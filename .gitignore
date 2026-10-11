@@ -1,0 +1,6 @@
+/target
+**/*.rs.bk
+/screenshots/*.png
+!/screenshots/.gitkeep
+.DS_Store
+*.log

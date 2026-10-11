@@ -1,0 +1,77 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+license = "MIT OR Apache-2.0"
+
+[workspace.dependencies]
+# --- engine crates (path deps) ---
+engine = { path = "crates/engine" }
+engine_core = { path = "crates/core" }
+engine_world = { path = "crates/world" }
+engine_assets = { path = "crates/assets" }
+engine_input = { path = "crates/input" }
+engine_render = { path = "crates/render" }
+engine_platform = { path = "crates/platform" }
+engine_physics = { path = "crates/physics" }
+engine_audio = { path = "crates/audio" }
+engine_ui = { path = "crates/ui" }
+engine_ai_bridge = { path = "crates/ai_bridge" }
+engine_terrain = { path = "crates/terrain" }
+engine_water = { path = "crates/water" }
+engine_weather = { path = "crates/weather" }
+engine_vfx = { path = "crates/vfx" }
+engine_fire = { path = "crates/fire" }
+engine_smoke = { path = "crates/smoke" }
+engine_foliage = { path = "crates/foliage" }
+engine_anim = { path = "crates/anim" }
+engine_movement = { path = "crates/movement" }
+engine_npc = { path = "crates/npc" }
+engine_vehicles = { path = "crates/vehicles" }
+engine_space = { path = "crates/space" }
+engine_destruction = { path = "crates/destruction" }
+engine_script = { path = "crates/script" }
+
+# --- ECS / core ---
+bevy_ecs = { version = "0.20", default-features = false, features = ["std", "multi_threaded", "async_executor", "serialize", "debug"] }
+bevy_platform = { version = "0.20", default-features = false, features = ["std", "serialize"] }
+bevy_tasks = { version = "0.20", features = ["multi_threaded"] }
+glam = { version = "0.33", features = ["serde", "bytemuck"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+raw-window-handle = "0.6"
+parking_lot = "0.12"
+crossbeam-channel = "0.5"
+thiserror = "2"
+
+# --- platform / GPU ---
+wgpu = "30"
+winit = "0.30"
+pollster = "0.4"
+bytemuck = { version = "1", features = ["derive"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "hdr"] }
+gltf = "1.4"
+notify = "8"
+
+# --- subsystems ---
+rapier3d = { version = "0.36", features = ["parallel"] }
+kira = "0.12"
+egui = "0.36"
+egui-wgpu = { version = "0.36", default-features = false }
+egui-winit = { version = "0.36", default-features = false, features = ["clipboard", "links"] }
+
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3
+
+[profile.release]
+lto = "thin"
+codegen-units = 16

@@ -1,0 +1,18 @@
+[package]
+name = "engine_core"
+description = "Engine foundation: App/Plugin model, schedules, time and time dilation, large-world transforms, reflection registry, engine API, scenes."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+bevy_ecs.workspace = true
+bevy_tasks.workspace = true
+bevy_platform.workspace = true
+glam.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+raw-window-handle.workspace = true
+parking_lot.workspace = true
