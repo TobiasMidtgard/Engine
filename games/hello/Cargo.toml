@@ -1,0 +1,11 @@
+[package]
+name = "hello"
+description = "Smallest engine game: a lit scene with a camera you can fly. Also a smoke test for windowed and headless runs."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+engine.workspace = true
+bevy_ecs.workspace = true

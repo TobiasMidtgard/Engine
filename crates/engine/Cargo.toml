@@ -1,0 +1,15 @@
+[package]
+name = "engine"
+description = "The engine facade: one dependency and one prelude for games. Re-exports every engine crate and provides DefaultPlugins."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+engine_core.workspace = true
+engine_world.workspace = true
+engine_assets.workspace = true
+engine_input.workspace = true
+engine_render.workspace = true
+engine_platform.workspace = true
+bevy_ecs.workspace = true

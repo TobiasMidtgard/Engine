@@ -1,0 +1,521 @@
+//! Per-frame view data: the camera, sun, exposure and the GPU `Frame` uniform.
+//!
+//! Large worlds: the camera's f64 world position is the rendering origin. Everything sent to
+//! the GPU is relative to it, so precision is the same next to the player whether they stand
+//! at the spawn point or on a moon 400 000 km away.
+
+use bytemuck::{Pod, Zeroable};
+use engine_core::math::Frustum;
+use engine_core::prelude::*;
+use engine_world::{SurfaceLayers, WeatherState, WindField};
+
+use crate::components::{AmbientLight, Camera, DirectionalLight, Exposure, PointLight, Projection};
+use crate::settings::{Atmosphere, DebugView, FogSettings, RenderSettings};
+use crate::shadows::Cascades;
+
+/// GPU layout of `struct Frame` in `lib_types.wgsl`.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Pod, Zeroable)]
+pub struct FrameUniform {
+    pub view: [[f32; 4]; 4],
+    pub proj: [[f32; 4]; 4],
+    pub view_proj: [[f32; 4]; 4],
+    pub inv_view: [[f32; 4]; 4],
+    pub inv_proj: [[f32; 4]; 4],
+    pub inv_view_proj: [[f32; 4]; 4],
+    pub prev_view_proj: [[f32; 4]; 4],
+    pub camera_world: [f32; 4],
+    pub camera_world_frac: [f32; 4],
+    pub viewport: [f32; 4],
+    pub time: [f32; 4],
+    pub sun_dir: [f32; 4],
+    pub sun_color: [f32; 4],
+    pub sun_camera: [f32; 4],
+    pub ambient: [f32; 4],
+    pub fog: [f32; 4],
+    pub fog_color: [f32; 4],
+    pub wind: [f32; 4],
+    pub weather: [f32; 4],
+    pub planet: [f32; 4],
+    pub atmosphere: [f32; 4],
+    pub exposure: [f32; 4],
+    pub shadow_cascades: [[[f32; 4]; 4]; 4],
+    pub shadow_splits: [f32; 4],
+    pub shadow_params: [f32; 4],
+    pub counts: [u32; 4],
+}
+
+/// GPU layout of `struct PointLight` in `lib_types.wgsl`.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Pod, Zeroable)]
+pub struct GpuPointLight {
+    pub position_range: [f32; 4],
+    pub color_radius: [f32; 4],
+}
+
+/// Everything about the current view, in camera-relative coordinates.
+#[derive(Debug, Clone)]
+pub struct ViewData {
+    pub camera: Option<Entity>,
+    /// Camera world position: the rendering origin.
+    pub origin: DVec3,
+    pub rotation: Quat,
+    /// Camera-relative view (rotation only).
+    pub view: Mat4,
+    pub proj: Mat4,
+    pub view_proj: Mat4,
+    pub prev_view_proj: Mat4,
+    pub frustum: Frustum,
+    pub near: f32,
+    /// Vertical field of view in radians (0 for orthographic).
+    pub fov_y: f32,
+    pub orthographic: bool,
+    pub width: u32,
+    pub height: u32,
+    /// Direction toward the sun (unit), if there is a sun.
+    pub sun_dir: Vec3,
+    /// Sun color × illuminance (lux).
+    pub sun_color: Vec3,
+    pub sun_shadows: bool,
+    pub cascades: Cascades,
+    /// Multiply radiance by this before writing HDR (1 / max luminance).
+    pub exposure: f32,
+    pub ev100: f32,
+    pub wind: Vec3,
+    /// World seconds (wrapped for shader precision).
+    pub time: f32,
+    pub real_time: f32,
+    pub delta: f32,
+    pub frame_index: u64,
+    pub point_lights: Vec<GpuPointLight>,
+    pub debug_view: DebugView,
+    /// Angular radius of the sun disc, radians.
+    pub sun_angular_radius: f32,
+}
+
+impl ViewData {
+    /// Camera-relative position of a world point.
+    pub fn relative(&self, world: DVec3) -> Vec3 {
+        (world - self.origin).as_vec3()
+    }
+
+    /// Distance from the camera along its view direction.
+    pub fn view_depth(&self, rel: Vec3) -> f32 {
+        -(self.view.transform_point3(rel)).z
+    }
+
+    /// Camera forward (−Z) direction.
+    pub fn forward(&self) -> Vec3 {
+        self.rotation * Vec3::NEG_Z
+    }
+
+    /// Screen-space size heuristic: projected radius in pixels of a sphere at distance `dist`.
+    pub fn projected_radius_px(&self, radius: f32, dist: f32) -> f32 {
+        if self.orthographic {
+            radius * self.proj.y_axis.y * self.height as f32 * 0.5
+        } else {
+            radius / (dist.max(1e-3) * (self.fov_y * 0.5).tan()) * self.height as f32 * 0.5
+        }
+    }
+}
+
+/// Reverse-Z infinite perspective projection for wgpu (depth 1 at `near`, 0 at infinity).
+pub fn perspective_infinite_reverse(fov_y: f32, aspect: f32, near: f32) -> Mat4 {
+    let f = 1.0 / (fov_y * 0.5).tan();
+    Mat4::from_cols(
+        Vec4::new(f / aspect, 0.0, 0.0, 0.0),
+        Vec4::new(0.0, f, 0.0, 0.0),
+        Vec4::new(0.0, 0.0, 0.0, -1.0),
+        Vec4::new(0.0, 0.0, near, 0.0),
+    )
+}
+
+/// Reverse-Z orthographic projection (depth 1 at `near`, 0 at `far`).
+pub fn orthographic_reverse(width: f32, height: f32, near: f32, far: f32) -> Mat4 {
+    let d = far - near;
+    Mat4::from_cols(
+        Vec4::new(2.0 / width, 0.0, 0.0, 0.0),
+        Vec4::new(0.0, 2.0 / height, 0.0, 0.0),
+        Vec4::new(0.0, 0.0, 1.0 / d, 0.0),
+        Vec4::new(0.0, 0.0, far / d, 1.0),
+    )
+}
+
+/// Standard-Z orthographic projection centered on the view axis (depth 0 at `near`).
+pub fn orthographic_standard(half_extent: f32, near: f32, far: f32) -> Mat4 {
+    let d = far - near;
+    Mat4::from_cols(
+        Vec4::new(1.0 / half_extent, 0.0, 0.0, 0.0),
+        Vec4::new(0.0, 1.0 / half_extent, 0.0, 0.0),
+        Vec4::new(0.0, 0.0, -1.0 / d, 0.0),
+        Vec4::new(0.0, 0.0, -near / d, 1.0),
+    )
+}
+
+/// Exposure value (ISO 100) to the pre-exposure multiplier (1 / max luminance).
+pub fn ev100_to_exposure(ev100: f32) -> f32 {
+    1.0 / (1.2 * 2f32.powf(ev100))
+}
+
+/// Auto-exposure state carried between frames.
+#[derive(Debug, Clone, Copy)]
+pub struct ExposureState {
+    pub ev100: f32,
+    pub initialized: bool,
+}
+
+impl Default for ExposureState {
+    fn default() -> Self {
+        Self {
+            ev100: 14.0,
+            initialized: false,
+        }
+    }
+}
+
+/// Estimate the scene's average luminance from the light setup (cd/m²).
+///
+/// A physically motivated heuristic: 18% gray lit by direct sun (mix of horizontal and
+/// vertical surfaces) and sky light. A GPU luminance histogram can replace it later without
+/// changing anything else.
+pub fn estimate_scene_luminance(sun_dir: Vec3, sun_camera: Vec3, ambient: f32) -> f32 {
+    let sun_lux = luminance(sun_camera);
+    let elevation = sun_dir.y;
+    let direct = sun_lux * (0.5 * elevation.max(0.0) + 0.15 * smoothstep(-0.05, 0.1, elevation));
+    let sky = sun_lux.max(1.0) * 0.15 * smoothstep(-0.2, 0.3, elevation)
+        + 110_000.0 * 0.004 * smoothstep(-0.25, 0.0, elevation);
+    0.18 * (direct + sky) / std::f32::consts::PI + ambient * 0.18
+}
+
+fn luminance(c: Vec3) -> f32 {
+    c.dot(Vec3::new(0.2126, 0.7152, 0.0722))
+}
+
+/// Build the view for the active camera (a default camera at the origin when there is none).
+pub fn build_view(
+    world: &mut World,
+    width: u32,
+    height: u32,
+    prev_view_proj: Option<Mat4>,
+    exposure_state: &mut ExposureState,
+    frame_index: u64,
+) -> ViewData {
+    let settings = world.resource::<RenderSettings>().clone();
+
+    // Active camera with the highest order.
+    let mut best: Option<(Entity, Camera, GlobalTransform)> = None;
+    let mut q = world.query::<(Entity, &Camera, &GlobalTransform)>();
+    for (e, cam, gt) in q.iter(world) {
+        if !cam.active {
+            continue;
+        }
+        if best.as_ref().is_none_or(|(_, b, _)| cam.order > b.order) {
+            best = Some((e, *cam, *gt));
+        }
+    }
+    let (camera_entity, camera, gt) = match best {
+        Some((e, c, g)) => (Some(e), c, g),
+        None => (None, Camera::default(), GlobalTransform::default()),
+    };
+    let origin = gt.translation();
+    let rotation = gt.rotation();
+    let aspect = width.max(1) as f32 / height.max(1) as f32;
+    let view = Mat4::from_quat(rotation.inverse());
+    let (proj, near, fov_y, orthographic) = match camera.projection {
+        Projection::Perspective { fov_y_deg, near } => {
+            let fov = fov_y_deg.clamp(1.0, 170.0).to_radians();
+            (perspective_infinite_reverse(fov, aspect, near.max(1e-4)), near, fov, false)
+        }
+        Projection::Orthographic { height: h, near, far } => {
+            (orthographic_reverse(h * aspect, h, near, far), near, 0.0, true)
+        }
+    };
+    let view_proj = proj * view;
+
+    // Sun: the brightest directional light.
+    let mut sun: Option<(Vec3, Vec3, bool, f32)> = None;
+    let mut q = world.query::<(&DirectionalLight, &GlobalTransform)>();
+    for (light, gt) in q.iter(world) {
+        let color = Vec3::from(light.color) * light.illuminance;
+        if sun.as_ref().is_none_or(|(_, c, _, _)| luminance(color) > luminance(*c)) {
+            let dir = -(gt.rotation() * Vec3::NEG_Z);
+            sun = Some((
+                dir.normalize_or(Vec3::Y),
+                color,
+                light.cast_shadows,
+                (light.angular_size_deg * 0.5).to_radians(),
+            ));
+        }
+    }
+    let (sun_dir, sun_color, sun_shadows, sun_angular_radius) =
+        sun.unwrap_or((Vec3::Y, Vec3::ZERO, false, 0.0046));
+
+    let atmosphere = *world.resource::<Atmosphere>();
+    let center_rel = atmosphere.planet_center - origin;
+    let sun_camera = sun_color * atmosphere.sun_transmittance(DVec3::ZERO, center_rel, sun_dir);
+
+    // Exposure.
+    let ambient = world.resource::<AmbientLight>();
+    let ambient_lum = luminance(Vec3::from(ambient.color)) * ambient.brightness;
+    let time = world.resource::<Time>();
+    let real_dt = time.real_delta_secs();
+    let elapsed = time.elapsed_secs_f64();
+    let real_elapsed = time.real_elapsed_secs_f64();
+    let delta = time.delta_secs();
+    let ev100 = match camera.exposure {
+        Exposure::Manual { ev100 } => ev100,
+        Exposure::Auto {
+            min_ev100,
+            max_ev100,
+            speed,
+            compensation,
+        } => {
+            let lum = estimate_scene_luminance(sun_dir, sun_camera, ambient_lum).max(1e-4);
+            let target = ((lum * 100.0 / 12.5).log2() - compensation).clamp(min_ev100, max_ev100);
+            if !exposure_state.initialized {
+                exposure_state.ev100 = target;
+            } else {
+                let k = 1.0 - (-speed.max(0.0) * real_dt).exp();
+                exposure_state.ev100 += (target - exposure_state.ev100) * k;
+            }
+            exposure_state.ev100
+        }
+    };
+    exposure_state.initialized = true;
+    exposure_state.ev100 = ev100;
+
+    let wind = world
+        .get_resource::<WindField>()
+        .map(|w| w.sample(origin))
+        .or_else(|| world.get_resource::<WeatherState>().map(|w| w.wind))
+        .unwrap_or(Vec3::ZERO);
+
+    // Point lights: nearest first.
+    let mut lights: Vec<(f32, GpuPointLight)> = Vec::new();
+    let mut q = world.query::<(&PointLight, &GlobalTransform)>();
+    let frustum = Frustum::from_view_proj(&view_proj);
+    for (light, gt) in q.iter(world) {
+        let rel = (gt.translation() - origin).as_vec3();
+        if !frustum.intersects_sphere(rel, light.range) {
+            continue;
+        }
+        let intensity_cd = light.intensity_lm / (4.0 * std::f32::consts::PI);
+        let color = Vec3::from(light.color) * intensity_cd;
+        lights.push((
+            rel.length_squared(),
+            GpuPointLight {
+                position_range: [rel.x, rel.y, rel.z, light.range],
+                color_radius: [color.x, color.y, color.z, light.radius.max(0.01)],
+            },
+        ));
+    }
+    lights.sort_by(|a, b| a.0.total_cmp(&b.0));
+    lights.truncate(settings.max_point_lights as usize);
+
+    let cascades = if sun_shadows && luminance(sun_color) > 0.0 {
+        crate::shadows::compute_cascades(
+            &settings, origin, rotation, near, fov_y, aspect, orthographic, sun_dir, &proj,
+        )
+    } else {
+        Cascades::default()
+    };
+
+    ViewData {
+        camera: camera_entity,
+        origin,
+        rotation,
+        view,
+        proj,
+        view_proj,
+        prev_view_proj: prev_view_proj.unwrap_or(view_proj),
+        frustum,
+        near,
+        fov_y,
+        orthographic,
+        width,
+        height,
+        sun_dir,
+        sun_color,
+        sun_shadows: sun_shadows && cascades.count > 0,
+        cascades,
+        exposure: ev100_to_exposure(ev100),
+        ev100,
+        wind,
+        time: (elapsed % 8192.0) as f32,
+        real_time: (real_elapsed % 8192.0) as f32,
+        delta,
+        frame_index,
+        point_lights: lights.into_iter().map(|(_, l)| l).collect(),
+        debug_view: settings.debug_view,
+        sun_angular_radius: sun_angular_radius,
+    }
+}
+
+fn mat(m: Mat4) -> [[f32; 4]; 4] {
+    m.to_cols_array_2d()
+}
+
+/// Fill the GPU frame uniform.
+pub fn frame_uniform(world: &World, v: &ViewData) -> FrameUniform {
+    let settings = world.resource::<RenderSettings>();
+    let atmosphere = world.resource::<Atmosphere>();
+    let fog = world.resource::<FogSettings>();
+    let ambient = world.resource::<AmbientLight>();
+
+    let weather = world.get_resource::<WeatherState>();
+    let surface = world
+        .get_resource::<SurfaceLayers>()
+        .map(|s| s.sample(v.origin));
+    let wetness = surface.map(|s| s.wetness).unwrap_or(0.0);
+    let snow = surface.map(|s| s.snow_m).unwrap_or(0.0);
+    let cloud_cover = weather.map(|w| w.cloud_cover).unwrap_or(0.25);
+    let precipitation = weather.map(|w| w.precipitation_mm_h).unwrap_or(0.0);
+    let fog_density = fog.density + weather.map(|w| w.fog * 0.02).unwrap_or(0.0);
+
+    let center_rel = atmosphere.planet_center - v.origin;
+    let altitude = (-center_rel).length() - atmosphere.planet_radius;
+    let sun_camera = v.sun_color * atmosphere.sun_transmittance(DVec3::ZERO, center_rel, v.sun_dir);
+    let frac = DVec3::new(
+        v.origin.x.rem_euclid(4096.0),
+        v.origin.y.rem_euclid(4096.0),
+        v.origin.z.rem_euclid(4096.0),
+    );
+    let ambient_rgb = Vec3::from(ambient.color) * ambient.brightness;
+    let mut cascades = [[[0.0; 4]; 4]; 4];
+    for (i, c) in v.cascades.view_proj.iter().enumerate() {
+        cascades[i] = mat(*c);
+    }
+
+    FrameUniform {
+        view: mat(v.view),
+        proj: mat(v.proj),
+        view_proj: mat(v.view_proj),
+        inv_view: mat(v.view.inverse()),
+        inv_proj: mat(v.proj.inverse()),
+        inv_view_proj: mat(v.view_proj.inverse()),
+        prev_view_proj: mat(v.prev_view_proj),
+        camera_world: [
+            v.origin.x as f32,
+            v.origin.y as f32,
+            v.origin.z as f32,
+            altitude as f32,
+        ],
+        camera_world_frac: [frac.x as f32, frac.y as f32, frac.z as f32, 0.0],
+        viewport: [
+            v.width as f32,
+            v.height as f32,
+            1.0 / v.width.max(1) as f32,
+            1.0 / v.height.max(1) as f32,
+        ],
+        time: [v.time, v.real_time, v.delta, (v.frame_index % 65536) as f32],
+        sun_dir: [
+            v.sun_dir.x,
+            v.sun_dir.y,
+            v.sun_dir.z,
+            v.sun_angular_radius,
+        ],
+        sun_color: [
+            v.sun_color.x,
+            v.sun_color.y,
+            v.sun_color.z,
+            if v.sun_shadows { 1.0 } else { 0.0 },
+        ],
+        sun_camera: [sun_camera.x, sun_camera.y, sun_camera.z, 0.0],
+        ambient: [
+            ambient_rgb.x,
+            ambient_rgb.y,
+            ambient_rgb.z,
+            atmosphere.ground_albedo,
+        ],
+        fog: [
+            fog_density,
+            fog.height_falloff,
+            fog.base_height,
+            fog.max_opacity,
+        ],
+        fog_color: [fog.color[0], fog.color[1], fog.color[2], fog.sun_scattering],
+        wind: [v.wind.x, v.wind.y, v.wind.z, 0.0],
+        weather: [wetness.clamp(0.0, 1.0), snow.max(0.0), cloud_cover, precipitation],
+        planet: if atmosphere.enabled {
+            [
+                center_rel.x as f32,
+                center_rel.y as f32,
+                center_rel.z as f32,
+                atmosphere.planet_radius as f32,
+            ]
+        } else {
+            [0.0; 4]
+        },
+        atmosphere: [
+            atmosphere.thickness,
+            atmosphere.rayleigh_scale_height,
+            atmosphere.mie_scale_height,
+            atmosphere.mie_g,
+        ],
+        exposure: [
+            v.exposure,
+            v.ev100,
+            v.near,
+            if v.orthographic { 1.0 } else { 0.0 },
+        ],
+        shadow_cascades: cascades,
+        shadow_splits: v.cascades.splits,
+        shadow_params: [
+            settings.shadow_depth_bias,
+            settings.shadow_normal_bias,
+            settings.shadow_softness,
+            v.cascades.map_size as f32,
+        ],
+        counts: [
+            v.point_lights.len() as u32,
+            v.cascades.count,
+            match v.debug_view {
+                DebugView::None => 0,
+                DebugView::Normals => 1,
+                DebugView::Cascades => 2,
+            },
+            0,
+        ],
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn frame_uniform_matches_wgsl_size() {
+        // 7 mat4 + 15 vec4 + 4 mat4 + 3 vec4
+        assert_eq!(std::mem::size_of::<FrameUniform>(), 7 * 64 + 15 * 16 + 4 * 64 + 3 * 16);
+        assert_eq!(std::mem::size_of::<GpuPointLight>(), 32);
+    }
+
+    #[test]
+    fn reverse_z_perspective() {
+        let p = perspective_infinite_reverse(1.0, 1.0, 0.1);
+        let near = p * Vec4::new(0.0, 0.0, -0.1, 1.0);
+        assert!((near.z / near.w - 1.0).abs() < 1e-5);
+        let far = p * Vec4::new(0.0, 0.0, -1.0e9, 1.0);
+        assert!(far.z / far.w < 1e-6);
+    }
+
+    #[test]
+    fn reverse_z_orthographic() {
+        let p = orthographic_reverse(10.0, 10.0, 0.0, 100.0);
+        let near = p * Vec4::new(0.0, 0.0, 0.0, 1.0);
+        let far = p * Vec4::new(0.0, 0.0, -100.0, 1.0);
+        assert!((near.z - 1.0).abs() < 1e-5);
+        assert!(far.z.abs() < 1e-5);
+    }
+
+    #[test]
+    fn daylight_exposure_is_sunny_sixteen() {
+        let sun = Vec3::new(0.3, 0.9, 0.2).normalize();
+        let lum = estimate_scene_luminance(sun, Vec3::splat(100_000.0), 0.0);
+        let ev = (lum * 100.0 / 12.5).log2();
+        assert!((14.0..16.5).contains(&ev), "ev {ev}");
+        let night = estimate_scene_luminance(Vec3::new(0.0, -0.5, 0.8).normalize(), Vec3::ZERO, 0.05);
+        let ev_night = (night * 100.0 / 12.5).log2();
+        assert!(ev_night < 0.0, "ev {ev_night}");
+    }
+}

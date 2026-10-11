@@ -1,0 +1,12 @@
+[package]
+name = "engine_input"
+description = "Keyboard, mouse and gamepad state plus rebindable named actions that work in variable and fixed-step systems and can be driven by AI agents."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+engine_core.workspace = true
+bevy_ecs.workspace = true
+serde.workspace = true
+serde_json.workspace = true

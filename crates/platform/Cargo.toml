@@ -1,0 +1,13 @@
+[package]
+name = "engine_platform"
+description = "OS window, event loop and input plumbing (winit), plus the headless runner for servers, tests and AI tools."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+engine_core.workspace = true
+engine_input.workspace = true
+bevy_ecs.workspace = true
+winit.workspace = true
+tracing.workspace = true
