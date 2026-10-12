@@ -254,7 +254,7 @@ fn litter() -> (Vec<Scatter>, Vec<Scatter>) {
         }
     }
     // Leaves blown into the shelter against its back glass, and under the bench.
-    for _ in 0..34 {
+    for _ in 0..24 {
         let q = Vec2::new(
             SHELTER_AT.x + rng.signed() * 2.2,
             SHELTER_AT.z - 0.62 + 0.4 * rng.next().powi(2),
@@ -739,9 +739,10 @@ fn make_materials(world: &mut World, t: &Textures) -> Mats {
         red_liquid: add("red_liquid", flat(hex(0xb5121b), 0.2, 0.0)),
         water: add(
             "gauge_water",
-            StandardMaterial::color(0.35, 0.55, 0.75)
+            // Dyed blue so the level reads through the sight glass.
+            StandardMaterial::color(0.06, 0.22, 0.55)
                 .with_roughness(0.05)
-                .with_alpha(0.7),
+                .with_alpha(0.85),
         ),
         snow: add("snow", {
             let mut m = flat([0.82, 0.84, 0.88], 0.8, 0.0).with_subsurface(0.3);

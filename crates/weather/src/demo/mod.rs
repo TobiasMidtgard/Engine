@@ -48,7 +48,7 @@ pub struct WindSock {
 }
 
 /// One fabric band of a windsock, `index` 0 at the frame. Each band hangs from the previous
-/// one and lifts once the wind is strong enough (about 1.5 m/s per band, level at ~8 m/s).
+/// one and lifts as the wind picks up (the first at a breath, the tail at ~9 m/s).
 #[derive(Component, Debug, Clone, Copy)]
 pub struct SockSegment {
     pub index: u32,
@@ -257,10 +257,11 @@ pub(crate) fn instruments_system(
             .find(|(e, _)| *e == seg.sock)
             .map_or(0.0, |s| s.1);
         let k = seg.index as f32;
-        // Each band lifts once the wind can hold it (about 1.5 m/s per band); limp bands
-        // fold down at their joint, more toward the tail.
-        let lift = smoothstep(1.5 * k + 0.3, 1.5 * k + 2.6, speed);
-        let hang = [0.55, 0.35, 0.25, 0.18, 0.12][seg.index.min(4) as usize];
+        // Each band lifts once the wind can hold it (each needs ~1.2 m/s more than the one
+        // before); limp bands fold down at their joint, more toward the tail.
+        let lift_at = |k: f32| smoothstep(1.2 * k, 1.2 * k + 4.5, speed);
+        let lift = lift_at(k);
+        let hang = [0.5, 0.35, 0.3, 0.22, 0.18][seg.index.min(4) as usize];
         let droop = hang * (1.0 - lift);
         // Fabric ripple: faster and wider as the wind blows, growing toward the tail.
         let gust = smoothstep(1.0, 14.0, speed);
@@ -275,11 +276,7 @@ pub(crate) fn instruments_system(
         let prev = if seg.index == 0 {
             1.0
         } else {
-            width(smoothstep(
-                1.5 * (k - 1.0) + 0.3,
-                1.5 * (k - 1.0) + 2.6,
-                speed,
-            ))
+            width(lift_at(k - 1.0))
         };
         tr.scale = Vec3::new(width(lift) / prev, 1.0, 1.0);
     }
@@ -336,8 +333,9 @@ pub(crate) fn instruments_system(
         } else {
             0.0
         };
-        // Fills with the rain, evaporates ~1 mm/h, a little faster in the sun.
-        let evap = 1.0 + 2.0 * state.daylight();
+        // Fills with the rain; the closed funnel loses only a little to evaporation (more in
+        // the sun), so it empties over a day or two.
+        let evap = 0.15 + 0.35 * state.daylight();
         g.collected_mm =
             (g.collected_mm + (rate - evap) * weather_dt_s / 3600.0).clamp(0.0, g.capacity_mm);
         let h = (g.full_m * g.collected_mm / g.capacity_mm).max(0.002);
