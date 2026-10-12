@@ -6,7 +6,7 @@ Architecture and module ownership: [`ARCHITECTURE.md`](ARCHITECTURE.md).
 ## Build & test
 
 ```sh
-git config core.hooksPath .githooks   # once per clone: refuses commits `cargo fmt` would change
+git config core.hooksPath .githooks   # once per clone: refuses commits and pushes `cargo fmt` would change
 cargo build --workspace
 cargo test -p <crate>                 # every crate has unit tests that need no GPU
 cargo clippy --workspace --all-targets -- -D warnings
