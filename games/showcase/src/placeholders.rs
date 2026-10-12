@@ -799,26 +799,36 @@ pub fn cave_shell(
     }
     cave_roof(commands, meshes, lib, land, c, h, rng);
     // Boulders sunk into the walls and hanging from the ceiling, so the inside reads as rock
-    // rather than a box.
+    // rather than a box. Each sits with its flat base in the wall and its rounded face out.
+    // (Shapes and tilts come from their own stream; the shared one advances as before.)
+    let kit = &lib.rocks;
+    let mut pick = Rng::new(0x00ca_7eb0_u64);
     for k in 0..64 {
         let along = rng.range(-1.0, 1.0) as f64;
         let y = rng.range(-0.5, h as f32 - 1.0) as f64;
-        let p = match k % 4 {
-            0 => DVec3::new(-hx - 0.4, y, along * hz),
-            1 => DVec3::new(hx + 0.4, y, along * hz),
-            2 => DVec3::new(along * hx, y, hz + 0.4),
-            _ => DVec3::new(along * hx, h + 0.4, rng.range(-hz as f32, hz as f32) as f64),
+        let (p, inward) = match k % 4 {
+            0 => (DVec3::new(-hx - 0.4, y, along * hz), Vec3::X),
+            1 => (DVec3::new(hx + 0.4, y, along * hz), Vec3::NEG_X),
+            2 => (DVec3::new(along * hx, y, hz + 0.4), Vec3::NEG_Z),
+            _ => (
+                DVec3::new(along * hx, h + 0.4, rng.range(-hz as f32, hz as f32) as f64),
+                Vec3::NEG_Y,
+            ),
         };
-        let mesh = lib.rocks[rng.range_i32(0, lib.rocks.len() as i32) as usize];
-        commands.spawn((
-            Transform::from_translation(c + p)
-                .with_rotation(
-                    Quat::from_rotation_y(rng.range(0.0, TAU))
-                        * Quat::from_rotation_x(rng.range(-0.6, 0.6)),
-                )
-                .with_scale(Vec3::splat(rng.range(1.4, 3.0))),
-            MeshRenderer::new(mesh, lib.mats.rock),
-        ));
+        let _ = rng.range_i32(0, 6);
+        let yaw = rng.range(0.0, TAU);
+        let tilt = rng.range(-0.6, 0.6) * 0.5;
+        let scale = rng.range(1.4, 3.0) * 0.6;
+        let v = kit.pick(crate::rocks::RockSize::Large, pick.chance(0.5), &mut pick);
+        let sink = (inward * v.extent.y * scale * 0.45).as_dvec3();
+        let tf = Transform::from_translation(c + p - sink)
+            .with_rotation(
+                Quat::from_rotation_arc(Vec3::Y, inward)
+                    * Quat::from_rotation_y(yaw)
+                    * Quat::from_rotation_x(tilt),
+            )
+            .with_scale(Vec3::new(scale, scale * pick.range(0.7, 1.0), scale));
+        kit.spawn(commands, v, tf, crate::rocks::RockLook::default());
     }
     // Front wall with the mouth (10 m wide).
     for s in [-1.0, 1.0] {
@@ -829,22 +839,25 @@ pub fn cave_shell(
             at(c + DVec3::new(s * 10.0, h * 0.5, -hz - 0.5)),
         );
     }
-    // Rocky arch over the mouth.
+    // Rocky arch over the mouth: blocks set into the hillside, faces out and a little up.
     for i in 0..9 {
         let a = i as f64 / 8.0 * std::f64::consts::PI;
         let s = rng.range(1.4, 2.2);
-        spawn(
-            commands,
-            Shape::Sphere {
-                radius: s,
-                segments: 10,
-            },
-            rock(),
-            Transform::from_translation(
-                c + DVec3::new(a.cos() * 6.0, 6.0 + a.sin() * 3.5, -hz - 1.5),
+        let v = kit.pick(crate::rocks::RockSize::Large, pick.chance(0.6), &mut pick);
+        let out = Vec3::new(a.cos() as f32 * 0.5, a.sin() as f32 * 0.5, -1.0).normalize();
+        let scale = s * 0.62;
+        let p = c + DVec3::new(a.cos() * 6.0, 6.0 + a.sin() * 3.5, -hz - 1.5)
+            - (out * v.extent.y * scale * 0.4).as_dvec3();
+        let tf = Transform::from_translation(p)
+            .with_rotation(
+                Quat::from_rotation_arc(Vec3::Y, out) * Quat::from_rotation_y(pick.range(0.0, TAU)),
             )
-            .with_scale(Vec3::new(1.2, 0.9, 1.0)),
-        );
+            .with_scale(Vec3::new(scale, scale * 0.8, scale));
+        let look = crate::rocks::RockLook {
+            wet: false,
+            moss: i % 3 != 1,
+        };
+        kit.spawn(commands, v, tf, look);
     }
     // Boulders piled around the mouth so it reads as a rock face in the hillside.
     for i in 0..26 {
@@ -852,18 +865,25 @@ pub fn cave_shell(
         let x = side * rng.range(5.5, 22.0) as f64;
         let y = rng.range(0.0, 10.0) as f64;
         let s = rng.range(1.2, 3.2);
-        spawn(
-            commands,
-            Shape::Sphere {
-                radius: s,
-                segments: 10,
-            },
-            rock(),
-            Transform::from_translation(
-                c + DVec3::new(x, y, -hz - 2.0 - rng.range(0.0, 3.0) as f64),
+        let z = -hz - 2.0 - rng.range(0.0, 3.0) as f64;
+        let (size, scale) = if s > 2.0 {
+            (crate::rocks::RockSize::Large, s * 0.55)
+        } else {
+            (crate::rocks::RockSize::Medium, s * 1.05)
+        };
+        let v = kit.pick(size, pick.chance(0.4), &mut pick);
+        let out = Vec3::new(side as f32 * 0.25, 0.7, -1.0).normalize();
+        let p = c + DVec3::new(x, y, z) - (out * v.extent.y * scale * 0.35).as_dvec3();
+        let tf = Transform::from_translation(p)
+            .with_rotation(
+                Quat::from_rotation_arc(Vec3::Y, out) * Quat::from_rotation_y(pick.range(0.0, TAU)),
             )
-            .with_scale(Vec3::new(1.3, 0.8, 1.0)),
-        );
+            .with_scale(Vec3::new(scale, scale * pick.range(0.7, 0.95), scale));
+        let look = crate::rocks::RockLook {
+            wet: false,
+            moss: true,
+        };
+        kit.spawn(commands, v, tf, look);
     }
     commands.spawn((
         at(c + DVec3::new(0.0, h * 0.5, 0.0)),
