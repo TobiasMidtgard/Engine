@@ -118,8 +118,9 @@ time, hovering, buoyancy, blasts, bodies crossing and merging regions); riding m
 thrusting and turning ship, a seesaw tipped by a character's weight, crates landing on heads,
 rays hitting bodies at orbital speed); following world shifts (`tests/world_shift.rs`: a
 sleeping pile stays asleep through floating-origin moves, a stack stands through a tilting turn,
-world-pinned hinges turn with the world, a moving frame adds its velocity, characters keep their
-footing, queries see the new frame at once); a headless screenshot of the proving ground.
+world-pinned hinges turn with the world, a moving or spinning frame adds its motion at each body,
+characters keep their footing, queries see the new frame at once); a headless screenshot of the
+proving ground.
 
 ## Done when
 

@@ -143,10 +143,17 @@ impl Simulation {
         // equal at the next sync.
         for (e, b) in self.bodies.iter_mut() {
             let (global, child) = entity(*e);
-            if !child && b.parent.is_none() {
+            let root = !child && b.parent.is_none();
+            // `engine_world` takes a root's lever arm from its `Transform` (what we wrote),
+            // a child's from its `GlobalTransform`.
+            let old = match b.written {
+                Some((t, _)) if root => t,
+                _ => global.unwrap_or(DVec3::ZERO),
+            };
+            if root {
                 b.written = b.written.map(|(t, q)| (s.point(t), s.orientation(q)));
             }
-            let at = s.point(global.unwrap_or(DVec3::ZERO));
+            let at = s.point(old);
             if let Some(v) = &mut b.written_velocity {
                 v.linear = s.velocity_at(at, v.linear);
                 v.angular = s.spin(v.angular);
