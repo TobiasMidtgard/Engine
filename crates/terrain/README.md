@@ -36,6 +36,10 @@ everything else (streaming, LOD, colliders, ground queries, prints) follows the 
   `with_overlay_paint(|x, z| …)` paints it: an `OverlayPaint` layer (grass, leaves, dirt,
   mud, sand, gravel, rock, concrete, snow, ash) for roads, plazas and woods, and a tint for
   fields. Footsteps, rain and the `Ground` query follow the painted layer; edits paint over it.
+  When the level already has its own material map, `with_ground_surface(Arc<dyn GroundQuery>)`
+  lets that query name the material while the terrain answers height and normal, edits
+  included (the sea and edit-painted layers stay the terrain's; never pass the world's
+  `Ground`, which is the terrain itself).
 - **Ground cover from afar.** Climate colors (lush, dry, desert, snow by temperature and
   altitude), woods as dark canopy, meadows and fields in patches a few hundred meters
   across, worn bare patches, beaches. Mountainsides are a patchwork: grass and woods hold
