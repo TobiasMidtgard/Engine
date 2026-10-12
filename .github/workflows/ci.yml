@@ -14,6 +14,10 @@ env:
   CARGO_INCREMENTAL: 0
   # Render tests run on lavapipe (Mesa's software Vulkan) and must not skip.
   ENGINE_REQUIRE_GPU: "1"
+  # Line tables keep panic locations and backtraces but drop full debug info, which roughly
+  # halves the target directory. With ~40 wgpu test binaries the runner's disk filled up and
+  # linking died with "Bus error" / "No space left on device".
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
 
 jobs:
   check:
@@ -21,6 +25,13 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
+      - name: Free runner disk space
+        run: |
+          df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup \
+            /opt/hostedtoolcache/CodeQL /usr/local/share/boost
+          sudo docker image prune --all --force > /dev/null || true
+          df -h /
       - uses: actions/checkout@v4
       - name: Install software Vulkan (lavapipe)
         run: |
@@ -35,3 +46,6 @@ jobs:
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: Test
         run: cargo test --workspace
+      - name: Disk left
+        if: always()
+        run: df -h / && du -sh target 2>/dev/null || true
