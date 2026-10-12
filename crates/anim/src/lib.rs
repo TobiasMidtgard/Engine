@@ -18,7 +18,7 @@ pub mod skin;
 pub mod xform;
 
 pub use animator::{AnimationLibrary, Animator, AnimatorSettings, PoseEdit};
-pub use attach::BoneAttachment;
+pub use attach::{BoneAttachment, Hang};
 pub use character::{HumanModel, HumanModels};
 pub use clip::AnimationClip;
 pub use graph::{AnimGraph, NodeDef};
@@ -27,7 +27,7 @@ pub use muscle::{MorphWeights, Muscle, MuscleDriver, MuscleRig};
 pub use procedural::gait::{GaitLeg, GaitStage, LeggedGait};
 pub use procedural::spring::{SpringChainDef, SpringChains};
 pub use procedural::vehicle::{VehicleRig, WheelRig};
-pub use retarget::{HandRig, Retarget, RetargetMap, Retargeter};
+pub use retarget::{HandGrip, HandRig, Retarget, RetargetMap, Retargeter};
 pub use skeleton::Skeleton;
 pub use skin::feature::SkinningFeature;
 pub use skin::{SkinMaterial, SkinPose, SkinnedMesh, SkinnedMeshRenderer};
@@ -179,7 +179,12 @@ fn register_types(app: &mut App) {
          and sheen (detail distance, m).",
     )
     .register_component::<BoneAttachment>(
-        "Follows a bone of another entity (props, weapons): bone name, offset (m), rotation.",
+        "Follows a bone of another entity (props, weapons): bone name, offset (m), rotation, \
+         and an optional hang (a loosely held prop swings down while no clip holds it up).",
+    )
+    .register_component::<HandGrip>(
+        "Keeps a character's hands closed at least this much (left, right: 0..1), as when it \
+         carries something.",
     );
 }
 

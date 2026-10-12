@@ -29,12 +29,13 @@ use engine_world::physics::PhysicsQueries;
 use serde_json::{Value, json};
 
 use crate::animator::{AnimationLibrary, Animator, AnimatorSettings};
-use crate::attach::BoneAttachment;
+use crate::attach::{BoneAttachment, Hang};
 use crate::build::{car, horse, humanoid, spider};
 use crate::character::HumanModel;
 use crate::ik::{GroundProbe, IkShape, IkSurface, IkSurfaces, LookAt, Reach, ReachIk};
 use crate::muscle::{MorphWeights, MuscleRig};
 use crate::procedural::spring::SpringChains;
+use crate::retarget::HandGrip;
 use crate::skin::{SkinMaterial, SkinnedMesh, SkinnedMeshRenderer};
 use crate::xform::smoothing;
 
@@ -414,6 +415,19 @@ pub fn dress(world: &mut World, person: Entity, character: &str, material: SkinM
     }
 }
 
+/// A part of the hammer at `offset` in the right hand's frame. Between swings and blocks the
+/// hammer hangs from the fist beside the leg, head down just off the ground.
+fn hammer_part(person: Entity, offset: Vec3, rotation: Quat) -> BoneAttachment {
+    BoneAttachment::new(person, "hand_r")
+        .with_offset(offset, rotation)
+        .with_hang(Hang {
+            pivot: GRIP,
+            axis: HANDLE_DIR.normalize(),
+            toward: Vec3::new(0.12, -1.0, -0.22),
+            curves: vec!["grip".into(), "brace".into()],
+        })
+}
+
 /// A sledgehammer in `person`'s right hand. The left hand grips the end of the handle while a
 /// clip's `grip` curve is on (two-handed swings).
 pub fn spawn_hammer(world: &mut World, person: Entity, near: DVec3) -> [Entity; 2] {
@@ -449,9 +463,13 @@ pub fn spawn_hammer(world: &mut World, person: Entity, near: DVec3) -> [Entity; 
                 t,
                 GlobalTransform::from(t),
                 MeshRenderer::new(shape, material),
-                BoneAttachment::new(person, "hand_r").with_offset(offset, rotation),
+                hammer_part(person, offset, rotation),
             ))
             .id()
+    });
+    world.entity_mut(person).insert(HandGrip {
+        left: 0.0,
+        right: 1.0,
     });
     world.entity_mut(person).insert(ReachIk::new(vec![Reach {
         target_bone: "hand_r".into(),
@@ -473,9 +491,8 @@ pub fn tire_strike_point(origin: DVec3) -> DVec3 {
 pub fn hammer_head(world: &World, person: Entity) -> Option<DVec3> {
     let animator = world.get::<Animator>(person)?;
     let gt = world.get::<GlobalTransform>(person)?;
-    let hand = animator.skeleton.index_of("hand_r")?;
-    let local = animator.model[hand].transform_point(GRIP + HANDLE_DIR.normalize() * 0.6);
-    Some(crate::ik::to_world(gt, local))
+    let head = hammer_part(person, GRIP + HANDLE_DIR.normalize() * 0.6, Quat::IDENTITY);
+    Some(crate::ik::to_world(gt, head.socket(animator)?.t))
 }
 
 pub fn spawn_horse(world: &mut World, transform: Transform) -> Entity {

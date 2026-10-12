@@ -80,6 +80,8 @@ pub struct Retargeter {
     drive: Vec<Drive>,
     fingers: Vec<Option<FingerBone>>,
     hands: Vec<HandRig>,
+    /// Which side each hand is on (from its logic bone's `_l`/`_r` name), for [`HandGrip`].
+    right_hand: Vec<Option<bool>>,
 }
 
 impl std::fmt::Debug for Retargeter {
@@ -240,24 +242,46 @@ impl Retargeter {
                 }
             }
         }
+        let right_hand = map
+            .hands
+            .iter()
+            .map(|h| {
+                let logic = &map.bones.iter().find(|(_, t)| *t == h.hand)?.0;
+                if logic.ends_with("_r") {
+                    Some(true)
+                } else if logic.ends_with("_l") {
+                    Some(false)
+                } else {
+                    None
+                }
+            })
+            .collect();
         Ok(Self {
             target,
             source_name: source.name.clone(),
             drive,
             fingers,
             hands: map.hands.clone(),
+            right_hand,
         })
     }
 
-    /// How closed each hand is for this animator (its curves, at least the rest closure).
-    pub fn hand_closure(&self, animator: &Animator) -> Vec<f32> {
+    /// How closed each hand is for this animator (its curves, at least the rest closure and
+    /// what `grip` holds).
+    pub fn hand_closure(&self, animator: &Animator, grip: Option<&HandGrip>) -> Vec<f32> {
         self.hands
             .iter()
-            .map(|h| {
+            .zip(&self.right_hand)
+            .map(|(h, right)| {
+                let held = match (grip, right) {
+                    (Some(g), Some(true)) => g.right,
+                    (Some(g), Some(false)) => g.left,
+                    _ => 0.0,
+                };
                 h.curves
                     .iter()
                     .map(|c| animator.curve(c))
-                    .fold(h.relaxed, f32::max)
+                    .fold(h.relaxed.max(held), f32::max)
                     .clamp(0.0, 1.0)
             })
             .collect()
@@ -444,10 +468,19 @@ impl Retarget {
     }
 }
 
-pub(crate) fn retarget_poses(mut q: Query<(&Animator, &mut Retarget)>) {
-    q.par_iter_mut().for_each(|(animator, mut retarget)| {
+/// Keeps a character's hands closed at least this much (0..1) whatever its clips do, as when
+/// it carries something (a hammer in the right hand). Closes an imported character's fingers.
+#[derive(Component, Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct HandGrip {
+    pub left: f32,
+    pub right: f32,
+}
+
+pub(crate) fn retarget_poses(mut q: Query<(&Animator, &mut Retarget, Option<&HandGrip>)>) {
+    q.par_iter_mut().for_each(|(animator, mut retarget, grip)| {
         let r = &mut *retarget;
-        let closure = r.retargeter.hand_closure(animator);
+        let closure = r.retargeter.hand_closure(animator, grip);
         r.retargeter.apply(&animator.model, &closure, &mut r.model);
     });
 }
@@ -561,5 +594,36 @@ mod tests {
         for (b, x) in open.iter().enumerate() {
             assert!(x.t.distance(target.rest_model[b].t) < 1e-5);
         }
+    }
+
+    #[test]
+    fn a_hand_grip_closes_only_its_side() {
+        let logic =
+            Arc::new(Skeleton::new("l", vec![BoneDef::new("hand_r", None, Vec3::ZERO)]).unwrap());
+        let target =
+            Arc::new(Skeleton::new("t", vec![BoneDef::new("R Hand", None, Vec3::ZERO)]).unwrap());
+        let map = RetargetMap {
+            bones: vec![("hand_r".into(), "R Hand".into())],
+            hands: vec![HandRig {
+                hand: "R Hand".into(),
+                curves: vec!["grip".into()],
+                relaxed: 0.1,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let r = Retargeter::new(&logic, target, &map).unwrap();
+        let animator = Animator::procedural(logic);
+        assert_eq!(r.hand_closure(&animator, None), vec![0.1]);
+        let carry = HandGrip {
+            left: 0.0,
+            right: 0.9,
+        };
+        assert_eq!(r.hand_closure(&animator, Some(&carry)), vec![0.9]);
+        let other = HandGrip {
+            left: 1.0,
+            right: 0.0,
+        };
+        assert_eq!(r.hand_closure(&animator, Some(&other)), vec![0.1]);
     }
 }

@@ -226,6 +226,7 @@ pub fn add_locomotion(
         let name = format!("{}/{role}", c.logic.name);
         let mut clip = retargeter.clip_to_source(&c.logic, clip, &name, &["hips"]);
         clip.looping = true;
+        face_forward(&mut clip, &c.logic);
         if role == "idle" {
             clip = smooth_loop(&clip, &c.logic, 0.6);
             motion.idle = name;
@@ -251,6 +252,43 @@ pub fn add_locomotion(
     }
     c.locomotion = Some(motion);
     Ok(())
+}
+
+/// Turn a clip about the vertical so the hips face the skeleton's forward on average (mocap
+/// actors don't all face the capture volume's forward; some idles are turned half around).
+fn face_forward(clip: &mut AnimationClip, skeleton: &Skeleton) {
+    let Some(hips) = skeleton.index_of("hips") else {
+        return;
+    };
+    let binding = ClipBinding::new(clip, skeleton);
+    let rest = skeleton.rest_model[hips].r;
+    let mut model = Vec::new();
+    let mut facing = Vec3::ZERO;
+    for i in 0..32 {
+        let t = clip.duration * i as f32 / 32.0;
+        skeleton.to_model(&pose_at(clip, &binding, skeleton, t), &mut model);
+        let f = model[hips].r * rest.conjugate() * Vec3::NEG_Z;
+        facing += Vec3::new(f.x, 0.0, f.z).normalize_or_zero();
+    }
+    if facing.length_squared() < 1e-6 {
+        return;
+    }
+    // About the vertical only (facing may be opposite to forward), heading measured from +Z.
+    let yaw = std::f32::consts::PI - facing.x.atan2(facing.z);
+    let yaw = (yaw + std::f32::consts::PI).rem_euclid(std::f32::consts::TAU) - std::f32::consts::PI;
+    if yaw.abs() < 1f32.to_radians() {
+        return;
+    }
+    let turn = Quat::from_rotation_y(yaw);
+    // Only the top of the moving chain is keyed in model space (its parents rest at the origin).
+    for track in clip.tracks.iter_mut().filter(|t| t.bone == "hips") {
+        for r in &mut track.rotation.values {
+            *r = (turn * *r).normalize();
+        }
+        for t in &mut track.translation.values {
+            *t = turn * *t;
+        }
+    }
 }
 
 /// Sample a looping clip's pose on `skeleton` at playback time `t`.
