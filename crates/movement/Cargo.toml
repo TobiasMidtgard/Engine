@@ -1,6 +1,6 @@
 [package]
 name = "engine_movement"
-description = "Movement & time dilation gameplay (stub: scope and contracts in README.md)."
+description = "Movement and time dilation: Titanfall-style locomotion (sprint, slide, wall-run, mantle, double jump, dash), dash-strike combat with blocks, dodges and counters, and reflex slow motion driven by each character's speed and reactions."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -8,6 +8,13 @@ license.workspace = true
 [dependencies]
 engine_core.workspace = true
 engine_world.workspace = true
+engine_render.workspace = true
+engine_input.workspace = true
 bevy_ecs.workspace = true
+wgpu.workspace = true
+bytemuck.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+
+[dev-dependencies]
+image.workspace = true
