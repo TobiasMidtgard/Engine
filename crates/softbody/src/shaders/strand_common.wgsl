@@ -32,6 +32,8 @@ struct StrandPoint {
     t: f32,
     width: f32,
     shade: f32,
+    // Random per drawn strand, 0..1.
+    seed: f32,
     groom: u32,
 };
 
@@ -119,6 +121,7 @@ fn strand_point(instance: u32, vertex: u32) -> StrandPoint {
     p.t = t;
     p.width = groom.color.w * mix(1.0, 0.2, t);
     p.shade = 0.8 + 0.4 * h4;
+    p.seed = hash_u(seed + 4u);
     p.groom = gi;
     return p;
 }

@@ -12,7 +12,7 @@ use engine_world::physics::{
 };
 use engine_world::{
     ContactKind, Env, GroundContact, IgniteRequest, NoiseEvent, ProjectileTrace, SmokeEmission,
-    SurfaceMaterials, WorldImpulse,
+    SurfaceMaterials, WorldImpulse, WorldShift,
 };
 
 use crate::body::{FrameSource, SoftBodySim, SoftKind};
@@ -300,6 +300,57 @@ pub fn gather_colliders(
     std::mem::swap(&mut world.prev, &mut world.seen);
 }
 
+/// Move every body, the collider history (for sweeps) and the gathered loads into the new
+/// frame when the world is re-anchored. Runs in `WorldShiftSet::Apply`.
+pub fn follow_world_shift(
+    mut shifts: MessageReader<WorldShift>,
+    mut bodies: Query<&mut SoftBodySim>,
+    mut colliders: ResMut<ColliderWorld>,
+    mut loads: ResMut<LoadList>,
+    mut ropes: Query<&mut Rope>,
+) {
+    let Some(s) = shifts.read().copied().reduce(|a, b| a.then(&b)) else {
+        return;
+    };
+    // World-anchored rope ends move with the world (without counting as a spec change, which
+    // would rebuild the rope), so a later rebuild ties them in the right place.
+    for mut rope in &mut ropes {
+        let rope = rope.bypass_change_detection();
+        for end in [&mut rope.end_a, &mut rope.end_b] {
+            if let rope::RopeEnd::World { at } = end {
+                *at = s.point(DVec3::from_array(*at)).to_array();
+            }
+        }
+    }
+    for mut b in &mut bodies {
+        let b = &mut *b;
+        b.sim.shift(&s);
+        b.center = s.point(b.center);
+        b.wind = s.direction(b.wind);
+        if let Some(bridge) = b.bridge.as_mut() {
+            for (p, r) in &mut bridge.plank_poses {
+                (*p, *r) = (s.point(*p), s.orientation(*r));
+            }
+        }
+    }
+    let colliders = &mut *colliders;
+    for (p, r) in colliders
+        .prev
+        .values_mut()
+        .chain(colliders.seen.values_mut())
+    {
+        (*p, *r) = (s.point(*p), s.orientation(*r));
+    }
+    for c in &mut colliders.list {
+        (c.pos, c.rot) = (s.point(c.pos), s.orientation(c.rot));
+        (c.prev_pos, c.prev_rot) = (s.point(c.prev_pos), s.orientation(c.prev_rot));
+        c.com = s.point(c.com);
+    }
+    for (p, _, _) in &mut loads.0 {
+        *p = s.point(*p);
+    }
+}
+
 /// Collect weights standing on soft decks: physics characters and [`SoftLoad`]s.
 pub fn gather_loads(
     mut loads: ResMut<LoadList>,
@@ -361,6 +412,8 @@ pub fn build_bodies(
     parents: Query<&ChildOf>,
     skeletons: Query<(&GlobalTransform, &SkeletonPose)>,
     all_transforms: Query<&GlobalTransform>,
+    meshes: Option<Res<engine_assets::Assets<engine_render::Mesh>>>,
+    skins: Option<Res<hair::MeshSkins>>,
 ) {
     for (e, spec, t) in &cloths {
         let skeleton = find_skeleton(e, &parents, &skeletons);
@@ -386,37 +439,66 @@ pub fn build_bodies(
         );
     }
     for (e, spec, t) in &bridges {
-        let material = engine_render::StandardMaterial::hex(spec.plank_color)
-            .with_roughness(spec.plank_roughness);
+        let material = match &spec.plank_material {
+            Some(key) => engine_render::MaterialRef::Asset(key.clone()),
+            None => engine_render::MaterialRef::Inline(
+                engine_render::StandardMaterial::hex(spec.plank_color)
+                    .with_roughness(spec.plank_roughness),
+            ),
+        };
         let result = rope::build_bridge(spec, e, t, |index, half| {
-            commands
+            let plank = commands
                 .spawn((
                     Transform::default(),
                     TransformInterpolation::default(),
                     RigidBody::kinematic(),
                     Collider::cuboid(half).with_density(600.0),
-                    engine_render::MeshRenderer::new(
-                        engine_render::Shape::Cuboid {
-                            size: (half * 2.0).to_array(),
-                        },
-                        material,
-                    ),
                     BridgePlank { bridge: e, index },
                     ChildOf(e),
                 ))
-                .id()
+                .id();
+            match &spec.plank_mesh {
+                // A unit mesh on a scaled child, so the collider keeps its true size.
+                Some(key) => {
+                    commands.spawn((
+                        Transform::from_scale(half * 2.0),
+                        engine_render::MeshRenderer::new(
+                            engine_render::MeshRef::Asset(key.clone()),
+                            material.clone(),
+                        ),
+                        ChildOf(plank),
+                    ));
+                }
+                None => {
+                    commands
+                        .entity(plank)
+                        .insert(engine_render::MeshRenderer::new(
+                            engine_render::Shape::Cuboid {
+                                size: (half * 2.0).to_array(),
+                            },
+                            material.clone(),
+                        ));
+                }
+            }
+            plank
         });
         report(&mut commands, e, "RopeBridge", result);
     }
     for (e, spec, t) in &volumes {
         report(&mut commands, e, "SoftVolume", volume::build(spec, t));
     }
+    let meshes = meshes.as_deref();
     for (e, spec) in &grooms {
         let skeleton = find_skeleton(e, &parents, &skeletons);
-        if skeleton.is_some_and(|s| s.2.bones.is_empty()) {
-            continue;
+        if skeleton.is_some_and(|s| s.2.bones.is_empty()) || spec.waiting_for_mesh(meshes) {
+            continue; // the pose isn't evaluated (or the body mesh isn't built) yet
         }
-        report(&mut commands, e, "HairGroom", hair::build(spec, skeleton));
+        report(
+            &mut commands,
+            e,
+            "HairGroom",
+            hair::build(spec, skeleton, meshes, skins.as_deref()),
+        );
     }
 }
 
@@ -693,6 +775,9 @@ fn step_one(entity: Entity, body: &mut SoftBodySim, ctx: &StepContext) {
             FrameSource::Bone { owner, bone } => world_transform(owner, ctx.transforms)
                 .zip(ctx.poses.get(owner).ok())
                 .and_then(|(t, p)| p.bone_world(&t, bone)),
+            FrameSource::Blend(blend) => world_transform(blend.owner, ctx.transforms)
+                .zip(ctx.poses.get(blend.owner).ok())
+                .and_then(|(t, p)| blend.world(&t, p)),
         };
         if let Some((p, r)) = pose {
             let local = (p - origin).as_vec3();
