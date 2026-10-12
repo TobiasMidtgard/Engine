@@ -60,13 +60,8 @@ pub(crate) fn play_lightning(
             continue;
         }
         let channel = s.path(PATH_DETAIL);
-        if let Some(cue) = play_thunder(
-            &mut audio,
-            &channel,
-            s.peak_current_ka,
-            settings.speed_of_sound,
-            s.seed,
-        ) {
+        let speed = audio.speed_of_sound();
+        if let Some(cue) = play_thunder(&mut audio, &channel, s.peak_current_ka, speed, s.seed) {
             cues.write(cue);
         }
     }

@@ -7,9 +7,18 @@
 //!   rockets crackle and thunder, electric motors sing, thrusters hiss.
 //! * [`TyreSound`] rolls, crunches, squelches and hisses by ground, and squeals when it
 //!   slides on hard ground.
+//! * [`vehicle_sounds`] plays both for every vehicle the vehicles module reports through
+//!   `engine_world::EngineState` and `WheelContacts`.
 
-use crate::Sound;
+use std::collections::HashMap;
+
+use engine_core::prelude::*;
+use engine_world::{EngineKind, EngineState, Env, WheelContacts};
+
 use crate::dsp::{Biquad, Bubble, Noise, OnePole, Resonator};
+use crate::footstep::{FootstepSurfaces, SurfaceSound};
+use crate::systems::clock_for;
+use crate::{Audio, AudioCue, AudioSettings, PlayOptions, Sound, VoiceId};
 
 /// What kind of engine to synthesize.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -522,6 +531,274 @@ fn smooth(a: f32, b: f32, x: f32) -> f32 {
     t * t * (3.0 - 2.0 * t)
 }
 
+impl EngineVoice {
+    /// The voice for an engine the vehicles module reports. The contract has no displacement,
+    /// so it is guessed from the cylinder count (about half a litre each).
+    pub fn from_kind(kind: EngineKind) -> Self {
+        match kind {
+            EngineKind::Piston { cylinders } => EngineVoice::Piston {
+                cylinders: cylinders.max(1),
+                litres: 0.3 + 0.55 * cylinders.max(1) as f32,
+            },
+            EngineKind::Electric => EngineVoice::Electric,
+            EngineKind::Turbine => EngineVoice::Turbine,
+            EngineKind::Rocket => EngineVoice::Rocket,
+            EngineKind::Thrusters => EngineVoice::Thrusters,
+        }
+    }
+
+    /// Reference distance (full level) and how far it carries, meters.
+    fn range(self) -> (f32, f32) {
+        match self {
+            EngineVoice::Piston { litres, .. } => (2.0 + litres * 0.4, 300.0 + 40.0 * litres),
+            EngineVoice::Electric => (1.5, 60.0),
+            EngineVoice::Turbine => (8.0, 4_000.0),
+            EngineVoice::Rocket => (25.0, 30_000.0),
+            EngineVoice::Thrusters => (2.0, 150.0),
+        }
+    }
+}
+
+impl EngineSound {
+    /// An engine already in `state`, without gliding up from idle.
+    pub fn from_state(fs: f32, state: &EngineState, seed: u64) -> Self {
+        let mut e = Self::new(fs, EngineVoice::from_kind(state.kind), seed);
+        e.set_state(state);
+        e.value = e.target;
+        // Still fades in from silence: a voice starting mid-roar would click.
+        e.value[RUNNING] = 0.0;
+        e
+    }
+
+    pub fn set_state(&mut self, s: &EngineState) {
+        self.set_param("rpm", s.rpm);
+        self.set_param("throttle", s.throttle);
+        self.set_param("load", s.load);
+        self.set_param("boost", s.boost);
+        self.set_param("thrust", s.thrust_n);
+        self.set_param("running", if s.running { 1.0 } else { 0.0 });
+    }
+}
+
+impl TyreGround {
+    /// The shares from how the ground sounds underfoot (its material and state: wet, puddles,
+    /// snow, frozen), plus how wet its surface is (a wet road hisses even though it soaks
+    /// nothing up).
+    pub fn from_surface(s: &SurfaceSound, wetness: f32) -> Self {
+        Self {
+            hard: s.click.clamp(0.0, 1.0),
+            gravel: s.grit.clamp(0.0, 1.0).powf(1.5),
+            soft: (s.thump * 0.5 * (1.0 - s.click.min(1.0)) + s.rustle * 0.6 + s.hiss * 0.8)
+                .clamp(0.0, 1.0),
+            mud: s.squelch.clamp(0.0, 1.0),
+            snow: (s.crunch - 0.3 * s.grit).clamp(0.0, 1.0),
+            wet: s.splash.max(wetness * 0.8).clamp(0.0, 1.0),
+        }
+    }
+
+    fn add(&mut self, o: &Self, k: f32) {
+        self.hard += o.hard * k;
+        self.gravel += o.gravel * k;
+        self.soft += o.soft * k;
+        self.mud += o.mud * k;
+        self.snow += o.snow * k;
+        self.wet += o.wet * k;
+    }
+}
+
+/// How far tyres are heard, meters.
+const TYRE_RANGE_M: f32 = 150.0;
+
+/// The voices playing for one vehicle.
+#[derive(Default)]
+pub(crate) struct VehicleVoices {
+    engine: VoiceId,
+    voice: Option<EngineVoice>,
+    tyres: VoiceId,
+    skidding: bool,
+    seen: bool,
+}
+
+/// Engines and tyres of every vehicle near the listener, from the `EngineState` and
+/// `WheelContacts` the vehicles module writes.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn vehicle_sounds(
+    mut audio: ResMut<Audio>,
+    vehicles: Query<(
+        Entity,
+        &GlobalTransform,
+        Option<&EngineState>,
+        Option<&WheelContacts>,
+    )>,
+    env: Env,
+    surfaces: Res<FootstepSurfaces>,
+    settings: Res<AudioSettings>,
+    scales: Query<&LocalTimeScale>,
+    mut cues: MessageWriter<AudioCue>,
+    mut playing: Local<HashMap<Entity, VehicleVoices>>,
+) {
+    for v in playing.values_mut() {
+        v.seen = false;
+    }
+    if audio.is_running() && settings.vehicles {
+        let listener = audio.listener_position();
+        let fs = audio.sample_rate();
+        let snow = surfaces.snow();
+        for (e, t, engine, wheels) in &vehicles {
+            if engine.is_none() && wheels.is_none() {
+                continue;
+            }
+            let p = t.translation();
+            let d = p.distance(listener) as f32;
+            let v = playing.entry(e).or_default();
+            v.seen = true;
+
+            if let Some(s) = engine {
+                let voice = EngineVoice::from_kind(s.kind);
+                let (near, far) = voice.range();
+                let heard = d < far * 1.1 && (s.running || s.rpm > 1.0 || s.thrust_n > 1.0);
+                if v.voice != Some(voice) || !heard {
+                    if !v.engine.is_none() {
+                        audio.stop(v.engine, 0.6);
+                    }
+                    v.engine = VoiceId::NONE;
+                    v.voice = None;
+                }
+                if heard && audio.is_playing(v.engine) {
+                    audio.set_param(v.engine, "rpm", s.rpm);
+                    audio.set_param(v.engine, "throttle", s.throttle);
+                    audio.set_param(v.engine, "load", s.load);
+                    audio.set_param(v.engine, "boost", s.boost);
+                    audio.set_param(v.engine, "thrust", s.thrust_n);
+                    audio.set_param(v.engine, "running", if s.running { 1.0 } else { 0.0 });
+                } else if heard {
+                    let seed = audio.next_seed();
+                    v.engine = audio.play(
+                        EngineSound::from_state(fs, s, seed),
+                        PlayOptions::at(p)
+                            .range(near, far)
+                            .follow(e)
+                            .clock(clock_for(Some(e), &scales))
+                            .fade_in(0.3)
+                            .reverb(0.2),
+                    );
+                    v.voice = Some(voice);
+                    if !v.engine.is_none() {
+                        let name = match voice {
+                            EngineVoice::Piston { .. } => "engine.piston",
+                            EngineVoice::Electric => "engine.electric",
+                            EngineVoice::Turbine => "engine.turbine",
+                            EngineVoice::Rocket => "engine.rocket",
+                            EngineVoice::Thrusters => "engine.thrusters",
+                        };
+                        cues.write(AudioCue {
+                            voice: v.engine,
+                            position: Some(p),
+                            name: name.into(),
+                            loudness: (near / 25.0).sqrt().min(1.0),
+                        });
+                    }
+                }
+            }
+
+            let Some(w) = wheels else {
+                if !v.tyres.is_none() {
+                    audio.stop(v.tyres, 0.3);
+                    v.tyres = VoiceId::NONE;
+                }
+                continue;
+            };
+            // One voice for all the wheels: the mean roll and load, the worst slip, and the
+            // ground shared out by how much each wheel carries.
+            let n = w.wheels.len().max(1) as f32;
+            let mut speed = 0.0;
+            let mut slip = 0.0f32;
+            let mut load = 0.0;
+            let mut ground = TyreGround::default();
+            let total: f32 = w.wheels.iter().map(|c| c.load_kg.max(1.0)).sum();
+            for c in &w.wheels {
+                speed += c.rolling_speed.abs() / n;
+                slip = slip.max(c.slip);
+                load += c.load_kg / n;
+                let material = env.material(c.surface);
+                let cell = env.surface_state(c.position);
+                let wading = env
+                    .water(c.position)
+                    .map(|s| (s.surface_height - c.position.y) as f32)
+                    .filter(|d| *d > 0.0)
+                    .unwrap_or(0.0)
+                    .min(1.5);
+                let sound = surfaces.get(material).with_state(
+                    &cell,
+                    material.absorbency,
+                    env.temperature(c.position),
+                    wading,
+                    &snow,
+                );
+                let share = c.load_kg.max(1.0) / total;
+                ground.add(&TyreGround::from_surface(&sound, cell.wetness), share);
+            }
+            let moving = speed > 0.3 || slip > 0.1;
+            let stopped = speed < 0.05 && slip < 0.02;
+            if d > TYRE_RANGE_M * 1.1 || (stopped && !v.tyres.is_none()) {
+                if !v.tyres.is_none() {
+                    audio.stop(v.tyres, 0.3);
+                }
+                v.tyres = VoiceId::NONE;
+            } else if moving && !audio.is_playing(v.tyres) && d < TYRE_RANGE_M {
+                let seed = audio.next_seed();
+                v.tyres = audio.play(
+                    TyreSound::new(fs, seed),
+                    PlayOptions::at(p)
+                        .range(2.0, TYRE_RANGE_M)
+                        .follow(e)
+                        .clock(clock_for(Some(e), &scales))
+                        .fade_in(0.15)
+                        .reverb(0.15),
+                );
+            }
+            if audio.is_playing(v.tyres) {
+                for (name, value) in [
+                    ("speed", speed),
+                    ("slip", slip),
+                    ("load", load),
+                    ("hard", ground.hard),
+                    ("gravel", ground.gravel),
+                    ("soft", ground.soft),
+                    ("mud", ground.mud),
+                    ("snow", ground.snow),
+                    ("wet", ground.wet),
+                ] {
+                    audio.set_param(v.tyres, name, value);
+                }
+            }
+            // A skid starting is something to hear (and for AI to notice).
+            let skid = slip > 0.4 && speed > 3.0 && ground.hard > 0.5 && ground.wet < 0.5;
+            if skid && !v.skidding && !v.tyres.is_none() {
+                cues.write(AudioCue {
+                    voice: v.tyres,
+                    position: Some(p),
+                    name: "tyre.skid".into(),
+                    loudness: (0.3 + 0.5 * slip).min(1.0),
+                });
+            }
+            v.skidding = if v.skidding { slip > 0.25 } else { skid };
+        }
+    }
+    // Vehicles gone, out of earshot or audio off.
+    playing.retain(|_, v| {
+        if !v.seen {
+            if !v.engine.is_none() {
+                audio.stop(v.engine, 0.6);
+            }
+            if !v.tyres.is_none() {
+                audio.stop(v.tyres, 0.3);
+            }
+        }
+        v.seen
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -645,5 +922,23 @@ mod tests {
             rms(&render(&mut t, 1.0))
         };
         assert!(stopped < 1e-4);
+    }
+
+    #[test]
+    fn tyres_read_the_ground_from_its_footstep_sound() {
+        let g = |name: &str, wet: f32| {
+            TyreGround::from_surface(&SurfaceSound::preset(name).unwrap(), wet)
+        };
+        let road = g("concrete", 0.0);
+        assert!(
+            road.hard > 0.9 && road.gravel < 0.05 && road.soft < 0.1,
+            "{road:?}"
+        );
+        assert!(g("concrete", 0.8).wet > 0.5, "a wet road hisses");
+        let gravel = g("gravel", 0.0);
+        assert!(gravel.gravel > 0.9 && gravel.hard < 0.1, "{gravel:?}");
+        assert!(g("mud", 0.0).mud > 0.9);
+        assert!(g("snow", 0.0).snow > 0.9);
+        assert!(g("grass", 0.0).soft > 0.7);
     }
 }
