@@ -1,6 +1,6 @@
 [package]
 name = "engine_weather"
-description = "Weather & day–night (stub: scope and contracts in README.md)."
+description = "Weather, wind, temperature, volumetric clouds, rain and snow that change the ground, lightning and the day–night sky."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -8,6 +8,11 @@ license.workspace = true
 [dependencies]
 engine_core.workspace = true
 engine_world.workspace = true
+engine_render.workspace = true
 bevy_ecs.workspace = true
+bytemuck.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+
+[dev-dependencies]
+image.workspace = true
