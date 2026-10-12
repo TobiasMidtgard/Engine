@@ -318,7 +318,7 @@ pub enum TextAlign {
 /// `name` is a built-in icon (`"sword"`, `"potion_health"`, `"ui_close"`; `ui.icons` lists
 /// them), a portrait (`"portrait:pilot"`), or SVG source registered at runtime with
 /// `ui.add_icon`.
-#[derive(Component, Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Component, Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 #[require(Node)]
 pub struct Icon {
@@ -333,18 +333,6 @@ pub struct Icon {
     /// Fill the node's box (cropping the sides, or the bottom first so faces stay in view)
     /// and clip to its rounded corners: round avatars from portraits.
     pub cover: bool,
-}
-
-impl Default for Icon {
-    fn default() -> Self {
-        Self {
-            name: String::new(),
-            tint: None,
-            flip_x: false,
-            desaturate: false,
-            cover: false,
-        }
-    }
 }
 
 impl Icon {

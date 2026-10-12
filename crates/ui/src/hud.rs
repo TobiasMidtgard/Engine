@@ -151,6 +151,7 @@ fn data_f64(world: &World, path: &str) -> Option<f64> {
     crate::data::lookup_f64(world, path)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn bar(
     bind: &str,
     max: &str,

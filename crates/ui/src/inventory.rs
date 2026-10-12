@@ -330,7 +330,7 @@ pub fn group(n: u64) -> String {
     let digits = n.to_string();
     let mut out = String::with_capacity(digits.len() + digits.len() / 3);
     for (i, c) in digits.chars().enumerate() {
-        if i > 0 && (digits.len() - i) % 3 == 0 {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
             out.push(',');
         }
         out.push(c);
@@ -930,17 +930,16 @@ pub fn inventory_screen_system(world: &mut World, mut seen: Local<MessageCursor<
 
 fn drop_item(world: &mut World, owner: Entity, i: usize) {
     let db = world.resource::<ItemDatabase>().clone();
-    let Some(mut inv) = world.get_mut::<Inventory>(owner) else {
-        return;
-    };
-    let Some(stack) = inv.slots.get(i).cloned().flatten() else {
+    let Some(stack) = world
+        .get::<Inventory>(owner)
+        .and_then(|inv| inv.slots.get(i).cloned().flatten())
+    else {
         return;
     };
     if db
         .get(&stack.item)
         .is_some_and(|d| d.category == ItemCategory::Quest)
     {
-        drop(inv);
         toast::notify(
             world,
             ToastKind::Warn,
@@ -951,7 +950,9 @@ fn drop_item(world: &mut World, owner: Entity, i: usize) {
         );
         return;
     }
-    inv.slots[i] = None;
+    if let Some(mut inv) = world.get_mut::<Inventory>(owner) {
+        inv.slots[i] = None;
+    }
     let name = db
         .get(&stack.item)
         .map(|d| d.name.clone())

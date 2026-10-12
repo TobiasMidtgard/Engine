@@ -300,7 +300,7 @@ mod tests {
     fn templates() {
         let mut d = UiData::default();
         d.set("player.gold", 12500);
-        d.set("player.speed", 3.14159);
+        d.set("player.speed", 4.26);
         d.set("player.name", "Mara");
         assert_eq!(
             resolve(
@@ -308,7 +308,7 @@ mod tests {
                 &d,
                 None
             ),
-            "Mara: 12,500 gold, 3.1 m/s {x} ?"
+            "Mara: 12,500 gold, 4.3 m/s {x} ?"
         );
         assert_eq!(resolve("no bindings", &d, None), "no bindings");
     }

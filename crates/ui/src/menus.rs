@@ -433,6 +433,7 @@ fn default_settings() -> Value {
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn slider(
     label: &str,
     bind: &str,

@@ -558,16 +558,13 @@ pub fn ui_layout_system(world: &mut World) {
             clip: vp.rect(),
         }];
         let mut first = true;
-        loop {
-            let Some(f) = stack.pop().or_else(|| {
-                if deferred.is_empty() {
-                    return None;
-                }
-                deferred.sort_by_key(|(z, _)| -*z);
-                deferred.pop().map(|(_, f)| f)
-            }) else {
-                break;
-            };
+        while let Some(f) = stack.pop().or_else(|| {
+            if deferred.is_empty() {
+                return None;
+            }
+            deferred.sort_by_key(|(z, _)| -*z);
+            deferred.pop().map(|(_, f)| f)
+        }) {
             let e = f.entity;
             let Some(&node) = layout.nodes.get(&e) else {
                 continue;

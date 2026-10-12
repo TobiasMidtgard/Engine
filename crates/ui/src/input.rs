@@ -364,9 +364,7 @@ pub fn hit_test(world: &World, p: Vec2, modal_layer: Option<i32>) -> Option<Enti
 /// `e` or its nearest ancestor that has component `T`.
 pub fn ancestor_with<T: Component>(world: &World, mut e: Entity) -> Option<Entity> {
     loop {
-        if world.get::<Node>(e).is_none() {
-            return None;
-        }
+        world.get::<Node>(e)?;
         if world.get::<T>(e).is_some() {
             return Some(e);
         }
@@ -376,9 +374,7 @@ pub fn ancestor_with<T: Component>(world: &World, mut e: Entity) -> Option<Entit
 
 fn interactive(world: &World, mut e: Entity) -> Option<Entity> {
     loop {
-        if world.get::<Node>(e).is_none() {
-            return None;
-        }
+        world.get::<Node>(e)?;
         if world.get::<OnClick>(e).is_some()
             || world.get::<Draggable>(e).is_some()
             || world.get::<Focusable>(e).is_some()
@@ -1168,12 +1164,12 @@ fn update_tooltip(
         return;
     };
     let content = (tip.title.clone(), tip.text.clone());
-    if st.tooltip.is_some() && st.tooltip_content != content {
-        if let Some(t) = st.tooltip.take()
-            && let Ok(t) = world.get_entity_mut(t)
-        {
-            t.despawn();
-        }
+    if st.tooltip.is_some()
+        && st.tooltip_content != content
+        && let Some(t) = st.tooltip.take()
+        && let Ok(t) = world.get_entity_mut(t)
+    {
+        t.despawn();
     }
     if st.tooltip.is_none() {
         let mut el = El::new()
