@@ -102,7 +102,6 @@ struct Palette {
     bark: StandardMaterial,
     leaves: [StandardMaterial; 3],
     concrete: StandardMaterial,
-    asphalt: StandardMaterial,
     brick: StandardMaterial,
     metal: StandardMaterial,
     wood: StandardMaterial,
@@ -123,7 +122,6 @@ impl Palette {
             bark: StandardMaterial::hex(0x5a4030).with_roughness(0.9),
             leaves: [leaf(0x3f6b2a), leaf(0x557f2c), leaf(0x2f5a2f)],
             concrete: StandardMaterial::hex(0xa8a49c).with_roughness(0.8),
-            asphalt: StandardMaterial::hex(0x2c2c2e).with_roughness(0.75),
             brick: StandardMaterial::hex(0x9c8670).with_roughness(0.9),
             metal: StandardMaterial::hex(0xc8ccd4)
                 .with_metallic(1.0)
@@ -745,64 +743,9 @@ fn field(commands: &mut Commands, rng: &mut Rng) {
     }
 }
 
-fn track(commands: &mut Commands, pal: &Palette) {
-    let z = zone("track");
-    let segs = 48;
-    let (rx, rz) = (z.radius, z.radius * 0.55);
-    for i in 0..segs {
-        let a0 = i as f64 / segs as f64 * std::f64::consts::TAU;
-        let a1 = (i + 1) as f64 / segs as f64 * std::f64::consts::TAU;
-        let p0 = DVec3::new(a0.cos() * rx, 0.0, a0.sin() * rz);
-        let p1 = DVec3::new(a1.cos() * rx, 0.0, a1.sin() * rz);
-        let mid = (p0 + p1) * 0.5;
-        let dir = (p1 - p0).as_vec3();
-        let len = dir.length();
-        let yaw = (-dir.z).atan2(dir.x);
-        spawn(
-            commands,
-            cuboid(len + 0.6, 0.05, 12.0),
-            pal.asphalt,
-            Transform::from_translation(z.center + mid + DVec3::new(0.0, 0.03, 0.0))
-                .with_rotation(Quat::from_rotation_y(yaw)),
-        );
-    }
-    spawn(
-        commands,
-        cuboid(10.0, 0.5, 12.0),
-        pal.concrete,
-        Transform::from_translation(z.center + DVec3::new(0.0, 1.2, rz))
-            .with_rotation(Quat::from_rotation_z(0.25)),
-    );
-    // A car placeholder.
-    let body = StandardMaterial::hex(0xb02020)
-        .with_metallic(0.6)
-        .with_roughness(0.25);
-    let car = z.center + DVec3::new(rx, 0.0, 0.0);
-    spawn(
-        commands,
-        cuboid(1.9, 0.7, 4.4),
-        body,
-        at(car + DVec3::new(0.0, 0.75, 0.0)),
-    );
-    spawn(
-        commands,
-        cuboid(1.7, 0.55, 2.2),
-        body,
-        at(car + DVec3::new(0.0, 1.35, -0.3)),
-    );
-    for (x, zz) in [(-0.95, 1.4), (0.95, 1.4), (-0.95, -1.4), (0.95, -1.4)] {
-        spawn(
-            commands,
-            Shape::Cylinder {
-                radius: 0.36,
-                height: 0.25,
-                segments: 20,
-            },
-            StandardMaterial::hex(0x151515).with_roughness(0.9),
-            Transform::from_translation(car + DVec3::new(x, 0.36, zz))
-                .with_rotation(Quat::from_rotation_z(std::f32::consts::FRAC_PI_2)),
-        );
-    }
+fn track(commands: &mut Commands, _pal: &Palette) {
+    // The circuit, kicker, drift pad and runway, with cars and planes running on autopilot.
+    engine_vehicles::demo::spawn_track(commands, zone("track").center);
 }
 
 fn spaceport(commands: &mut Commands, pal: &Palette) {
@@ -838,49 +781,8 @@ fn spaceport(commands: &mut Commands, pal: &Palette) {
             at(c + DVec3::new(a.cos() * 28.0, 0.5, a.sin() * 28.0)),
         );
     }
-    // Ship placeholder.
-    let hull = StandardMaterial::hex(0xdfe3e8)
-        .with_metallic(0.8)
-        .with_roughness(0.35);
-    let ship = c + DVec3::new(0.0, 4.0, 0.0);
-    let along_z = Quat::from_rotation_x(std::f32::consts::FRAC_PI_2);
-    spawn(
-        commands,
-        Shape::Capsule {
-            radius: 2.2,
-            height: 16.0,
-            segments: 32,
-        },
-        hull,
-        Transform::from_translation(ship).with_rotation(along_z),
-    );
-    spawn(
-        commands,
-        Shape::Cone {
-            radius: 2.2,
-            height: 4.0,
-            segments: 32,
-        },
-        hull,
-        Transform::from_translation(ship + DVec3::new(0.0, 0.0, -9.5))
-            .with_rotation(Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2)),
-    );
-    spawn(
-        commands,
-        cuboid(16.0, 0.4, 5.0),
-        hull,
-        at(ship + DVec3::new(0.0, -0.5, 3.0)),
-    );
-    spawn(
-        commands,
-        Shape::Cylinder {
-            radius: 1.4,
-            height: 1.0,
-            segments: 24,
-        },
-        StandardMaterial::hex(0x101820).with_emissive([0.4, 0.7, 1.0], 4_000.0),
-        Transform::from_translation(ship + DVec3::new(0.0, 0.0, 8.3)).with_rotation(along_z),
-    );
+    // A spaceplane hopping off the pad and one parked on the apron.
+    engine_vehicles::demo::spawn_spaceport(commands, c + DVec3::new(0.0, 0.4, 0.0), 30.0);
     // Scale: a 600 m tower of rings.
     let tower = c + DVec3::new(70.0, 0.0, 60.0);
     for i in 0..40 {

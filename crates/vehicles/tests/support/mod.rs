@@ -9,6 +9,8 @@
 
 #![allow(dead_code)]
 
+pub mod shots;
+
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 

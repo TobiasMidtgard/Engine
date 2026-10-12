@@ -169,6 +169,13 @@ fn ground(commands: &mut Commands, center: DVec3, half: Vec3) {
     );
 }
 
+/// Both vehicle demos side by side: the track at `origin` and the spaceport 300 m to its east.
+pub fn spawn_demo(commands: &mut Commands, origin: DVec3) {
+    spawn_track(commands, origin);
+    let pad = origin + DVec3::new(300.0, 0.4, 0.0);
+    spawn_spaceport(commands, pad, 30.0);
+}
+
 /// The vehicle track, centered on `center` (a point on flat ground). Fits in a 340 × 200 m
 /// rectangle.
 pub fn spawn_track(commands: &mut Commands, center: DVec3) {

@@ -9,6 +9,7 @@ pub mod demo;
 pub mod drivetrain;
 pub mod events;
 pub mod meshes;
+pub mod models;
 pub mod presets;
 pub mod ship;
 pub mod tire;

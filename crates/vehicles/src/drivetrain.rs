@@ -522,7 +522,15 @@ mod tests {
     fn automatic_upshifts_and_brake_selects_reverse() {
         let mut d = Drivetrain::default();
         let w = d.wheel_speed_for_rpm(1, 7_000.0);
+        // Past the shift point it changes up once it has been in gear a moment (no hunting).
         d.select_gear(1.0, 0.0, 15.0, w, 1.0 / 60.0);
+        assert_eq!(d.state.gear, 1, "not straight after engaging");
+        for _ in 0..90 {
+            d.select_gear(1.0, 0.0, 15.0, w, 1.0 / 60.0);
+            if d.state.gear != 1 {
+                break;
+            }
+        }
         assert_eq!(d.state.gear, 2);
         assert!(d.state.shifting > 0.0);
 
