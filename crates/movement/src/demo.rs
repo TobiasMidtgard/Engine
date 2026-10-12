@@ -762,7 +762,7 @@ fn set_up_round(
     for (cube, mut r) in cubes.iter_mut() {
         if !d.cubes.is_empty() {
             r.material = if cube.0 < level {
-                glow(0x3fd0ff, 500.0)
+                glow(0x3fd0ff, 3000.0)
             } else {
                 mat(0x34363b, 0.8)
             }
