@@ -356,9 +356,38 @@ fn wolf_closeups() {
 }
 
 #[test]
+fn rabbit_closeups() {
+    let r = |state| Pose::new(Species::Rabbit, state);
+    render(&[
+        ("rabbit_profile", r(AnimalState::Wander), 1.1, 0.0),
+        ("rabbit_graze", r(AnimalState::Graze), 1.0, 35.0),
+        ("rabbit_head", r(AnimalState::Wander), 0.45, 40.0),
+        ("rabbit_sit_up", r(AnimalState::Alert), 1.0, 30.0),
+        (
+            "rabbit_hop",
+            r(AnimalState::Wander).moving(1.2, 2.2, LocomotionMode::Walk),
+            1.1,
+            10.0,
+        ),
+        (
+            "rabbit_run",
+            Pose {
+                clock: 100.1,
+                ..r(AnimalState::Flee).moving(6.0, 0.0, LocomotionMode::Sprint)
+            },
+            1.2,
+            -30.0,
+        ),
+        ("rabbit_rest", r(AnimalState::Rest), 1.0, 40.0),
+        ("rabbit_rear", r(AnimalState::Wander), 0.9, -140.0),
+        ("rabbit_dead", r(AnimalState::Dead), 1.0, 60.0),
+    ]);
+}
+
+#[test]
 fn meshes_fit_their_budgets() {
     let mut total = 0.0;
-    for species in [Species::Deer, Species::Wolf] {
+    for species in [Species::Deer, Species::Wolf, Species::Rabbit] {
         let (meshes, secs) = animals::build_all(species);
         total += secs;
         for male in [false, true] {
