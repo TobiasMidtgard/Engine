@@ -118,6 +118,20 @@ Adding a file:
    Where the host is reachable, `cargo run -p fetch-assets` fetches unpinned entries and prints
    the pin itself.
 
+Files made here (a model converted to GLB, a baked texture, an offline recording) have no
+download link:
+
+1. Give the entry `url = "mirror"`, a `source` linking what it was made from (or the code that
+   made it), and that origin's `license` (`MIT OR Apache-2.0`, the engine's own, for art made
+   from scratch). Put the file at `assets/fetched/<path>`.
+2. Run `cargo run -p fetch-assets -- publish`. It uploads the file to the mirror and prints the
+   pin. In the project's cloud sessions, where uploads are blocked, it pushes a short-lived
+   `asset-upload/…` branch instead; the Asset upload workflow copies the files to the mirror and
+   deletes the branch. Paste the pin and push once that workflow has run.
+
+Fetching these needs a GitHub login (`gh auth login` or `GITHUB_TOKEN`) while the repository is
+private, since only the mirror has them.
+
 Sizes: 2K for most materials, 4K for hero assets and terrain close-ups, 2K–4K HDRIs for
 lighting (8K only for a visible backdrop). JPG or PNG for color, HDR or EXR only for HDR data.
 
