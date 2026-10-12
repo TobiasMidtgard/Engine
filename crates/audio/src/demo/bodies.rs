@@ -289,7 +289,7 @@ pub(super) fn person(
         if runner {
             "Trail runner"
         } else {
-            "Trail walker"
+            "Trail hiker"
         },
         walker,
         scale,

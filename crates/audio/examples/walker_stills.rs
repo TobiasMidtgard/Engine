@@ -107,7 +107,7 @@ struct Subject {
 
 const SUBJECTS: [Subject; 4] = [
     Subject {
-        name: "Trail walker",
+        name: "Trail hiker",
         file: "hiker",
         look_y: 0.95,
         dist: 3.0,
