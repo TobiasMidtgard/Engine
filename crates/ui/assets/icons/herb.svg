@@ -1,0 +1,43 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <defs>
+    <linearGradient id="leaf" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#bff58a"/>
+      <stop offset=".5" stop-color="#4fb84a"/>
+      <stop offset="1" stop-color="#1c5e2a"/>
+    </linearGradient>
+    <linearGradient id="leaf2" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#8ad870"/>
+      <stop offset="1" stop-color="#16502a"/>
+    </linearGradient>
+    <linearGradient id="flower" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#f0c8ff"/>
+      <stop offset="1" stop-color="#8a3ad0"/>
+    </linearGradient>
+  </defs>
+  <g stroke="#0c0f16" stroke-width="3.6" stroke-linejoin="round" stroke-linecap="round" paint-order="stroke">
+    <path d="M30 60 C30 46 28 30 22 14" fill="none" stroke-width="6"/>
+    <path d="M32 60 C33 44 36 28 44 12" fill="none" stroke-width="6"/>
+    <path d="M31 60 C31 44 31 28 32 8" fill="none" stroke-width="6"/>
+  </g>
+  <g fill="none" stroke="#3a8a3a" stroke-width="2.2" stroke-linecap="round">
+    <path d="M30 60 C30 46 28 30 22 14"/><path d="M32 60 C33 44 36 28 44 12"/><path d="M31 60 C31 44 31 28 32 8"/>
+  </g>
+  <g stroke="#0c0f16" stroke-width="3.4" stroke-linejoin="round" paint-order="stroke">
+    <path d="M28 38 C20 38 13 34 10 28 C17 26 25 30 28 38 Z" fill="url(#leaf2)"/>
+    <path d="M34 36 C42 37 49 33 53 27 C46 25 38 29 34 36 Z" fill="url(#leaf2)"/>
+    <path d="M26 26 C19 25 14 20 13 13 C20 13 25 18 26 26 Z" fill="url(#leaf)"/>
+    <path d="M37 24 C44 23 49 18 51 11 C44 11 39 16 37 24 Z" fill="url(#leaf)"/>
+    <path d="M31 22 C26 18 25 11 28 5 C33 9 34 16 31 22 Z" fill="url(#leaf)"/>
+    <path d="M30 48 C23 49 17 46 14 41 C20 39 27 42 30 48 Z" fill="url(#leaf)"/>
+    <path d="M33 47 C40 48 46 45 49 40 C43 38 36 41 33 47 Z" fill="url(#leaf2)"/>
+    <circle cx="44" cy="11" r="3.4" fill="url(#flower)"/>
+    <circle cx="21.5" cy="13" r="3" fill="url(#flower)"/>
+  </g>
+  <g fill="none" stroke="#e6ffcc" stroke-width=".9" stroke-linecap="round" opacity=".8">
+    <path d="M14.8 14.8 C18 17 22 20.6 25 25"/><path d="M28.5 7.5 C29.6 12 30.4 16 30.8 21"/><path d="M16 41.6 C20 42.6 25 44.4 29 47"/><path d="M12.6 28.4 C17 30 22 32.6 26.6 37"/>
+  </g>
+  <circle cx="43" cy="10" r="1" fill="#ffffff"/>
+  <circle cx="20.6" cy="12.2" r=".9" fill="#ffffff"/>
+  <path d="M25 52 L37 52 L36.5 57 L25.5 57 Z" fill="#c89a5a" stroke="#0c0f16" stroke-width="1.8" stroke-linejoin="round"/>
+  <path d="M26 54 L36 54" stroke="#8a5a2a" stroke-width="1"/>
+</svg>
