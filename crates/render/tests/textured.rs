@@ -1,6 +1,9 @@
 //! Offscreen renders of textured materials: procedural images, normal-map orientation, a glTF
-//! model with an embedded texture and alpha-masked shadow casters. Needs a GPU or a software
-//! Vulkan driver (lavapipe); passes with a note when neither is available.
+//! model with an embedded texture, alpha-masked shadow casters and mirrored instances. Needs a
+//! GPU or a software Vulkan driver (lavapipe); passes with a note when neither is available.
+//!
+//! Every render also fails on GPU validation errors: the renderer only logs those (and drops
+//! the frame), so pixel checks alone could miss them.
 
 use std::path::{Path, PathBuf};
 
@@ -17,6 +20,8 @@ const CAMERA_DISTANCE: f32 = 3.0;
 /// Headless app with a camera at `+Z` looking at the origin and a sun shining from the
 /// upper left, slightly towards the camera's side.
 fn front_lit_app(asset_root: Option<PathBuf>) -> App {
+    // Capture errors in the log buffer so `render` can check for GPU validation errors.
+    engine_core::log::init("error");
     let mut app = App::new();
     app.world.resource_mut::<EngineConfig>().headless = true;
     {
@@ -41,6 +46,7 @@ fn front_lit_app(asset_root: Option<PathBuf>) -> App {
 }
 
 /// Render a few frames and read the picture back; `None` (with a note) without a GPU.
+/// Panics if the GPU reported a validation error.
 fn render(app: &mut App, name: &str) -> Option<RgbaImage> {
     app.update_n(3);
     if let Some(d) = app.world.get_resource::<RenderDisabled>() {
@@ -49,6 +55,16 @@ fn render(app: &mut App, name: &str) -> Option<RgbaImage> {
     }
     let path = Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!("{name}.png"));
     capture_now(&mut app.world, &path).expect("screenshot");
+    let gpu_errors: Vec<String> = engine_core::log::log_buffer()
+        .tail(64, Some("error"))
+        .into_iter()
+        .filter(|l| l.message.contains("GPU error"))
+        .map(|l| l.message)
+        .collect();
+    assert!(
+        gpu_errors.is_empty(),
+        "GPU errors while rendering {name}: {gpu_errors:#?}"
+    );
     Some(image::open(&path).expect("png").to_rgba8())
 }
 
@@ -359,6 +375,7 @@ fn gltf_with_embedded_texture_loads_spawns_and_renders() {
 /// Camera and sun straight above a grey ground; a 10×10 m card above the camera (out of
 /// view) shadows all of the visible ground.
 fn shadow_app(card: StandardMaterial) -> App {
+    engine_core::log::init("error");
     let mut app = App::new();
     app.world.resource_mut::<EngineConfig>().headless = true;
     {
@@ -445,4 +462,100 @@ fn alpha_masked_casters_cut_holes_in_their_shadows() {
         lit_opaque < 0.05,
         "an opaque card shadows everything (lit fraction {lit_opaque})"
     );
+}
+
+#[test]
+fn mirrored_instances_keep_their_front_faces() {
+    // A single-sided quad mirrored in X (negative determinant, common in glTF files): its
+    // triangles wind clockwise on screen but it still faces the camera and must be drawn.
+    let mut app = front_lit_app(None);
+    let red = StandardMaterial::color(0.8, 0.05, 0.05).with_roughness(0.9);
+    let mut mirrored = Transform::from_xyz(-0.6, 0.0, 0.0);
+    mirrored.scale = Vec3::new(-1.0, 1.0, 1.0);
+    app.world.spawn((
+        mirrored,
+        MeshRenderer::new(Shape::Quad { size: [1.0, 1.0] }, red),
+    ));
+    // The same quad unmirrored, for reference.
+    app.world.spawn((
+        Transform::from_xyz(0.6, 0.0, 0.0),
+        MeshRenderer::new(Shape::Quad { size: [1.0, 1.0] }, red),
+    ));
+    let Some(img) = render(&mut app, "mirrored_quad") else {
+        return;
+    };
+    let [mr, mg, mb] = mean_rgb(&img, project(-0.6, 0.0));
+    let [r, g, b] = mean_rgb(&img, project(0.6, 0.0));
+    assert!(
+        r > (g + b) * 0.8 + 20.0,
+        "reference quad is not red: {r} {g} {b}"
+    );
+    assert!(
+        mr > (mg + mb) * 0.8 + 20.0,
+        "the mirrored quad was culled: {mr} {mg} {mb} (reference {r} {g} {b})"
+    );
+    assert!(
+        (mr - r).abs() < 0.15 * r + 8.0,
+        "a mirrored quad facing the camera should shade like the original: {mr} vs {r}"
+    );
+}
+
+#[test]
+fn handles_requested_under_aliases_share_one_gpu_mesh() {
+    let dir =
+        Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!("gltf_alias_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    write_card_gltf(&dir);
+    let mut app = front_lit_app(Some(dir.clone()));
+    // Two keys for the card's only mesh, both requested before the file has loaded: each gets
+    // its own reserved handle, which the loader then points at the same asset.
+    for (x, mesh) in [(-0.6, "card.gltf"), (0.6, "card.gltf#Mesh0")] {
+        let mut t = Transform::from_xyz(x, 0.0, 0.0);
+        t.scale = Vec3::splat(0.25);
+        app.world.spawn((
+            t,
+            MeshRenderer::new(
+                MeshRef::Asset(mesh.into()),
+                MaterialRef::Asset("card.gltf#Material0".into()),
+            ),
+        ));
+    }
+    app.update();
+    let start = std::time::Instant::now();
+    while !app.world.resource::<AssetServer>().is_loaded("card.gltf") {
+        assert!(start.elapsed().as_secs() < 20, "card.gltf never loaded");
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        app.update();
+    }
+    let mut q = app
+        .world
+        .query::<&engine_render::components::ResolvedMesh>();
+    let handles: Vec<_> = q.iter(&app.world).map(|r| r.mesh).collect();
+    assert_ne!(
+        handles[0], handles[1],
+        "the test needs two distinct handles"
+    );
+    let Some(img) = render(&mut app, "gltf_alias") else {
+        let _ = std::fs::remove_dir_all(&dir);
+        return;
+    };
+    // Both cards are drawn ...
+    for x in [-0.6, 0.6] {
+        let [r, _, b] = mean_rgb(&img, project(x - 0.1, 0.0));
+        assert!(r > b * 1.5 + 10.0, "card at x={x} is missing: r {r} b {b}");
+    }
+    // ... from one uploaded mesh, in one instanced batch.
+    let stats =
+        engine_core::registry::call_api(&mut app.world, "render.stats", serde_json::json!({}))
+            .unwrap();
+    let meshes = stats["renderer"]["features"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|f| f["name"] == "meshes")
+        .unwrap()
+        .clone();
+    assert_eq!(meshes["state"]["gpu_meshes"], 1, "{meshes}");
+    assert_eq!(meshes["state"]["opaque_batches"], 1, "{meshes}");
+    let _ = std::fs::remove_dir_all(&dir);
 }

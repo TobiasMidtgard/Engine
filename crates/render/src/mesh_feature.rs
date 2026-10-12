@@ -14,6 +14,10 @@
 //! Shadows: opaque casters use a depth-only pipeline; alpha-masked casters use a pipeline with
 //! a fragment stage that discards by base color alpha, so foliage cards cast leaf-shaped
 //! shadows.
+//!
+//! Mirrored instances (a transform with a negative determinant, e.g. `scale.x = -1`, common in
+//! glTF files) flip their triangles' winding; they are drawn with clockwise-front pipelines so
+//! back-face culling keeps the outside, as glTF requires.
 
 use std::collections::HashMap;
 
@@ -171,7 +175,7 @@ type MeshQuery = (
 /// Draws [`MeshRenderer`] entities. Added by `RenderPlugin`.
 #[derive(Default)]
 pub struct MeshFeature {
-    /// [opaque, opaque double-sided, blend, blend double-sided]
+    /// Indexed by `PIPE_*` bits: double-sided, blend, mirrored (clockwise front faces).
     pipelines: Vec<wgpu::RenderPipeline>,
     /// Depth-only shadow pipeline (opaque casters).
     shadow_pipeline: Option<wgpu::RenderPipeline>,
@@ -187,6 +191,9 @@ pub struct MeshFeature {
     meshes: HashMap<u32, GpuMesh>,
     /// Uploaded images by (image index, sRGB view).
     images: HashMap<(u32, bool), GpuImage>,
+    /// Images that could not be uploaded, by (image index, sRGB view) → asset version, so a
+    /// bad image is reported once per version instead of every frame.
+    failed_images: HashMap<(u32, bool), u64>,
     /// Texture sets by id; id 0 is the shared default (untextured) set.
     texture_sets: Vec<Option<TextureSet>>,
     texture_set_ids: HashMap<[Option<u32>; TEXTURE_SLOTS], u32>,
@@ -206,8 +213,11 @@ pub struct MeshFeature {
     stats: FeatureStats,
 }
 
-const PIPE_BLEND: u8 = 2;
 const PIPE_DOUBLE: u8 = 1;
+const PIPE_BLEND: u8 = 2;
+/// Clockwise front faces, for instances whose transform mirrors them.
+const PIPE_MIRROR: u8 = 4;
+const PIPELINE_VARIANTS: u8 = 8;
 /// Shadow pipelines: depth only / alpha masked.
 const SHADOW_DEPTH: u8 = 0;
 const SHADOW_MASKED: u8 = 1;
@@ -277,8 +287,12 @@ impl MeshFeature {
             existing.last_used = frame;
             return true;
         }
+        if self.failed_images.get(&(index, srgb)) == Some(&version) {
+            return false;
+        }
         match upload_image(gpu, image, srgb) {
             Some((texture, view)) => {
+                self.failed_images.remove(&(index, srgb));
                 self.images.insert(
                     (index, srgb),
                     GpuImage {
@@ -292,6 +306,7 @@ impl MeshFeature {
             }
             None => {
                 self.images.remove(&(index, srgb));
+                self.failed_images.insert((index, srgb), version);
                 false
             }
         }
@@ -305,9 +320,15 @@ impl MeshFeature {
         material: &StandardMaterial,
         images: Option<&Assets<Image>>,
     ) -> u32 {
-        let handles = material.textures();
+        let mut handles = material.textures();
         if handles.iter().all(Option::is_none) {
             return 0;
+        }
+        // Two handles naming the same image (a forwarded reservation) share one upload.
+        if let Some(images) = images {
+            for h in handles.iter_mut().flatten() {
+                *h = images.canonical(*h);
+            }
         }
         let key = handles.map(|h| h.map(|h| h.index()));
         let mut bound: [Option<(u32, u64, bool)>; TEXTURE_SLOTS] = [None; TEXTURE_SLOTS];
@@ -471,7 +492,9 @@ fn upload_image(
     srgb: bool,
 ) -> Option<(wgpu::Texture, wgpu::TextureView)> {
     if !image.is_valid() {
-        tracing::warn!("image data does not match its size ({image:?}); not uploading it");
+        tracing::warn!(
+            "image data or mip chain does not match its size ({image:?}); not uploading it"
+        );
         return None;
     }
     let format = match image.format {
@@ -613,10 +636,11 @@ impl RenderFeature for MeshFeature {
             immediate_size: 0,
         });
         let buffers = [Some(Vertex::layout()), Some(MeshInstance::layout())];
-        self.pipelines = (0..4u8)
+        self.pipelines = (0..PIPELINE_VARIANTS)
             .map(|variant| {
                 let blend = variant & PIPE_BLEND != 0;
                 let double = variant & PIPE_DOUBLE != 0;
+                let mirror = variant & PIPE_MIRROR != 0;
                 device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                     label: Some("mesh"),
                     layout: Some(&layout),
@@ -628,7 +652,11 @@ impl RenderFeature for MeshFeature {
                     },
                     primitive: wgpu::PrimitiveState {
                         cull_mode: if double { None } else { Some(wgpu::Face::Back) },
-                        front_face: wgpu::FrontFace::Ccw,
+                        front_face: if mirror {
+                            wgpu::FrontFace::Cw
+                        } else {
+                            wgpu::FrontFace::Ccw
+                        },
                         ..Default::default()
                     },
                     depth_stencil: Some(gpu.depth_state(!blend)),
@@ -740,6 +768,7 @@ impl RenderFeature for MeshFeature {
         self.texture_set_ids.clear();
         self.free_set_ids.clear();
         self.images.clear();
+        self.failed_images.clear();
         self.material_layout = Some(material_layout);
         self.texture_layout = Some(texture_layout);
         self.sampler = Some(sampler);
@@ -780,8 +809,10 @@ impl RenderFeature for MeshFeature {
             if !renderer.visible {
                 continue;
             }
-            let mesh_index = resolved.mesh.index();
-            let version = mesh_assets.version(resolved.mesh);
+            // Key GPU caches by the slot that holds the value, so aliases share uploads.
+            let mesh_handle = mesh_assets.canonical(resolved.mesh);
+            let mesh_index = mesh_handle.index();
+            let version = mesh_assets.version(mesh_handle);
             if version == 0 {
                 continue;
             }
@@ -789,15 +820,17 @@ impl RenderFeature for MeshFeature {
                 .meshes
                 .get(&mesh_index)
                 .is_none_or(|m| m.version != version)
-                && let Some(mesh) = mesh_assets.get(resolved.mesh)
+                && let Some(mesh) = mesh_assets.get(mesh_handle)
             {
                 self.upload_mesh(&gpu.device, mesh_index, mesh, version);
             }
             let Some(gpu_mesh) = self.meshes.get(&mesh_index) else {
                 continue;
             };
+            let material_handle =
+                material_assets.map_or(resolved.material, |m| m.canonical(resolved.material));
             let material = material_assets
-                .and_then(|m| m.get(resolved.material))
+                .and_then(|m| m.get(material_handle))
                 .unwrap_or(&default_material);
 
             let scale = gt.scale().abs().max_element();
@@ -813,33 +846,36 @@ impl RenderFeature for MeshFeature {
                 culled += 1;
                 continue;
             }
-            let (material_slot, textures) =
-                match self.material_index.get(&resolved.material.index()) {
-                    Some(v) => *v,
-                    None => {
-                        let textures = self.texture_set_for(gpu, material, image_assets);
-                        let mut gpu_material = material.to_gpu();
-                        // Only claim the slots that have a real image bound (others may still load).
-                        let bound = self
-                            .texture_sets
-                            .get(textures as usize)
-                            .and_then(Option::as_ref)
-                            .map_or(0, TextureSet::flags);
-                        gpu_material.flags[0] = (gpu_material.flags[0] & !TEXTURE_FLAGS) | bound;
-                        let slot = self.material_data.len() as u32;
-                        self.material_data.push(gpu_material);
-                        self.material_index
-                            .insert(resolved.material.index(), (slot, textures));
-                        (slot, textures)
-                    }
-                };
+            let (material_slot, textures) = match self.material_index.get(&material_handle.index())
+            {
+                Some(v) => *v,
+                None => {
+                    let textures = self.texture_set_for(gpu, material, image_assets);
+                    let mut gpu_material = material.to_gpu();
+                    // Only claim the slots that have a real image bound (others may still load).
+                    let bound = self
+                        .texture_sets
+                        .get(textures as usize)
+                        .and_then(Option::as_ref)
+                        .map_or(0, TextureSet::flags);
+                    gpu_material.flags[0] = (gpu_material.flags[0] & !TEXTURE_FLAGS) | bound;
+                    let slot = self.material_data.len() as u32;
+                    self.material_data.push(gpu_material);
+                    self.material_index
+                        .insert(material_handle.index(), (slot, textures));
+                    (slot, textures)
+                }
+            };
             let model = gt.matrix_relative_to(view.origin);
+            // A negative determinant mirrors the mesh and turns its front faces clockwise.
+            let mirrored = Mat3::from_mat4(model).determinant() < 0.0;
             let pipeline = if blend { PIPE_BLEND } else { 0 }
                 | if material.double_sided {
                     PIPE_DOUBLE
                 } else {
                     0
-                };
+                }
+                | if mirrored { PIPE_MIRROR } else { 0 };
             self.items.push(Item {
                 mesh: mesh_index,
                 pipeline,

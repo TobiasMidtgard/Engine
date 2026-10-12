@@ -119,7 +119,11 @@ impl Camera {
 pub enum MeshRef {
     Handle(Handle<Mesh>),
     Shape(Shape),
-    /// Path relative to the asset root, e.g. `"models/tree.glb#0"`.
+    /// Asset key: a file relative to the asset root, optionally with a `#label` naming one
+    /// mesh inside it (`"models/rock.glb"` for a single-mesh model,
+    /// `"models/tree.glb#Mesh0/Primitive0"`), or a key a mesh was registered under in code
+    /// (`Assets::insert_keyed`). Files start loading on first use; the entity appears once
+    /// the mesh has loaded.
     Asset(String),
 }
 
@@ -141,6 +145,8 @@ impl From<Handle<Mesh>> for MeshRef {
 pub enum MaterialRef {
     Handle(Handle<StandardMaterial>),
     Inline(StandardMaterial),
+    /// Asset key, like [`MeshRef::Asset`]: `"models/tree.glb#Material0"`, or a key a material
+    /// was registered under in code.
     Asset(String),
 }
 

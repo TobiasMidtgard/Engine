@@ -168,10 +168,7 @@ impl<'a> LoadContext<'a> {
 
     /// Lowercase extension of the file (`"glb"`).
     pub fn extension(&self) -> String {
-        self.path
-            .rsplit_once('.')
-            .map(|(_, e)| e.to_ascii_lowercase())
-            .unwrap_or_default()
+        file_extension(self.path)
     }
 
     /// Key for a sub-asset label (`Some("Mesh0")` → `"models/tree.glb#Mesh0"`) or the primary
@@ -261,21 +258,22 @@ impl<'a> LoadContext<'a> {
     }
 
     /// Read a companion file relative to this file's folder. The file becomes a dependency:
-    /// when it changes, this file is reloaded too.
+    /// when it changes (or appears, if it was missing), this file is reloaded too.
     pub fn read_file(&mut self, relative: &str) -> Result<Vec<u8>, String> {
         let key = self.resolve(relative);
         let full = self.root.join(&key);
-        let bytes = std::fs::read(&full).map_err(|e| {
+        // Record the dependency before reading so a load that failed because the file was
+        // missing is retried when the file shows up.
+        if !self.dependencies.contains(&key) {
+            self.dependencies.push(key);
+        }
+        std::fs::read(&full).map_err(|e| {
             format!(
                 "could not read '{}' (needed by {}): {e}",
                 full.display(),
                 self.path
             )
-        })?;
-        if !self.dependencies.contains(&key) {
-            self.dependencies.push(key);
-        }
-        Ok(bytes)
+        })
     }
 
     /// Keys added so far, with their asset type's short name.
@@ -301,11 +299,25 @@ pub struct AssetResolver<'w> {
 }
 
 impl AssetResolver<'_> {
-    /// Handle of the asset under `key`, reserved now if it is not loaded yet.
+    /// Handle of the asset under `key`, reserved now if it is not loaded yet. A key of another
+    /// file (`"textures/bark.png"` from a material file) starts loading that file.
     pub fn handle<T: Asset>(&mut self, key: &str) -> Handle<T> {
+        let key = normalize_key(key);
+        if let Some(h) = self
+            .world
+            .get_resource::<Assets<T>>()
+            .and_then(|a| a.by_key(&key))
+        {
+            return h;
+        }
+        self.world.get_resource_or_insert_with(Assets::<T>::default);
         self.world
-            .get_resource_or_insert_with(Assets::<T>::default)
-            .reserve_keyed(key)
+            .resource_scope(|world, mut assets: Mut<Assets<T>>| {
+                match world.get_resource::<AssetServer>() {
+                    Some(server) => server.load(&mut assets, &key),
+                    None => assets.reserve_keyed(&key),
+                }
+            })
     }
 
     /// The world, for anything else a builder needs.
@@ -349,7 +361,13 @@ struct Entry {
 struct LoadResult {
     path: String,
     generation: u64,
-    outcome: Result<LoadOutput, String>,
+    outcome: Result<LoadOutput, LoadError>,
+}
+
+/// Why a load failed, plus the companion files it tried to read.
+struct LoadError {
+    message: String,
+    dependencies: Vec<String>,
 }
 
 struct Watch {
@@ -527,16 +545,27 @@ impl AssetServer {
         let key = normalize_key(key);
         let file = asset_file(&key).to_string();
         let handle = assets.reserve_keyed(&key);
+        let kind = short_type_name_static::<T>();
         {
             let mut st = self.state.lock();
             st.requested
                 .entry(file.clone())
                 .or_default()
-                .insert((key.clone(), short_type_name_static::<T>()));
-            if st.entries.contains_key(&file) {
-                return handle;
+                .insert((key.clone(), kind));
+            match st.entries.get(&file) {
+                // Already loaded: a key it did not produce will never fill in.
+                Some(entry) if entry.status.is_loaded() => {
+                    if !entry
+                        .produced
+                        .iter()
+                        .any(|(k, t, _)| *k == key && *t == kind)
+                    {
+                        tracing::warn!("{}", missing_key_message(&key, kind, &file, entry));
+                    }
+                }
+                Some(_) => {}
+                None => self.start_load(&mut st, file),
             }
-            self.start_load(&mut st, file);
         }
         handle
     }
@@ -678,55 +707,43 @@ impl AssetServer {
             .is_some_and(|e| e.generation == generation)
     }
 
-    fn finish(&self, path: &str, result: Result<(Vec<Produced>, Vec<String>), String>) {
+    /// Record a finished load: status, produced keys and the files it read (also for failed
+    /// loads, so a file that failed because a companion file was missing reloads when that
+    /// file appears).
+    fn finish(&self, path: &str, result: Result<Vec<Produced>, String>, dependencies: Vec<String>) {
         let mut st = self.state.lock();
         let st = &mut *st;
+        for deps in st.dependents.values_mut() {
+            deps.remove(path);
+        }
+        for dep in &dependencies {
+            st.dependents
+                .entry(dep.clone())
+                .or_default()
+                .insert(path.to_string());
+        }
+        st.dependents.retain(|_, d| !d.is_empty());
+        let Some(entry) = st.entries.get_mut(path) else {
+            return;
+        };
+        entry.dependencies = dependencies;
         match result {
-            Ok((produced, dependencies)) => {
-                // Dependency bookkeeping.
-                for deps in st.dependents.values_mut() {
-                    deps.remove(path);
-                }
-                for dep in &dependencies {
-                    st.dependents
-                        .entry(dep.clone())
-                        .or_default()
-                        .insert(path.to_string());
-                }
-                st.dependents.retain(|_, d| !d.is_empty());
+            Ok(produced) => {
+                tracing::debug!("loaded {path} ({} assets)", produced.len());
+                entry.status = LoadStatus::Loaded;
+                entry.produced = produced;
                 // Keys someone asked for that this file does not provide.
                 if let Some(requested) = st.requested.get(path) {
                     for (key, kind) in requested {
-                        if !produced.iter().any(|(k, t, _)| k == key && t == kind) {
-                            let available: Vec<&str> = produced
-                                .iter()
-                                .filter(|(_, t, _)| t == kind)
-                                .map(|(k, _, _)| k.as_str())
-                                .collect();
-                            tracing::warn!(
-                                "'{key}' was requested as {kind} but {path} has no {kind} under \
-                                 that key. Available: {}",
-                                if available.is_empty() {
-                                    "none".to_string()
-                                } else {
-                                    available.join(", ")
-                                }
-                            );
+                        if !entry.produced.iter().any(|(k, t, _)| k == key && t == kind) {
+                            tracing::warn!("{}", missing_key_message(key, kind, path, entry));
                         }
                     }
-                }
-                tracing::debug!("loaded {path} ({} assets)", produced.len());
-                if let Some(entry) = st.entries.get_mut(path) {
-                    entry.status = LoadStatus::Loaded;
-                    entry.produced = produced;
-                    entry.dependencies = dependencies;
                 }
             }
             Err(e) => {
                 tracing::warn!("asset load failed: {e}");
-                if let Some(entry) = st.entries.get_mut(path) {
-                    entry.status = LoadStatus::Failed(e);
-                }
+                entry.status = LoadStatus::Failed(e);
             }
         }
     }
@@ -790,6 +807,24 @@ impl AssetServer {
             }
         }
     }
+}
+
+/// "'models/tree.glb#Mesh9' was requested as Mesh but …": for keys a file does not provide.
+fn missing_key_message(key: &str, kind: &str, path: &str, entry: &Entry) -> String {
+    let available: Vec<&str> = entry
+        .produced
+        .iter()
+        .filter(|(_, t, _)| *t == kind)
+        .map(|(k, _, _)| k.as_str())
+        .collect();
+    format!(
+        "'{key}' was requested as {kind} but {path} has no {kind} under that key. Available: {}",
+        if available.is_empty() {
+            "none".to_string()
+        } else {
+            available.join(", ")
+        }
+    )
 }
 
 fn entry_info(path: &str, e: &Entry) -> AssetInfo {
@@ -856,21 +891,27 @@ fn spawn_io(job: impl FnOnce() + Send + 'static) {
     }
 }
 
-fn run_loader(loader: &dyn AssetLoader, root: &Path, path: &str) -> Result<LoadOutput, String> {
+fn run_loader(loader: &dyn AssetLoader, root: &Path, path: &str) -> Result<LoadOutput, LoadError> {
     let full = root.join(path);
-    let bytes = std::fs::read(&full).map_err(|e| {
-        format!(
+    let bytes = std::fs::read(&full).map_err(|e| LoadError {
+        message: format!(
             "could not read '{}': {e}. Paths are relative to the asset root {}",
             full.display(),
             root.display()
-        )
+        ),
+        dependencies: Vec::new(),
     })?;
     let mut ctx = LoadContext::new(path, root);
-    match std::panic::catch_unwind(AssertUnwindSafe(|| loader.load(&bytes, &mut ctx))) {
-        Ok(Ok(())) => Ok(ctx.into_output()),
-        Ok(Err(e)) => Err(format!("{path}: {e}")),
-        Err(_) => Err(format!("{path}: the loader panicked (see the log)")),
-    }
+    let outcome = std::panic::catch_unwind(AssertUnwindSafe(|| loader.load(&bytes, &mut ctx)));
+    let message = match outcome {
+        Ok(Ok(())) => return Ok(ctx.into_output()),
+        Ok(Err(e)) => format!("{path}: {e}"),
+        Err(_) => format!("{path}: the loader panicked (see the log)"),
+    };
+    Err(LoadError {
+        message,
+        dependencies: ctx.dependencies,
+    })
 }
 
 /// Apply one finished load to the world. Stale results (superseded by a newer load of the
@@ -900,14 +941,17 @@ fn apply_result(world: &mut World, result: LoadResult) -> Result<(), String> {
                 .collect();
             world
                 .resource::<AssetServer>()
-                .finish(&path, Ok((produced, output.dependencies)));
+                .finish(&path, Ok(produced), output.dependencies);
             Ok(())
         }
-        Err(e) => {
+        Err(LoadError {
+            message,
+            dependencies,
+        }) => {
             world
                 .resource::<AssetServer>()
-                .finish(&path, Err(e.clone()));
-            Err(e)
+                .finish(&path, Err(message.clone()), dependencies);
+            Err(message)
         }
     }
 }
@@ -942,6 +986,14 @@ pub fn load_now(world: &mut World, path: &str) -> Result<(), String> {
             outcome,
         },
     )
+}
+
+/// Lowercase extension of the file name (`"models.v2/Tree.GLB"` → `"glb"`; `""` if none).
+fn file_extension(path: &str) -> String {
+    let name = path.rsplit(['/', '\\']).next().unwrap_or(path);
+    name.rsplit_once('.')
+        .map(|(_, e)| e.to_ascii_lowercase())
+        .unwrap_or_default()
 }
 
 /// The file part of an asset key: `"models/tree.glb#Mesh0"` → `"models/tree.glb"`.
@@ -1043,12 +1095,15 @@ fn register_api(app: &mut App) {
         "Load a file from the asset root (models .gltf/.glb, textures .png/.jpg/.hdr, …). \
          Returns its status and the asset keys it produced (use them in MeshRenderer, e.g. \
          {\"mesh\": {\"asset\": \"models/tree.glb#Mesh0/Primitive0\"}}). With wait=true the load \
-         finishes before the call returns.",
+         finishes before the call returns. A file that is already loaded is not loaded again \
+         (use assets.reload).",
         r#"{"path": "models/tree.glb", "wait": true}"#,
         |world, args| {
             let path = path_arg(&args)?.to_string();
             if args.get("wait").and_then(|w| w.as_bool()).unwrap_or(false) {
-                load_now(world, &path)?;
+                if !server(world)?.is_loaded(&path) {
+                    load_now(world, &path)?;
+                }
             } else {
                 server(world)?.load_path(&path);
             }
@@ -1316,6 +1371,59 @@ mod tests {
         assert!(run_until(&mut app, |a| text(a, "notes/whole.txt")
             .as_deref()
             == Some("part two")));
+
+        // A load that failed because its companion file was missing still records it, so
+        // the file is retried when the companion appears (hot reload or reload()).
+        std::fs::write(root.join("notes/early.txt"), "include: late.txt").unwrap();
+        assert!(load_now(&mut app.world, "notes/early.txt").is_err());
+        let info = app.world.resource::<AssetServer>().info("notes/early.txt");
+        assert_eq!(info.dependencies, vec!["notes/late.txt".to_string()]);
+        std::fs::write(root.join("notes/late.txt"), "finally").unwrap();
+        app.world.resource::<AssetServer>().reload("notes/late.txt");
+        assert!(run_until(&mut app, |a| text(a, "notes/early.txt")
+            .as_deref()
+            == Some("finally")));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// `*.link` → a `Link` to the `Text` whose key is the file's content (resolved on the main
+    /// thread through `add_with`).
+    struct Link(Handle<Text>);
+    impl Asset for Link {}
+    struct LinkLoader;
+    impl AssetLoader for LinkLoader {
+        fn extensions(&self) -> &[&str] {
+            &["link"]
+        }
+        fn load(&self, bytes: &[u8], ctx: &mut LoadContext) -> Result<(), String> {
+            let key = String::from_utf8_lossy(bytes).trim().to_string();
+            ctx.add_with(None, move |resolver| Link(resolver.handle::<Text>(&key)));
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn resolved_keys_of_other_files_start_loading() {
+        let root = temp_root("link");
+        std::fs::write(root.join("notes/target.txt"), "linked").unwrap();
+        std::fs::write(root.join("notes/a.link"), "notes/target.txt#upper").unwrap();
+        let mut app = test_app(&root, false);
+        app.register_asset_loader(LinkLoader);
+        load_now(&mut app.world, "notes/a.link").unwrap();
+        let link = {
+            let links = app.world.resource::<Assets<Link>>();
+            links.get(links.by_key("notes/a.link").unwrap()).unwrap().0
+        };
+        // The referenced file was not requested by anyone else; resolving its key loads it.
+        assert!(run_until(&mut app, |a| a
+            .world
+            .resource::<Assets<Text>>()
+            .get(link)
+            .is_some()));
+        assert_eq!(
+            app.world.resource::<Assets<Text>>().get(link).unwrap().0,
+            "LINKED"
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -1350,6 +1458,22 @@ mod tests {
         assert_eq!(
             w.resource::<Assets<Text>>().by_key(&key),
             Some(Handle::from_index(handle))
+        );
+        // Loading a loaded file again (even with wait) is a no-op: same value, same version.
+        let version = w
+            .resource::<Assets<Text>>()
+            .version(Handle::from_index(handle));
+        let again = call_api(
+            w,
+            "assets.load",
+            json!({"path": "notes/b.txt", "wait": true}),
+        )
+        .unwrap();
+        assert_eq!(again["status"], "loaded");
+        assert_eq!(
+            w.resource::<Assets<Text>>()
+                .version(Handle::from_index(handle)),
+            version
         );
         let list = call_api(w, "assets.list", json!({})).unwrap();
         assert_eq!(list["assets"][0]["path"], "notes/b.txt", "{list}");
@@ -1390,6 +1514,24 @@ mod tests {
                 == Some("v2")),
             "the change was not picked up"
         );
+        // A file that failed because its companion was missing loads once the companion is
+        // written.
+        std::fs::write(root.join("notes/needs.txt"), "include: later.txt").unwrap();
+        app.world
+            .resource::<AssetServer>()
+            .load_path("notes/needs.txt");
+        assert!(run_until(&mut app, |a| a
+            .world
+            .resource::<AssetServer>()
+            .status("notes/needs.txt")
+            .error()
+            .is_some()));
+        std::fs::write(root.join("notes/later.txt"), "arrived").unwrap();
+        assert!(
+            run_until(&mut app, |a| text(a, "notes/needs.txt").as_deref()
+                == Some("arrived")),
+            "the new companion file did not trigger a reload"
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -1406,6 +1548,8 @@ mod tests {
             "m/t.glb#Mesh0/Primitive1"
         );
         assert_eq!(asset_file("m/t.glb#Mesh0"), "m/t.glb");
+        assert_eq!(file_extension("models.v2/Tree.GLB"), "glb");
+        assert_eq!(file_extension("models.v2/README"), "");
     }
 
     #[test]

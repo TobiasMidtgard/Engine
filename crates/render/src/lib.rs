@@ -57,7 +57,7 @@ pub mod sky_feature;
 pub mod targets;
 pub mod texture;
 
-use engine_assets::{AssetAppExt, AssetPlugin, AssetServer, Assets};
+use engine_assets::{AssetAppExt, AssetPlugin, AssetServer, Assets, Handle};
 use engine_core::prelude::*;
 use serde_json::json;
 
@@ -281,18 +281,12 @@ pub fn resolve_mesh_renderers(
             MeshRef::Shape(shape) => {
                 Some(meshes.get_or_insert_keyed(&shape.key(), || shape.mesh()))
             }
-            MeshRef::Asset(key) => match &server {
-                Some(server) => Some(server.load(&mut meshes, key)),
-                None => meshes.by_key(key),
-            },
+            MeshRef::Asset(key) => keyed_handle(server.as_deref(), &mut meshes, key),
         };
         let material = match &renderer.material {
             MaterialRef::Handle(h) => Some(*h),
             MaterialRef::Inline(m) => Some(materials.get_or_insert_keyed(&m.key(), || *m)),
-            MaterialRef::Asset(key) => match &server {
-                Some(server) => Some(server.load(&mut materials, key)),
-                None => materials.by_key(key),
-            },
+            MaterialRef::Asset(key) => keyed_handle(server.as_deref(), &mut materials, key),
         };
         let (Some(mesh), Some(material)) = (mesh, material) else {
             continue;
@@ -301,6 +295,23 @@ pub fn resolve_mesh_renderers(
         if existing != Some(&resolved) {
             commands.entity(entity).insert(resolved);
         }
+    }
+}
+
+/// Handle for an asset key: the asset already registered under it (loaded from disk or
+/// inserted in code with `Assets::insert_keyed`), else a reserved handle while the server
+/// loads the file the key names.
+fn keyed_handle<T: engine_assets::Asset>(
+    server: Option<&AssetServer>,
+    assets: &mut Assets<T>,
+    key: &str,
+) -> Option<Handle<T>> {
+    if let Some(h) = assets.by_key(key) {
+        return Some(h);
+    }
+    match server {
+        Some(server) => Some(server.load(assets, key)),
+        None => None,
     }
 }
 
@@ -582,6 +593,41 @@ mod tests {
         app.update();
         assert!(app.world.get::<GltfSceneSpawner>(spawner).is_none());
         assert_eq!(app.world.get::<Children>(spawner).map(|c| c.len()), Some(1));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn in_memory_asset_keys_resolve_without_loading() {
+        // Keys registered in code (procedural meshes, shared materials) are not files: they
+        // resolve directly and must not start a load (which would fail with "no loader").
+        let root = temp_dir("memkeys");
+        let mut app = app_with_root(&root);
+        let mesh = app
+            .world
+            .resource_mut::<Assets<Mesh>>()
+            .insert_keyed("procedural/rock_3", Shape::Cuboid { size: [1.0; 3] }.mesh());
+        let material = app
+            .world
+            .resource_mut::<Assets<StandardMaterial>>()
+            .insert_keyed("materials/rock", StandardMaterial::hex(0x808080));
+        let e = app
+            .world
+            .spawn(MeshRenderer::new(
+                MeshRef::Asset("procedural/rock_3".into()),
+                MaterialRef::Asset("materials/rock".into()),
+            ))
+            .id();
+        app.update();
+        assert_eq!(
+            app.world.get::<ResolvedMesh>(e).copied(),
+            Some(ResolvedMesh { mesh, material })
+        );
+        let server = app.world.resource::<AssetServer>();
+        assert_eq!(
+            server.status("procedural/rock_3"),
+            engine_assets::LoadStatus::NotLoaded
+        );
+        assert!(server.list().is_empty(), "{:?}", server.list());
         let _ = std::fs::remove_dir_all(root);
     }
 

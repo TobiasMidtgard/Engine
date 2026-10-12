@@ -193,6 +193,13 @@ impl<T: Asset> Assets<T> {
         }
     }
 
+    /// The handle whose slot actually holds `h`'s value: `h` itself, or the target of a
+    /// forwarded reservation (see [`Assets::forward`]). GPU caches key by this so two handles
+    /// that name the same asset share one upload.
+    pub fn canonical(&self, h: Handle<T>) -> Handle<T> {
+        Handle::from_index(self.resolve(h) as u32)
+    }
+
     /// Make the empty reserved slot `from` an alias of `to`: from now on `from` reads and
     /// writes `to`'s value. Used when an asset was requested under two keys before loading and
     /// both turned out to name the same asset. Returns false (and does nothing) unless `from`
@@ -474,6 +481,8 @@ mod tests {
         a.insert_keyed("tree.glb#Mesh0", Thing(5));
         assert_eq!(a.get(alias).map(|t| t.0), Some(5));
         assert_eq!(a.version(alias), a.version(mesh));
+        assert_eq!(a.canonical(alias), mesh);
+        assert_eq!(a.canonical(mesh), mesh);
         assert_eq!(a.len(), 3);
         a.remove(mesh);
         assert!(a.get(alias).is_none());

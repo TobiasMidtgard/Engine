@@ -248,10 +248,15 @@ impl Image {
         out
     }
 
-    /// True if `data` (and every stored mip) has the size the dimensions require.
+    /// True if `data` (and every stored mip) has the size the dimensions require and there are
+    /// no more mips than a full chain has (the GPU rejects extra levels).
     pub fn is_valid(&self) -> bool {
         let bpp = self.format.bytes_per_pixel();
-        if self.data.len() != self.width as usize * self.height as usize * bpp {
+        if self.width == 0
+            || self.height == 0
+            || self.data.len() != self.width as usize * self.height as usize * bpp
+            || self.mips.len() >= self.full_mip_count() as usize
+        {
             return false;
         }
         self.mips.iter().enumerate().all(|(i, m)| {
@@ -472,6 +477,13 @@ mod tests {
         let chain = img.mip_chain(true);
         assert_eq!(chain.len(), 6);
         assert_eq!(chain.last().unwrap().len(), 4);
+        // An extra 1x1 level past the end of the chain would fail GPU validation (and with it
+        // the whole frame), so it makes the image invalid.
+        img2.mips.push(vec![0; 4]);
+        assert!(!img2.is_valid());
+        let mut empty = Image::new(1, 1, vec![0; 4], false);
+        empty.width = 0;
+        assert!(!empty.is_valid());
     }
 
     #[test]
