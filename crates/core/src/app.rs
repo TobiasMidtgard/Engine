@@ -196,12 +196,18 @@ impl App {
         self
     }
 
-    /// Add an already-boxed plugin. Adding the same plugin type twice logs a warning and is
-    /// ignored.
+    /// Add an already-boxed plugin. Adding the same plugin type twice keeps the first copy: the
+    /// second one, settings included, is ignored with a warning. To configure a plugin that a
+    /// group already adds, replace it in the group with [`PluginGroup::set`].
     pub fn add_boxed_plugin(&mut self, plugin: Box<dyn Plugin>) -> &mut Self {
         let name = plugin.name().to_string();
         if !self.plugin_names.insert(name.clone()) {
-            tracing::warn!("plugin {name} was added twice; ignoring the second copy");
+            tracing::warn!(
+                "plugin {name} was added twice; the second copy and its settings are ignored. \
+                 To configure a plugin that a group (like DefaultPlugins) already adds, replace \
+                 it in the group with `DefaultPlugins.set(...)`, or add your copy before the \
+                 group"
+            );
             return self;
         }
         tracing::debug!("building plugin {name}");
@@ -697,5 +703,101 @@ mod tests {
         let mut app = App::new();
         app.add_plugins(Group.disable::<CountPlugin>());
         assert!(!app.has_plugin::<CountPlugin>());
+    }
+
+    #[derive(Resource)]
+    struct Setting(u32);
+
+    /// A plugin with settings, like `AiBridgePlugin::listen(..)`.
+    struct SettingPlugin(u32);
+    impl Plugin for SettingPlugin {
+        fn build(&self, app: &mut App) {
+            app.insert_resource(Setting(self.0));
+        }
+    }
+
+    /// A group that includes `SettingPlugin` with its default settings, like `DefaultPlugins`.
+    struct SettingGroup;
+    impl PluginGroup for SettingGroup {
+        fn build(self) -> PluginGroupBuilder {
+            PluginGroupBuilder::start()
+                .add(CountPlugin)
+                .add(SettingPlugin(1))
+        }
+    }
+
+    /// Messages of the warnings logged on this thread while `f` runs.
+    fn warnings_during(f: impl FnOnce()) -> Vec<String> {
+        use std::sync::{Arc, Mutex};
+        use tracing::field::{Field, Visit};
+        use tracing_subscriber::layer::{Context, SubscriberExt};
+
+        struct Message<'a>(&'a mut String);
+        impl Visit for Message<'_> {
+            fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+                if field.name() == "message" {
+                    *self.0 = format!("{value:?}");
+                }
+            }
+        }
+
+        #[derive(Clone, Default)]
+        struct Warnings(Arc<Mutex<Vec<String>>>);
+        impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for Warnings {
+            fn on_event(&self, event: &tracing::Event<'_>, _: Context<'_, S>) {
+                if *event.metadata().level() == tracing::Level::WARN {
+                    let mut text = String::new();
+                    event.record(&mut Message(&mut text));
+                    self.0.lock().unwrap().push(text);
+                }
+            }
+        }
+
+        let warnings = Warnings::default();
+        let subscriber = tracing_subscriber::registry().with(warnings.clone());
+        tracing::subscriber::with_default(subscriber, f);
+        warnings.0.lock().unwrap().clone()
+    }
+
+    #[test]
+    fn group_plugins_are_configured_with_set() {
+        let mut app = App::new();
+        app.add_plugins(SettingGroup.set(SettingPlugin(2)));
+        assert_eq!(app.world.resource::<Setting>().0, 2);
+        assert_eq!(
+            app.plugin_names()
+                .iter()
+                .filter(|n| n.ends_with("SettingPlugin"))
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn adding_a_group_plugin_again_says_how_to_configure_it() {
+        let mut app = App::new();
+        app.add_plugins(SettingGroup);
+        let warnings = warnings_during(|| {
+            app.add_plugins(SettingPlugin(2));
+        });
+        assert_eq!(
+            app.world.resource::<Setting>().0,
+            1,
+            "the second copy is ignored"
+        );
+        let [warning] = warnings.as_slice() else {
+            panic!("expected one warning, got {warnings:?}");
+        };
+        for needed in [
+            "SettingPlugin",
+            "settings are ignored",
+            "DefaultPlugins.set(",
+            "before the group",
+        ] {
+            assert!(
+                warning.contains(needed),
+                "the warning should mention {needed:?}: {warning}"
+            );
+        }
     }
 }

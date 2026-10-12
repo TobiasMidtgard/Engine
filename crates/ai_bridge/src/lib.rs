@@ -17,11 +17,17 @@
 //!
 //! ## Enabling
 //!
-//! Add [`AiBridgePlugin`]. The TCP server starts when the `ENGINE_BRIDGE` environment variable is
-//! set (`ENGINE_BRIDGE=127.0.0.1:7878`, `ENGINE_BRIDGE=1` for that default, `ENGINE_BRIDGE=0` or
+//! `engine::DefaultPlugins` already includes [`AiBridgePlugin`] (as `AiBridgePlugin::default()`),
+//! so games built on it have the bridge; apps without `DefaultPlugins` add the plugin
+//! themselves. The TCP server starts when the `ENGINE_BRIDGE` environment variable is set
+//! (`ENGINE_BRIDGE=127.0.0.1:7878`, `ENGINE_BRIDGE=1` for that default, `ENGINE_BRIDGE=0` or
 //! `127.0.0.1:0` for a free port) or when the plugin settings say so
-//! ([`AiBridgePlugin::listen`]). The bound address is stored in [`BridgeInfo`] and logged.
-//! It binds to localhost unless told otherwise. If `ENGINE_BRIDGE_TOKEN` (or
+//! ([`AiBridgePlugin::listen`]). To change the settings of the copy in `DefaultPlugins`, replace
+//! it: `DefaultPlugins.set(AiBridgePlugin::listen("127.0.0.1:0"))`. A second `AiBridgePlugin`
+//! added after `DefaultPlugins` is ignored, settings included (the app logs a warning).
+//!
+//! The bound address is stored in [`BridgeInfo`] and logged. It binds to localhost unless
+//! told otherwise. If `ENGINE_BRIDGE_TOKEN` (or
 //! [`AiBridgePlugin::token`]) is set, every TCP request must carry `"token": "..."` or the
 //! connection must first call `auth`.
 //!
@@ -85,10 +91,27 @@ const ORPHAN_EXIT_GRACE_SECS: u64 = 15;
 
 /// Serves the engine API to AI agents and tools. See the [crate docs](crate).
 ///
+/// `engine::DefaultPlugins` already includes `AiBridgePlugin::default()`, which is off unless
+/// `ENGINE_BRIDGE` is set (the usual choice for games). To change its settings, replace the
+/// group's copy; a second `AiBridgePlugin` added after `DefaultPlugins` is ignored:
+///
+/// ```ignore
+/// use engine::ai_bridge::AiBridgePlugin;
+/// use engine::prelude::*;
+/// // Always on, on a free port (read BridgeInfo::address to find it):
+/// App::new().add_plugins(DefaultPlugins.set(AiBridgePlugin::listen("127.0.0.1:0")));
+/// // Always on, and TCP clients must send a token:
+/// App::new().add_plugins(
+///     DefaultPlugins.set(AiBridgePlugin::listen("127.0.0.1:0").with_token("secret")),
+/// );
+/// ```
+///
+/// Apps that don't use `DefaultPlugins` add the plugin themselves:
+///
 /// ```no_run
 /// # use engine_core::prelude::*;
 /// # use engine_ai_bridge::AiBridgePlugin;
-/// // Off unless ENGINE_BRIDGE is set (the usual choice for games):
+/// // Off unless ENGINE_BRIDGE is set:
 /// App::new().add_plugins(AiBridgePlugin::default());
 /// // Always on, on a free port (read BridgeInfo::address to find it):
 /// App::new().add_plugins(AiBridgePlugin::listen("127.0.0.1:0"));
