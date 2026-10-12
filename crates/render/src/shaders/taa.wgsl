@@ -49,11 +49,12 @@ fn ycocg_to_rgb(c: vec3<f32>) -> vec3<f32> {
 
 fn load_current(px: vec2<i32>, size: vec2<i32>) -> vec3<f32> {
     let c = textureLoad(current_tex, clamp(px, vec2<i32>(0), size - 1), 0).rgb;
-    // NaN and infinity guard: one bad pixel must never spread through the history.
-    if (any(c != c) || any(c > vec3<f32>(65000.0))) {
+    // NaN guard: one bad pixel must never spread through the history. Values past the half-float
+    // range (the sun's disk, a lamp's core) are clamped, not dropped, so they still bloom.
+    if (any(c != c)) {
         return vec3<f32>(0.0);
     }
-    return max(c, vec3<f32>(0.0));
+    return clamp(c, vec3<f32>(0.0), vec3<f32>(65000.0));
 }
 
 // Screen motion (uv, current - previous) of the surface at pixel `px`.

@@ -82,8 +82,9 @@ A module is one crate (`crates/<name>`, package `engine_<name>`) with one `Plugi
    `app.register_api("fire.ignite", "Start a fire", r#"{"at": [0,0,0]}"#, |world, args| ...)`.
    The AI bridge, console and scripts call these; nothing else is needed to make a feature
    AI-controllable.
-4. **Render through `RenderFeature`.** Implement the trait (prepare/draw/draw_shadow/
-   draw_environment/overlay), add it with `app.add_render_feature(...)`. Compose shaders with
+4. **Render through `RenderFeature`.** Implement the trait (prepare/draw/draw_prepass/
+   draw_shadow/draw_environment/overlay), add it with `app.add_render_feature(...)`. Opaque
+   geometry also implements `draw_prepass` so ambient occlusion and anti-aliasing see it. Compose shaders with
    `GpuShared::shader(label, src, with_frame)`; use `shade_surface`, `apply_fog`,
    `shadow_factor`, `wind_offset` from `lib_frame.wgsl` so lighting matches everything else.
    Output **pre-exposed** radiance (`pre_expose`). Add a unit test that runs
