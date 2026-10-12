@@ -323,6 +323,32 @@ pub fn rune(rng: &mut Rng) -> Vec<(Vec2, Vec2)> {
     strokes
 }
 
+/// A sigil: a rune inside a ring with four ticks around it, `radius` meters to the ring,
+/// centered on the origin (strokes for [`strokes_mesh`]).
+pub fn sigil(rng: &mut Rng, radius: f32) -> Vec<(Vec2, Vec2)> {
+    use std::f32::consts::{FRAC_PI_2, FRAC_PI_4, TAU};
+    let n = 32;
+    let mut strokes: Vec<(Vec2, Vec2)> = (0..n)
+        .map(|i| {
+            let a0 = i as f32 / n as f32 * TAU;
+            let a1 = (i + 1) as f32 / n as f32 * TAU;
+            (Vec2::from_angle(a0) * radius, Vec2::from_angle(a1) * radius)
+        })
+        .collect();
+    for k in 0..4 {
+        let d = Vec2::from_angle(k as f32 * FRAC_PI_2 + FRAC_PI_4);
+        strokes.push((d * radius * 1.14, d * radius * 1.34));
+    }
+    let k = radius * 0.85;
+    let mid = Vec2::new(0.5, 0.7);
+    strokes.extend(
+        rune(rng)
+            .into_iter()
+            .map(|(a, b)| ((a - mid) * k, (b - mid) * k)),
+    );
+    strokes
+}
+
 /// Flat stroke quads on the XY plane facing +Z, `width` wide (meters, in the units of the
 /// strokes), ends extended so strokes join cleanly.
 pub fn strokes_mesh(strokes: &[(Vec2, Vec2)], width: f32) -> Mesh {

@@ -7,7 +7,7 @@ use super::super::meshes::nature::{
     RockShape, grass_tuft, lichen, moss_cap, moss_cushion, pebble, reeds, rock,
 };
 use super::super::meshes::stone::{Stone, bend_to_ring, ring_courses, rune_line};
-use super::super::meshes::{Outline, Profile, grime, moved, noise1, paint, revolve, warp};
+use super::super::meshes::{Outline, Profile, Slab, grime, moved, noise1, paint, revolve, warp};
 use super::super::{Prop, Surface};
 use super::{dress, shade};
 
@@ -166,6 +166,15 @@ pub fn fountain() -> Prop {
         }
     });
     carved.merge(&m);
+    // Pilasters around the basin wall, between the base and rim moldings.
+    for k in 0..10 {
+        let a = (k as f32 + 0.5) / 10.0 * std::f32::consts::TAU + 0.1;
+        let mut p = Slab::new(Outline::rect(0.04, 0.075), 0.2, 0.43, 0.012).mesh();
+        dress(&mut p, 40 + k, 1.2);
+        grime(&mut p, 0.2, 0.08, 0.7);
+        let d = Vec3::new(a.cos(), 0.0, a.sin());
+        carved.merge(&moved(p, d * 2.415, Quat::from_rotation_y(-a)));
+    }
 
     // Baluster column and the lobed upper bowl.
     let column = Profile::new()

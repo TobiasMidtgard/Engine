@@ -139,17 +139,17 @@ pub fn footstep_patches() -> Prop {
     let mut snow = heightfield(Vec2::new(x0, -half), Vec2::new(x0 + 2.0, half), 0.02, |p| {
         // Wind-carved drifts: ridges stretched across the wind, softened by noise.
         let q = Vec2::new(p.x * 0.45 + p.y * 0.2, p.y * 1.6);
-        let ridge = 1.0 - n2(q, 2.2, 21, 3).abs() * 2.0;
-        let drift = ridge.max(-1.0) * 0.006 + n2(p, 1.1, 23, 2) * 0.004;
+        let ridge = 1.0 - n2(q, 3.0, 21, 3).abs() * 2.0;
+        let drift = ridge.max(-1.0) * 0.009 + n2(p, 1.1, 23, 2) * 0.004;
         let grain = n2(p, 9.0, 22, 2) * 0.0015;
         let bank = (1.0 - edge(p, x0)) * 0.008;
-        (0.066 + drift + grain + bank).min(0.08)
+        (0.064 + drift + grain + bank).min(0.08)
     });
     paint(&mut snow, |p, n| {
         // Blue in the hollows and on slopes away from the light, white on the crests.
-        let crest = smoothstep(0.06, 0.076, p.y);
-        let slope = smoothstep(0.9, 0.995, n.y);
-        Vec3::new(0.8 + 0.2 * crest, 0.86 + 0.14 * crest, 1.0) * (0.8 + 0.2 * slope)
+        let crest = smoothstep(0.055, 0.076, p.y);
+        let slope = smoothstep(0.88, 0.995, n.y);
+        Vec3::new(0.7 + 0.3 * crest, 0.78 + 0.22 * crest, 0.95) * (0.75 + 0.25 * slope)
     });
     prop.push(Surface::Snow, snow);
 

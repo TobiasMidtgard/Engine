@@ -5,7 +5,7 @@ use engine_core::math::{Quat, Rng, Vec2, Vec3};
 use engine_render::Mesh;
 
 use super::super::meshes::nature::{RockShape, crystal, grass_tuft, moss_cap, moss_cushion, rock};
-use super::super::meshes::stone::{rune, strokes_mesh};
+use super::super::meshes::stone::{sigil, strokes_mesh};
 use super::super::meshes::{
     Outline, Profile, Slab, block, grime, moved, noise_warp, paint, revolve, sweep, tube,
 };
@@ -56,21 +56,24 @@ pub fn caster_pedestal() -> Prop {
     grime(&mut die, 0.14, 0.25, 0.7);
     carved.merge(&die);
 
-    // A rune panel on each face of the die.
+    // A framed panel with a glowing sigil on each face of the die.
     for k in 0..4 {
         let rot = Quat::from_rotation_y(k as f32 * std::f32::consts::FRAC_PI_2);
         let mut panel = block(Vec3::new(0.38, 0.36, 0.03), 0.01);
         dress(&mut panel, 10 + k, 0.8);
         dark.merge(&moved(panel, rot * Vec3::new(0.0, 0.665, half), rot));
-        let strokes: Vec<(Vec2, Vec2)> = rune(&mut rng)
-            .into_iter()
-            .map(|(a, b)| {
-                let f = |p: Vec2| (p - Vec2::new(0.5, 0.7)) * 0.19;
-                (f(a), f(b))
-            })
-            .collect();
-        let g = strokes_mesh(&strokes, 0.028);
-        runes.merge(&moved(g, rot * Vec3::new(0.0, 0.665, half + 0.017), rot));
+        for (size, at) in [
+            (Vec3::new(0.46, 0.035, 0.04), Vec3::new(0.0, 0.8625, 0.0)),
+            (Vec3::new(0.46, 0.035, 0.04), Vec3::new(0.0, 0.4675, 0.0)),
+            (Vec3::new(0.035, 0.36, 0.04), Vec3::new(-0.2125, 0.665, 0.0)),
+            (Vec3::new(0.035, 0.36, 0.04), Vec3::new(0.2125, 0.665, 0.0)),
+        ] {
+            let mut m = block(size, 0.008);
+            dress(&mut m, rng.next_u64(), 1.0);
+            carved.merge(&moved(m, rot * (at + Vec3::Z * half), rot));
+        }
+        let g = strokes_mesh(&sigil(&mut rng, 0.12), 0.016);
+        runes.merge(&moved(g, rot * Vec3::new(0.0, 0.665, half + 0.0165), rot));
     }
 
     // Bronze cradle: a dish and three claws reaching up.

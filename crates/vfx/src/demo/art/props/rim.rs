@@ -149,13 +149,13 @@ pub fn shrubs(variant: u64) -> Prop {
     let mut grass = Mesh::default();
     let mut stones = Mesh::default();
     let spots = [
-        (Vec3::new(-0.9, 0.0, 0.0), 0.85, 1.25),
-        (Vec3::new(0.05, 0.0, 0.55), 0.72, 1.05),
-        (Vec3::new(0.95, 0.0, -0.1), 0.6, 0.85),
+        (Vec3::new(-1.2, 0.0, 0.0), 1.15, 1.7),
+        (Vec3::new(0.1, 0.0, 0.75), 0.95, 1.4),
+        (Vec3::new(1.3, 0.0, -0.15), 0.8, 1.15),
     ];
     for (k, (at, radius, height)) in spots.iter().enumerate() {
-        let leaves_n = (2200.0 * radius * radius) as u32;
-        let (w, l) = bush(rng.next_u64() + k as u64, *radius, *height, leaves_n, 0.075);
+        let leaves_n = (1650.0 * radius * radius) as u32;
+        let (w, l) = bush(rng.next_u64() + k as u64, *radius, *height, leaves_n, 0.1);
         let rot = Quat::from_rotation_y(rng.range(0.0, 6.3));
         wood.merge(&moved(w, *at, rot));
         leaves.merge(&moved(l, *at, rot));

@@ -192,10 +192,11 @@ pub fn bush(seed: u64, radius: f32, height: f32, leaves: u32, leaf_len: f32) -> 
     };
     // Twigs to hang leaf clusters on.
     let mut twigs: Vec<(Vec3, Vec3)> = Vec::new();
-    let stems = rng.range_i32(7, 11);
+    let stems = rng.range_i32(10, 15);
     for s in 0..stems {
         let a = s as f32 / stems as f32 * std::f32::consts::TAU + rng.range(-0.3, 0.3);
-        let up = rng.range(0.35, 0.95);
+        // Some stems arch out low so the bush is leafy down to the ground.
+        let up = rng.range(-0.2, 0.95);
         let dir = Vec3::new(a.cos() * (1.0 - up * 0.6), up, a.sin() * (1.0 - up * 0.6)).normalize();
         let tip = center + canopy(dir) * rng.range(0.75, 0.95);
         let base = Vec3::new(rng.range(-0.06, 0.06), 0.0, rng.range(-0.06, 0.06));
@@ -235,7 +236,8 @@ pub fn bush(seed: u64, radius: f32, height: f32, leaves: u32, leaf_len: f32) -> 
         let hue = rng.range(-1.0, 1.0);
         for _ in 0..per {
             let t = rng.range(0.25, 1.0).sqrt();
-            let at = from.lerp(*to, t) + rng.unit_vector() * leaf_len * 0.9;
+            let mut at = from.lerp(*to, t) + rng.unit_vector() * leaf_len * 0.9;
+            at.y = at.y.max(leaf_len * 0.6);
             let out = (at - center).normalize_or(Vec3::Y);
             let facing = (out + Vec3::Y * 0.9 + rng.unit_vector() * 0.8).normalize_or(Vec3::Y);
             let along = (out + rng.unit_vector() * 0.9).normalize_or(Vec3::X);

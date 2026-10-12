@@ -6,7 +6,7 @@ use engine_render::Mesh;
 
 use super::super::meshes::metal::rivet;
 use super::super::meshes::nature::{crystal, moss_cushion};
-use super::super::meshes::stone::{rune, rune_line, strokes_mesh};
+use super::super::meshes::stone::{rune_line, sigil, strokes_mesh};
 use super::super::meshes::{
     Outline, Profile, Slab, block, grime, moved, noise_warp, paint, sweep, tube,
 };
@@ -82,19 +82,8 @@ pub fn obelisk(seed: u64) -> Prop {
     carved.merge(&m);
     for k in 0..4 {
         let rot = Quat::from_rotation_y(k as f32 * std::f32::consts::FRAC_PI_2);
-        let strokes: Vec<(Vec2, Vec2)> = rune(&mut rng)
-            .into_iter()
-            .chain([
-                (Vec2::new(-0.3, -0.2), Vec2::new(0.5, -0.45)),
-                (Vec2::new(0.5, -0.45), Vec2::new(1.3, -0.2)),
-            ])
-            .map(|(a, b)| {
-                let f = |p: Vec2| (p - Vec2::new(0.5, 0.7)) * 0.2;
-                (f(a), f(b))
-            })
-            .collect();
-        let g = strokes_mesh(&strokes, 0.03);
-        runes.merge(&moved(g, rot * Vec3::new(0.0, 0.79, half + 0.002), rot));
+        let g = strokes_mesh(&sigil(&mut rng, 0.12), 0.02);
+        runes.merge(&moved(g, rot * Vec3::new(0.0, 0.775, half + 0.002), rot));
     }
 
     // Shaft: three tapering drums.
