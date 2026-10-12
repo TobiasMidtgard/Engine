@@ -20,7 +20,7 @@ use engine_world::{
 
 pub use climate::Climate;
 pub use cloudmap::CloudMap;
-pub use lightning::{ActiveBolts, Lightning, LightningStrike};
+pub use lightning::{ActiveBolts, Lightning};
 pub use presets::{Regime, WeatherPreset};
 pub use render::{CloudSettings, GroundEffectSettings, PrecipitationSettings};
 pub use sim::{ForecastStep, Weather, WeatherSim};
@@ -69,7 +69,6 @@ impl Plugin for WeatherPlugin {
             .init_resource::<ActiveBolts>()
             .init_resource::<lightning::StrikeRequests>()
             .init_resource::<CloudMap>()
-            .add_message::<LightningStrike>()
             .register_resource::<Weather>(
                 "What the weather should do: preset (clear, partly_cloudy, overcast, showers, rain, storm, \
                  snow, blizzard, fog), transition_s (game seconds for a front to arrive), auto \

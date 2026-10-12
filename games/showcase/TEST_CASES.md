@@ -32,10 +32,10 @@ are built, nothing simulates yet) · ⬜ not visible yet
 | 9 | Water splashes (particles) | `lake` | Particles and magic effects | ⬜ |
 | 10 | Fire that spreads through burnable things like grass | `field`, `fire_front`, `fire_trees`, `fire_campfire`, `fire_night` | Fire and smoke | ✅ burning meadow that spreads downwind and regrows |
 | 11 | Smoke that reacts to bullets, wind currents and explosions | `range` | Fire and smoke | 🟨 firing lanes, fans |
-| 12 | True volumetric clouds with fog | every outdoor viewpoint, `stratosphere` | Weather, wind and clouds | ⬜ flat cloud layer only |
-| 13 | Realistic rain that changes the ground (wet, puddles, mud) | `footsteps`, `plaza` | Weather, wind and clouds | ⬜ (renderer can already darken wet surfaces) |
-| 14 | Temperature, weather and wind simulation; dynamic weather that interacts with the world | `weather` hill | Weather, wind and clouds | 🟨 station instruments |
-| 15 | Snow that settles on the ground | `footsteps` snow strip, mountains | Weather, wind and clouds | 🟨 painted snow only |
+| 12 | True volumetric clouds with fog | every outdoor viewpoint, `weather_storm`, `stratosphere` | Weather, wind and clouds | ✅ volumetric clouds over the whole valley (fair-weather heaps, storm towers, overcast, fog) that drift with the wind and light up in lightning |
+| 13 | Realistic rain that changes the ground (wet, puddles, mud) | `weather_rain`, `footsteps`, `plaza` | Weather, wind and clouds | ✅ rain and splashes; the station yard gets wet and fills puddles with ripples (`weather_rain`), other wet surfaces darken |
+| 14 | Temperature, weather and wind simulation; dynamic weather that interacts with the world | `weather`, `weather_station` | Weather, wind and clouds | ✅ moving fronts, temperature and wind; the station's wind sock, anemometer, thermometer, rain gauge and snow stake follow the live weather |
+| 15 | Snow that settles on the ground | `weather_snow`, `footsteps` snow strip, mountains | Weather, wind and clouds | ✅ snow falls and piles up on the yard and the grass (`weather_snow`) |
 
 ## Ground and footsteps
 

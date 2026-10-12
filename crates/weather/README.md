@@ -65,7 +65,8 @@ open. Footsteps, fire and vehicle grip can read the same grid.
 (`weather.lightning`). Bolts are jagged, branching channels with a return-stroke flicker; the
 flash lights the clouds from inside and the ground. Strikes hit the tallest thing near the
 spot, send `NoiseEvent` (thunder for AI), `WorldImpulse` and, where the ground is dry,
-`IgniteRequest`, and emit a `LightningStrike` message for sound and gameplay.
+`IgniteRequest`, and emit the world's `LightningStrike` message for sound and gameplay. The
+drawn main channel is `LightningStrike::path`, so thunder rolls along the bolt you see.
 
 **Day and night.** A clock and calendar (`Sky`) for a place on a planet (`Climate`: latitude,
 axial tilt, year length) drive the sun and moon `DirectionalLight`s: real sun paths through
