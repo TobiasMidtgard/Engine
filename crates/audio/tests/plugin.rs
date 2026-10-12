@@ -527,7 +527,12 @@ fn a_waterfall_roars_instead_of_dripping() {
     let rms_at = |a: f32, b: f32| rms(&x[(a * 96_000.0) as usize..(b * 96_000.0) as usize]);
     let roaring = rms_at(1.5, 2.8);
     assert!(roaring > 0.005, "falls too quiet: {roaring}");
-    let quarter = [rms_at(1.5, 1.8), rms_at(1.8, 2.1), rms_at(2.1, 2.4), rms_at(2.4, 2.7)];
+    let quarter = [
+        rms_at(1.5, 1.8),
+        rms_at(1.8, 2.1),
+        rms_at(2.1, 2.4),
+        rms_at(2.4, 2.7),
+    ];
     let (lo, hi) = quarter
         .iter()
         .fold((f32::MAX, 0.0f32), |(a, b), v| (a.min(*v), b.max(*v)));
