@@ -120,17 +120,31 @@ fn a_meadow_covers_the_ground_with_blades() {
 #[test]
 fn wind_moves_the_blades() {
     // Normals only: noisy lighting effects change every frame without TAA, the blades' shapes
-    // change only when they move.
+    // change only when they move. Compared in 16-pixel blocks: a calm meadow's idle quiver
+    // shifts single blades by a pixel, gusts sweeping through change how whole patches lean.
+    const BLOCK: u32 = 16;
+    let block_mean = |img: &RgbaImage, bx: u32, by: u32| {
+        let mut sum = [0.0f32; 3];
+        for y in by * BLOCK..(by + 1) * BLOCK {
+            for x in bx * BLOCK..(bx + 1) * BLOCK {
+                let p = img.get_pixel(x, y);
+                for c in 0..3 {
+                    sum[c] += p[c] as f32;
+                }
+            }
+        }
+        sum.map(|s| s / (BLOCK * BLOCK) as f32)
+    };
     let diff = |wind: Vec3, name: &str| {
         let mut app = meadow_app_with(wind, |s| s.debug_view = DebugView::Normals);
         let a = render(&mut app, &format!("{name}_a"), 6)?;
         let b = render(&mut app, &format!("{name}_b"), 10)?;
         let (mut sum, mut n) = (0.0, 0.0);
-        for y in H / 2..H {
-            for x in 0..W {
-                let (p, q) = (a.get_pixel(x, y), b.get_pixel(x, y));
+        for by in H / 2 / BLOCK..H / BLOCK {
+            for bx in 0..W / BLOCK {
+                let (p, q) = (block_mean(&a, bx, by), block_mean(&b, bx, by));
                 for c in 0..3 {
-                    sum += (p[c] as f32 - q[c] as f32).abs();
+                    sum += (p[c] - q[c]).abs();
                 }
                 n += 3.0;
             }
