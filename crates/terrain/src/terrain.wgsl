@@ -588,14 +588,23 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     col[M_SAND] = planet.colors[C_SAND].rgb;
     // Rock on steep ground and bare alpine heights; scree below it. Coarse patches average
     // slopes out, so their thresholds are lower.
-    let rock_slope = planet.params.y * (1.0 - 0.45 * smoothstep(4.0, 150.0, in.lod.x));
+    // Grass and woods hold steeper ground below the tree line (rock shows on cliffs there).
+    // Between grass slopes and cliffs, mountainsides are a patchwork: outcrops on spurs,
+    // grass and scree in the hollows between them.
+    let veg_hold = vegetation * (0.03 + 0.06 * (1.0 - smoothstep(1400.0, 2600.0, altitude + (variety - 0.5) * 600.0)));
+    let outcrop = (macro_v - 0.5) * 0.4 * macro_fade + (mid_v - 0.5) * 0.12 * clump_fade
+        + (far_n.y - 0.5) * 0.3 * far - convex * 0.06;
+    let rock_slope = planet.params.y * (1.0 - 0.45 * smoothstep(4.0, 150.0, in.lod.x)) + veg_hold + outcrop;
     let alpine = smoothstep(2100.0, 3000.0, altitude + (variety - 0.5) * 800.0) * vegetation;
     // Sharp crests are bare rock even where their top is level, and mountain crests are stony;
     // rounded hills stay green.
     let sharp = smoothstep(0.5, 0.85, convex);
     let stony_crest = smoothstep(0.3, 0.6, convex) * smoothstep(600.0, 1400.0, altitude + (variety - 0.5) * 400.0);
     let rock = saturate(smoothstep(rock_slope - 0.08, rock_slope + 0.05, slope + (detail_n - 0.5) * 0.12 * fine_fade) + alpine * 0.8 + sharp * 0.8);
-    let rock_col = mix(planet.colors[C_ROCK].rgb * (0.85 + 0.3 * variety), planet.colors[C_DARK].rgb, mare);
+    // Weathered rock: warmer, iron-stained faces next to gray ones, water-darkened gullies.
+    let stain = saturate((patch_v - 0.55) * 4.0) * macro_fade;
+    let rock_col = mix(planet.colors[C_ROCK].rgb * (0.85 + 0.3 * variety), planet.colors[C_DARK].rgb, mare)
+        * mix(vec3<f32>(1.0), vec3<f32>(1.08, 0.98, 0.86), stain * vegetation) * (1.0 - gully * 0.3);
     // Layered rock: bands along altitude, warped so they bend with the land, at 37 m and 10 m.
     let strata_h = altitude + (macro_v - 0.5) * 60.0 * macro_fade + (mid_v - 0.5) * 6.0 * clump_fade;
     let strata = sin(strata_h * 0.17) * 0.6 * (1.0 - smoothstep(4.0, 16.0, pixel))
