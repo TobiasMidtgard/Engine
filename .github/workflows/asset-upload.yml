@@ -11,8 +11,9 @@ on:
 permissions:
   contents: write
 
+# Each upload branch is unique, so a per-branch group never cancels another thread's upload.
 concurrency:
-  group: asset-mirror
+  group: asset-mirror-${{ github.ref }}
   cancel-in-progress: false
 
 env:

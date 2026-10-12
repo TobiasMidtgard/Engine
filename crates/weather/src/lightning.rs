@@ -6,7 +6,8 @@ use engine_core::prelude::*;
 use engine_render::PointLight;
 use engine_world::physics::{PhysicsQueries, QueryFilter};
 use engine_world::{
-    FocusPoints, Ground, IgniteRequest, NoiseEvent, SurfaceLayers, WeatherState, WorldImpulse,
+    FocusPoints, Ground, IgniteRequest, LightningStrike, NoiseEvent, SurfaceLayers, WeatherState,
+    WorldImpulse,
 };
 
 use crate::sim::WeatherSim;
@@ -39,16 +40,6 @@ impl Default for Lightning {
     }
 }
 
-/// Sent for every flash. `ground` is where it hit (None for a flash inside the cloud).
-#[derive(Message, Debug, Clone, Copy)]
-pub struct LightningStrike {
-    /// Where the bolt leaves the cloud.
-    pub top: DVec3,
-    pub ground: Option<DVec3>,
-    /// Peak brightness relative to an average flash.
-    pub intensity: f32,
-}
-
 /// One segment of a bolt, world space.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct BoltSegment {
@@ -64,8 +55,10 @@ pub struct BoltSegment {
 #[derive(Debug, Clone)]
 pub struct Bolt {
     pub segments: Vec<BoltSegment>,
-    /// Center of the flash's light.
+    /// Center of the flash's light on the ground and things around it.
     pub light_at: DVec3,
+    /// Where the flash lights the cloud from inside (the channel spreads out there).
+    pub cloud_at: DVec3,
     pub age_s: f32,
     pub life_s: f32,
     pub intensity: f32,
@@ -102,11 +95,11 @@ pub struct ActiveBolts {
 }
 
 impl ActiveBolts {
-    /// The brightest flash right now: (where, brightness).
+    /// The brightest flash right now: (where it lights the cloud, brightness).
     pub fn brightest(&self) -> Option<(DVec3, f32)> {
         self.bolts
             .iter()
-            .map(|b| (b.light_at, b.brightness()))
+            .map(|b| (b.cloud_at, b.brightness()))
             .max_by(|a, b| a.1.total_cmp(&b.1))
     }
 }
@@ -115,12 +108,60 @@ impl ActiveBolts {
 #[derive(Resource, Debug, Clone, Default)]
 pub struct StrikeRequests(pub Vec<DVec3>);
 
-/// Build a jagged bolt from `top` down to `bottom`, with branches.
-pub fn build_bolt(top: DVec3, bottom: DVec3, rng: &mut Rng) -> Vec<BoltSegment> {
+/// Detail of the drawn main channel: `2^7` segments of [`LightningStrike::path`].
+const BOLT_DETAIL: u32 = 7;
+
+/// The bolt for a strike: its main channel is the strike's shared path (the same zigzag
+/// audio rolls thunder along), with branches forking off it.
+pub fn build_bolt(strike: &LightningStrike, rng: &mut Rng) -> Vec<BoltSegment> {
+    let points = strike.path(BOLT_DETAIL);
     let mut out = Vec::new();
-    let length = (top - bottom).length() as f32;
-    channel(top, bottom, length * 0.12, 6, 1.0, 0.6, rng, &mut out, 0);
+    for (i, w) in points.windows(2).enumerate() {
+        out.push(BoltSegment {
+            a: w[0],
+            b: w[1],
+            width: 0.6,
+            brightness: 1.0,
+        });
+        if i > 2 {
+            branch(w[1], strike.to.y, 0.6, 1.0, rng, &mut out, 0);
+        }
+    }
     out
+}
+
+/// Maybe fork a branch off the channel at `start`, heading down and fading.
+fn branch(
+    start: DVec3,
+    bottom_y: f64,
+    width: f32,
+    brightness: f32,
+    rng: &mut Rng,
+    out: &mut Vec<BoltSegment>,
+    level: u32,
+) {
+    if level >= 2 || !rng.chance(0.045) {
+        return;
+    }
+    let remaining = (start.y - bottom_y).max(10.0);
+    let dir = DVec3::new(
+        rng.range(-0.8, 0.8) as f64,
+        -1.0,
+        rng.range(-0.8, 0.8) as f64,
+    )
+    .normalize();
+    let len = remaining * rng.range(0.15, 0.45) as f64;
+    channel(
+        start,
+        start + dir * len,
+        len as f32 * 0.15,
+        4,
+        brightness * 0.45,
+        width * 0.55,
+        rng,
+        out,
+        level + 1,
+    );
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -164,27 +205,8 @@ fn channel(
             brightness,
         });
         // Branches fork off downward and fade.
-        if level < 2 && i > 2 && rng.chance(0.09) {
-            let start = w[1];
-            let remaining = (start.y - b.y).max(10.0);
-            let dir = DVec3::new(
-                rng.range(-0.8, 0.8) as f64,
-                -1.0,
-                rng.range(-0.8, 0.8) as f64,
-            )
-            .normalize();
-            let len = remaining * rng.range(0.15, 0.45) as f64;
-            channel(
-                start,
-                start + dir * len,
-                len as f32 * 0.15,
-                4,
-                brightness * 0.45,
-                width * 0.55,
-                rng,
-                out,
-                level + 1,
-            );
+        if i > 2 {
+            branch(w[1], b.y, width, brightness, rng, out, level);
         }
     }
 }
@@ -270,15 +292,22 @@ pub(crate) fn lightning_system(
         let fork_seed = sim.time_s.to_bits();
         let mut rng = sim.rng.fork(fork_seed);
         let intensity = rng.range(0.6, 1.4);
+        // The channel runs on inside the cloud a few hundred meters above the base.
+        let inside = top + DVec3::Y * rng.range(200.0, 900.0) as f64;
+        let strike = LightningStrike {
+            from: top,
+            to: if to_ground { hit } else { inside },
+            peak_current_ka: 30.0 * intensity,
+            cloud_to_ground: to_ground,
+            seed: rng.next_u64(),
+        };
         let (segments, light_at, ground_hit) = if to_ground {
             (
-                build_bolt(top, hit, &mut rng),
+                build_bolt(&strike, &mut rng),
                 hit.lerp(top, 0.25),
                 Some(hit),
             )
         } else {
-            // Inside the cloud: a flash a few hundred meters into it.
-            let inside = top + DVec3::Y * rng.range(200.0, 900.0) as f64;
             (Vec::new(), inside, None)
         };
         let strokes = [
@@ -305,6 +334,7 @@ pub(crate) fn lightning_system(
         bolts.bolts.push(Bolt {
             segments,
             light_at,
+            cloud_at: inside,
             age_s: 0.0,
             life_s: 0.55,
             intensity,
@@ -312,11 +342,7 @@ pub(crate) fn lightning_system(
             light: Some(light),
             ground: ground_hit.is_some(),
         });
-        strikes.write(LightningStrike {
-            top,
-            ground: ground_hit,
-            intensity,
-        });
+        strikes.write(strike);
         noise.write(NoiseEvent {
             position: light_at,
             radius: 9000.0,
@@ -353,12 +379,23 @@ mod tests {
         let mut rng = Rng::new(3);
         let top = DVec3::new(0.0, 1200.0, 0.0);
         let bottom = DVec3::ZERO;
-        let segs = build_bolt(top, bottom, &mut rng);
+        let strike = LightningStrike {
+            from: top,
+            to: bottom,
+            peak_current_ka: 30.0,
+            cloud_to_ground: true,
+            seed: 11,
+        };
+        let segs = build_bolt(&strike, &mut rng);
         assert!(segs.len() > 64);
         assert!(segs.iter().any(|s| s.brightness < 1.0), "has branches");
         let main: Vec<_> = segs.iter().filter(|s| s.brightness == 1.0).collect();
         assert!((main[0].a - top).length() < 1e-6);
         assert!((main.last().unwrap().b - bottom).length() < 1e-6);
+        // The drawn channel is the shared path, so thunder rolls along the same bolt.
+        let path = strike.path(BOLT_DETAIL);
+        assert_eq!(main.len(), path.len() - 1);
+        assert!(main.iter().zip(&path).all(|(s, p)| s.a == *p));
     }
 
     #[test]
@@ -366,6 +403,7 @@ mod tests {
         let mut bolt = Bolt {
             segments: Vec::new(),
             light_at: DVec3::ZERO,
+            cloud_at: DVec3::ZERO,
             age_s: 0.0,
             life_s: 0.5,
             intensity: 1.0,

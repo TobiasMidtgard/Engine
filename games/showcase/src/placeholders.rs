@@ -383,82 +383,6 @@ pub fn market(commands: &mut Commands, _lib: &Library, z: &Zone) {
     );
 }
 
-/// Animation stage: a wooden stage with mannequins, a horse and a cart (humanoids, animals,
-/// vehicles; muscles and cloth tension). The Animation thread owns it.
-pub fn stage(commands: &mut Commands, _lib: &Library, z: &Zone) {
-    let c = z.center;
-    spawn(
-        commands,
-        cyl(14.0, 1.0),
-        wood(),
-        at(c + DVec3::new(0.0, 0.5, 0.0)),
-    );
-    spawn(
-        commands,
-        cyl(14.4, 0.3),
-        dark_wood(),
-        at(c + DVec3::new(0.0, 0.15, 0.0)),
-    );
-    let top = c + DVec3::new(0.0, 1.0, 0.0);
-    for (i, x) in [-6.0, -3.0, 0.0, 3.0].into_iter().enumerate() {
-        person(
-            commands,
-            top + DVec3::new(x, 0.0, -3.0),
-            (i as f32) * 0.5,
-            [0xd35400, 0x2980b9, 0x16a085, 0x8e44ad][i],
-        );
-    }
-    quadruped(
-        commands,
-        top + DVec3::new(-3.0, 0.0, 4.0),
-        0.4,
-        1.35,
-        0x5a3a22,
-    );
-    quadruped(
-        commands,
-        top + DVec3::new(4.0, 0.0, 3.0),
-        -0.8,
-        0.55,
-        0x9a8a70,
-    );
-    // A cart.
-    spawn(
-        commands,
-        cuboid(2.0, 0.6, 3.0),
-        wood(),
-        at(top + DVec3::new(6.0, 0.9, -4.0)),
-    );
-    for (x, zz) in [(-1.1, -1.0), (1.1, -1.0), (-1.1, 1.0), (1.1, 1.0)] {
-        spawn(
-            commands,
-            Shape::Torus {
-                radius: 0.45,
-                tube: 0.06,
-                segments: 20,
-            },
-            dark_wood(),
-            Transform::from_translation(top + DVec3::new(6.0 + x, 0.5, -4.0 + zz))
-                .with_rotation(Quat::from_rotation_z(std::f32::consts::FRAC_PI_2)),
-        );
-    }
-    // Backdrop and stage lights.
-    spawn(
-        commands,
-        cuboid(26.0, 7.0, 0.4),
-        mat(0x5b2333, 0.9).with_subsurface(0.3),
-        at(c + DVec3::new(0.0, 4.5, -12.5)),
-    );
-    for x in [-12.0, 12.0] {
-        spawn(
-            commands,
-            cuboid(0.4, 9.0, 0.4),
-            dark_wood(),
-            at(c + DVec3::new(x, 4.5, -12.0)),
-        );
-    }
-}
-
 /// Physics playground: domino run, crate pyramid, Newton's cradle, ramp with balls, seesaw.
 /// The Physics and rigid bodies thread owns it.
 pub fn physics(commands: &mut Commands, _lib: &Library, z: &Zone) {
@@ -772,31 +696,6 @@ pub fn forest(commands: &mut Commands, lib: &Library, land: &Landscape, z: &Zone
             c + DVec3::new(a.cos() * 9.0, 0.0, a.sin() * 9.0),
             0.0,
             0.12 + i as f32 * 0.04,
-        );
-    }
-}
-
-/// Wildlife meadow: grazing deer, a few hares. The Smart NPC AI thread (wildlife) and the
-/// Animation thread own it.
-pub fn meadow(commands: &mut Commands, _lib: &Library, z: &Zone, rng: &mut Rng) {
-    for _ in 0..7 {
-        let p = rng.in_unit_disk() * 25.0;
-        quadruped(
-            commands,
-            z.center + DVec3::new(p.x as f64, 0.0, p.y as f64),
-            rng.range(0.0, TAU),
-            rng.range(0.9, 1.1),
-            0x8a5a32,
-        );
-    }
-    for _ in 0..5 {
-        let p = rng.in_unit_disk() * 30.0;
-        quadruped(
-            commands,
-            z.center + DVec3::new(p.x as f64, 0.0, p.y as f64),
-            rng.range(0.0, TAU),
-            0.25,
-            0x9a8a70,
         );
     }
 }
@@ -1268,7 +1167,13 @@ fn stream_water(commands: &mut Commands, meshes: &mut Assets<Mesh>, land: &Lands
                 );
             }
         }
+        // The falls get their own curved sheet; the ribbon stops at the lip and starts again
+        // at the foot.
+        let falls = st.falls();
         for i in 0..n as u32 - 1 {
+            if falls.is_some_and(|(top, bottom)| (top..bottom).contains(&(i as usize))) {
+                continue;
+            }
             let (a, b, c, d) = (2 * i, 2 * i + 1, 2 * i + 2, 2 * i + 3);
             let pos = |k: u32| Vec3::from(mesh.vertices[k as usize].position);
             // Wind so the ribbon faces up (or downstream where it falls).
@@ -1295,163 +1200,159 @@ fn stream_water(commands: &mut Commands, meshes: &mut Assets<Mesh>, land: &Lands
             at(origin),
             MeshRenderer::new(meshes.add(mesh), water).without_shadows(),
         ));
-        if let (Some((c, _)), Some((_, bottom))) = (st.pool, st.falls()) {
-            let mut froth = StandardMaterial::hex(0xc8d4d8)
-                .with_roughness(0.4)
-                .with_alpha(0.75);
+        if let Some((top, bottom)) = falls {
+            // Falling water is mostly air: a rough, white, barely mirror-like sheet.
+            let mut white_water = StandardMaterial::hex(0xffffff)
+                .with_roughness(0.35)
+                .with_subsurface(0.7)
+                .with_alpha(0.93);
+            white_water.reflectance = 0.25;
+            white_water.receives_wetness = false;
+            white_water.double_sided = true;
+            let sheet = falls_sheet(st, top, bottom, &level, o);
+            commands.spawn((
+                at(origin),
+                MeshRenderer::new(meshes.add(sheet), white_water).without_shadows(),
+            ));
+        }
+        if let (Some((c, _)), Some((_, bottom))) = (st.pool, falls) {
+            let mut froth = StandardMaterial::hex(0xffffff)
+                .with_roughness(0.45)
+                .with_subsurface(0.5)
+                .with_alpha(0.85);
             froth.receives_wetness = false;
-            spawn(
-                commands,
-                Shape::Cylinder {
-                    radius: 5.0,
-                    height: 0.02,
-                    segments: 40,
-                },
-                froth,
-                at(DVec3::new(c.x, level(bottom) + 0.02, c.y)),
-            );
+            froth.double_sided = true;
+            commands.spawn((
+                at(DVec3::new(c.x, level(bottom) + 0.03, c.y)),
+                MeshRenderer::new(meshes.add(froth_patch(5.5)), froth).without_shadows(),
+            ));
         }
     }
 }
 
-/// Combat arena: sand floor ringed by pillars, cover, a ramp and a wall-run wall; fighters. The
-/// Smart NPC AI and Movement and slow motion threads own it.
-pub fn arena(commands: &mut Commands, _lib: &Library, z: &Zone) {
-    let c = z.center;
-    spawn(
-        commands,
-        cyl(40.0, 0.3),
-        mat(0x9c8662, 0.95),
-        at(c + DVec3::new(0.0, 0.15, 0.0)),
+/// Churned foam in the plunge pool: a disc with a ragged edge, white in the middle and fading
+/// toward the water's color at the rim.
+fn froth_patch(radius: f64) -> Mesh {
+    const SEGMENTS: usize = 64;
+    const RINGS: usize = 5;
+    let mut rng = Rng::new(0xF20F);
+    let edge: Vec<f64> = (0..SEGMENTS)
+        .map(|_| radius * rng.range(0.6, 1.05) as f64)
+        .collect();
+    let white = Vec3::new(0.92, 0.95, 0.96);
+    let rim = Vec3::new(0.3, 0.38, 0.4);
+    let mut mesh = Mesh::default();
+    mesh.vertices.push(
+        engine::render::Vertex::new(Vec3::ZERO, Vec3::Y, Vec2::splat(0.5))
+            .with_color(white.extend(1.0)),
     );
-    // Stands: stepped stone rings.
-    for k in 0..4 {
-        let r = 41.5 + k as f64 * 1.6;
-        for i in 0..40 {
-            let a = i as f64 / 40.0 * TAU64;
-            if i % 10 == 0 {
-                continue;
-            }
-            spawn(
-                commands,
-                cuboid(6.8, 0.8 + k as f32 * 0.8, 1.6),
-                stone(),
-                yawed(
-                    c + DVec3::new(a.cos() * r, (0.8 + k as f64 * 0.8) * 0.5, a.sin() * r),
-                    -(a as f32) + std::f32::consts::FRAC_PI_2,
-                ),
+    for r in 1..=RINGS {
+        let f = r as f64 / RINGS as f64;
+        for (k, &e) in edge.iter().enumerate() {
+            // Smooth the ragged edge a little between neighbours.
+            let e = (e + edge[(k + 1) % SEGMENTS] + edge[(k + SEGMENTS - 1) % SEGMENTS]) / 3.0;
+            let a = k as f64 / SEGMENTS as f64 * std::f64::consts::TAU;
+            let p = DVec2::new(a.cos(), a.sin()) * e * f;
+            let streak = rng.range(0.75, 1.0);
+            let c = white.lerp(rim, smoothstep(0.45, 1.0, f as f32)) * streak;
+            mesh.vertices.push(
+                engine::render::Vertex::new(
+                    Vec3::new(p.x as f32, 0.0, p.y as f32),
+                    Vec3::Y,
+                    Vec2::new(p.x as f32, p.y as f32) * 0.2,
+                )
+                .with_color(c.extend(1.0)),
             );
         }
     }
-    for i in 0..8 {
-        let a = i as f64 / 8.0 * TAU64;
-        spawn(
-            commands,
-            cyl(1.2, 8.0),
-            concrete(),
-            at(c + DVec3::new(a.cos() * 18.0, 4.0, a.sin() * 18.0)),
-        );
+    let ring = |r: usize, k: usize| (1 + (r - 1) * SEGMENTS + k % SEGMENTS) as u32;
+    for k in 0..SEGMENTS {
+        mesh.indices
+            .extend_from_slice(&[0, ring(1, k + 1), ring(1, k)]);
+        for r in 1..RINGS {
+            let (a, b, c, d) = (
+                ring(r, k),
+                ring(r, k + 1),
+                ring(r + 1, k),
+                ring(r + 1, k + 1),
+            );
+            mesh.indices.extend_from_slice(&[a, b, c, b, d, c]);
+        }
     }
-    for (x, zz) in [(-8.0, 4.0), (6.0, -6.0), (0.0, 10.0)] {
-        spawn(
-            commands,
-            cuboid(4.0, 1.2, 1.0),
-            concrete(),
-            at(c + DVec3::new(x, 0.6, zz)),
-        );
-    }
-    spawn(
-        commands,
-        cuboid(4.0, 0.5, 10.0),
-        concrete(),
-        Transform::from_translation(c + DVec3::new(12.0, 1.6, 8.0))
-            .with_rotation(Quat::from_rotation_x(0.35)),
-    );
-    spawn(
-        commands,
-        cuboid(0.8, 6.0, 24.0),
-        concrete(),
-        at(c + DVec3::new(-24.0, 3.0, 0.0)),
-    );
-    for (i, (x, zz)) in [(-3.0, -2.0), (4.0, 3.0), (2.0, -8.0)]
-        .into_iter()
-        .enumerate()
-    {
-        person(
-            commands,
-            c + DVec3::new(x, 0.3, zz),
-            i as f32 * 2.0,
-            0xa83232,
-        );
-    }
-    person(commands, c + DVec3::new(0.0, 0.3, 0.0), 0.0, 0x3260a8);
+    mesh
 }
 
-/// Movement course: wall-run lanes, slide tunnels, platforms and gaps. The Movement and slow
-/// motion thread owns it.
-pub fn parkour(commands: &mut Commands, _lib: &Library, z: &Zone) {
-    let c = z.center;
-    let panel = mat(0xd0ccc4, 0.7);
-    let accent = mat(0xe67e22, 0.5);
-    for (i, x) in [-14.0, -6.0].into_iter().enumerate() {
-        spawn(
-            commands,
-            cuboid(0.6, 7.0, 30.0),
-            panel,
-            at(c + DVec3::new(x, 3.5 + i as f64, -4.0)),
-        );
-        spawn(
-            commands,
-            cuboid(0.62, 0.3, 30.0),
-            accent,
-            at(c + DVec3::new(x, 6.5 + i as f64, -4.0)),
-        );
+/// The waterfall as a sheet that leaves the lip, arcs out and spreads as it falls: ragged
+/// columns of glassy water near the lip turning to white, aerated streaks below. Positions are
+/// relative to `o` (the stream's first point).
+fn falls_sheet(
+    st: &crate::landscape::Stream,
+    top: usize,
+    bottom: usize,
+    level: &dyn Fn(usize) -> f64,
+    o: DVec2,
+) -> Mesh {
+    const COLUMNS: usize = 28;
+    const ROWS: usize = 22;
+    let glassy = Vec3::new(0.1, 0.2, 0.2);
+    let white = Vec3::new(0.93, 0.95, 0.96);
+    let lip = st.path[top];
+    let dir = (st.path[top + 1] - st.path[top.saturating_sub(1)]).normalize_or(DVec2::Y);
+    let side = DVec2::new(-dir.y, dir.x);
+    let (y0, y1) = (level(top), level(bottom));
+    let drop = (y0 - y1).max(0.5);
+    let fall_time = (2.0 * drop / 9.81).sqrt();
+    let reach = (st.path[bottom] - lip).length() * 0.75;
+    let mut rng = Rng::new(0xFA11);
+    let mut mesh = Mesh::default();
+    // Each column leaves the lip a little faster or slower, so the sheet tears into streaks.
+    let speeds: Vec<f64> = (0..=COLUMNS)
+        .map(|_| reach / fall_time * rng.range(0.8, 1.15) as f64)
+        .collect();
+    let streak: Vec<f32> = (0..=COLUMNS).map(|_| rng.range(0.0, 1.0)).collect();
+    for (k, (&speed, &streak)) in speeds.iter().zip(&streak).enumerate() {
+        let u = k as f64 / COLUMNS as f64 - 0.5;
+        for j in 0..=ROWS {
+            let t = j as f64 / ROWS as f64 * fall_time;
+            let width = st.width * (0.8 + 0.4 * j as f64 / ROWS as f64);
+            let p = lip + dir * (speed * t) + side * (width * u) - o;
+            let y = (y0 - 0.5 * 9.81 * t * t).max(y1);
+            // Glassy over the lip, white and streaky once it breaks up.
+            let foam = (smoothstep(0.0, 0.25, j as f32 / ROWS as f32) * (0.7 + 0.3 * streak))
+                .clamp(0.0, 1.0);
+            let c = glassy.lerp(white, foam);
+            mesh.vertices.push(
+                engine::render::Vertex::new(
+                    Vec3::new(p.x as f32, y as f32, p.y as f32),
+                    Vec3::Y,
+                    Vec2::new(k as f32 / COLUMNS as f32, j as f32 / ROWS as f32),
+                )
+                .with_color(c.extend(1.0)),
+            );
+        }
     }
-    for (k, (x, zz, h)) in [
-        (4.0, -14.0, 2.0),
-        (8.0, -6.0, 3.5),
-        (13.0, 2.0, 5.0),
-        (8.0, 10.0, 6.5),
-        (2.0, 16.0, 8.0),
-    ]
-    .into_iter()
-    .enumerate()
-    {
-        spawn(
-            commands,
-            cuboid(4.0, h as f32, 4.0),
-            panel,
-            at(c + DVec3::new(x, h * 0.5, zz)),
-        );
-        spawn(
-            commands,
-            cuboid(4.02, 0.2, 4.02),
-            if k % 2 == 0 { accent } else { panel },
-            at(c + DVec3::new(x, h, zz)),
-        );
+    let at_ = |k: usize, j: usize| (k * (ROWS + 1) + j) as u32;
+    for k in 0..COLUMNS {
+        for j in 0..ROWS {
+            let (a, b, c, d) = (at_(k, j), at_(k + 1, j), at_(k, j + 1), at_(k + 1, j + 1));
+            mesh.indices.extend_from_slice(&[a, b, c, b, d, c]);
+        }
     }
-    // Slide tunnel.
-    spawn(
-        commands,
-        cuboid(4.0, 0.4, 10.0),
-        panel,
-        at(c + DVec3::new(-20.0, 1.2, 14.0)),
-    );
-    for s in [-1.8, 1.8] {
-        spawn(
-            commands,
-            cuboid(0.4, 1.0, 10.0),
-            panel,
-            at(c + DVec3::new(-20.0 + s, 0.5, 14.0)),
-        );
+    // Smooth normals facing away from the cliff (the material is double-sided).
+    let mut normals = vec![Vec3::ZERO; mesh.vertices.len()];
+    for t in mesh.indices.chunks(3) {
+        let p = |k: u32| Vec3::from(mesh.vertices[k as usize].position);
+        let nrm = (p(t[1]) - p(t[0])).cross(p(t[2]) - p(t[0]));
+        for &k in t {
+            normals[k as usize] += nrm;
+        }
     }
-    // Grapple/zip line tower.
-    spawn(
-        commands,
-        cuboid(2.0, 14.0, 2.0),
-        panel,
-        at(c + DVec3::new(20.0, 7.0, -20.0)),
-    );
+    let out = Vec3::new(dir.x as f32, 0.0, dir.y as f32);
+    for (v, nrm) in mesh.vertices.iter_mut().zip(normals) {
+        let n = nrm.normalize_or(out);
+        v.normal = (if n.dot(out) < 0.0 { -n } else { n }).to_array();
+    }
+    mesh
 }
 
 /// Voxel hill: a mound of 1 m blocks (grass on dirt on stone) with a dug pit and a block house
@@ -1618,77 +1519,6 @@ pub fn range(commands: &mut Commands, _lib: &Library, z: &Zone) {
             at(c + DVec3::new(-19.0, 1.0, zz)),
         );
     }
-}
-
-/// Weather station on its hill: mast with anemometer and wind sock, instrument screen, rain
-/// gauge. The Weather, wind and clouds thread owns it.
-pub fn weather(commands: &mut Commands, _lib: &Library, z: &Zone) {
-    let c = z.center;
-    spawn(
-        commands,
-        cyl(0.1, 12.0),
-        metal(),
-        at(c + DVec3::new(0.0, 6.0, 0.0)),
-    );
-    for k in 0..3 {
-        let a = k as f32 / 3.0 * TAU;
-        spawn(
-            commands,
-            cuboid(0.9, 0.04, 0.04),
-            metal(),
-            yawed(
-                c + DVec3::new((a.cos() * 0.45) as f64, 12.1, (a.sin() * 0.45) as f64),
-                -a,
-            ),
-        );
-        spawn(
-            commands,
-            Shape::Sphere {
-                radius: 0.12,
-                segments: 10,
-            },
-            metal(),
-            at(c + DVec3::new((a.cos() * 0.9) as f64, 12.1, (a.sin() * 0.9) as f64)),
-        );
-    }
-    spawn(
-        commands,
-        Shape::Cone {
-            radius: 0.3,
-            height: 1.6,
-            segments: 16,
-        },
-        mat(0xff6a00, 0.7).with_subsurface(0.4),
-        Transform::from_translation(c + DVec3::new(0.9, 9.0, 0.0))
-            .with_rotation(Quat::from_rotation_z(-std::f32::consts::FRAC_PI_2)),
-    );
-    spawn(
-        commands,
-        cuboid(1.0, 0.8, 0.8),
-        mat(0xf4f4f0, 0.6),
-        at(c + DVec3::new(4.0, 1.4, 2.0)),
-    );
-    for (x, zz) in [(-0.4, -0.3), (0.4, -0.3), (-0.4, 0.3), (0.4, 0.3)] {
-        spawn(
-            commands,
-            cuboid(0.06, 1.0, 0.06),
-            mat(0xf4f4f0, 0.6),
-            at(c + DVec3::new(4.0 + x, 0.5, 2.0 + zz)),
-        );
-    }
-    spawn(
-        commands,
-        cyl(0.15, 0.6),
-        metal(),
-        at(c + DVec3::new(-3.0, 0.3, 3.0)),
-    );
-    spawn(
-        commands,
-        cuboid(2.0, 0.05, 1.2),
-        mat(0x1a2a4a, 0.2).with_metallic(0.5),
-        Transform::from_translation(c + DVec3::new(-4.0, 1.4, -3.0))
-            .with_rotation(Quat::from_rotation_x(-0.6)),
-    );
 }
 
 /// Airfield buildings: an apron, a control tower and a hangar beside the runway (the runway

@@ -316,6 +316,11 @@ fn in_hard_zone(x: f64, z: f64) -> bool {
     ZONES.iter().any(|zn| {
         let d = DVec2::new(x - zn.center.x, z - zn.center.z).length();
         d < zn.radius - 2.0 && !crate::zones::GRASSY_ZONES.contains(&zn.key)
+    }) || crate::zones::BARE_FOOTPRINTS.iter().any(|&(key, rx, rz)| {
+        // A grass patch reaches about 2 m from its center.
+        let c = crate::zones::zone(key).center;
+        (rx[0] - 2.0..rx[1] + 2.0).contains(&(x - c.x))
+            && (rz[0] - 2.0..rz[1] + 2.0).contains(&(z - c.z))
     })
 }
 

@@ -69,6 +69,13 @@ pub const VIEWS: &[DemoView] = &[
         hour: 20.4,
     },
     DemoView {
+        key: "fire_plume",
+        name: "Smoke plume over the meadow",
+        eye: [-58.0, 9.0, -52.0],
+        target: [12.0, 12.0, 6.0],
+        hour: 15.5,
+    },
+    DemoView {
         key: "fire_night",
         name: "Meadow fire at night",
         eye: [-40.0, 14.0, -50.0],

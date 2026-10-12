@@ -5,10 +5,14 @@ mod api;
 pub mod demo;
 pub mod dsp;
 pub mod effects;
+mod fires;
 pub mod footstep;
 pub mod mixer;
 mod output;
 mod systems;
+pub mod thunder;
+pub mod vehicle;
+mod water;
 pub mod wav;
 
 use std::collections::HashMap;
@@ -18,6 +22,7 @@ use std::sync::Mutex;
 use crossbeam_channel::{Receiver, Sender, unbounded};
 use engine_core::math::{DVec3, Vec3};
 use engine_core::prelude::*;
+use engine_world::{FollowsWorldShift, WorldShift, WorldShiftAppExt};
 
 pub use footstep::{FootstepSound, FootstepSurfaces, Step, SurfaceSound};
 pub use mixer::{Bus, Clock, Meters, Sound, Spatial, VoiceId};
@@ -41,15 +46,18 @@ impl Plugin for AudioPlugin {
             app.add_plugins(engine_world::WorldPlugin);
         }
         app.init_resource::<AudioSettings>()
+            .init_resource::<thunder::Strikes>()
             .init_resource::<AudioMix>()
             .init_resource::<FootstepSurfaces>()
             .insert_resource(Audio::new())
             .add_message::<AudioCue>()
+            .shift_messages::<AudioCue>()
             .register_resource::<AudioSettings>(
                 "Audio settings: output (Auto/Device/Offline/Off), master_db, speed_of_sound (m/s), \
                  doppler (0..1), air_absorption (/m), slow_motion_pitch (0..1, how much time \
                  dilation lowers pitch), min_pitch, slow_motion_darken (0..1), space_is_silent, \
-                 atmosphere_height_m, footstep_distance_m, max_voices, weather_ambience.",
+                 footstep_distance_m, max_voices, weather_ambience, \
+                 occlusion (walls muffle sounds).",
             )
             .register_resource::<AudioMix>(
                 "Bus volumes in dB: world (footsteps, impacts, explosions), ambience (rain, wind, \
@@ -73,14 +81,24 @@ impl Plugin for AudioPlugin {
                 (
                     systems::ensure_output,
                     systems::update_listener,
+                    thunder::play_lightning,
                     systems::play_footsteps,
                     systems::play_world_events,
+                    water::play_splashes,
                     systems::weather_ambience,
+                    fires::fire_ambience,
+                    water::water_ambience,
+                    vehicle::vehicle_sounds,
                     systems::reverb_zones,
                     systems::follow_emitters,
+                    systems::occlusion,
                 )
                     .chain()
                     .in_set(UpdateSet::AfterPropagate),
+            )
+            .add_systems(
+                PostUpdate,
+                systems::shift_world.in_set(engine_world::WorldShiftSet::Apply),
             )
             .add_systems(Last, systems::drive_output);
         api::register(app);
@@ -110,7 +128,9 @@ pub struct AudioSettings {
     /// Read when the output starts.
     pub output: AudioOutput,
     pub master_db: f32,
-    /// m/s. Distant sounds start late by distance / speed of sound.
+    /// m/s in sea-level air. Distant sounds start late by distance / speed of sound; the
+    /// actual speed follows the air around the listener (`Env::air`: warmer air and other
+    /// planets' air carry sound at other speeds) in proportion to this.
     pub speed_of_sound: f32,
     /// 0 = no doppler shift, 1 = physical.
     pub doppler: f32,
@@ -123,16 +143,26 @@ pub struct AudioSettings {
     pub min_pitch: f32,
     /// How much slow motion muffles the world and widens the reverb, 0..1.
     pub slow_motion_darken: f32,
-    /// No air, no sound: world and ambience fade out with altitude and vanish in space.
+    /// No air, no sound: world and ambience fade with the air's density (`Env::air`, per
+    /// planet) and vanish in space.
     pub space_is_silent: bool,
-    /// Scale height of the atmosphere for that fade, meters (Earth ≈ 8500).
-    pub atmosphere_height_m: f32,
     /// Footsteps farther than this from the listener are not played, meters.
     pub footstep_distance_m: f32,
     /// Most voices at once; new sounds beyond it are skipped.
     pub max_voices: u32,
     /// Play rain, wind and thunder from the weather.
     pub weather_ambience: bool,
+    /// Muffle sounds that walls and terrain stand between (physics raycasts).
+    pub occlusion: bool,
+    /// Play the roar and crackle of fires near the listener (burning ground in `HeatField`,
+    /// burning `Combustible`s).
+    pub fires: bool,
+    /// Play waves lapping at nearby shores and streams babbling (from the water module's
+    /// `WaterQuery`).
+    pub water: bool,
+    /// Play engines and tyres of vehicles (`EngineState`, `WheelContacts` from the vehicles
+    /// module).
+    pub vehicles: bool,
 }
 
 impl Default for AudioSettings {
@@ -147,10 +177,13 @@ impl Default for AudioSettings {
             min_pitch: 0.35,
             slow_motion_darken: 0.7,
             space_is_silent: true,
-            atmosphere_height_m: 8_500.0,
             footstep_distance_m: 60.0,
             max_voices: 96,
             weather_ambience: true,
+            occlusion: true,
+            fires: true,
+            water: true,
+            vehicles: true,
         }
     }
 }
@@ -281,6 +314,12 @@ pub struct AudioCue {
     pub loudness: f32,
 }
 
+impl FollowsWorldShift for AudioCue {
+    fn follow(&mut self, s: &WorldShift) {
+        self.position = self.position.map(|p| s.point(p));
+    }
+}
+
 /// How to play a sound. Start from [`PlayOptions::at`] (3D) or [`PlayOptions::ui`] (2D).
 #[derive(Debug, Clone, PartialEq)]
 pub struct PlayOptions {
@@ -289,6 +328,8 @@ pub struct PlayOptions {
     pub velocity: Vec3,
     /// Keep the sound attached to this entity as it moves.
     pub follow: Option<Entity>,
+    /// The entity making the sound (ignored when checking what blocks it).
+    pub source: Option<Entity>,
     pub bus: Bus,
     pub gain_db: f32,
     /// Playback rate (2 = an octave up).
@@ -315,6 +356,7 @@ impl PlayOptions {
             at: Some(position),
             velocity: Vec3::ZERO,
             follow: None,
+            source: None,
             bus: Bus::World,
             gain_db: 0.0,
             pitch: 1.0,
@@ -378,6 +420,13 @@ impl PlayOptions {
 
     pub fn follow(mut self, entity: Entity) -> Self {
         self.follow = Some(entity);
+        self.source = Some(entity);
+        self
+    }
+
+    /// The entity making the sound, so its own collider doesn't muffle it.
+    pub fn source(mut self, entity: Option<Entity>) -> Self {
+        self.source = entity;
         self
     }
 
@@ -404,7 +453,13 @@ impl PlayOptions {
 
 struct Live {
     follow: Option<Entity>,
+    source: Option<Entity>,
+    /// Where it is now (positioned sounds).
     last: Option<DVec3>,
+    bus: Bus,
+    /// Occlusion last sent, and when to check again (real seconds).
+    occlusion: f32,
+    check_at: f64,
 }
 
 struct Recording {
@@ -437,6 +492,10 @@ pub struct Audio {
     max_voices: usize,
     listener: DVec3,
     listener_velocity: Vec3,
+    /// Speed of sound around the listener, m/s.
+    speed_of_sound: f32,
+    /// The entity the ears are on (its own colliders don't block sound).
+    listener_entity: Option<Entity>,
     /// Mixer sample to start new sounds at (offline output only).
     start_sample: Option<u64>,
     meters: Meters,
@@ -462,6 +521,8 @@ impl Audio {
             max_voices: 96,
             listener: DVec3::ZERO,
             listener_velocity: Vec3::ZERO,
+            speed_of_sound: 343.0,
+            listener_entity: None,
             start_sample: None,
             meters: Meters::default(),
             recording: None,
@@ -547,6 +608,12 @@ impl Audio {
         self.listener
     }
 
+    /// How fast sound travels around the listener now, m/s (the air there, scaled by
+    /// [`AudioSettings::speed_of_sound`]).
+    pub fn speed_of_sound(&self) -> f32 {
+        self.speed_of_sound
+    }
+
     /// Latest level meters (updated every 50 ms of audio).
     pub fn meters(&self) -> Meters {
         self.meters
@@ -608,7 +675,11 @@ impl Audio {
                 id,
                 Live {
                     follow: opts.follow,
+                    source: opts.source.or(opts.follow),
                     last: opts.at,
+                    bus: opts.bus,
+                    occlusion: 0.0,
+                    check_at: 0.0,
                 },
             );
             id
@@ -758,6 +829,19 @@ impl Audio {
         if let Some(l) = self.live.get_mut(&id) {
             l.last = Some(p);
         }
+    }
+
+    /// Move the ears and every playing sound into the world's new frame.
+    fn shift_world(&mut self, shift: &engine_world::WorldShift) {
+        self.listener = shift.point(self.listener);
+        self.listener_velocity = shift.direction(self.listener_velocity);
+        for l in self.live.values_mut() {
+            l.last = l.last.map(|p| shift.point(p));
+        }
+        self.send(Command::ShiftWorld {
+            rotation: shift.rotation,
+            translation: shift.translation,
+        });
     }
 }
 

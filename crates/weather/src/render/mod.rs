@@ -55,7 +55,7 @@ impl Default for CloudSettings {
             steps: 72,
             light_steps: 5,
             environment_steps: 24,
-            extinction: 0.04,
+            extinction: 0.08,
             max_distance_m: 120_000.0,
             shape_scale_m: 4_000.0,
             detail_scale_m: 700.0,
