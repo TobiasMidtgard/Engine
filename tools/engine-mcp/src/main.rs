@@ -190,12 +190,21 @@ fn main() {
             .expect("start the watcher thread");
     }
 
-    for line in std::io::stdin().lock().lines() {
-        let Ok(line) = line else { break };
-        if line.trim().is_empty() {
+    // Raw bytes, not `lines()`: a line that is not UTF-8 gets a parse error like any other bad
+    // line instead of ending the session (and stopping the game).
+    let mut stdin = std::io::stdin().lock();
+    let mut line = Vec::new();
+    loop {
+        line.clear();
+        match stdin.read_until(b'\n', &mut line) {
+            Ok(0) | Err(_) => break,
+            Ok(_) => {}
+        }
+        let text = line.trim_ascii();
+        if text.is_empty() {
             continue;
         }
-        let message: Value = match serde_json::from_str(&line) {
+        let message: Value = match serde_json::from_slice(text) {
             Ok(m) => m,
             Err(e) => {
                 let error = mcp::error_response(

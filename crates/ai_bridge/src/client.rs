@@ -1,6 +1,7 @@
 //! The request queue between other threads and the game's main thread, and the in-process
 //! [`BridgeClient`] that uses it.
 
+use std::cell::OnceCell;
 use std::sync::Mutex;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, TryRecvError};
 use std::time::Duration;
@@ -99,7 +100,10 @@ impl BridgeClient {
         // If the game is gone, the request (and its reply sender) is dropped and the pending
         // reply reports "shutting down".
         let _ = self.tx.send(request);
-        PendingReply { rx }
+        PendingReply {
+            rx,
+            result: OnceCell::new(),
+        }
     }
 
     /// Queue a request whose result nobody needs (a JSON-RPC notification).
@@ -127,20 +131,29 @@ impl BridgeClient {
 #[derive(Debug)]
 pub struct PendingReply {
     rx: Receiver<Reply>,
+    /// The answer once it arrived, so [`PendingReply::try_get`] can be asked again.
+    result: OnceCell<RpcResult>,
 }
 
 impl PendingReply {
-    /// The result if it has arrived, without blocking.
+    /// The result if it has arrived, without blocking. Once it has, every call returns it.
     pub fn try_get(&self) -> Option<RpcResult> {
-        match self.rx.try_recv() {
-            Ok(reply) => Some(reply.result),
-            Err(TryRecvError::Empty) => None,
-            Err(TryRecvError::Disconnected) => Some(Err(RpcError::shutting_down())),
+        if let Some(result) = self.result.get() {
+            return Some(result.clone());
         }
+        let result = match self.rx.try_recv() {
+            Ok(reply) => reply.result,
+            Err(TryRecvError::Empty) => return None,
+            Err(TryRecvError::Disconnected) => Err(RpcError::shutting_down()),
+        };
+        Some(self.result.get_or_init(|| result).clone())
     }
 
     /// Block until the result arrives.
     pub fn wait(self) -> RpcResult {
+        if let Some(result) = self.result.into_inner() {
+            return result;
+        }
         match self.rx.recv() {
             Ok(reply) => reply.result,
             Err(_) => Err(RpcError::shutting_down()),
@@ -149,6 +162,9 @@ impl PendingReply {
 
     /// Block until the result arrives or `timeout` passes.
     pub fn wait_timeout(self, timeout: Duration) -> RpcResult {
+        if let Some(result) = self.result.into_inner() {
+            return result;
+        }
         match self.rx.recv_timeout(timeout) {
             Ok(reply) => reply.result,
             Err(RecvTimeoutError::Timeout) => Err(RpcError::new(

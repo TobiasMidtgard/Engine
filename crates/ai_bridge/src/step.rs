@@ -153,7 +153,14 @@ pub(crate) fn finish_steps(world: &mut World) {
 pub(crate) fn pause(world: &mut World) -> Value {
     let stepping = world.resource::<StepControl>().is_stepping();
     if stepping {
-        world.resource_mut::<StepControl>().repause = true;
+        // Remember the speed the step runs at, so engine.resume restores it after the
+        // deferred pause (Time::pause itself forgets it).
+        let speed = world.resource::<Time>().base_scale();
+        let mut control = world.resource_mut::<StepControl>();
+        control.repause = true;
+        if speed > 0.0 {
+            control.saved_scale = Some(speed);
+        }
         return json!({"paused": false, "pause_after_step": true});
     }
     let scale = {

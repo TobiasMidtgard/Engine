@@ -16,6 +16,7 @@ tracing.workspace = true
 engine_input.workspace = true
 engine_render.workspace = true
 engine_platform.workspace = true
+image.workspace = true
 
 [[example]]
 name = "bridge_demo"

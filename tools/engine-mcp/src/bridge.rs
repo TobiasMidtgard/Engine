@@ -447,7 +447,12 @@ impl BridgeLink {
                      output is in this server's stderr"
                 ));
             }
-            match self.try_call("bridge.ping", json!({}), Duration::from_secs(30)) {
+            // A connected game that does not run frames (stopped in a debugger, a modal dialog)
+            // must not hold the caller past its own deadline.
+            let ping_timeout = deadline
+                .saturating_duration_since(Instant::now())
+                .clamp(Duration::from_millis(500), Duration::from_secs(30));
+            match self.try_call("bridge.ping", json!({}), ping_timeout) {
                 Ok(_) | Err(CallError::Rpc { .. }) => return Ok(()),
                 Err(CallError::Unavailable(e)) => {
                     if Instant::now() >= deadline {
@@ -507,6 +512,28 @@ mod tests {
         let text = err.to_string();
         assert!(text.contains("ENGINE_BRIDGE=127.0.0.1:"), "{text}");
         assert!(text.contains("--launch"), "{text}");
+    }
+
+    #[test]
+    fn wait_ready_keeps_its_deadline_when_the_game_does_not_answer() {
+        // Accepts connections and reads requests but never answers, like a game stopped in a
+        // debugger.
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap().to_string();
+        std::thread::spawn(move || {
+            let mut held = Vec::new();
+            for stream in listener.incoming().flatten() {
+                held.push(stream);
+            }
+        });
+        let link = BridgeLink::connect_to(address, None);
+        let started = Instant::now();
+        let err = link.wait_ready(Duration::from_secs(1)).unwrap_err();
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "waited {:?}: {err}",
+            started.elapsed()
+        );
     }
 
     #[cfg(unix)]

@@ -52,7 +52,8 @@ pub struct Settings {
     pub list_wait: Duration,
     /// How long one tool call may take (a long `step` counts here).
     pub call_timeout: Duration,
-    /// Where screenshots go when the caller gives no path.
+    /// Where screenshots go when the caller gives no path. Removed by [`Server::shutdown`] if
+    /// the server created it.
     pub screenshot_dir: PathBuf,
 }
 
@@ -112,6 +113,8 @@ pub struct Server {
     /// A `tools/list` was answered without the engine's tools; send `list_changed` later.
     listed_without_engine: AtomicBool,
     shots: AtomicU64,
+    /// `settings.screenshot_dir` was created by this server (and is removed on shutdown).
+    made_screenshot_dir: AtomicBool,
 }
 
 /// `entity.spawn` → `entity_spawn`; anything outside `[A-Za-z0-9_-]` becomes `_`.
@@ -185,11 +188,11 @@ fn builtin_tools() -> Vec<Value> {
             "description": "Render the game's current frame and return it as a PNG image, plus \
                 a text line with the file path and size. Optional `path` keeps the PNG there \
                 (relative paths resolve against this server's working directory); by default \
-                it goes to a temp folder.",
+                it goes to a temp folder that is removed when this server exits.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "path": {"type": "string", "description": "Where to save the PNG."}
+                    "path": {"type": "string", "description": "Where to save the PNG (must end in .png)."}
                 },
                 "additionalProperties": false
             }
@@ -276,6 +279,7 @@ impl Server {
             tools: Mutex::new(HashMap::new()),
             listed_without_engine: AtomicBool::new(false),
             shots: AtomicU64::new(0),
+            made_screenshot_dir: AtomicBool::new(false),
         }
     }
 
@@ -450,6 +454,17 @@ impl Server {
     fn screenshot_path(&self, args: &Value) -> Result<PathBuf, String> {
         if let Some(path) = args.get("path").and_then(Value::as_str) {
             let path = Path::new(path);
+            // The game always writes PNG data and overwrites whatever is there; insisting on the
+            // extension keeps a mistyped path from clobbering a source file.
+            if !path
+                .extension()
+                .is_some_and(|e| e.eq_ignore_ascii_case("png"))
+            {
+                return Err(format!(
+                    "\"path\" must end in .png (got '{}'); omit it to use a temp file",
+                    path.display()
+                ));
+            }
             return Ok(if path.is_absolute() {
                 path.to_path_buf()
             } else {
@@ -459,8 +474,11 @@ impl Server {
             });
         }
         let dir = &self.settings.screenshot_dir;
-        std::fs::create_dir_all(dir)
-            .map_err(|e| format!("could not create {}: {e}", dir.display()))?;
+        if !dir.is_dir() {
+            std::fs::create_dir_all(dir)
+                .map_err(|e| format!("could not create {}: {e}", dir.display()))?;
+            self.made_screenshot_dir.store(true, Ordering::SeqCst);
+        }
         let n = self.shots.fetch_add(1, Ordering::SeqCst) + 1;
         Ok(dir.join(format!("shot-{n:04}.png")))
     }
@@ -470,17 +488,26 @@ impl Server {
             Ok(p) => p,
             Err(e) => return text_content(format!("Error: {e}"), true),
         };
-        // Remove an older file so a failed capture cannot be mistaken for a fresh one.
-        let _ = std::fs::remove_file(&path);
+        // An older file at the path must not pass for a fresh capture; remember its timestamp
+        // instead of deleting it (a failed capture then leaves the user's file alone).
+        let modified = |p: &Path| std::fs::metadata(p).and_then(|m| m.modified()).ok();
+        let before = modified(&path);
         let shown = path.to_string_lossy().to_string();
         let answer = self.bridge.call(
             "render.screenshot",
             json!({"path": shown}),
             self.settings.call_timeout,
         );
-        match (answer, std::fs::read(&path)) {
-            // The file is the source of truth: a written PNG is a success even if the game
-            // reported a problem after saving it.
+        // The game may report an error although it saved the PNG (render.screenshot answers
+        // "the frame was not rendered" from the 17th capture of a session on), so a file the
+        // call rewrote counts as a success too.
+        let rewritten = modified(&path).is_some_and(|after| before != Some(after));
+        let bytes = if answer.is_ok() || rewritten {
+            std::fs::read(&path)
+        } else {
+            Err(std::io::Error::other("not written"))
+        };
+        match (answer, bytes) {
             (_, Ok(bytes)) if bytes.starts_with(PNG_SIGNATURE) => {
                 let (width, height) = png_size(&bytes).unwrap_or((0, 0));
                 json!({
@@ -541,9 +568,13 @@ impl Server {
         false
     }
 
-    /// Stop the launched game (if any).
+    /// Stop the launched game (if any) and remove the temp screenshot folder this server
+    /// created.
     pub fn shutdown(&self) {
         self.bridge.shutdown();
+        if self.made_screenshot_dir.swap(false, Ordering::SeqCst) {
+            let _ = std::fs::remove_dir_all(&self.settings.screenshot_dir);
+        }
     }
 }
 
@@ -611,8 +642,18 @@ mod tests {
                 "engine.step" => json!({"result": {"frames": params["frames"], "frame": 10}}),
                 "render.screenshot" => {
                     let path = params["path"].as_str().unwrap().to_string();
-                    std::fs::write(&path, TINY_PNG).unwrap();
-                    json!({"result": {"path": path, "width": 4, "height": 3}})
+                    if path.contains("no-gpu") {
+                        // Fails without writing anything.
+                        json!({"error": {"code": -32000, "message": "no GPU"}})
+                    } else if path.contains("saved-then-error") {
+                        // Writes the PNG but reports an error (the render crate does this from
+                        // the 17th capture of a session).
+                        std::fs::write(&path, TINY_PNG).unwrap();
+                        json!({"error": {"code": -32000, "message": "the frame was not rendered"}})
+                    } else {
+                        std::fs::write(&path, TINY_PNG).unwrap();
+                        json!({"result": {"path": path, "width": 4, "height": 3}})
+                    }
                 }
                 other => {
                     json!({"error": {"code": -32601, "message": format!("unknown method '{other}'")}})
@@ -632,11 +673,14 @@ mod tests {
     fn server_for(address: &str) -> (Server, Arc<Mutex<Vec<Value>>>) {
         let notes = Arc::new(Mutex::new(Vec::new()));
         let sink = notes.clone();
+        // One folder per server: tests run in parallel and shutdown removes it.
+        static SERVERS: AtomicU64 = AtomicU64::new(0);
+        let n = SERVERS.fetch_add(1, Ordering::SeqCst);
         let settings = Settings {
             list_wait: Duration::from_secs(2),
             call_timeout: Duration::from_secs(10),
             screenshot_dir: std::env::temp_dir()
-                .join(format!("engine-mcp-test-{}", std::process::id())),
+                .join(format!("engine-mcp-test-{}-{n}", std::process::id())),
         };
         let server = Server::new(
             BridgeLink::connect_to(address, None),
@@ -840,6 +884,53 @@ mod tests {
             .to_string();
         assert!(Path::new(&path).is_absolute(), "{path}");
         assert!(text.contains(&path));
+
+        // The temp folder goes away with the server.
+        assert!(Path::new(&path).exists());
+        server.shutdown();
+        assert!(!server.settings.screenshot_dir.exists(), "{path}");
+    }
+
+    #[test]
+    fn screenshot_never_destroys_an_existing_file() {
+        let fake = FakeBridge::start();
+        let (server, _) = server_for(&fake.address);
+        let dir = std::env::temp_dir().join(format!("engine-mcp-keep-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let shot = |id: u64, path: &Path| {
+            let args = json!({"path": path.to_string_lossy()});
+            request(
+                &server,
+                id,
+                "tools/call",
+                json!({"name": "screenshot", "arguments": args}),
+            )
+        };
+
+        // A path that is not a .png is refused before the game is asked.
+        let notes = dir.join("notes.md");
+        std::fs::write(&notes, "keep me").unwrap();
+        let refused = shot(1, &notes);
+        assert_eq!(refused["result"]["isError"], json!(true), "{refused}");
+        assert!(fake.requests("render.screenshot").is_empty());
+        assert_eq!(std::fs::read_to_string(&notes).unwrap(), "keep me");
+
+        // A failed capture leaves an older file in place and is reported as a failure.
+        let old = dir.join("no-gpu.png");
+        std::fs::write(&old, TINY_PNG).unwrap();
+        let failed = shot(2, &old);
+        assert_eq!(failed["result"]["isError"], json!(true), "{failed}");
+        let text = failed["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("no GPU"), "{text}");
+        assert!(old.exists(), "the failed capture deleted the user's file");
+
+        // A PNG the game wrote counts even if the game then reported an error.
+        let late = dir.join("saved-then-error.png");
+        let _ = std::fs::remove_file(&late);
+        let saved = shot(3, &late);
+        assert_eq!(saved["result"]["isError"], json!(false), "{saved}");
+        assert_eq!(saved["result"]["content"][0]["type"], json!("image"));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

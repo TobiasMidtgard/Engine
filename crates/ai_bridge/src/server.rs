@@ -157,7 +157,15 @@ fn spawn_connection(stream: TcpStream, shared: Arc<ServerShared>) -> std::io::Re
 
     // Registered only once the writer runs, so a failed spawn leaves nothing behind (the
     // reader-spawn failure below undoes it).
-    lock(&shared.connections).push((id, registered_stream));
+    {
+        let mut connections = lock(&shared.connections);
+        // `BridgeServer::drop` sets `shutdown` before it closes the registered connections, so a
+        // connection registered after that would never be closed: close it here instead.
+        if shared.shutdown.load(Ordering::SeqCst) {
+            let _ = registered_stream.shutdown(Shutdown::Both);
+        }
+        connections.push((id, registered_stream));
+    }
     shared.clients.fetch_add(1, Ordering::SeqCst);
     let reader_shared = shared.clone();
     let spawned = std::thread::Builder::new()

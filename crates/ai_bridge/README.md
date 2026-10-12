@@ -24,7 +24,7 @@ app.add_plugins(engine_ai_bridge::AiBridgePlugin::listen("127.0.0.1:0")); // alw
 | `ENGINE_BRIDGE=9000` | listen on `127.0.0.1:9000` |
 | `ENGINE_BRIDGE=off` | stay off even if the plugin says `enabled` |
 | `ENGINE_BRIDGE_TOKEN=secret` | require the token (see below) |
-| `ENGINE_BRIDGE_EXIT_ON_STDIN_EOF=1` | exit when stdin closes (launchers set this so the game never outlives them) |
+| `ENGINE_BRIDGE_EXIT_ON_STDIN_EOF=1` | exit when stdin closes (launchers set this so the game never outlives them); also exit at once if the bridge cannot listen |
 | `AiBridgePlugin { enabled, address, token, read_env, max_requests_per_frame }` | the same settings in code |
 
 By default the bridge binds to localhost only. If you bind it to another interface without a
@@ -140,5 +140,7 @@ assert!(pending.try_get().is_some());
   panics and exit.
 - `tests/tcp.rs` uses a real TCP client thread while the main thread runs frames. It covers
   ping, spawn, list, step, input, error codes, pipelining, two concurrent clients, token
-  rejection and shutdown. It also takes a screenshot over TCP; that test is skipped with a note
-  when there is no GPU.
+  rejection and shutdown. It also spawns a red ball over TCP and checks that the next
+  screenshot shows it; that test is skipped with a note when there is no GPU.
+- `tests/launched.rs` checks that a game started by a launcher exits when its bridge cannot
+  listen (it runs the game in a child process, because it sets environment variables).

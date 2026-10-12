@@ -288,9 +288,17 @@ fn dropping_the_app_closes_the_bridge() {
     });
 
     drop(app);
-    // The open connection is closed...
+    // The open connection is closed (end of stream or reset, not a read timeout)...
+    client
+        .writer
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
     let mut line = String::new();
-    assert_eq!(client.reader.read_line(&mut line).unwrap_or(0), 0, "{line}");
+    match client.reader.read_line(&mut line) {
+        Ok(0) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::ConnectionReset => {}
+        other => panic!("the connection is still open after the app was dropped: {other:?} {line}"),
+    }
     // ...and the bridge stops serving new connections once the accept thread has exited.
     let deadline = Instant::now() + Duration::from_secs(5);
     while still_our_bridge(&address) {
@@ -353,24 +361,50 @@ fn screenshot_over_tcp() {
         return;
     }
     let address = app.world.resource::<BridgeInfo>().address.clone().unwrap();
-    let path = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("bridge_shot.png");
-    let _ = std::fs::remove_file(&path);
-    let shot_path = path.to_string_lossy().to_string();
+    let dir = std::path::Path::new(env!("CARGO_TARGET_TMPDIR"));
+    let (empty_path, ball_path) = (dir.join("bridge_empty.png"), dir.join("bridge_ball.png"));
+    for p in [&empty_path, &ball_path] {
+        let _ = std::fs::remove_file(p);
+    }
+    let (empty_arg, ball_arg) = (
+        empty_path.to_string_lossy().to_string(),
+        ball_path.to_string_lossy().to_string(),
+    );
 
     let result = run_until_done(&mut app, move || {
         let mut c = Client::connect(&address);
+        c.call("render.screenshot", json!({"path": empty_arg}));
+        // A red ball right where the camera looks, spawned and shown over the bridge.
         c.call(
             "entity.spawn",
             json!({"name": "Ball", "components": {
                 "Transform": {"translation": [0.0, 1.0, 0.0]},
-                "MeshRenderer": {"mesh": {"shape": {"Sphere": {"radius": 1.0, "segments": 32}}}}
+                "MeshRenderer": {
+                    "mesh": {"shape": {"Sphere": {"radius": 1.0, "segments": 32}}},
+                    "material": {"inline": {"base_color": [0.8, 0.03, 0.02, 1.0]}}
+                }
             }}),
         );
         c.call("engine.step", json!({"frames": 1}));
-        c.call("render.screenshot", json!({"path": shot_path}))
+        c.call("render.screenshot", json!({"path": ball_arg}))
     });
     assert_eq!(result["width"], json!(320), "{result}");
     assert_eq!(result["height"], json!(180), "{result}");
-    let bytes = std::fs::read(&path).expect("screenshot written");
-    assert!(bytes.starts_with(b"\x89PNG\r\n\x1a\n"), "not a PNG");
+
+    let center = |path: &std::path::Path| {
+        let img = image::open(path).expect("screenshot written").to_rgba8();
+        let [r, g, b, _] = img.get_pixel(img.width() / 2, img.height() / 2).0;
+        [r as i32, g as i32, b as i32]
+    };
+    let [r, g, b] = center(&ball_path);
+    assert!(
+        r > g + 40 && r > b + 40,
+        "the ball spawned over the bridge is not in the picture: center pixel {:?}",
+        [r, g, b]
+    );
+    let before = center(&empty_path);
+    assert!(
+        !(before[0] > before[1] + 40 && before[0] > before[2] + 40),
+        "the picture taken before the spawn is already red: {before:?}"
+    );
 }

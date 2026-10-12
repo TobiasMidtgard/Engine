@@ -75,7 +75,9 @@ pub const ENV_ADDRESS: &str = "ENGINE_BRIDGE";
 pub const ENV_TOKEN: &str = "ENGINE_BRIDGE_TOKEN";
 
 /// When set (to anything but `0`/`false`), the game exits once its stdin closes. Launchers such
-/// as `engine-mcp --launch` set it and keep a pipe open, so the game never outlives them.
+/// as `engine-mcp --launch` set it and keep a pipe open, so the game never outlives them. It
+/// also marks the game as started for its bridge: if the bridge cannot listen, the game exits
+/// (with code 1) instead of running where its launcher can never reach it.
 pub const ENV_EXIT_ON_STDIN_EOF: &str = "ENGINE_BRIDGE_EXIT_ON_STDIN_EOF";
 
 /// Seconds the game gets to exit cleanly after its launcher went away, before it is forced to.
@@ -244,7 +246,8 @@ impl Plugin for AiBridgePlugin {
             )
             .add_systems(Last, bridge_frame_end_system);
         register_api(app);
-        if self.read_env && env_flag(ENV_EXIT_ON_STDIN_EOF) {
+        let launched = self.read_env && env_flag(ENV_EXIT_ON_STDIN_EOF);
+        if launched {
             exit_when_stdin_closes(app.world.resource::<BridgeQueue>().client());
         }
 
@@ -284,6 +287,15 @@ impl Plugin for AiBridgePlugin {
                      {ENV_ADDRESS}=127.0.0.1:<port> (0 = any free port)."
                 );
                 tracing::error!("AI bridge {message}");
+                if launched {
+                    // The launcher waits for this bridge; a game it cannot reach is useless to
+                    // it, and exiting tells it at once instead of after its startup timeout.
+                    tracing::error!(
+                        "AI bridge: {ENV_EXIT_ON_STDIN_EOF} is set (launched by a tool that \
+                         drives the game through the bridge); exiting"
+                    );
+                    app.world.write_message(AppExit::Error(1));
+                }
                 info.error = Some(message);
             }
         }
@@ -526,6 +538,9 @@ mod tests {
         assert!(ping.try_get().is_none(), "answered before a frame ran");
         app.update();
         assert_eq!(ping.try_get().unwrap().unwrap()["pong"], json!(true));
+        // Asking again gives the same answer (not "the game stopped").
+        assert_eq!(ping.try_get().unwrap().unwrap()["pong"], json!(true));
+        assert_eq!(ping.wait().unwrap()["pong"], json!(true));
 
         let missing = client.request("entity.spwan", json!({}));
         app.update();
@@ -609,6 +624,27 @@ mod tests {
         assert!(!app.world.resource::<Time>().is_paused());
         app.update();
         assert!(app.world.resource::<Time>().is_paused());
+    }
+
+    #[test]
+    fn pause_during_a_step_keeps_the_speed_for_resume() {
+        let mut app = app();
+        app.world.resource_mut::<Time>().set_base_scale(0.5);
+        let client = BridgeClient::from_world(&app.world).unwrap();
+        let step = client.request("engine.step", json!({"frames": 2}));
+        let pause = client.request("engine.pause", json!({}));
+        app.update();
+        assert_eq!(
+            pause.try_get().unwrap().unwrap()["pause_after_step"],
+            json!(true)
+        );
+        app.update();
+        assert_eq!(step.try_get().unwrap().unwrap()["paused"], json!(true));
+        assert!(app.world.resource::<Time>().is_paused());
+
+        let resume = call_api(&mut app.world, "engine.resume", json!({})).unwrap();
+        assert_eq!(resume["speed"], json!(0.5));
+        assert_eq!(app.world.resource::<Time>().base_scale(), 0.5);
     }
 
     #[test]

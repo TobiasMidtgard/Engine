@@ -14,8 +14,9 @@ on stderr. The protocol is implemented by hand on `serde_json`, without an MCP S
   `engine_describe`, and so on. Each tool's description is the API summary plus
   `Example args: ...`. Its input schema is `{"type": "object", "additionalProperties": true}`.
 - `screenshot` renders the current frame. It returns the PNG as MCP image content (base64,
-  `image/png`) plus a text item with the file path and size. Optional `path` keeps the file
-  there. Otherwise it goes to a temp folder.
+  `image/png`) plus a text item with the file path and size. Optional `path` (must end in
+  `.png`) keeps the file there. Otherwise it goes to a temp folder that is removed when the
+  server exits.
 - `step` `{frames}` advances exactly N frames and returns when they have run. A paused game
   runs those frames, then pauses again.
 - `call` `{method, params}` calls any API by its dotted name, including APIs registered after
@@ -89,7 +90,9 @@ the client from the workspace directory, or run a prebuilt binary
 `TcpListener` in the test) answers `bridge.methods`, `entity.spawn`, `engine.step` and
 `render.screenshot`. The tests check `initialize`, the `tools/list` mapping, `tools/call`
 round trips, image content, the built-in-tools fallback with `list_changed`, and process
-launch and shutdown.
+launch and shutdown. `tests/stdio.rs` runs the real binary over stdio against a stand-in
+bridge: every stdout line must be one JSON-RPC message, a malformed line gets a parse error
+without ending the session, and closing stdin stops the server.
 
 To check the whole path by hand, start the server with `--launch` on the demo game and send:
 
