@@ -63,7 +63,10 @@ fn main() {
         ))
         .add_plugins(engine_softbody::SoftBodyPlugin)
         .add_systems(Startup, setup)
-        .add_systems(Update, (camera::fly, scenery::update_lods).chain());
+        .add_systems(
+            Update,
+            (camera::fly, places::run_pending, scenery::update_lods).chain(),
+        );
     register_apis(&mut app);
 
     let args: Vec<String> = std::env::args().collect();
@@ -203,7 +206,7 @@ fn register_apis(app: &mut App) {
                 ));
             };
             camera::go_to(world, &place);
-            places::visit(world, &place);
+            places::visit_soon(world, &place);
             if args
                 .get("with_time")
                 .and_then(|v| v.as_bool())

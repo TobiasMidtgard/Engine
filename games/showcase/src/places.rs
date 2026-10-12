@@ -42,6 +42,42 @@ pub fn visit(world: &mut World, place: &Place) {
     world.insert_resource(CurrentPlace(Some(place.clone())));
 }
 
+/// Frames between moving the camera and running a place's calls: the focus points follow the
+/// camera a frame later and the fields that follow them (weather on the ground, smoke, the
+/// terrain's prints) recenter the frame after that, so calls made at once would write around
+/// the old spot and be dropped when the grids move.
+pub const ARRIVE_DELAY: u32 = 2;
+
+/// A [`visit`] waiting for the camera's move to reach the focus points.
+#[derive(Resource, Debug)]
+pub struct PendingVisit {
+    place: Place,
+    frames: u32,
+}
+
+/// [`visit`] `place` [`ARRIVE_DELAY`] frames from now (call it right after moving the camera
+/// there).
+pub fn visit_soon(world: &mut World, place: &Place) {
+    world.insert_resource(PendingVisit {
+        place: place.clone(),
+        frames: ARRIVE_DELAY,
+    });
+}
+
+/// Count down and run a pending [`visit_soon`].
+pub fn run_pending(world: &mut World) {
+    let Some(mut pending) = world.get_resource_mut::<PendingVisit>() else {
+        return;
+    };
+    if pending.frames > 0 {
+        pending.frames -= 1;
+        return;
+    }
+    if let Some(pending) = world.remove_resource::<PendingVisit>() {
+        visit(world, &pending.place);
+    }
+}
+
 /// Run the current place's `on_leave` calls and forget it.
 pub fn leave(world: &mut World) {
     let previous = world
