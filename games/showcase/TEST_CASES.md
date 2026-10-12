@@ -43,7 +43,7 @@ are built, nothing simulates yet) · ⬜ not visible yet
 |---|---|---|---|---|
 | 16 | Footsteps in mud, grass, snow, sand, gravel, puddles, wood, metal (sound) | `footsteps` | Audio and footsteps | ✅ trail loop with a hiker, a runner, a dog and a horse; sound rings show each step; the ground reports the trail's surfaces to everyone else |
 | 17 | Footprints and tracks pressed into mud and snow | `tracks` (footprint lab) | Planets and terrain | ⬜ strips of mud, snow and sand with stand-in walkers |
-| 18 | Destructible walls and barricades (Rainbow Six Siege style) | `fortress` | Destructible terrain and buildings | 🟨 brick wall, barricades |
+| 18 | Destructible walls and barricades (Rainbow Six Siege style) | `fortress` | Destructible terrain and buildings | ✅ breach range: shot drywall, kicked-in barricades, thermite through rebar concrete, blown brick, a watchtower and gate that collapse, a mined cliff that caves in (replays every 20 s) |
 | 19 | Voxel digging and building (Valheim style) | `voxel` | Destructible terrain and buildings | 🟨 voxel mound with a pit |
 
 ## Living world
