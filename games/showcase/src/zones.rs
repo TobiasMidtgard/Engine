@@ -274,9 +274,24 @@ pub fn spawn_demos(
             }
             "range" => ph::range(commands, lib, z),
             "weather" => engine_weather::demo::spawn_demo(commands, z.center),
-            "track" => ph::track(commands, lib, z),
-            "airfield" => ph::airfield(commands, lib, z),
-            "spaceport" => ph::spaceport(commands, lib, z),
+            "track" => engine_vehicles::demo::spawn_track(commands, z.center),
+            "airfield" => {
+                let (a, b) = RUNWAY;
+                engine_vehicles::demo::spawn_airfield(
+                    commands,
+                    DVec3::new(a[0], z.center.y, a[1]),
+                    DVec3::new(b[0], z.center.y, b[1]),
+                );
+                ph::airfield_buildings(commands, lib, z);
+            }
+            "spaceport" => {
+                ph::spaceport(commands, lib, z);
+                engine_vehicles::demo::spawn_spaceport(
+                    commands,
+                    z.center + DVec3::new(0.0, 0.4, 0.0),
+                    30.0,
+                );
+            }
             _ => {}
         }
     }
