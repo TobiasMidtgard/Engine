@@ -179,6 +179,73 @@ fn shots() -> Vec<Shot> {
             frames: 10,
             face_moon: false,
         },
+        // Close-ups of the station's props.
+        Shot {
+            name: "station_shelter",
+            setup: vec![dry(), set("partly_cloudy"), hour(15.0), advance(60.0)],
+            eye: DVec3::new(0.2, 1.6, 1.9),
+            target: DVec3::new(-3.6, 1.2, -3.2),
+            frames: 10,
+            face_moon: false,
+        },
+        Shot {
+            name: "station_wind_mast",
+            setup: vec![
+                dry(),
+                (
+                    "weather.set",
+                    json!({"preset": "partly_cloudy", "transition_s": 0, "wind_from_deg": 300}),
+                ),
+                hour(11.0),
+                advance(60.0),
+            ],
+            eye: DVec3::new(3.2, 1.7, -0.6),
+            target: DVec3::new(8.6, 3.4, -6.4),
+            frames: 10,
+            face_moon: false,
+        },
+        Shot {
+            name: "station_thermometer",
+            setup: vec![dry(), set("clear"), hour(13.0), advance(60.0)],
+            eye: DVec3::new(1.9, 2.0, -3.0),
+            target: DVec3::new(2.9, 2.0, -5.75),
+            frames: 10,
+            face_moon: false,
+        },
+        Shot {
+            name: "station_enclosure",
+            setup: vec![dry(), set("partly_cloudy"), hour(10.0), advance(60.0)],
+            eye: DVec3::new(-6.6, 1.8, 2.0),
+            target: DVec3::new(-10.4, 0.9, 5.4),
+            frames: 10,
+            face_moon: false,
+        },
+        Shot {
+            name: "station_wet_asphalt",
+            setup: vec![
+                set("overcast"),
+                hour(13.0),
+                advance(120.0),
+                ("weather.ground", json!({"wetness": 1.0, "puddle_m": 0.006})),
+            ],
+            eye: DVec3::new(0.6, 1.3, 2.4),
+            target: DVec3::new(-2.0, 0.0, -1.6),
+            frames: 10,
+            face_moon: false,
+        },
+        Shot {
+            name: "station_dusk_lamps",
+            setup: vec![
+                set("overcast"),
+                hour(19.6),
+                advance(120.0),
+                ("weather.ground", json!({"wetness": 1.0, "puddle_m": 0.01})),
+            ],
+            eye: DVec3::new(6.2, 1.6, 4.4),
+            target: DVec3::new(-3.0, 1.4, -3.0),
+            frames: 12,
+            face_moon: false,
+        },
     ]
 }
 
