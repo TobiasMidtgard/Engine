@@ -1082,10 +1082,16 @@ name = "engine_water"
 version = "0.1.0"
 dependencies = [
  "bevy_ecs",
+ "bytemuck",
+ "engine_assets",
  "engine_core",
+ "engine_render",
  "engine_world",
+ "image",
+ "parking_lot",
  "serde",
  "serde_json",
+ "wgpu",
 ]
 
 [[package]]

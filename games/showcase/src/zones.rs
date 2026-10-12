@@ -254,8 +254,7 @@ pub fn spawn_demos(
             "forest" => ph::forest(commands, lib, land, z, rng),
             "meadow" => ph::meadow(commands, lib, z, rng),
             "lake" => ph::lake(commands, meshes, lib, land, z),
-            // The water module's test area (engine_water::demo::spawn_demo) goes here.
-            "water" => {}
+            "water" => engine_water::demo::spawn_demo(commands, z.center),
             "footsteps" => engine_audio::demo::spawn_demo(commands, z.center),
             "tracks" => ph::tracks(commands, z),
             "cave" => ph::cave(commands, z, rng),
