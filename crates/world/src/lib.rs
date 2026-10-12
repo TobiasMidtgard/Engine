@@ -39,7 +39,7 @@ pub use events::*;
 pub use grid::{Blend, Grid2, Grid3};
 pub use locomotion::{LocomotionMode, LocomotionState, MoveIntent, VehicleControls};
 pub use physical::*;
-pub use shift::{WorldShift, WorldShiftSet};
+pub use shift::{FollowsWorldShift, WorldShift, WorldShiftAppExt, WorldShiftSet};
 pub use terrain::{EditOp, EditShape, TerrainChanged, TerrainEdit};
 
 use engine_core::math::{DVec2, DVec3, Vec3};
@@ -234,6 +234,7 @@ impl Plugin for WorldPlugin {
                     .chain()
                     .in_set(SimSet::Environment),
             );
+        shift::register_messages(app);
     }
 }
 
