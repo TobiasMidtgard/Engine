@@ -11,6 +11,7 @@ pub mod ik;
 pub mod import;
 pub mod muscle;
 pub mod procedural;
+pub mod retarget;
 pub mod skeleton;
 pub mod skin;
 pub mod xform;
@@ -24,6 +25,7 @@ pub use muscle::{MorphWeights, Muscle, MuscleDriver, MuscleRig};
 pub use procedural::gait::{GaitLeg, GaitStage, LeggedGait};
 pub use procedural::spring::{SpringChainDef, SpringChains};
 pub use procedural::vehicle::{VehicleRig, WheelRig};
+pub use retarget::{HandRig, Retarget, RetargetMap, Retargeter};
 pub use skeleton::Skeleton;
 pub use skin::feature::SkinningFeature;
 pub use skin::{SkinMaterial, SkinPose, SkinnedMesh, SkinnedMeshRenderer};
@@ -119,6 +121,7 @@ impl Plugin for AnimationPlugin {
                 muscle::muscle_system.in_set(AnimSet::Muscles),
                 (
                     animator::publish_pose,
+                    retarget::retarget_poses,
                     (
                         skin::update_skin_poses,
                         attach::attachment_system,
