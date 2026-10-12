@@ -345,6 +345,62 @@ pub fn demo_views(z: &Zone) -> Vec<View> {
             .iter()
             .map(|v| View::new(v.key, v.name, v.eye, v.target, v.hour))
             .collect(),
+        "parkour" => {
+            // The duel runs from its setup when the camera arrives (movement.duel), so each
+            // stop catches its moment; leaving puts the duel back on its three-round cycle.
+            let duel = |round: &str| format!(r#"{{"round": "{round}"}}"#);
+            let cycle = r#"{"round": null}"#;
+            vec![
+                View::new(
+                    "parkour_course",
+                    "Movement course: slide bar, wall-run walls and the tower",
+                    [-34.0, 7.0, 26.0],
+                    [2.0, 2.5, 11.0],
+                    16.0,
+                )
+                .warmup(2.0),
+                View::new(
+                    "parkour_blink",
+                    "An elite cuts down an untrained player in a blink",
+                    [-4.0, 1.9, -11.5],
+                    [0.0, 1.15, -10.0],
+                    16.0,
+                )
+                .warmup(0.7)
+                .on_arrive("movement.duel", &duel("Blink"))
+                .on_leave("movement.duel", cycle),
+                View::new(
+                    "parkour_focus",
+                    "Trained: the same attack in slow motion, sidestepped",
+                    [-2.0, 2.4, -5.0],
+                    [0.3, 1.1, -13.0],
+                    16.0,
+                )
+                .warmup(1.0)
+                .on_arrive("movement.duel", &duel("Focus"))
+                .on_leave("movement.duel", cycle),
+                View::new(
+                    "parkour_counter",
+                    "The counter-strike while the elite recovers",
+                    [-4.0, 2.3, -7.5],
+                    [1.0, 1.0, -10.5],
+                    16.0,
+                )
+                .warmup(1.55)
+                .on_arrive("movement.duel", &duel("Focus"))
+                .on_leave("movement.duel", cycle),
+                View::new(
+                    "parkour_pack",
+                    "Grunts fall one by one in slow motion",
+                    [8.0, 4.0, -4.0],
+                    [0.0, 1.0, -15.0],
+                    16.0,
+                )
+                .warmup(1.75)
+                .on_arrive("movement.duel", &duel("Pack"))
+                .on_leave("movement.duel", cycle),
+            ]
+        }
         "yard" => vec![
             View::new(
                 "yard_banners",
