@@ -319,3 +319,28 @@ fn rebinding_a_key_in_settings_updates_the_input_map() {
         .collect();
     assert_eq!(keys, vec![KeyCode::K]);
 }
+
+#[test]
+fn markers_follow_a_world_shift() {
+    let mut app = app();
+    api(
+        &mut app,
+        "hud.marker",
+        json!({"title": "Beacon", "position": [100.0, 5.0, -40.0]}),
+    );
+    app.update_n(2);
+    app.world.write_message(engine_world::WorldShift::translate(
+        engine_core::math::DVec3::new(-100.0, 0.0, 40.0),
+    ));
+    app.update_n(2);
+    let mut q = app.world.query::<(&engine_ui::hud::Marker, &WorldAnchor)>();
+    let (_, a) = q
+        .iter(&app.world)
+        .find(|(m, _)| m.title == "Beacon")
+        .unwrap();
+    assert!(
+        (a.position - engine_core::math::DVec3::new(0.0, 5.0, 0.0)).length() < 1e-9,
+        "{:?}",
+        a.position
+    );
+}

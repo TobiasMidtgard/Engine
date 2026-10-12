@@ -187,6 +187,11 @@ impl Plugin for UiPlugin {
                 .chain()
                 .in_set(UpdateSet::AfterPropagate),
         )
+        .add_message::<engine_world::WorldShift>()
+        .add_systems(
+            PostUpdate,
+            layout::follow_world_shift.in_set(engine_world::WorldShiftSet::Apply),
+        )
         .add_render_feature(UiFeature::default());
 
         api::register(app);

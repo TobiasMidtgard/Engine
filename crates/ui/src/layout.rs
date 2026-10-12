@@ -816,6 +816,22 @@ fn project_anchors(world: &mut World, vp: &UiViewport) -> HashMap<Entity, (Vec2,
     out
 }
 
+/// Keeps world-anchored UI (markers, nameplates) on its spot when the world re-anchors: runs
+/// in `WorldShiftSet::Apply`.
+pub fn follow_world_shift(
+    mut shifts: MessageReader<engine_world::WorldShift>,
+    mut anchors: Query<&mut WorldAnchor>,
+) {
+    for shift in shifts.read() {
+        for mut a in &mut anchors {
+            a.offset = shift.direction(a.offset);
+            if a.entity.is_none() {
+                a.position = shift.point(a.position);
+            }
+        }
+    }
+}
+
 /// Whether a node or any ancestor node has `Display::None` or a closing screen.
 pub fn is_effectively_hidden(world: &World, mut e: Entity) -> bool {
     loop {
