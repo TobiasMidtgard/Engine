@@ -3,19 +3,23 @@
 pub mod animator;
 pub mod attach;
 pub mod build;
+pub mod character;
 pub mod clip;
 pub mod demo;
 pub mod events;
 pub mod graph;
 pub mod ik;
+pub mod import;
 pub mod muscle;
 pub mod procedural;
+pub mod retarget;
 pub mod skeleton;
 pub mod skin;
 pub mod xform;
 
 pub use animator::{AnimationLibrary, Animator, AnimatorSettings, PoseEdit};
-pub use attach::BoneAttachment;
+pub use attach::{BoneAttachment, Hang};
+pub use character::{HumanModel, HumanModels};
 pub use clip::AnimationClip;
 pub use graph::{AnimGraph, NodeDef};
 pub use ik::{FootIk, IkShape, IkSurface, LegIk, LookAt, Reach, ReachIk};
@@ -23,6 +27,7 @@ pub use muscle::{MorphWeights, Muscle, MuscleDriver, MuscleRig};
 pub use procedural::gait::{GaitLeg, GaitStage, LeggedGait};
 pub use procedural::spring::{SpringChainDef, SpringChains};
 pub use procedural::vehicle::{VehicleRig, WheelRig};
+pub use retarget::{HandGrip, HandRig, Retarget, RetargetMap, Retargeter};
 pub use skeleton::Skeleton;
 pub use skin::feature::SkinningFeature;
 pub use skin::{SkinMaterial, SkinPose, SkinnedMesh, SkinnedMeshRenderer};
@@ -93,7 +98,11 @@ impl Plugin for AnimationPlugin {
         .add_systems(
             Update,
             (
-                (animator::build_animators, animator::queue_triggers)
+                (
+                    character::load_human_models,
+                    animator::build_animators,
+                    animator::queue_triggers,
+                )
                     .chain()
                     .in_set(AnimSet::Setup),
                 animator::evaluate_animators.in_set(AnimSet::Graph),
@@ -118,6 +127,7 @@ impl Plugin for AnimationPlugin {
                 muscle::muscle_system.in_set(AnimSet::Muscles),
                 (
                     animator::publish_pose,
+                    retarget::retarget_poses,
                     (
                         skin::update_skin_poses,
                         attach::attachment_system,
@@ -169,7 +179,12 @@ fn register_types(app: &mut App) {
          and sheen (detail distance, m).",
     )
     .register_component::<BoneAttachment>(
-        "Follows a bone of another entity (props, weapons): bone name, offset (m), rotation.",
+        "Follows a bone of another entity (props, weapons): bone name, offset (m), rotation, \
+         and an optional hang (a loosely held prop swings down while no clip holds it up).",
+    )
+    .register_component::<HandGrip>(
+        "Keeps a character's hands closed at least this much (left, right: 0..1), as when it \
+         carries something.",
     );
 }
 

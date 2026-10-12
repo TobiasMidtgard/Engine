@@ -2,17 +2,23 @@
 // ECS systems take many queries and resources by design.
 #![allow(clippy::type_complexity, clippy::too_many_arguments)]
 
+pub mod architecture;
 pub mod assets;
 pub mod charges;
 pub mod collapse;
 pub mod debris;
 pub mod demo;
+pub mod dress;
 pub mod fracture;
+pub mod hill;
 pub mod hits;
 pub mod material;
 pub mod meshing;
+pub mod props;
+pub mod shift;
 pub mod structure;
 pub mod sync;
+pub mod textures;
 pub mod voxel;
 pub mod wall;
 
@@ -33,6 +39,22 @@ pub use material::{DestructibleMaterial, DestructionMaterials, MaterialProps};
 pub use structure::{Fracturable, FractureShape, PieceState, ShowSupport, StructuralPiece};
 pub use voxel::{VoxelShape, VoxelState, VoxelVolume};
 pub use wall::{DestructibleWall, WallAnchors, WallState};
+
+/// A suggested viewpoint on a demo (camera bookmark or screenshot-tour stop), relative to the
+/// demo's origin. Call `destruction.demo_restart` on arrival, then wait `warmup_secs` (a
+/// tour that settles 0.4 s before its warm-up is already counted in) to see the named moment.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct DemoView {
+    pub key: &'static str,
+    pub name: &'static str,
+    pub eye: [f64; 3],
+    pub target: [f64; 3],
+    pub hour: f32,
+    pub warmup_secs: f32,
+}
+
+/// The function a viewpoint calls on arrival so its moment plays from the start.
+pub const RESTART_API: &str = "destruction.demo_restart";
 
 /// Who moves big debris chunks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -154,6 +176,7 @@ impl Plugin for DestructionPlugin {
             .init_resource::<HitQueue>()
             .init_resource::<debris::PendingDebris>()
             .init_resource::<structure::StructureGraph>()
+            .init_resource::<dress::PropMeshes>()
             .insert_resource(hits::DestructionSource(source))
             .register_component::<DestructibleWall>(
                 "Siege-style destructible wall or barricade: size [w,h] m, thickness m, cell_size m, \
@@ -197,7 +220,8 @@ impl Plugin for DestructionPlugin {
             .add_systems(
                 FixedUpdate,
                 (
-                    (demo::demo_script_system, charges::charges_system)
+                    (demo::demo_script_system,
+                hill::hill_script_system, charges::charges_system)
                         .chain()
                         .in_set(SimSet::Gameplay),
                     debris::simulate_debris_system.in_set(SimSet::Physics),
@@ -222,10 +246,15 @@ impl Plugin for DestructionPlugin {
                     sync::rebuild_voxels_system,
                     debris::age_debris_system,
                     charges::charge_visuals_system,
+                    dress::build_prop_models_system,
                     structure::support_tint_system,
                 )
                     .chain()
                     .in_set(UpdateSet::Logic),
+            )
+            .add_systems(
+                PostUpdate,
+                shift::shift_system.in_set(engine_world::WorldShiftSet::Apply),
             );
         register_api(app);
     }
@@ -544,6 +573,17 @@ fn register_api(app: &mut App) {
         },
     );
     app.register_api(
+        "destruction.demo_restart",
+        "Start the destruction demos (the breach range and the dig-and-build hill) over from the \
+         beginning of their loops, so a camera arriving now sees every step.",
+        "{}",
+        |world, _| {
+            let range = demo::restart_demos(world);
+            let hills = hill::restart_hills(world);
+            Ok(json!({"range": range, "hills": hills}))
+        },
+    );
+    app.register_api(
         "destruction.stats",
         "Counters: walls, voxel volumes, live chunks/chips/dust, cells destroyed, m³ of rock removed, collapses.",
         "{}",
@@ -618,7 +658,7 @@ fn register_api(app: &mut App) {
         r#"{"preset": "cliff", "at": [0, 0, 0], "size": [10, 8, 5], "voxel_size": 0.25}"#;
     app.register_api(
         "destruction.spawn_voxels",
-        "Spawn a diggable voxel rock: preset cliff, arch or boulder; size [w,h,d] m; voxel_size m. \
+        "Spawn a diggable voxel rock: preset cliff, arch, boulder or hill; size [w,h,d] m; voxel_size m. \
          Returns its id.",
         SPAWN_VOX,
         |world, args| {
@@ -629,7 +669,8 @@ fn register_api(app: &mut App) {
                 "cliff" => VoxelVolume::cliff(w, h, d, s),
                 "arch" => VoxelVolume::arch(w, h, d, s),
                 "boulder" => VoxelVolume::boulder(w, s),
-                other => return Err(format!("Unknown preset \"{other}\". Use cliff, arch or boulder.")),
+                "hill" => VoxelVolume::hill(w, h, d, s),
+                other => return Err(format!("Unknown preset \"{other}\". Use cliff, arch, boulder or hill.")),
             };
             let cells = v.dims.iter().map(|d| *d as u64).product::<u64>();
             if cells > 4_000_000 {

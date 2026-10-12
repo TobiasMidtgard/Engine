@@ -42,6 +42,42 @@ pub fn visit(world: &mut World, place: &Place) {
     world.insert_resource(CurrentPlace(Some(place.clone())));
 }
 
+/// Frames between moving the camera and running a place's calls: the focus points follow the
+/// camera a frame later and the fields that follow them (weather on the ground, smoke, the
+/// terrain's prints) recenter the frame after that, so calls made at once would write around
+/// the old spot and be dropped when the grids move.
+pub const ARRIVE_DELAY: u32 = 2;
+
+/// A [`visit`] waiting for the camera's move to reach the focus points.
+#[derive(Resource, Debug)]
+pub struct PendingVisit {
+    place: Place,
+    frames: u32,
+}
+
+/// [`visit`] `place` [`ARRIVE_DELAY`] frames from now (call it right after moving the camera
+/// there).
+pub fn visit_soon(world: &mut World, place: &Place) {
+    world.insert_resource(PendingVisit {
+        place: place.clone(),
+        frames: ARRIVE_DELAY,
+    });
+}
+
+/// Count down and run a pending [`visit_soon`].
+pub fn run_pending(world: &mut World) {
+    let Some(mut pending) = world.get_resource_mut::<PendingVisit>() else {
+        return;
+    };
+    if pending.frames > 0 {
+        pending.frames -= 1;
+        return;
+    }
+    if let Some(pending) = world.remove_resource::<PendingVisit>() {
+        visit(world, &pending.place);
+    }
+}
+
 /// Run the current place's `on_leave` calls and forget it.
 pub fn leave(world: &mut World) {
     let previous = world
@@ -94,7 +130,9 @@ pub fn places() -> Vec<Place> {
     let tower = zone("spaceport").center + DVec3::new(70.0, 0.0, 60.0);
     let moon = moon_position();
     let moon_dir = moon.normalize();
-    let sun = crate::day_cycle::sun_direction(10.0).as_dvec3();
+    let sun = engine_weather::Climate::default()
+        .sun_direction(10.0, engine_weather::Sky::default().day_of_year)
+        .as_dvec3();
     let moon_side = (sun * 0.7 - moon_dir * 0.7).normalize();
     let mut list = vec![
         place(
@@ -121,7 +159,7 @@ pub fn places() -> Vec<Place> {
         place(
             "paddock",
             "Animation paddock",
-            near("paddock", [0.0, 5.0, 22.0], [0.0, 1.2, 0.0]),
+            near("paddock", [0.0, 16.0, 32.0], [0.0, 0.0, 0.0]),
             15.0,
         ),
         place(
@@ -217,7 +255,7 @@ pub fn places() -> Vec<Place> {
         place(
             "fortress",
             "Siege fortress on its hill",
-            near("fortress", [-2.0, 17.0, -44.0], [-3.0, 2.5, 4.0]),
+            near("fortress", [-34.0, 26.0, -62.0], [0.0, 3.0, 2.0]),
             15.0,
         ),
         place(

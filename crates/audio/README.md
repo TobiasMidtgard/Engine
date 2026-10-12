@@ -52,6 +52,14 @@ different wet, frozen, snowed on or burnt.
   electric motors sing, thrusters hiss. Tyres roll, crunch on gravel, pack snow, squelch in
   mud, hiss on wet roads and squeal when they slide on dry hard ground, reading each wheel's
   ground the way footsteps do (material plus wetness, puddles, snow and frost).
+- **Nature**: birds sing from perches 3 to 12 m up, 14 to 65 m around you, nine species
+  (warbler, thrush, chickadee, finch, dove, crow, woodpecker, owl, cuckoo), each with its own
+  song that a bird keeps from one song to the next. The sun and the hour decide how many: a
+  full dawn chorus from first light to a couple of hours after sunrise, fewer birds by day, a
+  smaller chorus at dusk, owls only in the dark. Rain, strong wind, snow and cold hush them,
+  and towns and bare rock have fewer than woods and meadows (from the ground around you).
+  Crickets chirp on warm evenings and nights at the rate the temperature sets (Dolbear's law;
+  silent below 8 °C), and cicadas buzz on hot days.
 - **Slow motion**: world sounds slow down and drop in pitch with `TimeDilation`, and the
   world gets darker and roomier. Anything with a `LocalTimeScale` that ignores dilation (a
   time-dilated hero) keeps its own pitch.
@@ -79,7 +87,7 @@ Tunable at runtime (JSON, console, scripts, AI agents):
 
 | Name | What |
 |---|---|
-| `AudioSettings` | output, master volume, speed of sound, doppler, air absorption, how much slow motion lowers pitch, silence in space, footstep range, voice limit, weather, fires, water, vehicles and occlusion on/off |
+| `AudioSettings` | output, master volume, speed of sound, doppler, air absorption, how much slow motion lowers pitch, silence in space, footstep range, voice limit, weather, fires, water, vehicles, nature and occlusion on/off |
 | `AudioMix` | volume per bus (world, ambience, music, ui, voice) and mute |
 | `FootstepSurfaces` | how each surface sounds underfoot: 14 layer weights, brightness, pitch, gain |
 | `SoundRings` | coloured rings on the ground for each sound near a footstep trail (or everywhere) |
@@ -131,19 +139,23 @@ a concrete underpass that echoes, sand, fallen leaves, puddles), walked by a hik
 who ignores slow motion, a dog and a horse. Each footstep is a `GroundContact` like a real
 character's and shows as a ring in its ground's colour.
 
+- The showcase films it in the valley: `showcase --headless --film footsteps --follow "Trail hiker"`
+  (the walkers are named `Trail hiker`, `Trail runner`, `Trail dog` and `Trail horse`).
 - `cargo run -p engine_audio --release --example trail_recording -- out/` films the trail
   following the hiker: every ground in turn, the runner overtaking in slow motion, the
   underpass echo and rain soaking the ground at the end. Writes `trail.mp4`, `trail.wav`
   and the frames.
 - `cargo run -p engine_audio --release --example footstep_lab -- out/` renders four steps
   on every surface, fires of three sizes, lake shores, a brook, rapids, engines, a tyre
-  skidding and thunder at three distances to WAV files
+  skidding, thunder at three distances, every bird's song, and crickets and cicadas to WAV
+  files
   (`--layers` prints each footstep layer's level).
 - `tests/plugin.rs`: contacts are heard, out-of-earshot steps are skipped, space is silent,
   the trail walks every surface, walls muffle what's behind them, burning ground and burning
   things are heard, shores lap and brooks babble, sounds stay put when the world shifts,
   lightning rolls thunder late, a waterfall roars instead of dripping, engines rev and tyres
-  skid, and sound travels at the speed the air allows. `tests/screenshot.rs` renders the
+  skid, sound travels at the speed the air allows, and birds sing at dawn, hush in rain and
+  give way to owls at night. `tests/screenshot.rs` renders the
   trail headless.
 
 ## Done when

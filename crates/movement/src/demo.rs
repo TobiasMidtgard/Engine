@@ -16,21 +16,26 @@
 //!   only runs while a camera is within [`DuelDirector::watch_radius`] of the ring, because
 //!   its slow motion slows the whole world.
 //!
-//! The characters are capsule puppets (body, head, visor, sword) posed procedurally from the
-//! movement state until the animation module provides skeletons. The bots that drive them
-//! write `MoveIntent` exactly like player input or NPC AI would. Only one demo per world.
+//! The characters are armored sword fighters ([`look::fighter`]) posed procedurally from the
+//! movement and combat state on their own clocks ([`look::rig`]): rigid parts on a skeleton,
+//! with IK for the arms and legs. The bots that drive them write `MoveIntent` exactly like
+//! player input or NPC AI would. Only one demo per world.
 
 use std::f32::consts::FRAC_PI_2;
 
 use engine_core::math::{DVec3, Quat, Vec3};
 use engine_core::prelude::*;
-use engine_render::{Camera, MeshRenderer, Shape, StandardMaterial};
+use engine_core::time::LocalTimeScale;
+use engine_render::{Camera, MeshRenderer, StandardMaterial};
+use engine_world::animation::AnimationParams;
 use engine_world::locomotion::{LocomotionMode, MoveIntent};
 use engine_world::physics::{CharacterController, Collider, RigidBody};
 use engine_world::{AttackEvent, AttackKind};
 
 use crate::afterimage::Afterimages;
 use crate::combat::{AttackPhase, CombatState, Fighter};
+use crate::look::fighter::{self, Style};
+use crate::look::rig::{self, AnimInput, Animator, AttackAnim, Bone};
 use crate::mover::{Mover, flat};
 use crate::profile::MovementProfile;
 use crate::tempo::{Perceiver, Tempo};
@@ -44,6 +49,65 @@ pub mod layout {
     pub const RUN_START: [f64; 3] = [-23.0, 0.1, 12.0];
     /// Top of the tower the runner climbs (a mantle from the end of the second wall-run).
     pub const TOWER_TOP: f64 = 5.5;
+
+    /// A static collider box of the demo, relative to the demo's origin: `center` and full
+    /// `size` in meters. The set dressing ([`crate::look::course`]) is drawn around these.
+    #[derive(Debug, Clone, Copy, PartialEq)]
+    pub struct Block {
+        pub center: [f64; 3],
+        pub size: [f32; 3],
+    }
+
+    /// Runway pad along +X.
+    pub const RUNWAY: Block = Block {
+        center: [0.0, 0.05, 12.0],
+        size: [56.0, 0.1, 10.0],
+    };
+    /// Slide bar (bottom at 1.15 m: too low to run under, high enough to slide under).
+    pub const SLIDE_BAR: Block = Block {
+        center: [-14.0, 1.35, 12.0],
+        size: [0.3, 0.4, 7.0],
+    };
+    /// The slide bar's posts.
+    pub const SLIDE_POSTS: [Block; 2] = [
+        Block {
+            center: [-14.0, 0.775, 8.5],
+            size: [0.3, 1.55, 0.3],
+        },
+        Block {
+            center: [-14.0, 0.775, 15.5],
+            size: [0.3, 1.55, 0.3],
+        },
+    ];
+    /// Wall A (right side, runner heading +X): run face at z = 14.5.
+    pub const WALL_A: Block = Block {
+        center: [-2.0, 2.6, 14.8],
+        size: [12.0, 5.0, 0.6],
+    };
+    /// Wall B (left side): run face at z = 9.5, runs into the tower.
+    pub const WALL_B: Block = Block {
+        center: [12.5, 2.6, 9.2],
+        size: [13.0, 5.0, 0.6],
+    };
+    /// The tower: climbed by a mantle off wall B.
+    pub const TOWER: Block = Block {
+        center: [22.0, TOWER_TOP * 0.5, 11.0],
+        size: [6.0, TOWER_TOP as f32, 7.0],
+    };
+    /// The ring platform (a 16 m square, 0.1 m high).
+    pub const RING_PLATFORM: Block = Block {
+        center: [RING[0], RING[1] + 0.05, RING[2]],
+        size: [2.0 * RING_RADIUS, 0.1, 2.0 * RING_RADIUS],
+    };
+    /// Stands behind the ring for fighters sitting a round out.
+    pub const STANDS: Block = Block {
+        center: [RING[0], RING[1] + 0.15, RING[2] - 11.5],
+        size: [16.0, 0.3, 3.0],
+    };
+    /// Center of the lowest level cell; the other nine stack [`LEVEL_STEP`] apart above it.
+    pub const LEVEL_METER: [f64; 3] = [RING[0] + 9.5, RING[1] + 0.35, RING[2]];
+    /// Spacing of the level cells, meters.
+    pub const LEVEL_STEP: f64 = 0.5;
 }
 
 /// Level the duel player has in the blink round and in the focus/pack rounds.
@@ -165,15 +229,13 @@ pub struct AttackerBrain {
     pulse: bool,
 }
 
-/// A procedurally posed stand-in body. Children: the rig (tilts), and the sword.
-#[derive(Component, Debug, Clone, Copy)]
+/// A procedurally animated fighter: the bone entities it poses every frame (children of the
+/// character; see [`look::rig`]) and its animation state.
+#[derive(Component, Debug, Clone)]
 pub struct Puppet {
-    rig: Entity,
-    sword: Entity,
-    tilt: Quat,
-    crouch: f32,
-    fallen: f32,
-    swing: f32,
+    bones: [Entity; Bone::ANIMATED],
+    anim: Animator,
+    was_defeated: bool,
 }
 
 #[derive(Component)]
@@ -193,32 +255,18 @@ fn glow(hex: u32, strength: f32) -> StandardMaterial {
         .with_emissive(c, strength)
 }
 
-/// A static box: collider + mesh. `center` and `size` in meters, world space.
-fn block(commands: &mut Commands, center: DVec3, size: [f32; 3], material: StandardMaterial) {
+/// A static box collider (no mesh: [`crate::look::course`] draws the set around it).
+fn block(commands: &mut Commands, origin: DVec3, name: &'static str, b: layout::Block) {
     commands.spawn((
-        Transform::from_translation(center),
+        Name::new(name),
+        Transform::from_translation(origin + DVec3::from_array(b.center)),
         RigidBody::fixed(),
-        Collider::cuboid(Vec3::from(size) * 0.5),
-        MeshRenderer::new(Shape::Cuboid { size }, material),
+        Collider::cuboid(Vec3::from(b.size) * 0.5),
     ));
-}
-
-/// A decoration without a collider.
-fn deco(commands: &mut Commands, t: Transform, shape: Shape, material: StandardMaterial) {
-    commands.spawn((t, MeshRenderer::new(shape, material).without_shadows()));
 }
 
 fn at(origin: DVec3, x: f64, y: f64, z: f64) -> DVec3 {
     origin + DVec3::new(x, y, z)
-}
-
-/// Colors of a character.
-struct Look {
-    body: StandardMaterial,
-    head: StandardMaterial,
-    visor: StandardMaterial,
-    blade: StandardMaterial,
-    trail: [f32; 3],
 }
 
 fn spawn_character(
@@ -226,91 +274,39 @@ fn spawn_character(
     name: &str,
     pos: DVec3,
     facing: Vec3,
-    look: &Look,
+    style: Style,
     profile: MovementProfile,
     extra: impl Bundle,
 ) -> Entity {
     let rotation = engine_core::transform::look_rotation(facing, Vec3::Y).unwrap_or_default();
+    let controller = CharacterController::default();
     let id = commands
         .spawn((
             Name::new(name.to_string()),
             Transform::from_translation(pos).with_rotation(rotation),
             profile,
-            CharacterController::default(),
-            Afterimages::colored(look.trail).lasting(0.8),
+            controller,
+            Afterimages::colored(style.trail()).lasting(0.8),
             extra,
         ))
         .id();
-    let rig = commands
-        .spawn((Transform::default(), ChildOf(id), PuppetPart))
-        .id();
-    let part = |commands: &mut Commands, t: Transform, shape: Shape, m: StandardMaterial| {
-        commands.spawn((t, MeshRenderer::new(shape, m), ChildOf(rig)));
-    };
-    part(
-        commands,
-        Transform::from_xyz(0.0, -0.22, 0.0),
-        Shape::Capsule {
-            radius: 0.3,
-            height: 1.36,
-            segments: 20,
-        },
-        look.body,
-    );
-    part(
-        commands,
-        Transform::from_xyz(0.0, 0.68, 0.0),
-        Shape::Sphere {
-            radius: 0.17,
-            segments: 20,
-        },
-        look.head,
-    );
-    part(
-        commands,
-        Transform::from_xyz(0.0, 0.7, -0.14),
-        Shape::Cuboid {
-            size: [0.24, 0.06, 0.06],
-        },
-        look.visor,
-    );
-    let sword = commands
-        .spawn((
-            Transform::from_xyz(0.36, 0.05, -0.1),
-            ChildOf(rig),
-            PuppetPart,
-        ))
-        .id();
-    commands.spawn((
-        Transform::from_xyz(0.0, 0.0, -0.55),
-        MeshRenderer::new(
-            Shape::Cuboid {
-                size: [0.04, 0.09, 1.1],
-            },
-            look.blade,
-        )
-        .without_shadows(),
-        ChildOf(sword),
-    ));
+    // The body: posed bones under the character with the feet at the capsule's bottom.
+    let body = fighter::spawn_body(commands, id, style, -controller.height * 0.5);
+    let mut bones = [Entity::PLACEHOLDER; Bone::ANIMATED];
+    bones.copy_from_slice(&body.bones[..Bone::ANIMATED]);
+    for &bone in &bones {
+        commands.entity(bone).insert(PuppetPart);
+    }
     commands.entity(id).insert(Puppet {
-        rig,
-        sword,
-        tilt: Quat::IDENTITY,
-        crouch: 0.0,
-        fallen: 0.0,
-        swing: 0.0,
+        bones,
+        anim: Animator::new(style),
+        was_defeated: false,
     });
     id
 }
 
 /// Build the movement showcase around `origin` (ground level). See the module docs.
 pub fn spawn_demo(commands: &mut Commands, origin: DVec3) {
-    let concrete = mat(0x7d8086, 0.85);
-    let dark = mat(0x34363b, 0.8);
-    let wall = mat(0xb9b4aa, 0.7);
-    let cyan = glow(0x3fd0ff, 400.0);
-    let amber = glow(0xffb340, 400.0);
-
     // Ground under the whole demo (physics only: the game draws its own ground).
     commands.spawn((
         Transform::from_translation(at(origin, 0.0, -0.5, 0.0)),
@@ -319,92 +315,23 @@ pub fn spawn_demo(commands: &mut Commands, origin: DVec3) {
     ));
 
     // ---------------------------------------------------------------- parkour course
-    // Runway pad along +X.
-    block(
-        commands,
-        at(origin, 0.0, 0.05, 12.0),
-        [56.0, 0.1, 10.0],
-        concrete,
-    );
-    // Slide bar (bottom at 1.15 m: too low to run under, high enough to slide under).
-    block(
-        commands,
-        at(origin, -14.0, 1.35, 12.0),
-        [0.3, 0.4, 7.0],
-        amber,
-    );
-    for z in [8.5, 15.5] {
-        block(
-            commands,
-            at(origin, -14.0, 0.775, z),
-            [0.3, 1.55, 0.3],
-            dark,
-        );
+    block(commands, origin, "Runway", layout::RUNWAY);
+    block(commands, origin, "Slide bar", layout::SLIDE_BAR);
+    for post in layout::SLIDE_POSTS {
+        block(commands, origin, "Slide bar post", post);
     }
-    deco(
-        commands,
-        Transform::from_translation(at(origin, -14.0, 0.105, 12.0)),
-        Shape::Cuboid {
-            size: [4.0, 0.01, 0.25],
-        },
-        amber,
-    );
-    // Wall A (right side, runner heading +X): face at z = 14.5.
-    block(
-        commands,
-        at(origin, -2.0, 2.6, 14.8),
-        [12.0, 5.0, 0.6],
-        wall,
-    );
-    // Wall B (left side): face at z = 9.5, runs into the tower.
-    block(commands, at(origin, 12.5, 2.6, 9.2), [13.0, 5.0, 0.6], wall);
-    // Glowing run lines along both walls.
-    deco(
-        commands,
-        Transform::from_translation(at(origin, -2.0, 2.0, 14.49)),
-        Shape::Cuboid {
-            size: [11.6, 0.08, 0.01],
-        },
-        cyan,
-    );
-    deco(
-        commands,
-        Transform::from_translation(at(origin, 12.5, 2.0, 9.51)),
-        Shape::Cuboid {
-            size: [12.6, 0.08, 0.01],
-        },
-        cyan,
-    );
-    // The tower: climbed by a mantle off wall B.
-    let top = layout::TOWER_TOP;
-    block(
-        commands,
-        at(origin, 22.0, top * 0.5, 11.0),
-        [6.0, top as f32, 7.0],
-        dark,
-    );
-    deco(
-        commands,
-        Transform::from_translation(at(origin, 19.0, top + 0.005, 11.0)),
-        Shape::Cuboid {
-            size: [0.12, 0.01, 7.0],
-        },
-        amber,
-    );
+    block(commands, origin, "Wall A", layout::WALL_A);
+    block(commands, origin, "Wall B", layout::WALL_B);
+    block(commands, origin, "Tower", layout::TOWER);
+    // The pilot training facility drawn around those boxes.
+    crate::look::course::dress_course(commands, origin);
 
-    let runner_look = Look {
-        body: mat(0x14a38b, 0.5),
-        head: mat(0xe8d5c0, 0.6),
-        visor: glow(0x7dffe0, 300.0),
-        blade: glow(0x7dffe0, 300.0),
-        trail: [0.2, 1.0, 0.75],
-    };
     spawn_character(
         commands,
         "Runner",
         origin + DVec3::from_array(layout::RUN_START) + DVec3::Y * 0.9,
         Vec3::X,
-        &runner_look,
+        Style::Pilot,
         MovementProfile::pilot(),
         Brain::Runner {
             step: 0,
@@ -415,48 +342,20 @@ pub fn spawn_demo(commands: &mut Commands, origin: DVec3) {
 
     // ---------------------------------------------------------------- duel ring
     let ring = origin + DVec3::from_array(layout::RING);
-    commands.spawn((
-        Transform::from_translation(ring + DVec3::new(0.0, 0.05, 0.0)),
-        RigidBody::fixed(),
-        Collider::cuboid(Vec3::new(layout::RING_RADIUS, 0.05, layout::RING_RADIUS)),
-        MeshRenderer::new(
-            Shape::Cylinder {
-                radius: layout::RING_RADIUS,
-                height: 0.1,
-                segments: 64,
-            },
-            mat(0x2b2d33, 0.6),
-        ),
-    ));
-    deco(
-        commands,
-        Transform::from_translation(ring + DVec3::new(0.0, 0.11, 0.0)),
-        Shape::Torus {
-            radius: layout::RING_RADIUS - 0.15,
-            tube: 0.05,
-            segments: 96,
-        },
-        cyan,
-    );
+    block(commands, origin, "Ring", layout::RING_PLATFORM);
     // Stands behind the ring for fighters sitting a round out.
-    block(
-        commands,
-        ring + DVec3::new(0.0, 0.15, -11.5),
-        [16.0, 0.3, 3.0],
-        concrete,
-    );
-    // Level meter: ten cubes, lit to the player's level.
+    block(commands, origin, "Stands", layout::STANDS);
+    // The samurai duel arena drawn around them.
+    crate::look::course::dress_ring(commands, ring);
+    // Level meter: ten cells in a shrine column, lit to the player's level.
+    let meter = origin + DVec3::from_array(layout::LEVEL_METER);
+    crate::look::course::dress_level_column(commands, DVec3::new(meter.x, ring.y, meter.z));
     let mut cubes = Vec::new();
     for i in 0..10 {
         let id = commands
             .spawn((
-                Transform::from_translation(ring + DVec3::new(9.5, 0.35 + i as f64 * 0.5, 0.0)),
-                MeshRenderer::new(
-                    Shape::Cuboid {
-                        size: [0.38, 0.38, 0.38],
-                    },
-                    dark,
-                ),
+                Transform::from_translation(meter + DVec3::Y * (i as f64 * layout::LEVEL_STEP)),
+                MeshRenderer::new(crate::look::course::level_cell(), mat(0x34363b, 0.8)),
                 LevelCube(i),
             ))
             .id();
@@ -468,13 +367,7 @@ pub fn spawn_demo(commands: &mut Commands, origin: DVec3) {
         "Duelist",
         ring + DVec3::new(0.0, 1.0, 4.5),
         Vec3::NEG_Z,
-        &Look {
-            body: mat(0x2a6fdb, 0.45),
-            head: mat(0xe8d5c0, 0.6),
-            visor: glow(0x9fe8ff, 300.0),
-            blade: glow(0x9fe8ff, 600.0),
-            trail: [0.3, 0.75, 1.0],
-        },
+        Style::Duelist,
         MovementProfile::pilot(),
         (
             Fighter {
@@ -491,13 +384,7 @@ pub fn spawn_demo(commands: &mut Commands, origin: DVec3) {
         "Elite",
         ring + DVec3::new(0.0, 1.0, -4.5),
         Vec3::Z,
-        &Look {
-            body: mat(0x2a0a10, 0.35),
-            head: mat(0x1a1a1e, 0.4),
-            visor: glow(0xff2a3a, 600.0),
-            blade: glow(0xff2a3a, 900.0),
-            trail: [1.0, 0.12, 0.18],
-        },
+        Style::Elite,
         MovementProfile::elite(),
         (
             Fighter {
@@ -524,13 +411,7 @@ pub fn spawn_demo(commands: &mut Commands, origin: DVec3) {
             &format!("Grunt {}", i + 1),
             stand_spot(ring, i),
             Vec3::Z,
-            &Look {
-                body: mat(0xa0522d, 0.7),
-                head: mat(0xd9b99b, 0.6),
-                visor: glow(0xffa040, 200.0),
-                blade: mat(0xb8bcc4, 0.3).with_metallic(1.0),
-                trail: [1.0, 0.5, 0.2],
-            },
+            Style::Grunt,
             MovementProfile::human(),
             (
                 Fighter {
@@ -881,7 +762,7 @@ fn set_up_round(
     for (cube, mut r) in cubes.iter_mut() {
         if !d.cubes.is_empty() {
             r.material = if cube.0 < level {
-                glow(0x3fd0ff, 500.0)
+                glow(0x3fd0ff, 3000.0)
             } else {
                 mat(0x34363b, 0.8)
             }
@@ -1061,63 +942,94 @@ fn think_attackers(
 
 // ------------------------------------------------------------------------ puppets
 
-/// Pose the stand-in bodies from the movement and combat state (Update).
+/// Animate the fighters from their movement and combat state, on their own clocks (Update).
+#[allow(clippy::type_complexity)]
 fn animate_puppets(
     time: Res<Time>,
-    mut puppets: Query<(&mut Puppet, &Mover, Option<&CombatState>)>,
-    mut parts: Query<&mut Transform, With<PuppetPart>>,
+    mut puppets: Query<(
+        &mut Puppet,
+        &Transform,
+        &Mover,
+        &CharacterController,
+        Option<&CombatState>,
+        Option<&Fighter>,
+        Option<&AnimationParams>,
+        Option<&LocalTimeScale>,
+    )>,
+    mut bones: Query<&mut Transform, (With<PuppetPart>, Without<Puppet>)>,
 ) {
-    let dt = time.real_delta_secs().max(0.0);
-    let k = 1.0 - (-14.0 * dt).exp();
-    for (mut p, m, cs) in &mut puppets {
+    for (mut p, t, m, cc, cs, f, params, local) in &mut puppets {
         let defeated = cs.is_some_and(|c| c.defeated);
-        let stagger = cs.is_some_and(|c| c.stagger_secs > 0.0);
-        let crouch = if matches!(m.mode, LocomotionMode::Slide | LocomotionMode::Crouch) {
-            1.0
+        if p.was_defeated && !defeated {
+            // Revived: stand straight up instead of getting up through the blend.
+            p.anim.reset();
+        }
+        p.was_defeated = defeated;
+        let input = anim_input(time.delta_for(local), t, m, cc, cs, f, params);
+        let pose = p.anim.update(&input);
+        let solved = rig::solve(&pose);
+        let lift = -cc.height * 0.5;
+        for (i, &e) in p.bones.iter().enumerate() {
+            if let Ok(mut bt) = bones.get_mut(e) {
+                *bt = fighter::bone_transform(solved[i], lift);
+            }
+        }
+    }
+}
+
+/// What the animation needs to know, in character space (feet at the origin, facing −Z).
+fn anim_input(
+    dt: f32,
+    t: &Transform,
+    m: &Mover,
+    cc: &CharacterController,
+    cs: Option<&CombatState>,
+    f: Option<&Fighter>,
+    params: Option<&AnimationParams>,
+) -> AnimInput {
+    let inv = t.rotation.inverse();
+    let feet = t.translation - (t.rotation * Vec3::Y * (cc.height * 0.5)).as_dvec3();
+    let attack = cs.and_then(|c| c.attack).map(|a| {
+        let dash = a.kind == AttackKind::Dash;
+        let total = match (a.phase, f) {
+            (AttackPhase::Windup, Some(f)) if dash => f.dash_windup_secs,
+            (AttackPhase::Windup, Some(f)) => f.windup_secs,
+            (AttackPhase::Strike, Some(f)) => f.strike_secs,
+            (AttackPhase::Recovery, Some(f)) => f.recovery_secs,
+            _ => 0.0,
+        };
+        let progress = if total > 0.0 {
+            (1.0 - a.secs_left / total).clamp(0.0, 1.0)
         } else {
             0.0
         };
-        let tilt = if stagger {
-            Quat::from_rotation_x(0.35)
-        } else {
-            m.body_tilt()
-        };
-        let swing: f32 = match cs.and_then(|c| c.attack) {
-            Some(a) => match a.phase {
-                AttackPhase::DashIn => -0.6,
-                AttackPhase::Windup => -1.0,
-                AttackPhase::Strike => 1.0,
-                AttackPhase::Recovery => 0.6,
-            },
-            None if cs.is_some_and(|c| c.blocking) => -0.3,
-            None => 0.0,
-        };
-        p.tilt = p.tilt.slerp(tilt, k);
-        p.crouch += (crouch - p.crouch) * k;
-        p.fallen += ((if defeated { 1.0 } else { 0.0 }) - p.fallen) * k * 0.6;
-        // Swings snap (they are fast); returning to rest is smoothed.
-        p.swing = if swing.abs() > p.swing.abs() || swing.signum() != p.swing.signum() {
-            swing
-        } else {
-            p.swing + (swing - p.swing) * k
-        };
-        if let Ok(mut rig) = parts.get_mut(p.rig) {
-            let fall = Quat::from_rotation_x(-FRAC_PI_2 * p.fallen);
-            rig.rotation = fall * p.tilt;
-            rig.translation = Vec3::new(0.0, -0.35 * p.crouch - 0.55 * p.fallen, 0.0).as_dvec3();
-            rig.scale = Vec3::new(1.0, 1.0 - 0.35 * p.crouch, 1.0);
+        AttackAnim {
+            dash,
+            phase: a.phase,
+            progress,
+            secs: a.secs,
         }
-        if let Ok(mut sword) = parts.get_mut(p.sword) {
-            // Rest: point forward-down. Windup: raised behind. Strike: swept across.
-            let s = p.swing;
-            let pitch = if s < 0.0 {
-                -0.5 + s * 1.6
-            } else {
-                -0.5 + s * 0.3
-            };
-            let yaw = if s > 0.0 { s * 1.9 } else { 0.0 };
-            sword.rotation = Quat::from_rotation_y(yaw) * Quat::from_rotation_x(pitch);
-            sword.translation = Vec3::new(0.36 - 0.25 * s.max(0.0), 0.05, -0.1).as_dvec3();
-        }
+    });
+    AnimInput {
+        dt,
+        mode: m.mode,
+        velocity: inv * m.velocity,
+        grounded: m.grounded,
+        air_jumps_left: m.air_jumps_left,
+        wall: m.wall.map(|w| {
+            let gap = (t.translation - w.point).as_vec3().dot(w.normal).abs();
+            (inv * w.normal, gap)
+        }),
+        ledge: m
+            .mantle
+            .map(|mt| (inv * (mt.top - feet).as_vec3(), mt.rising)),
+        dash_strike: m.dash.is_some_and(|d| d.strike),
+        attack,
+        blocking: cs.is_some_and(|c| c.blocking),
+        stagger: cs.is_some_and(|c| c.stagger_secs > 0.0),
+        hits_taken: cs.map_or(0, |c| c.hits_taken),
+        defeated: cs.is_some_and(|c| c.defeated),
+        fighter: f.is_some(),
+        effort: params.map_or(0.2, |p| p.get("effort")),
     }
 }

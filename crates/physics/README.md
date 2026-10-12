@@ -27,11 +27,13 @@ changing that one plugin line.
 - **Rolling resistance**: balls, barrels, logs and capsule limbs slow down and stop like real ones
   (Rapier has none, so they would roll forever). Each rolling contact pushes back with a torque of
   `Crr · N · r`: `rolling_resistance` on hard ground, more on mud, sand, snow and grass (from the
-  surface's deformation, the same amounts the vehicle tires use). Boxes tipping over an edge are
-  left alone. The contract's default `angular_damping` (0.05) slows rolling a little too.
+  surface's deformation, the same amounts the vehicle tires use), alike on boxes, terrain and
+  meshes. Boxes tipping over an edge are left alone. The contract's default `angular_damping`
+  (0.05) slows rolling a little too.
 - **Joints**: fixed, spherical (cone limit), revolute and prismatic (limits, motors), distance
   (rope), spring. `break_force` breaks a joint: the joint entity is despawned (or the `Joint`
-  removed from a body entity).
+  removed from a body entity). With `collide_connected: false` the two never touch, also when
+  one side is a fixed body (a door hinged inside its frame, a lid on a static box).
 - **Characters**: `CharacterController` capsules moved by sweeps, so even an 800 m/s dash stops
   at a thin wall: steps (also while gravity pulls), slopes, ground snapping, crouching (change
   `height` between steps). They move after the bodies have stepped: whatever a character stood
@@ -114,7 +116,8 @@ touching pairs, step time, substeps.
 ## API functions
 
 `physics.raycast`, `physics.shapecast`, `physics.overlap`, `physics.closest_point`,
-`physics.impulse`, `physics.blast`, `physics.stats`, `physics.debug`. `engine.describe` lists their arguments.
+`physics.impulse`, `physics.blast`, `physics.stats`, `physics.debug`,
+`physics.proving_ground.replay`. `engine.describe` lists their arguments.
 
 ## Contract details a replacement backend must match
 
@@ -128,14 +131,32 @@ touching pairs, step time, substeps.
 
 `demo::spawn_demo(commands, origin)` builds the **physics proving ground**: a 70 × 50 m concrete
 yard (with a curb, so nothing rolls off) with a 30-crate tower, a bin filling with 250
-crates/barrels/balls, a domino snake, ragdolls tumbling down a steep staircase, a wrecking ball
-smashing a crate wall, a seesaw catapult, a motor-driven paddle wheel, a sagging plank bridge, a
-kinematic turntable and bouncing rubber balls. Its top surface is at `origin`. Render it alone with
+crates/barrels/balls, a domino snake, crash test dummy ragdolls tumbling down a steep staircase,
+a wrecking ball smashing a crate wall, a seesaw catapult, a motor-driven paddle wheel, a sagging
+plank bridge, a kinematic turntable and bouncing rubber balls. Its top surface is at `origin`; the
+showcase's physics zone places it. Render it alone with
 `cargo run -p engine_physics --release --example proving_ground -- out_dir`.
+
+The stations replay on their own cycles (`demo::Station::cycle_secs`, world time: ragdolls,
+seesaw and balls every 20 s, dominoes, wrecking ball and bridge every 30 s, the pile every 45 s;
+the tower, wheel and turntable run on), so the zone is always playing when someone walks in.
+They pause while no focus point is within 250 m.
+`physics.proving_ground.replay {"station": "dominoes"}` restarts one now (`{}` restarts all).
+`demo::VIEWS` are tour stops for the action stations: arriving restarts the station, and the
+warm-up lands on its best moment. `tests/proving_ground.rs` checks that stations replay without
+piling up bodies.
+
+Everything in it is drawn with detailed procedural art (`src/demo/art/`): beveled meshes sized to
+their colliders (shipping crates with brackets and bolts, 200 l drums, chain links, a cast
+concrete stair with handrails, a steel gantry, glulam and diamond-plate machines, Hybrid III-style
+dummies) and PBR texture sets (albedo, normal, roughness/metal/occlusion) generated at startup,
+about a second in release builds (debug builds make them a quarter the size). Apps without a
+renderer get colliders only. `cargo run -p engine_physics --release --example art_props`
+(`art_structures`, `art_dummy`, `art_textures`) previews each part on its own.
 
 Tests (`cargo test -p engine_physics`): the conformance suite; the "done when" scenarios below
 (`tests/scenarios.rs`); behaviors other modules rely on (`tests/behaviors.rs`: removal, compound
-bodies, joint breaking and motors, kinematic platforms, stairs and steep slopes, dashing into
+bodies, joint breaking and motors, hinges swinging through the fixed body they hang on, kinematic platforms, stairs and steep slopes, dashing into
 thin walls, wall-running, crouching, characters on their own clock, sensors and layers, local
 time, hovering, buoyancy, blasts, bodies crossing and merging regions); riding moving bodies
 (`tests/platforms.rs`: crates and characters on a deck at up to 30 km/s, lifts, a turntable, a
@@ -146,7 +167,8 @@ sleeping pile stays asleep through floating-origin moves, a stack stands through
 world-pinned hinges turn with the world, a moving or spinning frame adds its motion at each body,
 characters keep their footing, queries see the new frame at once); rolling resistance
 (`tests/rolling.rs`: balls and logs slow at `Crr·g/(1 + I/mr²)` on concrete, faster on grass and
-sand, barrels stop on sand); the debug view (`tests/debug_draw.rs`); a headless screenshot of
+sand, the same on terrain and meshes, barrels stop on sand); the debug view
+(`tests/debug_draw.rs`, contacts on terrain included); a headless screenshot of
 the proving ground.
 
 ## Done when
@@ -162,8 +184,11 @@ the proving ground.
 ## Next
 
 - Articulated (reduced-coordinate) joints for ragdolls and robot arms: zero joint gap.
-- Smoother rolling barrels: Rapier's cylinder contacts make a rolling barrel hop a few
-  centimeters now and then.
+- Smoother rolling barrels on terrain and meshes: a barrel rolling over triangles hops up to
+  1.5 cm and drifts sideways (on a box it rolls flat; balls and capsules roll flat on both).
+  The contacts themselves are exact; Rapier's merged contact clusters match last step's
+  impulses by position in the bodies' frames, which a rolling body leaves every step, so its
+  two end contacts start cold and push unevenly. More solver iterations don't help.
 - A `rolling_resistance` field on `SurfaceMaterial`, so games can tune it per surface (today
   it comes from the surface's deformation).
 - Co-moving region frames, so cargo resting in a ship at 7 km/s can sleep (today bodies moving

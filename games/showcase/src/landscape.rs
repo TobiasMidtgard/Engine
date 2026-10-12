@@ -17,8 +17,8 @@ use engine::world::physical::{
     Deformation, GroundQuery, GroundSample, SurfaceMaterial, SurfaceMaterials,
 };
 
-/// Planet radius used to curve the far terrain so it meets the atmosphere's planet (m).
-const PLANET_RADIUS: f64 = 6_360_000.0;
+/// Planet radius used to curve the far terrain, the same Earth the valley sits on (m).
+pub const PLANET_RADIUS: f64 = 6_371_000.0;
 /// The terrain mesh reaches this far from the plaza (m).
 pub const TERRAIN_RADIUS: f64 = 24_000.0;
 /// Height of the lake's water surface (m).
@@ -550,8 +550,13 @@ impl Landscape {
 
     /// Ground height at world X/Z (m), including the planet's curvature.
     pub fn height(&self, x: f64, z: f64) -> f64 {
-        let h = self.carve_streams(DVec2::new(x, z), self.uncarved_height(x, z));
-        h - (x * x + z * z) / (2.0 * PLANET_RADIUS)
+        self.flat_height(x, z) - (x * x + z * z) / (2.0 * PLANET_RADIUS)
+    }
+
+    /// Ground height at world X/Z (m) as if the world were flat: what the planet terrain bends
+    /// onto the sphere (it comes out at [`height`](Self::height)).
+    pub fn flat_height(&self, x: f64, z: f64) -> f64 {
+        self.carve_streams(DVec2::new(x, z), self.uncarved_height(x, z))
     }
 
     /// Height with roads but before streams cut into it (and without curvature).

@@ -245,6 +245,68 @@ fn revolute_motor_spins_a_wheel() {
     assert!(pos(&app, wheel).distance(DVec3::new(0.0, 2.0, 0.0)) < 0.01);
 }
 
+/// A leg hinged to a fixed post it overlaps (`collide_connected: false`) swings through the
+/// post like a lid through its box rim, while other bodies still land on the post.
+#[test]
+fn bodies_hinged_to_fixed_bodies_pass_through_them() {
+    let mut app = app();
+    let post = app
+        .world
+        .spawn((
+            Transform::from_xyz(0.0, 1.0, 0.0),
+            RigidBody::fixed(),
+            Collider::cuboid(Vec3::new(0.1, 0.25, 0.1)),
+        ))
+        .id();
+    // Spans y 0.39..0.81: 6 cm inside the post's bottom (0.75).
+    let leg = app
+        .world
+        .spawn((
+            Transform::from_xyz(0.0, 0.6, 0.0),
+            RigidBody::dynamic(),
+            Collider::capsule(0.06, 0.15),
+            Velocity {
+                linear: Vec3::ZERO,
+                angular: Vec3::new(4.0, 0.0, 0.0),
+            },
+        ))
+        .id();
+    app.world.spawn(Joint {
+        kind: JointKind::Revolute {
+            axis: Vec3::X,
+            limits: None,
+            motor: None,
+        },
+        body_a: post,
+        body_b: Some(leg),
+        anchor_a: Vec3::new(0.0, -0.2, 0.0),
+        anchor_b: DVec3::new(0.0, 0.2, 0.0),
+        break_force: None,
+        collide_connected: false,
+    });
+    let ball = app
+        .world
+        .spawn((
+            Transform::from_xyz(0.0, 1.6, 0.0),
+            RigidBody::dynamic(),
+            Collider::sphere(0.08),
+            Velocity::default(),
+        ))
+        .id();
+    app.update_n(20);
+    let swing = app.world.get::<Transform>(leg).unwrap().rotation * Vec3::NEG_Y;
+    assert!(
+        swing.z < -0.05,
+        "the leg should swing back through the post, its foot points {swing:?}"
+    );
+    app.update_n(60);
+    let rest = pos(&app, ball).y;
+    assert!(
+        (rest - 1.33).abs() < 0.02,
+        "the ball should rest on the post's top (1.33), it is at {rest}"
+    );
+}
+
 // ---------------------------------------------------------------- kinematic & characters
 
 #[test]

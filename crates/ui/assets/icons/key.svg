@@ -1,0 +1,28 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <defs>
+    <linearGradient id="gold" x1="28" y1="0" x2="38" y2="0" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#fff3c4"/>
+      <stop offset=".5" stop-color="#e8b65a"/>
+      <stop offset="1" stop-color="#8a5418"/>
+    </linearGradient>
+    <radialGradient id="bow" cx=".35" cy=".3" r=".8">
+      <stop offset="0" stop-color="#fff3c4"/>
+      <stop offset=".5" stop-color="#e8b65a"/>
+      <stop offset="1" stop-color="#7f4c14"/>
+    </radialGradient>
+  </defs>
+  <g transform="rotate(45 32 32) translate(0 -1)">
+    <g stroke="#0c0f16" stroke-width="4" stroke-linejoin="round" paint-order="stroke">
+      <path d="M34.5 4 L44 4 L44 9 L40 9 L40 12 L44 12 L44 18 L34.5 18 Z" fill="url(#gold)"/>
+      <rect x="29" y="2" width="6" height="44" rx="2" fill="url(#gold)"/>
+      <rect x="26" y="38" width="12" height="4" rx="2" fill="url(#gold)"/>
+      <path fill-rule="evenodd" fill="url(#bow)" d="M32 41 C39 41 44 46 44 53 C44 60 39 65 32 65 C25 65 20 60 20 53 C20 46 25 41 32 41 Z M32 47.5 C29 47.5 26.5 50 26.5 53 C26.5 56 29 58.5 32 58.5 C35 58.5 37.5 56 37.5 53 C37.5 50 35 47.5 32 47.5 Z"/>
+    </g>
+    <path d="M30.4 4 L30.4 37" stroke="#fffbe6" stroke-width="1" stroke-linecap="round"/>
+    <path d="M22.6 50 C23.6 46.4 27 43.6 31 43.2" stroke="#fffbe6" stroke-width="1.2" fill="none" stroke-linecap="round"/>
+    <circle cx="32" cy="44.5" r="1.2" fill="#c8283a" stroke="#0c0f16" stroke-width=".6"/>
+    <circle cx="32" cy="61.5" r="1.2" fill="#c8283a" stroke="#0c0f16" stroke-width=".6"/>
+    <circle cx="23.5" cy="53" r="1.2" fill="#c8283a" stroke="#0c0f16" stroke-width=".6"/>
+    <circle cx="40.5" cy="53" r="1.2" fill="#c8283a" stroke="#0c0f16" stroke-width=".6"/>
+  </g>
+</svg>

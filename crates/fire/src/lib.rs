@@ -3,22 +3,30 @@
 pub mod demo;
 pub mod embers;
 pub mod field;
+pub mod flipbook;
 pub mod fuel;
+pub mod grass;
+pub mod ground;
 pub mod objects;
+pub mod props;
 pub mod render;
 pub mod settings;
+mod shift;
 pub mod sim;
+pub mod textures;
 
 use engine_core::math::DVec3;
 use engine_core::prelude::*;
 use engine_render::RenderAppExt;
-use engine_world::WorldPlugin;
+use engine_world::{WorldPlugin, WorldShiftSet};
 use serde_json::{Value, json};
 
 pub use demo::FireDemo;
 pub use embers::{Ember, Embers};
 pub use field::{Cell, CellState, FireField, SpreadParams};
 pub use fuel::{FuelKind, FuelPatch, PatchShape};
+pub use grass::{GrassBurn, GrassMeadow};
+pub use ground::{GroundKind, GroundPaint, PaintedGround};
 pub use objects::{Burning, Charring, ContainedFire, FlameShape};
 pub use settings::FireSettings;
 pub use sim::{FireCommand, FireCommands, FireLight, FireVulnerable};
@@ -76,6 +84,16 @@ impl Plugin for FirePlugin {
                  cycle_secs (time between fires), bounds (fires are kept inside), line (where \
                  fires start).",
             )
+            .register_component::<GrassMeadow>(
+                "A meadow of grass blades over a rectangle (half_extents, m) that burn with the \
+                 fire field: density (blades/m²), height [min, max] (m), width (m), seed_heads \
+                 (share), sway, seed. Grows only where the fuel is grass.",
+            )
+            .register_component::<PaintedGround>(
+                "Flat painted ground over a rectangle (half_extents, m): base layer (Litter, \
+                 Dirt, Gravel, Mud, Ash) and paints [{kind, center [x, z], shape, blend_m, \
+                 ragged_m, strength}] blended with soft, ragged, height-aware edges.",
+            )
             .register_component::<FireVulnerable>(
                 "Takes Fire damage (DamageEvent) in flames; `scale` multiplies \
                  FireSettings.damage_per_second.",
@@ -96,9 +114,19 @@ impl Plugin for FirePlugin {
             )
             .add_systems(
                 Update,
-                (sim::sync_lights, sim::apply_charring, demo::run_demos),
+                (
+                    sim::sync_lights,
+                    sim::apply_charring,
+                    props::burn_foliage,
+                    demo::run_demos,
+                    grass::update_grass,
+                )
+                    .chain(),
             )
-            .add_render_feature(render::FireFeature::default());
+            .add_systems(PostUpdate, shift::shift_fire.in_set(WorldShiftSet::Apply))
+            .add_render_feature(render::FireFeature::default())
+            .add_render_feature(grass::GrassFeature::default())
+            .add_render_feature(ground::GroundFeature::default());
         register_apis(app);
     }
 }

@@ -294,5 +294,12 @@ pub(crate) fn register(app: &mut App) {
          focus, on_top. Returns the current settings; {} just reads them.",
         r#"{"colliders": true, "contacts": true, "joints": true}"#,
         debug,
+    )
+    .register_api(
+        "physics.proving_ground.replay",
+        "Restart a proving ground station now (tower, pile, dominoes, ragdolls, wrecking_ball, \
+         seesaw, paddle_wheel, bridge, turntable, balls), or every station with {}.",
+        r#"{"station": "dominoes"}"#,
+        crate::demo::replay_api,
     );
 }

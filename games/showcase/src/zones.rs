@@ -166,7 +166,8 @@ pub const ZONES: &[Zone] = &[
         key: "range",
         name: "Smoke range (bullets, fans, explosions)",
         center: DVec3::new(285.0, 0.0, 55.0),
-        radius: 30.0,
+        // The range is 45 × 52 m; flat out to its corners.
+        radius: 36.0,
         module: "smoke",
     },
     Zone {
@@ -214,8 +215,16 @@ pub const GRASSY_ZONES: &[&str] = &[
     "meadow",
     "parkour",
     "fortress",
-    "voxel",
     "weather",
+];
+
+/// Rectangles inside grassy zones where a module's demo lays its own ground, so no grass grows
+/// there: zone key, then x min..max and z min..max relative to the zone center, meters.
+pub const BARE_FOOTPRINTS: &[(&str, [f64; 2], [f64; 2])] = &[
+    // The weather station's asphalt yard, sand pit and stone patio.
+    ("weather", [-13.5, 13.0], [-8.0, 9.0]),
+    // The siege fortress's gravel breach range.
+    ("fortress", [-26.5, 26.5], [-14.0, -4.0]),
 ];
 
 /// The stream's course (x, z), spring first: through the southern woods, over the cliff south
@@ -245,32 +254,59 @@ pub fn spawn_demos(
     for z in ZONES {
         match z.key {
             "plaza" => ph::plaza(commands, lib, z),
-            "market" => ph::market(commands, lib, z),
-            "paddock" => ph::stage(commands, lib, z),
-            "physics" => ph::physics(commands, lib, z),
+            "market" => {
+                ph::market(commands, lib, z);
+                engine_ui::demo::spawn_demo(commands, z.center);
+            }
+            "paddock" => engine_anim::demo::spawn_demo(commands, z.center),
+            "physics" => engine_physics::demo::spawn_demo(commands, z.center),
             "yard" => engine_softbody::demo::spawn_demo(commands, z.center),
-            "magic" => ph::magic(commands, lib, z),
+            "magic" => engine_vfx::demo::spawn_demo(commands, z.center),
             "gallery2d" => ph::gallery2d(commands, lib, z),
-            "forest" => ph::forest(commands, lib, land, z, rng),
+            "forest" => engine_foliage::demo::spawn_demo(commands, z.center),
             "meadow" => engine_npc::demo::spawn_wildlife(commands, z.center, z.radius * 0.8),
             "lake" => ph::lake(commands, meshes, lib, land, z),
             "water" => engine_water::demo::spawn_demo(commands, z.center),
             "footsteps" => engine_audio::demo::spawn_demo(commands, z.center),
             "tracks" => ph::tracks(commands, z),
-            "cave" => ph::cave(commands, z, rng),
+            "cave" => engine_foliage::demo::spawn_cave_demo(commands, z.center),
             "arena" => engine_npc::demo::spawn_demo(commands, z.center),
-            "parkour" => ph::parkour(commands, lib, z),
+            "parkour" => engine_movement::demo::spawn_demo(commands, z.center),
             "fortress" => engine_destruction::demo::spawn_demo(commands, z.center),
-            "voxel" => ph::voxel(commands, meshes, z, rng),
+            "voxel" => engine_destruction::hill::spawn_voxel_hill(commands, z.center),
             "field" => {
                 engine_fire::demo::spawn_demo(commands, z.center);
                 ph::field_edge(commands, lib, z, rng);
+                // Air over the meadow, so the fire's smoke rises as one simulated plume.
+                commands.spawn((
+                    Name::new("Fire demo: smoke"),
+                    Transform::from_translation(z.center + DVec3::new(16.0, 0.0, 4.0)),
+                    engine_smoke::SmokeVolume {
+                        size: [100.0, 40.0, 60.0],
+                        cell_m: 1.25,
+                    },
+                ));
             }
-            "range" => ph::range(commands, lib, z),
+            "range" => engine_smoke::demo::spawn_demo(commands, z.center),
             "weather" => engine_weather::demo::spawn_demo(commands, z.center),
-            "track" => ph::track(commands, lib, z),
-            "airfield" => ph::airfield(commands, lib, z),
-            "spaceport" => ph::spaceport(commands, lib, z),
+            "track" => engine_vehicles::demo::spawn_track(commands, z.center),
+            "airfield" => {
+                let (a, b) = RUNWAY;
+                engine_vehicles::demo::spawn_airfield(
+                    commands,
+                    DVec3::new(a[0], z.center.y, a[1]),
+                    DVec3::new(b[0], z.center.y, b[1]),
+                );
+                ph::airfield_buildings(commands, lib, z);
+            }
+            "spaceport" => {
+                ph::spaceport(commands, lib, z);
+                engine_vehicles::demo::spawn_spaceport(
+                    commands,
+                    z.center + DVec3::new(0.0, 0.4, 0.0),
+                    30.0,
+                );
+            }
             _ => {}
         }
     }
@@ -335,10 +371,150 @@ impl View {
 /// [`spawn_demos`], a module thread edits only its own zone's line.
 pub fn demo_views(z: &Zone) -> Vec<View> {
     match z.key {
+        "track" | "airfield" | "spaceport" => engine_vehicles::demo::views(z.key, z.center)
+            .into_iter()
+            .map(|v| {
+                let view = View::new(v.key, v.name, v.eye, v.target, v.hour).warmup(v.warmup_secs);
+                v.on_arrive
+                    .iter()
+                    .fold(view, |view, (api, args)| view.on_arrive(api, args))
+            })
+            .collect(),
         "field" => engine_fire::demo::VIEWS
             .iter()
             .map(|v| View::new(v.key, v.name, v.eye, v.target, v.hour))
             .collect(),
+        "parkour" => {
+            // The duel runs from its setup when the camera arrives (movement.duel), so each
+            // stop catches its moment; leaving puts the duel back on its three-round cycle.
+            let duel = |round: &str| format!(r#"{{"round": "{round}"}}"#);
+            let cycle = r#"{"round": null}"#;
+            vec![
+                View::new(
+                    "parkour_course",
+                    "Movement course: slide bar, wall-run walls and the tower",
+                    [-34.0, 7.0, 26.0],
+                    [2.0, 2.5, 11.0],
+                    16.0,
+                )
+                .warmup(2.0),
+                View::new(
+                    "parkour_blink",
+                    "An elite cuts down an untrained player in a blink",
+                    [-4.0, 1.9, -11.5],
+                    [0.0, 1.15, -10.0],
+                    16.0,
+                )
+                .warmup(0.7)
+                .on_arrive("movement.duel", &duel("Blink"))
+                .on_leave("movement.duel", cycle),
+                View::new(
+                    "parkour_focus",
+                    "Trained: the same attack in slow motion, sidestepped",
+                    [-2.0, 2.4, -5.0],
+                    [0.3, 1.1, -13.0],
+                    16.0,
+                )
+                .warmup(1.0)
+                .on_arrive("movement.duel", &duel("Focus"))
+                .on_leave("movement.duel", cycle),
+                View::new(
+                    "parkour_counter",
+                    "The counter-strike while the elite recovers",
+                    [-4.0, 2.3, -7.5],
+                    [1.0, 1.0, -10.5],
+                    16.0,
+                )
+                .warmup(1.55)
+                .on_arrive("movement.duel", &duel("Focus"))
+                .on_leave("movement.duel", cycle),
+                View::new(
+                    "parkour_pack",
+                    "Grunts fall one by one in slow motion",
+                    [8.0, 4.0, -4.0],
+                    [0.0, 1.0, -15.0],
+                    16.0,
+                )
+                .warmup(1.75)
+                .on_arrive("movement.duel", &duel("Pack"))
+                .on_leave("movement.duel", cycle),
+            ]
+        }
+        // Each stop restarts the range, so fans, grenades and bullets are at the same moment.
+        "range" => engine_smoke::demo::VIEWS
+            .iter()
+            .map(|v| {
+                View::new(v.key, v.name, v.eye, v.target, v.hour)
+                    .on_arrive("smoke.demo", r#"{"restart":true}"#)
+                    .warmup(v.warmup_secs)
+            })
+            .collect(),
+        "physics" => engine_physics::demo::VIEWS
+            .iter()
+            .map(|v| {
+                let view = View::new(v.key, v.name, v.eye, v.target, v.hour).warmup(v.warmup_secs);
+                match v.station {
+                    Some(s) => view.on_arrive(
+                        "physics.proving_ground.replay",
+                        &format!(r#"{{"station": "{}"}}"#, s.key()),
+                    ),
+                    None => view,
+                }
+            })
+            .collect(),
+        "market" => {
+            let ui = |key, name, screen: &'static str| {
+                View::new(key, name, [-1.5, 1.8, -5.5], [-11.8, 1.8, 9.2], 15.0)
+                    .warmup(1.5)
+                    .on_arrive("ui.show", screen)
+                    .on_leave("ui.hide_all", "{}")
+            };
+            vec![
+                ui(
+                    "market_hud",
+                    "HUD: vitals, compass, minimap, markers",
+                    r#"{"screen": "hud"}"#,
+                ),
+                ui(
+                    "market_dialogue",
+                    "A conversation with the trader",
+                    r#"{"screen": "dialogue", "tree": "merchant_intro", "node": "offer"}"#,
+                )
+                .warmup(6.0),
+                ui("market_shop", "The trader's shop", r#"{"screen": "shop"}"#),
+                ui(
+                    "market_inventory",
+                    "Inventory and equipment",
+                    r#"{"screen": "inventory"}"#,
+                ),
+                ui(
+                    "market_map_galaxy",
+                    "Galaxy map",
+                    r#"{"screen": "map", "zoom": 3.6}"#,
+                ),
+                ui(
+                    "market_map_system",
+                    "Star system map",
+                    r#"{"screen": "map", "zoom": 2.6}"#,
+                ),
+                ui(
+                    "market_map_globe",
+                    "Planet globe",
+                    r#"{"screen": "map", "zoom": 1.4}"#,
+                ),
+                ui(
+                    "market_map_surface",
+                    "Surface map",
+                    r#"{"screen": "map", "zoom": 0.5}"#,
+                ),
+                ui("market_pause", "Pause menu", r#"{"screen": "pause"}"#),
+                ui(
+                    "market_settings",
+                    "Settings",
+                    r#"{"screen": "settings", "tab": "video"}"#,
+                ),
+            ]
+        }
         "yard" => vec![
             View::new(
                 "yard_banners",
@@ -381,6 +557,8 @@ pub fn demo_views(z: &Zone) -> Vec<View> {
             )
             .warmup(7.0),
         ],
+        "fortress" => destruction_views(engine_destruction::demo::VIEWS),
+        "voxel" => destruction_views(engine_destruction::hill::VIEWS),
         "arena" => vec![
             View::new(
                 "arena_duel",
@@ -463,8 +641,48 @@ pub fn demo_views(z: &Zone) -> Vec<View> {
                 .on_leave("weather.set", &set("partly_cloudy")),
             ]
         }
+        "forest" => engine_foliage::demo::forest_viewpoints(DVec3::ZERO)
+            .iter()
+            .map(|v| {
+                View::new(
+                    v.name,
+                    v.title,
+                    v.eye.to_array(),
+                    v.target.to_array(),
+                    v.hour,
+                )
+            })
+            .collect(),
+        "cave" => engine_foliage::demo::cave_viewpoints(DVec3::ZERO)
+            .iter()
+            .map(|v| {
+                View::new(
+                    v.name,
+                    v.title,
+                    v.eye.to_array(),
+                    v.target.to_array(),
+                    v.hour,
+                )
+            })
+            .collect(),
+        "magic" => engine_vfx::demo::VIEWS
+            .iter()
+            .map(|v| View::new(v.key, v.name, v.eye, v.target, v.hour).warmup(v.warmup))
+            .collect(),
         _ => Vec::new(),
     }
+}
+
+/// The destruction demos' viewpoints: each restarts its demo on arrival so its moment plays.
+fn destruction_views(views: &[engine_destruction::DemoView]) -> Vec<View> {
+    views
+        .iter()
+        .map(|v| {
+            View::new(v.key, v.name, v.eye, v.target, v.hour)
+                .warmup(v.warmup_secs)
+                .on_arrive(engine_destruction::RESTART_API, "{}")
+        })
+        .collect()
 }
 
 /// The valley: pads for every zone and the runway, roads between them, the lake and the cave

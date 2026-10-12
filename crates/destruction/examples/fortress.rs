@@ -19,8 +19,21 @@ use engine_world::WorldPlugin;
 /// (seconds into the demo, file name, camera position, look-at point)
 fn shots() -> Vec<(f32, &'static str, [f64; 3], [f64; 3])> {
     let mut v: Vec<(f32, &str, [f64; 3], [f64; 3])> = vec![
-        (0.45, "00_tour_view", [14.0, 6.0, -38.0], [0.0, 5.0, 0.0]),
-        (0.5, "01_overview", [-2.0, 17.0, -44.0], [-3.0, 2.5, 4.0]),
+        (
+            0.45,
+            "00_establishing",
+            [-34.0, 26.0, -62.0],
+            [0.0, 3.0, 2.0],
+        ),
+        (0.5, "01_zone_stop", [-2.0, 17.0, -44.0], [-3.0, 2.5, 4.0]),
+        (0.5, "01b_gate", [-14.0, 5.0, -54.0], [0.0, 7.0, -31.0]),
+        (0.5, "01c_courtyard", [24.0, 15.0, -26.0], [-6.0, 2.0, 8.0]),
+        (
+            0.5,
+            "01d_breach_outside",
+            [64.0, 5.0, -4.0],
+            [44.0, 3.5, 2.0],
+        ),
         (
             0.55,
             "02_bay1_bullets_vault_hole",

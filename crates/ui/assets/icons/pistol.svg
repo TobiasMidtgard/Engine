@@ -1,0 +1,43 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <defs>
+    <linearGradient id="shell" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#f4f7fa"/>
+      <stop offset=".55" stop-color="#b3bdca"/>
+      <stop offset="1" stop-color="#6a7486"/>
+    </linearGradient>
+    <linearGradient id="frame" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#4a5466"/>
+      <stop offset="1" stop-color="#1c212c"/>
+    </linearGradient>
+    <linearGradient id="grip" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#3a4252"/>
+      <stop offset="1" stop-color="#171b24"/>
+    </linearGradient>
+    <linearGradient id="cell" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#e6fbff"/>
+      <stop offset=".5" stop-color="#5fd0ff"/>
+      <stop offset="1" stop-color="#1c78b8"/>
+    </linearGradient>
+    <radialGradient id="glow" cx=".5" cy=".5" r=".5">
+      <stop offset="0" stop-color="#bff1ff" stop-opacity=".9"/>
+      <stop offset="1" stop-color="#5fd0ff" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+  <g transform="rotate(-10 32 32) translate(0 1)">
+    <circle cx="57" cy="23" r="7" fill="url(#glow)"/>
+    <g stroke="#0c0f16" stroke-width="4" stroke-linejoin="round" stroke-linecap="round" paint-order="stroke">
+      <path d="M16 30 L32 30 L28 54 C27.5 56 26 57 24 57 L14 57 C12 57 11 55.5 11.5 53.5 Z" fill="url(#grip)"/>
+      <path d="M29 30 L42 30 C43 36 40 41 33 41 L29 41" fill="none" stroke-width="5"/>
+      <path d="M29 30 L42 30 C43 36 40 41 33 41 L29 41" fill="none" stroke="#2b3240" stroke-width="2.2"/>
+      <path d="M6 22 L12 15 L46 15 L52 19 L52 28 L46 32 L10 32 L6 28 Z" fill="url(#frame)"/>
+      <path d="M8 21 L13 16 L44 16 L49 20 L49 23 L8 23 Z" fill="url(#shell)"/>
+      <rect x="50" y="18.5" width="9" height="9" rx="1.5" fill="url(#frame)"/>
+    </g>
+    <rect x="18" y="25" width="22" height="3.8" rx="1.9" fill="url(#cell)" stroke="#0c0f16" stroke-width="1.2"/>
+    <path d="M14 17.6 L43 17.6" stroke="#ffffff" stroke-width="1.2" stroke-linecap="round"/>
+    <path d="M30 16 L28 23 M34 16 L32 23" stroke="#5e6878" stroke-width="1"/>
+    <rect x="57.5" y="20.5" width="2.5" height="5" rx="1" fill="#bff1ff"/>
+    <circle cx="11.5" cy="27" r="1.6" fill="#e8b65a" stroke="#0c0f16" stroke-width=".8"/>
+    <path d="M15 37 L26 37 M14.2 42 L25 42 M13.4 47 L24.2 47" stroke="#535d70" stroke-width="1.4" stroke-linecap="round"/>
+  </g>
+</svg>

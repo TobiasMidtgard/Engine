@@ -3,7 +3,6 @@
 //! that want to see the whole map in one go.
 
 use crate::camera;
-use crate::day_cycle::DayCycle;
 use crate::places::{Place, places};
 use engine::prelude::*;
 
@@ -66,12 +65,16 @@ fn run(world: &mut World) {
         )
     };
 
-    // Exposure settles at the end of the warm-up.
-    let capture_at = SETTLE_FRAMES + (place.warmup_secs / STEP_SECS).ceil() as u32;
+    // The place's calls run a few frames after the move; exposure settles at the end of the
+    // warm-up that follows them.
+    let capture_at = crate::places::ARRIVE_DELAY
+        + 1
+        + SETTLE_FRAMES
+        + (place.warmup_secs / STEP_SECS).ceil() as u32;
     if frames == 0 {
         camera::go_to(world, &place);
-        crate::places::visit(world, &place);
-        world.resource_mut::<DayCycle>().hour = place.hour;
+        crate::places::visit_soon(world, &place);
+        world.resource_mut::<engine_weather::Sky>().hour = place.hour;
         // Adapt exposure within a couple of frames instead of seconds.
         let mut cams = world.query::<&mut Camera>();
         for mut cam in cams.iter_mut(world) {
