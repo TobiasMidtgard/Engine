@@ -7,7 +7,7 @@ use std::sync::Arc;
 use engine_core::math::{DVec3, Quat, Vec3};
 use engine_core::prelude::*;
 use engine_core::time::TimeSource;
-use engine_physics::{PhysicsPlugin, PhysicsStats};
+use engine_physics::{PhysicsPlugin, PhysicsSettings, PhysicsStats};
 use engine_world::physics::{
     CharacterController, CharacterMove, CharacterState, Collider, CollisionLayers, ContactEvent,
     ContactPhase, ExternalForce, Joint, JointKind, PhysicsQueries, QueryFilter, RigidBody,
@@ -777,6 +777,56 @@ fn fast_bodies_travel_between_regions() {
         )
         .expect("ray should find the shot 9 km away");
     assert_eq!(hit.entity, shot);
+}
+
+#[test]
+fn joints_pinned_after_a_region_recenters_hang_in_place() {
+    // A region re-centers on its moving bodies as they drift (cars driving off, crates thrown
+    // far). Joints pinned to the world afterwards (a rebuilt rope bridge, a new pendulum) must
+    // hang where they were placed; they used to be off by however far the region moved.
+    let mut app = app();
+    app.world.resource_mut::<PhysicsSettings>().region_radius_m = 40.0;
+    ground(&mut app, DVec3::ZERO, 100.0);
+    let old = cube(&mut app, DVec3::new(-3.0, 6.0, 3.0), 0.25);
+    let pin = |app: &mut App, body: Entity, at: DVec3| {
+        app.world.spawn(Joint {
+            kind: JointKind::Spherical { cone_limit: None },
+            body_a: body,
+            body_b: None,
+            anchor_a: Vec3::new(0.0, 2.0, 0.0),
+            anchor_b: at,
+            break_force: None,
+            collide_connected: false,
+        });
+    };
+    pin(&mut app, old, DVec3::new(-3.0, 8.0, 3.0));
+    // A body gliding away drags the region's center 12 m along x.
+    app.world.spawn((
+        Transform::from_xyz(0.0, 3.0, 6.0),
+        RigidBody {
+            gravity_scale: 0.0,
+            ..RigidBody::dynamic()
+        },
+        Collider::sphere(0.3),
+        Velocity {
+            linear: Vec3::new(12.0, 0.0, 0.0),
+            angular: Vec3::ZERO,
+        },
+    ));
+    app.update_n(150);
+    let new = cube(&mut app, DVec3::new(0.0, 6.0, 3.0), 0.25);
+    pin(&mut app, new, DVec3::new(0.0, 8.0, 3.0));
+    app.update_n(120);
+    for (e, under) in [
+        (old, DVec3::new(-3.0, 6.0, 3.0)),
+        (new, DVec3::new(0.0, 6.0, 3.0)),
+    ] {
+        let p = pos(&app, e);
+        assert!(
+            p.distance(under) < 0.05,
+            "a pendulum hangs at {p:?}, not under its pin above {under:?}"
+        );
+    }
 }
 
 #[test]
