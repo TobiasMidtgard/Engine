@@ -668,6 +668,9 @@ pub(crate) fn drive_output(
     }
 }
 
+/// A sound due an occlusion check: voice, position, source entity, occlusion last sent.
+type OcclusionCheck = (VoiceId, DVec3, Option<Entity>, f32);
+
 /// Rays cast per frame for occlusion (3 per voice checked).
 const OCCLUSION_RAYS_PER_FRAME: usize = 48;
 /// How often each sound's line of sight is rechecked, real seconds.
@@ -683,7 +686,7 @@ pub(crate) fn occlusion(
     env: Env,
     time: Res<Time>,
     parents: Query<&ChildOf>,
-    mut work: Local<Vec<(VoiceId, DVec3, Option<Entity>, f32)>>,
+    mut work: Local<Vec<OcclusionCheck>>,
 ) {
     if !audio.is_running() {
         return;
