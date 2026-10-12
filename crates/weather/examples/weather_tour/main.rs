@@ -1,6 +1,17 @@
 //! Renders the weather station through a day of changing weather and saves a screenshot of
 //! each moment: `cargo run -p engine_weather --release --example weather_tour [out_dir] [only]`.
 //! Runs headless (needs a GPU or lavapipe). `only` is a comma-separated list of shot names.
+//!
+//! The station stands in a procedural landscape (see `landscape.rs`): a terrain with a meadow,
+//! wooded hills and a mountain range, procedural trees, rocks, grass and a farm track, all
+//! with textures painted on the CPU at startup.
+
+mod landscape;
+mod noise;
+mod rocks;
+mod terrain;
+mod texgen;
+mod trees;
 
 use engine_core::prelude::*;
 use engine_core::registry::call_api;
@@ -160,70 +171,10 @@ fn shots() -> Vec<Shot> {
 }
 
 fn scene(app: &mut App) {
-    let w = &mut app.world;
-    w.spawn((
-        Transform::default(),
-        MeshRenderer::new(
-            Shape::Plane {
-                size: [150_000.0, 150_000.0],
-                subdivisions: 1,
-            },
-            StandardMaterial::hex(0x55743a).with_roughness(0.95),
-        ),
-    ));
-    // Rolling hills and a few trees so the clouds have a landscape to sit over.
-    let hill = StandardMaterial::hex(0x4a6b34).with_roughness(0.95);
-    for (x, z, r) in [
-        (-300.0, -500.0, 180.0),
-        (250.0, -700.0, 260.0),
-        (700.0, -300.0, 220.0),
-        (-800.0, 100.0, 300.0),
-        (500.0, 600.0, 200.0),
-    ] {
-        w.spawn((
-            Transform::from_xyz(x, -r * 0.3, z).with_scale(Vec3::new(1.0, 0.55, 1.0)),
-            MeshRenderer::new(
-                Shape::Sphere {
-                    radius: r as f32,
-                    segments: 48,
-                },
-                hill,
-            ),
-        ));
-    }
-    let bark = StandardMaterial::hex(0x5a4030).with_roughness(0.9);
-    let leaves = StandardMaterial::hex(0x3d6b2a)
-        .with_roughness(0.7)
-        .with_subsurface(0.4);
-    for k in 0..14 {
-        let a = k as f64 * 2.4;
-        let r = 22.0 + (k % 4) as f64 * 6.0;
-        let (x, z) = (a.cos() * r, a.sin() * r);
-        w.spawn((
-            Transform::from_xyz(x, 1.5, z),
-            MeshRenderer::new(
-                Shape::Cylinder {
-                    radius: 0.2,
-                    height: 3.0,
-                    segments: 10,
-                },
-                bark,
-            ),
-        ));
-        w.spawn((
-            Transform::from_xyz(x, 4.2, z),
-            MeshRenderer::new(
-                Shape::Sphere {
-                    radius: 2.0,
-                    segments: 20,
-                },
-                leaves,
-            ),
-        ));
-    }
-    let mut commands = w.commands();
+    landscape::build(&mut app.world);
+    let mut commands = app.world.commands();
     engine_weather::demo::spawn_demo(&mut commands, DVec3::ZERO);
-    w.flush();
+    app.world.flush();
 }
 
 fn main() {
