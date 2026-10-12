@@ -2,6 +2,7 @@
 //! slots, shadows, and the ground maps (footprints, wetness, puddles, snow) the shader reads.
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 
 use bytemuck::{Pod, Zeroable};
 use engine_core::diagnostics::Diagnostics;
@@ -19,6 +20,7 @@ use crate::chunk::{ChunkSource, TerrainVertex, VERTS_PER_CHUNK, build_chunk, chu
 use crate::cube::NodeKey;
 use crate::deform::DeformationMap;
 use crate::lod::{Lod, SelectInput};
+use crate::materials::{self, BakedMaterials, MATERIAL_COUNT};
 use crate::{TerrainSettings, Terrains};
 
 const SHADER: &str = include_str!("terrain.wgsl");
@@ -37,7 +39,8 @@ struct ChunkInstance {
     origin: [f32; 3],
     /// Index into the planet array.
     planet: u32,
-    /// Vertex spacing (m), quadtree level, unused, unused.
+    /// Vertex spacing (m), quadtree level, and the camera distances where the geomorph
+    /// toward the parent patch starts and ends (0 = off).
     lod: [f32; 4],
 }
 
@@ -50,6 +53,44 @@ impl ChunkInstance {
             step_mode: wgpu::VertexStepMode::Instance,
             attributes: &ATTRS,
         }
+    }
+}
+
+/// Ground material info (uniform). Matches `Materials` in terrain.wgsl.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Pod, Zeroable)]
+struct MaterialsGpu {
+    /// Per material: (mean albedo rgb, tile meters), (mean roughness, mean occlusion,
+    /// height range m, 0).
+    info: [[f32; 4]; 2 * MATERIAL_COUNT],
+    /// Textures ready (0/1).
+    flags: [f32; 4],
+}
+
+impl MaterialsGpu {
+    fn from_baked(baked: Option<&BakedMaterials>) -> Self {
+        let mut out = Self {
+            info: [[0.0; 4]; 2 * MATERIAL_COUNT],
+            flags: [0.0; 4],
+        };
+        for (i, m) in materials::GroundMaterial::ALL.iter().enumerate() {
+            let (albedo, rough, occl, height, tile) = baked
+                .and_then(|b| b.stats.get(i))
+                .map(|s| {
+                    (
+                        s.mean_albedo,
+                        s.mean_roughness,
+                        s.mean_occlusion,
+                        s.height_m,
+                        s.tile_m,
+                    )
+                })
+                .unwrap_or(([0.5; 3], 0.8, 1.0, 0.0, m.tile_m()));
+            out.info[2 * i] = [albedo[0], albedo[1], albedo[2], tile];
+            out.info[2 * i + 1] = [rough, occl, height, 0.0];
+        }
+        out.flags[0] = if baked.is_some() { 1.0 } else { 0.0 };
+        out
     }
 }
 
@@ -93,7 +134,92 @@ struct Gpu {
     sampler: wgpu::Sampler,
     deform_tex: Option<(wgpu::Texture, wgpu::TextureView, u32)>,
     surface_tex: Option<(wgpu::Texture, wgpu::TextureView, u32, u32)>,
+    /// Ground material arrays: albedo + height, normal + roughness + occlusion.
+    mat_albedo: wgpu::TextureView,
+    mat_normal: wgpu::TextureView,
+    mat_info: wgpu::Buffer,
+    mat_sampler: wgpu::Sampler,
+    /// Resolution of the uploaded material textures (0 = placeholders).
+    mat_size: u32,
+    /// Resolution and scan folder of the uploaded materials.
+    mat_key: Option<(u32, Option<PathBuf>)>,
+    /// Materials built from scans.
+    mat_scanned: usize,
     group: Option<wgpu::BindGroup>,
+}
+
+/// Two `MATERIAL_COUNT`-layer texture arrays (albedo + height in sRGB, normal + roughness +
+/// occlusion linear) holding `baked`, or flat 1×1 placeholders.
+fn material_arrays(
+    gpu: &GpuShared,
+    baked: Option<&BakedMaterials>,
+) -> (wgpu::TextureView, wgpu::TextureView) {
+    let (size, mips) = baked.map(|b| (b.size, b.mip_count)).unwrap_or((1, 1));
+    let make = |label: &str, format: wgpu::TextureFormat, data: Option<&Vec<Vec<Vec<u8>>>>| {
+        let tex = gpu.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some(label),
+            size: wgpu::Extent3d {
+                width: size,
+                height: size,
+                depth_or_array_layers: MATERIAL_COUNT as u32,
+            },
+            mip_level_count: mips,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        for layer in 0..MATERIAL_COUNT {
+            for mip in 0..mips {
+                let w = (size >> mip).max(1);
+                let flat = [128u8, 128, 204, 255];
+                let bytes: &[u8] = match data {
+                    Some(d) => &d[layer][mip as usize],
+                    None => &flat,
+                };
+                gpu.queue.write_texture(
+                    wgpu::TexelCopyTextureInfo {
+                        texture: &tex,
+                        mip_level: mip,
+                        origin: wgpu::Origin3d {
+                            x: 0,
+                            y: 0,
+                            z: layer as u32,
+                        },
+                        aspect: wgpu::TextureAspect::All,
+                    },
+                    bytes,
+                    wgpu::TexelCopyBufferLayout {
+                        offset: 0,
+                        bytes_per_row: Some(w * 4),
+                        rows_per_image: Some(w),
+                    },
+                    wgpu::Extent3d {
+                        width: w,
+                        height: w,
+                        depth_or_array_layers: 1,
+                    },
+                );
+            }
+        }
+        tex.create_view(&wgpu::TextureViewDescriptor {
+            dimension: Some(wgpu::TextureViewDimension::D2Array),
+            ..Default::default()
+        })
+    };
+    (
+        make(
+            "terrain material albedo",
+            wgpu::TextureFormat::Rgba8UnormSrgb,
+            baked.map(|b| &b.albedo_height),
+        ),
+        make(
+            "terrain material normals",
+            wgpu::TextureFormat::Rgba8Unorm,
+            baked.map(|b| &b.normal_rough_ao),
+        ),
+    )
 }
 
 struct ChunkGpu {
@@ -247,9 +373,56 @@ impl TerrainFeature {
                             binding: 4,
                             resource: wgpu::BindingResource::Sampler(&gpu.sampler),
                         },
+                        wgpu::BindGroupEntry {
+                            binding: 5,
+                            resource: gpu.mat_info.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 6,
+                            resource: wgpu::BindingResource::TextureView(&gpu.mat_albedo),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 7,
+                            resource: wgpu::BindingResource::TextureView(&gpu.mat_normal),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 8,
+                            resource: wgpu::BindingResource::Sampler(&gpu.mat_sampler),
+                        },
                     ],
                 }),
         );
+    }
+
+    /// Swap in the baked ground materials once the background bake is done.
+    fn upload_materials(
+        &mut self,
+        gpu_shared: &GpuShared,
+        resolution: u32,
+        scans: Option<PathBuf>,
+    ) {
+        let Some(gpu) = self.gpu.as_mut() else {
+            return;
+        };
+        let key = (resolution.next_power_of_two().max(16), scans);
+        if resolution == 0 || gpu.mat_key.as_ref() == Some(&key) {
+            return;
+        }
+        let Some(baked) = materials::shared(resolution, key.1.as_deref()) else {
+            return;
+        };
+        let (albedo, normal) = material_arrays(gpu_shared, Some(&baked));
+        gpu.mat_albedo = albedo;
+        gpu.mat_normal = normal;
+        gpu.mat_size = baked.size;
+        gpu.mat_scanned = baked.scanned();
+        gpu.mat_key = Some(key);
+        gpu_shared.queue.write_buffer(
+            &gpu.mat_info,
+            0,
+            bytemuck::bytes_of(&MaterialsGpu::from_baked(Some(&baked))),
+        );
+        self.rebuild_group(gpu_shared);
     }
 
     /// Upload changed parts of the footprint grid and the weather surface layers.
@@ -494,6 +667,42 @@ impl RenderFeature for TerrainFeature {
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                     count: None,
                 },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 5,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 6,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2Array,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 7,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2Array,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 8,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
             ],
         });
         let buffers = [Some(TerrainVertex::layout()), Some(ChunkInstance::layout())];
@@ -579,6 +788,29 @@ impl RenderFeature for TerrainFeature {
             min_filter: wgpu::FilterMode::Linear,
             ..Default::default()
         });
+        // Ground materials: placeholders until the background bake finishes.
+        let (mat_albedo, mat_normal) = material_arrays(gpu, None);
+        let mat_info = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("terrain materials"),
+            size: std::mem::size_of::<MaterialsGpu>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        gpu.queue.write_buffer(
+            &mat_info,
+            0,
+            bytemuck::bytes_of(&MaterialsGpu::from_baked(None)),
+        );
+        let mat_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("terrain materials"),
+            address_mode_u: wgpu::AddressMode::Repeat,
+            address_mode_v: wgpu::AddressMode::Repeat,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::MipmapFilterMode::Linear,
+            anisotropy_clamp: 16,
+            ..Default::default()
+        });
         self.gpu = Some(Gpu {
             pipeline,
             shadow_pipeline,
@@ -601,6 +833,13 @@ impl RenderFeature for TerrainFeature {
             sampler,
             deform_tex: None,
             surface_tex: None,
+            mat_albedo,
+            mat_normal,
+            mat_info,
+            mat_sampler,
+            mat_size: 0,
+            mat_key: None,
+            mat_scanned: 0,
             group: None,
         });
     }
@@ -625,6 +864,21 @@ impl RenderFeature for TerrainFeature {
             .cloned()
             .unwrap_or_default();
         let maps = self.upload_maps(world, gpu_shared, view);
+        let Some(terrains) = world.get_resource::<Terrains>() else {
+            return;
+        };
+        if !terrains.entries.is_empty() {
+            let scans = settings.scan_folder(world);
+            self.upload_materials(gpu_shared, settings.material_resolution, scans);
+        }
+        let (materials_ready, scanned) = self
+            .gpu
+            .as_ref()
+            .map_or((false, 0), |g| (g.mat_size > 0, g.mat_scanned));
+        if let Some(mut d) = world.get_resource_mut::<Diagnostics>() {
+            d.set("terrain.materials_ready", materials_ready as u32 as f64);
+            d.set("terrain.scanned_materials", scanned as f64);
+        }
         let Some(terrains) = world.get_resource::<Terrains>() else {
             return;
         };
@@ -788,12 +1042,19 @@ impl RenderFeature for TerrainFeature {
                 let Some(c) = state.chunks.get(key) else {
                     continue;
                 };
+                // The parent takes over at `split` parent sizes; be fully morphed by then.
+                let morph = if settings.geomorph && key.level > 0 {
+                    let merge = (split * state.lod.map.node_size(key.level - 1)) as f32;
+                    (merge * 0.75, merge * 0.98)
+                } else {
+                    (0.0, 0.0)
+                };
                 let rel = (pos + rot * c.origin - view.origin).as_vec3();
                 let instance = instances.len() as u32;
                 instances.push(ChunkInstance {
                     origin: rel.to_array(),
                     planet: pi as u32,
-                    lod: [c.spacing as f32, key.level as f32, 0.0, 0.0],
+                    lod: [c.spacing as f32, key.level as f32, morph.0, morph.1],
                 });
                 self.draws.push(Draw {
                     slot: c.slot,
@@ -1007,6 +1268,6 @@ mod tests {
     fn gpu_structs_match_shader_sizes() {
         assert_eq!(std::mem::size_of::<PlanetGpu>(), 16 * (3 + 1 + 10 + 2));
         assert_eq!(std::mem::size_of::<MapsGpu>(), 48);
-        assert_eq!(std::mem::size_of::<TerrainVertex>(), 32);
+        assert_eq!(std::mem::size_of::<TerrainVertex>(), 36);
     }
 }

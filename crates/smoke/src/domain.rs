@@ -19,6 +19,7 @@
 
 use engine_core::math::{DVec3, UVec3, Vec3};
 use engine_core::tasks::par_chunks_mut;
+use engine_world::WorldShift;
 
 /// One voxel of air.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
@@ -139,6 +140,9 @@ pub struct Domain {
     curl: Vec<Vec3>,
     /// Per (x, z) column: voxel layers under the ground (solid).
     pub floor: Vec<u16>,
+    /// The floor no longer matches the ground (the world turned under the box): measure it
+    /// again with [`Domain::set_floor`] before the next step.
+    pub floor_stale: bool,
     wind: Vec<Vec3>,
     wind_dims: UVec3,
     pub expansions: Vec<Expansion>,
@@ -146,6 +150,9 @@ pub struct Domain {
     inflow: Vec<(DVec3, f32, f32)>,
     /// Bumped every step that changed anything visible.
     pub version: u64,
+    /// Bumped when the contents jumped instead of flowing (resampled into a turned world), so
+    /// the renderer doesn't blend from what was there before.
+    pub resampled: u64,
     /// Smoke in the box, kg.
     pub mass_kg: f32,
     /// Densest voxel, kg/m³.
@@ -172,11 +179,13 @@ impl Domain {
             divergence: vec![0.0; n],
             curl: vec![Vec3::ZERO; n],
             floor: vec![0; (dims.x * dims.z) as usize],
+            floor_stale: false,
             wind: vec![Vec3::ZERO; (wind_dims.x * wind_dims.y * wind_dims.z) as usize],
             wind_dims,
             expansions: Vec::new(),
             inflow: Vec::new(),
             version: 1,
+            resampled: 0,
             mass_kg: 0.0,
             max_density: 0.0,
             time: 0.0,
@@ -1001,6 +1010,68 @@ impl Domain {
             }
         }
         out
+    }
+
+    /// Move the box into a new reference frame (see [`WorldShift`]).
+    ///
+    /// A translation moves `origin` (exactly; the voxels stay as they are). A rotation
+    /// resamples the air (trilinear, velocities turned) into a box of the same size, still
+    /// along the world axes, placed so that `anchor` (meters from the old min corner) is where
+    /// the world took it, and marks the floor to be measured again. Either way `version` is
+    /// bumped, so the renderer and the obscurance snapshot pick it up.
+    pub fn shift(&mut self, s: &WorldShift, anchor: DVec3) {
+        for e in &mut self.expansions {
+            e.from = s.point(e.from);
+            e.to = s.point(e.to);
+        }
+        for (c, _, _) in &mut self.inflow {
+            *c = s.point(*c);
+        }
+        self.version += 1;
+        if s.is_translation_only() {
+            self.origin += s.translation;
+            return;
+        }
+        let old_origin = self.origin;
+        self.origin = s.point(old_origin + anchor) - anchor;
+        let old = std::mem::take(&mut self.voxels);
+        let old_floor = std::mem::take(&mut self.floor);
+        let dims = self.dims;
+        let cell = self.cell as f64;
+        let new_origin = self.origin;
+        // Continuous voxel coordinates in the old box of a voxel center of the new one.
+        let back = |x: u32, y: u32, z: u32| {
+            let p = new_origin + (UVec3::new(x, y, z).as_dvec3() + 0.5) * cell;
+            ((s.inverse_point(p) - old_origin) / cell).as_vec3()
+        };
+        let mut voxels = vec![Voxel::default(); old.len()];
+        let slice = (dims.x * dims.y) as usize;
+        par_chunks_mut(&mut voxels, slice, |z, chunk| {
+            for y in 0..dims.y {
+                for x in 0..dims.x {
+                    let mut v = sample(&old, dims, back(x, y, z as u32), &|_| Voxel::default());
+                    v.vel = s.direction(v.vel);
+                    chunk[(x + y * dims.x) as usize] = v;
+                }
+            }
+        });
+        self.voxels = voxels;
+        // Until the ground is measured again: the old floor under each new column.
+        self.floor = (0..dims.x * dims.z)
+            .map(|i| {
+                let q = back(i % dims.x, 0, i / dims.x);
+                let c = q.floor().as_ivec3();
+                let x = c.x.clamp(0, dims.x as i32 - 1) as u32;
+                let z = c.z.clamp(0, dims.z as i32 - 1) as u32;
+                old_floor[(x + z * dims.x) as usize]
+            })
+            .collect();
+        self.floor_stale = true;
+        self.resampled += 1;
+        self.max_density = self.voxels.iter().map(|v| v.density).fold(0.0, f32::max);
+        let total: f64 = self.voxels.iter().map(|v| v.density as f64).sum();
+        self.mass_kg = (total * cell.powi(3)) as f32;
+        self.active = self.active_region();
     }
 
     /// Remove all smoke and stop the air.

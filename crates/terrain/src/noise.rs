@@ -4,7 +4,7 @@
 //! centimeter detail with no precision loss. Lattice hashing is a 64-bit integer mix (no
 //! permutation table), so the noise never repeats.
 
-use engine_core::math::DVec3;
+use engine_core::math::{DMat3, DVec3};
 
 /// Integer lattice hash (splitmix-style finalizer).
 #[inline]
@@ -17,6 +17,38 @@ fn hash3(x: i64, y: i64, z: i64, seed: u64) -> u32 {
     h = h.wrapping_mul(0xBF58_476D_1CE4_E5B9);
     h ^= h >> 29;
     (h >> 32) as u32
+}
+
+/// 64 well-mixed bits for a lattice point (three 21-bit random numbers and change).
+#[inline]
+fn hash3_wide(x: i64, y: i64, z: i64, seed: u64) -> u64 {
+    let mut h = seed
+        ^ (x as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15)
+        ^ (y as u64).wrapping_mul(0xC2B2_AE3D_27D4_EB4F)
+        ^ (z as u64).wrapping_mul(0x1656_67B1_9E37_79F9);
+    h ^= h >> 31;
+    h = h.wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    h ^= h >> 29;
+    h = h.wrapping_mul(0x94D0_49BB_1331_11EB);
+    h ^ (h >> 32)
+}
+
+/// `(sin x, cos x)` to about 1e-7, several times faster than the libm pair (for phases of a
+/// few turns; the reduction loses precision far from zero).
+#[inline]
+pub fn sin_cos_fast(x: f64) -> (f64, f64) {
+    use std::f64::consts::{FRAC_2_PI, FRAC_PI_2};
+    let k = (x * FRAC_2_PI).round();
+    let y = x - k * FRAC_PI_2;
+    let y2 = y * y;
+    let s = y * (1.0 + y2 * (-1.0 / 6.0 + y2 * (1.0 / 120.0 + y2 * (-1.0 / 5040.0))));
+    let c = 1.0 + y2 * (-0.5 + y2 * (1.0 / 24.0 + y2 * (-1.0 / 720.0 + y2 / 40_320.0)));
+    match (k as i64) & 3 {
+        0 => (s, c),
+        1 => (c, -s),
+        2 => (-s, -c),
+        _ => (-c, s),
+    }
 }
 
 /// The 12 cube-edge gradients (Perlin's improved noise), padded to 16.
@@ -219,6 +251,171 @@ pub fn eroded(p: DVec3, seed: u64, octaves: f64, gain: f64, tangent: Option<DVec
         jac_scale *= 2.02;
     }
     sum / norm.max(1e-9)
+}
+
+/// `twist` as a matrix acting on gradients: the gradient of `f(twist(p))` is `TWIST_T * ∇f`.
+const TWIST_T: DMat3 = DMat3::from_cols(
+    DVec3::new(0.80 * 2.02, -0.36 * 2.02, 0.48 * 2.02),
+    DVec3::new(0.60 * 2.02, 0.48 * 2.02, -0.64 * 2.02),
+    DVec3::new(0.00, 0.80 * 2.02, 0.60 * 2.02),
+);
+
+/// Weight of octave `i` when `octaves` (possibly fractional) are wanted.
+#[inline]
+fn octave_weight(i: u32, octaves: f64) -> f64 {
+    (octaves - i as f64).clamp(0.0, 1.0)
+}
+
+/// [`fbm_smooth`] of `p / wavelength`, with gradients (per unit of `p`) for steering.
+///
+/// The value sums `octaves` layers (fractional for level of detail, exactly like
+/// [`fbm_smooth`]). Gradient `k` sums the first `grad_octaves` layers whose wavelength is at
+/// least `cutoffs[k]` (in units of `p`): a low-passed slope whose direction varies no faster
+/// than that, and which never changes with the level of detail.
+pub fn fbm_d<const N: usize>(
+    p: DVec3,
+    wavelength: f64,
+    seed: u64,
+    octaves: f64,
+    grad_octaves: u32,
+    gain: f64,
+    cutoffs: &[f64; N],
+) -> (f64, [DVec3; N]) {
+    let n = (octaves.ceil().max(0.0) as u32).max(grad_octaves);
+    let (mut sum, mut norm, mut amp) = (0.0, 0.0, 1.0);
+    let mut grads = [DVec3::ZERO; N];
+    let mut gnorm = 0.0;
+    let mut q = p / wavelength;
+    let mut jac = DMat3::IDENTITY / wavelength;
+    let mut wl = wavelength;
+    for i in 0..n {
+        let (v, g) = gradient3(q, seed.wrapping_add(i as u64 * 0x51ED));
+        let w = octave_weight(i, octaves);
+        sum += amp * w * v;
+        norm += amp * w;
+        if i < grad_octaves {
+            let dg = jac * g * amp;
+            for (grad, cutoff) in grads.iter_mut().zip(cutoffs) {
+                if wl >= *cutoff {
+                    *grad += dg;
+                }
+            }
+            gnorm += amp;
+        }
+        amp *= gain;
+        q = twist(q);
+        jac *= TWIST_T;
+        wl /= 2.02;
+    }
+    let inv = 1.0 / gnorm.max(1e-9);
+    (sum / norm.max(1e-9), grads.map(|g| g * inv))
+}
+
+/// [`ridged`] of `p / wavelength`, with low-passed gradients for steering as in [`fbm_d`].
+///
+/// The gradients are rounded off at the crests (as if they were a tenth of a wavelength
+/// wide), so they turn continuously from one side of a ridge to the other: directions taken
+/// from them (which way gullies run) never jump.
+///
+/// Also returns how close `p` is to a crest of the first layer (1 on it, 0 a tenth of a
+/// wavelength away), where those directions turn fastest.
+pub fn ridged_d<const N: usize>(
+    p: DVec3,
+    wavelength: f64,
+    seed: u64,
+    octaves: f64,
+    grad_octaves: u32,
+    cutoffs: &[f64; N],
+) -> (f64, [DVec3; N], f64) {
+    let mut crest = 0.0;
+    let n = (octaves.ceil().max(0.0) as u32).max(grad_octaves);
+    let (mut sum, mut norm, mut amp) = (0.0, 0.0, 1.0);
+    let mut grads = [DVec3::ZERO; N];
+    let mut gnorm = 0.0;
+    let (mut weight, mut dweight) = (1.0f64, DVec3::ZERO);
+    let mut q = p / wavelength;
+    let mut jac = DMat3::IDENTITY / wavelength;
+    let mut wl = wavelength;
+    for i in 0..n {
+        let (v, g) = gradient3(q, seed.wrapping_add(i as u64 * 0x3C6E));
+        let a = 1.0 - v.abs();
+        let da = jac * g * (-v / (v * v + 0.03).sqrt());
+        if i == 0 {
+            crest = (-(v * v) / 0.06).exp();
+        }
+        let nv = a * a * weight;
+        let dn = da * (2.0 * a * weight) + dweight * (a * a);
+        let w = octave_weight(i, octaves);
+        sum += nv * amp * w;
+        norm += amp * w;
+        if i < grad_octaves {
+            for (grad, cutoff) in grads.iter_mut().zip(cutoffs) {
+                if wl >= *cutoff {
+                    *grad += dn * amp;
+                }
+            }
+            gnorm += amp;
+        }
+        let k = nv * 1.8;
+        // The weight saturates at 1; its gradient fades out just before, not at once.
+        (weight, dweight) = if k <= 0.0 {
+            (0.0, DVec3::ZERO)
+        } else if k >= 1.0 {
+            (1.0, DVec3::ZERO)
+        } else {
+            let fade = ((1.0 - k) * 6.0).min(1.0);
+            (k, dn * (1.8 * fade))
+        };
+        amp *= 0.5;
+        q = twist(q);
+        jac *= TWIST_T;
+        wl /= 2.02;
+    }
+    let inv = 1.0 / gnorm.max(1e-9);
+    (sum / norm.max(1e-9), grads.map(|g| g * inv), crest)
+}
+
+/// Gully stripes: parallel waves that run along the slope, with a random phase per lattice
+/// cell, blended across cells so they fork and merge like a drainage network ("phacelle"
+/// noise, after Rune Skovbo Johansen, in 3D so it works on a sphere).
+///
+/// `across` is a unit tangent across the slope (perpendicular to downhill); the waves
+/// repeat `freq` times per cell along it, so their crests run downhill. Returns the wave as
+/// `(cos φ, sin φ)` with length ≤ 1: 1 almost everywhere, shrinking toward 0 only right at
+/// a fork, where neighbouring cells disagree. `φ = 0` is a spur crest, `φ = ±π` a gully
+/// floor; φ grows by 2π per `1 / freq` cells along `across`.
+pub fn stripes(q: DVec3, across: DVec3, seed: u64, freq: f64) -> (f64, f64) {
+    let i = q.floor();
+    let f = q - i;
+    let (ix, iy, iz) = (i.x as i64, i.y as i64, i.z as i64);
+    let u = f * f * f * (f * (f * 6.0 - 15.0) + 10.0);
+    let k = std::f64::consts::TAU * freq;
+    let (mut c, mut s) = (0.0, 0.0);
+    for corner in 0..8u32 {
+        let (ox, oy, oz) = (corner & 1, (corner >> 1) & 1, corner >> 2);
+        let w = (if ox == 1 { u.x } else { 1.0 - u.x })
+            * (if oy == 1 { u.y } else { 1.0 - u.y })
+            * (if oz == 1 { u.z } else { 1.0 - u.z });
+        if w < 1e-7 {
+            continue;
+        }
+        let h = hash3_wide(ix + ox as i64, iy + oy as i64, iz + oz as i64, seed);
+        // A random point in the cell around the corner; the waves are measured from it, so
+        // flipping `across` (the other side of a crest) gives the mirror image, not a jump.
+        let jitter = DVec3::new(
+            (h & 0x1F_FFFF) as f64,
+            ((h >> 21) & 0x1F_FFFF) as f64,
+            ((h >> 42) & 0x1F_FFFF) as f64,
+        ) * (1.0 / 2_097_152.0)
+            - 0.5;
+        let d = f - DVec3::new(ox as f64, oy as f64, oz as f64) - jitter;
+        let (sn, cs) = sin_cos_fast(k * d.dot(across));
+        c += w * cs;
+        s += w * sn;
+    }
+    // Normalize (full contrast) but softly, so forks stay continuous.
+    let inv = 1.0 / (c * c + s * s + 0.03).sqrt();
+    (c * inv, s * inv)
 }
 
 /// Value in `[0, 1)` for an integer cell (for scattering features like craters).

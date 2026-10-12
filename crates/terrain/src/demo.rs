@@ -10,6 +10,12 @@
 //! drives across, so every kind of print shows side by side. They walk for a while before
 //! the first frame, so trails are visible right away. Rain (from the weather module) darkens
 //! the soil, fills prints with water and turns dirt to mud; snowfall fills snow prints in.
+//!
+//! The walkers are print makers only: each is an entity with a [`DemoWalker`] (its kind, path
+//! and pace) and a `Transform` that moves along the path facing forward, with no body. Bodies
+//! belong to the modules that own people, animals and vehicles; a game attaches theirs as
+//! children of the walker entities. [`LabOptions::stand_in_bodies`] adds plain shapes instead
+//! for quick tests.
 
 use engine_core::math::{DVec3, Quat, Vec3};
 use engine_core::prelude::*;
@@ -248,10 +254,24 @@ fn edit(
     });
 }
 
+/// Options for [`spawn_demo_with`].
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct LabOptions {
+    /// Give the walkers plain stand-in shapes (capsule, boxes) instead of leaving them for
+    /// another module's bodies.
+    pub stand_in_bodies: bool,
+}
+
 /// Build the terrain lab around `origin` (on flat ground): 4 painted strips 9 m wide and 32 m
 /// long along Z (mud, snow, sand, grass from −X to +X), walkers on each, a rover crossing
-/// them, and a crater, a trench and a mound on the far side.
+/// them, and a crater, a trench and a mound on the far side. The walkers have no bodies (see
+/// the module docs).
 pub fn spawn_demo(commands: &mut Commands, origin: DVec3) {
+    spawn_demo_with(commands, origin, LabOptions::default());
+}
+
+/// [`spawn_demo`] with options.
+pub fn spawn_demo_with(commands: &mut Commands, origin: DVec3, options: LabOptions) {
     let strips: [(Option<&'static str>, WalkerKind, f32); 4] = [
         (Some("mud"), WalkerKind::Person, 80.0),
         (Some("snow"), WalkerKind::Dog, 30.0),
@@ -319,9 +339,8 @@ pub fn spawn_demo(commands: &mut Commands, origin: DVec3) {
                     3.0,
                 ),
             };
-        commands.spawn((
+        let mut walker = commands.spawn((
             Transform::from_translation(c),
-            MeshRenderer::new(shape, mat),
             DemoWalker {
                 kind,
                 center: c,
@@ -335,16 +354,13 @@ pub fn spawn_demo(commands: &mut Commands, origin: DVec3) {
                 ..Default::default()
             },
         ));
+        if options.stand_in_bodies {
+            walker.insert(MeshRenderer::new(shape, mat));
+        }
     }
     // A rover looping across all four strips.
-    commands.spawn((
+    let mut rover_walker = commands.spawn((
         Transform::from_translation(origin),
-        MeshRenderer::new(
-            Shape::Cuboid {
-                size: [1.9, 0.6, 3.0],
-            },
-            rover,
-        ),
         DemoWalker {
             kind: WalkerKind::Rover,
             center: origin + DVec3::new(0.0, 0.0, 4.0),
@@ -358,6 +374,14 @@ pub fn spawn_demo(commands: &mut Commands, origin: DVec3) {
             ..Default::default()
         },
     ));
+    if options.stand_in_bodies {
+        rover_walker.insert(MeshRenderer::new(
+            Shape::Cuboid {
+                size: [1.9, 0.6, 3.0],
+            },
+            rover,
+        ));
+    }
 
     // Terrain edits beyond the strips: a blast crater, a trench and a built-up mound.
     let far = origin + DVec3::new(0.0, 0.0, -26.0);
