@@ -11,6 +11,7 @@ use engine_assets::{Assets, Handle};
 use engine_core::prelude::*;
 use engine_render::{AlphaMode, Image, Mesh, StandardMaterial};
 
+use crate::meshgen::bark::{BarkKind, bark_textures};
 use crate::meshgen::small::small;
 use crate::meshgen::textures::{ALPHA_CUTOFF, LeafKind, leaf_texture};
 use crate::meshgen::tree::{PlantMeshes, woody};
@@ -66,6 +67,18 @@ pub struct SpeciesVisual {
 pub struct FoliageVisuals {
     pub species: Vec<Option<SpeciesVisual>>,
     textures: HashMap<LeafStyle, Handle<Image>>,
+    /// Bark texture sets, one per kind of bark, shared by every species with that bark.
+    bark_textures: HashMap<BarkKind, BarkImages>,
+}
+
+/// The images of one bark texture set ([`crate::meshgen::bark`]).
+#[derive(Debug, Clone, Copy)]
+struct BarkImages {
+    kind: BarkKind,
+    albedo: Handle<Image>,
+    normal: Handle<Image>,
+    /// Occlusion (R) and roughness (G).
+    orm: Handle<Image>,
 }
 
 impl FoliageVisuals {
@@ -132,7 +145,18 @@ pub fn ensure_species_visuals(
             }
             _ => None,
         };
-        let visual = build_species(sp, texture, &mut meshes, &mut materials);
+        let bark = BarkKind::for_species(sp).map(|kind| {
+            *visuals.bark_textures.entry(kind).or_insert_with(|| {
+                let painted = bark_textures(kind);
+                BarkImages {
+                    kind,
+                    albedo: images.add(painted.albedo.clone()),
+                    normal: images.add(painted.normal.clone()),
+                    orm: images.add(painted.orm.clone()),
+                }
+            })
+        });
+        let visual = build_species(sp, texture, bark, &mut meshes, &mut materials);
         visuals.species[i] = Some(visual);
         tracing::debug!("foliage: built visuals for {}", sp.name);
     }
@@ -141,6 +165,7 @@ pub fn ensure_species_visuals(
 fn build_species(
     sp: &PlantSpecies,
     texture: Option<Handle<Image>>,
+    bark_images: Option<BarkImages>,
     meshes: &mut Assets<Mesh>,
     materials: &mut Assets<StandardMaterial>,
 ) -> SpeciesVisual {
@@ -171,14 +196,7 @@ fn build_species(
         sp.form,
         PlantForm::Grass | PlantForm::Flower | PlantForm::Fern
     );
-    let mut bark = StandardMaterial::color(1.0, 1.0, 1.0)
-        .with_roughness(0.92)
-        .with_wind_sway(sp.wind_sway_m);
-    if sp.form == PlantForm::Mushroom {
-        bark = bark.with_subsurface(0.6).with_roughness(0.55);
-    }
-    let mut bark_rigid = bark;
-    bark_rigid.wind_sway = 0.0;
+    let [bark, bark_rigid, dead_bark, burnt] = bark_materials(sp, bark_images);
     let leaf_material = |color: [f32; 3]| {
         let mut m = StandardMaterial::color(color[0], color[1], color[2])
             .with_roughness(0.78)
@@ -209,8 +227,8 @@ fn build_species(
     };
     let leaves_still = tint_colors.map(|c| materials.add(still(leaf_material(c))));
     let dead_leaves_still = materials.add(still(leaf_material(srgb(0x8a6a3c))));
-    let dead_bark = materials.add(StandardMaterial::hex(0x6a6258).with_roughness(0.95));
-    let burnt = materials.add(StandardMaterial::hex(0x141211).with_roughness(0.98));
+    let dead_bark = materials.add(dead_bark);
+    let burnt = materials.add(burnt);
 
     let glow = match sp.glow {
         Some(g) => {
@@ -254,4 +272,50 @@ fn build_species(
         burnt,
         glow,
     }
+}
+
+/// Living bark (swaying), living bark (rigid: stumps, roots, logs), dead grey bark and charred
+/// bark for a species. With a bark texture set, the textures carry the bark's color, relief
+/// and roughness, and the vertex colors (relative to the texture's reference color) tint it:
+/// moss at the foot, a dark birch base, an orange pine crown, a designer's own bark color.
+fn bark_materials(sp: &PlantSpecies, images: Option<BarkImages>) -> [StandardMaterial; 4] {
+    let mut bark = StandardMaterial::color(1.0, 1.0, 1.0)
+        .with_roughness(0.92)
+        .with_wind_sway(sp.wind_sway_m);
+    if sp.form == PlantForm::Mushroom {
+        bark = bark.with_subsurface(0.6).with_roughness(0.55);
+    }
+    let mut dead = StandardMaterial::hex(0x6a6258).with_roughness(0.95);
+    let mut burnt = StandardMaterial::hex(0x141211).with_roughness(0.98);
+    if let Some(img) = images {
+        let painted = bark_textures(img.kind);
+        let reference = painted.reference;
+        let mean = painted.mean_albedo;
+        // `gain` multiplies the painted albedo; vertex colors tint it relative to the
+        // reference. Roughness and occlusion come from the texture.
+        let textured = |m: StandardMaterial, gain: [f32; 3], roughness: f32| {
+            let mut m = m
+                .with_base_color_texture(img.albedo)
+                .with_normal_texture(img.normal)
+                .with_metallic_roughness_texture(img.orm)
+                .with_occlusion_texture(img.orm)
+                .with_roughness(roughness);
+            let [r, g, b] = [0, 1, 2].map(|c| gain[c] / reference[c].max(1e-3));
+            m.base_color = [r, g, b, 1.0];
+            m.normal_scale = img.kind.normal_scale();
+            m
+        };
+        bark = textured(bark, [1.0; 3], 1.0);
+        // Dead wood weathers to silvery grey, keeping a hint of the bark's own color.
+        let grey = srgb(0x7a756d);
+        let dead_color = [0, 1, 2].map(|c| (0.25 * mean[c] + 0.75 * grey[c]) / mean[c].max(1e-3));
+        dead = textured(dead, dead_color, 1.0);
+        // Charcoal: near black, a dull sheen on the ridges.
+        let char_color = [0.014, 0.012, 0.011];
+        let burnt_color = [0, 1, 2].map(|c| char_color[c] / mean[c].max(1e-3));
+        burnt = textured(burnt, burnt_color, 0.85);
+    }
+    let mut rigid = bark;
+    rigid.wind_sway = 0.0;
+    [bark, rigid, dead, burnt]
 }
