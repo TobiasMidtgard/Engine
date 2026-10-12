@@ -268,3 +268,76 @@ fn walls_muffle_sounds_behind_them() {
     });
     assert!(rms(&off) > lo * 0.6, "{} vs {lo}", rms(&off));
 }
+
+fn heat_disc(app: &mut App, center: DVec3, radius: f64, celsius: f32) {
+    let mut heat = app.world.resource_mut::<engine_world::HeatField>();
+    let grid = &mut heat.grid;
+    let lo = grid.cell_at(center - DVec3::splat(radius));
+    let hi = grid.cell_at(center + DVec3::splat(radius));
+    for y in lo.y..=hi.y {
+        for x in lo.x..=hi.x {
+            let c = IVec2::new(x, y);
+            let cc = grid.cell_center(c);
+            if DVec2::new(cc.x - center.x, cc.y - center.z).length() <= radius {
+                grid.set(c, celsius);
+            }
+        }
+    }
+}
+
+#[test]
+fn burning_ground_and_burning_things_are_heard() {
+    let mut app = app();
+    app.world
+        .spawn((AudioListener::default(), Transform::from_xyz(0.0, 1.7, 0.0)));
+    let quiet = record(&mut app, "no_fire", 45, |_, _| {});
+
+    // A patch of grass burning 8 m away.
+    heat_disc(&mut app, DVec3::new(8.0, 0.0, 0.0), 3.0, 700.0);
+    let mut cues = Vec::new();
+    let burning = record(&mut app, "grass_fire", 60, |app, _| {
+        let msgs = app.world.resource::<Messages<AudioCue>>();
+        cues.extend(
+            msgs.iter_current_update_messages()
+                .filter(|c| c.name == "fire")
+                .filter_map(|c| c.position),
+        );
+    });
+    let quiet_rms = rms(&quiet[quiet.len() / 2..]);
+    let fire_rms = rms(&burning[burning.len() / 2..]);
+    assert!(
+        fire_rms > quiet_rms * 2.0 && fire_rms > 0.01,
+        "fire {fire_rms} vs quiet {quiet_rms}"
+    );
+    assert_eq!(cues.len(), 1, "one patch, one fire: {cues:?}");
+    assert!(
+        cues[0].distance(DVec3::new(8.0, 0.6, 0.0)) < 1.5,
+        "{}",
+        cues[0]
+    );
+
+    // A burning tree is heard on its own; when the ground goes out its fire fades.
+    app.world.spawn((
+        Transform::from_xyz(-12.0, 0.0, 0.0),
+        engine_world::Combustible {
+            fuel_kg: 60.0,
+            state: engine_world::BurnState::Burning,
+            ..Default::default()
+        },
+    ));
+    heat_disc(&mut app, DVec3::new(8.0, 0.0, 0.0), 3.0, 0.0);
+    let before = app.world.resource::<Audio>().voice_count();
+    let mut tree_cue = false;
+    record(&mut app, "tree_fire", 120, |app, _| {
+        let msgs = app.world.resource::<Messages<AudioCue>>();
+        tree_cue |= msgs
+            .iter_current_update_messages()
+            .any(|c| c.name == "fire" && c.position.is_some_and(|p| p.x < -10.0));
+    });
+    assert!(tree_cue, "the burning tree was never heard");
+    assert_eq!(
+        app.world.resource::<Audio>().voice_count(),
+        before,
+        "the grass fire should have faded out as the tree fire started"
+    );
+}

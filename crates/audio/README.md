@@ -20,10 +20,17 @@ different wet, frozen, snowed on or burnt.
   `WaterSplash`, **explosions** from `WorldImpulse`, **bullet whizzes and supersonic cracks**
   from `ProjectileTrace` passing near the listener, **whooshes** from melee, dash and spell
   `AttackEvent`s.
+- **Fire**: burning ground (`HeatField` cells hot enough for flames) is gathered into
+  burning areas, and each plays a roar with crackle, pops and snaps that grows with the area
+  in flames (a campfire, a burning house, a forest front); burning `Combustible`s (trees,
+  buildings) play on their own. The loudest few play, the rest fade out.
 - **Weather**: rain from `WeatherState` (louder with intensity; ticks on soft ground, taps
   on hard, plinks in puddles, pings on metal; drums on the roof when you're under cover),
   wind (the air moving past your ears, so running into it is louder), and thunder during
   storms, arriving late by distance / speed of sound and duller the farther it is.
+- **Walls**: sounds behind walls and terrain are quieter and duller (physics raycasts from
+  the listener toward each sound, over and beside it too, so a sound round a corner is only
+  partly muffled; denser materials muffle more).
 - **Space**: distance rolloff, equal-power panning, doppler, air absorption, a little
   shading from behind and below, and sound that starts late by distance / 343 m/s.
   `ReverbZone` boxes (caves, halls, the trail's underpass) add room echo. Air thins with
@@ -55,7 +62,7 @@ Tunable at runtime (JSON, console, scripts, AI agents):
 
 | Name | What |
 |---|---|
-| `AudioSettings` | output, master volume, speed of sound, doppler, air absorption, how much slow motion lowers pitch, silence in space, footstep range, voice limit, weather on/off |
+| `AudioSettings` | output, master volume, speed of sound, doppler, air absorption, how much slow motion lowers pitch, silence in space, footstep range, voice limit, weather, fires and occlusion on/off |
 | `AudioMix` | volume per bus (world, ambience, music, ui, voice) and mute |
 | `FootstepSurfaces` | how each surface sounds underfoot: 14 layer weights, brightness, pitch, gain |
 | `SoundRings` | coloured rings on the ground for each sound near a footstep trail (or everywhere) |
@@ -86,8 +93,10 @@ tween system cost more than writing the mixer.
 
 Reads (all from `engine_world`): `GroundContact`, `ContactEvent`, `WaterSplash`,
 `WorldImpulse`, `ProjectileTrace`, `AttackEvent`, `Collider::surface`, `SurfaceMaterials`,
-`SurfaceLayers` (wetness, puddles, snow, scorch), `WeatherState`, wind, temperature, water,
-ground and gravity bodies through `Env`, `PhysicsQueries::raycast` (roof over the listener),
+`SurfaceLayers` (wetness, puddles, snow, scorch), `HeatField` and `Combustible` (fires),
+`WeatherState`, wind, temperature, water,
+ground and gravity bodies through `Env`, `PhysicsQueries::raycast` (roof over the listener,
+walls between the listener and each sound),
 `Time` / `TimeDilation` / `LocalTimeScale`, `engine_render::Camera`.
 
 Writes: `AudioCue` (its own message), and the `gravel` surface material when the trail demo
@@ -108,13 +117,14 @@ character's and shows as a ring in its ground's colour.
 - `cargo run -p engine_audio --release --example footstep_lab -- out/` renders four steps
   on every surface to WAV files (`--layers` prints each layer's level).
 - `tests/plugin.rs`: contacts are heard, out-of-earshot steps are skipped, space is silent,
-  the trail walks every surface. `tests/screenshot.rs` renders the trail headless.
+  the trail walks every surface, walls muffle what's behind them, burning ground and burning
+  things are heard. `tests/screenshot.rs` renders the trail headless.
 
 ## Done when
 
 - Footsteps change from grass to mud to snow; rain gets louder with intensity; slow motion
   lowers the pitch. ✓ (all three are in the trail recording and the tests)
 
-Next: occlusion through walls (physics raycasts), rolling wheels and tracks, fire crackle and
-lapping water from their modules' events, thunder in sync with lightning (needs a lightning
-message in `engine_world`), music layers, and recorded samples alongside the synthesis.
+Next: rolling wheels and tracks, lapping water from the water module, thunder in sync with
+lightning (needs a lightning message in `engine_world`), music layers, and recorded samples
+alongside the synthesis.

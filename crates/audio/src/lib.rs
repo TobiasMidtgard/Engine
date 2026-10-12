@@ -5,6 +5,7 @@ mod api;
 pub mod demo;
 pub mod dsp;
 pub mod effects;
+mod fires;
 pub mod footstep;
 pub mod mixer;
 mod output;
@@ -77,6 +78,7 @@ impl Plugin for AudioPlugin {
                     systems::play_footsteps,
                     systems::play_world_events,
                     systems::weather_ambience,
+                    fires::fire_ambience,
                     systems::reverb_zones,
                     systems::follow_emitters,
                     systems::occlusion,
@@ -137,6 +139,9 @@ pub struct AudioSettings {
     pub weather_ambience: bool,
     /// Muffle sounds that walls and terrain stand between (physics raycasts).
     pub occlusion: bool,
+    /// Play the roar and crackle of fires near the listener (burning ground in `HeatField`,
+    /// burning `Combustible`s).
+    pub fires: bool,
 }
 
 impl Default for AudioSettings {
@@ -156,6 +161,7 @@ impl Default for AudioSettings {
             max_voices: 96,
             weather_ambience: true,
             occlusion: true,
+            fires: true,
         }
     }
 }
