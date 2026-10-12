@@ -188,10 +188,38 @@ pub(crate) fn register(app: &mut App) {
         .add_systems(Update, walk_trail)
         .add_systems(
             PostUpdate,
+            shift_trails.in_set(engine_world::WorldShiftSet::Apply),
+        )
+        .add_systems(
+            PostUpdate,
             (rings::spawn_rings, rings::grow_rings)
                 .chain()
                 .in_set(UpdateSet::AfterPropagate),
         );
+}
+
+/// The world moved to a new frame: the trails' props move with it (they are plain
+/// transforms), so move the walkers' trail origins and the ring areas too. The trail keeps its
+/// own axes, so a rotating shift (into a planet's spinning frame) leaves its walkers off the
+/// path; floating-origin moves are exact.
+fn shift_trails(
+    mut shifts: MessageReader<engine_world::WorldShift>,
+    mut walkers: Query<&mut TrailWalker>,
+    mut rings: ResMut<SoundRings>,
+) {
+    for shift in shifts.read() {
+        if !shift.is_translation_only() {
+            engine_core::log::warn!(
+                "footstep trail: a rotating world shift moves its walkers off the path"
+            );
+        }
+        for mut w in &mut walkers {
+            w.origin = shift.point(w.origin);
+        }
+        for p in &mut rings.near {
+            *p = shift.point(*p);
+        }
+    }
 }
 
 /// Build the footstep trail around `origin` (about 54 × 22 m) with its four walkers, and turn

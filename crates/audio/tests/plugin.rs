@@ -413,3 +413,46 @@ fn shores_lap_and_brooks_babble() {
     record(&mut app, "inland_off", 90, |_, _| {});
     assert_eq!(app.world.resource::<Audio>().voice_count(), before);
 }
+
+#[test]
+fn sounds_stay_put_when_the_world_shifts() {
+    let mut app = app();
+    app.world
+        .spawn((AudioListener::default(), Transform::from_xyz(0.0, 1.7, 0.0)));
+    app.update();
+    {
+        let mut audio = app.world.resource_mut::<Audio>();
+        let fs = audio.sample_rate();
+        audio.play(
+            engine_audio::effects::ToneSound::new(fs, 330.0, 4.0, 0.3),
+            engine_audio::PlayOptions::at(DVec3::new(5.0, 1.7, 0.0)),
+        );
+    }
+    let x = record(&mut app, "shift", 90, |app, i| {
+        if i == 45 {
+            // A floating-origin move: everything is now 10 km further along x.
+            app.world
+                .write_message(engine_world::WorldShift::translate(DVec3::new(
+                    10_000.0, 0.0, 0.0,
+                )));
+        }
+    });
+    // Stereo: the tone is to the right before and after.
+    let window = |a: f32, b: f32| {
+        let s = &x[((a * 48_000.0) as usize * 2)..((b * 48_000.0) as usize * 2)];
+        let (mut l, mut r) = (0.0f32, 0.0f32);
+        for f in s.chunks(2) {
+            l += f[0] * f[0];
+            r += f[1] * f[1];
+        }
+        (l.sqrt(), r.sqrt())
+    };
+    let before = window(0.6, 1.4);
+    let after = window(1.7, 2.6);
+    let level = |w: (f32, f32)| (w.0 * w.0 + w.1 * w.1).sqrt();
+    assert!(
+        level(after) > level(before) * 0.8 && level(after) < level(before) * 1.25,
+        "level jumped: {before:?} -> {after:?}"
+    );
+    assert!(after.1 > after.0 * 1.5, "no longer on the right: {after:?}");
+}

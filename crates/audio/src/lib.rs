@@ -90,6 +90,10 @@ impl Plugin for AudioPlugin {
                     .chain()
                     .in_set(UpdateSet::AfterPropagate),
             )
+            .add_systems(
+                PostUpdate,
+                systems::shift_world.in_set(engine_world::WorldShiftSet::Apply),
+            )
             .add_systems(Last, systems::drive_output);
         api::register(app);
         demo::register(app);
@@ -800,6 +804,19 @@ impl Audio {
         if let Some(l) = self.live.get_mut(&id) {
             l.last = Some(p);
         }
+    }
+
+    /// Move the ears and every playing sound into the world's new frame.
+    fn shift_world(&mut self, shift: &engine_world::WorldShift) {
+        self.listener = shift.point(self.listener);
+        self.listener_velocity = shift.direction(self.listener_velocity);
+        for l in self.live.values_mut() {
+            l.last = l.last.map(|p| shift.point(p));
+        }
+        self.send(Command::ShiftWorld {
+            rotation: shift.rotation,
+            translation: shift.translation,
+        });
     }
 }
 

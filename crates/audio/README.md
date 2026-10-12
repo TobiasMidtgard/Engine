@@ -105,6 +105,9 @@ ground and gravity bodies through `Env`, `PhysicsQueries::raycast` (roof over th
 walls between the listener and each sound),
 `Time` / `TimeDilation` / `LocalTimeScale`, `engine_render::Camera`.
 
+Follows `WorldShift`: the ears, every playing sound and the trail's walkers move into the
+new frame, so a floating-origin move is silent.
+
 Writes: `AudioCue` (its own message), and the `gravel` surface material when the trail demo
 spawns (if nobody defined it).
 

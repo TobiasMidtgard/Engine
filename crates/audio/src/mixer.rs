@@ -6,7 +6,7 @@
 //! the audio thread never waits on the game and never allocates per sample.
 
 use crossbeam_channel::{Receiver, Sender};
-use engine_core::math::{DVec3, Vec3};
+use engine_core::math::{DQuat, DVec3, Vec3};
 use serde::{Deserialize, Serialize};
 
 use crate::dsp::{Biquad, Freeverb, Limiter, OnePole, db, hermite, pan_gains};
@@ -208,6 +208,12 @@ pub enum Command {
     SetOcclusion {
         id: VoiceId,
         amount: f32,
+    },
+    /// The world moved to a new frame (floating origin, entering a planet's frame): move every
+    /// voice and the ears with it, so nothing jumps.
+    ShiftWorld {
+        rotation: DQuat,
+        translation: DVec3,
     },
     /// Ears: position, orientation (unit right, up, forward) and velocity.
     SetListener {
@@ -557,6 +563,24 @@ impl Mixer {
                     sp.position = position;
                     sp.velocity = velocity;
                 }
+            }
+            Command::ShiftWorld {
+                rotation,
+                translation,
+            } => {
+                let turn = |v: Vec3| (rotation * v.as_dvec3()).as_vec3();
+                for v in &mut self.voices {
+                    if let Some(sp) = &mut v.spatial {
+                        sp.position = rotation * sp.position + translation;
+                        sp.velocity = turn(sp.velocity);
+                    }
+                }
+                let l = &mut self.listener;
+                l.position = rotation * l.position + translation;
+                l.right = turn(l.right);
+                l.up = turn(l.up);
+                l.forward = turn(l.forward);
+                l.velocity = turn(l.velocity);
             }
             Command::SetOcclusion { id, amount } => {
                 if let Some(v) = self.voice_mut(id) {

@@ -650,6 +650,20 @@ pub(crate) fn follow_emitters(
     }
 }
 
+/// The world moved to a new frame: take the ears and every sound along.
+pub(crate) fn shift_world(
+    mut audio: ResMut<Audio>,
+    mut shifts: MessageReader<engine_world::WorldShift>,
+) {
+    let mut total: Option<engine_world::WorldShift> = None;
+    for s in shifts.read() {
+        total = Some(total.map_or(*s, |t| t.then(s)));
+    }
+    if let Some(shift) = total {
+        audio.shift_world(&shift);
+    }
+}
+
 pub(crate) fn drive_output(
     mut audio: ResMut<Audio>,
     time: Res<Time>,
