@@ -453,9 +453,20 @@ pub fn ui_layout_system(world: &mut World) {
         },
         ..Default::default()
     };
+    // World-anchored roots (markers, nameplates) keep their content size instead of
+    // stretching to the viewport's height, so centering them on their point works.
+    let anchored_vp_style = taffy::Style {
+        align_items: Some(taffy::AlignItems::FLEX_START),
+        ..vp_style.clone()
+    };
     for root in &roots {
         let Some(&node) = layout.nodes.get(root) else {
             continue;
+        };
+        let vp_style = if world.get::<WorldAnchor>(*root).is_some() {
+            &anchored_vp_style
+        } else {
+            &vp_style
         };
         let container = match layout.viewports.get(root) {
             Some(c) => *c,
@@ -468,7 +479,7 @@ pub fn ui_layout_system(world: &mut World) {
                 c
             }
         };
-        if layout.tree.style(container).ok() != Some(&vp_style) {
+        if layout.tree.style(container).ok() != Some(vp_style) {
             let _ = layout.tree.set_style(container, vp_style.clone());
         }
         if layout.tree.children(container).ok().as_deref() != Some(&[node][..]) {
@@ -770,8 +781,9 @@ fn project_anchors(world: &mut World, vp: &UiViewport) -> HashMap<Entity, (Vec2,
             targets.push((e, base + a.offset.as_dvec3()));
         }
     }
-    // Clamped markers keep clear of the compass (top) and the hotbar (bottom).
-    let (side, top, bottom) = (70.0 * vp.scale, 130.0 * vp.scale, 180.0 * vp.scale);
+    // Clamped markers ride an ellipse inside these margins, which keeps them clear of the
+    // compass (top), the hotbar (bottom) and the HUD's corner panels.
+    let (side, top, bottom) = (110.0 * vp.scale, 130.0 * vp.scale, 180.0 * vp.scale);
     for (e, point) in targets {
         let (mut screen, _, front) = project(camera, vp, point);
         let distance = (point - camera.0).length() as f32;
@@ -798,7 +810,7 @@ fn project_anchors(world: &mut World, vp: &UiViewport) -> HashMap<Entity, (Vec2,
                 }
             }
             let half = (hi - lo) * 0.5;
-            let k = (d.x.abs() / half.x).max(d.y.abs() / half.y).max(1e-6);
+            let k = (d / half).length().max(1e-6);
             screen = c + d / k;
             a.edge_direction = d.normalize_or_zero();
             shown = true;

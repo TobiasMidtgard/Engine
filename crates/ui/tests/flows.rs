@@ -344,3 +344,45 @@ fn markers_follow_a_world_shift() {
         a.position
     );
 }
+
+#[test]
+fn markers_sit_on_their_point_and_clamp_inside_the_screen() {
+    use engine_core::math::{DVec3, Vec3};
+    let mut app = app();
+    app.world.spawn((
+        engine_render::Camera::perspective(60.0),
+        Transform::default().looking_at(DVec3::new(0.0, 0.0, -1.0), Vec3::Y),
+    ));
+    api(
+        &mut app,
+        "ui.show",
+        json!({"screen": "hud", "instant": true}),
+    );
+    api(
+        &mut app,
+        "hud.marker",
+        json!({"title": "Ahead", "position": [0.0, 0.0, -10.0]}),
+    );
+    api(
+        &mut app,
+        "hud.marker",
+        json!({"title": "Behind", "position": [-50.0, 0.0, 400.0], "clamp": true}),
+    );
+    app.update_n(10);
+    let rect = |app: &mut App, id: &str| {
+        let e = engine_ui::input::find_id(&mut app.world, id).unwrap();
+        app.world.get::<ComputedNode>(e).unwrap().rect
+    };
+    let ahead = rect(&mut app, "marker:Ahead");
+    assert!(
+        (ahead.center() - Vec2::new(960.0, 540.0)).length() < 2.0,
+        "{ahead:?}"
+    );
+    assert!(ahead.h < 200.0, "sized to its content: {ahead:?}");
+    let behind = rect(&mut app, "marker:Behind");
+    assert!(behind.x >= 0.0 && behind.y >= 0.0, "{behind:?}");
+    assert!(
+        behind.x + behind.w <= 1920.0 && behind.y + behind.h <= 1080.0,
+        "{behind:?}"
+    );
+}

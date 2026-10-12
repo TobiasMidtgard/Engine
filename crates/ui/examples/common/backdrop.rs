@@ -231,7 +231,7 @@ fn vtx(p: Vec3, n: Vec3, uv: Vec2, c: Vec4) -> Vertex {
 /// Flip triangles whose winding disagrees with their vertex normals.
 fn fix_winding(m: &mut Mesh) {
     let verts = &m.vertices;
-    for tri in m.indices.chunks_exact_mut(3) {
+    for tri in m.indices.as_chunks_mut::<3>().0 {
         let p = |i: u32| Vec3::from(verts[i as usize].position);
         let n = |i: u32| Vec3::from(verts[i as usize].normal);
         let g = (p(tri[1]) - p(tri[0])).cross(p(tri[2]) - p(tri[0]));
@@ -1693,7 +1693,7 @@ fn rock_mesh(seed: u32, subdiv: u32, size: Vec3, tint_c: Vec3) -> Mesh {
 /// keeping the smooth normals.
 fn box_uv_unshared(m: &Mesh) -> Mesh {
     let mut out = Mesh::default();
-    for tri in m.indices.chunks_exact(3) {
+    for tri in m.indices.as_chunks::<3>().0 {
         let p: Vec<Vec3> = tri
             .iter()
             .map(|&i| Vec3::from(m.vertices[i as usize].position))
@@ -1854,7 +1854,9 @@ fn lit_yaw(m: &Mesh, at: Vec3, yaw: f32) -> f32 {
     let sun = sun_dir();
     let tris: Vec<(Vec3, f32)> = m
         .indices
-        .chunks_exact(3)
+        .as_chunks::<3>()
+        .0
+        .iter()
         .map(|t| {
             let p = |i: u32| Vec3::from(m.vertices[i as usize].position);
             let n = |i: u32| Vec3::from(m.vertices[i as usize].normal);

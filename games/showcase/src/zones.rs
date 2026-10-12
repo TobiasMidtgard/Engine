@@ -462,7 +462,7 @@ pub fn demo_views(z: &Zone) -> Vec<View> {
             .collect(),
         "market" => {
             let ui = |key, name, screen: &'static str| {
-                View::new(key, name, [4.0, 1.75, -3.0], [-8.0, 1.5, 6.0], 15.0)
+                View::new(key, name, [-1.5, 1.8, -5.5], [-11.8, 1.8, 9.2], 15.0)
                     .warmup(1.5)
                     .on_arrive("ui.show", screen)
                     .on_leave("ui.hide_all", "{}")
