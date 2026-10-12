@@ -11,6 +11,7 @@ pub mod look;
 pub mod mover;
 pub mod player;
 pub mod profile;
+mod shift;
 pub mod tempo;
 
 use engine_core::prelude::*;
@@ -153,6 +154,10 @@ impl Plugin for MovementPlugin {
             .add_render_feature(fx::SlowMotionOverlay::default());
         demo::register(app);
         look::register(app);
+        app.add_systems(
+            PostUpdate,
+            shift::follow_world_shifts.in_set(engine_world::WorldShiftSet::Apply),
+        );
         api::register(app);
     }
 }

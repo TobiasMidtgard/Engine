@@ -90,7 +90,7 @@ pub struct DuelDirector {
     /// shouldn't slow the rest of the world.
     pub watch_radius: f32,
     #[serde(skip)]
-    origin: DVec3,
+    pub(crate) origin: DVec3,
     #[serde(skip)]
     pub player: Option<Entity>,
     #[serde(skip)]
