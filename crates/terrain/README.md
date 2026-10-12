@@ -13,7 +13,8 @@ everything else (streaming, LOD, colliders, ground queries, prints) follows the 
   skirts, built in parallel on the compute pool and kept in a pool of GPU vertex pages.
   Patches split by distance (`TerrainSettings::split_factor`), with horizon and frustum
   culling; a patch only splits once all its children are built, so there are no holes when
-  flying fast, and a teleport builds until the view is complete. Positions are `f64` and
+  flying fast, and a teleport builds until the view is complete. Vertices geomorph toward the
+  parent patch's shape before a split or merge, so detail never pops. Positions are `f64` and
   rendered camera-relative, so a 6,371 km Earth is exact to the centimeter at the surface.
 - **Planet shapes.** `PlanetShape` presets for an Earth-like world (continents, oceans,
   eroded mountains, hills, climate bands), the Moon (craters, maria) and Mars (craters,
@@ -98,4 +99,4 @@ frame), plus a dug crater, a trench and a raised mound.
 
 - Prints are recorded in world X/Z, which is right on level ground near the focus (the
   showcase map, or anywhere once the space module re-centers the world on the player).
-- No caves or overhangs yet (voxel volumes are next), and no geomorphing between levels.
+- No caves or overhangs yet (voxel volumes are next).

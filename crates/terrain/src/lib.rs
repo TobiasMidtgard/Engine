@@ -258,6 +258,9 @@ pub struct TerrainSettings {
     pub collider_samples: u32,
     /// Draw patch outlines (debug).
     pub wireframe_lod: bool,
+    /// Slide vertices toward the coarser patch's shape before it takes over, so detail fades
+    /// in and out instead of popping.
+    pub geomorph: bool,
 }
 
 impl Default for TerrainSettings {
@@ -270,6 +273,7 @@ impl Default for TerrainSettings {
             collider_tile_m: 64.0,
             collider_samples: 65,
             wireframe_lod: false,
+            geomorph: true,
         }
     }
 }

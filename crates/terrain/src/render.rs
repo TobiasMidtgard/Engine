@@ -37,7 +37,8 @@ struct ChunkInstance {
     origin: [f32; 3],
     /// Index into the planet array.
     planet: u32,
-    /// Vertex spacing (m), quadtree level, unused, unused.
+    /// Vertex spacing (m), quadtree level, and the camera distances where the geomorph
+    /// toward the parent patch starts and ends (0 = off).
     lod: [f32; 4],
 }
 
@@ -788,12 +789,19 @@ impl RenderFeature for TerrainFeature {
                 let Some(c) = state.chunks.get(key) else {
                     continue;
                 };
+                // The parent takes over at `split` parent sizes; be fully morphed by then.
+                let morph = if settings.geomorph && key.level > 0 {
+                    let merge = (split * state.lod.map.node_size(key.level - 1)) as f32;
+                    (merge * 0.75, merge * 0.98)
+                } else {
+                    (0.0, 0.0)
+                };
                 let rel = (pos + rot * c.origin - view.origin).as_vec3();
                 let instance = instances.len() as u32;
                 instances.push(ChunkInstance {
                     origin: rel.to_array(),
                     planet: pi as u32,
-                    lod: [c.spacing as f32, key.level as f32, 0.0, 0.0],
+                    lod: [c.spacing as f32, key.level as f32, morph.0, morph.1],
                 });
                 self.draws.push(Draw {
                     slot: c.slot,

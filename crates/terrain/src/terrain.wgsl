@@ -60,6 +60,9 @@ struct VertexOut {
     @location(6) lod: vec2<f32>,
 };
 
+// Geomorph offsets are stored in vertex spacings (`chunk::MORPH_RANGE`).
+const MORPH_RANGE: f32 = 16.0;
+
 fn planet_rot(p: PlanetGpu) -> mat3x3<f32> {
     return mat3x3<f32>(p.rot[0].xyz, p.rot[1].xyz, p.rot[2].xyz);
 }
@@ -120,6 +123,11 @@ fn vs_main(in: VertexIn) -> VertexOut {
     let rot = planet_rot(planet);
     var rel = in.origin + rot * in.position;
     let up = planet_up(planet, rel);
+    // Geomorph toward the parent patch's shape as it nears the distance where it takes over.
+    if (in.lod.w > 0.0) {
+        let k = smoothstep(in.lod.z, in.lod.w, length(rel));
+        rel += up * (in.normal.w * in.lod.x * MORPH_RANGE * k);
+    }
     let flags = u32(round(in.climate.w * 255.0));
     let ocean = select(0.0, 1.0, (flags & 2u) != 0u);
 
