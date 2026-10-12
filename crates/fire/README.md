@@ -30,10 +30,17 @@ objects, embers and spot fires, flames, scorch, light, heat, smoke emission and 
   `ContainedFire` is a campfire, brazier or torch that never spreads; `perpetual` keeps it lit.
 - **Embers** are lofted by the plume, carried by the wind and can start spot fires where they
   land, which is how fires jump roads.
-- **Rendering:** flames are camera-facing sprites with procedural turbulence and blackbody
-  color, leaning with the wind; embers are motion-blurred streaks; a screen-space decal chars
-  the ground (and the grass on it) and draws glowing coal cracks. Point lights flicker with
-  the fire.
+- **Rendering:** flames are camera-facing sprites, leaning with the wind, that play a flame
+  flipbook: a small 2D fire simulation (`flipbook.rs`: fuel, combustion, buoyancy, vortex
+  confinement, MacCormack advection) run once at startup on a worker thread and recorded into
+  a looping 64 × 128 × 96 texture, so flames neck in at the base, lick and shed tongues the
+  way real ones do. Each sprite plays it from its own point, at its own pace (taller flames
+  flicker slower, as √height), some mirrored. Color is blackbody (deep red tips to a yellow
+  core) with soot at the tips; brightness follows the camera's exposure within limits, so
+  flames show by day and stay orange at night instead of burning out to white. Heat haze bends
+  the scene above them. Embers are motion-blurred streaks; a screen-space decal chars the
+  ground (and the grass on it), with ragged edges, glowing coal cracks and the burning litter
+  under the flames. Point lights flicker with the fire.
 
 ## Contracts
 
@@ -47,6 +54,12 @@ burning object, with mass, temperature and darkness: white steam from wet fuel, 
 from wood), `DamageEvent` (kind `Fire`) for anything with `FireVulnerable` or a
 `CharacterController` standing in flames, `WindField` updrafts over big fires,
 `Combustible::state` (owners react: foliage swaps a burnt tree, destruction drops a beam).
+
+Follows `WorldShift`: in `WorldShiftSet::Apply` the fire field moves its origin and ground
+heights (exact at any distance; a shift that turns the world resamples it into the new frame,
+nearest cell, and the cells it newly covers get their fuel at the next step), and embers,
+pending spot-fire landings, placed `FuelPatch`es, light targets and queued `fire.*` commands
+move with the world. Patches a shift moved are not refueled.
 
 ## Using it
 
@@ -79,6 +92,9 @@ path. Once the meadow has regrown, the next fire starts. The first fire is alrea
 when the demo starts so there's something to see right away. `demo::VIEWS` lists camera spots
 for it (fire front, burning trees, campfire, the whole meadow at night).
 
+`examples/flame_look.rs` is a bench for the flames alone (a grass fire, a campfire, a burning
+crate, by day or night); `flame_look sheet` writes the flipbook as a contact sheet.
+
 ## Performance
 
 Only tiles with fire, coals or heat are stepped, in parallel, at `sim_hz` (20 Hz) of world
@@ -89,6 +105,5 @@ into 1 × 1, 2 × 2 or 4 × 4-cell blocks with distance.
 ## Not yet
 
 - Fire climbing slopes faster (the field knows ground height; the kernel doesn't use slope).
-- Heat haze (screen-space refraction above flames) and fire-lit smoke from below.
 - Fuel from foliage instances (each grass blade or bush as fuel) once foliage exposes them.
 - Building interiors: fire spreading room to room through openings.

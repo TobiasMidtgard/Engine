@@ -8,6 +8,7 @@ pub mod demo;
 pub mod edits;
 pub mod ground;
 pub mod lod;
+pub mod materials;
 pub mod noise;
 pub mod palette;
 pub mod render;
@@ -21,16 +22,17 @@ use engine_core::prelude::*;
 use engine_render::RenderAppExt;
 use engine_world::{
     Deformation as Deform, EditOp, EditShape, Env, GroundContact, SurfaceLayers, SurfaceMaterial,
-    SurfaceMaterials, TerrainChanged, TerrainEdit, WeatherState,
+    SurfaceMaterials, TerrainChanged, TerrainEdit, WeatherState, WorldShift, WorldShiftSet,
 };
 
 pub use chunk::{ChunkMesh, ChunkSource, TerrainVertex};
 pub use cube::{NodeKey, SurfaceMap, TerrainDomain, home_rotation};
 pub use deform::{DeformationMap, DeformationSettings};
-pub use edits::{EditLayer, LocalEdit, paint_index};
+pub use edits::{EditLayer, LocalEdit, OverlayPaint, PAINT_NAMES, paint_index};
 pub use palette::TerrainPalette;
 pub use shape::{
-    Climate, FlatPad, HeightOverlay, PlanetShape, ShapeSample, dir_from_lat_lon, lat_lon_from_dir,
+    Climate, FlatPad, HeightOverlay, OverlayPaintFn, PlanetShape, ShapeSample, dir_from_lat_lon,
+    lat_lon_from_dir,
 };
 
 /// A procedural terrain: a whole planet (or a flat square) with level of detail from orbit
@@ -187,7 +189,36 @@ impl PlanetTerrain {
             translation,
             flat,
             y_range: (lo - margin, hi + margin),
+            paint: None,
         });
+        self
+    }
+
+    /// Paint the hand-made ground of [`with_overlay`](Self::with_overlay): `paint(x, z)`
+    /// returns the ground layer and tint at world `(x, z)` (the same frame as the height), or
+    /// `None` for the planet's own ground there. Roads, plazas, beaches, fields and the forest
+    /// floor: the renderer draws the layer's material, and footsteps, prints, rain and the
+    /// `Ground` query treat the spot as that surface. Edits paint over it. Call it after
+    /// `with_overlay`.
+    ///
+    /// ```ignore
+    /// let terrain = PlanetTerrain::earthlike(7)
+    ///     .with_pad(FlatPad::default())
+    ///     .with_overlay(20_000.0, 6_000.0, |x, z| valley_height(x, z))
+    ///     .with_overlay_paint(|x, z| match cover(x, z) {
+    ///         Cover::Road => Some(OverlayPaint::layer("dirt", 1.0)),
+    ///         Cover::Wheat => Some(OverlayPaint::tint([0.36, 0.27, 0.09], 0.8)),
+    ///         _ => None,
+    ///     });
+    /// ```
+    pub fn with_overlay_paint(
+        mut self,
+        paint: impl Fn(f64, f64) -> Option<OverlayPaint> + Send + Sync + 'static,
+    ) -> Self {
+        match self.shape.overlay.as_mut() {
+            Some(overlay) => overlay.paint = Some(std::sync::Arc::new(paint)),
+            None => engine_core::log::warn!("with_overlay_paint needs with_overlay first"),
+        }
         self
     }
 
@@ -258,6 +289,29 @@ pub struct TerrainSettings {
     pub collider_samples: u32,
     /// Draw patch outlines (debug).
     pub wireframe_lod: bool,
+    /// Slide vertices toward the coarser patch's shape before it takes over, so detail fades
+    /// in and out instead of popping.
+    pub geomorph: bool,
+    /// Texels per side of the ground material textures (grass, leaves, rock, snow…), a power
+    /// of two. They bake once per process on a background thread; 0 draws plain colors.
+    pub material_resolution: u32,
+    /// Use the CC0 photo scans in `<asset root>/fetched/terrain` for the materials that have
+    /// one (`cargo run -p fetch-assets -- terrain`); the rest stay procedural.
+    pub scanned_materials: bool,
+}
+
+impl TerrainSettings {
+    /// Folder the ground material scans are read from, if scans are on: `fetched/terrain`
+    /// under the [`AssetServer`](engine_assets::AssetServer) root (or `assets/` without one).
+    pub fn scan_folder(&self, world: &World) -> Option<std::path::PathBuf> {
+        self.scanned_materials.then(|| {
+            world
+                .get_resource::<engine_assets::AssetServer>()
+                .map(|a| a.root())
+                .unwrap_or_else(|| "assets".into())
+                .join("fetched/terrain")
+        })
+    }
 }
 
 impl Default for TerrainSettings {
@@ -270,6 +324,9 @@ impl Default for TerrainSettings {
             collider_tile_m: 64.0,
             collider_samples: 65,
             wireframe_lod: false,
+            geomorph: true,
+            material_resolution: 1024,
+            scanned_materials: true,
         }
     }
 }
@@ -420,6 +477,7 @@ impl Plugin for TerrainPlugin {
                     .chain()
                     .in_set(UpdateSet::AfterPropagate),
             )
+            .add_systems(PostUpdate, follow_world_shift.in_set(WorldShiftSet::Apply))
             .add_systems(
                 FixedUpdate,
                 (demo::walk, deform_from_contacts)
@@ -603,6 +661,22 @@ fn apply_edits(
 /// Accumulates time for the low-rate print recovery pass.
 #[derive(Resource, Default)]
 struct RecoverClock(f32);
+
+/// Footprints and lab walkers stay on the ground when the world re-anchors (planets and
+/// their colliders are placed from their transforms, which engine_world moves).
+fn follow_world_shift(
+    mut shifts: MessageReader<WorldShift>,
+    mut map: ResMut<DeformationMap>,
+    mut walkers: Query<&mut demo::DemoWalker>,
+) {
+    let Some(s) = shifts.read().copied().reduce(|a, b| a.then(&b)) else {
+        return;
+    };
+    map.follow_shift(&s);
+    for mut w in &mut walkers {
+        w.center = s.point(w.center);
+    }
+}
 
 /// Stamps ground contacts into the deformation map and lets old prints recover.
 #[allow(clippy::too_many_arguments)]
@@ -865,6 +939,69 @@ mod tests {
         // Back to the planet well outside the blend (the plain is not tilted there).
         let far = g.height(DVec3::new(0.0, 500.0, -14_000.0)).unwrap();
         assert!((far - valley(0.0, -14_000.0)).abs() > 1.0);
+    }
+
+    #[test]
+    fn overlay_paint_shows_and_reports_its_ground() {
+        let mut app = App::new();
+        app.add_plugins(engine_world::WorldPlugin)
+            .add_plugins(TerrainPlugin);
+        let pad = FlatPad::default();
+        let t = PlanetTerrain::earthlike(3)
+            .with_radius(6_371_000.0)
+            .with_pad(pad)
+            .with_overlay(8_000.0, 3_000.0, |_, _| 5.0)
+            .with_overlay_paint(|x, z| {
+                if x < 0.0 {
+                    Some(OverlayPaint::layer("sand", 1.0))
+                } else if z < 0.0 {
+                    Some(OverlayPaint::tint([0.36, 0.27, 0.09], 0.8))
+                } else {
+                    None
+                }
+            });
+        let shape = t.shape.clone();
+        let tf = t.home_transform(pad);
+        app.world.spawn((tf, t));
+        app.world.spawn((
+            Transform::from_xyz(0.0, 2.0, 0.0),
+            engine_world::SimulationFocus::default(),
+        ));
+        app.update_n(2);
+        let g = app.world.resource::<engine_world::Ground>().clone();
+        let mats = app.world.resource::<SurfaceMaterials>();
+        let surface = |x: f64, z: f64| {
+            let s = g.sample(DVec3::new(x, 50.0, z)).expect("ground");
+            mats.get(s.surface).name.clone()
+        };
+        // The painted layer is what footsteps find; a tint alone keeps the planet's ground.
+        assert_eq!(surface(-30.0, 20.0), "sand");
+        assert_eq!(surface(30.0, -20.0), "grass");
+        assert_eq!(surface(30.0, 20.0), "grass");
+
+        // The vertices carry the layer and the tint, fading out with the overlay's blend.
+        let src = ChunkSource {
+            map: SurfaceMap::new(TerrainDomain::Sphere, shape.radius_m),
+            shape: std::sync::Arc::new(shape),
+            edits: std::sync::Arc::new(EditLayer::default()),
+            ocean_surface: true,
+        };
+        let inv = tf.rotation.as_dquat().inverse();
+        let at = |x: f64, z: f64| {
+            let local = inv * (DVec3::new(x, 5.0, z) - tf.translation);
+            let (dir, up, base) = src.map.locate(local).unwrap();
+            src.sample(base, up, dir, 0.0)
+        };
+        let sand = at(-30.0, 20.0);
+        assert_eq!(sand.paint.0, paint_index("sand"));
+        assert!((sand.paint.1 - 1.0).abs() < 1e-6);
+        let field = at(30.0, -20.0);
+        assert_eq!(field.paint.1, 0.0);
+        assert!((field.tint[3] - 0.8).abs() < 1e-6 && (field.tint[0] - 0.36).abs() < 1e-6);
+        assert_eq!(at(30.0, 20.0).tint[3], 0.0);
+        let edge = at(-9_500.0, 0.0);
+        assert!(edge.paint.1 > 0.0 && edge.paint.1 < 1.0, "{}", edge.paint.1);
+        assert_eq!(at(-12_000.0, 0.0).paint.1, 0.0);
     }
 
     #[test]

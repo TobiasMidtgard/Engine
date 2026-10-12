@@ -166,7 +166,8 @@ pub const ZONES: &[Zone] = &[
         key: "range",
         name: "Smoke range (bullets, fans, explosions)",
         center: DVec3::new(285.0, 0.0, 55.0),
-        radius: 30.0,
+        // The range is 45 × 52 m; flat out to its corners.
+        radius: 36.0,
         module: "smoke",
     },
     Zone {
@@ -221,7 +222,7 @@ pub const GRASSY_ZONES: &[&str] = &[
 /// there: zone key, then x min..max and z min..max relative to the zone center, meters.
 pub const BARE_FOOTPRINTS: &[(&str, [f64; 2], [f64; 2])] = &[
     // The weather station's asphalt yard, sand pit and stone patio.
-    ("weather", [-13.0, 12.0], [-8.0, 9.0]),
+    ("weather", [-13.5, 13.0], [-8.0, 9.0]),
 ];
 
 /// The stream's course (x, z), spring first: through the southern woods, over the cliff south
@@ -255,7 +256,7 @@ pub fn spawn_demos(
             "paddock" => engine_anim::demo::spawn_demo(commands, z.center),
             "physics" => engine_physics::demo::spawn_demo(commands, z.center),
             "yard" => engine_softbody::demo::spawn_demo(commands, z.center),
-            "magic" => ph::magic(commands, lib, z),
+            "magic" => engine_vfx::demo::spawn_demo(commands, z.center),
             "gallery2d" => ph::gallery2d(commands, lib, z),
             "forest" => engine_foliage::demo::spawn_demo(commands, z.center),
             "meadow" => engine_npc::demo::spawn_wildlife(commands, z.center, z.radius * 0.8),
@@ -271,8 +272,17 @@ pub fn spawn_demos(
             "field" => {
                 engine_fire::demo::spawn_demo(commands, z.center);
                 ph::field_edge(commands, lib, z, rng);
+                // Air over the meadow, so the fire's smoke rises as one simulated plume.
+                commands.spawn((
+                    Name::new("Fire demo: smoke"),
+                    Transform::from_translation(z.center + DVec3::new(16.0, 0.0, 4.0)),
+                    engine_smoke::SmokeVolume {
+                        size: [100.0, 40.0, 60.0],
+                        cell_m: 1.25,
+                    },
+                ));
             }
-            "range" => ph::range(commands, lib, z),
+            "range" => engine_smoke::demo::spawn_demo(commands, z.center),
             "weather" => engine_weather::demo::spawn_demo(commands, z.center),
             "track" => engine_vehicles::demo::spawn_track(commands, z.center),
             "airfield" => {
@@ -425,6 +435,15 @@ pub fn demo_views(z: &Zone) -> Vec<View> {
                 .on_leave("movement.duel", cycle),
             ]
         }
+        // Each stop restarts the range, so fans, grenades and bullets are at the same moment.
+        "range" => engine_smoke::demo::VIEWS
+            .iter()
+            .map(|v| {
+                View::new(v.key, v.name, v.eye, v.target, v.hour)
+                    .on_arrive("smoke.demo", r#"{"restart":true}"#)
+                    .warmup(v.warmup_secs)
+            })
+            .collect(),
         "physics" => engine_physics::demo::VIEWS
             .iter()
             .map(|v| {
@@ -585,6 +604,10 @@ pub fn demo_views(z: &Zone) -> Vec<View> {
                     v.hour,
                 )
             })
+            .collect(),
+        "magic" => engine_vfx::demo::VIEWS
+            .iter()
+            .map(|v| View::new(v.key, v.name, v.eye, v.target, v.hour).warmup(v.warmup))
             .collect(),
         _ => Vec::new(),
     }

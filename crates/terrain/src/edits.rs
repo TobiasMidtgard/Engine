@@ -13,22 +13,65 @@ use engine_core::math::{DVec3, Quat};
 use engine_world::{EditOp, EditShape};
 
 /// Painted surface layers the terrain shader knows (index stored per vertex).
-pub const PAINT_NAMES: [&str; 9] = [
-    "", "mud", "snow", "sand", "dirt", "grass", "rock", "concrete", "ash",
+pub const PAINT_NAMES: [&str; 11] = [
+    "", "mud", "snow", "sand", "dirt", "grass", "rock", "concrete", "ash", "gravel", "leaves",
 ];
 
 /// Paint index for a surface material name (unknown names paint as dirt; empty = none).
 pub fn paint_index(name: &str) -> u8 {
     match name {
+        "" => 0,
         "mud" => 1,
         "snow" | "ice" => 2,
         "sand" | "regolith" => 3,
         "dirt" | "default" => 4,
-        "grass" | "leaves" => 5,
+        "grass" => 5,
         "rock" | "metal" | "glass" => 6,
         "concrete" | "asphalt" => 7,
         "ash" | "scorched" => 8,
+        "gravel" => 9,
+        "leaves" | "forest" => 10,
         _ => 4,
+    }
+}
+
+/// What hand-made ground looks like at one spot: a painted ground layer and a tint. Returned
+/// by the function given to
+/// [`PlanetTerrain::with_overlay_paint`](crate::PlanetTerrain::with_overlay_paint).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct OverlayPaint {
+    /// Ground layer (see [`PAINT_NAMES`]); 0 keeps the planet's own ground under the tint.
+    pub layer: u8,
+    /// How much of the layer covers the ground, 0..1.
+    pub weight: f32,
+    /// Linear albedo the ground is tinted toward (texture detail is kept).
+    pub tint: [f32; 3],
+    /// How far toward `tint`, 0..1.
+    pub tint_amount: f32,
+}
+
+impl OverlayPaint {
+    /// A layer by surface name ("grass", "leaves", "dirt", "mud", "sand", "gravel", "rock",
+    /// "concrete", "snow", "ash"), covering the ground with `weight`.
+    pub fn layer(name: &str, weight: f32) -> Self {
+        Self {
+            layer: paint_index(name),
+            weight: weight.clamp(0.0, 1.0),
+            tint: [0.0; 3],
+            tint_amount: 0.0,
+        }
+    }
+
+    /// Only a tint, over whatever ground the planet has there.
+    pub fn tint(color: [f32; 3], amount: f32) -> Self {
+        Self::layer("", 0.0).tinted(color, amount)
+    }
+
+    /// The same paint, tinted toward `color` (linear albedo) by `amount`.
+    pub fn tinted(mut self, color: [f32; 3], amount: f32) -> Self {
+        self.tint = color;
+        self.tint_amount = amount.clamp(0.0, 1.0);
+        self
     }
 }
 
