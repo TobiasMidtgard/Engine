@@ -268,6 +268,12 @@ pub enum Sprite {
     Shard,
     /// A small soft dust puff (footsteps, impacts, sand).
     Dust,
+    /// Heat haze: bends the scene behind it and adds nothing of its own (fire, explosions,
+    /// engines). Color alpha sets the strength.
+    Haze,
+    /// A billow of fire: a dense puff glowing from within, hot cracks cooling to dark smoke over
+    /// its life (explosions, fire impacts, dragon breath). Use `emissive` and a low `additive`.
+    Billow,
 }
 
 impl Sprite {
@@ -281,7 +287,7 @@ impl Sprite {
         match self {
             Sprite::Smoke | Sprite::Dust => 1.0,
             Sprite::Droplet => 0.4,
-            Sprite::Shard => 0.0,
+            Sprite::Shard | Sprite::Haze => 0.0,
             _ => 0.6,
         }
     }
@@ -437,10 +443,13 @@ pub struct EmitterDesc {
     // ---- motion
     /// Multiplier on world gravity (1 = falls like a stone, 0 = floats, negative = rises).
     pub gravity: f32,
-    /// Constant world-space acceleration, m/s² (buoyancy of flames and smoke: `[0, 3, 0]`).
+    /// Constant acceleration, m/s², as on flat ground in sea-level air (buoyancy of flames and
+    /// smoke: `[0, 3, 0]`). Its +Y turns to the local up on a planet, and it scales with the
+    /// air's density, so smoke barely rises in thin air and not at all in a vacuum.
     pub acceleration: [f32; 3],
-    /// How fast particles take on the motion of the surrounding air, per second
-    /// (0 = no air resistance, 1 = embers, 4 = light smoke).
+    /// How fast particles take on the motion of the surrounding air, per second, in sea-level
+    /// air (0 = no air resistance, 1 = embers, 4 = light smoke). Scales with the air's density,
+    /// as does `turbulence`.
     pub drag: f32,
     /// How much of the wind the surrounding air carries for this layer (0..1).
     pub wind: f32,

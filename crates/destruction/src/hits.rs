@@ -13,6 +13,7 @@ use engine_world::{
     SurfaceMaterials, TerrainEdit, WorldImpulse,
 };
 
+use crate::assets::DestructionAssets;
 use crate::debris::{
     Debris, DebrisBody, DebrisLook, DebrisSpawn, DustRequest, PendingDebris, reduce_points,
 };
@@ -249,12 +250,22 @@ pub struct Outputs<'w> {
     pub smoke: MessageWriter<'w, SmokeEmission>,
     pub noise: MessageWriter<'w, NoiseEvent>,
     pub terrain: MessageWriter<'w, TerrainEdit>,
+    pub assets: Option<Res<'w, DestructionAssets>>,
+}
+
+impl Outputs<'_> {
+    /// Surfaces carry textures (see [`DestructionAssets::textured`]).
+    pub fn textured(&self) -> bool {
+        self.assets.as_ref().is_some_and(|a| a.textured)
+    }
 }
 
 /// Shared context for applying hits.
 pub struct Ctx<'a> {
     pub settings: &'a DestructionSettings,
     pub table: &'a DestructionMaterials,
+    /// Surfaces carry textures, so meshes skip their vertex-color patterns.
+    pub textured: bool,
     pub rng: &'a mut Rng,
     pub pending: &'a mut PendingDebris,
     pub stats: &'a mut DestructionStats,
@@ -335,9 +346,11 @@ pub fn apply_hits_system(
     let mut terrain_edits = Vec::new();
     let mut smoke = Vec::new();
     {
+        let textured = out.textured();
         let mut ctx = Ctx {
             settings: &settings,
             table: &table,
+            textured,
             rng,
             pending: &mut out.pending,
             stats: &mut out.stats,
@@ -774,7 +787,7 @@ fn wall_chunks(
             .unwrap_or(0);
         groups[best].push(*c);
     }
-    let mut look = WallLook::new(wall, ctx.table);
+    let mut look = WallLook::new(wall, ctx.table).with_texture(ctx.textured);
     look.straight_border = false;
     let rot = gt.rotation();
     for group in groups {
@@ -1072,7 +1085,7 @@ fn blast(
         // Rubble flying out of the crater.
         let pieces = ((removed / 0.03) as u32).clamp(2, ctx.settings.max_chunks_per_hit as u32);
         let half = Vec3::splat((removed / pieces as f32).cbrt() * 0.9).max(Vec3::splat(0.08));
-        let (ext_c, int_c) = piece_colors(None, volume.material, ctx.table);
+        let (ext_c, int_c) = piece_colors(None, volume.material, ctx.table, ctx.textured);
         let shape = ConvexPoly::cuboid(half * 2.0);
         let parts = shatter(&shape, Vec3::ZERO, pieces, ctx.rng);
         for (poly, c, vol) in parts {
@@ -1388,7 +1401,7 @@ pub(crate) fn break_fracturable(
     base_velocity: Vec3,
 ) {
     let props = ctx.table.get(f.material);
-    let (ext, int) = piece_colors(f.color, f.material, ctx.table);
+    let (ext, int) = piece_colors(f.color, f.material, ctx.table, ctx.textured);
     let parts = shatter(&f.shape.poly(), impact, f.pieces, ctx.rng);
     let rot = gt.rotation();
     let size = f.shape.half_extents().max_element() * 2.0;

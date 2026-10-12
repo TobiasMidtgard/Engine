@@ -1,0 +1,33 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <defs>
+    <linearGradient id="wood" x1="-4" y1="0" x2="16" y2="0" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#d9a066"/>
+      <stop offset=".6" stop-color="#9a6234"/>
+      <stop offset="1" stop-color="#5a341a"/>
+    </linearGradient>
+    <linearGradient id="steel" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#f0f4f8"/>
+      <stop offset="1" stop-color="#6a7588"/>
+    </linearGradient>
+    <linearGradient id="fl" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ff8e76"/>
+      <stop offset="1" stop-color="#b8302c"/>
+    </linearGradient>
+  </defs>
+  <g transform="translate(28.5 35.5) rotate(-45)">
+    <path d="M1.5 -29 L1.5 29" stroke="#0c0f16" stroke-width="3.2" stroke-linecap="round"/>
+    <path d="M1.5 -29 L1.5 29" stroke="#efe6cf" stroke-width="1.1" stroke-linecap="round"/>
+    <path d="M3 -32 C-2 -27 -1 -22 3 -18 C9 -12 14.5 -6 14.5 0 C14.5 6 9 12 3 18 C-1 22 -2 27 3 32" stroke="#0c0f16" stroke-width="9.5" fill="none" stroke-linecap="round"/>
+    <path d="M3 -32 C-2 -27 -1 -22 3 -18 C9 -12 14.5 -6 14.5 0 C14.5 6 9 12 3 18 C-1 22 -2 27 3 32" stroke="url(#wood)" stroke-width="5.5" fill="none" stroke-linecap="round"/>
+    <path d="M1.2 -27 C0.4 -24 1.4 -21 3.6 -19 C9 -13.5 13 -8 13.2 -2" stroke="#ffe2b8" stroke-width="1.1" fill="none" opacity=".8"/>
+    <rect x="11" y="-6" width="7" height="12" rx="2" fill="#4a2a1e" stroke="#0c0f16" stroke-width="2"/>
+    <path d="M11.5 -3 L17.5 -1 M11.5 1 L17.5 3" stroke="#2a140c" stroke-width="1"/>
+    <g stroke="#0c0f16" stroke-width="3.5" stroke-linejoin="round" paint-order="stroke">
+      <rect x="-15" y="-1.2" width="45" height="2.4" rx="1" fill="#b98a5a"/>
+      <path d="M-16 -1 L-10 -1 L-6 -6 L-12 -6 Z" fill="url(#fl)"/>
+      <path d="M-16 1 L-10 1 L-6 6 L-12 6 Z" fill="url(#fl)"/>
+      <path d="M29 -4 L37.5 0 L29 4 Z" fill="url(#steel)"/>
+    </g>
+    <path d="M-12 -0.4 L28 -0.4" stroke="#f2d6b0" stroke-width=".8"/>
+  </g>
+</svg>

@@ -3,6 +3,12 @@
 use bytemuck::{Pod, Zeroable};
 
 use crate::effect::EmitterDesc;
+use engine_core::math::{Quat, Vec3};
+
+/// Air density at sea level on Earth, kg/m³: the air effects are authored for.
+pub const SEA_LEVEL_AIR: f32 = 1.225;
+/// Air denser than this many times [`SEA_LEVEL_AIR`] (Venus) acts like it, so effects stay sane.
+const MAX_AIR_THICKNESS: f32 = 4.0;
 
 /// Samples of the color gradient the GPU interpolates between.
 pub const COLOR_SAMPLES: usize = 16;
@@ -161,11 +167,27 @@ impl GpuEmitter {
         }
     }
 
-    /// Acceleration from the description's gravity multiplier and constant acceleration.
-    pub fn set_forces(&mut self, gravity: [f32; 3], desc: &EmitterDesc, scale: f32) {
-        for (i, g) in gravity.into_iter().enumerate() {
-            self.forces[i] = g * desc.gravity + desc.acceleration[i] * scale;
-        }
+    /// Forces from the local gravity and air. Effects are authored for sea-level air on a flat
+    /// world: their constant acceleration (the buoyancy of flames and smoke) points away from
+    /// the planet wherever "up" is, and buoyancy, drag, turbulence and the air's support of
+    /// floating dust scale with the air's density, so smoke barely rises on Mars and dust
+    /// flies in clean ballistic arcs on the Moon.
+    pub fn set_forces(&mut self, gravity: Vec3, air_density: f32, desc: &EmitterDesc, scale: f32) {
+        let thickness = (air_density / SEA_LEVEL_AIR).clamp(0.0, MAX_AIR_THICKNESS);
+        let up = (-gravity).try_normalize().unwrap_or(Vec3::Y);
+        let lift = Quat::from_rotation_arc(Vec3::Y, up)
+            * Vec3::from(desc.acceleration)
+            * (scale * thickness);
+        // A gravity multiplier under 1 stands for the air holding dust, smoke and spray up;
+        // without air they fall like stones. Light (glows, sparks, magic) keeps its own.
+        let held = if desc.additive < 0.5 && desc.gravity < 1.0 {
+            1.0 - (1.0 - desc.gravity) * thickness.min(1.0)
+        } else {
+            desc.gravity
+        };
+        let f = gravity * held + lift;
+        self.forces = [f.x, f.y, f.z, self.forces[3] * thickness];
+        self.wind[3] *= thickness;
     }
 }
 
@@ -213,7 +235,7 @@ pub struct GpuUpdate {
     pub _pad: u32,
 }
 
-/// Per-frame simulation constants (32 bytes).
+/// Per-frame simulation constants (128 bytes).
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Default, PartialEq, Pod, Zeroable)]
 pub struct GpuSim {
@@ -222,6 +244,15 @@ pub struct GpuSim {
     pub shift: [f32; 4],
     /// Update chunks, spawn chunks, frame index, unused.
     pub counts: [u32; 4],
+    /// Scene collision: enabled (1/0), near plane (m), surface thickness (m), unused.
+    pub depth: [f32; 4],
+    /// The world re-anchored since the last step (see `engine_world::WorldShift`): columns of
+    /// the rotation turning particle positions and velocities, `turn[0][3]` = 1 when set.
+    pub turn: [[f32; 4]; 3],
+    /// xyz: velocity the old frame had at the last camera origin (added to particles), m/s.
+    pub frame_velocity: [f32; 4],
+    /// xyz: angular velocity of the old frame, rad/s.
+    pub frame_spin: [f32; 4],
 }
 
 /// One ribbon vertex (48 bytes): trails and beams, built on the CPU each frame.
@@ -257,7 +288,7 @@ mod tests {
         );
         assert_eq!(std::mem::size_of::<GpuSpawn>(), 64);
         assert_eq!(std::mem::size_of::<GpuUpdate>(), 16);
-        assert_eq!(std::mem::size_of::<GpuSim>(), 32);
+        assert_eq!(std::mem::size_of::<GpuSim>(), 128);
         assert_eq!(std::mem::size_of::<RibbonVertex>(), 48);
     }
 
@@ -285,5 +316,64 @@ mod tests {
         assert_eq!(b.size_rot[0], 1.0);
         assert_eq!(b.speed_life[1], 8.0);
         assert_eq!(a.speed_life[2], 1.0);
+    }
+
+    #[test]
+    fn smoke_rises_away_from_the_planet_and_only_as_thick_air_lets_it() {
+        let desc = EmitterDesc {
+            acceleration: [0.0, 3.0, 0.0],
+            drag: 2.0,
+            turbulence: 1.0,
+            ..Default::default()
+        };
+        let forces = |gravity: Vec3, density: f32| {
+            let mut gpu = GpuEmitter::bake(&desc, 1.0);
+            gpu.set_forces(gravity, density, &desc, 1.0);
+            (
+                Vec3::from_slice(&gpu.forces[..3]),
+                gpu.forces[3],
+                gpu.wind[3],
+            )
+        };
+        let near = |a: Vec3, b: Vec3| a.distance(b) < 1e-4;
+
+        // On Earth at sea level: rises 3 m/s² against 9.81 m/s² of gravity, full drag.
+        let (f, drag, swirl) = forces(Vec3::new(0.0, -9.81, 0.0), SEA_LEVEL_AIR);
+        assert!(
+            near(f, Vec3::new(0.0, -9.81 * desc.gravity + 3.0, 0.0)),
+            "{f}"
+        );
+        assert_eq!((drag, swirl), (2.0, 1.0));
+
+        // On a planet's side, where down is -X: it rises along +X, not world Y.
+        let (f, ..) = forces(Vec3::new(-9.81, 0.0, 0.0), SEA_LEVEL_AIR);
+        assert!(
+            near(f, Vec3::new(-9.81 * desc.gravity + 3.0, 0.0, 0.0)),
+            "{f}"
+        );
+
+        // Mars (1.6 % of Earth's air): buoyancy, drag and turbulence nearly gone, and the
+        // air barely holds the smoke up.
+        let thin = 0.020 / SEA_LEVEL_AIR;
+        let (f, drag, swirl) = forces(Vec3::new(0.0, -3.71, 0.0), 0.020);
+        assert!(
+            (f.y - (-3.71 * (1.0 - thin) + 3.0 * thin)).abs() < 1e-4,
+            "{f}"
+        );
+        assert!(drag < 0.04 && swirl < 0.02, "{drag} {swirl}");
+
+        // The Moon: no air at all, so smoke falls like a stone and nothing else acts.
+        let (f, drag, swirl) = forces(Vec3::new(0.0, -1.62, 0.0), 0.0);
+        assert!(near(f, Vec3::new(0.0, -1.62, 0.0)), "{f}");
+        assert_eq!((drag, swirl), (0.0, 0.0));
+
+        // A glowing (additive) mote keeps floating: magic is not held up by air.
+        let glow = EmitterDesc {
+            additive: 1.0,
+            ..desc.clone()
+        };
+        let mut gpu = GpuEmitter::bake(&glow, 1.0);
+        gpu.set_forces(Vec3::new(0.0, -1.62, 0.0), 0.0, &glow, 1.0);
+        assert_eq!(gpu.forces[1], -1.62 * glow.gravity);
     }
 }

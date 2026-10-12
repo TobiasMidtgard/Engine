@@ -154,12 +154,19 @@ pub fn support_tint_system(
         {
             targets.extend(children.iter());
         }
-        if original.is_none() {
-            let saved = targets
-                .iter()
-                .filter_map(|t| renderers.get(*t).ok().map(|r| (*t, r.material.clone())))
-                .collect();
-            commands.entity(e).insert(SupportOriginal(saved));
+        // Remember each target's own material the first time it is tinted (children such as
+        // a prop's meshes can appear after the piece itself).
+        let mut saved = original.map(|o| o.0.clone()).unwrap_or_default();
+        let before = saved.len();
+        for t in &targets {
+            if !saved.iter().any(|(s, _)| s == t)
+                && let Ok(r) = renderers.get(*t)
+            {
+                saved.push((*t, r.material.clone()));
+            }
+        }
+        if original.is_none() || saved.len() != before {
+            commands.entity(e).insert(SupportOriginal(saved.clone()));
         }
         let grounded = graph
             .pieces
@@ -167,12 +174,18 @@ pub fn support_tint_system(
             .position(|p| *p == e)
             .is_some_and(|i| graph.grounded[i]);
         let fraction = state.map(|s| s.support_fraction()).unwrap_or(0.0);
-        let m = engine_render::MaterialRef::Handle(assets.support_color(grounded, fraction));
         for t in targets {
+            let tint = match saved.iter().find(|(s, _)| *s == t) {
+                Some((_, engine_render::MaterialRef::Handle(h))) => {
+                    assets.support_color_on(*h, grounded, fraction)
+                }
+                _ => assets.support_color(grounded, fraction),
+            };
+            let m = engine_render::MaterialRef::Handle(tint);
             if let Ok(mut r) = renderers.get_mut(t)
                 && r.material != m
             {
-                r.material = m.clone();
+                r.material = m;
             }
         }
     }
@@ -494,9 +507,18 @@ pub fn piece_colors(
     color: Option<[f32; 3]>,
     material: DestructibleMaterial,
     table: &DestructionMaterials,
+    textured: bool,
 ) -> ([f32; 3], [f32; 3]) {
     let p = table.get(material);
-    (color.unwrap_or(p.exterior), p.interior)
+    let (ext, int) = (color.unwrap_or(p.exterior), p.interior);
+    if !textured {
+        return (ext, int);
+    }
+    // The texture carries the albedo: shade relative to the material's own color.
+    let rel = |c: [f32; 3]| -> [f32; 3] {
+        std::array::from_fn(|k| (c[k] / p.exterior[k].max(1e-3)).clamp(0.3, 1.35))
+    };
+    (rel(ext), rel(int))
 }
 
 #[cfg(test)]

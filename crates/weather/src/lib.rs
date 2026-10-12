@@ -193,4 +193,50 @@ mod tests {
                 == 9
         );
     }
+
+    #[test]
+    fn ground_api_fills_only_the_dips_the_ground_has() {
+        let mut app = app();
+        app.world
+            .resource_mut::<Time>()
+            .set_source(engine_core::time::TimeSource::Manual { step_secs: 0.1 });
+        // A sand pit where nothing pools next to an asphalt yard full of dips.
+        app.world.spawn((
+            Transform::default(),
+            GroundPatch {
+                half_extents: [6.0, 6.0],
+                absorbency: 0.9,
+                puddles: 0.0,
+            },
+        ));
+        app.world.spawn((
+            Transform::from_translation(engine_core::math::DVec3::new(20.0, 0.0, 20.0)),
+            GroundPatch {
+                half_extents: [9.0, 9.0],
+                absorbency: 0.05,
+                puddles: 0.5,
+            },
+        ));
+        app.update_n(40);
+        call_api(&mut app.world, "weather.ground", json!({"puddle_m": 0.02})).unwrap();
+        let surface = app.world.resource::<SurfaceLayers>();
+        let puddled = |x: f64, z: f64, r: f64| {
+            let mut n = 0;
+            for i in 0..21 {
+                for j in 0..21 {
+                    let p = engine_core::math::DVec3::new(
+                        x + (i as f64 / 10.0 - 1.0) * r,
+                        0.0,
+                        z + (j as f64 / 10.0 - 1.0) * r,
+                    );
+                    if surface.sample(p).puddle_m > 0.001 {
+                        n += 1;
+                    }
+                }
+            }
+            n
+        };
+        assert_eq!(puddled(0.0, 0.0, 5.0), 0, "puddles in the sand pit");
+        assert!(puddled(20.0, 20.0, 8.0) > 60, "no puddles on the asphalt");
+    }
 }

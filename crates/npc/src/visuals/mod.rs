@@ -1,16 +1,22 @@
 //! Stand-in bodies: simple figures built from primitives and posed every step from what the
 //! AI is doing, so behavior reads clearly before real character models exist.
 //!
-//! Fighters walk and run with swinging limbs, crouch behind low cover, raise their weapon
-//! during an attack's telegraph (it glows orange for a heavy guard breaker), hold the weapon
-//! across the body to block (a white flash on a parry), lean into dodges, reel when staggered,
-//! flash when hit and fall when downed. Shooters shoulder their rifle and show a muzzle flash.
-//! A band on the head shows skill (grey rookie, bronze, silver, gold master) and an orb above
-//! it shows alertness (yellow suspicious, orange searching, red fighting).
+//! Fighters are armored combatants built from procedural meshes (see [`crate::art::fighter`])
+//! on a skeleton whose knees and elbows bend. They walk and run with planted feet and swinging
+//! arms, breathe and shift their weight when idle, kneel behind low cover, raise their weapon
+//! during an attack's telegraph (it glows orange for a heavy guard breaker), raise the guard
+//! or shield to block (a white flash on a parry), lean into dodges, reel when staggered, flash
+//! when hit, and fall and drop their weapon when downed. Shooters shoulder their carbine (with
+//! a muzzle flash and kick); archers draw to the jaw. Faces show under open helmets worn over
+//! mail coifs. The helmet's horsehair crest shows skill (grey rookie, bronze, silver, gold
+//! master) and a light in its brow band glows with alertness (yellow suspicious, orange
+//! searching, red fighting).
 //!
-//! Animals graze head-down, raise their heads when alert, lie down to rest, gallop (deer and
-//! wolves), hop (rabbits), creep low when stalking, flap and bank in flight, and fall over
-//! when killed.
+//! Animals are sculpted procedural red deer, grey wolves, rabbits and starlings (see
+//! `art::animals`; cheap primitives without the renderer). They plant their feet as they walk,
+//! trot and gallop, graze head-down, raise their heads when alert, lie down to rest, hop
+//! (rabbits), creep low when stalking, peck, flap and bank in flight, and fall over when
+//! killed.
 //!
 //! With `NpcSettings::show_intent` on, a ring on the ground marks where each NPC decided to
 //! go and a line leads to it, colored by why: blue cover, orange flank, purple high ground,
@@ -112,8 +118,8 @@ const WOOD: u32 = 0x7a5230;
 fn faction_color(f: Option<&Faction>) -> u32 {
     match f.map(|f| f.0) {
         Some(0) => 0x3d8a4e,
-        Some(1) => 0xa8392c,
-        Some(2) => 0x2f5fa8,
+        Some(1) => 0xb93c2e,
+        Some(2) => 0x2f6ad8,
         _ => 0x8a8a8a,
     }
 }
@@ -196,11 +202,6 @@ const HIDDEN: Placed = Placed {
     rot: Quat::IDENTITY,
     visible: false,
 };
-
-/// A limb hanging from `pivot`, rotated by `rot`, `len` long: its mesh center.
-fn limb(pivot: Vec3, rot: Quat, len: f32) -> Placed {
-    at(pivot + rot * Vec3::new(0.0, -len * 0.5, 0.0), rot)
-}
 
 type PoseItem<'a> = (
     &'a StandIn,

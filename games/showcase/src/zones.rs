@@ -223,6 +223,8 @@ pub const GRASSY_ZONES: &[&str] = &[
 pub const BARE_FOOTPRINTS: &[(&str, [f64; 2], [f64; 2])] = &[
     // The weather station's asphalt yard, sand pit and stone patio.
     ("weather", [-13.5, 13.0], [-8.0, 9.0]),
+    // The siege fortress's gravel breach range.
+    ("fortress", [-26.5, 26.5], [-14.0, -4.0]),
 ];
 
 /// The stream's course (x, z), spring first: through the southern woods, over the cliff south
@@ -252,7 +254,10 @@ pub fn spawn_demos(
     for z in ZONES {
         match z.key {
             "plaza" => ph::plaza(commands, lib, z),
-            "market" => ph::market(commands, lib, z),
+            "market" => {
+                ph::market(commands, lib, z);
+                engine_ui::demo::spawn_demo(commands, z.center);
+            }
             "paddock" => engine_anim::demo::spawn_demo(commands, z.center),
             "physics" => engine_physics::demo::spawn_demo(commands, z.center),
             "yard" => engine_softbody::demo::spawn_demo(commands, z.center),
@@ -268,7 +273,7 @@ pub fn spawn_demos(
             "arena" => engine_npc::demo::spawn_demo(commands, z.center),
             "parkour" => engine_movement::demo::spawn_demo(commands, z.center),
             "fortress" => engine_destruction::demo::spawn_demo(commands, z.center),
-            "voxel" => ph::voxel(commands, meshes, z, rng),
+            "voxel" => engine_destruction::hill::spawn_voxel_hill(commands, z.center),
             "field" => {
                 engine_fire::demo::spawn_demo(commands, z.center);
                 ph::field_edge(commands, lib, z, rng);
@@ -379,6 +384,62 @@ pub fn demo_views(z: &Zone) -> Vec<View> {
             .iter()
             .map(|v| View::new(v.key, v.name, v.eye, v.target, v.hour))
             .collect(),
+        "parkour" => {
+            // The duel runs from its setup when the camera arrives (movement.duel), so each
+            // stop catches its moment; leaving puts the duel back on its three-round cycle.
+            let duel = |round: &str| format!(r#"{{"round": "{round}"}}"#);
+            let cycle = r#"{"round": null}"#;
+            vec![
+                View::new(
+                    "parkour_course",
+                    "Movement course: slide bar, wall-run walls and the tower",
+                    [-34.0, 7.0, 26.0],
+                    [2.0, 2.5, 11.0],
+                    16.0,
+                )
+                .warmup(2.0),
+                View::new(
+                    "parkour_blink",
+                    "An elite cuts down an untrained player in a blink",
+                    [-4.0, 1.9, -11.5],
+                    [0.0, 1.15, -10.0],
+                    16.0,
+                )
+                .warmup(0.7)
+                .on_arrive("movement.duel", &duel("Blink"))
+                .on_leave("movement.duel", cycle),
+                View::new(
+                    "parkour_focus",
+                    "Trained: the same attack in slow motion, sidestepped",
+                    [-2.0, 2.4, -5.0],
+                    [0.3, 1.1, -13.0],
+                    16.0,
+                )
+                .warmup(1.0)
+                .on_arrive("movement.duel", &duel("Focus"))
+                .on_leave("movement.duel", cycle),
+                View::new(
+                    "parkour_counter",
+                    "The counter-strike while the elite recovers",
+                    [-4.0, 2.3, -7.5],
+                    [1.0, 1.0, -10.5],
+                    16.0,
+                )
+                .warmup(1.55)
+                .on_arrive("movement.duel", &duel("Focus"))
+                .on_leave("movement.duel", cycle),
+                View::new(
+                    "parkour_pack",
+                    "Grunts fall one by one in slow motion",
+                    [8.0, 4.0, -4.0],
+                    [0.0, 1.0, -15.0],
+                    16.0,
+                )
+                .warmup(1.75)
+                .on_arrive("movement.duel", &duel("Pack"))
+                .on_leave("movement.duel", cycle),
+            ]
+        }
         // Each stop restarts the range, so fans, grenades and bullets are at the same moment.
         "range" => engine_smoke::demo::VIEWS
             .iter()
@@ -401,6 +462,59 @@ pub fn demo_views(z: &Zone) -> Vec<View> {
                 }
             })
             .collect(),
+        "market" => {
+            let ui = |key, name, screen: &'static str| {
+                View::new(key, name, [-1.5, 1.8, -5.5], [-11.8, 1.8, 9.2], 15.0)
+                    .warmup(1.5)
+                    .on_arrive("ui.show", screen)
+                    .on_leave("ui.hide_all", "{}")
+            };
+            vec![
+                ui(
+                    "market_hud",
+                    "HUD: vitals, compass, minimap, markers",
+                    r#"{"screen": "hud"}"#,
+                ),
+                ui(
+                    "market_dialogue",
+                    "A conversation with the trader",
+                    r#"{"screen": "dialogue", "tree": "merchant_intro", "node": "offer"}"#,
+                )
+                .warmup(6.0),
+                ui("market_shop", "The trader's shop", r#"{"screen": "shop"}"#),
+                ui(
+                    "market_inventory",
+                    "Inventory and equipment",
+                    r#"{"screen": "inventory"}"#,
+                ),
+                ui(
+                    "market_map_galaxy",
+                    "Galaxy map",
+                    r#"{"screen": "map", "zoom": 3.6}"#,
+                ),
+                ui(
+                    "market_map_system",
+                    "Star system map",
+                    r#"{"screen": "map", "zoom": 2.6}"#,
+                ),
+                ui(
+                    "market_map_globe",
+                    "Planet globe",
+                    r#"{"screen": "map", "zoom": 1.4}"#,
+                ),
+                ui(
+                    "market_map_surface",
+                    "Surface map",
+                    r#"{"screen": "map", "zoom": 0.5}"#,
+                ),
+                ui("market_pause", "Pause menu", r#"{"screen": "pause"}"#),
+                ui(
+                    "market_settings",
+                    "Settings",
+                    r#"{"screen": "settings", "tab": "video"}"#,
+                ),
+            ]
+        }
         "yard" => vec![
             View::new(
                 "yard_banners",
@@ -443,6 +557,8 @@ pub fn demo_views(z: &Zone) -> Vec<View> {
             )
             .warmup(7.0),
         ],
+        "fortress" => destruction_views(engine_destruction::demo::VIEWS),
+        "voxel" => destruction_views(engine_destruction::hill::VIEWS),
         "arena" => vec![
             View::new(
                 "arena_duel",
@@ -565,6 +681,18 @@ pub fn demo_views(z: &Zone) -> Vec<View> {
             .collect(),
         _ => Vec::new(),
     }
+}
+
+/// The destruction demos' viewpoints: each restarts its demo on arrival so its moment plays.
+fn destruction_views(views: &[engine_destruction::DemoView]) -> Vec<View> {
+    views
+        .iter()
+        .map(|v| {
+            View::new(v.key, v.name, v.eye, v.target, v.hour)
+                .warmup(v.warmup_secs)
+                .on_arrive(engine_destruction::RESTART_API, "{}")
+        })
+        .collect()
 }
 
 /// The valley: pads for every zone and the runway, roads between them, the lake and the cave

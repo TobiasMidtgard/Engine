@@ -8,6 +8,7 @@ pub mod effects;
 mod fires;
 pub mod footstep;
 pub mod mixer;
+pub mod nature;
 mod output;
 mod systems;
 pub mod thunder;
@@ -56,8 +57,8 @@ impl Plugin for AudioPlugin {
                 "Audio settings: output (Auto/Device/Offline/Off), master_db, speed_of_sound (m/s), \
                  doppler (0..1), air_absorption (/m), slow_motion_pitch (0..1, how much time \
                  dilation lowers pitch), min_pitch, slow_motion_darken (0..1), space_is_silent, \
-                 footstep_distance_m, max_voices, weather_ambience, \
-                 occlusion (walls muffle sounds).",
+                 footstep_distance_m, max_voices, weather_ambience, occlusion (walls muffle \
+                 sounds), fires, water, vehicles, nature (birds, owls, crickets, cicadas).",
             )
             .register_resource::<AudioMix>(
                 "Bus volumes in dB: world (footsteps, impacts, explosions), ambience (rain, wind, \
@@ -88,6 +89,7 @@ impl Plugin for AudioPlugin {
                     systems::weather_ambience,
                     fires::fire_ambience,
                     water::water_ambience,
+                    nature::nature_ambience,
                     vehicle::vehicle_sounds,
                     systems::reverb_zones,
                     systems::follow_emitters,
@@ -163,6 +165,9 @@ pub struct AudioSettings {
     /// Play engines and tyres of vehicles (`EngineState`, `WheelContacts` from the vehicles
     /// module).
     pub vehicles: bool,
+    /// Play birds singing in the trees around the listener by day, owls and crickets at night
+    /// and cicadas on hot afternoons, by time of day, weather and how wild the ground is.
+    pub nature: bool,
 }
 
 impl Default for AudioSettings {
@@ -184,6 +189,7 @@ impl Default for AudioSettings {
             fires: true,
             water: true,
             vehicles: true,
+            nature: true,
         }
     }
 }

@@ -120,7 +120,60 @@ fn main() {
         )
         .expect("write wav");
     }
+    // Birds, each species singing three songs from 15 m away, and crickets at 12 and 26 °C.
+    nature(&out);
     println!("wrote {}", out.display());
+}
+
+fn nature(out: &std::path::Path) {
+    use engine_audio::Sound;
+    use engine_audio::nature::{BirdSong, InsectChorus, Species};
+    // 15 m away: inverse distance and the air's high cut, roughly as the mixer does.
+    let gain = 1.0 / 15.0;
+    let mut lp = engine_audio::dsp::Biquad::lowpass(FS, 20_000.0 / (1.0 + 15.0 * 0.006), 0.7);
+    for species in Species::ALL {
+        let mut track = Vec::new();
+        for song in 0..3 {
+            let mut s = BirdSong::new(FS, species, 11, song);
+            let mut x = vec![0.0; (FS * (s.duration() + 0.2)) as usize];
+            let n = s.fill(&mut x);
+            x.truncate(n);
+            track.extend(x.iter().map(|v| lp.process(v * gain * 4.0)));
+            track.extend(std::iter::repeat_n(0.0, (FS * 1.2) as usize));
+        }
+        let peak = track.iter().fold(0.0f32, |m, v| m.max(v.abs()));
+        println!("bird {:<10} peak {peak:.3}", species.name());
+        write_wav(
+            &out.join(format!("bird_{}.wav", species.name())),
+            &track,
+            1,
+            FS as u32,
+        )
+        .expect("write wav");
+    }
+    for celsius in [12.0, 26.0] {
+        let mut c = InsectChorus::new(FS, 3);
+        c.set_param("crickets", 1.0);
+        c.set_param("temperature", celsius);
+        if celsius > 25.0 {
+            c.set_param("cicadas", 0.0);
+        }
+        let mut track = vec![0.0; (FS * 10.0) as usize];
+        c.fill(&mut track);
+        write_wav(
+            &out.join(format!("crickets_{celsius:.0}c.wav")),
+            &track,
+            1,
+            FS as u32,
+        )
+        .expect("write wav");
+    }
+    let mut c = InsectChorus::new(FS, 4);
+    c.set_param("cicadas", 1.0);
+    c.set_param("temperature", 30.0);
+    let mut track = vec![0.0; (FS * 10.0) as usize];
+    c.fill(&mut track);
+    write_wav(&out.join("cicadas.wav"), &track, 1, FS as u32).expect("write wav");
 }
 
 /// A zigzag cloud-to-ground bolt `distance_m` away as heard from the origin, starting at the

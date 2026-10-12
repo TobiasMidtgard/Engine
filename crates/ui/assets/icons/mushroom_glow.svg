@@ -1,0 +1,37 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <defs>
+    <radialGradient id="halo" cx=".5" cy=".45" r=".5">
+      <stop offset="0" stop-color="#6affd8" stop-opacity=".55"/>
+      <stop offset=".6" stop-color="#3ae0c8" stop-opacity=".15"/>
+      <stop offset="1" stop-color="#3ae0c8" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="cap" cx=".4" cy=".3" r=".8">
+      <stop offset="0" stop-color="#e6fff6"/>
+      <stop offset=".35" stop-color="#5cf0d0"/>
+      <stop offset=".8" stop-color="#1a8aa8"/>
+      <stop offset="1" stop-color="#174a7a"/>
+    </radialGradient>
+    <linearGradient id="stem" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#f4f0e6"/>
+      <stop offset="1" stop-color="#9aa6b2"/>
+    </linearGradient>
+  </defs>
+  <circle cx="32" cy="30" r="31" fill="url(#halo)"/>
+  <g stroke="#0c0f16" stroke-width="3.6" stroke-linejoin="round" stroke-linecap="round" paint-order="stroke">
+    <path d="M14 58 C14 52 15 46 17 40 L22 40 C22 46 22 52 23 58 Z" fill="url(#stem)"/>
+    <path d="M6 41 C6 33 12 28 19.5 28 C27 28 33 33 33 41 C26 43 13 43 6 41 Z" fill="url(#cap)"/>
+    <path d="M44 58 C44 54 45 50 46 46 L50 46 C50 50 50 54 51 58 Z" fill="url(#stem)"/>
+    <path d="M38 47 C38 41 42 37 48 37 C54 37 58 41 58 47 C53 48.5 43 48.5 38 47 Z" fill="url(#cap)"/>
+    <path d="M27 59 C28 50 28 40 26 30 L35 30 C34 40 35 50 37 59 Z" fill="url(#stem)"/>
+    <path d="M12 29 C12 15 20 6 31 6 C42 6 51 15 51 29 C42 33 21 33 12 29 Z" fill="url(#cap)"/>
+    <path d="M8 59 L56 59" fill="none" stroke-width="3"/>
+  </g>
+  <path d="M15 30.6 C24 33.6 40 33.6 48 30.6" stroke="#0e3a5a" stroke-width="1.4" fill="none" opacity=".7"/>
+  <g fill="#f2fffb">
+    <ellipse cx="24" cy="15" rx="2.6" ry="1.8"/><ellipse cx="36" cy="12" rx="2" ry="1.4"/><ellipse cx="42" cy="21" rx="2.2" ry="1.5"/><ellipse cx="29" cy="23" rx="1.6" ry="1.1"/>
+    <ellipse cx="15" cy="34" rx="1.8" ry="1.2"/><ellipse cx="23" cy="32.5" rx="1.2" ry=".9"/><ellipse cx="46" cy="41" rx="1.6" ry="1.1"/><ellipse cx="51.5" cy="43" rx="1" ry=".8"/>
+  </g>
+  <path d="M16 23 C17 16 22 10.4 28 9" stroke="#ffffff" stroke-width="1.4" fill="none" stroke-linecap="round" opacity=".8"/>
+  <path d="M28.6 34 C29.4 42 29.4 50 29 56" stroke="#ffffff" stroke-width="1" fill="none" opacity=".7"/>
+  <g fill="#b8fff0"><circle cx="9" cy="20" r="1"/><circle cx="56" cy="27" r="1.1"/><circle cx="52" cy="11" r=".8"/><circle cx="5" cy="50" r=".8"/></g>
+</svg>

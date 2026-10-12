@@ -1,0 +1,35 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <defs>
+    <filter id="blur" x="-50%" y="-50%" width="200%" height="200%"><feGaussianBlur stdDeviation="2.4"/></filter>
+    <linearGradient id="gold" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#fff0bd"/>
+      <stop offset=".5" stop-color="#e8b65a"/>
+      <stop offset="1" stop-color="#8f5a1c"/>
+    </linearGradient>
+    <linearGradient id="sand" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#e6fbff"/>
+      <stop offset="1" stop-color="#5fa8ff"/>
+    </linearGradient>
+    <linearGradient id="swirl" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#b48aff" stop-opacity="0"/>
+      <stop offset=".5" stop-color="#b48aff"/>
+      <stop offset="1" stop-color="#e6d8ff"/>
+    </linearGradient>
+  </defs>
+  <path d="M8 40 C4 26 14 10 32 8 C46 7 56 16 58 26" stroke="#9a6aff" stroke-width="5" fill="none" filter="url(#blur)" opacity=".8"/>
+  <path d="M8 40 C4 26 14 10 32 8 C46 7 56 16 58 26" stroke="url(#swirl)" stroke-width="2.6" fill="none" stroke-linecap="round"/>
+  <path d="M56 24 L59 30 L52.6 28.6 Z" fill="#e6d8ff"/>
+  <path d="M56 24 C60 38 50 54 32 56 C20 57 10 50 7 42" stroke="url(#swirl)" stroke-width="1.8" fill="none" stroke-linecap="round" opacity=".6" transform="rotate(180 32 32)"/>
+  <path d="M23 15 L41 15 C41 24 35 28 33.5 32 C35 36 41 40 41 49 L23 49 C23 40 29 36 30.5 32 C29 28 23 24 23 15 Z" fill="#a8d4f0" fill-opacity=".2" stroke="#0c0f16" stroke-width="3.4" stroke-linejoin="round"/>
+  <path d="M26 22 L38 22 C37 26 34 28 32 30.5 C30 28 27 26 26 22 Z" fill="url(#sand)"/>
+  <path d="M25 47 C26 41 30 39 32 38.5 C34 39 38 41 39 47 Z" fill="url(#sand)"/>
+  <path d="M32 31 L32 38.5" stroke="#bff1ff" stroke-width="1.2" stroke-dasharray="1.4 1.2"/>
+  <g stroke="#0c0f16" stroke-width="3.4" stroke-linejoin="round" paint-order="stroke">
+    <rect x="17" y="9" width="30" height="6" rx="2" fill="url(#gold)"/>
+    <rect x="17" y="49" width="30" height="6" rx="2" fill="url(#gold)"/>
+    <rect x="19" y="15" width="3.4" height="34" rx="1.2" fill="url(#gold)"/>
+    <rect x="41.6" y="15" width="3.4" height="34" rx="1.2" fill="url(#gold)"/>
+  </g>
+  <path d="M19 11 L45 11" stroke="#fffbe6" stroke-width="1" stroke-linecap="round"/>
+  <path d="M26 17 C26.5 21 28.5 24 30 26" stroke="#ffffff" stroke-width="1" fill="none" stroke-linecap="round" opacity=".7"/>
+</svg>

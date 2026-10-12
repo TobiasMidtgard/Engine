@@ -117,6 +117,11 @@ pub struct VfxSettings {
     pub draw_distance: f32,
     /// Fade particles where they meet scene geometry.
     pub soft_particles: bool,
+    /// Draw heat haze (`haze` sprites bend the scene behind them).
+    pub heat_haze: bool,
+    /// Colliding particles also hit what the camera sees (walls, props, characters), using
+    /// last frame's depth; off screen only the ground plane collides.
+    pub scene_collision: bool,
     /// Draw particles at all (they keep simulating).
     pub enabled: bool,
     /// How much glow follows the camera's exposure: 1 is physical (a torch is a dim smudge
@@ -132,6 +137,8 @@ impl Default for VfxSettings {
             spawn_scale: 1.0,
             draw_distance: 5000.0,
             soft_particles: true,
+            heat_haze: true,
+            scene_collision: true,
             enabled: true,
             glow_exposure: 0.15,
         }
@@ -321,6 +328,8 @@ struct Instance {
     plane: Option<(DVec3, Vec3)>,
     gravity: Vec3,
     wind: Vec3,
+    /// Air density where the effect is, kg/m³.
+    air_density: f32,
     /// This frame's time step for the effect, seconds.
     frame_dt: f32,
 }
@@ -346,6 +355,19 @@ impl VfxRuntime {
     /// Names of effects that were asked for but are not in the library.
     pub fn missing_effects(&self) -> impl Iterator<Item = &str> {
         self.missing.iter().map(String::as_str)
+    }
+
+    /// Move every effect's world-space state into a new reference frame.
+    pub fn shift(&mut self, s: &engine_world::WorldShift) {
+        for inst in self.instances.values_mut().chain(self.orphans.iter_mut()) {
+            inst.pos = s.point(inst.pos);
+            inst.prev_pos = s.point(inst.prev_pos);
+            inst.rot = s.orientation(inst.rot);
+            inst.vel = s.velocity_at(inst.pos, inst.vel);
+            inst.plane = inst.plane.map(|(p, n)| (s.point(p), s.direction(n)));
+            inst.gravity = s.direction(inst.gravity);
+            inst.wind = s.direction(inst.wind);
+        }
     }
 }
 
@@ -388,6 +410,7 @@ impl Instance {
             plane: None,
             gravity: Vec3::ZERO,
             wind: Vec3::ZERO,
+            air_density: crate::gpu::SEA_LEVEL_AIR,
             frame_dt: 0.0,
         };
         inst.rebake();
@@ -703,6 +726,7 @@ pub fn tick_effects(
         }
         inst.gravity = env.gravity(pos);
         inst.wind = env.wind(pos);
+        inst.air_density = env.air(pos).density;
         inst.plane = collision_plane(&env, pos);
         tick_instance(
             inst,
@@ -866,7 +890,7 @@ fn push_frame_emitters(inst: &Instance, out: &mut Vec<FrameEmitter>) {
         gpu.velocity[0] = inst.vel.x;
         gpu.velocity[1] = inst.vel.y;
         gpu.velocity[2] = inst.vel.z;
-        gpu.set_forces(inst.gravity.to_array(), desc, inst.scale);
+        gpu.set_forces(inst.gravity, inst.air_density, desc, inst.scale);
         let air = inst.wind * desc.wind.clamp(0.0, 4.0);
         gpu.wind[0] = air.x;
         gpu.wind[1] = air.y;
@@ -995,6 +1019,47 @@ mod tests {
 
     fn spawned(inst: &Instance) -> u32 {
         inst.emitters[0].runs.iter().map(|r| r.count).sum()
+    }
+
+    #[test]
+    fn emitters_feel_the_air_and_gravity_where_the_effect_is() {
+        let d = desc(
+            EmitterDesc {
+                rate: 100.0,
+                acceleration: [0.0, 3.0, 0.0],
+                drag: 2.0,
+                gravity: 0.2,
+                ..Default::default()
+            },
+            None,
+        );
+        let (mut inst, mut pool) = instance(d);
+        let mut stats = VfxStats::default();
+        tick_instance(
+            &mut inst,
+            0.1,
+            &mut pool,
+            1 << 20,
+            1.0,
+            &mut Vec::new(),
+            &mut stats,
+        );
+        let mut frame = Vec::new();
+        push_frame_emitters(&inst, &mut frame);
+        // Before the world is sampled: sea-level air, so the authored drag applies.
+        assert_eq!(frame[0].gpu.forces[3], 2.0);
+
+        // Standing on the Moon: no buoyancy, no drag and no air to float in, only the Moon's
+        // full gravity.
+        inst.gravity = Vec3::new(0.0, -1.62, 0.0);
+        inst.air_density = 0.0;
+        frame.clear();
+        push_frame_emitters(&inst, &mut frame);
+        let f = frame[0].gpu.forces;
+        assert!(
+            (f[1] + 1.62).abs() < 1e-5 && f[0] == 0.0 && f[3] == 0.0,
+            "{f:?}"
+        );
     }
 
     #[test]

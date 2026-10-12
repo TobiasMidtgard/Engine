@@ -82,7 +82,8 @@ fn query_filter(body: RigidBodyHandle, desc: &CharacterController) -> QueryFilte
         .groups(convert::groups(&desc.layers))
 }
 
-/// What is right under the capsule's feet, within snapping distance.
+/// What is right under the capsule's feet, within snapping distance, with a normal that can be
+/// trusted ([`surface_normal`]).
 fn probe_ground(
     world: &PhysicsWorld,
     body: RigidBodyHandle,
@@ -97,8 +98,9 @@ fn probe_ground(
         &world.colliders,
         query_filter(body, desc),
     );
-    qp.cast_shape(
-        &Pose::from_parts(pos, convert::up_rotation(up)),
+    let rot = convert::up_rotation(up);
+    let (h, mut hit) = qp.cast_shape(
+        &Pose::from_parts(pos, rot),
         -up,
         &**shape,
         ShapeCastOptions {
@@ -107,7 +109,10 @@ fn probe_ground(
             stop_at_penetration: false,
             compute_impact_geometry_on_penetration: true,
         },
-    )
+    )?;
+    let at = Pose::from_parts(pos - up * hit.time_of_impact, rot);
+    hit.normal1 = surface_normal(shape, &at, &world.colliders[h], hit.witness1, hit.normal1);
+    Some((h, hit))
 }
 
 /// Colliders within [`TOUCH_MARGIN`] of the capsule at `pose`, with their surface normals
@@ -128,9 +133,61 @@ fn touching(
     qp.intersect_aabb_conservative(aabb)
         .filter_map(|(h, c)| {
             let hit = contact(pose, &**shape, c.position(), c.shape(), TOUCH_MARGIN).ok()??;
-            Some((h, hit.normal2))
+            Some((h, surface_normal(shape, pose, c, hit.point2, hit.normal2)))
         })
         .collect()
+}
+
+/// The normal of `collider` where it touches the character at `pose`, pointing away from the
+/// surface toward the character. `near` is a point on or near that surface.
+///
+/// The queries' own normals and hit points can't be trusted when the capsule starts inside
+/// the controller's 2 cm gap or a few millimetres into the floor, which is every step on the
+/// ground: about one step in a hundred one of them points sideways and reads as a wall in the
+/// middle of a field, or tilts the floor. Projecting a point onto a surface is exact, so the
+/// normal comes from the closest points between the capsule's core segment and the collider,
+/// found by projecting back and forth. Other character shapes keep the query's `fallback`.
+fn surface_normal(
+    shape: &SharedShape,
+    pose: &Pose,
+    collider: &Collider,
+    near: Vec3,
+    fallback: Vec3,
+) -> Vec3 {
+    let (a, b) = if let Some(cap) = shape.as_capsule() {
+        (
+            pose.transform_point(cap.segment.a),
+            pose.transform_point(cap.segment.b),
+        )
+    } else if shape.as_ball().is_some() {
+        (pose.translation, pose.translation)
+    } else {
+        return fallback;
+    };
+    let ab = b - a;
+    let on_core =
+        |p: Vec3| a + ab * ((p - a).dot(ab) / ab.length_squared().max(1e-12)).clamp(0.0, 1.0);
+    let mut core = on_core(near);
+    let mut out = fallback;
+    for _ in 0..4 {
+        let proj = collider
+            .shape()
+            .project_point(collider.position(), core, false);
+        // A core inside the collider (sunk deeper than the capsule's radius) leaves through
+        // the nearest face.
+        let away = if proj.is_inside {
+            proj.point - core
+        } else {
+            core - proj.point
+        };
+        out = away.try_normalize().unwrap_or(fallback);
+        let next = on_core(proj.point);
+        if next.distance_squared(core) < 1.0e-8 {
+            break;
+        }
+        core = next;
+    }
+    out
 }
 
 /// Push the dynamic bodies the character walked into toward its walking velocity, like a
@@ -140,6 +197,7 @@ fn push_bodies(
     world: &mut PhysicsWorld,
     desc: &CharacterController,
     platform: Option<(RigidBodyHandle, Pose)>,
+    shape: &SharedShape,
     collisions: &[CharacterCollision],
     walking: Vec3,
 ) {
@@ -162,7 +220,13 @@ fn push_bodies(
         if !rb.is_dynamic() {
             continue;
         }
-        let into = -c.hit.normal1;
+        let into = -surface_normal(
+            shape,
+            &c.character_pos,
+            &world.colliders[c.handle],
+            c.hit.witness1,
+            c.hit.normal1,
+        );
         let closing = (walking - (rb.velocity_at_point(point) - frame)).dot(into);
         if closing > 0.0 {
             let m = rb.mass();
@@ -307,7 +371,14 @@ fn move_one(sim: &mut Simulation, region_id: RegionId, e: Entity, gravity: &Grav
     if desc.push_bodies {
         let weight = gravity.at(anchor + end.as_dvec3()) * desc.mass_kg;
         let walking = horizontal / world_dt;
-        push_bodies(world, &desc, platform, &collisions[..walked_into], walking);
+        push_bodies(
+            world,
+            &desc,
+            platform,
+            &shape,
+            &collisions[..walked_into],
+            walking,
+        );
         if let Some((b, point)) = stands_on
             && let Some(rb) = world.bodies.get_mut(b)
             && rb.is_dynamic()
@@ -317,7 +388,18 @@ fn move_one(sim: &mut Simulation, region_id: RegionId, e: Entity, gravity: &Grav
     }
     // Surfaces hit while moving, plus surfaces touched without moving into them (running
     // along a wall): normals point away from the surface, toward the character.
-    let mut normals: Vec<Vec3> = collisions.iter().map(|c| c.hit.normal1).collect();
+    let mut normals: Vec<Vec3> = collisions
+        .iter()
+        .map(|c| {
+            surface_normal(
+                &shape,
+                &c.character_pos,
+                &world.colliders[c.handle],
+                c.hit.witness1,
+                c.hit.normal1,
+            )
+        })
+        .collect();
     normals.extend(
         touching(world, filter, &shape, &Pose::from_parts(end, rot))
             .into_iter()

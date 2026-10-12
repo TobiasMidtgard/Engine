@@ -249,7 +249,7 @@ pub fn voxel_support_system(
         } else {
             *gt
         };
-        let look = VoxelLook::new(volume, &table);
+        let look = VoxelLook::new(volume, &table).with_layers(out.textured());
         let props = table.get(volume.material);
         let voxel_m3 = state.size.powi(3);
         let mut lost = 0.0;
@@ -368,6 +368,7 @@ fn ctx<'a>(
     Ctx {
         settings,
         table,
+        textured: out.textured(),
         rng,
         pending: &mut out.pending,
         stats: &mut out.stats,

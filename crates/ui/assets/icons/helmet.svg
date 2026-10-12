@@ -1,0 +1,35 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <defs>
+    <radialGradient id="steel" cx=".32" cy=".25" r=".85">
+      <stop offset="0" stop-color="#ffffff"/>
+      <stop offset=".35" stop-color="#bcc6d3"/>
+      <stop offset=".8" stop-color="#5d6879"/>
+      <stop offset="1" stop-color="#3a4252"/>
+    </radialGradient>
+    <linearGradient id="gold" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#fff0bd"/>
+      <stop offset=".5" stop-color="#e8b65a"/>
+      <stop offset="1" stop-color="#8f5a1c"/>
+    </linearGradient>
+    <linearGradient id="plume" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#ff7a6a"/>
+      <stop offset=".55" stop-color="#c8283a"/>
+      <stop offset="1" stop-color="#5e0a1a"/>
+    </linearGradient>
+  </defs>
+  <g stroke="#0c0f16" stroke-width="4" stroke-linejoin="round" stroke-linecap="round" paint-order="stroke">
+    <path d="M31 12 C30 5 36 1 44 2 C53 3 59 9 60 18 C55 13 49 11 44 12 C40 9 35 9 31 12 Z" fill="url(#plume)"/>
+    <path d="M13 34 C13 19 21 10 32 10 C43 10 51 19 51 34 L51 49 C51 55 45 60 32 60 C19 60 13 55 13 49 Z" fill="url(#steel)"/>
+  </g>
+  <path d="M30 10.2 L34 10.2 L34.6 30 L29.4 30 Z" fill="url(#gold)" stroke="#0c0f16" stroke-width="1.4" stroke-linejoin="round"/>
+  <path d="M16.5 30 L47.5 30 C48.5 30 49 31 48.5 32 L47.5 34.5 L35 34.5 L35 50 C35 51 34 52 32 52 C30 52 29 51 29 50 L29 34.5 L16.5 34.5 L15.5 32 C15 31 15.5 30 16.5 30 Z" fill="#0c0f16"/>
+  <path d="M18 31.6 L28 31.6" stroke="#5fd0ff" stroke-width="1.2" stroke-linecap="round" opacity=".55"/>
+  <path d="M36 31.6 L46 31.6" stroke="#5fd0ff" stroke-width="1.2" stroke-linecap="round" opacity=".55"/>
+  <g fill="#1a1f2a">
+    <circle cx="22" cy="41" r="1.2"/><circle cx="22" cy="45.5" r="1.2"/><circle cx="25" cy="43.2" r="1.2"/>
+    <circle cx="42" cy="41" r="1.2"/><circle cx="42" cy="45.5" r="1.2"/><circle cx="39" cy="43.2" r="1.2"/>
+  </g>
+  <path d="M14.2 49 C14.2 54 20 58.4 32 58.4 C44 58.4 49.8 54 49.8 49" stroke="url(#gold)" stroke-width="3" fill="none"/>
+  <path d="M16 27 C16.5 19 21.5 13.4 28.5 12" stroke="#ffffff" stroke-width="1.4" fill="none" stroke-linecap="round" opacity=".9"/>
+  <path d="M33 6 C38 3.6 46 4 52 8" stroke="#ffb2a6" stroke-width="1" fill="none" opacity=".8"/>
+</svg>
