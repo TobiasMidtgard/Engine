@@ -21,6 +21,7 @@ struct VsOut {
     @location(6) seed: f32,
     @location(7) soft: f32,
     @location(8) age: f32,             // 0..1 of its life
+    @location(9) glint: vec3<f32>,     // sky mirrored by water droplets (pre-exposed)
 };
 
 fn hidden() -> VsOut {
@@ -89,6 +90,12 @@ fn vs_particle(@builtin(vertex_index) vi: u32, @builtin(instance_index) slot: u3
     out.seed = p.seed;
     out.soft = e.shade.w;
     out.age = t;
+    if (out.sprite == 4u) {
+        // Clear water mirrors the sky beyond it, just above the horizon.
+        let ahead = normalize(vec3<f32>(rel.x, 0.0, rel.z) + vec3<f32>(1e-4, 0.0, 0.0));
+        let sky = sample_env(normalize(ahead + vec3<f32>(0.0, 0.4, 0.0)));
+        out.glint = pre_expose(sky) * (1.0 - fog.a) * min(e.shade.y, 1.0);
+    }
     return out;
 }
 
@@ -161,10 +168,10 @@ fn fs_particle(in: VsOut) -> @location(0) vec4<f32> {
             let core = exp(-(sq(c.x) * 6.0 + sq(c.y + 0.25) * 3.0));
             rgb = mix(rgb, vec3<f32>(max(rgb.r, max(rgb.g, rgb.b))), core * 0.45) * (1.0 + core * 1.5);
         }
-        case 4u: { // droplet: clear water, denser at the rim, with a sky highlight
-            a = smoothstep(1.0, 0.7, r) * mix(0.6, 1.0, smoothstep(0.3, 0.9, r));
-            let hl = exp(-dot(c - vec2<f32>(-0.25, 0.4), c - vec2<f32>(-0.25, 0.4)) * 30.0);
-            rgb = rgb * (0.8 + 0.3 * r) + rgb * hl * 2.0;
+        case 4u: { // droplet: a soft drop (a streak when stretched) mirroring the sky
+            a = smoothstep(1.0, 0.45, r) * 0.9;
+            let hl = exp(-dot(c - vec2<f32>(-0.2, 0.35), c - vec2<f32>(-0.2, 0.35)) * 12.0);
+            rgb = rgb * (0.85 + hl * 0.6) + in.glint * (hl * 0.6 + 0.1);
         }
         case 5u: { // ring
             a = ring_line(r, 0.78, 0.09) + ring_line(r, 0.78, 0.25) * 0.25;
