@@ -6,9 +6,11 @@
 //! cargo run -p showcase --release -- --headless --tour  # writes screenshots/tour/*.png
 //! cargo run -p showcase --release -- --headless --tour plaza,orbit
 //! cargo run -p showcase --release -- --headless --film overview,plaza,falls --secs 6
+//! cargo run -p showcase --release -- --headless --film footsteps --follow "Trail hiker" --secs 60
 //! ```
 //!
-//! `--film` saves frames and sound for a video (see `film.rs`).
+//! `--film` saves frames and sound for a video (see `film.rs`); `--follow` films an entity, found
+//! by its `Name`, from behind.
 //!
 //! The map is a valley ringed by snowy mountains: a village around the material plaza, woods,
 //! a lake, and one zone per engine feature. Each zone shows placeholder content until its module
@@ -79,7 +81,18 @@ fn main() {
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(default)
         };
-        film::install(&mut app, keys, num("--secs", 8.0), num("--fps", 30.0));
+        let follow = args
+            .iter()
+            .position(|a| a == "--follow")
+            .and_then(|i| args.get(i + 1))
+            .cloned();
+        film::install(
+            &mut app,
+            keys,
+            num("--secs", 8.0),
+            num("--fps", 30.0),
+            follow,
+        );
     }
     app.run();
 }

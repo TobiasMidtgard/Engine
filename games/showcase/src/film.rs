@@ -4,6 +4,11 @@
 //! `screenshots/film/NNNNN.png` and what the camera hears as `screenshots/film/film.wav`. Both
 //! run on the same simulated clock, so picture and sound line up at any frame rate.
 //!
+//! `--follow NAME` films an entity instead: the camera rides behind and above whatever carries
+//! that `Name` (a walker on the footstep trail, a car on the track), turning with its direction
+//! of travel, from the first place's settings (weather, time, demo restarts). Until the entity
+//! exists the camera holds on the place.
+//!
 //! `--secs N` is the length of each shot or glide (default 8) and `--fps F` the frame rate
 //! (default 30). Turn the frames into a video with:
 //!
@@ -28,7 +33,25 @@ pub struct Film {
     pub secs: f32,
     pub fps: f32,
     pub frame: u32,
+    /// `Name` of the entity to follow (`--follow`), instead of moving between the places.
+    pub follow: Option<String>,
+    rig: Option<Rig>,
 }
+
+/// The follow camera's state, smoothed from frame to frame.
+#[derive(Debug, Clone, Copy)]
+struct Rig {
+    eye: DVec3,
+    /// Where the subject was last frame.
+    last: DVec3,
+    /// Its direction of travel, horizontal and of unit length.
+    heading: DVec3,
+}
+
+/// Follow camera: distance behind and height above the subject, and the height it aims at (m).
+const BEHIND: f64 = 6.5;
+const ABOVE: f64 = 2.3;
+const AIM: f64 = 1.1;
 
 impl Film {
     /// Frames to record in all.
@@ -40,7 +63,7 @@ impl Film {
 
 /// Install the film: fixed time steps of one frame and fast-adapting exposure. Unknown keys are
 /// reported and skipped.
-pub fn install(app: &mut App, keys: &str, secs: f32, fps: f32) {
+pub fn install(app: &mut App, keys: &str, secs: f32, fps: f32, follow: Option<String>) {
     let all = places::places();
     let mut list = Vec::new();
     for key in keys.split(',').filter(|k| !k.is_empty()) {
@@ -60,6 +83,8 @@ pub fn install(app: &mut App, keys: &str, secs: f32, fps: f32) {
         secs: secs.max(0.5),
         fps,
         frame: 0,
+        follow,
+        rig: None,
     });
     app.add_systems(Update, run.after(camera::fly));
 }
@@ -92,6 +117,48 @@ fn pose(places: &[Place], secs: f32, t: f32) -> (DVec3, DVec3, f32) {
     (eye, target, hour)
 }
 
+/// Position and facing of the first entity called `name`.
+fn subject(world: &mut World, name: &str) -> Option<(DVec3, Quat)> {
+    let mut q = world.query::<(&Name, &Transform)>();
+    q.iter(world)
+        .find(|(n, _)| n.as_str() == name)
+        .map(|(_, tf)| (tf.translation, tf.rotation))
+}
+
+/// Move the follow camera one frame (`dt` seconds) behind a subject at `at` facing `facing`:
+/// it swings round to the direction of travel over about a second and trails the subject
+/// softly, so steps and turns don't shake the picture. Returns eye and target.
+fn follow(rig: &mut Option<Rig>, at: DVec3, facing: Quat, dt: f64) -> (DVec3, DVec3) {
+    let want = |heading: DVec3| at - heading * BEHIND + DVec3::Y * ABOVE;
+    let step = DVec3::new(
+        at.x - rig.map_or(at.x, |r| r.last.x),
+        0.0,
+        at.z - rig.map_or(at.z, |r| r.last.z),
+    );
+    let r = match rig {
+        // First sight, or a jump (a respawn): start right behind it, facing as it faces.
+        Some(r) if step.length() < 5.0 => r,
+        _ => {
+            let f = (facing * Vec3::NEG_Z).as_dvec3();
+            let heading = DVec3::new(f.x, 0.0, f.z).normalize_or(DVec3::Z);
+            rig.insert(Rig {
+                eye: want(heading),
+                last: at,
+                heading,
+            })
+        }
+    };
+    if step.length() > 1e-4 {
+        let k = 1.0 - (-dt * 1.5).exp();
+        r.heading = r.heading.lerp(step.normalize(), k).normalize_or(r.heading);
+    }
+    r.last = at;
+    r.eye = r.eye.lerp(want(r.heading), 1.0 - (-dt * 3.0).exp());
+    let ground = landscape::shared().height(r.eye.x, r.eye.z);
+    r.eye.y = r.eye.y.max(ground + 1.5);
+    (r.eye, at + DVec3::Y * AIM)
+}
+
 fn smootherstep(x: f32) -> f32 {
     x * x * x * (x * (x * 6.0 - 15.0) + 10.0)
 }
@@ -103,7 +170,7 @@ fn call(world: &mut World, name: &str, args: serde_json::Value) {
 }
 
 fn run(world: &mut World) {
-    let (places, secs, fps, frame, total) = {
+    let (places, secs, fps, frame, total, follow_name) = {
         let film = world.resource::<Film>();
         (
             film.places.clone(),
@@ -111,6 +178,7 @@ fn run(world: &mut World) {
             film.fps,
             film.frame,
             film.total_frames(),
+            film.follow.clone(),
         )
     };
     if places.is_empty() {
@@ -146,7 +214,20 @@ fn run(world: &mut World) {
             places::visit(world, &places[leg(recorded)]);
         }
     }
-    let (eye, target, hour) = pose(&places, secs, t);
+    let (mut eye, mut target, hour) = pose(&places, secs, t);
+    if let Some(name) = &follow_name {
+        match subject(world, name) {
+            Some((at, facing)) => {
+                let mut rig = world.resource::<Film>().rig;
+                (eye, target) = follow(&mut rig, at, facing, 1.0 / fps as f64);
+                world.resource_mut::<Film>().rig = rig;
+            }
+            None if frame == SETTLE_FRAMES => {
+                engine::core::log::warn!("film: nothing called \"{name}\" to follow yet");
+            }
+            None => {}
+        }
+    }
     let mut q = world.query::<(&mut Transform, &mut ShowcaseCamera)>();
     for (mut tf, mut cam) in q.iter_mut(world) {
         camera::look(&mut tf, &mut cam, eye, target);
