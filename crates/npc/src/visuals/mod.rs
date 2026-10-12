@@ -10,7 +10,8 @@
 //! a muzzle flash and kick); archers draw to the jaw. Faces show under open helmets worn over
 //! mail coifs. The helmet's horsehair crest shows skill (grey rookie, bronze, silver, gold
 //! master) and a light in its brow band glows with alertness (yellow suspicious, orange
-//! searching, red fighting).
+//! searching, red fighting). Their painted armor shows skill too: a rookie's is nearly new, a
+//! veteran's or master's chipped to the steel, scratched, dented and dirty.
 //!
 //! Animals graze head-down, raise their heads when alert, lie down to rest, gallop (deer and
 //! wolves), hop (rabbits), creep low when stalking, flap and bank in flight, and fall over
