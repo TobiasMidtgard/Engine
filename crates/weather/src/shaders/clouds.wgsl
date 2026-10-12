@@ -184,7 +184,13 @@ fn march_clouds(dir: vec3<f32>, steps: i32, light_steps: i32, jitter: f32) -> Cl
     let key = clouds.light.rgb * sun_transmittance(entry + vec3(0.0, 50.0, 0.0));
     // Ambient: the clear sky above the clouds, the lit ground below.
     let sky = atmosphere(entry, vec3<f32>(0.0, 1.0, 0.0), 1e12, 6).radiance * clouds.light.rgb * 1.4;
-    let ground = frame.ground.rgb * (key * saturate(ldir.y) * INV_PI + sky * 0.4);
+    // Light bounced off the ground below. The ground's color only tints it (a meadow doesn't
+    // turn the cloud base green), and under the deck itself the ground is in the cloud's
+    // shadow (scaled per sample by the cover there).
+    let albedo = frame.ground.rgb;
+    let ground_tint = mix(vec3(dot(albedo, vec3<f32>(0.2126, 0.7152, 0.0722))), albedo, 0.4);
+    let ground_sun = ground_tint * key * saturate(ldir.y) * INV_PI;
+    let ground_sky = ground_tint * sky * 0.4;
     let fill = frame.ambient.rgb;
 
     // Big strides through empty air; on touching cloud, step back and walk it finely.
@@ -259,8 +265,10 @@ fn march_clouds(dir: vec3<f32>, steps: i32, light_steps: i32, jitter: f32) -> Cl
             let h01 = saturate((h - base) / type_thickness(w.g));
             // Rain clouds have dark bellies.
             let belly = 1.0 - 0.55 * saturate(w.b * 6.0) * (1.0 - h01);
+            let cover = saturate(w.r * 1.2);
+            let ground_below = ground_sun * (1.0 - 0.85 * cover) + ground_sky * (1.0 - 0.5 * cover);
             var s = key * light * powder * mix(belly, 1.0, 0.4)
-                + (mix(ground, sky, sqrt(h01)) + fill) * belly * (0.5 + 0.5 * h01);
+                + (mix(ground_below, sky, sqrt(h01)) + fill) * belly * (0.5 + 0.5 * h01);
             // Lightning lights the cloud from inside: the light diffuses through kilometers of
             // droplets, so the whole cloud base around the channel glows.
             if (clouds.flash.w > 0.0) {
@@ -449,7 +457,9 @@ fn fs_env(in: FullscreenOut) -> @location(0) vec4<f32> {
         let r = clouds_and_rain(up, steps, 2, 0.5);
         let sky_up = r.radiance + clear_sky(up) * r.transmittance;
         let a = atmosphere(vec3(0.0), dir, 1e12, 8);
-        let lit = planet_ground(dir, ground_t) + frame.ground.rgb * sky_up * 0.8;
+        // Under a deck the far ground lies in the clouds' shadow too.
+        let shade = mix(0.2, 1.0, r.transmittance);
+        let lit = planet_ground(dir, ground_t) * shade + frame.ground.rgb * sky_up * 0.8;
         let c = a.radiance * frame.sun_color.rgb + lit * a.transmittance;
         return vec4<f32>(min(c, vec3(60000.0)), 1.0);
     }
