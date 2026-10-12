@@ -484,8 +484,12 @@ fn sdf_mesh(f: &dyn Fn(Vec3) -> f32, min: Vec3, max: Vec3, voxel: f32) -> Mesh {
     };
     let mut grid = Grid::new(min, max, voxel);
     grid.occlusion = false;
-    sdf::polygonize(&banded, grid)
+    let m = sdf::polygonize(&banded, grid);
+    charts(&decimate(&m, voxel * DECIMATE))
 }
+
+/// How far decimation may move an SDF surface, in voxels.
+const DECIMATE: f32 = 0.2;
 
 /// Drop the triangles buried inside `solid` (every corner deeper than `margin`), then the
 /// vertices nothing uses.
@@ -511,6 +515,261 @@ fn cull(m: Mesh, solid: &dyn Fn(Vec3) -> f32, margin: f32) -> Mesh {
             verts.push(m.vertices[*i as usize]);
         }
         *i = *r;
+    }
+    Mesh::new(verts, idx)
+}
+
+/// Sum of squared distances to a set of planes, as a symmetric 4×4 matrix.
+#[derive(Clone, Copy, Default)]
+struct Quadric([f64; 10]);
+
+impl Quadric {
+    fn plane(n: Vec3, d: f32) -> Self {
+        let (a, b, c, d) = (n.x as f64, n.y as f64, n.z as f64, d as f64);
+        Self([
+            a * a,
+            a * b,
+            a * c,
+            a * d,
+            b * b,
+            b * c,
+            b * d,
+            c * c,
+            c * d,
+            d * d,
+        ])
+    }
+
+    fn add(&mut self, o: &Quadric) {
+        for (a, b) in self.0.iter_mut().zip(o.0) {
+            *a += b;
+        }
+    }
+
+    fn eval(&self, p: Vec3) -> f64 {
+        let q = &self.0;
+        let (x, y, z) = (p.x as f64, p.y as f64, p.z as f64);
+        q[0] * x * x
+            + 2.0 * q[1] * x * y
+            + 2.0 * q[2] * x * z
+            + 2.0 * q[3] * x
+            + q[4] * y * y
+            + 2.0 * q[5] * y * z
+            + 2.0 * q[6] * y
+            + q[7] * z * z
+            + 2.0 * q[8] * z
+            + q[9]
+    }
+}
+
+/// Simplify a mesh by collapsing edges onto one of their ends, cheapest first by quadric error,
+/// while the surface moves less than about `tolerance` meters. Open borders stay as they are,
+/// collapses that would fold or sliver a triangle are skipped, and surviving vertices keep
+/// their attributes (normals come from the distance field, so shading stays smooth).
+fn decimate(m: &Mesh, tolerance: f32) -> Mesh {
+    use std::cmp::Reverse;
+    use std::collections::BinaryHeap;
+    let n = m.vertices.len();
+    let pos: Vec<Vec3> = m.vertices.iter().map(|v| Vec3::from(v.position)).collect();
+    let mut tris: Vec<[u32; 3]> = m.indices.chunks(3).map(|t| [t[0], t[1], t[2]]).collect();
+    let mut alive = vec![true; tris.len()];
+    let mut around: Vec<Vec<u32>> = vec![Vec::new(); n];
+    let mut q = vec![Quadric::default(); n];
+    let mut uses: HashMap<(u32, u32), u8> = HashMap::with_capacity(tris.len() * 2);
+    for (ti, t) in tris.iter().enumerate() {
+        let [a, b, c] = t.map(|i| pos[i as usize]);
+        let nrm = (b - a).cross(c - a).normalize_or_zero();
+        let plane = Quadric::plane(nrm, -nrm.dot(a));
+        for k in 0..3 {
+            let i = t[k] as usize;
+            q[i].add(&plane);
+            around[i].push(ti as u32);
+            let (e0, e1) = (t[k], t[(k + 1) % 3]);
+            let e = uses.entry((e0.min(e1), e0.max(e1))).or_default();
+            *e = e.saturating_add(1);
+        }
+    }
+    let mut locked = vec![false; n];
+    for (&(a, b), &c) in &uses {
+        if c != 2 {
+            locked[a as usize] = true;
+            locked[b as usize] = true;
+        }
+    }
+    let limit = (tolerance as f64).powi(2);
+    let mut stamp = vec![0u32; n];
+    let mut dead = vec![false; n];
+    let mut heap = BinaryHeap::new();
+    let cost = |q: &[Quadric], u: usize, v: usize| {
+        let mut sum = q[u];
+        sum.add(&q[v]);
+        sum.eval(pos[v]).max(0.0)
+    };
+    for &(a, b) in uses.keys() {
+        for (u, v) in [(a as usize, b as usize), (b as usize, a as usize)] {
+            let c = cost(&q, u, v);
+            if !locked[u] && c <= limit {
+                heap.push(Reverse((c.to_bits(), u as u32, v as u32, 0u32, 0u32)));
+            }
+        }
+    }
+    let quality = |p: [Vec3; 3]| {
+        let area2 = (p[1] - p[0]).cross(p[2] - p[0]).length();
+        let sum = (p[1] - p[0]).length_squared()
+            + (p[2] - p[1]).length_squared()
+            + (p[0] - p[2]).length_squared();
+        // 1 for an equilateral triangle, 0 for a degenerate one.
+        2.0 * 3f32.sqrt() * area2 / sum.max(1e-20)
+    };
+    /// The vertices around `x`.
+    fn ring(x: usize, out: &mut Vec<u32>, around: &[Vec<u32>], alive: &[bool], tris: &[[u32; 3]]) {
+        out.clear();
+        for &t in &around[x] {
+            if alive[t as usize] {
+                for i in tris[t as usize] {
+                    if i as usize != x && !out.contains(&i) {
+                        out.push(i);
+                    }
+                }
+            }
+        }
+    }
+    let mut ring_u: Vec<u32> = Vec::new();
+    let mut ring_v: Vec<u32> = Vec::new();
+    while let Some(Reverse((_, u, v, su, sv))) = heap.pop() {
+        let (u, v) = (u as usize, v as usize);
+        if dead[u] || dead[v] || stamp[u] != su || stamp[v] != sv {
+            continue;
+        }
+        // The edge must still exist, and its ends share exactly the two vertices across it.
+        ring(u, &mut ring_u, &around, &alive, &tris);
+        if !ring_u.contains(&(v as u32)) {
+            continue;
+        }
+        ring(v, &mut ring_v, &around, &alive, &tris);
+        let shared = ring_u.iter().filter(|i| ring_v.contains(i)).count();
+        if shared != 2 {
+            continue;
+        }
+        let mut ok = true;
+        for &t in &around[u] {
+            let t = t as usize;
+            if !alive[t] || tris[t].contains(&(v as u32)) {
+                continue;
+            }
+            let before = tris[t].map(|i| pos[i as usize]);
+            let after = tris[t].map(|i| {
+                if i as usize == u {
+                    pos[v]
+                } else {
+                    pos[i as usize]
+                }
+            });
+            let n0 = (before[1] - before[0])
+                .cross(before[2] - before[0])
+                .normalize_or_zero();
+            let n1 = (after[1] - after[0])
+                .cross(after[2] - after[0])
+                .normalize_or_zero();
+            if n0.dot(n1) < 0.3 || quality(after) < 0.2_f32.min(quality(before)) {
+                ok = false;
+                break;
+            }
+        }
+        if !ok {
+            continue;
+        }
+        let list = std::mem::take(&mut around[u]);
+        for &t in &list {
+            let ti = t as usize;
+            if !alive[ti] {
+                continue;
+            }
+            if tris[ti].contains(&(v as u32)) {
+                alive[ti] = false;
+            } else {
+                for i in &mut tris[ti] {
+                    if *i as usize == u {
+                        *i = v as u32;
+                    }
+                }
+                around[v].push(t);
+            }
+        }
+        around[v].retain(|&t| alive[t as usize]);
+        dead[u] = true;
+        let qu = q[u];
+        q[v].add(&qu);
+        stamp[v] += 1;
+        ring(v, &mut ring_v, &around, &alive, &tris);
+        for &w in &ring_v {
+            let w = w as usize;
+            for (a, b) in [(v, w), (w, v)] {
+                let c = cost(&q, a, b);
+                if !locked[a] && c <= limit {
+                    heap.push(Reverse((
+                        c.to_bits(),
+                        a as u32,
+                        b as u32,
+                        stamp[a],
+                        stamp[b],
+                    )));
+                }
+            }
+        }
+    }
+    let mut remap = vec![u32::MAX; n];
+    let mut verts = Vec::new();
+    let mut idx = Vec::new();
+    for (t, _) in tris.iter().zip(&alive).filter(|(_, a)| **a) {
+        for &i in t {
+            let r = &mut remap[i as usize];
+            if *r == u32::MAX {
+                *r = verts.len() as u32;
+                verts.push(m.vertices[i as usize]);
+            }
+            idx.push(*r);
+        }
+    }
+    Mesh::new(verts, idx)
+}
+
+/// Give every triangle the box projection of its own facing (splitting vertices where the
+/// facing changes), so textures do not smear across projection changes.
+fn charts(m: &Mesh) -> Mesh {
+    let mut map: HashMap<(u32, u8), u32> = HashMap::with_capacity(m.vertices.len() * 2);
+    let mut verts = Vec::with_capacity(m.vertices.len() * 5 / 4);
+    let mut idx = Vec::with_capacity(m.indices.len());
+    for t in m.indices.chunks(3) {
+        let [a, b, c] = [0, 1, 2].map(|k| Vec3::from(m.vertices[t[k] as usize].position));
+        let n = (b - a).cross(c - a);
+        let s = n.abs();
+        let chart = if s.x >= s.y && s.x >= s.z {
+            if n.x > 0.0 { 0 } else { 1 }
+        } else if s.y >= s.z {
+            if n.y > 0.0 { 2 } else { 3 }
+        } else if n.z > 0.0 {
+            4
+        } else {
+            5
+        };
+        for &i in t {
+            let next = verts.len() as u32;
+            let j = *map.entry((i, chart)).or_insert(next);
+            if j == next {
+                let mut v = m.vertices[i as usize];
+                let p = Vec3::from(v.position);
+                let sign = if chart % 2 == 0 { 1.0 } else { -1.0 };
+                let uv = match chart / 2 {
+                    0 => v2(p.z * sign, -p.y),
+                    1 => v2(p.x, p.z * sign),
+                    _ => v2(-p.x * sign, -p.y),
+                };
+                v.uv = uv.to_array();
+                verts.push(v);
+            }
+            idx.push(j);
+        }
     }
     Mesh::new(verts, idx)
 }
@@ -911,9 +1170,12 @@ impl Plate<'_> {
         }
         let mut mesh = Mesh::new(verts, tris.into_iter().flatten().collect());
         fix_winding(&mut mesh);
-        mesh
+        decimate(&mesh, PLATE_TOLERANCE)
     }
 }
+
+/// How far decimation may move a plate's surface, meters.
+const PLATE_TOLERANCE: f32 = 0.0005;
 
 // ---------------------------------------------------------------------- lathe, sweep, extrude
 
