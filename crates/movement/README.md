@@ -48,7 +48,11 @@ commands.spawn((
 
 NPC AI drives characters the same way the player does: write `MoveIntent` (direction, look,
 sprint, crouch, jump, `dash_to`, `block`, `attack`) before `MovementSet::Intent`. Jump, dash
-and attack are edge-triggered, so hold them for one step.
+and attack are edge-triggered, so hold them for one step. Because movement is the installed
+`LocomotionBackend`, it also moves bodies spawned by other modules: any entity with a
+`MoveIntent` and a `CharacterController` but no `MovementProfile` gets
+`MovementProfile::human()` and keeps its capsule. Bodies without a `CharacterController`
+(animals, birds) are left to the module that spawned them.
 
 ## Showcase
 
@@ -95,6 +99,22 @@ Until a physics module is installed (no `PhysicsBackend` resource), a small stan
 characters itself: static colliders become boxes, the `Ground` provides terrain, and raycasts
 see both. It steps aside as soon as a physics backend claims the contract.
 
+### World shifts
+
+When the world re-anchors (floating origin, or a new planet's frame), `engine_world` moves
+root transforms and the shared character state. Movement moves its own world-space state in
+`WorldShiftSet::Apply`: velocities, facing, wall contacts, ledge targets, dash directions,
+knockback, and the course runner's and duel's anchor points, so a wall-run or a dash carries
+on through the shift.
+
+### Look
+
+`look` is a small procedural art kit for the demo: `look::meshgen` (rounded and chamfered
+boxes, lofts, lathes, extrusions, tubes) and `look::texgen` (tiling noise and a baker that
+turns a surface function into base color, normal, roughness/metal and occlusion maps). Meshes
+and materials are built once at startup and stored under keys (`movement/<name>`;
+`look::mesh(key)`, `look::material(key)`). `LookSettings::texture_size` sets the bake size.
+
 ## Tuning and AI access
 
 Registered components: `MovementProfile` (presets `pilot`, `human`, `elite`), `Mover`,
@@ -104,15 +124,19 @@ Registered components: `MovementProfile` (presets `pilot`, `human`, `elite`), `M
 
 API functions: `movement.status`, `movement.set_tempo` (`{"entity": "Player", "level": 10}`),
 `movement.preset`, `movement.dash`, `movement.attack`, `movement.revive`,
-`movement.combat_log`, `movement.perception` (read or patch the settings).
+`movement.combat_log`, `movement.perception` (read or patch the settings), `movement.duel`
+(`{"round": "Blink" | "Focus" | "Pack" | null}`: restart the duel on that round and keep
+replaying it, or `null` to go back to cycling; tour stops use it to catch a chosen moment).
 
 ## Tests
 
 `cargo test -p engine_movement`: unit tests per file; `tests/locomotion.rs` (sprint, jump and
 double jump heights, slide under a bar that blocks running, wall-run and wall-jump, mantle,
-dash, characters on their own clocks in slow motion, the stand-in stepping aside);
+dash, characters on their own clocks in slow motion, the stand-in stepping aside, bodies from
+other modules being moved);
 `tests/demo.rs` (each duel round plays out as described, the rounds cycle, the runner
-finishes the course, the duel waits without a camera); `tests/render.rs` (headless
+finishes the course, the duel waits without a camera, `movement.duel` restarts a chosen round);
+`src/shift.rs` (a world shift moves walls, ledges and velocities); `tests/render.rs` (headless
 screenshot with the slow-motion effect; skipped without a GPU).
 
 ## Not done yet

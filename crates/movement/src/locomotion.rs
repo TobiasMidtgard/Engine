@@ -106,6 +106,21 @@ impl Body {
     }
 }
 
+/// Characters that ask to move but have no [`Mover`] yet.
+type Unadopted = (With<MoveIntent>, With<CharacterController>, Without<Mover>);
+
+/// The movement module is the installed [`LocomotionBackend`](engine_world::LocomotionBackend),
+/// so it moves every character that asks to move, not only the ones spawned with a
+/// [`MovementProfile`]. A body with a `MoveIntent` and a `CharacterController` but no profile
+/// (an NPC from another module, say) gets [`MovementProfile::human`] and keeps its own capsule.
+/// Bodies without a `CharacterController` (animals, birds, props) are left to whoever spawned
+/// them.
+pub(crate) fn adopt_characters(mut commands: Commands, q: Query<Entity, Unadopted>) {
+    for e in &q {
+        commands.entity(e).insert(MovementProfile::human());
+    }
+}
+
 #[allow(clippy::type_complexity)]
 pub(crate) fn step_movers(
     time: Res<Time>,
