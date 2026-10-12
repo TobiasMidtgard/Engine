@@ -44,6 +44,7 @@ fn main() {
             engine_movement::MovementPlugin,
             engine_audio::AudioPlugin,
         ))
+        .add_plugins(engine_softbody::SoftBodyPlugin)
         .init_resource::<day_cycle::DayCycle>()
         .register_resource::<day_cycle::DayCycle>(
             "Showcase clock: hour of day and how fast it runs.",

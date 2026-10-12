@@ -51,6 +51,12 @@ pub fn places() -> Vec<Place> {
             11.0,
         ),
         place(
+            "yard",
+            "Cloth and soft-body yard",
+            near("yard", [14.0, 8.0, 32.0], [0.0, 3.0, -4.0]),
+            15.5,
+        ),
+        place(
             "forest",
             "Living forest",
             near("forest", [95.0, 6.0, 60.0], [0.0, 4.0, 0.0]),

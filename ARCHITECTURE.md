@@ -58,7 +58,8 @@ by the core owner, on request.
 | `engine_debug` | Debug drawing (lines, shapes, gizmos) for every module | Core |
 | `engine_audio` | Spatial audio, footsteps/impacts from surface materials | Core (until assigned) |
 | `games/showcase` | The tech showcase test area | Core |
-| `engine_physics` | Rigid bodies, colliders, joints, queries, character controller, floating-origin physics islands | Physics & vehicles |
+| `engine_physics` | Rigid-body simulation, colliders, joints, ragdolls, queries, character controller, floating-origin physics islands | Physics & vehicles |
+| `engine_softbody` | Cloth (characters, flags, sails), ropes and cables, soft bodies (jelly, flesh, soft tires); XPBD solver with two-way rigid coupling, tearing | Cloth & soft bodies (proposed) |
 | `engine_vehicles` | Cars (suspension, tires, drivetrain), planes (aero surfaces), spaceships (thrusters, RCS) | Physics & vehicles |
 | `engine_space` | Orbits, planets and moons, gravity wells, interplanetary travel, reference frames | Physics & vehicles (or Planets) |
 | `engine_terrain` | Heightmap/planet terrain with LOD, voxel volumes, ground queries, deformation (mud/snow tracks) | Planets & terrain (proposed) |
@@ -86,6 +87,7 @@ API; only these crate dependencies are allowed (everything may depend on the cor
 | `engine_vehicles`, `engine_space`, `engine_anim`, `engine_foliage` | `engine_physics` |
 | `engine_destruction` | `engine_physics`, `engine_terrain` |
 | `engine_movement` | `engine_physics`, `engine_anim` |
+| `engine_softbody` | `engine_physics`, `engine_anim` |
 | `engine_npc` | `engine_physics`, `engine_anim`, `engine_movement` |
 
 Anything else is a missing contract: ask the core owner to add it to `engine_world`.

@@ -26,6 +26,13 @@ pub const ZONES: &[Zone] = &[
         module: "render",
     },
     Zone {
+        key: "yard",
+        name: "Cloth and soft-body yard",
+        center: DVec3::new(110.0, 0.0, -20.0),
+        radius: 35.0,
+        module: "softbody",
+    },
+    Zone {
         key: "forest",
         name: "Living forest",
         center: DVec3::new(-190.0, 0.0, -120.0),
@@ -155,6 +162,7 @@ pub fn spawn_world(commands: &mut Commands, seed: u64) {
     );
 
     plaza(commands, &pal);
+    yard(commands, &pal);
     forest(commands, &pal, &mut rng);
     lake(commands, &pal, &mut rng);
     cave(commands, &pal, &mut rng);
@@ -250,6 +258,100 @@ fn plaza(commands: &mut Commands, pal: &Palette) {
             }
         };
         spawn(commands, shape, pal.metal, at(c + DVec3::new(x, 2.2, -6.0)));
+    }
+}
+
+/// Flags, a curtain, a rope bridge and jelly cubes: rigid stand-ins until `engine_softbody`
+/// makes them move.
+fn yard(commands: &mut Commands, pal: &Palette) {
+    let c = zone("yard").center;
+    let flag_colors = [0xc0392b, 0x2e86c1, 0xf1c40f, 0x27ae60, 0x8e44ad];
+    for (i, hex) in flag_colors.into_iter().enumerate() {
+        let base = c + DVec3::new(-16.0 + i as f64 * 8.0, 0.0, -18.0);
+        spawn(
+            commands,
+            Shape::Cylinder {
+                radius: 0.08,
+                height: 9.0,
+                segments: 12,
+            },
+            pal.metal,
+            at(base + DVec3::new(0.0, 4.5, 0.0)),
+        );
+        let cloth = StandardMaterial::hex(hex)
+            .with_roughness(0.8)
+            .with_subsurface(0.4);
+        spawn(
+            commands,
+            cuboid(3.0, 2.0, 0.03),
+            cloth,
+            at(base + DVec3::new(1.55, 7.8, 0.0)),
+        );
+    }
+    // A curtain in a frame.
+    let frame = c + DVec3::new(-12.0, 0.0, 6.0);
+    for x in [-2.6, 2.6] {
+        spawn(
+            commands,
+            cuboid(0.3, 6.0, 0.3),
+            pal.wood,
+            at(frame + DVec3::new(x, 3.0, 0.0)),
+        );
+    }
+    spawn(
+        commands,
+        cuboid(5.5, 0.3, 0.3),
+        pal.wood,
+        at(frame + DVec3::new(0.0, 6.1, 0.0)),
+    );
+    let velvet = StandardMaterial::hex(0x7b1e2b)
+        .with_roughness(0.9)
+        .with_subsurface(0.3);
+    spawn(
+        commands,
+        cuboid(4.8, 5.6, 0.04),
+        velvet,
+        at(frame + DVec3::new(0.0, 3.2, 0.0)),
+    );
+    // A sagging rope bridge between two platforms.
+    let (a, b) = (
+        c + DVec3::new(2.0, 0.0, 10.0),
+        c + DVec3::new(24.0, 0.0, 10.0),
+    );
+    for p in [a, b] {
+        spawn(
+            commands,
+            cuboid(3.0, 3.0, 3.0),
+            pal.rock,
+            at(p + DVec3::new(0.0, 1.5, 0.0)),
+        );
+    }
+    let planks = 18;
+    for i in 0..planks {
+        let t = (i as f64 + 0.5) / planks as f64;
+        let sag = 1.2 * (1.0 - (2.0 * t - 1.0).powi(2));
+        let p = a.lerp(b, t) + DVec3::new(0.0, 3.0 - sag, 0.0);
+        spawn(commands, cuboid(0.9, 0.06, 1.6), pal.wood, at(p));
+    }
+    // Jelly cubes stacked on crates.
+    let jelly = StandardMaterial::hex(0x5fd38d)
+        .with_roughness(0.15)
+        .with_subsurface(0.8)
+        .with_alpha(0.75);
+    for (i, x) in [0.0, 1.6, 0.8].into_iter().enumerate() {
+        let y = if i < 2 { 0.0 } else { 1.0 };
+        spawn(
+            commands,
+            cuboid(1.0, 1.0, 1.0),
+            pal.wood,
+            at(c + DVec3::new(10.0 + x, 0.5 + y, -4.0)),
+        );
+        spawn(
+            commands,
+            cuboid(0.9, 0.9, 0.9),
+            jelly,
+            at(c + DVec3::new(10.0 + x, 1.45 + y, -4.0)),
+        );
     }
 }
 

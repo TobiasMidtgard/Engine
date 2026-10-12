@@ -19,6 +19,7 @@ engine_render = { path = "crates/render" }
 engine_platform = { path = "crates/platform" }
 engine_physics = { path = "crates/physics" }
 engine_audio = { path = "crates/audio" }
+engine_softbody = { path = "crates/softbody" }
 engine_ui = { path = "crates/ui" }
 engine_ai_bridge = { path = "crates/ai_bridge" }
 engine_terrain = { path = "crates/terrain" }

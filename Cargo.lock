@@ -862,6 +862,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "engine_softbody"
+version = "0.1.0"
+dependencies = [
+ "bevy_ecs",
+ "engine_anim",
+ "engine_core",
+ "engine_physics",
+ "engine_world",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "engine_space"
 version = "0.1.0"
 dependencies = [
@@ -2412,6 +2425,7 @@ dependencies = [
  "engine_npc",
  "engine_physics",
  "engine_smoke",
+ "engine_softbody",
  "engine_space",
  "engine_terrain",
  "engine_ui",
