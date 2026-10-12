@@ -15,7 +15,6 @@ use std::f64::consts::PI;
 
 use engine_core::math::{DVec3, Quat, Vec3};
 use engine_core::prelude::*;
-use engine_render::{Shape, StandardMaterial};
 use engine_world::physical::{Deformation, SurfaceMaterial};
 use engine_world::{ContactKind, GroundContact, SurfaceMaterials};
 
@@ -157,10 +156,10 @@ pub struct TrailWalker {
 impl TrailWalker {
     fn new(origin: DVec3, along: f64, kind: ContactKind, mass_kg: f32, speed: f32) -> Self {
         let (step_len, feet, stance, length, height) = match kind {
-            ContactKind::Paw => (0.26, 4, 0.08, 0.5, 0.0),
-            ContactKind::Hoof => (0.45, 4, 0.18, 1.3, 0.0),
-            _ if speed > 2.5 => (1.3, 2, 0.1, 0.0, 0.0),
-            _ => (0.72, 2, 0.12, 0.0, 0.0),
+            ContactKind::Paw => (0.26, 4, 0.07, 0.5, 0.0),
+            ContactKind::Hoof => (0.45, 4, 0.15, 1.05, 0.0),
+            _ if speed > 2.5 => (1.3, 2, 0.075, 0.0, 0.0),
+            _ => (0.72, 2, 0.095, 0.0, 0.0),
         };
         Self {
             origin,
@@ -185,7 +184,7 @@ pub(crate) fn register(app: &mut App) {
             "Show a coloured ring on the ground for each sound as it plays (enabled): near \
              footstep trails, or everywhere.",
         )
-        .add_systems(Update, walk_trail)
+        .add_systems(Update, (walk_trail, bodies::animate).chain())
         .add_systems(
             PostUpdate,
             shift_trails.in_set(engine_world::WorldShiftSet::Apply),
@@ -249,16 +248,18 @@ pub fn spawn_demo(commands: &mut Commands, origin: DVec3) {
     ground::spawn(commands, origin);
 
     // The walkers, spread round the loop.
-    bodies::hiker(
+    bodies::person(
         commands,
         TrailWalker::new(origin, 0.0, ContactKind::Foot, 75.0, 1.4),
         0xb3362c,
+        false,
         None,
     );
-    bodies::hiker(
+    bodies::person(
         commands,
         TrailWalker::new(origin, 30.0, ContactKind::Foot, 68.0, 4.0),
         0x2c5fb3,
+        true,
         Some(LocalTimeScale::unaffected_by_dilation(1.0)),
     );
     bodies::dog(
@@ -271,20 +272,13 @@ pub fn spawn_demo(commands: &mut Commands, origin: DVec3) {
     );
 }
 
-fn mat(hex: u32, roughness: f32) -> StandardMaterial {
-    StandardMaterial::hex(hex).with_roughness(roughness)
-}
-
-fn cuboid(x: f32, y: f32, z: f32) -> Shape {
-    Shape::Cuboid { size: [x, y, z] }
-}
-
 /// Yaw that turns the -Z forward axis to `dir`.
 fn yaw(dir: Vec3) -> Quat {
     Quat::from_rotation_y((-dir.x).atan2(-dir.z))
 }
 
-/// Move the walkers along the trail and put their feet down.
+/// Move the walkers along the trail and put their feet down where their bodies plant them
+/// (see `bodies::gait`).
 fn walk_trail(
     time: Res<Time>,
     materials: Res<SurfaceMaterials>,
@@ -303,16 +297,8 @@ fn walk_trail(
         }
         let moved = w.speed * dt;
         w.along = (w.along + moved as f64).rem_euclid(TRAIL_LENGTH);
-        let (p, d) = trail_point(w.along);
-        let right = Vec3::new(-d.z, 0.0, d.x);
-        // A little bob with each step.
-        let phase = 1.0 - w.to_next_step / w.step_len;
-        let bob = if w.feet == 2 {
-            0.025 * (phase * std::f32::consts::PI).sin()
-        } else {
-            0.0
-        };
-        t.translation = w.origin + p + DVec3::new(0.0, (w.height + bob) as f64 + 0.06, 0.0);
+        let (p, d) = bodies::gait::root(&w);
+        t.translation = p;
         t.rotation = yaw(d);
 
         w.to_next_step -= moved;
@@ -321,20 +307,12 @@ fn walk_trail(
             let foot = w.next_foot;
             w.next_foot = (foot + 1) % w.feet;
             // Feet: left, right for two legs; left fore, right hind, right fore, left hind
-            // (a walking quadruped's footfall order) for four.
-            let (side, fore) = match (w.feet, foot) {
-                (2, 0) => (-1.0, 0.0),
-                (2, _) => (1.0, 0.0),
-                (_, 0) => (-1.0, 0.5),
-                (_, 1) => (1.0, -0.5),
-                (_, 2) => (1.0, 0.5),
-                _ => (-1.0, -0.5),
-            };
-            let foot_s = w.along + (w.to_next_step - w.step_len) as f64 + (fore * w.length) as f64;
-            let (fp, fd) = trail_point(foot_s);
+            // (a walking quadruped's footfall order) for four. Each lands where the gait puts
+            // it relative to where the walker was when it came down: a heel strikes ahead of
+            // the hips, a hoof ahead of its shoulder or hip.
+            let root_along = w.along + (w.to_next_step - w.step_len) as f64;
+            let (position, fd, foot_s) = bodies::gait::footprint(&w, foot, root_along);
             let surface = surface_at(foot_s);
-            let position =
-                w.origin + fp + (right * side * w.stance).as_dvec3() + DVec3::new(0.0, 0.06, 0.0);
             let load = if w.feet == 2 {
                 w.mass_kg
             } else {
