@@ -2,10 +2,10 @@
 //! `zones::spawn_demos`). Placeholders show where a test case lives and what it will contain;
 //! they don't simulate anything.
 
-use crate::landscape::{Cover, Landscape};
+use crate::landscape::Landscape;
 use crate::meshgen::TreeKind;
 use crate::scenery::{self, Library};
-use crate::zones::{FOOTSTEP_HALF_WIDTH, FOOTSTEP_STRIPS, RUNWAY, Zone};
+use crate::zones::{RUNWAY, Zone};
 use engine::prelude::*;
 use std::f64::consts::TAU as TAU64;
 
@@ -447,14 +447,14 @@ pub fn stage(commands: &mut Commands, _lib: &Library, z: &Zone) {
         commands,
         cuboid(26.0, 7.0, 0.4),
         mat(0x5b2333, 0.9).with_subsurface(0.3),
-        at(c + DVec3::new(0.0, 4.5, 12.5)),
+        at(c + DVec3::new(0.0, 4.5, -12.5)),
     );
     for x in [-12.0, 12.0] {
         spawn(
             commands,
             cuboid(0.4, 9.0, 0.4),
             dark_wood(),
-            at(c + DVec3::new(x, 4.5, 12.0)),
+            at(c + DVec3::new(x, 4.5, -12.0)),
         );
     }
 }
@@ -778,7 +778,14 @@ pub fn forest(commands: &mut Commands, lib: &Library, land: &Landscape, z: &Zone
 
 /// Lake: still water (the water module replaces it), a jetty and a rowboat. The Water simulation
 /// thread owns it.
-pub fn lake(commands: &mut Commands, _lib: &Library, z: &Zone) {
+pub fn lake(
+    commands: &mut Commands,
+    meshes: &mut Assets<Mesh>,
+    _lib: &Library,
+    land: &Landscape,
+    z: &Zone,
+) {
+    stream_water(commands, meshes, land);
     let mut water = StandardMaterial::hex(0x0f2a33)
         .with_roughness(0.03)
         .with_alpha(0.88);
@@ -835,105 +842,21 @@ pub fn lake(commands: &mut Commands, _lib: &Library, z: &Zone) {
     );
 }
 
-/// Footstep trail: strips of grass, mud, a puddle, sand, gravel, snow, boards, a metal grate
-/// and dirt across the road (the ground query reports each surface). The Audio and footsteps
-/// and Planets and terrain threads own it.
-pub fn footsteps(commands: &mut Commands, _lib: &Library, z: &Zone) {
-    let c = z.center;
-    let mut start = c.z - FOOTSTEP_STRIPS.iter().map(|s| s.1).sum::<f64>() * 0.5;
-    let w = FOOTSTEP_HALF_WIDTH as f32 * 2.0;
-    for (cover, len) in FOOTSTEP_STRIPS {
-        let mid = DVec3::new(c.x, 0.0, start + len * 0.5);
-        match cover {
-            Cover::Puddle => {
-                let mut water = StandardMaterial::hex(0x2a2a24)
-                    .with_roughness(0.02)
-                    .with_alpha(0.7);
-                water.receives_wetness = false;
-                spawn(
-                    commands,
-                    cuboid(w, 0.02, *len as f32 - 0.5),
-                    water,
-                    at(mid + DVec3::new(0.0, 0.03, 0.0)),
-                );
-            }
-            Cover::Mud => {
-                let mut mud = StandardMaterial::hex(0x2a1d12).with_roughness(0.35);
-                mud.receives_wetness = false;
-                spawn(
-                    commands,
-                    cuboid(w, 0.04, *len as f32),
-                    mud,
-                    at(mid + DVec3::new(0.0, 0.02, 0.0)),
-                );
-            }
-            Cover::Wood => {
-                for k in 0..(*len as i32 * 4) {
-                    let zz = start + 0.125 + k as f64 * 0.25;
-                    spawn(
-                        commands,
-                        cuboid(w, 0.06, 0.22),
-                        wood(),
-                        at(DVec3::new(c.x, 0.12, zz)),
-                    );
-                }
-                for x in [-5.0, 0.0, 5.0] {
-                    spawn(
-                        commands,
-                        cuboid(0.2, 0.1, *len as f32),
-                        dark_wood(),
-                        at(DVec3::new(c.x + x, 0.05, mid.z)),
-                    );
-                }
-            }
-            Cover::Metal => {
-                for k in 0..(*len as i32 * 5) {
-                    let zz = start + 0.1 + k as f64 * 0.2;
-                    spawn(
-                        commands,
-                        cuboid(w, 0.05, 0.04),
-                        metal(),
-                        at(DVec3::new(c.x, 0.1, zz)),
-                    );
-                }
-                spawn(
-                    commands,
-                    cuboid(w, 0.05, 0.04),
-                    metal(),
-                    at(DVec3::new(c.x, 0.1, mid.z)),
-                );
-            }
-            _ => {}
-        }
-        start += len;
-    }
-    // Sign posts at the start.
-    spawn(
-        commands,
-        cuboid(0.15, 2.2, 0.15),
-        dark_wood(),
-        at(DVec3::new(c.x + 8.5, 1.1, c.z - 36.0)),
-    );
-    spawn(
-        commands,
-        cuboid(1.6, 0.6, 0.08),
-        wood(),
-        at(DVec3::new(c.x + 8.5, 2.0, c.z - 36.0)),
-    );
-}
+/// Half width, half depth and height of the cave's inside (m), around the cave zone's center;
+/// the mouth faces −Z.
+pub const CAVE_INSIDE: (f64, f64, f64) = (15.0, 17.0, 9.0);
 
-/// Mushroom cave dug into the hill: rock walls and roof, a mineral pool, glowing mushrooms. The
-/// Foliage and ecology thread owns it.
-pub fn cave(
+/// The cave in its hill: rock walls, a roof that carries the hillside on over it, boulders round
+/// the mouth, and no sky light inside. Scenery, so it stays when the zone's demo moves in.
+pub fn cave_shell(
     commands: &mut Commands,
     meshes: &mut Assets<Mesh>,
     lib: &Library,
     land: &Landscape,
-    z: &Zone,
     rng: &mut Rng,
 ) {
-    let c = z.center;
-    let (hx, hz, h) = (15.0f64, 17.0f64, 9.0f64);
+    let c = crate::zones::zone("cave").center;
+    let (hx, hz, h) = CAVE_INSIDE;
     let wall = rock();
     // Back and side walls, thick enough to reach the edge of the hole the landscape digs.
     spawn(
@@ -1025,6 +948,53 @@ pub fn cave(
             .open(BoxFace::NegZ)
             .with_fade(12.0),
     ));
+}
+
+/// Footprint lab: strips of mud, snow, sand and grass (painted into the ground by the
+/// landscape) with walkers that will leave tracks. The Planets and terrain thread owns it.
+pub fn tracks(commands: &mut Commands, z: &Zone) {
+    let c = z.center;
+    for (i, x) in [-15.0, -5.0, 5.0, 15.0].into_iter().enumerate() {
+        person(
+            commands,
+            c + DVec3::new(x, 0.0, -10.0 + i as f64 * 5.0),
+            0.0,
+            [0x8e44ad, 0x2c3e50, 0xc0392b, 0x16a085][i],
+        );
+    }
+    quadruped(
+        commands,
+        c + DVec3::new(-5.0, 0.0, 8.0),
+        0.0,
+        1.35,
+        0x5a3a22,
+    );
+    quadruped(
+        commands,
+        c + DVec3::new(5.0, 0.0, 10.0),
+        0.3,
+        0.55,
+        0x9a8a70,
+    );
+    spawn(
+        commands,
+        cuboid(0.12, 2.0, 0.12),
+        dark_wood(),
+        at(c + DVec3::new(-22.0, 1.0, -18.0)),
+    );
+    spawn(
+        commands,
+        cuboid(1.6, 0.8, 0.08),
+        wood(),
+        at(c + DVec3::new(-22.0, 1.9, -18.0)),
+    );
+}
+
+/// Mushroom cave: a mineral spring and glowing mushrooms inside the cave ([`cave_shell`]). The
+/// Foliage and ecology thread owns it.
+pub fn cave(commands: &mut Commands, z: &Zone, rng: &mut Rng) {
+    let c = z.center;
+    let (hx, hz, _) = CAVE_INSIDE;
     // A mineral spring the cave plants drink from, faintly glowing.
     let mut pool = StandardMaterial::hex(0x0f3038)
         .with_roughness(0.02)
@@ -1217,17 +1187,105 @@ fn cave_roof(
                 c.x + x + rng.range(-1.2, 1.2) as f64,
                 c.z + z + rng.range(-1.2, 1.2) as f64,
             );
-            let mesh = lib.grass[rng.range_i32(0, lib.grass.len() as i32) as usize];
+            let k = rng.range_i32(0, lib.grass.len() as i32) as usize;
             commands.spawn((
                 Transform::from_translation(DVec3::new(wx, land.cave_roof_height(wx, wz), wz))
                     .with_rotation(Quat::from_rotation_y(rng.range(0.0, TAU)))
                     .with_scale(Vec3::new(1.0, rng.range(0.8, 1.3), 1.0)),
-                MeshRenderer::new(mesh, lib.mats.grass).without_shadows(),
-                scenery::Lod::hide_beyond(mesh, rng.range(45.0, 95.0)),
+                MeshRenderer::new(lib.grass[k], lib.mats.grass).without_shadows(),
+                scenery::Lod::swap_then_hide(
+                    lib.grass[k],
+                    lib.grass_mid[k],
+                    rng.range(20.0, 26.0),
+                    rng.range(45.0, 95.0),
+                ),
             ));
             z += 3.6;
         }
         x += 3.6;
+    }
+}
+
+/// The stream's water: a ribbon down its bed, white where it tumbles over the cliff, and a
+/// foaming plunge pool. Stand-in until the water module fills the stream.
+fn stream_water(commands: &mut Commands, meshes: &mut Assets<Mesh>, land: &Landscape) {
+    let deep = Vec3::new(0.03, 0.09, 0.1);
+    let foam = Vec3::new(0.75, 0.8, 0.82);
+    let mut water = StandardMaterial::hex(0xffffff)
+        .with_roughness(0.06)
+        .with_alpha(0.9);
+    water.reflectance = 0.5;
+    water.receives_wetness = false;
+    water.double_sided = true;
+    for st in &land.streams {
+        let n = st.path.len();
+        let o = st.path[0];
+        let origin = DVec3::new(o.x, 0.0, o.y);
+        let level = |i: usize| st.bed[i] + st.depth * 0.55;
+        let mut mesh = Mesh::default();
+        for i in 0..n {
+            let p = st.path[i];
+            let dir =
+                (st.path[(i + 1).min(n - 1)] - st.path[i.saturating_sub(1)]).normalize_or(DVec2::Y);
+            let side = DVec2::new(-dir.y, dir.x);
+            let drop = (level(i.saturating_sub(2)) - level((i + 2).min(n - 1))).max(0.0);
+            let c = deep.lerp(foam, smoothstep(0.5, 1.8, drop as f32));
+            let half = st.width * 0.5 + 1.2;
+            for s in [-1.0, 1.0] {
+                let q = p + side * half * s - o;
+                mesh.vertices.push(
+                    engine::render::Vertex::new(
+                        Vec3::new(q.x as f32, level(i) as f32, q.y as f32),
+                        Vec3::Y,
+                        Vec2::new(s as f32 * 0.5 + 0.5, i as f32 * 0.2),
+                    )
+                    .with_color(c.extend(1.0)),
+                );
+            }
+        }
+        for i in 0..n as u32 - 1 {
+            let (a, b, c, d) = (2 * i, 2 * i + 1, 2 * i + 2, 2 * i + 3);
+            let pos = |k: u32| Vec3::from(mesh.vertices[k as usize].position);
+            // Wind so the ribbon faces up (or downstream where it falls).
+            let up = (pos(b) - pos(a)).cross(pos(c) - pos(a)).y > 0.0;
+            if up {
+                mesh.indices.extend_from_slice(&[a, b, c, b, d, c]);
+            } else {
+                mesh.indices.extend_from_slice(&[a, c, b, b, c, d]);
+            }
+        }
+        // Face normals averaged per vertex, so the falls shade as a sheet.
+        let mut normals = vec![Vec3::ZERO; mesh.vertices.len()];
+        for t in mesh.indices.chunks(3) {
+            let p = |k: u32| Vec3::from(mesh.vertices[k as usize].position);
+            let nrm = (p(t[1]) - p(t[0])).cross(p(t[2]) - p(t[0]));
+            for &k in t {
+                normals[k as usize] += nrm;
+            }
+        }
+        for (v, nrm) in mesh.vertices.iter_mut().zip(normals) {
+            v.normal = nrm.normalize_or(Vec3::Y).to_array();
+        }
+        commands.spawn((
+            at(origin),
+            MeshRenderer::new(meshes.add(mesh), water).without_shadows(),
+        ));
+        if let (Some((c, _)), Some((_, bottom))) = (st.pool, st.falls()) {
+            let mut froth = StandardMaterial::hex(0xc8d4d8)
+                .with_roughness(0.4)
+                .with_alpha(0.75);
+            froth.receives_wetness = false;
+            spawn(
+                commands,
+                Shape::Cylinder {
+                    radius: 5.0,
+                    height: 0.02,
+                    segments: 40,
+                },
+                froth,
+                at(DVec3::new(c.x, level(bottom) + 0.02, c.y)),
+            );
+        }
     }
 }
 
@@ -1455,13 +1513,13 @@ pub fn field_edge(commands: &mut Commands, lib: &Library, z: &Zone, rng: &mut Rn
             if x * x + zz * zz > z.radius * z.radius || inside_fire {
                 continue;
             }
-            let mesh = lib.dry_grass[rng.range_i32(0, lib.dry_grass.len() as i32) as usize];
+            let k = rng.range_i32(0, lib.dry_grass.len() as i32) as usize;
             commands.spawn((
                 Transform::from_translation(c + DVec3::new(x, -0.02, zz))
                     .with_rotation(Quat::from_rotation_y(rng.range(0.0, TAU)))
                     .with_scale(Vec3::new(1.0, rng.range(1.3, 1.9), 1.0)),
-                MeshRenderer::new(mesh, lib.mats.grass).without_shadows(),
-                scenery::Lod::hide_beyond(mesh, 140.0),
+                MeshRenderer::new(lib.dry_grass[k], lib.mats.grass).without_shadows(),
+                scenery::Lod::swap_then_hide(lib.dry_grass[k], lib.dry_grass_mid[k], 26.0, 140.0),
             ));
         }
     }
