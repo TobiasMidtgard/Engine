@@ -18,7 +18,7 @@ use rapier3d::prelude::{Pose, QueryFilter as RFilter, SharedShape};
 use crate::character;
 use crate::convert;
 use crate::settings::PhysicsSettings;
-use crate::sim::{BodyWrite, MaterialCache, RegionId, Simulation};
+use crate::sim::{BodyWrite, ContactFilter, MaterialCache, RegionId, Simulation};
 use crate::{PhysicsStats, SharedSimulation};
 
 /// World pose (translation, rotation, scale) of `e`, composing `Transform`s up the hierarchy.
@@ -280,8 +280,8 @@ pub(crate) fn physics_step(world: &mut World, mut q: Local<Option<StepQueries>>)
             );
             continue;
         };
-        let owner = owning_body(world, e)
-            .filter(|(b, k)| *k != BodyKind::Static && sim.bodies.contains_key(b));
+        let found = owning_body(world, e);
+        let owner = found.filter(|(b, k)| *k != BodyKind::Static && sim.bodies.contains_key(b));
         match owner {
             Some((body, _)) => {
                 let body_pose = world_pose(world, body).unwrap_or_default();
@@ -293,7 +293,13 @@ pub(crate) fn physics_step(world: &mut World, mut q: Local<Option<StepQueries>>)
                 let (f, r) = sim.materials.get(desc.surface);
                 sim.attach_collider(e, body, &desc, shape, local, f, r);
             }
-            None => sim.add_static(e, &desc, shape, (pose.translation, pose.rotation)),
+            None => sim.add_static(
+                e,
+                found.map(|(b, _)| b),
+                &desc,
+                shape,
+                (pose.translation, pose.rotation),
+            ),
         }
     }
 
@@ -310,6 +316,7 @@ pub(crate) fn physics_step(world: &mut World, mut q: Local<Option<StepQueries>>)
             crate::sim::JointEntry {
                 desc,
                 created: None,
+                no_contact: Vec::new(),
             },
         );
     }
@@ -469,9 +476,11 @@ pub(crate) fn physics_step(world: &mut World, mut q: Local<Option<StepQueries>>)
             (r.frozen, r.movers)
         };
         if frozen || movers == 0 || substeps == 0 {
-            let r = sim.region_mut(rid);
+            let s = &mut *sim;
+            let filter = ContactFilter(&s.no_contact);
+            let r = s.regions[rid as usize].as_mut().expect("live region");
             if r.needs_refresh {
-                r.world.detect_collisions(&(), &());
+                r.world.detect_collisions(&filter, &());
                 r.needs_refresh = false;
                 r.queries_refreshed();
                 r.update_bounds();
@@ -499,10 +508,12 @@ pub(crate) fn physics_step(world: &mut World, mut q: Local<Option<StepQueries>>)
             drive_kinematics(&mut sim, rid, sub_dt);
             let scaled = scale_time(&mut sim, rid, true);
             {
-                let r = sim.region_mut(rid);
+                let s = &mut *sim;
+                let filter = ContactFilter(&s.no_contact);
+                let r = s.regions[rid as usize].as_mut().expect("live region");
                 r.world.integration_parameters.dt = sub_dt;
                 let collector = std::mem::take(&mut r.collector);
-                r.world.step_with_events(&(), &collector);
+                r.world.step_with_events(&filter, &collector);
                 r.collector = collector;
                 r.needs_refresh = false;
             }

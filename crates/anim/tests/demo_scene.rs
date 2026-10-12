@@ -20,6 +20,7 @@ fn app() -> (App, DemoEntities) {
         .set_source(TimeSource::Manual { step_secs: STEP });
     app.add_plugins((WorldPlugin, AnimationPlugin));
     let demo = spawn_demo_world(&mut app.world, DVec3::ZERO);
+    engine_anim::character::finish_loading(&mut app.world);
     (app, demo)
 }
 

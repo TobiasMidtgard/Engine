@@ -1,15 +1,21 @@
-//! Renders a skinned character offscreen and checks the picture: the GPU skinning pass draws
-//! the mesh with its paint, and the drawn pose follows the animation (a flex raises the
-//! arms). Needs a GPU or a software Vulkan driver (lavapipe); passes with a note when neither
-//! is available (CI sets ENGINE_REQUIRE_GPU=1, which turns that into a failure).
+//! Renders skinned meshes offscreen and checks the pictures: the GPU skinning pass draws a
+//! character with its paint and the drawn pose follows the animation (a flex raises the
+//! arms); textured submeshes draw with their own surfaces (a checker, an alpha cutout on a
+//! double-sided card). Needs a GPU or a software Vulkan driver (lavapipe); passes with a note
+//! when neither is available (CI sets ENGINE_REQUIRE_GPU=1, which turns that into a failure).
 
-use engine_anim::AnimationPlugin;
+use std::sync::Arc;
+
 use engine_anim::build::humanoid::Outfit;
 use engine_anim::demo::spawn_humanoid;
+use engine_anim::skeleton::BoneDef;
+use engine_anim::skin::{SkinVertex, Submesh};
+use engine_anim::{AnimationPlugin, Animator, Skeleton, SkinnedMesh, SkinnedMeshRenderer};
+use engine_assets::Assets;
 use engine_core::prelude::*;
 use engine_core::time::TimeSource;
 use engine_render::prelude::*;
-use engine_render::{RenderDisabled, capture_now};
+use engine_render::{AlphaMode, Image, RenderDisabled, capture_now};
 use engine_world::WorldPlugin;
 use engine_world::animation::AnimationTrigger;
 
@@ -54,8 +60,8 @@ fn skin_pixels(img: &image::RgbaImage, x0: f32, x1: f32, y0: f32, y1: f32) -> us
     n
 }
 
-#[test]
-fn skinned_character_renders_and_follows_the_pose() {
+/// A headless W×H app with the renderer and animation, stepping 1/60 s per update.
+fn headless_app() -> App {
     let mut app = App::new();
     app.world.resource_mut::<EngineConfig>().headless = true;
     {
@@ -69,6 +75,12 @@ fn skinned_character_renders_and_follows_the_pose() {
             step_secs: 1.0 / 60.0,
         });
     app.add_plugins((WorldPlugin, RenderPlugin, AnimationPlugin));
+    app
+}
+
+#[test]
+fn skinned_character_renders_and_follows_the_pose() {
+    let mut app = headless_app();
     let w = &mut app.world;
     w.spawn((
         DirectionalLight {
@@ -127,5 +139,189 @@ fn skinned_character_renders_and_follows_the_pose() {
     assert!(
         after > before + 150,
         "arms did not come up: {before} skin pixels beside the head at idle, {after} flexing"
+    );
+}
+
+/// Counts pixels in a box (fractions of the image) for which `pred(r, g, b)` holds; also
+/// returns the box's pixel count.
+fn count(
+    img: &image::RgbaImage,
+    (x0, x1, y0, y1): (f32, f32, f32, f32),
+    pred: impl Fn(f32, f32, f32) -> bool,
+) -> (usize, usize) {
+    let (w, h) = (img.width() as f32, img.height() as f32);
+    let (mut n, mut total) = (0, 0);
+    for y in (y0 * h) as u32..(y1 * h) as u32 {
+        for x in (x0 * w) as u32..(x1 * w) as u32 {
+            let p = img.get_pixel(x, y);
+            total += 1;
+            if pred(p[0] as f32, p[1] as f32, p[2] as f32) {
+                n += 1;
+            }
+        }
+    }
+    (n, total)
+}
+
+/// Two 1 m panels side by side, skinned to a two-bone skeleton (bottom row on `root`, top row
+/// on `top`). Submesh 0: the left panel, facing the camera (+Z). Submesh 1: the right panel,
+/// facing away (−Z), so it only shows if its surface is double-sided.
+fn panels() -> (Skeleton, SkinnedMesh) {
+    let skeleton = Skeleton::new(
+        "panels",
+        vec![
+            BoneDef::new("root", None, Vec3::ZERO),
+            BoneDef::new("top", Some("root"), Vec3::Y),
+        ],
+    )
+    .unwrap();
+    let mut mesh = SkinnedMesh {
+        joints: vec!["root".into(), "top".into()],
+        inverse_bind: skeleton.inverse_bind.clone(),
+        ..Default::default()
+    };
+    for (x0, normal) in [(-1.1, Vec3::Z), (0.1, Vec3::NEG_Z)] {
+        let base = mesh.vertices.len() as u32;
+        for (u, v) in [(0.0, 1.0), (1.0, 1.0), (1.0, 0.0), (0.0, 0.0)] {
+            // v = 0 at the top (glTF convention); the top row follows the `top` bone.
+            let top = v == 0.0;
+            mesh.vertices.push(SkinVertex {
+                position: Vec3::new(x0 + u, 1.0 - v, 0.0),
+                normal,
+                uv: Vec2::new(u, v),
+                joints: [u16::from(top), 0, 0, 0],
+                ..Default::default()
+            });
+        }
+        let first = mesh.indices.len() as u32;
+        if normal.z > 0.0 {
+            mesh.indices
+                .extend([0, 1, 2, 0, 2, 3].map(|i: u32| base + i));
+        } else {
+            mesh.indices
+                .extend([0, 2, 1, 0, 3, 2].map(|i: u32| base + i));
+        }
+        mesh.submeshes.push(Submesh {
+            first_index: first,
+            index_count: 6,
+            surface: mesh.submeshes.len(),
+        });
+    }
+    (skeleton, mesh)
+}
+
+#[test]
+fn textured_submeshes_draw_their_own_surfaces() {
+    let mut app = headless_app();
+    let w = &mut app.world;
+    // Sun from behind the camera, 45° up: the panels' shadows fall on the backdrop below them,
+    // clear of what the camera sees through the cutout.
+    w.spawn((
+        DirectionalLight {
+            illuminance: 80_000.0,
+            ..Default::default()
+        },
+        Transform::default().looking_at(DVec3::new(0.0, -1.0, -1.0), Vec3::Y),
+    ));
+    // Grey backdrop behind the panels, facing the camera.
+    w.spawn((
+        Transform::from_xyz(0.0, 0.5, -1.5)
+            .with_rotation(Quat::from_rotation_x(std::f32::consts::FRAC_PI_2)),
+        MeshRenderer::new(
+            Shape::Plane {
+                size: [12.0, 12.0],
+                subdivisions: 1,
+            },
+            StandardMaterial::color(0.4, 0.4, 0.4).with_roughness(0.9),
+        ),
+    ));
+    w.spawn((
+        Camera::perspective(40.0),
+        Transform::from_xyz(0.0, 0.5, 3.0).looking_at(DVec3::new(0.0, 0.5, 0.0), Vec3::Y),
+    ));
+    let (checker, cutout) = {
+        let mut images = w.get_resource_or_init::<Assets<Image>>();
+        let checker = images.add(Image::checker(64, 4, [255, 0, 0, 255], [0, 0, 255, 255]));
+        // Left half opaque green, right half fully transparent.
+        let cutout = images.add(Image::from_fn(64, 64, true, |x, _| {
+            [0, 255, 0, if x < 32 { 255 } else { 0 }]
+        }));
+        (checker, cutout)
+    };
+    let (skeleton, mesh) = panels();
+    let mesh = w.get_resource_or_init::<Assets<SkinnedMesh>>().add(mesh);
+    w.spawn((
+        Transform::default(),
+        GlobalTransform::default(),
+        Animator::procedural(Arc::new(skeleton)),
+        SkinnedMeshRenderer {
+            mesh: Some(mesh),
+            surfaces: vec![
+                StandardMaterial {
+                    base_color: [1.0; 4],
+                    perceptual_roughness: 0.8,
+                    ..Default::default()
+                }
+                .with_base_color_texture(checker),
+                StandardMaterial {
+                    base_color: [1.0; 4],
+                    perceptual_roughness: 0.8,
+                    alpha_mode: AlphaMode::Mask(0.5),
+                    double_sided: true,
+                    ..Default::default()
+                }
+                .with_base_color_texture(cutout),
+            ],
+            ..Default::default()
+        },
+    ));
+    app.update_n(5);
+    if let Some(d) = app.world.get_resource::<RenderDisabled>() {
+        eprintln!("skipping: no GPU ({})", d.0);
+        return;
+    }
+    let img = capture(&mut app, "anim_textured_submeshes.png");
+    let stats = app.world.resource::<engine_render::RenderStats>().clone();
+
+    // Left panel (screen x 0.12..0.47, y 0.27..0.73): red and blue checker squares.
+    let left = (0.15, 0.44, 0.3, 0.7);
+    let (red, total) = count(&img, left, |r, g, b| r > 40.0 && r > 2.0 * g && r > 2.0 * b);
+    let (blue, _) = count(&img, left, |r, g, b| b > 40.0 && b > 2.0 * r && b > 1.5 * g);
+    assert!(
+        red > total / 5 && blue > total / 5,
+        "checker surface not drawn: {red} red and {blue} blue of {total} pixels ({stats:?})"
+    );
+    // Right panel, seen from behind: its opaque half (screen x 0.53..0.71) is green ...
+    let (green, total) = count(&img, (0.56, 0.68, 0.3, 0.7), |r, g, b| {
+        g > 40.0 && g > 2.0 * r && g > 1.5 * b
+    });
+    assert!(
+        green > total * 2 / 3,
+        "double-sided cutout surface not drawn: {green} green of {total} pixels"
+    );
+    // ... and its transparent half (x 0.71..0.88) shows the grey backdrop.
+    let (green, total) = count(&img, (0.74, 0.86, 0.3, 0.7), |r, g, b| {
+        g > 40.0 && g > 1.5 * r && g > 1.2 * b
+    });
+    let (grey, _) = count(&img, (0.74, 0.86, 0.3, 0.7), |r, g, b| {
+        let (lo, hi) = (r.min(g).min(b), r.max(g).max(b));
+        hi > 30.0 && hi - lo < 0.35 * hi
+    });
+    assert!(
+        green < total / 50 && grey > total * 9 / 10,
+        "cut-out half not transparent: {green} green and {grey} grey of {total} pixels"
+    );
+    // Shadows on the backdrop (y 0.85..0.95): the card's opaque half casts one (x 0.53..0.62),
+    // its cut-out half does not (x 0.67..0.8), so the masked shadow pass discards too.
+    let dark = |r: f32, g: f32, b: f32| r.max(g).max(b) < 110.0;
+    let (shadow, total) = count(&img, (0.53, 0.62, 0.85, 0.95), dark);
+    assert!(
+        shadow > total * 9 / 10,
+        "the card's opaque half casts no shadow: {shadow} dark of {total} pixels"
+    );
+    let (shadow, total) = count(&img, (0.67, 0.8, 0.85, 0.95), dark);
+    assert!(
+        shadow < total / 20,
+        "the cut-out half casts a shadow: {shadow} dark of {total} pixels"
     );
 }

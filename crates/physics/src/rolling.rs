@@ -89,9 +89,11 @@ pub(crate) fn resist_rolling(sim: &mut Simulation, rid: RegionId) {
         if crr <= 0.0 {
             continue;
         }
-        // Normal impulse this substep, where it acted and along which normal.
+        // Normal impulse this substep, where it acted and along which normal. The impulses
+        // live in the manifolds the solver saw: on terrain, meshes and compounds (one manifold
+        // per triangle or part) those are merged clusters, and the plain ones hold none.
         let (mut jn, mut point, mut normal) = (0.0f32, Vec3::ZERO, Vec3::ZERO);
-        for m in pair.manifolds() {
+        for m in pair.solver_manifolds() {
             for c in &m.points {
                 if c.data.impulse > 0.0 {
                     jn += c.data.impulse;
