@@ -6,7 +6,7 @@
 use engine_core::prelude::*;
 use engine_world::locomotion::VehicleControls;
 use engine_world::physics::PhysicsQueries;
-use engine_world::{ContactKind, Ground, SurfaceId};
+use engine_world::{ContactKind, Ground, SurfaceId, WorldShift};
 
 use crate::animator::Animator;
 use crate::ik::{GroundProbe, IkSurfaces, to_world};
@@ -119,6 +119,22 @@ pub(crate) struct VehicleRuntime {
     roll: f32,
     pitch: f32,
     pub(crate) contacts: Vec<WheelContact>,
+}
+
+impl VehicleRuntime {
+    /// Carry motion history and pending tire contacts into a shifted world frame.
+    pub(crate) fn follow_shift(&mut self, s: &WorldShift) {
+        self.prev_origin = self.prev_origin.map(|o| s.point(o));
+        self.prev_forward = self.prev_forward.map(|f| s.direction(f));
+        self.velocity = s.direction(self.velocity);
+        self.accel = s.direction(self.accel);
+        for c in &mut self.contacts {
+            c.position = s.point(c.position);
+            c.normal = s.direction(c.normal);
+            // Headings are atan2(x, -z): a turn about +Y by a lowers them by a.
+            c.yaw -= s.yaw();
+        }
+    }
 }
 
 impl VehicleRig {

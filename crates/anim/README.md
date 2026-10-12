@@ -56,6 +56,9 @@ compresses and stretches.
 - **Time.** Every animator uses `Time::delta_for(LocalTimeScale)`, so `TimeDilation` slows
   animation and a hero who ignores world dilation keeps moving at full speed. Animators
   beyond `lod_distance` from the simulation focus update at a quarter rate.
+- **World shifts.** On a `WorldShift` (floating origin, a new planet's frame) planted feet,
+  spring chains, muscle jiggle, wheel contacts, look and reach targets and demo paths move
+  with the world, so nothing pops, whips or slides.
 
 ## Using it
 
@@ -79,7 +82,7 @@ Tunable at runtime (JSON, console, scripts, AI agents): `AnimatorSettings`, `Foo
 
 API: `anim.list`, `anim.state` (graph state, curves, events, muscles, gait), `anim.clips`,
 `anim.set_param`, `anim.trigger`, `anim.add_graph`, `anim.set_graph`, `anim.spawn`,
-`anim.demo`.
+`anim.demo`, `anim.demo_restart` (start the paddock's test cases over).
 
 ## The paddock (showcase test cases)
 
@@ -101,6 +104,9 @@ bodies and motion, and every test still runs.
 
 `cargo run -p engine_anim --example anim_gallery --release -- out_dir` renders close-ups of
 each test case (`GALLERY_SEQUENCE=horse:11:12:0.05` renders a strip of one subject).
+In the showcase valley the paddock is the `paddock` zone; `demo::VIEWS` are its close-up
+tour stops, each restarting the paddock and waiting for its moment
+(`cargo run -p showcase --release -- --headless --tour paddock_hammer,paddock_gallop`).
 
 ## Tests
 
@@ -110,7 +116,8 @@ does what it shows (the hammer lands on the tire with both hands on the handle, 
 and relax, the walker climbs and runs, the horse gallops with working haunches); with the
 character files fetched it runs the same checks on the imported people. `tests/render.rs`
 renders a skinned character on the GPU and checks the pixels follow the pose, and that
-textured submeshes each draw with their own surface.
+textured submeshes each draw with their own surface. `tests/world_shift.rs` runs two
+paddocks, shifts one halfway, and checks every pose and place still matches.
 
 ## Not yet
 

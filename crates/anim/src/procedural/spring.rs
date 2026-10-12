@@ -2,7 +2,7 @@
 //! swing with gravity and blow in the wind, then settle back to the animated pose.
 
 use engine_core::prelude::*;
-use engine_world::Env;
+use engine_world::{Env, WorldShift};
 
 use crate::animator::Animator;
 use crate::ik::{to_model, to_world};
@@ -49,6 +49,18 @@ pub struct SpringChains {
     state: Vec<ChainState>,
     #[serde(skip)]
     last_origin: Option<DVec3>,
+}
+
+impl SpringChains {
+    /// Carry the particles into a shifted world frame (floating origin, a planet's frame).
+    pub(crate) fn follow_shift(&mut self, s: &WorldShift) {
+        self.last_origin = self.last_origin.map(|o| s.point(o));
+        for c in &mut self.state {
+            for p in c.pos.iter_mut().chain(c.prev.iter_mut()) {
+                *p = s.direction(*p);
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Default)]
