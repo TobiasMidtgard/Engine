@@ -116,14 +116,34 @@ Storage (the first rule is a test, so CI enforces it):
 
 Adding a file:
 
-1. Add the entry with `sha256 = ""` and push it to a scratch branch named `assets/<area>`
-   (no pull request; CI doesn't run there). The Assets workflow downloads it, copies it to the
-   `asset-mirror` release, and prints `sha256 = "…"` in its log and job summary. Never push an
+1. Put the entry, with `sha256 = ""`, on a fresh scratch branch from main and push it (no pull
+   request; CI doesn't run there, so nothing turns red):
+
+   ```sh
+   git fetch origin main
+   git switch -c assets/<area> origin/main    # from main, so it has the current workflow
+   # add the entry to assets/manifests/<area>.toml, then commit only that file
+   git push origin assets/<area>    # --force if an old assets/<area> branch is still there
+   ```
+
+   The Assets workflow downloads the file, copies it to the `asset-mirror` release, reports
+   `sha256 = "…"` as an annotation on its check run, and deletes the scratch branch.
+2. Read the pin (the run takes a few minutes; `status` turns `completed`):
+
+   ```sh
+   sha=$(git rev-parse HEAD)    # the commit you pushed
+   run=$(gh api repos/TobiasMidtgard/Engine/commits/$sha/check-runs \
+     --jq '.check_runs[] | select(.name == "Mirror fetched assets") | .id')
+   gh api repos/TobiasMidtgard/Engine/check-runs/$run/annotations --jq '.[].message'
+   ```
+
+   Paste the pin into the manifest on your working branch and push that. If the run failed
+   (a bad URL, say), fix the entry, commit and push the scratch branch again. Never push an
    unpinned entry to a pull request: the test job fails until it is pinned.
-2. Paste the pin into the manifest on your working branch, push that, and delete the scratch
-   branch. From then on `cargo run -p fetch-assets` gets the file from the mirror even where
-   the original host is blocked (as it is in the project's cloud sessions). Where the host is
-   reachable, `cargo run -p fetch-assets` fetches unpinned entries and prints the pin itself.
+
+From then on `cargo run -p fetch-assets` gets the file from the mirror even where the original
+host is blocked (as it is in the project's cloud sessions). Where the host is reachable,
+`cargo run -p fetch-assets` fetches unpinned entries and prints the pin itself.
 
 Files made here (a model converted to GLB, a baked texture, an offline recording) have no
 download link:
@@ -134,7 +154,8 @@ download link:
 2. Run `cargo run -p fetch-assets -- publish`. It uploads the file to the mirror and prints the
    pin. In the project's cloud sessions, where uploads are blocked, it pushes a short-lived
    `asset-upload/…` branch instead; the Asset upload workflow copies the files to the mirror and
-   deletes the branch. Paste the pin and push once that workflow has run.
+   deletes the branch. Paste the pin and push once that workflow has run, which is when
+   `git ls-remote origin refs/heads/asset-upload/<id>` prints nothing.
 
 Fetching these needs a GitHub login (`gh auth login` or `GITHUB_TOKEN`) while the repository is
 private, since only the mirror has them.

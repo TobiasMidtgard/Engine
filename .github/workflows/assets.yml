@@ -8,7 +8,8 @@ on:
     paths: ["assets/manifests/**", "tools/fetch-assets/**", ".github/workflows/assets.yml"]
   push:
     # `assets/<area>` scratch branches get pins without a pull request (AGENTS.md, "Adding a
-    # file"); CI doesn't run on them, so an unpinned entry never turns a check red.
+    # file"); CI doesn't run on them, so an unpinned entry never turns a check red. A
+    # successful run deletes the scratch branch.
     branches: [main, "assets/**"]
     paths: ["assets/manifests/**"]
   workflow_dispatch:
@@ -16,9 +17,12 @@ on:
 permissions:
   contents: write
 
-# One mirror writer at a time, so two PRs never race to create the release.
+# One run per branch at a time. A single global group would let a newer queued run cancel a
+# pending one from another branch, whose pins would then never be printed. Runs on different
+# branches may upload at once; the mirror is content-addressed, so the worst case is one
+# failed upload that the next run repeats.
 concurrency:
-  group: asset-mirror
+  group: asset-mirror-${{ github.ref }}
   cancel-in-progress: false
 
 env:
@@ -42,3 +46,8 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           ENGINE_ASSET_MIRROR: ${{ github.repository }}
         run: cargo run -q -p fetch-assets -- mirror
+      # The pins stay readable in this check run's annotations after the branch is gone, and
+      # cloud sessions can't delete branches themselves.
+      - name: Delete the scratch branch
+        if: success() && github.event_name == 'push' && startsWith(github.ref, 'refs/heads/assets/')
+        run: git push origin --delete "$GITHUB_REF_NAME"

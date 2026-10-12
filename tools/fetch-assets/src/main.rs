@@ -581,10 +581,28 @@ fn mirror(root: &Path) -> Result<(), String> {
             .open(summary)
             .and_then(|mut f| writeln!(f, "```\n{report}```"));
     }
+    if std::env::var_os("GITHUB_ACTIONS").is_some() {
+        // Annotations can be read through the API (job summaries can't), so agents get the
+        // pins from the check run: GET /repos/{repo}/check-runs/{id}/annotations.
+        annotate("notice", "Asset pins", &pins);
+        annotate("error", "Asset mirror errors", &errors);
+    }
     if errors.is_empty() {
         Ok(())
     } else {
         Err(format!("{} files could not be mirrored", errors.len()))
+    }
+}
+
+/// Print `lines` as GitHub Actions annotations, a few per annotation (a step keeps only ten).
+fn annotate(level: &str, title: &str, lines: &[String]) {
+    for chunk in lines.chunks(25) {
+        let text = chunk
+            .join("\n")
+            .replace('%', "%25")
+            .replace('\r', "%0D")
+            .replace('\n', "%0A");
+        println!("::{level} title={title}::{text}");
     }
 }
 
