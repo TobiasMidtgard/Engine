@@ -36,6 +36,8 @@ pub fn spawn_camera(commands: &mut Commands) {
         },
         cam,
         t,
+        // Water, fire, smoke and weather grids follow the camera around the valley.
+        engine::world::SimulationFocus::default(),
     ));
 }
 

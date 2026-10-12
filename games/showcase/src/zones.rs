@@ -9,7 +9,7 @@
 //! (landscape, scenery, camera, tour) belongs to the Beautiful showcase world thread.
 //! `TEST_CASES.md` lists every test case, which zone shows it and who owns it.
 
-use crate::landscape::{CaveHill, Cover, Lake, Landscape, Pad, Road};
+use crate::landscape::{CaveHill, Cover, Lake, Landscape, Pad, Road, Scarp, Stream};
 use crate::placeholders as ph;
 use crate::scenery::Library;
 use engine::prelude::*;
@@ -39,21 +39,21 @@ pub const ZONES: &[Zone] = &[
         key: "market",
         name: "Market street (shop, dialogue, inventory, maps)",
         center: DVec3::new(75.0, 0.0, 70.0),
-        radius: 24.0,
+        radius: 30.0,
         module: "ui",
     },
     Zone {
-        key: "stage",
-        name: "Animation stage",
+        key: "paddock",
+        name: "Animation paddock",
         center: DVec3::new(-75.0, 0.0, 70.0),
-        radius: 26.0,
+        radius: 40.0,
         module: "anim",
     },
     Zone {
         key: "physics",
         name: "Physics playground",
         center: DVec3::new(-125.0, 0.0, -35.0),
-        radius: 35.0,
+        radius: 45.0,
         module: "physics",
     },
     Zone {
@@ -87,7 +87,8 @@ pub const ZONES: &[Zone] = &[
     Zone {
         key: "meadow",
         name: "Wildlife meadow",
-        center: DVec3::new(-400.0, 0.0, 10.0),
+        // The lake keeps its shore 0.9 m above the water out this far.
+        center: DVec3::new(375.0, 0.9, -250.0),
         radius: 70.0,
         module: "npc, anim",
     },
@@ -99,11 +100,25 @@ pub const ZONES: &[Zone] = &[
         module: "water",
     },
     Zone {
+        key: "water",
+        name: "Water test area (tarn, falls, stream, pond, boats)",
+        center: DVec3::new(-330.0, 0.0, 30.0),
+        radius: 95.0,
+        module: "water",
+    },
+    Zone {
         key: "footsteps",
         name: "Footstep trail (mud, snow, sand, gravel, puddles)",
         center: DVec3::new(0.0, 0.0, 150.0),
         radius: 40.0,
-        module: "audio, terrain",
+        module: "audio",
+    },
+    Zone {
+        key: "tracks",
+        name: "Footprint lab (tracks in mud, snow and sand)",
+        center: DVec3::new(70.0, 0.0, 205.0),
+        radius: 30.0,
+        module: "terrain",
     },
     Zone {
         key: "cave",
@@ -117,13 +132,13 @@ pub const ZONES: &[Zone] = &[
         name: "Combat arena",
         center: DVec3::new(-125.0, 0.0, 200.0),
         radius: 45.0,
-        module: "npc, movement",
+        module: "npc",
     },
     Zone {
         key: "parkour",
         name: "Movement course (wall-run, slide, dash)",
         center: DVec3::new(-125.0, 0.0, 330.0),
-        radius: 40.0,
+        radius: 45.0,
         module: "movement",
     },
     Zone {
@@ -191,7 +206,7 @@ pub fn zone(key: &str) -> &'static Zone {
 /// Zones with natural ground, where the valley's grass and flowers grow too.
 pub const GRASSY_ZONES: &[&str] = &[
     "market",
-    "stage",
+    "paddock",
     "yard",
     "magic",
     "gallery2d",
@@ -203,10 +218,23 @@ pub const GRASSY_ZONES: &[&str] = &[
     "weather",
 ];
 
+/// The stream's course (x, z), spring first: through the southern woods, over the cliff south
+/// of the lake (the waterfall) and into the lake.
+pub const STREAM: [[f64; 2]; 7] = [
+    [262.0, -440.0],
+    [250.0, -400.0],
+    [229.0, -360.0],
+    [238.0, -322.0],
+    [234.0, -290.0],
+    [232.0, -268.0],
+    [236.0, -235.0],
+];
+
 /// The runway's two ends (x, z): 1.2 km north–south through the airfield.
 pub const RUNWAY: ([f64; 2], [f64; 2]) = ([780.0, -750.0], [780.0, 450.0]);
 
-/// What each zone shows. Module threads swap their placeholder for their demo here.
+/// What each zone shows. Each zone is one line, owned by its module's thread: swap the
+/// placeholder (`ph::…`) for your demo and leave the other lines alone.
 pub fn spawn_demos(
     commands: &mut Commands,
     meshes: &mut Assets<Mesh>,
@@ -218,16 +246,19 @@ pub fn spawn_demos(
         match z.key {
             "plaza" => ph::plaza(commands, lib, z),
             "market" => ph::market(commands, lib, z),
-            "stage" => ph::stage(commands, lib, z),
+            "paddock" => ph::stage(commands, lib, z),
             "physics" => ph::physics(commands, lib, z),
             "yard" => engine_softbody::demo::spawn_demo(commands, z.center),
             "magic" => ph::magic(commands, lib, z),
             "gallery2d" => ph::gallery2d(commands, lib, z),
             "forest" => ph::forest(commands, lib, land, z, rng),
             "meadow" => ph::meadow(commands, lib, z, rng),
-            "lake" => ph::lake(commands, lib, z),
-            "footsteps" => ph::footsteps(commands, lib, z),
-            "cave" => ph::cave(commands, meshes, lib, land, z, rng),
+            "lake" => ph::lake(commands, meshes, lib, land, z),
+            // The water module's test area (engine_water::demo::spawn_demo) goes here.
+            "water" => {}
+            "footsteps" => engine_audio::demo::spawn_demo(commands, z.center),
+            "tracks" => ph::tracks(commands, z),
+            "cave" => ph::cave(commands, z, rng),
             "arena" => ph::arena(commands, lib, z),
             "parkour" => ph::parkour(commands, lib, z),
             "fortress" => engine_destruction::demo::spawn_demo(commands, z.center),
@@ -243,6 +274,115 @@ pub fn spawn_demos(
             "spaceport" => ph::spaceport(commands, lib, z),
             _ => {}
         }
+    }
+}
+
+/// A tour stop a zone's demo brings: eye and target relative to the zone's center.
+#[derive(Debug, Clone)]
+pub struct View {
+    pub key: &'static str,
+    pub name: &'static str,
+    pub eye: [f64; 3],
+    pub target: [f64; 3],
+    pub hour: f32,
+    /// Simulated seconds to wait before the screenshot.
+    pub warmup_secs: f32,
+    /// API calls (name, JSON args) made on arriving and on leaving.
+    pub on_arrive: Vec<(String, String)>,
+    pub on_leave: Vec<(String, String)>,
+}
+
+#[allow(
+    dead_code,
+    reason = "builders for the module threads' demo_views lines"
+)]
+impl View {
+    pub fn new(
+        key: &'static str,
+        name: &'static str,
+        eye: [f64; 3],
+        target: [f64; 3],
+        hour: f32,
+    ) -> Self {
+        Self {
+            key,
+            name,
+            eye,
+            target,
+            hour,
+            warmup_secs: 0.0,
+            on_arrive: Vec::new(),
+            on_leave: Vec::new(),
+        }
+    }
+
+    pub fn warmup(mut self, secs: f32) -> Self {
+        self.warmup_secs = secs;
+        self
+    }
+
+    pub fn on_arrive(mut self, api: &str, json_args: &str) -> Self {
+        self.on_arrive.push((api.into(), json_args.into()));
+        self
+    }
+
+    pub fn on_leave(mut self, api: &str, json_args: &str) -> Self {
+        self.on_leave.push((api.into(), json_args.into()));
+        self
+    }
+}
+
+/// Extra tour stops for each zone's demo, placed right after the zone's own stop. Like
+/// [`spawn_demos`], a module thread edits only its own zone's line.
+pub fn demo_views(z: &Zone) -> Vec<View> {
+    match z.key {
+        "field" => engine_fire::demo::VIEWS
+            .iter()
+            .map(|v| View::new(v.key, v.name, v.eye, v.target, v.hour))
+            .collect(),
+        "yard" => vec![
+            View::new(
+                "yard_banners",
+                "Banners in the wind",
+                [0.0, 3.0, 2.0],
+                [0.0, 7.5, -18.0],
+                14.5,
+            )
+            .warmup(3.0),
+            View::new(
+                "yard_curtains",
+                "Curtains: shot full of holes, and burning",
+                [-12.0, 3.4, 15.0],
+                [-12.0, 3.2, 6.0],
+                14.5,
+            )
+            .warmup(13.0),
+            View::new(
+                "yard_jelly",
+                "Jelly cubes and the wrecking ball",
+                [1.5, 3.2, 7.5],
+                [0.5, 1.8, -1.0],
+                14.5,
+            )
+            .warmup(4.4),
+            View::new(
+                "yard_bridge",
+                "A walker crossing the rope bridge",
+                [8.0, 6.5, 19.0],
+                [11.0, 2.5, 10.0],
+                14.5,
+            )
+            .warmup(8.0),
+            View::new(
+                "yard_cut_bridge",
+                "A rope bridge cut and falling",
+                [-2.0, 5.0, -2.0],
+                [-2.0, 2.8, -11.0],
+                14.5,
+            )
+            .warmup(7.0),
+        ],
+        _ => Vec::new(),
     }
 }
 
@@ -272,14 +412,10 @@ pub fn landscape(seed: u64) -> Landscape {
     });
     let road = |pts: &[[f64; 2]]| Road::new(pts, 7.0, false);
     let roads = vec![
-        // North: plaza, footstep trail, cave.
-        road(&[
-            [0.0, 38.0],
-            [0.0, 80.0],
-            [0.0, 150.0],
-            [0.0, 220.0],
-            [0.0, 262.0],
-        ]),
+        // North: plaza to the footstep trail, and on from it to the cave (the trail's loop is
+        // the path through its zone).
+        road(&[[0.0, 38.0], [0.0, 80.0], [0.0, 128.0]]),
+        road(&[[0.0, 172.0], [0.0, 220.0], [0.0, 262.0]]),
         // South: plaza, magic circle, track.
         road(&[
             [0.0, -38.0],
@@ -291,17 +427,19 @@ pub fn landscape(seed: u64) -> Landscape {
         // East: yard, lake shore.
         road(&[[38.0, -12.0], [90.0, -30.0]]),
         road(&[[158.0, -48.0], [185.0, -78.0], [200.0, -95.0]]),
+        // Footstep trail across to the footprint lab.
+        road(&[[38.0, 160.0], [52.0, 185.0]]),
         // North-east: market, field, spaceport.
         road(&[[28.0, 27.0], [55.0, 52.0]]),
         road(&[[94.0, 88.0], [128.0, 132.0]]),
         road(&[[218.0, 212.0], [300.0, 248.0], [352.0, 268.0]]),
-        // North-west: animation stage, arena, movement course.
+        // North-west: animation paddock, arena, movement course.
         road(&[[-28.0, 27.0], [-55.0, 52.0]]),
         road(&[[-94.0, 88.0], [-115.0, 155.0]]),
         road(&[[-125.0, 245.0], [-125.0, 290.0]]),
-        // West: physics playground, past the forest to the meadow.
+        // West: physics playground, on to the edge of the forest.
         road(&[[-38.0, -12.0], [-90.0, -30.0]]),
-        road(&[[-160.0, -30.0], [-230.0, -30.0], [-332.0, 8.0]]),
+        road(&[[-170.0, -30.0], [-230.0, -40.0], [-285.0, -62.0]]),
         // Arena to the fortress, fortress to the voxel hill.
         road(&[[-170.0, 205.0], [-240.0, 196.0]]),
         road(&[[-335.0, 238.0], [-392.0, 288.0]]),
@@ -310,6 +448,13 @@ pub fn landscape(seed: u64) -> Landscape {
         // Field to the weather station hill and to the smoke range.
         road(&[[190.0, 242.0], [205.0, 300.0], [213.0, 345.0]]),
         road(&[[218.0, 160.0], [258.0, 100.0], [272.0, 82.0]]),
+        // Smoke range down past the lake to the wildlife meadow.
+        road(&[
+            [285.0, 25.0],
+            [330.0, -80.0],
+            [368.0, -150.0],
+            [374.0, -182.0],
+        ]),
         // Magic circle to the 2D gallery.
         road(&[[-28.0, -142.0], [-48.0, -126.0]]),
     ];
@@ -346,58 +491,64 @@ pub fn landscape(seed: u64) -> Landscape {
             (DVec2::new(-900.0, -100.0), 300.0),
             (DVec2::new(1050.0, 300.0), 300.0),
         ],
-        patches: footstep_patches(),
-        surface_ids: surface_ids(),
+        patches: ground_patches(),
+        painters: vec![footstep_trail],
         fields: Vec::new(),
+        // A cliff south of the lake, with the land behind it raised 9 m.
+        scarps: vec![Scarp {
+            a: DVec2::new(300.0, -300.0),
+            b: DVec2::new(150.0, -300.0),
+            height: 9.0,
+            reach: 400.0,
+        }],
+        // From a spring in the southern woods, over the cliff as a waterfall, into the lake.
+        streams: vec![Stream::new(&STREAM, 5.0, 1.4)],
     };
+    land.lay_streams();
     land.plant_fields();
     land
 }
 
-/// Footstep surface ids for every [`Cover`] (from the default surface material table).
-fn surface_ids() -> [engine::world::SurfaceId; crate::landscape::COVER_KINDS] {
-    use Cover::*;
-    let table = SurfaceMaterials::default();
-    let mut ids = [engine::world::SurfaceId::default(); crate::landscape::COVER_KINDS];
-    for c in [
-        Grass, Forest, Dirt, Cobble, Sand, Rock, Snow, LakeBed, Mud, Gravel, Wood, Metal, Puddle,
-    ] {
-        ids[c as usize] = table.id(c.surface_name()).unwrap_or_default();
-    }
-    ids
-}
+/// The footprint lab's ground: 10 m wide strips running 32 m north–south.
+pub const TRACK_STRIPS: [Cover; 4] = [Cover::Mud, Cover::Snow, Cover::Sand, Cover::Grass];
 
-/// The footstep trail: strips of different ground across the road north of the plaza, in walking
-/// order from the plaza (the wooden and metal strips are boards laid on top, see placeholders).
-pub const FOOTSTEP_STRIPS: &[(Cover, f64)] = &[
-    (Cover::Grass, 8.0),
-    (Cover::Mud, 9.0),
-    (Cover::Puddle, 6.0),
-    (Cover::Sand, 8.0),
-    (Cover::Gravel, 8.0),
-    (Cover::Snow, 10.0),
-    (Cover::Wood, 7.0),
-    (Cover::Metal, 6.0),
-    (Cover::Dirt, 8.0),
-];
-
-/// Half width of the footstep trail (m).
-pub const FOOTSTEP_HALF_WIDTH: f64 = 7.0;
-
-/// Rectangles for [`FOOTSTEP_STRIPS`], starting at the south edge of the zone.
-pub fn footstep_patches() -> Vec<(DVec2, DVec2, Cover)> {
-    let z = zone("footsteps");
-    let mut start = z.center.z - FOOTSTEP_STRIPS.iter().map(|s| s.1).sum::<f64>() * 0.5;
+/// Ground patches: the footprint lab's strips.
+pub fn ground_patches() -> Vec<(DVec2, DVec2, Cover)> {
     let mut out = Vec::new();
-    for (cover, len) in FOOTSTEP_STRIPS {
+    let t = zone("tracks").center;
+    for (i, cover) in TRACK_STRIPS.iter().enumerate() {
+        let x0 = t.x - 20.0 + i as f64 * 10.0;
         out.push((
-            DVec2::new(z.center.x - FOOTSTEP_HALF_WIDTH, start),
-            DVec2::new(z.center.x + FOOTSTEP_HALF_WIDTH, start + len),
+            DVec2::new(x0, t.z - 16.0),
+            DVec2::new(x0 + 10.0, t.z + 16.0),
             *cover,
         ));
-        start += len;
     }
     out
+}
+
+/// The audio module's footstep trail, painted into the ground so the player, NPCs and rain find
+/// the same surfaces as the trail's walkers.
+fn footstep_trail(x: f64, z: f64) -> Option<Cover> {
+    let c = zone("footsteps").center;
+    let offset = DVec3::new(x - c.x, 0.0, z - c.z);
+    // The trail is about 54 × 22 m; skip the lookup everywhere else.
+    if offset.x.abs() > 28.0 || offset.z.abs() > 10.0 {
+        return None;
+    }
+    Some(match engine_audio::demo::surface_under(offset)? {
+        "mud" => Cover::Mud,
+        "snow" => Cover::Snow,
+        "ice" => Cover::Ice,
+        "gravel" => Cover::Gravel,
+        "wood" => Cover::Wood,
+        "metal" => Cover::Metal,
+        "concrete" => Cover::Concrete,
+        "sand" => Cover::Sand,
+        "leaves" => Cover::Forest,
+        "water" => Cover::Puddle,
+        _ => Cover::Grass,
+    })
 }
 
 /// The Moon at its real size and distance: 1 737 km radius, 384 400 km away.
