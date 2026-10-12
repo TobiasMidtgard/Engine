@@ -214,8 +214,14 @@ pub const GRASSY_ZONES: &[&str] = &[
     "meadow",
     "parkour",
     "fortress",
-    "voxel",
     "weather",
+];
+
+/// Rectangles inside grassy zones where a module's demo lays its own ground, so no grass grows
+/// there: zone key, then x min..max and z min..max relative to the zone center, meters.
+pub const BARE_FOOTPRINTS: &[(&str, [f64; 2], [f64; 2])] = &[
+    // The weather station's asphalt yard, sand pit and stone patio.
+    ("weather", [-13.0, 12.0], [-8.0, 9.0]),
 ];
 
 /// The stream's course (x, z), spring first: through the southern woods, over the cliff south
@@ -246,7 +252,7 @@ pub fn spawn_demos(
         match z.key {
             "plaza" => ph::plaza(commands, lib, z),
             "market" => ph::market(commands, lib, z),
-            "paddock" => ph::stage(commands, lib, z),
+            "paddock" => engine_anim::demo::spawn_demo(commands, z.center),
             "physics" => engine_physics::demo::spawn_demo(commands, z.center),
             "yard" => engine_softbody::demo::spawn_demo(commands, z.center),
             "magic" => ph::magic(commands, lib, z),
@@ -259,7 +265,7 @@ pub fn spawn_demos(
             "tracks" => ph::tracks(commands, z),
             "cave" => ph::cave(commands, z, rng),
             "arena" => engine_npc::demo::spawn_demo(commands, z.center),
-            "parkour" => ph::parkour(commands, lib, z),
+            "parkour" => engine_movement::demo::spawn_demo(commands, z.center),
             "fortress" => engine_destruction::demo::spawn_demo(commands, z.center),
             "voxel" => ph::voxel(commands, meshes, z, rng),
             "field" => {
