@@ -34,7 +34,19 @@ everything else (streaming, LOD, colliders, ground queries, prints) follows the 
   to the centimeter, and rendering, the `Ground` query, prints and colliders all use it.
 - **Ground cover from afar.** Climate colors (lush, dry, desert, snow by temperature and
   altitude), woods as dark canopy, meadows and fields in patches a few hundred meters
-  across, rock on steep or high ground, beaches.
+  across, worn bare patches, rock on steep or high ground with scree below it, beaches.
+- **Detailed ground materials up close.** Nine PBR materials (turf in tufts over thatch,
+  leaf litter with needles and twigs, soil, churned mud, rock, snow, rippled sand, gravel,
+  concrete) are generated procedurally in `materials.rs` like a node-graph material: height
+  from noise, cells and thousands of scattered blades, leaves and stones, then normals,
+  occlusion, cavity tint and roughness, with mips that widen roughness where normals
+  disagree. They bake once per process on a background thread (about 2 s at 1024²,
+  `TerrainSettings::material_resolution`) and need no files. The shader multiplies each
+  material's detail into the planet palette's color, so the Earth, Moon and Mars share them
+  and the ground looks the same near and far; materials blend by height (stones and blades
+  poke through their neighbors), tiles never visibly repeat (two offset lookups switched by
+  noise), and rock is projected on three axes at three scales so cliffs read as rock from
+  kilometers away. `examples/material_swatches.rs` saves a lit preview of each.
 - **Edits.** `TerrainEdit` messages dig, raise, smooth and paint (sphere, capsule, box).
   Edits are analytic, so they are exact at every level of detail and from any distance, and
   rebuild only the patches and colliders they touch.
@@ -45,8 +57,9 @@ everything else (streaming, LOD, colliders, ground queries, prints) follows the 
   flattened and springs back. Prints outside the grid are kept and re-stamped when it moves.
 - **Weather on the ground.** Wetness, puddles, snow depth and scorch from `SurfaceLayers`
   (written by the weather module) darken and gloss the ground, turn soil to mud, fill
-  footprints and low spots with water (with rain ripples), and cover the ground in snow that
-  footprints cut through. Without `SurfaceLayers`, the global weather in the frame is used.
+  footprints, ruts and the hollows of the mud texture with water (with rain ripples), and
+  cover the ground in snow that settles in hollows and on ledges first and that footprints
+  cut through. Without `SurfaceLayers`, the global weather in the frame is used.
 - **Ocean.** Optional sea surface at sea level (`PlanetTerrain::ocean_surface`) with depth
   tint and waves; turn it off when a water module draws the sea.
 - **Ground query and colliders.** Installs the `Ground` provider (height, normal, surface
@@ -93,7 +106,10 @@ map around the home pad for tuning shapes.
 
 `demo::spawn_demo` builds the Terrain lab: four 32 m strips of mud, snow, sand and grass with
 a person, a dog, a horse and a rover walking them (prints and tracks appear from the first
-frame), plus a dug crater, a trench and a raised mound.
+frame), plus a dug crater, a trench and a raised mound. The walkers make prints but have no
+bodies: attach a character, animal or vehicle from the module that owns it as a child of
+each `DemoWalker` entity (its `Transform` moves along the path facing forward), or pass
+`LabOptions { stand_in_bodies: true }` to `spawn_demo_with` for plain shapes.
 
 ## Known limits (next rounds)
 

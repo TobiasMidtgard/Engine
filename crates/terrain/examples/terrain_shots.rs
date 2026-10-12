@@ -320,7 +320,16 @@ fn main() {
             },
             Transform::from_translation(eye).looking_at(view.target, Vec3::Y),
         ));
-        // Let the walkers lay their trails and the terrain finish streaming.
+        // Let the walkers lay their trails and the terrain finish streaming, with the ground
+        // materials baked.
+        let resolution = app
+            .world
+            .get_resource::<engine_terrain::TerrainSettings>()
+            .map(|s| s.material_resolution)
+            .unwrap_or(1024);
+        while resolution > 0 && engine_terrain::materials::shared(resolution).is_none() {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
         app.update_n(12);
         let path = out.join(format!("{}.png", view.name));
         match capture_now(&mut app.world, &path) {

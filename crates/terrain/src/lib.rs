@@ -8,6 +8,7 @@ pub mod demo;
 pub mod edits;
 pub mod ground;
 pub mod lod;
+pub mod materials;
 pub mod noise;
 pub mod palette;
 pub mod render;
@@ -261,6 +262,9 @@ pub struct TerrainSettings {
     /// Slide vertices toward the coarser patch's shape before it takes over, so detail fades
     /// in and out instead of popping.
     pub geomorph: bool,
+    /// Texels per side of the ground material textures (grass, leaves, rock, snow…), a power
+    /// of two. They bake once per process on a background thread; 0 draws plain colors.
+    pub material_resolution: u32,
 }
 
 impl Default for TerrainSettings {
@@ -274,6 +278,7 @@ impl Default for TerrainSettings {
             collider_samples: 65,
             wireframe_lod: false,
             geomorph: true,
+            material_resolution: 1024,
         }
     }
 }
