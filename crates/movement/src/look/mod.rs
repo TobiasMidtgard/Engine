@@ -8,7 +8,12 @@
 //!
 //! - [`meshgen`]: the mesh toolkit (rounded and chamfered boxes, lofts, lathes, extrusions).
 //! - [`texgen`]: tiling noise and PBR texture baking.
+//! - [`materials`]: shared baked materials (`movement/mat/<name>`): concrete, steel, wood,
+//!   stone, sand, cloth, lacquer…
+//! - [`course`]: set dressing for the parkour course and the duel ring.
 
+pub mod course;
+pub mod materials;
 pub mod meshgen;
 pub mod texgen;
 
@@ -60,7 +65,7 @@ impl Library<'_> {
 pub type Generator = fn(&mut Library);
 
 /// Everything the look generates, in order.
-pub const LIBRARY: &[Generator] = &[];
+pub const LIBRARY: &[Generator] = &[materials::generate, course::generate];
 
 /// A mesh registered by a generator.
 pub fn mesh(key: &str) -> MeshRef {
