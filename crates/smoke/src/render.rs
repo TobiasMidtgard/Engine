@@ -1,6 +1,7 @@
 //! Drawing smoke: each volume's density goes to a 3D texture, a compute pass works out how
-//! much sun, sky and firelight reaches every voxel through the smoke around it, and a raymarch
-//! over the volume's box draws it lit, shadowed, fogged and blended with what's behind.
+//! much sun, sky and firelight reaches every voxel through the smoke around it, a shadow pass
+//! darkens the sunlit ground and props under the smoke, and a raymarch over the volume's box
+//! draws it lit, shadowed, fogged and blended with what's behind.
 
 use bytemuck::{Pod, Zeroable};
 use engine_core::math::{UVec3, Vec3};
@@ -16,13 +17,20 @@ use crate::sim::{SmokeClock, SmokeDomains, SmokeTunnels};
 
 pub const SMOKE_SHADER: &str = include_str!("shaders/smoke.wgsl");
 pub const SMOKE_LIGHT_SHADER: &str = include_str!("shaders/smoke_light.wgsl");
+pub const SMOKE_SHADOW_SHADER: &str = include_str!("shaders/smoke_shadow.wgsl");
 
 /// Bullet tunnels drawn per volume.
 pub const MAX_TUNNELS: usize = 16;
+/// Texels along each side of the tiling detail-noise texture.
+pub const DETAIL_SIZE: u32 = 64;
 /// Firelight is stored divided by this so it fits half floats.
 pub const GLOW_SCALE: f32 = 64.0;
 /// Volumes farther than this aren't drawn, m.
 const VIEW_DISTANCE: f64 = 4000.0;
+/// How far below a volume's floor its shadow still falls, m (as in smoke_shadow.wgsl).
+const SHADOW_DROP: f32 = 30.0;
+/// The longest a volume's shadow stretches away from a low sun, m (as in smoke_shadow.wgsl).
+const SHADOW_REACH: f32 = 120.0;
 
 /// GPU layout of `SmokeParams` in the shaders.
 #[repr(C)]
@@ -55,21 +63,29 @@ struct VolumeGpu {
     light_groups: [wgpu::BindGroup; 2],
     current: usize,
     version: u64,
+    /// `Domain::resampled` when last uploaded.
+    resampled: u64,
     light_dirty: bool,
     /// Distance from the camera to the box center, for back-to-front drawing.
     distance: f64,
+    /// The box is in view (draw the smoke).
     visible: bool,
+    /// The ground it shades is in view (draw the shadow).
+    shadow_visible: bool,
     seen: bool,
 }
 
 #[derive(Default)]
 pub struct SmokeFeature {
     pipeline: Option<wgpu::RenderPipeline>,
+    shadow_pipeline: Option<wgpu::RenderPipeline>,
     light_pipeline: Option<wgpu::ComputePipeline>,
     draw_layout: Option<wgpu::BindGroupLayout>,
     light_layout: Option<wgpu::BindGroupLayout>,
+    /// Billowy tiling noise the raymarch adds detail with (`noise::detail_noise`).
+    detail: Option<(wgpu::Texture, wgpu::TextureView)>,
     volumes: Vec<VolumeGpu>,
-    /// Indices into `volumes`, back to front.
+    /// Indices into `volumes` whose smoke or shadow is in view, back to front.
     order: Vec<usize>,
     pack: Vec<[u16; 4]>,
     frames_since_light: u32,
@@ -198,9 +214,11 @@ impl SmokeFeature {
             light_groups,
             current: 0,
             version: 0,
+            resampled: 0,
             light_dirty: true,
             distance: 0.0,
             visible: false,
+            shadow_visible: false,
             seen: true,
         })
     }
@@ -208,7 +226,8 @@ impl SmokeFeature {
     fn upload(&mut self, gpu: &GpuShared, slot: usize, domain: &Domain, extinction: f32) {
         pack_density(domain, extinction, &mut self.pack);
         let v = &mut self.volumes[slot];
-        let first = v.version == 0;
+        // Both states the first time, and when the smoke jumped (no blending across that).
+        let first = v.version == 0 || v.resampled != domain.resampled;
         v.current = 1 - v.current;
         let dims = v.dims;
         let write = |tex: &wgpu::Texture| {
@@ -232,6 +251,7 @@ impl SmokeFeature {
             write(&v.density[1 - v.current]);
         }
         v.version = domain.version;
+        v.resampled = domain.resampled;
         v.light_dirty = true;
     }
 }
@@ -292,6 +312,7 @@ impl RenderFeature for SmokeFeature {
                 tex3d(2, fs),
                 tex3d(3, fs),
                 tex3d(4, fs),
+                tex3d(6, fs),
                 wgpu::BindGroupLayoutEntry {
                     binding: 5,
                     visibility: fs,
@@ -345,7 +366,7 @@ impl RenderFeature for SmokeFeature {
                     cull_mode: None,
                     ..Default::default()
                 },
-                depth_stencil: Some(depth),
+                depth_stencil: Some(depth.clone()),
                 multisample: Default::default(),
                 fragment: Some(wgpu::FragmentState {
                     module: &shader,
@@ -361,6 +382,51 @@ impl RenderFeature for SmokeFeature {
                 cache: None,
             }),
         );
+
+        // Shadows multiply the scene: dst × src.
+        let multiply = wgpu::BlendState {
+            color: wgpu::BlendComponent {
+                src_factor: wgpu::BlendFactor::Zero,
+                dst_factor: wgpu::BlendFactor::Src,
+                operation: wgpu::BlendOperation::Add,
+            },
+            alpha: wgpu::BlendComponent {
+                src_factor: wgpu::BlendFactor::Zero,
+                dst_factor: wgpu::BlendFactor::One,
+                operation: wgpu::BlendOperation::Add,
+            },
+        };
+        let shadow_shader = gpu.shader("smoke shadow", SMOKE_SHADOW_SHADER, true);
+        self.shadow_pipeline = Some(device.create_render_pipeline(
+            &wgpu::RenderPipelineDescriptor {
+                label: Some("smoke shadow"),
+                layout: Some(&layout),
+                vertex: wgpu::VertexState {
+                    module: &shadow_shader,
+                    entry_point: Some("vs_shadow"),
+                    compilation_options: Default::default(),
+                    buffers: &[],
+                },
+                primitive: wgpu::PrimitiveState {
+                    cull_mode: None,
+                    ..Default::default()
+                },
+                depth_stencil: Some(depth.clone()),
+                multisample: Default::default(),
+                fragment: Some(wgpu::FragmentState {
+                    module: &shadow_shader,
+                    entry_point: Some("fs_shadow"),
+                    compilation_options: Default::default(),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: gpu.formats.hdr,
+                        blend: Some(multiply),
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                }),
+                multiview_mask: None,
+                cache: None,
+            },
+        ));
 
         let light_shader = gpu.shader("smoke light", SMOKE_LIGHT_SHADER, true);
         let light_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -380,6 +446,38 @@ impl RenderFeature for SmokeFeature {
         ));
         self.draw_layout = Some(draw_layout);
         self.light_layout = Some(light_layout);
+
+        let n = DETAIL_SIZE;
+        let detail = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("smoke detail noise"),
+            size: wgpu::Extent3d {
+                width: n,
+                height: n,
+                depth_or_array_layers: n,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D3,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        gpu.queue.write_texture(
+            detail.as_image_copy(),
+            bytemuck::cast_slice(&crate::noise::detail_noise(n)),
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(n * 4),
+                rows_per_image: Some(n),
+            },
+            wgpu::Extent3d {
+                width: n,
+                height: n,
+                depth_or_array_layers: n,
+            },
+        );
+        let view = detail.create_view(&Default::default());
+        self.detail = Some((detail, view));
     }
 
     fn resize(&mut self, _gpu: &GpuShared, _width: u32, _height: u32) {
@@ -418,7 +516,10 @@ impl RenderFeature for SmokeFeature {
         for v in &mut self.volumes {
             v.seen = false;
             v.visible = false;
+            v.shadow_visible = false;
         }
+        let sun =
+            (view.sun_dir.y > 0.0 && view.sun_color.length_squared() > 0.0).then_some(view.sun_dir);
         // Light again now and then even when the smoke is still: the sun and fires move.
         self.frames_since_light += 1;
         let relight = self.frames_since_light >= 6;
@@ -451,12 +552,18 @@ impl RenderFeature for SmokeFeature {
             let center = dom.center();
             v.distance = (center - view.origin).length();
             let radius = size.length() * 0.5;
-            if v.distance > VIEW_DISTANCE + radius as f64
-                || !view.frustum.intersects_sphere(rel_min + size * 0.5, radius)
-            {
+            if v.distance > VIEW_DISTANCE + radius as f64 {
                 continue;
             }
-            v.visible = true;
+            v.visible = view.frustum.intersects_sphere(rel_min + size * 0.5, radius);
+            if let Some(sun) = sun {
+                let (lo, hi) = shadow_bounds(rel_min, size, sun);
+                let half = (hi - lo) * 0.5;
+                v.shadow_visible = view.frustum.intersects_sphere(lo + half, half.length());
+            }
+            if !v.visible && !v.shadow_visible {
+                continue;
+            }
             if v.version != dom.version {
                 uploads.push(slot);
             }
@@ -510,23 +617,34 @@ impl RenderFeature for SmokeFeature {
         }
         self.volumes.retain(|v| v.seen);
         self.order = (0..self.volumes.len())
-            .filter(|&i| self.volumes[i].visible)
+            .filter(|&i| self.volumes[i].visible || self.volumes[i].shadow_visible)
             .collect();
         self.order.sort_by(|&a, &b| {
             self.volumes[b]
                 .distance
                 .total_cmp(&self.volumes[a].distance)
         });
-        self.stats.instances = self.order.len() as u32;
-        self.stats.draw_calls = self.order.len() as u32;
+        let drawn = self
+            .order
+            .iter()
+            .filter(|&&i| self.volumes[i].visible)
+            .count();
+        let shaded = self
+            .order
+            .iter()
+            .filter(|&&i| self.volumes[i].shadow_visible)
+            .count();
+        self.stats.instances = drawn as u32;
+        self.stats.draw_calls = (drawn + shaded) as u32;
         if let Some(mut d) = world.get_resource_mut::<Diagnostics>() {
-            d.set("smoke.drawn", self.order.len() as f64);
+            d.set("smoke.drawn", drawn as f64);
+            d.set("smoke.shadows", shaded as f64);
         }
     }
 
     fn compute(&mut self, encoder: &mut wgpu::CommandEncoder, ctx: &FrameContext) {
         let device = &ctx.gpu.device;
-        let Some(layout) = &self.draw_layout else {
+        let (Some(layout), Some((_, detail))) = (&self.draw_layout, &self.detail) else {
             return;
         };
         for &i in &self.order {
@@ -560,6 +678,10 @@ impl RenderFeature for SmokeFeature {
                         wgpu::BindGroupEntry {
                             binding: 5,
                             resource: wgpu::BindingResource::TextureView(ctx.scene_depth_copy),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 6,
+                            resource: wgpu::BindingResource::TextureView(detail),
                         },
                     ],
                 }));
@@ -596,13 +718,22 @@ impl RenderFeature for SmokeFeature {
         if phase != RenderPhase::Transparent {
             return;
         }
-        let Some(pipeline) = &self.pipeline else {
+        let (Some(pipeline), Some(shadow)) = (&self.pipeline, &self.shadow_pipeline) else {
             return;
         };
+        // Shadows on the scene first, so the smoke itself isn't darkened by them.
+        pass.set_pipeline(shadow);
+        for &i in &self.order {
+            let v = &self.volumes[i];
+            if let (true, Some(group)) = (v.shadow_visible, &v.draw_groups[v.current]) {
+                pass.set_bind_group(1, group, &[]);
+                pass.draw(0..36, 0..1);
+            }
+        }
         pass.set_pipeline(pipeline);
         for &i in &self.order {
             let v = &self.volumes[i];
-            if let Some(group) = &v.draw_groups[v.current] {
+            if let (true, Some(group)) = (v.visible, &v.draw_groups[v.current]) {
                 pass.set_bind_group(1, group, &[]);
                 pass.draw(0..36, 0..1);
             }
@@ -612,6 +743,15 @@ impl RenderFeature for SmokeFeature {
     fn stats(&self) -> FeatureStats {
         self.stats
     }
+}
+
+/// A volume's box (camera-relative min and size) and everything its shadow can fall on: swept
+/// away from the sun and down past its floor, as in smoke_shadow.wgsl.
+pub fn shadow_bounds(min: Vec3, size: Vec3, sun: Vec3) -> (Vec3, Vec3) {
+    let reach = ((size.y + SHADOW_DROP) / sun.y.max(0.05)).min(SHADOW_REACH);
+    let away = -sun * reach;
+    let max = min + size;
+    (min.min(min + away), max.max(max + away))
 }
 
 /// Where a ray from the camera enters and leaves a box (camera-relative), if it hits it.
@@ -632,9 +772,27 @@ mod tests {
 
     #[test]
     fn shaders_validate() {
-        for (name, src) in [("smoke", SMOKE_SHADER), ("smoke light", SMOKE_LIGHT_SHADER)] {
+        for (name, src) in [
+            ("smoke", SMOKE_SHADER),
+            ("smoke light", SMOKE_LIGHT_SHADER),
+            ("smoke shadow", SMOKE_SHADOW_SHADER),
+        ] {
             validate_wgsl(name, &compose_shader(src, true)).unwrap();
         }
+    }
+
+    #[test]
+    fn shadow_bounds_reach_away_from_the_sun() {
+        let min = Vec3::new(-10.0, 0.0, -10.0);
+        let size = Vec3::new(20.0, 10.0, 20.0);
+        // High sun from +x: the shadow falls toward -x and below the floor.
+        let sun = Vec3::new(0.5, 0.8, 0.0).normalize();
+        let (lo, hi) = shadow_bounds(min, size, sun);
+        assert!(lo.x < min.x - 10.0 && lo.y < min.y - 10.0, "{lo}");
+        assert_eq!(hi, min + size);
+        // A sun near the horizon is capped.
+        let (lo, _) = shadow_bounds(min, size, Vec3::new(1.0, 0.01, 0.0).normalize());
+        assert!(lo.x >= min.x - SHADOW_REACH - 1e-3, "{lo}");
     }
 
     #[test]
