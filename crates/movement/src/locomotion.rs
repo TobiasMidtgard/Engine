@@ -17,11 +17,12 @@ use engine_core::transform::look_rotation;
 use engine_world::animation::{AnimationParams, AnimationTrigger, SkeletonPose};
 use engine_world::locomotion::{LocomotionMode, LocomotionState, MoveIntent};
 use engine_world::physics::{
-    CharacterController, CharacterMove, CharacterState, Hit, PhysicsQueries, QueryFilter,
+    CharacterController, CharacterMove, CharacterState, Hit, PhysicsQueries, QueryFilter, Velocity,
 };
 use engine_world::{ContactKind, Gravity, GroundContact, NoiseEvent};
 
 use crate::mover::{Dash, DashRequest, Mantle, Mover, WallContact, flat, move_towards};
+use crate::platform::{self, Deck};
 use crate::profile::MovementProfile;
 
 /// Walls are surfaces whose normal is within this of horizontal (|n·up| below it).
@@ -121,7 +122,7 @@ pub(crate) fn adopt_characters(mut commands: Commands, q: Query<Entity, Unadopte
     }
 }
 
-#[allow(clippy::type_complexity)]
+#[allow(clippy::type_complexity, clippy::too_many_arguments)]
 pub(crate) fn step_movers(
     time: Res<Time>,
     gravity: Res<Gravity>,
@@ -129,6 +130,7 @@ pub(crate) fn step_movers(
     mut out: Outputs,
     mut filter: Local<QueryFilter>,
     movers: Query<(), With<Mover>>,
+    decks: Query<(&Transform, Option<&Velocity>), Without<Mover>>,
     mut q: Query<(
         Entity,
         &mut Transform,
@@ -193,6 +195,21 @@ pub(crate) fn step_movers(
             movers: &movers,
         };
 
+        let rate = if world_dt > 0.0 { dt / world_dt } else { 1.0 };
+        let deck = state
+            .ground_entity
+            .filter(|_| state.grounded)
+            .and_then(|g| decks.get(g).ok().map(|(t, vel)| (g, t, vel)))
+            .map(|(g, t, vel)| Deck {
+                entity: g,
+                transform: t,
+                // Per world second (decks run on world time); `rate` is this character's
+                // seconds per world second.
+                velocity: vel
+                    .map(|v| (v.linear + v.angular.cross((pos - t.translation).as_vec3())) / rate),
+            });
+        platform::ride(&mut m, deck, pos, dt);
+
         let v = step_one(&mut m, p, intent, state, &body, &probe, &mut out, dt);
 
         // Facing: combat target, then where the intent looks, then the motion.
@@ -235,9 +252,9 @@ pub(crate) fn step_movers(
 
         m.velocity = v;
         mv.velocity = v;
-        let rate = if world_dt > 0.0 { dt / world_dt } else { 1.0 };
         loco.mode = m.mode;
-        loco.velocity = v * rate;
+        // The world's frame: the deck's motion plus the character's own on it.
+        loco.velocity = (v + m.platform.map_or(Vec3::ZERO, |d| d.velocity)) * rate;
         loco.grounded = m.grounded;
         loco.stamina = (m.dash_charges / p.dash_charges.max(1) as f32).clamp(0.0, 1.0);
         write_params(&m, &mut params, up);

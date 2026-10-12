@@ -9,6 +9,7 @@ pub mod fx;
 mod locomotion;
 pub mod look;
 pub mod mover;
+pub mod platform;
 pub mod player;
 pub mod profile;
 mod shift;
