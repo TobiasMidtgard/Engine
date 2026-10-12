@@ -1,6 +1,6 @@
 [package]
 name = "engine_npc"
-description = "NPC AI (stub: scope and contracts in README.md)."
+description = "NPC AI: perception with reaction time, memory, utility decisions, cover/flank/high-ground tactics, squads, melee spacing and blocking, shooting, learning the player's habits, navigation, and wildlife."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -8,6 +8,11 @@ license.workspace = true
 [dependencies]
 engine_core.workspace = true
 engine_world.workspace = true
+engine_render.workspace = true
+engine_assets.workspace = true
 bevy_ecs.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+
+[dev-dependencies]
+image.workspace = true
