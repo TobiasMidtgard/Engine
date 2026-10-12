@@ -104,6 +104,7 @@ impl Plugin for PhysicsPlugin {
                  step time (ms), substeps.",
             )
             .add_systems(FixedUpdate, step::physics_step.in_set(SimSet::Physics))
+            .add_systems(FixedUpdate, demo::replay_stations.in_set(SimSet::Gameplay))
             .add_systems(
                 PostUpdate,
                 shift::shift_simulation.in_set(engine_world::WorldShiftSet::Apply),

@@ -1,7 +1,6 @@
 #![doc = include_str!("../README.md")]
 
 pub mod aero;
-pub mod air;
 pub mod api;
 pub mod autopilot;
 pub mod chassis;
@@ -23,12 +22,12 @@ use engine_world::{DamageEvent, GroundContact, NoiseEvent, SmokeEmission, WorldI
 pub use aero::{
     AeroSurface, Aircraft, ControlAxis, Propulsion, Propulsor, PropulsorKind, SurfaceControl,
 };
-pub use air::{AirSample, BodyAtmosphere, VehicleAir};
 pub use autopilot::{Autopilot, AutopilotMode};
 pub use chassis::{
     AeroBody, Vehicle, VehicleForces, VehicleFrame, VehicleKind, VehicleSettings, VehicleTelemetry,
 };
 pub use drivetrain::{Differential, DriveAxle, Drivetrain, EngineSpec, Gearbox};
+pub use engine_world::air::{AirSample, Atmospheres, BodyAtmosphere};
 pub use events::EventTimers;
 pub use ship::{AssistMode, FlightAssist, HeatShield, Spacecraft, Thruster, ThrusterRole};
 pub use tire::{MagicFormula, TireModel};
@@ -54,7 +53,6 @@ pub struct VehiclesPlugin;
 impl Plugin for VehiclesPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<VehicleSettings>()
-            .init_resource::<VehicleAir>()
             .add_message::<GroundContact>()
             .add_message::<NoiseEvent>()
             .add_message::<SmokeEmission>()
@@ -91,6 +89,7 @@ impl Plugin for VehiclesPlugin {
                         events::wheel_events_system,
                         events::engine_events_system,
                         events::heat_damage_system,
+                        events::engine_and_wheel_state_system,
                         ship::propellant_mass_system,
                     )
                         .chain()
@@ -172,9 +171,5 @@ fn register_types(app: &mut App) {
     .register_resource::<VehicleSettings>(
         "Vehicle simulation settings: wheel substeps, ground query fallback, track spacing (m), \
          engine noise interval (s).",
-    )
-    .register_resource::<VehicleAir>(
-        "Atmosphere per gravity body: sea-level density (kg/m³), scale height (m), top (m), \
-         temperature (°C); the flat-world atmosphere follows WeatherState.",
     );
 }

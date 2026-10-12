@@ -161,7 +161,6 @@ fn point_at(
 /// Run every autopilot. Writes `VehicleControls` before the vehicles step.
 #[allow(clippy::type_complexity)]
 pub fn autopilot_system(
-    time: Res<Time>,
     gravity: Res<Gravity>,
     mut q: Query<(
         &mut Autopilot,
@@ -173,15 +172,15 @@ pub fn autopilot_system(
         Option<&mut Spacecraft>,
     )>,
 ) {
-    let dt = time.delta_secs();
-    if dt <= 0.0 {
-        return;
-    }
     q.par_iter_mut().for_each(
         |(mut ap, mut controls, forces, tel, wheels, aircraft, ship)| {
+            let f = forces.frame;
+            let dt = f.dt;
+            if dt <= 0.0 {
+                return;
+            }
             let ap = &mut *ap;
             ap.timer += dt;
-            let f = forces.frame;
             let up = gravity.up_at(f.com);
             let mode = std::mem::take(&mut ap.mode);
             match &mode {

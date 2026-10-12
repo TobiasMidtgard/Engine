@@ -21,7 +21,7 @@ are built, nothing simulates yet) · ⬜ not visible yet
 | 3 | Cars with real suspension, tires and drivetrain | `track` | Cars, planes and spaceships | 🟨 demo in; being checked on the Rapier backend |
 | 4 | Planes with aerodynamic surfaces | `airfield` (1.2 km runway) | Cars, planes and spaceships | 🟨 demo in; being checked on the Rapier backend |
 | 5 | Spaceships with thrusters and RCS, launching to orbit | `spaceport` | Cars, planes and spaceships | 🟨 demo in; being checked on the Rapier backend |
-| 6 | Extremely well built, efficient physics: stacking, joints, ragdolls | `physics` | Physics and rigid bodies | 🟨 |
+| 6 | Extremely well built, efficient physics: stacking, joints, ragdolls | `physics`, `physics_ragdolls`, `physics_wrecking_ball`, `physics_seesaw`, `physics_pile`, `physics_dominoes`, `physics_bridge`, `physics_turntable` | Physics and rigid bodies | ✅ proving ground: a 30-crate tower standing still, 250 crates, drums and balls raining into a bin, a domino run, crash test dummy ragdolls on stairs, a wrecking ball on a chain, a seesaw catapult, a paddle wheel, a plank bridge, a turntable with a rider; stations replay every 20 to 45 s |
 
 ## Water, fire, smoke, weather
 
@@ -29,9 +29,9 @@ are built, nothing simulates yet) · ⬜ not visible yet
 |---|---|---|---|---|
 | 7 | Realistic water that moves efficiently | `water` (test area), `lake`, `falls` | Water simulation | 🟨 test area live (`water`): a tarn with wind waves, a waterfall, stream and pond that really flow; the valley's `lake` and `falls` still show stand-in water |
 | 8 | Water affected by the environment and players (wakes, splashes, rain filling it) | `water` (test area), `lake` | Water simulation | 🟨 test area live (`water`): boat wakes, swimmer and wader ripples, gunfire and depth-charge splashes, blocks floating by density, rain rings and puddles; `lake` next |
-| 9 | Water splashes (particles) | `lake` | Particles and magic effects | ⬜ |
+| 9 | Water splashes (particles) | `magic_splashes`, `water` | Particles and magic effects | ✅ stones dropping into the Spell court's pond throw a crown, spray, foam and ripples; every splash the water module reports (gunfire, depth charges, dropped blocks in `water`) gets spray too |
 | 10 | Fire that spreads through burnable things like grass | `field`, `fire_front`, `fire_trees`, `fire_campfire`, `fire_night` | Fire and smoke | ✅ burning meadow that spreads downwind and regrows |
-| 11 | Smoke that reacts to bullets, wind currents and explosions | `range` | Fire and smoke | 🟨 firing lanes, fans |
+| 11 | Smoke that reacts to bullets, wind currents and explosions | `range`, `smoke_bullets`, `smoke_range`, `smoke_signal`, `smoke_fans` | Fire and smoke | ✅ smoke range on a 50 s loop: grenades lay a screen and signal smoke, turret bursts punch see-through tunnels, a blast blows a hole, fans push the rest across, a cart drives through, a steam vent bends in the wind |
 | 12 | True volumetric clouds with fog | every outdoor viewpoint, `weather_storm`, `stratosphere` | Weather, wind and clouds | ✅ volumetric clouds over the whole valley (fair-weather heaps, storm towers, overcast, fog) that drift with the wind and light up in lightning |
 | 13 | Realistic rain that changes the ground (wet, puddles, mud) | `weather_rain`, `footsteps`, `plaza` | Weather, wind and clouds | ✅ rain and splashes; the station yard gets wet and fills puddles with ripples (`weather_rain`), other wet surfaces darken |
 | 14 | Temperature, weather and wind simulation; dynamic weather that interacts with the world | `weather`, `weather_station` | Weather, wind and clouds | ✅ moving fronts, temperature and wind; the station's wind sock, anemometer, thermometer, rain gauge and snow stake follow the live weather |
@@ -60,11 +60,11 @@ are built, nothing simulates yet) · ⬜ not visible yet
 
 | # | Test case | Zone / viewpoint | Owner | Status |
 |---|---|---|---|---|
-| 25 | Robust animation for humanoids | `paddock`, `arena` | Animation system | ✅ paddock: a hammer athlete, a lifter, a shirt reach, and a walker that climbs a ramp, crosses a deck, takes the stairs with IK-planted feet and runs back |
-| 26 | Animation for animals | `paddock`, `meadow` | Animation system | ✅ paddock: a horse that walks, trots, canters and gallops round an oval, and a spider picking its way over rocks |
-| 27 | Animation for vehicles (wheels, gear, doors) | `paddock` car loop, `track`, `airfield` | Animation system | ✅ paddock: a car with suspension over speed bumps, body roll, steering and spinning wheels |
-| 28 | Muscles that flex and jiggle with movement | `paddock` | Animation system | ✅ the hammer athlete's arms, shoulders and back tense on the strike and relax after; the lifter's double-biceps flex |
-| 29 | Clothing tension and wrinkles during movement | `paddock`, `yard` | Animation system, Cloth, soft bodies and hair | ✅ paddock: sleeves bunch at the elbows and the shirt stretches across the back on a reach |
+| 25 | Robust animation for humanoids | `paddock`, `paddock_hammer`, `paddock_stairs`, `arena` | Animation system | ✅ paddock: a hammer athlete, a lifter, a shirt reach, and a walker that climbs a ramp, crosses a deck, takes the stairs with IK-planted feet and runs back |
+| 26 | Animation for animals | `paddock`, `paddock_gallop`, `paddock_spider`, `meadow` | Animation system | ✅ paddock: a horse that walks, trots, canters and gallops round an oval, and a spider picking its way over rocks |
+| 27 | Animation for vehicles (wheels, gear, doors) | `paddock` car loop, `paddock_car`, `track`, `airfield` | Animation system | ✅ paddock: a car with suspension over speed bumps, body roll, steering and spinning wheels |
+| 28 | Muscles that flex and jiggle with movement | `paddock`, `paddock_hammer`, `paddock_flex`, `paddock_block` | Animation system | ✅ the hammer athlete's arms, shoulders and back tense on the strike and relax after; the lifter's double-biceps flex |
+| 29 | Clothing tension and wrinkles during movement | `paddock`, `paddock_reach`, `yard` | Animation system, Cloth, soft bodies and hair | ✅ paddock: sleeves bunch at the elbows and the shirt stretches across the back on a reach |
 | 30 | Cloth: flags, sails, curtains, clothes | `yard` | Cloth, soft bodies and hair | ✅ flags and pennants in the wind, a curtain shot full of holes, one that burns, a cape |
 | 31 | Soft bodies (jelly, flesh) and ropes (rope bridge) | `yard` | Cloth, soft bodies and hair | ✅ jelly cubes, a clay block that dents, rope bridges, a swing, a bead curtain, a wrecking ball |
 | 32 | Hair and fur for humans and animals | `yard` | Cloth, soft bodies and hair | ✅ a walking mannequin with long hair and a dog with fur |
@@ -80,7 +80,7 @@ are built, nothing simulates yet) · ⬜ not visible yet
 
 | # | Test case | Zone / viewpoint | Owner | Status |
 |---|---|---|---|---|
-| 40 | Beautiful magic spells (particles) | `magic` | Particles and magic effects | 🟨 rune circle glows |
+| 40 | Beautiful magic spells (particles) | `magic`, `magic_spells`, `magic_footsteps`, `magic_impacts` | Particles and magic effects | ✅ Spell court: arcane portal, fireballs and frost bolts hitting a wall, lightning between obelisks, a healing aura, fountain, anvil sparks, torches and fireflies; footprint puffs on mud, snow, sand and water and shot impacts on six materials |
 | 41 | Conversation UI between two people | `market` | UI system and maps | 🟨 two villagers |
 | 42 | Shop UI | `market` | UI system and maps | 🟨 stalls |
 | 43 | Inventory UI | `market` | UI system and maps | ⬜ |
