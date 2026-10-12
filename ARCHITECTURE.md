@@ -191,6 +191,13 @@ data, `shade_surface`, `shadow_factor`, `contact_shadow`, `screen_ao`, `sky_visi
 `sample_env`, `sample_env_rough`, `sky_ambient`, `wind_offset`, `prepass_output`) and `lib_atmosphere.wgsl` (`atmosphere` for aerial perspective,
 `sun_transmittance`, `sky_view_radiance`, `planet_height`, `ray_shell`).
 
+**Shapes** (built): `Shape` builds procedural meshes. Round shapes given `segments: 0` get
+enough segments to keep their outlines smooth at any size. `RoundedCuboid` rounds a box's edges
+and corners, as real objects are, so edges catch the light. `Rock` makes a faceted, weathered
+boulder or stone, different for every seed: break faces with rounded edges, erosion, a flat
+base, and darkened cracks in the vertex color. Prefer these over plain cuboids and spheres for
+anything meant to look real.
+
 **Surface detail** (built): `StandardMaterial::with_detail(strength, scale)` adds procedural
 bumps, mottled color and roughness from 3D noise to any material, textured or not, so plain
 colors (stone, plaster, bark, soil, metal plates) don't look flat; it fades out with distance
