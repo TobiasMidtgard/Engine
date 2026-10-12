@@ -241,10 +241,12 @@ pub enum Command {
         damping: f32,
         wet: f32,
     },
-    /// Air around the listener: density 0 (space) .. 1 (sea level), and a high-frequency cut
-    /// in dB for falling snow (which swallows highs).
+    /// Air around the listener: density 0 (space) .. 1 (sea level), how fast sound travels in
+    /// it relative to sea level (warm air and other planets' air differ), and a
+    /// high-frequency cut in dB for falling snow (which swallows highs).
     SetMedium {
         density: f32,
+        speed_scale: f32,
         hush_db: f32,
     },
     Settings(MixerSettings),
@@ -437,6 +439,8 @@ pub struct Mixer {
     world_rate: f32,
     slow_motion: f32,
     density: f32,
+    /// Speed of sound relative to sea-level air.
+    speed_scale: f32,
     hush_db: f32,
     settings: MixerSettings,
     capture: Option<Sender<Vec<f32>>>,
@@ -470,6 +474,7 @@ impl Mixer {
             world_rate: 1.0,
             slow_motion: 0.0,
             density: 1.0,
+            speed_scale: 1.0,
             hush_db: 0.0,
             settings: MixerSettings::default(),
             capture: None,
@@ -520,8 +525,8 @@ impl Mixer {
                     && sp.delay
                 {
                     let d = sp.position.distance(self.listener.position);
-                    delay +=
-                        (d / self.settings.speed_of_sound.max(1.0) as f64 * self.fs as f64) as u64;
+                    let c = self.settings.speed_of_sound * self.speed_scale;
+                    delay += (d / c.max(1.0) as f64 * self.fs as f64) as u64;
                 }
                 self.voices.push(Voice::new(*play, self.fs, delay));
             }
@@ -622,8 +627,13 @@ impl Mixer {
             Command::SetReverb { room, damping, wet } => {
                 self.reverb_target = (room, damping, wet.max(0.0));
             }
-            Command::SetMedium { density, hush_db } => {
+            Command::SetMedium {
+                density,
+                speed_scale,
+                hush_db,
+            } => {
                 self.density = density.clamp(0.0, 1.0);
+                self.speed_scale = speed_scale.clamp(0.1, 10.0);
                 self.hush_db = hush_db.min(0.0);
             }
             Command::Settings(s) => self.settings = s,
@@ -672,6 +682,7 @@ impl Mixer {
 
         let lis = &self.listener;
         let settings = self.settings;
+        let speed_scale = self.speed_scale;
         let world_rate = self.world_rate;
         let world_hush = self.density;
         for v in &mut self.voices {
@@ -717,7 +728,7 @@ impl Mixer {
                 // Distant sounds are mostly room.
                 send *= 0.35 + 0.65 * smooth01(dist / (r * 12.0));
                 if settings.doppler > 0.0 && dist > 1e-3 {
-                    let c = settings.speed_of_sound.max(1.0);
+                    let c = (settings.speed_of_sound * speed_scale).max(1.0);
                     let v_src = (-dir).dot(sp.velocity).clamp(-0.9 * c, 0.9 * c);
                     let v_lis = dir.dot(lis.velocity).clamp(-0.9 * c, 0.9 * c);
                     let f = ((c + v_lis) / (c - v_src)).clamp(0.5, 2.0);
@@ -1128,6 +1139,7 @@ mod tests {
         let (mut m, tx, _) = mixer();
         tx.send(Command::SetMedium {
             density: 0.0,
+            speed_scale: 1.0,
             hush_db: 0.0,
         })
         .unwrap();
