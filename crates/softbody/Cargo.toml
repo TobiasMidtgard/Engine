@@ -1,6 +1,6 @@
 [package]
 name = "engine_softbody"
-description = "Cloth, ropes and soft bodies (stub: scope and contracts in README.md)."
+description = "Cloth, ropes, rope bridges, soft volumes, hair and fur on one XPBD solver, two-way coupled to rigid bodies."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -8,6 +8,11 @@ license.workspace = true
 [dependencies]
 engine_core.workspace = true
 engine_world.workspace = true
+engine_render.workspace = true
 bevy_ecs.workspace = true
+bytemuck.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+
+[dev-dependencies]
+image.workspace = true
