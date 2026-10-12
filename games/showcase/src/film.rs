@@ -189,7 +189,7 @@ fn run(world: &mut World) {
         if let Err(e) = std::fs::create_dir_all(OUT_DIR) {
             engine::core::log::warn!("film: can't create {OUT_DIR}: {e}");
         }
-        places::visit(world, &places[0]);
+        places::visit_soon(world, &places[0]);
         let mut cams = world.query::<&mut Camera>();
         for mut cam in cams.iter_mut(world) {
             if let Exposure::Auto { speed, .. } = &mut cam.exposure {
