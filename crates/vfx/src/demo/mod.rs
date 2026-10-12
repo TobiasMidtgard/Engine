@@ -2,8 +2,8 @@
 //!
 //! [`spawn_demo`] builds it around a point. Everything moves on its own (the systems below
 //! are added by [`crate::VfxPlugin`]) and follows world time, so slow motion slows the
-//! spells too. Laid out on a 16 m stone disc, with +X east and +Z toward the default
-//! viewpoint:
+//! spells too. Laid out on a paved disc 42 m across, with +X east and +Z toward the default
+//! viewpoint. The props (stone, iron, wood, water and plants) are procedural, see [`art`]:
 //!
 //! | Where | Test case |
 //! |---|---|
@@ -15,10 +15,17 @@
 //! | south | Pond with stones splashing in, footsteps on mud, snow, sand and water, impacts on six materials |
 //! | rim | Torches and fireflies |
 
+pub mod art;
+
+use engine_assets::Assets;
 use engine_core::math::{DVec3, Quat, Rng, Vec3};
 use engine_core::prelude::*;
-use engine_render::{MeshRenderer, PointLight, Shape, StandardMaterial};
+use engine_render::{
+    Image, MaterialRef, Mesh, MeshRef, MeshRenderer, PointLight, StandardMaterial,
+};
 use engine_world::{ContactKind, GroundContact, SurfaceMaterials, WorldImpulse};
+
+use self::art::props;
 
 use crate::emitter::ParticleEffect;
 use crate::events::spawn_effect_at;
@@ -158,66 +165,139 @@ pub struct DemoFalling {
     pub surface_y: f64,
 }
 
-fn mesh(commands: &mut Commands, shape: Shape, material: StandardMaterial, at: Transform) {
-    commands.spawn((at, MeshRenderer::new(shape, material)));
+/// Which part of the golem a limb pivot moves.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LimbKind {
+    Arm,
+    Leg,
+}
+
+/// A golem limb pivot (child of a [`DemoWalker`]): legs step in time with the walker's
+/// footsteps, arms swing against them.
+#[derive(Component, Debug, Clone, Copy)]
+pub struct DemoLimb {
+    pub walker: Entity,
+    /// +1 for the limb on the walker's local +X side, -1 for -X.
+    pub side: f32,
+    pub kind: LimbKind,
+    /// Rest position of the pivot in the walker's space, meters.
+    pub pivot: Vec3,
 }
 
 fn at(p: DVec3) -> Transform {
     Transform::from_translation(p)
 }
 
-fn cylinder(radius: f32, height: f32) -> Shape {
-    Shape::Cylinder {
-        radius,
-        height,
-        segments: 48,
+/// Spawn prop `key` as children of `parent` (so it moves with it). Like [`art::spawn_prop`],
+/// it does nothing without a renderer.
+fn attach_prop(commands: &mut Commands, parent: Entity, key: &str, build: fn() -> art::Prop) {
+    let key = key.to_string();
+    commands.queue(move |world: &mut World| {
+        if !world.contains_resource::<Assets<Mesh>>()
+            || !world.contains_resource::<Assets<StandardMaterial>>()
+            || !world.contains_resource::<Assets<Image>>()
+            || world.get_entity(parent).is_err()
+        {
+            return;
+        }
+        for (mesh, material) in art::register(world, &key, build) {
+            world.spawn((
+                Transform::default(),
+                MeshRenderer::new(MeshRef::Handle(mesh), MaterialRef::Handle(material)),
+                ChildOf(parent),
+            ));
+        }
+    });
+}
+
+/// One of three rough stones for dropping into the pond.
+fn stone_variant(seed: u64) -> (&'static str, fn() -> art::Prop) {
+    match seed % 3 {
+        0 => ("court.stone.0", || props::golem::dropped_stone(0)),
+        1 => ("court.stone.1", || props::golem::dropped_stone(1)),
+        _ => ("court.stone.2", || props::golem::dropped_stone(2)),
     }
 }
 
-fn cuboid(x: f32, y: f32, z: f32) -> Shape {
-    Shape::Cuboid { size: [x, y, z] }
+/// Where everything stands, in court space (meters from the center, on the ground).
+mod layout {
+    /// Paved radius of the court.
+    pub const RADIUS: f64 = 21.0;
+    /// The portal's rune circle and orbiting orbs.
+    pub const PORTAL: (f64, f64) = (0.0, -11.0);
+    /// The gate behind it, clear of the orbs (they circle 4–5 m out).
+    pub const GATE: (f64, f64) = (0.0, -17.4);
+    pub const LANE_Z: f64 = -3.5;
+    pub const CASTER_X: f64 = -12.5;
+    pub const WALL_X: f64 = 9.0;
+    pub const OBELISKS: [(f64, f64); 2] = [(-13.0, 3.0), (-7.0, 9.0)];
+    pub const DAIS: (f64, f64) = (-2.5, 4.0);
+    pub const FOUNTAIN: (f64, f64) = (7.0, 5.5);
+    pub const ANVIL: (f64, f64) = (12.0, 0.5);
+    pub const POND: (f64, f64) = (1.5, 11.5);
+    /// Start of the footstep strip (it runs 8 m toward +X).
+    pub const STRIP: (f64, f64) = (-9.5, 14.0);
+    /// Center of the first impact plate (the others follow 1.5 m apart toward +X).
+    pub const PLATES: (f64, f64) = (5.6, 14.6);
+    pub const TORCH_RADIUS: f64 = 19.6;
+    pub const SHRUBS: [(f64, f64); 4] = [(-22.5, -7.5), (22.0, -10.0), (-20.5, 15.5), (22.5, 13.0)];
+}
+
+/// The parts of the court floor left unpaved because a prop stands there.
+pub fn clearings() -> Vec<props::court::Clearing> {
+    use layout::*;
+    use props::court::Clearing;
+    let v = |(x, z): (f64, f64)| engine_core::math::Vec2::new(x as f32, z as f32);
+    let rect = |c: (f64, f64), hx: f64, hz: f64| Clearing::Rect {
+        min: v((c.0 - hx, c.1 - hz)),
+        max: v((c.0 + hx, c.1 + hz)),
+    };
+    let circle = |c: (f64, f64), r: f32| Clearing::Circle {
+        center: v(c),
+        radius: r,
+    };
+    let mut out = vec![
+        circle(PORTAL, 3.62),
+        rect(GATE, 5.0, 1.8),
+        rect((CASTER_X, LANE_Z), 0.55, 0.55),
+        rect((WALL_X + 0.4, LANE_Z), 0.45, 2.4),
+        circle(DAIS, 2.2),
+        circle(FOUNTAIN, 2.6),
+        circle(POND, 3.75),
+        rect((STRIP.0 + 4.0, STRIP.1), 4.15, 0.95),
+        rect((PLATES.0 + 3.75, PLATES.1), 4.46, 0.71),
+    ];
+    out.extend(OBELISKS.iter().map(|o| rect(*o, 0.8, 0.8)));
+    out
 }
 
 /// Build the Spell court around `origin` (a point on the ground).
 pub fn spawn_demo(commands: &mut Commands, origin: DVec3) {
+    use layout::*;
     let o = |x: f64, y: f64, z: f64| origin + DVec3::new(x, y, z);
-    let stone = StandardMaterial::hex(0x6f6a66).with_roughness(0.8);
-    let dark = StandardMaterial::hex(0x34302e).with_roughness(0.85);
-    let floor = StandardMaterial::hex(0x56514c).with_roughness(0.8);
-    let pale = StandardMaterial::hex(0xb9b2a6).with_roughness(0.7);
-    let metal = StandardMaterial::hex(0x7d828a)
-        .with_metallic(1.0)
-        .with_roughness(0.35);
-    let mut water = StandardMaterial::hex(0x1d4a55)
-        .with_roughness(0.04)
-        .with_alpha(0.88);
-    water.reflectance = 0.5;
+    let ground = |(x, z): (f64, f64)| o(x, 0.0, z);
+    let yaw = |a: f32| Quat::from_rotation_y(a);
 
-    // The court: a dark stone disc with a pale inlaid ring.
-    mesh(commands, cylinder(21.0, 0.06), floor, at(o(0.0, 0.03, 0.0)));
-    mesh(
+    // The court: flagstone courses with a rune ring, a curb and a medallion.
+    art::spawn_prop(commands, "court.floor", at(origin), || {
+        props::court::floor(RADIUS as f32, &clearings())
+    });
+
+    // North: the arcane portal on a summoning floor before the gate, with orbs circling it.
+    let portal = ground(PORTAL);
+    art::spawn_prop(
         commands,
-        Shape::Torus {
-            radius: 20.4,
-            tube: 0.12,
-            segments: 96,
-        },
-        pale,
-        at(o(0.0, 0.04, 0.0)),
+        "court.summoning",
+        at(portal),
+        props::portal::summoning_circle,
     );
-
-    // North: the arcane portal between two standing stones, with orbs circling it.
-    let portal = o(0.0, 0.0, -11.0);
+    art::spawn_prop(
+        commands,
+        "court.gate",
+        at(ground(GATE)),
+        props::portal::gate,
+    );
     commands.spawn((at(portal), ParticleEffect::new("spell.arcane_portal")));
-    for x in [-4.6, 4.6] {
-        mesh(
-            commands,
-            cuboid(0.9, 4.2, 0.7),
-            stone,
-            Transform::from_translation(portal + DVec3::new(x, 2.1, -0.8))
-                .with_rotation(Quat::from_rotation_y(x.signum() as f32 * 0.25)),
-        );
-    }
     for i in 0..3 {
         commands.spawn((
             at(portal + DVec3::new(0.0, 2.5, 0.0)),
@@ -233,22 +313,32 @@ pub fn spawn_demo(commands: &mut Commands, origin: DVec3) {
         ));
     }
 
-    // Middle lane: a caster plinth in the west fires at a target wall in the east.
-    let lane_z = -3.5;
-    let caster = o(-12.5, 1.6, lane_z);
-    let wall = o(9.0, 0.0, lane_z);
-    mesh(
+    // Middle lane: a caster's pedestal in the west fires at a target wall in the east.
+    let caster = o(CASTER_X, 1.6, LANE_Z);
+    let wall = o(WALL_X, 0.0, LANE_Z);
+    let pedestal = o(CASTER_X, 0.0, LANE_Z);
+    art::spawn_prop(
         commands,
-        cylinder(0.6, 1.2),
-        stone,
-        at(caster - DVec3::new(0.0, 1.0, 0.0)),
+        "court.pedestal",
+        at(pedestal),
+        props::lane::caster_pedestal,
     );
-    mesh(
-        commands,
-        cuboid(0.8, 2.8, 3.0),
-        stone,
-        at(wall + DVec3::new(0.4, 1.4, 0.0)),
-    );
+    // The focus crystal bobs gently over the pedestal, around the launch point.
+    let focus = commands
+        .spawn((
+            at(caster),
+            DemoOrbit {
+                center: pedestal,
+                radius: 0.0,
+                speed: 0.0,
+                height: 1.6,
+                bob: 0.04,
+                phase: 0.0,
+            },
+        ))
+        .id();
+    attach_prop(commands, focus, "court.focus", props::lane::focus_crystal);
+    art::spawn_prop(commands, "court.wall", at(wall), props::lane::target_wall);
     commands.spawn((
         at(caster),
         ParticleEffect::new("spell.charge").with_scale(0.6),
@@ -265,34 +355,32 @@ pub fn spawn_demo(commands: &mut Commands, origin: DVec3) {
         },
     ));
 
-    // West: lightning between two obelisks.
-    let a = o(-13.0, 0.0, 3.0);
-    let b = o(-7.0, 0.0, 9.0);
+    // West: lightning between two obelisks, arcing between their crystals.
+    let crystal = props::storm::CRYSTAL_Y as f64;
+    let a = ground(OBELISKS[0]);
+    let b = ground(OBELISKS[1]);
+    art::spawn_prop(
+        commands,
+        "court.obelisk.0",
+        at(a).with_rotation(yaw(0.785)),
+        || props::storm::obelisk(0),
+    );
+    art::spawn_prop(
+        commands,
+        "court.obelisk.1",
+        at(b).with_rotation(yaw(0.785)),
+        || props::storm::obelisk(1),
+    );
     for p in [a, b] {
-        mesh(
-            commands,
-            cuboid(0.7, 4.4, 0.7),
-            dark,
-            at(p + DVec3::new(0.0, 2.2, 0.0)),
-        );
-        mesh(
-            commands,
-            Shape::Sphere {
-                radius: 0.32,
-                segments: 24,
-            },
-            metal,
-            at(p + DVec3::new(0.0, 4.6, 0.0)),
-        );
         commands.spawn((
-            at(p + DVec3::new(0.0, 4.6, 0.0)),
+            at(p + DVec3::new(0.0, crystal, 0.0)),
             ParticleEffect::new("spell.charge").with_scale(0.5),
         ));
     }
     commands.spawn((
-        at(a + DVec3::new(0.0, 4.6, 0.0)),
+        at(a + DVec3::new(0.0, crystal, 0.0)),
         Beam {
-            target: b + DVec3::new(0.0, 4.6, 0.0),
+            target: b + DVec3::new(0.0, crystal, 0.0),
             ..Default::default()
         },
         PointLight {
@@ -308,74 +396,36 @@ pub fn spawn_demo(commands: &mut Commands, origin: DVec3) {
         },
     ));
 
-    // Center: a healing aura on a dais.
-    let dais = o(-2.5, 0.0, 4.0);
-    mesh(
-        commands,
-        cylinder(1.8, 0.16),
-        pale,
-        at(dais + DVec3::new(0.0, 0.08, 0.0)),
-    );
+    // Center: a healing aura on a stepped dais.
+    let dais = ground(DAIS);
+    art::spawn_prop(commands, "court.dais", at(dais), props::water::dais);
     commands.spawn((
-        at(dais + DVec3::new(0.0, 0.17, 0.0)),
+        // Just above the inlaid flower in the middle of the dais.
+        at(dais + DVec3::new(0.0, props::water::DAIS_TOP as f64 + 0.012, 0.0)),
         ParticleEffect::new("spell.heal_aura"),
     ));
 
     // East: a fountain and an anvil.
-    let fountain = o(7.0, 0.0, 5.5);
-    mesh(
+    let fountain = ground(FOUNTAIN);
+    art::spawn_prop(
         commands,
-        cylinder(2.4, 0.45),
-        stone,
-        at(fountain + DVec3::new(0.0, 0.225, 0.0)),
-    );
-    mesh(
-        commands,
-        Shape::Torus {
-            radius: 2.3,
-            tube: 0.16,
-            segments: 64,
-        },
-        pale,
-        at(fountain + DVec3::new(0.0, 0.5, 0.0)),
-    );
-    mesh(
-        commands,
-        cylinder(2.2, 0.04),
-        water,
-        at(fountain + DVec3::new(0.0, 0.5, 0.0)),
-    );
-    mesh(
-        commands,
-        cylinder(0.18, 0.6),
-        pale,
-        at(fountain + DVec3::new(0.0, 0.8, 0.0)),
-    );
-    mesh(
-        commands,
-        cylinder(0.45, 0.08),
-        pale,
-        at(fountain + DVec3::new(0.0, 1.1, 0.0)),
+        "court.fountain",
+        at(fountain),
+        props::water::fountain,
     );
     commands.spawn((
-        at(fountain + DVec3::new(0.0, 1.12, 0.0)),
+        at(fountain + DVec3::new(0.0, props::water::NOZZLE as f64, 0.0)),
         ParticleEffect::new("water.fountain"),
     ));
-    let anvil = o(12.0, 0.0, 0.5);
-    mesh(
+    let anvil = ground(ANVIL);
+    art::spawn_prop(
         commands,
-        cuboid(0.5, 0.7, 0.5),
-        dark,
-        at(anvil + DVec3::new(0.0, 0.35, 0.0)),
-    );
-    mesh(
-        commands,
-        cuboid(1.1, 0.3, 0.5),
-        metal,
-        at(anvil + DVec3::new(0.0, 0.85, 0.0)),
+        "court.anvil",
+        at(anvil).with_rotation(yaw(0.5)),
+        props::forge::anvil,
     );
     commands.spawn((
-        at(anvil + DVec3::new(0.0, 1.0, 0.0)),
+        at(anvil + DVec3::new(0.0, props::forge::FACE as f64, 0.0)),
         DemoRepeater {
             effect: "impact.metal".into(),
             period: 1.1,
@@ -386,23 +436,9 @@ pub fn spawn_demo(commands: &mut Commands, origin: DVec3) {
     ));
 
     // South: a pond that stones fall into.
-    let pond = o(1.5, 0.0, 11.5);
-    mesh(
-        commands,
-        cylinder(3.2, 0.02),
-        water,
-        at(pond + DVec3::new(0.0, 0.07, 0.0)),
-    );
-    mesh(
-        commands,
-        Shape::Torus {
-            radius: 3.35,
-            tube: 0.22,
-            segments: 64,
-        },
-        stone,
-        at(pond + DVec3::new(0.0, 0.08, 0.0)),
-    );
+    let pond = ground(POND);
+    let water = props::water::POND_WATER as f64;
+    art::spawn_prop(commands, "court.pond", at(pond), props::water::pond);
     commands.spawn((
         at(pond),
         DemoDropper {
@@ -414,90 +450,103 @@ pub fn spawn_demo(commands: &mut Commands, origin: DVec3) {
         },
     ));
     // A stone already on its way down, so the pond splashes as soon as the court loads.
-    commands.spawn((
-        at(pond + DVec3::new(0.5, 1.2, -0.4)),
-        MeshRenderer::new(
-            Shape::Sphere {
-                radius: 0.16,
-                segments: 16,
+    let first = commands
+        .spawn((
+            at(pond + DVec3::new(0.5, 1.2, -0.4)),
+            DemoFalling {
+                velocity: 0.0,
+                surface_y: pond.y + water + 0.01,
             },
-            StandardMaterial::hex(0x55504a).with_roughness(0.8),
-        ),
-        DemoFalling {
-            velocity: 0.0,
-            surface_y: pond.y + 0.08,
-        },
-    ));
+        ))
+        .id();
+    let (key, build) = stone_variant(0);
+    attach_prop(commands, first, key, build);
 
-    // South-west: footsteps across mud, snow, sand and shallow water.
-    let start = o(-9.5, 0.0, 14.0);
-    let patches = [
-        ("mud", 0x3d2b1f, 0.6),
-        ("snow", 0xf2f4f7, 0.55),
-        ("sand", 0xc9b28a, 0.9),
-        ("water", 0x2a5562, 0.05),
-    ];
-    for (i, (_, hex, rough)) in patches.iter().enumerate() {
-        let mut m = StandardMaterial::hex(*hex).with_roughness(*rough);
-        if i == 3 {
-            m = m.with_alpha(0.85);
-        }
-        mesh(
-            commands,
-            cuboid(2.0, 0.02, 1.6),
-            m,
-            at(start + DVec3::new(1.0 + i as f64 * 2.0, 0.07, 0.0)),
-        );
-    }
-    commands.spawn((
-        at(start + DVec3::new(0.0, 0.9, 0.0)),
-        MeshRenderer::new(
-            Shape::Capsule {
-                radius: 0.28,
-                height: 1.3,
-                segments: 16,
+    // South-west: footsteps across mud, snow, sand and shallow water, walked by a stone golem.
+    let start = ground(STRIP);
+    art::spawn_prop(
+        commands,
+        "court.patches",
+        at(start),
+        props::beds::footstep_patches,
+    );
+    let patches = ["mud", "snow", "sand", "water"];
+    let walker = commands
+        .spawn((
+            at(start + DVec3::new(0.0, 0.9, 0.0)),
+            DemoWalker {
+                a: start + DVec3::new(0.2, 0.0, 0.0),
+                b: start + DVec3::new(7.8, 0.0, 0.0),
+                speed: 1.6,
+                stride: 0.7,
+                patches: patches
+                    .iter()
+                    .enumerate()
+                    .map(|(i, name)| (1.8 + i as f64 * 2.0, name.to_string()))
+                    .collect(),
+                along: 0.0,
+                forward: true,
+                since_step: 0.0,
+                left: false,
             },
-            stone,
-        ),
-        DemoWalker {
-            a: start + DVec3::new(0.2, 0.0, 0.0),
-            b: start + DVec3::new(7.8, 0.0, 0.0),
-            speed: 1.6,
-            stride: 0.7,
-            patches: patches
-                .iter()
-                .enumerate()
-                .map(|(i, (name, _, _))| (1.8 + i as f64 * 2.0, name.to_string()))
-                .collect(),
-            along: 0.0,
-            forward: true,
-            since_step: 0.0,
-            left: false,
-        },
-    ));
+        ))
+        .id();
+    attach_prop(
+        commands,
+        walker,
+        "court.golem.body",
+        props::golem::golem_body,
+    );
+    for side in [-1.0f32, 1.0] {
+        for (kind, pivot, key, build) in [
+            (
+                LimbKind::Arm,
+                props::golem::SHOULDER,
+                "court.golem.arm",
+                props::golem::golem_arm as fn() -> art::Prop,
+            ),
+            (
+                LimbKind::Leg,
+                props::golem::HIP,
+                "court.golem.leg",
+                props::golem::golem_leg,
+            ),
+        ] {
+            let pivot = pivot * Vec3::new(side, 1.0, 1.0);
+            let limb = commands
+                .spawn((
+                    at(pivot.as_dvec3()),
+                    ChildOf(walker),
+                    DemoLimb {
+                        walker,
+                        side,
+                        kind,
+                        pivot,
+                    },
+                ))
+                .id();
+            attach_prop(commands, limb, key, build);
+        }
+    }
 
     // South-east: shot impacts on six materials, one after another.
-    let row = o(5.6, 0.0, 14.6);
+    let row = ground(PLATES);
+    art::spawn_prop(
+        commands,
+        "court.plates",
+        at(row),
+        props::beds::impact_plates,
+    );
     let plates = [
-        ("impact.rock", 0x8a8580),
-        ("impact.wood", 0x8a6239),
-        ("impact.metal", 0xc8ccd4),
-        ("impact.dirt", 0x5c4632),
-        ("impact.snow", 0xf2f4f7),
-        ("impact.sand", 0xc9b28a),
+        "impact.rock",
+        "impact.wood",
+        "impact.metal",
+        "impact.dirt",
+        "impact.snow",
+        "impact.sand",
     ];
-    for (i, (effect, hex)) in plates.iter().enumerate() {
+    for (i, effect) in plates.iter().enumerate() {
         let p = row + DVec3::new(i as f64 * 1.5, 0.0, 0.0);
-        let mut m = StandardMaterial::hex(*hex).with_roughness(0.8);
-        if effect.ends_with("metal") {
-            m = m.with_metallic(1.0).with_roughness(0.35);
-        }
-        mesh(
-            commands,
-            cuboid(1.2, 0.1, 1.2),
-            m,
-            at(p + DVec3::new(0.0, 0.05, 0.0)),
-        );
         commands.spawn((
             at(p + DVec3::new(0.0, 0.1, 0.0)),
             DemoRepeater {
@@ -510,44 +559,71 @@ pub fn spawn_demo(commands: &mut Commands, origin: DVec3) {
         ));
     }
 
-    // The rim: torches, and fireflies in the bushes beyond.
+    // The rim: braziers, and fireflies in the shrubs beyond.
     for i in 0..8 {
         let angle = (i as f64 + 0.5) * std::f64::consts::TAU / 8.0;
-        let p = o(angle.cos() * 19.6, 0.0, angle.sin() * 19.6);
-        mesh(
+        let p = o(angle.cos() * TORCH_RADIUS, 0.0, angle.sin() * TORCH_RADIUS);
+        art::spawn_prop(
             commands,
-            cylinder(0.07, 1.9),
-            metal,
-            at(p + DVec3::new(0.0, 0.95, 0.0)),
-        );
-        mesh(
-            commands,
-            cylinder(0.16, 0.18),
-            dark,
-            at(p + DVec3::new(0.0, 1.95, 0.0)),
+            "court.brazier",
+            at(p).with_rotation(yaw(-angle as f32)),
+            props::rim::brazier,
         );
         commands.spawn((
-            at(p + DVec3::new(0.0, 2.05, 0.0)),
+            at(p + DVec3::new(0.0, props::rim::COALS as f64, 0.0)),
             ParticleEffect::new("fire.torch"),
         ));
     }
-    let bush = StandardMaterial::hex(0x2f4a24)
-        .with_roughness(0.8)
-        .with_subsurface(0.4);
-    for (x, z) in [(-22.5, -7.5), (22.0, -10.0), (-20.5, 15.5), (22.5, 13.0)] {
-        for k in 0..3 {
-            let off = DVec3::new(k as f64 * 0.9 - 0.9, 0.0, (k % 2) as f64 * 0.6);
-            mesh(
+    for (i, (x, z)) in SHRUBS.iter().enumerate() {
+        let spot = o(*x, 0.0, *z);
+        let turn = yaw((*z).atan2(*x) as f32 + std::f32::consts::FRAC_PI_2);
+        if i % 2 == 0 {
+            art::spawn_prop(
                 commands,
-                Shape::Sphere {
-                    radius: 0.9 - k as f32 * 0.12,
-                    segments: 20,
-                },
-                bush,
-                at(o(x, 0.55, z) + off),
+                "court.shrubs.0",
+                at(spot).with_rotation(turn),
+                || props::rim::shrubs(0),
+            );
+        } else {
+            art::spawn_prop(
+                commands,
+                "court.shrubs.1",
+                at(spot).with_rotation(turn),
+                || props::rim::shrubs(1),
             );
         }
-        commands.spawn((at(o(x, 1.0, z)), ParticleEffect::new("ambient.fireflies")));
+        commands.spawn((at(o(*x, 1.0, *z)), ParticleEffect::new("ambient.fireflies")));
+    }
+}
+
+/// The demo's own world positions, for following a [`engine_world::WorldShift`].
+#[derive(SystemParam)]
+pub struct ShiftQueries<'w, 's> {
+    casters: Query<'w, 's, &'static mut DemoCaster>,
+    projectiles: Query<'w, 's, &'static mut DemoProjectile>,
+    orbits: Query<'w, 's, &'static mut DemoOrbit>,
+    walkers: Query<'w, 's, &'static mut DemoWalker>,
+    falling: Query<'w, 's, &'static mut DemoFalling>,
+}
+
+/// Move the demo's waypoints into a new reference frame (the demo itself assumes +Y is up).
+pub fn shift(q: &mut ShiftQueries, s: &engine_world::WorldShift) {
+    for mut c in &mut q.casters {
+        c.target = s.point(c.target);
+    }
+    for mut p in &mut q.projectiles {
+        p.from = s.point(p.from);
+        p.to = s.point(p.to);
+    }
+    for mut o in &mut q.orbits {
+        o.center = s.point(o.center);
+    }
+    for mut w in &mut q.walkers {
+        w.a = s.point(w.a);
+        w.b = s.point(w.b);
+    }
+    for mut f in &mut q.falling {
+        f.surface_y += s.translation.y;
     }
 }
 
@@ -684,14 +760,20 @@ pub fn run_lightning(
     }
 }
 
-/// Walks the footstep tester and writes its footsteps.
+/// Walks the footstep tester and writes its footsteps; poses the golem's limbs in step.
+///
+/// Each foot lands half a stride ahead of the body and is pushed back under it until the
+/// other foot lands, so a footstep is written where (and when) a foot comes down. The body
+/// dips while the legs are spread and rises as they pass.
 pub fn run_walkers(
     time: Res<Time>,
     materials: Option<Res<SurfaceMaterials>>,
     mut walkers: Query<(Entity, &mut DemoWalker, &mut Transform)>,
+    mut limbs: Query<(&DemoLimb, &mut Transform), Without<DemoWalker>>,
     mut contacts: MessageWriter<GroundContact>,
 ) {
     let dt = time.delta_secs() as f64;
+    let leg = props::golem::LEG as f64;
     for (entity, mut w, mut t) in &mut walkers {
         let length = w.a.distance(w.b);
         let step = w.speed * dt;
@@ -710,33 +792,67 @@ pub fn run_walkers(
         }
         let dir = (w.b - w.a).normalize_or_zero();
         let pos = w.a + dir * w.along;
-        t.translation = pos + DVec3::new(0.0, 0.9, 0.0);
-        w.since_step += step;
-        if w.since_step < w.stride {
-            continue;
-        }
-        w.since_step -= w.stride;
-        w.left = !w.left;
         let heading = if w.forward { dir } else { -dir };
-        let side = DVec3::new(-heading.z, 0.0, heading.x) * if w.left { 0.15 } else { -0.15 };
-        let surface = w
-            .patches
-            .iter()
-            .find(|(end, _)| w.along <= *end)
-            .or(w.patches.last())
-            .and_then(|(_, name)| materials.as_ref().and_then(|m| m.id(name)));
-        contacts.write(GroundContact {
-            position: pos + side + DVec3::new(0.0, 0.08, 0.0),
-            normal: Vec3::Y,
-            // A heavy stone golem, so its footprints kick up enough to see from afar.
-            size: [0.18, 0.4],
-            yaw: heading.x.atan2(heading.z) as f32,
-            load_kg: 250.0,
-            speed: w.speed as f32,
-            kind: ContactKind::Foot,
-            surface,
-            entity: Some(entity),
-        });
+        w.since_step += step;
+        if w.since_step >= w.stride {
+            w.since_step -= w.stride;
+            w.left = !w.left;
+            let side = DVec3::new(-heading.z, 0.0, heading.x) * if w.left { 0.15 } else { -0.15 };
+            // The foot comes down half a stride ahead, on whatever patch is there.
+            let lead = if w.forward { 0.5 } else { -0.5 } * w.stride;
+            let foot = (w.along + lead).clamp(-0.1, length + 0.1);
+            let surface = w
+                .patches
+                .iter()
+                .find(|(end, _)| foot <= *end)
+                .or(w.patches.last())
+                .and_then(|(_, name)| materials.as_ref().and_then(|m| m.id(name)));
+            contacts.write(GroundContact {
+                position: w.a + dir * foot + side + DVec3::new(0.0, 0.08, 0.0),
+                normal: Vec3::Y,
+                // A heavy stone golem, so its footprints kick up enough to see from afar.
+                size: [0.18, 0.4],
+                yaw: heading.x.atan2(heading.z) as f32,
+                load_kg: 250.0,
+                speed: w.speed as f32,
+                kind: ContactKind::Foot,
+                surface,
+                entity: Some(entity),
+            });
+        }
+        // Body: over the planted foot, dipping as the legs spread; turning to face its way.
+        let p = (w.since_step / w.stride.max(1e-3)).clamp(0.0, 1.0);
+        let spread = ((0.5 - p) * w.stride / leg).clamp(-0.95, 0.95).asin();
+        t.translation = pos + DVec3::new(0.0, 0.065 + leg * spread.cos() + 0.2, 0.0);
+        let facing = Quat::from_rotation_y((-heading.x).atan2(-heading.z) as f32);
+        let turn = 1.0 - (-8.0 * dt as f32).exp();
+        t.rotation = t.rotation.slerp(facing, turn);
+    }
+    for (limb, mut lt) in &mut limbs {
+        let Ok((_, w, _)) = walkers.get(limb.walker) else {
+            continue;
+        };
+        let p = (w.since_step / w.stride.max(1e-3)).clamp(0.0, 1.0);
+        // The planted foot is the one that last came down (`left` means local +X).
+        let planted = w.left == (limb.side > 0.0);
+        let reach = if planted { 0.5 - p } else { p - 0.5 } * w.stride;
+        let swing = (reach / leg).clamp(-0.95, 0.95).asin() as f32;
+        match limb.kind {
+            LimbKind::Leg => {
+                let lift = if planted {
+                    0.0
+                } else {
+                    (p * std::f64::consts::PI).sin() as f32 * 0.09
+                };
+                lt.translation = (limb.pivot + Vec3::Y * lift).as_dvec3();
+                lt.rotation = Quat::from_rotation_x(swing);
+            }
+            LimbKind::Arm => {
+                lt.translation = limb.pivot.as_dvec3();
+                lt.rotation =
+                    Quat::from_rotation_x(-swing * 0.7) * Quat::from_rotation_z(limb.side * 0.1);
+            }
+        }
     }
 }
 
@@ -760,25 +876,31 @@ pub fn run_droppers(
         let r = d.radius * (rng.f32() as f64).sqrt();
         let surface = gt.translation();
         let p = surface + DVec3::new(angle.cos() * r, d.height, angle.sin() * r);
-        commands.spawn((
-            at(p),
-            MeshRenderer::new(
-                Shape::Sphere {
-                    radius: 0.16,
-                    segments: 16,
+        let turned = Quat::from_euler(
+            engine_core::math::EulerRot::YXZ,
+            rng.range(0.0, 6.3),
+            rng.range(0.0, 6.3),
+            0.0,
+        );
+        let stone = commands
+            .spawn((
+                at(p).with_rotation(turned),
+                DemoFalling {
+                    velocity: 0.0,
+                    surface_y: surface.y + 0.08,
                 },
-                StandardMaterial::hex(0x55504a).with_roughness(0.8),
-            ),
-            DemoFalling {
-                velocity: 0.0,
-                surface_y: surface.y + 0.08,
-            },
-        ));
+            ))
+            .id();
+        let (key, build) = stone_variant(d.seed);
+        attach_prop(&mut commands, stone, key, build);
     }
     let dt = dt as f64;
     for (entity, mut f, mut t) in &mut stones {
         f.velocity -= 9.81 * dt;
         t.translation.y += f.velocity * dt;
+        // Tumble as it falls.
+        let axis = Vec3::new(1.0, 0.4, (entity.to_bits() % 5) as f32 * 0.3 - 0.6).normalize();
+        t.rotation = Quat::from_axis_angle(axis, 3.0 * dt as f32) * t.rotation;
         if t.translation.y <= f.surface_y {
             let p = DVec3::new(t.translation.x, f.surface_y, t.translation.z);
             spawn_effect_at(&mut commands, "water.splash", p, Vec3::Y, 0.8);
@@ -833,7 +955,7 @@ mod tests {
     #[test]
     fn every_effect_the_demo_uses_exists() {
         let lib = EffectLibrary::with_builtins();
-        let src = include_str!("demo.rs");
+        let src = include_str!("mod.rs");
         let mut checked = 0;
         for part in src.split('"').skip(1).step_by(2) {
             let is_effect = ["spell.", "magic.", "water.", "impact.", "fire.", "ambient."]

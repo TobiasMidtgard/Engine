@@ -19,15 +19,17 @@
 use bevy_ecs::prelude::*;
 use bytemuck::Zeroable;
 use engine_core::diagnostics::Diagnostics;
-use engine_core::math::{DVec3, Vec3};
+use engine_core::math::{DVec3, Mat3, Vec3};
 use engine_render::wgpu;
 use engine_render::{
     FeatureStats, FrameContext, GpuShared, GrowBuffer, RenderFeature, RenderPhase, RenderSettings,
     ViewData,
 };
 
+use crate::effect::Sprite;
 use crate::emitter::{ParticleFrame, PoolRange, VfxSettings};
 use crate::gpu::{CHUNK, GpuEmitter, GpuParticle, GpuSim, GpuSpawn, GpuUpdate, RibbonVertex};
+use crate::shift::PendingShift;
 use crate::trail::{Ribbons, build_ribbon};
 
 /// Shared particle structs and helpers.
@@ -80,6 +82,8 @@ struct Gpu {
     ribbons: GrowBuffer,
     sim_group: Option<wgpu::BindGroup>,
     draw_group: Option<wgpu::BindGroup>,
+    /// View size the bind groups' scene copies were made for.
+    bound_size: (u32, u32),
 }
 
 /// Draws particles, trails and beams. Added by [`crate::VfxPlugin`].
@@ -101,6 +105,10 @@ pub struct ParticleFeature {
     /// Run the simulation in this frame's `compute` (false when re-rendering a frame).
     simulate: bool,
     soft: bool,
+    /// Some emitter this frame draws heat haze (needs the scene color copy).
+    haze: bool,
+    /// Colliding particles also hit last frame's scene depth (needs the scene depth copy).
+    scene_collision: bool,
     skipped: u32,
     stats: FeatureStats,
 }
@@ -201,6 +209,16 @@ impl RenderFeature for ParticleFeature {
                     },
                     count: None,
                 },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 5,
+                    visibility: compute,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Depth,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
             ],
         });
         let draw_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -213,6 +231,16 @@ impl RenderFeature for ParticleFeature {
                     visibility: wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::Texture {
                         sample_type: wgpu::TextureSampleType::Depth,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
                         view_dimension: wgpu::TextureViewDimension::D2,
                         multisampled: false,
                     },
@@ -348,6 +376,7 @@ impl RenderFeature for ParticleFeature {
             ),
             sim_group: None,
             draw_group: None,
+            bound_size: (0, 0),
         });
     }
 
@@ -380,6 +409,8 @@ impl RenderFeature for ParticleFeature {
             return;
         }
         self.soft = settings.soft_particles;
+        self.scene_collision = settings.scene_collision;
+        self.haze = false;
 
         // Ribbons follow the camera every time the frame is drawn.
         self.ribbon_vertices.clear();
@@ -404,17 +435,36 @@ impl RenderFeature for ParticleFeature {
             );
         }
 
-        let Some(frame) = world.get_resource::<ParticleFrame>() else {
+        let Some(frame_number) = world.get_resource::<ParticleFrame>().map(|f| f.frame) else {
             self.draws.clear();
             return;
         };
-        if self.last_frame == Some(frame.frame) {
+        if self.last_frame == Some(frame_number) {
             // Drawn again in the same frame (a screenshot): show the same particles.
             self.fill_stats();
             return;
         }
-        self.last_frame = Some(frame.frame);
+        self.last_frame = Some(frame_number);
         self.simulate = true;
+        // If the world re-anchored since the last step, the last camera origin moves with it
+        // and the particles turn and pick up the old frame's motion.
+        let reanchor = world
+            .get_resource_mut::<PendingShift>()
+            .and_then(|mut p| p.0.take());
+        let mut turn = None;
+        if let (Some(s), Some(last)) = (reanchor, self.last_origin.as_mut()) {
+            let old = *last;
+            *last = s.point(old);
+            if !s.is_translation_only()
+                || s.velocity != DVec3::ZERO
+                || s.angular_velocity != DVec3::ZERO
+            {
+                let r = s.rotation.as_quat();
+                let carried = s.velocity + s.angular_velocity.cross(s.rotation * old);
+                turn = Some((r, carried.as_vec3(), s.angular_velocity.as_vec3()));
+            }
+        }
+        let frame = world.resource::<ParticleFrame>();
         let shift = self
             .last_origin
             .map_or(Vec3::ZERO, |o| (o - view.origin).as_vec3());
@@ -466,6 +516,13 @@ impl RenderFeature for ParticleFeature {
             e.shade[0] *= glow;
             if !self.soft {
                 e.shade[3] = 0.0;
+            }
+            if e.spin_look[2] == Sprite::Haze.code() {
+                if settings.heat_haze {
+                    self.haze = true;
+                } else {
+                    e.look[3] = 0.0;
+                }
             }
             self.emitters.push(e);
 
@@ -544,6 +601,26 @@ impl RenderFeature for ParticleFeature {
                 (view.frame_index & 0xFFFF_FFFF) as u32,
                 0,
             ],
+            // Last frame's depth is in the old frame's axes after a turn: skip it for a frame.
+            depth: [
+                f32::from(self.scene_collision && !view.orthographic && turn.is_none()),
+                view.near,
+                0.25,
+                0.0,
+            ],
+            turn: match turn {
+                Some((r, ..)) => {
+                    let m = Mat3::from_quat(r);
+                    [
+                        m.x_axis.extend(1.0).to_array(),
+                        m.y_axis.extend(0.0).to_array(),
+                        m.z_axis.extend(0.0).to_array(),
+                    ]
+                }
+                None => [[0.0; 4]; 3],
+            },
+            frame_velocity: turn.map_or([0.0; 4], |(_, v, _)| v.extend(0.0).to_array()),
+            frame_spin: turn.map_or([0.0; 4], |(.., w)| w.extend(0.0).to_array()),
         };
         queue.write_buffer(&g.sim, 0, bytemuck::bytes_of(&sim));
 
@@ -562,6 +639,13 @@ impl RenderFeature for ParticleFeature {
             return;
         };
         let device = &ctx.gpu.device;
+        // The scene copies are recreated when the view is resized.
+        let size = (ctx.view.width, ctx.view.height);
+        if g.bound_size != size {
+            g.bound_size = size;
+            g.sim_group = None;
+            g.draw_group = None;
+        }
         if let Some((old, bytes)) = g.old_particles.take() {
             encoder.copy_buffer_to_buffer(&old, 0, &g.particles, 0, bytes);
         }
@@ -590,6 +674,10 @@ impl RenderFeature for ParticleFeature {
                         binding: 4,
                         resource: g.sim.as_entire_binding(),
                     },
+                    wgpu::BindGroupEntry {
+                        binding: 5,
+                        resource: wgpu::BindingResource::TextureView(ctx.scene_depth_copy),
+                    },
                 ],
             }));
         }
@@ -609,6 +697,10 @@ impl RenderFeature for ParticleFeature {
                     wgpu::BindGroupEntry {
                         binding: 2,
                         resource: wgpu::BindingResource::TextureView(ctx.scene_depth_copy),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 3,
+                        resource: wgpu::BindingResource::TextureView(ctx.scene_color_copy),
                     },
                 ],
             }));
@@ -667,7 +759,7 @@ impl RenderFeature for ParticleFeature {
     }
 
     fn needs_scene_copy(&self) -> bool {
-        self.soft && !self.draws.is_empty()
+        (self.soft || self.haze || self.scene_collision) && !self.draws.is_empty()
     }
 
     fn stats(&self) -> FeatureStats {
