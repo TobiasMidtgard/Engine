@@ -720,6 +720,7 @@ pub fn spawn_house(
                 near: *near,
                 far,
                 switch: house_lod_distance(*part),
+                hide: f32::INFINITY,
                 far_shown: false,
             },
         ));
@@ -764,6 +765,7 @@ pub fn spawn_lamp(commands: &mut Commands, lib: &Library, pos: DVec3) {
             near: near.0,
             far: Some(far.0),
             switch: 60.0,
+            hide: f32::INFINITY,
             far_shown: false,
         },
     ));
@@ -774,6 +776,7 @@ pub fn spawn_lamp(commands: &mut Commands, lib: &Library, pos: DVec3) {
             near: near.1,
             far: Some(far.1),
             switch: 60.0,
+            hide: f32::INFINITY,
             far_shown: false,
         },
     ));
