@@ -40,7 +40,7 @@ fn scene_depth(uv: vec2<f32>) -> f32 {
     let px = clamp(vec2<i32>(floor(uv * frame.viewport.xy)), vec2<i32>(0), size_i() - 1);
     let z = textureLoad(depth_input, px, 0);
     if (z <= 0.0) { return 0.0; }
-    return linear_depth(uv, z);
+    return scene_linear_depth(uv, z);
 }
 
 fn edge_fade(uv: vec2<f32>) -> f32 {
