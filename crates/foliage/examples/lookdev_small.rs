@@ -6,11 +6,13 @@
 //!
 //! A sunlit forest-edge patch (a meadow of grass clumps with wildflowers, a fern bed and a
 //! bluebell drift) seen at eye level and close up, and a dark cave floor of glowcaps and lantern
-//! caps lit only by their own glow. The second argument prefixes the file names, so renders
-//! before and after a change sit side by side. Also prints triangle counts per species.
+//! caps lit only by their own glow, plus near and far meshes side by side from the 22 m
+//! switch distance. The second argument prefixes the file names, so renders before and after
+//! a change sit side by side. Also prints triangle counts per species.
 
 use engine_core::prelude::*;
 use engine_core::time::TimeSource;
+use engine_foliage::assets::FoliageVisuals;
 use engine_foliage::meshgen::small::small;
 use engine_foliage::{FoliagePlugin, PlantLibrary, spawn_plant};
 use engine_render::prelude::*;
@@ -20,6 +22,8 @@ use engine_world::WeatherState;
 /// The cave sits far enough away that its walls never show in the meadow shots.
 const CAVE: DVec3 = DVec3::new(300.0, 0.0, 0.0);
 const SUN_LUX: f32 = 90_000.0;
+/// Where near and far meshes are compared side by side.
+const LOD_PATCH: DVec3 = DVec3::new(0.0, 0.0, 120.0);
 
 fn set_sun(world: &mut World, dir: Vec3, lux: f32) {
     world.resource_mut::<WeatherState>().sun_direction = dir;
@@ -36,6 +40,16 @@ fn aim(world: &mut World, eye: DVec3, target: DVec3) {
     let mut q = world.query_filtered::<&mut Transform, With<Camera>>();
     for mut t in q.iter_mut(world) {
         *t = Transform::from_translation(eye).looking_at(target, Vec3::Y);
+    }
+}
+
+fn set_fov(world: &mut World, fov_y_deg: f32) {
+    let mut q = world.query::<&mut Camera>();
+    for mut camera in q.iter_mut(world) {
+        camera.projection = Projection::Perspective {
+            fov_y_deg,
+            near: 0.05,
+        };
     }
 }
 
@@ -116,10 +130,60 @@ fn print_triangle_counts(library: &PlantLibrary) {
                 let tri = |m: &Option<engine_render::Mesh>| {
                     m.as_ref().map_or(0, engine_render::Mesh::triangle_count)
                 };
-                format!("{}+{}", tri(&m.foliage), tri(&m.wood))
+                format!(
+                    "{}+{} far {}",
+                    tri(&m.foliage),
+                    tri(&m.wood),
+                    tri(&m.foliage_lod)
+                )
             })
             .collect();
-        println!("triangles {name:12} (foliage+stems per variant): {counts:?}");
+        println!("triangles {name:12} (foliage+stems, far mesh per variant): {counts:?}");
+    }
+}
+
+/// The same plants twice, side by side: near meshes on the left, far meshes on the right. Seen
+/// from the switch distance, the two patches should match in color and silhouette.
+fn lod_compare(world: &mut World, at: DVec3) {
+    let mut parts = Vec::new();
+    {
+        let library = world.resource::<PlantLibrary>();
+        let visuals = world.resource::<FoliageVisuals>();
+        for (k, (name, spacing)) in [
+            ("grass", 0.8),
+            ("wildflowers", 1.5),
+            ("fern", 1.4),
+            ("bluebell", 0.7),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let Some(v) = library.id(name).and_then(|id| visuals.get(id)) else {
+                continue;
+            };
+            for (i, p) in scatter(10 + k as u64, [0.0, 0.0], 2.4, spacing)
+                .into_iter()
+                .enumerate()
+            {
+                let var = &v.variants[i % v.variants.len()];
+                let (Some(near), Some(far)) = (&var.foliage, &var.foliage_lod) else {
+                    continue;
+                };
+                let leaves = v.leaves[0];
+                parts.push((at + p - DVec3::X * 2.7, *near, leaves));
+                parts.push((at + p + DVec3::X * 2.7, *far, leaves));
+            }
+        }
+    }
+    for (pos, mesh, material) in parts {
+        let mut r = MeshRenderer::new(
+            Shape::Cuboid { size: [0.01; 3] },
+            StandardMaterial::default(),
+        );
+        r.mesh = engine_render::MeshRef::Handle(mesh);
+        r.material = engine_render::MaterialRef::Handle(material);
+        r.cast_shadows = false;
+        world.spawn((Transform::from_translation(pos), r));
     }
 }
 
@@ -283,6 +347,24 @@ fn main() {
         DVec3::new(0.75, 0.42, 1.75),
         DVec3::new(0.15, 0.22, 0.95),
     );
+    // Near (left) and far (right) meshes from the 22 m switch distance, far enough from the
+    // meadow that its plants are culled.
+    lod_compare(&mut app.world, LOD_PATCH);
+    shot(
+        &mut app,
+        &file("6_lod_22m"),
+        LOD_PATCH + DVec3::new(0.0, 1.7, 22.0),
+        LOD_PATCH + DVec3::new(0.0, 0.2, 0.0),
+    );
+    // The same through a telephoto lens: a stricter look than any player gets.
+    set_fov(&mut app.world, 12.0);
+    shot(
+        &mut app,
+        &file("7_lod_22m_zoom"),
+        LOD_PATCH + DVec3::new(0.0, 1.7, 22.0),
+        LOD_PATCH + DVec3::new(0.0, 0.3, 0.0),
+    );
+    set_fov(&mut app.world, 50.0);
     set_sun(&mut app.world, sun, 0.0);
     shot(
         &mut app,

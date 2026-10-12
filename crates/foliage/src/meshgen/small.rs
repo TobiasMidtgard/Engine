@@ -233,6 +233,14 @@ fn along(path: &[Vec3], s: f32) -> (Vec3, Vec3) {
     (path[i].lerp(path[i + 1], f - i as f32), t)
 }
 
+/// `n` points spread evenly (by index) along a path: the same curve with fewer segments, for
+/// far meshes.
+fn coarse(path: &[Vec3], n: usize) -> Vec<Vec3> {
+    (0..n)
+        .map(|i| along(path, i as f32 / (n - 1).max(1) as f32).0)
+        .collect()
+}
+
 /// A path that starts at `base` heading `a0` radians from vertical toward `out` and bends
 /// further by `bend · s^power` along its length.
 fn arc(base: Vec3, out: Vec3, len: f32, a0: f32, bend: f32, power: f32, n: usize) -> Vec<Vec3> {
@@ -326,6 +334,8 @@ fn grass(sp: &PlantSpecies, seed: u64) -> PlantMeshes {
     let droop = 1.0 - sh.tip_bend.clamp(-1.0, 1.0) * 0.6;
     let ao = |p: Vec3| 0.26 + 0.74 * smoothstep(0.0, h * 0.55, p.y);
     let mut b = MeshBuilder::new();
+    // The far mesh (beyond about 22 m) keeps the mat, the tufts and one blade in six.
+    let mut lod = MeshBuilder::new();
 
     for i in 0..sh.branches.max(8) {
         // A third arch out of a central tussock; the rest rise all over the clump, so
@@ -391,6 +401,25 @@ fn grass(sp: &PlantSpecies, seed: u64) -> PlantMeshes {
                 soft: Some(reach),
             },
         );
+        // Far away, one blade in six (tussock and spread alike), coarser and wider: blades
+        // are thinner than a pixel there, so their width stands in for the missing ones.
+        if i % 12 == 0 || i % 12 == 7 {
+            ribbon(
+                &mut lod,
+                &Ribbon {
+                    path: &coarse(&path, 3),
+                    out,
+                    width: &|s| w(s) * 2.5,
+                    twist: 0.0,
+                    fold: 0.0,
+                    cols: 2,
+                    cell: Cell::Blade,
+                    span: (0.12, 0.88),
+                    color: &color,
+                    soft: Some(reach),
+                },
+            );
+        }
     }
 
     // Flowering culms with airy seed heads above the leaves.
@@ -430,6 +459,21 @@ fn grass(sp: &PlantSpecies, seed: u64) -> PlantMeshes {
                 soft: Some(reach),
             },
         );
+        ribbon(
+            &mut lod,
+            &Ribbon {
+                path: &coarse(&path, 3),
+                out,
+                width: &|s| 0.006 * (1.0 - 0.45 * s),
+                twist: 0.0,
+                fold: 0.0,
+                cols: 2,
+                cell: Cell::Blade,
+                span: (0.4, 0.6),
+                color: &color,
+                soft: Some(reach),
+            },
+        );
         let (low, _) = along(&path, 0.7);
         let tip = *path.last().unwrap();
         let wide = hc * rng.range(0.12, 0.17);
@@ -437,22 +481,23 @@ fn grass(sp: &PlantSpecies, seed: u64) -> PlantMeshes {
         let clump = (UP + tip.with_y(0.0) / reach).normalize();
         for k in 0..2 {
             let a = Quat::from_rotation_y(k as f32 * 1.57 + az) * Vec3::X * wide * 0.5;
-            b.card(
-                [low - a, low + a, tip + a, tip - a],
-                [
-                    Cell::SeedHead.uv(0.0, 0.0),
-                    Cell::SeedHead.uv(1.0, 0.0),
-                    Cell::SeedHead.uv(1.0, 1.0),
-                    Cell::SeedHead.uv(0.0, 1.0),
-                ],
-                clump,
-                [
-                    (head * 0.75).extend(1.0),
-                    (head * 0.75).extend(1.0),
-                    head.extend(1.0),
-                    head.extend(1.0),
-                ],
-            );
+            let corners = [low - a, low + a, tip + a, tip - a];
+            let uvs = [
+                Cell::SeedHead.uv(0.0, 0.0),
+                Cell::SeedHead.uv(1.0, 0.0),
+                Cell::SeedHead.uv(1.0, 1.0),
+                Cell::SeedHead.uv(0.0, 1.0),
+            ];
+            let colors = [
+                (head * 0.75).extend(1.0),
+                (head * 0.75).extend(1.0),
+                head.extend(1.0),
+                head.extend(1.0),
+            ];
+            b.card(corners, uvs, clump, colors);
+            if k == 0 {
+                lod.card(corners, uvs, clump, colors);
+            }
         }
     }
 
@@ -470,22 +515,21 @@ fn grass(sp: &PlantSpecies, seed: u64) -> PlantMeshes {
         for k in 0..2 {
             let a = Quat::from_rotation_y(az + k as f32 * 1.7) * Vec3::X * half;
             let top = UP * tall + lean;
-            b.card(
-                [c - a, c + a, c + a * 1.2 + top, c - a * 1.2 + top],
-                [
-                    Cell::Tuft.uv(0.0, 0.0),
-                    Cell::Tuft.uv(1.0, 0.0),
-                    Cell::Tuft.uv(1.0, 1.0),
-                    Cell::Tuft.uv(0.0, 1.0),
-                ],
-                soft,
-                [
-                    (tint * 0.5).extend(1.0),
-                    (tint * 0.5).extend(1.0),
-                    tint.extend(1.0),
-                    tint.extend(1.0),
-                ],
-            );
+            let corners = [c - a, c + a, c + a * 1.2 + top, c - a * 1.2 + top];
+            let uvs = [
+                Cell::Tuft.uv(0.0, 0.0),
+                Cell::Tuft.uv(1.0, 0.0),
+                Cell::Tuft.uv(1.0, 1.0),
+                Cell::Tuft.uv(0.0, 1.0),
+            ];
+            let colors = [
+                (tint * 0.5).extend(1.0),
+                (tint * 0.5).extend(1.0),
+                tint.extend(1.0),
+                tint.extend(1.0),
+            ];
+            b.card(corners, uvs, soft, colors);
+            lod.card(corners, uvs, soft, colors);
         }
     }
 
@@ -500,27 +544,26 @@ fn grass(sp: &PlantSpecies, seed: u64) -> PlantMeshes {
         let (w0, w1) = (reach * 0.1, reach * rng.range(0.3, 0.4));
         let tint = Vec3::ONE.lerp(dry, rng.range(0.0, 0.25)) * rng.range(0.85, 1.05);
         let soft = (UP * 1.5 + dir * 0.5).normalize();
-        b.card(
-            [
-                inner - side * w0,
-                inner + side * w0,
-                outer + side * w1,
-                outer - side * w1,
-            ],
-            [
-                Cell::Tuft.uv(0.0, 0.0),
-                Cell::Tuft.uv(1.0, 0.0),
-                Cell::Tuft.uv(1.0, 1.0),
-                Cell::Tuft.uv(0.0, 1.0),
-            ],
-            soft,
-            [
-                (tint * 0.45).extend(1.0),
-                (tint * 0.45).extend(1.0),
-                tint.extend(1.0),
-                tint.extend(1.0),
-            ],
-        );
+        let corners = [
+            inner - side * w0,
+            inner + side * w0,
+            outer + side * w1,
+            outer - side * w1,
+        ];
+        let uvs = [
+            Cell::Tuft.uv(0.0, 0.0),
+            Cell::Tuft.uv(1.0, 0.0),
+            Cell::Tuft.uv(1.0, 1.0),
+            Cell::Tuft.uv(0.0, 1.0),
+        ];
+        let colors = [
+            (tint * 0.45).extend(1.0),
+            (tint * 0.45).extend(1.0),
+            tint.extend(1.0),
+            tint.extend(1.0),
+        ];
+        b.card(corners, uvs, soft, colors);
+        lod.card(corners, uvs, soft, colors);
     }
 
     // A low domed mat of short sward and thatch under the clump. Neighboring clumps' mats
@@ -533,23 +576,27 @@ fn grass(sp: &PlantSpecies, seed: u64) -> PlantMeshes {
     let mat_r = reach * rng.range(0.78, 0.92);
     let spin = rng.range(0.0, TAU);
     let mat_tint = Vec3::ONE.lerp(dry, rng.range(0.0, 0.3)) * rng.range(0.82, 1.0);
-    let (rings, seg) = (3, 12);
-    let mut v = Vec::with_capacity(rings * (seg + 1));
-    for ring in 0..rings {
-        let f = ring as f32 / (rings - 1) as f32;
-        for k in 0..=seg {
-            let a = k as f32 / seg as f32 * TAU;
-            let dir = Vec3::new((a + spin).cos(), 0.0, (a + spin).sin());
-            let p = dir * mat_r * f + UP * (0.004 + 0.026 * (1.0 - f * f));
-            let uv = mat.uv(0.5 + 0.5 * f * a.cos(), 0.5 + 0.5 * f * a.sin());
-            let n = (UP + dir * 0.2 * f).normalize();
-            v.push(gv(p, n, uv, mat_tint * (0.78 + 0.22 * f)));
+    let mat_mesh = |b: &mut MeshBuilder, rings: usize, seg: usize| {
+        let mut v = Vec::with_capacity(rings * (seg + 1));
+        for ring in 0..rings {
+            let f = ring as f32 / (rings - 1) as f32;
+            for k in 0..=seg {
+                let a = k as f32 / seg as f32 * TAU;
+                let dir = Vec3::new((a + spin).cos(), 0.0, (a + spin).sin());
+                let p = dir * mat_r * f + UP * (0.004 + 0.026 * (1.0 - f * f));
+                let uv = mat.uv(0.5 + 0.5 * f * a.cos(), 0.5 + 0.5 * f * a.sin());
+                let n = (UP + dir * 0.2 * f).normalize();
+                v.push(gv(p, n, uv, mat_tint * (0.78 + 0.22 * f)));
+            }
         }
-    }
-    grid(&mut b, &v, seg + 1, false);
+        grid(b, &v, seg + 1, false);
+    };
+    mat_mesh(&mut b, 3, 12);
+    mat_mesh(&mut lod, 2, 8);
 
     PlantMeshes {
         foliage: Some(b.finish()),
+        foliage_lod: Some(lod.finish()),
         ..Default::default()
     }
 }
@@ -580,6 +627,7 @@ fn fern(sp: &PlantSpecies, seed: u64) -> PlantMeshes {
         sh.angle_low_deg.to_radians(),
     );
     let mut b = MeshBuilder::new();
+    let mut lod = MeshBuilder::new();
     let n = (sh.branches as i32 + rng.range_i32(-2, 3)).max(5);
     for k in 0..n {
         let inner = rng.f32();
@@ -593,7 +641,7 @@ fn fern(sp: &PlantSpecies, seed: u64) -> PlantMeshes {
             stipe,
             dead: false,
         };
-        frond(&mut b, &f, h, &mut rng);
+        frond(&mut b, &mut lod, &f, h, &mut rng);
     }
     // Last year's frond, brown and lying low.
     if rng.chance(0.65) {
@@ -607,7 +655,7 @@ fn fern(sp: &PlantSpecies, seed: u64) -> PlantMeshes {
             stipe: brown * 0.8,
             dead: true,
         };
-        frond(&mut b, &f, h, &mut rng);
+        frond(&mut b, &mut lod, &f, h, &mut rng);
     }
     // Fiddleheads unrolling from the crown.
     for _ in 0..rng.range_i32(0, 4) {
@@ -628,11 +676,12 @@ fn fern(sp: &PlantSpecies, seed: u64) -> PlantMeshes {
     }
     PlantMeshes {
         foliage: Some(b.finish()),
+        foliage_lod: Some(lod.finish()),
         ..Default::default()
     }
 }
 
-fn frond(b: &mut MeshBuilder, f: &Frond, max_h: f32, rng: &mut Rng) {
+fn frond(b: &mut MeshBuilder, lod: &mut MeshBuilder, f: &Frond, max_h: f32, rng: &mut Rng) {
     let out = Vec3::new(f.az.cos(), 0.0, f.az.sin());
     let side = Vec3::new(-f.az.sin(), 0.0, f.az.cos());
     let samples = 16;
@@ -703,6 +752,55 @@ fn frond(b: &mut MeshBuilder, f: &Frond, max_h: f32, rng: &mut Rng) {
             grid(b, &v, 2, true);
         }
     }
+
+    // The far mesh: the rachis as a flat strip and six pairs of broad pinnae, each widened
+    // to close the gaps left by the pinnae it stands in for. No random draws, so the near
+    // mesh is the same with or without it.
+    let rest = |p: Vec3| p.with_y(p.y.max(0.004));
+    let far_path = coarse(&path, 4);
+    let mut v = Vec::with_capacity(8);
+    for (i, &p) in far_path.iter().enumerate() {
+        let s = i as f32 / (far_path.len() - 1) as f32;
+        let w = 0.009 * (1.0 - 0.7 * s);
+        let col = rachis_color((s * samples as f32) as usize, 0.0).truncate();
+        let n = (UP + out * 0.3).normalize();
+        v.push(gv(p - side * w, n, fern_stem_uv(0.0, s), col));
+        v.push(gv(p + side * w, n, fern_stem_uv(1.0, s), col));
+    }
+    grid(lod, &v, 2, true);
+    let rachis_len: f32 = path.windows(2).map(|w| w[0].distance(w[1])).sum();
+    let far_pairs = 6;
+    let gap = rachis_len * (0.985 - lamina0) / far_pairs as f32;
+    for j in 0..far_pairs {
+        let u = (j as f32 + 0.5) / far_pairs as f32;
+        let outline = (1.0 - u.powf(1.8)) * (0.55 + 0.45 * smoothstep(0.0, 0.35, u));
+        let pl = f.length * 0.27 * outline;
+        let s = lamina0 + (0.985 - lamina0) * u;
+        let (pos, t) = along(&path, s);
+        let mut nrm = t.cross(side).normalize_or(UP);
+        if nrm.y < 0.0 {
+            nrm = -nrm;
+        }
+        let nrm = Quat::from_axis_angle(t, f.roll) * nrm;
+        let ang = 1.075 - 0.3 * u;
+        let sag = -(nrm * 0.3 + UP * 0.25) * if f.dead { 2.0 } else { 1.0 };
+        let soft = (nrm * 0.6 + UP * 0.3 + out * 0.15).normalize();
+        let shade = 0.58 + 0.42 * s;
+        let half = (pl * 0.27).max(gap * ang.sin() * 0.55);
+        for sgn in [-1.0f32, 1.0] {
+            let toward = nrm.cross(t).normalize_or(side) * sgn;
+            let d = (t * ang.cos() + toward * ang.sin() + nrm * 0.18).normalize();
+            let wdir = d.cross(nrm).normalize_or(side);
+            let mut v = Vec::with_capacity(4);
+            for vv in [0.0f32, 1.0] {
+                let c = pos + d * pl * vv + sag * pl * vv * vv;
+                let col = f.tint * shade * (0.84 + 0.22 * vv);
+                v.push(gv(rest(c - wdir * half), soft, pinna_uv(0.0, vv), col));
+                v.push(gv(rest(c + wdir * half), soft, pinna_uv(1.0, vv), col));
+            }
+            grid(lod, &v, 2, true);
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -760,13 +858,15 @@ fn fiddlehead(
 
 fn flowers(sp: &PlantSpecies, seed: u64) -> PlantMeshes {
     let mut b = MeshBuilder::new();
+    let mut lod = MeshBuilder::new();
     if sp.shape.tip_bend < -0.3 {
-        bluebells(sp, seed, &mut b);
+        bluebells(sp, seed, &mut b, &mut lod);
     } else {
-        meadow_flowers(sp, seed, &mut b);
+        meadow_flowers(sp, seed, &mut b, &mut lod);
     }
     PlantMeshes {
         foliage: Some(b.finish()),
+        foliage_lod: Some(lod.finish()),
         ..Default::default()
     }
 }
@@ -796,7 +896,7 @@ fn stem(b: &mut MeshBuilder, path: &[Vec3], r0: f32, r1: f32, color: Vec3) {
     );
 }
 
-fn meadow_flowers(sp: &PlantSpecies, seed: u64, b: &mut MeshBuilder) {
+fn meadow_flowers(sp: &PlantSpecies, seed: u64, b: &mut MeshBuilder, lod: &mut MeshBuilder) {
     let mut rng = Rng::new(seed);
     let sh = sp.shape;
     let h = sp.max_height_m;
@@ -820,6 +920,9 @@ fn meadow_flowers(sp: &PlantSpecies, seed: u64, b: &mut MeshBuilder) {
         );
         let tint = leaf_c * rng.range(0.8, 1.1);
         let w = len * rng.range(0.3, 0.38);
+        let color = |s: f32, p: Vec3| {
+            tint * (0.55 + 0.45 * smoothstep(0.0, h * 0.3, p.y)) * (0.9 + 0.15 * s)
+        };
         ribbon(
             b,
             &Ribbon {
@@ -831,9 +934,22 @@ fn meadow_flowers(sp: &PlantSpecies, seed: u64, b: &mut MeshBuilder) {
                 cols: 3,
                 cell: Cell::Leaf,
                 span: (0.0, 1.0),
-                color: &|s, p| {
-                    tint * (0.55 + 0.45 * smoothstep(0.0, h * 0.3, p.y)) * (0.9 + 0.15 * s)
-                },
+                color: &color,
+                soft: None,
+            },
+        );
+        ribbon(
+            lod,
+            &Ribbon {
+                path: &coarse(&path, 3),
+                out,
+                width: &|_| w,
+                twist: 0.0,
+                fold: 0.0,
+                cols: 2,
+                cell: Cell::Leaf,
+                span: (0.0, 1.0),
+                color: &color,
                 soft: None,
             },
         );
@@ -856,6 +972,7 @@ fn meadow_flowers(sp: &PlantSpecies, seed: u64, b: &mut MeshBuilder) {
         let path = arc(base, out, height, lean, rng.range(-0.25, 0.2), 1.5, 6);
         let (top, tangent) = (*path.last().unwrap(), along(&path, 0.95).1);
         stem(b, &path, 0.0024, 0.0015, stem_c);
+        stem(lod, &[path[0], top], 0.004, 0.003, stem_c);
         // A leaf or two on the stem.
         for _ in 0..rng.range_i32(0, 3) {
             let (at, _) = along(&path, rng.range(0.15, 0.5));
@@ -901,16 +1018,9 @@ fn meadow_flowers(sp: &PlantSpecies, seed: u64, b: &mut MeshBuilder) {
                 Head::Poppy => red,
                 Head::Buttercup => Vec3::from(srgb(0xf2c014)),
                 Head::Cranesbill => Vec3::from(srgb(0x8a62c4)),
-            };
-            flower_head(
-                b,
-                kind,
-                top,
-                face,
-                size,
-                petal * rng.range(0.88, 1.08),
-                &mut rng,
-            );
+            } * rng.range(0.88, 1.08);
+            flower_head(b, kind, top, face, size, petal, &mut rng);
+            far_head(lod, kind, top, face, size, petal);
         }
         // Some stems carry a bud on a side shoot.
         if rng.chance(0.3) {
@@ -1139,6 +1249,31 @@ fn flower_head(
     }
 }
 
+/// A flower head for the far mesh: a hexagon of petal color, shading to the head's center
+/// color, seen from both sides (12 triangles).
+fn far_head(b: &mut MeshBuilder, kind: Head, at: Vec3, face: Vec3, size: f32, petal: Vec3) {
+    let (radius, center) = match kind {
+        Head::Daisy => (size * 1.05, Vec3::from(srgb(0xf0ad16))),
+        Head::Poppy => (size * 1.15, petal * 0.35),
+        Head::Buttercup => (size * 0.65, Vec3::from(srgb(0xc9b02a))),
+        Head::Cranesbill => (size * 0.78, petal.lerp(Vec3::splat(0.85), 0.6)),
+    };
+    let u = face.any_orthonormal_vector();
+    let w = face.cross(u);
+    let sides = 6;
+    let mut v = Vec::with_capacity(2 * (sides + 1));
+    for ring in 0..2 {
+        let r = ring as f32;
+        for k in 0..=sides {
+            let a = k as f32 / sides as f32 * TAU;
+            let p = at + face * size * 0.08 + (u * a.cos() + w * a.sin()) * radius * r;
+            let uv = Cell::Florets.uv(0.5 + 0.4 * r * a.cos(), 0.5 + 0.4 * r * a.sin());
+            v.push(gv(p, face, uv, center.lerp(petal, r)));
+        }
+    }
+    grid(b, &v, sides + 1, true);
+}
+
 /// One petal from `at` outward along `dir`, rising by `rise` (radians) above the head plane
 /// and curling back by `curl` toward the tip; `cup` hollows it across.
 #[allow(clippy::too_many_arguments)]
@@ -1178,7 +1313,7 @@ fn petal_mesh(
     grid(b, &v, cols, true);
 }
 
-fn bluebells(sp: &PlantSpecies, seed: u64, b: &mut MeshBuilder) {
+fn bluebells(sp: &PlantSpecies, seed: u64, b: &mut MeshBuilder, lod: &mut MeshBuilder) {
     let mut rng = Rng::new(seed);
     let sh = sp.shape;
     let h = sp.max_height_m;
@@ -1204,20 +1339,37 @@ fn bluebells(sp: &PlantSpecies, seed: u64, b: &mut MeshBuilder) {
         );
         let wid = rng.range(0.011, 0.016);
         let tint = leaf_c * rng.range(0.85, 1.1);
+        let width = |s: f32| wid * (0.7 + 0.3 * smoothstep(0.0, 0.2, s)) * (1.0 - s.powi(4)).sqrt();
+        let color = |s: f32, p: Vec3| {
+            tint * (0.45 + 0.55 * smoothstep(0.0, h * 0.4, p.y)) * (0.9 + 0.2 * s)
+        };
         ribbon(
             b,
             &Ribbon {
                 path: &path,
                 out,
-                width: &|s| wid * (0.7 + 0.3 * smoothstep(0.0, 0.2, s)) * (1.0 - s.powi(4)).sqrt(),
+                width: &width,
                 twist: rng.range(-0.4, 0.4),
                 fold: 0.45,
                 cols: 3,
                 cell: Cell::Blade,
                 span: (0.1, 0.9),
-                color: &|s, p| {
-                    tint * (0.45 + 0.55 * smoothstep(0.0, h * 0.4, p.y)) * (0.9 + 0.2 * s)
-                },
+                color: &color,
+                soft: None,
+            },
+        );
+        ribbon(
+            lod,
+            &Ribbon {
+                path: &coarse(&path, 3),
+                out,
+                width: &|s| width(s) * 1.3,
+                twist: 0.0,
+                fold: 0.0,
+                cols: 2,
+                cell: Cell::Blade,
+                span: (0.1, 0.9),
+                color: &color,
                 soft: None,
             },
         );
@@ -1246,6 +1398,7 @@ fn bluebells(sp: &PlantSpecies, seed: u64, b: &mut MeshBuilder) {
             path.push(p);
         }
         stem(b, &path, 0.0028, 0.0015, stem_c);
+        stem(lod, &coarse(&path, 4), 0.004, 0.0025, stem_c);
         let tint = rng.range(0.88, 1.1);
         let hue = petal.lerp(accent, rng.range(0.0, 0.4)) * tint;
         let bells = rng.range_i32(5, 9);
@@ -1325,6 +1478,39 @@ fn bluebells(sp: &PlantSpecies, seed: u64, b: &mut MeshBuilder) {
                     false,
                 );
             }
+            // Far away each bell is one card showing three tepals and the scalloped mouth,
+            // turned alternately across and along the arch so no scape goes edge-on.
+            let across = if j % 2 == 0 { side } else { out };
+            let across = (across - axis * across.dot(axis)).normalize_or(side);
+            let (len, half, t1) = if open {
+                (l * 0.95, r * 1.35, 1.0)
+            } else {
+                (l * 0.7, r * 0.8, 0.7)
+            };
+            let mouth = hang + axis * len;
+            let facing = axis.cross(across).normalize_or(out);
+            let facing = (facing * facing.y.signum() + UP * 0.4).normalize_or(UP);
+            lod.card(
+                [
+                    hang - across * half * 0.55,
+                    hang + across * half * 0.55,
+                    mouth + across * half,
+                    mouth - across * half,
+                ],
+                [
+                    Cell::Bell.uv(0.25, 0.0),
+                    Cell::Bell.uv(0.75, 0.0),
+                    Cell::Bell.uv(0.75, t1),
+                    Cell::Bell.uv(0.25, t1),
+                ],
+                facing,
+                [
+                    (color * 0.55).extend(1.0),
+                    (color * 0.55).extend(1.0),
+                    color.extend(1.0),
+                    color.extend(1.0),
+                ],
+            );
         }
     }
 }
@@ -1837,21 +2023,25 @@ mod tests {
             let sp = lib.get(lib.id(name).unwrap());
             for seed in 0..4 {
                 let m = small(sp, seed * 0x9e37_79b9 + 4);
-                let f = m.foliage.expect(name);
-                assert!(f.triangle_count() > 20, "{name}: {}", f.triangle_count());
-                assert!(f.aabb().max.y <= sp.max_height_m * 1.3, "{name}");
-                assert!(f.aabb().min.y >= -0.05, "{name} below ground");
-                for v in &f.vertices {
-                    assert!(v.position.iter().all(|c| c.is_finite()), "{name}");
-                    assert!(v.normal.iter().all(|c| c.is_finite()), "{name}");
-                    assert!(
-                        (Vec3::from(v.normal).length() - 1.0).abs() < 1e-3,
-                        "{name} normal"
-                    );
-                    assert!(v.uv.iter().all(|c| (0.0..=1.0).contains(c)), "{name} uv");
-                }
                 if sp.form == PlantForm::Mushroom {
                     assert!(m.wood.is_some(), "{name} buttons");
+                }
+                for f in [m.foliage.as_ref().expect(name)]
+                    .into_iter()
+                    .chain(m.foliage_lod.as_ref())
+                {
+                    assert!(f.triangle_count() > 20, "{name}: {}", f.triangle_count());
+                    assert!(f.aabb().max.y <= sp.max_height_m * 1.3, "{name}");
+                    assert!(f.aabb().min.y >= -0.05, "{name} below ground");
+                    for v in &f.vertices {
+                        assert!(v.position.iter().all(|c| c.is_finite()), "{name}");
+                        assert!(v.normal.iter().all(|c| c.is_finite()), "{name}");
+                        assert!(
+                            (Vec3::from(v.normal).length() - 1.0).abs() < 1e-3,
+                            "{name} normal"
+                        );
+                        assert!(v.uv.iter().all(|c| (0.0..=1.0).contains(c)), "{name} uv");
+                    }
                 }
             }
         }
@@ -1876,6 +2066,39 @@ mod tests {
                     + m.wood.as_ref().map_or(0, |w| w.triangle_count());
                 assert!(tris <= budget, "{name} variant {seed}: {tris} triangles");
             }
+        }
+    }
+
+    /// Far meshes (shown beyond `small_plant_lod_distance_m`) cost under a fifth of the near
+    /// mesh and cover the same ground; mushrooms keep one mesh.
+    #[test]
+    fn far_meshes_are_cheap_and_cover_the_plant() {
+        let lib = PlantLibrary::default();
+        for name in ["grass", "fern", "wildflowers", "bluebell"] {
+            let sp = lib.get(lib.id(name).unwrap());
+            for seed in 0..8u64 {
+                let m = small(sp, seed * 0x9e37_79b9 + 11);
+                let near = m.foliage.as_ref().expect(name);
+                let far = m.foliage_lod.as_ref().expect(name);
+                let (n, f) = (near.triangle_count(), far.triangle_count());
+                assert!(f > 20, "{name} variant {seed}: far mesh has {f} triangles");
+                assert!(
+                    f * 5 < n,
+                    "{name} variant {seed}: far {f} vs near {n} triangles"
+                );
+                let (a, b) = (near.aabb(), far.aabb());
+                for axis in [0, 2] {
+                    let (wn, wf) = (a.max[axis] - a.min[axis], b.max[axis] - b.min[axis]);
+                    assert!(
+                        wf > wn * 0.6,
+                        "{name} variant {seed}: far width {wf} vs {wn}"
+                    );
+                }
+            }
+        }
+        for name in ["glowcap", "lantern cap"] {
+            let sp = lib.get(lib.id(name).unwrap());
+            assert!(small(sp, 3).foliage_lod.is_none(), "{name}");
         }
     }
 
