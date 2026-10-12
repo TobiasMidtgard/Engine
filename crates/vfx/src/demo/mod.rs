@@ -15,6 +15,8 @@
 //! | south | Pond with stones splashing in, footsteps on mud, snow, sand and water, impacts on six materials |
 //! | rim | Torches and fireflies |
 
+pub mod art;
+
 use engine_core::math::{DVec3, Quat, Rng, Vec3};
 use engine_core::prelude::*;
 use engine_render::{MeshRenderer, PointLight, Shape, StandardMaterial};
@@ -237,11 +239,11 @@ pub fn spawn_demo(commands: &mut Commands, origin: DVec3) {
     let lane_z = -3.5;
     let caster = o(-12.5, 1.6, lane_z);
     let wall = o(9.0, 0.0, lane_z);
-    mesh(
+    art::spawn_prop(
         commands,
-        cylinder(0.6, 1.2),
-        stone,
-        at(caster - DVec3::new(0.0, 1.0, 0.0)),
+        "plinth.caster",
+        at(caster - DVec3::new(0.0, 1.6, 0.0)),
+        || art::props::plinth(0.6, 0.6),
     );
     mesh(
         commands,
@@ -833,7 +835,7 @@ mod tests {
     #[test]
     fn every_effect_the_demo_uses_exists() {
         let lib = EffectLibrary::with_builtins();
-        let src = include_str!("demo.rs");
+        let src = include_str!("mod.rs");
         let mut checked = 0;
         for part in src.split('"').skip(1).step_by(2) {
             let is_effect = ["spell.", "magic.", "water.", "impact.", "fire.", "ambient."]

@@ -47,7 +47,9 @@ fn options() -> Options {
         } else if let Some(n) = arg.strip_prefix("frames=").and_then(|n| n.parse().ok()) {
             o.frames = n;
         } else {
-            eprintln!("ignoring unknown argument {arg:?} (use a particle count, \"lit\" or frames=N)");
+            eprintln!(
+                "ignoring unknown argument {arg:?} (use a particle count, \"lit\" or frames=N)"
+            );
         }
     }
     o
@@ -150,7 +152,8 @@ fn main() {
     let span = (GRID - 1) as f64 * 5.0;
     w.spawn((
         Camera::perspective(55.0).with_exposure(Exposure::Manual { ev100: 11.0 }),
-        Transform::from_xyz(0.0, 18.0, span * 0.5 + 30.0).looking_at(DVec3::new(0.0, 2.0, 0.0), Vec3::Y),
+        Transform::from_xyz(0.0, 18.0, span * 0.5 + 30.0)
+            .looking_at(DVec3::new(0.0, 2.0, 0.0), Vec3::Y),
     ));
 
     app.update();
