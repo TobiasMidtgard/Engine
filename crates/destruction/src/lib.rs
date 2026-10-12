@@ -2,17 +2,21 @@
 // ECS systems take many queries and resources by design.
 #![allow(clippy::type_complexity, clippy::too_many_arguments)]
 
+pub mod architecture;
 pub mod assets;
 pub mod charges;
 pub mod collapse;
 pub mod debris;
 pub mod demo;
 pub mod fracture;
+pub mod hill;
 pub mod hits;
 pub mod material;
 pub mod meshing;
+pub mod props;
 pub mod structure;
 pub mod sync;
+pub mod textures;
 pub mod voxel;
 pub mod wall;
 
@@ -197,7 +201,8 @@ impl Plugin for DestructionPlugin {
             .add_systems(
                 FixedUpdate,
                 (
-                    (demo::demo_script_system, charges::charges_system)
+                    (demo::demo_script_system,
+                hill::hill_script_system, charges::charges_system)
                         .chain()
                         .in_set(SimSet::Gameplay),
                     debris::simulate_debris_system.in_set(SimSet::Physics),
@@ -618,7 +623,7 @@ fn register_api(app: &mut App) {
         r#"{"preset": "cliff", "at": [0, 0, 0], "size": [10, 8, 5], "voxel_size": 0.25}"#;
     app.register_api(
         "destruction.spawn_voxels",
-        "Spawn a diggable voxel rock: preset cliff, arch or boulder; size [w,h,d] m; voxel_size m. \
+        "Spawn a diggable voxel rock: preset cliff, arch, boulder or hill; size [w,h,d] m; voxel_size m. \
          Returns its id.",
         SPAWN_VOX,
         |world, args| {
@@ -629,7 +634,8 @@ fn register_api(app: &mut App) {
                 "cliff" => VoxelVolume::cliff(w, h, d, s),
                 "arch" => VoxelVolume::arch(w, h, d, s),
                 "boulder" => VoxelVolume::boulder(w, s),
-                other => return Err(format!("Unknown preset \"{other}\". Use cliff, arch or boulder.")),
+                "hill" => VoxelVolume::hill(w, h, d, s),
+                other => return Err(format!("Unknown preset \"{other}\". Use cliff, arch, boulder or hill.")),
             };
             let cells = v.dims.iter().map(|d| *d as u64).product::<u64>();
             if cells > 4_000_000 {

@@ -1142,16 +1142,27 @@ pub fn mesh_cells(
                 };
                 let pa = Vec3::new(va.xy.x, va.xy.y, 0.0) + offset;
                 let pb = Vec3::new(vb.xy.x, vb.xy.y, 0.0) + offset;
-                mb.quad_facing(
-                    [
-                        pa + Vec3::Z * va.zf,
-                        pa + Vec3::Z * va.zb,
-                        pb + Vec3::Z * vb.zb,
-                        pb + Vec3::Z * vb.zf,
-                    ],
-                    out,
-                    color,
-                );
+                let (fa, fb) = (pa + Vec3::Z * va.zf, pb + Vec3::Z * vb.zf);
+                let (ba, bb) = (pa + Vec3::Z * va.zb, pb + Vec3::Z * vb.zb);
+                if !broken {
+                    mb.quad_facing([fa, ba, bb, fb], out, color);
+                    continue;
+                }
+                // A fracture isn't a clean extrusion: break the edge at a ridge partway
+                // through, jittered per grid vertex so neighboring edges share it.
+                let ridge = |v: &GridVertex, p: Vec3, vi: usize, vj: usize| {
+                    let (gx, gy) = (grid.global.0 + vi as i64, grid.global.1 + vj as i64);
+                    let jx = hash3(gx, gy, 31, look.seed) - 0.5;
+                    let jy = hash3(gx, gy, 32, look.seed) - 0.5;
+                    let jz = hash3(gx, gy, 33, look.seed) - 0.5;
+                    let mid = 0.5 * (v.zf + v.zb) + jz * 0.5 * (v.zf - v.zb);
+                    p + Vec3::new(jx * grid.cell.x, jy * grid.cell.y, 0.0) * 0.8 + Vec3::Z * mid
+                };
+                let ma = ridge(&va, pa, a.0, a.1);
+                let mbv = ridge(&vb, pb, b.0, b.1);
+                let lit = scale(color, 1.08);
+                mb.quad_facing([fa, ma, mbv, fb], out + Vec3::Z * 0.3, lit);
+                mb.quad_facing([ma, ba, bb, mbv], out - Vec3::Z * 0.3, color);
             }
         }
     }

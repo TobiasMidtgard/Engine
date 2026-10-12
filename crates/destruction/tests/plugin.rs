@@ -325,3 +325,73 @@ fn the_demo_starts_wrecked_and_keeps_going() {
     let charges = app.world.query::<&BreachCharge>().iter(&app.world).count();
     assert!(charges >= 1, "the live charges are on their walls");
 }
+
+#[test]
+fn the_hill_demo_tunnels_caves_in_builds_and_rebuilds() {
+    let mut app = App::new();
+    app.world
+        .resource_mut::<Time>()
+        .set_source(TimeSource::Manual {
+            step_secs: 1.0 / 30.0,
+        });
+    app.init_asset::<Mesh>().init_asset::<StandardMaterial>();
+    app.add_plugins((WorldPlugin, DestructionPlugin));
+    app.add_systems(Startup, |mut commands: Commands| {
+        hill::spawn_voxel_hill(&mut commands, DVec3::new(-50.0, 0.0, 30.0));
+    });
+    let run = |app: &mut App, secs: f32| app.update_n((secs * 30.0).round() as usize);
+    let volume = |app: &mut App| -> f32 {
+        app.world
+            .query::<&VoxelState>()
+            .iter(&app.world)
+            .map(|v| v.volume())
+            .sum()
+    };
+    run(&mut app, 0.2);
+    let start = volume(&mut app);
+    assert!(start > 1000.0, "a big hill ({start} m³)");
+
+    run(&mut app, 8.0);
+    let pieces = app
+        .world
+        .query::<&StructuralPiece>()
+        .iter(&app.world)
+        .count();
+    assert!(pieces >= 11, "the hut is up ({pieces} pieces)");
+
+    run(&mut app, 6.0);
+    let fallen: f32 = app
+        .world
+        .query::<&Debris>()
+        .iter(&app.world)
+        .filter(|d| {
+            matches!(
+                d.material,
+                DestructibleMaterial::Rock | DestructibleMaterial::Dirt
+            )
+        })
+        .map(|d| d.mass_kg / 2000.0)
+        .sum();
+    assert!(fallen > 3.0, "the chamber's roof caved in ({fallen:.1} m³)");
+
+    run(&mut app, 4.0);
+    let raised = volume(&mut app);
+    run(&mut app, 4.0);
+    let hut_down = app
+        .world
+        .query::<(&Name, &Debris)>()
+        .iter(&app.world)
+        .filter(|(n, _)| n.as_str().starts_with("Hut"))
+        .count();
+    assert!(
+        hut_down >= 2,
+        "the front of the hut fell ({hut_down} pieces)"
+    );
+
+    run(&mut app, 6.5);
+    let rebuilt = volume(&mut app);
+    assert!(
+        (rebuilt - start).abs() < 1.0,
+        "the loop rebuilt the hill ({start} -> {raised} -> {rebuilt})"
+    );
+}

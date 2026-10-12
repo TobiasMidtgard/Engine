@@ -41,6 +41,9 @@ pub enum VoxelShape {
     Arch,
     /// Empty (fill it with `TerrainEdit` Add).
     Empty,
+    /// A grassy mound that meets the ground at its rim, soil over rock (Valheim-style hill to
+    /// dig into and build on).
+    Hill,
 }
 
 /// A destructible voxel formation. Put it on an entity with a `Transform`; the module
@@ -103,6 +106,16 @@ impl VoxelVolume {
             shape: VoxelShape::Arch,
             topsoil: None,
             grass: None,
+            ..Self::cliff(width, height, depth, voxel_size)
+        }
+    }
+
+    /// A hill `width × height × depth` meters: soil (with grass) over rock.
+    pub fn hill(width: f32, height: f32, depth: f32, voxel_size: f32) -> Self {
+        Self {
+            shape: VoxelShape::Hill,
+            topsoil_depth: 1.4,
+            overhang: 0.0,
             ..Self::cliff(width, height, depth, voxel_size)
         }
     }
@@ -193,6 +206,18 @@ fn shape_sdf(v: &VoxelVolume, p: Vec3) -> f32 {
             .min(hd - p.z.abs())
             .min(p.y + 1.0),
         VoxelShape::Empty => -1.0,
+        VoxelShape::Hill => {
+            // Height field: a broad dome with rolling bumps and a steeper rocky side (−Z),
+            // falling to zero at the rim so it sits flush on the ground.
+            let r = ((p.x / hw).powi(2) + (p.z / hd).powi(2)).sqrt();
+            let rim = smoothstep(1.0, 0.55, r);
+            let dome = (1.0 - r * r).max(0.0).powf(1.3);
+            let bumps = 0.18 * fbm2(p.x as f64 * 0.09, p.z as f64 * 0.09, seed, 4, 2.0, 0.5)
+                + 0.05 * fbm2(p.x as f64 * 0.5, p.z as f64 * 0.5, seed + 1, 3, 2.0, 0.5);
+            let scarp = 0.25 * smoothstep(0.1, -0.6, p.z / hd) * smoothstep(0.9, 0.3, r);
+            let top = h * (0.92 * dome + scarp + bumps * rim) * rim;
+            (top - p.y).min(p.y + 1.0)
+        }
         VoxelShape::Cliff => {
             // A rocky outcrop: tallest in the middle, sloping down into the ground at the
             // ends, with buttresses, ledges and an overhanging brow on its −Z face.
@@ -320,6 +345,32 @@ impl VoxelState {
                             volume.seed + 11,
                         );
                         state.grain[idx] = (128.0 + g * 180.0).clamp(0.0, 255.0) as u8;
+                    }
+                }
+            }
+        }
+        // A hill is soil over a bedrock base whose top undulates a meter or so: tunnels hold in
+        // the rock, wide rooms dug into the soil above cave in.
+        if volume.shape == VoxelShape::Hill {
+            let soil = DestructibleMaterial::Dirt.index() as u8;
+            for k in 0..dims[2] {
+                for i in 0..dims[0] {
+                    let c = state.center(i, 0, k);
+                    let line = 1.8
+                        + 1.3
+                            * fbm2(
+                                c.x as f64 * 0.11,
+                                c.z as f64 * 0.11,
+                                volume.seed + 41,
+                                3,
+                                2.0,
+                                0.5,
+                            );
+                    for j in 0..dims[1] {
+                        let idx = state.idx(i, j, k);
+                        if state.center(i, j, k).y > line {
+                            state.material[idx] = soil;
+                        }
                     }
                 }
             }
@@ -940,7 +991,35 @@ pub fn mesh_region(
             (vals[2] - vals[0]) + (vals[3] - vals[1]) + (vals[6] - vals[4]) + (vals[7] - vals[5]),
             (vals[4] - vals[0]) + (vals[5] - vals[1]) + (vals[6] - vals[2]) + (vals[7] - vals[3]),
         );
-        let normal = (-g).normalize_or(Vec3::Y);
+        let smooth_normal = (-g).normalize_or(Vec3::Y);
+        // Fine relief the voxel grid can't hold: chisel marks, knobs and cracks, as a
+        // displacement along the normal that depends only on position (seamless between
+        // chunks and on the pieces that break off).
+        let relief = |p: Vec3| -> f32 {
+            let q = |k: f32| {
+                (
+                    p.x as f64 * k as f64,
+                    p.y as f64 * k as f64,
+                    p.z as f64 * k as f64,
+                )
+            };
+            let (x1, y1, z1) = q(0.9);
+            let (x2, y2, z2) = q(3.1);
+            0.09 * fbm3(x1, y1, z1, look.seed + 31, 3, 2.0, 0.5)
+                + 0.03 * perlin3(x2, y2, z2, look.seed + 32)
+        };
+        let h = relief(pos);
+        let pos = pos + smooth_normal * h * (s / 0.25).min(1.5);
+        let normal = {
+            let e = 0.04;
+            let grad = Vec3::new(
+                relief(pos + Vec3::X * e) - relief(pos - Vec3::X * e),
+                relief(pos + Vec3::Y * e) - relief(pos - Vec3::Y * e),
+                relief(pos + Vec3::Z * e) - relief(pos - Vec3::Z * e),
+            ) / (2.0 * e);
+            let tangential = grad - smooth_normal * grad.dot(smooth_normal);
+            (smooth_normal - tangential * 1.3).normalize_or(smooth_normal)
+        };
         // Color from the most solid corner.
         let (mut best, mut best_v) = (0usize, f32::NEG_INFINITY);
         for (k, v) in vals.iter().enumerate() {
