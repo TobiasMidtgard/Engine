@@ -44,6 +44,7 @@ const CHECKS: &[(&str, CheckFn)] = &[
     ("rests_on_static_box", rests_on_static_box),
     ("raycast_hits_static_box", raycast_hits_static_box),
     ("impulse_changes_velocity", impulse_changes_velocity),
+    ("uses_mass_overrides", uses_mass_overrides),
     ("reports_contacts", reports_contacts),
     ("reports_contact_end", reports_contact_end),
     ("time_dilation_slows_bodies", time_dilation_slows_bodies),
@@ -316,6 +317,69 @@ fn write_pending_shift(mut pending: ResMut<PendingShift>, mut shifts: MessageWri
     if let Some(s) = pending.0.take() {
         shifts.write(s);
     }
+}
+
+fn uses_mass_overrides(install: &dyn Fn(&mut App)) -> Result<(), String> {
+    let mut app = app_with(install);
+    // Off the box's middle, like a plane whose balance point isn't its volume center.
+    let com = Vec3::new(0.4, 0.0, -0.2);
+    let inertia = Vec3::new(2.0, 3.0, 4.0);
+    let start = DVec3::new(0.0, 10.0, 0.0);
+    let body = app
+        .world
+        .spawn((
+            Transform::from_translation(start),
+            RigidBody {
+                gravity_scale: 0.0,
+                ..RigidBody::dynamic().with_mass_properties(12.0, com, inertia)
+            },
+            Collider::cuboid(Vec3::splat(0.5)),
+            Velocity::default(),
+        ))
+        .id();
+    app.update_n(3);
+    let m = *app
+        .world
+        .get::<MassProperties>(body)
+        .ok_or("no MassProperties on a dynamic body: write them back")?;
+    near("reported mass", m.mass_kg as f64, 12.0, 1e-3)?;
+    near(
+        "reported center of mass offset from the override",
+        (m.center_of_mass - com).length() as f64,
+        0.0,
+        1e-3,
+    )?;
+    near(
+        "reported inertia offset from the override",
+        (m.inertia - inertia).length() as f64,
+        0.0,
+        1e-3,
+    )?;
+    // A push through the overridden center of mass moves the body without turning it.
+    let at = position(&app, body) + com.as_dvec3();
+    app.world.write_message(ApplyImpulse {
+        entity: body,
+        impulse: Vec3::new(0.0, 0.0, 12.0),
+        at: Some(at),
+        angular: Vec3::ZERO,
+    });
+    app.update_n(10);
+    let v = *app
+        .world
+        .get::<Velocity>(body)
+        .ok_or("the body lost its Velocity")?;
+    near(
+        "speed after 12 N·s on 12 kg",
+        v.linear.length() as f64,
+        1.0,
+        0.02,
+    )?;
+    near(
+        "spin after a push through the center of mass",
+        v.angular.length() as f64,
+        0.0,
+        0.01,
+    )
 }
 
 fn raycast_hits_static_box(install: &dyn Fn(&mut App)) -> Result<(), String> {

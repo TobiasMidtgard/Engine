@@ -1,0 +1,34 @@
+#!/bin/sh
+# Refuses a commit whose staged Rust files `cargo fmt` would change, so CI's Format step
+# never fails on them. Enable once per clone:
+#
+#     git config core.hooksPath .githooks
+#
+# It checks what is staged (not the working tree), so formatting after `git add` and
+# forgetting to stage the result is caught too.
+
+command -v rustfmt >/dev/null 2>&1 || {
+    echo "pre-commit: rustfmt not found, so formatting was not checked" >&2
+    exit 0
+}
+
+tmp=$(mktemp) || exit 1
+trap 'rm -f "$tmp" "$tmp.fmt" "$tmp.list"' EXIT
+
+git diff --cached --name-only --diff-filter=ACMR -- '*.rs' >"$tmp.list"
+bad=""
+while IFS= read -r file; do
+    git show ":$file" >"$tmp"
+    # The workspace is edition 2024 (Cargo.toml), which also sets rustfmt's style edition.
+    if ! rustfmt --edition 2024 --emit stdout <"$tmp" >"$tmp.fmt" 2>/dev/null ||
+        ! cmp -s "$tmp" "$tmp.fmt"; then
+        bad="$bad
+    $file"
+    fi
+done <"$tmp.list"
+
+if [ -n "$bad" ]; then
+    echo "pre-commit: these staged files are not formatted, so CI's \`cargo fmt --all --check\` would fail:$bad" >&2
+    echo "Run \`cargo fmt --all\`, \`git add\` them and commit again." >&2
+    exit 1
+fi
