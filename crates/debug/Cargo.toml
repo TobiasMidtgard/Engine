@@ -1,0 +1,19 @@
+[package]
+name = "engine_debug"
+description = "Debug drawing: immediate-mode lines and shapes (spheres, boxes, arrows, frustums, grids…) from any system or AI agent, plus built-in views of wind, ground wetness/snow, focus, gravity and world events."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+engine_core.workspace = true
+engine_world.workspace = true
+engine_render.workspace = true
+bevy_ecs.workspace = true
+wgpu.workspace = true
+bytemuck.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+image.workspace = true
