@@ -461,7 +461,7 @@ impl Renderer {
         if let Some(mut pending) = world.get_resource_mut::<PendingRenderFeatures>()
             && !pending.0.is_empty()
         {
-            let new: Vec<_> = pending.0.drain(..).collect();
+            let new: Vec<_> = std::mem::take(&mut pending.0);
             for f in new {
                 self.add_feature(f);
             }

@@ -19,7 +19,6 @@
 //! the character controller.
 
 use engine_core::math::{DVec3, Vec3};
-use engine_core::prelude::*;
 use engine_core::time::TimeSource;
 
 use super::*;

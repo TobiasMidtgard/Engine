@@ -70,7 +70,7 @@ impl Mesh {
     /// Recompute smooth normals from triangles.
     pub fn compute_normals(&mut self) {
         let mut normals = vec![Vec3::ZERO; self.vertices.len()];
-        for tri in self.indices.chunks_exact(3) {
+        for tri in self.indices.as_chunks::<3>().0 {
             let [a, b, c] = [tri[0] as usize, tri[1] as usize, tri[2] as usize];
             let pa = Vec3::from(self.vertices[a].position);
             let pb = Vec3::from(self.vertices[b].position);
@@ -89,7 +89,7 @@ impl Mesh {
     /// glTF loader uses this for primitives without normals, as the glTF spec requires.
     pub fn compute_flat_normals(&mut self) {
         let mut vertices = Vec::with_capacity(self.indices.len());
-        for tri in self.indices.chunks_exact(3) {
+        for tri in self.indices.as_chunks::<3>().0 {
             let [a, b, c] = [tri[0] as usize, tri[1] as usize, tri[2] as usize];
             if a.max(b).max(c) >= self.vertices.len() {
                 continue;
@@ -437,7 +437,7 @@ mod tests {
     fn check_winding(m: &Mesh) {
         // Every triangle's geometric normal should agree with its vertex normals.
         let mut bad = 0;
-        for tri in m.indices.chunks_exact(3) {
+        for tri in m.indices.as_chunks::<3>().0 {
             let p: Vec<Vec3> = tri
                 .iter()
                 .map(|&i| Vec3::from(m.vertices[i as usize].position))

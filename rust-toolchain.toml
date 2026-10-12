@@ -1,3 +1,5 @@
 [toolchain]
-channel = "stable"
+# Pinned so a new stable release (with new lints) can't turn main red overnight. Bump it in
+# its own pull request after `cargo clippy --workspace --all-targets -- -D warnings` passes.
+channel = "1.99.0"
 components = ["rustfmt", "clippy"]

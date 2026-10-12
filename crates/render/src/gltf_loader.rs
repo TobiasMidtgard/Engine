@@ -480,7 +480,9 @@ fn read_primitive(prim: &gltf::Primitive, buffers: &[Vec<u8>]) -> Result<Option<
     // Drop triangles that point past the vertex data instead of failing the whole model.
     if indices.iter().any(|&i| i as usize >= count) {
         indices = indices
-            .chunks_exact(3)
+            .as_chunks::<3>()
+            .0
+            .iter()
             .filter(|t| t.iter().all(|&i| (i as usize) < count))
             .flatten()
             .copied()
