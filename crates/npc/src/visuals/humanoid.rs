@@ -22,9 +22,9 @@ use crate::skills::NpcSkills;
 
 // ============================================================================ parts
 
-// The chest is `Part::Torso`, the helmet `Head` with its visor `Orb` (it glows with the alert
-// level) and rank crest `Band`, the thighs `LegL`/`LegR`, the upper arms `ArmL`/`ArmR`, the
-// blade, carbine or bow riser `Weapon`. The other pieces:
+// The chest is `Part::Torso`, the helmet and coif `Head` with its brow light `Orb` (it glows
+// with the alert level) and rank crest `Band`, the thighs `LegL`/`LegR`, the upper arms
+// `ArmL`/`ArmR`, the blade, carbine or bow riser `Weapon`. The other pieces:
 const PELVIS: Part = Part::Fighter(0);
 const SHIN_L: Part = Part::Fighter(1);
 const SHIN_R: Part = Part::Fighter(2);
@@ -50,8 +50,13 @@ const PLAIN_HEAD: Part = Part::Fighter(19);
 const PLAIN_SEG: u8 = 20;
 const PLAIN_WEAPON: Part = Part::Fighter(28);
 const PLAIN_SHIELD: Part = Part::Fighter(29);
+/// The face under the helmet.
+const FACE: Part = Part::Fighter(30);
 
-const SLOTS: usize = 41;
+const SLOTS: usize = 42;
+
+/// Skin tones (sRGB), picked per fighter.
+const SKIN_TONES: [u32; 6] = [0xdcb8a0, 0xc29479, 0xa27760, 0x86614c, 0x5f4537, 0xd4a88f];
 
 /// Where a part's pose is kept.
 fn slot(part: Part) -> Option<usize> {
@@ -167,6 +172,7 @@ pub(super) fn parts(
     let mut list = vec![
         (Part::Torso, Piece::Chest),
         (Part::Head, Piece::Helmet),
+        (FACE, Piece::Face),
         (Part::Orb, Piece::Visor),
         (PELVIS, Piece::Pelvis),
         (TABARD_FRONT, Piece::TabardFront),
@@ -204,14 +210,25 @@ pub(super) fn parts(
         ]),
         Kind::Fists => {}
     }
+    // The face's "team" color is its skin tone, different between fighters of a squad.
+    let skin_hex = {
+        let f = faction.map_or(0, |f| f.0);
+        let k = f.wrapping_mul(7) + kind as u32 * 3 + (level * 10.0) as u32;
+        SKIN_TONES[k as usize % SKIN_TONES.len()]
+    };
     let mut out = Vec::with_capacity(list.len() + 2);
     for (part, piece) in list {
+        let (tint_hex, tint) = if piece == Piece::Face {
+            (skin_hex, linear(skin_hex))
+        } else {
+            (team_hex, team)
+        };
         let key = if piece.team_colored() {
-            format!("fighter/{}/{team_hex:06x}", piece.name())
+            format!("fighter/{}/{tint_hex:06x}", piece.name())
         } else {
             format!("fighter/{}", piece.name())
         };
-        let Some(mesh) = art.mesh(&key, || kit.mesh(piece, team)) else {
+        let Some(mesh) = art.mesh(&key, || kit.mesh(piece, tint)) else {
             return plain_parts(kind, team_hex);
         };
         let r = match part {
@@ -663,9 +680,17 @@ fn solve(i: &Input) -> Skeleton {
     };
     let (a, b) = (thigh_angle(0), thigh_angle(1));
     let flap = 0.06 * run * (TAU * tl * 2.0).sin();
+    // A thigh raised high (kneeling, a long stride) carries the front tabard with it: it turns
+    // and slides over that thigh to lie along it instead of standing out in the air.
+    let lead = if a > b { 0 } else { 1 };
+    let up = a.max(b).max(0.0);
+    let follow = step(0.6, 1.2, up);
+    let knee = pelvis.rot.inverse() * (s.shin[lead].pos - s.thigh[lead].pos);
+    let turn = (-knee.x).atan2(-knee.z).clamp(-0.6, 0.6) * follow;
+    let slide = (s.thigh[lead].pos - pelvis.pos).dot(pelvis.rot * Vec3::X) * 0.8 * follow;
     s.tabard[0] = pelvis.then(Bone::new(
-        v3(0.0, 0.085, -0.128),
-        rx(a.max(b).max(0.0) * 0.95 + 0.04 + 0.1 * run + flap),
+        v3(slide, 0.085, -0.128),
+        ry(turn) * rx(up * 0.95 + 0.04 + 0.1 * run + flap),
     ));
     s.tabard[1] = pelvis.then(Bone::new(
         v3(0.0, 0.085, 0.13),
@@ -1272,6 +1297,7 @@ fn place(s: &Skeleton, kind: Kind, flash: bool, spin: f32) -> [Placed; SLOTS] {
     };
     put(Part::Torso, s.chest);
     put(Part::Head, s.head);
+    put(FACE, s.head);
     put(Part::Band, s.head);
     put(Part::Orb, s.head);
     put(PELVIS, s.pelvis);

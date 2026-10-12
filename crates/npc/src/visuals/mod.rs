@@ -7,9 +7,10 @@
 //! during an attack's telegraph (it glows orange for a heavy guard breaker), raise the guard
 //! or shield to block (a white flash on a parry), lean into dodges, reel when staggered, flash
 //! when hit, and fall and drop their weapon when downed. Shooters shoulder their carbine (with
-//! a muzzle flash and kick); archers draw to the jaw. The helmet's crest shows skill (grey
-//! rookie, bronze, silver, gold master) and its visor glows with alertness (yellow
-//! suspicious, orange searching, red fighting).
+//! a muzzle flash and kick); archers draw to the jaw. Faces show under open helmets worn over
+//! mail coifs. The helmet's horsehair crest shows skill (grey rookie, bronze, silver, gold
+//! master) and a light in its brow band glows with alertness (yellow suspicious, orange
+//! searching, red fighting).
 //!
 //! Animals graze head-down, raise their heads when alert, lie down to rest, gallop (deer and
 //! wolves), hop (rabbits), creep low when stalking, flap and bank in flight, and fall over
@@ -115,8 +116,8 @@ const WOOD: u32 = 0x7a5230;
 fn faction_color(f: Option<&Faction>) -> u32 {
     match f.map(|f| f.0) {
         Some(0) => 0x3d8a4e,
-        Some(1) => 0xa8392c,
-        Some(2) => 0x2b5fc4,
+        Some(1) => 0xb93c2e,
+        Some(2) => 0x2f6ad8,
         _ => 0x8a8a8a,
     }
 }
