@@ -69,7 +69,75 @@ fn main() {
         fire.fill(&mut track);
         write_wav(&out.join(format!("fire_{name}.wav")), &track, 1, FS as u32).expect("write wav");
     }
+
+    // Thunder from a bolt 0.5, 2 and 8 km away, mixed roughly as the mixer would (inverse
+    // distance, air absorption), with its level over time.
+    for (name, km) in [("near", 0.5), ("mid", 2.0), ("far", 8.0)] {
+        let track = thunder_heard(km * 1_000.0);
+        let env: Vec<String> = track
+            .chunks((FS * 1.0) as usize)
+            .take(16)
+            .map(|c| {
+                let rms = (c.iter().map(|v| v * v).sum::<f32>() / c.len() as f32).sqrt();
+                format!("{:.0}", engine_audio::dsp::to_db(rms.max(1e-6)))
+            })
+            .collect();
+        let peak = track.iter().fold(0.0f32, |m, v| m.max(v.abs()));
+        println!(
+            "thunder {name:<5} peak {peak:.3}  dB per second: {}",
+            env.join(" ")
+        );
+        write_wav(
+            &out.join(format!("thunder_{name}.wav")),
+            &track,
+            1,
+            FS as u32,
+        )
+        .expect("write wav");
+    }
     println!("wrote {}", out.display());
+}
+
+/// A zigzag cloud-to-ground bolt `distance_m` away as heard from the origin, starting at the
+/// first arrival.
+fn thunder_heard(distance_m: f64) -> Vec<f32> {
+    use engine_audio::Sound;
+    use engine_audio::dsp::{Noise, OnePole};
+    use engine_audio::thunder::{THUNDER_REF_M, thunder_parts};
+    use engine_core::math::DVec3;
+    let mut rng = Noise::new(4);
+    let ground = DVec3::new(distance_m, 0.0, 300.0);
+    let mut p = ground + DVec3::new(0.0, 3_000.0, 0.0);
+    let mut bolt = vec![p];
+    for i in 0..256 {
+        let left = 256 - i;
+        let step = (ground - p) / left as f64;
+        p += step
+            + DVec3::new(
+                rng.range(-1.0, 1.0) as f64 * 18.0,
+                0.0,
+                rng.range(-1.0, 1.0) as f64 * 18.0,
+            ) * (left > 1) as i32 as f64;
+        bolt.push(if left == 1 { ground } else { p });
+    }
+    let listener = DVec3::new(0.0, 1.7, 0.0);
+    let parts = thunder_parts(FS, &bolt, listener, 343.0, 30.0, 11);
+    let first = parts.iter().map(|p| p.delay).fold(f32::MAX, f32::min);
+    let mut mix = vec![0.0f32; (FS * 24.0) as usize];
+    for mut part in parts {
+        let d = part.position.distance(listener) as f32;
+        let g = THUNDER_REF_M / d.max(THUNDER_REF_M);
+        let mut lp = OnePole::new(FS, 20_000.0 / (1.0 + d * 0.006));
+        let mut buf = vec![0.0; (FS * 22.0) as usize];
+        let n = part.sound.fill(&mut buf);
+        let start = ((part.delay - first) * FS) as usize;
+        for (i, v) in buf[..n].iter().enumerate() {
+            if let Some(m) = mix.get_mut(start + i) {
+                *m += lp.process(*v) * g;
+            }
+        }
+    }
+    mix
 }
 
 /// Print each layer's level on its own (run with `--layers`).

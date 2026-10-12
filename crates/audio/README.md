@@ -27,7 +27,9 @@ different wet, frozen, snowed on or burnt.
 - **Weather**: rain from `WeatherState` (louder with intensity; ticks on soft ground, taps
   on hard, plinks in puddles, pings on metal; drums on the roof when you're under cover),
   wind (the air moving past your ears, so running into it is louder), and thunder during
-  storms, arriving late by distance / speed of sound and duller the farther it is.
+  storms that rolls along the lightning bolt: each stretch of the channel sends its own
+  shock wave, so the nearest part cracks first and the rest rumbles in over seconds from up
+  and along the bolt, broadside stretches loudest, distant strikes late and dull.
 - **Walls**: sounds behind walls and terrain are quieter and duller (physics raycasts from
   the listener toward each sound, over and beside it too, so a sound round a corner is only
   partly muffled; denser materials muffle more).
@@ -115,7 +117,8 @@ character's and shows as a ring in its ground's colour.
   underpass echo and rain soaking the ground at the end. Writes `trail.mp4`, `trail.wav`
   and the frames.
 - `cargo run -p engine_audio --release --example footstep_lab -- out/` renders four steps
-  on every surface to WAV files (`--layers` prints each layer's level).
+  on every surface, fires of three sizes and thunder at three distances to WAV files
+  (`--layers` prints each footstep layer's level).
 - `tests/plugin.rs`: contacts are heard, out-of-earshot steps are skipped, space is silent,
   the trail walks every surface, walls muffle what's behind them, burning ground and burning
   things are heard. `tests/screenshot.rs` renders the trail headless.
@@ -125,6 +128,6 @@ character's and shows as a ring in its ground's colour.
 - Footsteps change from grass to mud to snow; rain gets louder with intensity; slow motion
   lowers the pitch. ✓ (all three are in the trail recording and the tests)
 
-Next: rolling wheels and tracks, lapping water from the water module, thunder in sync with
-lightning (needs a lightning message in `engine_world`), music layers, and recorded samples
-alongside the synthesis.
+Next: rolling wheels and tracks, lapping water from the water module, thunder from the
+weather's own lightning strikes (`LightningStrike`, waiting on the lead's contract), music
+layers, and recorded samples alongside the synthesis.

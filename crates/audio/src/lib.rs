@@ -10,6 +10,7 @@ pub mod footstep;
 pub mod mixer;
 mod output;
 mod systems;
+pub mod thunder;
 pub mod wav;
 
 use std::collections::HashMap;

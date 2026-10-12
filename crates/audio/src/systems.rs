@@ -12,11 +12,12 @@ use engine_world::{
     WaterSplash, WorldImpulse,
 };
 
-use crate::ambience::{RainSound, ThunderSound, WindSound};
+use crate::ambience::{RainSound, WindSound};
 use crate::dsp::{Noise, to_db};
 use crate::effects::{ExplosionSound, WhizSound, WhooshSound};
 use crate::footstep::{FootstepSound, Step, SurfaceSound};
 use crate::mixer::{Bus, Clock, Command, VoiceId};
+use crate::thunder;
 use crate::{
     Audio, AudioCue, AudioListener, AudioMix, AudioSettings, FootstepSurfaces, PlayOptions,
     ReverbZone,
@@ -463,6 +464,7 @@ pub(crate) fn weather_ambience(
     physics: Res<PhysicsQueries>,
     surfaces: Res<FootstepSurfaces>,
     time: Res<Time>,
+    mut cues: MessageWriter<AudioCue>,
     mut state: Local<AmbienceState>,
 ) {
     if !audio.is_running() {
@@ -559,16 +561,16 @@ pub(crate) fn weather_ambience(
         let rng = state.rng.get_or_insert_with(|| Noise::new(seed));
         state.next_thunder -= time.delta_secs();
         if state.next_thunder <= 0.0 {
-            let distance = 300.0 + 7_700.0 * rng.uniform().powf(0.7);
             let next = rng.exp_interval(w.storm / 18.0).min(120.0);
             let seed = rng.next_u32() as u64;
             state.next_thunder = next;
-            let delay = distance / settings.speed_of_sound.max(1.0);
-            let gain = (-10.0 * (distance / 1_000.0).log10()).clamp(-14.0, 4.0);
-            audio.play(
-                ThunderSound::new(fs, distance, seed),
-                PlayOptions::ambience().delay(delay).gain_db(gain),
-            );
+            let ground = env.ground(p).map(|g| g.height).unwrap_or(p.y - 1.7);
+            let (channel, current) = thunder::random_strike(p, ground, up, 300.0, 8_000.0, seed);
+            if let Some(cue) =
+                thunder::play_thunder(&mut audio, &channel, current, settings.speed_of_sound, seed)
+            {
+                cues.write(cue);
+            }
         }
     }
 }

@@ -1,4 +1,4 @@
-//! Weather ambience: rain, wind and thunder, synthesized live from the weather state.
+//! Ambience: rain and wind from the weather, and fire, synthesized live.
 //!
 //! * **Rain** is a stereo bed of hiss plus individual drops, each hitting something near the
 //!   listener: leaves and grass tick softly, stone and concrete tap, puddles and lakes plink
@@ -7,8 +7,9 @@
 //! * **Wind** is band-passed noise whose pitch and level follow the air speed past the
 //!   listener (wind plus your own motion), with buffeting at high speed and a whistle in
 //!   storms.
-//! * **Thunder** rolls in several swells; distant strikes are duller (air eats the highs) and,
-//!   like every positioned sound, arrive late at the speed of sound.
+//! * **Fire** roars, crackles and pops more densely and deeply the more area is in flames.
+//!
+//! Thunder lives in [`crate::thunder`]: it rolls along the lightning channel.
 
 use crate::dsp::{Biquad, Bubble, Noise, Resonator, decay_coef, pan_gains};
 use crate::mixer::Sound;
@@ -329,117 +330,6 @@ impl Sound for WindSound {
     }
 }
 
-/// One thunder clap, `distance_m` away: a crack (if close) and several rolling swells.
-pub struct ThunderSound {
-    fs: f32,
-    rng: Noise,
-    t: u32,
-    len: u32,
-    swells: [(u32, u32, f32, f32, f32); 6],
-    crack: u32,
-    crack_amp: f32,
-    lp: [Biquad; 2],
-    crack_hp: Biquad,
-    brown: [f32; 2],
-}
-
-impl ThunderSound {
-    pub fn new(fs: f32, distance_m: f32, seed: u64) -> Self {
-        let mut rng = Noise::new(seed);
-        let d = distance_m.max(100.0);
-        let len_s = rng.range(4.0, 8.0) + d / 3_000.0;
-        let mut swells = [(0u32, 1u32, 0.0f32, 1.0f32, 0.0f32); 6];
-        for (i, s) in swells.iter_mut().enumerate() {
-            let start = if i == 0 {
-                0.0
-            } else {
-                rng.range(0.1, len_s * 0.6)
-            };
-            let attack = rng.range(0.08, 0.6);
-            let decay = rng.range(0.8, 2.5);
-            let amp = rng.range(0.3, 1.0) * if i == 0 { 1.0 } else { 0.7 };
-            *s = (
-                (start * fs) as u32,
-                (attack * fs).max(1.0) as u32,
-                amp,
-                decay_coef(fs, decay),
-                rng.range(-0.8, 0.8),
-            );
-        }
-        let cutoff = (900.0 * (1_000.0 / d).powf(0.8)).clamp(90.0, 1_500.0);
-        // Loudness falls with distance but thunder carries far.
-        let crack_amp = if d < 1_500.0 {
-            0.5 * (1.0 - d / 1_500.0)
-        } else {
-            0.0
-        };
-        Self {
-            fs,
-            rng,
-            t: 0,
-            len: (len_s * fs) as u32,
-            swells,
-            crack: (0.05 * fs) as u32,
-            crack_amp,
-            lp: [Biquad::lowpass(fs, cutoff, 0.7); 2],
-            crack_hp: Biquad::highpass(fs, 1_200.0, 0.7),
-            brown: [0.0; 2],
-        }
-    }
-}
-
-impl Sound for ThunderSound {
-    fn channels(&self) -> usize {
-        2
-    }
-
-    fn fill(&mut self, out: &mut [f32]) -> usize {
-        let frames = out.len() / 2;
-        let fs = self.fs;
-        for f in 0..frames {
-            if self.t >= self.len {
-                return f;
-            }
-            let mut l = 0.0;
-            let mut r = 0.0;
-            let mut env = [0.0f32; 2];
-            for &(start, attack, amp, decay, pan) in &self.swells {
-                if self.t < start {
-                    continue;
-                }
-                let dt = self.t - start;
-                let e = if dt < attack {
-                    amp * dt as f32 / attack as f32
-                } else {
-                    amp * decay.powf((dt - attack) as f32)
-                };
-                let (pl, pr) = pan_gains(pan);
-                env[0] += e * pl;
-                env[1] += e * pr;
-            }
-            let mut roll = [0.0f32; 2];
-            for (c, o) in roll.iter_mut().enumerate() {
-                // Brown noise (integrated white) for the deep roll.
-                self.brown[c] = (self.brown[c] + self.rng.white() * 0.05) * 0.996;
-                *o = self.lp[c].process(self.brown[c] * 3.0) * env[c] * 0.6;
-            }
-            l += roll[0];
-            r += roll[1];
-            if self.t < self.crack && self.crack_amp > 0.0 {
-                let e = 1.0 - self.t as f32 / self.crack as f32;
-                let c = self.crack_hp.process(self.rng.white()) * self.crack_amp * e * e;
-                l += c;
-                r += c;
-            }
-            let fade = ((self.len - self.t) as f32 / (0.5 * fs)).min(1.0);
-            out[f * 2] = l * fade;
-            out[f * 2 + 1] = r * fade;
-            self.t += 1;
-        }
-        frames
-    }
-}
-
 /// A fire: the low roar of the flames, crackle and pops from the fuel, now and then a loud
 /// snap. Mono, so the mixer places it. Param `"size"`: area in flames, m² (0 = out; a
 /// campfire ≈ 1, a burning house ≈ 100, a forest front ≈ 2000).
@@ -639,24 +529,6 @@ mod tests {
             assert!(level > last, "{v} m/s: {level}");
             last = level;
         }
-    }
-
-    #[test]
-    fn distant_thunder_is_duller_and_ends() {
-        let mut near = ThunderSound::new(FS, 500.0, 1);
-        let mut far = ThunderSound::new(FS, 8_000.0, 1);
-        let mut a = vec![0.0; (12.0 * FS) as usize * 2];
-        let mut b = a.clone();
-        let na = near.fill(&mut a);
-        let nb = far.fill(&mut b);
-        assert!(na < (12.0 * FS) as usize && nb < (12.0 * FS) as usize);
-        let bright = |x: &[f32]| {
-            let e: f32 = x.iter().map(|v| v * v).sum();
-            let d: f32 = x.windows(2).map(|w| (w[1] - w[0]).powi(2)).sum();
-            d / e.max(1e-12)
-        };
-        let left = |x: &[f32], n: usize| x[..n * 2].iter().step_by(2).copied().collect::<Vec<_>>();
-        assert!(bright(&left(&a, na)) > bright(&left(&b, nb)) * 2.0);
     }
 
     #[test]
