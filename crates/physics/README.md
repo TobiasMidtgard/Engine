@@ -159,7 +159,7 @@ renderer get colliders only. `cargo run -p engine_physics --release --example ar
 Tests (`cargo test -p engine_physics`): the conformance suite; the "done when" scenarios below
 (`tests/scenarios.rs`); behaviors other modules rely on (`tests/behaviors.rs`: removal, compound
 bodies, joint breaking and motors, hinges swinging through the fixed body they hang on, kinematic platforms, stairs and steep slopes, dashing into
-thin walls, wall-running, no phantom walls on flat ground, crouching, characters on their own clock, sensors and layers, local
+thin walls, wall-running, no phantom walls on flat ground, running over heightfield hills, crouching, characters on their own clock, sensors and layers, local
 time, hovering, buoyancy, blasts, bodies crossing and merging regions); riding moving bodies
 (`tests/platforms.rs`: crates and characters on a deck at up to 30 km/s, lifts, a turntable, a
 thrusting and turning ship, a seesaw tipped by a character's weight, crates landing on heads,

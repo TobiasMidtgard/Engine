@@ -9,9 +9,9 @@ use engine_core::prelude::*;
 use engine_core::time::TimeSource;
 use engine_physics::{PhysicsPlugin, PhysicsStats};
 use engine_world::physics::{
-    CharacterController, CharacterMove, CharacterState, Collider, CollisionLayers, ContactEvent,
-    ContactPhase, ExternalForce, Joint, JointKind, PhysicsQueries, QueryFilter, RigidBody,
-    Velocity,
+    CharacterController, CharacterMove, CharacterState, Collider, ColliderShape, CollisionLayers,
+    ContactEvent, ContactPhase, ExternalForce, Joint, JointKind, PhysicsQueries, QueryFilter,
+    RigidBody, Velocity,
 };
 use engine_world::{Gravity, Water, WaterQuery, WaterSample, WorldImpulse, WorldPlugin};
 
@@ -525,6 +525,83 @@ fn running_on_flat_ground_finds_no_walls() {
             }
         }
     }
+}
+
+#[test]
+fn characters_run_over_rolling_terrain() {
+    // Gentle hills on a heightfield, like a planet's or the showcase's ground: runners keep
+    // their footing, follow the surface, and never find a wall.
+    let mut app = app();
+    let height = |x: f32, z: f32| 1.5 * (x * 0.15).sin() * (z * 0.11).cos();
+    let (rows, cols, size) = (81u32, 81u32, 80.0f32);
+    let mut heights = Vec::new();
+    for row in 0..rows {
+        for col in 0..cols {
+            let x = -size / 2.0 + size * col as f32 / (cols - 1) as f32;
+            let z = -size / 2.0 + size * row as f32 / (rows - 1) as f32;
+            heights.push(height(x, z));
+        }
+    }
+    app.world.spawn((
+        Transform::default(),
+        RigidBody::fixed(),
+        Collider {
+            shape: ColliderShape::Heightfield {
+                heights,
+                rows,
+                cols,
+                size: [size, size],
+            },
+            ..Default::default()
+        },
+    ));
+    let runners: Vec<Entity> = [-10.0f32, 0.0, 10.0]
+        .into_iter()
+        .map(|z| {
+            app.world
+                .spawn((
+                    Transform::from_xyz(-30.0, (height(-30.0, z) + 0.95) as f64, z as f64),
+                    CharacterController::default(),
+                    CharacterMove {
+                        velocity: Vec3::new(5.0, -3.0, 0.0),
+                    },
+                    CharacterState::default(),
+                ))
+                .id()
+        })
+        .collect();
+    for step in 0..240 {
+        app.update();
+        if step < 5 {
+            continue;
+        }
+        for &r in &runners {
+            let p = pos(&app, r).as_vec3();
+            let state = *app.world.get::<CharacterState>(r).unwrap();
+            assert!(
+                state.wall_normal.is_none(),
+                "step {step}: phantom wall {:?} at {p:?}",
+                state.wall_normal
+            );
+            assert!(state.grounded, "step {step}: lost the ground at {p:?}");
+            // The surface's own normal, from the slope of the height function.
+            let e = 0.01;
+            let dx = (height(p.x + e, p.z) - height(p.x - e, p.z)) / (2.0 * e);
+            let dz = (height(p.x, p.z + e) - height(p.x, p.z - e)) / (2.0 * e);
+            let n = Vec3::new(-dx, 1.0, -dz).normalize();
+            assert!(
+                state.ground_normal.dot(n) > 0.98,
+                "step {step}: ground normal {:?}, surface {n:?} at {p:?}",
+                state.ground_normal
+            );
+            let gap = p.y - 0.9 - height(p.x, p.z);
+            assert!(
+                (-0.02..0.08).contains(&gap),
+                "step {step}: feet {gap} m off the ground at {p:?}"
+            );
+        }
+    }
+    assert!(pos(&app, runners[0]).x > -15.0, "the runners got stuck");
 }
 
 #[test]
