@@ -25,7 +25,8 @@ pub const OVERLAY_BLEND: f64 = 6_000.0;
 /// keep their detail.
 const TINT: f32 = 0.75;
 
-/// Use the planet terrain for the ground (`--planet`) instead of the landscape's own mesh.
+/// Use the planet terrain for the ground (the default; `--no-planet` draws the landscape's own
+/// mesh instead).
 #[derive(Resource, Debug, Clone, Copy)]
 pub struct UsePlanet;
 

@@ -10,7 +10,8 @@
 //! ```
 //!
 //! `--film` saves frames and sound for a video (see `film.rs`); `--follow` films an entity, found
-//! by its `Name`, from behind.
+//! by its `Name`, from behind. The valley lies on a real planet (`planet.rs`); `--no-planet`
+//! draws it as the landscape's own mesh on an empty ground instead.
 //!
 //! The map is a valley ringed by snowy mountains: a village around the material plaza, woods,
 //! a lake, and one zone per engine feature. Each zone shows placeholder content until its module
@@ -70,7 +71,7 @@ fn main() {
     register_apis(&mut app);
 
     let args: Vec<String> = std::env::args().collect();
-    if args.iter().any(|a| a == "--planet") {
+    if !args.iter().any(|a| a == "--no-planet") {
         app.insert_resource(planet::UsePlanet);
     }
     if let Some(i) = args.iter().position(|a| a == "--tour") {
