@@ -5,7 +5,7 @@
 use crate::landscape::Landscape;
 use crate::meshgen::TreeKind;
 use crate::scenery::{self, Library};
-use crate::zones::{RUNWAY, Zone};
+use crate::zones::Zone;
 use engine::prelude::*;
 use std::f64::consts::TAU as TAU64;
 
@@ -399,110 +399,6 @@ pub fn market(commands: &mut Commands, _lib: &Library, z: &Zone) {
         cyl(0.05, 0.4),
         metal(),
         at(c + DVec3::new(0.9, 1.25, 5.0)),
-    );
-}
-
-/// Physics playground: domino run, crate pyramid, Newton's cradle, ramp with balls, seesaw.
-/// The Physics and rigid bodies thread owns it.
-pub fn physics(commands: &mut Commands, _lib: &Library, z: &Zone) {
-    let c = z.center;
-    spawn(
-        commands,
-        cyl(32.0, 0.15),
-        concrete(),
-        at(c + DVec3::new(0.0, 0.075, 0.0)),
-    );
-    // Dominoes on a spiral.
-    for i in 0..60 {
-        let t = i as f64 * 0.18;
-        let r = 4.0 + t * 1.1;
-        let p = c + DVec3::new(-12.0 + t.cos() * r * 0.5, 0.65, t.sin() * r * 0.5);
-        spawn(
-            commands,
-            cuboid(0.1, 1.0, 0.5),
-            mat([0xe74c3c, 0xf1c40f, 0x3498db][i % 3], 0.4),
-            yawed(p, -(t as f32)),
-        );
-    }
-    // Crate pyramid.
-    for row in 0..6 {
-        for i in 0..(6 - row) {
-            let x = (i as f64 - (5 - row) as f64 * 0.5) * 1.05;
-            spawn(
-                commands,
-                cuboid(1.0, 1.0, 1.0),
-                wood(),
-                at(c + DVec3::new(10.0 + x, 0.65 + row as f64, -8.0)),
-            );
-        }
-    }
-    // Newton's cradle.
-    let nc = c + DVec3::new(8.0, 0.0, 9.0);
-    for x in [-1.5, 1.5] {
-        for zz in [-0.6, 0.6] {
-            spawn(
-                commands,
-                cuboid(0.08, 2.4, 0.08),
-                metal(),
-                at(nc + DVec3::new(x, 1.35, zz)),
-            );
-        }
-        spawn(
-            commands,
-            cuboid(0.08, 0.08, 1.3),
-            metal(),
-            at(nc + DVec3::new(x, 2.55, 0.0)),
-        );
-    }
-    spawn(
-        commands,
-        cuboid(3.1, 0.08, 0.08),
-        metal(),
-        at(nc + DVec3::new(0.0, 2.55, 0.0)),
-    );
-    for i in 0..5 {
-        let x = -0.8 + i as f64 * 0.4;
-        spawn(
-            commands,
-            Shape::Sphere {
-                radius: 0.2,
-                segments: 24,
-            },
-            metal(),
-            at(nc + DVec3::new(x, 1.2, 0.0)),
-        );
-    }
-    // Ramp with balls and a seesaw.
-    spawn(
-        commands,
-        cuboid(3.0, 0.3, 12.0),
-        concrete(),
-        Transform::from_translation(c + DVec3::new(-8.0, 2.2, -14.0))
-            .with_rotation(Quat::from_rotation_x(0.35)),
-    );
-    for i in 0..4 {
-        spawn(
-            commands,
-            Shape::Sphere {
-                radius: 0.5,
-                segments: 24,
-            },
-            mat([0x8e44ad, 0x27ae60, 0xe67e22, 0x2c3e50][i], 0.3),
-            at(c + DVec3::new(-8.0 + (i as f64 - 1.5) * 0.7, 4.6, -18.5)),
-        );
-    }
-    spawn(
-        commands,
-        cuboid(0.6, 0.6, 0.6),
-        dark_wood(),
-        at(c + DVec3::new(-2.0, 0.45, 14.0)),
-    );
-    spawn(
-        commands,
-        cuboid(8.0, 0.2, 1.0),
-        wood(),
-        Transform::from_translation(c + DVec3::new(-2.0, 0.95, 14.0))
-            .with_rotation(Quat::from_rotation_z(0.12)),
     );
 }
 
@@ -1368,118 +1264,10 @@ pub fn field_edge(commands: &mut Commands, lib: &Library, z: &Zone, rng: &mut Rn
     }
 }
 
-/// Vehicle track: asphalt oval with a jump and a car. The Cars, planes and spaceships thread
-/// owns it.
-pub fn track(commands: &mut Commands, _lib: &Library, z: &Zone) {
-    let segs = 64;
-    let (rx, rz) = (z.radius, z.radius * 0.55);
-    let asphalt = mat(0x2c2c2e, 0.75);
-    let kerb = [mat(0xc0392b, 0.6), mat(0xeeeeee, 0.6)];
-    for i in 0..segs {
-        let a0 = i as f64 / segs as f64 * TAU64;
-        let a1 = (i + 1) as f64 / segs as f64 * TAU64;
-        let p0 = DVec3::new(a0.cos() * rx, 0.0, a0.sin() * rz);
-        let p1 = DVec3::new(a1.cos() * rx, 0.0, a1.sin() * rz);
-        let mid = (p0 + p1) * 0.5;
-        let dir = (p1 - p0).as_vec3();
-        let len = dir.length();
-        let yaw = (-dir.z).atan2(dir.x);
-        spawn(
-            commands,
-            cuboid(len + 0.6, 0.05, 12.0),
-            asphalt,
-            yawed(z.center + mid + DVec3::new(0.0, 0.03, 0.0), yaw),
-        );
-        let side = Quat::from_rotation_y(yaw) * Vec3::Z;
-        for s in [-6.3, 6.3] {
-            spawn(
-                commands,
-                cuboid(len + 0.1, 0.1, 0.6),
-                kerb[i % 2],
-                yawed(
-                    z.center + mid + (side * s).as_dvec3() + DVec3::new(0.0, 0.05, 0.0),
-                    yaw,
-                ),
-            );
-        }
-    }
-    spawn(
-        commands,
-        cuboid(10.0, 0.5, 12.0),
-        concrete(),
-        Transform::from_translation(z.center + DVec3::new(0.0, 1.2, rz))
-            .with_rotation(Quat::from_rotation_z(0.25)),
-    );
-    let body = StandardMaterial::hex(0xb02020)
-        .with_metallic(0.6)
-        .with_roughness(0.25);
-    let car = z.center + DVec3::new(rx, 0.0, 0.0);
-    spawn(
-        commands,
-        cuboid(1.9, 0.7, 4.4),
-        body,
-        at(car + DVec3::new(0.0, 0.75, 0.0)),
-    );
-    spawn(
-        commands,
-        cuboid(1.7, 0.55, 2.2),
-        body,
-        at(car + DVec3::new(0.0, 1.35, -0.3)),
-    );
-    for (x, zz) in [(-0.95, 1.4), (0.95, 1.4), (-0.95, -1.4), (0.95, -1.4)] {
-        spawn(
-            commands,
-            Shape::Cylinder {
-                radius: 0.36,
-                height: 0.25,
-                segments: 20,
-            },
-            mat(0x151515, 0.9),
-            Transform::from_translation(car + DVec3::new(x, 0.36, zz))
-                .with_rotation(Quat::from_rotation_z(std::f32::consts::FRAC_PI_2)),
-        );
-    }
-    // Grandstand.
-    for k in 0..6 {
-        spawn(
-            commands,
-            cuboid(60.0, 0.6, 1.4),
-            concrete(),
-            at(z.center + DVec3::new(0.0, 0.3 + k as f64 * 0.6, rz + 14.0 + k as f64 * 1.4)),
-        );
-    }
-}
-
-/// Airfield: a 1.2 km runway with markings, a control tower, a hangar and a plane. The Cars,
-/// planes and spaceships thread owns it.
-pub fn airfield(commands: &mut Commands, _lib: &Library, z: &Zone) {
-    let (a, b) = RUNWAY;
-    let len = (b[1] - a[1]) as f32;
-    let mid = DVec3::new(a[0], 0.04, (a[1] + b[1]) * 0.5);
-    spawn(
-        commands,
-        cuboid(45.0, 0.08, len),
-        mat(0x303032, 0.8),
-        at(mid),
-    );
-    let white = mat(0xe8e8e8, 0.6);
-    let n = (len / 30.0) as i32;
-    for i in 0..n {
-        spawn(
-            commands,
-            cuboid(0.9, 0.1, 15.0),
-            white,
-            at(DVec3::new(a[0], 0.06, a[1] + 15.0 + i as f64 * 30.0)),
-        );
-    }
-    for s in [-21.0, 21.0] {
-        spawn(
-            commands,
-            cuboid(0.6, 0.1, len),
-            white,
-            at(DVec3::new(a[0] + s, 0.06, mid.z)),
-        );
-    }
+/// Airfield buildings: an apron, a control tower and a hangar beside the runway (the runway
+/// and the planes come from `engine_vehicles::demo::spawn_airfield`). The Cars, planes and
+/// spaceships thread owns it.
+pub fn airfield_buildings(commands: &mut Commands, _lib: &Library, z: &Zone) {
     let c = z.center + DVec3::new(-90.0, 0.0, 0.0);
     spawn(
         commands,
@@ -1522,56 +1310,10 @@ pub fn airfield(commands: &mut Commands, _lib: &Library, z: &Zone) {
         Transform::from_translation(c + DVec3::new(-12.0, 0.0, 20.0))
             .with_rotation(Quat::from_rotation_x(std::f32::consts::FRAC_PI_2)),
     );
-    // A plane on the apron.
-    let p = c + DVec3::new(20.0, 2.2, 0.0);
-    let hull = StandardMaterial::hex(0xe8ecf0)
-        .with_metallic(0.3)
-        .with_roughness(0.35);
-    spawn(
-        commands,
-        Shape::Capsule {
-            radius: 1.3,
-            height: 16.0,
-            segments: 24,
-        },
-        hull,
-        Transform::from_translation(p)
-            .with_rotation(Quat::from_rotation_x(std::f32::consts::FRAC_PI_2)),
-    );
-    spawn(
-        commands,
-        cuboid(22.0, 0.25, 3.0),
-        hull,
-        at(p + DVec3::new(0.0, -0.3, 0.5)),
-    );
-    spawn(
-        commands,
-        cuboid(7.0, 0.2, 1.8),
-        hull,
-        at(p + DVec3::new(0.0, 0.4, 8.0)),
-    );
-    spawn(
-        commands,
-        cuboid(0.25, 3.0, 2.2),
-        mat(0x2e6fb0, 0.4),
-        at(p + DVec3::new(0.0, 1.8, 8.3)),
-    );
-    for x in [-5.5, 5.5] {
-        spawn(
-            commands,
-            Shape::Cylinder {
-                radius: 0.6,
-                height: 2.6,
-                segments: 16,
-            },
-            metal(),
-            Transform::from_translation(p + DVec3::new(x, -1.0, -0.5))
-                .with_rotation(Quat::from_rotation_x(std::f32::consts::FRAC_PI_2)),
-        );
-    }
 }
 
-/// Spaceport: landing pad with lights, a ship and a 600 m launch tower for scale. The Planets
+/// Spaceport: landing pad with lights, hangars and a 600 m launch tower for scale (the ships
+/// come from `engine_vehicles::demo::spawn_spaceport`). The Planets
 /// and terrain (space) and Cars, planes and spaceships threads own it.
 pub fn spaceport(commands: &mut Commands, _lib: &Library, z: &Zone) {
     let c = z.center;
@@ -1612,48 +1354,6 @@ pub fn spaceport(commands: &mut Commands, _lib: &Library, z: &Zone) {
             at(c + DVec3::new(a.cos() * 28.0, 0.5, a.sin() * 28.0)),
         );
     }
-    let hull = StandardMaterial::hex(0xdfe3e8)
-        .with_metallic(0.8)
-        .with_roughness(0.35);
-    let ship = c + DVec3::new(0.0, 4.0, 0.0);
-    let along_z = Quat::from_rotation_x(std::f32::consts::FRAC_PI_2);
-    spawn(
-        commands,
-        Shape::Capsule {
-            radius: 2.2,
-            height: 16.0,
-            segments: 32,
-        },
-        hull,
-        Transform::from_translation(ship).with_rotation(along_z),
-    );
-    spawn(
-        commands,
-        Shape::Cone {
-            radius: 2.2,
-            height: 4.0,
-            segments: 32,
-        },
-        hull,
-        Transform::from_translation(ship + DVec3::new(0.0, 0.0, -9.5))
-            .with_rotation(Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2)),
-    );
-    spawn(
-        commands,
-        cuboid(16.0, 0.4, 5.0),
-        hull,
-        at(ship + DVec3::new(0.0, -0.5, 3.0)),
-    );
-    spawn(
-        commands,
-        Shape::Cylinder {
-            radius: 1.4,
-            height: 1.0,
-            segments: 24,
-        },
-        StandardMaterial::hex(0x101820).with_emissive([0.4, 0.7, 1.0], 4_000.0),
-        Transform::from_translation(ship + DVec3::new(0.0, 0.0, 8.3)).with_rotation(along_z),
-    );
     // Hangars along the side.
     for k in 0..3 {
         spawn(

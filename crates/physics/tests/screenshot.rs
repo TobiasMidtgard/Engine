@@ -7,7 +7,7 @@ use engine_core::prelude::*;
 use engine_core::time::TimeSource;
 use engine_physics::{PhysicsPlugin, PhysicsStats, demo};
 use engine_render::prelude::*;
-use engine_render::{RenderDisabled, capture_now};
+use engine_render::{RenderDisabled, Renderer, capture_now};
 use engine_world::WorldPlugin;
 
 #[test]
@@ -27,13 +27,10 @@ fn proving_ground_renders_and_moves() {
         .set_source(TimeSource::Manual {
             step_secs: 1.0 / 60.0,
         });
-    let camera = app
-        .world
-        .spawn((
-            Camera::perspective(55.0),
-            Transform::from_xyz(0.0, 24.0, 44.0).looking_at(DVec3::new(0.0, 2.0, -3.0), Vec3::Y),
-        ))
-        .id();
+    app.world.spawn((
+        Camera::perspective(55.0),
+        Transform::from_xyz(0.0, 24.0, 44.0).looking_at(DVec3::new(0.0, 2.0, -3.0), Vec3::Y),
+    ));
     app.world.spawn((
         DirectionalLight::default(),
         Transform::default().looking_at(DVec3::new(-0.45, -0.75, -0.5), Vec3::Y),
@@ -50,10 +47,16 @@ fn proving_ground_renders_and_moves() {
             .expect("the demo has a wrecking ball")
     };
     let start = app.world.get::<Transform>(ball).unwrap().translation;
-    // Simulate a second without drawing, then draw a few frames for auto exposure.
-    app.world.get_mut::<Camera>(camera).unwrap().active = false;
+    // Simulate a second without drawing (the renderer draws every frame, from the origin when
+    // no camera is active, so it is parked), then draw a few frames for auto exposure.
+    let renderer = app.world.remove_resource::<Renderer>();
+    app.world
+        .insert_resource(RenderDisabled("simulating without drawing".into()));
     app.update_n(57);
-    app.world.get_mut::<Camera>(camera).unwrap().active = true;
+    app.world.remove_resource::<RenderDisabled>();
+    if let Some(r) = renderer {
+        app.world.insert_resource(r);
+    }
     app.update_n(3);
 
     let stats = *app.world.resource::<PhysicsStats>();

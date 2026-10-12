@@ -31,10 +31,11 @@ use engine_world::physics::{
 };
 use parking_lot::Mutex;
 use rapier3d::prelude::{
-    ActiveCollisionTypes, ActiveEvents, ColliderBuilder, ColliderHandle, CollisionEvent,
-    CollisionEventFlags, ContactPair, EventHandler, ImpulseJointHandle, LockedAxes,
-    MassProperties as RapierMassProperties, PhysicsWorld, Pose, RigidBodyBuilder, RigidBodyHandle,
-    RigidBodySet, RigidBodyType, SharedShape, SoftBodySet, SoftBodyTearEvent,
+    ActiveCollisionTypes, ActiveEvents, ActiveHooks, ColliderBuilder, ColliderHandle,
+    CollisionEvent, CollisionEventFlags, ContactPair, EventHandler, ImpulseJointHandle, LockedAxes,
+    MassProperties as RapierMassProperties, PairFilterContext, PhysicsHooks, PhysicsWorld, Pose,
+    RigidBodyBuilder, RigidBodyHandle, RigidBodySet, RigidBodyType, SharedShape, SoftBodySet,
+    SoftBodyTearEvent, SolverFlags,
 };
 
 use crate::convert;
@@ -211,6 +212,8 @@ pub struct ColliderEntry {
     pub radius: f64,
     /// Static: the region that must exist for it (its home).
     pub home: Option<RegionId>,
+    /// Static: the fixed body entity it belongs to (itself or an ancestor), if any.
+    pub owner: Option<Entity>,
     /// Rapier colliders for it: one for attached colliders, one per region for statics.
     pub handles: Vec<(RegionId, ColliderHandle)>,
 }
@@ -220,6 +223,8 @@ pub struct JointEntry {
     pub desc: Joint,
     /// Region and Rapier handle once created.
     pub created: Option<(RegionId, ImpulseJointHandle)>,
+    /// (static collider, body) pairs this joint keeps apart (see [`Simulation::no_contact`]).
+    pub no_contact: Vec<(Entity, Entity)>,
 }
 
 /// A kinematic character capsule.
@@ -301,6 +306,34 @@ pub struct Simulation {
     pub writes: Vec<BodyWrite>,
     /// Length of the last substep, seconds (turns impulses into forces for debug drawing).
     pub last_sub_dt: f32,
+    /// (static collider, body) pairs that must not touch: the body is jointed to the static's
+    /// fixed body with `collide_connected: false`. Rapier filters contacts between two jointed
+    /// bodies by itself, but statics are bare colliders and joints pin to the region's ground
+    /// body, so [`ContactFilter`] does it for them. Counts joints asking.
+    pub no_contact: HashMap<(Entity, Entity), u32>,
+    /// Static colliders that take part in [`Self::no_contact`] (their copies run the filter).
+    pub filtered_statics: EntityHashSet,
+}
+
+/// Rapier hook that drops contacts listed in [`Simulation::no_contact`].
+pub struct ContactFilter<'a>(pub &'a HashMap<(Entity, Entity), u32>);
+
+impl PhysicsHooks for ContactFilter<'_> {
+    fn filter_contact_pair(&self, ctx: &PairFilterContext) -> Option<SolverFlags> {
+        let apart = |collider: ColliderHandle, body: Option<RigidBodyHandle>| {
+            let (Some(c), Some(b)) = (ctx.colliders.get(collider), body) else {
+                return false;
+            };
+            let body = Entity::from_bits(ctx.bodies[b].user_data as u64);
+            self.0
+                .contains_key(&(convert::entity_of(c.user_data), body))
+        };
+        if apart(ctx.collider1, ctx.rigid_body2) || apart(ctx.collider2, ctx.rigid_body1) {
+            None
+        } else {
+            Some(SolverFlags::default())
+        }
+    }
 }
 
 /// Friction, restitution and extra rolling resistance (soft ground) of each `SurfaceMaterials`
@@ -682,6 +715,7 @@ impl Simulation {
                 world_pose: (DVec3::ZERO, Quat::IDENTITY),
                 radius: 0.0,
                 home: None,
+                owner: None,
                 handles: vec![(region_id, ch)],
             },
         );
@@ -692,6 +726,7 @@ impl Simulation {
     pub fn add_static(
         &mut self,
         entity: Entity,
+        owner: Option<Entity>,
         desc: &Collider,
         shape: SharedShape,
         pose: (DVec3, Quat),
@@ -708,6 +743,7 @@ impl Simulation {
                 world_pose: pose,
                 radius,
                 home: None,
+                owner,
                 handles: Vec::new(),
             },
         );
@@ -762,7 +798,7 @@ impl Simulation {
         let (friction, restitution) = materials.get(c.desc.surface);
         let region = self.regions[region_id as usize].as_mut().expect("live");
         let pose = Pose::from_parts(region.local(c.world_pose.0), c.world_pose.1);
-        let builder = Self::collider_builder(
+        let mut builder = Self::collider_builder(
             entity,
             &c.desc,
             c.shape.clone(),
@@ -770,6 +806,9 @@ impl Simulation {
             friction,
             restitution,
         );
+        if self.filtered_statics.contains(&entity) {
+            builder = builder.active_hooks(ActiveHooks::FILTER_CONTACT_PAIRS);
+        }
         let h = region.world.colliders.insert(builder);
         region.statics.insert(entity);
         region.needs_refresh = true;
@@ -940,8 +979,64 @@ impl Simulation {
         let joint = convert::joint(&desc.kind, frames, desc.collide_connected);
         let region = self.region_mut(region_id);
         let handle = region.world.impulse_joints.insert(h1, h2, joint, true);
-        self.joints.get_mut(&entity).unwrap().created = Some((region_id, handle));
+        // A body jointed to a fixed body: keep it off that body's colliders too.
+        let mut apart = Vec::new();
+        if !desc.collide_connected
+            && let Some(b) = desc.body_b
+        {
+            for (fixed, body) in [(desc.body_a, b), (b, desc.body_a)] {
+                if !self.bodies.contains_key(&body) || self.bodies.contains_key(&fixed) {
+                    continue;
+                }
+                apart.extend(
+                    self.colliders
+                        .iter()
+                        .filter(|(e, c)| {
+                            c.body.is_none() && (**e == fixed || c.owner == Some(fixed))
+                        })
+                        .map(|(e, _)| (*e, body)),
+                );
+            }
+            apart.sort();
+        }
+        let old = std::mem::take(&mut self.joints.get_mut(&entity).unwrap().no_contact);
+        self.release_no_contact(&old);
+        for pair in &apart {
+            *self.no_contact.entry(*pair).or_default() += 1;
+            self.filter_static(pair.0);
+        }
+        let entry = self.joints.get_mut(&entity).unwrap();
+        entry.created = Some((region_id, handle));
+        entry.no_contact = apart;
         true
+    }
+
+    fn release_no_contact(&mut self, pairs: &[(Entity, Entity)]) {
+        for pair in pairs {
+            if let Some(n) = self.no_contact.get_mut(pair) {
+                *n -= 1;
+                if *n == 0 {
+                    self.no_contact.remove(pair);
+                }
+            }
+        }
+    }
+
+    /// Run [`ContactFilter`] on a static collider's copies (now and in regions it enters later).
+    fn filter_static(&mut self, entity: Entity) {
+        if !self.filtered_statics.insert(entity) {
+            return;
+        }
+        let Some(c) = self.colliders.get(&entity) else {
+            return;
+        };
+        for (rid, h) in &c.handles {
+            if let Some(Some(region)) = self.regions.get_mut(*rid as usize)
+                && let Some(col) = region.world.colliders.get_mut(*h)
+            {
+                col.set_active_hooks(col.active_hooks() | ActiveHooks::FILTER_CONTACT_PAIRS);
+            }
+        }
     }
 
     /// Rapier body, local anchor and body rotation for one side of a joint. For a body side,
@@ -964,8 +1059,11 @@ impl Simulation {
     }
 
     pub fn remove_joint(&mut self, entity: Entity) {
-        if let Some(j) = self.joints.remove(&entity)
-            && let Some((rid, h)) = j.created
+        let Some(j) = self.joints.remove(&entity) else {
+            return;
+        };
+        self.release_no_contact(&j.no_contact);
+        if let Some((rid, h)) = j.created
             && let Some(Some(region)) = self.regions.get_mut(rid as usize)
         {
             region.world.impulse_joints.remove(h, true);
