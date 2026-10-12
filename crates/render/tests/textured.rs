@@ -384,8 +384,13 @@ fn shadow_app(card: StandardMaterial) -> App {
         w.height = SIZE;
     }
     app.add_plugins(RenderPlugin);
+    // Fixed exposure: the two shadow images are compared by absolute brightness, and the
+    // metered auto-exposure would brighten a fully shadowed view until it looks sunlit.
     app.world.spawn((
-        Camera::perspective(FOV_Y_DEG),
+        Camera {
+            exposure: Exposure::Manual { ev100: 15.0 },
+            ..Camera::perspective(FOV_Y_DEG)
+        },
         Transform::from_xyz(0.0, 6.0, 0.0).looking_at(DVec3::ZERO, Vec3::NEG_Z),
     ));
     app.world.spawn((

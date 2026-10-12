@@ -17,8 +17,10 @@
 //! re-exported here under a short name (`engine::render`, `engine::input`, …).
 
 pub use bevy_ecs as ecs;
+pub use engine_ai_bridge as ai_bridge;
 pub use engine_assets as assets;
 pub use engine_core as core;
+pub use engine_debug as debug;
 pub use engine_input as input;
 pub use engine_platform as platform;
 pub use engine_render as render;
@@ -26,8 +28,9 @@ pub use engine_world as world;
 
 use engine_core::{App, PluginGroup, PluginGroupBuilder};
 
-/// Everything a typical game needs: world simulation contracts, input, rendering and the
-/// window. Disable or replace parts with `.set(...)` / `.disable::<T>()`.
+/// Everything a typical game needs: world simulation contracts, input, rendering, the window,
+/// debug drawing and the AI bridge (off unless `ENGINE_BRIDGE` is set, see `engine_ai_bridge`).
+/// Disable or replace parts with `.set(...)` / `.disable::<T>()`.
 pub struct DefaultPlugins;
 
 impl PluginGroup for DefaultPlugins {
@@ -37,6 +40,8 @@ impl PluginGroup for DefaultPlugins {
             .add(engine_input::InputPlugin)
             .add(engine_render::RenderPlugin)
             .add(engine_platform::PlatformPlugin)
+            .add(engine_debug::DebugPlugin)
+            .add(engine_ai_bridge::AiBridgePlugin::default())
     }
 }
 
@@ -90,6 +95,7 @@ pub mod prelude {
     pub use crate::DefaultPlugins;
     pub use engine_assets::{Asset, AssetAppExt, Assets, Handle};
     pub use engine_core::prelude::*;
+    pub use engine_debug::DebugDraw;
     pub use engine_input::{ActionState, ButtonInput, InputMap, KeyCode, Mouse, MouseButton};
     pub use engine_render::prelude::*;
     pub use engine_world::{Env, Gravity, SurfaceMaterials, WeatherState, WindField};

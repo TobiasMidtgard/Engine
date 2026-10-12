@@ -221,7 +221,7 @@ fn plaza(commands: &mut Commands, pal: &Palette) {
         },
         StandardMaterial::hex(0x202830).with_emissive([0.3, 0.7, 1.0], 30_000.0),
         Transform::from_translation(c + DVec3::new(0.0, 3.5, -6.0))
-            .with_rotation(Quat::from_rotation_x(1.5708)),
+            .with_rotation(Quat::from_rotation_x(std::f32::consts::FRAC_PI_2)),
     );
     let mut glass = StandardMaterial::hex(0xd8f0ff)
         .with_roughness(0.05)
@@ -803,7 +803,7 @@ fn track(commands: &mut Commands, pal: &Palette) {
             },
             StandardMaterial::hex(0x151515).with_roughness(0.9),
             Transform::from_translation(car + DVec3::new(x, 0.36, zz))
-                .with_rotation(Quat::from_rotation_z(1.5708)),
+                .with_rotation(Quat::from_rotation_z(std::f32::consts::FRAC_PI_2)),
         );
     }
 }
@@ -846,7 +846,7 @@ fn spaceport(commands: &mut Commands, pal: &Palette) {
         .with_metallic(0.8)
         .with_roughness(0.35);
     let ship = c + DVec3::new(0.0, 4.0, 0.0);
-    let along_z = Quat::from_rotation_x(1.5708);
+    let along_z = Quat::from_rotation_x(std::f32::consts::FRAC_PI_2);
     spawn(
         commands,
         Shape::Capsule {
@@ -866,7 +866,7 @@ fn spaceport(commands: &mut Commands, pal: &Palette) {
         },
         hull,
         Transform::from_translation(ship + DVec3::new(0.0, 0.0, -9.5))
-            .with_rotation(Quat::from_rotation_x(-1.5708)),
+            .with_rotation(Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2)),
     );
     spawn(
         commands,

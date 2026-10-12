@@ -140,3 +140,19 @@ fn night_scene_with_lamp_is_dark_but_not_black() {
         / (img.width() * img.height() * 3) as f32;
     assert!(mean > 2.0, "night is pitch black (mean {mean})");
 }
+
+#[test]
+fn many_screenshots_in_one_session_all_succeed() {
+    // Only the last 16 results are kept; later captures must still report success.
+    let mut app = scene_app(64, 36);
+    app.update();
+    if app.world.contains_resource::<RenderDisabled>() {
+        return;
+    }
+    let dir = env!("CARGO_TARGET_TMPDIR");
+    for i in 0..20 {
+        let path = std::path::Path::new(&dir).join(format!("headless_many_{i}.png"));
+        capture_now(&mut app.world, &path)
+            .unwrap_or_else(|e| panic!("capture {} failed: {e}", i + 1));
+    }
+}

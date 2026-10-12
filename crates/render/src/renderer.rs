@@ -45,8 +45,10 @@ pub struct ScreenshotInfo {
 #[derive(Resource, Default)]
 pub struct Screenshots {
     pending: Vec<PathBuf>,
-    /// Results of the most recent captures (newest last).
+    /// Results of the most recent captures (newest last, at most 16 kept).
     pub done: Vec<Result<ScreenshotInfo, String>>,
+    /// Captures finished since startup (keeps counting when `done` is trimmed).
+    pub completed: u64,
 }
 
 impl Screenshots {
@@ -731,6 +733,7 @@ impl Renderer {
                 &pending,
             );
             if let Some(mut s) = world.get_resource_mut::<Screenshots>() {
+                s.completed += results.len() as u64;
                 s.done.extend(results);
                 let excess = s.done.len().saturating_sub(16);
                 s.done.drain(..excess);
@@ -1448,10 +1451,10 @@ pub fn capture_now(world: &mut World, path: impl Into<PathBuf>) -> Result<Screen
             .unwrap_or_else(|| "the renderer is not running yet (no window)".into()));
     }
     world.get_resource_or_init::<Screenshots>().request(path);
-    let before = world.resource::<Screenshots>().done.len();
+    let before = world.resource::<Screenshots>().completed;
     render_system(world);
     let mut s = world.resource_mut::<Screenshots>();
-    if s.done.len() > before {
+    if s.completed > before {
         s.done
             .last()
             .cloned()

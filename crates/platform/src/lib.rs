@@ -21,16 +21,10 @@ use winit::keyboard::PhysicalKey;
 use winit::window::{CursorGrabMode, Fullscreen, WindowId};
 
 /// How the headless runner paces frames.
-#[derive(Resource, Debug, Clone, Copy)]
+#[derive(Resource, Debug, Clone, Copy, Default)]
 pub struct HeadlessRun {
     /// Stop after this many frames (`None` = until `AppExit`).
     pub max_frames: Option<u64>,
-}
-
-impl Default for HeadlessRun {
-    fn default() -> Self {
-        Self { max_frames: None }
-    }
 }
 
 /// Window + event loop (or the headless loop).

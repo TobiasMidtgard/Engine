@@ -570,6 +570,7 @@ impl PluginGroupBuilder {
     }
 
     /// Append a plugin (replacing an earlier one of the same type).
+    #[allow(clippy::should_implement_trait)] // builder method, same name as Bevy's
     pub fn add<P: Plugin>(mut self, plugin: P) -> Self {
         let id = TypeId::of::<P>();
         self.entries.retain(|(t, _, _)| *t != id);

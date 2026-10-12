@@ -12,4 +12,6 @@ engine_assets.workspace = true
 engine_input.workspace = true
 engine_render.workspace = true
 engine_platform.workspace = true
+engine_debug.workspace = true
+engine_ai_bridge.workspace = true
 bevy_ecs.workspace = true
