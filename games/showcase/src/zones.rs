@@ -168,7 +168,7 @@ pub fn spawn_world(commands: &mut Commands, seed: u64) {
     cave(commands, &pal, &mut rng);
     fortress(commands, &pal);
     arena(commands, &pal);
-    field(commands, &pal, &mut rng);
+    field(commands, &mut rng);
     track(commands, &pal);
     spaceport(commands, &pal);
     moon(commands);
@@ -708,8 +708,11 @@ fn arena(commands: &mut Commands, pal: &Palette) {
     }
 }
 
-fn field(commands: &mut Commands, pal: &Palette, rng: &mut Rng) {
+fn field(commands: &mut Commands, rng: &mut Rng) {
     let z = zone("field");
+    // A dry meadow that burns downwind and grows back (engine_fire's demo, 64 × 44 m).
+    engine_fire::demo::spawn_demo(commands, z.center);
+    let fire = engine_fire::demo::FOOTPRINT;
     let blades = [
         StandardMaterial::hex(0x6b8f3a)
             .with_roughness(0.8)
@@ -722,6 +725,9 @@ fn field(commands: &mut Commands, pal: &Palette, rng: &mut Rng) {
     ];
     for i in 0..2500 {
         let p = rng.in_unit_disk() * z.radius as f32;
+        if p.x.abs() < fire[0] + 1.0 && p.y.abs() < fire[1] + 1.0 {
+            continue;
+        }
         let h = rng.range(0.5, 1.1);
         spawn(
             commands,
@@ -737,24 +743,6 @@ fn field(commands: &mut Commands, pal: &Palette, rng: &mut Rng) {
             .with_rotation(Quat::from_rotation_z(rng.range(-0.15, 0.15))),
         );
     }
-    for i in 0..6 {
-        spawn(
-            commands,
-            cuboid(1.0, 1.0, 1.0),
-            pal.wood,
-            at(z.center + DVec3::new(-10.0 + i as f64 * 3.5, 0.5, -z.radius * 0.5)),
-        );
-    }
-    spawn(
-        commands,
-        Shape::Cylinder {
-            radius: 2.0,
-            height: 0.3,
-            segments: 24,
-        },
-        pal.rock,
-        at(z.center + DVec3::new(0.0, 0.15, 0.0)),
-    );
 }
 
 fn track(commands: &mut Commands, pal: &Palette) {

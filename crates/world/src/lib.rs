@@ -6,7 +6,8 @@
 //! * **Fields** ([`environment`]): wind, weather, ground wetness/snow/scorch, heat. One owner
 //!   writes each; anyone reads. Sample them through [`Env`], a system parameter.
 //! * **Queries** ([`physical`]): [`Gravity`], [`Ground`] and [`Water`] answer "what is at this
-//!   point" for any implementation (heightmap, voxel, planet; lake, ocean, river).
+//!   point" for any implementation (heightmap, voxel, planet; lake, ocean, river), and
+//!   [`Obscurance`] answers "how much smoke, fog or dust is between these two points".
 //! * **Materials** ([`SurfaceMaterials`]): one table of friction, fuel, deformation, sounds.
 //! * **Events** ([`events`]): projectiles, impulses, ground contacts, ignition, damage, noise.
 //! * **Focus** ([`SimulationFocus`]): where detailed simulation happens (the player, the camera).
@@ -127,6 +128,7 @@ pub struct Env<'w> {
     pub gravity: Res<'w, Gravity>,
     pub ground_query: Res<'w, Ground>,
     pub water_query: Res<'w, Water>,
+    pub obscurance: Res<'w, Obscurance>,
     pub materials: Res<'w, SurfaceMaterials>,
     pub focus: Res<'w, FocusPoints>,
 }
@@ -157,6 +159,11 @@ impl Env<'_> {
         self.water_query.sample(p)
     }
 
+    /// Fraction of light that gets from `from` to `to` through smoke, fog and dust.
+    pub fn transmittance(&self, from: DVec3, to: DVec3) -> f32 {
+        self.obscurance.transmittance(from, to)
+    }
+
     pub fn surface_state(&self, p: DVec3) -> SurfaceCell {
         self.surface.sample(p)
     }
@@ -182,6 +189,7 @@ impl Plugin for WorldPlugin {
             .init_resource::<Gravity>()
             .init_resource::<Ground>()
             .init_resource::<Water>()
+            .init_resource::<Obscurance>()
             .init_resource::<SurfaceMaterials>()
             .init_resource::<FocusPoints>()
             .add_message::<ProjectileTrace>()
@@ -361,6 +369,12 @@ mod tests {
                 &physics::QueryFilter::default()
             )
             .is_none()
+        );
+        // Without smoke the air is clear.
+        let o = app.world.resource::<Obscurance>();
+        assert_eq!(
+            o.transmittance(DVec3::ZERO, DVec3::new(0.0, 0.0, 50.0)),
+            1.0
         );
     }
 }
