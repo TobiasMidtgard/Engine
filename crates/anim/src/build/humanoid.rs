@@ -1318,20 +1318,49 @@ pub fn clips(s: &Skeleton) -> Vec<AnimationClip> {
 /// Locomotion (idle/walk/run by `speed`, leaning by `turn`), plus `heavy_swing`, `block`
 /// (held while `blocking` > 0.5), `reach` and `flex` actions.
 pub fn graph() -> AnimGraph {
+    graph_with(GRAPH, &Locomotion::default())
+}
+
+/// Which clips a [`graph_with`] moves with, and the speeds (m/s) they cover.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Locomotion {
+    pub idle: String,
+    pub walk: String,
+    pub walk_speed: f32,
+    pub run: String,
+    pub run_speed: f32,
+}
+
+impl Default for Locomotion {
+    fn default() -> Self {
+        Self {
+            idle: "idle".into(),
+            walk: "walk".into(),
+            walk_speed: WALK_SPEED,
+            run: "run".into(),
+            run_speed: RUN_SPEED,
+        }
+    }
+}
+
+/// The humanoid graph named `name`, moving with other locomotion clips (motion capture,
+/// say); the actions stay the humanoid's. Walk and run clips must start on the right foot's
+/// strike, like the humanoid's, so they blend in step.
+pub fn graph_with(name: &str, motion: &Locomotion) -> AnimGraph {
     let locomotion = NodeDef::Blend1d {
         param: "speed".into(),
         children: vec![
             Blend1dChild {
                 at: 0.0,
-                node: NodeDef::clip("idle"),
+                node: NodeDef::clip(&motion.idle),
             },
             Blend1dChild {
-                at: WALK_SPEED,
-                node: NodeDef::clip("walk"),
+                at: motion.walk_speed,
+                node: NodeDef::clip(&motion.walk),
             },
             Blend1dChild {
-                at: RUN_SPEED,
-                node: NodeDef::clip("run"),
+                at: motion.run_speed,
+                node: NodeDef::clip(&motion.run),
             },
         ],
         sync: true,
@@ -1366,7 +1395,7 @@ pub fn graph() -> AnimGraph {
         speed: 1.0,
     };
     AnimGraph {
-        name: GRAPH.into(),
+        name: name.into(),
         root: NodeDef::StateMachine {
             states: vec![
                 state("move", leaning),

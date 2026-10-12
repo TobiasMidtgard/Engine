@@ -26,6 +26,7 @@ use engine_core::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use crate::animator::Animator;
+use crate::clip::{AnimationClip, BoneTrack, ClipBinding};
 use crate::skeleton::Skeleton;
 use crate::xform::{Xf, rotation_between};
 
@@ -306,6 +307,122 @@ impl Retargeter {
             out[b] = x;
             done[b] = true;
         }
+    }
+}
+
+impl Retargeter {
+    /// The logic pose (model space) that [`apply`](Self::apply) turns into `target_model`:
+    /// for converting clips authored on the target skeleton (motion capture) into clips for
+    /// the logic skeleton `source`. Logic bones no target bone follows keep their rest offsets.
+    pub fn invert(&self, source: &Skeleton, target_model: &[Xf], out: &mut Vec<Xf>) {
+        let n = source.len();
+        // When a logic bone drives several target bones, the last one (deepest) decides.
+        let mut from: Vec<Option<(usize, Quat)>> = vec![None; n];
+        for (b, d) in self.drive.iter().enumerate() {
+            if let Drive::Mapped {
+                source: s,
+                correction,
+            } = d
+                && let Some(slot) = from.get_mut(*s as usize)
+            {
+                *slot = Some((b, *correction));
+            }
+        }
+        out.clear();
+        for s in 0..n {
+            let x = match from[s].and_then(|(b, c)| target_model.get(b).map(|t| (t, c))) {
+                Some((t, c)) => Xf::from_tr(t.t, (t.r * c.conjugate()).normalize()),
+                None => match source.parents[s] {
+                    Some(p) => out[p as usize].mul(&source.rest[s]),
+                    None => source.rest[s],
+                },
+            };
+            out.push(x);
+        }
+    }
+
+    /// Convert `clip`, authored on the target skeleton, into a clip named `name` for the logic
+    /// skeleton `source`: a rotation track for every logic bone a target bone follows, and
+    /// translation tracks for the `moving` bones (usually the hips). Keys stay where the
+    /// clip's first track has them.
+    pub fn clip_to_source(
+        &self,
+        source: &Skeleton,
+        clip: &AnimationClip,
+        name: &str,
+        moving: &[&str],
+    ) -> AnimationClip {
+        let target = &*self.target;
+        let binding = ClipBinding::new(clip, target);
+        let times: Vec<f32> = clip
+            .tracks
+            .iter()
+            .map(|t| &t.rotation.times)
+            .find(|t| !t.is_empty())
+            .cloned()
+            .unwrap_or_else(|| vec![0.0, clip.duration]);
+        let followed: Vec<bool> = {
+            let mut f = vec![false; source.len()];
+            for d in &self.drive {
+                if let Drive::Mapped { source: s, .. } = d {
+                    f[*s as usize] = true;
+                }
+            }
+            f
+        };
+        let mut out = AnimationClip {
+            name: name.into(),
+            duration: clip.duration,
+            looping: clip.looping,
+            tracks: (0..source.len())
+                .filter(|&b| followed[b])
+                .map(|b| BoneTrack {
+                    bone: source.names[b].clone(),
+                    ..Default::default()
+                })
+                .collect(),
+            ..Default::default()
+        };
+        let track_of: Vec<Option<usize>> = {
+            let mut k = 0;
+            (0..source.len())
+                .map(|b| {
+                    followed[b].then(|| {
+                        k += 1;
+                        k - 1
+                    })
+                })
+                .collect()
+        };
+        let mut local = Vec::new();
+        let mut target_model = Vec::new();
+        let mut model = Vec::new();
+        for &t in &times {
+            local.clear();
+            local.extend_from_slice(&target.rest);
+            clip.sample(t, &binding, &mut local);
+            target.to_model(&local, &mut target_model);
+            self.invert(source, &target_model, &mut model);
+            for b in 0..source.len() {
+                let Some(k) = track_of[b] else { continue };
+                let l = match source.parents[b] {
+                    Some(p) => model[p as usize].inverse().mul(&model[b]),
+                    None => model[b],
+                };
+                let track = &mut out.tracks[k];
+                let r = match track.rotation.values.last() {
+                    Some(prev) if prev.dot(l.r) < 0.0 => -l.r,
+                    _ => l.r,
+                };
+                track.rotation.times.push(t);
+                track.rotation.values.push(r);
+                if moving.contains(&source.names[b].as_str()) {
+                    track.translation.times.push(t);
+                    track.translation.values.push(l.t);
+                }
+            }
+        }
+        out
     }
 }
 
