@@ -55,6 +55,7 @@ pub mod renderer;
 pub mod settings;
 pub mod shadows;
 pub mod sky_feature;
+mod sky_occlusion;
 pub mod targets;
 pub mod texture;
 
@@ -63,8 +64,8 @@ use engine_core::prelude::*;
 use serde_json::json;
 
 pub use components::{
-    AmbientLight, Camera, DirectionalLight, Exposure, MaterialRef, MeshRef, MeshRenderer,
-    PointLight, Projection, ResolvedMesh,
+    AmbientLight, BoxFace, Camera, DirectionalLight, Exposure, MaterialRef, MeshRef, MeshRenderer,
+    PointLight, Projection, ResolvedMesh, SkyLightVolume,
 };
 pub use features::{
     FeatureStats, FrameContext, GpuShared, GrowBuffer, RenderAppExt, RenderFeature, RenderPhase,
@@ -86,11 +87,11 @@ pub use wgpu;
 
 pub mod prelude {
     pub use crate::{
-        AlphaMode, AmbientLight, Atmosphere, Camera, DirectionalLight, Exposure, FogSettings,
-        GltfScene, GltfSceneSpawner, Image, MaterialRef, Mesh, MeshRef, MeshRenderer, PointLight,
-        Projection, RenderAppExt, RenderFeature, RenderPhase, RenderPlugin, RenderSettings,
-        Screenshots, Shape, StandardMaterial, Tonemapper, spawn_gltf_scene,
-        spawn_gltf_scene_deferred,
+        AlphaMode, AmbientLight, Atmosphere, BoxFace, Camera, DirectionalLight, Exposure,
+        FogSettings, GltfScene, GltfSceneSpawner, Image, MaterialRef, Mesh, MeshRef, MeshRenderer,
+        PointLight, Projection, RenderAppExt, RenderFeature, RenderPhase, RenderPlugin,
+        RenderSettings, Screenshots, Shape, SkyLightVolume, StandardMaterial, Tonemapper,
+        spawn_gltf_scene, spawn_gltf_scene_deferred,
     };
 }
 
@@ -135,6 +136,9 @@ impl Plugin for RenderPlugin {
             )
             .register_component::<PointLight>(
                 "Omni light. intensity_lm in lumens (bulb 800, campfire 2000), range in meters.",
+            )
+            .register_component::<SkyLightVolume>(
+                "Indoor space (cave, room, ship interior): inside the box (half_extents, m, local axes) sky light drops to sky_light (0..1), rising to full within fade meters of each of open_faces (PosX/NegX/PosY/NegY/PosZ/NegZ).",
             )
             .register_resource::<RenderSettings>(
                 "Renderer quality and look: shadows, tonemapper (AgX/Aces/Reinhard/None), bloom, grading, debug_view (None/Normals/Cascades).",

@@ -272,6 +272,85 @@ impl Default for PointLight {
     }
 }
 
+/// A side of a box, in the box's local axes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum BoxFace {
+    PosX,
+    NegX,
+    PosY,
+    NegY,
+    PosZ,
+    NegZ,
+}
+
+impl BoxFace {
+    /// Bit of this face in the GPU face mask (+x, -x, +y, -y, +z, -z).
+    pub fn bit(self) -> u32 {
+        1 << self as u32
+    }
+}
+
+/// An indoor space: a cave, room, tunnel or ship interior. Inside this box sky light only comes
+/// in through its open faces, fading from full at an open face to `sky_light` deeper inside.
+///
+/// The sky occlusion map sees cover from above only, so it can't tell that a cave's walls keep
+/// out the low sky; this volume says so. Fit the box to the inside of the walls (it follows the
+/// entity's transform, so a ship's interior moves and turns with the ship; scale is ignored,
+/// size it with `half_extents`). Lamps, emissive surfaces and sunlight through openings still
+/// light the inside as usual.
+#[derive(Component, Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[require(Transform)]
+#[serde(default)]
+pub struct SkyLightVolume {
+    /// Half the box size along its local x, y and z, meters.
+    pub half_extents: [f32; 3],
+    /// Fraction of the sky light left deep inside (0: only lamps and glowing things light it).
+    pub sky_light: f32,
+    /// Distance over which light from an open face dies out, meters.
+    pub fade: f32,
+    /// Faces sky light comes in through: a cave mouth, a doorway, an open hangar door.
+    pub open_faces: Vec<BoxFace>,
+}
+
+impl Default for SkyLightVolume {
+    fn default() -> Self {
+        Self {
+            half_extents: [5.0, 2.5, 5.0],
+            sky_light: 0.0,
+            fade: 8.0,
+            open_faces: Vec::new(),
+        }
+    }
+}
+
+impl SkyLightVolume {
+    /// A closed box of the given half size.
+    pub fn new(half_extents: [f32; 3]) -> Self {
+        Self {
+            half_extents,
+            ..Default::default()
+        }
+    }
+
+    /// Let sky light in through `face`.
+    pub fn open(mut self, face: BoxFace) -> Self {
+        if !self.open_faces.contains(&face) {
+            self.open_faces.push(face);
+        }
+        self
+    }
+
+    pub fn with_sky_light(mut self, sky_light: f32) -> Self {
+        self.sky_light = sky_light;
+        self
+    }
+
+    pub fn with_fade(mut self, fade: f32) -> Self {
+        self.fade = fade;
+        self
+    }
+}
+
 /// Extra ambient fill light added everywhere (on top of the sky's light). Keep it small: the
 /// sky environment map already lights outdoor scenes; this keeps unlit interiors from being
 /// pitch black.

@@ -71,7 +71,7 @@ pub fn places() -> Vec<Place> {
         place(
             "cave",
             "Mushroom cave",
-            near("cave", [0.0, 3.5, -12.0], [0.0, 0.5, 6.0]),
+            near("cave", [0.0, 3.0, -6.0], [0.0, 0.5, 10.0]),
             14.0,
         ),
         place(

@@ -142,10 +142,14 @@ Writes: `HeatField`, `WorldImpulse`, `IgniteRequest`, `DamageEvent`, `NoiseEvent
 
 **Sky occlusion** (built): a 512² top-down depth map of the highest surface within 128 m of
 the camera. `sky_visibility(rel, normal)` in `lib_frame.wgsl` returns how much open sky a point
-sees (1 outdoors, about 0.3 under a carport, 0 deep in a cave); shading and haze use it, and
-weather effects should use it to keep rain and snow off covered ground. It sees cover from
-above only, so a room near an outside wall still gets some sky light unless the roof or rock
-reaches past the wall. `RenderSettings::debug_view = SkyVisibility` shows it.
+sees; shading and haze use it, and weather effects should use it to keep rain and snow off
+covered ground. It integrates the view factor of the cover above the point out to 96 m, so it is
+height-aware: a 10 m carport 3 m up leaves about 0.25 of the sky, a roof 10 m up about 0.75, a
+roof 30 m up about 0.97 and an aircraft 100 m up next to nothing. The map sees cover from above
+only, so walls don't keep the low sky out: caves, rooms, tunnels and ship interiors add a
+`SkyLightVolume` (a box fitted to the inside, with the faces light comes in through, such as a
+cave mouth; it follows its entity, so a ship's interior moves with the ship). Up to 16 volumes
+nearest the camera are used. `RenderSettings::debug_view = SkyVisibility` shows the result.
 
 Shared pipelines the core will provide for modules (planned): **strands** for hair, fur and grass
 (guide curves in, GPU-expanded strands with hair shading and LOD out; `engine_softbody` drives

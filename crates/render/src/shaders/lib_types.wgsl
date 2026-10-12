@@ -35,10 +35,18 @@ struct Frame {
     shadow_cascades: array<mat4x4<f32>, 4>,  // camera-relative -> light clip space
     shadow_splits: vec4<f32>,      // far view distance of each cascade
     shadow_params: vec4<f32>,      // depth bias, normal bias (texels), pcf radius (texels), map size
-    counts: vec4<u32>,             // point light count, cascade count, debug view, unused
+    counts: vec4<u32>,             // point light count, cascade count, debug view, sky volume count
     ground: vec4<f32>,             // planet surface albedo RGB (beyond the terrain), w = ground-bounce weight (fades with altitude)
     sky_occlusion: mat4x4<f32>,    // camera-relative -> top-down sky occlusion map clip space (standard Z, 0 = top)
     sky_occlusion_params: vec4<f32>, // enabled (1/0), covered width (m), texel size (m), depth range (m)
+    sky_volumes: array<SkyVolume, 16>, // indoor volumes, nearest first (`counts.w` used)
+};
+
+// An indoor space (`SkyLightVolume`): sky light comes in only through its open faces.
+struct SkyVolume {
+    to_local: array<vec4<f32>, 3>, // rows of camera-relative -> box-local (meters, no scale)
+    half_fade: vec4<f32>,          // half extents xyz (m), fade distance from open faces (m)
+    params: vec4<f32>,             // sky light left inside, open face mask (+x -x +y -y +z -z bits), unused, unused
 };
 
 struct PointLight {

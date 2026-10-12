@@ -9,10 +9,21 @@ use image::RgbaImage;
 const W: u32 = 320;
 const H: u32 = 180;
 
-/// Ground, a 10 m roof slab 3 m up (like a carport or a cave ceiling) and a house-like block
-/// to the right whose wall faces the camera. The sun is high, so the roof's own shadow falls
-/// straight under it and the ground there is lit by the sky alone.
-fn roof_app(occlusion: bool, debug: DebugView) -> App {
+/// A box: center and size, meters.
+type Block = (DVec3, [f32; 3]);
+
+/// A 10 m roof slab 3 m up, like a carport or a cave ceiling. The sun is high, so its own
+/// shadow falls straight under it and the ground there is lit by the sky alone.
+const CARPORT: Block = (DVec3::new(0.0, 3.2, 0.0), [10.0, 0.4, 10.0]);
+/// A house-like block to the right whose wall faces the camera.
+const HOUSE: Block = (DVec3::new(12.0, 3.0, -2.0), [6.0, 6.0, 6.0]);
+
+/// Ground plus `blocks`, seen from 14 m away. `configure` tweaks the render settings.
+fn scene_app(
+    blocks: &[Block],
+    debug: DebugView,
+    configure: impl FnOnce(&mut RenderSettings),
+) -> App {
     engine_core::log::init("error");
     let mut app = App::new();
     app.world.resource_mut::<EngineConfig>().headless = true;
@@ -24,7 +35,6 @@ fn roof_app(occlusion: bool, debug: DebugView) -> App {
     app.add_plugins(RenderPlugin);
     {
         let mut s = app.world.resource_mut::<RenderSettings>();
-        s.sky_occlusion = occlusion;
         s.debug_view = debug;
         if debug != DebugView::None {
             // Show the debug value as is (sRGB-encoded, no tone curve).
@@ -34,6 +44,7 @@ fn roof_app(occlusion: bool, debug: DebugView) -> App {
             s.film_grain = 0.0;
             s.saturation = 1.0;
         }
+        configure(&mut s);
     }
     let w = &mut app.world;
     w.spawn((
@@ -57,25 +68,20 @@ fn roof_app(occlusion: bool, debug: DebugView) -> App {
             StandardMaterial::color(0.5, 0.5, 0.5).with_roughness(0.9),
         ),
     ));
-    w.spawn((
-        Transform::from_xyz(0.0, 3.2, 0.0),
-        MeshRenderer::new(
-            Shape::Cuboid {
-                size: [10.0, 0.4, 10.0],
-            },
-            StandardMaterial::color(0.5, 0.5, 0.5),
-        ),
-    ));
-    w.spawn((
-        Transform::from_xyz(12.0, 3.0, -2.0),
-        MeshRenderer::new(
-            Shape::Cuboid {
-                size: [6.0, 6.0, 6.0],
-            },
-            StandardMaterial::color(0.5, 0.5, 0.5).with_roughness(0.9),
-        ),
-    ));
+    for &(center, size) in blocks {
+        w.spawn((
+            Transform::from_translation(center),
+            MeshRenderer::new(
+                Shape::Cuboid { size },
+                StandardMaterial::color(0.5, 0.5, 0.5).with_roughness(0.9),
+            ),
+        ));
+    }
     app
+}
+
+fn roof_app(occlusion: bool, debug: DebugView) -> App {
+    scene_app(&[CARPORT, HOUSE], debug, |s| s.sky_occlusion = occlusion)
 }
 
 fn render(app: &mut App, name: &str) -> Option<RgbaImage> {
@@ -179,4 +185,86 @@ fn roofs_darken_sky_light_only_with_occlusion_on() {
         (open_on - open_off).abs() < open_off * 0.1 + 3.0,
         "open ground should look the same either way ({open_on} vs {open_off})"
     );
+}
+
+/// Sky visibility of the ground at the origin with `blocks` around it.
+fn visibility_under(
+    blocks: &[Block],
+    name: &str,
+    configure: impl FnOnce(&mut RenderSettings),
+) -> Option<f32> {
+    let mut app = scene_app(blocks, DebugView::SkyVisibility, configure);
+    let img = render(&mut app, name)?;
+    Some(decode(luma_at(&app, &img, UNDER_ROOF)))
+}
+
+#[test]
+fn high_roofs_hide_less_sky_than_low_ones() {
+    let roof_at = |y: f64| [(DVec3::new(0.0, y, 0.0), [10.0, 0.4, 10.0])];
+    let Some(low) = visibility_under(&roof_at(3.2), "sky_roof_3m", |_| {}) else {
+        return;
+    };
+    let mid = visibility_under(&roof_at(10.2), "sky_roof_10m", |_| {}).unwrap();
+    let high = visibility_under(&roof_at(30.2), "sky_roof_30m", |_| {}).unwrap();
+    eprintln!("sky visibility under a 10 m roof: 3 m up {low}, 10 m up {mid}, 30 m up {high}");
+    // Truth for the middle of a 10 m square roof: about 0.25 at 3 m, 0.76 at 10 m, 0.97 at 30 m.
+    assert!(low < 0.45, "a low roof hides most of the sky ({low})");
+    assert!(
+        (0.6..0.9).contains(&mid),
+        "a roof 10 m up hides about a quarter of the sky ({mid})"
+    );
+    assert!(high > 0.9, "a roof 30 m up hides very little sky ({high})");
+}
+
+#[test]
+fn an_aircraft_overhead_barely_darkens_the_ground() {
+    // A 12 m object 100 m up hides about 0.5 % of the sky.
+    let aircraft = [(DVec3::new(0.0, 100.0, 0.0), [12.0, 3.0, 12.0])];
+    let Some(vis) = visibility_under(&aircraft, "sky_aircraft", |_| {}) else {
+        return;
+    };
+    eprintln!("sky visibility under an aircraft 100 m up: {vis}");
+    assert!(
+        vis > 0.97,
+        "the ground under an aircraft keeps its sky light ({vis})"
+    );
+}
+
+#[test]
+fn a_coarse_map_still_darkens_under_a_carport() {
+    // 128² over 256 m is 2 m per texel: the carport is only five texels wide.
+    let Some(vis) = visibility_under(&[CARPORT], "sky_coarse", |s| s.sky_occlusion_size = 128)
+    else {
+        return;
+    };
+    eprintln!("sky visibility under the carport with a 2 m map: {vis}");
+    assert!(vis < 0.5, "the carport still hides most of the sky ({vis})");
+}
+
+#[test]
+fn a_sky_light_volume_keeps_sky_light_out_except_at_its_open_face() {
+    // The space under the carport, open toward the camera (+z).
+    let mut app = scene_app(&[CARPORT], DebugView::SkyVisibility, |_| {});
+    app.world.spawn((
+        Transform::from_xyz(0.0, 1.5, 0.0),
+        SkyLightVolume::new([5.0, 1.5, 5.0])
+            .open(BoxFace::PosZ)
+            .with_fade(4.0)
+            .with_sky_light(0.0),
+    ));
+    let Some(img) = render(&mut app, "sky_volume") else {
+        return;
+    };
+    let deep = decode(luma_at(&app, &img, DVec3::new(0.0, 0.0, -2.0)));
+    let mouth = decode(luma_at(&app, &img, DVec3::new(0.0, 0.0, 4.6)));
+    let open = decode(luma_at(&app, &img, OPEN_GROUND));
+    eprintln!(
+        "sky visibility with a volume: deep inside {deep}, at the open face {mouth}, outside {open}"
+    );
+    assert!(deep < 0.03, "deep inside sees no sky ({deep})");
+    assert!(
+        mouth > deep + 0.15,
+        "sky light comes in at the open face ({mouth})"
+    );
+    assert!(open > 0.85, "outside the volume nothing changes ({open})");
 }

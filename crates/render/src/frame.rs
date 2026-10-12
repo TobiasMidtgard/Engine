@@ -9,7 +9,9 @@ use engine_core::math::Frustum;
 use engine_core::prelude::*;
 use engine_world::{SurfaceLayers, WeatherState, WindField};
 
-use crate::components::{AmbientLight, Camera, DirectionalLight, Exposure, PointLight, Projection};
+use crate::components::{
+    AmbientLight, Camera, DirectionalLight, Exposure, PointLight, Projection, SkyLightVolume,
+};
 use crate::settings::{Atmosphere, DebugView, FogSettings, RenderSettings};
 use crate::shadows::{Cascades, SkyOcclusionView};
 
@@ -46,6 +48,39 @@ pub struct FrameUniform {
     pub ground: [f32; 4],
     pub sky_occlusion: [[f32; 4]; 4],
     pub sky_occlusion_params: [f32; 4],
+    pub sky_volumes: [GpuSkyVolume; MAX_SKY_VOLUMES],
+}
+
+/// Most [`SkyLightVolume`]s shaded per frame (nearest the camera first).
+pub const MAX_SKY_VOLUMES: usize = 16;
+
+/// GPU layout of `struct SkyVolume` in `lib_types.wgsl`.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default, Pod, Zeroable)]
+pub struct GpuSkyVolume {
+    /// Rows of the camera-relative → box-local affine transform (no scale).
+    pub to_local: [[f32; 4]; 3],
+    /// Half extents xyz (m), fade distance (m).
+    pub half_fade: [f32; 4],
+    /// Sky light left inside, open face mask (as a float), unused, unused.
+    pub params: [f32; 4],
+}
+
+impl GpuSkyVolume {
+    fn new(volume: &SkyLightVolume, rel_center: Vec3, rotation: Quat) -> Self {
+        let inv = Mat3::from_quat(rotation.inverse());
+        let row = |i: usize| {
+            let r = inv.row(i);
+            [r.x, r.y, r.z, -r.dot(rel_center)]
+        };
+        let [hx, hy, hz] = volume.half_extents.map(|h| h.max(0.0));
+        let mask = volume.open_faces.iter().fold(0, |m, f| m | f.bit());
+        Self {
+            to_local: [row(0), row(1), row(2)],
+            half_fade: [hx, hy, hz, volume.fade.max(0.01)],
+            params: [volume.sky_light.clamp(0.0, 1.0), mask as f32, 0.0, 0.0],
+        }
+    }
 }
 
 /// GPU layout of `struct PointLight` in `lib_types.wgsl`.
@@ -93,6 +128,8 @@ pub struct ViewData {
     pub delta: f32,
     pub frame_index: u64,
     pub point_lights: Vec<GpuPointLight>,
+    /// Indoor volumes near the camera (at most [`MAX_SKY_VOLUMES`]).
+    pub sky_volumes: Vec<GpuSkyVolume>,
     pub debug_view: DebugView,
     /// Angular radius of the sun disc, radians.
     pub sun_angular_radius: f32,
@@ -341,6 +378,20 @@ pub fn build_view(
     lights.sort_by(|a, b| a.0.total_cmp(&b.0));
     lights.truncate(settings.max_point_lights as usize);
 
+    // Indoor volumes: nearest first (by distance from the camera to the box's bounding sphere).
+    let mut volumes: Vec<(f32, GpuSkyVolume)> = Vec::new();
+    let mut q = world.query::<(&SkyLightVolume, &GlobalTransform)>();
+    for (volume, gt) in q.iter(world) {
+        let rel = (gt.translation() - origin).as_vec3();
+        let radius = Vec3::from(volume.half_extents).length();
+        volumes.push((
+            (rel.length() - radius).max(0.0),
+            GpuSkyVolume::new(volume, rel, gt.rotation()),
+        ));
+    }
+    volumes.sort_by(|a, b| a.0.total_cmp(&b.0));
+    volumes.truncate(MAX_SKY_VOLUMES);
+
     let cascades = if sun_shadows && luminance(sun_color) > 0.0 {
         crate::shadows::compute_cascades(
             &settings,
@@ -390,6 +441,7 @@ pub fn build_view(
         delta,
         frame_index,
         point_lights: lights.into_iter().map(|(_, l)| l).collect(),
+        sky_volumes: volumes.into_iter().map(|(_, v)| v).collect(),
         debug_view: settings.debug_view,
         sun_angular_radius,
     }
@@ -519,7 +571,7 @@ pub fn frame_uniform(world: &World, v: &ViewData) -> FrameUniform {
                 DebugView::Cascades => 2,
                 DebugView::SkyVisibility => 3,
             },
-            0,
+            v.sky_volumes.len() as u32,
         ],
         ground: [
             atmosphere.ground_color[0],
@@ -530,6 +582,7 @@ pub fn frame_uniform(world: &World, v: &ViewData) -> FrameUniform {
         ],
         sky_occlusion: mat(v.sky_occlusion.view_proj),
         sky_occlusion_params: v.sky_occlusion.params(),
+        sky_volumes: std::array::from_fn(|i| v.sky_volumes.get(i).copied().unwrap_or_default()),
     }
 }
 
@@ -542,8 +595,9 @@ mod tests {
         // 7 mat4 + 15 vec4 + 4 mat4 + 3 vec4
         assert_eq!(
             std::mem::size_of::<FrameUniform>(),
-            7 * 64 + 15 * 16 + 4 * 64 + 3 * 16 + 16 + 64 + 16
+            7 * 64 + 15 * 16 + 4 * 64 + 3 * 16 + 16 + 64 + 16 + MAX_SKY_VOLUMES * 80
         );
+        assert_eq!(std::mem::size_of::<GpuSkyVolume>(), 80);
         assert_eq!(std::mem::size_of::<GpuPointLight>(), 32);
     }
 

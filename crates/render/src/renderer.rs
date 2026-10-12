@@ -138,6 +138,7 @@ pub struct Renderer {
     frame_buffer: wgpu::Buffer,
     lights: GrowBuffer,
     shadow: ShadowResources,
+    sky_camera: crate::sky_occlusion::SkyCamera,
     env: [Tex; 2],
     env_current: usize,
     env_rendered: bool,
@@ -264,6 +265,20 @@ impl Renderer {
                         multisampled: false,
                     },
                 ),
+                layout_entry(
+                    8,
+                    all,
+                    wgpu::BindingType::Sampler(wgpu::SamplerBindingType::NonFiltering),
+                ),
+                layout_entry(
+                    9,
+                    all,
+                    wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                ),
             ],
         });
         let shadow_view_layout =
@@ -329,9 +344,25 @@ impl Renderer {
                 wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
             ),
         ];
+        let mut sky_camera = crate::sky_occlusion::SkyCamera::new(&shared);
+        sky_camera.set_inputs(&shared, &frame_buffer, &shadow.occlusion);
         let frame_groups = [
-            create_frame_group(&shared, &frame_buffer, &lights, &shadow, &env[0]),
-            create_frame_group(&shared, &frame_buffer, &lights, &shadow, &env[1]),
+            create_frame_group(
+                &shared,
+                &frame_buffer,
+                &lights,
+                &shadow,
+                &env[0],
+                &sky_camera,
+            ),
+            create_frame_group(
+                &shared,
+                &frame_buffer,
+                &lights,
+                &shadow,
+                &env[1],
+                &sky_camera,
+            ),
         ];
         let post = create_post(&shared, &targets, surface.as_ref().map(|s| s.view_format));
         let mut meter = crate::exposure::ExposureMeter::new(&shared);
@@ -347,6 +378,7 @@ impl Renderer {
             frame_buffer,
             lights,
             shadow,
+            sky_camera,
             env,
             env_current: 0,
             env_rendered: false,
@@ -461,6 +493,8 @@ impl Renderer {
             self.shadow.occlusion_size = view.sky_occlusion.map_size;
             self.shadow.occlusion =
                 create_occlusion_target(&self.shared, self.shadow.occlusion_size);
+            self.sky_camera
+                .set_inputs(&self.shared, &self.frame_buffer, &self.shadow.occlusion);
         }
         if self.lights.write(&self.shared.device, queue, light_bytes) || occlusion_resized {
             self.frame_groups = [
@@ -470,6 +504,7 @@ impl Renderer {
                     &self.lights,
                     &self.shadow,
                     &self.env[0],
+                    &self.sky_camera,
                 ),
                 create_frame_group(
                     &self.shared,
@@ -477,6 +512,7 @@ impl Renderer {
                     &self.lights,
                     &self.shadow,
                     &self.env[1],
+                    &self.sky_camera,
                 ),
             ];
         }
@@ -604,6 +640,7 @@ impl Renderer {
                 }
             }
         }
+        self.sky_camera.encode(&mut encoder);
 
         // Scene: opaque + sky.
         {
@@ -1049,6 +1086,7 @@ fn create_frame_group(
     lights: &GrowBuffer,
     shadow: &ShadowResources,
     env: &Tex,
+    sky_camera: &crate::sky_occlusion::SkyCamera,
 ) -> wgpu::BindGroup {
     shared.device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("frame"),
@@ -1085,6 +1123,14 @@ fn create_frame_group(
             wgpu::BindGroupEntry {
                 binding: 7,
                 resource: wgpu::BindingResource::TextureView(&shadow.occlusion),
+            },
+            wgpu::BindGroupEntry {
+                binding: 8,
+                resource: wgpu::BindingResource::Sampler(&shared.nearest_clamp),
+            },
+            wgpu::BindGroupEntry {
+                binding: 9,
+                resource: sky_camera.buffer.as_entire_binding(),
             },
         ],
     })
