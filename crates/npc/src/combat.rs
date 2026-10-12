@@ -186,6 +186,10 @@ pub(crate) fn defend(
             if a.handled || now < a.react_at {
                 continue;
             }
+            // Still reeling: look again once the stagger is over (if it ends in time).
+            if staggered && now < a.lands_at {
+                continue;
+            }
             let left = (a.lands_at - now) as f32;
             // Skilled sword fighters often hold their guard for the last moment to parry.
             if !a.ranged
@@ -200,9 +204,6 @@ pub(crate) fn defend(
             a.handled = true;
             if now >= a.lands_at {
                 late += 1;
-                continue;
-            }
-            if staggered {
                 continue;
             }
             let r = roll(me, now, 11);
@@ -292,6 +293,8 @@ pub(crate) struct Strike {
     origin: DVec3,
     forward: Vec3,
     aim: DVec3,
+    /// The attacker's clock when it landed (seeds the shot's scatter).
+    at: f64,
 }
 
 type FighterItem<'a> = (
@@ -378,6 +381,7 @@ pub(crate) fn resolve_attacks(
             origin: t.translation,
             forward: Vec3::new(fwd.x, 0.0, fwd.z).normalize_or(Vec3::NEG_Z),
             aim,
+            at: now,
         });
     }
     if !settings.resolve_hits {
@@ -544,8 +548,8 @@ fn resolve_shot(
         * if s.moving { 1.6 } else { 1.0 }
         * (1.0 + 3.0 * (1.0 - haze));
     // Random direction in a cone (deterministic per shot).
-    let r1 = roll(s.attacker, s.origin.x + s.aim.z, 3);
-    let r2 = roll(s.attacker, s.origin.z + s.aim.x, 5);
+    let r1 = roll(s.attacker, s.at, 3);
+    let r2 = roll(s.attacker, s.at, 5);
     let ang = spread * r1.sqrt();
     let rot = r2 * TAU;
     let side = aim_dir.any_orthonormal_vector();

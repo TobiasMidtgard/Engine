@@ -28,7 +28,7 @@ use crate::visuals::StandIn;
 use crate::wildlife::{Animal, Herd, Species};
 
 /// How far the arena reaches from its origin, stands and banners included, meters. The fight
-/// stays within 40 m.
+/// stays on the floor inside the stands (41 m).
 pub const ARENA_RADIUS: f64 = 48.0;
 
 /// Where the duel ring is, relative to the arena origin (in front of the south camera).

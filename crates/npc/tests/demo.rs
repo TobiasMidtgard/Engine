@@ -55,7 +55,8 @@ fn the_arena_fight_keeps_going() {
             }
             let p = app.world.get::<Transform>(e).unwrap().translation;
             assert!(p.is_finite(), "{e:?} at {p}");
-            assert!(p.distance(origin) < 40.0, "{e:?} left the arena: {p}");
+            // The first tier of stands rings the floor at 41 m.
+            assert!(p.distance(origin) < 41.5, "{e:?} left the arena: {p}");
         }
     }
     let stats: Vec<_> = fighters

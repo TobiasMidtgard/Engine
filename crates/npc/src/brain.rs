@@ -529,6 +529,9 @@ fn pick_spot(
 
 const WALK: f32 = 0.36;
 const JOG: f32 = 0.7;
+/// `logic × defense` above which a melee fighter waits out an enemy's swing to counter it
+/// instead of trading blows (elites and masters; veterans still trade).
+const COUNTER_FIGHTER: f32 = 0.6;
 
 #[allow(clippy::too_many_arguments)]
 fn drive(
@@ -939,7 +942,13 @@ fn melee(
         brain.committed_until = now + 1.0;
     }
     let committed = has_turn && now < brain.committed_until;
-    if committed || (ready && opening) {
+    // Elites and masters fight on the counter: never swing into an attack they can parry.
+    // They let it come, parry or slip it, and punish the opening it leaves.
+    let counter = p.attacking
+        && !opening
+        && weapon.can_block
+        && skills.logic * skills.defense > COUNTER_FIGHTER;
+    if (committed && !counter) || (ready && opening) {
         if dist > reach + 0.15 {
             let gap = dist - reach * 0.7;
             if (opening || skills.agility >= 1.1)
