@@ -7,13 +7,31 @@
 struct GroundFx {
     map: vec4<f32>,     // cover map min corner relative to the camera (x, z), size (m), texels per side
     rain: vec4<f32>,    // rain intensity 0..1, time (s, wrapped), ripples (1/0), puddle depth at 1.0 in the map (m)
-    params: vec4<f32>,  // reflection steps, snow meters per unit in the map, unused, unused
+    params: vec4<f32>,  // reflection steps, snow meters per unit in the map, height map offset to camera-relative (m), height map valid (1/0)
 };
 
 @group(1) @binding(0) var<uniform> fx: GroundFx;
 @group(1) @binding(1) var cover: texture_2d<f32>;      // wetness, puddle depth (0..1 of max), snow, scorch
 @group(1) @binding(2) var scene_color: texture_2d<f32>;
 @group(1) @binding(3) var scene_depth: texture_depth_2d;
+@group(1) @binding(4) var ground_height: texture_2d<f32>; // m above a reference, huge = unknown
+
+// How far `rel` sits above the ground (m), from the cached ground heights (bilinear between
+// cell centers); 0 where the ground isn't known yet.
+fn above_ground(rel: vec3<f32>) -> f32 {
+    if (fx.params.w < 0.5) { return 0.0; }
+    let size = vec2<i32>(textureDimensions(ground_height));
+    let g = (rel.xz - fx.map.xy) / fx.map.z * vec2<f32>(size) - 0.5;
+    let i = vec2<i32>(floor(g));
+    let f = g - floor(g);
+    let h00 = textureLoad(ground_height, clamp(i, vec2(0), size - 1), 0).r;
+    let h10 = textureLoad(ground_height, clamp(i + vec2(1, 0), vec2(0), size - 1), 0).r;
+    let h01 = textureLoad(ground_height, clamp(i + vec2(0, 1), vec2(0), size - 1), 0).r;
+    let h11 = textureLoad(ground_height, clamp(i + vec2(1, 1), vec2(0), size - 1), 0).r;
+    if (max(max(h00, h10), max(h01, h11)) > 1e20) { return 0.0; }
+    let h = mix(mix(h00, h10, f.x), mix(h01, h11, f.x), f.y) + fx.params.z;
+    return rel.y - h;
+}
 
 fn rel_at(px: vec2<i32>) -> vec4<f32> {
     let size = vec2<i32>(textureDimensions(scene_depth));
@@ -114,7 +132,9 @@ fn fs_ground(in: FullscreenOut) -> @location(0) vec4<f32> {
     let depth_mm = cov.g * fx.rain.w * 1000.0;
     let level = depth_mm / 4.0 - 0.4 + shore * 0.6;
     let snowed = saturate(cov.b * fx.params.y * 40.0);
-    let water = smoothstep(0.0, 0.05, level) * flat_ground * (1.0 - snowed);
+    // Water stands on the ground itself, not on grass blades, benches or tabletops.
+    let on_ground = 1.0 - smoothstep(0.04, 0.08, above_ground(rel));
+    let water = smoothstep(0.0, 0.05, level) * flat_ground * (1.0 - snowed) * on_ground;
     let damp = smoothstep(-0.3, 0.0, level);
     // Wetness the renderer didn't already apply (it uses the value at the camera).
     let extra_wet = saturate(max(cov.r, damp * cov.r) - frame.weather.x);
