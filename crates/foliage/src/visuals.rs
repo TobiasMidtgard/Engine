@@ -140,6 +140,21 @@ pub fn desired_parts(
     }
 }
 
+/// Turns a plant's pose ([`plant_pose`]) sits on: small plants lean with the slope they grow
+/// on (trees grow straight up), and a world shift that turns the world turns this too.
+/// Missing means none.
+#[derive(Component, Debug, Clone, Copy, PartialEq)]
+pub struct PlantBase(pub Quat);
+
+/// How far small plants lean toward the slope's normal (1 = square to the ground).
+const SLOPE_FOLLOW: f32 = 0.7;
+
+/// The lean of a small plant on ground with normal `normal`.
+pub fn slope_tilt(normal: Vec3) -> Quat {
+    let n = Vec3::Y.lerp(normal.normalize_or(Vec3::Y), SLOPE_FOLLOW);
+    Quat::from_rotation_arc(Vec3::Y, n.normalize_or(Vec3::Y))
+}
+
 /// Rotation and scale of a plant from its genes and size.
 pub fn plant_pose(plant: &Plant) -> (Quat, Vec3) {
     let g = &plant.genes;
@@ -167,14 +182,21 @@ pub fn sync_plant_visuals(
     library: Res<PlantLibrary>,
     visuals: Res<FoliageVisuals>,
     settings: Res<EcologySettings>,
+    ground: Option<Res<engine_world::Ground>>,
     cams: Query<(&Camera, &GlobalTransform)>,
-    mut plants: Query<(Entity, Ref<Plant>, &mut Transform, Option<&mut PlantVisual>)>,
+    mut plants: Query<(
+        Entity,
+        Ref<Plant>,
+        &mut Transform,
+        Option<&mut PlantVisual>,
+        Option<&PlantBase>,
+    )>,
     mut parts: Query<&mut MeshRenderer, With<PlantPart>>,
 ) {
     *frame = frame.wrapping_add(1);
     let full_pass = *frame % 8 == 1 || visuals.is_changed() || settings.is_changed();
     let cam = camera_position(&cams);
-    for (entity, plant, mut transform, visual) in &mut plants {
+    for (entity, plant, mut transform, visual, base) in &mut plants {
         let fresh = visual.is_none();
         if !full_pass && !fresh && !plant.is_changed() {
             continue;
@@ -184,7 +206,22 @@ pub fn sync_plant_visuals(
         };
         let sp = library.get(plant.species);
         if plant.is_changed() || fresh {
+            let base = match base {
+                Some(b) => b.0,
+                // Small plants lean with the slope, worked out once.
+                None if is_small(sp) => {
+                    let normal = ground
+                        .as_ref()
+                        .and_then(|g| g.sample(transform.translation + DVec3::Y))
+                        .map_or(Vec3::Y, |g| g.normal);
+                    let tilt = slope_tilt(normal);
+                    commands.entity(entity).insert(PlantBase(tilt));
+                    tilt
+                }
+                None => Quat::IDENTITY,
+            };
             let (rotation, scale) = plant_pose(&plant);
+            let rotation = base * rotation;
             if transform.rotation != rotation || transform.scale != scale {
                 transform.rotation = rotation;
                 transform.scale = scale;
@@ -377,6 +414,14 @@ pub struct GlowLights {
     last_camera: Option<DVec3>,
 }
 
+impl GlowLights {
+    /// Follow a world re-anchoring ([`crate::shift`]): the lights themselves are root entities
+    /// and move with the world; where they were gathered moves here.
+    pub fn follow(&mut self, s: &engine_world::WorldShift) {
+        self.last_camera = self.last_camera.map(|c| s.point(c));
+    }
+}
+
 /// Most glow lights at once.
 pub const MAX_GLOW_LIGHTS: usize = 40;
 
@@ -508,5 +553,20 @@ pub fn pulse_glow(
     }
     for (mut light, g) in &mut lights {
         light.intensity_lm = g.base_lm * breath(g.pulse_secs, g.phase);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn small_plants_lean_partly_with_the_slope() {
+        assert_eq!(slope_tilt(Vec3::Y), Quat::IDENTITY);
+        // A 30° slope facing +X: the plant leans toward +X, but less than the slope.
+        let normal = Vec3::new(30f32.to_radians().sin(), 30f32.to_radians().cos(), 0.0);
+        let up = slope_tilt(normal) * Vec3::Y;
+        let lean = up.angle_between(Vec3::Y).to_degrees();
+        assert!(up.x > 0.0 && (15.0..25.0).contains(&lean), "{up} {lean}");
     }
 }

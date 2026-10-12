@@ -720,16 +720,20 @@ pub fn trample(
 
 /// Terrain was dug or raised: plants move with the ground, or are uprooted.
 pub fn follow_terrain(
+    mut commands: Commands,
     mut changes: MessageReader<engine_world::TerrainChanged>,
     ground: Option<Res<Ground>>,
-    mut plants: Query<(&mut Transform, &mut Plant)>,
+    mut plants: Query<(Entity, &mut Transform, &mut Plant)>,
 ) {
     let Some(ground) = ground else { return };
     for c in changes.read() {
-        for (mut t, mut plant) in &mut plants {
+        for (e, mut t, mut plant) in &mut plants {
             if t.translation.distance(c.center) > c.radius as f64 + 1.0 {
                 continue;
             }
+            // Small plants lean with the new slope (worked out again when next drawn).
+            commands.entity(e).remove::<crate::visuals::PlantBase>();
+            plant.set_changed();
             let Some(h) = ground.height(t.translation + DVec3::Y * 2.0) else {
                 continue;
             };

@@ -7,6 +7,7 @@ pub mod ecology;
 pub mod felling;
 pub mod meshgen;
 pub mod plant;
+pub mod shift;
 pub mod sim;
 pub mod species;
 pub mod visuals;
@@ -107,6 +108,10 @@ impl Plugin for FoliagePlugin {
                     .chain()
                     .in_set(SimSet::Environment),
             ),
+        )
+        .add_systems(
+            PostUpdate,
+            shift::follow_world_shift.in_set(engine_world::WorldShiftSet::Apply),
         )
         .add_systems(
             Update,
