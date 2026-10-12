@@ -1458,69 +1458,6 @@ pub fn field_edge(commands: &mut Commands, lib: &Library, z: &Zone, rng: &mut Rn
     }
 }
 
-/// Smoke range: firing line, targets, a fan bank and a smoke chamber. The Fire and smoke thread
-/// owns it.
-pub fn range(commands: &mut Commands, _lib: &Library, z: &Zone) {
-    let c = z.center;
-    spawn(
-        commands,
-        cuboid(40.0, 0.12, 50.0),
-        concrete(),
-        at(c + DVec3::new(0.0, 0.06, 0.0)),
-    );
-    spawn(
-        commands,
-        cuboid(30.0, 1.0, 1.0),
-        stone(),
-        at(c + DVec3::new(0.0, 0.5, -20.0)),
-    );
-    for i in 0..5 {
-        let x = -12.0 + i as f64 * 6.0;
-        spawn(
-            commands,
-            cuboid(0.1, 1.6, 0.1),
-            dark_wood(),
-            at(c + DVec3::new(x, 0.8, 18.0)),
-        );
-        spawn(
-            commands,
-            cyl(0.6, 0.05),
-            mat(0xeeeeee, 0.8),
-            Transform::from_translation(c + DVec3::new(x, 1.8, 18.0))
-                .with_rotation(Quat::from_rotation_x(std::f32::consts::FRAC_PI_2)),
-        );
-        spawn(
-            commands,
-            cyl(0.3, 0.06),
-            mat(0xc0392b, 0.8),
-            Transform::from_translation(c + DVec3::new(x, 1.8, 17.98))
-                .with_rotation(Quat::from_rotation_x(std::f32::consts::FRAC_PI_2)),
-        );
-    }
-    // Back wall and fans that blow across the lanes.
-    spawn(
-        commands,
-        cuboid(40.0, 6.0, 1.0),
-        concrete(),
-        at(c + DVec3::new(0.0, 3.0, 25.0)),
-    );
-    for zz in [-8.0, 0.0, 8.0] {
-        spawn(
-            commands,
-            cyl(1.4, 0.4),
-            metal(),
-            Transform::from_translation(c + DVec3::new(-19.0, 2.0, zz))
-                .with_rotation(Quat::from_rotation_z(std::f32::consts::FRAC_PI_2)),
-        );
-        spawn(
-            commands,
-            cuboid(0.4, 2.0, 0.4),
-            metal(),
-            at(c + DVec3::new(-19.0, 1.0, zz)),
-        );
-    }
-}
-
 /// Vehicle track: asphalt oval with a jump and a car. The Cars, planes and spaceships thread
 /// owns it.
 pub fn track(commands: &mut Commands, _lib: &Library, z: &Zone) {

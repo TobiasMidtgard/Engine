@@ -271,8 +271,17 @@ pub fn spawn_demos(
             "field" => {
                 engine_fire::demo::spawn_demo(commands, z.center);
                 ph::field_edge(commands, lib, z, rng);
+                // Air over the meadow, so the fire's smoke rises as one simulated plume.
+                commands.spawn((
+                    Name::new("Fire demo: smoke"),
+                    Transform::from_translation(z.center + DVec3::new(16.0, 0.0, 4.0)),
+                    engine_smoke::SmokeVolume {
+                        size: [100.0, 40.0, 60.0],
+                        cell_m: 1.25,
+                    },
+                ));
             }
-            "range" => ph::range(commands, lib, z),
+            "range" => engine_smoke::demo::spawn_demo(commands, z.center),
             "weather" => engine_weather::demo::spawn_demo(commands, z.center),
             "track" => ph::track(commands, lib, z),
             "airfield" => ph::airfield(commands, lib, z),
@@ -344,6 +353,15 @@ pub fn demo_views(z: &Zone) -> Vec<View> {
         "field" => engine_fire::demo::VIEWS
             .iter()
             .map(|v| View::new(v.key, v.name, v.eye, v.target, v.hour))
+            .collect(),
+        // Each stop restarts the range, so fans, grenades and bullets are at the same moment.
+        "range" => engine_smoke::demo::VIEWS
+            .iter()
+            .map(|v| {
+                View::new(v.key, v.name, v.eye, v.target, v.hour)
+                    .on_arrive("smoke.demo", r#"{"restart":true}"#)
+                    .warmup(v.warmup_secs)
+            })
             .collect(),
         "yard" => vec![
             View::new(
