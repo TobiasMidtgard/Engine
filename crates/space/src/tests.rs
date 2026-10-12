@@ -1,5 +1,6 @@
 use super::*;
 use engine_core::time::TimeSource;
+use engine_render::prelude::Camera;
 
 fn app() -> App {
     let mut app = App::new();
@@ -262,4 +263,50 @@ fn climbing_to_orbit_stops_the_world_turning() {
         p.x.abs() < 1.0 && p.z.abs() < 1.0 && (p.y - 1_000.0).abs() < 50.0,
         "{p:?}"
     );
+}
+
+#[test]
+fn far_bodies_get_spheres_rings_and_stay_visible() {
+    let mut app = app();
+    app.world.spawn((Camera::default(), Transform::default()));
+    app.update_n(2);
+    let mut q = app.world.query::<(&ChildOf, &BodyImpostor, &Transform)>();
+    let impostors: Vec<_> = q
+        .iter(&app.world)
+        .map(|(p, i, t)| (p.parent(), *i, t.scale.x))
+        .collect();
+    let s = state(&app);
+    let of = |name: &str| {
+        let e = s.body(name).unwrap().entity;
+        impostors
+            .iter()
+            .filter(|(p, ..)| *p == e)
+            .collect::<Vec<_>>()
+    };
+    // One sphere per planet and moon, none for the Sun; Saturn also has its rings.
+    assert!(of("Sun").is_empty());
+    assert_eq!(of("Jupiter").len(), 1);
+    assert_eq!(of("Saturn").len(), 2);
+    assert_eq!(impostors.len(), 10);
+    // Inside the body (under any terrain), and the Moon is big enough to be seen as it is.
+    let moon = of("Moon")[0];
+    assert!(moon.1.radius_m < 1_737_400.0 && moon.1.radius_m > 1_700_000.0);
+    assert_eq!(moon.2, 1.0);
+    // Jupiter, hundreds of millions of km away, is enlarged to a visible dot.
+    let jupiter = of("Jupiter")[0];
+    let d = (s.body("Jupiter").unwrap().world_position).length();
+    let apparent = jupiter.1.radius_m * jupiter.2 as f64 / d;
+    assert!(
+        jupiter.2 > 1.0 && (apparent - 7e-4).abs() < 1e-5,
+        "{apparent}"
+    );
+}
+
+#[test]
+fn ring_opacity_has_the_cassini_division() {
+    let rings = BodyRings::default();
+    let b_ring = look::ring_opacity(&rings, 100_000_000.0);
+    let cassini = look::ring_opacity(&rings, 119_000_000.0);
+    assert!(b_ring > 0.6 && cassini < 0.15, "{b_ring} {cassini}");
+    assert_eq!(look::ring_opacity(&rings, 60_000_000.0), 0.0);
 }

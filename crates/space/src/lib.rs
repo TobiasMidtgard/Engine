@@ -1,6 +1,7 @@
 #![doc = include_str!("../README.md")]
 
 pub mod demo;
+pub mod look;
 pub mod orbit;
 pub mod system;
 
@@ -12,6 +13,7 @@ use engine_render::prelude::{Atmosphere, DirectionalLight};
 use engine_world::physics::Velocity;
 use engine_world::{FocusPoints, Gravity, GravityBody, SimulationFocus};
 
+pub use look::{BodyImpostor, BodyLook, BodyRings};
 pub use orbit::{AU, DAY, Orbit};
 
 /// What kind of body (for maps and defaults).
@@ -78,6 +80,10 @@ pub struct CelestialBody {
     pub luminosity_w: f64,
     /// Color for maps and far-away dots (linear RGB).
     pub color: [f32; 3],
+    /// Surface pattern of the far-view sphere.
+    pub look: BodyLook,
+    /// Rings in the equatorial plane.
+    pub rings: Option<BodyRings>,
 }
 
 impl Default for CelestialBody {
@@ -96,6 +102,8 @@ impl Default for CelestialBody {
             atmosphere: None,
             luminosity_w: 0.0,
             color: [0.5, 0.5, 0.5],
+            look: BodyLook::Rocky,
+            rings: None,
         }
     }
 }
@@ -175,6 +183,11 @@ pub struct SpaceSettings {
     /// The world turns with the anchor below this altitude, as a fraction of its radius (plus
     /// the top of its atmosphere).
     pub rotating_altitude_fraction: f64,
+    /// Draw a textured sphere (and rings) for every body that is not a star; a terrain on the
+    /// body covers it up close.
+    pub draw_bodies: bool,
+    /// Far bodies stay at least this wide (half-angle, radians) so they show as dots.
+    pub min_apparent_radius_rad: f64,
 }
 
 impl Default for SpaceSettings {
@@ -185,6 +198,8 @@ impl Default for SpaceSettings {
             drive_starlight: true,
             lumens_per_watt: 93.0,
             rotating_altitude_fraction: 0.15,
+            draw_bodies: true,
+            min_apparent_radius_rad: 7e-4,
         }
     }
 }
@@ -338,10 +353,15 @@ impl Plugin for SpacePlugin {
                  origin (latitude/longitude, degrees). auto_switch re-anchors on arrival.",
             )
             .register_resource::<SpaceSettings>(
-                "What the space module drives: gravity, atmosphere, starlight.",
+                "What the space module drives: gravity, atmosphere, starlight, far-view spheres.",
             )
             .add_systems(FixedUpdate, advance_clock.in_set(SimSet::Environment))
-            .add_systems(PostUpdate, update_space.before(UpdateSet::Propagate));
+            .add_systems(
+                PostUpdate,
+                (look::spawn_impostors, update_space, look::scale_impostors)
+                    .chain()
+                    .before(UpdateSet::Propagate),
+            );
         register_apis(app);
     }
 }

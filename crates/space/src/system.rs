@@ -5,7 +5,7 @@
 //! 2000-01-01 12:00 TT.
 
 use crate::orbit::{AU, DAY, Orbit};
-use crate::{BodyAtmosphere, BodyKind, CelestialBody};
+use crate::{BodyAtmosphere, BodyKind, BodyLook, BodyRings, CelestialBody};
 
 /// Planet elements from semi-major axis (AU), eccentricity, inclination, longitude of the
 /// ascending node, longitude of perihelion and mean longitude (degrees).
@@ -48,6 +48,53 @@ fn planet(
 
 /// The Sun, the eight planets and the Moon.
 pub fn solar_system() -> Vec<CelestialBody> {
+    let mut bodies = bodies();
+    for b in &mut bodies {
+        match b.name.as_str() {
+            "Earth" => b.look = BodyLook::Earthlike,
+            "Venus" => b.look = BodyLook::Clouds,
+            "Jupiter" => {
+                b.look = BodyLook::Banded {
+                    colors: vec![
+                        [0.78, 0.7, 0.58],
+                        [0.55, 0.38, 0.25],
+                        [0.85, 0.8, 0.7],
+                        [0.62, 0.45, 0.3],
+                        [0.8, 0.72, 0.6],
+                    ],
+                    bands: 15.0,
+                    storm: Some([0.6, 0.27, 0.14]),
+                }
+            }
+            "Saturn" => {
+                b.look = BodyLook::Banded {
+                    colors: vec![[0.82, 0.74, 0.55], [0.72, 0.62, 0.42], [0.86, 0.8, 0.62]],
+                    bands: 11.0,
+                    storm: None,
+                };
+                b.rings = Some(BodyRings::default());
+            }
+            "Uranus" => {
+                b.look = BodyLook::Banded {
+                    colors: vec![[0.6, 0.8, 0.84], [0.56, 0.76, 0.82]],
+                    bands: 6.0,
+                    storm: None,
+                }
+            }
+            "Neptune" => {
+                b.look = BodyLook::Banded {
+                    colors: vec![[0.28, 0.42, 0.85], [0.22, 0.34, 0.75], [0.32, 0.48, 0.88]],
+                    bands: 7.0,
+                    storm: Some([0.1, 0.14, 0.4]),
+                }
+            }
+            _ => {}
+        }
+    }
+    bodies
+}
+
+fn bodies() -> Vec<CelestialBody> {
     let hour = 3_600.0;
     vec![
         CelestialBody {
@@ -60,6 +107,7 @@ pub fn solar_system() -> Vec<CelestialBody> {
             axial_tilt_deg: 7.25,
             luminosity_w: 3.828e26,
             color: [1.0, 0.95, 0.85],
+            look: BodyLook::None,
             ..Default::default()
         },
         planet(
