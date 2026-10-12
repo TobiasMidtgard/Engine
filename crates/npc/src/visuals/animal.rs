@@ -525,9 +525,9 @@ impl<'a> Quad<'a> {
             }
             AnimalState::Alert => Some((
                 Look {
-                    neck: 0.3,
+                    neck: if deer { 0.3 } else { 0.12 },
                     neck2: if deer { 0.18 } else { 0.0 },
-                    head: if deer { 0.5 } else { 0.15 },
+                    head: if deer { 0.5 } else { 0.02 },
                     yaw: 0.35 * drift(c.now, 0.6, c.seed),
                     ear_fwd: 0.7,
                     ear_up: 0.35,
@@ -574,6 +574,10 @@ impl<'a> Quad<'a> {
                     head: if deer { 0.2 } else { 0.25 },
                     yaw: 0.4 * drift(c.now, 0.15, c.seed),
                     ear_fwd: 0.2 * drift(c.now, 0.3, c.seed),
+                    // Wolves lie with the tail curled round to the side.
+                    tail: if deer { 0.0 } else { 0.8 },
+                    tail2: if deer { 0.0 } else { 0.35 },
+                    tail_swish: if deer { 0.0 } else { 0.75 },
                     ..Look::default()
                 },
                 1.2,
@@ -604,7 +608,7 @@ impl<'a> Quad<'a> {
             let snap = (c.now * 14.0).sin().abs();
             l.neck -= 0.15;
             l.head += 0.3;
-            l.jaw = -0.75 * snap;
+            l.jaw = -0.5 * snap;
             l.ear_fwd = -0.6;
         }
         l
@@ -771,16 +775,22 @@ impl<'a> Quad<'a> {
             ang[i] += wrap_pi(fold[i] - ang[i]) * w_fold;
         }
         if self.dead > 0.0 {
-            let limp = [
-                rest[0] + 0.15,
-                rest[1] - 0.15,
-                rest[2] + 0.25,
-                rest[3] - 0.2,
-            ];
+            // Limp: knees and hocks a little bent, each leg a little differently.
+            let vary = 0.18 * (k as f32 * 1.7 + self.c.seed * 11.0).sin();
             let limp = if front {
-                limp
+                [
+                    rest[0] + 0.3 + vary,
+                    rest[1] + 0.1,
+                    rest[2] - 0.55 - vary,
+                    rest[3] - 0.35,
+                ]
             } else {
-                [rest[0] - 0.2, rest[1] + 0.25, rest[2] - 0.15, rest[3] - 0.3]
+                [
+                    rest[0] + 0.25 + vary,
+                    rest[1] + 0.05,
+                    rest[2] + 0.45 - vary,
+                    rest[3] - 0.35,
+                ]
             };
             for i in 0..4 {
                 ang[i] += wrap_pi(limp[i] - ang[i]) * self.dead;
@@ -1540,6 +1550,31 @@ mod tests {
         for k in 0..4 {
             let t = toe(Species::Deer, k, AnimalState::Graze, 0.0, 0.0, 100.0);
             assert!(t.y.abs() < 0.01, "grazing deer leg {k}: toe at {t}");
+        }
+    }
+
+    #[test]
+    fn feeding_wolves_reach_the_kill_and_stalking_wolves_creep_low() {
+        let nose = |state, speed| {
+            let p = pose(Species::Wolf, Part::Head, state, 0.0, speed, 100.0);
+            p.pos + p.rot * (Vec3::NEG_Z * WOLF.head_len)
+        };
+        let feed = nose(AnimalState::Feed, 0.0);
+        let stand = nose(AnimalState::Wander, 0.0);
+        eprintln!("wolf nose: feed {feed} stand {stand}");
+        assert!(feed.y > 0.0 && feed.y < 0.15, "feeding nose at {feed}");
+        let back = |state| {
+            pose(Species::Wolf, Part::Body, state, 0.0, 0.0, 100.0)
+                .pos
+                .y
+        };
+        assert!(
+            back(AnimalState::Stalk) < back(AnimalState::Wander) - 0.08,
+            "stalking body should be low"
+        );
+        for k in 0..4 {
+            let t = toe(Species::Wolf, k, AnimalState::Feed, 0.0, 0.0, 100.0);
+            assert!(t.y.abs() < 0.01, "feeding wolf leg {k}: toe at {t}");
         }
     }
 }
