@@ -59,7 +59,7 @@ by the core owner, on request.
 | `engine_audio` | Spatial audio, footsteps/impacts from surface materials | Core (until assigned) |
 | `games/showcase` | The tech showcase test area | Core |
 | `engine_physics` | Rigid-body simulation, colliders, joints, ragdolls, queries, character controller, floating-origin physics islands | Physics & vehicles |
-| `engine_softbody` | Cloth (characters, flags, sails), ropes and cables, soft bodies (jelly, flesh, soft tires); XPBD solver with two-way rigid coupling, tearing | Cloth & soft bodies (proposed) |
+| `engine_softbody` | Cloth (characters, flags, sails), ropes and cables, soft bodies (jelly, flesh, soft tires), hair and fur dynamics; one XPBD solver with two-way rigid coupling, tearing | Cloth, soft bodies & hair (proposed) |
 | `engine_vehicles` | Cars (suspension, tires, drivetrain), planes (aero surfaces), spaceships (thrusters, RCS) | Physics & vehicles |
 | `engine_space` | Orbits, planets and moons, gravity wells, interplanetary travel, reference frames | Physics & vehicles (or Planets) |
 | `engine_terrain` | Heightmap/planet terrain with LOD, voxel volumes, ground queries, deformation (mud/snow tracks) | Planets & terrain (proposed) |
@@ -122,6 +122,10 @@ Writes: `HeatField`, `WorldImpulse`, `IgniteRequest`, `DamageEvent`, `NoiseEvent
 | `draw_shadow(cascade)` | cast sun shadows |
 | `draw(Opaque/Sky/Transparent)` | draw into the HDR scene; transparent can read scene color/depth copies |
 | `overlay` | draw onto the final LDR image (UI, debug) |
+
+Shared pipelines the core provides for modules (planned): **strands** for hair, fur and grass
+(guide curves in, GPU-expanded strands with hair shading and LOD out; `engine_softbody` drives
+hair/fur, `engine_foliage` drives grass) and the **sky occlusion map** (`sky_visibility`).
 
 Shader library: `lib_types.wgsl` (types, noise, BRDF) and `lib_frame.wgsl` (group 0 frame
 data, `shade_surface`, `shadow_factor`, `apply_fog`, atmosphere, `wind_offset`).

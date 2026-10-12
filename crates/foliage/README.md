@@ -7,6 +7,7 @@ Background research: `game-engine-research/graphics.md` in the project files.
 
 - Procedural plants (trees, bushes, grass, mushrooms) from species parameters (L-systems / space colonization), with variation per plant.
 - GPU instancing, culling, LOD and impostors for forests; grass bends in wind (`wind_offset`) and under feet/wheels.
+- Grass blades are drawn with the renderer's shared strand pipeline (the same one hair and fur use), so dense grass, fur and hair get one optimized path.
 - Ecology: each species needs resources (water, sunlight, soil nutrients, minerals such as mineral water); plants grow over time where resources allow, compete, spread seeds.
 - Chop a tree: it falls (physics), leaves a stump, and new plants regrow where conditions allow.
 - Cave mushrooms that drink mineral water and glow (emissive + point lights).
