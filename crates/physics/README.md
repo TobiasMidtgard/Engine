@@ -24,6 +24,11 @@ changing that one plugin line.
   compound; on the body entity or on its children (one compound body). Shapes scale with the
   entity's `Transform::scale`. Changing a `Collider` rebuilds it. Friction and restitution come
   from `SurfaceMaterials`, layers from `CollisionLayers`, sensors report overlaps.
+- **Rolling resistance**: balls, barrels, logs and capsule limbs slow down and stop like real ones
+  (Rapier has none, so they would roll forever). Each rolling contact pushes back with a torque of
+  `Crr · N · r`: `rolling_resistance` on hard ground, more on mud, sand, snow and grass (from the
+  surface's deformation, the same amounts the vehicle tires use). Boxes tipping over an edge are
+  left alone. The contract's default `angular_damping` (0.05) slows rolling a little too.
 - **Joints**: fixed, spherical (cone limit), revolute and prismatic (limits, motors), distance
   (rope), spring. `break_force` breaks a joint: the joint entity is despawned (or the `Joint`
   removed from a body entity).
@@ -80,6 +85,7 @@ under a micrometer).
 | `contact_stiffness_hz` | 60 | Contact spring frequency (static contacts 2×). 30 Hz lets a 30-box tower sag 24 cm, 60 Hz ~6 cm. |
 | `region_radius_m` | 1000 | Size of a region. |
 | `freeze_distance_m` | 25 000 | Pause regions this far from every focus (`None` = never). |
+| `rolling_resistance` | 0.01 | Rolling resistance on hard ground (rubber on concrete); soft surfaces add more, 0 = roll forever. |
 | `max_speed` | 100 000 m/s | Velocity clamp (spaceships are fast). |
 | `contact_events`, `impact_events` | on | Send `ContactEvent` / impact `NoiseEvent` + `GroundContact`. |
 | `impact_min_speed` | 1.5 m/s | Smallest speed change that counts as an impact. |
@@ -122,8 +128,9 @@ rays hitting bodies at orbital speed); mass overrides (`tests/mass.rs`: a moved 
 dropping an override); following world shifts (`tests/world_shift.rs`: a
 sleeping pile stays asleep through floating-origin moves, a stack stands through a tilting turn,
 world-pinned hinges turn with the world, a moving or spinning frame adds its motion at each body,
-characters keep their footing, queries see the new frame at once); a headless screenshot of the
-proving ground.
+characters keep their footing, queries see the new frame at once); rolling resistance
+(`tests/rolling.rs`: balls and logs slow at `Crr·g/(1 + I/mr²)` on concrete, faster on grass and
+sand, barrels stop on sand); a headless screenshot of the proving ground.
 
 ## Done when
 
@@ -138,7 +145,10 @@ proving ground.
 ## Next
 
 - Articulated (reduced-coordinate) joints for ragdolls and robot arms: zero joint gap.
-- Rolling resistance (balls and wheels roll forever on flat ground today).
+- Smoother rolling barrels: Rapier's cylinder contacts make a rolling barrel hop a few
+  centimeters now and then.
+- A `rolling_resistance` field on `SurfaceMaterial`, so games can tune it per surface (today
+  it comes from the surface's deformation).
 - Co-moving region frames, so cargo resting in a ship at 7 km/s can sleep (today bodies moving
   together at speed stay awake; they ride correctly, they just cost CPU).
 - Debug drawing of colliders, contacts and regions through `engine_debug`.

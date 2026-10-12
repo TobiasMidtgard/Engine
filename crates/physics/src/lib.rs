@@ -5,6 +5,7 @@ mod character;
 mod convert;
 pub mod demo;
 mod queries;
+mod rolling;
 mod settings;
 mod shift;
 mod sim;

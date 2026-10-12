@@ -301,17 +301,28 @@ pub struct Simulation {
     pub writes: Vec<BodyWrite>,
 }
 
-/// Friction and restitution of each `SurfaceMaterials` entry, copied when the table changes.
+/// Friction, restitution and extra rolling resistance (soft ground) of each `SurfaceMaterials`
+/// entry, copied when the table changes.
 #[derive(Clone, Default)]
-pub struct MaterialCache(pub Vec<(f32, f32)>);
+pub struct MaterialCache(pub Vec<(f32, f32, f32)>);
 
 impl MaterialCache {
-    pub fn get(&self, id: SurfaceId) -> (f32, f32) {
+    fn entry(&self, id: SurfaceId) -> (f32, f32, f32) {
         self.0
             .get(id.0 as usize)
             .or_else(|| self.0.first())
             .copied()
-            .unwrap_or((0.7, 0.1))
+            .unwrap_or((0.7, 0.1, 0.0))
+    }
+
+    pub fn get(&self, id: SurfaceId) -> (f32, f32) {
+        let (f, r, _) = self.entry(id);
+        (f, r)
+    }
+
+    /// Rolling resistance a surface adds on top of `PhysicsSettings::rolling_resistance`.
+    pub fn rolling(&self, id: SurfaceId) -> f32 {
+        self.entry(id).2
     }
 }
 

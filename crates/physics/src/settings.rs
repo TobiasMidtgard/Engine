@@ -29,6 +29,10 @@ pub struct PhysicsSettings {
     /// Regions farther than this from every `SimulationFocus` pause (bodies there keep their
     /// state). `None` = simulate everywhere. Has no effect when there is no focus.
     pub freeze_distance_m: Option<f64>,
+    /// Rolling resistance coefficient on hard ground: how much balls, barrels, wheels and
+    /// capsules slow down rolling (≈ 0.01 for rubber on concrete; 0 = roll forever). Mud, sand,
+    /// snow and grass add more, from the surface's deformation.
+    pub rolling_resistance: f32,
     /// Fastest a body may move, m/s (keeps a solver blow-up from flinging bodies to infinity).
     /// Spaceships can go far faster than cars, so the default is high.
     pub max_speed: f32,
@@ -58,6 +62,7 @@ impl Default for PhysicsSettings {
             contact_stiffness_hz: 60.0,
             region_radius_m: 1000.0,
             freeze_distance_m: Some(25_000.0),
+            rolling_resistance: 0.01,
             max_speed: 100_000.0,
             contact_events: true,
             impact_events: true,
