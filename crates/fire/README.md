@@ -92,6 +92,12 @@ path. Once the meadow has regrown, the next fire starts. The first fire is alrea
 when the demo starts so there's something to see right away. `demo::VIEWS` lists camera spots
 for it (fire front, burning trees, campfire at dusk, the fire coming at you at night).
 
+The grass is a `GrassMeadow` (`grass.rs`): a few hundred thousand curved, tapered blades
+drawn on the GPU, thinned with distance, swaying in the wind and casting shadows. It grows
+only where the fuel is grass (roads and fire pits stay bare, the soaked patch is lush green)
+and follows the fire field: burning blades glow at their cut ends and collapse, burnt cells
+keep black stubble, and regrowth comes up green and cures to straw.
+
 The props are procedural meshes and textures (`props.rs`, `textures.rs`), built once and
 shared by key in `Assets`: grown broadleaf trees (flared, branching trunks with bark, alpha
 leaf cards whose crowns scorch brown, blacken and drop out as they burn; `Foliage`), a timber

@@ -773,6 +773,18 @@ impl RenderFeature for FireFeature {
         if phase != RenderPhase::Transparent {
             return;
         }
+        // Heat haze first: it replaces pixels with the bent scene copy (taken before the
+        // transparent pass), so it must come before anything the fire draws on top, the scorch
+        // decal included.
+        let flames = match (&self.haze_pipeline, &self.flame_pipeline, &self.flame_group) {
+            (Some(haze), Some(p), Some(g)) if self.count > 0 => {
+                pass.set_pipeline(haze);
+                pass.set_bind_group(1, g, &[]);
+                pass.draw(0..6, 0..self.count);
+                Some((p, g))
+            }
+            _ => None,
+        };
         if self.map_valid
             && let (Some(p), Some(g)) = (&self.scorch_pipeline, &self.scorch_group)
         {
@@ -780,15 +792,9 @@ impl RenderFeature for FireFeature {
             pass.set_bind_group(1, g, &[]);
             pass.draw(0..3, 0..1);
         }
-        if self.count > 0
-            && let (Some(haze), Some(p), Some(g)) =
-                (&self.haze_pipeline, &self.flame_pipeline, &self.flame_group)
-        {
-            // Heat haze first: it bends the scene as it was before any flame was drawn.
-            pass.set_pipeline(haze);
-            pass.set_bind_group(1, g, &[]);
-            pass.draw(0..6, 0..self.count);
+        if let Some((p, g)) = flames {
             pass.set_pipeline(p);
+            pass.set_bind_group(1, g, &[]);
             pass.draw(0..6, 0..self.count);
         }
     }
