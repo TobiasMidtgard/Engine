@@ -459,6 +459,9 @@ pub(crate) fn physics_step(world: &mut World, mut q: Local<Option<StepQueries>>)
     } else {
         0.0
     };
+    if sub_dt > 0.0 {
+        sim.last_sub_dt = sub_dt;
+    }
     let region_ids: Vec<RegionId> = sim.live_regions().map(|(id, _)| id).collect();
     for rid in region_ids.iter().copied() {
         let (frozen, movers) = {

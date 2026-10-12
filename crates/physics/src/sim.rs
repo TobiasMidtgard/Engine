@@ -299,6 +299,8 @@ pub struct Simulation {
     pub broken_joints: Vec<Entity>,
     /// Body writes produced by the last step.
     pub writes: Vec<BodyWrite>,
+    /// Length of the last substep, seconds (turns impulses into forces for debug drawing).
+    pub last_sub_dt: f32,
 }
 
 /// Friction, restitution and extra rolling resistance (soft ground) of each `SurfaceMaterials`
