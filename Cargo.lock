@@ -698,11 +698,33 @@ dependencies = [
 ]
 
 [[package]]
+name = "engine_anim"
+version = "0.1.0"
+dependencies = [
+ "bevy_ecs",
+ "engine_core",
+ "engine_world",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "engine_assets"
 version = "0.1.0"
 dependencies = [
  "bevy_ecs",
  "engine_core",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "engine_audio"
+version = "0.1.0"
+dependencies = [
+ "bevy_ecs",
+ "engine_core",
+ "engine_world",
  "serde",
  "serde_json",
 ]
@@ -724,11 +746,77 @@ dependencies = [
 ]
 
 [[package]]
+name = "engine_destruction"
+version = "0.1.0"
+dependencies = [
+ "bevy_ecs",
+ "engine_core",
+ "engine_world",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "engine_fire"
+version = "0.1.0"
+dependencies = [
+ "bevy_ecs",
+ "engine_core",
+ "engine_world",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "engine_foliage"
+version = "0.1.0"
+dependencies = [
+ "bevy_ecs",
+ "engine_core",
+ "engine_world",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "engine_input"
 version = "0.1.0"
 dependencies = [
  "bevy_ecs",
  "engine_core",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "engine_movement"
+version = "0.1.0"
+dependencies = [
+ "bevy_ecs",
+ "engine_core",
+ "engine_world",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "engine_npc"
+version = "0.1.0"
+dependencies = [
+ "bevy_ecs",
+ "engine_core",
+ "engine_world",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "engine_physics"
+version = "0.1.0"
+dependencies = [
+ "bevy_ecs",
+ "engine_core",
+ "engine_world",
  "serde",
  "serde_json",
 ]
@@ -760,6 +848,94 @@ dependencies = [
  "serde_json",
  "tracing",
  "wgpu",
+]
+
+[[package]]
+name = "engine_smoke"
+version = "0.1.0"
+dependencies = [
+ "bevy_ecs",
+ "engine_core",
+ "engine_world",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "engine_space"
+version = "0.1.0"
+dependencies = [
+ "bevy_ecs",
+ "engine_core",
+ "engine_world",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "engine_terrain"
+version = "0.1.0"
+dependencies = [
+ "bevy_ecs",
+ "engine_core",
+ "engine_world",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "engine_ui"
+version = "0.1.0"
+dependencies = [
+ "bevy_ecs",
+ "engine_core",
+ "engine_world",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "engine_vehicles"
+version = "0.1.0"
+dependencies = [
+ "bevy_ecs",
+ "engine_core",
+ "engine_world",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "engine_vfx"
+version = "0.1.0"
+dependencies = [
+ "bevy_ecs",
+ "engine_core",
+ "engine_world",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "engine_water"
+version = "0.1.0"
+dependencies = [
+ "bevy_ecs",
+ "engine_core",
+ "engine_world",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "engine_weather"
+version = "0.1.0"
+dependencies = [
+ "bevy_ecs",
+ "engine_core",
+ "engine_world",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

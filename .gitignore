@@ -4,3 +4,4 @@
 !/screenshots/.gitkeep
 .DS_Store
 *.log
+/.claude/

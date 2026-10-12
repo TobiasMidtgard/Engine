@@ -75,6 +75,21 @@ by the core owner, on request.
 | `engine_movement` | Advanced locomotion (wall-run, slide, dash), combat movement, time-dilation gameplay (perception levels, slow-mo on attacks) | Movement & time |
 | `engine_script` | Hot-reloaded gameplay scripting | Later |
 
+### Allowed dependencies between modules
+
+Modules talk through `engine_world` contracts. A few have a real need for another module's
+API; only these crate dependencies are allowed (everything may depend on the core crates):
+
+| Module | May depend on |
+|---|---|
+| `engine_physics`, `engine_terrain`, `engine_water`, `engine_weather`, `engine_fire`, `engine_smoke`, `engine_vfx`, `engine_audio`, `engine_ui` | core crates only |
+| `engine_vehicles`, `engine_space`, `engine_anim`, `engine_foliage` | `engine_physics` |
+| `engine_destruction` | `engine_physics`, `engine_terrain` |
+| `engine_movement` | `engine_physics`, `engine_anim` |
+| `engine_npc` | `engine_physics`, `engine_anim`, `engine_movement` |
+
+Anything else is a missing contract: ask the core owner to add it to `engine_world`.
+
 ### How a module plugs in
 
 ```rust

@@ -111,3 +111,44 @@ pub struct NoiseEvent {
     pub radius: f32,
     pub source: Option<Entity>,
 }
+
+/// Smoke or gas released into the air (fires, explosions, exhausts, smoke grenades).
+/// The smoke module turns these into volumetric smoke; particles may add soot.
+#[derive(Message, Debug, Clone, Copy)]
+pub struct SmokeEmission {
+    pub position: DVec3,
+    /// Initial velocity of the released gas, m/s.
+    pub velocity: Vec3,
+    /// Source radius, meters.
+    pub radius: f32,
+    /// Mass released this step, kg (a campfire ≈ 0.002 kg/s, a smoke grenade ≈ 0.05 kg/s).
+    pub mass_kg: f32,
+    /// Gas temperature, °C (hot smoke rises).
+    pub temperature_c: f32,
+    /// 0 = white steam .. 1 = black soot.
+    pub darkness: f32,
+}
+
+/// An attack is starting (telegraph). Sent by players and NPCs before the hit lands, so
+/// defenders can block or dodge, cameras and time dilation can react (cinematic slow
+/// motion), and audio/VFX can cue the swing.
+#[derive(Message, Debug, Clone, Copy)]
+pub struct AttackEvent {
+    pub attacker: Entity,
+    pub target: Option<Entity>,
+    /// Seconds (world time) until the hit lands.
+    pub windup_secs: f32,
+    /// Reach of the attack, meters.
+    pub reach: f32,
+    pub kind: AttackKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AttackKind {
+    #[default]
+    Melee,
+    Ranged,
+    Spell,
+    /// A gap-closing dash attack.
+    Dash,
+}
