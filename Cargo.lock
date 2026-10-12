@@ -703,6 +703,7 @@ dependencies = [
  "engine_platform",
  "engine_render",
  "engine_world",
+ "serde_json",
 ]
 
 [[package]]
