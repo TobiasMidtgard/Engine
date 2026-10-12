@@ -277,6 +277,7 @@ enum JointSource {
     Target(u16),
 }
 
+#[allow(clippy::type_complexity)]
 pub(crate) fn update_skin_poses(
     meshes: Option<Res<Assets<SkinnedMesh>>>,
     mut q: Query<(

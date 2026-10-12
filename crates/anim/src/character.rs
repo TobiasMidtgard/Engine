@@ -31,13 +31,16 @@ use crate::retarget::{Retarget, Retargeter};
 use crate::skin::{SkinMaterial, SkinnedMeshRenderer};
 
 use crate::build::humanoid;
+use crate::build::humanoid::Locomotion;
 use crate::build::sdf::{MuscleShape, add_muscle_morphs};
+use crate::clip::{AnimationClip, BoneTrack, ClipBinding};
 use crate::ik::FootIk;
-use crate::import::{ImportOptions, ImportedMaterial, ImportedModel, import_gltf};
+use crate::import::{ImportOptions, ImportedMaterial, ImportedModel, import_clips, import_gltf};
 use crate::procedural::spring::SpringChainDef;
 use crate::retarget::{HandRig, RetargetMap};
 use crate::skeleton::Skeleton;
 use crate::skin::SkinnedMesh;
+use crate::xform::Xf;
 
 /// A Biped-rigged person ready to spawn.
 #[derive(Debug, Clone)]
@@ -54,6 +57,9 @@ pub struct HumanCharacter {
     pub foot_ik: FootIk,
     /// Set when hair cards were found behind the head and weighted to the ponytail bones.
     pub ponytail: Option<SpringChainDef>,
+    /// Motion-capture locomotion converted onto `logic` (see [`HumanModel`]).
+    pub clips: Vec<AnimationClip>,
+    pub locomotion: Option<Locomotion>,
 }
 
 const SIDES: [(&str, usize); 2] = [("L", 0), ("R", 1)];
@@ -185,7 +191,160 @@ pub fn from_biped(name: &str, model: ImportedModel) -> Result<HumanCharacter, St
         images,
         foot_ik,
         ponytail,
+        clips: Vec::new(),
+        locomotion: None,
     })
+}
+
+/// Add motion-capture locomotion to a character: clip files rigged like its model, converted
+/// onto its fitted humanoid. Idle loops seamlessly; walk and run are re-timed to start on the
+/// right foot's strike (so they blend in step with each other) and get `footstep` events.
+/// Empty paths keep the humanoid's generated clips.
+pub fn add_locomotion(
+    c: &mut HumanCharacter,
+    idle: &str,
+    walk: &str,
+    run: &str,
+) -> Result<(), String> {
+    let retargeter = Retargeter::new(&c.logic, c.target.clone(), &c.map)?;
+    let mut motion = Locomotion::default();
+    for (role, path) in [("idle", idle), ("walk", walk), ("run", run)] {
+        if path.is_empty() {
+            continue;
+        }
+        let file = Path::new(path);
+        let bytes = std::fs::read(file).map_err(|e| format!("{path}: {e}"))?;
+        let options = ImportOptions {
+            in_place_bone: Some("Bip01".into()),
+            ..Default::default()
+        };
+        let (clips, info) = import_clips(&bytes, file.parent(), &c.target, 1.0, &options)
+            .map_err(|e| format!("{path}: {e}"))?;
+        let (Some(clip), Some(info)) = (clips.first(), info.first()) else {
+            continue;
+        };
+        let name = format!("{}/{role}", c.logic.name);
+        let mut clip = retargeter.clip_to_source(&c.logic, clip, &name, &["hips"]);
+        clip.looping = true;
+        if role == "idle" {
+            clip = smooth_loop(&clip, &c.logic, 0.6);
+            motion.idle = name;
+        } else {
+            let right = strikes(&clip, &c.logic, humanoid::FOOT[1]);
+            let start = right.first().copied().unwrap_or(0.0);
+            clip = resample(&clip, &c.logic, start, None);
+            let d = clip.duration.max(1e-4);
+            for (foot, bone) in [(humanoid::FOOT[1], "foot_r"), (humanoid::FOOT[0], "foot_l")] {
+                for t in strikes(&clip, &c.logic, foot) {
+                    clip = clip.with_event((t / d).clamp(0.0, 0.999), "footstep", Some(bone));
+                }
+            }
+            if role == "walk" {
+                motion.walk = name;
+                motion.walk_speed = info.speed.max(0.3);
+            } else {
+                motion.run = name;
+                motion.run_speed = info.speed.max(motion.walk_speed + 0.5);
+            }
+        }
+        c.clips.push(clip);
+    }
+    c.locomotion = Some(motion);
+    Ok(())
+}
+
+/// Sample a looping clip's pose on `skeleton` at playback time `t`.
+fn pose_at(clip: &AnimationClip, binding: &ClipBinding, skeleton: &Skeleton, t: f32) -> Vec<Xf> {
+    let mut local = skeleton.rest.clone();
+    clip.sample(t, binding, &mut local);
+    local
+}
+
+/// When a foot comes down in a looping clip: the first moment of each stretch where it is
+/// within 2 cm of its lowest point.
+fn strikes(clip: &AnimationClip, skeleton: &Skeleton, foot: &str) -> Vec<f32> {
+    let binding = ClipBinding::new(clip, skeleton);
+    let Some(f) = skeleton.index_of(foot) else {
+        return Vec::new();
+    };
+    let steps = ((clip.duration * 120.0).ceil() as usize).max(8);
+    let mut model = Vec::new();
+    let heights: Vec<f32> = (0..steps)
+        .map(|i| {
+            let t = clip.duration * i as f32 / steps as f32;
+            skeleton.to_model(&pose_at(clip, &binding, skeleton, t), &mut model);
+            model[f].t.y
+        })
+        .collect();
+    let low = heights.iter().copied().fold(f32::MAX, f32::min);
+    let down: Vec<bool> = heights.iter().map(|h| *h < low + 0.02).collect();
+    (0..steps)
+        .filter(|&i| down[i] && !down[(i + steps - 1) % steps])
+        .map(|i| clip.duration * i as f32 / steps as f32)
+        .collect()
+}
+
+/// Re-sample a looping clip so it starts `start` seconds in; with `blend`, its last `blend`
+/// seconds ease into its first pose so it loops without a pop.
+fn resample(
+    clip: &AnimationClip,
+    skeleton: &Skeleton,
+    start: f32,
+    blend: Option<f32>,
+) -> AnimationClip {
+    let binding = ClipBinding::new(clip, skeleton);
+    let d = clip.duration.max(1e-4);
+    let keys = ((d * 30.0).ceil() as usize).max(2);
+    let first = pose_at(clip, &binding, skeleton, start);
+    let mut out = AnimationClip {
+        tracks: clip
+            .tracks
+            .iter()
+            .map(|t| BoneTrack {
+                bone: t.bone.clone(),
+                ..Default::default()
+            })
+            .collect(),
+        events: Vec::new(),
+        ..clip.clone()
+    };
+    for k in 0..=keys {
+        let t = d * k as f32 / keys as f32;
+        let mut pose = pose_at(clip, &binding, skeleton, start + t);
+        if let Some(b) = blend {
+            let w = ((t - (d - b)) / b.max(1e-4)).clamp(0.0, 1.0);
+            let w = w * w * (3.0 - 2.0 * w);
+            for (p, f) in pose.iter_mut().zip(&first) {
+                *p = p.lerp(f, w);
+            }
+        }
+        for (track, (src, bone)) in out
+            .tracks
+            .iter_mut()
+            .zip(clip.tracks.iter().zip(&binding.bones))
+        {
+            let Some(b) = bone else { continue };
+            let x = pose[*b as usize];
+            if !src.rotation.values.is_empty() {
+                let r = match track.rotation.values.last() {
+                    Some(prev) if prev.dot(x.r) < 0.0 => -x.r,
+                    _ => x.r,
+                };
+                track.rotation.times.push(t);
+                track.rotation.values.push(r);
+            }
+            if !src.translation.values.is_empty() {
+                track.translation.times.push(t);
+                track.translation.values.push(x.t);
+            }
+        }
+    }
+    out
+}
+
+/// A looping clip whose end eases into its start over `blend` seconds.
+fn smooth_loop(clip: &AnimationClip, skeleton: &Skeleton, blend: f32) -> AnimationClip {
+    resample(clip, skeleton, 0.0, Some(blend.min(clip.duration * 0.3)))
 }
 
 /// Joint names of each vertex's strongest influence.
@@ -232,8 +391,8 @@ fn sample(image: &Image, uv: Vec2) -> Option<[f32; 3]> {
         for dx in -2..=2 {
             let (px, py) = ((x + dx).clamp(0, w - 1), (y + dy).clamp(0, h - 1));
             let i = ((py * w + px) * 4) as usize;
-            for c in 0..3 {
-                sum[c] += image.data[i + c] as f32;
+            for (c, v) in sum.iter_mut().enumerate() {
+                *v += image.data[i + c] as f32;
             }
             n += 1.0;
         }
@@ -654,22 +813,18 @@ fn weight_ponytail(mesh: &mut SkinnedMesh, logic: &Skeleton, tail: &Ponytail) {
 /// `MuscleRig`, `FootIk`) an imported body: a `.glb`/`.gltf` rigged with Biped bones. The file
 /// is loaded and prepared on a background thread, once per path however many people use it;
 /// until it is ready (or if it can't be loaded) the person keeps the body it has.
-#[derive(Component, Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Component, Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct HumanModel {
     /// File path of the model.
     pub path: String,
     /// Procedural detail on top of the model's textures (cloth folds, veins, flush).
     pub material: SkinMaterial,
-}
-
-impl Default for HumanModel {
-    fn default() -> Self {
-        Self {
-            path: String::new(),
-            material: SkinMaterial::default(),
-        }
-    }
+    /// Motion-capture clip files rigged like the model (one clip each), replacing the
+    /// humanoid's generated idle, walk and run. Empty keeps the generated one.
+    pub idle: String,
+    pub walk: String,
+    pub run: String,
 }
 
 impl HumanModel {
@@ -684,6 +839,11 @@ impl HumanModel {
         self.material = material;
         self
     }
+
+    /// Identifies what gets loaded (the model and its clips).
+    fn key(&self) -> String {
+        format!("{}|{}|{}|{}", self.path, self.idle, self.walk, self.run)
+    }
 }
 
 /// A loaded model, shared by everyone wearing it.
@@ -696,6 +856,8 @@ pub struct LoadedHuman {
     pub retargeter: Arc<Retargeter>,
     pub foot_ik: FootIk,
     pub ponytail: Option<SpringChainDef>,
+    /// Its graph in the `AnimationLibrary` when it has its own locomotion clips.
+    pub graph: Option<String>,
 }
 
 enum Load {
@@ -704,23 +866,28 @@ enum Load {
     Failed(String),
 }
 
-/// Every [`HumanModel`] file requested so far, by path.
+/// Every [`HumanModel`] requested so far (by its file paths).
 #[derive(Resource, Default)]
 pub struct HumanModels {
     loads: HashMap<String, Load>,
 }
 
 impl HumanModels {
-    pub fn get(&self, path: &str) -> Option<Arc<LoadedHuman>> {
-        match self.loads.get(path) {
+    fn get(&self, key: &str) -> Option<Arc<LoadedHuman>> {
+        match self.loads.get(key) {
             Some(Load::Ready(l)) => Some(l.clone()),
             _ => None,
         }
     }
 
+    /// A loaded model, once it is ready.
+    pub fn loaded(&self, model: &HumanModel) -> Option<Arc<LoadedHuman>> {
+        self.get(&model.key())
+    }
+
     /// Why a model couldn't be loaded.
-    pub fn error(&self, path: &str) -> Option<&str> {
-        match self.loads.get(path) {
+    pub fn error(&self, model: &HumanModel) -> Option<&str> {
+        match self.loads.get(&model.key()) {
             Some(Load::Failed(e)) => Some(e),
             _ => None,
         }
@@ -735,12 +902,19 @@ impl HumanModels {
     }
 }
 
-/// The model path an entity's current body came from.
+/// Which [`HumanModel`] an entity's current body came from.
 #[derive(Component, Debug, Clone, PartialEq)]
 pub struct AppliedHumanModel(pub String);
 
+/// Load and prepare a [`HumanModel`]: the model file and its clips (blocking).
+pub fn load_human(model: &HumanModel) -> Result<HumanCharacter, String> {
+    let mut c = load_human_file(&model.path)?;
+    add_locomotion(&mut c, &model.idle, &model.walk, &model.run)?;
+    Ok(c)
+}
+
 /// Load and prepare a Biped-rigged model file (blocking).
-pub fn load_human(path: &str) -> Result<HumanCharacter, String> {
+pub fn load_human_file(path: &str) -> Result<HumanCharacter, String> {
     let file = Path::new(path);
     let bytes = std::fs::read(file).map_err(|e| format!("{path}: {e}"))?;
     let name = file
@@ -778,6 +952,14 @@ fn register(world: &mut World, c: HumanCharacter) -> Result<LoadedHuman, String>
         .get_resource_or_init::<AnimationLibrary>()
         .add_skeleton(c.logic);
     let retargeter = Arc::new(Retargeter::new(&logic, c.target, &c.map)?);
+    let graph = c.locomotion.map(|motion| {
+        let mut lib = world.resource_mut::<AnimationLibrary>();
+        for clip in c.clips {
+            lib.add_clip(clip);
+        }
+        lib.add_graph(humanoid::graph_with(&logic.name, &motion));
+        logic.name.clone()
+    });
     Ok(LoadedHuman {
         skeleton: logic.name.clone(),
         mesh,
@@ -785,6 +967,7 @@ fn register(world: &mut World, c: HumanCharacter) -> Result<LoadedHuman, String>
         retargeter,
         foot_ik: c.foot_ik,
         ponytail: c.ponytail,
+        graph,
     })
 }
 
@@ -800,6 +983,9 @@ fn wear(world: &mut World, entity: Entity, model: &HumanModel, loaded: &LoadedHu
     };
     if let Some(mut s) = e.get_mut::<AnimatorSettings>() {
         s.skeleton = loaded.skeleton.clone();
+        if let Some(g) = &loaded.graph {
+            s.graph = g.clone();
+        }
     }
     let renderer = e.get::<SkinnedMeshRenderer>().cloned().unwrap_or_default();
     let muscles = e.get::<MuscleRig>().cloned().unwrap_or_default();
@@ -829,7 +1015,7 @@ fn wear(world: &mut World, entity: Entity, model: &HumanModel, loaded: &LoadedHu
             ..loaded.foot_ik.clone()
         },
         Retarget::new(loaded.retargeter.clone()),
-        AppliedHumanModel(model.path.clone()),
+        AppliedHumanModel(model.key()),
     ));
     match &loaded.ponytail {
         Some(p) => {
@@ -847,7 +1033,7 @@ fn update_models(world: &mut World, block: bool) {
     let mut wanted: Vec<(Entity, HumanModel)> = Vec::new();
     let mut q = world.query::<(Entity, &HumanModel, Option<&AppliedHumanModel>)>();
     for (e, model, applied) in q.iter(world) {
-        if !model.path.is_empty() && applied.is_none_or(|a| a.0 != model.path) {
+        if !model.path.is_empty() && applied.is_none_or(|a| a.0 != model.key()) {
             wanted.push((e, model.clone()));
         }
     }
@@ -858,13 +1044,13 @@ fn update_models(world: &mut World, block: bool) {
     {
         let mut models = world.get_resource_or_init::<HumanModels>();
         for (_, m) in &wanted {
-            models.loads.entry(m.path.clone()).or_insert_with(|| {
+            models.loads.entry(m.key()).or_insert_with(|| {
                 let (tx, rx) = channel();
-                let path = m.path.clone();
+                let model = m.clone();
                 let spawned = std::thread::Builder::new()
                     .name("human model".into())
                     .spawn(move || {
-                        let _ = tx.send(load_human(&path));
+                        let _ = tx.send(load_human(&model));
                     });
                 match spawned {
                     Ok(_) => Load::Pending(Mutex::new(rx)),
@@ -908,7 +1094,7 @@ fn update_models(world: &mut World, block: bool) {
         world.resource_mut::<HumanModels>().loads.insert(path, load);
     }
     for (entity, model) in wanted {
-        let loaded = world.resource::<HumanModels>().get(&model.path);
+        let loaded = world.resource::<HumanModels>().get(&model.key());
         if let Some(loaded) = loaded {
             wear(world, entity, &model, &loaded);
         }

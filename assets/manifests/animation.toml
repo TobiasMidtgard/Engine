@@ -1,0 +1,108 @@
+# Owner: Animation system. People and motion capture for the animation paddock.
+# Format and rules: AGENTS.md, "Art and large files". Fetch with `cargo run -p fetch-assets`.
+#
+# Converted from the Microsoft Rocketbox Avatar Library (MIT, Copyright (c) 2020 Microsoft):
+# FBX2glTF to GLB (meters, +Y up), materials rebuilt from the library's textures (roughness
+# from its specular maps), meshes Phong-tessellated x4 (28k-33k triangles) with the same
+# skeleton, UVs and weights, normal maps re-encoded as JPEG. Clips are 30 fps, one per file.
+# Without these files the paddock's people fall back to their generated bodies.
+
+# Hammer athlete: tank top, track pants, ponytail.
+[[file]]
+path = "anim/characters/athlete.glb"
+url = "mirror"
+sha256 = "3807741a076bc030749fdb78983b14e1ef261f51772cacc6c8a04652626bc939"
+license = "MIT"
+source = "https://github.com/microsoft/Microsoft-Rocketbox/tree/master/Assets/Avatars/Professions/Sports_Female_02"
+author = "Microsoft"
+
+# Lifter: running vest, bare arms.
+[[file]]
+path = "anim/characters/lifter.glb"
+url = "mirror"
+sha256 = "46a4f3196f05c5a4166a4669dfd58614c010ca1d44a6f146e1cb2092796d1e39"
+license = "MIT"
+source = "https://github.com/microsoft/Microsoft-Rocketbox/tree/master/Assets/Avatars/Professions/Sports_Male_04"
+author = "Microsoft"
+
+# Shirt reach: long-sleeved dress shirt.
+[[file]]
+path = "anim/characters/reacher.glb"
+url = "mirror"
+sha256 = "0551e9ce3464501c6e645807b0617a96ab3ee743eb09522960b9617a7395993f"
+license = "MIT"
+source = "https://github.com/microsoft/Microsoft-Rocketbox/tree/master/Assets/Avatars/Professions/Business_Male_06"
+author = "Microsoft"
+
+# Step course walker: T-shirt, jeans.
+[[file]]
+path = "anim/characters/walker.glb"
+url = "mirror"
+sha256 = "9689df2410938b085fc16bed31da090512dcba85b9ddc272d905765f0c92b80e"
+license = "MIT"
+source = "https://github.com/microsoft/Microsoft-Rocketbox/tree/master/Assets/Avatars/Adults/Male_Adult_16"
+author = "Microsoft"
+
+[[file]]
+path = "anim/clips/f_idle_neutral_01.glb"
+url = "mirror"
+sha256 = "cdded4093d219ace2fb743da4deb4d5ff3b75b04b9bee949e7906d4a3b9825a3"
+license = "MIT"
+source = "https://github.com/microsoft/Microsoft-Rocketbox/tree/master/Assets/Animations/Female"
+author = "Microsoft"
+
+[[file]]
+path = "anim/clips/f_idle_breathe_01.glb"
+url = "mirror"
+sha256 = "e6a21f3798d15927ac10d59e31b0b66d067e0cf9086cd8babdacd0495313f5cc"
+license = "MIT"
+source = "https://github.com/microsoft/Microsoft-Rocketbox/tree/master/Assets/Animations/Female"
+author = "Microsoft"
+
+[[file]]
+path = "anim/clips/f_walk_neutral_01.glb"
+url = "mirror"
+sha256 = "2a4c1af01146ce86fd8c1a8349e59bbd526821674e3fd46b01550bcfb7470316"
+license = "MIT"
+source = "https://github.com/microsoft/Microsoft-Rocketbox/tree/master/Assets/Animations/Female"
+author = "Microsoft"
+
+[[file]]
+path = "anim/clips/f_run_neutral_01.glb"
+url = "mirror"
+sha256 = "d3364c43af903131c31fb3b7c4bc5c6309794ffd26ac5c309b931a02af132681"
+license = "MIT"
+source = "https://github.com/microsoft/Microsoft-Rocketbox/tree/master/Assets/Animations/Female"
+author = "Microsoft"
+
+[[file]]
+path = "anim/clips/m_idle_neutral_01.glb"
+url = "mirror"
+sha256 = "0dd0e4bbb198ee92a4daf003ed21ec234f09aa8d749d09a2a9966fc8efcb6c0c"
+license = "MIT"
+source = "https://github.com/microsoft/Microsoft-Rocketbox/tree/master/Assets/Animations/Male"
+author = "Microsoft"
+
+[[file]]
+path = "anim/clips/m_idle_breathe_01.glb"
+url = "mirror"
+sha256 = "90151530239b3f9e31a2a19cb92057446851f2a27154a2792c5806f94d09e9c2"
+license = "MIT"
+source = "https://github.com/microsoft/Microsoft-Rocketbox/tree/master/Assets/Animations/Male"
+author = "Microsoft"
+
+[[file]]
+path = "anim/clips/m_walk_neutral_01.glb"
+url = "mirror"
+sha256 = "eaddf82919527a06d6b9724779b5497b6ea412ea290914de27c94da5549a39d1"
+license = "MIT"
+source = "https://github.com/microsoft/Microsoft-Rocketbox/tree/master/Assets/Animations/Male"
+author = "Microsoft"
+
+[[file]]
+path = "anim/clips/m_run_neutral_01.glb"
+url = "mirror"
+sha256 = "578b5de7f6e3bef39514e44cb618c240a503edcf32c1b72b2489f0eadc78647a"
+license = "MIT"
+source = "https://github.com/microsoft/Microsoft-Rocketbox/tree/master/Assets/Animations/Male"
+author = "Microsoft"

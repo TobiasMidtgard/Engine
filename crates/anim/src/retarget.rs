@@ -130,8 +130,8 @@ impl Retargeter {
             let Some(sb) = mapped[tb] else { continue };
             let mut q = None;
             'children: for &sc in source.children(sb) {
-                for tc in 0..n {
-                    if mapped[tc] == Some(sc as usize) && is_descendant(tc, tb) {
+                for (tc, m) in mapped.iter().enumerate() {
+                    if *m == Some(sc as usize) && is_descendant(tc, tb) {
                         let ds = source.rest_model[sc as usize].t - source.rest_model[sb].t;
                         let dt = target.rest_model[tc].t - target.rest_model[tb].t;
                         if ds.length() > 1e-5 && dt.length() > 1e-5 {
@@ -329,8 +329,8 @@ impl Retargeter {
             }
         }
         out.clear();
-        for s in 0..n {
-            let x = match from[s].and_then(|(b, c)| target_model.get(b).map(|t| (t, c))) {
+        for (s, f) in from.iter().enumerate() {
+            let x = match f.and_then(|(b, c)| target_model.get(b).map(|t| (t, c))) {
                 Some((t, c)) => Xf::from_tr(t.t, (t.r * c.conjugate()).normalize()),
                 None => match source.parents[s] {
                     Some(p) => out[p as usize].mul(&source.rest[s]),
@@ -558,8 +558,8 @@ mod tests {
         let tip_tip = |pose: &[Xf]| pose[tip].transform_point(Vec3::new(0.0, -0.02, 0.0));
         assert!(fist[tip].t.y > open[tip].t.y + 0.02, "{:?}", fist[tip].t);
         assert!(tip_tip(&fist).z < -0.02, "{:?}", tip_tip(&fist));
-        for b in 0..target.len() {
-            assert!(open[b].t.distance(target.rest_model[b].t) < 1e-5);
+        for (b, x) in open.iter().enumerate() {
+            assert!(x.t.distance(target.rest_model[b].t) < 1e-5);
         }
     }
 }

@@ -13,9 +13,10 @@
 //!   while its front wheels steer and every wheel spins.
 //!
 //! Call [`spawn_demo`] with the zone center. The people are detailed, textured characters
-//! from `assets/characters` (Microsoft Rocketbox, MIT; see its `CREDITS.md`) driven by the
-//! engine's humanoid rig; they load in the background and stand in as generated bodies until
-//! then. Everything else is generated from code.
+//! with motion-capture locomotion (Microsoft Rocketbox, MIT; fetched, see
+//! `assets/manifests/animation.toml`) driven by the engine's humanoid rig. They load in the
+//! background; until then, or if they haven't been fetched, generated bodies stand in.
+//! Everything else is generated from code.
 
 use std::f32::consts::PI;
 
@@ -360,23 +361,56 @@ pub fn spawn_humanoid(world: &mut World, outfit: humanoid::Outfit, transform: Tr
     e.id()
 }
 
-/// Path of one of the paddock's imported people (`athlete`, `lifter`, `reacher`, `walker`),
-/// in this crate's `assets/characters` folder.
-pub fn character_path(name: &str) -> String {
-    format!(
-        "{}/assets/characters/{name}.glb",
-        env!("CARGO_MANIFEST_DIR")
-    )
+/// A fetched file (`assets/fetched/<relative>`, see `assets/manifests/animation.toml`):
+/// under `ENGINE_ASSET_ROOT`, the working directory's `assets`, or this workspace's `assets`
+/// (tests and examples run from the crate folder). `None` if it hasn't been fetched.
+pub fn fetched_path(relative: &str) -> Option<String> {
+    let roots = [
+        std::env::var("ENGINE_ASSET_ROOT")
+            .ok()
+            .map(std::path::PathBuf::from),
+        Some("assets".into()),
+        Some(concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets").into()),
+    ];
+    roots
+        .into_iter()
+        .flatten()
+        .map(|root| root.join("fetched").join(relative))
+        .find(|p| p.exists())
+        .map(|p| p.to_string_lossy().into_owned())
 }
 
-/// Give a person one of the paddock's detailed characters (see [`HumanModel`]) when its file
-/// is there; otherwise they keep their generated body.
+/// One of the paddock's detailed people (`athlete`, `lifter`, `reacher`, `walker`) with its
+/// motion-capture locomotion, if they have been fetched (`cargo run -p fetch-assets --
+/// animation`).
+pub fn character_model(name: &str) -> Option<HumanModel> {
+    let path = fetched_path(&format!("anim/characters/{name}.glb"))?;
+    let set = if name == "athlete" { "f" } else { "m" };
+    let clip = |c: &str| fetched_path(&format!("anim/clips/{set}_{c}.glb")).unwrap_or_default();
+    Some(HumanModel {
+        idle: clip("idle_neutral_01"),
+        walk: clip("walk_neutral_01"),
+        run: clip("run_neutral_01"),
+        ..HumanModel::new(path)
+    })
+}
+
+/// Give a person one of the paddock's detailed characters (see [`HumanModel`]) when it has
+/// been fetched; otherwise they keep their generated body.
 pub fn dress(world: &mut World, person: Entity, character: &str, material: SkinMaterial) {
-    let path = character_path(character);
-    if std::path::Path::new(&path).exists() {
-        world
-            .entity_mut(person)
-            .insert(HumanModel::new(path).with_material(material));
+    static MISSING: std::sync::Once = std::sync::Once::new();
+    match character_model(character) {
+        Some(model) => {
+            world
+                .entity_mut(person)
+                .insert(model.with_material(material));
+        }
+        None => MISSING.call_once(|| {
+            tracing::info!(
+                "animation paddock: detailed people not fetched (cargo run -p fetch-assets -- \
+                 animation); using generated bodies"
+            )
+        }),
     }
 }
 

@@ -618,7 +618,7 @@ fn blend(joints: &[u16; 4], weights: &[f32; 4], skin_matrix: &impl Fn(u16) -> Ma
 fn set_limb_axes(mesh: &mut SkinnedMesh, skeleton: &Skeleton) {
     let n = skeleton.len();
     let mut axis = vec![Vec3::Y; n];
-    for b in 0..n {
+    for (b, axis) in axis.iter_mut().enumerate() {
         let head = skeleton.rest_model[b].t;
         let child = (0..n).find(|&c| skeleton.parents[c] == Some(b as u16));
         let dir = match (child, skeleton.parents[b].map(usize::from)) {
@@ -626,7 +626,7 @@ fn set_limb_axes(mesh: &mut SkinnedMesh, skeleton: &Skeleton) {
             (None, Some(p)) => head - skeleton.rest_model[p].t,
             _ => Vec3::Y,
         };
-        axis[b] = dir.normalize_or(Vec3::Y);
+        *axis = dir.normalize_or(Vec3::Y);
     }
     let joint_bone: Vec<Option<usize>> = mesh.joints.iter().map(|j| skeleton.index_of(j)).collect();
     for v in &mut mesh.vertices {
