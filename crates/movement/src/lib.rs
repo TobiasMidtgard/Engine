@@ -117,7 +117,12 @@ impl Plugin for MovementPlugin {
             .add_systems(
                 FixedUpdate,
                 (
-                    (player::player_intent, tempo::apply_tempo).in_set(MovementSet::Intent),
+                    (
+                        locomotion::adopt_characters,
+                        player::player_intent,
+                        tempo::apply_tempo,
+                    )
+                        .in_set(MovementSet::Intent),
                     (
                         combat::begin_attacks,
                         locomotion::step_movers,

@@ -48,7 +48,11 @@ commands.spawn((
 
 NPC AI drives characters the same way the player does: write `MoveIntent` (direction, look,
 sprint, crouch, jump, `dash_to`, `block`, `attack`) before `MovementSet::Intent`. Jump, dash
-and attack are edge-triggered, so hold them for one step.
+and attack are edge-triggered, so hold them for one step. Because movement is the installed
+`LocomotionBackend`, it also moves bodies spawned by other modules: any entity with a
+`MoveIntent` and a `CharacterController` but no `MovementProfile` gets
+`MovementProfile::human()` and keeps its capsule. Bodies without a `CharacterController`
+(animals, birds) are left to the module that spawned them.
 
 ## Showcase
 
@@ -110,7 +114,8 @@ API functions: `movement.status`, `movement.set_tempo` (`{"entity": "Player", "l
 
 `cargo test -p engine_movement`: unit tests per file; `tests/locomotion.rs` (sprint, jump and
 double jump heights, slide under a bar that blocks running, wall-run and wall-jump, mantle,
-dash, characters on their own clocks in slow motion, the stand-in stepping aside);
+dash, characters on their own clocks in slow motion, the stand-in stepping aside, bodies from
+other modules being moved);
 `tests/demo.rs` (each duel round plays out as described, the rounds cycle, the runner
 finishes the course, the duel waits without a camera); `tests/render.rs` (headless
 screenshot with the slow-motion effect; skipped without a GPU).
