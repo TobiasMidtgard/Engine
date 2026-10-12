@@ -15,7 +15,7 @@ struct PlanetGpu {
     center: vec4<f32>,              // terrain origin relative to the camera, base radius
     colors: array<vec4<f32>, 10>,   // lush, dry, soil, rock, sand, snow, dark, ocean, mud, concrete
     params: vec4<f32>,              // snow below °C, rock slope, vegetation (0/1), ocean surface (0/1)
-    params2: vec4<f32>,             // sphere (0/1)
+    params2: vec4<f32>,             // sphere (0/1), crater density, largest crater radius, crater seed
 };
 
 // Must match `MapsGpu` in render.rs.
@@ -165,6 +165,143 @@ fn far_noise(p: PlanetGpu, rel: vec3<f32>, pixel: f32) -> vec2<f32> {
         amp *= 0.55;
     }
     return vec2<f32>(a, b) / max(norm, 1e-4);
+}
+
+// Must match `noise::cell_random32` in noise.rs.
+fn crater_hash(c: vec3<i32>, seed: u32, salt: u32) -> f32 {
+    var h = (bitcast<u32>(c.x) * 0x8da6b343u) ^ (bitcast<u32>(c.y) * 0xd8163841u)
+        ^ (bitcast<u32>(c.z) * 0xcb1ab31fu) ^ seed ^ (salt * 0x9e3779b9u);
+    h ^= h >> 16u;
+    h *= 0x7feb352du;
+    h ^= h >> 15u;
+    h *= 0x846ca68bu;
+    h ^= h >> 16u;
+    return f32(h >> 8u) / 16777216.0;
+}
+
+// Derivative of smoothstep(e0, e1, x).
+fn smoothstep_d(e0: f32, e1: f32, x: f32) -> f32 {
+    let t = saturate((x - e0) / (e1 - e0));
+    return 6.0 * t * (1.0 - t) / (e1 - e0);
+}
+
+// Small craters on barren ground near the camera (none of them in the shape): slope along the
+// surface (xyz) and the albedo gain of fresh ones (w). Cells of 8 m down to 1 m divide the
+// 4096 m tiling period, so `tp` keeps them in place.
+fn micro_craters(tp: vec3<f32>, up: vec3<f32>, pixel: f32) -> vec4<f32> {
+    var grad = vec3<f32>(0.0);
+    var bright = 0.0;
+    var cell = 8.0;
+    for (var size_class = 0u; size_class < 4u; size_class++) {
+        let radius = cell / 3.2;
+        let seen = smoothstep(0.7 * pixel, 2.5 * pixel, radius);
+        if (seen <= 0.0) {
+            break;
+        }
+        let base = vec3<i32>(floor(tp / cell - 0.5));
+        let cs = 0x5eedu ^ (size_class * 0x9e37u);
+        for (var k = 0; k < 8; k++) {
+            let c = base + vec3<i32>(k & 1, (k >> 1) & 1, (k >> 2) & 1);
+            if (crater_hash(c, cs, 1u) > 0.55) {
+                continue;
+            }
+            let center = (vec3<f32>(c) + vec3<f32>(crater_hash(c, cs, 2u), crater_hash(c, cs, 3u), crater_hash(c, cs, 4u))) * cell;
+            let rc = radius * (0.5 + 0.5 * crater_hash(c, cs, 5u));
+            let d = tp - center;
+            let dist = length(d);
+            let x = dist / rc;
+            if (x >= 1.5) {
+                continue;
+            }
+            let age = crater_hash(c, cs, 6u);
+            let wear = 1.0 - 0.7 * smoothstep(0.1, 0.9, age);
+            let depth = rc * 0.2 * wear;
+            let rim = rc * 0.05 * wear * wear;
+            var dh = 0.0;
+            if (x < 1.0) {
+                dh = depth * 2.0 * x + rim * smoothstep_d(0.6, 1.0, x);
+            } else {
+                dh = rim * 2.0 * (-smoothstep_d(1.0, 1.5, x) * (1.5 - x) - (1.0 - smoothstep(1.0, 1.5, x)));
+            }
+            grad += d * (dh / (rc * max(dist, 1e-4))) * seen;
+            let fresh = 1.0 - smoothstep(0.1, 0.3, age);
+            bright += fresh * seen * smoothstep(0.5, 0.9, x) * (1.0 - smoothstep(1.05, 1.5, x)) * 0.25;
+        }
+        cell *= 0.5;
+    }
+    return vec4<f32>(grad - up * dot(grad, up), bright);
+}
+
+struct Craters {
+    slope: vec3<f32>, // gradient of the crater height along the surface (world)
+    bright: f32,      // albedo gain of fresh walls and ejecta
+};
+
+// The craters the shape scatters (`craters` in shape.rs, same hash and profile) that the
+// vertices are too far apart to draw, as slopes for shading, and the bright walls and ejecta
+// of fresh ones. Only craters at least a pixel across, and 40 m or more.
+fn crater_detail(p: PlanetGpu, rel: vec3<f32>, pixel: f32, spacing: f32) -> Craters {
+    var out: Craters;
+    out.slope = vec3<f32>(0.0);
+    out.bright = 0.0;
+    let density = p.params2.y;
+    var radius = p.params2.z;
+    let rot = planet_rot(p);
+    let local = transpose(rot) * (rel - p.center.xyz);
+    let up = normalize(local);
+    let pos = up * p.center.w;
+    let seed = u32(p.params2.w);
+    let smallest = max(pixel * 0.7, 40.0);
+    var grad = vec3<f32>(0.0);
+    var size_class = 0u;
+    loop {
+        if (radius < smallest || size_class > 16u) {
+            break;
+        }
+        // Vertices draw craters a few spacings across; pixels show ones a couple of pixels across.
+        let shade = 1.0 - smoothstep(1.5 * spacing, 6.0 * spacing, radius);
+        let seen = smoothstep(0.7 * pixel, 2.0 * pixel, radius);
+        let cell = radius * 3.2;
+        let base = vec3<i32>(floor(pos / cell - 0.5));
+        let cs = seed ^ (size_class * 0x9e37u);
+        for (var k = 0; k < 8; k++) {
+            let c = base + vec3<i32>(k & 1, (k >> 1) & 1, (k >> 2) & 1);
+            if (crater_hash(c, cs, 1u) > density) {
+                continue;
+            }
+            let center = (vec3<f32>(c) + vec3<f32>(crater_hash(c, cs, 2u), crater_hash(c, cs, 3u), crater_hash(c, cs, 4u))) * cell;
+            let rc = radius * (0.55 + 0.45 * crater_hash(c, cs, 5u));
+            let d = pos - center;
+            let dist = length(d);
+            let x = dist / rc;
+            if (x >= 1.5) {
+                continue;
+            }
+            let big = rc > 8000.0;
+            let age = crater_hash(c, cs, 6u);
+            let wear = 1.0 - 0.65 * smoothstep(0.1, 0.9, age);
+            let depth = rc * select(0.18, 0.06, big) * wear;
+            let rim = rc * 0.045 * wear * wear;
+            var dh = 0.0;
+            if (x < 1.0) {
+                let fl = select(0.0, 0.55, big);
+                if (x > fl) {
+                    dh = depth * 2.0 * (x - fl) / ((1.0 - fl) * (1.0 - fl));
+                }
+                dh += rim * smoothstep_d(0.6, 1.0, x);
+            } else {
+                dh = rim * 2.0 * (-smoothstep_d(1.0, 1.5, x) * (1.5 - x) - (1.0 - smoothstep(1.0, 1.5, x)));
+            }
+            grad += d * (dh / (rc * max(dist, 1e-3))) * shade;
+            let fresh = 1.0 - smoothstep(0.08, 0.25, age);
+            let walls = smoothstep(0.45, 0.9, x) * (1.0 - smoothstep(1.05, 1.5, x));
+            out.bright += fresh * seen * (walls * 0.6 + (1.0 - smoothstep(0.0, 0.9, x)) * 0.2);
+        }
+        radius *= 0.5;
+        size_class += 1u;
+    }
+    out.slope = rot * (grad - up * dot(grad, up));
+    return out;
 }
 
 @vertex
@@ -561,7 +698,11 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     grass = mix(grass, planet.colors[C_DRY].rgb, worn * 0.3 * smoothstep(0.1, 0.5, pixel));
     col[M_GRASS] = grass;
     // Bare ground (cold, barren, regolith) and dark maria.
-    col[M_SOIL] = mix(planet.colors[C_SOIL].rgb, planet.colors[C_DARK].rgb, mare);
+    // Airless worlds from afar: maria with ragged, gradual shores, and in shades.
+    let airless_far = far * (1.0 - vegetation);
+    let mare_soft = saturate(mare + (far_n.y - 0.5) * 0.7 * airless_far);
+    let mare_col = planet.colors[C_DARK].rgb * mix(1.0, 0.8 + 0.4 * far_n.x, airless_far);
+    col[M_SOIL] = mix(planet.colors[C_SOIL].rgb, mare_col, mare_soft);
     // Woods: the forest floor up close, dark canopy from afar (the foliage module draws the
     // trees themselves).
     let forest_edge = (mid_v - 0.5) * 0.08 * clump_fade + (patch_v - 0.5) * 0.06;
@@ -603,7 +744,7 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     let rock = saturate(smoothstep(rock_slope - 0.08, rock_slope + 0.05, slope + (detail_n - 0.5) * 0.12 * fine_fade) + alpine * 0.8 + sharp * 0.8);
     // Weathered rock: warmer, iron-stained faces next to gray ones, water-darkened gullies.
     let stain = saturate((patch_v - 0.55) * 4.0) * macro_fade;
-    let rock_col = mix(planet.colors[C_ROCK].rgb * (0.85 + 0.3 * variety), planet.colors[C_DARK].rgb, mare)
+    let rock_col = mix(planet.colors[C_ROCK].rgb * (0.85 + 0.3 * variety), mare_col, mare_soft)
         * mix(vec3<f32>(1.0), vec3<f32>(1.08, 0.98, 0.86), stain * vegetation) * (1.0 - gully * 0.3);
     // Layered rock: bands along altitude, warped so they bend with the land, at 37 m and 10 m.
     let strata_h = altitude + (macro_v - 0.5) * 60.0 * macro_fade + (mid_v - 0.5) * 6.0 * clump_fade;
@@ -611,7 +752,7 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
         + sin(strata_h * 0.61 + 1.3) * 0.4 * (1.0 - smoothstep(1.0, 4.0, pixel));
     col[M_ROCK] = rock_col * (1.0 + strata * 0.1);
     let scree = (1.0 - rock) * saturate(smoothstep(rock_slope - 0.14, rock_slope - 0.04, slope) * 0.7 + alpine * 0.6 + stony_crest * 0.9);
-    col[M_GRAVEL] = mix(rock_col, planet.colors[C_SOIL].rgb, 0.35);
+    col[M_GRAVEL] = mix(mix(rock_col, planet.colors[C_SOIL].rgb, 0.35), mix(rock_col, col[M_SOIL], 0.6), 1.0 - vegetation);
     col[M_CONCRETE] = planet.colors[C_CONCRETE].rgb;
     col[M_MUD] = planet.colors[C_MUD].rgb;
     col[M_SNOW] = planet.colors[C_SNOW].rgb;
@@ -625,6 +766,11 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     w[M_SOIL] = 1.0 - veg + max(veg - forest, 0.0) * bare_patch;
     for (var i = 0u; i < MAT_COUNT; i++) { w[i] *= 1.0 - sandy; }
     w[M_SAND] = sandy;
+    // Barren worlds: stony patches in the regolith.
+    let barren = 1.0 - vegetation;
+    let stony = w[M_SOIL] * barren * smoothstep(0.55, 0.8, patch_v + (detail_n - 0.5) * 0.3 * fine_fade) * 0.6;
+    w[M_SOIL] -= stony;
+    w[M_GRAVEL] += stony;
     for (var i = 0u; i < MAT_COUNT; i++) { w[i] *= 1.0 - scree; }
     w[M_GRAVEL] += scree;
     for (var i = 0u; i < MAT_COUNT; i++) { w[i] *= 1.0 - rock; }
@@ -646,6 +792,15 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     for (var i = 0u; i < MAT_COUNT; i++) {
         if (w[i] > 0.003) {
             ms[i] = sample_ground(i, tp, n_geo, dp1, dp2, pixel);
+            // Barren worlds' bare ground is powdery regolith, not the cracked earth of the
+            // soil texture: most of its relief and pattern is smoothed away (small craters
+            // stand in for it).
+            if (i == M_SOIL && barren > 0.0) {
+                let k = 0.75 * barren;
+                ms[i].normal = normalize(mix(ms[i].normal, n_geo, k));
+                ms[i].detail = mix(ms[i].detail, vec3<f32>(1.0), k);
+                ms[i].height = mix(ms[i].height, 0.5, k);
+            }
             hmax = max(hmax, ms[i].height + w[i]);
         }
     }
@@ -674,7 +829,23 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     ground_h *= inv_b;
     var n = normalize(select(n_geo, nsum, bsum > 1e-4));
     // Large-scale variation beyond the textures' reach.
-    albedo *= mix(1.0, 0.88 + 0.24 * macro_v, macro_fade) * mix(1.0, 0.9 + 0.2 * far_n.x, far);
+    albedo *= mix(1.0, 0.88 + 0.24 * macro_v, macro_fade) * mix(1.0, 0.9 + 0.2 * far_n.x, far)
+        * mix(1.0, 0.8 + 0.4 * far_n.y, airless_far);
+    // Pockmarks near the camera: craters from 2.5 m down to 30 cm, smaller than the shape's.
+    if (barren > 0.0 && planet.params2.y > 0.0 && pixel < 0.5) {
+        let pock = micro_craters(tp, up, pixel);
+        n = normalize(n - pock.xyz * barren * w[M_SOIL]);
+        albedo *= 1.0 + pock.w * barren * w[M_SOIL];
+    }
+    // Craters too small for the vertices, and fresh craters' bright ejecta.
+    if (planet.params2.y > 0.0 && planet.params2.z > 0.0) {
+        let crater = crater_detail(planet, in.rel, pixel, in.lod.x);
+        // Past the terminator the walls of real craters sit in the shadow of the land around
+        // them (which these slopes cannot cast), so they only shade where the sun is up.
+        let sun_up = smoothstep(-0.02, 0.2, dot(up, frame.sun_dir.xyz));
+        n = normalize(n - crater.slope * sun_up);
+        albedo *= 1.0 + crater.bright;
+    }
     var porosity = mix(1.0 - rock * 0.6, paint_porosity(layer), paint_w);
     var reflectance = 0.5;
     var subsurface = 0.0;
