@@ -1,8 +1,9 @@
 # engine_npc — NPC AI
 
 **Owner:** Smart NPC AI. **Status:** AI core (perception, memory, tactics, navigation, squads,
-melee and ranged combat, learning, explosives), wildlife, stand-in bodies, the showcase arena
-the `npc.*` API and smoke-aware sight are in. Next: detailed bodies and arena art, vehicles.
+melee and ranged combat, learning, explosives), wildlife, sculpted fighters and animals, the
+stone showcase arena, the `npc.*` API and smoke-aware sight are in. Next: lifelike faces,
+vehicles.
 
 Enemies that feel smarter than other games: they notice you gradually, remember where you went,
 use cover and high ground, flank and suppress as a squad, take turns in melee instead of
@@ -59,15 +60,17 @@ head-down, flag their tails when alarmed, lie down, gallop, hop, creep and flap.
 All art is generated in code (`src/art`), since no third-party art may go in the repository:
 
 - **Fighters** (`art/fighter.rs`): armored arena combatants with segmented plates, tabards in
-  the team color, closed helmets, gloves and boots, and a longsword, an arming sword with a
+  the team color, open helmets with a brow light and a rank crest over mail coifs, sculpted
+  faces in six skin tones, gloves and boots, and a longsword, an arming sword with a
   heater shield, a carbine or a recurve bow. A skeleton with two-bone IK for arms and legs
   poses them for every combat state. One texture atlas; each team shares one mesh per piece.
 - **Wildlife** (`art/animals.rs`): sculpted red deer (stags with antlers and a neck mane),
   grey wolves and European rabbits, with fur textures that follow the coat, baked ambient
-  occlusion, IK legs and planted feet. Starlings still use primitive stand-ins.
+  occlusion, IK legs and planted feet, and starlings with iridescent spotted plumage and
+  feathered wings that fold, spread and beat.
 - **Arena** (`art/arena.rs`): a sandstone amphitheater with arched stands, gates with
-  portcullises, fluted columns, banners, braziers, timber barricades, crates and drums, all
-  with baked PBR textures. The art dresses the gameplay entities; colliders never change.
+  portcullises, fluted columns, banners, braziers with flickering fire and light, rubble,
+  timber barricades, crates and drums, all with baked PBR textures. The art dresses the gameplay entities; colliders never change.
 
 Everything is built once per world and shared. Without a renderer (headless tests) the art
 falls back to primitive shapes so tests stay fast.
@@ -210,4 +213,4 @@ The crate depends only on core crates (`engine_core`, `engine_world`, `engine_re
 
 - Enemies that feel smarter than other games: they take cover, flank, punish mistakes, and block.
 - Dynamic fauna roams, herds, drinks, rests and flees from threats, fire and explosions.
-- The showcase arena shows all of it with readable stand-in bodies and an intent overlay.
+- The showcase arena shows all of it with readable bodies and an intent overlay.
