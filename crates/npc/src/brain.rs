@@ -123,7 +123,8 @@ pub(crate) fn think_and_act(
     {
         let now = clock.now;
         if !npc.active || vitals.downed || clock.dt <= 0.0 {
-            if vitals.downed || !npc.active {
+            // Inactive NPCs leave `MoveIntent` to game code (cutscenes, scripted moves).
+            if vitals.downed {
                 *intent = MoveIntent::default();
             }
             continue;

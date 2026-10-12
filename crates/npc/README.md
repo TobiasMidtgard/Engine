@@ -99,8 +99,11 @@ punish window), cooldown, spread and shield.
    angle, danger (fire, explosives) and path length on the nav grid. Combat decides strikes,
    heavy guard breakers, feints, dash attacks, blocks, parries and dodges against the attacker's
    telegraph.
-4. **Act**: the built-in fallback mover (only when no movement module has claimed
-   `LocomotionBackend`), hit resolution, damage, explosive props, revive.
+4. **Act**: the built-in fallback mover, hit resolution, damage, explosive props, revive. Once
+   a movement module has claimed `LocomotionBackend`, the fallback mover leaves bodies with a
+   `CharacterController` to it: give an NPC the movement module's character components (in
+   game code) and it wall-runs and slides like the player; NPCs without them keep the
+   built-in mover.
 
 ## Contracts
 

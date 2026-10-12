@@ -448,3 +448,49 @@ fn a_ranged_squad_sends_a_flanker() {
     let angle = Vec3::Z.dot(dir).acos().to_degrees();
     assert!(angle > 55.0, "flanker at {p} ({angle}°)");
 }
+
+#[test]
+fn a_movement_backend_takes_only_the_bodies_it_controls() {
+    let mut app = app();
+    engine_world::locomotion::claim_backend(&mut app, "test movement");
+    let walker = fighter(
+        &mut app,
+        DVec3::ZERO,
+        Vec3::NEG_Z,
+        Faction::ENEMY,
+        NpcSkills::veteran(),
+        NpcWeapon::sword(),
+    );
+    let controlled = fighter(
+        &mut app,
+        DVec3::new(10.0, 0.0, 0.0),
+        Vec3::NEG_Z,
+        Faction::ENEMY,
+        NpcSkills::veteran(),
+        NpcWeapon::sword(),
+    );
+    app.world
+        .entity_mut(controlled)
+        .insert(engine_world::physics::CharacterController::default());
+    for e in [walker, controlled] {
+        app.world.get_mut::<Npc>(e).unwrap().active = false;
+    }
+    for _ in 0..60 {
+        for e in [walker, controlled] {
+            app.world
+                .get_mut::<engine_world::locomotion::MoveIntent>(e)
+                .unwrap()
+                .direction = Vec3::Z;
+        }
+        app.update();
+    }
+    let moved = |e| app.world.get::<Transform>(e).unwrap().translation.z;
+    assert!(
+        moved(walker) > 2.0,
+        "the fallback mover still moves NPCs without a controller"
+    );
+    assert!(
+        moved(controlled).abs() < 1e-6,
+        "the backend's bodies are left alone"
+    );
+}

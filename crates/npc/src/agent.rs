@@ -38,7 +38,8 @@ pub struct Npc {
     pub home: Option<DVec3>,
     /// Patrol wander radius around home, meters.
     pub patrol_radius: f32,
-    /// Thinks and acts when true (false = statue, for cutscenes).
+    /// Thinks and acts when true. False hands the body to game code (cutscenes, scripted
+    /// moves): the AI stops writing `MoveIntent` but still defends itself.
     pub active: bool,
     /// Override the weapon's preferred fighting distance, meters.
     pub preferred_range: Option<f32>,
@@ -534,8 +535,8 @@ impl NpcCombat {
 #[serde(default)]
 pub struct NpcSettings {
     /// Move NPCs and animals with the built-in fallback mover (MoveIntent → Transform with
-    /// ground following and collision against static obstacles). It steps aside on its own
-    /// when a movement module has claimed `LocomotionBackend`.
+    /// ground following and collision against static obstacles). Once a movement module has
+    /// claimed `LocomotionBackend`, bodies with a `CharacterController` are left to it.
     pub builtin_locomotion: bool,
     /// The NPC module resolves its own NPCs' hits (melee reach checks, shot accuracy) and
     /// sends `DamageEvent`s. Turn off if a combat module does it.

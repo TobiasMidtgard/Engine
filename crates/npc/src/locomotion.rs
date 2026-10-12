@@ -1,7 +1,10 @@
-//! The fallback mover: turns `MoveIntent` into motion for NPCs and animals when no movement
-//! module drives them. It steps aside when a movement module has claimed
-//! `LocomotionBackend`, and can be switched off with `NpcSettings::builtin_locomotion`. It accelerates
-//! toward the wished velocity, dashes, follows the ground and walkable tops of crates and
+//! The fallback mover: turns `MoveIntent` into motion for NPCs and animals that no movement
+//! module drives. Once a movement module has claimed `LocomotionBackend`, it leaves every body
+//! with a `CharacterController` to that module (a game opts an NPC into the movement module's
+//! wall-running and sliding by giving it that module's character components) and keeps
+//! moving the rest. Switch it off entirely with `NpcSettings::builtin_locomotion`.
+//!
+//! It accelerates toward the wished velocity, dashes, follows the ground and walkable tops of crates and
 //! platforms, slides along walls, swims in deep water, turns toward where it looks, writes
 //! `LocomotionState` and `AnimationParams`, and sends a `GroundContact` per footstep so
 //! terrain, grass and audio react to NPCs and animals the same way they react to the player.
@@ -9,6 +12,7 @@
 use engine_core::prelude::*;
 use engine_world::animation::AnimationParams;
 use engine_world::locomotion::{LocomotionBackend, LocomotionMode, LocomotionState, MoveIntent};
+use engine_world::physics::CharacterController;
 use engine_world::{ContactKind, Ground, GroundContact, Water};
 
 use crate::agent::{NpcClock, NpcCombat, NpcMotor, NpcSettings, NpcVitals};
@@ -87,6 +91,7 @@ type MoverItem<'a> = (
     Option<&'a NpcVitals>,
     Option<&'a NpcSkills>,
     Option<&'a Footfall>,
+    Has<CharacterController>,
 );
 
 #[allow(clippy::too_many_arguments)]
@@ -100,9 +105,10 @@ pub(crate) fn fallback_move(
     mut q: Query<MoverItem, Without<SelfPropelled>>,
     mut contacts: MessageWriter<GroundContact>,
 ) {
-    if !settings.builtin_locomotion || backend.is_some() {
+    if !settings.builtin_locomotion {
         return;
     }
+    let backend = backend.is_some();
     for (
         e,
         intent,
@@ -117,8 +123,12 @@ pub(crate) fn fallback_move(
         vitals,
         skills,
         foot,
+        controlled,
     ) in &mut q
     {
+        if backend && controlled {
+            continue;
+        }
         let dt = clock.map(|c| c.dt).unwrap_or_else(|| time.delta_for(local));
         if dt <= 0.0 {
             continue;
