@@ -62,9 +62,9 @@ All art is generated in code (`src/art`), since no third-party art may go in the
   the team color, closed helmets, gloves and boots, and a longsword, an arming sword with a
   heater shield, a carbine or a recurve bow. A skeleton with two-bone IK for arms and legs
   poses them for every combat state. One texture atlas; each team shares one mesh per piece.
-- **Wildlife** (`art/animals.rs`): sculpted red deer (stags with antlers and a neck mane) and
-  grey wolves, with fur textures that follow the coat, baked ambient occlusion, IK legs and
-  planted feet. Rabbits and starlings still use primitive stand-ins.
+- **Wildlife** (`art/animals.rs`): sculpted red deer (stags with antlers and a neck mane),
+  grey wolves and European rabbits, with fur textures that follow the coat, baked ambient
+  occlusion, IK legs and planted feet. Starlings still use primitive stand-ins.
 - **Arena** (`art/arena.rs`): a sandstone amphitheater with arched stands, gates with
   portcullises, fluted columns, banners, braziers, timber barricades, crates and drums, all
   with baked PBR textures. The art dresses the gameplay entities; colliders never change.
