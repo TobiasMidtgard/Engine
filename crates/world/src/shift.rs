@@ -2,20 +2,42 @@
 //! another planet's sphere of influence.
 //!
 //! Whoever re-anchors (the space module) writes a [`WorldShift`] in [`WorldShiftSet::Write`].
-//! In [`WorldShiftSet::Apply`] this crate moves everything the shared contracts hold: root
+//! In [`WorldShiftSet::Apply`] this crate moves what the shared contracts hold: root
 //! `Transform`s and their interpolation, physics and character velocities, forces, move
-//! intents, world-anchored joints, gravity and the environment fields. Modules that keep
-//! world-space state of their own (particle buffers, broadphase caches, simulation grids,
-//! audio emitters) read the message and shift it too, in `Apply` so the frame renders right.
-//! Both sets run in `PostUpdate` before transforms propagate: before `Write` everything is in
-//! the old frame, after `Apply` everything is in the new one.
+//! intents, world-anchored joints, gravity, the weather's wind and sun, the environment
+//! fields, and the contract messages still waiting to be read (see
+//! [`WorldShiftAppExt::shift_messages`]). Both sets run in `PostUpdate` before transforms
+//! propagate.
+//!
+//! Every module or crate that keeps world positions or directions of its own (particle
+//! buffers, broadphase and query caches, simulation grids, cloth and rope particles, NPC
+//! memories and nav goals, IK targets, audio emitters, sky and planet centers, debug shapes)
+//! reads the message and shifts them in `Apply` too, so the frame renders right. Query
+//! providers stored here ([`crate::Ground`], [`crate::Water`],
+//! [`crate::physics::PhysicsQueries`], [`crate::Obscurance`] sources) answer in the new
+//! frame from `Apply` on. Modules with world-space messages of their own register them with
+//! [`WorldShiftAppExt::shift_messages`].
+//!
+//! A shift with `velocity` or `angular_velocity` adds that motion to everything that has a
+//! velocity here. Things without one (static colliders, `Transform`-driven props) keep their
+//! mapped place and don't start moving, so before such a shift the writer makes the old
+//! frame's static geometry kinematic and drives it, or only uses one once none is left.
+//!
+//! Not moved: `RigidBody::lock_rotation` (it locks world axes), and the default flat `Ground`
+//! (a plane at y = 0 with +Y up; a game that shifts vertically or turns needs a terrain
+//! module).
 
+use bevy_ecs::message::{MessageCursor, Messages};
 use engine_core::math::{DQuat, DVec2, DVec3, Quat, Vec3};
 use engine_core::prelude::*;
 
+use crate::events::*;
 use crate::locomotion::{LocomotionState, MoveIntent};
-use crate::physics::{CharacterMove, CharacterState, ExternalForce, Joint, Velocity};
-use crate::{FocusPoints, Gravity, Grid2, HeatField, SurfaceLayers, WindField};
+use crate::physics::{
+    ApplyImpulse, CharacterMove, CharacterState, ContactEvent, ExternalForce, Joint, Velocity,
+};
+use crate::terrain::{EditShape, TerrainChanged, TerrainEdit};
+use crate::{FocusPoints, Gravity, Grid2, HeatField, SurfaceLayers, WeatherState, WindField};
 
 /// The world moved to a new reference frame this frame: a point at `old` is now at
 /// `rotation * old + translation`, and the old frame moves with `velocity` and spins at
@@ -106,6 +128,13 @@ impl WorldShift {
         self.rotation.angle_between(DQuat::IDENTITY) < 1e-9
     }
 
+    /// How far the shift turns things about the vertical (+Y), radians: the part of the
+    /// rotation that changes a heading or a footprint's yaw.
+    pub fn yaw(&self) -> f32 {
+        let q = self.rotation;
+        (2.0 * q.y.atan2(q.w)) as f32
+    }
+
     /// A root transform in the new frame.
     pub fn transform(&self, t: &Transform) -> Transform {
         Transform {
@@ -123,6 +152,49 @@ pub enum WorldShiftSet {
     Write,
     /// The shared state moves here; shift module caches here too.
     Apply,
+}
+
+/// A message with world positions or directions in it. Messages written before a shift and
+/// read after it would land in the wrong place (an impulse applied 50 km from its body), so
+/// registered message types still waiting to be read are moved into the new frame in
+/// [`WorldShiftSet::Apply`].
+pub trait FollowsWorldShift {
+    /// Move this message's positions, directions and velocities into the new frame.
+    fn follow(&mut self, s: &WorldShift);
+}
+
+/// Registers message types that follow world shifts.
+pub trait WorldShiftAppExt {
+    /// Move messages of type `M` that are still waiting to be read into the new frame when
+    /// the world shifts. Call it after `add_message::<M>()`.
+    fn shift_messages<M: Message + FollowsWorldShift>(&mut self) -> &mut Self;
+}
+
+impl WorldShiftAppExt for App {
+    fn shift_messages<M: Message + FollowsWorldShift>(&mut self) -> &mut Self {
+        self.add_systems(
+            PostUpdate,
+            shift_pending_messages::<M>.in_set(WorldShiftSet::Apply),
+        )
+    }
+}
+
+/// Every message still stored is from before this shift (the ones written since the last
+/// shift are in the old frame; older ones were moved by that shift), so move them all.
+fn shift_pending_messages<M: Message + FollowsWorldShift>(
+    mut shifts: MessageReader<WorldShift>,
+    messages: Option<ResMut<Messages<M>>>,
+) {
+    let Some(s) = combined(&mut shifts) else {
+        return;
+    };
+    let Some(mut messages) = messages else {
+        return;
+    };
+    let mut cursor = MessageCursor::<M>::default();
+    for m in cursor.read_mut(&mut messages) {
+        m.follow(&s);
+    }
 }
 
 pub(crate) fn register(app: &mut App) {
@@ -158,33 +230,40 @@ type RootQuery<'w, 's> = Query<
 fn shift_entities_system(
     mut shifts: MessageReader<WorldShift>,
     mut roots: RootQuery,
-    mut velocities: Query<(&mut Velocity, Option<&GlobalTransform>)>,
+    mut velocities: Query<(Entity, &mut Velocity, Option<&GlobalTransform>)>,
     mut forces: Query<&mut ExternalForce>,
-    mut characters: Query<(&mut CharacterState, Option<&GlobalTransform>)>,
+    mut characters: Query<(Entity, &mut CharacterState, Option<&GlobalTransform>)>,
     mut character_moves: Query<&mut CharacterMove>,
     mut intents: Query<&mut MoveIntent>,
-    mut locomotion: Query<(&mut LocomotionState, Option<&GlobalTransform>)>,
+    mut locomotion: Query<(Entity, &mut LocomotionState, Option<&GlobalTransform>)>,
     mut joints: Query<&mut Joint>,
 ) {
     let Some(s) = combined(&mut shifts) else {
         return;
     };
-    // Velocities first: they need each entity's position, and `GlobalTransform` still holds
-    // the old frame until transforms propagate after this set.
-    let at = |g: Option<&GlobalTransform>| s.point(g.map_or(DVec3::ZERO, |g| g.translation()));
-    for (mut v, g) in &mut velocities {
-        let p = at(g);
+    // Velocities first: they need each entity's old position. A root's own `Transform` is
+    // current (its `GlobalTransform` lags a frame, and is the origin if it spawned this
+    // frame); a child's `GlobalTransform` is the best there is before transforms propagate.
+    let at = |e: Entity, g: Option<&GlobalTransform>| {
+        let old = match roots.get(e) {
+            Ok((t, _)) => t.translation,
+            Err(_) => g.map_or(DVec3::ZERO, |g| g.translation()),
+        };
+        s.point(old)
+    };
+    for (e, mut v, g) in &mut velocities {
+        let p = at(e, g);
         v.linear = s.velocity_at(p, v.linear);
         v.angular = s.spin(v.angular);
     }
-    for (mut c, g) in &mut characters {
-        let p = at(g);
+    for (e, mut c, g) in &mut characters {
+        let p = at(e, g);
         c.velocity = s.velocity_at(p, c.velocity);
         c.ground_normal = s.direction(c.ground_normal);
         c.wall_normal = c.wall_normal.map(|n| s.direction(n));
     }
-    for (mut l, g) in &mut locomotion {
-        let p = at(g);
+    for (e, mut l, g) in &mut locomotion {
+        let p = at(e, g);
         l.velocity = s.velocity_at(p, l.velocity);
     }
     for (mut t, interpolation) in &mut roots {
@@ -223,11 +302,15 @@ fn shift_resources_system(
     mut surface: ResMut<SurfaceLayers>,
     mut heat: ResMut<HeatField>,
     mut wind: ResMut<WindField>,
+    mut weather: ResMut<WeatherState>,
 ) {
     let Some(s) = combined(&mut shifts) else {
         return;
     };
     gravity.uniform = s.direction(gravity.uniform);
+    // The wind field copies the weather's wind every step, so both turn.
+    weather.wind = s.direction(weather.wind);
+    weather.sun_direction = s.direction(weather.sun_direction);
     for body in &mut gravity.bodies {
         body.center = s.point(body.center);
     }
@@ -235,6 +318,7 @@ fn shift_resources_system(
         *p = s.point(*p);
     }
     wind.prevailing = s.direction(wind.prevailing);
+    wind.gust_origin = s.point(wind.gust_origin);
     if s.is_translation_only() {
         // Exact: the grids keep their data and move their origin.
         let xz = DVec2::new(s.translation.x, s.translation.z);
@@ -242,8 +326,13 @@ fn shift_resources_system(
         heat.grid.origin += xz;
         wind.local.origin += s.translation;
     } else {
-        // A horizontal grid can't turn with the world: resample it around the focus.
-        let center = focus.primary();
+        // A horizontal grid can't turn with the world: resample it around the focus, or
+        // where its middle went if nothing is in focus.
+        let center = if focus.points.is_empty() {
+            s.point(grid_center(&surface.grid))
+        } else {
+            focus.primary()
+        };
         surface.grid = resampled(&surface.grid, &s, center);
         heat.grid = resampled(&heat.grid, &s, center);
         // Gusts are short-lived: start the local wind afresh, as recentering does.
@@ -260,9 +349,9 @@ fn shift_resources_system(
 /// `old` (in the old frame) as a grid of the same size and cell centered on `center` (new
 /// frame), sampling the nearest old cell under each new cell center at the focus height.
 fn resampled<T: Copy>(old: &Grid2<T>, s: &WorldShift, center: DVec3) -> Grid2<T> {
-    let size = old.width as f64 * old.cell as f64;
+    let size = DVec2::new(old.width as f64, old.height as f64) * old.cell as f64;
     let mut next = Grid2::new(
-        DVec2::new(center.x, center.z) - DVec2::splat(size * 0.5),
+        DVec2::new(center.x, center.z) - size * 0.5,
         old.cell,
         old.width,
         old.height,
@@ -278,6 +367,115 @@ fn resampled<T: Copy>(old: &Grid2<T>, s: &WorldShift, center: DVec3) -> Grid2<T>
         }
     }
     next
+}
+
+/// Middle of a grid at height 0, in world meters.
+fn grid_center<T: Copy>(g: &Grid2<T>) -> DVec3 {
+    let c = g.origin + DVec2::new(g.width as f64, g.height as f64) * g.cell as f64 * 0.5;
+    DVec3::new(c.x, 0.0, c.y)
+}
+
+impl FollowsWorldShift for ProjectileTrace {
+    fn follow(&mut self, s: &WorldShift) {
+        self.from = s.point(self.from);
+        self.to = s.point(self.to);
+    }
+}
+
+impl FollowsWorldShift for WorldImpulse {
+    fn follow(&mut self, s: &WorldShift) {
+        self.center = s.point(self.center);
+    }
+}
+
+impl FollowsWorldShift for GroundContact {
+    fn follow(&mut self, s: &WorldShift) {
+        self.position = s.point(self.position);
+        self.normal = s.direction(self.normal);
+        self.yaw += s.yaw();
+    }
+}
+
+impl FollowsWorldShift for IgniteRequest {
+    fn follow(&mut self, s: &WorldShift) {
+        self.position = s.point(self.position);
+    }
+}
+
+impl FollowsWorldShift for DamageEvent {
+    fn follow(&mut self, s: &WorldShift) {
+        self.point = s.point(self.point);
+        self.impulse = s.direction(self.impulse);
+    }
+}
+
+impl FollowsWorldShift for NoiseEvent {
+    fn follow(&mut self, s: &WorldShift) {
+        self.position = s.point(self.position);
+    }
+}
+
+impl FollowsWorldShift for SmokeEmission {
+    fn follow(&mut self, s: &WorldShift) {
+        self.position = s.point(self.position);
+        self.velocity = s.velocity_at(self.position, self.velocity);
+    }
+}
+
+impl FollowsWorldShift for WaterSplash {
+    fn follow(&mut self, s: &WorldShift) {
+        self.position = s.point(self.position);
+        // Relative to the water, which moves with the world.
+        self.velocity = s.direction(self.velocity);
+    }
+}
+
+impl FollowsWorldShift for ApplyImpulse {
+    fn follow(&mut self, s: &WorldShift) {
+        self.impulse = s.direction(self.impulse);
+        self.at = self.at.map(|p| s.point(p));
+        self.angular = s.direction(self.angular);
+    }
+}
+
+impl FollowsWorldShift for ContactEvent {
+    fn follow(&mut self, s: &WorldShift) {
+        self.point = s.point(self.point);
+        self.normal = s.direction(self.normal);
+    }
+}
+
+impl FollowsWorldShift for TerrainEdit {
+    fn follow(&mut self, s: &WorldShift) {
+        self.center = s.point(self.center);
+        match &mut self.shape {
+            EditShape::Box { rotation, .. } => *rotation = s.orientation(*rotation),
+            EditShape::Capsule { to, .. } => *to = s.direction(*to),
+            EditShape::Sphere { .. } => {}
+        }
+    }
+}
+
+impl FollowsWorldShift for TerrainChanged {
+    fn follow(&mut self, s: &WorldShift) {
+        self.center = s.point(self.center);
+    }
+}
+
+/// The contract messages with world positions in them.
+pub(crate) fn register_messages(app: &mut App) {
+    app.shift_messages::<ProjectileTrace>()
+        .shift_messages::<WorldImpulse>()
+        .shift_messages::<GroundContact>()
+        .shift_messages::<IgniteRequest>()
+        .shift_messages::<DamageEvent>()
+        .shift_messages::<NoiseEvent>()
+        .shift_messages::<SmokeEmission>()
+        .shift_messages::<WaterSplash>()
+        .shift_messages::<ApplyImpulse>()
+        .shift_messages::<ContactEvent>()
+        .shift_messages::<TerrainEdit>()
+        .shift_messages::<TerrainChanged>();
 }
 
 #[cfg(test)]
