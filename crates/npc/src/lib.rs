@@ -14,6 +14,7 @@ pub mod perception;
 pub mod skills;
 pub mod squad;
 pub mod tactics;
+pub mod training;
 pub mod visuals;
 pub mod wildlife;
 pub mod world_model;
@@ -31,6 +32,7 @@ pub use nav::{NavAgent, NavGrid, NavSettings, PathStatus};
 pub use perception::{BodyHeight, Known, NpcMemory, Perceivables};
 pub use skills::{NpcSkills, Perception};
 pub use squad::{AttackTokens, SquadSettings};
+pub use training::SparringPost;
 pub use visuals::{IntentMarker, Part, StandIn, StandInPart};
 pub use wildlife::{Animal, AnimalMind, AnimalState, BirdFlight, Herd, Species, WildlifeSettings};
 pub use world_model::{CoverPoint, TacticalWorld, WorldModelSettings};
@@ -104,6 +106,9 @@ impl Plugin for NpcPlugin {
                 "Stand-in body posed from the AI state: color (sRGB hex, default from faction or \
                  species), plain (no alert orb or skill band).",
             )
+            .register_component::<SparringPost>(
+                "Training post that swings at `target` on an uneven beat; counts blocks, parries, dodges and hits.",
+            )
             .register_component::<Herd>(
                 "Herd id: animals with the same id graze, move and flee together (herd, pack, flock).",
             )
@@ -158,6 +163,7 @@ impl Plugin for NpcPlugin {
                         combat::apply_damage,
                         features::explosives,
                         combat::revive,
+                        training::swing_posts,
                     )
                         .chain()
                         .in_set(NpcSet::Act),
@@ -165,6 +171,8 @@ impl Plugin for NpcPlugin {
                         visuals::build_stand_ins,
                         visuals::pose_stand_ins,
                         visuals::intent_markers,
+                        training::build_posts,
+                        training::pose_posts,
                     )
                         .chain()
                         .in_set(NpcSet::Show),

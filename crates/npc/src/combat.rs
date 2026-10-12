@@ -185,6 +185,17 @@ pub(crate) fn defend(
             if a.handled || now < a.react_at {
                 continue;
             }
+            let left = (a.lands_at - now) as f32;
+            // Skilled sword fighters often hold their guard for the last moment to parry.
+            if !a.ranged
+                && !staggered
+                && left > 0.2
+                && weapon.can_block
+                && skills.defense > 0.6
+                && roll(me, a.lands_at, 13) < skills.defense * 0.7
+            {
+                continue;
+            }
             a.handled = true;
             if now >= a.lands_at {
                 late += 1;
@@ -193,7 +204,6 @@ pub(crate) fn defend(
             if staggered {
                 continue;
             }
-            let left = (a.lands_at - now) as f32;
             let r = roll(me, now, 11);
             if r > skills.defense {
                 continue; // read it, but not well enough to do anything

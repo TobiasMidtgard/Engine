@@ -629,63 +629,10 @@ fn fortress(commands: &mut Commands, pal: &Palette) {
     }
 }
 
-fn arena(commands: &mut Commands, pal: &Palette) {
-    use engine::world::physics::{Collider, ColliderShape};
-    let c = zone("arena").center;
-    commands.spawn((
-        at(c + DVec3::new(0.0, 0.15, 0.0)),
-        MeshRenderer::new(
-            Shape::Cylinder {
-                radius: 40.0,
-                height: 0.3,
-                segments: 64,
-            },
-            StandardMaterial::hex(0x8c7a5b).with_roughness(0.95),
-        ),
-        Collider {
-            shape: ColliderShape::Cylinder {
-                radius: 40.0,
-                half_height: 0.15,
-            },
-            ..Default::default()
-        },
-    ));
-    // Pillars, turned half a step so none blocks the camera's view of the center.
-    for i in 0..8 {
-        let a = (i as f64 + 0.5) / 8.0 * std::f64::consts::TAU;
-        commands.spawn((
-            at(c + DVec3::new(a.cos() * 18.0, 4.0, a.sin() * 18.0)),
-            MeshRenderer::new(
-                Shape::Cylinder {
-                    radius: 1.2,
-                    height: 8.0,
-                    segments: 24,
-                },
-                pal.concrete,
-            ),
-            Collider {
-                shape: ColliderShape::Cylinder {
-                    radius: 1.2,
-                    half_height: 4.0,
-                },
-                ..Default::default()
-            },
-        ));
-    }
-    // A ramp and a wall-run wall for movement.
-    commands.spawn((
-        Transform::from_translation(c + DVec3::new(12.0, 1.6, 8.0))
-            .with_rotation(Quat::from_rotation_x(0.35)),
-        MeshRenderer::new(cuboid(4.0, 0.5, 10.0), pal.concrete),
-        Collider::cuboid(Vec3::new(2.0, 0.25, 5.0)),
-    ));
-    commands.spawn((
-        at(c + DVec3::new(-24.0, 3.0, 0.0)),
-        MeshRenderer::new(cuboid(0.8, 6.0, 24.0), pal.concrete),
-        Collider::cuboid(Vec3::new(0.4, 3.0, 12.0)),
-    ));
-    // Two squads, cover, explosive barrels, a high platform and a duel ring.
-    engine_npc::demo::spawn_demo(commands, c + DVec3::new(0.0, 0.3, 0.0));
+fn arena(commands: &mut Commands, _pal: &Palette) {
+    // Sand floor, stands, pillars and braziers; two squads fighting across cover, explosive
+    // barrels and a high platform; a duel ring; a sparring lane (engine_npc's demo).
+    engine_npc::demo::spawn_demo(commands, zone("arena").center);
 }
 
 fn field(commands: &mut Commands, rng: &mut Rng) {

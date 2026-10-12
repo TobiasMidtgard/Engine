@@ -104,8 +104,8 @@ fn arena_and_meadow_screenshots() {
     let mut app = app();
     let overview = camera(
         &mut app,
-        ARENA + DVec3::new(0.0, 11.0, -27.0),
-        ARENA + DVec3::new(0.0, 0.0, 3.0),
+        ARENA + DVec3::new(0.0, 16.0, -31.0),
+        ARENA + DVec3::new(0.0, 0.0, 4.0),
     );
     let ring = ARENA + demo::DUEL_RING;
     let duel = camera(
@@ -117,6 +117,17 @@ fn arena_and_meadow_screenshots() {
         &mut app,
         ARENA + DVec3::new(-15.0, 4.5, -4.0),
         ARENA + DVec3::new(2.0, 0.8, 9.0),
+    );
+    let lane = ARENA + demo::SPARRING_LANE;
+    let sparring = camera(
+        &mut app,
+        lane + DVec3::new(-8.0, 2.6, -4.5),
+        lane + DVec3::new(0.0, 1.0, 9.0),
+    );
+    let stands = camera(
+        &mut app,
+        ARENA + DVec3::new(-6.0, 7.0, -36.0),
+        ARENA + DVec3::new(0.0, 2.0, 20.0),
     );
     let meadow = camera(
         &mut app,
@@ -143,6 +154,8 @@ fn arena_and_meadow_screenshots() {
     assert!(red > 150, "red fighters visible: {red} px");
     assert!(blue > 150, "blue fighters visible: {blue} px");
     shoot(&mut app, cover, "npc_arena_cover.png");
+    shoot(&mut app, stands, "npc_arena_stands.png");
+    shoot(&mut app, sparring, "npc_sparring_lane.png");
     app.update_n(5);
     shoot(&mut app, duel, "npc_arena_duel.png");
     let img = shoot(&mut app, meadow, "npc_wildlife_meadow.png").unwrap();

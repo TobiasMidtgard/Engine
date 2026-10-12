@@ -585,6 +585,16 @@ fn drive(
         *intent = out;
         return;
     }
+    // Read the swing and holding the guard back for a parry: don't start anything now.
+    if combat
+        .incoming
+        .iter()
+        .any(|a| !a.handled && now >= a.react_at && now < a.lands_at)
+    {
+        out.look = attacker_dir.or(out.look);
+        *intent = out;
+        return;
+    }
     match combat.defense {
         Defense::Block { until } | Defense::Parry { until } if now < until => {
             out.block = true;

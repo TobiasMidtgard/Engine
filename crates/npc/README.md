@@ -76,11 +76,21 @@ Entities are addressed by `id` or `name`.
 
 ## Showcase
 
-`demo::spawn_demo(commands, origin)` builds the combat arena: two five-fighter squads of mixed
-skill across low walls, crates, explosive barrels and a raised platform, plus a master and a
-veteran dueling in a ring. Downed fighters get up after six seconds and barrels come back, so
-the fight keeps going. `demo::spawn_wildlife(commands, center, radius)` fills a meadow with a
+`demo::spawn_demo(commands, origin)` builds the whole combat arena (`demo::ARENA_RADIUS`, 48 m):
+a sand floor ringed by stepped stone stands with red and blue banners, pillars, braziers, a ramp
+and a wall-run wall. Two five-fighter squads of mixed skill fight across low walls, crates,
+explosive barrels and a raised platform; a master and a veteran duel in a ring; and a sparring
+lane on the east side puts five sword-and-shield fighters, rookie to master, in front of posts
+that swing at them, so you can watch skill decide who gets hit, who blocks and who parries.
+Downed fighters get up after six seconds and barrels come back, so the fight keeps going. A
+camera at (0, 16, −31) from the origin looking at (0, 0, 4) frames the fight. `demo::spawn_wildlife(commands, center, radius)` fills a meadow with a
 deer herd, rabbits, two bird flocks and a wolf pack.
+
+## Training
+
+`SparringPost { target, .. }` is a post with a swinging arm that attacks one NPC on an uneven
+beat with a clear telegraph, through the same `AttackEvent` a player sends. It counts blocks,
+parries, dodges and hits, so it doubles as a test rig for skills.
 
 ## Skills (`NpcSkills`, all 0..1 except reaction time)
 
@@ -151,11 +161,13 @@ The crate depends only on core crates (`engine_core`, `engine_world`, `engine_re
 - `tests/demo.rs`: the arena fight keeps going for a minute (shots, attacks, blocks, cover,
   downed and revived) inside the arena; the meadow lives for two minutes (grazing, wandering,
   hunting, fleeing) without animals leaving.
+- `tests/training.rs`: the same post swings at a rookie, soldier, veteran, elite and master;
+  the share of swings defended climbs with skill (0 % to about 100 %) and the master parries.
 - `tests/api.rs`: spawn, tune, order, alert, inspect, list and despawn through `npc.*`, and
   bad arguments come back as errors.
-- `tests/screenshots.rs`: renders the arena, a cover fight, the duel and the meadow on a GPU
-  or lavapipe and checks the fighters and deer show up. `NPC_SCREENSHOT_DIR=dir` keeps the
-  PNGs.
+- `tests/screenshots.rs`: renders the arena, its stands, a cover fight, the sparring lane, the
+  duel and the meadow on a GPU or lavapipe and checks the fighters and deer show up.
+  `NPC_SCREENSHOT_DIR=dir` keeps the PNGs.
 
 ## Done when
 

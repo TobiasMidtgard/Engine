@@ -29,8 +29,12 @@ fn the_arena_fight_keeps_going() {
         demo::spawn_demo(&mut commands, origin);
     }
     app.world.flush();
-    let mut npcs = app.world.query_filtered::<Entity, With<Npc>>();
-    let fighters: Vec<Entity> = npcs.iter(&app.world).collect();
+    let mut npcs = app.world.query::<(Entity, &Faction)>();
+    let fighters: Vec<Entity> = npcs
+        .iter(&app.world)
+        .filter(|(_, f)| **f != demo::SPARRING)
+        .map(|(e, _)| e)
+        .collect();
     assert_eq!(fighters.len(), 12);
     let mut actions = HashSet::new();
     let mut reasons = HashSet::new();
@@ -74,6 +78,17 @@ fn the_arena_fight_keeps_going() {
         .filter(|&&e| !app.world.get::<NpcVitals>(e).unwrap().downed)
         .count();
     assert!(alive >= 6, "only {alive} standing after a minute");
+    // The sparring lane ran alongside without the squads interfering: the master defended
+    // nearly everything, the rookie almost nothing.
+    let mut posts = app.world.query::<&SparringPost>();
+    let mut shares: Vec<(f32, f32)> = posts
+        .iter(&app.world)
+        .map(|p| (p.defended_share(), p.swings as f32))
+        .collect();
+    assert_eq!(shares.len(), 5);
+    shares.sort_by(|a, b| a.0.total_cmp(&b.0));
+    assert!(shares.iter().all(|s| s.1 >= 15.0), "{shares:?}");
+    assert!(shares[0].0 < 0.2 && shares[4].0 > 0.85, "{shares:?}");
 }
 
 #[test]
