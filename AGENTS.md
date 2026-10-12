@@ -134,7 +134,8 @@ Adding a file:
    sha=$(git rev-parse HEAD)    # the commit you pushed
    run=$(gh api repos/TobiasMidtgard/Engine/commits/$sha/check-runs \
      --jq '.check_runs[] | select(.name == "Mirror fetched assets") | .id')
-   gh api repos/TobiasMidtgard/Engine/check-runs/$run/annotations --jq '.[].message'
+   gh api repos/TobiasMidtgard/Engine/check-runs/$run/annotations \
+     --jq '.[] | select(.title | startswith("Asset")) | .message'    # pins, or what failed
    ```
 
    Paste the pin into the manifest on your working branch and push that. If the run failed
