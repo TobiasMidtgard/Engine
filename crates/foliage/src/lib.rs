@@ -111,7 +111,7 @@ impl Plugin for FoliagePlugin {
         .add_systems(
             Update,
             (
-                felling::sync_tree_colliders,
+                (felling::stream_tree_colliders, felling::sync_tree_colliders).chain(),
                 felling::remove_orphan_colliders,
                 (
                     demo::build_ground_cover,

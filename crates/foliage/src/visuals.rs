@@ -68,7 +68,11 @@ pub fn desired_parts(
     match plant.stage {
         PlantStage::Alive => {
             let sapling = v.sapling_wood.is_some() && plant.size < 0.22;
-            let lod = distance > settings.tree_lod_distance_m * (0.5 + plant.size);
+            let lod = if is_small(sp) {
+                distance > settings.small_plant_lod_distance_m * (0.6 + 0.4 * height.min(2.5))
+            } else {
+                distance > settings.tree_lod_distance_m * (0.5 + plant.size)
+            };
             let leaves = if vis.glow.is_empty() {
                 vis.leaves[tint]
             } else {
@@ -80,11 +84,12 @@ pub fn desired_parts(
                     pair(&v.sapling_wood, vis.bark),
                     pair(&v.sapling_foliage, leaves),
                 ]
-            } else if lod && v.wood_lod.is_some() {
+            } else if lod && (v.wood_lod.is_some() || v.foliage_lod.is_some()) {
+                let or = |a: &Option<Handle<Mesh>>, b: &Option<Handle<Mesh>>| a.or(*b);
                 [
                     pair(&v.base, vis.bark_rigid),
-                    pair(&v.wood_lod, vis.bark),
-                    pair(&v.foliage_lod, leaves),
+                    pair(&or(&v.wood_lod, &v.wood), vis.bark),
+                    pair(&or(&v.foliage_lod, &v.foliage), leaves),
                 ]
             } else {
                 [
