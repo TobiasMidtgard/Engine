@@ -60,7 +60,8 @@ pub struct FrameUniform {
     /// penumbra scale, ambient occlusion radius (m).
     pub effects: [f32; 4],
     /// Screen-space reflections this frame (1/0), the previous frame's pre-exposure (set by the
-    /// renderer; 0 = no previous image), maximum perceptual roughness, unused.
+    /// renderer; 0 = no previous image), maximum perceptual roughness, screen-space global
+    /// illumination strength (0 = off this frame).
     pub reflections: [f32; 4],
 }
 
@@ -634,6 +635,7 @@ pub fn frame_uniform(world: &World, v: &ViewData) -> FrameUniform {
                 DebugView::SkyVisibility => 3,
                 DebugView::AmbientOcclusion => 4,
                 DebugView::Reflections => 5,
+                DebugView::IndirectLight => 6,
             },
             v.sky_volumes.len() as u32,
         ],
@@ -676,7 +678,11 @@ pub fn frame_uniform(world: &World, v: &ViewData) -> FrameUniform {
             },
             0.0,
             settings.ssr_max_roughness.clamp(0.0, 1.0),
-            0.0,
+            if settings.screen_space_gi {
+                settings.gi_intensity.max(0.0)
+            } else {
+                0.0
+            },
         ],
     }
 }

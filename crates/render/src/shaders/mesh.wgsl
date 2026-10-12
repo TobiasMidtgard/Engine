@@ -295,6 +295,9 @@ fn fs_main(in: VertexOut, @builtin(front_facing) front: bool) -> @location(0) ve
         let r = screen_reflection(in.rel);
         return vec4<f32>(pre_expose(r.rgb) * r.a, 1.0);
     }
+    if (frame.counts.z == 6u) {
+        return vec4<f32>(pre_expose(screen_gi(in.rel)), 1.0);
+    }
     var color: vec3<f32>;
     if ((flags & 16u) != 0u) {
         color = s.albedo + pre_expose(s.emissive);

@@ -51,6 +51,9 @@ pub enum DebugView {
     /// Screen-space reflections: what each surface reflects from the screen, times how much of
     /// its reflection that covers (black where only the sky is reflected).
     Reflections,
+    /// Screen-space global illumination: the light bounced onto each surface from nearby
+    /// surfaces (before it is multiplied by the surface's color).
+    IndirectLight,
 }
 
 /// Renderer-wide quality and look settings.
@@ -90,6 +93,12 @@ pub struct RenderSettings {
     pub screen_space_reflections: bool,
     /// Surfaces rougher than this (perceptual roughness) reflect only the sky.
     pub ssr_max_roughness: f32,
+    /// Screen-space global illumination: diffuse light bounced off nearby surfaces that are on
+    /// screen (sunlit walls tint the ground, lamps and emissive surfaces light their
+    /// surroundings). Builds up over a few frames.
+    pub screen_space_gi: bool,
+    /// Strength of the bounced light (1 = physical).
+    pub gi_intensity: f32,
     pub anti_aliasing: AntiAliasing,
     /// 0..1 sharpening after temporal anti-aliasing (restores texture detail).
     pub sharpness: f32,
@@ -137,6 +146,8 @@ impl Default for RenderSettings {
             ao_intensity: 1.0,
             screen_space_reflections: true,
             ssr_max_roughness: 0.6,
+            screen_space_gi: true,
+            gi_intensity: 1.0,
             anti_aliasing: AntiAliasing::Taa,
             sharpness: 0.3,
             tonemapper: Tonemapper::AgXPunchy,
