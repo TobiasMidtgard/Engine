@@ -31,7 +31,8 @@ changing that one plugin line.
   left alone. The contract's default `angular_damping` (0.05) slows rolling a little too.
 - **Joints**: fixed, spherical (cone limit), revolute and prismatic (limits, motors), distance
   (rope), spring. `break_force` breaks a joint: the joint entity is despawned (or the `Joint`
-  removed from a body entity).
+  removed from a body entity). With `collide_connected: false` the two never touch, also when
+  one side is a fixed body (a door hinged inside its frame, a lid on a static box).
 - **Characters**: `CharacterController` capsules moved by sweeps, so even an 800 m/s dash stops
   at a thin wall: steps (also while gravity pulls), slopes, ground snapping, crouching (change
   `height` between steps). They move after the bodies have stepped: whatever a character stood
@@ -135,7 +136,7 @@ kinematic turntable and bouncing rubber balls. Its top surface is at `origin`. R
 
 Tests (`cargo test -p engine_physics`): the conformance suite; the "done when" scenarios below
 (`tests/scenarios.rs`); behaviors other modules rely on (`tests/behaviors.rs`: removal, compound
-bodies, joint breaking and motors, kinematic platforms, stairs and steep slopes, dashing into
+bodies, joint breaking and motors, hinges swinging through the fixed body they hang on, kinematic platforms, stairs and steep slopes, dashing into
 thin walls, wall-running, crouching, characters on their own clock, sensors and layers, local
 time, hovering, buoyancy, blasts, bodies crossing and merging regions); riding moving bodies
 (`tests/platforms.rs`: crates and characters on a deck at up to 30 km/s, lifts, a turntable, a
