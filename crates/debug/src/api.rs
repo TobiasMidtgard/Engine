@@ -62,9 +62,11 @@ const EXAMPLES: [(&str, &str); 15] = [
         "grid",
         r#"{"grid": {"center": [0, 0, 0], "normal": [0, 1, 0], "cell": 1, "cells": 20}}"#,
     ),
+    // A camera-relative view-projection (16 numbers, column-major): this one is a reverse-Z
+    // 60° perspective, 16:9, looking along -Z (`ViewData::view_proj` has this form).
     (
         "frustum",
-        r#"{"frustum": {"view_proj": [16 numbers, column-major], "origin": [0, 2, 0], "max_distance": 50}}"#,
+        r#"{"frustum": {"view_proj": [0.974, 0, 0, 0, 0, 1.732, 0, 0, 0, 0, 0, -1, 0, 0, 0.1, 0], "origin": [0, 2, 0], "max_distance": 50}}"#,
     ),
     (
         "path",
@@ -262,6 +264,10 @@ pub fn views_api(world: &mut World, args: Value) -> Result<Value, String> {
             .clone();
         (entry.patch)(world, Value::Object(patch))?;
     }
+    // Apply the master switch now rather than at the next frame, so a `debug.draw` right
+    // after this call already sees it.
+    let enabled = world.resource::<DebugViews>().enabled;
+    world.get_resource_or_init::<DebugDraw>().enabled = enabled;
     serde_json::to_value(world.resource::<DebugViews>()).map_err(|e| e.to_string())
 }
 
@@ -301,6 +307,32 @@ mod tests {
         let mut app = App::new();
         app.add_plugins(crate::DebugPlugin);
         app
+    }
+
+    #[test]
+    fn every_example_is_valid_and_draws() {
+        let mut app = app();
+        // The argument examples `engine.describe` shows to agents.
+        let examples: Vec<(String, String)> = app
+            .world
+            .resource::<engine_core::registry::ApiRegistry>()
+            .list()
+            .filter(|e| e.name.starts_with("debug."))
+            .map(|e| (e.name.clone(), e.args_example.clone()))
+            .collect();
+        assert_eq!(examples.len(), 3);
+        for (name, args) in examples {
+            let args: Value = serde_json::from_str(&args).unwrap_or_else(|e| panic!("{name}: {e}"));
+            call_api(&mut app.world, &name, args).unwrap_or_else(|e| panic!("{name}: {e}"));
+        }
+        // The per-shape examples quoted in error messages.
+        for (kind, example) in EXAMPLES {
+            let shape: Value =
+                serde_json::from_str(example).unwrap_or_else(|e| panic!("{kind}: {e}"));
+            let out = call_api(&mut app.world, "debug.draw", json!({ "shapes": [shape] }))
+                .unwrap_or_else(|e| panic!("{kind}: {e}"));
+            assert!(out["lines"].as_u64().unwrap() > 0, "{kind}: {out}");
+        }
     }
 
     #[test]
@@ -426,9 +458,8 @@ mod tests {
         .unwrap_err();
         assert!(err.contains("DebugViews"), "{err}");
 
-        // The master switch stops drawing.
+        // The master switch stops drawing right away (no frame in between)...
         call_api(&mut app.world, "debug.views", json!({"enabled": false})).unwrap();
-        app.update();
         let err = call_api(
             &mut app.world,
             "debug.draw",
@@ -436,5 +467,15 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.contains("enabled"), "{err}");
+        assert!(app.world.resource::<DebugDraw>().is_empty());
+        // ...and so does switching it back on.
+        call_api(&mut app.world, "debug.views", json!({"enabled": true})).unwrap();
+        call_api(
+            &mut app.world,
+            "debug.draw",
+            json!({"point": {"at": [0, 0, 0]}}),
+        )
+        .unwrap();
+        assert_eq!(app.world.resource::<DebugDraw>().line_count(), 3);
     }
 }

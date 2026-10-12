@@ -76,6 +76,7 @@ impl DebugViews {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct WindView {
+    /// Show the view (default off).
     pub enabled: bool,
     /// Radius of the sampled disc, meters.
     pub radius: f32,
@@ -107,6 +108,7 @@ impl Default for WindView {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct SurfaceView {
+    /// Show the view (default off).
     pub enabled: bool,
     /// Radius of the shown disc, meters.
     pub radius: f32,
@@ -134,9 +136,13 @@ impl Default for SurfaceView {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct EventViews {
+    /// Show `ProjectileTrace` paths.
     pub projectiles: bool,
+    /// Show `WorldImpulse` spheres.
     pub impulses: bool,
+    /// Show `GroundContact` footprints.
     pub ground_contacts: bool,
+    /// Show `NoiseEvent` circles.
     pub noise: bool,
     /// How long each event stays visible, real seconds.
     pub duration: f32,
@@ -155,6 +161,7 @@ impl Default for EventViews {
 }
 
 impl EventViews {
+    /// True if any event view is on.
     pub fn any(&self) -> bool {
         self.projectiles || self.impulses || self.ground_contacts || self.noise
     }

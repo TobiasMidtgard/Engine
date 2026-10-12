@@ -6,15 +6,16 @@
 //!
 //! # Lifetimes
 //!
-//! A shape lives for **this frame** by default: it is drawn in the frame it was added and
-//! removed at the start of the next frame (in `First`). Give it a duration with
+//! A shape lives for **one frame** by default: it is drawn by the next render and removed at
+//! the start of the following frame (in `First`). Shapes added up to `Extract` show in the
+//! same frame; shapes added after `Render` (in `Last`, or between frames by the `debug.draw`
+//! API or test code) show in the next frame. Give a shape a duration with
 //! [`ShapeHandle::duration`] to keep it for that many **real** seconds: durations keep
 //! counting while the world is paused or in slow motion, so a marker left during bullet time
 //! does not hang around forever. [`ShapeHandle::forever`] keeps a shape until
 //! [`DebugDraw::clear`].
 //!
-//! Shapes added after `Render` (in `Last`) with no duration are removed before they are ever
-//! drawn. Systems in `FixedUpdate` should give their shapes a duration of about one fixed step,
+//! Systems in `FixedUpdate` should give their shapes a duration of about one fixed step,
 //! because the fixed loop can run zero or several times per frame.
 
 use bevy_ecs::prelude::*;
@@ -51,8 +52,11 @@ impl DepthMode {
 /// One line segment with `f64` world-space endpoints (meters) and a linear RGBA color.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct DebugLine {
+    /// Start point, world meters.
     pub a: DVec3,
+    /// End point, world meters.
     pub b: DVec3,
+    /// Linear RGBA color (straight alpha).
     pub color: Color,
 }
 
@@ -88,6 +92,9 @@ pub struct DebugDraw {
     pub max_lines: usize,
     now: f64,
     frame: [Vec<DebugLine>; 2],
+    /// Length of each `frame` list at the last [`DebugDraw::end_frame`] (the shapes the last
+    /// render drew). `None` when nothing was rendered since `begin_frame`.
+    drawn: Option<[usize; 2]>,
     timed: Vec<TimedLine>,
     dropped: u64,
 }
@@ -100,6 +107,8 @@ impl Default for DebugDraw {
             max_lines: 1 << 18,
             now: 0.0,
             frame: [Vec::new(), Vec::new()],
+            // Shapes added before the first frame are not drawn yet: keep them for it.
+            drawn: Some([0, 0]),
             timed: Vec::new(),
             dropped: 0,
         }
@@ -110,15 +119,35 @@ impl DebugDraw {
     /// Pass as a duration to keep a shape until [`DebugDraw::clear`].
     pub const FOREVER: f32 = f32::INFINITY;
 
-    /// Start a new frame at `now_real_secs` (real seconds since start): drop this-frame shapes
-    /// and expired timed shapes. The plugin calls this in `First`; call it yourself only when
-    /// driving a `DebugDraw` without the plugin.
+    /// Start a new frame at `now_real_secs` (real seconds since start): drop expired timed
+    /// shapes and the one-frame shapes the last render drew (see [`DebugDraw::end_frame`]).
+    /// One-frame shapes added after that render are kept for this frame. Without an
+    /// `end_frame` since the last `begin_frame`, every one-frame shape is dropped.
+    ///
+    /// The plugin calls this in `First`; call it yourself only when driving a `DebugDraw`
+    /// without the plugin.
     pub fn begin_frame(&mut self, now_real_secs: f64) {
         self.now = now_real_secs;
-        for list in &mut self.frame {
-            list.clear();
+        match self.drawn.take() {
+            Some(drawn) => {
+                for (list, n) in self.frame.iter_mut().zip(drawn) {
+                    list.drain(..n.min(list.len()));
+                }
+            }
+            None => {
+                for list in &mut self.frame {
+                    list.clear();
+                }
+            }
         }
         self.timed.retain(|t| t.expires > now_real_secs);
+    }
+
+    /// Mark every one-frame shape stored now as drawn: the next [`DebugDraw::begin_frame`]
+    /// removes them, while one-frame shapes added later (in `Last`, or between frames by the
+    /// API) survive it and show in the next frame. The plugin calls this after rendering.
+    pub fn end_frame(&mut self) {
+        self.drawn = Some([self.frame[0].len(), self.frame[1].len()]);
     }
 
     /// Real time (seconds since start) of the current frame, as given to `begin_frame`.
@@ -131,6 +160,9 @@ impl DebugDraw {
         for list in &mut self.frame {
             list.clear();
         }
+        if let Some(drawn) = &mut self.drawn {
+            *drawn = [0, 0];
+        }
         self.timed.clear();
     }
 
@@ -139,6 +171,7 @@ impl DebugDraw {
         self.frame[0].len() + self.frame[1].len() + self.timed.len()
     }
 
+    /// True when no line is stored.
     pub fn is_empty(&self) -> bool {
         self.line_count() == 0
     }
@@ -323,6 +356,31 @@ mod tests {
         assert_eq!(count(&d, DepthMode::Tested), 1);
         d.begin_frame(1.0); // even if no real time passed (paused, manual step 0)
         assert!(d.is_empty());
+    }
+
+    #[test]
+    fn shapes_added_after_the_render_survive_one_more_frame() {
+        let mut d = DebugDraw::default();
+        d.begin_frame(0.0);
+        d.line(DVec3::ZERO, DVec3::X, RED);
+        d.line(DVec3::ZERO, DVec3::Y, RED).on_top();
+        d.end_frame(); // rendered
+        d.line(DVec3::ZERO, DVec3::Z, BLUE).on_top(); // added after the render
+        d.begin_frame(0.1);
+        let left: Vec<_> = d.lines(DepthMode::OnTop).map(|l| l.b).collect();
+        assert_eq!(left, [DVec3::Z]);
+        assert_eq!(count(&d, DepthMode::Tested), 0);
+        d.end_frame();
+        d.begin_frame(0.2);
+        assert!(d.is_empty());
+
+        // Clearing after a render resets the mark.
+        d.line(DVec3::ZERO, DVec3::X, RED);
+        d.end_frame();
+        d.clear();
+        d.line(DVec3::ZERO, DVec3::Y, RED);
+        d.begin_frame(0.3);
+        assert_eq!(d.line_count(), 1, "the line added after clear is kept");
     }
 
     #[test]

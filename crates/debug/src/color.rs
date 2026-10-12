@@ -7,23 +7,38 @@
 /// Linear RGBA color, components normally in `0..=1`.
 pub type Color = [f32; 4];
 
+/// Opaque red (`"red"` in the API).
 pub const RED: Color = [1.0, 0.05, 0.05, 1.0];
+/// Opaque green (`"green"`).
 pub const GREEN: Color = [0.1, 1.0, 0.1, 1.0];
+/// Opaque blue (`"blue"`).
 pub const BLUE: Color = [0.1, 0.25, 1.0, 1.0];
+/// Opaque yellow (`"yellow"`).
 pub const YELLOW: Color = [1.0, 0.9, 0.05, 1.0];
+/// Opaque cyan (`"cyan"`).
 pub const CYAN: Color = [0.05, 0.9, 1.0, 1.0];
+/// Opaque magenta (`"magenta"`).
 pub const MAGENTA: Color = [1.0, 0.05, 1.0, 1.0];
+/// Opaque orange (`"orange"`).
 pub const ORANGE: Color = [1.0, 0.35, 0.02, 1.0];
+/// Opaque purple (`"purple"`).
 pub const PURPLE: Color = [0.45, 0.1, 1.0, 1.0];
+/// Opaque pink (`"pink"`).
 pub const PINK: Color = [1.0, 0.3, 0.6, 1.0];
+/// Opaque lime (`"lime"`).
 pub const LIME: Color = [0.55, 1.0, 0.05, 1.0];
+/// Opaque white (`"white"`).
 pub const WHITE: Color = [1.0, 1.0, 1.0, 1.0];
+/// Opaque mid gray (`"gray"` / `"grey"`).
 pub const GRAY: Color = [0.35, 0.35, 0.35, 1.0];
+/// Opaque black (`"black"`).
 pub const BLACK: Color = [0.0, 0.0, 0.0, 1.0];
 
-/// Colors of the X, Y and Z axes in [`crate::DebugDraw::axes`].
+/// Color of the X axis in [`crate::DebugDraw::axes`].
 pub const AXIS_X: Color = RED;
+/// Color of the Y axis in [`crate::DebugDraw::axes`].
 pub const AXIS_Y: Color = GREEN;
+/// Color of the Z axis in [`crate::DebugDraw::axes`].
 pub const AXIS_Z: Color = BLUE;
 
 /// A color from linear components.

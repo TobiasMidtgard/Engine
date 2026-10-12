@@ -28,7 +28,9 @@ pub const SHADER: &str = include_str!("shaders/debug_lines.wgsl");
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Pod, Zeroable)]
 pub struct LineVertex {
+    /// Position relative to the camera (`ViewData::origin`), meters.
     pub position: [f32; 3],
+    /// Linear RGBA color, straight alpha.
     pub color: [f32; 4],
 }
 
@@ -36,6 +38,7 @@ impl LineVertex {
     const ATTRIBUTES: [wgpu::VertexAttribute; 2] =
         wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x4];
 
+    /// Vertex buffer layout: location 0 = position, location 1 = color.
     pub fn layout() -> wgpu::VertexBufferLayout<'static> {
         wgpu::VertexBufferLayout {
             array_stride: std::mem::size_of::<Self>() as u64,
@@ -206,11 +209,13 @@ impl RenderFeature for DebugLinesFeature {
     ) {
         self.counts = [0, 0];
         self.stats = FeatureStats::default();
-        let Some(draw) = world.get_resource::<DebugDraw>() else {
+        let Some(mut draw) = world.get_resource_mut::<DebugDraw>() else {
             return;
         };
+        // `render.screenshot` renders outside the schedule: count it as drawing the shapes.
+        draw.end_frame();
         if draw.enabled {
-            self.counts = build_vertices(draw, view.origin, &mut self.scratch);
+            self.counts = build_vertices(&draw, view.origin, &mut self.scratch);
         } else {
             self.scratch.clear();
         }

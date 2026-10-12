@@ -49,11 +49,12 @@ Every method returns a `ShapeHandle`:
   hidden behind geometry, and lines lying on a surface (ground grids, footprints) stay
   visible at any angle.
 
-**Lifetimes.** Shapes drawn in any schedule up to `Extract` show in that frame's render. They
-also show in screenshots taken between frames. They are removed at the start of the next
-frame (`First`). A shape drawn in `Last` without a duration is never seen. Give shapes drawn in
-`FixedUpdate` a duration of about one step, because the fixed loop can run zero or several
-times per frame.
+**Lifetimes.** A shape without a duration lives for one rendered frame. Shapes drawn in any
+schedule up to `Extract` show in that frame's render (and in screenshots taken between
+frames) and are removed at the start of the next frame (`First`). Shapes drawn after the
+render (in `Last`, or between frames by `debug.draw` or test code) show in the next frame
+instead. Give shapes drawn in `FixedUpdate` a duration of about one step, because the fixed
+loop can run zero or several times per frame.
 
 **Colors** are linear RGBA `[f32; 4]`: `RED`, `GREEN`, `BLUE`, `YELLOW`, `CYAN`, `MAGENTA`,
 `ORANGE`, `PURPLE`, `PINK`, `LIME`, `WHITE`, `GRAY`, `BLACK`, plus `color::hex(0xff8800)`,
@@ -107,8 +108,10 @@ camera-relative `f32` each frame (`ViewData::origin`). Lines 1e8 m from the orig
 precise as lines next to it. It writes them into one reused `Vec` and one `GrowBuffer`, then
 draws two line-list pipelines:
 
-- **Depth-tested.** Reverse-Z `GreaterEqual`, no depth write. The fragment shader also checks
-  the scene depth copy (3×3 farthest), so on-surface lines don't z-fight.
+- **Depth-tested.** Reverse-Z `GreaterEqual` against a depth nudged 5% toward the camera (a
+  cheap early reject), no depth write. The fragment shader then compares the line's true
+  depth with the scene depth copy (farthest of 3×3 pixels), so on-surface lines don't
+  z-fight, with perspective and orthographic cameras alike.
 - **On top.** Depth compare `Always`.
 
 Metrics: `debug.lines` and `debug.dropped_lines` in `Diagnostics`.

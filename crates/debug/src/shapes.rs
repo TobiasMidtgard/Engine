@@ -133,9 +133,11 @@ impl DebugShape {
 /// Color, lifetime and depth mode of a shape (for [`DebugDraw::styled`]).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ShapeStyle {
+    /// Linear RGBA color (ignored by `axes`, which use the axis colors).
     pub color: Color,
-    /// Real seconds; 0 = this frame, [`DebugDraw::FOREVER`] = until cleared.
+    /// Real seconds; 0 = one frame, [`DebugDraw::FOREVER`] = until cleared.
     pub duration: f32,
+    /// Depth-tested or always on top.
     pub depth: DepthMode,
 }
 
@@ -569,8 +571,11 @@ fn frustum_corners(view_proj: Mat4, max_distance: f32) -> Option<[DVec3; 8]> {
         let (near, far) = match (finite(h0), finite(h1)) {
             (true, true) => {
                 let (p0, p1) = (h0.truncate() / h0.w, h1.truncate() / h1.w);
-                // The camera sits at the relative origin: the end closer to it is "near".
-                let (near, far) = if p0.length_squared() <= p1.length_squared() {
+                // The camera sits at the relative origin: the end closer to it is "near". On a
+                // tie (an orthographic near plane behind the camera, as far behind as the far
+                // plane is in front) use clip z = 1, the near plane of the engine's reverse-Z.
+                let (d0, d1) = (p0.length_squared(), p1.length_squared());
+                let (near, far) = if d0 < d1 * (1.0 - 1e-6) {
                     (p0, p1)
                 } else {
                     (p1, p0)
@@ -853,6 +858,28 @@ mod tests {
             );
             assert!(p.z.abs() < 1e-4 || (p.z + 10.0).abs() < 1e-4, "{p:?}");
         }
+        // Near plane behind the camera (the default orthographic camera): both ends are
+        // equally far from the camera, so the reverse-Z near plane (clip z = 1) is used as the
+        // near end for every camera rotation, not whichever end rounding favors.
+        let proj = engine_render::frame::orthographic_reverse(4.0, 2.0, -10.0, 10.0);
+        for i in 0..64 {
+            let rot = Quat::from_euler(
+                engine_core::math::EulerRot::YXZ,
+                i as f32 * 0.37,
+                i as f32 * 0.11 - 3.0,
+                i as f32 * 0.05,
+            );
+            let view = Mat4::from_quat(rot.inverse());
+            let corners = frustum_corners(proj * view, 5.0).unwrap();
+            let back = (rot * Vec3::Z).as_dvec3();
+            for c in &corners[..4] {
+                assert!((c.dot(back) - 10.0).abs() < 1e-3, "near corner {c:?} ({i})");
+            }
+            for c in &corners[4..] {
+                assert!((c.dot(back) - 5.0).abs() < 1e-3, "cut corner {c:?} ({i})");
+            }
+        }
+
         // A singular matrix draws nothing.
         assert!(
             shape_lines(|d| {

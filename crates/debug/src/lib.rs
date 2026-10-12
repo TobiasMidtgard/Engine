@@ -85,16 +85,27 @@ impl Plugin for DebugPlugin {
                 Extract,
                 (views::environment_views_system, views::event_views_system).chain(),
             )
+            .add_systems(
+                Render,
+                end_frame_system.after(engine_render::renderer::render_system),
+            )
             .add_render_feature(DebugLinesFeature::default());
         api::register(app);
     }
 }
 
-/// `First`: start the debug frame on the real clock (drops last frame's shapes and expired
-/// timed shapes) and apply the master switch.
+/// `First`: start the debug frame on the real clock (drops the one-frame shapes the last
+/// render drew and expired timed shapes) and apply the master switch.
 pub fn begin_frame_system(time: Res<Time>, views: Res<DebugViews>, mut draw: ResMut<DebugDraw>) {
     draw.enabled = views.enabled;
     draw.begin_frame(time.real_elapsed_secs_f64());
+}
+
+/// `Render`, after the renderer: mark this frame's one-frame shapes as drawn, so shapes added
+/// later (in `Last` or between frames) are kept for the next frame. Runs with or without a
+/// GPU.
+pub fn end_frame_system(mut draw: ResMut<DebugDraw>) {
+    draw.end_frame();
 }
 
 #[cfg(test)]
@@ -136,6 +147,49 @@ mod tests {
         );
         // Still there between frames (screenshots taken after update see them).
         assert_eq!(app.world.resource::<DebugDraw>().line_count(), 96);
+    }
+
+    #[test]
+    fn frame_shapes_added_after_render_show_in_the_next_frame() {
+        let mut app = app();
+        app.init_resource::<Seen>();
+        app.add_systems(Render, |d: Res<DebugDraw>, mut seen: ResMut<Seen>| {
+            seen.0 = d.line_count();
+        });
+        // A system in `Last` (after Render) draws every frame: its shapes show one frame
+        // later and do not pile up.
+        app.add_systems(Last, |mut d: ResMut<DebugDraw>| {
+            d.cross(DVec3::ZERO, 1.0, RED);
+        });
+        app.update();
+        assert_eq!(app.world.resource::<Seen>().0, 0);
+        app.update_n(3);
+        assert_eq!(app.world.resource::<Seen>().0, 3, "drawn, not accumulated");
+    }
+
+    #[test]
+    fn one_frame_api_shapes_drawn_between_frames_are_rendered_once() {
+        let mut app = app();
+        app.init_resource::<Seen>();
+        app.add_systems(Render, |d: Res<DebugDraw>, mut seen: ResMut<Seen>| {
+            seen.0 = d.line_count();
+        });
+        app.update();
+        // An AI agent calls the API between frames.
+        engine_core::registry::call_api(
+            &mut app.world,
+            "debug.draw",
+            serde_json::json!({"line": {"a": [0, 0, 0], "b": [1, 0, 0], "duration": 0}}),
+        )
+        .unwrap();
+        app.update();
+        assert_eq!(
+            app.world.resource::<Seen>().0,
+            1,
+            "rendered in the next frame"
+        );
+        app.update();
+        assert_eq!(app.world.resource::<Seen>().0, 0, "and only once");
     }
 
     #[test]

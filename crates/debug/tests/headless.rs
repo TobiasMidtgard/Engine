@@ -28,7 +28,8 @@ const MAGENTA_LINE: (DVec3, DVec3) = (DVec3::new(-3.0, 0.4, 3.0), DVec3::new(3.0
 const CYAN_HIDDEN: (DVec3, DVec3) = (DVec3::new(-0.5, 1.0, -3.0), DVec3::new(0.5, 1.0, -3.0));
 const YELLOW_ON_TOP: (DVec3, DVec3) = (DVec3::new(-0.5, 1.3, -3.0), DVec3::new(0.5, 1.3, -3.0));
 
-fn scene_app(offset: DVec3, sun_lux: f32) -> App {
+/// Headless app with a sun and a 60 m ground plane at `offset` (no camera yet).
+fn base_app(offset: DVec3, sun_lux: f32) -> App {
     let mut app = App::new();
     app.world.resource_mut::<EngineConfig>().headless = true;
     {
@@ -48,10 +49,6 @@ fn scene_app(offset: DVec3, sun_lux: f32) -> App {
 
     let w = &mut app.world;
     w.spawn((
-        Camera::perspective(FOV_DEG),
-        Transform::from_translation(offset + EYE).looking_at(offset + TARGET, Vec3::Y),
-    ));
-    w.spawn((
         DirectionalLight {
             illuminance: sun_lux,
             ..Default::default()
@@ -67,6 +64,16 @@ fn scene_app(offset: DVec3, sun_lux: f32) -> App {
             },
             StandardMaterial::hex(0x4f7a3a).with_roughness(0.9),
         ),
+    ));
+    app
+}
+
+fn scene_app(offset: DVec3, sun_lux: f32) -> App {
+    let mut app = base_app(offset, sun_lux);
+    let w = &mut app.world;
+    w.spawn((
+        Camera::perspective(FOV_DEG),
+        Transform::from_translation(offset + EYE).looking_at(offset + TARGET, Vec3::Y),
     ));
     // Occluder: a 2 m gray cube; the cyan line behind it must be hidden, the yellow one not.
     w.spawn((
@@ -122,16 +129,26 @@ fn render(app: &mut App, name: &str) -> Option<image::RgbaImage> {
     Some(image::open(&path).expect("png").to_rgba8())
 }
 
-/// Pixel position of a point relative to the scene offset (same math as the renderer).
-fn project(p: DVec3) -> Vec3 {
+/// The perspective camera of [`scene_app`], relative to the scene offset.
+fn perspective_view() -> (Transform, Mat4) {
     let eye = Transform::from_translation(EYE).looking_at(TARGET, Vec3::Y);
     let proj = engine_render::frame::perspective_infinite_reverse(
         FOV_DEG.to_radians(),
         W as f32 / H as f32,
         0.05,
     );
+    (eye, proj)
+}
+
+/// Pixel position of a point relative to the scene offset (same math as the renderer).
+fn project(p: DVec3) -> Vec3 {
+    project_with(perspective_view(), p)
+}
+
+/// Pixel position of `p` seen by the camera `eye` with projection `proj`.
+fn project_with((eye, proj): (Transform, Mat4), p: DVec3) -> Vec3 {
     let view = Mat4::from_quat(Quat::inverse(eye.rotation));
-    let rel = (p - EYE).as_vec3();
+    let rel = (p - eye.translation).as_vec3();
     let clip = proj * view * Vec4::new(rel.x, rel.y, rel.z, 1.0);
     let ndc = clip.truncate() / clip.w;
     Vec3::new(
@@ -149,7 +166,15 @@ fn along_line(
     line: (DVec3, DVec3),
     is_color: impl Fn([u8; 4]) -> bool,
 ) -> (f32, [f32; 3]) {
-    let (a, b) = (project(line.0), project(line.1));
+    along_projected(img, (project(line.0), project(line.1)), is_color)
+}
+
+/// [`along_line`] for a line already projected to pixels.
+fn along_projected(
+    img: &image::RgbaImage,
+    (a, b): (Vec3, Vec3),
+    is_color: impl Fn([u8; 4]) -> bool,
+) -> (f32, [f32; 3]) {
     let samples = 40;
     let mut hits = 0;
     let mut sum = [0.0f32; 3];
@@ -296,5 +321,58 @@ fn lines_stay_precise_1e8_m_from_the_origin() {
     assert!(
         iou > 0.85,
         "magenta pixels match between origin and 1e8 m (IoU {iou})"
+    );
+}
+
+#[test]
+fn depth_tested_lines_work_with_an_orthographic_camera() {
+    // Near 0.1 m, far 1000 m: the ground 20 m below the camera sits in the first 2% of the
+    // depth range, where the vertex depth nudge is clamped at the near plane. The fragment
+    // test must still use the true depth there.
+    let mut app = base_app(DVec3::ZERO, 110_000.0);
+    let height = 12.0;
+    let (near, far) = (0.1, 1000.0);
+    let eye = Transform::from_xyz(0.0, 20.0, 0.0).looking_at(DVec3::ZERO, Vec3::NEG_Z);
+    app.world.spawn((
+        Camera {
+            projection: Projection::Orthographic { height, near, far },
+            ..Default::default()
+        },
+        eye,
+    ));
+    let above = (DVec3::new(-3.0, 1.0, -2.0), DVec3::new(3.0, 1.0, -2.0));
+    let below = (DVec3::new(-3.0, -1.0, 0.0), DVec3::new(3.0, -1.0, 0.0));
+    let on_top = (DVec3::new(-3.0, -1.0, 2.0), DVec3::new(3.0, -1.0, 2.0));
+    app.add_systems(Update, move |mut debug: ResMut<DebugDraw>| {
+        debug.line(above.0, above.1, MAGENTA);
+        debug.line(below.0, below.1, CYAN);
+        debug.line(on_top.0, on_top.1, YELLOW).on_top();
+    });
+    let Some(img) = render(&mut app, "debug_ortho.png") else {
+        return;
+    };
+
+    let proj =
+        engine_render::frame::orthographic_reverse(height * W as f32 / H as f32, height, near, far);
+    let px = |line: (DVec3, DVec3)| {
+        (
+            project_with((eye, proj), line.0),
+            project_with((eye, proj), line.1),
+        )
+    };
+    let (seen, color) = along_projected(&img, px(above), magenta);
+    assert!(
+        seen > 0.9,
+        "depth-tested line 1 m above the ground is visible ({seen}, {color:?})"
+    );
+    let (seen, _) = along_projected(&img, px(below), cyan);
+    assert!(
+        seen < 0.1,
+        "depth-tested line 1 m under the ground is hidden ({seen})"
+    );
+    let (seen, color) = along_projected(&img, px(on_top), yellow);
+    assert!(
+        seen > 0.9,
+        "on-top line under the ground is visible ({seen}, {color:?})"
     );
 }
