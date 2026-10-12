@@ -23,6 +23,8 @@ impl Client {
         stream
             .set_read_timeout(Some(Duration::from_secs(30)))
             .unwrap();
+        // Agents should send each request as soon as it is written, not wait on Nagle.
+        stream.set_nodelay(true).unwrap();
         Self {
             reader: BufReader::new(stream.try_clone().unwrap()),
             writer: stream,
@@ -30,9 +32,12 @@ impl Client {
         }
     }
 
+    /// One write per line: a separate write for the newline would sit in the kernel until the
+    /// first part is acknowledged.
     fn send_line(&mut self, line: &str) {
-        self.writer.write_all(line.as_bytes()).unwrap();
-        self.writer.write_all(b"\n").unwrap();
+        self.writer
+            .write_all(format!("{line}\n").as_bytes())
+            .unwrap();
     }
 
     fn send(&mut self, message: Value) {
@@ -202,18 +207,35 @@ fn tcp_client_spawns_lists_and_steps() {
         assert_eq!(first["id"], json!("fast"), "{first}");
         assert_eq!(second["id"], json!("slow"), "{second}");
 
-        // A second client is served while the first one waits on a long step. The step is long
-        // enough (about a second) that the second client gets in even on a busy machine.
-        c.send(
-            json!({"jsonrpc": "2.0", "id": 99, "method": "engine.step", "params": {"frames": 600}}),
-        );
+        // A second client is served while the first one waits on a step. The step is the
+        // longest allowed (a million frames), so it is still running however slow the machine is;
+        // the first client never reads its answer.
+        c.send(json!({
+            "jsonrpc": "2.0", "id": 99, "method": "engine.step",
+            "params": {"frames": engine_ai_bridge::MAX_STEP_FRAMES},
+        }));
         let mut other = Client::connect(&addr);
+        let started = Instant::now();
+        let start_frame = loop {
+            let status = other.call("engine.status", json!({}));
+            if status["stepping_frames_remaining"].as_u64().unwrap() > 0 {
+                break status["frame"].as_u64().unwrap();
+            }
+            assert!(
+                started.elapsed() < Duration::from_secs(30),
+                "the step never started: {status}"
+            );
+        };
+        // Answered by the main thread, so frames keep running during the step.
         let other_ping = other.call("bridge.ping", json!({}));
-        let long_step = c.read();
-        assert_eq!(long_step["id"], json!(99));
         assert!(
-            other_ping["frame"].as_u64().unwrap() < long_step["result"]["frame"].as_u64().unwrap(),
-            "the second client waited for the first client's step"
+            other_ping["frame"].as_u64().unwrap() > start_frame,
+            "{other_ping}"
+        );
+        let status = other.call("engine.status", json!({}));
+        assert!(
+            status["stepping_frames_remaining"].as_u64().unwrap() > 0,
+            "{status}"
         );
         id
     });
