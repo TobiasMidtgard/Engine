@@ -10,6 +10,9 @@
 //! * **Materials** ([`SurfaceMaterials`]): one table of friction, fuel, deformation, sounds.
 //! * **Events** ([`events`]): projectiles, impulses, ground contacts, ignition, damage, noise.
 //! * **Focus** ([`SimulationFocus`]): where detailed simulation happens (the player, the camera).
+//! * **World shifts** ([`shift`]): when the world is re-anchored (floating origin, a new
+//!   planet's frame), [`WorldShift`] says how; this crate moves everything the contracts hold
+//!   and modules move their own caches.
 //! * **Combustible** ([`Combustible`]): anything that can burn, declared by its owner (foliage,
 //!   props, buildings) and simulated by the fire module.
 //! * **Module contracts** for the systems other modules build on, so each module can be ripped
@@ -27,6 +30,7 @@ pub mod grid;
 pub mod locomotion;
 pub mod physical;
 pub mod physics;
+pub mod shift;
 pub mod terrain;
 
 pub use environment::*;
@@ -34,6 +38,7 @@ pub use events::*;
 pub use grid::{Blend, Grid2, Grid3};
 pub use locomotion::{LocomotionMode, LocomotionState, MoveIntent, VehicleControls};
 pub use physical::*;
+pub use shift::{WorldShift, WorldShiftSet};
 pub use terrain::{EditOp, EditShape, TerrainChanged, TerrainEdit};
 
 use engine_core::math::{DVec2, DVec3, Vec3};
@@ -175,6 +180,7 @@ impl Plugin for WorldPlugin {
         animation::register(app);
         locomotion::register(app);
         terrain::register(app);
+        shift::register(app);
         app.init_resource::<WeatherState>()
             .init_resource::<WindField>()
             .init_resource::<SurfaceLayers>()
