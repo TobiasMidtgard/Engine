@@ -1,6 +1,8 @@
 //! Renders the weather station through a day of changing weather and saves a screenshot of
 //! each moment: `cargo run -p engine_weather --release --example weather_tour [out_dir] [only]`.
 //! Runs headless (needs a GPU or lavapipe). `only` is a comma-separated list of shot names.
+//! For tuning, `CLOUD_SCALE`, `CLOUD_EXT`, `CLOUD_DETAIL` and `CLOUD_SHAPE` override the
+//! matching `CloudSettings` fields.
 
 use engine_core::prelude::*;
 use engine_core::registry::call_api;
@@ -303,6 +305,22 @@ fn main() {
     {
         let mut settings = app.world.resource_mut::<RenderSettings>();
         settings.environment_interval = 1;
+    }
+    {
+        let mut c = app.world.resource_mut::<engine_weather::CloudSettings>();
+        let env = |k: &str| std::env::var(k).ok().and_then(|v| v.parse::<f32>().ok());
+        if let Some(v) = env("CLOUD_SCALE") {
+            c.resolution_scale = v;
+        }
+        if let Some(v) = env("CLOUD_EXT") {
+            c.extinction = v;
+        }
+        if let Some(v) = env("CLOUD_DETAIL") {
+            c.detail_scale_m = v;
+        }
+        if let Some(v) = env("CLOUD_SHAPE") {
+            c.shape_scale_m = v;
+        }
     }
     // The weather clock spawns its sun and moon on the second frame.
     app.update_n(3);

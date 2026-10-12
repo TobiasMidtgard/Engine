@@ -113,7 +113,7 @@ fn cloud_density(p: vec3<f32>, h: f32, w: vec4<f32>, with_detail: bool) -> f32 {
         let dfbm = dn.r * 0.625 + dn.g * 0.25 + dn.b * 0.125;
         // Wispy at the bottom, billowy at the top.
         let m = mix(dfbm, 1.0 - dfbm, saturate(h01 * 5.0));
-        d = saturate(remap(d, m * 0.4, 1.0, 0.0, 1.0));
+        d = saturate(remap(d, m * 0.45, 1.0, 0.0, 1.0));
     }
     // Towers are far denser than fair-weather heaps: solid, hard-edged, dark underneath.
     return d * w.a * (1.0 + 1.5 * tower);
@@ -234,18 +234,27 @@ fn march_clouds(dir: vec3<f32>, steps: i32, light_steps: i32, jitter: f32) -> Cl
                 od += cloud_density(q, planet_height(q), weather_at(q.xz), false) * ls * 0.7;
             }
             od *= extinction;
-            // Single scattering (strong forward lobe: silver linings) plus a softer second
-            // order, and the diffuse light that bounces around inside the cloud many times:
-            // it falls off slowly with depth, which keeps thick clouds white and their
-            // shaded sides grey instead of black.
-            let direct = exp(-od) * cloud_phase(cos_t, 1.0) + 0.35 * exp(-od * 0.3) * cloud_phase(cos_t, 0.5);
-            let diffuse = 0.5 * INV_PI / (1.0 + 0.12 * od);
+            // Single scattering (strong forward lobe: silver linings) plus multiple scattering
+            // as octaves that each reach deeper, scatter less and lose direction (Wrenninge
+            // et al.): sunlit sides bright, shaded sides several times darker but never black.
+            // Clouds scatter ~all light they absorb (albedo ≈ 1), so the higher orders carry
+            // most of the energy of a thick cloud.
+            var light = exp(-od) * cloud_phase(cos_t, 1.0);
+            var oa = 0.25;
+            var ob = 1.2;
+            var oc = 0.5;
+            for (var o = 1; o < 4; o++) {
+                light += ob * cloud_phase(cos_t, oc) * exp(-od * oa);
+                oa *= 0.25;
+                ob *= 0.6;
+                oc *= 0.5;
+            }
             // Dark edges facing the light ("powder"): fewer photons scattered back out.
             let powder = 1.0 - 0.45 * exp(-sigma * 150.0);
             let h01 = saturate((h - base) / type_thickness(w.g));
             // Rain clouds have dark bellies.
             let belly = 1.0 - 0.55 * saturate(w.b * 6.0) * (1.0 - h01);
-            var s = key * (direct + diffuse * powder) * mix(belly, 1.0, 0.4)
+            var s = key * light * powder * mix(belly, 1.0, 0.4)
                 + (mix(ground, sky, sqrt(h01)) + fill) * belly * (0.5 + 0.5 * h01);
             // Lightning lights the cloud from inside: the light diffuses through kilometers of
             // droplets, so the whole cloud base around the channel glows.
