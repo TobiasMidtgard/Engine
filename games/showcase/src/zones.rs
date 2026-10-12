@@ -166,7 +166,8 @@ pub const ZONES: &[Zone] = &[
         key: "range",
         name: "Smoke range (bullets, fans, explosions)",
         center: DVec3::new(285.0, 0.0, 55.0),
-        radius: 30.0,
+        // The range is 45 × 52 m; flat out to its corners.
+        radius: 36.0,
         module: "smoke",
     },
     Zone {
