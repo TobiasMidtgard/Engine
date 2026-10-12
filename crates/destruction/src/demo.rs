@@ -602,11 +602,19 @@ fn piece(
         p.break_energy_j = 6000.0;
     }
     let mut e = commands.spawn((Name::new(name.to_string()), t, GlobalTransform::from(t), p));
+    // A stable seed per spot.
+    let seed = (at.x * 7.0 + at.y * 13.0 + at.z * 17.0).abs() as u64;
     if material == DestructibleMaterial::Wood {
-        // Sawn timber, its grain along the piece; a stable seed per spot.
-        let seed = (at.x * 7.0 + at.y * 13.0 + at.z * 17.0).abs() as u64;
+        // Sawn timber, its grain along the piece.
         e.insert(PropModel::new(
             PropKind::Timber {
+                size: size.to_array(),
+            },
+            seed,
+        ));
+    } else if material == DestructibleMaterial::Stone {
+        e.insert(PropModel::new(
+            PropKind::StoneBlock {
                 size: size.to_array(),
             },
             seed,

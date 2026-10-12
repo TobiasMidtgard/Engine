@@ -83,6 +83,10 @@ pub enum PropKind {
     Timber {
         size: [f32; 3],
     },
+    /// A dressed ashlar block: chamfered arrises, tooled faces, chipped corners.
+    StoneBlock {
+        size: [f32; 3],
+    },
     RoofTiles {
         width: f32,
         depth: f32,
@@ -133,6 +137,9 @@ impl PropKind {
             PropKind::Timber {
                 size: [3.0, 0.2, 0.2],
             },
+            PropKind::StoneBlock {
+                size: [1.2, 0.98, 1.2],
+            },
             PropKind::RoofTiles {
                 width: 4.0,
                 depth: 3.4,
@@ -165,6 +172,7 @@ impl PropKind {
             } => steel_i_beam(length, depth, end_plates),
             PropKind::StoneColumn { height, radius } => stone_column(height, radius, seed),
             PropKind::Timber { size } => timber(Vec3::from(size), seed),
+            PropKind::StoneBlock { size } => stone_block(Vec3::from(size), seed),
             PropKind::RoofTiles {
                 width,
                 depth,
@@ -186,7 +194,8 @@ impl PropKind {
             PropKind::WoodenCrate { size }
             | PropKind::MilitaryCrate { size }
             | PropKind::ConcretePillar { size }
-            | PropKind::Timber { size } => Vec3::from(size),
+            | PropKind::Timber { size }
+            | PropKind::StoneBlock { size } => Vec3::from(size),
             PropKind::SteelDrum { .. } => Vec3::new(DRUM_DIAMETER, DRUM_HEIGHT, DRUM_DIAMETER),
             PropKind::Sandbag => Vec3::new(BAG_LEN, BAG_HEIGHT, BAG_WIDTH),
             PropKind::SandbagWall { length, courses } => sandbag_wall_size(length, courses),
@@ -3278,6 +3287,76 @@ fn stone_column_size(height: f32, radius: f32) -> Vec3 {
 /// Classical stone column `height` meters tall with shaft radius `radius` at the foot: square
 /// plinth, Attic base (two tori around a scotia), a 20-flute shaft with entasis and rounded
 /// flute ends, Doric capital (astragal, annulets, echinus, abacus), weathered and chipped.
+/// A dressed ashlar block filling `size` (centered): chamfered arrises, faces tooled with
+/// shallow pitting, a few chipped corners and edges, and a per-block tint with darker pits.
+pub fn stone_block(size: Vec3, seed: u64) -> Vec<PropPart> {
+    let half = size.max(Vec3::splat(0.05)) * 0.5;
+    let mut rng = Rng::new(seed ^ 0x570E_B10C);
+    let mut kit = Kit::new();
+    let c = (half.min_element() * 0.08).clamp(0.008, 0.03);
+    let splits: [Vec<f32>; 3] = std::array::from_fn(|a| stations(-half[a], half[a], &[], 0.1));
+    let b = kit.mb(STONE);
+    let v0 = b.vertices.len();
+    let t0 = b.indices.len();
+    let tint = {
+        let k = rng.range(0.86, 1.06);
+        let warm = rng.range(-0.03, 0.03);
+        [k * (1.0 + warm), k, k * (1.0 - warm)]
+    };
+    bevel_box(
+        b,
+        &Frame::ID,
+        &BoxSpec::new(half, c)
+            .chamfer()
+            .splits([&splits[0], &splits[1], &splits[2]])
+            .tint(tint)
+            .uv(rng_uv(&mut rng)),
+    );
+    // Chipped corners: a few corners lose a bite of stone.
+    let chips: Vec<(Vec3, f32)> = (0..rng.range(1.0, 4.0) as usize)
+        .map(|_| {
+            let corner = Vec3::new(
+                if rng.chance(0.5) { 1.0 } else { -1.0 },
+                if rng.chance(0.5) { 1.0 } else { -1.0 },
+                if rng.chance(0.5) { 1.0 } else { -1.0 },
+            ) * half;
+            (corner, rng.range(0.04, 0.11))
+        })
+        .collect();
+    let s = seed;
+    deform(b, v0, |p| {
+        // Tooled faces: shallow pitting and a gentle pillow toward the middle of each face.
+        let inward = -(p / half).clamp(Vec3::splat(-1.0), Vec3::splat(1.0));
+        let face = p.abs() / half;
+        let depth = 0.004 * fbm(p, 9.0, s, 3).abs() + 0.0025 * n3(p, 30.0, s ^ 0x71);
+        let pillow = 0.006 * (1.0 - face.max_element().powi(8));
+        let mut q = p + inward.normalize_or(Vec3::Y) * (depth - pillow).max(-0.004);
+        for (corner, r) in &chips {
+            let d = (q - *corner).length();
+            if d < *r {
+                let bite = (*r - d) * (0.7 + 0.3 * n3(q, 25.0, s ^ 0xC4));
+                q += (-*corner).normalize_or(Vec3::Y) * bite;
+            }
+        }
+        q
+    });
+    auto_smooth(b, v0, t0, 35.0);
+    shade(b, v0, |p, _| {
+        let pit = smoothstep(0.25, 0.7, fbm(p, 9.0, s, 3).abs());
+        let mottle = 1.0 + 0.1 * fbm(p, 2.5, s ^ 0x3A, 3);
+        let chipped = chips
+            .iter()
+            .any(|(corner, r)| (p - *corner).length() < *r * 0.95);
+        let k = mottle * (1.0 - 0.18 * pit) * if chipped { 1.12 } else { 1.0 };
+        [k; 3]
+    });
+    kit.finish(Ao {
+        reach: 0.2,
+        strength: 0.7,
+        ground: false,
+    })
+}
+
 pub fn stone_column(height: f32, radius: f32, seed: u64) -> Vec<PropPart> {
     let size = stone_column_size(height, radius);
     let r = radius.clamp(0.08, 2.0);
