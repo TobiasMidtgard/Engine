@@ -16,8 +16,8 @@ are built, nothing simulates yet) · ⬜ not visible yet
 
 | # | Test case | Zone / viewpoint | Owner | Status |
 |---|---|---|---|---|
-| 1 | Huge scale: walk, drive, fly from the ground to orbit and the Moon without loading screens | `overview`, `tower`, `stratosphere`, `orbit`, `moon` | Planets and terrain | 🟨 the camera flies there over a real planet: the valley sits in an Earth with ranges, coasts and oceans all the way round (`stratosphere`, `orbit`), and the Moon's surface has craters (`moon`); one continuous trip from the ground to the Moon is next |
-| 2 | Efficient enough for multiplanetary travel (planets, moons, orbits, reference frames) | `spaceport`, `orbit`, `moon` | Planets and terrain | ⬜ |
+| 1 | Huge scale: walk, drive, fly from the ground to orbit and the Moon without loading screens | `overview`, `tower`, `stratosphere`, `orbit`, `moon` | Planets and terrain | ✅ the valley sits on a full-size Earth (6,371 km); the camera flies from the ground to a 420 km orbit and to the Moon at its real distance with no loading screens, and ground detail streams in by level of detail |
+| 2 | Efficient enough for multiplanetary travel (planets, moons, orbits, reference frames) | `spaceport`, `orbit`, `moon` | Planets and terrain | 🟨 Earth and the Moon are real terrain at real scale; engine_space (Kepler orbits on rails, time warp, re-anchoring the world on the nearest body, `space.travel`) runs in its `space_shots` example but the showcase doesn't spawn the solar system yet |
 | 3 | Cars with real suspension, tires and drivetrain | `track` | Cars, planes and spaceships | 🟨 demo in; being checked on the Rapier backend |
 | 4 | Planes with aerodynamic surfaces | `airfield` (1.2 km runway) | Cars, planes and spaceships | 🟨 demo in; being checked on the Rapier backend |
 | 5 | Spaceships with thrusters and RCS, launching to orbit | `spaceport` | Cars, planes and spaceships | 🟨 demo in; being checked on the Rapier backend |
