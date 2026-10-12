@@ -73,6 +73,7 @@ struct VertexIn {
     @location(5) origin: vec3<f32>,
     @location(6) planet: u32,
     @location(7) lod: vec4<f32>,       // vertex spacing (m), level
+    @location(8) tint: vec4<f32>,      // hand-made ground tint: sqrt(color), amount
 };
 
 struct VertexOut {
@@ -84,6 +85,7 @@ struct VertexOut {
     @location(4) ocean_paint: vec4<f32>,  // ocean flag, paint weight, regional variety, local patches (0..1)
     @location(5) @interpolate(flat) ids: vec2<u32>,  // planet, paint layer
     @location(6) lod: vec2<f32>,
+    @location(7) tint: vec4<f32>,         // linear color, amount
 };
 
 // Geomorph offsets are stored in vertex spacings (`chunk::MORPH_RANGE`).
@@ -177,6 +179,7 @@ fn vs_main(in: VertexIn) -> VertexOut {
     out.ocean_paint = vec4<f32>(ocean, vec3<f32>(in.paint.yzw) / 255.0);
     out.ids = vec2<u32>(in.planet, in.paint.x);
     out.lod = in.lod.xy;
+    out.tint = vec4<f32>(in.tint.rgb * in.tint.rgb, in.tint.a);
     out.clip = frame.view_proj * vec4<f32>(rel, 1.0);
     return out;
 }
@@ -203,6 +206,8 @@ fn paint_material(layer: u32) -> u32 {
         case 5u: { return M_GRASS; }
         case 6u: { return M_ROCK; }
         case 7u: { return M_CONCRETE; }
+        case 9u: { return M_GRAVEL; }
+        case 10u: { return M_FOREST; }
         default: { return M_SOIL; }
     }
 }
@@ -217,6 +222,8 @@ fn paint_color(p: PlanetGpu, layer: u32) -> vec3<f32> {
         case 6u: { return p.colors[C_ROCK].rgb; }
         case 7u: { return p.colors[C_CONCRETE].rgb; }
         case 8u: { return vec3<f32>(0.03, 0.028, 0.027); }
+        case 9u: { return mix(p.colors[C_ROCK].rgb, p.colors[C_SOIL].rgb, 0.35); }
+        case 10u: { return p.colors[C_SOIL].rgb * vec3<f32>(0.8, 0.75, 0.7); }
         default: { return p.colors[C_SOIL].rgb; }
     }
 }
@@ -225,6 +232,7 @@ fn paint_color(p: PlanetGpu, layer: u32) -> vec3<f32> {
 fn paint_porosity(layer: u32) -> f32 {
     switch (layer) {
         case 6u, 7u: { return 0.35; }
+        case 9u: { return 0.5; }
         case 2u: { return 0.0; }
         default: { return 1.0; }
     }
@@ -551,6 +559,10 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     for (var i = 0u; i < MAT_COUNT; i++) { w[i] *= 1.0 - paint_base; }
     w[painted] += paint_base;
     col[painted] = mix(col[painted], paint_color(planet, layer), paint_base);
+    // Hand-made ground's tint (fields, roads): its color with each material's texture detail.
+    if (in.tint.a > 0.001) {
+        for (var i = 0u; i < MAT_COUNT; i++) { col[i] = mix(col[i], in.tint.rgb, in.tint.a); }
+    }
 
     // ---- Sample the materials present and blend them by height.
     var ms: array<MatSample, 9>;
@@ -639,7 +651,7 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     let wet = saturate(rain_wet) * porosity;
     // Bare soil turns to mud; grass stays grass (darker, with a sheen) unless it is trodden.
     let natural_bare = 1.0 - veg;
-    let painted_bare = select(0.0, 1.0, layer == 0u || layer == 1u || layer == 4u || layer == 8u);
+    let painted_bare = select(0.0, 1.0, layer == 0u || layer == 1u || layer == 4u || layer == 8u || layer == 10u);
     let bare = mix(natural_bare, painted_bare, paint_w);
     let trodden = saturate(depth * 25.0) * print_fade + flattened * 0.6;
     let soil_like = (1.0 - rock) * saturate(bare + trodden);

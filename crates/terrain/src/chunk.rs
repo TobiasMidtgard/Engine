@@ -26,7 +26,7 @@ pub const FLAG_SKIRT: u8 = 1;
 /// Vertex flag: open ocean surface (sea level drawn over the sea floor).
 pub const FLAG_OCEAN: u8 = 2;
 
-/// GPU vertex of a terrain patch (32 bytes).
+/// GPU vertex of a terrain patch (36 bytes).
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Pod, Zeroable, PartialEq)]
 pub struct TerrainVertex {
@@ -41,12 +41,15 @@ pub struct TerrainVertex {
     pub climate: [u8; 4],
     /// Painted layer index, paint weight, regional variety, local patches.
     pub paint: [u8; 4],
+    /// Tint of hand-made ground: color (square root of linear) and amount (unorm8).
+    pub tint: [u8; 4],
 }
 
 impl TerrainVertex {
     pub fn layout() -> wgpu::VertexBufferLayout<'static> {
-        const ATTRS: [wgpu::VertexAttribute; 5] = wgpu::vertex_attr_array![
-            0 => Float32x3, 1 => Snorm16x4, 2 => Float32, 3 => Unorm8x4, 4 => Uint8x4
+        const ATTRS: [wgpu::VertexAttribute; 6] = wgpu::vertex_attr_array![
+            0 => Float32x3, 1 => Snorm16x4, 2 => Float32, 3 => Unorm8x4, 4 => Uint8x4,
+            8 => Unorm8x4
         ];
         wgpu::VertexBufferLayout {
             array_stride: std::mem::size_of::<TerrainVertex>() as u64,
@@ -76,7 +79,7 @@ impl ChunkSource {
     /// Sample at a surface column (`base` at height 0 with `up`; `dir` for the shape).
     pub fn sample(&self, base: DVec3, up: DVec3, dir: DVec3, min_wavelength: f64) -> Sample {
         let s = self.shape.sample(dir, min_wavelength);
-        let (height, paint) = if self.edits.is_empty() {
+        let (height, mut paint) = if self.edits.is_empty() {
             (s.height, (0, 0.0))
         } else {
             let coarse = |wavelength: f64| {
@@ -86,12 +89,27 @@ impl ChunkSource {
             };
             self.edits.apply(base, up, s.height, &coarse)
         };
+        // Hand-made ground's paint, under any edits painted on it.
+        let mut tint = [0.0; 4];
+        if let Some(op) = self
+            .shape
+            .overlay
+            .as_ref()
+            .and_then(|o| o.paint_at(dir, self.shape.radius_m, s.height))
+        {
+            if op.layer != 0 && op.weight > paint.1 * 2.0 {
+                paint = (op.layer, op.weight);
+            }
+            let [r, g, b] = op.tint;
+            tint = [r, g, b, op.tint_amount];
+        }
         Sample {
             height,
             moisture: s.moisture,
             temperature_c: s.temperature_c,
             mare: s.mare,
             paint,
+            tint,
         }
     }
 }
@@ -104,6 +122,8 @@ pub struct Sample {
     pub temperature_c: f32,
     pub mare: f32,
     pub paint: (u8, f32),
+    /// Tint of hand-made ground: linear color and amount (0 = none).
+    pub tint: [f32; 4],
 }
 
 /// A built patch.
@@ -139,6 +159,12 @@ fn encode_morph(offset: f64, spacing: f64) -> i16 {
     ((offset / (spacing * MORPH_RANGE)).clamp(-1.0, 1.0) * 32767.0).round() as i16
 }
 
+/// Tint color stored as its square root (finer steps in the darks), amount linear.
+fn encode_tint(t: [f32; 4]) -> [u8; 4] {
+    let q = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
+    [q(t[0].sqrt()), q(t[1].sqrt()), q(t[2].sqrt()), q(t[3])]
+}
+
 fn encode_normal(n: DVec3) -> [i16; 4] {
     let q = |v: f64| (v.clamp(-1.0, 1.0) * 32767.0).round() as i16;
     [q(n.x), q(n.y), q(n.z), 0]
@@ -166,7 +192,8 @@ pub fn build_chunk(src: &ChunkSource, key: NodeKey) -> ChunkMesh {
             moisture: 0.0,
             temperature_c: 0.0,
             mare: 0.0,
-            paint: (0, 0.0)
+            paint: (0, 0.0),
+            tint: [0.0; 4],
         };
         S * S
     ];
@@ -259,6 +286,7 @@ pub fn build_chunk(src: &ChunkSource, key: NodeKey) -> ChunkMesh {
                     (variety(src, dirs[idx]) * 255.0) as u8,
                     (patches(src, dirs[idx], spacing) * 255.0) as u8,
                 ],
+                tint: encode_tint(s.tint),
             });
         }
     }

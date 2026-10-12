@@ -32,6 +32,9 @@ everything else (streaming, LOD, colliders, ground queries, prints) follows the 
   world coordinates (a level, the showcase valley) and blends it back into the planet at the
   edge. The terrain bends it onto the sphere so the ground passes through `(x, f(x, z), z)`
   to the centimeter, and rendering, the `Ground` query, prints and colliders all use it.
+  `with_overlay_paint(|x, z| …)` paints it: an `OverlayPaint` layer (grass, leaves, dirt,
+  mud, sand, gravel, rock, concrete, snow, ash) for roads, plazas and woods, and a tint for
+  fields. Footsteps, rain and the `Ground` query follow the painted layer; edits paint over it.
 - **Ground cover from afar.** Climate colors (lush, dry, desert, snow by temperature and
   altitude), woods as dark canopy, meadows and fields in patches a few hundred meters
   across, worn bare patches, rock on steep or high ground with scree below it, beaches.
@@ -101,13 +104,14 @@ commands.entity(bodies["Earth"]).insert(
     PlanetTerrain::earthlike(7)
         .with_radius(6_371_000.0)
         .with_pad(FlatPad::default())
-        .with_overlay(20_000.0, 6_000.0, |x, z| my_level_height(x, z)),
+        .with_overlay(20_000.0, 6_000.0, |x, z| my_level_height(x, z))
+        .with_overlay_paint(|x, z| my_level_paint(x, z)), // Option<OverlayPaint>
 );
 commands.entity(bodies["Moon"]).insert(PlanetTerrain::moon(7).with_radius(1_737_400.0));
 ```
 
-`examples/terrain_shots.rs` renders the test views headless (lab prints, rain, snow, the
-range, the coast, the Moon and Mars from orbit) and `examples/terrain_map.rs` draws a relief
+`examples/terrain_shots.rs` renders the test views headless (lab prints, rain, snow, painted
+ground, the range, the coast, the Moon and Mars from orbit) and `examples/terrain_map.rs` draws a relief
 map around the home pad for tuning shapes.
 
 ## Test cases in the showcase
