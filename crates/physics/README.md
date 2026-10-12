@@ -16,8 +16,10 @@ changing that one plugin line.
 ## What it does
 
 - **Bodies**: dynamic, kinematic (moved by `Transform` *or* by `Velocity`), static. Mass from
-  collider densities or `RigidBody::mass_kg`; damping, gravity scale, CCD, sleeping, rotation
-  locks. `MassProperties` is written back.
+  collider densities or `RigidBody::mass_kg`; a designed `center_of_mass` and `inertia` (a car's
+  low balance point, a plane's trim) override what the shapes imply, and a moved center of mass
+  keeps the shapes' inertia about it. Damping, gravity scale, CCD, sleeping, rotation locks.
+  `MassProperties` is written back.
 - **Colliders**: sphere, cuboid, capsule, cylinder, convex hull, triangle mesh, heightfield,
   compound; on the body entity or on its children (one compound body). Shapes scale with the
   entity's `Transform::scale`. Changing a `Collider` rebuilds it. Friction and restitution come
@@ -116,7 +118,8 @@ thin walls, wall-running, crouching, characters on their own clock, sensors and 
 time, hovering, buoyancy, blasts, bodies crossing and merging regions); riding moving bodies
 (`tests/platforms.rs`: crates and characters on a deck at up to 30 km/s, lifts, a turntable, a
 thrusting and turning ship, a seesaw tipped by a character's weight, crates landing on heads,
-rays hitting bodies at orbital speed); following world shifts (`tests/world_shift.rs`: a
+rays hitting bodies at orbital speed); mass overrides (`tests/mass.rs`: a moved center of mass,
+dropping an override); following world shifts (`tests/world_shift.rs`: a
 sleeping pile stays asleep through floating-origin moves, a stack stands through a tilting turn,
 world-pinned hinges turn with the world, a moving or spinning frame adds its motion at each body,
 characters keep their footing, queries see the new frame at once); a headless screenshot of the

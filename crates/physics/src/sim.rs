@@ -22,7 +22,7 @@
 use std::collections::{BTreeMap, HashMap};
 
 use engine_core::ecs::entity::{EntityHashMap, EntityHashSet};
-use engine_core::math::{DVec3, Quat, Vec3};
+use engine_core::math::{DVec3, Mat3, Quat, Vec3};
 use engine_core::prelude::*;
 use engine_world::SurfaceId;
 use engine_world::physics::{
@@ -32,9 +32,9 @@ use engine_world::physics::{
 use parking_lot::Mutex;
 use rapier3d::prelude::{
     ActiveCollisionTypes, ActiveEvents, ColliderBuilder, ColliderHandle, CollisionEvent,
-    CollisionEventFlags, ContactPair, EventHandler, ImpulseJointHandle, LockedAxes, PhysicsWorld,
-    Pose, RigidBodyBuilder, RigidBodyHandle, RigidBodySet, RigidBodyType, SharedShape, SoftBodySet,
-    SoftBodyTearEvent,
+    CollisionEventFlags, ContactPair, EventHandler, ImpulseJointHandle, LockedAxes,
+    MassProperties as RapierMassProperties, PhysicsWorld, Pose, RigidBodyBuilder, RigidBodyHandle,
+    RigidBodySet, RigidBodyType, SharedShape, SoftBodySet, SoftBodyTearEvent,
 };
 
 use crate::convert;
@@ -500,39 +500,105 @@ impl Simulation {
         attached
     }
 
-    /// Give a body the mass its `RigidBody::mass_kg` asks for by scaling collider densities.
+    /// Give a body the mass properties its `RigidBody` asks for: `mass_kg` alone scales the
+    /// collider densities (so the mass spreads as the shapes do); a center of mass or inertia
+    /// override replaces the colliders' contribution with exactly the designed values.
     pub fn fix_mass(&mut self, entity: Entity) {
         let Some(entry) = self.bodies.get_mut(&entity) else {
             return;
         };
         entry.mass_dirty = true;
-        let (region, handle, mass) = (entry.region, entry.handle, entry.desc.mass_kg);
+        let (region, handle) = (entry.region, entry.handle);
+        let desc = entry.desc.clone();
+        // Start from the densities the colliders ask for (an earlier override may have scaled
+        // or zeroed them).
+        let densities: Vec<(ColliderHandle, f32)> = self
+            .colliders
+            .values()
+            .filter(|c| c.body == Some(entity))
+            .filter_map(|c| {
+                let h = c.handles.iter().find(|(r, _)| *r == region)?.1;
+                Some((
+                    h,
+                    if c.desc.sensor {
+                        0.0
+                    } else {
+                        c.desc.density.max(0.0)
+                    },
+                ))
+            })
+            .collect();
         let world = &mut self.region_mut(region).world;
+        for (h, d) in &densities {
+            if let Some(c) = world.colliders.get_mut(*h) {
+                c.set_density(*d);
+            }
+        }
         let Some(rb) = world.bodies.get_mut(handle) else {
             return;
         };
         rb.set_additional_mass(0.0, true);
-        let Some(target) = mass.filter(|m| *m > 0.0) else {
-            return;
-        };
         let handles: Vec<ColliderHandle> = rb.colliders().to_vec();
-        let total: f32 = handles
-            .iter()
-            .filter_map(|h| world.colliders.get(*h))
-            .filter(|c| !c.is_sensor())
-            .map(|c| c.mass())
-            .sum();
-        if total > 1e-9 {
-            for h in handles {
-                if let Some(c) = world.colliders.get_mut(h)
-                    && !c.is_sensor()
-                {
-                    let d = c.density();
-                    c.set_density(d * target / total);
+        let solid = || {
+            handles
+                .iter()
+                .filter_map(|h| world.colliders.get(*h))
+                .filter(|c| !c.is_sensor())
+        };
+        let mass = desc.mass_kg.filter(|m| *m > 0.0);
+        if desc.center_of_mass.is_none() && desc.inertia.is_none() {
+            let Some(target) = mass else {
+                return;
+            };
+            let total: f32 = solid().map(|c| c.mass()).sum();
+            if total > 1e-9 {
+                for h in &handles {
+                    if let Some(c) = world.colliders.get_mut(*h)
+                        && !c.is_sensor()
+                    {
+                        let d = c.density();
+                        c.set_density(d * target / total);
+                    }
                 }
+            } else if let Some(rb) = world.bodies.get_mut(handle) {
+                rb.set_additional_mass(target, true);
             }
-        } else if let Some(rb) = world.bodies.get_mut(handle) {
-            rb.set_additional_mass(target, true);
+            return;
+        }
+        // Designed mass properties: what the colliders imply, overridden where given.
+        let derived = solid()
+            .map(|c| {
+                let local = c.position_wrt_parent().copied().unwrap_or_default();
+                c.mass_properties().transform_by(&local)
+            })
+            .fold(RapierMassProperties::default(), |a, b| a + b);
+        let m = mass.unwrap_or(derived.mass()).max(1e-6);
+        let com = desc.center_of_mass.unwrap_or(derived.local_com);
+        let props = match desc.inertia {
+            Some(i) => RapierMassProperties::new(com, m, i.max(Vec3::splat(1e-6))),
+            None => {
+                // The shapes' inertia, scaled to the designed mass and taken about the
+                // designed center of mass (parallel axes).
+                let scale = if derived.mass() > 1e-9 {
+                    m / derived.mass()
+                } else {
+                    1.0
+                };
+                let d = com - derived.local_com;
+                let shifted = derived.reconstruct_inertia_matrix() * scale
+                    + (Mat3::IDENTITY * d.length_squared()
+                        - Mat3::from_cols(d * d.x, d * d.y, d * d.z))
+                        * m;
+                RapierMassProperties::with_inertia_matrix(com, m, shifted)
+            }
+        };
+        for h in &handles {
+            if let Some(c) = world.colliders.get_mut(*h) {
+                c.set_density(0.0);
+            }
+        }
+        if let Some(rb) = world.bodies.get_mut(handle) {
+            rb.set_additional_mass_properties(props, true);
         }
     }
 
