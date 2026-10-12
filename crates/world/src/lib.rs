@@ -191,6 +191,7 @@ impl Plugin for WorldPlugin {
             .add_message::<DamageEvent>()
             .add_message::<NoiseEvent>()
             .add_message::<SmokeEmission>()
+            .add_message::<WaterSplash>()
             .add_message::<AttackEvent>()
             .register_component::<SimulationFocus>(
                 "Detailed simulation (fields, LOD) follows this entity. Put it on the player.",

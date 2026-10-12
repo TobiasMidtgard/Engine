@@ -16,10 +16,11 @@
 //! checks cover what other modules rely on: gravity, resting contact, impulses, contact
 //! events (one `Started` per touch carrying the impact impulse and a normal from `a` toward
 //! `b`, one `Ended` when it stops), raycasts, time dilation, precision far from the origin and
-//! the character controller.
+//! the character controller (including its time scaling: a character moves in its own seconds,
+//! so one that ignores world slow motion keeps full speed).
 
 use engine_core::math::{DVec3, Vec3};
-use engine_core::time::TimeSource;
+use engine_core::time::{LocalTimeScale, TimeSource};
 
 use super::*;
 use crate::WorldPlugin;
@@ -47,6 +48,10 @@ const CHECKS: &[(&str, CheckFn)] = &[
     ("time_dilation_slows_bodies", time_dilation_slows_bodies),
     ("precise_far_from_origin", precise_far_from_origin),
     ("character_walks_and_grounds", character_walks_and_grounds),
+    (
+        "character_honors_local_time_scale",
+        character_honors_local_time_scale,
+    ),
 ];
 
 /// Run every check with `install` adding the backend to a fresh app.
@@ -468,6 +473,46 @@ fn time_dilation_slows_bodies(install: &dyn Fn(&mut App)) -> Result<(), String> 
         velocity(&app, ball).y as f64,
         -4.905,
         0.4,
+    )
+}
+
+fn character_honors_local_time_scale(install: &dyn Fn(&mut App)) -> Result<(), String> {
+    let mut app = app_with(install);
+    ground(&mut app, DVec3::ZERO);
+    app.world
+        .resource_mut::<TimeDilation>()
+        .hold("conformance", 0.25, 0.0);
+    let walker = |app: &mut App, z: f64| {
+        app.world
+            .spawn((
+                Transform::from_xyz(0.0, 0.5 + 0.9 + 0.2, z),
+                CharacterController::default(),
+                CharacterMove {
+                    velocity: Vec3::new(2.0, -2.0, 0.0),
+                },
+                CharacterState::default(),
+            ))
+            .id()
+    };
+    let fast = walker(&mut app, -3.0);
+    app.world
+        .entity_mut(fast)
+        .insert(LocalTimeScale::unaffected_by_dilation(1.0));
+    let slowed = walker(&mut app, 3.0);
+    app.update_n(60);
+    near(
+        "character with LocalTimeScale::unaffected_by_dilation(1.0) walked 1 real second at \
+         2 m/s while the world ran at 0.25 (move it by velocity × time.delta_for(local scale))",
+        position(&app, fast).x,
+        2.0,
+        0.25,
+    )?;
+    near(
+        "character without a LocalTimeScale walked 1 real second at 2 m/s while the world ran \
+         at 0.25",
+        position(&app, slowed).x,
+        0.5,
+        0.1,
     )
 }
 

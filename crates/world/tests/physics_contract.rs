@@ -202,11 +202,13 @@ fn step_characters(
         &CharacterController,
         &CharacterMove,
         &mut CharacterState,
+        Option<&LocalTimeScale>,
     )>,
 ) {
-    let dt = time.delta_secs_f64();
     let solid: Vec<Aabb> = statics.iter().map(|(e, t, c)| aabb(e, t, c)).collect();
-    for (mut t, cc, mv, mut state) in &mut characters {
+    for (mut t, cc, mv, mut state, local) in &mut characters {
+        // The character's own seconds (contract: `CharacterMove`).
+        let dt = time.delta_for(local) as f64;
         let h = DVec3::new(cc.radius as f64, cc.height as f64 * 0.5, cc.radius as f64);
         let start = t.translation;
         let mut pos = start + mv.velocity.as_dvec3() * dt;

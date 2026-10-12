@@ -366,6 +366,12 @@ impl Default for CharacterController {
 
 /// Desired motion for a [`CharacterController`] this step: displacement velocity in m/s
 /// (world). Gravity is not applied by the controller; the movement module adds it.
+///
+/// Seconds are the character's own: each fixed step the backend moves it by
+/// `velocity × time.delta_for(LocalTimeScale)` (`Time::delta_for` with the entity's
+/// `LocalTimeScale`, if any). So a character with `LocalTimeScale::unaffected_by_dilation(1.0)`
+/// keeps walking at full speed while `TimeDilation` slows the world, and one with factor 0.5
+/// moves at half speed. [`CharacterState::velocity`] is in the same seconds.
 #[derive(Component, Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct CharacterMove {
@@ -381,7 +387,8 @@ pub struct CharacterState {
     #[serde(skip)]
     pub ground_entity: Option<Entity>,
     pub ground_surface: Option<SurfaceId>,
-    /// Velocity actually achieved after collisions, m/s.
+    /// Velocity actually achieved after collisions, m/s in the character's own seconds (see
+    /// [`CharacterMove`]).
     pub velocity: Vec3,
     /// Hit a wall this step (normal of the steepest contact), for wall-running.
     pub wall_normal: Option<Vec3>,

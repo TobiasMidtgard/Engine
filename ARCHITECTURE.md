@@ -88,14 +88,14 @@ zone's entry; the rest of the showcase belongs to the Beautiful showcase world t
 ### Dependencies between modules: none
 
 A module crate depends only on the core crates (`engine_core`, `engine_world`,
-`engine_render`, `engine_assets`, `engine_input`). When one module needs another, it uses that
+`engine_render`, `engine_assets`, `engine_input`, `engine_debug`). When one module needs another, it uses that
 module's **contract** in `engine_world`:
 
 | Contract (`engine_world::…`) | Implemented by | Used by |
 |---|---|---|
 | `physics`: `RigidBody`, `Collider`, `Velocity`, `ExternalForce`, `Joint`, `CharacterController`/`CharacterMove`/`CharacterState`, `ApplyImpulse`, `ContactEvent`, `PhysicsQueries` (raycast, shapecast, overlap, closest point) | `engine_physics` | vehicles, softbody, destruction, movement, npc, anim (ragdolls), space, gameplay |
 | `animation`: `SkeletonPose`, `AnimationParams`, `AnimationTrigger`, `AnimationEvent`, `Ragdoll` | `engine_anim` | movement, npc, softbody (cloth/hair pinning), vfx, audio |
-| `locomotion`: `MoveIntent`, `LocomotionState`, `VehicleControls` | `engine_movement`, `engine_vehicles` | npc, player input, cameras, UI |
+| `locomotion`: `MoveIntent`, `LocomotionState`, `VehicleControls`, `LocomotionBackend` (`claim_backend`, so fallback movers can step aside) | `engine_movement`, `engine_vehicles` | npc, player input, cameras, UI |
 | `terrain`: `TerrainEdit`, `TerrainChanged`, plus the `Ground` query | `engine_terrain` | destruction, foliage, physics, water, npc |
 | `Water`, `Gravity`, fields and world events (see the crate docs) | water, space, weather, … | everyone |
 
@@ -109,8 +109,9 @@ to `engine_world` rather than depending on another module's crate. The test
    and writes).
 2. Pass the contract's conformance tests. Physics has a full suite:
    `engine_world::physics::conformance::assert_all(|app| { app.add_plugins(MyPhysics); })`
-   (gravity, resting contact, impulses, contact events, raycasts, time dilation, precision
-   100 000 km from the origin, the character controller). `crates/world/tests/physics_contract.rs`
+   (gravity, resting contact, impulses, contact events with start, end, impulse and normal,
+   raycasts, time dilation, precision 100 000 km from the origin, the character controller and
+   its per-character time scale). `crates/world/tests/physics_contract.rs`
    shows a 300-line backend that passes it.
 3. Swap the plugin in the game: `app.add_plugins(MyPhysics)` instead of
    `engine_physics::PhysicsPlugin`. Nothing else changes. Physics backends call
