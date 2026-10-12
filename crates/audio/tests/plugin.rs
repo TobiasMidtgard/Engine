@@ -169,3 +169,102 @@ fn the_trail_walks_every_surface() {
         assert!(heard.contains(&name), "never heard {name}; heard {heard:?}");
     }
 }
+
+/// A concrete wall: the plane x = 5, as tall and wide as you like.
+struct Wall;
+
+impl engine_world::physics::PhysicsQuery for Wall {
+    fn raycast(
+        &self,
+        origin: DVec3,
+        dir: Vec3,
+        max_distance: f32,
+        _: &engine_world::physics::QueryFilter,
+    ) -> Option<engine_world::physics::Hit> {
+        if dir.x.abs() < 1e-6 {
+            return None;
+        }
+        let t = ((5.0 - origin.x) / dir.x as f64) as f32;
+        (t > 0.0 && t <= max_distance).then(|| engine_world::physics::Hit {
+            entity: Entity::PLACEHOLDER,
+            point: origin + (dir * t).as_dvec3(),
+            normal: Vec3::NEG_X,
+            distance: t,
+            surface: engine_world::SurfaceId(12),
+        })
+    }
+    fn shapecast(
+        &self,
+        _: &engine_world::physics::ColliderShape,
+        _: DVec3,
+        _: Quat,
+        _: Vec3,
+        _: f32,
+        _: &engine_world::physics::QueryFilter,
+    ) -> Option<engine_world::physics::Hit> {
+        None
+    }
+    fn overlap(
+        &self,
+        _: &engine_world::physics::ColliderShape,
+        _: DVec3,
+        _: Quat,
+        _: &engine_world::physics::QueryFilter,
+        _: &mut Vec<Entity>,
+    ) {
+    }
+    fn closest_point(
+        &self,
+        _: DVec3,
+        _: f32,
+        _: &engine_world::physics::QueryFilter,
+    ) -> Option<engine_world::physics::Hit> {
+        None
+    }
+}
+
+/// Energy above 2 kHz relative to the whole (how bright a recording is).
+fn brightness(samples: &[f32]) -> f32 {
+    let mono: Vec<f32> = samples.chunks(2).map(|c| 0.5 * (c[0] + c[1])).collect();
+    // First difference ≈ a high-pass: its share of the energy tracks the highs.
+    let diff: f32 = mono.windows(2).map(|w| (w[1] - w[0]).powi(2)).sum();
+    let all: f32 = mono.iter().map(|x| x * x).sum();
+    diff / all.max(1e-12)
+}
+
+#[test]
+fn walls_muffle_sounds_behind_them() {
+    let mut app = app();
+    app.insert_resource(engine_world::physics::PhysicsQueries(std::sync::Arc::new(
+        Wall,
+    )));
+    app.world
+        .spawn((AudioListener::default(), Transform::from_xyz(0.0, 1.7, 0.0)));
+    // Gravel steps 10 m away: first in the open (-x), then behind the wall (+x).
+    let open = record(&mut app, "open", 60, |app, i| {
+        if i % 15 == 0 {
+            step_on(app, "gravel", DVec3::new(-10.0, 0.0, 0.0));
+        }
+    });
+    let walled = record(&mut app, "walled", 60, |app, i| {
+        if i % 15 == 0 {
+            step_on(app, "gravel", DVec3::new(10.0, 0.0, 0.0));
+        }
+    });
+    let (lo, lw) = (rms(&open), rms(&walled));
+    assert!(
+        lw < lo * 0.45,
+        "the wall should quieten the steps: {lw} vs {lo}"
+    );
+    let (bo, bw) = (brightness(&open), brightness(&walled));
+    assert!(bw < bo * 0.6, "and muffle them: {bw} vs {bo}");
+
+    // Without occlusion the wall changes nothing.
+    app.world.resource_mut::<AudioSettings>().occlusion = false;
+    let off = record(&mut app, "off", 60, |app, i| {
+        if i % 15 == 0 {
+            step_on(app, "gravel", DVec3::new(10.0, 0.0, 0.0));
+        }
+    });
+    assert!(rms(&off) > lo * 0.6, "{} vs {lo}", rms(&off));
+}

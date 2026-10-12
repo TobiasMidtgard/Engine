@@ -63,8 +63,8 @@ pub(crate) fn update_listener(
     mix: Res<AudioMix>,
     time: Res<Time>,
     env: Env,
-    listeners: Query<(&GlobalTransform, &AudioListener)>,
-    cameras: Query<(&GlobalTransform, &Camera)>,
+    listeners: Query<(Entity, &GlobalTransform, &AudioListener)>,
+    cameras: Query<(Entity, &GlobalTransform, &Camera)>,
     mut last: Local<Option<DVec3>>,
 ) {
     if !audio.is_running() {
@@ -72,17 +72,18 @@ pub(crate) fn update_listener(
     }
     let pose = listeners
         .iter()
-        .max_by_key(|(_, l)| l.priority)
-        .map(|(t, _)| t)
+        .max_by_key(|(_, _, l)| l.priority)
+        .map(|(e, t, _)| (e, t))
         .or_else(|| {
             cameras
                 .iter()
-                .filter(|(_, c)| c.active)
-                .max_by_key(|(_, c)| c.order)
-                .map(|(t, _)| t)
+                .filter(|(_, _, c)| c.active)
+                .max_by_key(|(_, _, c)| c.order)
+                .map(|(e, t, _)| (e, t))
         });
+    audio.listener_entity = pose.map(|(e, _)| e);
     let (pos, rot) = pose
-        .map(|t| (t.translation(), t.rotation()))
+        .map(|(_, t)| (t.translation(), t.rotation()))
         .unwrap_or((DVec3::ZERO, Quat::IDENTITY));
     let dt = time.real_delta_secs().max(1e-4) as f64;
     // A jump of more than 50 m in one frame is a teleport, not a velocity.
@@ -216,6 +217,7 @@ pub(crate) fn play_footsteps(
         let opts = PlayOptions::at(c.position)
             .range(1.5, max)
             .clock(clock_for(c.entity, &scales))
+            .source(c.entity)
             .reverb(0.35);
         let voice = audio.play(FootstepSound::new(fs, &step), opts);
         if !voice.is_none() {
@@ -296,6 +298,7 @@ pub(crate) fn play_world_events(
             PlayOptions::at(s.position)
                 .range(1.0 + s.radius, 100.0)
                 .clock(clock_for(s.source, &scales))
+                .source(s.source)
                 .reverb(0.35),
         );
         if !voice.is_none() {
@@ -662,5 +665,99 @@ pub(crate) fn drive_output(
         let m = audio.meters();
         d.set("audio.voices", audio.voice_count() as f64);
         d.set("audio.peak_db", to_db(m.master_peak) as f64);
+    }
+}
+
+/// Rays cast per frame for occlusion (3 per voice checked).
+const OCCLUSION_RAYS_PER_FRAME: usize = 48;
+/// How often each sound's line of sight is rechecked, real seconds.
+const OCCLUSION_INTERVAL: f64 = 0.1;
+
+/// Muffle sounds that something solid stands between: one ray straight to the sound and two
+/// past it (over the top and round the side), so a sound just round a corner or over a low
+/// wall is only partly muffled. Dense materials (stone, metal) block more than wood or cloth.
+pub(crate) fn occlusion(
+    mut audio: ResMut<Audio>,
+    settings: Res<AudioSettings>,
+    physics: Res<PhysicsQueries>,
+    env: Env,
+    time: Res<Time>,
+    parents: Query<&ChildOf>,
+    mut work: Local<Vec<(VoiceId, DVec3, Option<Entity>, f32)>>,
+) {
+    if !audio.is_running() {
+        return;
+    }
+    let now = time.real_elapsed_secs_f64();
+    let listener = audio.listener;
+    let enabled = settings.occlusion;
+    work.clear();
+    for (id, l) in audio.live.iter() {
+        let Some(p) = l.last else { continue };
+        if !l.bus.in_world() || (now < l.check_at && enabled) {
+            continue;
+        }
+        if !enabled && l.occlusion == 0.0 {
+            continue;
+        }
+        work.push((*id, p, l.source, l.occlusion));
+        if work.len() * 3 >= OCCLUSION_RAYS_PER_FRAME {
+            break;
+        }
+    }
+    if work.is_empty() {
+        return;
+    }
+    // The listener's own body (and whatever carries it) never blocks.
+    let mut exclude: Vec<Entity> = Vec::new();
+    let mut e = audio.listener_entity;
+    while let Some(x) = e {
+        exclude.push(x);
+        e = parents.get(x).ok().map(|c| c.0);
+        if exclude.len() > 8 {
+            break;
+        }
+    }
+    let up = env.up(listener);
+    for &(id, p, source, last) in work.iter() {
+        let amount = if enabled {
+            let mut filter = QueryFilter {
+                exclude: exclude.clone(),
+                ..Default::default()
+            };
+            filter.exclude.extend(source);
+            let target = p + (up * 0.3).as_dvec3();
+            let to = (target - listener).as_vec3();
+            let dist = to.length();
+            if dist < 0.5 {
+                0.0
+            } else {
+                let side = to.cross(up).normalize_or_zero() * (0.25 * dist).clamp(0.5, 3.0);
+                let over = up * (0.15 * dist).clamp(0.5, 3.0);
+                let mut amount = 0.0;
+                for (weight, aim) in [(0.6, Vec3::ZERO), (0.2, over), (0.2, side)] {
+                    let goal = target + aim.as_dvec3();
+                    let d = (goal - listener).as_vec3();
+                    let len = d.length();
+                    if let Some(hit) = physics.raycast(listener, d / len, len, &filter)
+                        && hit.distance > 0.2
+                        && hit.distance < len - 0.25
+                    {
+                        let density = env.material(hit.surface).density;
+                        amount += weight * (0.55 + 0.45 * (density / 2_400.0).min(1.0));
+                    }
+                }
+                amount
+            }
+        } else {
+            0.0
+        };
+        if let Some(l) = audio.live.get_mut(&id) {
+            l.check_at = now + OCCLUSION_INTERVAL;
+            l.occlusion = amount;
+        }
+        if (amount - last).abs() > 0.02 {
+            audio.send(Command::SetOcclusion { id, amount });
+        }
     }
 }

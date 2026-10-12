@@ -79,7 +79,7 @@ impl Bus {
         }
     }
 
-    fn in_world(self) -> bool {
+    pub(crate) fn in_world(self) -> bool {
         matches!(self, Bus::World | Bus::Ambience)
     }
 }
@@ -203,6 +203,12 @@ pub enum Command {
         position: DVec3,
         velocity: Vec3,
     },
+    /// How much is between the voice and the listener: 0 clear line of sight .. 1 behind a
+    /// thick wall. Muffles and quietens; the change is smoothed over about 0.15 s.
+    SetOcclusion {
+        id: VoiceId,
+        amount: f32,
+    },
     /// Ears: position, orientation (unit right, up, forward) and velocity.
     SetListener {
         position: DVec3,
@@ -272,6 +278,8 @@ struct Voice {
     spatial: Option<Spatial>,
     reverb_send: f32,
     delay: u64,
+    occlusion: f32,
+    occlusion_target: f32,
     // Fades: current level, per-sample step, target.
     fade: f32,
     fade_step: f32,
@@ -314,6 +322,8 @@ impl Voice {
             spatial: play.spatial,
             reverb_send: play.reverb_send,
             delay,
+            occlusion: 0.0,
+            occlusion_target: 0.0,
             fade,
             fade_step,
             fade_target: 1.0,
@@ -548,6 +558,15 @@ impl Mixer {
                     sp.velocity = velocity;
                 }
             }
+            Command::SetOcclusion { id, amount } => {
+                if let Some(v) = self.voice_mut(id) {
+                    v.occlusion_target = amount.clamp(0.0, 1.0);
+                    // Known before the first sample: start there instead of sweeping to it.
+                    if v.cur_rate.is_nan() {
+                        v.occlusion = v.occlusion_target;
+                    }
+                }
+            }
             Command::SetListener {
                 position,
                 right,
@@ -679,6 +698,18 @@ impl Mixer {
                     let v_lis = dir.dot(lis.velocity).clamp(-0.9 * c, 0.9 * c);
                     let f = ((c + v_lis) / (c - v_src)).clamp(0.5, 2.0);
                     rate *= 1.0 + (f - 1.0) * settings.doppler;
+                }
+                // Blocked: the direct sound comes through or around the obstacle, quieter
+                // and muffled; the room sound is affected less.
+                let k = 1.0 - (-(n as f32) / (0.05 * fs)).exp();
+                v.occlusion += (v.occlusion_target - v.occlusion) * k;
+                let o = v.occlusion;
+                if o > 1e-3 {
+                    let g = db(-15.0 * o);
+                    gains[0] *= g;
+                    gains[1] *= g;
+                    lp_hz *= (600.0 / 20_000.0f32).powf(o);
+                    send *= 1.0 - 0.35 * o;
                 }
             }
             if v.bus.in_world() {

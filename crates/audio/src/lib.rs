@@ -49,7 +49,8 @@ impl Plugin for AudioPlugin {
                 "Audio settings: output (Auto/Device/Offline/Off), master_db, speed_of_sound (m/s), \
                  doppler (0..1), air_absorption (/m), slow_motion_pitch (0..1, how much time \
                  dilation lowers pitch), min_pitch, slow_motion_darken (0..1), space_is_silent, \
-                 atmosphere_height_m, footstep_distance_m, max_voices, weather_ambience.",
+                 atmosphere_height_m, footstep_distance_m, max_voices, weather_ambience, \
+                 occlusion (walls muffle sounds).",
             )
             .register_resource::<AudioMix>(
                 "Bus volumes in dB: world (footsteps, impacts, explosions), ambience (rain, wind, \
@@ -78,6 +79,7 @@ impl Plugin for AudioPlugin {
                     systems::weather_ambience,
                     systems::reverb_zones,
                     systems::follow_emitters,
+                    systems::occlusion,
                 )
                     .chain()
                     .in_set(UpdateSet::AfterPropagate),
@@ -133,6 +135,8 @@ pub struct AudioSettings {
     pub max_voices: u32,
     /// Play rain, wind and thunder from the weather.
     pub weather_ambience: bool,
+    /// Muffle sounds that walls and terrain stand between (physics raycasts).
+    pub occlusion: bool,
 }
 
 impl Default for AudioSettings {
@@ -151,6 +155,7 @@ impl Default for AudioSettings {
             footstep_distance_m: 60.0,
             max_voices: 96,
             weather_ambience: true,
+            occlusion: true,
         }
     }
 }
@@ -289,6 +294,8 @@ pub struct PlayOptions {
     pub velocity: Vec3,
     /// Keep the sound attached to this entity as it moves.
     pub follow: Option<Entity>,
+    /// The entity making the sound (ignored when checking what blocks it).
+    pub source: Option<Entity>,
     pub bus: Bus,
     pub gain_db: f32,
     /// Playback rate (2 = an octave up).
@@ -315,6 +322,7 @@ impl PlayOptions {
             at: Some(position),
             velocity: Vec3::ZERO,
             follow: None,
+            source: None,
             bus: Bus::World,
             gain_db: 0.0,
             pitch: 1.0,
@@ -378,6 +386,13 @@ impl PlayOptions {
 
     pub fn follow(mut self, entity: Entity) -> Self {
         self.follow = Some(entity);
+        self.source = Some(entity);
+        self
+    }
+
+    /// The entity making the sound, so its own collider doesn't muffle it.
+    pub fn source(mut self, entity: Option<Entity>) -> Self {
+        self.source = entity;
         self
     }
 
@@ -404,7 +419,13 @@ impl PlayOptions {
 
 struct Live {
     follow: Option<Entity>,
+    source: Option<Entity>,
+    /// Where it is now (positioned sounds).
     last: Option<DVec3>,
+    bus: Bus,
+    /// Occlusion last sent, and when to check again (real seconds).
+    occlusion: f32,
+    check_at: f64,
 }
 
 struct Recording {
@@ -437,6 +458,8 @@ pub struct Audio {
     max_voices: usize,
     listener: DVec3,
     listener_velocity: Vec3,
+    /// The entity the ears are on (its own colliders don't block sound).
+    listener_entity: Option<Entity>,
     /// Mixer sample to start new sounds at (offline output only).
     start_sample: Option<u64>,
     meters: Meters,
@@ -462,6 +485,7 @@ impl Audio {
             max_voices: 96,
             listener: DVec3::ZERO,
             listener_velocity: Vec3::ZERO,
+            listener_entity: None,
             start_sample: None,
             meters: Meters::default(),
             recording: None,
@@ -608,7 +632,11 @@ impl Audio {
                 id,
                 Live {
                     follow: opts.follow,
+                    source: opts.source.or(opts.follow),
                     last: opts.at,
+                    bus: opts.bus,
+                    occlusion: 0.0,
+                    check_at: 0.0,
                 },
             );
             id

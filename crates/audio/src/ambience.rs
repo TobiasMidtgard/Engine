@@ -440,6 +440,143 @@ impl Sound for ThunderSound {
     }
 }
 
+/// A fire: the low roar of the flames, crackle and pops from the fuel, now and then a loud
+/// snap. Mono, so the mixer places it. Param `"size"`: area in flames, m² (0 = out; a
+/// campfire ≈ 1, a burning house ≈ 100, a forest front ≈ 2000).
+pub struct FireSound {
+    fs: f32,
+    rng: Noise,
+    size: f32,
+    target: f32,
+    roar: Biquad,
+    roar2: Biquad,
+    flutter: Biquad,
+    hiss: Biquad,
+    pops: Vec<Pop>,
+    t: u32,
+    // Per-block levels.
+    roar_amp: f32,
+    hiss_amp: f32,
+    pop_rate: f32,
+    snap_rate: f32,
+}
+
+struct Pop {
+    filter: Biquad,
+    amp: f32,
+    decay: f32,
+}
+
+/// Most pops sounding at once.
+const MAX_POPS: usize = 24;
+
+impl FireSound {
+    pub fn new(fs: f32, seed: u64) -> Self {
+        Self {
+            fs,
+            rng: Noise::new(seed),
+            size: 0.0,
+            target: 0.0,
+            roar: Biquad::lowpass(fs, 400.0, 0.7),
+            roar2: Biquad::lowpass(fs, 400.0, 0.7),
+            flutter: Biquad::lowpass(fs, 6.0, 0.7),
+            hiss: Biquad::highpass(fs, 3_000.0, 0.7),
+            pops: Vec::with_capacity(MAX_POPS),
+            t: 0,
+            roar_amp: 0.0,
+            hiss_amp: 0.0,
+            pop_rate: 0.0,
+            snap_rate: 0.0,
+        }
+    }
+
+    /// Overall loudness for `size` m² of flames (linear, at the fire's reference distance).
+    pub fn level(size: f32) -> f32 {
+        if size <= 0.0 {
+            0.0
+        } else {
+            (0.12 * (1.0 + size).ln().powf(0.8)).min(0.8)
+        }
+    }
+
+    fn pop(&mut self, snap: bool) {
+        if self.pops.len() >= MAX_POPS {
+            return;
+        }
+        let fs = self.fs;
+        let r = &mut self.rng;
+        // Many small pops, a few loud ones (Pareto-like).
+        let amp = (0.05 * r.uniform().max(1e-3).powf(-0.55)).min(1.0);
+        let (f, q, t60) = if snap {
+            (r.range(700.0, 1_600.0), 1.2, r.range(0.012, 0.03))
+        } else {
+            (r.range(1_800.0, 6_500.0), 1.8, r.range(0.002, 0.008))
+        };
+        self.pops.push(Pop {
+            filter: Biquad::bandpass(fs, f, q),
+            amp: if snap { amp.max(0.35) * 1.4 } else { amp },
+            decay: decay_coef(fs, t60),
+        });
+    }
+}
+
+impl Sound for FireSound {
+    fn set_param(&mut self, name: &str, value: f32) {
+        if name == "size" {
+            self.target = value.max(0.0);
+        }
+    }
+
+    fn fill(&mut self, out: &mut [f32]) -> usize {
+        let fs = self.fs;
+        for o in out.iter_mut() {
+            if self.t.is_multiple_of(64) {
+                let k = 1.0 - (-64.0 / (0.5 * fs)).exp();
+                self.size += (self.target - self.size) * k;
+                let level = Self::level(self.size);
+                // Bigger fires roar deeper and crackle more densely.
+                let cutoff = (520.0 / (1.0 + self.size).powf(0.12)).max(140.0);
+                self.roar.retune(Biquad::lowpass(fs, cutoff, 0.7));
+                self.roar2.retune(Biquad::lowpass(fs, cutoff * 1.6, 0.7));
+                self.roar_amp = level * (0.5 + 0.5 * (self.size / 30.0).min(1.0));
+                self.hiss_amp = level * 0.05;
+                self.pop_rate = if self.size > 0.0 {
+                    (12.0 * self.size.sqrt()).clamp(4.0, 400.0) / fs
+                } else {
+                    0.0
+                };
+                self.snap_rate = if self.size > 0.0 {
+                    (0.4 + 0.15 * self.size.sqrt()).min(6.0) / fs
+                } else {
+                    0.0
+                };
+            }
+            self.t = self.t.wrapping_add(1);
+            if self.rng.chance(self.pop_rate) {
+                self.pop(false);
+            }
+            if self.rng.chance(self.snap_rate) {
+                self.pop(true);
+            }
+            let level = Self::level(self.size);
+            // Turbulent flutter of the flames: slow random swells.
+            let flutter = 1.0 + 1.8 * self.flutter.process(self.rng.white());
+            let n = self.rng.white();
+            let roar =
+                self.roar2.process(self.roar.process(n)) * 2.2 * self.roar_amp * flutter.max(0.0);
+            let hiss = self.hiss.process(self.rng.white()) * self.hiss_amp;
+            let mut crackle = 0.0;
+            for p in &mut self.pops {
+                crackle += p.filter.process(self.rng.white()) * p.amp;
+                p.amp *= p.decay;
+            }
+            self.pops.retain(|p| p.amp > 1e-4);
+            *o = roar + hiss + crackle * level * 1.6;
+        }
+        out.len()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -520,5 +657,25 @@ mod tests {
         };
         let left = |x: &[f32], n: usize| x[..n * 2].iter().step_by(2).copied().collect::<Vec<_>>();
         assert!(bright(&left(&a, na)) > bright(&left(&b, nb)) * 2.0);
+    }
+
+    #[test]
+    fn fire_grows_and_goes_out() {
+        let render = |size: f32| {
+            let mut f = FireSound::new(FS, 9);
+            f.set_param("size", size);
+            let mut out = vec![0.0; (FS * 3.0) as usize];
+            f.fill(&mut out);
+            let x = &out[(FS * 1.5) as usize..];
+            (x.iter().map(|v| v * v).sum::<f32>() / x.len() as f32).sqrt()
+        };
+        let (out, camp, house, forest) = (render(0.0), render(1.0), render(100.0), render(2_000.0));
+        assert!(out < 1e-4, "a fire that's out is silent: {out}");
+        assert!(camp > 0.005, "a campfire is audible: {camp}");
+        assert!(
+            house > camp * 1.5 && forest > house,
+            "{camp} {house} {forest}"
+        );
+        assert!(forest < 0.6, "{forest}");
     }
 }

@@ -4,8 +4,9 @@
 //! cargo run -p engine_audio --release --example footstep_lab -- [out_dir]
 //! ```
 //!
-//! Writes `<out_dir>/<surface>.wav` (four steps each) and `<out_dir>/all_surfaces.wav`
-//! (every surface in turn), and prints level and brightness for each.
+//! Writes `<out_dir>/<surface>.wav` (four steps each), `<out_dir>/all_surfaces.wav` (every
+//! surface in turn) and `<out_dir>/fire_{campfire,house,forest}.wav`, and prints level and
+//! brightness for each surface.
 
 use std::path::PathBuf;
 
@@ -58,6 +59,16 @@ fn main() {
         all.extend_from_slice(&track);
     }
     write_wav(&out.join("all_surfaces.wav"), &all, 1, FS as u32).expect("write wav");
+
+    // Fires of three sizes, four seconds each.
+    for (name, size) in [("campfire", 1.0), ("house", 100.0), ("forest", 2_000.0)] {
+        use engine_audio::Sound;
+        let mut fire = engine_audio::ambience::FireSound::new(FS, 5);
+        fire.set_param("size", size);
+        let mut track = vec![0.0; (FS * 4.0) as usize];
+        fire.fill(&mut track);
+        write_wav(&out.join(format!("fire_{name}.wav")), &track, 1, FS as u32).expect("write wav");
+    }
     println!("wrote {}", out.display());
 }
 
