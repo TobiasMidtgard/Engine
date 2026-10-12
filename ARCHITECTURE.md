@@ -7,7 +7,7 @@ so the same feature can be driven by game code, data files, the console or an AI
 
 ```
 games/*            showcase, hello, (your games)
-tools/*            engine-mcp (AI agent bridge), asset tools
+tools/*            engine-mcp (AI agent bridge), fetch-assets (large art, see AGENTS.md)
 crates/engine      facade: prelude, DefaultPlugins, CLI flags
 crates/core        App, plugins, schedules, time & dilation, f64 transforms, math, registry/API, scenes, logs
 crates/world       shared simulation contracts (weather, wind, heat, surfaces, gravity, ground/water queries, world events)
@@ -63,6 +63,7 @@ zone's entry; the rest of the showcase belongs to the Beautiful showcase world t
 |---|---|---|
 | `engine_core`, `engine`, `engine_world`, `engine_assets`, `engine_input`, `engine_platform` | Engine core, shared contracts, assets, input, windows and platforms | Core (architecture and integration) |
 | `engine_ai_bridge`, `tools/engine-mcp` | JSON-RPC/MCP bridge so AI agents can inspect, edit, step and screenshot a running game | Core (architecture and integration) |
+| `tools/fetch-assets`, `assets/manifests/core.toml` | Large art pipeline: manifests, download cache, release mirror, the no-large-files test (each thread owns its own `assets/manifests/<area>.toml`) | Core (architecture and integration) |
 | `engine_debug` | Debug drawing (lines, shapes, gizmos) for every module | Core (architecture and integration) |
 | `engine_render` | Renderer, lighting, shadows, sky and sky occlusion, materials; the planned strand renderer (hair, fur, grass), wrinkle maps, and 2D/2.5D rendering | Rendering and lighting |
 | `games/showcase` | The tech showcase world: environment, viewpoints, screenshot tour, and the list of every test case with its owner | Beautiful showcase world |

@@ -1,0 +1,11 @@
+# Owner: Game engine and test game (core). Shared files any area may load.
+# Format and rules: AGENTS.md, "Art and large files". Fetch with `cargo run -p fetch-assets`.
+
+# A clear daytime sky for image-based lighting and reflection tests.
+[[file]]
+path = "core/hdri/kloofendal_48d_partly_cloudy_puresky_2k.hdr"
+url = "https://dl.polyhaven.org/file/ph-assets/HDRIs/hdr/2k/kloofendal_48d_partly_cloudy_puresky_2k.hdr"
+sha256 = ""
+license = "CC0-1.0"
+source = "https://polyhaven.com/a/kloofendal_48d_partly_cloudy_puresky"
+author = "Greg Zaal"
