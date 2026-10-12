@@ -224,11 +224,23 @@ pub fn build_view(
     let (proj, near, fov_y, orthographic) = match camera.projection {
         Projection::Perspective { fov_y_deg, near } => {
             let fov = fov_y_deg.clamp(1.0, 170.0).to_radians();
-            (perspective_infinite_reverse(fov, aspect, near.max(1e-4)), near, fov, false)
+            (
+                perspective_infinite_reverse(fov, aspect, near.max(1e-4)),
+                near,
+                fov,
+                false,
+            )
         }
-        Projection::Orthographic { height: h, near, far } => {
-            (orthographic_reverse(h * aspect, h, near, far), near, 0.0, true)
-        }
+        Projection::Orthographic {
+            height: h,
+            near,
+            far,
+        } => (
+            orthographic_reverse(h * aspect, h, near, far),
+            near,
+            0.0,
+            true,
+        ),
     };
     let view_proj = proj * view;
 
@@ -237,7 +249,10 @@ pub fn build_view(
     let mut q = world.query::<(&DirectionalLight, &GlobalTransform)>();
     for (light, gt) in q.iter(world) {
         let color = Vec3::from(light.color) * light.illuminance;
-        if sun.as_ref().is_none_or(|(_, c, _, _)| luminance(color) > luminance(*c)) {
+        if sun
+            .as_ref()
+            .is_none_or(|(_, c, _, _)| luminance(color) > luminance(*c))
+        {
             let dir = -(gt.rotation() * Vec3::NEG_Z);
             sun = Some((
                 dir.normalize_or(Vec3::Y),
@@ -314,7 +329,15 @@ pub fn build_view(
 
     let cascades = if sun_shadows && luminance(sun_color) > 0.0 {
         crate::shadows::compute_cascades(
-            &settings, origin, rotation, near, fov_y, aspect, orthographic, sun_dir, &proj,
+            &settings,
+            origin,
+            rotation,
+            near,
+            fov_y,
+            aspect,
+            orthographic,
+            sun_dir,
+            &proj,
         )
     } else {
         Cascades::default()
@@ -347,7 +370,7 @@ pub fn build_view(
         frame_index,
         point_lights: lights.into_iter().map(|(_, l)| l).collect(),
         debug_view: settings.debug_view,
-        sun_angular_radius: sun_angular_radius,
+        sun_angular_radius,
     }
 }
 
@@ -408,12 +431,7 @@ pub fn frame_uniform(world: &World, v: &ViewData) -> FrameUniform {
             1.0 / v.height.max(1) as f32,
         ],
         time: [v.time, v.real_time, v.delta, (v.frame_index % 65536) as f32],
-        sun_dir: [
-            v.sun_dir.x,
-            v.sun_dir.y,
-            v.sun_dir.z,
-            v.sun_angular_radius,
-        ],
+        sun_dir: [v.sun_dir.x, v.sun_dir.y, v.sun_dir.z, v.sun_angular_radius],
         sun_color: [
             v.sun_color.x,
             v.sun_color.y,
@@ -435,7 +453,12 @@ pub fn frame_uniform(world: &World, v: &ViewData) -> FrameUniform {
         ],
         fog_color: [fog.color[0], fog.color[1], fog.color[2], fog.sun_scattering],
         wind: [v.wind.x, v.wind.y, v.wind.z, 0.0],
-        weather: [wetness.clamp(0.0, 1.0), snow.max(0.0), cloud_cover, precipitation],
+        weather: [
+            wetness.clamp(0.0, 1.0),
+            snow.max(0.0),
+            cloud_cover,
+            precipitation,
+        ],
         planet: if atmosphere.enabled {
             [
                 center_rel.x as f32,
@@ -486,7 +509,10 @@ mod tests {
     #[test]
     fn frame_uniform_matches_wgsl_size() {
         // 7 mat4 + 15 vec4 + 4 mat4 + 3 vec4
-        assert_eq!(std::mem::size_of::<FrameUniform>(), 7 * 64 + 15 * 16 + 4 * 64 + 3 * 16);
+        assert_eq!(
+            std::mem::size_of::<FrameUniform>(),
+            7 * 64 + 15 * 16 + 4 * 64 + 3 * 16
+        );
         assert_eq!(std::mem::size_of::<GpuPointLight>(), 32);
     }
 
@@ -514,7 +540,8 @@ mod tests {
         let lum = estimate_scene_luminance(sun, Vec3::splat(100_000.0), 0.0);
         let ev = (lum * 100.0 / 12.5).log2();
         assert!((14.0..16.5).contains(&ev), "ev {ev}");
-        let night = estimate_scene_luminance(Vec3::new(0.0, -0.5, 0.8).normalize(), Vec3::ZERO, 0.05);
+        let night =
+            estimate_scene_luminance(Vec3::new(0.0, -0.5, 0.8).normalize(), Vec3::ZERO, 0.05);
         let ev_night = (night * 100.0 / 12.5).log2();
         assert!(ev_night < 0.0, "ev {ev_night}");
     }

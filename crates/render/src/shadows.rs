@@ -92,7 +92,12 @@ pub fn compute_cascades(
     let far = settings.shadow_distance.max(near * 4.0 + 1.0);
     // The first cascade starts a little in front of the camera to give it more resolution.
     let first_near = near.max(0.1);
-    let splits = split_distances(first_near.max(1.0), far, count, settings.shadow_split_lambda);
+    let splits = split_distances(
+        first_near.max(1.0),
+        far,
+        count,
+        settings.shadow_split_lambda,
+    );
 
     let forward = (rotation * Vec3::NEG_Z).as_dvec3();
     let (tx, ty) = if orthographic {
@@ -114,8 +119,8 @@ pub fn compute_cascades(
         ..Default::default()
     };
     let mut slice_near = first_near as f64;
-    for i in 0..count {
-        let slice_far = splits[i] as f64;
+    for (i, &split) in splits.iter().enumerate().take(count) {
+        let slice_far = split as f64;
         // Rotation-invariant bounding sphere of the frustum slice.
         let (d, radius) = if orthographic {
             let d = (slice_near + slice_far) * 0.5;
@@ -143,7 +148,8 @@ pub fn compute_cascades(
         // Eye sits behind the sphere toward the sun; depth covers the sphere plus extra room.
         let back = radius as f32 * 2.0 + 50.0;
         let eye = center_rel + sun_dir * back;
-        let light_view = Mat4::from_quat(light_rot.as_quat().inverse()) * Mat4::from_translation(-eye);
+        let light_view =
+            Mat4::from_quat(light_rot.as_quat().inverse()) * Mat4::from_translation(-eye);
         let depth = back + radius as f32;
         let light_proj = crate::frame::orthographic_standard(radius as f32, 0.0, depth);
         out.light_view[i] = light_view;
@@ -157,7 +163,11 @@ pub fn compute_cascades(
 
 fn look_rotation_f64(forward: DVec3) -> DQuat {
     let f = forward.normalize();
-    let up = if f.y.abs() > 0.999 { DVec3::Z } else { DVec3::Y };
+    let up = if f.y.abs() > 0.999 {
+        DVec3::Z
+    } else {
+        DVec3::Y
+    };
     let right = f.cross(up).normalize();
     let up = right.cross(f);
     DQuat::from_mat3(&DMat3::from_cols(right, up, -f))
@@ -180,7 +190,17 @@ mod tests {
         let sun = Vec3::new(0.3, 0.8, 0.2).normalize();
         let origin = DVec3::new(1000.0, 20.0, -5000.0);
         let proj = crate::frame::perspective_infinite_reverse(1.2, 1.6, 0.1);
-        let a = compute_cascades(&settings, origin, Quat::IDENTITY, 0.1, 1.2, 1.6, false, sun, &proj);
+        let a = compute_cascades(
+            &settings,
+            origin,
+            Quat::IDENTITY,
+            0.1,
+            1.2,
+            1.6,
+            false,
+            sun,
+            &proj,
+        );
         let b = compute_cascades(
             &settings,
             origin,

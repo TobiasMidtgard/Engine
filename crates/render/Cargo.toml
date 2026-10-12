@@ -1,6 +1,6 @@
 [package]
 name = "engine_render"
-description = "wgpu renderer: camera-relative large-world rendering, PBR meshes, cascaded shadows, sky, post-processing, extensible render features, headless screenshots."
+description = "wgpu renderer: camera-relative large-world rendering, textured PBR meshes, cascaded shadows, sky, post-processing, extensible render features, headless screenshots, image and glTF loaders."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -14,6 +14,7 @@ wgpu.workspace = true
 bytemuck.workspace = true
 pollster.workspace = true
 image.workspace = true
+gltf = { workspace = true, features = ["KHR_materials_emissive_strength", "KHR_materials_unlit", "KHR_texture_transform"] }
 serde.workspace = true
 serde_json.workspace = true
 tracing.workspace = true

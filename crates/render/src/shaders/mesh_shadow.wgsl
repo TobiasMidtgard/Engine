@@ -1,4 +1,9 @@
-// Depth-only shadow pass for the standard mesh feature. Requires lib_types (not lib_frame).
+// Shadow pass for the standard mesh feature. Requires lib_types (not lib_frame).
+//
+// Two pipelines use this module:
+// - `vs_shadow` (depth only) for opaque casters;
+// - `vs_shadow_masked` + `fs_shadow_masked` for alpha-masked casters (foliage cards, fences),
+//   which cut out the same pixels as in the scene so their shadows have holes.
 
 struct ShadowView {
     view_proj: mat4x4<f32>,  // camera-relative -> light clip
@@ -7,16 +12,21 @@ struct ShadowView {
     camera_frac: vec4<f32>,  // camera position modulo 4096 (tiling coordinates)
 };
 
+// Must match `struct Material` in mesh.wgsl and `GpuMaterial` in material.rs.
 struct Material {
     base_color: vec4<f32>,
     emissive: vec4<f32>,
-    params: vec4<f32>,
-    params2: vec4<f32>,
-    flags: vec4<u32>,
+    params: vec4<f32>,   // metallic, roughness, reflectance, alpha cutoff
+    params2: vec4<f32>,  // subsurface, wind sway, normal scale, occlusion strength
+    uv: vec4<f32>,       // uv scale xy
+    flags: vec4<u32>,    // x: bits 0-3 alpha mode, 7 base color texture present
 };
 
 @group(0) @binding(0) var<uniform> shadow_view: ShadowView;
 @group(1) @binding(0) var<storage, read> materials: array<Material>;
+// Same layout as the scene pass; only the base color texture and sampler are used here.
+@group(2) @binding(0) var base_color_texture: texture_2d<f32>;
+@group(2) @binding(5) var material_sampler: sampler;
 
 struct VertexIn {
     @location(0) position: vec3<f32>,
@@ -44,8 +54,7 @@ fn shadow_wind(rel: vec3<f32>, height01: f32, sway: f32) -> vec3<f32> {
     return dir * strength * gust;
 }
 
-@vertex
-fn vs_shadow(in: VertexIn) -> @builtin(position) vec4<f32> {
+fn shadow_clip(in: VertexIn) -> vec4<f32> {
     let p = vec4<f32>(in.position, 1.0);
     var rel = vec3<f32>(dot(in.m0, p), dot(in.m1, p), dot(in.m2, p));
     let sway = materials[in.extra.x].params2.y;
@@ -57,4 +66,39 @@ fn vs_shadow(in: VertexIn) -> @builtin(position) vec4<f32> {
     // Pancake casters behind the near plane onto it so they still cast shadows.
     clip.z = max(clip.z, 0.0);
     return clip;
+}
+
+@vertex
+fn vs_shadow(in: VertexIn) -> @builtin(position) vec4<f32> {
+    return shadow_clip(in);
+}
+
+struct MaskedOut {
+    @builtin(position) clip: vec4<f32>,
+    @location(0) uv: vec2<f32>,
+    @location(1) alpha: f32,
+    @location(2) @interpolate(flat) material: u32,
+};
+
+@vertex
+fn vs_shadow_masked(in: VertexIn) -> MaskedOut {
+    var out: MaskedOut;
+    out.clip = shadow_clip(in);
+    out.uv = in.uv * materials[in.extra.x].uv.xy;
+    out.alpha = in.color.a;
+    out.material = in.extra.x;
+    return out;
+}
+
+@fragment
+fn fs_shadow_masked(in: MaskedOut) {
+    let mat = materials[in.material];
+    let tex = textureSample(base_color_texture, material_sampler, in.uv);
+    var alpha = mat.base_color.a * in.alpha;
+    if ((mat.flags.x & 128u) != 0u) {
+        alpha *= tex.a;
+    }
+    if (alpha < mat.params.w) {
+        discard;
+    }
 }

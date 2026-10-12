@@ -1,9 +1,19 @@
 //! The standard mesh feature: draws every entity with a [`MeshRenderer`].
 //!
 //! Per frame it culls against the camera frustum and each shadow cascade, groups instances
-//! by mesh and pipeline, and draws each group with one instanced call. Materials live in one
-//! storage buffer indexed per instance, so thousands of objects with different materials
-//! still batch by mesh.
+//! by (pipeline, texture set, mesh), and draws each group with one instanced call. Material
+//! factors live in one storage buffer indexed per instance (group 1), so thousands of objects
+//! with different untextured materials still batch by mesh.
+//!
+//! Textures are bound per *texture set* (group 2: base color, normal, metallic/roughness,
+//! emissive, occlusion + one sampler). Materials that use the same images share a set; every
+//! untextured material uses the default set of 1×1 textures, so untextured scenes batch
+//! exactly as before. Images are uploaded (with mipmaps) the first time a material uses them
+//! and re-uploaded when their asset version changes (hot reload, `Assets::get_mut`).
+//!
+//! Shadows: opaque casters use a depth-only pipeline; alpha-masked casters use a pipeline with
+//! a fragment stage that discards by base color alpha, so foliage cards cast leaf-shaped
+//! shadows.
 
 use std::collections::HashMap;
 
@@ -14,12 +24,15 @@ use engine_core::prelude::*;
 use wgpu::util::DeviceExt;
 
 use crate::components::{MeshRenderer, ResolvedMesh};
-use crate::features::{FeatureStats, FrameContext, GpuShared, GrowBuffer, RenderFeature, RenderPhase};
+use crate::features::{
+    FeatureStats, FrameContext, GpuShared, GrowBuffer, RenderFeature, RenderPhase,
+};
 use crate::frame::ViewData;
-use crate::material::{AlphaMode, GpuMaterial, StandardMaterial};
+use crate::material::{AlphaMode, GpuMaterial, StandardMaterial, TEXTURE_FLAG_BASE, TEXTURE_FLAGS};
 use crate::mesh::{Mesh, Vertex};
 use crate::settings::RenderSettings;
 use crate::shadows::MAX_CASCADES;
+use crate::texture::{Image, PixelFormat};
 
 /// Per-instance vertex data (locations 4–10 in `mesh.wgsl`).
 #[repr(C)]
@@ -66,6 +79,22 @@ impl MeshInstance {
     }
 }
 
+/// Number of texture slots per material (group 2 bindings 0..5; the sampler is binding 5).
+pub const TEXTURE_SLOTS: usize = 5;
+/// Slots holding color (decoded as sRGB when the image is sRGB): base color and emissive.
+const COLOR_SLOT: [bool; TEXTURE_SLOTS] = [true, false, false, true, false];
+/// Default 1×1 textures: white base color, flat normal, neutral metallic/roughness (factors
+/// pass through), black emissive, white (unoccluded) AO.
+const DEFAULT_TEXELS: [[u8; 4]; TEXTURE_SLOTS] = [
+    [255, 255, 255, 255],
+    [128, 128, 255, 255],
+    [255, 255, 255, 255],
+    [0, 0, 0, 255],
+    [255, 255, 255, 255],
+];
+/// Texture sets and images unused for this many frames are released.
+const EVICT_AFTER_FRAMES: u64 = 600;
+
 struct GpuMesh {
     vertex: wgpu::Buffer,
     index: wgpu::Buffer,
@@ -77,10 +106,44 @@ struct GpuMesh {
     height: f32,
 }
 
+struct GpuImage {
+    _texture: wgpu::Texture,
+    view: wgpu::TextureView,
+    version: u64,
+    last_used: u64,
+}
+
+/// A group-2 bind group for one combination of images.
+struct TextureSet {
+    group: wgpu::BindGroup,
+    key: [Option<u32>; TEXTURE_SLOTS],
+    /// (image index, version, sRGB view) actually bound per slot; `None` = default texture
+    /// (no image, or not loaded yet).
+    bound: [Option<(u32, u64, bool)>; TEXTURE_SLOTS],
+    last_used: u64,
+}
+
+impl TextureSet {
+    /// Texture-present flag bits for the slots bound to real images.
+    fn flags(&self) -> u32 {
+        self.bound
+            .iter()
+            .enumerate()
+            .filter(|(_, b)| b.is_some())
+            .fold(0, |f, (i, _)| f | (TEXTURE_FLAG_BASE << i))
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct BatchKey {
+    pipeline: u8,
+    textures: u32,
+    mesh: u32,
+}
+
 #[derive(Debug, Clone, Copy)]
 struct Batch {
-    mesh: u32,
-    pipeline: u8,
+    key: BatchKey,
     first: u32,
     count: u32,
 }
@@ -89,6 +152,8 @@ struct Batch {
 struct Item {
     mesh: u32,
     pipeline: u8,
+    textures: u32,
+    masked: bool,
     visible: bool,
     casts: bool,
     center: Vec3,
@@ -108,25 +173,44 @@ type MeshQuery = (
 pub struct MeshFeature {
     /// [opaque, opaque double-sided, blend, blend double-sided]
     pipelines: Vec<wgpu::RenderPipeline>,
+    /// Depth-only shadow pipeline (opaque casters).
     shadow_pipeline: Option<wgpu::RenderPipeline>,
+    /// Alpha-tested shadow pipeline (masked casters).
+    shadow_masked_pipeline: Option<wgpu::RenderPipeline>,
     material_layout: Option<wgpu::BindGroupLayout>,
+    texture_layout: Option<wgpu::BindGroupLayout>,
+    sampler: Option<wgpu::Sampler>,
+    default_textures: Vec<(wgpu::Texture, wgpu::TextureView)>,
     materials: Option<GrowBuffer>,
     material_group: Option<wgpu::BindGroup>,
     instances: Option<GrowBuffer>,
     meshes: HashMap<u32, GpuMesh>,
+    /// Uploaded images by (image index, sRGB view).
+    images: HashMap<(u32, bool), GpuImage>,
+    /// Texture sets by id; id 0 is the shared default (untextured) set.
+    texture_sets: Vec<Option<TextureSet>>,
+    texture_set_ids: HashMap<[Option<u32>; TEXTURE_SLOTS], u32>,
+    free_set_ids: Vec<u32>,
+    frame: u64,
     opaque: Vec<Batch>,
     transparent: Vec<Batch>,
     shadow: [Vec<Batch>; MAX_CASCADES],
     query: Option<QueryState<MeshQuery>>,
     items: Vec<Item>,
+    keys: Vec<BatchKey>,
+    casters: Vec<u32>,
     instance_data: Vec<MeshInstance>,
     material_data: Vec<GpuMaterial>,
-    material_index: HashMap<u32, u32>,
+    /// Material handle index → (material buffer slot, texture set id), rebuilt every frame.
+    material_index: HashMap<u32, (u32, u32)>,
     stats: FeatureStats,
 }
 
 const PIPE_BLEND: u8 = 2;
 const PIPE_DOUBLE: u8 = 1;
+/// Shadow pipelines: depth only / alpha masked.
+const SHADOW_DEPTH: u8 = 0;
+const SHADOW_MASKED: u8 = 1;
 
 impl MeshFeature {
     fn upload_mesh(&mut self, device: &wgpu::Device, index: u32, mesh: &Mesh, version: u64) {
@@ -160,23 +244,308 @@ impl MeshFeature {
         );
     }
 
-    fn batch(items: &[MeshInstance], keys: &[(u32, u8)], first: u32, out: &mut Vec<Batch>) {
-        debug_assert_eq!(items.len(), keys.len());
+    fn batch(keys: &[BatchKey], first: u32, out: &mut Vec<Batch>) {
         let mut i = 0;
         while i < keys.len() {
-            let (mesh, pipeline) = keys[i];
+            let key = keys[i];
             let start = i;
-            while i < keys.len() && keys[i] == (mesh, pipeline) {
+            while i < keys.len() && keys[i] == key {
                 i += 1;
             }
             out.push(Batch {
-                mesh,
-                pipeline,
+                key,
                 first: first + start as u32,
                 count: (i - start) as u32,
             });
         }
     }
+
+    /// Make sure the image is on the GPU with the given color space; returns false if it
+    /// cannot be uploaded (invalid data, too large).
+    fn ensure_image(
+        &mut self,
+        gpu: &GpuShared,
+        index: u32,
+        image: &Image,
+        version: u64,
+        srgb: bool,
+    ) -> bool {
+        let frame = self.frame;
+        if let Some(existing) = self.images.get_mut(&(index, srgb))
+            && existing.version == version
+        {
+            existing.last_used = frame;
+            return true;
+        }
+        match upload_image(gpu, image, srgb) {
+            Some((texture, view)) => {
+                self.images.insert(
+                    (index, srgb),
+                    GpuImage {
+                        _texture: texture,
+                        view,
+                        version,
+                        last_used: frame,
+                    },
+                );
+                true
+            }
+            None => {
+                self.images.remove(&(index, srgb));
+                false
+            }
+        }
+    }
+
+    /// Texture set id for a material (0 for untextured materials), creating or rebuilding the
+    /// bind group when its images changed.
+    fn texture_set_for(
+        &mut self,
+        gpu: &GpuShared,
+        material: &StandardMaterial,
+        images: Option<&Assets<Image>>,
+    ) -> u32 {
+        let handles = material.textures();
+        if handles.iter().all(Option::is_none) {
+            return 0;
+        }
+        let key = handles.map(|h| h.map(|h| h.index()));
+        let mut bound: [Option<(u32, u64, bool)>; TEXTURE_SLOTS] = [None; TEXTURE_SLOTS];
+        for (slot, handle) in handles.iter().enumerate() {
+            let (Some(handle), Some(images)) = (handle, images) else {
+                continue;
+            };
+            let version = images.version(*handle);
+            let Some(image) = images.get(*handle) else {
+                continue;
+            };
+            let srgb = COLOR_SLOT[slot] && image.srgb && image.format == PixelFormat::Rgba8;
+            if self.ensure_image(gpu, handle.index(), image, version, srgb) {
+                bound[slot] = Some((handle.index(), version, srgb));
+            }
+        }
+        let id = match self.texture_set_ids.get(&key) {
+            Some(id) => *id,
+            None => {
+                let id = self
+                    .free_set_ids
+                    .pop()
+                    .unwrap_or(self.texture_sets.len() as u32);
+                self.texture_set_ids.insert(key, id);
+                id
+            }
+        };
+        let needs_build = self
+            .texture_sets
+            .get(id as usize)
+            .and_then(Option::as_ref)
+            .is_none_or(|s| s.bound != bound);
+        if needs_build {
+            let views: [&wgpu::TextureView; TEXTURE_SLOTS] = std::array::from_fn(|slot| {
+                bound[slot]
+                    .and_then(|(index, _, srgb)| self.images.get(&(index, srgb)))
+                    .map(|i| &i.view)
+                    .unwrap_or(&self.default_textures[slot].1)
+            });
+            let (Some(layout), Some(sampler)) = (&self.texture_layout, &self.sampler) else {
+                return 0;
+            };
+            let group = create_texture_group(&gpu.device, layout, sampler, views);
+            if self.texture_sets.len() <= id as usize {
+                self.texture_sets.resize_with(id as usize + 1, || None);
+            }
+            self.texture_sets[id as usize] = Some(TextureSet {
+                group,
+                key,
+                bound,
+                last_used: self.frame,
+            });
+        } else if let Some(Some(set)) = self.texture_sets.get_mut(id as usize) {
+            set.last_used = self.frame;
+        }
+        id
+    }
+
+    /// Release texture sets and images nobody used for a while.
+    fn evict(&mut self) {
+        let frame = self.frame;
+        for id in 1..self.texture_sets.len() {
+            let stale = self.texture_sets[id]
+                .as_ref()
+                .is_some_and(|s| s.last_used + EVICT_AFTER_FRAMES < frame);
+            if stale && let Some(set) = self.texture_sets[id].take() {
+                self.texture_set_ids.remove(&set.key);
+                self.free_set_ids.push(id as u32);
+            }
+        }
+        self.images
+            .retain(|_, image| image.last_used + EVICT_AFTER_FRAMES >= frame);
+    }
+
+    fn texture_group(&self, id: u32) -> Option<&wgpu::BindGroup> {
+        self.texture_sets
+            .get(id as usize)
+            .and_then(Option::as_ref)
+            .or_else(|| self.texture_sets.first().and_then(Option::as_ref))
+            .map(|s| &s.group)
+    }
+
+    fn draw_batches<'a>(
+        &'a self,
+        pass: &mut wgpu::RenderPass<'_>,
+        batches: &[Batch],
+        pipeline_for: impl Fn(u8) -> Option<&'a wgpu::RenderPipeline>,
+        bind_textures: impl Fn(u8) -> bool,
+    ) {
+        let mut current_pipeline = u8::MAX;
+        let mut current_textures = u32::MAX;
+        for b in batches {
+            let Some(mesh) = self.meshes.get(&b.key.mesh) else {
+                continue;
+            };
+            let Some(pipeline) = pipeline_for(b.key.pipeline) else {
+                continue;
+            };
+            if b.key.pipeline != current_pipeline {
+                pass.set_pipeline(pipeline);
+                current_pipeline = b.key.pipeline;
+                current_textures = u32::MAX;
+            }
+            if bind_textures(b.key.pipeline) && b.key.textures != current_textures {
+                if let Some(group) = self.texture_group(b.key.textures) {
+                    pass.set_bind_group(2, group, &[]);
+                }
+                current_textures = b.key.textures;
+            }
+            pass.set_vertex_buffer(0, mesh.vertex.slice(..));
+            pass.set_index_buffer(mesh.index.slice(..), wgpu::IndexFormat::Uint32);
+            pass.draw_indexed(0..mesh.index_count, 0, b.first..b.first + b.count);
+        }
+    }
+}
+
+fn texture_layout_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
+    wgpu::BindGroupLayoutEntry {
+        binding,
+        visibility: wgpu::ShaderStages::FRAGMENT,
+        ty: wgpu::BindingType::Texture {
+            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+            view_dimension: wgpu::TextureViewDimension::D2,
+            multisampled: false,
+        },
+        count: None,
+    }
+}
+
+fn create_texture_group(
+    device: &wgpu::Device,
+    layout: &wgpu::BindGroupLayout,
+    sampler: &wgpu::Sampler,
+    views: [&wgpu::TextureView; TEXTURE_SLOTS],
+) -> wgpu::BindGroup {
+    let mut entries: Vec<wgpu::BindGroupEntry> = views
+        .iter()
+        .enumerate()
+        .map(|(i, view)| wgpu::BindGroupEntry {
+            binding: i as u32,
+            resource: wgpu::BindingResource::TextureView(view),
+        })
+        .collect();
+    entries.push(wgpu::BindGroupEntry {
+        binding: TEXTURE_SLOTS as u32,
+        resource: wgpu::BindingResource::Sampler(sampler),
+    });
+    device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("mesh textures"),
+        layout,
+        entries: &entries,
+    })
+}
+
+/// Upload an image with its mip chain. `srgb` selects an sRGB view format for RGBA8 data
+/// (mips are re-generated in the matching color space when the stored ones don't match).
+/// Levels larger than the device allows are skipped.
+fn upload_image(
+    gpu: &GpuShared,
+    image: &Image,
+    srgb: bool,
+) -> Option<(wgpu::Texture, wgpu::TextureView)> {
+    if !image.is_valid() {
+        tracing::warn!("image data does not match its size ({image:?}); not uploading it");
+        return None;
+    }
+    let format = match image.format {
+        PixelFormat::Rgba8 if srgb => wgpu::TextureFormat::Rgba8UnormSrgb,
+        PixelFormat::Rgba8 => wgpu::TextureFormat::Rgba8Unorm,
+        PixelFormat::Rgba16Float => wgpu::TextureFormat::Rgba16Float,
+    };
+    let generated;
+    let mips: &[Vec<u8>] = if !image.mipmaps {
+        &[]
+    } else if !image.mips.is_empty() && (image.format != PixelFormat::Rgba8 || srgb == image.srgb) {
+        &image.mips
+    } else {
+        generated = image.mip_chain(srgb);
+        &generated
+    };
+    let mut levels: Vec<(u32, u32, &[u8])> = Vec::with_capacity(mips.len() + 1);
+    levels.push((image.width, image.height, &image.data));
+    for (i, m) in mips.iter().enumerate() {
+        let (w, h) = image.level_size(i as u32 + 1);
+        levels.push((w, h, m));
+    }
+    let max = gpu.device.limits().max_texture_dimension_2d;
+    let skip = levels
+        .iter()
+        .take_while(|(w, h, _)| *w > max || *h > max)
+        .count();
+    let levels = &levels[skip.min(levels.len())..];
+    let Some(&(width, height, _)) = levels.first() else {
+        tracing::warn!(
+            "image {}x{} is larger than the GPU allows ({max})",
+            image.width,
+            image.height
+        );
+        return None;
+    };
+    let texture = gpu.device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("material image"),
+        size: wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: levels.len() as u32,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    let bpp = image.format.bytes_per_pixel() as u32;
+    for (level, (w, h, data)) in levels.iter().enumerate() {
+        gpu.queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &texture,
+                mip_level: level as u32,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            data,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(w * bpp),
+                rows_per_image: Some(*h),
+            },
+            wgpu::Extent3d {
+                width: *w,
+                height: *h,
+                depth_or_array_layers: 1,
+            },
+        );
+    }
+    let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+    Some((texture, view))
 }
 
 impl RenderFeature for MeshFeature {
@@ -199,10 +568,48 @@ impl RenderFeature for MeshFeature {
                 count: None,
             }],
         });
+        let mut texture_entries: Vec<wgpu::BindGroupLayoutEntry> = (0..TEXTURE_SLOTS as u32)
+            .map(texture_layout_entry)
+            .collect();
+        texture_entries.push(wgpu::BindGroupLayoutEntry {
+            binding: TEXTURE_SLOTS as u32,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+            count: None,
+        });
+        let texture_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("mesh textures"),
+            entries: &texture_entries,
+        });
+        // Trilinear, repeating, 16x anisotropic where supported (wgpu clamps to 1 otherwise).
+        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("material sampler"),
+            address_mode_u: wgpu::AddressMode::Repeat,
+            address_mode_v: wgpu::AddressMode::Repeat,
+            address_mode_w: wgpu::AddressMode::Repeat,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::MipmapFilterMode::Linear,
+            anisotropy_clamp: 16,
+            ..Default::default()
+        });
+        self.default_textures = DEFAULT_TEXELS
+            .iter()
+            .enumerate()
+            .map(|(slot, texel)| {
+                let image = Image::solid(*texel, COLOR_SLOT[slot]);
+                upload_image(gpu, &image, COLOR_SLOT[slot]).expect("1x1 default texture")
+            })
+            .collect();
+
         let shader = gpu.shader("mesh", include_str!("shaders/mesh.wgsl"), true);
         let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("mesh"),
-            bind_group_layouts: &[Some(&gpu.frame_layout), Some(&material_layout)],
+            bind_group_layouts: &[
+                Some(&gpu.frame_layout),
+                Some(&material_layout),
+                Some(&texture_layout),
+            ],
             immediate_size: 0,
         });
         let buffers = [Some(Vertex::layout()), Some(MeshInstance::layout())];
@@ -242,32 +649,71 @@ impl RenderFeature for MeshFeature {
             })
             .collect();
 
-        let shadow_shader = gpu.shader("mesh shadow", include_str!("shaders/mesh_shadow.wgsl"), false);
+        let shadow_shader = gpu.shader(
+            "mesh shadow",
+            include_str!("shaders/mesh_shadow.wgsl"),
+            false,
+        );
+        let shadow_primitive = wgpu::PrimitiveState {
+            cull_mode: None,
+            unclipped_depth: gpu.features.contains(wgpu::Features::DEPTH_CLIP_CONTROL),
+            ..Default::default()
+        };
         let shadow_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("mesh shadow"),
             bind_group_layouts: &[Some(&gpu.shadow_view_layout), Some(&material_layout)],
             immediate_size: 0,
         });
-        self.shadow_pipeline = Some(device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("mesh shadow"),
-            layout: Some(&shadow_layout),
-            vertex: wgpu::VertexState {
-                module: &shadow_shader,
-                entry_point: Some("vs_shadow"),
-                compilation_options: Default::default(),
-                buffers: &buffers,
+        self.shadow_pipeline = Some(device.create_render_pipeline(
+            &wgpu::RenderPipelineDescriptor {
+                label: Some("mesh shadow"),
+                layout: Some(&shadow_layout),
+                vertex: wgpu::VertexState {
+                    module: &shadow_shader,
+                    entry_point: Some("vs_shadow"),
+                    compilation_options: Default::default(),
+                    buffers: &buffers,
+                },
+                primitive: shadow_primitive,
+                depth_stencil: Some(gpu.shadow_depth_state()),
+                multisample: Default::default(),
+                fragment: None,
+                multiview_mask: None,
+                cache: None,
             },
-            primitive: wgpu::PrimitiveState {
-                cull_mode: None,
-                unclipped_depth: gpu.features.contains(wgpu::Features::DEPTH_CLIP_CONTROL),
-                ..Default::default()
+        ));
+        let shadow_masked_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("mesh shadow masked"),
+            bind_group_layouts: &[
+                Some(&gpu.shadow_view_layout),
+                Some(&material_layout),
+                Some(&texture_layout),
+            ],
+            immediate_size: 0,
+        });
+        self.shadow_masked_pipeline = Some(device.create_render_pipeline(
+            &wgpu::RenderPipelineDescriptor {
+                label: Some("mesh shadow masked"),
+                layout: Some(&shadow_masked_layout),
+                vertex: wgpu::VertexState {
+                    module: &shadow_shader,
+                    entry_point: Some("vs_shadow_masked"),
+                    compilation_options: Default::default(),
+                    buffers: &buffers,
+                },
+                primitive: shadow_primitive,
+                depth_stencil: Some(gpu.shadow_depth_state()),
+                multisample: Default::default(),
+                fragment: Some(wgpu::FragmentState {
+                    module: &shadow_shader,
+                    entry_point: Some("fs_shadow_masked"),
+                    compilation_options: Default::default(),
+                    targets: &[],
+                }),
+                multiview_mask: None,
+                cache: None,
             },
-            depth_stencil: Some(gpu.shadow_depth_state()),
-            multisample: Default::default(),
-            fragment: None,
-            multiview_mask: None,
-            cache: None,
-        }));
+        ));
         self.materials = Some(GrowBuffer::new(
             device,
             "mesh materials",
@@ -280,21 +726,48 @@ impl RenderFeature for MeshFeature {
             wgpu::BufferUsages::VERTEX,
             1024 * std::mem::size_of::<MeshInstance>() as u64,
         ));
+
+        // Texture set 0: the shared default set for untextured materials.
+        let default_views: [&wgpu::TextureView; TEXTURE_SLOTS] =
+            std::array::from_fn(|slot| &self.default_textures[slot].1);
+        let default_group = create_texture_group(device, &texture_layout, &sampler, default_views);
+        self.texture_sets = vec![Some(TextureSet {
+            group: default_group,
+            key: [None; TEXTURE_SLOTS],
+            bound: [None; TEXTURE_SLOTS],
+            last_used: 0,
+        })];
+        self.texture_set_ids.clear();
+        self.free_set_ids.clear();
+        self.images.clear();
         self.material_layout = Some(material_layout);
+        self.texture_layout = Some(texture_layout);
+        self.sampler = Some(sampler);
         self.material_group = None;
     }
 
-    fn prepare(&mut self, world: &mut World, gpu: &GpuShared, view: &ViewData, _settings: &RenderSettings) {
+    fn prepare(
+        &mut self,
+        world: &mut World,
+        gpu: &GpuShared,
+        view: &ViewData,
+        _settings: &RenderSettings,
+    ) {
         if self.pipelines.is_empty() {
             return;
         }
-        let mut query = self.query.take().unwrap_or_else(|| world.query::<MeshQuery>());
+        self.frame += 1;
+        let mut query = self
+            .query
+            .take()
+            .unwrap_or_else(|| world.query::<MeshQuery>());
         let world_ref: &World = world;
         let Some(mesh_assets) = world_ref.get_resource::<Assets<Mesh>>() else {
             self.query = Some(query);
             return;
         };
         let material_assets = world_ref.get_resource::<Assets<StandardMaterial>>();
+        let image_assets = world_ref.get_resource::<Assets<Image>>();
         let default_material = StandardMaterial::default();
 
         self.items.clear();
@@ -312,7 +785,10 @@ impl RenderFeature for MeshFeature {
             if version == 0 {
                 continue;
             }
-            if self.meshes.get(&mesh_index).is_none_or(|m| m.version != version)
+            if self
+                .meshes
+                .get(&mesh_index)
+                .is_none_or(|m| m.version != version)
                 && let Some(mesh) = mesh_assets.get(resolved.mesh)
             {
                 self.upload_mesh(&gpu.device, mesh_index, mesh, version);
@@ -324,36 +800,57 @@ impl RenderFeature for MeshFeature {
                 .and_then(|m| m.get(resolved.material))
                 .unwrap_or(&default_material);
 
-            let scale = gt.scale().abs().max_element() as f32;
+            let scale = gt.scale().abs().max_element();
             let center_world = gt.transform_point(gpu_mesh.center.as_dvec3());
             let center = (center_world - view.origin).as_vec3();
             let radius = gpu_mesh.half_extents.length() * scale;
+            let (min_y, height) = (gpu_mesh.min_y, gpu_mesh.height);
             let visible = view.frustum.intersects_sphere(center, radius);
             let blend = material.alpha_mode == AlphaMode::Blend;
+            let masked = matches!(material.alpha_mode, AlphaMode::Mask(_));
             let casts = shadows && renderer.cast_shadows && !blend;
             if !visible && !casts {
                 culled += 1;
                 continue;
             }
-            let next = self.material_data.len() as u32;
-            let material_slot = *self
-                .material_index
-                .entry(resolved.material.index())
-                .or_insert_with(|| {
-                    self.material_data.push(material.to_gpu());
-                    next
-                });
+            let (material_slot, textures) =
+                match self.material_index.get(&resolved.material.index()) {
+                    Some(v) => *v,
+                    None => {
+                        let textures = self.texture_set_for(gpu, material, image_assets);
+                        let mut gpu_material = material.to_gpu();
+                        // Only claim the slots that have a real image bound (others may still load).
+                        let bound = self
+                            .texture_sets
+                            .get(textures as usize)
+                            .and_then(Option::as_ref)
+                            .map_or(0, TextureSet::flags);
+                        gpu_material.flags[0] = (gpu_material.flags[0] & !TEXTURE_FLAGS) | bound;
+                        let slot = self.material_data.len() as u32;
+                        self.material_data.push(gpu_material);
+                        self.material_index
+                            .insert(resolved.material.index(), (slot, textures));
+                        (slot, textures)
+                    }
+                };
             let model = gt.matrix_relative_to(view.origin);
-            let pipeline = if blend { PIPE_BLEND } else { 0 } | if material.double_sided { PIPE_DOUBLE } else { 0 };
+            let pipeline = if blend { PIPE_BLEND } else { 0 }
+                | if material.double_sided {
+                    PIPE_DOUBLE
+                } else {
+                    0
+                };
             self.items.push(Item {
                 mesh: mesh_index,
                 pipeline,
+                textures,
+                masked,
                 visible,
                 casts,
                 center,
                 radius,
                 dist2: center.length_squared(),
-                instance: MeshInstance::new(model, material_slot, gpu_mesh.min_y, gpu_mesh.height),
+                instance: MeshInstance::new(model, material_slot, min_y, height),
             });
             if !visible {
                 culled += 1;
@@ -361,7 +858,7 @@ impl RenderFeature for MeshFeature {
         }
         self.query = Some(query);
 
-        // Order: opaque (by pipeline, mesh), transparent (back to front), shadow casters per cascade.
+        // Order: opaque (by pipeline, texture set, mesh), transparent (back to front).
         self.items.sort_unstable_by(|a, b| {
             let ab = a.pipeline & PIPE_BLEND;
             let bb = b.pipeline & PIPE_BLEND;
@@ -369,7 +866,7 @@ impl RenderFeature for MeshFeature {
                 if ab != 0 {
                     b.dist2.total_cmp(&a.dist2)
                 } else {
-                    (a.pipeline, a.mesh).cmp(&(b.pipeline, b.mesh))
+                    (a.pipeline, a.textures, a.mesh).cmp(&(b.pipeline, b.textures, b.mesh))
                 }
             })
         });
@@ -380,36 +877,72 @@ impl RenderFeature for MeshFeature {
         for s in &mut self.shadow {
             s.clear();
         }
-        let mut keys: Vec<(u32, u8)> = Vec::with_capacity(self.items.len());
+        self.keys.clear();
 
         // Opaque.
-        for item in self.items.iter().filter(|i| i.visible && i.pipeline & PIPE_BLEND == 0) {
+        for item in self
+            .items
+            .iter()
+            .filter(|i| i.visible && i.pipeline & PIPE_BLEND == 0)
+        {
             self.instance_data.push(item.instance);
-            keys.push((item.mesh, item.pipeline));
+            self.keys.push(BatchKey {
+                pipeline: item.pipeline,
+                textures: item.textures,
+                mesh: item.mesh,
+            });
         }
-        Self::batch(&self.instance_data, &keys, 0, &mut self.opaque);
+        Self::batch(&self.keys, 0, &mut self.opaque);
         // Transparent.
         let first = self.instance_data.len();
-        keys.clear();
-        for item in self.items.iter().filter(|i| i.visible && i.pipeline & PIPE_BLEND != 0) {
+        self.keys.clear();
+        for item in self
+            .items
+            .iter()
+            .filter(|i| i.visible && i.pipeline & PIPE_BLEND != 0)
+        {
             self.instance_data.push(item.instance);
-            keys.push((item.mesh, item.pipeline));
+            self.keys.push(BatchKey {
+                pipeline: item.pipeline,
+                textures: item.textures,
+                mesh: item.mesh,
+            });
         }
-        Self::batch(&self.instance_data[first..], &keys, first as u32, &mut self.transparent);
-        // Shadows: casters are grouped by mesh for each cascade.
+        Self::batch(&self.keys, first as u32, &mut self.transparent);
+        // Shadows: opaque casters batch by mesh (depth only); masked casters by texture set
+        // and mesh (alpha tested).
         if shadows {
-            let mut casters: Vec<&Item> = self.items.iter().filter(|i| i.casts).collect();
-            casters.sort_unstable_by_key(|i| i.mesh);
-            for c in 0..view.cascades.count as usize {
+            let shadow_key = |item: &Item| BatchKey {
+                pipeline: if item.masked {
+                    SHADOW_MASKED
+                } else {
+                    SHADOW_DEPTH
+                },
+                textures: if item.masked { item.textures } else { 0 },
+                mesh: item.mesh,
+            };
+            self.casters.clear();
+            self.casters.extend(
+                self.items
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, i)| i.casts)
+                    .map(|(n, _)| n as u32),
+            );
+            let items = &self.items;
+            self.casters
+                .sort_unstable_by_key(|&n| shadow_key(&items[n as usize]));
+            for c in 0..(view.cascades.count as usize).min(MAX_CASCADES) {
                 let first = self.instance_data.len();
-                keys.clear();
-                for item in &casters {
+                self.keys.clear();
+                for &n in &self.casters {
+                    let item = &self.items[n as usize];
                     if view.cascades.sphere_in_cascade(c, item.center, item.radius) {
                         self.instance_data.push(item.instance);
-                        keys.push((item.mesh, 0));
+                        self.keys.push(shadow_key(item));
                     }
                 }
-                Self::batch(&self.instance_data[first..], &keys, first as u32, &mut self.shadow[c]);
+                Self::batch(&self.keys, first as u32, &mut self.shadow[c]);
             }
         }
 
@@ -438,6 +971,9 @@ impl RenderFeature for MeshFeature {
                 }],
             }));
         }
+        if self.frame.is_multiple_of(120) {
+            self.evict();
+        }
 
         // Stats.
         let mut stats = FeatureStats {
@@ -447,7 +983,7 @@ impl RenderFeature for MeshFeature {
         for b in self.opaque.iter().chain(self.transparent.iter()) {
             stats.draw_calls += 1;
             stats.instances += b.count;
-            if let Some(m) = self.meshes.get(&b.mesh) {
+            if let Some(m) = self.meshes.get(&b.key.mesh) {
                 stats.triangles += (m.index_count / 3) as u64 * b.count as u64;
             }
         }
@@ -469,42 +1005,24 @@ impl RenderFeature for MeshFeature {
         }
         pass.set_bind_group(1, group, &[]);
         pass.set_vertex_buffer(1, instances.buffer.slice(..));
-        let mut current = u8::MAX;
-        for b in batches {
-            let Some(mesh) = self.meshes.get(&b.mesh) else {
-                continue;
-            };
-            if b.pipeline != current {
-                pass.set_pipeline(&self.pipelines[b.pipeline as usize]);
-                current = b.pipeline;
-            }
-            pass.set_vertex_buffer(0, mesh.vertex.slice(..));
-            pass.set_index_buffer(mesh.index.slice(..), wgpu::IndexFormat::Uint32);
-            pass.draw_indexed(0..mesh.index_count, 0, b.first..b.first + b.count);
-        }
+        self.draw_batches(pass, batches, |p| self.pipelines.get(p as usize), |_| true);
     }
 
     fn draw_shadow(&self, pass: &mut wgpu::RenderPass<'_>, cascade: usize, _ctx: &FrameContext) {
-        let (Some(pipeline), Some(group), Some(instances)) =
-            (&self.shadow_pipeline, &self.material_group, &self.instances)
-        else {
+        let (Some(group), Some(instances)) = (&self.material_group, &self.instances) else {
             return;
         };
         let batches = &self.shadow[cascade];
         if batches.is_empty() {
             return;
         }
-        pass.set_pipeline(pipeline);
         pass.set_bind_group(1, group, &[]);
         pass.set_vertex_buffer(1, instances.buffer.slice(..));
-        for b in batches {
-            let Some(mesh) = self.meshes.get(&b.mesh) else {
-                continue;
-            };
-            pass.set_vertex_buffer(0, mesh.vertex.slice(..));
-            pass.set_index_buffer(mesh.index.slice(..), wgpu::IndexFormat::Uint32);
-            pass.draw_indexed(0..mesh.index_count, 0, b.first..b.first + b.count);
-        }
+        let pipeline_for = |p: u8| match p {
+            SHADOW_MASKED => self.shadow_masked_pipeline.as_ref(),
+            _ => self.shadow_pipeline.as_ref(),
+        };
+        self.draw_batches(pass, batches, pipeline_for, |p| p == SHADOW_MASKED);
     }
 
     fn stats(&self) -> FeatureStats {
@@ -514,6 +1032,8 @@ impl RenderFeature for MeshFeature {
     fn describe(&self) -> serde_json::Value {
         serde_json::json!({
             "gpu_meshes": self.meshes.len(),
+            "gpu_images": self.images.len(),
+            "texture_sets": self.texture_sets.iter().filter(|s| s.is_some()).count(),
             "materials": self.material_data.len(),
             "opaque_batches": self.opaque.len(),
             "transparent_batches": self.transparent.len(),

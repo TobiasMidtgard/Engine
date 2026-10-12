@@ -26,28 +26,42 @@ fn scene_app(width: u32, height: u32) -> App {
     w.spawn((
         Transform::default(),
         MeshRenderer::new(
-            Shape::Plane { size: [60.0, 60.0], subdivisions: 1 },
+            Shape::Plane {
+                size: [60.0, 60.0],
+                subdivisions: 1,
+            },
             StandardMaterial::hex(0x4f7a3a).with_roughness(0.9),
         ),
     ));
     w.spawn((
         Transform::from_xyz(-2.0, 1.0, 0.0),
         MeshRenderer::new(
-            Shape::Sphere { radius: 1.0, segments: 48 },
+            Shape::Sphere {
+                radius: 1.0,
+                segments: 48,
+            },
             StandardMaterial::hex(0xd94f30).with_roughness(0.35),
         ),
     ));
     w.spawn((
         Transform::from_xyz(1.5, 0.75, 0.5),
         MeshRenderer::new(
-            Shape::Cuboid { size: [1.5, 1.5, 1.5] },
-            StandardMaterial::hex(0xc0c4cc).with_metallic(1.0).with_roughness(0.25),
+            Shape::Cuboid {
+                size: [1.5, 1.5, 1.5],
+            },
+            StandardMaterial::hex(0xc0c4cc)
+                .with_metallic(1.0)
+                .with_roughness(0.25),
         ),
     ));
     w.spawn((
         Transform::from_xyz(0.0, 1.0, -3.0),
         MeshRenderer::new(
-            Shape::Torus { radius: 1.0, tube: 0.3, segments: 48 },
+            Shape::Torus {
+                radius: 1.0,
+                tube: 0.3,
+                segments: 48,
+            },
             StandardMaterial::hex(0x3060d0).with_emissive([0.3, 0.5, 1.0], 20_000.0),
         ),
     ));
@@ -85,11 +99,21 @@ fn renders_a_lit_scene_to_png() {
     for (_, _, p) in img.enumerate_pixels() {
         distinct.insert([p[0] / 16, p[1] / 16, p[2] / 16]);
     }
-    assert!(distinct.len() > 40, "image looks flat ({} colors)", distinct.len());
+    assert!(
+        distinct.len() > 40,
+        "image looks flat ({} colors)",
+        distinct.len()
+    );
 
     let stats = app.world.resource::<engine_render::RenderStats>();
     assert!(stats.draw_calls >= 4, "{stats:?}");
-    eprintln!("rendered on {} ({}): {:?} -> {}", stats.adapter, stats.backend, stats, path.display());
+    eprintln!(
+        "rendered on {} ({}): {:?} -> {}",
+        stats.adapter,
+        stats.backend,
+        stats,
+        path.display()
+    );
 }
 
 #[test]
@@ -109,7 +133,10 @@ fn night_scene_with_lamp_is_dark_but_not_black() {
     let path = std::path::Path::new(&dir).join("headless_night.png");
     capture_now(&mut app.world, &path).expect("screenshot");
     let img = image::open(&path).expect("png").to_rgba8();
-    let mean: f32 = img.pixels().map(|p| p[0] as f32 + p[1] as f32 + p[2] as f32).sum::<f32>()
+    let mean: f32 = img
+        .pixels()
+        .map(|p| p[0] as f32 + p[1] as f32 + p[2] as f32)
+        .sum::<f32>()
         / (img.width() * img.height() * 3) as f32;
     assert!(mean > 2.0, "night is pitch black (mean {mean})");
 }

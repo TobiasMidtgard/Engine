@@ -107,9 +107,8 @@ impl GpuShared {
 
 /// Build the full WGSL source for a feature shader.
 pub fn compose_shader(source: &str, with_frame: bool) -> String {
-    let mut code = String::with_capacity(
-        SHADER_LIB_TYPES.len() + SHADER_LIB_FRAME.len() + source.len() + 2,
-    );
+    let mut code =
+        String::with_capacity(SHADER_LIB_TYPES.len() + SHADER_LIB_FRAME.len() + source.len() + 2);
     code.push_str(SHADER_LIB_TYPES);
     code.push('\n');
     if with_frame {
@@ -175,7 +174,14 @@ pub trait RenderFeature: Send + Sync + 'static {
     fn resize(&mut self, gpu: &GpuShared, width: u32, height: u32) {}
 
     /// Gather and upload this frame's data.
-    fn prepare(&mut self, world: &mut World, gpu: &GpuShared, view: &ViewData, settings: &RenderSettings) {}
+    fn prepare(
+        &mut self,
+        world: &mut World,
+        gpu: &GpuShared,
+        view: &ViewData,
+        settings: &RenderSettings,
+    ) {
+    }
 
     /// Record compute or offscreen work before the scene is drawn.
     fn compute(&mut self, encoder: &mut wgpu::CommandEncoder, ctx: &FrameContext) {}
@@ -235,7 +241,12 @@ pub struct GrowBuffer {
 }
 
 impl GrowBuffer {
-    pub fn new(device: &wgpu::Device, label: &'static str, usage: wgpu::BufferUsages, capacity: u64) -> Self {
+    pub fn new(
+        device: &wgpu::Device,
+        label: &'static str,
+        usage: wgpu::BufferUsages,
+        capacity: u64,
+    ) -> Self {
         let usage = usage | wgpu::BufferUsages::COPY_DST;
         let capacity = capacity.max(256).next_power_of_two();
         let buffer = device.create_buffer(&wgpu::BufferDescriptor {

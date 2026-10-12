@@ -176,48 +176,93 @@ impl Renderer {
                 ..Default::default()
             })
         };
-        let linear_clamp = sampler("linear clamp", wgpu::AddressMode::ClampToEdge, wgpu::FilterMode::Linear);
-        let linear_repeat = sampler("linear repeat", wgpu::AddressMode::Repeat, wgpu::FilterMode::Linear);
-        let nearest_clamp = sampler("nearest clamp", wgpu::AddressMode::ClampToEdge, wgpu::FilterMode::Nearest);
+        let linear_clamp = sampler(
+            "linear clamp",
+            wgpu::AddressMode::ClampToEdge,
+            wgpu::FilterMode::Linear,
+        );
+        let linear_repeat = sampler(
+            "linear repeat",
+            wgpu::AddressMode::Repeat,
+            wgpu::FilterMode::Linear,
+        );
+        let nearest_clamp = sampler(
+            "nearest clamp",
+            wgpu::AddressMode::ClampToEdge,
+            wgpu::FilterMode::Nearest,
+        );
 
         use wgpu::ShaderStages as S;
         let all = S::VERTEX_FRAGMENT | S::COMPUTE;
         let frame_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("frame layout"),
             entries: &[
-                layout_entry(0, all, wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Uniform,
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
-                }),
-                layout_entry(1, all, wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Storage { read_only: true },
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
-                }),
-                layout_entry(2, all, wgpu::BindingType::Texture {
-                    sample_type: wgpu::TextureSampleType::Depth,
-                    view_dimension: wgpu::TextureViewDimension::D2Array,
-                    multisampled: false,
-                }),
-                layout_entry(3, all, wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Comparison)),
-                layout_entry(4, all, wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering)),
-                layout_entry(5, all, wgpu::BindingType::Texture {
-                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                    view_dimension: wgpu::TextureViewDimension::D2,
-                    multisampled: false,
-                }),
-                layout_entry(6, all, wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering)),
+                layout_entry(
+                    0,
+                    all,
+                    wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                ),
+                layout_entry(
+                    1,
+                    all,
+                    wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                ),
+                layout_entry(
+                    2,
+                    all,
+                    wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Depth,
+                        view_dimension: wgpu::TextureViewDimension::D2Array,
+                        multisampled: false,
+                    },
+                ),
+                layout_entry(
+                    3,
+                    all,
+                    wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Comparison),
+                ),
+                layout_entry(
+                    4,
+                    all,
+                    wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                ),
+                layout_entry(
+                    5,
+                    all,
+                    wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                ),
+                layout_entry(
+                    6,
+                    all,
+                    wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                ),
             ],
         });
-        let shadow_view_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("shadow view layout"),
-            entries: &[layout_entry(0, S::VERTEX_FRAGMENT, wgpu::BindingType::Buffer {
-                ty: wgpu::BufferBindingType::Uniform,
-                has_dynamic_offset: false,
-                min_binding_size: None,
-            })],
-        });
+        let shadow_view_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("shadow view layout"),
+                entries: &[layout_entry(
+                    0,
+                    S::VERTEX_FRAGMENT,
+                    wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                )],
+            });
 
         let shared = GpuShared {
             device: gpu.device.clone(),
@@ -247,10 +292,22 @@ impl Renderer {
         );
         let shadow = create_shadow_resources(&shared, settings.shadow_map_size.clamp(256, 8192));
         let env = [
-            Tex::new(&device, "environment 0", ENV_WIDTH, ENV_HEIGHT, formats.env,
-                wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING),
-            Tex::new(&device, "environment 1", ENV_WIDTH, ENV_HEIGHT, formats.env,
-                wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING),
+            Tex::new(
+                &device,
+                "environment 0",
+                ENV_WIDTH,
+                ENV_HEIGHT,
+                formats.env,
+                wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            ),
+            Tex::new(
+                &device,
+                "environment 1",
+                ENV_WIDTH,
+                ENV_HEIGHT,
+                formats.env,
+                wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            ),
         ];
         let frame_groups = [
             create_frame_group(&shared, &frame_buffer, &lights, &shadow, &env[0]),
@@ -314,7 +371,11 @@ impl Renderer {
             s.resize(&self.shared.device, width, height);
         }
         self.targets = Targets::new(&self.shared.device, &self.shared.formats, width, height);
-        self.post = create_post(&self.shared, &self.targets, self.surface.as_ref().map(|s| s.view_format));
+        self.post = create_post(
+            &self.shared,
+            &self.targets,
+            self.surface.as_ref().map(|s| s.view_format),
+        );
         for f in &mut self.features {
             f.resize(&self.shared, width, height);
         }
@@ -367,8 +428,20 @@ impl Renderer {
         };
         if self.lights.write(&self.shared.device, queue, light_bytes) {
             self.frame_groups = [
-                create_frame_group(&self.shared, &self.frame_buffer, &self.lights, &self.shadow, &self.env[0]),
-                create_frame_group(&self.shared, &self.frame_buffer, &self.lights, &self.shadow, &self.env[1]),
+                create_frame_group(
+                    &self.shared,
+                    &self.frame_buffer,
+                    &self.lights,
+                    &self.shadow,
+                    &self.env[0],
+                ),
+                create_frame_group(
+                    &self.shared,
+                    &self.frame_buffer,
+                    &self.lights,
+                    &self.shadow,
+                    &self.env[1],
+                ),
             ];
         }
         if view.sun_shadows {
@@ -408,7 +481,7 @@ impl Renderer {
 
         // Environment map (double-buffered: draw into one while the other is bound).
         let interval = settings.environment_interval.max(1) as u64;
-        if !self.env_rendered || self.frame_index % interval == 0 {
+        if !self.env_rendered || self.frame_index.is_multiple_of(interval) {
             let target = 1 - self.env_current;
             {
                 let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -541,13 +614,23 @@ impl Renderer {
         // Bloom.
         let levels = self.targets.bloom.len();
         for i in 0..levels {
-            let mut pass = fullscreen_pass(&mut encoder, "bloom down", &self.targets.bloom[i].view, true);
+            let mut pass = fullscreen_pass(
+                &mut encoder,
+                "bloom down",
+                &self.targets.bloom[i].view,
+                true,
+            );
             pass.set_pipeline(&self.post.bloom_down);
             pass.set_bind_group(0, &self.post.bloom_down_groups[i], &[]);
             pass.draw(0..3, 0..1);
         }
         for i in (1..levels).rev() {
-            let mut pass = fullscreen_pass(&mut encoder, "bloom up", &self.targets.bloom[i - 1].view, false);
+            let mut pass = fullscreen_pass(
+                &mut encoder,
+                "bloom up",
+                &self.targets.bloom[i - 1].view,
+                false,
+            );
             pass.set_pipeline(&self.post.bloom_up);
             pass.set_bind_group(0, &self.post.bloom_up_groups[i], &[]);
             pass.draw(0..3, 0..1);
@@ -609,7 +692,6 @@ impl Renderer {
         }
 
         let stats = self.collect_stats(&view, started);
-        drop(ctx);
         self.shared.queue.submit([encoder.finish()]);
         if let Some(t) = surface_texture {
             self.shared.queue.present(t);
@@ -658,7 +740,12 @@ impl Renderer {
         };
         let levels = self.targets.bloom.len().max(1) as f32;
         let u = PostUniform {
-            params: [tonemapper, settings.saturation, settings.contrast, settings.vignette],
+            params: [
+                tonemapper,
+                settings.saturation,
+                settings.contrast,
+                settings.vignette,
+            ],
             params2: [
                 settings.bloom_intensity.clamp(0.0, 1.0),
                 settings.film_grain,
@@ -726,7 +813,11 @@ impl Renderer {
     }
 }
 
-fn layout_entry(binding: u32, visibility: wgpu::ShaderStages, ty: wgpu::BindingType) -> wgpu::BindGroupLayoutEntry {
+fn layout_entry(
+    binding: u32,
+    visibility: wgpu::ShaderStages,
+    ty: wgpu::BindingType,
+) -> wgpu::BindGroupLayoutEntry {
     wgpu::BindGroupLayoutEntry {
         binding,
         visibility,
@@ -879,6 +970,7 @@ fn create_frame_group(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn fullscreen_pipeline(
     shared: &GpuShared,
     label: &str,
@@ -925,29 +1017,50 @@ fn fullscreen_pipeline(
         })
 }
 
-fn texture_sampler_layout(device: &wgpu::Device, label: &str, with_uniform: bool, with_second_texture: bool) -> wgpu::BindGroupLayout {
+fn texture_sampler_layout(
+    device: &wgpu::Device,
+    label: &str,
+    with_uniform: bool,
+    with_second_texture: bool,
+) -> wgpu::BindGroupLayout {
     use wgpu::ShaderStages as S;
     let mut entries = vec![
-        layout_entry(0, S::FRAGMENT, wgpu::BindingType::Texture {
-            sample_type: wgpu::TextureSampleType::Float { filterable: true },
-            view_dimension: wgpu::TextureViewDimension::D2,
-            multisampled: false,
-        }),
-        layout_entry(1, S::FRAGMENT, wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering)),
+        layout_entry(
+            0,
+            S::FRAGMENT,
+            wgpu::BindingType::Texture {
+                sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                view_dimension: wgpu::TextureViewDimension::D2,
+                multisampled: false,
+            },
+        ),
+        layout_entry(
+            1,
+            S::FRAGMENT,
+            wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+        ),
     ];
     if with_uniform {
-        entries.push(layout_entry(2, S::FRAGMENT, wgpu::BindingType::Buffer {
-            ty: wgpu::BufferBindingType::Uniform,
-            has_dynamic_offset: false,
-            min_binding_size: None,
-        }));
+        entries.push(layout_entry(
+            2,
+            S::FRAGMENT,
+            wgpu::BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Uniform,
+                has_dynamic_offset: false,
+                min_binding_size: None,
+            },
+        ));
     }
     if with_second_texture {
-        entries.push(layout_entry(3, S::FRAGMENT, wgpu::BindingType::Texture {
-            sample_type: wgpu::TextureSampleType::Float { filterable: true },
-            view_dimension: wgpu::TextureViewDimension::D2,
-            multisampled: false,
-        }));
+        entries.push(layout_entry(
+            3,
+            S::FRAGMENT,
+            wgpu::BindingType::Texture {
+                sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                view_dimension: wgpu::TextureViewDimension::D2,
+                multisampled: false,
+            },
+        ));
     }
     device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
         label: Some(label),
@@ -955,7 +1068,11 @@ fn texture_sampler_layout(device: &wgpu::Device, label: &str, with_uniform: bool
     })
 }
 
-fn create_post(shared: &GpuShared, targets: &Targets, surface_format: Option<wgpu::TextureFormat>) -> PostResources {
+fn create_post(
+    shared: &GpuShared,
+    targets: &Targets,
+    surface_format: Option<wgpu::TextureFormat>,
+) -> PostResources {
     let device = &shared.device;
     let tonemap_layout = texture_sampler_layout(device, "tonemap layout", true, true);
     let bloom_layout = texture_sampler_layout(device, "bloom layout", true, false);
@@ -966,12 +1083,24 @@ fn create_post(shared: &GpuShared, targets: &Targets, surface_format: Option<wgp
     let blit_module = shared.shader("blit", include_str!("shaders/blit.wgsl"), false);
 
     let tonemap_pipeline = fullscreen_pipeline(
-        shared, "tonemap", &post_module, "vs_fullscreen", "fs_tonemap", &tonemap_layout,
-        shared.formats.ldr, None,
+        shared,
+        "tonemap",
+        &post_module,
+        "vs_fullscreen",
+        "fs_tonemap",
+        &tonemap_layout,
+        shared.formats.ldr,
+        None,
     );
     let bloom_down = fullscreen_pipeline(
-        shared, "bloom down", &bloom_module, "vs_bloom", "fs_down", &bloom_layout,
-        shared.formats.hdr, None,
+        shared,
+        "bloom down",
+        &bloom_module,
+        "vs_bloom",
+        "fs_down",
+        &bloom_layout,
+        shared.formats.hdr,
+        None,
     );
     let additive = wgpu::BlendState {
         color: wgpu::BlendComponent {
@@ -982,11 +1111,26 @@ fn create_post(shared: &GpuShared, targets: &Targets, surface_format: Option<wgp
         alpha: wgpu::BlendComponent::REPLACE,
     };
     let bloom_up = fullscreen_pipeline(
-        shared, "bloom up", &bloom_module, "vs_bloom", "fs_up", &bloom_layout,
-        shared.formats.hdr, Some(additive),
+        shared,
+        "bloom up",
+        &bloom_module,
+        "vs_bloom",
+        "fs_up",
+        &bloom_layout,
+        shared.formats.hdr,
+        Some(additive),
     );
     let blit_pipeline = surface_format.map(|f| {
-        fullscreen_pipeline(shared, "blit", &blit_module, "vs_blit", "fs_blit", &blit_layout, f, None)
+        fullscreen_pipeline(
+            shared,
+            "blit",
+            &blit_module,
+            "vs_blit",
+            "fs_blit",
+            &blit_layout,
+            f,
+            None,
+        )
     });
 
     let params = device.create_buffer(&wgpu::BufferDescriptor {
@@ -1031,7 +1175,11 @@ fn create_post(shared: &GpuShared, targets: &Targets, surface_format: Option<wgp
         b
     };
     for i in 0..levels {
-        let src = if i == 0 { &targets.hdr } else { &targets.bloom[i - 1] };
+        let src = if i == 0 {
+            &targets.hdr
+        } else {
+            &targets.bloom[i - 1]
+        };
         let buf = uniform_buffer(BloomUniform {
             params: [
                 1.0 / src.width as f32,
@@ -1107,7 +1255,11 @@ fn create_post(shared: &GpuShared, targets: &Targets, surface_format: Option<wgp
     }
 }
 
-fn copy_to_readback(device: &wgpu::Device, encoder: &mut wgpu::CommandEncoder, tex: &Tex) -> (wgpu::Buffer, u32) {
+fn copy_to_readback(
+    device: &wgpu::Device,
+    encoder: &mut wgpu::CommandEncoder,
+    tex: &Tex,
+) -> (wgpu::Buffer, u32) {
     let unpadded = tex.width * 4;
     let align = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
     let padded = unpadded.div_ceil(align) * align;
@@ -1149,7 +1301,10 @@ fn save_readback(
         let _ = tx.send(r);
     });
     if let Err(e) = device.poll(wgpu::PollType::wait_indefinitely()) {
-        return paths.iter().map(|_| Err(format!("GPU poll failed: {e}"))).collect();
+        return paths
+            .iter()
+            .map(|_| Err(format!("GPU poll failed: {e}")))
+            .collect();
     }
     match rx.recv() {
         Ok(Ok(())) => {}
@@ -1162,7 +1317,12 @@ fn save_readback(
     }
     let data = match buffer.slice(..).get_mapped_range() {
         Ok(d) => d,
-        Err(e) => return paths.iter().map(|_| Err(format!("screenshot map failed: {e:?}"))).collect(),
+        Err(e) => {
+            return paths
+                .iter()
+                .map(|_| Err(format!("screenshot map failed: {e:?}")))
+                .collect();
+        }
     };
     let mut pixels = Vec::with_capacity((width * height * 4) as usize);
     for row in 0..height {
@@ -1183,8 +1343,15 @@ fn save_png(path: &Path, rgba: &[u8], width: u32, height: u32) -> Result<Screens
     {
         std::fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
     }
-    image::save_buffer_with_format(path, rgba, width, height, image::ExtendedColorType::Rgba8, image::ImageFormat::Png)
-        .map_err(|e| format!("{}: {e}", path.display()))?;
+    image::save_buffer_with_format(
+        path,
+        rgba,
+        width,
+        height,
+        image::ExtendedColorType::Rgba8,
+        image::ImageFormat::Png,
+    )
+    .map_err(|e| format!("{}: {e}", path.display()))?;
     tracing::info!("screenshot saved to {}", path.display());
     Ok(ScreenshotInfo {
         path: path.display().to_string(),
@@ -1212,7 +1379,12 @@ pub fn ensure_renderer(world: &mut World) -> bool {
         .map(|w| (w.width, w.height))
         .unwrap_or((1280, 720));
     let settings = world.resource::<RenderSettings>().clone();
-    match Renderer::new(if headless { None } else { handle }, width, height, &settings) {
+    match Renderer::new(
+        if headless { None } else { handle },
+        width,
+        height,
+        &settings,
+    ) {
         Ok(mut renderer) => {
             if let Some(mut pending) = world.get_resource_mut::<PendingRenderFeatures>() {
                 for f in pending.0.drain(..) {
@@ -1252,7 +1424,10 @@ pub fn capture_now(world: &mut World, path: impl Into<PathBuf>) -> Result<Screen
     render_system(world);
     let mut s = world.resource_mut::<Screenshots>();
     if s.done.len() > before {
-        s.done.last().cloned().unwrap_or_else(|| Err("no screenshot taken".into()))
+        s.done
+            .last()
+            .cloned()
+            .unwrap_or_else(|| Err("no screenshot taken".into()))
     } else {
         s.pending.clear();
         Err("the frame was not rendered".into())
