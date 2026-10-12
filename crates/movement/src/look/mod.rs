@@ -8,8 +8,20 @@
 //!
 //! - [`meshgen`]: the mesh toolkit (rounded and chamfered boxes, lofts, lathes, extrusions).
 //! - [`texgen`]: tiling noise and PBR texture baking.
+//! - [`materials`]: shared baked materials (`movement/mat/<name>`): concrete, steel, wood,
+//!   stone, sand, cloth, lacquer…
+//! - [`course`]: set dressing for the parkour course and the duel ring.
+//! - [`fighter`]: the armored sword fighters (four styles) and their parts.
+//! - [`rig`]: the fighters' skeleton, poses, two-bone IK and the procedural animator.
+//! - [`effects`]: blade trails, parry sparks, slash flashes, impact lights, dust and the
+//!   render feature that draws them and the afterimage ghosts.
 
+pub mod course;
+pub mod effects;
+pub mod fighter;
+pub mod materials;
 pub mod meshgen;
+pub mod rig;
 pub mod texgen;
 
 use engine_assets::Assets;
@@ -60,7 +72,7 @@ impl Library<'_> {
 pub type Generator = fn(&mut Library);
 
 /// Everything the look generates, in order.
-pub const LIBRARY: &[Generator] = &[];
+pub const LIBRARY: &[Generator] = &[materials::generate, course::generate, fighter::generate];
 
 /// A mesh registered by a generator.
 pub fn mesh(key: &str) -> MeshRef {
