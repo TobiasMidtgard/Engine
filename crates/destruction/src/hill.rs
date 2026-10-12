@@ -14,6 +14,7 @@ use engine_core::prelude::*;
 use engine_render::{MeshRenderer, Shape, StandardMaterial};
 use engine_world::{DamageEvent, DamageKind, EditOp, EditShape, SurfaceMaterials, TerrainEdit};
 
+use crate::DemoView;
 use crate::debris::Debris;
 use crate::material::DestructibleMaterial;
 use crate::structure::{ShowSupport, StructuralPiece};
@@ -34,6 +35,42 @@ const RAISES: u32 = 6;
 /// The hoe's level-ground strokes; each pass averages the soil with its neighbors once, so a
 /// few in a row turn the raised mounds' edges into a soft bank.
 const SMOOTH_PASSES: u32 = 6;
+
+/// The dig-and-build hill's moments.
+pub const VIEWS: &[DemoView] = &[
+    DemoView {
+        key: "voxel_tunnel",
+        name: "Digging a tunnel into the hill",
+        eye: [-2.5, 2.2, -16.0],
+        target: [-4.0, 1.4, -6.0],
+        hour: 10.5,
+        warmup_secs: 5.1,
+    },
+    DemoView {
+        key: "voxel_cave_in",
+        name: "The tunnel's hall caving in",
+        eye: [-1.0, 7.0, -17.0],
+        target: [-4.5, 2.5, -2.0],
+        hour: 10.5,
+        warmup_secs: 10.6,
+    },
+    DemoView {
+        key: "voxel_terrace",
+        name: "Raising and leveling a terrace with the hoe",
+        eye: [18.0, 8.0, -6.0],
+        target: [8.5, 3.5, 2.0],
+        hour: 10.5,
+        warmup_secs: 17.6,
+    },
+    DemoView {
+        key: "voxel_hut",
+        name: "A timber hut in support colors losing its posts",
+        eye: [9.5, 3.5, -16.5],
+        target: [15.0, 1.8, -10.0],
+        hour: 10.5,
+        warmup_secs: 19.5,
+    },
+];
 
 /// The running hill script.
 #[derive(Component, Debug, Clone, Default)]
@@ -202,6 +239,27 @@ pub fn hill_script_system(world: &mut World) {
             *d = demo;
         }
     }
+}
+
+/// Start every [`HillDemo`] over: the hill and the hut are rebuilt. Returns how many restarted.
+pub fn restart_hills(world: &mut World) -> usize {
+    let demos: Vec<Entity> = world
+        .query_filtered::<Entity, With<HillDemo>>()
+        .iter(world)
+        .collect();
+    for &e in &demos {
+        let Some(mut demo) = world.get::<HillDemo>(e).cloned() else {
+            continue;
+        };
+        run_step(world, &mut demo, Step::Reset);
+        demo.time = 0.0;
+        demo.next = 0;
+        demo.cycle += 1;
+        if let Some(mut d) = world.get_mut::<HillDemo>(e) {
+            *d = demo;
+        }
+    }
+    demos.len()
 }
 
 fn edit(world: &mut World, center: DVec3, shape: EditShape, op: EditOp, surface: Option<&str>) {
