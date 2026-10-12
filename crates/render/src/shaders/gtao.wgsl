@@ -138,7 +138,7 @@ fn fs_blur(in: FullscreenOut) -> @location(0) vec4<f32> {
         return vec4<f32>(1.0);
     }
     let uv = (vec2<f32>(px) + 0.5) / vec2<f32>(size);
-    let depth = linear_depth(uv, z);
+    let depth = scene_linear_depth(uv, z);
     let n = oct_decode(textureLoad(normal_input, px, 0).xy);
     var sum = 0.0;
     var weight = 0.0;
@@ -148,7 +148,7 @@ fn fs_blur(in: FullscreenOut) -> @location(0) vec4<f32> {
             let zq = textureLoad(depth_input, q, 0);
             if (zq <= 0.0) { continue; }
             let uvq = (vec2<f32>(q) + 0.5) / vec2<f32>(size);
-            let dq = linear_depth(uvq, zq);
+            let dq = scene_linear_depth(uvq, zq);
             let nq = oct_decode(textureLoad(normal_input, q, 0).xy);
             let w = saturate(1.0 - abs(dq - depth) / (0.03 * depth + 0.05)) * saturate(dot(n, nq) * 4.0 - 3.0);
             sum += textureLoad(ao_input, q, 0).r * w;

@@ -50,7 +50,7 @@ fn view_position(uv: vec2<f32>, z: f32) -> vec3<f32> {
 }
 
 // Distance along the view axis of the depth-buffer value `z` at screen `uv` (meters).
-fn linear_depth(uv: vec2<f32>, z: f32) -> f32 {
+fn scene_linear_depth(uv: vec2<f32>, z: f32) -> f32 {
     return -view_position(uv, z).z;
 }
 
@@ -64,7 +64,7 @@ fn in_prepass(rel: vec3<f32>, pixel: vec2<i32>) -> bool {
     if (z <= 0.0 || textureLoad(prepass_normal, pixel, 0).w < 0.5) { return false; }
     let uv = (vec2<f32>(pixel) + 0.5) * frame.viewport.zw;
     let d = view_depth(rel);
-    return abs(linear_depth(uv, z) - d) <= 0.01 * d + 0.01;
+    return abs(scene_linear_depth(uv, z) - d) <= 0.01 * d + 0.01;
 }
 
 // Screen-space ambient occlusion for the surface at `rel` (1 = open sky and walls far away,
@@ -266,7 +266,7 @@ fn contact_shadow(rel: vec3<f32>, n: vec3<f32>) -> f32 {
         let px = vec2<i32>(uv * frame.viewport.xy);
         let z = textureLoad(prepass_depth, clamp(px, vec2<i32>(0), size - 1), 0);
         if (z <= 0.0) { continue; }
-        let scene = linear_depth(uv, z);
+        let scene = scene_linear_depth(uv, z);
         let ray = view_depth(q);
         let diff = ray - scene;
         // In front of the ray by more than the depth noise, but not so far it's a separate
