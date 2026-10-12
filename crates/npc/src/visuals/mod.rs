@@ -203,11 +203,6 @@ const HIDDEN: Placed = Placed {
     visible: false,
 };
 
-/// A limb hanging from `pivot`, rotated by `rot`, `len` long: its mesh center.
-fn limb(pivot: Vec3, rot: Quat, len: f32) -> Placed {
-    at(pivot + rot * Vec3::new(0.0, -len * 0.5, 0.0), rot)
-}
-
 type PoseItem<'a> = (
     &'a StandIn,
     &'a mut StandInState,
