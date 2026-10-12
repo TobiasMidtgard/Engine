@@ -268,7 +268,13 @@ pub fn spawn_demos(
             "lake" => ph::lake(commands, meshes, lib, land, z),
             "water" => engine_water::demo::spawn_demo(commands, z.center),
             "footsteps" => engine_audio::demo::spawn_demo(commands, z.center),
-            "tracks" => ph::tracks(commands, z),
+            "tracks" => engine_terrain::demo::spawn_demo_with(
+                commands,
+                z.center,
+                engine_terrain::demo::LabOptions {
+                    stand_in_bodies: true,
+                },
+            ),
             "cave" => engine_foliage::demo::spawn_cave_demo(commands, z.center),
             "arena" => engine_npc::demo::spawn_demo(commands, z.center),
             "parkour" => engine_movement::demo::spawn_demo(commands, z.center),

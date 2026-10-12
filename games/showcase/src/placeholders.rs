@@ -116,61 +116,6 @@ fn person(commands: &mut Commands, base: DVec3, yaw: f32, shirt: u32) {
     );
 }
 
-/// A four-legged animal of boxes and capsules (deer-sized at scale 1), facing `yaw`.
-fn quadruped(commands: &mut Commands, base: DVec3, yaw: f32, scale: f32, coat: u32) {
-    let fur = mat(coat, 0.9).with_subsurface(0.2);
-    let rot = Quat::from_rotation_y(yaw);
-    let p = |v: Vec3| base + (rot * (v * scale)).as_dvec3();
-    spawn(
-        commands,
-        Shape::Capsule {
-            radius: 0.28,
-            height: 1.3,
-            segments: 12,
-        },
-        fur,
-        Transform::from_translation(p(Vec3::new(0.0, 1.05, 0.0)))
-            .with_rotation(rot * Quat::from_rotation_x(std::f32::consts::FRAC_PI_2))
-            .with_scale(Vec3::splat(scale)),
-    );
-    for (x, z) in [(-0.17, 0.45), (0.17, 0.45), (-0.17, -0.45), (0.17, -0.45)] {
-        spawn(
-            commands,
-            Shape::Capsule {
-                radius: 0.05,
-                height: 0.85,
-                segments: 8,
-            },
-            fur,
-            Transform::from_translation(p(Vec3::new(x, 0.45, z))).with_scale(Vec3::splat(scale)),
-        );
-    }
-    spawn(
-        commands,
-        Shape::Capsule {
-            radius: 0.09,
-            height: 0.55,
-            segments: 8,
-        },
-        fur,
-        Transform::from_translation(p(Vec3::new(0.0, 1.45, 0.62)))
-            .with_rotation(rot * Quat::from_rotation_x(0.6))
-            .with_scale(Vec3::splat(scale)),
-    );
-    spawn(
-        commands,
-        Shape::Capsule {
-            radius: 0.1,
-            height: 0.32,
-            segments: 8,
-        },
-        fur,
-        Transform::from_translation(p(Vec3::new(0.0, 1.68, 0.8)))
-            .with_rotation(rot * Quat::from_rotation_x(1.3))
-            .with_scale(Vec3::splat(scale)),
-    );
-}
-
 /// Material plaza: a paved square with a roughness ladder (dielectric and metal), a glass orb
 /// inside an emissive ring and pedestals. The Rendering and lighting thread owns its content.
 pub fn plaza(commands: &mut Commands, lib: &Library, z: &Zone) {
@@ -687,46 +632,6 @@ pub fn cave_shell(
             .open(BoxFace::NegZ)
             .with_fade(12.0),
     ));
-}
-
-/// Footprint lab: strips of mud, snow, sand and grass (painted into the ground by the
-/// landscape) with walkers that will leave tracks. The Planets and terrain thread owns it.
-pub fn tracks(commands: &mut Commands, z: &Zone) {
-    let c = z.center;
-    for (i, x) in [-15.0, -5.0, 5.0, 15.0].into_iter().enumerate() {
-        person(
-            commands,
-            c + DVec3::new(x, 0.0, -10.0 + i as f64 * 5.0),
-            0.0,
-            [0x8e44ad, 0x2c3e50, 0xc0392b, 0x16a085][i],
-        );
-    }
-    quadruped(
-        commands,
-        c + DVec3::new(-5.0, 0.0, 8.0),
-        0.0,
-        1.35,
-        0x5a3a22,
-    );
-    quadruped(
-        commands,
-        c + DVec3::new(5.0, 0.0, 10.0),
-        0.3,
-        0.55,
-        0x9a8a70,
-    );
-    spawn(
-        commands,
-        cuboid(0.12, 2.0, 0.12),
-        dark_wood(),
-        at(c + DVec3::new(-22.0, 1.0, -18.0)),
-    );
-    spawn(
-        commands,
-        cuboid(1.6, 0.8, 0.08),
-        wood(),
-        at(c + DVec3::new(-22.0, 1.9, -18.0)),
-    );
 }
 
 /// The cave's roof: the hillside carried on over the cave (grass on top, rock underneath and
