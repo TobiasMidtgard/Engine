@@ -376,3 +376,69 @@ fn depth_tested_lines_work_with_an_orthographic_camera() {
         "on-top line under the ground is visible ({seen}, {color:?})"
     );
 }
+
+/// Linear display value to the 8-bit sRGB value a screenshot stores.
+fn srgb8(linear: f32) -> f32 {
+    let c = linear.clamp(0.0, 1.0);
+    let s = if c <= 0.003_130_8 {
+        c * 12.92
+    } else {
+        1.055 * c.powf(1.0 / 2.4) - 0.055
+    };
+    s * 255.0
+}
+
+#[test]
+fn line_colors_are_exact_on_a_dark_night() {
+    // Drawn after tonemapping: no tone curve and no night (scotopic) desaturation.
+    let mut night = scene_app(DVec3::ZERO, 0.02);
+    night.update_n(60);
+    let Some(img) = render(&mut night, "debug_dark_night.png") else {
+        return;
+    };
+    let ev = night.world.resource::<engine_render::RenderStats>().ev100;
+    assert!(
+        ev < 1.0,
+        "the scene should be exposed for night (EV100 {ev})"
+    );
+    let (seen, color) = along_line(&img, MAGENTA_LINE, magenta);
+    assert!(seen > 0.9, "magenta line visible at night ({seen})");
+    let want = [srgb8(MAGENTA[0]), srgb8(MAGENTA[1]), srgb8(MAGENTA[2])];
+    for i in 0..3 {
+        assert!(
+            (color[i] - want[i]).abs() < 12.0,
+            "night line color {color:?}, expected {want:?}"
+        );
+    }
+}
+
+#[test]
+fn debug_lines_do_not_change_the_metered_exposure() {
+    let metered = |grid: bool| -> Option<f64> {
+        let mut app = base_app(DVec3::ZERO, 0.25);
+        app.world.spawn((
+            Camera::perspective(FOV_DEG),
+            Transform::from_translation(EYE).looking_at(TARGET, Vec3::Y),
+        ));
+        if grid {
+            // A dense bright grid covering most of the view.
+            app.add_systems(Update, |mut debug: ResMut<DebugDraw>| {
+                debug.grid(DVec3::ZERO, Vec3::Y, 0.15, 40, WHITE);
+            });
+        }
+        app.update_n(12);
+        if app.world.contains_resource::<RenderDisabled>() {
+            return None;
+        }
+        app.world
+            .resource::<Diagnostics>()
+            .get("render.ev100_metered")
+    };
+    let (Some(plain), Some(with_grid)) = (metered(false), metered(true)) else {
+        return;
+    };
+    assert!(
+        (plain - with_grid).abs() < 0.1,
+        "metered EV100 without lines {plain}, with a dense debug grid {with_grid}"
+    );
+}

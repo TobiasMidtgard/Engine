@@ -1,8 +1,8 @@
 //! Debug colors: linear RGBA `[f32; 4]` with straight (not premultiplied) alpha.
 //!
-//! Debug lines are written to the screen as display values, not as physical radiance, so
-//! `[1.0, 0.0, 0.0, 1.0]` is a clearly visible red at noon, at night and in a cave. Values above
-//! 1 make a line brighter (and slightly bloom); alpha below 1 blends it with the scene.
+//! Debug lines are drawn onto the final image as display colors, not as physical radiance, so
+//! `[1.0, 0.0, 0.0, 1.0]` is the same clearly visible red at noon, at night and in a cave.
+//! Components are clamped to `0..=1`; alpha below 1 blends the line with the scene.
 
 /// Linear RGBA color, components normally in `0..=1`.
 pub type Color = [f32; 4];

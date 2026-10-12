@@ -1,24 +1,22 @@
 // Debug lines. Requires lib_types + lib_frame (uses `frame.view_proj`).
 //
-// Positions are camera-relative (the CPU subtracts the f64 camera position). Colors are
-// written as display values, NOT pre-exposed: a debug line looks the same at noon, at night
-// and in a cave, and is never washed out or crushed by auto-exposure.
+// Positions are camera-relative (the CPU subtracts the f64 camera position). Lines are drawn
+// onto the final tonemapped image, so colors are exact display colors: a debug line looks the
+// same at noon, at night and in a cave, and never affects auto-exposure.
 //
-// Depth-tested lines use two tests:
-// 1. The hardware test (reverse-Z GreaterEqual) against a depth nudged DEPTH_NUDGE toward the
-//    camera: a cheap early reject of lines clearly behind the scene.
-// 2. `fs_line_tested` compares the true line depth with the FARTHEST scene depth in the 3x3
-//    pixels around the fragment (scene depth copy). A line lying on a surface is visible at
-//    any viewing angle (the line and the surface are sampled half a pixel apart, which at
-//    grazing angles is a large depth difference), while a line behind geometry stays hidden
-//    except for a one-pixel halo at silhouettes.
+// Depth-tested lines (`fs_line_tested`, reverse-Z: larger depth = closer) use the scene depth
+// copy twice:
+// 1. Hidden when the line is behind the scene at its own pixel by more than DEPTH_NUDGE.
+// 2. Hidden when the line is behind the FARTHEST scene depth in the 3x3 pixels around the
+//    fragment. A line lying on a surface stays visible at any viewing angle (the line and the
+//    surface are sampled half a pixel apart, which at grazing angles is a large depth
+//    difference), while a line behind geometry stays hidden except for a one-pixel halo at
+//    silhouettes.
 //
-// The true depth comes from the un-nudged clip z and w, interpolated perspective-correctly
-// (both are affine in the position, so z / w is exact per fragment). It is NOT recovered from
-// the nudged `position.z`: the nudge is clamped at the near plane, which for orthographic
-// cameras covers the first ~5% of the depth range and would hide nearby lines.
+// The true depth comes from the clip z and w passed separately and interpolated
+// perspective-correctly (both are affine in the position, so z / w is exact per fragment).
 
-// Relative depth nudge for the hardware test (reverse-Z: larger depth = closer).
+// Relative depth nudge for the center-pixel test (reverse-Z: larger depth = closer).
 const DEPTH_NUDGE: f32 = 1.05;
 // Relative tolerance of the precise per-fragment test.
 const DEPTH_TOLERANCE: f32 = 1.0005;
@@ -34,20 +32,15 @@ struct LineIn {
 struct LineOut {
     @builtin(position) clip: vec4<f32>,
     @location(0) color: vec4<f32>,
-    // Un-nudged clip-space z and w; z / w is the line's true depth.
+    // Clip-space z and w; z / w is the line's depth.
     @location(1) depth_zw: vec2<f32>,
 };
 
 @vertex
 fn vs_line(in: LineIn) -> LineOut {
-    var clip = frame.view_proj * vec4<f32>(in.position, 1.0);
+    let clip = frame.view_proj * vec4<f32>(in.position, 1.0);
     var out: LineOut;
     out.depth_zw = clip.zw;
-    // Scaling clip z scales NDC depth (z / w). Points in front of the near plane stay inside
-    // it (z <= w), so the nudge never clips a line.
-    if (clip.z <= clip.w) {
-        clip.z = min(clip.z * DEPTH_NUDGE, clip.w);
-    }
     out.clip = clip;
     out.color = in.color;
     return out;
@@ -67,6 +60,10 @@ fn fs_line(in: LineOut) -> @location(0) vec4<f32> {
 fn fs_line_tested(in: LineOut) -> @location(0) vec4<f32> {
     let size = vec2<i32>(textureDimensions(scene_depth));
     let p = vec2<i32>(in.clip.xy);
+    let depth = in.depth_zw.x / in.depth_zw.y;
+    if (depth * DEPTH_NUDGE < textureLoad(scene_depth, clamp(p, vec2<i32>(0), size - 1), 0)) {
+        discard;
+    }
     var farthest = 1.0;
     for (var y = -1; y <= 1; y++) {
         for (var x = -1; x <= 1; x++) {
@@ -74,7 +71,6 @@ fn fs_line_tested(in: LineOut) -> @location(0) vec4<f32> {
             farthest = min(farthest, textureLoad(scene_depth, q, 0));
         }
     }
-    let depth = in.depth_zw.x / in.depth_zw.y;
     if (depth * DEPTH_TOLERANCE < farthest) {
         discard;
     }

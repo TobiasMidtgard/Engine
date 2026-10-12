@@ -136,8 +136,13 @@ pub fn validate_wgsl(label: &str, code: &str) -> Result<(), String> {
 }
 
 /// Read-only per-frame state given to features while drawing.
+#[derive(Clone, Copy)]
 pub struct FrameContext<'a> {
     pub gpu: &'a GpuShared,
+    /// Group 0 frame bindings (`lib_frame.wgsl`) for passes a feature records itself, such as
+    /// overlays. During `compute` and `draw_environment` it still holds last frame's
+    /// environment map.
+    pub frame_group: &'a wgpu::BindGroup,
     pub view: &'a ViewData,
     pub settings: &'a RenderSettings,
     /// Scene color copy (HDR, pre-exposed) taken after the sky; valid in the transparent phase.

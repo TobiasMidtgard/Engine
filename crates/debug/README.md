@@ -58,9 +58,9 @@ loop can run zero or several times per frame.
 
 **Colors** are linear RGBA `[f32; 4]`: `RED`, `GREEN`, `BLUE`, `YELLOW`, `CYAN`, `MAGENTA`,
 `ORANGE`, `PURPLE`, `PINK`, `LIME`, `WHITE`, `GRAY`, `BLACK`, plus `color::hex(0xff8800)`,
-`color::with_alpha`, `color::mix` and `color::ramp(t)` (blue to red). They are written as
-display values, not as physical light, so auto-exposure never washes them out or hides
-them. Alpha below 1 blends.
+`color::with_alpha`, `color::mix` and `color::ramp(t)` (blue to red). They are drawn onto the
+final image as display colors, not as physical light, so they look exactly the same day and
+night and never affect auto-exposure. Alpha below 1 blends.
 
 ## Built-in views (`DebugViews`, off by default)
 
@@ -103,16 +103,17 @@ Errors name the shape index and include an example.
 
 ## How it renders
 
-`DebugLinesFeature` (a `RenderFeature`, `Transparent` phase) converts the `f64` segments to
-camera-relative `f32` each frame (`ViewData::origin`). Lines 1e8 m from the origin are as
-precise as lines next to it. It writes them into one reused `Vec` and one `GrowBuffer`, then
-draws two line-list pipelines:
+`DebugLinesFeature` (a `RenderFeature` overlay) converts the `f64` segments to camera-relative
+`f32` each frame (`ViewData::origin`). Lines 1e8 m from the origin are as precise as lines next
+to it. It writes them into one reused `Vec` and one `GrowBuffer`, then draws two line-list
+pipelines onto the final tonemapped image, after exposure metering and post-processing. Colors
+come out exactly as given, day or night, and debug lines never change the scene's exposure.
 
-- **Depth-tested.** Reverse-Z `GreaterEqual` against a depth nudged 5% toward the camera (a
-  cheap early reject), no depth write. The fragment shader then compares the line's true
-  depth with the scene depth copy (farthest of 3×3 pixels), so on-surface lines don't
-  z-fight, with perspective and orthographic cameras alike.
-- **On top.** Depth compare `Always`.
+- **Depth-tested.** The fragment shader compares the line's depth with the scene depth copy:
+  hidden when clearly behind the scene at its own pixel, or behind the farthest of the 3×3
+  pixels around it, so on-surface lines don't z-fight, with perspective and orthographic
+  cameras alike.
+- **On top.** No depth test.
 
 Metrics: `debug.lines` and `debug.dropped_lines` in `Diagnostics`.
 `DebugDraw::max_lines` (262 144) caps memory if something draws in a loop.

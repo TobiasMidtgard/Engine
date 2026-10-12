@@ -517,6 +517,7 @@ impl Renderer {
         });
         let ctx = FrameContext {
             gpu: &self.shared,
+            frame_group: &self.frame_groups[self.env_current],
             view: &view,
             settings: &settings,
             scene_color_copy: &self.targets.color_copy.view,
@@ -555,6 +556,7 @@ impl Renderer {
             self.env_rendered = true;
         }
         let frame_group = &self.frame_groups[self.env_current];
+        let ctx = FrameContext { frame_group, ..ctx };
 
         // Shadows.
         if view.sun_shadows {

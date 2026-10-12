@@ -1,22 +1,22 @@
-//! [`DebugLinesFeature`]: draws the lines in [`DebugDraw`] in the transparent phase.
+//! [`DebugLinesFeature`]: draws the lines in [`DebugDraw`] as an overlay.
 //!
 //! Each frame the `f64` world-space segments are converted to camera-relative `f32`
 //! (`ViewData::origin`), written into one reused CPU vector and uploaded into one growing
-//! vertex buffer. Two line-list pipelines draw them: depth-tested (reverse-Z `GreaterEqual`,
-//! no depth write) and always on top (`Always`). Both alpha-blend into the HDR target.
+//! vertex buffer. Two line-list pipelines draw them onto the final tonemapped (LDR) image,
+//! after exposure metering and post-processing, so lines keep their exact colors and never
+//! change the scene's exposure: depth-tested and always on top.
 //!
-//! Lines lying exactly on a surface (a ground grid, a footprint) would z-fight with it at
-//! grazing angles, so the depth-tested pipeline refines the hardware test in its fragment
-//! shader against the scene depth copy (see `shaders/debug_lines.wgsl`). The renderer makes
-//! that copy only on frames that have depth-tested lines.
+//! The depth test happens in the fragment shader against the scene depth copy (see
+//! `shaders/debug_lines.wgsl`), which also keeps lines lying exactly on a surface (a ground
+//! grid, a footprint) from z-fighting with it. The renderer makes that copy only on frames
+//! that have depth-tested lines.
 
 use bevy_ecs::prelude::*;
 use bytemuck::{Pod, Zeroable};
 use engine_core::diagnostics::Diagnostics;
 use engine_core::math::DVec3;
 use engine_render::{
-    FeatureStats, FrameContext, GpuShared, GrowBuffer, RenderFeature, RenderPhase, RenderSettings,
-    ViewData,
+    FeatureStats, FrameContext, GpuShared, GrowBuffer, RenderFeature, RenderSettings, ViewData,
 };
 
 use crate::draw::{DebugDraw, DepthMode};
@@ -98,7 +98,7 @@ impl RenderFeature for DebugLinesFeature {
         "debug_lines"
     }
 
-    /// Late in the transparent phase, so lines are drawn over water, particles and clouds.
+    /// Early among overlays: game UI drawn later stays on top of debug lines.
     fn order(&self) -> i32 {
         1000
     }
@@ -133,20 +133,13 @@ impl RenderFeature for DebugLinesFeature {
         self.pipelines = DepthMode::ALL
             .into_iter()
             .map(|mode| {
-                let (label, layout, compare, fragment) = match mode {
-                    // Reverse-Z: greater is closer.
+                let (label, layout, fragment) = match mode {
                     DepthMode::Tested => (
                         "debug lines (depth tested)",
                         &tested_layout,
-                        wgpu::CompareFunction::GreaterEqual,
                         "fs_line_tested",
                     ),
-                    DepthMode::OnTop => (
-                        "debug lines (on top)",
-                        &on_top_layout,
-                        wgpu::CompareFunction::Always,
-                        "fs_line",
-                    ),
+                    DepthMode::OnTop => ("debug lines (on top)", &on_top_layout, "fs_line"),
                 };
                 device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                     label: Some(label),
@@ -162,20 +155,14 @@ impl RenderFeature for DebugLinesFeature {
                         cull_mode: None,
                         ..Default::default()
                     },
-                    depth_stencil: Some(wgpu::DepthStencilState {
-                        format: gpu.formats.depth,
-                        depth_write_enabled: Some(false),
-                        depth_compare: Some(compare),
-                        stencil: Default::default(),
-                        bias: Default::default(),
-                    }),
+                    depth_stencil: None,
                     multisample: Default::default(),
                     fragment: Some(wgpu::FragmentState {
                         module: &shader,
                         entry_point: Some(fragment),
                         compilation_options: Default::default(),
                         targets: &[Some(wgpu::ColorTargetState {
-                            format: gpu.formats.hdr,
+                            format: gpu.formats.ldr,
                             blend: Some(wgpu::BlendState::ALPHA_BLENDING),
                             write_mask: wgpu::ColorWrites::ALL,
                         })],
@@ -258,13 +245,27 @@ impl RenderFeature for DebugLinesFeature {
         self.counts[0] > 0
     }
 
-    fn draw(&self, phase: RenderPhase, pass: &mut wgpu::RenderPass<'_>, _ctx: &FrameContext) {
-        if phase != RenderPhase::Transparent || self.counts == [0, 0] {
+    fn overlay(&mut self, encoder: &mut wgpu::CommandEncoder, ctx: &FrameContext) {
+        if self.counts == [0, 0] {
             return;
         }
         let Some(buffer) = &self.vertices else {
             return;
         };
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("debug lines"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: ctx.ldr,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Load,
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            ..Default::default()
+        });
+        pass.set_bind_group(0, ctx.frame_group, &[]);
         pass.set_vertex_buffer(0, buffer.buffer.slice(..));
         let [tested, on_top] = self.counts;
         if tested > 0
