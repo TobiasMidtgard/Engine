@@ -158,6 +158,13 @@ struct Shading {
 }
 
 impl Shading {
+    /// Ambient occlusion of wood at `p`: darker than the leaves deep in the crown, since a
+    /// limb there is wrapped in foliage on every side.
+    fn wood_ao(&self, p: Vec3) -> f32 {
+        let deep = self.deep * 0.8;
+        deep + (1.0 - deep) * smoothstep(0.1, 1.05, self.crown.depth(p))
+    }
+
     /// Normal and ambient occlusion of a leaf at `p`.
     fn at(&self, p: Vec3, clump: usize) -> (Vec3, f32) {
         let cn = self.crown.normal(p);
@@ -545,6 +552,8 @@ fn cut_color(sp: &PlantSpecies, r: f32) -> Vec4 {
     }
 }
 
+/// Limbs and twigs; `shade` darkens wood deep inside the crown, like the leaves around it
+/// (little sky reaches a spruce's inner limbs).
 fn add_branches(
     b: &mut MeshBuilder,
     sp: &PlantSpecies,
@@ -552,6 +561,7 @@ fn add_branches(
     h: f32,
     lod: bool,
     seed: u64,
+    shade: &Shading,
 ) {
     let many = branches.iter().filter(|b| b.level == 1).count() > 30;
     for (bi, br) in branches.iter().enumerate() {
@@ -572,7 +582,9 @@ fn add_branches(
             _ => 3,
         };
         let path = &br.path;
-        let color = |i: usize, _a: f32| bark_color(sp, path[i].y, h, i + bi * 7, seed);
+        let color = |i: usize, _a: f32| {
+            bark_color(sp, path[i].y, h, i + bi * 7, seed) * shade.wood_ao(path[i])
+        };
         b.tube(path, &br.radius, sides, 0.5, &color, None, None);
     }
 }
@@ -780,7 +792,7 @@ fn assemble(
             if sapling { None } else { Some(&cap) },
             Some(&tip),
         );
-        add_branches(&mut b, sp, branches, h, lod, seed);
+        add_branches(&mut b, sp, branches, h, lod, seed, &shading);
         let mut f = MeshBuilder::new();
         for c in &crowns.cards {
             if !lod || c.far {
@@ -1145,8 +1157,8 @@ fn conifer(sp: &PlantSpecies, seed: u64, sapling: bool) -> PlantMeshes {
                 let sag = if pine { 0.0 } else { -0.1 * (1.0 - f) };
                 Vec3::Y * (sh.tip_bend * 0.3 * f + sag) + jitter(&mut rng, gnarl)
             });
-            let r_start =
-                (r_t * 0.45).min(0.06 + sp.trunk_radius_m * 0.12) * (0.5 + 0.5 * envelope);
+            // Conifer limbs stay slender (a few centimeters), even low on an old trunk.
+            let r_start = (r_t * 0.3).min(0.03 + sp.trunk_radius_m * 0.06) * (0.5 + 0.5 * envelope);
             let br = taper(segs, r_start, 0.008);
             let tint = leaf_tint(sp, &mut rng);
             if pine {
@@ -1420,7 +1432,7 @@ fn shrub(sp: &PlantSpecies, seed: u64) -> PlantMeshes {
     };
     for lod in [false, true] {
         let mut b = MeshBuilder::new();
-        add_branches(&mut b, sp, &cr.branches, h, lod, seed);
+        add_branches(&mut b, sp, &cr.branches, h, lod, seed, &shading);
         let mut f = MeshBuilder::new();
         for c in &cr.cards {
             if !lod || c.far {
