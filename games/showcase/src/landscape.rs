@@ -13,7 +13,9 @@ use engine::core::math::smoothstep;
 use engine::prelude::*;
 use engine::render::Vertex;
 use engine::world::SurfaceId;
-use engine::world::physical::{GroundQuery, GroundSample};
+use engine::world::physical::{
+    Deformation, GroundQuery, GroundSample, SurfaceMaterial, SurfaceMaterials,
+};
 
 /// Planet radius used to curve the far terrain so it meets the atmosphere's planet (m).
 const PLANET_RADIUS: f64 = 6_360_000.0;
@@ -155,10 +157,31 @@ pub enum Cover {
     Wood,
     Metal,
     Puddle,
+    Ice,
+    Concrete,
 }
 
 /// Number of [`Cover`] kinds.
-pub const COVER_KINDS: usize = 13;
+pub const COVER_KINDS: usize = 15;
+
+/// Every [`Cover`] kind, in order.
+pub const COVERS: [Cover; COVER_KINDS] = [
+    Cover::Grass,
+    Cover::Forest,
+    Cover::Dirt,
+    Cover::Cobble,
+    Cover::Sand,
+    Cover::Rock,
+    Cover::Snow,
+    Cover::LakeBed,
+    Cover::Mud,
+    Cover::Gravel,
+    Cover::Wood,
+    Cover::Metal,
+    Cover::Puddle,
+    Cover::Ice,
+    Cover::Concrete,
+];
 
 impl Cover {
     /// Footstep surface name in [`SurfaceMaterials`].
@@ -173,10 +196,12 @@ impl Cover {
             Cover::Snow => "snow",
             Cover::LakeBed => "mud",
             Cover::Mud => "mud",
-            Cover::Gravel => "rock",
+            Cover::Gravel => "gravel",
             Cover::Wood => "wood",
             Cover::Metal => "metal",
             Cover::Puddle => "water",
+            Cover::Ice => "ice",
+            Cover::Concrete => "concrete",
         }
     }
 
@@ -188,6 +213,12 @@ impl Cover {
             Cover::Sand => Some(Vec3::new(0.45, 0.38, 0.25)),
             Cover::Gravel => Some(Vec3::new(0.2, 0.19, 0.18)),
             Cover::Dirt => Some(Vec3::new(0.17, 0.12, 0.07)),
+            Cover::Ice => Some(Vec3::new(0.55, 0.65, 0.72)),
+            Cover::Concrete => Some(Vec3::new(0.3, 0.29, 0.27)),
+            Cover::Wood => Some(Vec3::new(0.2, 0.12, 0.06)),
+            Cover::Metal => Some(Vec3::new(0.16, 0.16, 0.17)),
+            Cover::Puddle => Some(Vec3::new(0.05, 0.04, 0.03)),
+            Cover::Forest => Some(Vec3::new(0.12, 0.07, 0.03)),
             _ => None,
         }
     }
@@ -313,11 +344,12 @@ pub struct Landscape {
     pub cave: CaveHill,
     /// Woodland centers on the hills (x, z, radius) beyond the forest zone.
     pub woods: Vec<(DVec2, f64)>,
-    /// Rectangles (min x/z, max x/z) with their own ground: the footstep trail's mud, snow,
-    /// sand and gravel.
+    /// Rectangles (min x/z, max x/z) with their own ground: the footprint lab's mud, snow and
+    /// sand.
     pub patches: Vec<(DVec2, DVec2, Cover)>,
-    /// Footstep surface ids by [`Cover`], filled from [`SurfaceMaterials`].
-    pub surface_ids: [SurfaceId; COVER_KINDS],
+    /// Ground laid out by module demos (the footstep trail): the cover at (x, z), or `None`
+    /// to leave the landscape's own. Checked before `patches`.
+    pub painters: Vec<fn(f64, f64) -> Option<Cover>>,
     /// Farm fields on the valley floor: grid cell and crop (see [`Landscape::plant_fields`]).
     pub fields: Vec<((i32, i32), Crop)>,
     /// Rock steps (the cliff the waterfall drops over).
@@ -753,10 +785,15 @@ impl Landscape {
     }
 
     fn patch_at(&self, x: f64, z: f64) -> Option<Cover> {
-        self.patches
+        self.painters
             .iter()
-            .find(|(min, max, _)| x >= min.x && z >= min.y && x <= max.x && z <= max.y)
-            .map(|p| p.2)
+            .find_map(|paint| paint(x, z))
+            .or_else(|| {
+                self.patches
+                    .iter()
+                    .find(|(min, max, _)| x >= min.x && z >= min.y && x <= max.x && z <= max.y)
+                    .map(|p| p.2)
+            })
     }
 
     /// Linear albedo of the ground here (vertex color of the terrain mesh).
@@ -843,11 +880,11 @@ impl Landscape {
         c * (0.85 + 0.3 * n2)
     }
 
-    /// Footstep surface id here.
-    pub fn surface(&self, x: f64, z: f64) -> SurfaceId {
+    /// What covers the ground at (x, z), from the height and slope there.
+    pub fn cover_at(&self, x: f64, z: f64) -> Cover {
         let h = self.height(x, z);
         let n = self.normal(x, z, 0.5);
-        self.surface_ids[self.cover(x, z, h, n) as usize]
+        self.cover(x, z, h, n)
     }
 }
 
@@ -862,15 +899,47 @@ pub fn shared() -> &'static std::sync::Arc<Landscape> {
 }
 
 /// The landscape as the world's ground (footsteps, foliage, AI and physics demos read it).
-pub struct LandscapeGround(pub std::sync::Arc<Landscape>);
+pub struct LandscapeGround {
+    pub land: std::sync::Arc<Landscape>,
+    /// Footstep surface ids by [`Cover`].
+    pub surface_ids: [SurfaceId; COVER_KINDS],
+}
+
+impl LandscapeGround {
+    /// The ground for `land`, with surface ids from the world's material table. Registers the
+    /// materials the landscape uses that the default table lacks (gravel), so the ids don't
+    /// depend on which demo happens to register them first.
+    pub fn new(land: std::sync::Arc<Landscape>, materials: &mut SurfaceMaterials) -> Self {
+        if materials.id("gravel").is_none() {
+            materials.add(gravel());
+        }
+        let fallback = materials.id("default").unwrap_or_default();
+        let surface_ids = COVERS.map(|c| materials.id(c.surface_name()).unwrap_or(fallback));
+        Self { land, surface_ids }
+    }
+}
+
+/// Loose stones: firm but shifting underfoot, crunchy.
+fn gravel() -> SurfaceMaterial {
+    SurfaceMaterial {
+        name: "gravel".into(),
+        friction: 0.7,
+        density: 1_800.0,
+        absorbency: 0.15,
+        deformation: Deformation::Granular { depth_m: 0.01 },
+        footstep_sound: "footstep.gravel".into(),
+        impact_effect: "impact.gravel".into(),
+        ..Default::default()
+    }
+}
 
 impl GroundQuery for LandscapeGround {
     fn sample(&self, p: DVec3) -> Option<GroundSample> {
-        let l = &self.0;
+        let l = &self.land;
         Some(GroundSample {
             height: l.height(p.x, p.z),
             normal: l.normal(p.x, p.z, 0.5),
-            surface: l.surface(p.x, p.z),
+            surface: self.surface_ids[l.cover_at(p.x, p.z) as usize],
         })
     }
 }
@@ -1022,6 +1091,27 @@ mod tests {
             land.lake_depth(end.x, end.y) > 0.5,
             "the stream ends in the lake"
         );
+    }
+
+    #[test]
+    fn ground_reports_the_footstep_trail_surfaces() {
+        let land = test_land();
+        let mut table = SurfaceMaterials::default();
+        let ground = LandscapeGround::new(std::sync::Arc::new(land), &mut table);
+        let at = |x: f64, z: f64| {
+            let s = ground.sample(DVec3::new(x, 0.0, z)).unwrap().surface;
+            table.get(s).name.clone()
+        };
+        // The trail's first straight runs along x at z = 150 - 7: grass, mud, snow.
+        assert_eq!(at(-12.0, 143.0), "grass");
+        assert_eq!(at(0.0, 143.0), "mud");
+        assert_eq!(at(12.0, 143.0), "snow");
+        // The far bend starts with ice, then gravel (registered by the ground itself), and the
+        // second straight starts with boards.
+        assert_eq!(at(22.95, 145.05), "ice");
+        assert_eq!(at(22.95, 154.95), "gravel");
+        assert_eq!(at(14.0, 157.0), "wood");
+        assert_ne!(at(0.0, 150.0), "wood", "inside the loop is not the trail");
     }
 
     #[test]

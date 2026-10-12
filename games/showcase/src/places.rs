@@ -127,7 +127,7 @@ pub fn places() -> Vec<Place> {
         place(
             "physics",
             "Physics playground",
-            near("physics", [22.0, 12.0, 30.0], [0.0, 2.0, 0.0]),
+            near("physics", [0.0, 24.0, 44.0], [0.0, 2.0, -3.0]),
             13.5,
         ),
         place(
@@ -154,6 +154,15 @@ pub fn places() -> Vec<Place> {
             near("forest", [14.0, 2.5, 12.0], [-10.0, 4.0, -6.0]),
             9.0,
         ),
+        // Water's own test area: a tarn on a hill spilling over falls into a pond. The stream
+        // needs a few seconds to run and the pond to fill.
+        place(
+            "water",
+            "Water test area: tarn, falls, stream and pond",
+            near("water", [62.0, 18.0, 66.0], [0.0, 4.0, 0.0]),
+            16.5,
+        )
+        .warmup(8.0),
         place(
             "meadow",
             "Wildlife meadow by the lake, in the morning",
@@ -169,8 +178,8 @@ pub fn places() -> Vec<Place> {
         place("falls", "Waterfall into the lake", falls_view(), 15.0),
         place(
             "footsteps",
-            "Footstep trail: mud, puddle, sand, gravel, snow, wood, metal",
-            near("footsteps", [9.0, 3.0, -44.0], [0.0, 0.0, 0.0]),
+            "Footstep trail: grass, mud, snow, ice, gravel, boards, grate, underpass, sand",
+            near("footsteps", [-32.0, 7.0, -19.0], [2.0, 0.0, 1.0]),
             14.0,
         ),
         place(

@@ -100,6 +100,13 @@ pub const ZONES: &[Zone] = &[
         module: "water",
     },
     Zone {
+        key: "water",
+        name: "Water test area (tarn, falls, stream, pond, boats)",
+        center: DVec3::new(-330.0, 0.0, 30.0),
+        radius: 95.0,
+        module: "water",
+    },
+    Zone {
         key: "footsteps",
         name: "Footstep trail (mud, snow, sand, gravel, puddles)",
         center: DVec3::new(0.0, 0.0, 150.0),
@@ -247,7 +254,9 @@ pub fn spawn_demos(
             "forest" => ph::forest(commands, lib, land, z, rng),
             "meadow" => ph::meadow(commands, lib, z, rng),
             "lake" => ph::lake(commands, meshes, lib, land, z),
-            "footsteps" => ph::footsteps(commands, lib, z),
+            // The water module's test area (engine_water::demo::spawn_demo) goes here.
+            "water" => {}
+            "footsteps" => engine_audio::demo::spawn_demo(commands, z.center),
             "tracks" => ph::tracks(commands, z),
             "cave" => ph::cave(commands, z, rng),
             "arena" => ph::arena(commands, lib, z),
@@ -331,6 +340,48 @@ pub fn demo_views(z: &Zone) -> Vec<View> {
             .iter()
             .map(|v| View::new(v.key, v.name, v.eye, v.target, v.hour))
             .collect(),
+        "yard" => vec![
+            View::new(
+                "yard_banners",
+                "Banners in the wind",
+                [0.0, 3.0, 2.0],
+                [0.0, 7.5, -18.0],
+                14.5,
+            )
+            .warmup(3.0),
+            View::new(
+                "yard_curtains",
+                "Curtains: shot full of holes, and burning",
+                [-12.0, 3.4, 15.0],
+                [-12.0, 3.2, 6.0],
+                14.5,
+            )
+            .warmup(13.0),
+            View::new(
+                "yard_jelly",
+                "Jelly cubes and the wrecking ball",
+                [1.5, 3.2, 7.5],
+                [0.5, 1.8, -1.0],
+                14.5,
+            )
+            .warmup(4.4),
+            View::new(
+                "yard_bridge",
+                "A walker crossing the rope bridge",
+                [8.0, 6.5, 19.0],
+                [11.0, 2.5, 10.0],
+                14.5,
+            )
+            .warmup(8.0),
+            View::new(
+                "yard_cut_bridge",
+                "A rope bridge cut and falling",
+                [-2.0, 5.0, -2.0],
+                [-2.0, 2.8, -11.0],
+                14.5,
+            )
+            .warmup(7.0),
+        ],
         _ => Vec::new(),
     }
 }
@@ -361,14 +412,10 @@ pub fn landscape(seed: u64) -> Landscape {
     });
     let road = |pts: &[[f64; 2]]| Road::new(pts, 7.0, false);
     let roads = vec![
-        // North: plaza, footstep trail, cave.
-        road(&[
-            [0.0, 38.0],
-            [0.0, 80.0],
-            [0.0, 150.0],
-            [0.0, 220.0],
-            [0.0, 262.0],
-        ]),
+        // North: plaza to the footstep trail, and on from it to the cave (the trail's loop is
+        // the path through its zone).
+        road(&[[0.0, 38.0], [0.0, 80.0], [0.0, 128.0]]),
+        road(&[[0.0, 172.0], [0.0, 220.0], [0.0, 262.0]]),
         // South: plaza, magic circle, track.
         road(&[
             [0.0, -38.0],
@@ -445,7 +492,7 @@ pub fn landscape(seed: u64) -> Landscape {
             (DVec2::new(1050.0, 300.0), 300.0),
         ],
         patches: ground_patches(),
-        surface_ids: surface_ids(),
+        painters: vec![footstep_trail],
         fields: Vec::new(),
         // A cliff south of the lake, with the land behind it raised 9 m.
         scarps: vec![Scarp {
@@ -462,43 +509,12 @@ pub fn landscape(seed: u64) -> Landscape {
     land
 }
 
-/// Footstep surface ids for every [`Cover`] (from the default surface material table).
-fn surface_ids() -> [engine::world::SurfaceId; crate::landscape::COVER_KINDS] {
-    use Cover::*;
-    let table = SurfaceMaterials::default();
-    let mut ids = [engine::world::SurfaceId::default(); crate::landscape::COVER_KINDS];
-    for c in [
-        Grass, Forest, Dirt, Cobble, Sand, Rock, Snow, LakeBed, Mud, Gravel, Wood, Metal, Puddle,
-    ] {
-        ids[c as usize] = table.id(c.surface_name()).unwrap_or_default();
-    }
-    ids
-}
-
-/// The footstep trail: strips of different ground across the road north of the plaza, in walking
-/// order from the plaza (the wooden and metal strips are boards laid on top, see placeholders).
-pub const FOOTSTEP_STRIPS: &[(Cover, f64)] = &[
-    (Cover::Grass, 8.0),
-    (Cover::Mud, 9.0),
-    (Cover::Puddle, 6.0),
-    (Cover::Sand, 8.0),
-    (Cover::Gravel, 8.0),
-    (Cover::Snow, 10.0),
-    (Cover::Wood, 7.0),
-    (Cover::Metal, 6.0),
-    (Cover::Dirt, 8.0),
-];
-
-/// Half width of the footstep trail (m).
-pub const FOOTSTEP_HALF_WIDTH: f64 = 7.0;
-
-/// Rectangles for [`FOOTSTEP_STRIPS`], starting at the south edge of the zone.
 /// The footprint lab's ground: 10 m wide strips running 32 m north–south.
 pub const TRACK_STRIPS: [Cover; 4] = [Cover::Mud, Cover::Snow, Cover::Sand, Cover::Grass];
 
-/// Ground patches: the footstep trail's strips and the footprint lab's.
+/// Ground patches: the footprint lab's strips.
 pub fn ground_patches() -> Vec<(DVec2, DVec2, Cover)> {
-    let mut out = footstep_patches();
+    let mut out = Vec::new();
     let t = zone("tracks").center;
     for (i, cover) in TRACK_STRIPS.iter().enumerate() {
         let x0 = t.x - 20.0 + i as f64 * 10.0;
@@ -511,19 +527,28 @@ pub fn ground_patches() -> Vec<(DVec2, DVec2, Cover)> {
     out
 }
 
-pub fn footstep_patches() -> Vec<(DVec2, DVec2, Cover)> {
-    let z = zone("footsteps");
-    let mut start = z.center.z - FOOTSTEP_STRIPS.iter().map(|s| s.1).sum::<f64>() * 0.5;
-    let mut out = Vec::new();
-    for (cover, len) in FOOTSTEP_STRIPS {
-        out.push((
-            DVec2::new(z.center.x - FOOTSTEP_HALF_WIDTH, start),
-            DVec2::new(z.center.x + FOOTSTEP_HALF_WIDTH, start + len),
-            *cover,
-        ));
-        start += len;
+/// The audio module's footstep trail, painted into the ground so the player, NPCs and rain find
+/// the same surfaces as the trail's walkers.
+fn footstep_trail(x: f64, z: f64) -> Option<Cover> {
+    let c = zone("footsteps").center;
+    let offset = DVec3::new(x - c.x, 0.0, z - c.z);
+    // The trail is about 54 × 22 m; skip the lookup everywhere else.
+    if offset.x.abs() > 28.0 || offset.z.abs() > 10.0 {
+        return None;
     }
-    out
+    Some(match engine_audio::demo::surface_under(offset)? {
+        "mud" => Cover::Mud,
+        "snow" => Cover::Snow,
+        "ice" => Cover::Ice,
+        "gravel" => Cover::Gravel,
+        "wood" => Cover::Wood,
+        "metal" => Cover::Metal,
+        "concrete" => Cover::Concrete,
+        "sand" => Cover::Sand,
+        "leaves" => Cover::Forest,
+        "water" => Cover::Puddle,
+        _ => Cover::Grass,
+    })
 }
 
 /// The Moon at its real size and distance: 1 737 km radius, 384 400 km away.

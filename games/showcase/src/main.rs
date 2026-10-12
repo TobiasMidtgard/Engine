@@ -79,10 +79,11 @@ fn setup(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut images: ResMut<Assets<Image>>,
-    (mut atmosphere, mut settings, mut fog): (
+    (mut atmosphere, mut settings, mut fog, mut surfaces): (
         ResMut<Atmosphere>,
         ResMut<RenderSettings>,
         ResMut<FogSettings>,
+        ResMut<engine::world::SurfaceMaterials>,
     ),
     config: Res<EngineConfig>,
 ) {
@@ -96,7 +97,7 @@ fn setup(
 
     let land = landscape::shared().clone();
     commands.insert_resource(engine::world::Ground(std::sync::Arc::new(
-        landscape::LandscapeGround(land.clone()),
+        landscape::LandscapeGround::new(land.clone(), &mut surfaces),
     )));
     let lib = scenery::build_library(&mut meshes, &mut materials, &mut images);
     let mut rng = Rng::new(config.seed);

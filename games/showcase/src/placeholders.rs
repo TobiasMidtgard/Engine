@@ -2,10 +2,10 @@
 //! `zones::spawn_demos`). Placeholders show where a test case lives and what it will contain;
 //! they don't simulate anything.
 
-use crate::landscape::{Cover, Landscape};
+use crate::landscape::Landscape;
 use crate::meshgen::TreeKind;
 use crate::scenery::{self, Library};
-use crate::zones::{FOOTSTEP_HALF_WIDTH, FOOTSTEP_STRIPS, RUNWAY, Zone};
+use crate::zones::{RUNWAY, Zone};
 use engine::prelude::*;
 use std::f64::consts::TAU as TAU64;
 
@@ -954,93 +954,6 @@ pub fn lake(
     );
 }
 
-/// Footstep trail: strips of grass, mud, a puddle, sand, gravel, snow, boards, a metal grate
-/// and dirt across the road (the ground query reports each surface). The Audio and footsteps
-/// and Planets and terrain threads own it.
-pub fn footsteps(commands: &mut Commands, _lib: &Library, z: &Zone) {
-    let c = z.center;
-    let mut start = c.z - FOOTSTEP_STRIPS.iter().map(|s| s.1).sum::<f64>() * 0.5;
-    let w = FOOTSTEP_HALF_WIDTH as f32 * 2.0;
-    for (cover, len) in FOOTSTEP_STRIPS {
-        let mid = DVec3::new(c.x, 0.0, start + len * 0.5);
-        match cover {
-            Cover::Puddle => {
-                let mut water = StandardMaterial::hex(0x2a2a24)
-                    .with_roughness(0.02)
-                    .with_alpha(0.7);
-                water.receives_wetness = false;
-                spawn(
-                    commands,
-                    cuboid(w, 0.02, *len as f32 - 0.5),
-                    water,
-                    at(mid + DVec3::new(0.0, 0.03, 0.0)),
-                );
-            }
-            Cover::Mud => {
-                let mut mud = StandardMaterial::hex(0x2a1d12).with_roughness(0.35);
-                mud.receives_wetness = false;
-                spawn(
-                    commands,
-                    cuboid(w, 0.04, *len as f32),
-                    mud,
-                    at(mid + DVec3::new(0.0, 0.02, 0.0)),
-                );
-            }
-            Cover::Wood => {
-                for k in 0..(*len as i32 * 4) {
-                    let zz = start + 0.125 + k as f64 * 0.25;
-                    spawn(
-                        commands,
-                        cuboid(w, 0.06, 0.22),
-                        wood(),
-                        at(DVec3::new(c.x, 0.12, zz)),
-                    );
-                }
-                for x in [-5.0, 0.0, 5.0] {
-                    spawn(
-                        commands,
-                        cuboid(0.2, 0.1, *len as f32),
-                        dark_wood(),
-                        at(DVec3::new(c.x + x, 0.05, mid.z)),
-                    );
-                }
-            }
-            Cover::Metal => {
-                for k in 0..(*len as i32 * 5) {
-                    let zz = start + 0.1 + k as f64 * 0.2;
-                    spawn(
-                        commands,
-                        cuboid(w, 0.05, 0.04),
-                        metal(),
-                        at(DVec3::new(c.x, 0.1, zz)),
-                    );
-                }
-                spawn(
-                    commands,
-                    cuboid(w, 0.05, 0.04),
-                    metal(),
-                    at(DVec3::new(c.x, 0.1, mid.z)),
-                );
-            }
-            _ => {}
-        }
-        start += len;
-    }
-    // Sign posts at the start.
-    spawn(
-        commands,
-        cuboid(0.15, 2.2, 0.15),
-        dark_wood(),
-        at(DVec3::new(c.x + 8.5, 1.1, c.z - 36.0)),
-    );
-    spawn(
-        commands,
-        cuboid(1.6, 0.6, 0.08),
-        wood(),
-        at(DVec3::new(c.x + 8.5, 2.0, c.z - 36.0)),
-    );
-}
-
 /// Half width, half depth and height of the cave's inside (m), around the cave zone's center;
 /// the mouth faces −Z.
 pub const CAVE_INSIDE: (f64, f64, f64) = (15.0, 17.0, 9.0);
@@ -1386,13 +1299,18 @@ fn cave_roof(
                 c.x + x + rng.range(-1.2, 1.2) as f64,
                 c.z + z + rng.range(-1.2, 1.2) as f64,
             );
-            let mesh = lib.grass[rng.range_i32(0, lib.grass.len() as i32) as usize];
+            let k = rng.range_i32(0, lib.grass.len() as i32) as usize;
             commands.spawn((
                 Transform::from_translation(DVec3::new(wx, land.cave_roof_height(wx, wz), wz))
                     .with_rotation(Quat::from_rotation_y(rng.range(0.0, TAU)))
                     .with_scale(Vec3::new(1.0, rng.range(0.8, 1.3), 1.0)),
-                MeshRenderer::new(mesh, lib.mats.grass).without_shadows(),
-                scenery::Lod::hide_beyond(mesh, rng.range(45.0, 95.0)),
+                MeshRenderer::new(lib.grass[k], lib.mats.grass).without_shadows(),
+                scenery::Lod::swap_then_hide(
+                    lib.grass[k],
+                    lib.grass_mid[k],
+                    rng.range(20.0, 26.0),
+                    rng.range(45.0, 95.0),
+                ),
             ));
             z += 3.6;
         }
@@ -1780,13 +1698,13 @@ pub fn field_edge(commands: &mut Commands, lib: &Library, z: &Zone, rng: &mut Rn
             if x * x + zz * zz > z.radius * z.radius || inside_fire {
                 continue;
             }
-            let mesh = lib.dry_grass[rng.range_i32(0, lib.dry_grass.len() as i32) as usize];
+            let k = rng.range_i32(0, lib.dry_grass.len() as i32) as usize;
             commands.spawn((
                 Transform::from_translation(c + DVec3::new(x, -0.02, zz))
                     .with_rotation(Quat::from_rotation_y(rng.range(0.0, TAU)))
                     .with_scale(Vec3::new(1.0, rng.range(1.3, 1.9), 1.0)),
-                MeshRenderer::new(mesh, lib.mats.grass).without_shadows(),
-                scenery::Lod::hide_beyond(mesh, 140.0),
+                MeshRenderer::new(lib.dry_grass[k], lib.mats.grass).without_shadows(),
+                scenery::Lod::swap_then_hide(lib.dry_grass[k], lib.dry_grass_mid[k], 26.0, 140.0),
             ));
         }
     }
