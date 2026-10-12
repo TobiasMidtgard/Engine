@@ -42,3 +42,11 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           ENGINE_ASSET_MIRROR: ${{ github.repository }}
         run: cargo run -q -p fetch-assets -- mirror
+      - name: Delete the scratch branch
+        # The pins stay in this run's log and job summary. After a failed run the branch stays,
+        # so the entry can be fixed and pushed there again. The lease leaves a branch alone that
+        # got a newer commit while this ran; that commit's own run deletes it.
+        if: success() && startsWith(github.ref, 'refs/heads/assets/')
+        run: |
+          git push origin --delete --force-with-lease="$GITHUB_REF:$GITHUB_SHA" "$GITHUB_REF" ||
+            echo "::notice::Left $GITHUB_REF_NAME in place: it is gone already or has newer commits."

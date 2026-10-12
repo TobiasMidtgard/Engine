@@ -116,14 +116,18 @@ Storage (the first rule is a test, so CI enforces it):
 
 Adding a file:
 
-1. Add the entry with `sha256 = ""` and push it to a scratch branch named `assets/<area>`
-   (no pull request; CI doesn't run there). The Assets workflow downloads it, copies it to the
-   `asset-mirror` release, and prints `sha256 = "…"` in its log and job summary. Never push an
-   unpinned entry to a pull request: the test job fails until it is pinned.
-2. Paste the pin into the manifest on your working branch, push that, and delete the scratch
-   branch. From then on `cargo run -p fetch-assets` gets the file from the mirror even where
-   the original host is blocked (as it is in the project's cloud sessions). Where the host is
-   reachable, `cargo run -p fetch-assets` fetches unpinned entries and prints the pin itself.
+1. Add the entry with `sha256 = ""` on a scratch branch named `assets/<area>` and push it
+   there, with no pull request (CI doesn't run there): `git switch -C assets/<area> origin/main`,
+   add the entry, commit, `git push -f origin assets/<area>`. The Assets workflow downloads the
+   file, copies it to the `asset-mirror` release, prints `sha256 = "…"` in its log and job
+   summary, and deletes the branch. If the run fails, the branch stays: fix the entry and push
+   again. If it was cancelled (a newer mirror run took its place in the queue), start the Assets
+   workflow on that branch again (workflow_dispatch). Never push an unpinned entry to a pull
+   request: the test job fails until it is pinned.
+2. Paste the pin into the manifest on your working branch and push that. From then on
+   `cargo run -p fetch-assets` gets the file from the mirror even where the original host is
+   blocked (as it is in the project's cloud sessions). Where the host is reachable,
+   `cargo run -p fetch-assets` fetches unpinned entries and prints the pin itself.
 
 Files made here (a model converted to GLB, a baked texture, an offline recording) have no
 download link:
