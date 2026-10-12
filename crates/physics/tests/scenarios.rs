@@ -605,7 +605,7 @@ fn every_api_example_runs() {
         .filter(|e| e.name.starts_with("physics."))
         .map(|e| (e.name.clone(), e.args_example.clone()))
         .collect();
-    assert_eq!(examples.len(), 8);
+    assert_eq!(examples.len(), 9);
     for (name, args) in examples {
         let args = serde_json::from_str(&args).unwrap_or_else(|e| panic!("{name}: {e}"));
         engine_core::registry::call_api(&mut app.world, &name, args)
