@@ -223,6 +223,8 @@ pub const GRASSY_ZONES: &[&str] = &[
 pub const BARE_FOOTPRINTS: &[(&str, [f64; 2], [f64; 2])] = &[
     // The weather station's asphalt yard, sand pit and stone patio.
     ("weather", [-13.5, 13.0], [-8.0, 9.0]),
+    // The siege fortress's gravel breach range.
+    ("fortress", [-26.5, 26.5], [-14.0, -4.0]),
 ];
 
 /// The stream's course (x, z), spring first: through the southern woods, over the cliff south
@@ -268,7 +270,7 @@ pub fn spawn_demos(
             "arena" => engine_npc::demo::spawn_demo(commands, z.center),
             "parkour" => engine_movement::demo::spawn_demo(commands, z.center),
             "fortress" => engine_destruction::demo::spawn_demo(commands, z.center),
-            "voxel" => ph::voxel(commands, meshes, z, rng),
+            "voxel" => engine_destruction::hill::spawn_voxel_hill(commands, z.center),
             "field" => {
                 engine_fire::demo::spawn_demo(commands, z.center);
                 ph::field_edge(commands, lib, z, rng);
@@ -499,6 +501,8 @@ pub fn demo_views(z: &Zone) -> Vec<View> {
             )
             .warmup(7.0),
         ],
+        "fortress" => destruction_views(engine_destruction::demo::VIEWS),
+        "voxel" => destruction_views(engine_destruction::hill::VIEWS),
         "arena" => vec![
             View::new(
                 "arena_duel",
@@ -611,6 +615,18 @@ pub fn demo_views(z: &Zone) -> Vec<View> {
             .collect(),
         _ => Vec::new(),
     }
+}
+
+/// The destruction demos' viewpoints: each restarts its demo on arrival so its moment plays.
+fn destruction_views(views: &[engine_destruction::DemoView]) -> Vec<View> {
+    views
+        .iter()
+        .map(|v| {
+            View::new(v.key, v.name, v.eye, v.target, v.hour)
+                .warmup(v.warmup_secs)
+                .on_arrive(engine_destruction::RESTART_API, "{}")
+        })
+        .collect()
 }
 
 /// The valley: pads for every zone and the runway, roads between them, the lake and the cave
