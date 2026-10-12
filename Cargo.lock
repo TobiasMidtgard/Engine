@@ -883,6 +883,7 @@ dependencies = [
  "bevy_ecs",
  "cpal",
  "crossbeam-channel",
+ "engine_assets",
  "engine_core",
  "engine_render",
  "engine_world",

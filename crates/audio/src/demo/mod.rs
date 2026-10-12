@@ -15,7 +15,7 @@ use std::f64::consts::PI;
 
 use engine_core::math::{DVec3, Quat, Vec3};
 use engine_core::prelude::*;
-use engine_render::{MeshRenderer, Shape, StandardMaterial};
+use engine_render::{Shape, StandardMaterial};
 use engine_world::physical::{Deformation, SurfaceMaterial};
 use engine_world::{ContactKind, GroundContact, SurfaceMaterials};
 
@@ -246,13 +246,7 @@ pub fn spawn_demo(commands: &mut Commands, origin: DVec3) {
         rings.near.push(origin);
     });
 
-    let mut rng = Rng(0x7A11);
-    let mut start = 0.0;
-    for &(name, len) in STRETCHES {
-        ground::build_stretch(commands, origin, name, start, start + len, &mut rng);
-        start += len;
-    }
-    ground::underpass(commands, origin);
+    ground::spawn(commands, origin);
 
     // The walkers, spread round the loop.
     bodies::hiker(
@@ -277,32 +271,12 @@ pub fn spawn_demo(commands: &mut Commands, origin: DVec3) {
     );
 }
 
-/// A tiny deterministic random source for prop placement.
-struct Rng(u64);
-
-impl Rng {
-    fn f(&mut self) -> f32 {
-        self.0 ^= self.0 << 13;
-        self.0 ^= self.0 >> 7;
-        self.0 ^= self.0 << 17;
-        (self.0 >> 40) as f32 / (1u64 << 24) as f32
-    }
-
-    fn range(&mut self, a: f32, b: f32) -> f32 {
-        a + (b - a) * self.f()
-    }
-}
-
 fn mat(hex: u32, roughness: f32) -> StandardMaterial {
     StandardMaterial::hex(hex).with_roughness(roughness)
 }
 
 fn cuboid(x: f32, y: f32, z: f32) -> Shape {
     Shape::Cuboid { size: [x, y, z] }
-}
-
-fn put(commands: &mut Commands, shape: Shape, material: StandardMaterial, transform: Transform) {
-    commands.spawn((transform, MeshRenderer::new(shape, material)));
 }
 
 /// Yaw that turns the -Z forward axis to `dir`.
