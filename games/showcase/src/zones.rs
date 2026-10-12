@@ -255,7 +255,7 @@ pub fn spawn_demos(
             "paddock" => engine_anim::demo::spawn_demo(commands, z.center),
             "physics" => engine_physics::demo::spawn_demo(commands, z.center),
             "yard" => engine_softbody::demo::spawn_demo(commands, z.center),
-            "magic" => ph::magic(commands, lib, z),
+            "magic" => engine_vfx::demo::spawn_demo(commands, z.center),
             "gallery2d" => ph::gallery2d(commands, lib, z),
             "forest" => engine_foliage::demo::spawn_demo(commands, z.center),
             "meadow" => engine_npc::demo::spawn_wildlife(commands, z.center, z.radius * 0.8),
@@ -368,6 +368,19 @@ pub fn demo_views(z: &Zone) -> Vec<View> {
         "field" => engine_fire::demo::VIEWS
             .iter()
             .map(|v| View::new(v.key, v.name, v.eye, v.target, v.hour))
+            .collect(),
+        "physics" => engine_physics::demo::VIEWS
+            .iter()
+            .map(|v| {
+                let view = View::new(v.key, v.name, v.eye, v.target, v.hour).warmup(v.warmup_secs);
+                match v.station {
+                    Some(s) => view.on_arrive(
+                        "physics.proving_ground.replay",
+                        &format!(r#"{{"station": "{}"}}"#, s.key()),
+                    ),
+                    None => view,
+                }
+            })
             .collect(),
         "yard" => vec![
             View::new(
@@ -516,6 +529,10 @@ pub fn demo_views(z: &Zone) -> Vec<View> {
                     v.hour,
                 )
             })
+            .collect(),
+        "magic" => engine_vfx::demo::VIEWS
+            .iter()
+            .map(|v| View::new(v.key, v.name, v.eye, v.target, v.hour).warmup(v.warmup))
             .collect(),
         _ => Vec::new(),
     }

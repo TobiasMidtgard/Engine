@@ -3,16 +3,18 @@
 pub mod demo;
 pub mod embers;
 pub mod field;
+pub mod flipbook;
 pub mod fuel;
 pub mod objects;
 pub mod render;
 pub mod settings;
+mod shift;
 pub mod sim;
 
 use engine_core::math::DVec3;
 use engine_core::prelude::*;
 use engine_render::RenderAppExt;
-use engine_world::WorldPlugin;
+use engine_world::{WorldPlugin, WorldShiftSet};
 use serde_json::{Value, json};
 
 pub use demo::FireDemo;
@@ -98,6 +100,7 @@ impl Plugin for FirePlugin {
                 Update,
                 (sim::sync_lights, sim::apply_charring, demo::run_demos),
             )
+            .add_systems(PostUpdate, shift::shift_fire.in_set(WorldShiftSet::Apply))
             .add_render_feature(render::FireFeature::default());
         register_apis(app);
     }

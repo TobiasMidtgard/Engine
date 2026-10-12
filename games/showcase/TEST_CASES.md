@@ -21,7 +21,7 @@ are built, nothing simulates yet) · ⬜ not visible yet
 | 3 | Cars with real suspension, tires and drivetrain | `track` | Cars, planes and spaceships | 🟨 demo in; being checked on the Rapier backend |
 | 4 | Planes with aerodynamic surfaces | `airfield` (1.2 km runway) | Cars, planes and spaceships | 🟨 demo in; being checked on the Rapier backend |
 | 5 | Spaceships with thrusters and RCS, launching to orbit | `spaceport` | Cars, planes and spaceships | 🟨 demo in; being checked on the Rapier backend |
-| 6 | Extremely well built, efficient physics: stacking, joints, ragdolls | `physics` | Physics and rigid bodies | 🟨 |
+| 6 | Extremely well built, efficient physics: stacking, joints, ragdolls | `physics`, `physics_ragdolls`, `physics_wrecking_ball`, `physics_seesaw`, `physics_pile`, `physics_dominoes`, `physics_bridge`, `physics_turntable` | Physics and rigid bodies | ✅ proving ground: a 30-crate tower standing still, 250 crates, drums and balls raining into a bin, a domino run, crash test dummy ragdolls on stairs, a wrecking ball on a chain, a seesaw catapult, a paddle wheel, a plank bridge, a turntable with a rider; stations replay every 20 to 45 s |
 
 ## Water, fire, smoke, weather
 
@@ -29,7 +29,7 @@ are built, nothing simulates yet) · ⬜ not visible yet
 |---|---|---|---|---|
 | 7 | Realistic water that moves efficiently | `water` (test area), `lake`, `falls` | Water simulation | 🟨 test area live (`water`): a tarn with wind waves, a waterfall, stream and pond that really flow; the valley's `lake` and `falls` still show stand-in water |
 | 8 | Water affected by the environment and players (wakes, splashes, rain filling it) | `water` (test area), `lake` | Water simulation | 🟨 test area live (`water`): boat wakes, swimmer and wader ripples, gunfire and depth-charge splashes, blocks floating by density, rain rings and puddles; `lake` next |
-| 9 | Water splashes (particles) | `lake` | Particles and magic effects | ⬜ |
+| 9 | Water splashes (particles) | `magic_splashes`, `water` | Particles and magic effects | ✅ stones dropping into the Spell court's pond throw a crown, spray, foam and ripples; every splash the water module reports (gunfire, depth charges, dropped blocks in `water`) gets spray too |
 | 10 | Fire that spreads through burnable things like grass | `field`, `fire_front`, `fire_trees`, `fire_campfire`, `fire_night` | Fire and smoke | ✅ burning meadow that spreads downwind and regrows |
 | 11 | Smoke that reacts to bullets, wind currents and explosions | `range` | Fire and smoke | 🟨 firing lanes, fans |
 | 12 | True volumetric clouds with fog | every outdoor viewpoint, `weather_storm`, `stratosphere` | Weather, wind and clouds | ✅ volumetric clouds over the whole valley (fair-weather heaps, storm towers, overcast, fog) that drift with the wind and light up in lightning |
@@ -80,7 +80,7 @@ are built, nothing simulates yet) · ⬜ not visible yet
 
 | # | Test case | Zone / viewpoint | Owner | Status |
 |---|---|---|---|---|
-| 40 | Beautiful magic spells (particles) | `magic` | Particles and magic effects | 🟨 rune circle glows |
+| 40 | Beautiful magic spells (particles) | `magic`, `magic_spells`, `magic_footsteps`, `magic_impacts` | Particles and magic effects | ✅ Spell court: arcane portal, fireballs and frost bolts hitting a wall, lightning between obelisks, a healing aura, fountain, anvil sparks, torches and fireflies; footprint puffs on mud, snow, sand and water and shot impacts on six materials |
 | 41 | Conversation UI between two people | `market` | UI system and maps | 🟨 two villagers |
 | 42 | Shop UI | `market` | UI system and maps | 🟨 stalls |
 | 43 | Inventory UI | `market` | UI system and maps | ⬜ |
