@@ -680,10 +680,10 @@ pub fn grass_tufts() -> TexSet {
     }
     let greens = [
         hex(0x4f6b2c),
-        hex(0x66803a),
-        hex(0x8b8a48),
-        hex(0x5a7633),
-        hex(0x72863c),
+        hex(0x5f7d36),
+        hex(0x7d8443),
+        hex(0x55722f),
+        hex(0x67823a),
     ];
     let mut blades = Vec::new();
     for clump in 0..2 {
@@ -735,7 +735,7 @@ pub fn grass_tufts() -> TexSet {
             }
         }
         let dry = smooth(0.55, 1.0, along);
-        let c = mix3(scale3(tone, 0.7 + 0.3 * along), hex(0xb2a660), dry * 0.5);
+        let c = mix3(scale3(tone, 0.7 + 0.3 * along), hex(0xa29a5a), dry * 0.3);
         Px {
             albedo: c,
             alpha: best,

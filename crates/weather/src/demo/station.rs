@@ -210,7 +210,7 @@ fn litter() -> (Vec<Scatter>, Vec<Scatter>) {
         yaw: rng.next() * TAU,
         size: size * (0.7 + 0.5 * rng.next()),
         variant: (rng.next() * 2.0) as u32 % 2,
-        tint: 0.8 + 0.3 * rng.next(),
+        tint: 0.72 + 0.25 * rng.next(),
     };
     // Along each kerb: leaves drift against it on the asphalt, grass grows behind it and a
     // few weeds come up in the joint.
