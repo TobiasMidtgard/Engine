@@ -129,6 +129,10 @@ fn arena_shell(commands: &mut Commands, origin: DVec3, layout: &mut ArenaLayout)
                     range: 16.0,
                     radius: 0.3,
                 },
+                arena::Flicker {
+                    seed: arena::fire_seed(layout.braziers.len() - 1),
+                    lumens: 2500.0,
+                },
             ));
         }
     }

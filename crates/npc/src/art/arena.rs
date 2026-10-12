@@ -2,15 +2,17 @@
 //!
 //! Everything is generated: tiling PBR texture sets (sand with ripples, footprints and scuffs;
 //! sandstone with bedding, tool marks and pits; weathered timber; forged iron; worn red drum
-//! paint with hazard markings; embroidered banner cloth; glowing coal; woven mats; leather) and
-//! meshes built from cut-stone blocks with rounded, chipped edges, turned and fluted shapes,
-//! planks, straps, studs and cloth. Repeated pieces share one mesh (32 stand segments, four
-//! gates, eight columns, …) and everything is keyed in [`ArtAssets`], so the arena is built
-//! once per world.
+//! paint with hazard markings; embroidered banner cloth; glowing coal; woven mats; leather), an
+//! unlit flame sheet, and meshes built from cut-stone blocks with rounded, chipped edges,
+//! turned and fluted shapes, planks, straps, studs, cloth, rubble and crossed flame cards.
+//! Repeated pieces share one mesh (32 stand segments, four gates, eight columns, …) and
+//! everything is keyed in [`ArtAssets`]. What one world built is kept for the process, so a
+//! second world (another test, a reloaded level) gets the arena in milliseconds.
 //!
 //! [`dress`] puts the art on an arena laid out by `demo::spawn_demo`: visuals go on (or under)
-//! the gameplay entities, whose colliders never change. Without the renderer it falls back to
-//! a few primitive shapes so headless tests stay fast.
+//! the gameplay entities, whose colliders never change. The braziers' fires and lights
+//! flicker through [`flicker_fires`]. Without the renderer it falls back to a few primitive
+//! shapes so headless tests stay fast.
 //!
 //! Frames: Y up, meters. The stands are built per 10° sector in a frame where +Z points from
 //! the arena center through the sector's middle and Z is the distance from the center; blocks
@@ -19,19 +21,22 @@
 
 use std::collections::HashMap;
 use std::f32::consts::{FRAC_PI_2, PI, TAU};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use bevy_ecs::system::SystemState;
 use engine_core::math::hash_u64;
 use engine_core::prelude::*;
 use engine_render::{
-    Image, MaterialRef, Mesh, MeshRef, MeshRenderer, Shape, StandardMaterial, Vertex,
+    AlphaMode, Image, MaterialRef, Mesh, MeshRef, MeshRenderer, PointLight, Shape,
+    StandardMaterial, Vertex,
 };
 use engine_world::physics::{Collider, ColliderShape};
 
 use super::ArtAssets;
 use super::mesh::{
-    BoxOpts, NEG_Y, NEG_Z, POS_Z, SdfOpts, append, arc_points, bake_par, deform, lathe, offset_uv,
-    paint, par_map, rounded_box, sdf_mesh, steps, surface, tint, transformed, tube,
+    BoxOpts, NEG_Y, NEG_Z, POS_Z, SdfOpts, append, arc_points, bake_par, box_lid, deform,
+    image_par, lathe, offset_uv, paint, par_map, rounded_box, sdf_mesh, steps, surface, tint,
+    transformed, tube,
 };
 use super::noise::rand3;
 use super::sdf;
@@ -99,30 +104,57 @@ const DIRS: [Vec2; 16] = {
     d
 };
 
+// The texture generators spend most of their time in these few helpers, so they are inlined
+// even in unoptimized builds.
+
+#[inline(always)]
 fn fade(t: f32) -> f32 {
     t * t * t * (t * (t * 6.0 - 15.0) + 10.0)
 }
 
+/// `i` wrapped into `0..p` (no wrapping for `p <= 0`); skips the division in the usual case
+/// of being at most one period off.
+#[inline(always)]
 fn wrapi(i: i32, p: i32) -> i32 {
-    if p > 0 { i.rem_euclid(p) } else { i }
+    if p <= 0 || (0..p).contains(&i) {
+        i
+    } else if (-p..0).contains(&i) {
+        i + p
+    } else if (p..2 * p).contains(&i) {
+        i - p
+    } else {
+        i.rem_euclid(p)
+    }
 }
 
+/// SplitMix64's finalizer (as `hash_u64`).
+#[inline(always)]
+fn mix64(mut x: u64) -> u64 {
+    x = x.wrapping_add(0x9e37_79b9_7f4a_7c15);
+    x = (x ^ (x >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    x = (x ^ (x >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+    x ^ (x >> 31)
+}
+
+#[inline(always)]
 fn hash2(x: i32, y: i32, seed: u32) -> u64 {
-    hash_u64((x as u32 as u64) ^ ((y as u32 as u64) << 32) ^ ((seed as u64) << 17).rotate_left(23))
+    mix64((x as u32 as u64) ^ ((y as u32 as u64) << 32) ^ ((seed as u64) << 17).rotate_left(23))
 }
 
 /// Gradient noise, about −0.7..0.7, tiling every `per` cells on each axis (0 = never).
+#[inline(always)]
 fn pn(p: Vec2, per: (i32, i32), seed: u32) -> f32 {
     let i = p.floor();
     let f = p - i;
     let (x0, y0) = (i.x as i32, i.y as i32);
-    let g = |dx: i32, dy: i32| {
-        let h = hash2(wrapi(x0 + dx, per.0), wrapi(y0 + dy, per.1), seed);
-        DIRS[(h >> 60) as usize].dot(f - Vec2::new(dx as f32, dy as f32))
-    };
+    let (xa, xb) = (wrapi(x0, per.0), wrapi(x0 + 1, per.0));
+    let (ya, yb) = (wrapi(y0, per.1), wrapi(y0 + 1, per.1));
+    let g = |x: i32, y: i32, d: Vec2| DIRS[(hash2(x, y, seed) >> 60) as usize].dot(d);
+    let (g00, g10) = (g(xa, ya, f), g(xb, ya, f - Vec2::X));
+    let (g01, g11) = (g(xa, yb, f - Vec2::Y), g(xb, yb, f - Vec2::ONE));
     let (u, v) = (fade(f.x), fade(f.y));
-    let a = g(0, 0) + (g(1, 0) - g(0, 0)) * u;
-    let b = g(0, 1) + (g(1, 1) - g(0, 1)) * u;
+    let a = g00 + (g10 - g00) * u;
+    let b = g01 + (g11 - g01) * u;
     a + (b - a) * v
 }
 
@@ -144,6 +176,7 @@ fn fb(p: Vec2, per: (i32, i32), octaves: u32, seed: u32) -> f32 {
 }
 
 /// Uniform 0..1 per integer cell.
+#[inline(always)]
 fn r2(x: i32, y: i32, seed: u32) -> f32 {
     (hash2(x, y, seed) >> 40) as f32 / (1u64 << 24) as f32
 }
@@ -159,6 +192,7 @@ struct Cell {
     rel: Vec2,
 }
 
+#[inline(always)]
 fn cell(p: Vec2, per: (i32, i32), seed: u32) -> Cell {
     let i = p.floor();
     let (x0, y0) = (i.x as i32, i.y as i32);
@@ -168,22 +202,31 @@ fn cell(p: Vec2, per: (i32, i32), seed: u32) -> Cell {
         id: 0.0,
         rel: Vec2::ZERO,
     };
+    const UNIT: f32 = 1.0 / (1u32 << 21) as f32;
+    let mut best = 0u64;
+    let xs = [-1, 0, 1].map(|d| wrapi(x0 + d, per.0));
+    let ys = [-1, 0, 1].map(|d| wrapi(y0 + d, per.1));
     for dy in -1..=1 {
         for dx in -1..=1 {
-            let (cx, cy) = (wrapi(x0 + dx, per.0), wrapi(y0 + dy, per.1));
-            let q = Vec2::new((x0 + dx) as f32, (y0 + dy) as f32)
-                + Vec2::new(r2(cx, cy, seed), r2(cx, cy, seed ^ 0x77));
+            let (cx, cy) = (xs[(dx + 1) as usize], ys[(dy + 1) as usize]);
+            // One hash per cell: 21 bits each for the point's x, y and the cell's id.
+            let h = hash2(cx, cy, seed);
+            let q = Vec2::new(
+                (x0 + dx) as f32 + (h & 0x1f_ffff) as f32 * UNIT,
+                (y0 + dy) as f32 + ((h >> 21) & 0x1f_ffff) as f32 * UNIT,
+            );
             let d = q.distance(p);
             if d < c.d1 {
                 c.d2 = c.d1;
                 c.d1 = d;
-                c.id = r2(cx, cy, seed ^ 0x3131);
+                best = h;
                 c.rel = p - q;
             } else if d < c.d2 {
                 c.d2 = d;
             }
         }
     }
+    c.id = ((best >> 42) & 0x1f_ffff) as f32 * UNIT;
     c
 }
 
@@ -455,8 +498,8 @@ pub fn sand_set() -> TextureSet {
         };
         // Old stains.
         let sc = cell(uv * 4.0, (4, 4), 9);
-        let blot_edge = 0.16 + 0.08 * fb(uv * 40.0, (40, 40), 2, 10);
-        let stain = if sc.id < 0.18 {
+        let stain = if sc.id < 0.18 && sc.d1 < 0.3 {
+            let blot_edge = 0.16 + 0.08 * fb(uv * 40.0, (40, 40), 2, 10);
             (1.0 - smooth(blot_edge * 0.6, blot_edge, sc.d1)) * 0.55
         } else {
             0.0
@@ -527,7 +570,8 @@ fn stone_texel(uv: Vec2) -> Texel {
     // Hairline cracks in some areas.
     let cw = fb(uv * 6.0, (6, 6), 2, 19) * 0.15;
     let ridge = 1.0 - (pn(uv * 5.0 + Vec2::splat(cw), (5, 5), 20) * 2.2).abs();
-    let crack = smooth(0.94, 0.99, ridge) * smooth(0.0, 0.45, big + 0.2 * mid);
+    let crack = smooth(0.955, 0.995, ridge) * smooth(0.1, 0.6, big + 0.2 * mid);
+    let halo = smooth(0.85, 0.99, ridge) * smooth(0.1, 0.6, big + 0.2 * mid);
     let cream = hex(0xd6c3a0);
     let ochre = hex(0xc49d6a);
     let grey = hex(0xaba497);
@@ -537,7 +581,7 @@ fn stone_texel(uv: Vec2) -> Texel {
     // Darker weathered blotches.
     let blotch = smooth(0.35, 0.8, fb(uv * 5.0, (5, 5), 3, 21));
     a = mix(a, a * Vec3::new(0.72, 0.7, 0.66), blotch * 0.5);
-    a *= 1.0 - 0.45 * pit - 0.5 * crack;
+    a *= 1.0 - 0.45 * pit - 0.2 * crack - 0.05 * halo;
     let height = 0.0022 * big
         + 0.0008 * mid
         + 0.0003 * fine
@@ -545,14 +589,14 @@ fn stone_texel(uv: Vec2) -> Texel {
         + 0.0003 * tool_wave * tool_mask
         + 0.0003 * bed
         - 0.0012 * pit
-        - 0.001 * crack;
+        - 0.0004 * crack;
     Texel {
         albedo: a,
         height,
         roughness: (0.83 + 0.07 * fine + 0.1 * pit - 0.04 * tool_mask + 0.05 * blotch)
             .clamp(0.5, 1.0),
         metallic: 0.0,
-        occlusion: (1.0 - 0.45 * pit - 0.5 * crack - 0.08 * (1.0 - bed)).clamp(0.3, 1.0),
+        occlusion: (1.0 - 0.45 * pit - 0.25 * crack - 0.08 * (1.0 - bed)).clamp(0.3, 1.0),
     }
 }
 
@@ -717,19 +761,211 @@ pub fn coal_set() -> (TextureSet, Image) {
             occlusion: 0.5 + 0.5 * dome,
         }
     });
-    let n = 512;
-    let emissive = Image::from_fn(n, n, true, |x, y| {
-        let uv = Vec2::new((x as f32 + 0.5) / n as f32, (y as f32 + 0.5) / n as f32);
+    let emissive = image_par(512, 512, |uv| {
         let g = glow(uv);
-        let c = mix(
-            Vec3::new(0.55, 0.06, 0.0),
-            Vec3::new(1.0, 0.62, 0.22),
-            g * g,
-        ) * g;
-        let s = |v: f32| (v.clamp(0.0, 1.0).powf(1.0 / 2.2) * 255.0) as u8;
-        [s(c.x), s(c.y), s(c.z), 255]
+        (fire_color(0.25 + 0.6 * g) * g * g).extend(1.0)
     });
     (set, emissive)
+}
+
+// ============================================================================== fire
+
+/// Peak emission of the flames, cd/m² (the flame image scales it down toward the tips).
+const FLAME_GLOW: f32 = 100_000.0;
+const FLAME_KEY: &str = "npc/arena/flame";
+
+/// Fire colors by temperature 0..1: dull red, orange, yellow, a pale yellow core (linear).
+fn fire_color(t: f32) -> Vec3 {
+    const STOPS: [(f32, [f32; 3]); 5] = [
+        (0.0, [0.3, 0.025, 0.0]),
+        (0.35, [0.95, 0.2, 0.02]),
+        (0.6, [1.0, 0.45, 0.07]),
+        (0.82, [1.0, 0.7, 0.26]),
+        (1.0, [1.0, 0.9, 0.62]),
+    ];
+    let t = t.clamp(0.0, 1.0);
+    for w in STOPS.windows(2) {
+        let ((t0, a), (t1, b)) = (w[0], w[1]);
+        if t <= t1 {
+            return mix(Vec3::from(a), Vec3::from(b), (t - t0) / (t1 - t0));
+        }
+    }
+    Vec3::from(STOPS[4].1)
+}
+
+/// A tongue of flame on a sheet (x −1..1 across, y 0..1 up): root position, sideways drift
+/// at the tip, height and widest half-width.
+#[derive(Debug, Clone, Copy)]
+struct Tongue {
+    x: f32,
+    drift: f32,
+    height: f32,
+    width: f32,
+}
+
+/// A tall tongue in the middle and smaller ones licking up beside it.
+fn tongues(seed: u64) -> Vec<Tongue> {
+    let mut rng = Rng::new(seed);
+    let mut v = vec![Tongue {
+        x: rng.range(-0.08, 0.08),
+        drift: rng.range(-0.15, 0.15),
+        height: rng.range(0.9, 0.97),
+        width: 0.62,
+    }];
+    for k in 0..5 {
+        let side = if k % 2 == 0 { -1.0 } else { 1.0 };
+        let off = rng.range(0.2, 0.68);
+        v.push(Tongue {
+            x: side * off,
+            drift: side * rng.range(-0.1, 0.2),
+            height: rng.range(0.35, 0.8) * (1.0 - 0.4 * off),
+            width: rng.range(0.22, 0.36),
+        });
+    }
+    v
+}
+
+/// One texel of a flame sheet: linear emission (1 = the hottest) and coverage.
+fn flame_texel(x: f32, y: f32, tongues: &[Tongue], seed: u32) -> Vec4 {
+    // Turbulence grows with height: the tongues sway and tear apart toward their tips.
+    let sway = 0.26 * y.powf(1.2) * fb(Vec2::new(x * 1.1 + 3.0, y * 2.4), (0, 0), 3, seed)
+        + 0.07 * y.sqrt() * pn(Vec2::new(x * 5.0, y * 8.0), (0, 0), seed ^ 3);
+    let xd = x + sway;
+    // A rolling body over the whole bed that the tongues rise from.
+    let body_h = 0.3 + 0.08 * pn(Vec2::new(x * 2.5, 0.5), (0, 0), seed ^ 5);
+    let b = (y / body_h).min(1.0);
+    let qb = 1.0 - xd.abs() / (0.92 * (1.0 - b * b).sqrt()).max(1e-3);
+    let mut cover = smooth(0.0, 0.5, qb) * (1.0 - smooth(0.6, 1.0, b));
+    let mut heat = smooth(0.1, 0.8, qb) * (1.0 - b) * 0.9;
+    for t in tongues {
+        let s = y / t.height;
+        if s >= 1.0 {
+            continue;
+        }
+        let cx = t.x + t.drift * s * s;
+        let hw = t.width * (1.0 - s).powf(0.65) * (0.75 + 0.25 * smooth(0.0, 0.3, s));
+        let q = 1.0 - (xd - cx).abs() / hw.max(1e-3);
+        if q <= 0.0 {
+            continue;
+        }
+        let d = smooth(0.0, 0.8, q) * (1.0 - smooth(0.75, 1.0, s));
+        cover = 1.0 - (1.0 - cover) * (1.0 - d);
+        heat = heat.max(smooth(0.2, 1.0, q) * (1.0 - s).powf(0.6));
+    }
+    // Torn wisps near the tips, streaks inside, nothing at the sheet's edges.
+    let tear = fb(Vec2::new(xd * 3.0, y * 1.6 - 0.3), (0, 0), 3, seed ^ 7);
+    cover *= smooth(-0.3, 0.2, tear + 0.75 - 1.1 * y);
+    cover *= 0.88 + 0.17 * pn(Vec2::new(xd * 9.0, y * 2.5), (0, 0), seed ^ 11);
+    cover *= 1.0 - smooth(0.8, 0.97, x.abs());
+    let t = (cover * (0.45 + 0.55 * heat) * (1.08 - 0.55 * y)).clamp(0.0, 1.0);
+    // Dim, cool edges are thin, so they glow without darkening what is behind them, and the
+    // root fades out where the sheets dip into the coals.
+    let alpha =
+        smooth(0.02, 0.4, cover) * smooth(0.03, 0.16, y) * (0.3 + 0.7 * smooth(0.05, 0.45, t));
+    (fire_color(t) * (0.04 + 0.96 * t * t)).extend(alpha.clamp(0.0, 1.0))
+}
+
+/// Two flame sheets side by side (u 0..½ and ½..1, v 0 at the root), each a few licking
+/// tongues: a pale yellow core through orange to dull red, torn tips. RGB is the emission
+/// (sRGB) and alpha the shape, so one image serves as both.
+pub fn flame_image() -> Image {
+    let sheets = [tongues(31), tongues(47)];
+    image_par(512, 512, |uv| {
+        let k = (uv.x >= 0.5) as usize;
+        let x = (uv.x * 2.0 - k as f32) * 2.0 - 1.0;
+        flame_texel(x, uv.y, &sheets[k], 90 + k as u32 * 13)
+    })
+}
+
+/// A brazier's fire (origin at the root, on the coals): crossed sheets of [`flame_image`],
+/// curved, leaning and twisting as they rise, three tall ones through the middle and smaller
+/// licks around them.
+pub fn flame_mesh(seed: u64) -> Mesh {
+    let mut rng = Rng::new(seed);
+    let mut m = Mesh::default();
+    let mut card = |rng: &mut Rng, at: Vec3, yaw: f32, size: Vec2| {
+        let twist = rng.range(-0.5, 0.5);
+        let lean = Vec3::new(rng.range(-0.06, 0.06), 0.0, rng.range(-0.06, 0.06));
+        let bend = rng.range(-0.12, 0.12);
+        let sheet = (rng.f() < 0.5) as u32 as f32;
+        let flip = rng.f() < 0.5;
+        let (nx, ny) = (6u32, 12u32);
+        let base = m.vertices.len() as u32;
+        for j in 0..=ny {
+            let t = j as f32 / ny as f32;
+            let (sa, ca) = (yaw + twist * t).sin_cos();
+            for i in 0..=nx {
+                let s = i as f32 / nx as f32 * 2.0 - 1.0;
+                let (lx, lz) = (s * size.x * 0.5, bend * (s * s - 0.33) * size.x);
+                let p = at
+                    + Vec3::new(lx * ca + lz * sa, t * size.y - 0.06, lz * ca - lx * sa)
+                    + lean * t * t;
+                let u = if flip { 1.0 - s } else { 1.0 + s } * 0.5;
+                let alpha = 1.0 - smooth(0.8, 1.0, s.abs());
+                m.vertices.push(
+                    Vertex::new(p, Vec3::new(sa, 0.0, ca), Vec2::new((sheet + u) * 0.5, t))
+                        .with_color(Vec4::new(1.0, 1.0, 1.0, alpha)),
+                );
+            }
+        }
+        let w = nx + 1;
+        for j in 0..ny {
+            for i in 0..nx {
+                let a = base + j * w + i;
+                m.indices
+                    .extend_from_slice(&[a, a + 1, a + w + 1, a, a + w + 1, a + w]);
+            }
+        }
+    };
+    let turn = rng.range(0.0, PI);
+    for k in 0..3 {
+        let at = Vec3::new(rng.range(-0.03, 0.03), 0.0, rng.range(-0.03, 0.03));
+        let size = Vec2::new(0.85, 1.2 * rng.range(0.9, 1.05));
+        card(&mut rng, at, turn + k as f32 * PI / 3.0, size);
+    }
+    for k in 0..3 {
+        let a = turn + k as f32 * TAU / 3.0 + rng.range(-0.4, 0.4);
+        let r = rng.range(0.14, 0.2);
+        let at = Vec3::new(a.cos() * r, 0.0, -a.sin() * r);
+        let size = Vec2::new(0.6, rng.range(0.55, 0.7));
+        let yaw = a + FRAC_PI_2 + rng.range(-0.4, 0.4);
+        card(&mut rng, at, yaw, size);
+    }
+    m
+}
+
+/// Makes a fire flicker ([`flicker_fires`]): a flame mesh stretches, sways and turns; a
+/// light wavers around `lumens`. A brazier's flame and light share a seed, so the light
+/// swells as the flame leaps.
+#[derive(Component, Debug, Clone, Copy)]
+pub struct Flicker {
+    /// Phase offset, so neighboring fires don't pulse together.
+    pub seed: f32,
+    /// The light's mean output, lumens (unused on a flame).
+    pub lumens: f32,
+}
+
+/// Animate every [`Flicker`].
+pub fn flicker_fires(
+    time: Res<Time>,
+    mut q: Query<(&Flicker, &mut Transform, Option<&mut PointLight>)>,
+) {
+    let t = time.elapsed_secs();
+    for (f, mut tf, light) in &mut q {
+        let s = f.seed;
+        let wave = |freq: f32, phase: f32| (t * freq + s * phase).sin();
+        let leap = 0.5 * wave(7.3, 1.7) + 0.3 * wave(13.1, 2.9) + 0.2 * wave(21.7, 4.3);
+        match light {
+            Some(mut l) => l.intensity_lm = f.lumens * (0.85 + 0.15 * leap),
+            None => {
+                let squash = 1.0 - 0.05 * leap;
+                tf.scale = Vec3::new(squash, 1.0 + 0.12 * leap, squash);
+                tf.rotation = Quat::from_rotation_y(s * 2.4 + 0.35 * (t * 0.9 + s).sin())
+                    * Quat::from_rotation_x(0.05 * wave(3.7, 1.1))
+                    * Quat::from_rotation_z(0.05 * wave(4.3, 2.2));
+            }
+        }
+    }
 }
 
 /// Which team a banner is for.
@@ -872,7 +1108,7 @@ fn r_arc(q: Vec2, r: f32) -> f32 {
 /// v = 0 at the top rim), the square u 0..0.32, v 0.68..1 is the lid.
 pub fn barrel_set() -> TextureSet {
     const SIDE_V: f32 = 0.68;
-    bake_par(1024, 2.0, |uv| {
+    bake_par(768, 2.0, |uv| {
         if uv.y < SIDE_V {
             let y = 1.0 - uv.y / SIDE_V; // 0 bottom .. 1 top (meters)
             let around = uv.x * 2.01; // meters around
@@ -988,6 +1224,7 @@ fn barrel_lid(uv: Vec2, q: Vec2) -> Texel {
 // ============================================================================== stone kit
 
 /// Value noise in 3D, about −1..1 (cheap: no trigonometry), for sculpting.
+#[inline(always)]
 fn vn3(p: Vec3, seed: u32) -> f32 {
     let i = p.floor();
     let f = p - i;
@@ -1163,6 +1400,9 @@ pub struct Mason {
     pub tone: Tone,
     /// Largest random tilt of a block, radians.
     pub wobble: f32,
+    /// Left-out faces that keep their flat middle ([`box_lid`]): set it while laying blocks
+    /// that overhang what they sit on (copings, treads, cornices), so their undersides close.
+    pub lid: u8,
 }
 
 impl Mason {
@@ -1172,6 +1412,7 @@ impl Mason {
             rng: Rng::new(seed),
             tone,
             wobble: 0.003,
+            lid: 0,
         }
     }
 
@@ -1180,6 +1421,9 @@ impl Mason {
         let grow = self.rng.range(0.002, 0.004);
         let half = (max - min) * 0.5 + Vec3::splat(grow);
         let mut b = rounded_box(half, o);
+        if self.lid & o.skip != 0 {
+            b.merge(&box_lid(half, o, self.lid & o.skip));
+        }
         joint_shade(&mut b);
         let center = (min + max) * 0.5;
         let w = self.wobble;
@@ -1219,16 +1463,23 @@ impl Mason {
 }
 
 /// Darken the rounded edges of a fresh [`rounded_box`] so joints between blocks read as dark
-/// lines of dirt and shadow, not bright bevels.
+/// lines of dirt and shadow, and turn the upper arrises' normals toward the side faces: a
+/// chamfer facing the sun would otherwise catch it as a bright line along every course.
 fn joint_shade(m: &mut Mesh) {
-    paint(m, |_, n| {
-        let k = if n.abs().max_element() < 0.98 {
-            0.7
-        } else {
-            1.0
-        };
-        Vec4::new(k, k * 0.98, k * 0.96, 1.0)
-    });
+    for v in &mut m.vertices {
+        let n = Vec3::from(v.normal);
+        if n.abs().max_element() >= 0.98 {
+            continue;
+        }
+        let k = 0.55;
+        v.color = (Vec4::from(v.color) * Vec4::new(k, k * 0.97, k * 0.94, 1.0)).to_array();
+        let side = Vec3::new(n.x, 0.0, n.z);
+        if n.y > 0.05 && side.length_squared() > 1e-4 {
+            v.normal = (side.normalize() * 0.9 + Vec3::Y * 0.2)
+                .normalize()
+                .to_array();
+        }
+    }
 }
 
 /// Darken vertex colors near the ground (dust and splash), `height` meters up from `ground`.
@@ -1379,13 +1630,15 @@ pub fn stand_segment(seed: u64) -> Mesh {
         (0.8, 1.5),
         sb(0.03).skip(NEG_Y),
     );
+    low.lid = NEG_Y;
     low.course(
         (-xw, xw),
         (0.64, 0.8),
-        (40.96, 42.62),
+        (40.96, 42.72),
         (1.3, 2.0),
         sb(0.05).skip(NEG_Y),
     );
+    low.lid = 0;
     // Seats: a slab with a rounded nosing over a recessed riser, five rows.
     let sx = (-xw + 0.45, xw - 0.45);
     for j in 0..5 {
@@ -1398,13 +1651,15 @@ pub fn stand_segment(seed: u64) -> Mesh {
             (1.2, 2.0),
             sb(0.02).skip(NEG_Y | POS_Z),
         );
+        low.lid = NEG_Y;
         low.course(
             sx,
             (top - 0.12, top),
-            (zf, zf + 0.84),
+            (zf, zf + 0.92),
             (1.3, 2.2),
             sb(0.04).skip(NEG_Y | POS_Z),
         );
+        low.lid = 0;
     }
     // Walkway at the top.
     low.course(
@@ -1414,6 +1669,7 @@ pub fn stand_segment(seed: u64) -> Mesh {
         (0.9, 1.5),
         sb(0.02).skip(NEG_Y),
     );
+    low.lid = NEG_Y;
     low.course(
         (-xw, xw),
         (3.08, 3.2),
@@ -1421,6 +1677,7 @@ pub fn stand_segment(seed: u64) -> Mesh {
         (1.1, 1.8),
         sb(0.04).skip(NEG_Y),
     );
+    low.lid = 0;
     // Half a stair at each edge (the neighbor sector holds the other half).
     for s in [-1.0f32, 1.0] {
         let (x0, x1) = if s > 0.0 {
@@ -1466,6 +1723,7 @@ pub fn stand_segment(seed: u64) -> Mesh {
         );
         y = top;
     }
+    up.lid = NEG_Y;
     up.course(
         (-xa, xa),
         (3.1, 3.3),
@@ -1473,6 +1731,7 @@ pub fn stand_segment(seed: u64) -> Mesh {
         (1.4, 2.2),
         sb(0.04).skip(NEG_Y),
     );
+    up.lid = 0;
     // Arcade: piers, imposts, two arches, attic and cornice.
     let piers = [(-xa, -xa + 0.55), (-0.55, 0.55), (xa - 0.55, xa)];
     for &(a, b) in &piers {
@@ -1485,11 +1744,13 @@ pub fn stand_segment(seed: u64) -> Mesh {
             );
             y = top;
         }
+        up.lid = NEG_Y;
         up.block(
             Vec3::new(a - 0.035, 5.47, z.0 - 0.035),
             Vec3::new(b + 0.035, 5.6, z.1 + 0.035),
             sb(0.025).skip(NEG_Y),
         );
+        up.lid = 0;
     }
     let r = xa * 0.5 - 0.55;
     for xc in [-xa * 0.5, xa * 0.5] {
@@ -1507,6 +1768,7 @@ pub fn stand_segment(seed: u64) -> Mesh {
         );
     }
     up.course((-xa, xa), (7.6, 8.2), z, (1.2, 2.2), sb(0.03).skip(NEG_Y));
+    up.lid = NEG_Y;
     up.course(
         (-xa, xa),
         (8.2, 8.3),
@@ -1521,6 +1783,7 @@ pub fn stand_segment(seed: u64) -> Mesh {
         (1.6, 2.4),
         sb(0.05).skip(NEG_Y),
     );
+    up.lid = 0;
     let mut upper = up.mesh;
     shear(&mut upper, zr);
     lower.merge(&upper);
@@ -1580,11 +1843,13 @@ pub fn entrance_meshes(seed: u64) -> (Mesh, Mesh, Mesh) {
             );
             y = t;
         }
+        low.lid = NEG_Y;
         low.block(
             Vec3::new(x0 - 0.08, 1.72, 40.96),
             Vec3::new(x1 + 0.08, 1.9, 41.64),
             sb(0.05).skip(NEG_Y),
         );
+        low.lid = 0;
         // Body in courses; the top course follows the slope under the coping.
         let mut yb = -1.7;
         for yt in [-0.6, 0.0, 0.55, 1.1, 1.65, 2.2, 2.75, 3.3, 3.85] {
@@ -1664,11 +1929,13 @@ pub fn entrance_meshes(seed: u64) -> (Mesh, Mesh, Mesh) {
             );
             y = t;
         }
+        up.lid = NEG_Y;
         up.block(
             Vec3::new(a - 0.04, 3.45, z.0 - 0.04),
             Vec3::new(b + 0.04, 3.6, z.1 + 0.04),
             sb(0.025).skip(NEG_Y),
         );
+        up.lid = 0;
     }
     arch(
         &mut up,
@@ -1681,6 +1948,7 @@ pub fn entrance_meshes(seed: u64) -> (Mesh, Mesh, Mesh) {
         (-xa, xa),
         &[0.0, 0.6, 1.2, 1.8, 2.4, 3.0, 3.58, 4.16, 4.6],
     );
+    up.lid = NEG_Y;
     up.course(
         (-xa, xa),
         (8.2, 8.3),
@@ -1695,10 +1963,12 @@ pub fn entrance_meshes(seed: u64) -> (Mesh, Mesh, Mesh) {
         (1.6, 2.4),
         sb(0.05).skip(NEG_Y),
     );
+    up.lid = 0;
     // Raised attic with a framed tablet facing the arena.
     let ax = (-xa + 0.35, xa - 0.35);
     up.course(ax, (8.48, 9.1), z, (1.3, 2.2), sb(0.03).skip(NEG_Y));
     up.course(ax, (9.1, 9.72), z, (1.3, 2.2), sb(0.03).skip(NEG_Y));
+    up.lid = NEG_Y;
     up.course(
         (ax.0 - 0.06, ax.1 + 0.06),
         (9.72, 9.95),
@@ -1706,6 +1976,7 @@ pub fn entrance_meshes(seed: u64) -> (Mesh, Mesh, Mesh) {
         (1.6, 2.6),
         sb(0.05).skip(NEG_Y),
     );
+    up.lid = 0;
     up.tone = Tone::Lime;
     let (tx, ty) = (1.7, (8.62, 9.6));
     up.block(
@@ -2102,6 +2373,119 @@ pub fn stone_wall_mesh(seed: u64) -> Mesh {
         );
     }
     grime(&mut m, -0.55, 0.45, 0.4);
+    m
+}
+
+/// Rubble at the foot of a low wall (the frame of [`stone_wall_mesh`]; the ground is at
+/// y = −0.55): fallen fragments and chips heaped against the +Z face toward one end (+X for
+/// variant 0, −X for 1), smaller ones resting on the bigger, grit scattered further out and a
+/// fragment by that end.
+pub fn rubble_mesh(variant: u32) -> Mesh {
+    let mut rng = Rng::new(0x5ab1e + variant as u64 * 31);
+    let side = if variant.is_multiple_of(2) { 1.0 } else { -1.0 };
+    let ground = -0.55;
+    let mut m = Mesh::default();
+    // Fragments placed so far: center (x, z), footprint radius, top.
+    let mut placed: Vec<(Vec2, f32, f32)> = Vec::new();
+    // A tumbled fragment at `x`, `z_out` in front of the wall face, resting on the sand (a
+    // little sunk in) or on the fragments below it.
+    let mut drop = |m: &mut Mesh, rng: &mut Rng, x: f32, z_out: f32, half: Vec3, voxel: f32| {
+        let rot = Quat::from_euler(
+            EulerRot::YXZ,
+            rng.range(0.0, TAU),
+            rng.signed() * 0.5,
+            rng.signed() * 0.5,
+        );
+        let mut b = chipped_block(
+            half,
+            Chip {
+                radius: 0.008,
+                voxel,
+                depth: half.min_element() * 0.6,
+                breaks: 6,
+                open_bottom: false,
+                ..Chip::new(rng.0)
+            },
+        );
+        rng.f();
+        tint(&mut b, tone(rng, Tone::Sand));
+        offset_uv(&mut b, Vec2::new(rng.range(0.0, 8.0), rng.range(0.0, 8.0)));
+        let r = Mat3::from_quat(rot);
+        let e = Vec3::new(
+            r.row(0).abs().dot(half),
+            r.row(1).abs().dot(half),
+            r.row(2).abs().dot(half),
+        );
+        let at = Vec2::new(x, 0.26 + e.z + z_out);
+        let rho = e.x.max(e.z);
+        let base = placed
+            .iter()
+            .filter(|(c, rc, _)| c.distance(at) < (rc + rho) * 0.55)
+            .map(|p| p.2)
+            .fold(ground, f32::max);
+        let y = base + e.y * 0.8;
+        placed.push((at, rho, y + e.y * 0.75));
+        append(
+            m,
+            &b,
+            Mat4::from_rotation_translation(rot, Vec3::new(at.x, y, at.y)),
+        );
+    };
+    let xc = side * 0.85;
+    for _ in 0..4 {
+        let half = Vec3::new(
+            rng.range(0.1, 0.17),
+            rng.range(0.06, 0.09),
+            rng.range(0.08, 0.12),
+        );
+        let (x, z) = (xc + rng.signed() * 0.5, rng.range(0.0, 0.15));
+        drop(&mut m, &mut rng, x, z, half, 0.03);
+    }
+    for _ in 0..7 {
+        let half = Vec3::new(
+            rng.range(0.045, 0.075),
+            rng.range(0.03, 0.05),
+            rng.range(0.035, 0.06),
+        );
+        let (x, z) = (xc + rng.signed() * 0.6, rng.range(0.0, 0.3));
+        drop(&mut m, &mut rng, x, z, half, 0.024);
+    }
+    for _ in 0..10 {
+        let half = Vec3::new(
+            rng.range(0.02, 0.04),
+            rng.range(0.014, 0.028),
+            rng.range(0.016, 0.035),
+        );
+        let (x, z) = (xc + rng.signed() * 0.85, rng.range(0.0, 0.55));
+        drop(&mut m, &mut rng, x, z, half, 0.016);
+    }
+    let half = Vec3::new(0.08, 0.05, 0.07);
+    let z = rng.range(-0.45, -0.3);
+    drop(&mut m, &mut rng, side * 1.78, z, half, 0.024);
+    // Grit: tiny sharp chips (too small to need rounding).
+    for _ in 0..20 {
+        let half = Vec3::new(
+            rng.range(0.006, 0.014),
+            rng.range(0.004, 0.009),
+            rng.range(0.005, 0.012),
+        );
+        let mut b = rounded_box(half, BoxOpts::round(0.0));
+        tint(&mut b, tone(&mut rng, Tone::Sand));
+        offset_uv(&mut b, Vec2::new(rng.range(0.0, 8.0), rng.range(0.0, 8.0)));
+        let rot = Quat::from_euler(EulerRot::YXZ, rng.range(0.0, TAU), rng.signed(), 0.0);
+        let at = Vec3::new(
+            xc + rng.signed() * 1.0,
+            ground + half.y * 0.5,
+            0.3 + rng.range(0.0, 0.8),
+        );
+        append(&mut m, &b, Mat4::from_rotation_translation(rot, at));
+    }
+    grime(&mut m, ground, 0.1, 0.3);
+    // Sand dust settled on top.
+    paint(&mut m, |_, n| {
+        let k = smooth(0.4, 1.0, n.y) * 0.1;
+        Vec4::new(1.0 + k, 1.0 + k * 0.85, 1.0 + k * 0.6, 1.0)
+    });
     m
 }
 
@@ -2529,6 +2913,7 @@ pub fn platform_mesh(half: Vec3, seed: u64) -> Mesh {
         }
     }
     let (ex, ez) = (hx + 0.03, hz + 0.03);
+    ms.lid = NEG_Y;
     for (za, zb) in run(&mut ms.rng, -ez, ez, 0.8, 1.25) {
         ms.course(
             (-ex, ex),
@@ -2562,6 +2947,7 @@ pub fn step_mesh(half: Vec3, seed: u64) -> Mesh {
             );
         }
     }
+    ms.lid = NEG_Y;
     for (za, zb) in run(&mut ms.rng, -hz - 0.02, hz + 0.02, 0.9, 1.4) {
         ms.block(
             Vec3::new(-hx, y1, za),
@@ -2703,6 +3089,7 @@ pub fn wall_run_mesh(half: Vec3, seed: u64) -> Mesh {
             );
         }
     }
+    ms.lid = NEG_Y;
     ms.course(
         (-hz - 0.035, hz + 0.035),
         (y1, hy),
@@ -3314,15 +3701,17 @@ pub enum Mat {
     Coal,
     Weave,
     Leather,
+    /// Unlit, blended fire ([`flame_image`]).
+    Flame,
 }
 
 /// Emission of the glowing coal seams (the emissive image scales it down elsewhere).
-const COAL_GLOW: f32 = 3000.0;
+const COAL_GLOW: f32 = 40_000.0;
 const COAL_GLOW_KEY: &str = "npc/arena/coal/emissive";
 
 impl Mat {
     /// Every material, the slowest to bake first.
-    pub const ALL: [Mat; 11] = [
+    pub const ALL: [Mat; 12] = [
         Mat::Sand,
         Mat::Stone,
         Mat::Wood,
@@ -3334,6 +3723,7 @@ impl Mat {
         Mat::Coal,
         Mat::Brass,
         Mat::Leather,
+        Mat::Flame,
     ];
 
     fn key(self) -> &'static str {
@@ -3349,6 +3739,7 @@ impl Mat {
             Mat::Coal => "arena/coal",
             Mat::Weave => "arena/mat",
             Mat::Leather => "arena/leather",
+            Mat::Flame => "arena/flame",
         }
     }
 
@@ -3375,21 +3766,52 @@ impl Mat {
             Mat::Coal => tiled(span::COAL).with_emissive([1.0, 1.0, 1.0], COAL_GLOW),
             Mat::Weave => tiled(span::MAT),
             Mat::Leather => tiled(span::LEATHER),
+            Mat::Flame => StandardMaterial {
+                base_color: [0.0, 0.0, 0.0, 1.0],
+                unlit: true,
+                alpha_mode: AlphaMode::Blend,
+                double_sided: true,
+                ..Default::default()
+            }
+            .with_emissive([1.0; 3], FLAME_GLOW),
         }
     }
 
-    fn bake(self) -> TextureSet {
+    fn bake(self) -> Baked {
+        let set = |set: TextureSet| Baked {
+            set: Some(set),
+            glow: None,
+        };
         match self {
-            Mat::Sand => sand_set(),
-            Mat::Stone => stone_set(),
-            Mat::Wood => wood_set(),
-            Mat::Iron => iron_set(),
-            Mat::Brass => brass_set(),
-            Mat::Barrel => barrel_set(),
-            Mat::Banner(t) => banner_set(t),
-            Mat::Coal => coal_set().0,
-            Mat::Weave => mat_set(),
-            Mat::Leather => leather_set(),
+            Mat::Sand => set(sand_set()),
+            Mat::Stone => set(stone_set()),
+            Mat::Wood => set(wood_set()),
+            Mat::Iron => set(iron_set()),
+            Mat::Brass => set(brass_set()),
+            Mat::Barrel => set(barrel_set()),
+            Mat::Banner(t) => set(banner_set(t)),
+            Mat::Coal => {
+                let (set, glow) = coal_set();
+                Baked {
+                    set: Some(set),
+                    glow: Some(glow),
+                }
+            }
+            Mat::Weave => set(mat_set()),
+            Mat::Leather => set(leather_set()),
+            Mat::Flame => Baked {
+                set: None,
+                glow: Some(flame_image()),
+            },
+        }
+    }
+
+    /// The key of the material's emission image, if it glows.
+    fn glow_key(self) -> Option<&'static str> {
+        match self {
+            Mat::Coal => Some(COAL_GLOW_KEY),
+            Mat::Flame => Some(FLAME_KEY),
+            _ => None,
         }
     }
 
@@ -3397,26 +3819,69 @@ impl Mat {
         let Some(images) = art.images.as_ref() else {
             return false;
         };
-        images
-            .loaded_by_key(&format!("npc/{}/orm", self.key()))
-            .is_some()
-            && (self != Mat::Coal || images.loaded_by_key(COAL_GLOW_KEY).is_some())
+        (self == Mat::Flame
+            || images
+                .loaded_by_key(&format!("npc/{}/orm", self.key()))
+                .is_some())
+            && self
+                .glow_key()
+                .is_none_or(|k| images.loaded_by_key(k).is_some())
     }
 }
 
-/// The material `m` (its textures baked on first use). `None` without the renderer.
+/// The material `m` (its textures baked on first use, or taken from what this process baked
+/// for another world). `None` without the renderer.
 pub fn material(art: &mut ArtAssets, m: Mat) -> Option<MaterialRef> {
-    let mut r = art.material(m.key(), m.base(), || m.bake())?;
-    if m == Mat::Coal {
-        let glow = art
-            .images
-            .as_mut()?
-            .get_or_insert_keyed(COAL_GLOW_KEY, || coal_set().1);
-        if let MaterialRef::Inline(s) = &mut r {
-            s.emissive_texture = Some(glow);
-        }
+    if !m.loaded(art) {
+        store(art, m, &baked(m))?;
     }
-    Some(r)
+    let images = art.images.as_mut()?;
+    let mut s = m.base();
+    if m != Mat::Flame {
+        let k = format!("npc/{}", m.key());
+        let orm = images.loaded_by_key(&format!("{k}/orm"))?;
+        s.base_color_texture = Some(images.loaded_by_key(&format!("{k}/albedo"))?);
+        s.normal_texture = Some(images.loaded_by_key(&format!("{k}/normal"))?);
+        s.metallic_roughness_texture = Some(orm);
+        s.occlusion_texture = Some(orm);
+        // The ORM map carries roughness and metalness; the factors scale it.
+        s.perceptual_roughness = 1.0;
+        s.metallic = 1.0;
+    }
+    if let Some(k) = m.glow_key() {
+        let glow = images.loaded_by_key(k)?;
+        if m == Mat::Flame {
+            // The flame image's alpha is the flame's shape.
+            s.base_color_texture = Some(glow);
+        }
+        s.emissive_texture = Some(glow);
+    }
+    Some(MaterialRef::Inline(s))
+}
+
+/// `m` baked, from the process cache when an earlier world baked it.
+fn baked(m: Mat) -> Arc<Baked> {
+    if let Some(b) = lock().textures.get(&m) {
+        return b.clone();
+    }
+    let b = Arc::new(m.bake());
+    lock().textures.insert(m, b.clone());
+    b
+}
+
+/// Put `m`'s baked images in the image store.
+fn store(art: &mut ArtAssets, m: Mat, b: &Baked) -> Option<()> {
+    let images = art.images.as_mut()?;
+    if let Some(set) = &b.set {
+        let k = format!("npc/{}", m.key());
+        images.insert_keyed(&format!("{k}/albedo"), set.albedo.clone());
+        images.insert_keyed(&format!("{k}/normal"), set.normal.clone());
+        images.insert_keyed(&format!("{k}/orm"), set.orm.clone());
+    }
+    if let (Some(glow), Some(k)) = (&b.glow, m.glow_key()) {
+        images.insert_keyed(k, glow.clone());
+    }
+    Some(())
 }
 
 /// Meshes stored under `keys` (built together by `make` when any is missing). `None` without
@@ -3479,9 +3944,11 @@ pub enum Piece {
     WallRun(Vec3),
 }
 
-/// One mesh job: the keys it fills and the builder.
+/// One mesh job: the keys it fills, what the meshes depend on (for the process cache) and
+/// the builder.
 struct Spec {
     keys: Vec<String>,
+    tag: String,
     make: Box<dyn Fn() -> Vec<Mesh> + Send + Sync>,
 }
 
@@ -3491,7 +3958,16 @@ fn spec<const N: usize>(
 ) -> Spec {
     Spec {
         keys: keys.iter().map(|k| k.to_string()).collect(),
+        tag: keys.join(" "),
         make: Box::new(move || make().into_iter().collect()),
+    }
+}
+
+impl Spec {
+    /// Meshes that depend on the layout (`params`) are cached per layout.
+    fn tagged(mut self, params: impl std::fmt::Debug) -> Spec {
+        self.tag = format!("{} {params:?}", self.tag);
+        self
     }
 }
 
@@ -3534,9 +4010,15 @@ fn specs(layout: &ArenaLayout) -> Vec<Spec> {
         v.push(spec([&format!("arena/banner_cloth{k}")], move || {
             [banner_cloth_mesh(800 + k as u64)]
         }));
+        v.push(spec([&format!("arena/rubble{k}")], move || {
+            [rubble_mesh(k)]
+        }));
+        v.push(spec([&format!("arena/flame{k}")], move || {
+            [flame_mesh(990 + k as u64)]
+        }));
     }
     let trample = layout.trample.clone();
-    v.push(spec(["arena/floor"], move || [floor_mesh(&trample)]));
+    v.push(spec(["arena/floor"], move || [floor_mesh(&trample)]).tagged(&layout.trample));
     v.push(spec(
         ["arena/wall_timber_wood", "arena/wall_timber_iron"],
         || {
@@ -3547,19 +4029,23 @@ fn specs(layout: &ArenaLayout) -> Vec<Spec> {
     for &(_, p) in &layout.pieces {
         match p {
             Piece::Platform(half) => {
-                v.push(spec(["arena/platform"], move || [platform_mesh(half, 900)]))
+                v.push(spec(["arena/platform"], move || [platform_mesh(half, 900)]).tagged(half))
             }
-            Piece::Step(k, half) => v.push(spec([&format!("arena/step{k}")], move || {
-                [step_mesh(half, 910 + k as u64)]
-            })),
-            Piece::Ramp(half, tilt, ground) => {
-                v.push(spec(["arena/ramp_wood", "arena/ramp_iron"], move || {
+            Piece::Step(k, half) => v.push(
+                spec([&format!("arena/step{k}")], move || {
+                    [step_mesh(half, 910 + k as u64)]
+                })
+                .tagged(half),
+            ),
+            Piece::Ramp(half, tilt, ground) => v.push(
+                spec(["arena/ramp_wood", "arena/ramp_iron"], move || {
                     let (w, i) = ramp_meshes(half, tilt, ground, 920);
                     [w, i]
-                }))
-            }
+                })
+                .tagged((half, tilt, ground)),
+            ),
             Piece::WallRun(half) => {
-                v.push(spec(["arena/wall_run"], move || [wall_run_mesh(half, 930)]))
+                v.push(spec(["arena/wall_run"], move || [wall_run_mesh(half, 930)]).tagged(half))
             }
             _ => {}
         }
@@ -3601,64 +4087,77 @@ enum Work<'a> {
     Mesh(&'a Spec),
 }
 
-enum Done {
-    Tex(Mat, Box<TextureSet>, Option<Image>),
-    Mesh(Vec<String>, Vec<Mesh>),
+enum Done<'a> {
+    Tex(Mat, Arc<Baked>),
+    Mesh(&'a Spec, Vec<Arc<Mesh>>),
 }
 
 impl Kit {
-    /// Build whatever is missing on all cores, store it, and collect the handles.
+    /// Build whatever is missing on all cores (or take it from what this process built for
+    /// another world), store it, and collect the handles.
     fn load(art: &mut ArtAssets, layout: &ArenaLayout) -> Option<Kit> {
         let specs = specs(layout);
-        let mut work: Vec<Work> = Mat::ALL
-            .into_iter()
-            .filter(|m| !m.loaded(art))
-            .map(Work::Tex)
-            .collect();
-        {
+        let missing_mats: Vec<Mat> = Mat::ALL.into_iter().filter(|m| !m.loaded(art)).collect();
+        let missing_specs: Vec<&Spec> = {
             let store = art.meshes.as_ref()?;
-            for s in &specs {
-                if s.keys
-                    .iter()
-                    .any(|k| store.loaded_by_key(&format!("npc/{k}")).is_none())
-                {
-                    work.push(Work::Mesh(s));
+            specs
+                .iter()
+                .filter(|s| {
+                    s.keys
+                        .iter()
+                        .any(|k| store.loaded_by_key(&format!("npc/{k}")).is_none())
+                })
+                .collect()
+        };
+        let mut textures: Vec<(Mat, Arc<Baked>)> = Vec::new();
+        let mut meshes: Vec<(String, Arc<Mesh>)> = Vec::new();
+        let mut work: Vec<Work> = Vec::new();
+        {
+            let cache = lock();
+            for m in missing_mats {
+                match cache.textures.get(&m) {
+                    Some(b) => textures.push((m, b.clone())),
+                    None => work.push(Work::Tex(m)),
+                }
+            }
+            for s in missing_specs {
+                match cache.meshes.get(&s.tag) {
+                    Some(built) => meshes.extend(s.keys.iter().cloned().zip(built.iter().cloned())),
+                    None => work.push(Work::Mesh(s)),
                 }
             }
         }
+        // The slowest jobs (the big textures) are queued first.
         let done = par_map(work.len(), |i| match work[i] {
-            Work::Tex(Mat::Coal) => {
-                let (set, glow) = coal_set();
-                Done::Tex(Mat::Coal, Box::new(set), Some(glow))
-            }
-            Work::Tex(m) => Done::Tex(m, Box::new(m.bake()), None),
-            Work::Mesh(s) => Done::Mesh(s.keys.clone(), (s.make)()),
+            Work::Tex(m) => Done::Tex(m, Arc::new(m.bake())),
+            Work::Mesh(s) => Done::Mesh(s, (s.make)().into_iter().map(Arc::new).collect()),
         });
-        for d in done {
-            match d {
-                Done::Tex(m, set, glow) => {
-                    let images = art.images.as_mut()?;
-                    let k = format!("npc/{}", m.key());
-                    images.insert_keyed(&format!("{k}/albedo"), set.albedo);
-                    images.insert_keyed(&format!("{k}/normal"), set.normal);
-                    images.insert_keyed(&format!("{k}/orm"), set.orm);
-                    if let Some(g) = glow {
-                        images.insert_keyed(COAL_GLOW_KEY, g);
+        {
+            let mut cache = lock();
+            for d in done {
+                match d {
+                    Done::Tex(m, b) => {
+                        cache.textures.insert(m, b.clone());
+                        textures.push((m, b));
                     }
-                }
-                Done::Mesh(keys, built) => {
-                    let store = art.meshes.as_mut()?;
-                    for (k, m) in keys.iter().zip(built) {
-                        store.insert_keyed(&format!("npc/{k}"), m);
+                    Done::Mesh(s, built) => {
+                        meshes.extend(s.keys.iter().cloned().zip(built.iter().cloned()));
+                        cache.meshes.insert(s.tag.clone(), built);
                     }
                 }
             }
+        }
+        for (m, b) in textures {
+            store(art, m, &b)?;
+        }
+        let store = art.meshes.as_mut()?;
+        for (k, m) in meshes {
+            store.insert_keyed(&format!("npc/{k}"), (*m).clone());
         }
         let mut kit = Kit {
             meshes: HashMap::new(),
             mats: HashMap::new(),
         };
-        let store = art.meshes.as_ref()?;
         for s in &specs {
             for k in &s.keys {
                 let h = store.loaded_by_key(&format!("npc/{k}"))?;
@@ -3673,6 +4172,28 @@ impl Kit {
     }
 }
 
+/// A material's baked images: its texture set (none for the flame) and its emission image.
+struct Baked {
+    set: Option<TextureSet>,
+    glow: Option<Image>,
+}
+
+/// What this process has built, so another world (a test, a reloaded level) gets the arena
+/// without building it again. Meshes are keyed by their spec's tag.
+#[derive(Default)]
+struct Cache {
+    textures: HashMap<Mat, Arc<Baked>>,
+    meshes: HashMap<String, Vec<Arc<Mesh>>>,
+}
+
+fn lock() -> std::sync::MutexGuard<'static, Cache> {
+    static CACHE: OnceLock<Mutex<Cache>> = OnceLock::new();
+    CACHE
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+}
+
 /// Spawns art entities and counts the triangles it places.
 struct Dresser<'k> {
     kit: &'k Kit,
@@ -3684,6 +4205,7 @@ impl Dresser<'_> {
         self.part_ex(world, parent, local, key, mat, true);
     }
 
+    /// Like [`Dresser::part`], optionally without shadows, returning the new entity.
     fn part_ex(
         &mut self,
         world: &mut World,
@@ -3692,18 +4214,22 @@ impl Dresser<'_> {
         key: &str,
         mat: Mat,
         shadows: bool,
-    ) {
-        let Some((mesh, tris)) = self.kit.meshes.get(key).cloned() else {
-            return;
-        };
-        let Some(material) = self.kit.mats.get(&mat).cloned() else {
-            return;
-        };
+    ) -> Option<Entity> {
+        let (mesh, tris) = self.kit.meshes.get(key).cloned()?;
+        let material = self.kit.mats.get(&mat).cloned()?;
         self.triangles += tris;
         let mut r = MeshRenderer::new(mesh, material);
         r.cast_shadows = shadows;
-        world.spawn((local, r, ChildOf(parent)));
+        Some(world.spawn((local, r, ChildOf(parent))).id())
     }
+}
+
+/// Height of a brazier's fire (on its coals) above the floor, meters.
+pub const FIRE_HEIGHT: f64 = 1.14;
+
+/// The [`Flicker`] seed of brazier `n` (in `ArenaLayout::braziers` order).
+pub fn fire_seed(n: usize) -> f32 {
+    n as f32 * 1.37 + 0.4
 }
 
 fn yaw_at(a: f64) -> Quat {
@@ -3730,7 +4256,7 @@ pub fn dress(world: &mut World, layout: &ArenaLayout) {
     let origin = layout.origin;
     let id = Transform::default();
     let floor = world.spawn(Transform::from_translation(origin)).id();
-    d.part_ex(world, floor, id, "arena/floor", Mat::Sand, false);
+    let _ = d.part_ex(world, floor, id, "arena/floor", Mat::Sand, false);
     // Stands: 36 sectors of 10°, gates at 0°, 90°, 180° and 270°.
     for i in 0..36u32 {
         let a = i as f64 / 36.0 * std::f64::consts::TAU;
@@ -3789,11 +4315,82 @@ pub fn dress(world: &mut World, layout: &ArenaLayout) {
             Piece::WallRun(_) => d.part(world, e, id, "arena/wall_run", Mat::Stone),
         }
     }
-    for &at in &layout.braziers {
+    // Rubble at the foot of the stone walls, on whichever side and end is clearest of the
+    // other pieces (barrels stand close to some walls).
+    let obstacles: Vec<(Entity, DVec3, f64)> = layout
+        .pieces
+        .iter()
+        .filter_map(|&(e, _)| {
+            let at = world.get::<Transform>(e)?.translation;
+            let r = match &world.get::<Collider>(e)?.shape {
+                ColliderShape::Cuboid { half_extents } => {
+                    Vec2::new(half_extents.x, half_extents.z).length()
+                }
+                ColliderShape::Cylinder { radius, .. } => *radius,
+                _ => return None,
+            };
+            Some((e, at, r as f64))
+        })
+        .chain(
+            layout
+                .braziers
+                .iter()
+                .chain(&layout.mats)
+                .map(|&at| (Entity::PLACEHOLDER, at, 1.0)),
+        )
+        .collect();
+    for &(e, piece) in &layout.pieces {
+        let (Piece::StoneWall(_), Some(&wall)) = (piece, world.get::<Transform>(e)) else {
+            continue;
+        };
+        let mut best = (f64::MIN, 0, wall.rotation);
+        for variant in 0..2u32 {
+            let side = if variant == 0 { 1.0 } else { -1.0 };
+            for turn in [0.0, PI] {
+                let rot = wall.rotation * Quat::from_rotation_y(turn);
+                let clear = [(0.85, 0.6), (0.2, 0.55), (1.8, -0.1), (-0.6, 0.5)]
+                    .iter()
+                    .map(|&(x, z)| {
+                        wall.translation + (rot * Vec3::new(side * x, 0.0, z)).as_dvec3()
+                    })
+                    .flat_map(|p| {
+                        obstacles.iter().filter(|o| o.0 != e).map(move |o| {
+                            let d = p - o.1;
+                            (d.x * d.x + d.z * d.z).sqrt() - o.2
+                        })
+                    })
+                    .fold(f64::MAX, f64::min);
+                if clear > best.0 {
+                    best = (clear, variant, rot);
+                }
+            }
+        }
+        let root = world
+            .spawn(Transform::from_translation(wall.translation).with_rotation(best.2))
+            .id();
+        d.part(
+            world,
+            root,
+            id,
+            &format!("arena/rubble{}", best.1),
+            Mat::Stone,
+        );
+    }
+    // Braziers: the fire flickers in step with the brazier's light (`demo` gives it the same
+    // seed).
+    for (n, &at) in layout.braziers.iter().enumerate() {
         let root = world.spawn(Transform::from_translation(at)).id();
         d.part(world, root, id, "arena/brazier_stone", Mat::Stone);
         d.part(world, root, id, "arena/brazier_iron", Mat::Iron);
-        d.part_ex(world, root, id, "arena/brazier_coal", Mat::Coal, false);
+        let _ = d.part_ex(world, root, id, "arena/brazier_coal", Mat::Coal, false);
+        let fire = Transform::from_translation(DVec3::Y * FIRE_HEIGHT);
+        let key = format!("arena/flame{}", n % 2);
+        if let Some(flame) = d.part_ex(world, root, fire, &key, Mat::Flame, false) {
+            world.entity_mut(flame).insert(Flicker {
+                seed: fire_seed(n),
+                lumens: 0.0,
+            });
+        }
     }
     for (n, &(a, team)) in layout.banners.iter().enumerate() {
         let at = origin + DVec3::new(a.cos() * 47.0, 3.2, a.sin() * 47.0);
@@ -3814,12 +4411,12 @@ pub fn dress(world: &mut World, layout: &ArenaLayout) {
     let ring = world
         .spawn(Transform::from_translation(layout.duel_ring))
         .id();
-    d.part_ex(world, ring, id, "arena/ring_stone", Mat::Stone, false);
-    d.part_ex(world, ring, id, "arena/ring_brass", Mat::Brass, false);
+    let _ = d.part_ex(world, ring, id, "arena/ring_stone", Mat::Stone, false);
+    let _ = d.part_ex(world, ring, id, "arena/ring_brass", Mat::Brass, false);
     for &at in &layout.mats {
         let root = world.spawn(Transform::from_translation(at)).id();
-        d.part_ex(world, root, id, "arena/mat_weave", Mat::Weave, false);
-        d.part_ex(world, root, id, "arena/mat_leather", Mat::Leather, false);
+        let _ = d.part_ex(world, root, id, "arena/mat_weave", Mat::Weave, false);
+        let _ = d.part_ex(world, root, id, "arena/mat_leather", Mat::Leather, false);
     }
     let triangles = d.triangles;
     if let Some(mut diag) = world.get_resource_mut::<Diagnostics>() {

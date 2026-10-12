@@ -174,6 +174,7 @@ impl Plugin for NpcPlugin {
                         visuals::intent_markers,
                         training::build_posts,
                         training::pose_posts,
+                        art::arena::flicker_fires,
                     )
                         .chain()
                         .in_set(NpcSet::Show),
