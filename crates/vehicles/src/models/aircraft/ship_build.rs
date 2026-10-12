@@ -1,0 +1,885 @@
+//! Assembles the spaceplane: builds every mesh, bakes the atlases, defines the materials
+//! (once per world) and spawns the drawn parts under a vehicle body.
+
+use std::f32::consts::{FRAC_PI_2, TAU};
+
+use engine_core::math::{Mat4, Quat, Vec2, Vec3};
+use engine_core::prelude::*;
+use engine_render::{AlphaMode, Image, MaterialRef, Mesh, MeshRef, MeshRenderer, StandardMaterial};
+
+use engine_assets::Assets;
+
+use crate::aero::Aircraft;
+use crate::ship::{Thruster, ThrusterRole};
+use crate::visuals::{HeatGlow, PlumeVisual, SurfaceVisual, WheelVisual};
+use crate::wheels::Wheels;
+
+use super::ship_paint::*;
+use super::ship_parts::*;
+use super::ship_surfaces as ss;
+use super::spaceplane::*;
+use super::toolkit::{smoothstep, *};
+
+/// Axles at rest (right main), body frame.
+pub const NOSE_AXLE: Vec3 = Vec3::new(0.0, -2.23, -7.5);
+pub const MAIN_AXLE: Vec3 = Vec3::new(2.2, -2.22, 4.0);
+/// Twin tires: radius, width of each, gap between them.
+const NOSE_TIRES: (f32, f32, f32) = (0.5, 0.2, 0.14);
+const MAIN_TIRES: (f32, f32, f32) = (0.6, 0.24, 0.16);
+/// Gear wells in the belly (center x, z and half sizes), also painted by the hull painter.
+pub const NOSE_WELL: (Vec2, Vec2) = (Vec2::new(0.0, -7.5), Vec2::new(0.40, 0.78));
+pub const MAIN_WELL: (Vec2, Vec2) = (Vec2::new(2.12, 4.0), Vec2::new(0.36, 0.92));
+
+// ---------------------------------------------------------------- control surfaces
+
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum Control {
+    ElevonIn,
+    ElevonOut,
+    BodyFlap,
+    Rudder,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct Pivot {
+    pub control: Control,
+    pub side: f32,
+    /// Pivot origin and rotation at zero deflection, body frame.
+    pub at: Vec3,
+    pub base: Quat,
+    /// Hinge axis in the pivot frame (+ deflection moves the trailing edge down).
+    pub hinge: Vec3,
+    /// Hinge midpoint in the frame the surface is built in.
+    pub mid: Vec3,
+}
+
+pub fn pivot(control: Control, side: f32) -> Pivot {
+    let mirror = Vec3::new(-1.0, 1.0, 1.0);
+    match control {
+        Control::ElevonIn | Control::ElevonOut => {
+            let (s0, s1) = if control == Control::ElevonIn {
+                ELEVON_IN
+            } else {
+                ELEVON_OUT
+            };
+            let p = wing_panel();
+            let (a, b) = (p.hinge_pt(s0).0, p.hinge_pt(s1).0);
+            let mid = (a + b) * 0.5;
+            let d = (b - a).normalize();
+            let at = wing_to_body(1.0).transform_point3(mid);
+            if side < 0.0 {
+                Pivot {
+                    control,
+                    side,
+                    at: at * mirror,
+                    base: wing_rotation(-1.0),
+                    hinge: d * mirror,
+                    mid,
+                }
+            } else {
+                Pivot {
+                    control,
+                    side,
+                    at,
+                    base: wing_rotation(1.0),
+                    hinge: -d,
+                    mid,
+                }
+            }
+        }
+        Control::BodyFlap => Pivot {
+            control,
+            side,
+            at: FLAP_HINGE,
+            base: Quat::IDENTITY,
+            hinge: Vec3::NEG_X,
+            mid: Vec3::ZERO,
+        },
+        Control::Rudder => {
+            let p = fin_panel();
+            let (a, b) = (p.hinge_pt(RUDDER_SPAN.0).0, p.hinge_pt(RUDDER_SPAN.1).0);
+            let mid = (a + b) * 0.5;
+            Pivot {
+                control,
+                side,
+                at: fin_to_body().transform_point3(mid),
+                base: Quat::from_rotation_z(FRAC_PI_2),
+                hinge: -(b - a).normalize(),
+                mid,
+            }
+        }
+    }
+}
+
+pub fn pivots() -> [Pivot; 7] {
+    [
+        pivot(Control::ElevonIn, -1.0),
+        pivot(Control::ElevonIn, 1.0),
+        pivot(Control::ElevonOut, -1.0),
+        pivot(Control::ElevonOut, 1.0),
+        pivot(Control::BodyFlap, -1.0),
+        pivot(Control::BodyFlap, 1.0),
+        pivot(Control::Rudder, 1.0),
+    ]
+}
+
+fn pivot_name(p: &Pivot) -> String {
+    let side = if p.side < 0.0 { "l" } else { "r" };
+    match p.control {
+        Control::ElevonIn => format!("elevon_in_{side}"),
+        Control::ElevonOut => format!("elevon_out_{side}"),
+        Control::BodyFlap => format!("body_flap_{side}"),
+        Control::Rudder => "rudder".into(),
+    }
+}
+
+fn elevon(control: Control) -> Mesh {
+    let (s0, s1) = if control == Control::ElevonIn {
+        ELEVON_IN
+    } else {
+        ELEVON_OUT
+    };
+    let rows = ((s1 - s0) / 0.12).ceil() as usize;
+    ss::control(&wing_panel(), s0, s1, rows, &wing_uv)
+}
+
+fn rudder() -> Mesh {
+    let rows = ((RUDDER_SPAN.1 - RUDDER_SPAN.0) / 0.15).ceil() as usize;
+    ss::control(&fin_panel(), RUDDER_SPAN.0, RUDDER_SPAN.1, rows, &fin_uv)
+}
+
+/// A control surface's mesh in its pivot frame (the right side's built in its own frame and
+/// mirrored for the left).
+fn pivot_mesh(pv: &Pivot) -> Mesh {
+    let raw = match pv.control {
+        Control::ElevonIn | Control::ElevonOut => elevon(pv.control),
+        Control::BodyFlap => body_flap(&flap_uv),
+        Control::Rudder => rudder(),
+    };
+    let local = transformed(raw, Mat4::from_translation(-pv.mid));
+    if pv.side < 0.0 && pv.control != Control::Rudder {
+        mirrored_x(&local)
+    } else {
+        local
+    }
+}
+
+// ---------------------------------------------------------------- fixed surfaces
+
+fn wing_fixed() -> Mesh {
+    ss::fixed(
+        &wing_panel(),
+        WING_S0,
+        WING_TIP,
+        &[ELEVON_IN, ELEVON_OUT],
+        0.12,
+        36,
+        true,
+        &wing_uv,
+    )
+}
+
+fn fin_fixed() -> Mesh {
+    ss::fixed(
+        &fin_panel(),
+        FIN_S0,
+        FIN_TIP,
+        &[RUDDER_SPAN],
+        0.15,
+        26,
+        true,
+        &fin_uv,
+    )
+}
+
+fn oms_pod() -> Mesh {
+    pod(
+        OMS_HALF,
+        2.4,
+        OMS_Z.0,
+        OMS_Z.1,
+        &oms_radius(),
+        44,
+        48,
+        &oms_uv,
+    )
+}
+
+fn tip_pod() -> Mesh {
+    pod(
+        Vec2::splat(TIP_POD_R),
+        2.0,
+        TIP_POD_Z.0,
+        TIP_POD_Z.1,
+        &tip_pod_radius(),
+        30,
+        28,
+        &tip_pod_uv,
+    )
+}
+
+/// Wing atlas part of a texel by its UV (see the island layout in [`super::spaceplane`]).
+pub fn wing_part(uv: Vec2) -> u8 {
+    let (u, v) = (uv.x, uv.y);
+    if u >= 0.95 && v >= 0.95 {
+        W_EDGE
+    } else if u < 0.305 {
+        W_WING_LOWER
+    } else if u < 0.612 {
+        W_WING_UPPER
+    } else if v >= 0.65 && (0.74..0.87).contains(&u) {
+        if v < 0.743 {
+            W_FLAP_LOWER
+        } else {
+            W_FLAP_UPPER
+        }
+    } else if u < 0.82 {
+        if v < 0.32 { W_FIN_LEFT } else { W_FIN_RIGHT }
+    } else if v < 0.39 {
+        W_OMS
+    } else {
+        W_TIP_POD
+    }
+}
+
+/// Every mesh the wing atlas covers, in the frames its painter expects.
+fn wing_atlas_meshes() -> [Mesh; 9] {
+    [
+        wing_fixed(),
+        elevon(Control::ElevonIn),
+        elevon(Control::ElevonOut),
+        fin_fixed(),
+        rudder(),
+        body_flap(&flap_uv),
+        oms_pod(),
+        tip_pod(),
+        edge_patch(),
+    ]
+}
+
+// ---------------------------------------------------------------- thrusters
+
+/// Where an RCS port sits.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum PortOn {
+    Hull,
+    Oms,
+    TipPod,
+}
+
+/// An RCS thruster's port on the skin: point and outward normal (body frame).
+pub fn rcs_port(h: &Hull, t: &Thruster) -> (Vec3, Vec3, PortOn) {
+    let e = -t.direction.normalize_or(Vec3::Y);
+    let p = t.position;
+    let sx = if p.x < 0.0 { -1.0 } else { 1.0 };
+    if p.x.abs() > 5.0 {
+        let r = TIP_POD_R * tip_pod_radius().at(p.z);
+        let y = TIP_POD.y + e.y.signum() * r;
+        return (
+            Vec3::new(TIP_POD.x * sx, y, p.z),
+            Vec3::Y * e.y.signum(),
+            PortOn::TipPod,
+        );
+    }
+    let in_oms = (OMS_Z.0 + 2.0..OMS_Z.1 - 0.7).contains(&p.z)
+        && (p.x.abs() - OMS_CENTER.x).abs() < OMS_HALF.x * 0.8;
+    if e.y > 0.7 && in_oms {
+        let (q, n) = oms_top(p.x.abs(), p.z);
+        return (
+            Vec3::new(q.x * sx, q.y, q.z),
+            Vec3::new(n.x * sx, n.y, n.z),
+            PortOn::Oms,
+        );
+    }
+    let (q, n) = h.exit(p, e);
+    (q, n, PortOn::Hull)
+}
+
+/// Port plates, hover wells and the like for the painters.
+pub fn layout(h: &Hull, thrusters: &[Thruster]) -> Layout {
+    let mut lay = Layout {
+        hull_ports: Vec::new(),
+        oms_ports: Vec::new(),
+        tip_ports: Vec::new(),
+        hover: Vec::new(),
+    };
+    for t in thrusters {
+        match t.role {
+            ThrusterRole::Rcs => {
+                let (p, n, on) = rcs_port(h, t);
+                let right = |v: Vec3| Vec3::new(v.x.abs(), v.y, v.z);
+                let rn = |v: Vec3| Vec3::new(v.x * p.x.signum(), v.y, v.z);
+                match on {
+                    PortOn::Hull => lay.hull_ports.push((p, n)),
+                    PortOn::Oms => lay
+                        .oms_ports
+                        .push((right(p) - Vec3::new(OMS_CENTER.x, OMS_CENTER.y, 0.0), rn(n))),
+                    PortOn::TipPod => lay
+                        .tip_ports
+                        .push((right(p) - Vec3::new(TIP_POD.x, TIP_POD.y, 0.0), rn(n))),
+                }
+            }
+            ThrusterRole::Hover => lay.hover.push(Vec2::new(t.position.x, t.position.z)),
+            ThrusterRole::Main => {}
+        }
+    }
+    lay
+}
+
+/// Nested plume shells, outside in: radius at the nozzle and at the end, alpha at the
+/// nozzle, alpha fade exponent along the plume. Seen through the middle a ray crosses every
+/// shell, at the edge only the outer one, so the glow falls off softly toward the sides.
+type Shells = [(f32, f32, f32, f32); 4];
+const PLUME_SHELLS: Shells = [
+    (1.0, 1.7, 0.10, 1.6),
+    (0.8, 1.15, 0.12, 1.25),
+    (0.58, 0.55, 0.15, 1.0),
+    (0.34, 0.1, 0.22, 0.8),
+];
+/// Hover plumes: a hot narrow core in a fainter, wider glow (they're mostly seen close to
+/// the nozzle, where the ground cuts them off).
+const HOVER_SHELLS: Shells = [
+    (1.0, 2.2, 0.04, 2.0),
+    (0.75, 1.5, 0.06, 1.6),
+    (0.5, 0.8, 0.1, 1.2),
+    (0.26, 0.12, 0.32, 0.9),
+];
+
+/// A unit plume along +Z (radius 1 at the nozzle, length 1): the shells of
+/// `shells`, each in its own quarter of the glow texture; alpha in vertex colors.
+fn plume_mesh(shells: &Shells) -> Mesh {
+    let seg = 24;
+    let n = 20;
+    let ts: Vec<f32> = (0..=n).map(|i| (i as f32 / n as f32).powf(1.3)).collect();
+    let mut out = Mesh::default();
+    for (k, &(r0, r1, a0, fade)) in shells.iter().enumerate() {
+        let radius = |t: f32| r0 + (r1 - r0) * t.powf(0.8);
+        let rows: Vec<Vec<Vec3>> = ts
+            .iter()
+            .map(|&t| {
+                (0..seg)
+                    .map(|j| {
+                        let a = j as f32 / seg as f32 * TAU;
+                        Vec3::new(a.cos() * radius(t), a.sin() * radius(t), t)
+                    })
+                    .collect()
+            })
+            .collect();
+        let u0 = k as f32 * 0.25;
+        let mut m = grid(&rows, true, false, |i, j| {
+            Vec2::new(u0 + 0.01 + 0.23 * j as f32 / seg as f32, ts[i])
+        });
+        for (i, v) in m.vertices.iter_mut().enumerate() {
+            let t = ts[i / (seg + 1)];
+            v.color = [1.0, 1.0, 1.0, a0 * (1.0 - t).powf(fade)];
+        }
+        out.merge(&m);
+    }
+    out
+}
+
+/// The plume's glow along its length, one quarter per shell (outside in); the core has
+/// shock diamonds.
+fn plume_glow() -> Image {
+    image_fn(64, 256, true, |u, v| {
+        let shell = ((u * 4.0) as usize).min(3);
+        let b = match shell {
+            0 => 0.35 * (1.0 - v).powf(1.5),
+            1 => 0.5 * (1.0 - v).powf(1.2),
+            2 => 0.7 * (1.0 - v),
+            _ => {
+                let diamonds = (v * 8.0 * TAU).cos().max(0.0).powi(6) * smoothstep(0.7, 0.05, v);
+                0.85 * (1.0 - v).powf(0.7) + 0.5 * diamonds
+            }
+        };
+        let c = srgb(Vec3::splat(b.min(1.0)));
+        [c[0], c[1], c[2], 255]
+    })
+}
+
+// ---------------------------------------------------------------- materials
+
+fn mat(hex_color: u32, rough: f32, metal: f32) -> StandardMaterial {
+    StandardMaterial::hex(hex_color)
+        .with_roughness(rough)
+        .with_metallic(metal)
+}
+
+fn textured(rgb: [f32; 3], rough: f32, metal: f32) -> StandardMaterial {
+    StandardMaterial {
+        base_color: [rgb[0], rgb[1], rgb[2], 1.0],
+        perceptual_roughness: rough,
+        metallic: metal,
+        ..Default::default()
+    }
+}
+
+fn plume_material(color: [f32; 3], strength: f32) -> StandardMaterial {
+    let mut m = StandardMaterial::color(0.0, 0.0, 0.0).with_emissive(color, strength);
+    m.unlit = true;
+    m.alpha_mode = AlphaMode::Blend;
+    m.receives_wetness = false;
+    m.double_sided = true;
+    m
+}
+
+// ---------------------------------------------------------------- build
+
+/// Fixed parts: (mesh, material, casts shadows, glows with heat).
+const FIXED: &[(&str, &str, bool, bool)] = &[
+    ("hull", "hull", true, true),
+    ("base", "base", true, false),
+    ("wing", "wing", true, true),
+    ("bells", "bell", true, false),
+    ("bell_inside", "bell_inside", true, false),
+    ("engine_hw", "engine_hw", true, false),
+    ("hover_metal", "rcs", true, false),
+    ("hover_dark", "dark", true, false),
+    ("rcs_body", "rcs", true, false),
+    ("rcs_inside", "black", false, false),
+    ("frames", "frame", true, false),
+    ("hatch", "metal", true, false),
+    ("dock", "gear", true, false),
+    ("dock_hatch", "frame", true, false),
+    ("dock_metal", "metal", true, false),
+    ("gear", "gear", true, false),
+    ("gear_chrome", "chrome", true, false),
+    ("doors", "door", true, false),
+    ("door_inner", "gear", true, false),
+];
+
+/// Every mesh, texture and material of the spaceplane.
+pub fn build() -> ModelAssets {
+    let mut out = ModelAssets::default();
+    let h = Hull::new();
+    let thrusters = crate::presets::spaceplane_thrusters();
+    let lay = layout(&h, &thrusters);
+
+    // ---- hull, cut open at the hover engines
+    let holes: Vec<(f32, f32, f32)> = lay
+        .hover
+        .iter()
+        .map(|c| (c.x, c.y, HOVER_R + 0.03))
+        .collect();
+    let hull = hull_mesh(&h, &holes);
+    let mut atlas = Atlas::new(HULL_ATLAS.0, HULL_ATLAS.1);
+    atlas.raster(&hull, 1);
+    out.baked(&key("tex/hull"), paint_hull(&atlas, &h, &lay));
+    out.mesh(&key("hull"), hull);
+    out.mesh(&key("base"), base_mesh(&h));
+
+    // ---- wings, fin, pods, control surfaces (one atlas)
+    let mut atlas = Atlas::new(1024, 1024);
+    let parts = wing_atlas_meshes();
+    for m in &parts {
+        atlas.raster_with(m, wing_part);
+    }
+    out.baked(&key("tex/wing"), paint_wing(&atlas, &lay));
+    let [wing, _, _, fin, _, _, oms, tip, _] = parts;
+    let oms = transformed(oms, Mat4::from_translation(OMS_CENTER.extend(0.0)));
+    let tip = transformed(tip, Mat4::from_translation(TIP_POD));
+    let right = merged([transformed(wing, wing_to_body(1.0)), oms, tip]);
+    out.mesh(
+        &key("wing"),
+        merged([mirrored_x(&right), right, transformed(fin, fin_to_body())]),
+    );
+    for pv in pivots() {
+        out.mesh(&key(&pivot_name(&pv)), pivot_mesh(&pv));
+    }
+
+    // ---- engines and thrusters
+    let mut bells = Mesh::default();
+    let mut insides = Mesh::default();
+    let mut hardware = Mesh::default();
+    let mut hover_metal = Mesh::default();
+    let mut hover_dark = Mesh::default();
+    let mut rcs_body = Mesh::default();
+    let mut rcs_inside = Mesh::default();
+    for t in &thrusters {
+        match t.role {
+            ThrusterRole::Main => {
+                let (b, i, hw) = main_engine(t.position);
+                bells.merge(&b);
+                insides.merge(&i);
+                hardware.merge(&hw);
+            }
+            ThrusterRole::Hover => {
+                let (m, d) = hover_engine(&h, t.position.x, t.position.z);
+                hover_metal.merge(&m);
+                hover_dark.merge(&d);
+            }
+            ThrusterRole::Rcs => {
+                let (p, n, _) = rcs_port(&h, t);
+                let (b, i) = rcs_quad(p, n);
+                rcs_body.merge(&b);
+                rcs_inside.merge(&i);
+            }
+        }
+    }
+    out.mesh(&key("bells"), bells);
+    out.mesh(&key("bell_inside"), insides);
+    out.mesh(&key("engine_hw"), hardware);
+    out.mesh(&key("hover_metal"), hover_metal);
+    out.mesh(&key("hover_dark"), hover_dark);
+    out.mesh(&key("rcs_body"), rcs_body);
+    out.mesh(&key("rcs_inside"), rcs_inside);
+    out.mesh(&key("plume"), plume_mesh(&PLUME_SHELLS));
+    out.mesh(&key("plume_soft"), plume_mesh(&HOVER_SHELLS));
+
+    // ---- details
+    out.mesh(&key("frames"), window_frames(&h));
+    out.mesh(&key("hatch"), hatch_hardware(&h));
+    let (dock, dock_hatch, dock_metal) = docking_port(&h);
+    out.mesh(&key("dock"), dock);
+    out.mesh(&key("dock_hatch"), dock_hatch);
+    out.mesh(&key("dock_metal"), dock_metal);
+
+    // ---- landing gear: legs and doors (fixed), tires and hubs (turning)
+    let belly = |x: f32, z: f32| h.exit(Vec3::new(x, -1.0, z), Vec3::NEG_Y).0;
+    let (nose_leg, nose_chrome) = gear_leg(
+        belly(0.0, NOSE_AXLE.z) + Vec3::Y * 0.1,
+        NOSE_AXLE,
+        0.07,
+        belly(0.0, NOSE_AXLE.z - 0.6) + Vec3::Y * 0.05,
+    );
+    let (main_leg, main_chrome) = gear_leg(
+        belly(MAIN_AXLE.x, MAIN_AXLE.z) + Vec3::Y * 0.1,
+        MAIN_AXLE,
+        0.09,
+        belly(MAIN_AXLE.x, MAIN_AXLE.z - 0.8) + Vec3::Y * 0.05,
+    );
+    let mut doors = Mesh::default();
+    let mut door_inner = Mesh::default();
+    {
+        let (c, half) = NOSE_WELL;
+        for sx in [-1.0f32, 1.0] {
+            let x = c.x + sx * half.x;
+            let a = belly(x, c.y - half.y);
+            let b = belly(x, c.y + half.y);
+            let (o, i) = gear_door(a, b, half.x * 0.95, Vec3::X * sx);
+            doors.merge(&o);
+            door_inner.merge(&i);
+        }
+        let (c, half) = MAIN_WELL;
+        let x = c.x - half.x;
+        let a = belly(x, c.y - half.y);
+        let b = belly(x, c.y + half.y);
+        let (o, i) = gear_door(a, b, 0.62, Vec3::NEG_X);
+        doors.merge(&mirrored_x(&o));
+        doors.merge(&o);
+        door_inner.merge(&mirrored_x(&i));
+        door_inner.merge(&i);
+    }
+    out.mesh(
+        &key("gear"),
+        merged([nose_leg, mirrored_x(&main_leg), main_leg]),
+    );
+    out.mesh(
+        &key("gear_chrome"),
+        merged([nose_chrome, mirrored_x(&main_chrome), main_chrome]),
+    );
+    out.mesh(&key("doors"), doors);
+    out.mesh(&key("door_inner"), door_inner);
+    for (name, (r, w, gap)) in [("nose", NOSE_TIRES), ("main", MAIN_TIRES)] {
+        let (tires, hubs) = twin_tires(r, w, gap);
+        out.mesh(&key(&format!("tires_{name}")), tires);
+        out.mesh(&key(&format!("hubs_{name}")), hubs);
+    }
+
+    // ---- textures
+    out.image(&key("tex/bell/normal"), bell_normal());
+    let (tc, tn, to) = tile_set();
+    out.image(&key("tex/tiles/color"), tc);
+    out.image(&key("tex/tiles/normal"), tn);
+    out.image(&key("tex/tiles/orm"), to);
+    out.image(&key("tex/base/normal"), base_quilt());
+    let (tc, tn, to) = super::plane_paint::tire_textures();
+    out.image(&key("tex/tire/color"), tc);
+    out.image(&key("tex/tire/normal"), tn);
+    out.image(&key("tex/tire/orm"), to);
+    out.image(&key("tex/plume/glow"), plume_glow());
+
+    // ---- materials
+    let k = |n: &str| key(&format!("mat/{n}"));
+    for name in ["hull", "wing"] {
+        let mut m = textured([1.0; 3], 1.0, 1.0);
+        m.reflectance = 0.5;
+        let mut def = MaterialDef::baked(&k(name), m, &key(&format!("tex/{name}")));
+        def.glow = Some(key(&format!("tex/{name}/glow")));
+        out.material(def);
+    }
+    let mut base = MaterialDef::plain(&k("base"), mat(0x2b2b2d, 0.85, 0.0));
+    base.normal = Some(key("tex/base/normal"));
+    out.material(base);
+    let mut bell = MaterialDef::plain(&k("bell"), textured([0.44, 0.42, 0.40], 0.52, 0.85));
+    bell.normal = Some(key("tex/bell/normal"));
+    out.material(bell);
+    let mut inside =
+        MaterialDef::plain(&k("bell_inside"), textured([0.075, 0.07, 0.065], 0.6, 0.6));
+    inside.normal = Some(key("tex/bell/normal"));
+    out.material(inside);
+    out.material(MaterialDef::plain(
+        &k("engine_hw"),
+        textured([0.56, 0.56, 0.58], 0.4, 0.9),
+    ));
+    out.material(MaterialDef::plain(&k("metal"), mat(0x9a9ea4, 0.38, 1.0)));
+    out.material(MaterialDef::plain(
+        &k("dark"),
+        textured([0.07, 0.07, 0.075], 0.7, 0.2),
+    ));
+    out.material(MaterialDef::plain(&k("rcs"), mat(0x2e2f31, 0.5, 0.6)));
+    out.material(MaterialDef::plain(&k("black"), mat(0x050505, 0.8, 0.0)));
+    out.material(MaterialDef::plain(&k("frame"), mat(0x1c1d20, 0.5, 0.0)));
+    out.material(MaterialDef::plain(&k("gear"), mat(0xb4b7bb, 0.4, 0.7)));
+    out.material(MaterialDef::plain(&k("chrome"), mat(0xd2d5da, 0.15, 1.0)));
+    let mut door = MaterialDef::baked(
+        &k("door"),
+        {
+            let mut m = textured([1.0; 3], 1.0, 1.0);
+            m.uv_scale = [1.0 / 0.6, 1.0 / 0.6];
+            m
+        },
+        &key("tex/tiles"),
+    );
+    door.glow = None;
+    out.material(door);
+    out.material(MaterialDef::baked(
+        &k("tire"),
+        textured([1.0; 3], 1.0, 1.0),
+        &key("tex/tire"),
+    ));
+    out.material(MaterialDef::plain(&k("hub"), mat(0x8a8e93, 0.55, 0.6)));
+    for (name, color, strength) in [
+        ("plume_main", [0.70, 0.82, 1.0], 60_000.0),
+        ("plume_hover", [1.0, 0.70, 0.42], 80_000.0),
+        ("plume_rcs", [0.9, 0.92, 1.0], 25_000.0),
+    ] {
+        let mut def = MaterialDef::plain(&k(name), plume_material(color, strength));
+        def.glow = Some(key("tex/plume/glow"));
+        out.material(def);
+    }
+    out
+}
+
+// ---------------------------------------------------------------- spawn
+
+fn renderer(mesh: &str, material: &str, shadows: bool) -> MeshRenderer {
+    let mut r = MeshRenderer::new(
+        MeshRef::Asset(key(mesh)),
+        MaterialRef::Asset(key(&format!("mat/{material}"))),
+    );
+    r.cast_shadows = shadows;
+    r
+}
+
+fn spawn_part(
+    commands: &mut Commands,
+    parent: Entity,
+    mesh: &str,
+    material: &str,
+    transform: Transform,
+    shadows: bool,
+) -> Entity {
+    commands
+        .spawn((
+            transform,
+            renderer(mesh, material, shadows),
+            ChildOf(parent),
+        ))
+        .id()
+}
+
+/// Spawn the spaceplane's drawn parts under `body` (the vehicle carrying `aircraft`,
+/// `wheels` and a spacecraft with `thrusters`); the model's assets are built the first time.
+pub fn spawn(
+    commands: &mut Commands,
+    body: Entity,
+    aircraft: &Aircraft,
+    wheels: &Wheels,
+    thrusters: &[Thruster],
+) {
+    commands.queue(|world: &mut World| ensure(world, &key("hull"), build));
+    // Parts that glow with re-entry heat, by material.
+    let mut glowing: Vec<(Entity, &'static str)> = Vec::new();
+    for &(mesh, material, shadows, glows) in FIXED {
+        let e = spawn_part(
+            commands,
+            body,
+            mesh,
+            material,
+            Transform::default(),
+            shadows,
+        );
+        if glows {
+            glowing.push((e, material));
+        }
+    }
+    // Control surfaces: the elevons and body-flap halves follow their side's delta wing,
+    // the rudder the fin. The pivot draws the surface itself, so it can glow too (heat
+    // glow looks at the drawn entity's parent).
+    for pv in pivots() {
+        let index = aircraft.surfaces.iter().position(|s| {
+            if pv.control == Control::Rudder {
+                s.name.contains("fin")
+            } else {
+                !s.name.contains("fin") && (s.position.x < 0.0) == (pv.side < 0.0)
+            }
+        });
+        let Some(index) = index else { continue };
+        let e = commands
+            .spawn((
+                Transform::from_translation(pv.at.as_dvec3()).with_rotation(pv.base),
+                SurfaceVisual {
+                    index,
+                    hinge: pv.hinge,
+                    base: pv.base,
+                },
+                renderer(&pivot_name(&pv), "wing", true),
+                ChildOf(body),
+            ))
+            .id();
+        glowing.push((e, "wing"));
+    }
+    // Wheels: twin tires on each leg.
+    for (i, w) in wheels.wheels.iter().enumerate() {
+        let mount = w.mount - Vec3::Y * w.suspension.travel_m * 0.6;
+        let wheel = commands
+            .spawn((
+                Transform::from_translation(mount.as_dvec3()),
+                WheelVisual {
+                    index: i,
+                    retracts: false,
+                },
+                ChildOf(body),
+            ))
+            .id();
+        let size = if w.radius > 0.55 { "main" } else { "nose" };
+        spawn_part(
+            commands,
+            wheel,
+            &format!("tires_{size}"),
+            "tire",
+            Transform::default(),
+            true,
+        );
+        spawn_part(
+            commands,
+            wheel,
+            &format!("hubs_{size}"),
+            "hub",
+            Transform::default(),
+            true,
+        );
+    }
+    // Plumes at every thruster's nozzle exit.
+    let h = Hull::new();
+    for (i, t) in thrusters.iter().enumerate() {
+        let exhaust = -t.direction.normalize_or(Vec3::Z);
+        let (at, dir, radius, length, kind) = match t.role {
+            ThrusterRole::Main => (
+                t.position + exhaust * BELL_EXIT.0,
+                exhaust,
+                BELL_EXIT.1 * 0.95,
+                16.0,
+                "main",
+            ),
+            ThrusterRole::Hover => {
+                let (p, n) = h.exit(Vec3::new(t.position.x, -1.0, t.position.z), Vec3::NEG_Y);
+                (p - n * 0.2, n, HOVER_R * 0.8, 7.0, "hover")
+            }
+            ThrusterRole::Rcs => {
+                let (p, n, _) = rcs_port(&h, t);
+                (p + n * 0.01, n, 0.1, 1.4, "rcs")
+            }
+        };
+        let mesh = if kind == "hover" {
+            "plume_soft"
+        } else {
+            "plume"
+        };
+        let mut r = renderer(mesh, &format!("plume_{kind}"), false);
+        r.visible = false;
+        commands.spawn((
+            Transform::from_translation(at.as_dvec3())
+                .with_rotation(Quat::from_rotation_arc(Vec3::Z, dir))
+                .with_scale(Vec3::new(radius, radius, 0.01)),
+            r,
+            PlumeVisual {
+                index: i,
+                length,
+                radius,
+            },
+            ChildOf(body),
+        ));
+    }
+    // Heat glow starts from each part's own material, once the materials exist.
+    commands.queue(move |world: &mut World| {
+        let Some(materials) = world.get_resource::<Assets<StandardMaterial>>() else {
+            return;
+        };
+        let found: Vec<(Entity, StandardMaterial)> = glowing
+            .into_iter()
+            .filter_map(|(e, m)| {
+                let h = materials.by_key(&key(&format!("mat/{m}")))?;
+                Some((e, *materials.get(h)?))
+            })
+            .collect();
+        for (e, base) in found {
+            if let Ok(mut entity) = world.get_entity_mut(e) {
+                entity.insert(HeatGlow { base, level: 0 });
+            }
+        }
+    });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn wing_atlas_islands_stay_apart() {
+        let mut atlas = Atlas::new(1024, 1024);
+        for (k, m) in wing_atlas_meshes().iter().enumerate() {
+            let mut lo = Vec2::splat(f32::MAX);
+            let mut hi = Vec2::splat(f32::MIN);
+            for v in &m.vertices {
+                lo = lo.min(Vec2::from(v.uv));
+                hi = hi.max(Vec2::from(v.uv));
+            }
+            eprintln!("wing atlas mesh {k}: uv {lo:?}..{hi:?}");
+            assert!(
+                lo.cmpge(Vec2::ZERO).all() && hi.cmple(Vec2::ONE).all(),
+                "mesh {k}"
+            );
+            // Each mesh's texels must land in the part its UVs claim.
+            atlas.raster_with(m, |_| 100 + k as u8);
+        }
+        eprintln!("wing atlas: {} overlapping texels", atlas.overlaps);
+        assert!(atlas.overlaps < 40, "{} overlapping texels", atlas.overlaps);
+        let h = Hull::new();
+        let mut atlas = Atlas::new(HULL_ATLAS.0, HULL_ATLAS.1);
+        atlas.raster(&hull_mesh(&h, &[]), 1);
+        let covered = atlas.part.iter().filter(|&&p| p != 0).count();
+        eprintln!("hull atlas: {covered} texels covered");
+        assert!(covered > HULL_ATLAS.0 * HULL_ATLAS.1 / 2);
+    }
+
+    #[test]
+    fn rcs_ports_sit_on_the_skin() {
+        let h = Hull::new();
+        for t in crate::presets::spaceplane_thrusters() {
+            if t.role != ThrusterRole::Rcs {
+                continue;
+            }
+            let (p, n, on) = rcs_port(&h, &t);
+            let e = -t.direction.normalize();
+            eprintln!("{}: {on:?} at {p:?}, normal {n:?}", t.name);
+            assert!(n.dot(e) > 0.3, "{} faces away from its exhaust", t.name);
+            assert!(
+                (p - t.position).length() < 1.2,
+                "{} port far from thruster",
+                t.name
+            );
+        }
+    }
+}
