@@ -15,7 +15,7 @@
 //! reads the message and shifts them in `Apply` too, so the frame renders right. Query
 //! providers stored here ([`crate::Ground`], [`crate::Water`],
 //! [`crate::physics::PhysicsQueries`], [`crate::Obscurance`] sources) answer in the new
-//! frame from `Apply` on. Modules with world-space messages of their own register them with
+//! frame from [`WorldShiftSet::Rebuild`] on. Modules with world-space messages of their own register them with
 //! [`WorldShiftAppExt::shift_messages`].
 //!
 //! A shift with `velocity` or `angular_velocity` adds that motion to everything that has a
@@ -145,13 +145,16 @@ impl WorldShift {
     }
 }
 
-/// Where world shifts happen inside `PostUpdate`, before transforms propagate.
+/// Where world shifts happen inside `PostUpdate`, in this order, before transforms propagate.
 #[derive(SystemSet, Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum WorldShiftSet {
     /// Write [`WorldShift`] here.
     Write,
     /// The shared state moves here; shift module caches here too.
     Apply,
+    /// Rebuild what is derived from the moved state (query snapshots such as
+    /// [`crate::physics::PhysicsQueries`]). Queries answer in the new frame from here on.
+    Rebuild,
 }
 
 /// A message with world positions or directions in it. Messages written before a shift and
@@ -201,7 +204,11 @@ pub(crate) fn register(app: &mut App) {
     app.add_message::<WorldShift>()
         .configure_sets(
             PostUpdate,
-            (WorldShiftSet::Write, WorldShiftSet::Apply)
+            (
+                WorldShiftSet::Write,
+                WorldShiftSet::Apply,
+                WorldShiftSet::Rebuild,
+            )
                 .chain()
                 .before(UpdateSet::Propagate),
         )

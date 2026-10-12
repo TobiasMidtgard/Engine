@@ -255,11 +255,35 @@ fn follows_world_shifts(install: &dyn Fn(&mut App)) -> Result<(), String> {
     // `WorldShiftSet::Write`). A turn about the vertical, so the check doesn't also demand
     // tilted colliders; gravity turning with the world is `engine_world`'s job, tested there.
     app.update_n(20);
-    app.world.resource_mut::<PendingShift>().0 = Some(WorldShift {
+    let shift = WorldShift {
         rotation: engine_core::math::DQuat::from_rotation_y(0.7),
         translation: DVec3::new(5.0e4, -300.0, 1.0e4),
         ..WorldShift::IDENTITY
-    });
+    };
+    app.world.resource_mut::<PendingShift>().0 = Some(shift);
+    app.update();
+    // Queries answer in the new frame right away, before the next step.
+    let q = app.world.resource::<PhysicsQueries>().clone();
+    let hit = q
+        .raycast(
+            shift.point(DVec3::new(0.0, 5.0, 0.0)),
+            -shift.direction(Vec3::Y),
+            20.0,
+            &QueryFilter::default(),
+        )
+        .ok_or("right after the shift, a raycast down onto the shifted ground missed")?;
+    if hit.entity != g {
+        return Err(format!(
+            "right after the shift, the raycast hit {:?}, expected the ground {g:?}",
+            hit.entity
+        ));
+    }
+    near(
+        "ground top hit right after the shift",
+        hit.point.y,
+        shift.point(DVec3::new(0.0, 0.5, 0.0)).y,
+        0.05,
+    )?;
     app.update_n(160);
     let ground_t = *app.world.get::<Transform>(g).ok_or("the ground is gone")?;
     let local =
