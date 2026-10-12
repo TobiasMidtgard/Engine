@@ -16,14 +16,21 @@
 //! (`FireDemo::warmup_secs`) so there is something to see straight away. Fires that escape
 //! the mown border are put out (`FireDemo::bounds`), so the rest of the map is safe.
 
-use engine_core::math::{DQuat, DVec2, DVec3, Quat, Rng, Vec2, Vec3};
+use engine_assets::Assets;
+use engine_core::math::{DQuat, DVec2, DVec3, Mat4, Quat, Rng, Vec2, Vec3};
 use engine_core::prelude::*;
-use engine_render::{MeshRenderer, Shape, StandardMaterial};
+use engine_render::{Image, Mesh, MeshRenderer};
 use engine_world::{Combustible, FocusPoints, Ground, SurfaceMaterials, Water};
 
 use crate::field::FireField;
 use crate::fuel::{FuelPatch, PatchShape};
+use crate::grass::GrassMeadow;
+use crate::ground::{GroundKind, GroundPaint, PaintedGround};
 use crate::objects::{Burning, Charring, ContainedFire, FlameShape};
+use crate::props::{
+    Foliage, SHED_ROOF_TILT, SHED_ROOF_Y, TreeParams, campfire_stones, campfire_wood, grow_tree,
+    hay_bale, prop_materials, shed_roof, shed_wall, shed_wall_frame,
+};
 use crate::settings::FireSettings;
 use crate::sim::{self, CharBase, FireClock, FirePatches, WorldFuel};
 
@@ -59,14 +66,14 @@ pub const VIEWS: &[DemoView] = &[
         name: "Trees and shed burning",
         eye: [22.0, 4.0, -14.0],
         target: [2.0, 3.0, 4.0],
-        hour: 19.6,
+        hour: 18.9,
     },
     DemoView {
         key: "fire_campfire",
         name: "Campfire at dusk",
-        eye: [-27.5, 1.5, -25.5],
-        target: [-22.0, 0.6, -20.5],
-        hour: 20.4,
+        eye: [-19.4, 1.3, -18.0],
+        target: [-22.5, 0.35, -21.1],
+        hour: 19.15,
     },
     DemoView {
         key: "fire_plume",
@@ -78,8 +85,8 @@ pub const VIEWS: &[DemoView] = &[
     DemoView {
         key: "fire_night",
         name: "Meadow fire at night",
-        eye: [-40.0, 14.0, -50.0],
-        target: [0.0, 0.0, 0.0],
+        eye: [17.0, 2.0, -12.0],
+        target: [0.0, 2.0, 4.0],
         hour: 22.5,
     },
 ];
@@ -128,14 +135,6 @@ pub struct FireDemoState {
 pub struct DemoObject {
     pub demo: Entity,
     pub initial: Combustible,
-}
-
-/// A grass blade that burns down to stubble and grows back with the fire field's fuel. It
-/// shrinks and grows from its base, wherever that is (a world shift moves it).
-#[derive(Component, Debug, Clone, Copy)]
-pub struct DemoGrass {
-    /// Full height, meters.
-    pub height: f32,
 }
 
 /// Build the fire demo around `origin`. It needs about 64 × 44 m of open ground.
@@ -200,110 +199,82 @@ pub fn spawn_demo(commands: &mut Commands, origin: DVec3) {
         FuelPatch::firebreak(PatchShape::Disc { radius: 2.5 }).with_priority(30),
     ));
 
-    // Ground: dirt border, gravel road and pad, dark wet patch.
-    let dirt = StandardMaterial::hex(0x6b5843).with_roughness(1.0);
-    let gravel = StandardMaterial::hex(0x8d877c).with_roughness(0.95);
-    let soaked = StandardMaterial::hex(0x2f4423).with_roughness(0.22);
-    let (hx, hz) = (MEADOW[0] as f64, MEADOW[1] as f64);
-    let b = BORDER as f64;
-    for (x, z, sx, sz) in [
-        (0.0, hz + b * 0.5, 2.0 * (hx + b), b),
-        (0.0, -hz - b * 0.5, 2.0 * (hx + b), b),
-        (hx + b * 0.5, 0.0, b, 2.0 * hz),
-        (-hx - b * 0.5, 0.0, b, 2.0 * hz),
-    ] {
-        commands.spawn((
-            Transform::from_translation(at(x, 0.01, z)),
-            MeshRenderer::new(
-                Shape::Cuboid {
-                    size: [sx as f32, 0.02, sz as f32],
-                },
-                dirt,
-            ),
-        ));
-    }
+    // Ground: meadow litter, a dusty mown border, the gravel road with its wheel ruts and
+    // shoulders, the soaked patch and the campfire's pad, blended with ragged edges.
+    let rect = |hx: f32, hz: f32| PatchShape::Rect {
+        half_extents: [hx, hz],
+    };
+    let road_len = MEADOW[1] + BORDER + 2.0;
+    let rx = road_x as f32;
     commands.spawn((
-        Transform::from_translation(at(road_x, 0.02, 0.0)),
-        MeshRenderer::new(
-            Shape::Cuboid {
-                size: [3.0, 0.04, 2.0 * (MEADOW[1] + BORDER)],
-            },
-            gravel,
-        ),
-    ));
-    commands.spawn((
-        Transform::from_translation(at(camp.0, 0.02, camp.1)),
-        MeshRenderer::new(
-            Shape::Cylinder {
-                radius: 2.5,
-                height: 0.04,
-                segments: 32,
-            },
-            gravel,
-        ),
-    ));
-    commands.spawn((
-        Transform::from_translation(at(wet.0, 0.015, wet.1)),
-        MeshRenderer::new(
-            Shape::Cuboid {
-                size: [wet.2[0] * 2.0, 0.02, wet.2[1] * 2.0],
-            },
-            soaked,
-        ),
+        Name::new("Fire demo: ground"),
+        place(0.0, 0.0),
+        PaintedGround {
+            half_extents: [FOOTPRINT[0] + 2.0, FOOTPRINT[1] + 2.0],
+            base: GroundKind::Dirt,
+            edge_m: 2.5,
+            paints: vec![
+                GroundPaint::new(GroundKind::Litter, [0.0, 0.0], rect(MEADOW[0], MEADOW[1]))
+                    .with_edge(1.4, 0.7),
+                GroundPaint::new(GroundKind::Dirt, [rx, 0.0], rect(2.3, road_len))
+                    .with_edge(0.9, 0.45),
+                GroundPaint::new(GroundKind::Gravel, [rx, 0.0], rect(1.45, road_len))
+                    .with_edge(0.5, 0.22),
+                GroundPaint::new(GroundKind::Dirt, [rx - 0.75, 0.0], rect(0.22, road_len))
+                    .with_edge(0.35, 0.08)
+                    .with_strength(0.55),
+                GroundPaint::new(GroundKind::Dirt, [rx + 0.75, 0.0], rect(0.22, road_len))
+                    .with_edge(0.35, 0.08)
+                    .with_strength(0.55),
+                GroundPaint::new(
+                    GroundKind::Mud,
+                    [wet.0 as f32, wet.1 as f32],
+                    rect(wet.2[0], wet.2[1]),
+                )
+                .with_edge(1.2, 0.6),
+                GroundPaint::new(
+                    GroundKind::Dirt,
+                    [camp.0 as f32, camp.1 as f32],
+                    PatchShape::Disc { radius: 2.4 },
+                )
+                .with_edge(0.9, 0.45),
+                GroundPaint::new(
+                    GroundKind::Ash,
+                    [camp.0 as f32, camp.1 as f32],
+                    PatchShape::Disc { radius: 1.25 },
+                )
+                .with_edge(0.6, 0.25)
+                .with_strength(0.45),
+                GroundPaint::new(
+                    GroundKind::Ash,
+                    [camp.0 as f32, camp.1 as f32],
+                    PatchShape::Disc { radius: 0.62 },
+                )
+                .with_edge(0.25, 0.1),
+            ],
+            ..Default::default()
+        },
     ));
 
-    // Grass blades: dry and straw-colored in the meadow, lush in the soaked patch.
-    let dry = [
-        StandardMaterial::hex(0x9c9548),
-        StandardMaterial::hex(0xb3a35e),
-        StandardMaterial::hex(0x7f8a3e),
-    ]
-    .map(|m| {
-        m.with_roughness(0.85)
-            .with_subsurface(0.45)
-            .with_wind_sway(0.22)
-    });
-    let lush = StandardMaterial::hex(0x3f7a2c)
-        .with_roughness(0.6)
-        .with_subsurface(0.5)
-        .with_wind_sway(0.2);
-    let blades = (MEADOW[0] * MEADOW[1] * 4.0 * 1.6) as usize;
-    for i in 0..blades {
-        let x = rng.range(-MEADOW[0], MEADOW[0]) as f64;
-        let z = rng.range(-MEADOW[1], MEADOW[1]) as f64;
-        if (x - road_x).abs() < 1.7 || DVec2::new(x - camp.0, z - camp.1).length() < 2.7 {
-            continue;
-        }
-        let in_wet = (x - wet.0).abs() < wet.2[0] as f64 && (z - wet.1).abs() < wet.2[1] as f64;
-        let h = rng.range(0.45, 1.0) * if in_wet { 0.8 } else { 1.0 };
-        let material = if in_wet { lush } else { dry[i % dry.len()] };
-        commands.spawn((
-            Transform::from_translation(at(x, h as f64 * 0.5, z)).with_rotation(
-                Quat::from_rotation_y(rng.range(0.0, std::f32::consts::TAU))
-                    * Quat::from_rotation_z(rng.range(-0.2, 0.2)),
-            ),
-            MeshRenderer::new(
-                Shape::Cone {
-                    radius: 0.05,
-                    height: h,
-                    segments: 4,
-                },
-                material,
-            ),
-            DemoGrass { height: h },
-        ));
-    }
+    // Grass: a dense meadow of blades that burns with the fire field (lush in the soaked
+    // patch, none on the road or the campfire pad).
+    commands.spawn((
+        Name::new("Fire demo: grass"),
+        place(0.0, 0.0),
+        GrassMeadow {
+            half_extents: MEADOW,
+            seed: 0xF12E,
+            ..Default::default()
+        },
+    ));
 
     let object = |c: Combustible| DemoObject { demo, initial: c };
+    // Props get their meshes and textures once the world has asset stores (it has none in
+    // headless tests); see `dress_props`.
+    let mut props: Vec<(Entity, Prop)> = Vec::new();
 
-    // Trees: the trunk catches from the grass, then the crown.
-    let bark = StandardMaterial::hex(0x5a4030).with_roughness(0.9);
-    let leaves = [0x3f6b2a, 0x557f2c, 0x4a6f26].map(|hex| {
-        StandardMaterial::hex(hex)
-            .with_roughness(0.7)
-            .with_subsurface(0.45)
-            .with_wind_sway(0.3)
-    });
+    // Trees: the trunk catches from the grass, then the crown. Each is grown from its seed:
+    // the trunk entity carries the wood (trunk, limbs and twigs), the crown entity the leaves.
     for (i, (x, z)) in [(-9.0, 9.0), (-3.0, 13.0), (3.0, 7.5), (8.0, 12.5)]
         .into_iter()
         .enumerate()
@@ -311,31 +282,41 @@ pub fn spawn_demo(commands: &mut Commands, origin: DVec3) {
         let scale = rng.range(0.85, 1.15);
         let trunk_h = 4.2 * scale;
         let crown_r = 2.3 * scale;
+        let crown_y = trunk_h + crown_r * 0.55;
+        let tree = TreeParams {
+            height: trunk_h + crown_r * 1.55,
+            crown_base: trunk_h - crown_r * 0.8,
+            crown_radius: crown_r * 1.15,
+            trunk_radius: 0.26 * scale,
+            seed: 0x7EE + i as u64 * 31,
+        };
+        let yaw = Quat::from_rotation_y(Rng::new(tree.seed).range(0.0, std::f32::consts::TAU));
         let trunk = Combustible {
             fuel_kg: 60.0,
             moisture: 0.35,
             ignition_c: 320.0,
             ..Default::default()
         };
-        commands.spawn((
-            Name::new(format!("Fire demo: tree {i} trunk")),
-            Transform::from_translation(at(x, trunk_h as f64 * 0.5, z)),
-            MeshRenderer::new(
-                Shape::Cylinder {
-                    radius: 0.22 * scale,
+        let trunk_entity = commands
+            .spawn((
+                Name::new(format!("Fire demo: tree {i} trunk")),
+                Transform::from_translation(at(x, trunk_h as f64 * 0.5, z)).with_rotation(yaw),
+                trunk,
+                object(trunk),
+                FlameShape {
+                    radius: 0.5,
                     height: trunk_h,
-                    segments: 10,
+                    offset: [0.0, -trunk_h * 0.5, 0.0],
                 },
-                bark,
-            ),
-            trunk,
-            object(trunk),
-            FlameShape {
-                radius: 0.5,
-                height: trunk_h,
-                offset: [0.0, -trunk_h * 0.5, 0.0],
+                Charring::default(),
+            ))
+            .id();
+        props.push((
+            trunk_entity,
+            Prop::TreeWood {
+                tree,
+                foot: -trunk_h * 0.5,
             },
-            Charring::default(),
         ));
         let crown = Combustible {
             fuel_kg: 40.0,
@@ -343,33 +324,35 @@ pub fn spawn_demo(commands: &mut Commands, origin: DVec3) {
             ignition_c: 300.0,
             ..Default::default()
         };
-        let crown_y = trunk_h as f64 + crown_r as f64 * 0.55;
-        commands.spawn((
-            Name::new(format!("Fire demo: tree {i} crown")),
-            Transform::from_translation(at(x, crown_y, z)),
-            MeshRenderer::new(
-                Shape::Sphere {
+        let crown_entity = commands
+            .spawn((
+                Name::new(format!("Fire demo: tree {i} crown")),
+                Transform::from_translation(at(x, crown_y as f64, z)).with_rotation(yaw),
+                crown,
+                object(crown),
+                FlameShape {
                     radius: crown_r,
-                    segments: 20,
+                    height: crown_r * 2.2,
+                    offset: [0.0, -crown_r * 0.9, 0.0],
                 },
-                leaves[i % leaves.len()],
-            ),
-            crown,
-            object(crown),
-            FlameShape {
-                radius: crown_r,
-                height: crown_r * 2.2,
-                offset: [0.0, -crown_r * 0.9, 0.0],
-            },
-            Charring {
-                shrink: 0.55,
-                char_color: [0.03, 0.025, 0.02],
+                Charring {
+                    shrink: 0.3,
+                    char_color: [0.03, 0.025, 0.02],
+                },
+                Foliage,
+            ))
+            .id();
+        props.push((
+            crown_entity,
+            Prop::TreeLeaves {
+                tree,
+                foot: -crown_y,
             },
         ));
     }
 
-    // A wooden shed in the fire's path: four walls and a roof that burn on their own.
-    let wood = StandardMaterial::hex(0x8a6239).with_roughness(0.8);
+    // A timber shed in the fire's path: four board walls (the front one with a door) and a
+    // corrugated iron roof, each burning on its own.
     let (sx, sz) = (4.0, -3.0);
     let wall = Combustible {
         fuel_kg: 45.0,
@@ -377,54 +360,48 @@ pub fn spawn_demo(commands: &mut Commands, origin: DVec3) {
         ignition_c: 300.0,
         ..Default::default()
     };
-    for (i, (dx, dz, size)) in [
-        (0.0, -1.5, [3.0, 2.4, 0.12]),
-        (0.0, 1.5, [3.0, 2.4, 0.12]),
-        (-1.5, 0.0, [0.12, 2.4, 3.0]),
-        (1.5, 0.0, [0.12, 2.4, 3.0]),
-    ]
-    .into_iter()
-    .enumerate()
-    {
-        commands.spawn((
-            Name::new(format!("Fire demo: shed wall {i}")),
-            Transform::from_translation(at(sx + dx, 1.2, sz + dz)),
-            MeshRenderer::new(Shape::Cuboid { size }, wood),
-            wall,
-            object(wall),
-            FlameShape {
-                radius: 1.3,
-                height: 2.8,
-                offset: [0.0, -1.2, 0.0],
-            },
-            Charring::default(),
-        ));
+    for i in 0..4 {
+        let (center, ..) = shed_wall_frame(i);
+        let (dx, dz) = (center.x as f64, center.z as f64);
+        let e = commands
+            .spawn((
+                Name::new(format!("Fire demo: shed wall {i}")),
+                Transform::from_translation(at(sx + dx, 1.2, sz + dz)),
+                wall,
+                object(wall),
+                FlameShape {
+                    radius: 1.3,
+                    height: 2.8,
+                    offset: [0.0, -1.2, 0.0],
+                },
+                Charring::default(),
+            ))
+            .id();
+        props.push((e, Prop::ShedWall(i)));
     }
     let roof = Combustible {
         fuel_kg: 40.0,
         ..wall
     };
-    commands.spawn((
-        Name::new("Fire demo: shed roof"),
-        Transform::from_translation(at(sx, 2.46, sz)).with_rotation(Quat::from_rotation_x(0.08)),
-        MeshRenderer::new(
-            Shape::Cuboid {
-                size: [3.5, 0.12, 3.6],
+    let e = commands
+        .spawn((
+            Name::new("Fire demo: shed roof"),
+            Transform::from_translation(at(sx, SHED_ROOF_Y as f64, sz))
+                .with_rotation(Quat::from_rotation_x(SHED_ROOF_TILT)),
+            roof,
+            object(roof),
+            FlameShape {
+                radius: 1.8,
+                height: 1.8,
+                offset: [0.0, 0.0, 0.0],
             },
-            wood,
-        ),
-        roof,
-        object(roof),
-        FlameShape {
-            radius: 1.8,
-            height: 1.8,
-            offset: [0.0, 0.0, 0.0],
-        },
-        Charring::default(),
-    ));
+            Charring::default(),
+        ))
+        .id();
+    props.push((e, Prop::ShedRoof));
 
-    // Hay bales: some in the fire's path, some safe across the road.
-    let straw = StandardMaterial::hex(0xc9ad5a).with_roughness(0.95);
+    // Round hay bales: some in the fire's path, some safe across the road. (Their origin is
+    // at their foot, so they slump onto the ground as they burn down.)
     let bale = Combustible {
         fuel_kg: 25.0,
         moisture: 0.08,
@@ -442,74 +419,43 @@ pub fn spawn_demo(commands: &mut Commands, origin: DVec3) {
     .into_iter()
     .enumerate()
     {
-        commands.spawn((
-            Name::new(format!("Fire demo: hay bale {i}")),
-            Transform::from_translation(at(x, 0.6, z)).with_rotation(
-                Quat::from_rotation_y(rng.range(0.0, std::f32::consts::PI))
-                    * Quat::from_rotation_z(std::f32::consts::FRAC_PI_2),
-            ),
-            MeshRenderer::new(
-                Shape::Cylinder {
-                    radius: 0.6,
-                    height: 1.3,
-                    segments: 16,
+        let e = commands
+            .spawn((
+                Name::new(format!("Fire demo: hay bale {i}")),
+                Transform::from_translation(at(x, 0.0, z))
+                    .with_rotation(Quat::from_rotation_y(rng.range(0.0, std::f32::consts::PI))),
+                bale,
+                object(bale),
+                FlameShape {
+                    radius: 0.8,
+                    height: 1.8,
+                    offset: [0.0, 0.0, 0.0],
                 },
-                straw,
-            ),
-            bale,
-            object(bale),
-            FlameShape {
-                radius: 0.8,
-                height: 1.8,
-                offset: [0.0, -0.6, 0.0],
-            },
-            Charring {
-                shrink: 0.6,
-                ..Default::default()
-            },
-        ));
+                Charring {
+                    shrink: 0.6,
+                    ..Default::default()
+                },
+            ))
+            .id();
+        props.push((e, Prop::Bale(i as u32 % 3)));
     }
 
-    // The campfire: a ring of stones around a few logs, tended forever.
-    let stone = StandardMaterial::hex(0x77726b).with_roughness(0.85);
-    let char_log = StandardMaterial::hex(0x2a1e16)
-        .with_roughness(0.9)
-        .with_emissive([1.0, 0.3, 0.06], 30.0);
-    for k in 0..10 {
-        let a = k as f64 / 10.0 * std::f64::consts::TAU;
-        let r = rng.range(0.15, 0.22);
-        commands.spawn((
-            Transform::from_translation(at(
-                camp.0 + a.cos() * 0.75,
-                r as f64 * 0.6,
-                camp.1 + a.sin() * 0.75,
-            ))
-            .with_scale(Vec3::new(1.0, 0.7, 1.0)),
-            MeshRenderer::new(
-                Shape::Sphere {
-                    radius: r,
-                    segments: 10,
-                },
-                stone,
-            ),
-        ));
-    }
-    for k in 0..4 {
-        let yaw = k as f32 * std::f32::consts::FRAC_PI_2 + 0.4;
-        let o = Quat::from_rotation_y(yaw) * Vec3::new(0.22, 0.0, 0.0);
-        commands.spawn((
-            Transform::from_translation(at(camp.0 + o.x as f64, 0.28, camp.1 + o.z as f64))
-                .with_rotation(Quat::from_rotation_y(yaw) * Quat::from_rotation_z(0.75)),
-            MeshRenderer::new(
-                Shape::Cylinder {
-                    radius: 0.06,
-                    height: 0.8,
-                    segments: 8,
-                },
-                char_log,
-            ),
-        ));
-    }
+    // The campfire: a ring of fieldstones around split logs and charcoal, tended forever.
+    let stones = commands
+        .spawn((
+            Name::new("Fire demo: campfire stones"),
+            Transform::from_translation(at(camp.0, 0.0, camp.1)),
+        ))
+        .id();
+    props.push((stones, Prop::Stones));
+    let wood = commands
+        .spawn((
+            Name::new("Fire demo: campfire wood"),
+            Transform::from_translation(at(camp.0, 0.0, camp.1)),
+        ))
+        .id();
+    props.push((wood, Prop::Firewood));
+    commands.queue(move |world: &mut World| dress_props(world, &props));
     commands.spawn((
         Name::new("Fire demo: campfire"),
         Transform::from_translation(at(camp.0, 0.05, camp.1)),
@@ -526,6 +472,96 @@ pub fn spawn_demo(commands: &mut Commands, origin: DVec3) {
         },
         ContainedFire { perpetual: true },
     ));
+}
+
+/// What a demo prop entity looks like (see [`dress_props`]).
+#[derive(Debug, Clone, Copy)]
+enum Prop {
+    /// Trunk and limbs, the entity `foot` m above the tree's foot.
+    TreeWood {
+        tree: TreeParams,
+        foot: f32,
+    },
+    /// The leaves, the entity `foot` m above the tree's foot.
+    TreeLeaves {
+        tree: TreeParams,
+        foot: f32,
+    },
+    ShedWall(usize),
+    ShedRoof,
+    Bale(u32),
+    Stones,
+    Firewood,
+}
+
+/// Give the demo's props their meshes and materials (generated once and shared by key).
+/// Does nothing without asset stores (headless tests).
+fn dress_props(world: &mut World, props: &[(Entity, Prop)]) {
+    if !world.contains_resource::<Assets<Image>>() || !world.contains_resource::<Assets<Mesh>>() {
+        return;
+    }
+    let mats =
+        world.resource_scope(|_, mut images: Mut<Assets<Image>>| prop_materials(&mut images));
+    let mut renderers = Vec::with_capacity(props.len());
+    {
+        let mut meshes = world.resource_mut::<Assets<Mesh>>();
+        let mut keyed =
+            |key: String, make: &dyn Fn() -> Mesh| meshes.get_or_insert_keyed(&key, make);
+        for &(entity, prop) in props {
+            let (mesh, material) = match prop {
+                Prop::TreeWood { tree, foot } | Prop::TreeLeaves { tree, foot } => {
+                    let wood = matches!(prop, Prop::TreeWood { .. });
+                    let part = if wood { "wood" } else { "leaves" };
+                    let key = format!(
+                        "fire/tree/{}/{}/{part}",
+                        tree.seed,
+                        (tree.height * 100.0).round()
+                    );
+                    let mesh = keyed(key, &|| {
+                        let grown = grow_tree(&tree);
+                        let (mut m, y) = if wood {
+                            (grown.wood, foot)
+                        } else {
+                            (grown.leaves, grown.crown_center.y + foot)
+                        };
+                        m.transform(&Mat4::from_translation(Vec3::new(0.0, y, 0.0)));
+                        m
+                    });
+                    (mesh, if wood { mats.bark } else { mats.leaves })
+                }
+                Prop::ShedWall(i) => {
+                    let mesh = keyed(format!("fire/shed/wall{i}"), &|| {
+                        let (center, ..) = shed_wall_frame(i);
+                        let mut m = shed_wall(i);
+                        m.transform(&Mat4::from_translation(-(center + Vec3::Y * 1.2)));
+                        m
+                    });
+                    (mesh, mats.planks)
+                }
+                Prop::ShedRoof => (keyed("fire/shed/roof".into(), &shed_roof), mats.metal),
+                Prop::Bale(v) => (
+                    keyed(format!("fire/bale/{v}"), &|| hay_bale(0xBA1E + v)),
+                    mats.straw,
+                ),
+                Prop::Stones => (
+                    keyed("fire/campfire/stones".into(), &|| {
+                        campfire_stones(0.8, 13, 0x570E)
+                    }),
+                    mats.granite,
+                ),
+                Prop::Firewood => (
+                    keyed("fire/campfire/wood".into(), &|| campfire_wood(0x10C5)),
+                    mats.firewood,
+                ),
+            };
+            renderers.push((entity, MeshRenderer::new(mesh, material)));
+        }
+    }
+    for (entity, renderer) in renderers {
+        if let Ok(mut e) = world.get_entity_mut(entity) {
+            e.insert(renderer);
+        }
+    }
 }
 
 /// Where a demo is: its origin and how it is turned. The layout is built along the world axes,
@@ -556,8 +592,9 @@ impl Place {
     }
 }
 
-/// Run every [`FireDemo`]: first fire (fast-forwarded by `warmup_secs`), containment, grass
-/// that burns down and grows back, and the reset-and-relight loop.
+/// Run every [`FireDemo`]: first fire (fast-forwarded by `warmup_secs`), containment and the
+/// reset-and-relight loop. (The grass burns down and grows back with the field on its own:
+/// [`crate::grass::update_grass`].)
 pub fn run_demos(world: &mut World) {
     let mut q = world.query::<(Entity, &GlobalTransform, &FireDemo, &FireDemoState)>();
     let demos: Vec<(Entity, Place, FireDemo, FireDemoState)> = q
@@ -595,7 +632,6 @@ pub fn run_demos(world: &mut World) {
         contain(world, place, &demo);
         world.entity_mut(entity).insert(state);
     }
-    grow_grass(world);
 }
 
 fn light(world: &mut World, place: Place, demo: &FireDemo) {
@@ -726,39 +762,6 @@ fn contain(world: &mut World, place: Place, demo: &FireDemo) {
             tile.version += 1;
         }
     }
-}
-
-/// Burnt grass shrinks to stubble; regrown grass stands up again, from its base.
-fn grow_grass(world: &mut World) {
-    let dt = world.resource::<Time>().delta_secs();
-    let mut q = world.query::<(&DemoGrass, &mut Transform)>();
-    world.resource_scope(|world, field: Mut<FireField>| {
-        if field.tiles.is_empty() {
-            return;
-        }
-        for (grass, mut t) in q.iter_mut(world) {
-            let Some(c) = field.cell_at(t.translation) else {
-                continue;
-            };
-            if c.load <= 0.0 {
-                continue;
-            }
-            let left = (c.fuel / c.load).clamp(0.0, 1.0);
-            let target = if c.state() == crate::field::CellState::Intact {
-                left
-            } else {
-                0.12 + 0.88 * left * left
-            };
-            let s = t.scale.y;
-            // Burning grass collapses fast; regrowth springs up over a few seconds.
-            let rate = if target < s { 3.0 } else { 0.5 };
-            let next = s + (target - s) * (rate * dt).min(1.0);
-            if (next - s).abs() > 0.002 {
-                t.scale.y = next;
-                t.translation.y += (grass.height * (next - s)) as f64 * 0.5;
-            }
-        }
-    });
 }
 
 #[cfg(test)]

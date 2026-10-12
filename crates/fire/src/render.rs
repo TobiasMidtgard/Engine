@@ -19,6 +19,9 @@ use crate::settings::FireSettings;
 pub const FLAMES_SHADER: &str = include_str!("shaders/flames.wgsl");
 pub const SCORCH_SHADER: &str = include_str!("shaders/scorch.wgsl");
 
+/// Vertices per flame: a strip of four quads up its height (`FLAME_SEGMENTS` in flames.wgsl).
+const FLAME_VERTICES: u32 = 4 * 6;
+
 /// GPU layout of `FlameInstance` in `flames.wgsl`.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Pod, Zeroable)]
@@ -102,8 +105,9 @@ impl FireFeature {
             let w = wind
                 .map(|w| w.sample(p + DVec3::Y * h as f64 * 0.5))
                 .unwrap_or(Vec3::ZERO);
-            // Flames lean with the wind but their own buoyancy keeps them up.
-            let l = w / (3.0 + w.length() * 0.35);
+            // Flames lean with the wind but their own buoyancy keeps them up; tall flames (big,
+            // buoyant fires) stand up better than knee-high grass flames.
+            let l = w / (3.0 + w.length() * 0.35) * (1.5 / h.max(1.5)).sqrt();
             [l.x, l.z]
         };
         let origin = view.origin;
@@ -193,7 +197,7 @@ impl FireFeature {
             {
                 continue;
             }
-            let count = ((shape.radius * shape.height * 1.6).clamp(7.0, 28.0) * b.intensity.sqrt())
+            let count = ((shape.radius * shape.height * 2.0).clamp(7.0, 32.0) * b.intensity.sqrt())
                 .ceil() as u32;
             let id = id as i64;
             for i in 0..count {
@@ -217,7 +221,10 @@ impl FireFeature {
                 self.scratch.push(FlameInstance {
                     pos_height: [rel.x, rel.y, rel.z, h],
                     shape: [
-                        (shape.radius * 0.8 + h * 0.2).max(0.25) * if i == 0 { 1.2 } else { 1.0 },
+                        // No wider than about half the height: the flipbook's tongues smear
+                        // sideways when stretched; wide fires get more sprites instead.
+                        (shape.radius * 0.8 + h * 0.2).min(h * 0.45).max(0.25)
+                            * if i == 0 { 1.2 } else { 1.0 },
                         b.intensity.min(1.0),
                         r(5) * 113.0,
                         0.0,
@@ -773,6 +780,18 @@ impl RenderFeature for FireFeature {
         if phase != RenderPhase::Transparent {
             return;
         }
+        // Heat haze first: it replaces pixels with the bent scene copy (taken before the
+        // transparent pass), so it must come before anything the fire draws on top, the scorch
+        // decal included.
+        let flames = match (&self.haze_pipeline, &self.flame_pipeline, &self.flame_group) {
+            (Some(haze), Some(p), Some(g)) if self.count > 0 => {
+                pass.set_pipeline(haze);
+                pass.set_bind_group(1, g, &[]);
+                pass.draw(0..FLAME_VERTICES, 0..self.count);
+                Some((p, g))
+            }
+            _ => None,
+        };
         if self.map_valid
             && let (Some(p), Some(g)) = (&self.scorch_pipeline, &self.scorch_group)
         {
@@ -780,16 +799,10 @@ impl RenderFeature for FireFeature {
             pass.set_bind_group(1, g, &[]);
             pass.draw(0..3, 0..1);
         }
-        if self.count > 0
-            && let (Some(haze), Some(p), Some(g)) =
-                (&self.haze_pipeline, &self.flame_pipeline, &self.flame_group)
-        {
-            // Heat haze first: it bends the scene as it was before any flame was drawn.
-            pass.set_pipeline(haze);
-            pass.set_bind_group(1, g, &[]);
-            pass.draw(0..6, 0..self.count);
+        if let Some((p, g)) = flames {
             pass.set_pipeline(p);
-            pass.draw(0..6, 0..self.count);
+            pass.set_bind_group(1, g, &[]);
+            pass.draw(0..FLAME_VERTICES, 0..self.count);
         }
     }
 
