@@ -634,12 +634,7 @@ mod tests {
         let m = b.build();
         assert!(closed(&m));
         let bb = m.aabb();
-        assert!(
-            (bb.max - Vec3::new(0.5, 0.3, 0.2))
-                .abs()
-                .max_element()
-                < 1e-5
-        );
+        assert!((bb.max - Vec3::new(0.5, 0.3, 0.2)).abs().max_element() < 1e-5);
 
         let mut b = MeshBuilder::new();
         b.sphere(0.4, 3);
