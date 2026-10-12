@@ -75,7 +75,7 @@ impl Default for SmokeSettings {
             tunnel_radius_m: 0.18,
             tunnel_secs: 1.6,
             detail: 1.0,
-            max_steps: 96,
+            max_steps: 160,
         }
     }
 }

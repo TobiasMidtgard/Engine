@@ -308,3 +308,55 @@ fn the_duel_api_restarts_a_chosen_round() {
     .unwrap();
     assert_eq!(r["duels"][0]["only"], serde_json::Value::Null);
 }
+
+/// The set dressing is drawn around the demo's collider boxes and never changes them: the
+/// demo spawns exactly the static boxes it always has (center, half extents), and nothing
+/// else that is static and solid.
+#[test]
+fn the_demo_spawns_the_same_static_collider_boxes() {
+    use engine_core::math::Quat;
+    use engine_world::physics::{BodyKind, Collider, ColliderShape, RigidBody};
+    let mut app = app();
+    let origin = DVec3::new(100.0, 0.0, -40.0);
+    with_commands(&mut app, |c| demo::spawn_demo(c, origin));
+    let mut q = app.world.query::<(&Transform, &RigidBody, &Collider)>();
+    let mut boxes: Vec<([f64; 3], [f32; 3])> = q
+        .iter(&app.world)
+        .filter(|(_, b, c)| b.kind == BodyKind::Static && !c.sensor)
+        .map(|(t, _, c)| {
+            assert_eq!(t.rotation, Quat::IDENTITY, "static boxes are axis aligned");
+            let ColliderShape::Cuboid { half_extents } = c.shape else {
+                panic!("static collider that isn't a box: {:?}", c.shape);
+            };
+            ((t.translation - origin).to_array(), half_extents.to_array())
+        })
+        .collect();
+    // The demo's boxes before the course and ring were dressed (meters, from the origin).
+    let mut expected: Vec<([f64; 3], [f32; 3])> = vec![
+        ([0.0, -0.5, 0.0], [40.0, 0.5, 40.0]),      // ground
+        ([0.0, 0.05, 12.0], [28.0, 0.05, 5.0]),     // runway
+        ([-14.0, 1.35, 12.0], [0.15, 0.2, 3.5]),    // slide bar
+        ([-14.0, 0.775, 8.5], [0.15, 0.775, 0.15]), // slide bar posts
+        ([-14.0, 0.775, 15.5], [0.15, 0.775, 0.15]),
+        ([-2.0, 2.6, 14.8], [6.0, 2.5, 0.3]),   // wall A
+        ([12.5, 2.6, 9.2], [6.5, 2.5, 0.3]),    // wall B
+        ([22.0, 2.75, 11.0], [3.0, 2.75, 3.5]), // tower
+        ([0.0, 0.05, -14.0], [8.0, 0.05, 8.0]), // ring
+        ([0.0, 0.15, -25.5], [8.0, 0.15, 1.5]), // stands
+    ];
+    let key = |b: &([f64; 3], [f32; 3])| {
+        b.0.map(|v| (v * 1000.0).round() as i64)
+            .into_iter()
+            .chain(b.1.map(|v| (v * 1000.0).round() as i64))
+            .collect::<Vec<_>>()
+    };
+    boxes.sort_by_key(key);
+    expected.sort_by_key(key);
+    assert_eq!(boxes.len(), expected.len(), "{boxes:?}");
+    for (got, want) in boxes.iter().zip(&expected) {
+        for i in 0..3 {
+            assert!((got.0[i] - want.0[i]).abs() < 1e-9, "{got:?} vs {want:?}");
+            assert!((got.1[i] - want.1[i]).abs() < 1e-6, "{got:?} vs {want:?}");
+        }
+    }
+}

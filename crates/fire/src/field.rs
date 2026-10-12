@@ -23,8 +23,10 @@
 //! wind, and backs into the wind at a small fraction of that (see the tests).
 
 use std::collections::HashMap;
+use std::collections::hash_map::Entry;
 
 use engine_core::math::{DVec2, DVec3, IVec2, Vec2, Vec3, smoothstep};
+use engine_world::WorldShift;
 
 use crate::fuel::{CellFuel, FuelKind};
 
@@ -305,6 +307,10 @@ pub struct FieldStats {
 pub struct FireField {
     /// Cell size, meters.
     pub cell_m: f32,
+    /// World X/Z of the minimum corner of cell (0, 0): cell and tile coordinates count from
+    /// here. A floating-origin shift moves it (see [`FireField::shift`]), so every cell keeps
+    /// its coordinates and its exact place on the ground.
+    pub origin: DVec2,
     pub tiles: Vec<Tile>,
     map: HashMap<IVec2, usize>,
     /// Simulated seconds.
@@ -314,6 +320,10 @@ pub struct FireField {
     /// Most tiles kept; when full, new tiles are not created (fire stops at the edge).
     pub max_tiles: usize,
     incoming: Vec<Vec<f32>>,
+    /// Cells a rotating shift created where the old field had none: (tile key, cell indices).
+    /// They get their fuel from the world at the next step, once the world answers in the new
+    /// frame.
+    unfueled: Vec<(IVec2, Vec<u16>)>,
 }
 
 /// Where the fuel for a new cell comes from: `(fuel, ground height)` at a world X/Z (the `y`
@@ -332,6 +342,7 @@ impl FireField {
     pub fn new(cell_m: f32) -> Self {
         Self {
             cell_m: cell_m.max(0.05),
+            origin: DVec2::ZERO,
             tiles: Vec::new(),
             map: HashMap::new(),
             time: 0.0,
@@ -339,13 +350,17 @@ impl FireField {
             stats: FieldStats::default(),
             max_tiles: 4096,
             incoming: Vec::new(),
+            unfueled: Vec::new(),
         }
     }
 
     /// Global cell coordinates of a world point.
     pub fn cell_coord(&self, p: DVec3) -> IVec2 {
         let c = self.cell_m as f64;
-        IVec2::new((p.x / c).floor() as i32, (p.z / c).floor() as i32)
+        IVec2::new(
+            ((p.x - self.origin.x) / c).floor() as i32,
+            ((p.z - self.origin.y) / c).floor() as i32,
+        )
     }
 
     /// Tile key and local cell of global cell coordinates.
@@ -356,12 +371,12 @@ impl FireField {
 
     /// World X/Z of a cell center.
     pub fn cell_center(&self, c: IVec2) -> DVec2 {
-        (c.as_dvec2() + DVec2::splat(0.5)) * self.cell_m as f64
+        self.origin + (c.as_dvec2() + DVec2::splat(0.5)) * self.cell_m as f64
     }
 
     /// World X/Z of a tile's minimum corner.
     pub fn tile_origin(&self, key: IVec2) -> DVec2 {
-        (key * TILE).as_dvec2() * self.cell_m as f64
+        tile_origin(self.origin, self.cell_m, key)
     }
 
     /// Tile edge length, meters.
@@ -475,9 +490,10 @@ impl FireField {
         reset: bool,
     ) -> usize {
         let cell = self.cell_m as f64;
+        let field_origin = self.origin;
         let mut changed = 0;
         for tile in &mut self.tiles {
-            let origin = (tile.key * TILE).as_dvec2() * cell;
+            let origin = tile_origin(field_origin, self.cell_m, tile.key);
             let size = TILE as f64 * cell;
             if origin.x > max.x
                 || origin.y > max.y
@@ -658,6 +674,7 @@ impl FireField {
         }
         self.time += dt as f64;
         self.steps += 1;
+        self.fuel_unfueled(fuel);
 
         // Burning tiles bring their neighbors into existence so the fire can walk into them.
         let mut grow = Vec::new();
@@ -715,12 +732,13 @@ impl FireField {
 
         // Kernels from the local wind (2 m above the ground at the tile center).
         let cell = self.cell_m;
+        let field_origin = self.origin;
         for (i, t) in self.tiles.iter_mut().enumerate() {
             if !process[i] {
                 continue;
             }
             let half = TILE as f64 * cell as f64 * 0.5;
-            let c = (t.key * TILE).as_dvec2() * cell as f64 + DVec2::splat(half);
+            let c = tile_origin(field_origin, cell, t.key) + DVec2::splat(half);
             let w = (input.wind)(DVec3::new(c.x, t.base_y + 2.0, c.y));
             build_kernel(&mut t.kernel, Vec2::new(w.x, w.z), cell, &input.params);
         }
@@ -756,7 +774,7 @@ impl FireField {
                     if !process[i] {
                         continue;
                     }
-                    update_tile(tile, &incoming[i], input, cell);
+                    update_tile(tile, &incoming[i], input, cell, field_origin);
                 }
             });
         }
@@ -782,15 +800,16 @@ impl FireField {
     pub fn cells_near(&self, p: DVec3, radius: f64) -> impl Iterator<Item = (DVec3, &Cell)> {
         let size = self.tile_size();
         let cell = self.cell_m as f64;
+        let (field_origin, cell_m) = (self.origin, self.cell_m);
         self.tiles
             .iter()
             .filter(move |t| {
-                let o = (t.key * TILE).as_dvec2() * cell;
+                let o = tile_origin(field_origin, cell_m, t.key);
                 let c = o + DVec2::splat(size * 0.5);
                 (DVec2::new(p.x, p.z) - c).length() < radius + size
             })
             .flat_map(move |t| {
-                let o = (t.key * TILE).as_dvec2() * cell;
+                let o = tile_origin(field_origin, cell_m, t.key);
                 t.cells.iter().enumerate().map(move |(i, c)| {
                     let x = (i as i32 % TILE) as f64;
                     let y = (i as i32 / TILE) as f64;
@@ -835,6 +854,193 @@ impl FireField {
         }
         self.incoming.clear();
     }
+
+    /// Move the field into a new reference frame (see [`WorldShift`]).
+    ///
+    /// A translation moves [`FireField::origin`] and every tile's `base_y`: cells keep their
+    /// coordinates and land exactly where the ground they burn on went, whatever the distance.
+    /// A rotation resamples every tile into the new frame (each new cell takes the nearest old
+    /// one; a quarter turn about +Y maps cells onto cells), keeping burning tiles and those
+    /// nearest `focus` (old frame) first should the turned field need more than `max_tiles`.
+    /// New cells the old field didn't cover get their fuel from the world at the next
+    /// [`FireField::step`], when the world answers in the new frame.
+    pub fn shift(&mut self, s: &WorldShift, focus: Option<DVec3>) {
+        if s.is_translation_only() {
+            self.origin += DVec2::new(s.translation.x, s.translation.z);
+            for t in &mut self.tiles {
+                t.base_y += s.translation.y;
+                t.version += 1;
+            }
+        } else {
+            self.rotate(s, focus);
+        }
+    }
+
+    fn rotate(&mut self, s: &WorldShift, focus: Option<DVec3>) {
+        let budget = self.max_tiles.max(self.tiles.len());
+        let mut old = std::mem::replace(self, FireField::new(self.cell_m));
+        self.max_tiles = old.max_tiles;
+        self.time = old.time;
+        self.steps = old.steps;
+        self.stats = old.stats;
+        // Where the old origin went (at height 0), so a quarter turn about +Y maps the old
+        // cells onto new ones.
+        let o = s.point(DVec3::new(old.origin.x, 0.0, old.origin.y));
+        self.origin = DVec2::new(o.x, o.z);
+        // Burning tiles first, then the ones nearest the focus.
+        let size = old.tile_size();
+        let center_of = |t: &Tile| {
+            let c = old.tile_origin(t.key) + DVec2::splat(size * 0.5);
+            DVec3::new(c.x, t.base_y, c.y)
+        };
+        let mut order: Vec<(bool, f64, usize)> = old
+            .tiles
+            .iter()
+            .enumerate()
+            .map(|(i, t)| {
+                let d = focus.map_or(0.0, |f| center_of(t).distance_squared(f));
+                (t.burning == 0, d, i)
+            })
+            .collect();
+        order.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.total_cmp(&b.1)).then(a.2.cmp(&b.2)));
+        let version = old.tiles.iter().map(|t| t.version).sum::<u64>() + 1;
+
+        // New tiles under construction: each cell's state and world height, once filled.
+        let mut keys: Vec<IVec2> = Vec::new();
+        let mut building: HashMap<IVec2, Vec<Option<(Cell, f64)>>> = HashMap::new();
+        for &(_, _, i) in &order {
+            let t = &old.tiles[i];
+            let o = old.tile_origin(t.key);
+            // The tile's footprint in the new frame.
+            let mut lo = DVec2::splat(f64::INFINITY);
+            let mut hi = DVec2::splat(f64::NEG_INFINITY);
+            for (a, b) in [(0.0, 0.0), (1.0, 0.0), (0.0, 1.0), (1.0, 1.0)] {
+                let p = s.point(DVec3::new(o.x + a * size, t.base_y, o.y + b * size));
+                lo = lo.min(DVec2::new(p.x, p.z));
+                hi = hi.max(DVec2::new(p.x, p.z));
+            }
+            let y = s.point(center_of(t)).y;
+            let c0 = self.cell_coord(DVec3::new(lo.x, 0.0, lo.y));
+            let c1 = self.cell_coord(DVec3::new(hi.x, 0.0, hi.y));
+            for cy in c0.y..=c1.y {
+                for cx in c0.x..=c1.x {
+                    let c = IVec2::new(cx, cy);
+                    let center = self.cell_center(c);
+                    let back = s.inverse_point(DVec3::new(center.x, y, center.y));
+                    let (key, local) = Self::split(old.cell_coord(back));
+                    if key != t.key {
+                        continue;
+                    }
+                    let (new_key, new_local) = Self::split(c);
+                    let cells = match building.entry(new_key) {
+                        Entry::Occupied(e) => e.into_mut(),
+                        Entry::Vacant(e) if keys.len() < budget => {
+                            keys.push(new_key);
+                            e.insert(vec![None; TILE_CELLS])
+                        }
+                        Entry::Vacant(_) => continue,
+                    };
+                    let height = s.point(old.cell_world(t, local)).y;
+                    cells[(new_local.y * TILE + new_local.x) as usize] =
+                        Some((*t.cell(local), height));
+                }
+            }
+        }
+
+        let area = (self.cell_m * self.cell_m) as f64;
+        for key in keys {
+            let Some(built) = building.remove(&key) else {
+                continue;
+            };
+            let base_y = built
+                .iter()
+                .flatten()
+                .map(|(_, h)| *h)
+                .fold(f64::INFINITY, f64::min);
+            if !base_y.is_finite() {
+                continue;
+            }
+            let mut missing = Vec::new();
+            let cells: Vec<Cell> = built
+                .into_iter()
+                .enumerate()
+                .map(|(i, c)| match c {
+                    Some((cell, h)) => Cell {
+                        ground_y: (h - base_y) as f32,
+                        ..cell
+                    },
+                    None => {
+                        missing.push(i as u16);
+                        Cell::default()
+                    }
+                })
+                .collect();
+            if !missing.is_empty() {
+                self.unfueled.push((key, missing));
+            }
+            self.map.insert(key, self.tiles.len());
+            self.tiles.push(Tile {
+                key,
+                base_y,
+                burning: cells.iter().filter(|c| c.is_burning()).count() as u32,
+                hrr_w: cells.iter().map(|c| c.hrr as f64 * area).sum(),
+                cells,
+                active: true,
+                version,
+                kernel: vec![0.0; KERNEL_LEN],
+            });
+        }
+        // Cells still owed fuel from an earlier turn are owed it where they went.
+        for (key, list) in std::mem::take(&mut old.unfueled) {
+            let Some(t) = old.tile(key) else { continue };
+            for i in list {
+                let local = IVec2::new(i as i32 % TILE, i as i32 / TILE);
+                let p = s.point(old.cell_world(t, local));
+                let (new_key, new_local) = Self::split(self.cell_coord(p));
+                if self.tile_index(new_key).is_none() {
+                    continue;
+                }
+                let idx = (new_local.y * TILE + new_local.x) as u16;
+                match self.unfueled.iter_mut().find(|(k, _)| *k == new_key) {
+                    Some((_, cells)) if !cells.contains(&idx) => cells.push(idx),
+                    Some(_) => {}
+                    None => self.unfueled.push((new_key, vec![idx])),
+                }
+            }
+        }
+    }
+
+    /// Give cells a rotating shift created their fuel and ground height from the world.
+    fn fuel_unfueled(&mut self, fuel: &mut dyn FuelSource) {
+        if self.unfueled.is_empty() {
+            return;
+        }
+        let cell = self.cell_m as f64;
+        for (key, list) in std::mem::take(&mut self.unfueled) {
+            let Some(i) = self.tile_index(key) else {
+                continue;
+            };
+            let o = self.tile_origin(key);
+            let tile = &mut self.tiles[i];
+            for idx in list {
+                let (x, y) = ((idx as i32 % TILE) as f64, (idx as i32 / TILE) as f64);
+                let p = DVec3::new(
+                    o.x + (x + 0.5) * cell,
+                    tile.base_y + 20.0,
+                    o.y + (y + 0.5) * cell,
+                );
+                let (f, h) = fuel.fuel_at(p);
+                tile.cells[idx as usize] = Cell::from_fuel(f, (h - tile.base_y) as f32);
+            }
+            tile.active = true;
+            tile.version += 1;
+        }
+    }
+}
+
+/// World X/Z of the minimum corner of tile `key` in a field with origin `field_origin`.
+fn tile_origin(field_origin: DVec2, cell_m: f32, key: IVec2) -> DVec2 {
+    field_origin + (key * TILE).as_dvec2() * cell_m as f64
 }
 
 /// Fill `kernel` with the share of a burning cell's heat that reaches each offset, for wind
@@ -949,7 +1155,13 @@ fn gather_tile(
     }
 }
 
-fn update_tile(tile: &mut Tile, incoming: &[f32], input: &StepInput, cell_m: f32) {
+fn update_tile(
+    tile: &mut Tile,
+    incoming: &[f32],
+    input: &StepInput,
+    cell_m: f32,
+    field_origin: DVec2,
+) {
     let dt = input.dt;
     let ambient = input.ambient_c;
     // Equilibrium moisture of dead fuel: drier in dry air.
@@ -959,7 +1171,7 @@ fn update_tile(tile: &mut Tile, incoming: &[f32], input: &StepInput, cell_m: f32
     let mut hrr_sum = 0.0f64;
     let mut changed = false;
     let mut any_active = false;
-    let origin = (tile.key * TILE).as_dvec2() * cell_m as f64;
+    let origin = tile_origin(field_origin, cell_m, tile.key);
     let area = cell_m * cell_m;
     let cooling = input.params.cooling;
     for (idx, c) in tile.cells.iter_mut().enumerate() {

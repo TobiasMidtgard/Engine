@@ -54,8 +54,27 @@ fn metal() -> StandardMaterial {
         .with_metallic(1.0)
         .with_roughness(0.3)
 }
-fn rock() -> StandardMaterial {
-    mat(0x5a5650, 0.9)
+/// Vertex tint for flat rock surfaces drawn with the rock kit's material (as dark as the
+/// boulders, which the textures multiply).
+const ROCK_TINT: Vec3 = Vec3::new(0.31, 0.3, 0.28);
+
+/// Finish a mesh for the rock kit's material: planar UVs in rock texture tiles, projected
+/// along each face's main axis (the same mapping the boulders use).
+fn rock_face(b: crate::meshgen::Builder) -> Mesh {
+    let mut mesh = b.finish();
+    for v in &mut mesh.vertices {
+        let p = Vec3::from(v.position);
+        let n = Vec3::from(v.normal).abs();
+        let q = if n.x >= n.y && n.x >= n.z {
+            Vec2::new(p.z, -p.y)
+        } else if n.y >= n.z {
+            Vec2::new(p.x, p.z)
+        } else {
+            Vec2::new(p.x, -p.y)
+        };
+        v.uv = (q / crate::rock_textures::ROCK_TILE_M).to_array();
+    }
+    mesh
 }
 
 /// A simple person: legs, body, head (1.8 m), facing `yaw`.
@@ -219,7 +238,7 @@ pub fn plaza(commands: &mut Commands, lib: &Library, z: &Zone) {
             tube: 0.25,
             segments: 64,
         },
-        StandardMaterial::hex(0x202830).with_emissive([0.3, 0.7, 1.0], 8_000.0),
+        StandardMaterial::hex(0x202830).with_emissive([0.3, 0.7, 1.0], 600.0),
         Transform::from_translation(c + DVec3::new(0.0, 3.5, -6.0))
             .with_rotation(Quat::from_rotation_x(std::f32::consts::FRAC_PI_2)),
     );
@@ -383,90 +402,6 @@ pub fn market(commands: &mut Commands, _lib: &Library, z: &Zone) {
     );
 }
 
-/// Magic circle: standing stones around a rune disc. The Particles and magic effects thread
-/// owns it.
-pub fn magic(commands: &mut Commands, _lib: &Library, z: &Zone) {
-    let c = z.center;
-    let mut rng = Rng::new(42);
-    for i in 0..10 {
-        let a = i as f64 / 10.0 * TAU64;
-        let h = rng.range(4.0, 6.5);
-        spawn(
-            commands,
-            cuboid(1.6, h, 0.9),
-            mat(0x6e6a62, 0.95),
-            Transform::from_translation(
-                c + DVec3::new(a.cos() * 16.0, h as f64 * 0.5 - 0.3, a.sin() * 16.0),
-            )
-            .with_rotation(
-                Quat::from_rotation_y(-(a as f32)) * Quat::from_rotation_z(rng.range(-0.06, 0.06)),
-            ),
-        );
-        if i % 2 == 0 {
-            spawn(
-                commands,
-                cuboid(4.0, 0.9, 1.0),
-                mat(0x6e6a62, 0.95),
-                Transform::from_translation(
-                    c + DVec3::new(a.cos() * 16.0, h as f64 + 0.1, a.sin() * 16.0),
-                )
-                .with_rotation(Quat::from_rotation_y(
-                    -(a as f32) + std::f32::consts::FRAC_PI_2,
-                )),
-            );
-        }
-    }
-    spawn(
-        commands,
-        cyl(7.0, 0.2),
-        mat(0x3a3836, 0.9),
-        at(c + DVec3::new(0.0, 0.1, 0.0)),
-    );
-    for (r, hex) in [(6.0, 0x6a3cff), (3.5, 0x2fd6ff)] {
-        spawn(
-            commands,
-            Shape::Torus {
-                radius: r,
-                tube: 0.08,
-                segments: 96,
-            },
-            StandardMaterial::hex(0x101018).with_emissive(
-                [
-                    ((hex >> 16) & 255) as f32 / 255.0,
-                    ((hex >> 8) & 255) as f32 / 255.0,
-                    (hex & 255) as f32 / 255.0,
-                ],
-                2_000.0,
-            ),
-            at(c + DVec3::new(0.0, 0.22, 0.0)),
-        );
-    }
-    spawn(
-        commands,
-        cuboid(1.2, 1.1, 1.2),
-        mat(0x4a4744, 0.9),
-        at(c + DVec3::new(0.0, 0.75, 0.0)),
-    );
-    spawn(
-        commands,
-        Shape::Sphere {
-            radius: 0.35,
-            segments: 32,
-        },
-        StandardMaterial::hex(0x203040).with_emissive([0.5, 0.8, 1.0], 6_000.0),
-        at(c + DVec3::new(0.0, 1.7, 0.0)),
-    );
-    commands.spawn((
-        at(c + DVec3::new(0.0, 2.0, 0.0)),
-        PointLight {
-            color: [0.5, 0.75, 1.0],
-            intensity_lm: 1200.0,
-            range: 14.0,
-            radius: 0.3,
-        },
-    ));
-}
-
 /// 2D and 2.5D gallery: a side-on diorama (platforms, coins, a hero) that the 2D cameras will
 /// frame. The Rendering and lighting thread owns it.
 pub fn gallery2d(commands: &mut Commands, _lib: &Library, z: &Zone) {
@@ -606,70 +541,86 @@ pub fn cave_shell(
 ) {
     let c = crate::zones::zone("cave").center;
     let (hx, hz, h) = CAVE_INSIDE;
-    let wall = rock();
-    // Back and side walls, thick enough to reach the edge of the hole the landscape digs.
-    spawn(
-        commands,
-        cuboid(44.0, 10.0, 7.0),
-        wall,
-        at(c + DVec3::new(0.0, 5.0, hz + 3.5)),
+    let kit = &lib.rocks;
+    // Back and side walls, thick enough to reach the edge of the hole the landscape digs, and
+    // the front wall either side of the 10 m mouth: the kit's rock, so the face reads as stone.
+    let (fx, fz, fh) = (hx as f32, hz as f32, h as f32);
+    let mut walls = crate::meshgen::Builder::default();
+    walls.cuboid(
+        Vec3::new(0.0, 5.0, fz + 3.5),
+        Vec3::new(22.0, 5.0, 3.5),
+        Quat::IDENTITY,
+        ROCK_TINT,
     );
     for s in [-1.0, 1.0] {
-        spawn(
-            commands,
-            cuboid(7.0, 10.0, 43.0),
-            wall,
-            at(c + DVec3::new(s * (hx + 3.5), 5.0, 2.5)),
+        walls.cuboid(
+            Vec3::new(s * (fx + 3.5), 5.0, 2.5),
+            Vec3::new(3.5, 5.0, 21.5),
+            Quat::IDENTITY,
+            ROCK_TINT,
+        );
+        walls.cuboid(
+            Vec3::new(s * 10.0, fh * 0.5, -fz - 0.5),
+            Vec3::new(5.0, fh * 0.5, 1.5),
+            Quat::IDENTITY,
+            ROCK_TINT,
         );
     }
+    commands.spawn((
+        at(c),
+        MeshRenderer::new(meshes.add(rock_face(walls)), kit.mats.rock),
+    ));
     cave_roof(commands, meshes, lib, land, c, h, rng);
     // Boulders sunk into the walls and hanging from the ceiling, so the inside reads as rock
-    // rather than a box.
+    // rather than a box. Each sits with its flat base in the wall and its rounded face out.
+    // (Shapes and tilts come from their own stream; the shared one advances as before.)
+    let mut pick = Rng::new(0x00ca_7eb0_u64);
     for k in 0..64 {
         let along = rng.range(-1.0, 1.0) as f64;
         let y = rng.range(-0.5, h as f32 - 1.0) as f64;
-        let p = match k % 4 {
-            0 => DVec3::new(-hx - 0.4, y, along * hz),
-            1 => DVec3::new(hx + 0.4, y, along * hz),
-            2 => DVec3::new(along * hx, y, hz + 0.4),
-            _ => DVec3::new(along * hx, h + 0.4, rng.range(-hz as f32, hz as f32) as f64),
+        let (p, inward) = match k % 4 {
+            0 => (DVec3::new(-hx - 0.4, y, along * hz), Vec3::X),
+            1 => (DVec3::new(hx + 0.4, y, along * hz), Vec3::NEG_X),
+            2 => (DVec3::new(along * hx, y, hz + 0.4), Vec3::NEG_Z),
+            _ => (
+                DVec3::new(along * hx, h + 0.4, rng.range(-hz as f32, hz as f32) as f64),
+                Vec3::NEG_Y,
+            ),
         };
-        let mesh = lib.rocks[rng.range_i32(0, lib.rocks.len() as i32) as usize];
-        commands.spawn((
-            Transform::from_translation(c + p)
-                .with_rotation(
-                    Quat::from_rotation_y(rng.range(0.0, TAU))
-                        * Quat::from_rotation_x(rng.range(-0.6, 0.6)),
-                )
-                .with_scale(Vec3::splat(rng.range(1.4, 3.0))),
-            MeshRenderer::new(mesh, lib.mats.rock),
-        ));
+        let _ = rng.range_i32(0, 6);
+        let yaw = rng.range(0.0, TAU);
+        let tilt = rng.range(-0.6, 0.6) * 0.5;
+        let scale = rng.range(1.4, 3.0) * 0.6;
+        let v = kit.pick(crate::rocks::RockSize::Large, pick.chance(0.5), &mut pick);
+        let sink = (inward * v.extent.y * scale * 0.45).as_dvec3();
+        let tf = Transform::from_translation(c + p - sink)
+            .with_rotation(
+                Quat::from_rotation_arc(Vec3::Y, inward)
+                    * Quat::from_rotation_y(yaw)
+                    * Quat::from_rotation_x(tilt),
+            )
+            .with_scale(Vec3::new(scale, scale * pick.range(0.7, 1.0), scale));
+        kit.spawn(commands, v, tf, crate::rocks::RockLook::default());
     }
-    // Front wall with the mouth (10 m wide).
-    for s in [-1.0, 1.0] {
-        spawn(
-            commands,
-            cuboid(10.0, h as f32, 3.0),
-            wall,
-            at(c + DVec3::new(s * 10.0, h * 0.5, -hz - 0.5)),
-        );
-    }
-    // Rocky arch over the mouth.
+    // Rocky arch over the mouth: blocks set into the hillside, faces out and a little up.
     for i in 0..9 {
         let a = i as f64 / 8.0 * std::f64::consts::PI;
         let s = rng.range(1.4, 2.2);
-        spawn(
-            commands,
-            Shape::Sphere {
-                radius: s,
-                segments: 10,
-            },
-            rock(),
-            Transform::from_translation(
-                c + DVec3::new(a.cos() * 6.0, 6.0 + a.sin() * 3.5, -hz - 1.5),
+        let v = kit.pick(crate::rocks::RockSize::Large, pick.chance(0.6), &mut pick);
+        let out = Vec3::new(a.cos() as f32 * 0.5, a.sin() as f32 * 0.5, -1.0).normalize();
+        let scale = s * 0.62;
+        let p = c + DVec3::new(a.cos() * 6.0, 6.0 + a.sin() * 3.5, -hz - 1.5)
+            - (out * v.extent.y * scale * 0.4).as_dvec3();
+        let tf = Transform::from_translation(p)
+            .with_rotation(
+                Quat::from_rotation_arc(Vec3::Y, out) * Quat::from_rotation_y(pick.range(0.0, TAU)),
             )
-            .with_scale(Vec3::new(1.2, 0.9, 1.0)),
-        );
+            .with_scale(Vec3::new(scale, scale * 0.8, scale));
+        let look = crate::rocks::RockLook {
+            wet: false,
+            moss: i % 3 != 1,
+        };
+        kit.spawn(commands, v, tf, look);
     }
     // Boulders piled around the mouth so it reads as a rock face in the hillside.
     for i in 0..26 {
@@ -677,18 +628,57 @@ pub fn cave_shell(
         let x = side * rng.range(5.5, 22.0) as f64;
         let y = rng.range(0.0, 10.0) as f64;
         let s = rng.range(1.2, 3.2);
-        spawn(
-            commands,
-            Shape::Sphere {
-                radius: s,
-                segments: 10,
-            },
-            rock(),
-            Transform::from_translation(
-                c + DVec3::new(x, y, -hz - 2.0 - rng.range(0.0, 3.0) as f64),
+        let z = -hz - 2.0 - rng.range(0.0, 3.0) as f64;
+        let (size, scale) = if s > 2.0 {
+            (crate::rocks::RockSize::Large, s * 0.55)
+        } else {
+            (crate::rocks::RockSize::Medium, s * 1.05)
+        };
+        let v = kit.pick(size, pick.chance(0.4), &mut pick);
+        let out = Vec3::new(side as f32 * 0.25, 0.7, -1.0).normalize();
+        let p = c + DVec3::new(x, y, z) - (out * v.extent.y * scale * 0.35).as_dvec3();
+        let tf = Transform::from_translation(p)
+            .with_rotation(
+                Quat::from_rotation_arc(Vec3::Y, out) * Quat::from_rotation_y(pick.range(0.0, TAU)),
             )
-            .with_scale(Vec3::new(1.3, 0.8, 1.0)),
-        );
+            .with_scale(Vec3::new(scale, scale * pick.range(0.7, 0.95), scale));
+        let look = crate::rocks::RockLook {
+            wet: false,
+            moss: true,
+        };
+        kit.spawn(commands, v, tf, look);
+    }
+    // Blocks stacked up the face above the mouth to where the hill's grass starts, so it breaks
+    // into ledges instead of standing as one flat wall. (Their own stream, like the shapes.)
+    let face_z = -hz - 2.6;
+    let mut x = -23.0;
+    while x <= 23.0 {
+        let top = land.cave_roof_height(c.x + x, c.z + face_z) - c.y;
+        let mut y = h - 0.8;
+        while y < top - 0.6 {
+            let scale = pick.range(1.0, 1.5);
+            let v = kit.pick(crate::rocks::RockSize::Large, pick.chance(0.6), &mut pick);
+            let out = Vec3::new(pick.range(-0.2, 0.2), pick.range(0.2, 0.6), -1.0).normalize();
+            let at_face = DVec3::new(
+                x + pick.range(-0.9, 0.9) as f64,
+                y + pick.range(-0.5, 0.5) as f64,
+                face_z,
+            );
+            let p = c + at_face - (out * v.extent.y * scale * 0.45).as_dvec3();
+            let tf = Transform::from_translation(p)
+                .with_rotation(
+                    Quat::from_rotation_arc(Vec3::Y, out)
+                        * Quat::from_rotation_y(pick.range(0.0, TAU)),
+                )
+                .with_scale(Vec3::new(scale, scale * pick.range(0.6, 0.85), scale));
+            let look = crate::rocks::RockLook {
+                wet: false,
+                moss: pick.chance(0.7),
+            };
+            kit.spawn(commands, v, tf, look);
+            y += 2.4;
+        }
+        x += 2.9;
     }
     commands.spawn((
         at(c + DVec3::new(0.0, h * 0.5, 0.0)),
@@ -818,7 +808,7 @@ fn cave_roof(
     };
     b.quad(
         [p(0, 0, y0), p(nx, 0, y0), p(nx, nz, y0), p(0, nz, y0)],
-        Vec3::ONE,
+        ROCK_TINT,
     );
     let mut skirt = |a: (usize, usize), e: (usize, usize), out: Vec3| {
         let (ta, te) = (top(a.0, a.1) as f32, top(e.0, e.1) as f32);
@@ -831,7 +821,7 @@ fn cave_roof(
         if (q[1] - q[0]).cross(q[2] - q[0]).dot(out) < 0.0 {
             q = [q[1], q[0], q[3], q[2]];
         }
-        b.quad(q, Vec3::ONE);
+        b.quad(q, ROCK_TINT);
     };
     for i in 0..nx {
         skirt((i, 0), (i + 1, 0), Vec3::NEG_Z);
@@ -841,7 +831,10 @@ fn cave_roof(
         skirt((0, j), (0, j + 1), Vec3::NEG_X);
         skirt((nx, j), (nx, j + 1), Vec3::X);
     }
-    commands.spawn((at(c), MeshRenderer::new(meshes.add(b.finish()), rock())));
+    commands.spawn((
+        at(c),
+        MeshRenderer::new(meshes.add(rock_face(b)), lib.rocks.mats.rock),
+    ));
 
     // Grass on the roof like on the rest of the hill.
     let mut x = x0 + 1.5;
@@ -1096,62 +1089,6 @@ fn falls_sheet(
     mesh
 }
 
-/// Voxel hill: a mound of 1 m blocks (grass on dirt on stone) with a dug pit and a block house
-/// (Valheim-style digging and building). The Destructible terrain and buildings and Planets and
-/// terrain threads own it.
-pub fn voxel(commands: &mut Commands, meshes: &mut Assets<Mesh>, z: &Zone, rng: &mut Rng) {
-    use engine::core::math::noise::fbm2;
-    let mut b = crate::meshgen::Builder::default();
-    let grass = Vec3::new(0.08, 0.17, 0.04);
-    let dirt = Vec3::new(0.18, 0.12, 0.07);
-    let stone_c = Vec3::new(0.22, 0.21, 0.2);
-    let n = 36i32;
-    let height = |i: i32, j: i32| -> i32 {
-        let (x, y) = (i as f64 - n as f64 * 0.5, j as f64 - n as f64 * 0.5);
-        let r = (x * x + y * y).sqrt() / (n as f64 * 0.5);
-        let mound = (1.0 - r).max(0.0) * 9.0 + fbm2(x / 6.0, y / 6.0, 3, 3, 2.0, 0.5) as f64 * 2.0;
-        // The dug pit.
-        let pit = ((x - 4.0).powi(2) + (y + 3.0).powi(2)).sqrt() < 4.0;
-        if pit {
-            (mound as i32 - 4).max(0)
-        } else {
-            mound.max(0.0) as i32
-        }
-    };
-    for i in 0..n {
-        for j in 0..n {
-            let top = height(i, j);
-            for y in 0..top {
-                let c = if y == top - 1 {
-                    grass
-                } else if y > top - 4 {
-                    dirt
-                } else {
-                    stone_c
-                } * (0.9 + 0.2 * rng.f32());
-                // Only blocks with an exposed side need faces; boxes are cheap enough here.
-                let exposed = y == top - 1
-                    || height(i - 1, j) <= y
-                    || height(i + 1, j) <= y
-                    || height(i, j - 1) <= y
-                    || height(i, j + 1) <= y;
-                if exposed {
-                    let p = Vec3::new(
-                        i as f32 - n as f32 * 0.5,
-                        y as f32 + 0.5,
-                        j as f32 - n as f32 * 0.5,
-                    );
-                    b.aabb(p - Vec3::splat(0.5), p + Vec3::splat(0.5), c);
-                }
-            }
-        }
-    }
-    commands.spawn((
-        at(z.center),
-        MeshRenderer::new(meshes.add(b.finish()), mat(0xffffff, 0.9)),
-    ));
-}
-
 /// Dry grass around the fire module's burning meadow (which fills the middle of the zone), out
 /// to the fence.
 pub fn field_edge(commands: &mut Commands, lib: &Library, z: &Zone, rng: &mut Rng) {
@@ -1195,69 +1132,6 @@ pub fn field_edge(commands: &mut Commands, lib: &Library, z: &Zone, rng: &mut Rn
                 p + DVec3::new(0.0, 0.9, 0.0),
                 -(a as f32) - std::f32::consts::FRAC_PI_2 + std::f32::consts::FRAC_PI_2,
             ),
-        );
-    }
-}
-
-/// Smoke range: firing line, targets, a fan bank and a smoke chamber. The Fire and smoke thread
-/// owns it.
-pub fn range(commands: &mut Commands, _lib: &Library, z: &Zone) {
-    let c = z.center;
-    spawn(
-        commands,
-        cuboid(40.0, 0.12, 50.0),
-        concrete(),
-        at(c + DVec3::new(0.0, 0.06, 0.0)),
-    );
-    spawn(
-        commands,
-        cuboid(30.0, 1.0, 1.0),
-        stone(),
-        at(c + DVec3::new(0.0, 0.5, -20.0)),
-    );
-    for i in 0..5 {
-        let x = -12.0 + i as f64 * 6.0;
-        spawn(
-            commands,
-            cuboid(0.1, 1.6, 0.1),
-            dark_wood(),
-            at(c + DVec3::new(x, 0.8, 18.0)),
-        );
-        spawn(
-            commands,
-            cyl(0.6, 0.05),
-            mat(0xeeeeee, 0.8),
-            Transform::from_translation(c + DVec3::new(x, 1.8, 18.0))
-                .with_rotation(Quat::from_rotation_x(std::f32::consts::FRAC_PI_2)),
-        );
-        spawn(
-            commands,
-            cyl(0.3, 0.06),
-            mat(0xc0392b, 0.8),
-            Transform::from_translation(c + DVec3::new(x, 1.8, 17.98))
-                .with_rotation(Quat::from_rotation_x(std::f32::consts::FRAC_PI_2)),
-        );
-    }
-    // Back wall and fans that blow across the lanes.
-    spawn(
-        commands,
-        cuboid(40.0, 6.0, 1.0),
-        concrete(),
-        at(c + DVec3::new(0.0, 3.0, 25.0)),
-    );
-    for zz in [-8.0, 0.0, 8.0] {
-        spawn(
-            commands,
-            cyl(1.4, 0.4),
-            metal(),
-            Transform::from_translation(c + DVec3::new(-19.0, 2.0, zz))
-                .with_rotation(Quat::from_rotation_z(std::f32::consts::FRAC_PI_2)),
-        );
-        spawn(
-            commands,
-            cuboid(0.4, 2.0, 0.4),
-            metal(),
-            at(c + DVec3::new(-19.0, 1.0, zz)),
         );
     }
 }

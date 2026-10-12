@@ -14,7 +14,7 @@
 
 use std::path::PathBuf;
 
-use engine_audio::demo::{TRAIL_LENGTH, TrailWalker, spawn_demo, stretch_start, trail_point};
+use engine_audio::demo::{TRAIL_LENGTH, TrailWalker, spawn_demo, stretch_start};
 use engine_audio::{Audio, AudioListener, AudioOutput, AudioPlugin, AudioSettings};
 use engine_core::prelude::*;
 use engine_core::time::TimeSource;
@@ -307,8 +307,7 @@ fn tag_hiker(
         return;
     }
     for (e, w) in &walkers {
-        // The hiker: two feet at walking pace (the runner is faster).
-        if w.feet == 2 && w.speed < 2.0 {
+        if w.is_hiker() {
             commands.entity(e).insert(Followed).with_children(|c| {
                 c.spawn((
                     AudioListener { priority: 10 },
@@ -351,7 +350,6 @@ fn script(
 
 fn follow_camera(
     time: Res<Time>,
-    s: Res<Script>,
     hiker: Query<&TrailWalker, With<Followed>>,
     mut cams: Query<&mut Transform, With<Camera>>,
     mut eye: Local<Option<DVec3>>,
@@ -360,14 +358,7 @@ fn follow_camera(
     let Ok(w) = hiker.single() else {
         return;
     };
-    let (p, d) = trail_point(w.along);
-    let (ahead, _) = trail_point(w.along + 2.5);
-    let right = Vec3::new(-d.z, 0.0, d.x).as_dvec3();
-    // Stay on the outside of the loop (the underpass is open on that side).
-    let outward = if p.dot(right) > 0.0 { right } else { -right };
-    let pos = s.origin + p;
-    let want_eye = pos - d.as_dvec3() * 4.2 + outward * 3.0 + DVec3::new(0.0, 2.1, 0.0);
-    let want_look = s.origin + ahead + DVec3::new(0.0, 0.7, 0.0);
+    let (want_eye, want_look) = w.follow_view();
     let k = 1.0 - (-time.real_delta_secs() as f64 * 2.5).exp();
     let e = eye.map_or(want_eye, |e| e + (want_eye - e) * k);
     let l = look.map_or(want_look, |l| l + (want_look - l) * k);

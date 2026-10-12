@@ -110,8 +110,14 @@ Storage (the first rule is a test, so CI enforces it):
   area, so threads never conflict) and downloaded into `assets/fetched/` (gitignored) by
   `cargo run -p fetch-assets`. Code loads them with the asset key `fetched/<path>`.
 - Every entry is pinned by SHA-256, links the `source` page, and has an allowed `license`:
-  `CC0-1.0` preferred, CC-BY with an `author` to credit; nothing non-commercial or
-  no-derivatives. Format and checks: `tools/fetch-assets` docs.
+  `CC0-1.0` preferred, CC-BY with an `author` to credit, MIT, Apache-2.0 or OFL-1.1 with the
+  `copyright` line from the origin's license file; nothing non-commercial or no-derivatives
+  (most motion-capture datasets, such as LAFAN1 and Bandai Namco's, are CC BY-NC-ND, so they
+  are out). Format and checks: `tools/fetch-assets` docs.
+- The repository and the mirror are public, so licenses travel with the files: fetching
+  writes `assets/fetched/THIRD_PARTY_NOTICES.md` (every file's license, author and source,
+  CC-BY credits, and the license texts), the Assets workflow puts the same file on the mirror,
+  and a build that ships fetched files ships it too.
 - Code must run when a fetched file is missing (CI and fresh checkouts don't fetch): fall back
   to a procedural or plain version and log once. Tests never depend on fetched files.
 
@@ -159,8 +165,8 @@ download link:
    deletes the branch. Paste the pin and push once that workflow has run, which is when
    `git ls-remote origin refs/heads/asset-upload/<id>` prints nothing.
 
-Fetching these needs a GitHub login (`gh auth login` or `GITHUB_TOKEN`) while the repository is
-private, since only the mirror has them.
+Only the mirror has these. Fetching them needs no login now that the repository is public (a
+`GITHUB_TOKEN` or `gh auth login` raises GitHub's rate limit).
 
 Sizes: 2K for most materials, 4K for hero assets and terrain close-ups, 2K–4K HDRIs for
 lighting (8K only for a visible backdrop). JPG or PNG for color, HDR or EXR only for HDR data.

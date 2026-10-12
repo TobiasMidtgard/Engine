@@ -23,7 +23,7 @@ use engine_core::prelude::*;
 use engine_render::BoxFace;
 
 use crate::material::{DestructibleMaterial, DestructionMaterials};
-use crate::meshing::{MeshBuilder, hash3, mix, scale};
+use crate::meshing::{MeshBuilder, box_uv, hash3, mix, scale};
 
 /// Starting shape of a [`VoxelVolume`].
 #[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
@@ -41,6 +41,9 @@ pub enum VoxelShape {
     Arch,
     /// Empty (fill it with `TerrainEdit` Add).
     Empty,
+    /// A grassy mound that meets the ground at its rim, soil over rock (Valheim-style hill to
+    /// dig into and build on).
+    Hill,
 }
 
 /// A destructible voxel formation. Put it on an entity with a `Transform`; the module
@@ -103,6 +106,16 @@ impl VoxelVolume {
             shape: VoxelShape::Arch,
             topsoil: None,
             grass: None,
+            ..Self::cliff(width, height, depth, voxel_size)
+        }
+    }
+
+    /// A hill `width × height × depth` meters: soil (with grass) over rock.
+    pub fn hill(width: f32, height: f32, depth: f32, voxel_size: f32) -> Self {
+        Self {
+            shape: VoxelShape::Hill,
+            topsoil_depth: 1.4,
+            overhang: 0.0,
             ..Self::cliff(width, height, depth, voxel_size)
         }
     }
@@ -193,6 +206,18 @@ fn shape_sdf(v: &VoxelVolume, p: Vec3) -> f32 {
             .min(hd - p.z.abs())
             .min(p.y + 1.0),
         VoxelShape::Empty => -1.0,
+        VoxelShape::Hill => {
+            // Height field: a broad dome with rolling bumps and a steeper rocky side (−Z),
+            // falling to zero at the rim so it sits flush on the ground.
+            let r = ((p.x / hw).powi(2) + (p.z / hd).powi(2)).sqrt();
+            let rim = smoothstep(1.0, 0.55, r);
+            let dome = (1.0 - r * r).max(0.0).powf(1.3);
+            let bumps = 0.18 * fbm2(p.x as f64 * 0.09, p.z as f64 * 0.09, seed, 4, 2.0, 0.5)
+                + 0.05 * fbm2(p.x as f64 * 0.5, p.z as f64 * 0.5, seed + 1, 3, 2.0, 0.5);
+            let scarp = 0.25 * smoothstep(0.1, -0.6, p.z / hd) * smoothstep(0.9, 0.3, r);
+            let top = h * (0.92 * dome + scarp + bumps * rim) * rim;
+            (top - p.y).min(p.y + 1.0)
+        }
         VoxelShape::Cliff => {
             // A rocky outcrop: tallest in the middle, sloping down into the ground at the
             // ends, with buttresses, ledges and an overhanging brow on its −Z face.
@@ -324,6 +349,32 @@ impl VoxelState {
                 }
             }
         }
+        // A hill is soil over a bedrock base whose top undulates a meter or so: tunnels hold in
+        // the rock, wide rooms dug into the soil above cave in.
+        if volume.shape == VoxelShape::Hill {
+            let soil = DestructibleMaterial::Dirt.index() as u8;
+            for k in 0..dims[2] {
+                for i in 0..dims[0] {
+                    let c = state.center(i, 0, k);
+                    let line = 1.8
+                        + 1.3
+                            * fbm2(
+                                c.x as f64 * 0.11,
+                                c.z as f64 * 0.11,
+                                volume.seed + 41,
+                                3,
+                                2.0,
+                                0.5,
+                            );
+                    for j in 0..dims[1] {
+                        let idx = state.idx(i, j, k);
+                        if state.center(i, j, k).y > line {
+                            state.material[idx] = soil;
+                        }
+                    }
+                }
+            }
+        }
         // Top layer: solid voxels within `topsoil_depth` of open air above.
         if let Some(top) = volume.topsoil {
             let layers = (volume.topsoil_depth / s).round() as usize;
@@ -435,70 +486,79 @@ impl VoxelState {
         );
         let before = self.solid_count_in(i0, j0, k0, i1, j1, k1);
         let mut touched = false;
-        for k in k0..k1 {
-            for j in j0..j1 {
-                for i in i0..i1 {
-                    let p = self.center(i, j, k);
-                    let d = sdf(p);
-                    // Occupancy of the shape in this voxel, 0..1.
-                    let occ = (0.5 + d / s).clamp(0.0, 1.0);
-                    if occ <= 0.0 && d < -s {
-                        continue;
-                    }
-                    let idx = self.idx(i, j, k);
-                    let old = self.density[idx];
-                    match op {
-                        VoxelOp::Remove => {
-                            let new = (old as f32).min(255.0 * (1.0 - occ)).round() as u8;
-                            if new != old {
-                                self.density[idx] = new;
-                                touched = true;
-                            }
-                            if d > -1.5 * s && old > 0 {
-                                self.wear[idx] = self.wear[idx]
-                                    .min(((-d / (1.5 * s)).clamp(0.0, 1.0) * 255.0) as u8);
-                            }
+        // A big smoothing brush works at a bigger scale: several passes of neighbor averaging.
+        let passes = match op {
+            VoxelOp::Smooth(_) => ((hi - lo).min_element() * 0.5 / (3.0 * s))
+                .round()
+                .clamp(1.0, 8.0) as usize,
+            _ => 1,
+        };
+        for _ in 0..passes {
+            for k in k0..k1 {
+                for j in j0..j1 {
+                    for i in i0..i1 {
+                        let p = self.center(i, j, k);
+                        let d = sdf(p);
+                        // Occupancy of the shape in this voxel, 0..1.
+                        let occ = (0.5 + d / s).clamp(0.0, 1.0);
+                        if occ <= 0.0 && d < -s {
+                            continue;
                         }
-                        VoxelOp::Add(material) => {
-                            let new = (old as f32).max(255.0 * occ).round() as u8;
-                            if new != old {
-                                self.density[idx] = new;
-                                if occ > 0.3 {
-                                    self.material[idx] = material.index() as u8;
-                                    self.wear[idx] = 0;
+                        let idx = self.idx(i, j, k);
+                        let old = self.density[idx];
+                        match op {
+                            VoxelOp::Remove => {
+                                let new = (old as f32).min(255.0 * (1.0 - occ)).round() as u8;
+                                if new != old {
+                                    self.density[idx] = new;
+                                    touched = true;
                                 }
-                                touched = true;
+                                if d > -1.5 * s && old > 0 {
+                                    self.wear[idx] = self.wear[idx]
+                                        .min(((-d / (1.5 * s)).clamp(0.0, 1.0) * 255.0) as u8);
+                                }
                             }
-                        }
-                        VoxelOp::Smooth(strength) => {
-                            if occ <= 0.0 {
-                                continue;
+                            VoxelOp::Add(material) => {
+                                let new = (old as f32).max(255.0 * occ).round() as u8;
+                                if new != old {
+                                    self.density[idx] = new;
+                                    if occ > 0.3 {
+                                        self.material[idx] = material.index() as u8;
+                                        self.wear[idx] = 0;
+                                    }
+                                    touched = true;
+                                }
                             }
-                            let mut sum = 0.0;
-                            for (di, dj, dk) in [
-                                (-1, 0, 0),
-                                (1, 0, 0),
-                                (0, -1, 0),
-                                (0, 1, 0),
-                                (0, 0, -1),
-                                (0, 0, 1),
-                            ] {
-                                sum +=
-                                    self.sample(i as i64 + di, j as i64 + dj, k as i64 + dk) as f32;
+                            VoxelOp::Smooth(strength) => {
+                                if occ <= 0.0 {
+                                    continue;
+                                }
+                                let mut sum = 0.0;
+                                for (di, dj, dk) in [
+                                    (-1, 0, 0),
+                                    (1, 0, 0),
+                                    (0, -1, 0),
+                                    (0, 1, 0),
+                                    (0, 0, -1),
+                                    (0, 0, 1),
+                                ] {
+                                    sum += self.sample(i as i64 + di, j as i64 + dj, k as i64 + dk)
+                                        as f32;
+                                }
+                                let avg = sum / 6.0;
+                                let new = (old as f32
+                                    + (avg - old as f32) * strength.clamp(0.0, 1.0) * occ)
+                                    .round() as u8;
+                                if new != old {
+                                    self.density[idx] = new;
+                                    touched = true;
+                                }
                             }
-                            let avg = sum / 6.0;
-                            let new = (old as f32
-                                + (avg - old as f32) * strength.clamp(0.0, 1.0) * occ)
-                                .round() as u8;
-                            if new != old {
-                                self.density[idx] = new;
-                                touched = true;
-                            }
-                        }
-                        VoxelOp::Paint(material) => {
-                            if occ > 0.3 && old > 0 {
-                                self.material[idx] = material.index() as u8;
-                                touched = true;
+                            VoxelOp::Paint(material) => {
+                                if occ > 0.3 && old > 0 {
+                                    self.material[idx] = material.index() as u8;
+                                    touched = true;
+                                }
                             }
                         }
                     }
@@ -844,7 +904,15 @@ pub struct VoxelLook {
     pub grass: Option<[f32; 3]>,
     pub topsoil: Option<u8>,
     pub seed: u64,
+    /// Split meshes into one layer per surface (material, or [`GRASS_LAYER`]) so each layer
+    /// can use its own textured material. Off: one mesh in the volume's material.
+    pub layered: bool,
+    /// The volume's own material index (the layer an unlayered mesh belongs to).
+    pub base: u8,
 }
+
+/// Layer id of grassy topsoil in [`mesh_chunk_layers`] (other layers are material indices).
+pub const GRASS_LAYER: u8 = u8::MAX;
 
 impl VoxelLook {
     pub fn new(volume: &VoxelVolume, materials: &DestructionMaterials) -> Self {
@@ -859,7 +927,24 @@ impl VoxelLook {
             grass: volume.grass,
             topsoil: volume.topsoil.map(|m| m.index() as u8),
             seed: volume.seed,
+            layered: false,
+            base: volume.material.index() as u8,
         }
+    }
+
+    /// The color a textured layer already has (its material's weathered color, or the grass
+    /// color), which vertex colors are divided by.
+    pub fn reference(&self, layer: u8) -> [f32; 3] {
+        if layer == GRASS_LAYER {
+            return self.grass.unwrap_or([1.0; 3]);
+        }
+        self.colors.get(layer as usize).map_or([1.0; 3], |c| c.0)
+    }
+
+    /// Mesh in layers (see [`VoxelLook::layered`]).
+    pub fn with_layers(mut self, layered: bool) -> Self {
+        self.layered = layered;
+        self
     }
 }
 
@@ -889,7 +974,8 @@ const EDGES: [(usize, usize); 12] = [
 ];
 
 /// Surface-nets mesh of the edges whose base sample lies in `[lo, hi)` (sample coordinates).
-/// Vertices are in the state's local space minus `offset`.
+/// Vertices are in the state's local space minus `offset`. With `look.layered` (textured
+/// surfaces) it is ready for the volume's own textured material, as a falling piece needs.
 pub fn mesh_region(
     state: &VoxelState,
     look: &VoxelLook,
@@ -897,11 +983,210 @@ pub fn mesh_region(
     hi: [i64; 3],
     offset: Vec3,
 ) -> MeshBuilder {
+    let tagged = mesh_region_tagged(state, look, lo, hi);
+    let mut mb = if look.layered {
+        retexture(&tagged, look, false)
+            .pop()
+            .map(|l| l.1)
+            .unwrap_or_default()
+    } else {
+        tagged.mesh
+    };
+    // Offset last, so texture coordinates stay in volume space (a falling boulder keeps its
+    // grain).
+    mb.translate(-offset);
+    mb
+}
+
+/// [`mesh_region`] split into layers when `look.layered` (else one layer, the volume's
+/// material): each triangle goes to the surface most of its corners show.
+pub fn mesh_region_layers(
+    state: &VoxelState,
+    look: &VoxelLook,
+    lo: [i64; 3],
+    hi: [i64; 3],
+    offset: Vec3,
+) -> Vec<(u8, MeshBuilder)> {
+    let tagged = mesh_region_tagged(state, look, lo, hi);
+    let mut layers = if look.layered {
+        retexture(&tagged, look, true)
+    } else {
+        vec![(look.base, tagged.mesh)]
+    };
+    for (_, m) in &mut layers {
+        m.translate(-offset);
+    }
+    layers
+}
+
+/// Prepare a voxel mesh for textured materials. Each triangle is mapped along its own face
+/// normal's main axis (per-vertex box mapping would smear texture across triangles whose
+/// corners pick different axes), and vertex colors become relative to their layer's own color,
+/// since the texture now carries the albedo. With `split`, grass is cut out along the lawn's
+/// edge (where the corners' grass cover crosses one half), so the grass layer ends in a smooth
+/// line rather than in whole triangles; the bare rest goes to the material two of its corners
+/// share (else the first's). Without `split`, everything is one layer in the volume's
+/// material. Layers come out sorted by tag.
+pub fn retexture(tagged: &Tagged, look: &VoxelLook, split: bool) -> Vec<(u8, MeshBuilder)> {
+    let (mb, tags, lawn) = (&tagged.mesh, &tagged.tags, &tagged.lawn);
+    let mut out: Vec<(u8, MeshBuilder, HashMap<(u32, u32, u8), u32>)> = Vec::new();
+    let pos = |i: u32| Vec3::from(mb.vertices[i as usize].position);
+    let grassy = |i: u32| lawn[i as usize] > 0.5;
+    for t in mb.indices.as_chunks::<3>().0 {
+        let face = (pos(t[1]) - pos(t[0])).cross(pos(t[2]) - pos(t[0]));
+        let axis = face.abs().max_position();
+        let dir = {
+            let mut d = Vec3::ZERO;
+            d[axis] = face[axis].signum();
+            d
+        };
+        let code = (axis * 2) as u8 + (face[axis] < 0.0) as u8;
+        // Corners as (a, b): a vertex (b = a) or the lawn's edge between two vertices.
+        let mut polygons: Vec<(u8, Vec<(u32, u32)>)> = Vec::new();
+        let corners: Vec<(u32, u32)> = t.iter().map(|&i| (i, i)).collect();
+        let g = t.map(grassy);
+        if !split {
+            polygons.push((look.base, corners));
+        } else if g.iter().all(|g| *g) {
+            polygons.push((GRASS_LAYER, corners));
+        } else if g.iter().all(|g| !*g) {
+            polygons.push((majority(t.map(|i| tags[i as usize])), corners));
+        } else {
+            let (mut grass, mut bare) = (Vec::new(), Vec::new());
+            for k in 0..3 {
+                let (p, q) = (t[k], t[(k + 1) % 3]);
+                if g[k] {
+                    grass.push((p, p));
+                } else {
+                    bare.push((p, p));
+                }
+                if g[k] != g[(k + 1) % 3] {
+                    let cut = (p.min(q), p.max(q));
+                    grass.push(cut);
+                    bare.push(cut);
+                }
+            }
+            // The bare part wears its first bare corner's material.
+            let tag = t
+                .iter()
+                .zip(g)
+                .find(|(_, g)| !g)
+                .map_or(look.base, |(i, _)| tags[*i as usize]);
+            polygons.push((GRASS_LAYER, grass));
+            polygons.push((tag, bare));
+        }
+        for (tag, poly) in polygons {
+            let k = match out.iter().position(|o| o.0 == tag) {
+                Some(k) => k,
+                None => {
+                    out.push((tag, MeshBuilder::new(), HashMap::new()));
+                    out.len() - 1
+                }
+            };
+            let (_, layer, remap) = &mut out[k];
+            let ids: Vec<u32> = poly
+                .iter()
+                .map(|&(a, b)| {
+                    *remap.entry((a, b, code)).or_insert_with(|| {
+                        let v = corner(tagged, a, b);
+                        let mut vert = mb.vertices[a as usize];
+                        vert.position = v.position.to_array();
+                        vert.normal = v.normal.to_array();
+                        vert.uv = box_uv(v.position, dir).to_array();
+                        // Grass shades grass; every other layer shows its own bare color.
+                        let (color, reference) = if tag == GRASS_LAYER {
+                            (v.color, look.reference(GRASS_LAYER))
+                        } else {
+                            let own = if split { tag } else { v.material };
+                            (v.bare, look.reference(own))
+                        };
+                        for ch in 0..3 {
+                            vert.color[ch] =
+                                (color[ch] / reference[ch].max(1e-3)).clamp(0.12, 1.35);
+                        }
+                        layer.vertices.push(vert);
+                        layer.vertices.len() as u32 - 1
+                    })
+                })
+                .collect();
+            for k in 1..ids.len() - 1 {
+                layer.triangle(ids[0], ids[k], ids[k + 1]);
+            }
+        }
+    }
+    out.sort_by_key(|o| o.0);
+    out.into_iter().map(|(t, m, _)| (t, m)).collect()
+}
+
+/// The material most corners show (two that agree, else the first).
+fn majority([a, b, c]: [u8; 3]) -> u8 {
+    if b == c { b } else { a }
+}
+
+/// A corner of a retextured triangle.
+struct Corner {
+    position: Vec3,
+    normal: Vec3,
+    color: [f32; 3],
+    bare: [f32; 3],
+    material: u8,
+}
+
+/// Vertex `a` (when `b == a`) or the point on edge `a`–`b` where grass cover crosses one half.
+/// Neighboring triangles name a shared edge the same way round, so their cuts meet exactly.
+fn corner(tagged: &Tagged, a: u32, b: u32) -> Corner {
+    let at = |i: u32| {
+        let v = &tagged.mesh.vertices[i as usize];
+        Corner {
+            position: Vec3::from(v.position),
+            normal: Vec3::from(v.normal),
+            color: [v.color[0], v.color[1], v.color[2]],
+            bare: tagged.bare[i as usize],
+            material: tagged.tags[i as usize],
+        }
+    };
+    let (p, q) = (at(a), at(b));
+    if a == b {
+        return p;
+    }
+    let (la, lb) = (tagged.lawn[a as usize], tagged.lawn[b as usize]);
+    let t = ((0.5 - la) / (lb - la)).clamp(0.0, 1.0);
+    let lerp3 = |x: [f32; 3], y: [f32; 3]| std::array::from_fn(|k| x[k] + (y[k] - x[k]) * t);
+    Corner {
+        position: p.position.lerp(q.position, t),
+        normal: p.normal.lerp(q.normal, t).normalize_or(p.normal),
+        color: lerp3(p.color, q.color),
+        bare: lerp3(p.bare, q.bare),
+        material: if la <= 0.5 { p.material } else { q.material },
+    }
+}
+
+fn mesh_region_tagged(state: &VoxelState, look: &VoxelLook, lo: [i64; 3], hi: [i64; 3]) -> Tagged {
     let s = state.size;
     let mut mb = MeshBuilder::new();
+    let mut tags: Vec<u8> = Vec::new();
+    let mut lawn: Vec<f32> = Vec::new();
+    let mut bare_colors: Vec<[f32; 3]> = Vec::new();
     let mut cache: HashMap<[i64; 3], Option<u32>> = HashMap::new();
     let f = |p: [i64; 3]| state.sample(p[0], p[1], p[2]) as f32 - 127.5;
     let floor_anchored = state.anchored[2];
+    // Sky light reaching a vertex (1 open, 0 buried), from rays through the density field:
+    // tunnels, caves and overhangs go dark, which the renderer's screen-space occlusion can't
+    // see from outside. `q` is in sample coordinates. Rays that hit far away count less.
+    let dirs = sky_directions();
+    let sky = |q: Vec3, n: Vec3| -> f32 {
+        let (t1, t2) = n.any_orthonormal_pair();
+        let mut open = 0.0;
+        for d in &dirs {
+            let dir = t1 * d.x + t2 * d.y + n * d.z;
+            let hit = SKY_STEPS.iter().position(|m| {
+                let p = (q + dir * (m / s)).round();
+                f([p.x as i64, p.y as i64, p.z as i64]) >= 0.0
+            });
+            open += hit.map_or(1.0, |k| k as f32 / SKY_STEPS.len() as f32);
+        }
+        open / dirs.len() as f32
+    };
 
     let mut make_vertex = |c: [i64; 3], mb: &mut MeshBuilder| -> Option<u32> {
         if let Some(v) = cache.get(&c) {
@@ -940,7 +1225,49 @@ pub fn mesh_region(
             (vals[2] - vals[0]) + (vals[3] - vals[1]) + (vals[6] - vals[4]) + (vals[7] - vals[5]),
             (vals[4] - vals[0]) + (vals[5] - vals[1]) + (vals[6] - vals[2]) + (vals[7] - vals[3]),
         );
-        let normal = (-g).normalize_or(Vec3::Y);
+        let smooth_normal = (-g).normalize_or(Vec3::Y);
+        // The slope over a 4-voxel block: on a voxel slope the local normal flips between
+        // step tops and risers, which would grow grass in stripes along the steps.
+        let broad = {
+            let mut g = Vec3::ZERO;
+            for i in -1..=2 {
+                for j in -1..=2 {
+                    for k in -1..=2 {
+                        let v = f([c[0] + i, c[1] + j, c[2] + k]);
+                        g += Vec3::new(i as f32 - 0.5, j as f32 - 0.5, k as f32 - 0.5) * v;
+                    }
+                }
+            }
+            (-g).normalize_or(smooth_normal)
+        };
+        // Fine relief the voxel grid can't hold: chisel marks, knobs and cracks, as a
+        // displacement along the normal that depends only on position (seamless between
+        // chunks and on the pieces that break off).
+        let relief = |p: Vec3| -> f32 {
+            let q = |k: f32| {
+                (
+                    p.x as f64 * k as f64,
+                    p.y as f64 * k as f64,
+                    p.z as f64 * k as f64,
+                )
+            };
+            let (x1, y1, z1) = q(0.9);
+            let (x2, y2, z2) = q(3.1);
+            0.09 * fbm3(x1, y1, z1, look.seed + 31, 3, 2.0, 0.5)
+                + 0.03 * perlin3(x2, y2, z2, look.seed + 32)
+        };
+        let h = relief(pos);
+        let pos = pos + smooth_normal * h * (s / 0.25).min(1.5);
+        let normal = {
+            let e = 0.04;
+            let grad = Vec3::new(
+                relief(pos + Vec3::X * e) - relief(pos - Vec3::X * e),
+                relief(pos + Vec3::Y * e) - relief(pos - Vec3::Y * e),
+                relief(pos + Vec3::Z * e) - relief(pos - Vec3::Z * e),
+            ) / (2.0 * e);
+            let tangential = grad - smooth_normal * grad.dot(smooth_normal);
+            (smooth_normal - tangential * 1.3).normalize_or(smooth_normal)
+        };
         // Color from the most solid corner.
         let (mut best, mut best_v) = (0usize, f32::NEG_INFINITY);
         for (k, v) in vals.iter().enumerate() {
@@ -974,18 +1301,33 @@ pub fn mesh_region(
                     look.seed + 4,
                 )
             + 0.08 * (hash3(bc[0] as i64, bc[1] as i64, bc[2] as i64, look.seed) - 0.5);
-        let mut color = mix(scale(inside, 0.97), scale(outside, strata), wear);
+        let bare = mix(scale(inside, 0.97), scale(outside, strata), wear);
+        let mut color = bare;
+        // Grass by the broad slope (not the relief's) plus noise, so it grows in clean
+        // patches rather than flickering where a slope sits near the limit.
+        let (x, z) = (pos.x as f64, pos.z as f64);
+        let patch = 0.16 * perlin2(x * 0.18, z * 0.18, look.seed + 7)
+            + 0.06 * perlin2(x * 0.9, z * 0.9, look.seed + 8);
+        let slope = broad.y + patch;
+        let mut cover = 0.0;
         if let (Some(grass), Some(top)) = (look.grass, look.topsoil)
             && mat == top
-            && normal.y > 0.45
+            && slope > 0.45
         {
-            let k = ((normal.y - 0.45) / 0.35).clamp(0.0, 1.0) * wear;
+            cover = ((slope - 0.45) / 0.35).clamp(0.0, 1.0) * wear;
             let var = 0.85 + 0.3 * hash3(bc[0] as i64, 0, bc[2] as i64, look.seed + 5);
-            color = mix(color, scale(grass, var), k);
+            color = mix(color, scale(grass, var), cover);
         }
-        // Crevices facing down are darker (cheap occlusion).
-        color = scale(color, 0.82 + 0.18 * (normal.y * 0.5 + 0.5));
-        let id = mb.vertex(pos - offset, normal, color);
+        // Crevices facing down are a little darker, and buried places much darker.
+        let open = sky(
+            Vec3::new(c[0] as f32, c[1] as f32, c[2] as f32) + local,
+            broad,
+        );
+        let shade = (0.82 + 0.18 * (normal.y * 0.5 + 0.5)) * (0.1 + 0.9 * open * open);
+        let id = mb.vertex(pos, normal, scale(color, shade));
+        tags.push(mat);
+        lawn.push(cover);
+        bare_colors.push(scale(bare, shade));
         cache.insert(c, Some(id));
         Some(id)
     };
@@ -1042,11 +1384,55 @@ pub fn mesh_region(
             }
         }
     }
-    mb
+    Tagged {
+        mesh: mb,
+        tags,
+        lawn,
+        bare: bare_colors,
+    }
+}
+
+/// A voxel mesh before texturing: each vertex's material, grass cover (0..1, grass above one
+/// half) and color without grass.
+pub struct Tagged {
+    pub mesh: MeshBuilder,
+    pub tags: Vec<u8>,
+    pub lawn: Vec<f32>,
+    pub bare: Vec<[f32; 3]>,
+}
+
+/// How far sky rays look, meters.
+const SKY_STEPS: [f32; 6] = [0.45, 0.9, 1.6, 2.6, 4.0, 6.0];
+
+/// Cosine-weighted ray directions around +Z (a golden-angle spiral).
+fn sky_directions() -> Vec<Vec3> {
+    const N: usize = 14;
+    (0..N)
+        .map(|i| {
+            let u = (i as f32 + 0.5) / N as f32;
+            let (r, a) = (u.sqrt(), i as f32 * 2.399_963);
+            Vec3::new(r * a.cos(), r * a.sin(), (1.0 - u).sqrt())
+        })
+        .collect()
 }
 
 /// Mesh of one chunk of a volume.
 pub fn mesh_chunk(state: &VoxelState, look: &VoxelLook, chunk: [usize; 3]) -> MeshBuilder {
+    let (lo, hi) = chunk_bounds(state, chunk);
+    mesh_region(state, look, lo, hi, Vec3::ZERO)
+}
+
+/// Mesh of one chunk of a volume in layers (see [`mesh_region_layers`]).
+pub fn mesh_chunk_layers(
+    state: &VoxelState,
+    look: &VoxelLook,
+    chunk: [usize; 3],
+) -> Vec<(u8, MeshBuilder)> {
+    let (lo, hi) = chunk_bounds(state, chunk);
+    mesh_region_layers(state, look, lo, hi, Vec3::ZERO)
+}
+
+fn chunk_bounds(state: &VoxelState, chunk: [usize; 3]) -> ([i64; 3], [i64; 3]) {
     let mut lo = [0i64; 3];
     let mut hi = [0i64; 3];
     for a in 0..3 {
@@ -1056,7 +1442,7 @@ pub fn mesh_chunk(state: &VoxelState, look: &VoxelLook, chunk: [usize; 3]) -> Me
             lo[a] = -1;
         }
     }
-    mesh_region(state, look, lo, hi, Vec3::ZERO)
+    (lo, hi)
 }
 
 /// Mesh of a whole (small) volume, e.g. a falling piece, offset by `-center`.
@@ -1110,6 +1496,46 @@ mod tests {
             }
         }
         assert!(tris > 500, "{tris} triangles");
+    }
+
+    #[test]
+    fn layered_hill_meshes_split_into_rock_soil_and_grass() {
+        let v = VoxelVolume::hill(12.0, 4.0, 10.0, 0.3);
+        let s = VoxelState::new(&v, &mats());
+        let plain = VoxelLook::new(&v, &mats());
+        let layered = plain.clone().with_layers(true);
+        let area = |m: &MeshBuilder| -> f32 {
+            let p = |i: u32| Vec3::from(m.vertices[i as usize].position);
+            m.indices
+                .as_chunks::<3>()
+                .0
+                .iter()
+                .map(|t| (p(t[1]) - p(t[0])).cross(p(t[2]) - p(t[0])).length() * 0.5)
+                .sum()
+        };
+        let (mut whole, mut split) = (0.0, 0.0);
+        let mut seen = std::collections::BTreeSet::new();
+        for ci in 0..s.chunk_dirty.len() {
+            let c = [
+                ci % s.chunks[0],
+                (ci / s.chunks[0]) % s.chunks[1],
+                ci / (s.chunks[0] * s.chunks[1]),
+            ];
+            whole += area(&mesh_chunk(&s, &plain, c));
+            for (tag, m) in mesh_chunk_layers(&s, &layered, c) {
+                seen.insert(tag);
+                split += area(&m);
+            }
+        }
+        assert!(
+            (whole - split).abs() < whole * 1e-4,
+            "cutting the lawn's edge keeps the whole surface ({whole} vs {split} m²)"
+        );
+        assert!(seen.contains(&GRASS_LAYER), "a grassy top ({seen:?})");
+        assert!(
+            seen.contains(&(DestructibleMaterial::Dirt.index() as u8)),
+            "bare soil on the flanks ({seen:?})"
+        );
     }
 
     #[test]

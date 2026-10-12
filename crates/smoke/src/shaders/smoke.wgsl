@@ -16,6 +16,13 @@ struct SmokeParams {
 @group(1) @binding(3) var light_tex: texture_3d<f32>;
 @group(1) @binding(4) var glow_tex: texture_3d<f32>;
 @group(1) @binding(5) var scene_depth: texture_depth_2d;
+// Tiling billowy noise: r Perlin-Worley (2 cells per tile), g/b/a inverted Worley fbm (4, 8,
+// 16 cells per tile).
+@group(1) @binding(6) var detail_tex: texture_3d<f32>;
+
+// Meters per tile of the detail texture: the warp's and the billows'.
+const WARP_TILE: f32 = 16.0;
+const BILLOW_TILE: f32 = 8.0;
 
 struct VsOut {
     @builtin(position) clip: vec4<f32>,
@@ -54,6 +61,14 @@ fn hg(cos_t: f32, g: f32) -> f32 {
 // Smoke particles scatter mostly forward (bright toward the sun), with a little back-scatter.
 fn smoke_phase(cos_t: f32, g: f32) -> f32 {
     return mix(hg(cos_t, g), hg(cos_t, -0.2), 0.2);
+}
+
+// Single-scattering albedo for a smoke whose thick cloud looks `color`: a deep cloud of
+// particles that each scatter a fraction ω of the light reflects (1 - s) / (1 + s) of it, with
+// s = sqrt(1 - ω) (two-stream). White smoke (0.92) is made of particles that hardly absorb.
+fn particle_albedo(color: vec3<f32>) -> vec3<f32> {
+    let s = (1.0 - color) / (1.0 + color);
+    return 1.0 - s * s;
 }
 
 // One tap of the sun's shadow map (the march averages many of them).
@@ -119,7 +134,7 @@ fn fs_smoke(in: VsOut) -> @location(0) vec4<f32> {
 
     let cell = smoke.min_rel.w;
     let len = t1 - t0;
-    let steps = i32(clamp(ceil(len / (cell * 0.6)), 4.0, smoke.look.y));
+    let steps = i32(clamp(ceil(len / (cell * 0.4)), 4.0, smoke.look.y));
     let ds = len / f32(steps);
 
     // Bullet tunnels near this ray.
@@ -136,9 +151,11 @@ fn fs_smoke(in: VsOut) -> @location(0) vec4<f32> {
     let sun_light = frame.sun_camera.rgb;
     let sun_on = dot(sun_light, sun_light) > 0.0;
     let cos_t = dot(dir, frame.sun_dir.xyz);
-    // Sky light from above and light bounced off the ground below.
+    // Sky light from above and around, and light bounced off the ground below.
     let amb_up = sky_ambient(vec3<f32>(0.0, 1.0, 0.0));
     let amb_down = sky_ambient(vec3<f32>(0.0, -1.0, 0.0));
+    let flat_dir = vec3<f32>(dir.x, 0.0, dir.z) + vec3<f32>(1e-4, 0.0, 0.0);
+    let amb_side = 0.5 * (sky_ambient(normalize(flat_dir)) + sky_ambient(normalize(-flat_dir)));
     // Billows finer than a pixel only shimmer: fade the detail out with distance (the size
     // of a pixel at the volume, against the detail noise's ~1 m scale).
     let pixel_m = 2.0 / (frame.proj[1][1] * frame.viewport.y) * max(t0, 1.0);
@@ -154,18 +171,17 @@ fn fs_smoke(in: VsOut) -> @location(0) vec4<f32> {
         if (t > t1) { break; }
         let p = dir * t;
         var q = p;
+        var lumps = 0.5;
         if (detail > 0.0) {
             // Warp the lookup so the voxels' smooth shapes break up into billows.
-            let wp = (tiling_pos(p) - drift) * 0.3;
-            let warp = vec3<f32>(
-                value_noise3(wp),
-                value_noise3(wp + vec3<f32>(31.7, 0.0, 0.0)),
-                value_noise3(wp + vec3<f32>(0.0, 47.3, 0.0)),
-            ) - 0.5;
-            q = p + warp * (cell * 2.0 * detail);
+            let wn = textureSampleLevel(detail_tex, linear_repeat, (tiling_pos(p) - drift) / WARP_TILE, 0.0);
+            lumps = wn.r;
+            q = p + (wn.gba - 0.5) * (cell * 2.4 * detail);
         }
         let local = q - bmin;
         let uvw = local / smoke.size.xyz;
+        // Light reaching into the creases between billows (finer than the light texture).
+        var crease = 1.0;
         var s = mix(
             textureSampleLevel(density_prev, linear_clamp, uvw, 0.0),
             textureSampleLevel(density_cur, linear_clamp, uvw, 0.0),
@@ -179,12 +195,15 @@ fn fs_smoke(in: VsOut) -> @location(0) vec4<f32> {
             );
             var k = saturate(edge / (cell * 2.5));
             if (detail > 0.0) {
-                // Erode: where the smoke is thin it breaks into wisps; dense cores keep their
-                // shape. `d` is how dense it is (σ = 2/m is halfway).
-                let n = fbm3((tiling_pos(p) - drift) * 0.8, 3);
+                // Erode: where the smoke is thin it breaks into round billows and wisps; dense
+                // cores keep their shape. `d` is how dense it is (σ = 2/m is halfway); `gaps`
+                // is high between billows; big lumps (`lumps`) erode less.
+                let bn = textureSampleLevel(detail_tex, linear_repeat, (tiling_pos(p) - drift * 1.3) / BILLOW_TILE, 0.0);
+                let gaps = 1.0 - (bn.g * 0.5 + bn.b * 0.3 + bn.a * 0.2);
                 let d = s.x / (s.x + 2.0);
-                let e = saturate(n * 1.5 - 0.2) * min(detail, 1.0) * 0.8;
+                let e = saturate(gaps * 1.6 - 0.35) * mix(1.25, 0.7, lumps) * min(detail, 1.0) * 0.9;
                 k *= saturate((d - e) / max(1.0 - e, 1e-3)) / max(d, 1e-4);
+                crease = mix(1.0, mix(0.5, 1.15, 1.0 - gaps), min(detail, 1.0));
             }
             var m = mask;
             loop {
@@ -202,37 +221,38 @@ fn fs_smoke(in: VsOut) -> @location(0) vec4<f32> {
         }
         let sigma = s.x;
         if (sigma > 1e-4) {
-            let albedo = saturate3(s.yzw / sigma);
+            // What a thick cloud of it looks like, and what its particles scatter.
+            let tint = saturate3(s.yzw / sigma);
+            let albedo = particle_albedo(tint);
             let light = textureSampleLevel(light_tex, linear_clamp, uvw, 0.0);
             var inscatter = vec3(0.0);
             if (sun_on) {
-                // Scattering orders: each later one bounced inside the smoke, so it is
-                // dimmer, less shadowed by it and spread wider.
                 // Light scattered once (mostly forward, so smoke glows toward the sun) and a
-                // few times more. Many bounces inside bright smoke even out into a soft glow,
-                // which is why a thick white cloud looks white from every side; dark smoke
-                // absorbs before it gets there.
+                // few times more. Each later order bounced inside the smoke, so it is weaker,
+                // reaches deeper and spreads wider: deep inside a thick white cloud the light
+                // still glows through, while dark smoke absorbs it before it gets there.
                 var sun = vec3(0.0);
-                var w = vec3(1.0);
+                var w = tint;
                 var reach = 1.0;
                 var g = 0.65;
-                for (var o = 0; o < 2; o++) {
+                for (var o = 0; o < 4; o++) {
                     sun += w * smoke_phase(cos_t, g) * exp(-light.x * reach);
-                    w *= albedo * 0.7;
-                    reach *= 0.25;
-                    g *= 0.4;
+                    w *= albedo * 0.8;
+                    reach *= 0.3;
+                    g *= 0.45;
                 }
-                sun += albedo * albedo * (2.2 / (4.0 * PI)) * exp(-light.x * 0.12);
                 inscatter += sun * sun_light * sun_shadow(p);
             }
             // Sky and ground light, also partly scattered on through the smoke.
-            inscatter += 0.5 * amb_up * (0.6 * exp(-light.y) + 0.4 * exp(-light.y * 0.2));
-            inscatter += 0.5 * amb_down * (0.6 * exp(-light.z * 0.6) + 0.4 * exp(-light.z * 0.15));
+            let ms = 0.6 * albedo * albedo;
+            var sky = 0.35 * amb_up * (exp(-light.y) + ms * exp(-light.y * 0.15));
+            sky += 0.4 * amb_side * (exp(-light.w) + ms * exp(-light.w * 0.15));
+            sky += 0.25 * amb_down * (exp(-light.z * 0.6) + ms * exp(-light.z * 0.12));
             let glow = textureSampleLevel(glow_tex, linear_clamp, uvw, 0.0).rgb * smoke.dims.w;
-            inscatter += glow * (0.25 * INV_PI);
+            inscatter = (inscatter + tint * sky) * crease + tint * glow * (0.25 * INV_PI);
             let step_t = exp(-sigma * ds);
             let absorbed = transmittance * (1.0 - step_t);
-            color += albedo * inscatter * absorbed;
+            color += inscatter * absorbed;
             t_weighted += absorbed * t;
             transmittance *= step_t;
             if (transmittance < 0.004) { break; }

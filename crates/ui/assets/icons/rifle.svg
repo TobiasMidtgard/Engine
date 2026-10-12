@@ -1,0 +1,47 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <defs>
+    <linearGradient id="shell" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#f4f7fa"/>
+      <stop offset=".55" stop-color="#b3bdca"/>
+      <stop offset="1" stop-color="#6a7486"/>
+    </linearGradient>
+    <linearGradient id="frame" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#525d70"/>
+      <stop offset="1" stop-color="#1c212c"/>
+    </linearGradient>
+    <linearGradient id="cell" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#e6fbff"/>
+      <stop offset=".5" stop-color="#5fd0ff"/>
+      <stop offset="1" stop-color="#1c78b8"/>
+    </linearGradient>
+    <linearGradient id="gold" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#fff0bd"/>
+      <stop offset=".5" stop-color="#e8b65a"/>
+      <stop offset="1" stop-color="#8f5a1c"/>
+    </linearGradient>
+  </defs>
+  <g transform="rotate(-38 32 32) translate(32 32) scale(.93) translate(-32 -32)">
+    <g stroke="#0c0f16" stroke-width="4" stroke-linejoin="round" stroke-linecap="round" paint-order="stroke">
+      <rect x="44" y="29" width="25" height="4.4" rx="1" fill="url(#frame)"/>
+      <path d="M-4 30 L14 27 L14 39 L4 43 L-3 43 C-5 43 -6 41.5 -6 40 L-6 32 C-6 31 -5 30.2 -4 30 Z" fill="url(#frame)"/>
+      <path d="M18 36 L25 36 L22.5 47 L16 47 Z" fill="url(#frame)"/>
+      <path d="M31 36 L38 36 L39 46 L33 47 Z" fill="url(#frame)"/>
+      <path d="M12 26 L44 26 L50 28 L54 30 L54 35 L44 37 L12 37 Z" fill="url(#frame)"/>
+      <path d="M14 27 L44 27 L52 30.5 L14 30.5 Z" fill="url(#shell)"/>
+      <rect x="22" y="19.5" width="17" height="5" rx="2.5" fill="url(#frame)"/>
+      <path d="M-4.2 31.4 L13 28.6 L13 32 L-4.5 34.5 Z" fill="url(#shell)"/>
+    </g>
+    <rect x="37.5" y="19.6" width="2.2" height="4.8" rx="1" fill="#9ff0ff"/>
+    <path d="M24 21.2 L36 21.2" stroke="#8792a6" stroke-width="1" stroke-linecap="round"/>
+    <rect x="18" y="32.3" width="22" height="2.8" rx="1.4" fill="url(#cell)" stroke="#0c0f16" stroke-width="1"/>
+    <g fill="#5fd0ff">
+      <rect x="47" y="30.2" width="2" height="2.2" rx=".6"/>
+      <rect x="51" y="30.2" width="2" height="2.2" rx=".6"/>
+      <rect x="55" y="30.2" width="2" height="2.2" rx=".6"/>
+      <rect x="59" y="30.2" width="2" height="2.2" rx=".6"/>
+    </g>
+    <rect x="66" y="28.4" width="3.5" height="5.6" rx="1" fill="url(#gold)" stroke="#0c0f16" stroke-width="1.2"/>
+    <path d="M16 28.2 L44 28.2" stroke="#ffffff" stroke-width="1" stroke-linecap="round"/>
+    <circle cx="8" cy="38" r="1.4" fill="#e8b65a" stroke="#0c0f16" stroke-width=".7"/>
+  </g>
+</svg>

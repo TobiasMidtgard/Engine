@@ -1,0 +1,42 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <defs>
+    <linearGradient id="pcb" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#3a8a7a"/>
+      <stop offset=".5" stop-color="#1e5a50"/>
+      <stop offset="1" stop-color="#0c2a26"/>
+    </linearGradient>
+    <linearGradient id="chip" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#4a5262"/>
+      <stop offset=".5" stop-color="#1e232e"/>
+      <stop offset="1" stop-color="#0e1118"/>
+    </linearGradient>
+    <linearGradient id="pin" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#fff0bd"/>
+      <stop offset="1" stop-color="#a86a1c"/>
+    </linearGradient>
+    <radialGradient id="glow" cx=".5" cy=".5" r=".5">
+      <stop offset="0" stop-color="#e6fbff"/>
+      <stop offset=".5" stop-color="#5fd0ff"/>
+      <stop offset="1" stop-color="#5fd0ff" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+  <rect x="5" y="5" width="54" height="54" rx="6" fill="url(#pcb)" stroke="#0c0f16" stroke-width="4"/>
+  <g fill="none" stroke="#e8b65a" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" opacity=".85">
+    <path d="M10 14 L16 14 L20 18"/><path d="M10 50 L16 50 L20 46"/><path d="M54 14 L48 14 L44 18"/><path d="M54 50 L48 50 L44 46"/>
+    <path d="M27 10 L27 16"/><path d="M37 10 L37 16"/><path d="M27 54 L27 48"/><path d="M37 54 L37 48"/>
+  </g>
+  <g fill="#e8b65a" stroke="#0c0f16" stroke-width=".8"><circle cx="10" cy="14" r="1.8"/><circle cx="10" cy="50" r="1.8"/><circle cx="54" cy="14" r="1.8"/><circle cx="54" cy="50" r="1.8"/><circle cx="27" cy="10" r="1.6"/><circle cx="37" cy="10" r="1.6"/><circle cx="27" cy="54" r="1.6"/><circle cx="37" cy="54" r="1.6"/></g>
+  <g fill="url(#pin)" stroke="#0c0f16" stroke-width="1">
+    <rect x="23" y="15" width="3" height="5" rx=".6"/><rect x="28" y="15" width="3" height="5" rx=".6"/><rect x="33" y="15" width="3" height="5" rx=".6"/><rect x="38" y="15" width="3" height="5" rx=".6"/>
+    <rect x="23" y="44" width="3" height="5" rx=".6"/><rect x="28" y="44" width="3" height="5" rx=".6"/><rect x="33" y="44" width="3" height="5" rx=".6"/><rect x="38" y="44" width="3" height="5" rx=".6"/>
+    <rect x="15" y="23" width="5" height="3" rx=".6"/><rect x="15" y="28" width="5" height="3" rx=".6"/><rect x="15" y="33" width="5" height="3" rx=".6"/><rect x="15" y="38" width="5" height="3" rx=".6"/>
+    <rect x="44" y="23" width="5" height="3" rx=".6"/><rect x="44" y="28" width="5" height="3" rx=".6"/><rect x="44" y="33" width="5" height="3" rx=".6"/><rect x="44" y="38" width="5" height="3" rx=".6"/>
+  </g>
+  <rect x="19" y="19" width="26" height="26" rx="3" fill="url(#chip)" stroke="#0c0f16" stroke-width="2"/>
+  <rect x="25" y="25" width="14" height="14" rx="2" fill="#0a0d14" stroke="#3a4252" stroke-width="1"/>
+  <circle cx="32" cy="32" r="7" fill="url(#glow)"/>
+  <path d="M28 32 L32 28 L36 32 L32 36 Z" fill="#e6fbff"/>
+  <path d="M21 21.4 L43 21.4" stroke="#8a93a3" stroke-width="1" stroke-linecap="round"/>
+  <circle cx="22.5" cy="41.5" r="1.1" fill="#5fd0ff"/>
+  <path d="M8 9.4 C9 8 10 7.6 12 7.6 L52 7.6" stroke="#8ad0c0" stroke-width="1.1" fill="none" stroke-linecap="round" opacity=".7"/>
+</svg>

@@ -1,0 +1,38 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <defs>
+    <linearGradient id="blade" x1="27" y1="0" x2="37" y2="0" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#ffffff"/>
+      <stop offset=".48" stop-color="#dce4ee"/>
+      <stop offset=".52" stop-color="#8d99aa"/>
+      <stop offset="1" stop-color="#596476"/>
+    </linearGradient>
+    <linearGradient id="gold" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#fff0bd"/>
+      <stop offset=".5" stop-color="#e8b65a"/>
+      <stop offset="1" stop-color="#8f5a1c"/>
+    </linearGradient>
+    <linearGradient id="grip" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#8a5634"/>
+      <stop offset="1" stop-color="#3e2416"/>
+    </linearGradient>
+    <radialGradient id="pom" cx=".35" cy=".35" r=".7">
+      <stop offset="0" stop-color="#fff4cc"/>
+      <stop offset=".5" stop-color="#e8b65a"/>
+      <stop offset="1" stop-color="#8a5418"/>
+    </radialGradient>
+  </defs>
+  <g transform="rotate(45 32 32) translate(0 -1)">
+    <g stroke="#0c0f16" stroke-width="4" stroke-linejoin="round" stroke-linecap="round" paint-order="stroke">
+      <path d="M32 -4 L36.5 4 L36.5 44 L27.5 44 L27.5 4 Z" fill="url(#blade)"/>
+      <rect x="29" y="49" width="6" height="13" rx="1.5" fill="url(#grip)"/>
+      <path d="M17 45 Q32 41 47 45 L47 49.5 Q32 52 17 49.5 Z" fill="url(#gold)"/>
+      <circle cx="32" cy="65.5" r="4.2" fill="url(#pom)"/>
+    </g>
+    <path d="M32 -1 L32 41" stroke="#ffffff" stroke-width="1" opacity=".55"/>
+    <path d="M28.6 5 L28.6 42" stroke="#ffffff" stroke-width="1" opacity=".9"/>
+    <path d="M29 52 L35 54 M29 56 L35 58 M29 60 L35 62" stroke="#2a170d" stroke-width="1.2"/>
+    <path d="M19 45.6 Q32 42.4 45 45.6" stroke="#fff6d8" stroke-width="1" fill="none" opacity=".9"/>
+    <circle cx="30.6" cy="64" r="1.2" fill="#fffbe8"/>
+    <circle cx="32" cy="47.3" r="1.8" fill="#5fd0ff" stroke="#0c0f16" stroke-width="1"/>
+  </g>
+</svg>

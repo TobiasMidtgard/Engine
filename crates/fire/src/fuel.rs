@@ -280,6 +280,14 @@ impl PlacedPatch {
         }
     }
 
+    /// The same fuel in the same place (to within 0.1 mm and a hundredth of a degree): what a
+    /// world shift leaves of a patch it moved.
+    pub fn same_as(&self, other: &PlacedPatch) -> bool {
+        self.patch == other.patch
+            && self.center.distance_squared(other.center) < 1e-8
+            && self.axis_x.distance_squared(other.axis_x) < 3e-8
+    }
+
     /// Bounding radius around `center`, meters.
     pub fn radius(&self) -> f32 {
         match self.patch.shape {

@@ -11,7 +11,9 @@ use std::collections::VecDeque;
 
 use engine_core::math::{DVec2, DVec3, Vec2};
 use engine_core::prelude::*;
-use engine_world::{ContactKind, Deformation as Deform, GroundContact};
+use engine_world::{
+    ContactKind, Deformation as Deform, FollowsWorldShift, GroundContact, WorldShift,
+};
 
 /// What kind of ground a cell was pressed into (decides how it recovers).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -212,6 +214,54 @@ impl DeformationMap {
             }
             self.history = history;
         }
+    }
+
+    /// Keep the prints on the ground when the world re-anchors. A plain move carries the grid
+    /// and the remembered prints along. A turn (another planet's frame, or the world starting
+    /// or stopping to turn with its planet, both far above the ground) clears them.
+    pub fn follow_shift(&mut self, s: &WorldShift) {
+        if s.is_translation_only() {
+            self.origin += DVec2::new(s.translation.x, s.translation.z);
+            for r in &mut self.history {
+                r.contact.follow(s);
+            }
+        } else {
+            self.depth.iter_mut().for_each(|d| *d = 0.0);
+            self.flatten.iter_mut().for_each(|f| *f = 0.0);
+            self.kind.iter_mut().for_each(|k| *k = CellKind::None);
+            self.active.iter_mut().for_each(|a| *a = false);
+            self.history.clear();
+        }
+        self.dirty = Some((0, 0, self.size, self.size));
+        self.generation += 1;
+    }
+
+    /// Clear the prints within `radius` of `center` (the ground there was dug, raised or
+    /// smoothed, so they are gone) and forget them.
+    pub fn erase(&mut self, center: DVec3, radius: f32) {
+        let r = radius as f64 + self.cell as f64;
+        let c = (DVec2::new(center.x, center.z) - self.origin) / self.cell as f64;
+        let rc = r / self.cell as f64;
+        let lo = (c - rc).floor().max(DVec2::ZERO);
+        let hi = (c + rc).ceil().min(DVec2::splat(self.size as f64));
+        if lo.x < hi.x && lo.y < hi.y {
+            let (x0, y0, x1, y1) = (lo.x as u32, lo.y as u32, hi.x as u32, hi.y as u32);
+            for y in y0..y1 {
+                for x in x0..x1 {
+                    let p = DVec2::new(x as f64 + 0.5, y as f64 + 0.5);
+                    if p.distance(c) <= rc {
+                        let i = self.index(x, y);
+                        self.depth[i] = 0.0;
+                        self.flatten[i] = 0.0;
+                        self.kind[i] = CellKind::None;
+                    }
+                }
+            }
+            self.mark(x0, y0, x1, y1);
+        }
+        let at = DVec2::new(center.x, center.z);
+        self.history
+            .retain(|h| DVec2::new(h.contact.position.x, h.contact.position.z).distance(at) > r);
     }
 
     /// Move the window over `focus` if needed. Returns whether it moved.
@@ -532,6 +582,29 @@ mod tests {
     }
 
     #[test]
+    fn prints_stay_on_the_ground_when_the_world_moves() {
+        let mut map = DeformationMap::new(0.04, 256);
+        let s = DeformationSettings::default();
+        let (k, d, rim, f) = response(Deform::Plastic { depth_m: 0.06 }, 80.0, 0.3, 0.0, &s);
+        let c = contact(0.0, 0.0, ContactKind::Foot);
+        map.record(&c, k, d, rim, f, 0.0);
+        let before = map.sample(DVec3::new(0.0, 0.0, 0.08)).0;
+        // A floating-origin move of 1.5 km east and 3 m down: the print moves with the ground.
+        let shift = WorldShift::translate(DVec3::new(1_500.0, -3.0, 0.0));
+        map.follow_shift(&shift);
+        let after = map.sample(DVec3::new(1_500.0, -3.0, 0.08)).0;
+        assert_eq!(before, after);
+        assert_eq!(map.history[0].contact.position.x, 1_500.0);
+        // A turn (another planet's frame) clears the grid.
+        let turn = WorldShift {
+            rotation: engine_core::math::DQuat::from_rotation_x(0.3),
+            ..WorldShift::IDENTITY
+        };
+        map.follow_shift(&turn);
+        assert!(map.depth.iter().all(|&d| d == 0.0) && map.history.is_empty());
+    }
+
+    #[test]
     fn snow_print_limited_by_snow_and_fills_in() {
         let mut map = DeformationMap::new(0.04, 256);
         let s = DeformationSettings::default();
@@ -570,6 +643,22 @@ mod tests {
             }
         }
         best
+    }
+
+    #[test]
+    fn edits_wipe_the_prints_under_them() {
+        let mut map = DeformationMap::new(0.05, 256);
+        for x in [0.0, 3.0] {
+            let c = contact(x, 0.0, ContactKind::Foot);
+            map.record(&c, CellKind::Plastic, 0.03, 0.005, 0.0, 0.0);
+        }
+        assert!(peak(&map, 0.0, 0.0) > 0.01 && peak(&map, 3.0, 0.0) > 0.01);
+        map.dirty = None;
+        map.erase(DVec3::new(0.0, 0.0, 0.0), 1.0);
+        assert_eq!(peak(&map, 0.0, 0.0), 0.0);
+        assert!(peak(&map, 3.0, 0.0) > 0.01, "prints outside stay");
+        assert!(map.dirty.is_some());
+        assert_eq!(map.history.len(), 1);
     }
 
     #[test]

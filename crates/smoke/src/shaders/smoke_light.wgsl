@@ -1,6 +1,6 @@
 // Smoke lighting, once per simulation step: for every voxel, how much smoke lies toward the
-// sun, up toward the sky and down toward the ground (optical depths), and the firelight and
-// lamplight that reach it through the smoke.
+// sun, up toward the sky, out toward the horizon and down toward the ground (optical depths),
+// and the firelight and lamplight that reach it through the smoke.
 
 struct SmokeParams {
     min_rel: vec4<f32>,   // box min (camera-relative), voxel size
@@ -17,6 +17,7 @@ struct SmokeParams {
 
 const SUN_STEPS: i32 = 32;
 const SKY_STEPS: i32 = 16;
+const SIDE_STEPS: i32 = 8;
 const LAMP_STEPS: i32 = 6;
 
 // Extinction (1/m) at voxel-space point `q` (0 outside the box).
@@ -26,12 +27,14 @@ fn sigma_at(q: vec3<f32>) -> f32 {
     return textureSampleLevel(density, linear_clamp, uvw, 0.0).x;
 }
 
-// Optical depth from voxel-space `q` along unit `dir`, with steps that start at `first`
-// voxels and grow by `growth` each step, until the ray leaves the box.
+// Optical depth from the edge of the voxel at voxel-space `q` along unit `dir`, with steps that
+// start at `first` voxels and grow by `growth` each step, until the ray leaves the box. The
+// voxel's own smoke doesn't count: in thick smoke the light that reaches the eye is scattered
+// near the voxel's sunny edge, not at its center.
 fn optical_depth(q: vec3<f32>, dir: vec3<f32>, steps: i32, first: f32, growth: f32) -> f32 {
     var tau = 0.0;
     var step = first;
-    var p = q + dir * (first * 0.5);
+    var p = q + dir * (0.5 + first * 0.5);
     for (var i = 0; i < steps; i++) {
         if (any(p < vec3(-1.0)) || any(p > smoke.dims.xyz + vec3(1.0))) { break; }
         tau += sigma_at(p) * step;
@@ -55,7 +58,14 @@ fn cs_light(@builtin(global_invocation_id) id: vec3<u32>) {
     }
     let tau_up = optical_depth(q, vec3(0.0, 1.0, 0.0), SKY_STEPS, 0.75, 1.15);
     let tau_down = optical_depth(q, vec3(0.0, -1.0, 0.0), SKY_STEPS / 2, 0.75, 1.15);
-    textureStore(light_out, id, vec4<f32>(tau_sun, tau_up, tau_down, 0.0));
+    // Out toward the horizon: the clearest of four directions lets the most sky in.
+    var tau_side = 1e9;
+    for (var k = 0; k < 4; k++) {
+        let a = f32(k) * 1.5707964 + 0.3927;
+        let d = vec3<f32>(cos(a), 0.0, sin(a));
+        tau_side = min(tau_side, optical_depth(q, d, SIDE_STEPS, 0.75, 1.3));
+    }
+    textureStore(light_out, id, vec4<f32>(tau_sun, tau_up, tau_down, tau_side));
 
     // Fires and lamps (point lights), dimmed by the smoke between them and this voxel.
     let rel = smoke.min_rel.xyz + q * cell;

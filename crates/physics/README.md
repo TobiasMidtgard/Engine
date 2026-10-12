@@ -43,7 +43,9 @@ changing that one plugin line.
   stand on with their weight, and stop falling bodies like any kinematic body. `CharacterMove`
   is in the character's own seconds; `CharacterState::velocity` is the character's own motion,
   without the platform's. `CharacterState` reports ground, ceiling and wall contacts, including
-  walls it only touches (running along a wall).
+  walls it only touches (running along a wall). Its normals come from exact point projections
+  between the capsule's core and the surface, not from the sweeps: those point sideways about
+  one step in a hundred while the capsule sits in its 2 cm gap, a wall in the middle of a field.
 - **Events**: one `ContactEvent::Started` per touch with the impact impulse and a normal from
   `a` to `b`, one `Ended` when it stops; sensors too. Hard impacts also send `NoiseEvent` (AI
   hearing) and, against static ground, `GroundContact` (dents, dust, impact sounds).
@@ -116,7 +118,8 @@ touching pairs, step time, substeps.
 ## API functions
 
 `physics.raycast`, `physics.shapecast`, `physics.overlap`, `physics.closest_point`,
-`physics.impulse`, `physics.blast`, `physics.stats`, `physics.debug`. `engine.describe` lists their arguments.
+`physics.impulse`, `physics.blast`, `physics.stats`, `physics.debug`,
+`physics.proving_ground.replay`. `engine.describe` lists their arguments.
 
 ## Contract details a replacement backend must match
 
@@ -136,6 +139,15 @@ plank bridge, a kinematic turntable and bouncing rubber balls. Its top surface i
 showcase's physics zone places it. Render it alone with
 `cargo run -p engine_physics --release --example proving_ground -- out_dir`.
 
+The stations replay on their own cycles (`demo::Station::cycle_secs`, world time: ragdolls,
+seesaw and balls every 20 s, dominoes, wrecking ball and bridge every 30 s, the pile every 45 s;
+the tower, wheel and turntable run on), so the zone is always playing when someone walks in.
+They pause while no focus point is within 250 m.
+`physics.proving_ground.replay {"station": "dominoes"}` restarts one now (`{}` restarts all).
+`demo::VIEWS` are tour stops for the action stations: arriving restarts the station, and the
+warm-up lands on its best moment. `tests/proving_ground.rs` checks that stations replay without
+piling up bodies.
+
 Everything in it is drawn with detailed procedural art (`src/demo/art/`): beveled meshes sized to
 their colliders (shipping crates with brackets and bolts, 200 l drums, chain links, a cast
 concrete stair with handrails, a steel gantry, glulam and diamond-plate machines, Hybrid III-style
@@ -147,7 +159,7 @@ renderer get colliders only. `cargo run -p engine_physics --release --example ar
 Tests (`cargo test -p engine_physics`): the conformance suite; the "done when" scenarios below
 (`tests/scenarios.rs`); behaviors other modules rely on (`tests/behaviors.rs`: removal, compound
 bodies, joint breaking and motors, hinges swinging through the fixed body they hang on, kinematic platforms, stairs and steep slopes, dashing into
-thin walls, wall-running, crouching, characters on their own clock, sensors and layers, local
+thin walls, wall-running, no phantom walls on flat ground, running over heightfield hills, crouching, characters on their own clock, sensors and layers, local
 time, hovering, buoyancy, blasts, bodies crossing and merging regions); riding moving bodies
 (`tests/platforms.rs`: crates and characters on a deck at up to 30 km/s, lifts, a turntable, a
 thrusting and turning ship, a seesaw tipped by a character's weight, crates landing on heads,
