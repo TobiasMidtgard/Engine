@@ -12,7 +12,7 @@ use engine_world::physics::{
 };
 use engine_world::{
     ContactKind, Env, GroundContact, IgniteRequest, NoiseEvent, ProjectileTrace, SmokeEmission,
-    SurfaceMaterials, WorldImpulse,
+    SurfaceMaterials, WorldImpulse, WorldShift,
 };
 
 use crate::body::{FrameSource, SoftBodySim, SoftKind};
@@ -298,6 +298,57 @@ pub fn gather_colliders(
         }
     }
     std::mem::swap(&mut world.prev, &mut world.seen);
+}
+
+/// Move every body, the collider history (for sweeps) and the gathered loads into the new
+/// frame when the world is re-anchored. Runs in `WorldShiftSet::Apply`.
+pub fn follow_world_shift(
+    mut shifts: MessageReader<WorldShift>,
+    mut bodies: Query<&mut SoftBodySim>,
+    mut colliders: ResMut<ColliderWorld>,
+    mut loads: ResMut<LoadList>,
+    mut ropes: Query<&mut Rope>,
+) {
+    let Some(s) = shifts.read().copied().reduce(|a, b| a.then(&b)) else {
+        return;
+    };
+    // World-anchored rope ends move with the world (without counting as a spec change, which
+    // would rebuild the rope), so a later rebuild ties them in the right place.
+    for mut rope in &mut ropes {
+        let rope = rope.bypass_change_detection();
+        for end in [&mut rope.end_a, &mut rope.end_b] {
+            if let rope::RopeEnd::World { at } = end {
+                *at = s.point(DVec3::from_array(*at)).to_array();
+            }
+        }
+    }
+    for mut b in &mut bodies {
+        let b = &mut *b;
+        b.sim.shift(&s);
+        b.center = s.point(b.center);
+        b.wind = s.direction(b.wind);
+        if let Some(bridge) = b.bridge.as_mut() {
+            for (p, r) in &mut bridge.plank_poses {
+                (*p, *r) = (s.point(*p), s.orientation(*r));
+            }
+        }
+    }
+    let colliders = &mut *colliders;
+    for (p, r) in colliders
+        .prev
+        .values_mut()
+        .chain(colliders.seen.values_mut())
+    {
+        (*p, *r) = (s.point(*p), s.orientation(*r));
+    }
+    for c in &mut colliders.list {
+        (c.pos, c.rot) = (s.point(c.pos), s.orientation(c.rot));
+        (c.prev_pos, c.prev_rot) = (s.point(c.prev_pos), s.orientation(c.prev_rot));
+        c.com = s.point(c.com);
+    }
+    for (p, _, _) in &mut loads.0 {
+        *p = s.point(*p);
+    }
 }
 
 /// Collect weights standing on soft decks: physics characters and [`SoftLoad`]s.

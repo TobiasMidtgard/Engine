@@ -52,7 +52,7 @@ Every spec component is data (serde, registered with docs), so AI agents and the
 
 ## Contracts
 
-Reads: `WindField`, `Gravity`, `Ground`, `WeatherState` (rain), `HeatField`, `FocusPoints`, `ProjectileTrace`, `WorldImpulse`, `IgniteRequest`; physics contract (`Collider`, `RigidBody`, `MassProperties`, `CharacterController`, `CharacterState`); animation contract (`SkeletonPose`); `LocalTimeScale`.
+Reads: `WindField`, `Gravity`, `Ground`, `WeatherState` (rain), `HeatField`, `FocusPoints`, `ProjectileTrace`, `WorldImpulse`, `IgniteRequest`, `WorldShift` (particles, collider history and world-anchored rope ends follow the world into its new frame in `WorldShiftSet::Apply`); physics contract (`Collider`, `RigidBody`, `MassProperties`, `CharacterController`, `CharacterState`); animation contract (`SkeletonPose`); `LocalTimeScale`.
 
 Writes: `ApplyImpulse` (soft bodies pushing and pulling rigid bodies), `GroundContact` (landings), `NoiseEvent` (impacts), `SmokeEmission` (burning cloth), its own components, and draws through `SoftBodyFeature` (a `RenderFeature`).
 

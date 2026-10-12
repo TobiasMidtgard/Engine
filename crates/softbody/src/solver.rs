@@ -14,6 +14,7 @@
 //! colliders and wind each step and reads back positions and reaction impulses.
 
 use engine_core::math::{DVec3, Mat3, Quat, Vec3};
+use engine_world::WorldShift;
 
 use crate::collide::{LocalCollider, PosedCollider};
 
@@ -355,6 +356,47 @@ impl Sim {
             // n·(x - shift) + w = n·x + (w - n·shift)
             let n = Vec3::new(g[0], g[1], g[2]);
             g[3] -= n.dot(shift);
+        }
+    }
+
+    /// Follow the world into a new reference frame (floating origin, a new planet's frame):
+    /// every particle keeps its place in the world, and its velocity is seen from the new
+    /// frame. A plain floating-origin move only moves [`Sim::origin`].
+    pub fn shift(&mut self, s: &WorldShift) {
+        self.origin = s.point(self.origin);
+        if !s.is_translation_only() {
+            let r = s.rotation.as_quat();
+            for v in self
+                .pos
+                .iter_mut()
+                .chain(self.step_start.iter_mut())
+                .chain(self.prev.iter_mut())
+            {
+                *v = r * *v;
+            }
+            for f in &mut self.frames {
+                f.from_pos = r * f.from_pos;
+                f.to_pos = r * f.to_pos;
+                f.from_rot = (r * f.from_rot).normalize();
+                f.to_rot = (r * f.to_rot).normalize();
+            }
+            // n·x + w with both n and x turned keeps w.
+            for g in &mut self.ground {
+                let n = r * Vec3::new(g[0], g[1], g[2]);
+                g[..3].copy_from_slice(&n.to_array());
+            }
+            for (_, f) in &mut self.loads {
+                *f = r * *f;
+            }
+            self.params.gravity = r * self.params.gravity;
+        }
+        if !s.is_translation_only()
+            || s.velocity != DVec3::ZERO
+            || s.angular_velocity != DVec3::ZERO
+        {
+            for (v, x) in self.vel.iter_mut().zip(&self.pos) {
+                *v = s.velocity_at(self.origin + x.as_dvec3(), *v);
+            }
         }
     }
 
@@ -1048,5 +1090,39 @@ mod tests {
         }
         sim.step(1.0 / 60.0, &[]);
         assert!(sim.pos.iter().all(|p| p.is_finite()));
+    }
+
+    #[test]
+    fn world_shift_keeps_places_and_turns_motion() {
+        let mut sim = chain(4, 0.5, 1.0);
+        sim.origin = DVec3::new(20.0, 3.0, -7.0);
+        for _ in 0..10 {
+            sim.step(1.0 / 60.0, &[]);
+        }
+        let world: Vec<DVec3> = sim.pos.iter().map(|p| sim.origin + p.as_dvec3()).collect();
+        let vel = sim.vel.clone();
+        let s = WorldShift {
+            rotation: engine_core::math::DQuat::from_rotation_y(1.0),
+            translation: DVec3::new(-5000.0, 0.0, 120.0),
+            velocity: DVec3::new(0.0, 0.0, 3.0),
+            angular_velocity: DVec3::ZERO,
+        };
+        sim.shift(&s);
+        for (i, w) in world.iter().enumerate() {
+            let now = sim.origin + sim.pos[i].as_dvec3();
+            assert!(
+                (now - s.point(*w)).length() < 1e-3,
+                "{i}: {now} vs {}",
+                s.point(*w)
+            );
+            assert!((sim.vel[i] - s.velocity_at(now, vel[i])).length() < 1e-4);
+        }
+        // The pinned end follows its frame, which turned with everything else.
+        let f = sim.frames[0];
+        assert!((f.to_pos - sim.pos[0]).length() < 1e-4);
+        assert!((sim.params.gravity - s.direction(Vec3::new(0.0, -9.81, 0.0))).length() < 1e-4);
+        sim.step(1.0 / 60.0, &[]);
+        assert!(sim.pos.iter().all(|p| p.is_finite()));
+        assert!((sim.pos[1] - sim.pos[0]).length() < 0.51);
     }
 }

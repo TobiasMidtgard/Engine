@@ -91,6 +91,10 @@ impl Plugin for SoftBodyPlugin {
             )
             .add_systems(
                 PostUpdate,
+                systems::follow_world_shift.in_set(engine_world::WorldShiftSet::Apply),
+            )
+            .add_systems(
+                PostUpdate,
                 (systems::rebuild_changed, systems::build_bodies)
                     .chain()
                     .in_set(UpdateSet::AfterPropagate),
