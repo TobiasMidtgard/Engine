@@ -439,6 +439,7 @@ fn vs_env(@builtin(vertex_index) i: u32) -> FullscreenOut {
 @fragment
 fn fs_env(in: FullscreenOut) -> @location(0) vec4<f32> {
     let dir = equirect_to_dir(in.uv);
+    let texel = vec2<f32>(abs(dpdx(in.uv.x)), abs(dpdy(in.uv.y)));
     let steps = i32(clouds.params.z);
     let ground_t = ray_shell(vec3(0.0), frame.camera_world.w, dir, 0.0).x;
     if (ground_t > 0.0 && frame.planet.w > 0.0) {
@@ -452,7 +453,21 @@ fn fs_env(in: FullscreenOut) -> @location(0) vec4<f32> {
         let c = a.radiance * frame.sun_color.rgb + lit * a.transmittance;
         return vec4<f32>(min(c, vec3(60000.0)), 1.0);
     }
-    let r = clouds_and_rain(dir, steps, 2, 0.5);
-    let c = r.radiance + clear_sky(dir) * r.transmittance;
+    if (abs(dir.y) > 0.25) {
+        let r = clouds_and_rain(dir, steps, 2, 0.5);
+        let c = r.radiance + clear_sky(dir) * r.transmittance;
+        return vec4<f32>(min(c, vec3(60000.0)), 1.0);
+    }
+    // Near the horizon a ray crosses tens of kilometers of cloud layer in a few strides, so
+    // one ray per texel lands on different noise from its neighbors and the map gets streaks
+    // in azimuth, which the renderer's fog (lit by the horizon color) repeats down the whole
+    // screen. Average four rays across the texel, with staggered strides and more of them.
+    var c = vec3(0.0);
+    for (var k = 0; k < 4; k++) {
+        let o = (vec2<f32>(f32(k & 1), f32(k >> 1u)) - 0.5) * 0.5;
+        let d = equirect_to_dir(in.uv + o * texel);
+        let r = clouds_and_rain(d, steps * 2, 2, (f32(k) + 0.5) * 0.25);
+        c += (r.radiance + clear_sky(d) * r.transmittance) * 0.25;
+    }
     return vec4<f32>(min(c, vec3(60000.0)), 1.0);
 }

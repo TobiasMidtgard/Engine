@@ -18,7 +18,8 @@ use engine_core::math::{DVec2, DVec3, IVec2, Vec3, smoothstep};
 use engine_core::prelude::*;
 use engine_world::physics::{PhysicsQueries, QueryFilter};
 use engine_world::{
-    Grid2, Ground, HeatField, PrecipitationKind, SurfaceLayers, SurfaceMaterials, WeatherState,
+    Grid2, Ground, HeatField, PrecipitationKind, SurfaceId, SurfaceLayers, SurfaceMaterials,
+    WeatherState,
 };
 
 use crate::climate;
@@ -344,9 +345,10 @@ pub fn refresh_cache(
         let xz = cache.cells.cell_center(c);
         let sample = ground.sample(DVec3::new(xz.x, 0.0, xz.y));
         let height = sample.map(|s| s.height).unwrap_or(0.0);
-        let absorbency = sample
-            .map(|s| materials.get(s.surface).absorbency)
-            .unwrap_or(0.5);
+        // Unknown ground soaks like the world's default material.
+        let absorbency = materials
+            .get(sample.map(|s| s.surface).unwrap_or(SurfaceId::DEFAULT))
+            .absorbency;
         let flat = sample.map(|s| s.normal.y).unwrap_or(1.0);
         let exposure = match physics {
             Some(q) => {
@@ -359,9 +361,12 @@ pub fn refresh_cache(
             }
             None => 1.0,
         };
-        // Puddles keep their spots on the ground when the world shifts.
-        let dip =
-            puddle_dip(sim.frame.to_pattern(xz), share, sim.seed) * smoothstep(0.9, 0.98, flat);
+        // Puddles keep their spots on the ground when the world shifts. Soft ground (a grass
+        // meadow, soil) drains: water stands only in its few real hollows, not in a third of
+        // the field.
+        let share_here = share * (1.0 - smoothstep(0.2, 0.65, absorbency));
+        let dip = puddle_dip(sim.frame.to_pattern(xz), share_here, sim.seed)
+            * smoothstep(0.9, 0.98, flat);
         cache.cells.data[index] = CellInfo {
             exposure,
             height: height as f32,
@@ -491,6 +496,23 @@ mod tests {
         (surface, cache, GroundWeather::default())
     }
 
+    /// Makes the (flat) test ground soak like `absorbency` (it is grass by default).
+    fn ground_soaking(cache: &mut GroundCache, absorbency: f32) {
+        let ground = Ground::default();
+        let mut materials = SurfaceMaterials::default();
+        let id = ground.sample(DVec3::ZERO).unwrap().surface;
+        materials.materials[id.0 as usize].absorbency = absorbency;
+        refresh_cache(
+            cache,
+            100_000,
+            &ground,
+            None,
+            &materials,
+            0.3,
+            &WeatherSim::default(),
+        );
+    }
+
     fn rain(mm_h: f32, t: f32) -> WeatherState {
         WeatherState {
             precipitation_mm_h: mm_h,
@@ -550,9 +572,9 @@ mod tests {
 
     #[test]
     fn rain_wets_the_ground_and_fills_puddles_then_it_dries() {
-        let (mut surface, cache, mut params) = setup();
-        // Concrete-like ground so water pools quickly.
-        params.infiltration_mm_h = 2.0;
+        let (mut surface, mut cache, params) = setup();
+        // Hard-packed ground so water pools quickly.
+        ground_soaking(&mut cache, 0.15);
         run(&mut surface, &cache, &params, &rain(10.0, 12.0), 600.0);
         let (wet, puddled, deepest, _) = stats(&surface);
         assert!(wet > 0.95, "wet {wet}");
@@ -567,6 +589,25 @@ mod tests {
         let (wet, puddled, _, _) = stats(&surface);
         assert!(wet < 0.2, "still wet {wet}");
         assert!(puddled < 0.02, "puddles left {puddled}");
+    }
+
+    #[test]
+    fn a_meadow_holds_far_fewer_puddles_than_hard_ground() {
+        let downpour = rain(40.0, 12.0);
+        let mut puddled = Vec::new();
+        for absorbency in [0.15, 0.6] {
+            let (mut surface, mut cache, params) = setup();
+            ground_soaking(&mut cache, absorbency);
+            run(&mut surface, &cache, &params, &downpour, 1800.0);
+            puddled.push(stats(&surface).1);
+        }
+        assert!(puddled[0] > 0.15, "hard ground {}", puddled[0]);
+        assert!(
+            puddled[1] < puddled[0] * 0.4,
+            "a meadow pools {} vs {} on hard ground",
+            puddled[1],
+            puddled[0]
+        );
     }
 
     #[test]

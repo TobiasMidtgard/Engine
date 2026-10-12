@@ -54,13 +54,15 @@ occlusion map).
 
 **The ground changes.** The weather writes the shared `SurfaceLayers` grid around the player:
 rain wets exposed ground within a millimeter; what the ground can't soak up collects in the low
-spots as puddles (asphalt pools, sand soaks it up, see `GroundPatch`); snow piles up below
+spots as puddles (asphalt pools, sand soaks it up, see `GroundPatch`; soft ground such as a
+meadow drains, so water stands only in its few hollows); snow piles up below
 freezing and melts by degree-days; sun, wind and dry air evaporate it again. Covered ground
 stays dry (roofs with colliders are found by raycasts; `WeatherShelter` marks covers without
 one). A ground pass draws it: puddles that mirror the world (screen-space reflections, the sky
 where they leave the screen) with rings from raindrops, darker wet ground, and snow lying in the
 open. Puddles only show within a few centimeters of the ground height, so grass blades,
-tabletops and car roofs stay dry. Footsteps, fire and vehicle grip can read the same grid.
+tabletops and car roofs stay dry, and snow buries what stands lower than its surface (grass, the
+foot of a post) while taller blades poke out. Footsteps, fire and vehicle grip can read the same grid.
 
 **Lightning.** Storm cells strike on their own (`Lightning`), or on demand
 (`weather.lightning`). Bolts are jagged, branching channels with a return-stroke flicker; the

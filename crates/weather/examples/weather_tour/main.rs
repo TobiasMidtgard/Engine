@@ -135,7 +135,7 @@ fn shots() -> Vec<Shot> {
         Shot {
             name: "09_sunset",
             setup: vec![dry(), set("partly_cloudy"), hour(17.6), advance(120.0)],
-            eye: DVec3::new(-10.0, 1.8, 6.0),
+            eye: DVec3::new(-10.5, 1.8, 1.6),
             target: DVec3::new(60.0, 10.0, 0.0),
             frames: 10,
             face_moon: false,

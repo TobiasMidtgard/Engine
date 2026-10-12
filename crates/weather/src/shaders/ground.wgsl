@@ -17,9 +17,10 @@ struct GroundFx {
 @group(1) @binding(4) var ground_height: texture_2d<f32>; // m above a reference, huge = unknown
 
 // How far `rel` sits above the ground (m), from the cached ground heights (bilinear between
-// cell centers); 0 where the ground isn't known yet.
-fn above_ground(rel: vec3<f32>) -> f32 {
-    if (fx.params.w < 0.5) { return 0.0; }
+// cell centers), and the ground's steepest slope there (rise over run); (0, 0) where the ground
+// isn't known yet.
+fn above_ground(rel: vec3<f32>) -> vec2<f32> {
+    if (fx.params.w < 0.5) { return vec2(0.0); }
     let size = vec2<i32>(textureDimensions(ground_height));
     let g = (rel.xz - fx.map.xy) / fx.map.z * vec2<f32>(size) - 0.5;
     let i = vec2<i32>(floor(g));
@@ -28,9 +29,11 @@ fn above_ground(rel: vec3<f32>) -> f32 {
     let h10 = textureLoad(ground_height, clamp(i + vec2(1, 0), vec2(0), size - 1), 0).r;
     let h01 = textureLoad(ground_height, clamp(i + vec2(0, 1), vec2(0), size - 1), 0).r;
     let h11 = textureLoad(ground_height, clamp(i + vec2(1, 1), vec2(0), size - 1), 0).r;
-    if (max(max(h00, h10), max(h01, h11)) > 1e20) { return 0.0; }
+    if (max(max(h00, h10), max(h01, h11)) > 1e20) { return vec2(0.0); }
     let h = mix(mix(h00, h10, f.x), mix(h01, h11, f.x), f.y) + fx.params.z;
-    return rel.y - h;
+    let cell = fx.map.z / f32(size.x);
+    let rise = max(max(abs(h10 - h00), abs(h11 - h01)), max(abs(h01 - h00), abs(h11 - h10)));
+    return vec2<f32>(rel.y - h, rise / cell);
 }
 
 fn rel_at(px: vec2<i32>) -> vec4<f32> {
@@ -116,14 +119,27 @@ fn fs_ground(in: FullscreenOut) -> @location(0) vec4<f32> {
     let u = rel - rel_at(px - vec2<i32>(0, 1)).xyz;
     let dx = select(l, r, dot(r, r) < dot(l, l));
     let dy = select(u, d, dot(d, d) < dot(u, u));
-    var n = normalize(cross(dy, dx));
+    // At the screen edge a neighbor is missing and the normal can't be found.
+    let cr = cross(dy, dx);
+    if (dot(cr, cr) < 1e-20) { discard; }
+    var n = normalize(cr);
     if (dot(n, -rel) < 0.0) { n = -n; }
-    if (n.y < 0.75) { discard; }
 
     let uv = (rel.xz - fx.map.xy) / fx.map.z;
     if (any(uv <= vec2(0.0)) || any(uv >= vec2(1.0))) { discard; }
     let cov = textureSampleLevel(cover, linear_clamp, uv, 0.0);
     let pos = tiling_pos(rel).xz;
+    let ground = above_ground(rel);
+    let snow_m = cov.b * fx.params.y;
+
+    // Snow buries whatever stands lower than its surface (grass, the foot of a post) on
+    // ground flat enough to hold it. The surface drifts, so the taller blades poke out.
+    var buried = 0.0;
+    if (snow_m > 0.01 && ground.x > 0.02 && ground.y < 0.6) {
+        let surface = snow_m * (0.7 + 0.6 * value_noise2(pos * 1.3));
+        buried = 1.0 - smoothstep(surface * 0.8, surface, ground.x);
+    }
+    if (n.y < 0.75 && buried < 0.01) { discard; }
     let flat_ground = smoothstep(0.85, 0.97, n.y);
 
     // Standing water: the simulated depth plus noise for organic shorelines.
@@ -133,13 +149,13 @@ fn fs_ground(in: FullscreenOut) -> @location(0) vec4<f32> {
     let level = depth_mm / 4.0 - 0.4 + shore * 0.6;
     let snowed = saturate(cov.b * fx.params.y * 40.0);
     // Water stands on the ground itself, not on grass blades, benches or tabletops.
-    let on_ground = 1.0 - smoothstep(0.04, 0.08, above_ground(rel));
+    let on_ground = 1.0 - smoothstep(0.04, 0.08, ground.x);
     let water = smoothstep(0.0, 0.05, level) * flat_ground * (1.0 - snowed) * on_ground;
     let damp = smoothstep(-0.3, 0.0, level);
     // Wetness the renderer didn't already apply (it uses the value at the camera).
     let extra_wet = saturate(max(cov.r, damp * cov.r) - frame.weather.x);
-    let snow_m = cov.b * fx.params.y;
-    let extra_snow = saturate(saturate(snow_m * 10.0) - saturate(frame.weather.y * 10.0)) * smoothstep(0.75, 0.9, n.y);
+    let lying = saturate(saturate(snow_m * 10.0) - saturate(frame.weather.y * 10.0)) * smoothstep(0.75, 0.9, n.y);
+    let extra_snow = max(lying, buried);
     if (water < 0.003 && extra_wet < 0.01 && extra_snow < 0.01) { discard; }
 
     let base = textureLoad(scene_color, px, 0).rgb;
@@ -173,8 +189,10 @@ fn fs_ground(in: FullscreenOut) -> @location(0) vec4<f32> {
     }
 
     if (extra_snow > 0.01) {
-        let sun = frame.sun_camera.rgb * saturate(dot(n, frame.sun_dir.xyz)) * shadow_factor(rel, n) * INV_PI;
-        let lit = (sky_ambient(n) * sky_map_visibility(rel, n) + sun) * 0.9;
+        // Buried pixels show the snow's own surface, which faces up.
+        let sn = normalize(mix(n, vec3<f32>(0.0, 1.0, 0.0), buried));
+        let sun = frame.sun_camera.rgb * saturate(dot(sn, frame.sun_dir.xyz)) * shadow_factor(rel, sn) * INV_PI;
+        let lit = (sky_ambient(sn) * sky_map_visibility(rel, sn) + sun) * 0.9;
         let grain = 0.85 + 0.15 * value_noise2(pos * 6.0);
         col = mix(col, pre_expose(lit) * grain, extra_snow);
     }
