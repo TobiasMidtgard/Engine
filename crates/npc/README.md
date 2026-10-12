@@ -1,8 +1,8 @@
 # engine_npc — NPC AI
 
 **Owner:** Smart NPC AI. **Status:** AI core (perception, memory, tactics, navigation, squads,
-melee and ranged combat, learning, explosives), wildlife, stand-in bodies and the showcase arena
-are in. Next: the `npc.*` API, smoke-aware sight, vehicles.
+melee and ranged combat, learning, explosives), wildlife, stand-in bodies, the showcase arena
+and the `npc.*` API are in. Next: smoke-aware sight, vehicles.
 
 Enemies that feel smarter than other games: they notice you gradually, remember where you went,
 use cover and high ground, flank and suppress as a squad, take turns in melee instead of
@@ -56,6 +56,23 @@ staggers, hit flashes, falling when downed, muzzle flashes; a head band in the s
 head-down, flag their tails when alarmed, lie down, gallop, hop, creep and flap. With
 `NpcSettings::show_intent`, rings and lines on the ground show where each NPC is going and why
 (blue cover, orange flank, purple high ground, grey fall back, yellow search).
+
+## API (`npc.*`, JSON)
+
+AI agents and tools reach NPCs through the engine's API registry (and so through the AI bridge):
+
+| Function | Does |
+| --- | --- |
+| `npc.list` | NPCs and animals with position, action or state, target, health; filter by `near`/`radius`/`kind` |
+| `npc.spawn` | a fighter: `position`, `skills` (preset, level 0..1 or fields), `weapon`, `faction`, `squad`, `name` |
+| `npc.spawn_animal` | `species` deer, rabbit, wolf or bird, `herd`, `range`, `male` |
+| `npc.set_skill` | merge skill fields (clamped) or set a preset or level |
+| `npc.inspect` | why an NPC does what it does: utility scores, chosen spot and best candidates, what it knows, combat state and stats; for animals state, danger and needs |
+| `npc.order` | `hold`, `move`, `attack` or `clear` for one NPC or a list |
+| `npc.alert` | a noise at a point: NPCs investigate, animals startle |
+| `npc.despawn` | remove an NPC or animal |
+
+Entities are addressed by `id` or `name`.
 
 ## Showcase
 
@@ -134,6 +151,8 @@ The crate depends only on core crates (`engine_core`, `engine_world`, `engine_re
 - `tests/demo.rs`: the arena fight keeps going for a minute (shots, attacks, blocks, cover,
   downed and revived) inside the arena; the meadow lives for two minutes (grazing, wandering,
   hunting, fleeing) without animals leaving.
+- `tests/api.rs`: spawn, tune, order, alert, inspect, list and despawn through `npc.*`, and
+  bad arguments come back as errors.
 - `tests/screenshots.rs`: renders the arena, a cover fight, the duel and the meadow on a GPU
   or lavapipe and checks the fighters and deer show up. `NPC_SCREENSHOT_DIR=dir` keeps the
   PNGs.

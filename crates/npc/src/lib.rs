@@ -1,6 +1,7 @@
 #![doc = include_str!("../README.md")]
 
 pub mod agent;
+mod api;
 pub mod brain;
 pub mod combat;
 pub mod demo;
@@ -169,5 +170,6 @@ impl Plugin for NpcPlugin {
                         .in_set(NpcSet::Show),
                 ),
             );
+        api::register(app);
     }
 }
