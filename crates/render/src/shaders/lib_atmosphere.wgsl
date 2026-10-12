@@ -95,6 +95,24 @@ fn distance_to_top(h: f32, mu: f32) -> f32 {
     return max(s - b, 0.0);
 }
 
+// Optical depth (Rayleigh, Mie, ozone; feed it to `extinction`) from `p` at height `h` along
+// `dir` to the top of the atmosphere, ray-marched with `samples` steps; x = -1 when the ray hits
+// the ground. Kept for shaders outside the renderer (the weather module's cloud composite).
+fn optical_depth_to_sun(p: vec3<f32>, h: f32, dir: vec3<f32>, samples: i32) -> vec3<f32> {
+    if (ray_shell(p, h, dir, -50.0).x > 0.0) { return vec3<f32>(-1.0); }
+    let len = max(ray_shell(p, h, dir, frame.atmosphere.x).y, 0.0);
+    var od = vec3<f32>(0.0);
+    var prev = 0.0;
+    for (var j = 0; j < samples; j++) {
+        let f = f32(j + 1) / f32(samples);
+        let t = len * f * f;
+        let tm = (prev + t) * 0.5;
+        od += atmo_density(planet_height(p + dir * tm)) * (t - prev);
+        prev = t;
+    }
+    return od;
+}
+
 // How much of the sun's disc is above the horizon at height h for sun zenith cosine mu_s.
 fn sun_above_horizon(h: f32, mu_s: f32) -> f32 {
     let mu_horizon = -atmo_rho(h) / (frame.planet.w + max(h, 0.0));
