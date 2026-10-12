@@ -13,8 +13,10 @@
 //! - [`course`]: set dressing for the parkour course and the duel ring.
 
 pub mod course;
+pub mod fighter;
 pub mod materials;
 pub mod meshgen;
+pub mod rig;
 pub mod texgen;
 
 use engine_assets::Assets;
@@ -65,7 +67,7 @@ impl Library<'_> {
 pub type Generator = fn(&mut Library);
 
 /// Everything the look generates, in order.
-pub const LIBRARY: &[Generator] = &[materials::generate, course::generate];
+pub const LIBRARY: &[Generator] = &[materials::generate, course::generate, fighter::generate];
 
 /// A mesh registered by a generator.
 pub fn mesh(key: &str) -> MeshRef {
