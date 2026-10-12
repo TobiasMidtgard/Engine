@@ -1,37 +1,98 @@
 # engine_anim — Animation
 
-**Owner:** Animation system. **Status:** stub. The owning workstream replaces this with the real module.
-Background research: `game-engine-research/animation.md` in the project files.
+**Owner:** Animation system. Background research: `game-engine-research/animation.md` in the
+project files.
 
-## Scope
+Skeletal and procedural animation for people, animals, creatures and vehicles: clips, blend
+graphs and state machines, IK, legged gaits for any number of legs, vehicle rigs, spring
+chains, muscles that tense with effort, and GPU skinning that wrinkles clothing where it
+compresses and stretches.
 
-- Skeletons and clips from glTF (skins, animations); GPU skinning as a `RenderFeature` using `shade_surface`.
-- Blend trees, state machines, layered/masked blending, additive, root motion, animation events.
-- IK: two-bone, FABRIK/CCD, foot placement on `Ground`, look-at, hand IK for weapons.
-- Procedural animation: spider/creature legs, tails and spines (spring chains), animals (quadruped gaits), vehicles (suspension, landing gear).
-- Ragdolls and physical animation built from physics-contract components (`RigidBody`, `Collider`, `Joint` with motors), driven by `Ragdoll::weight`.
-- **Implements the animation contract** (`engine_world::animation`): reads `AnimationParams`/`AnimationTrigger`, writes `SkeletonPose` every frame and `AnimationEvent` at marked frames, so movement, AI, cloth and hair never depend on this crate.
-- **Muscles:** per-muscle activation computed from what the body is doing (joint angles plus effort: lifting, punching, sprinting, bracing for a block), driving corrective blend shapes (biceps bulge, forearm flex, neck tendons, calves on push-off) and tension maps that fade in veins/striations. Relaxed muscle and fat get secondary jiggle (spring-driven, cheap). Optional later: an ML deformer trained offline on a full muscle simulation for hero characters. Blend shapes run in the skinning compute pass; full detail only near the camera.
-- Skinned clothing that isn't simulated still wrinkles: the skinning pass compares edge lengths to the rest pose and writes a per-vertex tension value for the material's wrinkle maps.
-- Respects `TimeDilation` and `LocalTimeScale`; footstep events become `GroundContact`.
+## What it does
 
-## Contracts
+- **Clips and graphs.** `AnimationClip` (keyed or generated from a function, with curves such
+  as `effort` and events such as `footstep` or `impact`). `AnimGraph` nodes: clip, 1D blend
+  with sync and speed matching, additive, masked layers, and state machines with crossfades,
+  one-shot triggers and conditions on parameters. Graphs are serde data, so tools and AI
+  agents can add or edit them at runtime (`anim.add_graph`).
+- **IK.** `FootIk` plants feet on uneven ground (pelvis drop, two-bone legs, foot tilt, toes
+  stay flat at toe-off). `LookAt` turns spine, neck and head toward an entity or point.
+  `ReachIk` reaches hands to world points or to points on other bones (the off hand on a
+  two-handed grip), faded in and out by a clip curve. Feet step on `IkSurface` boxes, ramps
+  and stairs, on `Ground`, and on physics colliders through `PhysicsQueries`.
+- **Procedural motion.** `LeggedGait` drives any number of legs from the entity's actual
+  motion: gait stages by speed (a horse walks, trots, canters and gallops), step timing,
+  swing arcs, body bob, pitch and roll, turning, and per-leg load for muscles. Leg styles:
+  two-bone, yaw-root (spiders) and hoofed (folding cannon). `VehicleRig` gives cars sprung
+  suspension, body roll and pitch from acceleration, steering and wheel spin.
+  `SpringChains` make tails, manes and ponytails lag and swing.
+- **Muscles.** `MuscleRig` activates each muscle from joint angles, clip curves (`effort`,
+  `brace`, `flex`), gait load and speed; activation rises fast and relaxes slowly, relaxed
+  muscle jiggles. Activation drives bulge morph targets (with corrected normals), a flush
+  on working skin and veins on bare arms and legs.
+- **GPU skinning.** `SkinnedMeshRenderer` draws through a `RenderFeature`: a compute pass
+  applies morph targets and linear blend skinning, a second pass measures how much each
+  vertex's edges compress or stretch against the rest pose. The material bunches compressed
+  cloth outward and folds it into rings across the limb (sleeves at the elbow), draws
+  diagonal pull lines where it stretches (a shirt across the back), and adds veins, flush
+  and fabric sheen. All detail is procedural (no textures) and fades by distance.
+- **Contracts.** Reads `AnimationParams` and `AnimationTrigger`; writes `SkeletonPose` every
+  frame and `AnimationEvent` at marked frames, so movement, AI, cloth and hair never depend
+  on this crate. Footsteps and hoof falls become `GroundContact` (foot, paw or hoof, with
+  load and speed) and `NoiseEvent`; hammer impacts are loud `NoiseEvent`s.
+- **Time.** Every animator uses `Time::delta_for(LocalTimeScale)`, so `TimeDilation` slows
+  animation and a hero who ignores world dilation keeps moving at full speed. Animators
+  beyond `lod_distance` from the simulation focus update at a quarter rate.
 
-Reads: Ground query, Time / LocalTimeScale, physics bodies.
+## Using it
 
-Writes: GroundContact (Foot/Paw/Hoof), NoiseEvent (footsteps).
+`AnimationPlugin` registers everything. The quickest way to see it is the paddock:
 
-Cross-module interaction goes through `engine_world` (see AGENTS.md). If a contract is missing, ask the core owner to add it rather than depending on another module's crate.
+```rust,ignore
+engine_anim::demo::spawn_demo(&mut commands, zone_center);
+```
 
-## Done when
+or spawn single characters with `demo::spawn_humanoid`, `spawn_horse`, `spawn_spider`,
+`spawn_car`, or from an AI agent with `anim.spawn {"kind": "horse", "at": [0, 0, 0]}`.
+To animate your own character, register a `Skeleton`, clips and an `AnimGraph` in the
+`AnimationLibrary`, then spawn an entity with `AnimatorSettings`, `AnimationParams` and a
+`SkinnedMeshRenderer`; set parameters (`speed`, `turn`, ...) and send `AnimationTrigger`s.
+`build::sdf::Body` turns smooth-blended capsules, ellipsoids and boxes into a skinned mesh
+with automatic weights and muscle morph targets.
 
-- A humanoid walks/runs/turns with foot IK on slopes; a quadruped and a procedural creature move believably.
-- Arms visibly tense on a heavy swing or a block and relax after; a horse's flank muscles flex at a gallop; a shirt bunches at the elbow and stretches across the back on a reach.
+Tunable at runtime (JSON, console, scripts, AI agents): `AnimatorSettings`, `FootIk`,
+`LookAt`, `ReachIk`, `IkSurface`, `SpringChains`, `LeggedGait`, `VehicleRig`, `MuscleRig`,
+`SkinnedMeshRenderer` (with its `SkinMaterial`), `BoneAttachment`, `DemoPath`, `DemoScript`.
 
-## Checklist
+API: `anim.list`, `anim.state` (graph state, curves, events, muscles, gait), `anim.clips`,
+`anim.set_param`, `anim.trigger`, `anim.add_graph`, `anim.set_graph`, `anim.spawn`,
+`anim.demo`.
 
-- Plugin registers its tunable components/resources (with docs) and `anim.*` API functions.
-- Fixed-step simulation in the right `SimSet`; honors `TimeDilation`/`LocalTimeScale`.
-- Rendering through `RenderFeature`; shaders validated in a unit test.
-- Unit tests plus a headless screenshot test.
-- A `demo` module with `pub fn spawn_demo(commands: &mut Commands, origin: DVec3)` that builds a small showcase of the feature around `origin`; `games/showcase` places it in its zone.
+## The paddock (showcase test cases)
+
+| Test case | What to look for |
+|---|---|
+| Hammer athlete | Two-handed sledgehammer strike onto a tractor tire: arms, shoulders and back tense on the strike and relax after; veins on the forearms; the ponytail whips; then a braced block |
+| Lifter | Double-biceps flex: biceps, shoulders and chest bulge |
+| Shirt reach | Sleeves bunch at the elbows on the wind-up, the shirt stretches across the back on the reach |
+| Step course | A walker climbs a ramp, crosses a deck, walks down stairs with feet planted by IK, then runs back leaning into the turns |
+| Horse oval | Walk, trot, canter and gallop by speed; haunches and shoulders flex with each stride; the tail streams |
+| Spider garden | Eight procedural legs pick their way over rocks |
+| Car loop | Suspension over speed bumps, roll in corners, steering and spinning wheels |
+
+`cargo run -p engine_anim --example anim_gallery --release -- out_dir` renders close-ups of
+each test case (`GALLERY_SEQUENCE=horse:11:12:0.05` renders a strip of one subject).
+
+## Tests
+
+Unit tests cover clips, graphs, IK, gaits, muscles, skinning and the shaders (WGSL validated,
+GPU struct layouts checked). `tests/demo_scene.rs` runs the paddock and checks each test case
+does what it shows (the hammer lands on the tire with both hands on the handle, muscles tense
+and relax, the walker climbs and runs, the horse gallops with working haunches).
+`tests/render.rs` renders a skinned character on the GPU and checks the pixels follow the
+pose.
+
+## Not yet
+
+glTF skin and animation import, retargeting, ragdolls from the physics contract, and
+scanned or artist-made characters (the paddock's characters are generated from code).

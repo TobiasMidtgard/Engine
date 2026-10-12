@@ -687,37 +687,92 @@ pub fn rock(seed: u64, detail: u32) -> Mesh {
     mesh
 }
 
-/// A square patch of grass blades (`size` m across, centered, base at y = 0). Blades are
-/// single tapered triangles, dark at the root and sunlit at the tip.
-pub fn grass_patch(seed: u64, size: f32, blades: u32, dry: f32) -> Mesh {
+/// A patch of grass `size` meters across: `blades` blades grown in clumps, each a tapered
+/// strip of `segments` segments (1 = a single triangle for distant patches) that bends over
+/// along its length. `dry` (0–1) shifts the color from lush green toward straw.
+pub fn grass_patch(seed: u64, size: f32, blades: u32, dry: f32, segments: u32) -> Mesh {
     let mut rng = Rng::new(seed);
     let mut mesh = Mesh::default();
-    for _ in 0..blades {
-        let x = rng.range(-0.5, 0.5) * size;
-        let z = rng.range(-0.5, 0.5) * size;
-        let h = rng.range(0.2, 0.5) * if rng.chance(0.08) { 1.6 } else { 1.0 };
-        let w = rng.range(0.04, 0.075);
-        let a = rng.range(0.0, TAU);
-        let lean = rng.range(0.05, 0.35);
-        let side = Vec3::new(a.cos(), 0.0, a.sin());
-        let fwd = Vec3::new(-a.sin(), 0.0, a.cos());
-        let base = Vec3::new(x, 0.0, z);
-        let tip = base + Vec3::Y * h + fwd * h * lean;
-        let n = (fwd * -0.3 + Vec3::Y).normalize();
-        let lush = Vec3::new(0.06, 0.15, 0.03);
-        let gold = Vec3::new(0.2, 0.19, 0.06);
-        let col = lush.lerp(gold, (dry + rng.range(-0.25, 0.25)).clamp(0.0, 1.0));
-        let root = col * 0.8;
-        let i = mesh.vertices.len() as u32;
-        mesh.vertices.push(
-            Vertex::new(base - side * w, n, Vec2::new(0.0, 0.0)).with_color(root.extend(1.0)),
-        );
-        mesh.vertices.push(
-            Vertex::new(base + side * w, n, Vec2::new(1.0, 0.0)).with_color(root.extend(1.0)),
-        );
-        mesh.vertices
-            .push(Vertex::new(tip, n, Vec2::new(0.5, 1.0)).with_color((col * 1.4).extend(1.0)));
-        mesh.indices.extend_from_slice(&[i, i + 1, i + 2]);
+    let segments = segments.max(1);
+    let lush = Vec3::new(0.05, 0.13, 0.025);
+    let fresh = Vec3::new(0.09, 0.2, 0.035);
+    let straw = Vec3::new(0.22, 0.19, 0.08);
+    let mut clump = (Vec3::ZERO, 0.0f32, 0.0f32, 1.0f32);
+    for b in 0..blades {
+        // A new clump every eight blades: blades share a center, a lean and a height.
+        if b % 8 == 0 {
+            clump = (
+                Vec3::new(
+                    rng.range(-0.5, 0.5) * size,
+                    0.0,
+                    rng.range(-0.5, 0.5) * size,
+                ),
+                rng.range(0.0, TAU),
+                rng.range(0.15, 0.6),
+                rng.range(0.7, 1.3),
+            );
+        }
+        let (center, clump_dir, clump_lean, clump_h) = clump;
+        let r = rng.range(0.0, 1.0).sqrt() * 0.28;
+        let ra = rng.range(0.0, TAU);
+        let mut base = center + Vec3::new(ra.cos() * r, 0.0, ra.sin() * r);
+        base.x = base.x.clamp(-0.5 * size, 0.5 * size);
+        base.z = base.z.clamp(-0.5 * size, 0.5 * size);
+        let h = rng.range(0.22, 0.48) * clump_h * if rng.chance(0.06) { 1.5 } else { 1.0 };
+        let half_w = rng.range(0.008, 0.016) * if segments == 1 { 2.2 } else { 1.0 };
+        // Blades lean outward from the clump center and with the clump.
+        let out = Vec3::new(ra.cos(), 0.0, ra.sin());
+        let lean_dir = (Vec3::new(clump_dir.cos(), 0.0, clump_dir.sin()) * 0.6 + out * 0.4)
+            .normalize_or(Vec3::X);
+        let lean = (clump_lean + rng.range(-0.1, 0.25)).max(0.05);
+        // The blade's flat side faces mostly across its lean, with some twist.
+        let face = rng.range(-0.6, 0.6);
+        let side = (Vec3::new(-lean_dir.z, 0.0, lean_dir.x) * face.cos() + lean_dir * face.sin())
+            .normalize();
+        let tint = rng.range(-0.25, 0.25);
+        let dryness = (dry + tint).clamp(0.0, 1.0);
+        let tip_col = fresh.lerp(straw, dryness) * rng.range(0.85, 1.25);
+        let root_col = lush * 0.45;
+        let point = |t: f32| -> Vec3 {
+            // Rises, then bends over: the tip droops by `lean` of the height.
+            let bend = lean * t * t;
+            base + Vec3::Y * h * (t - 0.35 * bend * t) + lean_dir * h * bend
+        };
+        let i0 = mesh.vertices.len() as u32;
+        for k in 0..=segments {
+            let t = k as f32 / segments as f32;
+            let p = point(t);
+            let tangent = (point((t + 0.02).min(1.0)) - point((t - 0.02).max(0.0))).normalize();
+            let blade_n = side.cross(tangent).normalize_or(Vec3::Y);
+            // Lean shading normals toward the sky and round the edges, like a curved blade.
+            let n = (blade_n * 0.55 + Vec3::Y * 0.6).normalize();
+            let col = root_col.lerp(tip_col, smoothstep(0.0, 0.8, t)).extend(1.0);
+            let v = t;
+            if k == segments {
+                mesh.vertices
+                    .push(Vertex::new(p, n, Vec2::new(0.5, v)).with_color(col * 1.15));
+            } else {
+                let w = half_w * (1.0 - t.powf(1.6));
+                let edge = side * 0.35;
+                mesh.vertices.push(
+                    Vertex::new(p - side * w, (n - edge).normalize(), Vec2::new(0.0, v))
+                        .with_color(col),
+                );
+                mesh.vertices.push(
+                    Vertex::new(p + side * w, (n + edge).normalize(), Vec2::new(1.0, v))
+                        .with_color(col),
+                );
+            }
+        }
+        for k in 0..segments {
+            let a = i0 + k * 2;
+            if k + 1 == segments {
+                mesh.indices.extend_from_slice(&[a, a + 1, a + 2]);
+            } else {
+                mesh.indices
+                    .extend_from_slice(&[a, a + 1, a + 2, a + 2, a + 1, a + 3]);
+            }
+        }
     }
     mesh
 }
@@ -1117,7 +1172,8 @@ mod tests {
         }
         check(&tree(TreeKind::Bush, 1).crown, "bush");
         check(&rock(5, 2), "rock");
-        check(&grass_patch(1, 4.0, 300, 0.3), "grass");
+        check(&grass_patch(1, 4.0, 300, 0.3, 3), "grass");
+        check(&grass_patch(1, 4.0, 300, 0.3, 1), "far grass");
         check(&flower_patch(1, 4.0, 20, Vec3::X), "flowers");
         let h = house(9);
         check(&h.walls, "walls");
