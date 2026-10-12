@@ -115,7 +115,8 @@ touching pairs, step time, substeps.
 ## API functions
 
 `physics.raycast`, `physics.shapecast`, `physics.overlap`, `physics.closest_point`,
-`physics.impulse`, `physics.blast`, `physics.stats`, `physics.debug`. `engine.describe` lists their arguments.
+`physics.impulse`, `physics.blast`, `physics.stats`, `physics.debug`,
+`physics.proving_ground.replay`. `engine.describe` lists their arguments.
 
 ## Contract details a replacement backend must match
 
@@ -134,6 +135,14 @@ a wrecking ball smashing a crate wall, a seesaw catapult, a motor-driven paddle 
 plank bridge, a kinematic turntable and bouncing rubber balls. Its top surface is at `origin`; the
 showcase's physics zone places it. Render it alone with
 `cargo run -p engine_physics --release --example proving_ground -- out_dir`.
+
+The stations replay on their own cycles (`demo::Station::cycle_secs`, world time: ragdolls,
+seesaw and balls every 20 s, dominoes, wrecking ball and bridge every 30 s, the pile every 45 s;
+the tower, wheel and turntable run on), so the zone is always playing when someone walks in.
+`physics.proving_ground.replay {"station": "dominoes"}` restarts one now (`{}` restarts all).
+`demo::VIEWS` are tour stops for the action stations: arriving restarts the station, and the
+warm-up lands on its best moment. `tests/proving_ground.rs` checks that stations replay without
+piling up bodies.
 
 Everything in it is drawn with detailed procedural art (`src/demo/art/`): beveled meshes sized to
 their colliders (shipping crates with brackets and bolts, 200 l drums, chain links, a cast

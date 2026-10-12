@@ -360,6 +360,19 @@ pub fn demo_views(z: &Zone) -> Vec<View> {
             .iter()
             .map(|v| View::new(v.key, v.name, v.eye, v.target, v.hour))
             .collect(),
+        "physics" => engine_physics::demo::VIEWS
+            .iter()
+            .map(|v| {
+                let view = View::new(v.key, v.name, v.eye, v.target, v.hour).warmup(v.warmup_secs);
+                match v.station {
+                    Some(s) => view.on_arrive(
+                        "physics.proving_ground.replay",
+                        &format!(r#"{{"station": "{}"}}"#, s.key()),
+                    ),
+                    None => view,
+                }
+            })
+            .collect(),
         "yard" => vec![
             View::new(
                 "yard_banners",
