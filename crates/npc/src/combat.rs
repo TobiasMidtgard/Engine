@@ -292,6 +292,8 @@ pub(crate) struct Strike {
     origin: DVec3,
     forward: Vec3,
     aim: DVec3,
+    /// When it lands (attacker's clock): seeds the shot's spread.
+    at: f64,
 }
 
 type FighterItem<'a> = (
@@ -378,6 +380,7 @@ pub(crate) fn resolve_attacks(
             origin: t.translation,
             forward: Vec3::new(fwd.x, 0.0, fwd.z).normalize_or(Vec3::NEG_Z),
             aim,
+            at: now,
         });
     }
     if !settings.resolve_hits {
@@ -543,9 +546,10 @@ fn resolve_shot(
         * (1.0 + 1.5 * s.suppression)
         * if s.moving { 1.6 } else { 1.0 }
         * (1.0 + 3.0 * (1.0 - haze));
-    // Random direction in a cone (deterministic per shot).
-    let r1 = roll(s.attacker, s.origin.x + s.aim.z, 3);
-    let r2 = roll(s.attacker, s.origin.z + s.aim.x, 5);
+    // Random direction in a cone (deterministic per shot; seeded by when it is fired, so a
+    // shooter standing still doesn't send every shot to the same spot).
+    let r1 = roll(s.attacker, s.at, 3);
+    let r2 = roll(s.attacker, s.at, 5);
     let ang = spread * r1.sqrt();
     let rot = r2 * TAU;
     let side = aim_dir.any_orthonormal_vector();
