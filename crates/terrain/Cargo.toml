@@ -1,6 +1,6 @@
 [package]
 name = "engine_terrain"
-description = "Terrain (stub: scope and contracts in README.md)."
+description = "Planet-scale cube-sphere terrain with streaming LOD, edits, footprints and weather-driven ground, ground queries and heightfield colliders."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -8,6 +8,12 @@ license.workspace = true
 [dependencies]
 engine_core.workspace = true
 engine_world.workspace = true
+engine_render.workspace = true
 bevy_ecs.workspace = true
+wgpu.workspace = true
+bytemuck.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+
+[dev-dependencies]
+image.workspace = true
