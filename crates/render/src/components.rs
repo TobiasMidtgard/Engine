@@ -407,7 +407,7 @@ pub struct FogVolume {
     pub noise: f32,
     /// Size of the noise's wisps, meters.
     pub noise_scale: f32,
-    /// Henyey-Greenstein anisotropy `g` (-0.95..0.95), as `FogSettings::anisotropy`.
+    /// Henyey-Greenstein anisotropy `g` (-0.95..0.95), as `FogSettings::sun_scattering`.
     pub anisotropy: f32,
 }
 

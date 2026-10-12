@@ -219,7 +219,7 @@ stay dark. Other modules feed it two inputs and need nothing else:
 
 - `FogSettings` (resource): the height fog everywhere. `density` (extinction per meter at
   `base_height`; weather writes it), `height_falloff`, `base_height`, `color` (albedo),
-  `anisotropy` (forward scattering, 0.6) and `max_opacity`.
+  `sun_scattering` (forward scattering, Henyey-Greenstein g, 0.6) and `max_opacity`.
 - `FogVolume` (component, follows its entity's transform, scale included): local fog for a
   smoky room, a mist bank, steam or a dust cloud. `shape` (`Box` or `Ellipsoid`),
   `half_extents`, `density`, `albedo`, `emission` (cd/m² per meter, for fire-lit smoke or

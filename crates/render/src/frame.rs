@@ -594,7 +594,7 @@ pub fn frame_uniform(world: &World, v: &ViewData) -> FrameUniform {
             fog.color[0].max(0.0),
             fog.color[1].max(0.0),
             fog.color[2].max(0.0),
-            fog.anisotropy.clamp(-0.95, 0.95),
+            fog.sun_scattering.clamp(-0.95, 0.95),
         ],
         wind: [v.wind.x, v.wind.y, v.wind.z, 0.0],
         weather: [

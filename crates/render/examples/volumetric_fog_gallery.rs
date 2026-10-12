@@ -104,7 +104,7 @@ fn forest(app: &mut App) {
         height_falloff: 0.06,
         base_height: 0.0,
         color: [0.92, 0.94, 0.97],
-        anisotropy: 0.7,
+        sun_scattering: 0.7,
         ..Default::default()
     };
     let w = &mut app.world;
@@ -418,7 +418,7 @@ fn cave(app: &mut App) {
         height_falloff: 0.07,
         base_height: -38.0,
         color: [0.94, 0.95, 0.98],
-        anisotropy: 0.65,
+        sun_scattering: 0.65,
         ..Default::default()
     };
     let ground_at = |x: f32, z: f32| {
@@ -609,7 +609,7 @@ fn lamps(app: &mut App) {
         height_falloff: 0.12,
         base_height: 0.0,
         color: [0.9, 0.92, 0.95],
-        anisotropy: 0.55,
+        sun_scattering: 0.55,
         ..Default::default()
     };
     let path_x = |z: f32| 2.5 * (z / 23.0).sin();
@@ -726,7 +726,7 @@ fn valley(app: &mut App) {
         height_falloff: 0.12,
         base_height: 4.0,
         color: [0.95, 0.96, 1.0],
-        anisotropy: 0.65,
+        sun_scattering: 0.65,
         ..Default::default()
     };
     {

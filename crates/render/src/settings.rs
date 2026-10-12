@@ -264,10 +264,11 @@ pub struct FogSettings {
     /// Fog albedo, linear RGB: the share of the light it stops that it scatters (the rest it
     /// absorbs). Lit by the sun, the sky and lamps.
     pub color: [f32; 3],
-    /// Henyey-Greenstein anisotropy `g` of the scattering (-0.95..0.95): 0 scatters evenly in
-    /// all directions, 0.6 (default) mostly forward, so fog glows around the sun and lamps when
-    /// you look toward them and sunbeams are brightest against the light.
-    pub anisotropy: f32,
+    /// How strongly the fog scatters light forward: the Henyey-Greenstein anisotropy `g`
+    /// (-0.95..0.95). 0 scatters evenly in all directions, 0.6 (default) mostly forward, so fog
+    /// glows around the sun and lamps when you look toward them and sunbeams are brightest
+    /// against the light.
+    pub sun_scattering: f32,
 }
 
 impl Default for FogSettings {
@@ -278,7 +279,7 @@ impl Default for FogSettings {
             base_height: 0.0,
             max_opacity: 1.0,
             color: [0.9, 0.93, 1.0],
-            anisotropy: 0.6,
+            sun_scattering: 0.6,
         }
     }
 }
