@@ -965,11 +965,12 @@ pub fn build(
                 let t = k as f32 / segments as f32;
                 let omega =
                     (omega_root.ln() + (omega_tip.ln() - omega_root.ln()) * t.powf(0.6)).exp();
+                // A spring of stiffness k = m·ω² on each particle; compliance is 1/k.
                 sim.goals.push(Goal {
                     p: first + k as u32,
                     frame,
                     local,
-                    compliance: mass / (omega * omega),
+                    compliance: 1.0 / (mass * omega * omega),
                 });
                 sim.tethers.push(Tether {
                     p: first + k as u32,
@@ -1126,6 +1127,49 @@ mod tests {
             let over_face = d.z < -0.05 && d.y < 0.02 && d.x.abs() < 0.06;
             assert!(!over_face, "a strand hangs over the face at {d}");
         }
+    }
+
+    #[test]
+    fn hair_sways_in_the_wind_and_falls_back() {
+        let pose = head_pose();
+        let t = GlobalTransform::default();
+        let groom = HairGroom::long_hair("head", HairStyle::long());
+        let mut body = build(&groom, Some((Entity::PLACEHOLDER, &t, &pose)), None, None).unwrap();
+        let strands = body.strands.clone().unwrap();
+        let tips: Vec<usize> = strands
+            .guides
+            .iter()
+            .map(|g| (g.first + g.count - 1) as usize)
+            .collect();
+        let mean_x =
+            |sim: &Sim| tips.iter().map(|&i| sim.pos[i].x).sum::<f32>() / tips.len() as f32;
+        let dt = 1.0 / 60.0;
+        for _ in 0..120 {
+            body.sim.step(dt, &[]);
+        }
+        let rest = mean_x(&body.sim);
+        // A fresh breeze from the left blows the ends out to the right.
+        body.sim.params.wind = Vec3::new(6.0, 0.0, 0.0);
+        for _ in 0..90 {
+            body.sim.step(dt, &[]);
+        }
+        let blown = mean_x(&body.sim);
+        assert!(
+            blown - rest > 0.04,
+            "tips moved {} m in the wind",
+            blown - rest
+        );
+        // When it drops, the hair falls back into its style.
+        body.sim.params.wind = Vec3::ZERO;
+        for _ in 0..240 {
+            body.sim.step(dt, &[]);
+        }
+        let back = mean_x(&body.sim);
+        assert!(
+            (back - rest).abs() < 0.015,
+            "tips {} m from where they were",
+            back - rest
+        );
     }
 
     #[test]
