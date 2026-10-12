@@ -474,6 +474,60 @@ fn running_along_a_wall_reports_its_normal() {
 }
 
 #[test]
+fn running_on_flat_ground_finds_no_walls() {
+    // Movement's setup: capsules spawned on a floor, running and falling. Wall runs, wall
+    // jumps and mantles start from `wall_normal`, so a phantom wall in the middle of a field
+    // throws the player sideways. The sweeps' own normals pointed sideways about one step in
+    // a hundred, on small floors and huge ones, in real time and in slow motion.
+    for (half, dilation) in [(50.0, None), (500.0, None), (500.0, Some(0.25))] {
+        let mut app = app();
+        ground(&mut app, DVec3::ZERO, half);
+        if let Some(scale) = dilation {
+            app.world
+                .resource_mut::<TimeDilation>()
+                .hold("focus", scale, 0.0);
+        }
+        let runners: Vec<Entity> = (0..3)
+            .map(|i| {
+                let mut e = app.world.spawn((
+                    Transform::from_xyz(-20.0, 0.9, i as f64 * 4.0 - 4.0),
+                    CharacterController::default(),
+                    CharacterMove {
+                        velocity: Vec3::new(4.5 + i as f32 * 2.0, -0.5, 0.3 * i as f32),
+                    },
+                    CharacterState::default(),
+                ));
+                // The focus player runs at full speed through the slowed world.
+                if i == 2 {
+                    e.insert(LocalTimeScale {
+                        factor: 1.0,
+                        ignore_world_dilation: true,
+                    });
+                }
+                e.id()
+            })
+            .collect();
+        for step in 0..240 {
+            app.update();
+            for &r in &runners {
+                let state = *app.world.get::<CharacterState>(r).unwrap();
+                assert!(
+                    state.wall_normal.is_none(),
+                    "floor {half}, dilation {dilation:?}, step {step}: phantom wall {:?} at {:?}",
+                    state.wall_normal,
+                    pos(&app, r)
+                );
+                assert!(
+                    step < 2 || (state.grounded && state.ground_normal.y > 0.999),
+                    "floor {half}, dilation {dilation:?}, step {step}: ground {:?}",
+                    state.ground_normal
+                );
+            }
+        }
+    }
+}
+
+#[test]
 fn characters_can_crouch_under_low_ceilings() {
     let mut app = app();
     ground(&mut app, DVec3::ZERO, 50.0);
