@@ -12,7 +12,10 @@
 //! * **Car loop**: a car drives over speed bumps (springy suspension) and rolls in the corners
 //!   while its front wheels steer and every wheel spins.
 //!
-//! Call [`spawn_demo`] with the zone center. Everything is generated from code.
+//! Call [`spawn_demo`] with the zone center. The people are detailed, textured characters
+//! from `assets/characters` (Microsoft Rocketbox, MIT; see its `CREDITS.md`) driven by the
+//! engine's humanoid rig; they load in the background and stand in as generated bodies until
+//! then. Everything else is generated from code.
 
 use std::f32::consts::PI;
 
@@ -27,6 +30,7 @@ use serde_json::{Value, json};
 use crate::animator::{AnimationLibrary, Animator, AnimatorSettings};
 use crate::attach::BoneAttachment;
 use crate::build::{car, horse, humanoid, spider};
+use crate::character::HumanModel;
 use crate::ik::{GroundProbe, IkShape, IkSurface, IkSurfaces, LookAt, Reach, ReachIk};
 use crate::muscle::{MorphWeights, MuscleRig};
 use crate::procedural::spring::SpringChains;
@@ -319,20 +323,21 @@ fn morphs(world: &World, handle: engine_assets::Handle<SkinnedMesh>) -> MorphWei
     MorphWeights::new(names)
 }
 
+/// Deeper folds for a loose long-sleeved shirt.
+fn shirt_detail() -> SkinMaterial {
+    SkinMaterial {
+        wrinkles: 1.4,
+        bunch: 0.016,
+        ..Default::default()
+    }
+}
+
 /// A person (athlete or shirt) with locomotion graph, muscles, foot IK (and a ponytail).
 pub fn spawn_humanoid(world: &mut World, outfit: humanoid::Outfit, transform: Transform) -> Entity {
     let (key, name, material) = match outfit {
         humanoid::Outfit::Athlete => ("anim/humanoid/athlete", "Athlete", SkinMaterial::default()),
         humanoid::Outfit::Lifter => ("anim/humanoid/lifter", "Lifter", SkinMaterial::default()),
-        humanoid::Outfit::Shirt => (
-            "anim/humanoid/shirt",
-            "Shirt",
-            SkinMaterial {
-                wrinkles: 1.4,
-                bunch: 0.016,
-                ..Default::default()
-            },
-        ),
+        humanoid::Outfit::Shirt => ("anim/humanoid/shirt", "Shirt", shirt_detail()),
     };
     let handle = mesh_handle(world, key, || humanoid::mesh(outfit));
     let anim = animator(world, humanoid::SKELETON, humanoid::GRAPH);
@@ -353,6 +358,26 @@ pub fn spawn_humanoid(world: &mut World, outfit: humanoid::Outfit, transform: Tr
         e.insert(SpringChains::new(vec![humanoid::ponytail()]));
     }
     e.id()
+}
+
+/// Path of one of the paddock's imported people (`athlete`, `lifter`, `reacher`, `walker`),
+/// in this crate's `assets/characters` folder.
+pub fn character_path(name: &str) -> String {
+    format!(
+        "{}/assets/characters/{name}.glb",
+        env!("CARGO_MANIFEST_DIR")
+    )
+}
+
+/// Give a person one of the paddock's detailed characters (see [`HumanModel`]) when its file
+/// is there; otherwise they keep their generated body.
+pub fn dress(world: &mut World, person: Entity, character: &str, material: SkinMaterial) {
+    let path = character_path(character);
+    if std::path::Path::new(&path).exists() {
+        world
+            .entity_mut(person)
+            .insert(HumanModel::new(path).with_material(material));
+    }
 }
 
 /// A sledgehammer in `person`'s right hand. The left hand grips the end of the handle while a
@@ -611,6 +636,7 @@ pub fn spawn_demo_world(world: &mut World, origin: DVec3) -> DemoEntities {
         ],
         time: 0.0,
     });
+    dress(world, athlete, "athlete", SkinMaterial::default());
     spawn_hammer(world, athlete, at(ATHLETE.x, 1.0, ATHLETE.z));
     // The tractor tire the hammer comes down on; the athlete keeps their eyes on it.
     let tire = Transform::from_translation(at(ATHLETE.x, 0.56, ATHLETE.z + TIRE_AHEAD));
@@ -636,6 +662,7 @@ pub fn spawn_demo_world(world: &mut World, origin: DVec3) -> DemoEntities {
         humanoid::Outfit::Lifter,
         Transform::from_translation(at(0.7, 0.4, 5.6)).with_rotation(facing(180.0)),
     );
+    dress(world, lifter, "lifter", SkinMaterial::default());
     world.entity_mut(lifter).insert(DemoScript {
         period: 5.0,
         steps: vec![DemoStep::trigger(0.8, "flex")],
@@ -646,6 +673,7 @@ pub fn spawn_demo_world(world: &mut World, origin: DVec3) -> DemoEntities {
         humanoid::Outfit::Shirt,
         Transform::from_translation(at(3.1, 0.4, 5.8)).with_rotation(facing(180.0)),
     );
+    dress(world, reacher, "reacher", shirt_detail());
     world.entity_mut(reacher).insert(DemoScript {
         period: 5.5,
         steps: vec![DemoStep::trigger(0.5, "reach")],
@@ -740,6 +768,7 @@ pub fn spawn_demo_world(world: &mut World, origin: DVec3) -> DemoEntities {
         humanoid::Outfit::Shirt,
         Transform::from_translation(at(-10.0, 0.0, 1.5)),
     );
+    dress(world, walker, "walker", SkinMaterial::default());
     world.entity_mut(walker).insert((
         Name::new("Walker"),
         DemoPath::new(

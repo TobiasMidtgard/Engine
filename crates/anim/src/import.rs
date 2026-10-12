@@ -13,8 +13,9 @@
 use std::collections::HashMap;
 use std::path::Path;
 
+use engine_assets::Handle;
 use engine_core::math::{Mat3, Mat4, Quat, Vec2, Vec3, Vec4};
-use engine_render::Image;
+use engine_render::{AlphaMode, Image, StandardMaterial};
 
 use crate::clip::{AnimationClip, BoneTrack, Track};
 use crate::skeleton::{BoneDef, Skeleton};
@@ -67,6 +68,28 @@ pub struct ImportedMaterial {
     /// Alpha-tested cutout (hair cards, eyelashes), or blended treated as cutout at 0.5.
     pub alpha_cutoff: Option<f32>,
     pub double_sided: bool,
+}
+
+impl ImportedMaterial {
+    /// As an engine material, with `images` the handles of [`ImportedModel::images`] (same
+    /// order).
+    pub fn to_standard(&self, images: &[Handle<Image>]) -> StandardMaterial {
+        let texture = |i: Option<usize>| i.and_then(|i| images.get(i).copied());
+        StandardMaterial {
+            base_color: self.base_color,
+            perceptual_roughness: self.roughness,
+            metallic: self.metallic,
+            alpha_mode: match self.alpha_cutoff {
+                Some(c) => AlphaMode::Mask(c),
+                None => AlphaMode::Opaque,
+            },
+            double_sided: self.double_sided,
+            base_color_texture: texture(self.base_color_texture),
+            normal_texture: texture(self.normal_texture),
+            metallic_roughness_texture: texture(self.metallic_roughness_texture),
+            ..Default::default()
+        }
+    }
 }
 
 /// Facts about an imported clip.

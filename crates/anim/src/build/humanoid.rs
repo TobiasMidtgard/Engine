@@ -20,6 +20,7 @@ use crate::muscle::{Muscle, MuscleDriver};
 use crate::procedural::spring::SpringChainDef;
 use crate::skeleton::Skeleton;
 use crate::skin::SkinnedMesh;
+use crate::xform::Xf;
 
 pub const SKELETON: &str = "humanoid";
 pub const GRAPH: &str = "humanoid";
@@ -112,6 +113,50 @@ pub fn skeleton() -> Skeleton {
         ]);
     }
     Skeleton::new(SKELETON, bones).expect("humanoid skeleton")
+}
+
+/// The humanoid skeleton sized to another character, for driving it through
+/// [`Retarget`](crate::retarget::Retarget). `joint(bone)` says where a humanoid joint sits on
+/// that character in its bind pose (model space, meters, facing −Z); bones it doesn't know
+/// keep their offsets from their parents.
+///
+/// Rest orientations stay the humanoid's, so every humanoid clip, IK rig and muscle works
+/// unchanged: arm and leg chains stay straight along their bones with the character's bone
+/// lengths, the rest of the joints move to the character's positions. Clips key the hips
+/// relative to their rest offset, so the hips keep it and the root takes up the difference.
+pub fn fit_skeleton(name: &str, joint: impl Fn(&str) -> Option<Vec3>) -> Skeleton {
+    let base = skeleton();
+    let straight = [LOWER_ARM, HAND, LOWER_LEG, FOOT].concat();
+    let n = base.len();
+    let mut rest = base.rest.clone();
+    let mut model = base.rest_model.clone();
+    let hips = base.bone("hips");
+    for b in 0..n {
+        let bone_name = base.names[b].as_str();
+        let parent = base.parents[b].map(usize::from);
+        let parent_model = parent.map_or(Xf::IDENTITY, |p| model[p]);
+        if b == base.bone("root") {
+            if let Some(h) = joint("hips") {
+                rest[b].t = h - base.rest[hips].t;
+            }
+        } else if b != hips
+            && let Some(p) = parent
+            && let Some(at) = joint(bone_name)
+        {
+            rest[b].t = if straight.contains(&bone_name) {
+                // Keep the chain straight; take the character's bone length.
+                let from = joint(&base.names[p]).unwrap_or(parent_model.t);
+                base.rest[b].t.normalize_or(Vec3::NEG_Y) * (at - from).length()
+            } else {
+                parent_model.inverse().transform_point(at)
+            };
+        }
+        model[b] = match parent {
+            Some(p) => model[p].mul(&rest[b]),
+            None => rest[b],
+        };
+    }
+    Skeleton::from_parts(name, base.names.to_vec(), base.parents.to_vec(), rest, None)
 }
 
 /// What the character wears.
