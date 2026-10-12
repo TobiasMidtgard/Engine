@@ -10,6 +10,8 @@ use engine::prelude::*;
 /// Frames to wait at each place before capturing (metered auto-exposure reads back a frame or
 /// two late, then adapts).
 const SETTLE_FRAMES: u32 = 8;
+/// Simulated seconds per tour frame.
+const STEP_SECS: f32 = 0.05;
 
 #[derive(Resource, Debug)]
 pub struct Tour {
@@ -39,7 +41,9 @@ impl Tour {
 pub fn install(app: &mut App, only: Option<&str>) {
     app.world
         .resource_mut::<Time>()
-        .set_source(engine::core::time::TimeSource::Manual { step_secs: 0.05 });
+        .set_source(engine::core::time::TimeSource::Manual {
+            step_secs: STEP_SECS as f64,
+        });
     app.insert_resource(Tour::new(only));
     app.add_systems(Update, run.after(camera::fly));
 }
@@ -49,6 +53,7 @@ fn run(world: &mut World) {
         let tour = world.resource::<Tour>();
         let Some(place) = tour.places.get(tour.index).cloned() else {
             // Done: give the last screenshot a frame to be written, then exit.
+            crate::places::leave(world);
             world.write_message(AppExit::Success);
             return;
         };
@@ -61,8 +66,11 @@ fn run(world: &mut World) {
         )
     };
 
+    // Exposure settles at the end of the warm-up.
+    let capture_at = SETTLE_FRAMES + (place.warmup_secs / STEP_SECS).ceil() as u32;
     if frames == 0 {
         camera::go_to(world, &place);
+        crate::places::visit(world, &place);
         world.resource_mut::<DayCycle>().hour = place.hour;
         // Adapt exposure within a couple of frames instead of seconds.
         let mut cams = world.query::<&mut Camera>();
@@ -74,7 +82,7 @@ fn run(world: &mut World) {
         engine::core::log::info!("tour {}/{}: {}", index + 1, total, place.name);
     }
 
-    if frames == SETTLE_FRAMES {
+    if frames == capture_at {
         let d = world.resource::<Diagnostics>();
         engine::core::log::info!(
             "  exposure EV100 {:.1} (metered {:.1})",
@@ -83,7 +91,7 @@ fn run(world: &mut World) {
         );
     }
     let mut tour = world.resource_mut::<Tour>();
-    if frames == SETTLE_FRAMES {
+    if frames == capture_at {
         let path = format!("{out_dir}/{:02}_{}.png", index + 1, place.key);
         tour.frames = 0;
         tour.index += 1;
