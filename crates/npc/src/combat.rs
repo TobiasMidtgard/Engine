@@ -547,7 +547,8 @@ fn resolve_shot(
         * (1.0 + 1.5 * s.suppression)
         * if s.moving { 1.6 } else { 1.0 }
         * (1.0 + 3.0 * (1.0 - haze));
-    // Random direction in a cone (deterministic per shot).
+    // Random direction in a cone (deterministic per shot; seeded by when it is fired, so a
+    // shooter standing still doesn't send every shot to the same spot).
     let r1 = roll(s.attacker, s.at, 3);
     let r2 = roll(s.attacker, s.at, 5);
     let ang = spread * r1.sqrt();

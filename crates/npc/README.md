@@ -137,12 +137,19 @@ punish window), cooldown, spread and shield.
    game code) and it wall-runs and slides like the player; NPCs without them keep the
    built-in mover.
 
+When the world is re-anchored (a floating-origin move or a new reference frame, `WorldShift`),
+everything NPCs and animals keep in world space moves with it in `WorldShiftSet::Apply`: homes,
+orders, destinations and candidate spots, paths, remembered positions, velocities and
+snapshots, disturbances, aim points, dashes, threats, noises heard, water and landing spots, and
+the tactical world. The navigation grid rebuilds its chunks where paths are next asked for, and
+a turned world also rebuilds the tactical world from the colliders.
+
 ## Contracts
 
 Reads: `Collider` / `RigidBody` (tactical world), `PhysicsQueries` when present, `Ground`,
 `Water`, `HeatField` (avoid fire), `Obscurance` (smoke, fog and dust), `NoiseEvent`, `DamageEvent`, `AttackEvent` (telegraphs to
 defend against), `ProjectileTrace` (near misses), `LocomotionState` of targets, `TerrainChanged`,
-`LocalTimeScale` / `TimeDilation`, `LocomotionBackend`.
+`LocalTimeScale` / `TimeDilation`, `LocomotionBackend`, `WorldShift`.
 
 Writes: `MoveIntent` (the same input a player produces), `LocomotionState` and
 `AnimationParams` (fallback mover only), `AttackEvent` (its own telegraphs), `DamageEvent`,
@@ -172,6 +179,11 @@ The crate depends only on core crates (`engine_core`, `engine_world`, `engine_re
   shots into smoke miss more, and a shooter with no solid cover hides in a smoke bank.
 - `tests/api.rs`: spawn, tune, order, alert, inspect, list and despawn through `npc.*`, and
   bad arguments come back as errors.
+- `tests/world_shift.rs`: a far floating-origin move, and two shifts in one frame that turn the
+  world, mid-fight and while deer flee: memories, destinations, paths, aim, homes, threats and
+  the tactical world move exactly with the world, the rifleman keeps looking and shooting at
+  the player, the deer keep running from what scared them and stay around their home, and
+  paths go around a wall where it moved to, not where it was.
 - `tests/screenshots.rs`: renders the arena, its stands, a cover fight, the sparring lane, the
   duel and the meadow on a GPU or lavapipe and checks the fighters and deer show up.
   `NPC_SCREENSHOT_DIR=dir` keeps the PNGs.
