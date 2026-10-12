@@ -11,6 +11,8 @@ use engine_render::{MaterialRef, MeshRenderer, Shape, StandardMaterial};
 use engine_world::{AttackEvent, AttackKind, DamageEvent, DamageKind};
 
 use crate::agent::{Defense, NpcClock, NpcCombat, NpcVitals};
+use crate::art::ArtAssets;
+use crate::art::arena::PostKit;
 use crate::combat::roll;
 
 /// A post that swings at `target` (see the module docs). The post turns to face its target.
@@ -115,8 +117,65 @@ fn tip(hot: bool) -> StandardMaterial {
     }
 }
 
-pub(crate) fn build_posts(mut commands: Commands, q: Query<Entity, Added<SparringPost>>) {
+/// The two looks of a post's striking head: at rest, and glowing while a swing is telegraphed.
+#[derive(Component, Debug, Clone, PartialEq)]
+pub(crate) struct TipLooks {
+    cold: MaterialRef,
+    hot: MaterialRef,
+}
+
+/// Dress new posts: a stone base, a turned wooden post with iron bands and a leather grip,
+/// and a beam arm with a padded leather head (plain shapes without the renderer).
+pub(crate) fn build_posts(
+    mut commands: Commands,
+    q: Query<Entity, Added<SparringPost>>,
+    mut art: ArtAssets,
+) {
+    if q.is_empty() {
+        return;
+    }
+    let kit = PostKit::load(&mut art);
     for e in &q {
+        let Some(kit) = &kit else {
+            plain_post(&mut commands, e);
+            continue;
+        };
+        for (mesh, material) in &kit.body {
+            commands.spawn((
+                Transform::default(),
+                MeshRenderer::new(mesh.clone(), material.clone()),
+                ChildOf(e),
+            ));
+        }
+        let arm = commands
+            .spawn((
+                Transform::from_translation(DVec3::new(0.0, ARM_HEIGHT as f64, 0.0)),
+                PostPart::Arm,
+                ChildOf(e),
+            ))
+            .id();
+        for (mesh, material) in &kit.arm {
+            commands.spawn((
+                Transform::default(),
+                MeshRenderer::new(mesh.clone(), material.clone()),
+                ChildOf(arm),
+            ));
+        }
+        commands.spawn((
+            Transform::from_translation(DVec3::new(0.0, 0.0, -(ARM_LENGTH as f64))),
+            MeshRenderer::new(kit.tip.clone(), kit.tip_cold.clone()),
+            PostPart::Tip,
+            TipLooks {
+                cold: kit.tip_cold.clone(),
+                hot: kit.tip_hot.clone(),
+            },
+            ChildOf(arm),
+        ));
+    }
+}
+
+fn plain_post(commands: &mut Commands, e: Entity) {
+    {
         let base = [
             (
                 Shape::Cylinder {
@@ -169,6 +228,10 @@ pub(crate) fn build_posts(mut commands: Commands, q: Query<Entity, Added<Sparrin
                 tip(false),
             ),
             PostPart::Tip,
+            TipLooks {
+                cold: MaterialRef::Inline(tip(false)),
+                hot: MaterialRef::Inline(tip(true)),
+            },
             ChildOf(arm),
         ));
     }
@@ -254,16 +317,16 @@ pub(crate) fn swing_posts(
     }
 }
 
+type PostPieces = (
+    &'static PostPart,
+    &'static mut Transform,
+    Option<&'static mut MeshRenderer>,
+    Option<&'static Children>,
+    Option<&'static TipLooks>,
+);
+
 /// Draw the arm back during the telegraph, sweep it through on the hit, bounce it off a parry.
-pub(crate) fn pose_posts(
-    posts: Query<(&SparringPost, &Children)>,
-    mut parts: Query<(
-        &PostPart,
-        &mut Transform,
-        Option<&mut MeshRenderer>,
-        Option<&Children>,
-    )>,
-) {
+pub(crate) fn pose_posts(posts: Query<(&SparringPost, &Children)>, mut parts: Query<PostPieces>) {
     for (post, children) in &posts {
         let st = post.state;
         let now = st.clock;
@@ -299,7 +362,7 @@ pub(crate) fn pose_posts(
             }
         };
         for child in children.iter() {
-            let Ok((part, mut t, _, grandchildren)) = parts.get_mut(child) else {
+            let Ok((part, mut t, _, grandchildren, _)) = parts.get_mut(child) else {
                 continue;
             };
             if *part != PostPart::Arm {
@@ -312,12 +375,12 @@ pub(crate) fn pose_posts(
             let tips: Vec<Entity> = grandchildren
                 .map(|g| g.iter().collect())
                 .unwrap_or_default();
-            let want = MaterialRef::Inline(tip(hot));
             for g in tips {
-                if let Ok((PostPart::Tip, _, Some(mut mesh), _)) = parts.get_mut(g)
-                    && mesh.material != want
-                {
-                    mesh.material = want.clone();
+                if let Ok((PostPart::Tip, _, Some(mut mesh), _, Some(looks))) = parts.get_mut(g) {
+                    let want = if hot { &looks.hot } else { &looks.cold };
+                    if mesh.material != *want {
+                        mesh.material = want.clone();
+                    }
                 }
             }
         }

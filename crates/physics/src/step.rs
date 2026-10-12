@@ -13,7 +13,7 @@ use engine_world::{
     ContactKind, FocusPoints, Gravity, GroundContact, NoiseEvent, SurfaceMaterials, Water,
     WorldImpulse,
 };
-use rapier3d::prelude::{Pose, QueryFilter as RFilter, SharedShape};
+use rapier3d::prelude::{ActiveHooks, PhysicsWorld, Pose, QueryFilter as RFilter, SharedShape};
 
 use crate::character;
 use crate::convert;
@@ -489,6 +489,7 @@ pub(crate) fn physics_step(world: &mut World, mut q: Local<Option<StepQueries>>)
         }
         let g = gravity.at(sim.region(rid).anchor);
         sim.region_mut(rid).world.gravity = g;
+        refresh_contacts_on_turning_bodies(&mut sim.region_mut(rid).world);
         prepare_forces(
             &mut sim,
             rid,
@@ -875,6 +876,79 @@ fn prepare_forces(
             }
         }
         sim.bodies.get_mut(&e).unwrap().forces_set = needs || (wet && had_forces);
+    }
+}
+
+/// A body whose far edge moves faster than this from turning alone, m/s, gets its contacts
+/// recomputed every step; below [`STILL_EDGE_SPEED`] Rapier may reuse them again.
+const TURNING_EDGE_SPEED: f32 = 0.02;
+const STILL_EDGE_SPEED: f32 = 0.01;
+/// Dynamic bodies reaching less than this from their center of mass, m, never count as decks.
+const DECK_REACH_M: f32 = 1.2;
+
+/// Rapier reuses ("recycles") a contact pair while its bodies barely move relative to each
+/// other, with the solver's lever arms frozen in world space until either body has turned
+/// about 11°. Cargo riding a turning body (a turntable, a ship coming about) never moves
+/// relative to it, so its friction pulls at points up to 11° behind and the cargo creeps
+/// outward at about a tenth of the deck's speed until it slides off. Pairs with a contact hook
+/// are never recycled, so turning decks get a (no-op) one. The error grows with the deck's
+/// size, so only bodies big enough to carry something count ([`DECK_REACH_M`]): debris and
+/// crates tumbling in a settling pile keep the speed-up (about a tenth of a 1000-body pile's
+/// step time).
+fn refresh_contacts_on_turning_bodies(world: &mut PhysicsWorld) {
+    let PhysicsWorld {
+        bodies, colliders, ..
+    } = world;
+    for (_, rb) in bodies.iter() {
+        if rb.is_fixed() {
+            continue;
+        }
+        let spin = if rb.is_sleeping() {
+            0.0
+        } else {
+            rb.angvel().length()
+        };
+        let edge_speed = if rb.is_kinematic() {
+            // Gameplay turns these on purpose, and steadily: any turning counts.
+            if spin > 1.0e-4 { f32::INFINITY } else { 0.0 }
+        } else {
+            // A ball's radius from its inertia: close enough for any shape (a disc reads 1.1×
+            // its radius, a rod 0.9× its half-length) and cheap for a thousand bodies a step.
+            let mass = rb.mass();
+            let inertia = rb
+                .mass_properties()
+                .local_mprops
+                .principal_inertia()
+                .max_element();
+            let reach = if mass > 0.0 {
+                (2.5 * inertia / mass).sqrt()
+            } else {
+                0.0
+            };
+            if reach < DECK_REACH_M {
+                0.0
+            } else {
+                spin * reach
+            }
+        };
+        for &h in rb.colliders() {
+            // Look before touching: `get_mut` marks the collider modified, which costs the
+            // broad phase work every step.
+            let Some(hooks) = colliders.get(h).map(|c| c.active_hooks()) else {
+                continue;
+            };
+            let hooked = hooks.contains(ActiveHooks::MODIFY_SOLVER_CONTACTS);
+            let hooks = if !hooked && edge_speed > TURNING_EDGE_SPEED {
+                hooks | ActiveHooks::MODIFY_SOLVER_CONTACTS
+            } else if hooked && edge_speed < STILL_EDGE_SPEED {
+                hooks - ActiveHooks::MODIFY_SOLVER_CONTACTS
+            } else {
+                continue;
+            };
+            if let Some(col) = colliders.get_mut(h) {
+                col.set_active_hooks(hooks);
+            }
+        }
     }
 }
 

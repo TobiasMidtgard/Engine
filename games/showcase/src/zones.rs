@@ -254,7 +254,10 @@ pub fn spawn_demos(
     for z in ZONES {
         match z.key {
             "plaza" => ph::plaza(commands, lib, z),
-            "market" => ph::market(commands, lib, z),
+            "market" => {
+                ph::market(commands, lib, z);
+                engine_ui::demo::spawn_demo(commands, z.center);
+            }
             "paddock" => engine_anim::demo::spawn_demo(commands, z.center),
             "physics" => engine_physics::demo::spawn_demo(commands, z.center),
             "yard" => engine_softbody::demo::spawn_demo(commands, z.center),
@@ -459,6 +462,59 @@ pub fn demo_views(z: &Zone) -> Vec<View> {
                 }
             })
             .collect(),
+        "market" => {
+            let ui = |key, name, screen: &'static str| {
+                View::new(key, name, [-1.5, 1.8, -5.5], [-11.8, 1.8, 9.2], 15.0)
+                    .warmup(1.5)
+                    .on_arrive("ui.show", screen)
+                    .on_leave("ui.hide_all", "{}")
+            };
+            vec![
+                ui(
+                    "market_hud",
+                    "HUD: vitals, compass, minimap, markers",
+                    r#"{"screen": "hud"}"#,
+                ),
+                ui(
+                    "market_dialogue",
+                    "A conversation with the trader",
+                    r#"{"screen": "dialogue", "tree": "merchant_intro", "node": "offer"}"#,
+                )
+                .warmup(6.0),
+                ui("market_shop", "The trader's shop", r#"{"screen": "shop"}"#),
+                ui(
+                    "market_inventory",
+                    "Inventory and equipment",
+                    r#"{"screen": "inventory"}"#,
+                ),
+                ui(
+                    "market_map_galaxy",
+                    "Galaxy map",
+                    r#"{"screen": "map", "zoom": 3.6}"#,
+                ),
+                ui(
+                    "market_map_system",
+                    "Star system map",
+                    r#"{"screen": "map", "zoom": 2.6}"#,
+                ),
+                ui(
+                    "market_map_globe",
+                    "Planet globe",
+                    r#"{"screen": "map", "zoom": 1.4}"#,
+                ),
+                ui(
+                    "market_map_surface",
+                    "Surface map",
+                    r#"{"screen": "map", "zoom": 0.5}"#,
+                ),
+                ui("market_pause", "Pause menu", r#"{"screen": "pause"}"#),
+                ui(
+                    "market_settings",
+                    "Settings",
+                    r#"{"screen": "settings", "tab": "video"}"#,
+                ),
+            ]
+        }
         "yard" => vec![
             View::new(
                 "yard_banners",
@@ -607,6 +663,16 @@ pub fn demo_views(z: &Zone) -> Vec<View> {
                     v.target.to_array(),
                     v.hour,
                 )
+            })
+            .collect(),
+        // Each stop restarts the paddock and waits for its moment (the tour settles 0.4 s
+        // before its warm-up).
+        "paddock" => engine_anim::demo::VIEWS
+            .iter()
+            .map(|v| {
+                View::new(v.key, v.name, v.eye, v.target, v.hour)
+                    .warmup((v.at - 0.4).max(0.0))
+                    .on_arrive("anim.demo_restart", "{}")
             })
             .collect(),
         "magic" => engine_vfx::demo::VIEWS

@@ -90,7 +90,24 @@ gravel road and a soaked patch, lights four trees (trunk first, then the crown),
 shed and hay bales, while the bales across the road survive. A campfire burns forever by the
 path. Once the meadow has regrown, the next fire starts. The first fire is already 50 s along
 when the demo starts so there's something to see right away. `demo::VIEWS` lists camera spots
-for it (fire front, burning trees, campfire, the whole meadow at night).
+for it (fire front, burning trees, campfire at dusk, the fire coming at you at night).
+
+The grass is a `GrassMeadow` (`grass.rs`): a few hundred thousand curved, tapered blades
+drawn on the GPU, thinned with distance, swaying in the wind and casting shadows. It grows
+only where the fuel is grass (roads and fire pits stay bare, the soaked patch is lush green)
+and follows the fire field: burning blades glow at their cut ends and collapse, burnt cells
+keep black stubble, and regrowth comes up green and cures to straw.
+
+The props are procedural meshes and textures (`props.rs`, `textures.rs`), built once and
+shared by key in `Assets`: grown broadleaf trees (flared, branching trunks with bark, alpha
+leaf cards whose crowns scorch brown, blacken and drop out as they burn; `Foliage`), a timber
+shed (framed board walls with gaps, a ledged door on strap hinges, a corrugated iron roof), round
+hay bales with twine, and a campfire ring of shaped fieldstones around split logs and charcoal.
+Materials carry albedo, normal, roughness/AO and an emissive mask, so charring props glow in
+their cracks. The `PaintedGround` (dirt, gravel road, mud, fire-pit ash, litter) darkens to
+char and ash wherever the fire map is scorched. `examples/fire_gallery.rs` renders every view
+and close-ups of each prop (`fire_gallery [out_dir] [views|all] [width] [height]`; a view may
+be `key@secs` to take it at another time).
 
 `examples/flame_look.rs` is a bench for the flames alone (a grass fire, a campfire, a burning
 crate, by day or night); `flame_look sheet` writes the flipbook as a contact sheet.

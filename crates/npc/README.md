@@ -1,8 +1,9 @@
 # engine_npc — NPC AI
 
 **Owner:** Smart NPC AI. **Status:** AI core (perception, memory, tactics, navigation, squads,
-melee and ranged combat, learning, explosives), wildlife, stand-in bodies, the showcase arena
-the `npc.*` API and smoke-aware sight are in. Next: detailed bodies and arena art, vehicles.
+melee and ranged combat, learning, explosives), wildlife, sculpted fighters and animals, the
+stone showcase arena, the `npc.*` API and smoke-aware sight are in. Next: lifelike faces,
+vehicles.
 
 Enemies that feel smarter than other games: they notice you gradually, remember where you went,
 use cover and high ground, flank and suppress as a squad, take turns in melee instead of
@@ -46,16 +47,33 @@ back away from people. Bird flocks peck on the ground and lift off together. Gun
 explosions, howls and fire scare everything. `WildlifeSettings` tunes respawn, thirst, hunger,
 skittishness and howling.
 
-## Stand-in bodies
+## Bodies and art
 
-`StandIn` gives an NPC or animal a primitive body posed every step from the AI state, so
-behavior reads before real models exist: gait, crouching in cover, the raised weapon of an
-attack's telegraph (glowing for a heavy guard breaker), blocks, white parry flashes, dodges,
-staggers, hit flashes, falling when downed, muzzle flashes; a head band in the skill color
-(grey, bronze, silver, gold) and an orb for alertness (yellow, orange, red). Animals graze
+`StandIn` gives an NPC or animal a body posed every step from the AI state, so behavior reads
+on screen: gait, crouching in cover, the raised weapon of an attack's telegraph (glowing for a
+heavy guard breaker), blocks, white parry flashes, dodges, staggers, hit flashes, falling when
+downed, muzzle flashes, a rank crest in the skill color and an alert light. Animals graze
 head-down, flag their tails when alarmed, lie down, gallop, hop, creep and flap. With
 `NpcSettings::show_intent`, rings and lines on the ground show where each NPC is going and why
 (blue cover, orange flank, purple high ground, grey fall back, yellow search).
+
+All art is generated in code (`src/art`), since no third-party art may go in the repository:
+
+- **Fighters** (`art/fighter.rs`): armored arena combatants with segmented plates, tabards in
+  the team color, open helmets with a brow light and a rank crest over mail coifs, sculpted
+  faces in six skin tones, gloves and boots, and a longsword, an arming sword with a
+  heater shield, a carbine or a recurve bow. A skeleton with two-bone IK for arms and legs
+  poses them for every combat state. One texture atlas; each team shares one mesh per piece.
+- **Wildlife** (`art/animals.rs`): sculpted red deer (stags with antlers and a neck mane),
+  grey wolves and European rabbits, with fur textures that follow the coat, baked ambient
+  occlusion, IK legs and planted feet, and starlings with iridescent spotted plumage and
+  feathered wings that fold, spread and beat.
+- **Arena** (`art/arena.rs`): a sandstone amphitheater with arched stands, gates with
+  portcullises, fluted columns, banners, braziers with flickering fire and light, rubble,
+  timber barricades, crates and drums, all with baked PBR textures. The art dresses the gameplay entities; colliders never change.
+
+Everything is built once per world and shared. Without a renderer (headless tests) the art
+falls back to primitive shapes so tests stay fast.
 
 ## API (`npc.*`, JSON)
 
@@ -184,6 +202,9 @@ The crate depends only on core crates (`engine_core`, `engine_world`, `engine_re
   the tactical world move exactly with the world, the rifleman keeps looking and shooting at
   the player, the deer keep running from what scared them and stay around their home, and
   paths go around a wall where it moved to, not where it was.
+- `tests/art_fighters.rs`, `tests/art_animals.rs`, `tests/art_arena.rs`: close-up renders of
+  the fighters, wildlife and arena in chosen poses and lights, plus triangle and build-time
+  budgets and a check that the arena art sits on every collider.
 - `tests/screenshots.rs`: renders the arena, its stands, a cover fight, the sparring lane, the
   duel and the meadow on a GPU or lavapipe and checks the fighters and deer show up.
   `NPC_SCREENSHOT_DIR=dir` keeps the PNGs.
@@ -192,4 +213,4 @@ The crate depends only on core crates (`engine_core`, `engine_world`, `engine_re
 
 - Enemies that feel smarter than other games: they take cover, flank, punish mistakes, and block.
 - Dynamic fauna roams, herds, drinks, rests and flees from threats, fire and explosions.
-- The showcase arena shows all of it with readable stand-in bodies and an intent overlay.
+- The showcase arena shows all of it with readable bodies and an intent overlay.

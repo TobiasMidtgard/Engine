@@ -1,0 +1,30 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <defs>
+    <linearGradient id="cloth" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#5fb07a"/>
+      <stop offset=".5" stop-color="#2c6a46"/>
+      <stop offset="1" stop-color="#123022"/>
+    </linearGradient>
+    <linearGradient id="inner" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#05070b"/>
+      <stop offset="1" stop-color="#1a2a22"/>
+    </linearGradient>
+    <linearGradient id="gold" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#fff0bd"/>
+      <stop offset=".5" stop-color="#e8b65a"/>
+      <stop offset="1" stop-color="#8f5a1c"/>
+    </linearGradient>
+  </defs>
+  <g stroke="#0c0f16" stroke-width="4" stroke-linejoin="round" stroke-linecap="round" paint-order="stroke">
+    <path d="M32 3 C42 3 48 10 48 20 C48 24 47 26 46 28 C52 36 56 48 57 60 C52 58 48 61 44 59 C40 61 36 58 32 60 C28 58 24 61 20 59 C16 61 12 58 7 60 C8 48 12 36 18 28 C17 26 16 24 16 20 C16 10 22 3 32 3 Z" fill="url(#cloth)"/>
+  </g>
+  <path d="M32 8 C38.5 8 42.5 13.5 42.5 20 C42.5 25 39 29 32 29 C25 29 21.5 25 21.5 20 C21.5 13.5 25.5 8 32 8 Z" fill="url(#inner)" stroke="#0c0f16" stroke-width="1.4"/>
+  <path d="M24 34 C22 42 21 50 20 59 M32 36 L32 60 M40 34 C42 42 43 50 44 59" stroke="#0c0f16" stroke-width="1.6" fill="none" opacity=".45" stroke-linecap="round"/>
+  <path d="M26 35 C24.5 43 23.5 51 23 58 M34 36 L34 58" stroke="#8fd6a6" stroke-width="1" fill="none" opacity=".35" stroke-linecap="round"/>
+  <path d="M17.6 21 C17.4 11.6 23 5 32 5" stroke="#b6f0c8" stroke-width="1.4" fill="none" stroke-linecap="round" opacity=".7"/>
+  <path d="M16.5 32 C13 39 10.6 47 9.6 56" stroke="#b6f0c8" stroke-width="1.2" fill="none" stroke-linecap="round" opacity=".5"/>
+  <path d="M7 60 C12 58 16 61 20 59 C24 61 28 58 32 60 C36 58 40 61 44 59 C48 61 52 58 57 60" stroke="url(#gold)" stroke-width="2" fill="none"/>
+  <path d="M21 31 C25 33 39 33 43 31" stroke="url(#gold)" stroke-width="2.2" fill="none" stroke-linecap="round"/>
+  <circle cx="32" cy="32.5" r="3.6" fill="url(#gold)" stroke="#0c0f16" stroke-width="1.4"/>
+  <circle cx="32" cy="32.5" r="1.5" fill="#5fd0ff"/>
+</svg>

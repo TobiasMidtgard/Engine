@@ -60,11 +60,11 @@ are built, nothing simulates yet) · ⬜ not visible yet
 
 | # | Test case | Zone / viewpoint | Owner | Status |
 |---|---|---|---|---|
-| 25 | Robust animation for humanoids | `paddock`, `arena` | Animation system | ✅ paddock: a hammer athlete, a lifter, a shirt reach, and a walker that climbs a ramp, crosses a deck, takes the stairs with IK-planted feet and runs back |
-| 26 | Animation for animals | `paddock`, `meadow` | Animation system | ✅ paddock: a horse that walks, trots, canters and gallops round an oval, and a spider picking its way over rocks |
-| 27 | Animation for vehicles (wheels, gear, doors) | `paddock` car loop, `track`, `airfield` | Animation system | ✅ paddock: a car with suspension over speed bumps, body roll, steering and spinning wheels |
-| 28 | Muscles that flex and jiggle with movement | `paddock` | Animation system | ✅ the hammer athlete's arms, shoulders and back tense on the strike and relax after; the lifter's double-biceps flex |
-| 29 | Clothing tension and wrinkles during movement | `paddock`, `yard` | Animation system, Cloth, soft bodies and hair | ✅ paddock: sleeves bunch at the elbows and the shirt stretches across the back on a reach |
+| 25 | Robust animation for humanoids | `paddock`, `paddock_hammer`, `paddock_stairs`, `arena` | Animation system | ✅ paddock: a hammer athlete, a lifter, a shirt reach, and a walker that climbs a ramp, crosses a deck, takes the stairs with IK-planted feet and runs back |
+| 26 | Animation for animals | `paddock`, `paddock_gallop`, `paddock_spider`, `meadow` | Animation system | ✅ paddock: a horse that walks, trots, canters and gallops round an oval, and a spider picking its way over rocks |
+| 27 | Animation for vehicles (wheels, gear, doors) | `paddock` car loop, `paddock_car`, `track`, `airfield` | Animation system | ✅ paddock: a car with suspension over speed bumps, body roll, steering and spinning wheels |
+| 28 | Muscles that flex and jiggle with movement | `paddock`, `paddock_hammer`, `paddock_flex`, `paddock_block` | Animation system | ✅ the hammer athlete's arms, shoulders and back tense on the strike and relax after; the lifter's double-biceps flex |
+| 29 | Clothing tension and wrinkles during movement | `paddock`, `paddock_reach`, `yard` | Animation system, Cloth, soft bodies and hair | ✅ paddock: sleeves bunch at the elbows and the shirt stretches across the back on a reach |
 | 30 | Cloth: flags, sails, curtains, clothes | `yard` | Cloth, soft bodies and hair | ✅ flags and pennants in the wind, a curtain shot full of holes, one that burns, a cape |
 | 31 | Soft bodies (jelly, flesh) and ropes (rope bridge) | `yard` | Cloth, soft bodies and hair | ✅ jelly cubes, a clay block that dents, rope bridges, a swing, a bead curtain, a wrecking ball |
 | 32 | Hair and fur for humans and animals | `yard` | Cloth, soft bodies and hair | ✅ a walking mannequin with long hair and a dog with fur |
@@ -81,11 +81,11 @@ are built, nothing simulates yet) · ⬜ not visible yet
 | # | Test case | Zone / viewpoint | Owner | Status |
 |---|---|---|---|---|
 | 40 | Beautiful magic spells (particles) | `magic`, `magic_spells`, `magic_footsteps`, `magic_impacts` | Particles and magic effects | ✅ Spell court: arcane portal, fireballs and frost bolts hitting a wall, lightning between obelisks, a healing aura, fountain, anvil sparks, torches and fireflies; footprint puffs on mud, snow, sand and water and shot impacts on six materials |
-| 41 | Conversation UI between two people | `market` | UI system and maps | 🟨 two villagers |
-| 42 | Shop UI | `market` | UI system and maps | 🟨 stalls |
-| 43 | Inventory UI | `market` | UI system and maps | ⬜ |
-| 44 | Interactive maps: flat map, 3D globe, galaxy map | `market` map table | UI system and maps | 🟨 table and globe |
-| 45 | HUD | any | UI system and maps | ⬜ |
+| 41 | Conversation UI between two people | `market_dialogue` | UI system and maps | ✅ portraits that talk and blink, typewriter text, choices (one opens the shop) |
+| 42 | Shop UI | `market_shop` | UI system and maps | ✅ buy and sell tabs, item cards, quantity, prices and gold |
+| 43 | Inventory UI | `market_inventory` | UI system and maps | ✅ bag grid with drag and drop, equipment, weight, item details |
+| 44 | Interactive maps: flat map, 3D globe, galaxy map | `market_map_surface`, `market_map_globe`, `market_map_system`, `market_map_galaxy` | UI system and maps | ✅ one map zooming surface → globe → star system → galaxy, with POIs, waypoint and info cards |
+| 45 | HUD | `market_hud` (any zone via `ui.show {"screen": "hud"}`) | UI system and maps | ✅ vitals, compass, minimap, quest, hotbar, slow-motion gauge, world markers; also `market_pause`, `market_settings` |
 
 ## Engine-wide
 

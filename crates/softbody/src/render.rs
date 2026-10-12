@@ -14,6 +14,7 @@
 //! Hair and fur use their own strand drawing here until the shared strand renderer (owned by
 //! Rendering and lighting) exists; [`Geometry::add_hair`] produces exactly the buffers it needs.
 
+use std::f32::consts::{PI, TAU};
 use std::ops::Range;
 
 use bytemuck::{Pod, Zeroable};
@@ -24,12 +25,15 @@ use engine_render::{
     ViewData, wgpu,
 };
 
-use crate::body::{SoftBodySim, Surface, Tube};
+use crate::body::{SoftBodySim, SoftKind, Surface, Tube};
+use crate::rope::Beads;
 use crate::settings::SoftMaterial;
 
-/// Cloth, jelly and rope surfaces (needs `lib_frame`).
+/// Materials, bullet holes and the burn front, shared by both surface passes.
+pub const SURFACE_COMMON: &str = include_str!("shaders/surface_common.wgsl");
+/// Cloth, jelly and rope surfaces (needs `lib_frame`, after [`SURFACE_COMMON`]).
 pub const SURFACE_SHADER: &str = include_str!("shaders/surface.wgsl");
-/// Shadow casting for surfaces (`lib_types` only).
+/// Shadow casting for surfaces (after [`SURFACE_COMMON`]).
 pub const SHADOW_SHADER: &str = include_str!("shaders/shadow.wgsl");
 /// Strand expansion shared by both hair passes.
 pub const STRAND_COMMON: &str = include_str!("shaders/strand_common.wgsl");
@@ -44,6 +48,8 @@ const TUBE_SIDES: usize = 8;
 const TUBE_SUBDIV: usize = 3;
 /// Projected radius (px) at which hair is drawn with every strand.
 const HAIR_FULL_DENSITY_PX: f32 = 120.0;
+/// Cloth cells larger than this on screen (pixels) are drawn subdivided along curved edges.
+const REFINE_CELL_PX: f32 = 6.0;
 
 /// One surface vertex. Must match `VertexIn` in `surface.wgsl` and `shadow.wgsl`.
 #[repr(C)]
@@ -88,7 +94,8 @@ pub struct GpuSoftMaterial {
 }
 
 impl GpuSoftMaterial {
-    pub fn new(m: &SoftMaterial, wetness: f32, uv_scale: Vec2) -> Self {
+    /// `holes`: this body's range in the bullet-hole buffer.
+    pub fn new(m: &SoftMaterial, wetness: f32, uv_scale: Vec2, holes: Range<u32>) -> Self {
         let (id, param) = m.pattern.encode();
         let [r, g, b] = m.color;
         let [r2, g2, b2] = m.color2;
@@ -111,7 +118,7 @@ impl GpuSoftMaterial {
                 0.0,
             ],
             scale: [scale.x, scale.y, 0.0, 0.0],
-            pattern: [id, param, 0, 0],
+            pattern: [id, param, holes.start, holes.end - holes.start],
         }
     }
 }
@@ -168,6 +175,8 @@ pub struct Geometry {
     pub vertices: Vec<SoftVertex>,
     pub indices: Vec<u32>,
     pub materials: Vec<GpuSoftMaterial>,
+    /// Bullet holes of every cloth: uv, radius (m), seed.
+    pub holes: Vec<[f32; 4]>,
     /// Hair guide points, camera-relative (w unused).
     pub points: Vec<[f32; 4]>,
     pub guides: Vec<GpuStrandGuide>,
@@ -178,6 +187,36 @@ pub struct Geometry {
     normals: Vec<Vec3>,
     tension: Vec<Vec3>,
     ring: Vec<(Vec3, Vec3, Vec3, f32)>,
+    edges: Vec<(u64, u32)>,
+    edge_mid: Vec<u32>,
+}
+
+/// The midpoint of a PN-triangle edge: the cubic through both ends that leaves each end
+/// along its tangent plane, sampled halfway. Bending is capped at an eighth of the edge so
+/// noisy normals can't raise bumps. The normal is the plain average of the ends: the
+/// quadratic PN normal flips its tilt wherever the ends lean the same way, which shows as
+/// dark patches under a low sun.
+fn curved_midpoint(a: &SoftVertex, b: &SoftVertex) -> SoftVertex {
+    let (pa, pb) = (Vec3::from(a.position), Vec3::from(b.position));
+    let (na, nb) = (Vec3::from(a.normal), Vec3::from(b.normal));
+    let d = pb - pa;
+    // Ends whose normals disagree a lot sit on a crease or a fold that doubles back: there
+    // the normals say little about the surface between them, so stay close to straight.
+    let agree = ((na.dot(nb) - 0.3) / 0.5).clamp(0.0, 1.0);
+    let mut bend = -(d.dot(na) * na - d.dot(nb) * nb) / 8.0 * agree;
+    let cap = 0.12 * d.length();
+    if bend.length() > cap {
+        bend = bend.normalize_or_zero() * cap;
+    }
+    let avg = |x: [f32; 2], y: [f32; 2]| [(x[0] + y[0]) * 0.5, (x[1] + y[1]) * 0.5];
+    SoftVertex {
+        position: ((pa + pb) * 0.5 + bend).to_array(),
+        normal: (na + nb).try_normalize().unwrap_or(na).to_array(),
+        uv: avg(a.uv, b.uv),
+        tension: avg(a.tension, b.tension),
+        burn: avg(a.burn, b.burn),
+        material: a.material,
+    }
 }
 
 impl Geometry {
@@ -185,6 +224,7 @@ impl Geometry {
         self.vertices.clear();
         self.indices.clear();
         self.materials.clear();
+        self.holes.clear();
         self.points.clear();
         self.guides.clear();
         self.grooms.clear();
@@ -198,8 +238,15 @@ impl Geometry {
     }
 
     /// Append a body's surface and rope tubes; `base` is the body origin relative to the
-    /// camera. Returns its index range (empty for bodies with nothing to draw).
-    pub fn add_body(&mut self, body: &SoftBodySim, base: Vec3, alpha: f32) -> Range<u32> {
+    /// camera. `refine` splits each surface triangle in four along curved edges (for cloth
+    /// seen up close). Returns its index range (empty for bodies with nothing to draw).
+    pub fn add_body(
+        &mut self,
+        body: &SoftBodySim,
+        base: Vec3,
+        alpha: f32,
+        refine: bool,
+    ) -> Range<u32> {
         let start = self.indices.len() as u32;
         if body.surface.is_none() && body.tubes.is_empty() {
             return start..start;
@@ -207,11 +254,20 @@ impl Geometry {
         let material = self.materials.len() as u32;
         let wetness = body.cloth.as_ref().map_or(0.0, |c| c.wetness);
         let uv_scale = body.surface.as_ref().map_or(Vec2::ONE, |s| s.uv_scale);
-        self.materials
-            .push(GpuSoftMaterial::new(&body.material, wetness, uv_scale));
+        let first_hole = self.holes.len() as u32;
+        if let Some(c) = &body.cloth {
+            self.holes.extend_from_slice(&c.holes);
+        }
+        let holes = first_hole..self.holes.len() as u32;
+        let mut gpu_material = GpuSoftMaterial::new(&body.material, wetness, uv_scale, holes);
+        if body.kind == SoftKind::Cloth {
+            // Woven fabric: threads close up, yarn irregularity and hems further away.
+            gpu_material.params[3] = 1.0;
+        }
+        self.materials.push(gpu_material);
         self.interpolate(body, base, alpha);
         if let Some(surface) = &body.surface {
-            self.add_surface(body, surface, material);
+            self.add_surface(body, surface, material, refine);
         }
         for tube in &body.tubes {
             self.add_tube(tube, material);
@@ -219,7 +275,7 @@ impl Geometry {
         start..self.indices.len() as u32
     }
 
-    fn add_surface(&mut self, body: &SoftBodySim, s: &Surface, material: u32) {
+    fn add_surface(&mut self, body: &SoftBodySim, s: &Surface, material: u32, refine: bool) {
         let n = s.vertex_count();
         self.positions.clear();
         match &s.embed {
@@ -309,10 +365,63 @@ impl Geometry {
                 material,
             });
         }
+        if refine {
+            self.refine(first, n, &s.triangles);
+            return;
+        }
         for t in &s.triangles {
             if t.iter().all(|&i| (i as usize) < n) {
                 self.indices.extend(t.iter().map(|&i| first + i));
             }
+        }
+    }
+
+    /// Split every triangle in four through curved edge midpoints (PN triangles, Vlachos et
+    /// al. 2001): each edge bends to fit the normals at its ends, so folds and edges seen up
+    /// close are round instead of faceted. Neighbors share their edge's midpoint, so the
+    /// surface stays closed; torn edges have separate vertices and curve separately.
+    fn refine(&mut self, first: u32, n: usize, triangles: &[[u32; 3]]) {
+        // Unique edges: sort (edge key, triangle side) pairs.
+        self.edges.clear();
+        for (k, t) in triangles.iter().enumerate() {
+            if t.iter().any(|&i| i as usize >= n) {
+                continue;
+            }
+            for e in 0..3 {
+                let (a, b) = (t[e], t[(e + 1) % 3]);
+                let key = ((a.min(b) as u64) << 32) | a.max(b) as u64;
+                self.edges.push((key, (k * 3 + e) as u32));
+            }
+        }
+        self.edges.sort_unstable_by_key(|e| e.0);
+        self.edge_mid.clear();
+        self.edge_mid.resize(triangles.len() * 3, u32::MAX);
+        let mut last = u64::MAX;
+        let mut mid = 0u32;
+        for i in 0..self.edges.len() {
+            let (key, side) = self.edges[i];
+            if key != last {
+                last = key;
+                let (a, b) = ((key >> 32) as u32 + first, key as u32 + first);
+                mid = self.vertices.len() as u32;
+                let v = curved_midpoint(&self.vertices[a as usize], &self.vertices[b as usize]);
+                self.vertices.push(v);
+            }
+            self.edge_mid[side as usize] = mid;
+        }
+        for (k, t) in triangles.iter().enumerate() {
+            let m = [
+                self.edge_mid[k * 3],
+                self.edge_mid[k * 3 + 1],
+                self.edge_mid[k * 3 + 2],
+            ];
+            if m.contains(&u32::MAX) {
+                continue;
+            }
+            let [a, b, c] = t.map(|i| first + i);
+            self.indices.extend_from_slice(&[
+                a, m[0], m[2], m[0], b, m[1], m[2], m[1], c, m[0], m[1], m[2],
+            ]);
         }
     }
 
@@ -413,6 +522,111 @@ impl Geometry {
                 let b = center + 1 + (k + 1) % TUBE_SIDES as u32;
                 self.indices.extend([center, a, b]);
             }
+        }
+        if let Some(beads) = &tube.beads {
+            self.add_beads(beads, material);
+        }
+    }
+
+    /// Beads threaded along the centerline in `self.ring`, evenly spaced by arc length.
+    fn add_beads(&mut self, beads: &Beads, material: u32) {
+        let total = self.ring.last().map_or(0.0, |r| r.3);
+        let spacing = beads.spacing.max(beads.radius * 1.2).max(1e-3);
+        let (r, half_len) = (beads.radius, beads.radius * beads.elongation.max(0.2));
+        const LAT: usize = 8;
+        let lon = if beads.facets > 0 {
+            beads.facets.clamp(3, 24) as usize
+        } else {
+            14
+        };
+        let mut seg = 0;
+        let mut s = spacing * 0.5;
+        while s < total - half_len * 0.5 {
+            while seg + 2 < self.ring.len() && self.ring[seg + 1].3 < s {
+                seg += 1;
+            }
+            let (c0, t0, n0, a0) = self.ring[seg];
+            let (c1, t1, n1, a1) = self.ring[(seg + 1).min(self.ring.len() - 1)];
+            let f = if a1 > a0 {
+                ((s - a0) / (a1 - a0)).clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
+            let c = c0.lerp(c1, f);
+            let t = t0.lerp(t1, f).try_normalize().unwrap_or(t0);
+            let n = (n0.lerp(n1, f) - t * n0.lerp(n1, f).dot(t))
+                .try_normalize()
+                .unwrap_or_else(|| t.any_orthonormal_vector());
+            let b = t.cross(n);
+            // A surface point and its normal on the bead (an ellipsoid along the thread).
+            let point = |theta: f32, phi: f32| {
+                let dir = n * phi.cos() + b * phi.sin();
+                let p = c - t * (theta.cos() * half_len) + dir * (theta.sin() * r);
+                let normal = (dir * theta.sin() / r - t * theta.cos() / half_len)
+                    .try_normalize()
+                    .unwrap_or(dir);
+                (p, normal)
+            };
+            let vertex = |p: Vec3, normal: Vec3, uv: [f32; 2]| SoftVertex {
+                position: p.to_array(),
+                normal: normal.to_array(),
+                uv,
+                tension: [0.0; 2],
+                burn: [0.0; 2],
+                material,
+            };
+            let first = self.vertices.len() as u32;
+            if beads.facets == 0 {
+                for i in 0..=LAT {
+                    let theta = i as f32 / LAT as f32 * PI;
+                    for j in 0..=lon {
+                        let phi = j as f32 / lon as f32 * TAU;
+                        let (p, normal) = point(theta, phi);
+                        let uv = [j as f32 / lon as f32, i as f32 / LAT as f32];
+                        self.vertices.push(vertex(p, normal, uv));
+                    }
+                }
+                let stride = (lon + 1) as u32;
+                for i in 0..LAT as u32 {
+                    for j in 0..lon as u32 {
+                        let a = first + i * stride + j;
+                        self.indices.extend([
+                            a,
+                            a + stride,
+                            a + 1,
+                            a + 1,
+                            a + stride,
+                            a + stride + 1,
+                        ]);
+                    }
+                }
+            } else {
+                // Cut glass: flat facets, each with its own vertices.
+                for i in 0..LAT {
+                    let (ta, tb) = (i as f32 / LAT as f32 * PI, (i + 1) as f32 / LAT as f32 * PI);
+                    for j in 0..lon {
+                        let (pa, pb) = (
+                            j as f32 / lon as f32 * TAU,
+                            (j + 1) as f32 / lon as f32 * TAU,
+                        );
+                        let corners = [
+                            point(ta, pa).0,
+                            point(tb, pa).0,
+                            point(tb, pb).0,
+                            point(ta, pb).0,
+                        ];
+                        let normal = point((ta + tb) * 0.5, (pa + pb) * 0.5).1;
+                        let base = self.vertices.len() as u32;
+                        for (k, p) in corners.into_iter().enumerate() {
+                            self.vertices
+                                .push(vertex(p, normal, [k as f32 * 0.25, 0.5]));
+                        }
+                        self.indices
+                            .extend([base, base + 1, base + 2, base, base + 2, base + 3]);
+                    }
+                }
+            }
+            s += spacing;
         }
     }
 
@@ -555,6 +769,7 @@ struct Gpu {
     vertices: GrowBuffer,
     indices: GrowBuffer,
     materials: GrowBuffer,
+    holes: GrowBuffer,
     points: GrowBuffer,
     guides: GrowBuffer,
     grooms: GrowBuffer,
@@ -656,7 +871,7 @@ fn pipeline(gpu: &GpuShared, s: PipelineSpec) -> wgpu::RenderPipeline {
             module: s.module,
             entry_point: Some(fs),
             compilation_options: Default::default(),
-            targets: &targets,
+            targets: if s.shadow { &[] } else { &targets },
         }),
         multiview_mask: None,
         cache: None,
@@ -681,10 +896,18 @@ impl RenderFeature for SoftBodyFeature {
 
     fn init(&mut self, gpu: &GpuShared) {
         let device = &gpu.device;
-        let material_layout = storage_layout(device, "softbody materials", 1);
+        let material_layout = storage_layout(device, "softbody materials", 2);
         let strand_layout = storage_layout(device, "softbody strands", 3);
-        let surface = gpu.shader("softbody surface", SURFACE_SHADER, true);
-        let shadow = gpu.shader("softbody shadow", SHADOW_SHADER, false);
+        let surface = gpu.shader(
+            "softbody surface",
+            &format!("{SURFACE_COMMON}\n{SURFACE_SHADER}"),
+            true,
+        );
+        let shadow = gpu.shader(
+            "softbody shadow",
+            &format!("{SURFACE_COMMON}\n{SHADOW_SHADER}"),
+            false,
+        );
         let strands = gpu.shader(
             "softbody strands",
             &format!("{STRAND_COMMON}\n{STRAND_SHADER}"),
@@ -715,8 +938,8 @@ impl RenderFeature for SoftBodyFeature {
                 label: "softbody shadow",
                 module: &shadow,
                 vs: "vs_shadow",
-                fs: None,
-                layouts: &[Some(&gpu.shadow_view_layout)],
+                fs: Some("fs_shadow"),
+                layouts: &[Some(&gpu.shadow_view_layout), Some(&material_layout)],
                 vertex: true,
                 strip: false,
                 blend: false,
@@ -756,6 +979,7 @@ impl RenderFeature for SoftBodyFeature {
         let vertices = buffer("softbody vertices", wgpu::BufferUsages::VERTEX, 1 << 20);
         let indices = buffer("softbody indices", wgpu::BufferUsages::INDEX, 1 << 20);
         let materials = buffer("softbody materials", storage, 64 * 112);
+        let holes = buffer("softbody holes", storage, 4096);
         let points = buffer("softbody strand points", storage, 1 << 16);
         let guides = buffer("softbody strand guides", storage, 1 << 14);
         let grooms = buffer("softbody grooms", storage, 1 << 10);
@@ -763,7 +987,7 @@ impl RenderFeature for SoftBodyFeature {
             device,
             "softbody materials",
             &material_layout,
-            &[&materials],
+            &[&materials, &holes],
         );
         let strand_group = storage_group(
             device,
@@ -782,6 +1006,7 @@ impl RenderFeature for SoftBodyFeature {
             vertices,
             indices,
             materials,
+            holes,
             points,
             guides,
             grooms,
@@ -865,7 +1090,13 @@ impl RenderFeature for SoftBodyFeature {
 
         let geo = &mut self.geometry;
         for s in &seen {
-            let range = geo.add_body(s.body, s.base, alpha);
+            // Curved subdivision once cloth cells cover more than a few pixels.
+            let refine = s
+                .body
+                .cloth
+                .as_ref()
+                .is_some_and(|c| s.px / s.body.radius.max(0.01) * c.cell > REFINE_CELL_PX);
+            let range = geo.add_body(s.body, s.base, alpha, refine);
             if !range.is_empty() {
                 if s.in_view {
                     let list = if transparent(s) {
@@ -911,14 +1142,18 @@ impl RenderFeature for SoftBodyFeature {
             .write(device, queue, bytemuck::cast_slice(&geo.vertices));
         g.indices
             .write(device, queue, bytemuck::cast_slice(&geo.indices));
-        if g.materials
-            .write(device, queue, bytemuck::cast_slice(&geo.materials))
-        {
+        let mut grown = g
+            .materials
+            .write(device, queue, bytemuck::cast_slice(&geo.materials));
+        grown |= g
+            .holes
+            .write(device, queue, bytemuck::cast_slice(&geo.holes));
+        if grown {
             g.material_group = storage_group(
                 device,
                 "softbody materials",
                 &g.material_layout,
-                &[&g.materials],
+                &[&g.materials, &g.holes],
             );
         }
         if !geo.grooms.is_empty() {
@@ -957,6 +1192,7 @@ impl RenderFeature for SoftBodyFeature {
         let ranges = &self.draws.shadow[cascade.min(MAX_CASCADES)];
         if !ranges.is_empty() {
             pass.set_pipeline(&g.shadow);
+            pass.set_bind_group(1, &g.material_group, &[]);
             pass.set_vertex_buffer(0, g.vertices.buffer.slice(..));
             pass.set_index_buffer(g.indices.buffer.slice(..), wgpu::IndexFormat::Uint32);
             for r in ranges {
@@ -1036,8 +1272,16 @@ mod tests {
     #[test]
     fn shaders_validate() {
         let cases = [
-            ("surface", SURFACE_SHADER.to_string(), true),
-            ("shadow", SHADOW_SHADER.to_string(), false),
+            (
+                "surface",
+                format!("{SURFACE_COMMON}\n{SURFACE_SHADER}"),
+                true,
+            ),
+            (
+                "shadow",
+                format!("{SURFACE_COMMON}\n{SHADOW_SHADER}"),
+                false,
+            ),
             ("strands", format!("{STRAND_COMMON}\n{STRAND_SHADER}"), true),
             (
                 "strands shadow",
@@ -1077,7 +1321,7 @@ mod tests {
     fn cloth_vertices_follow_particles_and_report_compression() {
         let mut body = flat_cloth();
         let mut geo = Geometry::default();
-        let range = geo.add_body(&body, Vec3::ZERO, 1.0);
+        let range = geo.add_body(&body, Vec3::ZERO, 1.0, false);
         assert_eq!(geo.vertices.len(), body.sim.len());
         assert_eq!(
             range.len(),
@@ -1094,7 +1338,7 @@ mod tests {
             body.sim.step_start[i] = body.sim.pos[i];
         }
         geo.clear();
-        geo.add_body(&body, Vec3::ZERO, 1.0);
+        geo.add_body(&body, Vec3::ZERO, 1.0, false);
         for v in &geo.vertices {
             assert!((v.tension[0] + 0.3).abs() < 0.02, "{:?}", v.tension);
             assert!(v.tension[1].abs() < 0.02, "{:?}", v.tension);
@@ -1102,15 +1346,52 @@ mod tests {
     }
 
     #[test]
+    fn refined_cloth_is_closed_and_rounds_out_curves() {
+        // Roll the cloth halfway around a cylinder of radius 0.5 about +Y.
+        let mut body = flat_cloth();
+        let r = 0.5;
+        let x0 = body.sim.pos.iter().map(|p| p.x).fold(f32::MAX, f32::min);
+        for i in 0..body.sim.len() {
+            let p = body.sim.pos[i];
+            let a = (p.x - x0) / r * 0.5;
+            body.sim.pos[i] = Vec3::new(r * a.sin(), p.y, r * a.cos());
+            body.sim.step_start[i] = body.sim.pos[i];
+        }
+        let n = body.sim.len();
+        let triangles = body.surface.as_ref().unwrap().triangles.len();
+        let mut geo = Geometry::default();
+        let range = geo.add_body(&body, Vec3::ZERO, 1.0, true);
+        assert_eq!(range.len(), triangles * 4 * 3);
+        // One shared midpoint per edge: a disc has V - E + F = 1.
+        let edges = geo.vertices.len() - n;
+        assert_eq!(n + triangles - edges, 1);
+        let off_axis =
+            |v: &SoftVertex| (Vec2::new(v.position[0], v.position[2]).length() - r).abs();
+        let worst = geo.vertices[n..].iter().map(off_axis).fold(0.0, f32::max);
+        // Straight midpoints of the rolled 0.25 m cells would sag up to 1.5 cm inside.
+        assert!(worst < 0.002, "midpoints {worst} m off the cylinder");
+        assert!(
+            geo.vertices
+                .iter()
+                .all(|v| Vec3::from(v.normal).is_normalized())
+        );
+        // The same body far away draws its own triangles.
+        geo.clear();
+        let range = geo.add_body(&body, Vec3::ZERO, 1.0, false);
+        assert_eq!(range.len(), triangles * 3);
+    }
+
+    #[test]
     fn tubes_are_closed_rings_along_the_rope() {
         let mut body = flat_cloth();
         body.surface = None;
         body.tubes = vec![Tube {
+            beads: None,
             particles: (0..9).collect(),
             radius: 0.05,
         }];
         let mut geo = Geometry::default();
-        let range = geo.add_body(&body, Vec3::new(10.0, 0.0, 0.0), 1.0);
+        let range = geo.add_body(&body, Vec3::new(10.0, 0.0, 0.0), 1.0, false);
         let rings = 8 * TUBE_SUBDIV + 1;
         assert_eq!(
             geo.vertices.len(),
@@ -1128,6 +1409,44 @@ mod tests {
         let v_end = geo.vertices[(rings - 1) * (TUBE_SIDES + 1)].uv[1];
         let length = body.sim.pos[0].distance(body.sim.pos[8]);
         assert!((v_end - length).abs() < 0.01, "{v_end} vs {length}");
+    }
+
+    #[test]
+    fn beads_are_threaded_along_the_rope() {
+        let mut body = crate::rope::build_rope(
+            &crate::rope::Rope {
+                length: 1.0,
+                segments: 10,
+                beads: Some(Beads {
+                    spacing: 0.1,
+                    ..Beads::default()
+                }),
+                ..crate::rope::Rope::default()
+            },
+            Entity::PLACEHOLDER,
+            &GlobalTransform::default(),
+            |_| None,
+        )
+        .unwrap();
+        let plain = {
+            let mut geo = Geometry::default();
+            let mut b = std::mem::take(&mut body.tubes);
+            b.iter_mut().for_each(|t| t.beads = None);
+            body.tubes = b;
+            geo.add_body(&body, Vec3::ZERO, 1.0, false);
+            geo.vertices.len()
+        };
+        body.tubes = body.bridge.as_ref().unwrap().lines.tubes();
+        let mut geo = Geometry::default();
+        geo.add_body(&body, Vec3::ZERO, 1.0, false);
+        // Ten beads over a meter, each a closed ellipsoid around the thread.
+        let per_bead = 9 * 15;
+        assert_eq!(geo.vertices.len() - plain, 10 * per_bead);
+        let top = geo.vertices[plain..]
+            .iter()
+            .map(|v| v.position[1])
+            .fold(f32::MIN, f32::max);
+        assert!(top <= 0.02, "beads hang on the rope, top {top}");
     }
 
     #[test]

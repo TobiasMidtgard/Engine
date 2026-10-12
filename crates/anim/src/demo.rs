@@ -18,6 +18,7 @@
 //! background; until then, or if they haven't been fetched, generated bodies stand in.
 //! Everything else is generated from code.
 
+use std::collections::HashSet;
 use std::f32::consts::PI;
 
 use engine_assets::Assets;
@@ -262,6 +263,13 @@ pub(crate) fn register(app: &mut App) {
             };
             Ok(json!({ "id": e.to_bits() }))
         },
+    )
+    .register_api(
+        "anim.demo_restart",
+        "Start every animation paddock's test cases over (camera stops time their shots from \
+         here).",
+        "{}",
+        |world, _| Ok(json!({ "restarted": restart_demos(world).len() })),
     )
     .register_api(
         "anim.demo",
@@ -594,6 +602,132 @@ pub fn spawn_car(world: &mut World, transform: Transform, paint: [f32; 3]) -> En
 
 /// Spawn every exhibit around `origin`. Returns the main characters.
 pub fn spawn_demo_world(world: &mut World, origin: DVec3) -> DemoEntities {
+    let before: HashSet<Entity> = world.query::<Entity>().iter(world).collect();
+    let entities = build_paddock(world, origin);
+    let parts = world
+        .query::<Entity>()
+        .iter(world)
+        .filter(|e| !before.contains(e))
+        .collect();
+    world.spawn(Paddock {
+        origin,
+        entities,
+        parts,
+    });
+    entities
+}
+
+/// A spawned paddock: where it stands and everything it spawned, so it can start over.
+#[derive(Component, Debug, Clone)]
+pub struct Paddock {
+    pub origin: DVec3,
+    pub entities: DemoEntities,
+    parts: Vec<Entity>,
+}
+
+/// Despawn every paddock and spawn it again in the same place, so its test cases start from
+/// the beginning (camera stops time their shots from here, see [`VIEWS`]).
+pub fn restart_demos(world: &mut World) -> Vec<DemoEntities> {
+    let paddocks: Vec<(Entity, Paddock)> = world
+        .query::<(Entity, &Paddock)>()
+        .iter(world)
+        .map(|(e, p)| (e, p.clone()))
+        .collect();
+    paddocks
+        .into_iter()
+        .map(|(root, paddock)| {
+            for e in paddock.parts.into_iter().chain([root]) {
+                if world.get_entity(e).is_ok() {
+                    world.despawn(e);
+                }
+            }
+            spawn_demo_world(world, paddock.origin)
+        })
+        .collect()
+}
+
+/// A close-up of one test case, for camera bookmarks and screenshot tours: eye and target
+/// relative to the paddock's origin, the hour it looks best at, and when the moment comes,
+/// in seconds after `anim.demo_restart`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct DemoView {
+    pub key: &'static str,
+    pub name: &'static str,
+    pub eye: [f64; 3],
+    pub target: [f64; 3],
+    pub hour: f32,
+    pub at: f32,
+}
+
+/// One close-up per test case (framed for a 55° camera).
+pub const VIEWS: &[DemoView] = &[
+    DemoView {
+        key: "paddock_hammer",
+        name: "Sledgehammer strike: arms, shoulders and back tense",
+        eye: [-4.74, 1.59, 7.23],
+        target: [-2.6, 1.3, 5.9],
+        hour: 15.0,
+        at: 1.57,
+    },
+    DemoView {
+        key: "paddock_flex",
+        name: "Double-biceps flex",
+        eye: [0.47, 1.8, 7.19],
+        target: [0.7, 1.7, 5.6],
+        hour: 15.0,
+        at: 2.52,
+    },
+    DemoView {
+        key: "paddock_reach",
+        name: "Shirt sleeves bunching on a reach",
+        eye: [2.14, 1.77, 7.14],
+        target: [3.0, 1.6, 6.05],
+        hour: 15.0,
+        at: 1.2,
+    },
+    DemoView {
+        key: "paddock_block",
+        name: "Braced block, hammer on the shoulder",
+        eye: [-4.0, 1.75, 6.75],
+        target: [-2.65, 1.55, 5.4],
+        hour: 15.0,
+        at: 4.82,
+    },
+    DemoView {
+        key: "paddock_stairs",
+        name: "Walking down stairs, feet planted by IK",
+        eye: [-13.15, 1.51, -10.38],
+        target: [-12.6, 1.19, -8.01],
+        hour: 15.0,
+        at: 9.97,
+    },
+    DemoView {
+        key: "paddock_gallop",
+        name: "Horse at a gallop, haunches working",
+        eye: [22.87, 1.52, -2.65],
+        target: [23.33, 1.2, -6.85],
+        hour: 15.0,
+        at: 11.78,
+    },
+    DemoView {
+        key: "paddock_spider",
+        name: "Eight procedural legs over rocks",
+        eye: [10.87, 1.82, 10.48],
+        target: [7.24, 0.79, 10.16],
+        hour: 15.0,
+        at: 6.02,
+    },
+    DemoView {
+        key: "paddock_car",
+        name: "Car suspension over a speed bump",
+        eye: [0.05, 1.28, -20.59],
+        target: [3.0, 0.64, -16.82],
+        hour: 15.0,
+        at: 4.57,
+    },
+];
+
+fn build_paddock(world: &mut World, origin: DVec3) -> DemoEntities {
     let at = |x: f64, y: f64, z: f64| origin + DVec3::new(x, y, z);
     let facing = |yaw_deg: f32| Quat::from_rotation_y(yaw_deg.to_radians());
     let wood = StandardMaterial::hex(0x8a6a48).with_roughness(0.8);

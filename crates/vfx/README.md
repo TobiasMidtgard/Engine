@@ -38,6 +38,11 @@ how they look (`sprite`: glow, spark, smoke, flame, droplet, ring, star, rune, s
 `light` with flicker and fade, a `trail`, and `prewarm` so loops look settled from the first
 frame.
 
+Effects are authored for flat ground in sea-level air and adapt to where they play: gravity
+comes from `Env::gravity`, buoyancy (`acceleration`) turns to the local up on a planet, and
+buoyancy, `drag` and `turbulence` scale with the air's density from `Env::air`. Smoke barely
+rises on Mars, and dust kicked up on the Moon flies in clean ballistic arcs.
+
 ## Built-in effects
 
 | Family | Effects |

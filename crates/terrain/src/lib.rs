@@ -480,7 +480,7 @@ impl Plugin for TerrainPlugin {
             .add_systems(PostUpdate, follow_world_shift.in_set(WorldShiftSet::Apply))
             .add_systems(
                 FixedUpdate,
-                (demo::walk, deform_from_contacts)
+                (demo::walk, demo::swing_limbs, deform_from_contacts)
                     .chain()
                     .in_set(SimSet::Environment),
             )

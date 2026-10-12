@@ -83,7 +83,9 @@ pub const VIEWS: &[DemoView] = &[
         target: [-4.0, 2.5, 9.0],
         hour: 16.0,
         station: Some(Station::Seesaw),
-        warmup_secs: 2.0,
+        // The ball lands at 1.25 s and throws the crate 13 m up; the tour's capture (warm-up
+        // plus 0.4 s of exposure settling) catches it about 5 m up, still in frame.
+        warmup_secs: 1.1,
     },
     DemoView {
         key: "physics_pile",

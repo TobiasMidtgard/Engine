@@ -11,12 +11,14 @@ use serde_json::json;
 
 use super::GroundEffectSettings;
 use super::clouds::fullscreen_pipeline;
-use crate::surface::GroundWeather;
+use crate::surface::{GroundCache, GroundWeather};
 
 /// Snow depth stored as 1.0 in the cover texture, m.
 const SNOW_SCALE_M: f32 = 0.3;
 /// Seconds between cover uploads (the ground changes a few times per second at most).
 const UPLOAD_INTERVAL_S: f32 = 0.25;
+/// Ground height for a cell the ground cache hasn't sampled yet (no height test there).
+const UNKNOWN_HEIGHT: f32 = 1.0e30;
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable, Default)]
@@ -31,6 +33,10 @@ struct Gpu {
     cover: wgpu::Texture,
     cover_view: wgpu::TextureView,
     cover_size: (u32, u32),
+    /// Ground height per cell, meters above `height_ref` (puddles lie on the ground, not on
+    /// grass blades or tabletops).
+    heights: wgpu::Texture,
+    heights_view: wgpu::TextureView,
     layout: wgpu::BindGroupLayout,
     pipeline: wgpu::RenderPipeline,
 }
@@ -42,13 +48,33 @@ pub struct GroundFeature {
     group: Option<wgpu::BindGroup>,
     active: bool,
     bytes: Vec<u8>,
+    height_bytes: Vec<u8>,
+    /// World height the uploaded ground heights are relative to.
+    height_ref: f64,
+    heights_known: bool,
     since_upload: f32,
     time: f64,
 }
 
 fn cover_texture(device: &wgpu::Device, w: u32, h: u32) -> (wgpu::Texture, wgpu::TextureView) {
+    grid_texture(
+        device,
+        "ground cover",
+        wgpu::TextureFormat::Rgba8Unorm,
+        w,
+        h,
+    )
+}
+
+fn grid_texture(
+    device: &wgpu::Device,
+    label: &str,
+    format: wgpu::TextureFormat,
+    w: u32,
+    h: u32,
+) -> (wgpu::Texture, wgpu::TextureView) {
     let texture = device.create_texture(&wgpu::TextureDescriptor {
-        label: Some("ground cover"),
+        label: Some(label),
         size: wgpu::Extent3d {
             width: w,
             height: h,
@@ -57,7 +83,7 @@ fn cover_texture(device: &wgpu::Device, w: u32, h: u32) -> (wgpu::Texture, wgpu:
         mip_level_count: 1,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
-        format: wgpu::TextureFormat::Rgba8Unorm,
+        format,
         usage: wgpu::TextureUsages::COPY_DST | wgpu::TextureUsages::TEXTURE_BINDING,
         view_formats: &[],
     });
@@ -114,6 +140,7 @@ impl RenderFeature for GroundFeature {
                 tex(1, float),
                 tex(2, float),
                 tex(3, wgpu::TextureSampleType::Depth),
+                tex(4, wgpu::TextureSampleType::Float { filterable: false }),
             ],
         });
         let shader = gpu.shader("ground fx", include_str!("../shaders/ground.wgsl"), true);
@@ -137,11 +164,20 @@ impl RenderFeature for GroundFeature {
             Some(super::depth_always(gpu)),
         );
         let (cover, cover_view) = cover_texture(device, 1, 1);
+        let (heights, heights_view) = grid_texture(
+            device,
+            "ground heights",
+            wgpu::TextureFormat::R32Float,
+            1,
+            1,
+        );
         self.gpu = Some(Gpu {
             uniform,
             cover,
             cover_view,
             cover_size: (1, 1),
+            heights,
+            heights_view,
             layout,
             pipeline,
         });
@@ -198,8 +234,51 @@ impl RenderFeature for GroundFeature {
                     let (t, v) = cover_texture(&gpu.device, size.0, size.1);
                     g.cover = t;
                     g.cover_view = v;
+                    let (t, v) = grid_texture(
+                        &gpu.device,
+                        "ground heights",
+                        wgpu::TextureFormat::R32Float,
+                        size.0,
+                        size.1,
+                    );
+                    g.heights = t;
+                    g.heights_view = v;
                     g.cover_size = size;
                 }
+                // Ground heights from the weather's ground cache, laid out like the cover.
+                self.height_ref = view.origin.y.round();
+                self.height_bytes.clear();
+                let cache = world
+                    .get_resource::<GroundCache>()
+                    .filter(|c| c.cells.origin == grid.origin && c.cells.len() == grid.data.len());
+                self.heights_known = cache.is_some();
+                for i in 0..grid.data.len() {
+                    let h = cache
+                        .map(|c| c.cells.data[i])
+                        .filter(|c| c.known)
+                        .map(|c| (c.height as f64 - self.height_ref) as f32)
+                        .unwrap_or(UNKNOWN_HEIGHT);
+                    self.height_bytes.extend_from_slice(&h.to_le_bytes());
+                }
+                gpu.queue.write_texture(
+                    wgpu::TexelCopyTextureInfo {
+                        texture: &g.heights,
+                        mip_level: 0,
+                        origin: wgpu::Origin3d::ZERO,
+                        aspect: wgpu::TextureAspect::All,
+                    },
+                    &self.height_bytes,
+                    wgpu::TexelCopyBufferLayout {
+                        offset: 0,
+                        bytes_per_row: Some(size.0 * 4),
+                        rows_per_image: Some(size.1),
+                    },
+                    wgpu::Extent3d {
+                        width: size.0,
+                        height: size.1,
+                        depth_or_array_layers: 1,
+                    },
+                );
                 gpu.queue.write_texture(
                     wgpu::TexelCopyTextureInfo {
                         texture: &g.cover,
@@ -251,8 +330,8 @@ impl RenderFeature for GroundFeature {
             params: [
                 settings.reflection_steps.min(96) as f32,
                 SNOW_SCALE_M,
-                0.0,
-                0.0,
+                (self.height_ref - view.origin.y) as f32,
+                if self.heights_known { 1.0 } else { 0.0 },
             ],
         };
         gpu.queue
@@ -287,6 +366,10 @@ impl RenderFeature for GroundFeature {
                         wgpu::BindGroupEntry {
                             binding: 3,
                             resource: wgpu::BindingResource::TextureView(ctx.scene_depth_copy),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 4,
+                            resource: wgpu::BindingResource::TextureView(&g.heights_view),
                         },
                     ],
                 }),
