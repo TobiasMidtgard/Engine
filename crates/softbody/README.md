@@ -14,6 +14,7 @@ Rigid bodies live in `engine_physics`; this crate simulates everything that bend
 - **Soft bodies:** volumetric bodies (tetrahedral or shape-matching): jelly, slimes, creature flesh/bellies, soft tires and cushions, foliage that bends under weight. Plasticity for dents that stay.
 - Two-way coupling: soft bodies push rigid bodies and vice versa, through `engine_physics` collider queries and impulse application.
 - LOD and sleeping: full simulation near `SimulationFocus`, simplified or frozen far away; skinned fallback when off-screen.
+- Cloth writes per-vertex tension (stretch vs compression from the solver) so the material shows wrinkles where fabric bunches and smooths where it pulls tight, at no extra simulation cost.
 - Hair, fur and grass share the renderer's strand pipeline (`engine_render` strands: GPU-expanded camera-facing strands from guide curves, hair shading with two specular lobes, LOD from strands to cards to shells). `engine_foliage` uses the same pipeline for grass, with wind sway instead of full dynamics.
 - Renders deformed meshes through a `RenderFeature` (dynamic vertex buffers, normals recomputed) using `shade_surface`, with `subsurface` for flesh and thin translucent cloth.
 - Runs in `FixedUpdate` / `SimSet::Physics` (after rigid bodies), honors `TimeDilation` and `LocalTimeScale`.

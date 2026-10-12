@@ -69,7 +69,7 @@ by the core owner, on request.
 | `engine_smoke` | Smoke/gas volumes that react to wind, bullets and explosions; volumetric clouds and fog | World simulation |
 | `engine_vfx` | GPU particles (spells, splashes, sparks, debris), trails, decals | VFX (proposed) |
 | `engine_foliage` | Procedural plants, growth from water/sun/soil/minerals, chopping and regrowth, glowing cave mushrooms | Foliage & ecology |
-| `engine_anim` | Skeletons, clips, blend trees, IK, procedural animation for humanoids, animals, vehicles; GPU skinning feature | Animation |
+| `engine_anim` | Skeletons, clips, blend trees, IK, procedural animation for humanoids, animals, vehicles; muscle flex and jiggle; GPU skinning feature | Animation |
 | `engine_npc` | Perception, tactics, cover/terrain use, spacing, blocking, skill/reaction/logic parameters | NPC AI |
 | `engine_ui` | Game UI: dialogue, shop, inventory, maps (flat, 3D globe, galaxy), HUD | UI |
 | `engine_destruction` | Fracture, breakable walls (siege-style), voxel edits through the terrain API | Destruction |
@@ -125,7 +125,10 @@ Writes: `HeatField`, `WorldImpulse`, `IgniteRequest`, `DamageEvent`, `NoiseEvent
 
 Shared pipelines the core provides for modules (planned): **strands** for hair, fur and grass
 (guide curves in, GPU-expanded strands with hair shading and LOD out; `engine_softbody` drives
-hair/fur, `engine_foliage` drives grass) and the **sky occlusion map** (`sky_visibility`).
+hair/fur, `engine_foliage` drives grass), **tension-driven wrinkle maps** in `StandardMaterial`
+(a per-vertex tension value blends wrinkle/vein normal maps; written by `engine_anim` for skin,
+muscles and skinned clothes and by `engine_softbody` for simulated cloth) and the **sky
+occlusion map** (`sky_visibility`).
 
 Shader library: `lib_types.wgsl` (types, noise, BRDF) and `lib_frame.wgsl` (group 0 frame
 data, `shade_surface`, `shadow_factor`, `apply_fog`, atmosphere, `wind_offset`).

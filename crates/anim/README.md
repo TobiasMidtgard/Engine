@@ -10,6 +10,8 @@ Background research: `game-engine-research/animation.md` in the project files.
 - IK: two-bone, FABRIK/CCD, foot placement on `Ground`, look-at, hand IK for weapons.
 - Procedural animation: spider/creature legs, tails and spines (spring chains), animals (quadruped gaits), vehicles (suspension, landing gear).
 - Ragdolls and physical animation with `engine_physics`.
+- **Muscles:** per-muscle activation computed from what the body is doing (joint angles plus effort: lifting, punching, sprinting, bracing for a block), driving corrective blend shapes (biceps bulge, forearm flex, neck tendons, calves on push-off) and tension maps that fade in veins/striations. Relaxed muscle and fat get secondary jiggle (spring-driven, cheap). Optional later: an ML deformer trained offline on a full muscle simulation for hero characters. Blend shapes run in the skinning compute pass; full detail only near the camera.
+- Skinned clothing that isn't simulated still wrinkles: the skinning pass compares edge lengths to the rest pose and writes a per-vertex tension value for the material's wrinkle maps.
 - Respects `TimeDilation` and `LocalTimeScale`; footstep events become `GroundContact`.
 
 ## Contracts
@@ -23,6 +25,7 @@ Cross-module interaction goes through `engine_world` (see AGENTS.md). If a contr
 ## Done when
 
 - A humanoid walks/runs/turns with foot IK on slopes; a quadruped and a procedural creature move believably.
+- Arms visibly tense on a heavy swing or a block and relax after; a horse's flank muscles flex at a gallop; a shirt bunches at the elbow and stretches across the back on a reach.
 
 ## Checklist
 
