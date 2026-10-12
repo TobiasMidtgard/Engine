@@ -8,7 +8,9 @@
 @group(0) @binding(2) var shadow_map: texture_depth_2d_array;
 @group(0) @binding(3) var shadow_sampler: sampler_comparison;
 @group(0) @binding(4) var linear_clamp: sampler;
-@group(0) @binding(5) var env_map: texture_2d<f32>;   // equirect sky radiance (cd/m^2, not pre-exposed)
+// Equirect sky radiance (cd/m^2, not pre-exposed) prefiltered for reflections: mip 0 is the sharp
+// sky, the last mip what a fully rough surface reflects (`sample_env`, `sample_env_rough`).
+@group(0) @binding(5) var env_map: texture_2d<f32>;
 @group(0) @binding(6) var linear_repeat: sampler;
 @group(0) @binding(7) var sky_occlusion_map: texture_depth_2d; // top-down depth of the highest surface (0 = top)
 @group(0) @binding(8) var sky_occlusion_sampler: sampler;      // nearest, for textureGather on the map
@@ -22,6 +24,9 @@
 @group(0) @binding(13) var transmittance_lut: texture_2d<f32>; // sunlight transmittance to the top of the atmosphere
 @group(0) @binding(14) var multiscatter_lut: texture_2d<f32>;  // light from all higher orders of scattering
 @group(0) @binding(15) var sky_view_lut: texture_2d<f32>;      // the sky seen from the camera (this frame)
+// Sky light for diffuse surfaces: cosine-weighted sky radiance around each normal (equirect).
+@group(0) @binding(16) var env_irradiance: texture_2d<f32>;
+@group(0) @binding(17) var env_sampler: sampler; // equirect maps: wraps around, clamps at the poles
 
 // Multiply final radiance by this before writing to the HDR target.
 fn pre_expose(c: vec3<f32>) -> vec3<f32> { return c * frame.exposure.x; }
@@ -291,25 +296,31 @@ fn contact_shadow(rel: vec3<f32>, n: vec3<f32>) -> f32 {
 // (`atmosphere`, `sun_transmittance`, `sky_view_radiance`, `planet_height`, `ray_shell`).
 
 // ---------------------------------------------------------------- environment lighting
+// The sky (and, without a planet, the ground below the horizon) as seen from the camera,
+// redrawn and filtered every `environment_interval` frames (environment.rs).
 fn sample_env(dir: vec3<f32>) -> vec3<f32> {
-    return textureSampleLevel(env_map, linear_repeat, dir_to_equirect(dir), 0.0).rgb;
+    return textureSampleLevel(env_map, env_sampler, dir_to_equirect(dir), 0.0).rgb;
 }
 
-// Light bounced off the ground below (cd/m^2): sky from above plus sun, times ground albedo.
-// Fades out high above the planet (frame.ground.w).
+// The sky reflected toward `dir` by a surface of perceptual `roughness`: GGX-prefiltered, so
+// rough surfaces reflect a blurred sky.
+fn sample_env_rough(dir: vec3<f32>, roughness: f32) -> vec3<f32> {
+    let lod = saturate(roughness) * f32(textureNumLevels(env_map) - 1u);
+    return textureSampleLevel(env_map, env_sampler, dir_to_equirect(dir), lod).rgb;
+}
+
+// Light bounced off the ground below (cd/m^2): sky irradiance from above plus sun, times the
+// ground albedo. Fades out high above the planet (frame.ground.w).
 fn ground_radiance() -> vec3<f32> {
-    let sky_up = sample_env(vec3<f32>(0.0, 1.0, 0.0));
+    let sky = textureSampleLevel(env_irradiance, env_sampler, vec2<f32>(0.5, 0.0), 0.0).rgb;
     let sun = frame.sun_camera.rgb * saturate(frame.sun_dir.y) * INV_PI;
-    return frame.ground.rgb * frame.ground.w * (sky_up + sun);
+    return frame.ground.rgb * frame.ground.w * (sky + sun);
 }
 
-// Approximate cosine-weighted sky radiance (cd/m^2) around normal `n`, plus ambient fill.
+// Cosine-weighted sky radiance (cd/m^2) around normal `n`, plus ambient fill: diffuse sky light
+// is `sky_ambient(n) * albedo`.
 fn sky_ambient(n: vec3<f32>) -> vec3<f32> {
-    let up = sample_env(normalize(n + vec3(0.0, 0.6, 0.0)));
-    let side = sample_env(normalize(vec3(n.x, 0.15, n.z) + vec3(0.0001)));
-    let sky = mix(side, up, 0.6);
-    let w = saturate(n.y * 0.5 + 0.5);
-    return mix(ground_radiance(), sky, w) + frame.ambient.rgb;
+    return textureSampleLevel(env_irradiance, env_sampler, dir_to_equirect(n), 0.0).rgb + frame.ambient.rgb;
 }
 
 // Fraction of the open sky seen from camera-relative `rel` with normal `n`: 1 outdoors, toward 0
@@ -504,8 +515,11 @@ fn shade_surface(s: Surface, rel: vec3<f32>) -> vec3<f32> {
     let sky_vis = sky_visibility(rel, n);
     let fill = frame.ambient.rgb;
     let irradiance = ((sky_ambient(n) - fill) * sky_vis + fill) * PI;
+    // Rough surfaces reflect around a direction between the mirror direction and the normal
+    // (Lagarde and de Rousiers 2014).
     let r = reflect(-v, n);
-    let spec_env = (mix(sample_env(r), sky_ambient(r), saturate(roughness * 1.5)) - fill) * sky_vis + fill;
+    let dominant = normalize(mix(n, r, (1.0 - roughness) * (sqrt(1.0 - roughness) + roughness)));
+    let spec_env = sample_env_rough(dominant, s.roughness) * sky_vis + fill;
     let env_brdf = env_brdf_approx(f0, s.roughness, n_dot_v);
     let visibility = min(s.occlusion, screen_ao(rel));
     color += diffuse_color * irradiance * INV_PI * ao_multibounce(visibility, diffuse_color);

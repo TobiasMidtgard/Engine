@@ -134,9 +134,15 @@ fn vs_env(@builtin(vertex_index) i: u32) -> FullscreenOut {
     return fullscreen_vertex(i, 0.5);
 }
 
-// Environment map: not pre-exposed, no sun disc (lit analytically).
+// Environment map: not pre-exposed, no sun disc (lit analytically). Without a planet the
+// ground below the horizon is a plane lit by the sky and sun, so reflections and diffuse light
+// from below aren't black.
 @fragment
 fn fs_env(in: FullscreenOut) -> @location(0) vec4<f32> {
     let dir = equirect_to_dir(in.uv);
-    return vec4<f32>(min(sky_radiance(dir, false), vec3(60000.0)), 1.0);
+    var c = sky_radiance(dir, false);
+    if (frame.planet.w <= 0.0) {
+        c = mix(c, ground_radiance(), smoothstep(0.0, -0.05, dir.y));
+    }
+    return vec4<f32>(min(c, vec3(60000.0)), 1.0);
 }

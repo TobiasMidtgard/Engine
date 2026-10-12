@@ -7,8 +7,9 @@
 //!   100 000 km away both render without jitter or z-fighting.
 //! - **Physical units**: sunlight in lux, lamps in lumens, auto-exposure in EV100, filmic
 //!   tonemapping (AgX) and bloom. Day, dusk, night and caves all look right with one setup.
-//! - **Atmosphere**: single-scattering sky that works from the ground and from orbit, aerial
-//!   perspective, height fog, a cloud layer, stars; an environment map lights every surface.
+//! - **Atmosphere**: multiple-scattering sky that works from the ground and from orbit, aerial
+//!   perspective, height fog, a cloud layer, stars; the sky lights every surface (prefiltered
+//!   for rough reflections, convolved for diffuse light).
 //! - **Cascaded sun shadows** (4 × 2048², texel-snapped), point lights, wind sway, wetness
 //!   and snow on surfaces driven by `engine_world` weather. Alpha-masked materials (leaves,
 //!   fences) cut out their shadows too.
@@ -45,6 +46,7 @@
 mod atmosphere;
 pub mod components;
 pub mod effects;
+mod environment;
 pub mod exposure;
 pub mod features;
 pub mod frame;
@@ -330,7 +332,7 @@ mod tests {
     /// Every shader must compile against the shader library (no GPU needed).
     #[test]
     fn shaders_validate() {
-        let shaders: [(&str, &str, bool); 11] = [
+        let shaders: [(&str, &str, bool); 12] = [
             ("mesh", include_str!("shaders/mesh.wgsl"), true),
             (
                 "mesh_shadow",
@@ -350,6 +352,11 @@ mod tests {
                 true,
             ),
             ("sky_camera", include_str!("shaders/sky_camera.wgsl"), true),
+            (
+                "environment_filter",
+                include_str!("shaders/environment_filter.wgsl"),
+                false,
+            ),
         ];
         let mut errors = Vec::new();
         for (name, src, frame) in shaders {
