@@ -72,10 +72,10 @@ pub const VIEWS: &[DemoView] = &[
     DemoView {
         key: "magic_marks",
         name: "Scorch and frost marks on the target wall",
-        eye: [4.2, 2.1, -0.6],
-        target: [9.0, 1.4, -3.5],
-        hour: 17.6,
-        warmup: 6.0,
+        eye: [5.4, 1.9, -0.9],
+        target: [9.0, 1.5, -3.4],
+        hour: 18.1,
+        warmup: 7.4,
     },
     DemoView {
         key: "magic_impacts",
