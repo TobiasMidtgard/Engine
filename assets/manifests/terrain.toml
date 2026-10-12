@@ -1,0 +1,293 @@
+# Owner: Planets and terrain. Scanned ground materials for engine_terrain (crates/terrain).
+# Format and rules: AGENTS.md, "Art and large files". Fetch with `cargo run -p fetch-assets -- terrain`.
+# The terrain bakes its procedural materials when these are missing.
+
+# Grass with fallen leaves, seen from above (terrain grass).
+[[file]]
+path = "terrain/leafy_grass/leafy_grass_diff_2k.jpg"
+url = "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/leafy_grass/leafy_grass_diff_2k.jpg"
+sha256 = ""
+license = "CC0-1.0"
+source = "https://polyhaven.com/a/leafy_grass"
+
+[[file]]
+path = "terrain/leafy_grass/leafy_grass_nor_gl_2k.jpg"
+url = "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/leafy_grass/leafy_grass_nor_gl_2k.jpg"
+sha256 = ""
+license = "CC0-1.0"
+source = "https://polyhaven.com/a/leafy_grass"
+
+[[file]]
+path = "terrain/leafy_grass/leafy_grass_arm_2k.jpg"
+url = "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/leafy_grass/leafy_grass_arm_2k.jpg"
+sha256 = ""
+license = "CC0-1.0"
+source = "https://polyhaven.com/a/leafy_grass"
+
+[[file]]
+path = "terrain/leafy_grass/leafy_grass_disp_2k.jpg"
+url = "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/leafy_grass/leafy_grass_disp_2k.jpg"
+sha256 = ""
+license = "CC0-1.0"
+source = "https://polyhaven.com/a/leafy_grass"
+
+# Thin grass over soil (terrain grass variant).
+[[file]]
+path = "terrain/sparse_grass/sparse_grass_diff_2k.jpg"
+url = "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/sparse_grass/sparse_grass_diff_2k.jpg"
+sha256 = ""
+license = "CC0-1.0"
+source = "https://polyhaven.com/a/sparse_grass"
+
+[[file]]
+path = "terrain/sparse_grass/sparse_grass_nor_gl_2k.jpg"
+url = "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/sparse_grass/sparse_grass_nor_gl_2k.jpg"
+sha256 = ""
+license = "CC0-1.0"
+source = "https://polyhaven.com/a/sparse_grass"
+
+[[file]]
+path = "terrain/sparse_grass/sparse_grass_arm_2k.jpg"
+url = "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/sparse_grass/sparse_grass_arm_2k.jpg"
+sha256 = ""
+license = "CC0-1.0"
+source = "https://polyhaven.com/a/sparse_grass"
+
+[[file]]
+path = "terrain/sparse_grass/sparse_grass_disp_2k.jpg"
+url = "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/sparse_grass/sparse_grass_disp_2k.jpg"
+sha256 = ""
+license = "CC0-1.0"
+source = "https://polyhaven.com/a/sparse_grass"
+
+# Forest floor: leaves, needles, twigs (terrain forest floor).
+[[file]]
+path = "terrain/forrest_ground_01/forrest_ground_01_diff_2k.jpg"
+url = "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/forrest_ground_01/forrest_ground_01_diff_2k.jpg"
+sha256 = ""
+license = "CC0-1.0"
+source = "https://polyhaven.com/a/forrest_ground_01"
+
+[[file]]
+path = "terrain/forrest_ground_01/forrest_ground_01_nor_gl_2k.jpg"
+url = "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/forrest_ground_01/forrest_ground_01_nor_gl_2k.jpg"
+sha256 = ""
+license = "CC0-1.0"
+source = "https://polyhaven.com/a/forrest_ground_01"
+
+[[file]]
+path = "terrain/forrest_ground_01/forrest_ground_01_arm_2k.jpg"
+url = "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/forrest_ground_01/forrest_ground_01_arm_2k.jpg"
+sha256 = ""
+license = "CC0-1.0"
+source = "https://polyhaven.com/a/forrest_ground_01"
+
+[[file]]
+path = "terrain/forrest_ground_01/forrest_ground_01_disp_2k.jpg"
+url = "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/forrest_ground_01/forrest_ground_01_disp_2k.jpg"
+sha256 = ""
+license = "CC0-1.0"
+source = "https://polyhaven.com/a/forrest_ground_01"
+
+# Dry bare earth (terrain soil).
+[[file]]
+path = "terrain/dry_ground_01/dry_ground_01_diff_2k.jpg"
+url = "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/dry_ground_01/dry_ground_01_diff_2k.jpg"
+sha256 = ""
+license = "CC0-1.0"
+source = "https://polyhaven.com/a/dry_ground_01"
+
+[[file]]
+path = "terrain/dry_ground_01/dry_ground_01_nor_gl_2k.jpg"
+url = "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/dry_ground_01/dry_ground_01_nor_gl_2k.jpg"
+sha256 = ""
+license = "CC0-1.0"
+source = "https://polyhaven.com/a/dry_ground_01"
+
+[[file]]
+path = "terrain/dry_ground_01/dry_ground_01_arm_2k.jpg"
+url = "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/dry_ground_01/dry_ground_01_arm_2k.jpg"
+sha256 = ""
+license = "CC0-1.0"
+source = "https://polyhaven.com/a/dry_ground_01"
+
+[[file]]
+path = "terrain/dry_ground_01/dry_ground_01_disp_2k.jpg"
+url = "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/dry_ground_01/dry_ground_01_disp_2k.jpg"
+sha256 = ""
+license = "CC0-1.0"
+source = "https://polyhaven.com/a/dry_ground_01"
+
+# Wet churned mud (terrain mud).
+[[file]]
+path = "terrain/brown_mud_02/brown_mud_02_diff_2k.jpg"
+url = "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/brown_mud_02/brown_mud_02_diff_2k.jpg"
+sha256 = ""
+license = "CC0-1.0"
+source = "https://polyhaven.com/a/brown_mud_02"
+
+[[file]]
+path = "terrain/brown_mud_02/brown_mud_02_nor_gl_2k.jpg"
+url = "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/brown_mud_02/brown_mud_02_nor_gl_2k.jpg"
+sha256 = ""
+license = "CC0-1.0"
+source = "https://polyhaven.com/a/brown_mud_02"
+
+[[file]]
+path = "terrain/brown_mud_02/brown_mud_02_arm_2k.jpg"
+url = "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/brown_mud_02/brown_mud_02_arm_2k.jpg"
+sha256 = ""
+license = "CC0-1.0"
+source = "https://polyhaven.com/a/brown_mud_02"
+
+[[file]]
+path = "terrain/brown_mud_02/brown_mud_02_disp_2k.jpg"
+url = "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/brown_mud_02/brown_mud_02_disp_2k.jpg"
+sha256 = ""
+license = "CC0-1.0"
+source = "https://polyhaven.com/a/brown_mud_02"
+
+# Cliff rock face (terrain rock, close range).
+[[file]]
+path = "terrain/rock_face/rock_face_diff_2k.jpg"
+url = "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/rock_face/rock_face_diff_2k.jpg"
+sha256 = ""
+license = "CC0-1.0"
+source = "https://polyhaven.com/a/rock_face"
+
+[[file]]
+path = "terrain/rock_face/rock_face_nor_gl_2k.jpg"
+url = "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/rock_face/rock_face_nor_gl_2k.jpg"
+sha256 = ""
+license = "CC0-1.0"
+source = "https://polyhaven.com/a/rock_face"
+
+[[file]]
+path = "terrain/rock_face/rock_face_arm_2k.jpg"
+url = "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/rock_face/rock_face_arm_2k.jpg"
+sha256 = ""
+license = "CC0-1.0"
+source = "https://polyhaven.com/a/rock_face"
+
+[[file]]
+path = "terrain/rock_face/rock_face_disp_2k.jpg"
+url = "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/rock_face/rock_face_disp_2k.jpg"
+sha256 = ""
+license = "CC0-1.0"
+source = "https://polyhaven.com/a/rock_face"
+
+# Rocky ground with stones (terrain rock and scree).
+[[file]]
+path = "terrain/rocky_terrain_02/rocky_terrain_02_diff_2k.jpg"
+url = "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/rocky_terrain_02/rocky_terrain_02_diff_2k.jpg"
+sha256 = ""
+license = "CC0-1.0"
+source = "https://polyhaven.com/a/rocky_terrain_02"
+
+[[file]]
+path = "terrain/rocky_terrain_02/rocky_terrain_02_nor_gl_2k.jpg"
+url = "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/rocky_terrain_02/rocky_terrain_02_nor_gl_2k.jpg"
+sha256 = ""
+license = "CC0-1.0"
+source = "https://polyhaven.com/a/rocky_terrain_02"
+
+[[file]]
+path = "terrain/rocky_terrain_02/rocky_terrain_02_arm_2k.jpg"
+url = "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/rocky_terrain_02/rocky_terrain_02_arm_2k.jpg"
+sha256 = ""
+license = "CC0-1.0"
+source = "https://polyhaven.com/a/rocky_terrain_02"
+
+[[file]]
+path = "terrain/rocky_terrain_02/rocky_terrain_02_disp_2k.jpg"
+url = "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/rocky_terrain_02/rocky_terrain_02_disp_2k.jpg"
+sha256 = ""
+license = "CC0-1.0"
+source = "https://polyhaven.com/a/rocky_terrain_02"
+
+# Fresh snow (terrain snow).
+[[file]]
+path = "terrain/snow_02/snow_02_diff_2k.jpg"
+url = "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/snow_02/snow_02_diff_2k.jpg"
+sha256 = ""
+license = "CC0-1.0"
+source = "https://polyhaven.com/a/snow_02"
+
+[[file]]
+path = "terrain/snow_02/snow_02_nor_gl_2k.jpg"
+url = "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/snow_02/snow_02_nor_gl_2k.jpg"
+sha256 = ""
+license = "CC0-1.0"
+source = "https://polyhaven.com/a/snow_02"
+
+[[file]]
+path = "terrain/snow_02/snow_02_arm_2k.jpg"
+url = "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/snow_02/snow_02_arm_2k.jpg"
+sha256 = ""
+license = "CC0-1.0"
+source = "https://polyhaven.com/a/snow_02"
+
+[[file]]
+path = "terrain/snow_02/snow_02_disp_2k.jpg"
+url = "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/snow_02/snow_02_disp_2k.jpg"
+sha256 = ""
+license = "CC0-1.0"
+source = "https://polyhaven.com/a/snow_02"
+
+# Beach sand from above (terrain sand).
+[[file]]
+path = "terrain/aerial_beach_01/aerial_beach_01_diff_2k.jpg"
+url = "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/aerial_beach_01/aerial_beach_01_diff_2k.jpg"
+sha256 = ""
+license = "CC0-1.0"
+source = "https://polyhaven.com/a/aerial_beach_01"
+
+[[file]]
+path = "terrain/aerial_beach_01/aerial_beach_01_nor_gl_2k.jpg"
+url = "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/aerial_beach_01/aerial_beach_01_nor_gl_2k.jpg"
+sha256 = ""
+license = "CC0-1.0"
+source = "https://polyhaven.com/a/aerial_beach_01"
+
+[[file]]
+path = "terrain/aerial_beach_01/aerial_beach_01_arm_2k.jpg"
+url = "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/aerial_beach_01/aerial_beach_01_arm_2k.jpg"
+sha256 = ""
+license = "CC0-1.0"
+source = "https://polyhaven.com/a/aerial_beach_01"
+
+[[file]]
+path = "terrain/aerial_beach_01/aerial_beach_01_disp_2k.jpg"
+url = "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/aerial_beach_01/aerial_beach_01_disp_2k.jpg"
+sha256 = ""
+license = "CC0-1.0"
+source = "https://polyhaven.com/a/aerial_beach_01"
+
+# Gravel (terrain gravel and scree).
+[[file]]
+path = "terrain/gravel_floor_02/gravel_floor_02_diff_2k.jpg"
+url = "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/gravel_floor_02/gravel_floor_02_diff_2k.jpg"
+sha256 = ""
+license = "CC0-1.0"
+source = "https://polyhaven.com/a/gravel_floor_02"
+
+[[file]]
+path = "terrain/gravel_floor_02/gravel_floor_02_nor_gl_2k.jpg"
+url = "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/gravel_floor_02/gravel_floor_02_nor_gl_2k.jpg"
+sha256 = ""
+license = "CC0-1.0"
+source = "https://polyhaven.com/a/gravel_floor_02"
+
+[[file]]
+path = "terrain/gravel_floor_02/gravel_floor_02_arm_2k.jpg"
+url = "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/gravel_floor_02/gravel_floor_02_arm_2k.jpg"
+sha256 = ""
+license = "CC0-1.0"
+source = "https://polyhaven.com/a/gravel_floor_02"
+
+[[file]]
+path = "terrain/gravel_floor_02/gravel_floor_02_disp_2k.jpg"
+url = "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/gravel_floor_02/gravel_floor_02_disp_2k.jpg"
+sha256 = ""
+license = "CC0-1.0"
+source = "https://polyhaven.com/a/gravel_floor_02"
