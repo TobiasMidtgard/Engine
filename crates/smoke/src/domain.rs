@@ -439,23 +439,7 @@ impl Domain {
 
     /// The part of segment a–b inside the box, as parameters 0..1.
     pub fn clip(&self, a: DVec3, b: DVec3) -> Option<(f64, f64)> {
-        let lo = self.origin;
-        let hi = self.origin + self.size();
-        let d = b - a;
-        let (mut t0, mut t1) = (0.0f64, 1.0f64);
-        for k in 0..3 {
-            if d[k].abs() < 1e-12 {
-                if a[k] < lo[k] || a[k] > hi[k] {
-                    return None;
-                }
-                continue;
-            }
-            let ta = (lo[k] - a[k]) / d[k];
-            let tb = (hi[k] - a[k]) / d[k];
-            t0 = t0.max(ta.min(tb));
-            t1 = t1.min(ta.max(tb));
-        }
-        (t0 < t1).then_some((t0, t1))
+        clip_box(self.origin, self.origin + self.size(), a, b)
     }
 
     /// Whether there's anything to simulate.
@@ -1067,6 +1051,25 @@ fn wind_at(wind: &[Vec3], wd: UVec3, q: Vec3) -> Vec3 {
 
 /// Trilinear sample of voxel data at continuous coordinates (centers at i + 0.5). Points
 /// outside the box blend toward `outside(q)`.
+/// The part of segment a–b inside the box lo–hi, as parameters 0..1.
+pub(crate) fn clip_box(lo: DVec3, hi: DVec3, a: DVec3, b: DVec3) -> Option<(f64, f64)> {
+    let d = b - a;
+    let (mut t0, mut t1) = (0.0f64, 1.0f64);
+    for k in 0..3 {
+        if d[k].abs() < 1e-12 {
+            if a[k] < lo[k] || a[k] > hi[k] {
+                return None;
+            }
+            continue;
+        }
+        let ta = (lo[k] - a[k]) / d[k];
+        let tb = (hi[k] - a[k]) / d[k];
+        t0 = t0.max(ta.min(tb));
+        t1 = t1.min(ta.max(tb));
+    }
+    (t0 < t1).then_some((t0, t1))
+}
+
 fn sample(data: &[Voxel], dims: UVec3, q: Vec3, outside: &dyn Fn(Vec3) -> Voxel) -> Voxel {
     let g = q - 0.5;
     let i = g.floor();

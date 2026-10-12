@@ -2,6 +2,7 @@
 
 pub mod demo;
 pub mod domain;
+pub mod obscurance;
 pub mod render;
 pub mod settings;
 pub mod sim;
@@ -14,6 +15,7 @@ use serde_json::{Value, json};
 
 pub use demo::SmokeDemo;
 pub use domain::{Domain, Voxel};
+pub use obscurance::SmokeSnapshot;
 pub use settings::SmokeSettings;
 pub use sim::{
     SmokeCommand, SmokeCommands, SmokeDomains, SmokeFan, SmokeObstacle, SmokeSource, SmokeTunnels,
@@ -74,6 +76,7 @@ impl Plugin for SmokePlugin {
                     sim::release,
                     sim::disturb,
                     sim::step,
+                    obscurance::publish,
                 )
                     .chain()
                     .in_set(SimSet::Environment),
@@ -281,6 +284,12 @@ mod tests {
         assert!(domains.density(at) > 0.0);
         let mass = domains.mass_kg();
         assert!((mass - 1.0).abs() < 0.05, "{mass}");
+        // The rest of the engine sees it through the obscurance contract.
+        let sight = app
+            .world
+            .resource::<engine_world::Obscurance>()
+            .transmittance(at - DVec3::X * 6.0, at + DVec3::X * 6.0);
+        assert!(sight < 0.5, "{sight}");
         app.update_n(90);
         let domains = app.world.resource::<SmokeDomains>();
         let d = &domains.list[0].domain;

@@ -35,9 +35,10 @@ shadowed volumes.
   billows are added with noise (fading out with distance), the march stops at the scene's
   depth, and the result is fogged like the rest of the scene. Motion between simulation steps
   is blended so it stays smooth at any frame rate.
-- **Visibility for gameplay:** `SmokeDomains::transmittance(a, b, …)` and the
-  `smoke.visibility` API say how much of a line of sight gets through the smoke, for AI that
-  can't see through a smoke screen.
+- **Visibility for gameplay:** after every step a copy of the smoke goes to the engine's
+  `Obscurance` contract (as "smoke"), so NPC AI asks `obscurance.transmittance(eye, target)`
+  without depending on this module, and fog or dust from other modules stack with it. The
+  `smoke.visibility` API answers the same question.
 
 ## Contracts
 
@@ -45,7 +46,7 @@ Reads: `SmokeEmission`, `ProjectileTrace`, `WorldImpulse`, `WindField`, `Weather
 temperature), `Ground` (the floor of each volume), `FocusPoints` (volumes far from every
 focus, or the camera, pause).
 
-Writes: `WindField` (fans).
+Writes: `WindField` (fans), `Obscurance` (the "smoke" source).
 
 ## Using it
 
@@ -64,8 +65,8 @@ commands.spawn((transform, SmokeSource { rate_kg_s: 0.01, temperature_c: 180.0, 
 commands.spawn((transform, SmokeFan { speed: 9.0, radius: 2.0, reach: 20.0, on: true }));
 commands.spawn((car_transform, SmokeObstacle { radius: 2.0 }));
 
-// Can the guard see the player?
-let seen = domains.transmittance(eye, target, settings.extinction_m2_kg) > 0.3;
+// Can the guard see the player? (Any module can ask; this one answers.)
+let seen = env.obscurance.transmittance(eye, target) > 0.3; // env: engine_world::Env
 ```
 
 AI bridge: `smoke.emit`, `smoke.clear`, `smoke.status`, `smoke.sample`, `smoke.visibility`,
@@ -98,7 +99,5 @@ and relights a volume only when it changed.
 
 - Smoke crossing from one volume into a neighbor (each volume is on its own).
 - Volumetric fog banks (ground fog that rolls in valleys) on the same simulation.
-- An `Obscurance` provider once that contract lands in `engine_world`, so AI asks the world
-  rather than this module.
 - Heat haze and smoke lit from below by the flames' own shape (firelight is point lights).
 - Half-resolution raymarching for very large volumes on slow GPUs.
