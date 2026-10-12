@@ -1,0 +1,25 @@
+#!/bin/sh
+# Refuses a push whose Rust files `cargo fmt` would change. This catches what the pre-commit
+# hook never sees: clean merges, cherry-picks, rebases and commits made before the hooks were
+# enabled. Only files that differ from origin/main are checked (main is always formatted).
+# Enable once per clone: git config core.hooksPath .githooks
+
+zero=0000000000000000000000000000000000000000
+base=$(git rev-parse -q --verify refs/remotes/origin/main)
+status=0
+while read -r local_ref local_sha remote_ref remote_sha; do
+    # Deleting a remote branch pushes nothing.
+    [ "$local_sha" = "$zero" ] && continue
+    if [ -n "$base" ]; then
+        files=$(git -c core.quotePath=false diff --name-only --diff-filter=ACMR "$base" "$local_sha" -- '*.rs')
+    else
+        files=$(git -c core.quotePath=false ls-tree -r --name-only "$local_sha" | grep '\.rs$')
+    fi
+    printf '%s\n' "$files" | "$(dirname "$0")/check-rust-fmt" "$local_sha" || status=1
+done
+
+if [ "$status" -ne 0 ]; then
+    echo "pre-push: CI's \`cargo fmt --all --check\` would fail on the files above." >&2
+    echo "Run \`cargo fmt --all\`, commit the result and push again." >&2
+    exit 1
+fi

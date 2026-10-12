@@ -6,7 +6,7 @@
 //! the audio thread never waits on the game and never allocates per sample.
 
 use crossbeam_channel::{Receiver, Sender};
-use engine_core::math::{DVec3, Vec3};
+use engine_core::math::{DQuat, DVec3, Vec3};
 use serde::{Deserialize, Serialize};
 
 use crate::dsp::{Biquad, Freeverb, Limiter, OnePole, db, hermite, pan_gains};
@@ -79,7 +79,7 @@ impl Bus {
         }
     }
 
-    fn in_world(self) -> bool {
+    pub(crate) fn in_world(self) -> bool {
         matches!(self, Bus::World | Bus::Ambience)
     }
 }
@@ -203,6 +203,18 @@ pub enum Command {
         position: DVec3,
         velocity: Vec3,
     },
+    /// How much is between the voice and the listener: 0 clear line of sight .. 1 behind a
+    /// thick wall. Muffles and quietens; the change is smoothed over about 0.15 s.
+    SetOcclusion {
+        id: VoiceId,
+        amount: f32,
+    },
+    /// The world moved to a new frame (floating origin, entering a planet's frame): move every
+    /// voice and the ears with it, so nothing jumps.
+    ShiftWorld {
+        rotation: DQuat,
+        translation: DVec3,
+    },
     /// Ears: position, orientation (unit right, up, forward) and velocity.
     SetListener {
         position: DVec3,
@@ -229,10 +241,12 @@ pub enum Command {
         damping: f32,
         wet: f32,
     },
-    /// Air around the listener: density 0 (space) .. 1 (sea level), and a high-frequency cut
-    /// in dB for falling snow (which swallows highs).
+    /// Air around the listener: density 0 (space) .. 1 (sea level), how fast sound travels in
+    /// it relative to sea level (warm air and other planets' air differ), and a
+    /// high-frequency cut in dB for falling snow (which swallows highs).
     SetMedium {
         density: f32,
+        speed_scale: f32,
         hush_db: f32,
     },
     Settings(MixerSettings),
@@ -272,6 +286,8 @@ struct Voice {
     spatial: Option<Spatial>,
     reverb_send: f32,
     delay: u64,
+    occlusion: f32,
+    occlusion_target: f32,
     // Fades: current level, per-sample step, target.
     fade: f32,
     fade_step: f32,
@@ -314,6 +330,8 @@ impl Voice {
             spatial: play.spatial,
             reverb_send: play.reverb_send,
             delay,
+            occlusion: 0.0,
+            occlusion_target: 0.0,
             fade,
             fade_step,
             fade_target: 1.0,
@@ -421,6 +439,8 @@ pub struct Mixer {
     world_rate: f32,
     slow_motion: f32,
     density: f32,
+    /// Speed of sound relative to sea-level air.
+    speed_scale: f32,
     hush_db: f32,
     settings: MixerSettings,
     capture: Option<Sender<Vec<f32>>>,
@@ -454,6 +474,7 @@ impl Mixer {
             world_rate: 1.0,
             slow_motion: 0.0,
             density: 1.0,
+            speed_scale: 1.0,
             hush_db: 0.0,
             settings: MixerSettings::default(),
             capture: None,
@@ -504,8 +525,8 @@ impl Mixer {
                     && sp.delay
                 {
                     let d = sp.position.distance(self.listener.position);
-                    delay +=
-                        (d / self.settings.speed_of_sound.max(1.0) as f64 * self.fs as f64) as u64;
+                    let c = self.settings.speed_of_sound * self.speed_scale;
+                    delay += (d / c.max(1.0) as f64 * self.fs as f64) as u64;
                 }
                 self.voices.push(Voice::new(*play, self.fs, delay));
             }
@@ -548,6 +569,33 @@ impl Mixer {
                     sp.velocity = velocity;
                 }
             }
+            Command::ShiftWorld {
+                rotation,
+                translation,
+            } => {
+                let turn = |v: Vec3| (rotation * v.as_dvec3()).as_vec3();
+                for v in &mut self.voices {
+                    if let Some(sp) = &mut v.spatial {
+                        sp.position = rotation * sp.position + translation;
+                        sp.velocity = turn(sp.velocity);
+                    }
+                }
+                let l = &mut self.listener;
+                l.position = rotation * l.position + translation;
+                l.right = turn(l.right);
+                l.up = turn(l.up);
+                l.forward = turn(l.forward);
+                l.velocity = turn(l.velocity);
+            }
+            Command::SetOcclusion { id, amount } => {
+                if let Some(v) = self.voice_mut(id) {
+                    v.occlusion_target = amount.clamp(0.0, 1.0);
+                    // Known before the first sample: start there instead of sweeping to it.
+                    if v.cur_rate.is_nan() {
+                        v.occlusion = v.occlusion_target;
+                    }
+                }
+            }
             Command::SetListener {
                 position,
                 right,
@@ -579,8 +627,13 @@ impl Mixer {
             Command::SetReverb { room, damping, wet } => {
                 self.reverb_target = (room, damping, wet.max(0.0));
             }
-            Command::SetMedium { density, hush_db } => {
+            Command::SetMedium {
+                density,
+                speed_scale,
+                hush_db,
+            } => {
                 self.density = density.clamp(0.0, 1.0);
+                self.speed_scale = speed_scale.clamp(0.1, 10.0);
                 self.hush_db = hush_db.min(0.0);
             }
             Command::Settings(s) => self.settings = s,
@@ -629,6 +682,7 @@ impl Mixer {
 
         let lis = &self.listener;
         let settings = self.settings;
+        let speed_scale = self.speed_scale;
         let world_rate = self.world_rate;
         let world_hush = self.density;
         for v in &mut self.voices {
@@ -674,11 +728,23 @@ impl Mixer {
                 // Distant sounds are mostly room.
                 send *= 0.35 + 0.65 * smooth01(dist / (r * 12.0));
                 if settings.doppler > 0.0 && dist > 1e-3 {
-                    let c = settings.speed_of_sound.max(1.0);
+                    let c = (settings.speed_of_sound * speed_scale).max(1.0);
                     let v_src = (-dir).dot(sp.velocity).clamp(-0.9 * c, 0.9 * c);
                     let v_lis = dir.dot(lis.velocity).clamp(-0.9 * c, 0.9 * c);
                     let f = ((c + v_lis) / (c - v_src)).clamp(0.5, 2.0);
                     rate *= 1.0 + (f - 1.0) * settings.doppler;
+                }
+                // Blocked: the direct sound comes through or around the obstacle, quieter
+                // and muffled; the room sound is affected less.
+                let k = 1.0 - (-(n as f32) / (0.05 * fs)).exp();
+                v.occlusion += (v.occlusion_target - v.occlusion) * k;
+                let o = v.occlusion;
+                if o > 1e-3 {
+                    let g = db(-15.0 * o);
+                    gains[0] *= g;
+                    gains[1] *= g;
+                    lp_hz *= (600.0 / 20_000.0f32).powf(o);
+                    send *= 1.0 - 0.35 * o;
                 }
             }
             if v.bus.in_world() {
@@ -1073,6 +1139,7 @@ mod tests {
         let (mut m, tx, _) = mixer();
         tx.send(Command::SetMedium {
             density: 0.0,
+            speed_scale: 1.0,
             hush_db: 0.0,
         })
         .unwrap();

@@ -32,10 +32,10 @@ are built, nothing simulates yet) · ⬜ not visible yet
 | 9 | Water splashes (particles) | `lake` | Particles and magic effects | ⬜ |
 | 10 | Fire that spreads through burnable things like grass | `field`, `fire_front`, `fire_trees`, `fire_campfire`, `fire_night` | Fire and smoke | ✅ burning meadow that spreads downwind and regrows |
 | 11 | Smoke that reacts to bullets, wind currents and explosions | `range` | Fire and smoke | 🟨 firing lanes, fans |
-| 12 | True volumetric clouds with fog | every outdoor viewpoint, `stratosphere` | Weather, wind and clouds | ⬜ flat cloud layer only |
-| 13 | Realistic rain that changes the ground (wet, puddles, mud) | `footsteps`, `plaza` | Weather, wind and clouds | ⬜ (renderer can already darken wet surfaces) |
-| 14 | Temperature, weather and wind simulation; dynamic weather that interacts with the world | `weather` hill | Weather, wind and clouds | 🟨 station instruments |
-| 15 | Snow that settles on the ground | `footsteps` snow strip, mountains | Weather, wind and clouds | 🟨 painted snow only |
+| 12 | True volumetric clouds with fog | every outdoor viewpoint, `weather_storm`, `stratosphere` | Weather, wind and clouds | ✅ volumetric clouds over the whole valley (fair-weather heaps, storm towers, overcast, fog) that drift with the wind and light up in lightning |
+| 13 | Realistic rain that changes the ground (wet, puddles, mud) | `weather_rain`, `footsteps`, `plaza` | Weather, wind and clouds | ✅ rain and splashes; the station yard gets wet and fills puddles with ripples (`weather_rain`), other wet surfaces darken |
+| 14 | Temperature, weather and wind simulation; dynamic weather that interacts with the world | `weather`, `weather_station` | Weather, wind and clouds | ✅ moving fronts, temperature and wind; the station's wind sock, anemometer, thermometer, rain gauge and snow stake follow the live weather |
+| 15 | Snow that settles on the ground | `weather_snow`, `footsteps` snow strip, mountains | Weather, wind and clouds | ✅ snow falls and piles up on the yard and the grass (`weather_snow`) |
 
 ## Ground and footsteps
 
@@ -54,7 +54,7 @@ are built, nothing simulates yet) · ⬜ not visible yet
 | 21 | Chop a tree; new ones grow where water, sun and soil allow | `forest` clearing | Foliage and ecology | 🟨 stumps, fallen trunk, saplings |
 | 22 | Plants that need other resources (mineral water) and glowing cave mushrooms | `cave` | Foliage and ecology | 🟨 mushrooms glow, no growth |
 | 23 | Grass that moves in the wind | everywhere | Foliage and ecology (strands: Rendering and lighting) | 🟨 grass patches sway |
-| 24 | Dynamic fauna (wildlife that grazes, drinks, flees, flocks) | `meadow` (by the lake shore) | Smart NPC AI | 🟨 deer and hare stand-ins |
+| 24 | Dynamic fauna (wildlife that grazes, drinks, flees, flocks) | `meadow`, `meadow_herd` (by the lake shore) | Smart NPC AI | ✅ deer and rabbit herds graze, drink, rest and bolt; birds flock; a wolf pack stalks and hunts (stand-in bodies) |
 
 ## Characters and combat
 
@@ -68,9 +68,9 @@ are built, nothing simulates yet) · ⬜ not visible yet
 | 30 | Cloth: flags, sails, curtains, clothes | `yard` | Cloth, soft bodies and hair | ✅ flags and pennants in the wind, a curtain shot full of holes, one that burns, a cape |
 | 31 | Soft bodies (jelly, flesh) and ropes (rope bridge) | `yard` | Cloth, soft bodies and hair | ✅ jelly cubes, a clay block that dents, rope bridges, a swing, a bead curtain, a wrecking ball |
 | 32 | Hair and fur for humans and animals | `yard` | Cloth, soft bodies and hair | ✅ a walking mannequin with long hair and a dog with fur |
-| 33 | Smart NPC AI that uses the environment (cover, high ground) | `arena` | Smart NPC AI | 🟨 |
-| 34 | NPCs that space the player and block attacks | `arena` | Smart NPC AI | 🟨 |
-| 35 | NPC skill, reaction time and logic editable per enemy | `arena` | Smart NPC AI | ⬜ |
+| 33 | Smart NPC AI that uses the environment (cover, high ground) | `arena`, `arena_cover` | Smart NPC AI | ✅ two squads take cover, climb the platform, flank, suppress and shoot the explosive barrel (stand-in bodies) |
+| 34 | NPCs that space the player and block attacks | `arena`, `arena_duel` | Smart NPC AI | ✅ melee fighters take turns instead of ringing you, block, parry, dodge and feint; a master and a veteran duel |
+| 35 | NPC skill, reaction time and logic editable per enemy | `arena` | Smart NPC AI | ✅ every fighter's skills (reaction time, accuracy, logic, defense…) are tunable through `npc.set_skill`; head band color shows skill |
 | 36 | Titanfall-style movement: wall-run, slide, dash | `parkour` | Movement and slow motion | 🟨 walls, platforms, slide tunnel |
 | 37 | Elite enemies dash in and slice in the blink of an eye | `arena` | Movement and slow motion | ⬜ |
 | 38 | Stat-based time perception: a leveled-up player sees enemies in slow motion | `arena` | Movement and slow motion | ⬜ |
