@@ -197,9 +197,13 @@ pub(crate) fn sky_system(
 /// Where the sun and moon are and how bright, for a clock and climate. `sim` dims the sun
 /// under thick cloud.
 pub fn compute_lights(sky: &Sky, climate: &Climate, sim: &WeatherSim) -> SkyLights {
-    let sun_dir = climate.sun_direction(sky.hour, sky.day_of_year);
+    // The sky's compass turns with the world's frame (see `WeatherFrame`).
+    let sun_dir = sim
+        .frame
+        .dir3_to_world(climate.sun_direction(sky.hour, sky.day_of_year));
     let elevation = sun_dir.y.clamp(-1.0, 1.0).asin().to_degrees();
     let (moon_dir, moon_lit) = climate::moon(climate, sky.hour, sky.day_of_year, sky.moon_phase);
+    let moon_dir = sim.frame.dir3_to_world(moon_dir);
     let moon_elevation = moon_dir.y.clamp(-1.0, 1.0).asin().to_degrees();
     // The renderer shades with the brightest light only, so the sun fades out during
     // nautical twilight and the moon takes over at night.

@@ -4,8 +4,9 @@
 //! cargo run -p engine_audio --release --example footstep_lab -- [out_dir]
 //! ```
 //!
-//! Writes `<out_dir>/<surface>.wav` (four steps each) and `<out_dir>/all_surfaces.wav`
-//! (every surface in turn), and prints level and brightness for each.
+//! Writes `<out_dir>/<surface>.wav` (four steps each), `<out_dir>/all_surfaces.wav` (every
+//! surface in turn) and `<out_dir>/fire_{campfire,house,forest}.wav`, and prints level and
+//! brightness for each surface.
 
 use std::path::PathBuf;
 
@@ -58,7 +59,110 @@ fn main() {
         all.extend_from_slice(&track);
     }
     write_wav(&out.join("all_surfaces.wav"), &all, 1, FS as u32).expect("write wav");
+
+    // Fires of three sizes, four seconds each.
+    for (name, size) in [("campfire", 1.0), ("house", 100.0), ("forest", 2_000.0)] {
+        use engine_audio::Sound;
+        let mut fire = engine_audio::ambience::FireSound::new(FS, 5);
+        fire.set_param("size", size);
+        let mut track = vec![0.0; (FS * 4.0) as usize];
+        fire.fill(&mut track);
+        write_wav(&out.join(format!("fire_{name}.wav")), &track, 1, FS as u32).expect("write wav");
+    }
+
+    // Water: a calm and a windy lake shore, a brook and rapids, eight seconds each.
+    for (name, waves, flow) in [
+        ("lake_calm", 0.2, 0.0),
+        ("lake_windy", 0.8, 0.0),
+        ("brook", 0.0, 1.0),
+        ("rapids", 0.0, 3.0),
+    ] {
+        use engine_audio::Sound;
+        let mut water = engine_audio::ambience::WaterSound::new(FS, 6);
+        water.set_param("waves", waves);
+        water.set_param("flow", flow);
+        let mut track = vec![0.0; (FS * 8.0) as usize];
+        water.fill(&mut track);
+        let tail = &track[track.len() / 4..];
+        let rms = (tail.iter().map(|v| v * v).sum::<f32>() / tail.len() as f32).sqrt();
+        let peak = tail.iter().fold(0.0f32, |m, v| m.max(v.abs()));
+        println!("water {name:<10} rms {rms:.4} peak {peak:.3}");
+        write_wav(&out.join(format!("water_{name}.wav")), &track, 1, FS as u32).expect("write wav");
+    }
+
+    // Vehicles: a rev sweep and lift-off for a V8 and a four, a jet spooling up into
+    // afterburner, a rocket, an electric car, and a tyre that rolls on tarmac, skids, then
+    // runs onto gravel.
+    vehicles(&out);
+
+    // Thunder from a bolt 0.5, 2 and 8 km away, mixed roughly as the mixer would (inverse
+    // distance, air absorption), with its level over time.
+    for (name, km) in [("near", 0.5), ("mid", 2.0), ("far", 8.0)] {
+        let track = thunder_heard(km * 1_000.0);
+        let env: Vec<String> = track
+            .chunks((FS * 1.0) as usize)
+            .take(16)
+            .map(|c| {
+                let rms = (c.iter().map(|v| v * v).sum::<f32>() / c.len() as f32).sqrt();
+                format!("{:.0}", engine_audio::dsp::to_db(rms.max(1e-6)))
+            })
+            .collect();
+        let peak = track.iter().fold(0.0f32, |m, v| m.max(v.abs()));
+        println!(
+            "thunder {name:<5} peak {peak:.3}  dB per second: {}",
+            env.join(" ")
+        );
+        write_wav(
+            &out.join(format!("thunder_{name}.wav")),
+            &track,
+            1,
+            FS as u32,
+        )
+        .expect("write wav");
+    }
     println!("wrote {}", out.display());
+}
+
+/// A zigzag cloud-to-ground bolt `distance_m` away as heard from the origin, starting at the
+/// first arrival.
+fn thunder_heard(distance_m: f64) -> Vec<f32> {
+    use engine_audio::Sound;
+    use engine_audio::dsp::{Noise, OnePole};
+    use engine_audio::thunder::{THUNDER_REF_M, thunder_parts};
+    use engine_core::math::DVec3;
+    let mut rng = Noise::new(4);
+    let ground = DVec3::new(distance_m, 0.0, 300.0);
+    let mut p = ground + DVec3::new(0.0, 3_000.0, 0.0);
+    let mut bolt = vec![p];
+    for i in 0..256 {
+        let left = 256 - i;
+        let step = (ground - p) / left as f64;
+        p += step
+            + DVec3::new(
+                rng.range(-1.0, 1.0) as f64 * 18.0,
+                0.0,
+                rng.range(-1.0, 1.0) as f64 * 18.0,
+            ) * (left > 1) as i32 as f64;
+        bolt.push(if left == 1 { ground } else { p });
+    }
+    let listener = DVec3::new(0.0, 1.7, 0.0);
+    let parts = thunder_parts(FS, &bolt, listener, 343.0, 30.0, 11);
+    let first = parts.iter().map(|p| p.delay).fold(f32::MAX, f32::min);
+    let mut mix = vec![0.0f32; (FS * 24.0) as usize];
+    for mut part in parts {
+        let d = part.position.distance(listener) as f32;
+        let g = THUNDER_REF_M / d.max(THUNDER_REF_M);
+        let mut lp = OnePole::new(FS, 20_000.0 / (1.0 + d * 0.006));
+        let mut buf = vec![0.0; (FS * 22.0) as usize];
+        let n = part.sound.fill(&mut buf);
+        let start = ((part.delay - first) * FS) as usize;
+        for (i, v) in buf[..n].iter().enumerate() {
+            if let Some(m) = mix.get_mut(start + i) {
+                *m += lp.process(*v) * g;
+            }
+        }
+    }
+    mix
 }
 
 /// Print each layer's level on its own (run with `--layers`).
@@ -89,4 +193,83 @@ fn layers() {
         }
         println!("{n:<8} peak {peak:.3}  rms(300ms) {rms:.4}");
     }
+}
+
+fn vehicles(out: &std::path::Path) {
+    use engine_audio::Sound;
+    use engine_audio::vehicle::{EngineSound, EngineVoice, TyreSound};
+    let secs = 8.0;
+    let n = (FS * secs) as usize;
+    let block = 480;
+    let engines = [
+        (
+            "v8",
+            EngineVoice::Piston {
+                cylinders: 8,
+                litres: 5.0,
+            },
+        ),
+        (
+            "inline4",
+            EngineVoice::Piston {
+                cylinders: 4,
+                litres: 1.6,
+            },
+        ),
+        ("jet", EngineVoice::Turbine),
+        ("rocket", EngineVoice::Rocket),
+        ("electric", EngineVoice::Electric),
+    ];
+    for (name, voice) in engines {
+        let mut e = EngineSound::new(FS, voice, 9);
+        let mut track = vec![0.0f32; n];
+        for (b, chunk) in track.chunks_mut(block).enumerate() {
+            let t = b as f32 * block as f32 / FS;
+            // Idle, floor it up to the red line, lift off and coast down.
+            let (rpm, throttle, load) = if t < 1.5 {
+                (800.0, 0.0, 0.05)
+            } else if t < 5.0 {
+                (800.0 + (t - 1.5) / 3.5 * 6_000.0, 1.0, 1.0)
+            } else {
+                (6_800.0 - (t - 5.0) / 3.0 * 5_000.0, 0.0, 0.0)
+            };
+            let rpm = if matches!(voice, EngineVoice::Turbine) {
+                rpm * 2.0
+            } else {
+                rpm
+            };
+            e.set_param("rpm", rpm);
+            e.set_param("throttle", throttle);
+            e.set_param("load", load);
+            e.set_param("boost", if (3.5..5.0).contains(&t) { 1.0 } else { 0.0 });
+            e.set_param("thrust", rpm / 6_800.0 * 120_000.0 * (0.2 + 0.8 * throttle));
+            e.fill(chunk);
+        }
+        let peak = track.iter().fold(0.0f32, |m, v| m.max(v.abs()));
+        println!("engine {name:<9} peak {peak:.3}");
+        write_wav(
+            &out.join(format!("engine_{name}.wav")),
+            &track,
+            1,
+            FS as u32,
+        )
+        .expect("write wav");
+    }
+    let mut tyre = TyreSound::new(FS, 3);
+    let mut track = vec![0.0f32; n];
+    for (b, chunk) in track.chunks_mut(block).enumerate() {
+        let t = b as f32 * block as f32 / FS;
+        tyre.set_param("speed", 18.0);
+        tyre.set_param("slip", if (2.5..4.5).contains(&t) { 0.7 } else { 0.0 });
+        tyre.set_param("hard", if t < 5.5 { 1.0 } else { 0.0 });
+        tyre.set_param("gravel", if t < 5.5 { 0.0 } else { 1.0 });
+        tyre.fill(chunk);
+    }
+    write_wav(
+        &out.join("tyre_tarmac_skid_gravel.wav"),
+        &track,
+        1,
+        FS as u32,
+    )
+    .expect("write wav");
 }

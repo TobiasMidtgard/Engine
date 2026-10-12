@@ -17,6 +17,8 @@ pub enum WeatherPreset {
     PartlyCloudy,
     /// A grey sheet of cloud, dry.
     Overcast,
+    /// Sunny spells and scattered showers from heaped, towering clouds (rainbow weather).
+    Showers,
     /// Steady rain from a thick, low cloud deck.
     Rain,
     /// Thunderstorm: towering clouds, downpours, gusts and lightning.
@@ -31,10 +33,11 @@ pub enum WeatherPreset {
 
 impl WeatherPreset {
     /// Every preset, in a stable order (API listings, UI).
-    pub const ALL: [WeatherPreset; 8] = [
+    pub const ALL: [WeatherPreset; 9] = [
         WeatherPreset::Clear,
         WeatherPreset::PartlyCloudy,
         WeatherPreset::Overcast,
+        WeatherPreset::Showers,
         WeatherPreset::Rain,
         WeatherPreset::Storm,
         WeatherPreset::Snow,
@@ -48,6 +51,7 @@ impl WeatherPreset {
             WeatherPreset::Clear => "clear",
             WeatherPreset::PartlyCloudy => "partly_cloudy",
             WeatherPreset::Overcast => "overcast",
+            WeatherPreset::Showers => "showers",
             WeatherPreset::Rain => "rain",
             WeatherPreset::Storm => "storm",
             WeatherPreset::Snow => "snow",
@@ -68,7 +72,8 @@ impl WeatherPreset {
             "clear" | "sunny" | "fair" => WeatherPreset::Clear,
             "partlycloudy" | "cloudy" | "cumulus" => WeatherPreset::PartlyCloudy,
             "overcast" | "grey" | "gray" => WeatherPreset::Overcast,
-            "rain" | "rainy" | "drizzle" | "showers" => WeatherPreset::Rain,
+            "showers" | "shower" | "sunshowers" | "rainbow" => WeatherPreset::Showers,
+            "rain" | "rainy" | "drizzle" => WeatherPreset::Rain,
             "storm" | "thunderstorm" | "thunder" => WeatherPreset::Storm,
             "snow" | "snowy" => WeatherPreset::Snow,
             "blizzard" => WeatherPreset::Blizzard,
@@ -120,6 +125,20 @@ impl WeatherPreset {
                 humidity: 0.75,
                 pressure_offset_hpa: -4.0,
                 fog: 0.04,
+                storm: 0.0,
+                ..base
+            },
+            WeatherPreset::Showers => Regime {
+                cloud_cover: 0.5,
+                cloud_density: 0.9,
+                cloud_type: 0.78,
+                precipitation_mm_h: 7.0,
+                wind_speed: 7.0,
+                gustiness: 0.6,
+                temperature_offset_c: -1.5,
+                humidity: 0.7,
+                pressure_offset_hpa: -3.0,
+                fog: 0.0,
                 storm: 0.0,
                 ..base
             },

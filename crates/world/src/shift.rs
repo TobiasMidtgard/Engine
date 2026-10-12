@@ -32,7 +32,7 @@ use engine_core::math::{DQuat, DVec2, DVec3, Quat, Vec3};
 use engine_core::prelude::*;
 
 use crate::events::*;
-use crate::locomotion::{LocomotionState, MoveIntent};
+use crate::locomotion::{LocomotionState, MoveIntent, WheelContacts};
 use crate::physics::{
     ApplyImpulse, CharacterMove, CharacterState, ContactEvent, ExternalForce, Joint, Velocity,
 };
@@ -244,6 +244,7 @@ fn shift_entities_system(
     mut intents: Query<&mut MoveIntent>,
     mut locomotion: Query<(Entity, &mut LocomotionState, Option<&GlobalTransform>)>,
     mut joints: Query<&mut Joint>,
+    mut wheels: Query<&mut WheelContacts>,
 ) {
     let Some(s) = combined(&mut shifts) else {
         return;
@@ -298,6 +299,11 @@ fn shift_entities_system(
     for mut j in &mut joints {
         if j.body_b.is_none() {
             j.anchor_b = s.point(j.anchor_b);
+        }
+    }
+    for mut w in &mut wheels {
+        for c in &mut w.wheels {
+            c.position = s.point(c.position);
         }
     }
 }

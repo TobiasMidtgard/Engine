@@ -1,4 +1,4 @@
-//! `cargo run -p fetch-assets [-- <manifest>... | check | mirror]`. See the crate docs.
+//! `cargo run -p fetch-assets [-- <manifest>... | check | mirror | publish]`. See the crate docs.
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -17,6 +17,9 @@ fetch-assets: download the large art listed in assets/manifests/*.toml into asse
   cargo run -p fetch-assets -- <name>...      only assets/manifests/<name>.toml
   cargo run -p fetch-assets -- check          validate the manifests (offline, needs pins)
   cargo run -p fetch-assets -- mirror         CI only: copy files to the release mirror
+  cargo run -p fetch-assets -- publish [<name>...]
+                                              upload files made here (url = \"mirror\") from
+                                              assets/fetched/ to the mirror and print their pins
 
 Cache: ENGINE_ASSET_CACHE (default: the user cache folder). Mirror repository:
 ENGINE_ASSET_MIRROR (default TobiasMidtgard/Engine). GitHub token: GITHUB_TOKEN, GH_TOKEN or
@@ -32,6 +35,7 @@ fn main() -> ExitCode {
         }
         Some("check") => check(&root),
         Some("mirror") => mirror(&root),
+        Some("publish") => publish(&root, &args[1..]),
         _ => fetch(&root, &args),
     };
     match result {
@@ -88,7 +92,8 @@ impl PlacedFile {
     }
 }
 
-fn fetch(root: &Path, only: &[String]) -> Result<(), String> {
+/// The valid manifests, only those named in `only` when it isn't empty.
+fn selected_manifests(root: &Path, only: &[String]) -> Result<Vec<Manifest>, String> {
     let mut manifests = load_manifests(root)?;
     let known: HashSet<&str> = manifests.iter().map(|m| m.name.as_str()).collect();
     if let Some(unknown) = only.iter().find(|n| !known.contains(n.as_str())) {
@@ -107,6 +112,11 @@ fn fetch(root: &Path, only: &[String]) -> Result<(), String> {
     if !only.is_empty() {
         manifests.retain(|m| only.contains(&m.name));
     }
+    Ok(manifests)
+}
+
+fn fetch(root: &Path, only: &[String]) -> Result<(), String> {
+    let manifests = selected_manifests(root, only)?;
 
     let fetched = fetched_dir(root);
     let cache = cache_dir();
@@ -124,6 +134,16 @@ fn fetch(root: &Path, only: &[String]) -> Result<(), String> {
             let target = fetched.join(&e.path);
             let result = if e.is_pinned() {
                 place_pinned(e, &target, &cache, &mut mirror, &mut placed)
+            } else if e.is_made_here() {
+                if target.exists() {
+                    pins.push(format!(
+                        "{} ({}): made here; `cargo run -p fetch-assets -- publish` uploads it and prints the pin",
+                        m.name, e.path
+                    ));
+                    Ok(false)
+                } else {
+                    Err("made here and not published yet: whoever has the file puts it in assets/fetched/ and runs `cargo run -p fetch-assets -- publish`".into())
+                }
             } else {
                 place_unpinned(e, &target, &cache).map(|sha| {
                     pins.push(format!("{} ({}): sha256 = \"{sha}\"", m.name, e.path));
@@ -200,7 +220,13 @@ fn place_pinned(
                 Err(why) => errors.push(format!("mirror: {why}")),
             }
         }
-        if got.as_deref() != Some(e.sha256.as_str()) {
+        if got.as_deref() != Some(e.sha256.as_str()) && e.is_made_here() {
+            errors.push(if mirror.reachable() {
+                "made here, and the mirror doesn't have it: whoever has the file runs `cargo run -p fetch-assets -- publish`".to_string()
+            } else {
+                "made here, so only the mirror has it: log in to GitHub (`gh auth login`) or set GITHUB_TOKEN".to_string()
+            });
+        } else if got.as_deref() != Some(e.sha256.as_str()) {
             match download(&e.url, &part, false).and_then(|_| hash(&part)) {
                 Ok(h) => got = Some(h),
                 Err(why) => errors.push(format!("{}: {why}", e.url)),
@@ -279,10 +305,10 @@ fn download(url: &str, out: &Path, github_asset: bool) -> Result<(), String> {
             headers.push_str(&format!("Authorization: Bearer {t}\n"));
         }
     }
-    curl(url, Some(out), &headers).map(|_| ())
+    curl(url, Some(out), &headers, &[]).map(|_| ())
 }
 
-fn curl(url: &str, out: Option<&Path>, headers: &str) -> Result<Vec<u8>, String> {
+fn curl(url: &str, out: Option<&Path>, headers: &str, extra: &[&str]) -> Result<Vec<u8>, String> {
     let mut cmd = Command::new("curl");
     cmd.args([
         "-fsSL",
@@ -299,7 +325,8 @@ fn curl(url: &str, out: Option<&Path>, headers: &str) -> Result<Vec<u8>, String>
     if !headers.is_empty() {
         cmd.args(["-H", "@-"]);
     }
-    cmd.arg(url)
+    cmd.args(extra)
+        .arg(url)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -332,6 +359,7 @@ struct ReleaseAsset {
 struct Mirror {
     repo: String,
     assets: Option<HashMap<String, u64>>,
+    reachable: bool,
 }
 
 impl Mirror {
@@ -340,42 +368,67 @@ impl Mirror {
             .ok()
             .filter(|r| !r.is_empty())
             .unwrap_or_else(|| DEFAULT_MIRROR_REPO.to_string());
-        Self { repo, assets: None }
+        Self {
+            repo,
+            assets: None,
+            reachable: false,
+        }
     }
 
-    fn api(&self, path: &str) -> Result<Vec<u8>, String> {
-        let mut headers = String::from("Accept: application/vnd.github+json\n");
+    fn headers(accept: &str) -> String {
+        let mut headers = format!("Accept: {accept}\n");
         if let Some(t) = github_token() {
             headers.push_str(&format!("Authorization: Bearer {t}\n"));
         }
+        headers
+    }
+
+    fn api(&self, path: &str) -> Result<Vec<u8>, String> {
         curl(
             &format!("https://api.github.com/repos/{}{path}", self.repo),
             None,
-            &headers,
+            &Self::headers("application/vnd.github+json"),
+            &[],
         )
+    }
+
+    /// Whether the listing reached the mirror.
+    fn reachable(&mut self) -> bool {
+        self.listing();
+        self.reachable
     }
 
     /// Asset name → id. Empty (with a note) when the mirror can't be reached.
     fn listing(&mut self) -> &HashMap<String, u64> {
         if self.assets.is_none() {
-            let listed = self.list().unwrap_or_else(|why| {
-                eprintln!("note: release mirror unavailable ({why}); using original URLs");
-                HashMap::new()
-            });
+            let listed = match self.list() {
+                Ok(listed) => {
+                    self.reachable = true;
+                    listed
+                }
+                Err(why) => {
+                    eprintln!("note: release mirror unavailable ({why}); using original URLs");
+                    HashMap::new()
+                }
+            };
             self.assets = Some(listed);
         }
         self.assets.as_ref().unwrap()
     }
 
-    fn list(&self) -> Result<HashMap<String, u64>, String> {
+    fn release_id(&self) -> Result<u64, String> {
         let release: Release =
             serde_json::from_slice(&self.api(&format!("/releases/tags/{MIRROR_TAG}"))?)
                 .map_err(|e| e.to_string())?;
+        Ok(release.id)
+    }
+
+    fn list(&self) -> Result<HashMap<String, u64>, String> {
+        let release = self.release_id()?;
         let mut assets = HashMap::new();
         for page in 1.. {
             let batch: Vec<ReleaseAsset> = serde_json::from_slice(&self.api(&format!(
-                "/releases/{}/assets?per_page=100&page={page}",
-                release.id
+                "/releases/{release}/assets?per_page=100&page={page}"
             ))?)
             .map_err(|e| e.to_string())?;
             let n = batch.len();
@@ -385,6 +438,23 @@ impl Mirror {
             }
         }
         Ok(assets)
+    }
+
+    /// Upload `file` as the asset `name` of the mirror release.
+    fn upload(&self, release: u64, file: &Path, name: &str) -> Result<(), String> {
+        let mut headers = Self::headers("application/vnd.github+json");
+        headers.push_str("Content-Type: application/octet-stream\n");
+        let body = format!("@{}", file.display());
+        curl(
+            &format!(
+                "https://uploads.github.com/repos/{}/releases/{release}/assets?name={name}",
+                self.repo
+            ),
+            None,
+            &headers,
+            &["-X", "POST", "--data-binary", &body],
+        )
+        .map(|_| ())
     }
 
     fn url_of(&mut self, sha256: &str) -> Option<String> {
@@ -442,6 +512,12 @@ fn mirror(root: &Path) -> Result<(), String> {
         for e in &m.files {
             let at = format!("{} ({})", m.name, e.path);
             if e.is_pinned() && have.contains(&e.sha256) {
+                continue;
+            }
+            if e.is_made_here() {
+                errors.push(format!(
+                    "{at}: made here and not on the mirror yet; whoever has the file puts it in assets/fetched/ and runs `cargo run -p fetch-assets -- publish`"
+                ));
                 continue;
             }
             let part = work.join("download.part");
@@ -505,9 +581,178 @@ fn mirror(root: &Path) -> Result<(), String> {
             .open(summary)
             .and_then(|mut f| writeln!(f, "```\n{report}```"));
     }
+    if std::env::var_os("GITHUB_ACTIONS").is_some() {
+        // Annotations can be read through the API (job summaries can't), so agents get the
+        // pins from the check run: GET /repos/{repo}/check-runs/{id}/annotations.
+        annotate("notice", "Asset pins", &pins);
+        annotate("error", "Asset mirror errors", &errors);
+    }
     if errors.is_empty() {
         Ok(())
     } else {
         Err(format!("{} files could not be mirrored", errors.len()))
     }
+}
+
+/// Print `lines` as GitHub Actions annotations, a few per annotation (a step keeps only ten).
+fn annotate(level: &str, title: &str, lines: &[String]) {
+    for chunk in lines.chunks(25) {
+        let text = chunk
+            .join("\n")
+            .replace('%', "%25")
+            .replace('\r', "%0D")
+            .replace('\n', "%0A");
+        println!("::{level} title={title}::{text}");
+    }
+}
+
+/// Branches that carry files made here to CI, which uploads them and deletes the branch.
+const UPLOAD_BRANCH_PREFIX: &str = "asset-upload/";
+
+/// Upload the files made here (`url = "mirror"`) that sit in `assets/fetched/` and the mirror
+/// lacks, and print the pins to paste. Content-addressed, so running it again is harmless.
+///
+/// Where the GitHub upload endpoint is blocked (the project's cloud sessions only allow git
+/// pushes), the files go on a short-lived `asset-upload/…` branch instead; the Asset upload
+/// workflow copies them to the mirror and deletes the branch.
+fn publish(root: &Path, only: &[String]) -> Result<(), String> {
+    let manifests = selected_manifests(root, only)?;
+    let fetched = fetched_dir(root);
+    let mirror = Mirror::new();
+    let release = mirror.release_id().map_err(|why| {
+        format!(
+            "can't reach the {MIRROR_TAG} release on {}: {why}",
+            mirror.repo
+        )
+    })?;
+    let mut have: HashSet<String> = mirror.list()?.into_keys().collect();
+    let (mut uploaded, mut ready, mut errors, mut pins) = (0, 0, Vec::new(), Vec::new());
+    // Set once a direct upload fails; the rest then go on an upload branch.
+    let mut blocked: Option<String> = None;
+    let mut by_branch: Vec<String> = Vec::new();
+    for m in &manifests {
+        for e in m.files.iter().filter(|e| e.is_made_here()) {
+            let at = format!("{} ({})", m.name, e.path);
+            let file = fetched.join(&e.path);
+            if !file.exists() {
+                if !(e.is_pinned() && have.contains(&e.sha256)) {
+                    errors.push(format!("{at}: put the file at {}", file.display()));
+                }
+                continue;
+            }
+            let sha = hash(&file)?;
+            if !e.is_pinned() {
+                pins.push(format!("{at}: sha256 = \"{sha}\""));
+            } else if sha != e.sha256 {
+                pins.push(format!(
+                    "{at}: the file changed; new sha256 = \"{sha}\" (pinned {})",
+                    e.sha256
+                ));
+            }
+            if have.contains(&sha) {
+                ready += 1;
+                continue;
+            }
+            if blocked.is_none() {
+                match mirror.upload(release, &file, &sha) {
+                    Ok(()) => {
+                        uploaded += 1;
+                        have.insert(sha);
+                        continue;
+                    }
+                    Err(why) => blocked = Some(why),
+                }
+            }
+            by_branch.push(format!("assets/fetched/{}", e.path));
+            have.insert(sha);
+        }
+    }
+    let mut branch = None;
+    if !by_branch.is_empty() {
+        let why = blocked.unwrap_or_default();
+        // CI is where upload branches end up; pushing another from there would loop.
+        let pushed = if std::env::var_os("GITHUB_ACTIONS").is_some() {
+            Err("not from CI".to_string())
+        } else {
+            push_upload_branch(root, &by_branch)
+        };
+        match pushed {
+            Ok(name) => branch = Some(name),
+            Err(push) => errors.push(format!(
+                "{} files: direct upload failed ({why}) and so did pushing an upload branch ({push})",
+                by_branch.len()
+            )),
+        }
+    }
+    println!(
+        "{uploaded} uploaded, {} sent on an upload branch, {ready} already on the mirror, {} failed",
+        if branch.is_some() { by_branch.len() } else { 0 },
+        errors.len()
+    );
+    if let Some(branch) = &branch {
+        println!(
+            "Direct uploads are blocked here, so the files went to branch {branch}. The \"Asset upload\" \
+             workflow copies them to the mirror and deletes the branch; push the pins after it has run."
+        );
+    }
+    if !pins.is_empty() {
+        println!("Paste these pins into the manifests:");
+        for p in &pins {
+            println!("  {p}");
+        }
+    }
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        for e in &errors {
+            eprintln!("  {e}");
+        }
+        Err(format!("{} files not published", errors.len()))
+    }
+}
+
+/// Push a commit with `files` (force-added, they are gitignored) and the working tree's
+/// manifests on top of HEAD to a new `asset-upload/…` branch. Uses a scratch index, so the
+/// checkout, its index and its branch are left alone. Returns the branch name.
+fn push_upload_branch(root: &Path, files: &[String]) -> Result<String, String> {
+    let index = std::env::temp_dir().join(format!("fetch-assets-index-{}", std::process::id()));
+    let git = |args: &[&str]| -> Result<String, String> {
+        let out = Command::new("git")
+            .current_dir(root)
+            .env("GIT_INDEX_FILE", &index)
+            .args(args)
+            .output()
+            .map_err(|e| format!("can't run git: {e}"))?;
+        if out.status.success() {
+            Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+        } else {
+            Err(format!(
+                "git {}: {}",
+                args.first().unwrap_or(&""),
+                String::from_utf8_lossy(&out.stderr).trim()
+            ))
+        }
+    };
+    let result = (|| {
+        git(&["read-tree", "HEAD"])?;
+        let mut add = vec!["add", "-f", "--", "assets/manifests"];
+        add.extend(files.iter().map(String::as_str));
+        git(&add)?;
+        let tree = git(&["write-tree"])?;
+        let message = format!(
+            "Asset upload: {} files made here\n\nFor the mirror only; the Asset upload workflow deletes this branch.",
+            files.len()
+        );
+        let commit = git(&["commit-tree", &tree, "-p", "HEAD", "-m", &message])?;
+        let branch = format!("{UPLOAD_BRANCH_PREFIX}{}", &commit[..12.min(commit.len())]);
+        git(&[
+            "push",
+            "-q",
+            "origin",
+            &format!("{commit}:refs/heads/{branch}"),
+        ])?;
+        Ok(branch)
+    })();
+    let _ = fs::remove_file(&index);
+    result
 }

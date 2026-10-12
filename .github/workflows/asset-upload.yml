@@ -1,0 +1,42 @@
+name: Asset upload
+
+# `cargo run -p fetch-assets -- publish` pushes files made here (manifest entries with
+# url = "mirror") to a short-lived asset-upload/… branch where it can't upload to the release
+# directly, as in the project's cloud sessions. This copies them to the `asset-mirror` release
+# and deletes the branch, so the files never stay in the repository.
+on:
+  push:
+    branches: ["asset-upload/**"]
+
+permissions:
+  contents: write
+
+# Each upload branch is unique, so a per-branch group never cancels another thread's upload.
+concurrency:
+  group: asset-mirror-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  upload:
+    name: Upload files made here
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust (from rust-toolchain.toml)
+        run: rustup show active-toolchain || rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: fetch-assets
+      - name: Upload to the mirror
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          ENGINE_ASSET_MIRROR: ${{ github.repository }}
+        run: cargo run -q -p fetch-assets -- publish
+      - name: Delete the upload branch
+        if: always()
+        run: git push origin --delete "$GITHUB_REF_NAME"
