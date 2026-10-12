@@ -6,6 +6,8 @@
 //! then reports itself unavailable and callers fall back to primitive shapes.
 
 pub mod animals;
+pub mod arena;
+pub mod mesh;
 pub mod noise;
 pub mod sdf;
 pub mod tex;
