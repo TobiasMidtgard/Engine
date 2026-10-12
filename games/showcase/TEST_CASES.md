@@ -21,7 +21,7 @@ are built, nothing simulates yet) · ⬜ not visible yet
 | 3 | Cars with real suspension, tires and drivetrain | `track` | Cars, planes and spaceships | 🟨 |
 | 4 | Planes with aerodynamic surfaces | `airfield` (1.2 km runway) | Cars, planes and spaceships | 🟨 |
 | 5 | Spaceships with thrusters and RCS, launching to orbit | `spaceport` | Cars, planes and spaceships | 🟨 |
-| 6 | Extremely well built, efficient physics: stacking, joints, ragdolls | `physics` | Physics and rigid bodies | 🟨 |
+| 6 | Extremely well built, efficient physics: stacking, joints, ragdolls | `physics` | Physics and rigid bodies | ✅ proving ground: crate pile, drum stack, domino run, crash test dummies tumbling down stairs, a gantry with chain and wrecking ball, seesaw, paddle wheel, rope bridge and turntable, all simulated |
 
 ## Water, fire, smoke, weather
 

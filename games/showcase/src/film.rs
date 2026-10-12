@@ -80,13 +80,14 @@ fn pose(places: &[Place], secs: f32, t: f32) -> (DVec3, DVec3, f32) {
     let leg = ((t / secs) as usize).min(legs - 1);
     let (a, b) = (&places[leg], &places[leg + 1]);
     let s = smootherstep((t / secs - leg as f32).clamp(0.0, 1.0)) as f64;
-    let mut eye = a.position.lerp(b.position, s);
-    // Arc up between far-apart places, and never dip into a hill on the way.
+    // Arc up between far-apart places (raising the aim point as much, so the camera keeps its
+    // pitch instead of staring at the ground), and never dip into a hill on the way.
     let span = (b.position - a.position).length();
-    eye.y += (std::f64::consts::PI * s).sin() * (span * 0.12).min(250.0);
+    let lift = DVec3::Y * (std::f64::consts::PI * s).sin() * (span * 0.12).min(250.0);
+    let mut eye = a.position.lerp(b.position, s) + lift;
     let ground = landscape::shared().height(eye.x, eye.z);
     eye.y = eye.y.max(ground + 2.0);
-    let target = a.target.lerp(b.target, s);
+    let target = a.target.lerp(b.target, s) + lift;
     let hour = a.hour + (b.hour - a.hour) * s as f32;
     (eye, target, hour)
 }
@@ -130,7 +131,7 @@ fn run(world: &mut World) {
     }
     let recorded = frame.saturating_sub(SETTLE_FRAMES);
     if frame >= SETTLE_FRAMES && recorded >= total {
-        call(world, "audio.record", serde_json::json!({ "stop": true }));
+        // The recording was started for exactly this long, so it has written its file.
         places::leave(world);
         engine::core::log::info!("film: {total} frames in {OUT_DIR}");
         world.write_message(AppExit::Success);
