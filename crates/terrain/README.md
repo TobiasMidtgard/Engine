@@ -13,7 +13,8 @@ everything else (streaming, LOD, colliders, ground queries, prints) follows the 
   skirts, built in parallel on the compute pool and kept in a pool of GPU vertex pages.
   Patches split by distance (`TerrainSettings::split_factor`), with horizon and frustum
   culling; a patch only splits once all its children are built, so there are no holes when
-  flying fast, and a teleport builds until the view is complete. Positions are `f64` and
+  flying fast, and a teleport builds until the view is complete. Vertices geomorph toward the
+  parent patch's shape before a split or merge, so detail never pops. Positions are `f64` and
   rendered camera-relative, so a 6,371 km Earth is exact to the centimeter at the surface.
 - **Planet shapes.** `PlanetShape` presets for an Earth-like world (continents, oceans,
   eroded mountains, hills, climate bands), the Moon (craters, maria) and Mars (craters,
@@ -31,9 +32,32 @@ everything else (streaming, LOD, colliders, ground queries, prints) follows the 
   world coordinates (a level, the showcase valley) and blends it back into the planet at the
   edge. The terrain bends it onto the sphere so the ground passes through `(x, f(x, z), z)`
   to the centimeter, and rendering, the `Ground` query, prints and colliders all use it.
+  `with_overlay_paint(|x, z| …)` paints it: an `OverlayPaint` layer (grass, leaves, dirt,
+  mud, sand, gravel, rock, concrete, snow, ash) for roads, plazas and woods, and a tint for
+  fields. Footsteps, rain and the `Ground` query follow the painted layer; edits paint over it.
 - **Ground cover from afar.** Climate colors (lush, dry, desert, snow by temperature and
   altitude), woods as dark canopy, meadows and fields in patches a few hundred meters
-  across, rock on steep or high ground, beaches.
+  across, worn bare patches, rock on steep or high ground with scree below it, beaches.
+- **Detailed ground materials up close.** Nine PBR materials (turf in tufts over thatch,
+  leaf litter with needles and twigs, soil, churned mud, rock, snow, rippled sand, gravel,
+  concrete) are generated procedurally in `materials.rs` like a node-graph material: height
+  from noise, cells and thousands of scattered blades, leaves and stones, then normals,
+  occlusion, cavity tint and roughness, with mips that widen roughness where normals
+  disagree. They bake once per process on a background thread (about 2 s at 1024²,
+  `TerrainSettings::material_resolution`) and need no files. The shader multiplies each
+  material's detail into the planet palette's color, so the Earth, Moon and Mars share them
+  and the ground looks the same near and far; materials blend by height (stones and blades
+  poke through their neighbors), tiles never visibly repeat (two offset lookups switched by
+  noise), and rock is projected on three axes at three scales so cliffs read as rock from
+  kilometers away. `examples/material_swatches.rs` saves a lit preview of each.
+- **Photo-scanned ground where fetched.** Seven materials (grass, forest floor, soil, mud,
+  rock, sand, gravel) have CC0 Poly Haven scans listed in `assets/manifests/terrain.toml`.
+  After `cargo run -p fetch-assets -- terrain` they replace the procedural versions
+  (`TerrainSettings::scanned_materials`, on by default); the 2K color, normal, roughness,
+  occlusion and height maps are filtered down to the material resolution through the same
+  mip builder. Snow and concrete stay procedural, and any material whose files are missing
+  or unreadable falls back on its own. The `terrain.scanned_materials` diagnostic counts the
+  scans in use.
 - **Edits.** `TerrainEdit` messages dig, raise, smooth and paint (sphere, capsule, box).
   Edits are analytic, so they are exact at every level of detail and from any distance, and
   rebuild only the patches and colliders they touch.
@@ -44,8 +68,9 @@ everything else (streaming, LOD, colliders, ground queries, prints) follows the 
   flattened and springs back. Prints outside the grid are kept and re-stamped when it moves.
 - **Weather on the ground.** Wetness, puddles, snow depth and scorch from `SurfaceLayers`
   (written by the weather module) darken and gloss the ground, turn soil to mud, fill
-  footprints and low spots with water (with rain ripples), and cover the ground in snow that
-  footprints cut through. Without `SurfaceLayers`, the global weather in the frame is used.
+  footprints, ruts and the hollows of the mud texture with water (with rain ripples), and
+  cover the ground in snow that settles in hollows and on ledges first and that footprints
+  cut through. Without `SurfaceLayers`, the global weather in the frame is used.
 - **Ocean.** Optional sea surface at sea level (`PlanetTerrain::ocean_surface`) with depth
   tint and waves; turn it off when a water module draws the sea.
 - **Ground query and colliders.** Installs the `Ground` provider (height, normal, surface
@@ -79,23 +104,27 @@ commands.entity(bodies["Earth"]).insert(
     PlanetTerrain::earthlike(7)
         .with_radius(6_371_000.0)
         .with_pad(FlatPad::default())
-        .with_overlay(20_000.0, 6_000.0, |x, z| my_level_height(x, z)),
+        .with_overlay(20_000.0, 6_000.0, |x, z| my_level_height(x, z))
+        .with_overlay_paint(|x, z| my_level_paint(x, z)), // Option<OverlayPaint>
 );
 commands.entity(bodies["Moon"]).insert(PlanetTerrain::moon(7).with_radius(1_737_400.0));
 ```
 
-`examples/terrain_shots.rs` renders the test views headless (lab prints, rain, snow, the
-range, the coast, the Moon and Mars from orbit) and `examples/terrain_map.rs` draws a relief
+`examples/terrain_shots.rs` renders the test views headless (lab prints, rain, snow, painted
+ground, the range, the coast, the Moon and Mars from orbit) and `examples/terrain_map.rs` draws a relief
 map around the home pad for tuning shapes.
 
 ## Test cases in the showcase
 
 `demo::spawn_demo` builds the Terrain lab: four 32 m strips of mud, snow, sand and grass with
 a person, a dog, a horse and a rover walking them (prints and tracks appear from the first
-frame), plus a dug crater, a trench and a raised mound.
+frame), plus a dug crater, a trench and a raised mound. The walkers make prints but have no
+bodies: attach a character, animal or vehicle from the module that owns it as a child of
+each `DemoWalker` entity (its `Transform` moves along the path facing forward), or pass
+`LabOptions { stand_in_bodies: true }` to `spawn_demo_with` for plain shapes.
 
 ## Known limits (next rounds)
 
 - Prints are recorded in world X/Z, which is right on level ground near the focus (the
   showcase map, or anywhere once the space module re-centers the world on the player).
-- No caves or overhangs yet (voxel volumes are next), and no geomorphing between levels.
+- No caves or overhangs yet (voxel volumes are next).

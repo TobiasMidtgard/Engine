@@ -10,7 +10,7 @@ use engine_core::prelude::*;
 use engine_core::time::TimeSource;
 use engine_render::prelude::*;
 use engine_render::{RenderDisabled, capture_now};
-use engine_terrain::{FlatPad, PlanetTerrain, TerrainPlugin, demo};
+use engine_terrain::{FlatPad, OverlayPaint, PlanetTerrain, TerrainPlugin, demo};
 use engine_world::{PrecipitationKind, SimulationFocus, SurfaceLayers, WeatherState};
 
 #[derive(Clone, Copy)]
@@ -40,6 +40,8 @@ struct View {
     ev100: f32,
     fov: f32,
     lab: bool,
+    /// Hand-made, painted ground around home (roads, a plaza, fields, woods, a beach).
+    painted: bool,
     ground: Ground,
 }
 
@@ -53,6 +55,7 @@ const BASE: View = View {
     ev100: 14.5,
     fov: 60.0,
     lab: false,
+    painted: false,
     ground: Ground::Dry,
 };
 
@@ -100,6 +103,22 @@ fn views() -> Vec<View> {
             ev100: 15.0,
             lab: true,
             ground: Ground::Snow,
+            ..BASE
+        },
+        View {
+            name: "painted_ground",
+            eye: DVec3::new(-35.0, 38.0, 75.0),
+            target: DVec3::new(15.0, 0.0, -45.0),
+            sun: (230.0, 32.0),
+            painted: true,
+            ..BASE
+        },
+        View {
+            name: "painted_close",
+            eye: DVec3::new(-6.0, 2.2, 14.0),
+            target: DVec3::new(6.0, 0.0, -14.0),
+            sun: (235.0, 24.0),
+            painted: true,
             ..BASE
         },
         View {
@@ -186,6 +205,52 @@ fn views() -> Vec<View> {
     ]
 }
 
+fn painted_height(x: f64, z: f64) -> f64 {
+    (x / 80.0).sin() * 1.2 + (z / 120.0).cos() * 0.8 - 0.8
+}
+
+/// A small hand-made layout, like a game level paints its valley.
+fn painted_ground(x: f64, z: f64) -> Option<OverlayPaint> {
+    let fade = |d: f64, inner: f64, outer: f64| {
+        let t = ((outer - d) / (outer - inner)).clamp(0.0, 1.0);
+        (t * t * (3.0 - 2.0 * t)) as f32
+    };
+    // A winding dirt road.
+    let road = (z - 12.0 * (x / 45.0).sin()).abs();
+    if road < 3.6 {
+        return Some(OverlayPaint::layer("dirt", fade(road, 2.2, 3.6)));
+    }
+    // A stone plaza with a gravel ring around it.
+    let plaza = x.hypot(z + 40.0);
+    if plaza < 16.0 {
+        return Some(OverlayPaint::layer("concrete", fade(plaza, 14.5, 16.0)));
+    }
+    if plaza < 20.0 {
+        return Some(OverlayPaint::layer(
+            "gravel",
+            fade((plaza - 18.0).abs(), 1.4, 2.0),
+        ));
+    }
+    // Fields: wheat, lavender and plowed strips.
+    if (35.0..170.0).contains(&x) && (-150.0..-25.0).contains(&z) {
+        let strip = ((x - 35.0) / 22.0).floor() as i32 % 3;
+        return Some(match strip {
+            0 => OverlayPaint::tint([0.36, 0.27, 0.09], 0.85),
+            1 => OverlayPaint::tint([0.17, 0.11, 0.24], 0.8),
+            _ => OverlayPaint::layer("dirt", 1.0).tinted([0.11, 0.075, 0.045], 0.6),
+        });
+    }
+    // Woods: leaf litter.
+    if (-170.0..-30.0).contains(&x) && (-150.0..-25.0).contains(&z) {
+        return Some(OverlayPaint::layer("leaves", 1.0));
+    }
+    // A sandy shore.
+    if z > 45.0 {
+        return Some(OverlayPaint::layer("sand", fade(z, 52.0, 45.0)));
+    }
+    None
+}
+
 fn sun_dir(azimuth_deg: f64, elevation_deg: f64) -> DVec3 {
     let (az, el) = (azimuth_deg.to_radians(), elevation_deg.to_radians());
     // North is −Z, east is +X.
@@ -214,6 +279,13 @@ fn build(view: &View, size: (u32, u32)) -> App {
         World3::Mars => PlanetTerrain::mars(5),
     }
     .with_pad(pad);
+    let planet = if view.painted {
+        planet
+            .with_overlay(400.0, 300.0, painted_height)
+            .with_overlay_paint(painted_ground)
+    } else {
+        planet
+    };
     let tf = planet.home_transform(pad);
     {
         let mut atmo = app.world.resource_mut::<Atmosphere>();
@@ -320,7 +392,22 @@ fn main() {
             },
             Transform::from_translation(eye).looking_at(view.target, Vec3::Y),
         ));
-        // Let the walkers lay their trails and the terrain finish streaming.
+        // Let the walkers lay their trails and the terrain finish streaming, with the ground
+        // materials baked.
+        let settings = app
+            .world
+            .get_resource::<engine_terrain::TerrainSettings>()
+            .cloned()
+            .unwrap_or_default();
+        let (resolution, scans) = (
+            settings.material_resolution,
+            settings.scan_folder(&app.world),
+        );
+        while resolution > 0
+            && engine_terrain::materials::shared(resolution, scans.as_deref()).is_none()
+        {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
         app.update_n(12);
         let path = out.join(format!("{}.png", view.name));
         match capture_now(&mut app.world, &path) {
