@@ -9,7 +9,9 @@
 //! - [`meshgen`]: the mesh toolkit (rounded and chamfered boxes, lofts, lathes, extrusions).
 //! - [`texgen`]: tiling noise and PBR texture baking.
 
+pub mod fighter;
 pub mod meshgen;
+pub mod rig;
 pub mod texgen;
 
 use engine_assets::Assets;
@@ -60,7 +62,7 @@ impl Library<'_> {
 pub type Generator = fn(&mut Library);
 
 /// Everything the look generates, in order.
-pub const LIBRARY: &[Generator] = &[];
+pub const LIBRARY: &[Generator] = &[fighter::generate];
 
 /// A mesh registered by a generator.
 pub fn mesh(key: &str) -> MeshRef {

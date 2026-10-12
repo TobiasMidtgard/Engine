@@ -16,21 +16,26 @@
 //!   only runs while a camera is within [`DuelDirector::watch_radius`] of the ring, because
 //!   its slow motion slows the whole world.
 //!
-//! The characters are capsule puppets (body, head, visor, sword) posed procedurally from the
-//! movement state until the animation module provides skeletons. The bots that drive them
-//! write `MoveIntent` exactly like player input or NPC AI would. Only one demo per world.
+//! The characters are armored sword fighters ([`look::fighter`]) posed procedurally from the
+//! movement and combat state on their own clocks ([`look::rig`]): rigid parts on a skeleton,
+//! with IK for the arms and legs. The bots that drive them write `MoveIntent` exactly like
+//! player input or NPC AI would. Only one demo per world.
 
 use std::f32::consts::FRAC_PI_2;
 
 use engine_core::math::{DVec3, Quat, Vec3};
 use engine_core::prelude::*;
+use engine_core::time::LocalTimeScale;
 use engine_render::{Camera, MeshRenderer, Shape, StandardMaterial};
+use engine_world::animation::AnimationParams;
 use engine_world::locomotion::{LocomotionMode, MoveIntent};
 use engine_world::physics::{CharacterController, Collider, RigidBody};
 use engine_world::{AttackEvent, AttackKind};
 
 use crate::afterimage::Afterimages;
 use crate::combat::{AttackPhase, CombatState, Fighter};
+use crate::look::fighter::{self, Style};
+use crate::look::rig::{self, AnimInput, Animator, AttackAnim, Bone};
 use crate::mover::{Mover, flat};
 use crate::profile::MovementProfile;
 use crate::tempo::{Perceiver, Tempo};
@@ -151,15 +156,13 @@ pub struct AttackerBrain {
     pulse: bool,
 }
 
-/// A procedurally posed stand-in body. Children: the rig (tilts), and the sword.
-#[derive(Component, Debug, Clone, Copy)]
+/// A procedurally animated fighter: the bone entities it poses every frame (children of the
+/// character; see [`look::rig`]) and its animation state.
+#[derive(Component, Debug, Clone)]
 pub struct Puppet {
-    rig: Entity,
-    sword: Entity,
-    tilt: Quat,
-    crouch: f32,
-    fallen: f32,
-    swing: f32,
+    bones: [Entity; Bone::ANIMATED],
+    anim: Animator,
+    was_defeated: bool,
 }
 
 #[derive(Component)]
@@ -198,93 +201,38 @@ fn at(origin: DVec3, x: f64, y: f64, z: f64) -> DVec3 {
     origin + DVec3::new(x, y, z)
 }
 
-/// Colors of a character.
-struct Look {
-    body: StandardMaterial,
-    head: StandardMaterial,
-    visor: StandardMaterial,
-    blade: StandardMaterial,
-    trail: [f32; 3],
-}
-
 fn spawn_character(
     commands: &mut Commands,
     name: &str,
     pos: DVec3,
     facing: Vec3,
-    look: &Look,
+    style: Style,
     profile: MovementProfile,
     extra: impl Bundle,
 ) -> Entity {
     let rotation = engine_core::transform::look_rotation(facing, Vec3::Y).unwrap_or_default();
+    let controller = CharacterController::default();
     let id = commands
         .spawn((
             Name::new(name.to_string()),
             Transform::from_translation(pos).with_rotation(rotation),
             profile,
-            CharacterController::default(),
-            Afterimages::colored(look.trail).lasting(0.8),
+            controller,
+            Afterimages::colored(style.trail()).lasting(0.8),
             extra,
         ))
         .id();
-    let rig = commands
-        .spawn((Transform::default(), ChildOf(id), PuppetPart))
-        .id();
-    let part = |commands: &mut Commands, t: Transform, shape: Shape, m: StandardMaterial| {
-        commands.spawn((t, MeshRenderer::new(shape, m), ChildOf(rig)));
-    };
-    part(
-        commands,
-        Transform::from_xyz(0.0, -0.22, 0.0),
-        Shape::Capsule {
-            radius: 0.3,
-            height: 1.36,
-            segments: 20,
-        },
-        look.body,
-    );
-    part(
-        commands,
-        Transform::from_xyz(0.0, 0.68, 0.0),
-        Shape::Sphere {
-            radius: 0.17,
-            segments: 20,
-        },
-        look.head,
-    );
-    part(
-        commands,
-        Transform::from_xyz(0.0, 0.7, -0.14),
-        Shape::Cuboid {
-            size: [0.24, 0.06, 0.06],
-        },
-        look.visor,
-    );
-    let sword = commands
-        .spawn((
-            Transform::from_xyz(0.36, 0.05, -0.1),
-            ChildOf(rig),
-            PuppetPart,
-        ))
-        .id();
-    commands.spawn((
-        Transform::from_xyz(0.0, 0.0, -0.55),
-        MeshRenderer::new(
-            Shape::Cuboid {
-                size: [0.04, 0.09, 1.1],
-            },
-            look.blade,
-        )
-        .without_shadows(),
-        ChildOf(sword),
-    ));
+    // The body: posed bones under the character with the feet at the capsule's bottom.
+    let body = fighter::spawn_body(commands, id, style, -controller.height * 0.5);
+    let mut bones = [Entity::PLACEHOLDER; Bone::ANIMATED];
+    bones.copy_from_slice(&body.bones[..Bone::ANIMATED]);
+    for &bone in &bones {
+        commands.entity(bone).insert(PuppetPart);
+    }
     commands.entity(id).insert(Puppet {
-        rig,
-        sword,
-        tilt: Quat::IDENTITY,
-        crouch: 0.0,
-        fallen: 0.0,
-        swing: 0.0,
+        bones,
+        anim: Animator::new(style),
+        was_defeated: false,
     });
     id
 }
@@ -378,19 +326,12 @@ pub fn spawn_demo(commands: &mut Commands, origin: DVec3) {
         amber,
     );
 
-    let runner_look = Look {
-        body: mat(0x14a38b, 0.5),
-        head: mat(0xe8d5c0, 0.6),
-        visor: glow(0x7dffe0, 300.0),
-        blade: glow(0x7dffe0, 300.0),
-        trail: [0.2, 1.0, 0.75],
-    };
     spawn_character(
         commands,
         "Runner",
         origin + DVec3::from_array(layout::RUN_START) + DVec3::Y * 0.9,
         Vec3::X,
-        &runner_look,
+        Style::Pilot,
         MovementProfile::pilot(),
         Brain::Runner {
             step: 0,
@@ -454,13 +395,7 @@ pub fn spawn_demo(commands: &mut Commands, origin: DVec3) {
         "Duelist",
         ring + DVec3::new(0.0, 1.0, 4.5),
         Vec3::NEG_Z,
-        &Look {
-            body: mat(0x2a6fdb, 0.45),
-            head: mat(0xe8d5c0, 0.6),
-            visor: glow(0x9fe8ff, 300.0),
-            blade: glow(0x9fe8ff, 600.0),
-            trail: [0.3, 0.75, 1.0],
-        },
+        Style::Duelist,
         MovementProfile::pilot(),
         (
             Fighter {
@@ -477,13 +412,7 @@ pub fn spawn_demo(commands: &mut Commands, origin: DVec3) {
         "Elite",
         ring + DVec3::new(0.0, 1.0, -4.5),
         Vec3::Z,
-        &Look {
-            body: mat(0x2a0a10, 0.35),
-            head: mat(0x1a1a1e, 0.4),
-            visor: glow(0xff2a3a, 600.0),
-            blade: glow(0xff2a3a, 900.0),
-            trail: [1.0, 0.12, 0.18],
-        },
+        Style::Elite,
         MovementProfile::elite(),
         (
             Fighter {
@@ -510,13 +439,7 @@ pub fn spawn_demo(commands: &mut Commands, origin: DVec3) {
             &format!("Grunt {}", i + 1),
             stand_spot(ring, i),
             Vec3::Z,
-            &Look {
-                body: mat(0xa0522d, 0.7),
-                head: mat(0xd9b99b, 0.6),
-                visor: glow(0xffa040, 200.0),
-                blade: mat(0xb8bcc4, 0.3).with_metallic(1.0),
-                trail: [1.0, 0.5, 0.2],
-            },
+            Style::Grunt,
             MovementProfile::human(),
             (
                 Fighter {
@@ -1047,63 +970,94 @@ fn think_attackers(
 
 // ------------------------------------------------------------------------ puppets
 
-/// Pose the stand-in bodies from the movement and combat state (Update).
+/// Animate the fighters from their movement and combat state, on their own clocks (Update).
+#[allow(clippy::type_complexity)]
 fn animate_puppets(
     time: Res<Time>,
-    mut puppets: Query<(&mut Puppet, &Mover, Option<&CombatState>)>,
-    mut parts: Query<&mut Transform, With<PuppetPart>>,
+    mut puppets: Query<(
+        &mut Puppet,
+        &Transform,
+        &Mover,
+        &CharacterController,
+        Option<&CombatState>,
+        Option<&Fighter>,
+        Option<&AnimationParams>,
+        Option<&LocalTimeScale>,
+    )>,
+    mut bones: Query<&mut Transform, (With<PuppetPart>, Without<Puppet>)>,
 ) {
-    let dt = time.real_delta_secs().max(0.0);
-    let k = 1.0 - (-14.0 * dt).exp();
-    for (mut p, m, cs) in &mut puppets {
+    for (mut p, t, m, cc, cs, f, params, local) in &mut puppets {
         let defeated = cs.is_some_and(|c| c.defeated);
-        let stagger = cs.is_some_and(|c| c.stagger_secs > 0.0);
-        let crouch = if matches!(m.mode, LocomotionMode::Slide | LocomotionMode::Crouch) {
-            1.0
+        if p.was_defeated && !defeated {
+            // Revived: stand straight up instead of getting up through the blend.
+            p.anim.reset();
+        }
+        p.was_defeated = defeated;
+        let input = anim_input(time.delta_for(local), t, m, cc, cs, f, params);
+        let pose = p.anim.update(&input);
+        let solved = rig::solve(&pose);
+        let lift = -cc.height * 0.5;
+        for (i, &e) in p.bones.iter().enumerate() {
+            if let Ok(mut bt) = bones.get_mut(e) {
+                *bt = fighter::bone_transform(solved[i], lift);
+            }
+        }
+    }
+}
+
+/// What the animation needs to know, in character space (feet at the origin, facing −Z).
+fn anim_input(
+    dt: f32,
+    t: &Transform,
+    m: &Mover,
+    cc: &CharacterController,
+    cs: Option<&CombatState>,
+    f: Option<&Fighter>,
+    params: Option<&AnimationParams>,
+) -> AnimInput {
+    let inv = t.rotation.inverse();
+    let feet = t.translation - (t.rotation * Vec3::Y * (cc.height * 0.5)).as_dvec3();
+    let attack = cs.and_then(|c| c.attack).map(|a| {
+        let dash = a.kind == AttackKind::Dash;
+        let total = match (a.phase, f) {
+            (AttackPhase::Windup, Some(f)) if dash => f.dash_windup_secs,
+            (AttackPhase::Windup, Some(f)) => f.windup_secs,
+            (AttackPhase::Strike, Some(f)) => f.strike_secs,
+            (AttackPhase::Recovery, Some(f)) => f.recovery_secs,
+            _ => 0.0,
+        };
+        let progress = if total > 0.0 {
+            (1.0 - a.secs_left / total).clamp(0.0, 1.0)
         } else {
             0.0
         };
-        let tilt = if stagger {
-            Quat::from_rotation_x(0.35)
-        } else {
-            m.body_tilt()
-        };
-        let swing: f32 = match cs.and_then(|c| c.attack) {
-            Some(a) => match a.phase {
-                AttackPhase::DashIn => -0.6,
-                AttackPhase::Windup => -1.0,
-                AttackPhase::Strike => 1.0,
-                AttackPhase::Recovery => 0.6,
-            },
-            None if cs.is_some_and(|c| c.blocking) => -0.3,
-            None => 0.0,
-        };
-        p.tilt = p.tilt.slerp(tilt, k);
-        p.crouch += (crouch - p.crouch) * k;
-        p.fallen += ((if defeated { 1.0 } else { 0.0 }) - p.fallen) * k * 0.6;
-        // Swings snap (they are fast); returning to rest is smoothed.
-        p.swing = if swing.abs() > p.swing.abs() || swing.signum() != p.swing.signum() {
-            swing
-        } else {
-            p.swing + (swing - p.swing) * k
-        };
-        if let Ok(mut rig) = parts.get_mut(p.rig) {
-            let fall = Quat::from_rotation_x(-FRAC_PI_2 * p.fallen);
-            rig.rotation = fall * p.tilt;
-            rig.translation = Vec3::new(0.0, -0.35 * p.crouch - 0.55 * p.fallen, 0.0).as_dvec3();
-            rig.scale = Vec3::new(1.0, 1.0 - 0.35 * p.crouch, 1.0);
+        AttackAnim {
+            dash,
+            phase: a.phase,
+            progress,
+            secs: a.secs,
         }
-        if let Ok(mut sword) = parts.get_mut(p.sword) {
-            // Rest: point forward-down. Windup: raised behind. Strike: swept across.
-            let s = p.swing;
-            let pitch = if s < 0.0 {
-                -0.5 + s * 1.6
-            } else {
-                -0.5 + s * 0.3
-            };
-            let yaw = if s > 0.0 { s * 1.9 } else { 0.0 };
-            sword.rotation = Quat::from_rotation_y(yaw) * Quat::from_rotation_x(pitch);
-            sword.translation = Vec3::new(0.36 - 0.25 * s.max(0.0), 0.05, -0.1).as_dvec3();
-        }
+    });
+    AnimInput {
+        dt,
+        mode: m.mode,
+        velocity: inv * m.velocity,
+        grounded: m.grounded,
+        air_jumps_left: m.air_jumps_left,
+        wall: m.wall.map(|w| {
+            let gap = (t.translation - w.point).as_vec3().dot(w.normal).abs();
+            (inv * w.normal, gap)
+        }),
+        ledge: m
+            .mantle
+            .map(|mt| (inv * (mt.top - feet).as_vec3(), mt.rising)),
+        dash_strike: m.dash.is_some_and(|d| d.strike),
+        attack,
+        blocking: cs.is_some_and(|c| c.blocking),
+        stagger: cs.is_some_and(|c| c.stagger_secs > 0.0),
+        hits_taken: cs.map_or(0, |c| c.hits_taken),
+        defeated: cs.is_some_and(|c| c.defeated),
+        fighter: f.is_some(),
+        effort: params.map_or(0.2, |p| p.get("effort")),
     }
 }
