@@ -1,7 +1,8 @@
 //! Procedural fighters: near-future arena combatants. Padded undersuits under segmented,
 //! painted armor plates with rolled rims, leather belts and straps, team tabards, open helmets
-//! with a horsehair crest and a brow light over mail coifs, sculpted faces (the skin tone
-//! varies between fighters), gloved fists, boots, and their weapons (a two-handed longsword,
+//! with a horsehair crest and a brow light over leather-bound mail coifs, sculpted faces (four
+//! face shapes; skin tone and eye color vary between fighters), gloved fists, boots, and their
+//! weapons (a two-handed longsword,
 //! an arming sword with a steel-rimmed heater shield, a carbine with an optic, and a composite
 //! recurve bow).
 //!
@@ -10,9 +11,10 @@
 //! for hard armor (a thick panel laid over a body surface, outlined by a 2D distance field,
 //! with a rolled rim and relief), and lathes, sweeps and extrusions for weapons. All pieces
 //! share one texture atlas ([`Zone`] tiles: paint, padded suit, cloth, leather, metal, polymer,
-//! glass, wood, mail, skin, hair); vertex colors carry the tint of each sub-part and baked
-//! ambient occlusion, and team colors are applied to a copy of a mesh ([`Kit::mesh`]), so all
-//! fighters of a team share one mesh per piece.
+//! glass, wood, mail with four times the texels, skin, hair); vertex colors carry the tint of
+//! each sub-part and baked ambient occlusion, and team colors are applied to a copy of a mesh
+//! ([`Kit::mesh`]), so all fighters of a team share one mesh per piece (faces: one per shape,
+//! skin tone and eye color, [`Kit::face`]).
 //!
 //! Each piece is modeled in its joint's frame (see [`rig`]): limbs hang along −Y from the
 //! joint at the origin, the body faces −Z, the right side is +X; left limbs mirror the right.
@@ -27,7 +29,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use engine_core::prelude::*;
 use engine_render::{Image, Mesh, Vertex};
 
-use super::noise::{fbm2, perlin2, ridged2, worley2};
+use super::noise::{fbm2, perlin2, rand3, ridged2, worley2};
 use super::sdf::{self, Grid, capsule, ellipsoid, round_box, round_cone, smax, smin, sphere, ssub};
 use super::tex::{Texel, TextureSet, mix, smooth};
 
@@ -166,22 +168,43 @@ impl Zone {
     ];
 }
 
-/// Atlas layout: tiles of `TILE`² pixels in `ATLAS_COLS` × `ATLAS_ROWS`.
+/// Atlas layout: cells of `TILE`² pixels in `ATLAS_COLS` × `ATLAS_ROWS`.
 pub const ATLAS_COLS: u32 = 4;
-pub const ATLAS_ROWS: u32 = 3;
+pub const ATLAS_ROWS: u32 = 4;
 pub const TILE: u32 = 256;
-/// Unused pixels around each tile's content (keeps mip levels from bleeding).
-const GUTTER: f32 = 10.0;
+/// Unused pixels around each cell's content (keeps mip levels from bleeding).
+const GUTTER: u32 = 10;
 /// Meters of surface one tile spans; bigger parts are squeezed to fit.
 pub const TILE_M: f32 = 0.5;
 
+/// Where a zone's tile sits in the atlas (its first cell's column and row) and how many cells
+/// it spans each way: the mail's rings get a block of four.
+fn cell(zone: Zone) -> (u32, u32, u32) {
+    match zone {
+        Zone::Mail => (2, 2, 2),
+        Zone::Skin => (0, 2, 1),
+        Zone::Hair => (1, 2, 1),
+        z => (z as u32 % ATLAS_COLS, z as u32 / ATLAS_COLS, 1),
+    }
+}
+
+/// Meters of surface a zone's tile spans: the mail's tile is finer (its only part, the coif,
+/// is smaller).
+fn tile_m(zone: Zone) -> f32 {
+    match zone {
+        Zone::Mail => 0.3,
+        _ => TILE_M,
+    }
+}
+
 /// Atlas UV of a point `m` (meters, 0..`span`) of a part in `zone`.
 fn tile_uv(zone: Zone, m: Vec2, span: f32) -> Vec2 {
-    let i = zone as u32;
-    let cell = Vec2::new((i % ATLAS_COLS) as f32, (i / ATLAS_COLS) as f32);
-    let usable = TILE as f32 - 2.0 * GUTTER;
-    let px =
-        cell * TILE as f32 + Vec2::splat(GUTTER) + (m / span).clamp(Vec2::ZERO, Vec2::ONE) * usable;
+    let (cx, cy, k) = cell(zone);
+    let gutter = (GUTTER * k) as f32;
+    let usable = (TILE * k) as f32 - 2.0 * gutter;
+    let px = Vec2::new(cx as f32, cy as f32) * TILE as f32
+        + Vec2::splat(gutter)
+        + (m / span).clamp(Vec2::ZERO, Vec2::ONE) * usable;
     px / Vec2::new((ATLAS_COLS * TILE) as f32, (ATLAS_ROWS * TILE) as f32)
 }
 
@@ -327,36 +350,62 @@ fn texel(zone: Zone, p: Vec2) -> Texel {
             }
         }
         Zone::Mail => {
-            // Rows of interlinked rings (10 mm across, every other row offset by half).
-            let (pitch, row) = (0.013, 0.0098);
-            let j = (p.y / row).floor();
-            let shift = if j.rem_euclid(2.0) == 0.0 { 0.0 } else { 0.5 };
-            let c = Vec2::new(
-                ((p.x / pitch + shift).floor() + 0.5 - shift) * pitch,
-                (j + 0.5) * row,
-            );
-            // Each ring overlaps its neighbors: take the nearest of the three below and beside.
-            let mut ring: f32 = 0.0;
-            for d in [
-                v2(0.0, 0.0),
-                v2(pitch, 0.0),
-                v2(-pitch, 0.0),
-                v2(pitch * 0.5, row),
-                v2(-pitch * 0.5, row),
-                v2(pitch * 0.5, -row),
-                v2(-pitch * 0.5, -row),
-            ] {
-                let r = (p - c - d).length() / (pitch * 0.5);
-                ring = ring.max(1.0 - ((r - 0.72) / 0.22).powi(2));
+            // European four-in-one: rows of rings 11 mm across, every other row offset by half,
+            // each ring through two of the row above and two below, rows leaning alternately
+            // left and right so the raised side of each ring lies on its neighbors. Each ring
+            // sits a little off its place, a little bigger or smaller and turned, with its own
+            // polish and rust; rust and dirt gather in the gaps.
+            let (pitch, row) = (0.0084, 0.005);
+            let (i, j) = ((p.x / pitch).floor() as i32, (p.y / row).floor() as i32);
+            let mut wire: f32 = 0.0;
+            let mut shine = 0.0;
+            let mut own_rust = 0.0;
+            for dj in -2..=2 {
+                for di in -1..=1 {
+                    let (ri, rj) = (i + di, j + dj);
+                    let odd = rj.rem_euclid(2) as f32;
+                    let rnd = |k: u32| rand3(ri, rj, 0, 120 + k);
+                    let c = v2(
+                        (ri as f32 + 0.5 + 0.5 * odd) * pitch,
+                        (rj as f32 + 0.5) * row,
+                    ) + (v2(rnd(0), rnd(1)) - 0.5) * 0.0009;
+                    let lean = 1.0 - 2.0 * odd;
+                    let turn = lean * 0.25 + (rnd(2) - 0.5) * 0.3;
+                    let size = 1.0 + (rnd(3) - 0.5) * 0.12;
+                    let (sn, cs) = turn.sin_cos();
+                    let q = p - c;
+                    let q = v2(q.x * cs + q.y * sn, q.y * cs - q.x * sn);
+                    let radii = v2(0.0052, 0.0044) * size;
+                    let d = ((q / radii).length() - 1.0) * radii.min_element();
+                    let profile = (1.0 - (d / 0.0009).powi(2)).max(0.0).sqrt();
+                    let raised = 0.62 + 0.38 * (q.x / radii.x * lean).clamp(-1.0, 1.0);
+                    let h = profile * raised * (0.85 + 0.15 * rnd(4));
+                    if h > wire {
+                        wire = h;
+                        shine = rnd(5);
+                        own_rust = rnd(6);
+                    }
+                }
             }
-            let ring = ring.max(0.0);
-            let rust = smooth(0.6, 0.9, fbm2(p * 7.0, 0, 3, 0.5, 101) * 0.5 + 0.5);
+            let rust_n = fbm2(p * 9.0, 0, 3, 0.5, 101) * 0.5 + 0.5;
+            let rust = smooth(0.5, 0.82, rust_n + 0.2 * own_rust);
+            let dirt = smooth(0.35, 0.75, fbm2(p * 25.0, 0, 2, 0.5, 102) * 0.5 + 0.5);
+            let on = smooth(0.05, 0.3, wire);
+            let steel = lum(0.45 + 0.35 * shine);
+            let rusty = Vec3::new(0.42, 0.22, 0.1);
+            let metal = mix(steel, rusty, rust * (0.3 + 0.7 * (1.0 - wire)));
+            let gap = mix(
+                Vec3::new(0.07, 0.06, 0.05),
+                Vec3::new(0.24, 0.12, 0.05),
+                rust,
+            );
+            let gap = gap * (1.0 - 0.5 * dirt);
             Texel {
-                albedo: lum(0.1 + 0.6 * ring - 0.25 * rust * ring),
-                height: ring * 0.0008,
-                roughness: 0.38 + 0.3 * (1.0 - ring) + 0.25 * rust,
-                metallic: ring * (1.0 - 0.5 * rust),
-                occlusion: 0.35 + 0.65 * ring,
+                albedo: mix(gap, metal, on),
+                height: wire * 0.0008,
+                roughness: 0.95 + (0.3 + 0.2 * (1.0 - shine) + 0.45 * rust - 0.95) * on,
+                metallic: on * (1.0 - 0.8 * rust),
+                occlusion: 0.3 + 0.7 * on * (0.55 + 0.45 * wire),
             }
         }
         Zone::Skin => {
@@ -418,13 +467,15 @@ struct BakedTile {
 }
 
 fn bake_tile(zone: Zone) -> BakedTile {
-    let n = TILE as usize;
-    let usable = TILE as f32 - 2.0 * GUTTER;
-    let texel_m = TILE_M / usable;
+    let k = cell(zone).2;
+    let n = (TILE * k) as usize;
+    let gutter = (GUTTER * k) as f32;
+    let usable = n as f32 - 2.0 * gutter;
+    let texel_m = tile_m(zone) / usable;
     let mut texels = Vec::with_capacity(n * n);
     for y in 0..n {
         for x in 0..n {
-            let m = (Vec2::new(x as f32 + 0.5, y as f32 + 0.5) - Vec2::splat(GUTTER)) * texel_m;
+            let m = (Vec2::new(x as f32 + 0.5, y as f32 + 0.5) - Vec2::splat(gutter)) * texel_m;
             texels.push(texel(zone, m));
         }
     }
@@ -485,14 +536,12 @@ fn assemble_atlas(tiles: &[BakedTile]) -> TextureSet {
         vec![0u8; w * h * 4],
     ];
     for t in tiles {
-        let i = t.zone as usize;
-        let (x0, y0) = (
-            (i % ATLAS_COLS as usize) * TILE as usize,
-            (i / ATLAS_COLS as usize) * TILE as usize,
-        );
-        let row = TILE as usize * 4;
+        let (cx, cy, k) = cell(t.zone);
+        let (x0, y0) = ((cx * TILE) as usize, (cy * TILE) as usize);
+        let n = (TILE * k) as usize;
+        let row = n * 4;
         for (k, map) in t.maps.iter().enumerate() {
-            for y in 0..TILE as usize {
+            for y in 0..n {
                 let dst = ((y0 + y) * w + x0) * 4;
                 data[k][dst..dst + row].copy_from_slice(&map[y * row..(y + 1) * row]);
             }
@@ -1691,7 +1740,7 @@ impl Builder {
             lo = lo.min(uv);
             hi = hi.max(uv);
         }
-        let span = (hi - lo).max_element().max(TILE_M);
+        let span = (hi - lo).max_element().max(tile_m(zone));
         let base = self.mesh.vertices.len() as u32;
         for v in &m.vertices {
             let mut out = *v;
@@ -2011,23 +2060,45 @@ fn lips(a: Vec3, full: f32) -> f32 {
     smin(upper, lower, 0.0015).max(a.x - 0.0245)
 }
 
-/// The nose (head frame, from the head's middle) and its nostrils, scaled from the top of the
-/// bridge by the shape.
-fn nose(r: Vec3, s: &Shape) -> (f32, f32) {
+/// The nose (head frame, from the head's middle), scaled from the top of its bridge by the
+/// shape: the bridge, a defined tip with the columella under it and the wings beside it, how
+/// deep the creases around the wings run (0..1: where the wings meet the cheeks and the tip),
+/// and the nostrils.
+fn nose(r: Vec3, s: &Shape) -> (f32, f32, f32) {
     let root = v3(0.0, 0.012, -0.088);
     let q = root + (r - root) / s.nose;
     let a = ax(q);
-    let bridge = round_cone(q, root, v3(0.0, -0.028, -0.111), 0.0068, 0.0085);
-    let tip = sphere(q, v3(0.0, -0.032, -0.109), 0.0105);
-    let wings = sphere(a, v3(0.0125, -0.038, -0.099), 0.0085);
-    let mut nose = smin(smin(bridge, tip, 0.008), wings, 0.005);
+    let bridge = round_cone(q, root, v3(0.0, -0.027, -0.1105), 0.0064, 0.0078);
+    let tip = ellipsoid(q, v3(0.0, -0.032, -0.1085), v3(0.0092, 0.009, 0.009));
+    let columella = capsule(
+        q,
+        v3(0.0, -0.0375, -0.106),
+        v3(0.0, -0.0455, -0.0965),
+        0.003,
+    );
+    let wing_c = v3(0.0118, -0.0378, -0.0985);
+    let wing = sphere(a, wing_c, 0.0078);
+    let mut nose = smin(smin(bridge, tip, 0.006), columella, 0.004);
     if s.hump > 0.0 {
         let hump = sphere(q, v3(0.0, -0.004, -0.0972 - s.hump), 0.0062);
         nose = smin(nose, hump, 0.006);
     }
-    let nostril = ellipsoid(a, v3(0.0072, -0.0455, -0.1055), v3(0.0034, 0.0022, 0.0036));
+    let nose = smin(nose, wing, 0.005);
+    // The creases, seen from the front: an arc around each wing from below it, around its
+    // outside and over its top toward the tip.
+    let v = v2(a.x - wing_c.x, a.y - wing_c.y);
+    let (from, to, radius) = (-1.2f32, 2.6f32, 0.0088);
+    let angle = v.y.atan2(v.x);
+    let off = if (from..=to).contains(&angle) {
+        (v.length() - radius).abs()
+    } else {
+        let end = |t: f32| v.distance(v2(t.cos(), t.sin()) * radius);
+        end(from).min(end(to))
+    };
+    let crease = (-(off / 0.0013).powi(2)).exp() * smooth(-0.084, -0.09, a.z);
+    let nostril = ellipsoid(a, v3(0.0068, -0.0448, -0.1045), v3(0.0032, 0.0018, 0.0034));
     let k = s.nose.min_element();
-    (nose * k, nostril * k)
+    (nose * k, crease, nostril * k)
 }
 
 /// The face with its brows, eyelids, nose and mouth (head frame).
@@ -2053,9 +2124,9 @@ fn face_form(p: Vec3, s: &Shape) -> f32 {
         ellipsoid(q, Vec3::ZERO, v3(0.0126, 0.0042 + s.lids, 0.0125)),
         0.0015,
     );
-    let (nose, nostril) = nose(r, s);
-    d = smin(d, nose, 0.006);
-    d = ssub(d, nostril, 0.0015);
+    let (nose, crease, nostril) = nose(r, s);
+    d = smin(d, nose, 0.006) + 0.0007 * crease;
+    d = ssub(d, nostril, 0.0012);
     // Cheek pads over the folds running from the nose's wings past the mouth's corners.
     let pad = ellipsoid(a, v3(0.031, -0.043, -0.081), v3(0.015, 0.016, 0.007));
     d = smin(d, pad, 0.008);
@@ -2097,18 +2168,168 @@ fn brow_hair(p: Vec3, s: &Shape) -> f32 {
     inner.min(outer).max(a.z + 0.07)
 }
 
-/// The coif's opening for the face (negative inside): an oval seen from the front, narrowing
-/// to the chin, cut through the front half of the hood.
+/// The coif's opening for the face seen from the front (head frame x and y, from the head's
+/// middle; negative inside): an oval narrowing to the chin.
+fn face_oval(q: Vec2) -> f32 {
+    let hw = 0.054 - 0.02 * smooth(-0.03, -0.115, q.y);
+    let (top, bottom, round) = (0.07, -0.113, 0.018);
+    let d = v2(
+        q.x.abs() - hw + round,
+        (q.y - top).max(bottom - q.y) + round,
+    );
+    d.max(Vec2::ZERO).length() + d.max_element().min(0.0) - round
+}
+
+/// The coif's opening for the face (negative inside): [`face_oval`] cut through the front
+/// half of the hood.
 fn face_hole(p: Vec3) -> f32 {
     let r = p - HEAD_C;
-    let hw = 0.054 - 0.02 * smooth(-0.03, -0.115, r.y);
-    let (top, bottom, round) = (0.07, -0.123, 0.018);
-    let q = v2(
-        r.x.abs() - hw + round,
-        (r.y - top).max(bottom - r.y) + round,
-    );
-    let d = q.max(Vec2::ZERO).length() + q.max_element().min(0.0) - round;
-    d.max(r.z + 0.035)
+    face_oval(v2(r.x, r.y)).max(r.z + 0.035)
+}
+
+/// How far back (head frame z) a ray straight back through `q` (head frame x and y) first
+/// meets a surface, starting 20 cm in front of the head's middle.
+fn depth(f: &dyn Fn(Vec3) -> f32, q: Vec2) -> Option<f32> {
+    let mut z = -0.2;
+    for _ in 0..200 {
+        let d = f(HEAD_C + v3(q.x, q.y, z));
+        if d < 5e-5 {
+            return Some(z);
+        }
+        z += d.max(2e-4);
+        if z > 0.1 {
+            break;
+        }
+    }
+    None
+}
+
+/// The rolled leather binding around the coif's face opening. It lines the opening's wall,
+/// from just proud of the mail back to the deepest face, so the cut edges of mail and skin
+/// both end under it.
+fn face_binding() -> Mesh {
+    // The opening's outline, finely by angle around its middle, then evenly along its length.
+    let mid = v2(0.0, -0.0265);
+    let fine: Vec<Vec2> = (0..480)
+        .map(|k| {
+            let a = TAU * k as f32 / 480.0;
+            let dir = v2(a.sin(), a.cos());
+            let (mut lo, mut hi) = (0.0f32, 0.2f32);
+            for _ in 0..32 {
+                let t = 0.5 * (lo + hi);
+                if face_oval(mid + dir * t) < 0.0 {
+                    lo = t;
+                } else {
+                    hi = t;
+                }
+            }
+            mid + dir * lo
+        })
+        .collect();
+    let mut along = vec![0.0f32];
+    for k in 1..=fine.len() {
+        along.push(along[k - 1] + fine[k % fine.len()].distance(fine[k - 1]));
+    }
+    let n = 80;
+    let total = along[fine.len()];
+    let mut outline = Vec::with_capacity(n);
+    let mut k = 0;
+    for i in 0..n {
+        let s = total * i as f32 / n as f32;
+        while along[k + 1] < s {
+            k += 1;
+        }
+        let f = (s - along[k]) / (along[k + 1] - along[k]).max(1e-9);
+        outline.push(fine[k].lerp(fine[(k + 1) % fine.len()], f));
+    }
+    // Out of the opening, across its edge.
+    let out = |q: Vec2| {
+        let e = 1e-4;
+        v2(
+            face_oval(q + v2(e, 0.0)) - face_oval(q - v2(e, 0.0)),
+            face_oval(q + v2(0.0, e)) - face_oval(q - v2(0.0, e)),
+        )
+        .normalize_or(Vec2::Y)
+    };
+    // The deepest of the faces (inside all of them).
+    let faces = |p: Vec3| {
+        SHAPES
+            .iter()
+            .map(|s| face_form(p, s))
+            .fold(f32::MIN, f32::max)
+    };
+    let (w, proud) = (0.0034, 0.0012);
+    let mail_at = |q: Vec2| depth(&coif_whole, q).unwrap_or(-0.06);
+    // Per point: the middle of the section (head frame), its half depth, and how much
+    // further back the mail lies across the binding's width.
+    let rings: Vec<(Vec3, f32, f32)> = outline
+        .iter()
+        .map(|&q| {
+            let o = out(q);
+            let front = mail_at(q + o * 0.001);
+            let back = depth(&faces, q - o * 0.0025)
+                .map_or(-0.034, |z| (z + 0.0015).min(-0.034))
+                .max(front + 0.004);
+            let hd = 0.5 * (back - front) + proud;
+            // Not so steep that the front folds behind the middle.
+            let slope = (mail_at(q + o * w) - front).clamp(-0.004, 0.006f32.min(hd));
+            (v3(q.x, q.y, 0.5 * (front + back)), hd, slope)
+        })
+        .collect();
+    let k = 10;
+    let mut verts = Vec::with_capacity(n * k);
+    let mut arc = 0.0;
+    for i in 0..n {
+        let (c, hd, slope) = rings[i];
+        let t = (rings[(i + 1) % n].0 - rings[(i + n - 1) % n].0).normalize_or(Vec3::X);
+        let fwd = (-Vec3::Z - t * -t.z).normalize_or(-Vec3::Z);
+        let o = out(outline[i]);
+        let mut side = t.cross(fwd).normalize_or(Vec3::X);
+        if side.dot(v3(o.x, o.y, 0.0)) < 0.0 {
+            side = -side;
+        }
+        if i > 0 {
+            arc += c.distance(rings[i - 1].0);
+        }
+        for j in 0..k {
+            // A rounded box: depth along `fwd`, width across the edge; its front follows the
+            // mail's slope.
+            let a = TAU * j as f32 / k as f32;
+            let (sn, cs) = a.sin_cos();
+            let u = hd * cs.signum() * cs.abs().powf(0.6);
+            let v = w * sn.signum() * sn.abs().powf(0.6);
+            let u = u - slope * (v / w) * (u + hd) / (2.0 * hd);
+            let p = HEAD_C + c + fwd * u + side * v;
+            verts.push(Vertex::new(
+                p,
+                fwd * cs + side * sn,
+                v2(a / TAU * 0.03, arc),
+            ));
+        }
+    }
+    let mut idx = Vec::with_capacity(n * k * 6);
+    for i in 0..n {
+        let i1 = (i + 1) % n;
+        for j in 0..k {
+            let j1 = (j + 1) % k;
+            let (a, b, c, d) = (i * k + j, i * k + j1, i1 * k + j1, i1 * k + j);
+            idx.extend_from_slice(&[a as u32, b as u32, c as u32, a as u32, c as u32, d as u32]);
+        }
+    }
+    // Face out from the binding's middle line.
+    for tri in idx.chunks_mut(3) {
+        let [a, b, c] = [tri[0], tri[1], tri[2]].map(|i| Vec3::from(verts[i as usize].position));
+        let ring = tri[0] as usize / k;
+        let away = (a + b + c) / 3.0 - (HEAD_C + rings[ring].0);
+        if (b - a).cross(c - a).dot(away) < 0.0 {
+            tri.swap(1, 2);
+        }
+    }
+    let mut m = Mesh::new(verts, idx);
+    m.compute_normals();
+    fix_winding(&mut m);
+    m.compute_normals();
+    m
 }
 
 /// The coif before the face opening is cut.
@@ -2306,7 +2527,7 @@ fn helmet() -> PieceMesh {
             v2(0.014, 0.01),
             v2(0.0, 0.01),
         ],
-        24,
+        20,
         &[2, 3],
     );
     for side in [-1.0f32, 1.0] {
@@ -2314,16 +2535,18 @@ fn helmet() -> PieceMesh {
         let m = placed(pod.clone(), Quat::from_rotation_arc(Vec3::Y, n), hit);
         b.add(m, Zone::Metal, Tint::Rgb(lin(GUNMETAL)));
     }
-    // The mail coif under it, edged in leather around the face.
+    // The mail coif under it, bound in leather around the face.
     // Above the brow it is all under the helmet; it runs on 15 mm under the rim.
     let mail = sdf_mesh_tol(
         &coif,
         v3(-0.1, -0.06, -0.13),
         v3(0.1, 0.225, 0.13),
         0.0045,
-        0.002,
+        0.003,
     );
     let mail = cull(mail, &helmet_base, 0.015);
+    // The opening's wall is under the binding.
+    let mail = select(&mail, &|p| face_hole(p) > 0.0015);
     // Hidden inside every face.
     let faces = |p: Vec3| {
         SHAPES
@@ -2332,17 +2555,12 @@ fn helmet() -> PieceMesh {
             .fold(f32::MIN, f32::max)
     };
     let mail = cull(mail, &faces, 0.001);
-    let trim = |p: Vec3| coif_whole(p) < -0.0012 || face_hole(p) < 0.004;
-    b.add(
-        select(&mail, &|p| !trim(p)),
-        Zone::Mail,
-        Tint::Rgb(lin(STEEL) * 0.85),
-    );
-    b.add(
-        select(&mail, &trim),
-        Zone::Leather,
-        Tint::Rgb(lin(LEATHER_DARK)),
-    );
+    b.add(mail, Zone::Mail, Tint::Rgb(lin(STEEL) * 0.85));
+    // Only its front and inner side show: the rest is under the helmet, in the mail or behind
+    // every face.
+    let binding = cull(face_binding(), &helmet_base, 0.002);
+    let binding = cull(cull(binding, &coif, 0.0008), &faces, 0.0008);
+    b.add(binding, Zone::Leather, Tint::Rgb(lin(LEATHER)));
     let field = |p: Vec3| shell.proxy(p).min(band.proxy(p)).min(coif(p));
     b.finish(&field, 1.0)
 }
@@ -2357,7 +2575,7 @@ fn skin_paint(p: Vec3, s: &Shape) -> (Vec3, f32) {
     let near = |d: f32, r: f32| 1.0 - smooth(0.0, r, d);
     let mut w = Vec3::ONE;
     let root = v3(0.0, 0.012, -0.088);
-    let tip = root + (v3(0.0, -0.032, -0.109) - root) * s.nose;
+    let tip = root + (v3(0.0, -0.031, -0.107) - root) * s.nose;
     let nose = near(sphere(a, tip, 0.006), 0.012);
     let cheek = near(sphere(a, v3(0.042, -0.022, -0.078), 0.008), 0.018);
     w *= Vec3::ONE.lerp(v3(1.07, 0.9, 0.86), nose.max(cheek * 0.8));
@@ -3871,15 +4089,21 @@ fn rifle() -> PieceMesh {
         v3(0.0, 0.119, -0.17),
     );
     b.add(bar, Zone::Metal, Tint::Rgb(lin(GUNMETAL)));
-    let tooth = slab(v3(0.011, 0.0025, 0.0028), 0.001, 0.0008);
-    for k in 0..33 {
+    // The teeth: one comb drawn from the side.
+    let (h, base, valley, top) = (0.0028, 0.1225, 0.1235, 0.127);
+    let mut comb = vec![p(0.15 + h, base, 0.0), p(-0.49 - h, base, 0.0)];
+    for k in (0..33).rev() {
         let z = 0.15 - k as f32 * 0.02;
-        b.add(
-            placed(tooth.clone(), Quat::IDENTITY, v3(0.0, 0.1245, z)),
-            Zone::Metal,
-            Tint::Rgb(lin(GUNMETAL)),
-        );
+        comb.extend([p(z - h, top, 0.0), p(z + h, top, 0.0)]);
+        if k > 0 {
+            comb.extend([p(z + h, valley, 0.0), p(z + 0.02 - h, valley, 0.0)]);
+        }
     }
+    b.add(
+        side(&comb, 0.022, 0.0005),
+        Zone::Metal,
+        Tint::Rgb(lin(GUNMETAL)),
+    );
     // Barrel and muzzle brake.
     let barrel = lathe(
         &[
