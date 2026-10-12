@@ -59,6 +59,13 @@ const SHOTS: &[(f32, &str, [f64; 3], [f64; 3])] = &[
         [0.0, 24.0, 44.0],
         [0.0, 2.0, -3.0],
     ),
+    // The dominoes replay every 30 s: standing again, the first one tipping.
+    (
+        30.6,
+        "10_dominoes_replayed",
+        [8.0, 4.5, -4.0],
+        [5.0, 0.4, -16.0],
+    ),
 ];
 
 fn main() {
