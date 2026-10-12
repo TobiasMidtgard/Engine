@@ -6,13 +6,16 @@
 //! exponentially out to `volumetric_fog_range`), after Wronski 2014 ("Volumetric Fog: Unified
 //! compute shader based solution to atmospheric scattering") and Hillaire 2015 ("Physically
 //! Based and Unified Volumetric Rendering in Frostbite"). Two compute passes in
-//! `volumetric_fog.wgsl` fill it every frame, after the shadow and sky occlusion maps:
+//! `volumetric_fog.wgsl` fill it every frame, after the shadow and sky occlusion maps and the
+//! depth prepass:
 //!
 //! ```text
-//! scatter (per froxel)   height fog (FogSettings) + FogVolumes at a point jittered inside the
-//!                        froxel, lit by the sun (shadow cascades, sun_transmittance, Henyey-
-//!                        Greenstein phase), the sky (sky light × sky_visibility) and point
-//!                        lights, plus emission; blended with last frame's value at the same
+//! scatter (per froxel)   height fog (FogSettings, exact along the column's center ray) +
+//!                        FogVolumes at a point jittered inside the froxel, lit there (from
+//!                        above the ground at its pixel when just below it): by the sun
+//!                        (shadow cascades, sun_transmittance, Henyey-Greenstein phase), the
+//!                        sky (sky light × sky_visibility) and point lights, plus emission;
+//!                        blended with last frame's value at the same
 //!                        place in the world (90% history)          → rgba16float 3D, ping-pong
 //! integrate (per column) front to back, energy conserving          → light scattered toward the
 //!                        camera and transmittance to the far edge of every slice
@@ -21,7 +24,9 @@
 //!
 //! `apply_fog` (lib_frame.wgsl) reads it for every surface within the range, opaque or
 //! transparent, and continues with the analytic height fog beyond it; the sky pass is fogged up
-//! to the range. Values are pre-exposed; the history is rescaled when the exposure changes.
+//! to the range. The lookup (`volumetric_fog_at`) blends the four columns around the pixel and
+//! swaps their height fog for the pixel's own ray analytically. Values are pre-exposed; the
+//! history is rescaled when the exposure changes.
 
 use bevy_ecs::prelude::*;
 use bytemuck::{Pod, Zeroable};
@@ -32,6 +37,7 @@ use crate::features::{GpuShared, GrowBuffer};
 use crate::frame::ViewData;
 use crate::renderer::layout_entry;
 use crate::settings::{RenderSettings, VolumetricQuality};
+use crate::targets::Targets;
 
 const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
 /// Most fog volumes drawn per frame, nearest the camera first (`MAX_FOG_VOLUMES` in the shader).
@@ -202,6 +208,9 @@ pub(crate) struct Volumetrics {
     /// Clear air (no light, transmittance 1): frame binding 19 in passes that write the volume
     /// and while volumetric fog is off.
     stand_in: wgpu::TextureView,
+    /// This frame's depth prepass, depth and normals: the scatter pass lifts samples out of the
+    /// surfaces (`fog_sample_point`).
+    prepass: [wgpu::TextureView; 2],
     grid: Option<Grid>,
     query: Option<QueryState<(&'static FogVolume, &'static GlobalTransform)>>,
     nearest: Vec<(f32, GpuFogVolume)>,
@@ -217,7 +226,7 @@ pub(crate) struct Volumetrics {
 }
 
 impl Volumetrics {
-    pub fn new(shared: &GpuShared) -> Self {
+    pub fn new(shared: &GpuShared, targets: &Targets) -> Self {
         use wgpu::ShaderStages as S;
         let device = &shared.device;
         let uniform = layout_entry(
@@ -266,6 +275,24 @@ impl Volumetrics {
                 ),
                 volume_texture(2),
                 volume_output(3),
+                layout_entry(
+                    6,
+                    S::COMPUTE,
+                    wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Depth,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                ),
+                layout_entry(
+                    7,
+                    S::COMPUTE,
+                    wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                ),
             ],
         });
         let integrate_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -351,6 +378,10 @@ impl Volumetrics {
             params,
             volumes,
             stand_in,
+            prepass: [
+                targets.prepass_depth.view.clone(),
+                targets.prepass_normal.view.clone(),
+            ],
             grid: None,
             query: None,
             nearest: Vec::new(),
@@ -374,6 +405,18 @@ impl Volumetrics {
     /// The clear stand-in for frame binding 19 in passes that write the volume.
     pub fn stand_in(&self) -> &wgpu::TextureView {
         &self.stand_in
+    }
+
+    /// Bind the depth prepass of new render targets (after a resize).
+    pub fn resize(&mut self, shared: &GpuShared, targets: &Targets) {
+        self.prepass = [
+            targets.prepass_depth.view.clone(),
+            targets.prepass_normal.view.clone(),
+        ];
+        if let Some(mut grid) = self.grid.take() {
+            grid.scatter_groups = self.scatter_groups(shared, &grid.scatter);
+            self.grid = Some(grid);
+        }
     }
 
     /// Gather this frame's fog volumes, (re)create the grid for the view and upload the
@@ -575,6 +618,14 @@ impl Volumetrics {
                     wgpu::BindGroupEntry {
                         binding: 3,
                         resource: wgpu::BindingResource::TextureView(&scatter[current].view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 6,
+                        resource: wgpu::BindingResource::TextureView(&self.prepass[0]),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 7,
+                        resource: wgpu::BindingResource::TextureView(&self.prepass[1]),
                     },
                 ],
             })

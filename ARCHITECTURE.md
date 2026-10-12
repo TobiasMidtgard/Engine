@@ -203,15 +203,19 @@ can spawn them directly.
 **Volumetric fog** (built): with `RenderSettings::volumetric_fog` (the default), fog within
 `volumetric_fog_range` (default 256 m) of the camera lives in a froxel grid fitted to the view,
 after Wronski 2014 and Hillaire 2015 (`volumetric_fog_quality`: `High` 8 px tiles and 128
-exponential depth slices, `Medium` 64 slices, `Low` 16 px and 64). A compute pass evaluates the
-medium in every froxel and lights it with the sun through the shadow cascades and the air
-(`sun_transmittance`, Henyey-Greenstein phase `phase_hg`), the sky (kept out by the sky
-occlusion map and `SkyLightVolume`s) and the point lights (same falloff as surfaces, no shadows),
-blends it with the reprojected previous frame (jittered samples, 90% history) and integrates it
-front to back, energy-conserving, into a 3D texture of in-scattered light (pre-exposed) and
-transmittance: frame binding 19, read with `volumetric_fog_at(rel, depth)`. So sunbeams show
-through trees and windows, lamps glow in mist and caves stay dark. Other modules feed it two
-inputs and need nothing else:
+exponential depth slices, `Medium` 64 slices, `Low` 16 px and 64). A compute pass right after
+the depth prepass evaluates the medium in every froxel and lights it with the sun through the
+shadow cascades and the air (`sun_transmittance`, phase function `henyey_greenstein`), the sky
+(kept out by the sky occlusion map and `SkyLightVolume`s) and the point lights (same falloff as
+surfaces, no shadows); air just below the ground seen at a froxel's pixel is lit from just above
+it, so the ground's own shadow doesn't darken the fog lying on it. It blends that with
+the reprojected previous frame (jittered samples, 90% history) and integrates it front to back,
+energy-conserving, into a 3D texture of in-scattered light (pre-exposed) and transmittance:
+frame binding 19, read with `volumetric_fog_at(rel, depth)`, which blends the four froxel
+columns around the pixel (their fog's radiance, and their transmittance with the height fog's
+share swapped analytically for what the pixel's own ray crosses, so thin ground fog seen at a
+glance doesn't band). So sunbeams show through trees and windows, lamps glow in mist and caves
+stay dark. Other modules feed it two inputs and need nothing else:
 
 - `FogSettings` (resource): the height fog everywhere. `density` (extinction per meter at
   `base_height`; weather writes it), `height_falloff`, `base_height`, `color` (albedo),
@@ -235,7 +239,7 @@ Shared pipelines the core will provide for modules (planned): **strands** for ha
 (a per-vertex tension value blends wrinkle/vein normal maps; written by `engine_anim` for skin,
 muscles and skinned clothes and by `engine_softbody` for simulated cloth).
 
-Shader library: `lib_types.wgsl` (types, noise, BRDF, `phase_hg`), `lib_frame.wgsl` (group 0 frame
+Shader library: `lib_types.wgsl` (types, noise, BRDF, `henyey_greenstein`), `lib_frame.wgsl` (group 0 frame
 data, `shade_surface`, `shade_surface_shadowed`, `shadow_factor`, `contact_shadow`, `screen_ao`, `sky_visibility`, `apply_fog`,
 `apply_sky_fog`, `volumetric_fog_at`, `height_fog_density`, `fog_sky_light`,
 `sample_env`, `sample_env_rough`, `sky_ambient`, `wind_offset`, `prepass_output`) and `lib_atmosphere.wgsl` (`atmosphere` for aerial perspective,

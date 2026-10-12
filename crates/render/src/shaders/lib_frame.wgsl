@@ -618,23 +618,101 @@ fn fog_sky_light() -> vec3<f32> {
 // and sky light, both scaled by `lit` (the open sky the fog sees), plus the ambient fill. No
 // shadows: this is the fog beyond the volumetric range (or all of it with volumetrics off).
 fn height_fog_radiance(dir: vec3<f32>, at: vec3<f32>, lit: f32) -> vec3<f32> {
-    let sun = frame.sun_color.rgb * sun_transmittance(at) * phase_hg(dot(dir, frame.sun_dir.xyz), frame.fog_color.w);
+    let sun = frame.sun_color.rgb * sun_transmittance(at) * henyey_greenstein(dot(dir, frame.sun_dir.xyz), frame.fog_color.w);
     return frame.fog_color.rgb * ((sun + fog_sky_light()) * lit + frame.ambient.rgb);
 }
 
 // Volumetric fog between the camera and view depth `depth` (meters, up to the range) in the
 // direction of camera-relative `rel`: light scattered toward the camera (pre-exposed) and
 // transmittance. Depth slices are spaced exponentially (fine near the camera); texel z of the
-// volume holds the integral to the far edge of slice z, read trilinearly.
+// volume holds the integral to the far edge of slice z.
+//
+// The four froxel columns around the pixel are read and blended by hand:
+// - Between the two edges of the slice the depth falls in, a column's fog is taken as uniform:
+//   transmittance falls exponentially and the light builds up as it does in `cs_integrate`.
+//   (Blending the edges linearly shows each slice as a band where fog is thick, such as a valley
+//   of ground fog seen from above.)
+// - The froxels hold the fog along their columns' center rays. Where the height fog changes fast
+//   from one column to the next (a thin layer of ground fog seen at a glance, where the rows' rays
+//   meet the layer meters apart), blending them misjudges how much fog this pixel's ray crosses,
+//   in bands one row of froxels apart. So the height fog's share of the transmittance is set
+//   right analytically: what the blended columns' rays cross is swapped for what this ray
+//   crosses.
+// - What is blended for the light is the fog's radiance (light per opacity), which changes
+//   smoothly from column to column (the sun's glow), not the light itself, which is mostly the
+//   foggiest column's.
 fn volumetric_fog_at(rel: vec3<f32>, depth: f32) -> vec4<f32> {
     let v = frame.volumetrics;
     let clip = frame.unjittered_view_proj * vec4<f32>(rel, 1.0);
     let uv = clip.xy / max(clip.w, 1e-6) * vec2<f32>(0.5, -0.5) + 0.5;
-    let edge = v.w * log2(1.0 + max(depth, 0.0) * v.y) * v.z; // slice boundary, 0..slices
-    let w = clamp((edge - 0.5) / v.w, 0.5 / v.w, 1.0 - 0.5 / v.w);
-    let fog = textureSampleLevel(volumetric_fog, linear_clamp, vec3<f32>(uv, w), 0.0);
-    // Inside the first slice: from clear air at the camera to the slice's far edge.
-    return mix(vec4<f32>(0.0, 0.0, 0.0, 1.0), fog, saturate(edge));
+    let d = clamp(depth, 0.0, v.x);
+    let s = min(v.w * log2(1.0 + d * v.y) * v.z, v.w - 1e-3); // slice coordinate, 0..slices
+    let k = floor(s);
+    // How far into the slice `depth` is, in meters (the slices' depth mapping inverted).
+    let d0 = (exp2(k / (v.w * v.z)) - 1.0) / v.y;
+    let d1 = (exp2((k + 1.0) / (v.w * v.z)) - 1.0) / v.y;
+    let f = saturate((d - d0) / max(d1 - d0, 1e-6));
+
+    let grid = vec2<f32>(textureDimensions(volumetric_fog).xy);
+    let g = uv * grid - 0.5;
+    let i0 = floor(g);
+    let w = g - i0;
+    var t_froxels = 0.0; // the columns' transmittance, blended
+    var t_columns = 0.0; // the height fog's share of it, analytically
+    var light = vec3<f32>(0.0);
+    var radiance = vec3<f32>(0.0);
+    var radiance_weight = 0.0;
+    for (var j = 0u; j < 4u; j++) {
+        let o = vec2<f32>(f32(j & 1u), f32(j >> 1u));
+        let cell = clamp(i0 + o, vec2<f32>(0.0), grid - 1.0);
+        let weight = mix(1.0 - w.x, w.x, o.x) * mix(1.0 - w.y, w.y, o.y);
+        let fog = froxel_column_fog(vec2<i32>(cell), i32(k), f);
+        let height_fog = froxel_column_height_fog_t((cell + 0.5) / grid, d0, d1, f);
+        t_froxels += weight * fog.a;
+        t_columns += weight * height_fog;
+        light += weight * fog.rgb;
+        // Columns with next to no fog have no radiance to speak of (and an imprecise one).
+        let opacity = 1.0 - fog.a;
+        let r = weight * saturate(opacity * 50.0);
+        radiance += r * fog.rgb / max(opacity, 1e-4);
+        radiance_weight += r;
+    }
+    let dist = length(rel);
+    let t_ray = exp(-height_fog_optical_depth(rel / max(dist, 1e-6), 0.0, dist * d / max(view_depth(rel), 1e-6)));
+    let t = clamp(t_froxels * t_ray / max(t_columns, 1e-6), 0.0, 1.0);
+    if (radiance_weight > 1e-3) {
+        light = radiance / radiance_weight * (1.0 - t);
+    }
+    return vec4<f32>(light, t);
+}
+
+// Column `cell` of the volumetric fog up to fraction `f` of slice `k`: in-scattered light and
+// transmittance, the fog taken as uniform within the slice.
+fn froxel_column_fog(cell: vec2<i32>, k: i32, f: f32) -> vec4<f32> {
+    // The integral to the near edge of the slice (clear air at the camera for k = 0) and to its
+    // far edge.
+    var near = vec4<f32>(0.0, 0.0, 0.0, 1.0);
+    if (k >= 1) { near = textureLoad(volumetric_fog, vec3<i32>(cell, k - 1), 0); }
+    let far = textureLoad(volumetric_fog, vec3<i32>(cell, k), 0);
+    // Transmittance across the whole slice, then up to the depth.
+    let slice_t = clamp(far.a / max(near.a, 1e-6), 1e-6, 1.0);
+    let t = pow(slice_t, f);
+    var share = f; // of the slice's in-scattered light
+    if (slice_t < 0.999) { share = (1.0 - t) / (1.0 - slice_t); }
+    return vec4<f32>(near.rgb + (far.rgb - near.rgb) * share, near.a * t);
+}
+
+// The height fog's transmittance along the center ray of the froxel column at screen `uv`, to
+// fraction `f` of the slice from view depth `d0` to `d1`, taken as `froxel_column_fog` takes it.
+fn froxel_column_height_fog_t(uv: vec2<f32>, d0: f32, d1: f32, f: f32) -> f32 {
+    // The column's ray, per meter of view depth.
+    let view = vec3<f32>((uv.x * 2.0 - 1.0) / frame.proj[0][0], (1.0 - uv.y * 2.0) / frame.proj[1][1], -1.0);
+    let ray = (frame.inv_view * vec4<f32>(view, 0.0)).xyz;
+    let len = length(ray);
+    let dir = ray / len;
+    let near = exp(-height_fog_optical_depth(dir, 0.0, d0 * len));
+    let slice = exp(-height_fog_optical_depth(dir, d0 * len, d1 * len));
+    return near * pow(clamp(slice, 1e-6, 1.0), f);
 }
 
 // Keeps fog (in-scattered light, transmittance) from hiding more than

@@ -5,11 +5,13 @@
 // in Frostbite"). Requires lib_types + lib_frame + lib_atmosphere; group 0 is the prepass frame
 // group (binding 19 is a stand-in while the volume is written).
 //
-// cs_scatter, one thread per froxel: evaluates the medium at a point jittered inside the froxel
-// (a different point every frame), lights it and blends it with last frame's value at the same
-// place in the world (temporal reprojection, 90% history), so each froxel converges to its
-// average over its whole cell and nothing bands or flickers. Output: light scattered toward the
-// camera per meter (cd/m^2 per m, pre-exposed) and extinction (1/m).
+// cs_scatter, one thread per froxel: evaluates the medium (the height fog exactly along the
+// column's center ray, fog volumes at a point jittered inside the froxel, a different point every
+// frame), lights it at that point (from above the ground at its pixel when just below it, see
+// `lit_point`) and blends it with last frame's value at the same place in the world
+// (temporal reprojection, 90% history), so each froxel converges to its average over its whole
+// cell and nothing bands or flickers. Runs after the depth prepass. Output: light scattered
+// toward the camera per meter (cd/m^2 per m, pre-exposed) and extinction (1/m).
 //
 // cs_integrate, one thread per column: marches the slices front to back with the energy
 // conserving integral of each slice. Output: in-scattered light (pre-exposed) and transmittance
@@ -39,6 +41,9 @@ struct FogVolume {
 // cs_integrate
 @group(1) @binding(4) var scatter_in: texture_3d<f32>;
 @group(1) @binding(5) var integrated_out: texture_storage_3d<rgba16float, write>;
+// cs_scatter: this frame's depth prepass (depth, reverse-Z, 0 = nothing; octahedral normals).
+@group(1) @binding(6) var scene_depth: texture_depth_2d;
+@group(1) @binding(7) var scene_normal: texture_2d<f32>;
 
 const BLOCK: u32 = 4u;            // cs_scatter workgroups are blocks of 4x4x4 froxels
 const MAX_FOG_LIGHTS: u32 = 256u; // point lights considered (the nearest: the buffer is sorted)
@@ -69,6 +74,44 @@ fn froxel_position(c: vec3<f32>) -> vec3<f32> {
         -d,
     );
     return (frame.inv_view * vec4<f32>(view, 0.0)).xyz;
+}
+
+// Where to light the fog at `rel` from (sun shadows, the sunlight's way through the air, sky
+// cover), froxel coordinates `c`. A point just below the ground seen at its pixel is fog nobody
+// sees through that pixel, but the neighboring pixels whose ground lies a little farther away
+// read the froxel at that depth through the blended lookup: for them it continues the air lying
+// on the ground. So it is lit from just above the ground (lifted out along its normal), as if
+// the ground weren't there; otherwise the ground's own shadow and cover darken the fog on it in
+// bands, one per row of froxels. Only surfaces facing up are lifted from (ground, floors, the
+// tops of things), which never shade the air on them: a trunk or a wall lit from behind does
+// shade the air in front of it, and air lifted sideways out of that shadow would glow over its
+// edge. Points farther below (the air behind a hill) keep their own light.
+fn lit_point(c: vec3<f32>, rel: vec3<f32>) -> vec3<f32> {
+    let size = vec2<i32>(textureDimensions(scene_depth));
+    let px = clamp(vec2<i32>(c.xy / vec2<f32>(froxels.grid.xy) * vec2<f32>(size)), vec2<i32>(0), size - 1);
+    let z = textureLoad(scene_depth, px, 0);
+    if (z <= 0.0) { return rel; }
+    let nw = textureLoad(scene_normal, px, 0);
+    if (nw.w < 0.5) { return rel; }
+    let uv = (vec2<f32>(px) + 0.5) / vec2<f32>(size);
+    let surface = scene_linear_depth(uv, z);
+    let depth = slice_depth(c.z);
+    if (depth <= surface) { return rel; }
+    let dist = length(rel);
+    let v = rel / max(dist, 1e-6);
+    var n = oct_decode(nw.xy);
+    n = select(n, -n, dot(n, v) > 0.0); // facing the camera
+    var up = vec3<f32>(0.0, 1.0, 0.0);
+    if (frame.planet.w > 0.0) { up = normalize(rel - frame.planet.xyz); }
+    let facing_up = smoothstep(0.3, 0.6, dot(n, up));
+    if (facing_up <= 0.0) { return rel; }
+    // How far below the surface, along its normal; neighbors' surfaces lie within about a row of
+    // froxels (in angle) of this one.
+    let below = (depth - surface) * (dist / depth) * abs(dot(n, v));
+    let row_angle = 2.0 / (frame.proj[1][1] * f32(froxels.grid.y));
+    if (below > 3.0 * surface * row_angle + 0.5) { return rel; }
+    // Clear of the surface's own shadow-map texels.
+    return rel + n * ((below + 0.25 + 0.002 * surface) * facing_up);
 }
 
 // Sun visibility for a point in the air from the shadow cascades: one filtered tap. The point
@@ -125,9 +168,10 @@ fn cs_scatter(
     // expensive part of lighting a froxel and changes slowly, so it is interpolated.
     if (local < 8u) {
         let corner = vec3<u32>(local & 1u, (local >> 1u) & 1u, local >> 2u);
-        let p = froxel_position(vec3<f32>((block + corner) * BLOCK));
+        let c = vec3<f32>((block + corner) * BLOCK);
+        let p = froxel_position(c);
         block_corners[local] = p;
-        block_sky[local] = sky_map_visibility(p, vec3<f32>(0.0, 1.0, 0.0));
+        block_sky[local] = sky_map_visibility(lit_point(c, p), vec3<f32>(0.0, 1.0, 0.0));
         atomicStore(&light_mask[local], 0u);
         if (local < 2u) { atomicStore(&volume_mask[local], 0u); }
     } else if (local == 8u) {
@@ -163,13 +207,21 @@ fn cs_scatter(
         fract(froxels.jitter.z + interleaved_gradient_noise(vec2<f32>(id.xy))),
     );
     let rel = froxel_position(vec3<f32>(id) + jitter);
+    let lit_at = lit_point(vec3<f32>(id) + jitter, rel);
 
     // The medium: height fog plus the fog volumes here. Fog volumes fade out over the last 15%
     // of the range (nothing draws them beyond it), so they never end in a hard edge; the height
-    // fog continues analytically.
+    // fog continues analytically. The height fog is its exact mean over the froxel's stretch of
+    // the column's center ray: lookups correct it per pixel against exactly that
+    // (`volumetric_fog_at`), and a jittered sample's noise would show through.
     let range = frame.volumetrics.x;
     let volume_fade = 1.0 - smoothstep(0.85 * range, range, slice_depth(f32(id.z) + jitter.z));
-    var extinction = height_fog_density(rel);
+    let column = vec2<f32>(id.xy) + 0.5;
+    let enter = froxel_position(vec3<f32>(column, f32(id.z)));
+    let leave = froxel_position(vec3<f32>(column, f32(id.z) + 1.0));
+    let span = vec2<f32>(length(enter), length(leave));
+    let optical_depth = height_fog_optical_depth(leave / max(span.y, 1e-6), span.x, span.y);
+    var extinction = optical_depth / max(span.y - span.x, 1e-6);
     var scattering = extinction * frame.fog_color.rgb;
     var g_sum = luminance(scattering) * frame.fog_color.w;
     var light = vec3<f32>(0.0); // scattered toward the camera per meter (cd/m^2 per m)
@@ -198,10 +250,10 @@ fn cs_scatter(
         var incoming = vec3<f32>(0.0); // radiance arriving, weighted by the phase function
         // Sun, through the air and the shadow cascades.
         if (any(frame.sun_color.rgb > vec3<f32>(0.0))) {
-            let shadow = volume_shadow(rel);
+            let shadow = volume_shadow(lit_at);
             if (shadow > 0.0) {
-                let phase = phase_hg(dot(view_dir, frame.sun_dir.xyz), g);
-                incoming += frame.sun_color.rgb * sun_transmittance(rel) * (shadow * phase);
+                let phase = henyey_greenstein(dot(view_dir, frame.sun_dir.xyz), g);
+                incoming += frame.sun_color.rgb * sun_transmittance(lit_at) * (shadow * phase);
             }
         }
         // Sky, scattered about evenly; dark in caves and rooms. The occlusion map's visibility is
@@ -209,7 +261,7 @@ fn cs_scatter(
         let f = (vec3<f32>(id - block * BLOCK) + jitter) / f32(BLOCK);
         let y0 = mix(mix(block_sky[0], block_sky[1], f.x), mix(block_sky[2], block_sky[3], f.x), f.y);
         let y1 = mix(mix(block_sky[4], block_sky[5], f.x), mix(block_sky[6], block_sky[7], f.x), f.y);
-        let sky_vis = mix(y0, y1, f.z) * sky_volume_factor(rel);
+        let sky_vis = mix(y0, y1, f.z) * sky_volume_factor(lit_at);
         incoming += block_sky_light * sky_vis + frame.ambient.rgb;
         // Point lights, with the falloff surfaces get (`shade_surface`); no shadows.
         for (var word = 0u; word < 8u; word++) {
@@ -223,7 +275,7 @@ fn cs_scatter(
                 if (dist2 >= range2) { continue; }
                 let falloff = sq(saturate(1.0 - sq(dist2 / range2))) / max(dist2, sq(pl.color_radius.w));
                 let cos_t = dot(view_dir, to_light) * inverseSqrt(max(dist2, 1e-12));
-                incoming += pl.color_radius.rgb * (falloff * phase_hg(cos_t, g));
+                incoming += pl.color_radius.rgb * (falloff * henyey_greenstein(cos_t, g));
             }
         }
         light += scattering * incoming;

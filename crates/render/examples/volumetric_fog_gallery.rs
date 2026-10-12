@@ -1,13 +1,15 @@
 //! Before/after gallery of the volumetric fog: a pine forest at a low sun, a dark room with a
-//! sunlit window and a hanging lamp, and a valley full of ground fog at sunrise. Each scene is
-//! rendered twice, with the volumetric fog off (`<scene>_before.png`: the analytic height fog
-//! alone) and on (`<scene>_after.png`), and the time per frame of both is printed.
+//! sunlit window and a hanging lamp, a misty cave with a crack in its roof, a row of lamps on a
+//! misty night, and a valley full of ground fog at sunrise. Each scene is rendered twice, with
+//! the volumetric fog off (`<scene>_before.png`: the analytic height fog alone) and on
+//! (`<scene>_after.png`), and the time per frame of both is printed.
 //!
 //! ```text
 //! cargo run -p engine_render --example volumetric_fog_gallery -- <out dir> [scene] [WxH]
 //! ```
 //!
-//! `scene` is `forest`, `room`, `valley` or `all` (default); the size defaults to 1280x720.
+//! `scene` is `forest`, `room`, `cave`, `lamps`, `valley` or `all` (default); the size defaults
+//! to 1280x720.
 //! Needs a GPU or a software Vulkan driver (lavapipe).
 
 use std::f32::consts::TAU;
@@ -38,7 +40,13 @@ fn main() {
         .and_then(|(w, h)| Some((w.parse().ok()?, h.parse().ok()?)))
         .unwrap_or((1280, 720));
     std::fs::create_dir_all(&out).expect("output directory");
-    let scenes: [(&str, Scene); 3] = [("forest", forest), ("room", room), ("valley", valley)];
+    let scenes: [(&str, Scene); 5] = [
+        ("forest", forest),
+        ("room", room),
+        ("cave", cave),
+        ("lamps", lamps),
+        ("valley", valley),
+    ];
     for (name, build) in scenes {
         if which != "all" && which != name {
             continue;
@@ -399,15 +407,324 @@ fn room(app: &mut App) {
     ));
 }
 
+/// Deep in a cave, looking out of its mouth at a misty valley in the morning sun. Damp mist
+/// fills the cave; sky light only comes in at the mouth, so the mist deep inside stays dark,
+/// and the sun reaches in only through the mouth and a crack in the roof, which drops a beam
+/// onto the floor in front of the camera.
+fn cave(app: &mut App) {
+    // Morning mist in the valley below the cave; the ground outside drops away from a ledge.
+    *app.world.resource_mut::<FogSettings>() = FogSettings {
+        density: 0.012,
+        height_falloff: 0.07,
+        base_height: -38.0,
+        color: [0.94, 0.95, 0.98],
+        anisotropy: 0.65,
+        ..Default::default()
+    };
+    let ground_at = |x: f32, z: f32| {
+        let drop = -38.0 * smooth(6.0, 140.0, z);
+        let ridge =
+            120.0 * smooth(260.0, 700.0, z) * (0.6 + 0.6 * fbm(x / 150.0, z / 150.0, 3, 61));
+        let bumps = (fbm(x / 9.0, z / 9.0, 4, 62) - 0.5) * 0.6 * (0.3 + smooth(0.0, 20.0, z));
+        drop + ridge + bumps
+    };
+    let w = &mut app.world;
+    let eye = Vec3::new(-2.2, 1.65, -24.0);
+    spawn_camera(w, eye, Vec3::new(1.0, 2.6, 10.0), 66.0, 12.0);
+    let sun = sun_toward(168.0, 42.0);
+    spawn_sun(w, sun, 110_000.0);
+
+    let ground = terrain(Vec2::new(0.0, -10.0), 900.0, 420, 0.4, ground_at, |p, n| {
+        let t = fbm(p.x / 14.0, p.z / 14.0, 4, 63);
+        let grass = Vec3::new(0.07, 0.09, 0.035).lerp(Vec3::new(0.12, 0.11, 0.05), t);
+        let stone = Vec3::new(0.15, 0.14, 0.12) * (0.8 + 0.4 * fbm(p.x / 3.0, p.z / 3.0, 3, 64));
+        // Bare, damp stone inside the cave and on the ledge.
+        let bare = smooth(8.0, 2.0, p.z).max(smooth(0.8, 0.6, n.y));
+        grass.lerp(stone * 0.8, bare)
+    });
+    spawn_mesh(w, ground, white().with_roughness(0.9).with_detail(0.6, 0.4));
+
+    // The cave: inside x -7..7, y 0..6, z -27..0, open at z = 0. A thick shell of rock (no seams
+    // for light to leak through), with a crack in the 2 m roof at x -1.2..1.2, z -16..-11 (long
+    // enough for the slanting sun to get through).
+    let rock = StandardMaterial::color(0.14, 0.13, 0.12)
+        .with_roughness(0.9)
+        .with_detail(0.9, 0.6);
+    let shell: [(Vec3, Vec3); 7] = [
+        ((-10.0, -3.0, -30.0).into(), (-7.0, 8.0, 0.0).into()),
+        ((7.0, -3.0, -30.0).into(), (10.0, 8.0, 0.0).into()),
+        ((-10.0, -3.0, -30.0).into(), (10.0, 8.0, -27.0).into()),
+        // The roof, around the crack.
+        ((-10.0, 6.0, -27.0).into(), (10.0, 8.0, -16.0).into()),
+        ((-10.0, 6.0, -11.0).into(), (10.0, 8.0, 0.0).into()),
+        ((-10.0, 6.0, -16.0).into(), (-1.2, 8.0, -11.0).into()),
+        ((1.2, 6.0, -16.0).into(), (10.0, 8.0, -11.0).into()),
+    ];
+    for (min, max) in shell {
+        spawn_box(w, (min + max) * 0.5, max - min, rock);
+    }
+    // Rough rock lining the walls, slabs hanging from the roof, an uneven arch at the mouth and
+    // boulders on the floor.
+    let mut rng = Rng(0xca7e_0001);
+    let mut rocks = Mesh::default();
+    let mut add_rock = |rng: &mut Rng, at: Vec3, size: Vec3, upside_down: bool| {
+        let mut m = Shape::Rock {
+            size: size.to_array(),
+            seed: (rng.next() * 1e6) as u32,
+            detail: 4,
+        }
+        .mesh();
+        let tone = rng.range(0.75, 1.15);
+        for v in &mut m.vertices {
+            let wet = smooth(0.5, -0.5, v.normal[1]);
+            let c = Vec3::new(0.16, 0.15, 0.13).lerp(Vec3::new(0.09, 0.085, 0.08), wet) * tone;
+            v.color = c.extend(1.0).to_array();
+        }
+        let flip = if upside_down {
+            Quat::from_rotation_x(std::f32::consts::PI)
+        } else {
+            Quat::IDENTITY
+        };
+        let turn = Quat::from_rotation_y(rng.range(0.0, TAU)) * flip;
+        m.transform(&Mat4::from_rotation_translation(turn, at));
+        rocks.merge(&m);
+    };
+    let mut z = -27.0;
+    while z < 0.5 {
+        for side in [-1.0, 1.0] {
+            let s = rng.range(2.5, 4.0);
+            let at = Vec3::new(side * rng.range(6.8, 7.6), rng.range(-0.5, 2.5), z);
+            let size = Vec3::new(s, s * rng.range(1.0, 1.6), s);
+            add_rock(&mut rng, at, size, false);
+        }
+        z += rng.range(2.0, 3.2);
+    }
+    for i in 0..5 {
+        let x = -6.0 + i as f32 * 3.0 + rng.range(-0.8, 0.8);
+        let s = rng.range(2.5, 3.5);
+        add_rock(&mut rng, Vec3::new(x, -0.5, -26.8), Vec3::splat(s), false);
+    }
+    for _ in 0..22 {
+        let at = Vec3::new(rng.range(-6.5, 6.5), 6.4, rng.range(-26.5, 0.3));
+        if at.x.abs() < 2.4 && (-17.5..-9.5).contains(&at.z) {
+            continue;
+        }
+        let s = rng.range(1.2, 2.6);
+        add_rock(&mut rng, at, Vec3::new(s, s * 0.7, s), true);
+    }
+    // Ragged edges for the crack, so its beam isn't a neat rectangle.
+    for (x, z) in [
+        (-1.5, -15.4),
+        (-1.4, -13.9),
+        (-1.6, -12.2),
+        (1.5, -15.0),
+        (1.6, -13.4),
+        (1.4, -11.8),
+        (-0.4, -16.4),
+        (0.7, -16.2),
+    ] {
+        let s = rng.range(1.0, 1.5);
+        let size = Vec3::new(s, s * rng.range(0.6, 0.9), s);
+        add_rock(&mut rng, Vec3::new(x, 6.3, z), size, true);
+    }
+    // An uneven arch over the mouth and big boulders at its sides.
+    for x in [-6.6, -4.6, -2.3, 0.2, 2.5, 4.7, 6.6] {
+        let s = rng.range(2.2, 3.2);
+        let at = Vec3::new(x + rng.range(-0.4, 0.4), 6.6, rng.range(-0.6, 0.4));
+        let size = Vec3::new(s, s * rng.range(0.9, 1.4), s);
+        add_rock(&mut rng, at, size, true);
+    }
+    for (x, z, s) in [(-6.2, -0.5, 4.5), (6.4, 0.2, 4.0), (-5.0, 1.2, 2.4)] {
+        add_rock(
+            &mut rng,
+            Vec3::new(x, -0.4, z),
+            Vec3::new(s, s * 1.3, s),
+            false,
+        );
+    }
+    for _ in 0..14 {
+        let at = Vec3::new(rng.range(-6.0, 6.0), -0.15, rng.range(-25.0, 4.0));
+        if at.x.abs() < 1.8 && at.z < -18.0 {
+            continue;
+        }
+        let s = rng.range(0.4, 1.3);
+        add_rock(&mut rng, at, Vec3::new(s, s * 0.6, s), false);
+    }
+    spawn_mesh(w, rocks, white().with_roughness(0.85).with_detail(0.8, 0.3));
+
+    // Pines on the slopes and the valley floor outside.
+    let mut trees = Mesh::default();
+    let mut count = 0;
+    for _ in 0..40000 {
+        let p = Vec2::new(rng.range(-400.0, 400.0), rng.range(14.0, 600.0));
+        if rng.next() > smooth(0.42, 0.62, fbm(p.x / 60.0, p.y / 60.0, 3, 65)) {
+            continue;
+        }
+        let height = rng.range(9.0, 24.0);
+        let crown_from = rng.range(0.12, 0.3);
+        let mut tree = conifer(&mut rng, height, crown_from);
+        let turn = Quat::from_rotation_y(rng.range(0.0, TAU));
+        let base = Vec3::new(p.x, ground_at(p.x, p.y) - 0.3, p.y);
+        tree.transform(&Mat4::from_rotation_translation(turn, base));
+        trees.merge(&tree);
+        count += 1;
+        if count >= 1200 {
+            break;
+        }
+    }
+    spawn_mesh(
+        w,
+        trees,
+        white()
+            .with_roughness(0.85)
+            .with_detail(0.5, 0.15)
+            .with_subsurface(0.3),
+    );
+
+    // Sky light comes in only at the mouth; damp mist fills the cave. The box reaches a little
+    // into the walls and under the floor, so their bases don't catch the open sky's light.
+    w.spawn((
+        Transform::from_xyz(0.0, 2.4, -13.5),
+        SkyLightVolume::new([7.4, 3.6, 13.6])
+            .open(BoxFace::PosZ)
+            .with_sky_light(0.02)
+            .with_fade(8.0),
+    ));
+    w.spawn((
+        Transform::from_xyz(0.0, 3.0, -13.0),
+        FogVolume::new([7.5, 3.5, 14.5])
+            .with_density(0.05)
+            .with_albedo([0.9, 0.9, 0.88])
+            .with_edge_falloff(1.5)
+            .with_noise(0.5, 2.5)
+            .with_anisotropy(0.6),
+    ));
+}
+
+/// A path through a park on a misty night: a row of lamps recedes into the fog, each one glowing
+/// in the mist around it, under a faint moon.
+fn lamps(app: &mut App) {
+    *app.world.resource_mut::<FogSettings>() = FogSettings {
+        density: 0.035,
+        height_falloff: 0.12,
+        base_height: 0.0,
+        color: [0.9, 0.92, 0.95],
+        anisotropy: 0.55,
+        ..Default::default()
+    };
+    let path_x = |z: f32| 2.5 * (z / 23.0).sin();
+    let ground_at = |x: f32, z: f32| (fbm(x / 25.0, z / 25.0, 3, 71) - 0.5) * 1.2;
+    let w = &mut app.world;
+    let eye = Vec3::new(path_x(4.0) - 0.4, ground_at(0.0, 4.0) + 1.7, 4.0);
+    spawn_camera(
+        w,
+        eye,
+        Vec3::new(path_x(-40.0), ground_at(0.0, -40.0) + 2.6, -40.0),
+        58.0,
+        2.5,
+    );
+    // The moon, high behind the camera.
+    spawn_sun(w, sun_toward(200.0, 40.0), 0.3);
+
+    let ground = terrain(Vec2::new(0.0, -10.0), 400.0, 300, 0.3, ground_at, |p, _| {
+        let on_path = smooth(1.6, 1.1, (p.x - path_x(p.z)).abs());
+        let grass = Vec3::new(0.05, 0.08, 0.03)
+            .lerp(Vec3::new(0.09, 0.1, 0.04), fbm(p.x / 6.0, p.z / 6.0, 4, 72));
+        let gravel = Vec3::new(0.2, 0.18, 0.15) * (0.8 + 0.4 * fbm(p.x * 2.0, p.z * 2.0, 3, 73));
+        grass.lerp(gravel, on_path)
+    });
+    spawn_mesh(w, ground, white().with_roughness(0.9).with_detail(0.6, 0.3));
+
+    // Lamp posts along the path, alternating sides.
+    let iron = StandardMaterial::color(0.03, 0.03, 0.03).with_roughness(0.4);
+    let glass = StandardMaterial::color(1.0, 0.85, 0.6).with_emissive([1.0, 0.72, 0.4], 600.0);
+    for i in 0..7 {
+        let z = -4.0 - 13.0 * i as f32;
+        let side = if i % 2 == 0 { 1.0 } else { -1.0 };
+        let x = path_x(z) + side * 1.9;
+        let base = ground_at(x, z);
+        spawn_box(
+            w,
+            Vec3::new(x, base + 1.9, z),
+            Vec3::new(0.09, 3.8, 0.09),
+            iron,
+        );
+        let head = Vec3::new(x, base + 4.0, z);
+        spawn_box(w, head + Vec3::Y * 0.22, Vec3::new(0.42, 0.06, 0.42), iron);
+        spawn_box(w, head, Vec3::new(0.28, 0.38, 0.28), glass);
+        w.spawn((
+            Transform::from_translation(head.as_dvec3()),
+            PointLight {
+                color: [1.0, 0.72, 0.42],
+                intensity_lm: 2500.0,
+                range: 30.0,
+                radius: 0.12,
+            },
+        ));
+    }
+
+    // Trees beside the path and a bench under the first lamp.
+    let mut rng = Rng(0x1a3b_0007);
+    let mut trees = Mesh::default();
+    let mut count = 0;
+    for _ in 0..20000 {
+        let p = Vec2::new(rng.range(-60.0, 60.0), rng.range(-200.0, 0.0));
+        if (p.x - path_x(p.y)).abs() < 5.0 || rng.next() > 0.35 {
+            continue;
+        }
+        let (height, crown_from) = (rng.range(8.0, 18.0), rng.range(0.25, 0.45));
+        let mut tree = conifer(&mut rng, height, crown_from);
+        let turn = Quat::from_rotation_y(rng.range(0.0, TAU));
+        let base = Vec3::new(p.x, ground_at(p.x, p.y) - 0.2, p.y);
+        tree.transform(&Mat4::from_rotation_translation(turn, base));
+        trees.merge(&tree);
+        count += 1;
+        if count >= 260 {
+            break;
+        }
+    }
+    spawn_mesh(
+        w,
+        trees,
+        white().with_roughness(0.85).with_detail(0.5, 0.15),
+    );
+    let wood = StandardMaterial::color(0.2, 0.12, 0.07).with_roughness(0.6);
+    let bench = Vec3::new(
+        path_x(-4.0) + 1.5,
+        ground_at(path_x(-4.0) + 1.5, -6.0),
+        -6.0,
+    );
+    spawn_box(
+        w,
+        bench + Vec3::new(0.0, 0.45, 0.0),
+        Vec3::new(0.45, 0.05, 1.6),
+        wood,
+    );
+    spawn_box(
+        w,
+        bench + Vec3::new(0.2, 0.75, 0.0),
+        Vec3::new(0.05, 0.4, 1.6),
+        wood,
+    );
+    for dz in [-0.7, 0.7] {
+        spawn_box(
+            w,
+            bench + Vec3::new(0.0, 0.22, dz),
+            Vec3::new(0.4, 0.44, 0.06),
+            iron,
+        );
+    }
+}
+
 /// A broad valley at sunrise, seen from the edge of a cliff at its head: ground fog fills the
 /// valley floor like a lake, the sun rises over the low hills at its far end, and the pines
 /// on the floor and the slopes stand in the mist and cast long shadows across it toward the
 /// camera. The volumetric fog reaches 1 km here, a vista's range.
 fn valley(app: &mut App) {
     *app.world.resource_mut::<FogSettings>() = FogSettings {
-        density: 0.03,
-        height_falloff: 0.16,
-        base_height: 6.0,
+        density: 0.016,
+        height_falloff: 0.12,
+        base_height: 4.0,
         color: [0.95, 0.96, 1.0],
         anisotropy: 0.65,
         ..Default::default()
@@ -480,7 +797,7 @@ fn valley(app: &mut App) {
         }
         let clump = fbm(p.x / 90.0, p.y / 90.0, 3, 41);
         let on_floor = smooth(12.0, 4.0, h);
-        if rng.next() > smooth(0.45, 0.65, clump) * (1.0 - 0.6 * on_floor) {
+        if rng.next() > smooth(0.45, 0.65, clump) * (1.0 + 0.5 * on_floor) {
             continue;
         }
         // Not on cliffs.
@@ -513,11 +830,11 @@ fn valley(app: &mut App) {
     );
 
     // A bank of denser mist rolling over the valley floor ahead.
-    let bank = Vec3::new(valley_center(-480.0) - 40.0, 10.0, -480.0);
+    let bank = Vec3::new(valley_center(-480.0) - 40.0, 12.0, -480.0);
     w.spawn((
         Transform::from_translation(bank.as_dvec3()).with_rotation(Quat::from_rotation_y(-0.3)),
-        FogVolume::ellipsoid([150.0, 18.0, 230.0])
-            .with_density(0.02)
+        FogVolume::ellipsoid([150.0, 22.0, 230.0])
+            .with_density(0.03)
             .with_edge_falloff(14.0)
             .with_noise(0.75, 24.0)
             .with_anisotropy(0.65),

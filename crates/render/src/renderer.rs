@@ -2,7 +2,7 @@
 //!
 //! ```text
 //! prepare (features read the world) → compute → environment map (+ filters) → shadow cascades
-//! → volumetric fog → prepass → AO, reflections, bounce light → scene pass [opaque → sky]
+//! → prepass → volumetric fog → AO, reflections, bounce light → scene pass [opaque → sky]
 //! → (scene copies) → transparent pass → TAA → bloom → tonemap to LDR → overlays (UI)
 //! → screenshot readback → blit to window
 //! ```
@@ -489,7 +489,7 @@ impl Renderer {
         let environment = EnvironmentMaps::new(&shared);
         let mut sky_camera = crate::sky_occlusion::SkyCamera::new(&shared);
         sky_camera.set_inputs(&shared, &frame_buffer, &shadow.occlusion);
-        let volumetrics = crate::volumetrics::Volumetrics::new(&shared);
+        let volumetrics = crate::volumetrics::Volumetrics::new(&shared, &targets);
         let screen_stand_ins = ScreenMaps::stand_ins(&shared, &volumetrics);
         let atmosphere = AtmosphereLuts::new(&shared, &frame_buffer);
         let groups = FrameGroups::new(
@@ -581,6 +581,7 @@ impl Renderer {
             self.surface.as_ref().map(|s| s.view_format),
         );
         self.effects.resize(&self.shared, &self.targets);
+        self.volumetrics.resize(&self.shared, &self.targets);
         self.rebuild_frame_groups();
         self.previous = None;
         self.meter
@@ -843,10 +844,6 @@ impl Renderer {
         }
         self.sky_camera.encode(&mut encoder);
 
-        // Volumetric fog: needs the shadow cascades, the sky occlusion map and the sky light;
-        // shading reads it from frame binding 19 (a stand-in in the prepass group).
-        self.volumetrics.encode(&mut encoder, &self.prepass_group);
-
         // Depth prepass: depth, normals and motion of opaque geometry.
         {
             let clear = wgpu::Operations {
@@ -894,6 +891,10 @@ impl Renderer {
                 depth_or_array_layers: 1,
             },
         );
+        // Volumetric fog: needs the shadow cascades, the sky occlusion map, the sky light and
+        // the prepass depth; shading reads it from frame binding 19 (a stand-in in the prepass
+        // group).
+        self.volumetrics.encode(&mut encoder, &self.prepass_group);
         if settings.ambient_occlusion {
             self.effects
                 .encode_ao(&mut encoder, &self.targets, &self.prepass_group);

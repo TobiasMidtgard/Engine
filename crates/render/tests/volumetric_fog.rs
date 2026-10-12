@@ -418,3 +418,91 @@ fn fog_holds_still_with_a_still_camera() {
         "the fog drifts: {brightness} then {late}"
     );
 }
+
+/// Flat ground under a layer of ground fog, seen from 120 m up with the sun low ahead (like a
+/// valley at dawn from a cliff): the view of the ground sweeps across froxel rows and slices.
+fn ground_fog_app(volumetric: bool) -> App {
+    let mut app = app(|s| {
+        s.volumetric_fog = volumetric;
+        s.volumetric_fog_range = 1000.0;
+        s.shadow_distance = 1000.0;
+    });
+    {
+        let mut fog = app.world.resource_mut::<FogSettings>();
+        fog.density = 0.016;
+        fog.height_falloff = 0.12;
+        fog.base_height = 4.0;
+    }
+    let w = &mut app.world;
+    w.spawn((
+        Camera {
+            exposure: Exposure::Manual { ev100: 13.0 },
+            ..Camera::perspective(50.0)
+        },
+        Transform::from_xyz(0.0, 120.0, 0.0).looking_at(DVec3::new(0.0, 0.0, -600.0), Vec3::Y),
+    ));
+    w.spawn((
+        DirectionalLight::default(),
+        Transform::default().looking_at(DVec3::new(0.05, -0.07, 1.0), Vec3::Y),
+    ));
+    w.spawn((
+        Transform::default(),
+        MeshRenderer::new(
+            Shape::Plane {
+                size: [4000.0, 4000.0],
+                subdivisions: 1,
+            },
+            StandardMaterial::color(0.2, 0.2, 0.2).with_roughness(1.0),
+        ),
+    ));
+    app
+}
+
+/// How much the luma of the rows of the ground (averaged across the middle of the picture)
+/// wobbles around its smooth trend (banding), and its mean.
+fn row_wobble(app: &App, img: &RgbaImage) -> (f32, f32) {
+    let (_, top) = screen(app, DVec3::new(0.0, 0.0, -1500.0));
+    let rows: Vec<f32> = (top.max(0) as u32 + 4..H)
+        .map(|y| {
+            (W / 4..W * 3 / 4)
+                .map(|x| luma(img.get_pixel(x, y)))
+                .sum::<f32>()
+                / (W / 2) as f32
+        })
+        .collect();
+    let mean = rows.iter().sum::<f32>() / rows.len() as f32;
+    // Each row against the average of the 9 rows around it.
+    let mut sq = 0.0;
+    let mut n = 0;
+    for i in 4..rows.len() - 4 {
+        let trend = rows[i - 4..=i + 4].iter().sum::<f32>() / 9.0;
+        sq += (rows[i] - trend).powi(2);
+        n += 1;
+    }
+    ((sq / n as f32).sqrt(), mean)
+}
+
+#[test]
+fn ground_fog_seen_at_a_glance_has_no_bands() {
+    let mut volumetric = ground_fog_app(true);
+    let mut analytic = ground_fog_app(false);
+    let (Some(v), Some(a)) = (
+        render(&mut volumetric, 30, "volumetric_ground_fog"),
+        render(&mut analytic, 4, "analytic_ground_fog"),
+    ) else {
+        return;
+    };
+    let (wv, mv) = row_wobble(&volumetric, &v);
+    let (wa, ma) = row_wobble(&analytic, &a);
+    eprintln!(
+        "ground in fog: volumetric mean {mv:.4}, wobble {wv:.5}; analytic mean {ma:.4}, wobble {wa:.5}"
+    );
+    // Bands one row of froxels apart came from froxels behind the ground (in its shadow and under
+    // its cover), from blending rows whose rays meet the fog layer meters apart, and from blending
+    // their light rather than their radiance where the sun's glow changes from row to row
+    // (wobbles of 0.0245, 0.0035 and 0.0026 against the analytic fog's 0.0009).
+    assert!(
+        wv < 1.5 * wa + 0.001 * mv,
+        "the fogged ground shows bands: row wobble {wv} (analytic fog: {wa})"
+    );
+}

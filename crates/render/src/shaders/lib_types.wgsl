@@ -159,7 +159,7 @@ fn v_smith_ggx_correlated(n_dot_v: f32, n_dot_l: f32, roughness: f32) -> f32 {
 // Henyey-Greenstein phase function (1/sr): the share of light scattered by a medium at angle
 // acos(cos_t) from its direction of travel. g > 0 scatters forward (fog glows around the sun and
 // lamps you look toward), g = 0 evenly, g < 0 back.
-fn phase_hg(cos_t: f32, g: f32) -> f32 {
+fn henyey_greenstein(cos_t: f32, g: f32) -> f32 {
     let g2 = g * g;
     return (1.0 - g2) / (4.0 * PI * pow(max(1.0 + g2 - 2.0 * g * cos_t, 1e-4), 1.5));
 }
