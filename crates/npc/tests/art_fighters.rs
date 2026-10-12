@@ -272,6 +272,12 @@ fn fighter_closeups() {
         DVec3::new(-6.0, 1.55, 0.0),
         35.0,
     );
+    let portrait = camera(
+        &mut app,
+        DVec3::new(-5.72, 1.6, -0.78),
+        DVec3::new(-5.98, 1.55, 0.0),
+        26.0,
+    );
     let downed = camera(
         &mut app,
         DVec3::new(9.6, 1.6, -1.2),
@@ -301,6 +307,7 @@ fn fighter_closeups() {
     shoot(&mut app, right, "npc_fighters_moving.png");
     shoot(&mut app, duelist, "npc_fighters_duelist.png");
     shoot(&mut app, face, "npc_fighters_face.png");
+    shoot(&mut app, portrait, "npc_fighters_portrait.png");
     shoot(&mut app, downed, "npc_fighters_downed.png");
     shoot(&mut app, back, "npc_fighters_back.png");
 }
