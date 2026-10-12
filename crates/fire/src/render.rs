@@ -48,6 +48,9 @@ const MAX_MAP: u32 = 1024;
 #[derive(Default)]
 pub struct FireFeature {
     flame_pipeline: Option<wgpu::RenderPipeline>,
+    haze_pipeline: Option<wgpu::RenderPipeline>,
+    /// The flame flipbook (made on a worker thread at startup, uploaded when first needed).
+    flipbook: Option<(wgpu::Texture, wgpu::TextureView)>,
     scorch_pipeline: Option<wgpu::RenderPipeline>,
     flame_layout: Option<wgpu::BindGroupLayout>,
     scorch_layout: Option<wgpu::BindGroupLayout>,
@@ -164,7 +167,8 @@ impl FireFeature {
                     if h < 0.12 {
                         continue;
                     }
-                    let w = (size as f32 * 0.6 + h * 0.14).max(0.2);
+                    // The flipbook's flame fills about 70% of the sprite's width at its base.
+                    let w = (size as f32 * 0.8 + h * 0.3).max(0.3);
                     let rel = (p - origin).as_vec3();
                     let lean = lean_of(p, h);
                     self.scratch.push(FlameInstance {
@@ -189,15 +193,23 @@ impl FireFeature {
             {
                 continue;
             }
-            let count = ((shape.radius * shape.height * 1.6).clamp(3.0, 28.0) * b.intensity.sqrt())
+            let count = ((shape.radius * shape.height * 1.6).clamp(7.0, 28.0) * b.intensity.sqrt())
                 .ceil() as u32;
             let id = id as i64;
             for i in 0..count {
                 let r = |k: i64| engine_core::math::hash01(id, i as i64, k, 0xF2);
                 let a = r(1) * std::f32::consts::TAU;
-                let rad = r(2).sqrt() * shape.radius * 0.8;
-                let y0 = r(3) * shape.height * 0.45;
-                let h = shape.height * (0.45 + 0.45 * r(4)) * b.intensity.sqrt().max(0.4);
+                // The first flame is the tall one in the middle; the others crowd round it.
+                let (rad, y0, tall) = if i == 0 {
+                    (0.0, 0.0, 1.0)
+                } else {
+                    (
+                        r(2).sqrt() * shape.radius * 0.75,
+                        r(3) * r(3) * shape.height * 0.4,
+                        0.5 + 0.4 * r(4),
+                    )
+                };
+                let h = shape.height * tall * b.intensity.sqrt().max(0.6);
                 let p =
                     base + DVec3::new((a.cos() * rad) as f64, y0 as f64, (a.sin() * rad) as f64);
                 let rel = (p - origin).as_vec3();
@@ -205,7 +217,7 @@ impl FireFeature {
                 self.scratch.push(FlameInstance {
                     pos_height: [rel.x, rel.y, rel.z, h],
                     shape: [
-                        (shape.radius * 0.7 + h * 0.15).max(0.3),
+                        (shape.radius * 0.8 + h * 0.2).max(0.25) * if i == 0 { 1.2 } else { 1.0 },
                         b.intensity.min(1.0),
                         r(5) * 113.0,
                         0.0,
@@ -388,6 +400,40 @@ impl FireFeature {
     }
 }
 
+/// The flame flipbook as a 3D texture (across, up, frame), simulating it first if the worker
+/// thread hasn't finished.
+fn upload_flipbook(gpu: &GpuShared) -> (wgpu::Texture, wgpu::TextureView) {
+    let book = crate::flipbook::flipbook();
+    let [w, h, frames] = book.size;
+    let size = wgpu::Extent3d {
+        width: w,
+        height: h,
+        depth_or_array_layers: frames,
+    };
+    let texture = gpu.device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("fire flipbook"),
+        size,
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D3,
+        format: wgpu::TextureFormat::Rg8Unorm,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    gpu.queue.write_texture(
+        texture.as_image_copy(),
+        bytemuck::cast_slice(&book.texels),
+        wgpu::TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(w * 2),
+            rows_per_image: Some(h),
+        },
+        size,
+    );
+    let view = texture.create_view(&Default::default());
+    (texture, view)
+}
+
 /// f32 → IEEE half (round to nearest, no NaN handling needed for these values).
 pub fn f16(v: f32) -> u16 {
     let bits = v.to_bits();
@@ -449,6 +495,26 @@ impl RenderFeature for FireFeature {
                     count: None,
                 },
                 depth_entry(1),
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D3,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
             ],
         });
         let scorch_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -542,6 +608,19 @@ impl RenderFeature for FireFeature {
             "fs_flame",
             true,
         ));
+        self.haze_pipeline = Some(pipeline(
+            "fire heat haze",
+            FLAMES_SHADER,
+            &flame_layout,
+            "vs_haze",
+            "fs_haze",
+            true,
+        ));
+        // Simulate the flame flipbook in the background; it's waited for only if a flame needs
+        // drawing before it's done.
+        std::thread::spawn(|| {
+            crate::flipbook::flipbook();
+        });
         self.scorch_pipeline = Some(pipeline(
             "fire scorch",
             SCORCH_SHADER,
@@ -590,6 +669,10 @@ impl RenderFeature for FireFeature {
         }
         self.build_instances(world, view);
         self.build_map(world, gpu, view);
+        if !self.scratch.is_empty() && self.flipbook.is_none() {
+            self.flipbook = Some(upload_flipbook(gpu));
+            self.flame_group = None;
+        }
         if let Some(buf) = &mut self.instances {
             if !self.scratch.is_empty()
                 && buf.write(&gpu.device, &gpu.queue, bytemuck::cast_slice(&self.scratch))
@@ -635,7 +718,8 @@ impl RenderFeature for FireFeature {
     fn compute(&mut self, _encoder: &mut wgpu::CommandEncoder, ctx: &FrameContext) {
         let device = &ctx.gpu.device;
         if self.flame_group.is_none()
-            && let (Some(layout), Some(buf)) = (&self.flame_layout, &self.instances)
+            && let (Some(layout), Some(buf), Some((_, book))) =
+                (&self.flame_layout, &self.instances, &self.flipbook)
         {
             self.flame_group = Some(device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("fire flames"),
@@ -648,6 +732,14 @@ impl RenderFeature for FireFeature {
                     wgpu::BindGroupEntry {
                         binding: 1,
                         resource: wgpu::BindingResource::TextureView(ctx.scene_depth_copy),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: wgpu::BindingResource::TextureView(book),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 3,
+                        resource: wgpu::BindingResource::TextureView(ctx.scene_color_copy),
                     },
                 ],
             }));
@@ -689,10 +781,14 @@ impl RenderFeature for FireFeature {
             pass.draw(0..3, 0..1);
         }
         if self.count > 0
-            && let (Some(p), Some(g)) = (&self.flame_pipeline, &self.flame_group)
+            && let (Some(haze), Some(p), Some(g)) =
+                (&self.haze_pipeline, &self.flame_pipeline, &self.flame_group)
         {
-            pass.set_pipeline(p);
+            // Heat haze first: it bends the scene as it was before any flame was drawn.
+            pass.set_pipeline(haze);
             pass.set_bind_group(1, g, &[]);
+            pass.draw(0..6, 0..self.count);
+            pass.set_pipeline(p);
             pass.draw(0..6, 0..self.count);
         }
     }

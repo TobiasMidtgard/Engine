@@ -3,6 +3,7 @@
 pub mod demo;
 pub mod embers;
 pub mod field;
+pub mod flipbook;
 pub mod fuel;
 pub mod objects;
 pub mod render;

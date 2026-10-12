@@ -99,5 +99,6 @@ and relights a volume only when it changed.
 
 - Smoke crossing from one volume into a neighbor (each volume is on its own).
 - Volumetric fog banks (ground fog that rolls in valleys) on the same simulation.
-- Heat haze and smoke lit from below by the flames' own shape (firelight is point lights).
+- Smoke lit from below by the flames' own shape (firelight is point lights). Heat haze is
+  drawn by the fire module.
 - Half-resolution raymarching for very large volumes on slow GPUs.

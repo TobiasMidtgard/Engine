@@ -96,8 +96,9 @@ fn main() {
     let camera = w
         .spawn((Camera::default(), Transform::from_xyz(-2.0, 3.0, -26.0)))
         .id();
+    // The volume's Transform is the center of its floor.
     w.spawn((
-        Transform::from_xyz(-20.0, 0.0, -20.0),
+        Transform::default(),
         SmokeVolume {
             size: [40.0, 16.0, 40.0],
             cell_m: 0.5,
