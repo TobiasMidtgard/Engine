@@ -368,9 +368,11 @@ pub(crate) fn begin_attacks(
         cs.blocking =
             intent.block && cs.attack.is_none() && cs.stagger_secs <= 0.0 && m.dash.is_none();
 
+        // (A character's first step sets up its dash charges: attacks wait for it.)
         if cs.attack.is_none()
             && cs.stagger_secs <= 0.0
             && m.mantle.is_none()
+            && m.initialized
             && let Some((kind, _)) = cs.buffered.take()
         {
             let look = intent

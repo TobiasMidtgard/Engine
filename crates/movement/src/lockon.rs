@@ -157,9 +157,9 @@ const MARKER_MATERIAL: &str = "lockon/marker";
 pub(crate) fn generate(lib: &mut Library) {
     let diamond = MeshBuilder::lathe(
         &[
-            Vec2::new(0.0, -0.16),
-            Vec2::new(0.085, 0.0),
-            Vec2::new(0.0, 0.1),
+            Vec2::new(0.0, -0.24),
+            Vec2::new(0.12, 0.0),
+            Vec2::new(0.0, 0.14),
         ],
         4,
     );
@@ -200,7 +200,7 @@ pub(crate) fn place_markers(
             .and_then(|i| i.previous)
             .map_or(tt.translation, |p| p.lerp(tt, alpha).translation);
         let bob = 0.06 * (now * 3.0).sin() as f32;
-        t.translation = pos + (up * (1.45 + bob)).as_dvec3();
+        t.translation = pos + (up * (1.35 + bob)).as_dvec3();
         t.rotation = Quat::from_rotation_arc(Vec3::Y, up) * Quat::from_rotation_y(now as f32 * 2.5);
         placed.push(marker.owner);
     }

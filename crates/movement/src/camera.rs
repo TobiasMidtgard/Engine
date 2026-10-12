@@ -58,9 +58,9 @@ impl Default for PilotCamera {
             target: None,
             yaw: 0.0,
             pitch: -0.2,
-            distance: 4.2,
-            height: 0.75,
-            shoulder: 0.55,
+            distance: 3.4,
+            height: 0.6,
+            shoulder: 0.5,
             mouse_sensitivity: 0.0025,
             stick_speed: 3.2,
             min_pitch: -1.2,
@@ -183,7 +183,7 @@ pub(crate) fn follow_pilots(
                 let k = 1.0 - (-pc.lock_rate * dt).exp();
                 pc.yaw = approach_angle(pc.yaw, yaw, k);
                 // Look a little down at the fight.
-                let want = (pitch - 0.22).clamp(pc.min_pitch, pc.max_pitch);
+                let want = (pitch - 0.12).clamp(pc.min_pitch, pc.max_pitch);
                 pc.pitch += (want - pc.pitch) * k;
             }
             None => {

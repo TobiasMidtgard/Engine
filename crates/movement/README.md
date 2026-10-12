@@ -53,6 +53,16 @@ commands.spawn((
 ));
 ```
 
+**Play it yourself**: where the demo is installed, press P (the `pilot` action, gamepad d-pad
+down) to put a level 10 pilot on the ground in front of the camera, with a third-person
+[`PilotCamera`](camera::PilotCamera) over its shoulder (mouse or right stick to look; the boom
+pulls in at walls and the view's up follows gravity). Controls are the default action map:
+move, jump (again in the air to double jump), sprint, crouch (slide while running), dash,
+attack (a dash-strike when the enemy is far), block, and `lock_on` (middle mouse, right stick
+click): the pilot faces the enemy nearest the center of view, attacks go to it, the camera
+keeps both in frame and a marker hangs over it. Escape frees the mouse; P again ends play
+mode. `movement.play` and `movement.lock_on` do the same from the console.
+
 NPC AI drives characters the same way the player does: write `MoveIntent` (direction, look,
 sprint, crouch, jump, `dash_to`, `block`, `attack`) before `MovementSet::Intent`. Jump, dash
 and attack are edge-triggered, so hold them for one step. Because movement is the installed
@@ -110,6 +120,15 @@ Until a physics module is installed (no `PhysicsBackend` resource), a small stan
 characters itself: static colliders become boxes, the `Ground` provides terrain, and raycasts
 see both. It steps aside as soon as a physics backend claims the contract.
 
+### Moving platforms and terrain
+
+The physics backend carries a character standing on a moving body; movement keeps the deck's
+velocity when the character jumps or walks off (a jump from a moving train keeps the train's
+speed), takes it off again when it lands from the air (a jump straight up comes down on the
+same spot), and turns the character with a turning deck (`platform`). Where physics reports no
+ground but the feet are on the [`Ground`](engine_world::Ground) surface (terrain that has no
+collider yet), the character stands on the surface instead of falling through.
+
 ### World shifts
 
 When the world re-anchors (floating origin, or a new planet's frame), `engine_world` moves
@@ -149,12 +168,14 @@ sets the bake size). Nothing in it is third-party art.
 
 Registered components: `MovementProfile` (presets `pilot`, `human`, `elite`), `Mover`,
 `Fighter`, `CombatState`, `Tempo`, `Perceiver`, `Afterimages`, `CameraFx`, `PlayerControlled`,
-`DuelDirector`. Resources: `TimePerception` (focus and cinematic settings),
+`LockOn`, `PilotCamera`, `DuelDirector`. Resources: `TimePerception` (focus and cinematic settings),
 `PerceptionStatus`, `SlowMotionFx`.
 
 API functions: `movement.status`, `movement.set_tempo` (`{"entity": "Player", "level": 10}`),
 `movement.preset`, `movement.dash`, `movement.attack`, `movement.revive`,
-`movement.combat_log`, `movement.perception` (read or patch the settings), `movement.duel`
+`movement.combat_log`, `movement.perception` (read or patch the settings), `movement.play`
+(`{"on": true}`: play mode), `movement.lock_on` (`{"target": "Elite" | "auto" | null}`),
+`movement.duel`
 (`{"round": "Blink" | "Focus" | "Pack" | null}`: restart the duel on that round and keep
 replaying it, or `null` to go back to cycling; tour stops use it to catch a chosen moment).
 
@@ -167,11 +188,14 @@ other modules being moved);
 `tests/demo.rs` (each duel round plays out as described, the rounds cycle, the runner
 finishes the course, the duel waits without a camera, `movement.duel` restarts a chosen round,
 the demo's collider boxes stay the same under the new art);
-`src/shift.rs` (a world shift moves walls, ledges, velocities and sparks in flight); `tests/render.rs` (headless
+`tests/play.rs` (play mode puts a pilot in front of the camera and follows it, a locked-on
+pilot dash-strikes its target past a closer enemy, the lock moves on when its target falls);
+`src/platform.rs` (a jump keeps a deck's speed and lands on the same spot, a turning deck
+turns the character); `src/shift.rs` (a world shift moves walls, ledges, velocities and sparks
+in flight); `tests/render.rs` (headless
 screenshot with the slow-motion effect; skipped without a GPU).
 
 ## Not done yet
 
 - Ledge hang: mantling is a vault onto the top; there is no hang-and-climb yet.
-- Lock-on targeting for the player (attacks aim at the nearest enemy in front).
-- Moving platforms: characters don't inherit a platform's velocity yet.
+- Wall-running on moving walls (only standing on a moving body carries a character).

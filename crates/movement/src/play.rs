@@ -1,6 +1,6 @@
 //! Play mode: take control of a pilot and try the movement and combat by hand.
 //!
-//! [`start`] puts a level 10 pilot (a sword fighter with the player's look) on the ground in
+//! [`start`] puts a level 10 pilot (the teal pilot-suit sword fighter) on the ground in
 //! front of the active camera and a [`PilotCamera`] behind it; [`stop`] removes both and gives
 //! the view back. `movement.play` does the same from the console or an agent, and where
 //! [`PlayToggle`] is present (the demo adds it) the `pilot` action (P, gamepad d-pad down)
@@ -72,7 +72,7 @@ pub fn start(world: &mut World, at: Option<DVec3>) -> Result<Entity, String> {
             PILOT_NAME,
             center,
             facing,
-            Style::Duelist,
+            Style::Pilot,
             MovementProfile::pilot(),
             (
                 PlayerControlled::default(),
