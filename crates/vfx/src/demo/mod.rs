@@ -845,7 +845,7 @@ pub fn run_walkers(
                 normal: Vec3::Y,
                 // A heavy stone golem, so its footprints kick up enough to see from afar.
                 size: [0.18, 0.4],
-                yaw: heading.x.atan2(heading.z) as f32,
+                yaw: GroundContact::yaw_of(heading.as_vec3()),
                 load_kg: 250.0,
                 speed: w.speed as f32,
                 kind: ContactKind::Foot,
