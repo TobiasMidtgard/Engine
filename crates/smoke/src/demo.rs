@@ -85,10 +85,10 @@ pub const VIEWS: &[DemoView] = &[
     DemoView {
         key: "smoke_fans",
         name: "Fans blowing smoke",
-        eye: [-22.5, 3.2, 1.0],
-        target: [-4.0, 2.4, 12.5],
+        eye: [-24.0, 4.5, -14.0],
+        target: [-4.0, 1.8, 2.0],
         hour: 12.5,
-        warmup_secs: 19.5,
+        warmup_secs: 15.5,
     },
 ];
 
@@ -118,7 +118,7 @@ impl Default for SmokeDemo {
             fire_rate: 9.0,
             shooting: [8.0, 18.0],
             blast_at: 20.0,
-            fans: [27.0, 40.0],
+            fans: [22.0, 36.0],
         }
     }
 }
@@ -590,11 +590,12 @@ mod tests {
             }
             sum / total.max(1e-12)
         };
-        while state(&mut app).since < 27.0 {
+        let fans = SmokeDemo::default().fans;
+        while state(&mut app).since < fans[0] {
             app.update();
         }
         let before = centroid(&app);
-        while state(&mut app).since < 37.0 {
+        while state(&mut app).since < (fans[0] + 10.0).min(fans[1] - 0.5) {
             app.update();
         }
         let after = centroid(&app);
