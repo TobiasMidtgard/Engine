@@ -87,6 +87,40 @@ A module is one crate (`crates/<name>`, package `engine_<name>`) with one `Plugi
 6. **Tests.** Unit tests for logic (no GPU). For visuals, a headless test that renders and
    saves a PNG via `engine_render::capture_now` and checks something about the pixels.
 
+## Art and large files
+
+The bar is AAA: nothing in a screenshot or the showcase should look low poly or placeholder.
+Get detail from procedural generation first (noise-shaped terrain and rocks, grown trees,
+displaced and tessellated meshes, layered materials), and use CC0 scans (Poly Haven,
+ambientCG) where scans beat procedural: rock, ground, bark, skies.
+
+Storage (the first rule is a test, so CI enforces it):
+
+- **No file over 1 MiB goes into git, and no third-party art at any size.** No Git LFS either:
+  every clone and CI run of every thread would download it. `tools/fetch-assets`'s
+  `no_large_files_are_committed` test fails the build otherwise.
+- Large files are listed in `assets/manifests/<area>.toml` (one per thread, named after its
+  area, so threads never conflict) and downloaded into `assets/fetched/` (gitignored) by
+  `cargo run -p fetch-assets`. Code loads them with the asset key `fetched/<path>`.
+- Every entry is pinned by SHA-256, links the `source` page, and has an allowed `license`:
+  `CC0-1.0` preferred, CC-BY with an `author` to credit; nothing non-commercial or
+  no-derivatives. Format and checks: `tools/fetch-assets` docs.
+- Code must run when a fetched file is missing (CI and fresh checkouts don't fetch): fall back
+  to a procedural or plain version and log once. Tests never depend on fetched files.
+
+Adding a file:
+
+1. Add an entry with `sha256 = ""` and push. The Assets workflow downloads it, copies it to the
+   `asset-mirror` release, and prints `sha256 = "…"` in its log and job summary. The test job
+   stays red until the entry is pinned.
+2. Paste the pin and push. From then on `cargo run -p fetch-assets` gets the file from the
+   mirror even where the original host is blocked (as it is in the project's cloud sessions).
+   Where the host is reachable, `cargo run -p fetch-assets` fetches unpinned entries and prints
+   the pin itself.
+
+Sizes: 2K for most materials, 4K for hero assets and terrain close-ups, 2K–4K HDRIs for
+lighting (8K only for a visible backdrop). JPG or PNG for color, HDR or EXR only for HDR data.
+
 ## Performance rules
 
 - No allocation per entity per frame in hot paths. Keep scratch `Vec`s in the system's
