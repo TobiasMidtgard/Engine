@@ -14,7 +14,8 @@ use engine_world::physics::{Collider, ColliderShape, PhysicsBackend};
 use crate::DestructionStats;
 use crate::assets::DestructionAssets;
 use crate::material::DestructionMaterials;
-use crate::voxel::{VoxelLook, VoxelState, VoxelVolume, mesh_chunk};
+use crate::meshing::MeshBuilder;
+use crate::voxel::{VoxelLook, VoxelState, VoxelVolume, mesh_chunk_layers};
 use crate::wall::{DestructibleWall, TILE, WallLook, WallState, greedy_rects, mesh_cells};
 
 /// One mesh tile of a wall (child entity).
@@ -25,13 +26,19 @@ pub struct WallTile {
     pub mesh: Handle<Mesh>,
 }
 
-/// One mesh chunk of a voxel volume (child entity).
-#[derive(Component, Debug, Clone, Copy)]
+/// One mesh chunk of a voxel volume (child entity, with the chunk's collider). It draws
+/// through one child per surface layer (rock, soil, grass), each with its own material.
+#[derive(Component, Debug, Clone)]
 pub struct VoxelChunk {
     pub volume: Entity,
     pub chunk: usize,
-    pub mesh: Handle<Mesh>,
+    /// (layer, drawing entity, mesh); see [`crate::voxel::mesh_chunk_layers`].
+    pub layers: Vec<(u8, Entity, Handle<Mesh>)>,
 }
+
+/// One surface layer of a [`VoxelChunk`] (its drawing child).
+#[derive(Component, Debug, Clone, Copy)]
+pub struct VoxelLayer;
 
 /// When a wall's or volume's state was built from its component (change tick), so a state
 /// that was built (and damaged) before this system first ran is not rebuilt.
@@ -107,7 +114,9 @@ pub fn init_voxels_system(
                     if let Ok(chunk) = chunks.get(*c)
                         && let Some(m) = meshes.as_deref_mut()
                     {
-                        m.remove(chunk.mesh);
+                        for (_, _, mesh) in &chunk.layers {
+                            m.remove(*mesh);
+                        }
                     }
                     commands.entity(*c).despawn();
                 }
@@ -243,7 +252,7 @@ pub fn rebuild_voxels_system(
     backend: Option<Res<PhysicsBackend>>,
     mut volumes: Query<(Entity, &VoxelVolume, &mut VoxelState)>,
     chunks: Query<&VoxelChunk>,
-    mut renderers: Query<&mut MeshRenderer, With<VoxelChunk>>,
+    mut renderers: Query<&mut MeshRenderer, With<VoxelLayer>>,
     mut diagnostics: ResMut<Diagnostics>,
     mut stats: ResMut<DestructionStats>,
 ) {
@@ -258,8 +267,7 @@ pub fn rebuild_voxels_system(
         if !state.chunk_dirty.iter().any(|d| *d) {
             continue;
         }
-        let look = VoxelLook::new(volume, &table);
-        let material = assets.surface(volume.material);
+        let look = VoxelLook::new(volume, &table).with_layers(assets.textured);
         let [cx_n, cy_n, _] = state.chunks;
         for ci in 0..state.chunk_dirty.len() {
             if !state.chunk_dirty[ci] {
@@ -270,59 +278,94 @@ pub fn rebuild_voxels_system(
             let cx = ci % cx_n;
             let cy = (ci / cx_n) % cy_n;
             let cz = ci / (cx_n * cy_n);
-            let mb = mesh_chunk(&state, &look, [cx, cy, cz]);
-            let empty = mb.is_empty();
-            let collider = (backend.is_some() && !empty).then(|| Collider {
-                shape: ColliderShape::TriMesh {
-                    vertices: mb.vertices.iter().map(|v| Vec3::from(v.position)).collect(),
-                    indices: mb
-                        .indices
-                        .as_chunks::<3>()
-                        .0
-                        .iter()
-                        .map(|t| [t[0], t[1], t[2]])
-                        .collect(),
-                },
-                ..Collider::default()
-            });
-            match state.chunk_entities[ci].and_then(|c| chunks.get(c).ok().map(|v| (c, *v))) {
-                Some((ce, vc)) => {
-                    if !empty {
-                        meshes.set(vc.mesh, mb.build());
-                    }
-                    if let Ok(mut r) = renderers.get_mut(ce)
-                        && r.visible == empty
-                    {
-                        r.visible = !empty;
-                    }
-                    match collider {
-                        Some(c) => {
-                            commands.entity(ce).insert(c);
-                        }
-                        None => {
-                            commands.entity(ce).remove::<Collider>();
-                        }
-                    }
+            let layers = mesh_chunk_layers(&state, &look, [cx, cy, cz]);
+            let empty = layers.iter().all(|(_, m)| m.is_empty());
+            let collider = (backend.is_some() && !empty).then(|| {
+                let mut all = MeshBuilder::new();
+                for (_, m) in &layers {
+                    all.append(m);
                 }
+                Collider {
+                    shape: ColliderShape::TriMesh {
+                        vertices: all
+                            .vertices
+                            .iter()
+                            .map(|v| Vec3::from(v.position))
+                            .collect(),
+                        indices: all
+                            .indices
+                            .as_chunks::<3>()
+                            .0
+                            .iter()
+                            .map(|t| [t[0], t[1], t[2]])
+                            .collect(),
+                    },
+                    ..Collider::default()
+                }
+            });
+            let existing =
+                state.chunk_entities[ci].and_then(|c| chunks.get(c).ok().map(|v| (c, v)));
+            let (ce, mut chunk) = match existing {
+                Some((ce, vc)) => (ce, vc.clone()),
                 None => {
                     if empty {
                         continue;
                     }
-                    let h = meshes.add(mb.build());
-                    let mut ec = commands.spawn((
-                        Transform::default(),
-                        MeshRenderer::new(MeshRef::Handle(h), MaterialRef::Handle(material)),
-                        VoxelChunk {
-                            volume: e,
-                            chunk: ci,
-                            mesh: h,
-                        },
-                        ChildOf(e),
-                    ));
-                    if let Some(c) = collider {
-                        ec.insert(c);
+                    let chunk = VoxelChunk {
+                        volume: e,
+                        chunk: ci,
+                        layers: Vec::new(),
+                    };
+                    let ce = commands
+                        .spawn((Transform::default(), chunk.clone(), ChildOf(e)))
+                        .id();
+                    state.chunk_entities[ci] = Some(ce);
+                    (ce, chunk)
+                }
+            };
+            // Each layer's drawing child: shown while the layer has triangles, spawned the
+            // first time it does.
+            for &(tag, le, _) in &chunk.layers {
+                let present = layers.iter().any(|(t, m)| *t == tag && !m.is_empty());
+                if let Ok(mut r) = renderers.get_mut(le)
+                    && r.visible != present
+                {
+                    r.visible = present;
+                }
+            }
+            for (tag, mb) in layers {
+                if mb.is_empty() {
+                    continue;
+                }
+                match chunk.layers.iter().find(|l| l.0 == tag) {
+                    Some(&(_, _, h)) => {
+                        meshes.set(h, mb.build());
                     }
-                    state.chunk_entities[ci] = Some(ec.id());
+                    None => {
+                        let h = meshes.add(mb.build());
+                        let le = commands
+                            .spawn((
+                                Transform::default(),
+                                MeshRenderer::new(
+                                    MeshRef::Handle(h),
+                                    MaterialRef::Handle(assets.layer_material(tag)),
+                                ),
+                                VoxelLayer,
+                                ChildOf(ce),
+                            ))
+                            .id();
+                        chunk.layers.push((tag, le, h));
+                    }
+                }
+            }
+            let mut ec = commands.entity(ce);
+            ec.insert(chunk);
+            match collider {
+                Some(c) => {
+                    ec.insert(c);
+                }
+                None => {
+                    ec.remove::<Collider>();
                 }
             }
         }
