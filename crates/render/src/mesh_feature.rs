@@ -42,7 +42,8 @@ use crate::settings::RenderSettings;
 use crate::shadows::{MAX_CASCADES, SKY_OCCLUSION_VIEW};
 use crate::texture::{Image, PixelFormat};
 
-/// Per-instance vertex data (locations 4–13 in `mesh.wgsl`).
+/// Per-instance vertex data (locations 4–10 in `mesh.wgsl`, plus 11–13 for the previous
+/// matrix in the mesh feature's own pipelines).
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Pod, Zeroable)]
 pub struct MeshInstance {
@@ -64,7 +65,20 @@ impl MeshInstance {
         11 => Float32x4, 12 => Float32x4, 13 => Float32x4,
     ];
 
+    /// The instance layout other features share: model matrix, normal matrix and `extra` at
+    /// locations 4–10. The previous matrix is in the buffer but not bound, which leaves
+    /// locations 11 and up free for the feature's own vertex data.
     pub fn layout() -> wgpu::VertexBufferLayout<'static> {
+        wgpu::VertexBufferLayout {
+            array_stride: std::mem::size_of::<Self>() as u64,
+            step_mode: wgpu::VertexStepMode::Instance,
+            attributes: &Self::ATTRIBUTES[..7],
+        }
+    }
+
+    /// [`MeshInstance::layout`] plus the previous model matrix at locations 11–13, for
+    /// pipelines that write motion vectors.
+    pub fn layout_with_motion() -> wgpu::VertexBufferLayout<'static> {
         wgpu::VertexBufferLayout {
             array_stride: std::mem::size_of::<Self>() as u64,
             step_mode: wgpu::VertexStepMode::Instance,
@@ -666,7 +680,10 @@ impl RenderFeature for MeshFeature {
             ],
             immediate_size: 0,
         });
-        let buffers = [Some(Vertex::layout()), Some(MeshInstance::layout())];
+        let buffers = [
+            Some(Vertex::layout()),
+            Some(MeshInstance::layout_with_motion()),
+        ];
         self.pipelines = (0..PIPELINE_VARIANTS)
             .map(|variant| {
                 let blend = variant & PIPE_BLEND != 0;
@@ -1181,5 +1198,26 @@ impl RenderFeature for MeshFeature {
             "transparent_batches": self.transparent.len(),
             "shadow_batches": self.shadow.iter().map(|s| s.len()).collect::<Vec<_>>(),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Other crates bind `MeshInstance::layout()` next to their own vertex data at locations 11
+    /// and up (the skinning feature does), so the shared layout must stay at 4–10.
+    #[test]
+    fn the_shared_instance_layout_leaves_locations_above_10_free() {
+        let shared = MeshInstance::layout();
+        assert!(
+            shared
+                .attributes
+                .iter()
+                .all(|a| (4..=10).contains(&a.shader_location))
+        );
+        let motion = MeshInstance::layout_with_motion();
+        assert_eq!(motion.array_stride, shared.array_stride);
+        assert!(motion.attributes.iter().any(|a| a.shader_location == 13));
     }
 }
