@@ -178,7 +178,11 @@ fn viewport(world: &World) -> UiViewport {
 fn node_children(world: &World, e: Entity) -> Vec<Entity> {
     world
         .get::<Children>(e)
-        .map(|c| c.iter().filter(|c| world.get::<Node>(*c).is_some()).collect())
+        .map(|c| {
+            c.iter()
+                .filter(|c| world.get::<Node>(*c).is_some())
+                .collect()
+        })
         .unwrap_or_default()
 }
 
@@ -239,8 +243,8 @@ fn resolve_styles(world: &mut World, dt: f32, theme_changed: bool) {
                     && (next.scale - c.target.scale).abs() < 0.0005
                     && (next.translate[0] - c.target.translate[0]).abs() < 0.05
                     && (next.translate[1] - c.target.translate[1]).abs() < 0.05;
-                let snap = close
-                    && (k > 0.5 || next.background.approx_eq(&c.target.background, 0.004));
+                let snap =
+                    close && (k > 0.5 || next.background.approx_eq(&c.target.background, 0.004));
                 c.style = if snap { c.target.clone() } else { next };
             }
         }
@@ -361,7 +365,10 @@ pub fn ui_layout_system(world: &mut World) {
 
             // Taffy node.
             let mut tstyle = style.to_taffy(vp.scale);
-            if is_icon && style.width == crate::style::Val::Auto && style.height == crate::style::Val::Auto {
+            if is_icon
+                && style.width == crate::style::Val::Auto
+                && style.height == crate::style::Val::Auto
+            {
                 let px = own.font_size * 1.25 * vp.scale;
                 tstyle.size = taffy::Size {
                     width: taffy::Dimension::length(px),
@@ -476,24 +483,29 @@ pub fn ui_layout_system(world: &mut World) {
                 height: AvailableSpace::Definite(vp.height),
             },
             |inputs, _id, ctx, style| {
-                taffy::compute_leaf_layout(inputs, style, |_, _| 0.0, |known, available| {
-                    let Some(entity) = ctx.map(|e| *e) else {
-                        return taffy::Size::ZERO;
-                    };
-                    let Some(entry) = texts_ref.entries.get_mut(&entity) else {
-                        return taffy::Size::ZERO;
-                    };
-                    let width = known.width.or(match available.width {
-                        AvailableSpace::Definite(w) => Some(w),
-                        AvailableSpace::MinContent => Some(0.0),
-                        AvailableSpace::MaxContent => None,
-                    });
-                    let [w, h] = entry.measure(system, width);
-                    taffy::Size {
-                        width: known.width.unwrap_or(w),
-                        height: known.height.unwrap_or(h),
-                    }
-                })
+                taffy::compute_leaf_layout(
+                    inputs,
+                    style,
+                    |_, _| 0.0,
+                    |known, available| {
+                        let Some(entity) = ctx.map(|e| *e) else {
+                            return taffy::Size::ZERO;
+                        };
+                        let Some(entry) = texts_ref.entries.get_mut(&entity) else {
+                            return taffy::Size::ZERO;
+                        };
+                        let width = known.width.or(match available.width {
+                            AvailableSpace::Definite(w) => Some(w),
+                            AvailableSpace::MinContent => Some(0.0),
+                            AvailableSpace::MaxContent => None,
+                        });
+                        let [w, h] = entry.measure(system, width);
+                        taffy::Size {
+                            width: known.width.unwrap_or(w),
+                            height: known.height.unwrap_or(h),
+                        }
+                    },
+                )
             },
         );
     }
@@ -526,7 +538,11 @@ pub fn ui_layout_system(world: &mut World) {
             }
             root_opacity *= fade;
         }
-        let screen_scale = if is_screen { 0.985 + 0.015 * presence } else { 1.0 };
+        let screen_scale = if is_screen {
+            0.985 + 0.015 * presence
+        } else {
+            1.0
+        };
         let screen_shift = if is_screen {
             (1.0 - presence) * 14.0 * vp.scale
         } else {
@@ -583,7 +599,12 @@ pub fn ui_layout_system(world: &mut World) {
             let own_offset = center * (1.0 - own_scale) + translate;
             let offset_total = own_offset * f.scale + f.offset;
             let screen_min = pos * s_total + offset_total;
-            let rect = Rect::new(screen_min.x, screen_min.y, size.x * s_total, size.y * s_total);
+            let rect = Rect::new(
+                screen_min.x,
+                screen_min.y,
+                size.x * s_total,
+                size.y * s_total,
+            );
             let opacity = f.opacity * style.opacity;
             let mut clip = f.clip;
             if style.overflow != Overflow::Visible {
@@ -752,7 +773,8 @@ fn project_anchors(world: &mut World, vp: &UiViewport) -> HashMap<Entity, (Vec2,
             targets.push((e, base + a.offset.as_dvec3()));
         }
     }
-    let margin = 40.0 * vp.scale;
+    // Clamped markers keep clear of the compass (top) and the hotbar (bottom).
+    let (side, top, bottom) = (70.0 * vp.scale, 130.0 * vp.scale, 180.0 * vp.scale);
     for (e, point) in targets {
         let (mut screen, _, front) = project(camera, vp, point);
         let distance = (point - camera.0).length() as f32;
@@ -768,7 +790,9 @@ fn project_anchors(world: &mut World, vp: &UiViewport) -> HashMap<Entity, (Vec2,
         a.on_screen = inside;
         let mut shown = inside;
         if !inside && a.clamp_to_edges {
-            let c = Vec2::new(vp.width, vp.height) * 0.5;
+            let lo = Vec2::new(side, top);
+            let hi = Vec2::new(vp.width - side, vp.height - bottom).max(lo + Vec2::ONE);
+            let c = (lo + hi) * 0.5;
             let mut d = screen - c;
             if !front {
                 d = -d;
@@ -776,7 +800,7 @@ fn project_anchors(world: &mut World, vp: &UiViewport) -> HashMap<Entity, (Vec2,
                     d = Vec2::new(0.0, 1.0);
                 }
             }
-            let half = c - Vec2::splat(margin);
+            let half = (hi - lo) * 0.5;
             let k = (d.x.abs() / half.x).max(d.y.abs() / half.y).max(1e-6);
             screen = c + d / k;
             a.edge_direction = d.normalize_or_zero();
@@ -817,7 +841,11 @@ pub fn is_effectively_hidden(world: &World, mut e: Entity) -> bool {
 
 /// Position helper for absolutely placed popups: keep `rect` inside the viewport.
 pub fn keep_inside(rect: Rect, vp: &UiViewport, margin: f32) -> Vec2 {
-    let x = rect.x.clamp(margin, (vp.width - rect.w - margin).max(margin));
-    let y = rect.y.clamp(margin, (vp.height - rect.h - margin).max(margin));
+    let x = rect
+        .x
+        .clamp(margin, (vp.width - rect.w - margin).max(margin));
+    let y = rect
+        .y
+        .clamp(margin, (vp.height - rect.h - margin).max(margin));
     Vec2::new(x, y)
 }

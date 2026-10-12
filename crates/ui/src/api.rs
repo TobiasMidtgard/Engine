@@ -24,13 +24,18 @@ fn need_str<'a>(args: &'a Value, key: &str, example: &str) -> Result<&'a str, St
 
 fn node_by_id(world: &mut World, id: &str) -> Result<Entity, String> {
     input::find_id(world, id).ok_or_else(|| {
-        format!("No UI node has the id \"{id}\". `ui.tree` lists the nodes on screen and their ids.")
+        format!(
+            "No UI node has the id \"{id}\". `ui.tree` lists the nodes on screen and their ids."
+        )
     })
 }
 
 /// A JSON description of a node and its children (what an AI agent "sees").
 pub fn describe_node(world: &World, e: Entity, depth: usize) -> Value {
-    let vp = world.get_resource::<UiViewport>().copied().unwrap_or_default();
+    let vp = world
+        .get_resource::<UiViewport>()
+        .copied()
+        .unwrap_or_default();
     let mut v = serde_json::Map::new();
     if let Some(id) = world.get::<UiId>(e) {
         v.insert("id".into(), json!(id.0));
@@ -66,7 +71,10 @@ pub fn describe_node(world: &World, e: Entity, depth: usize) -> Value {
         v.insert("drop_slot".into(), json!(d.slot));
     }
     if let Some(t) = world.get::<Tooltip>(e) {
-        v.insert("tooltip".into(), json!(format!("{} {}", t.title, t.text).trim()));
+        v.insert(
+            "tooltip".into(),
+            json!(format!("{} {}", t.title, t.text).trim()),
+        );
     }
     if let Some(i) = world.get::<Interaction>(e) {
         for (k, on) in [
@@ -97,7 +105,11 @@ pub fn describe_node(world: &World, e: Entity, depth: usize) -> Value {
     }
     let children: Vec<Entity> = world
         .get::<Children>(e)
-        .map(|c| c.iter().filter(|c| world.get::<Node>(*c).is_some()).collect())
+        .map(|c| {
+            c.iter()
+                .filter(|c| world.get::<Node>(*c).is_some())
+                .collect()
+        })
         .unwrap_or_default();
     if !children.is_empty() {
         if depth == 0 {
@@ -136,7 +148,10 @@ pub fn register(app: &mut App) {
         r#"{"screen": "shop", "instant": false}"#,
         |world, args| {
             let key = need_str(&args, "screen", r#"{"screen": "shop"}"#)?;
-            let instant = args.get("instant").and_then(Value::as_bool).unwrap_or(false);
+            let instant = args
+                .get("instant")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
             Ok(json!({"closed": screens::hide(world, key, instant)}))
         },
     );
@@ -148,10 +163,17 @@ pub fn register(app: &mut App) {
             let keep: Vec<String> = args
                 .get("keep")
                 .and_then(Value::as_array)
-                .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|v| v.as_str().map(String::from))
+                        .collect()
+                })
                 .unwrap_or_default();
             let keep: Vec<&str> = keep.iter().map(String::as_str).collect();
-            let instant = args.get("instant").and_then(Value::as_bool).unwrap_or(false);
+            let instant = args
+                .get("instant")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
             Ok(json!({"closed": screens::hide_all(world, &keep, instant)}))
         },
     );

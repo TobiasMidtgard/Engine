@@ -21,6 +21,7 @@
 
 use std::collections::BTreeMap;
 
+use bevy_ecs::message::MessageCursor;
 use bevy_ecs::prelude::*;
 use engine_core::prelude::Time;
 use engine_input::{ButtonInput, KeyCode};
@@ -122,9 +123,15 @@ impl DialogueTree {
         }
         for (id, n) in &self.nodes {
             if !self.speakers.contains_key(&n.speaker) {
-                return Err(format!("Node \"{id}\" has an unknown speaker \"{}\".", n.speaker));
+                return Err(format!(
+                    "Node \"{id}\" has an unknown speaker \"{}\".",
+                    n.speaker
+                ));
             }
-            let nexts = n.next.iter().chain(n.choices.iter().filter_map(|c| c.next.as_ref()));
+            let nexts = n
+                .next
+                .iter()
+                .chain(n.choices.iter().filter_map(|c| c.next.as_ref()));
             for next in nexts {
                 if !self.nodes.contains_key(next) {
                     return Err(format!("Node \"{id}\" leads to a missing node \"{next}\"."));
@@ -170,7 +177,11 @@ impl DialogueScreen {
 
 fn portrait_variant(icons: &IconLibrary, base: &str, suffix: &str) -> String {
     let name = format!("{base}_{suffix}");
-    if icons.contains(&name) { name } else { base.to_string() }
+    if icons.contains(&name) {
+        name
+    } else {
+        base.to_string()
+    }
 }
 
 fn visible_choices(world: &World, node: &DialogueNode) -> Vec<(usize, Choice)> {
@@ -178,11 +189,15 @@ fn visible_choices(world: &World, node: &DialogueNode) -> Vec<(usize, Choice)> {
         .iter()
         .enumerate()
         .filter(|(_, c)| match &c.requires {
-            Some(path) => crate::data::lookup_f64(world, path).is_some_and(|v| v != 0.0)
-                || world
-                    .get_resource::<crate::data::UiData>()
-                    .and_then(|d| d.get(path).cloned())
-                    .is_some_and(|v| v.as_bool() == Some(true) || v.as_str().is_some_and(|s| !s.is_empty())),
+            Some(path) => {
+                crate::data::lookup_f64(world, path).is_some_and(|v| v != 0.0)
+                    || world
+                        .get_resource::<crate::data::UiData>()
+                        .and_then(|d| d.get(path).cloned())
+                        .is_some_and(|v| {
+                            v.as_bool() == Some(true) || v.as_str().is_some_and(|s| !s.is_empty())
+                        })
+            }
             None => true,
         })
         .map(|(i, c)| (i, c.clone()))
@@ -192,43 +207,38 @@ fn visible_choices(world: &World, node: &DialogueNode) -> Vec<(usize, Choice)> {
 fn portrait_el(sp: &Speaker, side: Side, active: bool, id: &str) -> El {
     let flip = (side == Side::Right) == sp.faces_right;
     let glow = sp.color;
-    let mut col = El::new()
-        .id(format!("{id}_wrap"))
-        .with_style(|s| {
-            let s = s
-                .position(Position::Absolute)
-                .bottom(0.0)
-                .width(440.0)
-                .height(550.0)
-                .column()
-                .align_items(Align::Center)
-                .justify(crate::style::Justify::End)
-                .pick(Pick::Ignore)
-                .transition(0.25)
-                .opacity(if active { 1.0 } else { 0.5 })
-                .scale(if active { 1.0 } else { 0.95 })
-                .translate([0.0, if active { 0.0 } else { 12.0 }]);
-            match side {
-                Side::Left => s.left(30.0),
-                Side::Right => s.right(30.0),
-            }
-        });
+    let mut col = El::new().id(format!("{id}_wrap")).with_style(|s| {
+        let s = s
+            .position(Position::Absolute)
+            .bottom(0.0)
+            .width(440.0)
+            .height(550.0)
+            .column()
+            .align_items(Align::Center)
+            .justify(crate::style::Justify::End)
+            .pick(Pick::Ignore)
+            .transition(0.25)
+            .opacity(if active { 1.0 } else { 0.5 })
+            .scale(if active { 1.0 } else { 0.95 })
+            .translate([0.0, if active { 0.0 } else { 12.0 }]);
+        match side {
+            Side::Left => s.left(30.0),
+            Side::Right => s.right(30.0),
+        }
+    });
     // Soft colored light behind the speaker.
-    col = col.child(
-        El::new()
-            .with_style(|s| {
-                s.position(Position::Absolute)
-                    .left(-60.0)
-                    .right(-60.0)
-                    .top(40.0)
-                    .bottom(-40.0)
-                    .background(Fill::Radial {
-                        inner: glow.fade(0.28),
-                        outer: glow.fade(0.0),
-                    })
-                    .pick(Pick::Ignore)
-            }),
-    );
+    col = col.child(El::new().with_style(|s| {
+        s.position(Position::Absolute)
+            .left(-60.0)
+            .right(-60.0)
+            .top(40.0)
+            .bottom(-40.0)
+            .background(Fill::Radial {
+                inner: glow.fade(0.28),
+                outer: glow.fade(0.0),
+            })
+            .pick(Pick::Ignore)
+    }));
     col.child(
         El::icon(sp.portrait.clone())
             .id(id)
@@ -241,7 +251,12 @@ fn build(world: &World, st: &DialogueScreen) -> El {
     let theme = world.resource::<Theme>().clone();
     let p = &theme.palette;
     let node = st.tree.nodes.get(&st.node).cloned().unwrap_or_default();
-    let speaker = st.tree.speakers.get(&node.speaker).cloned().unwrap_or_default();
+    let speaker = st
+        .tree
+        .speakers
+        .get(&node.speaker)
+        .cloned()
+        .unwrap_or_default();
     let side = speaker.side;
 
     // Who stands where: the current speaker on their side, the most recent other speaker
@@ -250,8 +265,12 @@ fn build(world: &World, st: &DialogueScreen) -> El {
     let mut right: Option<(String, Speaker)> = None;
     for (k, s) in &st.tree.speakers {
         match s.side {
-            Side::Left if left.is_none() || *k == node.speaker => left = Some((k.clone(), s.clone())),
-            Side::Right if right.is_none() || *k == node.speaker => right = Some((k.clone(), s.clone())),
+            Side::Left if left.is_none() || *k == node.speaker => {
+                left = Some((k.clone(), s.clone()))
+            }
+            Side::Right if right.is_none() || *k == node.speaker => {
+                right = Some((k.clone(), s.clone()))
+            }
             _ => {}
         }
     }
@@ -272,10 +291,20 @@ fn build(world: &World, st: &DialogueScreen) -> El {
             .pick(Pick::Ignore)
     }));
     if let Some((k, s)) = &left {
-        root = root.child(portrait_el(s, Side::Left, *k == node.speaker, "dlg_portrait_left"));
+        root = root.child(portrait_el(
+            s,
+            Side::Left,
+            *k == node.speaker,
+            "dlg_portrait_left",
+        ));
     }
     if let Some((k, s)) = &right {
-        root = root.child(portrait_el(s, Side::Right, *k == node.speaker, "dlg_portrait_right"));
+        root = root.child(portrait_el(
+            s,
+            Side::Right,
+            *k == node.speaker,
+            "dlg_portrait_right",
+        ));
     }
     // Cinematic shading over the lower screen (and the portraits' cut-off shoulders).
     root = root.child(El::new().with_style(|s| {
@@ -311,7 +340,11 @@ fn build(world: &World, st: &DialogueScreen) -> El {
     let text = El::text(node.text.clone())
         .id("dlg_text")
         .text_style(|t| t.line_height(1.5))
-        .with_style(|s| s.font_size(23.0).color(p.text).min_height(if node.choices.is_empty() { 70.0 } else { 0.0 }))
+        .with_style(|s| {
+            s.font_size(23.0)
+                .color(p.text)
+                .min_height(if node.choices.is_empty() { 70.0 } else { 0.0 })
+        })
         .pick_ignore();
     let mut body = El::new()
         .class("col")
@@ -320,7 +353,10 @@ fn build(world: &World, st: &DialogueScreen) -> El {
         .child(text);
     let choices = visible_choices(world, &node);
     if st.choices_shown && !choices.is_empty() {
-        let mut list = El::new().class("col").id("dlg_choices").with_style(|s| s.gap(6.0).margin([6.0, 0.0, 0.0, 0.0]));
+        let mut list = El::new()
+            .class("col")
+            .id("dlg_choices")
+            .with_style(|s| s.gap(6.0).margin([6.0, 0.0, 0.0, 0.0]));
         for (n, (i, c)) in choices.iter().enumerate() {
             let mut row = El::new()
                 .class("list_item choice")
@@ -368,10 +404,25 @@ fn build(world: &World, st: &DialogueScreen) -> El {
                 .right(26.0)
                 .bottom(18.0)
                 .gap(8.0)
-                .opacity(if choices.is_empty() || !st.choices_shown { 1.0 } else { 0.0 })
+                .opacity(if choices.is_empty() || !st.choices_shown {
+                    1.0
+                } else {
+                    0.0
+                })
                 .transition(0.2)
         })
-        .child(widgets::key_hint("Space", "A", if node.next.is_some() || !choices.is_empty() { "Continue" } else { "End" }).pick_ignore())
+        .child(
+            widgets::key_hint(
+                "Space",
+                "A",
+                if node.next.is_some() || !choices.is_empty() {
+                    "Continue"
+                } else {
+                    "End"
+                },
+            )
+            .pick_ignore(),
+        )
         .child(
             El::icon("ui_arrow_down")
                 .id("dlg_arrow")
@@ -395,21 +446,19 @@ fn build(world: &World, st: &DialogueScreen) -> El {
                 .translate([x_offset, 0.0])
                 .transition(0.3)
         })
-        .child(
-            El::new().with_style(|s| {
-                s.position(Position::Absolute)
-                    .top(-1.0)
-                    .left(40.0)
-                    .right(40.0)
-                    .height(2.0)
-                    .background(Fill::Linear {
-                        from: accent.fade(0.0),
-                        to: accent,
-                        angle_deg: 0.0,
-                    })
-                    .pick(Pick::Ignore)
-            }),
-        )
+        .child(El::new().with_style(|s| {
+            s.position(Position::Absolute)
+                .top(-1.0)
+                .left(40.0)
+                .right(40.0)
+                .height(2.0)
+                .background(Fill::Linear {
+                    from: accent.fade(0.0),
+                    to: accent,
+                    angle_deg: 0.0,
+                })
+                .pick(Pick::Ignore)
+        }))
         .child(body)
         .child(cont);
     root.child(
@@ -433,7 +482,10 @@ fn plain_text(world: &World, text: &str) -> Vec<char> {
         Some(d) if crate::data::has_bindings(text) => crate::data::resolve(text, d, Some(world)),
         _ => text.to_string(),
     };
-    crate::text::strip_markup(&resolved).chars().filter(|c| *c != '\n').collect()
+    crate::text::strip_markup(&resolved)
+        .chars()
+        .filter(|c| *c != '\n')
+        .collect()
 }
 
 /// Builder for `ui.show {"screen": "dialogue"}`.
@@ -452,7 +504,9 @@ pub fn build_screen(world: &mut World, args: &Value) -> Result<Entity, String> {
                 .map_err(|e| format!("The conversation doesn't parse: {e}."))?;
             ("inline".to_string(), tree)
         }
-        _ => return Err("Pass \"tree\": a conversation id (dialogue.list) or a whole tree.".into()),
+        _ => {
+            return Err("Pass \"tree\": a conversation id (dialogue.list) or a whole tree.".into());
+        }
     };
     tree.validate()?;
     let node = args
@@ -495,7 +549,10 @@ pub fn build_screen(world: &mut World, args: &Value) -> Result<Entity, String> {
     let root = sp.root.ok_or("empty")?;
     world.entity_mut(root).insert(st);
     set_reveal(world, root, 0.0);
-    if let Some(a) = world.get::<DialogueScreen>(root).and_then(|s| s.tree.nodes[&s.node].action.clone()) {
+    if let Some(a) = world
+        .get::<DialogueScreen>(root)
+        .and_then(|s| s.tree.nodes[&s.node].action.clone())
+    {
         input::dispatch(world, &a);
     }
     Ok(root)
@@ -552,7 +609,10 @@ fn go(world: &mut World, root: Entity, next: Option<String>) {
 
 /// Pick choice `index` (of the node's full choice list).
 pub fn choose(world: &mut World, root: Entity, index: usize) -> Result<(), String> {
-    let st = world.get::<DialogueScreen>(root).cloned().ok_or("No conversation.")?;
+    let st = world
+        .get::<DialogueScreen>(root)
+        .cloned()
+        .ok_or("No conversation.")?;
     let node = st.tree.nodes.get(&st.node).cloned().unwrap_or_default();
     let visible = visible_choices(world, &node);
     let (_, c) = visible
@@ -583,23 +643,21 @@ pub fn advance(world: &mut World, root: Entity) {
 }
 
 /// Typewriter, portrait animation and input for open conversations.
-pub fn dialogue_system(world: &mut World) {
+pub fn dialogue_system(world: &mut World, mut seen: Local<MessageCursor<UiEvent>>) {
     let dt = world.resource::<Time>().real_delta_secs().min(0.1);
-    let events: Vec<UiEvent> = world
-        .resource::<bevy_ecs::message::Messages<UiEvent>>()
-        .iter_current_update_messages()
-        .cloned()
-        .collect();
+    let events: Vec<UiEvent> = crate::input::read_events(world, &mut seen);
     let digits: Vec<usize> = world
         .get_resource::<ButtonInput<KeyCode>>()
         .map(|k| {
             use KeyCode::*;
-            [Digit1, Digit2, Digit3, Digit4, Digit5, Digit6, Digit7, Digit8, Digit9]
-                .iter()
-                .enumerate()
-                .filter(|(_, d)| k.just_pressed(**d))
-                .map(|(i, _)| i)
-                .collect()
+            [
+                Digit1, Digit2, Digit3, Digit4, Digit5, Digit6, Digit7, Digit8, Digit9,
+            ]
+            .iter()
+            .enumerate()
+            .filter(|(_, d)| k.just_pressed(**d))
+            .map(|(i, _)| i)
+            .collect()
         })
         .unwrap_or_default();
     let mut q = world.query::<(Entity, &DialogueScreen, &Screen)>();
@@ -616,7 +674,9 @@ pub fn dialogue_system(world: &mut World) {
                 }
                 if action == "dialogue.next" {
                     advance(world, root);
-                } else if let Some(i) = action.strip_prefix("dialogue.choose:").and_then(|i| i.parse().ok())
+                } else if let Some(i) = action
+                    .strip_prefix("dialogue.choose:")
+                    .and_then(|i| i.parse().ok())
                     && let Err(e) = choose(world, root, i)
                 {
                     tracing::warn!("{e}");
@@ -700,7 +760,10 @@ pub fn dialogue_system(world: &mut World) {
         // Portrait frames.
         let icons = world.resource::<IconLibrary>();
         let mut frames = Vec::new();
-        for (side_id, side, b) in [("dlg_portrait_left", Side::Left, blink[0]), ("dlg_portrait_right", Side::Right, blink[1])] {
+        for (side_id, side, b) in [
+            ("dlg_portrait_left", Side::Left, blink[0]),
+            ("dlg_portrait_right", Side::Right, blink[1]),
+        ] {
             let Some((key, sp)) = speakers
                 .iter()
                 .filter(|(_, s)| s.side == side)
@@ -750,7 +813,15 @@ pub fn register_api(app: &mut engine_core::prelude::App) {
         "dialogue.list",
         "Conversation ids in the DialogueLibrary.",
         "{}",
-        |world, _| Ok(json!(world.resource::<DialogueLibrary>().trees.keys().collect::<Vec<_>>())),
+        |world, _| {
+            Ok(json!(
+                world
+                    .resource::<DialogueLibrary>()
+                    .trees
+                    .keys()
+                    .collect::<Vec<_>>()
+            ))
+        },
     );
     app.register_api(
         "dialogue.add",
@@ -787,7 +858,10 @@ pub fn register_api(app: &mut engine_core::prelude::App) {
         r#"{"index": 0}"#,
         |world, args| {
             let root = open_dialogue(world)?;
-            let i = args.get("index").and_then(Value::as_u64).ok_or("Pass \"index\".")? as usize;
+            let i = args
+                .get("index")
+                .and_then(Value::as_u64)
+                .ok_or("Pass \"index\".")? as usize;
             choose(world, root, i)?;
             Ok(json!({"ok": true}))
         },

@@ -86,7 +86,13 @@ impl IconLibrary {
 
     /// Rasterize `name` to fit `w`×`h` (aspect kept). Returns the bitmap size and straight-alpha
     /// sRGB RGBA8 pixels.
-    pub fn rasterize(&mut self, name: &str, w: u32, h: u32, flip: bool) -> Option<(u32, u32, Vec<u8>)> {
+    pub fn rasterize(
+        &mut self,
+        name: &str,
+        w: u32,
+        h: u32,
+        flip: bool,
+    ) -> Option<(u32, u32, Vec<u8>)> {
         let tree = self.tree(name)?;
         let size = tree.size();
         let s = (w as f32 / size.width()).min(h as f32 / size.height());
@@ -137,7 +143,10 @@ mod tests {
         let mut lib = IconLibrary::default();
         let names: Vec<String> = lib.names().iter().map(|s| s.to_string()).collect();
         for name in names {
-            assert!(lib.rasterize(&name, 32, 32, false).is_some(), "{name} failed");
+            assert!(
+                lib.rasterize(&name, 32, 32, false).is_some(),
+                "{name} failed"
+            );
         }
     }
 }

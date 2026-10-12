@@ -85,7 +85,11 @@ pub fn open_screens(world: &mut World) -> Vec<(String, Entity, i32, bool)> {
 /// opening animation). `args.instant` skips the animation, `args.modal`/`args.layer`
 /// override the defaults.
 pub fn show(world: &mut World, kind: &str, args: &Value) -> Result<Entity, String> {
-    let key = args.get("key").and_then(Value::as_str).unwrap_or(kind).to_string();
+    let key = args
+        .get("key")
+        .and_then(Value::as_str)
+        .unwrap_or(kind)
+        .to_string();
     let key = key.as_str();
     let registry = world.resource::<ScreenRegistry>();
     let Some(kind) = registry.kinds.get(kind).cloned() else {
@@ -200,7 +204,9 @@ pub fn build_layout(world: &mut World, args: &Value) -> Result<Entity, String> {
         .with_style(|s| s.fill_parent().pick(crate::style::Pick::Ignore))
         .child(el);
     let spawned = spawn_screen(world, screen, &root)?;
-    spawned.root.ok_or_else(|| "The layout is empty.".to_string())
+    spawned
+        .root
+        .ok_or_else(|| "The layout is empty.".to_string())
 }
 
 /// Every node entity under (and including) `root`, depth first.
@@ -221,9 +227,11 @@ pub fn subtree(world: &World, root: Entity) -> Vec<Entity> {
 
 /// The node with [`UiId`](crate::node::UiId) `id` under `root`.
 pub fn find_in(world: &World, root: Entity, id: &str) -> Option<Entity> {
-    subtree(world, root)
-        .into_iter()
-        .find(|e| world.get::<crate::node::UiId>(*e).is_some_and(|i| i.0 == id))
+    subtree(world, root).into_iter().find(|e| {
+        world
+            .get::<crate::node::UiId>(*e)
+            .is_some_and(|i| i.0 == id)
+    })
 }
 
 /// The top-level node (screen root) that `e` belongs to.

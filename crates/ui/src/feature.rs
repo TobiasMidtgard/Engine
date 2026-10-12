@@ -252,7 +252,11 @@ impl Gpu {
         });
         let blur_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("ui blur"),
-            entries: &[texture(0), sampler(1), uniform(2, wgpu::ShaderStages::FRAGMENT)],
+            entries: &[
+                texture(0),
+                sampler(1),
+                uniform(2, wgpu::ShaderStages::FRAGMENT),
+            ],
         });
         let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("ui"),
@@ -293,8 +297,10 @@ impl Gpu {
             multiview_mask: None,
             cache: None,
         });
-        let down_pipeline = fullscreen_pipeline(gpu, &blur_pipeline_layout, &blur_shader, "fs_down");
-        let blur_pipeline = fullscreen_pipeline(gpu, &blur_pipeline_layout, &blur_shader, "fs_blur");
+        let down_pipeline =
+            fullscreen_pipeline(gpu, &blur_pipeline_layout, &blur_shader, "fs_down");
+        let blur_pipeline =
+            fullscreen_pipeline(gpu, &blur_pipeline_layout, &blur_shader, "fs_blur");
         let buffer = |label, size| {
             device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some(label),
@@ -376,7 +382,11 @@ impl Gpu {
 
     fn textures_group(&mut self, gpu: &GpuShared) -> Option<&wgpu::BindGroup> {
         if self.textures_group.is_none() {
-            let (mask, color, blur) = (self.mask.as_ref()?, self.color.as_ref()?, self.blur.as_ref()?);
+            let (mask, color, blur) = (
+                self.mask.as_ref()?,
+                self.color.as_ref()?,
+                self.blur.as_ref()?,
+            );
             self.textures_group = Some(gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("ui textures"),
                 layout: &self.textures_layout,
@@ -470,7 +480,11 @@ impl RenderFeature for UiFeature {
                 *slot = Some(atlas_texture(
                     gpu,
                     atlas,
-                    if is_mask { "ui glyph atlas" } else { "ui color atlas" },
+                    if is_mask {
+                        "ui glyph atlas"
+                    } else {
+                        "ui color atlas"
+                    },
                 ));
                 atlas.resized = false;
                 atlas.dirty = Some([0, 0, atlas.width, atlas.height]);
@@ -495,9 +509,11 @@ impl RenderFeature for UiFeature {
                 .write_buffer(&g.looks, 0, bytemuck::cast_slice(&list.looks));
         }
         if self.count > 0 {
-            let grown = g
-                .instances
-                .write(&gpu.device, &gpu.queue, bytemuck::cast_slice(&list.instances));
+            let grown = g.instances.write(
+                &gpu.device,
+                &gpu.queue,
+                bytemuck::cast_slice(&list.instances),
+            );
             let _ = grown;
         }
         self.stats.draw_calls = (self.count > 0) as u32;

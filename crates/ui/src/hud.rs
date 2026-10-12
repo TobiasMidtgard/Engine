@@ -118,11 +118,11 @@ impl Default for Marker {
 }
 
 /// The distance label inside a marker.
-#[derive(Component, Debug, Clone, Copy, Default)]
+#[derive(Component, Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
 pub struct MarkerDistance;
 
 /// The edge arrow inside a marker (shown while the marker is clamped to the screen edge).
-#[derive(Component, Debug, Clone, Copy, Default)]
+#[derive(Component, Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
 pub struct MarkerArrow;
 
 // --------------------------------------------------------------------------------- helpers
@@ -137,7 +137,10 @@ pub fn format_distance(m: f64) -> String {
     } else if m < 10_000.0 {
         format!("{:.1} km", m / 1000.0)
     } else {
-        format!("{} km", crate::data::group_thousands(format!("{:.0}", m / 1000.0)))
+        format!(
+            "{} km",
+            crate::data::group_thousands(format!("{:.0}", m / 1000.0))
+        )
     }
 }
 
@@ -148,7 +151,16 @@ fn data_f64(world: &World, path: &str) -> Option<f64> {
     crate::data::lookup_f64(world, path)
 }
 
-fn bar(bind: &str, max: &str, color: Color, color2: Color, height: f32, segments: u32, low: f32, label: bool) -> El {
+fn bar(
+    bind: &str,
+    max: &str,
+    color: Color,
+    color2: Color,
+    height: f32,
+    segments: u32,
+    low: f32,
+    label: bool,
+) -> El {
     El::new()
         .class("bar_track")
         .paint("bar")
@@ -161,7 +173,11 @@ fn bar(bind: &str, max: &str, color: Color, color2: Color, height: f32, segments
                 ..Bar::bound(bind, max, color, color2)
             },
         )
-        .with_style(|s| s.width(pct(100.0)).height(height).radius(Corners::all(height * 0.5)))
+        .with_style(|s| {
+            s.width(pct(100.0))
+                .height(height)
+                .radius(Corners::all(height * 0.5))
+        })
 }
 
 fn hud_panel() -> El {
@@ -272,7 +288,10 @@ fn vitals(p: &crate::theme::Palette, portrait: &str) -> El {
             El::new()
                 .class("bar_track")
                 .paint("bar")
-                .attach("Bar", &Bar::bound("player.xp", "player.xp_max", p.accent_dark, p.accent_light))
+                .attach(
+                    "Bar",
+                    &Bar::bound("player.xp", "player.xp_max", p.accent_dark, p.accent_light),
+                )
                 .with_style(|s| {
                     s.position(Position::Absolute)
                         .left(14.0)
@@ -371,8 +390,17 @@ fn quest_tracker(p: &crate::theme::Palette) -> El {
             El::new()
                 .class("row")
                 .with_style(|s| s.gap(8.0))
-                .child(El::icon("marker_quest").with_style(|s| s.size(16.0, 16.0)).pick_ignore())
-                .child(El::text("QUEST").class("label_caps").text_style(|t| t.nowrap()))
+                .child(
+                    El::icon("marker_quest")
+                        .with_style(|s| s.size(16.0, 16.0))
+                        .pick_ignore(),
+                )
+                .child(
+                    El::text("QUEST")
+                        .class("label_caps")
+                        .text_style(|t| t.nowrap().shadow())
+                        .with_style(|s| s.color(p.accent)),
+                )
                 .child(El::new().with_style(|s| s.grow(1.0)))
                 .child(
                     El::text("{nav.waypoint_text}")
@@ -389,15 +417,13 @@ fn quest_tracker(p: &crate::theme::Palette) -> El {
             El::new()
                 .class("row")
                 .with_style(|s| s.gap(8.0).align_items(Align::Start))
-                .child(
-                    El::new().with_style(|s| {
-                        s.size(10.0, 10.0)
-                            .margin([5.0, 0.0, 0.0, 2.0])
-                            .radius(Corners::all(2.0))
-                            .border(1.5, p.accent.fade(0.9))
-                            .rotate_deg(45.0)
-                    }),
-                )
+                .child(El::new().with_style(|s| {
+                    s.size(10.0, 10.0)
+                        .margin([5.0, 0.0, 0.0, 2.0])
+                        .radius(Corners::all(2.0))
+                        .border(1.5, p.accent.fade(0.9))
+                        .rotate_deg(45.0)
+                }))
                 .child(
                     El::text("{quest.step}")
                         .text_style(|t| t.shadow().line_height(1.35))
@@ -408,11 +434,16 @@ fn quest_tracker(p: &crate::theme::Palette) -> El {
             El::new()
                 .class("row")
                 .with_style(|s| s.gap(10.0).margin([2.0, 0.0, 0.0, 20.0]))
-                .child(
-                    El::new()
-                        .with_style(|s| s.grow(1.0))
-                        .child(bar("quest.progress", "quest.progress_max", p.accent_dark, p.accent, 4.0, 3, 0.0, false)),
-                )
+                .child(El::new().with_style(|s| s.grow(1.0)).child(bar(
+                    "quest.progress",
+                    "quest.progress_max",
+                    p.accent_dark,
+                    p.accent,
+                    4.0,
+                    3,
+                    0.0,
+                    false,
+                )))
                 .child(
                     El::text("{quest.progress} / {quest.progress_max}")
                         .text_style(|t| t.tabular().nowrap())
@@ -446,15 +477,6 @@ fn hotbar(p: &crate::theme::Palette, world: &World) -> El {
             El::new()
                 .class("slot")
                 .id(format!("hud_ability:{i}"))
-                .paint("cooldown")
-                .attach(
-                    "Cooldown",
-                    &Cooldown {
-                        bind: format!("abilities.{i}.cooldown"),
-                        bind_total: format!("abilities.{i}.total"),
-                        ..Default::default()
-                    },
-                )
                 .with_style(|s| {
                     s.size(62.0, 62.0)
                         .background(Fill::Radial {
@@ -463,7 +485,33 @@ fn hotbar(p: &crate::theme::Palette, world: &World) -> El {
                         })
                         .border(1.0, Color::WHITE.fade(0.14))
                 })
-                .child(El::icon(icon).with_style(|s| s.size(44.0, 44.0)).pick_ignore())
+                .child(
+                    El::icon(icon)
+                        .with_style(|s| s.size(44.0, 44.0))
+                        .pick_ignore(),
+                )
+                .child(
+                    // The sweep draws over the icon.
+                    El::new()
+                        .paint("cooldown")
+                        .attach(
+                            "Cooldown",
+                            &Cooldown {
+                                bind: format!("abilities.{i}.cooldown"),
+                                bind_total: format!("abilities.{i}.total"),
+                                ..Default::default()
+                            },
+                        )
+                        .with_style(|s| {
+                            s.position(Position::Absolute)
+                                .left(0.0)
+                                .top(0.0)
+                                .right(0.0)
+                                .bottom(0.0)
+                                .radius(Corners::all(10.0))
+                        })
+                        .pick_ignore(),
+                )
                 .child(
                     El::new()
                         .class("kbd")
@@ -502,20 +550,16 @@ fn hotbar(p: &crate::theme::Palette, world: &World) -> El {
             El::new()
                 .class("col")
                 .with_style(|s| s.align_items(Align::Center).gap(8.0))
-                .child(
-                    El::new()
-                        .with_style(|s| s.width(360.0))
-                        .child(bar(
-                            "player.mana",
-                            "player.mana_max",
-                            Color::hex(0x6b5cff),
-                            Color::hex(0xb98cff),
-                            6.0,
-                            8,
-                            0.0,
-                            false,
-                        )),
-                )
+                .child(El::new().with_style(|s| s.width(360.0)).child(bar(
+                    "player.mana",
+                    "player.mana_max",
+                    Color::hex(0x6b5cff),
+                    Color::hex(0xb98cff),
+                    6.0,
+                    8,
+                    0.0,
+                    false,
+                )))
                 .child(slots),
         )
 }
@@ -549,7 +593,11 @@ fn time_and_speed(p: &crate::theme::Palette) -> El {
                     El::new()
                         .class("col")
                         .with_style(|s| s.gap(0.0))
-                        .child(El::text("TIME").class("label_caps").text_style(|t| t.nowrap()))
+                        .child(
+                            El::text("TIME")
+                                .class("label_caps")
+                                .text_style(|t| t.nowrap()),
+                        )
                         .child(
                             El::text("{time.scale_text}")
                                 .text_style(|t| t.bold().tabular().nowrap())
@@ -569,7 +617,12 @@ fn time_and_speed(p: &crate::theme::Palette) -> El {
                 .child(
                     El::text("m/s")
                         .text_style(|t| t.nowrap().shadow())
-                        .with_style(|s| s.font_size(13.0).font_weight(700).color(p.text_dim).margin([0.0, 0.0, 5.0, 0.0])),
+                        .with_style(|s| {
+                            s.font_size(13.0)
+                                .font_weight(700)
+                                .color(p.text_dim)
+                                .margin([0.0, 0.0, 5.0, 0.0])
+                        }),
                 ),
         )
 }
@@ -597,7 +650,11 @@ fn weapon(p: &crate::theme::Palette) -> El {
                             outer: p.accent.fade(0.0),
                         })
                 })
-                .child(El::icon("pistol").with_style(|s| s.size(54.0, 54.0)).pick_ignore()),
+                .child(
+                    El::icon("pistol")
+                        .with_style(|s| s.size(54.0, 54.0))
+                        .pick_ignore(),
+                ),
         )
         .child(
             El::new()
@@ -620,16 +677,29 @@ fn weapon(p: &crate::theme::Palette) -> El {
                         .child(
                             El::text("/ {weapon.reserve}")
                                 .text_style(|t| t.tabular().nowrap())
-                                .with_style(|s| s.font_size(16.0).font_weight(600).color(p.text_dim).margin([0.0, 0.0, 6.0, 0.0])),
+                                .with_style(|s| {
+                                    s.font_size(16.0)
+                                        .font_weight(600)
+                                        .color(p.text_dim)
+                                        .margin([0.0, 0.0, 6.0, 0.0])
+                                }),
                         ),
                 ),
         )
-        .child(El::new().with_style(|s| s.width(1.0).height(44.0).background(Color::WHITE.fade(0.12))))
+        .child(El::new().with_style(|s| {
+            s.width(1.0)
+                .height(44.0)
+                .background(Color::WHITE.fade(0.12))
+        }))
         .child(
             El::new()
                 .class("col")
                 .with_style(|s| s.align_items(Align::Center).gap(2.0))
-                .child(El::icon("grenade").with_style(|s| s.size(28.0, 28.0)).pick_ignore())
+                .child(
+                    El::icon("grenade")
+                        .with_style(|s| s.size(28.0, 28.0))
+                        .pick_ignore(),
+                )
                 .child(
                     El::text("×{weapon.grenades}")
                         .text_style(|t| t.bold().tabular().nowrap())
@@ -665,7 +735,13 @@ fn prompt(p: &crate::theme::Palette) -> El {
                     El::new()
                         .class("kbd")
                         .id("hud_prompt_key")
-                        .attach("KeyHint", &KeyHint { key: "E".into(), pad: "X".into() })
+                        .attach(
+                            "KeyHint",
+                            &KeyHint {
+                                key: "E".into(),
+                                pad: "X".into(),
+                            },
+                        )
                         .text_style(|t| t.semibold().nowrap())
                         .with_style(|s| s.min_width(26.0).height(26.0).font_size(13.0)),
                 )
@@ -692,20 +768,16 @@ fn build(world: &World, args: &Value) -> El {
     El::new()
         .class("screen")
         .with_style(|s| s.pick(Pick::Ignore))
-        .child(
-            El::new()
-                .id("hud_vignette")
-                .with_style(|s| {
-                    s.fill_parent()
-                        .background(Fill::Radial {
-                            inner: Color::hexa(0xff202000),
-                            outer: Color::hexa(0xc0101070),
-                        })
-                        .opacity(0.0)
-                        .transition(0.4)
-                        .pick(Pick::Ignore)
-                }),
-        )
+        .child(El::new().id("hud_vignette").with_style(|s| {
+            s.fill_parent()
+                .background(Fill::Radial {
+                    inner: Color::hexa(0xff202000),
+                    outer: Color::hexa(0xc0101070),
+                })
+                .opacity(0.0)
+                .transition(0.4)
+                .pick(Pick::Ignore)
+        }))
         .child(vitals(p, portrait))
         .child(compass())
         .child(minimap(p))
@@ -749,8 +821,13 @@ pub fn build_screen(world: &mut World, args: &Value) -> Result<Entity, String> {
 /// readout and the low-health vignette, and updates world markers.
 pub fn hud_system(world: &mut World) {
     // Derived data.
-    let scale = world.get_resource::<Time>().map(|t| t.scale()).unwrap_or(1.0);
-    let nav = world.get_resource::<MapData>().and_then(|m| m.waypoint_nav());
+    let scale = world
+        .get_resource::<Time>()
+        .map(|t| t.scale())
+        .unwrap_or(1.0);
+    let nav = world
+        .get_resource::<MapData>()
+        .and_then(|m| m.waypoint_nav());
     if let Some(mut data) = world.get_resource_mut::<UiData>() {
         let s = (scale as f64 * 100.0).round() / 100.0;
         if data.get_f64("time.scale") != Some(s) {
@@ -782,7 +859,10 @@ pub fn hud_system(world: &mut World) {
             .get_resource::<UiData>()
             .and_then(|d| d.get_str("prompt.verb"))
             .is_some_and(|v| !v.is_empty());
-        let health = match (data_f64(world, "player.health"), data_f64(world, "player.health_max")) {
+        let health = match (
+            data_f64(world, "player.health"),
+            data_f64(world, "player.health_max"),
+        ) {
             (Some(h), Some(m)) if m > 0.0 => (h / m) as f32,
             _ => 1.0,
         };
@@ -795,7 +875,12 @@ pub fn hud_system(world: &mut World) {
             .and_then(|d| d.get_str("prompt.pad").map(String::from));
         set_opacity(world, root, "hud_prompt", if prompt_on { 1.0 } else { 0.0 });
         set_opacity(world, root, "hud_time", if dilated { 1.0 } else { 0.0 });
-        set_opacity(world, root, "hud_vignette", ((0.35 - health) / 0.35).clamp(0.0, 1.0));
+        set_opacity(
+            world,
+            root,
+            "hud_vignette",
+            ((0.35 - health) / 0.35).clamp(0.0, 1.0),
+        );
         if let Some(e) = screens::find_in(world, root, "hud_prompt_key")
             && let Some(mut k) = world.get_mut::<KeyHint>(e)
         {
@@ -828,12 +913,24 @@ fn markers_update(world: &mut World) {
     let mut q = world.query::<(Entity, &Marker, &WorldAnchor)>();
     let items: Vec<(Entity, bool, f32, bool, Vec2)> = q
         .iter(world)
-        .map(|(e, m, a)| (e, m.show_distance, a.distance, !a.on_screen && a.clamp_to_edges, a.edge_direction))
+        .map(|(e, m, a)| {
+            (
+                e,
+                m.show_distance,
+                a.distance,
+                !a.on_screen && a.clamp_to_edges,
+                a.edge_direction,
+            )
+        })
         .collect();
     for (e, show, distance, clamped, dir) in items {
         for c in screens::subtree(world, e) {
             if world.get::<MarkerDistance>(c).is_some() {
-                let text = if show { format_distance(distance as f64) } else { String::new() };
+                let text = if show {
+                    format_distance(distance as f64)
+                } else {
+                    String::new()
+                };
                 if let Some(mut t) = world.get_mut::<Text>(c)
                     && t.text != text
                 {
@@ -974,9 +1071,15 @@ fn paint_compass(world: &mut World, e: Entity, ctx: &mut DrawCtx) {
         let mut marks: Vec<(f32, String, Color, bool)> = Vec::new();
         if let Some(pl) = map.player_planet() {
             for poi in pl.pois.iter().filter(|p| p.discovered) {
-                let (dist, bearing) = map::great_circle(map.player.lon, map.player.lat, poi.lon, poi.lat);
+                let (dist, bearing) =
+                    map::great_circle(map.player.lon, map.player.lat, poi.lon, poi.lat);
                 if dist.to_degrees() < 12.0 && dist > 1e-6 {
-                    marks.push((bearing as f32, poi.kind.icon().to_string(), poi.kind.color(), false));
+                    marks.push((
+                        bearing as f32,
+                        poi.kind.icon().to_string(),
+                        poi.kind.color(),
+                        false,
+                    ));
                 }
             }
         }
@@ -1017,8 +1120,21 @@ fn paint_compass(world: &mut World, e: Entity, ctx: &mut DrawCtx) {
     let box_w = 50.0 * px;
     let box_h = 20.0 * px;
     let b = Rect::new(cx - box_w * 0.5, notch_y + 6.0 * px, box_w, box_h);
-    ctx.rect(b, Color::hexa(0x0b1019e0), box_h * 0.5, 1.0 * px, p.accent.fade(0.6));
-    ctx.text(&label, 12.0, 700, p.accent_light, b.center(), Vec2::splat(0.5));
+    ctx.rect(
+        b,
+        Color::hexa(0x0b1019e0),
+        box_h * 0.5,
+        1.0 * px,
+        p.accent.fade(0.6),
+    );
+    ctx.text(
+        &label,
+        12.0,
+        700,
+        p.accent_light,
+        b.center(),
+        Vec2::splat(0.5),
+    );
     // Little triangle on top of the readout.
     ctx.line(
         Vec2::new(cx - 4.0 * px, notch_y + 6.0 * px),
@@ -1074,9 +1190,25 @@ fn paint_minimap(world: &mut World, e: Entity, ctx: &mut DrawCtx) {
         rad,
     );
     // Darken toward the rim.
-    ctx.ring(c, Vec2::splat(rad - 14.0 * px), 28.0 * px, Color::hexa(0x05080e70), 0.0, std::f32::consts::TAU, 0.0);
+    ctx.ring(
+        c,
+        Vec2::splat(rad - 14.0 * px),
+        28.0 * px,
+        Color::hexa(0x05080e70),
+        0.0,
+        std::f32::consts::TAU,
+        0.0,
+    );
     // Range rings.
-    ctx.ring(c, Vec2::splat(rad * 0.5), 1.0 * px, Color::WHITE.with_alpha(0.12), 0.0, std::f32::consts::TAU, 24.0);
+    ctx.ring(
+        c,
+        Vec2::splat(rad * 0.5),
+        1.0 * px,
+        Color::WHITE.with_alpha(0.12),
+        0.0,
+        std::f32::consts::TAU,
+        24.0,
+    );
     let to_px = |plon: f64, plat: f64| {
         let mut dl = plon - lon;
         if dl > 180.0 {
@@ -1097,7 +1229,11 @@ fn paint_minimap(world: &mut World, e: Entity, ctx: &mut DrawCtx) {
         }
         let s = 20.0 * px;
         ctx.glow(q, 12.0 * px, poi.kind.color().with_alpha(0.35), 1.6);
-        ctx.icon(poi.kind.icon(), Rect::new(q.x - s * 0.5, q.y - s * 0.5, s, s), Color::WHITE);
+        ctx.icon(
+            poi.kind.icon(),
+            Rect::new(q.x - s * 0.5, q.y - s * 0.5, s, s),
+            Color::WHITE,
+        );
     }
     if let Some(w) = &map.waypoint
         && w.planet == planet.id
@@ -1111,14 +1247,24 @@ fn paint_minimap(world: &mut World, e: Entity, ctx: &mut DrawCtx) {
         }
         let s = 22.0 * px;
         ctx.glow(q, 16.0 * px, p.accent.with_alpha(0.5), 1.4);
-        ctx.icon("marker_quest", Rect::new(q.x - s * 0.5, q.y - s * 0.5, s, s), Color::WHITE);
+        ctx.icon(
+            "marker_quest",
+            Rect::new(q.x - s * 0.5, q.y - s * 0.5, s, s),
+            Color::WHITE,
+        );
     }
     // The player: a view cone and the arrow.
     let cone = 22.0 * px;
     let hr = heading.to_radians();
     for k in [-1.0f32, 1.0] {
         let a = hr + k * 0.45;
-        ctx.line(c, c + Vec2::new(a.sin(), -a.cos()) * cone * 2.2, 1.0 * px, Color::WHITE.with_alpha(0.25), 0.0);
+        ctx.line(
+            c,
+            c + Vec2::new(a.sin(), -a.cos()) * cone * 2.2,
+            1.0 * px,
+            Color::WHITE.with_alpha(0.25),
+            0.0,
+        );
     }
     ctx.glow(c, 18.0 * px, p.info.with_alpha(0.35), 1.5);
     let s = 26.0 * px;
@@ -1129,8 +1275,24 @@ fn paint_minimap(world: &mut World, e: Entity, ctx: &mut DrawCtx) {
         hr,
     );
     // Frame, north mark.
-    ctx.ring(c, Vec2::splat(rad - 1.0 * px), 2.0 * px, p.accent.with_alpha(0.75), 0.0, std::f32::consts::TAU, 0.0);
-    ctx.ring(c, Vec2::splat(rad - 5.0 * px), 1.0 * px, Color::WHITE.with_alpha(0.15), 0.0, std::f32::consts::TAU, 72.0);
+    ctx.ring(
+        c,
+        Vec2::splat(rad - 1.0 * px),
+        2.0 * px,
+        p.accent.with_alpha(0.75),
+        0.0,
+        std::f32::consts::TAU,
+        0.0,
+    );
+    ctx.ring(
+        c,
+        Vec2::splat(rad - 5.0 * px),
+        1.0 * px,
+        Color::WHITE.with_alpha(0.15),
+        0.0,
+        std::f32::consts::TAU,
+        72.0,
+    );
     let n = Vec2::new(c.x, r.y + 1.0 * px);
     ctx.rect(
         Rect::new(n.x - 11.0 * px, n.y - 11.0 * px, 22.0 * px, 22.0 * px),
@@ -1156,7 +1318,10 @@ fn paint_crosshair(world: &mut World, e: Entity, ctx: &mut DrawCtx) {
     let Some(ch) = world.get::<Crosshair>(e).cloned() else {
         return;
     };
-    let spread = data_f64(world, &ch.bind).map(|v| v as f32).unwrap_or(ch.spread).clamp(0.0, 1.0);
+    let spread = data_f64(world, &ch.bind)
+        .map(|v| v as f32)
+        .unwrap_or(ch.spread)
+        .clamp(0.0, 1.0);
     let c = ctx.rect.center();
     let px = ctx.px;
     let gap = (5.0 + spread * 16.0) * px;
@@ -1178,19 +1343,50 @@ fn paint_crosshair(world: &mut World, e: Entity, ctx: &mut DrawCtx) {
 }
 
 fn paint_time_gauge(world: &mut World, _e: Entity, ctx: &mut DrawCtx) {
-    let scale = world.get_resource::<Time>().map(|t| t.scale()).unwrap_or(1.0);
+    let scale = world
+        .get_resource::<Time>()
+        .map(|t| t.scale())
+        .unwrap_or(1.0);
     let p = world.resource::<Theme>().palette.clone();
     let r = ctx.rect;
     let c = r.center();
     let rad = r.w.min(r.h) * 0.5 - 3.0 * ctx.px;
     let tau = std::f32::consts::TAU;
-    ctx.ring(c, Vec2::splat(rad), 4.0 * ctx.px, Color::WHITE.with_alpha(0.12), 0.0, tau, 0.0);
+    ctx.ring(
+        c,
+        Vec2::splat(rad),
+        4.0 * ctx.px,
+        Color::WHITE.with_alpha(0.12),
+        0.0,
+        tau,
+        0.0,
+    );
     let frac = scale.clamp(0.0, 1.0);
-    ctx.ring(c, Vec2::splat(rad), 4.0 * ctx.px, p.info, 0.0, frac * tau, 0.0);
-    ctx.ring(c, Vec2::splat(rad - 6.0 * ctx.px), 1.0 * ctx.px, Color::WHITE.with_alpha(0.25), 0.0, tau, 12.0);
+    ctx.ring(
+        c,
+        Vec2::splat(rad),
+        4.0 * ctx.px,
+        p.info,
+        0.0,
+        frac * tau,
+        0.0,
+    );
+    ctx.ring(
+        c,
+        Vec2::splat(rad - 6.0 * ctx.px),
+        1.0 * ctx.px,
+        Color::WHITE.with_alpha(0.25),
+        0.0,
+        tau,
+        12.0,
+    );
     ctx.glow(c, rad, p.info.with_alpha(0.18 * (1.0 - frac)), 1.2);
     let s = rad * 1.05;
-    ctx.icon("ability_time_slow", Rect::new(c.x - s * 0.5, c.y - s * 0.5, s, s), Color::WHITE);
+    ctx.icon(
+        "ability_time_slow",
+        Rect::new(c.x - s * 0.5, c.y - s * 0.5, s, s),
+        Color::WHITE,
+    );
 }
 
 /// Register the HUD painters.
@@ -1213,7 +1409,7 @@ pub fn marker_el(m: &Marker) -> El {
         .with_style(|s| s.align_items(Align::Center).gap(3.0).pick(Pick::Ignore))
         .child(
             El::icon("ui_arrow_up")
-                .attach("MarkerArrow", &())
+                .attach("MarkerArrow", &MarkerArrow)
                 .with_style(|s| s.size(16.0, 16.0).color(c).opacity(0.0).transition(0.15))
                 .pick_ignore(),
         )
@@ -1230,7 +1426,11 @@ pub fn marker_el(m: &Marker) -> El {
                         .border(1.5, c.fade(0.9))
                         .shadow(Shadow::glow(c.fade(0.45), 12.0))
                 })
-                .child(El::icon(m.icon.clone()).with_style(|s| s.size(22.0, 22.0)).pick_ignore()),
+                .child(
+                    El::icon(m.icon.clone())
+                        .with_style(|s| s.size(22.0, 22.0))
+                        .pick_ignore(),
+                ),
         );
     if !m.title.is_empty() {
         col = col.child(
@@ -1243,14 +1443,22 @@ pub fn marker_el(m: &Marker) -> El {
         col = col.child(
             El::text(m.subtitle.clone())
                 .text_style(|t| t.nowrap().shadow())
-                .with_style(|s| s.font_size(12.0).font_weight(600).color(c.lerp(Color::WHITE, 0.4))),
+                .with_style(|s| {
+                    s.font_size(12.0)
+                        .font_weight(600)
+                        .color(c.lerp(Color::WHITE, 0.4))
+                }),
         );
     }
     col.child(
         El::text("")
-            .attach("MarkerDistance", &())
+            .attach("MarkerDistance", &MarkerDistance)
             .text_style(|t| t.tabular().nowrap().shadow())
-            .with_style(|s| s.font_size(12.0).font_weight(700).color(Color::WHITE.with_alpha(0.8))),
+            .with_style(|s| {
+                s.font_size(12.0)
+                    .font_weight(700)
+                    .color(Color::WHITE.with_alpha(0.8))
+            }),
     )
 }
 
@@ -1258,7 +1466,9 @@ pub fn marker_el(m: &Marker) -> El {
 pub fn spawn_marker(world: &mut World, m: &Marker, anchor: WorldAnchor) -> Result<Entity, String> {
     let sp = el::spawn(world, None, &marker_el(m))?;
     let root = sp.root.ok_or("empty marker")?;
-    world.entity_mut(root).insert((anchor, UiId(format!("marker:{}", m.title))));
+    world
+        .entity_mut(root)
+        .insert((anchor, UiId(format!("marker:{}", m.title))));
     Ok(root)
 }
 
@@ -1421,9 +1631,15 @@ pub fn register_api(app: &mut App) {
         |world, args| {
             let id = str_arg(&args, "id").ok_or("Pass the marker's \"id\".")?;
             let mut q = world.query_filtered::<(Entity, &UiId), With<Marker>>();
-            let found: Vec<Entity> = q.iter(world).filter(|(_, i)| i.0 == id).map(|(e, _)| e).collect();
+            let found: Vec<Entity> = q
+                .iter(world)
+                .filter(|(_, i)| i.0 == id)
+                .map(|(e, _)| e)
+                .collect();
             if found.is_empty() {
-                return Err(format!("There is no marker \"{id}\". hud.markers lists them."));
+                return Err(format!(
+                    "There is no marker \"{id}\". hud.markers lists them."
+                ));
             }
             for e in &found {
                 for c in screens::subtree(world, *e).into_iter().rev() {

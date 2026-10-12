@@ -50,19 +50,20 @@ const KEY: &str = "toasts";
 
 fn container(world: &mut World) -> Option<Entity> {
     if let Some(root) = screens::find_screen(world, KEY) {
-        return world.get::<Children>(root).and_then(|c| c.first().copied()).or(Some(root));
+        return world
+            .get::<Children>(root)
+            .and_then(|c| c.first().copied())
+            .or(Some(root));
     }
-    let el = El::new()
-        .class("screen")
-        .child(El::new().with_style(|s| {
-            s.position(Position::Absolute)
-                .bottom(176.0)
-                .right(32.0)
-                .column()
-                .gap(10.0)
-                .align_items(crate::style::Align::End)
-                .pick(Pick::Ignore)
-        }));
+    let el = El::new().class("screen").child(El::new().with_style(|s| {
+        s.position(Position::Absolute)
+            .bottom(176.0)
+            .right(32.0)
+            .column()
+            .gap(10.0)
+            .align_items(crate::style::Align::End)
+            .pick(Pick::Ignore)
+    }));
     let sp = screens::spawn_screen(
         world,
         Screen {
@@ -81,7 +82,14 @@ fn container(world: &mut World) -> Option<Entity> {
 }
 
 /// Show a toast. `title` may be empty; text takes markup.
-pub fn notify(world: &mut World, kind: ToastKind, icon: &str, title: &str, text: &str, duration: f32) {
+pub fn notify(
+    world: &mut World,
+    kind: ToastKind,
+    icon: &str,
+    title: &str,
+    text: &str,
+    duration: f32,
+) {
     let Some(parent) = container(world) else {
         return;
     };
@@ -105,7 +113,9 @@ pub fn notify(world: &mut World, kind: ToastKind, icon: &str, title: &str, text:
         icon
     };
     let glyph = icon.starts_with("ui_");
-    let mut col = El::new().class("col").with_style(|s| s.gap(2.0).grow(1.0).shrink(1.0));
+    let mut col = El::new()
+        .class("col")
+        .with_style(|s| s.gap(2.0).grow(1.0).shrink(1.0));
     if !title.is_empty() {
         col = col.child(
             El::text(title)
@@ -153,7 +163,12 @@ pub fn notify(world: &mut World, kind: ToastKind, icon: &str, title: &str, text:
                 })
                 .child(
                     El::icon(icon)
-                        .with_style(|s| s.size(if glyph { 16.0 } else { 24.0 }, if glyph { 16.0 } else { 24.0 }))
+                        .with_style(|s| {
+                            s.size(
+                                if glyph { 16.0 } else { 24.0 },
+                                if glyph { 16.0 } else { 24.0 },
+                            )
+                        })
                         .pick_ignore(),
                 ),
         )

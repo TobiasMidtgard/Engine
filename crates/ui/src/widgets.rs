@@ -8,7 +8,7 @@
 //!                         "color": "#e0503c", "color2": "#ff8a5c"}}}
 //! ```
 
-use bevy_ecs::message::Messages;
+use bevy_ecs::message::MessageCursor;
 use bevy_ecs::prelude::*;
 use engine_core::math::Vec2;
 use engine_core::prelude::Time;
@@ -389,7 +389,12 @@ fn paint_cooldown(world: &mut World, e: Entity, ctx: &mut DrawCtx) {
         }
     }
     if cd.flash > 0.0 {
-        ctx.glow(center, r.w * 0.75, Color::hex(0x9fe6ff).with_alpha(cd.flash * 0.8), 1.5);
+        ctx.glow(
+            center,
+            r.w * 0.75,
+            Color::hex(0x9fe6ff).with_alpha(cd.flash * 0.8),
+            1.5,
+        );
     }
 }
 
@@ -424,13 +429,19 @@ pub fn key_hints_system(world: &mut World) {
     let hints: Vec<(Entity, KeyHint)> = q.iter(world).map(|(e, h)| (e, h.clone())).collect();
     for (e, h) in hints {
         let use_pad = gamepad && !h.pad.is_empty();
-        let label = if use_pad { h.pad.clone() } else { h.key.clone() };
+        let label = if use_pad {
+            h.pad.clone()
+        } else {
+            h.key.clone()
+        };
         if let Some(mut t) = world.get_mut::<Text>(e) {
             if t.text != label {
                 t.text = label.clone();
             }
         } else {
-            world.entity_mut(e).insert(Text::new(label.clone()).semibold().nowrap());
+            world
+                .entity_mut(e)
+                .insert(Text::new(label.clone()).semibold().nowrap());
         }
         let want = if use_pad && pad_color(&h.pad).is_some() {
             "pad_button"
@@ -484,7 +495,7 @@ impl Default for Slider {
 }
 
 /// Drag and keyboard adjustment of sliders; keeps them in sync with their bindings.
-pub fn sliders_system(world: &mut World) {
+pub fn sliders_system(world: &mut World, mut seen: Local<MessageCursor<UiEvent>>) {
     let (pressed, cursor) = {
         let st = world.resource::<UiInputState>();
         (
@@ -494,9 +505,8 @@ pub fn sliders_system(world: &mut World) {
                 .and_then(|m| m.position),
         )
     };
-    let adjusts: Vec<(Entity, i32)> = world
-        .resource_mut::<Messages<UiEvent>>()
-        .iter_current_update_messages()
+    let adjusts: Vec<(Entity, i32)> = crate::input::read_events(world, &mut seen)
+        .iter()
         .filter_map(|e| match e {
             UiEvent::Adjust {
                 entity: Some(en),
@@ -534,7 +544,11 @@ pub fn sliders_system(world: &mut World) {
         }
         for (target, delta) in &adjusts {
             if *target == e {
-                let step = if s.step > 0.0 { s.step } else { (s.max - s.min) / 20.0 };
+                let step = if s.step > 0.0 {
+                    s.step
+                } else {
+                    (s.max - s.min) / 20.0
+                };
                 value = (value + step * *delta as f32).clamp(s.min, s.max);
                 changed = true;
             }
@@ -572,7 +586,13 @@ fn paint_slider(world: &mut World, e: Entity, ctx: &mut DrawCtx) {
         0.0
     };
     let track = Rect::new(inner.x, y - h * 0.5, track_w, h);
-    ctx.rect(track, Color::hexa(0x0a0f18e0), h * 0.5, 1.0, Color::hexa(0xffffff1a));
+    ctx.rect(
+        track,
+        Color::hexa(0x0a0f18e0),
+        h * 0.5,
+        1.0,
+        Color::hexa(0xffffff1a),
+    );
     ctx.rect_fill(
         Rect::new(track.x, track.y, (track.w * t).max(h), h),
         Fill::Linear {
@@ -629,11 +649,10 @@ pub struct Toggle {
 }
 
 /// Flip toggles that were clicked; sync them with their bindings and animate the knob.
-pub fn toggles_system(world: &mut World) {
+pub fn toggles_system(world: &mut World, mut seen: Local<MessageCursor<UiEvent>>) {
     let dt = world.resource::<Time>().real_delta_secs().min(0.1);
-    let clicked: Vec<Entity> = world
-        .resource_mut::<Messages<UiEvent>>()
-        .iter_current_update_messages()
+    let clicked: Vec<Entity> = crate::input::read_events(world, &mut seen)
+        .iter()
         .filter_map(|e| match e {
             UiEvent::Action {
                 entity: Some(en), ..
@@ -814,7 +833,14 @@ pub fn currency(amount: &str, size: f32) -> El {
 }
 
 /// A labeled value bar bound to UI data.
-pub fn labeled_bar(label: &str, bind: &str, bind_max: &str, color: Color, color2: Color, width: f32) -> El {
+pub fn labeled_bar(
+    label: &str,
+    bind: &str,
+    bind_max: &str,
+    color: Color,
+    color2: Color,
+    width: f32,
+) -> El {
     El::new()
         .class("col")
         .with_style(|s| s.gap(4.0).width(width))
@@ -842,7 +868,11 @@ pub fn stat_row(label: &str, value: &str, delta: Option<f32>) -> El {
     let mut row = El::new()
         .class("stat_row")
         .child(El::text(label).class("dim").with_style(|s| s.grow(1.0)))
-        .child(El::text(value).class("stat_value").text_style(|t| t.tabular().nowrap()));
+        .child(
+            El::text(value)
+                .class("stat_value")
+                .text_style(|t| t.tabular().nowrap()),
+        );
     if let Some(d) = delta
         && d.abs() > 1e-4
     {
@@ -855,7 +885,11 @@ pub fn stat_row(label: &str, value: &str, delta: Option<f32>) -> El {
             El::new()
                 .class("row")
                 .with_style(|s| s.gap(2.0).width(64.0).justify(crate::style::Justify::End))
-                .child(El::icon(icon).icon_tint(color).with_style(|s| s.size(12.0, 12.0)))
+                .child(
+                    El::icon(icon)
+                        .icon_tint(color)
+                        .with_style(|s| s.size(12.0, 12.0)),
+                )
                 .child(
                     El::text(format!("{:+}", (d * 10.0).round() / 10.0))
                         .text_style(|t| t.color(color).tabular().nowrap())

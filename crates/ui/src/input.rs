@@ -23,7 +23,7 @@
 
 use std::collections::HashMap;
 
-use bevy_ecs::message::Messages;
+use bevy_ecs::message::{MessageCursor, Messages};
 use bevy_ecs::prelude::*;
 use engine_core::math::Vec2;
 use engine_core::prelude::Time;
@@ -59,7 +59,9 @@ pub enum UiEvent {
         entity: Option<Entity>,
     },
     /// A drag began.
-    DragStarted { payload: String },
+    DragStarted {
+        payload: String,
+    },
     /// A drag ended over a [`DropTarget`] that accepts the payload.
     Dropped {
         payload: String,
@@ -70,11 +72,18 @@ pub enum UiEvent {
         target: Option<Entity>,
     },
     /// A drag ended anywhere else (or was cancelled with Escape / B).
-    DragCancelled { payload: String },
+    DragCancelled {
+        payload: String,
+    },
     /// Switch tab: Q / E or the bumpers (`delta` -1 or 1) in the focused screen.
-    Tab { screen: String, delta: i32 },
+    Tab {
+        screen: String,
+        delta: i32,
+    },
     /// Back (Escape / B) in a screen. Closable screens also close.
-    Back { screen: String },
+    Back {
+        screen: String,
+    },
     /// Left/right on a focused [`Adjustable`] node (sliders, steppers): `delta` -1 or 1.
     Adjust {
         id: Option<String>,
@@ -82,8 +91,12 @@ pub enum UiEvent {
         #[serde(skip)]
         entity: Option<Entity>,
     },
-    ScreenOpened { screen: String },
-    ScreenClosed { screen: String },
+    ScreenOpened {
+        screen: String,
+    },
+    ScreenClosed {
+        screen: String,
+    },
 }
 
 /// Left/right adjusts this node (sending [`UiEvent::Adjust`]) instead of moving focus.
@@ -251,9 +264,7 @@ impl Devices {
     }
 
     fn any_directional_input(&self) -> bool {
-        !self.keys_down.is_empty()
-            || !self.pad_down.is_empty()
-            || self.left_stick.length() > 0.5
+        !self.keys_down.is_empty() || !self.pad_down.is_empty() || self.left_stick.length() > 0.5
     }
 
     /// The direction held right now (keys, d-pad, stick).
@@ -274,7 +285,11 @@ impl Devices {
         let s = self.left_stick;
         if s.length() > 0.6 {
             return Some(if s.x.abs() > s.y.abs() {
-                if s.x > 0.0 { NavDir::Right } else { NavDir::Left }
+                if s.x > 0.0 {
+                    NavDir::Right
+                } else {
+                    NavDir::Left
+                }
             } else if s.y > 0.0 {
                 NavDir::Up
             } else {
@@ -414,7 +429,12 @@ fn focusables(world: &World, scope: Entity) -> Vec<Entity> {
 
 /// The focusable nearest to `from` in direction `dir` (rect edges, perpendicular offset
 /// weighted twice).
-fn nearest_in_direction(world: &World, from: Entity, dir: NavDir, candidates: &[Entity]) -> Option<Entity> {
+fn nearest_in_direction(
+    world: &World,
+    from: Entity,
+    dir: NavDir,
+    candidates: &[Entity],
+) -> Option<Entity> {
     let a = world.get::<ComputedNode>(from)?.rect;
     let d = dir.vector();
     let mut best: Option<(f32, Entity)> = None;
@@ -433,7 +453,9 @@ fn nearest_in_direction(world: &World, from: Entity, dir: NavDir, candidates: &[
             NavDir::Up => (a.y - (b.y + b.h), gap(a.x, a.w, b.x, b.w)),
         };
         let centers = b.center() - a.center();
-        if along < -0.5 * (a.size().dot(d.abs())).min(b.size().dot(d.abs())) || centers.dot(d) <= 1.0 {
+        if along < -0.5 * (a.size().dot(d.abs())).min(b.size().dot(d.abs()))
+            || centers.dot(d) <= 1.0
+        {
             continue;
         }
         let center_perp = (centers - d * centers.dot(d)).length();
@@ -513,6 +535,15 @@ pub fn activate(world: &mut World, e: Entity, alt: bool) -> bool {
     true
 }
 
+/// The [`UiEvent`]s a system hasn't read yet. Systems keep `seen` in a `Local`, so they get
+/// events sent between frames (`ui.click` and other API calls) as well as during the frame,
+/// each exactly once.
+pub fn read_events(world: &World, seen: &mut MessageCursor<UiEvent>) -> Vec<UiEvent> {
+    seen.read(world.resource::<Messages<UiEvent>>())
+        .cloned()
+        .collect()
+}
+
 /// Run an action string as if a button carrying it was clicked: built-in `ui.*` actions run
 /// and a [`UiEvent::Action`] is sent (with no node). Used by dialogue choices and scripts.
 pub fn dispatch(world: &mut World, action: &str) {
@@ -575,8 +606,14 @@ pub fn ui_input_system(world: &mut World) {
         .min(0.1);
     let mut st = world.remove_resource::<UiInputState>().unwrap_or_default();
     let dev = Devices::read(world);
-    let vp = world.get_resource::<UiViewport>().copied().unwrap_or_default();
-    let settings = world.get_resource::<UiSettings>().cloned().unwrap_or_default();
+    let vp = world
+        .get_resource::<UiViewport>()
+        .copied()
+        .unwrap_or_default();
+    let settings = world
+        .get_resource::<UiSettings>()
+        .cloned()
+        .unwrap_or_default();
 
     // Forget entities that are gone (focus follows a rebuilt node with the same id).
     st.hovered = alive(world, st.hovered);
@@ -590,7 +627,10 @@ pub fn ui_input_system(world: &mut World) {
     st.scope = alive(world, st.scope);
     st.tooltip = alive(world, st.tooltip);
     st.press_hit = alive(world, st.press_hit);
-    if st.pressed.is_some_and(|(e, _)| alive(world, Some(e)).is_none()) {
+    if st
+        .pressed
+        .is_some_and(|(e, _)| alive(world, Some(e)).is_none())
+    {
         st.pressed = None;
     }
     if let Some(d) = &st.drag
@@ -608,7 +648,10 @@ pub fn ui_input_system(world: &mut World) {
 
     // Input scope: the topmost open modal screen.
     let open = screens::open_screens(world);
-    let modal = open.iter().find(|(_, _, _, m)| *m).map(|(_, e, l, _)| (*e, *l));
+    let modal = open
+        .iter()
+        .find(|(_, _, _, m)| *m)
+        .map(|(_, e, l, _)| (*e, *l));
     let scope = modal.map(|(e, _)| e);
     if scope != st.scope {
         if let (Some(old), Some(f)) = (st.scope, st.focused) {
@@ -637,7 +680,9 @@ pub fn ui_input_system(world: &mut World) {
     }
 
     // ---------------------------------------------------------------- pointer
-    let hit = dev.cursor.and_then(|p| hit_test(world, p, modal.map(|(_, l)| l)));
+    let hit = dev
+        .cursor
+        .and_then(|p| hit_test(world, p, modal.map(|(_, l)| l)));
     st.hit = hit;
     let dragging_payload = st
         .drag
@@ -682,7 +727,10 @@ pub fn ui_input_system(world: &mut World) {
                 && let Some(src) = ancestor_with::<Draggable>(world, h)
             {
                 let payload = world.get::<Draggable>(src).unwrap().payload.clone();
-                let r = world.get::<ComputedNode>(src).map(|c| c.rect).unwrap_or_default();
+                let r = world
+                    .get::<ComputedNode>(src)
+                    .map(|c| c.rect)
+                    .unwrap_or_default();
                 st.drag = Some(Drag {
                     source: src,
                     payload,
@@ -765,7 +813,9 @@ pub fn ui_input_system(world: &mut World) {
             }
         }
         let adjust = match (step, st.focused) {
-            (Some(NavDir::Left | NavDir::Right), Some(f)) if world.get::<Adjustable>(f).is_some() => {
+            (Some(NavDir::Left | NavDir::Right), Some(f))
+                if world.get::<Adjustable>(f).is_some() =>
+            {
                 Some(f)
             }
             _ => None,
@@ -979,7 +1029,11 @@ pub fn ui_input_system(world: &mut World) {
 fn first_focus(world: &World, list: &[Entity]) -> Option<Entity> {
     list.iter()
         .copied()
-        .find(|e| world.get::<Interaction>(*e).is_some_and(|i| i.selected && !i.disabled))
+        .find(|e| {
+            world
+                .get::<Interaction>(*e)
+                .is_some_and(|i| i.selected && !i.disabled)
+        })
         .or_else(|| {
             list.iter()
                 .copied()
@@ -1013,10 +1067,10 @@ fn spawn_ghost(world: &mut World, source: Entity, vp: &UiViewport) -> Option<Ent
             .padding(size.x.min(size.y) * 0.14)
     });
     if let Some(icon) = icon {
-        el = el.child(
-            El::icon(icon.name)
-                .with_style(|s| s.size(crate::style::pct(100.0), crate::style::pct(100.0)).pick(Pick::Ignore)),
-        );
+        el = el.child(El::icon(icon.name).with_style(|s| {
+            s.size(crate::style::pct(100.0), crate::style::pct(100.0))
+                .pick(Pick::Ignore)
+        }));
     }
     let spawned = el::spawn(world, None, &el).ok()?;
     let root = spawned.root?;
@@ -1045,7 +1099,10 @@ fn finish_drag(world: &mut World, d: &Drag, over: Option<Entity>) {
     end_drag_visuals(world, d);
     match over.and_then(|h| drop_target(world, h, &d.payload)) {
         Some(t) if t != d.source => {
-            let slot = world.get::<DropTarget>(t).map(|t| t.slot.clone()).unwrap_or_default();
+            let slot = world
+                .get::<DropTarget>(t)
+                .map(|t| t.slot.clone())
+                .unwrap_or_default();
             set_interaction(world, t, |i| i.hovered = false);
             send(
                 world,

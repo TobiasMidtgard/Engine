@@ -6,7 +6,9 @@ use std::path::Path;
 
 fn main() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("assets");
-    let mut out = String::from("/// Built-in SVG sources: (name, svg).\npub const BUILTIN_SVGS: &[(&str, &str)] = &[\n");
+    let mut out = String::from(
+        "/// Built-in SVG sources: (name, svg).\npub const BUILTIN_SVGS: &[(&str, &str)] = &[\n",
+    );
     for (dir, prefix) in [("icons", ""), ("portraits", "portrait:")] {
         let path = root.join(dir);
         println!("cargo:rerun-if-changed={}", path.display());

@@ -6,6 +6,7 @@
 //! Open it with `ui.show {"screen": "shop", "vendor": "Merchant"}` (the name of an entity
 //! with a [`Vendor`]; `owner` names the buyer, default the Player).
 
+use bevy_ecs::message::MessageCursor;
 use bevy_ecs::prelude::*;
 use serde_json::{Value, json};
 
@@ -70,7 +71,15 @@ fn card_stack(st: &ShopScreen, inv: &Inventory, vendor: &Vendor, i: usize) -> Op
     }
 }
 
-fn card(theme: &Theme, db: &ItemDatabase, st: &ShopScreen, inv: &Inventory, vendor: &Vendor, i: usize, stack: &ItemStack) -> El {
+fn card(
+    theme: &Theme,
+    db: &ItemDatabase,
+    st: &ShopScreen,
+    inv: &Inventory,
+    vendor: &Vendor,
+    i: usize,
+    stack: &ItemStack,
+) -> El {
     let p = &theme.palette;
     let def = db.get(&stack.item);
     let (price, ok) = match (st.mode, def) {
@@ -82,9 +91,18 @@ fn card(theme: &Theme, db: &ItemDatabase, st: &ShopScreen, inv: &Inventory, vend
         _ => (0, false),
     };
     let name = def.map(|d| d.name.clone()).unwrap_or(stack.item.clone());
-    let rc = def.map(|d| theme.rarity(d.rarity as usize)).unwrap_or(p.text);
+    let rc = def
+        .map(|d| theme.rarity(d.rarity as usize))
+        .unwrap_or(p.text);
     let cat = def.map(|d| d.category.label()).unwrap_or("");
-    let display = ItemStack::new(&stack.item, if st.mode == ShopMode::Buy { 1 } else { stack.count });
+    let display = ItemStack::new(
+        &stack.item,
+        if st.mode == ShopMode::Buy {
+            1
+        } else {
+            stack.count
+        },
+    );
     let mut slot = item_slot(theme, db, Some(&display), 58.0);
     slot.tooltip = None;
     let count = match (st.mode, stack.count) {
@@ -100,7 +118,13 @@ fn card(theme: &Theme, db: &ItemDatabase, st: &ShopScreen, inv: &Inventory, vend
             ShopMode::Sell => format!("inv:{i}"),
         })
         .selected(st.selected == Some(i))
-        .with_style(|s| s.row().align_items(Align::Center).gap(12.0).padding([8.0, 12.0, 8.0, 8.0]).width(370.0))
+        .with_style(|s| {
+            s.row()
+                .align_items(Align::Center)
+                .gap(12.0)
+                .padding([8.0, 12.0, 8.0, 8.0])
+                .width(370.0)
+        })
         .child(slot.pick_ignore())
         .child(
             El::new()
@@ -134,14 +158,30 @@ fn card(theme: &Theme, db: &ItemDatabase, st: &ShopScreen, inv: &Inventory, vend
 fn hints(mode: ShopMode) -> El {
     El::new()
         .class("hud_panel row")
-        .with_style(|s| s.gap(22.0).padding([10.0, 18.0]).radius(Corners::all(999.0)))
+        .with_style(|s| {
+            s.gap(22.0)
+                .padding([10.0, 18.0])
+                .radius(Corners::all(999.0))
+        })
         .child(widgets::key_hint("LMB", "A", "Select"))
         .child(widgets::key_hint(
             "RMB",
             "X",
-            if mode == ShopMode::Buy { "Buy one" } else { "Sell one" },
+            if mode == ShopMode::Buy {
+                "Buy one"
+            } else {
+                "Sell one"
+            },
         ))
-        .child(widgets::key_hint("Drag", "", if mode == ShopMode::Buy { "Drop on your bag to buy" } else { "Drop on the wares to sell" }))
+        .child(widgets::key_hint(
+            "Drag",
+            "",
+            if mode == ShopMode::Buy {
+                "Drop on your bag to buy"
+            } else {
+                "Drop on the wares to sell"
+            },
+        ))
         .child(widgets::key_hint2(["Q", "E"], ["LB", "RB"], "Buy / Sell"))
         .child(widgets::key_hint("Esc", "B", "Leave"))
 }
@@ -149,7 +189,10 @@ fn hints(mode: ShopMode) -> El {
 fn build(world: &World, st: &ShopScreen) -> El {
     let theme = world.resource::<Theme>().clone();
     let db = world.resource::<ItemDatabase>().clone();
-    let inv = world.get::<Inventory>(st.owner).cloned().unwrap_or_default();
+    let inv = world
+        .get::<Inventory>(st.owner)
+        .cloned()
+        .unwrap_or_default();
     let vendor = world.get::<Vendor>(st.vendor).cloned().unwrap_or_default();
     let p = &theme.palette;
 
@@ -167,7 +210,11 @@ fn build(world: &World, st: &ShopScreen) -> El {
                 .padding([6.0, 0.0, 0.0, 0.0])
                 .center()
         })
-        .child(El::icon(vendor.portrait.clone()).with_style(|s| s.size(100.0, 125.0).margin([26.0, 0.0, 0.0, 0.0])).pick_ignore());
+        .child(
+            El::icon(vendor.portrait.clone())
+                .with_style(|s| s.size(100.0, 125.0).margin([26.0, 0.0, 0.0, 0.0]))
+                .pick_ignore(),
+        );
     let head = El::new()
         .class("row")
         .with_style(|s| s.gap(18.0))
@@ -187,7 +234,11 @@ fn build(world: &World, st: &ShopScreen) -> El {
             El::new()
                 .class("col")
                 .with_style(|s| s.gap(2.0).align_items(Align::End))
-                .child(El::text("Merchant's purse").class("label_caps").text_style(|t| t.nowrap()))
+                .child(
+                    El::text("Merchant's purse")
+                        .class("label_caps")
+                        .text_style(|t| t.nowrap()),
+                )
                 .child(widgets::currency(&group(vendor.gold), 16.0)),
         )
         .child(widgets::close_button());
@@ -210,7 +261,14 @@ fn build(world: &World, st: &ShopScreen) -> El {
         grid = grid.child(card(&theme, &db, st, &inv, &vendor, *i, stack));
     }
     if entries.is_empty() {
-        grid = grid.child(El::text(if st.mode == ShopMode::Buy { "Sold out." } else { "Nothing to sell." }).class("dim"));
+        grid = grid.child(
+            El::text(if st.mode == ShopMode::Buy {
+                "Sold out."
+            } else {
+                "Nothing to sell."
+            })
+            .class("dim"),
+        );
     }
     let wares = El::new()
         .class("panel")
@@ -220,12 +278,18 @@ fn build(world: &World, st: &ShopScreen) -> El {
         .child(
             El::new()
                 .class("row")
-                .child(widgets::tabs(&["Buy", "Sell"], (st.mode == ShopMode::Sell) as usize, "shop.mode"))
+                .child(widgets::tabs(
+                    &["Buy", "Sell"],
+                    (st.mode == ShopMode::Sell) as usize,
+                    "shop.mode",
+                ))
                 .child(El::new().class("spacer"))
                 .child(
                     El::text(match st.mode {
                         ShopMode::Buy => format!("{} wares", vendor.stock.len()),
-                        ShopMode::Sell => format!("Brannoc pays {:.0}% of value", vendor.buy_rate * 100.0),
+                        ShopMode::Sell => {
+                            format!("Brannoc pays {:.0}% of value", vendor.buy_rate * 100.0)
+                        }
                     })
                     .class("caption"),
                 ),
@@ -264,15 +328,28 @@ fn build(world: &World, st: &ShopScreen) -> El {
             El::new()
                 .class("col")
                 .with_style(|s| s.gap(4.0))
-                .child(El::text("Your bag").class("heading").with_style(|s| s.font_size(16.0)))
-                .child(El::text(format!("{} / {} slots", inv.used(), inv.slots.len())).class("caption")),
+                .child(
+                    El::text("Your bag")
+                        .class("heading")
+                        .with_style(|s| s.font_size(16.0)),
+                )
+                .child(
+                    El::text(format!("{} / {} slots", inv.used(), inv.slots.len()))
+                        .class("caption"),
+                ),
         )
         .child(strip)
         .child(El::new().class("spacer"))
         .child(widgets::currency(&group(inv.gold), 24.0).id("shop_gold"));
 
     El::new()
-        .with_style(|s| s.fill_parent().column().center().gap(16.0).pick(Pick::Ignore))
+        .with_style(|s| {
+            s.fill_parent()
+                .column()
+                .center()
+                .gap(16.0)
+                .pick(Pick::Ignore)
+        })
         .child(
             El::new()
                 .class("row")
@@ -287,7 +364,10 @@ fn build(world: &World, st: &ShopScreen) -> El {
 fn details(world: &World, st: &ShopScreen) -> El {
     let theme = world.resource::<Theme>().clone();
     let db = world.resource::<ItemDatabase>().clone();
-    let inv = world.get::<Inventory>(st.owner).cloned().unwrap_or_default();
+    let inv = world
+        .get::<Inventory>(st.owner)
+        .cloned()
+        .unwrap_or_default();
     let vendor = world.get::<Vendor>(st.vendor).cloned().unwrap_or_default();
     let shown = st.shown.or(st.selected);
     let stack = shown.and_then(|i| card_stack(st, &inv, &vendor, i));
@@ -315,7 +395,15 @@ fn details(world: &World, st: &ShopScreen) -> El {
             ShopMode::Buy => inv.gold >= total,
             ShopMode::Sell => d.category != ItemCategory::Quest && vendor.gold >= total,
         };
-        price = Some((if st.mode == ShopMode::Buy { "Price" } else { "Offer" }, unit, ok || st.mode == ShopMode::Sell));
+        price = Some((
+            if st.mode == ShopMode::Buy {
+                "Price"
+            } else {
+                "Offer"
+            },
+            unit,
+            ok || st.mode == ShopMode::Sell,
+        ));
         let stepper = El::new()
             .class("row")
             .with_style(|s| s.gap(6.0))
@@ -325,7 +413,11 @@ fn details(world: &World, st: &ShopScreen) -> El {
                     .id("shop_less")
                     .on_click("shop.qty:-1")
                     .disabled(qty <= 1)
-                    .child(El::icon("ui_minus").with_style(|s| s.size(14.0, 14.0)).pick_ignore()),
+                    .child(
+                        El::icon("ui_minus")
+                            .with_style(|s| s.size(14.0, 14.0))
+                            .pick_ignore(),
+                    ),
             )
             .child(
                 El::text(qty.to_string())
@@ -338,9 +430,17 @@ fn details(world: &World, st: &ShopScreen) -> El {
                     .id("shop_more")
                     .on_click("shop.qty:1")
                     .disabled(qty >= max)
-                    .child(El::icon("ui_plus").with_style(|s| s.size(14.0, 14.0)).pick_ignore()),
+                    .child(
+                        El::icon("ui_plus")
+                            .with_style(|s| s.size(14.0, 14.0))
+                            .pick_ignore(),
+                    ),
             );
-        let verb = if st.mode == ShopMode::Buy { "Buy" } else { "Sell" };
+        let verb = if st.mode == ShopMode::Buy {
+            "Buy"
+        } else {
+            "Sell"
+        };
         actions.push(stepper);
         actions.push(
             El::new()
@@ -350,16 +450,30 @@ fn details(world: &World, st: &ShopScreen) -> El {
                 .disabled(!ok)
                 .with_style(|s| s.grow(1.0))
                 .child(El::text(format!("{verb} for")).pick_ignore())
-                .child(widgets::currency(&group(total), 16.0).with_style(|s| s.color(Color::hex(0x23180a))).pick_ignore()),
+                .child(
+                    widgets::currency(&group(total), 16.0)
+                        .with_style(|s| s.color(Color::hex(0x23180a)))
+                        .pick_ignore(),
+                ),
         );
     }
-    let mut el = item_details(&theme, &db, stack.as_ref(), compare.as_ref(), price, actions);
+    let mut el = item_details(
+        &theme,
+        &db,
+        stack.as_ref(),
+        compare.as_ref(),
+        price,
+        actions,
+    );
     if let (Some(d), ShopMode::Buy) = (&def, st.mode)
         && inv.gold < vendor.price(d)
     {
         el = el.child(
-            El::text(format!("You need {} more gold.", group(vendor.price(d) - inv.gold)))
-                .with_style(|s| s.color(theme.palette.bad).font_size(14.0)),
+            El::text(format!(
+                "You need {} more gold.",
+                group(vendor.price(d) - inv.gold)
+            ))
+            .with_style(|s| s.color(theme.palette.bad).font_size(14.0)),
         );
     }
     el
@@ -407,9 +521,13 @@ fn rebuild(world: &mut World, root: Entity) {
         return;
     };
     // Keep the scroll position across rebuilds.
-    let scroll = screens::find_in(world, root, "shop_scroll").and_then(|e| world.get::<ScrollState>(e).copied());
+    let scroll = screens::find_in(world, root, "shop_scroll")
+        .and_then(|e| world.get::<ScrollState>(e).copied());
     let content = build(world, &st);
-    let children: Vec<Entity> = world.get::<Children>(root).map(|c| c.iter().collect()).unwrap_or_default();
+    let children: Vec<Entity> = world
+        .get::<Children>(root)
+        .map(|c| c.iter().collect())
+        .unwrap_or_default();
     for c in children.iter().skip(1) {
         if let Ok(e) = world.get_entity_mut(*c) {
             e.despawn();
@@ -438,28 +556,62 @@ fn refresh_details(world: &mut World, root: Entity) {
 /// Buy (or sell) `qty` of card `i`. Returns a message for a toast.
 pub fn trade(world: &mut World, st: &ShopScreen, i: usize, qty: u32) -> Result<String, String> {
     let db = world.resource::<ItemDatabase>().clone();
-    let mut inv = world.get::<Inventory>(st.owner).cloned().ok_or("No inventory.")?;
-    let mut vendor = world.get::<Vendor>(st.vendor).cloned().ok_or("No vendor.")?;
+    let mut inv = world
+        .get::<Inventory>(st.owner)
+        .cloned()
+        .ok_or("No inventory.")?;
+    let mut vendor = world
+        .get::<Vendor>(st.vendor)
+        .cloned()
+        .ok_or("No vendor.")?;
     let item = card_stack(st, &inv, &vendor, i).ok_or("That item is gone.")?;
-    let name = db.get(&item.item).map(|d| d.name.clone()).unwrap_or(item.item.clone());
+    let name = db
+        .get(&item.item)
+        .map(|d| d.name.clone())
+        .unwrap_or(item.item.clone());
     let msg = match st.mode {
         ShopMode::Buy => {
             let cost = buy(&db, &mut vendor, &mut inv, i, qty)?;
-            format!("Bought {}{name} for {} gold", if qty > 1 { format!("{qty} × ") } else { String::new() }, group(cost))
+            format!(
+                "Bought {}{name} for {} gold",
+                if qty > 1 {
+                    format!("{qty} × ")
+                } else {
+                    String::new()
+                },
+                group(cost)
+            )
         }
         ShopMode::Sell => {
             let got = sell(&db, &mut vendor, &mut inv, i, qty)?;
-            format!("Sold {}{name} for {} gold", if qty > 1 { format!("{qty} × ") } else { String::new() }, group(got))
+            format!(
+                "Sold {}{name} for {} gold",
+                if qty > 1 {
+                    format!("{qty} × ")
+                } else {
+                    String::new()
+                },
+                group(got)
+            )
         }
     };
     *world.get_mut::<Inventory>(st.owner).unwrap() = inv;
     *world.get_mut::<Vendor>(st.vendor).unwrap() = vendor;
-    let gold = world.get::<Inventory>(st.owner).map(|i| i.gold).unwrap_or(0);
-    world.resource_mut::<crate::data::UiData>().set("player.gold", gold);
+    let gold = world
+        .get::<Inventory>(st.owner)
+        .map(|i| i.gold)
+        .unwrap_or(0);
+    world
+        .resource_mut::<crate::data::UiData>()
+        .set("player.gold", gold);
     world.write_message(UiEvent::Action {
         action: format!(
             "shop.{}:{}:{qty}",
-            if st.mode == ShopMode::Buy { "bought" } else { "sold" },
+            if st.mode == ShopMode::Buy {
+                "bought"
+            } else {
+                "sold"
+            },
             item.item
         ),
         id: None,
@@ -470,12 +622,8 @@ pub fn trade(world: &mut World, st: &ShopScreen, i: usize, qty: u32) -> Result<S
 }
 
 /// Handle input for open shop screens and refresh them when the inventory or stock changes.
-pub fn shop_screen_system(world: &mut World) {
-    let events: Vec<UiEvent> = world
-        .resource::<bevy_ecs::message::Messages<UiEvent>>()
-        .iter_current_update_messages()
-        .cloned()
-        .collect();
+pub fn shop_screen_system(world: &mut World, mut seen: Local<MessageCursor<UiEvent>>) {
+    let events: Vec<UiEvent> = crate::input::read_events(world, &mut seen);
     let mut q = world.query::<(Entity, &ShopScreen, &Screen)>();
     let open: Vec<(Entity, ShopScreen, String)> = q
         .iter(world)
@@ -492,17 +640,29 @@ pub fn shop_screen_system(world: &mut World) {
         let mut result: Option<Result<String, String>> = None;
         for ev in &events {
             match ev {
-                UiEvent::Action { action, alt, entity, .. } => {
+                UiEvent::Action {
+                    action,
+                    alt,
+                    entity,
+                    ..
+                } => {
                     if entity.is_some_and(|e| !screens::is_descendant(world, e, root)) {
                         continue;
                     }
                     if let Some(m) = action.strip_prefix("shop.mode:") {
-                        st.mode = if m == "1" { ShopMode::Sell } else { ShopMode::Buy };
+                        st.mode = if m == "1" {
+                            ShopMode::Sell
+                        } else {
+                            ShopMode::Buy
+                        };
                         st.selected = None;
                         st.shown = None;
                         st.quantity = 1;
                         dirty = true;
-                    } else if let Some(i) = action.strip_prefix("shop.select:").and_then(|i| i.parse::<usize>().ok()) {
+                    } else if let Some(i) = action
+                        .strip_prefix("shop.select:")
+                        .and_then(|i| i.parse::<usize>().ok())
+                    {
                         if *alt {
                             result = Some(trade(world, &st, i, 1));
                         } else {
@@ -513,7 +673,10 @@ pub fn shop_screen_system(world: &mut World) {
                             st.shown = Some(i);
                         }
                         dirty = true;
-                    } else if let Some(d) = action.strip_prefix("shop.qty:").and_then(|d| d.parse::<i32>().ok()) {
+                    } else if let Some(d) = action
+                        .strip_prefix("shop.qty:")
+                        .and_then(|d| d.parse::<i32>().ok())
+                    {
                         st.quantity = (st.quantity as i32 + d).clamp(1, 99) as u32;
                         details_only = true;
                     } else if action == "shop.confirm"
@@ -525,7 +688,11 @@ pub fn shop_screen_system(world: &mut World) {
                     }
                 }
                 UiEvent::Tab { screen, .. } if *screen == key => {
-                    st.mode = if st.mode == ShopMode::Buy { ShopMode::Sell } else { ShopMode::Buy };
+                    st.mode = if st.mode == ShopMode::Buy {
+                        ShopMode::Sell
+                    } else {
+                        ShopMode::Buy
+                    };
                     st.selected = None;
                     st.shown = None;
                     dirty = true;
@@ -544,20 +711,31 @@ pub fn shop_screen_system(world: &mut World) {
                         details_only = true;
                     }
                 }
-                UiEvent::Dropped { payload, slot, target, .. } => {
+                UiEvent::Dropped {
+                    payload,
+                    slot,
+                    target,
+                    ..
+                } => {
                     if target.is_some_and(|t| !screens::is_descendant(world, t, root)) {
                         continue;
                     }
                     if slot == "bag"
                         && let Some(i) = payload.strip_prefix("shop:").and_then(|i| i.parse().ok())
                     {
-                        let buy_st = ShopScreen { mode: ShopMode::Buy, ..st.clone() };
+                        let buy_st = ShopScreen {
+                            mode: ShopMode::Buy,
+                            ..st.clone()
+                        };
                         result = Some(trade(world, &buy_st, i, 1));
                         dirty = true;
                     } else if slot == "vendor"
                         && let Some(i) = payload.strip_prefix("inv:").and_then(|i| i.parse().ok())
                     {
-                        let sell_st = ShopScreen { mode: ShopMode::Sell, ..st.clone() };
+                        let sell_st = ShopScreen {
+                            mode: ShopMode::Sell,
+                            ..st.clone()
+                        };
                         let count = world
                             .get::<Inventory>(st.owner)
                             .and_then(|inv| inv.slots.get(i).cloned().flatten())
@@ -619,7 +797,10 @@ pub fn register_api(app: &mut engine_core::prelude::App) {
             let owner = inventory::find_owner(world, &args)?;
             let vendor = find_vendor(world, &args)?;
             let inv = world.get::<Inventory>(owner).unwrap();
-            let i = match (args.get("slot").and_then(Value::as_u64), args.get("item").and_then(Value::as_str)) {
+            let i = match (
+                args.get("slot").and_then(Value::as_u64),
+                args.get("item").and_then(Value::as_str),
+            ) {
                 (Some(i), _) => i as usize,
                 (None, Some(item)) => inv
                     .slots
@@ -629,7 +810,15 @@ pub fn register_api(app: &mut engine_core::prelude::App) {
                 _ => return Err("Pass \"slot\" or \"item\".".into()),
             };
             let count = args.get("count").and_then(Value::as_u64).unwrap_or(1) as u32;
-            let st = ShopScreen { owner, vendor, mode: ShopMode::Sell, selected: None, shown: None, quantity: 1, snapshot: None };
+            let st = ShopScreen {
+                owner,
+                vendor,
+                mode: ShopMode::Sell,
+                selected: None,
+                shown: None,
+                quantity: 1,
+                snapshot: None,
+            };
             Ok(json!({"result": trade(world, &st, i, count)?}))
         },
     );

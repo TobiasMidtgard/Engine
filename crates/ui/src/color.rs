@@ -52,12 +52,7 @@ impl Color {
 
     /// From a `0xRRGGBB` sRGB value, opaque.
     pub fn hex(rgb: u32) -> Self {
-        Self::srgb8(
-            (rgb >> 16) as u8,
-            (rgb >> 8) as u8,
-            rgb as u8,
-            255,
-        )
+        Self::srgb8((rgb >> 16) as u8, (rgb >> 8) as u8, rgb as u8, 255)
     }
 
     /// From a `0xRRGGBBAA` sRGB value.
@@ -207,7 +202,9 @@ impl<'de> Deserialize<'de> for Color {
         impl<'de> Visitor<'de> for V {
             type Value = Color;
             fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
-                f.write_str("a color: \"#rrggbb\", \"#rrggbbaa\", a name, or [r, g, b, a] in 0..1 sRGB")
+                f.write_str(
+                    "a color: \"#rrggbb\", \"#rrggbbaa\", a name, or [r, g, b, a] in 0..1 sRGB",
+                )
             }
             fn visit_str<E: de::Error>(self, v: &str) -> Result<Color, E> {
                 Color::parse(v).map_err(E::custom)

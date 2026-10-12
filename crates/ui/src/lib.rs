@@ -16,6 +16,7 @@ pub mod inventory;
 pub mod items;
 pub mod layout;
 pub mod map;
+pub mod menus;
 pub mod node;
 pub mod screens;
 pub mod shop;
@@ -100,7 +101,8 @@ impl Plugin for UiPlugin {
         }
         app.init_resource::<items::ItemDatabase>()
             .init_resource::<dialogue::DialogueLibrary>()
-            .init_resource::<map::MapData>();
+            .init_resource::<map::MapData>()
+            .init_resource::<menus::PauseState>();
         {
             let mut screens = app.world.resource_mut::<ScreenRegistry>();
             screens.add(
@@ -133,6 +135,24 @@ impl Plugin for UiPlugin {
                 r#"{"zoom": 1.4}"#,
                 map::build_screen,
             );
+            screens.add(
+                "pause",
+                "The pause menu (stops game time while open): resume, inventory, map, settings, save, quit.",
+                "{}",
+                menus::build_pause,
+            );
+            screens.add(
+                "settings",
+                "Settings: gameplay, video (RenderSettings), audio, controls (InputMap, rebinding) and interface (UiSettings, accent color). `tab` 0-4 or a name.",
+                r#"{"tab": "video"}"#,
+                menus::build_settings,
+            );
+            screens.add(
+                "confirm",
+                "A yes/no dialog: title, text, confirm (label), cancel (label), action (sent on confirm), danger.",
+                r#"{"title": "Quit to title?", "text": "Unsaved progress will be lost.", "confirm": "Quit", "action": "game.quit", "danger": true}"#,
+                menus::build_confirm,
+            );
         }
 
         app.add_systems(
@@ -147,6 +167,7 @@ impl Plugin for UiPlugin {
                 dialogue::dialogue_system,
                 hud::hud_system,
                 map::map_system,
+                menus::menus_system,
             ),
         )
         .add_systems(
@@ -245,6 +266,8 @@ fn register_types(app: &mut App) {
     )
     .register_component::<hud::Crosshair>("Crosshair (paint: crosshair): spread 0..1 or bind.")
     .register_component::<hud::TimeGauge>("Ring gauge of the engine's time scale (paint: time_gauge).")
+    .register_component::<hud::MarkerDistance>("The distance label inside a world marker.")
+    .register_component::<hud::MarkerArrow>("The edge arrow inside a world marker.")
     .register_component::<hud::Marker>(
         "World marker: title, subtitle, icon, color, show_distance. Pair with WorldAnchor on a top-level node.",
     )

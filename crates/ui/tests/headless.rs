@@ -76,18 +76,35 @@ fn draws_a_panel_with_text_and_icons() {
                 .child(El::icon("potion_health").with_style(|s| s.size(56.0, 56.0)))
                 .child(El::icon("ui_close").with_style(|s| s.size(28.0, 28.0))),
         )
-        .child(El::button("Trade", "shop.open").class("primary").id("trade"));
+        .child(
+            El::button("Trade", "shop.open")
+                .class("primary")
+                .id("trade"),
+        );
     engine_ui::el::spawn(&mut app.world, None, &el).unwrap();
     let Some(img) = render(&mut app, "ui_panel.png") else {
         return;
     };
-    let tree = engine_core::registry::call_api(&mut app.world, "ui.tree", serde_json::json!({})).unwrap();
+    let tree =
+        engine_core::registry::call_api(&mut app.world, "ui.tree", serde_json::json!({})).unwrap();
     eprintln!("{}", serde_json::to_string_pretty(&tree).unwrap());
     let diag = app.world.resource::<Diagnostics>();
     assert!(diag.get("ui.glyphs").unwrap_or(0.0) > 20.0, "glyphs drawn");
-    // The panel is darker than the sky behind it.
-    let inside = img.get_pixel(60, 60).0;
-    let outside = img.get_pixel(600, 60).0;
-    eprintln!("inside {inside:?} outside {outside:?}");
-    assert!((inside[0] as u32 + inside[1] as u32 + inside[2] as u32) < (outside[0] as u32 + outside[1] as u32 + outside[2] as u32));
+    let mut rect = |id: &str| {
+        let e = engine_ui::input::find_id(&mut app.world, id).expect(id);
+        app.world.get::<ComputedNode>(e).unwrap().rect
+    };
+    let (card, trade) = (rect("card"), rect("trade"));
+    let lum = |x: f32, y: f32| {
+        let p = img.get_pixel(x as u32, y as u32).0;
+        p[0] as u32 + p[1] as u32 + p[2] as u32
+    };
+    // The panel (an empty spot right of the icons) is darker than the sky beside it, and
+    // the primary button is brighter than the panel.
+    let inside = lum(card.x + card.w - 12.0, card.y + card.h * 0.5);
+    let outside = lum(card.x + card.w + 200.0, card.y + card.h * 0.5);
+    let button = lum(trade.x + 8.0, trade.y + trade.h * 0.5);
+    eprintln!("inside {inside} outside {outside} button {button}");
+    assert!(inside < outside, "panel darker than the sky");
+    assert!(button > inside + 150, "button brighter than the panel");
 }

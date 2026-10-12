@@ -175,7 +175,9 @@ pub fn write(world: &mut World, path: &str, value: Value) -> Result<(), String> 
         return (entry.patch)(world, patch);
     }
     if path.starts_with('@') {
-        return Err(format!("\"{path}\" is an entity field; change it with entity.patch."));
+        return Err(format!(
+            "\"{path}\" is an entity field; change it with entity.patch."
+        ));
     }
     world.resource_mut::<UiData>().set(path, value);
     Ok(())
@@ -301,7 +303,11 @@ mod tests {
         d.set("player.speed", 3.14159);
         d.set("player.name", "Mara");
         assert_eq!(
-            resolve("{player.name}: {player.gold} gold, {player.speed:1} m/s {{x}} {nope}", &d, None),
+            resolve(
+                "{player.name}: {player.gold} gold, {player.speed:1} m/s {{x}} {nope}",
+                &d,
+                None
+            ),
             "Mara: 12,500 gold, 3.1 m/s {x} ?"
         );
         assert_eq!(resolve("no bindings", &d, None), "no bindings");
@@ -327,9 +333,16 @@ mod tests {
         ));
         let d = UiData::default();
         assert_eq!(
-            resolve("{@Player.Health.current} / {@Player.Health.max}", &d, Some(&app.world)),
+            resolve(
+                "{@Player.Health.current} / {@Player.Health.max}",
+                &d,
+                Some(&app.world)
+            ),
             "75 / 100"
         );
-        assert_eq!(resolve("{@Nobody.Health.current}", &d, Some(&app.world)), "?");
+        assert_eq!(
+            resolve("{@Nobody.Health.current}", &d, Some(&app.world)),
+            "?"
+        );
     }
 }

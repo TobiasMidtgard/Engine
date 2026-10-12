@@ -14,10 +14,13 @@
 
 use std::f32::consts::{PI, TAU};
 
+use bevy_ecs::message::MessageCursor;
 use bevy_ecs::prelude::*;
 use engine_core::math::Vec2;
 use engine_core::prelude::*;
-use engine_input::{ButtonInput, GamepadAxis, GamepadButton, Gamepads, KeyCode, Mouse, MouseButton};
+use engine_input::{
+    ButtonInput, GamepadAxis, GamepadButton, Gamepads, KeyCode, Mouse, MouseButton,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -73,13 +76,27 @@ impl PlanetKind {
         match self {
             PlanetKind::Terran => {}
             PlanetKind::Ocean => {
-                l.colors = [c(0x06224a), c(0x1a7fb0), c(0x5b8a3c), c(0xb8a878), c(0x7a7468), c(0xf4f6fa)];
+                l.colors = [
+                    c(0x06224a),
+                    c(0x1a7fb0),
+                    c(0x5b8a3c),
+                    c(0xb8a878),
+                    c(0x7a7468),
+                    c(0xf4f6fa),
+                ];
                 l.shape = [seed, 0.68, 1.1, 0.86];
                 l.clouds[3] = 0.55;
                 l.lights[3] = 0.25;
             }
             PlanetKind::Jungle => {
-                l.colors = [c(0x0a2c40), c(0x1e7a86), c(0x245c1e), c(0x3f7a2a), c(0x5a5a3c), c(0xe8ecef)];
+                l.colors = [
+                    c(0x0a2c40),
+                    c(0x1e7a86),
+                    c(0x245c1e),
+                    c(0x3f7a2a),
+                    c(0x5a5a3c),
+                    c(0xe8ecef),
+                ];
                 l.shape = [seed, 0.42, 1.2, 0.93];
                 l.clouds = [0.95, 0.98, 1.0, 0.6];
                 l.atmosphere = [0.45, 0.75, 0.9, 1.1];
@@ -87,7 +104,14 @@ impl PlanetKind {
                 l.lights[3] = 0.15;
             }
             PlanetKind::Desert => {
-                l.colors = [c(0x3a2a1a), c(0x8a6a3a), c(0xc89a5a), c(0xe0b878), c(0x9a6a44), c(0xf0e0c8)];
+                l.colors = [
+                    c(0x3a2a1a),
+                    c(0x8a6a3a),
+                    c(0xc89a5a),
+                    c(0xe0b878),
+                    c(0x9a6a44),
+                    c(0xf0e0c8),
+                ];
                 l.shape = [seed, 0.08, 1.3, 0.94];
                 l.style = [1.0, 0.0, 0.0, 0.0];
                 l.atmosphere = [0.95, 0.65, 0.4, 0.7];
@@ -95,28 +119,56 @@ impl PlanetKind {
                 l.lights = [1.0, 0.7, 0.35, 0.4];
             }
             PlanetKind::Ice => {
-                l.colors = [c(0x1a3a5a), c(0x6aa0c8), c(0xc8d8e4), c(0xa8bccc), c(0x7c8a98), c(0xffffff)];
+                l.colors = [
+                    c(0x1a3a5a),
+                    c(0x6aa0c8),
+                    c(0xc8d8e4),
+                    c(0xa8bccc),
+                    c(0x7c8a98),
+                    c(0xffffff),
+                ];
                 l.shape = [seed, 0.32, 1.0, 0.45];
                 l.atmosphere = [0.6, 0.8, 1.0, 0.8];
                 l.clouds[3] = 0.3;
                 l.lights[3] = 0.1;
             }
             PlanetKind::Lava => {
-                l.colors = [c(0xffb040), c(0xff5a1a), c(0x2a1e1c), c(0x3c2a24), c(0x1c1414), c(0x5a4a44)];
+                l.colors = [
+                    c(0xffb040),
+                    c(0xff5a1a),
+                    c(0x2a1e1c),
+                    c(0x3c2a24),
+                    c(0x1c1414),
+                    c(0x5a4a44),
+                ];
                 l.shape = [seed, 0.36, 1.4, 1.2];
                 l.atmosphere = [1.0, 0.45, 0.2, 0.6];
                 l.clouds = [0.25, 0.2, 0.2, 0.25];
                 l.lights = [1.0, 0.45, 0.1, 1.0];
             }
             PlanetKind::Barren => {
-                l.colors = [c(0x2a2a2c), c(0x3a3a3c), c(0x6e6a66), c(0x8a8580), c(0x5a5652), c(0xd8d4d0)];
+                l.colors = [
+                    c(0x2a2a2c),
+                    c(0x3a3a3c),
+                    c(0x6e6a66),
+                    c(0x8a8580),
+                    c(0x5a5652),
+                    c(0xd8d4d0),
+                ];
                 l.shape = [seed, 0.0, 1.5, 1.2];
                 l.atmosphere = [0.6, 0.6, 0.6, 0.0];
                 l.clouds[3] = 0.0;
                 l.lights[3] = 0.0;
             }
             PlanetKind::Gas => {
-                l.colors = [c(0x000000), c(0x000000), c(0xd8b08a), c(0xf0e0c4), c(0xa86a48), c(0xc0583a)];
+                l.colors = [
+                    c(0x000000),
+                    c(0x000000),
+                    c(0xd8b08a),
+                    c(0xf0e0c4),
+                    c(0xa86a48),
+                    c(0xc0583a),
+                ];
                 l.style = [0.0, 9.0, 1.0, 1.0];
                 l.atmosphere = [0.95, 0.8, 0.6, 0.6];
                 l.clouds[3] = 0.0;
@@ -510,9 +562,30 @@ pub fn demo_map() -> MapData {
     };
     // The rest of the Veil: systems along the two spiral arms.
     let names = [
-        "Kestrel Reach", "Orun", "Halcyon", "Brightwater", "Teshar", "Cinder Gate", "Mirae", "Vashti",
-        "Low Harbor", "Sable", "Ithren", "Corvid", "Aster Nine", "Pellucid", "Rhune", "Dawnmere",
-        "Kaskade", "Ombra", "Lanthe", "Quietus", "Eldra", "Marrow", "Solace", "Tarn",
+        "Kestrel Reach",
+        "Orun",
+        "Halcyon",
+        "Brightwater",
+        "Teshar",
+        "Cinder Gate",
+        "Mirae",
+        "Vashti",
+        "Low Harbor",
+        "Sable",
+        "Ithren",
+        "Corvid",
+        "Aster Nine",
+        "Pellucid",
+        "Rhune",
+        "Dawnmere",
+        "Kaskade",
+        "Ombra",
+        "Lanthe",
+        "Quietus",
+        "Eldra",
+        "Marrow",
+        "Solace",
+        "Tarn",
     ];
     let classes = [
         ("M2", 0xffb27a, 0.6),
@@ -552,7 +625,8 @@ pub fn demo_map() -> MapData {
         let r = 0.2 + 0.75 * hash(i, 1);
         let arm = (i % 2) as f32;
         let theta = (TAU * arm + 4.2 * r.ln()) / 2.0 + (hash(i, 2) - 0.5) * 0.5;
-        let (cls, col, size) = classes[(hash(i, 3) * classes.len() as f32) as usize % classes.len()];
+        let (cls, col, size) =
+            classes[(hash(i, 3) * classes.len() as f32) as usize % classes.len()];
         let (faction, fcol) = factions[(hash(i, 4) * 4.0) as usize % 4];
         let n_planets = 1 + (hash(i, 5) * 5.0) as u32;
         let planets = (0..n_planets)
@@ -560,10 +634,18 @@ pub fn demo_map() -> MapData {
                 let kind = kinds[(hash(i * 7 + k, 6) * kinds.len() as f32) as usize % kinds.len()];
                 Planet {
                     id: format!("{}_{}", name.to_lowercase().replace(' ', "_"), k + 1),
-                    name: format!("{} {}", name, ["I", "II", "III", "IV", "V", "VI"][k as usize]),
+                    name: format!(
+                        "{} {}",
+                        name,
+                        ["I", "II", "III", "IV", "V", "VI"][k as usize]
+                    ),
                     kind,
                     seed: hash(i, 10 + k) * 20.0,
-                    radius_km: if kind == PlanetKind::Gas { 50_000.0 } else { 2000.0 + 5000.0 * hash(i, 20 + k) as f64 },
+                    radius_km: if kind == PlanetKind::Gas {
+                        50_000.0
+                    } else {
+                        2000.0 + 5000.0 * hash(i, 20 + k) as f64
+                    },
                     orbit_au: 0.4 + k as f32 * 0.9 + hash(i, 30 + k) * 0.5,
                     phase_deg: hash(i, 40 + k) * 360.0,
                     period_days: 200.0 * (1.0 + k as f32 * 2.0),
@@ -598,7 +680,11 @@ pub fn demo_map() -> MapData {
             .collect();
         near.sort_by(|x, y| x.0.total_cmp(&y.0));
         for (_, b) in near.into_iter().take(2) {
-            let key = if a.id < b.id { [a.id.clone(), b.id.clone()] } else { [b.id.clone(), a.id.clone()] };
+            let key = if a.id < b.id {
+                [a.id.clone(), b.id.clone()]
+            } else {
+                [b.id.clone(), a.id.clone()]
+            };
             if !lanes.contains(&key) {
                 lanes.push(key);
             }
@@ -631,7 +717,9 @@ pub fn demo_map() -> MapData {
 /// Install the demo universe (unless a map is already loaded) and the location data the HUD
 /// shows.
 pub fn add_demo_map(world: &mut World) {
-    let empty = world.get_resource::<MapData>().is_none_or(|m| m.systems.is_empty());
+    let empty = world
+        .get_resource::<MapData>()
+        .is_none_or(|m| m.systems.is_empty());
     if empty {
         world.insert_resource(demo_map());
     }
@@ -735,8 +823,16 @@ fn layer(world: &World, name: &str) -> bool {
 fn level_weight(zoom: f32, level: usize) -> f32 {
     let l = level as f32;
     let w = 0.15;
-    let lo = if level == 0 { 1.0 } else { ((zoom - (l - w)) / (2.0 * w)).clamp(0.0, 1.0) };
-    let hi = if level == 3 { 1.0 } else { (((l + 1.0 + w) - zoom) / (2.0 * w)).clamp(0.0, 1.0) };
+    let lo = if level == 0 {
+        1.0
+    } else {
+        ((zoom - (l - w)) / (2.0 * w)).clamp(0.0, 1.0)
+    };
+    let hi = if level == 3 {
+        1.0
+    } else {
+        (((l + 1.0 + w) - zoom) / (2.0 * w)).clamp(0.0, 1.0)
+    };
     let k = lo.min(hi);
     k * k * (3.0 - 2.0 * k)
 }
@@ -749,6 +845,13 @@ fn smooth(t: f32) -> f32 {
 /// Globe radius at planet-level zoom `u` (0..1), physical px.
 fn globe_radius(u: f32, h: f32) -> f32 {
     h * 0.42 * 2f32.powf(-u * 1.35)
+}
+
+/// System-level magnification at zoom `u` (0..1): 16x on the focused planet at 0, the whole
+/// system at 1, easing so most of the level shows the full system.
+fn system_zoom(u: f32) -> f32 {
+    let k = (1.0 - u.clamp(-0.2, 1.2)).max(0.0);
+    2f32.powf(4.0 * k * k)
 }
 
 /// Rotate a planet-frame direction into view space (inverse of the shader's mapping).
@@ -817,12 +920,32 @@ fn reticle(ctx: &mut DrawCtx, c: Vec2, r: f32, color: Color) {
     let l = 7.0 * px;
     for (sx, sy) in [(-1.0f32, -1.0f32), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)] {
         let corner = c + Vec2::new(sx * k, sy * k);
-        ctx.line(corner, corner - Vec2::new(sx * l, 0.0), 2.0 * px, color, 0.0);
-        ctx.line(corner, corner - Vec2::new(0.0, sy * l), 2.0 * px, color, 0.0);
+        ctx.line(
+            corner,
+            corner - Vec2::new(sx * l, 0.0),
+            2.0 * px,
+            color,
+            0.0,
+        );
+        ctx.line(
+            corner,
+            corner - Vec2::new(0.0, sy * l),
+            2.0 * px,
+            color,
+            0.0,
+        );
     }
 }
 
-fn label(ctx: &mut DrawCtx, text: &str, size: f32, weight: u16, color: Color, pos: Vec2, anchor: Vec2) -> Rect {
+fn label(
+    ctx: &mut DrawCtx,
+    text: &str,
+    size: f32,
+    weight: u16,
+    color: Color,
+    pos: Vec2,
+    anchor: Vec2,
+) -> Rect {
     // A soft dark pad behind map labels keeps them readable on bright terrain.
     let m = ctx.measure(&crate::text::TextSpec {
         text: text.to_string(),
@@ -835,7 +958,12 @@ fn label(ctx: &mut DrawCtx, text: &str, size: f32, weight: u16, color: Color, po
     let tl = pos - m * anchor;
     let pad = 4.0 * ctx.px;
     ctx.rect(
-        Rect::new(tl.x - pad * 1.5, tl.y - pad * 0.5, m.x + pad * 3.0, m.y + pad),
+        Rect::new(
+            tl.x - pad * 1.5,
+            tl.y - pad * 0.5,
+            m.x + pad * 3.0,
+            m.y + pad,
+        ),
         Color::hexa(0x05080e8c),
         (m.y + pad) * 0.5,
         0.0,
@@ -849,7 +977,14 @@ fn paint_map(world: &mut World, e: Entity, ctx: &mut DrawCtx) {
         return;
     };
     let Some(map) = world.get_resource::<MapData>().cloned() else {
-        ctx.text("No map loaded", 16.0, 700, Color::WHITE, ctx.rect.center(), Vec2::splat(0.5));
+        ctx.text(
+            "No map loaded",
+            16.0,
+            700,
+            Color::WHITE,
+            ctx.rect.center(),
+            Vec2::splat(0.5),
+        );
         return;
     };
     let p = world.resource::<Theme>().palette.clone();
@@ -866,7 +1001,8 @@ fn paint_map(world: &mut World, e: Entity, ctx: &mut DrawCtx) {
 
     // Deep space under everything, drifting with the pan.
     ctx.rect(r, Color::hex(0x03050a), 0.0, 0.0, Color::TRANSPARENT);
-    let drift = Vec2::new(view.galaxy_pan.x, view.galaxy_pan.y) * 400.0 * ctx.px + Vec2::new(z * 120.0, view.yaw * 60.0) * ctx.px;
+    let drift = Vec2::new(view.galaxy_pan.x, view.galaxy_pan.y) * 400.0 * ctx.px
+        + Vec2::new(z * 120.0, view.yaw * 60.0) * ctx.px;
     ctx.starfield(r, drift, 1.0, 7.0, 0.0);
 
     let mut out = Painted {
@@ -907,7 +1043,15 @@ fn paint_map(world: &mut World, e: Entity, ctx: &mut DrawCtx) {
 
 type Layers = (bool, bool, bool, bool, bool);
 
-fn draw_galaxy(ctx: &mut DrawCtx, map: &MapData, p: &crate::theme::Palette, out: &mut Painted, u: f32, t: f32, layers: Layers) {
+fn draw_galaxy(
+    ctx: &mut DrawCtx,
+    map: &MapData,
+    p: &crate::theme::Palette,
+    out: &mut Painted,
+    u: f32,
+    t: f32,
+    layers: Layers,
+) {
     let r = ctx.rect;
     let px = ctx.px;
     let view = out.view;
@@ -926,7 +1070,15 @@ fn draw_galaxy(ctx: &mut DrawCtx, map: &MapData, p: &crate::theme::Palette, out:
     let off = galaxy_point(look_at, Vec2::ZERO, radius, g.rotation, g.tilt);
     let center = center0 - off;
     ctx.galaxy(r, center, radius, g.rotation + t * 0.004, g.tilt);
-    let gp = |s: &StarSystem| galaxy_point(Vec2::new(s.x, s.y), center, radius, g.rotation + t * 0.004, g.tilt);
+    let gp = |s: &StarSystem| {
+        galaxy_point(
+            Vec2::new(s.x, s.y),
+            center,
+            radius,
+            g.rotation + t * 0.004,
+            g.tilt,
+        )
+    };
     // Hyperlanes.
     if layers.1 {
         for [a, b] in &map.lanes {
@@ -934,8 +1086,18 @@ fn draw_galaxy(ctx: &mut DrawCtx, map: &MapData, p: &crate::theme::Palette, out:
                 continue;
             };
             let known = sa.discovered && sb.discovered;
-            let col = if known { p.info.with_alpha(0.32) } else { Color::WHITE.with_alpha(0.1) };
-            ctx.line(gp(sa), gp(sb), 1.2 * px, col, if known { 0.0 } else { 6.0 * px });
+            let col = if known {
+                p.info.with_alpha(0.32)
+            } else {
+                Color::WHITE.with_alpha(0.1)
+            };
+            ctx.line(
+                gp(sa),
+                gp(sb),
+                1.2 * px,
+                col,
+                if known { 0.0 } else { 6.0 * px },
+            );
         }
     }
     // Route to the waypoint's system.
@@ -953,25 +1115,62 @@ fn draw_galaxy(ctx: &mut DrawCtx, map: &MapData, p: &crate::theme::Palette, out:
         let item = MapItem::System(s.id.clone());
         let hot = out.is_hot(&item);
         let size = (2.6 + s.star_size * 1.6) * px * zoomed.powf(0.25);
-        let col = if s.discovered { s.star_color } else { Color::hex(0x8a94a8) };
-        ctx.glow(q, size * 5.0, col.with_alpha(if s.discovered { 0.55 } else { 0.25 }), 1.8);
+        let col = if s.discovered {
+            s.star_color
+        } else {
+            Color::hex(0x8a94a8)
+        };
+        ctx.glow(
+            q,
+            size * 5.0,
+            col.with_alpha(if s.discovered { 0.55 } else { 0.25 }),
+            1.8,
+        );
         ctx.glow(q, size * 1.4, Color::WHITE.with_alpha(0.95), 2.5);
         if hot {
-            ctx.ring(q, Vec2::splat(size * 3.0), 1.5 * px, p.accent_light, 0.0, TAU, 0.0);
+            ctx.ring(
+                q,
+                Vec2::splat(size * 3.0),
+                1.5 * px,
+                p.accent_light,
+                0.0,
+                TAU,
+                0.0,
+            );
         }
         if s.id == map.player.system {
             let pulse = (t * 2.0).fract();
-            ctx.ring(q, Vec2::splat(size * (2.5 + pulse * 5.0)), 1.5 * px, p.info.with_alpha(1.0 - pulse), 0.0, TAU, 0.0);
+            ctx.ring(
+                q,
+                Vec2::splat(size * (2.5 + pulse * 5.0)),
+                1.5 * px,
+                p.info.with_alpha(1.0 - pulse),
+                0.0,
+                TAU,
+                0.0,
+            );
         }
-        if map.waypoint.as_ref().is_some_and(|w| w.system == s.id && w.system != map.player.system) {
+        if map
+            .waypoint
+            .as_ref()
+            .is_some_and(|w| w.system == s.id && w.system != map.player.system)
+        {
             let d = 12.0 * px;
-            ctx.icon("marker_quest", Rect::new(q.x - d * 0.5, q.y - size * 3.0 - d, d, d), Color::WHITE);
+            ctx.icon(
+                "marker_quest",
+                Rect::new(q.x - d * 0.5, q.y - size * 3.0 - d, d, d),
+                Color::WHITE,
+            );
         }
         if out.is_sel(&item) {
             reticle(ctx, q, size * 2.2, p.accent_light);
         }
         if layers.2 && (s.discovered || hot) {
-            let name = if s.discovered { s.name.as_str() } else { "Uncharted" };
+            let name = if s.discovered {
+                s.name.as_str()
+            } else {
+                "Uncharted"
+            };
             let color = if s.id == map.player.system {
                 p.info
             } else if hot {
@@ -979,25 +1178,55 @@ fn draw_galaxy(ctx: &mut DrawCtx, map: &MapData, p: &crate::theme::Palette, out:
             } else {
                 Color::WHITE.with_alpha(0.82)
             };
-            ctx.text(name, 12.0, 700, color, q + Vec2::new(0.0, size * 2.4 + 4.0 * px), Vec2::new(0.5, 0.0));
+            ctx.text(
+                name,
+                12.0,
+                700,
+                color,
+                q + Vec2::new(0.0, size * 2.4 + 4.0 * px),
+                Vec2::new(0.5, 0.0),
+            );
             if hot && s.discovered && !s.faction.is_empty() {
-                ctx.text(&s.faction, 10.0, 600, s.faction_color, q + Vec2::new(0.0, size * 2.4 + 20.0 * px), Vec2::new(0.5, 0.0));
+                ctx.text(
+                    &s.faction,
+                    10.0,
+                    600,
+                    s.faction_color,
+                    q + Vec2::new(0.0, size * 2.4 + 20.0 * px),
+                    Vec2::new(0.5, 0.0),
+                );
             }
         }
         out.hits.push((q, (size * 3.0).max(14.0 * px), item));
     }
 }
 
-fn draw_system(ctx: &mut DrawCtx, map: &MapData, p: &crate::theme::Palette, out: &mut Painted, u: f32, t: f32, layers: Layers) {
+fn draw_system(
+    ctx: &mut DrawCtx,
+    map: &MapData,
+    p: &crate::theme::Palette,
+    out: &mut Painted,
+    u: f32,
+    t: f32,
+    layers: Layers,
+) {
     let r = ctx.rect;
     let px = ctx.px;
     let view = out.view;
-    let Some(sys) = map.system(&view.system).or_else(|| map.system(&map.player.system)) else {
+    let Some(sys) = map
+        .system(&view.system)
+        .or_else(|| map.system(&map.player.system))
+    else {
         return;
     };
-    let outer = sys.planets.iter().map(|p| p.orbit_au).fold(1.0f32, f32::max) * 1.08;
+    let outer = sys
+        .planets
+        .iter()
+        .map(|p| p.orbit_au)
+        .fold(1.0f32, f32::max)
+        * 1.08;
     let tilt = 0.5;
-    let zf = 2f32.powf((1.0 - u.clamp(-0.2, 1.2)) * 5.0);
+    let zf = system_zoom(u);
     let au = r.h * 0.43 / outer * zf;
     let focus = sys
         .planets
@@ -1014,17 +1243,10 @@ fn draw_system(ctx: &mut DrawCtx, map: &MapData, p: &crate::theme::Palette, out:
     ctx.glow(star, star_r * 9.0, sys.star_color.with_alpha(0.22), 1.2);
     ctx.glow(star, star_r * 3.0, sys.star_color.with_alpha(0.75), 1.6);
     ctx.glow(star, star_r * 1.1, Color::WHITE, 3.0);
-    if layers.2 && u > 0.35 {
-        ctx.text(
-            &format!("{}  ·  {}", sys.name, sys.star_class),
-            12.0,
-            700,
-            sys.star_color.lerp(Color::WHITE, 0.4),
-            star + Vec2::new(0.0, star_r * 1.6 + 6.0 * px),
-            Vec2::new(0.5, 0.0),
-        );
-    }
-    out.hits.push((star, star_r * 1.5, MapItem::System(sys.id.clone())));
+    out.hits
+        .push((star, star_r * 1.5, MapItem::System(sys.id.clone())));
+    let star_label = star + Vec2::new(0.0, star_r * 1.6 + 6.0 * px);
+    let mut star_label_alpha = 1.0f32;
     // Asteroid belt between the 2nd and 3rd orbits.
     if sys.planets.len() >= 3 {
         let belt = (sys.planets[1].orbit_au + sys.planets[2].orbit_au) * 0.5;
@@ -1045,8 +1267,20 @@ fn draw_system(ctx: &mut DrawCtx, map: &MapData, p: &crate::theme::Palette, out:
     for pl in &sys.planets {
         let pos = orbit_pos(pl, t);
         let item = MapItem::Planet(pl.id.clone());
-        let col = if out.is_hot(&item) { p.accent.with_alpha(0.7) } else { Color::WHITE.with_alpha(0.16) };
-        ctx.ring(star, Vec2::new(pl.orbit_au, pl.orbit_au * tilt) * au, 1.2 * px, col, 0.0, TAU, 0.0);
+        let col = if out.is_hot(&item) {
+            p.accent.with_alpha(0.7)
+        } else {
+            Color::WHITE.with_alpha(0.16)
+        };
+        ctx.ring(
+            star,
+            Vec2::new(pl.orbit_au, pl.orbit_au * tilt) * au,
+            1.2 * px,
+            col,
+            0.0,
+            TAU,
+            0.0,
+        );
         order.push((pos.y, pl, pos));
     }
     order.sort_by(|a, b| a.0.total_cmp(&b.0));
@@ -1057,6 +1291,11 @@ fn draw_system(ctx: &mut DrawCtx, map: &MapData, p: &crate::theme::Palette, out:
         if !r.inflate(pr * 3.0).contains(q) {
             continue;
         }
+        // Fade the star's label while a planet (or its label below it) passes over it.
+        let gap =
+            (star_label + Vec2::new(0.0, 8.0 * px)) - (q + Vec2::new(0.0, pr * 0.5 + 14.0 * px));
+        let near = (gap.x.abs() / (90.0 * px + pr)).max(gap.y.abs() / (26.0 * px + pr * 0.8));
+        star_label_alpha = star_label_alpha.min(smooth((near - 0.8) / 0.4));
         let (az, el) = sun_from((star - q).normalize_or_zero());
         let item = MapItem::Planet(pl.id.clone());
         let look = pl.look();
@@ -1077,7 +1316,15 @@ fn draw_system(ctx: &mut DrawCtx, map: &MapData, p: &crate::theme::Palette, out:
         }
         if pl.id == map.player.planet {
             let pulse = (t * 1.6).fract();
-            ctx.ring(q, Vec2::splat(pr * (1.25 + pulse * 0.6)), 1.5 * px, p.info.with_alpha(1.0 - pulse), 0.0, TAU, 0.0);
+            ctx.ring(
+                q,
+                Vec2::splat(pr * (1.25 + pulse * 0.6)),
+                1.5 * px,
+                p.info.with_alpha(1.0 - pulse),
+                0.0,
+                TAU,
+                0.0,
+            );
         }
         if out.is_sel(&item) {
             reticle(ctx, q, pr, p.accent_light);
@@ -1098,16 +1345,39 @@ fn draw_system(ctx: &mut DrawCtx, map: &MapData, p: &crate::theme::Palette, out:
                 q + Vec2::new(0.0, pr + 8.0 * px),
                 Vec2::new(0.5, 0.0),
             );
-            ctx.text(pl.kind.label(), 10.0, 600, Color::WHITE.with_alpha(0.5), q + Vec2::new(0.0, pr + 24.0 * px), Vec2::new(0.5, 0.0));
+            ctx.text(
+                pl.kind.label(),
+                10.0,
+                600,
+                Color::WHITE.with_alpha(0.5),
+                q + Vec2::new(0.0, pr + 24.0 * px),
+                Vec2::new(0.5, 0.0),
+            );
         }
         out.hits.push((q, pr.max(12.0 * px) * 1.2, item));
+    }
+    if layers.2 && u > 0.35 && star_label_alpha > 0.01 {
+        ctx.faded(star_label_alpha, |ctx| {
+            ctx.text(
+                &format!("{}  ·  {}", sys.name, sys.star_class),
+                12.0,
+                700,
+                sys.star_color.lerp(Color::WHITE, 0.4),
+                star_label,
+                Vec2::new(0.5, 0.0),
+            );
+        });
     }
 }
 
 /// Half of a planet's ring system: the far half (drawn before the planet) or the near half.
 fn ring_half(ctx: &mut DrawCtx, c: Vec2, pr: f32, back: bool) {
     let (start, sweep) = if back { (PI * 1.5, PI) } else { (PI * 0.5, PI) };
-    for (k, a, w) in [(1.55f32, 0.55f32, 0.18f32), (1.85, 0.4, 0.22), (2.15, 0.25, 0.12)] {
+    for (k, a, w) in [
+        (1.55f32, 0.55f32, 0.18f32),
+        (1.85, 0.4, 0.22),
+        (2.15, 0.25, 0.12),
+    ] {
         ctx.ring(
             c,
             Vec2::new(pr * k, pr * k * 0.3),
@@ -1120,11 +1390,22 @@ fn ring_half(ctx: &mut DrawCtx, c: Vec2, pr: f32, back: bool) {
     }
 }
 
-fn draw_globe(ctx: &mut DrawCtx, map: &MapData, p: &crate::theme::Palette, out: &mut Painted, u: f32, t: f32, layers: Layers) {
+fn draw_globe(
+    ctx: &mut DrawCtx,
+    map: &MapData,
+    p: &crate::theme::Palette,
+    out: &mut Painted,
+    u: f32,
+    t: f32,
+    layers: Layers,
+) {
     let r = ctx.rect;
     let px = ctx.px;
     let view = out.view;
-    let Some((_, pl)) = map.planet(&view.planet).or_else(|| map.planet(&map.player.planet)) else {
+    let Some((_, pl)) = map
+        .planet(&view.planet)
+        .or_else(|| map.planet(&map.player.planet))
+    else {
         return;
     };
     let rad = globe_radius(u.clamp(-0.3, 1.3), r.h);
@@ -1137,8 +1418,24 @@ fn draw_globe(ctx: &mut DrawCtx, map: &MapData, p: &crate::theme::Palette, out: 
         ring_half(ctx, c, rad, true);
     }
     // Sci-fi frame: a thin ring with ticks around the globe.
-    ctx.ring(c, Vec2::splat(rad * 1.16), 1.0 * px, p.info.with_alpha(0.22), 0.0, TAU, 0.0);
-    ctx.ring(c, Vec2::splat(rad * 1.2), 6.0 * px, p.info.with_alpha(0.12), 0.0, TAU, 120.0);
+    ctx.ring(
+        c,
+        Vec2::splat(rad * 1.16),
+        1.0 * px,
+        p.info.with_alpha(0.22),
+        0.0,
+        TAU,
+        0.0,
+    );
+    ctx.ring(
+        c,
+        Vec2::splat(rad * 1.2),
+        6.0 * px,
+        p.info.with_alpha(0.12),
+        0.0,
+        TAU,
+        120.0,
+    );
     ctx.planet(c, rad, look, yaw, pitch, az, el, halo);
     if pl.rings {
         ring_half(ctx, c, rad, false);
@@ -1159,12 +1456,28 @@ fn draw_globe(ctx: &mut DrawCtx, map: &MapData, p: &crate::theme::Palette, out: 
             let s = (18.0 + 6.0 * a) * px;
             ctx.faded(a, |ctx| {
                 ctx.glow(q, s * 0.9, poi.kind.color().with_alpha(0.4), 1.6);
-                ctx.icon(poi.kind.icon(), Rect::new(q.x - s * 0.5, q.y - s * 0.5, s, s), Color::WHITE);
+                ctx.icon(
+                    poi.kind.icon(),
+                    Rect::new(q.x - s * 0.5, q.y - s * 0.5, s, s),
+                    Color::WHITE,
+                );
                 if out.is_sel(&item) {
                     reticle(ctx, q, s * 0.5, p.accent_light);
                 }
-                if layers.2 && (out.is_hot(&item) || poi.kind == PoiKind::City || poi.kind == PoiKind::Spaceport) {
-                    label(ctx, &poi.name, 11.0, 700, Color::WHITE, q + Vec2::new(0.0, s * 0.6 + 2.0 * px), Vec2::new(0.5, 0.0));
+                if layers.2
+                    && (out.is_hot(&item)
+                        || poi.kind == PoiKind::City
+                        || poi.kind == PoiKind::Spaceport)
+                {
+                    label(
+                        ctx,
+                        &poi.name,
+                        11.0,
+                        700,
+                        Color::WHITE,
+                        q + Vec2::new(0.0, s * 0.6 + 2.0 * px),
+                        Vec2::new(0.5, 0.0),
+                    );
                 }
             });
             out.hits.push((q, s * 0.8, item));
@@ -1175,7 +1488,15 @@ fn draw_globe(ctx: &mut DrawCtx, map: &MapData, p: &crate::theme::Palette, out: 
         let (q, depth) = project(map.player.lon, map.player.lat);
         if depth > 0.05 {
             let pulse = (t * 1.6).fract();
-            ctx.ring(q, Vec2::splat((5.0 + pulse * 14.0) * px), 1.5 * px, p.info.with_alpha(1.0 - pulse), 0.0, TAU, 0.0);
+            ctx.ring(
+                q,
+                Vec2::splat((5.0 + pulse * 14.0) * px),
+                1.5 * px,
+                p.info.with_alpha(1.0 - pulse),
+                0.0,
+                TAU,
+                0.0,
+            );
             ctx.glow(q, 6.0 * px, p.info, 2.0);
         }
     }
@@ -1186,20 +1507,42 @@ fn draw_globe(ctx: &mut DrawCtx, map: &MapData, p: &crate::theme::Palette, out: 
         if depth > 0.05 {
             let s = 22.0 * px;
             ctx.glow(q, s, p.accent.with_alpha(0.5), 1.4);
-            ctx.icon("marker_quest", Rect::new(q.x - s * 0.5, q.y - s - 4.0 * px, s, s), Color::WHITE);
+            ctx.icon(
+                "marker_quest",
+                Rect::new(q.x - s * 0.5, q.y - s - 4.0 * px, s, s),
+                Color::WHITE,
+            );
         }
     }
     out.hits.push((c, rad, MapItem::Planet(pl.id.clone())));
     if layers.2 && u > 0.2 {
-        ctx.text(&pl.name.to_uppercase(), 13.0, 800, Color::WHITE.with_alpha(0.8), c + Vec2::new(0.0, rad * 1.26 + 6.0 * px), Vec2::new(0.5, 0.0));
+        ctx.text(
+            &pl.name.to_uppercase(),
+            13.0,
+            800,
+            Color::WHITE.with_alpha(0.8),
+            c + Vec2::new(0.0, rad * 1.26 + 6.0 * px),
+            Vec2::new(0.5, 0.0),
+        );
     }
 }
 
-fn draw_surface(ctx: &mut DrawCtx, map: &MapData, p: &crate::theme::Palette, out: &mut Painted, u: f32, t: f32, layers: Layers) {
+fn draw_surface(
+    ctx: &mut DrawCtx,
+    map: &MapData,
+    p: &crate::theme::Palette,
+    out: &mut Painted,
+    u: f32,
+    t: f32,
+    layers: Layers,
+) {
     let r = ctx.rect;
     let px = ctx.px;
     let view = out.view;
-    let Some((_, pl)) = map.planet(&view.planet).or_else(|| map.planet(&map.player.planet)) else {
+    let Some((_, pl)) = map
+        .planet(&view.planet)
+        .or_else(|| map.planet(&map.player.planet))
+    else {
         return;
     };
     // World width in px: the whole map fits at u = 1, 16x closer at u = 0.
@@ -1233,14 +1576,26 @@ fn draw_surface(ctx: &mut DrawCtx, map: &MapData, p: &crate::theme::Palette, out
     ctx.planet_flat(
         vis,
         pl.look(),
-        [lon_at(vis.x).to_radians() as f32, lon_at(vis.x + vis.w).to_radians() as f32],
-        [lat_at(vis.y).to_radians() as f32, lat_at(vis.y + vis.h).to_radians() as f32],
+        [
+            lon_at(vis.x).to_radians() as f32,
+            lon_at(vis.x + vis.w).to_radians() as f32,
+        ],
+        [
+            lat_at(vis.y).to_radians() as f32,
+            lat_at(vis.y + vis.h).to_radians() as f32,
+        ],
         if layers.4 { 1.0 } else { 0.0 },
         if layers.3 { 1.0 } else { 0.0 },
         rounded,
     );
     if rounded > 0.0 {
-        ctx.rect(vis, Color::TRANSPARENT, rounded, 1.0 * px, p.info.with_alpha(0.35));
+        ctx.rect(
+            vis,
+            Color::TRANSPARENT,
+            rounded,
+            1.0 * px,
+            p.info.with_alpha(0.35),
+        );
     }
     ctx.with_clip(vis, |ctx| {
         // Route from the player to the waypoint.
@@ -1254,7 +1609,11 @@ fn draw_surface(ctx: &mut DrawCtx, map: &MapData, p: &crate::theme::Palette, out
             ctx.line(a, b, 1.6 * px, p.accent.with_alpha(0.9), 9.0 * px);
             let s = 26.0 * px;
             ctx.glow(b, s, p.accent.with_alpha(0.5), 1.4);
-            ctx.icon("marker_quest", Rect::new(b.x - s * 0.5, b.y - s - 2.0 * px, s, s), Color::WHITE);
+            ctx.icon(
+                "marker_quest",
+                Rect::new(b.x - s * 0.5, b.y - s - 2.0 * px, s, s),
+                Color::WHITE,
+            );
         }
         if layers.0 {
             for poi in pl.pois.iter().filter(|q| q.discovered) {
@@ -1266,7 +1625,11 @@ fn draw_surface(ctx: &mut DrawCtx, map: &MapData, p: &crate::theme::Palette, out
                 let hot = out.is_hot(&item);
                 let s = if hot { 30.0 } else { 24.0 } * px;
                 ctx.glow(q, s * 0.9, poi.kind.color().with_alpha(0.45), 1.6);
-                ctx.icon(poi.kind.icon(), Rect::new(q.x - s * 0.5, q.y - s * 0.5, s, s), Color::WHITE);
+                ctx.icon(
+                    poi.kind.icon(),
+                    Rect::new(q.x - s * 0.5, q.y - s * 0.5, s, s),
+                    Color::WHITE,
+                );
                 if out.is_sel(&item) {
                     reticle(ctx, q, s * 0.5, p.accent_light);
                 }
@@ -1287,12 +1650,32 @@ fn draw_surface(ctx: &mut DrawCtx, map: &MapData, p: &crate::theme::Palette, out
         if map.player.planet == pl.id {
             let q = to_px(map.player.lon, map.player.lat);
             let pulse = (t * 1.6).fract();
-            ctx.ring(q, Vec2::splat((7.0 + pulse * 16.0) * px), 1.5 * px, p.info.with_alpha(1.0 - pulse), 0.0, TAU, 0.0);
+            ctx.ring(
+                q,
+                Vec2::splat((7.0 + pulse * 16.0) * px),
+                1.5 * px,
+                p.info.with_alpha(1.0 - pulse),
+                0.0,
+                TAU,
+                0.0,
+            );
             let s = 26.0 * px;
             ctx.glow(q, s * 0.7, p.info.with_alpha(0.5), 1.6);
-            ctx.icon("marker_player", Rect::new(q.x - s * 0.5, q.y - s * 0.5, s, s), Color::WHITE);
+            ctx.icon(
+                "marker_player",
+                Rect::new(q.x - s * 0.5, q.y - s * 0.5, s, s),
+                Color::WHITE,
+            );
             if layers.2 {
-                label(ctx, "You", 11.0, 800, p.info, q + Vec2::new(0.0, s * 0.6 + 2.0 * px), Vec2::new(0.5, 0.0));
+                label(
+                    ctx,
+                    "You",
+                    11.0,
+                    800,
+                    p.info,
+                    q + Vec2::new(0.0, s * 0.6 + 2.0 * px),
+                    Vec2::new(0.5, 0.0),
+                );
             }
         }
     });
@@ -1301,15 +1684,38 @@ fn draw_surface(ctx: &mut DrawCtx, map: &MapData, p: &crate::theme::Palette, out
         let km_per_px = pl.radius_km * std::f64::consts::TAU / ww as f64;
         let target = km_per_px * 160.0 * px as f64;
         let mag = 10f64.powf(target.log10().floor());
-        let nice = [1.0, 2.0, 5.0, 10.0].into_iter().map(|m| m * mag).find(|v| *v >= target * 0.6).unwrap_or(mag * 10.0);
+        let nice = [1.0, 2.0, 5.0, 10.0]
+            .into_iter()
+            .map(|m| m * mag)
+            .find(|v| *v >= target * 0.6)
+            .unwrap_or(mag * 10.0);
         let len = (nice / km_per_px) as f32;
         let a = Vec2::new(r.x + 340.0 * px, r.y + r.h - 96.0 * px);
-        ctx.line(a, a + Vec2::new(len, 0.0), 3.0 * px, Color::hexa(0x00000080), 0.0);
+        ctx.line(
+            a,
+            a + Vec2::new(len, 0.0),
+            3.0 * px,
+            Color::hexa(0x00000080),
+            0.0,
+        );
         ctx.line(a, a + Vec2::new(len, 0.0), 1.5 * px, Color::WHITE, 0.0);
         for x in [0.0, len] {
-            ctx.line(a + Vec2::new(x, -5.0 * px), a + Vec2::new(x, 5.0 * px), 1.5 * px, Color::WHITE, 0.0);
+            ctx.line(
+                a + Vec2::new(x, -5.0 * px),
+                a + Vec2::new(x, 5.0 * px),
+                1.5 * px,
+                Color::WHITE,
+                0.0,
+            );
         }
-        ctx.text(&crate::hud::format_distance(nice * 1000.0), 11.0, 700, Color::WHITE, a + Vec2::new(len * 0.5, -8.0 * px), Vec2::new(0.5, 1.0));
+        ctx.text(
+            &crate::hud::format_distance(nice * 1000.0),
+            11.0,
+            700,
+            Color::WHITE,
+            a + Vec2::new(len * 0.5, -8.0 * px),
+            Vec2::new(0.5, 1.0),
+        );
     }
 }
 
@@ -1336,7 +1742,11 @@ fn info_card(world: &World, item: Option<&MapItem>) -> Vec<El> {
                 El::new()
                     .class("header_icon")
                     .with_style(|s| s.border_color(color.fade(0.6)))
-                    .child(El::icon(icon).with_style(|s| s.size(26.0, 26.0)).pick_ignore()),
+                    .child(
+                        El::icon(icon)
+                            .with_style(|s| s.size(26.0, 26.0))
+                            .pick_ignore(),
+                    ),
             )
             .child(
                 El::new()
@@ -1359,39 +1769,85 @@ fn info_card(world: &World, item: Option<&MapItem>) -> Vec<El> {
             };
             let (dist, bearing) = great_circle(map.player.lon, map.player.lat, poi.lon, poi.lat);
             let here = map.player.planet == pl.id;
-            out.push(head(poi.kind.icon(), &poi.name, &format!("{}  ·  {}", poi.kind.label(), pl.name), poi.kind.color()));
+            out.push(head(
+                poi.kind.icon(),
+                &poi.name,
+                &format!("{}  ·  {}", poi.kind.label(), pl.name),
+                poi.kind.color(),
+            ));
             out.push(desc(&poi.description));
             out.push(widgets::divider());
             if here {
-                out.push(stat("Distance", crate::hud::format_distance(dist * pl.radius_km * 1000.0)));
+                out.push(stat(
+                    "Distance",
+                    crate::hud::format_distance(dist * pl.radius_km * 1000.0),
+                ));
                 out.push(stat("Bearing", format!("{bearing:03.0}°")));
             }
-            out.push(stat("Coordinates", format!("{:.1}° {}, {:.1}° {}", poi.lat.abs(), if poi.lat >= 0.0 { "N" } else { "S" }, poi.lon.abs(), if poi.lon >= 0.0 { "E" } else { "W" })));
-            let is_wp = map.waypoint.as_ref().is_some_and(|w| w.planet == pl.id && (w.lon - poi.lon).abs() < 1e-6 && (w.lat - poi.lat).abs() < 1e-6);
+            out.push(stat(
+                "Coordinates",
+                format!(
+                    "{:.1}° {}, {:.1}° {}",
+                    poi.lat.abs(),
+                    if poi.lat >= 0.0 { "N" } else { "S" },
+                    poi.lon.abs(),
+                    if poi.lon >= 0.0 { "E" } else { "W" }
+                ),
+            ));
+            let is_wp = map.waypoint.as_ref().is_some_and(|w| {
+                w.planet == pl.id
+                    && (w.lon - poi.lon).abs() < 1e-6
+                    && (w.lat - poi.lat).abs() < 1e-6
+            });
             out.push(
                 El::new()
                     .class("row")
                     .with_style(|s| s.gap(8.0).margin([6.0, 0.0, 0.0, 0.0]))
                     .child(
-                        El::button(if is_wp { "Clear waypoint" } else { "Set waypoint" }, "map.waypoint")
-                            .id("map_waypoint")
-                            .class(if is_wp { "ghost" } else { "primary" })
-                            .with_style(|s| s.grow(1.0)),
+                        El::button(
+                            if is_wp {
+                                "Clear waypoint"
+                            } else {
+                                "Set waypoint"
+                            },
+                            "map.waypoint",
+                        )
+                        .id("map_waypoint")
+                        .class(if is_wp { "ghost" } else { "primary" })
+                        .with_style(|s| s.grow(1.0)),
                     )
-                    .child(El::button("Fast travel", format!("map.travel:{}", poi.id)).id("map_travel").with_style(|s| s.grow(1.0))),
+                    .child(
+                        El::button("Fast travel", format!("map.travel:{}", poi.id))
+                            .id("map_travel")
+                            .with_style(|s| s.grow(1.0)),
+                    ),
             );
         }
         Some(MapItem::Planet(id)) => {
             let Some((sys, pl)) = map.planet(id) else {
                 return out;
             };
-            out.push(head("planet", &pl.name, &format!("{}  ·  {} system", pl.kind.label(), sys.name), p.info));
+            out.push(head(
+                "planet",
+                &pl.name,
+                &format!("{}  ·  {} system", pl.kind.label(), sys.name),
+                p.info,
+            ));
             out.push(desc(&pl.description));
             out.push(widgets::divider());
-            out.push(stat("Radius", format!("{} km", crate::data::group_thousands(format!("{:.0}", pl.radius_km)))));
+            out.push(stat(
+                "Radius",
+                format!(
+                    "{} km",
+                    crate::data::group_thousands(format!("{:.0}", pl.radius_km))
+                ),
+            ));
             out.push(stat("Gravity", format!("{:.2} g", pl.gravity_g)));
             out.push(stat("Atmosphere", pl.atmosphere.clone()));
-            out.push(stat("Orbit", format!("{:.2} AU · {:.0} days", pl.orbit_au, pl.period_days)));
+            out.push(stat(
+                "Orbit",
+                format!("{:.2} AU · {:.0} days", pl.orbit_au, pl.period_days),
+            ));
             if pl.moons > 0 {
                 out.push(stat("Moons", pl.moons.to_string()));
             }
@@ -1406,8 +1862,17 @@ fn info_card(world: &World, item: Option<&MapItem>) -> Vec<El> {
                 El::new()
                     .class("row")
                     .with_style(|s| s.gap(8.0).margin([6.0, 0.0, 0.0, 0.0]))
-                    .child(El::button("View planet", format!("map.focus:planet:{}", pl.id)).id("map_focus").class("primary").with_style(|s| s.grow(1.0)))
-                    .child(El::button("Plot course", format!("map.travel:{}", pl.id)).id("map_travel").with_style(|s| s.grow(1.0))),
+                    .child(
+                        El::button("View planet", format!("map.focus:planet:{}", pl.id))
+                            .id("map_focus")
+                            .class("primary")
+                            .with_style(|s| s.grow(1.0)),
+                    )
+                    .child(
+                        El::button("Plot course", format!("map.travel:{}", pl.id))
+                            .id("map_travel")
+                            .with_style(|s| s.grow(1.0)),
+                    ),
             );
         }
         Some(MapItem::System(id)) => {
@@ -1415,20 +1880,44 @@ fn info_card(world: &World, item: Option<&MapItem>) -> Vec<El> {
                 return out;
             };
             if !sys.discovered {
-                out.push(head("ui_lock", "Uncharted system", "No survey data", Color::hex(0x8a94a8)));
+                out.push(head(
+                    "ui_lock",
+                    "Uncharted system",
+                    "No survey data",
+                    Color::hex(0x8a94a8),
+                ));
                 out.push(desc("Travel here or buy survey data to reveal it."));
-                out.push(El::button("Plot course", format!("map.travel:{}", sys.id)).id("map_travel").class("primary"));
+                out.push(
+                    El::button("Plot course", format!("map.travel:{}", sys.id))
+                        .id("map_travel")
+                        .class("primary"),
+                );
                 return out;
             }
-            out.push(head("star", &sys.name, &format!("{}-class star  ·  {} planets", sys.star_class, sys.planets.len()), sys.star_color));
+            out.push(head(
+                "star",
+                &sys.name,
+                &format!(
+                    "{}-class star  ·  {} planets",
+                    sys.star_class,
+                    sys.planets.len()
+                ),
+                sys.star_color,
+            ));
             out.push(desc(&sys.description));
             out.push(widgets::divider());
             out.push(
                 El::new()
                     .class("row")
                     .with_style(|s| s.gap(8.0))
-                    .child(El::new().with_style(|s| s.size(10.0, 10.0).radius(Corners::all(5.0)).bg(sys.faction_color)))
-                    .child(El::text(sys.faction.clone()).with_style(|s| s.font_size(14.0).font_weight(600).color(sys.faction_color))),
+                    .child(El::new().with_style(|s| {
+                        s.size(10.0, 10.0)
+                            .radius(Corners::all(5.0))
+                            .bg(sys.faction_color)
+                    }))
+                    .child(El::text(sys.faction.clone()).with_style(|s| {
+                        s.font_size(14.0).font_weight(600).color(sys.faction_color)
+                    })),
             );
             for pl in sys.planets.iter().take(6) {
                 out.push(
@@ -1437,22 +1926,55 @@ fn info_card(world: &World, item: Option<&MapItem>) -> Vec<El> {
                         .id(format!("map_planet:{}", pl.id))
                         .on_click(format!("map.select:planet:{}", pl.id))
                         .with_style(|s| s.padding([7.0, 10.0]))
-                        .child(El::icon("planet").with_style(|s| s.size(20.0, 20.0)).pick_ignore())
-                        .child(El::text(pl.name.clone()).with_style(|s| s.font_size(14.0).grow(1.0)).pick_ignore())
-                        .child(El::text(pl.kind.label()).class("caption").text_style(|t| t.nowrap()).pick_ignore()),
+                        .child(
+                            El::icon("planet")
+                                .with_style(|s| s.size(20.0, 20.0))
+                                .pick_ignore(),
+                        )
+                        .child(
+                            El::text(pl.name.clone())
+                                .with_style(|s| s.font_size(14.0).grow(1.0))
+                                .pick_ignore(),
+                        )
+                        .child(
+                            El::text(pl.kind.label())
+                                .class("caption")
+                                .text_style(|t| t.nowrap())
+                                .pick_ignore(),
+                        ),
                 );
             }
             out.push(
                 El::new()
                     .class("row")
                     .with_style(|s| s.gap(8.0).margin([6.0, 0.0, 0.0, 0.0]))
-                    .child(El::button("View system", format!("map.focus:system:{}", sys.id)).id("map_focus").class("primary").with_style(|s| s.grow(1.0)))
-                    .child(El::button("Plot course", format!("map.travel:{}", sys.id)).id("map_travel").with_style(|s| s.grow(1.0))),
+                    .child(
+                        El::button("View system", format!("map.focus:system:{}", sys.id))
+                            .id("map_focus")
+                            .class("primary")
+                            .with_style(|s| s.grow(1.0)),
+                    )
+                    .child(
+                        El::button("Plot course", format!("map.travel:{}", sys.id))
+                            .id("map_travel")
+                            .with_style(|s| s.grow(1.0)),
+                    ),
             );
         }
         None => {
-            let here = map.player_planet().map(|p| p.name.clone()).unwrap_or_default();
-            out.push(head("ui_galaxy", &map.galaxy.name, &format!("{} systems charted", map.systems.iter().filter(|s| s.discovered).count()), p.accent));
+            let here = map
+                .player_planet()
+                .map(|p| p.name.clone())
+                .unwrap_or_default();
+            out.push(head(
+                "ui_galaxy",
+                &map.galaxy.name,
+                &format!(
+                    "{} systems charted",
+                    map.systems.iter().filter(|s| s.discovered).count()
+                ),
+                p.accent,
+            ));
             out.push(desc(&format!(
                 "You are on {here}. Scroll to zoom from the surface out to the galaxy, drag to look around, click anything to learn more."
             )));
@@ -1468,7 +1990,9 @@ fn info_card(world: &World, item: Option<&MapItem>) -> Vec<El> {
                                 .class("col")
                                 .with_style(|s| s.gap(1.0))
                                 .child(El::text("WAYPOINT").class("label_caps"))
-                                .child(El::text(w.label.clone()).with_style(|s| s.font_size(15.0).font_weight(600).color(p.accent_light))),
+                                .child(El::text(w.label.clone()).with_style(|s| {
+                                    s.font_size(15.0).font_weight(600).color(p.accent_light)
+                                })),
                         ),
                 );
             }
@@ -1503,7 +2027,13 @@ fn build(world: &World, view: &MapView) -> El {
     let theme = world.resource::<Theme>();
     let p = &theme.palette;
     let level = view.level();
-    let layer_toggle = |label: &str, key: &str| widgets::toggle_row(label, &format!("map.layers.{key}"), &format!("map_layer_{key}"));
+    let layer_toggle = |label: &str, key: &str| {
+        widgets::toggle_row(
+            label,
+            &format!("map.layers.{key}"),
+            &format!("map_layer_{key}"),
+        )
+    };
     El::new()
         .class("screen")
         .child(
@@ -1524,18 +2054,27 @@ fn build(world: &World, view: &MapView) -> El {
                         .padding([24.0, 36.0, 40.0, 36.0])
                         .gap(24.0)
                         .align_items(Align::Center)
-                        .background(Fill::vertical(Color::hexa(0x03050ae0), Color::hexa(0x03050a00)))
+                        .background(Fill::vertical(
+                            Color::hexa(0x03050ae0),
+                            Color::hexa(0x03050a00),
+                        ))
                         .pick(Pick::Ignore)
                 })
                 .child(
                     El::new()
-                        .with_style(|s| s.grow(1.0).shrink(1.0))
+                        .class("col")
+                        .with_style(|s| s.grow(1.0).shrink(1.0).gap(0.0))
                         .child(widgets::header(Some("ui_galaxy"), "Star Map", "", false))
                         .child(
                             El::text(breadcrumb(world, view))
                                 .id("map_breadcrumb")
                                 .text_style(|t| t.nowrap())
-                                .with_style(|s| s.font_size(13.0).font_weight(600).color(p.info).margin([2.0, 0.0, 0.0, 58.0])),
+                                .with_style(|s| {
+                                    s.font_size(13.0)
+                                        .font_weight(600)
+                                        .color(p.info)
+                                        .margin([-12.0, 0.0, 0.0, 58.0])
+                                }),
                         ),
                 )
                 .child(widgets::tabs(&LEVELS, level, "map.level"))
@@ -1564,7 +2103,10 @@ fn build(world: &World, view: &MapView) -> El {
                     El::new()
                         .class("row")
                         .with_style(|s| s.gap(8.0).padding([2.0, 4.0, 6.0, 4.0]))
-                        .child(El::icon("ui_layers").with_style(|s| s.size(16.0, 16.0).color(p.text_dim)))
+                        .child(
+                            El::icon("ui_layers")
+                                .with_style(|s| s.size(16.0, 16.0).color(p.text_dim)),
+                        )
                         .child(El::text("LAYERS").class("label_caps")),
                 )
                 .child(layer_toggle("Places", "places"))
@@ -1580,7 +2122,7 @@ fn build(world: &World, view: &MapView) -> El {
                 .with_style(|s| {
                     s.position(Position::Absolute)
                         .left(36.0)
-                        .top(470.0)
+                        .top(500.0)
                         .column()
                         .padding(6.0)
                         .gap(4.0)
@@ -1592,7 +2134,11 @@ fn build(world: &World, view: &MapView) -> El {
                         .id("map_zoom_in")
                         .on_click("map.zoom:-0.5")
                         .tooltip("Zoom in", "Mouse wheel or right trigger")
-                        .child(El::icon("ui_plus").with_style(|s| s.size(16.0, 16.0)).pick_ignore()),
+                        .child(
+                            El::icon("ui_plus")
+                                .with_style(|s| s.size(16.0, 16.0))
+                                .pick_ignore(),
+                        ),
                 )
                 .child(
                     El::new()
@@ -1600,7 +2146,11 @@ fn build(world: &World, view: &MapView) -> El {
                         .id("map_zoom_out")
                         .on_click("map.zoom:0.5")
                         .tooltip("Zoom out", "Mouse wheel or left trigger")
-                        .child(El::icon("ui_minus").with_style(|s| s.size(16.0, 16.0)).pick_ignore()),
+                        .child(
+                            El::icon("ui_minus")
+                                .with_style(|s| s.size(16.0, 16.0))
+                                .pick_ignore(),
+                        ),
                 ),
         )
         // Info card.
@@ -1644,19 +2194,37 @@ fn build(world: &World, view: &MapView) -> El {
 pub fn build_screen(world: &mut World, args: &Value) -> Result<Entity, String> {
     let map = world.get_resource::<MapData>().cloned().unwrap_or_default();
     if map.systems.is_empty() {
-        return Err("There is no map yet. Load one with map.data, or add systems with map.add_system.".into());
+        return Err(
+            "There is no map yet. Load one with map.data, or add systems with map.add_system."
+                .into(),
+        );
     }
     if let Some(mut d) = world.get_resource_mut::<UiData>()
         && d.get("map.layers").is_none()
     {
-        d.set("map.layers", json!({"places": true, "lanes": true, "labels": true, "grid": true, "clouds": true}));
+        d.set(
+            "map.layers",
+            json!({"places": true, "lanes": true, "labels": true, "grid": true, "clouds": true}),
+        );
     }
-    let zoom = args.get("zoom").and_then(Value::as_f64).unwrap_or(1.4).clamp(0.0, 3.999) as f32;
+    let zoom = args
+        .get("zoom")
+        .and_then(Value::as_f64)
+        .unwrap_or(1.4)
+        .clamp(0.0, 3.999) as f32;
     let mut view = MapView {
         zoom,
         target: zoom,
-        system: args.get("system").and_then(Value::as_str).unwrap_or(&map.player.system).to_string(),
-        planet: args.get("planet").and_then(Value::as_str).unwrap_or(&map.player.planet).to_string(),
+        system: args
+            .get("system")
+            .and_then(Value::as_str)
+            .unwrap_or(&map.player.system)
+            .to_string(),
+        planet: args
+            .get("planet")
+            .and_then(Value::as_str)
+            .unwrap_or(&map.player.planet)
+            .to_string(),
         lon: map.player.lon,
         lat: map.player.lat,
         // Face the player's side of the planet.
@@ -1745,7 +2313,7 @@ fn focus_on(view: &mut MapView, map: &MapData, item: &MapItem) {
 }
 
 /// Input, easing and the info card for the open map.
-pub fn map_system(world: &mut World) {
+pub fn map_system(world: &mut World, mut seen: Local<MessageCursor<UiEvent>>) {
     let Some((root, mut ms)) = open_map(world) else {
         return;
     };
@@ -1757,12 +2325,11 @@ pub fn map_system(world: &mut World) {
     };
     let map = world.get_resource::<MapData>().cloned().unwrap_or_default();
     let dt = world.resource::<Time>().real_delta_secs().min(0.1);
-    let events: Vec<UiEvent> = world
-        .resource::<bevy_ecs::message::Messages<UiEvent>>()
-        .iter_current_update_messages()
-        .cloned()
-        .collect();
-    let vp = world.get_resource::<crate::layout::UiViewport>().copied().unwrap_or_default();
+    let events: Vec<UiEvent> = crate::input::read_events(world, &mut seen);
+    let vp = world
+        .get_resource::<crate::layout::UiViewport>()
+        .copied()
+        .unwrap_or_default();
     let is_top = screens::open_screens(world)
         .into_iter()
         .find(|(k, ..)| !matches!(k.as_str(), "toasts" | "tooltip" | "drag"))
@@ -1775,10 +2342,16 @@ pub fn map_system(world: &mut World) {
                 if entity.is_some_and(|e| !screens::is_descendant(world, e, root)) {
                     continue;
                 }
-                if let Some(l) = action.strip_prefix("map.level:").and_then(|s| s.parse::<usize>().ok()) {
+                if let Some(l) = action
+                    .strip_prefix("map.level:")
+                    .and_then(|s| s.parse::<usize>().ok())
+                {
                     view.target = [0.45, 1.35, 2.55, 3.6][l.min(3)];
                     view.idle = 0.0;
-                } else if let Some(d) = action.strip_prefix("map.zoom:").and_then(|s| s.parse::<f32>().ok()) {
+                } else if let Some(d) = action
+                    .strip_prefix("map.zoom:")
+                    .and_then(|s| s.parse::<f32>().ok())
+                {
                     view.target = (view.target + d).clamp(0.0, 3.999);
                     view.idle = 0.0;
                 } else if let Some(it) = action.strip_prefix("map.select:").and_then(parse_item) {
@@ -1798,7 +2371,14 @@ pub fn map_system(world: &mut World) {
                         .or_else(|| map.planet(id).map(|(_, p)| p.name.clone()))
                         .or_else(|| map.system(id).map(|s| s.name.clone()))
                         .unwrap_or_else(|| id.to_string());
-                    toast::notify(world, ToastKind::Info, "ui_target", "Course plotted", &format!("Travel to [b]{name}[/b]"), 3.0);
+                    toast::notify(
+                        world,
+                        ToastKind::Info,
+                        "ui_target",
+                        "Course plotted",
+                        &format!("Travel to [b]{name}[/b]"),
+                        3.0,
+                    );
                 }
             }
             UiEvent::Tab { screen, delta } if screen == "map" => {
@@ -1829,7 +2409,9 @@ pub fn map_system(world: &mut World) {
             view.target = (view.target - mouse.scroll.y * 0.2).clamp(0.0, 3.999);
             view.idle = 0.0;
         }
-        let left_down = buttons.as_ref().is_some_and(|b| b.pressed(MouseButton::Left));
+        let left_down = buttons
+            .as_ref()
+            .is_some_and(|b| b.pressed(MouseButton::Left));
         if let Some(b) = &buttons {
             if b.just_pressed(MouseButton::Left) && over_canvas {
                 view.dragging = true;
@@ -1840,7 +2422,10 @@ pub fn map_system(world: &mut World) {
             }
             if b.just_released(MouseButton::Left) && view.dragging {
                 view.dragging = false;
-                let moved = mouse.position.map(|p| (p - view.drag_from).length()).unwrap_or(0.0);
+                let moved = mouse
+                    .position
+                    .map(|p| (p - view.drag_from).length())
+                    .unwrap_or(0.0);
                 if moved < 6.0 * vp.scale && over_canvas {
                     let picked = view.hovered.clone();
                     if picked != view.selected {
@@ -1856,7 +2441,8 @@ pub fn map_system(world: &mut World) {
             if rx.abs() > 0.15 || ry.abs() > 0.15 {
                 pan += Vec2::new(rx, -ry) * 900.0 * dt * vp.scale;
             }
-            let zoom = pads.any_axis(GamepadAxis::LeftTrigger) - pads.any_axis(GamepadAxis::RightTrigger);
+            let zoom =
+                pads.any_axis(GamepadAxis::LeftTrigger) - pads.any_axis(GamepadAxis::RightTrigger);
             if zoom.abs() > 0.1 {
                 view.target = (view.target + zoom * dt * 1.5).clamp(0.0, 3.999);
                 view.idle = 0.0;
@@ -1875,7 +2461,9 @@ pub fn map_system(world: &mut World) {
                 view.idle = 0.0;
             }
         }
-        if pad_buttons.as_ref().is_some_and(|b| b.just_pressed(GamepadButton::South))
+        if pad_buttons
+            .as_ref()
+            .is_some_and(|b| b.just_pressed(GamepadButton::South))
             && focused.is_none()
             && view.hovered.is_some()
         {
@@ -1902,7 +2490,7 @@ pub fn map_system(world: &mut World) {
                     .map(|s| s.planets.iter().map(|p| p.orbit_au).fold(1.0f32, f32::max))
                     .unwrap_or(1.0)
                     * 1.08;
-                let au = h * 0.43 / outer * 2f32.powf((1.0 - u) * 5.0);
+                let au = h * 0.43 / outer * system_zoom(u);
                 view.system_pan += Vec2::new(pan.x, pan.y / 0.5) / au;
                 view.system_pan = view.system_pan.clamp_length_max(outer * 1.2);
             }
@@ -1913,7 +2501,8 @@ pub fn map_system(world: &mut World) {
             }
             _ => {
                 let ww = (vp.width * 0.86).min(h * 1.7) * 2f32.powf((1.0 - u) * 4.0);
-                view.lon = (view.lon + (pan.x / ww * 360.0) as f64 + 540.0).rem_euclid(360.0) - 180.0;
+                view.lon =
+                    (view.lon + (pan.x / ww * 360.0) as f64 + 540.0).rem_euclid(360.0) - 180.0;
                 view.lat = (view.lat - (pan.y / ww * 360.0) as f64).clamp(-85.0, 85.0);
             }
         }
@@ -1982,14 +2571,23 @@ fn toggle_waypoint(world: &mut World, poi_id: &str) {
     let Some((pl, poi)) = map.poi(poi_id).map(|(p, q)| (p.clone(), q.clone())) else {
         return;
     };
-    let system = map.planet(&pl.id).map(|(s, _)| s.id.clone()).unwrap_or_default();
-    let same = map
-        .waypoint
-        .as_ref()
-        .is_some_and(|w| w.planet == pl.id && (w.lon - poi.lon).abs() < 1e-6 && (w.lat - poi.lat).abs() < 1e-6);
+    let system = map
+        .planet(&pl.id)
+        .map(|(s, _)| s.id.clone())
+        .unwrap_or_default();
+    let same = map.waypoint.as_ref().is_some_and(|w| {
+        w.planet == pl.id && (w.lon - poi.lon).abs() < 1e-6 && (w.lat - poi.lat).abs() < 1e-6
+    });
     if same {
         map.waypoint = None;
-        toast::notify(world, ToastKind::Info, "marker_quest", "Waypoint cleared", "", 2.0);
+        toast::notify(
+            world,
+            ToastKind::Info,
+            "marker_quest",
+            "Waypoint cleared",
+            "",
+            2.0,
+        );
     } else {
         map.waypoint = Some(Waypoint {
             system,
@@ -1998,7 +2596,14 @@ fn toggle_waypoint(world: &mut World, poi_id: &str) {
             lat: poi.lat,
             label: poi.name.clone(),
         });
-        toast::notify(world, ToastKind::Good, "marker_quest", "Waypoint set", &poi.name, 2.4);
+        toast::notify(
+            world,
+            ToastKind::Good,
+            "marker_quest",
+            "Waypoint set",
+            &poi.name,
+            2.4,
+        );
     }
 }
 

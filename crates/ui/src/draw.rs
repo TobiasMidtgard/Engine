@@ -273,21 +273,23 @@ impl UiAtlases {
         if let Some(s) = self.icons.get(&key) {
             return *s;
         }
-        let slot = icons.rasterize(name, w, h, flip).and_then(|(pw, ph, pixels)| {
-            let Some((x, y)) = self.color.alloc(pw, ph) else {
-                self.overflowed = true;
-                return None;
-            };
-            self.color.write(x, y, pw, ph, &pixels);
-            Some(AtlasSlot {
-                page: 1,
-                uv: self.color.uv(x, y, pw, ph),
-                left: (w as f32 - pw as f32) * 0.5,
-                top: (h as f32 - ph as f32) * 0.5,
-                w: pw as f32,
-                h: ph as f32,
-            })
-        });
+        let slot = icons
+            .rasterize(name, w, h, flip)
+            .and_then(|(pw, ph, pixels)| {
+                let Some((x, y)) = self.color.alloc(pw, ph) else {
+                    self.overflowed = true;
+                    return None;
+                };
+                self.color.write(x, y, pw, ph, &pixels);
+                Some(AtlasSlot {
+                    page: 1,
+                    uv: self.color.uv(x, y, pw, ph),
+                    left: (w as f32 - pw as f32) * 0.5,
+                    top: (h as f32 - ph as f32) * 0.5,
+                    w: pw as f32,
+                    h: ph as f32,
+                })
+            });
         if !self.overflowed {
             self.icons.insert(key, slot);
         }
@@ -356,7 +358,12 @@ impl DrawCtx<'_> {
 
     /// A soft glow of `radius` px around `center`; `falloff` > 1 makes the core tighter.
     pub fn glow(&mut self, center: Vec2, radius: f32, color: Color, falloff: f32) {
-        let r = Rect::new(center.x - radius, center.y - radius, radius * 2.0, radius * 2.0);
+        let r = Rect::new(
+            center.x - radius,
+            center.y - radius,
+            radius * 2.0,
+            radius * 2.0,
+        );
         if !self.clip_ok(&r) || color.a <= 0.0 {
             return;
         }
@@ -406,7 +413,12 @@ impl DrawCtx<'_> {
         let c = (a + b) * 0.5;
         let w = width + 2.0;
         let r = Rect::new(c.x - len * 0.5 - 1.0, c.y - w * 0.5, len + 2.0, w);
-        let bounds = Rect::new(a.x.min(b.x) - w, a.y.min(b.y) - w, d.x.abs() + 2.0 * w, d.y.abs() + 2.0 * w);
+        let bounds = Rect::new(
+            a.x.min(b.x) - w,
+            a.y.min(b.y) - w,
+            d.x.abs() + 2.0 * w,
+            d.y.abs() + 2.0 * w,
+        );
         if !self.clip_ok(&bounds) {
             return;
         }
@@ -433,9 +445,19 @@ impl DrawCtx<'_> {
         let (w, h, k) = raster_size(r.w, r.h);
         if let Some(slot) = self.atlases.icon(self.icons, name, w, h, false) {
             let q = if k == 1.0 && angle == 0.0 {
-                Rect::new(r.x.round() + slot.left, r.y.round() + slot.top, slot.w, slot.h)
+                Rect::new(
+                    r.x.round() + slot.left,
+                    r.y.round() + slot.top,
+                    slot.w,
+                    slot.h,
+                )
             } else {
-                Rect::new(r.x + slot.left * k, r.y + slot.top * k, slot.w * k, slot.h * k)
+                Rect::new(
+                    r.x + slot.left * k,
+                    r.y + slot.top * k,
+                    slot.w * k,
+                    slot.h * k,
+                )
             };
             let mut i = UiInstance::new(kind::IMAGE, q, self.clip);
             i.uv = slot.uv;
@@ -502,7 +524,14 @@ impl DrawCtx<'_> {
     }
 
     /// A box with any fill, per-corner radii and a border.
-    pub fn rect_fill(&mut self, r: Rect, fill: Fill, radius: [f32; 4], border: f32, border_color: Color) {
+    pub fn rect_fill(
+        &mut self,
+        r: Rect,
+        fill: Fill,
+        radius: [f32; 4],
+        border: f32,
+        border_color: Color,
+    ) {
         if !self.clip_ok(&r) {
             return;
         }
@@ -516,7 +545,11 @@ impl DrawCtx<'_> {
                 i.color = c.to_array();
                 i.color2 = c.to_array();
             }
-            Fill::Linear { from, to, angle_deg } => {
+            Fill::Linear {
+                from,
+                to,
+                angle_deg,
+            } => {
                 i.color = from.to_array();
                 i.color2 = to.to_array();
                 i.params[2] = angle_deg.to_radians();
@@ -669,7 +702,9 @@ pub fn draw_buffer(
     let origin = Vec2::new(origin.x.round(), origin.y.round());
     let start = list.instances.len();
     for run in buffer.layout_runs() {
-        if origin.y + run.line_top > clip.y + clip.h || origin.y + run.line_top + run.line_height < clip.y {
+        if origin.y + run.line_top > clip.y + clip.h
+            || origin.y + run.line_top + run.line_height < clip.y
+        {
             continue;
         }
         let line_base = reveal.and_then(|(_, lines)| lines.get(run.line_i).copied());
@@ -687,10 +722,19 @@ pub fn draw_buffer(
             let Some(slot) = atlases.glyph(system, swash, p.cache_key) else {
                 continue;
             };
-            let r = Rect::new(p.x as f32 + slot.left, p.y as f32 - slot.top, slot.w, slot.h);
+            let r = Rect::new(
+                p.x as f32 + slot.left,
+                p.y as f32 - slot.top,
+                slot.w,
+                slot.h,
+            );
             let color = g.color_opt.map(from_cosmic).unwrap_or(default_color);
             let mut i = UiInstance::new(
-                if slot.page == 0 { kind::GLYPH } else { kind::IMAGE },
+                if slot.page == 0 {
+                    kind::GLYPH
+                } else {
+                    kind::IMAGE
+                },
                 r,
                 clip,
             );
@@ -747,7 +791,14 @@ pub fn build_draw_list(world: &mut World) {
     let texts = world.remove_resource::<TextLayouts>().unwrap_or_default();
     for attempt in 0..2 {
         list.clear();
-        build(world, &mut list, &mut fonts, &mut atlases, &mut icons, &texts);
+        build(
+            world,
+            &mut list,
+            &mut fonts,
+            &mut atlases,
+            &mut icons,
+            &texts,
+        );
         if !atlases.overflowed || attempt == 1 {
             break;
         }
@@ -778,7 +829,10 @@ fn build(
         .resource::<engine_core::prelude::Time>()
         .real_elapsed_secs_f64() as f32;
     let order = world.resource::<UiDrawOrder>().nodes.clone();
-    let painters = world.get_resource::<Painters>().cloned().unwrap_or_default();
+    let painters = world
+        .get_resource::<Painters>()
+        .cloned()
+        .unwrap_or_default();
     for e in order {
         let Some(c) = world.get::<ComputedNode>(e) else {
             continue;
@@ -827,7 +881,11 @@ fn build(
                     i.color = col.to_array();
                     i.color2 = col.to_array();
                 }
-                Fill::Linear { from, to, angle_deg } => {
+                Fill::Linear {
+                    from,
+                    to,
+                    angle_deg,
+                } => {
                     i.color = from.to_array();
                     i.color2 = to.to_array();
                     i.params[2] = angle_deg.to_radians();

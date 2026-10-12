@@ -107,7 +107,11 @@ impl<'de> Deserialize<'de> for Val {
                     .trim()
                     .parse()
                     .map(Val::Px)
-                    .map_err(|_| E::custom(format!("\"{v}\" is not a length: use 12, \"50%\" or \"auto\"")))
+                    .map_err(|_| {
+                        E::custom(format!(
+                            "\"{v}\" is not a length: use 12, \"50%\" or \"auto\""
+                        ))
+                    })
             }
         }
         d.deserialize_any(V)
@@ -492,8 +496,24 @@ impl Fill {
         match (&a, other) {
             (None, None) => true,
             (Solid(x), Solid(y)) => c(x, y),
-            (Linear { from: a0, to: a1, .. }, Linear { from: b0, to: b1, .. }) => c(a0, b0) && c(a1, b1),
-            (Radial { inner: a0, outer: a1 }, Radial { inner: b0, outer: b1 }) => c(a0, b0) && c(a1, b1),
+            (
+                Linear {
+                    from: a0, to: a1, ..
+                },
+                Linear {
+                    from: b0, to: b1, ..
+                },
+            ) => c(a0, b0) && c(a1, b1),
+            (
+                Radial {
+                    inner: a0,
+                    outer: a1,
+                },
+                Radial {
+                    inner: b0,
+                    outer: b1,
+                },
+            ) => c(a0, b0) && c(a1, b1),
             _ => !self.is_visible() && !other.is_visible(),
         }
     }
@@ -521,7 +541,16 @@ impl Fill {
                 to: a1.lerp(*b1, t),
                 angle_deg: aa + (ba - aa) * t,
             },
-            (Radial { inner: a0, outer: a1 }, Radial { inner: b0, outer: b1 }) => Radial {
+            (
+                Radial {
+                    inner: a0,
+                    outer: a1,
+                },
+                Radial {
+                    inner: b0,
+                    outer: b1,
+                },
+            ) => Radial {
                 inner: a0.lerp(*b0, t),
                 outer: a1.lerp(*b1, t),
             },
@@ -994,9 +1023,10 @@ mod tests {
         assert_eq!(p.margin.unwrap().top, Val::Px(4.0));
         assert_eq!(p.direction, Some(Direction::Column));
 
-        let f: Fill =
-            serde_json::from_str(r##"{"linear": {"from": "#000", "to": "#fff", "angle_deg": 90}}"##)
-                .unwrap();
+        let f: Fill = serde_json::from_str(
+            r##"{"linear": {"from": "#000", "to": "#fff", "angle_deg": 90}}"##,
+        )
+        .unwrap();
         assert!(matches!(f, Fill::Linear { angle_deg, .. } if angle_deg == 90.0));
         let back: StylePatch = serde_json::from_value(serde_json::to_value(&p).unwrap()).unwrap();
         assert_eq!(back, p);

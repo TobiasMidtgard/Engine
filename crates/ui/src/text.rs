@@ -216,13 +216,11 @@ impl TextSpec {
     /// `shape_until_scroll`.
     pub fn apply(&self, buffer: &mut Buffer) {
         buffer.set_metrics(self.metrics());
-        buffer.set_wrap(
-            if self.wrap {
-                Wrap::WordOrGlyph
-            } else {
-                Wrap::None
-            },
-        );
+        buffer.set_wrap(if self.wrap {
+            Wrap::WordOrGlyph
+        } else {
+            Wrap::None
+        });
         let align = Some(match self.align {
             TextAlign::Left => cosmic_text::Align::Left,
             TextAlign::Center => cosmic_text::Align::Center,
@@ -326,7 +324,10 @@ pub fn parse_markup(src: &str) -> Vec<(String, SpanStyle)> {
         let tag = &rest[1..end];
         let lower = tag.to_ascii_lowercase();
         let (name, value) = match lower.split_once('=') {
-            Some((n, _)) => (n.trim().to_string(), Some(tag[n.len() + 1..].trim().to_string())),
+            Some((n, _)) => (
+                n.trim().to_string(),
+                Some(tag[n.len() + 1..].trim().to_string()),
+            ),
             None => (lower.trim().to_string(), None),
         };
         let mut handled = true;
@@ -460,7 +461,11 @@ impl TextEntry {
 
     /// Size for an available width, physical px.
     pub fn measure(&mut self, system: &mut FontSystem, width: Option<f32>) -> [f32; 2] {
-        let width = if self.wrap { width.map(|w| w.max(1.0)) } else { None };
+        let width = if self.wrap {
+            width.map(|w| w.max(1.0))
+        } else {
+            None
+        };
         let key = width.map(f32::to_bits);
         if let Some((_, s)) = self.measured.iter().find(|(k, _)| *k == key) {
             return *s;

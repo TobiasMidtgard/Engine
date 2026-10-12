@@ -8,7 +8,10 @@ use resvg::{tiny_skia, usvg};
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    let dir = args.get(1).map(String::as_str).unwrap_or("crates/ui/assets/icons");
+    let dir = args
+        .get(1)
+        .map(String::as_str)
+        .unwrap_or("crates/ui/assets/icons");
     let out = args.get(2).map(String::as_str).unwrap_or("sheet.png");
     let cell: u32 = args.get(3).and_then(|v| v.parse().ok()).unwrap_or(128);
     let bg = args

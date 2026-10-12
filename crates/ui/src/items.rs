@@ -11,7 +11,9 @@ use bevy_ecs::prelude::*;
 use serde::{Deserialize, Serialize};
 
 /// Broad item category (inventory and shop tabs).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Default, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Default, Serialize, Deserialize,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum ItemCategory {
     Weapon,
@@ -216,52 +218,696 @@ impl Default for ItemDatabase {
             items: BTreeMap::new(),
         };
         let list = [
-            ("sword", item("Ranger's Sword", "sword", 1, Weapon, 120, 1, Some(MainHand), &[("damage", 24.0), ("speed", 1.1)], 3.2, "A well-balanced blade with a worn leather grip.")),
-            ("greatsword", item("Sunforged Greatsword", "greatsword", 3, Weapon, 940, 1, Some(MainHand), &[("damage", 58.0), ("speed", 0.8)], 7.5, "Still warm from the heart of a dying star.")),
-            ("dagger", item("Whisper Dagger", "dagger", 2, Weapon, 310, 1, Some(MainHand), &[("damage", 16.0), ("speed", 1.6), ("crit", 12.0)], 1.1, "Strikes before the target hears it.")),
-            ("axe", item("Woodsman's Axe", "axe", 0, Weapon, 60, 1, Some(MainHand), &[("damage", 20.0), ("speed", 0.9)], 3.8, "Fells trees and the occasional bandit.")),
-            ("hammer", item("Quake Hammer", "hammer", 2, Weapon, 420, 1, Some(MainHand), &[("damage", 42.0), ("speed", 0.7)], 9.0, "Each blow sends tremors through the ground.")),
-            ("bow", item("Hunter's Longbow", "bow", 1, Weapon, 180, 1, Some(MainHand), &[("damage", 28.0), ("range", 60.0)], 1.9, "Yew and sinew, strung tight.")),
-            ("staff", item("Staff of the Tides", "staff", 3, Weapon, 780, 1, Some(MainHand), &[("damage", 30.0), ("mana", 40.0)], 2.4, "Ripples with the pull of distant moons.")),
-            ("pistol", item("Ion Pistol", "pistol", 2, Weapon, 520, 1, Some(MainHand), &[("damage", 34.0), ("range", 35.0)], 1.4, "Standard issue for frontier marshals.")),
-            ("rifle", item("Longshot Rail Rifle", "rifle", 4, Weapon, 2400, 1, Some(MainHand), &[("damage", 96.0), ("range", 400.0), ("speed", 0.5)], 6.0, "Accelerates a tungsten slug to a tenth of light speed. Mind the recoil.")),
-            ("shield", item("Bulwark Shield", "shield", 1, Armor, 150, 1, Some(OffHand), &[("armor", 18.0)], 5.5, "Dented, but never broken.")),
-            ("shield_small", item("Buckler", "shield_small", 0, Armor, 45, 1, Some(OffHand), &[("armor", 7.0)], 2.0, "Light enough to parry with.")),
-            ("helmet", item("Pathfinder Helm", "helmet", 1, Armor, 95, 1, Some(Head), &[("armor", 9.0)], 1.8, "A visor tuned to three suns.")),
-            ("chest_armor", item("Scaled Cuirass", "chest_armor", 2, Armor, 380, 1, Some(Chest), &[("armor", 26.0)], 9.5, "Overlapping plates of drake scale.")),
-            ("gloves", item("Grip Gloves", "gloves", 0, Armor, 30, 1, Some(Hands), &[("armor", 3.0)], 0.4, "Never drop your tools again.")),
-            ("boots", item("Strider Boots", "boots", 2, Armor, 260, 1, Some(Feet), &[("armor", 6.0), ("speed", 1.08)], 1.2, "Light as air. You'll outrun your own echo.")),
-            ("cloak", item("Nightveil Cloak", "cloak", 3, Armor, 650, 1, Some(Back), &[("armor", 8.0), ("stealth", 25.0)], 0.9, "Woven from the dark between stars.")),
-            ("ring", item("Ring of Embers", "ring", 3, Armor, 820, 1, Some(Ring), &[("fire", 15.0)], 0.05, "A tiny flame dances inside the stone.")),
-            ("amulet", item("Navigator's Amulet", "amulet", 4, Armor, 3100, 1, Some(Amulet), &[("luck", 20.0), ("mana", 25.0)], 0.1, "Points, always, toward home.")),
-            ("potion_health", item("Health Potion", "potion_health", 0, Consumable, 25, 10, None, &[("heal", 40.0)], 0.3, "Restores 40 health over 3 seconds.")),
-            ("potion_mana", item("Mana Draught", "potion_mana", 1, Consumable, 40, 10, None, &[("mana", 50.0)], 0.3, "Tastes of starlight and copper.")),
-            ("potion_stamina", item("Stamina Tonic", "potion_stamina", 0, Consumable, 20, 10, None, &[("stamina", 60.0)], 0.3, "For when the legs say no.")),
-            ("elixir", item("Elixir of Ages", "elixir", 4, Consumable, 1800, 3, None, &[("heal", 100.0), ("mana", 100.0)], 0.2, "One sip, and time forgets you for a while.")),
-            ("medkit", item("Field Medkit", "medkit", 1, Consumable, 75, 5, None, &[("heal", 80.0)], 1.0, "Bandages, stims and a stern note from the medic.")),
-            ("bread", item("Hearth Bread", "bread", 0, Consumable, 4, 20, None, &[("heal", 8.0)], 0.2, "Still warm. Someone's grandmother made this.")),
-            ("meat", item("Grilled Meat", "meat", 0, Consumable, 9, 20, None, &[("heal", 15.0)], 0.4, "Don't ask what it was.")),
-            ("fish", item("River Trout", "fish", 0, Consumable, 6, 20, None, &[("heal", 10.0)], 0.5, "Caught this morning.")),
-            ("herb", item("Silverleaf", "herb", 0, Material, 3, 50, None, &[], 0.05, "A common herb used in potions.")),
-            ("mushroom_glow", item("Glowcap", "mushroom_glow", 2, Material, 35, 50, None, &[], 0.05, "Glows faintly in the dark. Alchemists love it.")),
-            ("crystal_glow", item("Resonant Crystal", "crystal_glow", 3, Material, 220, 20, None, &[], 0.3, "Hums when held near a ley line.")),
-            ("ore_iron", item("Iron Ore", "ore_iron", 0, Material, 5, 50, None, &[], 1.0, "Rough and heavy.")),
-            ("ore_gold", item("Gold Ore", "ore_gold", 2, Material, 60, 50, None, &[], 1.2, "Worth its weight, almost.")),
-            ("gem_ruby", item("Ruby", "gem_ruby", 2, Material, 150, 20, None, &[], 0.02, "Deep red, flawless.")),
-            ("gem_sapphire", item("Sapphire", "gem_sapphire", 2, Material, 160, 20, None, &[], 0.02, "Blue as an ice moon's sky.")),
-            ("gem_emerald", item("Emerald", "gem_emerald", 3, Material, 240, 20, None, &[], 0.02, "Green fire caught in stone.")),
-            ("wood_log", item("Oak Log", "wood_log", 0, Material, 2, 50, None, &[], 2.0, "Good for building and burning.")),
-            ("circuit", item("Quantum Circuit", "circuit", 3, Material, 480, 20, None, &[], 0.1, "Exists in two states until you look at the price.")),
-            ("fuel_cell", item("Fusion Fuel Cell", "fuel_cell", 2, Gadget, 300, 5, None, &[("fuel", 25.0)], 2.5, "Powers a ship's drive for one jump.")),
-            ("grenade", item("Pulse Grenade", "grenade", 1, Gadget, 90, 10, None, &[("damage", 70.0)], 0.6, "Pull, throw, count to three. Or two.")),
-            ("lockpick", item("Lockpick Set", "lockpick", 0, Gadget, 15, 10, None, &[], 0.1, "Every lock is a puzzle.")),
-            ("torch", item("Torch", "torch", 0, Gadget, 3, 10, None, &[], 0.6, "Lights the way for an hour.")),
-            ("rope", item("Climbing Rope", "rope", 0, Gadget, 12, 5, None, &[], 1.5, "Twenty meters of braided fibre.")),
-            ("compass", item("Star Compass", "compass", 2, Gadget, 210, 1, None, &[], 0.3, "Points to the nearest jump gate.")),
-            ("key", item("Vault Key", "key", 3, Quest, 0, 1, None, &[], 0.1, "Opens the vault beneath the old observatory.")),
-            ("map_scroll", item("Old Star Chart", "map_scroll", 2, Quest, 0, 1, None, &[], 0.1, "Shows a system that isn't on any modern map.")),
-            ("scroll", item("Sealed Letter", "scroll", 1, Quest, 0, 1, None, &[], 0.05, "Addressed to the merchant at Hollow Reach.")),
-            ("spellbook", item("Tome of Gravity", "spellbook", 4, Quest, 0, 1, None, &[], 1.5, "Its pages turn themselves toward the nearest planet.")),
+            (
+                "sword",
+                item(
+                    "Ranger's Sword",
+                    "sword",
+                    1,
+                    Weapon,
+                    120,
+                    1,
+                    Some(MainHand),
+                    &[("damage", 24.0), ("speed", 1.1)],
+                    3.2,
+                    "A well-balanced blade with a worn leather grip.",
+                ),
+            ),
+            (
+                "greatsword",
+                item(
+                    "Sunforged Greatsword",
+                    "greatsword",
+                    3,
+                    Weapon,
+                    940,
+                    1,
+                    Some(MainHand),
+                    &[("damage", 58.0), ("speed", 0.8)],
+                    7.5,
+                    "Still warm from the heart of a dying star.",
+                ),
+            ),
+            (
+                "dagger",
+                item(
+                    "Whisper Dagger",
+                    "dagger",
+                    2,
+                    Weapon,
+                    310,
+                    1,
+                    Some(MainHand),
+                    &[("damage", 16.0), ("speed", 1.6), ("crit", 12.0)],
+                    1.1,
+                    "Strikes before the target hears it.",
+                ),
+            ),
+            (
+                "axe",
+                item(
+                    "Woodsman's Axe",
+                    "axe",
+                    0,
+                    Weapon,
+                    60,
+                    1,
+                    Some(MainHand),
+                    &[("damage", 20.0), ("speed", 0.9)],
+                    3.8,
+                    "Fells trees and the occasional bandit.",
+                ),
+            ),
+            (
+                "hammer",
+                item(
+                    "Quake Hammer",
+                    "hammer",
+                    2,
+                    Weapon,
+                    420,
+                    1,
+                    Some(MainHand),
+                    &[("damage", 42.0), ("speed", 0.7)],
+                    9.0,
+                    "Each blow sends tremors through the ground.",
+                ),
+            ),
+            (
+                "bow",
+                item(
+                    "Hunter's Longbow",
+                    "bow",
+                    1,
+                    Weapon,
+                    180,
+                    1,
+                    Some(MainHand),
+                    &[("damage", 28.0), ("range", 60.0)],
+                    1.9,
+                    "Yew and sinew, strung tight.",
+                ),
+            ),
+            (
+                "staff",
+                item(
+                    "Staff of the Tides",
+                    "staff",
+                    3,
+                    Weapon,
+                    780,
+                    1,
+                    Some(MainHand),
+                    &[("damage", 30.0), ("mana", 40.0)],
+                    2.4,
+                    "Ripples with the pull of distant moons.",
+                ),
+            ),
+            (
+                "pistol",
+                item(
+                    "Ion Pistol",
+                    "pistol",
+                    2,
+                    Weapon,
+                    520,
+                    1,
+                    Some(MainHand),
+                    &[("damage", 34.0), ("range", 35.0)],
+                    1.4,
+                    "Standard issue for frontier marshals.",
+                ),
+            ),
+            (
+                "rifle",
+                item(
+                    "Longshot Rail Rifle",
+                    "rifle",
+                    4,
+                    Weapon,
+                    2400,
+                    1,
+                    Some(MainHand),
+                    &[("damage", 96.0), ("range", 400.0), ("speed", 0.5)],
+                    6.0,
+                    "Accelerates a tungsten slug to a tenth of light speed. Mind the recoil.",
+                ),
+            ),
+            (
+                "shield",
+                item(
+                    "Bulwark Shield",
+                    "shield",
+                    1,
+                    Armor,
+                    150,
+                    1,
+                    Some(OffHand),
+                    &[("armor", 18.0)],
+                    5.5,
+                    "Dented, but never broken.",
+                ),
+            ),
+            (
+                "shield_small",
+                item(
+                    "Buckler",
+                    "shield_small",
+                    0,
+                    Armor,
+                    45,
+                    1,
+                    Some(OffHand),
+                    &[("armor", 7.0)],
+                    2.0,
+                    "Light enough to parry with.",
+                ),
+            ),
+            (
+                "helmet",
+                item(
+                    "Pathfinder Helm",
+                    "helmet",
+                    1,
+                    Armor,
+                    95,
+                    1,
+                    Some(Head),
+                    &[("armor", 9.0)],
+                    1.8,
+                    "A visor tuned to three suns.",
+                ),
+            ),
+            (
+                "chest_armor",
+                item(
+                    "Scaled Cuirass",
+                    "chest_armor",
+                    2,
+                    Armor,
+                    380,
+                    1,
+                    Some(Chest),
+                    &[("armor", 26.0)],
+                    9.5,
+                    "Overlapping plates of drake scale.",
+                ),
+            ),
+            (
+                "gloves",
+                item(
+                    "Grip Gloves",
+                    "gloves",
+                    0,
+                    Armor,
+                    30,
+                    1,
+                    Some(Hands),
+                    &[("armor", 3.0)],
+                    0.4,
+                    "Never drop your tools again.",
+                ),
+            ),
+            (
+                "boots",
+                item(
+                    "Strider Boots",
+                    "boots",
+                    2,
+                    Armor,
+                    260,
+                    1,
+                    Some(Feet),
+                    &[("armor", 6.0), ("speed", 1.08)],
+                    1.2,
+                    "Light as air. You'll outrun your own echo.",
+                ),
+            ),
+            (
+                "cloak",
+                item(
+                    "Nightveil Cloak",
+                    "cloak",
+                    3,
+                    Armor,
+                    650,
+                    1,
+                    Some(Back),
+                    &[("armor", 8.0), ("stealth", 25.0)],
+                    0.9,
+                    "Woven from the dark between stars.",
+                ),
+            ),
+            (
+                "ring",
+                item(
+                    "Ring of Embers",
+                    "ring",
+                    3,
+                    Armor,
+                    820,
+                    1,
+                    Some(Ring),
+                    &[("fire", 15.0)],
+                    0.05,
+                    "A tiny flame dances inside the stone.",
+                ),
+            ),
+            (
+                "amulet",
+                item(
+                    "Navigator's Amulet",
+                    "amulet",
+                    4,
+                    Armor,
+                    3100,
+                    1,
+                    Some(Amulet),
+                    &[("luck", 20.0), ("mana", 25.0)],
+                    0.1,
+                    "Points, always, toward home.",
+                ),
+            ),
+            (
+                "potion_health",
+                item(
+                    "Health Potion",
+                    "potion_health",
+                    0,
+                    Consumable,
+                    25,
+                    10,
+                    None,
+                    &[("heal", 40.0)],
+                    0.3,
+                    "Restores 40 health over 3 seconds.",
+                ),
+            ),
+            (
+                "potion_mana",
+                item(
+                    "Mana Draught",
+                    "potion_mana",
+                    1,
+                    Consumable,
+                    40,
+                    10,
+                    None,
+                    &[("mana", 50.0)],
+                    0.3,
+                    "Tastes of starlight and copper.",
+                ),
+            ),
+            (
+                "potion_stamina",
+                item(
+                    "Stamina Tonic",
+                    "potion_stamina",
+                    0,
+                    Consumable,
+                    20,
+                    10,
+                    None,
+                    &[("stamina", 60.0)],
+                    0.3,
+                    "For when the legs say no.",
+                ),
+            ),
+            (
+                "elixir",
+                item(
+                    "Elixir of Ages",
+                    "elixir",
+                    4,
+                    Consumable,
+                    1800,
+                    3,
+                    None,
+                    &[("heal", 100.0), ("mana", 100.0)],
+                    0.2,
+                    "One sip, and time forgets you for a while.",
+                ),
+            ),
+            (
+                "medkit",
+                item(
+                    "Field Medkit",
+                    "medkit",
+                    1,
+                    Consumable,
+                    75,
+                    5,
+                    None,
+                    &[("heal", 80.0)],
+                    1.0,
+                    "Bandages, stims and a stern note from the medic.",
+                ),
+            ),
+            (
+                "bread",
+                item(
+                    "Hearth Bread",
+                    "bread",
+                    0,
+                    Consumable,
+                    4,
+                    20,
+                    None,
+                    &[("heal", 8.0)],
+                    0.2,
+                    "Still warm. Someone's grandmother made this.",
+                ),
+            ),
+            (
+                "meat",
+                item(
+                    "Grilled Meat",
+                    "meat",
+                    0,
+                    Consumable,
+                    9,
+                    20,
+                    None,
+                    &[("heal", 15.0)],
+                    0.4,
+                    "Don't ask what it was.",
+                ),
+            ),
+            (
+                "fish",
+                item(
+                    "River Trout",
+                    "fish",
+                    0,
+                    Consumable,
+                    6,
+                    20,
+                    None,
+                    &[("heal", 10.0)],
+                    0.5,
+                    "Caught this morning.",
+                ),
+            ),
+            (
+                "herb",
+                item(
+                    "Silverleaf",
+                    "herb",
+                    0,
+                    Material,
+                    3,
+                    50,
+                    None,
+                    &[],
+                    0.05,
+                    "A common herb used in potions.",
+                ),
+            ),
+            (
+                "mushroom_glow",
+                item(
+                    "Glowcap",
+                    "mushroom_glow",
+                    2,
+                    Material,
+                    35,
+                    50,
+                    None,
+                    &[],
+                    0.05,
+                    "Glows faintly in the dark. Alchemists love it.",
+                ),
+            ),
+            (
+                "crystal_glow",
+                item(
+                    "Resonant Crystal",
+                    "crystal_glow",
+                    3,
+                    Material,
+                    220,
+                    20,
+                    None,
+                    &[],
+                    0.3,
+                    "Hums when held near a ley line.",
+                ),
+            ),
+            (
+                "ore_iron",
+                item(
+                    "Iron Ore",
+                    "ore_iron",
+                    0,
+                    Material,
+                    5,
+                    50,
+                    None,
+                    &[],
+                    1.0,
+                    "Rough and heavy.",
+                ),
+            ),
+            (
+                "ore_gold",
+                item(
+                    "Gold Ore",
+                    "ore_gold",
+                    2,
+                    Material,
+                    60,
+                    50,
+                    None,
+                    &[],
+                    1.2,
+                    "Worth its weight, almost.",
+                ),
+            ),
+            (
+                "gem_ruby",
+                item(
+                    "Ruby",
+                    "gem_ruby",
+                    2,
+                    Material,
+                    150,
+                    20,
+                    None,
+                    &[],
+                    0.02,
+                    "Deep red, flawless.",
+                ),
+            ),
+            (
+                "gem_sapphire",
+                item(
+                    "Sapphire",
+                    "gem_sapphire",
+                    2,
+                    Material,
+                    160,
+                    20,
+                    None,
+                    &[],
+                    0.02,
+                    "Blue as an ice moon's sky.",
+                ),
+            ),
+            (
+                "gem_emerald",
+                item(
+                    "Emerald",
+                    "gem_emerald",
+                    3,
+                    Material,
+                    240,
+                    20,
+                    None,
+                    &[],
+                    0.02,
+                    "Green fire caught in stone.",
+                ),
+            ),
+            (
+                "wood_log",
+                item(
+                    "Oak Log",
+                    "wood_log",
+                    0,
+                    Material,
+                    2,
+                    50,
+                    None,
+                    &[],
+                    2.0,
+                    "Good for building and burning.",
+                ),
+            ),
+            (
+                "circuit",
+                item(
+                    "Quantum Circuit",
+                    "circuit",
+                    3,
+                    Material,
+                    480,
+                    20,
+                    None,
+                    &[],
+                    0.1,
+                    "Exists in two states until you look at the price.",
+                ),
+            ),
+            (
+                "fuel_cell",
+                item(
+                    "Fusion Fuel Cell",
+                    "fuel_cell",
+                    2,
+                    Gadget,
+                    300,
+                    5,
+                    None,
+                    &[("fuel", 25.0)],
+                    2.5,
+                    "Powers a ship's drive for one jump.",
+                ),
+            ),
+            (
+                "grenade",
+                item(
+                    "Pulse Grenade",
+                    "grenade",
+                    1,
+                    Gadget,
+                    90,
+                    10,
+                    None,
+                    &[("damage", 70.0)],
+                    0.6,
+                    "Pull, throw, count to three. Or two.",
+                ),
+            ),
+            (
+                "lockpick",
+                item(
+                    "Lockpick Set",
+                    "lockpick",
+                    0,
+                    Gadget,
+                    15,
+                    10,
+                    None,
+                    &[],
+                    0.1,
+                    "Every lock is a puzzle.",
+                ),
+            ),
+            (
+                "torch",
+                item(
+                    "Torch",
+                    "torch",
+                    0,
+                    Gadget,
+                    3,
+                    10,
+                    None,
+                    &[],
+                    0.6,
+                    "Lights the way for an hour.",
+                ),
+            ),
+            (
+                "rope",
+                item(
+                    "Climbing Rope",
+                    "rope",
+                    0,
+                    Gadget,
+                    12,
+                    5,
+                    None,
+                    &[],
+                    1.5,
+                    "Twenty meters of braided fibre.",
+                ),
+            ),
+            (
+                "compass",
+                item(
+                    "Star Compass",
+                    "compass",
+                    2,
+                    Gadget,
+                    210,
+                    1,
+                    None,
+                    &[],
+                    0.3,
+                    "Points to the nearest jump gate.",
+                ),
+            ),
+            (
+                "key",
+                item(
+                    "Vault Key",
+                    "key",
+                    3,
+                    Quest,
+                    0,
+                    1,
+                    None,
+                    &[],
+                    0.1,
+                    "Opens the vault beneath the old observatory.",
+                ),
+            ),
+            (
+                "map_scroll",
+                item(
+                    "Old Star Chart",
+                    "map_scroll",
+                    2,
+                    Quest,
+                    0,
+                    1,
+                    None,
+                    &[],
+                    0.1,
+                    "Shows a system that isn't on any modern map.",
+                ),
+            ),
+            (
+                "scroll",
+                item(
+                    "Sealed Letter",
+                    "scroll",
+                    1,
+                    Quest,
+                    0,
+                    1,
+                    None,
+                    &[],
+                    0.05,
+                    "Addressed to the merchant at Hollow Reach.",
+                ),
+            ),
+            (
+                "spellbook",
+                item(
+                    "Tome of Gravity",
+                    "spellbook",
+                    4,
+                    Quest,
+                    0,
+                    1,
+                    None,
+                    &[],
+                    1.5,
+                    "Its pages turn themselves toward the nearest planet.",
+                ),
+            ),
         ];
         for (id, def) in list {
             db.items.insert(id.to_string(), def);
@@ -415,7 +1061,12 @@ impl Inventory {
     }
 
     /// Take off what is worn in `slot` into the bag (into `to` when given and empty).
-    pub fn unequip(&mut self, db: &ItemDatabase, slot: EquipSlot, to: Option<usize>) -> Result<(), String> {
+    pub fn unequip(
+        &mut self,
+        db: &ItemDatabase,
+        slot: EquipSlot,
+        to: Option<usize>,
+    ) -> Result<(), String> {
         let worn = self
             .equipment
             .get(&slot)
@@ -522,7 +1173,13 @@ impl Vendor {
 }
 
 /// Buy `count` of stock entry `index` from `vendor` into `inv`. Returns the gold spent.
-pub fn buy(db: &ItemDatabase, vendor: &mut Vendor, inv: &mut Inventory, index: usize, count: u32) -> Result<u64, String> {
+pub fn buy(
+    db: &ItemDatabase,
+    vendor: &mut Vendor,
+    inv: &mut Inventory,
+    index: usize,
+    count: u32,
+) -> Result<u64, String> {
     let entry = vendor
         .stock
         .get(index)
@@ -531,7 +1188,11 @@ pub fn buy(db: &ItemDatabase, vendor: &mut Vendor, inv: &mut Inventory, index: u
     let def = db
         .get(&entry.item)
         .ok_or_else(|| format!("Unknown item \"{}\".", entry.item))?;
-    let count = if entry.count > 0 { count.min(entry.count) } else { count };
+    let count = if entry.count > 0 {
+        count.min(entry.count)
+    } else {
+        count
+    };
     if count == 0 {
         return Err(format!("{} is sold out.", def.name));
     }
@@ -556,7 +1217,13 @@ pub fn buy(db: &ItemDatabase, vendor: &mut Vendor, inv: &mut Inventory, index: u
 }
 
 /// Sell `count` from bag slot `index` to `vendor`. Returns the gold earned.
-pub fn sell(db: &ItemDatabase, vendor: &mut Vendor, inv: &mut Inventory, index: usize, count: u32) -> Result<u64, String> {
+pub fn sell(
+    db: &ItemDatabase,
+    vendor: &mut Vendor,
+    inv: &mut Inventory,
+    index: usize,
+    count: u32,
+) -> Result<u64, String> {
     let stack = inv
         .slots
         .get(index)
@@ -577,7 +1244,11 @@ pub fn sell(db: &ItemDatabase, vendor: &mut Vendor, inv: &mut Inventory, index: 
     inv.take(index, count);
     inv.gold += earned;
     vendor.gold -= earned;
-    match vendor.stock.iter_mut().find(|s| s.item == stack.item && s.count > 0) {
+    match vendor
+        .stock
+        .iter_mut()
+        .find(|s| s.item == stack.item && s.count > 0)
+    {
         Some(s) => s.count += count,
         None => vendor.stock.push(ItemStack::new(&stack.item, count)),
     }
@@ -599,31 +1270,59 @@ mod tests {
         assert_eq!(inv.count_of("potion_health"), 13);
         inv.add(&db, "sword", 1);
         inv.add(&db, "dagger", 1);
-        let sword = inv.slots.iter().position(|s| s.as_ref().is_some_and(|s| s.item == "sword")).unwrap();
+        let sword = inv
+            .slots
+            .iter()
+            .position(|s| s.as_ref().is_some_and(|s| s.item == "sword"))
+            .unwrap();
         assert_eq!(inv.equip(&db, sword), Ok(EquipSlot::MainHand));
-        let dagger = inv.slots.iter().position(|s| s.as_ref().is_some_and(|s| s.item == "dagger")).unwrap();
+        let dagger = inv
+            .slots
+            .iter()
+            .position(|s| s.as_ref().is_some_and(|s| s.item == "dagger"))
+            .unwrap();
         inv.equip(&db, dagger).unwrap();
         assert_eq!(inv.equipment[&EquipSlot::MainHand].item, "dagger");
         assert_eq!(inv.count_of("sword"), 1, "the sword went back into the bag");
-        assert!(inv.equip(&db, inv.slots.iter().position(|s| s.as_ref().is_some_and(|s| s.item == "potion_health")).unwrap()).is_err());
+        assert!(
+            inv.equip(
+                &db,
+                inv.slots
+                    .iter()
+                    .position(|s| s.as_ref().is_some_and(|s| s.item == "potion_health"))
+                    .unwrap()
+            )
+            .is_err()
+        );
     }
 
     #[test]
     fn buying_and_selling() {
         let db = ItemDatabase::default();
         let mut v = Vendor {
-            stock: vec![ItemStack::new("sword", 1), ItemStack::new("potion_health", 0)],
+            stock: vec![
+                ItemStack::new("sword", 1),
+                ItemStack::new("potion_health", 0),
+            ],
             ..Default::default()
         };
         let mut inv = Inventory::with_capacity(10);
         inv.gold = 100;
-        assert!(buy(&db, &mut v, &mut inv, 0, 1).unwrap_err().contains("more gold"));
+        assert!(
+            buy(&db, &mut v, &mut inv, 0, 1)
+                .unwrap_err()
+                .contains("more gold")
+        );
         inv.gold = 200;
         assert_eq!(buy(&db, &mut v, &mut inv, 0, 1), Ok(120));
         assert_eq!(v.stock.len(), 1, "the only sword is gone");
         assert_eq!(buy(&db, &mut v, &mut inv, 0, 3), Ok(75));
         assert_eq!(inv.gold, 5);
-        let slot = inv.slots.iter().position(|s| s.as_ref().is_some_and(|s| s.item == "sword")).unwrap();
+        let slot = inv
+            .slots
+            .iter()
+            .position(|s| s.as_ref().is_some_and(|s| s.item == "sword"))
+            .unwrap();
         assert_eq!(sell(&db, &mut v, &mut inv, slot, 1), Ok(48));
         assert_eq!(inv.gold, 53);
         assert!(v.stock.iter().any(|s| s.item == "sword"));
@@ -637,7 +1336,12 @@ mod tests {
             inv.add(&db, id, 1);
         }
         inv.sort(&db);
-        let order: Vec<&str> = inv.slots.iter().flatten().map(|s| s.item.as_str()).collect();
+        let order: Vec<&str> = inv
+            .slots
+            .iter()
+            .flatten()
+            .map(|s| s.item.as_str())
+            .collect();
         assert_eq!(order, ["rifle", "sword", "potion_health", "herb"]);
         assert_eq!(inv.count_of("herb"), 2);
     }

@@ -10,7 +10,9 @@ use bevy_ecs::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use crate::color::Color;
-use crate::style::{Align, Corners, Direction, Fill, Justify, Overflow, Pick, Shadow, StylePatch, Val, pct};
+use crate::style::{
+    Align, Corners, Direction, Fill, Justify, Overflow, Pick, Shadow, StylePatch, Val, pct,
+};
 
 /// Named colors. Classes are generated from these by [`Theme::from_palette`].
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -166,12 +168,11 @@ impl Theme {
                     .padding(12.0)
                     .gap(10.0)
                     .transition(0.12),
-                hover: s().background(p.surface_hover).border_color(p.line.scale(1.6)),
+                hover: s()
+                    .background(p.surface_hover)
+                    .border_color(p.line.scale(1.6)),
                 selected: s()
-                    .background(Fill::vertical(
-                        p.accent.fade(0.16),
-                        p.accent.fade(0.05),
-                    ))
+                    .background(Fill::vertical(p.accent.fade(0.16), p.accent.fade(0.05)))
                     .border_color(p.accent.fade(0.85))
                     .shadow(Shadow::glow(p.accent.fade(0.25), 14.0)),
                 disabled: s().opacity(0.5),
@@ -196,16 +197,10 @@ impl Theme {
             ClassStyle {
                 base: button_base,
                 hover: s()
-                    .background(Fill::vertical(
-                        p.surface_hover.scale(1.45),
-                        p.surface_hover,
-                    ))
+                    .background(Fill::vertical(p.surface_hover.scale(1.45), p.surface_hover))
                     .border_color(p.accent.fade(0.55))
                     .translate([0.0, -1.0]),
-                pressed: s()
-                    .scale(0.97)
-                    .translate([0.0, 0.0])
-                    .background(p.surface),
+                pressed: s().scale(0.97).translate([0.0, 0.0]).background(p.surface),
                 focused: s()
                     .border_color(p.accent)
                     .shadow(Shadow::glow(p.accent.fade(0.45), 12.0)),
@@ -259,7 +254,12 @@ impl Theme {
         );
         c.insert(
             "icon_button".into(),
-            ClassStyle::base(s().padding(8.0).width(36.0).height(36.0).radius(Corners::all(18.0))),
+            ClassStyle::base(
+                s().padding(8.0)
+                    .width(36.0)
+                    .height(36.0)
+                    .radius(Corners::all(18.0)),
+            ),
         );
         c.insert(
             "tab".into(),
@@ -316,16 +316,13 @@ impl Theme {
         );
         c.insert(
             "divider".into(),
-            ClassStyle::base(
-                s().height(1.0)
-                    .width(pct(100.0))
-                    .shrink(0.0)
-                    .background(Fill::Linear {
-                        from: p.line.fade(0.0),
-                        to: p.line.scale(1.4),
-                        angle_deg: 0.0,
-                    }),
-            ),
+            ClassStyle::base(s().height(1.0).width(pct(100.0)).shrink(0.0).background(
+                Fill::Linear {
+                    from: p.line.fade(0.0),
+                    to: p.line.scale(1.4),
+                    angle_deg: 0.0,
+                },
+            )),
         );
         c.insert(
             "chip".into(),
@@ -376,14 +373,8 @@ impl Theme {
             "body".into(),
             ClassStyle::base(s().font_size(15.0).font_weight(400).color(p.text_dim)),
         );
-        c.insert(
-            "dim".into(),
-            ClassStyle::base(s().color(p.text_dim)),
-        );
-        c.insert(
-            "accent".into(),
-            ClassStyle::base(s().color(p.accent)),
-        );
+        c.insert("dim".into(), ClassStyle::base(s().color(p.text_dim)));
+        c.insert("accent".into(), ClassStyle::base(s().color(p.accent)));
         c.insert(
             "bar_track".into(),
             ClassStyle::base(
@@ -437,14 +428,8 @@ impl Theme {
             "row".into(),
             ClassStyle::base(s().row().align_items(Align::Center).gap(8.0)),
         );
-        c.insert(
-            "col".into(),
-            ClassStyle::base(s().column().gap(8.0)),
-        );
-        c.insert(
-            "spacer".into(),
-            ClassStyle::base(s().grow(1.0)),
-        );
+        c.insert("col".into(), ClassStyle::base(s().column().gap(8.0)));
+        c.insert("spacer".into(), ClassStyle::base(s().grow(1.0)));
         c.insert(
             "scroll".into(),
             ClassStyle::base(
@@ -537,7 +522,9 @@ fn widget_classes(p: &Palette, c: &mut BTreeMap<String, ClassStyle>) {
     add(
         "slider",
         ClassStyle {
-            base: s().radius(Corners::all(8.0)).border(1.0, Color::TRANSPARENT),
+            base: s()
+                .radius(Corners::all(8.0))
+                .border(1.0, Color::TRANSPARENT),
             focused: s().border_color(p.accent.fade(0.6)),
             ..Default::default()
         },
@@ -643,6 +630,55 @@ fn widget_classes(p: &Palette, c: &mut BTreeMap<String, ClassStyle>) {
                 })
                 .border_color(p.accent.fade(0.45)),
             disabled: s().opacity(0.45),
+            ..Default::default()
+        },
+    );
+    add(
+        "menu_item",
+        ClassStyle {
+            base: s()
+                .row()
+                .align_items(Align::Center)
+                .gap(16.0)
+                .padding([13.0, 18.0])
+                .radius(Corners::all(10.0))
+                .border(1.0, Color::TRANSPARENT)
+                .font_size(20.0)
+                .font_weight(600)
+                .color(p.text_dim)
+                .transition(0.12),
+            hover: s()
+                .color(p.text)
+                .translate([6.0, 0.0])
+                .background(Fill::Linear {
+                    from: p.accent.fade(0.22),
+                    to: p.accent.fade(0.0),
+                    angle_deg: 0.0,
+                }),
+            focused: s()
+                .color(p.accent_light)
+                .translate([6.0, 0.0])
+                .border_color(p.accent.fade(0.35))
+                .background(Fill::Linear {
+                    from: p.accent.fade(0.3),
+                    to: p.accent.fade(0.0),
+                    angle_deg: 0.0,
+                }),
+            pressed: s().scale(0.98),
+            ..Default::default()
+        },
+    );
+    add(
+        "swatch",
+        ClassStyle {
+            base: s()
+                .size(38.0, 38.0)
+                .radius(Corners::all(19.0))
+                .border(2.0, Color::WHITE.fade(0.25))
+                .shadow(Shadow::new(Color::hexa(0x00000080), 8.0, 2.0))
+                .transition(0.12),
+            hover: s().scale(1.1).border_color(Color::WHITE.fade(0.7)),
+            focused: s().scale(1.1).border_color(Color::WHITE),
             ..Default::default()
         },
     );

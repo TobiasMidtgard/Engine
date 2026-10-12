@@ -5,6 +5,7 @@
 //! the entity with the [`Inventory`]). Drag items between slots to move or stack them, onto
 //! an equipment slot to equip, onto the trash to drop; right click (or X) uses or equips.
 
+use bevy_ecs::message::MessageCursor;
 use bevy_ecs::prelude::*;
 use serde_json::{Value, json};
 
@@ -48,7 +49,9 @@ impl SlotRef {
         if let Some(i) = s.strip_prefix("inv:") {
             return i.parse().ok().map(SlotRef::Bag);
         }
-        s.strip_prefix("equip:").and_then(EquipSlot::from_key).map(SlotRef::Equip)
+        s.strip_prefix("equip:")
+            .and_then(EquipSlot::from_key)
+            .map(SlotRef::Equip)
     }
 
     pub fn stack(self, inv: &Inventory) -> Option<&ItemStack> {
@@ -210,7 +213,10 @@ pub fn item_details(
             })
             .child(
                 El::icon(def.icon.clone())
-                    .with_style(|s| s.size(112.0, 112.0).shadow(Shadow::glow(rc.fade(0.4), 30.0)))
+                    .with_style(|s| {
+                        s.size(112.0, 112.0)
+                            .shadow(Shadow::glow(rc.fade(0.4), 30.0))
+                    })
                     .pick_ignore(),
             ),
     );
@@ -235,7 +241,9 @@ pub fn item_details(
                     )
                     .child(El::text(def.category.label()).class("chip"))
                     .child_opt(def.slot.map(|s| El::text(s.label()).class("chip")))
-                    .child_opt((st.count > 1).then(|| El::text(format!("×{}", st.count)).class("chip"))),
+                    .child_opt(
+                        (st.count > 1).then(|| El::text(format!("×{}", st.count)).class("chip")),
+                    ),
             ),
     );
     if !def.description.is_empty() {
@@ -282,28 +290,29 @@ pub fn item_details(
     let mut meta = El::new().class("row").with_style(|s| s.gap(16.0));
     if let Some((label, amount, ok)) = price {
         meta = meta
-            .child(El::text(label).class("dim").with_style(|s| s.font_size(14.0)))
             .child(
-                widgets::currency(&group(amount), 18.0).with_style(|s| {
-                    if ok {
-                        s
-                    } else {
-                        s.color(Color::hex(0xff6b6b))
-                    }
-                }),
+                El::text(label)
+                    .class("dim")
+                    .with_style(|s| s.font_size(14.0)),
+            )
+            .child(
+                widgets::currency(&group(amount), 18.0)
+                    .with_style(|s| if ok { s } else { s.color(Color::hex(0xff6b6b)) }),
             );
     } else if def.value > 0 {
         meta = meta
-            .child(El::text("Value").class("dim").with_style(|s| s.font_size(14.0)))
+            .child(
+                El::text("Value")
+                    .class("dim")
+                    .with_style(|s| s.font_size(14.0)),
+            )
             .child(widgets::currency(&group(def.value as u64), 18.0));
     }
-    meta = meta
-        .child(El::new().class("spacer"))
-        .child(
-            El::text(format!("{:.1} kg", def.weight * st.count as f32))
-                .class("dim")
-                .with_style(|s| s.font_size(14.0)),
-        );
+    meta = meta.child(El::new().class("spacer")).child(
+        El::text(format!("{:.1} kg", def.weight * st.count as f32))
+            .class("dim")
+            .with_style(|s| s.font_size(14.0)),
+    );
     col = col.child(meta);
     if !actions.is_empty() {
         col = col.child(El::new().class("spacer")).child(
@@ -329,7 +338,13 @@ pub fn group(n: u64) -> String {
     out
 }
 
-fn equip_slot_el(theme: &Theme, db: &ItemDatabase, inv: &Inventory, slot: EquipSlot, selected: bool) -> El {
+fn equip_slot_el(
+    theme: &Theme,
+    db: &ItemDatabase,
+    inv: &Inventory,
+    slot: EquipSlot,
+    selected: bool,
+) -> El {
     let stack = inv.equipment.get(&slot);
     let r = SlotRef::Equip(slot);
     let mut el = item_slot(theme, db, stack, 60.0)
@@ -346,7 +361,10 @@ fn equip_slot_el(theme: &Theme, db: &ItemDatabase, inv: &Inventory, slot: EquipS
                     .with_style(|s| s.size(pct(100.0), pct(100.0)).opacity(0.16))
                     .pick_ignore(),
             )
-            .tooltip(slot.label(), "[color=#8a94a8]Empty. Drag an item here to equip it.[/color]");
+            .tooltip(
+                slot.label(),
+                "[color=#8a94a8]Empty. Drag an item here to equip it.[/color]",
+            );
     }
     El::new()
         .class("col")
@@ -368,7 +386,11 @@ fn matches_tab(def: Option<&ItemDef>, tab: usize) -> bool {
 fn hints() -> El {
     El::new()
         .class("hud_panel row")
-        .with_style(|s| s.gap(22.0).padding([10.0, 18.0]).radius(Corners::all(999.0)))
+        .with_style(|s| {
+            s.gap(22.0)
+                .padding([10.0, 18.0])
+                .radius(Corners::all(999.0))
+        })
         .child(widgets::key_hint("LMB", "A", "Select / drag"))
         .child(widgets::key_hint("RMB", "X", "Use or equip"))
         .child(widgets::key_hint2(["Q", "E"], ["LB", "RB"], "Category"))
@@ -379,7 +401,10 @@ fn hints() -> El {
 fn build(world: &mut World, st: &InventoryScreen) -> El {
     let theme = world.resource::<Theme>().clone();
     let db = world.resource::<ItemDatabase>().clone();
-    let inv = world.get::<Inventory>(st.owner).cloned().unwrap_or_default();
+    let inv = world
+        .get::<Inventory>(st.owner)
+        .cloned()
+        .unwrap_or_default();
     let name = world
         .resource::<crate::data::UiData>()
         .get_str("player.name")
@@ -404,12 +429,11 @@ fn build(world: &mut World, st: &InventoryScreen) -> El {
         EquipSlot::Amulet,
     ];
     let slot_col = |slots: &[EquipSlot]| {
-        El::new()
-            .class("col")
-            .with_style(|s| s.gap(10.0))
-            .children(slots.iter().map(|s| {
-                equip_slot_el(&theme, &db, &inv, *s, sel == Some(SlotRef::Equip(*s)))
-            }))
+        El::new().class("col").with_style(|s| s.gap(10.0)).children(
+            slots
+                .iter()
+                .map(|s| equip_slot_el(&theme, &db, &inv, *s, sel == Some(SlotRef::Equip(*s)))),
+        )
     };
     let armor = inv.equipped_stat(&db, "armor");
     let damage = inv.equipped_stat(&db, "damage");
@@ -512,7 +536,11 @@ fn build(world: &mut World, st: &InventoryScreen) -> El {
                         .id("inv_sort")
                         .on_click("inv.sort")
                         .tooltip("Sort", "Group by category and rarity, and merge stacks.")
-                        .child(El::icon("ui_sort").with_style(|s| s.size(16.0, 16.0)).pick_ignore()),
+                        .child(
+                            El::icon("ui_sort")
+                                .with_style(|s| s.size(16.0, 16.0))
+                                .pick_ignore(),
+                        ),
                 ),
         )
         .child(grid)
@@ -527,7 +555,11 @@ fn build(world: &mut World, st: &InventoryScreen) -> El {
                         .child(
                             El::new()
                                 .class("row")
-                                .child(El::text("Weight").class("caption").with_style(|s| s.grow(1.0)))
+                                .child(
+                                    El::text("Weight")
+                                        .class("caption")
+                                        .with_style(|s| s.grow(1.0)),
+                                )
                                 .child(
                                     El::text(format!("{weight:.1} / {:.0} kg", inv.max_weight))
                                         .class("caption")
@@ -559,7 +591,11 @@ fn build(world: &mut World, st: &InventoryScreen) -> El {
                         .tooltip("Drop", "Drag an item here to drop it.")
                         .with_style(|s| s.size(44.0, 44.0).padding(11.0))
                         .hover(StylePatch::default().border_color(p.bad).color(p.bad))
-                        .child(El::icon("ui_trash").with_style(|s| s.size(pct(100.0), pct(100.0))).pick_ignore()),
+                        .child(
+                            El::icon("ui_trash")
+                                .with_style(|s| s.size(pct(100.0), pct(100.0)))
+                                .pick_ignore(),
+                        ),
                 )
                 .child(widgets::currency(&group(inv.gold), 22.0).id("inv_gold")),
         );
@@ -571,7 +607,13 @@ fn build(world: &mut World, st: &InventoryScreen) -> El {
         .child(details(world, st));
 
     El::new()
-        .with_style(|s| s.fill_parent().column().center().gap(18.0).pick(Pick::Ignore))
+        .with_style(|s| {
+            s.fill_parent()
+                .column()
+                .center()
+                .gap(18.0)
+                .pick(Pick::Ignore)
+        })
         .child(
             El::new()
                 .class("row")
@@ -587,7 +629,10 @@ fn build(world: &mut World, st: &InventoryScreen) -> El {
 fn details(world: &World, st: &InventoryScreen) -> El {
     let theme = world.resource::<Theme>().clone();
     let db = world.resource::<ItemDatabase>().clone();
-    let inv = world.get::<Inventory>(st.owner).cloned().unwrap_or_default();
+    let inv = world
+        .get::<Inventory>(st.owner)
+        .cloned()
+        .unwrap_or_default();
     let shown = st.shown.or(st.selected);
     let stack = shown.and_then(|r| r.stack(&inv)).cloned();
     let compare = stack
@@ -602,13 +647,27 @@ fn details(world: &World, st: &InventoryScreen) -> El {
     {
         match (r, def.category, def.slot) {
             (SlotRef::Bag(_), ItemCategory::Consumable, _) => {
-                actions.push(El::button("Use", "inv.use").class("primary").id("inv_use").with_style(|s| s.grow(1.0)));
+                actions.push(
+                    El::button("Use", "inv.use")
+                        .class("primary")
+                        .id("inv_use")
+                        .with_style(|s| s.grow(1.0)),
+                );
             }
             (SlotRef::Bag(_), _, Some(_)) => {
-                actions.push(El::button("Equip", "inv.use").class("primary").id("inv_use").with_style(|s| s.grow(1.0)));
+                actions.push(
+                    El::button("Equip", "inv.use")
+                        .class("primary")
+                        .id("inv_use")
+                        .with_style(|s| s.grow(1.0)),
+                );
             }
             (SlotRef::Equip(_), _, _) => {
-                actions.push(El::button("Unequip", "inv.use").id("inv_use").with_style(|s| s.grow(1.0)));
+                actions.push(
+                    El::button("Unequip", "inv.use")
+                        .id("inv_use")
+                        .with_style(|s| s.grow(1.0)),
+                );
             }
             _ => {}
         }
@@ -685,7 +744,10 @@ fn refresh_details(world: &mut World, root: Entity) {
 /// Use, equip or unequip what is in `r`.
 pub fn use_slot(world: &mut World, owner: Entity, r: SlotRef) -> Result<String, String> {
     let db = world.resource::<ItemDatabase>().clone();
-    let mut inv = world.get::<Inventory>(owner).cloned().ok_or("No inventory.")?;
+    let mut inv = world
+        .get::<Inventory>(owner)
+        .cloned()
+        .ok_or("No inventory.")?;
     let stack = r.stack(&inv).cloned().ok_or("That slot is empty.")?;
     let def = db.get(&stack.item).cloned().ok_or("Unknown item.")?;
     let msg = match r {
@@ -698,7 +760,10 @@ pub fn use_slot(world: &mut World, owner: Entity, r: SlotRef) -> Result<String, 
                 inv.take(i, 1);
                 if let Some(heal) = def.stats.get("heal") {
                     let mut data = world.resource_mut::<crate::data::UiData>();
-                    if let (Some(h), Some(m)) = (data.get_f64("player.health"), data.get_f64("player.health_max")) {
+                    if let (Some(h), Some(m)) = (
+                        data.get_f64("player.health"),
+                        data.get_f64("player.health_max"),
+                    ) {
                         data.set("player.health", (h + *heal as f64).min(m));
                     }
                 }
@@ -722,12 +787,8 @@ pub fn use_slot(world: &mut World, owner: Entity, r: SlotRef) -> Result<String, 
 }
 
 /// Handle input for open inventory screens and refresh them when their inventory changes.
-pub fn inventory_screen_system(world: &mut World) {
-    let events: Vec<UiEvent> = world
-        .resource::<bevy_ecs::message::Messages<UiEvent>>()
-        .iter_current_update_messages()
-        .cloned()
-        .collect();
+pub fn inventory_screen_system(world: &mut World, mut seen: Local<MessageCursor<UiEvent>>) {
+    let events: Vec<UiEvent> = crate::input::read_events(world, &mut seen);
     let mut q = world.query::<(Entity, &InventoryScreen, &Screen)>();
     let screens: Vec<(Entity, InventoryScreen, String)> = q
         .iter(world)
@@ -744,21 +805,32 @@ pub fn inventory_screen_system(world: &mut World) {
         let mut dirty = false;
         for ev in &events {
             match ev {
-                UiEvent::Action { action, alt, entity, .. } => {
+                UiEvent::Action {
+                    action,
+                    alt,
+                    entity,
+                    ..
+                } => {
                     if entity.is_some_and(|e| !screens::is_descendant(world, e, root)) {
                         continue;
                     }
                     if let Some(t) = action.strip_prefix("inv.tab:") {
                         st.tab = t.parse().unwrap_or(0);
                         dirty = true;
-                    } else if let Some(r) = action.strip_prefix("inv.select:").and_then(SlotRef::parse) {
+                    } else if let Some(r) =
+                        action.strip_prefix("inv.select:").and_then(SlotRef::parse)
+                    {
                         if *alt {
                             match use_slot(world, st.owner, r) {
                                 Ok(m) => toast::notify(world, ToastKind::Good, "", "", &m, 2.2),
                                 Err(e) => toast::notify(world, ToastKind::Bad, "", "", &e, 2.5),
                             }
                         } else {
-                            st.selected = if st.selected == Some(r) { None } else { Some(r) };
+                            st.selected = if st.selected == Some(r) {
+                                None
+                            } else {
+                                Some(r)
+                            };
                             st.shown = Some(r);
                         }
                         dirty = true;
@@ -794,7 +866,11 @@ pub fn inventory_screen_system(world: &mut World) {
                         id.strip_prefix("inv_slot:")
                             .and_then(|i| i.parse().ok())
                             .map(SlotRef::Bag)
-                            .or_else(|| id.strip_prefix("equip_slot:").and_then(EquipSlot::from_key).map(SlotRef::Equip))
+                            .or_else(|| {
+                                id.strip_prefix("equip_slot:")
+                                    .and_then(EquipSlot::from_key)
+                                    .map(SlotRef::Equip)
+                            })
                     });
                     if let Some(r) = r
                         && st.shown != Some(r)
@@ -803,7 +879,12 @@ pub fn inventory_screen_system(world: &mut World) {
                         details_only = true;
                     }
                 }
-                UiEvent::Dropped { payload, slot, target, .. } => {
+                UiEvent::Dropped {
+                    payload,
+                    slot,
+                    target,
+                    ..
+                } => {
                     if target.is_some_and(|t| !screens::is_descendant(world, t, root)) {
                         continue;
                     }
@@ -855,26 +936,54 @@ fn drop_item(world: &mut World, owner: Entity, i: usize) {
     let Some(stack) = inv.slots.get(i).cloned().flatten() else {
         return;
     };
-    if db.get(&stack.item).is_some_and(|d| d.category == ItemCategory::Quest) {
+    if db
+        .get(&stack.item)
+        .is_some_and(|d| d.category == ItemCategory::Quest)
+    {
         drop(inv);
-        toast::notify(world, ToastKind::Warn, "", "", "Quest items can't be dropped.", 2.5);
+        toast::notify(
+            world,
+            ToastKind::Warn,
+            "",
+            "",
+            "Quest items can't be dropped.",
+            2.5,
+        );
         return;
     }
     inv.slots[i] = None;
-    let name = db.get(&stack.item).map(|d| d.name.clone()).unwrap_or(stack.item.clone());
+    let name = db
+        .get(&stack.item)
+        .map(|d| d.name.clone())
+        .unwrap_or(stack.item.clone());
     world.write_message(UiEvent::Action {
         action: format!("inventory.dropped:{}:{}", stack.item, stack.count),
         id: None,
         alt: false,
         entity: None,
     });
-    toast::notify(world, ToastKind::Info, "ui_trash", "", &format!("Dropped {name}"), 2.0);
+    toast::notify(
+        world,
+        ToastKind::Info,
+        "ui_trash",
+        "",
+        &format!("Dropped {name}"),
+        2.0,
+    );
 }
 
 /// Move an item between two slots (bag ↔ bag, bag → equipment, equipment → bag).
-pub fn move_between(world: &mut World, owner: Entity, from: SlotRef, to: SlotRef) -> Result<Option<String>, String> {
+pub fn move_between(
+    world: &mut World,
+    owner: Entity,
+    from: SlotRef,
+    to: SlotRef,
+) -> Result<Option<String>, String> {
     let db = world.resource::<ItemDatabase>().clone();
-    let mut inv = world.get::<Inventory>(owner).cloned().ok_or("No inventory.")?;
+    let mut inv = world
+        .get::<Inventory>(owner)
+        .cloned()
+        .ok_or("No inventory.")?;
     let msg = match (from, to) {
         (SlotRef::Bag(a), SlotRef::Bag(b)) => {
             inv.move_slot(&db, a, b);
@@ -885,7 +994,11 @@ pub fn move_between(world: &mut World, owner: Entity, from: SlotRef, to: SlotRef
             let def = db.get(&item.item).ok_or("Unknown item.")?;
             if def.slot != Some(slot) {
                 return Err(match def.slot {
-                    Some(s) => format!("{} goes in the {} slot.", def.name, s.label().to_lowercase()),
+                    Some(s) => format!(
+                        "{} goes in the {} slot.",
+                        def.name,
+                        s.label().to_lowercase()
+                    ),
                     None => format!("{} can't be equipped.", def.name),
                 });
             }
@@ -928,14 +1041,22 @@ pub fn register_api(app: &mut engine_core::prelude::App) {
         r#"{"item": "potion_health", "count": 3, "owner": "Player"}"#,
         |world, args| {
             let owner = find_owner(world, &args)?;
-            let item = args.get("item").and_then(Value::as_str).ok_or("Pass \"item\" (an ItemDatabase id).")?;
+            let item = args
+                .get("item")
+                .and_then(Value::as_str)
+                .ok_or("Pass \"item\" (an ItemDatabase id).")?;
             let count = args.get("count").and_then(Value::as_u64).unwrap_or(1) as u32;
             let db = world.resource::<ItemDatabase>().clone();
             if db.get(item).is_none() {
                 let ids: Vec<&String> = db.items.keys().take(12).collect();
-                return Err(format!("There is no item \"{item}\". Some ids: {ids:?}. Add new ones to ItemDatabase."));
+                return Err(format!(
+                    "There is no item \"{item}\". Some ids: {ids:?}. Add new ones to ItemDatabase."
+                ));
             }
-            let left = world.get_mut::<Inventory>(owner).unwrap().add(&db, item, count);
+            let left = world
+                .get_mut::<Inventory>(owner)
+                .unwrap()
+                .add(&db, item, count);
             Ok(json!({"added": count - left, "left_over": left}))
         },
     );
@@ -954,7 +1075,10 @@ pub fn register_api(app: &mut engine_core::prelude::App) {
         r#"{"slot": "inv:0"}"#,
         |world, args| {
             let owner = find_owner(world, &args)?;
-            let slot = args.get("slot").and_then(Value::as_str).ok_or("Pass \"slot\", e.g. \"inv:0\".")?;
+            let slot = args
+                .get("slot")
+                .and_then(Value::as_str)
+                .ok_or("Pass \"slot\", e.g. \"inv:0\".")?;
             let r = SlotRef::parse(slot).ok_or("Slots look like \"inv:3\" or \"equip:head\".")?;
             Ok(json!({"result": use_slot(world, owner, r)?}))
         },

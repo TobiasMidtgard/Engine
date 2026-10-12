@@ -165,7 +165,8 @@ pub fn setup_data(world: &mut World) {
         world.insert_resource(UiData::default());
     }
     let db = world.resource::<ItemDatabase>().clone();
-    let has = |world: &mut World, name: &str| engine_core::registry::find_by_name(world, name).is_ok();
+    let has =
+        |world: &mut World, name: &str| engine_core::registry::find_by_name(world, name).is_ok();
     if !has(world, PLAYER) {
         world.spawn((Name::new(PLAYER), player_inventory(&db)));
     }
