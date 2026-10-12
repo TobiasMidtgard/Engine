@@ -8,6 +8,7 @@ pub mod events;
 pub mod feature;
 pub mod gpu;
 pub mod library;
+pub mod shift;
 pub mod trail;
 
 use engine_assets::AssetAppExt;
@@ -78,7 +79,9 @@ impl Plugin for VfxPlugin {
             .add_message::<GroundContact>()
             .add_message::<ProjectileTrace>()
             .add_message::<WorldImpulse>()
-            .add_message::<WaterSplash>();
+            .add_message::<WaterSplash>()
+            .add_message::<engine_world::LightningStrike>()
+            .add_message::<engine_world::WorldShift>();
 
         app.insert_resource(EffectLibrary::with_builtins())
             .init_resource::<VfxSettings>()
@@ -86,6 +89,7 @@ impl Plugin for VfxPlugin {
             .init_resource::<emitter::VfxRuntime>()
             .init_resource::<emitter::ParticleFrame>()
             .init_resource::<Ribbons>()
+            .init_resource::<shift::PendingShift>()
             .init_asset::<EffectFile>()
             .register_asset_loader(EffectLoader)
             .register_component::<ParticleEffect>(
@@ -137,6 +141,12 @@ impl Plugin for VfxPlugin {
                     trail::update_beams,
                 )
                     .in_set(UpdateSet::AfterPropagate),
+            )
+            .add_systems(
+                PostUpdate,
+                shift::follow_world_shift
+                    .in_set(engine_world::WorldShiftSet::Apply)
+                    .before(UpdateSet::Propagate),
             )
             .add_render_feature(ParticleFeature::default());
         register_apis(app);

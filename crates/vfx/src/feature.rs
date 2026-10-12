@@ -19,7 +19,7 @@
 use bevy_ecs::prelude::*;
 use bytemuck::Zeroable;
 use engine_core::diagnostics::Diagnostics;
-use engine_core::math::{DVec3, Vec3};
+use engine_core::math::{DVec3, Mat3, Vec3};
 use engine_render::wgpu;
 use engine_render::{
     FeatureStats, FrameContext, GpuShared, GrowBuffer, RenderFeature, RenderPhase, RenderSettings,
@@ -29,6 +29,7 @@ use engine_render::{
 use crate::effect::Sprite;
 use crate::emitter::{ParticleFrame, PoolRange, VfxSettings};
 use crate::gpu::{CHUNK, GpuEmitter, GpuParticle, GpuSim, GpuSpawn, GpuUpdate, RibbonVertex};
+use crate::shift::PendingShift;
 use crate::trail::{Ribbons, build_ribbon};
 
 /// Shared particle structs and helpers.
@@ -434,17 +435,36 @@ impl RenderFeature for ParticleFeature {
             );
         }
 
-        let Some(frame) = world.get_resource::<ParticleFrame>() else {
+        let Some(frame_number) = world.get_resource::<ParticleFrame>().map(|f| f.frame) else {
             self.draws.clear();
             return;
         };
-        if self.last_frame == Some(frame.frame) {
+        if self.last_frame == Some(frame_number) {
             // Drawn again in the same frame (a screenshot): show the same particles.
             self.fill_stats();
             return;
         }
-        self.last_frame = Some(frame.frame);
+        self.last_frame = Some(frame_number);
         self.simulate = true;
+        // If the world re-anchored since the last step, the last camera origin moves with it
+        // and the particles turn and pick up the old frame's motion.
+        let reanchor = world
+            .get_resource_mut::<PendingShift>()
+            .and_then(|mut p| p.0.take());
+        let mut turn = None;
+        if let (Some(s), Some(last)) = (reanchor, self.last_origin.as_mut()) {
+            let old = *last;
+            *last = s.point(old);
+            if !s.is_translation_only()
+                || s.velocity != DVec3::ZERO
+                || s.angular_velocity != DVec3::ZERO
+            {
+                let r = s.rotation.as_quat();
+                let carried = s.velocity + s.angular_velocity.cross(s.rotation * old);
+                turn = Some((r, carried.as_vec3(), s.angular_velocity.as_vec3()));
+            }
+        }
+        let frame = world.resource::<ParticleFrame>();
         let shift = self
             .last_origin
             .map_or(Vec3::ZERO, |o| (o - view.origin).as_vec3());
@@ -581,12 +601,26 @@ impl RenderFeature for ParticleFeature {
                 (view.frame_index & 0xFFFF_FFFF) as u32,
                 0,
             ],
+            // Last frame's depth is in the old frame's axes after a turn: skip it for a frame.
             depth: [
-                f32::from(self.scene_collision && !view.orthographic),
+                f32::from(self.scene_collision && !view.orthographic && turn.is_none()),
                 view.near,
                 0.25,
                 0.0,
             ],
+            turn: match turn {
+                Some((r, ..)) => {
+                    let m = Mat3::from_quat(r);
+                    [
+                        m.x_axis.extend(1.0).to_array(),
+                        m.y_axis.extend(0.0).to_array(),
+                        m.z_axis.extend(0.0).to_array(),
+                    ]
+                }
+                None => [[0.0; 4]; 3],
+            },
+            frame_velocity: turn.map_or([0.0; 4], |(_, v, _)| v.extend(0.0).to_array()),
+            frame_spin: turn.map_or([0.0; 4], |(.., w)| w.extend(0.0).to_array()),
         };
         queue.write_buffer(&g.sim, 0, bytemuck::bytes_of(&sim));
 

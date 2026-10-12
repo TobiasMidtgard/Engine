@@ -322,3 +322,46 @@ fn sparks_stick_to_a_wall_the_camera_sees() {
         lumas[1]
     );
 }
+
+#[test]
+fn particles_stay_put_when_the_world_re_anchors() {
+    // A still cloud in front of the camera; then the world moves to a new origin (a plain
+    // floating-origin shift), then to a turned frame (as when entering another planet's
+    // sphere of influence). The camera moves with the world, so the cloud must stay on screen
+    // where it was.
+    let mut app = app(DVec3::ZERO, 400.0);
+    app.add_plugins(engine_world::WorldPlugin);
+    app.world
+        .resource_mut::<EffectLibrary>()
+        .insert(glow_cloud())
+        .unwrap();
+    app.world.spawn((
+        Transform::from_translation(TARGET),
+        ParticleEffect::new("test.glow"),
+    ));
+    let Some(first) = shot(&mut app, "vfx_shift_0.png") else {
+        return;
+    };
+    let center = project(TARGET);
+    let aside = project(TARGET + DVec3::new(2.0, 0.0, 0.0));
+    let lit = luma(&first, center, 3);
+    assert!(lit > luma(&first, aside, 2) + 60.0, "cloud not visible");
+    let shifts = [
+        engine_world::WorldShift::translate(DVec3::new(250.0, 0.0, -400.0)),
+        engine_world::WorldShift {
+            rotation: engine_core::math::DQuat::from_rotation_y(1.2),
+            translation: DVec3::new(-30.0, 0.0, 75.0),
+            ..engine_world::WorldShift::IDENTITY
+        },
+    ];
+    for (i, s) in shifts.into_iter().enumerate() {
+        app.world.write_message(s);
+        let img = shot(&mut app, &format!("vfx_shift_{}.png", i + 1)).unwrap();
+        let (c, a) = (luma(&img, center, 3), luma(&img, aside, 2));
+        assert!(
+            c > lit * 0.7 && c > a + 60.0,
+            "after shift {}: center {c} (was {lit}), aside {a}",
+            i + 1
+        );
+    }
+}

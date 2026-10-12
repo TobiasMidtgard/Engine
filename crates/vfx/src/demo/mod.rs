@@ -553,6 +553,37 @@ pub fn spawn_demo(commands: &mut Commands, origin: DVec3) {
     }
 }
 
+/// The demo's own world positions, for following a [`engine_world::WorldShift`].
+#[derive(SystemParam)]
+pub struct ShiftQueries<'w, 's> {
+    casters: Query<'w, 's, &'static mut DemoCaster>,
+    projectiles: Query<'w, 's, &'static mut DemoProjectile>,
+    orbits: Query<'w, 's, &'static mut DemoOrbit>,
+    walkers: Query<'w, 's, &'static mut DemoWalker>,
+    falling: Query<'w, 's, &'static mut DemoFalling>,
+}
+
+/// Move the demo's waypoints into a new reference frame (the demo itself assumes +Y is up).
+pub fn shift(q: &mut ShiftQueries, s: &engine_world::WorldShift) {
+    for mut c in &mut q.casters {
+        c.target = s.point(c.target);
+    }
+    for mut p in &mut q.projectiles {
+        p.from = s.point(p.from);
+        p.to = s.point(p.to);
+    }
+    for mut o in &mut q.orbits {
+        o.center = s.point(o.center);
+    }
+    for mut w in &mut q.walkers {
+        w.a = s.point(w.a);
+        w.b = s.point(w.b);
+    }
+    for mut f in &mut q.falling {
+        f.surface_y += s.translation.y;
+    }
+}
+
 /// Casts spells at the target in turn.
 pub fn run_casters(
     mut commands: Commands,

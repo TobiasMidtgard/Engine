@@ -31,6 +31,13 @@ struct Sim {
     shift: vec4<f32>,   // camera origin movement since last frame, w unused
     counts: vec4<u32>,  // update jobs, spawn jobs, frame index, unused
     depth: vec4<f32>,   // scene collision: enabled, near plane, surface thickness, unused
+    // The world re-anchored since last frame: rotation columns (turn_x.w = 1 when set), the
+    // old frame's velocity at the last camera origin and its angular velocity.
+    turn_x: vec4<f32>,
+    turn_y: vec4<f32>,
+    turn_z: vec4<f32>,
+    frame_velocity: vec4<f32>,
+    frame_spin: vec4<f32>,
 };
 
 @group(1) @binding(0) var<storage, read_write> particles: array<Particle>;
@@ -258,6 +265,13 @@ fn cs_update(
     if (p.age >= p.life) { return; }
     let e = emitters[job.emitter];
     if (!is_local(e)) {
+        if (sim.turn_x.w > 0.5) {
+            // Into the new frame: turned, and carried along with the old frame's motion.
+            let r = mat3x3<f32>(sim.turn_x.xyz, sim.turn_y.xyz, sim.turn_z.xyz);
+            let turned = r * p.pos;
+            p.vel = r * p.vel + sim.frame_velocity.xyz + cross(sim.frame_spin.xyz, turned);
+            p.pos = turned;
+        }
         p.pos += sim.shift.xyz;
     }
     p.emitter = job.emitter;

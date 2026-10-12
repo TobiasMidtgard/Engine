@@ -354,6 +354,19 @@ impl VfxRuntime {
     pub fn missing_effects(&self) -> impl Iterator<Item = &str> {
         self.missing.iter().map(String::as_str)
     }
+
+    /// Move every effect's world-space state into a new reference frame.
+    pub fn shift(&mut self, s: &engine_world::WorldShift) {
+        for inst in self.instances.values_mut().chain(self.orphans.iter_mut()) {
+            inst.pos = s.point(inst.pos);
+            inst.prev_pos = s.point(inst.prev_pos);
+            inst.rot = s.orientation(inst.rot);
+            inst.vel = s.velocity_at(inst.pos, inst.vel);
+            inst.plane = inst.plane.map(|(p, n)| (s.point(p), s.direction(n)));
+            inst.gravity = s.direction(inst.gravity);
+            inst.wind = s.direction(inst.wind);
+        }
+    }
 }
 
 /// Prewarm step, seconds.
