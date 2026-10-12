@@ -85,6 +85,33 @@ pub fn surface_at(along: f64) -> &'static str {
     STRETCHES[STRETCHES.len() - 1].0
 }
 
+/// The point on the trail's center line nearest to `offset` (relative to the trail's
+/// origin, height ignored): how far along the trail it is and how far `offset` is from it
+/// sideways, meters.
+pub fn nearest_on_trail(offset: DVec3) -> (f64, f64) {
+    let (h, r) = (HALF_STRAIGHT, BEND_RADIUS);
+    let (x, z) = (offset.x, offset.z);
+    if x > h {
+        let a = (x - h).atan2(-z);
+        (2.0 * h + a * r, ((x - h).hypot(z) - r).abs())
+    } else if x < -h {
+        let a = (-h - x).atan2(z);
+        (4.0 * h + BEND + a * r, ((x + h).hypot(z) - r).abs())
+    } else if z < 0.0 {
+        (x + h, (z + r).abs())
+    } else {
+        (2.0 * h + BEND + (h - x), (z - r).abs())
+    }
+}
+
+/// The surface material of the trail at `offset` from its origin, or `None` off the path.
+/// Lets a landscape paint its ground to match the trail, so anything else walking it (the
+/// player, NPCs, rain) finds the same surfaces as the trail's walkers.
+pub fn surface_under(offset: DVec3) -> Option<&'static str> {
+    let (along, side) = nearest_on_trail(offset);
+    (side <= TRAIL_WIDTH as f64 * 0.5).then(|| surface_at(along))
+}
+
 /// Where each stretch starts, meters along the trail.
 pub fn stretch_start(name: &str) -> Option<f64> {
     let mut s = 0.0;
@@ -148,11 +175,16 @@ impl TrailWalker {
     }
 }
 
-/// Coloured rings on the ground for every positioned sound the audio module plays.
-#[derive(Resource, Debug, Clone, Copy, Default, Serialize, Deserialize)]
+/// Coloured rings on the ground for the sounds the audio module plays: on and around footstep
+/// trails, or everywhere.
+#[derive(Resource, Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct SoundRings {
     pub enabled: bool,
+    /// Rings for every sound in the world, not just near trails.
+    pub everywhere: bool,
+    /// Trail origins (set by [`spawn_demo`]); rings show within 40 m of one.
+    pub near: Vec<DVec3>,
 }
 
 #[derive(Component, Debug, Clone, Copy)]
@@ -167,7 +199,8 @@ struct SoundRing {
 pub(crate) fn register(app: &mut App) {
     app.init_resource::<SoundRings>()
         .register_resource::<SoundRings>(
-            "Show a coloured ring on the ground for every sound as it plays (enabled).",
+            "Show a coloured ring on the ground for each sound as it plays (enabled): near \
+             footstep trails, or everywhere.",
         )
         .add_systems(Update, walk_trail)
         .add_systems(
@@ -196,7 +229,11 @@ pub fn spawn_demo(commands: &mut Commands, origin: DVec3) {
             });
         }
     });
-    commands.insert_resource(SoundRings { enabled: true });
+    commands.queue(move |world: &mut World| {
+        let mut rings = world.resource_mut::<SoundRings>();
+        rings.enabled = true;
+        rings.near.push(origin);
+    });
 
     let mut rng = Rng(0x7A11);
     let mut start = 0.0;
@@ -960,6 +997,9 @@ fn spawn_rings(mut commands: Commands, rings: Res<SoundRings>, mut cues: Message
     }
     for cue in cues.read() {
         let Some(p) = cue.position else { continue };
+        if !rings.everywhere && !rings.near.iter().any(|o| o.distance(p) < 40.0) {
+            continue;
+        }
         let key = cue.name.rsplit('.').next().unwrap_or(&cue.name);
         let color = RING_NAMES
             .iter()
@@ -1039,5 +1079,26 @@ mod tests {
         );
         assert_eq!(surface_at(TRAIL_LENGTH - 0.5), "water");
         assert_eq!(surface_at(TRAIL_LENGTH + 1.0), "grass");
+    }
+
+    #[test]
+    fn nearest_point_matches_the_path() {
+        let mut s = 0.0;
+        while s < TRAIL_LENGTH {
+            let (p, d) = trail_point(s);
+            let side = Vec3::new(-d.z, 0.0, d.x).as_dvec3();
+            for off in [-1.0, 0.0, 0.9] {
+                let (along, dist) = nearest_on_trail(p + side * off);
+                let gap = (along - s).abs().min(TRAIL_LENGTH - (along - s).abs());
+                assert!(
+                    gap < 1e-6 && (dist - off.abs()).abs() < 1e-6,
+                    "s {s} off {off}: {along} {dist}"
+                );
+            }
+            assert_eq!(surface_under(p), Some(surface_at(s + 1e-9)));
+            s += 0.37;
+        }
+        assert_eq!(surface_under(DVec3::ZERO), None);
+        assert_eq!(surface_under(DVec3::new(0.0, 0.0, -7.0 - 2.0)), None);
     }
 }

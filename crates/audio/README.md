@@ -58,7 +58,7 @@ Tunable at runtime (JSON, console, scripts, AI agents):
 | `AudioSettings` | output, master volume, speed of sound, doppler, air absorption, how much slow motion lowers pitch, silence in space, footstep range, voice limit, weather on/off |
 | `AudioMix` | volume per bus (world, ambience, music, ui, voice) and mute |
 | `FootstepSurfaces` | how each surface sounds underfoot: 14 layer weights, brightness, pitch, gain |
-| `SoundRings` | coloured rings on the ground for every sound |
+| `SoundRings` | coloured rings on the ground for each sound near a footstep trail (or everywhere) |
 | `AudioListener`, `ReverbZone` | components |
 | `audio.status`, `audio.play`, `audio.surfaces`, `audio.record`, `audio.stop_all` | API functions |
 
