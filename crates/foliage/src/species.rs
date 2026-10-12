@@ -133,7 +133,7 @@ impl Default for Glow {
 /// Which leaf texture a species uses.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 pub enum LeafStyle {
-    /// Ovate leaves on a twig spray (oak, hazel).
+    /// Rounded, toothed leaves on a twig spray (hazel, generic broadleaf).
     #[default]
     Broad,
     /// Many small leaves (birch, willow).
@@ -144,6 +144,8 @@ pub enum LeafStyle {
     ShortNeedles,
     /// Fern fronds.
     Frond,
+    /// Deeply lobed leaves crowded at the shoot tips (oak).
+    Lobed,
 }
 
 /// How the bark is colored along the trunk.
@@ -496,9 +498,9 @@ pub fn builtin_species() -> Vec<PlantSpecies> {
                 angle_high_deg: 38.0,
                 tip_bend: 0.3,
                 gnarl: 0.7,
-                leaf_size_m: 1.7,
+                leaf_size_m: 1.25,
                 leaf_density: 1.0,
-                leaf: LeafStyle::Broad,
+                leaf: LeafStyle::Lobed,
                 bark: BarkStyle::Plain,
             },
             fuel_kg: 900.0,
@@ -536,8 +538,8 @@ pub fn builtin_species() -> Vec<PlantSpecies> {
                 angle_high_deg: 24.0,
                 tip_bend: -0.45,
                 gnarl: 0.2,
-                leaf_size_m: 1.15,
-                leaf_density: 1.1,
+                leaf_size_m: 0.95,
+                leaf_density: 1.0,
                 leaf: LeafStyle::Small,
                 bark: BarkStyle::Birch,
             },
@@ -575,7 +577,7 @@ pub fn builtin_species() -> Vec<PlantSpecies> {
                 angle_high_deg: 62.0,
                 tip_bend: 0.35,
                 gnarl: 0.35,
-                leaf_size_m: 1.25,
+                leaf_size_m: 1.1,
                 leaf_density: 1.0,
                 leaf: LeafStyle::LongNeedles,
                 bark: BarkStyle::Pine,
@@ -616,7 +618,7 @@ pub fn builtin_species() -> Vec<PlantSpecies> {
                 angle_high_deg: 72.0,
                 tip_bend: 0.25,
                 gnarl: 0.05,
-                leaf_size_m: 0.95,
+                leaf_size_m: 0.9,
                 leaf_density: 1.0,
                 leaf: LeafStyle::ShortNeedles,
                 bark: BarkStyle::Plain,
@@ -657,7 +659,7 @@ pub fn builtin_species() -> Vec<PlantSpecies> {
                 angle_high_deg: 12.0,
                 tip_bend: -0.1,
                 gnarl: 0.4,
-                leaf_size_m: 1.0,
+                leaf_size_m: 0.8,
                 leaf_density: 1.0,
                 leaf: LeafStyle::Broad,
                 bark: BarkStyle::Plain,

@@ -16,7 +16,7 @@ use crate::meshgen::small::small;
 use crate::meshgen::small_textures::{
     Fungus, SMALL_ALPHA_CUTOFF, TextureSet, fern_pinna, fungus, meadow_atlas,
 };
-use crate::meshgen::textures::{ALPHA_CUTOFF, LeafKind, leaf_texture};
+use crate::meshgen::textures::{ALPHA_CUTOFF, LeafKind, kind_of, leaf_textures};
 use crate::meshgen::tree::{PlantMeshes, woody};
 use crate::species::{LeafStyle, PlantForm, PlantLibrary, PlantSpecies, srgb};
 
@@ -69,7 +69,8 @@ pub struct SpeciesVisual {
 #[derive(Resource, Default)]
 pub struct FoliageVisuals {
     pub species: Vec<Option<SpeciesVisual>>,
-    textures: HashMap<LeafStyle, Handle<Image>>,
+    /// Leaf texture and its normal map per leaf style (trees and shrubs).
+    textures: HashMap<LeafStyle, LeafImages>,
     /// Bark texture sets, one per kind of bark, shared by every species with that bark.
     bark_textures: HashMap<BarkKind, BarkImages>,
     small_textures: HashMap<SmallKind, SmallMaps>,
@@ -130,13 +131,29 @@ impl FoliageVisuals {
     }
 }
 
-fn leaf_kind(style: LeafStyle) -> LeafKind {
-    match style {
-        LeafStyle::Broad => LeafKind::Broad,
-        LeafStyle::Small => LeafKind::Small,
-        LeafStyle::LongNeedles => LeafKind::LongNeedles,
-        LeafStyle::ShortNeedles => LeafKind::ShortNeedles,
-        LeafStyle::Frond => LeafKind::Frond,
+/// A species' leaf texture (color with alpha cut-out) and its normal map.
+#[derive(Debug, Clone, Copy)]
+struct LeafImages {
+    color: Handle<Image>,
+    normal: Option<Handle<Image>>,
+}
+
+/// Paint the leaf images of a style: a 1024² atlas of sprays with a normal map for trees and
+/// shrubs, a single 256² image for fern fronds.
+fn paint_leaves(style: LeafStyle, images: &mut Assets<Image>) -> LeafImages {
+    let kind = kind_of(style);
+    let seed = 0x1eaf ^ style as u64;
+    if kind == LeafKind::Frond {
+        let t = leaf_textures(kind, 256, seed);
+        return LeafImages {
+            color: images.add(t.color),
+            normal: None,
+        };
+    }
+    let t = leaf_textures(kind, 1024, seed);
+    LeafImages {
+        color: images.add(t.color),
+        normal: Some(images.add(t.normal)),
     }
 }
 
@@ -177,10 +194,14 @@ pub fn ensure_species_visuals(
         }
         let texture = match sp.form {
             PlantForm::Broadleaf | PlantForm::Conifer | PlantForm::Shrub => {
+                // Ferns paint their own pinna maps (`SmallKind::Fern`).
                 let style = sp.shape.leaf;
-                Some(*visuals.textures.entry(style).or_insert_with(|| {
-                    images.add(leaf_texture(leaf_kind(style), 256, 0x1eaf ^ style as u64))
-                }))
+                Some(
+                    *visuals
+                        .textures
+                        .entry(style)
+                        .or_insert_with(|| paint_leaves(style, &mut images)),
+                )
             }
             _ => None,
         };
@@ -213,7 +234,7 @@ pub fn ensure_species_visuals(
 
 fn build_species(
     sp: &PlantSpecies,
-    texture: Option<Handle<Image>>,
+    texture: Option<LeafImages>,
     bark_images: Option<BarkImages>,
     small_maps: Option<SmallMaps>,
     meshes: &mut Assets<Mesh>,
@@ -261,16 +282,27 @@ fn build_species(
         bark_rigid = bark;
         bark_rigid.wind_sway = 0.0;
     }
+    let needles = matches!(
+        sp.shape.leaf,
+        LeafStyle::LongNeedles | LeafStyle::ShortNeedles
+    );
     let leaf_material = |color: [f32; 3]| {
+        // Thin leaves let sunlight through (they glow yellow-green against the sun); needles
+        // are thicker. Both are matte enough that a grazing sun doesn't turn them white.
         let mut m = StandardMaterial::color(color[0], color[1], color[2])
-            .with_roughness(0.78)
-            .with_subsurface(0.3)
+            .with_roughness(if needles { 0.82 } else { 0.86 })
+            .with_subsurface(if needles { 0.45 } else { 0.65 })
             .with_wind_sway(sp.wind_sway_m);
         // Leaves reflect less than the default dielectric (F0 ≈ 0.03).
-        m.reflectance = 0.35;
+        m.reflectance = 0.3;
         if let Some(t) = texture {
-            m = m.with_base_color_texture(t);
+            m = m.with_base_color_texture(t.color);
             m.alpha_mode = AlphaMode::Mask(ALPHA_CUTOFF);
+            if let Some(n) = t.normal {
+                // Each leaf in a spray tilts its own way and folds along its midrib.
+                m = m.with_normal_texture(n);
+                m.normal_scale = 1.0;
+            }
         }
         // Small plants and fungi: their own albedo + normal maps (cut out for plants).
         if let Some(maps) = small_maps {
@@ -286,6 +318,10 @@ fn build_species(
         }
         if small {
             m.perceptual_roughness = 0.75;
+            m.reflectance = 0.35;
+            if sp.form != PlantForm::Flower {
+                m.subsurface = 0.3;
+            }
         }
         if matches!(sp.form, PlantForm::Grass | PlantForm::Fern) {
             // Thin blades and pinnae glow when the sun is behind them.
