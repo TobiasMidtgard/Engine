@@ -484,6 +484,13 @@ fn fog_sky_visibility(rel: vec3<f32>) -> f32 {
 // ---------------------------------------------------------------- surface shading
 // Returns pre-exposed radiance for a lit surface at camera-relative position `rel`.
 fn shade_surface(s: Surface, rel: vec3<f32>) -> vec3<f32> {
+    return shade_surface_shadowed(s, rel, 1.0);
+}
+
+// `shade_surface` with extra sun visibility (0..1) from relief too small for the shadow maps,
+// such as parallax self-shadowing: deep mortar joints and the gaps between cobbles stay dark
+// in low sun.
+fn shade_surface_shadowed(s: Surface, rel: vec3<f32>, sun_visibility: f32) -> vec3<f32> {
     let v = normalize(-rel);
     let n = s.normal;
     let roughness = s.roughness * s.roughness;
@@ -498,7 +505,7 @@ fn shade_surface(s: Surface, rel: vec3<f32>) -> vec3<f32> {
     let n_dot_l = saturate(n_dot_l_raw);
     let sun_light = frame.sun_color.rgb * sun_transmittance(rel);
     if (dot(sun_light, sun_light) > 0.0) {
-        var shadow = shadow_factor(rel, n);
+        var shadow = shadow_factor(rel, n) * sun_visibility;
         if (shadow > 0.0 && n_dot_l_raw > 0.0) {
             shadow *= contact_shadow(rel, n);
         }

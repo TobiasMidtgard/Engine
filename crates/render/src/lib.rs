@@ -54,6 +54,7 @@ pub mod gltf_loader;
 pub mod gpu;
 pub mod grass;
 pub mod material;
+pub mod material_library;
 pub mod mesh;
 pub mod mesh_feature;
 pub mod renderer;
@@ -84,7 +85,8 @@ pub use gltf_loader::{
     spawn_gltf_scene_deferred,
 };
 pub use grass::{GrassBender, GrassField, GrassStyle};
-pub use material::{AlphaMode, StandardMaterial};
+pub use material::{AlphaMode, StandardMaterial, TextureMapping};
+pub use material_library::{MaterialMaps, MaterialPreset, MaterialTextures};
 pub use mesh::{Mesh, Shape, Vertex};
 pub use renderer::{
     RenderDisabled, RenderStats, Renderer, ScreenshotInfo, Screenshots, capture_now,
@@ -97,9 +99,10 @@ pub mod prelude {
     pub use crate::{
         AlphaMode, AmbientLight, AntiAliasing, Atmosphere, BoxFace, Camera, DirectionalLight,
         Exposure, FogSettings, GltfScene, GltfSceneSpawner, GrassBender, GrassField, GrassStyle,
-        Image, MaterialRef, Mesh, MeshRef, MeshRenderer, NoVirtualGeometry, PointLight, Projection,
-        RenderAppExt, RenderFeature, RenderPhase, RenderPlugin, RenderSettings, Screenshots, Shape,
-        SkyLightVolume, StandardMaterial, Tonemapper, spawn_gltf_scene, spawn_gltf_scene_deferred,
+        Image, MaterialPreset, MaterialRef, Mesh, MeshRef, MeshRenderer, NoVirtualGeometry,
+        PointLight, Projection, RenderAppExt, RenderFeature, RenderPhase, RenderPlugin,
+        RenderSettings, Screenshots, Shape, SkyLightVolume, StandardMaterial, TextureMapping,
+        Tonemapper, spawn_gltf_scene, spawn_gltf_scene_deferred,
     };
 }
 
@@ -346,37 +349,54 @@ mod tests {
     /// Every shader must compile against the shader library (no GPU needed).
     #[test]
     fn shaders_validate() {
-        let shaders: [(&str, &str, bool); 14] = [
-            ("mesh", include_str!("shaders/mesh.wgsl"), true),
+        let mut shaders: Vec<(&str, std::borrow::Cow<str>, bool)> = vec![
+            ("mesh", include_str!("shaders/mesh.wgsl").into(), true),
             (
                 "mesh_shadow",
-                include_str!("shaders/mesh_shadow.wgsl"),
+                include_str!("shaders/mesh_shadow.wgsl").into(),
                 false,
             ),
-            ("sky", include_str!("shaders/sky.wgsl"), true),
-            ("post", include_str!("shaders/post.wgsl"), false),
-            ("bloom", include_str!("shaders/bloom.wgsl"), false),
-            ("blit", include_str!("shaders/blit.wgsl"), false),
-            ("exposure", include_str!("shaders/exposure.wgsl"), false),
-            ("gtao", include_str!("shaders/gtao.wgsl"), true),
-            ("taa", include_str!("shaders/taa.wgsl"), true),
-            ("ssr", include_str!("shaders/ssr.wgsl"), true),
-            ("ssgi", include_str!("shaders/ssgi.wgsl"), true),
+            ("sky", include_str!("shaders/sky.wgsl").into(), true),
+            ("post", include_str!("shaders/post.wgsl").into(), false),
+            ("bloom", include_str!("shaders/bloom.wgsl").into(), false),
+            ("blit", include_str!("shaders/blit.wgsl").into(), false),
+            (
+                "exposure",
+                include_str!("shaders/exposure.wgsl").into(),
+                false,
+            ),
+            ("gtao", include_str!("shaders/gtao.wgsl").into(), true),
+            ("taa", include_str!("shaders/taa.wgsl").into(), true),
+            ("ssr", include_str!("shaders/ssr.wgsl").into(), true),
+            ("ssgi", include_str!("shaders/ssgi.wgsl").into(), true),
             (
                 "atmosphere_luts",
-                include_str!("shaders/atmosphere_luts.wgsl"),
+                include_str!("shaders/atmosphere_luts.wgsl").into(),
                 true,
             ),
-            ("sky_camera", include_str!("shaders/sky_camera.wgsl"), true),
+            (
+                "sky_camera",
+                include_str!("shaders/sky_camera.wgsl").into(),
+                true,
+            ),
             (
                 "environment_filter",
-                include_str!("shaders/environment_filter.wgsl"),
+                include_str!("shaders/environment_filter.wgsl").into(),
+                false,
+            ),
+            (
+                "material_gen_mips",
+                include_str!("shaders/material_gen_mips.wgsl").into(),
                 false,
             ),
         ];
+        // Every material preset's generator.
+        for preset in MaterialPreset::ALL {
+            shaders.push((preset.name(), preset.generator_source().into(), false));
+        }
         let mut errors = Vec::new();
         for (name, src, frame) in shaders {
-            if let Err(e) = validate_wgsl(name, &compose_shader(src, frame)) {
+            if let Err(e) = validate_wgsl(name, &compose_shader(&src, frame)) {
                 errors.push(e);
             }
         }
