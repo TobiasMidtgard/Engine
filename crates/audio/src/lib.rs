@@ -5,10 +5,14 @@ mod api;
 pub mod demo;
 pub mod dsp;
 pub mod effects;
+mod fires;
 pub mod footstep;
 pub mod mixer;
 mod output;
 mod systems;
+pub mod thunder;
+pub mod vehicle;
+mod water;
 pub mod wav;
 
 use std::collections::HashMap;
@@ -41,6 +45,7 @@ impl Plugin for AudioPlugin {
             app.add_plugins(engine_world::WorldPlugin);
         }
         app.init_resource::<AudioSettings>()
+            .init_resource::<thunder::Strikes>()
             .init_resource::<AudioMix>()
             .init_resource::<FootstepSurfaces>()
             .insert_resource(Audio::new())
@@ -49,7 +54,8 @@ impl Plugin for AudioPlugin {
                 "Audio settings: output (Auto/Device/Offline/Off), master_db, speed_of_sound (m/s), \
                  doppler (0..1), air_absorption (/m), slow_motion_pitch (0..1, how much time \
                  dilation lowers pitch), min_pitch, slow_motion_darken (0..1), space_is_silent, \
-                 atmosphere_height_m, footstep_distance_m, max_voices, weather_ambience.",
+                 atmosphere_height_m, footstep_distance_m, max_voices, weather_ambience, \
+                 occlusion (walls muffle sounds).",
             )
             .register_resource::<AudioMix>(
                 "Bus volumes in dB: world (footsteps, impacts, explosions), ambience (rain, wind, \
@@ -73,14 +79,23 @@ impl Plugin for AudioPlugin {
                 (
                     systems::ensure_output,
                     systems::update_listener,
+                    thunder::play_lightning,
                     systems::play_footsteps,
                     systems::play_world_events,
+                    water::play_splashes,
                     systems::weather_ambience,
+                    fires::fire_ambience,
+                    water::water_ambience,
                     systems::reverb_zones,
                     systems::follow_emitters,
+                    systems::occlusion,
                 )
                     .chain()
                     .in_set(UpdateSet::AfterPropagate),
+            )
+            .add_systems(
+                PostUpdate,
+                systems::shift_world.in_set(engine_world::WorldShiftSet::Apply),
             )
             .add_systems(Last, systems::drive_output);
         api::register(app);
@@ -133,6 +148,14 @@ pub struct AudioSettings {
     pub max_voices: u32,
     /// Play rain, wind and thunder from the weather.
     pub weather_ambience: bool,
+    /// Muffle sounds that walls and terrain stand between (physics raycasts).
+    pub occlusion: bool,
+    /// Play the roar and crackle of fires near the listener (burning ground in `HeatField`,
+    /// burning `Combustible`s).
+    pub fires: bool,
+    /// Play waves lapping at nearby shores and streams babbling (from the water module's
+    /// `WaterQuery`).
+    pub water: bool,
 }
 
 impl Default for AudioSettings {
@@ -151,6 +174,9 @@ impl Default for AudioSettings {
             footstep_distance_m: 60.0,
             max_voices: 96,
             weather_ambience: true,
+            occlusion: true,
+            fires: true,
+            water: true,
         }
     }
 }
@@ -289,6 +315,8 @@ pub struct PlayOptions {
     pub velocity: Vec3,
     /// Keep the sound attached to this entity as it moves.
     pub follow: Option<Entity>,
+    /// The entity making the sound (ignored when checking what blocks it).
+    pub source: Option<Entity>,
     pub bus: Bus,
     pub gain_db: f32,
     /// Playback rate (2 = an octave up).
@@ -315,6 +343,7 @@ impl PlayOptions {
             at: Some(position),
             velocity: Vec3::ZERO,
             follow: None,
+            source: None,
             bus: Bus::World,
             gain_db: 0.0,
             pitch: 1.0,
@@ -378,6 +407,13 @@ impl PlayOptions {
 
     pub fn follow(mut self, entity: Entity) -> Self {
         self.follow = Some(entity);
+        self.source = Some(entity);
+        self
+    }
+
+    /// The entity making the sound, so its own collider doesn't muffle it.
+    pub fn source(mut self, entity: Option<Entity>) -> Self {
+        self.source = entity;
         self
     }
 
@@ -404,7 +440,13 @@ impl PlayOptions {
 
 struct Live {
     follow: Option<Entity>,
+    source: Option<Entity>,
+    /// Where it is now (positioned sounds).
     last: Option<DVec3>,
+    bus: Bus,
+    /// Occlusion last sent, and when to check again (real seconds).
+    occlusion: f32,
+    check_at: f64,
 }
 
 struct Recording {
@@ -437,6 +479,8 @@ pub struct Audio {
     max_voices: usize,
     listener: DVec3,
     listener_velocity: Vec3,
+    /// The entity the ears are on (its own colliders don't block sound).
+    listener_entity: Option<Entity>,
     /// Mixer sample to start new sounds at (offline output only).
     start_sample: Option<u64>,
     meters: Meters,
@@ -462,6 +506,7 @@ impl Audio {
             max_voices: 96,
             listener: DVec3::ZERO,
             listener_velocity: Vec3::ZERO,
+            listener_entity: None,
             start_sample: None,
             meters: Meters::default(),
             recording: None,
@@ -608,7 +653,11 @@ impl Audio {
                 id,
                 Live {
                     follow: opts.follow,
+                    source: opts.source.or(opts.follow),
                     last: opts.at,
+                    bus: opts.bus,
+                    occlusion: 0.0,
+                    check_at: 0.0,
                 },
             );
             id
@@ -758,6 +807,19 @@ impl Audio {
         if let Some(l) = self.live.get_mut(&id) {
             l.last = Some(p);
         }
+    }
+
+    /// Move the ears and every playing sound into the world's new frame.
+    fn shift_world(&mut self, shift: &engine_world::WorldShift) {
+        self.listener = shift.point(self.listener);
+        self.listener_velocity = shift.direction(self.listener_velocity);
+        for l in self.live.values_mut() {
+            l.last = l.last.map(|p| shift.point(p));
+        }
+        self.send(Command::ShiftWorld {
+            rotation: shift.rotation,
+            translation: shift.translation,
+        });
     }
 }
 

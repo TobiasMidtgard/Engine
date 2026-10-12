@@ -9,14 +9,15 @@ use engine_render::Camera;
 use engine_world::physics::{Collider, ContactEvent, ContactPhase, PhysicsQueries, QueryFilter};
 use engine_world::{
     AttackEvent, AttackKind, Env, GroundContact, PrecipitationKind, ProjectileTrace, SurfaceCell,
-    WaterSplash, WorldImpulse,
+    WorldImpulse,
 };
 
-use crate::ambience::{RainSound, ThunderSound, WindSound};
+use crate::ambience::{RainSound, WindSound};
 use crate::dsp::{Noise, to_db};
 use crate::effects::{ExplosionSound, WhizSound, WhooshSound};
 use crate::footstep::{FootstepSound, Step, SurfaceSound};
 use crate::mixer::{Bus, Clock, Command, VoiceId};
+use crate::thunder;
 use crate::{
     Audio, AudioCue, AudioListener, AudioMix, AudioSettings, FootstepSurfaces, PlayOptions,
     ReverbZone,
@@ -48,7 +49,7 @@ pub(crate) fn ensure_output(
 }
 
 /// Clock for sounds made by `entity`: its own time scale if it has one.
-fn clock_for(entity: Option<Entity>, scales: &Query<&LocalTimeScale>) -> Clock {
+pub(crate) fn clock_for(entity: Option<Entity>, scales: &Query<&LocalTimeScale>) -> Clock {
     match entity.and_then(|e| scales.get(e).ok()) {
         Some(s) if s.ignore_world_dilation => Clock::Real(s.factor),
         Some(s) => Clock::World(s.factor),
@@ -63,8 +64,8 @@ pub(crate) fn update_listener(
     mix: Res<AudioMix>,
     time: Res<Time>,
     env: Env,
-    listeners: Query<(&GlobalTransform, &AudioListener)>,
-    cameras: Query<(&GlobalTransform, &Camera)>,
+    listeners: Query<(Entity, &GlobalTransform, &AudioListener)>,
+    cameras: Query<(Entity, &GlobalTransform, &Camera)>,
     mut last: Local<Option<DVec3>>,
 ) {
     if !audio.is_running() {
@@ -72,17 +73,18 @@ pub(crate) fn update_listener(
     }
     let pose = listeners
         .iter()
-        .max_by_key(|(_, l)| l.priority)
-        .map(|(t, _)| t)
+        .max_by_key(|(_, _, l)| l.priority)
+        .map(|(e, t, _)| (e, t))
         .or_else(|| {
             cameras
                 .iter()
-                .filter(|(_, c)| c.active)
-                .max_by_key(|(_, c)| c.order)
-                .map(|(t, _)| t)
+                .filter(|(_, _, c)| c.active)
+                .max_by_key(|(_, _, c)| c.order)
+                .map(|(e, t, _)| (e, t))
         });
+    audio.listener_entity = pose.map(|(e, _)| e);
     let (pos, rot) = pose
-        .map(|t| (t.translation(), t.rotation()))
+        .map(|(_, t)| (t.translation(), t.rotation()))
         .unwrap_or((DVec3::ZERO, Quat::IDENTITY));
     let dt = time.real_delta_secs().max(1e-4) as f64;
     // A jump of more than 50 m in one frame is a teleport, not a velocity.
@@ -216,6 +218,7 @@ pub(crate) fn play_footsteps(
         let opts = PlayOptions::at(c.position)
             .range(1.5, max)
             .clock(clock_for(c.entity, &scales))
+            .source(c.entity)
             .reverb(0.35);
         let voice = audio.play(FootstepSound::new(fs, &step), opts);
         if !voice.is_none() {
@@ -254,13 +257,13 @@ pub(crate) fn play_world_events(
     mut traces: MessageReader<ProjectileTrace>,
     mut attacks: MessageReader<AttackEvent>,
     mut contacts: MessageReader<ContactEvent>,
-    mut splashes: MessageReader<WaterSplash>,
     transforms: Query<&GlobalTransform>,
     colliders: Query<&Collider>,
     scales: Query<&LocalTimeScale>,
     env: Env,
     surfaces: Res<FootstepSurfaces>,
     time: Res<Time>,
+    strikes: Res<thunder::Strikes>,
     mut cues: MessageWriter<AudioCue>,
     mut memory: Local<ImpactMemory>,
 ) {
@@ -269,49 +272,16 @@ pub(crate) fn play_world_events(
         traces.clear();
         attacks.clear();
         contacts.clear();
-        splashes.clear();
         return;
     }
     let fs = audio.sample_rate();
     let listener = audio.listener;
 
-    // Something broke the water's surface.
-    let water = surfaces
-        .surfaces
-        .get("water")
-        .copied()
-        .or_else(|| SurfaceSound::preset("water"))
-        .unwrap_or_default();
-    for (n, s) in splashes.read().enumerate() {
-        if n >= 8 || s.position.distance(listener) > 100.0 {
-            continue;
-        }
-        let strength = (s.mass_kg.max(0.0) / 4.0).sqrt() * (1.0 + 0.1 * s.velocity.length());
-        if strength < 0.05 {
-            continue;
-        }
-        let step = Step::impact(water, strength.min(4.0), audio.next_seed());
-        let voice = audio.play(
-            FootstepSound::new(fs, &step),
-            PlayOptions::at(s.position)
-                .range(1.0 + s.radius, 100.0)
-                .clock(clock_for(s.source, &scales))
-                .reverb(0.35),
-        );
-        if !voice.is_none() {
-            cues.write(AudioCue {
-                voice,
-                position: Some(s.position),
-                name: "splash.water".into(),
-                loudness: (strength * 0.4).min(1.0),
-            });
-        }
-    }
-
     // Explosions and other blasts.
     for i in impulses.read() {
         let energy = i.energy_j.max(i.strength * i.strength * 2_000.0);
-        if energy < 5e4 {
+        // A lightning strike's blast is already in its thunder.
+        if energy < 5e4 || strikes.is_strike(i.center) {
             continue;
         }
         let seed = audio.next_seed();
@@ -460,6 +430,8 @@ pub(crate) fn weather_ambience(
     physics: Res<PhysicsQueries>,
     surfaces: Res<FootstepSurfaces>,
     time: Res<Time>,
+    strikes: Res<thunder::Strikes>,
+    mut cues: MessageWriter<AudioCue>,
     mut state: Local<AmbienceState>,
 ) {
     if !audio.is_running() {
@@ -550,22 +522,22 @@ pub(crate) fn weather_ambience(
         state.wind = VoiceId::NONE;
     }
 
-    // Thunder.
-    if w.storm > 0.02 {
+    // Thunder, made up while the weather doesn't send its own lightning strikes.
+    if w.storm > 0.02 && !strikes.weather_has_lightning(time.real_elapsed_secs_f64()) {
         let seed = audio.next_seed();
         let rng = state.rng.get_or_insert_with(|| Noise::new(seed));
         state.next_thunder -= time.delta_secs();
         if state.next_thunder <= 0.0 {
-            let distance = 300.0 + 7_700.0 * rng.uniform().powf(0.7);
             let next = rng.exp_interval(w.storm / 18.0).min(120.0);
             let seed = rng.next_u32() as u64;
             state.next_thunder = next;
-            let delay = distance / settings.speed_of_sound.max(1.0);
-            let gain = (-10.0 * (distance / 1_000.0).log10()).clamp(-14.0, 4.0);
-            audio.play(
-                ThunderSound::new(fs, distance, seed),
-                PlayOptions::ambience().delay(delay).gain_db(gain),
-            );
+            let ground = env.ground(p).map(|g| g.height).unwrap_or(p.y - 1.7);
+            let (channel, current) = thunder::random_strike(p, ground, up, 300.0, 8_000.0, seed);
+            if let Some(cue) =
+                thunder::play_thunder(&mut audio, &channel, current, settings.speed_of_sound, seed)
+            {
+                cues.write(cue);
+            }
         }
     }
 }
@@ -645,6 +617,20 @@ pub(crate) fn follow_emitters(
     }
 }
 
+/// The world moved to a new frame: take the ears and every sound along.
+pub(crate) fn shift_world(
+    mut audio: ResMut<Audio>,
+    mut shifts: MessageReader<engine_world::WorldShift>,
+) {
+    let mut total: Option<engine_world::WorldShift> = None;
+    for s in shifts.read() {
+        total = Some(total.map_or(*s, |t| t.then(s)));
+    }
+    if let Some(shift) = total {
+        audio.shift_world(&shift);
+    }
+}
+
 pub(crate) fn drive_output(
     mut audio: ResMut<Audio>,
     time: Res<Time>,
@@ -662,5 +648,102 @@ pub(crate) fn drive_output(
         let m = audio.meters();
         d.set("audio.voices", audio.voice_count() as f64);
         d.set("audio.peak_db", to_db(m.master_peak) as f64);
+    }
+}
+
+/// A sound due an occlusion check: voice, position, source entity, occlusion last sent.
+type OcclusionCheck = (VoiceId, DVec3, Option<Entity>, f32);
+
+/// Rays cast per frame for occlusion (3 per voice checked).
+const OCCLUSION_RAYS_PER_FRAME: usize = 48;
+/// How often each sound's line of sight is rechecked, real seconds.
+const OCCLUSION_INTERVAL: f64 = 0.1;
+
+/// Muffle sounds that something solid stands between: one ray straight to the sound and two
+/// past it (over the top and round the side), so a sound just round a corner or over a low
+/// wall is only partly muffled. Dense materials (stone, metal) block more than wood or cloth.
+pub(crate) fn occlusion(
+    mut audio: ResMut<Audio>,
+    settings: Res<AudioSettings>,
+    physics: Res<PhysicsQueries>,
+    env: Env,
+    time: Res<Time>,
+    parents: Query<&ChildOf>,
+    mut work: Local<Vec<OcclusionCheck>>,
+) {
+    if !audio.is_running() {
+        return;
+    }
+    let now = time.real_elapsed_secs_f64();
+    let listener = audio.listener;
+    let enabled = settings.occlusion;
+    work.clear();
+    for (id, l) in audio.live.iter() {
+        let Some(p) = l.last else { continue };
+        if !l.bus.in_world() || (now < l.check_at && enabled) {
+            continue;
+        }
+        if !enabled && l.occlusion == 0.0 {
+            continue;
+        }
+        work.push((*id, p, l.source, l.occlusion));
+        if work.len() * 3 >= OCCLUSION_RAYS_PER_FRAME {
+            break;
+        }
+    }
+    if work.is_empty() {
+        return;
+    }
+    // The listener's own body (and whatever carries it) never blocks.
+    let mut exclude: Vec<Entity> = Vec::new();
+    let mut e = audio.listener_entity;
+    while let Some(x) = e {
+        exclude.push(x);
+        e = parents.get(x).ok().map(|c| c.0);
+        if exclude.len() > 8 {
+            break;
+        }
+    }
+    let up = env.up(listener);
+    for &(id, p, source, last) in work.iter() {
+        let amount = if enabled {
+            let mut filter = QueryFilter {
+                exclude: exclude.clone(),
+                ..Default::default()
+            };
+            filter.exclude.extend(source);
+            let target = p + (up * 0.3).as_dvec3();
+            let to = (target - listener).as_vec3();
+            let dist = to.length();
+            if dist < 0.5 {
+                0.0
+            } else {
+                let side = to.cross(up).normalize_or_zero() * (0.25 * dist).clamp(0.5, 3.0);
+                let over = up * (0.15 * dist).clamp(0.5, 3.0);
+                let mut amount = 0.0;
+                for (weight, aim) in [(0.6, Vec3::ZERO), (0.2, over), (0.2, side)] {
+                    let goal = target + aim.as_dvec3();
+                    let d = (goal - listener).as_vec3();
+                    let len = d.length();
+                    if let Some(hit) = physics.raycast(listener, d / len, len, &filter)
+                        && hit.distance > 0.2
+                        && hit.distance < len - 0.25
+                    {
+                        let density = env.material(hit.surface).density;
+                        amount += weight * (0.55 + 0.45 * (density / 2_400.0).min(1.0));
+                    }
+                }
+                amount
+            }
+        } else {
+            0.0
+        };
+        if let Some(l) = audio.live.get_mut(&id) {
+            l.check_at = now + OCCLUSION_INTERVAL;
+            l.occlusion = amount;
+        }
+        if (amount - last).abs() > 0.02 {
+            audio.send(Command::SetOcclusion { id, amount });
+        }
     }
 }

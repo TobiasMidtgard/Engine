@@ -169,3 +169,372 @@ fn the_trail_walks_every_surface() {
         assert!(heard.contains(&name), "never heard {name}; heard {heard:?}");
     }
 }
+
+/// A concrete wall: the plane x = 5, as tall and wide as you like.
+struct Wall;
+
+impl engine_world::physics::PhysicsQuery for Wall {
+    fn raycast(
+        &self,
+        origin: DVec3,
+        dir: Vec3,
+        max_distance: f32,
+        _: &engine_world::physics::QueryFilter,
+    ) -> Option<engine_world::physics::Hit> {
+        if dir.x.abs() < 1e-6 {
+            return None;
+        }
+        let t = ((5.0 - origin.x) / dir.x as f64) as f32;
+        (t > 0.0 && t <= max_distance).then(|| engine_world::physics::Hit {
+            entity: Entity::PLACEHOLDER,
+            point: origin + (dir * t).as_dvec3(),
+            normal: Vec3::NEG_X,
+            distance: t,
+            surface: engine_world::SurfaceId(12),
+        })
+    }
+    fn shapecast(
+        &self,
+        _: &engine_world::physics::ColliderShape,
+        _: DVec3,
+        _: Quat,
+        _: Vec3,
+        _: f32,
+        _: &engine_world::physics::QueryFilter,
+    ) -> Option<engine_world::physics::Hit> {
+        None
+    }
+    fn overlap(
+        &self,
+        _: &engine_world::physics::ColliderShape,
+        _: DVec3,
+        _: Quat,
+        _: &engine_world::physics::QueryFilter,
+        _: &mut Vec<Entity>,
+    ) {
+    }
+    fn closest_point(
+        &self,
+        _: DVec3,
+        _: f32,
+        _: &engine_world::physics::QueryFilter,
+    ) -> Option<engine_world::physics::Hit> {
+        None
+    }
+}
+
+/// Energy above 2 kHz relative to the whole (how bright a recording is).
+fn brightness(samples: &[f32]) -> f32 {
+    let mono: Vec<f32> = samples.chunks(2).map(|c| 0.5 * (c[0] + c[1])).collect();
+    // First difference ≈ a high-pass: its share of the energy tracks the highs.
+    let diff: f32 = mono.windows(2).map(|w| (w[1] - w[0]).powi(2)).sum();
+    let all: f32 = mono.iter().map(|x| x * x).sum();
+    diff / all.max(1e-12)
+}
+
+#[test]
+fn walls_muffle_sounds_behind_them() {
+    let mut app = app();
+    app.insert_resource(engine_world::physics::PhysicsQueries(std::sync::Arc::new(
+        Wall,
+    )));
+    app.world
+        .spawn((AudioListener::default(), Transform::from_xyz(0.0, 1.7, 0.0)));
+    // Gravel steps 10 m away: first in the open (-x), then behind the wall (+x).
+    let open = record(&mut app, "open", 60, |app, i| {
+        if i % 15 == 0 {
+            step_on(app, "gravel", DVec3::new(-10.0, 0.0, 0.0));
+        }
+    });
+    let walled = record(&mut app, "walled", 60, |app, i| {
+        if i % 15 == 0 {
+            step_on(app, "gravel", DVec3::new(10.0, 0.0, 0.0));
+        }
+    });
+    let (lo, lw) = (rms(&open), rms(&walled));
+    assert!(
+        lw < lo * 0.45,
+        "the wall should quieten the steps: {lw} vs {lo}"
+    );
+    let (bo, bw) = (brightness(&open), brightness(&walled));
+    assert!(bw < bo * 0.6, "and muffle them: {bw} vs {bo}");
+
+    // Without occlusion the wall changes nothing.
+    app.world.resource_mut::<AudioSettings>().occlusion = false;
+    let off = record(&mut app, "off", 60, |app, i| {
+        if i % 15 == 0 {
+            step_on(app, "gravel", DVec3::new(10.0, 0.0, 0.0));
+        }
+    });
+    assert!(rms(&off) > lo * 0.6, "{} vs {lo}", rms(&off));
+}
+
+fn heat_disc(app: &mut App, center: DVec3, radius: f64, celsius: f32) {
+    let mut heat = app.world.resource_mut::<engine_world::HeatField>();
+    let grid = &mut heat.grid;
+    let lo = grid.cell_at(center - DVec3::splat(radius));
+    let hi = grid.cell_at(center + DVec3::splat(radius));
+    for y in lo.y..=hi.y {
+        for x in lo.x..=hi.x {
+            let c = IVec2::new(x, y);
+            let cc = grid.cell_center(c);
+            if DVec2::new(cc.x - center.x, cc.y - center.z).length() <= radius {
+                grid.set(c, celsius);
+            }
+        }
+    }
+}
+
+#[test]
+fn burning_ground_and_burning_things_are_heard() {
+    let mut app = app();
+    app.world
+        .spawn((AudioListener::default(), Transform::from_xyz(0.0, 1.7, 0.0)));
+    let quiet = record(&mut app, "no_fire", 45, |_, _| {});
+
+    // A patch of grass burning 8 m away.
+    heat_disc(&mut app, DVec3::new(8.0, 0.0, 0.0), 3.0, 700.0);
+    let mut cues = Vec::new();
+    let burning = record(&mut app, "grass_fire", 60, |app, _| {
+        let msgs = app.world.resource::<Messages<AudioCue>>();
+        cues.extend(
+            msgs.iter_current_update_messages()
+                .filter(|c| c.name == "fire")
+                .filter_map(|c| c.position),
+        );
+    });
+    let quiet_rms = rms(&quiet[quiet.len() / 2..]);
+    let fire_rms = rms(&burning[burning.len() / 2..]);
+    assert!(
+        fire_rms > quiet_rms * 2.0 && fire_rms > 0.01,
+        "fire {fire_rms} vs quiet {quiet_rms}"
+    );
+    assert_eq!(cues.len(), 1, "one patch, one fire: {cues:?}");
+    assert!(
+        cues[0].distance(DVec3::new(8.0, 0.6, 0.0)) < 1.5,
+        "{}",
+        cues[0]
+    );
+
+    // A burning tree is heard on its own; when the ground goes out its fire fades.
+    app.world.spawn((
+        Transform::from_xyz(-12.0, 0.0, 0.0),
+        engine_world::Combustible {
+            fuel_kg: 60.0,
+            state: engine_world::BurnState::Burning,
+            ..Default::default()
+        },
+    ));
+    heat_disc(&mut app, DVec3::new(8.0, 0.0, 0.0), 3.0, 0.0);
+    let before = app.world.resource::<Audio>().voice_count();
+    let mut tree_cue = false;
+    record(&mut app, "tree_fire", 120, |app, _| {
+        let msgs = app.world.resource::<Messages<AudioCue>>();
+        tree_cue |= msgs
+            .iter_current_update_messages()
+            .any(|c| c.name == "fire" && c.position.is_some_and(|p| p.x < -10.0));
+    });
+    assert!(tree_cue, "the burning tree was never heard");
+    assert_eq!(
+        app.world.resource::<Audio>().voice_count(),
+        before,
+        "the grass fire should have faded out as the tree fire started"
+    );
+}
+
+/// A lake east of x = 6 (its bed sloping down), and a brook running north along x = -9.
+struct Lakeside;
+
+impl engine_world::GroundQuery for Lakeside {
+    fn sample(&self, p: DVec3) -> Option<engine_world::GroundSample> {
+        let height = if p.x > 6.0 {
+            -(p.x - 6.0) * 0.3
+        } else if (p.x + 9.0).abs() < 1.0 {
+            -0.4
+        } else {
+            0.0
+        };
+        Some(engine_world::GroundSample {
+            height,
+            normal: Vec3::Y,
+            surface: Default::default(),
+        })
+    }
+}
+
+impl engine_world::WaterQuery for Lakeside {
+    fn sample(&self, p: DVec3) -> Option<engine_world::WaterSample> {
+        let (depth, velocity) = if p.x > 6.0 {
+            ((p.x - 6.0) as f32 * 0.3, Vec3::ZERO)
+        } else if (p.x + 9.0).abs() < 1.0 {
+            (0.3, Vec3::new(0.0, 0.0, -1.2))
+        } else {
+            return None;
+        };
+        Some(engine_world::WaterSample {
+            surface_height: if p.x > 6.0 { 0.0 } else { -0.1 },
+            depth,
+            velocity,
+            normal: Vec3::Y,
+        })
+    }
+}
+
+#[test]
+fn shores_lap_and_brooks_babble() {
+    let mut app = app();
+    app.insert_resource(engine_world::Ground(std::sync::Arc::new(Lakeside)));
+    app.insert_resource(engine_world::Water(std::sync::Arc::new(Lakeside)));
+    let listener = app
+        .world
+        .spawn((AudioListener::default(), Transform::from_xyz(0.0, 1.7, 0.0)))
+        .id();
+    let by_water = record(&mut app, "lakeside", 150, |_, _| {});
+    // Count only the water: compare with the same place with water sounds off.
+    app.world.resource_mut::<AudioSettings>().water = false;
+    let dry = record(&mut app, "lakeside_off", 150, |_, _| {});
+    let (wet, quiet) = (
+        rms(&by_water[by_water.len() / 2..]),
+        rms(&dry[dry.len() / 2..]),
+    );
+    assert!(
+        wet > quiet * 1.5 && wet > 0.002,
+        "by the water {wet}, off {quiet}"
+    );
+
+    // Far inland there's nothing to hear.
+    app.world.resource_mut::<AudioSettings>().water = true;
+    app.world
+        .entity_mut(listener)
+        .insert(Transform::from_xyz(-200.0, 1.7, 0.0));
+    record(&mut app, "inland_settle", 90, |_, _| {});
+    let before = app.world.resource::<Audio>().voice_count();
+    app.world.resource_mut::<AudioSettings>().water = false;
+    record(&mut app, "inland_off", 90, |_, _| {});
+    assert_eq!(app.world.resource::<Audio>().voice_count(), before);
+}
+
+#[test]
+fn sounds_stay_put_when_the_world_shifts() {
+    let mut app = app();
+    app.world
+        .spawn((AudioListener::default(), Transform::from_xyz(0.0, 1.7, 0.0)));
+    app.update();
+    {
+        let mut audio = app.world.resource_mut::<Audio>();
+        let fs = audio.sample_rate();
+        audio.play(
+            engine_audio::effects::ToneSound::new(fs, 330.0, 4.0, 0.3),
+            engine_audio::PlayOptions::at(DVec3::new(5.0, 1.7, 0.0)),
+        );
+    }
+    let x = record(&mut app, "shift", 90, |app, i| {
+        if i == 45 {
+            // A floating-origin move: everything is now 10 km further along x.
+            app.world
+                .write_message(engine_world::WorldShift::translate(DVec3::new(
+                    10_000.0, 0.0, 0.0,
+                )));
+        }
+    });
+    // Stereo: the tone is to the right before and after.
+    let window = |a: f32, b: f32| {
+        let s = &x[((a * 48_000.0) as usize * 2)..((b * 48_000.0) as usize * 2)];
+        let (mut l, mut r) = (0.0f32, 0.0f32);
+        for f in s.chunks(2) {
+            l += f[0] * f[0];
+            r += f[1] * f[1];
+        }
+        (l.sqrt(), r.sqrt())
+    };
+    let before = window(0.6, 1.4);
+    let after = window(1.7, 2.6);
+    let level = |w: (f32, f32)| (w.0 * w.0 + w.1 * w.1).sqrt();
+    assert!(
+        level(after) > level(before) * 0.8 && level(after) < level(before) * 1.25,
+        "level jumped: {before:?} -> {after:?}"
+    );
+    assert!(after.1 > after.0 * 1.5, "no longer on the right: {after:?}");
+}
+
+#[test]
+fn lightning_strikes_roll_thunder_late() {
+    let mut app = app();
+    app.world
+        .spawn((AudioListener::default(), Transform::from_xyz(0.0, 1.7, 0.0)));
+    let ground = DVec3::new(1_200.0, 0.0, 0.0);
+    let mut cues = Vec::new();
+    let x = record(&mut app, "lightning", 300, |app, i| {
+        if i == 15 {
+            app.world.write_message(engine_world::LightningStrike {
+                from: ground + DVec3::new(200.0, 2_800.0, 0.0),
+                to: ground,
+                peak_current_ka: 30.0,
+                cloud_to_ground: true,
+                seed: 5,
+            });
+            // The weather's blast at the strike point is part of the thunder, not a bomb.
+            app.world.write_message(engine_world::WorldImpulse {
+                center: ground,
+                radius: 14.0,
+                strength: 18.0,
+                energy_j: 5.0e5,
+                heat_c: 0.0,
+                source: None,
+            });
+        }
+        let msgs = app.world.resource::<Messages<AudioCue>>();
+        cues.extend(msgs.iter_current_update_messages().map(|c| c.name.clone()));
+    });
+    assert!(cues.iter().any(|c| c == "thunder"), "{cues:?}");
+    assert!(!cues.iter().any(|c| c == "explosion"), "{cues:?}");
+    // Silent until the sound has crossed 1.2 km (3.5 s after the flash at 0.5 s), then loud.
+    let rms_at = |a: f32, b: f32| rms(&x[(a * 96_000.0) as usize..(b * 96_000.0) as usize]);
+    let early = rms_at(0.6, 3.6);
+    let rolling = rms_at(4.2, 7.0);
+    assert!(
+        rolling > 0.02 && rolling > early * 8.0,
+        "early {early} rolling {rolling}"
+    );
+}
+
+#[test]
+fn a_waterfall_roars_instead_of_dripping() {
+    let mut app = app();
+    app.world
+        .spawn((AudioListener::default(), Transform::from_xyz(0.0, 1.7, 0.0)));
+    let falls = app.world.spawn(Transform::from_xyz(6.0, 0.0, 0.0)).id();
+    let mut cues = Vec::new();
+    // The water module splashes at the foot of a fall every 0.25 s.
+    let x = record(&mut app, "falls", 120, |app, i| {
+        if i < 90 && i % 7 == 0 {
+            app.world.write_message(engine_world::WaterSplash {
+                position: DVec3::new(6.0, 0.0, 0.0),
+                velocity: Vec3::new(0.0, -7.0, 0.0),
+                radius: 1.0,
+                mass_kg: 1.0,
+                source: Some(falls),
+            });
+        }
+        let msgs = app.world.resource::<Messages<AudioCue>>();
+        cues.extend(msgs.iter_current_update_messages().map(|c| c.name.clone()));
+    });
+    let sprays = cues.iter().filter(|c| *c == "spray.water").count();
+    let drips = cues.iter().filter(|c| *c == "splash.water").count();
+    assert_eq!(sprays, 1, "{cues:?}");
+    assert!(drips <= 2, "{cues:?}");
+    // A steady roar while it falls, gone after it stops.
+    let rms_at = |a: f32, b: f32| rms(&x[(a * 96_000.0) as usize..(b * 96_000.0) as usize]);
+    let roaring = rms_at(1.5, 2.8);
+    assert!(roaring > 0.005, "falls too quiet: {roaring}");
+    let quarter = [
+        rms_at(1.5, 1.8),
+        rms_at(1.8, 2.1),
+        rms_at(2.1, 2.4),
+        rms_at(2.4, 2.7),
+    ];
+    let (lo, hi) = quarter
+        .iter()
+        .fold((f32::MAX, 0.0f32), |(a, b), v| (a.min(*v), b.max(*v)));
+    assert!(hi < lo * 2.0, "pulsing, not roaring: {quarter:?}");
+}
