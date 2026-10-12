@@ -172,6 +172,9 @@ fn safe_normalize(v: vec3<f32>, fallback: vec3<f32>) -> vec3<f32> {
 @fragment
 fn fs_main(in: VertexOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f32> {
     let m = materials[in.material];
+    // A see-through solid shows only its outside: its far side would read as the inner
+    // walls of a hollow glass box. The color from inside is scattered light (below).
+    if (!front && m.color.a < 0.999 && m.params.z > 0.5) { discard; }
     let dmg = damage(m, in.uv, in.burn);
     if (dmg.cut > 0.0) { discard; }
     var n = safe_normalize(in.normal, safe_normalize(-in.rel, vec3(0.0, 1.0, 0.0)));
