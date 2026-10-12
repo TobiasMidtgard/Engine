@@ -649,6 +649,17 @@ impl RenderFeature for CloudFeature {
         gpu.queue
             .write_buffer(&g.uniform, 0, bytemuck::bytes_of(&u));
 
+        // Rainbows need sunlight reaching the rain from behind the viewer: a sun below 42°
+        // (the bow sinks under the horizon above that) that the clouds overhead don't hide.
+        let sun_elevation = sun_dir.y.clamp(-1.0, 1.0).asin().to_degrees();
+        let rainbow_lux = if settings.rain_shafts && lights.in_charge {
+            sun_lux
+                * smoothstep(0.4, 0.9, lights.cloud_dimming)
+                * smoothstep(42.0, 32.0, sun_elevation)
+                * smoothstep(0.0, 3.0, sun_elevation)
+        } else {
+            0.0
+        };
         let moon_radius = MOON_RADIUS * settings.moon_scale.clamp(0.25, 8.0);
         let moon_solid_angle = PI * moon_radius * moon_radius;
         let moon_luminance = sky.moon_lux / moon_solid_angle * 0.55;
@@ -668,7 +679,7 @@ impl RenderFeature for CloudFeature {
             pole: [0.0, lat.sin(), lat.cos(), sidereal],
             params: [
                 stars * settings.star_brightness.max(0.0),
-                0.0,
+                rainbow_lux,
                 1.0 / size.0 as f32,
                 1.0 / size.1 as f32,
             ],

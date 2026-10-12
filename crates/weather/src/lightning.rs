@@ -64,8 +64,10 @@ pub struct BoltSegment {
 #[derive(Debug, Clone)]
 pub struct Bolt {
     pub segments: Vec<BoltSegment>,
-    /// Center of the flash's light.
+    /// Center of the flash's light on the ground and things around it.
     pub light_at: DVec3,
+    /// Where the flash lights the cloud from inside (the channel spreads out there).
+    pub cloud_at: DVec3,
     pub age_s: f32,
     pub life_s: f32,
     pub intensity: f32,
@@ -102,11 +104,11 @@ pub struct ActiveBolts {
 }
 
 impl ActiveBolts {
-    /// The brightest flash right now: (where, brightness).
+    /// The brightest flash right now: (where it lights the cloud, brightness).
     pub fn brightest(&self) -> Option<(DVec3, f32)> {
         self.bolts
             .iter()
-            .map(|b| (b.light_at, b.brightness()))
+            .map(|b| (b.cloud_at, b.brightness()))
             .max_by(|a, b| a.1.total_cmp(&b.1))
     }
 }
@@ -270,6 +272,8 @@ pub(crate) fn lightning_system(
         let fork_seed = sim.time_s.to_bits();
         let mut rng = sim.rng.fork(fork_seed);
         let intensity = rng.range(0.6, 1.4);
+        // The channel runs on inside the cloud a few hundred meters above the base.
+        let inside = top + DVec3::Y * rng.range(200.0, 900.0) as f64;
         let (segments, light_at, ground_hit) = if to_ground {
             (
                 build_bolt(top, hit, &mut rng),
@@ -277,8 +281,6 @@ pub(crate) fn lightning_system(
                 Some(hit),
             )
         } else {
-            // Inside the cloud: a flash a few hundred meters into it.
-            let inside = top + DVec3::Y * rng.range(200.0, 900.0) as f64;
             (Vec::new(), inside, None)
         };
         let strokes = [
@@ -305,6 +307,7 @@ pub(crate) fn lightning_system(
         bolts.bolts.push(Bolt {
             segments,
             light_at,
+            cloud_at: inside,
             age_s: 0.0,
             life_s: 0.55,
             intensity,
@@ -366,6 +369,7 @@ mod tests {
         let mut bolt = Bolt {
             segments: Vec::new(),
             light_at: DVec3::ZERO,
+            cloud_at: DVec3::ZERO,
             age_s: 0.0,
             life_s: 0.5,
             intensity: 1.0,

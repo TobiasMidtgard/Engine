@@ -126,7 +126,7 @@ pub(crate) fn register(app: &mut App) {
     app.register_api(
         "weather.set",
         "Change the weather. A front carries it in from upwind over transition_s game seconds \
-         (0 = at once). Presets: clear, partly_cloudy, overcast, rain, storm, snow, blizzard, fog.",
+         (0 = at once). Presets: clear, partly_cloudy, overcast, showers, rain, storm, snow, blizzard, fog.",
         r#"{"preset": "storm", "transition_s": 300, "auto": false, "wind_from_deg": 250}"#,
         |world, args| {
             let preset = preset_arg(args.get("preset").unwrap_or(&Value::Null))?;

@@ -156,6 +156,16 @@ fn shots() -> Vec<Shot> {
             frames: 12,
             face_moon: true,
         },
+        Shot {
+            name: "13_rainbow_in_the_showers",
+            setup: vec![dry(), set("showers"), hour(17.0), advance(600.0)],
+            // The camera turns to face away from the sun once the weather is right (see
+            // `wait_for_rainbow`).
+            eye: DVec3::new(6.0, 1.7, 8.0),
+            target: DVec3::new(-100.0, 14.0, 10.0),
+            frames: 10,
+            face_moon: false,
+        },
     ]
 }
 
@@ -226,6 +236,40 @@ fn scene(app: &mut App) {
     w.flush();
 }
 
+/// Let the showers drift until the sun shines on the station while a shower falls a few
+/// kilometers away on the opposite side, then face the shower (where the rainbow stands).
+fn wait_for_rainbow(app: &mut App, camera: Entity, eye: DVec3) {
+    for _ in 0..900 {
+        let lights = engine_weather::sky::compute_lights(
+            app.world.resource::<engine_weather::Sky>(),
+            app.world.resource::<engine_weather::Climate>(),
+            app.world.resource::<engine_weather::WeatherSim>(),
+        );
+        let sim = app.world.resource::<engine_weather::WeatherSim>();
+        let sun = lights.sun_dir.as_dvec3();
+        let sun_flat = DVec2::new(sun.x, sun.z).normalize_or(DVec2::X);
+        let sunny = (0..5).all(|k| {
+            let d = k as f64 * 2000.0;
+            sim.cell_at(sun_flat * d).coverage < 0.45
+        });
+        // Rain close enough that the bow stands tall below the cloud base.
+        let shower = (4..11)
+            .map(|k| {
+                sim.cell_at(-sun_flat * (k as f64 * 500.0))
+                    .precipitation_mm_h
+            })
+            .fold(0.0f32, f32::max);
+        if sunny && shower > 2.5 {
+            let away = DVec3::new(-sun_flat.x, 0.0, -sun_flat.y);
+            *app.world.get_mut::<Transform>(camera).unwrap() = Transform::from_translation(eye)
+                .looking_at(eye + away * 100.0 + DVec3::Y * 18.0, Vec3::Y);
+            return;
+        }
+        call_api(&mut app.world, "weather.advance", json!({"seconds": 60})).unwrap();
+    }
+    eprintln!("no rainbow weather found; shooting anyway");
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let out_dir = args
@@ -284,6 +328,9 @@ fn main() {
             if let Err(e) = call_api(&mut app.world, api, args.clone()) {
                 panic!("{api}: {e}");
             }
+        }
+        if shot.name.contains("rainbow") {
+            wait_for_rainbow(&mut app, camera, shot.eye);
         }
         if shot.face_moon {
             // Where the moon is at the time the setup chose (the lights catch up next frame).

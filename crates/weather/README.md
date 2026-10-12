@@ -3,7 +3,7 @@
 **Owner:** Weather, wind and clouds.
 
 Dynamic weather that moves across the world and changes it: fronts that carry clear skies,
-fair-weather clouds, rain, thunderstorms, snow or fog toward the player; temperature, humidity
+fair-weather clouds, showers, rain, thunderstorms, snow or fog toward the player; temperature, humidity
 and wind that follow the weather and the time of day; true volumetric clouds; rain and snow that
 wet the ground, fill puddles and pile up; lightning; and the day–night sky with the sun, the
 moon and the stars.
@@ -26,7 +26,7 @@ call_api(world, "weather.set", json!({"preset": "storm", "transition_s": 300}));
 and moves toward the player with the wind. You see the towers on the horizon first, the wind
 picks up as the gust front arrives, then the rain starts, and later it clears again. Clouds,
 rain and the numbers in `WeatherState` all come from one function (`WeatherSim::regime_at`), so
-what you see is what falls. Presets: `clear`, `partly_cloudy`, `overcast`, `rain`, `storm`,
+what you see is what falls. Presets: `clear`, `partly_cloudy`, `overcast`, `showers`, `rain`, `storm`,
 `snow`, `blizzard`, `fog`. `Weather::auto` picks new weather by itself; `Weather::forecast`
 queues changes.
 
@@ -70,7 +70,9 @@ spot, send `NoiseEvent` (thunder for AI), `WorldImpulse` and, where the ground i
 **Day and night.** A clock and calendar (`Sky`) for a place on a planet (`Climate`: latitude,
 axial tilt, year length) drive the sun and moon `DirectionalLight`s: real sun paths through
 the seasons, twilight, a moon with phases that rises and sets, and a turning star field with the
-Milky Way. Thick cloud dims the sun. A world without a directional light gets a sun and moon
+Milky Way. Thick cloud dims the sun. With the sun low behind you and a shower ahead, a
+rainbow stands on the rain: the primary bow, the fainter reversed secondary and the dark band
+between them. A world without a directional light gets a sun and moon
 spawned; a game with its own untagged light keeps control (tag it `SunLight` to hand it over).
 
 ## Showcase

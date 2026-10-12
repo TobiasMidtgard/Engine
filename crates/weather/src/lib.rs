@@ -71,7 +71,7 @@ impl Plugin for WeatherPlugin {
             .init_resource::<CloudMap>()
             .add_message::<LightningStrike>()
             .register_resource::<Weather>(
-                "What the weather should do: preset (clear, partly_cloudy, overcast, rain, storm, \
+                "What the weather should do: preset (clear, partly_cloudy, overcast, showers, rain, storm, \
                  snow, blizzard, fog), transition_s (game seconds for a front to arrive), auto \
                  (pick new weather by itself), forecast queue, time_scale, wind_from_deg (0 = \
                  from north/+Z, 90 = from east/−X). WeatherState is the simulated result.",
@@ -186,7 +186,7 @@ mod tests {
                 .as_array()
                 .unwrap()
                 .len()
-                == 8
+                == 9
         );
     }
 }

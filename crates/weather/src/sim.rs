@@ -322,7 +322,10 @@ pub fn cloud_cell(r: &Regime, drifted: DVec2, seed: u64) -> CloudCell {
     } else {
         (r.cloud_type + cells * 0.06).clamp(0.0, 1.0)
     };
-    let rainy = smoothstep(0.55, 0.95, coverage);
+    // Layer clouds rain where they're thick; towering clouds rain from their cells even when
+    // there's blue sky between them (showers).
+    let shower = towering * smoothstep(0.45, 0.9, cellness) * smoothstep(0.3, 0.55, coverage);
+    let rainy = smoothstep(0.55, 0.95, coverage).max(shower);
     let intensity = 1.0 + towering * (cellness * 1.3 - 0.55);
     CloudCell {
         coverage,
@@ -539,7 +542,14 @@ fn pick_auto(sim: &mut WeatherSim, climate: &Climate, day_of_year: f32) -> Weath
             (Clear, 3.0),
             (PartlyCloudy, 2.0),
             (Overcast, 3.0),
+            (Showers, 1.5),
             (Storm, 1.5),
+            (Rain, 1.0),
+        ],
+        Showers => &[
+            (PartlyCloudy, 3.0),
+            (Showers, 1.0),
+            (Storm, 1.0),
             (Rain, 1.0),
         ],
         Overcast => &[
@@ -550,7 +560,8 @@ fn pick_auto(sim: &mut WeatherSim, climate: &Climate, day_of_year: f32) -> Weath
         ],
         Rain => &[
             (Overcast, 3.0),
-            (PartlyCloudy, 3.0),
+            (PartlyCloudy, 2.0),
+            (Showers, 1.5),
             (Rain, 1.0),
             (Storm, 1.0),
         ],
@@ -570,7 +581,7 @@ fn pick_auto(sim: &mut WeatherSim, climate: &Climate, day_of_year: f32) -> Weath
         pick -= w;
     }
     match (choice, cold) {
-        (Rain, true) => Snow,
+        (Rain | Showers, true) => Snow,
         (Storm, true) => Blizzard,
         (Snow, false) => Rain,
         (Blizzard, false) => Storm,
