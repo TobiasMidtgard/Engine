@@ -26,10 +26,15 @@ changing that one plugin line.
   (rope), spring. `break_force` breaks a joint: the joint entity is despawned (or the `Joint`
   removed from a body entity).
 - **Characters**: `CharacterController` capsules moved by sweeps, so even an 800 m/s dash stops
-  at a thin wall: steps (also while gravity pulls), slopes, ground snapping, moving platforms
-  (the platform carries the character on world time, whatever its `LocalTimeScale`), pushing
-  dynamic bodies. `CharacterMove` is in the character's own seconds. `CharacterState` reports
-  ground, ceiling and wall contacts, including walls it only touches (running along a wall).
+  at a thin wall: steps (also while gravity pulls), slopes, ground snapping, crouching (change
+  `height` between steps). They move after the bodies have stepped: whatever a character stood
+  on (a lift, a turntable, a seesaw, a ship at 30 km/s) first carries it by exactly how far it
+  moved and turned, then the character makes its own move. Characters push what they walk into
+  (relative to what they ride, so a ship's speed never leaks into a push), press on what they
+  stand on with their weight, and stop falling bodies like any kinematic body. `CharacterMove`
+  is in the character's own seconds; `CharacterState::velocity` is the character's own motion,
+  without the platform's. `CharacterState` reports ground, ceiling and wall contacts, including
+  walls it only touches (running along a wall).
 - **Events**: one `ContactEvent::Started` per touch with the impact impulse and a normal from
   `a` to `b`, one `Ended` when it stops; sensors too. Hard impacts also send `NoiseEvent` (AI
   hearing) and, against static ground, `GroundContact` (dents, dust, impact sounds).
@@ -104,8 +109,10 @@ Tests (`cargo test -p engine_physics`): the conformance suite; the "done when" s
 (`tests/scenarios.rs`); behaviors other modules rely on (`tests/behaviors.rs`: removal, compound
 bodies, joint breaking and motors, kinematic platforms, stairs and steep slopes, dashing into
 thin walls, wall-running, crouching, characters on their own clock, sensors and layers, local
-time, hovering, buoyancy, blasts, bodies crossing and merging regions); a headless screenshot of
-the proving ground.
+time, hovering, buoyancy, blasts, bodies crossing and merging regions); riding moving bodies
+(`tests/platforms.rs`: crates and characters on a deck at up to 30 km/s, lifts, a turntable, a
+thrusting and turning ship, a seesaw tipped by a character's weight, crates landing on heads,
+rays hitting bodies at orbital speed); a headless screenshot of the proving ground.
 
 ## Done when
 
@@ -121,7 +128,8 @@ the proving ground.
 
 - Articulated (reduced-coordinate) joints for ragdolls and robot arms: zero joint gap.
 - Rolling resistance (balls and wheels roll forever on flat ground today).
-- Co-moving region frames for orbital speeds (bodies at 7 km/s in a shared frame).
+- Co-moving region frames, so cargo resting in a ship at 7 km/s can sleep (today bodies moving
+  together at speed stay awake; they ride correctly, they just cost CPU).
 - Debug drawing of colliders, contacts and regions through `engine_debug`.
 - A `Ground` query backed by static colliders for levels without terrain.
 - Buoyancy along the local "up" on planets (today it measures depth along world Y).

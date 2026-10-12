@@ -462,6 +462,7 @@ pub(crate) fn physics_step(world: &mut World, mut q: Local<Option<StepQueries>>)
             if r.needs_refresh {
                 r.world.detect_collisions(&(), &());
                 r.needs_refresh = false;
+                r.queries_refreshed();
                 r.update_bounds();
             }
             continue;
@@ -476,10 +477,13 @@ pub(crate) fn physics_step(world: &mut World, mut q: Local<Option<StepQueries>>)
             water.as_ref(),
             settings.buoyancy,
         );
-        if sim.region(rid).needs_refresh && sim.characters.values().any(|c| c.region == rid) {
-            sim.region_mut(rid).refresh_static_queries();
+        if sim.characters.values().any(|c| c.region == rid) {
+            let r = sim.region_mut(rid);
+            if r.stale_all || !r.fresh.is_empty() {
+                r.refresh_queries();
+            }
+            character::find_platforms(&mut sim, rid, &gravity);
         }
-        character::move_characters(&mut sim, rid, &gravity);
         for _ in 0..substeps {
             drive_kinematics(&mut sim, rid, sub_dt);
             let scaled = scale_time(&mut sim, rid, true);
@@ -501,6 +505,8 @@ pub(crate) fn physics_step(world: &mut World, mut q: Local<Option<StepQueries>>)
             }
             break_joints(&mut sim, rid, sub_dt);
         }
+        sim.region_mut(rid).queries_refreshed();
+        character::move_characters(&mut sim, rid, &gravity);
         sim.region_mut(rid).update_bounds();
     }
     sim.recheck_contacts();
