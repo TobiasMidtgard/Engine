@@ -54,7 +54,7 @@ are built, nothing simulates yet) · ⬜ not visible yet
 | 21 | Chop a tree; new ones grow where water, sun and soil allow | `forest` clearing | Foliage and ecology | 🟨 stumps, fallen trunk, saplings |
 | 22 | Plants that need other resources (mineral water) and glowing cave mushrooms | `cave` | Foliage and ecology | 🟨 mushrooms glow, no growth |
 | 23 | Grass that moves in the wind | everywhere | Foliage and ecology (strands: Rendering and lighting) | 🟨 grass patches sway |
-| 24 | Dynamic fauna (wildlife that grazes, drinks, flees, flocks) | `meadow` (by the lake shore) | Smart NPC AI | 🟨 deer and hare stand-ins |
+| 24 | Dynamic fauna (wildlife that grazes, drinks, flees, flocks) | `meadow`, `meadow_herd` (by the lake shore) | Smart NPC AI | ✅ deer and rabbit herds graze, drink, rest and bolt; birds flock; a wolf pack stalks and hunts (stand-in bodies) |
 
 ## Characters and combat
 
@@ -68,9 +68,9 @@ are built, nothing simulates yet) · ⬜ not visible yet
 | 30 | Cloth: flags, sails, curtains, clothes | `yard` | Cloth, soft bodies and hair | ✅ flags and pennants in the wind, a curtain shot full of holes, one that burns, a cape |
 | 31 | Soft bodies (jelly, flesh) and ropes (rope bridge) | `yard` | Cloth, soft bodies and hair | ✅ jelly cubes, a clay block that dents, rope bridges, a swing, a bead curtain, a wrecking ball |
 | 32 | Hair and fur for humans and animals | `yard` | Cloth, soft bodies and hair | ✅ a walking mannequin with long hair and a dog with fur |
-| 33 | Smart NPC AI that uses the environment (cover, high ground) | `arena` | Smart NPC AI | 🟨 |
-| 34 | NPCs that space the player and block attacks | `arena` | Smart NPC AI | 🟨 |
-| 35 | NPC skill, reaction time and logic editable per enemy | `arena` | Smart NPC AI | ⬜ |
+| 33 | Smart NPC AI that uses the environment (cover, high ground) | `arena`, `arena_cover` | Smart NPC AI | ✅ two squads take cover, climb the platform, flank, suppress and shoot the explosive barrel (stand-in bodies) |
+| 34 | NPCs that space the player and block attacks | `arena`, `arena_duel` | Smart NPC AI | ✅ melee fighters take turns instead of ringing you, block, parry, dodge and feint; a master and a veteran duel |
+| 35 | NPC skill, reaction time and logic editable per enemy | `arena` | Smart NPC AI | ✅ every fighter's skills (reaction time, accuracy, logic, defense…) are tunable through `npc.set_skill`; head band color shows skill |
 | 36 | Titanfall-style movement: wall-run, slide, dash | `parkour` | Movement and slow motion | ✅ a runner loops sprint, slide under a bar, wall-run, wall-jump, mantle onto a tower, double jump |
 | 37 | Elite enemies dash in and slice in the blink of an eye | `parkour` duel ring | Movement and slow motion | ✅ an elite dash-strikes a level 1 player in under 0.25 s |
 | 38 | Stat-based time perception: a leveled-up player sees enemies in slow motion | `parkour` duel ring | Movement and slow motion | ✅ at level 10 the same attack slows the world to 1/5.5; the player sidesteps and counters |

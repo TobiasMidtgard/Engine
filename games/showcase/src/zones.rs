@@ -258,13 +258,13 @@ pub fn spawn_demos(
             "magic" => ph::magic(commands, lib, z),
             "gallery2d" => ph::gallery2d(commands, lib, z),
             "forest" => ph::forest(commands, lib, land, z, rng),
-            "meadow" => ph::meadow(commands, lib, z, rng),
+            "meadow" => engine_npc::demo::spawn_wildlife(commands, z.center, z.radius * 0.8),
             "lake" => ph::lake(commands, meshes, lib, land, z),
             "water" => engine_water::demo::spawn_demo(commands, z.center),
             "footsteps" => engine_audio::demo::spawn_demo(commands, z.center),
             "tracks" => ph::tracks(commands, z),
             "cave" => ph::cave(commands, z, rng),
-            "arena" => ph::arena(commands, lib, z),
+            "arena" => engine_npc::demo::spawn_demo(commands, z.center),
             "parkour" => engine_movement::demo::spawn_demo(commands, z.center),
             "fortress" => engine_destruction::demo::spawn_demo(commands, z.center),
             "voxel" => ph::voxel(commands, meshes, z, rng),
@@ -386,6 +386,34 @@ pub fn demo_views(z: &Zone) -> Vec<View> {
                 14.5,
             )
             .warmup(7.0),
+        ],
+        "arena" => vec![
+            View::new(
+                "arena_duel",
+                "Duel: a master against a veteran (block, parry, feint)",
+                [10.0, 2.4, -30.5],
+                [12.0, 1.0, -23.0],
+                15.0,
+            )
+            .warmup(10.0),
+            View::new(
+                "arena_cover",
+                "Squads in cover, flanking and suppressing",
+                [-15.0, 4.5, -4.0],
+                [2.0, 0.8, 9.0],
+                15.0,
+            )
+            .warmup(12.0),
+        ],
+        "meadow" => vec![
+            View::new(
+                "meadow_herd",
+                "Deer herd grazing near the shore",
+                [-14.0, 3.0, -10.0],
+                [-5.0, 0.8, 5.0],
+                15.0,
+            )
+            .warmup(6.0),
         ],
         _ => Vec::new(),
     }

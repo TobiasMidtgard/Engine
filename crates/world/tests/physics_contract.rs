@@ -31,6 +31,8 @@ struct Bugs {
     stale_statics: bool,
     /// Report mass properties from the colliders even when the body overrides them.
     ignores_mass_overrides: bool,
+    /// Step every body with the world's delta, ignoring its `LocalTimeScale`.
+    ignores_body_time_scale: bool,
 }
 
 /// The static colliders as first seen, for the `stale_statics` bug.
@@ -148,9 +150,15 @@ fn step_bodies(
     mut touching: ResMut<Touching>,
     mut cache: ResMut<StaticCache>,
     statics: Query<(Entity, &Transform, &Collider, Option<&RigidBody>), Without<Velocity>>,
-    mut dynamics: Query<(Entity, &mut Transform, &mut Velocity, &RigidBody, &Collider)>,
+    mut dynamics: Query<(
+        Entity,
+        &mut Transform,
+        &mut Velocity,
+        &RigidBody,
+        &Collider,
+        Option<&LocalTimeScale>,
+    )>,
 ) {
-    let dt = time.delta_secs_f64();
     let mut solid: Vec<Aabb> = statics
         .iter()
         .filter(|(_, _, _, b)| b.is_none_or(|b| b.kind == BodyKind::Static))
@@ -161,10 +169,17 @@ fn step_bodies(
     }
     let pending: Vec<ApplyImpulse> = impulses.read().copied().collect();
     let mut now = HashSet::new();
-    for (e, mut t, mut v, body, collider) in &mut dynamics {
+    for (e, mut t, mut v, body, collider, local) in &mut dynamics {
         if body.kind != BodyKind::Dynamic {
             continue;
         }
+        // Each body in its own seconds.
+        let local = if bugs.ignores_body_time_scale {
+            None
+        } else {
+            local
+        };
+        let dt = time.delta_for(local) as f64;
         let h = half_extents(&collider.shape);
         let mass = body.mass_kg.unwrap_or(box_mass(collider));
         for imp in pending.iter().filter(|i| i.entity == e) {
@@ -448,6 +463,24 @@ fn the_suite_catches_a_backend_that_ignores_mass_overrides() {
         .map(|c| c.name)
         .collect();
     assert_eq!(failed, ["uses_mass_overrides"], "{checks:?}");
+}
+
+#[test]
+fn the_suite_catches_a_backend_that_ignores_body_time_scales() {
+    let checks = engine_world::physics::conformance::run_all(|app| {
+        app.add_plugins(MiniPhysics {
+            bugs: Bugs {
+                ignores_body_time_scale: true,
+                ..Bugs::default()
+            },
+        });
+    });
+    let failed: Vec<&str> = checks
+        .iter()
+        .filter(|c| c.result.is_err())
+        .map(|c| c.name)
+        .collect();
+    assert_eq!(failed, ["bodies_honor_local_time_scale"], "{checks:?}");
 }
 
 #[test]
