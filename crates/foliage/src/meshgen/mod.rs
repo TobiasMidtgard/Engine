@@ -15,6 +15,7 @@
 
 pub mod bark;
 pub mod small;
+pub mod small_textures;
 pub mod textures;
 pub mod tree;
 
