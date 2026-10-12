@@ -18,9 +18,9 @@ are built, nothing simulates yet) · ⬜ not visible yet
 |---|---|---|---|---|
 | 1 | Huge scale: walk, drive, fly from the ground to orbit and the Moon without loading screens | `overview`, `tower`, `stratosphere`, `orbit`, `moon` | Planets and terrain | 🟨 camera flies there; planet surface from orbit is flat color |
 | 2 | Efficient enough for multiplanetary travel (planets, moons, orbits, reference frames) | `spaceport`, `orbit`, `moon` | Planets and terrain | ⬜ |
-| 3 | Cars with real suspension, tires and drivetrain | `track` | Cars, planes and spaceships | 🟨 demo in; being checked on the Rapier backend |
-| 4 | Planes with aerodynamic surfaces | `airfield` (1.2 km runway) | Cars, planes and spaceships | 🟨 demo in; being checked on the Rapier backend |
-| 5 | Spaceships with thrusters and RCS, launching to orbit | `spaceport` | Cars, planes and spaceships | 🟨 demo in; being checked on the Rapier backend |
+| 3 | Cars with real suspension, tires and drivetrain | `track`, `track_cars`, `track_drift`, `track_jump` | Cars, planes and spaceships | ✅ two sports cars race the oval, the rally car drifts on dirt; detailed car models next |
+| 4 | Planes with aerodynamic surfaces | `airfield` (1.2 km runway), `airfield_lineup`, `airfield_rotate` | Cars, planes and spaceships | ✅ a plane takes off and one flies circuits |
+| 5 | Spaceships with thrusters and RCS, launching to orbit | `spaceport`, `spaceport_hover`, `spaceport_parked` | Cars, planes and spaceships | ✅ the VTOL spaceplane hops and hovers over the pad; orbit launch runs in the tests, not yet in the showcase |
 | 6 | Extremely well built, efficient physics: stacking, joints, ragdolls | `physics`, `physics_ragdolls`, `physics_wrecking_ball`, `physics_seesaw`, `physics_pile`, `physics_dominoes`, `physics_bridge`, `physics_turntable` | Physics and rigid bodies | ✅ proving ground: a 30-crate tower standing still, 250 crates, drums and balls raining into a bin, a domino run, crash test dummy ragdolls on stairs, a wrecking ball on a chain, a seesaw catapult, a paddle wheel, a plank bridge, a turntable with a rider; stations replay every 20 to 45 s |
 
 ## Water, fire, smoke, weather
