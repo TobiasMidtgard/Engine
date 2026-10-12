@@ -1255,7 +1255,203 @@ fn water() -> Vec<EffectDesc> {
         )
     };
 
-    vec![splash, splash_small, fountain]
+    let foam_white = [0.93, 0.96, 1.0];
+    let column = effect(
+        "water.column",
+        "An explosion under or on the water: a white column thrown about 10 m up (scale 2 for \
+         about 40 m), water falling back as droplets, a surge of spray rolling outward from \
+         its foot, lingering mist, foam and wide ripples. Put the entity on the surface.",
+        Some(0.6),
+        vec![
+            // The column itself: white water shooting up for half a second. The spread of
+            // speeds fills the trunk from the surface to the top.
+            EmitterDesc {
+                rate: 420.0,
+                duration: Some(0.45),
+                shape: EmitShape::Cone {
+                    angle_deg: 4.0,
+                    radius: 0.55,
+                },
+                speed: [3.5, 14.5],
+                gravity: 1.0,
+                drag: 0.2,
+                turbulence: 0.4,
+                lifetime: [1.4, 2.4],
+                size: [0.55, 1.0],
+                size_over_life: c(&[(0.0, 0.5), (0.25, 1.3), (1.0, 2.4)]),
+                // Albedo above one stands in for light scattered many times inside the foam.
+                color: g(&[
+                    (0.0, [1.2, 1.23, 1.28, 0.0]),
+                    (0.04, [1.2, 1.23, 1.28, 0.75]),
+                    (0.6, [1.2, 1.23, 1.28, 0.5]),
+                    (1.0, [1.2, 1.23, 1.28, 0.0]),
+                ]),
+                ..smoke("column", 1.2, 0.75)
+            },
+            // The dome of white water heaving up at the column's foot.
+            EmitterDesc {
+                bursts: once(36),
+                shape: EmitShape::Hemisphere { radius: 1.0 },
+                speed: [2.0, 5.0],
+                velocity: [0.0, 1.5, 0.0],
+                gravity: 0.6,
+                drag: 1.4,
+                lifetime: [1.2, 2.0],
+                size: [0.9, 1.5],
+                size_over_life: c(&[(0.0, 0.6), (1.0, 2.2)]),
+                color: fade([1.15, 1.18, 1.22], 0.7, 0.04, 0.45),
+                ..smoke("dome", 1.15, 0.7)
+            },
+            // Water flung out of the column, falling back in long arcs.
+            EmitterDesc {
+                rate: 1600.0,
+                duration: Some(0.4),
+                bursts: Vec::new(),
+                shape: EmitShape::Cone {
+                    angle_deg: 14.0,
+                    radius: 0.5,
+                },
+                speed: [5.0, 15.0],
+                velocity: [0.0, 0.0, 0.0],
+                lifetime: [2.0, 3.0],
+                size: [0.04, 0.09],
+                stretch: 0.03,
+                drag: 0.12,
+                color: g(&[(0.0, [0.9, 0.94, 0.98, 0.9]), (1.0, [0.9, 0.94, 0.98, 0.8])]),
+                ..droplets("fallback", 0, water_rgb, [5.0, 15.0], 0.0, Collide::Die)
+            },
+            // The base surge: spray rolling outward low over the water.
+            EmitterDesc {
+                bursts: vec![at(0.12, 36)],
+                shape: EmitShape::Ring {
+                    radius: 1.2,
+                    thickness: 0.4,
+                },
+                speed: [3.5, 7.0],
+                velocity: [0.0, 1.2, 0.0],
+                gravity: 0.05,
+                drag: 1.1,
+                lifetime: [2.5, 3.8],
+                size: [1.0, 1.8],
+                size_over_life: c(&[(0.0, 0.6), (1.0, 3.2)]),
+                color: fade(foam_white, 0.55, 0.06, 0.4),
+                ..smoke("surge", 0.94, 0.55)
+            },
+            // Mist left hanging where the column stood, drifting off with the wind.
+            EmitterDesc {
+                bursts: vec![at(0.9, 16)],
+                shape: EmitShape::Sphere {
+                    radius: 3.0,
+                    surface: false,
+                },
+                offset: [0.0, 4.0, 0.0],
+                speed: [0.1, 0.5],
+                gravity: 0.0,
+                drag: 1.5,
+                wind: 1.0,
+                lifetime: [4.0, 6.5],
+                size: [2.0, 3.2],
+                size_over_life: c(&[(0.0, 0.7), (1.0, 2.0)]),
+                color: fade(foam_white, 0.22, 0.2, 0.45),
+                ..smoke("mist", 0.95, 0.22)
+            },
+            EmitterDesc {
+                bursts: once(60),
+                shape: EmitShape::Disc { radius: 2.0 },
+                offset: [0.0, 0.03, 0.0],
+                speed: [0.4, 1.6],
+                drag: 1.2,
+                lifetime: [3.0, 5.0],
+                size: [0.4, 0.8],
+                size_over_life: c(&[(0.0, 0.7), (1.0, 2.2)]),
+                sprite: Sprite::Dust,
+                facing: Facing::Horizontal,
+                lit: 1.0,
+                color: fade([0.95, 0.97, 1.0], 0.65, 0.05, 0.5),
+                soft: 0.05,
+                ..em("foam")
+            },
+            EmitterDesc {
+                size: [1.5, 1.5],
+                ..ripples("ripples", &[0.0, 0.3, 0.7, 1.2], 16.0, 2.6, 0.7)
+            },
+        ],
+    );
+
+    let bow_spray = effect(
+        "water.bow_spray",
+        "A puff of spray thrown off a fast boat's bow or a skimming object: droplets and fine \
+         spray flung along the entity's +Y (point it along the spray's velocity).",
+        Some(0.12),
+        vec![
+            EmitterDesc {
+                shape: EmitShape::Cone {
+                    angle_deg: 22.0,
+                    radius: 0.15,
+                },
+                lifetime: [0.6, 1.1],
+                size: [0.025, 0.055],
+                stretch: 0.03,
+                ..droplets("droplets", 70, water_rgb, [3.0, 7.0], 0.0, Collide::Die)
+            },
+            EmitterDesc {
+                bursts: once(6),
+                shape: EmitShape::Cone {
+                    angle_deg: 25.0,
+                    radius: 0.2,
+                },
+                speed: [2.0, 4.5],
+                gravity: 0.15,
+                drag: 2.2,
+                wind: 1.0,
+                lifetime: [0.8, 1.4],
+                size: [0.35, 0.6],
+                size_over_life: c(&[(0.0, 0.6), (1.0, 2.4)]),
+                color: fade(foam_white, 0.35, 0.05, 0.3),
+                ..smoke("spray", 0.94, 0.35)
+            },
+        ],
+    );
+
+    let mist = effect(
+        "water.mist",
+        "A puff of fine mist, as at the foot of a waterfall: soft, slow, carried off by the \
+         wind and lingering for several seconds. Meant to be played a few times a second; \
+         scale 1 is about 1.5 m across.",
+        Some(0.1),
+        vec![
+            EmitterDesc {
+                bursts: once(4),
+                shape: EmitShape::Sphere {
+                    radius: 0.6,
+                    surface: false,
+                },
+                speed: [0.2, 0.8],
+                velocity: [0.0, 1.0, 0.0],
+                gravity: 0.0,
+                drag: 0.9,
+                wind: 1.0,
+                turbulence: 0.5,
+                lifetime: [4.0, 7.0],
+                size: [1.0, 1.8],
+                size_over_life: c(&[(0.0, 0.6), (1.0, 2.6)]),
+                color: fade([0.9, 0.94, 1.0], 0.14, 0.15, 0.4),
+                soft: 0.8,
+                ..smoke("mist", 0.95, 0.14)
+            },
+            EmitterDesc {
+                shape: EmitShape::Sphere {
+                    radius: 0.4,
+                    surface: false,
+                },
+                lifetime: [0.5, 1.0],
+                size: [0.015, 0.03],
+                ..droplets("drizzle", 10, water_rgb, [0.5, 2.0], 1.5, Collide::Die)
+            },
+        ],
+    );
+
+    vec![splash, splash_small, fountain, column, bow_spray, mist]
 }
 
 fn impacts() -> Vec<EffectDesc> {
@@ -1800,7 +1996,103 @@ fn steps() -> Vec<EffectDesc> {
 }
 
 fn misc() -> Vec<EffectDesc> {
+    let lightning_ground = EffectDesc {
+        light: light([0.75, 0.82, 1.0], 400_000.0, 60.0, 0.9, 0.35),
+        ..effect(
+            "lightning.ground_strike",
+            "Where a cloud-to-ground lightning strike lands: a blinding blue-white flash on the \
+             ground, a burst of molten sparks, soil blasted up and a drifting puff of steam and \
+             smoke. Scale 1 is a typical 30 kA stroke.",
+            Some(0.12),
+            vec![
+                EmitterDesc {
+                    bursts: once(1),
+                    speed: [0.0, 0.0],
+                    offset: [0.0, 0.6, 0.0],
+                    lifetime: [0.2, 0.2],
+                    size: [5.0, 5.0],
+                    size_over_life: c(&[(0.0, 0.7), (1.0, 1.3)]),
+                    color: g(&[(0.0, [0.9, 0.93, 1.0, 1.0]), (1.0, [0.55, 0.65, 1.0, 0.0])]),
+                    emissive: 400_000.0,
+                    additive: 1.0,
+                    wind: 0.0,
+                    ..em("flash")
+                },
+                // The ground itself glowing where the current spread out.
+                EmitterDesc {
+                    bursts: once(1),
+                    speed: [0.0, 0.0],
+                    offset: [0.0, 0.05, 0.0],
+                    lifetime: [0.45, 0.45],
+                    size: [3.5, 3.5],
+                    facing: Facing::Horizontal,
+                    color: g(&[
+                        (0.0, [0.85, 0.9, 1.0, 1.0]),
+                        (0.3, [1.0, 0.6, 0.3, 0.7]),
+                        (1.0, [1.0, 0.35, 0.1, 0.0]),
+                    ]),
+                    emissive: 60_000.0,
+                    additive: 1.0,
+                    wind: 0.0,
+                    ..em("scorch")
+                },
+                EmitterDesc {
+                    color: g(&[
+                        (0.0, [0.95, 0.97, 1.0, 1.0]),
+                        (0.3, [1.0, 0.8, 0.5, 1.0]),
+                        (1.0, [1.0, 0.4, 0.1, 0.0]),
+                    ]),
+                    size: [0.025, 0.05],
+                    lifetime: [0.6, 1.6],
+                    ..sparks("sparks", 260, [4.0, 14.0])
+                },
+                // Clods of soil blown out of the crater.
+                EmitterDesc {
+                    bursts: once(40),
+                    shape: EmitShape::Hemisphere { radius: 0.2 },
+                    speed: [3.0, 8.0],
+                    velocity: [0.0, 2.0, 0.0],
+                    gravity: 1.0,
+                    drag: 0.3,
+                    collide: Collide::Die,
+                    lifetime: [0.8, 1.5],
+                    size: [0.04, 0.1],
+                    sprite: Sprite::Shard,
+                    spin_deg: [-400.0, 400.0],
+                    lit: 1.0,
+                    color: g(&[(0.0, [0.2, 0.15, 0.1, 1.0]), (1.0, [0.2, 0.15, 0.1, 1.0])]),
+                    soft: 0.0,
+                    ..em("soil")
+                },
+                EmitterDesc {
+                    bursts: once(24),
+                    shape: EmitShape::Hemisphere { radius: 0.4 },
+                    speed: [1.0, 3.5],
+                    velocity: [0.0, 1.0, 0.0],
+                    drag: 2.0,
+                    gravity: 0.2,
+                    lifetime: [1.0, 2.0],
+                    size: [0.5, 0.9],
+                    sprite: Sprite::Dust,
+                    lit: 1.0,
+                    color: fade([0.42, 0.36, 0.3], 0.6, 0.05, 0.4),
+                    soft: 0.3,
+                    ..em("dust")
+                },
+                EmitterDesc {
+                    bursts: vec![at(0.05, 14)],
+                    shape: EmitShape::Hemisphere { radius: 0.4 },
+                    speed: [0.4, 1.2],
+                    acceleration: [0.0, 1.0, 0.0],
+                    lifetime: [2.5, 4.0],
+                    size: [0.7, 1.1],
+                    ..smoke("steam", 0.55, 0.45)
+                },
+            ],
+        )
+    };
     vec![
+        lightning_ground,
         EffectDesc {
             light: light([1.0, 0.75, 0.45], 6000.0, 8.0, 0.8, 0.08),
             ..effect(

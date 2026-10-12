@@ -112,8 +112,8 @@ impl Plugin for VfxPlugin {
                  particles, and an on/off switch.",
             )
             .register_resource::<VfxReactions>(
-                "Which world events play effects by themselves: footsteps, projectile hits \
-                 and water crossings, explosions; and a per-frame cap.",
+                "Which world events play effects by themselves: footsteps, projectile hits, \
+                 explosions, water splashes and lightning strikes; and a per-frame cap.",
             )
             .add_systems(
                 Update,
@@ -121,6 +121,7 @@ impl Plugin for VfxPlugin {
                     library::sync_effect_files,
                     events::react_to_world,
                     events::react_to_splashes,
+                    events::react_to_lightning,
                     tick_lifetimes,
                     (
                         demo::run_casters,
