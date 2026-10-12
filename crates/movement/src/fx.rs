@@ -15,6 +15,7 @@ use engine_render::{
 use engine_world::LocomotionMode;
 
 use crate::mover::Mover;
+use crate::player::PlayerControlled;
 use crate::tempo::{FOCUS_KEY, Perceiver};
 
 /// Slow-motion screen effect settings. Patch it live (`resource.set SlowMotionFx`).
@@ -199,10 +200,13 @@ impl RenderFeature for SlowMotionOverlay {
             return;
         }
         let dashing = {
-            let mut q = world.query_filtered::<&Mover, With<Perceiver>>();
-            q.iter(world)
-                .next()
-                .is_some_and(|m| m.mode == LocomotionMode::Dash)
+            // The player in play mode first, like reflex slow motion.
+            let mut q = world.query_filtered::<(&Mover, Has<PlayerControlled>), With<Perceiver>>();
+            let all: Vec<_> = q.iter(world).collect();
+            all.iter()
+                .find(|(_, player)| *player)
+                .or(all.first())
+                .is_some_and(|(m, _)| m.mode == LocomotionMode::Dash)
         };
         let t = world
             .get_resource::<Time>()

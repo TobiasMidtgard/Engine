@@ -19,6 +19,7 @@ use engine_world::locomotion::{LocomotionState, MoveIntent};
 use engine_world::physics::CharacterController;
 use engine_world::{AttackEvent, AttackKind, DamageEvent, DamageKind, NoiseEvent};
 
+use crate::lockon::LockOn;
 use crate::mover::{DashRequest, Influence, Mover, flat};
 use crate::profile::MovementProfile;
 
@@ -323,10 +324,11 @@ pub(crate) fn begin_attacks(
         &MovementProfile,
         &CharacterController,
         Option<&LocalTimeScale>,
+        Option<&LockOn>,
     )>,
 ) {
     snaps.clear();
-    for (entity, t, m, _, f, cs, _, cc, _) in &q {
+    for (entity, t, m, _, f, cs, _, cc, _, _) in &q {
         snaps.push(Snap {
             entity,
             pos: t.translation,
@@ -339,7 +341,7 @@ pub(crate) fn begin_attacks(
             facing: m.facing,
         });
     }
-    for (entity, t, mut m, intent, f, mut cs, p, _, local) in &mut q {
+    for (entity, t, mut m, intent, f, mut cs, p, _, local, lock) in &mut q {
         let dt = time.delta_for(local);
         if dt <= 0.0 {
             continue;
@@ -377,6 +379,13 @@ pub(crate) fn begin_attacks(
                 .and_then(|l| l.try_normalize())
                 .unwrap_or(m.facing);
             let rate = own_rate(&time, local).max(1e-3);
+            // Locked on: that enemy, wherever it stands.
+            let locked = lock
+                .and_then(|l| l.target)
+                .and_then(|e| snaps.iter().find(|s| s.entity == e && !s.defeated))
+                .copied();
+            let locked_gap =
+                locked.map(|s| flat((s.pos - t.translation).as_vec3(), up).length() - s.radius);
             let far_target = || {
                 pick_target(
                     &snaps,
@@ -392,21 +401,27 @@ pub(crate) fn begin_attacks(
                     flat((s.pos - t.translation).as_vec3(), up).length() - s.radius > f.reach * 1.5
                 })
             };
+            let out_of_reach = match locked_gap {
+                Some(gap) => gap > f.reach * 1.5 && gap <= f.dash_strike_range,
+                None => {
+                    pick_target(
+                        &snaps,
+                        entity,
+                        f.team,
+                        t.translation,
+                        None,
+                        look,
+                        f.reach * 1.5,
+                        up,
+                    )
+                    .is_none()
+                        && far_target().is_some()
+                }
+            };
             let kind = if kind == AttackKind::Melee
                 && f.auto_dash_strike
                 && m.dash_charges >= 1.0
-                && pick_target(
-                    &snaps,
-                    entity,
-                    f.team,
-                    t.translation,
-                    None,
-                    look,
-                    f.reach * 1.5,
-                    up,
-                )
-                .is_none()
-                && far_target().is_some()
+                && out_of_reach
             {
                 AttackKind::Dash
             } else {
@@ -418,16 +433,20 @@ pub(crate) fn begin_attacks(
             } else {
                 f.reach * 2.5
             };
-            let target = pick_target(
-                &snaps,
-                entity,
-                f.team,
-                t.translation,
-                if dash { intent.dash_to } else { None },
-                look,
-                range,
-                up,
-            );
+            let target = locked
+                .filter(|_| locked_gap.is_some_and(|gap| gap <= range))
+                .or_else(|| {
+                    pick_target(
+                        &snaps,
+                        entity,
+                        f.team,
+                        t.translation,
+                        if dash { intent.dash_to } else { None },
+                        look,
+                        range,
+                        up,
+                    )
+                });
             let aim = target.map(|s| s.pos).or(intent.dash_to);
             let dir = aim
                 .map(|a| flat((a - t.translation).as_vec3(), up))

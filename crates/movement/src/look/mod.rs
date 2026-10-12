@@ -72,7 +72,12 @@ impl Library<'_> {
 pub type Generator = fn(&mut Library);
 
 /// Everything the look generates, in order.
-pub const LIBRARY: &[Generator] = &[materials::generate, course::generate, fighter::generate];
+pub const LIBRARY: &[Generator] = &[
+    materials::generate,
+    course::generate,
+    fighter::generate,
+    crate::lockon::generate,
+];
 
 /// A mesh registered by a generator.
 pub fn mesh(key: &str) -> MeshRef {
