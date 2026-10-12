@@ -15,7 +15,8 @@
 //! A backend (the shipped `engine_physics`, or one you write) is a plugin that:
 //! 1. calls [`claim_backend`] in `build` (two backends in one app is an error),
 //! 2. simulates in `FixedUpdate` / `SimSet::Physics` using `Res<Time>` (so time dilation and
-//!    slow motion work), reading the components above and writing the outputs,
+//!    slow motion work), advancing each body by its own step (see "Local time" below),
+//!    reading the components above and writing the outputs,
 //! 3. replaces [`PhysicsQueries`] with its own implementation,
 //! 4. follows world shifts (floating origin, planet frames): in `WorldShiftSet::Apply` it
 //!    moves its own state (bodies, statics, islands) by the [`crate::WorldShift`], as a
@@ -27,6 +28,19 @@
 //!
 //! Positions are `f64` world meters (`Transform`), so a backend must keep precision far from
 //! the origin (for example by simulating in local islands around each `SimulationFocus`).
+//!
+//! **Local time.** Every body lives in its own seconds: each fixed step the backend advances
+//! a body by `time.delta_for(local)` (`Time::delta_for` with the entity's `LocalTimeScale`, if
+//! any), for motion, gravity, forces and damping alike. Without a `LocalTimeScale` that is the
+//! world step. So a car inside a slow-motion bubble (`LocalTimeScale { factor: 0.3, .. }`)
+//! moves, falls and spins at 0.3 speed while the rest of the world runs normally, and a body
+//! with `LocalTimeScale::unaffected_by_dilation(1.0)` keeps full speed while `TimeDilation`
+//! slows everything else. [`Velocity`] is in the body's own seconds, like characters'
+//! [`CharacterState::velocity`]; multiply by `delta_for(local) / delta_secs()` for world
+//! seconds. Contacts between bodies on different clocks are resolved with those world-second
+//! velocities. A backend whose solver takes one step for all bodies can do this by scaling a
+//! body's velocity by its time factor `s` for the step (and dividing it back after) and its
+//! gravity and forces by `s²`.
 
 use std::sync::Arc;
 
@@ -255,8 +269,9 @@ impl Collider {
     }
 }
 
-/// Linear (m/s) and angular (rad/s, world axes) velocity. Gameplay may write it; the backend
-/// writes it back for dynamic bodies every step.
+/// Linear (m/s) and angular (rad/s, world axes) velocity, in the body's own seconds (see
+/// "Local time" in the [module docs](self)). Gameplay may write it; the backend writes it back
+/// for dynamic bodies every step.
 #[derive(Component, Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Velocity {
