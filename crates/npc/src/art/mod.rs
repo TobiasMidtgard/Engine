@@ -7,6 +7,7 @@
 
 pub mod animals;
 pub mod arena;
+pub mod fighter;
 pub mod mesh;
 pub mod noise;
 pub mod sdf;
