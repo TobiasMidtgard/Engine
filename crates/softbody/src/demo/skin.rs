@@ -1,0 +1,395 @@
+//! CPU skinning for the demo bodies.
+//!
+//! [`BodyLibrary`] builds every [`BodyPart`] once, on background threads, and shares it. Each
+//! [`SkinnedPart`] entity (a child of a character with a `SkeletonPose`) gets its own mesh
+//! asset, deformed every frame with dual-quaternion skinning (no candy-wrapper twists, no
+//! collapsing elbows and knees), and registered under its key, with its skin weights in
+//! [`MeshSkins`], so hair can grow on it ([`crate::HairEmitter::Surface`]). Like
+//! `TransformInterpolation`, a body is drawn between the poses its skeleton had at the start
+//! and the end of the latest fixed step, so it stays in step with the cloth and hair simulated
+//! on it (which are drawn the same way) instead of running a step ahead of them.
+
+use std::collections::HashMap;
+use std::sync::Arc;
+use std::thread::JoinHandle;
+
+use engine_assets::{Assets, Handle};
+use engine_core::prelude::*;
+use engine_core::tasks::ComputeTaskPool;
+use engine_core::time::FixedTime;
+use engine_render::{Mesh, MeshRenderer, StandardMaterial, Vertex};
+use engine_world::animation::{BonePose, SkeletonPose};
+
+use super::body::{self, BodyPart, BodyQuality, SkinTemplate};
+use crate::hair::{MeshSkin, MeshSkins};
+
+/// A skinned body part drawn on the skeleton of `owner`.
+#[derive(Component, Debug, Clone)]
+pub struct SkinnedPart {
+    pub part: BodyPart,
+    /// The entity with the `SkeletonPose`.
+    pub owner: Entity,
+    /// Key of the deformed mesh in `Assets<Mesh>`.
+    pub key: String,
+    pub material: StandardMaterial,
+    pub mesh: Option<Handle<Mesh>>,
+    /// The owner's pose at the start of the latest fixed step.
+    previous: Vec<BonePose>,
+}
+
+impl SkinnedPart {
+    pub fn new(part: BodyPart, owner: Entity, key: &str, material: StandardMaterial) -> Self {
+        Self {
+            part,
+            owner,
+            key: key.to_string(),
+            material,
+            mesh: None,
+            previous: Vec::new(),
+        }
+    }
+}
+
+/// Built body templates, shared by every character that uses them.
+#[derive(Resource, Default)]
+pub struct BodyLibrary {
+    ready: HashMap<BodyPart, Arc<SkinTemplate>>,
+    skins: HashMap<BodyPart, Arc<MeshSkin>>,
+    pending: Vec<(BodyPart, JoinHandle<SkinTemplate>)>,
+    /// Mesh resolution (1 = full).
+    pub quality: BodyQuality,
+    /// Build on the calling thread instead of in the background (tests, screenshots).
+    pub blocking: bool,
+}
+
+impl BodyLibrary {
+    /// The template for `part`, once it's built.
+    pub fn get(&self, part: BodyPart) -> Option<Arc<SkinTemplate>> {
+        self.ready.get(&part).cloned()
+    }
+
+    /// The skin weights of `part`, once it's built.
+    pub fn skin(&self, part: BodyPart) -> Option<Arc<MeshSkin>> {
+        self.skins.get(&part).cloned()
+    }
+
+    fn finish(&mut self, part: BodyPart, template: SkinTemplate) {
+        let skin = MeshSkin {
+            joints: template.joints.clone(),
+            weights: template.weights.clone(),
+        };
+        self.skins.insert(part, Arc::new(skin));
+        self.ready.insert(part, Arc::new(template));
+    }
+
+    /// Start building `part` unless it's built or underway.
+    pub fn request(&mut self, part: BodyPart) {
+        if self.ready.contains_key(&part) || self.pending.iter().any(|(p, _)| *p == part) {
+            return;
+        }
+        let quality = self.quality;
+        if self.blocking {
+            self.finish(part, body::build(part, quality));
+            return;
+        }
+        let spawned = std::thread::Builder::new()
+            .name(format!("{part:?} body"))
+            .spawn(move || body::build(part, quality));
+        match spawned {
+            Ok(handle) => self.pending.push((part, handle)),
+            Err(_) => self.finish(part, body::build(part, quality)),
+        }
+    }
+
+    /// Collect finished builds.
+    pub fn poll(&mut self) {
+        let mut k = 0;
+        while k < self.pending.len() {
+            if self.pending[k].1.is_finished() {
+                let (part, handle) = self.pending.swap_remove(k);
+                match handle.join() {
+                    Ok(t) => self.finish(part, t),
+                    Err(_) => engine_core::log::warn!("building the {part:?} body failed"),
+                }
+            } else {
+                k += 1;
+            }
+        }
+    }
+}
+
+/// Start building the bodies characters ask for; pick up finished ones.
+pub fn prepare_bodies(mut library: ResMut<BodyLibrary>, parts: Query<&SkinnedPart>) {
+    for p in &parts {
+        library.request(p.part);
+    }
+    library.poll();
+}
+
+/// `FixedPreUpdate`: remember the pose each part's skeleton starts the fixed step with.
+pub fn snapshot_poses(mut parts: Query<&mut SkinnedPart>, poses: Query<&SkeletonPose>) {
+    for mut part in &mut parts {
+        if let Ok(pose) = poses.get(part.owner) {
+            let part = &mut *part;
+            part.previous.clone_from(&pose.bones);
+        }
+    }
+}
+
+/// Give new parts their mesh and deform every part to its skeleton's pose, interpolated
+/// within the fixed step like `TransformInterpolation`.
+#[allow(clippy::too_many_arguments)]
+pub fn skin_bodies(
+    mut commands: Commands,
+    library: Res<BodyLibrary>,
+    fixed: Option<Res<FixedTime>>,
+    meshes: Option<ResMut<Assets<Mesh>>>,
+    mut skins: ResMut<MeshSkins>,
+    mut parts: Query<(Entity, &mut SkinnedPart)>,
+    poses: Query<&SkeletonPose>,
+    mut scratch: Local<(Vec<BonePose>, Vec<BoneTransform>)>,
+) {
+    let Some(mut meshes) = meshes else {
+        return;
+    };
+    let alpha = fixed.map_or(1.0, |f| f.alpha());
+    let (posed, bones) = &mut *scratch;
+    for (e, mut part) in &mut parts {
+        let Some(template) = library.get(part.part) else {
+            continue;
+        };
+        let Ok(pose) = poses.get(part.owner) else {
+            continue;
+        };
+        // A new mesh starts at the current pose (hair grown on it this frame binds to that
+        // pose); after that, between the last two simulated poses.
+        let t = if part.mesh.is_some() { alpha } else { 1.0 };
+        interpolate_pose(&part.previous, &pose.bones, t, posed);
+        let handle = match part.mesh {
+            Some(h) => h,
+            None => {
+                let h = meshes.insert_keyed(&part.key, template.mesh());
+                if let Some(skin) = library.skin(part.part) {
+                    skins.0.insert(part.key.clone(), skin);
+                }
+                part.mesh = Some(h);
+                commands
+                    .entity(e)
+                    .insert(MeshRenderer::new(h, part.material));
+                h
+            }
+        };
+        if let Some(mesh) = meshes.get_mut(handle) {
+            skin(&template, posed, &mut mesh.vertices, bones);
+        }
+    }
+}
+
+/// `previous` blended toward `current` by `t` (all of `current` where `previous` lacks a
+/// bone).
+fn interpolate_pose(previous: &[BonePose], current: &[BonePose], t: f32, out: &mut Vec<BonePose>) {
+    out.clear();
+    out.extend(
+        current
+            .iter()
+            .enumerate()
+            .map(|(i, c)| match previous.get(i) {
+                Some(p) if t < 1.0 => BonePose {
+                    translation: p.translation.lerp(c.translation, t),
+                    rotation: p.rotation.slerp(c.rotation, t).normalize(),
+                    ..*c
+                },
+                _ => *c,
+            }),
+    );
+}
+
+/// One bone's skinning transform (bind pose → current pose) as a rotation, a translation and
+/// the dual quaternion of both.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct BoneTransform {
+    real: Quat,
+    dual: Quat,
+    translation: Vec3,
+}
+
+/// Skinning transforms for every bone of `bind` in `pose` (bones the pose lacks stay put).
+pub fn bone_transforms(bind: &[BonePose], pose: &[BonePose], out: &mut Vec<BoneTransform>) {
+    out.clear();
+    for (i, b) in bind.iter().enumerate() {
+        let p = pose.get(i).copied().unwrap_or(*b);
+        let real = (p.rotation * b.rotation.conjugate()).normalize();
+        let translation = p.translation - real * b.translation;
+        let t = Quat::from_xyzw(translation.x, translation.y, translation.z, 0.0);
+        out.push(BoneTransform {
+            real,
+            dual: t * real * 0.5,
+            translation,
+        });
+    }
+}
+
+/// Deform the template into `out` (same vertex order) for `pose` (model-space bones).
+pub fn skin(
+    template: &SkinTemplate,
+    pose: &[BonePose],
+    out: &mut [Vertex],
+    bones: &mut Vec<BoneTransform>,
+) {
+    bone_transforms(&template.bind, pose, bones);
+    let bones = &bones[..];
+    const CHUNK: usize = 4096;
+    match ComputeTaskPool::try_get() {
+        Some(pool) if out.len() > 2 * CHUNK => {
+            pool.scope(|s| {
+                for (k, chunk) in out.chunks_mut(CHUNK).enumerate() {
+                    s.spawn(async move { skin_range(template, bones, k * CHUNK, chunk) });
+                }
+            });
+        }
+        _ => skin_range(template, bones, 0, out),
+    }
+}
+
+fn skin_range(template: &SkinTemplate, bones: &[BoneTransform], start: usize, out: &mut [Vertex]) {
+    for (k, v) in out.iter_mut().enumerate() {
+        let i = start + k;
+        let (Some(j), Some(w)) = (template.joints.get(i), template.weights.get(i)) else {
+            break;
+        };
+        let b0 = bones[j[0] as usize];
+        let (rot, translation) = if w[0] >= 0.999 {
+            (b0.real, b0.translation)
+        } else {
+            // Blend dual quaternions on the same hemisphere, then normalize.
+            let mut real = b0.real * w[0];
+            let mut dual = b0.dual * w[0];
+            for n in 1..4 {
+                if w[n] <= 0.0 {
+                    break;
+                }
+                let b = bones[j[n] as usize];
+                let s = if b.real.dot(b0.real) < 0.0 {
+                    -w[n]
+                } else {
+                    w[n]
+                };
+                real += b.real * s;
+                dual += b.dual * s;
+            }
+            let inv = 1.0 / real.length().max(1e-8);
+            let real = real * inv;
+            let t = dual * inv * real.conjugate() * 2.0;
+            (real, Vec3::new(t.x, t.y, t.z))
+        };
+        v.position = (rot * template.positions[i] + translation).to_array();
+        v.normal = (rot * template.normals[i]).to_array();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::demo::body::{Dog, Human};
+    use std::sync::Arc as StdArc;
+
+    fn posed(bind: &[BonePose]) -> SkeletonPose {
+        SkeletonPose {
+            names: StdArc::from((0..bind.len()).map(|i| format!("b{i}")).collect::<Vec<_>>()),
+            parents: StdArc::from(vec![None; bind.len()]),
+            bones: bind.to_vec(),
+        }
+    }
+
+    fn skinned(t: &SkinTemplate, pose: &SkeletonPose) -> Vec<Vertex> {
+        let mut out = t.mesh().vertices;
+        let mut bones = Vec::new();
+        skin(t, &pose.bones, &mut out, &mut bones);
+        out
+    }
+
+    #[test]
+    fn mannequin_mesh_is_clean_and_skinned_vertices_follow_their_bones() {
+        let t = body::build(BodyPart::Mannequin, BodyQuality(3.0));
+        assert!(
+            t.indices.len() / 3 > 3000,
+            "{} triangles",
+            t.indices.len() / 3
+        );
+        for ((p, n), w) in t.positions.iter().zip(&t.normals).zip(&t.weights) {
+            assert!(p.is_finite() && n.is_finite());
+            assert!((n.length() - 1.0).abs() < 1e-3);
+            assert!((w.iter().sum::<f32>() - 1.0).abs() < 1e-4);
+        }
+        // A seamless figure from the soles (flat on the ground) to the top of the head.
+        let lo = t.positions.iter().fold(Vec3::MAX, |a, p| a.min(*p));
+        let hi = t.positions.iter().fold(Vec3::MIN, |a, p| a.max(*p));
+        assert!(
+            lo.y.abs() < 0.01 && (1.78..1.9).contains(&hi.y),
+            "{lo} {hi}"
+        );
+
+        // The bind pose reproduces the rest mesh.
+        let rest = posed(&t.bind);
+        for (v, p) in skinned(&t, &rest).iter().zip(&t.positions) {
+            assert!(Vec3::from(v.position).distance(*p) < 1e-4);
+        }
+        // Raise the right hand: fingertips move with the hand bone, the left side stays.
+        let mut pose = posed(&t.bind);
+        let hand = Human::ARM_R + 2;
+        let lift = Quat::from_rotation_x(-1.2);
+        let shoulder = t.bind[Human::ARM_R].translation;
+        for b in Human::ARM_R..=hand {
+            let bp = &mut pose.bones[b];
+            bp.translation = shoulder + lift * (bp.translation - shoulder);
+            bp.rotation = lift * bp.rotation;
+        }
+        let out = skinned(&t, &pose);
+        let mut checked = 0;
+        for (i, v) in out.iter().enumerate() {
+            let rest_p = t.positions[i];
+            let moved = Vec3::from(v.position);
+            if t.joints[i][0] as usize == hand && t.weights[i][0] > 0.999 {
+                let expect = shoulder + lift * (rest_p - shoulder);
+                assert!(moved.distance(expect) < 1e-3, "hand vertex {i}");
+                checked += 1;
+            }
+            if rest_p.x < -0.12 {
+                assert!(moved.distance(rest_p) < 1e-4, "left side moved at {rest_p}");
+            }
+            let n = Vec3::from(v.normal);
+            assert!(moved.is_finite() && (n.length() - 1.0).abs() < 1e-3);
+        }
+        assert!(checked > 50, "{checked} hand vertices");
+    }
+
+    #[test]
+    fn bodies_are_drawn_between_their_last_two_poses() {
+        let a = BonePose::default();
+        let b = BonePose {
+            translation: Vec3::new(0.2, 0.0, 0.0),
+            rotation: Quat::from_rotation_y(1.0),
+            ..BonePose::default()
+        };
+        let mut out = Vec::new();
+        interpolate_pose(&[a], &[b], 0.5, &mut out);
+        assert!(out[0].translation.distance(Vec3::new(0.1, 0.0, 0.0)) < 1e-6);
+        assert!(out[0].rotation.angle_between(Quat::from_rotation_y(0.5)) < 1e-4);
+        // At the end of the step, or with no earlier pose, the current pose.
+        interpolate_pose(&[a], &[b], 1.0, &mut out);
+        assert_eq!(out[0], b);
+        interpolate_pose(&[], &[b], 0.3, &mut out);
+        assert_eq!(out[0], b);
+    }
+
+    #[test]
+    fn dog_parts_build_on_one_skeleton() {
+        for part in [BodyPart::Dog, BodyPart::DogNose, BodyPart::DogEyes] {
+            let t = body::build(part, BodyQuality(3.0));
+            assert!(!t.indices.is_empty(), "{part:?}");
+            assert_eq!(t.bind.len(), Dog::BONES);
+            assert!(t.positions.iter().all(|p| p.is_finite() && p.y > -0.005));
+            assert!(t.normals.iter().all(|n| (n.length() - 1.0).abs() < 1e-3));
+        }
+    }
+}

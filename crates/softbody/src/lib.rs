@@ -20,7 +20,7 @@ use engine_render::RenderAppExt;
 pub use body::{SoftBodySim, SoftKind};
 pub use character::{BoneCapsule, BoneColliders};
 pub use cloth::{Cloth, ClothPins};
-pub use hair::{HairEmitter, HairGroom, HairStyle};
+pub use hair::{FurZone, HairEmitter, HairGroom, HairStyle, MeshSkin, MeshSkins};
 pub use rope::{BridgePlank, Rope, RopeBridge, RopeEnd, SoftLoad};
 pub use settings::{Pattern, SimSettings, SoftBodyConfig, SoftMaterial};
 pub use systems::SoftBodyFailed;
@@ -62,7 +62,7 @@ impl Plugin for SoftBodyPlugin {
                 "Soft solid (jelly, slime, cushion): shape (Box{size, bevel} or Sphere{radius}, m), resolution, mass_kg, shape_compliance and lattice_compliance (m/N), plasticity (1/s), yield_m, detail, sim, material.",
             )
             .register_component::<HairGroom>(
-                "Hair or fur grown from the parent's SkeletonPose bones: emitters (Scalp{bone, center, radii, guides, hairline}, Fur{bone, to, radius, guides, comb}), style (length m, segments, strands_per_guide, spread, clumping, curl, stiffness, droop, thickness, melanin, redness, tint), sim.",
+                "Hair or fur grown from the parent's SkeletonPose bones: emitters (Scalp{bone, center, radii, guides, hairline}, Fur{bone, to, radius, guides, comb}, Surface{mesh (asset key of a skinned body), guides, flow_from (bone), gravity, zones [{bone, offset, radius, length}], bones, skip_bones}), style (length m, segments, strands_per_guide, spread, clumping, curl, stiffness, droop, thickness, melanin, redness, tint), sim.",
             )
             .register_component::<BoneColliders>(
                 "Collision capsules on a character's bones for cloth and hair: capsules [{bone, to, radius (m), offset}], friction.",

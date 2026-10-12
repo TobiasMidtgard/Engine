@@ -36,11 +36,19 @@ use crate::rope::{Rope, RopeBridge, RopeEnd, SoftLoad};
 use crate::settings::{Pattern, SimSettings, SoftMaterial};
 use crate::volume::{SoftVolume, VolumeShape};
 
+pub mod body;
 mod characters;
 mod props;
+pub mod sculpt;
+pub mod skin;
 
-pub use characters::{DemoLimb, DemoSkeleton, Rig, animate_skeletons, place_limbs, pose_rig};
-use characters::{dog, mannequin};
+#[cfg(test)]
+pub(crate) use characters::dog_fur_zones;
+pub use characters::{
+    DOG, DemoSkeleton, HUMANOID, Rig, animate_skeletons, mannequin_colliders, pose_rig,
+    pose_rig_stride, skeleton,
+};
+use characters::{dog, graphite, ivory, mannequin};
 use props::*;
 
 /// How a demo prop moves (kinematic until the physics module lands).
@@ -119,12 +127,20 @@ pub struct DemoRespawn {
 
 /// Adds the demo's animation systems (they only touch entities with demo components).
 pub fn register(app: &mut App) {
+    app.init_resource::<skin::BodyLibrary>()
+        .init_resource::<crate::MeshSkins>()
+        .add_systems(
+            PostUpdate,
+            (skin::prepare_bodies, skin::skin_bodies)
+                .chain()
+                .before(UpdateSet::Propagate),
+        )
+        .add_systems(FixedPreUpdate, skin::snapshot_poses);
     app.add_systems(
         FixedUpdate,
         (
             drive_motion,
             animate_skeletons,
-            place_limbs,
             walk_bridges,
             fire_turrets,
             burn_and_restore,
@@ -156,6 +172,7 @@ pub fn spawn_demo(commands: &mut Commands, origin: DVec3) {
         2.6,
         1.0,
         "Mannequin",
+        ivory(),
     );
     mannequin(
         commands,
@@ -163,6 +180,7 @@ pub fn spawn_demo(commands: &mut Commands, origin: DVec3) {
         2.0,
         0.25,
         "Slow-motion mannequin",
+        graphite(),
     );
     dog(commands, c + DVec3::new(-8.0, 0.0, -4.0));
 }

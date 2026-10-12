@@ -361,6 +361,8 @@ pub fn build_bodies(
     parents: Query<&ChildOf>,
     skeletons: Query<(&GlobalTransform, &SkeletonPose)>,
     all_transforms: Query<&GlobalTransform>,
+    meshes: Option<Res<engine_assets::Assets<engine_render::Mesh>>>,
+    skins: Option<Res<hair::MeshSkins>>,
 ) {
     for (e, spec, t) in &cloths {
         let skeleton = find_skeleton(e, &parents, &skeletons);
@@ -411,12 +413,18 @@ pub fn build_bodies(
     for (e, spec, t) in &volumes {
         report(&mut commands, e, "SoftVolume", volume::build(spec, t));
     }
+    let meshes = meshes.as_deref();
     for (e, spec) in &grooms {
         let skeleton = find_skeleton(e, &parents, &skeletons);
-        if skeleton.is_some_and(|s| s.2.bones.is_empty()) {
-            continue;
+        if skeleton.is_some_and(|s| s.2.bones.is_empty()) || spec.waiting_for_mesh(meshes) {
+            continue; // the pose isn't evaluated (or the body mesh isn't built) yet
         }
-        report(&mut commands, e, "HairGroom", hair::build(spec, skeleton));
+        report(
+            &mut commands,
+            e,
+            "HairGroom",
+            hair::build(spec, skeleton, meshes, skins.as_deref()),
+        );
     }
 }
 
@@ -693,6 +701,9 @@ fn step_one(entity: Entity, body: &mut SoftBodySim, ctx: &StepContext) {
             FrameSource::Bone { owner, bone } => world_transform(owner, ctx.transforms)
                 .zip(ctx.poses.get(owner).ok())
                 .and_then(|(t, p)| p.bone_world(&t, bone)),
+            FrameSource::Blend(blend) => world_transform(blend.owner, ctx.transforms)
+                .zip(ctx.poses.get(blend.owner).ok())
+                .and_then(|(t, p)| blend.world(&t, p)),
         };
         if let Some((p, r)) = pose {
             let local = (p - origin).as_vec3();
