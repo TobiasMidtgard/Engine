@@ -175,7 +175,11 @@ fn main() {
     );
 
     if want("hud") {
-        engine_ui::hud::spawn_world_markers(&mut app.world, DVec3::new(0.0, 0.0, -2.0));
+        engine_ui::hud::spawn_world_markers(
+            &mut app.world,
+            DVec3::new(0.0, 0.0, -2.0),
+            DVec3::new(6.0, 3.0, -4.0),
+        );
         api(&mut app, "time.set_speed", json!({"scale": 0.35}));
         show(&mut app, "hud", json!({}));
         api(

@@ -188,7 +188,8 @@ pub struct UiDemo;
 pub fn spawn_demo(commands: &mut Commands, origin: DVec3) {
     commands.queue(move |world: &mut World| {
         setup_data(world);
-        crate::hud::spawn_world_markers(world, origin);
+        // Over the showcase market's middle stall, in view of the tour's UI stops.
+        crate::hud::spawn_world_markers(world, origin, DVec3::new(-11.8, 3.4, 9.2));
         world.spawn((UiDemo, Transform::from_translation(origin)));
     });
 }

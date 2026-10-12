@@ -103,6 +103,9 @@ pub struct Marker {
     pub icon: String,
     pub color: Color,
     pub show_distance: bool,
+    /// Show it even while the HUD screen is closed. By default markers belong to the HUD and
+    /// fade in and out with it.
+    pub always: bool,
 }
 
 impl Default for Marker {
@@ -113,6 +116,7 @@ impl Default for Marker {
             icon: "marker_quest".into(),
             color: Color::hex(0xe8b65a),
             show_distance: true,
+            always: false,
         }
     }
 }
@@ -911,8 +915,11 @@ fn set_opacity(world: &mut World, root: Entity, id: &str, opacity: f32) {
 }
 
 fn markers_update(world: &mut World) {
+    let hud = screens::find_screen(world, "hud")
+        .and_then(|e| world.get::<Screen>(e))
+        .map_or(0.0, |s| s.presence);
     let mut q = world.query::<(Entity, &Marker, &WorldAnchor)>();
-    let items: Vec<(Entity, bool, f32, bool, Vec2)> = q
+    let items: Vec<(Entity, bool, f32, bool, Vec2, f32)> = q
         .iter(world)
         .map(|(e, m, a)| {
             (
@@ -921,10 +928,16 @@ fn markers_update(world: &mut World) {
                 a.distance,
                 !a.on_screen && a.clamp_to_edges,
                 a.edge_direction,
+                if m.always { 1.0 } else { hud },
             )
         })
         .collect();
-    for (e, show, distance, clamped, dir) in items {
+    for (e, show, distance, clamped, dir, opacity) in items {
+        if let Some(mut n) = world.get_mut::<Node>(e)
+            && n.style.opacity != Some(opacity)
+        {
+            n.style.opacity = Some(opacity);
+        }
         for c in screens::subtree(world, e) {
             if world.get::<MarkerDistance>(c).is_some() {
                 let text = if show {
@@ -1473,9 +1486,9 @@ pub fn spawn_marker(world: &mut World, m: &Marker, anchor: WorldAnchor) -> Resul
     Ok(root)
 }
 
-/// The UI test area's markers: the merchant's stall, a quest beacon off in the distance
-/// (clamped to the screen edge) and a lookout.
-pub fn spawn_world_markers(world: &mut World, origin: DVec3) {
+/// The UI test area's markers: the trader over `trader` (relative to `origin`), a quest
+/// beacon off in the distance (clamped to the screen edge) and a lookout.
+pub fn spawn_world_markers(world: &mut World, origin: DVec3, trader: DVec3) {
     let p = world.resource::<Theme>().palette.clone();
     let items = [
         (
@@ -1486,7 +1499,7 @@ pub fn spawn_world_markers(world: &mut World, origin: DVec3) {
                 color: p.accent,
                 show_distance: false,
             },
-            DVec3::new(6.0, 3.0, -4.0),
+            trader,
             false,
             [8.0, 45.0],
         ),
@@ -1565,7 +1578,7 @@ pub fn register_api(app: &mut App) {
     );
     app.register_api(
         "hud.marker",
-        "Pin a marker to the world: title, subtitle, icon, color, and position [x, y, z] or entity (a name) with offset [x, y, z]; clamp keeps it on the screen edge; fade [near, far] m.",
+        "Pin a marker to the world: title, subtitle, icon, color, and position [x, y, z] or entity (a name) with offset [x, y, z]; clamp keeps it on the screen edge; fade [near, far] m; always shows it without the HUD.",
         r#"{"title": "Relay Tower", "icon": "marker_quest", "position": [120, 30, -800], "clamp": true}"#,
         |world, args| {
             let mut m = Marker {
@@ -1582,6 +1595,7 @@ pub fn register_api(app: &mut App) {
             if let Some(b) = args.get("distance").and_then(Value::as_bool) {
                 m.show_distance = b;
             }
+            m.always = args.get("always").and_then(Value::as_bool).unwrap_or(false);
             let v3 = |v: Option<&Value>| -> Option<[f64; 3]> {
                 let a = v?.as_array()?;
                 Some([a.first()?.as_f64()?, a.get(1)?.as_f64()?, a.get(2)?.as_f64()?])
