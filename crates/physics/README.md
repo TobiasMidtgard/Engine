@@ -128,10 +128,19 @@ touching pairs, step time, substeps.
 
 `demo::spawn_demo(commands, origin)` builds the **physics proving ground**: a 70 × 50 m concrete
 yard (with a curb, so nothing rolls off) with a 30-crate tower, a bin filling with 250
-crates/barrels/balls, a domino snake, ragdolls tumbling down a steep staircase, a wrecking ball
-smashing a crate wall, a seesaw catapult, a motor-driven paddle wheel, a sagging plank bridge, a
-kinematic turntable and bouncing rubber balls. Its top surface is at `origin`. Render it alone with
+crates/barrels/balls, a domino snake, crash test dummy ragdolls tumbling down a steep staircase,
+a wrecking ball smashing a crate wall, a seesaw catapult, a motor-driven paddle wheel, a sagging
+plank bridge, a kinematic turntable and bouncing rubber balls. Its top surface is at `origin`; the
+showcase's physics zone places it. Render it alone with
 `cargo run -p engine_physics --release --example proving_ground -- out_dir`.
+
+Everything in it is drawn with detailed procedural art (`src/demo/art/`): beveled meshes sized to
+their colliders (shipping crates with brackets and bolts, 200 l drums, chain links, a cast
+concrete stair with handrails, a steel gantry, glulam and diamond-plate machines, Hybrid III-style
+dummies) and PBR texture sets (albedo, normal, roughness/metal/occlusion) generated at startup,
+about a second in release builds (debug builds make them a quarter the size). Apps without a
+renderer get colliders only. `cargo run -p engine_physics --release --example art_props`
+(`art_structures`, `art_dummy`, `art_textures`) previews each part on its own.
 
 Tests (`cargo test -p engine_physics`): the conformance suite; the "done when" scenarios below
 (`tests/scenarios.rs`); behaviors other modules rely on (`tests/behaviors.rs`: removal, compound
