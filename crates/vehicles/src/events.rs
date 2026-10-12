@@ -29,7 +29,6 @@ pub struct EventTimers {
 
 /// Wheel tracks, tire smoke and pushes on whatever the wheels stand on.
 pub fn wheel_events_system(
-    time: Res<Time>,
     settings: Res<VehicleSettings>,
     bodies: Query<&RigidBody>,
     mut q: Query<(Entity, &mut Wheels, &VehicleForces)>,
@@ -37,9 +36,9 @@ pub fn wheel_events_system(
     mut smoke: MessageWriter<SmokeEmission>,
     mut impulses: MessageWriter<ApplyImpulse>,
 ) {
-    let dt = time.delta_secs();
     let g = 9.81;
     for (entity, mut wheels, forces) in &mut q {
+        let dt = forces.frame.dt;
         let yaw_of = |dir: Vec3| (-dir.z).atan2(dir.x);
         let rotation = forces.frame.rotation;
         for w in &mut wheels.wheels {
@@ -97,7 +96,6 @@ pub fn wheel_events_system(
 /// Engine noise for AI, exhaust smoke and jet/rocket wash.
 #[allow(clippy::type_complexity)]
 pub fn engine_events_system(
-    time: Res<Time>,
     settings: Res<VehicleSettings>,
     mut wind: ResMut<WindField>,
     mut q: Query<(
@@ -112,9 +110,9 @@ pub fn engine_events_system(
     mut noise: MessageWriter<NoiseEvent>,
     mut smoke: MessageWriter<SmokeEmission>,
 ) {
-    let dt = time.delta_secs();
     for (entity, vehicle, forces, tel, mut timers, propulsion, ship) in &mut q {
         let f = forces.frame;
+        let dt = f.dt;
         timers.noise -= dt;
         timers.smoke -= dt;
         // How loud: idling car ≈ 40 m for AI hearing, racing car ≈ 300 m, jet ≈ 3 km,
@@ -238,13 +236,11 @@ pub fn crash_events_system(
 
 /// Overheating hulls take fire damage.
 pub fn heat_damage_system(
-    time: Res<Time>,
     mut q: Query<(Entity, &HeatShield, &VehicleForces, &mut EventTimers)>,
     mut damage: MessageWriter<DamageEvent>,
 ) {
-    let dt = time.delta_secs();
     for (e, shield, forces, mut timers) in &mut q {
-        timers.heat_damage -= dt;
+        timers.heat_damage -= forces.frame.dt;
         if shield.temperature_k <= shield.max_temperature_k || timers.heat_damage > 0.0 {
             continue;
         }

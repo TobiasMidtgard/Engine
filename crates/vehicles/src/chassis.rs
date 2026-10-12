@@ -91,6 +91,10 @@ pub struct VehicleFrame {
     /// Gravity at the center of mass, m/s².
     pub gravity: Vec3,
     pub air: AirSample,
+    /// This vehicle's own step, s: `Time::delta_for` with its `LocalTimeScale`, so a car in a
+    /// slow-motion bubble spins its wheels, spools its engine and flies its autopilot in its
+    /// own seconds, like the physics backend moves its body.
+    pub dt: f32,
 }
 
 impl Default for VehicleFrame {
@@ -105,6 +109,7 @@ impl Default for VehicleFrame {
             angular: Vec3::ZERO,
             gravity: Vec3::ZERO,
             air: AirSample::VACUUM,
+            dt: 0.0,
         }
     }
 }
@@ -287,6 +292,7 @@ impl Default for VehicleSettings {
 /// Body state, mass and air for every vehicle; clears the force accumulators.
 #[allow(clippy::type_complexity)]
 pub fn prepare_frames(
+    time: Res<Time>,
     air: Res<Atmospheres>,
     weather: Res<WeatherState>,
     gravity: Res<Gravity>,
@@ -297,11 +303,12 @@ pub fn prepare_frames(
         Option<&Velocity>,
         Option<&MassProperties>,
         Option<&RigidBody>,
+        Option<&LocalTimeScale>,
         &mut VehicleForces,
     )>,
 ) {
     q.par_iter_mut()
-        .for_each(|(vehicle, t, vel, mass_props, body, mut forces)| {
+        .for_each(|(vehicle, t, vel, mass_props, body, local, mut forces)| {
             let (mass, com_local, inertia) = match mass_props {
                 Some(m) if m.mass_kg > 0.0 => (
                     m.mass_kg,
@@ -330,6 +337,7 @@ pub fn prepare_frames(
                 angular: v.angular,
                 gravity: gravity.at(com),
                 air: air.sample(&weather, &gravity, &wind, com),
+                dt: time.delta_for(local),
             };
             forces.force = Vec3::ZERO;
             forces.torque = Vec3::ZERO;
@@ -390,13 +398,12 @@ pub fn apply_forces(
 /// Speed, altitude, AoA and g-load gauges (wheel, engine and wing gauges are filled in by
 /// their systems).
 pub fn telemetry_system(
-    time: Res<Time>,
     gravity: Res<Gravity>,
     mut q: Query<(&VehicleForces, &mut VehicleTelemetry)>,
 ) {
-    let dt = time.delta_secs().max(1e-6);
     q.par_iter_mut().for_each(|(forces, mut tel)| {
         let f = forces.frame;
+        let dt = f.dt.max(1e-6);
         let up = gravity.up_at(f.com);
         tel.speed = f.linear.length();
         tel.forward_speed = f.linear.dot(f.forward());

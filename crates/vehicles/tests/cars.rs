@@ -382,3 +382,42 @@ fn reports_engine_and_wheel_state_for_audio() {
         assert!(w.rolling_speed > speed * 0.9, "{w:?} at {speed:.1} m/s");
     }
 }
+
+#[test]
+fn a_car_in_a_slow_motion_bubble_drives_in_its_own_seconds() {
+    let mut app = flat_app("concrete");
+    calm(&mut app);
+    let normal = car_on(&mut app, DVec3::new(-5.0, 0.0, 0.0), Vec3::NEG_Z);
+    let slow = car_on(&mut app, DVec3::new(5.0, 0.0, 0.0), Vec3::NEG_Z);
+    app.world.entity_mut(slow).insert(LocalTimeScale {
+        factor: 0.5,
+        ..Default::default()
+    });
+    // Settle both (the slow one needs twice the world time), then floor it.
+    run_for(&mut app, 4.0);
+    let start = |app: &App, e| transform(app, e).translation.z;
+    let (z_normal, z_slow) = (start(&app, normal), start(&app, slow));
+    for car in [normal, slow] {
+        controls(&mut app, car, |c| c.throttle = 1.0);
+    }
+    run_for(&mut app, 2.0);
+    let normal_after_2 = z_normal - start(&app, normal);
+    let normal_rpm_after_2 = app.world.get::<EngineState>(normal).unwrap().rpm;
+    run_for(&mut app, 2.0);
+    // Four world seconds are two of the slow car's own: it has done what the other car did
+    // in two, engine included.
+    let slow_after_4 = z_slow - start(&app, slow);
+    let slow_rpm = app.world.get::<EngineState>(slow).unwrap().rpm;
+    assert!(
+        normal_after_2 > 5.0,
+        "the normal car moved {normal_after_2:.1} m"
+    );
+    assert!(
+        (slow_after_4 - normal_after_2).abs() < normal_after_2 * 0.12,
+        "slow car {slow_after_4:.1} m in 4 world s, normal {normal_after_2:.1} m in 2 s"
+    );
+    assert!(
+        (slow_rpm - normal_rpm_after_2).abs() < 900.0,
+        "slow {slow_rpm:.0} rpm, normal {normal_rpm_after_2:.0} rpm"
+    );
+}

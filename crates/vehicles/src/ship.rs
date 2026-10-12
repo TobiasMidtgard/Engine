@@ -251,7 +251,6 @@ fn axis_capacity(thrusters: &[Thruster]) -> [f32; 6] {
 
 /// Flight assist + allocation + thrust, and propellant use.
 pub fn spacecraft_system(
-    time: Res<Time>,
     mut q: Query<(
         &mut Spacecraft,
         &VehicleControls,
@@ -259,14 +258,14 @@ pub fn spacecraft_system(
         &mut VehicleTelemetry,
     )>,
 ) {
-    let dt = time.delta_secs();
-    if dt <= 0.0 {
-        return;
-    }
     q.par_iter_mut()
         .for_each(|(mut ship, controls, mut forces, mut tel)| {
             let ship = &mut *ship;
             let f = forces.frame;
+            let dt = f.dt;
+            if dt <= 0.0 {
+                return;
+            }
             let inv = f.rotation.inverse();
             let v_local = inv * f.linear;
             let w_local = inv * f.angular;
@@ -428,13 +427,10 @@ const SUTTON_GRAVES: f32 = 1.7415e-4;
 const STEFAN_BOLTZMANN: f32 = 5.670_374e-8;
 
 /// Heat and cool every heat shield.
-pub fn heating_system(
-    time: Res<Time>,
-    mut q: Query<(&mut HeatShield, &VehicleForces, &mut VehicleTelemetry)>,
-) {
-    let dt = time.delta_secs();
+pub fn heating_system(mut q: Query<(&mut HeatShield, &VehicleForces, &mut VehicleTelemetry)>) {
     q.par_iter_mut().for_each(|(mut shield, forces, mut tel)| {
         let f = forces.frame;
+        let dt = f.dt;
         let v = f.airspeed_vector().length();
         let rho = f.air.density.max(0.0);
         let flux = SUTTON_GRAVES * (rho / shield.nose_radius_m.max(0.05)).sqrt() * v * v * v;

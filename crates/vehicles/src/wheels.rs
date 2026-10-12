@@ -312,7 +312,6 @@ fn ackermann_angle(center: f32, x: f32, wheelbase: f32, amount: f32) -> f32 {
 /// Simulate every vehicle's wheels for one physics step.
 #[allow(clippy::type_complexity, clippy::too_many_arguments)]
 pub fn wheels_system(
-    time: Res<Time>,
     settings: Res<VehicleSettings>,
     queries: Res<PhysicsQueries>,
     ground: Res<Ground>,
@@ -328,20 +327,17 @@ pub fn wheels_system(
         &mut VehicleTelemetry,
     )>,
 ) {
-    let dt = time.delta_secs();
-    if dt <= 0.0 {
-        return;
-    }
     let use_ground = settings.use_ground_query && gravity.bodies.is_empty();
     let substeps = settings.wheel_substeps.clamp(1, 32);
     q.par_iter_mut().for_each(
         |(entity, mut wheels, mut drivetrain, controls, mut forces, mut tel)| {
             let wheels = &mut *wheels;
             let n = wheels.wheels.len().min(MAX_WHEELS);
-            if n == 0 {
+            let frame = forces.frame;
+            let dt = frame.dt;
+            if n == 0 || dt <= 0.0 {
                 return;
             }
-            let frame = forces.frame;
             let up = frame.up();
             let down = -up;
             let filter = QueryFilter::excluding(entity);

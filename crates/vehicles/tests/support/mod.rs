@@ -545,6 +545,11 @@ struct Body {
     points: Vec<Vec3>,
     friction: f32,
     restitution: f32,
+    /// Own seconds per world second (`LocalTimeScale`). Velocities are scaled by it for the
+    /// step and forces and gravity by its square, as the contract describes.
+    time_scale: f32,
+    /// The body's own-seconds velocity on entry, kept for a frozen body (scale 0).
+    own_velocity: Velocity,
 }
 
 impl Body {
@@ -626,16 +631,22 @@ fn step_system(world: &mut World) {
             &Collider,
             Option<&Velocity>,
             Option<&ExternalForce>,
+            Option<&LocalTimeScale>,
         )>();
-        for (e, t, b, c, v, f) in q.iter(world) {
+        for (e, t, b, c, v, f, local) in q.iter(world) {
             if b.kind != BodyKind::Dynamic {
                 continue;
             }
+            let s = (world.resource::<Time>().delta_for(local) as f64 / dt) as f32;
             parts.clear();
             expand(&c.shape, Vec3::ZERO, Quat::IDENTITY, &mut parts);
             let mp = mass_properties(&parts, b, c.density);
             let com = t.translation + (t.rotation * mp.center_of_mass).as_dvec3();
-            let v = v.copied().unwrap_or_default();
+            let own_velocity = v.copied().unwrap_or_default();
+            let v = Velocity {
+                linear: own_velocity.linear * s,
+                angular: own_velocity.angular * s,
+            };
             let (mut force, mut torque) = (Vec3::ZERO, Vec3::ZERO);
             if let Some(f) = f {
                 force = f.force;
@@ -675,6 +686,8 @@ fn step_system(world: &mut World) {
                 points,
                 friction: mat.friction,
                 restitution: mat.restitution,
+                time_scale: s,
+                own_velocity,
             });
             props.push(mp);
         }
@@ -699,12 +712,13 @@ fn step_system(world: &mut World) {
     for _ in 0..substeps {
         // Forces.
         for b in &mut bodies {
+            let s2 = b.time_scale * b.time_scale;
             let g = gravity.at(b.com) * b.gravity_scale;
-            b.v += (b.force / b.mass + g) * h;
-            let tau = b.torque;
+            b.v += (b.force / b.mass + g) * s2 * h;
+            let tau = b.torque * s2;
             b.w += b.inv_inertia_world(tau) * h;
-            b.v *= (1.0 - b.linear_damping * h).max(0.0);
-            b.w *= (1.0 - b.angular_damping * h).max(0.0);
+            b.v *= (1.0 - b.linear_damping * b.time_scale * h).max(0.0);
+            b.w *= (1.0 - b.angular_damping * b.time_scale * h).max(0.0);
         }
         // Contacts: every corner near a static face.
         contacts.clear();
@@ -799,6 +813,9 @@ fn step_system(world: &mut World) {
         }
         // Integrate.
         for b in &mut bodies {
+            if b.time_scale <= 1e-6 {
+                continue;
+            }
             b.com += (b.v * h).as_dvec3();
             let angle = b.w.length() * h;
             if angle > 1e-9 {
@@ -849,13 +866,15 @@ fn step_system(world: &mut World) {
             t.translation = origin;
             t.rotation = b.rotation;
         }
-        e.insert((
+        let velocity = if b.time_scale > 1e-6 {
             Velocity {
-                linear: b.v,
-                angular: b.w,
-            },
-            mp,
-        ));
+                linear: b.v / b.time_scale,
+                angular: b.w / b.time_scale,
+            }
+        } else {
+            b.own_velocity
+        };
+        e.insert((velocity, mp));
     }
 }
 

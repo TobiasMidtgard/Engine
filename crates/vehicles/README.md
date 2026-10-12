@@ -61,5 +61,7 @@ contract (until the physics module lands).
 - A car drives, drifts and jumps convincingly; a plane takes off and stalls; a ship flies from a
   planet surface into orbit. ✓ (on the stand-in solver; to re-check on the real backend)
 - The models hold up in close-up next to the rest of the showcase.
-- Vehicles honor `LocalTimeScale` (time dilation bubbles). World slow motion already works;
-  a per-vehicle time scale needs the physics contract to integrate rigid bodies in entity time.
+- Vehicles honor `LocalTimeScale` (time dilation bubbles). ✓ Every subsystem steps by
+  `VehicleFrame::dt` (`Time::delta_for` with the vehicle's `LocalTimeScale`), and the backend
+  moves the body in the same seconds, so a car in a 0.5 bubble does in 4 world seconds what
+  another does in 2 (`tests/cars.rs`).
