@@ -332,7 +332,7 @@ mod tests {
     /// Every shader must compile against the shader library (no GPU needed).
     #[test]
     fn shaders_validate() {
-        let shaders: [(&str, &str, bool); 12] = [
+        let shaders: [(&str, &str, bool); 13] = [
             ("mesh", include_str!("shaders/mesh.wgsl"), true),
             (
                 "mesh_shadow",
@@ -346,6 +346,7 @@ mod tests {
             ("exposure", include_str!("shaders/exposure.wgsl"), false),
             ("gtao", include_str!("shaders/gtao.wgsl"), true),
             ("taa", include_str!("shaders/taa.wgsl"), true),
+            ("ssr", include_str!("shaders/ssr.wgsl"), true),
             (
                 "atmosphere_luts",
                 include_str!("shaders/atmosphere_luts.wgsl"),

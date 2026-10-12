@@ -1,9 +1,11 @@
-//! Screen-space effects built on the depth prepass: ground-truth ambient occlusion (GTAO) and
-//! temporal anti-aliasing (TAA).
+//! Screen-space effects built on the depth prepass: ground-truth ambient occlusion (GTAO),
+//! screen-space reflections (SSR) and temporal anti-aliasing (TAA).
 //!
 //! ```text
-//! prepass (depth, normals, motion) → copy depth → GTAO → edge-aware blur → [scene shading reads
-//! the AO] … transparent → TAA resolve into the history → copy back to the HDR target
+//! prepass (depth, normals, motion) → copy depth → GTAO → edge-aware blur → SSR (traces the
+//! prepass depth, reads the previous frame's image) → [scene shading reads the AO and SSR] …
+//! transparent → TAA resolve into the history → copy back to the HDR target (without TAA, the
+//! HDR image is copied into the history for next frame's reflections)
 //! ```
 
 use bytemuck::{Pod, Zeroable};
@@ -49,6 +51,10 @@ pub struct ScreenEffects {
     blur: wgpu::RenderPipeline,
     gtao_group: wgpu::BindGroup,
     blur_group: wgpu::BindGroup,
+    ssr_layout: wgpu::BindGroupLayout,
+    ssr: wgpu::RenderPipeline,
+    /// SSR input groups, indexed by the history written this frame (they read the other one).
+    ssr_groups: [wgpu::BindGroup; 2],
     taa_layout: wgpu::BindGroupLayout,
     taa: wgpu::RenderPipeline,
     taa_params: wgpu::Buffer,
@@ -92,6 +98,10 @@ impl ScreenEffects {
             label: Some("ambient occlusion inputs"),
             entries: &[float_tex(0), float_tex(1), depth_tex(2)],
         });
+        let ssr_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("screen-space reflection inputs"),
+            entries: &[float_tex(0), depth_tex(1), float_tex(2), float_tex(3)],
+        });
         let taa_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("taa inputs"),
             entries: &[
@@ -133,6 +143,17 @@ impl ScreenEffects {
             shared.formats.ao,
             None,
         );
+        let ssr_module = shared.shader("ssr", include_str!("shaders/ssr.wgsl"), true);
+        let ssr = fullscreen_pipeline(
+            shared,
+            "screen-space reflections",
+            &ssr_module,
+            "vs_ssr",
+            "fs_ssr",
+            &[&shared.frame_layout, &ssr_layout],
+            shared.formats.hdr,
+            None,
+        );
         let taa = fullscreen_pipeline(
             shared,
             "taa resolve",
@@ -151,12 +172,16 @@ impl ScreenEffects {
         });
         let (gtao_group, blur_group, taa_groups) =
             Self::groups(shared, targets, &ao_layout, &taa_layout, &taa_params);
+        let ssr_groups = Self::ssr_groups(shared, targets, &ssr_layout);
         Self {
             ao_layout,
             gtao,
             blur,
             gtao_group,
             blur_group,
+            ssr_layout,
+            ssr,
+            ssr_groups,
             taa_layout,
             taa,
             taa_params,
@@ -233,6 +258,40 @@ impl ScreenEffects {
         (gtao_group, blur_group, taa_groups)
     }
 
+    fn ssr_groups(
+        shared: &GpuShared,
+        t: &Targets,
+        layout: &wgpu::BindGroupLayout,
+    ) -> [wgpu::BindGroup; 2] {
+        fn view(v: &wgpu::TextureView) -> wgpu::BindingResource<'_> {
+            wgpu::BindingResource::TextureView(v)
+        }
+        [0, 1].map(|current| {
+            shared.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("screen-space reflection inputs"),
+                layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: view(&t.prepass_normal.view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: view(&t.prepass_depth.view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: view(&t.motion.view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 3,
+                        resource: view(&t.history[1 - current].view),
+                    },
+                ],
+            })
+        })
+    }
+
     /// The targets were recreated: rebuild bind groups and drop the history.
     pub fn resize(&mut self, shared: &GpuShared, targets: &Targets) {
         let (gtao_group, blur_group, taa_groups) = Self::groups(
@@ -245,6 +304,7 @@ impl ScreenEffects {
         self.gtao_group = gtao_group;
         self.blur_group = blur_group;
         self.taa_groups = taa_groups;
+        self.ssr_groups = Self::ssr_groups(shared, targets, &self.ssr_layout);
         self.history_ready = false;
         self.accumulated = 0;
     }
@@ -275,6 +335,43 @@ impl ScreenEffects {
         pass.set_bind_group(0, prepass_group, &[]);
         pass.set_bind_group(1, &self.blur_group, &[]);
         pass.draw(0..3, 0..1);
+    }
+
+    /// Whether the history holds the previous frame's image (for screen-space reflections).
+    pub fn has_previous(&self) -> bool {
+        self.history_ready
+    }
+
+    /// Record screen-space reflections into `targets.ssr` from the prepass and the previous
+    /// frame's image (`has_previous` must be true). `prepass_group` as for `encode_ao`.
+    pub fn encode_ssr(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        targets: &Targets,
+        prepass_group: &wgpu::BindGroup,
+    ) {
+        let mut pass =
+            fullscreen_pass(encoder, "screen-space reflections", &targets.ssr.view, true);
+        pass.set_pipeline(&self.ssr);
+        pass.set_bind_group(0, prepass_group, &[]);
+        pass.set_bind_group(1, &self.ssr_groups[self.current], &[]);
+        pass.draw(0..3, 0..1);
+    }
+
+    /// Without TAA: keep the finished HDR image as the previous frame for next frame's
+    /// reflections.
+    pub fn keep_frame(&mut self, encoder: &mut wgpu::CommandEncoder, targets: &Targets) {
+        encoder.copy_texture_to_texture(
+            targets.hdr.texture.as_image_copy(),
+            targets.history[self.current].texture.as_image_copy(),
+            wgpu::Extent3d {
+                width: targets.width,
+                height: targets.height,
+                depth_or_array_layers: 1,
+            },
+        );
+        self.current = 1 - self.current;
+        self.history_ready = true;
     }
 
     /// Record the TAA resolve of `targets.hdr` into the history and copy the result back into

@@ -2,8 +2,8 @@
 //!
 //! ```text
 //! prepare (features read the world) → compute → environment map (+ filters) → shadow cascades
-//! → scene pass [opaque → sky] → (scene copies) → transparent pass
-//! → bloom → tonemap to LDR → overlays (UI) → screenshot readback → blit to window
+//! → prepass → AO, reflections → scene pass [opaque → sky] → (scene copies) → transparent pass
+//! → TAA → bloom → tonemap to LDR → overlays (UI) → screenshot readback → blit to window
 //! ```
 
 use std::path::{Path, PathBuf};
@@ -167,6 +167,9 @@ pub struct Renderer {
     prev_step: f64,
     /// Anti-aliasing mode of the previous frame (a switch resets the history).
     prev_aa: AntiAliasing,
+    /// Pre-exposure the previous frame's image was rendered with (screen-space reflections
+    /// read it).
+    prev_exposure: f32,
     frame_index: u64,
     last_view: Option<ViewData>,
 }
@@ -176,6 +179,7 @@ struct ScreenMaps {
     ao: wgpu::TextureView,
     normal: wgpu::TextureView,
     depth: wgpu::TextureView,
+    ssr: wgpu::TextureView,
 }
 
 impl ScreenMaps {
@@ -184,6 +188,7 @@ impl ScreenMaps {
             ao: targets.ao.view.clone(),
             normal: targets.prepass_normal.view.clone(),
             depth: targets.prepass_depth.view.clone(),
+            ssr: targets.ssr.view.clone(),
         }
     }
 
@@ -214,13 +219,15 @@ impl ScreenMaps {
                 depth_or_array_layers: 1,
             },
         );
-        // New textures start zeroed: no normal written, depth 0 (nothing).
+        // New textures start zeroed: no normal written, depth 0 (nothing), no reflections.
         let normal = tex("no prepass normals", shared.formats.normal);
         let depth = tex("no prepass depth", shared.formats.depth);
+        let ssr = tex("no screen-space reflections", shared.formats.hdr);
         Self {
             ao: ao.view,
             normal: normal.view,
             depth: depth.view,
+            ssr: ssr.view,
         }
     }
 }
@@ -400,6 +407,8 @@ impl Renderer {
                     all,
                     wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                 ),
+                // Screen-space reflections (a screen-space map like 10-12).
+                layout_entry(18, all, float_texture),
             ],
         });
         let shadow_view_layout =
@@ -498,6 +507,7 @@ impl Renderer {
             previous: None,
             prev_step: 0.0,
             prev_aa: settings.anti_aliasing,
+            prev_exposure: 0.0,
             frame_index: 0,
             last_view: None,
         })
@@ -633,6 +643,13 @@ impl Renderer {
         }
         let mut uniform = frame_uniform(world, &view);
         uniform.shadow_params[3] = self.shadow.size as f32;
+        // Screen-space reflections need the previous frame's image of the same view.
+        let ssr = settings.screen_space_reflections
+            && self.effects.has_previous()
+            && view.history_valid
+            && self.prev_exposure > 0.0;
+        uniform.reflections[0] = if ssr { 1.0 } else { 0.0 };
+        uniform.reflections[1] = if ssr { self.prev_exposure } else { 0.0 };
         let queue = &self.shared.queue;
         queue.write_buffer(&self.frame_buffer, 0, bytemuck::bytes_of(&uniform));
         let mut overlay_uniform = uniform;
@@ -841,6 +858,10 @@ impl Renderer {
             self.effects
                 .encode_ao(&mut encoder, &self.targets, &self.prepass_group);
         }
+        if ssr {
+            self.effects
+                .encode_ssr(&mut encoder, &self.targets, &self.prepass_group);
+        }
 
         // Scene: opaque + sky (on the prepass depth).
         {
@@ -923,7 +944,8 @@ impl Renderer {
             }
         }
 
-        // Temporal anti-aliasing (writes the resolved image back into the HDR target).
+        // Temporal anti-aliasing (writes the resolved image back into the HDR target). Either
+        // way the finished image is kept for next frame's reflections.
         if taa {
             self.effects.encode_taa(
                 &self.shared,
@@ -932,7 +954,10 @@ impl Renderer {
                 frame_group,
                 view.history_valid,
             );
+        } else if settings.screen_space_reflections {
+            self.effects.keep_frame(&mut encoder, &self.targets);
         }
+        self.prev_exposure = view.exposure;
 
         // Exposure metering of the finished HDR image.
         self.meter.encode(
@@ -1432,6 +1457,10 @@ fn create_frame_group(
             wgpu::BindGroupEntry {
                 binding: 17,
                 resource: wgpu::BindingResource::Sampler(&env.sampler),
+            },
+            wgpu::BindGroupEntry {
+                binding: 18,
+                resource: view(&maps.ssr),
             },
         ],
     })

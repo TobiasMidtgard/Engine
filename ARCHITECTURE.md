@@ -173,7 +173,12 @@ contact shadows toward the sun (`contact_shadow_length`), and temporal anti-alia
 (`anti_aliasing = Taa`, the default). Under TAA the projection is jittered by a sub-pixel
 offset every frame (`frame.jitter`); `frame.unjittered_view_proj` and `prev_view_proj` give
 stable positions, and overlays get an unjittered frame group. Sun shadows use PCSS: the
-penumbra widens with distance from the caster like the real sun's (`sun_penumbra_scale`).
+penumbra widens with distance from the caster like the real sun's (`sun_penumbra_scale`). Screen-space
+reflections (`screen_space_reflections`, `ssr_max_roughness`; `screen_reflection(rel)` in
+shaders, used by `shade_surface`) trace the prepass depth and read the previous frame's finished
+image, so polished floors, wet streets, metal and glossy paint mirror what is on screen, blurred
+with roughness, and fall back to the prefiltered sky elsewhere. `DebugView::Reflections` shows
+them.
 
 Shared pipelines the core will provide for modules (planned): **strands** for hair, fur and grass
 (guide curves in, GPU-expanded strands with hair shading and LOD out; `engine_softbody` drives

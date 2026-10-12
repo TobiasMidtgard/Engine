@@ -27,6 +27,9 @@
 // Sky light for diffuse surfaces: cosine-weighted sky radiance around each normal (equirect).
 @group(0) @binding(16) var env_irradiance: texture_2d<f32>;
 @group(0) @binding(17) var env_sampler: sampler; // equirect maps: wraps around, clamps at the poles
+// Screen-space reflections: reflected radiance (cd/m^2, not pre-exposed), coverage (see
+// `screen_reflection`). A stand-in while it is being drawn.
+@group(0) @binding(18) var ssr_map: texture_2d<f32>;
 
 // Multiply final radiance by this before writing to the HDR target.
 fn pre_expose(c: vec3<f32>) -> vec3<f32> { return c * frame.exposure.x; }
@@ -86,6 +89,16 @@ fn screen_ao(rel: vec3<f32>) -> f32 {
     if (!in_prepass(rel, pixel)) { return 1.0; }
     let ao = textureLoad(ao_map, pixel, 0).r;
     return pow(saturate(ao), strength);
+}
+
+// Screen-space reflection for the surface at `rel`: reflected radiance (cd/m^2, not
+// pre-exposed) and how much of the reflection it covers (0 = reflect the sky only). Zero when
+// reflections are off or the surface wasn't in the prepass.
+fn screen_reflection(rel: vec3<f32>) -> vec4<f32> {
+    if (frame.reflections.x <= 0.0) { return vec4<f32>(0.0); }
+    let pixel = vec2<i32>(floor(pixel_of(rel)));
+    if (!in_prepass(rel, pixel)) { return vec4<f32>(0.0); }
+    return textureLoad(ssr_map, pixel, 0);
 }
 
 // Ambient occlusion with interreflections (Jimenez et al. 2016, "Practical Real-Time Strategies
@@ -519,7 +532,8 @@ fn shade_surface(s: Surface, rel: vec3<f32>) -> vec3<f32> {
     // (Lagarde and de Rousiers 2014).
     let r = reflect(-v, n);
     let dominant = normalize(mix(n, r, (1.0 - roughness) * (sqrt(1.0 - roughness) + roughness)));
-    let spec_env = sample_env_rough(dominant, s.roughness) * sky_vis + fill;
+    let ssr = screen_reflection(rel);
+    let spec_env = mix(sample_env_rough(dominant, s.roughness) * sky_vis + fill, ssr.rgb, ssr.a);
     let env_brdf = env_brdf_approx(f0, s.roughness, n_dot_v);
     let visibility = min(s.occlusion, screen_ao(rel));
     color += diffuse_color * irradiance * INV_PI * ao_multibounce(visibility, diffuse_color);
