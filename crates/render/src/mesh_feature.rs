@@ -35,7 +35,7 @@ use crate::frame::ViewData;
 use crate::material::{AlphaMode, GpuMaterial, StandardMaterial, TEXTURE_FLAG_BASE, TEXTURE_FLAGS};
 use crate::mesh::{Mesh, Vertex};
 use crate::settings::RenderSettings;
-use crate::shadows::MAX_CASCADES;
+use crate::shadows::{MAX_CASCADES, SKY_OCCLUSION_VIEW};
 use crate::texture::{Image, PixelFormat};
 
 /// Per-instance vertex data (locations 4–10 in `mesh.wgsl`).
@@ -201,7 +201,8 @@ pub struct MeshFeature {
     frame: u64,
     opaque: Vec<Batch>,
     transparent: Vec<Batch>,
-    shadow: [Vec<Batch>; MAX_CASCADES],
+    /// Per shadow cascade, then the sky occlusion map (index `SKY_OCCLUSION_VIEW`).
+    shadow: [Vec<Batch>; MAX_CASCADES + 1],
     query: Option<QueryState<MeshQuery>>,
     items: Vec<Item>,
     keys: Vec<BatchKey>,
@@ -803,7 +804,7 @@ impl RenderFeature for MeshFeature {
         self.material_data.clear();
         self.material_index.clear();
         let mut culled = 0u32;
-        let shadows = view.sun_shadows;
+        let shadows = view.sun_shadows || view.sky_occlusion.enabled;
 
         for (gt, renderer, resolved) in query.iter(world_ref) {
             if !renderer.visible {
@@ -968,12 +969,22 @@ impl RenderFeature for MeshFeature {
             let items = &self.items;
             self.casters
                 .sort_unstable_by_key(|&n| shadow_key(&items[n as usize]));
-            for c in 0..(view.cascades.count as usize).min(MAX_CASCADES) {
+            let cascades = if view.sun_shadows {
+                (view.cascades.count as usize).min(MAX_CASCADES)
+            } else {
+                0
+            };
+            for c in (0..cascades).chain(view.sky_occlusion.enabled.then_some(SKY_OCCLUSION_VIEW)) {
                 let first = self.instance_data.len();
                 self.keys.clear();
                 for &n in &self.casters {
                     let item = &self.items[n as usize];
-                    if view.cascades.sphere_in_cascade(c, item.center, item.radius) {
+                    let inside = if c == SKY_OCCLUSION_VIEW {
+                        view.sky_occlusion.contains_sphere(item.center, item.radius)
+                    } else {
+                        view.cascades.sphere_in_cascade(c, item.center, item.radius)
+                    };
+                    if inside {
                         self.instance_data.push(item.instance);
                         self.keys.push(shadow_key(item));
                     }

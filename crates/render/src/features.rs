@@ -5,7 +5,8 @@
 //! 1. `prepare` — read the world, cull, upload buffers (CPU side, `&mut World` access).
 //! 2. `compute` — record compute or offscreen passes (particles, simulation, clouds).
 //! 3. `draw_environment` — draw into the sky environment map (ambient light + reflections).
-//! 4. `draw_shadow` — draw depth into one shadow cascade.
+//! 4. `draw_shadow` — draw depth into one shadow cascade, or into the top-down sky occlusion
+//!    map when the index is [`SKY_OCCLUSION_VIEW`](crate::shadows::SKY_OCCLUSION_VIEW).
 //! 5. `draw` — draw into the HDR scene in a [`RenderPhase`] (opaque → sky → transparent).
 //! 6. `overlay` — draw onto the final tonemapped image (UI, debug text, editor gizmos).
 //!
@@ -189,7 +190,10 @@ pub trait RenderFeature: Send + Sync + 'static {
     /// Draw into the environment map (equirectangular, radiance not pre-exposed).
     fn draw_environment(&self, pass: &mut wgpu::RenderPass<'_>, ctx: &FrameContext) {}
 
-    /// Draw depth into shadow cascade `cascade`.
+    /// Draw depth into shadow cascade `cascade` (cull with `ctx.view.cascades`), or into the
+    /// sky occlusion map when `cascade == SKY_OCCLUSION_VIEW` (cull with
+    /// `ctx.view.sky_occlusion.contains_sphere`). Anything that roofs over the ground (rock,
+    /// buildings, canopies) should draw into both.
     fn draw_shadow(&self, pass: &mut wgpu::RenderPass<'_>, cascade: usize, ctx: &FrameContext) {}
 
     /// Draw into the HDR scene.

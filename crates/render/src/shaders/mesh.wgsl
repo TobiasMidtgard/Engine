@@ -165,6 +165,9 @@ fn fs_main(in: VertexOut, @builtin(front_facing) front: bool) -> @location(0) ve
     if (frame.counts.z == 1u) {
         return vec4<f32>(n * 0.5 + 0.5, 1.0);
     }
+    if (frame.counts.z == 3u) {
+        return vec4<f32>(vec3(sky_visibility(in.rel, n)), 1.0);
+    }
     var color: vec3<f32>;
     if ((flags & 16u) != 0u) {
         color = s.albedo + pre_expose(s.emissive);

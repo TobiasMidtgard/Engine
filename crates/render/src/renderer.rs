@@ -22,7 +22,7 @@ use crate::features::{
 use crate::frame::{ExposureState, GpuPointLight, ViewData, build_view, frame_uniform};
 use crate::gpu::{self, SurfaceState};
 use crate::settings::{RenderSettings, Tonemapper};
-use crate::shadows::{MAX_CASCADES, ShadowViewUniform};
+use crate::shadows::{MAX_CASCADES, SKY_OCCLUSION_VIEW, ShadowViewUniform};
 use crate::targets::{Targets, Tex};
 
 const ENV_WIDTH: u32 = 256;
@@ -97,10 +97,14 @@ struct ShadowResources {
     texture: wgpu::Texture,
     array_view: wgpu::TextureView,
     layer_views: Vec<wgpu::TextureView>,
+    /// One per cascade, then one for the sky occlusion map (index `SKY_OCCLUSION_VIEW`).
     view_buffers: Vec<wgpu::Buffer>,
     view_bind_groups: Vec<wgpu::BindGroup>,
     compare_sampler: wgpu::Sampler,
     size: u32,
+    /// Top-down depth map of the highest surface around the camera (see `SkyOcclusionView`).
+    occlusion: wgpu::TextureView,
+    occlusion_size: u32,
 }
 
 #[allow(dead_code)] // layouts and buffers are kept alive with their bind groups
@@ -251,6 +255,15 @@ impl Renderer {
                     all,
                     wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                 ),
+                layout_entry(
+                    7,
+                    all,
+                    wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Depth,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                ),
             ],
         });
         let shadow_view_layout =
@@ -293,7 +306,11 @@ impl Renderer {
             wgpu::BufferUsages::STORAGE,
             64 * std::mem::size_of::<GpuPointLight>() as u64,
         );
-        let shadow = create_shadow_resources(&shared, settings.shadow_map_size.clamp(256, 8192));
+        let shadow = create_shadow_resources(
+            &shared,
+            settings.shadow_map_size.clamp(256, 8192),
+            settings.sky_occlusion_size.clamp(64, 4096),
+        );
         let env = [
             Tex::new(
                 &device,
@@ -438,7 +455,14 @@ impl Renderer {
         } else {
             bytemuck::cast_slice(&view.point_lights)
         };
-        if self.lights.write(&self.shared.device, queue, light_bytes) {
+        let occlusion_resized =
+            view.sky_occlusion.enabled && view.sky_occlusion.map_size != self.shadow.occlusion_size;
+        if occlusion_resized {
+            self.shadow.occlusion_size = view.sky_occlusion.map_size;
+            self.shadow.occlusion =
+                create_occlusion_target(&self.shared, self.shadow.occlusion_size);
+        }
+        if self.lights.write(&self.shared.device, queue, light_bytes) || occlusion_resized {
             self.frame_groups = [
                 create_frame_group(
                     &self.shared,
@@ -466,6 +490,19 @@ impl Renderer {
                 };
                 queue.write_buffer(&self.shadow.view_buffers[i], 0, bytemuck::bytes_of(&u));
             }
+        }
+        if view.sky_occlusion.enabled {
+            let u = ShadowViewUniform {
+                view_proj: view.sky_occlusion.view_proj.to_cols_array_2d(),
+                wind: [view.wind.x, view.wind.y, view.wind.z, 0.0],
+                time: [view.time, view.real_time, view.delta, 0.0],
+                camera_frac: uniform.camera_world_frac,
+            };
+            queue.write_buffer(
+                &self.shadow.view_buffers[SKY_OCCLUSION_VIEW],
+                0,
+                bytemuck::bytes_of(&u),
+            );
         }
         self.write_post_params(&settings, &view);
 
@@ -538,6 +575,30 @@ impl Renderer {
                 pass.set_bind_group(0, &self.shadow.view_bind_groups[i], &[]);
                 for f in &self.features {
                     f.draw_shadow(&mut pass, i, &ctx);
+                }
+            }
+        }
+
+        // Sky occlusion: the highest surface around the camera, seen from above. Cleared to
+        // 1 (nothing) when disabled so stale data never darkens the sky light.
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("sky occlusion"),
+                color_attachments: &[],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &self.shadow.occlusion,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(1.0),
+                        store: wgpu::StoreOp::Store,
+                    }),
+                    stencil_ops: None,
+                }),
+                ..Default::default()
+            });
+            if view.sky_occlusion.enabled {
+                pass.set_bind_group(0, &self.shadow.view_bind_groups[SKY_OCCLUSION_VIEW], &[]);
+                for f in &self.features {
+                    f.draw_shadow(&mut pass, SKY_OCCLUSION_VIEW, &ctx);
                 }
             }
         }
@@ -882,7 +943,7 @@ fn fullscreen_pass<'e>(
     })
 }
 
-fn create_shadow_resources(shared: &GpuShared, size: u32) -> ShadowResources {
+fn create_shadow_resources(shared: &GpuShared, size: u32, occlusion_size: u32) -> ShadowResources {
     let device = &shared.device;
     let texture = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("shadow cascades"),
@@ -914,7 +975,7 @@ fn create_shadow_resources(shared: &GpuShared, size: u32) -> ShadowResources {
             })
         })
         .collect();
-    let view_buffers: Vec<wgpu::Buffer> = (0..MAX_CASCADES)
+    let view_buffers: Vec<wgpu::Buffer> = (0..=SKY_OCCLUSION_VIEW)
         .map(|_| {
             device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("shadow view"),
@@ -955,7 +1016,29 @@ fn create_shadow_resources(shared: &GpuShared, size: u32) -> ShadowResources {
         view_bind_groups,
         compare_sampler,
         size,
+        occlusion: create_occlusion_target(shared, occlusion_size),
+        occlusion_size,
     }
+}
+
+fn create_occlusion_target(shared: &GpuShared, size: u32) -> wgpu::TextureView {
+    shared
+        .device
+        .create_texture(&wgpu::TextureDescriptor {
+            label: Some("sky occlusion"),
+            size: wgpu::Extent3d {
+                width: size,
+                height: size,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: shared.formats.shadow,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        })
+        .create_view(&wgpu::TextureViewDescriptor::default())
 }
 
 fn create_frame_group(
@@ -996,6 +1079,10 @@ fn create_frame_group(
             wgpu::BindGroupEntry {
                 binding: 6,
                 resource: wgpu::BindingResource::Sampler(&shared.linear_repeat),
+            },
+            wgpu::BindGroupEntry {
+                binding: 7,
+                resource: wgpu::BindingResource::TextureView(&shadow.occlusion),
             },
         ],
     })

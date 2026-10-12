@@ -492,11 +492,13 @@ fn cave(commands: &mut Commands, pal: &Palette, rng: &mut Rng) {
         pal.dark_rock,
         at(c + DVec3::new(w as f64 * 0.5, h as f64 * 0.5, 0.0)),
     );
+    // The rock above reaches well past the walls, like a hillside with a cave in it (the sky
+    // occlusion map sees cover from above; walls alone don't keep sky light out).
     spawn(
         commands,
-        cuboid(w + 2.0, 3.0, d + 2.0),
+        cuboid(w + 24.0, 5.0, d + 16.0),
         pal.dark_rock,
-        at(c + DVec3::new(0.0, h as f64 + 1.5, 0.0)),
+        at(c + DVec3::new(0.0, h as f64 + 2.5, 4.0)),
     );
     for x in [-1.0, 1.0] {
         spawn(

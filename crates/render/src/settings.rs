@@ -25,6 +25,8 @@ pub enum DebugView {
     Normals,
     /// Shadow cascades tinted.
     Cascades,
+    /// How much open sky each surface sees (white = outdoors, black = cave or interior).
+    SkyVisibility,
 }
 
 /// Renderer-wide quality and look settings.

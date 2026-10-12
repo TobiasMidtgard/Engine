@@ -375,13 +375,12 @@ pub fn build_view(
         sun_color,
         sun_shadows: sun_shadows && cascades.count > 0,
         cascades,
-        // Enabled once the renderer has drawn the map this frame (see `Renderer::render`).
         sky_occlusion: SkyOcclusionView::new(
             origin,
             settings.sky_occlusion_size.clamp(64, 4096),
             settings.sky_occlusion_extent.max(8.0),
             800.0,
-            false,
+            settings.sky_occlusion,
         ),
         exposure: ev100_to_exposure(ev100),
         ev100,
@@ -518,6 +517,7 @@ pub fn frame_uniform(world: &World, v: &ViewData) -> FrameUniform {
                 DebugView::None => 0,
                 DebugView::Normals => 1,
                 DebugView::Cascades => 2,
+                DebugView::SkyVisibility => 3,
             },
             0,
         ],

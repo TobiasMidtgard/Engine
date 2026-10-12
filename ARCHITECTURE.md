@@ -136,19 +136,25 @@ Writes: `HeatField`, `WorldImpulse`, `IgniteRequest`, `DamageEvent`, `NoiseEvent
 | `prepare(world, …)` | read the ECS, cull, upload buffers |
 | `compute(encoder, …)` | GPU simulation (particles, fluids, clouds) |
 | `draw_environment` | add to the sky environment map (clouds, nebulae) |
-| `draw_shadow(cascade)` | cast sun shadows |
+| `draw_shadow(cascade)` | cast sun shadows; with `cascade == SKY_OCCLUSION_VIEW`, draw into the top-down sky occlusion map so whatever roofs over the ground (rock, buildings, canopies) keeps sky light and rain out |
 | `draw(Opaque/Sky/Transparent)` | draw into the HDR scene; transparent can read scene color/depth copies |
 | `overlay` | draw onto the final LDR image (UI, debug) |
 
-Shared pipelines the core provides for modules (planned): **strands** for hair, fur and grass
+**Sky occlusion** (built): a 512² top-down depth map of the highest surface within 128 m of
+the camera. `sky_visibility(rel, normal)` in `lib_frame.wgsl` returns how much open sky a point
+sees (1 outdoors, about 0.3 under a carport, 0 deep in a cave); shading and haze use it, and
+weather effects should use it to keep rain and snow off covered ground. It sees cover from
+above only, so a room near an outside wall still gets some sky light unless the roof or rock
+reaches past the wall. `RenderSettings::debug_view = SkyVisibility` shows it.
+
+Shared pipelines the core will provide for modules (planned): **strands** for hair, fur and grass
 (guide curves in, GPU-expanded strands with hair shading and LOD out; `engine_softbody` drives
-hair/fur, `engine_foliage` drives grass), **tension-driven wrinkle maps** in `StandardMaterial`
+hair/fur, `engine_foliage` drives grass) and **tension-driven wrinkle maps** in `StandardMaterial`
 (a per-vertex tension value blends wrinkle/vein normal maps; written by `engine_anim` for skin,
-muscles and skinned clothes and by `engine_softbody` for simulated cloth) and the **sky
-occlusion map** (`sky_visibility`).
+muscles and skinned clothes and by `engine_softbody` for simulated cloth).
 
 Shader library: `lib_types.wgsl` (types, noise, BRDF) and `lib_frame.wgsl` (group 0 frame
-data, `shade_surface`, `shadow_factor`, `apply_fog`, atmosphere, `wind_offset`).
+data, `shade_surface`, `shadow_factor`, `sky_visibility`, `apply_fog`, atmosphere, `wind_offset`).
 
 ## AI integration
 

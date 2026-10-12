@@ -10,6 +10,7 @@
 @group(0) @binding(4) var linear_clamp: sampler;
 @group(0) @binding(5) var env_map: texture_2d<f32>;   // equirect sky radiance (cd/m^2, not pre-exposed)
 @group(0) @binding(6) var linear_repeat: sampler;
+@group(0) @binding(7) var sky_occlusion_map: texture_depth_2d; // top-down depth of the highest surface (0 = top)
 
 // Multiply final radiance by this before writing to the HDR target.
 fn pre_expose(c: vec3<f32>) -> vec3<f32> { return c * frame.exposure.x; }
@@ -247,9 +248,68 @@ fn sky_ambient(n: vec3<f32>) -> vec3<f32> {
 // in caves, rooms and under overhangs. Multiply sky/ambient light by it. Also the test for
 // "is this spot exposed to rain and snow". Uses the top-down sky occlusion map around the
 // camera; returns 1 where the map is off or doesn't reach.
+//
+// Each tap asks "is there something above this spot?". Taps lie on a 6 m disc pushed toward
+// where the surface faces (so a wall looks at the ground in front of it, not into its own
+// building) and start a little off the surface so slopes and walls don't cover themselves.
+// Inner taps weigh more, like the steep part of the sky they stand for; with these weights a
+// 10 m carport 3.4 m up comes out within ~0.07 of the true cosine-weighted sky visibility. A
+// tap only counts as covered when the cover is clearly above (0.5 m plus 0.1 m per meter of
+// distance), which keeps hillsides and bumpy ground open to the sky.
+const SKY_TAP_COUNT: u32 = 15u;
+const SKY_TAPS: array<vec2<f32>, 15> = array<vec2<f32>, 15>(
+    vec2(0.0, 0.0),
+    vec2(0.5, 0.0), vec2(0.25, 0.433), vec2(-0.25, 0.433),
+    vec2(-0.5, 0.0), vec2(-0.25, -0.433), vec2(0.25, -0.433),
+    vec2(0.924, 0.383), vec2(0.383, 0.924), vec2(-0.383, 0.924), vec2(-0.924, 0.383),
+    vec2(-0.924, -0.383), vec2(-0.383, -0.924), vec2(0.383, -0.924), vec2(0.924, -0.383),
+);
+const SKY_TAP_RADIUS: f32 = 6.0;  // m
+const SKY_COVER_BIAS: f32 = 0.5;  // m above the (lifted) surface before a tap counts as covered
+const SKY_COVER_SLOPE: f32 = 0.1; // extra height needed per meter of horizontal distance
+
 fn sky_visibility(rel: vec3<f32>, n: vec3<f32>) -> f32 {
+    let params = frame.sky_occlusion_params;
+    if (params.x < 0.5) { return 1.0; }
+    let texel = params.z;
+    let depth_range = params.w;
+    let p = rel + n * (texel * 1.5 + 0.2);
+    let c = frame.sky_occlusion * vec4<f32>(p, 1.0);
+    let edge = max(abs(c.x), abs(c.y));
+    if (edge >= 1.0 || c.z <= 0.0 || c.z >= 1.0) { return 1.0; }
+    // Clip-space steps for one meter along world x and z (orientation-agnostic).
+    let step_x = (frame.sky_occlusion * vec4<f32>(1.0, 0.0, 0.0, 0.0)).xy;
+    let step_z = (frame.sky_occlusion * vec4<f32>(0.0, 0.0, 1.0, 0.0)).xy;
+    let facing = vec2<f32>(n.x, n.z) * SKY_TAP_RADIUS;
+    var covered = 0.0;
+    var total = 0.0;
+    for (var i = 0u; i < SKY_TAP_COUNT; i++) {
+        // Weights: center 4, inner ring 2, outer ring 1.
+        let weight = select(select(1.0, 2.0, i < 7u), 4.0, i == 0u);
+        total += weight;
+        let o = facing + SKY_TAPS[i] * SKY_TAP_RADIUS;
+        let tc = c.xy + step_x * o.x + step_z * o.y;
+        let uv = tc * vec2<f32>(0.5, -0.5) + 0.5;
+        if (any(uv < vec2(0.0)) || any(uv >= vec2(1.0))) { continue; }
+        // Covered when the top surface is higher than `needed` above the point. The
+        // comparison sampler filters 2x2 texels, so cover fades in smoothly at roof edges.
+        let needed = SKY_COVER_BIAS + SKY_COVER_SLOPE * length(o);
+        let reference = c.z - needed / depth_range;
+        covered += weight * (1.0 - textureSampleCompareLevel(sky_occlusion_map, shadow_sampler, uv, reference));
+    }
+    let vis = 1.0 - covered / total;
+    // Fade out over the outer eighth of the map so its edge doesn't show.
+    return mix(vis, 1.0, saturate((edge - 0.875) * 8.0));
+}
+
+// How much the haze along a view ray is lit by the sky: 1 when either end is outdoors (the
+// ray then runs mostly through open air), low when looking around inside a cave or room.
+fn fog_sky_visibility(rel: vec3<f32>) -> f32 {
     if (frame.sky_occlusion_params.x < 0.5) { return 1.0; }
-    return 1.0;
+    let up = vec3<f32>(0.0, 1.0, 0.0);
+    let at_camera = sky_visibility(vec3<f32>(0.0), up);
+    if (at_camera > 0.99) { return 1.0; }
+    return max(at_camera, sky_visibility(rel, up));
 }
 
 // ---------------------------------------------------------------- surface shading
@@ -346,8 +406,10 @@ fn apply_fog(color: vec3<f32>, rel: vec3<f32>) -> vec3<f32> {
     let fog_t = min(1.0 - exp(-amount), frame.fog.w);
     let sun_amt = pow(saturate(dot(dir, frame.sun_dir.xyz)), 8.0) * frame.fog_color.w;
     // Fog is lit by the sky near the horizon and by forward-scattered sun; fog_color is its albedo.
+    // Haze inside caves and rooms gets neither (it still hides what's behind it).
     let horizon = sample_env(normalize(vec3<f32>(dir.x, 0.05, dir.z) + vec3(0.0001)));
-    let fog_col = frame.fog_color.rgb * (horizon + frame.ambient.rgb + frame.sun_camera.rgb * sun_amt * INV_PI * 0.05);
+    let outside = (horizon + frame.sun_camera.rgb * sun_amt * INV_PI * 0.05) * fog_sky_visibility(rel);
+    let fog_col = frame.fog_color.rgb * (outside + frame.ambient.rgb);
     var c = mix(color, pre_expose(fog_col), fog_t);
     // Aerial perspective: cheap atmosphere integral for distant geometry.
     if (dist > 500.0) {
