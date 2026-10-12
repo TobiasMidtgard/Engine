@@ -131,6 +131,22 @@ struct PieceSpec {
     at: [f64; 3],
     rotation: Quat,
     size: Vec3,
+    look: PropKind,
+}
+
+impl PieceSpec {
+    /// A squared timber filling the piece.
+    fn timber(name: &'static str, at: [f64; 3], size: Vec3) -> Self {
+        Self {
+            name,
+            at,
+            rotation: Quat::IDENTITY,
+            size,
+            look: PropKind::Timber {
+                size: size.to_array(),
+            },
+        }
+    }
 }
 
 /// The hut (an open timber shelter, so its support runs only through the frame), in build
@@ -139,51 +155,47 @@ fn hut_plan() -> Vec<PieceSpec> {
     let mut v = Vec::new();
     let post = Vec3::new(0.22, 2.6, 0.22);
     for (x, z) in [(-1.9, -1.9), (1.9, -1.9), (1.9, 1.9), (-1.9, 1.9)] {
-        v.push(PieceSpec {
-            name: "Hut post",
-            at: [x, 1.3, z],
-            rotation: Quat::IDENTITY,
-            size: post,
-        });
+        v.push(PieceSpec::timber("Hut post", [x, 1.3, z], post));
     }
     for z in [-1.9, 1.9] {
-        v.push(PieceSpec {
-            name: "Hut beam",
-            at: [0.0, 2.7, z],
-            rotation: Quat::IDENTITY,
-            size: Vec3::new(4.2, 0.2, 0.2),
-        });
+        v.push(PieceSpec::timber(
+            "Hut beam",
+            [0.0, 2.7, z],
+            Vec3::new(4.2, 0.2, 0.2),
+        ));
     }
     for x in [-1.9, 1.9] {
-        v.push(PieceSpec {
-            name: "Hut beam",
-            at: [x, 2.7, 0.0],
-            rotation: Quat::IDENTITY,
-            size: Vec3::new(0.2, 0.2, 4.2),
-        });
+        v.push(PieceSpec::timber(
+            "Hut beam",
+            [x, 2.7, 0.0],
+            Vec3::new(0.2, 0.2, 4.2),
+        ));
     }
     // A ridge post on each gable and the ridge beam.
     for z in [-1.9, 1.9] {
-        v.push(PieceSpec {
-            name: "Hut king post",
-            at: [0.0, 3.35, z],
-            rotation: Quat::IDENTITY,
-            size: Vec3::new(0.18, 1.1, 0.18),
-        });
+        v.push(PieceSpec::timber(
+            "Hut king post",
+            [0.0, 3.35, z],
+            Vec3::new(0.18, 1.1, 0.18),
+        ));
     }
-    v.push(PieceSpec {
-        name: "Hut ridge",
-        at: [0.0, 3.95, 0.0],
-        rotation: Quat::IDENTITY,
-        size: Vec3::new(0.2, 0.2, 4.4),
-    });
-    // Two roof panels from the ridge down past the side beams.
+    v.push(PieceSpec::timber(
+        "Hut ridge",
+        [0.0, 3.95, 0.0],
+        Vec3::new(0.2, 0.2, 4.4),
+    ));
+    // Two shingled roof panels from the ridge down past the side beams.
     for s in [-1.0f64, 1.0] {
+        let size = Vec3::new(2.6, 0.12, 4.6);
         v.push(PieceSpec {
             name: "Hut roof",
             at: [s * 1.05, 3.35, 0.0],
             rotation: Quat::from_rotation_z(-s as f32 * 0.58),
-            size: Vec3::new(2.6, 0.12, 4.6),
+            size,
+            look: PropKind::ShinglePanel {
+                size: size.to_array(),
+                eave_at_plus_x: s > 0.0,
+            },
         });
     }
     v
@@ -299,12 +311,7 @@ fn run_step(world: &mut World, demo: &mut HillDemo, step: Step) {
                     Name::new(spec.name),
                     t,
                     GlobalTransform::from(t),
-                    PropModel::new(
-                        PropKind::Timber {
-                            size: spec.size.to_array(),
-                        },
-                        k as u64,
-                    ),
+                    PropModel::new(spec.look, k as u64),
                     piece,
                     ShowSupport {
                         on: true,

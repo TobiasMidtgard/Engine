@@ -166,7 +166,7 @@ pub fn support_tint_system(
             }
         }
         if original.is_none() || saved.len() != before {
-            commands.entity(e).insert(SupportOriginal(saved));
+            commands.entity(e).insert(SupportOriginal(saved.clone()));
         }
         let grounded = graph
             .pieces
@@ -174,12 +174,18 @@ pub fn support_tint_system(
             .position(|p| *p == e)
             .is_some_and(|i| graph.grounded[i]);
         let fraction = state.map(|s| s.support_fraction()).unwrap_or(0.0);
-        let m = engine_render::MaterialRef::Handle(assets.support_color(grounded, fraction));
         for t in targets {
+            let tint = match saved.iter().find(|(s, _)| *s == t) {
+                Some((_, engine_render::MaterialRef::Handle(h))) => {
+                    assets.support_color_on(*h, grounded, fraction)
+                }
+                _ => assets.support_color(grounded, fraction),
+            };
+            let m = engine_render::MaterialRef::Handle(tint);
             if let Ok(mut r) = renderers.get_mut(t)
                 && r.material != m
             {
-                r.material = m.clone();
+                r.material = m;
             }
         }
     }

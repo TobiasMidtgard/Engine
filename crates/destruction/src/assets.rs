@@ -35,8 +35,13 @@ pub struct DestructionAssets {
     /// Valheim-style support colors: blue (on the ground), green, yellow, orange, red (about
     /// to fail).
     pub support: [Handle<StandardMaterial>; 5],
+    /// The support colors per surface, keeping the surface's relief (normal and roughness
+    /// maps), so tinted wood still shows its grain. Empty until [`Self::texture`].
+    pub support_surface: Vec<[Handle<StandardMaterial>; 5]>,
     /// Grassy topsoil on voxel hills ([`crate::voxel::GRASS_LAYER`]).
     pub grass: Handle<StandardMaterial>,
+    /// Gravel ground ([`crate::dress::GravelPad`]).
+    pub gravel: Handle<StandardMaterial>,
     /// Surfaces carry procedural PBR textures (needs an image store); voxel meshes then split
     /// into one layer per surface.
     pub textured: bool,
@@ -137,13 +142,15 @@ impl DestructionAssets {
         let charge_body = materials.add(StandardMaterial::hex(0x2d3330).with_roughness(0.6));
         let thermite_glow = materials
             .add(StandardMaterial::color(1.0, 0.6, 0.2).with_emissive([1.0, 0.5, 0.12], 120_000.0));
-        let support = [0x2f6bff, 0x34b84a, 0xe6cf2e, 0xf08a24, 0xe0352a].map(|hex| {
+        let support = SUPPORT_COLORS.map(|hex| {
             let m = StandardMaterial::hex(hex).with_roughness(0.7);
             let c = crate::material::linear(hex);
-            materials.add(m.with_emissive(c, 1500.0))
+            materials.add(m.with_emissive(c, SUPPORT_GLOW))
         });
+        let gravel = materials.add(StandardMaterial::hex(0x6d695f).with_roughness(0.95));
         Self {
             grass: surface[DestructibleMaterial::Dirt.index()],
+            gravel,
             surface,
             chips,
             chip_material,
@@ -153,6 +160,7 @@ impl DestructionAssets {
             charge_body,
             thermite_glow,
             support,
+            support_surface: Vec::new(),
             textured: false,
         }
     }
@@ -168,11 +176,27 @@ impl DestructionAssets {
         for (i, m) in DestructibleMaterial::ALL.iter().enumerate() {
             let mut mat = textured(surface_kind(*m), 0xDE57 + i as u64, images);
             mat.receives_wetness = *m != DestructibleMaterial::Glass;
+            if *m == DestructibleMaterial::Plaster {
+                // The texture is fresh interior paint (albedo about 0.8), which blows out in
+                // full sun; outdoor render here is a weathered off-white.
+                mat.base_color = [0.66, 0.65, 0.62, 1.0];
+            }
+            // The texture stays (grain, joints) under a strong tint and a little glow.
+            let tints = SUPPORT_COLORS.map(|hex| {
+                let c = crate::material::linear(hex);
+                let mut t = mat.with_emissive(c, SUPPORT_GLOW * 0.5);
+                t.base_color = [c[0] * 2.4, c[1] * 2.4, c[2] * 2.4, 1.0];
+                materials.add(t)
+            });
+            self.support_surface.push(tints);
             materials.set(self.surface[i], mat);
         }
         let mut grass = textured(SurfaceKind::Grass, 0xDE57_06A5, images);
         grass.receives_wetness = true;
         self.grass = materials.add(grass);
+        let mut gravel = textured(SurfaceKind::Gravel, 0xDE57_06A6, images);
+        gravel.receives_wetness = true;
+        materials.set(self.gravel, gravel);
         self.textured = true;
     }
 
@@ -195,18 +219,23 @@ impl DestructionAssets {
 
     /// Support color for a piece: blue on the ground, then green → red as support runs out.
     pub fn support_color(&self, grounded: bool, fraction: f32) -> Handle<StandardMaterial> {
-        let i = if grounded {
-            0
-        } else if fraction >= 0.7 {
-            1
-        } else if fraction >= 0.45 {
-            2
-        } else if fraction >= 0.25 {
-            3
-        } else {
-            4
-        };
-        self.support[i]
+        self.support[support_level(grounded, fraction)]
+    }
+
+    /// Support color for something drawn in `original`: a surface keeps its relief under the
+    /// color when textured; anything else gets the flat color.
+    pub fn support_color_on(
+        &self,
+        original: Handle<StandardMaterial>,
+        grounded: bool,
+        fraction: f32,
+    ) -> Handle<StandardMaterial> {
+        let level = support_level(grounded, fraction);
+        self.surface
+            .iter()
+            .position(|s| *s == original)
+            .and_then(|i| self.support_surface.get(i))
+            .map_or(self.support[level], |tints| tints[level])
     }
 
     /// Dust material for a darkness (0..1) and opacity (0..1).
@@ -222,6 +251,26 @@ impl DestructionAssets {
             .clamp(1, DUST_LEVELS)
             - 1;
         self.dust[d][level]
+    }
+}
+
+/// Valheim-style support colors: blue (on the ground), green, yellow, orange, red.
+const SUPPORT_COLORS: [u32; 5] = [0x2f6bff, 0x34b84a, 0xe6cf2e, 0xf08a24, 0xe0352a];
+/// Glow of the support colors, so they read in shade too.
+const SUPPORT_GLOW: f32 = 1500.0;
+
+/// Index into [`SUPPORT_COLORS`]: on the ground, then by the fraction of support left.
+fn support_level(grounded: bool, fraction: f32) -> usize {
+    if grounded {
+        0
+    } else if fraction >= 0.7 {
+        1
+    } else if fraction >= 0.45 {
+        2
+    } else if fraction >= 0.25 {
+        3
+    } else {
+        4
     }
 }
 

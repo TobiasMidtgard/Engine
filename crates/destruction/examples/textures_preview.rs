@@ -1,11 +1,14 @@
 //! Previews the procedural PBR texture sets (`engine_destruction::textures`): every kind on a
 //! wall panel, a cube and a sphere (box-projected meter UVs, like the destruction meshes)
-//! under a low sun, rendered headless as close-ups (~1.5 m) and medium shots (~6 m). Also
-//! saves each kind's flat albedo, normal and ORM images and prints generation times.
+//! under a low sun, rendered headless as close-ups (~1.5 m) and medium shots (~6 m), plus a
+//! look across the ground for the ground kinds. Also saves each kind's flat albedo, normal
+//! and ORM images and prints generation times.
 //!
 //! ```sh
 //! cargo run -p engine_destruction --release --example textures_preview -- \
 //!     [out_dir] [kinds: all | brick,stone,...] [size: default | pixels]
+//! # Generation times only (best of 3), no rendering:
+//! cargo run -p engine_destruction --release --example textures_preview -- --bench [kinds]
 //! ```
 //!
 //! Needs a GPU or lavapipe (`mesa-vulkan-drivers`) for the renders; the flat images are
@@ -146,20 +149,69 @@ fn save_flat(dir: &Path, set: &TextureSet) {
     }
 }
 
-fn main() {
-    let args: Vec<String> = std::env::args().collect();
-    let out = PathBuf::from(
-        args.get(1)
-            .cloned()
-            .unwrap_or_else(|| "texture_shots".into()),
-    );
-    let kinds: Vec<SurfaceKind> = match args.get(2).map(String::as_str) {
+/// CPU time used by this process so far (all threads), seconds; Linux only.
+fn cpu_seconds() -> Option<f64> {
+    let stat = std::fs::read_to_string("/proc/self/stat").ok()?;
+    // Fields after the parenthesized command name; utime and stime are the 12th and 13th.
+    let rest = &stat[stat.rfind(')')? + 2..];
+    let f: Vec<&str> = rest.split_whitespace().collect();
+    let ticks: f64 = f.get(11)?.parse::<f64>().ok()? + f.get(12)?.parse::<f64>().ok()?;
+    Some(ticks / 100.0)
+}
+
+/// `all` (or nothing) for every kind, else a comma-separated list of kind names.
+fn parse_kinds(arg: Option<&str>) -> Vec<SurfaceKind> {
+    match arg {
         None | Some("all") => SurfaceKind::ALL.to_vec(),
         Some(list) => list
             .split(',')
             .map(|n| SurfaceKind::from_name(n.trim()).unwrap_or_else(|| panic!("unknown kind {n}")))
             .collect(),
+    }
+}
+
+/// Prints each kind's best-of-3 generation time at 512 px wide and at its default size,
+/// with the CPU time per set (a busy machine stretches wall time, not CPU time).
+fn bench(kinds: &[SurfaceKind]) {
+    let run = |kind: SurfaceKind, size: u32| {
+        let cpu0 = cpu_seconds();
+        let best = (0..3)
+            .map(|_| {
+                let t0 = Instant::now();
+                std::hint::black_box(textures::generate(kind, size, 7));
+                t0.elapsed().as_secs_f64() * 1000.0
+            })
+            .fold(f64::MAX, f64::min);
+        let cpu = cpu0
+            .zip(cpu_seconds())
+            .map_or(f64::NAN, |(a, b)| (b - a) * 1000.0 / 3.0);
+        (best, cpu)
     };
+    let threads = std::thread::available_parallelism().map_or(1, |n| n.get());
+    println!("{threads} threads");
+    for &kind in kinds {
+        let (w512, c512) = run(kind, 512);
+        let (wd, cd) = run(kind, kind.default_size());
+        println!(
+            "{:>9}: 512 wide {w512:6.1} ms (cpu {c512:6.0} ms), {} wide {wd:7.1} ms (cpu {cd:6.0} ms)",
+            kind.name(),
+            kind.default_size(),
+        );
+    }
+}
+
+fn main() {
+    let args: Vec<String> = std::env::args().collect();
+    if args.get(1).map(String::as_str) == Some("--bench") {
+        bench(&parse_kinds(args.get(2).map(String::as_str)));
+        return;
+    }
+    let out = PathBuf::from(
+        args.get(1)
+            .cloned()
+            .unwrap_or_else(|| "texture_shots".into()),
+    );
+    let kinds = parse_kinds(args.get(2).map(String::as_str));
     let size_override: Option<u32> = args.get(3).and_then(|s| s.parse().ok());
     let flat = out.join("flat");
     std::fs::create_dir_all(&flat).expect("create output dir");
@@ -213,23 +265,10 @@ fn main() {
         let kind = set.kind;
         let bx = i as f64 * SPACING;
         let world = &mut app.world;
-        let mut material = {
+        let material = {
             let mut images = world.resource_mut::<Assets<Image>>();
             set.into_material(&mut images)
         };
-        if let Ok(v) = std::env::var("DEBUG_MAT") {
-            match v.as_str() {
-                "nometal" => material.metallic = 0.0,
-                "noorm" => {
-                    material.metallic_roughness_texture = None;
-                    material.occlusion_texture = None;
-                    material.metallic = 0.0;
-                    material.perceptual_roughness = 0.6;
-                }
-                "nonormal" => material.normal_texture = None,
-                _ => {}
-            }
-        }
         let mat = world
             .resource_mut::<Assets<StandardMaterial>>()
             .add(material);

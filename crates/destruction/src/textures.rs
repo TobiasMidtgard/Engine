@@ -142,9 +142,13 @@ impl SurfaceKind {
     }
 
     /// Recommended `StandardMaterial::normal_scale`. Normal maps are built from heights in
-    /// meters, so 1 is physically right; a few kinds are toned a little for readability.
+    /// meters, so 1 is physically right; grass is softened (its blades overlap in steps that
+    /// read too crisp on a flat ground plane).
     pub fn normal_scale(self) -> f32 {
-        1.0
+        match self {
+            SurfaceKind::Grass => 0.8,
+            _ => 1.0,
+        }
     }
 
     /// Typical perceptual roughness of the kind (the ORM texture's green channel holds the
@@ -318,12 +322,34 @@ fn render(kind: SurfaceKind, w: u32, h: u32, seed: u64, shift: [u32; 2]) -> Text
     let heights: Vec<f32> = texels.iter().map(|t| t.h).collect();
     let (dx_m, dy_m) = (tu / w as f32, tv / h as f32);
     let ao_steps = horizon_steps(finish.ao_radius / dx_m.max(dy_m));
+    // Horizon taps per direction: (column, row) offsets and 1 / distance in meters.
+    let ao_taps: Vec<Vec<(isize, isize, f32)>> = DIRS8
+        .iter()
+        .map(|&(ddx, ddy)| {
+            ao_steps
+                .iter()
+                .map(|&s| {
+                    let off = |d: f32| (d * s).round() as isize;
+                    (off(ddx), off(ddy), 1.0 / (s * dx_m))
+                })
+                .collect()
+        })
+        .collect();
+    let (wi, hi) = (wu as isize, hu as isize);
     let mut out = vec![[0u8; 12]; wu * hu];
     par_rows(&mut out, wu, |r, row| {
         let at = |c: isize, rr: isize| {
-            let c = c.rem_euclid(wu as isize) as usize;
-            let rr = rr.rem_euclid(hu as isize) as usize;
-            heights[rr * wu + c]
+            let c = if (0..wi).contains(&c) {
+                c
+            } else {
+                c.rem_euclid(wi)
+            };
+            let rr = if (0..hi).contains(&rr) {
+                rr
+            } else {
+                rr.rem_euclid(hi)
+            };
+            heights[rr as usize * wu + c as usize]
         };
         let ri = r as isize;
         for (c, px) in row.iter_mut().enumerate() {
@@ -342,15 +368,10 @@ fn render(kind: SurfaceKind, w: u32, h: u32, seed: u64, shift: [u32; 2]) -> Text
             let h0 = heights[r * wu + c];
             let mut occ = 0.0;
             if !ao_steps.is_empty() {
-                for (ddx, ddy) in DIRS8 {
+                for taps in &ao_taps {
                     let mut best = 0.0f32;
-                    for &s in &ao_steps {
-                        let hs = at(
-                            ci + (ddx * s).round() as isize,
-                            ri + (ddy * s).round() as isize,
-                        );
-                        let dist = s * dx_m;
-                        best = best.max((hs - h0) / dist);
+                    for &(oc, or, inv_dist) in taps {
+                        best = best.max((at(ci + oc, ri + or) - h0) * inv_dist);
                     }
                     occ += best / (1.0 + best * best).sqrt();
                 }
@@ -499,8 +520,8 @@ impl Tile {
     /// Whole lattice periods across the tile for about `fx`, `fy` cycles per meter.
     fn periods(&self, fx: f32, fy: f32) -> (i32, i32) {
         (
-            ((fx * self.w).round() as i32).max(1),
-            ((fy * self.h).round() as i32).max(1),
+            ((fx * self.w + 0.5) as i32).max(1),
+            ((fy * self.h + 0.5) as i32).max(1),
         )
     }
 
@@ -569,12 +590,11 @@ impl Tile {
         let (px, py) = self.periods(f, f);
         let (sx, sy) = (self.w / px as f32, self.h / py as f32);
         let (gx, gy) = (x / sx, y / sy);
-        let (fx, fy) = (gx.floor(), gy.floor());
-        let (ix, iy) = (fx as i32, fy as i32);
-        let (fx, fy) = (gx - fx, gy - fy);
+        let (ix, iy) = (floor_i(gx), floor_i(gy));
+        let (fx, fy) = (gx - ix as f32, gy - iy as f32);
         for j in -1..=1 {
             for i in -1..=1 {
-                let h = hash2((ix + i).rem_euclid(px), (iy + j).rem_euclid(py), seed);
+                let h = hash2(wrap(ix + i, px), wrap(iy + j, py), seed);
                 let dx = (fx - i as f32 - u01(h)) * sx;
                 let dy = (fy - j as f32 - u01b(h)) * sy;
                 visit(h, dx, dy);
@@ -588,11 +608,10 @@ impl Tile {
         let (px, py) = self.periods(f, f);
         let (sx, sy) = (self.w / px as f32, self.h / py as f32);
         let (gx, gy) = (x / sx, y / sy);
-        let (fx, fy) = (gx.floor(), gy.floor());
-        let (ix, iy) = (fx as i32, fy as i32);
-        let (fx, fy) = (gx - fx, gy - fy);
+        let (ix, iy) = (floor_i(gx), floor_i(gy));
+        let (fx, fy) = (gx - ix as f32, gy - iy as f32);
         let feature = |i: i32, j: i32| {
-            let h = hash2((ix + i).rem_euclid(px), (iy + j).rem_euclid(py), seed);
+            let h = hash2(wrap(ix + i, px), wrap(iy + j, py), seed);
             let rx = (i as f32 + 0.5 + jitter * (u01(h) - 0.5) - fx) * sx;
             let ry = (j as f32 + 0.5 + jitter * (u01b(h) - 0.5) - fy) * sy;
             (rx, ry, h)
@@ -652,10 +671,10 @@ const GRAD: [[f32; 2]; 16] = [
 
 /// Perlin gradient noise on a lattice that wraps every `px` × `py` cells.
 fn perlin(x: f32, y: f32, px: i32, py: i32, seed: u64) -> f32 {
-    let (x0, y0) = (x.floor(), y.floor());
-    let (fx, fy) = (x - x0, y - y0);
-    let ix = (x0 as i32).rem_euclid(px);
-    let iy = (y0 as i32).rem_euclid(py);
+    let (x0, y0) = (floor_i(x), floor_i(y));
+    let (fx, fy) = (x - x0 as f32, y - y0 as f32);
+    let ix = wrap(x0, px);
+    let iy = wrap(y0, py);
     let ix1 = if ix + 1 == px { 0 } else { ix + 1 };
     let iy1 = if iy + 1 == py { 0 } else { iy + 1 };
     let g = |i: i32, j: i32, dx: f32, dy: f32| {
@@ -671,6 +690,35 @@ fn perlin(x: f32, y: f32, px: i32, py: i32, seed: u64) -> f32 {
     let a = n00 + (n10 - n00) * u;
     let b = n01 + (n11 - n01) * u;
     (a + (b - a) * v) * 1.42
+}
+
+/// `hypot` without the libm call (no overflow care needed at these magnitudes).
+trait Hyp {
+    fn hyp(self, other: f32) -> f32;
+}
+
+impl Hyp for f32 {
+    #[inline]
+    fn hyp(self, other: f32) -> f32 {
+        (self * self + other * other).sqrt()
+    }
+}
+
+/// `x.floor()` as an integer, without a libm call (for values well inside the i32 range).
+#[inline]
+fn floor_i(x: f32) -> i32 {
+    let i = x as i32;
+    if (i as f32) > x { i - 1 } else { i }
+}
+
+/// `i` wrapped into `0..n`; skips the division in the common in-range case.
+#[inline]
+fn wrap(i: i32, n: i32) -> i32 {
+    if (0..n).contains(&i) {
+        i
+    } else {
+        i.rem_euclid(n)
+    }
 }
 
 fn hash2(i: i32, j: i32, seed: u64) -> u64 {
@@ -737,7 +785,7 @@ fn wrap_abs(x: f32, period: f32) -> f32 {
 fn rrect_inside(px: f32, py: f32, hw: f32, hh: f32, r: f32) -> f32 {
     let qx = px.abs() - (hw - r);
     let qy = py.abs() - (hh - r);
-    let outside = qx.max(0.0).hypot(qy.max(0.0)) + qx.max(qy).min(0.0) - r;
+    let outside = qx.max(0.0).hyp(qy.max(0.0)) + qx.max(qy).min(0.0) - r;
     -outside
 }
 
@@ -748,7 +796,7 @@ fn segment(dx: f32, dy: f32, ang: f32, half: f32) -> (f32, f32) {
     let along = dx * c + dy * s;
     let across = -dx * s + dy * c;
     let a = along.clamp(-half, half);
-    ((along - a).hypot(across), along / half)
+    ((along - a).hyp(across), along / half)
 }
 
 /// Cell of a running bond with `pitch` (u, v) meters: `(column, course, local x, local y)`,
@@ -774,13 +822,20 @@ fn bond(x: f32, y: f32, pitch: [f32; 2], cols: i32, rows: i32) -> (i32, i32, f32
 fn lichen(t: &Tile, s: u64, x: f32, y: f32, freq: f32, density: f32) -> (f32, [f32; 3], f32) {
     let mut cover = 0.0f32;
     let mut color = [0.27, 0.3, 0.25];
-    let edge_n = t.fbm(x, y, freq * 6.0, 4, 0.55, sd(s, 1));
+    // Ragged rims; the noise moves them by at most half a radius, so it is only needed near
+    // a colony.
+    let mut edge_n = None;
     t.scatter(x, y, freq, sd(s, 2), |h, dx, dy| {
         if rnd(h, 1) > density {
             return;
         }
         let radius = (0.1 + 0.32 * rnd(h, 2).powi(2)) / freq;
-        let d = dx.hypot(dy) / radius + 0.5 * edge_n;
+        let dn = dx.hyp(dy) / radius;
+        if dn >= 1.5 {
+            return;
+        }
+        let d =
+            dn + 0.5 * *edge_n.get_or_insert_with(|| t.fbm(x, y, freq * 6.0, 4, 0.55, sd(s, 1)));
         let c = 1.0 - smooth(0.6, 1.0, d);
         if c > cover {
             cover = c;
@@ -799,6 +854,9 @@ fn lichen(t: &Tile, s: u64, x: f32, y: f32, freq: f32, density: f32) -> (f32, [f
     });
     // Crusts grow as lobes: the cover breaks into granules, most toward the rim.
     let lobe_f = freq * 45.0;
+    if cover <= 0.0 || t.keep(lobe_f) <= 0.0 {
+        return (cover, color, 0.0);
+    }
     let lobes = t.voronoi(x, y, lobe_f, 1.0, sd(s, 3));
     let grain = 1.0 - smooth(0.25 / lobe_f, 0.6 / lobe_f, lobes.f1);
     let granular = t.keep(lobe_f) * (1.0 - cover * cover).max(0.3);
@@ -838,8 +896,12 @@ fn plaster(t: &Tile, s: u64, x: f32, y: f32) -> Texel {
     // Roller stipple ("orange peel"): soft nubs a few millimeters across, pocks between them
     // and a broader peel undulation.
     let cell = 1.0 / 170.0;
-    let v = t.voronoi(x, y, 170.0, 1.0, sd(s, 4));
-    let nub = (1.0 - smooth(0.0, 0.8 * cell, v.f1)) * (0.5 + rnd(v.id, 1)) * t.keep(170.0);
+    let nub = if t.keep(170.0) > 0.0 {
+        let v = t.voronoi(x, y, 170.0, 1.0, sd(s, 4));
+        (1.0 - smooth(0.0, 0.8 * cell, v.f1)) * (0.5 + rnd(v.id, 1)) * t.keep(170.0)
+    } else {
+        0.0
+    };
     let pock = t.fbm(x, y, 300.0, 2, 0.5, sd(s, 5));
     let peel = t.fbm(x, y, 40.0, 3, 0.5, sd(s, 6));
     let stip = (nub * 0.8 + 0.4 * pock) * lane_k * (1.0 - 0.7 * seam);
@@ -857,7 +919,7 @@ fn plaster(t: &Tile, s: u64, x: f32, y: f32) -> Texel {
     );
     let sdx = x - (si * 0.4 + (u01(hs) - 0.5) * 0.01);
     let sdy = y - (sj * 0.3 + 0.15 + (u01b(hs) - 0.5) * 0.03);
-    let spot_r = sdx.hypot(sdy);
+    let spot_r = sdx.hyp(sdy);
     let spot = 1.0 - smooth(0.006, 0.014, spot_r);
     h -= spot * 0.00025 * (1.0 - smooth(0.0, 0.005, spot_r)) - spot * 0.00005;
 
@@ -866,7 +928,7 @@ fn plaster(t: &Tile, s: u64, x: f32, y: f32) -> Texel {
     t.scatter(x, y, 2.5, sd(s, 12), |hh, dx, dy| {
         if rnd(hh, 1) < 0.35 {
             let rad = 0.003 + 0.008 * rnd(hh, 2);
-            let e = (dx / rad).hypot(dy / (rad * (0.5 + 0.5 * rnd(hh, 3))));
+            let e = (dx / rad).hyp(dy / (rad * (0.5 + 0.5 * rnd(hh, 3))));
             if e < 1.0 {
                 ding = ding.max((1.0 - e * e) * (0.0002 + 0.0007 * rnd(hh, 4)));
             }
@@ -936,7 +998,7 @@ fn concrete(t: &Tile, s: u64, x: f32, y: f32) -> Texel {
     let mut plug = 0.0f32;
     t.scatter(x, y, 1.6, sd(s, 8), |h, dx, dy| {
         if rnd(h, 1) < 0.35 {
-            let e = (dx / 0.032).hypot(dy / 0.012);
+            let e = (dx / 0.032).hyp(dy / 0.012);
             plug = plug.max(1.0 - smooth(0.0, 0.08, (e - 1.0).abs()));
         }
     });
@@ -955,7 +1017,7 @@ fn concrete(t: &Tile, s: u64, x: f32, y: f32) -> Texel {
         (gy as i32).rem_euclid(2),
         sd(s, 11),
     );
-    let tr = tx.hypot(ty);
+    let tr = tx.hyp(ty);
     let style = rnd(th, 1);
     let cone_r = 0.016;
     let (mut hole, mut rod, mut patch, mut cap) = (0.0, 0.0, 0.0, 0.0);
@@ -1006,7 +1068,7 @@ fn concrete(t: &Tile, s: u64, x: f32, y: f32) -> Texel {
     t.scatter(x, y, 50.0, sd(s, 17), |hh, dx, dy| {
         if rnd(hh, 1) < density {
             let rad = 0.0008 + 0.006 * rnd(hh, 2).powi(3);
-            let d = dx.hypot(dy);
+            let d = dx.hyp(dy);
             if d < rad {
                 let k = 1.0 - (d / rad).powi(2);
                 bug = bug.max(k.sqrt() * rad * 0.9);
@@ -1015,23 +1077,28 @@ fn concrete(t: &Tile, s: u64, x: f32, y: f32) -> Texel {
     });
     // Pinholes: sub-millimeter pores everywhere.
     let mut pin = 0.0f32;
-    t.scatter(x, y, 220.0, sd(s, 26), |hh, dx, dy| {
-        if rnd(hh, 1) < 0.3 {
-            let rad = 0.0003 + 0.0006 * rnd(hh, 2);
-            let d = dx.hypot(dy);
-            if d < rad {
-                pin = pin.max((1.0 - (d / rad).powi(2)).sqrt() * rad);
+    if t.keep(220.0) > 0.0 {
+        t.scatter(x, y, 220.0, sd(s, 26), |hh, dx, dy| {
+            if rnd(hh, 1) < 0.3 {
+                let rad = 0.0003 + 0.0006 * rnd(hh, 2);
+                let d = dx.hyp(dy);
+                if d < rad {
+                    pin = pin.max((1.0 - (d / rad).powi(2)).sqrt() * rad);
+                }
             }
-        }
-    });
+        });
+    }
     h -= bug + pin * t.keep(220.0);
 
     // Color: cement paste with hydration mottling, faint aggregate, water run-off from the
     // top seam, lime streaks, rust, grout and caps.
     let cloud = t.fbm(x, y, 0.9, 6, 0.55, sd(s, 18));
     let blotch = smooth(0.15, 0.55, t.fbm(x, y, 2.2, 4, 0.5, sd(s, 19)));
-    let agg = t.voronoi(x, y, 240.0, 1.0, sd(s, 20));
-    let agg_v = (rnd(agg.id, 1) - 0.5) * t.keep(240.0);
+    let agg_v = if t.keep(240.0) > 0.0 {
+        (rnd(t.voronoi(x, y, 240.0, 1.0, sd(s, 20)).id, 1) - 0.5) * t.keep(240.0)
+    } else {
+        0.0
+    };
     let speck = t.n(x, y, 700.0, sd(s, 21)) * t.keep(700.0);
     let blotch2 = smooth(0.25, 0.6, t.fbm(x, y, 4.5, 3, 0.5, sd(s, 27)));
     let mottle = 1.0 + 0.3 * (smooth(-0.4, 0.4, cloud) - 0.5) + 0.08 * cloud;
@@ -1103,7 +1170,7 @@ fn brick(t: &Tile, s: u64, x: f32, y: f32) -> Texel {
         let roll = rv(20 + k as u64);
         if roll < 0.22 {
             let size = 0.005 + 0.012 * (roll / 0.22);
-            let r = (px - sx * hw).hypot(py - sy * hh);
+            let r = (px - sx * hw).hyp(py - sy * hh);
             corner_chip = corner_chip.max(size - r + t.fbm(x, y, 150.0, 3, 0.5, sd(s, 18)) * 0.004);
         }
     }
@@ -1121,7 +1188,7 @@ fn brick(t: &Tile, s: u64, x: f32, y: f32) -> Texel {
     t.scatter(x, y, 140.0, sd(s, 8), |hh2, dx, dy| {
         if rnd(hh2, 1) < pit_rate {
             let rad = 0.0006 + 0.0016 * rnd(hh2, 2);
-            let d = dx.hypot(dy);
+            let d = dx.hyp(dy);
             if d < rad {
                 pit = pit.max((1.0 - (d / rad).powi(2)).sqrt() * rad * 0.7);
             }
@@ -1167,16 +1234,18 @@ fn brick(t: &Tile, s: u64, x: f32, y: f32) -> Texel {
         (1.0 + 0.14 * mottle + 0.5 * sand / 0.0003 * 0.08) * (1.0 - flash),
     );
     // Dark manganese specks and light sand grains.
-    let sp = t.voronoi(x, y, 260.0, 1.0, sd(s, 13));
     let speck_k = t.keep(260.0);
-    let spr = rnd(sp.id, 1);
-    if spr < 0.06 {
-        c = mul(
-            c,
-            1.0 - 0.55 * speck_k * (1.0 - smooth(0.0005, 0.0012, sp.f1)),
-        );
-    } else if spr > 0.88 {
-        c = mul(c, 1.0 + 0.22 * speck_k);
+    if speck_k > 0.0 {
+        let sp = t.voronoi(x, y, 260.0, 1.0, sd(s, 13));
+        let spr = rnd(sp.id, 1);
+        if spr < 0.06 {
+            c = mul(
+                c,
+                1.0 - 0.55 * speck_k * (1.0 - smooth(0.0005, 0.0012, sp.f1)),
+            );
+        } else if spr > 0.88 {
+            c = mul(c, 1.0 + 0.22 * speck_k);
+        }
     }
     c = mul(c, 1.0 - 0.08 * crease);
     // Fresh clay in chips, lime haze near the joints on some bricks.
@@ -1262,7 +1331,7 @@ fn stone(t: &Tile, s: u64, x: f32, y: f32) -> Texel {
     t.scatter(x, y, 70.0, sd(s, 8), |h, dx, dy| {
         if rnd(h, 1) < pit_rate {
             let rad = 0.0015 + 0.0045 * rnd(h, 2).powi(2);
-            let d = dx.hypot(dy);
+            let d = dx.hyp(dy);
             if d < rad {
                 pit = pit.max((1.0 - (d / rad).powi(2)).sqrt() * rad * 0.35);
             }
@@ -1358,7 +1427,7 @@ fn wood(t: &Tile, s: u64, x: f32, y: f32) -> Texel {
     t.scatter(x, y, 1.6, sd(s, 4), |h, dx, dy| {
         if rnd(h, 1) < 0.35 {
             let kr = 0.011 + 0.02 * rnd(h, 2).powi(2);
-            let e = (dx / (kr * 1.3)).hypot(dy / kr);
+            let e = (dx / (kr * 1.3)).hyp(dy / kr);
             // Rings flow smoothly around the knot.
             let side = dy / (dy * dy + kr * kr).sqrt();
             yw += side * kr * 1.8 * (-(e / 2.2).powi(2)).exp();
@@ -1379,7 +1448,7 @@ fn wood(t: &Tile, s: u64, x: f32, y: f32) -> Texel {
     let depth = 0.035
         + 0.006 * (wave + 1.5 * t.n2(x, y, 0.6, 1.0, sd(s, 5))).sin()
         + 0.004 * t.n2(x, y, 1.5, 1.0, sd(s, 18));
-    let phase = across.hypot(depth) / 0.0085 + 0.8 * t.n2(x, y, 0.8, 3.0, sd(s, 6));
+    let phase = across.hyp(depth) / 0.0085 + 0.8 * t.n2(x, y, 0.8, 3.0, sd(s, 6));
     let f = phase.rem_euclid(1.0);
     let ring = hash2(phase.floor() as i32, 0, sd(s, 7));
     // Latewood: a darker band with a soft start and a sharp end; ring widths and darkness
@@ -1449,8 +1518,8 @@ fn wood(t: &Tile, s: u64, x: f32, y: f32) -> Texel {
 /// Natural cliff rock: crags on a few bedding planes, flaking ledges, faults and open
 /// cracks, mineral grains, stains, rain streaks and lichen.
 fn rock(t: &Tile, s: u64, x: f32, y: f32) -> Texel {
-    let wx = x + 0.2 * t.fbm(x, y, 0.5, 4, 0.5, sd(s, 1));
-    let wy = y + 0.12 * t.fbm(x, y, 0.5, 4, 0.5, sd(s, 2));
+    let wx = x + 0.2 * t.fbm(x, y, 0.5, 3, 0.5, sd(s, 1));
+    let wy = y + 0.12 * t.fbm(x, y, 0.5, 3, 0.5, sd(s, 2));
     // Two bedding planes per meter, each bed set back or forward a little.
     let bed_t = (wy + 0.04 * t.n(x, y, 2.0, sd(s, 6))) * 2.0;
     let bed_f = bed_t - bed_t.floor();
@@ -1465,11 +1534,16 @@ fn rock(t: &Tile, s: u64, x: f32, y: f32) -> Texel {
         t.fbm2(x, y, 1.0, 0.35, 3, 0.5, sd(s, 4)) + 0.006 * t.n(x, y, 14.0, sd(s, 26))
     };
     let fault_n = fault_at(wx, wy);
-    let e = 0.004;
-    let fault_g = ((fault_at(wx + e, wy) - fault_n) / e)
-        .hypot((fault_at(wx, wy + e) - fault_n) / e)
-        .max(0.05);
-    let fault_d = fault_n / fault_g;
+    // The field changes by at most ~25 per meter, so past 0.25 the fault is > 1 cm away.
+    let fault_d = if fault_n.abs() > 0.25 {
+        fault_n.signum()
+    } else {
+        let e = 0.004;
+        let g = ((fault_at(wx + e, wy) - fault_n) / e)
+            .hyp((fault_at(wx, wy + e) - fault_n) / e)
+            .max(0.05);
+        fault_n / g
+    };
     let fault_h =
         smooth(-0.003, 0.003, fault_d) * (0.008 + 0.014 * (t.n(x, y, 1.0, sd(s, 27)) * 0.5 + 0.5));
     // Flaking: thin layers spalled off in irregular ledges.
@@ -1502,9 +1576,12 @@ fn rock(t: &Tile, s: u64, x: f32, y: f32) -> Texel {
     );
     c = mul(c, 0.94 + 0.12 * rnd(bed_id, 2));
     c = mul(c, 1.0 + 0.16 * t.fbm(x, y, 5.0, 5, 0.55, sd(s, 17)));
-    let grain = t.voronoi(x, y, 220.0, 1.0, sd(s, 18));
     let gk = t.keep(220.0);
-    let g = rnd(grain.id, 1);
+    let g = if gk > 0.0 {
+        rnd(t.voronoi(x, y, 220.0, 1.0, sd(s, 18)).id, 1)
+    } else {
+        0.5
+    };
     let mut rough = 0.84 + 0.06 * t.n(x, y, 30.0, sd(s, 19));
     if g < 0.14 {
         c = mul(c, 1.0 - 0.5 * gk);
@@ -1523,7 +1600,7 @@ fn rock(t: &Tile, s: u64, x: f32, y: f32) -> Texel {
         (0.86 + 0.28 * smooth(0.3, 0.8, crag)) * (1.0 + 0.04 * fresh),
     );
     // Dark rain streaks run down from cracks and ledges.
-    let streak = t.fbm2(x, y, 5.0, 0.45, 5, 0.5, sd(s, 21));
+    let streak = t.fbm2(x, y, 5.0, 0.45, 4, 0.5, sd(s, 21));
     let wash =
         smooth(0.0, 0.55, streak) * (0.5 + 0.5 * smooth(-0.2, 0.4, t.n(x, y, 0.7, sd(s, 22))));
     c = mul(c, 1.0 - 0.38 * wash);
@@ -1596,7 +1673,7 @@ fn grass(t: &Tile, s: u64, x: f32, y: f32) -> Texel {
             // Blade direction: the local lean plus a random turn.
             let g = GRAD[(hh >> 12) as usize & 15];
             let (bx, by) = (lx + g[0], ly + g[1]);
-            let bl = bx.hypot(by).max(1e-6);
+            let bl = bx.hyp(by).max(1e-6);
             let (bx, by) = (bx / bl, by / bl);
             let along = dx * bx + dy * by;
             if along.abs() > half {
@@ -1696,7 +1773,7 @@ fn dirt(t: &Tile, s: u64, x: f32, y: f32) -> Texel {
                 return;
             }
             let rad = rmin + (rmax - rmin) * rnd(hh, 2);
-            let e = (dx / rad).hypot(dy / (rad * (0.6 + 0.4 * rnd(hh, 3))));
+            let e = (dx / rad).hyp(dy / (rad * (0.6 + 0.4 * rnd(hh, 3))));
             if e < 1.0 {
                 let top = (1.0 - e * e).sqrt() * rad * 0.6 - rad * 0.2;
                 if top > stone_top {
@@ -1759,10 +1836,12 @@ fn dirt(t: &Tile, s: u64, x: f32, y: f32) -> Texel {
 /// Painted steel plate with worn, chipped paint, primer, scratches and rust.
 fn metal(t: &Tile, s: u64, x: f32, y: f32) -> Texel {
     // Wear zones (where things rub and knock) hold clusters of small chips.
-    let wear_at = |x: f32, y: f32| {
-        t.fbm(x, y, 22.0, 4, 0.5, sd(s, 2)) * 0.5 + 0.5 + 0.3 * t.fbm(x, y, 1.3, 3, 0.5, sd(s, 1))
+    let wear_at = |x: f32, y: f32, octaves: u32| {
+        t.fbm(x, y, 22.0, octaves, 0.5, sd(s, 2)) * 0.5
+            + 0.5
+            + 0.3 * t.fbm(x, y, 1.3, 3, 0.5, sd(s, 1))
     };
-    let wear = wear_at(x, y);
+    let wear = wear_at(x, y, 4);
     let bare = smooth(0.74, 0.745, wear);
     let primer = smooth(0.705, 0.71, wear) * (1.0 - bare);
     // Scratches through to bare steel.
@@ -1781,9 +1860,9 @@ fn metal(t: &Tile, s: u64, x: f32, y: f32) -> Texel {
     let rust_n = t.fbm(x, y, 25.0, 4, 0.5, sd(s, 4)) * 0.5 + 0.5;
     let rust = bare * smooth(0.3, 0.6, rust_n);
     let mut bleed = 0.0f32;
-    for (k, up) in [0.01f32, 0.03, 0.06, 0.1].into_iter().enumerate() {
+    for (k, up) in [0.015f32, 0.045, 0.09].into_iter().enumerate() {
         let wob = 0.004 * t.n2(x, y, 25.0, 3.0, sd(s, 5 + k as u64));
-        let above = smooth(0.74, 0.76, wear_at(x + wob, y + up));
+        let above = smooth(0.74, 0.76, wear_at(x + wob, y + up, 3));
         bleed = bleed.max(above * (1.0 - up / 0.12));
     }
     let runs = smooth(-0.1, 0.5, t.n2(x, y, 90.0, 3.0, sd(s, 9)));
@@ -1889,7 +1968,7 @@ fn glass(t: &Tile, s: u64, x: f32, y: f32) -> Texel {
     let mut prints = 0.0f32;
     t.scatter(x, y, 6.0, sd(s, 3), |h, dx, dy| {
         if rnd(h, 1) < 0.25 {
-            let e = (dx / 0.007).hypot(dy / 0.0095);
+            let e = (dx / 0.007).hyp(dy / 0.0095);
             prints = prints.max(1.0 - smooth(0.6, 1.0, e));
         }
     });
@@ -1939,7 +2018,7 @@ fn ice(t: &Tile, s: u64, x: f32, y: f32) -> Texel {
     t.scatter(x, y, 70.0, sd(s, 9), |h, dx, dy| {
         if rnd(h, 1) < 0.25 {
             let rad = 0.0005 + 0.0015 * rnd(h, 2);
-            bubbles = bubbles.max(1.0 - smooth(rad * 0.6, rad, dx.hypot(dy)));
+            bubbles = bubbles.max(1.0 - smooth(rad * 0.6, rad, dx.hyp(dy)));
         }
     });
     let h = melt * 0.004 + grain * 0.0003 * frost - crack * 0.0006;

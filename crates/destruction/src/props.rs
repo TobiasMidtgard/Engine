@@ -88,6 +88,12 @@ pub enum PropKind {
         depth: f32,
         pitch: f32,
     },
+    /// One flat roof panel: `size` X down the slope, Y thick, Z along the ridge; the
+    /// shingle butts (the eave) at +X, or at −X when `eave_at_plus_x` is false.
+    ShinglePanel {
+        size: [f32; 3],
+        eave_at_plus_x: bool,
+    },
     Pallet,
     ScaffoldTower,
     ChainLinkFence {
@@ -132,6 +138,10 @@ impl PropKind {
                 depth: 3.4,
                 pitch: 35f32.to_radians(),
             },
+            PropKind::ShinglePanel {
+                size: [2.6, 0.12, 4.6],
+                eave_at_plus_x: true,
+            },
             PropKind::Pallet,
             PropKind::ScaffoldTower,
             PropKind::ChainLinkFence { length: 5.0 },
@@ -160,6 +170,10 @@ impl PropKind {
                 depth,
                 pitch,
             } => roof_tiles(width, depth, pitch, seed),
+            PropKind::ShinglePanel {
+                size,
+                eave_at_plus_x,
+            } => shingle_panel(Vec3::from(size), eave_at_plus_x, seed),
             PropKind::Pallet => pallet(seed),
             PropKind::ScaffoldTower => scaffold_tower(seed),
             PropKind::ChainLinkFence { length } => chain_link_fence(length, seed),
@@ -188,6 +202,7 @@ impl PropKind {
                 depth,
                 pitch,
             } => roof_size(width, depth, pitch),
+            PropKind::ShinglePanel { size, .. } => Vec3::from(size),
             PropKind::Pallet => Vec3::new(1.2, 0.144, 0.8),
             PropKind::ScaffoldTower => SCAFFOLD_SIZE,
             PropKind::ChainLinkFence { length } => Vec3::new(length.max(1.0), 2.0, 0.1),
@@ -3488,6 +3503,146 @@ fn roof_slope_len(depth: f32, pitch: f32) -> f32 {
     (depth * 0.5 - SHINGLE_H * pitch.sin()) / pitch.cos()
 }
 
+/// A flat roof panel (see [`PropKind::ShinglePanel`]): rafters every 0.6 m under board
+/// sheathing under wooden shingle courses laid from the eave up.
+pub fn shingle_panel(size: Vec3, eave_at_plus_x: bool, seed: u64) -> Vec<PropPart> {
+    let (l, t, w) = (size.x.max(0.5), size.y.max(0.06), size.z.max(0.5));
+    let mut rng = Rng::new(seed ^ 0x5419);
+    let mut kit = Kit::new();
+    let dn = if eave_at_plus_x { Vec3::X } else { -Vec3::X };
+    let nn = Vec3::Y;
+    let hw = w * 0.5;
+    let e = 0.18; // shingle exposure
+    // `sl` runs down the slope from the ridge end (0) to the eave (l); `h` up from the bottom.
+    let at = |z: f32, sl: f32, h: f32| Vec3::Z * z + dn * (sl - l * 0.5) + nn * (h - t * 0.5);
+    let b = kit.mb(WOOD);
+    let rd = (t - 0.05).max(0.03);
+    let n_raft = ((w - 0.1) / 0.6).ceil().max(1.0) as usize + 1;
+    for i in 0..n_raft {
+        let z = -(hw - 0.05) + (w - 0.1) * i as f32 / (n_raft - 1) as f32;
+        let f = Frame::xz(at(z, l * 0.5, rd * 0.5), dn, Vec3::Z);
+        board(
+            b,
+            &f,
+            Vec2::new(0.025, rd * 0.5),
+            &stations(-l * 0.5, l * 0.5, &[], 0.5),
+            0.004,
+            0.004,
+            true,
+            wood_tint(&mut rng),
+            rng_uv(&mut rng),
+        );
+    }
+    // Sheathing boards across the rafters.
+    let mut sl = 0.1;
+    while sl < l {
+        let width = (l - sl + 0.1).min(0.2);
+        let f = Frame::xz(at(0.0, sl - 0.1 + width * 0.5, rd + 0.01), Vec3::Z, nn);
+        board(
+            b,
+            &f,
+            Vec2::new(0.01, width * 0.5 - 0.003),
+            &stations(-hw, hw, &[], 0.6),
+            0.002,
+            0.0,
+            true,
+            mul(wood_tint(&mut rng), 0.9),
+            rng_uv(&mut rng),
+        );
+        sl += 0.2;
+    }
+    // Shingle courses from the eave up.
+    let base_h = rd + 0.02;
+    let mut k = 0;
+    loop {
+        let butt = l - k as f32 * e;
+        if butt < 0.02 {
+            break;
+        }
+        let top = (butt - e - 0.06).max(0.0);
+        let lift = if k == 0 { 0.008 } else { 0.006 };
+        let mut z = -hw - rng.range(0.0, 0.12);
+        while z < hw {
+            let width = rng.range(0.08, 0.24);
+            let gap = rng.range(0.003, 0.008);
+            let z0 = z.max(-hw);
+            let z1 = (z + width).min(hw);
+            z += width + gap;
+            if z1 - z0 < 0.03 {
+                continue;
+            }
+            let bj = (butt + rng.range(-0.008, 0.006)).min(l);
+            let curl = rng.range(0.0, 0.004);
+            let skew = rng.range(-0.004, 0.004);
+            let t_b = rng.range(0.009, 0.013);
+            let t_t = 0.003;
+            let tint = {
+                let t = wood_tint(&mut rng);
+                let grey = rng.range(0.0, 0.35);
+                mix3(t, [t[1] * 0.92; 3], grey)
+            };
+            let uv = rng_uv(&mut rng);
+            let f01 = |sl: f32| ((sl - top) / (bj - top)).clamp(0.0, 1.0);
+            let hb = |sl: f32| base_h + (lift + curl) * f01(sl);
+            let th = |sl: f32| t_t + (t_b - t_t) * f01(sl);
+            let rows = [top, (bj - e).max(top + 0.01), bj - 0.006, bj];
+            let pt = |z: f32, sl: f32, up: bool| {
+                let round_over = if sl >= bj - 1e-5 { 0.0025 } else { 0.0 };
+                let hh = if up {
+                    hb(sl) + th(sl) - round_over
+                } else {
+                    hb(sl)
+                };
+                at(z + skew * f01(sl), sl, hh)
+            };
+            // Top surface strips, the last one rounding over the butt.
+            for wr in rows.windows(2) {
+                let n1 = if wr[1] >= bj - 1e-5 {
+                    (nn + dn).normalize()
+                } else {
+                    nn
+                };
+                let q = [
+                    (pt(z0, wr[0], true), nn),
+                    (pt(z1, wr[0], true), nn),
+                    (pt(z1, wr[1], true), n1),
+                    (pt(z0, wr[1], true), n1),
+                ];
+                let idx = q.map(|(v, n)| vert(b, v, n, Vec2::new(v.dot(dn), v.z) + uv, tint));
+                quad_idx(b, idx, nn);
+            }
+            // Butt end.
+            let q = [
+                pt(z0, bj, false),
+                pt(z1, bj, false),
+                pt(z1, bj, true),
+                pt(z0, bj, true),
+            ];
+            let idx = q.map(|v| vert(b, v, dn, Vec2::new(v.z, v.y) + uv, mul(tint, 0.85)));
+            quad_idx(b, idx, dn);
+            // Sides.
+            for (ze, sgn) in [(z0, -1.0f32), (z1, 1.0)] {
+                let q = [
+                    pt(ze, top, false),
+                    pt(ze, bj, false),
+                    pt(ze, bj, true),
+                    pt(ze, top, true),
+                ];
+                let n = Vec3::Z * sgn;
+                let idx = q.map(|v| vert(b, v, n, Vec2::new(v.dot(dn), v.y) + uv, mul(tint, 0.85)));
+                quad_idx(b, idx, n);
+            }
+        }
+        k += 1;
+    }
+    kit.center();
+    kit.finish(Ao {
+        reach: 0.25,
+        strength: 0.85,
+        ground: false,
+    })
+}
+
 fn roof_size(width: f32, depth: f32, pitch: f32) -> Vec3 {
     let (w, d, p) = roof_params(width, depth, pitch);
     let sl = roof_slope_len(d, p);
@@ -4313,6 +4468,7 @@ mod tests {
                 PropKind::ScaffoldTower => 15_500,
                 PropKind::StoneColumn { .. }
                 | PropKind::RoofTiles { .. }
+                | PropKind::ShinglePanel { .. }
                 | PropKind::SandbagWall { .. } => 30_000,
                 _ => 6_500,
             };

@@ -1022,29 +1022,17 @@ pub fn mesh_region_layers(
 /// Prepare a voxel mesh for textured materials. Each triangle is mapped along its own face
 /// normal's main axis (per-vertex box mapping would smear texture across triangles whose
 /// corners pick different axes), and vertex colors become relative to their layer's own color,
-/// since the texture now carries the albedo. With `split`, triangles go to the layer two of
-/// their corners share (else their first corner's); without, everything is one layer in the
-/// volume's material. Layers come out sorted by tag.
+/// since the texture now carries the albedo. With `split`, grass is cut out along the lawn's
+/// edge (where the corners' grass cover crosses one half), so the grass layer ends in a smooth
+/// line rather than in whole triangles; the bare rest goes to the material two of its corners
+/// share (else the first's). Without `split`, everything is one layer in the volume's
+/// material. Layers come out sorted by tag.
 pub fn retexture(tagged: &Tagged, look: &VoxelLook, split: bool) -> Vec<(u8, MeshBuilder)> {
-    let (mb, tags) = (&tagged.mesh, &tagged.tags);
-    let mut out: Vec<(u8, MeshBuilder, HashMap<(u32, u8), u32>)> = Vec::new();
+    let (mb, tags, lawn) = (&tagged.mesh, &tagged.tags, &tagged.lawn);
+    let mut out: Vec<(u8, MeshBuilder, HashMap<(u32, u32, u8), u32>)> = Vec::new();
     let pos = |i: u32| Vec3::from(mb.vertices[i as usize].position);
+    let grassy = |i: u32| lawn[i as usize] > 0.5;
     for t in mb.indices.as_chunks::<3>().0 {
-        let [a, b, c] = t.map(|i| tags[i as usize]);
-        let tag = if !split {
-            look.base
-        } else if b == c {
-            b
-        } else {
-            a
-        };
-        let k = match out.iter().position(|o| o.0 == tag) {
-            Some(k) => k,
-            None => {
-                out.push((tag, MeshBuilder::new(), HashMap::new()));
-                out.len() - 1
-            }
-        };
         let face = (pos(t[1]) - pos(t[0])).cross(pos(t[2]) - pos(t[0]));
         let axis = face.abs().max_position();
         let dir = {
@@ -1053,43 +1041,152 @@ pub fn retexture(tagged: &Tagged, look: &VoxelLook, split: bool) -> Vec<(u8, Mes
             d
         };
         let code = (axis * 2) as u8 + (face[axis] < 0.0) as u8;
-        let (_, layer, remap) = &mut out[k];
-        let ids = [t[0], t[1], t[2]].map(|i| {
-            *remap.entry((i, code)).or_insert_with(|| {
-                let mut v = mb.vertices[i as usize];
-                v.uv = box_uv(Vec3::from(v.position), dir).to_array();
-                // Grass shades grass; every other layer shows its own bare color.
-                let (color, reference) = if tag == GRASS_LAYER {
-                    (
-                        [v.color[0], v.color[1], v.color[2]],
-                        look.reference(GRASS_LAYER),
-                    )
+        // Corners as (a, b): a vertex (b = a) or the lawn's edge between two vertices.
+        let mut polygons: Vec<(u8, Vec<(u32, u32)>)> = Vec::new();
+        let corners: Vec<(u32, u32)> = t.iter().map(|&i| (i, i)).collect();
+        let g = t.map(grassy);
+        if !split {
+            polygons.push((look.base, corners));
+        } else if g.iter().all(|g| *g) {
+            polygons.push((GRASS_LAYER, corners));
+        } else if g.iter().all(|g| !*g) {
+            polygons.push((majority(t.map(|i| tags[i as usize])), corners));
+        } else {
+            let (mut grass, mut bare) = (Vec::new(), Vec::new());
+            for k in 0..3 {
+                let (p, q) = (t[k], t[(k + 1) % 3]);
+                if g[k] {
+                    grass.push((p, p));
                 } else {
-                    let own = if split { tag } else { tags[i as usize] };
-                    let own = if own == GRASS_LAYER { look.base } else { own };
-                    (tagged.bare[i as usize], look.reference(own))
-                };
-                for ch in 0..3 {
-                    v.color[ch] = (color[ch] / reference[ch].max(1e-3)).clamp(0.3, 1.35);
+                    bare.push((p, p));
                 }
-                layer.vertices.push(v);
-                layer.vertices.len() as u32 - 1
-            })
-        });
-        layer.triangle(ids[0], ids[1], ids[2]);
+                if g[k] != g[(k + 1) % 3] {
+                    let cut = (p.min(q), p.max(q));
+                    grass.push(cut);
+                    bare.push(cut);
+                }
+            }
+            // The bare part wears its first bare corner's material.
+            let tag = t
+                .iter()
+                .zip(g)
+                .find(|(_, g)| !g)
+                .map_or(look.base, |(i, _)| tags[*i as usize]);
+            polygons.push((GRASS_LAYER, grass));
+            polygons.push((tag, bare));
+        }
+        for (tag, poly) in polygons {
+            let k = match out.iter().position(|o| o.0 == tag) {
+                Some(k) => k,
+                None => {
+                    out.push((tag, MeshBuilder::new(), HashMap::new()));
+                    out.len() - 1
+                }
+            };
+            let (_, layer, remap) = &mut out[k];
+            let ids: Vec<u32> = poly
+                .iter()
+                .map(|&(a, b)| {
+                    *remap.entry((a, b, code)).or_insert_with(|| {
+                        let v = corner(tagged, a, b);
+                        let mut vert = mb.vertices[a as usize];
+                        vert.position = v.position.to_array();
+                        vert.normal = v.normal.to_array();
+                        vert.uv = box_uv(v.position, dir).to_array();
+                        // Grass shades grass; every other layer shows its own bare color.
+                        let (color, reference) = if tag == GRASS_LAYER {
+                            (v.color, look.reference(GRASS_LAYER))
+                        } else {
+                            let own = if split { tag } else { v.material };
+                            (v.bare, look.reference(own))
+                        };
+                        for ch in 0..3 {
+                            vert.color[ch] =
+                                (color[ch] / reference[ch].max(1e-3)).clamp(0.12, 1.35);
+                        }
+                        layer.vertices.push(vert);
+                        layer.vertices.len() as u32 - 1
+                    })
+                })
+                .collect();
+            for k in 1..ids.len() - 1 {
+                layer.triangle(ids[0], ids[k], ids[k + 1]);
+            }
+        }
     }
     out.sort_by_key(|o| o.0);
     out.into_iter().map(|(t, m, _)| (t, m)).collect()
+}
+
+/// The material most corners show (two that agree, else the first).
+fn majority([a, b, c]: [u8; 3]) -> u8 {
+    if b == c { b } else { a }
+}
+
+/// A corner of a retextured triangle.
+struct Corner {
+    position: Vec3,
+    normal: Vec3,
+    color: [f32; 3],
+    bare: [f32; 3],
+    material: u8,
+}
+
+/// Vertex `a` (when `b == a`) or the point on edge `a`–`b` where grass cover crosses one half.
+/// Neighboring triangles name a shared edge the same way round, so their cuts meet exactly.
+fn corner(tagged: &Tagged, a: u32, b: u32) -> Corner {
+    let at = |i: u32| {
+        let v = &tagged.mesh.vertices[i as usize];
+        Corner {
+            position: Vec3::from(v.position),
+            normal: Vec3::from(v.normal),
+            color: [v.color[0], v.color[1], v.color[2]],
+            bare: tagged.bare[i as usize],
+            material: tagged.tags[i as usize],
+        }
+    };
+    let (p, q) = (at(a), at(b));
+    if a == b {
+        return p;
+    }
+    let (la, lb) = (tagged.lawn[a as usize], tagged.lawn[b as usize]);
+    let t = ((0.5 - la) / (lb - la)).clamp(0.0, 1.0);
+    let lerp3 = |x: [f32; 3], y: [f32; 3]| std::array::from_fn(|k| x[k] + (y[k] - x[k]) * t);
+    Corner {
+        position: p.position.lerp(q.position, t),
+        normal: p.normal.lerp(q.normal, t).normalize_or(p.normal),
+        color: lerp3(p.color, q.color),
+        bare: lerp3(p.bare, q.bare),
+        material: if la <= 0.5 { p.material } else { q.material },
+    }
 }
 
 fn mesh_region_tagged(state: &VoxelState, look: &VoxelLook, lo: [i64; 3], hi: [i64; 3]) -> Tagged {
     let s = state.size;
     let mut mb = MeshBuilder::new();
     let mut tags: Vec<u8> = Vec::new();
+    let mut lawn: Vec<f32> = Vec::new();
     let mut bare_colors: Vec<[f32; 3]> = Vec::new();
     let mut cache: HashMap<[i64; 3], Option<u32>> = HashMap::new();
     let f = |p: [i64; 3]| state.sample(p[0], p[1], p[2]) as f32 - 127.5;
     let floor_anchored = state.anchored[2];
+    // Sky light reaching a vertex (1 open, 0 buried), from rays through the density field:
+    // tunnels, caves and overhangs go dark, which the renderer's screen-space occlusion can't
+    // see from outside. `q` is in sample coordinates. Rays that hit far away count less.
+    let dirs = sky_directions();
+    let sky = |q: Vec3, n: Vec3| -> f32 {
+        let (t1, t2) = n.any_orthonormal_pair();
+        let mut open = 0.0;
+        for d in &dirs {
+            let dir = t1 * d.x + t2 * d.y + n * d.z;
+            let hit = SKY_STEPS.iter().position(|m| {
+                let p = (q + dir * (m / s)).round();
+                f([p.x as i64, p.y as i64, p.z as i64]) >= 0.0
+            });
+            open += hit.map_or(1.0, |k| k as f32 / SKY_STEPS.len() as f32);
+        }
+        open / dirs.len() as f32
+    };
 
     let mut make_vertex = |c: [i64; 3], mb: &mut MeshBuilder| -> Option<u32> {
         if let Some(v) = cache.get(&c) {
@@ -1129,6 +1226,20 @@ fn mesh_region_tagged(state: &VoxelState, look: &VoxelLook, lo: [i64; 3], hi: [i
             (vals[4] - vals[0]) + (vals[5] - vals[1]) + (vals[6] - vals[2]) + (vals[7] - vals[3]),
         );
         let smooth_normal = (-g).normalize_or(Vec3::Y);
+        // The slope over a 4-voxel block: on a voxel slope the local normal flips between
+        // step tops and risers, which would grow grass in stripes along the steps.
+        let broad = {
+            let mut g = Vec3::ZERO;
+            for i in -1..=2 {
+                for j in -1..=2 {
+                    for k in -1..=2 {
+                        let v = f([c[0] + i, c[1] + j, c[2] + k]);
+                        g += Vec3::new(i as f32 - 0.5, j as f32 - 0.5, k as f32 - 0.5) * v;
+                    }
+                }
+            }
+            (-g).normalize_or(smooth_normal)
+        };
         // Fine relief the voxel grid can't hold: chisel marks, knobs and cracks, as a
         // displacement along the normal that depends only on position (seamless between
         // chunks and on the pieces that break off).
@@ -1192,27 +1303,30 @@ fn mesh_region_tagged(state: &VoxelState, look: &VoxelLook, lo: [i64; 3], hi: [i
             + 0.08 * (hash3(bc[0] as i64, bc[1] as i64, bc[2] as i64, look.seed) - 0.5);
         let bare = mix(scale(inside, 0.97), scale(outside, strata), wear);
         let mut color = bare;
-        let mut tag = mat;
-        // Grass by the smooth slope (not the relief's) plus broad noise, so it grows in
-        // clean patches rather than flickering triangle by triangle where a slope sits near
-        // the limit.
-        let patch = 0.2 * perlin2(pos.x as f64 * 0.3, pos.z as f64 * 0.3, look.seed + 7);
-        let lawn = smooth_normal.y + patch;
+        // Grass by the broad slope (not the relief's) plus noise, so it grows in clean
+        // patches rather than flickering where a slope sits near the limit.
+        let (x, z) = (pos.x as f64, pos.z as f64);
+        let patch = 0.16 * perlin2(x * 0.18, z * 0.18, look.seed + 7)
+            + 0.06 * perlin2(x * 0.9, z * 0.9, look.seed + 8);
+        let slope = broad.y + patch;
+        let mut cover = 0.0;
         if let (Some(grass), Some(top)) = (look.grass, look.topsoil)
             && mat == top
-            && lawn > 0.45
+            && slope > 0.45
         {
-            let k = ((lawn - 0.45) / 0.35).clamp(0.0, 1.0) * wear;
+            cover = ((slope - 0.45) / 0.35).clamp(0.0, 1.0) * wear;
             let var = 0.85 + 0.3 * hash3(bc[0] as i64, 0, bc[2] as i64, look.seed + 5);
-            color = mix(color, scale(grass, var), k);
-            if k > 0.5 {
-                tag = GRASS_LAYER;
-            }
+            color = mix(color, scale(grass, var), cover);
         }
-        // Crevices facing down are darker (cheap occlusion).
-        let shade = 0.82 + 0.18 * (normal.y * 0.5 + 0.5);
+        // Crevices facing down are a little darker, and buried places much darker.
+        let open = sky(
+            Vec3::new(c[0] as f32, c[1] as f32, c[2] as f32) + local,
+            broad,
+        );
+        let shade = (0.82 + 0.18 * (normal.y * 0.5 + 0.5)) * (0.1 + 0.9 * open * open);
         let id = mb.vertex(pos, normal, scale(color, shade));
-        tags.push(tag);
+        tags.push(mat);
+        lawn.push(cover);
         bare_colors.push(scale(bare, shade));
         cache.insert(c, Some(id));
         Some(id)
@@ -1273,15 +1387,33 @@ fn mesh_region_tagged(state: &VoxelState, look: &VoxelLook, lo: [i64; 3], hi: [i
     Tagged {
         mesh: mb,
         tags,
+        lawn,
         bare: bare_colors,
     }
 }
 
-/// A voxel mesh before texturing: each vertex's surface tag and its color without grass.
+/// A voxel mesh before texturing: each vertex's material, grass cover (0..1, grass above one
+/// half) and color without grass.
 pub struct Tagged {
     pub mesh: MeshBuilder,
     pub tags: Vec<u8>,
+    pub lawn: Vec<f32>,
     pub bare: Vec<[f32; 3]>,
+}
+
+/// How far sky rays look, meters.
+const SKY_STEPS: [f32; 6] = [0.45, 0.9, 1.6, 2.6, 4.0, 6.0];
+
+/// Cosine-weighted ray directions around +Z (a golden-angle spiral).
+fn sky_directions() -> Vec<Vec3> {
+    const N: usize = 14;
+    (0..N)
+        .map(|i| {
+            let u = (i as f32 + 0.5) / N as f32;
+            let (r, a) = (u.sqrt(), i as f32 * 2.399_963);
+            Vec3::new(r * a.cos(), r * a.sin(), (1.0 - u).sqrt())
+        })
+        .collect()
 }
 
 /// Mesh of one chunk of a volume.
@@ -1372,7 +1504,16 @@ mod tests {
         let s = VoxelState::new(&v, &mats());
         let plain = VoxelLook::new(&v, &mats());
         let layered = plain.clone().with_layers(true);
-        let (mut whole, mut split) = (0, 0);
+        let area = |m: &MeshBuilder| -> f32 {
+            let p = |i: u32| Vec3::from(m.vertices[i as usize].position);
+            m.indices
+                .as_chunks::<3>()
+                .0
+                .iter()
+                .map(|t| (p(t[1]) - p(t[0])).cross(p(t[2]) - p(t[0])).length() * 0.5)
+                .sum()
+        };
+        let (mut whole, mut split) = (0.0, 0.0);
         let mut seen = std::collections::BTreeSet::new();
         for ci in 0..s.chunk_dirty.len() {
             let c = [
@@ -1380,13 +1521,16 @@ mod tests {
                 (ci / s.chunks[0]) % s.chunks[1],
                 ci / (s.chunks[0] * s.chunks[1]),
             ];
-            whole += mesh_chunk(&s, &plain, c).indices.len();
+            whole += area(&mesh_chunk(&s, &plain, c));
             for (tag, m) in mesh_chunk_layers(&s, &layered, c) {
                 seen.insert(tag);
-                split += m.indices.len();
+                split += area(&m);
             }
         }
-        assert_eq!(whole, split, "splitting keeps every triangle");
+        assert!(
+            (whole - split).abs() < whole * 1e-4,
+            "cutting the lawn's edge keeps the whole surface ({whole} vs {split} m²)"
+        );
         assert!(seen.contains(&GRASS_LAYER), "a grassy top ({seen:?})");
         assert!(
             seen.contains(&(DestructibleMaterial::Dirt.index() as u8)),
