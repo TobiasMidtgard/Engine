@@ -4,11 +4,12 @@
 use engine_assets::{Assets, Handle};
 use engine_core::math::{Rng, Vec3};
 use engine_core::prelude::*;
-use engine_render::{Mesh, Shape, StandardMaterial};
+use engine_render::{Image, Mesh, Shape, StandardMaterial};
 
 use crate::fracture::{ConvexPoly, impact_seeds, voronoi};
 use crate::material::{DestructibleMaterial, DestructionMaterials};
 use crate::meshing::MeshBuilder;
+use crate::textures::{self, SurfaceKind};
 
 /// Alpha levels of the dust materials.
 pub const DUST_LEVELS: usize = 6;
@@ -156,6 +157,25 @@ impl DestructionAssets {
         }
     }
 
+    /// Put procedural PBR textures (see [`crate::textures`]) on every surface material and
+    /// the grass layer. Meshes then carry vertex colors relative to each surface's own color
+    /// (fresh breaks lighter, scorch darker), and the texture supplies the albedo.
+    pub fn texture(
+        &mut self,
+        materials: &mut Assets<StandardMaterial>,
+        images: &mut Assets<Image>,
+    ) {
+        for (i, m) in DestructibleMaterial::ALL.iter().enumerate() {
+            let mut mat = textured(surface_kind(*m), 0xDE57 + i as u64, images);
+            mat.receives_wetness = *m != DestructibleMaterial::Glass;
+            materials.set(self.surface[i], mat);
+        }
+        let mut grass = textured(SurfaceKind::Grass, 0xDE57_06A5, images);
+        grass.receives_wetness = true;
+        self.grass = materials.add(grass);
+        self.textured = true;
+    }
+
     /// Material of a voxel mesh layer (a material index or the grass layer).
     pub fn layer_material(&self, layer: u8) -> Handle<StandardMaterial> {
         if layer == crate::voxel::GRASS_LAYER {
@@ -205,6 +225,40 @@ impl DestructionAssets {
     }
 }
 
+/// The texture each material wears.
+pub fn surface_kind(m: DestructibleMaterial) -> SurfaceKind {
+    match m {
+        DestructibleMaterial::Plaster => SurfaceKind::Plaster,
+        DestructibleMaterial::Wood => SurfaceKind::Wood,
+        DestructibleMaterial::Brick => SurfaceKind::Brick,
+        DestructibleMaterial::Stone => SurfaceKind::Stone,
+        DestructibleMaterial::Concrete | DestructibleMaterial::ReinforcedConcrete => {
+            SurfaceKind::Concrete
+        }
+        DestructibleMaterial::Rock => SurfaceKind::Rock,
+        DestructibleMaterial::Dirt => SurfaceKind::Dirt,
+        DestructibleMaterial::Metal => SurfaceKind::Metal,
+        DestructibleMaterial::Glass => SurfaceKind::Glass,
+        DestructibleMaterial::Ice => SurfaceKind::Ice,
+    }
+}
+
+/// Image width for runtime surfaces: at most 1024 pixels, and small in debug builds so
+/// tests that render stay fast.
+fn texture_size(kind: SurfaceKind) -> u32 {
+    if cfg!(debug_assertions) {
+        128
+    } else {
+        kind.default_size().min(1024)
+    }
+}
+
+/// A textured material for `kind` (white base color: the texture carries the albedo and
+/// vertex colors only shade it relative to the surface's own color).
+fn textured(kind: SurfaceKind, seed: u64, images: &mut Assets<Image>) -> StandardMaterial {
+    textures::generate(kind, texture_size(kind), seed).into_material(images)
+}
+
 /// Create [`DestructionAssets`] the first time the asset stores exist.
 pub fn ensure_assets(world: &mut World) {
     if world.contains_resource::<DestructionAssets>() {
@@ -219,9 +273,15 @@ pub fn ensure_assets(world: &mut World) {
         .get_resource::<DestructionMaterials>()
         .cloned()
         .unwrap_or_default();
-    let assets = world.resource_scope(|world, mut meshes: Mut<Assets<Mesh>>| {
+    let mut assets = world.resource_scope(|world, mut meshes: Mut<Assets<Mesh>>| {
         let mut materials = world.resource_mut::<Assets<StandardMaterial>>();
         DestructionAssets::new(&mut meshes, &mut materials, &table)
     });
+    if world.contains_resource::<Assets<Image>>() {
+        world.resource_scope(|world, mut images: Mut<Assets<Image>>| {
+            let mut materials = world.resource_mut::<Assets<StandardMaterial>>();
+            assets.texture(&mut materials, &mut images);
+        });
+    }
     world.insert_resource(assets);
 }

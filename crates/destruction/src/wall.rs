@@ -899,6 +899,8 @@ pub struct WallLook {
     pub seed: u64,
     /// Keep the grid's outer border straight (true for walls, false for broken chunks).
     pub straight_border: bool,
+    /// The material's own exterior color (what its texture already shows).
+    pub reference: [f32; 3],
 }
 
 impl WallLook {
@@ -914,7 +916,25 @@ impl WallLook {
             plank_pitch: (wall.plank_height > 0.0).then_some(wall.plank_height + wall.plank_gap),
             seed: wall.seed,
             straight_border: true,
+            reference: props.exterior,
         }
+    }
+
+    /// Textured surfaces carry their own albedo, bricks and blocks: colors become relative to
+    /// the material's own exterior color (paint and fresh breaks still show) and the
+    /// vertex-color masonry goes.
+    pub fn with_texture(mut self, textured: bool) -> Self {
+        if textured {
+            let r = self.reference;
+            let rel =
+                |c: [f32; 3]| std::array::from_fn(|k| (c[k] / r[k].max(1e-3)).clamp(0.3, 1.35));
+            self.exterior = rel(self.exterior);
+            self.interior = rel(self.interior);
+            self.stud_interior = rel(self.stud_interior);
+            self.rebar = rel(self.rebar);
+            self.masonry = None;
+        }
+        self
     }
 
     fn outside_color(&self, p: Vec2, gi: i64, gj: i64) -> [f32; 3] {

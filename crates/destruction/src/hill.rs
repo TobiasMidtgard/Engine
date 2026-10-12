@@ -3,7 +3,7 @@
 //!
 //! - a pickaxe drives a tunnel into the hill's rocky side, then opens a chamber too wide for the
 //!   rock and soil above it, which caves in;
-//! - a hoe raises and levels a terrace of soil on the other flank and smooths its edges;
+//! - a hoe cuts and fills a level terrace on the other flank and rounds its edges;
 //! - beside the hill a timber shelter goes up piece by piece in build-mode support colors (blue
 //!   on the ground through red at the limit), then loses two posts and half of it comes down.
 //!
@@ -32,6 +32,8 @@ const HUT: [f64; 3] = [15.0, 0.0, -10.0];
 const TUNNEL_DIGS: u32 = 15;
 const CHAMBER_DIGS: u32 = 15;
 const RAISES: u32 = 6;
+/// Height of the leveled terrace above the hill's foot, m.
+const TERRACE_Y: f64 = 3.6;
 /// The hoe's level-ground strokes; each pass averages the soil with its neighbors once, so a
 /// few in a row turn the raised mounds' edges into a soft bank.
 const SMOOTH_PASSES: u32 = 6;
@@ -91,6 +93,7 @@ enum Step {
     Tunnel(u32),
     Chamber(u32),
     Raise(u32),
+    Level,
     Smooth,
     KnockPost(usize),
     Reset,
@@ -110,6 +113,7 @@ fn timeline() -> Vec<(f32, Step)> {
     for k in 0..RAISES {
         t.push((14.0 + k as f32 * 0.5, Step::Raise(k)));
     }
+    t.push((14.0 + RAISES as f32 * 0.5, Step::Level));
     for k in 0..SMOOTH_PASSES {
         t.push((17.2 + k as f32 * 0.12, Step::Smooth));
     }
@@ -332,23 +336,39 @@ fn run_step(world: &mut World, demo: &mut HillDemo, step: Step) {
             );
         }
         Step::Raise(k) => {
-            // Raise a terrace of soil on the +X flank in hoe-sized mounds, which the smoothing
-            // passes then level into one bank.
+            // Fill the low side of a terrace on the +X flank with soil, a hoe stroke at a time.
             let x = 7.0 + (k % 3) as f64 * 1.8;
             let z = 1.0 + (k / 3) as f64 * 2.2;
             edit(
                 world,
-                o + DVec3::new(x, 2.3, z),
-                EditShape::Sphere { radius: 1.5 },
+                o + DVec3::new(x, TERRACE_Y - 0.9, z),
+                EditShape::Box {
+                    half_extents: Vec3::new(1.0, 0.9, 1.2),
+                    rotation: Quat::IDENTITY,
+                },
                 EditOp::Add,
                 Some("dirt"),
             );
         }
-        Step::Smooth => {
+        Step::Level => {
+            // Cut the high side down to the same level: cut and fill, one flat terrace.
             edit(
                 world,
-                o + DVec3::new(8.8, 3.0, 2.1),
-                EditShape::Sphere { radius: 4.2 },
+                o + DVec3::new(8.8, TERRACE_Y + 2.5, 2.1),
+                EditShape::Box {
+                    half_extents: Vec3::new(3.0, 2.5, 3.4),
+                    rotation: Quat::IDENTITY,
+                },
+                EditOp::Remove,
+                None,
+            );
+        }
+        Step::Smooth => {
+            // Round the terrace's edges into banks.
+            edit(
+                world,
+                o + DVec3::new(8.8, TERRACE_Y, 2.1),
+                EditShape::Sphere { radius: 4.4 },
                 EditOp::Smooth { strength: 1.0 },
                 None,
             );

@@ -494,9 +494,18 @@ pub fn piece_colors(
     color: Option<[f32; 3]>,
     material: DestructibleMaterial,
     table: &DestructionMaterials,
+    textured: bool,
 ) -> ([f32; 3], [f32; 3]) {
     let p = table.get(material);
-    (color.unwrap_or(p.exterior), p.interior)
+    let (ext, int) = (color.unwrap_or(p.exterior), p.interior);
+    if !textured {
+        return (ext, int);
+    }
+    // The texture carries the albedo: shade relative to the material's own color.
+    let rel = |c: [f32; 3]| -> [f32; 3] {
+        std::array::from_fn(|k| (c[k] / p.exterior[k].max(1e-3)).clamp(0.3, 1.35))
+    };
+    (rel(ext), rel(int))
 }
 
 #[cfg(test)]

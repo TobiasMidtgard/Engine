@@ -182,7 +182,7 @@ pub fn rebuild_walls_system(
         if !state.tile_dirty.iter().any(|d| *d) {
             continue;
         }
-        let look = WallLook::new(wall, &table);
+        let look = WallLook::new(wall, &table).with_texture(assets.textured);
         let material = assets.surface(wall.material);
         for tile in 0..state.tile_dirty.len() {
             if !state.tile_dirty[tile] {
