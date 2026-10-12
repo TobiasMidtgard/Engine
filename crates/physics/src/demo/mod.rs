@@ -18,6 +18,8 @@
 //! * a kinematic turntable carrying crates and a stand-in character around,
 //! * rubber balls bouncing in the middle.
 
+mod art;
+
 use engine_core::math::{DVec3, Quat, Vec3};
 use engine_core::prelude::*;
 use engine_render::prelude::{MeshRenderer, Shape, StandardMaterial};
