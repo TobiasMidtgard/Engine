@@ -14,15 +14,16 @@
 //! * a wrecking ball on a chain swinging into a crate wall,
 //! * a seesaw catapult: a steel ball lands on one end and throws a crate,
 //! * a motor-driven paddle wheel churning a bin of balls and blocks,
-//! * a sagging plank bridge that crates drop onto,
-//! * a kinematic turntable carrying crates around,
+//! * a sagging plank bridge that crates drop onto, with a stand-in character on it,
+//! * a kinematic turntable carrying crates and a stand-in character around,
 //! * rubber balls bouncing in the middle.
 
 use engine_core::math::{DVec3, Quat, Vec3};
 use engine_core::prelude::*;
 use engine_render::prelude::{MeshRenderer, Shape, StandardMaterial};
 use engine_world::physics::{
-    Collider, ColliderShape, Joint, JointKind, JointMotor, RigidBody, Velocity,
+    CharacterController, CharacterMove, Collider, ColliderShape, Joint, JointKind, JointMotor,
+    RigidBody, Velocity,
 };
 use engine_world::{SurfaceId, SurfaceMaterial, SurfaceMaterials};
 
@@ -156,6 +157,31 @@ impl Yard<'_> {
                 break_force: None,
                 collide_connected: false,
             })
+            .id()
+    }
+
+    /// A stand-in character with its feet at `feet`: the controller the movement module
+    /// drives, here only falling at a steady 2 m/s, so it stands, rides and weighs.
+    fn mannequin(&mut self, feet: DVec3, color: u32, name: &str) -> Entity {
+        let desc = CharacterController::default();
+        let center = feet + DVec3::Y * (desc.height as f64 * 0.5 + 0.02);
+        self.world
+            .spawn((
+                Transform::from_translation(self.at(center)),
+                desc,
+                CharacterMove {
+                    velocity: Vec3::new(0.0, -2.0, 0.0),
+                },
+                MeshRenderer::new(
+                    Shape::Capsule {
+                        radius: desc.radius,
+                        height: desc.height,
+                        segments: 16,
+                    },
+                    mat(color, 0.6),
+                ),
+                Name::new(name.to_string()),
+            ))
             .id()
     }
 
@@ -812,6 +838,12 @@ fn bridge(y: &mut Yard, center: DVec3) {
             CRATE_COLORS[i],
         );
     }
+    // Someone standing on the deck: the bridge sags under their weight too.
+    y.mannequin(
+        center + DVec3::new(0.0, height - 0.8, -0.8),
+        0x2e86e8,
+        "Bridge walker",
+    );
 }
 
 /// A kinematic disc turning at 0.4 rad/s with crates riding on it.
@@ -860,6 +892,11 @@ fn turntable(y: &mut Yard, center: DVec3) {
         ))
         .id();
     let _ = table;
+    y.mannequin(
+        center + DVec3::new(1.2, 0.3, 0.0),
+        0xe8772e,
+        "Turntable rider",
+    );
     for k in 0..10 {
         let a = k as f64 / 10.0 * std::f64::consts::TAU;
         let at = center + DVec3::new(a.cos() * 3.0, 0.3 + 0.35, a.sin() * 3.0);

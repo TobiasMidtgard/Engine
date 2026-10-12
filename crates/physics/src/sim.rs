@@ -32,9 +32,9 @@ use engine_world::physics::{
 use parking_lot::Mutex;
 use rapier3d::prelude::{
     ActiveCollisionTypes, ActiveEvents, ColliderBuilder, ColliderHandle, CollisionEvent,
-    CollisionEventFlags, ContactPair, EventHandler, ImpulseJointHandle, InteractionGroups,
-    LockedAxes, PhysicsWorld, Pose, RigidBodyBuilder, RigidBodyHandle, RigidBodySet, RigidBodyType,
-    SharedShape, SoftBodySet, SoftBodyTearEvent,
+    CollisionEventFlags, ContactPair, EventHandler, ImpulseJointHandle, LockedAxes, PhysicsWorld,
+    Pose, RigidBodyBuilder, RigidBodyHandle, RigidBodySet, RigidBodyType, SharedShape, SoftBodySet,
+    SoftBodyTearEvent,
 };
 
 use crate::convert;
@@ -64,6 +64,10 @@ pub struct Region {
     pub collector: Collector,
     /// Local bounds of every collider here, refreshed after each step (scene-query culling).
     pub bounds: Option<(Vec3, Vec3)>,
+    /// Colliders added or moved since the last step, not yet in the query tree.
+    pub fresh: Vec<ColliderHandle>,
+    /// Everything moved (the region was re-anchored): refresh the whole query tree.
+    pub stale_all: bool,
 }
 
 impl Region {
@@ -83,6 +87,8 @@ impl Region {
             needs_refresh: true,
             collector: Collector::default(),
             bounds: None,
+            fresh: Vec::new(),
+            stale_all: false,
         }
     }
 
@@ -103,17 +109,29 @@ impl Region {
     }
 
     /// Recompute [`Self::bounds`] from the colliders.
-    /// Put static colliders added or moved since the last step into the query tree now (the
-    /// step would only do it after characters have already been swept against the old tree).
-    pub fn refresh_static_queries(&mut self) {
+    /// Put colliders added or moved since the last step into the query tree now (the step
+    /// would only do it after characters looked for the ground under them).
+    pub fn refresh_queries(&mut self) {
         let w = &mut self.world;
         let params = w.integration_parameters;
-        for (h, c) in w.colliders.iter() {
-            if c.parent().is_none() {
+        let handles: Vec<ColliderHandle> = if self.stale_all {
+            w.colliders.iter().map(|(h, _)| h).collect()
+        } else {
+            std::mem::take(&mut self.fresh)
+        };
+        for h in handles {
+            if let Some(c) = w.colliders.get(h) {
                 let aabb = c.compute_broad_phase_aabb(&params, &w.bodies);
                 w.broad_phase.set_aabb(&params, h, aabb);
             }
         }
+        self.queries_refreshed();
+    }
+
+    /// The query tree is up to date (after a step or a refresh).
+    pub fn queries_refreshed(&mut self) {
+        self.fresh.clear();
+        self.stale_all = false;
     }
 
     pub fn update_bounds(&mut self) {
@@ -212,8 +230,8 @@ pub struct CharacterEntry {
     pub desc: CharacterController,
     /// Translation this backend last wrote.
     pub written: Option<DVec3>,
-    /// Velocity of the platform the character stands on, m/s (moving platforms, ships).
-    pub platform_velocity: Vec3,
+    /// The moving body the character stood on before this step, and that body's pose then.
+    pub platform: Option<(RigidBodyHandle, Pose)>,
     /// Desired velocity this step and its time step (set before moving).
     pub desired: Vec3,
     /// The character's own time step (`Time::delta_for` its `LocalTimeScale`).
@@ -570,10 +588,12 @@ impl Simulation {
             friction,
             restitution,
         );
-        let world = &mut self.region_mut(region_id).world;
+        let region = self.region_mut(region_id);
+        let world = &mut region.world;
         let ch = world
             .colliders
             .insert_with_parent(builder, handle, &mut world.bodies);
+        region.fresh.push(ch);
         self.colliders.insert(
             entity,
             ColliderEntry {
@@ -674,6 +694,7 @@ impl Simulation {
         let h = region.world.colliders.insert(builder);
         region.statics.insert(entity);
         region.needs_refresh = true;
+        region.fresh.push(h);
         self.colliders
             .get_mut(&entity)
             .unwrap()
@@ -750,6 +771,7 @@ impl Simulation {
                 col.set_position(local);
             }
             region.needs_refresh = true;
+            region.fresh.push(h);
         }
         if out_of_reach {
             self.place_static(entity);
@@ -895,15 +917,16 @@ impl Simulation {
                 .user_data(entity.to_bits() as u128),
         );
         let collider = ColliderBuilder::capsule_y(half, desc.radius.max(0.01))
+            // Characters move only by their own sweeps (the controller), but bodies hitting
+            // them bounce off as off any kinematic body: crates land on heads, barrels stop.
             .collision_groups(convert::groups(&desc.layers))
-            // Characters move by sweeps (the controller), not by contact forces.
-            .solver_groups(InteractionGroups::none())
             .user_data(convert::pack_user_data(entity, SurfaceId(15), false))
             .density(0.0);
         let world = &mut region.world;
         let collider = world
             .colliders
             .insert_with_parent(collider, body, &mut world.bodies);
+        region.fresh.push(collider);
         region.movers += 1;
         self.characters.insert(
             entity,
@@ -913,7 +936,7 @@ impl Simulation {
                 collider,
                 desc: *desc,
                 written: None,
-                platform_velocity: Vec3::ZERO,
+                platform: None,
                 desired: Vec3::ZERO,
                 dt: 0.0,
                 world_dt: 0.0,
@@ -1065,7 +1088,19 @@ impl Simulation {
                     rb.sleep();
                 }
             }
+            // Attached colliders follow their bodies only when the region steps; move them now
+            // so queries before then (characters looking for the ground) find them.
+            let world = &mut region.world;
+            for (_, col) in world.colliders.iter_mut() {
+                if let Some(parent) = col.parent()
+                    && let Some(rb) = world.bodies.get(parent)
+                    && let Some(rel) = col.position_wrt_parent()
+                {
+                    col.set_position(*rb.position() * *rel);
+                }
+            }
             region.needs_refresh = true;
+            region.stale_all = true;
             delta
         };
         let _ = delta;
@@ -1192,6 +1227,7 @@ impl Simulation {
         let nc = world
             .colliders
             .insert_with_parent(col, nb, &mut world.bodies);
+        dst.fresh.push(nc);
         dst.movers += 1;
         let c = self.characters.get_mut(&e).unwrap();
         c.region = target;
@@ -1269,6 +1305,7 @@ impl Simulation {
                 let nc = world
                     .colliders
                     .insert_with_parent(col, nb, &mut world.bodies);
+                dst.fresh.push(nc);
                 new_handles.insert(old, nc);
             }
             dst.movers += 1;
