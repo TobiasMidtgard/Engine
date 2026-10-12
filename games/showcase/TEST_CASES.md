@@ -63,9 +63,9 @@ are built, nothing simulates yet) · ⬜ not visible yet
 | 27 | Animation for vehicles (wheels, gear, doors) | `stage` cart, `track`, `airfield` | Animation system | 🟨 |
 | 28 | Muscles that flex and jiggle with movement | `stage` | Animation system | ⬜ |
 | 29 | Clothing tension and wrinkles during movement | `stage`, `yard` | Animation system, Cloth, soft bodies and hair | ⬜ |
-| 30 | Cloth: flags, sails, curtains, clothes | `yard` | Cloth, soft bodies and hair | 🟨 rigid flags and curtain |
-| 31 | Soft bodies (jelly, flesh) and ropes (rope bridge) | `yard` | Cloth, soft bodies and hair | 🟨 |
-| 32 | Hair and fur for humans and animals | `yard` | Cloth, soft bodies and hair | 🟨 stand-in person and dog |
+| 30 | Cloth: flags, sails, curtains, clothes | `yard` | Cloth, soft bodies and hair | ✅ flags and pennants in the wind, a curtain shot full of holes, one that burns, a cape |
+| 31 | Soft bodies (jelly, flesh) and ropes (rope bridge) | `yard` | Cloth, soft bodies and hair | ✅ jelly cubes, a clay block that dents, rope bridges, a swing, a bead curtain, a wrecking ball |
+| 32 | Hair and fur for humans and animals | `yard` | Cloth, soft bodies and hair | ✅ a walking mannequin with long hair and a dog with fur |
 | 33 | Smart NPC AI that uses the environment (cover, high ground) | `arena` | Smart NPC AI | 🟨 |
 | 34 | NPCs that space the player and block attacks | `arena` | Smart NPC AI | 🟨 |
 | 35 | NPC skill, reaction time and logic editable per enemy | `arena` | Smart NPC AI | ⬜ |
