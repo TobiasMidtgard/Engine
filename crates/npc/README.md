@@ -129,7 +129,8 @@ punish window), cooldown, spread and shield.
    concealment when there is no solid cover (it hides but doesn't stop bullets, so solid cover
    wins), and shots into smoke spread wider. Combat decides strikes,
    heavy guard breakers, feints, dash attacks, blocks, parries and dodges against the attacker's
-   telegraph.
+   telegraph. Elites and masters fight on the counter: they never swing into an attack they
+   can parry, they let it come, deflect it and punish the opening.
 4. **Act**: the built-in fallback mover, hit resolution, damage, explosive props, revive. Once
    a movement module has claimed `LocomotionBackend`, the fallback mover leaves bodies with a
    `CharacterController` to it: give an NPC the movement module's character components (in
@@ -156,9 +157,9 @@ The crate depends only on core crates (`engine_core`, `engine_world`, `engine_re
   behavior tests in `tests/behavior.rs`, which run whole NPCs headless and check that they see
   what's in front and not through walls, that reaction time decides who blocks, that slow motion
   slows reactions, that shooters take cover when shot at, that melee fighters close in and hit,
-  that a master beats a veteran in a duel, that squad mates share sightings, that melee squads
-  take turns, that shooters detonate explosives next to enemies, and that a ranged squad sends a
-  flanker.
+  that a master beats a veteran in most of six duels and takes far fewer hits, that squad mates
+  share sightings, that melee squads take turns, that shooters detonate explosives next to
+  enemies, and that a ranged squad sends a flanker.
 - `tests/wildlife.rs`: deer bolt from a runner but let a sneaker much closer, panic spreads
   through a herd, a wolf pack stalks, charges, kills and feeds, birds take off together and
   land again.
