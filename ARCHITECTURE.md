@@ -97,6 +97,7 @@ module's **contract** in `engine_world`:
 | `animation`: `SkeletonPose`, `AnimationParams`, `AnimationTrigger`, `AnimationEvent`, `Ragdoll` | `engine_anim` | movement, npc, softbody (cloth/hair pinning), vfx, audio |
 | `locomotion`: `MoveIntent`, `LocomotionState`, `VehicleControls`, `LocomotionBackend` (`claim_backend`, so fallback movers can step aside) | `engine_movement`, `engine_vehicles` | npc, player input, cameras, UI |
 | `terrain`: `TerrainEdit`, `TerrainChanged`, plus the `Ground` query | `engine_terrain` | destruction, foliage, physics, water, npc |
+| `Obscurance`: smoke, fog and dust between two points (`transmittance`, `extinction`); sources stack by name and implementations pass `check_obscurance` | `engine_smoke` (weather fog and destruction dust can add their own) | npc, gameplay, ui |
 | `Water`, `Gravity`, fields and world events (see the crate docs) | water, space, weather, … | everyone |
 
 Anything a module needs that isn't there is a missing contract: ask the core owner to add it
