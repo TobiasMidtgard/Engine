@@ -1081,6 +1081,8 @@ impl Renderer {
             Tonemapper::Aces => 1.0,
             Tonemapper::Reinhard => 2.0,
             Tonemapper::None => 3.0,
+            Tonemapper::AgXPunchy => 4.0,
+            Tonemapper::Neutral => 5.0,
         };
         let levels = self.targets.bloom.len().max(1) as f32;
         let u = PostUniform {

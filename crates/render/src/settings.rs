@@ -6,9 +6,15 @@ use engine_core::prelude::*;
 /// Tonemapping curve.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum Tonemapper {
-    /// Filmic, hue-preserving; handles very bright colors gracefully (default).
+    /// AgX with Blender's "Punchy" look: AgX's graceful highlights with more contrast and
+    /// color, closer to a camera's picture (default).
     #[default]
+    AgXPunchy,
+    /// Filmic, hue-preserving; handles very bright colors gracefully. Flatter than `AgXPunchy`.
     AgX,
+    /// Khronos PBR Neutral: keeps base colors as authored up to bright highlights (product
+    /// shots, checking materials).
+    Neutral,
     /// The classic ACES filmic look (more contrast, saturated highlights).
     Aces,
     Reinhard,
@@ -122,7 +128,7 @@ impl Default for RenderSettings {
             ao_intensity: 1.0,
             anti_aliasing: AntiAliasing::Taa,
             sharpness: 0.3,
-            tonemapper: Tonemapper::AgX,
+            tonemapper: Tonemapper::AgXPunchy,
             bloom_intensity: 0.04,
             saturation: 1.05,
             contrast: 1.0,

@@ -390,7 +390,8 @@ pub fn build_view(
             });
             // Dark scenes stay darker than average gray, like the eye sees them.
             let night = smoothstep(5.0, -2.0, metered) * settings.night_exposure_bias;
-            let target = (metered + night - compensation).clamp(min_ev100, max_ev100);
+            let target = (metered + night - compensation - crate::exposure::METER_BIAS_EV)
+                .clamp(min_ev100, max_ev100);
             if !exposure_state.initialized {
                 exposure_state.ev100 = target;
             } else {
