@@ -1,0 +1,13 @@
+#!/bin/sh
+# Refuses a commit whose staged Rust files `cargo fmt` would change, so CI's Format step never
+# fails on them. It checks what is staged, so formatting after `git add` and forgetting to
+# stage the result is caught too. Enable once per clone (it also enables pre-push):
+#
+#     git config core.hooksPath .githooks
+
+git -c core.quotePath=false diff --cached --name-only --diff-filter=ACMR -- '*.rs' |
+    "$(dirname "$0")/check-rust-fmt" "" || {
+    echo "pre-commit: CI's \`cargo fmt --all --check\` would fail on the files above." >&2
+    echo "Run \`cargo fmt --all\`, \`git add\` them and commit again." >&2
+    exit 1
+}

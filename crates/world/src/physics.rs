@@ -15,14 +15,32 @@
 //! A backend (the shipped `engine_physics`, or one you write) is a plugin that:
 //! 1. calls [`claim_backend`] in `build` (two backends in one app is an error),
 //! 2. simulates in `FixedUpdate` / `SimSet::Physics` using `Res<Time>` (so time dilation and
-//!    slow motion work), reading the components above and writing the outputs,
+//!    slow motion work), advancing each body by its own step (see "Local time" below),
+//!    reading the components above and writing the outputs,
 //! 3. replaces [`PhysicsQueries`] with its own implementation,
-//! 4. passes [`conformance`]: `engine_world::physics::conformance::assert_all(|app| { app.add_plugins(MyPhysics); })`.
+//! 4. follows world shifts (floating origin, planet frames): in `WorldShiftSet::Apply` it
+//!    moves its own state (bodies, statics, islands) by the [`crate::WorldShift`], as a
+//!    teleport rather than motion (kinematic bodies get no velocity from it), and by
+//!    `WorldShiftSet::Rebuild` its query snapshot answers in the new frame,
+//! 5. passes [`conformance`]: `engine_world::physics::conformance::assert_all(|app| { app.add_plugins(MyPhysics); })`.
 //!
 //! Swapping physics is then a one-line change in the game's `main`.
 //!
 //! Positions are `f64` world meters (`Transform`), so a backend must keep precision far from
 //! the origin (for example by simulating in local islands around each `SimulationFocus`).
+//!
+//! **Local time.** Every body lives in its own seconds: each fixed step the backend advances
+//! a body by `time.delta_for(local)` (`Time::delta_for` with the entity's `LocalTimeScale`, if
+//! any), for motion, gravity, forces and damping alike. Without a `LocalTimeScale` that is the
+//! world step. So a car inside a slow-motion bubble (`LocalTimeScale { factor: 0.3, .. }`)
+//! moves, falls and spins at 0.3 speed while the rest of the world runs normally, and a body
+//! with `LocalTimeScale::unaffected_by_dilation(1.0)` keeps full speed while `TimeDilation`
+//! slows everything else. [`Velocity`] is in the body's own seconds, like characters'
+//! [`CharacterState::velocity`]; multiply by `delta_for(local) / delta_secs()` for world
+//! seconds. Contacts between bodies on different clocks are resolved with those world-second
+//! velocities. A backend whose solver takes one step for all bodies can do this by scaling a
+//! body's velocity by its time factor `s` for the step (and dividing it back after) and its
+//! gravity and forces by `s²`.
 
 use std::sync::Arc;
 
@@ -52,6 +70,12 @@ pub struct RigidBody {
     pub kind: BodyKind,
     /// Total mass, kg. `None` = from collider volumes and densities.
     pub mass_kg: Option<f32>,
+    /// Center of mass in the body's local space, meters. `None` = from the colliders. Set it
+    /// to a design's balance point (a plane's CG, a car's low center of mass).
+    pub center_of_mass: Option<Vec3>,
+    /// Principal moments of inertia about the center of mass, along the body's local axes,
+    /// kg·m². `None` = from the colliders.
+    pub inertia: Option<Vec3>,
     /// Fraction of linear velocity lost per second (air drag stand-in), 0..1.
     pub linear_damping: f32,
     pub angular_damping: f32,
@@ -69,6 +93,8 @@ impl Default for RigidBody {
         Self {
             kind: BodyKind::Dynamic,
             mass_kg: None,
+            center_of_mass: None,
+            inertia: None,
             linear_damping: 0.0,
             angular_damping: 0.05,
             gravity_scale: 1.0,
@@ -100,6 +126,15 @@ impl RigidBody {
 
     pub fn with_mass(mut self, kg: f32) -> Self {
         self.mass_kg = Some(kg);
+        self
+    }
+
+    /// Designed mass properties instead of the ones the colliders imply: mass (kg), center
+    /// of mass (body-local meters) and principal moments of inertia (kg·m²).
+    pub fn with_mass_properties(mut self, kg: f32, center_of_mass: Vec3, inertia: Vec3) -> Self {
+        self.mass_kg = Some(kg);
+        self.center_of_mass = Some(center_of_mass);
+        self.inertia = Some(inertia);
         self
     }
 }
@@ -234,8 +269,9 @@ impl Collider {
     }
 }
 
-/// Linear (m/s) and angular (rad/s, world axes) velocity. Gameplay may write it; the backend
-/// writes it back for dynamic bodies every step.
+/// Linear (m/s) and angular (rad/s, world axes) velocity, in the body's own seconds (see
+/// "Local time" in the [module docs](self)). Gameplay may write it; the backend writes it back
+/// for dynamic bodies every step.
 #[derive(Component, Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Velocity {
@@ -253,7 +289,8 @@ pub struct ExternalForce {
     pub at: Option<DVec3>,
 }
 
-/// Written by the backend: the body's mass properties.
+/// Written by the backend on every dynamic body: the mass properties it simulates with. They
+/// are the [`RigidBody`] overrides where set, otherwise derived from the colliders.
 #[derive(Component, Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct MassProperties {
@@ -467,7 +504,8 @@ pub struct Hit {
 }
 
 /// Scene queries against the current physics state. Implementations must be safe to call
-/// from any system, any thread, at any time (they read a snapshot updated each step).
+/// from any system, any thread, at any time (they read a snapshot updated each step and
+/// after each world shift).
 pub trait PhysicsQuery: Send + Sync + 'static {
     /// First hit along a ray. `dir` is normalized.
     fn raycast(
