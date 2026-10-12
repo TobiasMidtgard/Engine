@@ -193,6 +193,116 @@ impl Cover {
     }
 }
 
+/// A rock step in the land: the ground on one side of the line from `a` to `b` (the side of
+/// `(-d.y, d.x)` for `d` = a → b) rises by `height`, as a cliff at the line, and stays up for
+/// `reach` metres before easing back into the hills.
+#[derive(Debug, Clone, Copy)]
+pub struct Scarp {
+    pub a: DVec2,
+    pub b: DVec2,
+    pub height: f64,
+    pub reach: f64,
+}
+
+impl Scarp {
+    /// Distance along the line from `a`, and signed distance from it (positive on the raised
+    /// side). The line wobbles a few metres so the cliff isn't ruler-straight.
+    pub fn frame(&self, p: DVec2, seed: u64) -> (f64, f64) {
+        let d = (self.b - self.a).normalize();
+        let rel = p - self.a;
+        let along = rel.dot(d);
+        let wobble = fbm2(along / 35.0, 0.5, seed + 31, 3, 2.0, 0.5) as f64 * 6.0;
+        (along, rel.dot(DVec2::new(-d.y, d.x)) - wobble)
+    }
+
+    /// How much the land rises at `p` (m).
+    fn rise(&self, p: DVec2, seed: u64) -> f64 {
+        let (along, side) = self.frame(p, seed);
+        let len = (self.b - self.a).length();
+        let ends = smooth(-5.0, 40.0, along) * smooth(-5.0, 40.0, len - along);
+        if ends <= 0.0 || side < -2.0 {
+            return 0.0;
+        }
+        let face = smooth(-1.5, 2.0, side);
+        let back = 1.0 - smooth(self.reach * 0.6, self.reach * 1.4, side);
+        self.height * face * back * ends
+    }
+}
+
+/// A stream from a spring to the lake. Its bed only ever runs downhill, so where the land drops
+/// away (over a [`Scarp`]) the water falls; the bed is carved into the ground with steep banks.
+#[derive(Debug, Clone)]
+pub struct Stream {
+    /// Centerline, one point per metre.
+    pub path: Vec<DVec2>,
+    pub width: f64,
+    /// Depth of the bed below the ground it runs through (m).
+    pub depth: f64,
+    /// Bed height at each path point (filled in by [`Landscape::lay_streams`]).
+    pub bed: Vec<f64>,
+    /// The plunge pool under the falls: center and bed height.
+    pub pool: Option<(DVec2, f64)>,
+    bounds: (DVec2, DVec2),
+}
+
+impl Stream {
+    pub fn new(control: &[[f64; 2]], width: f64, depth: f64) -> Self {
+        let smooth_line = Road::new(control, width, false).points;
+        let mut path = vec![smooth_line[0]];
+        for w in smooth_line.windows(2) {
+            let n = (w[1] - w[0]).length().ceil().max(1.0) as usize;
+            for k in 1..=n {
+                path.push(w[0].lerp(w[1], k as f64 / n as f64));
+            }
+        }
+        let margin = width + 25.0;
+        let min = path.iter().fold(DVec2::splat(f64::MAX), |m, p| m.min(*p)) - margin;
+        let max = path.iter().fold(DVec2::splat(f64::MIN), |m, p| m.max(*p)) + margin;
+        Self {
+            bed: vec![0.0; path.len()],
+            path,
+            width,
+            depth,
+            pool: None,
+            bounds: (min, max),
+        }
+    }
+
+    /// Distance to the centerline and the bed height at the closest point.
+    pub fn closest(&self, p: DVec2) -> Option<(f64, f64)> {
+        if p.x < self.bounds.0.x
+            || p.y < self.bounds.0.y
+            || p.x > self.bounds.1.x
+            || p.y > self.bounds.1.y
+        {
+            return None;
+        }
+        let mut best: Option<(f64, f64)> = None;
+        for (i, w) in self.path.windows(2).enumerate() {
+            let q = closest_on_segment(p, w[0], w[1]);
+            let d = (p - q).length();
+            if best.is_none_or(|(bd, _)| d < bd) {
+                let t = (q - w[0]).length() / (w[1] - w[0]).length().max(1e-9);
+                best = Some((d, self.bed[i] + (self.bed[i + 1] - self.bed[i]) * t));
+            }
+        }
+        best
+    }
+
+    /// The waterfall: where the bed drops the most over 4 m. Returns the path index at the top
+    /// and at the bottom of the drop.
+    pub fn falls(&self) -> Option<(usize, usize)> {
+        (0..self.bed.len().saturating_sub(4))
+            .map(|i| (i, i + 4))
+            .max_by(|a, b| {
+                let da = self.bed[a.0] - self.bed[a.1];
+                let db = self.bed[b.0] - self.bed[b.1];
+                da.total_cmp(&db)
+            })
+            .filter(|&(i, j)| self.bed[i] - self.bed[j] > 2.0)
+    }
+}
+
 /// The whole landscape description.
 #[derive(Debug, Clone)]
 pub struct Landscape {
@@ -210,6 +320,10 @@ pub struct Landscape {
     pub surface_ids: [SurfaceId; COVER_KINDS],
     /// Farm fields on the valley floor: grid cell and crop (see [`Landscape::plant_fields`]).
     pub fields: Vec<((i32, i32), Crop)>,
+    /// Rock steps (the cliff the waterfall drops over).
+    pub scarps: Vec<Scarp>,
+    /// Streams down to the lake (lay them out with [`Landscape::lay_streams`]).
+    pub streams: Vec<Stream>,
 }
 
 /// What grows on a farm field.
@@ -332,6 +446,9 @@ impl Landscape {
     fn shaped_height(&self, x: f64, z: f64, carve: bool) -> f64 {
         let p = DVec2::new(x, z);
         let mut h = self.natural(x, z);
+        for scarp in &self.scarps {
+            h += scarp.rise(p, self.seed);
+        }
         for pad in &self.pads {
             let w = pad.weight(p);
             if w > 0.0 {
@@ -401,11 +518,64 @@ impl Landscape {
 
     /// Ground height at world X/Z (m), including the planet's curvature.
     pub fn height(&self, x: f64, z: f64) -> f64 {
+        let h = self.carve_streams(DVec2::new(x, z), self.uncarved_height(x, z));
+        h - (x * x + z * z) / (2.0 * PLANET_RADIUS)
+    }
+
+    /// Height with roads but before streams cut into it (and without curvature).
+    fn uncarved_height(&self, x: f64, z: f64) -> f64 {
         let mut h = self.base_height(x, z);
         if let Some((w, rh, _, _)) = self.road_at(DVec2::new(x, z)) {
             h += (rh - h) * w;
         }
-        h - (x * x + z * z) / (2.0 * PLANET_RADIUS)
+        h
+    }
+
+    fn carve_streams(&self, p: DVec2, mut h: f64) -> f64 {
+        for st in &self.streams {
+            if let Some((d, bed)) = st.closest(p) {
+                let half = st.width * 0.5;
+                if d < half + 20.0 {
+                    h = h.min(bed + (d - half).max(0.0) * 1.5);
+                }
+            }
+            if let Some((c, bed)) = st.pool {
+                let d = (p - c).length();
+                if d < 25.0 {
+                    h = h.min(bed + (d - 4.5).max(0.0) * 0.8);
+                }
+            }
+        }
+        h
+    }
+
+    /// Lay each stream's bed: follow the ground down from the spring (shallow at first), never
+    /// climbing, and dig a plunge pool under the falls.
+    pub fn lay_streams(&mut self) {
+        let mut streams = std::mem::take(&mut self.streams);
+        for st in &mut streams {
+            let mut low = f64::MAX;
+            for (i, p) in st.path.iter().enumerate() {
+                let dig = st.depth * (0.2 + 0.8 * smooth(0.0, 30.0, i as f64));
+                low = low.min(self.uncarved_height(p.x, p.y) - dig);
+                st.bed[i] = low;
+            }
+            if let Some((_, bottom)) = st.falls() {
+                // A few metres downstream of the drop, where the water lands.
+                let j = (bottom + 3).min(st.path.len() - 1);
+                st.pool = Some((st.path[j], st.bed[j] - 1.8));
+            }
+        }
+        self.streams = streams;
+    }
+
+    /// Distance to the nearest stream's centerline, and its water surface height there.
+    pub fn stream_at(&self, x: f64, z: f64) -> Option<(f64, f64)> {
+        let p = DVec2::new(x, z);
+        self.streams
+            .iter()
+            .filter_map(|st| st.closest(p).map(|(d, bed)| (d, bed + st.depth * 0.55)))
+            .min_by(|a, b| a.0.total_cmp(&b.0))
     }
 
     /// Surface normal from central differences with step `e` (m).
@@ -424,9 +594,16 @@ impl Landscape {
             .fold(0.0, f64::max)
     }
 
-    /// 0..1 road coverage (1 on the road surface).
+    /// 0..1 road or stream coverage (1 on the road surface or in the water): scenery keeps
+    /// off it.
     pub fn road_weight(&self, x: f64, z: f64) -> f64 {
-        self.road_at(DVec2::new(x, z)).map_or(0.0, |r| r.3)
+        let road = self.road_at(DVec2::new(x, z)).map_or(0.0, |r| r.3);
+        let stream = self.streams.iter().fold(0.0, |w: f64, st| {
+            st.closest(DVec2::new(x, z)).map_or(w, |(d, _)| {
+                w.max(1.0 - smooth(st.width * 0.5, st.width * 0.5 + 3.0, d))
+            })
+        });
+        road.max(stream)
     }
 
     /// 0..1 woodland density (the forest zone and the woods on the hills).
@@ -472,6 +649,9 @@ impl Landscape {
         }
         if self.in_cave(x, z) {
             return Cover::Rock;
+        }
+        if self.stream_at(x, z).is_some_and(|(d, _)| d < 3.0) {
+            return Cover::Gravel;
         }
         let slope = 1.0 - normal.y as f64;
         if h > SNOW_LINE + perlin2(x / 300.0, z / 300.0, self.seed + 6) as f64 * 150.0
@@ -652,6 +832,10 @@ impl Landscape {
         if let Some(pc) = self.patch_at(x, z).and_then(Cover::patch_color) {
             c = pc;
         }
+        // Wet stones in the stream bed.
+        if self.stream_at(x, z).is_some_and(|(d, _)| d < 3.0) {
+            c = Vec3::new(0.085, 0.08, 0.065).lerp(Vec3::new(0.13, 0.12, 0.1), n2);
+        }
         if !roofed && self.in_cave(x, z) {
             c = Vec3::new(0.13, 0.12, 0.105).lerp(Vec3::new(0.08, 0.12, 0.12), n1);
         }
@@ -823,6 +1007,21 @@ mod tests {
         assert!(peak > 800.0, "highest point 6 km out is only {peak} m");
         let l = land.lake;
         assert!(land.lake_depth(l.center.x, l.center.y) > 3.0);
+    }
+
+    #[test]
+    fn stream_runs_downhill_over_the_falls_into_the_lake() {
+        let land = test_land();
+        let st = &land.streams[0];
+        assert!(st.bed.windows(2).all(|w| w[1] <= w[0]), "the bed climbs");
+        let (top, bottom) = st.falls().expect("the stream has a waterfall");
+        let drop = st.bed[top] - st.bed[bottom];
+        assert!(drop > 5.0, "the falls drop only {drop} m");
+        let end = *st.path.last().unwrap();
+        assert!(
+            land.lake_depth(end.x, end.y) > 0.5,
+            "the stream ends in the lake"
+        );
     }
 
     #[test]

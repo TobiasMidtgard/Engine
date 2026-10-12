@@ -342,14 +342,12 @@ pub fn spawn_woods(commands: &mut Commands, lib: &Library, land: &Landscape, rng
                 TreeKind::Birch
             };
             let t = pick_tree(lib, kind, rng);
-            spawn_tree(
-                commands,
-                lib,
-                t,
-                place(land, x, z, 0.1),
-                rng.range(0.0, TAU),
-                rng.range(0.75, 1.25),
-            );
+            let scale = rng.range(0.75, 1.25);
+            let at = place(land, x, z, 0.1);
+            spawn_tree(commands, lib, t, at, rng.range(0.0, TAU), scale);
+            if near_wildlife(x, z) {
+                solid(commands, at, 0.35 * scale, 5.0 * scale);
+            }
             count += 1;
             // Bushes along the wood edges.
             if wood < 0.6 && rng.chance(0.35) {
@@ -464,6 +462,107 @@ pub fn spawn_rocks(commands: &mut Commands, lib: &Library, land: &Landscape, rng
             MeshRenderer::new(mesh, lib.mats.rock),
             Lod::hide_beyond(mesh, if big { 900.0 } else { 160.0 }),
         ));
+        if big && near_wildlife(x, z) {
+            solid(commands, DVec3::new(x, h, z), s * 0.8, s * 1.2);
+        }
+    }
+}
+
+/// Where the wildlife roams, trunks and boulders get colliders so animals path around them.
+fn near_wildlife(x: f64, z: f64) -> bool {
+    let m = crate::zones::zone("meadow");
+    DVec2::new(x - m.center.x, z - m.center.z).length() < m.radius + 120.0
+}
+
+/// A static upright obstacle (a trunk or a boulder) for physics and pathfinding.
+fn solid(commands: &mut Commands, base: DVec3, radius: f32, height: f32) {
+    let half = (height * 0.5 - radius).max(0.0);
+    commands.spawn((
+        Transform::from_translation(base + DVec3::new(0.0, height as f64 * 0.5, 0.0)),
+        engine::world::physics::Collider::capsule(radius, half),
+    ));
+}
+
+/// The cliff south of the lake faced with boulders, and stones along the stream's banks.
+pub fn spawn_cliffs_and_stream(
+    commands: &mut Commands,
+    lib: &Library,
+    land: &Landscape,
+    rng: &mut Rng,
+) {
+    let boulder = |commands: &mut Commands, rng: &mut Rng, p: DVec3, s: f32| {
+        let mesh = lib.rocks[rng.range_i32(0, lib.rocks.len() as i32) as usize];
+        commands.spawn((
+            Transform::from_translation(p)
+                .with_rotation(
+                    Quat::from_rotation_y(rng.range(0.0, TAU))
+                        * Quat::from_rotation_x(rng.range(-0.5, 0.5)),
+                )
+                .with_scale(Vec3::new(s, s * rng.range(0.7, 1.1), s)),
+            MeshRenderer::new(mesh, lib.mats.rock),
+            Lod::hide_beyond(mesh, 1200.0),
+        ));
+    };
+    for sc in &land.scarps {
+        let d = (sc.b - sc.a).normalize();
+        let n = DVec2::new(-d.y, d.x);
+        let len = (sc.b - sc.a).length();
+        let mut along = 12.0;
+        while along < len - 12.0 {
+            // The face sits where the wobbling line puts it.
+            let (_, side) = sc.frame(sc.a + d * along, land.seed);
+            let foot = sc.a + d * along - n * (side + 1.0);
+            let near_water = land
+                .stream_at(foot.x, foot.y)
+                .is_some_and(|(dist, _)| dist < 7.0);
+            if !near_water {
+                let low = land.height(foot.x, foot.y);
+                let top = land.height(foot.x + n.x * 4.0, foot.y + n.y * 4.0);
+                for k in 0..3 {
+                    let y = low + (top - low) * (k as f64 * 0.38) - 0.5;
+                    let jitter = n * rng.range(-0.8, 1.2) as f64;
+                    let q = foot + jitter;
+                    let size = rng.range(1.8, 3.4);
+                    boulder(commands, rng, DVec3::new(q.x, y, q.y), size);
+                }
+            }
+            along += rng.range(3.0, 4.5) as f64;
+        }
+    }
+    for st in &land.streams {
+        for (i, p) in st.path.iter().enumerate().step_by(5) {
+            if !rng.chance(0.6) || i + 1 >= st.path.len() {
+                continue;
+            }
+            let dir = (st.path[i + 1] - *p).normalize_or(DVec2::Y);
+            let side = DVec2::new(-dir.y, dir.x) * if rng.chance(0.5) { 1.0 } else { -1.0 };
+            let q = *p + side * (st.width * 0.5 + rng.range(0.3, 1.5) as f64);
+            let s = rng.range(0.5, 1.4);
+            let mesh = lib.small_rocks[rng.range_i32(0, lib.small_rocks.len() as i32) as usize];
+            commands.spawn((
+                Transform::from_translation(DVec3::new(q.x, land.height(q.x, q.y) - 0.2, q.y))
+                    .with_rotation(Quat::from_rotation_y(rng.range(0.0, TAU)))
+                    .with_scale(Vec3::splat(s)),
+                MeshRenderer::new(mesh, lib.mats.rock),
+                Lod::hide_beyond(mesh, 220.0),
+            ));
+        }
+        // Big boulders flanking the falls.
+        if let Some((top, _)) = st.falls() {
+            let lip = st.path[top];
+            let dir = (st.path[top + 1] - lip).normalize_or(DVec2::Y);
+            let side = DVec2::new(-dir.y, dir.x);
+            for s in [-1.0, 1.0] {
+                for k in 0..3 {
+                    let q = lip
+                        + side * s * (st.width * 0.5 + 1.8 + k as f64 * 1.6)
+                        + dir * (k as f64 * 1.2 - 1.0);
+                    let y = land.height(q.x, q.y) - 1.0;
+                    let size = rng.range(2.0, 3.0);
+                    boulder(commands, rng, DVec3::new(q.x, y, q.y), size);
+                }
+            }
+        }
     }
 }
 

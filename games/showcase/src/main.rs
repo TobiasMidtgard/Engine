@@ -106,6 +106,8 @@ fn setup(
     scenery::spawn_farms(&mut commands, &lib, &land, &mut rng);
     scenery::spawn_rocks(&mut commands, &lib, &land, &mut rng);
     scenery::spawn_village(&mut commands, &lib, &land, &mut rng);
+    scenery::spawn_cliffs_and_stream(&mut commands, &lib, &land, &mut rng);
+    placeholders::cave_shell(&mut commands, &mut meshes, &lib, &land, &mut rng);
     zones::spawn_demos(&mut commands, &mut meshes, &lib, &land, &mut rng);
     zones::moon(&mut commands);
     camera::spawn_camera(&mut commands);
@@ -152,6 +154,7 @@ fn register_apis(app: &mut App) {
                 return Err(format!("Unknown place \"{key}\". Use one of: {}.", keys.join(", ")));
             };
             camera::go_to(world, &place);
+            places::visit(world, &place);
             if args.get("with_time").and_then(|v| v.as_bool()).unwrap_or(false) {
                 world.resource_mut::<day_cycle::DayCycle>().hour = place.hour;
             }
