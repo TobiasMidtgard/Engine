@@ -54,12 +54,15 @@ occlusion map).
 
 **The ground changes.** The weather writes the shared `SurfaceLayers` grid around the player:
 rain wets exposed ground within a millimeter; what the ground can't soak up collects in the low
-spots as puddles (asphalt pools, sand soaks it up, see `GroundPatch`); snow piles up below
+spots as puddles (asphalt pools, sand soaks it up, see `GroundPatch`; soft ground such as a
+meadow drains, so water stands only in its few hollows); snow piles up below
 freezing and melts by degree-days; sun, wind and dry air evaporate it again. Covered ground
 stays dry (roofs with colliders are found by raycasts; `WeatherShelter` marks covers without
 one). A ground pass draws it: puddles that mirror the world (screen-space reflections, the sky
 where they leave the screen) with rings from raindrops, darker wet ground, and snow lying in the
-open. Footsteps, fire and vehicle grip can read the same grid.
+open. Puddles only show within a few centimeters of the ground height, so grass blades,
+tabletops and car roofs stay dry, and snow buries what stands lower than its surface (grass, the
+foot of a post) while taller blades poke out. Footsteps, fire and vehicle grip can read the same grid.
 
 **Lightning.** Storm cells strike on their own (`Lightning`), or on demand
 (`weather.lightning`). Bolts are jagged, branching channels with a return-stroke flicker; the
@@ -78,16 +81,28 @@ spawned; a game with its own untagged light keeps control (tag it `SunLight` to 
 
 ## Showcase
 
-`demo::spawn_demo(commands, origin)` builds a weather station: an asphalt yard, a sand pit and a
-stone patio (puddles form on asphalt, not on sand), a bus-stop shelter whose ground stays dry, a
-windsock and a cup anemometer that follow the wind, a thermometer, a rain gauge that fills, a
-snow stake, street lamps that come on at dusk or in a storm, and a chrome ball that reflects the
-sky.
+`demo::spawn_demo(commands, origin)` builds a weather station of about 26 × 16 m from
+generated meshes and textures (nothing loaded from disk):
+
+- an asphalt bus yard with wheel ruts, sealed cracks, road markings, a drain and a manhole, where
+  rain pools into puddles; a sand pit that soaks it all up and a stone patio between them
+- a glazed bus shelter whose ground stays dry, with lights that come on at night
+- a lattice wind mast with a cup anemometer and a wind vane, and a windsock whose bands lift
+  one after another as the wind picks up
+- a fenced enclosure with a Stevenson screen, a rain gauge that fills and a snow stake
+- a big thermometer with a display cycling temperature, wind and rain rate
+- street lamps that switch on at dusk and in dark storms, and a chrome ball that reflects the sky
+
+In the showcase valley it stands in the `weather` zone, with tour stops for the station, rain,
+snow and a storm.
 
 `cargo run -p engine_weather --release --example weather_tour [out_dir] [shots]` renders the
 station through a day of changing weather (clear morning, fair-weather clouds, a storm rolling
 in, a downpour, puddles after the rain, night rain under lamps, lightning, a foggy morning,
-sunset, above the clouds, snow, a moonlit night) and saves a screenshot of each.
+sunset, above the clouds, snow, a moonlit night, a rainbow in the showers), then close-ups of
+the station, and saves a screenshot of each. Around the station the tour builds its own
+landscape: a meadow with grass, wooded hills, rocks, a farm track and a mountain range. Puddles
+only form within a few centimeters of the ground, so grass blades and tabletops stay dry.
 
 ## Tuning
 
