@@ -137,7 +137,7 @@ impl Plugin for RenderPlugin {
                 "Renders the scene. Perspective (fov_y_deg, near) or Orthographic (height). Exposure Auto or Manual{ev100}. Highest `order` among active cameras wins.",
             )
             .register_component::<MeshRenderer>(
-                "Draws a mesh with a material. mesh: {\"shape\": {\"Sphere\": {\"radius\": 1, \"segments\": 32}}} | {\"handle\": n} | {\"asset\": \"models/rock.glb#Mesh0\"} (loads on first use); material: {\"inline\": {base_color, metallic, perceptual_roughness, emissive, emissive_strength, alpha_mode, base_color_texture: <image handle>, normal_texture, metallic_roughness_texture (G=roughness, B=metallic), emissive_texture, occlusion_texture, uv_scale, normal_scale}} | {\"asset\": \"models/rock.glb#Material0\"}.",
+                "Draws a mesh with a material. mesh: {\"shape\": {\"Sphere\": {\"radius\": 1, \"segments\": 32}}} | {\"handle\": n} | {\"asset\": \"models/rock.glb#Mesh0\"} (loads on first use); material: {\"inline\": {base_color, metallic, perceptual_roughness, emissive, emissive_strength, alpha_mode, base_color_texture: <image handle>, normal_texture, metallic_roughness_texture (G=roughness, B=metallic), emissive_texture, occlusion_texture, uv_scale, normal_scale}} | {\"asset\": \"models/rock.glb#Material0\"}. virtual_geometry: false keeps a dense mesh off the cluster path (debris, fragments).",
             )
             .register_component::<DirectionalLight>(
                 "Sun/moon light along the entity's forward (-Z). illuminance in lux (noon sun 110000).",
@@ -155,7 +155,7 @@ impl Plugin for RenderPlugin {
                 "Pushes grass aside and flattens it within radius (m) of the entity: feet, bodies, boulders, landing ships. The 16 nearest the camera act.",
             )
             .register_resource::<RenderSettings>(
-                "Renderer quality and look: shadows (sun_penumbra_scale, contact_shadow_length m), ambient_occlusion (ao_radius m, ao_intensity), anti_aliasing (Taa/None) and sharpness, tonemapper (AgX/Aces/Reinhard/None), bloom, grading, debug_view (None/Normals/Cascades/SkyVisibility/AmbientOcclusion).",
+                "Renderer quality and look: shadows (sun_penumbra_scale, contact_shadow_length m), ambient_occlusion (ao_radius m, ao_intensity), anti_aliasing (Taa/None) and sharpness, tonemapper (AgX/Aces/Reinhard/None), bloom, grading, debug_view (None/Normals/Cascades/SkyVisibility/AmbientOcclusion/Reflections/Clusters/ClusterLevels), virtual_geometry (dense opaque meshes as GPU-culled clusters: virtual_geometry_min_triangles, cluster_error_px, cluster_shadow_error_texels).",
             )
             .register_resource::<FogSettings>("Height fog: density per meter, height_falloff, base_height, color (albedo).")
             .register_resource::<Atmosphere>(
@@ -374,6 +374,12 @@ mod tests {
         let mut errors = Vec::new();
         for (name, src, frame) in shaders {
             if let Err(e) = validate_wgsl(name, &compose_shader(src, frame)) {
+                errors.push(e);
+            }
+        }
+        // Virtual geometry shaders are made of several files.
+        for (name, src, frame) in virtual_geometry::shader_sources() {
+            if let Err(e) = validate_wgsl(name, &compose_shader(&src, frame)) {
                 errors.push(e);
             }
         }

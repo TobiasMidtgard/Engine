@@ -29,16 +29,29 @@
 //! ## Which meshes take this path
 //!
 //! Automatic: a [`MeshRenderer`](crate::MeshRenderer) whose mesh has at least
-//! `RenderSettings::virtual_geometry_min_triangles` triangles and whose material is opaque is
-//! drawn as clusters once its build has finished (until then, and whenever the mesh changes
-//! version, it is drawn by the regular instanced path, so nothing pops in or disappears).
-//! Smaller meshes, alpha-masked and transparent materials stay on the instanced path.
-//! `RenderSettings::virtual_geometry = false` turns the cluster path off.
+//! `RenderSettings::virtual_geometry_min_triangles` triangles (50 000 by default) and whose
+//! material is opaque and not wind-animated is drawn as clusters once its build has finished.
+//! Until then it is drawn by the regular instanced path, so nothing pops in or disappears.
+//! Smaller meshes (props, debris, fragments), alpha-masked and transparent materials stay on
+//! the instanced path, and so does any entity with `MeshRenderer::virtual_geometry = false`
+//! (`without_virtual_geometry()`). `RenderSettings::virtual_geometry = false` turns the
+//! cluster path off.
+//!
+//! ## Changing meshes
+//!
+//! When a mesh asset changes version (a damaged wall, an edited chunk), only that mesh's
+//! clusters are dropped: its new version is drawn by the instanced path right away, and its
+//! clusters are rebuilt in the background once the version has stayed the same for a few
+//! frames (a mesh that changes every frame is never built). Every mesh owns its own ranges of
+//! the GPU buffers, so nothing else is rebuilt, re-sorted or re-uploaded, and meshes under
+//! 200 000 triangles have a build slot of their own so they never wait behind large builds.
 
 mod build;
+mod gpu;
 mod simplify;
 
 pub use build::build;
+pub use gpu::{ClusterInstance, ClusterRenderer, ClusterStats, shader_sources};
 
 use engine_core::math::Vec3;
 

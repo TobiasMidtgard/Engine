@@ -184,6 +184,10 @@ pub struct MeshRenderer {
     pub material: MaterialRef,
     pub cast_shadows: bool,
     pub visible: bool,
+    /// Allow drawing it as virtual geometry clusters when its mesh is dense enough
+    /// (`RenderSettings::virtual_geometry_min_triangles`; default on). Turn off for meshes
+    /// that should always take the instanced path, such as debris and fragments.
+    pub virtual_geometry: bool,
 }
 
 impl Default for MeshRenderer {
@@ -193,6 +197,7 @@ impl Default for MeshRenderer {
             material: MaterialRef::default(),
             cast_shadows: true,
             visible: true,
+            virtual_geometry: true,
         }
     }
 }
@@ -202,13 +207,18 @@ impl MeshRenderer {
         Self {
             mesh: mesh.into(),
             material: material.into(),
-            cast_shadows: true,
-            visible: true,
+            ..Default::default()
         }
     }
 
     pub fn without_shadows(mut self) -> Self {
         self.cast_shadows = false;
+        self
+    }
+
+    /// Always draw it on the instanced path, never as virtual geometry clusters.
+    pub fn without_virtual_geometry(mut self) -> Self {
+        self.virtual_geometry = false;
         self
     }
 }

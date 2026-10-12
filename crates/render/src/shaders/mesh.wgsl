@@ -86,6 +86,11 @@ fn vertex_rel(in: VertexIn) -> vec3<f32> {
 
 @vertex
 fn vs_main(in: VertexIn) -> VertexOut {
+    return standard_vertex(in);
+}
+
+// The scene pass's vertex math, shared with the virtual geometry path (cluster.wgsl).
+fn standard_vertex(in: VertexIn) -> VertexOut {
     let rel = vertex_rel(in);
     var out: VertexOut;
     out.rel = rel;
@@ -298,6 +303,12 @@ fn fs_main(in: VertexOut, @builtin(front_facing) front: bool) -> @location(0) ve
     if (frame.counts.z == 6u) {
         return vec4<f32>(pre_expose(screen_gi(in.rel)), 1.0);
     }
+    // Virtual geometry clusters or levels: the cluster vertex stage puts the debug color in
+    // `color` (cluster.wgsl); other meshes show their vertex color. Lit by a plain sun term.
+    if (frame.counts.z == 7u || frame.counts.z == 8u) {
+        let lambert = 0.25 + 0.75 * saturate(dot(n, frame.sun_dir.xyz));
+        return vec4<f32>(in.color.rgb * lambert, 1.0);
+    }
     var color: vec3<f32>;
     if ((flags & 16u) != 0u) {
         color = s.albedo + pre_expose(s.emissive);
@@ -336,6 +347,10 @@ struct PrepassVertexOut {
 
 @vertex
 fn vs_prepass(in: VertexIn) -> PrepassVertexOut {
+    return standard_prepass_vertex(in);
+}
+
+fn standard_prepass_vertex(in: VertexIn) -> PrepassVertexOut {
     let rel = vertex_rel(in);
     let p = vec4<f32>(in.position, 1.0);
     let prev = vec3<f32>(dot(in.p0, p), dot(in.p1, p), dot(in.p2, p)) + (rel - vec3<f32>(dot(in.m0, p), dot(in.m1, p), dot(in.m2, p)));

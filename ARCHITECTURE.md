@@ -223,6 +223,21 @@ colors (stone, plaster, bark, soil, metal plates) don't look flat; it fades out 
 instead of sparkling. It sticks to the object; terrain and other meshes split into pieces use
 `with_detail_in_world()` so it lines up across seams.
 
+**Virtual geometry** (built: cluster LOD and GPU-driven drawing; `crates/render/src/virtual_geometry`):
+dense opaque meshes (`RenderSettings::virtual_geometry_min_triangles`, 50 000 by default) are
+split into 128-triangle clusters with a level-of-detail DAG (groups simplified with locked
+borders, so mixed levels never crack), built once per mesh version on a background thread. Every
+frame a compute pass culls instances and clusters for the camera, the shadow cascades and the sky
+occlusion map, picks each cluster's level by its projected error (`cluster_error_px` on screen,
+`cluster_shadow_error_texels` in shadow maps), culls clusters that face away, and writes indirect
+draws; the clusters then go through the depth prepass, the scene pass (the same
+`StandardMaterial` shading as `mesh.wgsl`) and the shadow maps. Only storage buffers, 32-bit
+atomics and indirect draws: every backend. Smaller meshes, alpha-masked or wind-animated
+materials and `MeshRenderer::without_virtual_geometry()` stay instanced; a changed mesh is drawn
+instanced until its own clusters are rebuilt. `DebugView::Clusters` and `ClusterLevels` show
+them; `render.stats` reports `clusters` (and their triangles). Next: occlusion culling (two-pass
+HZB), streaming, a compute rasterizer for tiny triangles, cached shadow pages.
+
 **Sky light** (built): every time the sky environment map is redrawn
 (`RenderSettings::environment_interval`), the GPU filters it twice: prefiltered for GGX
 reflections, one mip per roughness step (`sample_env_rough(dir, roughness)`), and convolved into

@@ -198,6 +198,8 @@ pub struct FeatureStats {
     pub instances: u32,
     pub triangles: u64,
     pub culled: u32,
+    /// Virtual geometry clusters drawn by the camera (their triangles are in `triangles`).
+    pub clusters: u32,
 }
 
 /// A pluggable piece of the renderer. See the module docs for the frame order.
