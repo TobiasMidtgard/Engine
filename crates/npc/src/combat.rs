@@ -10,7 +10,8 @@ use engine_world::animation::{AnimationTrigger, Ragdoll};
 use engine_world::locomotion::{LocomotionMode, MoveIntent};
 use engine_world::physics::{PhysicsBackend, PhysicsQueries, QueryFilter};
 use engine_world::{
-    AttackEvent, AttackKind, DamageEvent, DamageKind, Ground, NoiseEvent, ProjectileTrace,
+    AttackEvent, AttackKind, DamageEvent, DamageKind, Ground, NoiseEvent, Obscurance,
+    ProjectileTrace,
 };
 
 use crate::agent::{
@@ -314,6 +315,7 @@ pub(crate) fn resolve_attacks(
     physics: Res<PhysicsQueries>,
     backend: Option<Res<PhysicsBackend>>,
     ground: Res<Ground>,
+    obscurance: Res<Obscurance>,
     settings: Res<NpcSettings>,
     mut models: ResMut<OpponentModels>,
     mut tokens: ResMut<AttackTokens>,
@@ -395,6 +397,7 @@ pub(crate) fn resolve_attacks(
                 &world,
                 phys,
                 &ground,
+                &obscurance,
                 &mut models,
                 &mut damage,
                 &mut traces,
@@ -526,6 +529,7 @@ fn resolve_shot(
     world: &TacticalWorld,
     physics: Option<&PhysicsQueries>,
     ground: &Ground,
+    obscurance: &Obscurance,
     models: &mut OpponentModels,
     damage: &mut MessageWriter<DamageEvent>,
     traces: &mut MessageWriter<ProjectileTrace>,
@@ -533,9 +537,12 @@ fn resolve_shot(
 ) {
     let eye = s.origin + DVec3::Y * 1.45 + (s.forward * 0.4).as_dvec3();
     let aim_dir = (s.aim - eye).as_vec3().normalize_or(s.forward);
+    // Shooting into smoke is mostly guessing.
+    let haze = obscurance.transmittance(eye, s.aim);
     let spread = (s.weapon.spread_deg * (1.0 - 0.9 * s.accuracy)).to_radians()
         * (1.0 + 1.5 * s.suppression)
-        * if s.moving { 1.6 } else { 1.0 };
+        * if s.moving { 1.6 } else { 1.0 }
+        * (1.0 + 3.0 * (1.0 - haze));
     // Random direction in a cone (deterministic per shot).
     let r1 = roll(s.attacker, s.origin.x + s.aim.z, 3);
     let r2 = roll(s.attacker, s.origin.z + s.aim.x, 5);

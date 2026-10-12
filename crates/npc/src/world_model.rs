@@ -14,7 +14,7 @@ use engine_world::physics::{
     BodyKind, CharacterController, Collider, ColliderShape, PhysicsBackend, PhysicsQueries,
     QueryFilter, RigidBody,
 };
-use engine_world::{Ground, TerrainChanged};
+use engine_world::{Ground, Obscurance, TerrainChanged};
 
 /// Spatial hash cell size, meters.
 const HASH_CELL: f64 = 8.0;
@@ -649,9 +649,31 @@ pub struct Sight<'a> {
     pub world: &'a TacticalWorld,
     pub physics: Option<&'a PhysicsQueries>,
     pub ground: &'a Ground,
+    /// Smoke, fog and dust (`None` = clear air).
+    pub obscurance: Option<&'a Obscurance>,
 }
 
+/// Below this much light getting through, smoke hides a body completely.
+pub const OPAQUE_SMOKE: f32 = 0.08;
+
 impl Sight<'_> {
+    /// How well someone at `from` can see `to`: 0 when something solid is in the way,
+    /// otherwise the fraction of light that gets through smoke, fog and dust (1 = clear).
+    pub fn visibility(&self, from: DVec3, to: DVec3, ignore: &[Entity]) -> f32 {
+        if !self.clear(from, to, ignore) {
+            return 0.0;
+        }
+        self.haze(from, to)
+    }
+
+    /// Fraction of light that gets from `from` to `to` through smoke, fog and dust (solid
+    /// obstacles ignored).
+    pub fn haze(&self, from: DVec3, to: DVec3) -> f32 {
+        self.obscurance
+            .map(|o| o.transmittance(from, to))
+            .unwrap_or(1.0)
+    }
+
     /// Can someone at `from` see `to`? `ignore` lists the looker and the target (their own
     /// colliders shouldn't block).
     pub fn clear(&self, from: DVec3, to: DVec3, ignore: &[Entity]) -> bool {

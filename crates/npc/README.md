@@ -2,7 +2,7 @@
 
 **Owner:** Smart NPC AI. **Status:** AI core (perception, memory, tactics, navigation, squads,
 melee and ranged combat, learning, explosives), wildlife, stand-in bodies, the showcase arena
-and the `npc.*` API are in. Next: smoke-aware sight, vehicles.
+the `npc.*` API and smoke-aware sight are in. Next: detailed bodies and arena art, vehicles.
 
 Enemies that feel smarter than other games: they notice you gradually, remember where you went,
 use cover and high ground, flank and suppress as a squad, take turns in melee instead of
@@ -117,13 +117,17 @@ punish window), cooldown, spread and shield.
    its own time scale; gather everything that can be seen.
 2. **Perceive**: sight cones with occlusion, hearing (`NoiseEvent`, gunfire, impacts), being
    hit (`DamageEvent`, `ProjectileTrace` near misses). Awareness grows over
-   `detection_secs`, faster when close, moving or loud. Memory keeps last-known positions with
-   timestamped snapshots that the reaction delay reads from.
+   `detection_secs`, faster when close, moving or loud, and slower through smoke and fog
+   (`Obscurance`) in step with the light that gets through; past 8 % nothing is seen at all.
+   Memory keeps last-known positions with timestamped snapshots that the reaction delay reads
+   from.
 3. **Decide**: squads share sightings, hand out roles (assault, suppress, flank, hold) and melee
    attack tokens. Each NPC scores its options (patrol, investigate, search, engage, take cover,
    flank, high ground, use explosive, retreat) with utility curves shaped by its skills, then
    picks a spot by scoring candidates for cover, line of fire, distance band, height, flanking
-   angle, danger (fire, explosives) and path length on the nav grid. Combat decides strikes,
+   angle, danger (fire, explosives) and path length on the nav grid. Thick smoke counts as
+   concealment when there is no solid cover (it hides but doesn't stop bullets, so solid cover
+   wins), and shots into smoke spread wider. Combat decides strikes,
    heavy guard breakers, feints, dash attacks, blocks, parries and dodges against the attacker's
    telegraph.
 4. **Act**: the built-in fallback mover, hit resolution, damage, explosive props, revive. Once
@@ -135,7 +139,7 @@ punish window), cooldown, spread and shield.
 ## Contracts
 
 Reads: `Collider` / `RigidBody` (tactical world), `PhysicsQueries` when present, `Ground`,
-`Water`, `HeatField` (avoid fire), `NoiseEvent`, `DamageEvent`, `AttackEvent` (telegraphs to
+`Water`, `HeatField` (avoid fire), `Obscurance` (smoke, fog and dust), `NoiseEvent`, `DamageEvent`, `AttackEvent` (telegraphs to
 defend against), `ProjectileTrace` (near misses), `LocomotionState` of targets, `TerrainChanged`,
 `LocalTimeScale` / `TimeDilation`, `LocomotionBackend`.
 
@@ -163,6 +167,8 @@ The crate depends only on core crates (`engine_core`, `engine_world`, `engine_re
   hunting, fleeing) without animals leaving.
 - `tests/training.rs`: the same post swings at a rookie, soldier, veteran, elite and master;
   the share of swings defended climbs with skill (0 % to about 100 %) and the master parries.
+- `tests/smoke.rs`: thick smoke hides a player until it clears, thin smoke slows spotting,
+  shots into smoke miss more, and a shooter with no solid cover hides in a smoke bank.
 - `tests/api.rs`: spawn, tune, order, alert, inspect, list and despawn through `npc.*`, and
   bad arguments come back as errors.
 - `tests/screenshots.rs`: renders the arena, its stands, a cover fight, the sparring lane, the

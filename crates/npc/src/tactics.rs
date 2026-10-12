@@ -111,6 +111,10 @@ impl PositionWeights {
     }
 }
 
+/// Smoke letting less light than this through hides a spot from a shooter (and a target
+/// from us).
+pub const SMOKE_HIDES: f32 = 0.25;
+
 /// What the NPC knows when picking a spot.
 #[derive(Debug, Clone)]
 pub struct PositionQuery {
@@ -252,12 +256,17 @@ pub fn choose_position(
         let low_cover = cover_height == Some(CoverHeight::Low);
         let crouch = p + DVec3::Y * 0.95;
         let stand = p + DVec3::Y * 1.5;
-        let covered = !ctx.sight.clear(target_eye, crouch, &ignore);
-        if covered {
+        // Solid cover stops bullets; thick smoke only hides you (worth a bit less).
+        let solid = !ctx.sight.clear(target_eye, crouch, &ignore);
+        let concealed = !solid && ctx.sight.haze(target_eye, crouch) < SMOKE_HIDES;
+        if solid {
             s += w.cover;
+        } else if concealed {
+            s += w.cover * 0.7;
         }
+        let covered = solid || concealed;
         if w.can_shoot > 0.0 {
-            let mut shoot = ctx.sight.clear(stand, target_chest, &ignore);
+            let mut shoot = ctx.sight.visibility(stand, target_chest, &ignore) > SMOKE_HIDES;
             if !shoot && reason == "cover" {
                 // Lean out around a tall edge.
                 let side = Vec3::new(
@@ -267,9 +276,11 @@ pub fn choose_position(
                 )
                 .normalize_or_zero();
                 for sgn in [-1.0f32, 1.0] {
-                    if ctx
-                        .sight
-                        .clear(stand + (side * 0.8 * sgn).as_dvec3(), target_chest, &ignore)
+                    if ctx.sight.visibility(
+                        stand + (side * 0.8 * sgn).as_dvec3(),
+                        target_chest,
+                        &ignore,
+                    ) > SMOKE_HIDES
                     {
                         shoot = true;
                         break;
@@ -282,7 +293,7 @@ pub fn choose_position(
         }
         if w.exposure > 0.0 {
             for &t in &q.other_threats {
-                if ctx.sight.clear(t + DVec3::Y * 1.6, crouch, &ignore) {
+                if ctx.sight.visibility(t + DVec3::Y * 1.6, crouch, &ignore) > SMOKE_HIDES {
                     s -= w.exposure;
                 }
             }
@@ -421,6 +432,7 @@ mod tests {
                 world: &world,
                 physics: None,
                 ground: &ground,
+                obscurance: None,
             },
             nav: &mut nav,
             heat: &heat,
@@ -455,6 +467,7 @@ mod tests {
                     world: &world,
                     physics: None,
                     ground: &ground,
+                    obscurance: None,
                 },
                 nav: &mut nav,
                 heat: &heat,

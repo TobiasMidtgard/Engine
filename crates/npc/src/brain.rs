@@ -10,7 +10,7 @@ use engine_core::prelude::*;
 use engine_world::animation::AnimationTrigger;
 use engine_world::locomotion::MoveIntent;
 use engine_world::physics::{PhysicsBackend, PhysicsQueries};
-use engine_world::{AttackEvent, FocusPoints, Ground, HeatField, Water};
+use engine_world::{AttackEvent, FocusPoints, Ground, HeatField, Obscurance, Water};
 
 use crate::agent::{
     AlertLevel, AttackPhase, Defense, Npc, NpcAction, NpcBrain, NpcClock, NpcCombat, NpcMotor,
@@ -36,6 +36,7 @@ pub(crate) struct BrainWorld<'w, 's> {
     ground: Res<'w, Ground>,
     water: Res<'w, Water>,
     heat: Res<'w, HeatField>,
+    obscurance: Res<'w, Obscurance>,
     physics: Res<'w, PhysicsQueries>,
     backend: Option<Res<'w, PhysicsBackend>>,
     settings: Res<'w, NpcSettings>,
@@ -258,6 +259,7 @@ fn think(
             world: &w.world,
             physics: physics_backend(&w.backend, &w.physics),
             ground: &w.ground,
+            obscurance: Some(&w.obscurance),
         };
         for (pe, pt, prop) in w.props.iter() {
             if prop.detonated {
@@ -451,6 +453,7 @@ fn pick_spot(
         ground,
         water,
         heat,
+        obscurance,
         physics,
         backend,
         ..
@@ -461,6 +464,7 @@ fn pick_spot(
             world,
             physics: physics_backend(backend, physics),
             ground,
+            obscurance: Some(obscurance),
         },
         nav: &mut navctx,
         heat,
