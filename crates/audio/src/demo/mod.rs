@@ -178,6 +178,26 @@ impl TrailWalker {
     }
 }
 
+impl TrailWalker {
+    /// The hiker: two feet at walking pace (the runner is faster). Cameras and recordings
+    /// follow this one.
+    pub fn is_hiker(&self) -> bool {
+        self.feet == 2 && self.speed < 2.0
+    }
+
+    /// Where a camera following this walker wants to be (behind and on the outside of the
+    /// loop, where the underpass is open) and what it looks at, world meters. Smooth both.
+    pub fn follow_view(&self) -> (DVec3, DVec3) {
+        let (p, d) = trail_point(self.along);
+        let (ahead, _) = trail_point(self.along + 2.5);
+        let right = Vec3::new(-d.z, 0.0, d.x).as_dvec3();
+        let outward = if p.dot(right) > 0.0 { right } else { -right };
+        let eye = self.origin + p - d.as_dvec3() * 4.2 + outward * 3.0 + DVec3::Y * 2.1;
+        let look = self.origin + ahead + DVec3::Y * 0.7;
+        (eye, look)
+    }
+}
+
 pub(crate) fn register(app: &mut App) {
     app.init_resource::<SoundRings>()
         .register_resource::<SoundRings>(
