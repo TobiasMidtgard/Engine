@@ -11,7 +11,9 @@ use std::collections::VecDeque;
 
 use engine_core::math::{DVec2, DVec3, Vec2};
 use engine_core::prelude::*;
-use engine_world::{ContactKind, Deformation as Deform, GroundContact};
+use engine_world::{
+    ContactKind, Deformation as Deform, FollowsWorldShift, GroundContact, WorldShift,
+};
 
 /// What kind of ground a cell was pressed into (decides how it recovers).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -212,6 +214,26 @@ impl DeformationMap {
             }
             self.history = history;
         }
+    }
+
+    /// Keep the prints on the ground when the world re-anchors. A plain move carries the grid
+    /// and the remembered prints along. A turn (another planet's frame, or the world starting
+    /// or stopping to turn with its planet, both far above the ground) clears them.
+    pub fn follow_shift(&mut self, s: &WorldShift) {
+        if s.is_translation_only() {
+            self.origin += DVec2::new(s.translation.x, s.translation.z);
+            for r in &mut self.history {
+                r.contact.follow(s);
+            }
+        } else {
+            self.depth.iter_mut().for_each(|d| *d = 0.0);
+            self.flatten.iter_mut().for_each(|f| *f = 0.0);
+            self.kind.iter_mut().for_each(|k| *k = CellKind::None);
+            self.active.iter_mut().for_each(|a| *a = false);
+            self.history.clear();
+        }
+        self.dirty = Some((0, 0, self.size, self.size));
+        self.generation += 1;
     }
 
     /// Move the window over `focus` if needed. Returns whether it moved.
@@ -529,6 +551,29 @@ mod tests {
         let (beside, _) = map.sample(DVec3::new(0.075, 0.0, 0.08));
         assert!(beside < 0.0, "{beside}");
         assert!(map.dirty.is_some());
+    }
+
+    #[test]
+    fn prints_stay_on_the_ground_when_the_world_moves() {
+        let mut map = DeformationMap::new(0.04, 256);
+        let s = DeformationSettings::default();
+        let (k, d, rim, f) = response(Deform::Plastic { depth_m: 0.06 }, 80.0, 0.3, 0.0, &s);
+        let c = contact(0.0, 0.0, ContactKind::Foot);
+        map.record(&c, k, d, rim, f, 0.0);
+        let before = map.sample(DVec3::new(0.0, 0.0, 0.08)).0;
+        // A floating-origin move of 1.5 km east and 3 m down: the print moves with the ground.
+        let shift = WorldShift::translate(DVec3::new(1_500.0, -3.0, 0.0));
+        map.follow_shift(&shift);
+        let after = map.sample(DVec3::new(1_500.0, -3.0, 0.08)).0;
+        assert_eq!(before, after);
+        assert_eq!(map.history[0].contact.position.x, 1_500.0);
+        // A turn (another planet's frame) clears the grid.
+        let turn = WorldShift {
+            rotation: engine_core::math::DQuat::from_rotation_x(0.3),
+            ..WorldShift::IDENTITY
+        };
+        map.follow_shift(&turn);
+        assert!(map.depth.iter().all(|&d| d == 0.0) && map.history.is_empty());
     }
 
     #[test]

@@ -11,6 +11,7 @@ use std::sync::Arc;
 use engine_core::math::{DQuat, DVec3};
 use engine_core::prelude::*;
 
+use crate::edits::OverlayPaint;
 use crate::noise;
 
 /// What a planet looks like at one point.
@@ -116,7 +117,13 @@ pub struct HeightOverlay {
     pub flat: bool,
     /// Lowest and highest world y the function returns (sampled when built).
     pub y_range: (f64, f64),
+    /// Ground layer and tint at world `(x, z)`, same frame as `height` (see
+    /// [`PlanetTerrain::with_overlay_paint`](crate::PlanetTerrain::with_overlay_paint)).
+    pub paint: Option<OverlayPaintFn>,
 }
+
+/// Paint of a hand-made ground at world `(x, z)`.
+pub type OverlayPaintFn = Arc<dyn Fn(f64, f64) -> Option<OverlayPaint> + Send + Sync>;
 
 impl std::fmt::Debug for HeightOverlay {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -125,6 +132,7 @@ impl std::fmt::Debug for HeightOverlay {
             .field("blend_m", &self.blend_m)
             .field("flat", &self.flat)
             .field("y_range", &self.y_range)
+            .field("painted", &self.paint.is_some())
             .finish_non_exhaustive()
     }
 }
@@ -137,6 +145,10 @@ impl PartialEq for HeightOverlay {
             && self.rotation == other.rotation
             && self.translation == other.translation
             && self.flat == other.flat
+            && match (&self.paint, &other.paint) {
+                (Some(a), Some(b)) => Arc::ptr_eq(a, b),
+                (a, b) => a.is_none() && b.is_none(),
+            }
     }
 }
 
@@ -175,6 +187,30 @@ impl HeightOverlay {
         let p = along(h);
         let t = 1.0 - smooth(self.radius_m, self.radius_m + self.blend_m, p.x.hypot(p.z));
         (t > 0.0).then_some((t, h))
+    }
+
+    /// The paint of the ground at planet-local direction `dir`, `h` above sea level on a
+    /// planet of radius `r`, faded out with the overlay's blend.
+    pub(crate) fn paint_at(&self, dir: DVec3, r: f64, h: f64) -> Option<OverlayPaint> {
+        let paint = self.paint.as_ref()?;
+        let w = self.rotation * dir;
+        if w.y <= 0.0 {
+            return None;
+        }
+        let (x, z) = if self.flat {
+            (w.x / w.y * r, w.z / w.y * r)
+        } else {
+            let p = self.translation + w * (r + h);
+            (p.x, p.z)
+        };
+        let t = 1.0 - smooth(self.radius_m, self.radius_m + self.blend_m, x.hypot(z)) as f32;
+        if t <= 0.0 {
+            return None;
+        }
+        let mut out = paint(x, z)?;
+        out.weight = out.weight.clamp(0.0, 1.0) * t;
+        out.tint_amount = out.tint_amount.clamp(0.0, 1.0) * t;
+        Some(out)
     }
 }
 

@@ -5,7 +5,7 @@
 //! 2000-01-01 12:00 TT.
 
 use crate::orbit::{AU, DAY, Orbit};
-use crate::{BodyAtmosphere, BodyKind, CelestialBody};
+use crate::{BodyAir, BodyAtmosphere, BodyHaze, BodyKind, BodyLook, BodyRings, CelestialBody};
 
 /// Planet elements from semi-major axis (AU), eccentricity, inclination, longitude of the
 /// ascending node, longitude of perihelion and mean longitude (degrees).
@@ -46,8 +46,87 @@ fn planet(
     }
 }
 
-/// The Sun, the eight planets and the Moon.
+/// Air at the surface (gas giants: at 1 bar): density kg/m³, scale height m, top m, °C.
+/// NASA planetary fact sheets. Earth is left to the weather-driven standard atmosphere.
+fn air(density: f32, scale_height_m: f32, top_m: f32, temperature_c: f32) -> Option<BodyAir> {
+    Some(BodyAir {
+        surface_density: density,
+        scale_height_m,
+        top_m,
+        temperature_c,
+    })
+}
+
+/// The Sun, the eight planets and the Moon, with their far-view looks: a detailed portrait
+/// of each body, haze on Venus, Earth and Mars, real polar flattening and Saturn's rings.
 pub fn solar_system() -> Vec<CelestialBody> {
+    let mut bodies = bodies();
+    for b in &mut bodies {
+        b.air = match b.name.as_str() {
+            "Venus" => air(65.0, 15_900.0, 250_000.0, 464.0),
+            "Mars" => air(0.020, 11_100.0, 200_000.0, -63.0),
+            "Jupiter" => air(0.16, 27_000.0, 1_000_000.0, -108.0),
+            "Saturn" => air(0.19, 59_500.0, 1_000_000.0, -139.0),
+            "Uranus" => air(0.42, 27_700.0, 1_000_000.0, -197.0),
+            "Neptune" => air(0.45, 19_700.0, 1_000_000.0, -201.0),
+            _ => None,
+        };
+        match b.name.as_str() {
+            "Mercury" => b.look = BodyLook::Mercury,
+            "Venus" => {
+                b.look = BodyLook::Clouds;
+                // Haze above the cloud tops: a thin bright rim.
+                b.haze = Some(BodyHaze {
+                    optical_depth: 0.5,
+                    extinction: [1.0, 1.0, 1.05],
+                    albedo: [1.0, 0.96, 0.86],
+                    scale_height_m: 5_000.0,
+                    forward: 0.6,
+                });
+            }
+            "Earth" => {
+                b.look = BodyLook::Earthlike;
+                // Used when the renderer's atmosphere is on another body.
+                b.haze = Some(BodyHaze::default());
+                b.flattening = 0.003_353;
+            }
+            "Moon" => b.look = BodyLook::Moon,
+            "Mars" => {
+                b.look = BodyLook::Mars;
+                // Dust low down with a thin bluish haze above it.
+                b.haze = Some(BodyHaze {
+                    optical_depth: 0.3,
+                    extinction: [0.9, 1.0, 1.15],
+                    albedo: [0.95, 0.78, 0.66],
+                    scale_height_m: 11_000.0,
+                    forward: 0.6,
+                });
+                b.flattening = 0.005_89;
+            }
+            "Jupiter" => {
+                b.look = BodyLook::Jupiter;
+                b.flattening = 0.064_87;
+            }
+            "Saturn" => {
+                b.look = BodyLook::Saturn;
+                b.rings = Some(BodyRings::default());
+                b.flattening = 0.097_96;
+            }
+            "Uranus" => {
+                b.look = BodyLook::Uranus;
+                b.flattening = 0.022_9;
+            }
+            "Neptune" => {
+                b.look = BodyLook::Neptune;
+                b.flattening = 0.017_1;
+            }
+            _ => {}
+        }
+    }
+    bodies
+}
+
+fn bodies() -> Vec<CelestialBody> {
     let hour = 3_600.0;
     vec![
         CelestialBody {
@@ -60,6 +139,7 @@ pub fn solar_system() -> Vec<CelestialBody> {
             axial_tilt_deg: 7.25,
             luminosity_w: 3.828e26,
             color: [1.0, 0.95, 0.85],
+            look: BodyLook::None,
             ..Default::default()
         },
         planet(
