@@ -34,6 +34,11 @@ pub struct DestructionAssets {
     /// Valheim-style support colors: blue (on the ground), green, yellow, orange, red (about
     /// to fail).
     pub support: [Handle<StandardMaterial>; 5],
+    /// Grassy topsoil on voxel hills ([`crate::voxel::GRASS_LAYER`]).
+    pub grass: Handle<StandardMaterial>,
+    /// Surfaces carry procedural PBR textures (needs an image store); voxel meshes then split
+    /// into one layer per surface.
+    pub textured: bool,
 }
 
 impl DestructionAssets {
@@ -42,7 +47,7 @@ impl DestructionAssets {
         materials: &mut Assets<StandardMaterial>,
         table: &DestructionMaterials,
     ) -> Self {
-        let surface = DestructibleMaterial::ALL
+        let surface: Vec<Handle<StandardMaterial>> = DestructibleMaterial::ALL
             .iter()
             .map(|m| {
                 let p = table.get(*m);
@@ -137,6 +142,7 @@ impl DestructionAssets {
             materials.add(m.with_emissive(c, 1500.0))
         });
         Self {
+            grass: surface[DestructibleMaterial::Dirt.index()],
             surface,
             chips,
             chip_material,
@@ -146,6 +152,16 @@ impl DestructionAssets {
             charge_body,
             thermite_glow,
             support,
+            textured: false,
+        }
+    }
+
+    /// Material of a voxel mesh layer (a material index or the grass layer).
+    pub fn layer_material(&self, layer: u8) -> Handle<StandardMaterial> {
+        if layer == crate::voxel::GRASS_LAYER {
+            self.grass
+        } else {
+            self.surface[layer as usize % self.surface.len()]
         }
     }
 

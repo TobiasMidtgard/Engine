@@ -895,7 +895,15 @@ pub struct VoxelLook {
     pub grass: Option<[f32; 3]>,
     pub topsoil: Option<u8>,
     pub seed: u64,
+    /// Split meshes into one layer per surface (material, or [`GRASS_LAYER`]) so each layer
+    /// can use its own textured material. Off: one mesh in the volume's material.
+    pub layered: bool,
+    /// The volume's own material index (the layer an unlayered mesh belongs to).
+    pub base: u8,
 }
+
+/// Layer id of grassy topsoil in [`mesh_chunk_layers`] (other layers are material indices).
+pub const GRASS_LAYER: u8 = u8::MAX;
 
 impl VoxelLook {
     pub fn new(volume: &VoxelVolume, materials: &DestructionMaterials) -> Self {
@@ -910,7 +918,15 @@ impl VoxelLook {
             grass: volume.grass,
             topsoil: volume.topsoil.map(|m| m.index() as u8),
             seed: volume.seed,
+            layered: false,
+            base: volume.material.index() as u8,
         }
+    }
+
+    /// Mesh in layers (see [`VoxelLook::layered`]).
+    pub fn with_layers(mut self, layered: bool) -> Self {
+        self.layered = layered;
+        self
     }
 }
 
@@ -948,8 +964,62 @@ pub fn mesh_region(
     hi: [i64; 3],
     offset: Vec3,
 ) -> MeshBuilder {
+    mesh_region_tagged(state, look, lo, hi, offset).0
+}
+
+/// [`mesh_region`] split into layers when `look.layered` (else one layer, the volume's
+/// material): each triangle goes to the surface most of its corners show.
+pub fn mesh_region_layers(
+    state: &VoxelState,
+    look: &VoxelLook,
+    lo: [i64; 3],
+    hi: [i64; 3],
+    offset: Vec3,
+) -> Vec<(u8, MeshBuilder)> {
+    let (mb, tags) = mesh_region_tagged(state, look, lo, hi, offset);
+    if !look.layered {
+        return vec![(look.base, mb)];
+    }
+    split_layers(&mb, &tags)
+}
+
+/// Split `mb` by per-vertex `tags`; a triangle takes the tag two of its corners share (else
+/// its first corner's). Layers come out sorted by tag.
+pub fn split_layers(mb: &MeshBuilder, tags: &[u8]) -> Vec<(u8, MeshBuilder)> {
+    let mut out: Vec<(u8, MeshBuilder, HashMap<u32, u32>)> = Vec::new();
+    for t in mb.indices.chunks_exact(3) {
+        let [a, b, c] = [t[0], t[1], t[2]].map(|i| tags[i as usize]);
+        let tag = if b == c { b } else { a };
+        let k = match out.iter().position(|o| o.0 == tag) {
+            Some(k) => k,
+            None => {
+                out.push((tag, MeshBuilder::new(), HashMap::new()));
+                out.len() - 1
+            }
+        };
+        let (_, layer, remap) = &mut out[k];
+        let ids = [t[0], t[1], t[2]].map(|i| {
+            *remap.entry(i).or_insert_with(|| {
+                layer.vertices.push(mb.vertices[i as usize]);
+                layer.vertices.len() as u32 - 1
+            })
+        });
+        layer.triangle(ids[0], ids[1], ids[2]);
+    }
+    out.sort_by_key(|o| o.0);
+    out.into_iter().map(|(t, m, _)| (t, m)).collect()
+}
+
+fn mesh_region_tagged(
+    state: &VoxelState,
+    look: &VoxelLook,
+    lo: [i64; 3],
+    hi: [i64; 3],
+    offset: Vec3,
+) -> (MeshBuilder, Vec<u8>) {
     let s = state.size;
     let mut mb = MeshBuilder::new();
+    let mut tags: Vec<u8> = Vec::new();
     let mut cache: HashMap<[i64; 3], Option<u32>> = HashMap::new();
     let f = |p: [i64; 3]| state.sample(p[0], p[1], p[2]) as f32 - 127.5;
     let floor_anchored = state.anchored[2];
@@ -1054,6 +1124,7 @@ pub fn mesh_region(
                 )
             + 0.08 * (hash3(bc[0] as i64, bc[1] as i64, bc[2] as i64, look.seed) - 0.5);
         let mut color = mix(scale(inside, 0.97), scale(outside, strata), wear);
+        let mut tag = mat;
         if let (Some(grass), Some(top)) = (look.grass, look.topsoil)
             && mat == top
             && normal.y > 0.45
@@ -1061,10 +1132,14 @@ pub fn mesh_region(
             let k = ((normal.y - 0.45) / 0.35).clamp(0.0, 1.0) * wear;
             let var = 0.85 + 0.3 * hash3(bc[0] as i64, 0, bc[2] as i64, look.seed + 5);
             color = mix(color, scale(grass, var), k);
+            if k > 0.5 {
+                tag = GRASS_LAYER;
+            }
         }
         // Crevices facing down are darker (cheap occlusion).
         color = scale(color, 0.82 + 0.18 * (normal.y * 0.5 + 0.5));
         let id = mb.vertex(pos - offset, normal, color);
+        tags.push(tag);
         cache.insert(c, Some(id));
         Some(id)
     };
@@ -1121,11 +1196,26 @@ pub fn mesh_region(
             }
         }
     }
-    mb
+    (mb, tags)
 }
 
 /// Mesh of one chunk of a volume.
 pub fn mesh_chunk(state: &VoxelState, look: &VoxelLook, chunk: [usize; 3]) -> MeshBuilder {
+    let (lo, hi) = chunk_bounds(state, chunk);
+    mesh_region(state, look, lo, hi, Vec3::ZERO)
+}
+
+/// Mesh of one chunk of a volume in layers (see [`mesh_region_layers`]).
+pub fn mesh_chunk_layers(
+    state: &VoxelState,
+    look: &VoxelLook,
+    chunk: [usize; 3],
+) -> Vec<(u8, MeshBuilder)> {
+    let (lo, hi) = chunk_bounds(state, chunk);
+    mesh_region_layers(state, look, lo, hi, Vec3::ZERO)
+}
+
+fn chunk_bounds(state: &VoxelState, chunk: [usize; 3]) -> ([i64; 3], [i64; 3]) {
     let mut lo = [0i64; 3];
     let mut hi = [0i64; 3];
     for a in 0..3 {
@@ -1135,7 +1225,7 @@ pub fn mesh_chunk(state: &VoxelState, look: &VoxelLook, chunk: [usize; 3]) -> Me
             lo[a] = -1;
         }
     }
-    mesh_region(state, look, lo, hi, Vec3::ZERO)
+    (lo, hi)
 }
 
 /// Mesh of a whole (small) volume, e.g. a falling piece, offset by `-center`.
@@ -1189,6 +1279,34 @@ mod tests {
             }
         }
         assert!(tris > 500, "{tris} triangles");
+    }
+
+    #[test]
+    fn layered_hill_meshes_split_into_rock_soil_and_grass() {
+        let v = VoxelVolume::hill(12.0, 4.0, 10.0, 0.3);
+        let s = VoxelState::new(&v, &mats());
+        let plain = VoxelLook::new(&v, &mats());
+        let layered = plain.clone().with_layers(true);
+        let (mut whole, mut split) = (0, 0);
+        let mut seen = std::collections::BTreeSet::new();
+        for ci in 0..s.chunk_dirty.len() {
+            let c = [
+                ci % s.chunks[0],
+                (ci / s.chunks[0]) % s.chunks[1],
+                ci / (s.chunks[0] * s.chunks[1]),
+            ];
+            whole += mesh_chunk(&s, &plain, c).indices.len();
+            for (tag, m) in mesh_chunk_layers(&s, &layered, c) {
+                seen.insert(tag);
+                split += m.indices.len();
+            }
+        }
+        assert_eq!(whole, split, "splitting keeps every triangle");
+        assert!(seen.contains(&GRASS_LAYER), "a grassy top ({seen:?})");
+        assert!(
+            seen.contains(&(DestructibleMaterial::Dirt.index() as u8)),
+            "bare soil on the flanks ({seen:?})"
+        );
     }
 
     #[test]
