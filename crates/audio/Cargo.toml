@@ -14,6 +14,7 @@ alsa = ["dep:cpal"]
 engine_core.workspace = true
 engine_world.workspace = true
 engine_render.workspace = true
+engine_assets.workspace = true
 bevy_ecs.workspace = true
 serde.workspace = true
 serde_json.workspace = true
