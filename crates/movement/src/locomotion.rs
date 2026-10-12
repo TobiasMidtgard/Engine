@@ -17,11 +17,12 @@ use engine_core::transform::look_rotation;
 use engine_world::animation::{AnimationParams, AnimationTrigger, SkeletonPose};
 use engine_world::locomotion::{LocomotionMode, LocomotionState, MoveIntent};
 use engine_world::physics::{
-    CharacterController, CharacterMove, CharacterState, Hit, PhysicsQueries, QueryFilter,
+    CharacterController, CharacterMove, CharacterState, Hit, PhysicsQueries, QueryFilter, Velocity,
 };
-use engine_world::{ContactKind, Gravity, GroundContact, NoiseEvent};
+use engine_world::{ContactKind, Gravity, Ground, GroundContact, NoiseEvent};
 
 use crate::mover::{Dash, DashRequest, Mantle, Mover, WallContact, flat, move_towards};
+use crate::platform::{self, Deck};
 use crate::profile::MovementProfile;
 
 /// Walls are surfaces whose normal is within this of horizontal (|n·up| below it).
@@ -121,14 +122,16 @@ pub(crate) fn adopt_characters(mut commands: Commands, q: Query<Entity, Unadopte
     }
 }
 
-#[allow(clippy::type_complexity)]
+#[allow(clippy::type_complexity, clippy::too_many_arguments)]
 pub(crate) fn step_movers(
     time: Res<Time>,
     gravity: Res<Gravity>,
+    ground: Res<Ground>,
     queries: Res<PhysicsQueries>,
     mut out: Outputs,
     mut filter: Local<QueryFilter>,
     movers: Query<(), With<Mover>>,
+    decks: Query<(&Transform, Option<&Velocity>), Without<Mover>>,
     mut q: Query<(
         Entity,
         &mut Transform,
@@ -193,7 +196,23 @@ pub(crate) fn step_movers(
             movers: &movers,
         };
 
-        let v = step_one(&mut m, p, intent, state, &body, &probe, &mut out, dt);
+        let rate = if world_dt > 0.0 { dt / world_dt } else { 1.0 };
+        let deck = state
+            .ground_entity
+            .filter(|_| state.grounded)
+            .and_then(|g| decks.get(g).ok().map(|(t, vel)| (g, t, vel)))
+            .map(|(g, t, vel)| Deck {
+                entity: g,
+                transform: t,
+                // Per world second (decks run on world time); `rate` is this character's
+                // seconds per world second.
+                velocity: vel
+                    .map(|v| (v.linear + v.angular.cross((pos - t.translation).as_vec3())) / rate),
+            });
+        platform::ride(&mut m, deck, pos, dt);
+        let (state, lift) = on_ground_surface(state, &ground, &body);
+
+        let v = step_one(&mut m, p, intent, &state, &body, &probe, &mut out, dt);
 
         // Facing: combat target, then where the intent looks, then the motion.
         let face = m
@@ -234,14 +253,43 @@ pub(crate) fn step_movers(
         feedback(&mut m, p, &body, v, dt, animated, &mut out);
 
         m.velocity = v;
-        mv.velocity = v;
-        let rate = if world_dt > 0.0 { dt / world_dt } else { 1.0 };
+        // Back up onto the ground surface if the step sank into it.
+        mv.velocity = v + up * (lift / dt);
         loco.mode = m.mode;
-        loco.velocity = v * rate;
+        // The world's frame: the deck's motion plus the character's own on it.
+        loco.velocity = (v + m.platform.map_or(Vec3::ZERO, |d| d.velocity)) * rate;
         loco.grounded = m.grounded;
         loco.stamina = (m.dash_charges / p.dash_charges.max(1) as f32).clamp(0.0, 1.0);
         write_params(&m, &mut params, up);
     }
+}
+
+/// How far above the [`Ground`] surface the feet still count as standing on it, m.
+const GROUND_SNAP: f64 = 0.05;
+
+/// Terrain without colliders: physics reports no ground, but the feet are on (or sank into)
+/// the [`Ground`] surface, so the character stands on it. Returns the state to step with and
+/// how far to lift the character back up, m. Physics backends that collide with the terrain
+/// report the ground themselves and this never applies.
+fn on_ground_surface(state: &CharacterState, ground: &Ground, b: &Body) -> (CharacterState, f32) {
+    if state.grounded || b.up.y < 0.9 {
+        return (*state, 0.0);
+    }
+    let feet = b.pos.y - (b.height * 0.5) as f64;
+    let Some(g) = ground.sample(b.pos) else {
+        return (*state, 0.0);
+    };
+    if feet > g.height + GROUND_SNAP {
+        return (*state, 0.0);
+    }
+    let on = CharacterState {
+        grounded: true,
+        ground_normal: g.normal,
+        ground_entity: None,
+        ground_surface: Some(g.surface),
+        ..*state
+    };
+    (on, (g.height - feet).max(0.0) as f32)
 }
 
 /// One character, one step. Returns the velocity to move with (own time, m/s).
@@ -1054,6 +1102,37 @@ fn smooth01(x: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn feet_on_or_in_the_ground_surface_stand_on_it() {
+        let ground = Ground::default(); // flat at y = 0
+        let body = |y: f64| Body {
+            entity: Entity::PLACEHOLDER,
+            pos: DVec3::new(3.0, y, 4.0),
+            up: Vec3::Y,
+            g: 9.81,
+            radius: 0.35,
+            height: 1.8,
+        };
+        let air = CharacterState::default();
+        // Sank 0.3 m in: standing, and lifted back out.
+        let (s, lift) = on_ground_surface(&air, &ground, &body(0.6));
+        assert!(s.grounded && s.ground_normal == Vec3::Y && s.ground_entity.is_none());
+        assert!((lift - 0.3).abs() < 1e-5);
+        // Just above: standing, nothing to lift.
+        let (s, lift) = on_ground_surface(&air, &ground, &body(0.93));
+        assert!(s.grounded && lift == 0.0);
+        // In the air: unchanged.
+        let (s, _) = on_ground_surface(&air, &ground, &body(1.5));
+        assert!(!s.grounded);
+        // Physics found ground (a collider): its report wins.
+        let on_box = CharacterState {
+            grounded: true,
+            ground_normal: Vec3::new(0.0, 0.8, 0.6),
+            ..Default::default()
+        };
+        assert_eq!(on_ground_surface(&on_box, &ground, &body(0.6)).0, on_box);
+    }
 
     #[test]
     fn turning_is_rate_limited() {

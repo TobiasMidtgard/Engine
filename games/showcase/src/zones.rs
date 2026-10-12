@@ -438,6 +438,22 @@ pub fn demo_views(z: &Zone) -> Vec<View> {
                 .warmup(1.75)
                 .on_arrive("movement.duel", &duel("Pack"))
                 .on_leave("movement.duel", cycle),
+                // Play mode (P): a pilot in front of the camera, locked onto the elite.
+                View::new(
+                    "parkour_play",
+                    "Play mode: your pilot dash-strikes the locked-on elite (press P to play)",
+                    [-8.0, 2.0, -6.0],
+                    [-2.0, 1.0, -17.0],
+                    16.0,
+                )
+                // The capture lands mid-strike (dash 0.2 s, strike from 0.3 s).
+                .warmup(0.0)
+                .on_arrive("movement.duel", &duel("Focus"))
+                .on_arrive("movement.play", r#"{"on": true}"#)
+                .on_arrive("movement.lock_on", r#"{"target": "Elite"}"#)
+                .on_arrive("movement.attack", r#"{"entity": "Pilot", "kind": "dash"}"#)
+                .on_leave("movement.play", r#"{"on": false}"#)
+                .on_leave("movement.duel", cycle),
             ]
         }
         // Each stop restarts the range, so fans, grenades and bullets are at the same moment.

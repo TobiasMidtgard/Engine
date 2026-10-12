@@ -269,7 +269,7 @@ fn at(origin: DVec3, x: f64, y: f64, z: f64) -> DVec3 {
     origin + DVec3::new(x, y, z)
 }
 
-fn spawn_character(
+pub(crate) fn spawn_character(
     commands: &mut Commands,
     name: &str,
     pos: DVec3,
@@ -307,6 +307,8 @@ fn spawn_character(
 
 /// Build the movement showcase around `origin` (ground level). See the module docs.
 pub fn spawn_demo(commands: &mut Commands, origin: DVec3) {
+    // P (the `pilot` action) takes control of a pilot here.
+    commands.insert_resource(crate::play::PlayToggle);
     // Ground under the whole demo (physics only: the game draws its own ground).
     commands.spawn((
         Transform::from_translation(at(origin, 0.0, -0.5, 0.0)),
