@@ -10,6 +10,7 @@ use engine_destruction::*;
 use engine_render::{Mesh, StandardMaterial};
 use engine_world::{
     DamageEvent, DamageKind, EditOp, EditShape, ProjectileTrace, TerrainEdit, WorldPlugin,
+    WorldShift,
 };
 use serde_json::json;
 
@@ -393,5 +394,50 @@ fn the_hill_demo_tunnels_caves_in_builds_and_rebuilds() {
     assert!(
         (rebuilt - start).abs() < 1.0,
         "the loop rebuilt the hill ({start} -> {raised} -> {rebuilt})"
+    );
+}
+
+#[test]
+fn a_world_shift_carries_the_demos_and_falling_debris_along() {
+    let mut app = app();
+    app.add_systems(Startup, |mut commands: Commands| {
+        hill::spawn_voxel_hill(&mut commands, DVec3::new(-50.0, 0.0, 30.0));
+        demo::spawn_demo(&mut commands, DVec3::new(100.0, 0.0, 0.0));
+    });
+    run_secs(&mut app, 0.1);
+    let mut body = debris::DebrisBody::new(10.0, Vec3::splat(0.2), Vec::new(), 0.5);
+    body.velocity = Vec3::new(2.0, 0.0, 0.0);
+    let falling = app
+        .world
+        .spawn((
+            Transform::from_xyz(5.0, 40.0, 5.0),
+            GlobalTransform::from(Transform::from_xyz(5.0, 40.0, 5.0)),
+            body,
+        ))
+        .id();
+    // Re-anchor 1 km along −X into a frame where the old one drifts at 3 m/s along +Z.
+    app.world.write_message(WorldShift {
+        translation: DVec3::new(-1000.0, 0.0, 0.0),
+        velocity: DVec3::new(0.0, 0.0, 3.0),
+        ..WorldShift::IDENTITY
+    });
+    app.update();
+    let hill = app
+        .world
+        .query::<&hill::HillDemo>()
+        .single(&app.world)
+        .unwrap();
+    assert_eq!(hill.origin, DVec3::new(-1050.0, 0.0, 30.0));
+    let demo = app
+        .world
+        .query::<&demo::DestructionDemo>()
+        .single(&app.world)
+        .unwrap();
+    assert_eq!(demo.origin, DVec3::new(-900.0, 0.0, 0.0));
+    let b = app.world.get::<debris::DebrisBody>(falling).unwrap();
+    assert!(
+        (b.velocity.x - 2.0).abs() < 0.1 && (b.velocity.z - 3.0).abs() < 0.1,
+        "falling debris keeps its motion and picks up the frame's ({:?})",
+        b.velocity
     );
 }

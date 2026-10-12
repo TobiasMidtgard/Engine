@@ -262,7 +262,7 @@ pub fn spawn_demos(
             "arena" => ph::arena(commands, lib, z),
             "parkour" => ph::parkour(commands, lib, z),
             "fortress" => engine_destruction::demo::spawn_demo(commands, z.center),
-            "voxel" => ph::voxel(commands, meshes, z, rng),
+            "voxel" => engine_destruction::hill::spawn_voxel_hill(commands, z.center),
             "field" => {
                 engine_fire::demo::spawn_demo(commands, z.center);
                 ph::field_edge(commands, lib, z, rng);
@@ -382,8 +382,22 @@ pub fn demo_views(z: &Zone) -> Vec<View> {
             )
             .warmup(7.0),
         ],
+        "fortress" => destruction_views(engine_destruction::demo::VIEWS),
+        "voxel" => destruction_views(engine_destruction::hill::VIEWS),
         _ => Vec::new(),
     }
+}
+
+/// The destruction demos' viewpoints: each restarts its demo on arrival so its moment plays.
+fn destruction_views(views: &[engine_destruction::DemoView]) -> Vec<View> {
+    views
+        .iter()
+        .map(|v| {
+            View::new(v.key, v.name, v.eye, v.target, v.hour)
+                .warmup(v.warmup_secs)
+                .on_arrive(engine_destruction::RESTART_API, "{}")
+        })
+        .collect()
 }
 
 /// The valley: pads for every zone and the runway, roads between them, the lake and the cave

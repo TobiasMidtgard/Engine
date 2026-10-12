@@ -27,6 +27,7 @@ use engine_core::prelude::*;
 use engine_render::{MeshRenderer, Shape, StandardMaterial};
 use engine_world::{EditOp, EditShape, ProjectileTrace, TerrainEdit, WorldImpulse};
 
+use crate::DemoView;
 use crate::charges::BreachCharge;
 use crate::debris::{Debris, PendingDebris, settle};
 use crate::hits::{Hit, HitQueue};
@@ -63,6 +64,59 @@ pub struct DemoTargets {
     pub gate: Vec<Entity>,
     pub props: Vec<Entity>,
 }
+
+/// The breach range's live moments (the zone's own stop is the overview from
+/// `(-2, 17, -44)` looking at `(-3, 2.5, 4)`).
+pub const VIEWS: &[DemoView] = &[
+    DemoView {
+        key: "fortress_bays",
+        name: "Breach bays: shot, kicked in, burned and blown open",
+        eye: [12.0, 4.5, -22.0],
+        target: [0.0, 1.4, -8.0],
+        hour: 15.0,
+        warmup_secs: 0.2,
+    },
+    DemoView {
+        key: "fortress_thermite",
+        name: "Thermite burning a doorway through rebar concrete",
+        eye: [2.2, 1.7, -13.0],
+        target: [0.0, 1.2, -8.0],
+        hour: 15.0,
+        warmup_secs: 2.0,
+    },
+    DemoView {
+        key: "fortress_charge",
+        name: "A breach charge blowing a wall open",
+        eye: [-9.5, 2.4, -17.0],
+        target: [-13.6, 1.3, -8.0],
+        hour: 15.0,
+        warmup_secs: 3.95,
+    },
+    DemoView {
+        key: "fortress_cliff",
+        name: "A mined cliff caving in",
+        eye: [3.0, 5.0, -7.0],
+        target: [-4.0, 3.5, 12.0],
+        hour: 15.0,
+        warmup_secs: 4.2,
+    },
+    DemoView {
+        key: "fortress_tower",
+        name: "A watchtower in support colors losing its posts",
+        eye: [9.0, 4.5, -5.0],
+        target: [18.0, 3.0, 9.0],
+        hour: 15.0,
+        warmup_secs: 10.1,
+    },
+    DemoView {
+        key: "fortress_arch",
+        name: "A rock arch blown off its foot",
+        eye: [-26.0, 6.0, -4.0],
+        target: [-36.0, 3.5, 16.0],
+        hour: 15.0,
+        warmup_secs: 14.0,
+    },
+];
 
 /// The running showcase script (one per [`spawn_demo`]).
 #[derive(Component, Debug, Clone, Default)]
@@ -753,6 +807,29 @@ pub fn demo_script_system(world: &mut World) {
             *d = demo;
         }
     }
+}
+
+/// Start every [`DestructionDemo`]'s live script over from the beginning: loose debris sinks,
+/// the live walls, cliff, arch, tower and gate are rebuilt. Returns how many demos restarted.
+pub fn restart_demos(world: &mut World) -> usize {
+    let demos: Vec<Entity> = world
+        .query_filtered::<Entity, With<DestructionDemo>>()
+        .iter(world)
+        .collect();
+    for &e in &demos {
+        let Some(mut demo) = world.get::<DestructionDemo>(e).cloned() else {
+            continue;
+        };
+        run_step(world, &mut demo, Step::Clear);
+        run_step(world, &mut demo, Step::Reset);
+        demo.time = 0.0;
+        demo.next = 0;
+        demo.cycle += 1;
+        if let Some(mut d) = world.get_mut::<DestructionDemo>(e) {
+            *d = demo;
+        }
+    }
+    demos.len()
 }
 
 fn run_step(world: &mut World, demo: &mut DestructionDemo, step: Step) {

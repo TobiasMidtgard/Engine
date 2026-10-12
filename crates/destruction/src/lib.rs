@@ -14,6 +14,7 @@ pub mod hits;
 pub mod material;
 pub mod meshing;
 pub mod props;
+pub mod shift;
 pub mod structure;
 pub mod sync;
 pub mod textures;
@@ -37,6 +38,22 @@ pub use material::{DestructibleMaterial, DestructionMaterials, MaterialProps};
 pub use structure::{Fracturable, FractureShape, PieceState, ShowSupport, StructuralPiece};
 pub use voxel::{VoxelShape, VoxelState, VoxelVolume};
 pub use wall::{DestructibleWall, WallAnchors, WallState};
+
+/// A suggested viewpoint on a demo (camera bookmark or screenshot-tour stop), relative to the
+/// demo's origin. Call `destruction.demo_restart` on arrival, then wait `warmup_secs` (a
+/// tour that settles 0.4 s before its warm-up is already counted in) to see the named moment.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct DemoView {
+    pub key: &'static str,
+    pub name: &'static str,
+    pub eye: [f64; 3],
+    pub target: [f64; 3],
+    pub hour: f32,
+    pub warmup_secs: f32,
+}
+
+/// The function a viewpoint calls on arrival so its moment plays from the start.
+pub const RESTART_API: &str = "destruction.demo_restart";
 
 /// Who moves big debris chunks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -231,6 +248,10 @@ impl Plugin for DestructionPlugin {
                 )
                     .chain()
                     .in_set(UpdateSet::Logic),
+            )
+            .add_systems(
+                PostUpdate,
+                shift::shift_system.in_set(engine_world::WorldShiftSet::Apply),
             );
         register_api(app);
     }
@@ -546,6 +567,17 @@ fn register_api(app: &mut App) {
                 n += 1;
             }
             Ok(json!({"cleared": n}))
+        },
+    );
+    app.register_api(
+        "destruction.demo_restart",
+        "Start the destruction demos (the breach range and the dig-and-build hill) over from the \
+         beginning of their loops, so a camera arriving now sees every step.",
+        "{}",
+        |world, _| {
+            let range = demo::restart_demos(world);
+            let hills = hill::restart_hills(world);
+            Ok(json!({"range": range, "hills": hills}))
         },
     );
     app.register_api(
