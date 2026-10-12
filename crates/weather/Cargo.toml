@@ -15,4 +15,6 @@ serde.workspace = true
 serde_json.workspace = true
 
 [dev-dependencies]
+# The weather tour registers procedural meshes and textures (a core crate, allowed for modules).
+engine_assets.workspace = true
 image.workspace = true
