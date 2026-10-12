@@ -17,8 +17,12 @@ cargo run -p hello -- --headless --frames 4   # offscreen, writes screenshots/he
 
 Before every push, run `cargo fmt --all`, the clippy line above, and the tests of each crate
 you changed and of every crate that uses what you changed (shared shaders, contracts and
-assets reach other modules; `cargo test --workspace` covers all). CI runs all of it on every
-pull request, and each failed run emails the repository owner.
+assets reach other modules; `cargo test --workspace` covers all). CI runs all of it on pull
+requests that are ready for review (draft pull requests show the check as skipped) and on main
+after each merge. Actions minutes are limited and each failed run emails the repository owner,
+so iterate on a draft with local checks, then mark it ready and wait for "Format, lint and test"
+to succeed on the head commit before merging. GitHub does not block a merge on a red or missing
+check here, so that wait is yours.
 
 Headless GPU tests and screenshots need a GPU or a software Vulkan driver. On Debian/Ubuntu
 containers: `apt-get install -y mesa-vulkan-drivers` (lavapipe). Tests that need a GPU must
