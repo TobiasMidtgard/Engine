@@ -102,7 +102,12 @@ fn cloud_density(p: vec3<f32>, h: f32, w: vec4<f32>, with_detail: bool) -> f32 {
     let billows = s.g * 0.7 + s.b * 0.3;
     let hb = h01 + smoothstep(0.35, 0.9, w.g) * 0.35 * (0.7 - billows);
     if (hb >= 1.0) { return 0.0; }
-    let profile = height_profile(saturate(hb), w.g);
+    // Raining decks (nimbostratus, the bases of storms) hang in ragged lumps instead of one
+    // flat ceiling; fair-weather heaps keep their flat bases.
+    let ragged = smoothstep(0.5, 0.9, w.r) * smoothstep(0.02, 0.15, w.b)
+        * (1.0 - smoothstep(0.55, 0.85, w.g));
+    let carve = ragged * (1.0 - billows) * 380.0 / thickness;
+    let profile = height_profile(saturate(hb), w.g) * smoothstep(carve, carve + 0.06, h01);
     let fbm = s.g * 0.625 + s.b * 0.25 + s.a * 0.125;
     let shape = remap(s.r, fbm - 1.0, 1.0, 0.0, 1.0);
     var d = saturate(remap(shape * profile, 1.0 - cov, 1.0, 0.0, 1.0)) * cov;
@@ -300,7 +305,9 @@ fn march_clouds(dir: vec3<f32>, steps: i32, light_steps: i32, jitter: f32) -> Cl
 
 // Rain hanging below the clouds (seen from a distance as grey curtains). Starts a little
 // away from the camera: rain right around the player is particles and fog.
-fn rain_shafts(dir: vec3<f32>, max_t: f32) -> CloudResult {
+// `deck` is the light under the clouds the ray meets (their underside's color), when it
+// meets any.
+fn rain_shafts(dir: vec3<f32>, max_t: f32, deck: vec4<f32>) -> CloudResult {
     var r: CloudResult;
     r.radiance = vec3(0.0);
     r.transmittance = 1.0;
@@ -314,13 +321,16 @@ fn rain_shafts(dir: vec3<f32>, max_t: f32) -> CloudResult {
     if (up.y > 0.0) { t1 = min(t1, up.y); }
     let ground = ray_shell(vec3(0.0), h0, dir, 0.0);
     if (ground.x > 0.0) { t1 = min(t1, ground.x); }
-    let t0 = 1500.0;
+    let t0 = 400.0;
     if (t1 <= t0) { return r; }
-    let steps = 10;
+    let steps = 12;
     let dt = (t1 - t0) / f32(steps);
     let sky = atmosphere(vec3(0.0), vec3<f32>(0.0, 1.0, 0.0), 1e12, 6).radiance * clouds.light.rgb;
     // Rain is lit by the grey light under the clouds and a little by the sun from the side.
-    let lit = sky * 0.55 + clouds.light.rgb * saturate(clouds.light_dir.y) * INV_PI * 0.06 + frame.ambient.rgb;
+    let open_sky = sky * 0.55 + clouds.light.rgb * saturate(clouds.light_dir.y) * INV_PI * 0.06 + frame.ambient.rgb;
+    // Under a deck the rain sees the deck above and the darker ground below: a little
+    // darker than the deck's underside.
+    let lit = mix(open_sky, deck.rgb * 0.7 + frame.ambient.rgb, deck.a);
     var t = t0 + dt * 0.5;
     var hit = false;
     for (var i = 0; i < steps; i++) {
@@ -329,7 +339,8 @@ fn rain_shafts(dir: vec3<f32>, max_t: f32) -> CloudResult {
         let mm_h = w.b * 50.0;
         if (mm_h > 0.05) {
             // Visibility in rain: ~10 km at 1 mm/h, ~1 km at 50 mm/h.
-            let sigma = 0.00025 * pow(mm_h, 0.65);
+            // Fades in with distance: the rain right around the player is particles.
+            let sigma = 0.00025 * pow(mm_h, 0.65) * smoothstep(400.0, 2500.0, t);
             let tr = exp(-sigma * dt);
             r.radiance += r.transmittance * (1.0 - tr) * lit;
             if (!hit) {
@@ -351,7 +362,9 @@ fn rain_shafts(dir: vec3<f32>, max_t: f32) -> CloudResult {
 // Clouds plus rain shafts in front of them.
 fn clouds_and_rain(dir: vec3<f32>, steps: i32, light_steps: i32, jitter: f32) -> CloudResult {
     var c = march_clouds(dir, steps, light_steps, jitter);
-    let s = rain_shafts(dir, c.front);
+    let cover = 1.0 - c.transmittance;
+    let deck = vec4<f32>(c.radiance / max(cover, 1e-3), smoothstep(0.05, 0.6, cover));
+    let s = rain_shafts(dir, c.front, deck);
     if (s.transmittance >= 1.0) { return c; }
     c.radiance = s.radiance + c.radiance * s.transmittance;
     c.front = min(c.front, s.front);
