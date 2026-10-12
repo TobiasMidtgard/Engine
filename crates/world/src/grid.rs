@@ -135,11 +135,18 @@ impl<T: Copy> Grid2<T> {
         // Whole cells from the current origin, so values stay where they were in the world
         // even when the origin is off the global cell lattice (after a world shift).
         let shift = ((center - half - self.origin) / self.cell as f64).round();
-        let (dx, dy) = (shift.x as i32, shift.y as i32);
-        if dx == 0 && dy == 0 {
+        if shift == DVec2::ZERO {
             return false;
         }
         let new_origin = self.origin + shift * self.cell as f64;
+        // A jump past the whole grid (a trip to another planet) keeps nothing, and its cell
+        // count may not even fit in an i32.
+        if shift.x.abs() >= self.width as f64 || shift.y.abs() >= self.height as f64 {
+            self.data.fill(self.default);
+            self.origin = new_origin;
+            return true;
+        }
+        let (dx, dy) = (shift.x as i32, shift.y as i32);
         let mut next = vec![self.default; self.data.len()];
         for y in 0..self.height as i32 {
             for x in 0..self.width as i32 {
