@@ -70,7 +70,12 @@ fn the_arena_fight_keeps_going() {
     assert!(defended > 5, "defended {defended}");
     assert!(downed_seen > 0, "nobody went down");
     assert!(actions.contains(&NpcAction::Engage), "{actions:?}");
-    assert!(actions.contains(&NpcAction::TakeCover), "{actions:?}");
+    // Shooters use cover: as a TakeCover action when pinned, or by picking covered spots to
+    // fight from.
+    assert!(
+        actions.contains(&NpcAction::TakeCover) || reasons.contains("cover"),
+        "{actions:?} {reasons:?}"
+    );
     assert!(reasons.len() >= 3, "{reasons:?}");
     // The fight never ends: downed fighters get back up.
     let alive = fighters

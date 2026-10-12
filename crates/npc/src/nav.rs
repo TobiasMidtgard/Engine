@@ -12,6 +12,7 @@
 
 use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashMap};
+use std::hash::{BuildHasherDefault, Hasher};
 
 use engine_core::prelude::*;
 use engine_world::{Ground, Water};
@@ -20,6 +21,34 @@ use crate::world_model::TacticalWorld;
 
 /// Cells per chunk side.
 const CHUNK: i32 = 32;
+
+/// Hashes chunk coordinates with one multiply-xorshift per value (path searches look chunks up
+/// thousands of times per step, and the default hasher is built for untrusted keys).
+#[derive(Default)]
+struct ChunkHasher(u64);
+
+impl Hasher for ChunkHasher {
+    fn finish(&self) -> u64 {
+        self.0
+    }
+
+    fn write(&mut self, bytes: &[u8]) {
+        for &b in bytes {
+            self.write_u64(b as u64);
+        }
+    }
+
+    fn write_i32(&mut self, v: i32) {
+        self.write_u64(v as u32 as u64);
+    }
+
+    fn write_u64(&mut self, v: u64) {
+        let x = (self.0.rotate_left(26) ^ v).wrapping_mul(0x9e37_79b9_7f4a_7c15);
+        self.0 = x ^ (x >> 29);
+    }
+}
+
+type ChunkMap = HashMap<(i32, i32), Chunk, BuildHasherDefault<ChunkHasher>>;
 
 /// Navigation settings (one grid for every agent of roughly human size).
 #[derive(Resource, Debug, Clone, Copy, Serialize, Deserialize)]
@@ -63,7 +92,7 @@ struct Chunk {
 #[derive(Resource, Default)]
 pub struct NavGrid {
     pub settings: NavSettings,
-    chunks: HashMap<(i32, i32), Chunk>,
+    chunks: ChunkMap,
     generation: u64,
     /// Chunks built since startup (diagnostics).
     pub chunks_built: u64,
@@ -245,9 +274,12 @@ impl NavCtx<'_> {
 
     fn cell(&mut self, x: i32, z: i32) -> (f64, bool) {
         let key = (x.div_euclid(CHUNK), z.div_euclid(CHUNK));
+        let i = (z.rem_euclid(CHUNK) * CHUNK + x.rem_euclid(CHUNK)) as usize;
+        if let Some(chunk) = self.grid.chunks.get(&key) {
+            return (chunk.base + chunk.h[i] as f64, chunk.walk[i]);
+        }
         self.ensure_chunk(key);
         let chunk = &self.grid.chunks[&key];
-        let i = (z.rem_euclid(CHUNK) * CHUNK + x.rem_euclid(CHUNK)) as usize;
         (chunk.base + chunk.h[i] as f64, chunk.walk[i])
     }
 
@@ -297,13 +329,22 @@ impl NavCtx<'_> {
         let z0 = z0
             .max(a.1 - d + margin.min(d - 1) + 1)
             .min(a.1 - margin.min(d - 1));
-        let mut h = Vec::with_capacity((w * d) as usize);
-        let mut walk = Vec::with_capacity((w * d) as usize);
-        for z in z0..z0 + d {
-            for x in x0..x0 + w {
-                let (hh, ok) = self.cell(x, z);
-                h.push(hh);
-                walk.push(ok);
+        let mut h = vec![0.0; (w * d) as usize];
+        let mut walk = vec![false; (w * d) as usize];
+        // Copy chunk by chunk: one map lookup per chunk, not per cell.
+        for kz in z0.div_euclid(CHUNK)..=(z0 + d - 1).div_euclid(CHUNK) {
+            for kx in x0.div_euclid(CHUNK)..=(x0 + w - 1).div_euclid(CHUNK) {
+                self.ensure_chunk((kx, kz));
+                let chunk = &self.grid.chunks[&(kx, kz)];
+                let (cx, cz) = (kx * CHUNK, kz * CHUNK);
+                for z in cz.max(z0)..(cz + CHUNK).min(z0 + d) {
+                    for x in cx.max(x0)..(cx + CHUNK).min(x0 + w) {
+                        let ci = ((z - cz) * CHUNK + (x - cx)) as usize;
+                        let wi = ((z - z0) * w + (x - x0)) as usize;
+                        h[wi] = chunk.base + chunk.h[ci] as f64;
+                        walk[wi] = chunk.walk[ci];
+                    }
+                }
             }
         }
         Window {
@@ -330,6 +371,11 @@ impl NavCtx<'_> {
         let s = self.grid.settings;
         let start = self.cell_of(from);
         let goal = self.cell_of(to);
+        // Most trips in open ground are a straight walk: skip the search for those.
+        if let Some(h) = self.straight_walk(from, to, extra_cost) {
+            out.push(DVec3::new(to.x, h, to.z));
+            return PathStatus::Complete;
+        }
         let win = self.window(start, goal, 24);
         let Some(mut si) = win.idx(start.0, start.1) else {
             return PathStatus::Failed;
@@ -521,6 +567,54 @@ impl NavCtx<'_> {
         } else {
             PathStatus::Partial
         }
+    }
+
+    /// If one can walk straight from `from` to `to` over free cells (walkable, connected, no
+    /// extra cost, with clearance either side), the height of the goal cell.
+    fn straight_walk(
+        &mut self,
+        from: DVec3,
+        to: DVec3,
+        extra_cost: &mut dyn FnMut(DVec3) -> f32,
+    ) -> Option<f64> {
+        let s = self.grid.settings;
+        let (a, b) = (self.cell_of(from), self.cell_of(to));
+        let (dx, dz) = (b.0 - a.0, b.1 - a.1);
+        let n = dx.abs().max(dz.abs()) * 2;
+        if n > s.max_window {
+            return None;
+        }
+        let (h0, ok) = self.cell(a.0, a.1);
+        if !ok || (h0 - from.y).abs() > 1.2 {
+            return None;
+        }
+        let len = ((dx * dx + dz * dz) as f32).sqrt().max(1e-3);
+        let (px, pz) = (-(dz as f32) / len, dx as f32 / len);
+        let mut prev = (a, h0);
+        for k in 1..=n.max(1) {
+            let t = k as f32 / n.max(1) as f32;
+            for off in [-0.35f32, 0.35, 0.0] {
+                let x = (a.0 as f32 + 0.5 + dx as f32 * t + px * off).floor() as i32;
+                let z = (a.1 as f32 + 0.5 + dz as f32 * t + pz * off).floor() as i32;
+                let (h, ok) = self.cell(x, z);
+                if !ok {
+                    return None;
+                }
+                if off == 0.0 && (x, z) != prev.0 {
+                    let diagonal = x != prev.0.0 && z != prev.0.1;
+                    let limit = if diagonal { s.max_step * 1.42 } else { s.max_step } as f64;
+                    if (h - prev.1).abs() > limit {
+                        return None;
+                    }
+                    let (cx, cz) = self.cell_center(x, z);
+                    if extra_cost(DVec3::new(cx, h, cz)) != 0.0 {
+                        return None;
+                    }
+                    prev = ((x, z), h);
+                }
+            }
+        }
+        (prev.0 == b && (to.y - prev.1).abs() < 1.0).then_some(prev.1)
     }
 
     /// Can one walk straight between window cells `a` and `b` (every crossed cell walkable
