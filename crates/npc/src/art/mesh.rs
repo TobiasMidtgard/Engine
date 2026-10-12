@@ -1,6 +1,7 @@
 //! Mesh builders for procedural props and architecture.
 //!
-//! * [`rounded_box`]: a box with rounded edges (cut stone, planks, iron straps).
+//! * [`rounded_box`]: a box with rounded edges (cut stone, planks, iron straps), with hidden
+//!   faces left out; [`box_lid`] closes the flat middle of one that is only partly hidden.
 //! * [`surface`]: any parametric surface `f(u, v)` (cloth, sand, curved panels), with normals
 //!   from its derivatives; [`lathe`] turns a profile around Y (columns, drums, bowls, finials)
 //!   with an optional angular modulation (flutes, ribs); [`tube`] sweeps a circle along a path
@@ -9,7 +10,8 @@
 //!   with per-face projected UVs and baked occlusion.
 //! * Editing: [`append`] (merge with a transform), [`deform`] (bend or shear, normals follow),
 //!   [`displace`] (push along normals), [`smooth_normals`], [`paint`] (vertex colors).
-//! * [`bake_par`]: texture baking spread over all cores, and [`par_map`].
+//! * [`bake_par`]: texture baking spread over all cores, [`image_par`] for single images, and
+//!   [`par_map`].
 //!
 //! Texture coordinates are in meters unless a builder says otherwise, so tiling materials keep
 //! their scale everywhere: set the material's `uv_scale` to one over the meters a texture
@@ -19,7 +21,7 @@ use std::collections::HashMap;
 use std::f32::consts::{FRAC_PI_4, TAU};
 
 use engine_core::prelude::*;
-use engine_render::{Mesh, Vertex};
+use engine_render::{Image, Mesh, Vertex};
 
 use super::tex::{Texel, TextureSet};
 
@@ -176,7 +178,9 @@ pub struct BoxOpts {
     /// Largest grid spacing on the flat parts, meters (0 = no subdivision). Subdivide when the
     /// box will be bent or displaced.
     pub step: f32,
-    /// Faces to leave out because they are hidden (`NEG_Y | POS_Z`); their edges stay rounded.
+    /// Faces to leave out because they are hidden (`NEG_Y | POS_Z`). The rounded edges along
+    /// a left-out face wrap all the way round onto its plane, so where the box sits on (or
+    /// against) something no slot opens into its hollow inside.
     pub skip: u8,
 }
 
@@ -216,10 +220,33 @@ impl BoxOpts {
     }
 }
 
+/// The [`BoxOpts::skip`] bit of the face whose outward normal is the axis direction `d`.
+fn face_bit(d: Vec3) -> u8 {
+    match (d.x, d.y, d.z) {
+        (x, _, _) if x > 0.5 => POS_X,
+        (x, _, _) if x < -0.5 => NEG_X,
+        (_, y, _) if y > 0.5 => POS_Y,
+        (_, y, _) if y < -0.5 => NEG_Y,
+        (_, _, z) if z > 0.5 => POS_Z,
+        _ => NEG_Z,
+    }
+}
+
 /// A box with half extents `half`, centered on the origin, with rounded edges and corners.
 /// Texture coordinates are per face in meters (looking at a face from outside, u goes right
 /// and v down), like the box projection of [`sdf_mesh`].
 pub fn rounded_box(half: Vec3, o: BoxOpts) -> Mesh {
+    box_faces(half, o, !o.skip, false)
+}
+
+/// The flat middles of the left-out `faces` of a [`rounded_box`] with the same `half` and `o`
+/// (whose rims wrap round onto them): two triangles (or the step grid) that close a face
+/// which is only partly hidden, such as the underside of a coping overhanging its wall.
+pub fn box_lid(half: Vec3, o: BoxOpts, faces: u8) -> Mesh {
+    box_faces(half, o, faces, true)
+}
+
+fn box_faces(half: Vec3, o: BoxOpts, which: u8, flat_only: bool) -> Mesh {
     let half = half.max(Vec3::splat(1e-4));
     let r = o.radius.clamp(0.0, half.min_element() * 0.95);
     let inner = half - Vec3::splat(r);
@@ -260,19 +287,40 @@ pub fn rounded_box(half: Vec3, o: BoxOpts) -> Mesh {
     ];
     let mut m = Mesh::default();
     for (n, u, v, bit) in faces {
-        if o.skip & bit != 0 {
+        if which & bit == 0 {
             continue;
         }
         let hn = n.abs().dot(half);
-        let tu = ticks(u.abs().dot(half));
-        let tv = ticks(v.abs().dot(half));
+        let mut tu = ticks(u.abs().dot(half));
+        let mut tv = ticks(v.abs().dot(half));
+        if flat_only {
+            let (iu, iv) = (u.abs().dot(inner), v.abs().dot(inner));
+            tu.retain(|t| t.abs() <= iu + 1e-6);
+            tv.retain(|t| t.abs() <= iv + 1e-6);
+        }
         let base = m.vertices.len() as u32;
         for &b in &tv {
             for &a in &tu {
                 let p = n * hn + u * a + v * b;
                 let (pos, normal) = if r > 0.0 {
                     let q = p.clamp(-inner, inner);
-                    let dir = (p - q).normalize_or(n);
+                    let d = p - q;
+                    // A face covers half of each rounded edge, its neighbor the other half;
+                    // next to a left-out neighbor it covers the whole quarter round.
+                    let (dn, mut scale_n, mut wrapped) = (d.dot(n), 1.0, d);
+                    for (axis, c) in [(u, a), (v, b)] {
+                        let toward = axis * c.signum();
+                        if c.abs() > axis.abs().dot(inner) + 1e-6 && o.skip & face_bit(toward) != 0
+                        {
+                            let dt = d.dot(toward);
+                            let len = (dn * dn + dt * dt).sqrt();
+                            let ang = 2.0 * dt.atan2(dn);
+                            scale_n *= ang.cos().max(0.0) * len / dn;
+                            wrapped += toward * (len * ang.sin() - dt);
+                        }
+                    }
+                    wrapped += n * (dn * scale_n - dn);
+                    let dir = wrapped.normalize_or(n);
                     (q + dir * r, dir)
                 } else {
                     (p, n)
@@ -810,25 +858,135 @@ pub fn par_map<T: Send>(n: usize, f: impl Fn(usize) -> T + Sync) -> Vec<T> {
     out.into_iter().flatten().collect()
 }
 
-/// [`TextureSet::bake`] with the texels computed on all cores.
+fn srgb_exact(linear: f32) -> u8 {
+    let c = linear.clamp(0.0, 1.0);
+    let s = if c <= 0.003_130_8 {
+        c * 12.92
+    } else {
+        1.055 * c.powf(1.0 / 2.4) - 0.055
+    };
+    (s * 255.0 + 0.5) as u8
+}
+
+/// Linear 0..1 to an sRGB byte through a table (within one step of the exact curve).
+fn srgb_u8(linear: f32) -> u8 {
+    const N: usize = 8192;
+    static TABLE: std::sync::OnceLock<Vec<u8>> = std::sync::OnceLock::new();
+    let table = TABLE.get_or_init(|| {
+        (0..N)
+            .map(|i| srgb_exact(i as f32 / (N - 1) as f32))
+            .collect()
+    });
+    table[(linear.clamp(0.0, 1.0) * (N - 1) as f32 + 0.5) as usize]
+}
+
+fn unorm(v: f32) -> u8 {
+    (v.clamp(0.0, 1.0) * 255.0 + 0.5) as u8
+}
+
+/// An sRGB image with straight alpha, rows computed on all cores: `f(u, v)` (texel centers,
+/// 0..1, v down the rows) gives linear RGB and alpha. Its mip chain is built too.
+pub fn image_par(w: u32, h: u32, f: impl Fn(Vec2) -> Vec4 + Sync) -> Image {
+    let (wn, hn) = (w.max(1) as usize, h.max(1) as usize);
+    let rows = par_map(hn, |y| {
+        let mut row = Vec::with_capacity(wn * 4);
+        for x in 0..wn {
+            let c = f(Vec2::new(
+                (x as f32 + 0.5) / wn as f32,
+                (y as f32 + 0.5) / hn as f32,
+            ));
+            row.extend_from_slice(&[srgb_u8(c.x), srgb_u8(c.y), srgb_u8(c.z), unorm(c.w)]);
+        }
+        row
+    });
+    let mut image = Image::new(w, h, rows.concat(), true);
+    image.generate_mips();
+    image
+}
+
+/// [`TextureSet::bake`] spread over all cores (texels, the three images and their mip
+/// chains), with the same encoding: sRGB albedo, a tangent-space normal map from Sobel slopes
+/// of the height (green up), and linear ORM.
 pub fn bake_par(size: u32, meters: f32, f: impl Fn(Vec2) -> Texel + Sync) -> TextureSet {
     let n = size.max(1) as usize;
-    let rows = par_map(n, |y| {
-        (0..n)
+    let rows: Vec<(Vec<Texel>, Vec<f32>)> = par_map(n, |y| {
+        let row: Vec<Texel> = (0..n)
             .map(|x| {
                 f(Vec2::new(
                     (x as f32 + 0.5) / n as f32,
                     (y as f32 + 0.5) / n as f32,
                 ))
             })
-            .collect::<Vec<Texel>>()
+            .collect();
+        let heights = row.iter().map(|t| t.height).collect();
+        (row, heights)
     });
-    let texels: Vec<Texel> = rows.into_iter().flatten().collect();
-    TextureSet::bake(size, meters, |uv| {
-        let x = ((uv.x * n as f32) as usize).min(n - 1);
-        let y = ((uv.y * n as f32) as usize).min(n - 1);
-        texels[y * n + x]
-    })
+    let inv = 1.0 / (8.0 * meters / n as f32);
+    let packed = par_map(n, |y| {
+        let (mut a, mut nm, mut o) = (
+            Vec::with_capacity(n * 4),
+            Vec::with_capacity(n * 4),
+            Vec::with_capacity(n * 4),
+        );
+        // Rows above and below (wrapping), for the Sobel slopes.
+        let (r0, r1, r2) = (&rows[(y + n - 1) % n].1, &rows[y].1, &rows[(y + 1) % n].1);
+        for (x, t) in rows[y].0.iter().enumerate() {
+            a.extend_from_slice(&[
+                srgb_u8(t.albedo.x),
+                srgb_u8(t.albedo.y),
+                srgb_u8(t.albedo.z),
+                255,
+            ]);
+            let (xm, xp) = (
+                if x == 0 { n - 1 } else { x - 1 },
+                if x + 1 == n { 0 } else { x + 1 },
+            );
+            let dx = (r0[xp] + 2.0 * r1[xp] + r2[xp] - r0[xm] - 2.0 * r1[xm] - r2[xm]) * inv;
+            let dy = (r2[xm] + 2.0 * r2[x] + r2[xp] - r0[xm] - 2.0 * r0[x] - r0[xp]) * inv;
+            let nrm = Vec3::new(-dx, dy, 1.0).normalize();
+            nm.extend_from_slice(&[
+                unorm(nrm.x * 0.5 + 0.5),
+                unorm(nrm.y * 0.5 + 0.5),
+                unorm(nrm.z * 0.5 + 0.5),
+                255,
+            ]);
+            o.extend_from_slice(&[
+                unorm(t.occlusion),
+                unorm(t.roughness),
+                unorm(t.metallic),
+                255,
+            ]);
+        }
+        (a, nm, o)
+    });
+    drop(rows);
+    let mut data = [
+        Vec::with_capacity(n * n * 4),
+        Vec::with_capacity(n * n * 4),
+        Vec::with_capacity(n * n * 4),
+    ];
+    for (a, nm, o) in packed {
+        data[0].extend(a);
+        data[1].extend(nm);
+        data[2].extend(o);
+    }
+    let [a, nm, o] = data;
+    let mut images = [
+        Image::new(size, size, a, true),
+        Image::new(size, size, nm, false),
+        Image::new(size, size, o, false),
+    ];
+    std::thread::scope(|s| {
+        for image in images.iter_mut() {
+            s.spawn(move || image.generate_mips());
+        }
+    });
+    let [albedo, normal, orm] = images;
+    TextureSet {
+        albedo,
+        normal,
+        orm,
+    }
 }
 
 #[cfg(test)]
@@ -868,10 +1026,62 @@ mod tests {
             .map(|v| Vec3::from(v.position).length())
             .fold(0.0, f32::max);
         assert!(far < half.length() - 0.01);
-        let skipped = rounded_box(half, BoxOpts::round(0.05).skip(NEG_Y));
+        let skipped = rounded_box(half, BoxOpts::round(0.05).skip(NEG_Y | POS_Z));
         assert!(
             skipped.triangle_count() < rounded_box(half, BoxOpts::round(0.05)).triangle_count()
         );
+        // Along the left-out faces the edges wrap onto their planes, so the open rims lie on
+        // them (no slot into the hollow box where it sits on something).
+        assert_eq!(wound_out(&skipped), 0);
+        let b = skipped.aabb();
+        assert!(
+            b.min.abs_diff_eq(-half, 1e-4) && b.max.abs_diff_eq(half, 1e-4),
+            "{b:?}"
+        );
+        let rim = |p: Vec3| p.y < -half.y + 1e-4 || p.z > half.z - 1e-4;
+        let on_rim = skipped
+            .vertices
+            .iter()
+            .filter(|v| rim(Vec3::from(v.position)))
+            .count();
+        assert!(on_rim >= 12, "{on_rim}");
+        let o = BoxOpts::round(0.05).skip(NEG_Y);
+        let lid = box_lid(half, o, NEG_Y);
+        assert_eq!(lid.triangle_count(), 2);
+        assert_eq!(wound_out(&lid), 0);
+        assert!(
+            lid.vertices
+                .iter()
+                .all(|v| (v.position[1] + half.y).abs() < 1e-5 && v.normal[1] < -0.999)
+        );
+    }
+
+    #[test]
+    fn bake_par_matches_the_serial_bake() {
+        let f = |uv: Vec2| Texel {
+            albedo: Vec3::new(uv.x, uv.y, 0.5 * (uv.x + uv.y)),
+            height: 0.01 * (uv.x * 12.0).sin() * (uv.y * 7.0).cos() + 0.004 * uv.y * uv.y,
+            roughness: uv.x,
+            metallic: uv.y,
+            occlusion: 1.0 - 0.5 * uv.x * uv.y,
+        };
+        let (a, b) = (TextureSet::bake(32, 2.0, f), bake_par(32, 2.0, f));
+        for (x, y) in [
+            (&a.albedo, &b.albedo),
+            (&a.normal, &b.normal),
+            (&a.orm, &b.orm),
+        ] {
+            assert_eq!((x.width, x.height, x.srgb), (y.width, y.height, y.srgb));
+            // The parallel bake's sRGB table is within one step of the exact curve.
+            let worst = x
+                .data
+                .iter()
+                .zip(&y.data)
+                .map(|(p, q)| p.abs_diff(*q))
+                .max();
+            assert!(worst <= Some(1), "{worst:?}");
+            assert_eq!(x.mips.len(), y.mips.len());
+        }
     }
 
     #[test]
