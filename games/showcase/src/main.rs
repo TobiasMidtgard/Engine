@@ -7,11 +7,18 @@
 //! cargo run -p showcase --release -- --headless --tour plaza,orbit
 //! ```
 //!
-//! Each zone shows placeholder primitives until its module ships a `demo::spawn_demo`.
+//! The map is a valley ringed by snowy mountains: a village around the material plaza, woods,
+//! a lake, and one zone per engine feature. Each zone shows placeholder content until its module
+//! ships a `demo::spawn_demo` (see `zones.rs`); `TEST_CASES.md` lists every test case and its
+//! owner.
 
 mod camera;
 mod day_cycle;
+mod landscape;
+mod meshgen;
+mod placeholders;
 mod places;
+mod scenery;
 mod tour;
 mod zones;
 
@@ -50,7 +57,10 @@ fn main() {
             "Showcase clock: hour of day and how fast it runs.",
         )
         .add_systems(Startup, setup)
-        .add_systems(Update, (camera::fly, day_cycle::advance).chain());
+        .add_systems(
+            Update,
+            (camera::fly, day_cycle::advance, scenery::update_lods).chain(),
+        );
     register_apis(&mut app);
 
     let args: Vec<String> = std::env::args().collect();
@@ -64,12 +74,46 @@ fn main() {
     app.run();
 }
 
-fn setup(mut commands: Commands, config: Res<EngineConfig>, mut atmosphere: ResMut<Atmosphere>) {
-    // The planet beyond the map is grassland too, so the map's edge blends into it.
-    atmosphere.ground_color = [0.09, 0.18, 0.04];
-    zones::spawn_world(&mut commands, config.seed);
+fn setup(
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut images: ResMut<Assets<Image>>,
+    (mut atmosphere, mut settings, mut fog): (
+        ResMut<Atmosphere>,
+        ResMut<RenderSettings>,
+        ResMut<FogSettings>,
+    ),
+    config: Res<EngineConfig>,
+) {
+    let t0 = std::time::Instant::now();
+    // The planet beyond the terrain is grassland too, so the far edge blends into it.
+    atmosphere.ground_color = [0.07, 0.13, 0.04];
+    // Mountains a few km away should still be in the shadow maps' reach for the valley.
+    settings.shadow_distance = settings.shadow_distance.max(400.0);
+    // Clear mountain air: a light valley haze (the weather module drives this later).
+    fog.density = 0.00012;
+
+    let land = landscape::shared().clone();
+    commands.insert_resource(engine::world::Ground(std::sync::Arc::new(
+        landscape::LandscapeGround(land.clone()),
+    )));
+    let lib = scenery::build_library(&mut meshes, &mut materials, &mut images);
+    let mut rng = Rng::new(config.seed);
+    scenery::spawn_terrain(&mut commands, &mut meshes, &lib, &land);
+    scenery::spawn_woods(&mut commands, &lib, &land, &mut rng);
+    scenery::spawn_meadows(&mut commands, &lib, &land, &mut rng);
+    scenery::spawn_farms(&mut commands, &lib, &land, &mut rng);
+    scenery::spawn_rocks(&mut commands, &lib, &land, &mut rng);
+    scenery::spawn_village(&mut commands, &lib, &land, &mut rng);
+    zones::spawn_demos(&mut commands, &mut meshes, &lib, &land, &mut rng);
+    zones::moon(&mut commands);
     camera::spawn_camera(&mut commands);
     day_cycle::spawn_sun(&mut commands);
+    engine::core::log::info!(
+        "showcase world built in {:.1} s",
+        t0.elapsed().as_secs_f32()
+    );
 }
 
 fn register_apis(app: &mut App) {
