@@ -635,7 +635,7 @@ mod tests {
         assert!(closed(&m));
         let bb = m.aabb();
         assert!(
-            (Vec3::from(bb.max) - Vec3::new(0.5, 0.3, 0.2))
+            (bb.max - Vec3::new(0.5, 0.3, 0.2))
                 .abs()
                 .max_element()
                 < 1e-5
