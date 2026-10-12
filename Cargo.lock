@@ -900,6 +900,7 @@ dependencies = [
  "engine_core",
  "engine_render",
  "engine_world",
+ "gltf",
  "image",
  "serde",
  "serde_json",

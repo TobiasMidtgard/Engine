@@ -279,7 +279,6 @@ impl Aircraft {
 
 /// Move control surfaces and push the body with every surface's lift and drag.
 pub fn aero_surfaces_system(
-    time: Res<Time>,
     mut q: Query<(
         &mut Aircraft,
         &VehicleControls,
@@ -287,10 +286,10 @@ pub fn aero_surfaces_system(
         &mut VehicleTelemetry,
     )>,
 ) {
-    let dt = time.delta_secs();
     q.par_iter_mut()
         .for_each(|(mut aircraft, controls, mut forces, mut tel)| {
             let f = forces.frame;
+            let dt = f.dt;
             let flaps = aircraft.flaps.clamp(0.0, 1.0);
             let pitch = (controls.pitch + aircraft.pitch_trim).clamp(-1.0, 1.0);
             let mut stalled = false;
@@ -426,7 +425,6 @@ pub struct Propulsion {
 
 /// Spool engines and push.
 pub fn propulsion_system(
-    time: Res<Time>,
     mut q: Query<(
         &mut Propulsion,
         &VehicleControls,
@@ -434,10 +432,10 @@ pub fn propulsion_system(
         &mut VehicleTelemetry,
     )>,
 ) {
-    let dt = time.delta_secs();
     q.par_iter_mut()
         .for_each(|(mut prop, controls, mut forces, mut tel)| {
             let f = forces.frame;
+            let dt = f.dt;
             let throttle = controls.throttle.clamp(0.0, 1.0);
             let boost = if controls.boost { 1.3 } else { 1.0 };
             let density_ratio = f.air.density / 1.225;

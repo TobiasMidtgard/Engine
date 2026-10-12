@@ -365,6 +365,15 @@ impl View {
 /// [`spawn_demos`], a module thread edits only its own zone's line.
 pub fn demo_views(z: &Zone) -> Vec<View> {
     match z.key {
+        "track" | "airfield" | "spaceport" => engine_vehicles::demo::views(z.key, z.center)
+            .into_iter()
+            .map(|v| {
+                let view = View::new(v.key, v.name, v.eye, v.target, v.hour).warmup(v.warmup_secs);
+                v.on_arrive
+                    .iter()
+                    .fold(view, |view, (api, args)| view.on_arrive(api, args))
+            })
+            .collect(),
         "field" => engine_fire::demo::VIEWS
             .iter()
             .map(|v| View::new(v.key, v.name, v.eye, v.target, v.hour))
@@ -376,6 +385,19 @@ pub fn demo_views(z: &Zone) -> Vec<View> {
                 View::new(v.key, v.name, v.eye, v.target, v.hour)
                     .on_arrive("smoke.demo", r#"{"restart":true}"#)
                     .warmup(v.warmup_secs)
+            })
+            .collect(),
+        "physics" => engine_physics::demo::VIEWS
+            .iter()
+            .map(|v| {
+                let view = View::new(v.key, v.name, v.eye, v.target, v.hour).warmup(v.warmup_secs);
+                match v.station {
+                    Some(s) => view.on_arrive(
+                        "physics.proving_ground.replay",
+                        &format!(r#"{{"station": "{}"}}"#, s.key()),
+                    ),
+                    None => view,
+                }
             })
             .collect(),
         "yard" => vec![
