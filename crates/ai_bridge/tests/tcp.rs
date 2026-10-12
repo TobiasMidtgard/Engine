@@ -202,9 +202,10 @@ fn tcp_client_spawns_lists_and_steps() {
         assert_eq!(first["id"], json!("fast"), "{first}");
         assert_eq!(second["id"], json!("slow"), "{second}");
 
-        // A second client is served while the first one waits on a long step.
+        // A second client is served while the first one waits on a long step. The step is long
+        // enough (about a second) that the second client gets in even on a busy machine.
         c.send(
-            json!({"jsonrpc": "2.0", "id": 99, "method": "engine.step", "params": {"frames": 30}}),
+            json!({"jsonrpc": "2.0", "id": 99, "method": "engine.step", "params": {"frames": 600}}),
         );
         let mut other = Client::connect(&addr);
         let other_ping = other.call("bridge.ping", json!({}));

@@ -28,7 +28,9 @@ use crate::targets::{Targets, Tex};
 const ENV_WIDTH: u32 = 256;
 const ENV_HEIGHT: u32 = 128;
 
-/// Set when the renderer could not start (no GPU); rendering is skipped.
+/// Set when the renderer could not start (no GPU); rendering is skipped. With the environment
+/// variable `ENGINE_REQUIRE_GPU=1` (as in CI) the renderer panics instead, so GPU tests can't
+/// pass by skipping.
 #[derive(Resource, Debug, Clone)]
 pub struct RenderDisabled(pub String);
 
@@ -459,7 +461,7 @@ impl Renderer {
         if let Some(mut pending) = world.get_resource_mut::<PendingRenderFeatures>()
             && !pending.0.is_empty()
         {
-            let new: Vec<_> = pending.0.drain(..).collect();
+            let new: Vec<_> = std::mem::take(&mut pending.0);
             for f in new {
                 self.add_feature(f);
             }
@@ -1561,6 +1563,9 @@ pub fn ensure_renderer(world: &mut World) -> bool {
             true
         }
         Err(e) => {
+            if std::env::var("ENGINE_REQUIRE_GPU").is_ok_and(|v| v == "1") {
+                panic!("no GPU and ENGINE_REQUIRE_GPU=1: {e}");
+            }
             tracing::error!("renderer disabled: {e}");
             world.insert_resource(RenderDisabled(e));
             false
