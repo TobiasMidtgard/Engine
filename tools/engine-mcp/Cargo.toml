@@ -1,0 +1,10 @@
+[package]
+name = "engine-mcp"
+description = "MCP (Model Context Protocol) server over stdio that lets AI assistants drive a running engine game through its AI bridge: every engine API becomes a tool, plus screenshot and step."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+serde_json.workspace = true

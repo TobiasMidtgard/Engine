@@ -1,0 +1,21 @@
+[package]
+name = "engine_ai_bridge"
+description = "AI bridge: serves every registered engine API as newline-delimited JSON-RPC 2.0 over TCP (plus an in-process client), with frame stepping, pause/resume and status, so agents can inspect, edit, step and screenshot a running game."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+engine_core.workspace = true
+bevy_ecs.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+engine_input.workspace = true
+engine_render.workspace = true
+engine_platform.workspace = true
+
+[[example]]
+name = "bridge_demo"
