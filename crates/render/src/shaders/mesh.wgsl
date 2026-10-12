@@ -5,9 +5,10 @@ struct Material {
     emissive: vec4<f32>,
     params: vec4<f32>,   // metallic, roughness, reflectance, alpha cutoff
     params2: vec4<f32>,  // subsurface, wind sway, normal scale, occlusion strength
-    uv: vec4<f32>,       // uv scale xy, unused zw
+    uv: vec4<f32>,       // uv scale xy, detail strength, detail scale (m)
     flags: vec4<u32>,    // x: bits 0-3 alpha mode, 4 unlit, 5 double sided, 6 receives wetness,
-                         //    7-11 texture present (base color, normal, metallic/roughness, emissive, occlusion)
+                         //    7-11 texture present (base color, normal, metallic/roughness, emissive, occlusion),
+                         //    12 detail anchored to the world
 };
 
 const TEX_BASE_COLOR: u32 = 128u;
@@ -15,6 +16,7 @@ const TEX_NORMAL: u32 = 256u;
 const TEX_METALLIC_ROUGHNESS: u32 = 512u;
 const TEX_EMISSIVE: u32 = 1024u;
 const TEX_OCCLUSION: u32 = 2048u;
+const DETAIL_IN_WORLD: u32 = 4096u;
 
 @group(1) @binding(0) var<storage, read> materials: array<Material>;
 
@@ -54,6 +56,7 @@ struct VertexOut {
     @location(2) uv: vec2<f32>,
     @location(3) color: vec4<f32>,
     @location(4) @interpolate(flat) material: u32,
+    @location(5) local: vec3<f32>,
 };
 
 // Wind sway of a vertex (meters, camera-relative).
@@ -62,6 +65,17 @@ fn vertex_wind(in: VertexIn, rel: vec3<f32>) -> vec3<f32> {
     if (sway <= 0.0) { return vec3<f32>(0.0); }
     let h01 = saturate((in.position.y - bitcast<f32>(in.extra.z)) / max(bitcast<f32>(in.extra.w), 1e-3));
     return wind_offset(rel, h01, sway);
+}
+
+// Object-space position in meters (the model's scale applied, not its rotation or offset), so
+// surface detail sticks to moving objects at a consistent size.
+fn vertex_local(in: VertexIn) -> vec3<f32> {
+    let scale = vec3<f32>(
+        length(vec3<f32>(in.m0.x, in.m1.x, in.m2.x)),
+        length(vec3<f32>(in.m0.y, in.m1.y, in.m2.y)),
+        length(vec3<f32>(in.m0.z, in.m1.z, in.m2.z)),
+    );
+    return in.position * scale;
 }
 
 fn vertex_rel(in: VertexIn) -> vec3<f32> {
@@ -79,8 +93,94 @@ fn vs_main(in: VertexIn) -> VertexOut {
     out.uv = in.uv;
     out.color = in.color;
     out.material = in.extra.x;
+    out.local = vertex_local(in);
     out.clip = frame.view_proj * vec4<f32>(rel, 1.0);
     return out;
+}
+
+// ---------------------------------------------------------------- surface detail
+// `StandardMaterial::detail`: value-noise fbm in object (or world) space that bumps the normal
+// and mottles color and roughness. Octaves finer than a few pixels fade out, so distant
+// surfaces stay calm instead of sparkling.
+
+// Detail position: object space, or world space (wrapping every 4096 m) for terrain.
+fn detail_pos(mat: Material, local: vec3<f32>, rel: vec3<f32>) -> vec3<f32> {
+    if ((mat.flags.x & DETAIL_IN_WORLD) != 0u) { return tiling_pos(rel); }
+    return local;
+}
+
+// A rotation (Quilez's octave rotation for fbm).
+const DETAIL_TURN: mat3x3<f32> = mat3x3<f32>(
+    vec3<f32>(0.00, 0.80, 0.60),
+    vec3<f32>(-0.80, 0.36, -0.48),
+    vec3<f32>(-0.60, -0.48, 0.64),
+);
+
+// Bump height in [-1, 1] at `p` (meters) for bumps `scale` meters across; `footprint` is the
+// size of a pixel there (meters).
+fn detail_height(p: vec3<f32>, scale: f32, footprint: f32) -> f32 {
+    var sum = 0.0;
+    var amp = 0.5;
+    var wavelength = scale;
+    var q = p / scale;
+    for (var i = 0; i < 5; i++) {
+        let fade = saturate(wavelength / (4.0 * footprint) - 0.5);
+        if (fade <= 0.0) { break; }
+        sum += amp * fade * (value_noise3(q) * 2.0 - 1.0);
+        // Turn every octave so the noise lattices don't line up into streaks.
+        q = DETAIL_TURN * q * 2.03 + vec3<f32>(17.1, 9.2, 3.7);
+        amp *= 0.5;
+        wavelength *= 0.4926;
+    }
+    return sum * 1.2;
+}
+
+// Normal bumped by a height field from its differences one pixel right (`dh1`) and down
+// (`dh2`), in meters (Mikkelsen 2010, "Bump Mapping Unparametrized Surfaces on the GPU").
+fn bump_normal(n: vec3<f32>, dp1: vec3<f32>, dp2: vec3<f32>, dh1: f32, dh2: f32) -> vec3<f32> {
+    let r1 = cross(dp2, n);
+    let r2 = cross(n, dp1);
+    let det = dot(dp1, r1);
+    if (abs(det) < 1e-20) { return n; }
+    let grad = sign(det) * (dh1 * r1 + dh2 * r2);
+    let b = abs(det) * n - grad;
+    let len = length(b);
+    return select(n, b / len, len > 1e-20);
+}
+
+struct Detail {
+    normal: vec3<f32>,
+    height: f32,  // [-1, 1] at this pixel (0 without detail)
+};
+
+// Apply the material's surface detail to normal `n`. `dp1`/`dp2` are the screen derivatives
+// of the camera-relative position, `dq1`/`dq2` those of the detail position.
+fn surface_detail(mat: Material, n: vec3<f32>, p: vec3<f32>, dp1: vec3<f32>, dp2: vec3<f32>, dq1: vec3<f32>, dq2: vec3<f32>) -> Detail {
+    var d: Detail;
+    d.normal = n;
+    d.height = 0.0;
+    let strength = mat.uv.z;
+    if (strength <= 0.0) { return d; }
+    let scale = mat.uv.w;
+    let footprint = max(max(length(dq1), length(dq2)), 1e-5);
+    let h0 = detail_height(p, scale, footprint);
+    let h1 = detail_height(p + dq1, scale, footprint);
+    let h2 = detail_height(p + dq2, scale, footprint);
+    let amplitude = 0.06 * scale * strength;
+    d.normal = bump_normal(n, dp1, dp2, (h1 - h0) * amplitude, (h2 - h0) * amplitude);
+    d.height = h0;
+    return d;
+}
+
+// Mottled color: broad light/dark patches plus a faint warm/cool shift, and darker hollows.
+fn detail_albedo(mat: Material, albedo: vec3<f32>, p: vec3<f32>, height: f32) -> vec3<f32> {
+    let strength = mat.uv.z;
+    if (strength <= 0.0) { return albedo; }
+    let q = p / (8.0 * mat.uv.w);
+    let patches = fbm3(q + vec3<f32>(5.2, 1.3, 7.7), 3) * 2.0 - 1.0;
+    let hue = (value_noise3(q * 0.7 + vec3<f32>(11.0, 3.0, 5.0)) * 2.0 - 1.0) * 0.08 * strength;
+    let light = 1.0 + strength * (0.35 * patches + 0.2 * height);
+    return albedo * max(light, 0.0) * vec3<f32>(1.0 + hue, 1.0, 1.0 - hue);
 }
 
 // Normal mapping without precomputed tangents (Schüler, "Normal Mapping Without Precomputed
@@ -125,6 +225,9 @@ fn fs_main(in: VertexOut, @builtin(front_facing) front: bool) -> @location(0) ve
     let dp2 = dpdy(in.rel);
     let duv1 = dpdx(uv);
     let duv2 = dpdy(uv);
+    let dpos = detail_pos(mat, in.local, in.rel);
+    let dq1 = dpdx(dpos);
+    let dq2 = dpdy(dpos);
 
     var base = mat.base_color * in.color;
     if ((flags & TEX_BASE_COLOR) != 0u) {
@@ -138,17 +241,21 @@ fn fs_main(in: VertexOut, @builtin(front_facing) front: bool) -> @location(0) ve
         let tn = (normal_tex.xyz * 2.0 - 1.0) * vec3<f32>(mat.params2.z, mat.params2.z, 1.0);
         n = perturb_normal(n, dp1, dp2, duv1, duv2, tn);
     }
+    let detail = surface_detail(mat, n, dpos, dp1, dp2, dq1, dq2);
+    n = detail.normal;
     // Back faces of double-sided materials see the mirrored (perturbed) normal.
     if (!front) { n = -n; }
 
     var s = default_surface();
-    s.albedo = base.rgb;
+    s.albedo = detail_albedo(mat, base.rgb, dpos, detail.height);
     s.metallic = mat.params.x;
     s.roughness = mat.params.y;
     if ((flags & TEX_METALLIC_ROUGHNESS) != 0u) {
         s.metallic = saturate(s.metallic * mr_tex.b);
         s.roughness = clamp(s.roughness * mr_tex.g, 0.045, 1.0);
     }
+    // Detail: rougher on the bumps, smoother in the hollows; hollows also see less sky.
+    s.roughness = clamp(s.roughness * (1.0 + 0.3 * mat.uv.z * detail.height), 0.045, 1.0);
     s.reflectance = mat.params.z;
     s.normal = n;
     s.emissive = mat.emissive.rgb;
@@ -158,6 +265,7 @@ fn fs_main(in: VertexOut, @builtin(front_facing) front: bool) -> @location(0) ve
     if ((flags & TEX_OCCLUSION) != 0u) {
         s.occlusion = mix(1.0, occlusion_tex.r, mat.params2.w);
     }
+    s.occlusion *= 1.0 - 0.3 * mat.uv.z * saturate(-detail.height * 1.5);
     s.subsurface = mat.params2.x;
 
     // Weather: rain darkens porous surfaces and makes them glossy; snow settles on top faces.
@@ -216,6 +324,7 @@ struct PrepassVertexOut {
     @location(4) @interpolate(flat) material: u32,
     @location(5) motion_now: vec4<f32>,
     @location(6) motion_prev: vec4<f32>,
+    @location(7) local: vec3<f32>,
 };
 
 @vertex
@@ -232,6 +341,7 @@ fn vs_prepass(in: VertexIn) -> PrepassVertexOut {
     out.clip = frame.view_proj * vec4<f32>(rel, 1.0);
     out.motion_now = motion_clip(rel);
     out.motion_prev = prev_motion_clip(prev);
+    out.local = vertex_local(in);
     return out;
 }
 
@@ -247,6 +357,9 @@ fn fs_prepass(in: PrepassVertexOut, @builtin(front_facing) front: bool) -> Prepa
     let dp2 = dpdy(in.rel);
     let duv1 = dpdx(uv);
     let duv2 = dpdy(uv);
+    let dpos = detail_pos(mat, in.local, in.rel);
+    let dq1 = dpdx(dpos);
+    let dq2 = dpdy(dpos);
 
     var base = mat.base_color * in.color;
     if ((flags & TEX_BASE_COLOR) != 0u) {
@@ -260,11 +373,14 @@ fn fs_prepass(in: PrepassVertexOut, @builtin(front_facing) front: bool) -> Prepa
         let tn = (normal_tex.xyz * 2.0 - 1.0) * vec3<f32>(mat.params2.z, mat.params2.z, 1.0);
         n = perturb_normal(n, dp1, dp2, duv1, duv2, tn);
     }
+    let detail = surface_detail(mat, n, dpos, dp1, dp2, dq1, dq2);
+    n = detail.normal;
     if (!front) { n = -n; }
     var roughness = mat.params.y;
     if ((flags & TEX_METALLIC_ROUGHNESS) != 0u) {
         roughness = clamp(roughness * mr_tex.g, 0.045, 1.0);
     }
+    roughness = clamp(roughness * (1.0 + 0.3 * mat.uv.z * detail.height), 0.045, 1.0);
     if ((flags & 64u) != 0u) {
         let wet = frame.weather.x * saturate(n.y * 0.7 + 0.5);
         roughness = mix(roughness, 0.12, wet * 0.85);

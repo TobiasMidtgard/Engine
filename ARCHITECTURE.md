@@ -186,6 +186,12 @@ data, `shade_surface`, `shadow_factor`, `contact_shadow`, `screen_ao`, `sky_visi
 `wind_offset`, `prepass_output`) and `lib_atmosphere.wgsl` (`atmosphere` for aerial perspective,
 `sun_transmittance`, `sky_view_radiance`, `planet_height`, `ray_shell`).
 
+**Surface detail** (built): `StandardMaterial::with_detail(strength, scale)` adds procedural
+bumps, mottled color and roughness from 3D noise to any material, textured or not, so plain
+colors (stone, plaster, bark, soil, metal plates) don't look flat; it fades out with distance
+instead of sparkling. It sticks to the object; terrain and other meshes split into pieces use
+`with_detail_in_world()` so it lines up across seams.
+
 **Atmosphere** (built): Rayleigh, Mie and ozone scattering on a spherical planet with multiple
 scattering, after Hillaire 2020. Look-up tables (sunlight transmittance and multiple scattering,
 recomputed when the planet or its air changes; the sky seen from the camera, every frame) make the
