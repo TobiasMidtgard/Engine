@@ -8,7 +8,7 @@
 //! [`WeatherState`] always agree.
 
 use engine_core::math::noise::fbm2;
-use engine_core::math::{DVec2, DVec3, Rng, Vec2, Vec3, damp, smoothstep};
+use engine_core::math::{DQuat, DVec2, DVec3, Rng, Vec2, Vec3, damp, smoothstep};
 use engine_core::prelude::*;
 use engine_world::{FocusPoints, PrecipitationKind, WeatherState};
 
@@ -81,9 +81,9 @@ impl Default for ForecastStep {
 pub struct Front {
     pub preset: WeatherPreset,
     pub to: Regime,
-    /// A point on the front line when it formed, world X/Z.
+    /// A point on the front line when it formed (pattern X/Z, see [`WeatherFrame`]).
     pub origin: DVec2,
-    /// Direction it moves (unit, X/Z).
+    /// Direction it moves (unit, pattern X/Z).
     pub dir: Vec2,
     /// Speed, m/s of weather time.
     pub speed: f32,
@@ -94,7 +94,7 @@ pub struct Front {
 }
 
 impl Front {
-    /// How much the new weather has taken over at `p` (world X/Z) at weather time `t`:
+    /// How much the new weather has taken over at `p` (pattern X/Z) at weather time `t`:
     /// 0 = not yet, 1 = fully.
     pub fn weight(&self, p: DVec2, t: f64) -> f32 {
         let traveled = self.speed as f64 * (t - self.start_s).max(0.0);
@@ -158,6 +158,55 @@ impl Default for Air {
     }
 }
 
+/// Where the weather pattern sits in the world. Fronts, the cloud pattern, the wind and the
+/// sky's axes live in this frame, which matches the world until the world shifts (a floating
+/// origin move or a turned reference frame): then the frame follows, so the clouds and fronts
+/// stay over the same ground. `pattern = yaw-rotation · world + offset` (X/Z).
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct WeatherFrame {
+    /// Rotation about +Y from world axes to pattern axes, radians.
+    pub yaw: f64,
+    /// Pattern X/Z of the world origin.
+    pub offset: DVec2,
+}
+
+impl WeatherFrame {
+    fn turn(yaw: f64, v: DVec2) -> DVec2 {
+        let r = DQuat::from_rotation_y(yaw) * DVec3::new(v.x, 0.0, v.y);
+        DVec2::new(r.x, r.z)
+    }
+
+    /// Pattern X/Z of world X/Z `p`.
+    pub fn to_pattern(&self, p: DVec2) -> DVec2 {
+        Self::turn(self.yaw, p) + self.offset
+    }
+
+    /// World X/Z of pattern X/Z `q`.
+    pub fn to_world(&self, q: DVec2) -> DVec2 {
+        Self::turn(-self.yaw, q - self.offset)
+    }
+
+    /// A pattern-axis direction or velocity in world axes.
+    pub fn dir_to_world(&self, v: Vec2) -> Vec2 {
+        Self::turn(-self.yaw, v.as_dvec2()).as_vec2()
+    }
+
+    /// A pattern-axis 3D direction (sun, moon) in world axes.
+    pub fn dir3_to_world(&self, v: Vec3) -> Vec3 {
+        (DQuat::from_rotation_y(-self.yaw) * v.as_dvec3()).as_vec3()
+    }
+
+    /// The world moved: a point at `p` is now at `s.point(p)`. Keep pattern points where they
+    /// were on the ground (only the turn about the vertical counts).
+    pub fn follow(&mut self, s: &engine_world::WorldShift) {
+        // The turn about the vertical, in full precision (`WorldShift::yaw` is f32).
+        let q = s.rotation;
+        self.yaw -= 2.0 * q.y.atan2(q.w);
+        let t = DVec2::new(s.translation.x, s.translation.z);
+        self.offset -= Self::turn(self.yaw, t);
+    }
+}
+
 /// Simulation state. Read it through `weather.get`; change the weather through [`Weather`].
 #[derive(Resource, Debug, Clone)]
 pub struct WeatherSim {
@@ -172,8 +221,10 @@ pub struct WeatherSim {
     pub target: WeatherPreset,
     /// When auto mode or the forecast next changes the weather (weather time).
     pub next_change_s: f64,
-    /// How far the cloud pattern has drifted with the wind, meters (X/Z).
+    /// How far the cloud pattern has drifted with the wind, meters (pattern X/Z).
     pub cloud_drift: DVec2,
+    /// Where the weather pattern sits in the world.
+    pub frame: WeatherFrame,
     pub air: Air,
     /// The weather right at the player.
     pub local: CloudCell,
@@ -208,6 +259,7 @@ impl WeatherSim {
             target: weather.preset,
             next_change_s: f64::INFINITY,
             cloud_drift: DVec2::ZERO,
+            frame: WeatherFrame::default(),
             air: Air::default(),
             local: CloudCell::default(),
             local_regime: regime,
@@ -222,19 +274,24 @@ impl WeatherSim {
 
     /// The weather regime at world X/Z `p` now.
     pub fn regime_at(&self, p: DVec2) -> Regime {
+        self.regime_at_pattern(self.frame.to_pattern(p))
+    }
+
+    fn regime_at_pattern(&self, q: DVec2) -> Regime {
         let mut r = self.base;
         for f in &self.fronts {
-            r = r.lerp(&f.to, f.weight(p, self.time_s));
+            r = r.lerp(&f.to, f.weight(q, self.time_s));
         }
         r
     }
 
     /// The preset that dominates at `p` (the newest front that has mostly arrived there).
     pub fn preset_at(&self, p: DVec2) -> WeatherPreset {
+        let q = self.frame.to_pattern(p);
         self.fronts
             .iter()
             .rev()
-            .find(|f| f.weight(p, self.time_s) > 0.5)
+            .find(|f| f.weight(q, self.time_s) > 0.5)
             .map(|f| f.preset)
             .unwrap_or(self.base_preset)
     }
@@ -242,7 +299,13 @@ impl WeatherSim {
     /// Cloud and rain at world X/Z `p` now (the same numbers the cloud map and the renderer
     /// use).
     pub fn cell_at(&self, p: DVec2) -> CloudCell {
-        cloud_cell(&self.regime_at(p), p - self.cloud_drift, self.seed)
+        let q = self.frame.to_pattern(p);
+        cloud_cell(&self.regime_at_pattern(q), q - self.cloud_drift, self.seed)
+    }
+
+    /// How much front `f` has taken over at world X/Z `p` (see [`Front::weight`]).
+    pub fn front_weight(&self, f: &Front, p: DVec2) -> f32 {
+        f.weight(self.frame.to_pattern(p), self.time_s)
     }
 
     /// Send a front carrying `preset` toward `focus`, arriving in `transition_s` weather
@@ -259,7 +322,7 @@ impl WeatherSim {
         let half_width = FRONT_DISTANCE_M * 0.2;
         // Arrive fully (weight ≈ 1) at the focus after `transition_s`.
         let speed = (FRONT_DISTANCE_M + half_width) / transition_s.max(1.0);
-        let origin = focus - dir.as_dvec2() * FRONT_DISTANCE_M as f64;
+        let origin = self.frame.to_pattern(focus) - dir.as_dvec2() * FRONT_DISTANCE_M as f64;
         if self.fronts.len() >= MAX_FRONTS {
             let oldest = self.fronts.remove(0);
             self.base = oldest.to;
@@ -350,6 +413,8 @@ pub fn step(
     let dt_w = dt * weather.time_scale.max(0.0);
     let focus_xz = DVec2::new(focus.x, focus.z);
     sim.focus = focus_xz;
+    // Fronts and the cloud pattern live in the weather's own frame.
+    let focus_q = sim.frame.to_pattern(focus_xz);
     if sim.seed != weather.seed {
         sim.seed = weather.seed;
         sim.rng = Rng::new(weather.seed);
@@ -392,7 +457,7 @@ pub fn step(
     sim.retire_fronts();
 
     // The weather at the player.
-    let regime = sim.regime_at(focus_xz);
+    let regime = sim.regime_at_pattern(focus_q);
     let cell = sim.cell_at(focus_xz);
     sim.local_regime = regime;
     sim.local = cell;
@@ -404,7 +469,7 @@ pub fn step(
         .iter()
         .filter(|f| f.to.storm > 0.3)
         .map(|f| {
-            let w = f.weight(focus_xz, sim.time_s);
+            let w = f.weight(focus_q, sim.time_s);
             4.0 * w * (1.0 - w) * f.to.storm
         })
         .fold(0.0, f32::max);
@@ -448,7 +513,7 @@ pub fn step(
     let veer = sim
         .fronts
         .iter()
-        .map(|f| f.weight(focus_xz, sim.time_s) * 35f32.to_radians())
+        .map(|f| f.weight(focus_q, sim.time_s) * 35f32.to_radians())
         .sum::<f32>();
     let dir = Vec2::from_angle(veer).rotate(toward);
     let speed = regime.wind_speed + sim.gust_front * 9.0;
@@ -608,7 +673,8 @@ pub fn write_state(sim: &WeatherSim, state: &mut WeatherState) {
     } else {
         PrecipitationKind::None
     };
-    state.wind = Vec3::new(air.wind_dir.x, 0.0, air.wind_dir.y) * air.wind_speed;
+    let wind = sim.frame.dir_to_world(air.wind_dir);
+    state.wind = Vec3::new(wind.x, 0.0, wind.y) * air.wind_speed;
     state.gustiness = air.gustiness;
     state.fog = air.fog.clamp(0.0, 1.0);
     state.storm = cell.storm.max(sim.gust_front * 0.5);

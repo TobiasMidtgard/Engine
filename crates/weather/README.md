@@ -128,6 +128,10 @@ precipitation, fog, time of day, sun direction), `SurfaceLayers` (wetness, puddl
 `DirectionalLight` on `SunLight`/`MoonLight` entities, `AmbientLight`; messages `NoiseEvent`,
 `WorldImpulse`, `IgniteRequest`, `LightningStrike`.
 
+Follows `WorldShift`: fronts, the cloud pattern, the sky's compass (sun, moon, stars) and
+puddle spots live in the weather's own frame (`WeatherSim::frame`), which follows every
+floating-origin move or turned frame, so the weather stays over the same ground.
+
 Renders through three `RenderFeature`s: `weather clouds` (march, sky and geometry composites,
 environment map), `weather precipitation` (rain, snow, splashes, bolts) and `weather ground`
 (puddles, wet ground and snow cover).

@@ -543,12 +543,14 @@ impl RenderFeature for CloudFeature {
 
         // Map placement: the pattern has drifted with the wind since the map was built.
         let span = map.size as f64 * map.cell_m as f64;
-        let shift = sim.cloud_drift - map.drift_at_build;
-        let corner = map.origin + shift - DVec2::new(origin.x, origin.z);
+        let moved = sim
+            .frame
+            .dir_to_world((sim.cloud_drift - map.drift_at_build).as_vec2());
+        let corner = map.origin + moved.as_dvec2() - DVec2::new(origin.x, origin.z);
         let wrap = |v: f64, period: f32| v.rem_euclid(period as f64) as f32;
-        let drift = sim.cloud_drift;
-        let noise_x = origin.x - drift.x;
-        let noise_z = origin.z - drift.y;
+        // The noise sticks to the drifting pattern (and stays put when the world shifts).
+        let noise = sim.frame.to_pattern(DVec2::new(origin.x, origin.z)) - sim.cloud_drift;
+        let (noise_x, noise_z) = (noise.x, noise.y);
 
         // Key light for the clouds: the sun by day, the moon by night (not dimmed by cloud).
         let (sun_dir, sun_lux, sun_radius) = if lights.in_charge {
@@ -668,7 +670,7 @@ impl RenderFeature for CloudFeature {
         let size = self.targets.as_ref().map(|t| t.size).unwrap_or((1, 1));
         let c = CelestialUniform {
             sun: [sun_dir.x, sun_dir.y, sun_dir.z, sun_radius],
-            sun_color: [sun_lux, sun_lux, sun_lux, 0.0],
+            sun_color: [sun_lux, sun_lux, sun_lux, sim.frame.yaw as f32],
             moon: [moon_dir.x, moon_dir.y, moon_dir.z, moon_radius],
             moon_color: [
                 MOON_COLOR[0] * moon_luminance,

@@ -40,7 +40,7 @@ pub fn describe(world: &World) -> Value {
         "auto": weather.auto,
         "fronts": sim.fronts.iter().map(|f| json!({
             "preset": f.preset.name(),
-            "arrived_here": f.weight(focus, sim.time_s),
+            "arrived_here": sim.front_weight(f, focus),
         })).collect::<Vec<_>>(),
         "forecast": weather.forecast.iter().map(|s| json!({
             "preset": s.preset.name(), "after_s": s.after_s, "transition_s": s.transition_s,
@@ -263,7 +263,10 @@ pub(crate) fn register(app: &mut App) {
                 return Err("Pass \"dry\": true, or any of wetness, puddle_m, snow_m.".into());
             }
             let params = *world.resource::<GroundWeather>();
-            let seed = world.resource::<WeatherSim>().seed;
+            let (seed, frame) = {
+                let sim = world.resource::<WeatherSim>();
+                (sim.seed, sim.frame)
+            };
             let mut surface = world.resource_mut::<SurfaceLayers>();
             let grid = &mut surface.grid;
             let (origin, cell, width) = (grid.origin, grid.cell as f64, grid.width as usize);
@@ -283,7 +286,7 @@ pub(crate) fn register(app: &mut App) {
                             (i % width) as f64 + 0.5,
                             (i / width) as f64 + 0.5,
                         ) * cell;
-                    let dip = surface::puddle_dip(xz, params.puddle_share, seed);
+                    let dip = surface::puddle_dip(frame.to_pattern(xz), params.puddle_share, seed);
                     c.puddle_m = (p * dip).min(params.max_puddle_m);
                 }
                 if let Some(s) = snow {

@@ -5,7 +5,7 @@
 
 struct Celestial {
     sun: vec4<f32>,        // direction toward the sun, angular radius (rad)
-    sun_color: vec4<f32>,  // color × illuminance (lux, not dimmed by cloud), unused
+    sun_color: vec4<f32>,  // color × illuminance (lux, not dimmed by cloud), sky yaw (rad)
     moon: vec4<f32>,       // direction toward the moon, angular radius (rad)
     moon_color: vec4<f32>, // color × luminance of the full disc (cd/m²), earthshine
     pole: vec4<f32>,       // celestial north pole direction, sidereal angle (rad)
@@ -126,7 +126,10 @@ fn celestial(dir: vec3<f32>) -> vec3<f32> {
         c = pre_expose(c) + moon_light * 6.0 / (6.0 + max(moon_light.r, max(moon_light.g, moon_light.b))) * edge;
         return c;
     } else if (sky.params.x > 0.0) {
-        let star_dir = rotate(dir, sky.pole.xyz, -sky.pole.w);
+        // Into the sky's own axes (they turn when the world's frame turns), then the
+        // turning of the Earth.
+        let sky_dir = rotate(dir, vec3<f32>(0.0, 1.0, 0.0), sky.sun_color.w);
+        let star_dir = rotate(sky_dir, sky.pole.xyz, -sky.pole.w);
         c += (star_field(star_dir) + milky_way(star_dir)) * sky.params.x * tr;
     }
     return pre_expose(c);

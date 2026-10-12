@@ -7,6 +7,7 @@ pub mod demo;
 pub mod lightning;
 pub mod presets;
 pub mod render;
+mod shift;
 pub mod sim;
 pub mod sky;
 pub mod surface;
@@ -107,6 +108,10 @@ impl Plugin for WeatherPlugin {
                  X/Z in meters, absorbency (0 asphalt .. 1 sand), puddles (share that pools).",
             )
             .add_systems(Update, (sky::ensure_lights, demo::instruments_system))
+            .add_systems(
+                PostUpdate,
+                shift::shift_system.in_set(engine_world::WorldShiftSet::Apply),
+            )
             .add_systems(
                 FixedUpdate,
                 (
