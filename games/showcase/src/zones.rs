@@ -257,13 +257,13 @@ pub fn spawn_demos(
             "yard" => engine_softbody::demo::spawn_demo(commands, z.center),
             "magic" => ph::magic(commands, lib, z),
             "gallery2d" => ph::gallery2d(commands, lib, z),
-            "forest" => ph::forest(commands, lib, land, z, rng),
+            "forest" => engine_foliage::demo::spawn_demo(commands, z.center),
             "meadow" => engine_npc::demo::spawn_wildlife(commands, z.center, z.radius * 0.8),
             "lake" => ph::lake(commands, meshes, lib, land, z),
             "water" => engine_water::demo::spawn_demo(commands, z.center),
             "footsteps" => engine_audio::demo::spawn_demo(commands, z.center),
             "tracks" => ph::tracks(commands, z),
-            "cave" => ph::cave(commands, z, rng),
+            "cave" => engine_foliage::demo::spawn_cave_demo(commands, z.center),
             "arena" => engine_npc::demo::spawn_demo(commands, z.center),
             "parkour" => engine_movement::demo::spawn_demo(commands, z.center),
             "fortress" => engine_destruction::demo::spawn_demo(commands, z.center),
@@ -469,6 +469,30 @@ pub fn demo_views(z: &Zone) -> Vec<View> {
                 .on_leave("weather.set", &set("partly_cloudy")),
             ]
         }
+        "forest" => engine_foliage::demo::forest_viewpoints(DVec3::ZERO)
+            .iter()
+            .map(|v| {
+                View::new(
+                    v.name,
+                    v.title,
+                    v.eye.to_array(),
+                    v.target.to_array(),
+                    v.hour,
+                )
+            })
+            .collect(),
+        "cave" => engine_foliage::demo::cave_viewpoints(DVec3::ZERO)
+            .iter()
+            .map(|v| {
+                View::new(
+                    v.name,
+                    v.title,
+                    v.eye.to_array(),
+                    v.target.to_array(),
+                    v.hour,
+                )
+            })
+            .collect(),
         _ => Vec::new(),
     }
 }
