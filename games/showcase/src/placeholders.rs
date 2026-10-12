@@ -37,9 +37,6 @@ fn mat(hex: u32, roughness: f32) -> StandardMaterial {
     StandardMaterial::hex(hex).with_roughness(roughness)
 }
 
-fn concrete() -> StandardMaterial {
-    mat(0xa8a49c, 0.8)
-}
 fn stone() -> StandardMaterial {
     mat(0x8a857c, 0.85)
 }
