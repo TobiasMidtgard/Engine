@@ -17,7 +17,11 @@
 //! 2. simulates in `FixedUpdate` / `SimSet::Physics` using `Res<Time>` (so time dilation and
 //!    slow motion work), reading the components above and writing the outputs,
 //! 3. replaces [`PhysicsQueries`] with its own implementation,
-//! 4. passes [`conformance`]: `engine_world::physics::conformance::assert_all(|app| { app.add_plugins(MyPhysics); })`.
+//! 4. follows world shifts (floating origin, planet frames): in `WorldShiftSet::Apply` it
+//!    moves its own state (bodies, statics, islands) by the [`crate::WorldShift`], as a
+//!    teleport rather than motion (kinematic bodies get no velocity from it), and by
+//!    `WorldShiftSet::Rebuild` its query snapshot answers in the new frame,
+//! 5. passes [`conformance`]: `engine_world::physics::conformance::assert_all(|app| { app.add_plugins(MyPhysics); })`.
 //!
 //! Swapping physics is then a one-line change in the game's `main`.
 //!
@@ -467,7 +471,8 @@ pub struct Hit {
 }
 
 /// Scene queries against the current physics state. Implementations must be safe to call
-/// from any system, any thread, at any time (they read a snapshot updated each step).
+/// from any system, any thread, at any time (they read a snapshot updated each step and
+/// after each world shift).
 pub trait PhysicsQuery: Send + Sync + 'static {
     /// First hit along a ray. `dir` is normalized.
     fn raycast(

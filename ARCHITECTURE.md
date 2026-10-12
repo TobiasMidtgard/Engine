@@ -7,7 +7,7 @@ so the same feature can be driven by game code, data files, the console or an AI
 
 ```
 games/*            showcase, hello, (your games)
-tools/*            engine-mcp (AI agent bridge), asset tools
+tools/*            engine-mcp (AI agent bridge), fetch-assets (large art, see AGENTS.md)
 crates/engine      facade: prelude, DefaultPlugins, CLI flags
 crates/core        App, plugins, schedules, time & dilation, f64 transforms, math, registry/API, scenes, logs
 crates/world       shared simulation contracts (weather, wind, heat, surfaces, gravity, ground/water queries, world events)
@@ -63,6 +63,7 @@ zone's entry; the rest of the showcase belongs to the Beautiful showcase world t
 |---|---|---|
 | `engine_core`, `engine`, `engine_world`, `engine_assets`, `engine_input`, `engine_platform` | Engine core, shared contracts, assets, input, windows and platforms | Core (architecture and integration) |
 | `engine_ai_bridge`, `tools/engine-mcp` | JSON-RPC/MCP bridge so AI agents can inspect, edit, step and screenshot a running game | Core (architecture and integration) |
+| `tools/fetch-assets`, `assets/manifests/core.toml` | Large art pipeline: manifests, download cache, release mirror, the no-large-files test (each thread owns its own `assets/manifests/<area>.toml`) | Core (architecture and integration) |
 | `engine_debug` | Debug drawing (lines, shapes, gizmos) for every module | Core (architecture and integration) |
 | `engine_render` | Renderer, lighting, shadows, sky and sky occlusion, materials; the planned strand renderer (hair, fur, grass), wrinkle maps, and 2D/2.5D rendering | Rendering and lighting |
 | `games/showcase` | The tech showcase world: environment, viewpoints, screenshot tour, and the list of every test case with its owner | Beautiful showcase world |
@@ -98,6 +99,7 @@ module's **contract** in `engine_world`:
 | `locomotion`: `MoveIntent`, `LocomotionState`, `VehicleControls`, `LocomotionBackend` (`claim_backend`, so fallback movers can step aside) | `engine_movement`, `engine_vehicles` | npc, player input, cameras, UI |
 | `terrain`: `TerrainEdit`, `TerrainChanged`, plus the `Ground` query | `engine_terrain` | destruction, foliage, physics, water, npc |
 | `Obscurance`: smoke, fog and dust between two points (`transmittance`, `extinction`); sources stack by name and implementations pass `check_obscurance` | `engine_smoke` (weather fog and destruction dust can add their own) | npc, gameplay, ui |
+| `WorldShift` (+ `WorldShiftSet`, `FollowsWorldShift`): the world was re-anchored (floating origin, a new planet's frame). `engine_world` moves transforms, velocities, forces, intents, gravity, wind and sun, the fields, and pending contract messages; query providers answer in the new frame from `WorldShiftSet::Apply` on | written by `engine_space` | every module or crate that keeps world positions or directions of its own shifts them in `WorldShiftSet::Apply`: physics (bodies, statics, query caches), softbody, vehicles, movement, npc (memories, nav goals), anim (IK targets), vfx, fire, smoke, water, weather, terrain, foliage, destruction, audio, ui (map markers), render (sky and planet centers), debug |
 | `Water`, `Gravity`, fields and world events (see the crate docs) | water, space, weather, … | everyone |
 
 Anything a module needs that isn't there is a missing contract: ask the core owner to add it

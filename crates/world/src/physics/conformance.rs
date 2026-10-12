@@ -15,15 +15,16 @@
 //! 60 Hz with deterministic time, and compares against physics with generous tolerances. The
 //! checks cover what other modules rely on: gravity, resting contact, impulses, contact
 //! events (one `Started` per touch carrying the impact impulse and a normal from `a` toward
-//! `b`, one `Ended` when it stops), raycasts, time dilation, precision far from the origin and
-//! the character controller (including its time scaling: a character moves in its own seconds,
+//! `b`, one `Ended` when it stops), raycasts, time dilation, precision far from the origin,
+//! following a [`WorldShift`](crate::WorldShift) (bodies keep their place relative to each
+//! other when the world is re-anchored and turned) and the character controller (including its time scaling: a character moves in its own seconds,
 //! so one that ignores world slow motion keeps full speed).
 
 use engine_core::math::{DVec3, Vec3};
 use engine_core::time::{LocalTimeScale, TimeSource};
 
 use super::*;
-use crate::WorldPlugin;
+use crate::{WorldPlugin, WorldShift, WorldShiftSet};
 
 /// Result of one check.
 #[derive(Debug, Clone)]
@@ -47,6 +48,7 @@ const CHECKS: &[(&str, CheckFn)] = &[
     ("reports_contact_end", reports_contact_end),
     ("time_dilation_slows_bodies", time_dilation_slows_bodies),
     ("precise_far_from_origin", precise_far_from_origin),
+    ("follows_world_shifts", follows_world_shifts),
     ("character_walks_and_grounds", character_walks_and_grounds),
     (
         "character_honors_local_time_scale",
@@ -231,6 +233,89 @@ fn resting_at(install: &dyn Fn(&mut App), base: DVec3) -> Result<(), String> {
         0.0,
         0.05,
     )
+}
+
+fn follows_world_shifts(install: &dyn Fn(&mut App)) -> Result<(), String> {
+    let mut app = app_with(install);
+    app.init_resource::<PendingShift>()
+        .add_systems(PostUpdate, write_pending_shift.in_set(WorldShiftSet::Write));
+    let g = ground(&mut app, DVec3::ZERO);
+    // Off the turn's axis, so a backend that moves bodies but doesn't turn them shows drift.
+    let start = DVec3::new(6.0, 3.0, -4.0);
+    let crate_e = app
+        .world
+        .spawn((
+            Transform::from_translation(start),
+            RigidBody::dynamic(),
+            Collider::cuboid(Vec3::splat(0.5)),
+            Velocity::default(),
+        ))
+        .id();
+    // Re-anchor and turn the world while the crate is falling, the way a game does it (in
+    // `WorldShiftSet::Write`). A turn about the vertical, so the check doesn't also demand
+    // tilted colliders; gravity turning with the world is `engine_world`'s job, tested there.
+    app.update_n(20);
+    let shift = WorldShift {
+        rotation: engine_core::math::DQuat::from_rotation_y(0.7),
+        translation: DVec3::new(5.0e4, -300.0, 1.0e4),
+        ..WorldShift::IDENTITY
+    };
+    app.world.resource_mut::<PendingShift>().0 = Some(shift);
+    app.update();
+    // Queries answer in the new frame right away, before the next step.
+    let q = app.world.resource::<PhysicsQueries>().clone();
+    let hit = q
+        .raycast(
+            shift.point(DVec3::new(0.0, 5.0, 0.0)),
+            -shift.direction(Vec3::Y),
+            20.0,
+            &QueryFilter::default(),
+        )
+        .ok_or("right after the shift, a raycast down onto the shifted ground missed")?;
+    if hit.entity != g {
+        return Err(format!(
+            "right after the shift, the raycast hit {:?}, expected the ground {g:?}",
+            hit.entity
+        ));
+    }
+    near(
+        "ground top hit right after the shift",
+        hit.point.y,
+        shift.point(DVec3::new(0.0, 0.5, 0.0)).y,
+        0.05,
+    )?;
+    app.update_n(160);
+    let ground_t = *app.world.get::<Transform>(g).ok_or("the ground is gone")?;
+    let local =
+        ground_t.rotation.as_dquat().inverse() * (position(&app, crate_e) - ground_t.translation);
+    near(
+        "crate resting height above the shifted ground, in the ground's frame",
+        local.y,
+        1.0,
+        0.05,
+    )?;
+    near(
+        "crate drift from where it fell, in the ground's frame",
+        (local.x - start.x).hypot(local.z - start.z),
+        0.0,
+        0.05,
+    )?;
+    near(
+        "crate speed at rest after the shift",
+        velocity(&app, crate_e).length() as f64,
+        0.0,
+        0.05,
+    )
+}
+
+/// A shift for `follows_world_shifts` to write in `WorldShiftSet::Write`.
+#[derive(Resource, Default)]
+struct PendingShift(Option<WorldShift>);
+
+fn write_pending_shift(mut pending: ResMut<PendingShift>, mut shifts: MessageWriter<WorldShift>) {
+    if let Some(s) = pending.0.take() {
+        shifts.write(s);
+    }
 }
 
 fn raycast_hits_static_box(install: &dyn Fn(&mut App)) -> Result<(), String> {
