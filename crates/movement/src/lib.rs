@@ -7,6 +7,7 @@ pub mod demo;
 mod fallback;
 pub mod fx;
 mod locomotion;
+pub mod look;
 pub mod mover;
 pub mod player;
 pub mod profile;
@@ -151,6 +152,7 @@ impl Plugin for MovementPlugin {
             )
             .add_render_feature(fx::SlowMotionOverlay::default());
         demo::register(app);
+        look::register(app);
         api::register(app);
     }
 }
