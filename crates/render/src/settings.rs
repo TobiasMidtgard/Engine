@@ -145,7 +145,8 @@ pub struct RenderSettings {
     /// Largest geometric error a cluster may show on screen, pixels (lower = more triangles).
     pub cluster_error_px: f32,
     /// The same for shadow maps, in shadow map texels (cascade texels are much larger than
-    /// screen pixels, so shadows use coarser clusters than the camera).
+    /// screen pixels, so shadows use coarser clusters than the camera). The default of 2 halves
+    /// the shadow triangles of 1 with no visible change under the shadow filter.
     pub cluster_shadow_error_texels: f32,
 }
 
@@ -189,7 +190,7 @@ impl Default for RenderSettings {
             virtual_geometry: true,
             virtual_geometry_min_triangles: 50_000,
             cluster_error_px: 1.0,
-            cluster_shadow_error_texels: 1.0,
+            cluster_shadow_error_texels: 2.0,
         }
     }
 }

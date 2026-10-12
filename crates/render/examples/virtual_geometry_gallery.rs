@@ -1,6 +1,6 @@
-//! Renders the virtual geometry gallery: a dense procedural boulder (1.3 million triangles), a
-//! field of its instances and a million-triangle cliff, up close, far away, and in the cluster
-//! and level-of-detail debug views.
+//! Renders the virtual geometry gallery: a dense procedural granite boulder (1.3 million
+//! triangles), a field of 60 of its instances and a 1.3 million triangle sandstone mesa, up
+//! close, far away, and in the cluster and level-of-detail debug views.
 //!
 //! ```text
 //! cargo run -p engine_render --release --example virtual_geometry_gallery -- <output dir>
@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 use engine_assets::Assets;
 use engine_core::prelude::*;
 use engine_render::prelude::*;
-use engine_render::{DebugView, RenderDisabled, RenderStats, Renderer, Vertex, capture_now};
+use engine_render::{DebugView, RenderDisabled, RenderStats, Renderer, capture_now};
 
 fn hash(x: i32, y: i32, z: i32) -> f32 {
     let mut h = (x as u32).wrapping_mul(0x8da6_b343)
@@ -77,57 +77,77 @@ fn ridged(p: Vec3, octaves: u32) -> f32 {
     sum / total
 }
 
-/// A boulder about 2.8 × 1.8 × 2.2 m (1,310,720 triangles).
+/// A granite boulder about 2.8 × 1.8 × 2.2 m (1,310,720 triangles): broken into flat facets
+/// with sharp edges, crested, cracked and grainy.
 fn boulder() -> Mesh {
+    // Fracture planes (unit normal, distance from the center).
+    let cuts: Vec<(Vec3, f32)> = (0..9)
+        .map(|k| {
+            let a = k as f32 * 2.399_963;
+            let y = 1.0 - 2.0 * (k as f32 + 0.5) / 9.0;
+            let s = (1.0 - y * y).sqrt();
+            (
+                Vec3::new(a.cos() * s, y, a.sin() * s),
+                0.82 + 0.1 * hash(k, 3, 7),
+            )
+        })
+        .collect();
     let mut m = engine_render::mesh::icosphere(1.0, 8);
     for v in &mut m.vertices {
         let p = Vec3::from(v.position);
-        let r = 1.0
-            + 0.4 * (fbm(p * 1.4, 4) - 0.5)
-            + 0.10 * ridged(p * 3.0 + Vec3::splat(11.0), 4)
-            + 0.025 * (fbm(p * 22.0, 4) - 0.5);
+        let mut r =
+            1.0 + 0.3 * (fbm(p * 1.3, 4) - 0.5) + 0.07 * ridged(p * 2.6 + Vec3::splat(11.0), 5);
+        for &(n, d) in &cuts {
+            let c = p.dot(n);
+            if c > 0.05 {
+                r = r.min(d / c + 0.04 * (fbm(p * 6.0, 2) - 0.5));
+            }
+        }
+        // Weathered crests, pits and grain.
+        r += 0.035 * ridged(p * 6.0 + Vec3::splat(2.0), 4);
+        r -= 0.02 * fbm(p * 14.0, 3).powf(3.0);
+        r += 0.006 * (fbm(p * 45.0, 3) - 0.5);
         v.position = (p * r * Vec3::new(1.4, 0.9, 1.1)).to_array();
     }
     m.compute_normals();
     m
 }
 
-/// A cliff face 60 m wide and 24 m high (1,048,576 triangles), facing +Z: layered rock with
-/// ledges, gullies and fine cracks.
-fn cliff() -> Mesh {
-    let (nx, ny) = (1024u32, 512u32);
-    let (width, height) = (60.0f32, 24.0f32);
-    let mut vertices = Vec::with_capacity(((nx + 1) * (ny + 1)) as usize);
-    for j in 0..=ny {
-        for i in 0..=nx {
-            let (u, v) = (i as f32 / nx as f32, j as f32 / ny as f32);
-            let (x, y) = ((u - 0.5) * width, v * height);
-            let p = Vec3::new(x, y, 0.0);
-            // Strata: terraces every ~1.6 m, broken up by noise.
-            let layer = y / 1.6 + 1.5 * fbm(p * 0.08, 3);
-            let terrace = (layer - layer.floor()).powf(3.0);
-            let gullies = ridged(p * Vec3::new(0.09, 0.03, 1.0), 4);
-            let depth = 2.5 * fbm(p * 0.05, 4)
-                + 0.9 * terrace
-                + 1.6 * gullies
-                + 0.12 * ridged(p * 0.9 + Vec3::splat(4.0), 4)
-                + 0.03 * fbm(p * 6.0, 3);
-            // Lean back toward the top.
-            let z = depth - 0.25 * y;
-            vertices.push(Vertex::new(Vec3::new(x, y, z), Vec3::Z, Vec2::new(u, v)));
-        }
+/// A sandstone mesa about 40 m across and 9 m high (1,310,720 triangles): layered ledges,
+/// gullies and weathered faces.
+fn outcrop() -> Mesh {
+    let mut m = engine_render::mesh::icosphere(1.0, 8);
+    for v in &mut m.vertices {
+        let p = Vec3::from(v.position);
+        // Strata: ledges about every 1.2 m of height, wavy and broken up.
+        let layer = p.y * 7.5 + 0.8 * fbm(p * 2.0, 3);
+        let ledge = (layer - layer.floor()).powf(4.0);
+        let r = 1.0 + 0.25 * (fbm(p * 1.2, 4) - 0.5) - 0.12 * ridged(p * 3.0, 4)
+            + 0.035 * ledge
+            + 0.01 * (fbm(p * 30.0, 3) - 0.5);
+        // Flat top: a mesa.
+        let mut q = p * r;
+        q.y = q.y.min(0.55 + 0.03 * fbm(p * 4.0, 2));
+        v.position = (q * Vec3::new(20.0, 16.0, 14.0)).to_array();
     }
-    let mut indices = Vec::with_capacity((nx * ny * 6) as usize);
-    let row = nx + 1;
-    for j in 0..ny {
-        for i in 0..nx {
-            let a = j * row + i;
-            indices.extend([a, a + 1, a + row + 1, a, a + row + 1, a + row]);
-        }
-    }
-    let mut m = Mesh::new(vertices, indices);
     m.compute_normals();
     m
+}
+
+/// A point `gap` meters outside the surface of `mesh` (placed by `transform`), on the line from
+/// its center toward `eye`.
+fn near_surface(mesh: &Mesh, transform: &Transform, eye: DVec3, gap: f64) -> DVec3 {
+    let center = transform.translation;
+    let dir = (eye - center).normalize();
+    let surface = mesh
+        .vertices
+        .iter()
+        .map(|v| transform.transform_point(Vec3::from(v.position).as_dvec3()) - center)
+        // Vertices within about 3 degrees of the line.
+        .filter(|p| p.normalize().dot(dir) > 0.9986)
+        .map(|p| p.dot(dir))
+        .fold(0.0, f64::max);
+    center + dir * (surface + gap)
 }
 
 fn mesh_state(app: &App) -> serde_json::Value {
@@ -155,61 +175,64 @@ fn main() {
         w.height = 720;
     }
     app.add_plugins(RenderPlugin);
+    // Until the clusters are built the rocks are drawn instanced: skip the sky occlusion map
+    // (and spawn the sun later) so that waiting stays cheap.
+    app.world.resource_mut::<RenderSettings>().sky_occlusion = false;
 
-    let (boulder, cliff) = {
+    let boulder_mesh = boulder();
+    let hero_transform = Transform::from_xyz(0.0, 1.2, 0.0)
+        .with_rotation(Quat::from_rotation_y(0.6))
+        .with_scale(Vec3::splat(2.2));
+    let hero_eye = DVec3::new(-3.4, 2.4, 4.6);
+    let detail_eye = near_surface(&boulder_mesh, &hero_transform, hero_eye, 1.3);
+    let (boulder, outcrop) = {
         let mut meshes = app.world.resource_mut::<Assets<Mesh>>();
-        (meshes.add(boulder()), meshes.add(cliff()))
+        (meshes.add(boulder_mesh), meshes.add(outcrop()))
     };
-    let stone = StandardMaterial::color(0.33, 0.30, 0.27)
+    let granite = StandardMaterial::color(0.17, 0.165, 0.155)
+        .with_roughness(0.8)
+        .with_detail(0.5, 0.03);
+    let sandstone = StandardMaterial::color(0.46, 0.33, 0.23)
         .with_roughness(0.9)
-        .with_detail(0.6, 0.06);
-    let cliff_stone = StandardMaterial::color(0.42, 0.36, 0.30)
-        .with_roughness(0.92)
-        .with_detail(0.5, 0.15);
+        .with_detail(0.6, 0.12);
     let w = &mut app.world;
+    // Looking at the sky while waiting.
     w.spawn((
         Camera::perspective(55.0),
-        Transform::from_xyz(0.0, 2.0, 8.0).looking_at(DVec3::ZERO, Vec3::Y),
-    ));
-    w.spawn((
-        DirectionalLight::default(),
-        Transform::default().looking_at(DVec3::new(-0.6, -0.45, -0.65), Vec3::Y),
+        Transform::from_xyz(0.0, 2.0, 8.0).looking_at(DVec3::new(0.0, 50.0, 0.0), Vec3::Z),
     ));
     w.spawn((
         Transform::default(),
         MeshRenderer::new(
             Shape::Plane {
-                size: [600.0, 600.0],
+                size: [800.0, 800.0],
                 subdivisions: 1,
             },
-            StandardMaterial::color(0.22, 0.2, 0.15)
+            StandardMaterial::color(0.24, 0.2, 0.15)
                 .with_roughness(0.95)
                 .with_detail(0.8, 0.3)
                 .with_detail_in_world(),
         ),
     ));
-    // The hero boulder, two meters tall.
-    w.spawn((
-        Transform::from_xyz(0.0, 1.3, 0.0).with_scale(Vec3::splat(2.2)),
-        MeshRenderer::new(boulder, stone),
-    ));
-    // A field of boulders of every size, half sunk into the ground.
+    // The hero boulder, two meters tall, and a field of boulders of every size around it,
+    // half sunk into the ground.
+    w.spawn((hero_transform, MeshRenderer::new(boulder, granite)));
     for k in 0..60 {
         let a = k as f64 * 2.399_963;
-        let r = 9.0 + 4.2 * (k as f64).sqrt() * 2.2;
-        let scale = 0.4 + 2.2 * (((k * 7919) % 100) as f32 / 100.0).powf(2.0);
+        let r = 9.0 + 9.0 * (k as f64).sqrt();
+        let scale = 0.35 + 2.0 * (((k * 7919) % 100) as f32 / 100.0).powf(2.0);
         let rotation =
-            Quat::from_rotation_y(a as f32 * 3.0) * Quat::from_rotation_x((k % 5) as f32 * 0.4);
+            Quat::from_rotation_y(a as f32 * 3.0) * Quat::from_rotation_x((k % 5) as f32 * 0.5);
         w.spawn((
-            Transform::from_xyz(a.cos() * r, 0.45 * scale as f64, a.sin() * r - 10.0)
+            Transform::from_xyz(a.cos() * r, 0.4 * scale as f64, a.sin() * r - 10.0)
                 .with_rotation(rotation)
                 .with_scale(Vec3::splat(scale)),
-            MeshRenderer::new(boulder, stone),
+            MeshRenderer::new(boulder, granite),
         ));
     }
     w.spawn((
-        Transform::from_xyz(0.0, -1.0, -45.0),
-        MeshRenderer::new(cliff, cliff_stone),
+        Transform::from_xyz(-10.0, 0.0, -75.0).with_rotation(Quat::from_rotation_y(0.4)),
+        MeshRenderer::new(outcrop, sandstone),
     ));
 
     app.update();
@@ -228,40 +251,25 @@ fn main() {
         app.update();
     }
     eprintln!("clusters built in {:.1} s", started.elapsed().as_secs_f32());
+    app.world.resource_mut::<RenderSettings>().sky_occlusion = true;
+    // Low afternoon sun from the left: raking light shows the relief.
+    app.world.spawn((
+        DirectionalLight::default(),
+        Transform::default().looking_at(DVec3::new(0.75, -0.32, -0.55), Vec3::Y),
+    ));
 
-    let shots: [(&str, DVec3, DVec3, DebugView); 5] = [
-        (
-            "01_boulder_close",
-            DVec3::new(1.2, 2.1, 3.6),
-            DVec3::new(0.2, 1.5, 0.0),
-            DebugView::None,
-        ),
-        (
-            "02_field_far",
-            DVec3::new(-30.0, 14.0, 70.0),
-            DVec3::new(0.0, 2.0, -20.0),
-            DebugView::None,
-        ),
-        (
-            "03_boulder_close_clusters",
-            DVec3::new(1.2, 2.1, 3.6),
-            DVec3::new(0.2, 1.5, 0.0),
-            DebugView::Clusters,
-        ),
-        (
-            "04_field_far_clusters",
-            DVec3::new(-30.0, 14.0, 70.0),
-            DVec3::new(0.0, 2.0, -20.0),
-            DebugView::Clusters,
-        ),
-        (
-            "05_field_far_levels",
-            DVec3::new(-30.0, 14.0, 70.0),
-            DVec3::new(0.0, 2.0, -20.0),
-            DebugView::ClusterLevels,
-        ),
+    let hero = (hero_eye, DVec3::new(0.0, 1.0, 0.0));
+    let detail = (detail_eye, DVec3::new(0.0, 1.0, 0.0));
+    let far = (DVec3::new(30.0, 16.0, 75.0), DVec3::new(-5.0, 2.0, -25.0));
+    let shots = [
+        ("01_boulder", hero, DebugView::None),
+        ("02_boulder_detail", detail, DebugView::None),
+        ("03_field_far", far, DebugView::None),
+        ("04_boulder_clusters", hero, DebugView::Clusters),
+        ("05_field_far_clusters", far, DebugView::Clusters),
+        ("06_field_far_levels", far, DebugView::ClusterLevels),
     ];
-    for (name, eye, target, debug) in shots {
+    for (name, (eye, target), debug) in shots {
         {
             let mut q = app.world.query_filtered::<&mut Transform, With<Camera>>();
             for mut t in q.iter_mut(&mut app.world) {
