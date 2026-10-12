@@ -169,7 +169,7 @@ pub(crate) fn physics_step(world: &mut World, mut q: Local<Option<StepQueries>>)
             table
                 .materials
                 .iter()
-                .map(|m| (m.friction, m.restitution))
+                .map(|m| (m.friction, m.restitution, crate::rolling::sinkage(m)))
                 .collect(),
         );
         sim.refresh_materials();
@@ -506,6 +506,7 @@ pub(crate) fn physics_step(world: &mut World, mut q: Local<Option<StepQueries>>)
             if scaled {
                 scale_time(&mut sim, rid, false);
             }
+            crate::rolling::resist_rolling(&mut sim, rid);
             if settings.contact_events {
                 sim.process_contacts(rid, sub_dt);
             } else {
