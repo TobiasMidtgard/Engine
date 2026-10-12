@@ -201,8 +201,8 @@ pub fn compute_cascades(
         ..Default::default()
     };
     let mut slice_near = first_near as f64;
-    for i in 0..count {
-        let slice_far = splits[i] as f64;
+    for (i, &split) in splits.iter().enumerate().take(count) {
+        let slice_far = split as f64;
         // Rotation-invariant bounding sphere of the frustum slice.
         let (d, radius) = if orthographic {
             let d = (slice_near + slice_far) * 0.5;

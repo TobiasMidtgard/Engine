@@ -104,9 +104,9 @@ fn try_create(
     vsync: bool,
 ) -> Result<(Gpu, Option<SurfaceState>), String> {
     let mut desc = match &window {
-        Some(w) => wgpu::InstanceDescriptor::new_with_display_handle(Box::new(WindowTarget(
-            w.clone(),
-        ))),
+        Some(w) => {
+            wgpu::InstanceDescriptor::new_with_display_handle(Box::new(WindowTarget(w.clone())))
+        }
         None => wgpu::InstanceDescriptor::new_without_display_handle(),
     };
     desc.backends = backends;

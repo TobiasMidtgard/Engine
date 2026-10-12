@@ -29,7 +29,11 @@ impl RenderFeature for SkyFeature {
             bind_group_layouts: &[Some(&gpu.frame_layout)],
             immediate_size: 0,
         });
-        let pipeline = |label: &str, vs: &str, fs: &str, format: wgpu::TextureFormat, depth: Option<wgpu::DepthStencilState>| {
+        let pipeline = |label: &str,
+                        vs: &str,
+                        fs: &str,
+                        format: wgpu::TextureFormat,
+                        depth: Option<wgpu::DepthStencilState>| {
             device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                 label: Some(label),
                 layout: Some(&layout),
@@ -57,8 +61,20 @@ impl RenderFeature for SkyFeature {
             })
         };
         // The sky is drawn at the far plane (depth 0 in reverse-Z) where nothing else was drawn.
-        self.sky = Some(pipeline("sky", "vs_sky", "fs_sky", gpu.formats.hdr, Some(gpu.depth_state(false))));
-        self.env = Some(pipeline("environment", "vs_env", "fs_env", gpu.formats.env, None));
+        self.sky = Some(pipeline(
+            "sky",
+            "vs_sky",
+            "fs_sky",
+            gpu.formats.hdr,
+            Some(gpu.depth_state(false)),
+        ));
+        self.env = Some(pipeline(
+            "environment",
+            "vs_env",
+            "fs_env",
+            gpu.formats.env,
+            None,
+        ));
     }
 
     fn draw(&self, phase: RenderPhase, pass: &mut wgpu::RenderPass<'_>, _ctx: &FrameContext) {

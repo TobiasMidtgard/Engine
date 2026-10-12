@@ -85,6 +85,29 @@ impl Mesh {
         }
     }
 
+    /// Give every triangle its own three vertices with the face normal (flat shading). The
+    /// glTF loader uses this for primitives without normals, as the glTF spec requires.
+    pub fn compute_flat_normals(&mut self) {
+        let mut vertices = Vec::with_capacity(self.indices.len());
+        for tri in self.indices.chunks_exact(3) {
+            let [a, b, c] = [tri[0] as usize, tri[1] as usize, tri[2] as usize];
+            if a.max(b).max(c) >= self.vertices.len() {
+                continue;
+            }
+            let pa = Vec3::from(self.vertices[a].position);
+            let pb = Vec3::from(self.vertices[b].position);
+            let pc = Vec3::from(self.vertices[c].position);
+            let n = (pb - pa).cross(pc - pa).normalize_or(Vec3::Y).to_array();
+            for i in [a, b, c] {
+                let mut v = self.vertices[i];
+                v.normal = n;
+                vertices.push(v);
+            }
+        }
+        self.indices = (0..vertices.len() as u32).collect();
+        self.vertices = vertices;
+    }
+
     /// Paint every vertex with one color.
     pub fn with_vertex_color(mut self, color: Vec4) -> Self {
         for v in &mut self.vertices {
@@ -118,15 +141,41 @@ impl Mesh {
 /// never need to ship mesh data: `{"Cuboid": {"size": [1, 2, 1]}}`.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub enum Shape {
-    Cuboid { size: [f32; 3] },
-    Sphere { radius: f32, segments: u32 },
-    Plane { size: [f32; 2], subdivisions: u32 },
-    Capsule { radius: f32, height: f32, segments: u32 },
-    Cylinder { radius: f32, height: f32, segments: u32 },
-    Cone { radius: f32, height: f32, segments: u32 },
-    Torus { radius: f32, tube: f32, segments: u32 },
+    Cuboid {
+        size: [f32; 3],
+    },
+    Sphere {
+        radius: f32,
+        segments: u32,
+    },
+    Plane {
+        size: [f32; 2],
+        subdivisions: u32,
+    },
+    Capsule {
+        radius: f32,
+        height: f32,
+        segments: u32,
+    },
+    Cylinder {
+        radius: f32,
+        height: f32,
+        segments: u32,
+    },
+    Cone {
+        radius: f32,
+        height: f32,
+        segments: u32,
+    },
+    Torus {
+        radius: f32,
+        tube: f32,
+        segments: u32,
+    },
     /// Single quad facing +Z.
-    Quad { size: [f32; 2] },
+    Quad {
+        size: [f32; 2],
+    },
 }
 
 impl Shape {
@@ -206,7 +255,8 @@ pub fn plane(size: Vec2, subdivisions: u32) -> Mesh {
             let u = x as f32 / n as f32;
             let v = z as f32 / n as f32;
             let p = Vec3::new((u - 0.5) * size.x, 0.0, (v - 0.5) * size.y);
-            m.vertices.push(Vertex::new(p, Vec3::Y, Vec2::new(u, v) * size));
+            m.vertices
+                .push(Vertex::new(p, Vec3::Y, Vec2::new(u, v) * size));
         }
     }
     let row = n + 1;
@@ -223,7 +273,9 @@ pub fn plane(size: Vec2, subdivisions: u32) -> Mesh {
 /// Quad in the XY plane facing +Z.
 pub fn quad(size: Vec2) -> Mesh {
     let h = size * 0.5;
-    let v = |x: f32, y: f32, u: f32, w: f32| Vertex::new(Vec3::new(x, y, 0.0), Vec3::Z, Vec2::new(u, w));
+    let v = |x: f32, y: f32, u: f32, w: f32| {
+        Vertex::new(Vec3::new(x, y, 0.0), Vec3::Z, Vec2::new(u, w))
+    };
     Mesh::new(
         vec![
             v(-h.x, -h.y, 0.0, 1.0),
@@ -386,8 +438,14 @@ mod tests {
         // Every triangle's geometric normal should agree with its vertex normals.
         let mut bad = 0;
         for tri in m.indices.chunks_exact(3) {
-            let p: Vec<Vec3> = tri.iter().map(|&i| Vec3::from(m.vertices[i as usize].position)).collect();
-            let n: Vec3 = tri.iter().map(|&i| Vec3::from(m.vertices[i as usize].normal)).sum();
+            let p: Vec<Vec3> = tri
+                .iter()
+                .map(|&i| Vec3::from(m.vertices[i as usize].position))
+                .collect();
+            let n: Vec3 = tri
+                .iter()
+                .map(|&i| Vec3::from(m.vertices[i as usize].normal))
+                .sum();
             let g = (p[1] - p[0]).cross(p[2] - p[0]);
             if g.length_squared() > 1e-12 && g.dot(n) < 0.0 {
                 bad += 1;
@@ -399,13 +457,37 @@ mod tests {
     #[test]
     fn shapes_are_counter_clockwise() {
         for shape in [
-            Shape::Cuboid { size: [1.0, 2.0, 3.0] },
-            Shape::Sphere { radius: 1.0, segments: 16 },
-            Shape::Plane { size: [4.0, 4.0], subdivisions: 2 },
-            Shape::Capsule { radius: 0.4, height: 1.8, segments: 12 },
-            Shape::Cylinder { radius: 0.5, height: 2.0, segments: 12 },
-            Shape::Cone { radius: 0.5, height: 1.0, segments: 12 },
-            Shape::Torus { radius: 1.0, tube: 0.25, segments: 16 },
+            Shape::Cuboid {
+                size: [1.0, 2.0, 3.0],
+            },
+            Shape::Sphere {
+                radius: 1.0,
+                segments: 16,
+            },
+            Shape::Plane {
+                size: [4.0, 4.0],
+                subdivisions: 2,
+            },
+            Shape::Capsule {
+                radius: 0.4,
+                height: 1.8,
+                segments: 12,
+            },
+            Shape::Cylinder {
+                radius: 0.5,
+                height: 2.0,
+                segments: 12,
+            },
+            Shape::Cone {
+                radius: 0.5,
+                height: 1.0,
+                segments: 12,
+            },
+            Shape::Torus {
+                radius: 1.0,
+                tube: 0.25,
+                segments: 16,
+            },
             Shape::Quad { size: [1.0, 1.0] },
         ] {
             let m = shape.mesh();

@@ -491,7 +491,7 @@ impl Renderer {
 
         // Environment map (double-buffered: draw into one while the other is bound).
         let interval = settings.environment_interval.max(1) as u64;
-        if !self.env_rendered || self.frame_index % interval == 0 {
+        if !self.env_rendered || self.frame_index.is_multiple_of(interval) {
             let target = 1 - self.env_current;
             {
                 let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -711,7 +711,6 @@ impl Renderer {
         }
 
         let stats = self.collect_stats(&view, started);
-        drop(ctx);
         self.shared.queue.submit([encoder.finish()]);
         self.meter.after_submit();
         if let Some(t) = surface_texture {
@@ -999,6 +998,7 @@ fn create_frame_group(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn fullscreen_pipeline(
     shared: &GpuShared,
     label: &str,
