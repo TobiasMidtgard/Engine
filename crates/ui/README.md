@@ -1,6 +1,6 @@
 # engine_ui — UI
 
-**Owner:** UI. **Status:** stub. The owning workstream replaces this with the real module.
+**Owner:** UI system and maps. **Status:** stub. The owning workstream replaces this with the real module.
 Background research: `game-engine-research/ui.md` in the project files.
 
 ## Scope

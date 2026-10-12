@@ -1,6 +1,6 @@
 # engine_softbody — Cloth, ropes, soft bodies, hair and fur
 
-**Owner:** Cloth, soft bodies & hair (proposed). **Status:** stub. The owning workstream replaces this with the real module.
+**Owner:** Cloth, soft bodies and hair. **Status:** stub. The owning workstream replaces this with the real module.
 Background research: `game-engine-research/physics.md` (cloth and soft-body sections: Chaos Cloth/Flesh, Jolt and Godot `SoftBody3D`, XPBD) in the project files.
 
 Rigid bodies live in the physics module; this crate simulates everything that bends, stretches or squishes and couples it to those rigid bodies both ways, through the physics contract only (so either module can be replaced).

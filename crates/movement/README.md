@@ -1,6 +1,6 @@
 # engine_movement — Movement & time dilation gameplay
 
-**Owner:** Movement & time. **Status:** stub. The owning workstream replaces this with the real module.
+**Owner:** Movement and slow motion. **Status:** stub. The owning workstream replaces this with the real module.
 Background research: `game-engine-research/animation.md` in the project files.
 
 ## Scope

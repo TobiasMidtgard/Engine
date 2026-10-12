@@ -1,6 +1,6 @@
 # engine_ai_bridge: AI bridge
 
-**Owner:** Core.
+**Owner:** Core (architecture and integration).
 
 Lets AI agents and tools drive a running game, windowed or headless. Every API function
 registered with `app.register_api` is served as **newline-delimited JSON-RPC 2.0 over TCP**.

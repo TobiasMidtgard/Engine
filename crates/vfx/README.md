@@ -1,6 +1,6 @@
 # engine_vfx — Particles & VFX
 
-**Owner:** VFX (proposed). **Status:** stub. The owning workstream replaces this with the real module.
+**Owner:** Particles and magic effects. **Status:** stub. The owning workstream replaces this with the real module.
 Background research: `game-engine-research/particles.md` in the project files.
 
 ## Scope

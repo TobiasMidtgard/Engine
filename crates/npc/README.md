@@ -1,6 +1,6 @@
 # engine_npc — NPC AI
 
-**Owner:** NPC AI. **Status:** stub. The owning workstream replaces this with the real module.
+**Owner:** Smart NPC AI. **Status:** stub. The owning workstream replaces this with the real module.
 Background research: `game-engine-research/scripting.md` in the project files.
 
 ## Scope

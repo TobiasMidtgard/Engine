@@ -1,6 +1,6 @@
 # engine_terrain — Terrain
 
-**Owner:** Planets & terrain (proposed). **Status:** stub. The owning workstream replaces this with the real module.
+**Owner:** Planets and terrain. **Status:** stub. The owning workstream replaces this with the real module.
 Background research: `game-engine-research/graphics.md` in the project files.
 
 ## Scope

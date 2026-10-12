@@ -1,6 +1,6 @@
 # engine_foliage — Foliage & ecology
 
-**Owner:** Foliage & ecology. **Status:** stub. The owning workstream replaces this with the real module.
+**Owner:** Foliage and ecology. **Status:** stub. The owning workstream replaces this with the real module.
 Background research: `game-engine-research/graphics.md` in the project files.
 
 ## Scope

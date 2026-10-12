@@ -1,6 +1,6 @@
 # engine_physics — Physics
 
-**Owner:** Physics & vehicles. **Status:** stub. The owning workstream replaces this with the real module.
+**Owner:** Physics and rigid bodies. **Status:** stub. The owning workstream replaces this with the real module.
 Background research: `game-engine-research/physics.md` in the project files.
 
 ## Scope

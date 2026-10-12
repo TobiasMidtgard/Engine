@@ -1,6 +1,6 @@
 # engine_anim — Animation
 
-**Owner:** Animation. **Status:** stub. The owning workstream replaces this with the real module.
+**Owner:** Animation system. **Status:** stub. The owning workstream replaces this with the real module.
 Background research: `game-engine-research/animation.md` in the project files.
 
 ## Scope

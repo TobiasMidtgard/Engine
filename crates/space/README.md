@@ -1,6 +1,6 @@
 # engine_space — Space & planets
 
-**Owner:** Physics & vehicles (or Planets & terrain). **Status:** stub. The owning workstream replaces this with the real module.
+**Owner:** Planets and terrain. **Status:** stub. The owning workstream replaces this with the real module.
 Background research: `game-engine-research/physics.md` in the project files.
 
 ## Scope

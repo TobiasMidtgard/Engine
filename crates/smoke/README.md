@@ -1,6 +1,6 @@
 # engine_smoke — Smoke, gas & volumetric clouds
 
-**Owner:** World simulation. **Status:** stub. The owning workstream replaces this with the real module.
+**Owner:** Fire and smoke. **Status:** stub. The owning workstream replaces this with the real module.
 Background research: `game-engine-research/particles.md` in the project files.
 
 ## Scope

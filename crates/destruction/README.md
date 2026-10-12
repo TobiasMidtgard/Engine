@@ -1,6 +1,6 @@
 # engine_destruction — Destruction
 
-**Owner:** Destruction. **Status:** stub. The owning workstream replaces this with the real module.
+**Owner:** Destructible terrain and buildings. **Status:** stub. The owning workstream replaces this with the real module.
 Background research: `game-engine-research/physics.md` in the project files.
 
 ## Scope

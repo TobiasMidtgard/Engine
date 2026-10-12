@@ -1,6 +1,6 @@
 # engine_water — Water
 
-**Owner:** World simulation. **Status:** stub. The owning workstream replaces this with the real module.
+**Owner:** Water simulation. **Status:** stub. The owning workstream replaces this with the real module.
 Background research: `game-engine-research/graphics.md` in the project files.
 
 ## Scope

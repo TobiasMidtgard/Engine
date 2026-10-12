@@ -49,33 +49,40 @@ tonemap → UI overlays → present).
 
 ## Modules and ownership
 
-Each module crate has one owner (a workstream). Owners change only their own crates. Changes
-to shared crates (`core`, `world`, `render`, `assets`, `input`, `platform`, `engine`) are made
-by the core owner, on request.
+Each crate has one owner: a workstream with its own project thread. Owners change only their
+own crates and their own showcase zone. Changes to the shared core crates (`core`, `world`,
+`assets`, `input`, `platform`, `engine`, `ai_bridge`, `debug`) are made by the core owner, on
+request; anything that touches an `engine_world` contract is reviewed by the core owner, who
+also keeps `main` green. `engine_render` changes go through the Rendering and lighting owner.
+
+Every workstream branches from `origin/main` and lands work through pull requests; nobody
+pushes to `main` directly. In `games/showcase/src/zones.rs`, a module thread edits only its own
+zone's entry; the rest of the showcase belongs to the Beautiful showcase world thread.
 
 | Crate | Scope | Owner |
 |---|---|---|
-| `engine_core`, `engine`, `engine_world`, `engine_assets`, `engine_render`, `engine_input`, `engine_platform` | Engine core, shared contracts, renderer, assets, input, window | Core |
-| `engine_ai_bridge`, `tools/engine-mcp` | JSON-RPC/MCP bridge so AI agents can inspect, edit, step and screenshot a running game | Core |
-| `engine_debug` | Debug drawing (lines, shapes, gizmos) for every module | Core |
-| `engine_audio` | Spatial audio, footsteps/impacts from surface materials | Audio (proposed) |
-| `games/showcase` | The tech showcase test area | Core |
-| `engine_physics` | Rigid-body simulation, colliders, joints, ragdolls, queries, character controller, floating-origin physics islands | Physics & vehicles |
-| `engine_softbody` | Cloth (characters, flags, sails), ropes and cables, soft bodies (jelly, flesh, soft tires), hair and fur dynamics; one XPBD solver with two-way rigid coupling, tearing | Cloth, soft bodies & hair (proposed) |
-| `engine_vehicles` | Cars (suspension, tires, drivetrain), planes (aero surfaces), spaceships (thrusters, RCS) | Physics & vehicles |
-| `engine_space` | Orbits, planets and moons, gravity wells, interplanetary travel, reference frames | Physics & vehicles (or Planets) |
-| `engine_terrain` | Heightmap/planet terrain with LOD, voxel volumes, ground queries, deformation (mud/snow tracks) | Planets & terrain (proposed) |
-| `engine_water` | Oceans, rivers, lakes, interactive water, buoyancy, splashes, rain filling puddles | World simulation |
-| `engine_weather` | Weather state machine, temperature, wind, clouds/rain/snow, day–night, surface wetness/snow | World simulation |
-| `engine_fire` | Combustion, fire spread through fuel (grass, wood), heat, embers | World simulation |
-| `engine_smoke` | Smoke/gas volumes that react to wind, bullets and explosions; volumetric clouds and fog | World simulation |
-| `engine_vfx` | GPU particles (spells, splashes, sparks, debris), trails, decals | VFX (proposed) |
-| `engine_foliage` | Procedural plants, growth from water/sun/soil/minerals, chopping and regrowth, glowing cave mushrooms | Foliage & ecology |
-| `engine_anim` | Skeletons, clips, blend trees, IK, procedural animation for humanoids, animals, vehicles; muscle flex and jiggle; GPU skinning feature | Animation |
-| `engine_npc` | Perception, tactics, cover/terrain use, spacing, blocking, skill/reaction/logic parameters | NPC AI |
-| `engine_ui` | Game UI: dialogue, shop, inventory, maps (flat, 3D globe, galaxy), HUD | UI |
-| `engine_destruction` | Fracture, breakable walls (siege-style), voxel edits through the terrain API | Destruction |
-| `engine_movement` | Advanced locomotion (wall-run, slide, dash), combat movement, time-dilation gameplay (perception levels, slow-mo on attacks) | Movement & time |
+| `engine_core`, `engine`, `engine_world`, `engine_assets`, `engine_input`, `engine_platform` | Engine core, shared contracts, assets, input, windows and platforms | Core (architecture and integration) |
+| `engine_ai_bridge`, `tools/engine-mcp` | JSON-RPC/MCP bridge so AI agents can inspect, edit, step and screenshot a running game | Core (architecture and integration) |
+| `engine_debug` | Debug drawing (lines, shapes, gizmos) for every module | Core (architecture and integration) |
+| `engine_render` | Renderer, lighting, shadows, sky and sky occlusion, materials; the planned strand renderer (hair, fur, grass), wrinkle maps, and 2D/2.5D rendering | Rendering and lighting |
+| `games/showcase` | The tech showcase world: environment, viewpoints, screenshot tour, and the list of every test case with its owner | Beautiful showcase world |
+| `engine_physics` | Rigid-body simulation, colliders, joints, ragdolls, queries, character controller, floating-origin physics islands | Physics and rigid bodies |
+| `engine_vehicles` | Cars (suspension, tires, drivetrain), planes (aero surfaces), spaceships (thrusters, RCS) | Cars, planes and spaceships |
+| `engine_softbody` | Cloth (characters, flags, sails), ropes and cables, soft bodies (jelly, flesh, soft tires), hair and fur dynamics; one XPBD solver with two-way rigid coupling, tearing | Cloth, soft bodies and hair |
+| `engine_space` | Orbits, planets and moons, gravity wells, interplanetary travel, reference frames | Planets and terrain |
+| `engine_terrain` | Heightmap/planet terrain with LOD, voxel volumes, ground queries, deformation (mud/snow tracks) | Planets and terrain |
+| `engine_water` | Oceans, rivers, lakes, interactive water, buoyancy, splashes, rain filling puddles | Water simulation |
+| `engine_weather` | Weather state machine, temperature, wind, volumetric clouds, rain/snow, day–night, surface wetness/snow | Weather, wind and clouds |
+| `engine_fire` | Combustion, fire spread through fuel (grass, wood), heat, embers | Fire and smoke |
+| `engine_smoke` | Smoke/gas volumes that react to wind, bullets and explosions; volumetric fog | Fire and smoke |
+| `engine_vfx` | GPU particles (spells, splashes, sparks, debris), trails, decals | Particles and magic effects |
+| `engine_foliage` | Procedural plants, growth from water/sun/soil/minerals, chopping and regrowth, glowing cave mushrooms | Foliage and ecology |
+| `engine_anim` | Skeletons, clips, blend trees, IK, procedural animation for humanoids, animals, vehicles; muscle flex and jiggle; GPU skinning feature | Animation system |
+| `engine_npc` | Perception, tactics, cover/terrain use, spacing, blocking, skill/reaction/logic parameters; wildlife and dynamic fauna | Smart NPC AI |
+| `engine_ui` | Game UI: dialogue, shop, inventory, maps (flat, 3D globe, galaxy), HUD | UI system and maps |
+| `engine_destruction` | Fracture, breakable walls (siege-style), voxel edits through the terrain API | Destructible terrain and buildings |
+| `engine_movement` | Advanced locomotion (wall-run, slide, dash), combat movement, time-dilation gameplay (perception levels, slow-mo on attacks) | Movement and slow motion |
+| `engine_audio` | Spatial audio, footsteps/impacts from surface materials | Audio and footsteps |
 | `engine_script` | Hot-reloaded gameplay scripting | Later |
 
 ### Dependencies between modules: none

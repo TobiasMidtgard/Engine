@@ -1,6 +1,6 @@
 # engine_weather — Weather & day–night
 
-**Owner:** World simulation. **Status:** stub. The owning workstream replaces this with the real module.
+**Owner:** Weather, wind and clouds. **Status:** stub. The owning workstream replaces this with the real module.
 Background research: `game-engine-research/lighting.md` in the project files.
 
 ## Scope
