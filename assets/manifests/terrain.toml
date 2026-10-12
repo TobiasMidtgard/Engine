@@ -31,35 +31,6 @@ sha256 = "de34be0f135a3c92fe6e55cca9501a4cc40e02e84de9cc4c7fefded1da5bd3f3"
 license = "CC0-1.0"
 source = "https://polyhaven.com/a/leafy_grass"
 
-# Thin grass over soil (terrain grass variant).
-[[file]]
-path = "terrain/sparse_grass/sparse_grass_diff_2k.jpg"
-url = "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/sparse_grass/sparse_grass_diff_2k.jpg"
-sha256 = "3b655de96161164bf2324e136b3409ad8417c9f94750bc008e9c93ee507c2fac"
-license = "CC0-1.0"
-source = "https://polyhaven.com/a/sparse_grass"
-
-[[file]]
-path = "terrain/sparse_grass/sparse_grass_nor_gl_2k.jpg"
-url = "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/sparse_grass/sparse_grass_nor_gl_2k.jpg"
-sha256 = "5539a5913653a106a4e8a699a1d288f0b41907775b5fb36156ef5be2e937718b"
-license = "CC0-1.0"
-source = "https://polyhaven.com/a/sparse_grass"
-
-[[file]]
-path = "terrain/sparse_grass/sparse_grass_arm_2k.jpg"
-url = "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/sparse_grass/sparse_grass_arm_2k.jpg"
-sha256 = "f498dcdbfd1c29b6c36232fc56e69d467be7d6d1d180d2a294138d9c725d6b66"
-license = "CC0-1.0"
-source = "https://polyhaven.com/a/sparse_grass"
-
-[[file]]
-path = "terrain/sparse_grass/sparse_grass_disp_2k.jpg"
-url = "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/sparse_grass/sparse_grass_disp_2k.jpg"
-sha256 = "84301f04bb98bb87a2101bd6923142d17d070a97227f01c55aa3a383ec823297"
-license = "CC0-1.0"
-source = "https://polyhaven.com/a/sparse_grass"
-
 # Forest floor: leaves, needles, twigs (terrain forest floor).
 [[file]]
 path = "terrain/forrest_ground_01/forrest_ground_01_diff_2k.jpg"
@@ -175,64 +146,6 @@ url = "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/rock_face/rock_fa
 sha256 = "2b057d933924f800f0aa008b9d5a0011dbf2a91d7819fc412db12e02c6553814"
 license = "CC0-1.0"
 source = "https://polyhaven.com/a/rock_face"
-
-# Rocky ground with stones (terrain rock and scree).
-[[file]]
-path = "terrain/rocky_terrain_02/rocky_terrain_02_diff_2k.jpg"
-url = "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/rocky_terrain_02/rocky_terrain_02_diff_2k.jpg"
-sha256 = "9b042fe0618ffbc3650592456d7d8d265ba9a1cb5ce802f5f1d86b7ee79508a1"
-license = "CC0-1.0"
-source = "https://polyhaven.com/a/rocky_terrain_02"
-
-[[file]]
-path = "terrain/rocky_terrain_02/rocky_terrain_02_nor_gl_2k.jpg"
-url = "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/rocky_terrain_02/rocky_terrain_02_nor_gl_2k.jpg"
-sha256 = "556ed903180a9431b253fc1c334c769dc4615c5c0f4ef1cedf20533ae8409ce8"
-license = "CC0-1.0"
-source = "https://polyhaven.com/a/rocky_terrain_02"
-
-[[file]]
-path = "terrain/rocky_terrain_02/rocky_terrain_02_arm_2k.jpg"
-url = "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/rocky_terrain_02/rocky_terrain_02_arm_2k.jpg"
-sha256 = "8d658c2836ca4b8e436b29cc4b909ac273289f689cd064c459d7e9ae0d554789"
-license = "CC0-1.0"
-source = "https://polyhaven.com/a/rocky_terrain_02"
-
-[[file]]
-path = "terrain/rocky_terrain_02/rocky_terrain_02_disp_2k.jpg"
-url = "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/rocky_terrain_02/rocky_terrain_02_disp_2k.jpg"
-sha256 = "84a544dad4d12da56962297dbc7c64813c918ca4942cc8b71b5a18799e454c24"
-license = "CC0-1.0"
-source = "https://polyhaven.com/a/rocky_terrain_02"
-
-# Fresh snow (terrain snow).
-[[file]]
-path = "terrain/snow_02/snow_02_diff_2k.jpg"
-url = "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/snow_02/snow_02_diff_2k.jpg"
-sha256 = "d185c2853c7e674161789db4eed1c5708d85e4f6e3dcb5698209568adf02aa98"
-license = "CC0-1.0"
-source = "https://polyhaven.com/a/snow_02"
-
-[[file]]
-path = "terrain/snow_02/snow_02_nor_gl_2k.jpg"
-url = "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/snow_02/snow_02_nor_gl_2k.jpg"
-sha256 = "288539ee33387e91035be4dc8d10da574bf6a95c8374d33b6b1dc465c6949e8f"
-license = "CC0-1.0"
-source = "https://polyhaven.com/a/snow_02"
-
-[[file]]
-path = "terrain/snow_02/snow_02_arm_2k.jpg"
-url = "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/snow_02/snow_02_arm_2k.jpg"
-sha256 = "b17b8e2f1be87aa72e024993b4353a897af041fb76e6a9b31887fb0c09eac2d2"
-license = "CC0-1.0"
-source = "https://polyhaven.com/a/snow_02"
-
-[[file]]
-path = "terrain/snow_02/snow_02_disp_2k.jpg"
-url = "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/snow_02/snow_02_disp_2k.jpg"
-sha256 = "c3fe9fe26907138e23e685c53c43152858f27042b802931e0f71bc0c62286fdd"
-license = "CC0-1.0"
-source = "https://polyhaven.com/a/snow_02"
 
 # Beach sand from above (terrain sand).
 [[file]]
