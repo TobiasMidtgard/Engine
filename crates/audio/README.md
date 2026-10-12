@@ -1,6 +1,6 @@
 # engine_audio — Audio
 
-**Owner:** Core (until assigned). **Status:** stub. The owning workstream replaces this with the real module.
+**Owner:** Audio (proposed). **Status:** stub. The owning workstream replaces this with the real module.
 Background research: `game-engine-research/sound.md` in the project files.
 
 ## Scope

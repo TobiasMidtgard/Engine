@@ -58,7 +58,7 @@ by the core owner, on request.
 | `engine_core`, `engine`, `engine_world`, `engine_assets`, `engine_render`, `engine_input`, `engine_platform` | Engine core, shared contracts, renderer, assets, input, window | Core |
 | `engine_ai_bridge`, `tools/engine-mcp` | JSON-RPC/MCP bridge so AI agents can inspect, edit, step and screenshot a running game | Core |
 | `engine_debug` | Debug drawing (lines, shapes, gizmos) for every module | Core |
-| `engine_audio` | Spatial audio, footsteps/impacts from surface materials | Core (until assigned) |
+| `engine_audio` | Spatial audio, footsteps/impacts from surface materials | Audio (proposed) |
 | `games/showcase` | The tech showcase test area | Core |
 | `engine_physics` | Rigid-body simulation, colliders, joints, ragdolls, queries, character controller, floating-origin physics islands | Physics & vehicles |
 | `engine_softbody` | Cloth (characters, flags, sails), ropes and cables, soft bodies (jelly, flesh, soft tires), hair and fur dynamics; one XPBD solver with two-way rigid coupling, tearing | Cloth, soft bodies & hair (proposed) |
