@@ -1268,7 +1268,13 @@ fn stream_water(commands: &mut Commands, meshes: &mut Assets<Mesh>, land: &Lands
                 );
             }
         }
+        // The falls get their own curved sheet; the ribbon stops at the lip and starts again
+        // at the foot.
+        let falls = st.falls();
         for i in 0..n as u32 - 1 {
+            if falls.is_some_and(|(top, bottom)| (top..bottom).contains(&(i as usize))) {
+                continue;
+            }
             let (a, b, c, d) = (2 * i, 2 * i + 1, 2 * i + 2, 2 * i + 3);
             let pos = |k: u32| Vec3::from(mesh.vertices[k as usize].position);
             // Wind so the ribbon faces up (or downstream where it falls).
@@ -1295,7 +1301,21 @@ fn stream_water(commands: &mut Commands, meshes: &mut Assets<Mesh>, land: &Lands
             at(origin),
             MeshRenderer::new(meshes.add(mesh), water).without_shadows(),
         ));
-        if let (Some((c, _)), Some((_, bottom))) = (st.pool, st.falls()) {
+        if let Some((top, bottom)) = falls {
+            // Falling water is mostly air: a rough, white, barely mirror-like sheet.
+            let mut white_water = StandardMaterial::hex(0xffffff)
+                .with_roughness(0.35)
+                .with_alpha(0.93);
+            white_water.reflectance = 0.25;
+            white_water.receives_wetness = false;
+            white_water.double_sided = true;
+            let sheet = falls_sheet(st, top, bottom, &level, o);
+            commands.spawn((
+                at(origin),
+                MeshRenderer::new(meshes.add(sheet), white_water).without_shadows(),
+            ));
+        }
+        if let (Some((c, _)), Some((_, bottom))) = (st.pool, falls) {
             let mut froth = StandardMaterial::hex(0xc8d4d8)
                 .with_roughness(0.4)
                 .with_alpha(0.75);
@@ -1312,6 +1332,79 @@ fn stream_water(commands: &mut Commands, meshes: &mut Assets<Mesh>, land: &Lands
             );
         }
     }
+}
+
+/// The waterfall as a sheet that leaves the lip, arcs out and spreads as it falls: ragged
+/// columns of glassy water near the lip turning to white, aerated streaks below. Positions are
+/// relative to `o` (the stream's first point).
+fn falls_sheet(
+    st: &crate::landscape::Stream,
+    top: usize,
+    bottom: usize,
+    level: &dyn Fn(usize) -> f64,
+    o: DVec2,
+) -> Mesh {
+    const COLUMNS: usize = 28;
+    const ROWS: usize = 22;
+    let glassy = Vec3::new(0.1, 0.2, 0.2);
+    let white = Vec3::new(0.93, 0.95, 0.96);
+    let lip = st.path[top];
+    let dir = (st.path[top + 1] - st.path[top.saturating_sub(1)]).normalize_or(DVec2::Y);
+    let side = DVec2::new(-dir.y, dir.x);
+    let (y0, y1) = (level(top), level(bottom));
+    let drop = (y0 - y1).max(0.5);
+    let fall_time = (2.0 * drop / 9.81).sqrt();
+    let reach = (st.path[bottom] - lip).length() * 0.75;
+    let mut rng = Rng::new(0xFA11);
+    let mut mesh = Mesh::default();
+    // Each column leaves the lip a little faster or slower, so the sheet tears into streaks.
+    let speeds: Vec<f64> = (0..=COLUMNS)
+        .map(|_| reach / fall_time * rng.range(0.8, 1.15) as f64)
+        .collect();
+    let streak: Vec<f32> = (0..=COLUMNS).map(|_| rng.range(0.0, 1.0)).collect();
+    for (k, (&speed, &streak)) in speeds.iter().zip(&streak).enumerate() {
+        let u = k as f64 / COLUMNS as f64 - 0.5;
+        for j in 0..=ROWS {
+            let t = j as f64 / ROWS as f64 * fall_time;
+            let width = st.width * (0.8 + 0.4 * j as f64 / ROWS as f64);
+            let p = lip + dir * (speed * t) + side * (width * u) - o;
+            let y = (y0 - 0.5 * 9.81 * t * t).max(y1);
+            // Glassy over the lip, white and streaky once it breaks up.
+            let foam = (smoothstep(0.0, 0.25, j as f32 / ROWS as f32) * (0.7 + 0.3 * streak))
+                .clamp(0.0, 1.0);
+            let c = glassy.lerp(white, foam);
+            mesh.vertices.push(
+                engine::render::Vertex::new(
+                    Vec3::new(p.x as f32, y as f32, p.y as f32),
+                    Vec3::Y,
+                    Vec2::new(k as f32 / COLUMNS as f32, j as f32 / ROWS as f32),
+                )
+                .with_color(c.extend(1.0)),
+            );
+        }
+    }
+    let at_ = |k: usize, j: usize| (k * (ROWS + 1) + j) as u32;
+    for k in 0..COLUMNS {
+        for j in 0..ROWS {
+            let (a, b, c, d) = (at_(k, j), at_(k + 1, j), at_(k, j + 1), at_(k + 1, j + 1));
+            mesh.indices.extend_from_slice(&[a, b, c, b, d, c]);
+        }
+    }
+    // Smooth normals facing away from the cliff (the material is double-sided).
+    let mut normals = vec![Vec3::ZERO; mesh.vertices.len()];
+    for t in mesh.indices.chunks(3) {
+        let p = |k: u32| Vec3::from(mesh.vertices[k as usize].position);
+        let nrm = (p(t[1]) - p(t[0])).cross(p(t[2]) - p(t[0]));
+        for &k in t {
+            normals[k as usize] += nrm;
+        }
+    }
+    let out = Vec3::new(dir.x as f32, 0.0, dir.y as f32);
+    for (v, nrm) in mesh.vertices.iter_mut().zip(normals) {
+        let n = nrm.normalize_or(out);
+        v.normal = (if n.dot(out) < 0.0 { -n } else { n }).to_array();
+    }
+    mesh
 }
 
 /// Combat arena: sand floor ringed by pillars, cover, a ramp and a wall-run wall; fighters. The
@@ -1704,77 +1797,6 @@ pub fn range(commands: &mut Commands, _lib: &Library, z: &Zone) {
             at(c + DVec3::new(-19.0, 1.0, zz)),
         );
     }
-}
-
-/// Weather station on its hill: mast with anemometer and wind sock, instrument screen, rain
-/// gauge. The Weather, wind and clouds thread owns it.
-pub fn weather(commands: &mut Commands, _lib: &Library, z: &Zone) {
-    let c = z.center;
-    spawn(
-        commands,
-        cyl(0.1, 12.0),
-        metal(),
-        at(c + DVec3::new(0.0, 6.0, 0.0)),
-    );
-    for k in 0..3 {
-        let a = k as f32 / 3.0 * TAU;
-        spawn(
-            commands,
-            cuboid(0.9, 0.04, 0.04),
-            metal(),
-            yawed(
-                c + DVec3::new((a.cos() * 0.45) as f64, 12.1, (a.sin() * 0.45) as f64),
-                -a,
-            ),
-        );
-        spawn(
-            commands,
-            Shape::Sphere {
-                radius: 0.12,
-                segments: 10,
-            },
-            metal(),
-            at(c + DVec3::new((a.cos() * 0.9) as f64, 12.1, (a.sin() * 0.9) as f64)),
-        );
-    }
-    spawn(
-        commands,
-        Shape::Cone {
-            radius: 0.3,
-            height: 1.6,
-            segments: 16,
-        },
-        mat(0xff6a00, 0.7).with_subsurface(0.4),
-        Transform::from_translation(c + DVec3::new(0.9, 9.0, 0.0))
-            .with_rotation(Quat::from_rotation_z(-std::f32::consts::FRAC_PI_2)),
-    );
-    spawn(
-        commands,
-        cuboid(1.0, 0.8, 0.8),
-        mat(0xf4f4f0, 0.6),
-        at(c + DVec3::new(4.0, 1.4, 2.0)),
-    );
-    for (x, zz) in [(-0.4, -0.3), (0.4, -0.3), (-0.4, 0.3), (0.4, 0.3)] {
-        spawn(
-            commands,
-            cuboid(0.06, 1.0, 0.06),
-            mat(0xf4f4f0, 0.6),
-            at(c + DVec3::new(4.0 + x, 0.5, 2.0 + zz)),
-        );
-    }
-    spawn(
-        commands,
-        cyl(0.15, 0.6),
-        metal(),
-        at(c + DVec3::new(-3.0, 0.3, 3.0)),
-    );
-    spawn(
-        commands,
-        cuboid(2.0, 0.05, 1.2),
-        mat(0x1a2a4a, 0.2).with_metallic(0.5),
-        Transform::from_translation(c + DVec3::new(-4.0, 1.4, -3.0))
-            .with_rotation(Quat::from_rotation_x(-0.6)),
-    );
 }
 
 /// Vehicle track: asphalt oval with a jump and a car. The Cars, planes and spaceships thread
