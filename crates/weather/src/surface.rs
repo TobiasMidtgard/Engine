@@ -22,6 +22,7 @@ use engine_world::{
 };
 
 use crate::climate;
+use crate::sim::WeatherSim;
 
 /// Tuning for how rain and snow change the ground.
 #[derive(Resource, Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -329,7 +330,7 @@ pub fn refresh_cache(
     physics: Option<&PhysicsQueries>,
     materials: &SurfaceMaterials,
     share: f32,
-    seed: u64,
+    sim: &WeatherSim,
 ) {
     if cache.order.is_empty() {
         return;
@@ -358,7 +359,9 @@ pub fn refresh_cache(
             }
             None => 1.0,
         };
-        let dip = puddle_dip(xz, share, seed) * smoothstep(0.9, 0.98, flat);
+        // Puddles keep their spots on the ground when the world shifts.
+        let dip =
+            puddle_dip(sim.frame.to_pattern(xz), share, sim.seed) * smoothstep(0.9, 0.98, flat);
         cache.cells.data[index] = CellInfo {
             exposure,
             height: height as f32,
@@ -401,11 +404,11 @@ pub(crate) fn ground_system(
         physics.as_deref(),
         &materials,
         params.puddle_share,
-        sim.seed,
+        &sim,
     );
     rasterize_shelters(&mut cache, &shelters);
     for (gt, patch) in &patches {
-        apply_patch(&mut cache, gt.translation(), patch, sim.seed);
+        apply_patch(&mut cache, gt.translation(), patch, &sim);
     }
     update_cells(
         &mut surface,
@@ -446,7 +449,7 @@ fn rasterize_shelters(
 }
 
 /// Stamp a [`GroundPatch`] centered on `at` into the cache.
-pub fn apply_patch(cache: &mut GroundCache, at: DVec3, patch: &GroundPatch, seed: u64) {
+pub fn apply_patch(cache: &mut GroundCache, at: DVec3, patch: &GroundPatch, sim: &WeatherSim) {
     let grid = &mut cache.cells;
     let h = DVec2::new(patch.half_extents[0] as f64, patch.half_extents[1] as f64);
     let lo = grid.cell_at(DVec3::new(at.x - h.x, 0.0, at.z - h.y));
@@ -458,7 +461,7 @@ pub fn apply_patch(cache: &mut GroundCache, at: DVec3, patch: &GroundPatch, seed
             if let Some(i) = grid.index(c) {
                 let info = &mut grid.data[i];
                 info.absorbency = patch.absorbency.clamp(0.0, 1.0);
-                info.dip = puddle_dip(xz, patch.puddles, seed);
+                info.dip = puddle_dip(sim.frame.to_pattern(xz), patch.puddles, sim.seed);
             }
         }
     }
@@ -483,7 +486,7 @@ mod tests {
             None,
             &SurfaceMaterials::default(),
             0.3,
-            1,
+            &WeatherSim::default(),
         );
         (surface, cache, GroundWeather::default())
     }
