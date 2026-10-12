@@ -34,9 +34,9 @@ fn vs_strand(@builtin(vertex_index) vertex: u32, @builtin(instance_index) instan
 fn fs_strand(in: StrandOut) -> @location(0) vec4<f32> {
     let g = grooms[in.groom];
     let albedo = g.color.rgb * in.t_shade.y;
-    let t = normalize(in.tangent);
+    let t = safe_normalize(in.tangent, vec3(0.0, 1.0, 0.0));
     let v = normalize(-in.rel);
-    let n = normalize(v - t * dot(v, t) + vec3(1e-6));
+    let n = safe_normalize(v - t * dot(v, t), safe_normalize(cross(t, vec3(0.0, 0.0, 1.0)), vec3(1.0, 0.0, 0.0)));
     let l = frame.sun_dir.xyz;
     let sun = frame.sun_color.rgb * sun_transmittance(in.rel);
     var color = vec3(0.0);
@@ -44,7 +44,7 @@ fn fs_strand(in: StrandOut) -> @location(0) vec4<f32> {
         let shadow = shadow_factor(in.rel, n);
         let tl = dot(t, l);
         let diffuse = sqrt(max(1.0 - tl * tl, 0.0)) * saturate(dot(n, l) * 0.5 + 0.6);
-        let h = normalize(l + v);
+        let h = safe_normalize(l + v, n);
         let t1 = normalize(t + n * 0.1);
         let t2 = normalize(t - n * 0.15);
         let th1 = dot(t1, h);
@@ -56,7 +56,7 @@ fn fs_strand(in: StrandOut) -> @location(0) vec4<f32> {
     let sky = sky_ambient(n) * sky_visibility(in.rel, n) * PI;
     color += sky * albedo * INV_PI * 0.8;
     // Strands near the root sit deep in the hair and get less light (less so in short fur).
-    color *= mix(g.extra.y, 1.0, sqrt(in.t_shade.x));
+    color *= mix(g.extra.y, 1.0, sqrt(saturate(in.t_shade.x)));
     if (frame.counts.z == 1u) {
         return vec4<f32>(t * 0.5 + 0.5, 1.0);
     }

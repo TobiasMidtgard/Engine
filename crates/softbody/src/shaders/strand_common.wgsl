@@ -35,6 +35,13 @@ struct StrandPoint {
     groom: u32,
 };
 
+// Normalize, or `fallback` for a (near-)zero vector. Interpolated directions can cancel out,
+// and one NaN pixel turns into a white bloom spot.
+fn safe_normalize(v: vec3<f32>, fallback: vec3<f32>) -> vec3<f32> {
+    let l2 = dot(v, v);
+    return select(fallback, v * inverseSqrt(l2), l2 > 1e-20);
+}
+
 fn hash_u(x: u32) -> f32 {
     var h = x * 747796405u + 2891336453u;
     h = ((h >> ((h >> 28u) + 4u)) ^ h) * 277803737u;
@@ -86,7 +93,7 @@ fn strand_point(instance: u32, vertex: u32) -> StrandPoint {
     let len_factor = 1.0 - groom.extra.x * h3;
     let f = t * len_factor * f32(guide.count - 1u);
     let e = guide_eval(guide, f);
-    let tan = normalize(e[1] + vec3(1e-7));
+    let tan = safe_normalize(e[1], guide.normal.xyz);
     // Offset around the guide: a disc at the root, transported along the strand.
     let n0 = guide.normal.xyz;
     let t0 = guide.tangent.xyz;

@@ -1338,25 +1338,33 @@ fn dog(commands: &mut Commands, center: DVec3) {
         redness: 0.75,
         ..HairStyle::fur()
     };
-    let body_fur = |bone: &str, to: Option<&str>, radius: f32, guides: u32| HairEmitter::Fur {
-        bone: bone.into(),
-        to: to.map(Into::into),
-        radius,
-        guides,
-        comb: [0.0, -0.3, 1.0],
-    };
+    // Torso, neck and head bones point along the body, so fur lies back (+Z) and a little
+    // down. Leg and tail bones are aimed along their −Y, so their fur lies toward paw and tip.
+    let back = [0.0, -0.3, 1.0];
+    let along = [0.0, -1.0, 0.1];
+    let body_fur =
+        |bone: &str, to: Option<&str>, radius: f32, guides: u32, comb| HairEmitter::Fur {
+            bone: bone.into(),
+            to: to.map(Into::into),
+            radius,
+            guides,
+            comb,
+        };
     commands.spawn((
         Name::new("Dog fur"),
         Transform::default(),
         HairGroom {
             emitters: vec![
-                body_fur("hips", Some("chest"), 0.14, 420),
-                body_fur("neck", Some("head"), 0.065, 100),
-                body_fur("head", None, 0.095, 90),
-                body_fur("leg_fl", Some("knee_fl"), 0.045, 18),
-                body_fur("leg_fr", Some("knee_fr"), 0.045, 18),
-                body_fur("leg_hl", Some("knee_hl"), 0.045, 18),
-                body_fur("leg_hr", Some("knee_hr"), 0.045, 18),
+                body_fur("hips", Some("chest"), 0.14, 420, back),
+                // The rounded ends of the body.
+                body_fur("hips", None, 0.14, 80, back),
+                body_fur("chest", None, 0.14, 80, back),
+                body_fur("neck", Some("head"), 0.065, 100, back),
+                body_fur("head", None, 0.095, 90, back),
+                body_fur("leg_fl", Some("knee_fl"), 0.045, 36, along),
+                body_fur("leg_fr", Some("knee_fr"), 0.045, 36, along),
+                body_fur("leg_hl", Some("knee_hl"), 0.045, 36, along),
+                body_fur("leg_hr", Some("knee_hr"), 0.045, 36, along),
             ],
             style: fur,
             sim: HairGroom::hair_settings(),
@@ -1367,7 +1375,7 @@ fn dog(commands: &mut Commands, center: DVec3) {
         Name::new("Dog tail fur"),
         Transform::default(),
         HairGroom {
-            emitters: vec![body_fur("tail_1", Some("tail_3"), 0.03, 50)],
+            emitters: vec![body_fur("tail_1", Some("tail_3"), 0.03, 70, along)],
             style: HairStyle {
                 length: 0.11,
                 segments: 4,

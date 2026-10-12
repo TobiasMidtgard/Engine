@@ -11,7 +11,7 @@ use engine_render::prelude::*;
 use engine_render::{RenderDisabled, capture_now};
 
 /// One screenshot: when (demo seconds), from where, looking at what (relative to the yard, or
-/// to the named entity's position when `follow` is set).
+/// in the named entity's own frame when `follow` is set; characters face −Z).
 struct Shot {
     name: &'static str,
     secs: f32,
@@ -52,15 +52,15 @@ const SHOTS: &[Shot] = &[
     Shot {
         name: "mannequin",
         secs: 6.0,
-        eye: [2.2, 1.9, 2.6],
-        target: [0.0, 1.25, 0.0],
+        eye: [1.7, 1.8, 2.5],
+        target: [0.0, 1.2, 0.0],
         follow: Some("Mannequin"),
     },
     Shot {
         name: "dog",
         secs: 6.6,
-        eye: [1.6, 0.9, 1.4],
-        target: [0.0, 0.5, 0.0],
+        eye: [1.9, 0.9, 0.9],
+        target: [0.0, 0.5, 0.05],
         follow: Some("Dog"),
     },
     Shot {
@@ -101,7 +101,7 @@ const SHOTS: &[Shot] = &[
     Shot {
         name: "slow_motion",
         secs: 10.5,
-        eye: [-2.0, 1.8, 2.4],
+        eye: [-2.2, 1.6, 1.2],
         target: [0.0, 1.2, 0.0],
         follow: Some("Slow-motion mannequin"),
     },
@@ -189,14 +189,17 @@ fn main() {
             eprintln!("no GPU ({}); nothing to capture", d.0);
             return;
         }
-        let base = shot.follow.map_or(DVec3::ZERO, |name| {
+        let (base, rot) = shot.follow.map_or((DVec3::ZERO, Quat::IDENTITY), |name| {
             let mut q = app.world.query::<(&Name, &Transform)>();
             q.iter(&app.world)
                 .find(|(n, _)| n.as_str() == name)
-                .map_or(DVec3::ZERO, |(_, t)| t.translation)
+                .map_or((DVec3::ZERO, Quat::IDENTITY), |(_, t)| {
+                    (t.translation, t.rotation)
+                })
         });
-        let t = Transform::from_translation(base + DVec3::from_array(shot.eye))
-            .looking_at(base + DVec3::from_array(shot.target), Vec3::Y);
+        let local = |p: [f64; 3]| base + (rot * DVec3::from_array(p).as_vec3()).as_dvec3();
+        let t =
+            Transform::from_translation(local(shot.eye)).looking_at(local(shot.target), Vec3::Y);
         *app.world.get_mut::<Transform>(camera).unwrap() = t;
         *app.world.get_mut::<GlobalTransform>(camera).unwrap() = GlobalTransform::from(t);
         let path = out.join(format!("{:02}_{}.png", i + 1, shot.name));

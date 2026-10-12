@@ -128,10 +128,17 @@ fn cotangent_frame(n: vec3<f32>, rel: vec3<f32>, uv: vec2<f32>) -> mat2x3<f32> {
     return mat2x3<f32>(t * inv, b * inv);
 }
 
+// Normalize, or `fallback` for a (near-)zero vector. Interpolated directions can cancel out,
+// and one NaN pixel turns into a white bloom spot.
+fn safe_normalize(v: vec3<f32>, fallback: vec3<f32>) -> vec3<f32> {
+    let l2 = dot(v, v);
+    return select(fallback, v * inverseSqrt(l2), l2 > 1e-20);
+}
+
 @fragment
 fn fs_main(in: VertexOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f32> {
     let m = materials[in.material];
-    var n = normalize(in.normal);
+    var n = safe_normalize(in.normal, safe_normalize(-in.rel, vec3(0.0, 1.0, 0.0)));
     if (!front) { n = -n; }
 
     // Fine wrinkles where the cloth is compressed: ridges run across the squeeze direction.
@@ -171,7 +178,7 @@ fn fs_main(in: VertexOut, @builtin(front_facing) front: bool) -> @location(0) ve
     var color = shade_surface(s, in.rel);
 
     // Fabric sheen: a soft rim brightening at grazing angles (velvet, satin).
-    let v = normalize(-in.rel);
+    let v = safe_normalize(-in.rel, n);
     let sheen = m.emissive.w;
     if (sheen > 0.0) {
         let ndv = saturate(dot(n, v));
