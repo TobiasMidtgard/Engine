@@ -63,6 +63,9 @@ pub struct FrameUniform {
     /// renderer; 0 = no previous image), maximum perceptual roughness, screen-space global
     /// illumination strength (0 = off this frame).
     pub reflections: [f32; 4],
+    /// Volumetric fog: range (m, 0 = off), 1 / depth scale (1/m), 1 / log2(1 + range / depth
+    /// scale), depth slices (see `volumetrics::frame_params`).
+    pub volumetrics: [f32; 4],
 }
 
 /// Most [`SkyLightVolume`]s shaded per frame (nearest the camera first).
@@ -587,7 +590,12 @@ pub fn frame_uniform(world: &World, v: &ViewData) -> FrameUniform {
             fog.base_height,
             fog.max_opacity,
         ],
-        fog_color: [fog.color[0], fog.color[1], fog.color[2], fog.sun_scattering],
+        fog_color: [
+            fog.color[0].max(0.0),
+            fog.color[1].max(0.0),
+            fog.color[2].max(0.0),
+            fog.anisotropy.clamp(-0.95, 0.95),
+        ],
         wind: [v.wind.x, v.wind.y, v.wind.z, 0.0],
         weather: [
             wetness.clamp(0.0, 1.0),
@@ -686,6 +694,7 @@ pub fn frame_uniform(world: &World, v: &ViewData) -> FrameUniform {
                 0.0
             },
         ],
+        volumetrics: crate::volumetrics::frame_params(settings, v),
     }
 }
 
@@ -696,10 +705,10 @@ mod tests {
     #[test]
     fn frame_uniform_matches_wgsl_size() {
         // 7 mat4 + 15 vec4 + 4 mat4 + 3 vec4 + ground, sky occlusion, volumes, then the
-        // screen-space block (mat4 + 4 vec4).
+        // screen-space block (mat4 + 4 vec4), volumetric fog (vec4).
         assert_eq!(
             std::mem::size_of::<FrameUniform>(),
-            7 * 64 + 15 * 16 + 4 * 64 + 3 * 16 + 16 + 64 + 16 + MAX_SKY_VOLUMES * 80 + 64 + 4 * 16
+            7 * 64 + 15 * 16 + 4 * 64 + 3 * 16 + 16 + 64 + 16 + MAX_SKY_VOLUMES * 80 + 64 + 5 * 16
         );
         assert_eq!(std::mem::size_of::<GpuSkyVolume>(), 80);
         assert_eq!(std::mem::size_of::<GpuPointLight>(), 32);
