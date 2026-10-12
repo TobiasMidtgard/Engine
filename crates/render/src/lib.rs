@@ -42,6 +42,7 @@
 //! spawn_gltf_scene_deferred(&mut commands, scene, Transform::from_xyz(4.0, 0.0, 0.0));
 //! ```
 
+mod atmosphere;
 pub mod components;
 pub mod effects;
 pub mod exposure;
@@ -70,7 +71,7 @@ pub use components::{
 };
 pub use features::{
     FeatureStats, FrameContext, GpuShared, GrowBuffer, RenderAppExt, RenderFeature, RenderPhase,
-    SHADER_LIB_FRAME, SHADER_LIB_TYPES, compose_shader, validate_wgsl,
+    SHADER_LIB_ATMOSPHERE, SHADER_LIB_FRAME, SHADER_LIB_TYPES, compose_shader, validate_wgsl,
 };
 pub use frame::ViewData;
 pub use gltf_loader::{
@@ -329,7 +330,7 @@ mod tests {
     /// Every shader must compile against the shader library (no GPU needed).
     #[test]
     fn shaders_validate() {
-        let shaders: [(&str, &str, bool); 9] = [
+        let shaders: [(&str, &str, bool); 11] = [
             ("mesh", include_str!("shaders/mesh.wgsl"), true),
             (
                 "mesh_shadow",
@@ -343,6 +344,12 @@ mod tests {
             ("exposure", include_str!("shaders/exposure.wgsl"), false),
             ("gtao", include_str!("shaders/gtao.wgsl"), true),
             ("taa", include_str!("shaders/taa.wgsl"), true),
+            (
+                "atmosphere_luts",
+                include_str!("shaders/atmosphere_luts.wgsl"),
+                true,
+            ),
+            ("sky_camera", include_str!("shaders/sky_camera.wgsl"), true),
         ];
         let mut errors = Vec::new();
         for (name, src, frame) in shaders {

@@ -181,9 +181,17 @@ hair/fur, `engine_foliage` drives grass) and **tension-driven wrinkle maps** in 
 (a per-vertex tension value blends wrinkle/vein normal maps; written by `engine_anim` for skin,
 muscles and skinned clothes and by `engine_softbody` for simulated cloth).
 
-Shader library: `lib_types.wgsl` (types, noise, BRDF) and `lib_frame.wgsl` (group 0 frame
+Shader library: `lib_types.wgsl` (types, noise, BRDF), `lib_frame.wgsl` (group 0 frame
 data, `shade_surface`, `shadow_factor`, `contact_shadow`, `screen_ao`, `sky_visibility`, `apply_fog`,
-atmosphere, `wind_offset`, `prepass_output`).
+`wind_offset`, `prepass_output`) and `lib_atmosphere.wgsl` (`atmosphere` for aerial perspective,
+`sun_transmittance`, `sky_view_radiance`, `planet_height`, `ray_shell`).
+
+**Atmosphere** (built): Rayleigh, Mie and ozone scattering on a spherical planet with multiple
+scattering, after Hillaire 2020. Look-up tables (sunlight transmittance and multiple scattering,
+recomputed when the planet or its air changes; the sky seen from the camera, every frame) make the
+sky cheap and physically consistent from the ground, from orbit and from the Moon. Clouds,
+fog and anything else lit by the sun should use `sun_transmittance(rel)` for the sunlight
+reaching a point.
 
 ## AI integration
 

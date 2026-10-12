@@ -34,8 +34,11 @@ use crate::settings::RenderSettings;
 
 /// Shared types and pure functions (no bindings).
 pub const SHADER_LIB_TYPES: &str = include_str!("shaders/lib_types.wgsl");
-/// Group 0 frame bindings, shadows, atmosphere, PBR shading and fog. Requires `SHADER_LIB_TYPES`.
+/// Group 0 frame bindings, shadows, PBR shading and fog. Requires `SHADER_LIB_TYPES`.
 pub const SHADER_LIB_FRAME: &str = include_str!("shaders/lib_frame.wgsl");
+/// The atmosphere: sky radiance, sunlight transmittance, aerial perspective. Requires
+/// `SHADER_LIB_TYPES` and `SHADER_LIB_FRAME`.
+pub const SHADER_LIB_ATMOSPHERE: &str = include_str!("shaders/lib_atmosphere.wgsl");
 
 /// Which part of the scene pass a draw belongs to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -136,12 +139,19 @@ impl GpuShared {
 
 /// Build the full WGSL source for a feature shader.
 pub fn compose_shader(source: &str, with_frame: bool) -> String {
-    let mut code =
-        String::with_capacity(SHADER_LIB_TYPES.len() + SHADER_LIB_FRAME.len() + source.len() + 2);
+    let mut code = String::with_capacity(
+        SHADER_LIB_TYPES.len()
+            + SHADER_LIB_FRAME.len()
+            + SHADER_LIB_ATMOSPHERE.len()
+            + source.len()
+            + 3,
+    );
     code.push_str(SHADER_LIB_TYPES);
     code.push('\n');
     if with_frame {
         code.push_str(SHADER_LIB_FRAME);
+        code.push('\n');
+        code.push_str(SHADER_LIB_ATMOSPHERE);
         code.push('\n');
     }
     code.push_str(source);

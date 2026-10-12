@@ -15,6 +15,7 @@ use engine_core::prelude::*;
 use engine_core::window::RawWindowHandle;
 use serde_json::json;
 
+use crate::atmosphere::AtmosphereLuts;
 use crate::effects::ScreenEffects;
 use crate::features::{
     FeatureStats, FrameContext, GpuShared, GrowBuffer, PendingRenderFeatures, RenderFeature,
@@ -161,6 +162,7 @@ pub struct Renderer {
     overlay_group: wgpu::BindGroup,
     post: PostResources,
     effects: ScreenEffects,
+    atmosphere: AtmosphereLuts,
     exposure: ExposureState,
     meter: crate::exposure::ExposureMeter,
     previous: Option<PreviousView>,
@@ -280,6 +282,11 @@ impl Renderer {
 
         use wgpu::ShaderStages as S;
         let all = S::VERTEX_FRAGMENT | S::COMPUTE;
+        let float_texture = wgpu::BindingType::Texture {
+            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+            view_dimension: wgpu::TextureViewDimension::D2,
+            multisampled: false,
+        };
         let frame_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("frame layout"),
             entries: &[
@@ -384,6 +391,10 @@ impl Renderer {
                         multisampled: false,
                     },
                 ),
+                // Atmosphere tables: transmittance, multiple scattering, sky view.
+                layout_entry(13, all, float_texture),
+                layout_entry(14, all, float_texture),
+                layout_entry(15, all, float_texture),
             ],
         });
         let shadow_view_layout =
@@ -456,6 +467,7 @@ impl Renderer {
         let mut sky_camera = crate::sky_occlusion::SkyCamera::new(&shared);
         sky_camera.set_inputs(&shared, &frame_buffer, &shadow.occlusion);
         let screen_stand_ins = ScreenMaps::stand_ins(&shared);
+        let atmosphere = AtmosphereLuts::new(&shared, &frame_buffer);
         let groups = FrameGroups::new(
             &shared,
             [&frame_buffer, &overlay_frame_buffer],
@@ -463,6 +475,7 @@ impl Renderer {
             &shadow,
             &env,
             &sky_camera,
+            &atmosphere,
             &ScreenMaps::of(&targets),
             &screen_stand_ins,
         );
@@ -487,6 +500,7 @@ impl Renderer {
             env_current: 0,
             env_rendered: false,
             screen_stand_ins,
+            atmosphere,
             frame_groups: groups.scene,
             prepass_group: groups.prepass,
             overlay_group: groups.overlay,
@@ -559,6 +573,7 @@ impl Renderer {
             &self.shadow,
             &self.env,
             &self.sky_camera,
+            &self.atmosphere,
             &ScreenMaps::of(&self.targets),
             &self.screen_stand_ins,
         );
@@ -707,6 +722,7 @@ impl Renderer {
             ldr: &self.targets.ldr.view,
         };
 
+        self.atmosphere.encode(&mut encoder, &uniform);
         for f in &mut self.features {
             f.compute(&mut encoder, &ctx);
         }
@@ -1324,11 +1340,14 @@ impl FrameGroups {
         shadow: &ShadowResources,
         env: &[Tex; 2],
         sky_camera: &crate::sky_occlusion::SkyCamera,
+        atmosphere: &AtmosphereLuts,
         maps: &ScreenMaps,
         stand_ins: &ScreenMaps,
     ) -> Self {
         let group = |uniform: &wgpu::Buffer, env: &Tex, maps: &ScreenMaps| {
-            create_frame_group(shared, uniform, lights, shadow, env, sky_camera, maps)
+            create_frame_group(
+                shared, uniform, lights, shadow, env, sky_camera, atmosphere, maps,
+            )
         };
         Self {
             scene: [
@@ -1341,6 +1360,7 @@ impl FrameGroups {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn create_frame_group(
     shared: &GpuShared,
     frame: &wgpu::Buffer,
@@ -1348,6 +1368,7 @@ fn create_frame_group(
     shadow: &ShadowResources,
     env: &Tex,
     sky_camera: &crate::sky_occlusion::SkyCamera,
+    atmosphere: &AtmosphereLuts,
     maps: &ScreenMaps,
 ) -> wgpu::BindGroup {
     fn view(v: &wgpu::TextureView) -> wgpu::BindingResource<'_> {
@@ -1408,6 +1429,18 @@ fn create_frame_group(
             wgpu::BindGroupEntry {
                 binding: 12,
                 resource: view(&maps.depth),
+            },
+            wgpu::BindGroupEntry {
+                binding: 13,
+                resource: view(&atmosphere.transmittance.view),
+            },
+            wgpu::BindGroupEntry {
+                binding: 14,
+                resource: view(&atmosphere.multiscatter.view),
+            },
+            wgpu::BindGroupEntry {
+                binding: 15,
+                resource: view(&atmosphere.sky_view.view),
             },
         ],
     })
