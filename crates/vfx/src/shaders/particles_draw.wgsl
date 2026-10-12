@@ -262,10 +262,10 @@ fn fs_particle(in: VsOut) -> @location(0) vec4<f32> {
             let heat = saturate(base * (0.15 + n * 1.2 + cracks * 0.5) * 1.3 - in.age * 0.9);
             rgb = flame_shade(in.radiance, heat) * smoothstep(0.08, 0.7, heat) * 1.4 + in.radiance * 0.012;
         }
-        default: { // glow: a soft orb with a white-hot center
+        default: { // glow: a soft orb with a hot center that keeps its color
             a = exp(-r * r * 4.5) * smoothstep(1.0, 0.85, r);
             let core = exp(-r * r * 18.0);
-            rgb = mix(rgb, vec3<f32>(max(rgb.r, max(rgb.g, rgb.b))), core * 0.6) * (1.0 + core * 1.5);
+            rgb = mix(rgb, vec3<f32>(max(rgb.r, max(rgb.g, rgb.b))), core * 0.3) * (1.0 + core * 1.2);
         }
     }
 

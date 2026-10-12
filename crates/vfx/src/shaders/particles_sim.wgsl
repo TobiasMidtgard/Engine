@@ -172,7 +172,9 @@ fn particle_light(rel: vec3<f32>, translucency: f32) -> vec3<f32> {
         let d2 = dot(d, d);
         let range = pl.position_range.w;
         if (d2 > range * range) { continue; }
-        let falloff = sq(saturate(1.0 - sq(d2 / (range * range)))) / max(d2, sq(max(pl.color_radius.w, 0.05)));
+        // Particles are soft volumes, not surfaces: keep them from blowing out right next to a
+        // light (an effect's own light sits in the middle of its smoke and mist).
+        let falloff = sq(saturate(1.0 - sq(d2 / (range * range)))) / max(d2, sq(max(pl.color_radius.w, 0.75)));
         light += pl.color_radius.rgb * (falloff * iso);
     }
     return light;
