@@ -25,17 +25,67 @@ fn app() -> App {
 
 /// A long flat strip of `surface` with its top at y = 0.
 fn ground(app: &mut App, surface: &str) {
+    ground_of(app, Ground::Slab, surface);
+}
+
+/// How the ground's collider is made.
+#[derive(Clone, Copy, Debug)]
+enum Ground {
+    /// One box.
+    Slab,
+    /// A flat heightfield with 1 m cells, like terrain.
+    Terrain,
+    /// A triangle mesh of 2 m quads, like a road or a floor model.
+    Mesh,
+}
+
+/// [`ground`] made as `kind`: terrain and meshes touch a ball with one triangle or more.
+fn ground_of(app: &mut App, kind: Ground, surface: &str) {
     let surface = app
         .world
         .resource::<SurfaceMaterials>()
         .id(surface)
         .unwrap();
+    let (y, shape) = match kind {
+        Ground::Slab => (
+            -0.5,
+            ColliderShape::Cuboid {
+                half_extents: Vec3::new(200.0, 0.5, 5.0),
+            },
+        ),
+        Ground::Terrain => {
+            let (rows, cols) = (11, 401);
+            (
+                0.0,
+                ColliderShape::Heightfield {
+                    heights: vec![0.0; (rows * cols) as usize],
+                    rows,
+                    cols,
+                    size: [400.0, 10.0],
+                },
+            )
+        }
+        Ground::Mesh => {
+            let mut vertices = Vec::new();
+            let mut indices = Vec::new();
+            for i in 0..=200u32 {
+                let x = -200.0 + 2.0 * i as f32;
+                vertices.extend([Vec3::new(x, 0.0, -5.0), Vec3::new(x, 0.0, 5.0)]);
+                if i > 0 {
+                    let (a, b, c, d) = (2 * i - 2, 2 * i - 1, 2 * i, 2 * i + 1);
+                    indices.extend([[a, b, c], [c, b, d]]);
+                }
+            }
+            (0.0, ColliderShape::TriMesh { vertices, indices })
+        }
+    };
     app.world.spawn((
-        Transform::from_xyz(0.0, -0.5, 0.0),
+        Transform::from_xyz(0.0, y, 0.0),
         RigidBody::fixed(),
         Collider {
+            shape,
             surface,
-            ..Collider::cuboid(Vec3::new(200.0, 0.5, 5.0))
+            ..Default::default()
         },
     ));
 }
@@ -125,6 +175,26 @@ fn balls_and_logs_on_concrete_slow_like_real_ones() {
         assert!(
             (got - expect).abs() < 0.2 * expect,
             "{roller:?}: slowed at {got} m/s², expected about {expect}"
+        );
+    }
+}
+
+#[test]
+fn balls_slow_the_same_on_terrain_and_meshes() {
+    // Terrain and meshes touch a ball through several triangles at once; the resistance must
+    // not depend on how the ground is made.
+    let decel = |kind: Ground| {
+        let mut app = app();
+        ground_of(&mut app, kind, "concrete");
+        let e = launch(&mut app, Roller::Ball, 4.0);
+        deceleration(&mut app, e, 3.0)
+    };
+    let slab = decel(Ground::Slab);
+    for kind in [Ground::Terrain, Ground::Mesh] {
+        let got = decel(kind);
+        assert!(
+            (got - slab).abs() < 0.15 * slab,
+            "{kind:?}: slowed at {got} m/s², {slab} on a slab"
         );
     }
 }
