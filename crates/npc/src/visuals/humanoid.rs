@@ -15,7 +15,7 @@ use crate::agent::{
     AlertLevel, AttackPhase, Defense, NpcBrain, NpcCombat, NpcVitals, NpcWeapon, WeaponStyle,
 };
 use crate::art::ArtAssets;
-use crate::art::fighter::{Piece, basis, kit, rig, weapons};
+use crate::art::fighter::{FACE_SHAPES, Piece, basis, kit, rig, weapons};
 use crate::combat::Downed;
 use crate::faction::Faction;
 use crate::skills::NpcSkills;
@@ -57,6 +57,15 @@ const SLOTS: usize = 42;
 
 /// Skin tones (sRGB), picked per fighter.
 const SKIN_TONES: [u32; 6] = [0xdcb8a0, 0xc29479, 0xa27760, 0x86614c, 0x5f4537, 0xd4a88f];
+/// The darker skin tones (indices into [`SKIN_TONES`]): their eyes are brown or hazel.
+const DARK_SKIN: [usize; 2] = [3, 4];
+/// Iris colors (sRGB) at the rim and around the pupil: brown, hazel, blue, grey.
+const IRISES: [[u32; 2]; 4] = [
+    [0x3b2617, 0x5e3b1f],
+    [0x4d5530, 0x8a5c28],
+    [0x2f5680, 0x7397b8],
+    [0x56626a, 0x8e989d],
+];
 
 /// Where a part's pose is kept.
 fn slot(part: Part) -> Option<usize> {
@@ -210,25 +219,37 @@ pub(super) fn parts(
         ]),
         Kind::Fists => {}
     }
-    // The face's "team" color is its skin tone, different between fighters of a squad.
-    let skin_hex = {
+    // The face differs between fighters of a squad: its skin tone, shape and eye color all
+    // come from one seed. Seeds closer than 24 never share both skin tone and shape.
+    let (skin_hex, shape, iris_hex) = {
         let f = faction.map_or(0, |f| f.0);
-        let k = f.wrapping_mul(7) + kind as u32 * 3 + (level * 10.0) as u32;
-        SKIN_TONES[k as usize % SKIN_TONES.len()]
+        let seed = (f.wrapping_mul(7) + kind as u32 * 3 + (level * 10.0) as u32) as usize;
+        let skin = seed % SKIN_TONES.len();
+        let shape = seed / SKIN_TONES.len() % FACE_SHAPES;
+        let mut iris = (seed + seed / 4) % IRISES.len();
+        if DARK_SKIN.contains(&skin) {
+            iris %= 2;
+        }
+        (SKIN_TONES[skin], shape, IRISES[iris])
     };
     let mut out = Vec::with_capacity(list.len() + 2);
     for (part, piece) in list {
-        let (tint_hex, tint) = if piece == Piece::Face {
-            (skin_hex, linear(skin_hex))
+        let mesh = if piece == Piece::Face {
+            let key = format!(
+                "fighter/face{shape}/{skin_hex:06x}/{:06x}{:06x}",
+                iris_hex[0], iris_hex[1]
+            );
+            let iris = iris_hex.map(linear);
+            art.mesh(&key, || kit.face(shape, linear(skin_hex), iris))
+        } else if piece.team_colored() {
+            let key = format!("fighter/{}/{team_hex:06x}", piece.name());
+            art.mesh(&key, || kit.mesh(piece, team))
         } else {
-            (team_hex, team)
+            art.mesh(&format!("fighter/{}", piece.name()), || {
+                kit.mesh(piece, team)
+            })
         };
-        let key = if piece.team_colored() {
-            format!("fighter/{}/{tint_hex:06x}", piece.name())
-        } else {
-            format!("fighter/{}", piece.name())
-        };
-        let Some(mesh) = art.mesh(&key, || kit.mesh(piece, tint)) else {
+        let Some(mesh) = mesh else {
             return plain_parts(kind, team_hex);
         };
         let r = match part {
