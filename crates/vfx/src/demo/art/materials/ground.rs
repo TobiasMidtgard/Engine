@@ -4,7 +4,7 @@ use engine_core::math::{Vec2, Vec3, Vec4};
 use engine_render::StandardMaterial;
 
 use super::Generated;
-use super::noise::{mix32, rand, sub, unit};
+use super::noise::{floor, mix32, rand, sub, unit};
 use super::textures::{
     Maps, Texel, Tile, add_slope, hex, mix, mix3, plausible, relief, smooth, white,
 };
@@ -204,7 +204,7 @@ pub fn sand(shrink: u32) -> Generated {
     let px = tile.par(|p, x, y| {
         let b = broad.at(x, y);
         let phase = ka * p.x + kb * p.y + b.x * 1.6 + b.w * 0.35;
-        let s = phase - phase.floor();
+        let s = phase - floor(phase);
         let profile = if s < 0.7 {
             0.5 - 0.5 * (std::f32::consts::PI * s / 0.7).cos()
         } else {
@@ -305,7 +305,7 @@ pub fn dirt(shrink: u32) -> Generated {
         let v = px[i];
         let b = broad.at(x, y);
         let ao = r.ao[i];
-        let damp = smooth(0.0, 0.4, b.y);
+        let damp = smooth(0.0, 0.4, b.y) * 0.6;
         let mut c = mix3(
             hex(0x6e5640),
             hex(0x5a4430),

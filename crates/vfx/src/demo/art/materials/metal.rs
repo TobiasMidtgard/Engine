@@ -9,9 +9,9 @@ use super::textures::{Maps, Texel, Tile, hex, mix, mix3, plausible, relief, smoo
 
 /// Forged iron: overlapping soft hammer dishes over a slightly wavy bar, a dark mottled oxide
 /// skin rubbed back to bare metal on the high spots, pitting, and rust that spreads from
-/// hollows and blooms with freckled fringes. 0.5 m per tile.
+/// hollows and blooms with freckled fringes. 0.8 m per tile.
 pub fn iron(shrink: u32) -> Generated {
-    let tile = Tile::new(512 >> shrink, 512 >> shrink, 0.5);
+    let tile = Tile::new(512 >> shrink, 512 >> shrink, 0.8);
     let seed = 0x1404_0002;
     let broad = tile.coarse(4, |p| {
         let q = tile.warp(p, 0.2, 0.03, 3, sub(seed, 11));
@@ -98,10 +98,10 @@ pub fn iron(shrink: u32) -> Generated {
 }
 
 /// Aged cast bronze: dark brown oxidized metal, polished gold where handled, and a chalky
-/// green verdigris crust that fills the hollows and creeps out in crumbly patches. 0.5 m
+/// green verdigris crust that fills the hollows and creeps out in crumbly patches. 0.8 m
 /// per tile.
 pub fn bronze(shrink: u32) -> Generated {
-    let tile = Tile::new(512 >> shrink, 512 >> shrink, 0.5);
+    let tile = Tile::new(512 >> shrink, 512 >> shrink, 0.8);
     let seed = 0xb404_0002;
     let broad = tile.coarse(4, |p| {
         let q = tile.warp(p, 0.15, 0.02, 3, sub(seed, 11));
@@ -121,7 +121,7 @@ pub fn bronze(shrink: u32) -> Generated {
     let px = tile.par(|p, x, y| {
         let b = broad.at(x, y);
         let dents = tile.smooth_cells(p, 0.025, 0.9, 8.0, sub(seed, 5));
-        let pore = smooth(0.8, 0.93, tile.value(p, 0.0025, sub(seed, 6)));
+        let pore = smooth(0.8, 0.93, tile.value(p, 0.004, sub(seed, 6)));
         let crumb = tile.fbm(p, 0.012, 2, 0.5, sub(seed, 7)) + 0.5;
         let h = b.x * 0.0007 + dents * 0.0003 - pore * 0.00025
             + (tile.value(p, 0.0012, sub(seed, 8)) - 0.5) * 0.00002;

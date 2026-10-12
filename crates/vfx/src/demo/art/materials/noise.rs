@@ -47,6 +47,28 @@ pub fn rand(seed: u32, k: u32) -> f32 {
     unit(sub(seed, k))
 }
 
+/// `x.floor()` without a library call (the default x86-64 target has no rounding
+/// instruction). Exact for |x| < 2^31, which covers every coordinate used here.
+#[inline(always)]
+pub fn floor(x: f32) -> f32 {
+    let t = x as i32 as f32;
+    if t > x { t - 1.0 } else { t }
+}
+
+/// `x.round()` (halves away from zero) without a library call; exact for |x| < 2^31.
+#[inline(always)]
+pub fn round(x: f32) -> f32 {
+    let t = x as i32 as f32;
+    let d = x - t;
+    if d >= 0.5 {
+        t + 1.0
+    } else if d <= -0.5 {
+        t - 1.0
+    } else {
+        t
+    }
+}
+
 #[inline(always)]
 fn fade(t: f32) -> f32 {
     t * t * t * (t * (t * 6.0 - 15.0) + 10.0)
@@ -87,7 +109,7 @@ const GRAD: [(f32, f32); 16] = [
 /// fractional position inside the cell.
 #[inline(always)]
 fn cell(p: f32, n: i32) -> (i32, i32, f32) {
-    let x = (p - p.floor()) * n as f32;
+    let x = (p - floor(p)) * n as f32;
     let i = (x as i32).min(n - 1);
     let i1 = if i + 1 == n { 0 } else { i + 1 };
     (i, i1, x - i as f32)
@@ -96,7 +118,7 @@ fn cell(p: f32, n: i32) -> (i32, i32, f32) {
 /// Integer cell and position inside it for Voronoi lookups (`p` wrapped into the tile first).
 #[inline(always)]
 fn vcell(p: f32, n: i32) -> (i32, f32) {
-    let x = (p - p.floor()) * n as f32;
+    let x = (p - floor(p)) * n as f32;
     let i = (x as i32).min(n - 1);
     (i, x - i as f32)
 }

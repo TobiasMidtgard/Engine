@@ -4,7 +4,7 @@ use engine_core::math::{Vec2, Vec3, Vec4};
 use engine_render::StandardMaterial;
 
 use super::Generated;
-use super::noise::{mix32, rand, sub, unit};
+use super::noise::{mix32, rand, round, sub, unit};
 use super::textures::{Maps, Texel, Tile, hex, mix, mix3, plausible, relief, smooth, white};
 
 /// One leaf of the layer, in meters within the tile.
@@ -100,7 +100,7 @@ pub fn leaves(shrink: u32) -> Generated {
                     if h > best.h {
                         // Side veins run from the midrib toward the tip at about 45°.
                         let vcoord = (along - across.abs() * 0.9) / (leaf.len * 0.11);
-                        let side = smooth(0.12, 0.0, (vcoord - vcoord.round()).abs())
+                        let side = smooth(0.12, 0.0, (vcoord - round(vcoord)).abs())
                             * smooth(0.95, 0.6, s.abs());
                         let mid = smooth(0.06, 0.0, s.abs());
                         best = L {
@@ -189,14 +189,14 @@ pub fn moss(shrink: u32) -> Generated {
         let b = broad.at(x, y);
         let ao = r.ao[i];
         let high = smooth(-0.6, -0.15, v.lump);
-        let hue = smooth(0.2, 0.8, tile.value(p, 0.06, sub(seed, 8)) + b.z * 0.5);
+        let hue = smooth(0.15, 0.85, tile.value(p, 0.04, sub(seed, 8)) + b.z * 0.2);
         let deep = mix3(hex(0x3a4220), hex(0x4a3e26), smooth(0.2, 0.6, b.y));
         let mid = mix3(hex(0x3e5e26), hex(0x6a7e24), hue);
         let tips = mix3(hex(0x86a23e), hex(0xb0b048), hue);
         let mut c = mix3(deep, mid, smooth(0.0, 0.7, high * mix(0.4, 1.0, ao)));
         c = mix3(c, tips, v.tip * high * 0.65);
         let dead = smooth(0.3, 0.6, b.y) * smooth(0.0, 0.3, b.z + 0.2);
-        c = mix3(c, mix3(hex(0x5e4e2c), hex(0x8a7a48), v.tip), dead * 0.75);
+        c = mix3(c, mix3(hex(0x5e4e2c), hex(0x8a7a48), v.tip), dead * 0.45);
         c *= 1.0 + (white(i, 1) - 0.5) * 0.16;
         c *= mix(0.6, 1.0, ao);
         let rough = 0.9 + (white(i, 2) - 0.5) * 0.08 - v.tip * 0.05;

@@ -46,14 +46,14 @@ impl Tile {
 
     /// Meters to texels (at least 1).
     pub fn px(&self, meters: f32) -> usize {
-        ((meters / self.texel_m()).round() as usize).max(1)
+        (noise::round(meters / self.texel_m()) as usize).max(1)
     }
 
     /// Lattice period (cells per tile per axis) for features about `scale_m` meters across.
     pub fn period(&self, scale_m: f32) -> [i32; 2] {
         [
-            ((self.size.x / scale_m).round() as i32).max(1),
-            ((self.size.y / scale_m).round() as i32).max(1),
+            (noise::round(self.size.x / scale_m) as i32).max(1),
+            (noise::round(self.size.y / scale_m) as i32).max(1),
         ]
     }
 
@@ -150,7 +150,7 @@ impl Tile {
     pub fn sample(&self, data: &[f32], p: Vec2) -> f32 {
         let x = p.x * self.w as f32 - 0.5;
         let y = p.y * self.h as f32 - 0.5;
-        let (x0, y0) = (x.floor(), y.floor());
+        let (x0, y0) = (noise::floor(x), noise::floor(y));
         let (fx, fy) = (x - x0, y - y0);
         let (x0, y0) = (x0 as isize, y0 as isize);
         let a = self.at(data, x0, y0);
@@ -256,12 +256,12 @@ where
     T: Copy + std::ops::Add<Output = T> + std::ops::Mul<f32, Output = T>,
 {
     /// Value at full-resolution texel (x, y).
-    #[inline]
+    #[inline(always)]
     pub fn at(&self, x: usize, y: usize) -> T {
         let fx = (x as f32 + 0.5) * self.sx - 0.5;
         let fy = (y as f32 + 0.5) * self.sy - 0.5;
-        let x0 = fx.floor();
-        let y0 = fy.floor();
+        let x0 = noise::floor(fx);
+        let y0 = noise::floor(fy);
         let (tx, ty) = (fx - x0, fy - y0);
         let wrap = |i: f32, n: usize| -> usize {
             let i = i as isize;
@@ -315,10 +315,14 @@ pub fn par_fill<T: Send>(out: &mut [T], w: usize, f: impl Fn(usize, usize) -> T 
     });
 }
 
+/// Worker threads for texture work (asked once: the query reads system files).
 fn threads() -> usize {
-    std::thread::available_parallelism()
-        .map_or(4, |n| n.get())
-        .clamp(1, 32)
+    static THREADS: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *THREADS.get_or_init(|| {
+        std::thread::available_parallelism()
+            .map_or(4, |n| n.get())
+            .clamp(1, 32)
+    })
 }
 
 /// Run `f(row)` over each row of `w` values on all cores.

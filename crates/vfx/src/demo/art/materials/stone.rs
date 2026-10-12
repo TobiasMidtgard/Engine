@@ -5,7 +5,7 @@ use engine_core::math::{Vec2, Vec3, Vec4};
 use engine_render::StandardMaterial;
 
 use super::Generated;
-use super::noise::{hash2, mix32, rand, sub, unit};
+use super::noise::{floor, hash2, mix32, rand, sub, unit};
 use super::textures::{
     Coarse, Maps, Texel, Tile, hex, mix, mix3, plausible, relief, smooth, white,
 };
@@ -557,11 +557,12 @@ impl FacetPair {
 /// Voronoi cells, each a tilted plane with a random offset (`slope` cell units).
 pub(super) fn facet_pair(p: Vec2, period: [i32; 2], slope: f32, seed: u32) -> FacetPair {
     let s = mix32(seed);
-    let x = (p.x - p.x.floor()) * period[0] as f32;
-    let y = (p.y - p.y.floor()) * period[1] as f32;
+    let x = (p.x - floor(p.x)) * period[0] as f32;
+    let y = (p.y - floor(p.y)) * period[1] as f32;
     let (ix, iy) = ((x as i32).min(period[0] - 1), (y as i32).min(period[1] - 1));
     let f = Vec2::new(x - ix as f32, y - iy as f32);
-    let mut best = [(f32::MAX, 0.0f32, 0u32); 2];
+    // (squared distance, offset from the feature point, cell hash) of the two nearest.
+    let mut best = [(f32::MAX, Vec2::ZERO, 0u32); 2];
     for j in -1..=1 {
         for i in -1..=1 {
             let cx = (ix + i).rem_euclid(period[0]);
@@ -570,18 +571,21 @@ pub(super) fn facet_pair(p: Vec2, period: [i32; 2], slope: f32, seed: u32) -> Fa
             let o = Vec2::new(i as f32 + unit(h), j as f32 + unit(mix32(h ^ 0x68e3_1da4)));
             let r = f - o;
             let d = r.length_squared();
-            let sl = Vec2::new(unit(mix32(h ^ 1)) - 0.5, unit(mix32(h ^ 2)) - 0.5) * 2.0 * slope;
-            let plane = (unit(mix32(h ^ 3)) - 0.5) * slope + r.dot(sl);
             if d < best[0].0 {
                 best[1] = best[0];
-                best[0] = (d, plane, h);
+                best[0] = (d, r, h);
             } else if d < best[1].0 {
-                best[1] = (d, plane, h);
+                best[1] = (d, r, h);
             }
         }
     }
+    // Only the two nearest planes matter.
+    let plane = |(_, r, h): (f32, Vec2, u32)| {
+        let sl = Vec2::new(unit(mix32(h ^ 1)) - 0.5, unit(mix32(h ^ 2)) - 0.5) * 2.0 * slope;
+        (unit(mix32(h ^ 3)) - 0.5) * slope + r.dot(sl)
+    };
     FacetPair {
-        planes: [best[0].1, best[1].1],
+        planes: [plane(best[0]), plane(best[1])],
         gap: best[1].0.sqrt() - best[0].0.sqrt(),
         ids: [best[0].2, best[1].2],
     }
