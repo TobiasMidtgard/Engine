@@ -1081,7 +1081,7 @@ pub fn mesh_cells(
                         let gy = grid.global.1 + vj as i64;
                         let color = surface_color(&v, removed, gx, gy);
                         let n = if front { Vec3::Z } else { Vec3::NEG_Z };
-                        index[slot] = mb.vertex(Vec3::new(v.xy.x, v.xy.y, z) + offset, n, color);
+                        index[slot] = mb.vertex(Vec3::new(v.xy.x, v.xy.y, z), n, color);
                     }
                     ids[k] = index[slot];
                 }
@@ -1140,8 +1140,8 @@ pub fn mesh_cells(
                 } else {
                     scale(look.exterior, 0.8)
                 };
-                let pa = Vec3::new(va.xy.x, va.xy.y, 0.0) + offset;
-                let pb = Vec3::new(vb.xy.x, vb.xy.y, 0.0) + offset;
+                let pa = Vec3::new(va.xy.x, va.xy.y, 0.0);
+                let pb = Vec3::new(vb.xy.x, vb.xy.y, 0.0);
                 let (fa, fb) = (pa + Vec3::Z * va.zf, pb + Vec3::Z * vb.zf);
                 let (ba, bb) = (pa + Vec3::Z * va.zb, pb + Vec3::Z * vb.zb);
                 if !broken {
@@ -1187,7 +1187,7 @@ pub fn mesh_cells(
                     y0 + grid.cell.y,
                     wob(gx, gy + 1, 22),
                 );
-                mb.rod(a + offset, b + offset, radius, look.rebar);
+                mb.rod(a, b, radius, look.rebar);
             }
             if grid.rebar[c] & HBAR != 0 {
                 let y = y0 + grid.cell.y * 0.5;
@@ -1197,10 +1197,12 @@ pub fn mesh_cells(
                     y + wob(gx + 1, gy, 23),
                     0.012 + wob(gx + 1, gy, 24),
                 );
-                mb.rod(a + offset, b + offset, radius, look.rebar);
+                mb.rod(a, b, radius, look.rebar);
             }
         }
     }
+    // Offset last, so texture coordinates stay in wall space (a chunk keeps its bricks).
+    mb.translate(offset);
     mb
 }
 

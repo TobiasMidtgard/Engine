@@ -1138,7 +1138,7 @@ fn mesh_region_tagged(
         }
         // Crevices facing down are darker (cheap occlusion).
         color = scale(color, 0.82 + 0.18 * (normal.y * 0.5 + 0.5));
-        let id = mb.vertex(pos - offset, normal, color);
+        let id = mb.vertex(pos, normal, color);
         tags.push(tag);
         cache.insert(c, Some(id));
         Some(id)
@@ -1196,6 +1196,9 @@ fn mesh_region_tagged(
             }
         }
     }
+    // Offset last, so texture coordinates stay in volume space (a falling boulder keeps its
+    // grain).
+    mb.translate(-offset);
     (mb, tags)
 }
 
