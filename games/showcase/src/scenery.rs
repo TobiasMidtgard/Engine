@@ -7,6 +7,8 @@
 
 use crate::landscape::{Cover, Crop, Landscape, field_corners};
 use crate::meshgen::{self, TreeKind};
+use crate::texgen::VillageMats;
+use crate::village::{self, Part, PropKind, PropSpot};
 use crate::zones::{ZONES, zone};
 use engine::prelude::*;
 
@@ -18,12 +20,8 @@ pub struct Mats {
     pub rock: Handle<StandardMaterial>,
     pub grass: Handle<StandardMaterial>,
     pub flowers: Handle<StandardMaterial>,
-    pub plaster: Handle<StandardMaterial>,
-    pub wood: Handle<StandardMaterial>,
-    pub roof: Handle<StandardMaterial>,
-    pub window: Handle<StandardMaterial>,
-    pub iron: Handle<StandardMaterial>,
-    pub lantern: Handle<StandardMaterial>,
+    /// The village's procedural PBR materials (plaster, timber, tiles, glass, iron, ...).
+    pub village: VillageMats,
 }
 
 pub struct TreeHandles {
@@ -33,12 +31,30 @@ pub struct TreeHandles {
     pub far: Handle<Mesh>,
 }
 
+/// One house archetype: a mesh per material, near and far versions.
 pub struct HouseHandles {
-    pub walls: Handle<Mesh>,
-    pub wood: Handle<Mesh>,
-    pub roof: Handle<Mesh>,
-    pub windows: Handle<Mesh>,
+    pub near: Vec<(Part, Handle<Mesh>)>,
+    pub far: Vec<(Part, Handle<Mesh>)>,
+    /// Footprint half extents (x, z) including the roof overhang.
     pub half: Vec2,
+    pub props: Vec<PropSpot>,
+}
+
+/// A prop: one mesh per material.
+pub type PropHandles = Vec<(Part, Handle<Mesh>)>;
+
+/// Street lamp meshes: (iron, glass), near and far.
+pub struct LampHandles {
+    pub near: (Handle<Mesh>, Handle<Mesh>),
+    pub far: (Handle<Mesh>, Handle<Mesh>),
+}
+
+/// Street furniture variants.
+pub struct Props {
+    pub bench: PropHandles,
+    pub barrels: Vec<PropHandles>,
+    pub wood_piles: Vec<PropHandles>,
+    pub cart: PropHandles,
 }
 
 /// Every procedural mesh and material, built once at startup.
@@ -51,7 +67,8 @@ pub struct Library {
     pub dry_grass: Vec<Handle<Mesh>>,
     pub flowers: Vec<Handle<Mesh>>,
     pub houses: Vec<HouseHandles>,
-    pub lamp: (Handle<Mesh>, Handle<Mesh>),
+    pub lamp: LampHandles,
+    pub props: Props,
 }
 
 impl Library {
@@ -79,11 +96,13 @@ pub fn build_library(
     grass.double_sided = true;
     let mut flowers = white(0.6).with_subsurface(0.4).with_wind_sway(0.15);
     flowers.double_sided = true;
-    let mut window = StandardMaterial::hex(0x14161c)
-        .with_roughness(0.08)
-        .with_emissive([1.0, 0.62, 0.32], 40.0);
-    window.reflectance = 0.7;
-    window.receives_wetness = false;
+    // The village's meshes build on a worker while its textures generate.
+    let t0 = std::time::Instant::now();
+    let (village_meshes, village_mats) = std::thread::scope(|s| {
+        let job = s.spawn(village::build_meshes);
+        let mats = crate::texgen::village_materials(materials, images);
+        (job.join().expect("village mesh thread"), mats)
+    });
     let mats = Mats {
         terrain: materials.add(terrain),
         bark: materials.add(white(0.9)),
@@ -91,16 +110,7 @@ pub fn build_library(
         rock: materials.add(white(0.85)),
         grass: materials.add(grass),
         flowers: materials.add(flowers),
-        plaster: materials.add(white(0.9)),
-        wood: materials.add(white(0.75)),
-        roof: materials.add(white(0.7)),
-        window: materials.add(window),
-        iron: materials.add(white(0.45).with_metallic(0.8)),
-        lantern: materials.add(
-            StandardMaterial::hex(0x332211)
-                .with_emissive([1.0, 0.7, 0.4], 3_000.0)
-                .with_roughness(0.2),
-        ),
+        village: village_mats,
     };
 
     let mut trees = Vec::new();
@@ -151,19 +161,51 @@ pub fn build_library(
         .enumerate()
         .map(|(i, c)| meshes.add(meshgen::flower_patch(800 + i as u64, 4.0, 24, *c)))
         .collect();
-    let houses = (0..6)
-        .map(|i| {
-            let h = meshgen::house(900 + i);
-            HouseHandles {
-                walls: meshes.add(h.walls),
-                wood: meshes.add(h.wood),
-                roof: meshes.add(h.roof),
-                windows: meshes.add(h.windows),
-                half: h.half,
-            }
+    let village::VillageMeshes {
+        houses,
+        lamp,
+        bench,
+        barrels,
+        wood_piles,
+        cart,
+    } = village_meshes;
+    let mut add_parts = |parts: Vec<(Part, Mesh)>| -> PropHandles {
+        parts.into_iter().map(|(p, m)| (p, meshes.add(m))).collect()
+    };
+    let tris = |far: bool| {
+        houses
+            .iter()
+            .map(|h| if far { &h.1 } else { &h.0 }.triangles().to_string())
+            .collect::<Vec<_>>()
+            .join("/")
+    };
+    let (near_tris, far_tris) = (tris(false), tris(true));
+    let houses: Vec<HouseHandles> = houses
+        .into_iter()
+        .map(|(near, far)| HouseHandles {
+            half: near.half,
+            props: near.props,
+            near: add_parts(near.parts),
+            far: add_parts(far.parts),
         })
         .collect();
-    let (iron, glass) = meshgen::lamp_post();
+    let props = Props {
+        bench: add_parts(bench.parts),
+        barrels: barrels.into_iter().map(|b| add_parts(b.parts)).collect(),
+        wood_piles: wood_piles.into_iter().map(|b| add_parts(b.parts)).collect(),
+        cart: add_parts(cart.parts),
+    };
+    let lamp = LampHandles {
+        near: (meshes.add(lamp.0.0), meshes.add(lamp.0.1)),
+        far: (meshes.add(lamp.1.0), meshes.add(lamp.1.1)),
+    };
+    engine::core::log::info!(
+        "village: {} house types ({} triangles near, {} far), built in {:.2} s",
+        houses.len(),
+        near_tris,
+        far_tris,
+        t0.elapsed().as_secs_f32()
+    );
     Library {
         mats,
         trees,
@@ -173,7 +215,8 @@ pub fn build_library(
         dry_grass,
         flowers,
         houses,
-        lamp: (meshes.add(iron), meshes.add(glass)),
+        lamp,
+        props,
     }
 }
 
@@ -566,35 +609,151 @@ pub fn spawn_cliffs_and_stream(
     }
 }
 
-/// A house with its door facing `facing` (radians around Y; 0 = +Z).
+/// Street furniture hides beyond this distance (meters).
+const PROP_HIDE: f32 = 75.0;
+
+/// Distance (meters) beyond which a house part switches to the archetype's far mesh, or hides
+/// when it has none: single tiles and stones go first (their relief is under a pixel by then),
+/// the framing and windows last.
+fn house_lod_distance(part: Part) -> f32 {
+    match part {
+        Part::Roof | Part::Stone => 80.0,
+        Part::Iron => 50.0,
+        Part::Plants => 60.0,
+        _ => 140.0,
+    }
+}
+
+/// One house's looks: material variants (indices into the village materials) and mirroring.
+#[derive(Clone, Copy, Debug)]
+pub struct HouseLook {
+    pub plaster: usize,
+    pub timber: usize,
+    pub slate: bool,
+    pub roof: usize,
+    pub mirror: bool,
+}
+
+impl HouseLook {
+    pub fn random(rng: &mut Rng) -> Self {
+        Self {
+            plaster: rng.range_i32(0, 64) as usize,
+            timber: rng.range_i32(0, 64) as usize,
+            slate: rng.chance(0.3),
+            roof: rng.range_i32(0, 64) as usize,
+            mirror: rng.chance(0.5),
+        }
+    }
+}
+
+fn village_material(lib: &Library, part: Part, look: &HouseLook) -> Handle<StandardMaterial> {
+    let vm = &lib.mats.village;
+    let pick = |v: &Vec<Handle<StandardMaterial>>, i: usize| v[i % v.len()];
+    match part {
+        Part::Plaster => pick(&vm.plaster, look.plaster),
+        Part::Timber => pick(&vm.timber, look.timber),
+        Part::Paint => vm.paint,
+        Part::Stone => vm.stone,
+        Part::Brick => vm.brick,
+        Part::Roof if look.slate => pick(&vm.roof_slate, look.roof),
+        Part::Roof => pick(&vm.roof_clay, look.roof),
+        Part::Glass => vm.glass,
+        Part::Iron => vm.iron,
+        Part::Plants => vm.plants,
+    }
+}
+
+/// The transform of a house with its door facing `facing` (radians around Y; 0 = +Z).
+fn house_transform(pos: DVec3, facing: f32, look: &HouseLook) -> Transform {
+    let mirror = if look.mirror { -1.0 } else { 1.0 };
+    Transform::from_translation(pos)
+        .with_rotation(Quat::from_rotation_y(facing))
+        .with_scale(Vec3::new(mirror, 1.0, 1.0))
+}
+
+/// A house with its door facing `facing` (radians around Y; 0 = +Z): one entity per material,
+/// each switching to the archetype's far mesh (or hiding) with distance.
 pub fn spawn_house(
     commands: &mut Commands,
     lib: &Library,
     h: &HouseHandles,
     pos: DVec3,
     facing: f32,
+    look: &HouseLook,
 ) {
-    let tf = Transform::from_translation(pos).with_rotation(Quat::from_rotation_y(facing));
-    for (mesh, mat) in [
-        (h.walls, lib.mats.plaster),
-        (h.wood, lib.mats.wood),
-        (h.roof, lib.mats.roof),
-        (h.windows, lib.mats.window),
-    ] {
-        commands.spawn((tf, MeshRenderer::new(mesh, mat)));
+    let tf = house_transform(pos, facing, look);
+    for (part, near) in &h.near {
+        let far = h.far.iter().find(|(p, _)| p == part).map(|(_, m)| *m);
+        let mut renderer = MeshRenderer::new(*near, village_material(lib, *part, look));
+        if *part == Part::Plants {
+            renderer = renderer.without_shadows();
+        }
+        commands.spawn((
+            tf,
+            renderer,
+            Lod {
+                near: *near,
+                far,
+                switch: house_lod_distance(*part),
+                far_shown: false,
+            },
+        ));
+    }
+}
+
+/// A prop (bench, barrels, wood pile, cart) whose front faces `yaw` (radians around Y).
+fn spawn_prop(
+    commands: &mut Commands,
+    lib: &Library,
+    prop: &PropHandles,
+    pos: DVec3,
+    yaw: f32,
+    timber: usize,
+) {
+    let tf = Transform::from_translation(pos).with_rotation(Quat::from_rotation_y(yaw));
+    let look = HouseLook {
+        plaster: 0,
+        timber,
+        slate: false,
+        roof: 0,
+        mirror: false,
+    };
+    for (part, mesh) in prop {
+        commands.spawn((
+            tf,
+            MeshRenderer::new(*mesh, village_material(lib, *part, &look)),
+            Lod::hide_beyond(*mesh, PROP_HIDE),
+        ));
     }
 }
 
 /// A street lamp with a warm point light (lumens).
 pub fn spawn_lamp(commands: &mut Commands, lib: &Library, pos: DVec3) {
     let tf = Transform::from_translation(pos);
-    commands.spawn((tf, MeshRenderer::new(lib.lamp.0, lib.mats.iron)));
+    let vm = &lib.mats.village;
+    let (near, far) = (lib.lamp.near, lib.lamp.far);
     commands.spawn((
         tf,
-        MeshRenderer::new(lib.lamp.1, lib.mats.lantern).without_shadows(),
+        MeshRenderer::new(near.0, vm.iron),
+        Lod {
+            near: near.0,
+            far: Some(far.0),
+            switch: 60.0,
+            far_shown: false,
+        },
     ));
     commands.spawn((
-        Transform::from_translation(pos + DVec3::new(0.0, 3.9, 0.0)),
+        tf,
+        MeshRenderer::new(near.1, vm.lantern).without_shadows(),
+        Lod {
+            near: near.1,
+            far: Some(far.1),
+            switch: 60.0,
+            far_shown: false,
+        },
+    ));
+    commands.spawn((
+        Transform::from_translation(pos + DVec3::new(0.0, 3.86, 0.0)),
         PointLight {
             color: [1.0, 0.72, 0.45],
             intensity_lm: 1800.0,
@@ -604,56 +763,209 @@ pub fn spawn_lamp(commands: &mut Commands, lib: &Library, pos: DVec3) {
     ));
 }
 
-/// The village: houses ringing the plaza (doors toward it), more along the roads out, and
-/// street lamps.
-pub fn spawn_village(commands: &mut Commands, lib: &Library, land: &Landscape, rng: &mut Rng) {
-    let plaza = zone("plaza").center;
-    let mut placed: Vec<(DVec2, f64)> = Vec::new();
-    let mut try_house = |commands: &mut Commands, rng: &mut Rng, x: f64, z: f64, facing: f32| {
-        let h = &lib.houses[rng.range_i32(0, lib.houses.len() as i32) as usize];
-        let r = h.half.length() as f64;
-        let c = DVec2::new(x, z);
-        // Keep clear of roads, zones and other houses.
-        let clear = (0..8).all(|k| {
-            let a = k as f64 / 8.0 * std::f64::consts::TAU;
-            let q = c + DVec2::new(a.cos(), a.sin()) * r;
-            land.road_weight(q.x, q.y) == 0.0
-        }) && land.road_weight(x, z) == 0.0
-            && !ZONES.iter().any(|zn| {
-                (DVec2::new(zn.center.x, zn.center.z) - c).length() < zn.radius + r + 2.0
-            })
-            && placed
-                .iter()
-                .all(|(p, pr)| (*p - c).length() > pr + r + 3.0);
-        if !clear {
-            return;
-        }
-        // Sit on the lowest corner so no corner floats.
-        let base = (0..4)
-            .map(|k| {
-                let a = k as f64 / 4.0 * std::f64::consts::TAU + 0.78;
-                land.height(x + a.cos() * r * 0.7, z + a.sin() * r * 0.7)
-            })
-            .fold(f64::MAX, f64::min);
-        spawn_house(commands, lib, h, DVec3::new(x, base, z), facing);
-        placed.push((c, r));
-    };
-    for ring in [58.0, 78.0] {
-        let steps = if ring < 60.0 { 22 } else { 28 };
-        for i in 0..steps {
-            let a = i as f64 / steps as f64 * std::f64::consts::TAU + rng.range(-0.04, 0.04) as f64;
-            let x = plaza.x + a.cos() * ring;
-            let z = plaza.z + a.sin() * ring;
-            // Face the plaza: door (+Z local) toward the center.
-            let facing = (-(a.cos()) as f32).atan2(-(a.sin()) as f32);
-            try_house(commands, rng, x, z, facing);
+/// A house's footprint on the ground: center, unit axes (local X and Z) and half extents.
+#[derive(Clone, Copy, Debug)]
+struct Footprint {
+    c: DVec2,
+    ax: [DVec2; 2],
+    half: DVec2,
+}
+
+impl Footprint {
+    fn new(c: DVec2, facing: f32, half: Vec2) -> Self {
+        let (s, co) = (facing as f64).sin_cos();
+        // Local +X and +Z after turning by `facing` around Y.
+        Self {
+            c,
+            ax: [DVec2::new(co, -s), DVec2::new(s, co)],
+            half: half.as_dvec2(),
         }
     }
-    // Lamps around the plaza and along the first stretch of each road.
+
+    fn corners(&self, grow: f64) -> [DVec2; 4] {
+        let (x, z) = (
+            self.ax[0] * (self.half.x + grow),
+            self.ax[1] * (self.half.y + grow),
+        );
+        [
+            self.c + x + z,
+            self.c - x + z,
+            self.c - x - z,
+            self.c + x - z,
+        ]
+    }
+
+    /// Separating-axis test with a margin (meters).
+    fn overlaps(&self, o: &Footprint, margin: f64) -> bool {
+        let a = self.corners(margin * 0.5);
+        let b = o.corners(margin * 0.5);
+        for axis in self.ax.iter().chain(o.ax.iter()) {
+            let proj = |pts: &[DVec2; 4]| {
+                pts.iter()
+                    .map(|p| p.dot(*axis))
+                    .fold((f64::MAX, f64::MIN), |(lo, hi), v| (lo.min(v), hi.max(v)))
+            };
+            let ((a0, a1), (b0, b1)) = (proj(&a), proj(&b));
+            if a1 < b0 || b1 < a0 {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// Distance from `p` to the footprint (0 inside).
+    fn distance(&self, p: DVec2) -> f64 {
+        let d = p - self.c;
+        let q = DVec2::new(d.dot(self.ax[0]).abs(), d.dot(self.ax[1]).abs()) - self.half;
+        q.max(DVec2::ZERO).length()
+    }
+}
+
+/// The village: rows of houses around the plaza (doors toward it) with benches, barrels and
+/// wood piles by their walls, carts at the plaza's edge, and street lamps.
+pub fn spawn_village(commands: &mut Commands, lib: &Library, land: &Landscape, rng: &mut Rng) {
+    let plaza = zone("plaza").center;
+    let center = DVec2::new(plaza.x, plaza.z);
+    let mut placed: Vec<Footprint> = Vec::new();
+    let mut count = 0;
+    let mut try_house =
+        |commands: &mut Commands, rng: &mut Rng, k: usize, at: DVec2, facing: f32| {
+            let h = &lib.houses[k];
+            let fp = Footprint::new(at, facing, h.half);
+            // Keep clear of roads, zones and other houses.
+            let mut probe = fp.corners(1.0).to_vec();
+            probe.extend(fp.corners(1.0).iter().map(|q| (*q + fp.c) * 0.5));
+            probe.push(fp.c);
+            let clear = probe.iter().all(|q| land.road_weight(q.x, q.y) == 0.0)
+                && !ZONES
+                    .iter()
+                    .any(|zn| fp.distance(DVec2::new(zn.center.x, zn.center.z)) < zn.radius + 2.0)
+                && placed.iter().all(|o| !fp.overlaps(o, 1.6));
+            if !clear {
+                return false;
+            }
+            // Sit on the lowest corner so no corner floats (the plinth goes down into the ground).
+            let base = fp
+                .corners(-0.5)
+                .iter()
+                .map(|q| land.height(q.x, q.y))
+                .fold(f64::MAX, f64::min);
+            let look = HouseLook::random(rng);
+            let pos = DVec3::new(at.x, base, at.y);
+            spawn_house(commands, lib, h, pos, facing, &look);
+            // Props at some of the archetype's spots.
+            let tf = house_transform(pos, facing, &look);
+            let mut barrels_done = false;
+            for spot in &h.props {
+                let (prop, chance, timber) = match spot.kind {
+                    PropKind::Bench => (&lib.props.bench, 0.6, 2),
+                    PropKind::Barrels if !barrels_done => (
+                        &lib.props.barrels
+                            [rng.range_i32(0, lib.props.barrels.len() as i32) as usize],
+                        0.3,
+                        0,
+                    ),
+                    PropKind::Barrels => continue,
+                    PropKind::WoodPile => (
+                        &lib.props.wood_piles
+                            [rng.range_i32(0, lib.props.wood_piles.len() as i32) as usize],
+                        0.35,
+                        2,
+                    ),
+                };
+                if !rng.chance(chance) {
+                    continue;
+                }
+                barrels_done |= spot.kind == PropKind::Barrels;
+                let p = tf.translation + (tf.rotation * (spot.pos * tf.scale)).as_dvec3();
+                let f = tf.rotation * (spot.facing * tf.scale);
+                if land.road_weight(p.x, p.z) > 0.0 {
+                    continue;
+                }
+                let y = land.height(p.x, p.z);
+                spawn_prop(
+                    commands,
+                    lib,
+                    prop,
+                    DVec3::new(p.x, y, p.z),
+                    f.x.atan2(f.z),
+                    timber,
+                );
+            }
+            placed.push(fp);
+            count += 1;
+            true
+        };
+    // Rows of houses along rings around the plaza, frontages a few meters apart.
+    for (ring, gap) in [(55.0f64, (1.5f32, 4.0f32)), (76.0, (2.5, 7.0))] {
+        let mut a = rng.range(0.0, 0.3) as f64;
+        let end = a + std::f64::consts::TAU;
+        let mut k = rng.range_i32(0, lib.houses.len() as i32) as usize;
+        while a < end {
+            let h = &lib.houses[k];
+            let half_w = h.half.x as f64;
+            // Center the house's frontage on the ring, its back half outward.
+            let r = ring + h.half.y as f64;
+            let at = center + DVec2::new(a.cos(), a.sin()) * r;
+            let facing = (-(a.cos()) as f32).atan2(-(a.sin()) as f32);
+            let placed_one = try_house(commands, rng, k, at, facing);
+            let step = if placed_one {
+                half_w * 2.0 + rng.range(gap.0, gap.1) as f64
+            } else {
+                3.0
+            };
+            a += step / ring;
+            if placed_one {
+                k = (k + 1 + rng.range_i32(0, 3) as usize) % lib.houses.len();
+            }
+        }
+    }
+    engine::core::log::info!("village: {count} houses");
+    // Lamps around the plaza, and along the street in front of the first row.
     for i in 0..12 {
         let a = i as f64 / 12.0 * std::f64::consts::TAU + 0.13;
         let p = DVec3::new(a.cos() * 34.0, 0.0, a.sin() * 34.0);
         spawn_lamp(commands, lib, place(land, p.x, p.z, 0.0));
+    }
+    for i in 0..10 {
+        let a = i as f64 / 10.0 * std::f64::consts::TAU + 0.4;
+        let q = center + DVec2::new(a.cos(), a.sin()) * 51.5;
+        let clear = land.road_weight(q.x, q.y) == 0.0
+            && placed.iter().all(|fp| fp.distance(q) > 1.0)
+            && !ZONES.iter().any(|zn| {
+                DVec2::new(q.x - zn.center.x, q.y - zn.center.z).length() < zn.radius + 0.5
+            });
+        if clear {
+            spawn_lamp(commands, lib, place(land, q.x, q.y, 0.0));
+        }
+    }
+    // Hand carts left at the plaza's edge.
+    let mut carts = 0;
+    for _ in 0..40 {
+        if carts == 2 {
+            break;
+        }
+        let a = rng.range(0.0, TAU) as f64;
+        let q = center + DVec2::new(a.cos(), a.sin()) * rng.range(44.0, 48.0) as f64;
+        let clear = land.road_weight(q.x, q.y) == 0.0
+            && land.road_weight(q.x + 2.0, q.y) == 0.0
+            && land.road_weight(q.x - 2.0, q.y) == 0.0
+            && placed.iter().all(|fp| fp.distance(q) > 2.5)
+            && !ZONES.iter().any(|zn| {
+                DVec2::new(q.x - zn.center.x, q.y - zn.center.z).length() < zn.radius + 2.0
+            });
+        if clear {
+            let yaw = a as f32 + rng.range(-0.6, 0.6) + std::f32::consts::FRAC_PI_2;
+            spawn_prop(
+                commands,
+                lib,
+                &lib.props.cart,
+                place(land, q.x, q.y, 0.0),
+                yaw,
+                2,
+            );
+            carts += 1;
+        }
     }
 }
 

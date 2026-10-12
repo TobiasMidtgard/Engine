@@ -19,7 +19,9 @@ mod meshgen;
 mod placeholders;
 mod places;
 mod scenery;
+mod texgen;
 mod tour;
+mod village;
 mod zones;
 
 use engine::prelude::*;
