@@ -5,6 +5,10 @@
 //! Without the renderer (headless tests) there are no mesh or image assets; [`ArtAssets`]
 //! then reports itself unavailable and callers fall back to primitive shapes.
 
+pub mod animals;
+pub mod arena;
+pub mod fighter;
+pub mod mesh;
 pub mod noise;
 pub mod sdf;
 pub mod tex;

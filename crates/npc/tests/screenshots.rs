@@ -149,11 +149,15 @@ fn arena_and_meadow_screenshots() {
     let Some(img) = shoot(&mut app, overview, "npc_arena_overview.png") else {
         return;
     };
-    let red = count(&img, |r, g, b| r > 70.0 && r > g * 1.7 && r > b * 1.7);
-    let blue = count(&img, |r, g, b| b > 70.0 && b > r * 1.5 && b > g * 1.2);
+    let cover_img = shoot(&mut app, cover, "npc_arena_cover.png").unwrap();
+    // Both squads show up (counted over two views, so a column in front of one doesn't hide a
+    // whole squad).
+    let red = |img: &image::RgbaImage| count(img, |r, g, b| r > 70.0 && r > g * 1.7 && r > b * 1.7);
+    let blue =
+        |img: &image::RgbaImage| count(img, |r, g, b| b > 70.0 && b > r * 1.5 && b > g * 1.2);
+    let (red, blue) = (red(&img) + red(&cover_img), blue(&img) + blue(&cover_img));
     assert!(red > 150, "red fighters visible: {red} px");
     assert!(blue > 150, "blue fighters visible: {blue} px");
-    shoot(&mut app, cover, "npc_arena_cover.png");
     shoot(&mut app, stands, "npc_arena_stands.png");
     shoot(&mut app, sparring, "npc_sparring_lane.png");
     app.update_n(5);
