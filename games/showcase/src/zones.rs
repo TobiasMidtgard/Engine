@@ -247,7 +247,7 @@ pub fn spawn_demos(
             "plaza" => ph::plaza(commands, lib, z),
             "market" => ph::market(commands, lib, z),
             "paddock" => ph::stage(commands, lib, z),
-            "physics" => ph::physics(commands, lib, z),
+            "physics" => engine_physics::demo::spawn_demo(commands, z.center),
             "yard" => engine_softbody::demo::spawn_demo(commands, z.center),
             "magic" => ph::magic(commands, lib, z),
             "gallery2d" => ph::gallery2d(commands, lib, z),
