@@ -311,3 +311,38 @@ fn fighter_closeups() {
     shoot(&mut app, downed, "npc_fighters_downed.png");
     shoot(&mut app, back, "npc_fighters_back.png");
 }
+
+/// One squad side by side, close: each fighter's face (skin tone, shape and eye color) comes
+/// from its own seed, so squad members look like different people.
+#[test]
+fn fighter_faces() {
+    let mut app = app();
+    let squad = [
+        (NpcWeapon::claws(), NpcSkills::master()),
+        (NpcWeapon::sword(), NpcSkills::rookie()),
+        (NpcWeapon::sword(), NpcSkills::veteran()),
+        (NpcWeapon::sword_and_shield(), NpcSkills::elite()),
+    ];
+    for (i, (weapon, skills)) in squad.into_iter().enumerate() {
+        spawn(
+            &mut app,
+            Pose {
+                skills,
+                alert: AlertLevel::Relaxed,
+                ..Pose::new(-0.9 + 0.6 * i as f64, 1, weapon)
+            },
+        );
+    }
+    let cam = camera(
+        &mut app,
+        DVec3::new(0.0, 1.7, -3.6),
+        DVec3::new(0.0, 1.5, 0.0),
+        22.0,
+    );
+    app.update_n(2);
+    if app.world.get_resource::<RenderDisabled>().is_some() {
+        eprintln!("skipping: no GPU");
+        return;
+    }
+    shoot(&mut app, cam, "npc_fighters_squad_faces.png");
+}
