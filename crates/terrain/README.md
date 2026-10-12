@@ -121,7 +121,11 @@ a person, a dog, a horse and a rover walking them (prints and tracks appear from
 frame), plus a dug crater, a trench and a raised mound. The walkers make prints but have no
 bodies: attach a character, animal or vehicle from the module that owns it as a child of
 each `DemoWalker` entity (its `Transform` moves along the path facing forward), or pass
-`LabOptions { stand_in_bodies: true }` to `spawn_demo_with` for plain shapes.
+`LabOptions { stand_in_bodies: true }` to `spawn_demo_with` for simple figures built from
+shapes: a hiker with a backpack, a dog, a horse and a rover, whose legs and arms swing with
+their steps (`LabLimb`, trotting animals move diagonal legs together) and whose wheels roll
+with the distance driven. The strips and edits sit on the ground under each spot (sampled
+from `Ground` when they apply), so the lab works on uneven ground too.
 
 ## Known limits (next rounds)
 
