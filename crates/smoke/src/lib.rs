@@ -2,6 +2,7 @@
 
 pub mod demo;
 pub mod domain;
+pub mod noise;
 pub mod obscurance;
 pub mod render;
 pub mod settings;
