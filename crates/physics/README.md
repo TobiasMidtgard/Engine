@@ -6,9 +6,9 @@ Background research: `game-engine-research/physics.md` in the project files.
 ## Scope
 
 - Rigid-body simulation: dynamic/kinematic/static bodies, colliders (primitives, convex hulls, trimesh, heightfield, voxel), stable stacking, joints and motors (hinges, sliders, ball, fixed, springs), ragdolls and articulations, sleeping, continuous collision for fast vehicles and projectiles, optional deterministic mode for replays and netcode.
-- Public coupling API for `engine_softbody` (cloth, ropes, soft bodies), `engine_vehicles` and `engine_destruction`: collider queries against particles, applying impulses at points, attaching constraints to bodies.
+- **Implements the physics contract** in `engine_world::physics` and nothing else is public: other modules (vehicles, cloth, destruction, movement, ragdolls) only see `RigidBody`, `Collider`, `Joint`, `CharacterController`, `ApplyImpulse`, `ContactEvent` and `PhysicsQueries`, so this crate can be replaced by another backend. Must pass `engine_world::physics::conformance::assert_all`. If the contract lacks something (soft contacts, articulations), ask the core owner to extend it.
 - Scene queries: raycast, shapecast, overlap, with layer/filters. These are what AI perception, weapons, footsteps and cameras use.
-- Kinematic character controller (steps, slopes, ground snapping, moving platforms) that `engine_movement` builds wall-running and dashing on.
+- Kinematic character controller (steps, slopes, ground snapping, moving platforms) behind `CharacterController`/`CharacterMove`/`CharacterState`, which the movement module builds wall-running and dashing on.
 - Planet-scale worlds: simulate in local physics islands/frames anchored at f64 positions around each `SimulationFocus` (floating origin), so a car on a moon 400 000 km away is as stable as one at the origin.
 - Gravity from `engine_world::Gravity` (uniform or planet bodies), friction/restitution from `SurfaceMaterials`, buoyancy from the `Water` query.
 - Runs in `FixedUpdate` / `SimSet::Physics`, honors `TimeDilation` and per-entity `LocalTimeScale`.
@@ -27,6 +27,7 @@ Cross-module interaction goes through `engine_world` (see AGENTS.md). If a contr
 - A 1 000-body pile settles without jitter at 60 Hz on a laptop; a 30-box tower stands still.
 - A ragdoll and a chain of jointed bodies stay stable under slow motion and at 10x time scale.
 - A body 1e8 m from the origin behaves exactly like one at the origin.
+- `engine_world::physics::conformance::assert_all` passes in this crate's tests.
 - Raycasts/shapecasts available as API functions (`physics.raycast`).
 
 ## Checklist

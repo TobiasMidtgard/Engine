@@ -866,7 +866,6 @@ name = "engine_softbody"
 version = "0.1.0"
 dependencies = [
  "bevy_ecs",
- "engine_anim",
  "engine_core",
  "engine_physics",
  "engine_world",

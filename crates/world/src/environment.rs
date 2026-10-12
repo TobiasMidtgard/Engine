@@ -133,7 +133,12 @@ impl Default for WindField {
             prevailing: Vec3::new(3.0, 0.0, 1.0),
             gustiness: 0.3,
             time: 0.0,
-            local: Grid3::new(DVec3::new(-64.0, -16.0, -64.0), 4.0, [32, 12, 32], Vec3::ZERO),
+            local: Grid3::new(
+                DVec3::new(-64.0, -16.0, -64.0),
+                4.0,
+                [32, 12, 32],
+                Vec3::ZERO,
+            ),
         }
     }
 }

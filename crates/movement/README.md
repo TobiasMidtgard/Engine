@@ -13,9 +13,9 @@ Background research: `game-engine-research/animation.md` in the project files.
 
 ## Contracts
 
-Reads: engine_input actions, physics character controller, Time / TimeDilation, `AttackEvent` (slow motion on attacks).
+Reads: `MoveIntent` (from player input or NPC AI), physics contract (`CharacterController`/`CharacterState`, `PhysicsQueries` for wall and ledge detection), Time / TimeDilation, `AttackEvent` (slow motion on attacks).
 
-Writes: TimeDilation requests, `LocalTimeScale`, GroundContact (landings), `NoiseEvent`.
+Writes: `CharacterMove`, `LocomotionState`, `AnimationParams`/`AnimationTrigger`, TimeDilation requests, `LocalTimeScale`, GroundContact (landings), `NoiseEvent`.
 
 Cross-module interaction goes through `engine_world` (see AGENTS.md). If a contract is missing, ask the core owner to add it rather than depending on another module's crate.
 

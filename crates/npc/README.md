@@ -13,9 +13,9 @@ Background research: `game-engine-research/scripting.md` in the project files.
 
 ## Contracts
 
-Reads: physics queries, `NoiseEvent`, `DamageEvent`, `AttackEvent` (to block and dodge), Ground query, movement/animation capabilities.
+Reads: `PhysicsQueries` (line of sight, cover), `NoiseEvent`, `DamageEvent`, `AttackEvent` (to block and dodge), Ground query, `LocomotionState` and `SkeletonPose` of targets.
 
-Writes: `AttackEvent` (telegraphs), actions for movement/combat, NoiseEvent (shouts).
+Writes: `MoveIntent` (the same input a player produces), `VehicleControls` when driving, `AttackEvent` (telegraphs), NoiseEvent (shouts).
 
 Cross-module interaction goes through `engine_world` (see AGENTS.md). If a contract is missing, ask the core owner to add it rather than depending on another module's crate.
 

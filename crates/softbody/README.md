@@ -3,16 +3,16 @@
 **Owner:** Cloth, soft bodies & hair (proposed). **Status:** stub. The owning workstream replaces this with the real module.
 Background research: `game-engine-research/physics.md` (cloth and soft-body sections: Chaos Cloth/Flesh, Jolt and Godot `SoftBody3D`, XPBD) in the project files.
 
-Rigid bodies live in `engine_physics`; this crate simulates everything that bends, stretches or squishes and couples it to those rigid bodies both ways.
+Rigid bodies live in the physics module; this crate simulates everything that bends, stretches or squishes and couples it to those rigid bodies both ways, through the physics contract only (so either module can be replaced).
 
 ## Scope
 
 - One XPBD particle/constraint solver with substeps, used for all of the below. CPU for gameplay-relevant pieces, GPU compute (`RenderFeature::compute`) for large purely visual cloth.
-- **Cloth:** capes, clothing on characters (pinned to bones/skinned vertices from `engine_anim`), flags, sails, curtains, tents. Stretch, bend and shear constraints, self-collision, collision with physics colliders and characters, wind from `WindField`, tearing (bullets, blades, fire), wetness making cloth heavier.
+- **Cloth:** capes, clothing on characters (pinned to bones from `engine_world::animation::SkeletonPose`), flags, sails, curtains, tents. Stretch, bend and shear constraints, self-collision, collision with physics colliders and characters, wind from `WindField`, tearing (bullets, blades, fire), wetness making cloth heavier.
 - **Ropes and cables:** grappling lines, rope bridges, power lines, tow cables between vehicles; attach to rigid bodies with two-way forces.
-- **Hair and fur:** a hair strand is a tiny rope, so it uses the same solver. Simulate a few hundred to a few thousand guide strands per character or animal (XPBD chains with bend/twist stiffness, inertia that follows the moving head or body, collision against body capsules or an SDF from `engine_anim`, wind, wetness clumping) and interpolate the rendered strands from them. Styles as data: length, curl, clumping, stiffness, color/melanin. Fur on animals uses short guides and shell or strand rendering at distance.
+- **Hair and fur:** a hair strand is a tiny rope, so it uses the same solver. Simulate a few hundred to a few thousand guide strands per character or animal (XPBD chains with bend/twist stiffness, inertia that follows the moving head or body, collision against body capsules placed on `SkeletonPose` bones, wind, wetness clumping) and interpolate the rendered strands from them. Styles as data: length, curl, clumping, stiffness, color/melanin. Fur on animals uses short guides and shell or strand rendering at distance.
 - **Soft bodies:** volumetric bodies (tetrahedral or shape-matching): jelly, slimes, creature flesh/bellies, soft tires and cushions, foliage that bends under weight. Plasticity for dents that stay.
-- Two-way coupling: soft bodies push rigid bodies and vice versa, through `engine_physics` collider queries and impulse application.
+- Two-way coupling: soft bodies push rigid bodies and vice versa, through `PhysicsQueries::closest_point`/`overlap` and `ApplyImpulse` from the physics contract.
 - LOD and sleeping: full simulation near `SimulationFocus`, simplified or frozen far away; skinned fallback when off-screen.
 - Cloth writes per-vertex tension (stretch vs compression from the solver) so the material shows wrinkles where fabric bunches and smooths where it pulls tight, at no extra simulation cost.
 - Hair, fur and grass share the renderer's strand pipeline (`engine_render` strands: GPU-expanded camera-facing strands from guide curves, hair shading with two specular lobes, LOD from strands to cards to shells). `engine_foliage` uses the same pipeline for grass, with wind sway instead of full dynamics.
@@ -21,11 +21,11 @@ Rigid bodies live in `engine_physics`; this crate simulates everything that bend
 
 ## Contracts
 
-Reads: `WindField`, `Gravity`, `WorldImpulse` (explosions push cloth), `ProjectileTrace` (bullets pierce/tear), `HeatField` / `IgniteRequest` (burning cloth), `SurfaceLayers` (rain wetness), `SimulationFocus`; physics colliders and bodies via `engine_physics`; bone/skin poses via `engine_anim`.
+Reads: `WindField`, `Gravity`, `WorldImpulse` (explosions push cloth), `ProjectileTrace` (bullets pierce/tear), `HeatField` / `IgniteRequest` (burning cloth), `SurfaceLayers` (rain wetness), `SimulationFocus`; physics contract (`PhysicsQueries`, `Velocity`, `MassProperties`); animation contract (`SkeletonPose`).
 
-Writes: `WorldImpulse` (soft bodies hitting things), `NoiseEvent` (flapping, impacts), `GroundContact` (soft bodies landing), its own components.
+Writes: `ApplyImpulse` (pushing rigid bodies), `WorldImpulse` (soft bodies hitting things), `NoiseEvent` (flapping, impacts), `GroundContact` (soft bodies landing), its own components.
 
-Allowed crate dependencies: `engine_physics`, `engine_anim` (see ARCHITECTURE.md). Anything else goes through `engine_world`; if a contract is missing, ask the core owner to add it.
+No dependencies on other module crates (see ARCHITECTURE.md). Everything goes through `engine_world`; if a contract is missing, ask the core owner to add it.
 
 ## Done when
 

@@ -23,10 +23,12 @@ crates/<module>    one crate per system (below)
 1. **Large worlds first.** f64 world positions, camera-relative rendering, reverse-Z infinite
    projection. Physics and simulations run in local frames around the action
    (`SimulationFocus`), so a city, a planet and the space between planets all work.
-2. **Contracts over coupling.** Modules don't depend on each other; they read and write the
-   shared types in `engine_world`. Fire listens for `IgniteRequest` and heat; smoke listens for
-   `ProjectileTrace` and `WindField`; footprints listen for `GroundContact`. A module can be
-   replaced without touching the others.
+2. **Every module is replaceable.** Modules never depend on each other's crates; they read
+   and write the shared types in `engine_world`. Fire listens for `IgniteRequest` and heat;
+   smoke listens for `ProjectileTrace` and `WindField`; footprints listen for `GroundContact`;
+   vehicles, cloth, ragdolls and destruction use the physics *contract*, not a physics crate.
+   Rip any module out, write a new one against the same contract, and plug it back in with
+   one line in the game's `main` (see "Replacing a module").
 3. **Everything is data and everything is callable.** Registered components/resources are
    JSON-patchable by name; API functions (`module.verb`) take and return JSON. This is the AI
    integration surface (`engine.describe` lists it all) and also the console, scripting and
@@ -76,21 +78,36 @@ by the core owner, on request.
 | `engine_movement` | Advanced locomotion (wall-run, slide, dash), combat movement, time-dilation gameplay (perception levels, slow-mo on attacks) | Movement & time |
 | `engine_script` | Hot-reloaded gameplay scripting | Later |
 
-### Allowed dependencies between modules
+### Dependencies between modules: none
 
-Modules talk through `engine_world` contracts. A few have a real need for another module's
-API; only these crate dependencies are allowed (everything may depend on the core crates):
+A module crate depends only on the core crates (`engine_core`, `engine_world`,
+`engine_render`, `engine_assets`, `engine_input`). When one module needs another, it uses that
+module's **contract** in `engine_world`:
 
-| Module | May depend on |
-|---|---|
-| `engine_physics`, `engine_terrain`, `engine_water`, `engine_weather`, `engine_fire`, `engine_smoke`, `engine_vfx`, `engine_audio`, `engine_ui` | core crates only |
-| `engine_vehicles`, `engine_space`, `engine_anim`, `engine_foliage` | `engine_physics` |
-| `engine_destruction` | `engine_physics`, `engine_terrain` |
-| `engine_movement` | `engine_physics`, `engine_anim` |
-| `engine_softbody` | `engine_physics`, `engine_anim` |
-| `engine_npc` | `engine_physics`, `engine_anim`, `engine_movement` |
+| Contract (`engine_world::…`) | Implemented by | Used by |
+|---|---|---|
+| `physics`: `RigidBody`, `Collider`, `Velocity`, `ExternalForce`, `Joint`, `CharacterController`/`CharacterMove`/`CharacterState`, `ApplyImpulse`, `ContactEvent`, `PhysicsQueries` (raycast, shapecast, overlap, closest point) | `engine_physics` | vehicles, softbody, destruction, movement, npc, anim (ragdolls), space, gameplay |
+| `animation`: `SkeletonPose`, `AnimationParams`, `AnimationTrigger`, `AnimationEvent`, `Ragdoll` | `engine_anim` | movement, npc, softbody (cloth/hair pinning), vfx, audio |
+| `locomotion`: `MoveIntent`, `LocomotionState`, `VehicleControls` | `engine_movement`, `engine_vehicles` | npc, player input, cameras, UI |
+| `terrain`: `TerrainEdit`, `TerrainChanged`, plus the `Ground` query | `engine_terrain` | destruction, foliage, physics, water, npc |
+| `Water`, `Gravity`, fields and world events (see the crate docs) | water, space, weather, … | everyone |
 
-Anything else is a missing contract: ask the core owner to add it to `engine_world`.
+Anything a module needs that isn't there is a missing contract: ask the core owner to add it
+to `engine_world` rather than depending on another module's crate. The test
+`crates/engine/tests/module_boundaries.rs` fails the build if a module crate depends on another.
+
+### Replacing a module
+
+1. Write the new crate against the same contract (the old crate's README lists what it reads
+   and writes).
+2. Pass the contract's conformance tests. Physics has a full suite:
+   `engine_world::physics::conformance::assert_all(|app| { app.add_plugins(MyPhysics); })`
+   (gravity, resting contact, impulses, contact events, raycasts, time dilation, precision
+   100 000 km from the origin, the character controller). `crates/world/tests/physics_contract.rs`
+   shows a 300-line backend that passes it.
+3. Swap the plugin in the game: `app.add_plugins(MyPhysics)` instead of
+   `engine_physics::PhysicsPlugin`. Nothing else changes. Physics backends call
+   `claim_backend`, so accidentally running two is a clear error.
 
 ### How a module plugs in
 

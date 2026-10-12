@@ -58,8 +58,11 @@ A module is one crate (`crates/<name>`, package `engine_<name>`) with one `Plugi
 1. **Own your crate.** Don't edit other modules' crates. Changes to `engine_core`,
    `engine_world` or `engine_render` public APIs go through the core owner (open a PR or
    describe the change; see ARCHITECTURE.md).
-2. **Talk through contracts, not crates.** Only the module dependencies listed in
-   ARCHITECTURE.md ("Allowed dependencies") are allowed. Everything else goes through
+2. **Talk through contracts, not crates.** A module never depends on another module's crate,
+   so any module can be replaced (ARCHITECTURE.md, "Replacing a module"). Physics, animation,
+   locomotion and terrain editing have contracts in `engine_world` (`physics::RigidBody`,
+   `PhysicsQueries`, `animation::SkeletonPose`, `MoveIntent`, `TerrainEdit`, …); a physics
+   backend must pass `engine_world::physics::conformance`. Everything else also goes through
    `engine_world`: messages (`WorldImpulse`, `ProjectileTrace`, `GroundContact`,
    `IgniteRequest`, `DamageEvent`, `NoiseEvent`), shared fields (`WindField`, `HeatField`,
    `SurfaceLayers`), queries (`Ground`, `Water`), `SurfaceMaterials`, `Gravity`. A smoke

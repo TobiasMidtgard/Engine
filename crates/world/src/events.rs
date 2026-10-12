@@ -143,7 +143,7 @@ pub struct AttackEvent {
     pub kind: AttackKind,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum AttackKind {
     #[default]
     Melee,

@@ -8,8 +8,6 @@ license.workspace = true
 [dependencies]
 engine_core.workspace = true
 engine_world.workspace = true
-engine_physics.workspace = true
-engine_anim.workspace = true
 bevy_ecs.workspace = true
 serde.workspace = true
 serde_json.workspace = true

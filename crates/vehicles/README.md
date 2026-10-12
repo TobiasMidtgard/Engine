@@ -12,7 +12,7 @@ Background research: `game-engine-research/physics.md` in the project files.
 
 ## Contracts
 
-Reads: engine_physics bodies/queries, `Gravity`, SurfaceMaterials (tire friction), Water (boats/amphibious), Atmosphere density (via space/weather).
+Reads: `VehicleControls` (player or AI), physics contract (`RigidBody`, `ExternalForce`, `ApplyImpulse`, `PhysicsQueries` for wheel raycasts), `Gravity`, SurfaceMaterials (tire friction), Water (boats/amphibious), Atmosphere density (via space/weather).
 
 Writes: GroundContact (Wheel/Track), NoiseEvent (engines), WorldImpulse (crashes).
 

@@ -12,18 +12,29 @@
 //! * **Focus** ([`SimulationFocus`]): where detailed simulation happens (the player, the camera).
 //! * **Combustible** ([`Combustible`]): anything that can burn, declared by its owner (foliage,
 //!   props, buildings) and simulated by the fire module.
+//! * **Module contracts** for the systems other modules build on, so each module can be ripped
+//!   out and replaced: [`physics`] (bodies, colliders, joints, character controller, queries,
+//!   plus a [`physics::conformance`] suite every backend must pass), [`animation`] (pose,
+//!   parameters, triggers, events, ragdoll), [`locomotion`] (move intent and state, vehicle
+//!   controls) and [`terrain`] (edits and change notifications).
 //!
 //! Units everywhere: meters, kilograms, seconds, °C, m/s.
 
+pub mod animation;
 pub mod environment;
 pub mod events;
 pub mod grid;
+pub mod locomotion;
 pub mod physical;
+pub mod physics;
+pub mod terrain;
 
 pub use environment::*;
 pub use events::*;
 pub use grid::{Blend, Grid2, Grid3};
+pub use locomotion::{LocomotionMode, LocomotionState, MoveIntent, VehicleControls};
 pub use physical::*;
+pub use terrain::{EditOp, EditShape, TerrainChanged, TerrainEdit};
 
 use engine_core::math::{DVec2, DVec3, Vec3};
 use engine_core::prelude::*;
@@ -160,6 +171,10 @@ pub struct WorldPlugin;
 
 impl Plugin for WorldPlugin {
     fn build(&self, app: &mut App) {
+        physics::register(app);
+        animation::register(app);
+        locomotion::register(app);
+        terrain::register(app);
         app.init_resource::<WeatherState>()
             .init_resource::<WindField>()
             .init_resource::<SurfaceLayers>()
@@ -214,7 +229,7 @@ fn update_focus_system(
         .iter()
         .map(|(g, f)| (f.priority, g.translation()))
         .collect();
-    items.sort_by(|a, b| b.0.cmp(&a.0));
+    items.sort_by_key(|item| std::cmp::Reverse(item.0));
     focus.points.clear();
     focus.points.extend(items.into_iter().map(|(_, p)| p));
 }
@@ -289,18 +304,62 @@ mod tests {
         };
         let a = g.at(DVec3::new(0.0, 6.371e6, 0.0));
         assert!((a.y + 9.82).abs() < 0.05, "{a:?}");
-        assert!(g.up_at(DVec3::new(6.371e6, 0.0, 0.0)).abs_diff_eq(Vec3::X, 1e-5));
+        assert!(
+            g.up_at(DVec3::new(6.371e6, 0.0, 0.0))
+                .abs_diff_eq(Vec3::X, 1e-5)
+        );
     }
 
     #[test]
     fn plugin_installs_and_runs() {
         let mut app = App::new();
         app.add_plugins(WorldPlugin);
-        app.world.spawn((Transform::from_xyz(500.0, 0.0, 0.0), SimulationFocus::default()));
+        app.world.spawn((
+            Transform::from_xyz(500.0, 0.0, 0.0),
+            SimulationFocus::default(),
+        ));
         app.update_n(2);
         let focus = app.world.resource::<FocusPoints>();
         assert_eq!(focus.points.len(), 1);
         let surface = app.world.resource::<SurfaceLayers>();
         assert!(surface.grid.contains(DVec3::new(500.0, 0.0, 0.0)));
+    }
+
+    #[test]
+    #[should_panic(expected = "Two physics backends")]
+    fn two_physics_backends_are_rejected() {
+        let mut app = App::new();
+        physics::claim_backend(&mut app, "first");
+        physics::claim_backend(&mut app, "second");
+    }
+
+    #[test]
+    fn contracts_are_registered() {
+        let mut app = App::new();
+        app.add_plugins(WorldPlugin);
+        let registry = app.world.resource::<TypeRegistry>();
+        for name in [
+            "RigidBody",
+            "Collider",
+            "CharacterController",
+            "MoveIntent",
+            "AnimationParams",
+        ] {
+            assert!(
+                registry.component(name).is_some(),
+                "{name} is not registered"
+            );
+        }
+        // Without a backend every query misses instead of failing.
+        let q = app.world.resource::<physics::PhysicsQueries>();
+        assert!(
+            q.raycast(
+                DVec3::ZERO,
+                Vec3::NEG_Y,
+                10.0,
+                &physics::QueryFilter::default()
+            )
+            .is_none()
+        );
     }
 }

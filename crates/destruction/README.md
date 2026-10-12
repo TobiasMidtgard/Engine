@@ -12,9 +12,9 @@ Background research: `game-engine-research/physics.md` in the project files.
 
 ## Contracts
 
-Reads: `DamageEvent`, `WorldImpulse`, `ProjectileTrace`, `physics`.
+Reads: `DamageEvent`, `WorldImpulse`, `ProjectileTrace`, `ContactEvent` impulses; spawns debris as physics-contract bodies.
 
-Writes: WorldImpulse (collapses), `NoiseEvent`, terrain edits.
+Writes: WorldImpulse (collapses), `NoiseEvent`, `TerrainEdit` (voxel digging/blasting).
 
 Cross-module interaction goes through `engine_world` (see AGENTS.md). If a contract is missing, ask the core owner to add it rather than depending on another module's crate.
 
