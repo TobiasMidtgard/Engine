@@ -23,6 +23,7 @@ mod landscape;
 mod meshgen;
 mod placeholders;
 mod places;
+mod planet;
 mod rock_textures;
 mod rocks;
 mod scenery;
@@ -66,6 +67,9 @@ fn main() {
     register_apis(&mut app);
 
     let args: Vec<String> = std::env::args().collect();
+    if args.iter().any(|a| a == "--planet") {
+        app.insert_resource(planet::UsePlanet);
+    }
     if let Some(i) = args.iter().position(|a| a == "--tour") {
         let only = args
             .get(i + 1)
@@ -109,6 +113,7 @@ fn setup(
         ResMut<engine::world::SurfaceMaterials>,
     ),
     config: Res<EngineConfig>,
+    use_planet: Option<Res<planet::UsePlanet>>,
 ) {
     let t0 = std::time::Instant::now();
     // The planet beyond the terrain is grassland too, so the far edge blends into it.
@@ -124,7 +129,11 @@ fn setup(
     )));
     let lib = scenery::build_library(&mut meshes, &mut materials, &mut images);
     let mut rng = Rng::new(config.seed);
-    scenery::spawn_terrain(&mut commands, &mut meshes, &lib, &land);
+    if use_planet.is_some() {
+        planet::spawn(&mut commands, land.clone());
+    } else {
+        scenery::spawn_terrain(&mut commands, &mut meshes, &lib, &land);
+    }
     scenery::spawn_woods(&mut commands, &lib, &land, &mut rng);
     scenery::spawn_meadows(&mut commands, &lib, &land, &mut rng);
     scenery::spawn_farms(&mut commands, &lib, &land, &mut rng);
@@ -133,7 +142,11 @@ fn setup(
     scenery::spawn_cliffs_and_stream(&mut commands, &mut meshes, &lib, &land, &mut rng);
     placeholders::cave_shell(&mut commands, &mut meshes, &lib, &land, &mut rng);
     zones::spawn_demos(&mut commands, &mut meshes, &lib, &land, &mut rng);
-    zones::moon(&mut commands);
+    if use_planet.is_some() {
+        planet::spawn_moon(&mut commands, zones::moon_position());
+    } else {
+        zones::moon(&mut commands);
+    }
     camera::spawn_camera(&mut commands);
     // The weather module drives the sun, the moon and the clock (`engine_weather::Sky`).
     engine_weather::spawn_sky_lights(&mut commands);
