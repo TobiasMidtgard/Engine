@@ -5,7 +5,7 @@
 use engine_core::math::{DVec2, Vec4};
 use engine_core::prelude::*;
 
-use crate::sim::{WeatherSim, cloud_cell};
+use crate::sim::WeatherSim;
 
 /// Cells per side.
 pub const MAP_SIZE: u32 = 128;
@@ -22,7 +22,8 @@ pub struct CloudMap {
     pub origin: DVec2,
     pub size: u32,
     pub cell_m: f32,
-    /// How far the clouds had drifted when the map was built (see [`WeatherSim::cloud_drift`]).
+    /// How far the clouds had drifted when the map was built (see [`WeatherSim::cloud_drift`],
+    /// pattern X/Z).
     pub drift_at_build: DVec2,
     /// Weather time when built.
     pub built_at_s: f64,
@@ -63,14 +64,12 @@ pub fn build(map: &mut CloudMap, sim: &WeatherSim) {
     map.built_at_s = sim.time_s;
     let size = map.size as usize;
     map.texels.resize(size * size, [0; 4]);
-    let drift = sim.cloud_drift;
-    let seed = sim.seed;
     engine_core::tasks::par_chunks_mut(&mut map.texels, size * 8, |chunk, texels| {
         for (i, t) in texels.iter_mut().enumerate() {
             let index = chunk * size * 8 + i;
             let (x, y) = ((index % size) as f64, (index / size) as f64);
             let p = origin + DVec2::new(x + 0.5, y + 0.5) * cell;
-            let c = cloud_cell(&sim.regime_at(p), p - drift, seed);
+            let c = sim.cell_at(p);
             *t = [
                 unorm(c.coverage),
                 unorm(c.cloud_type),

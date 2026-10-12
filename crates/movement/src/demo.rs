@@ -90,7 +90,7 @@ pub struct DuelDirector {
     /// shouldn't slow the rest of the world.
     pub watch_radius: f32,
     #[serde(skip)]
-    origin: DVec3,
+    pub(crate) origin: DVec3,
     #[serde(skip)]
     pub player: Option<Entity>,
     #[serde(skip)]
@@ -101,6 +101,20 @@ pub struct DuelDirector {
     cubes: Vec<Entity>,
     decided_at: Option<f32>,
     set_up: bool,
+}
+
+impl DuelDirector {
+    /// Start a round over from its setup: `Some(round)` plays only that round on a loop,
+    /// `None` cycles through all three again (from the current round).
+    pub fn restart(&mut self, round: Option<Round>) {
+        if let Some(r) = round {
+            self.round = r;
+        }
+        self.only = round;
+        self.secs = 0.0;
+        self.decided_at = None;
+        self.set_up = false;
+    }
 }
 
 /// What a demo bot does.

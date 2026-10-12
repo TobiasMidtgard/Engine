@@ -543,12 +543,14 @@ impl RenderFeature for CloudFeature {
 
         // Map placement: the pattern has drifted with the wind since the map was built.
         let span = map.size as f64 * map.cell_m as f64;
-        let shift = sim.cloud_drift - map.drift_at_build;
-        let corner = map.origin + shift - DVec2::new(origin.x, origin.z);
+        let moved = sim
+            .frame
+            .dir_to_world((sim.cloud_drift - map.drift_at_build).as_vec2());
+        let corner = map.origin + moved.as_dvec2() - DVec2::new(origin.x, origin.z);
         let wrap = |v: f64, period: f32| v.rem_euclid(period as f64) as f32;
-        let drift = sim.cloud_drift;
-        let noise_x = origin.x - drift.x;
-        let noise_z = origin.z - drift.y;
+        // The noise sticks to the drifting pattern (and stays put when the world shifts).
+        let noise = sim.frame.to_pattern(DVec2::new(origin.x, origin.z)) - sim.cloud_drift;
+        let (noise_x, noise_z) = (noise.x, noise.y);
 
         // Key light for the clouds: the sun by day, the moon by night (not dimmed by cloud).
         let (sun_dir, sun_lux, sun_radius) = if lights.in_charge {
@@ -649,6 +651,17 @@ impl RenderFeature for CloudFeature {
         gpu.queue
             .write_buffer(&g.uniform, 0, bytemuck::bytes_of(&u));
 
+        // Rainbows need sunlight reaching the rain from behind the viewer: a sun below 42°
+        // (the bow sinks under the horizon above that) that the clouds overhead don't hide.
+        let sun_elevation = sun_dir.y.clamp(-1.0, 1.0).asin().to_degrees();
+        let rainbow_lux = if settings.rain_shafts && lights.in_charge {
+            sun_lux
+                * smoothstep(0.4, 0.9, lights.cloud_dimming)
+                * smoothstep(42.0, 32.0, sun_elevation)
+                * smoothstep(0.0, 3.0, sun_elevation)
+        } else {
+            0.0
+        };
         let moon_radius = MOON_RADIUS * settings.moon_scale.clamp(0.25, 8.0);
         let moon_solid_angle = PI * moon_radius * moon_radius;
         let moon_luminance = sky.moon_lux / moon_solid_angle * 0.55;
@@ -657,7 +670,7 @@ impl RenderFeature for CloudFeature {
         let size = self.targets.as_ref().map(|t| t.size).unwrap_or((1, 1));
         let c = CelestialUniform {
             sun: [sun_dir.x, sun_dir.y, sun_dir.z, sun_radius],
-            sun_color: [sun_lux, sun_lux, sun_lux, 0.0],
+            sun_color: [sun_lux, sun_lux, sun_lux, sim.frame.yaw as f32],
             moon: [moon_dir.x, moon_dir.y, moon_dir.z, moon_radius],
             moon_color: [
                 MOON_COLOR[0] * moon_luminance,
@@ -668,7 +681,7 @@ impl RenderFeature for CloudFeature {
             pole: [0.0, lat.sin(), lat.cos(), sidereal],
             params: [
                 stars * settings.star_brightness.max(0.0),
-                0.0,
+                rainbow_lux,
                 1.0 / size.0 as f32,
                 1.0 / size.1 as f32,
             ],
