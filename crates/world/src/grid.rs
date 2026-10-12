@@ -128,16 +128,18 @@ impl<T: Copy> Grid2<T> {
             .map(move |(i, v)| (IVec2::new((i as u32 % w) as i32, (i as u32 / w) as i32), v))
     }
 
-    /// Move the grid so it is centered on `center`, keeping overlapping values.
+    /// Move the grid by whole cells so it is centered on `center`, keeping overlapping values.
     /// Returns true if the grid moved.
     pub fn recenter(&mut self, center: DVec2) -> bool {
         let half = DVec2::new(self.width as f64, self.height as f64) * self.cell as f64 * 0.5;
-        let new_origin = snap(center - half, self.cell);
-        let shift = ((new_origin - self.origin) / self.cell as f64).round();
+        // Whole cells from the current origin, so values stay where they were in the world
+        // even when the origin is off the global cell lattice (after a world shift).
+        let shift = ((center - half - self.origin) / self.cell as f64).round();
         let (dx, dy) = (shift.x as i32, shift.y as i32);
         if dx == 0 && dy == 0 {
             return false;
         }
+        let new_origin = self.origin + shift * self.cell as f64;
         let mut next = vec![self.default; self.data.len()];
         for y in 0..self.height as i32 {
             for x in 0..self.width as i32 {

@@ -26,7 +26,14 @@ struct Bugs {
     zero_impulse: bool,
     /// Report contact normals from `b` toward `a`.
     flipped_normal: bool,
+    /// Cache static colliders the first time they are seen and never refresh the cache, so a
+    /// `WorldShift` leaves them behind (what a broadphase that ignores shifts does).
+    stale_statics: bool,
 }
+
+/// The static colliders as first seen, for the `stale_statics` bug.
+#[derive(Resource, Default)]
+struct StaticCache(Option<Vec<Aabb>>);
 
 #[derive(Clone, Copy)]
 struct Aabb {
@@ -59,6 +66,7 @@ impl Plugin for MiniPhysics {
             .insert_resource(Shared(shared))
             .insert_resource(self.bugs)
             .init_resource::<Touching>()
+            .init_resource::<StaticCache>()
             .add_systems(
                 FixedUpdate,
                 (step_bodies, step_characters, publish_snapshot)
@@ -127,15 +135,19 @@ fn step_bodies(
     mut impulses: MessageReader<ApplyImpulse>,
     mut contacts: MessageWriter<ContactEvent>,
     mut touching: ResMut<Touching>,
+    mut cache: ResMut<StaticCache>,
     statics: Query<(Entity, &Transform, &Collider, Option<&RigidBody>), Without<Velocity>>,
     mut dynamics: Query<(Entity, &mut Transform, &mut Velocity, &RigidBody, &Collider)>,
 ) {
     let dt = time.delta_secs_f64();
-    let solid: Vec<Aabb> = statics
+    let mut solid: Vec<Aabb> = statics
         .iter()
         .filter(|(_, _, _, b)| b.is_none_or(|b| b.kind == BodyKind::Static))
         .map(|(e, t, c, _)| aabb(e, t, c))
         .collect();
+    if bugs.stale_statics {
+        solid = cache.0.get_or_insert(solid).clone();
+    }
     let pending: Vec<ApplyImpulse> = impulses.read().copied().collect();
     let mut now = HashSet::new();
     for (e, mut t, mut v, body, collider) in &mut dynamics {
@@ -341,6 +353,24 @@ fn a_minimal_backend_passes_the_conformance_suite() {
     engine_world::physics::conformance::assert_all(|app| {
         app.add_plugins(MiniPhysics::default());
     });
+}
+
+#[test]
+fn the_suite_catches_a_backend_that_ignores_world_shifts() {
+    let checks = engine_world::physics::conformance::run_all(|app| {
+        app.add_plugins(MiniPhysics {
+            bugs: Bugs {
+                stale_statics: true,
+                ..Bugs::default()
+            },
+        });
+    });
+    let failed: Vec<&str> = checks
+        .iter()
+        .filter(|c| c.result.is_err())
+        .map(|c| c.name)
+        .collect();
+    assert_eq!(failed, ["follows_world_shifts"], "{checks:?}");
 }
 
 #[test]
