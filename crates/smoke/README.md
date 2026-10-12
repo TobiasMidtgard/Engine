@@ -48,6 +48,13 @@ focus, or the camera, pause).
 
 Writes: `WindField` (fans), `Obscurance` (the "smoke" source).
 
+Follows `WorldShift`: in `WorldShiftSet::Apply` every volume moves its origin (exact at any
+distance; a shift that turns the world resamples its air into a box of the same size around
+where it went, velocities turned, and measures its floor again at the next step), along with
+blasts and gas still expanding, bullet tunnels, queued `smoke.emit` puffs, obstacles' last
+positions and the demo cart's track. A `SmokeVolume` keeps its smoke as its entity moves with
+the world. `Obscurance` gets the moved smoke in `WorldShiftSet::Rebuild`.
+
 ## Using it
 
 ```rust,ignore

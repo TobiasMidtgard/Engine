@@ -55,6 +55,12 @@ from wood), `DamageEvent` (kind `Fire`) for anything with `FireVulnerable` or a
 `CharacterController` standing in flames, `WindField` updrafts over big fires,
 `Combustible::state` (owners react: foliage swaps a burnt tree, destruction drops a beam).
 
+Follows `WorldShift`: in `WorldShiftSet::Apply` the fire field moves its origin and ground
+heights (exact at any distance; a shift that turns the world resamples it into the new frame,
+nearest cell, and the cells it newly covers get their fuel at the next step), and embers,
+pending spot-fire landings, placed `FuelPatch`es, light targets and queued `fire.*` commands
+move with the world. Patches a shift moved are not refueled.
+
 ## Using it
 
 ```rust,ignore

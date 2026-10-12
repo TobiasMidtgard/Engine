@@ -19,7 +19,7 @@
 
 use std::f32::consts::{FRAC_PI_2, PI};
 
-use engine_core::math::{DVec3, Quat, Rng, Vec3};
+use engine_core::math::{DQuat, DVec3, Quat, Rng, Vec3};
 use engine_core::prelude::*;
 use engine_render::{MeshRenderer, Shape, StandardMaterial};
 use engine_world::{ProjectileTrace, SmokeEmission, WorldImpulse};
@@ -148,9 +148,10 @@ pub struct DemoFan {
 /// The cart that drives back and forth through the smoke.
 #[derive(Component, Debug, Clone, Copy)]
 pub struct DemoCart {
-    /// Track ends (world X), its Z and its height.
-    pub from: f64,
-    pub to: f64,
+    /// Track ends: where the cart is at each end, world position.
+    pub from: DVec3,
+    pub to: DVec3,
+    /// m/s.
     pub speed: f32,
     pub phase: f32,
 }
@@ -343,8 +344,8 @@ pub fn spawn_demo(commands: &mut Commands, origin: DVec3) {
         mesh(cuboid(3.2, 1.6, 2.0), cart_paint),
         SmokeObstacle { radius: 1.8 },
         DemoCart {
-            from: origin.x + rail_from,
-            to: origin.x + rail_to,
+            from: origin + DVec3::new(rail_from, 1.0, rail_z),
+            to: origin + DVec3::new(rail_to, 1.0, rail_z),
             speed: 3.5,
             phase: 0.0,
         },
@@ -359,19 +360,46 @@ fn warm(mut s: SmokeSource) -> SmokeSource {
     s
 }
 
+/// Where a demo is: its origin and how it is turned. The range is built along the world
+/// axes, but a world shift can turn it with the world.
+#[derive(Debug, Clone, Copy)]
+struct Place {
+    origin: DVec3,
+    rotation: DQuat,
+}
+
+impl Place {
+    /// World position of a point given relative to the demo.
+    fn world(&self, local: DVec3) -> DVec3 {
+        self.origin + self.rotation * local
+    }
+
+    /// A direction given relative to the demo, in world axes.
+    fn direction(&self, local: Vec3) -> Vec3 {
+        (self.rotation * local.as_dvec3()).as_vec3()
+    }
+}
+
 /// Drive every smoke demo: rounds of grenades, shooting, a blast and fans; the cart; tracers.
 pub fn run_demos(world: &mut World) {
     let dt = world.resource::<Time>().delta_secs();
     age_tracers(world, dt);
     drive_carts(world, dt);
     let mut q = world.query::<(Entity, &GlobalTransform, &SmokeDemo, &SmokeDemoState)>();
-    let demos: Vec<(Entity, DVec3, SmokeDemo, SmokeDemoState)> = q
+    let demos: Vec<(Entity, Place, SmokeDemo, SmokeDemoState)> = q
         .iter(world)
-        .map(|(e, t, d, s)| (e, t.translation(), d.clone(), *s))
+        .map(|(e, t, d, s)| {
+            let place = Place {
+                origin: t.translation(),
+                rotation: t.rotation().as_dquat(),
+            };
+            (e, place, d.clone(), *s)
+        })
         .collect();
-    for (entity, origin, demo, mut state) in demos {
+    for (entity, place, demo, mut state) in demos {
+        let middle = place.world(DVec3::Y);
         if state.restart {
-            clear_demo(world, origin);
+            clear_demo(world, middle);
             state = SmokeDemoState {
                 frames: 2,
                 ..Default::default()
@@ -384,7 +412,7 @@ pub fn run_demos(world: &mut World) {
                 .resource::<sim::SmokeDomains>()
                 .list
                 .iter()
-                .any(|d| d.owner.is_some() && d.domain.contains(origin + DVec3::Y));
+                .any(|d| d.owner.is_some() && d.domain.contains(middle));
         if !state.started {
             if ready {
                 state.started = true;
@@ -417,7 +445,7 @@ pub fn run_demos(world: &mut World) {
                     state.shot_clock -= gap;
                     state.shots += 1;
                     let target = AIM_X[(burst + state.rounds as usize) % AIM_X.len()];
-                    shoot(world, origin, target, state.shots);
+                    shoot(world, place, target, state.shots);
                 }
             } else {
                 state.shot_clock = 0.0;
@@ -425,7 +453,7 @@ pub fn run_demos(world: &mut World) {
         }
         if t >= demo.blast_at && !state.blasted {
             state.blasted = true;
-            blast(world, origin);
+            blast(world, place);
         }
         let fans_on = t >= demo.fans[0] && t < demo.fans[1];
         let mut fans = world.query::<(&DemoFan, &mut SmokeFan)>();
@@ -438,11 +466,11 @@ pub fn run_demos(world: &mut World) {
     }
 }
 
-/// Clear the smoke and bullet tunnels in the demo's volume.
-fn clear_demo(world: &mut World, origin: DVec3) {
+/// Clear the smoke and bullet tunnels in the volume around `middle` (the demo's).
+fn clear_demo(world: &mut World, middle: DVec3) {
     let mut cleared = Vec::new();
     for d in world.resource_mut::<sim::SmokeDomains>().list.iter_mut() {
-        if d.owner.is_some() && d.domain.contains(origin + DVec3::Y) {
+        if d.owner.is_some() && d.domain.contains(middle) {
             d.domain.clear();
             cleared.push((d.domain.origin, d.domain.origin + d.domain.size()));
         }
@@ -467,15 +495,14 @@ fn pop_grenades(world: &mut World, demo: Entity) {
     }
 }
 
-fn shoot(world: &mut World, origin: DVec3, target_x: f64, n: u32) {
+fn shoot(world: &mut World, place: Place, target_x: f64, n: u32) {
     let mut rng = Rng::new(0x5_0E + n as u64 * 7919);
-    let from = origin + DVec3::from_array(MUZZLE);
-    let to = origin
-        + DVec3::new(
-            target_x + rng.range(-0.5, 0.5) as f64,
-            TARGET_Y + rng.range(-0.4, 0.4) as f64,
-            TARGET_Z,
-        );
+    let from = place.world(DVec3::from_array(MUZZLE));
+    let to = place.world(DVec3::new(
+        target_x + rng.range(-0.5, 0.5) as f64,
+        TARGET_Y + rng.range(-0.4, 0.4) as f64,
+        TARGET_Z,
+    ));
     world.write_message(ProjectileTrace {
         from,
         to,
@@ -502,8 +529,8 @@ fn shoot(world: &mut World, origin: DVec3, target_x: f64, n: u32) {
     ));
 }
 
-fn blast(world: &mut World, origin: DVec3) {
-    let center = origin + DVec3::from_array(BLAST);
+fn blast(world: &mut World, place: Place) {
+    let center = place.world(DVec3::from_array(BLAST));
     world.write_message(WorldImpulse {
         center,
         radius: 7.0,
@@ -513,8 +540,8 @@ fn blast(world: &mut World, origin: DVec3) {
         source: None,
     });
     world.write_message(SmokeEmission {
-        position: center + DVec3::Y,
-        velocity: Vec3::new(0.0, 3.0, 0.0),
+        position: center + place.direction(Vec3::Y).as_dvec3(),
+        velocity: place.direction(Vec3::new(0.0, 3.0, 0.0)),
         radius: 2.0,
         mass_kg: 0.35,
         temperature_c: 260.0,
@@ -539,11 +566,11 @@ fn age_tracers(world: &mut World, dt: f32) {
 fn drive_carts(world: &mut World, dt: f32) {
     let mut q = world.query::<(&mut DemoCart, &mut Transform)>();
     for (mut cart, mut t) in q.iter_mut(world) {
-        let span = (cart.to - cart.from).abs().max(0.1) as f32;
+        let span = cart.to.distance(cart.from).max(0.1) as f32;
         cart.phase = (cart.phase + dt * cart.speed / span) % 2.0;
         // There and back, easing at the ends.
         let s = 0.5 - 0.5 * (cart.phase * PI).cos();
-        t.translation.x = cart.from + (cart.to - cart.from) * s as f64;
+        t.translation = cart.from.lerp(cart.to, s as f64);
     }
 }
 

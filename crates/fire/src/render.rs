@@ -111,7 +111,7 @@ impl FireFeature {
             if tile.burning == 0 {
                 continue;
             }
-            let o = (tile.key * TILE).as_dvec2() * cell as f64;
+            let o = field.tile_origin(tile.key);
             let center = o + DVec2::splat(tile_size * 0.5);
             let d = DVec2::new(center.x - origin.x, center.y - origin.z).length();
             if d > max_d + tile_size {
@@ -288,7 +288,7 @@ impl FireFeature {
         let cam = DVec2::new(view.origin.x, view.origin.z);
         let half = MAX_MAP as f64 * cell * 0.5;
         for t in &field.tiles {
-            let o = (t.key * TILE).as_dvec2() * cell;
+            let o = field.tile_origin(t.key);
             let c = o + DVec2::splat(tile_size * 0.5);
             if (c - cam).length() > max_d.min(half * 1.5) + tile_size {
                 continue;

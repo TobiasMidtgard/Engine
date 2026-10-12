@@ -63,6 +63,8 @@ struct VolumeGpu {
     light_groups: [wgpu::BindGroup; 2],
     current: usize,
     version: u64,
+    /// `Domain::resampled` when last uploaded.
+    resampled: u64,
     light_dirty: bool,
     /// Distance from the camera to the box center, for back-to-front drawing.
     distance: f64,
@@ -212,6 +214,7 @@ impl SmokeFeature {
             light_groups,
             current: 0,
             version: 0,
+            resampled: 0,
             light_dirty: true,
             distance: 0.0,
             visible: false,
@@ -223,7 +226,8 @@ impl SmokeFeature {
     fn upload(&mut self, gpu: &GpuShared, slot: usize, domain: &Domain, extinction: f32) {
         pack_density(domain, extinction, &mut self.pack);
         let v = &mut self.volumes[slot];
-        let first = v.version == 0;
+        // Both states the first time, and when the smoke jumped (no blending across that).
+        let first = v.version == 0 || v.resampled != domain.resampled;
         v.current = 1 - v.current;
         let dims = v.dims;
         let write = |tex: &wgpu::Texture| {
@@ -247,6 +251,7 @@ impl SmokeFeature {
             write(&v.density[1 - v.current]);
         }
         v.version = domain.version;
+        v.resampled = domain.resampled;
         v.light_dirty = true;
     }
 }
