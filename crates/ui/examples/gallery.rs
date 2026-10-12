@@ -7,7 +7,7 @@
 //! settings_controls, theme_cyan (all by default).
 //! Needs a GPU or a software Vulkan driver (lavapipe).
 
-use engine_core::math::{DVec3, Vec2, Vec3};
+use engine_core::math::{DVec3, Vec2};
 use engine_core::prelude::*;
 use engine_core::registry::call_api;
 use engine_core::time::TimeSource;
@@ -16,6 +16,9 @@ use engine_render::prelude::*;
 use engine_render::{RenderDisabled, capture_now};
 use engine_ui::prelude::*;
 use serde_json::json;
+
+#[path = "common/backdrop.rs"]
+mod backdrop;
 
 fn scene(app: &mut App, w: u32, h: u32) {
     app.world.resource_mut::<EngineConfig>().headless = true;
@@ -30,44 +33,7 @@ fn scene(app: &mut App, w: u32, h: u32) {
             step_secs: 1.0 / 60.0,
         });
     app.add_plugins((RenderPlugin, engine_input::InputPlugin, UiPlugin));
-    let world = &mut app.world;
-    world.spawn((
-        DirectionalLight::default(),
-        Transform::default().looking_at(DVec3::new(-0.35, -0.42, -0.8), Vec3::Y),
-    ));
-    world.spawn((
-        Transform::default(),
-        MeshRenderer::new(
-            Shape::Plane {
-                size: [400.0, 400.0],
-                subdivisions: 1,
-            },
-            StandardMaterial::hex(0x56743a).with_roughness(0.95),
-        ),
-    ));
-    let props = [
-        (DVec3::new(-3.0, 1.0, -4.0), 0xd9603a, 1.0),
-        (DVec3::new(2.5, 0.8, -6.0), 0x3a8fd9, 0.8),
-        (DVec3::new(0.0, 1.6, -9.0), 0xe0b040, 1.6),
-        (DVec3::new(5.5, 1.2, -12.0), 0x8f5bd9, 1.2),
-        (DVec3::new(-6.0, 2.0, -14.0), 0x40c070, 2.0),
-    ];
-    for (p, c, r) in props {
-        world.spawn((
-            Transform::from_translation(p),
-            MeshRenderer::new(
-                Shape::Sphere {
-                    radius: r,
-                    segments: 48,
-                },
-                StandardMaterial::hex(c).with_roughness(0.35),
-            ),
-        ));
-    }
-    world.spawn((
-        Camera::perspective(62.0),
-        Transform::from_xyz(0.0, 1.8, 4.0).looking_at(DVec3::new(0.0, 1.4, -6.0), Vec3::Y),
-    ));
+    backdrop::spawn_backdrop(&mut app.world);
     engine_ui::demo::setup_data(&mut app.world);
     // A few bindings for the settings' Controls tab.
     use engine_input::{Binding, GamepadButton, InputMap, KeyCode};
