@@ -17,8 +17,8 @@ use engine_assets::{Assets, Handle};
 use engine_core::math::{DVec3, Mat3, Mat4, Vec3};
 use engine_core::prelude::*;
 use engine_render::{Mesh, MeshRef, MeshRenderer, ResolvedMesh, Shape};
-use engine_world::LocomotionMode;
 use engine_world::physics::CharacterController;
+use engine_world::{LocomotionMode, WorldShift};
 
 use crate::combat::{AttackPhase, CombatState};
 use crate::look::NoGhost;
@@ -128,7 +128,25 @@ pub(crate) struct GhostStyle {
     pub seed: f32,
 }
 
+impl Afterimages {
+    /// Follow a world shift (where the last afterimage was left).
+    pub(crate) fn shift(&mut self, s: &WorldShift) {
+        self.last_at = self.last_at.map(|p| s.point(p));
+    }
+}
+
 impl Afterimage {
+    /// Follow a world shift: the anchor moves, and the frozen parts turn with the world.
+    pub(crate) fn shift(&mut self, s: &WorldShift) {
+        self.anchor = s.point(self.anchor);
+        if !s.is_translation_only() {
+            let turn = Mat4::from_quat(s.rotation.as_quat());
+            for p in &mut self.parts {
+                p.transform = turn * p.transform;
+            }
+        }
+    }
+
     /// Still showing (faded afterimages wait in the pool).
     pub fn is_active(&self) -> bool {
         self.active

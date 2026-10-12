@@ -61,7 +61,7 @@ use engine_render::{
 };
 use engine_world::animation::AnimationTrigger;
 use engine_world::physics::CharacterController;
-use engine_world::{ContactKind, Gravity, GroundContact, LocomotionMode};
+use engine_world::{ContactKind, Gravity, GroundContact, LocomotionMode, WorldShift};
 use wgpu::util::DeviceExt;
 
 use super::{Blade, texgen};
@@ -713,6 +713,34 @@ pub enum Impact {
 }
 
 impl Effects {
+    /// Move everything showing into the world's new frame (see [`WorldShift`]).
+    pub fn shift(&mut self, s: &WorldShift) {
+        for t in &mut self.trails {
+            t.anchor = s.point(t.anchor);
+            for sample in &mut t.samples {
+                sample.base = s.point(sample.base);
+                sample.tip = s.point(sample.tip);
+                sample.anchor = s.point(sample.anchor);
+            }
+        }
+        for p in &mut self.particles {
+            p.floor = s.point(DVec3::new(p.pos.x, p.floor, p.pos.z)).y;
+            p.pos = s.point(p.pos);
+            p.vel = s.velocity_at(p.pos, p.vel);
+        }
+        for slash in &mut self.slashes {
+            slash.center = s.point(slash.center);
+            slash.pivot = s.direction(slash.pivot);
+        }
+        for r in &mut self.rings {
+            r.center = s.point(r.center);
+            r.normal = s.direction(r.normal);
+        }
+        for l in &mut self.lights {
+            l.pos = s.point(l.pos);
+        }
+    }
+
     fn rand(&mut self) -> f32 {
         // xorshift32
         let mut x = self.rng.max(1);
