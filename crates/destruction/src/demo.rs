@@ -28,6 +28,8 @@ use engine_render::{MeshRenderer, Shape, StandardMaterial};
 use engine_world::{EditOp, EditShape, ProjectileTrace, TerrainEdit, WorldImpulse};
 
 use crate::DemoView;
+use crate::dress::PropModel;
+use crate::props::PropKind;
 use crate::charges::BreachCharge;
 use crate::debris::{Debris, PendingDebris, settle};
 use crate::hits::{Hit, HitQueue};
@@ -188,6 +190,14 @@ fn prop(
         .id()
 }
 
+/// A detailed prop (see [`crate::props`]) centered at `at`.
+fn model(commands: &mut Commands, kind: PropKind, seed: u64, at: DVec3, yaw: f32) -> Entity {
+    let (t, g) = placed(at, yaw);
+    commands
+        .spawn((t, g, PropModel::new(kind, seed)))
+        .id()
+}
+
 fn cuboid(x: f32, y: f32, z: f32) -> Shape {
     Shape::Cuboid { size: [x, y, z] }
 }
@@ -196,8 +206,6 @@ fn cuboid(x: f32, y: f32, z: f32) -> Shape {
 pub fn spawn_demo(commands: &mut Commands, origin: DVec3) {
     let o = origin;
     let yaw = std::f32::consts::PI;
-    let concrete = mat(0x9b978e, 0.85);
-    let steel = mat(0x3f4245, 0.45).with_metallic(0.8);
     // The range: a gravel pad, concrete pillars between the bays and a steel lintel on top.
     prop(
         commands,
@@ -211,18 +219,24 @@ pub fn spawn_demo(commands: &mut Commands, origin: DVec3) {
     );
     for k in 0..=BAYS.len() {
         let x = BAYS[0] + 3.4 - k as f64 * 6.8;
-        prop(
+        model(
             commands,
-            cuboid(0.7, 3.8, 0.7),
-            concrete,
+            PropKind::ConcretePillar {
+                size: [0.7, 3.8, 0.7],
+            },
+            k as u64,
             o + DVec3::new(x, 1.9, ROW_Z),
             0.0,
         );
     }
-    prop(
+    model(
         commands,
-        cuboid(6.8 * BAYS.len() as f32 + 0.7, 0.4, 0.8),
-        steel,
+        PropKind::SteelIBeam {
+            length: 6.8 * BAYS.len() as f32 + 0.7,
+            depth: 0.4,
+            end_plates: true,
+        },
+        1,
         o + DVec3::new(0.0, 4.0, ROW_Z),
         0.0,
     );
@@ -369,7 +383,6 @@ pub fn spawn_demo(commands: &mut Commands, origin: DVec3) {
 fn spawn_props(commands: &mut Commands, o: DVec3) -> Vec<Entity> {
     let mut out = Vec::new();
     let x0 = BAYS[5];
-    let crate_mat = mat(0x8a6238, 0.8);
     for (k, (dx, dz, s)) in [
         (-1.4, -1.6, 0.8f32),
         (-0.4, -2.0, 0.7),
@@ -387,7 +400,7 @@ fn spawn_props(commands: &mut Commands, o: DVec3) -> Vec<Entity> {
                     Name::new("Crate"),
                     t,
                     g,
-                    MeshRenderer::new(cuboid(s, s, s), crate_mat),
+                    PropModel::new(PropKind::WoodenCrate { size: [s, s, s] }, k as u64),
                     Fracturable {
                         shape: FractureShape::Box {
                             half_extents: Vec3::splat(s * 0.5),
@@ -410,13 +423,12 @@ fn spawn_props(commands: &mut Commands, o: DVec3) -> Vec<Entity> {
                     Name::new("Stone column"),
                     t,
                     g,
-                    MeshRenderer::new(
-                        Shape::Cylinder {
-                            radius: 0.3,
+                    PropModel::new(
+                        PropKind::StoneColumn {
                             height: 2.6,
-                            segments: 12,
+                            radius: 0.3,
                         },
-                        mat(0xb9b2a4, 0.7),
+                        (dx > 0.0) as u64,
                     ),
                     Fracturable {
                         shape: FractureShape::Column {
@@ -465,17 +477,23 @@ fn piece(
     if material == DestructibleMaterial::Wood {
         p.break_energy_j = 6000.0;
     }
-    let mut e = commands.spawn((
-        Name::new(name.to_string()),
-        t,
-        GlobalTransform::from(t),
-        MeshRenderer::new(cuboid(size.x, size.y, size.z), look),
-        p,
-    ));
+    let mut e = commands.spawn((Name::new(name.to_string()), t, GlobalTransform::from(t), p));
+    if material == DestructibleMaterial::Wood {
+        // Sawn timber, its grain along the piece; a stable seed per spot.
+        let seed = (at.x * 7.0 + at.y * 13.0 + at.z * 17.0).abs() as u64;
+        e.insert(PropModel::new(
+            PropKind::Timber {
+                size: size.to_array(),
+            },
+            seed,
+        ));
+    } else {
+        e.insert(MeshRenderer::new(cuboid(size.x, size.y, size.z), look));
+    }
     if tint {
         e.insert(ShowSupport {
             on: false,
-            children: false,
+            children: true,
         });
     }
     e.id()

@@ -11,12 +11,13 @@
 
 use engine_core::math::{DVec3, Quat, Vec3};
 use engine_core::prelude::*;
-use engine_render::{MeshRenderer, Shape, StandardMaterial};
 use engine_world::{DamageEvent, DamageKind, EditOp, EditShape, SurfaceMaterials, TerrainEdit};
 
 use crate::DemoView;
 use crate::debris::Debris;
+use crate::dress::PropModel;
 use crate::material::DestructibleMaterial;
+use crate::props::PropKind;
 use crate::structure::{ShowSupport, StructuralPiece};
 use crate::voxel::VoxelVolume;
 
@@ -62,7 +63,7 @@ pub const VIEWS: &[DemoView] = &[
         eye: [18.0, 8.0, -6.0],
         target: [8.5, 3.5, 2.0],
         hour: 10.5,
-        warmup_secs: 17.6,
+        warmup_secs: 17.8,
     },
     DemoView {
         key: "voxel_hut",
@@ -298,16 +299,16 @@ fn run_step(world: &mut World, demo: &mut HillDemo, step: Step) {
                     Name::new(spec.name),
                     t,
                     GlobalTransform::from(t),
-                    MeshRenderer::new(
-                        Shape::Cuboid {
+                    PropModel::new(
+                        PropKind::Timber {
                             size: spec.size.to_array(),
                         },
-                        StandardMaterial::hex(0x7a5634).with_roughness(0.85),
+                        k as u64,
                     ),
                     piece,
                     ShowSupport {
                         on: true,
-                        children: false,
+                        children: true,
                     },
                 ))
                 .id();

@@ -1029,8 +1029,8 @@ pub fn retexture(tagged: &Tagged, look: &VoxelLook, split: bool) -> Vec<(u8, Mes
     let (mb, tags) = (&tagged.mesh, &tagged.tags);
     let mut out: Vec<(u8, MeshBuilder, HashMap<(u32, u8), u32>)> = Vec::new();
     let pos = |i: u32| Vec3::from(mb.vertices[i as usize].position);
-    for t in mb.indices.chunks_exact(3) {
-        let [a, b, c] = [t[0], t[1], t[2]].map(|i| tags[i as usize]);
+    for t in mb.indices.as_chunks::<3>().0 {
+        let [a, b, c] = t.map(|i| tags[i as usize]);
         let tag = if !split {
             look.base
         } else if b == c {
@@ -1193,12 +1193,16 @@ fn mesh_region_tagged(state: &VoxelState, look: &VoxelLook, lo: [i64; 3], hi: [i
         let bare = mix(scale(inside, 0.97), scale(outside, strata), wear);
         let mut color = bare;
         let mut tag = mat;
-        // Grass by the smooth slope (not the relief's), so its edges run in clean patches.
+        // Grass by the smooth slope (not the relief's) plus broad noise, so it grows in
+        // clean patches rather than flickering triangle by triangle where a slope sits near
+        // the limit.
+        let patch = 0.2 * perlin2(pos.x as f64 * 0.3, pos.z as f64 * 0.3, look.seed + 7);
+        let lawn = smooth_normal.y + patch;
         if let (Some(grass), Some(top)) = (look.grass, look.topsoil)
             && mat == top
-            && smooth_normal.y > 0.45
+            && lawn > 0.45
         {
-            let k = ((smooth_normal.y - 0.45) / 0.35).clamp(0.0, 1.0) * wear;
+            let k = ((lawn - 0.45) / 0.35).clamp(0.0, 1.0) * wear;
             let var = 0.85 + 0.3 * hash3(bc[0] as i64, 0, bc[2] as i64, look.seed + 5);
             color = mix(color, scale(grass, var), k);
             if k > 0.5 {

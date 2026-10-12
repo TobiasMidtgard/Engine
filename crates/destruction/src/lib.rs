@@ -8,6 +8,7 @@ pub mod charges;
 pub mod collapse;
 pub mod debris;
 pub mod demo;
+pub mod dress;
 pub mod fracture;
 pub mod hill;
 pub mod hits;
@@ -175,6 +176,7 @@ impl Plugin for DestructionPlugin {
             .init_resource::<HitQueue>()
             .init_resource::<debris::PendingDebris>()
             .init_resource::<structure::StructureGraph>()
+            .init_resource::<dress::PropMeshes>()
             .insert_resource(hits::DestructionSource(source))
             .register_component::<DestructibleWall>(
                 "Siege-style destructible wall or barricade: size [w,h] m, thickness m, cell_size m, \
@@ -244,6 +246,7 @@ impl Plugin for DestructionPlugin {
                     sync::rebuild_voxels_system,
                     debris::age_debris_system,
                     charges::charge_visuals_system,
+                    dress::build_prop_models_system,
                     structure::support_tint_system,
                 )
                     .chain()

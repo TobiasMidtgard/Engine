@@ -154,11 +154,18 @@ pub fn support_tint_system(
         {
             targets.extend(children.iter());
         }
-        if original.is_none() {
-            let saved = targets
-                .iter()
-                .filter_map(|t| renderers.get(*t).ok().map(|r| (*t, r.material.clone())))
-                .collect();
+        // Remember each target's own material the first time it is tinted (children such as
+        // a prop's meshes can appear after the piece itself).
+        let mut saved = original.map(|o| o.0.clone()).unwrap_or_default();
+        let before = saved.len();
+        for t in &targets {
+            if !saved.iter().any(|(s, _)| s == t)
+                && let Ok(r) = renderers.get(*t)
+            {
+                saved.push((*t, r.material.clone()));
+            }
+        }
+        if original.is_none() || saved.len() != before {
             commands.entity(e).insert(SupportOriginal(saved));
         }
         let grounded = graph
