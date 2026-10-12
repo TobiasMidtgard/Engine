@@ -70,6 +70,7 @@ pub struct Embedding {
 pub struct Tube {
     pub particles: Vec<u32>,
     pub radius: f32,
+    pub beads: Option<crate::rope::Beads>,
 }
 
 /// Runtime state of one soft body. Added by the plugin; read it for positions

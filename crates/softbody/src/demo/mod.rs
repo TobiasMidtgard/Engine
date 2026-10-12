@@ -32,7 +32,7 @@ use crate::body::SoftBodySim;
 use crate::character::{BoneCapsule, BoneColliders};
 use crate::cloth::{Cloth, ClothPins};
 use crate::hair::{HairEmitter, HairGroom, HairStyle};
-use crate::rope::{Rope, RopeBridge, RopeEnd, SoftLoad};
+use crate::rope::{Beads, Rope, RopeBridge, RopeEnd, SoftLoad};
 use crate::settings::{Pattern, SimSettings, SoftMaterial};
 use crate::volume::{SoftVolume, VolumeShape};
 
@@ -475,9 +475,19 @@ fn bead_curtain(commands: &mut Commands, c: DVec3) {
                 end_b: RopeEnd::Free,
                 length: 2.5,
                 segments: 18,
-                radius: 0.018,
+                radius: 0.0025,
                 mass_per_m: 0.25,
-                material: SoftMaterial::hex(color).with_roughness(0.3).with_sheen(0.0),
+                // Alternate strings of cut-glass and smooth lacquered beads.
+                beads: Some(Beads {
+                    spacing: 0.042,
+                    radius: 0.016,
+                    elongation: if i % 2 == 0 { 0.85 } else { 1.25 },
+                    facets: if i % 2 == 0 { 10 } else { 0 },
+                }),
+                material: SoftMaterial::hex(color)
+                    .with_roughness(if i % 2 == 0 { 0.06 } else { 0.25 })
+                    .with_sheen(0.0)
+                    .with_wrinkles(0.0),
                 ..Rope::default()
             },
         ));

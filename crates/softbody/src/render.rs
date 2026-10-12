@@ -14,6 +14,7 @@
 //! Hair and fur use their own strand drawing here until the shared strand renderer (owned by
 //! Rendering and lighting) exists; [`Geometry::add_hair`] produces exactly the buffers it needs.
 
+use std::f32::consts::{PI, TAU};
 use std::ops::Range;
 
 use bytemuck::{Pod, Zeroable};
@@ -25,6 +26,7 @@ use engine_render::{
 };
 
 use crate::body::{SoftBodySim, SoftKind, Surface, Tube};
+use crate::rope::Beads;
 use crate::settings::SoftMaterial;
 
 /// Materials, bullet holes and the burn front, shared by both surface passes.
@@ -428,6 +430,111 @@ impl Geometry {
                 let b = center + 1 + (k + 1) % TUBE_SIDES as u32;
                 self.indices.extend([center, a, b]);
             }
+        }
+        if let Some(beads) = &tube.beads {
+            self.add_beads(beads, material);
+        }
+    }
+
+    /// Beads threaded along the centerline in `self.ring`, evenly spaced by arc length.
+    fn add_beads(&mut self, beads: &Beads, material: u32) {
+        let total = self.ring.last().map_or(0.0, |r| r.3);
+        let spacing = beads.spacing.max(beads.radius * 1.2).max(1e-3);
+        let (r, half_len) = (beads.radius, beads.radius * beads.elongation.max(0.2));
+        const LAT: usize = 8;
+        let lon = if beads.facets > 0 {
+            beads.facets.clamp(3, 24) as usize
+        } else {
+            14
+        };
+        let mut seg = 0;
+        let mut s = spacing * 0.5;
+        while s < total - half_len * 0.5 {
+            while seg + 2 < self.ring.len() && self.ring[seg + 1].3 < s {
+                seg += 1;
+            }
+            let (c0, t0, n0, a0) = self.ring[seg];
+            let (c1, t1, n1, a1) = self.ring[(seg + 1).min(self.ring.len() - 1)];
+            let f = if a1 > a0 {
+                ((s - a0) / (a1 - a0)).clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
+            let c = c0.lerp(c1, f);
+            let t = t0.lerp(t1, f).try_normalize().unwrap_or(t0);
+            let n = (n0.lerp(n1, f) - t * n0.lerp(n1, f).dot(t))
+                .try_normalize()
+                .unwrap_or_else(|| t.any_orthonormal_vector());
+            let b = t.cross(n);
+            // A surface point and its normal on the bead (an ellipsoid along the thread).
+            let point = |theta: f32, phi: f32| {
+                let dir = n * phi.cos() + b * phi.sin();
+                let p = c - t * (theta.cos() * half_len) + dir * (theta.sin() * r);
+                let normal = (dir * theta.sin() / r - t * theta.cos() / half_len)
+                    .try_normalize()
+                    .unwrap_or(dir);
+                (p, normal)
+            };
+            let vertex = |p: Vec3, normal: Vec3, uv: [f32; 2]| SoftVertex {
+                position: p.to_array(),
+                normal: normal.to_array(),
+                uv,
+                tension: [0.0; 2],
+                burn: [0.0; 2],
+                material,
+            };
+            let first = self.vertices.len() as u32;
+            if beads.facets == 0 {
+                for i in 0..=LAT {
+                    let theta = i as f32 / LAT as f32 * PI;
+                    for j in 0..=lon {
+                        let phi = j as f32 / lon as f32 * TAU;
+                        let (p, normal) = point(theta, phi);
+                        let uv = [j as f32 / lon as f32, i as f32 / LAT as f32];
+                        self.vertices.push(vertex(p, normal, uv));
+                    }
+                }
+                let stride = (lon + 1) as u32;
+                for i in 0..LAT as u32 {
+                    for j in 0..lon as u32 {
+                        let a = first + i * stride + j;
+                        self.indices.extend([
+                            a,
+                            a + stride,
+                            a + 1,
+                            a + 1,
+                            a + stride,
+                            a + stride + 1,
+                        ]);
+                    }
+                }
+            } else {
+                // Cut glass: flat facets, each with its own vertices.
+                for i in 0..LAT {
+                    let (ta, tb) = (i as f32 / LAT as f32 * PI, (i + 1) as f32 / LAT as f32 * PI);
+                    for j in 0..lon {
+                        let (pa, pb) = (
+                            j as f32 / lon as f32 * TAU,
+                            (j + 1) as f32 / lon as f32 * TAU,
+                        );
+                        let corners = [
+                            point(ta, pa).0,
+                            point(tb, pa).0,
+                            point(tb, pb).0,
+                            point(ta, pb).0,
+                        ];
+                        let normal = point((ta + tb) * 0.5, (pa + pb) * 0.5).1;
+                        let base = self.vertices.len() as u32;
+                        for (k, p) in corners.into_iter().enumerate() {
+                            self.vertices
+                                .push(vertex(p, normal, [k as f32 * 0.25, 0.5]));
+                        }
+                        self.indices
+                            .extend([base, base + 1, base + 2, base, base + 2, base + 3]);
+                    }
+                }
+            }
+            s += spacing;
         }
     }
 
@@ -1145,6 +1252,7 @@ mod tests {
         let mut body = flat_cloth();
         body.surface = None;
         body.tubes = vec![Tube {
+            beads: None,
             particles: (0..9).collect(),
             radius: 0.05,
         }];
@@ -1167,6 +1275,44 @@ mod tests {
         let v_end = geo.vertices[(rings - 1) * (TUBE_SIDES + 1)].uv[1];
         let length = body.sim.pos[0].distance(body.sim.pos[8]);
         assert!((v_end - length).abs() < 0.01, "{v_end} vs {length}");
+    }
+
+    #[test]
+    fn beads_are_threaded_along_the_rope() {
+        let mut body = crate::rope::build_rope(
+            &crate::rope::Rope {
+                length: 1.0,
+                segments: 10,
+                beads: Some(Beads {
+                    spacing: 0.1,
+                    ..Beads::default()
+                }),
+                ..crate::rope::Rope::default()
+            },
+            Entity::PLACEHOLDER,
+            &GlobalTransform::default(),
+            |_| None,
+        )
+        .unwrap();
+        let plain = {
+            let mut geo = Geometry::default();
+            let mut b = std::mem::take(&mut body.tubes);
+            b.iter_mut().for_each(|t| t.beads = None);
+            body.tubes = b;
+            geo.add_body(&body, Vec3::ZERO, 1.0);
+            geo.vertices.len()
+        };
+        body.tubes = body.bridge.as_ref().unwrap().lines.tubes();
+        let mut geo = Geometry::default();
+        geo.add_body(&body, Vec3::ZERO, 1.0);
+        // Ten beads over a meter, each a closed ellipsoid around the thread.
+        let per_bead = 9 * 15;
+        assert_eq!(geo.vertices.len() - plain, 10 * per_bead);
+        let top = geo.vertices[plain..]
+            .iter()
+            .map(|v| v.position[1])
+            .fold(f32::MIN, f32::max);
+        assert!(top <= 0.02, "beads hang on the rope, top {top}");
     }
 
     #[test]

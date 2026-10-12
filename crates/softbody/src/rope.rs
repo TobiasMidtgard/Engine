@@ -58,8 +58,35 @@ pub struct Rope {
     pub bend_compliance: f32,
     /// Bullets and `softbody.cut` can cut it.
     pub cuttable: bool,
+    /// Beads threaded on it (bead curtains, necklaces); `radius` is then the thread.
+    pub beads: Option<Beads>,
     pub sim: SimSettings,
     pub material: SoftMaterial,
+}
+
+/// Beads threaded on a rope, drawn at even spacing along it.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Beads {
+    /// Center-to-center spacing, meters.
+    pub spacing: f32,
+    /// Bead radius, meters.
+    pub radius: f32,
+    /// Length along the rope relative to the width (1 round, 1.5 a barrel, 0.6 a disc).
+    pub elongation: f32,
+    /// Facets around a cut-glass bead; 0 = smooth.
+    pub facets: u32,
+}
+
+impl Default for Beads {
+    fn default() -> Self {
+        Self {
+            spacing: 0.05,
+            radius: 0.014,
+            elongation: 1.0,
+            facets: 0,
+        }
+    }
 }
 
 impl Default for Rope {
@@ -74,6 +101,7 @@ impl Default for Rope {
             stretch_compliance: 0.0,
             bend_compliance: 1e-2,
             cuttable: true,
+            beads: None,
             sim: SimSettings {
                 substeps: 16,
                 damping: 0.1,
@@ -184,6 +212,8 @@ pub struct Lines {
     /// Drawn ropes: segment indices in order, and radius.
     pub chains: Vec<(Vec<u32>, f32)>,
     pub cuttable: bool,
+    /// Beads drawn on every chain.
+    pub beads: Option<Beads>,
 }
 
 impl Lines {
@@ -246,6 +276,7 @@ impl Lines {
                     out.push(Tube {
                         particles: std::mem::take(&mut run),
                         radius: *radius,
+                        beads: self.beads,
                     });
                 } else {
                     run.clear();
@@ -255,6 +286,7 @@ impl Lines {
                 out.push(Tube {
                     particles: run,
                     radius: *radius,
+                    beads: self.beads,
                 });
             }
         }
@@ -538,10 +570,14 @@ pub fn build_rope(
             sim.pin(p, f, local);
         }
     }
-    sim.params.radius = spec.radius.max(spec.sim.thickness);
+    let drawn = spec
+        .beads
+        .map_or(spec.radius, |b| b.radius.max(spec.radius));
+    sim.params.radius = drawn.max(spec.sim.thickness);
     sim.params.drag = 0.4;
     let mut body = SoftBodySim::new(SoftKind::Rope, sim, spec.sim, spec.material);
     body.frames = frames;
+    lines.beads = spec.beads;
     body.tubes = lines.tubes();
     body.bridge = Some(BridgeState {
         lines,
