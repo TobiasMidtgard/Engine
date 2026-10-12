@@ -13,7 +13,7 @@
 
 use engine_core::math::{Quat, Vec3};
 use engine_core::prelude::*;
-use engine_render::{AlphaMode, MeshRef, MeshRenderer, Shape, StandardMaterial};
+use engine_render::{MeshRef, MeshRenderer, Shape, StandardMaterial};
 use engine_world::physics::{Collider, ColliderShape, RigidBody, Velocity};
 use engine_world::{EngineKind, SurfaceId, VehicleControls};
 
@@ -25,9 +25,7 @@ use crate::drivetrain::{Differential, DriveAxle, Drivetrain, EngineSpec, Gearbox
 use crate::meshes;
 use crate::ship::{FlightAssist, HeatShield, Spacecraft, Thruster, ThrusterRole};
 use crate::tire::{MagicFormula, TireModel};
-use crate::visuals::{
-    BrakeLight, HeatGlow, PlumeVisual, PropellerVisual, SurfaceVisual, WheelVisual,
-};
+use crate::visuals::{BrakeLight, WheelVisual};
 use crate::wheels::{AntiRollBar, Assists, SteerInput, Suspension, Wheel, Wheels};
 
 /// Every preset by name.
@@ -733,7 +731,6 @@ pub fn sport_plane_wheels() -> Wheels {
 
 /// A single-engine sport plane.
 pub fn sport_plane(commands: &mut Commands, transform: Transform) -> Entity {
-    register_meshes(commands);
     let aircraft = sport_plane_aircraft();
     let wheels = sport_plane_wheels();
     let body = commands
@@ -815,131 +812,8 @@ pub fn sport_plane(commands: &mut Commands, transform: Transform) -> Entity {
             },
         ))
         .id();
-    for (i, w) in wheels.wheels.iter().enumerate() {
-        wheel_visual(commands, body, w, i, true);
-    }
-    let white = StandardMaterial::hex(0xf1f1ef)
-        .with_metallic(0.15)
-        .with_roughness(0.3);
-    let orange = StandardMaterial::hex(0xe8590c).with_roughness(0.35);
-    part(
-        commands,
-        body,
-        asset(meshes::PLANE_FUSELAGE),
-        white,
-        Transform::default(),
-    );
-    part(
-        commands,
-        body,
-        asset(meshes::PLANE_CANOPY),
-        glass(),
-        Transform::default(),
-    );
-    // Wings, tail and fin: the fixed parts.
-    part(
-        commands,
-        body,
-        asset(meshes::PLANE_WING_RIGHT),
-        white,
-        at(0.55, -0.38, 0.05),
-    );
-    part(
-        commands,
-        body,
-        asset(meshes::PLANE_WING_LEFT),
-        white,
-        at(-0.55, -0.38, 0.05),
-    );
-    part(
-        commands,
-        body,
-        asset(meshes::PLANE_TAIL_RIGHT),
-        white,
-        at(0.22, 0.32, 4.15),
-    );
-    part(
-        commands,
-        body,
-        asset(meshes::PLANE_TAIL_LEFT),
-        white,
-        at(-0.22, 0.32, 4.15),
-    );
-    part(
-        commands,
-        body,
-        asset(meshes::PLANE_FIN),
-        orange,
-        at(0.0, 0.38, 4.15),
-    );
-    // Moving surfaces drawn at their hinges (flaps, ailerons, elevators, rudder).
-    for (i, s) in aircraft.surfaces.iter().enumerate() {
-        let Some(_) = s.control else { continue };
-        let flap_chord = s.chord * s.flap_fraction;
-        let rot = s.rotation;
-        // Hinge line: at the trailing edge minus the flap chord, in the surface's frame.
-        let hinge_local = Vec3::new(0.0, 0.0, 0.75 * s.chord - flap_chord);
-        let hinge = s.position + rot * hinge_local;
-        let span = if s.rotation == Quat::IDENTITY || s.name.contains("wing") {
-            s.span * 0.92
-        } else {
-            s.span * 0.9
-        };
-        let mat = if s.name.contains("fin") {
-            orange
-        } else {
-            white
-        };
-        let pivot = commands
-            .spawn((
-                Transform::from_translation(hinge.as_dvec3()).with_rotation(rot),
-                SurfaceVisual {
-                    index: i,
-                    hinge: Vec3::X,
-                    base: rot,
-                },
-                ChildOf(body),
-            ))
-            .id();
-        // The control mesh is a 1 m × 1 m slab with its hinge at z = −0.25; scale and shift.
-        let mut t = Transform::from_translation(Vec3::new(0.0, 0.0, 0.25 * flap_chord).as_dvec3())
-            .with_scale(Vec3::new(span, 0.6, flap_chord));
-        t.translation.x = -(span as f64) * 0.5;
-        part(commands, pivot, asset(meshes::PLANE_CONTROL), mat, t);
-    }
-    // Propeller: spinner and two blades.
-    part(
-        commands,
-        body,
-        Shape::Cone {
-            radius: 0.2,
-            height: 0.4,
-            segments: 20,
-        },
-        orange,
-        Transform::from_xyz(0.0, 0.0, -3.45)
-            .with_rotation(Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2)),
-    );
-    let prop_base = Quat::IDENTITY;
-    let prop = commands
-        .spawn((
-            Transform::from_xyz(0.0, 0.0, -3.35),
-            PropellerVisual {
-                index: 0,
-                base: prop_base,
-            },
-            ChildOf(body),
-        ))
-        .id();
-    part(
-        commands,
-        prop,
-        Shape::Cuboid {
-            size: [0.12, 1.9, 0.03],
-        },
-        StandardMaterial::hex(0x222222).with_roughness(0.5),
-        Transform::default().with_rotation(Quat::from_rotation_y(0.25)),
-    );
+    // Drawn parts: fuselage, wings, moving control surfaces, propeller, gear and lights.
+    crate::models::aircraft::spawn_sport_plane_parts(commands, body, &aircraft, &wheels);
     commands.entity(body).insert((aircraft, wheels));
     body
 }
@@ -1149,7 +1023,6 @@ pub fn spaceplane_wheels() -> Wheels {
 
 /// A VTOL spaceplane that can fly from the ground to orbit.
 pub fn spaceplane(commands: &mut Commands, transform: Transform) -> Entity {
-    register_meshes(commands);
     let thrusters = spaceplane_thrusters();
     let wheels = spaceplane_wheels();
     let aircraft = spaceplane_aircraft();
@@ -1216,119 +1089,9 @@ pub fn spaceplane(commands: &mut Commands, transform: Transform) -> Entity {
             },
         ))
         .id();
-    for (i, w) in wheels.wheels.iter().enumerate() {
-        wheel_visual(commands, body, w, i, true);
-    }
-    let hull = StandardMaterial::hex(0xd9dde3)
-        .with_metallic(0.35)
-        .with_roughness(0.38);
-    let dark = StandardMaterial::hex(0x1d1f22).with_roughness(0.75);
-    commands.spawn((
-        Transform::default(),
-        MeshRenderer::new(asset(meshes::SHIP_HULL), hull),
-        HeatGlow {
-            base: hull,
-            level: 0,
-        },
-        ChildOf(body),
-    ));
-    part(
-        commands,
-        body,
-        asset(meshes::SHIP_CANOPY),
-        glass(),
-        Transform::default(),
-    );
-    part(
-        commands,
-        body,
-        asset(meshes::SHIP_WING_RIGHT),
-        hull,
-        at(2.3, -0.9, 3.4),
-    );
-    part(
-        commands,
-        body,
-        asset(meshes::SHIP_WING_LEFT),
-        hull,
-        at(-2.3, -0.9, 3.4),
-    );
-    part(
-        commands,
-        body,
-        asset(meshes::SHIP_FIN),
-        dark,
-        at(0.0, 1.5, 6.6),
-    );
-    // Heat-shield tiles along the belly.
-    commands.spawn((
-        at(0.0, -1.62, -0.3),
-        MeshRenderer::new(
-            Shape::Cuboid {
-                size: [4.4, 0.06, 19.5],
-            },
-            dark,
-        ),
-        HeatGlow {
-            base: dark,
-            level: 0,
-        },
-        ChildOf(body),
-    ));
-    let nozzle = StandardMaterial::hex(0x3a3c40)
-        .with_metallic(0.9)
-        .with_roughness(0.45);
-    let plume_mat = |color: [f32; 3], strength: f32| {
-        let mut m = StandardMaterial::color(0.0, 0.0, 0.0).with_emissive(color, strength);
-        m.unlit = true;
-        m.alpha_mode = AlphaMode::Blend;
-        m.base_color[3] = 0.55;
-        m.receives_wetness = false;
-        m.double_sided = true;
-        m
-    };
-    let main_plume = plume_mat([0.55, 0.75, 1.0], 9_000.0);
-    let hover_plume = plume_mat([1.0, 0.6, 0.3], 6_000.0);
-    let rcs_plume = plume_mat([0.9, 0.92, 1.0], 3_000.0);
-    for (i, t) in thrusters.iter().enumerate() {
-        let exhaust = -t.direction.normalize_or_zero();
-        let rot = Quat::from_rotation_arc(Vec3::Z, exhaust);
-        let (radius, length, mat) = match t.role {
-            ThrusterRole::Main => (0.75, 16.0, main_plume),
-            ThrusterRole::Hover => (0.55, 7.0, hover_plume),
-            ThrusterRole::Rcs => (0.12, 1.4, rcs_plume),
-        };
-        if t.role != ThrusterRole::Rcs {
-            part(
-                commands,
-                body,
-                Shape::Cone {
-                    radius: radius * 1.15,
-                    height: radius * 1.6,
-                    segments: 24,
-                },
-                nozzle,
-                Transform::from_translation(t.position.as_dvec3())
-                    .with_rotation(Quat::from_rotation_arc(Vec3::Y, -exhaust)),
-            );
-        }
-        commands.spawn((
-            Transform::from_translation((t.position + exhaust * radius * 0.4).as_dvec3())
-                .with_rotation(rot)
-                .with_scale(Vec3::new(radius, radius, 0.01)),
-            MeshRenderer {
-                visible: false,
-                cast_shadows: false,
-                ..MeshRenderer::new(asset(meshes::SHIP_PLUME), mat)
-            },
-            PlumeVisual {
-                index: i,
-                length,
-                radius,
-            },
-            ChildOf(body),
-        ));
-    }
+    // Drawn parts: tiled hull and wings, engines, thrusters and their plumes, moving control
+    // surfaces, gear, heat glow.
+    crate::models::aircraft::spawn_spaceplane_parts(commands, body, &aircraft, &wheels, &thrusters);
     commands.entity(body).insert((
         Spacecraft {
             thrusters,

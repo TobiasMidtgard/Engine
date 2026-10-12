@@ -12,6 +12,24 @@ use engine_vehicles::presets;
 
 use super::*;
 
+/// Close-up galleries (dozens of shots, minutes each on a software GPU) render only when
+/// `$VEHICLE_SHOTS` names a folder for them, so CI runs the few shots in `screenshots.rs` and
+/// the model budgets, not the galleries. Prints a note and returns false otherwise.
+pub fn gallery(name: &str) -> bool {
+    let on = std::env::var_os("VEHICLE_SHOTS").is_some();
+    if !on {
+        eprintln!("skipping {name}: set VEHICLE_SHOTS=<dir> to render the gallery");
+    }
+    on
+}
+
+/// [`shoot`] for gallery shots: only when [`gallery`] says so.
+pub fn gallery_shot(name: &str, warmup: f64, scene: impl FnOnce(&mut App), camera: Transform) {
+    if gallery(name) {
+        shoot(name, warmup, scene, camera);
+    }
+}
+
 /// A vehicle app that renders: the scene runs `warmup` seconds with the renderer held back,
 /// then a few frames render (so exposure settles) and one is saved as `name`.png.
 pub fn shoot(name: &str, warmup: f64, scene: impl FnOnce(&mut App), camera: Transform) {
