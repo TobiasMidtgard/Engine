@@ -19,10 +19,10 @@ these vehicles unchanged.
 | Air | `air.rs` | Density, pressure, temperature, speed of sound and wind anywhere: the weather-driven standard atmosphere, or per-planet atmospheres (`VehicleAir.bodies`). |
 | Autopilots | `autopilot.rs` | Drive a path, drift a circle, take off and fly waypoints, stall and recover, launch to orbit, hold a point, hop off a pad and land. They write `VehicleControls` like a player or the NPC module would. |
 | Events | `events.rs` | Wheel tracks (`GroundContact`), engine `NoiseEvent`s, tire and exhaust `SmokeEmission`, rocket wash fanning out along the ground (`WindField`), crash `WorldImpulse` and `DamageEvent`, heat damage. |
-| Models | `meshes.rs`, `visuals.rs`, `presets.rs` | Procedural meshes and materials; spinning, steering wheels; moving control surfaces; engine plumes; lights; hull glow when hot. |
+| Models | `models/`, `meshes.rs`, `visuals.rs`, `presets.rs` | Procedural meshes and materials; spinning, steering wheels; moving control surfaces; engine plumes; lights; hull glow when hot. |
 | Presets | `presets.rs` | `sports_car`, `rally_car`, `sport_plane`, `spaceplane` (by name through `presets::spawn`). |
 | AI tools | `api.rs` | `vehicles.presets`, `vehicles.spawn`, `vehicles.list`, `vehicles.control`, `vehicles.autopilot`, `vehicles.telemetry`. |
-| Demos | `demo.rs` | `spawn_track` (circuit, kicker, drift pad, runway, two racing cars, a drifting rally car, two planes) and `spawn_spaceport` (a spaceplane hopping off the pad, one parked). `spawn_demo` builds both. |
+| Demos | `demo.rs` | `spawn_track` (circuit, kicker, drift pad, two racing cars, a drifting rally car), `spawn_airfield` (a runway, a plane taking off and one flying circuits) and `spawn_spaceport` (a spaceplane hopping off the pad, one parked). `spawn_demo` builds all three; the showcase puts them in its `track`, `airfield` and `spaceport` zones. |
 
 ## Contracts
 
@@ -56,8 +56,8 @@ contract (until the physics module lands).
 - `tests/spacecraft.rs`: hops off a pad, hovers and lands softly; climbs from the ground into a
   stable orbit around a small planet (vertical lift, pitch up, gravity turn, coast,
   circularize); re-entry from orbit heats the shield past 1 200 K without burning through.
-- `tests/screenshots.rs`: renders the cars, the aircraft, the track demo and the spaceport demo
-  (set `VEHICLE_SHOTS=<dir>` to keep the PNGs).
+- `tests/screenshots.rs`: renders the cars, the aircraft and the track, airfield and spaceport
+  demos (set `VEHICLE_SHOTS=<dir>` to keep the PNGs; helpers in `tests/support/shots.rs`).
 
 ## Done when
 

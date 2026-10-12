@@ -1,8 +1,9 @@
 //! The vehicle test cases in the showcase.
 //!
-//! * [`spawn_track`]: an oval race track with a jump, two sports cars racing round it, a
-//!   rally car drifting on a dirt pad, a runway with one plane taking off and another flying
-//!   circuits overhead.
+//! * [`spawn_track`]: an oval race track with a jump, two sports cars racing round it and a
+//!   rally car drifting on a dirt pad.
+//! * [`spawn_airfield`]: a runway with one plane taking off and another flying circuits
+//!   overhead.
 //! * [`spawn_spaceport`]: a VTOL spaceplane hopping off a landing pad (hover engines, dust
 //!   and rocket wash) next to a parked one.
 //!
@@ -19,7 +20,7 @@ use crate::autopilot::{Autopilot, AutopilotMode};
 use crate::presets;
 
 /// Half-axes of the oval's center line, meters (x, z).
-pub const TRACK_RADII: (f64, f64) = (160.0, 88.0);
+pub const TRACK_RADII: (f64, f64) = (138.0, 80.0);
 /// Asphalt width, meters.
 pub const TRACK_WIDTH: f32 = 12.0;
 /// Height of the asphalt top above the zone's ground, meters.
@@ -169,15 +170,22 @@ fn ground(commands: &mut Commands, center: DVec3, half: Vec3) {
     );
 }
 
-/// Both vehicle demos side by side: the track at `origin` and the spaceport 300 m to its east.
+/// All three vehicle demos side by side on flat ground: the track at `origin`, a 1.2 km
+/// runway 250 m to its north and the spaceport 330 m to its east.
 pub fn spawn_demo(commands: &mut Commands, origin: DVec3) {
     spawn_track(commands, origin);
-    let pad = origin + DVec3::new(300.0, 0.4, 0.0);
+    let runway = origin + DVec3::new(0.0, 0.0, -250.0);
+    spawn_airfield(
+        commands,
+        runway + DVec3::new(-600.0, 0.0, 0.0),
+        runway + DVec3::new(600.0, 0.0, 0.0),
+    );
+    let pad = origin + DVec3::new(330.0, 0.4, 0.0);
     spawn_spaceport(commands, pad, 30.0);
 }
 
-/// The vehicle track, centered on `center` (a point on flat ground). Fits in a 340 × 200 m
-/// rectangle.
+/// The vehicle track, centered on `center` (a point on flat ground). Fits in a 300 × 175 m
+/// rectangle (inside a 150 m circle).
 pub fn spawn_track(commands: &mut Commands, center: DVec3) {
     let asphalt = material(0x2c2c2e, 0.75);
     let curb_red = material(0xb3261e, 0.6);
@@ -278,42 +286,6 @@ pub fn spawn_track(commands: &mut Commands, center: DVec3) {
         "dirt",
     );
 
-    // Runway inside the oval, along +X.
-    let runway = center + DVec3::new(0.0, 0.0, 32.0);
-    slab(
-        commands,
-        Vec3::new(240.0, 0.12, 22.0),
-        Transform::from_translation(runway),
-        Some(material(0x3a3a3c, 0.8)),
-        "concrete",
-    );
-    for k in 0..12 {
-        let x = -110.0 + k as f64 * 20.0;
-        commands.spawn((
-            Transform::from_translation(runway + DVec3::new(x, 0.065, 0.0)),
-            MeshRenderer::new(
-                Shape::Cuboid {
-                    size: [9.0, 0.01, 0.6],
-                },
-                line,
-            ),
-        ));
-    }
-    for end in [-1.0f64, 1.0] {
-        for k in 0..6 {
-            let z = -7.5 + k as f64 * 3.0;
-            commands.spawn((
-                Transform::from_translation(runway + DVec3::new(end * 114.0, 0.065, z)),
-                MeshRenderer::new(
-                    Shape::Cuboid {
-                        size: [8.0, 0.01, 1.4],
-                    },
-                    line,
-                ),
-            ));
-        }
-    }
-
     // Two sports cars racing round the oval.
     let path = oval_path(center, SEGMENTS * 2);
     let race = |max_speed: f32| AutopilotMode::Drive {
@@ -364,13 +336,80 @@ pub fn spawn_track(commands: &mut Commands, center: DVec3) {
             clockwise: false,
         },
     );
+}
 
-    // Planes: one flying circuits over the track, one taking off to join it.
+/// A runway from `start` to `end` (centers of its two ends on flat ground), 45 m wide, with
+/// one plane lined up on it taking off and another flying circuits over it at 140 m.
+pub fn spawn_airfield(commands: &mut Commands, start: DVec3, end: DVec3) {
+    let line = material(0xf2f0e6, 0.55);
+    let along = (end - start).with_y(0.0);
+    let length = along.length();
+    let dir = (along / length).as_vec3();
+    let side = Vec3::Y.cross(dir);
+    let yaw = facing(dir);
+    let mid = (start + end) * 0.5;
+    let width = 45.0f32;
+    slab(
+        commands,
+        Vec3::new(width, 0.12, length as f32),
+        Transform::from_translation(mid).with_rotation(yaw),
+        Some(material(0x3a3a3c, 0.8)),
+        "concrete",
+    );
+    let top = |p: DVec3| p + DVec3::Y * 0.065;
+    // Center line dashes.
+    let dashes = ((length - 120.0) / 50.0) as i32;
+    for k in 0..dashes {
+        let at = start + (dir * (60.0 + k as f32 * 50.0 + 15.0)).as_dvec3();
+        commands.spawn((
+            Transform::from_translation(top(at)).with_rotation(yaw),
+            MeshRenderer::new(
+                Shape::Cuboid {
+                    size: [0.9, 0.01, 30.0],
+                },
+                line,
+            ),
+        ));
+    }
+    // Threshold bars at both ends.
+    for (from, toward) in [(start, dir), (end, -dir)] {
+        for k in 0..8 {
+            let x = (k as f32 - 3.5) * 4.0 + if k < 4 { -2.0 } else { 2.0 };
+            let at = from + (toward * 25.0 + side * x).as_dvec3();
+            commands.spawn((
+                Transform::from_translation(top(at)).with_rotation(yaw),
+                MeshRenderer::new(
+                    Shape::Cuboid {
+                        size: [1.8, 0.01, 30.0],
+                    },
+                    line,
+                ),
+            ));
+        }
+    }
+    // Edge lines.
+    for s in [-1.0f32, 1.0] {
+        commands.spawn((
+            Transform::from_translation(top(mid + (side * s * (width * 0.5 - 1.5)).as_dvec3()))
+                .with_rotation(yaw),
+            MeshRenderer::new(
+                Shape::Cuboid {
+                    size: [0.9, 0.01, length as f32 - 10.0],
+                },
+                line,
+            ),
+        ));
+    }
+
+    // Planes: one flying circuits over the runway, one taking off to join it.
     let alt = 140.0;
+    let (a, b) = (length * 0.5 + 100.0, 380.0);
     let circuit: Vec<DVec3> = (0..8)
         .map(|i| {
-            let a = i as f64 / 8.0 * std::f64::consts::TAU;
-            center + DVec3::new(a.cos() * 420.0, alt, a.sin() * 260.0)
+            let t = i as f64 / 8.0 * std::f64::consts::TAU;
+            mid + (dir.as_dvec3() * (t.cos() * a))
+                + (side.as_dvec3() * (t.sin() * b))
+                + DVec3::Y * alt
         })
         .collect();
     let fly = AutopilotMode::Fly {
@@ -390,13 +429,9 @@ pub fn spawn_track(commands: &mut Commands, center: DVec3) {
         "Circuit plane",
         fly.clone(),
     );
-    let threshold = runway
-        + DVec3::new(
-            -108.0,
-            TRACK_SURFACE + presets::ride_height("sport_plane"),
-            0.0,
-        );
-    let t = Transform::from_translation(threshold).with_rotation(facing(Vec3::X));
+    let threshold =
+        start + (dir * 12.0).as_dvec3() + DVec3::Y * (0.12 + presets::ride_height("sport_plane"));
+    let t = Transform::from_translation(threshold).with_rotation(yaw);
     let e = presets::sport_plane(commands, t);
     commands
         .entity(e)
@@ -422,7 +457,7 @@ pub fn spawn_spaceport(commands: &mut Commands, pad: DVec3, pad_radius: f32) {
         Vec3::new(130.0, 0.0, 130.0),
     );
     // An apron for the parked ship.
-    let apron = pad + DVec3::new(-58.0, 0.0, 6.0);
+    let apron = pad + DVec3::new(58.0, 0.0, -45.0);
     slab(
         commands,
         Vec3::new(34.0, 0.12, 40.0),

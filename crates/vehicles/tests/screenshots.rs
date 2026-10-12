@@ -1,5 +1,5 @@
 //! Renders the vehicles offscreen: a garage shot of the cars, a hangar shot of the aircraft,
-//! the race track demo and the spaceport demo, each after the scene has run a while on the
+//! the race track, airfield and spaceport demos, each after the scene has run a while on the
 //! stand-in solver. Needs a GPU or a software Vulkan driver (lavapipe); passes with a note
 //! when neither is available.
 //!
@@ -54,7 +54,27 @@ fn race_track_demo() {
                 c.spawn_empty().id()
             });
         },
-        Transform::from_xyz(-40.0, 95.0, 190.0).looking_at(DVec3::new(0.0, 0.0, 10.0), Vec3::Y),
+        Transform::from_xyz(-30.0, 80.0, 170.0).looking_at(DVec3::new(0.0, 0.0, 5.0), Vec3::Y),
+    );
+}
+
+#[test]
+fn airfield_demo() {
+    shoot(
+        "airfield",
+        1.5,
+        |app| {
+            plane(app, 1600.0, -0.01, 0x4f6b32, 0.95);
+            spawn_with(app, |c| {
+                engine_vehicles::demo::spawn_airfield(
+                    c,
+                    DVec3::new(0.0, 0.0, 600.0),
+                    DVec3::new(0.0, 0.0, -600.0),
+                );
+                c.spawn_empty().id()
+            });
+        },
+        Transform::from_xyz(22.0, 7.0, 612.0).looking_at(DVec3::new(0.0, 1.5, 578.0), Vec3::Y),
     );
 }
 

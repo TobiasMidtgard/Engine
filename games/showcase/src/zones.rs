@@ -1,9 +1,17 @@
-//! The showcase map: one zone per engine system, laid out around a central plaza.
+//! The showcase map: one zone per engine feature, laid out in a valley around a village plaza.
 //!
-//! Each zone has placeholder content built from primitives. When a module lands, its
-//! `demo::spawn_demo(commands, zone.center)` replaces the placeholder (see each module's
-//! README), so the layout, camera bookmarks and screenshot tour stay the same.
+//! Every zone sits on a flat pad of the landscape at `center` (its `y` is the pad height), so a
+//! module's demo can build around `center` without caring about hills.
+//!
+//! **Module threads:** to show your module, edit only your zone's entry in [`ZONES`] and your
+//! line in [`spawn_demos`], replacing the placeholder with
+//! `engine_<module>::demo::spawn_demo(commands, z.center)`. Everything else in the showcase
+//! (landscape, scenery, camera, tour) belongs to the Beautiful showcase world thread.
+//! `TEST_CASES.md` lists every test case, which zone shows it and who owns it.
 
+use crate::landscape::{CaveHill, Cover, Lake, Landscape, Pad, Road};
+use crate::placeholders as ph;
+use crate::scenery::Library;
 use engine::prelude::*;
 
 /// A themed area of the map.
@@ -11,7 +19,9 @@ use engine::prelude::*;
 pub struct Zone {
     pub key: &'static str,
     pub name: &'static str,
+    /// Middle of the zone; `y` is the height of its flat pad.
     pub center: DVec3,
+    /// Radius of the flat pad, meters.
     pub radius: f64,
     /// Which module's demo goes here.
     pub module: &'static str,
@@ -26,65 +36,149 @@ pub const ZONES: &[Zone] = &[
         module: "render",
     },
     Zone {
+        key: "market",
+        name: "Market street (shop, dialogue, inventory, maps)",
+        center: DVec3::new(75.0, 0.0, 70.0),
+        radius: 24.0,
+        module: "ui",
+    },
+    Zone {
+        key: "stage",
+        name: "Animation stage",
+        center: DVec3::new(-75.0, 0.0, 70.0),
+        radius: 26.0,
+        module: "anim",
+    },
+    Zone {
+        key: "physics",
+        name: "Physics playground",
+        center: DVec3::new(-125.0, 0.0, -35.0),
+        radius: 35.0,
+        module: "physics",
+    },
+    Zone {
         key: "yard",
         name: "Cloth and soft-body yard",
-        center: DVec3::new(110.0, 0.0, -20.0),
+        center: DVec3::new(125.0, 0.0, -35.0),
         radius: 35.0,
         module: "softbody",
     },
     Zone {
+        key: "magic",
+        name: "Magic circle",
+        center: DVec3::new(0.0, 0.0, -150.0),
+        radius: 30.0,
+        module: "vfx",
+    },
+    Zone {
+        key: "gallery2d",
+        name: "2D and 2.5D gallery",
+        center: DVec3::new(-65.0, 0.0, -115.0),
+        radius: 20.0,
+        module: "render",
+    },
+    Zone {
         key: "forest",
         name: "Living forest",
-        center: DVec3::new(-190.0, 0.0, -120.0),
-        radius: 90.0,
+        center: DVec3::new(-260.0, 0.0, -170.0),
+        radius: 100.0,
         module: "foliage",
+    },
+    Zone {
+        key: "meadow",
+        name: "Wildlife meadow",
+        center: DVec3::new(-400.0, 0.0, 10.0),
+        radius: 70.0,
+        module: "npc, anim",
     },
     Zone {
         key: "lake",
         name: "Lake",
-        center: DVec3::new(170.0, 0.0, -140.0),
-        radius: 80.0,
+        center: DVec3::new(240.0, 0.0, -175.0),
+        radius: 85.0,
         module: "water",
+    },
+    Zone {
+        key: "footsteps",
+        name: "Footstep trail (mud, snow, sand, gravel, puddles)",
+        center: DVec3::new(0.0, 0.0, 150.0),
+        radius: 40.0,
+        module: "audio, terrain",
     },
     Zone {
         key: "cave",
         name: "Mushroom cave",
-        center: DVec3::new(0.0, 0.0, 260.0),
-        radius: 40.0,
+        center: DVec3::new(0.0, 0.0, 290.0),
+        radius: 35.0,
         module: "foliage",
-    },
-    Zone {
-        key: "fortress",
-        name: "Siege fortress",
-        center: DVec3::new(-230.0, 0.0, 170.0),
-        radius: 60.0,
-        module: "destruction",
     },
     Zone {
         key: "arena",
         name: "Combat arena",
-        center: DVec3::new(-70.0, 0.0, 170.0),
+        center: DVec3::new(-125.0, 0.0, 200.0),
         radius: 45.0,
         module: "npc, movement",
     },
     Zone {
-        key: "field",
-        name: "Grass field",
-        center: DVec3::new(130.0, 0.0, 150.0),
+        key: "parkour",
+        name: "Movement course (wall-run, slide, dash)",
+        center: DVec3::new(-125.0, 0.0, 330.0),
+        radius: 40.0,
+        module: "movement",
+    },
+    Zone {
+        key: "fortress",
+        name: "Siege fortress",
+        center: DVec3::new(-300.0, 10.0, 190.0),
         radius: 60.0,
-        module: "fire, smoke, weather",
+        module: "destruction",
+    },
+    Zone {
+        key: "voxel",
+        name: "Voxel hill (dig and build)",
+        center: DVec3::new(-420.0, 0.0, 320.0),
+        radius: 45.0,
+        module: "destruction, terrain",
+    },
+    Zone {
+        key: "field",
+        name: "Grass field (fire spread)",
+        center: DVec3::new(165.0, 0.0, 185.0),
+        radius: 60.0,
+        module: "fire",
+    },
+    Zone {
+        key: "range",
+        name: "Smoke range (bullets, fans, explosions)",
+        center: DVec3::new(285.0, 0.0, 55.0),
+        radius: 30.0,
+        module: "smoke",
+    },
+    Zone {
+        key: "weather",
+        name: "Weather station hill",
+        center: DVec3::new(215.0, 28.0, 370.0),
+        radius: 25.0,
+        module: "weather",
     },
     Zone {
         key: "track",
         name: "Vehicle track",
-        center: DVec3::new(0.0, 0.0, -430.0),
+        center: DVec3::new(0.0, 0.0, -500.0),
         radius: 160.0,
+        module: "vehicles",
+    },
+    Zone {
+        key: "airfield",
+        name: "Airfield",
+        center: DVec3::new(780.0, 0.0, -150.0),
+        radius: 90.0,
         module: "vehicles",
     },
     Zone {
         key: "spaceport",
         name: "Spaceport",
-        center: DVec3::new(400.0, 0.0, 230.0),
+        center: DVec3::new(470.0, 0.0, 280.0),
         radius: 120.0,
         module: "space, vehicles",
     },
@@ -94,747 +188,248 @@ pub fn zone(key: &str) -> &'static Zone {
     ZONES.iter().find(|z| z.key == key).expect("zone")
 }
 
-/// Shared materials so instances batch.
-struct Palette {
-    grass: StandardMaterial,
-    rock: StandardMaterial,
-    dark_rock: StandardMaterial,
-    bark: StandardMaterial,
-    leaves: [StandardMaterial; 3],
-    concrete: StandardMaterial,
-    brick: StandardMaterial,
-    metal: StandardMaterial,
-    wood: StandardMaterial,
-}
+/// Zones with natural ground, where the valley's grass and flowers grow too.
+pub const GRASSY_ZONES: &[&str] = &[
+    "market",
+    "stage",
+    "yard",
+    "magic",
+    "gallery2d",
+    "forest",
+    "meadow",
+    "parkour",
+    "fortress",
+    "voxel",
+    "weather",
+];
 
-impl Palette {
-    fn new() -> Self {
-        let leaf = |hex| {
-            StandardMaterial::hex(hex)
-                .with_roughness(0.7)
-                .with_subsurface(0.45)
-                .with_wind_sway(0.35)
-        };
-        Self {
-            grass: StandardMaterial::hex(0x55743a).with_roughness(0.95),
-            rock: StandardMaterial::hex(0x8a8580).with_roughness(0.85),
-            dark_rock: StandardMaterial::hex(0x3e3b39).with_roughness(0.9),
-            bark: StandardMaterial::hex(0x5a4030).with_roughness(0.9),
-            leaves: [leaf(0x3f6b2a), leaf(0x557f2c), leaf(0x2f5a2f)],
-            concrete: StandardMaterial::hex(0xa8a49c).with_roughness(0.8),
-            brick: StandardMaterial::hex(0x9c8670).with_roughness(0.9),
-            metal: StandardMaterial::hex(0xc8ccd4)
-                .with_metallic(1.0)
-                .with_roughness(0.3),
-            wood: StandardMaterial::hex(0x8a6239).with_roughness(0.8),
+/// The runway's two ends (x, z): 1.2 km north–south through the airfield.
+pub const RUNWAY: ([f64; 2], [f64; 2]) = ([780.0, -750.0], [780.0, 450.0]);
+
+/// What each zone shows. Module threads swap their placeholder for their demo here.
+pub fn spawn_demos(
+    commands: &mut Commands,
+    meshes: &mut Assets<Mesh>,
+    lib: &Library,
+    land: &Landscape,
+    rng: &mut Rng,
+) {
+    for z in ZONES {
+        match z.key {
+            "plaza" => ph::plaza(commands, lib, z),
+            "market" => ph::market(commands, lib, z),
+            "stage" => ph::stage(commands, lib, z),
+            "physics" => ph::physics(commands, lib, z),
+            "yard" => engine_softbody::demo::spawn_demo(commands, z.center),
+            "magic" => ph::magic(commands, lib, z),
+            "gallery2d" => ph::gallery2d(commands, lib, z),
+            "forest" => ph::forest(commands, lib, land, z, rng),
+            "meadow" => ph::meadow(commands, lib, z, rng),
+            "lake" => ph::lake(commands, lib, z),
+            "footsteps" => ph::footsteps(commands, lib, z),
+            "cave" => ph::cave(commands, meshes, lib, land, z, rng),
+            "arena" => ph::arena(commands, lib, z),
+            "parkour" => ph::parkour(commands, lib, z),
+            "fortress" => ph::fortress(commands, lib, z),
+            "voxel" => ph::voxel(commands, meshes, z, rng),
+            "field" => {
+                engine_fire::demo::spawn_demo(commands, z.center);
+                ph::field_edge(commands, lib, z, rng);
+            }
+            "range" => ph::range(commands, lib, z),
+            "weather" => ph::weather(commands, lib, z),
+            "track" => engine_vehicles::demo::spawn_track(commands, z.center),
+            "airfield" => {
+                let (a, b) = RUNWAY;
+                engine_vehicles::demo::spawn_airfield(
+                    commands,
+                    DVec3::new(a[0], z.center.y, a[1]),
+                    DVec3::new(b[0], z.center.y, b[1]),
+                );
+                ph::airfield_buildings(commands, lib, z);
+            }
+            "spaceport" => {
+                ph::spaceport(commands, lib, z);
+                engine_vehicles::demo::spawn_spaceport(
+                    commands,
+                    z.center + DVec3::new(0.0, 0.4, 0.0),
+                    30.0,
+                );
+            }
+            _ => {}
         }
     }
 }
 
-fn spawn(commands: &mut Commands, shape: Shape, material: StandardMaterial, transform: Transform) {
-    commands.spawn((transform, MeshRenderer::new(shape, material)));
-}
-
-fn cuboid(x: f32, y: f32, z: f32) -> Shape {
-    Shape::Cuboid { size: [x, y, z] }
-}
-
-fn at(p: DVec3) -> Transform {
-    Transform::from_translation(p)
-}
-
-/// Build the whole map.
-pub fn spawn_world(commands: &mut Commands, seed: u64) {
-    let pal = Palette::new();
-    let mut rng = Rng::new(seed);
-
-    // Ground: 12 km of grass (the planet continues beyond it in the same color, see main.rs).
-    spawn(
-        commands,
-        Shape::Plane {
-            size: [12_000.0, 12_000.0],
-            subdivisions: 1,
-        },
-        pal.grass,
-        Transform::default(),
-    );
-
-    plaza(commands, &pal);
-    yard(commands, &pal);
-    forest(commands, &pal, &mut rng);
-    lake(commands, &pal, &mut rng);
-    cave(commands, &pal, &mut rng);
-    fortress(commands, &pal);
-    arena(commands, &pal);
-    field(commands, &mut rng);
-    track(commands, &pal);
-    spaceport(commands, &pal);
-    moon(commands);
-}
-
-fn plaza(commands: &mut Commands, pal: &Palette) {
-    let c = zone("plaza").center;
-    spawn(
-        commands,
-        Shape::Cylinder {
-            radius: 30.0,
-            height: 0.2,
-            segments: 64,
-        },
-        pal.concrete,
-        at(c + DVec3::new(0.0, 0.1, 0.0)),
-    );
-    // Roughness ladder: dielectric (front) and metal (back).
-    for i in 0..7 {
-        let r = i as f32 / 6.0;
-        let x = (i as f64 - 3.0) * 2.6;
-        spawn(
-            commands,
-            Shape::Sphere {
-                radius: 1.0,
-                segments: 48,
-            },
-            StandardMaterial::hex(0xc0392b).with_roughness(r.max(0.05)),
-            at(c + DVec3::new(x, 1.2, 4.0)),
-        );
-        spawn(
-            commands,
-            Shape::Sphere {
-                radius: 1.0,
-                segments: 48,
-            },
-            StandardMaterial::hex(0xe6b450)
-                .with_metallic(1.0)
-                .with_roughness(r.max(0.05)),
-            at(c + DVec3::new(x, 1.2, 0.0)),
-        );
-    }
-    // Emissive ring (bloom) and a glass orb.
-    spawn(
-        commands,
-        Shape::Torus {
-            radius: 2.5,
-            tube: 0.25,
-            segments: 64,
-        },
-        StandardMaterial::hex(0x202830).with_emissive([0.3, 0.7, 1.0], 30_000.0),
-        Transform::from_translation(c + DVec3::new(0.0, 3.5, -6.0))
-            .with_rotation(Quat::from_rotation_x(std::f32::consts::FRAC_PI_2)),
-    );
-    let mut glass = StandardMaterial::hex(0xd8f0ff)
-        .with_roughness(0.05)
-        .with_alpha(0.25);
-    glass.reflectance = 0.6;
-    spawn(
-        commands,
-        Shape::Sphere {
-            radius: 1.5,
-            segments: 64,
-        },
-        glass,
-        at(c + DVec3::new(0.0, 3.5, -6.0)),
-    );
-    // Pedestals.
-    for (i, x) in [-9.0, 9.0].into_iter().enumerate() {
-        spawn(
-            commands,
-            cuboid(2.0, 1.0, 2.0),
-            pal.concrete,
-            at(c + DVec3::new(x, 0.5, -6.0)),
-        );
-        let shape = if i == 0 {
-            Shape::Capsule {
-                radius: 0.6,
-                height: 2.4,
-                segments: 32,
+/// The valley: pads for every zone and the runway, roads between them, the lake and the cave
+/// hill.
+pub fn landscape(seed: u64) -> Landscape {
+    // The lake shapes its own basin (see `Lake`), so it gets no flat pad.
+    let mut pads: Vec<Pad> = ZONES
+        .iter()
+        .filter(|z| z.key != "lake")
+        .map(|z| {
+            let mut pad = Pad::disc(z.center, z.radius);
+            // Raised zones get a wide, gentle hill instead of a steep bank.
+            if z.center.y > 1.0 {
+                pad.falloff = 70.0;
             }
-        } else {
-            Shape::Cone {
-                radius: 0.9,
-                height: 2.2,
-                segments: 48,
-            }
-        };
-        spawn(commands, shape, pal.metal, at(c + DVec3::new(x, 2.2, -6.0)));
-    }
-}
-
-/// Flags, a curtain, a rope bridge and jelly cubes: rigid stand-ins until `engine_softbody`
-/// makes them move.
-fn yard(commands: &mut Commands, pal: &Palette) {
-    let c = zone("yard").center;
-    let flag_colors = [0xc0392b, 0x2e86c1, 0xf1c40f, 0x27ae60, 0x8e44ad];
-    for (i, hex) in flag_colors.into_iter().enumerate() {
-        let base = c + DVec3::new(-16.0 + i as f64 * 8.0, 0.0, -18.0);
-        spawn(
-            commands,
-            Shape::Cylinder {
-                radius: 0.08,
-                height: 9.0,
-                segments: 12,
-            },
-            pal.metal,
-            at(base + DVec3::new(0.0, 4.5, 0.0)),
-        );
-        let cloth = StandardMaterial::hex(hex)
-            .with_roughness(0.8)
-            .with_subsurface(0.4);
-        spawn(
-            commands,
-            cuboid(3.0, 2.0, 0.03),
-            cloth,
-            at(base + DVec3::new(1.55, 7.8, 0.0)),
-        );
-    }
-    // A curtain in a frame.
-    let frame = c + DVec3::new(-12.0, 0.0, 6.0);
-    for x in [-2.6, 2.6] {
-        spawn(
-            commands,
-            cuboid(0.3, 6.0, 0.3),
-            pal.wood,
-            at(frame + DVec3::new(x, 3.0, 0.0)),
-        );
-    }
-    spawn(
-        commands,
-        cuboid(5.5, 0.3, 0.3),
-        pal.wood,
-        at(frame + DVec3::new(0.0, 6.1, 0.0)),
-    );
-    let velvet = StandardMaterial::hex(0x7b1e2b)
-        .with_roughness(0.9)
-        .with_subsurface(0.3);
-    spawn(
-        commands,
-        cuboid(4.8, 5.6, 0.04),
-        velvet,
-        at(frame + DVec3::new(0.0, 3.2, 0.0)),
-    );
-    // A sagging rope bridge between two platforms.
-    let (a, b) = (
-        c + DVec3::new(2.0, 0.0, 10.0),
-        c + DVec3::new(24.0, 0.0, 10.0),
-    );
-    for p in [a, b] {
-        spawn(
-            commands,
-            cuboid(3.0, 3.0, 3.0),
-            pal.rock,
-            at(p + DVec3::new(0.0, 1.5, 0.0)),
-        );
-    }
-    let planks = 18;
-    for i in 0..planks {
-        let t = (i as f64 + 0.5) / planks as f64;
-        let sag = 1.2 * (1.0 - (2.0 * t - 1.0).powi(2));
-        let p = a.lerp(b, t) + DVec3::new(0.0, 3.0 - sag, 0.0);
-        spawn(commands, cuboid(0.9, 0.06, 1.6), pal.wood, at(p));
-    }
-    // Jelly cubes stacked on crates.
-    let jelly = StandardMaterial::hex(0x5fd38d)
-        .with_roughness(0.15)
-        .with_subsurface(0.8)
-        .with_alpha(0.75);
-    for (i, x) in [0.0, 1.6, 0.8].into_iter().enumerate() {
-        let y = if i < 2 { 0.0 } else { 1.0 };
-        spawn(
-            commands,
-            cuboid(1.0, 1.0, 1.0),
-            pal.wood,
-            at(c + DVec3::new(10.0 + x, 0.5 + y, -4.0)),
-        );
-        spawn(
-            commands,
-            cuboid(0.9, 0.9, 0.9),
-            jelly,
-            at(c + DVec3::new(10.0 + x, 1.45 + y, -4.0)),
-        );
-    }
-}
-
-fn tree(commands: &mut Commands, pal: &Palette, rng: &mut Rng, base: DVec3) {
-    let h = rng.range(4.0, 9.0);
-    let r = rng.range(0.18, 0.35);
-    spawn(
-        commands,
-        Shape::Cylinder {
-            radius: r,
-            height: h,
-            segments: 10,
-        },
-        pal.bark,
-        at(base + DVec3::new(0.0, h as f64 * 0.5, 0.0)),
-    );
-    let leaves = pal.leaves[rng.range_i32(0, 3) as usize];
-    let conifer = rng.chance(0.5);
-    let layers = if conifer { 3 } else { 2 };
-    for l in 0..layers {
-        let y = h as f64 * (0.55 + 0.2 * l as f64);
-        let size = rng.range(1.8, 3.0) * (1.0 - 0.22 * l as f32);
-        let shape = if conifer {
-            Shape::Cone {
-                radius: size,
-                height: size * 1.6,
-                segments: 12,
-            }
-        } else {
-            Shape::Sphere {
-                radius: size,
-                segments: 14,
-            }
-        };
-        let jitter = DVec3::new(
-            rng.range(-0.3, 0.3) as f64,
-            0.0,
-            rng.range(-0.3, 0.3) as f64,
-        );
-        spawn(
-            commands,
-            shape,
-            leaves,
-            at(base + jitter + DVec3::new(0.0, y, 0.0)),
-        );
-    }
-}
-
-fn forest(commands: &mut Commands, pal: &Palette, rng: &mut Rng) {
-    let z = zone("forest");
-    for _ in 0..360 {
-        let p = rng.in_unit_disk() * z.radius as f32;
-        tree(
-            commands,
-            pal,
-            rng,
-            z.center + DVec3::new(p.x as f64, 0.0, p.y as f64),
-        );
-    }
-    for _ in 0..40 {
-        let p = rng.in_unit_disk() * z.radius as f32;
-        let s = rng.range(0.4, 1.6);
-        spawn(
-            commands,
-            Shape::Sphere {
-                radius: 1.0,
-                segments: 12,
-            },
-            pal.rock,
-            Transform::from_translation(z.center + DVec3::new(p.x as f64, 0.2, p.y as f64))
-                .with_scale(Vec3::new(s * 1.4, s * 0.7, s)),
-        );
-    }
-}
-
-fn lake(commands: &mut Commands, pal: &Palette, rng: &mut Rng) {
-    let z = zone("lake");
-    let mut water = StandardMaterial::hex(0x1d4250)
-        .with_roughness(0.04)
-        .with_alpha(0.86);
-    water.reflectance = 0.5;
-    water.receives_wetness = false;
-    spawn(
-        commands,
-        Shape::Cylinder {
-            radius: z.radius as f32 * 0.8,
-            height: 0.02,
-            segments: 96,
-        },
-        water,
-        at(z.center + DVec3::new(0.0, 0.03, 0.0)),
-    );
-    for i in 0..60 {
-        let a = i as f64 / 60.0 * std::f64::consts::TAU;
-        let r = z.radius * 0.8 + rng.range(-2.0, 3.0) as f64;
-        let s = rng.range(0.5, 1.8);
-        spawn(
-            commands,
-            Shape::Sphere {
-                radius: 1.0,
-                segments: 12,
-            },
-            pal.rock,
-            Transform::from_translation(z.center + DVec3::new(a.cos() * r, 0.1, a.sin() * r))
-                .with_scale(Vec3::new(s * 1.5, s * 0.6, s * 1.2)),
-        );
-    }
-    // A jetty.
-    for i in 0..10 {
-        spawn(
-            commands,
-            cuboid(2.5, 0.2, 2.0),
-            pal.wood,
-            at(z.center + DVec3::new(-z.radius * 0.8 + 2.0 + i as f64 * 2.0, 0.6, 0.0)),
-        );
-    }
-}
-
-fn cave(commands: &mut Commands, pal: &Palette, rng: &mut Rng) {
-    let c = zone("cave").center;
-    let (w, h, d) = (30.0f32, 9.0f32, 34.0f32);
-    // Walls and roof (entrance on the -Z side facing the plaza).
-    spawn(
-        commands,
-        cuboid(w, h, 2.0),
-        pal.dark_rock,
-        at(c + DVec3::new(0.0, h as f64 * 0.5, d as f64 * 0.5)),
-    );
-    spawn(
-        commands,
-        cuboid(2.0, h, d),
-        pal.dark_rock,
-        at(c + DVec3::new(-w as f64 * 0.5, h as f64 * 0.5, 0.0)),
-    );
-    spawn(
-        commands,
-        cuboid(2.0, h, d),
-        pal.dark_rock,
-        at(c + DVec3::new(w as f64 * 0.5, h as f64 * 0.5, 0.0)),
-    );
-    // The rock above reaches past the walls, like a hillside with a cave in it.
-    spawn(
-        commands,
-        cuboid(w + 24.0, 5.0, d + 16.0),
-        pal.dark_rock,
-        at(c + DVec3::new(0.0, h as f64 + 2.5, 4.0)),
-    );
-    // The sky occlusion map sees the rock but not the walls, so the inside is marked as an
-    // indoor space: sky light comes in through the mouth and dies out deeper in.
-    commands.spawn((
-        at(c + DVec3::new(0.0, h as f64 * 0.5, 0.0)),
-        SkyLightVolume::new([w * 0.5 - 1.0, h * 0.5, d * 0.5 - 1.0])
-            .open(BoxFace::NegZ)
-            .with_fade(12.0),
-    ));
-    for x in [-1.0, 1.0] {
-        spawn(
-            commands,
-            cuboid(10.0, h, 2.0),
-            pal.dark_rock,
-            at(c + DVec3::new(x * 10.0, h as f64 * 0.5, -d as f64 * 0.5)),
-        );
-    }
-    // Glowing mushrooms around a mineral pool.
-    let mut pool = StandardMaterial::hex(0x0e2a33).with_roughness(0.05);
-    pool.receives_wetness = false;
-    spawn(
-        commands,
-        Shape::Cylinder {
-            radius: 5.0,
-            height: 0.04,
-            segments: 48,
-        },
-        pool,
-        at(c + DVec3::new(0.0, 0.03, 4.0)),
-    );
-    let caps = [
-        StandardMaterial::hex(0x1a3a40)
-            .with_emissive([0.2, 1.0, 0.9], 400.0)
-            .with_subsurface(0.5),
-        StandardMaterial::hex(0x2a2040)
-            .with_emissive([0.6, 0.3, 1.0], 400.0)
-            .with_subsurface(0.5),
+            pad
+        })
+        .collect();
+    let (a, b) = RUNWAY;
+    pads.push(Pad {
+        a: DVec2::from_array(a),
+        b: DVec2::from_array(b),
+        radius: 45.0,
+        falloff: 40.0,
+        height: 0.0,
+    });
+    let road = |pts: &[[f64; 2]]| Road::new(pts, 7.0, false);
+    let roads = vec![
+        // North: plaza, footstep trail, cave.
+        road(&[
+            [0.0, 38.0],
+            [0.0, 80.0],
+            [0.0, 150.0],
+            [0.0, 220.0],
+            [0.0, 262.0],
+        ]),
+        // South: plaza, magic circle, track.
+        road(&[
+            [0.0, -38.0],
+            [0.0, -110.0],
+            [0.0, -190.0],
+            [-6.0, -300.0],
+            [0.0, -400.0],
+        ]),
+        // East: yard, lake shore.
+        road(&[[38.0, -12.0], [90.0, -30.0]]),
+        road(&[[158.0, -48.0], [185.0, -78.0], [200.0, -95.0]]),
+        // North-east: market, field, spaceport.
+        road(&[[28.0, 27.0], [55.0, 52.0]]),
+        road(&[[94.0, 88.0], [128.0, 132.0]]),
+        road(&[[218.0, 212.0], [300.0, 248.0], [352.0, 268.0]]),
+        // North-west: animation stage, arena, movement course.
+        road(&[[-28.0, 27.0], [-55.0, 52.0]]),
+        road(&[[-94.0, 88.0], [-115.0, 155.0]]),
+        road(&[[-125.0, 245.0], [-125.0, 290.0]]),
+        // West: physics playground, past the forest to the meadow.
+        road(&[[-38.0, -12.0], [-90.0, -30.0]]),
+        road(&[[-160.0, -30.0], [-230.0, -30.0], [-332.0, 8.0]]),
+        // Arena to the fortress, fortress to the voxel hill.
+        road(&[[-170.0, 205.0], [-240.0, 196.0]]),
+        road(&[[-335.0, 238.0], [-392.0, 288.0]]),
+        // Spaceport to the airfield.
+        road(&[[585.0, 240.0], [690.0, 140.0], [736.0, 40.0]]),
+        // Field to the weather station hill and to the smoke range.
+        road(&[[190.0, 242.0], [205.0, 300.0], [213.0, 345.0]]),
+        road(&[[218.0, 160.0], [258.0, 100.0], [272.0, 82.0]]),
+        // Magic circle to the 2D gallery.
+        road(&[[-28.0, -142.0], [-48.0, -126.0]]),
     ];
-    let stem = StandardMaterial::hex(0xd8d0c0)
-        .with_roughness(0.6)
-        .with_subsurface(0.6);
-    for i in 0..40 {
-        let a = rng.range(0.0, std::f32::consts::TAU);
-        let r = rng.range(5.5, 12.0);
-        let base = c + DVec3::new((a.cos() * r) as f64, 0.0, (a.sin() * r) as f64 + 4.0);
-        let s = rng.range(0.4, 1.4);
-        spawn(
-            commands,
-            Shape::Cylinder {
-                radius: 0.08 * s,
-                height: 0.6 * s,
-                segments: 8,
-            },
-            stem,
-            at(base + DVec3::new(0.0, 0.3 * s as f64, 0.0)),
-        );
-        spawn(
-            commands,
-            Shape::Sphere {
-                radius: 0.35 * s,
-                segments: 16,
-            },
-            caps[i % 2],
-            Transform::from_translation(base + DVec3::new(0.0, 0.62 * s as f64, 0.0))
-                .with_scale(Vec3::new(1.0, 0.45, 1.0)),
-        );
-        if i % 5 == 0 {
-            commands.spawn((
-                at(base + DVec3::new(0.0, 0.9, 0.0)),
-                PointLight {
-                    color: if i % 2 == 0 {
-                        [0.3, 1.0, 0.9]
-                    } else {
-                        [0.7, 0.4, 1.0]
-                    },
-                    intensity_lm: 250.0,
-                    range: 9.0,
-                    radius: 0.2,
-                },
-            ));
-        }
-    }
-}
-
-fn fortress(commands: &mut Commands, pal: &Palette) {
-    let c = zone("fortress").center;
-    // Brick wall: 24 × 8 bricks with an offset bond.
-    for row in 0..8 {
-        for i in 0..24 {
-            let x = (i as f64 - 12.0) * 2.0 + if row % 2 == 0 { 0.0 } else { 1.0 };
-            spawn(
-                commands,
-                cuboid(1.96, 0.98, 1.0),
-                pal.brick,
-                at(c + DVec3::new(x, 0.5 + row as f64, 0.0)),
-            );
-        }
-    }
-    for x in [-26.0, 26.0] {
-        spawn(
-            commands,
-            Shape::Cylinder {
-                radius: 4.0,
-                height: 14.0,
-                segments: 32,
-            },
-            pal.brick,
-            at(c + DVec3::new(x, 7.0, 0.0)),
-        );
-        spawn(
-            commands,
-            Shape::Cone {
-                radius: 4.6,
-                height: 5.0,
-                segments: 32,
-            },
-            StandardMaterial::hex(0x6e3b2a),
-            at(c + DVec3::new(x, 16.5, 0.0)),
-        );
-    }
-    // Wooden barricades in front.
-    for i in 0..4 {
-        spawn(
-            commands,
-            cuboid(4.0, 2.0, 0.3),
-            pal.wood,
-            at(c + DVec3::new(-12.0 + i as f64 * 8.0, 1.0, -10.0)),
-        );
-    }
-}
-
-fn arena(commands: &mut Commands, pal: &Palette) {
-    let c = zone("arena").center;
-    spawn(
-        commands,
-        Shape::Cylinder {
-            radius: 40.0,
-            height: 0.3,
-            segments: 64,
+    let lake = zone("lake");
+    let cave = zone("cave");
+    let mut land = Landscape {
+        seed,
+        pads,
+        roads,
+        lake: Lake {
+            center: DVec2::new(lake.center.x, lake.center.z),
+            radius: lake.radius * 1.05,
+            depth: 8.0,
         },
-        StandardMaterial::hex(0x8c7a5b).with_roughness(0.95),
-        at(c + DVec3::new(0.0, 0.15, 0.0)),
-    );
-    for i in 0..8 {
-        let a = i as f64 / 8.0 * std::f64::consts::TAU;
-        spawn(
-            commands,
-            Shape::Cylinder {
-                radius: 1.2,
-                height: 8.0,
-                segments: 24,
-            },
-            pal.concrete,
-            at(c + DVec3::new(a.cos() * 18.0, 4.0, a.sin() * 18.0)),
-        );
-    }
-    // Cover, a ramp and a wall-run wall.
-    for (x, z) in [(-8.0, 4.0), (6.0, -6.0), (0.0, 10.0)] {
-        spawn(
-            commands,
-            cuboid(4.0, 1.2, 1.0),
-            pal.concrete,
-            at(c + DVec3::new(x, 0.6, z)),
-        );
-    }
-    spawn(
-        commands,
-        cuboid(4.0, 0.5, 10.0),
-        pal.concrete,
-        Transform::from_translation(c + DVec3::new(12.0, 1.6, 8.0))
-            .with_rotation(Quat::from_rotation_x(0.35)),
-    );
-    spawn(
-        commands,
-        cuboid(0.8, 6.0, 24.0),
-        pal.concrete,
-        at(c + DVec3::new(-24.0, 3.0, 0.0)),
-    );
-    // Placeholder fighters.
-    let red = StandardMaterial::hex(0xa83232).with_roughness(0.5);
-    let blue = StandardMaterial::hex(0x3260a8).with_roughness(0.5);
-    for (i, (x, z)) in [(-3.0, -2.0), (4.0, 3.0), (2.0, -8.0)]
-        .into_iter()
-        .enumerate()
-    {
-        spawn(
-            commands,
-            Shape::Capsule {
-                radius: 0.4,
-                height: 1.8,
-                segments: 16,
-            },
-            red,
-            at(c + DVec3::new(x, 0.9 + 0.3, z)),
-        );
-        if i == 0 {
-            spawn(
-                commands,
-                Shape::Capsule {
-                    radius: 0.4,
-                    height: 1.8,
-                    segments: 16,
-                },
-                blue,
-                at(c + DVec3::new(0.0, 1.2, 0.0)),
-            );
-        }
-    }
-}
-
-fn field(commands: &mut Commands, rng: &mut Rng) {
-    let z = zone("field");
-    // A dry meadow that burns downwind and grows back (engine_fire's demo, 64 × 44 m).
-    engine_fire::demo::spawn_demo(commands, z.center);
-    let fire = engine_fire::demo::FOOTPRINT;
-    let blades = [
-        StandardMaterial::hex(0x6b8f3a)
-            .with_roughness(0.8)
-            .with_subsurface(0.5)
-            .with_wind_sway(0.25),
-        StandardMaterial::hex(0x8a9a40)
-            .with_roughness(0.8)
-            .with_subsurface(0.5)
-            .with_wind_sway(0.25),
-    ];
-    for i in 0..2500 {
-        let p = rng.in_unit_disk() * z.radius as f32;
-        if p.x.abs() < fire[0] + 1.0 && p.y.abs() < fire[1] + 1.0 {
-            continue;
-        }
-        let h = rng.range(0.5, 1.1);
-        spawn(
-            commands,
-            Shape::Cone {
-                radius: 0.06,
-                height: h,
-                segments: 4,
-            },
-            blades[i % 2],
-            Transform::from_translation(
-                z.center + DVec3::new(p.x as f64, h as f64 * 0.5, p.y as f64),
-            )
-            .with_rotation(Quat::from_rotation_z(rng.range(-0.15, 0.15))),
-        );
-    }
-}
-
-fn track(commands: &mut Commands, _pal: &Palette) {
-    // The circuit, kicker, drift pad and runway, with cars and planes running on autopilot.
-    engine_vehicles::demo::spawn_track(commands, zone("track").center);
-}
-
-fn spaceport(commands: &mut Commands, pal: &Palette) {
-    let c = zone("spaceport").center;
-    spawn(
-        commands,
-        Shape::Cylinder {
-            radius: 30.0,
-            height: 0.4,
-            segments: 64,
+        cave: CaveHill {
+            center: DVec2::new(cave.center.x, cave.center.z + 30.0),
+            // The hole reaches past the cave's inner walls by more than a terrain cell, so the
+            // steep terrain triangles at its edge stay hidden inside the walls. Its front edge
+            // is the front wall's outer face (19 m in front of the zone center).
+            mouth: DVec2::new(cave.center.x, cave.center.z + 1.5),
+            hole: DVec2::new(20.0, 20.5),
+            hill_height: 24.0,
+            hill_radius: 90.0,
         },
-        pal.concrete,
-        at(c + DVec3::new(0.0, 0.2, 0.0)),
-    );
-    for i in 0..12 {
-        let a = i as f64 / 12.0 * std::f64::consts::TAU;
-        commands.spawn((
-            at(c + DVec3::new(a.cos() * 28.0, 0.6, a.sin() * 28.0)),
-            PointLight {
-                color: [1.0, 0.5, 0.2],
-                intensity_lm: 1500.0,
-                range: 12.0,
-                radius: 0.1,
-            },
+        woods: vec![
+            (DVec2::new(-260.0, -170.0), 150.0),
+            (DVec2::new(-520.0, -380.0), 260.0),
+            (DVec2::new(330.0, -470.0), 200.0),
+            (DVec2::new(-230.0, 470.0), 170.0),
+            (DVec2::new(420.0, 620.0), 240.0),
+            (DVec2::new(640.0, -620.0), 240.0),
+            (DVec2::new(-700.0, 260.0), 220.0),
+            (DVec2::new(80.0, 640.0), 200.0),
+            (DVec2::new(-900.0, -100.0), 300.0),
+            (DVec2::new(1050.0, 300.0), 300.0),
+        ],
+        patches: footstep_patches(),
+        surface_ids: surface_ids(),
+        fields: Vec::new(),
+    };
+    land.plant_fields();
+    land
+}
+
+/// Footstep surface ids for every [`Cover`] (from the default surface material table).
+fn surface_ids() -> [engine::world::SurfaceId; crate::landscape::COVER_KINDS] {
+    use Cover::*;
+    let table = SurfaceMaterials::default();
+    let mut ids = [engine::world::SurfaceId::default(); crate::landscape::COVER_KINDS];
+    for c in [
+        Grass, Forest, Dirt, Cobble, Sand, Rock, Snow, LakeBed, Mud, Gravel, Wood, Metal, Puddle,
+    ] {
+        ids[c as usize] = table.id(c.surface_name()).unwrap_or_default();
+    }
+    ids
+}
+
+/// The footstep trail: strips of different ground across the road north of the plaza, in walking
+/// order from the plaza (the wooden and metal strips are boards laid on top, see placeholders).
+pub const FOOTSTEP_STRIPS: &[(Cover, f64)] = &[
+    (Cover::Grass, 8.0),
+    (Cover::Mud, 9.0),
+    (Cover::Puddle, 6.0),
+    (Cover::Sand, 8.0),
+    (Cover::Gravel, 8.0),
+    (Cover::Snow, 10.0),
+    (Cover::Wood, 7.0),
+    (Cover::Metal, 6.0),
+    (Cover::Dirt, 8.0),
+];
+
+/// Half width of the footstep trail (m).
+pub const FOOTSTEP_HALF_WIDTH: f64 = 7.0;
+
+/// Rectangles for [`FOOTSTEP_STRIPS`], starting at the south edge of the zone.
+pub fn footstep_patches() -> Vec<(DVec2, DVec2, Cover)> {
+    let z = zone("footsteps");
+    let mut start = z.center.z - FOOTSTEP_STRIPS.iter().map(|s| s.1).sum::<f64>() * 0.5;
+    let mut out = Vec::new();
+    for (cover, len) in FOOTSTEP_STRIPS {
+        out.push((
+            DVec2::new(z.center.x - FOOTSTEP_HALF_WIDTH, start),
+            DVec2::new(z.center.x + FOOTSTEP_HALF_WIDTH, start + len),
+            *cover,
         ));
-        spawn(
-            commands,
-            Shape::Sphere {
-                radius: 0.2,
-                segments: 8,
-            },
-            StandardMaterial::hex(0x331100).with_emissive([1.0, 0.5, 0.2], 800.0),
-            at(c + DVec3::new(a.cos() * 28.0, 0.5, a.sin() * 28.0)),
-        );
+        start += len;
     }
-    // A spaceplane hopping off the pad and one parked on the apron.
-    engine_vehicles::demo::spawn_spaceport(commands, c + DVec3::new(0.0, 0.4, 0.0), 30.0);
-    // Scale: a 600 m tower of rings.
-    let tower = c + DVec3::new(70.0, 0.0, 60.0);
-    for i in 0..40 {
-        let y = i as f64 * 15.0;
-        let r = 14.0 - i as f32 * 0.25;
-        spawn(
-            commands,
-            Shape::Cylinder {
-                radius: r,
-                height: 12.0,
-                segments: 48,
-            },
-            pal.concrete,
-            at(tower + DVec3::new(0.0, y + 6.0, 0.0)),
-        );
-        spawn(
-            commands,
-            Shape::Torus {
-                radius: r + 1.0,
-                tube: 0.5,
-                segments: 48,
-            },
-            pal.metal,
-            at(tower + DVec3::new(0.0, y + 13.5, 0.0)),
-        );
-    }
-    spawn(
-        commands,
-        Shape::Sphere {
-            radius: 2.0,
-            segments: 24,
-        },
-        StandardMaterial::hex(0x400000).with_emissive([1.0, 0.1, 0.05], 50_000.0),
-        at(tower + DVec3::new(0.0, 606.0, 0.0)),
-    );
+    out
 }
 
 /// The Moon at its real size and distance: 1 737 km radius, 384 400 km away.
-fn moon(commands: &mut Commands) {
-    let dir = DVec3::new(-0.45, 0.35, -0.82).normalize();
-    spawn(
-        commands,
-        Shape::Sphere {
-            radius: 1_737_400.0,
-            segments: 96,
-        },
-        StandardMaterial::hex(0x9a9690).with_roughness(0.95),
-        at(dir * 384_400_000.0),
-    );
+pub fn moon(commands: &mut Commands) {
+    commands.spawn((
+        Transform::from_translation(moon_position()),
+        MeshRenderer::new(
+            Shape::Sphere {
+                radius: 1_737_400.0,
+                segments: 96,
+            },
+            StandardMaterial::hex(0x9a9690).with_roughness(0.95),
+        ),
+    ));
 }
 
-/// The Moon's direction (for camera bookmarks).
+/// The Moon's position (for camera bookmarks).
 pub fn moon_position() -> DVec3 {
     DVec3::new(-0.45, 0.35, -0.82).normalize() * 384_400_000.0
 }
