@@ -386,25 +386,48 @@ pub fn build_bodies(
         );
     }
     for (e, spec, t) in &bridges {
-        let material = engine_render::StandardMaterial::hex(spec.plank_color)
-            .with_roughness(spec.plank_roughness);
+        let material = match &spec.plank_material {
+            Some(key) => engine_render::MaterialRef::Asset(key.clone()),
+            None => engine_render::MaterialRef::Inline(
+                engine_render::StandardMaterial::hex(spec.plank_color)
+                    .with_roughness(spec.plank_roughness),
+            ),
+        };
         let result = rope::build_bridge(spec, e, t, |index, half| {
-            commands
+            let plank = commands
                 .spawn((
                     Transform::default(),
                     TransformInterpolation::default(),
                     RigidBody::kinematic(),
                     Collider::cuboid(half).with_density(600.0),
-                    engine_render::MeshRenderer::new(
-                        engine_render::Shape::Cuboid {
-                            size: (half * 2.0).to_array(),
-                        },
-                        material,
-                    ),
                     BridgePlank { bridge: e, index },
                     ChildOf(e),
                 ))
-                .id()
+                .id();
+            match &spec.plank_mesh {
+                // A unit mesh on a scaled child, so the collider keeps its true size.
+                Some(key) => {
+                    commands.spawn((
+                        Transform::from_scale(half * 2.0),
+                        engine_render::MeshRenderer::new(
+                            engine_render::MeshRef::Asset(key.clone()),
+                            material.clone(),
+                        ),
+                        ChildOf(plank),
+                    ));
+                }
+                None => {
+                    commands
+                        .entity(plank)
+                        .insert(engine_render::MeshRenderer::new(
+                            engine_render::Shape::Cuboid {
+                                size: (half * 2.0).to_array(),
+                            },
+                            material.clone(),
+                        ));
+                }
+            }
+            plank
         });
         report(&mut commands, e, "RopeBridge", result);
     }

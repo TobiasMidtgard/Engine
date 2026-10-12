@@ -24,12 +24,14 @@ use engine_render::{
     ViewData, wgpu,
 };
 
-use crate::body::{SoftBodySim, Surface, Tube};
+use crate::body::{SoftBodySim, SoftKind, Surface, Tube};
 use crate::settings::SoftMaterial;
 
-/// Cloth, jelly and rope surfaces (needs `lib_frame`).
+/// Materials, bullet holes and the burn front, shared by both surface passes.
+pub const SURFACE_COMMON: &str = include_str!("shaders/surface_common.wgsl");
+/// Cloth, jelly and rope surfaces (needs `lib_frame`, after [`SURFACE_COMMON`]).
 pub const SURFACE_SHADER: &str = include_str!("shaders/surface.wgsl");
-/// Shadow casting for surfaces (`lib_types` only).
+/// Shadow casting for surfaces (after [`SURFACE_COMMON`]).
 pub const SHADOW_SHADER: &str = include_str!("shaders/shadow.wgsl");
 /// Strand expansion shared by both hair passes.
 pub const STRAND_COMMON: &str = include_str!("shaders/strand_common.wgsl");
@@ -88,7 +90,8 @@ pub struct GpuSoftMaterial {
 }
 
 impl GpuSoftMaterial {
-    pub fn new(m: &SoftMaterial, wetness: f32, uv_scale: Vec2) -> Self {
+    /// `holes`: this body's range in the bullet-hole buffer.
+    pub fn new(m: &SoftMaterial, wetness: f32, uv_scale: Vec2, holes: Range<u32>) -> Self {
         let (id, param) = m.pattern.encode();
         let [r, g, b] = m.color;
         let [r2, g2, b2] = m.color2;
@@ -111,7 +114,7 @@ impl GpuSoftMaterial {
                 0.0,
             ],
             scale: [scale.x, scale.y, 0.0, 0.0],
-            pattern: [id, param, 0, 0],
+            pattern: [id, param, holes.start, holes.end - holes.start],
         }
     }
 }
@@ -168,6 +171,8 @@ pub struct Geometry {
     pub vertices: Vec<SoftVertex>,
     pub indices: Vec<u32>,
     pub materials: Vec<GpuSoftMaterial>,
+    /// Bullet holes of every cloth: uv, radius (m), seed.
+    pub holes: Vec<[f32; 4]>,
     /// Hair guide points, camera-relative (w unused).
     pub points: Vec<[f32; 4]>,
     pub guides: Vec<GpuStrandGuide>,
@@ -185,6 +190,7 @@ impl Geometry {
         self.vertices.clear();
         self.indices.clear();
         self.materials.clear();
+        self.holes.clear();
         self.points.clear();
         self.guides.clear();
         self.grooms.clear();
@@ -207,8 +213,17 @@ impl Geometry {
         let material = self.materials.len() as u32;
         let wetness = body.cloth.as_ref().map_or(0.0, |c| c.wetness);
         let uv_scale = body.surface.as_ref().map_or(Vec2::ONE, |s| s.uv_scale);
-        self.materials
-            .push(GpuSoftMaterial::new(&body.material, wetness, uv_scale));
+        let first_hole = self.holes.len() as u32;
+        if let Some(c) = &body.cloth {
+            self.holes.extend_from_slice(&c.holes);
+        }
+        let holes = first_hole..self.holes.len() as u32;
+        let mut gpu_material = GpuSoftMaterial::new(&body.material, wetness, uv_scale, holes);
+        if body.kind == SoftKind::Cloth {
+            // Woven fabric: threads close up, yarn irregularity and hems further away.
+            gpu_material.params[3] = 1.0;
+        }
+        self.materials.push(gpu_material);
         self.interpolate(body, base, alpha);
         if let Some(surface) = &body.surface {
             self.add_surface(body, surface, material);
@@ -555,6 +570,7 @@ struct Gpu {
     vertices: GrowBuffer,
     indices: GrowBuffer,
     materials: GrowBuffer,
+    holes: GrowBuffer,
     points: GrowBuffer,
     guides: GrowBuffer,
     grooms: GrowBuffer,
@@ -656,7 +672,7 @@ fn pipeline(gpu: &GpuShared, s: PipelineSpec) -> wgpu::RenderPipeline {
             module: s.module,
             entry_point: Some(fs),
             compilation_options: Default::default(),
-            targets: &targets,
+            targets: if s.shadow { &[] } else { &targets },
         }),
         multiview_mask: None,
         cache: None,
@@ -681,10 +697,18 @@ impl RenderFeature for SoftBodyFeature {
 
     fn init(&mut self, gpu: &GpuShared) {
         let device = &gpu.device;
-        let material_layout = storage_layout(device, "softbody materials", 1);
+        let material_layout = storage_layout(device, "softbody materials", 2);
         let strand_layout = storage_layout(device, "softbody strands", 3);
-        let surface = gpu.shader("softbody surface", SURFACE_SHADER, true);
-        let shadow = gpu.shader("softbody shadow", SHADOW_SHADER, false);
+        let surface = gpu.shader(
+            "softbody surface",
+            &format!("{SURFACE_COMMON}\n{SURFACE_SHADER}"),
+            true,
+        );
+        let shadow = gpu.shader(
+            "softbody shadow",
+            &format!("{SURFACE_COMMON}\n{SHADOW_SHADER}"),
+            false,
+        );
         let strands = gpu.shader(
             "softbody strands",
             &format!("{STRAND_COMMON}\n{STRAND_SHADER}"),
@@ -715,8 +739,8 @@ impl RenderFeature for SoftBodyFeature {
                 label: "softbody shadow",
                 module: &shadow,
                 vs: "vs_shadow",
-                fs: None,
-                layouts: &[Some(&gpu.shadow_view_layout)],
+                fs: Some("fs_shadow"),
+                layouts: &[Some(&gpu.shadow_view_layout), Some(&material_layout)],
                 vertex: true,
                 strip: false,
                 blend: false,
@@ -756,6 +780,7 @@ impl RenderFeature for SoftBodyFeature {
         let vertices = buffer("softbody vertices", wgpu::BufferUsages::VERTEX, 1 << 20);
         let indices = buffer("softbody indices", wgpu::BufferUsages::INDEX, 1 << 20);
         let materials = buffer("softbody materials", storage, 64 * 112);
+        let holes = buffer("softbody holes", storage, 4096);
         let points = buffer("softbody strand points", storage, 1 << 16);
         let guides = buffer("softbody strand guides", storage, 1 << 14);
         let grooms = buffer("softbody grooms", storage, 1 << 10);
@@ -763,7 +788,7 @@ impl RenderFeature for SoftBodyFeature {
             device,
             "softbody materials",
             &material_layout,
-            &[&materials],
+            &[&materials, &holes],
         );
         let strand_group = storage_group(
             device,
@@ -782,6 +807,7 @@ impl RenderFeature for SoftBodyFeature {
             vertices,
             indices,
             materials,
+            holes,
             points,
             guides,
             grooms,
@@ -911,14 +937,18 @@ impl RenderFeature for SoftBodyFeature {
             .write(device, queue, bytemuck::cast_slice(&geo.vertices));
         g.indices
             .write(device, queue, bytemuck::cast_slice(&geo.indices));
-        if g.materials
-            .write(device, queue, bytemuck::cast_slice(&geo.materials))
-        {
+        let mut grown = g
+            .materials
+            .write(device, queue, bytemuck::cast_slice(&geo.materials));
+        grown |= g
+            .holes
+            .write(device, queue, bytemuck::cast_slice(&geo.holes));
+        if grown {
             g.material_group = storage_group(
                 device,
                 "softbody materials",
                 &g.material_layout,
-                &[&g.materials],
+                &[&g.materials, &g.holes],
             );
         }
         if !geo.grooms.is_empty() {
@@ -957,6 +987,7 @@ impl RenderFeature for SoftBodyFeature {
         let ranges = &self.draws.shadow[cascade.min(MAX_CASCADES)];
         if !ranges.is_empty() {
             pass.set_pipeline(&g.shadow);
+            pass.set_bind_group(1, &g.material_group, &[]);
             pass.set_vertex_buffer(0, g.vertices.buffer.slice(..));
             pass.set_index_buffer(g.indices.buffer.slice(..), wgpu::IndexFormat::Uint32);
             for r in ranges {
@@ -1036,8 +1067,16 @@ mod tests {
     #[test]
     fn shaders_validate() {
         let cases = [
-            ("surface", SURFACE_SHADER.to_string(), true),
-            ("shadow", SHADOW_SHADER.to_string(), false),
+            (
+                "surface",
+                format!("{SURFACE_COMMON}\n{SURFACE_SHADER}"),
+                true,
+            ),
+            (
+                "shadow",
+                format!("{SURFACE_COMMON}\n{SHADOW_SHADER}"),
+                false,
+            ),
             ("strands", format!("{STRAND_COMMON}\n{STRAND_SHADER}"), true),
             (
                 "strands shadow",

@@ -197,15 +197,22 @@ pub struct ClothState {
     pub flammable: bool,
     /// 0 dry .. 1 soaked.
     pub wetness: f32,
-    /// Per particle: 0 clean .. 1 charred (drawn darker).
+    /// Per particle: burn progress of the triangles around it, 0 untouched .. 1 burnt away.
+    /// The renderer draws a ragged burn front, char and glowing edges from it.
     pub char: Vec<f32>,
-    /// Per particle: glowing burning edge 0..1.
+    /// Per particle: still burning (the front glows) 0..1.
     pub glow: Vec<f32>,
+    /// Bullet holes too small to remove triangles for, drawn by the renderer: surface uv,
+    /// radius in meters and a random seed. The oldest go first past [`MAX_HOLES`].
+    pub holes: Vec<[f32; 4]>,
     pub burning: u32,
     /// Triangles lost to tearing, piercing and fire.
     pub lost: u32,
     pub cell: f32,
 }
+
+/// Most drawn bullet holes one cloth keeps.
+pub const MAX_HOLES: usize = 128;
 
 impl ClothState {
     fn edge_alive(&self, e: u32) -> bool {
@@ -308,24 +315,39 @@ impl ClothState {
                 // Through a shared vertex or edge, neighbors report the same crossing.
                 if hits.iter().all(|o: &Vec3| o.distance(h) > self.cell * 0.25) {
                     hits.push(h);
+                    let [wa, wb, wc] = barycentric(h, a, b, c);
+                    let uv = tri.map(|i| surface.uv.get(i as usize).copied().unwrap_or_default());
+                    let at = uv[0] * wa + uv[1] * wb + uv[2] * wc;
+                    let seed = hash01(self.holes.len() as u64, (h.x * 1e4) as i64 as u64);
+                    // Fabric frays a little wider than the bullet.
+                    self.holes
+                        .push([at.x, at.y, radius.max(0.004) * 1.25, seed]);
                 }
             }
         }
         if hits.is_empty() {
             return hits;
         }
-        let hole = radius.max(self.cell * 0.75);
-        let mut doomed = Vec::new();
-        for (t, tri) in self.triangles.iter().enumerate() {
-            if !self.alive[t] {
-                continue;
-            }
-            let centroid = tri.iter().map(|&i| sim.pos[i as usize]).sum::<Vec3>() / 3.0;
-            if hits.iter().any(|h| h.distance(centroid) < hole) {
-                doomed.push(t);
-            }
+        if self.holes.len() > MAX_HOLES {
+            let extra = self.holes.len() - MAX_HOLES;
+            self.holes.drain(..extra);
         }
-        self.kill(doomed, sim, surface);
+        // Only projectiles about as wide as a cell take whole triangles out; smaller holes are
+        // drawn (see `holes`) and the cloth stays in one piece.
+        if radius >= self.cell * 0.5 {
+            let mut doomed = Vec::new();
+            for (t, tri) in self.triangles.iter().enumerate() {
+                if !self.alive[t] {
+                    continue;
+                }
+                let centroid = tri.iter().map(|&i| sim.pos[i as usize]).sum::<Vec3>() / 3.0;
+                if hits.iter().any(|h| h.distance(centroid) < radius) {
+                    doomed.push(t);
+                }
+            }
+            self.kill(doomed, sim, surface);
+        }
+        let hole = radius.max(self.cell * 0.75);
         let push = dir.normalize_or_zero() * (speed * 0.004).min(4.0);
         let reach = hole * 3.0;
         sim.add_velocity(|p| {
@@ -427,13 +449,13 @@ impl ClothState {
                 continue;
             }
             let glow = if self.alive[t] {
-                smoothstep(0.05, 0.6, b)
+                smoothstep(0.02, 0.25, b)
             } else {
                 0.0
             };
             for &i in tri {
                 let i = i as usize;
-                self.char[i] = self.char[i].max((b * 1.6).min(1.0));
+                self.char[i] = self.char[i].max(b);
                 self.glow[i] = self.glow[i].max(glow);
             }
         }
@@ -453,6 +475,20 @@ impl ClothState {
         let alive = self.alive.iter().filter(|a| **a).count();
         alive as f32 / self.alive.len().max(1) as f32
     }
+}
+
+/// Barycentric weights of `p` (on the triangle's plane) in triangle `a b c`.
+fn barycentric(p: Vec3, a: Vec3, b: Vec3, c: Vec3) -> [f32; 3] {
+    let (v0, v1, v2) = (b - a, c - a, p - a);
+    let (d00, d01, d11) = (v0.dot(v0), v0.dot(v1), v1.dot(v1));
+    let (d20, d21) = (v2.dot(v0), v2.dot(v1));
+    let den = d00 * d11 - d01 * d01;
+    if den.abs() < 1e-12 {
+        return [1.0, 0.0, 0.0];
+    }
+    let v = (d11 * d20 - d01 * d21) / den;
+    let w = (d00 * d21 - d01 * d20) / den;
+    [1.0 - v - w, v, w]
 }
 
 /// Where a segment `from + s·dir` (s in 0..1) crosses triangle `a b c`, if it does.
@@ -766,6 +802,7 @@ pub fn build(
         wetness: 0.0,
         char: vec![0.0; n_particles],
         glow: vec![0.0; n_particles],
+        holes: Vec::new(),
         burning: 0,
         lost: 0,
         cell,
@@ -849,8 +886,21 @@ mod tests {
             400.0,
         );
         assert_eq!(hits.len(), 1);
+        // A bullet leaves a drawn hole at the hit's uv; the cloth stays in one piece.
+        assert_eq!(surface.triangles.len(), before);
+        assert_eq!(cloth.holes.len(), 1);
+        let [u, v, r, _] = cloth.holes[0];
+        assert!((0.0..=1.0).contains(&u) && (0.0..=1.0).contains(&v) && r > 0.02);
+        // A cannonball takes the triangles with it.
+        cloth.pierce(
+            sim,
+            surface,
+            Vec3::new(0.3, -0.3, 1.0),
+            Vec3::new(0.3, -0.3, -1.0),
+            0.3,
+            400.0,
+        );
         assert!(surface.triangles.len() < before);
-        assert!(surface.triangles.len() > before - 12, "hole is small");
         let missed = cloth.pierce(
             sim,
             surface,

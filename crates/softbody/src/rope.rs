@@ -107,9 +107,14 @@ pub struct RopeBridge {
     /// Gap between planks along the span, meters.
     pub plank_gap: f32,
     pub plank_mass_kg: f32,
-    /// Plank color (sRGB hex) and roughness.
+    /// Plank color (sRGB hex) and roughness, for the default plain plank.
     pub plank_color: u32,
     pub plank_roughness: f32,
+    /// Asset key of a custom plank mesh, modeled as a unit cube (−0.5..0.5) and stretched to
+    /// each plank's size; `None` draws a plain box.
+    pub plank_mesh: Option<String>,
+    /// Asset key of a custom plank material; `None` uses `plank_color` and `plank_roughness`.
+    pub plank_material: Option<String>,
     pub sim: SimSettings,
     pub material: SoftMaterial,
 }
@@ -128,6 +133,8 @@ impl Default for RopeBridge {
             plank_mass_kg: 6.0,
             plank_color: 0x7a5636,
             plank_roughness: 0.85,
+            plank_mesh: None,
+            plank_material: None,
             sim: SimSettings {
                 substeps: 16,
                 damping: 0.25,
