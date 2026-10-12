@@ -8,9 +8,11 @@
 //! A band on the head shows skill (grey rookie, bronze, silver, gold master) and an orb above
 //! it shows alertness (yellow suspicious, orange searching, red fighting).
 //!
-//! Animals graze head-down, raise their heads when alert, lie down to rest, gallop (deer and
-//! wolves), hop (rabbits), creep low when stalking, flap and bank in flight, and fall over
-//! when killed.
+//! Animals are sculpted procedural red deer, grey wolves, rabbits and starlings (see
+//! `art::animals`; cheap primitives without the renderer). They plant their feet as they walk,
+//! trot and gallop, graze head-down, raise their heads when alert, lie down to rest, hop
+//! (rabbits), creep low when stalking, peck, flap and bank in flight, and fall over when
+//! killed.
 //!
 //! With `NpcSettings::show_intent` on, a ring on the ground marks where each NPC decided to
 //! go and a line leads to it, colored by why: blue cover, orange flank, purple high ground,

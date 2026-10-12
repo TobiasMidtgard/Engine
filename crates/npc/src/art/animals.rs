@@ -2,12 +2,14 @@
 //! wolves, European rabbits and starlings.
 //!
 //! Every animal is a set of rigid pieces (torso, neck, head, jaw, ears, tail, leg segments,
-//! hooves, wings) that the stand-in pose code places each step. Each piece is sculpted in the
-//! animal's rest pose as a signed distance field and meshed with surface nets on a grid aligned
-//! with its bone (fine across, coarse along), or built directly as tubes (antlers, bird legs)
-//! and ribbons (feathers). Vertices carry the coat pattern (countershading, rump patch, masks,
-//! agouti saddle) times ambient occlusion baked against the whole body, and UVs that follow the
-//! fur's flow, so the tiled fur, feather, horn and hoof textures run the right way.
+//! hooves, wings) that the pose code in `visuals::animal` places each step. Each piece is
+//! sculpted in the animal's rest pose as a signed distance field and meshed with surface nets
+//! on a grid aligned with its bone (fine across, coarse along), or built directly as tubes
+//! (antlers, bird legs) and feather ribbons (a starling's wings and tail, the folded wings laid
+//! onto its body). Vertices carry the coat pattern (countershading, rump patch, masks, agouti
+//! saddle, a starling's iridescent sheen) times ambient occlusion baked against the whole body,
+//! and UVs that follow the fur's flow, so the tiled fur, plumage, feather, horn and hoof
+//! textures run the right way.
 //!
 //! Rest coordinates: meters, Y up, −Z forward, origin on the ground under the body; the right
 //! side is +X. A piece's mesh is stored relative to its pivot (the joint it turns about), with
@@ -199,7 +201,7 @@ pub const RABBIT: RabbitRig = RabbitRig {
     ],
 };
 
-/// Starling standing on the ground: 0.2 m long, 0.38 m wingspan.
+/// Starling standing on the ground: 0.21 m from bill to tail, 0.39 m wingspan.
 #[derive(Debug, Clone, Copy)]
 pub struct BirdRig {
     pub body: Vec3,
@@ -214,13 +216,13 @@ pub struct BirdRig {
 }
 
 pub const BIRD: BirdRig = BirdRig {
-    body: v3(0.0, 0.075, 0.0),
-    head: v3(0.0, 0.105, -0.052),
-    tail: v3(0.0, 0.078, 0.055),
-    shoulder: v3(0.02, 0.092, -0.028),
-    wrist: v3(0.095, 0.093, -0.02),
-    hip: v3(0.012, 0.052, 0.004),
-    foot: v3(0.014, 0.0, -0.004),
+    body: v3(0.0, 0.068, 0.0),
+    head: v3(0.0, 0.096, -0.048),
+    tail: v3(0.0, 0.074, 0.05),
+    shoulder: v3(0.019, 0.086, -0.024),
+    wrist: v3(0.085, 0.087, -0.026),
+    hip: v3(0.0125, 0.054, 0.006),
+    foot: v3(0.0125, 0.0, -0.001),
 };
 
 // ======================================================================= pieces
@@ -289,11 +291,6 @@ enum Skin {
     Bare,
 }
 
-/// Whether a species has its sculpted body yet (the others keep primitive stand-ins).
-pub fn sculpted(species: Species) -> bool {
-    matches!(species, Species::Deer | Species::Wolf | Species::Rabbit)
-}
-
 /// The pieces of one animal with meshes and materials, or `None` without the renderer.
 /// `tint` (linear RGB, 1 = as painted) multiplies the coat.
 pub fn pieces(
@@ -302,7 +299,7 @@ pub fn pieces(
     tint: Option<Vec3>,
     art: &mut ArtAssets,
 ) -> Option<Vec<(Piece, MeshRef, MaterialRef)>> {
-    if !art.available() || !sculpted(species) {
+    if !art.available() {
         return None;
     }
     ensure_species(species, art);
@@ -526,7 +523,12 @@ pub fn species_jobs(species: Species) -> Vec<Job> {
         }
         Species::Wolf => wolf::jobs(&mut jobs),
         Species::Rabbit => rabbit::jobs(&mut jobs),
-        Species::Bird => {}
+        Species::Bird => {
+            jobs.push(Box::new(|| {
+                vec![Made::Tex("animals/bird/feather".into(), feather_texture())]
+            }));
+            bird::jobs(&mut jobs);
+        }
     }
     jobs
 }
@@ -1487,20 +1489,24 @@ struct Tuft {
 
 /// The tufts of every cell of a fur tile (row major).
 fn fur_tufts(f: &Fur) -> Vec<Tuft> {
-    let n = f.cells;
+    tuft_table(f.cells, f.len, f.seed)
+}
+
+/// One tuft (or feather) per cell of an `n`×`n` tile, rows staggered, about `len` cells long.
+fn tuft_table(n: i32, len: f32, seed: u32) -> Vec<Tuft> {
     let mut out = Vec::with_capacity((n * n) as usize);
     for wr in 0..n {
         for wc in 0..n {
             let stagger = if wr % 2 == 1 { 0.5 } else { 0.0 };
-            let ang = (rand3(wc, wr, 2, f.seed) - 0.5) * 0.4;
+            let ang = (rand3(wc, wr, 2, seed) - 0.5) * 0.4;
             out.push(Tuft {
                 root: Vec2::new(
-                    0.5 + stagger + (rand3(wc, wr, 0, f.seed) - 0.5) * 0.7,
-                    rand3(wc, wr, 1, f.seed) * 0.8,
+                    0.5 + stagger + (rand3(wc, wr, 0, seed) - 0.5) * 0.7,
+                    rand3(wc, wr, 1, seed) * 0.8,
                 ),
                 dir: Vec2::new(ang.sin(), ang.cos()),
-                len: f.len * (0.8 + 0.4 * rand3(wc, wr, 3, f.seed)),
-                id: rand3(wc, wr, 4, f.seed),
+                len: len * (0.8 + 0.4 * rand3(wc, wr, 3, seed)),
+                id: rand3(wc, wr, 4, seed),
             });
         }
     }
@@ -1645,7 +1651,82 @@ fn coat_texture(species: Species) -> TextureSet {
             let tufts = fur_tufts(&f);
             TextureSet::bake(256, 0.07, |uv| fur_texel(&f, &tufts, uv))
         }
-        Species::Bird => TextureSet::bake(4, 0.05, |_| Texel::default()),
+        Species::Bird => plumage_texture(),
+    }
+}
+
+/// A starling's contour feathers: rows of overlapping rounded feathers lying along +V with
+/// glossy vanes (metallic, so the iridescent vertex tint colors their sheen) and, on some, a
+/// pale buff spot at the tip.
+fn plumage_texture() -> TextureSet {
+    const CELLS: i32 = 8;
+    let tufts = tuft_table(CELLS, 1.9, 43);
+    TextureSet::bake(256, 0.045, |uv| plumage_texel(&tufts, CELLS, uv))
+}
+
+fn plumage_texel(tufts: &[Tuft], n: i32, uv: Vec2) -> Texel {
+    let q = uv * n as f32;
+    let (ix, iy) = (q.x.floor() as i32, q.y.floor() as i32);
+    // The visible feather is the one rooted farthest upstream (its tip lies on top).
+    let mut best: Option<(f32, f32, f32, f32)> = None; // root y, along t, across s, id
+    for dy in 0..=3 {
+        let row = iy - dy;
+        for dx in -1..=1 {
+            let col = ix + dx;
+            let (wc, wr) = (col.rem_euclid(n), row.rem_euclid(n));
+            let tuft = tufts[(wr * n + wc) as usize];
+            let root = Vec2::new(col as f32, row as f32) + tuft.root;
+            let d = q - root;
+            let along = d.dot(tuft.dir);
+            if along < 0.0 || along > tuft.len {
+                continue;
+            }
+            let t = along / tuft.len;
+            let across = d.x * tuft.dir.y - d.y * tuft.dir.x;
+            // Narrow at the root, a rounded tip.
+            let tip = ((t - 0.45) / 0.55).max(0.0);
+            let w = 0.82 * (0.7 + 0.3 * smooth(0.0, 0.4, t)) * (1.0 - tip * tip).max(0.0).sqrt();
+            if across.abs() > w {
+                continue;
+            }
+            if best.is_none_or(|b| root.y < b.0) {
+                best = Some((root.y, t, across / w, tuft.id));
+            }
+        }
+    }
+    let Some((_, t, s, id)) = best else {
+        return Texel {
+            albedo: Vec3::splat(0.06),
+            height: 0.0,
+            roughness: 0.6,
+            metallic: 0.3,
+            occlusion: 0.3,
+        };
+    };
+    let a = s.abs();
+    let shaft = 1.0 - smooth(0.04, 0.1, a);
+    // Barbs sweep out from the shaft toward the tip.
+    let barb = ((t * 7.0 - a * 2.2 + id * 3.0) * TAU).sin();
+    // Pale arrowhead spots on about half the feathers.
+    let spot = if id < 0.42 {
+        let e = Vec2::new(s / 0.42, (t - 0.87) / 0.15).length();
+        1.0 - smooth(0.75, 1.0, e)
+    } else {
+        0.0
+    };
+    // Each feather catches the light a little differently.
+    let glint = 1.0 + 0.16 * (id * 7.3).fract() - 0.08;
+    let vane = Vec3::new(0.22, 0.21, 0.23) * glint * (0.94 + 0.06 * barb);
+    let mut albedo = mix(vane, Vec3::new(0.95, 0.82, 0.6), spot);
+    albedo = mix(albedo, Vec3::splat(0.2), shaft * 0.5 * (1.0 - spot));
+    Texel {
+        albedo,
+        height: 0.00025 * (0.3 + 0.7 * smooth(0.0, 0.7, t)) * (1.0 - 0.3 * s * s)
+            + 0.00003 * barb
+            + 0.00004 * shaft,
+        roughness: 0.42 + 0.28 * spot + 0.04 * barb,
+        metallic: 0.85 * (1.0 - spot) * (1.0 - 0.3 * shaft),
+        occlusion: 0.5 + 0.5 * smooth(0.0, 0.4, t),
     }
 }
 
@@ -1681,8 +1762,32 @@ fn antler_texture() -> TextureSet {
     })
 }
 
+/// One flight or tail feather filling the texture: U across (0.5 on the shaft), V from the
+/// downy base to the tip. A glossy dark vane of fine barbs with buff fringes, broadest on
+/// the outer vane (U > 0.5) and around the tip.
 fn feather_texture() -> TextureSet {
-    TextureSet::bake(4, 0.05, |_| Texel::default())
+    TextureSet::bake(256, 0.06, |uv| {
+        let s = uv.x * 2.0 - 1.0;
+        let t = uv.y;
+        let a = s.abs();
+        let shaft_w = 0.05 * (1.0 - 0.6 * t);
+        let shaft = 1.0 - smooth(shaft_w * 0.5, shaft_w, a);
+        let barb = ((t * 46.0 - a * 9.0) * TAU).sin() * 0.5 + 0.5;
+        let edge = if s > 0.0 { 0.88 } else { 0.94 };
+        let fringe = smooth(edge, 0.995, a).max(smooth(0.95, 0.995, t)) * smooth(0.25, 0.45, t);
+        let down = 1.0 - smooth(0.04, 0.2, t);
+        let vane = Vec3::new(0.065, 0.058, 0.052) * (0.85 + 0.25 * barb);
+        let mut albedo = mix(vane, Vec3::new(0.36, 0.24, 0.12), fringe);
+        albedo = mix(albedo, Vec3::splat(0.25), down * 0.7);
+        albedo = mix(albedo, Vec3::splat(0.08), shaft * 0.8);
+        Texel {
+            albedo,
+            height: 0.00012 * shaft + 0.000025 * barb - 0.00006 * a * a,
+            roughness: 0.52 + 0.22 * fringe + 0.2 * down + 0.05 * barb,
+            metallic: 0.3 * (1.0 - fringe) * (1.0 - down),
+            occlusion: 1.0 - 0.2 * a * a,
+        }
+    })
 }
 
 // ======================================================================= deer
@@ -3641,6 +3746,707 @@ mod rabbit {
                 mesh.merge(&eye);
             }
             vec![Made::Mesh("animals/rabbit/gloss".into(), mesh)]
+        }));
+    }
+}
+
+// ======================================================================= starling
+
+mod bird {
+    use super::*;
+
+    const R: BirdRig = BIRD;
+
+    const KIND: Kind = Kind {
+        key: "bird",
+        coat,
+        body,
+        scale: 0.09,
+    };
+
+    /// The head's neck ball (the body holds a slightly bigger socket around it).
+    const HEAD_BALL: f32 = 0.0125;
+    const EYE: Vec3 = v3(0.0091, 0.1035, -0.0705);
+    const EYE_AXIS: Vec3 = v3(0.93, 0.18, -0.32);
+    const EYE_R: f32 = 0.0031;
+    /// Bill base (inside the feathered forehead) and tip.
+    const BILL: Vec3 = v3(0.0, 0.0985, -0.079);
+    const BILL_TIP: Vec3 = v3(0.0, 0.0955, -0.111);
+    /// End of the right hand, where the outer primaries sit (wing spread).
+    const HAND: Vec3 = v3(0.118, 0.087, -0.02);
+
+    // Iridescent sheens: the glossy vanes take these as their color.
+    const PURPLE: Vec3 = v3(0.72, 0.36, 1.0);
+    const GREEN: Vec3 = v3(0.36, 1.0, 0.5);
+    const BRONZE: Vec3 = v3(1.0, 0.8, 0.52);
+    /// Flight and tail feathers: dull black-brown with buff fringes.
+    const DULL: Vec3 = v3(0.78, 0.76, 0.74);
+
+    /// The body with the breast and flank feathers that cover the bend of the folded wing.
+    pub fn torso(p: Vec3) -> f32 {
+        let d = trunk(p);
+        if d > 0.012 {
+            return d;
+        }
+        let shoulder = ell(
+            mx(p),
+            v3(0.0205, 0.0745, -0.033),
+            v3(0.0062, 0.0125, 0.0105),
+        );
+        smin(d, shoulder, 0.006)
+    }
+
+    /// Plump, short-tailed body standing a little nose-up, with the socket the head turns in
+    /// and feathered thighs.
+    fn trunk(p: Vec3) -> f32 {
+        let m = mx(p);
+        let main = ell(p, v3(0.0, 0.066, 0.004), v3(0.0235, 0.025, 0.046));
+        let breast = ell(p, v3(0.0, 0.068, -0.024), v3(0.0228, 0.027, 0.027));
+        let nape = ell(p, v3(0.0, 0.085, -0.034), v3(0.015, 0.0155, 0.019));
+        let socket = sphere(p, R.head, HEAD_BALL + 0.0005);
+        let belly = ell(p, v3(0.0, 0.054, 0.006), v3(0.0185, 0.017, 0.032));
+        let vent = ell(p, v3(0.0, 0.064, 0.05), v3(0.0105, 0.009, 0.026));
+        let rump = ell(p, v3(0.0, 0.079, 0.044), v3(0.0125, 0.007, 0.024));
+        let thigh = ell(m, v3(0.0125, 0.047, 0.008), v3(0.0085, 0.0125, 0.011));
+        let mut d = smin(main, breast, 0.012);
+        d = smin(d, nape, 0.012);
+        d = smin(d, socket, 0.008);
+        d = smin(d, belly, 0.01);
+        d = smin(d, vent, 0.01);
+        d = smin(d, rump, 0.008);
+        // Contour feathers lie smooth: the texture carries them.
+        smin(d, thigh, 0.006)
+    }
+
+    /// Flat crown and a long sloping forehead running into the bill, big dark eyes.
+    pub fn head(p: Vec3) -> f32 {
+        let m = mx(p);
+        let poll = sphere(p, R.head, HEAD_BALL);
+        let skull = ell(p, v3(0.0, 0.1015, -0.063), v3(0.0118, 0.0115, 0.0175));
+        let brow = ell(p, v3(0.0, 0.1, -0.078), v3(0.0068, 0.0076, 0.011));
+        let throat = ell(p, v3(0.0, 0.0915, -0.064), v3(0.0088, 0.0085, 0.013));
+        let cheek = ell(m, v3(0.006, 0.0985, -0.067), v3(0.0062, 0.0085, 0.012));
+        let mut d = smin(poll, skull, 0.008);
+        d = smin(d, brow, 0.006);
+        d = smin(d, throat, 0.006);
+        d = smin(d, cheek, 0.004);
+        d = smax(d, p.y - 0.1118, 0.004);
+        // Eye sockets with lids.
+        let axis = EYE_AXIS.normalize();
+        d = ssub(d, sphere(m, EYE + axis * 0.0006, EYE_R + 0.0002), 0.0008);
+        let e = m - EYE;
+        let along = e.dot(axis);
+        let ring = Vec2::new((e - axis * along).length() - EYE_R, along).length() - 0.0007;
+        smin(d, ring, 0.0008)
+    }
+
+    /// Long, straight and sharp, a little flattened, with the gape along each side.
+    pub fn bill(p: Vec3) -> f32 {
+        let s = v3(0.88, 1.15, 1.0);
+        let d = round_cone(p * s, BILL * s, BILL_TIP * s, 0.0047, 0.0003) / 1.15;
+        let gape = cone(
+            mx(p),
+            v3(0.0049, 0.0973, -0.0815),
+            v3(0.0015, 0.0954, -0.103),
+            0.00045,
+            0.0002,
+        );
+        ssub(d, gape, 0.0003)
+    }
+
+    /// Everything, for occlusion.
+    pub fn body(p: Vec3) -> f32 {
+        torso(p).min(head(p))
+    }
+
+    /// The surface the folded wings lie on: the body and, behind it, the base of the tail.
+    fn bed(p: Vec3) -> f32 {
+        smin(
+            trunk(p),
+            ell(p, v3(0.0, 0.073, 0.075), v3(0.011, 0.0045, 0.04)),
+            0.012,
+        )
+    }
+
+    /// Plumage tint (linear). The glossy vanes reflect it, so it is the sheen: purple on the
+    /// head and breast, green on the back and flanks, bronze toward the tail, in patches like
+    /// oil on water.
+    fn coat(piece: Piece, p: Vec3, n: Vec3, _: bool) -> Vec3 {
+        let oil = (mottle(p, 70.0, 5) * 0.8 + 0.5).clamp(0.0, 1.0);
+        let hue = mix(GREEN, PURPLE, oil * 0.5);
+        if piece == Piece::Head {
+            let crown = smooth(0.5, 1.0, n.y) * 0.4 + oil * 0.25;
+            return mix(PURPLE, GREEN, crown) * 0.62;
+        }
+        let breast = smooth(-0.015, -0.04, p.z) * smooth(0.4, -0.3, n.y);
+        let mut hue = mix(hue, PURPLE, breast * 0.8);
+        hue = mix(hue, BRONZE, smooth(0.02, 0.065, p.z) * 0.45);
+        hue * (0.72 + 0.2 * smooth(0.2, -0.6, n.y))
+    }
+
+    /// One feather: a vane from `root` along `dir`, its face toward `up`, `outer` the share
+    /// of the width on the `up × dir` side.
+    #[derive(Clone, Copy)]
+    struct Quill {
+        root: Vec3,
+        dir: Vec3,
+        up: Vec3,
+        len: f32,
+        width: f32,
+        outer: f32,
+        /// Arch across the vane and droop toward the tip, meters.
+        camber: f32,
+        droop: f32,
+        /// 1 a rounded tip, 2 a pointed one, below 1 blunt.
+        point: f32,
+        tint: Vec3,
+    }
+
+    impl Quill {
+        fn new(root: Vec3, dir: Vec3, len: f32, width: f32, tint: Vec3) -> Self {
+            Self {
+                root,
+                dir: dir.normalize(),
+                up: Vec3::Y,
+                len,
+                width,
+                outer: 0.5,
+                camber: 0.0007,
+                droop: 0.0,
+                point: 1.0,
+                tint,
+            }
+        }
+
+        /// The vane at `s` across (−1..1) and `t` along (0 root, 1 tip).
+        fn at(&self, s: f32, t: f32) -> Vec3 {
+            let side = self.up.cross(self.dir).normalize();
+            let up = self.dir.cross(side);
+            let tip = ((t - 0.45) / 0.55).max(0.0);
+            let w = self.width
+                * (0.55 + 0.45 * smooth(0.0, 0.2, t))
+                * (1.0 - tip * tip).max(0.0).powf(0.5 * self.point);
+            let half = if s > 0.0 {
+                self.outer
+            } else {
+                1.0 - self.outer
+            };
+            let arch = self.camber * (1.0 - s * s) * (w / self.width);
+            self.root
+                + self.dir * (t * self.len)
+                + side * (s * half * w)
+                + up * (arch - self.droop * t * t)
+        }
+
+        /// The vane as a grid, its points from `pos(s, t)`.
+        fn grid(&self, across: usize, rows: usize, pos: &dyn Fn(f32, f32) -> Vec3) -> Geo {
+            let mut g = Geo::default();
+            let e = 0.02;
+            for i in 0..=rows {
+                let t = 0.97 * i as f32 / rows as f32;
+                for j in 0..=across {
+                    let s = -1.0 + 2.0 * j as f32 / across as f32;
+                    let ds = pos((s + e).min(1.0), t) - pos((s - e).max(-1.0), t);
+                    let dt = pos(s, t + e) - pos(s, (t - e).max(0.0));
+                    g.positions.push(pos(s, t));
+                    g.normals.push(dt.cross(ds).normalize_or(self.up));
+                    g.uvs.push(Vec2::new(0.5 + 0.5 * s, t));
+                }
+            }
+            let w = across as u32 + 1;
+            for i in 0..rows as u32 {
+                for j in 0..across as u32 {
+                    let (a, b, c, d) = (
+                        i * w + j,
+                        i * w + j + 1,
+                        (i + 1) * w + j + 1,
+                        (i + 1) * w + j,
+                    );
+                    g.indices.extend_from_slice(&[a, b, c, a, c, d]);
+                }
+            }
+            orient(&mut g);
+            g
+        }
+
+        /// Free in the air (spread wings, tail).
+        fn free(&self, across: usize, rows: usize) -> Geo {
+            self.grid(across, rows, &|s, t| self.at(s, t))
+        }
+
+        /// Laid `off` above the bed (folded wings), its root tucked in and its outer edge
+        /// lifted a little like a shingle.
+        fn laid(&self, off: f32, across: usize, rows: usize) -> Geo {
+            self.grid(across, rows, &|s, t| {
+                let mut p = self.at(s, t);
+                let o = (off + 0.0004 * (1.0 + s)) * (0.3 + 0.7 * smooth(0.0, 0.3, t));
+                for _ in 0..3 {
+                    let d = bed(p) - o;
+                    p -= gradient(&bed, p, 0.0005) * d;
+                }
+                p
+            })
+        }
+
+        /// Painted (darker at the root, under the feathers above) about `pivot`.
+        fn mesh(&self, g: Geo, pivot: Vec3) -> Mesh {
+            let tint = self.tint;
+            g.finish(pivot, &body, KIND.scale, &|_, _, uv| {
+                tint * (0.55 + 0.45 * smooth(0.0, 0.45, uv.y))
+            })
+        }
+    }
+
+    /// Turn every triangle so it winds counter-clockwise seen from its vertices' normals.
+    fn orient(g: &mut Geo) {
+        for t in g.indices.chunks_mut(3) {
+            let [a, b, c] = [t[0], t[1], t[2]].map(|i| i as usize);
+            let n = g.normals[a] + g.normals[b] + g.normals[c];
+            let face = (g.positions[b] - g.positions[a]).cross(g.positions[c] - g.positions[a]);
+            if face.dot(n) < 0.0 {
+                t.swap(1, 2);
+            }
+        }
+    }
+
+    /// A wing's leading edge from `a` out to `b`: an elliptical tube `ry` thick and `rz` deep
+    /// behind the edge line, rounded off at `b`. Textured with a plain stretch of vane.
+    fn edge(a: Vec3, b: Vec3, ry: (f32, f32), rz: (f32, f32)) -> Geo {
+        let mut g = Geo::default();
+        let (rings, sides) = (8usize, 10usize);
+        let along = (b - a).normalize();
+        for i in 0..=rings + 2 {
+            let (t, k) = if i <= rings {
+                (i as f32 / rings as f32, 1.0)
+            } else {
+                (1.0, if i == rings + 1 { 0.6 } else { 0.0 })
+            };
+            let c = a.lerp(b, t) + along * (1.0 - k) * rz.1;
+            let (hy, hz) = (ry.0 + (ry.1 - ry.0) * t, rz.0 + (rz.1 - rz.0) * t);
+            for j in 0..=sides {
+                let th = TAU * j as f32 / sides as f32;
+                let (cy, cz) = (th.sin(), -th.cos());
+                g.positions.push(c + v3(0.0, cy * hy * k, hz + cz * hz * k));
+                let n = v3(0.0, cy / hy, cz / hz).normalize() * k + along * (1.0 - k);
+                g.normals.push(n.normalize());
+                g.uvs.push(Vec2::new(
+                    0.2 + 0.06 * j as f32 / sides as f32,
+                    0.3 + 0.6 * t,
+                ));
+            }
+        }
+        let w = sides as u32 + 1;
+        for i in 0..rings as u32 + 2 {
+            for j in 0..sides as u32 {
+                let (a, b, c, d) = (
+                    i * w + j,
+                    i * w + j + 1,
+                    (i + 1) * w + j + 1,
+                    (i + 1) * w + j,
+                );
+                g.indices.extend_from_slice(&[a, b, c, a, c, d]);
+            }
+        }
+        orient(&mut g);
+        g
+    }
+
+    /// The right arm wing spread flat about the shoulder: secondaries and tertials, the
+    /// coverts above and below them and the leading edge.
+    fn spread_arm() -> Mesh {
+        let sheen = mix(GREEN, PURPLE, 0.35) * 0.85;
+        let mut mesh = edge(
+            R.shoulder + v3(-0.006, 0.0, 0.0),
+            R.wrist,
+            (0.0032, 0.0024),
+            (0.0085, 0.0065),
+        )
+        .finish(R.shoulder, &body, KIND.scale, &|_, _, _| sheen);
+        for i in 0..12 {
+            let f = i as f32 / 11.0;
+            let x = 0.083 - f * 0.06;
+            let a = 0.12 - f * 0.16;
+            let dir = v3(a.sin(), 0.0, a.cos());
+            let (len, tint) = if i < 9 {
+                (0.057 + 0.005 * f, DULL)
+            } else {
+                ([0.06, 0.055, 0.048][i - 9], sheen)
+            };
+            let q = Quill {
+                outer: 0.42,
+                camber: 0.0008,
+                droop: 0.002,
+                point: 0.8,
+                ..Quill::new(v3(x, 0.0862 + f * 0.0012, -0.019), dir, len, 0.0135, tint)
+            };
+            mesh.merge(&q.mesh(q.free(3, 6), R.shoulder));
+            // Greater coverts over the bases, under-wing coverts below.
+            if i < 10 {
+                let cover = |y: f32, z: f32, len: f32, width: f32, tint: Vec3| {
+                    let q = Quill {
+                        outer: 0.45,
+                        camber: 0.0005,
+                        ..Quill::new(v3(x + 0.001, y, z), dir, len, width, tint)
+                    };
+                    q.mesh(q.free(2, 4), R.shoulder)
+                };
+                mesh.merge(&cover(0.0881 + f * 0.0006, -0.022, 0.03, 0.0118, sheen));
+                mesh.merge(&cover(0.0846, -0.022, 0.03, 0.012, DULL * 0.9));
+                if i % 3 != 2 {
+                    mesh.merge(&cover(0.0892 + f * 0.0004, -0.025, 0.017, 0.0095, sheen));
+                }
+            }
+        }
+        mesh
+    }
+
+    /// The right hand spread flat about the wrist: primaries fanning to the pointed tip, their
+    /// coverts, the alula and the leading edge.
+    fn spread_hand() -> Mesh {
+        const LEN: [f32; 9] = [0.06, 0.061, 0.063, 0.066, 0.07, 0.076, 0.083, 0.089, 0.088];
+        let w = R.wrist;
+        let sheen = mix(GREEN, PURPLE, 0.6) * 0.8;
+        let mut mesh = edge(
+            w + v3(-0.003, 0.0, 0.0),
+            HAND + v3(0.006, 0.0, 0.0),
+            (0.0025, 0.0016),
+            (0.0065, 0.004),
+        )
+        .finish(w, &body, KIND.scale, &|_, _, _| sheen);
+        for (i, &len) in LEN.iter().enumerate() {
+            let f = i as f32 / 8.0;
+            let a = 0.3 + 0.95 * f.powf(1.2);
+            let dir = v3(a.sin(), 0.0, a.cos());
+            let root = w.lerp(HAND, f) + v3(0.0, (1.0 - f) * 0.0012 - 0.0004, 0.004);
+            let q = Quill {
+                outer: 0.3,
+                camber: 0.0009,
+                droop: 0.004,
+                point: 1.6,
+                ..Quill::new(root, dir, len, 0.016 - 0.003 * f, DULL * 0.95)
+            };
+            mesh.merge(&q.mesh(q.free(3, 8), w));
+            let c = Quill {
+                outer: 0.4,
+                camber: 0.0005,
+                point: 1.2,
+                ..Quill::new(
+                    root + v3(0.0, 0.0016, -0.002),
+                    dir,
+                    0.026,
+                    0.011,
+                    mix(sheen, DULL, f),
+                )
+            };
+            mesh.merge(&c.mesh(c.free(2, 4), w));
+            if i % 2 == 0 {
+                let u = Quill::new(
+                    root + v3(0.0, -0.0015, -0.002),
+                    dir,
+                    0.024,
+                    0.012,
+                    DULL * 0.9,
+                );
+                mesh.merge(&u.mesh(u.free(2, 4), w));
+            }
+        }
+        // Alula: two small feathers at the wrist, pointing out along the edge.
+        for (k, len) in [0.017f32, 0.013].into_iter().enumerate() {
+            let q = Quill {
+                camber: 0.0004,
+                ..Quill::new(
+                    w + v3(0.002, 0.0026 - k as f32 * 0.0004, 0.001),
+                    v3(1.0, 0.0, 0.25 + 0.2 * k as f32),
+                    len,
+                    0.006,
+                    sheen,
+                )
+            };
+            mesh.merge(&q.mesh(q.free(2, 4), w));
+        }
+        mesh
+    }
+
+    /// The right wing folded along the side about the body pivot: primaries lowest (their
+    /// tips crossing over the tail), secondaries over them along the flank, tertials along
+    /// the back and the coverts at the shoulder.
+    fn folded() -> Mesh {
+        let side = v3(1.0, 0.25, 0.0).normalize();
+        let top = v3(0.7, 1.0, 0.0).normalize();
+        let sheen = mix(GREEN, PURPLE, 0.35) * 0.85;
+        let mut mesh = Mesh::default();
+        let mut add =
+            |root: Vec3, tip: Vec3, width: f32, off: f32, tint: Vec3, up: Vec3, rows: usize| {
+                let q = Quill {
+                    up,
+                    outer: 0.4,
+                    camber: 0.0,
+                    ..Quill::new(root, tip - root, root.distance(tip), width, tint)
+                };
+                mesh.merge(&q.mesh(q.laid(off, 2, rows), R.body));
+            };
+        for i in 0..8 {
+            let f = i as f32;
+            add(
+                v3(0.021, 0.07 + f * 0.0006, -0.016 + f * 0.0012),
+                v3(0.0065 + f * 0.0009, 0.077 - f * 0.0004, 0.097 - f * 0.0045),
+                0.011,
+                0.0005 + f * 0.00008,
+                DULL * 0.95,
+                side,
+                7,
+            );
+        }
+        for j in 0..8 {
+            let f = j as f32;
+            add(
+                v3(0.0225, 0.0705 + f * 0.0018, -0.01 + f * 0.001),
+                v3(0.0145 - f * 0.0003, 0.066 + f * 0.0022, 0.05 - f * 0.001),
+                0.012,
+                0.0013 + f * 0.0001,
+                DULL,
+                side,
+                6,
+            );
+        }
+        for k in 0..3 {
+            let f = k as f32;
+            add(
+                v3(0.016 - f * 0.0015, 0.0875 + f * 0.0005, -0.008 + f * 0.002),
+                v3(0.0105 - f * 0.0012, 0.0845 - f * 0.0005, 0.058 - f * 0.004),
+                0.013,
+                0.0022 + f * 0.0001,
+                sheen,
+                top,
+                6,
+            );
+        }
+        for j in 0..8 {
+            let f = j as f32;
+            add(
+                v3(0.0232, 0.0715 + f * 0.0018, -0.026 + f * 0.0008),
+                v3(0.02 - f * 0.0003, 0.07 + f * 0.002, 0.002 + f * 0.0028),
+                0.011,
+                0.0026 + f * 0.0001,
+                sheen,
+                side,
+                4,
+            );
+        }
+        for j in 0..7 {
+            let f = j as f32;
+            add(
+                v3(0.0222, 0.0735 + f * 0.0018, -0.035),
+                v3(0.0225, 0.073 + f * 0.0018, -0.016 + f * 0.0022),
+                0.009,
+                0.0034 + f * 0.0001,
+                sheen,
+                side,
+                3,
+            );
+        }
+        mesh
+    }
+
+    /// Twelve tail feathers about the tail joint, `fan` radians apart (folded or spread for
+    /// flight), with the coverts over and under their base.
+    fn tail(fan: f32) -> Mesh {
+        let mut mesh = Mesh::default();
+        for side in [-1.0f32, 1.0] {
+            for i in 0..6 {
+                let f = i as f32;
+                let a = side * (0.012 + f * fan);
+                let dir = v3(a.sin(), -0.12, a.cos());
+                let root = R.tail
+                    + v3(
+                        side * (0.0012 + f * (0.0012 + fan * 0.006)),
+                        (5.0 - f) * 0.00025,
+                        0.0,
+                    );
+                // The narrow outer vane faces away from the middle.
+                let outer = if i == 0 {
+                    0.5
+                } else if side > 0.0 {
+                    0.38
+                } else {
+                    0.62
+                };
+                let q = Quill {
+                    outer,
+                    camber: 0.0006,
+                    droop: 0.001,
+                    point: 0.8,
+                    ..Quill::new(root, dir, 0.064 - 0.0004 * f, 0.0125, DULL)
+                };
+                mesh.merge(&q.mesh(q.free(3, 6), R.tail));
+            }
+            for k in 0..2 {
+                let x = side * (0.0025 + 0.004 * k as f32);
+                let over = Quill::new(
+                    v3(x, 0.0788, 0.04),
+                    v3(x * 0.3, -0.05, 1.0),
+                    0.03,
+                    0.012,
+                    mix(GREEN, BRONZE, 0.5) * 0.85,
+                );
+                mesh.merge(&over.mesh(over.free(2, 4), R.tail));
+                let under = Quill::new(
+                    v3(x, 0.0665, 0.043),
+                    v3(x * 0.3, -0.06, 1.0),
+                    0.032,
+                    0.012,
+                    DULL,
+                );
+                mesh.merge(&under.mesh(under.free(2, 4), R.tail));
+            }
+        }
+        mesh
+    }
+
+    /// The right leg about the hip: a reddish-pink scaly tarsus from the feathered thigh,
+    /// three toes forward and one back, dark claws.
+    fn leg() -> Mesh {
+        let skin = v3(0.5, 0.2, 0.16);
+        let claw = v3(0.07, 0.055, 0.045);
+        let x = R.foot.x;
+        let ankle = v3(x, 0.031, 0.0135);
+        let foot = v3(x, 0.0026, -0.0005);
+        let paint = |g: Geo, c: Vec3| g.finish(R.hip, &body, KIND.scale, &|_, _, _| c);
+        let (pts, rad) = spline(
+            &[v3(x, 0.043, 0.01), ankle, v3(x, 0.017, 0.0065), foot],
+            &[0.0018, 0.0015, 0.0013, 0.0012],
+            4,
+        );
+        let mut mesh = paint(tube(&pts, &rad, 8), skin);
+        for (yaw, len, hook) in [
+            (0.0f32, 0.017f32, 0.0045f32),
+            (-0.42, 0.013, 0.004),
+            (0.42, 0.014, 0.004),
+            (PI, 0.011, 0.0065),
+        ] {
+            let d = v3(yaw.sin(), 0.0, -yaw.cos());
+            let end = foot + d * len + v3(0.0, -0.0016, 0.0);
+            let (pts, rad) = spline(
+                &[
+                    foot + d * 0.001,
+                    foot + d * (len * 0.5) + v3(0.0, -0.0012, 0.0),
+                    end,
+                ],
+                &[0.0011, 0.0009, 0.0008],
+                3,
+            );
+            mesh.merge(&paint(tube(&pts, &rad, 6), skin * 0.85));
+            let (pts, rad) = spline(
+                &[
+                    end,
+                    end + d * (hook * 0.55) + v3(0.0, 0.0001, 0.0),
+                    end + d * hook + v3(0.0, -0.0011, 0.0),
+                ],
+                &[0.0007, 0.0005, 0.0002],
+                3,
+            );
+            mesh.merge(&paint(tube(&pts, &rad, 6), claw));
+        }
+        mesh
+    }
+
+    /// Bill color: lemon yellow with a blue-grey base, like a starling in spring.
+    fn bill_color(p: Vec3) -> Vec3 {
+        let t = ((p.z - BILL.z) / (BILL_TIP.z - BILL.z)).clamp(0.0, 1.0);
+        mix(hex(0x6a7486), hex(0xe8c228), smooth(0.12, 0.35, t))
+    }
+
+    pub fn jobs(jobs: &mut Vec<Job>) {
+        let up = Vec3::Y;
+        let mut torso_flow =
+            Flow::new(v3(0.0, 0.096, -0.068), v3(0.0, 0.066, 0.076), up, 0.045).tilt(0.15);
+        // The front pole sits inside the head's neck ball, out of sight.
+        torso_flow.start = 0.008;
+        torso_flow.end = 0.14;
+        let mut head_flow =
+            Flow::new(v3(0.0, 0.1, -0.09), v3(0.0, 0.097, -0.042), up, 0.022).tilt(0.1);
+        head_flow.start = 0.006;
+        let specs = [
+            Spec {
+                piece: Piece::Body,
+                f: torso,
+                region: Region::aabb(
+                    v3(-0.033, 0.028, -0.068),
+                    v3(0.033, 0.106, 0.082),
+                    Vec3::splat(0.0015),
+                ),
+                target: 2000,
+                flow: torso_flow,
+                pivot: R.body,
+                mirror: None,
+                variant: false,
+            },
+            Spec {
+                piece: Piece::Head,
+                f: head,
+                region: Region::aabb(
+                    v3(-0.017, 0.078, -0.094),
+                    v3(0.017, 0.117, -0.033),
+                    Vec3::splat(0.0009),
+                ),
+                target: 1100,
+                flow: head_flow,
+                pivot: R.head,
+                mirror: None,
+                variant: false,
+            },
+        ];
+        for spec in specs {
+            jobs.push(Box::new(move || spec.run(KIND)));
+        }
+        let pair = |w: u8, mesh: Mesh| {
+            vec![
+                Made::Mesh(format!("animals/bird/wing0_{w}"), mirrored(&mesh)),
+                Made::Mesh(format!("animals/bird/wing1_{w}"), mesh),
+            ]
+        };
+        jobs.push(Box::new(move || pair(2, folded())));
+        jobs.push(Box::new(move || pair(0, spread_arm())));
+        jobs.push(Box::new(move || pair(1, spread_hand())));
+        jobs.push(Box::new(|| {
+            vec![
+                Made::Mesh("animals/bird/tail".into(), tail(0.016)),
+                Made::Mesh("animals/bird/tailfan".into(), tail(0.06)),
+            ]
+        }));
+        jobs.push(Box::new(|| {
+            let leg = leg();
+            vec![
+                Made::Mesh("animals/bird/leg0_0".into(), mirrored(&leg)),
+                Made::Mesh("animals/bird/leg1_0".into(), leg),
+            ]
+        }));
+        // Eyes and bill.
+        jobs.push(Box::new(|| {
+            let axis = EYE_AXIS.normalize();
+            let mut mesh = Mesh::default();
+            for side in [-1.0f32, 1.0] {
+                let c = v3(EYE.x * side, EYE.y, EYE.z);
+                let ax = v3(axis.x * side, axis.y, axis.z);
+                let rot = Quat::from_rotation_arc(Vec3::Y, ax);
+                let g = ball(c, Vec3::splat(EYE_R), rot, 8, 12);
+                let eye = g.finish(R.head, &body, KIND.scale, &|p, _, _| {
+                    let t = (p - c).normalize().dot(ax);
+                    mix(hex(0x2a1a10), hex(0x050302), smooth(0.55, 0.8, t))
+                });
+                mesh.merge(&eye);
+            }
+            let color = |p: Vec3, _: Vec3| bill_color(p);
+            let paint = Paint {
+                flow: Flow::new(BILL, BILL_TIP, Vec3::Y, 0.03),
+                color: &color,
+                body: &body,
+                scale: KIND.scale,
+                pivot: R.head,
+            };
+            let region = Region::bone(BILL, BILL_TIP, 0.0075, 0.00035, 0.0006);
+            mesh.merge(&sculpt(&bill, region, 360, &paint));
+            vec![Made::Mesh("animals/bird/gloss".into(), mesh)]
         }));
     }
 }

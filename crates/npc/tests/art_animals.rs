@@ -30,6 +30,9 @@ struct Pose {
     clock: f64,
     flap: f32,
     bite: bool,
+    /// Climb rate (birds glide when sinking) and bank angle in flight.
+    climb: f32,
+    bank: f32,
 }
 
 impl Pose {
@@ -45,6 +48,8 @@ impl Pose {
             clock: 100.0,
             flap: 0.0,
             bite: false,
+            climb: 0.0,
+            bank: 0.0,
         }
     }
 
@@ -90,18 +95,26 @@ fn app() -> App {
     app
 }
 
-/// Spawn `poses` 40 m apart along X, facing +X; returns their entities and positions.
+/// Spawn `poses` 40 m apart along X, facing +X (birds in flight 0.6 m up); returns their
+/// entities and positions.
 fn spawn(app: &mut App, poses: &[Pose]) -> Vec<(Entity, DVec3)> {
     let mut out = Vec::new();
     for (i, p) in poses.iter().enumerate() {
-        let at = DVec3::new(i as f64 * 40.0, 0.0, 0.0);
+        let up = if p.state == AnimalState::Flying {
+            0.6
+        } else {
+            0.0
+        };
+        let at = DVec3::new(i as f64 * 40.0, up, 0.0);
         let mut animal = Animal::new(p.species);
         animal.male = p.male;
         let e = app
             .world
             .spawn((
-                Transform::from_translation(at)
-                    .with_rotation(Quat::from_rotation_y(-std::f32::consts::FRAC_PI_2)),
+                Transform::from_translation(at).with_rotation(
+                    Quat::from_rotation_y(-std::f32::consts::FRAC_PI_2)
+                        * Quat::from_rotation_z(p.bank),
+                ),
                 animal,
                 StandIn::default(),
                 SelfPropelled,
@@ -126,7 +139,7 @@ fn hold(app: &mut App, animals: &[(Entity, DVec3)], poses: &[Pose]) {
             m.bite_ready = if p.bite { p.clock + 1.0 } else { 0.0 };
         }
         if let Some(mut l) = ent.get_mut::<LocomotionState>() {
-            l.velocity = Vec3::X * p.speed;
+            l.velocity = Vec3::X * p.speed + Vec3::Y * p.climb;
             l.mode = p.mode;
             l.grounded = p.state != AnimalState::Flying;
         }
@@ -135,7 +148,7 @@ fn hold(app: &mut App, animals: &[(Entity, DVec3)], poses: &[Pose]) {
         }
         if let Some(mut b) = ent.get_mut::<BirdFlight>() {
             b.flap = p.flap;
-            b.velocity = Vec3::X * p.speed;
+            b.velocity = Vec3::X * p.speed + Vec3::Y * p.climb;
         }
     }
 }
@@ -231,7 +244,7 @@ fn render(shots: &[Shot]) {
                 Species::Deer => (1.22, 1.08),
                 Species::Wolf => (0.72, 0.62),
                 Species::Rabbit => (0.16, 0.1),
-                Species::Bird => (0.1, 0.05),
+                Species::Bird => (0.1, 0.06),
             }
         } else if name.ends_with("_feet") {
             match pose.species {
@@ -242,15 +255,12 @@ fn render(shots: &[Shot]) {
         } else {
             (h, ahead)
         };
-        let lift = if pose.state == AnimalState::Flying {
-            0.6
-        } else {
-            0.0
-        };
         let az = azimuth.to_radians();
         // The animal faces +X: look at its middle, a little toward the head.
-        let target = at + DVec3::new(ahead, h + lift, 0.0);
-        let eye = target + DVec3::new(dist * az.sin(), dist * 0.22, dist * az.cos());
+        let target = at + DVec3::new(ahead, h, 0.0);
+        // Names ending in "_top" look down from high above.
+        let rise = if name.ends_with("_top") { 2.5 } else { 0.22 };
+        let eye = target + DVec3::new(dist * az.sin(), dist * rise, dist * az.cos());
         let cam = camera(&mut app, eye, target, 28.0);
         hold(&mut app, &animals, &list);
         app.update();
@@ -385,9 +395,76 @@ fn rabbit_closeups() {
 }
 
 #[test]
+fn starling_closeups() {
+    let b = |state| Pose::new(Species::Bird, state);
+    let fly = |flap: f32| Pose {
+        flap,
+        t: 3.0,
+        ..b(AnimalState::Flying).moving(7.0, 0.0, LocomotionMode::Air)
+    };
+    render(&[
+        ("bird_profile", b(AnimalState::Perched), 0.6, 0.0),
+        ("bird_head", b(AnimalState::Perched), 0.3, 40.0),
+        (
+            "bird_peck",
+            Pose {
+                clock: 100.085,
+                ..b(AnimalState::Perched)
+            },
+            0.6,
+            30.0,
+        ),
+        (
+            "bird_hop",
+            Pose {
+                climb: 1.0,
+                ..b(AnimalState::Perched)
+            },
+            0.6,
+            20.0,
+        ),
+        ("bird_rear", b(AnimalState::Perched), 0.55, -140.0),
+        (
+            "bird_takeoff",
+            Pose {
+                t: 0.1,
+                climb: 4.0,
+                ..fly(0.6)
+            },
+            0.9,
+            25.0,
+        ),
+        ("bird_fly_up", fly(0.0), 0.9, 15.0),
+        ("bird_fly_raised", fly(1.57), 0.9, 15.0),
+        ("bird_fly_top", fly(3.6), 0.5, 0.0),
+        ("bird_perched_top", b(AnimalState::Perched), 0.25, 0.0),
+        ("bird_fly_down", fly(3.6), 0.9, 15.0),
+        (
+            "bird_glide",
+            Pose {
+                climb: -1.0,
+                ..fly(4.7)
+            },
+            0.9,
+            40.0,
+        ),
+        (
+            "bird_bank",
+            Pose {
+                bank: 0.6,
+                ..fly(3.6)
+            },
+            0.9,
+            -20.0,
+        ),
+        ("bird_dead", b(AnimalState::Dead), 0.6, 60.0),
+    ]);
+}
+
+#[test]
 fn meshes_fit_their_budgets() {
     let mut total = 0.0;
-    for species in [Species::Deer, Species::Wolf, Species::Rabbit] {
+    for species in Species::ALL {
         let (meshes, secs) = animals::build_all(species);
         total += secs;
         for male in [false, true] {
