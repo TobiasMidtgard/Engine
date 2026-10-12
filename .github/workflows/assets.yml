@@ -46,8 +46,12 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           ENGINE_ASSET_MIRROR: ${{ github.repository }}
         run: cargo run -q -p fetch-assets -- mirror
-      # The pins stay readable in this check run's annotations after the branch is gone, and
-      # cloud sessions can't delete branches themselves.
       - name: Delete the scratch branch
-        if: success() && github.event_name == 'push' && startsWith(github.ref, 'refs/heads/assets/')
-        run: git push origin --delete "$GITHUB_REF_NAME"
+        # Cloud sessions can't delete branches, so the run does. The pins stay in this check
+        # run's annotations. After a failed run the branch stays, so the entry can be fixed and
+        # pushed there again. The lease leaves a branch alone that got a newer commit while this
+        # ran; that commit's own run deletes it. (From the Failing PR checks thread's #50.)
+        if: success() && startsWith(github.ref, 'refs/heads/assets/')
+        run: |
+          git push origin --delete --force-with-lease="$GITHUB_REF:$GITHUB_SHA" "$GITHUB_REF" ||
+            echo "::notice::Left $GITHUB_REF_NAME in place: it is gone already or has newer commits."
