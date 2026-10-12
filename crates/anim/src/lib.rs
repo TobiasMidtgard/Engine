@@ -8,6 +8,7 @@ pub mod demo;
 pub mod events;
 pub mod graph;
 pub mod ik;
+pub mod import;
 pub mod muscle;
 pub mod procedural;
 pub mod skeleton;

@@ -21,6 +21,7 @@ use std::sync::Arc;
 use engine_assets::{Asset, Assets, Handle};
 use engine_core::math::Aabb;
 use engine_core::prelude::*;
+use engine_render::StandardMaterial;
 
 use crate::animator::Animator;
 use crate::muscle::MorphWeights;
@@ -89,6 +90,19 @@ pub struct SkinnedMesh {
     /// Mesh space → joint space at bind time, per joint.
     pub inverse_bind: Vec<Mat4>,
     pub morph_targets: Vec<MorphTarget>,
+    /// Index ranges drawn with their own surface (see [`SkinnedMeshRenderer::surfaces`]).
+    /// Empty: the whole mesh is one surface.
+    pub submeshes: Vec<Submesh>,
+}
+
+/// A range of a mesh's triangles drawn with one textured surface.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Submesh {
+    /// First index into [`SkinnedMesh::indices`].
+    pub first_index: u32,
+    pub index_count: u32,
+    /// Index into [`SkinnedMeshRenderer::surfaces`].
+    pub surface: usize,
 }
 
 impl Asset for SkinnedMesh {}
@@ -208,6 +222,10 @@ impl Default for SkinMaterial {
 pub struct SkinnedMeshRenderer {
     pub mesh: Option<Handle<SkinnedMesh>>,
     pub material: SkinMaterial,
+    /// Textured surfaces for the mesh's [`Submesh`]es (imported characters): base color,
+    /// normal and metallic-roughness textures, alpha cutouts. The procedural detail of
+    /// `material` (cloth folds, veins, flush) still applies on top, by the vertex mask.
+    pub surfaces: Vec<StandardMaterial>,
     pub cast_shadows: bool,
     pub visible: bool,
     /// Beyond this distance from the camera, skip morphs and cloth tension, meters.
@@ -219,6 +237,7 @@ impl Default for SkinnedMeshRenderer {
         Self {
             mesh: None,
             material: SkinMaterial::default(),
+            surfaces: Vec::new(),
             cast_shadows: true,
             visible: true,
             detail_distance: 45.0,
