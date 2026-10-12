@@ -7,8 +7,9 @@
 // camera's motion and the depth for everything else, taken from the nearest surface in the
 // neighborhood so silhouettes reproject cleanly), samples the history there with a Catmull-Rom
 // filter, clips it to the color range of the neighborhood (no ghosting when things change) and
-// blends. Colors are compared in a compressed space (c / (1 + luma)) so very bright pixels don't
-// flicker.
+// blends. The color box is built in a compressed space (c / (1 + luma)) so very bright pixels
+// don't blow it open, while filtering and blending stay linear so small bright things (the
+// sun's disk, a lamp's core) keep their energy and still bloom.
 
 struct TaaParams {
     // x: history valid (0/1), y: frames accumulated since the last reset, z: minimum weight of
@@ -131,13 +132,13 @@ fn fs_taa(in: FullscreenOut) -> @location(0) vec4<f32> {
         for (var x = -1; x <= 1; x++) {
             let o = vec2<i32>(x, y);
             let q = clamp(px + o, vec2<i32>(0), size - 1);
-            let c = compress(load_current(q, size));
+            let c = load_current(q, size);
             // The sample in pixel q was taken at q's center minus the jitter.
             let d = vec2<f32>(o) - jitter;
             let w = exp(-2.29 * dot(d, d));
             filtered += c * w;
             filter_weight += w;
-            let ycc = rgb_to_ycocg(c);
+            let ycc = rgb_to_ycocg(compress(c));
             m1 += ycc;
             m2 += ycc * ycc;
             let z = textureLoad(depth_tex, q, 0);
@@ -149,18 +150,23 @@ fn fs_taa(in: FullscreenOut) -> @location(0) vec4<f32> {
     }
     filtered /= filter_weight;
     if (taa.params.x < 0.5) {
-        return vec4<f32>(decompress(filtered), 1.0);
+        return vec4<f32>(filtered, 1.0);
     }
     let motion = pixel_motion(nearest, size);
     let history_uv = uv - motion;
     if (any(history_uv < vec2<f32>(0.0)) || any(history_uv > vec2<f32>(1.0))) {
-        return vec4<f32>(decompress(filtered), 1.0);
+        return vec4<f32>(filtered, 1.0);
     }
     let mean = m1 / 9.0;
     let sigma = sqrt(max(m2 / 9.0 - mean * mean, vec3<f32>(0.0)));
     let gamma = 1.25;
+    // The box can't hold the current sample if that is an outlier (a sub-pixel highlight):
+    // widen it to include the filtered value.
+    let current = rgb_to_ycocg(compress(filtered));
+    let lo = min(mean - gamma * sigma, current);
+    let hi = max(mean + gamma * sigma, current);
     let history = rgb_to_ycocg(compress(sample_history(history_uv, sizef)));
-    let clipped = ycocg_to_rgb(clip_to_box(history, mean - gamma * sigma, mean + gamma * sigma));
+    let clipped = decompress(ycocg_to_rgb(clip_to_box(history, lo, hi)));
 
     // Accumulate quickly after a reset, then keep a tenth of the current frame. Fast motion
     // keeps a little more of the current frame so moving things stay sharp.
@@ -169,5 +175,5 @@ fn fs_taa(in: FullscreenOut) -> @location(0) vec4<f32> {
     var alpha = max(1.0 / (frames + 1.0), taa.params.z);
     alpha = mix(alpha, max(alpha, 0.25), saturate(speed / 32.0));
     let result = mix(clipped, filtered, alpha);
-    return vec4<f32>(decompress(max(result, vec3<f32>(0.0))), 1.0);
+    return vec4<f32>(max(result, vec3<f32>(0.0)), 1.0);
 }
