@@ -39,7 +39,6 @@ pub fn wheel_events_system(
     let g = 9.81;
     for (entity, mut wheels, forces) in &mut q {
         let dt = forces.frame.dt;
-        let yaw_of = |dir: Vec3| (-dir.z).atan2(dir.x);
         let rotation = forces.frame.rotation;
         for w in &mut wheels.wheels {
             let width = w.width;
@@ -58,7 +57,7 @@ pub fn wheel_events_system(
                     position: st.contact_point,
                     normal: st.contact_normal,
                     size: [width, (radius * 0.35).max(0.08)],
-                    yaw: yaw_of(dir),
+                    yaw: GroundContact::yaw_of(dir),
                     load_kg: st.load_n / g,
                     speed: st.ground_speed,
                     kind: ContactKind::Wheel,

@@ -1,9 +1,13 @@
 // Terrain patches (engine_terrain). Requires lib_types + lib_frame.
 //
-// Ground color comes from climate (moisture, temperature, altitude, slope) and painted
-// layers; weather adds wetness, puddles with rain ripples, mud and snow from the surface
-// layers grid; footprints and tracks come from the deformation grid (8 cm cells) as normals,
-// occlusion and, on fine patches, a small vertex offset. Open sea is shaded as water.
+// Which ground is where comes from climate (moisture, temperature, altitude, slope) and
+// painted layers; each ground material (grass, forest floor, soil, rock, sand, gravel,
+// concrete) is a baked texture (materials.rs) whose detail multiplies the planet palette's
+// color, blended by height so stones and blades poke through their neighbors. Rock is
+// projected on three axes at two scales. Weather adds snow and mud that fill the low spots
+// first, wetness, puddles with rain ripples; footprints and tracks come from the
+// deformation grid as normals, occlusion and, on fine patches, a small vertex offset. Open
+// sea is shaded as water.
 
 // Must match `PlanetGpu` in render.rs.
 struct PlanetGpu {
@@ -38,6 +42,28 @@ const C_CONCRETE: u32 = 9u;
 @group(1) @binding(3) var surface_tex: texture_2d<f32>;  // wetness, puddle depth (m), snow depth (m), scorch
 @group(1) @binding(4) var map_sampler: sampler;
 
+// Must match `MaterialsGpu` in render.rs.
+struct Materials {
+    info: array<vec4<f32>, 18>,  // per material: (mean albedo, tile m), (mean roughness, mean occlusion, height m, 0)
+    flags: vec4<f32>,            // textures ready
+};
+@group(1) @binding(5) var<uniform> mats: Materials;
+@group(1) @binding(6) var mat_albedo: texture_2d_array<f32>;  // sRGB albedo, height in alpha
+@group(1) @binding(7) var mat_normal: texture_2d_array<f32>;  // normal xy, roughness, occlusion
+@group(1) @binding(8) var mat_sampler: sampler;
+
+// Ground materials (`materials::GroundMaterial`).
+const M_GRASS: u32 = 0u;
+const M_FOREST: u32 = 1u;
+const M_SOIL: u32 = 2u;
+const M_MUD: u32 = 3u;
+const M_ROCK: u32 = 4u;
+const M_SNOW: u32 = 5u;
+const M_SAND: u32 = 6u;
+const M_GRAVEL: u32 = 7u;
+const M_CONCRETE: u32 = 8u;
+const MAT_COUNT: u32 = 9u;
+
 struct VertexIn {
     @location(0) position: vec3<f32>,
     @location(1) normal: vec4<f32>,
@@ -47,6 +73,7 @@ struct VertexIn {
     @location(5) origin: vec3<f32>,
     @location(6) planet: u32,
     @location(7) lod: vec4<f32>,       // vertex spacing (m), level
+    @location(8) tint: vec4<f32>,      // hand-made ground tint: sqrt(color), amount
 };
 
 struct VertexOut {
@@ -57,8 +84,12 @@ struct VertexOut {
     @location(3) climate: vec4<f32>,      // moisture, temperature °C, mare, altitude (m)
     @location(4) ocean_paint: vec4<f32>,  // ocean flag, paint weight, regional variety, local patches (0..1)
     @location(5) @interpolate(flat) ids: vec2<u32>,  // planet, paint layer
-    @location(6) lod: vec2<f32>,
+    @location(6) lod: vec4<f32>,          // vertex spacing (m), level, convexity (-1 gully .. +1 crest)
+    @location(7) tint: vec4<f32>,         // linear color, amount
 };
+
+// Geomorph offsets are stored in vertex spacings (`chunk::MORPH_RANGE`).
+const MORPH_RANGE: f32 = 16.0;
 
 fn planet_rot(p: PlanetGpu) -> mat3x3<f32> {
     return mat3x3<f32>(p.rot[0].xyz, p.rot[1].xyz, p.rot[2].xyz);
@@ -120,8 +151,14 @@ fn vs_main(in: VertexIn) -> VertexOut {
     let rot = planet_rot(planet);
     var rel = in.origin + rot * in.position;
     let up = planet_up(planet, rel);
+    // Geomorph toward the parent patch's shape as it nears the distance where it takes over.
+    if (in.lod.w > 0.0) {
+        let k = smoothstep(in.lod.z, in.lod.w, length(rel));
+        rel += up * (in.normal.w * in.lod.x * MORPH_RANGE * k);
+    }
     let flags = u32(round(in.climate.w * 255.0));
     let ocean = select(0.0, 1.0, (flags & 2u) != 0u);
+    let convex = f32(flags >> 2u) / 63.0 * 2.0 - 1.0;
 
     // Prints and tracks lower fine patches a little (shading carries the detail).
     if (maps.flags.x > 0.5 && in.lod.x < 1.5 && ocean < 0.5) {
@@ -142,10 +179,12 @@ fn vs_main(in: VertexIn) -> VertexOut {
     out.climate = vec4<f32>(in.climate.x, in.climate.y * 120.0 - 60.0, in.climate.z, in.altitude);
     out.ocean_paint = vec4<f32>(ocean, vec3<f32>(in.paint.yzw) / 255.0);
     out.ids = vec2<u32>(in.planet, in.paint.x);
-    out.lod = in.lod.xy;
+    out.lod = vec4<f32>(in.lod.xy, convex, 0.0);
+    out.tint = vec4<f32>(in.tint.rgb * in.tint.rgb, in.tint.a);
     out.clip = frame.view_proj * vec4<f32>(rel, 1.0);
     return out;
 }
+
 
 // Bump the normal by a scalar height field `h` using screen-space derivatives
 // (Mikkelsen, "Bump Mapping Unparametrized Surfaces on the GPU", 2010).
@@ -159,6 +198,21 @@ fn bump(n: vec3<f32>, dp1: vec3<f32>, dp2: vec3<f32>, dh1: f32, dh2: f32) -> vec
     return select(n, b / len, len > 1e-12);
 }
 
+// Painted layer -> ground material.
+fn paint_material(layer: u32) -> u32 {
+    switch (layer) {
+        case 1u: { return M_MUD; }
+        case 2u: { return M_SNOW; }
+        case 3u: { return M_SAND; }
+        case 5u: { return M_GRASS; }
+        case 6u: { return M_ROCK; }
+        case 7u: { return M_CONCRETE; }
+        case 9u: { return M_GRAVEL; }
+        case 10u: { return M_FOREST; }
+        default: { return M_SOIL; }
+    }
+}
+
 fn paint_color(p: PlanetGpu, layer: u32) -> vec3<f32> {
     switch (layer) {
         case 1u: { return p.colors[C_MUD].rgb; }
@@ -169,6 +223,8 @@ fn paint_color(p: PlanetGpu, layer: u32) -> vec3<f32> {
         case 6u: { return p.colors[C_ROCK].rgb; }
         case 7u: { return p.colors[C_CONCRETE].rgb; }
         case 8u: { return vec3<f32>(0.03, 0.028, 0.027); }
+        case 9u: { return mix(p.colors[C_ROCK].rgb, p.colors[C_SOIL].rgb, 0.35); }
+        case 10u: { return p.colors[C_SOIL].rgb * vec3<f32>(0.8, 0.75, 0.7); }
         default: { return p.colors[C_SOIL].rgb; }
     }
 }
@@ -177,6 +233,7 @@ fn paint_color(p: PlanetGpu, layer: u32) -> vec3<f32> {
 fn paint_porosity(layer: u32) -> f32 {
     switch (layer) {
         case 6u, 7u: { return 0.35; }
+        case 9u: { return 0.5; }
         case 2u: { return 0.0; }
         default: { return 1.0; }
     }
@@ -205,11 +262,175 @@ fn rain_ripples(p: vec2<f32>, t: f32, rate: f32) -> f32 {
     return h;
 }
 
+// ---------------------------------------------------------------- ground materials
+
+// One material's look at a pixel: albedo detail (texel / mean, multiplied into the palette
+// color), height 0..1 for blending, world normal, roughness and occlusion.
+struct MatSample {
+    detail: vec3<f32>,
+    height: f32,
+    normal: vec3<f32>,
+    roughness: f32,
+    occlusion: f32,
+};
+
+fn mat_tile(i: u32) -> f32 {
+    return mats.info[i * 2u].w;
+}
+
+// The material's averages: what it looks like once its texture is too small to see.
+fn mat_mean(i: u32, n: vec3<f32>) -> MatSample {
+    let b = mats.info[i * 2u + 1u];
+    return MatSample(vec3<f32>(1.0), 0.5, n, b.x, b.y);
+}
+
+struct Texels {
+    albedo: vec4<f32>,
+    normal: vec4<f32>,
+};
+
+// Two lookups at offsets picked by a slow noise, switched where the noise steps, so the tile
+// never visibly repeats (Quilez, "texture repetition", technique 3). The taller texel wins
+// near a switch. `uv` is in tiles; `period` is how many tiles the 4096 m camera tile holds.
+fn mat_fetch(i: u32, uv: vec2<f32>, gx: vec2<f32>, gy: vec2<f32>, period: f32) -> Texels {
+    let k = pnoise3(vec3<f32>(uv * 0.25, f32(i) * 7.31), period * 0.25) * 8.0;
+    let ia = floor(k);
+    let f = fract(k);
+    let oa = sin(vec2<f32>(3.0, 7.0) * ia);
+    let ob = sin(vec2<f32>(3.0, 7.0) * (ia + 1.0));
+    let a0 = textureSampleGrad(mat_albedo, mat_sampler, uv + oa, i, gx, gy);
+    let b0 = textureSampleGrad(mat_albedo, mat_sampler, uv + ob, i, gx, gy);
+    let a1 = textureSampleGrad(mat_normal, mat_sampler, uv + oa, i, gx, gy);
+    let b1 = textureSampleGrad(mat_normal, mat_sampler, uv + ob, i, gx, gy);
+    let t = smoothstep(0.2, 0.8, f + (b0.a - a0.a) * 0.8);
+    return Texels(mix(a0, b0, t), mix(a1, b1, t));
+}
+
+fn unpack_tn(t: vec4<f32>) -> vec3<f32> {
+    let xy = t.xy * 2.0 - 1.0;
+    return vec3<f32>(xy, sqrt(saturate(1.0 - dot(xy, xy))));
+}
+
+// How much of a material's texture is still visible for a pixel covering `pixel` meters.
+fn mat_fade(tile: f32, pixel: f32) -> f32 {
+    return 1.0 - smoothstep(tile * 0.06, tile * 0.25, pixel);
+}
+
+fn finish_sample(i: u32, tx: Texels, n_detail: vec3<f32>, n: vec3<f32>, fade: f32) -> MatSample {
+    let mean = mats.info[i * 2u].rgb;
+    let avg = mats.info[i * 2u + 1u];
+    var m: MatSample;
+    m.detail = mix(vec3<f32>(1.0), tx.albedo.rgb / max(mean, vec3<f32>(1e-3)), fade);
+    m.height = mix(0.5, tx.albedo.a, fade);
+    m.normal = normalize(mix(n, n_detail, fade));
+    m.roughness = mix(avg.x, tx.normal.z, fade);
+    m.occlusion = mix(avg.y, tx.normal.w, fade);
+    return m;
+}
+
+// Ground material projected straight down (x → world X, y → world Z), whiteout-blended
+// onto the surface normal.
+fn sample_planar(i: u32, tp: vec3<f32>, n: vec3<f32>, dp1: vec3<f32>, dp2: vec3<f32>, pixel: f32) -> MatSample {
+    let tile = mat_tile(i);
+    let fade = mat_fade(tile, pixel) * mats.flags.x;
+    if (fade <= 0.0) {
+        return mat_mean(i, n);
+    }
+    let tx = mat_fetch(i, tp.xz / tile, dp1.xz / tile, dp2.xz / tile, 4096.0 / tile);
+    let tn = unpack_tn(tx.normal);
+    let nd = normalize(vec3<f32>(tn.x + n.x, n.y * tn.z, tn.y + n.z));
+    return finish_sample(i, tx, nd, n, fade);
+}
+
+// Ground material projected along all three axes, weighted by the normal (Golus,
+// "Normal Mapping for a Triplanar Shader", whiteout blend), at `scale` × its tile size.
+fn sample_triplanar(i: u32, tp: vec3<f32>, n: vec3<f32>, dp1: vec3<f32>, dp2: vec3<f32>, pixel: f32, scale: f32) -> MatSample {
+    let tile = mat_tile(i) * scale;
+    let fade = mat_fade(tile, pixel) * mats.flags.x;
+    if (fade <= 0.0) {
+        return mat_mean(i, n);
+    }
+    var w = pow(abs(n), vec3<f32>(4.0));
+    w /= (w.x + w.y + w.z);
+    let sg = select(vec3<f32>(-1.0), vec3<f32>(1.0), n >= vec3<f32>(0.0));
+    let period = 4096.0 / tile;
+    var albedo = vec4<f32>(0.0);
+    var packed = vec4<f32>(0.0);
+    var nd = vec3<f32>(0.0);
+    var wsum = 0.0;
+    if (w.x > 0.02) {
+        let flip = vec2<f32>(sg.x, 1.0);
+        let tx = mat_fetch(i, tp.zy / tile * flip, dp1.zy / tile * flip, dp2.zy / tile * flip, period);
+        var tn = unpack_tn(tx.normal);
+        tn.x *= sg.x;
+        nd += vec3<f32>(n.x * tn.z, tn.y + n.y, tn.x + n.z) * w.x;
+        albedo += tx.albedo * w.x;
+        packed += tx.normal * w.x;
+        wsum += w.x;
+    }
+    if (w.y > 0.02) {
+        let flip = vec2<f32>(sg.y, 1.0);
+        let tx = mat_fetch(i, tp.xz / tile * flip, dp1.xz / tile * flip, dp2.xz / tile * flip, period);
+        var tn = unpack_tn(tx.normal);
+        tn.x *= sg.y;
+        nd += vec3<f32>(tn.x + n.x, n.y * tn.z, tn.y + n.z) * w.y;
+        albedo += tx.albedo * w.y;
+        packed += tx.normal * w.y;
+        wsum += w.y;
+    }
+    if (w.z > 0.02) {
+        let flip = vec2<f32>(-sg.z, 1.0);
+        let tx = mat_fetch(i, tp.xy / tile * flip, dp1.xy / tile * flip, dp2.xy / tile * flip, period);
+        var tn = unpack_tn(tx.normal);
+        tn.x *= -sg.z;
+        nd += vec3<f32>(tn.x + n.x, tn.y + n.y, n.z * tn.z) * w.z;
+        albedo += tx.albedo * w.z;
+        packed += tx.normal * w.z;
+        wsum += w.z;
+    }
+    let inv = 1.0 / max(wsum, 1e-4);
+    return finish_sample(i, Texels(albedo * inv, packed * inv), normalize(nd), n, fade);
+}
+
+// Rock at three scales: faces and buttresses at 64× the tile for mountainsides kilometers
+// away (skipped up close, where the terrain's own shape takes over), blocks at 8×, then the
+// close-up texture.
+fn sample_rock(tp: vec3<f32>, n: vec3<f32>, dp1: vec3<f32>, dp2: vec3<f32>, pixel: f32) -> MatSample {
+    var huge = mat_mean(M_ROCK, n);
+    if (pixel > 0.1) {
+        huge = sample_triplanar(M_ROCK, tp, n, dp1, dp2, pixel, 64.0);
+        let keep = smoothstep(0.1, 0.5, pixel);
+        huge.normal = normalize(mix(n, huge.normal, keep));
+        huge.detail = mix(vec3<f32>(1.0), huge.detail, keep);
+    }
+    let big = sample_triplanar(M_ROCK, tp, huge.normal, dp1, dp2, pixel, 8.0);
+    let near = sample_triplanar(M_ROCK, tp, big.normal, dp1, dp2, pixel, 1.0);
+    let mean_occl = max(mats.info[M_ROCK * 2u + 1u].y, 0.3);
+    var m = near;
+    m.detail = sqrt(huge.detail * big.detail) * near.detail;
+    m.height = mix(big.height, near.height, 0.6);
+    m.occlusion = big.occlusion * near.occlusion / mean_occl;
+    return m;
+}
+
+fn sample_ground(i: u32, tp: vec3<f32>, n: vec3<f32>, dp1: vec3<f32>, dp2: vec3<f32>, pixel: f32) -> MatSample {
+    if (i == M_ROCK) {
+        return sample_rock(tp, n, dp1, dp2, pixel);
+    }
+    return sample_planar(i, tp, n, dp1, dp2, pixel);
+}
+
+// Cover `height` (0..1) with a layer of the given amount (0..1): low spots fill first, high
+// ones last.
+fn fill_low(amount: f32, height: f32) -> f32 {
+    return smoothstep(height - 0.12, height + 0.12, amount * 1.5 - 0.25);
+}
+
 @fragment
 fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     let planet = planets[in.ids.x];
     let up = normalize(in.up);
-    var n = normalize(in.normal);
+    let n_geo = normalize(in.normal);
     let moisture = in.climate.x;
     let temp_c = in.climate.y;
     let mare = in.climate.z;
@@ -220,20 +441,28 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     let layer = in.ids.y;
     let tp = tiling_pos(in.rel);
     let dist = length(in.rel);
+    // Ridge outlines: where a crest hides the slope behind it, a sliver of that back slope
+    // thinner than a pixel still fills whole pixels (there is no anti-aliasing). Its normal,
+    // turned from the eye and often from the sun, drew a dark line along every ridge. Such
+    // pixels stand for the crest around them, so they are shaded as level ground.
+    let to_eye = in.rel / -max(dist, 1e-6);
+    let ndv = dot(n_geo, to_eye);
 
     // Screen derivatives up front (uniform control flow).
     let dp1 = dpdx(in.rel);
     let dp2 = dpdy(in.rel);
     let pixel = max(length(dp1), length(dp2));
+    // (A sliver: seen edge-on, turned away, and a whole triangle within a pixel or two.)
+    let sliver = (1.0 - smoothstep(0.03, 0.15, ndv)) * saturate((dot(up, to_eye) - ndv) * 8.0)
+        * smoothstep(0.1, 0.4, pixel / max(in.lod.x, 1e-3));
     // Capped so far-off lowland at grazing angles never blends toward sea.
     let alt_width = clamp(fwidth(altitude), 1e-3, 2.0);
     let detail_n = tile_fbm(tp, 1.0, 4);
     let detail_f = pnoise3(tp * 8.0, 4096.0 * 8.0);
     let macro_v = tile_fbm(tp, 1.0 / 64.0, 3);
+    let mid_v = tile_fbm(tp, 1.0 / 8.0, 3);
+    let patch_v = tile_fbm(tp, 1.0 / 32.0, 3);
     let meadow_v = tile_fbm(tp, 1.0 / 512.0, 3);
-    let bump_h = detail_n * 0.25 + detail_f * 0.03;
-    let dh1 = dpdx(bump_h);
-    let dh2 = dpdy(bump_h);
     let wave_t = frame.time.x;
     let wave_h = pnoise3(vec3<f32>(tp.x * 0.25, wave_t * 0.25, tp.z * 0.25), 1024.0) * 0.6
         + pnoise3(vec3<f32>(tp.x * 2.0 + 11.0, wave_t * 0.6, tp.z * 2.0), 8192.0) * 0.15;
@@ -270,53 +499,141 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     let fine_fade = 1.0 - smoothstep(0.3, 3.0, pixel);
     let macro_fade = 1.0 - smoothstep(20.0, 200.0, pixel);
 
-    // ---- Natural ground from climate.
-    let slope = 1.0 - saturate(dot(n, up));
+    // ---- Which ground is here: a palette color and a weight per material.
+    let slope = 1.0 - saturate(dot(n_geo, up));
     let vegetation = planet.params.z;
+    let veg = vegetation * smoothstep(-8.0, 6.0, temp_c);
     let meadow_fade = 1.0 - smoothstep(40.0, 400.0, pixel);
+    // Ridge crests and gullies at the patch's vertex scale: crests are wind-blown, dry and
+    // rocky; water, soil, trees and snow collect in gullies. Landforms only: fine patches
+    // (craters, trenches, small bumps) keep their ground.
+    let convex = in.lod.z * smoothstep(2.0, 8.0, in.lod.x);
+    let crest = smoothstep(0.2, 0.7, convex);
+    let gully = smoothstep(0.15, 0.6, -convex);
     let wet_bias = (macro_v - 0.5) * 0.35 * macro_fade + (meadow_v - 0.5) * 0.45 * meadow_fade
-        + (variety - 0.5) * 0.5 + (patches - 0.5) * 0.5;
-    var albedo = mix(planet.colors[C_DRY].rgb, planet.colors[C_LUSH].rgb, smoothstep(0.2, 0.7, moisture + wet_bias));
-    albedo = mix(planet.colors[C_SOIL].rgb, albedo, vegetation * smoothstep(-8.0, 6.0, temp_c));
-    // Meadows and hay fields: sunlit dry patches between the woods.
+        + (variety - 0.5) * 0.5 + (patches - 0.5) * 0.5 + gully * 0.25 - crest * 0.2;
+    var col: array<vec3<f32>, 9>;
+    var w: array<f32, 9>;
+    for (var i = 0u; i < MAT_COUNT; i++) {
+        col[i] = vec3<f32>(0.5);
+        w[i] = 0.0;
+    }
+    // Grass: lush to dry by moisture, with sunlit meadows and hay fields between the woods.
+    var grass = mix(planet.colors[C_DRY].rgb, planet.colors[C_LUSH].rgb, smoothstep(0.2, 0.7, moisture + wet_bias));
     let field = vegetation * smoothstep(0.56, 0.64, patches + (variety - 0.5) * 0.2) * smoothstep(4.0, 12.0, temp_c);
-    albedo = mix(albedo, mix(planet.colors[C_DRY].rgb, planet.colors[C_LUSH].rgb, 0.45), field * 0.35);
-    // Woods: dark canopy from afar, a darker forest floor up close (the foliage module draws
-    // the trees themselves).
+    grass = mix(grass, mix(planet.colors[C_DRY].rgb, planet.colors[C_LUSH].rgb, 0.45), field * 0.35);
+    // Clumps a few meters across: drier, yellower tufts next to dark, dense ones.
+    let clump_fade = 1.0 - smoothstep(1.0, 12.0, pixel);
+    let clump = (mid_v - 0.5) * 2.0 * clump_fade;
+    grass = mix(grass, planet.colors[C_DRY].rgb * 1.1, saturate(clump) * 0.6);
+    grass *= 1.0 - saturate(-clump) * 0.4;
+    let worn = smoothstep(0.72, 0.84, patch_v + (patches - 0.5) * 0.3);
+    grass = mix(grass, planet.colors[C_DRY].rgb, worn * 0.3 * smoothstep(0.1, 0.5, pixel));
+    col[M_GRASS] = grass;
+    // Bare ground (cold, barren, regolith) and dark maria.
+    col[M_SOIL] = mix(planet.colors[C_SOIL].rgb, planet.colors[C_DARK].rgb, mare);
+    // Woods: the forest floor up close, dark canopy from afar (the foliage module draws the
+    // trees themselves).
+    let forest_edge = (mid_v - 0.5) * 0.08 * clump_fade + (patch_v - 0.5) * 0.06;
     let forest = vegetation
-        * smoothstep(0.42, 0.5, moisture * 0.6 + (0.5 - patches) * 0.9 + (variety - 0.5) * 0.4)
+        * smoothstep(0.40, 0.52, moisture * 0.6 + (0.5 - patches) * 0.9 + (variety - 0.5) * 0.4 + forest_edge + gully * 0.12 - crest * 0.12)
         * smoothstep(-6.0, 4.0, temp_c)
         * (1.0 - smoothstep(1800.0, 2600.0, altitude + (variety - 0.5) * 600.0));
-    let canopy = mix(0.35, 0.85, smoothstep(500.0, 2500.0, dist));
-    albedo = mix(albedo, planet.colors[C_LUSH].rgb * vec3<f32>(0.45, 0.55, 0.45), forest * canopy);
-    // Beaches and dry deserts.
+    // From a couple of hundred meters the canopy (the foliage module draws trees near the camera,
+    // and bare leaf litter there read as a brown hole in the land). Up close: ferns and grass
+    // with patches of litter between them.
+    let canopy = smoothstep(15.0, 90.0, dist);
+    let undergrowth = planet.colors[C_LUSH].rgb * vec3<f32>(0.6, 0.7, 0.55);
+    let litter = mix(planet.colors[C_SOIL].rgb * vec3<f32>(0.75, 0.72, 0.65), undergrowth, 0.3);
+    let forest_floor = mix(undergrowth, litter, smoothstep(0.6, 0.8, patch_v));
+    col[M_FOREST] = mix(forest_floor, planet.colors[C_LUSH].rgb * vec3<f32>(0.45, 0.55, 0.45), canopy);
+    // Beaches and deserts.
     let beach = vegetation * (1.0 - smoothstep(1.5, 5.0, altitude)) * step(-1.0, altitude);
     let desert = vegetation * (1.0 - smoothstep(0.08, 0.22, moisture + (variety - 0.5) * 0.1)) * smoothstep(12.0, 22.0, temp_c);
-    albedo = mix(albedo, planet.colors[C_SAND].rgb, saturate(beach + desert));
-    // Moon maria and dark basalt.
-    albedo = mix(albedo, planet.colors[C_DARK].rgb, mare);
-    // Rock on steep ground and bare alpine heights.
-    // Coarse patches average slopes out: lower the thresholds so cliffs still read as rock.
+    let sandy = saturate(beach + desert);
+    col[M_SAND] = planet.colors[C_SAND].rgb;
+    // Rock on steep ground and bare alpine heights; scree below it. Coarse patches average
+    // slopes out, so their thresholds are lower.
     let rock_slope = planet.params.y * (1.0 - 0.45 * smoothstep(4.0, 150.0, in.lod.x));
     let alpine = smoothstep(2100.0, 3000.0, altitude + (variety - 0.5) * 800.0) * vegetation;
-    let rock = saturate(smoothstep(rock_slope - 0.08, rock_slope + 0.05, slope + (detail_n - 0.5) * 0.12 * fine_fade) + alpine * 0.8);
-    albedo = mix(albedo, planet.colors[C_ROCK].rgb * (0.85 + 0.3 * variety), rock);
-    // Small-scale variation.
-    albedo *= mix(1.0, 0.82 + 0.36 * detail_f, fine_fade) * mix(1.0, 0.88 + 0.24 * macro_v, macro_fade);
+    // Sharp crests are bare rock even where their top is level, and mountain crests are stony;
+    // rounded hills stay green.
+    let sharp = smoothstep(0.5, 0.85, convex);
+    let stony_crest = smoothstep(0.3, 0.6, convex) * smoothstep(600.0, 1400.0, altitude + (variety - 0.5) * 400.0);
+    let rock = saturate(smoothstep(rock_slope - 0.08, rock_slope + 0.05, slope + (detail_n - 0.5) * 0.12 * fine_fade) + alpine * 0.8 + sharp * 0.8);
+    let rock_col = mix(planet.colors[C_ROCK].rgb * (0.85 + 0.3 * variety), planet.colors[C_DARK].rgb, mare);
+    // Layered rock: bands along altitude, warped so they bend with the land, at 37 m and 10 m.
+    let strata_h = altitude + (macro_v - 0.5) * 60.0 * macro_fade + (mid_v - 0.5) * 6.0 * clump_fade;
+    let strata = sin(strata_h * 0.17) * 0.6 * (1.0 - smoothstep(4.0, 16.0, pixel))
+        + sin(strata_h * 0.61 + 1.3) * 0.4 * (1.0 - smoothstep(1.0, 4.0, pixel));
+    col[M_ROCK] = rock_col * (1.0 + strata * 0.1);
+    let scree = (1.0 - rock) * saturate(smoothstep(rock_slope - 0.14, rock_slope - 0.04, slope) * 0.7 + alpine * 0.6 + stony_crest * 0.9);
+    col[M_GRAVEL] = mix(rock_col, planet.colors[C_SOIL].rgb, 0.35);
+    col[M_CONCRETE] = planet.colors[C_CONCRETE].rgb;
+    col[M_MUD] = planet.colors[C_MUD].rgb;
+    col[M_SNOW] = planet.colors[C_SNOW].rgb;
 
-    // ---- Painted layers (mud, snow, sand, dirt, grass, rock, concrete, ash).
-    let paint_col = paint_color(planet, layer);
-    albedo = mix(albedo, paint_col * mix(1.0, 0.9 + 0.2 * detail_f, fine_fade), paint_w);
+    // Worn, bare patches in open grassland, near the camera only: from afar they read as spots,
+    // so there they are drier grass.
+    let bare_near = 1.0 - smoothstep(0.1, 0.5, pixel);
+    let bare_patch = worn * 0.8 * bare_near;
+    w[M_GRASS] = max(veg - forest, 0.0) * (1.0 - bare_patch);
+    w[M_FOREST] = min(forest, veg);
+    w[M_SOIL] = 1.0 - veg + max(veg - forest, 0.0) * bare_patch;
+    for (var i = 0u; i < MAT_COUNT; i++) { w[i] *= 1.0 - sandy; }
+    w[M_SAND] = sandy;
+    for (var i = 0u; i < MAT_COUNT; i++) { w[i] *= 1.0 - scree; }
+    w[M_GRAVEL] += scree;
+    for (var i = 0u; i < MAT_COUNT; i++) { w[i] *= 1.0 - rock; }
+    w[M_ROCK] += rock;
+    // Painted ground (snow and mud paint are overlays, below).
+    let painted = paint_material(layer);
+    let paint_base = select(paint_w, 0.0, painted == M_MUD || painted == M_SNOW);
+    for (var i = 0u; i < MAT_COUNT; i++) { w[i] *= 1.0 - paint_base; }
+    w[painted] += paint_base;
+    col[painted] = mix(col[painted], paint_color(planet, layer), paint_base);
+    // Hand-made ground's tint (fields, roads): its color with each material's texture detail.
+    if (in.tint.a > 0.001) {
+        for (var i = 0u; i < MAT_COUNT; i++) { col[i] = mix(col[i], in.tint.rgb, in.tint.a); }
+    }
+
+    // ---- Sample the materials present and blend them by height.
+    var ms: array<MatSample, 9>;
+    var hmax = -10.0;
+    for (var i = 0u; i < MAT_COUNT; i++) {
+        if (w[i] > 0.003) {
+            ms[i] = sample_ground(i, tp, n_geo, dp1, dp2, pixel);
+            hmax = max(hmax, ms[i].height + w[i]);
+        }
+    }
+    var albedo = vec3<f32>(0.0);
+    var nsum = vec3<f32>(0.0);
+    var roughness = 0.0;
+    var occlusion = 0.0;
+    var ground_h = 0.0;
+    var bsum = 0.0;
+    for (var i = 0u; i < MAT_COUNT; i++) {
+        if (w[i] > 0.003) {
+            let b = max(ms[i].height + w[i] - hmax + 0.3, 0.0);
+            albedo += col[i] * ms[i].detail * b;
+            nsum += ms[i].normal * b;
+            roughness += ms[i].roughness * b;
+            occlusion += ms[i].occlusion * b;
+            ground_h += ms[i].height * b;
+            bsum += b;
+        }
+    }
+    let inv_b = 1.0 / max(bsum, 1e-4);
+    albedo *= inv_b;
+    roughness *= inv_b;
+    occlusion *= inv_b;
+    ground_h *= inv_b;
+    var n = normalize(select(n_geo, nsum, bsum > 1e-4));
+    // Large-scale variation beyond the textures' reach.
+    albedo *= mix(1.0, 0.88 + 0.24 * macro_v, macro_fade);
     var porosity = mix(1.0 - rock * 0.6, paint_porosity(layer), paint_w);
-
-    var roughness = mix(0.92, 0.75, rock);
-    var occlusion = 1.0;
     var reflectance = 0.5;
     var subsurface = 0.0;
-
-    // ---- Detail bump (fades with distance).
-    let bump_fade = (1.0 - smoothstep(0.15, 1.2, pixel)) * (1.0 - ocean);
-    n = normalize(mix(n, bump(n, dp1, dp2, dh1, dh2), bump_fade * (0.6 + rock)));
 
     // ---- Footprints and tracks: normals from the print depth field, darker hollows.
     let cell = maps.deform.z;
@@ -325,51 +642,92 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     n = normalize(mix(n, print_n, print_fade));
     let hollow = saturate(depth * 6.0);
     occlusion *= 1.0 - hollow * 0.35 * print_fade;
+    // Under a low sun a print's near wall shades its floor, which is what makes shallow prints
+    // (sand) read as hollows rather than bumps. March the depth grid toward the sun: a cell whose
+    // surface rises above the sun ray hides this point. Surface has no direct-light-only input,
+    // so the shadow darkens the albedo by roughly the sun's share of the light.
+    let sun = frame.sun_dir.xyz;
+    let sun_flat = length(sun.xz);
+    if (depth > 0.002 && print_fade > 0.01 && sun.y > 0.0 && sun_flat > 1e-3) {
+        let step_uv = sun.xz / sun_flat * texel;
+        let rise = cell * sun.y / sun_flat;
+        var print_shadow = 0.0;
+        for (var k = 1; k <= 6; k++) {
+            let dk = textureSampleLevel(deform_tex, map_sampler, duv + step_uv * f32(k), 0.0).r;
+            print_shadow = max(print_shadow, saturate((depth - dk - rise * f32(k)) / 0.004));
+        }
+        albedo *= 1.0 - print_shadow * 0.6 * print_fade * saturate(sun.y * 5.0);
+    }
     let rim = saturate(-depth * 20.0);
     albedo *= 1.0 + rim * 0.06;
     // Trampled grass: flattened blades read slightly darker and yellower.
     albedo = mix(albedo, albedo * vec3<f32>(0.78, 0.82, 0.62), flattened * 0.7);
     roughness = mix(roughness, 0.7, flattened * 0.5);
 
-    // ---- Snow (cold climate, snowfall in the surface layers, painted snow).
+    // ---- Snow (cold climate, snowfall in the surface layers, painted snow). It settles on
+    // ledges and fills hollows first; steep faces stay bare.
+    let snow_slope = 1.0 - saturate(dot(n, up));
     let snow_line = planet.params.x;
-    let climate_snow = smoothstep(snow_line + 2.0, snow_line - 3.0, temp_c + (detail_n - 0.5) * 4.0 * fine_fade + (variety - 0.5) * 3.0 + (patches - 0.5) * 2.0)
-        * (1.0 - smoothstep(rock_slope - 0.02, rock_slope + 0.14, slope + (detail_n - 0.5) * 0.1 * fine_fade));
+    let climate_snow = smoothstep(snow_line + 2.0, snow_line - 3.0, temp_c + (detail_n - 0.5) * 4.0 * fine_fade + (variety - 0.5) * 3.0 + (patches - 0.5) * 2.0 + crest * 2.0 - gully * 3.0)
+        * (1.0 - smoothstep(rock_slope - 0.02, rock_slope + 0.14, snow_slope + (detail_n - 0.5) * 0.1 * fine_fade));
     let fallen = max(layers.z, select(0.0, frame.weather.y * 0.1, maps.flags.y < 0.5));
     let weather_snow = smoothstep(0.004, 0.04, fallen + (detail_f - 0.5) * 0.01 * fine_fade)
-        * (1.0 - smoothstep(0.55, 0.8, slope));
+        * (1.0 - smoothstep(0.55, 0.8, snow_slope));
     let painted_snow = select(0.0, paint_w, layer == 2u);
-    var snow = saturate(max(max(climate_snow, weather_snow), painted_snow)) * (1.0 - ocean);
-    // Deep prints in thin snow show the ground below.
-    let snow_depth = max(fallen, painted_snow * 0.25 + climate_snow * 0.5);
-    snow *= 1.0 - smoothstep(0.7, 1.0, depth / max(snow_depth, 1e-3)) * print_fade;
-    let packed = saturate(depth * 12.0) * print_fade;
-    let snow_col = planet.colors[C_SNOW].rgb * mix(1.0, 0.82, packed) * mix(vec3(1.0), vec3(0.93, 0.96, 1.0), packed);
-    albedo = mix(albedo, snow_col, snow);
-    roughness = mix(roughness, mix(0.6, 0.45, packed), snow);
-    subsurface = mix(subsurface, 0.35, snow);
+    let snow_amount = saturate(max(max(climate_snow, weather_snow), painted_snow)) * (1.0 - ocean);
+    var snow = 0.0;
+    if (snow_amount > 0.003) {
+        snow = fill_low(snow_amount, ground_h);
+        // Deep prints in thin snow show the ground below.
+        let snow_depth = max(fallen, painted_snow * 0.25 + climate_snow * 0.5);
+        snow *= 1.0 - smoothstep(0.7, 1.0, depth / max(snow_depth, 1e-3)) * print_fade;
+        // A blanket of snow softens the shapes under it.
+        let soft = normalize(mix(n, n_geo, 0.6 * snow));
+        let sm = sample_planar(M_SNOW, tp, soft, dp1, dp2, pixel);
+        let packed = saturate(depth * 12.0) * print_fade;
+        let snow_col = col[M_SNOW] * sm.detail * mix(1.0, 0.82, packed) * mix(vec3(1.0), vec3(0.93, 0.96, 1.0), packed);
+        albedo = mix(albedo, snow_col, snow);
+        n = normalize(mix(n, sm.normal, snow));
+        roughness = mix(roughness, mix(sm.roughness, 0.45, packed), snow);
+        occlusion = mix(occlusion, sm.occlusion, snow);
+        subsurface = mix(subsurface, 0.35, snow);
+        ground_h = mix(ground_h, 1.0, snow);
+    }
     porosity *= 1.0 - snow;
 
     // ---- Rain: wet ground darkens and gets glossy, soil turns to mud, water pools.
     let rain_wet = max(layers.x, select(0.0, frame.weather.x, maps.flags.y < 0.5));
     let wet = saturate(rain_wet) * porosity;
     // Bare soil turns to mud; grass stays grass (darker, with a sheen) unless it is trodden.
-    let natural_bare = 1.0 - vegetation * smoothstep(-8.0, 6.0, temp_c);
-    let painted_bare = select(0.0, 1.0, layer == 0u || layer == 1u || layer == 4u || layer == 8u);
+    let natural_bare = 1.0 - veg;
+    let painted_bare = select(0.0, 1.0, layer == 0u || layer == 1u || layer == 4u || layer == 8u || layer == 10u);
     let bare = mix(natural_bare, painted_bare, paint_w);
     let trodden = saturate(depth * 25.0) * print_fade + flattened * 0.6;
     let soil_like = (1.0 - rock) * saturate(bare + trodden);
-    let mud = saturate(max(select(0.0, paint_w, layer == 1u), wet * soil_like * smoothstep(0.55, 0.9, rain_wet) * 0.8)) * (1.0 - snow);
-    albedo = mix(albedo, planet.colors[C_MUD].rgb * mix(1.0, 0.85 + 0.3 * detail_f, fine_fade), mud * 0.85);
-    albedo *= mix(1.0, mix(0.72, 0.5, soil_like), wet);
-    roughness = mix(roughness, mix(0.55, 0.35, soil_like), wet * 0.8);
-    roughness = mix(roughness, 0.22, mud * saturate(rain_wet + 0.3));
+    let mud_amount = saturate(max(select(0.0, paint_w, layer == 1u), wet * soil_like * smoothstep(0.55, 0.9, rain_wet) * 0.8)) * (1.0 - snow);
+    var mud = 0.0;
+    if (mud_amount > 0.003) {
+        mud = fill_low(mud_amount, ground_h) * 0.9;
+        let mm = sample_planar(M_MUD, tp, n, dp1, dp2, pixel);
+        albedo = mix(albedo, col[M_MUD] * mm.detail * mix(1.0, 0.85 + 0.3 * detail_f, fine_fade), mud);
+        n = normalize(mix(n, mm.normal, mud));
+        roughness = mix(roughness, mm.roughness * mix(1.0, 0.5, saturate(rain_wet)), mud);
+        occlusion = mix(occlusion, mm.occlusion, mud);
+        ground_h = mix(ground_h, mm.height * 0.6, mud);
+    }
+    // Water darkens more in the hollows, where it collects.
+    let wet_here = wet * (1.0 + 0.4 * (0.5 - ground_h));
+    albedo *= mix(1.0, mix(0.72, 0.5, soil_like), saturate(wet_here));
+    roughness = mix(roughness, mix(0.55, 0.35, soil_like), saturate(wet_here) * 0.8);
 
-    // Puddles: from the surface layers, in low spots, and in prints on soaked ground.
+    // Puddles: from the surface layers, in prints on soaked ground, and in the low spots of
+    // soaked soil and mud.
     // Ragged puddle edges, only where the surface layers hold standing water.
     let puddle_level = select(-1.0, layers.y + (detail_n - 0.5) * 0.02, layers.y > 0.0005);
     let print_pool = smoothstep(0.015, 0.04, depth) * smoothstep(0.5, 0.85, rain_wet) * porosity;
-    let puddle = saturate(max(smoothstep(0.0, 0.015, puddle_level), print_pool)) * (1.0 - snow) * (1.0 - ocean);
+    let water_line = smoothstep(0.7, 1.0, rain_wet) * 0.2 * max(soil_like * 0.5, mud) * porosity;
+    let low_pool = smoothstep(water_line + 0.01, water_line - 0.04, ground_h) * step(0.01, water_line);
+    let puddle = saturate(max(max(smoothstep(0.0, 0.015, puddle_level), print_pool), low_pool)) * (1.0 - snow) * (1.0 - ocean);
     let ripple_n = bump(up, dp1, dp2, dr1, dr2);
     let still = normalize(mix(up, ripple_n, saturate(frame.weather.w * 0.2) * (1.0 - smoothstep(0.02, 0.2, pixel))));
     n = normalize(mix(n, still, puddle));
@@ -394,6 +752,12 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     reflectance = mix(reflectance, 0.354, ocean);
     occlusion = mix(occlusion, 1.0, ocean);
     subsurface = mix(subsurface, 0.0, ocean);
+
+    // Gullies get less sky.
+    occlusion *= 1.0 - gully * 0.25 * (1.0 - ocean);
+
+    // Sliver pixels show the level crest.
+    n = normalize(mix(n, up, sliver));
 
     // Debug views (RenderSettings.debug_view).
     if (frame.counts.z == 1u) {

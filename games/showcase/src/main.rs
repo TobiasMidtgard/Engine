@@ -5,7 +5,13 @@
 //! cargo run -p showcase --release                       # fly around (see camera.rs for keys)
 //! cargo run -p showcase --release -- --headless --tour  # writes screenshots/tour/*.png
 //! cargo run -p showcase --release -- --headless --tour plaza,orbit
+//! cargo run -p showcase --release -- --headless --film overview,plaza,falls --secs 6
+//! cargo run -p showcase --release -- --headless --film footsteps --follow "Trail hiker" --secs 60
 //! ```
+//!
+//! `--film` saves frames and sound for a video (see `film.rs`); `--follow` films an entity, found
+//! by its `Name`, from behind. The valley lies on a real planet (`planet.rs`); `--no-planet`
+//! draws it as the landscape's own mesh on an empty ground instead.
 //!
 //! The map is a valley ringed by snowy mountains: a village around the material plaza, woods,
 //! a lake, and one zone per engine feature. Each zone shows placeholder content until its module
@@ -13,12 +19,18 @@
 //! owner.
 
 mod camera;
+mod film;
 mod landscape;
 mod meshgen;
 mod placeholders;
 mod places;
+mod planet;
+mod rock_textures;
+mod rocks;
 mod scenery;
+mod texgen;
 mod tour;
+mod village;
 mod zones;
 
 use engine::prelude::*;
@@ -52,16 +64,43 @@ fn main() {
         ))
         .add_plugins(engine_softbody::SoftBodyPlugin)
         .add_systems(Startup, setup)
-        .add_systems(Update, (camera::fly, scenery::update_lods).chain());
+        .add_systems(
+            Update,
+            (camera::fly, places::run_pending, scenery::update_lods).chain(),
+        );
     register_apis(&mut app);
 
     let args: Vec<String> = std::env::args().collect();
+    if !args.iter().any(|a| a == "--no-planet") {
+        app.insert_resource(planet::UsePlanet);
+    }
     if let Some(i) = args.iter().position(|a| a == "--tour") {
         let only = args
             .get(i + 1)
             .filter(|a| !a.starts_with("--"))
             .map(String::as_str);
         tour::install(&mut app, only);
+    } else if let Some(i) = args.iter().position(|a| a == "--film") {
+        let keys = args.get(i + 1).map(String::as_str).unwrap_or("overview");
+        let num = |flag: &str, default: f32| {
+            args.iter()
+                .position(|a| a == flag)
+                .and_then(|i| args.get(i + 1))
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(default)
+        };
+        let follow = args
+            .iter()
+            .position(|a| a == "--follow")
+            .and_then(|i| args.get(i + 1))
+            .cloned();
+        film::install(
+            &mut app,
+            keys,
+            num("--secs", 8.0),
+            num("--fps", 30.0),
+            follow,
+        );
     }
     app.run();
 }
@@ -78,6 +117,7 @@ fn setup(
         ResMut<engine::world::SurfaceMaterials>,
     ),
     config: Res<EngineConfig>,
+    use_planet: Option<Res<planet::UsePlanet>>,
 ) {
     let t0 = std::time::Instant::now();
     // The planet beyond the terrain is grassland too, so the far edge blends into it.
@@ -93,16 +133,24 @@ fn setup(
     )));
     let lib = scenery::build_library(&mut meshes, &mut materials, &mut images);
     let mut rng = Rng::new(config.seed);
-    scenery::spawn_terrain(&mut commands, &mut meshes, &lib, &land);
+    if use_planet.is_some() {
+        planet::spawn(&mut commands, land.clone());
+    } else {
+        scenery::spawn_terrain(&mut commands, &mut meshes, &lib, &land);
+    }
     scenery::spawn_woods(&mut commands, &lib, &land, &mut rng);
     scenery::spawn_meadows(&mut commands, &lib, &land, &mut rng);
     scenery::spawn_farms(&mut commands, &lib, &land, &mut rng);
     scenery::spawn_rocks(&mut commands, &lib, &land, &mut rng);
     scenery::spawn_village(&mut commands, &lib, &land, &mut rng);
-    scenery::spawn_cliffs_and_stream(&mut commands, &lib, &land, &mut rng);
+    scenery::spawn_cliffs_and_stream(&mut commands, &mut meshes, &lib, &land, &mut rng);
     placeholders::cave_shell(&mut commands, &mut meshes, &lib, &land, &mut rng);
     zones::spawn_demos(&mut commands, &mut meshes, &lib, &land, &mut rng);
-    zones::moon(&mut commands);
+    if use_planet.is_some() {
+        planet::spawn_moon(&mut commands, zones::moon_position());
+    } else {
+        zones::moon(&mut commands);
+    }
     camera::spawn_camera(&mut commands);
     // The weather module drives the sun, the moon and the clock (`engine_weather::Sky`).
     engine_weather::spawn_sky_lights(&mut commands);
@@ -159,7 +207,7 @@ fn register_apis(app: &mut App) {
                 ));
             };
             camera::go_to(world, &place);
-            places::visit(world, &place);
+            places::visit_soon(world, &place);
             if args
                 .get("with_time")
                 .and_then(|v| v.as_bool())

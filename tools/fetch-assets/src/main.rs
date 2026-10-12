@@ -1,4 +1,5 @@
-//! `cargo run -p fetch-assets [-- <manifest>... | check | mirror | publish]`. See the crate docs.
+//! `cargo run -p fetch-assets [-- <manifest>... | check | mirror | publish | notices]`. See the
+//! crate docs.
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -20,6 +21,9 @@ fetch-assets: download the large art listed in assets/manifests/*.toml into asse
   cargo run -p fetch-assets -- publish [<name>...]
                                               upload files made here (url = \"mirror\") from
                                               assets/fetched/ to the mirror and print their pins
+  cargo run -p fetch-assets -- notices        print the license notices of every listed file
+                                              (fetching also writes them to
+                                              assets/fetched/THIRD_PARTY_NOTICES.md)
 
 Cache: ENGINE_ASSET_CACHE (default: the user cache folder). Mirror repository:
 ENGINE_ASSET_MIRROR (default TobiasMidtgard/Engine). GitHub token: GITHUB_TOKEN, GH_TOKEN or
@@ -36,6 +40,7 @@ fn main() -> ExitCode {
         Some("check") => check(&root),
         Some("mirror") => mirror(&root),
         Some("publish") => publish(&root, &args[1..]),
+        Some("notices") => load_manifests(&root).map(|m| print!("{}", notices(&m))),
         _ => fetch(&root, &args),
     };
     match result {
@@ -160,6 +165,11 @@ fn fetch(root: &Path, only: &[String]) -> Result<(), String> {
 
     if let Ok(json) = serde_json::to_vec_pretty(&placed) {
         let _ = fs::create_dir_all(&fetched).and_then(|_| fs::write(&state_file, json));
+    }
+    // The licenses travel with the files: notices for every manifest, fetched or not.
+    if let Ok(all) = load_manifests(root) {
+        let _ = fs::create_dir_all(&fetched)
+            .and_then(|_| fs::write(fetched.join(NOTICES_FILE), notices(&all)));
     }
     println!(
         "{ready} up to date, {downloaded} fetched, {} failed",

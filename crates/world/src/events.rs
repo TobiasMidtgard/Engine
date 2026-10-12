@@ -4,7 +4,7 @@
 //! them. A gunshot writes one [`ProjectileTrace`]: smoke parts around the bullet path, audio
 //! plays a whiz, AI hears it, water splashes where it crosses the surface.
 
-use engine_core::math::{DVec3, Vec3};
+use engine_core::math::{DVec3, Quat, Vec3};
 use engine_core::prelude::*;
 
 use crate::physical::SurfaceId;
@@ -44,7 +44,10 @@ pub struct GroundContact {
     pub normal: Vec3,
     /// Footprint/contact size (width, length), meters.
     pub size: [f32; 2],
-    /// Yaw of the contact's long axis, radians (footprint orientation).
+    /// Heading of the contact's long axis about +Y, radians: the toe, or the direction of
+    /// travel, points along `Quat::from_rotation_y(yaw) * Vec3::NEG_Z`, so yaw 0 faces −Z like
+    /// `Transform::forward()`. Write it with [`GroundContact::yaw_of`]; read it with
+    /// [`GroundContact::forward`].
     pub yaw: f32,
     /// Weight on this contact, kg.
     pub load_kg: f32,
@@ -54,6 +57,19 @@ pub struct GroundContact {
     /// Surface if known; otherwise receivers query the ground.
     pub surface: Option<SurfaceId>,
     pub entity: Option<Entity>,
+}
+
+impl GroundContact {
+    /// The [`yaw`](Self::yaw) of a contact whose toe or travel points along `forward` (any
+    /// length; only its horizontal part counts).
+    pub fn yaw_of(forward: Vec3) -> f32 {
+        (-forward.x).atan2(-forward.z)
+    }
+
+    /// Unit horizontal direction of the toe or travel.
+    pub fn forward(&self) -> Vec3 {
+        Quat::from_rotation_y(self.yaw) * Vec3::NEG_Z
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -239,6 +255,30 @@ pub enum AttackKind {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn contact_yaw_follows_the_transform_convention() {
+        let contact = |yaw| GroundContact {
+            position: DVec3::ZERO,
+            normal: Vec3::Y,
+            size: [0.1, 0.28],
+            yaw,
+            load_kg: 70.0,
+            speed: 1.4,
+            kind: ContactKind::Foot,
+            surface: None,
+            entity: None,
+        };
+        assert_eq!(GroundContact::yaw_of(Vec3::NEG_Z), 0.0);
+        for dir in [Vec3::X, Vec3::NEG_X, Vec3::Z, Vec3::new(0.6, -0.3, -0.8)] {
+            let yaw = GroundContact::yaw_of(dir);
+            let flat = Vec3::new(dir.x, 0.0, dir.z).normalize();
+            assert!(contact(yaw).forward().distance(flat) < 1e-6, "{dir}");
+            // The same heading a transform turned by that yaw looks along.
+            let look = Quat::from_rotation_y(yaw) * Vec3::NEG_Z;
+            assert!(look.distance(flat) < 1e-6, "{dir}");
+        }
+    }
 
     fn strike(seed: u64) -> LightningStrike {
         LightningStrike {

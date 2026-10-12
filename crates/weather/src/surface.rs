@@ -18,7 +18,8 @@ use engine_core::math::{DVec2, DVec3, IVec2, Vec3, smoothstep};
 use engine_core::prelude::*;
 use engine_world::physics::{PhysicsQueries, QueryFilter};
 use engine_world::{
-    Grid2, Ground, HeatField, PrecipitationKind, SurfaceLayers, SurfaceMaterials, WeatherState,
+    Grid2, Ground, HeatField, PrecipitationKind, SurfaceId, SurfaceLayers, SurfaceMaterials,
+    WeatherState,
 };
 
 use crate::climate;
@@ -44,7 +45,8 @@ pub struct GroundWeather {
     pub snow_ratio: f32,
     /// Snow melt per °C above freezing per day, mm of water (degree-day factor).
     pub melt_mm_per_c_day: f32,
-    /// Upward raycasts per update that look for roofs.
+    /// Upward raycasts per update that look for roofs over ground not seen yet; known ground
+    /// is re-checked with a 32nd of that.
     pub shelter_rays: u32,
     /// Speed up drying and wetting (1 = physical; time-lapse demos use more).
     pub time_scale: f32,
@@ -143,7 +145,12 @@ pub struct GroundCache {
     pub cells: Grid2<CellInfo>,
     /// Cell indices nearest the grid center first.
     order: Vec<u32>,
+    /// Where the search for cells not looked at yet continues.
     cursor: usize,
+    /// Every cell has been looked at since the grid last moved.
+    complete: bool,
+    /// Where the slow re-check of known cells continues.
+    sweep: usize,
     accumulated_s: f32,
     /// Cells covered by a [`WeatherShelter`] this update.
     sheltered: Vec<bool>,
@@ -155,6 +162,8 @@ impl Default for GroundCache {
             cells: Grid2::new(DVec2::ZERO, 1.0, 0, 0, CellInfo::default()),
             order: Vec::new(),
             cursor: 0,
+            complete: false,
+            sweep: 0,
             accumulated_s: 0.0,
             sheltered: Vec::new(),
         }
@@ -177,12 +186,14 @@ impl GroundCache {
             );
             self.order = near_first_order(surface.width, surface.height);
             self.cursor = 0;
+            self.complete = false;
         } else if self.cells.origin != surface.origin {
             let half =
                 DVec2::new(surface.width as f64, surface.height as f64) * surface.cell as f64 * 0.5;
             self.cells.recenter(surface.origin + half);
             self.cells.origin = surface.origin;
             self.cursor = 0;
+            self.complete = false;
         }
         self.sheltered.resize(self.cells.len(), false);
     }
@@ -322,7 +333,13 @@ pub fn update_cells(
     });
 }
 
-/// Refresh roofs and ground facts for the next `rays` cells (nearest the player first).
+/// Roofs higher than this above the ground don't keep rain off it (m).
+const ROOF_SEARCH_M: f32 = 120.0;
+
+/// Look up roofs and ground facts for up to `rays` cells: first the cells not looked at yet
+/// (nearest the player first), then a slow sweep over known cells that notices roofs built
+/// or torn down since. Each look is one upward raycast, so once the area is known this costs
+/// a few dozen rays per update rather than `rays`.
 pub fn refresh_cache(
     cache: &mut GroundCache,
     rays: u32,
@@ -332,26 +349,67 @@ pub fn refresh_cache(
     share: f32,
     sim: &WeatherSim,
 ) {
-    if cache.order.is_empty() {
+    let n = cache.order.len();
+    if n == 0 {
         return;
     }
-    let filter = QueryFilter::default();
-    for _ in 0..rays.min(cache.order.len() as u32) {
-        let index = cache.order[cache.cursor] as usize;
-        cache.cursor = (cache.cursor + 1) % cache.order.len();
+    let look = LookUp {
+        ground,
+        physics,
+        materials,
+        share,
+        sim,
+        filter: QueryFilter::default(),
+    };
+    let mut budget = rays.min(n as u32);
+    if !cache.complete {
+        let mut scanned = 0;
+        while budget > 0 && scanned < n {
+            let index = cache.order[cache.cursor] as usize;
+            cache.cursor = (cache.cursor + 1) % n;
+            scanned += 1;
+            if !cache.cells.data[index].known {
+                look.cell(cache, index);
+                budget -= 1;
+            }
+        }
+        cache.complete = scanned == n;
+    }
+    for _ in 0..(rays / 32).max(1).min(budget) {
+        let index = cache.order[cache.sweep] as usize;
+        cache.sweep = (cache.sweep + 1) % n;
+        look.cell(cache, index);
+    }
+}
+
+struct LookUp<'a> {
+    ground: &'a Ground,
+    physics: Option<&'a PhysicsQueries>,
+    materials: &'a SurfaceMaterials,
+    share: f32,
+    sim: &'a WeatherSim,
+    filter: QueryFilter,
+}
+
+impl LookUp<'_> {
+    fn cell(&self, cache: &mut GroundCache, index: usize) {
         let w = cache.cells.width;
         let c = IVec2::new((index as u32 % w) as i32, (index as u32 / w) as i32);
         let xz = cache.cells.cell_center(c);
-        let sample = ground.sample(DVec3::new(xz.x, 0.0, xz.y));
+        let sample = self.ground.sample(DVec3::new(xz.x, 0.0, xz.y));
         let height = sample.map(|s| s.height).unwrap_or(0.0);
-        let absorbency = sample
-            .map(|s| materials.get(s.surface).absorbency)
-            .unwrap_or(0.5);
+        // Unknown ground soaks like the world's default material.
+        let absorbency = self
+            .materials
+            .get(sample.map(|s| s.surface).unwrap_or(SurfaceId::DEFAULT))
+            .absorbency;
         let flat = sample.map(|s| s.normal.y).unwrap_or(1.0);
-        let exposure = match physics {
+        let exposure = match self.physics {
             Some(q) => {
                 let from = DVec3::new(xz.x, height + 0.3, xz.y);
-                if q.raycast(from, Vec3::Y, 400.0, &filter).is_some() {
+                if q.raycast(from, Vec3::Y, ROOF_SEARCH_M, &self.filter)
+                    .is_some()
+                {
                     0.0
                 } else {
                     1.0
@@ -359,9 +417,12 @@ pub fn refresh_cache(
             }
             None => 1.0,
         };
-        // Puddles keep their spots on the ground when the world shifts.
-        let dip =
-            puddle_dip(sim.frame.to_pattern(xz), share, sim.seed) * smoothstep(0.9, 0.98, flat);
+        // Puddles keep their spots on the ground when the world shifts. Soft ground (a grass
+        // meadow, soil) drains: water stands only in its few real hollows, not in a third of
+        // the field.
+        let share_here = self.share * (1.0 - smoothstep(0.2, 0.65, absorbency));
+        let dip = puddle_dip(self.sim.frame.to_pattern(xz), share_here, self.sim.seed)
+            * smoothstep(0.9, 0.98, flat);
         cache.cells.data[index] = CellInfo {
             exposure,
             height: height as f32,
@@ -491,6 +552,28 @@ mod tests {
         (surface, cache, GroundWeather::default())
     }
 
+    /// Makes the (flat) test ground soak like `absorbency` (it is grass by default).
+    fn ground_soaking(cache: &mut GroundCache, absorbency: f32) {
+        let ground = Ground::default();
+        let mut materials = SurfaceMaterials::default();
+        let id = ground.sample(DVec3::ZERO).unwrap().surface;
+        materials.materials[id.0 as usize].absorbency = absorbency;
+        // Look at every cell again.
+        for c in &mut cache.cells.data {
+            c.known = false;
+        }
+        cache.complete = false;
+        refresh_cache(
+            cache,
+            100_000,
+            &ground,
+            None,
+            &materials,
+            0.3,
+            &WeatherSim::default(),
+        );
+    }
+
     fn rain(mm_h: f32, t: f32) -> WeatherState {
         WeatherState {
             precipitation_mm_h: mm_h,
@@ -550,9 +633,9 @@ mod tests {
 
     #[test]
     fn rain_wets_the_ground_and_fills_puddles_then_it_dries() {
-        let (mut surface, cache, mut params) = setup();
-        // Concrete-like ground so water pools quickly.
-        params.infiltration_mm_h = 2.0;
+        let (mut surface, mut cache, params) = setup();
+        // Hard-packed ground so water pools quickly.
+        ground_soaking(&mut cache, 0.15);
         run(&mut surface, &cache, &params, &rain(10.0, 12.0), 600.0);
         let (wet, puddled, deepest, _) = stats(&surface);
         assert!(wet > 0.95, "wet {wet}");
@@ -567,6 +650,45 @@ mod tests {
         let (wet, puddled, _, _) = stats(&surface);
         assert!(wet < 0.2, "still wet {wet}");
         assert!(puddled < 0.02, "puddles left {puddled}");
+    }
+
+    #[test]
+    fn known_ground_is_only_rechecked_slowly() {
+        // Each look is an upward raycast; a full budget every update stalled worlds whose
+        // physics backend marches rays through the terrain.
+        let (_, mut cache, _) = setup();
+        assert!(cache.complete);
+        let (cursor, sweep) = (cache.cursor, cache.sweep);
+        refresh_cache(
+            &mut cache,
+            2048,
+            &Ground::default(),
+            None,
+            &SurfaceMaterials::default(),
+            0.3,
+            &WeatherSim::default(),
+        );
+        assert_eq!(cache.cursor, cursor);
+        assert_eq!(cache.sweep, sweep + 64);
+    }
+
+    #[test]
+    fn a_meadow_holds_far_fewer_puddles_than_hard_ground() {
+        let downpour = rain(40.0, 12.0);
+        let mut puddled = Vec::new();
+        for absorbency in [0.15, 0.6] {
+            let (mut surface, mut cache, params) = setup();
+            ground_soaking(&mut cache, absorbency);
+            run(&mut surface, &cache, &params, &downpour, 1800.0);
+            puddled.push(stats(&surface).1);
+        }
+        assert!(puddled[0] > 0.15, "hard ground {}", puddled[0]);
+        assert!(
+            puddled[1] < puddled[0] * 0.4,
+            "a meadow pools {} vs {} on hard ground",
+            puddled[1],
+            puddled[0]
+        );
     }
 
     #[test]

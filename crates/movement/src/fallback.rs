@@ -21,6 +21,8 @@ use engine_world::physics::{
 
 /// Largest distance a character moves in one collision sub-step, meters.
 const SUBSTEP_METERS: f64 = 0.1;
+/// Shortest step when a ray marches over the ground, meters.
+const MIN_GROUND_STEP: f64 = 0.25;
 
 #[derive(Clone, Copy, Debug)]
 struct Aabb {
@@ -263,13 +265,17 @@ impl PhysicsQuery for Queries {
                 });
             }
         }
-        // The ground (terrain): march along the ray.
+        // The ground (terrain): march along the ray. Each step goes as far as half the ray's
+        // height above the ground (at least `MIN_GROUND_STEP`), which can't skip terrain no
+        // steeper than about 1:1, so rays far above the ground (or pointing up) take a few
+        // dozen samples instead of one every 25 cm.
         let limit = best.map_or(max_distance, |h| h.distance) as f64;
         let mut prev = 0.0;
         let mut s = 0.0;
         while s <= limit {
             let p = origin + d * s;
-            if let Some(g) = self.ground.sample(p)
+            let ground = self.ground.sample(p);
+            if let Some(g) = ground
                 && p.y <= g.height
             {
                 // Refine between the last two samples.
@@ -293,7 +299,9 @@ impl PhysicsQuery for Queries {
                 });
             }
             prev = s;
-            s += 0.25;
+            s += ground.map_or(MIN_GROUND_STEP, |g| {
+                ((p.y - g.height) * 0.5).max(MIN_GROUND_STEP)
+            });
             if s > limit && prev < limit {
                 s = limit;
             }
@@ -407,5 +415,47 @@ mod tests {
             q.raycast(DVec3::new(-3.0, 2.0, 0.0), -Vec3::Y, 1.5, &f)
                 .is_none()
         );
+    }
+
+    /// A 45° ramp rising along +x from x = 0 (flat below), counting its samples.
+    struct Ramp(std::sync::atomic::AtomicUsize);
+    impl engine_world::GroundQuery for Ramp {
+        fn sample(&self, p: DVec3) -> Option<engine_world::GroundSample> {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            Some(engine_world::GroundSample {
+                height: p.x.max(0.0),
+                normal: Vec3::Y,
+                surface: engine_world::SurfaceId(0),
+            })
+        }
+    }
+
+    #[test]
+    fn long_rays_over_the_ground_take_few_samples_and_still_hit_slopes() {
+        let ramp = Arc::new(Ramp(Default::default()));
+        let q = Queries {
+            snapshot: Arc::new(RwLock::new(Snapshot::default())),
+            ground: Ground(ramp.clone()),
+        };
+        let f = QueryFilter::default();
+        let samples = || ramp.0.swap(0, std::sync::atomic::Ordering::Relaxed);
+        // Straight up from just above the ground, 400 m: nothing to hit.
+        assert!(
+            q.raycast(DVec3::new(-10.0, 0.5, 0.0), Vec3::Y, 400.0, &f)
+                .is_none()
+        );
+        assert!(samples() < 40, "upward ray took too many samples");
+        // Level ray at 2 m toward the ramp: hits where the ramp reaches 2 m.
+        let hit = q
+            .raycast(DVec3::new(-50.0, 2.0, 0.0), Vec3::X, 100.0, &f)
+            .unwrap();
+        assert!((hit.point.x - 2.0).abs() < 0.01, "{hit:?}");
+        assert!(samples() < 300);
+        // A ray climbing more gently than the ramp still hits it.
+        let dir = Vec3::new(1.0, 0.5, 0.0).normalize();
+        let hit = q
+            .raycast(DVec3::new(-20.0, 10.0, 0.0), dir, 200.0, &f)
+            .unwrap();
+        assert!((hit.point.y - hit.point.x).abs() < 0.01, "{hit:?}");
     }
 }

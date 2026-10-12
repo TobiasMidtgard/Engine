@@ -2,15 +2,17 @@
 
 pub mod demo;
 pub mod domain;
+pub mod noise;
 pub mod obscurance;
 pub mod render;
 pub mod settings;
+mod shift;
 pub mod sim;
 
 use engine_core::math::{DVec3, Vec3};
 use engine_core::prelude::*;
 use engine_render::RenderAppExt;
-use engine_world::{SmokeEmission, WorldPlugin};
+use engine_world::{SmokeEmission, WorldPlugin, WorldShiftSet};
 use serde_json::{Value, json};
 
 pub use demo::SmokeDemo;
@@ -82,6 +84,13 @@ impl Plugin for SmokePlugin {
                     .in_set(SimSet::Environment),
             )
             .add_systems(Update, (sim::age_tunnels, demo::run_demos))
+            .add_systems(
+                PostUpdate,
+                (
+                    shift::shift_smoke.in_set(WorldShiftSet::Apply),
+                    shift::publish_shifted.in_set(WorldShiftSet::Rebuild),
+                ),
+            )
             .add_render_feature(render::SmokeFeature::default());
         register_apis(app);
     }
