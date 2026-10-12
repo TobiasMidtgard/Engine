@@ -164,9 +164,11 @@ the proving ground.
 ## Next
 
 - Articulated (reduced-coordinate) joints for ragdolls and robot arms: zero joint gap.
-- Smoother rolling barrels on terrain and meshes: Rapier's cylinder-triangle contacts make a
-  barrel rolling over triangles hop up to 1.5 cm and drift sideways (on a box it rolls flat).
-  Balls and capsules roll flat on both.
+- Smoother rolling barrels on terrain and meshes: a barrel rolling over triangles hops up to
+  1.5 cm and drifts sideways (on a box it rolls flat; balls and capsules roll flat on both).
+  The contacts themselves are exact; Rapier's merged contact clusters match last step's
+  impulses by position in the bodies' frames, which a rolling body leaves every step, so its
+  two end contacts start cold and push unevenly. More solver iterations don't help.
 - A `rolling_resistance` field on `SurfaceMaterial`, so games can tune it per surface (today
   it comes from the surface's deformation).
 - Co-moving region frames, so cargo resting in a ship at 7 km/s can sleep (today bodies moving
