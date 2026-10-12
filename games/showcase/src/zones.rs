@@ -230,7 +230,7 @@ pub fn spawn_demos(
             "cave" => ph::cave(commands, meshes, lib, land, z, rng),
             "arena" => ph::arena(commands, lib, z),
             "parkour" => ph::parkour(commands, lib, z),
-            "fortress" => ph::fortress(commands, lib, z),
+            "fortress" => engine_destruction::demo::spawn_demo(commands, z.center),
             "voxel" => ph::voxel(commands, meshes, z, rng),
             "field" => {
                 engine_fire::demo::spawn_demo(commands, z.center);
