@@ -206,6 +206,36 @@ fn a_moving_frame_adds_its_velocity() {
 }
 
 #[test]
+fn a_spinning_frame_adds_its_rotation_at_each_body() {
+    let mut app = app();
+    app.world.resource_mut::<Gravity>().uniform = Vec3::ZERO;
+    let near = cube(&mut app, DVec3::ZERO);
+    let far = cube(&mut app, DVec3::new(100.0, 0.0, 0.0));
+    app.update_n(10);
+    let s = WorldShift {
+        translation: DVec3::new(50.0, 0.0, 0.0),
+        angular_velocity: DVec3::new(0.0, 0.01, 0.0),
+        ..WorldShift::IDENTITY
+    };
+    shift(&mut app, s);
+    app.update_n(3);
+    // The old frame turned at 0.01 rad/s about its own origin: each body gets ω × its old
+    // position (the ship's deck carried at 1 m/s 100 m out, nothing at the pivot). Default
+    // damping takes a fraction of a percent off over the few steps since.
+    for (e, expect) in [(near, Vec3::ZERO), (far, Vec3::new(0.0, 0.0, -1.0))] {
+        let v = *app.world.get::<Velocity>(e).unwrap();
+        assert!(
+            (v.linear - expect).length() < 1e-2,
+            "{v:?}, expected {expect:?}"
+        );
+        assert!(
+            (v.angular - Vec3::new(0.0, 0.01, 0.0)).length() < 1e-4,
+            "{v:?}"
+        );
+    }
+}
+
+#[test]
 fn characters_stand_through_shifts() {
     let mut app = app();
     let g = ground(&mut app);
