@@ -115,14 +115,14 @@ pub fn ring_courses(
             s += l;
             cuts.push(s);
         }
-        let scale = circumference / (s + (circumference - s));
+        // The last stone runs from the last cut round to the first.
         let phase = rng.range(0.0, std::f32::consts::TAU);
         let n = cuts.len();
         for i in 0..n {
-            let a0 = phase + cuts[i] * scale / mid;
+            let a0 = phase + cuts[i] / mid;
             let a1 = phase
                 + if i + 1 < n {
-                    cuts[i + 1] * scale / mid
+                    cuts[i + 1] / mid
                 } else {
                     std::f32::consts::TAU
                 };
