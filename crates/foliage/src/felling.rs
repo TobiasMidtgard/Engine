@@ -516,7 +516,7 @@ pub fn update_falling_trees(
                 position: along(s),
                 normal: Vec3::Y,
                 size: [crown_r.min(3.0), f.length / 3.0],
-                yaw: pose.yaw,
+                yaw: GroundContact::yaw_of(dir),
                 load_kg: f.mass_kg / 3.0,
                 speed: speed * s,
                 kind: ContactKind::Body,
@@ -881,6 +881,35 @@ mod tests {
         ));
         let mut q = app.world.query::<&FallingTree>();
         assert_eq!(q.iter(&app.world).count(), 1);
+    }
+
+    #[derive(Resource, Default)]
+    struct Contacts(Vec<GroundContact>);
+
+    fn collect_contacts(mut seen: ResMut<Contacts>, mut contacts: MessageReader<GroundContact>) {
+        seen.0.extend(contacts.read().copied());
+    }
+
+    #[test]
+    fn a_fallen_trunk_presses_the_ground_along_its_length() {
+        let (mut app, tree) = app_with_oak(0.8);
+        app.init_resource::<Contacts>()
+            .add_systems(Update, collect_contacts);
+        app.update();
+        let dir = Vec3::new(0.6, 0.0, 0.8);
+        let log = fell_tree(&mut app.world, tree, dir).expect("the oak falls");
+        app.update_n(400);
+        let pose = *app.world.get::<LogPose>(log).unwrap();
+        let fall = Vec3::new(pose.yaw.cos(), 0.0, pose.yaw.sin());
+        let seen = &app.world.resource::<Contacts>().0;
+        let body: Vec<_> = seen
+            .iter()
+            .filter(|c| c.entity == Some(log) && c.kind == ContactKind::Body)
+            .collect();
+        assert_eq!(body.len(), 3);
+        for c in body {
+            assert!(c.forward().dot(fall) > 0.99, "{:?} vs {fall}", c.forward());
+        }
     }
 
     #[test]
