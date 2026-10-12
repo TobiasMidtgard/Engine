@@ -121,8 +121,8 @@ character's and shows as a ring in its ground's colour.
   underpass echo and rain soaking the ground at the end. Writes `trail.mp4`, `trail.wav`
   and the frames.
 - `cargo run -p engine_audio --release --example footstep_lab -- out/` renders four steps
-  on every surface, fires of three sizes, lake shores, a brook, rapids and thunder at three
-  distances to WAV files
+  on every surface, fires of three sizes, lake shores, a brook, rapids, engines, a tyre
+  skidding and thunder at three distances to WAV files
   (`--layers` prints each footstep layer's level).
 - `tests/plugin.rs`: contacts are heard, out-of-earshot steps are skipped, space is silent,
   the trail walks every surface, walls muffle what's behind them, burning ground and burning
@@ -133,6 +133,12 @@ character's and shows as a ring in its ground's colour.
 - Footsteps change from grass to mud to snow; rain gets louder with intensity; slow motion
   lowers the pitch. ✓ (all three are in the trail recording and the tests)
 
-Next: rolling wheels and tracks, thunder from the
+Engines (piston engines firing pulse by pulse through their exhaust, turbines, rockets,
+electric motors, thrusters) and tyres (rolling, crunching, squelching, hissing, squealing)
+are synthesized in `vehicle.rs` and render in `footstep_lab`; they play in the world once
+the vehicles module publishes engine and wheel state through `engine_world` (asked of the
+lead).
+
+Next: vehicles in the world (see above), thunder from the
 weather's own lightning strikes (`LightningStrike`, waiting on the lead's contract), music
 layers, and recorded samples alongside the synthesis.

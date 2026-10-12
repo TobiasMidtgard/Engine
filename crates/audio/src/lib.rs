@@ -11,6 +11,7 @@ pub mod mixer;
 mod output;
 mod systems;
 pub mod thunder;
+pub mod vehicle;
 mod water;
 pub mod wav;
 

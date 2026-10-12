@@ -90,6 +90,11 @@ fn main() {
         write_wav(&out.join(format!("water_{name}.wav")), &track, 1, FS as u32).expect("write wav");
     }
 
+    // Vehicles: a rev sweep and lift-off for a V8 and a four, a jet spooling up into
+    // afterburner, a rocket, an electric car, and a tyre that rolls on tarmac, skids, then
+    // runs onto gravel.
+    vehicles(&out);
+
     // Thunder from a bolt 0.5, 2 and 8 km away, mixed roughly as the mixer would (inverse
     // distance, air absorption), with its level over time.
     for (name, km) in [("near", 0.5), ("mid", 2.0), ("far", 8.0)] {
@@ -188,4 +193,83 @@ fn layers() {
         }
         println!("{n:<8} peak {peak:.3}  rms(300ms) {rms:.4}");
     }
+}
+
+fn vehicles(out: &std::path::Path) {
+    use engine_audio::Sound;
+    use engine_audio::vehicle::{EngineSound, EngineVoice, TyreSound};
+    let secs = 8.0;
+    let n = (FS * secs) as usize;
+    let block = 480;
+    let engines = [
+        (
+            "v8",
+            EngineVoice::Piston {
+                cylinders: 8,
+                litres: 5.0,
+            },
+        ),
+        (
+            "inline4",
+            EngineVoice::Piston {
+                cylinders: 4,
+                litres: 1.6,
+            },
+        ),
+        ("jet", EngineVoice::Turbine),
+        ("rocket", EngineVoice::Rocket),
+        ("electric", EngineVoice::Electric),
+    ];
+    for (name, voice) in engines {
+        let mut e = EngineSound::new(FS, voice, 9);
+        let mut track = vec![0.0f32; n];
+        for (b, chunk) in track.chunks_mut(block).enumerate() {
+            let t = b as f32 * block as f32 / FS;
+            // Idle, floor it up to the red line, lift off and coast down.
+            let (rpm, throttle, load) = if t < 1.5 {
+                (800.0, 0.0, 0.05)
+            } else if t < 5.0 {
+                (800.0 + (t - 1.5) / 3.5 * 6_000.0, 1.0, 1.0)
+            } else {
+                (6_800.0 - (t - 5.0) / 3.0 * 5_000.0, 0.0, 0.0)
+            };
+            let rpm = if matches!(voice, EngineVoice::Turbine) {
+                rpm * 2.0
+            } else {
+                rpm
+            };
+            e.set_param("rpm", rpm);
+            e.set_param("throttle", throttle);
+            e.set_param("load", load);
+            e.set_param("boost", if (3.5..5.0).contains(&t) { 1.0 } else { 0.0 });
+            e.set_param("thrust", rpm / 6_800.0 * 120_000.0 * (0.2 + 0.8 * throttle));
+            e.fill(chunk);
+        }
+        let peak = track.iter().fold(0.0f32, |m, v| m.max(v.abs()));
+        println!("engine {name:<9} peak {peak:.3}");
+        write_wav(
+            &out.join(format!("engine_{name}.wav")),
+            &track,
+            1,
+            FS as u32,
+        )
+        .expect("write wav");
+    }
+    let mut tyre = TyreSound::new(FS, 3);
+    let mut track = vec![0.0f32; n];
+    for (b, chunk) in track.chunks_mut(block).enumerate() {
+        let t = b as f32 * block as f32 / FS;
+        tyre.set_param("speed", 18.0);
+        tyre.set_param("slip", if (2.5..4.5).contains(&t) { 0.7 } else { 0.0 });
+        tyre.set_param("hard", if t < 5.5 { 1.0 } else { 0.0 });
+        tyre.set_param("gravel", if t < 5.5 { 0.0 } else { 1.0 });
+        tyre.fill(chunk);
+    }
+    write_wav(
+        &out.join("tyre_tarmac_skid_gravel.wav"),
+        &track,
+        1,
+        FS as u32,
+    )
+    .expect("write wav");
 }
