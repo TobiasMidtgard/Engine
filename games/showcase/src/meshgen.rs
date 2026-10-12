@@ -101,11 +101,6 @@ impl Builder {
         }
     }
 
-    /// Axis-aligned box from min to max corner.
-    pub fn aabb(&mut self, min: Vec3, max: Vec3, c: Vec3) {
-        self.cuboid((min + max) * 0.5, (max - min) * 0.5, Quat::IDENTITY, c);
-    }
-
     /// Smooth tapered tube from `a` (radius `ra`) to `b` (radius `rb`), colors per end.
     #[allow(clippy::too_many_arguments)]
     pub fn tube(

@@ -516,14 +516,19 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     col[M_SOIL] = mix(planet.colors[C_SOIL].rgb, planet.colors[C_DARK].rgb, mare);
     // Woods: the forest floor up close, dark canopy from afar (the foliage module draws the
     // trees themselves).
+    let forest_edge = (mid_v - 0.5) * 0.08 * clump_fade + (patch_v - 0.5) * 0.06;
     let forest = vegetation
-        * smoothstep(0.42, 0.5, moisture * 0.6 + (0.5 - patches) * 0.9 + (variety - 0.5) * 0.4)
+        * smoothstep(0.40, 0.52, moisture * 0.6 + (0.5 - patches) * 0.9 + (variety - 0.5) * 0.4 + forest_edge)
         * smoothstep(-6.0, 4.0, temp_c)
         * (1.0 - smoothstep(1800.0, 2600.0, altitude + (variety - 0.5) * 600.0));
-    // Up close: leaf litter under undergrowth; from afar: the canopy.
-    let canopy = 0.45 + 0.4 * smoothstep(150.0, 2500.0, dist);
-    col[M_FOREST] = mix(planet.colors[C_SOIL].rgb * vec3<f32>(0.8, 0.75, 0.7),
-        planet.colors[C_LUSH].rgb * vec3<f32>(0.45, 0.55, 0.45), canopy);
+    // From a couple of hundred meters the canopy (the foliage module draws trees near the camera,
+    // and bare leaf litter there read as a brown hole in the land). Up close: ferns and grass
+    // with patches of litter between them.
+    let canopy = smoothstep(15.0, 90.0, dist);
+    let undergrowth = planet.colors[C_LUSH].rgb * vec3<f32>(0.6, 0.7, 0.55);
+    let litter = mix(planet.colors[C_SOIL].rgb * vec3<f32>(0.75, 0.72, 0.65), undergrowth, 0.3);
+    let forest_floor = mix(undergrowth, litter, smoothstep(0.6, 0.8, patch_v));
+    col[M_FOREST] = mix(forest_floor, planet.colors[C_LUSH].rgb * vec3<f32>(0.45, 0.55, 0.45), canopy);
     // Beaches and deserts.
     let beach = vegetation * (1.0 - smoothstep(1.5, 5.0, altitude)) * step(-1.0, altitude);
     let desert = vegetation * (1.0 - smoothstep(0.08, 0.22, moisture + (variety - 0.5) * 0.1)) * smoothstep(12.0, 22.0, temp_c);
@@ -609,6 +614,22 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     n = normalize(mix(n, print_n, print_fade));
     let hollow = saturate(depth * 6.0);
     occlusion *= 1.0 - hollow * 0.35 * print_fade;
+    // Under a low sun a print's near wall shades its floor, which is what makes shallow prints
+    // (sand) read as hollows rather than bumps. March the depth grid toward the sun: a cell whose
+    // surface rises above the sun ray hides this point. Surface has no direct-light-only input,
+    // so the shadow darkens the albedo by roughly the sun's share of the light.
+    let sun = frame.sun_dir.xyz;
+    let sun_flat = length(sun.xz);
+    if (depth > 0.002 && print_fade > 0.01 && sun.y > 0.0 && sun_flat > 1e-3) {
+        let step_uv = sun.xz / sun_flat * texel;
+        let rise = cell * sun.y / sun_flat;
+        var print_shadow = 0.0;
+        for (var k = 1; k <= 6; k++) {
+            let dk = textureSampleLevel(deform_tex, map_sampler, duv + step_uv * f32(k), 0.0).r;
+            print_shadow = max(print_shadow, saturate((depth - dk - rise * f32(k)) / 0.004));
+        }
+        albedo *= 1.0 - print_shadow * 0.6 * print_fade * saturate(sun.y * 5.0);
+    }
     let rim = saturate(-depth * 20.0);
     albedo *= 1.0 + rim * 0.06;
     // Trampled grass: flattened blades read slightly darker and yellower.

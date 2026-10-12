@@ -4,11 +4,12 @@
 use engine_assets::{Assets, Handle};
 use engine_core::math::{Rng, Vec3};
 use engine_core::prelude::*;
-use engine_render::{Mesh, Shape, StandardMaterial};
+use engine_render::{Image, Mesh, Shape, StandardMaterial};
 
 use crate::fracture::{ConvexPoly, impact_seeds, voronoi};
 use crate::material::{DestructibleMaterial, DestructionMaterials};
 use crate::meshing::MeshBuilder;
+use crate::textures::{self, SurfaceKind};
 
 /// Alpha levels of the dust materials.
 pub const DUST_LEVELS: usize = 6;
@@ -34,6 +35,16 @@ pub struct DestructionAssets {
     /// Valheim-style support colors: blue (on the ground), green, yellow, orange, red (about
     /// to fail).
     pub support: [Handle<StandardMaterial>; 5],
+    /// The support colors per surface, keeping the surface's relief (normal and roughness
+    /// maps), so tinted wood still shows its grain. Empty until [`Self::texture`].
+    pub support_surface: Vec<[Handle<StandardMaterial>; 5]>,
+    /// Grassy topsoil on voxel hills ([`crate::voxel::GRASS_LAYER`]).
+    pub grass: Handle<StandardMaterial>,
+    /// Gravel ground ([`crate::dress::GravelPad`]).
+    pub gravel: Handle<StandardMaterial>,
+    /// Surfaces carry procedural PBR textures (needs an image store); voxel meshes then split
+    /// into one layer per surface.
+    pub textured: bool,
 }
 
 impl DestructionAssets {
@@ -42,7 +53,7 @@ impl DestructionAssets {
         materials: &mut Assets<StandardMaterial>,
         table: &DestructionMaterials,
     ) -> Self {
-        let surface = DestructibleMaterial::ALL
+        let surface: Vec<Handle<StandardMaterial>> = DestructibleMaterial::ALL
             .iter()
             .map(|m| {
                 let p = table.get(*m);
@@ -131,12 +142,15 @@ impl DestructionAssets {
         let charge_body = materials.add(StandardMaterial::hex(0x2d3330).with_roughness(0.6));
         let thermite_glow = materials
             .add(StandardMaterial::color(1.0, 0.6, 0.2).with_emissive([1.0, 0.5, 0.12], 120_000.0));
-        let support = [0x2f6bff, 0x34b84a, 0xe6cf2e, 0xf08a24, 0xe0352a].map(|hex| {
+        let support = SUPPORT_COLORS.map(|hex| {
             let m = StandardMaterial::hex(hex).with_roughness(0.7);
             let c = crate::material::linear(hex);
-            materials.add(m.with_emissive(c, 1500.0))
+            materials.add(m.with_emissive(c, SUPPORT_GLOW))
         });
+        let gravel = materials.add(StandardMaterial::hex(0x6d695f).with_roughness(0.95));
         Self {
+            grass: surface[DestructibleMaterial::Dirt.index()],
+            gravel,
             surface,
             chips,
             chip_material,
@@ -146,6 +160,52 @@ impl DestructionAssets {
             charge_body,
             thermite_glow,
             support,
+            support_surface: Vec::new(),
+            textured: false,
+        }
+    }
+
+    /// Put procedural PBR textures (see [`crate::textures`]) on every surface material and
+    /// the grass layer. Meshes then carry vertex colors relative to each surface's own color
+    /// (fresh breaks lighter, scorch darker), and the texture supplies the albedo.
+    pub fn texture(
+        &mut self,
+        materials: &mut Assets<StandardMaterial>,
+        images: &mut Assets<Image>,
+    ) {
+        for (i, m) in DestructibleMaterial::ALL.iter().enumerate() {
+            let mut mat = textured(surface_kind(*m), 0xDE57 + i as u64, images);
+            mat.receives_wetness = *m != DestructibleMaterial::Glass;
+            if *m == DestructibleMaterial::Plaster {
+                // The texture is fresh interior paint (albedo about 0.8), which blows out in
+                // full sun; outdoor render here is a weathered off-white.
+                mat.base_color = [0.66, 0.65, 0.62, 1.0];
+            }
+            // The texture stays (grain, joints) under a strong tint and a little glow.
+            let tints = SUPPORT_COLORS.map(|hex| {
+                let c = crate::material::linear(hex);
+                let mut t = mat.with_emissive(c, SUPPORT_GLOW * 0.5);
+                t.base_color = [c[0] * 2.4, c[1] * 2.4, c[2] * 2.4, 1.0];
+                materials.add(t)
+            });
+            self.support_surface.push(tints);
+            materials.set(self.surface[i], mat);
+        }
+        let mut grass = textured(SurfaceKind::Grass, 0xDE57_06A5, images);
+        grass.receives_wetness = true;
+        self.grass = materials.add(grass);
+        let mut gravel = textured(SurfaceKind::Gravel, 0xDE57_06A6, images);
+        gravel.receives_wetness = true;
+        materials.set(self.gravel, gravel);
+        self.textured = true;
+    }
+
+    /// Material of a voxel mesh layer (a material index or the grass layer).
+    pub fn layer_material(&self, layer: u8) -> Handle<StandardMaterial> {
+        if layer == crate::voxel::GRASS_LAYER {
+            self.grass
+        } else {
+            self.surface[layer as usize % self.surface.len()]
         }
     }
 
@@ -159,18 +219,23 @@ impl DestructionAssets {
 
     /// Support color for a piece: blue on the ground, then green → red as support runs out.
     pub fn support_color(&self, grounded: bool, fraction: f32) -> Handle<StandardMaterial> {
-        let i = if grounded {
-            0
-        } else if fraction >= 0.7 {
-            1
-        } else if fraction >= 0.45 {
-            2
-        } else if fraction >= 0.25 {
-            3
-        } else {
-            4
-        };
-        self.support[i]
+        self.support[support_level(grounded, fraction)]
+    }
+
+    /// Support color for something drawn in `original`: a surface keeps its relief under the
+    /// color when textured; anything else gets the flat color.
+    pub fn support_color_on(
+        &self,
+        original: Handle<StandardMaterial>,
+        grounded: bool,
+        fraction: f32,
+    ) -> Handle<StandardMaterial> {
+        let level = support_level(grounded, fraction);
+        self.surface
+            .iter()
+            .position(|s| *s == original)
+            .and_then(|i| self.support_surface.get(i))
+            .map_or(self.support[level], |tints| tints[level])
     }
 
     /// Dust material for a darkness (0..1) and opacity (0..1).
@@ -189,6 +254,60 @@ impl DestructionAssets {
     }
 }
 
+/// Valheim-style support colors: blue (on the ground), green, yellow, orange, red.
+const SUPPORT_COLORS: [u32; 5] = [0x2f6bff, 0x34b84a, 0xe6cf2e, 0xf08a24, 0xe0352a];
+/// Glow of the support colors, so they read in shade too.
+const SUPPORT_GLOW: f32 = 1500.0;
+
+/// Index into [`SUPPORT_COLORS`]: on the ground, then by the fraction of support left.
+fn support_level(grounded: bool, fraction: f32) -> usize {
+    if grounded {
+        0
+    } else if fraction >= 0.7 {
+        1
+    } else if fraction >= 0.45 {
+        2
+    } else if fraction >= 0.25 {
+        3
+    } else {
+        4
+    }
+}
+
+/// The texture each material wears.
+pub fn surface_kind(m: DestructibleMaterial) -> SurfaceKind {
+    match m {
+        DestructibleMaterial::Plaster => SurfaceKind::Plaster,
+        DestructibleMaterial::Wood => SurfaceKind::Wood,
+        DestructibleMaterial::Brick => SurfaceKind::Brick,
+        DestructibleMaterial::Stone => SurfaceKind::Stone,
+        DestructibleMaterial::Concrete | DestructibleMaterial::ReinforcedConcrete => {
+            SurfaceKind::Concrete
+        }
+        DestructibleMaterial::Rock => SurfaceKind::Rock,
+        DestructibleMaterial::Dirt => SurfaceKind::Dirt,
+        DestructibleMaterial::Metal => SurfaceKind::Metal,
+        DestructibleMaterial::Glass => SurfaceKind::Glass,
+        DestructibleMaterial::Ice => SurfaceKind::Ice,
+    }
+}
+
+/// Image width for runtime surfaces: at most 1024 pixels, and small in debug builds so
+/// tests that render stay fast.
+fn texture_size(kind: SurfaceKind) -> u32 {
+    if cfg!(debug_assertions) {
+        128
+    } else {
+        kind.default_size().min(1024)
+    }
+}
+
+/// A textured material for `kind` (white base color: the texture carries the albedo and
+/// vertex colors only shade it relative to the surface's own color).
+fn textured(kind: SurfaceKind, seed: u64, images: &mut Assets<Image>) -> StandardMaterial {
+    textures::generate(kind, texture_size(kind), seed).into_material(images)
+}
+
 /// Create [`DestructionAssets`] the first time the asset stores exist.
 pub fn ensure_assets(world: &mut World) {
     if world.contains_resource::<DestructionAssets>() {
@@ -203,9 +322,15 @@ pub fn ensure_assets(world: &mut World) {
         .get_resource::<DestructionMaterials>()
         .cloned()
         .unwrap_or_default();
-    let assets = world.resource_scope(|world, mut meshes: Mut<Assets<Mesh>>| {
+    let mut assets = world.resource_scope(|world, mut meshes: Mut<Assets<Mesh>>| {
         let mut materials = world.resource_mut::<Assets<StandardMaterial>>();
         DestructionAssets::new(&mut meshes, &mut materials, &table)
     });
+    if world.contains_resource::<Assets<Image>>() {
+        world.resource_scope(|world, mut images: Mut<Assets<Image>>| {
+            let mut materials = world.resource_mut::<Assets<StandardMaterial>>();
+            assets.texture(&mut materials, &mut images);
+        });
+    }
     world.insert_resource(assets);
 }

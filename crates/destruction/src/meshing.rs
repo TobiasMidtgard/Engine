@@ -22,7 +22,7 @@ impl MeshBuilder {
 
     pub fn vertex(&mut self, position: Vec3, normal: Vec3, color: [f32; 3]) -> u32 {
         let i = self.vertices.len() as u32;
-        let uv = Vec2::new(position.x + position.z, position.y);
+        let uv = box_uv(position, normal);
         self.vertices.push(Vertex {
             position: position.to_array(),
             normal: normal.to_array(),
@@ -133,6 +133,20 @@ impl MeshBuilder {
 
     pub fn build(self) -> Mesh {
         Mesh::new(self.vertices, self.indices)
+    }
+}
+
+/// Texture coordinates in meters, projected along the normal's main axis (box mapping), with
+/// +v down so an image's top is up: a wall's front (+Z) gets `(x, -y)`, the ground `(x, z)`.
+/// Materials tile with `uv_scale = 1 / tile size`.
+pub fn box_uv(p: Vec3, n: Vec3) -> Vec2 {
+    let a = n.abs();
+    if a.y >= a.x && a.y >= a.z {
+        Vec2::new(p.x, if n.y >= 0.0 { p.z } else { -p.z })
+    } else if a.x >= a.z {
+        Vec2::new(if n.x >= 0.0 { -p.z } else { p.z }, -p.y)
+    } else {
+        Vec2::new(if n.z >= 0.0 { p.x } else { -p.x }, -p.y)
     }
 }
 

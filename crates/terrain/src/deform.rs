@@ -236,6 +236,34 @@ impl DeformationMap {
         self.generation += 1;
     }
 
+    /// Clear the prints within `radius` of `center` (the ground there was dug, raised or
+    /// smoothed, so they are gone) and forget them.
+    pub fn erase(&mut self, center: DVec3, radius: f32) {
+        let r = radius as f64 + self.cell as f64;
+        let c = (DVec2::new(center.x, center.z) - self.origin) / self.cell as f64;
+        let rc = r / self.cell as f64;
+        let lo = (c - rc).floor().max(DVec2::ZERO);
+        let hi = (c + rc).ceil().min(DVec2::splat(self.size as f64));
+        if lo.x < hi.x && lo.y < hi.y {
+            let (x0, y0, x1, y1) = (lo.x as u32, lo.y as u32, hi.x as u32, hi.y as u32);
+            for y in y0..y1 {
+                for x in x0..x1 {
+                    let p = DVec2::new(x as f64 + 0.5, y as f64 + 0.5);
+                    if p.distance(c) <= rc {
+                        let i = self.index(x, y);
+                        self.depth[i] = 0.0;
+                        self.flatten[i] = 0.0;
+                        self.kind[i] = CellKind::None;
+                    }
+                }
+            }
+            self.mark(x0, y0, x1, y1);
+        }
+        let at = DVec2::new(center.x, center.z);
+        self.history
+            .retain(|h| DVec2::new(h.contact.position.x, h.contact.position.z).distance(at) > r);
+    }
+
     /// Move the window over `focus` if needed. Returns whether it moved.
     fn shift_to(&mut self, focus: DVec3) -> bool {
         let half = self.extent() * 0.5;
@@ -615,6 +643,22 @@ mod tests {
             }
         }
         best
+    }
+
+    #[test]
+    fn edits_wipe_the_prints_under_them() {
+        let mut map = DeformationMap::new(0.05, 256);
+        for x in [0.0, 3.0] {
+            let c = contact(x, 0.0, ContactKind::Foot);
+            map.record(&c, CellKind::Plastic, 0.03, 0.005, 0.0, 0.0);
+        }
+        assert!(peak(&map, 0.0, 0.0) > 0.01 && peak(&map, 3.0, 0.0) > 0.01);
+        map.dirty = None;
+        map.erase(DVec3::new(0.0, 0.0, 0.0), 1.0);
+        assert_eq!(peak(&map, 0.0, 0.0), 0.0);
+        assert!(peak(&map, 3.0, 0.0) > 0.01, "prints outside stay");
+        assert!(map.dirty.is_some());
+        assert_eq!(map.history.len(), 1);
     }
 
     #[test]

@@ -71,21 +71,21 @@ are built, nothing simulates yet) · ⬜ not visible yet
 | 33 | Smart NPC AI that uses the environment (cover, high ground) | `arena`, `arena_cover` | Smart NPC AI | ✅ two squads take cover, climb the platform, flank, suppress and shoot the explosive barrel (stand-in bodies) |
 | 34 | NPCs that space the player and block attacks | `arena`, `arena_duel` | Smart NPC AI | ✅ melee fighters take turns instead of ringing you, block, parry, dodge and feint; a master and a veteran duel |
 | 35 | NPC skill, reaction time and logic editable per enemy | `arena` | Smart NPC AI | ✅ every fighter's skills (reaction time, accuracy, logic, defense…) are tunable through `npc.set_skill`; head band color shows skill |
-| 36 | Titanfall-style movement: wall-run, slide, dash | `parkour` | Movement and slow motion | ✅ a runner loops sprint, slide under a bar, wall-run, wall-jump, mantle onto a tower, double jump |
-| 37 | Elite enemies dash in and slice in the blink of an eye | `parkour` duel ring | Movement and slow motion | ✅ an elite dash-strikes a level 1 player in under 0.25 s |
-| 38 | Stat-based time perception: a leveled-up player sees enemies in slow motion | `parkour` duel ring | Movement and slow motion | ✅ at level 10 the same attack slows the world to 1/5.5; the player sidesteps and counters |
-| 39 | Slow motion when attacking or being attacked (Zoro / Sung Jin-Woo moments) | `parkour` duel ring | Movement and slow motion | ✅ four grunts attack in turn; each attack and each kill plays in slow motion |
+| 36 | Titanfall-style movement: wall-run, slide, dash | `parkour`, `parkour_course` | Movement and slow motion | ✅ a runner loops sprint, slide under a bar, wall-run, wall-jump, mantle onto a tower, double jump |
+| 37 | Elite enemies dash in and slice in the blink of an eye | `parkour` duel ring, `parkour_blink` | Movement and slow motion | ✅ an elite dash-strikes a level 1 player in under 0.25 s |
+| 38 | Stat-based time perception: a leveled-up player sees enemies in slow motion | `parkour` duel ring, `parkour_focus`, `parkour_counter` | Movement and slow motion | ✅ at level 10 the same attack slows the world to 1/5.5; the player sidesteps and counters |
+| 39 | Slow motion when attacking or being attacked (Zoro / Sung Jin-Woo moments) | `parkour` duel ring, `parkour_pack` | Movement and slow motion | ✅ four grunts attack in turn; each attack and each kill plays in slow motion |
 
 ## Effects and UI
 
 | # | Test case | Zone / viewpoint | Owner | Status |
 |---|---|---|---|---|
 | 40 | Beautiful magic spells (particles) | `magic`, `magic_spells`, `magic_footsteps`, `magic_impacts` | Particles and magic effects | ✅ Spell court: arcane portal, fireballs and frost bolts hitting a wall, lightning between obelisks, a healing aura, fountain, anvil sparks, torches and fireflies; footprint puffs on mud, snow, sand and water and shot impacts on six materials |
-| 41 | Conversation UI between two people | `market` | UI system and maps | 🟨 two villagers |
-| 42 | Shop UI | `market` | UI system and maps | 🟨 stalls |
-| 43 | Inventory UI | `market` | UI system and maps | ⬜ |
-| 44 | Interactive maps: flat map, 3D globe, galaxy map | `market` map table | UI system and maps | 🟨 table and globe |
-| 45 | HUD | any | UI system and maps | ⬜ |
+| 41 | Conversation UI between two people | `market_dialogue` | UI system and maps | ✅ portraits that talk and blink, typewriter text, choices (one opens the shop) |
+| 42 | Shop UI | `market_shop` | UI system and maps | ✅ buy and sell tabs, item cards, quantity, prices and gold |
+| 43 | Inventory UI | `market_inventory` | UI system and maps | ✅ bag grid with drag and drop, equipment, weight, item details |
+| 44 | Interactive maps: flat map, 3D globe, galaxy map | `market_map_surface`, `market_map_globe`, `market_map_system`, `market_map_galaxy` | UI system and maps | ✅ one map zooming surface → globe → star system → galaxy, with POIs, waypoint and info cards |
+| 45 | HUD | `market_hud` (any zone via `ui.show {"screen": "hud"}`) | UI system and maps | ✅ vitals, compass, minimap, quest, hotbar, slow-motion gauge, world markers; also `market_pause`, `market_settings` |
 
 ## Engine-wide
 

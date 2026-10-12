@@ -587,6 +587,7 @@ fn apply_edits(
     mut changed: MessageWriter<TerrainChanged>,
     mut ground: ResMut<engine_world::Ground>,
     mut pending: Local<PendingEdits>,
+    mut prints: ResMut<DeformationMap>,
 ) {
     let mut any = false;
     let waiting = std::mem::take(&mut pending.0);
@@ -638,6 +639,10 @@ fn apply_edits(
             center: edit.center,
             radius: reach as f32,
         });
+        // Digging, building up or smoothing takes the prints there with it; paint keeps them.
+        if edit.op != EditOp::Paint {
+            prints.erase(edit.center, reach as f32);
+        }
         any = true;
     }
     if any {

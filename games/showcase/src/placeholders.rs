@@ -238,7 +238,7 @@ pub fn plaza(commands: &mut Commands, lib: &Library, z: &Zone) {
             tube: 0.25,
             segments: 64,
         },
-        StandardMaterial::hex(0x202830).with_emissive([0.3, 0.7, 1.0], 8_000.0),
+        StandardMaterial::hex(0x202830).with_emissive([0.3, 0.7, 1.0], 600.0),
         Transform::from_translation(c + DVec3::new(0.0, 3.5, -6.0))
             .with_rotation(Quat::from_rotation_x(std::f32::consts::FRAC_PI_2)),
     );
@@ -1087,62 +1087,6 @@ fn falls_sheet(
         v.normal = (if n.dot(out) < 0.0 { -n } else { n }).to_array();
     }
     mesh
-}
-
-/// Voxel hill: a mound of 1 m blocks (grass on dirt on stone) with a dug pit and a block house
-/// (Valheim-style digging and building). The Destructible terrain and buildings and Planets and
-/// terrain threads own it.
-pub fn voxel(commands: &mut Commands, meshes: &mut Assets<Mesh>, z: &Zone, rng: &mut Rng) {
-    use engine::core::math::noise::fbm2;
-    let mut b = crate::meshgen::Builder::default();
-    let grass = Vec3::new(0.08, 0.17, 0.04);
-    let dirt = Vec3::new(0.18, 0.12, 0.07);
-    let stone_c = Vec3::new(0.22, 0.21, 0.2);
-    let n = 36i32;
-    let height = |i: i32, j: i32| -> i32 {
-        let (x, y) = (i as f64 - n as f64 * 0.5, j as f64 - n as f64 * 0.5);
-        let r = (x * x + y * y).sqrt() / (n as f64 * 0.5);
-        let mound = (1.0 - r).max(0.0) * 9.0 + fbm2(x / 6.0, y / 6.0, 3, 3, 2.0, 0.5) as f64 * 2.0;
-        // The dug pit.
-        let pit = ((x - 4.0).powi(2) + (y + 3.0).powi(2)).sqrt() < 4.0;
-        if pit {
-            (mound as i32 - 4).max(0)
-        } else {
-            mound.max(0.0) as i32
-        }
-    };
-    for i in 0..n {
-        for j in 0..n {
-            let top = height(i, j);
-            for y in 0..top {
-                let c = if y == top - 1 {
-                    grass
-                } else if y > top - 4 {
-                    dirt
-                } else {
-                    stone_c
-                } * (0.9 + 0.2 * rng.f32());
-                // Only blocks with an exposed side need faces; boxes are cheap enough here.
-                let exposed = y == top - 1
-                    || height(i - 1, j) <= y
-                    || height(i + 1, j) <= y
-                    || height(i, j - 1) <= y
-                    || height(i, j + 1) <= y;
-                if exposed {
-                    let p = Vec3::new(
-                        i as f32 - n as f32 * 0.5,
-                        y as f32 + 0.5,
-                        j as f32 - n as f32 * 0.5,
-                    );
-                    b.aabb(p - Vec3::splat(0.5), p + Vec3::splat(0.5), c);
-                }
-            }
-        }
-    }
-    commands.spawn((
-        at(z.center),
-        MeshRenderer::new(meshes.add(b.finish()), mat(0xffffff, 0.9)),
-    ));
 }
 
 /// Dry grass around the fire module's burning meadow (which fills the middle of the zone), out
