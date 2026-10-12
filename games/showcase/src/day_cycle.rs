@@ -58,7 +58,8 @@ pub fn advance(
     mut sun: Query<(&mut Transform, &mut DirectionalLight), With<Sun>>,
 ) {
     if cycle.hours_per_second != 0.0 {
-        cycle.hour = (cycle.hour + cycle.hours_per_second * time.real_delta_secs()).rem_euclid(24.0);
+        cycle.hour =
+            (cycle.hour + cycle.hours_per_second * time.real_delta_secs()).rem_euclid(24.0);
     }
     let dir = sun_direction(cycle.hour);
     weather.time_of_day_h = cycle.hour;

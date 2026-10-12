@@ -24,6 +24,7 @@
 //! ```
 
 pub mod components;
+pub mod exposure;
 pub mod features;
 pub mod frame;
 pub mod gpu;
@@ -51,7 +52,9 @@ pub use features::{
 pub use frame::ViewData;
 pub use material::{AlphaMode, StandardMaterial};
 pub use mesh::{Mesh, Shape, Vertex};
-pub use renderer::{RenderDisabled, RenderStats, Renderer, ScreenshotInfo, Screenshots, capture_now};
+pub use renderer::{
+    RenderDisabled, RenderStats, Renderer, ScreenshotInfo, Screenshots, capture_now,
+};
 pub use settings::{Atmosphere, DebugView, FogSettings, RenderSettings, Tonemapper};
 pub use wgpu;
 
@@ -179,7 +182,9 @@ pub fn resolve_mesh_renderers(
     for (entity, renderer, existing) in &query {
         let mesh = match &renderer.mesh {
             MeshRef::Handle(h) => Some(*h),
-            MeshRef::Shape(shape) => Some(meshes.get_or_insert_keyed(&shape.key(), || shape.mesh())),
+            MeshRef::Shape(shape) => {
+                Some(meshes.get_or_insert_keyed(&shape.key(), || shape.mesh()))
+            }
             MeshRef::Asset(path) => meshes.by_key(path),
         };
         let material = match &renderer.material {
@@ -204,13 +209,18 @@ mod tests {
     /// Every shader must compile against the shader library (no GPU needed).
     #[test]
     fn shaders_validate() {
-        let shaders: [(&str, &str, bool); 6] = [
+        let shaders: [(&str, &str, bool); 7] = [
             ("mesh", include_str!("shaders/mesh.wgsl"), true),
-            ("mesh_shadow", include_str!("shaders/mesh_shadow.wgsl"), false),
+            (
+                "mesh_shadow",
+                include_str!("shaders/mesh_shadow.wgsl"),
+                false,
+            ),
             ("sky", include_str!("shaders/sky.wgsl"), true),
             ("post", include_str!("shaders/post.wgsl"), false),
             ("bloom", include_str!("shaders/bloom.wgsl"), false),
             ("blit", include_str!("shaders/blit.wgsl"), false),
+            ("exposure", include_str!("shaders/exposure.wgsl"), false),
         ];
         let mut errors = Vec::new();
         for (name, src, frame) in shaders {

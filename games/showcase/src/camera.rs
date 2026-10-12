@@ -18,13 +18,20 @@ pub struct ShowcaseCamera {
 }
 
 pub fn spawn_camera(commands: &mut Commands) {
-    let mut cam = ShowcaseCamera { yaw: 0.0, pitch: 0.0, speed_scale: 1.0 };
+    let mut cam = ShowcaseCamera {
+        yaw: 0.0,
+        pitch: 0.0,
+        speed_scale: 1.0,
+    };
     let mut t = Transform::default();
     let start = places::find("plaza").expect("plaza");
     look(&mut t, &mut cam, start.position, start.target);
     commands.spawn((
         Camera {
-            projection: Projection::Perspective { fov_y_deg: 55.0, near: 0.1 },
+            projection: Projection::Perspective {
+                fov_y_deg: 55.0,
+                near: 0.1,
+            },
             ..Default::default()
         },
         cam,
@@ -96,7 +103,11 @@ pub fn fly(
         cycle.hour = (cycle.hour + 1.0).rem_euclid(24.0);
     }
     if keys.just_pressed(KeyCode::T) {
-        cycle.hours_per_second = if cycle.hours_per_second == 0.0 { 0.25 } else { 0.0 };
+        cycle.hours_per_second = if cycle.hours_per_second == 0.0 {
+            0.25
+        } else {
+            0.0
+        };
     }
 
     let dt = time.real_delta_secs();

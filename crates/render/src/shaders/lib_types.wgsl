@@ -25,7 +25,7 @@ struct Frame {
     sun_color: vec4<f32>,          // linear RGB * illuminance (lux), w = shadows enabled (1/0)
     sun_camera: vec4<f32>,         // sun illuminance reaching the camera through the atmosphere (lux RGB)
     ambient: vec4<f32>,            // extra ambient fill radiance (cd/m^2) RGB, w = ground albedo
-    fog: vec4<f32>,                // density, height falloff, fog base height (world y), max opacity
+    fog: vec4<f32>,                // density, height falloff, fog base altitude (m above the planet surface; world y without one), max opacity
     fog_color: vec4<f32>,          // fog albedo RGB (lit by sky and sun), w = sun scattering strength
     wind: vec4<f32>,               // wind velocity (m/s) xyz, w = gust phase
     weather: vec4<f32>,            // wetness, snow cover, cloud cover, precipitation (mm/h)
@@ -36,6 +36,9 @@ struct Frame {
     shadow_splits: vec4<f32>,      // far view distance of each cascade
     shadow_params: vec4<f32>,      // depth bias, normal bias (texels), pcf radius (texels), map size
     counts: vec4<u32>,             // point light count, cascade count, debug view, unused
+    ground: vec4<f32>,             // planet surface albedo RGB (beyond the terrain), w = ground-bounce weight (fades with altitude)
+    sky_occlusion: mat4x4<f32>,    // camera-relative -> top-down sky occlusion map clip space (standard Z, 0 = top)
+    sky_occlusion_params: vec4<f32>, // enabled (1/0), covered width (m), texel size (m), depth range (m)
 };
 
 struct PointLight {

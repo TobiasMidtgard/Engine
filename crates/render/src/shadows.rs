@@ -53,6 +53,88 @@ impl Cascades {
     }
 }
 
+/// Top-down depth map around the camera that records the highest surface over each spot.
+///
+/// Shading uses it for sky visibility (caves, rooms and overhangs don't get sky light), and
+/// weather effects use it to keep rain and snow off covered ground (`sky_visibility` in
+/// `lib_frame.wgsl`). Features draw into it from `draw_shadow` with
+/// [`SKY_OCCLUSION_VIEW`] as the cascade index, using the same shadow pipeline as for the sun.
+#[derive(Debug, Clone, Copy)]
+pub struct SkyOcclusionView {
+    pub enabled: bool,
+    pub map_size: u32,
+    /// Width of the covered square, meters.
+    pub extent: f32,
+    /// Depth covered: from `depth_range / 2` above the camera to as far below it.
+    pub depth_range: f32,
+    /// Camera-relative → occlusion clip space (orthographic, looking down, standard Z).
+    pub view_proj: Mat4,
+    /// Camera-relative → occlusion view space (looking down −Z), for culling.
+    pub view: Mat4,
+}
+
+/// Cascade index passed to `RenderFeature::draw_shadow` for the sky occlusion map.
+pub const SKY_OCCLUSION_VIEW: usize = MAX_CASCADES;
+
+impl Default for SkyOcclusionView {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            map_size: 512,
+            extent: 256.0,
+            depth_range: 800.0,
+            view_proj: Mat4::IDENTITY,
+            view: Mat4::IDENTITY,
+        }
+    }
+}
+
+impl SkyOcclusionView {
+    /// Build the view for a camera at world position `origin`. The square is snapped to whole
+    /// texels in world space so the map doesn't shimmer as the camera moves.
+    pub fn new(origin: DVec3, map_size: u32, extent: f32, depth_range: f32, enabled: bool) -> Self {
+        let texel = extent as f64 / map_size.max(1) as f64;
+        let snapped = DVec3::new(
+            (origin.x / texel).floor() * texel,
+            origin.y,
+            (origin.z / texel).floor() * texel,
+        );
+        let eye = (snapped - origin).as_vec3() + Vec3::Y * (depth_range * 0.5);
+        // Looking straight down (−Y) with −Z as "up" in the map.
+        let rotation = Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2);
+        let view = Mat4::from_rotation_translation(rotation, eye).inverse();
+        let proj = crate::frame::orthographic_standard(extent * 0.5, 0.0, depth_range);
+        Self {
+            enabled,
+            map_size,
+            extent,
+            depth_range,
+            view_proj: proj * view,
+            view,
+        }
+    }
+
+    /// Whether a camera-relative bounding sphere touches the covered box.
+    pub fn contains_sphere(&self, center: Vec3, radius: f32) -> bool {
+        let p = self.view.transform_point3(center);
+        let e = self.extent * 0.5 + radius;
+        p.x.abs() <= e
+            && p.y.abs() <= e
+            && -p.z + radius >= 0.0
+            && -p.z - radius <= self.depth_range
+    }
+
+    /// `sky_occlusion_params` in the frame uniform: enabled, extent, texel size, depth range.
+    pub fn params(&self) -> [f32; 4] {
+        [
+            if self.enabled { 1.0 } else { 0.0 },
+            self.extent,
+            self.extent / self.map_size.max(1) as f32,
+            self.depth_range,
+        ]
+    }
+}
+
 /// GPU layout of `struct ShadowView` in `mesh_shadow.wgsl` (and any feature's shadow shader).
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Pod, Zeroable)]
@@ -92,7 +174,12 @@ pub fn compute_cascades(
     let far = settings.shadow_distance.max(near * 4.0 + 1.0);
     // The first cascade starts a little in front of the camera to give it more resolution.
     let first_near = near.max(0.1);
-    let splits = split_distances(first_near.max(1.0), far, count, settings.shadow_split_lambda);
+    let splits = split_distances(
+        first_near.max(1.0),
+        far,
+        count,
+        settings.shadow_split_lambda,
+    );
 
     let forward = (rotation * Vec3::NEG_Z).as_dvec3();
     let (tx, ty) = if orthographic {
@@ -143,7 +230,8 @@ pub fn compute_cascades(
         // Eye sits behind the sphere toward the sun; depth covers the sphere plus extra room.
         let back = radius as f32 * 2.0 + 50.0;
         let eye = center_rel + sun_dir * back;
-        let light_view = Mat4::from_quat(light_rot.as_quat().inverse()) * Mat4::from_translation(-eye);
+        let light_view =
+            Mat4::from_quat(light_rot.as_quat().inverse()) * Mat4::from_translation(-eye);
         let depth = back + radius as f32;
         let light_proj = crate::frame::orthographic_standard(radius as f32, 0.0, depth);
         out.light_view[i] = light_view;
@@ -157,7 +245,11 @@ pub fn compute_cascades(
 
 fn look_rotation_f64(forward: DVec3) -> DQuat {
     let f = forward.normalize();
-    let up = if f.y.abs() > 0.999 { DVec3::Z } else { DVec3::Y };
+    let up = if f.y.abs() > 0.999 {
+        DVec3::Z
+    } else {
+        DVec3::Y
+    };
     let right = f.cross(up).normalize();
     let up = right.cross(f);
     DQuat::from_mat3(&DMat3::from_cols(right, up, -f))
@@ -180,7 +272,17 @@ mod tests {
         let sun = Vec3::new(0.3, 0.8, 0.2).normalize();
         let origin = DVec3::new(1000.0, 20.0, -5000.0);
         let proj = crate::frame::perspective_infinite_reverse(1.2, 1.6, 0.1);
-        let a = compute_cascades(&settings, origin, Quat::IDENTITY, 0.1, 1.2, 1.6, false, sun, &proj);
+        let a = compute_cascades(
+            &settings,
+            origin,
+            Quat::IDENTITY,
+            0.1,
+            1.2,
+            1.6,
+            false,
+            sun,
+            &proj,
+        );
         let b = compute_cascades(
             &settings,
             origin,
@@ -203,5 +305,24 @@ mod tests {
         // Projecting a point near the camera lands inside clip space.
         let c = a.view_proj[0] * Vec4::new(0.0, 0.0, -1.0, 1.0);
         assert!(c.x.abs() <= 1.0 && c.y.abs() <= 1.0 && (0.0..=1.0).contains(&c.z));
+    }
+}
+
+#[cfg(test)]
+mod sky_occlusion_tests {
+    use super::*;
+
+    #[test]
+    fn sky_occlusion_maps_points_below_the_eye_into_the_unit_square() {
+        let v = SkyOcclusionView::new(DVec3::new(1234.5, 10.0, -77.25), 512, 256.0, 800.0, true);
+        // A point 3 m above the camera's feet, 20 m away: inside the square, depth in 0..1.
+        let clip = v.view_proj * Vec4::new(20.0, 3.0, -15.0, 1.0);
+        assert!(clip.x.abs() < 1.0 && clip.y.abs() < 1.0);
+        assert!(clip.z > 0.0 && clip.z < 1.0);
+        // Higher points have smaller depth (closer to the eye above).
+        let higher = v.view_proj * Vec4::new(20.0, 30.0, -15.0, 1.0);
+        assert!(higher.z < clip.z);
+        assert!(v.contains_sphere(Vec3::new(20.0, 3.0, -15.0), 1.0));
+        assert!(!v.contains_sphere(Vec3::new(500.0, 3.0, 0.0), 1.0));
     }
 }

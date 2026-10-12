@@ -6,7 +6,7 @@ struct PostParams {
     params: vec4<f32>,
     // x: bloom intensity (0..1 mix), y: film grain, z: real time, w: bloom normalization
     params2: vec4<f32>,
-    // x: debug view, y: white balance warm(+)/cool(-), z, w: unused
+    // x: debug view, y: white balance warm(+)/cool(-), z: pre-exposure, w: night desaturation
     params3: vec4<f32>,
 };
 
@@ -59,6 +59,13 @@ fn fs_tonemap(in: FullscreenOut) -> @location(0) vec4<f32> {
     var c = textureSampleLevel(hdr_tex, post_sampler, in.uv, 0.0).rgb;
     let bloom = textureSampleLevel(bloom_tex, post_sampler, in.uv, 0.0).rgb * post.params2.w;
     c = mix(c, bloom, post.params2.x);
+    // Scotopic (night) vision: below ~1 cd/m^2 color fades toward a blue-gray.
+    let night = post.params3.w;
+    if (night > 0.0) {
+        let l_abs = luminance(c) / max(post.params3.z, 1e-12);
+        let scotopic = smoothstep(1.0, 0.005, l_abs) * night;
+        c = mix(c, vec3(luminance(c)) * vec3(0.75, 0.9, 1.25), scotopic);
+    }
     // White balance: simple warm/cool tint that preserves luminance.
     let wb = post.params3.y;
     if (wb != 0.0) {
@@ -83,9 +90,14 @@ fn fs_tonemap(in: FullscreenOut) -> @location(0) vec4<f32> {
     // Vignette.
     let d = distance(in.uv, vec2(0.5));
     mapped *= 1.0 - post.params.w * smoothstep(0.4, 0.85, d);
-    // Film grain (breaks up banding).
+    // Film grain.
     let grain = (hash12(in.uv * 1000.0 + post.params2.z) - 0.5) * post.params2.y;
-    mapped += grain;
-    return vec4<f32>(max(mapped, vec3(0.0)), 1.0);
+    mapped = max(mapped + grain, vec3(0.0));
+    // Dither by one 8-bit step in display (sRGB) space so skies and fog don't band.
+    let px = in.uv * 4096.0;
+    let dither = (hash12(px + fract(post.params2.z) * 61.0) + hash12(px.yx + 17.3) - 1.0) / 255.0;
+    let encoded = pow(mapped, vec3(1.0 / 2.2)) + dither;
+    mapped = pow(max(encoded, vec3(0.0)), vec3(2.2));
+    return vec4<f32>(mapped, 1.0);
 }
 

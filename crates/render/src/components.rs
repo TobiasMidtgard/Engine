@@ -56,7 +56,7 @@ impl Default for Exposure {
     fn default() -> Self {
         Exposure::Auto {
             min_ev100: -3.0,
-            max_ev100: 16.0,
+            max_ev100: 18.0,
             speed: 2.0,
             compensation: 0.0,
         }

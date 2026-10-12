@@ -56,7 +56,7 @@ fn planet_ground(dir: vec3<f32>, t: f32) -> vec3<f32> {
     let n_dot_l = dot(n, sun);
     let sun_light = frame.sun_color.rgb * sun_transmittance(p + n * 10.0) * saturate(n_dot_l);
     let sky_light = frame.sun_color.rgb * 0.12 * smoothstep(-0.15, 0.3, n_dot_l);
-    let albedo = vec3<f32>(0.85, 1.0, 0.75) * frame.ambient.w;
+    let albedo = frame.ground.rgb;
     return albedo * (sun_light + sky_light) * INV_PI + frame.ambient.rgb * albedo;
 }
 

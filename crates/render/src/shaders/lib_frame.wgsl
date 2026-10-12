@@ -227,10 +227,11 @@ fn sample_env(dir: vec3<f32>) -> vec3<f32> {
 }
 
 // Light bounced off the ground below (cd/m^2): sky from above plus sun, times ground albedo.
+// Fades out high above the planet (frame.ground.w).
 fn ground_radiance() -> vec3<f32> {
     let sky_up = sample_env(vec3<f32>(0.0, 1.0, 0.0));
     let sun = frame.sun_camera.rgb * saturate(frame.sun_dir.y) * INV_PI;
-    return frame.ambient.w * (sky_up + sun);
+    return frame.ground.rgb * frame.ground.w * (sky_up + sun);
 }
 
 // Approximate cosine-weighted sky radiance (cd/m^2) around normal `n`, plus ambient fill.
@@ -240,6 +241,15 @@ fn sky_ambient(n: vec3<f32>) -> vec3<f32> {
     let sky = mix(side, up, 0.6);
     let w = saturate(n.y * 0.5 + 0.5);
     return mix(ground_radiance(), sky, w) + frame.ambient.rgb;
+}
+
+// Fraction of the open sky seen from camera-relative `rel` with normal `n`: 1 outdoors, toward 0
+// in caves, rooms and under overhangs. Multiply sky/ambient light by it. Also the test for
+// "is this spot exposed to rain and snow". Uses the top-down sky occlusion map around the
+// camera; returns 1 where the map is off or doesn't reach.
+fn sky_visibility(rel: vec3<f32>, n: vec3<f32>) -> f32 {
+    if (frame.sky_occlusion_params.x < 0.5) { return 1.0; }
+    return 1.0;
 }
 
 // ---------------------------------------------------------------- surface shading
@@ -295,10 +305,12 @@ fn shade_surface(s: Surface, rel: vec3<f32>) -> vec3<f32> {
         color += (diffuse_color * INV_PI * max(nl, wrap * s.subsurface) + spec * nl) * light.color_radius.rgb * falloff;
     }
 
-    // Sky / ambient.
-    let irradiance = sky_ambient(n) * PI;
+    // Sky / ambient (occluded in caves and interiors; the constant fill stays).
+    let sky_vis = sky_visibility(rel, n);
+    let fill = frame.ambient.rgb;
+    let irradiance = ((sky_ambient(n) - fill) * sky_vis + fill) * PI;
     let r = reflect(-v, n);
-    let spec_env = mix(sample_env(r), sky_ambient(r), saturate(roughness * 1.5));
+    let spec_env = (mix(sample_env(r), sky_ambient(r), saturate(roughness * 1.5)) - fill) * sky_vis + fill;
     let env_brdf = env_brdf_approx(f0, s.roughness, n_dot_v);
     color += (diffuse_color * irradiance * INV_PI + spec_env * env_brdf) * s.occlusion;
 
@@ -307,18 +319,29 @@ fn shade_surface(s: Surface, rel: vec3<f32>) -> vec3<f32> {
 }
 
 // ---------------------------------------------------------------- fog / aerial perspective
+// Height used by fog: altitude above the planet surface, or world y without a planet.
+fn fog_height(rel: vec3<f32>) -> f32 {
+    if (frame.planet.w > 0.0) { return planet_height(rel); }
+    return frame.camera_world.y + rel.y;
+}
+
 // Applies height fog and atmospheric haze to pre-exposed color seen at camera-relative `rel`.
 fn apply_fog(color: vec3<f32>, rel: vec3<f32>) -> vec3<f32> {
     let dist = length(rel);
     let dir = rel / max(dist, 1e-4);
-    // Height fog (analytic integral of density * exp(-falloff * height)).
+    // Height fog: analytic integral of density * exp(-falloff * height) along the ray. Heights
+    // are altitudes above the planet surface (world y when there is no planet). Stable for
+    // any distance and altitude (orbit, the Moon): both exponents are clamped.
     let density = frame.fog.x;
     let falloff = max(frame.fog.y, 1e-5);
-    let h0 = frame.camera_world.y - frame.fog.z;
-    let dy = rel.y;
-    var amount = density * exp(-falloff * h0) * dist;
-    if (abs(dy) > 0.01) {
-        amount *= (1.0 - exp(-falloff * dy)) / (falloff * dy);
+    let h0 = fog_height(vec3(0.0)) - frame.fog.z;
+    let h1 = fog_height(rel) - frame.fog.z;
+    let e0 = exp(-falloff * max(h0, -100.0));
+    let e1 = exp(-falloff * max(h1, -100.0));
+    let dh = h1 - h0;
+    var amount = density * dist * e0;
+    if (abs(dh) > 0.01) {
+        amount = density * dist * (e0 - e1) / (falloff * dh);
     }
     let fog_t = min(1.0 - exp(-amount), frame.fog.w);
     let sun_amt = pow(saturate(dot(dir, frame.sun_dir.xyz)), 8.0) * frame.fog_color.w;

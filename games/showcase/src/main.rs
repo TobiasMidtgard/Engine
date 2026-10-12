@@ -45,20 +45,27 @@ fn main() {
             engine_audio::AudioPlugin,
         ))
         .init_resource::<day_cycle::DayCycle>()
-        .register_resource::<day_cycle::DayCycle>("Showcase clock: hour of day and how fast it runs.")
+        .register_resource::<day_cycle::DayCycle>(
+            "Showcase clock: hour of day and how fast it runs.",
+        )
         .add_systems(Startup, setup)
         .add_systems(Update, (camera::fly, day_cycle::advance).chain());
     register_apis(&mut app);
 
     let args: Vec<String> = std::env::args().collect();
     if let Some(i) = args.iter().position(|a| a == "--tour") {
-        let only = args.get(i + 1).filter(|a| !a.starts_with("--")).map(String::as_str);
+        let only = args
+            .get(i + 1)
+            .filter(|a| !a.starts_with("--"))
+            .map(String::as_str);
         tour::install(&mut app, only);
     }
     app.run();
 }
 
-fn setup(mut commands: Commands, config: Res<EngineConfig>) {
+fn setup(mut commands: Commands, config: Res<EngineConfig>, mut atmosphere: ResMut<Atmosphere>) {
+    // The planet beyond the map is grassland too, so the map's edge blends into it.
+    atmosphere.ground_color = [0.09, 0.18, 0.04];
     zones::spawn_world(&mut commands, config.seed);
     camera::spawn_camera(&mut commands);
     day_cycle::spawn_sun(&mut commands);

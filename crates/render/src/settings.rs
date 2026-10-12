@@ -58,6 +58,17 @@ pub struct RenderSettings {
     pub debug_view: DebugView,
     /// Re-render the sky environment map every N frames (1 = every frame).
     pub environment_interval: u32,
+    /// Top-down sky occlusion map around the camera (caves and interiors lose sky light; rain
+    /// stays off covered ground).
+    pub sky_occlusion: bool,
+    /// Width of the area it covers, meters (resolution is `sky_occlusion_size`²).
+    pub sky_occlusion_extent: f32,
+    pub sky_occlusion_size: u32,
+    /// How many EV darker than "average gray" very dark scenes are shown (0 = a moonlit night
+    /// is exposed like noon; 2.5 = night looks like night). Ramps in below EV100 ≈ 5.
+    pub night_exposure_bias: f32,
+    /// 0..1 loss of color in very dark areas (scotopic vision: moonlight looks blue-gray).
+    pub night_desaturation: f32,
 }
 
 impl Default for RenderSettings {
@@ -80,6 +91,11 @@ impl Default for RenderSettings {
             max_point_lights: 256,
             debug_view: DebugView::None,
             environment_interval: 1,
+            sky_occlusion: true,
+            sky_occlusion_extent: 256.0,
+            sky_occlusion_size: 512,
+            night_exposure_bias: 2.5,
+            night_desaturation: 0.7,
         }
     }
 }
@@ -92,7 +108,8 @@ pub struct FogSettings {
     pub density: f32,
     /// How fast fog thins with height, per meter.
     pub height_falloff: f32,
-    /// World height where density applies, meters.
+    /// Altitude above the planet surface (world y when there is no planet) where `density`
+    /// applies, meters.
     pub base_height: f32,
     /// Fog never hides more than this fraction of an object (keeps silhouettes).
     pub max_opacity: f32,
@@ -130,8 +147,9 @@ pub struct Atmosphere {
     pub mie_scale_height: f32,
     /// Mie anisotropy (0.76 hazy .. 0.9 clear).
     pub mie_g: f32,
-    /// Ground albedo used for bounce light.
-    pub ground_albedo: f32,
+    /// Albedo (linear RGB) of the planet surface beyond the terrain: the ground seen from high
+    /// up and toward the horizon, and the color of light bounced off the ground.
+    pub ground_color: [f32; 3],
 }
 
 impl Default for Atmosphere {
@@ -144,7 +162,7 @@ impl Default for Atmosphere {
             rayleigh_scale_height: 8_000.0,
             mie_scale_height: 1_200.0,
             mie_g: 0.8,
-            ground_albedo: 0.2,
+            ground_color: [0.12, 0.15, 0.09],
         }
     }
 }

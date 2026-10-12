@@ -4,12 +4,12 @@
 
 use crate::camera;
 use crate::day_cycle::DayCycle;
-use crate::places::{places, Place};
+use crate::places::{Place, places};
 use engine::prelude::*;
 
-/// Frames to wait at each place before capturing (auto-exposure and the environment map
-/// need a few frames to adapt).
-const SETTLE_FRAMES: u32 = 4;
+/// Frames to wait at each place before capturing (metered auto-exposure reads back a frame or
+/// two late, then adapts).
+const SETTLE_FRAMES: u32 = 8;
 
 #[derive(Resource, Debug)]
 pub struct Tour {
@@ -52,7 +52,13 @@ fn run(world: &mut World) {
             world.write_message(AppExit::Success);
             return;
         };
-        (place, tour.frames, tour.index, tour.places.len(), tour.out_dir.clone())
+        (
+            place,
+            tour.frames,
+            tour.index,
+            tour.places.len(),
+            tour.out_dir.clone(),
+        )
     };
 
     if frames == 0 {
@@ -68,6 +74,14 @@ fn run(world: &mut World) {
         engine::core::log::info!("tour {}/{}: {}", index + 1, total, place.name);
     }
 
+    if frames == SETTLE_FRAMES {
+        let d = world.resource::<Diagnostics>();
+        engine::core::log::info!(
+            "  exposure EV100 {:.1} (metered {:.1})",
+            d.get("render.ev100").unwrap_or(f64::NAN),
+            d.get("render.ev100_metered").unwrap_or(f64::NAN)
+        );
+    }
     let mut tour = world.resource_mut::<Tour>();
     if frames == SETTLE_FRAMES {
         let path = format!("{out_dir}/{:02}_{}.png", index + 1, place.key);
