@@ -217,11 +217,11 @@ pub const GRASSY_ZONES: &[&str] = &[
     "weather",
 ];
 
-/// Footprints inside grassy zones where a module's demo lays its own ground, so no grass grows
-/// there: zone key and half size in X and Z, meters.
-pub const BARE_FOOTPRINTS: &[(&str, f64, f64)] = &[
-    // The weather station's yard, sand pit and patio (about 25 x 12 m).
-    ("weather", 14.0, 8.0),
+/// Rectangles inside grassy zones where a module's demo lays its own ground, so no grass grows
+/// there: zone key, then x min..max and z min..max relative to the zone center, meters.
+pub const BARE_FOOTPRINTS: &[(&str, [f64; 2], [f64; 2])] = &[
+    // The weather station's asphalt yard, sand pit and stone patio.
+    ("weather", [-13.0, 12.0], [-8.0, 9.0]),
 ];
 
 /// The stream's course (x, z), spring first: through the southern woods, over the cliff south
@@ -252,7 +252,7 @@ pub fn spawn_demos(
         match z.key {
             "plaza" => ph::plaza(commands, lib, z),
             "market" => ph::market(commands, lib, z),
-            "paddock" => ph::stage(commands, lib, z),
+            "paddock" => engine_anim::demo::spawn_demo(commands, z.center),
             "physics" => ph::physics(commands, lib, z),
             "yard" => engine_softbody::demo::spawn_demo(commands, z.center),
             "magic" => ph::magic(commands, lib, z),
@@ -265,7 +265,7 @@ pub fn spawn_demos(
             "tracks" => ph::tracks(commands, z),
             "cave" => ph::cave(commands, z, rng),
             "arena" => ph::arena(commands, lib, z),
-            "parkour" => ph::parkour(commands, lib, z),
+            "parkour" => engine_movement::demo::spawn_demo(commands, z.center),
             "fortress" => engine_destruction::demo::spawn_demo(commands, z.center),
             "voxel" => ph::voxel(commands, meshes, z, rng),
             "field" => {
@@ -387,67 +387,6 @@ pub fn demo_views(z: &Zone) -> Vec<View> {
             )
             .warmup(7.0),
         ],
-        "weather" => {
-            // Each stop sets its weather and fast-forwards so the ground has time to change,
-            // then leaves fair weather and dry ground for the next stop.
-            let fair = |v: View| {
-                v.on_leave(
-                    "weather.set",
-                    r#"{"preset": "partly_cloudy", "transition_s": 0}"#,
-                )
-                .on_leave("weather.ground", r#"{"dry": true}"#)
-                .on_leave("weather.advance", r#"{"seconds": 60}"#)
-            };
-            vec![
-                fair(
-                    View::new(
-                        "weather_storm",
-                        "A storm: downpour, wet ground and puddles",
-                        [-6.0, 1.6, 9.0],
-                        [2.0, 0.5, -2.0],
-                        15.5,
-                    )
-                    .on_arrive("weather.set", r#"{"preset": "storm", "transition_s": 0}"#)
-                    .on_arrive("weather.advance", r#"{"seconds": 900}"#)
-                    .warmup(0.5),
-                ),
-                fair(
-                    View::new(
-                        "weather_puddles",
-                        "After the rain: puddles mirror the sky",
-                        [5.5, 0.6, 5.0],
-                        [-3.0, 1.2, -3.0],
-                        16.5,
-                    )
-                    .on_arrive("weather.advance", r#"{"seconds": 120}"#)
-                    .on_arrive("weather.ground", r#"{"wetness": 1.0, "puddle_m": 0.012}"#),
-                ),
-                fair(
-                    View::new(
-                        "weather_fog",
-                        "A foggy morning",
-                        [-14.0, 2.0, 14.0],
-                        [0.0, 1.0, 0.0],
-                        7.0,
-                    )
-                    .on_arrive("weather.ground", r#"{"wetness": 0.3}"#)
-                    .on_arrive("weather.set", r#"{"preset": "fog", "transition_s": 0}"#)
-                    .on_arrive("weather.advance", r#"{"seconds": 600}"#),
-                ),
-                fair(
-                    View::new(
-                        "weather_snow",
-                        "Snow settles on the hill after four hours",
-                        [-12.0, 2.5, 13.0],
-                        [0.0, 1.0, 0.0],
-                        12.5,
-                    )
-                    .on_arrive("weather.set", r#"{"preset": "snow", "transition_s": 0}"#)
-                    .on_arrive("weather.advance", r#"{"seconds": 14400}"#)
-                    .warmup(0.5),
-                ),
-            ]
-        }
         _ => Vec::new(),
     }
 }

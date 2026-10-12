@@ -383,82 +383,6 @@ pub fn market(commands: &mut Commands, _lib: &Library, z: &Zone) {
     );
 }
 
-/// Animation stage: a wooden stage with mannequins, a horse and a cart (humanoids, animals,
-/// vehicles; muscles and cloth tension). The Animation thread owns it.
-pub fn stage(commands: &mut Commands, _lib: &Library, z: &Zone) {
-    let c = z.center;
-    spawn(
-        commands,
-        cyl(14.0, 1.0),
-        wood(),
-        at(c + DVec3::new(0.0, 0.5, 0.0)),
-    );
-    spawn(
-        commands,
-        cyl(14.4, 0.3),
-        dark_wood(),
-        at(c + DVec3::new(0.0, 0.15, 0.0)),
-    );
-    let top = c + DVec3::new(0.0, 1.0, 0.0);
-    for (i, x) in [-6.0, -3.0, 0.0, 3.0].into_iter().enumerate() {
-        person(
-            commands,
-            top + DVec3::new(x, 0.0, -3.0),
-            (i as f32) * 0.5,
-            [0xd35400, 0x2980b9, 0x16a085, 0x8e44ad][i],
-        );
-    }
-    quadruped(
-        commands,
-        top + DVec3::new(-3.0, 0.0, 4.0),
-        0.4,
-        1.35,
-        0x5a3a22,
-    );
-    quadruped(
-        commands,
-        top + DVec3::new(4.0, 0.0, 3.0),
-        -0.8,
-        0.55,
-        0x9a8a70,
-    );
-    // A cart.
-    spawn(
-        commands,
-        cuboid(2.0, 0.6, 3.0),
-        wood(),
-        at(top + DVec3::new(6.0, 0.9, -4.0)),
-    );
-    for (x, zz) in [(-1.1, -1.0), (1.1, -1.0), (-1.1, 1.0), (1.1, 1.0)] {
-        spawn(
-            commands,
-            Shape::Torus {
-                radius: 0.45,
-                tube: 0.06,
-                segments: 20,
-            },
-            dark_wood(),
-            Transform::from_translation(top + DVec3::new(6.0 + x, 0.5, -4.0 + zz))
-                .with_rotation(Quat::from_rotation_z(std::f32::consts::FRAC_PI_2)),
-        );
-    }
-    // Backdrop and stage lights.
-    spawn(
-        commands,
-        cuboid(26.0, 7.0, 0.4),
-        mat(0x5b2333, 0.9).with_subsurface(0.3),
-        at(c + DVec3::new(0.0, 4.5, -12.5)),
-    );
-    for x in [-12.0, 12.0] {
-        spawn(
-            commands,
-            cuboid(0.4, 9.0, 0.4),
-            dark_wood(),
-            at(c + DVec3::new(x, 4.5, -12.0)),
-        );
-    }
-}
-
 /// Physics playground: domino run, crate pyramid, Newton's cradle, ramp with balls, seesaw.
 /// The Physics and rigid bodies thread owns it.
 pub fn physics(commands: &mut Commands, _lib: &Library, z: &Zone) {
@@ -1305,6 +1229,7 @@ fn stream_water(commands: &mut Commands, meshes: &mut Assets<Mesh>, land: &Lands
             // Falling water is mostly air: a rough, white, barely mirror-like sheet.
             let mut white_water = StandardMaterial::hex(0xffffff)
                 .with_roughness(0.35)
+                .with_subsurface(0.7)
                 .with_alpha(0.93);
             white_water.reflectance = 0.25;
             white_water.receives_wetness = false;
@@ -1316,22 +1241,70 @@ fn stream_water(commands: &mut Commands, meshes: &mut Assets<Mesh>, land: &Lands
             ));
         }
         if let (Some((c, _)), Some((_, bottom))) = (st.pool, falls) {
-            let mut froth = StandardMaterial::hex(0xc8d4d8)
-                .with_roughness(0.4)
-                .with_alpha(0.75);
+            let mut froth = StandardMaterial::hex(0xffffff)
+                .with_roughness(0.45)
+                .with_subsurface(0.5)
+                .with_alpha(0.85);
             froth.receives_wetness = false;
-            spawn(
-                commands,
-                Shape::Cylinder {
-                    radius: 5.0,
-                    height: 0.02,
-                    segments: 40,
-                },
-                froth,
-                at(DVec3::new(c.x, level(bottom) + 0.02, c.y)),
+            froth.double_sided = true;
+            commands.spawn((
+                at(DVec3::new(c.x, level(bottom) + 0.03, c.y)),
+                MeshRenderer::new(meshes.add(froth_patch(5.5)), froth).without_shadows(),
+            ));
+        }
+    }
+}
+
+/// Churned foam in the plunge pool: a disc with a ragged edge, white in the middle and fading
+/// toward the water's color at the rim.
+fn froth_patch(radius: f64) -> Mesh {
+    const SEGMENTS: usize = 64;
+    const RINGS: usize = 5;
+    let mut rng = Rng::new(0xF20F);
+    let edge: Vec<f64> = (0..SEGMENTS)
+        .map(|_| radius * rng.range(0.6, 1.05) as f64)
+        .collect();
+    let white = Vec3::new(0.92, 0.95, 0.96);
+    let rim = Vec3::new(0.3, 0.38, 0.4);
+    let mut mesh = Mesh::default();
+    mesh.vertices.push(
+        engine::render::Vertex::new(Vec3::ZERO, Vec3::Y, Vec2::splat(0.5))
+            .with_color(white.extend(1.0)),
+    );
+    for r in 1..=RINGS {
+        let f = r as f64 / RINGS as f64;
+        for (k, &e) in edge.iter().enumerate() {
+            // Smooth the ragged edge a little between neighbours.
+            let e = (e + edge[(k + 1) % SEGMENTS] + edge[(k + SEGMENTS - 1) % SEGMENTS]) / 3.0;
+            let a = k as f64 / SEGMENTS as f64 * std::f64::consts::TAU;
+            let p = DVec2::new(a.cos(), a.sin()) * e * f;
+            let streak = rng.range(0.75, 1.0);
+            let c = white.lerp(rim, smoothstep(0.45, 1.0, f as f32)) * streak;
+            mesh.vertices.push(
+                engine::render::Vertex::new(
+                    Vec3::new(p.x as f32, 0.0, p.y as f32),
+                    Vec3::Y,
+                    Vec2::new(p.x as f32, p.y as f32) * 0.2,
+                )
+                .with_color(c.extend(1.0)),
             );
         }
     }
+    let ring = |r: usize, k: usize| (1 + (r - 1) * SEGMENTS + k % SEGMENTS) as u32;
+    for k in 0..SEGMENTS {
+        mesh.indices
+            .extend_from_slice(&[0, ring(1, k + 1), ring(1, k)]);
+        for r in 1..RINGS {
+            let (a, b, c, d) = (
+                ring(r, k),
+                ring(r, k + 1),
+                ring(r + 1, k),
+                ring(r + 1, k + 1),
+            );
+            mesh.indices.extend_from_slice(&[a, b, c, b, d, c]);
+        }
+    }
+    mesh
 }
 
 /// The waterfall as a sheet that leaves the lip, arcs out and spreads as it falls: ragged
@@ -1478,73 +1451,6 @@ pub fn arena(commands: &mut Commands, _lib: &Library, z: &Zone) {
         );
     }
     person(commands, c + DVec3::new(0.0, 0.3, 0.0), 0.0, 0x3260a8);
-}
-
-/// Movement course: wall-run lanes, slide tunnels, platforms and gaps. The Movement and slow
-/// motion thread owns it.
-pub fn parkour(commands: &mut Commands, _lib: &Library, z: &Zone) {
-    let c = z.center;
-    let panel = mat(0xd0ccc4, 0.7);
-    let accent = mat(0xe67e22, 0.5);
-    for (i, x) in [-14.0, -6.0].into_iter().enumerate() {
-        spawn(
-            commands,
-            cuboid(0.6, 7.0, 30.0),
-            panel,
-            at(c + DVec3::new(x, 3.5 + i as f64, -4.0)),
-        );
-        spawn(
-            commands,
-            cuboid(0.62, 0.3, 30.0),
-            accent,
-            at(c + DVec3::new(x, 6.5 + i as f64, -4.0)),
-        );
-    }
-    for (k, (x, zz, h)) in [
-        (4.0, -14.0, 2.0),
-        (8.0, -6.0, 3.5),
-        (13.0, 2.0, 5.0),
-        (8.0, 10.0, 6.5),
-        (2.0, 16.0, 8.0),
-    ]
-    .into_iter()
-    .enumerate()
-    {
-        spawn(
-            commands,
-            cuboid(4.0, h as f32, 4.0),
-            panel,
-            at(c + DVec3::new(x, h * 0.5, zz)),
-        );
-        spawn(
-            commands,
-            cuboid(4.02, 0.2, 4.02),
-            if k % 2 == 0 { accent } else { panel },
-            at(c + DVec3::new(x, h, zz)),
-        );
-    }
-    // Slide tunnel.
-    spawn(
-        commands,
-        cuboid(4.0, 0.4, 10.0),
-        panel,
-        at(c + DVec3::new(-20.0, 1.2, 14.0)),
-    );
-    for s in [-1.8, 1.8] {
-        spawn(
-            commands,
-            cuboid(0.4, 1.0, 10.0),
-            panel,
-            at(c + DVec3::new(-20.0 + s, 0.5, 14.0)),
-        );
-    }
-    // Grapple/zip line tower.
-    spawn(
-        commands,
-        cuboid(2.0, 14.0, 2.0),
-        panel,
-        at(c + DVec3::new(20.0, 7.0, -20.0)),
-    );
 }
 
 /// Voxel hill: a mound of 1 m blocks (grass on dirt on stone) with a dug pit and a block house
