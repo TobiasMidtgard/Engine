@@ -1,6 +1,7 @@
 //! Close-up screenshots of the sport plane and the spaceplane, and the build budget of their
 //! models (triangles, generation time).
 //!
+//! The shots render only with `$VEHICLE_SHOTS` set (the budgets always run):
 //! `VEHICLE_SHOTS=<dir> ENGINE_REQUIRE_GPU=1 cargo test -p engine_vehicles --test shots_aircraft -- --nocapture`
 
 mod support;
@@ -10,7 +11,7 @@ use engine_core::prelude::*;
 use support::shots::*;
 
 fn sport(name: &str, eye: [f64; 3], target: [f64; 3]) {
-    shoot(
+    gallery_shot(
         name,
         0.6,
         |app| {
@@ -95,7 +96,7 @@ fn aircraft_sport_plane_gear() {
 }
 
 fn ship(name: &str, eye: [f64; 3], target: [f64; 3]) {
-    shoot(
+    gallery_shot(
         name,
         0.6,
         |app| {
@@ -182,7 +183,7 @@ fn aircraft_spaceplane_gear() {
 /// Main and hover engines firing with the ship hanging a few meters up, for the plumes.
 #[test]
 fn aircraft_spaceplane_firing() {
-    shoot(
+    gallery_shot(
         "aircraft_spaceplane_firing",
         0.5,
         |app| {
@@ -201,7 +202,7 @@ fn aircraft_spaceplane_firing() {
 /// glow's emission masks.
 #[test]
 fn aircraft_spaceplane_heat() {
-    shoot(
+    gallery_shot(
         "aircraft_spaceplane_heat",
         0.3,
         |app| {
@@ -218,7 +219,7 @@ fn aircraft_spaceplane_heat() {
 /// Both aircraft parked on the apron.
 #[test]
 fn aircraft_apron() {
-    shoot(
+    gallery_shot(
         "aircraft_apron",
         2.0,
         |app| {

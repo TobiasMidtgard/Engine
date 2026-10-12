@@ -3,8 +3,8 @@
 //! close up, with the demo vehicles running. Needs a GPU or a software Vulkan driver
 //! (lavapipe) for the shots; they pass with a note when neither is available.
 //!
-//! PNGs go to `CARGO_TARGET_TMPDIR`, or to `$VEHICLE_SHOTS` when set; `$SCENERY_SHOTS_ONLY`
-//! (comma-separated name parts) limits which shots are taken.
+//! The shots render only with `$VEHICLE_SHOTS` set to a folder for the PNGs (the budget
+//! always runs); `$SCENERY_SHOTS_ONLY` (comma-separated name parts) limits which are taken.
 
 mod support;
 
@@ -14,6 +14,7 @@ use engine_core::prelude::*;
 use engine_render::prelude::*;
 use engine_render::{Image, Mesh, RenderDisabled, capture_now};
 use engine_vehicles::models::scenery::{self, BuildStats};
+use support::shots::gallery;
 use support::*;
 
 /// Generation must stay under a second per zone (dev profile) and a million triangles.
@@ -125,6 +126,9 @@ fn shot(name: &'static str, at: f64, eye: [f64; 3], target: [f64; 3]) -> Shot {
 fn shoot_scene(scene: impl FnOnce(&mut App), mut shots: Vec<Shot>) {
     // Let the budget measurement finish first (its result is the budget test's to report).
     let _ = budget();
+    if !gallery(shots.first().map_or("scenery", |s| s.name)) {
+        return;
+    }
     let mut app = vehicle_app();
     app.world.resource_mut::<EngineConfig>().headless = true;
     {
