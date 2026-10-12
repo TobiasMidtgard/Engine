@@ -16,7 +16,7 @@
 //! (`FireDemo::warmup_secs`) so there is something to see straight away. Fires that escape
 //! the mown border are put out (`FireDemo::bounds`), so the rest of the map is safe.
 
-use engine_core::math::{DVec2, DVec3, Quat, Rng, Vec2, Vec3};
+use engine_core::math::{DQuat, DVec2, DVec3, Quat, Rng, Vec2, Vec3};
 use engine_core::prelude::*;
 use engine_render::{MeshRenderer, Shape, StandardMaterial};
 use engine_world::{Combustible, FocusPoints, Ground, SurfaceMaterials, Water};
@@ -130,11 +130,12 @@ pub struct DemoObject {
     pub initial: Combustible,
 }
 
-/// A grass blade that burns down to stubble and grows back with the fire field's fuel.
+/// A grass blade that burns down to stubble and grows back with the fire field's fuel. It
+/// shrinks and grows from its base, wherever that is (a world shift moves it).
 #[derive(Component, Debug, Clone, Copy)]
 pub struct DemoGrass {
+    /// Full height, meters.
     pub height: f32,
-    pub ground_y: f64,
 }
 
 /// Build the fire demo around `origin`. It needs about 64 × 44 m of open ground.
@@ -289,10 +290,7 @@ pub fn spawn_demo(commands: &mut Commands, origin: DVec3) {
                 },
                 material,
             ),
-            DemoGrass {
-                height: h,
-                ground_y: origin.y,
-            },
+            DemoGrass { height: h },
         ));
     }
 
@@ -530,19 +528,47 @@ pub fn spawn_demo(commands: &mut Commands, origin: DVec3) {
     ));
 }
 
+/// Where a demo is: its origin and how it is turned. The layout is built along the world axes,
+/// but a world shift can turn the demo with the world.
+#[derive(Debug, Clone, Copy)]
+struct Place {
+    origin: DVec3,
+    rotation: DQuat,
+}
+
+impl Place {
+    fn of(t: &GlobalTransform) -> Self {
+        Self {
+            origin: t.translation(),
+            rotation: t.rotation().as_dquat(),
+        }
+    }
+
+    /// World position of a point given relative to the demo (X/Z on its ground).
+    fn world(&self, x: f64, z: f64) -> DVec3 {
+        self.origin + self.rotation * DVec3::new(x, 0.0, z)
+    }
+
+    /// Demo-relative X/Z of a world point.
+    fn local(&self, p: DVec3) -> DVec2 {
+        let l = self.rotation.inverse() * (p - self.origin);
+        DVec2::new(l.x, l.z)
+    }
+}
+
 /// Run every [`FireDemo`]: first fire (fast-forwarded by `warmup_secs`), containment, grass
 /// that burns down and grows back, and the reset-and-relight loop.
 pub fn run_demos(world: &mut World) {
     let mut q = world.query::<(Entity, &GlobalTransform, &FireDemo, &FireDemoState)>();
-    let demos: Vec<(Entity, DVec3, FireDemo, FireDemoState)> = q
+    let demos: Vec<(Entity, Place, FireDemo, FireDemoState)> = q
         .iter(world)
-        .map(|(e, t, d, s)| (e, t.translation(), d.clone(), *s))
+        .map(|(e, t, d, s)| (e, Place::of(t), d.clone(), *s))
         .collect();
     if demos.is_empty() {
         return;
     }
     let dt = world.resource::<Time>().delta_secs();
-    for (entity, origin, demo, mut state) in demos {
+    for (entity, place, demo, mut state) in demos {
         state.frames += 1;
         // Wait for transforms to settle so objects are where they belong.
         if state.frames < 3 {
@@ -552,30 +578,28 @@ pub fn run_demos(world: &mut World) {
         if !state.started {
             state.started = true;
             state.cycles = 1;
-            light(world, origin, &demo);
+            light(world, place, &demo);
             if demo.warmup_secs > 0.0 {
-                fast_forward(world, origin, demo.warmup_secs);
+                fast_forward(world, place.origin, demo.warmup_secs);
             }
             state.since = demo.warmup_secs;
         } else {
             state.since += dt;
             if state.since >= demo.cycle_secs {
-                reset(world, entity, origin, &demo);
-                light(world, origin, &demo);
+                reset(world, entity, place, &demo);
+                light(world, place, &demo);
                 state.since = 0.0;
                 state.cycles += 1;
             }
         }
-        contain(world, origin, &demo);
+        contain(world, place, &demo);
         world.entity_mut(entity).insert(state);
     }
     grow_grass(world);
 }
 
-fn light(world: &mut World, origin: DVec3, demo: &FireDemo) {
-    let [a, b] = demo
-        .line
-        .map(|p| origin + DVec3::new(p[0] as f64, 0.0, p[1] as f64));
+fn light(world: &mut World, place: Place, demo: &FireDemo) {
+    let [a, b] = demo.line.map(|p| place.world(p[0] as f64, p[1] as f64));
     let n = (a.distance(b) / 1.0).ceil().max(1.0) as usize;
     let mut commands = world.resource_mut::<sim::FireCommands>();
     for i in 0..=n {
@@ -614,7 +638,7 @@ fn fast_forward(world: &mut World, origin: DVec3, secs: f32) {
 }
 
 /// Put the meadow and its objects back as they were.
-fn reset(world: &mut World, demo_entity: Entity, origin: DVec3, demo: &FireDemo) {
+fn reset(world: &mut World, demo_entity: Entity, place: Place, demo: &FireDemo) {
     let mut q = world.query::<(Entity, &DemoObject)>();
     let objects: Vec<(Entity, Combustible)> = q
         .iter(world)
@@ -635,7 +659,9 @@ fn reset(world: &mut World, demo_entity: Entity, origin: DVec3, demo: &FireDemo)
         }
     }
     let half = DVec2::new(demo.bounds[0] as f64, demo.bounds[1] as f64);
-    let center = DVec2::new(origin.x, origin.z);
+    let center = DVec2::new(place.origin.x, place.origin.z);
+    // Turned or not, the bounds fit in this square.
+    let reach = DVec2::splat(half.length());
     world.resource_scope(|world, mut field: Mut<FireField>| {
         let settings = world.resource::<FireSettings>();
         let mut fuel = WorldFuel {
@@ -646,37 +672,36 @@ fn reset(world: &mut World, demo_entity: Entity, origin: DVec3, demo: &FireDemo)
             ground_fuel: settings.ground_fuel,
         };
         let inside = |p: DVec3| {
-            let d = DVec2::new(p.x, p.z) - center;
+            let d = place.local(DVec3::new(p.x, place.origin.y, p.z));
             d.x.abs() <= half.x && d.y.abs() <= half.y
         };
-        field.reset_area(center - half, center + half, &inside, &mut fuel);
+        field.reset_area(center - reach, center + reach, &inside, &mut fuel);
     });
 }
 
 /// Put out anything burning just outside the demo (embers that jumped the border).
-fn contain(world: &mut World, origin: DVec3, demo: &FireDemo) {
+fn contain(world: &mut World, place: Place, demo: &FireDemo) {
     let half = Vec2::from(demo.bounds).as_dvec2();
     let margin = 40.0;
-    let center = DVec2::new(origin.x, origin.z);
     let mut field = world.resource_mut::<FireField>();
+    let field = &mut *field;
     let cell = field.cell_m as f64;
     let tile_size = crate::field::TILE as f64 * cell;
+    // Half a tile's diagonal: a tile is entirely within this of its center, however turned.
+    let r = tile_size * std::f64::consts::FRAC_1_SQRT_2;
+    let field_origin = field.origin;
     for tile in &mut field.tiles {
         if tile.burning == 0 && !tile.active {
             continue;
         }
-        let o = tile.key.as_dvec2() * tile_size;
-        let lo = o - center;
-        let hi = lo + DVec2::splat(tile_size);
+        let o = field_origin + (tile.key * crate::field::TILE).as_dvec2() * cell;
+        let c = o + DVec2::splat(tile_size * 0.5);
+        let mid = place.local(DVec3::new(c.x, place.origin.y, c.y));
         // Only tiles near this demo, and only ones reaching past its bounds.
-        if hi.x < -half.x - margin
-            || lo.x > half.x + margin
-            || hi.y < -half.y - margin
-            || lo.y > half.y + margin
-        {
+        if mid.x.abs() - r > half.x + margin || mid.y.abs() - r > half.y + margin {
             continue;
         }
-        if lo.x >= -half.x && hi.x <= half.x && lo.y >= -half.y && hi.y <= half.y {
+        if mid.x.abs() + r <= half.x && mid.y.abs() + r <= half.y {
             continue;
         }
         let mut doused = false;
@@ -686,7 +711,8 @@ fn contain(world: &mut World, origin: DVec3, demo: &FireDemo) {
             }
             let x = (i as i32 % crate::field::TILE) as f64;
             let y = (i as i32 / crate::field::TILE) as f64;
-            let p = o + DVec2::new(x + 0.5, y + 0.5) * cell - center;
+            let w = o + DVec2::new(x + 0.5, y + 0.5) * cell;
+            let p = place.local(DVec3::new(w.x, place.origin.y, w.y));
             if p.x.abs() > half.x || p.y.abs() > half.y {
                 c.burn = 0.0;
                 c.glow = 0.0;
@@ -702,7 +728,7 @@ fn contain(world: &mut World, origin: DVec3, demo: &FireDemo) {
     }
 }
 
-/// Burnt grass shrinks to stubble; regrown grass stands up again.
+/// Burnt grass shrinks to stubble; regrown grass stands up again, from its base.
 fn grow_grass(world: &mut World) {
     let dt = world.resource::<Time>().delta_secs();
     let mut q = world.query::<(&DemoGrass, &mut Transform)>();
@@ -729,7 +755,7 @@ fn grow_grass(world: &mut World) {
             let next = s + (target - s) * (rate * dt).min(1.0);
             if (next - s).abs() > 0.002 {
                 t.scale.y = next;
-                t.translation.y = grass.ground_y + (grass.height * next) as f64 * 0.5;
+                t.translation.y += (grass.height * (next - s)) as f64 * 0.5;
             }
         }
     });
@@ -798,5 +824,52 @@ mod tests {
             .filter(|(n, c)| n.as_str().contains("trunk") && c.state != BurnState::Intact)
             .count();
         assert!(trees > 0, "no tree caught");
+    }
+
+    #[test]
+    fn demo_follows_a_turned_world() {
+        let mut app = App::new();
+        app.world
+            .resource_mut::<Time>()
+            .set_source(engine_core::time::TimeSource::Manual {
+                step_secs: 1.0 / 30.0,
+            });
+        app.add_plugins(FirePlugin);
+        let origin = DVec3::new(100.0, 0.0, -50.0);
+        {
+            let mut commands = app.world.commands();
+            spawn_demo(&mut commands, origin);
+        }
+        app.world.flush();
+        let mut demos = app.world.query::<&mut FireDemo>();
+        demos.single_mut(&mut app.world).unwrap().warmup_secs = 0.0;
+        app.update_n(5);
+        // A quarter turn: the meadow's long side now runs along world Z.
+        let s = engine_world::WorldShift {
+            rotation: DQuat::from_rotation_y(std::f64::consts::FRAC_PI_2),
+            translation: DVec3::new(500.5, 0.0, -300.25),
+            ..engine_world::WorldShift::IDENTITY
+        };
+        app.world.write_message(s);
+        app.update();
+        // Light the far end of the meadow (inside the bounds) and the grass beyond the border.
+        let at = |x: f64, z: f64| s.point(origin + DVec3::new(x, 0.0, z));
+        let (inside, outside) = (at(25.0, 0.0), at(0.0, 30.0));
+        app.world
+            .resource_mut::<sim::FireCommands>()
+            .0
+            .extend([inside, outside].map(|at| sim::FireCommand::Ignite {
+                at,
+                radius: 1.0,
+                temperature_c: 900.0,
+            }));
+        app.update_n(3);
+        let field = app.world.resource::<FireField>();
+        let burning = |p: DVec3| field.cell_at(p).is_some_and(|c| c.is_burning());
+        assert!(burning(inside), "the meadow was put out");
+        assert!(
+            !burning(outside),
+            "a fire outside the border was left burning"
+        );
     }
 }

@@ -135,6 +135,13 @@ pub struct SmokeObstacleTrack {
     last: Option<DVec3>,
 }
 
+impl SmokeObstacleTrack {
+    /// Where it was, in a new reference frame, so a world shift doesn't look like a dash.
+    pub(crate) fn shift(&mut self, s: &engine_world::WorldShift) {
+        self.last = self.last.map(|p| s.point(p));
+    }
+}
+
 /// One simulated volume.
 #[derive(Debug, Clone)]
 pub struct SmokeDomain {
@@ -243,7 +250,9 @@ fn ground_floor(ground: &Ground) -> impl Fn(f64, f64) -> Option<f64> + '_ {
     move |x, z| ground.height(DVec3::new(x, 1.0e5, z))
 }
 
-/// Keep volumes in sync with `SmokeVolume` components (made again when one moves or changes).
+/// Keep volumes in sync with `SmokeVolume` components (made again when one moves or changes;
+/// one a world shift moved along with its entity is kept), and measure the ground again under
+/// volumes the world turned.
 pub fn sync_volumes(
     q: Query<(Entity, &SmokeVolume, &GlobalTransform)>,
     mut removed: RemovedComponents<SmokeVolume>,
@@ -252,6 +261,12 @@ pub fn sync_volumes(
 ) {
     for e in removed.read() {
         domains.list.retain(|d| d.owner != Some(e));
+    }
+    for d in &mut domains.list {
+        if d.domain.floor_stale {
+            d.domain.set_floor(ground_floor(&ground));
+            d.domain.floor_stale = false;
+        }
     }
     for (e, v, gt) in &q {
         let cell = v.cell_m.max(0.05);

@@ -48,6 +48,13 @@ focus, or the camera, pause).
 
 Writes: `WindField` (fans), `Obscurance` (the "smoke" source).
 
+Follows `WorldShift`: in `WorldShiftSet::Apply` every volume moves its origin (exact at any
+distance; a shift that turns the world resamples its air into a box of the same size around
+where it went, velocities turned, and measures its floor again at the next step), along with
+blasts and gas still expanding, bullet tunnels, queued `smoke.emit` puffs, obstacles' last
+positions and the demo cart's track. A `SmokeVolume` keeps its smoke as its entity moves with
+the world. `Obscurance` gets the moved smoke in `WorldShiftSet::Rebuild`.
+
 ## Using it
 
 ```rust,ignore
@@ -76,7 +83,13 @@ detail) and the demo live.
 
 ## Demo
 
-`demo::spawn_demo(commands, origin)` builds a 38 × 44 m smoke range. Every 50 s: smoke
+`demo::spawn_demo(commands, origin)` builds a smoke range (about 45 × 52 m): a 38 × 44 m
+concrete pad, a firing line of Jersey barriers and sandbags with a belt-fed machine gun,
+steel targets and gongs in front of an earth berm, three drum fans whose rotors spin up, a
+skip wagon on rails, a steam vent, and clutter (cables, range flags, ammo crates, spent
+grenades, dry grass). Every prop is a procedural mesh with baked textures (`demo/`),
+registered once by key; `examples/smoke_gallery.rs` renders the views and close-ups. Every
+50 s: smoke
 grenades pop (a white screen in the middle, red, violet and green signal smoke by the
 targets), a turret fires bursts through the white screen at the targets (each round leaves a
 see-through tunnel and a tracer), a blast in the cloud blows a hole in it and leaves a dark,
@@ -99,5 +112,6 @@ and relights a volume only when it changed.
 
 - Smoke crossing from one volume into a neighbor (each volume is on its own).
 - Volumetric fog banks (ground fog that rolls in valleys) on the same simulation.
-- Heat haze and smoke lit from below by the flames' own shape (firelight is point lights).
+- Smoke lit from below by the flames' own shape (firelight is point lights). Heat haze is
+  drawn by the fire module.
 - Half-resolution raymarching for very large volumes on slow GPUs.

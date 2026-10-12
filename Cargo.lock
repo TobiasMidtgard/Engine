@@ -927,6 +927,7 @@ dependencies = [
  "bevy_ecs",
  "cpal",
  "crossbeam-channel",
+ "engine_assets",
  "engine_core",
  "engine_render",
  "engine_world",
@@ -1104,6 +1105,7 @@ version = "0.1.0"
 dependencies = [
  "bevy_ecs",
  "bytemuck",
+ "engine_assets",
  "engine_core",
  "engine_render",
  "engine_world",
@@ -1183,8 +1185,12 @@ name = "engine_vfx"
 version = "0.1.0"
 dependencies = [
  "bevy_ecs",
+ "bytemuck",
+ "engine_assets",
  "engine_core",
+ "engine_render",
  "engine_world",
+ "image",
  "serde",
  "serde_json",
 ]
