@@ -28,12 +28,12 @@ use engine_render::{MeshRenderer, Shape, StandardMaterial};
 use engine_world::{EditOp, EditShape, ProjectileTrace, TerrainEdit, WorldImpulse};
 
 use crate::DemoView;
-use crate::dress::PropModel;
-use crate::props::PropKind;
 use crate::charges::BreachCharge;
 use crate::debris::{Debris, PendingDebris, settle};
+use crate::dress::PropModel;
 use crate::hits::{Hit, HitQueue};
 use crate::material::{DestructibleMaterial, linear};
+use crate::props::PropKind;
 use crate::structure::{Fracturable, FractureShape, ShowSupport, StructuralPiece};
 use crate::voxel::VoxelVolume;
 use crate::wall::{DestructibleWall, WallAnchors, WallState};
@@ -193,9 +193,7 @@ fn prop(
 /// A detailed prop (see [`crate::props`]) centered at `at`.
 fn model(commands: &mut Commands, kind: PropKind, seed: u64, at: DVec3, yaw: f32) -> Entity {
     let (t, g) = placed(at, yaw);
-    commands
-        .spawn((t, g, PropModel::new(kind, seed)))
-        .id()
+    commands.spawn((t, g, PropModel::new(kind, seed))).id()
 }
 
 fn cuboid(x: f32, y: f32, z: f32) -> Shape {
