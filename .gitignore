@@ -6,3 +6,6 @@
 *.log
 /.claude/
 screenshots/
+
+# Third-party art downloaded by `cargo run -p fetch-assets` (assets/manifests)
+/assets/fetched/

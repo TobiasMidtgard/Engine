@@ -8,8 +8,8 @@ use std::sync::{Arc, RwLock};
 
 use engine_core::math::{DVec3, Quat, Vec3};
 use engine_core::prelude::*;
-use engine_world::Gravity;
 use engine_world::physics::*;
+use engine_world::{Gravity, WorldShift, WorldShiftSet};
 
 #[derive(Default)]
 struct MiniPhysics {
@@ -72,6 +72,10 @@ impl Plugin for MiniPhysics {
                 (step_bodies, step_characters, publish_snapshot)
                     .chain()
                     .in_set(SimSet::Physics),
+            )
+            .add_systems(
+                PostUpdate,
+                publish_after_shift.in_set(WorldShiftSet::Rebuild),
             );
     }
 }
@@ -244,6 +248,17 @@ fn step_characters(
 fn publish_snapshot(shared: Res<Shared>, q: Query<(Entity, &Transform, &Collider)>) {
     let mut snap = shared.0.write().unwrap();
     snap.boxes = q.iter().map(|(e, t, c)| aabb(e, t, c)).collect();
+}
+
+/// Queries answer in the new frame as soon as engine_world has moved the transforms.
+fn publish_after_shift(
+    mut shifts: MessageReader<WorldShift>,
+    shared: Res<Shared>,
+    q: Query<(Entity, &Transform, &Collider)>,
+) {
+    if shifts.read().count() > 0 {
+        publish_snapshot(shared, q);
+    }
 }
 
 impl PhysicsQuery for Queries {
