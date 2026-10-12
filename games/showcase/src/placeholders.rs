@@ -732,25 +732,37 @@ pub fn cave_shell(
         };
         kit.spawn(commands, v, tf, look);
     }
-    // Blocks along the face above the mouth, up to where the hill's grass starts, so it breaks
+    // Blocks stacked up the face above the mouth to where the hill's grass starts, so it breaks
     // into ledges instead of standing as one flat wall. (Their own stream, like the shapes.)
-    for i in 0..15 {
-        let x = -22.0 + i as f64 * (44.0 / 14.0) + pick.range(-0.8, 0.8) as f64;
-        let y = h + pick.range(-1.5, 2.5) as f64;
-        let scale = pick.range(0.95, 1.45);
-        let v = kit.pick(crate::rocks::RockSize::Large, pick.chance(0.5), &mut pick);
-        let out = Vec3::new(0.0, 0.45, -1.0).normalize();
-        let p = c + DVec3::new(x, y, -hz - 2.6) - (out * v.extent.y * scale * 0.4).as_dvec3();
-        let tf = Transform::from_translation(p)
-            .with_rotation(
-                Quat::from_rotation_arc(Vec3::Y, out) * Quat::from_rotation_y(pick.range(0.0, TAU)),
-            )
-            .with_scale(Vec3::new(scale, scale * pick.range(0.6, 0.85), scale));
-        let look = crate::rocks::RockLook {
-            wet: false,
-            moss: i % 4 != 2,
-        };
-        kit.spawn(commands, v, tf, look);
+    let face_z = -hz - 2.6;
+    let mut x = -23.0;
+    while x <= 23.0 {
+        let top = land.cave_roof_height(c.x + x, c.z + face_z) - c.y;
+        let mut y = h - 0.8;
+        while y < top - 0.6 {
+            let scale = pick.range(1.0, 1.5);
+            let v = kit.pick(crate::rocks::RockSize::Large, pick.chance(0.6), &mut pick);
+            let out = Vec3::new(pick.range(-0.2, 0.2), pick.range(0.2, 0.6), -1.0).normalize();
+            let at_face = DVec3::new(
+                x + pick.range(-0.9, 0.9) as f64,
+                y + pick.range(-0.5, 0.5) as f64,
+                face_z,
+            );
+            let p = c + at_face - (out * v.extent.y * scale * 0.45).as_dvec3();
+            let tf = Transform::from_translation(p)
+                .with_rotation(
+                    Quat::from_rotation_arc(Vec3::Y, out)
+                        * Quat::from_rotation_y(pick.range(0.0, TAU)),
+                )
+                .with_scale(Vec3::new(scale, scale * pick.range(0.6, 0.85), scale));
+            let look = crate::rocks::RockLook {
+                wet: false,
+                moss: pick.chance(0.7),
+            };
+            kit.spawn(commands, v, tf, look);
+            y += 2.4;
+        }
+        x += 2.9;
     }
     commands.spawn((
         at(c + DVec3::new(0.0, h * 0.5, 0.0)),
