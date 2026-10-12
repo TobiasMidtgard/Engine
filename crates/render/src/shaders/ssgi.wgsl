@@ -49,7 +49,7 @@ fn pixel_at(uv: vec2<f32>) -> vec2<i32> {
 fn scene_depth(uv: vec2<f32>) -> f32 {
     let z = textureLoad(depth_input, pixel_at(uv), 0);
     if (z <= 0.0) { return 0.0; }
-    return linear_depth(uv, z);
+    return scene_linear_depth(uv, z);
 }
 
 // Three independent uniform numbers in [0, 1) (PCG3D, Jarzynski and Olano 2020). Correlated
@@ -149,7 +149,7 @@ fn fs_temporal(in: FullscreenOut) -> @location(0) vec4<f32> {
     if (z <= 0.0) { return vec4<f32>(0.0); }
     let uv = (vec2<f32>(px) + 0.5) * frame.viewport.zw;
     let current = textureLoad(gi_input, px, 0).rgb;
-    let depth = linear_depth(uv, z);
+    let depth = scene_linear_depth(uv, z);
     // Where this surface point was last frame, and how far from last frame's camera.
     let prev_uv = uv - textureLoad(motion_input, px, 0).xy;
     let rel = (frame.inv_view * vec4<f32>(view_position(uv, z), 1.0)).xyz;
