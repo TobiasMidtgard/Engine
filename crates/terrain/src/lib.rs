@@ -22,7 +22,7 @@ use engine_core::prelude::*;
 use engine_render::RenderAppExt;
 use engine_world::{
     Deformation as Deform, EditOp, EditShape, Env, GroundContact, SurfaceLayers, SurfaceMaterial,
-    SurfaceMaterials, TerrainChanged, TerrainEdit, WeatherState,
+    SurfaceMaterials, TerrainChanged, TerrainEdit, WeatherState, WorldShift, WorldShiftSet,
 };
 
 pub use chunk::{ChunkMesh, ChunkSource, TerrainVertex};
@@ -447,6 +447,7 @@ impl Plugin for TerrainPlugin {
                     .chain()
                     .in_set(UpdateSet::AfterPropagate),
             )
+            .add_systems(PostUpdate, follow_world_shift.in_set(WorldShiftSet::Apply))
             .add_systems(
                 FixedUpdate,
                 (demo::walk, deform_from_contacts)
@@ -630,6 +631,22 @@ fn apply_edits(
 /// Accumulates time for the low-rate print recovery pass.
 #[derive(Resource, Default)]
 struct RecoverClock(f32);
+
+/// Footprints and lab walkers stay on the ground when the world re-anchors (planets and
+/// their colliders are placed from their transforms, which engine_world moves).
+fn follow_world_shift(
+    mut shifts: MessageReader<WorldShift>,
+    mut map: ResMut<DeformationMap>,
+    mut walkers: Query<&mut demo::DemoWalker>,
+) {
+    let Some(s) = shifts.read().copied().reduce(|a, b| a.then(&b)) else {
+        return;
+    };
+    map.follow_shift(&s);
+    for mut w in &mut walkers {
+        w.center = s.point(w.center);
+    }
+}
 
 /// Stamps ground contacts into the deformation map and lets old prints recover.
 #[allow(clippy::too_many_arguments)]
