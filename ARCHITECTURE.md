@@ -200,13 +200,44 @@ pushes blades aside (16 nearest the camera). `RenderSettings::grass_density` sca
 draw distance. `engine_foliage` drives grass by spawning fields from its soil grid; game code
 can spawn them directly.
 
+**Volumetric fog** (built): with `RenderSettings::volumetric_fog` (the default), fog within
+`volumetric_fog_range` (default 256 m) of the camera lives in a froxel grid fitted to the view,
+after Wronski 2014 and Hillaire 2015 (`volumetric_fog_quality`: `High` 8 px tiles and 128
+exponential depth slices, `Medium` 64 slices, `Low` 16 px and 64). A compute pass evaluates the
+medium in every froxel and lights it with the sun through the shadow cascades and the air
+(`sun_transmittance`, Henyey-Greenstein phase `phase_hg`), the sky (kept out by the sky
+occlusion map and `SkyLightVolume`s) and the point lights (same falloff as surfaces, no shadows),
+blends it with the reprojected previous frame (jittered samples, 90% history) and integrates it
+front to back, energy-conserving, into a 3D texture of in-scattered light (pre-exposed) and
+transmittance: frame binding 19, read with `volumetric_fog_at(rel, depth)`. So sunbeams show
+through trees and windows, lamps glow in mist and caves stay dark. Other modules feed it two
+inputs and need nothing else:
+
+- `FogSettings` (resource): the height fog everywhere. `density` (extinction per meter at
+  `base_height`; weather writes it), `height_falloff`, `base_height`, `color` (albedo),
+  `anisotropy` (forward scattering, 0.6) and `max_opacity`.
+- `FogVolume` (component, follows its entity's transform, scale included): local fog for a
+  smoky room, a mist bank, steam or a dust cloud. `shape` (`Box` or `Ellipsoid`),
+  `half_extents`, `density`, `albedo`, `emission` (cd/m² per meter, for fire-lit smoke or
+  glowing spores), `edge_falloff` (meters), `noise` and `noise_scale` (wisps that drift with
+  the wind) and `anisotropy`; `FogVolume::new(half_extents).with_density(0.05)...`. The 64
+  nearest volumes in range are drawn. They fade out over the last 15% of the range, and they
+  are not drawn beyond it or with volumetric fog off.
+
+`apply_fog(color, rel)` reads the volume up to the range and continues the height fog
+analytically beyond it, so nothing is counted twice, then adds aerial perspective. With
+volumetric fog off, the analytic fog starts at the camera. `apply_sky_fog(color, dir)` fogs the
+sky up to the range. The frame uniform's `volumetrics` field holds the range (0 = off) and the
+slice mapping. Passes that write the volume see a clear stand-in at binding 19.
+
 Shared pipelines the core will provide for modules (planned): **strands** for hair and fur
 (`engine_softbody` draws its own today) and **tension-driven wrinkle maps** in `StandardMaterial`
 (a per-vertex tension value blends wrinkle/vein normal maps; written by `engine_anim` for skin,
 muscles and skinned clothes and by `engine_softbody` for simulated cloth).
 
-Shader library: `lib_types.wgsl` (types, noise, BRDF), `lib_frame.wgsl` (group 0 frame
+Shader library: `lib_types.wgsl` (types, noise, BRDF, `phase_hg`), `lib_frame.wgsl` (group 0 frame
 data, `shade_surface`, `shade_surface_shadowed`, `shadow_factor`, `contact_shadow`, `screen_ao`, `sky_visibility`, `apply_fog`,
+`apply_sky_fog`, `volumetric_fog_at`, `height_fog_density`, `fog_sky_light`,
 `sample_env`, `sample_env_rough`, `sky_ambient`, `wind_offset`, `prepass_output`) and `lib_atmosphere.wgsl` (`atmosphere` for aerial perspective,
 `sun_transmittance`, `sky_view_radiance`, `planet_height`, `ray_shell`).
 

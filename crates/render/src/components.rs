@@ -373,7 +373,8 @@ pub enum FogShape {
 /// through windows and leaves, sky light where the sky is visible, lamps glowing in it. It
 /// follows its entity's transform, scale included (`half_extents` are in the entity's local
 /// units). Up to 64 volumes within `volumetric_fog_range` of the camera are drawn, nearest
-/// first. Fire, smoke and weather modules spawn and animate these; everything is plain data.
+/// first; they fade out over the last 15% of the range. Fire, smoke and weather modules spawn
+/// and animate these; everything is plain data.
 ///
 /// ```ignore
 /// // Dusty air filling a 10 x 4 x 8 m room, with drifting wisps.

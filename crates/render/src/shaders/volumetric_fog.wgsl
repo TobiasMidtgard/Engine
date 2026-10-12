@@ -164,17 +164,22 @@ fn cs_scatter(
     );
     let rel = froxel_position(vec3<f32>(id) + jitter);
 
-    // The medium: height fog plus the fog volumes here.
+    // The medium: height fog plus the fog volumes here. Fog volumes fade out over the last 15%
+    // of the range (nothing draws them beyond it), so they never end in a hard edge; the height
+    // fog continues analytically.
+    let range = frame.volumetrics.x;
+    let volume_fade = 1.0 - smoothstep(0.85 * range, range, slice_depth(f32(id.z) + jitter.z));
     var extinction = height_fog_density(rel);
     var scattering = extinction * frame.fog_color.rgb;
     var g_sum = luminance(scattering) * frame.fog_color.w;
     var light = vec3<f32>(0.0); // scattered toward the camera per meter (cd/m^2 per m)
     for (var word = 0u; word < 2u; word++) {
         var bits = atomicLoad(&volume_mask[word]);
+        if (volume_fade <= 0.0) { bits = 0u; }
         while (bits != 0u) {
             let v = fog_volumes[word * 32u + firstTrailingBit(bits)];
             bits &= bits - 1u;
-            let amount = fog_volume_amount(v, rel);
+            let amount = fog_volume_amount(v, rel) * volume_fade;
             if (amount <= 0.0) { continue; }
             let density = v.medium.x * amount;
             let s = density * v.albedo.rgb;
