@@ -977,6 +977,63 @@ fn label(
     ctx.text(text, size, weight, color, pos, anchor)
 }
 
+/// Keeps map labels from piling up: each one tries below, above, right and left of its marker
+/// and takes the first side that covers no marker or label placed before it.
+#[derive(Default)]
+struct Declutter(Vec<Rect>);
+
+impl Declutter {
+    fn block(&mut self, r: Rect) {
+        self.0.push(r);
+    }
+
+    /// Where to put a label `gap` px from the marker at `q`, as (position, anchor). `None`
+    /// when every side is taken, unless `keep` (then it goes below anyway).
+    #[allow(clippy::too_many_arguments)]
+    fn place(
+        &mut self,
+        ctx: &mut DrawCtx,
+        text: &str,
+        size: f32,
+        weight: u16,
+        q: Vec2,
+        gap: f32,
+        keep: bool,
+    ) -> Option<(Vec2, Vec2)> {
+        let m = ctx.measure(&crate::text::TextSpec {
+            text: text.to_string(),
+            size: size * ctx.px,
+            weight,
+            wrap: false,
+            ..Default::default()
+        });
+        let pad = 4.0 * ctx.px;
+        let side = gap + pad;
+        let spots = [
+            (Vec2::new(0.0, gap), Vec2::new(0.5, 0.0)),
+            (Vec2::new(0.0, -gap), Vec2::new(0.5, 1.0)),
+            (Vec2::new(side, 0.0), Vec2::new(0.0, 0.5)),
+            (Vec2::new(-side, 0.0), Vec2::new(1.0, 0.5)),
+        ];
+        let rect = |(off, anchor): (Vec2, Vec2)| {
+            let tl = q + off - m * anchor;
+            Rect::new(
+                tl.x - pad * 1.5,
+                tl.y - pad * 0.5,
+                m.x + pad * 3.0,
+                m.y + pad,
+            )
+        };
+        let free = |r: &Rect| self.0.iter().all(|o| o.intersect(r).is_empty());
+        let spot = spots
+            .into_iter()
+            .find(|s| free(&rect(*s)))
+            .or(keep.then_some(spots[0]))?;
+        self.0.push(rect(spot));
+        Some((q + spot.0, spot.1))
+    }
+}
+
 fn paint_map(world: &mut World, e: Entity, ctx: &mut DrawCtx) {
     let Some(view) = world.get::<MapView>(e).cloned() else {
         return;
@@ -1450,45 +1507,10 @@ fn draw_globe(
         let v = to_view(lonlat_dir(lon, lat), yaw, pitch);
         (c + Vec2::new(v[0], -v[1]) * rad, v[2])
     };
-    if layers.0 {
-        for poi in pl.pois.iter().filter(|q| q.discovered) {
-            let (q, depth) = project(poi.lon, poi.lat);
-            if depth < 0.08 {
-                continue;
-            }
-            let a = smooth((depth - 0.08) / 0.25);
-            let item = MapItem::Poi(poi.id.clone());
-            let s = (18.0 + 6.0 * a) * px;
-            ctx.faded(a, |ctx| {
-                ctx.glow(q, s * 0.9, poi.kind.color().with_alpha(0.4), 1.6);
-                ctx.icon(
-                    poi.kind.icon(),
-                    Rect::new(q.x - s * 0.5, q.y - s * 0.5, s, s),
-                    Color::WHITE,
-                );
-                if out.is_sel(&item) {
-                    reticle(ctx, q, s * 0.5, p.accent_light);
-                }
-                if layers.2
-                    && (out.is_hot(&item)
-                        || poi.kind == PoiKind::City
-                        || poi.kind == PoiKind::Spaceport)
-                {
-                    label(
-                        ctx,
-                        &poi.name,
-                        11.0,
-                        700,
-                        Color::WHITE,
-                        q + Vec2::new(0.0, s * 0.6 + 2.0 * px),
-                        Vec2::new(0.5, 0.0),
-                    );
-                }
-            });
-            out.hits.push((q, s * 0.8, item));
-        }
-    }
-    // The player.
+    // Labels go on last, so none covers a marker or another label.
+    let mut placer = Declutter::default();
+    let mut labels: Vec<(String, Vec2, f32, f32)> = Vec::new();
+    // The player and the waypoint first, so places merge around them.
     if pl.id == map.player.planet {
         let (q, depth) = project(map.player.lon, map.player.lat);
         if depth > 0.05 {
@@ -1503,6 +1525,84 @@ fn draw_globe(
                 0.0,
             );
             ctx.glow(q, 6.0 * px, p.info, 2.0);
+            placer.block(Rect::new(
+                q.x - 6.0 * px,
+                q.y - 6.0 * px,
+                12.0 * px,
+                12.0 * px,
+            ));
+        }
+    }
+    if layers.0 {
+        // Places closer than a marker apart merge into the most important one, with a count.
+        let rank = |poi: &Poi| {
+            let item = MapItem::Poi(poi.id.clone());
+            if out.is_sel(&item) {
+                0
+            } else if out.is_hot(&item) {
+                1
+            } else {
+                match poi.kind {
+                    PoiKind::Quest | PoiKind::City | PoiKind::Spaceport => 2,
+                    PoiKind::Vendor => 3,
+                    _ => 4,
+                }
+            }
+        };
+        let mut seen: Vec<(&Poi, Vec2, f32)> = pl
+            .pois
+            .iter()
+            .filter(|q| q.discovered)
+            .filter_map(|poi| {
+                let (q, depth) = project(poi.lon, poi.lat);
+                (depth >= 0.08).then_some((poi, q, smooth((depth - 0.08) / 0.25)))
+            })
+            .collect();
+        seen.sort_by_key(|(poi, _, _)| rank(poi));
+        let merge = 32.0 * px;
+        let mut leaders: Vec<(&Poi, Vec2, f32, usize)> = Vec::new();
+        for (poi, q, a) in seen {
+            match leaders.iter_mut().find(|l| l.1.distance(q) < merge) {
+                Some(l) => l.3 += 1,
+                None => leaders.push((poi, q, a, 0)),
+            }
+        }
+        for (poi, q, a, more) in leaders {
+            let item = MapItem::Poi(poi.id.clone());
+            let s = (18.0 + 6.0 * a) * px;
+            ctx.faded(a, |ctx| {
+                ctx.glow(q, s * 0.9, poi.kind.color().with_alpha(0.4), 1.6);
+                let icon = Rect::new(q.x - s * 0.5, q.y - s * 0.5, s, s);
+                ctx.icon(poi.kind.icon(), icon, Color::WHITE);
+                placer.block(icon.inflate(-2.0 * px));
+                if out.is_sel(&item) {
+                    reticle(ctx, q, s * 0.5, p.accent_light);
+                }
+                if more > 0 {
+                    // "+2" badge on the bottom right of the marker, clear of a waypoint pin.
+                    let b = q + Vec2::new(s * 0.5, s * 0.2);
+                    let d = 16.0 * px;
+                    let badge = Rect::new(b.x - d * 0.5, b.y - d * 0.5, d, d);
+                    ctx.rect(badge, Color::hexa(0x0b1220e6), d * 0.5, 1.0 * px, p.info);
+                    ctx.text(
+                        &format!("+{more}"),
+                        9.0,
+                        800,
+                        Color::WHITE,
+                        b,
+                        Vec2::new(0.5, 0.5),
+                    );
+                    placer.block(badge);
+                }
+            });
+            if layers.2
+                && (out.is_hot(&item)
+                    || poi.kind == PoiKind::City
+                    || poi.kind == PoiKind::Spaceport)
+            {
+                labels.push((poi.name.clone(), q, s * 0.6 + 2.0 * px, a));
+            }
+            out.hits.push((q, s * 0.8, item));
         }
     }
     if let Some(w) = &map.waypoint
@@ -1512,11 +1612,16 @@ fn draw_globe(
         if depth > 0.05 {
             let s = 22.0 * px;
             ctx.glow(q, s, p.accent.with_alpha(0.5), 1.4);
-            ctx.icon(
-                "marker_quest",
-                Rect::new(q.x - s * 0.5, q.y - s - 4.0 * px, s, s),
-                Color::WHITE,
-            );
+            let icon = Rect::new(q.x - s * 0.5, q.y - s - 4.0 * px, s, s);
+            ctx.icon("marker_quest", icon, Color::WHITE);
+            placer.block(icon.inflate(-2.0 * px));
+        }
+    }
+    for (text, q, gap, a) in labels {
+        if let Some((pos, anchor)) = placer.place(ctx, &text, 11.0, 700, q, gap, true) {
+            ctx.faded(a, |ctx| {
+                label(ctx, &text, 11.0, 700, Color::WHITE, pos, anchor);
+            });
         }
     }
     out.hits.push((c, rad, MapItem::Planet(pl.id.clone())));
@@ -1554,7 +1659,8 @@ fn draw_surface(
     let w1 = (r.w * 0.86).min(r.h * 1.7);
     let ww = w1 * 2f32.powf((1.0 - u.clamp(-0.3, 1.3)) * 4.0);
     let wh = ww * 0.5;
-    let k = smooth(u);
+    // Centered on the focus at surface zooms, easing out to the whole world as it zooms out.
+    let k = smooth(((u - 0.5) * 2.0).clamp(0.0, 1.0));
     let clon = view.lon * (1.0 - k as f64);
     let clat = view.lat * (1.0 - k as f64);
     let c = r.center() + Vec2::new(-r.w * 0.04 * k, 0.0);
@@ -1603,6 +1709,9 @@ fn draw_surface(
         );
     }
     ctx.with_clip(vis, |ctx| {
+        // Labels go on last, around the markers, so none covers a marker or another label.
+        let mut placer = Declutter::default();
+        let mut labels: Vec<(String, f32, Color, Vec2, f32, bool)> = Vec::new();
         // Route from the player to the waypoint.
         if let Some(w) = &map.waypoint
             && w.planet == pl.id
@@ -1614,11 +1723,9 @@ fn draw_surface(
             ctx.line(a, b, 1.6 * px, p.accent.with_alpha(0.9), 9.0 * px);
             let s = 26.0 * px;
             ctx.glow(b, s, p.accent.with_alpha(0.5), 1.4);
-            ctx.icon(
-                "marker_quest",
-                Rect::new(b.x - s * 0.5, b.y - s - 2.0 * px, s, s),
-                Color::WHITE,
-            );
+            let icon = Rect::new(b.x - s * 0.5, b.y - s - 2.0 * px, s, s);
+            ctx.icon("marker_quest", icon, Color::WHITE);
+            placer.block(icon.inflate(-3.0 * px));
         }
         if layers.0 {
             for poi in pl.pois.iter().filter(|q| q.discovered) {
@@ -1628,26 +1735,25 @@ fn draw_surface(
                 }
                 let item = MapItem::Poi(poi.id.clone());
                 let hot = out.is_hot(&item);
+                let sel = out.is_sel(&item);
                 let s = if hot { 30.0 } else { 24.0 } * px;
                 ctx.glow(q, s * 0.9, poi.kind.color().with_alpha(0.45), 1.6);
-                ctx.icon(
-                    poi.kind.icon(),
-                    Rect::new(q.x - s * 0.5, q.y - s * 0.5, s, s),
-                    Color::WHITE,
-                );
-                if out.is_sel(&item) {
+                let icon = Rect::new(q.x - s * 0.5, q.y - s * 0.5, s, s);
+                ctx.icon(poi.kind.icon(), icon, Color::WHITE);
+                placer.block(icon.inflate(-3.0 * px));
+                if sel {
                     reticle(ctx, q, s * 0.5, p.accent_light);
                 }
                 if layers.2 && (u < 0.75 || hot || poi.kind == PoiKind::City) {
-                    label(
-                        ctx,
-                        &poi.name,
+                    let color = if hot { p.accent_light } else { Color::WHITE };
+                    labels.push((
+                        poi.name.clone(),
                         12.0,
-                        700,
-                        if hot { p.accent_light } else { Color::WHITE },
-                        q + Vec2::new(0.0, s * 0.55 + 3.0 * px),
-                        Vec2::new(0.5, 0.0),
-                    );
+                        color,
+                        q,
+                        s * 0.55 + 3.0 * px,
+                        hot || sel,
+                    ));
                 }
                 out.hits.push((q, s * 0.75, item));
             }
@@ -1666,21 +1772,24 @@ fn draw_surface(
             );
             let s = 26.0 * px;
             ctx.glow(q, s * 0.7, p.info.with_alpha(0.5), 1.6);
-            ctx.icon(
-                "marker_player",
-                Rect::new(q.x - s * 0.5, q.y - s * 0.5, s, s),
-                Color::WHITE,
-            );
+            let icon = Rect::new(q.x - s * 0.5, q.y - s * 0.5, s, s);
+            ctx.icon("marker_player", icon, Color::WHITE);
+            placer.block(icon.inflate(-3.0 * px));
             if layers.2 {
-                label(
-                    ctx,
-                    "You",
-                    11.0,
-                    800,
-                    p.info,
-                    q + Vec2::new(0.0, s * 0.6 + 2.0 * px),
-                    Vec2::new(0.5, 0.0),
+                // After the hovered or selected place, before the others.
+                labels.sort_by_key(|l| !l.5);
+                let at = labels.iter().take_while(|l| l.5).count();
+                labels.insert(
+                    at,
+                    ("You".into(), 11.0, p.info, q, s * 0.6 + 2.0 * px, false),
                 );
+            }
+        }
+        labels.sort_by_key(|l| !l.5);
+        for (text, size, color, q, gap, keep) in labels {
+            let weight = if text == "You" { 800 } else { 700 };
+            if let Some((pos, anchor)) = placer.place(ctx, &text, size, weight, q, gap, keep) {
+                label(ctx, &text, size, weight, color, pos, anchor);
             }
         }
     });
@@ -2186,11 +2295,23 @@ fn build(world: &World, view: &MapView) -> El {
                         .gap(26.0)
                         .pick(Pick::Ignore)
                 })
-                .child(widgets::key_hint("Wheel", "RT", "Zoom"))
-                .child(widgets::key_hint("Drag", "RS", "Pan"))
-                .child(widgets::key_hint("Click", "A", "Select"))
-                .child(widgets::key_hint2(["Q", "E"], ["LB", "RB"], "Level"))
-                .child(widgets::key_hint("Esc", "B", "Close")),
+                .child(
+                    // A glass strip keeps the hints readable over bright terrain and ice.
+                    El::new()
+                        .class("glass")
+                        .class("row")
+                        .with_style(|s| {
+                            s.padding([8.0, 20.0])
+                                .gap(26.0)
+                                .radius(Corners::all(21.0))
+                                .pick(Pick::Ignore)
+                        })
+                        .child(widgets::key_hint("Wheel", "RT", "Zoom"))
+                        .child(widgets::key_hint("Drag", "RS", "Pan"))
+                        .child(widgets::key_hint("Click", "A", "Select"))
+                        .child(widgets::key_hint2(["Q", "E"], ["LB", "RB"], "Level"))
+                        .child(widgets::key_hint("Esc", "B", "Close")),
+                ),
         )
 }
 
