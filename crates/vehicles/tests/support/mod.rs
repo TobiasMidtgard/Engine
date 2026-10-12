@@ -231,7 +231,8 @@ fn unit_inertia(kind: &PrimKind) -> Vec3 {
     }
 }
 
-/// Mass, center of mass and principal (diagonal) inertia from collider volumes.
+/// Mass, center of mass and principal (diagonal) inertia from collider volumes, unless the
+/// body overrides them.
 fn mass_properties(
     prims: &[(Vec3, Quat, PrimKind)],
     body: &RigidBody,
@@ -239,11 +240,13 @@ fn mass_properties(
 ) -> MassProperties {
     let total_volume: f32 = prims.iter().map(|p| volume(&p.2)).sum::<f32>().max(1e-6);
     let mass = body.mass_kg.unwrap_or(total_volume * density).max(1e-3);
-    let com = prims
-        .iter()
-        .map(|(o, _, k)| *o * volume(k))
-        .fold(Vec3::ZERO, |a, b| a + b)
-        / total_volume;
+    let com = body.center_of_mass.unwrap_or_else(|| {
+        prims
+            .iter()
+            .map(|(o, _, k)| *o * volume(k))
+            .fold(Vec3::ZERO, |a, b| a + b)
+            / total_volume
+    });
     let mut tensor = Mat3::ZERO;
     for (o, r, k) in prims {
         let m = mass * volume(k) / total_volume;
@@ -254,11 +257,13 @@ fn mass_properties(
         let parallel = (Mat3::IDENTITY * d.length_squared() - outer(d, d)) * m;
         tensor += rotated + parallel;
     }
+    let inertia =
+        body.inertia
+            .unwrap_or(Vec3::new(tensor.x_axis.x, tensor.y_axis.y, tensor.z_axis.z));
     MassProperties {
         mass_kg: mass,
         center_of_mass: com,
-        inertia: Vec3::new(tensor.x_axis.x, tensor.y_axis.y, tensor.z_axis.z)
-            .max(Vec3::splat(1e-3)),
+        inertia: inertia.max(Vec3::splat(1e-3)),
     }
 }
 

@@ -2,18 +2,20 @@
 //! only: tire tracks and dust (`GroundContact`), engine noise AI can hear (`NoiseEvent`),
 //! exhaust and tire smoke (`SmokeEmission`), jet and rocket wash (`WindField` gusts),
 //! crashes (`WorldImpulse`, `DamageEvent`), wheels pushing what they stand on
-//! (`ApplyImpulse`) and heat damage on re-entry.
+//! (`ApplyImpulse`) and heat damage on re-entry. Every step each vehicle also carries
+//! `EngineState` and `WheelContacts` components, which audio plays engines and tires from.
 
 use engine_core::math::{DVec3, Vec3};
 use engine_core::prelude::*;
 use engine_world::physics::{ApplyImpulse, BodyKind, ContactEvent, ContactPhase, RigidBody};
 use engine_world::{
-    ContactKind, DamageEvent, DamageKind, GroundContact, NoiseEvent, SmokeEmission, WindField,
-    WorldImpulse,
+    ContactKind, DamageEvent, DamageKind, EngineKind, EngineState, GroundContact, NoiseEvent,
+    SmokeEmission, VehicleControls, WheelContact, WheelContacts, WindField, WorldImpulse,
 };
 
 use crate::aero::{Propulsion, PropulsorKind};
 use crate::chassis::{Vehicle, VehicleForces, VehicleKind, VehicleSettings, VehicleTelemetry};
+use crate::drivetrain::Drivetrain;
 use crate::ship::{HeatShield, Spacecraft, ThrusterRole};
 use crate::wheels::Wheels;
 
@@ -255,5 +257,158 @@ pub fn heat_damage_system(
             impulse: Vec3::ZERO,
             source: None,
         });
+    }
+}
+
+/// What a vehicle's power plant is doing right now: a car's engine from its drivetrain, a
+/// plane's from its engines, a ship's from its thrusters.
+pub fn engine_state(
+    controls: Option<&VehicleControls>,
+    drivetrain: Option<&Drivetrain>,
+    propulsion: Option<&Propulsion>,
+    ship: Option<&Spacecraft>,
+) -> Option<EngineState> {
+    let throttle = controls.map_or(0.0, |c| c.throttle.max(0.0));
+    if let Some(d) = drivetrain {
+        let e = &d.engine;
+        let rpm = d.state.rpm;
+        let load = (d.state.engine_torque_nm / e.max_torque_at(rpm).max(1.0)).clamp(0.0, 1.0);
+        let span = (e.redline_rpm - e.idle_rpm).max(1.0);
+        let boost = if e.turbo {
+            (((rpm - e.idle_rpm) / span) * 1.6).clamp(0.0, 1.0) * load
+        } else {
+            0.0
+        };
+        return Some(EngineState {
+            kind: e.sound,
+            running: true,
+            rpm,
+            idle_rpm: e.idle_rpm,
+            max_rpm: e.redline_rpm,
+            throttle,
+            load,
+            thrust_n: 0.0,
+            boost,
+        });
+    }
+    if let Some(p) = propulsion
+        && let Some(first) = p.engines.first()
+    {
+        let level = p.engines.iter().map(|e| e.level).fold(0.0, f32::max);
+        let thrust: f32 = p.engines.iter().map(|e| e.thrust_n).sum();
+        let boost = controls.is_some_and(|c| c.boost);
+        let (kind, idle, max) = match first.kind {
+            // A light-aircraft flat four: 700 rpm idle, 2 700 rpm at full power.
+            PropulsorKind::Propeller { .. } => {
+                (EngineKind::Piston { cylinders: 4 }, 700.0, 2_700.0)
+            }
+            PropulsorKind::Jet => (EngineKind::Turbine, 3_000.0, 10_000.0),
+            PropulsorKind::Rocket { .. } => (EngineKind::Rocket, 0.0, 0.0),
+        };
+        let rpm = if max > 0.0 {
+            idle + (max - idle) * level
+        } else {
+            0.0
+        };
+        return Some(EngineState {
+            kind,
+            running: level > 0.0,
+            rpm,
+            idle_rpm: idle,
+            max_rpm: max,
+            throttle,
+            load: level,
+            thrust_n: thrust,
+            boost: if boost && first.kind == PropulsorKind::Jet {
+                1.0
+            } else {
+                0.0
+            },
+        });
+    }
+    if let Some(ship) = ship {
+        let mut thrust = 0.0;
+        let mut main = 0.0f32;
+        let mut any = 0.0f32;
+        for t in &ship.thrusters {
+            thrust += t.level * t.max_thrust_n;
+            any = any.max(t.level);
+            if t.role != ThrusterRole::Rcs {
+                main = main.max(t.level);
+            }
+        }
+        return Some(EngineState {
+            kind: if main > 0.01 || any <= 0.01 {
+                EngineKind::Rocket
+            } else {
+                EngineKind::Thrusters
+            },
+            running: any > 0.01 && ship.propellant_kg > 0.0,
+            throttle,
+            load: main,
+            thrust_n: thrust,
+            ..Default::default()
+        });
+    }
+    None
+}
+
+/// The wheels on the ground this step, for tire roll, squeal and gravel spray.
+pub fn wheel_contacts(wheels: &Wheels) -> WheelContacts {
+    WheelContacts {
+        wheels: wheels
+            .wheels
+            .iter()
+            .filter(|w| w.state.grounded)
+            .map(|w| WheelContact {
+                position: w.state.contact_point,
+                surface: w.state.surface.unwrap_or_default(),
+                rolling_speed: w.state.spin * w.radius,
+                // Quiet while the tire grips; squeals as it nears the limit; 1 when sliding.
+                slip: ((w.state.grip_used - 0.7) / 0.4).clamp(0.0, 1.0),
+                load_kg: w.state.load_n / 9.81,
+                radius_m: w.radius,
+            })
+            .collect(),
+    }
+}
+
+/// Writes [`EngineState`] and [`WheelContacts`] on every vehicle each step (inserting them
+/// the first time).
+#[allow(clippy::type_complexity)]
+pub fn engine_and_wheel_state_system(
+    mut commands: Commands,
+    mut q: Query<
+        (
+            Entity,
+            Option<&VehicleControls>,
+            Option<&Drivetrain>,
+            Option<&Propulsion>,
+            Option<&Spacecraft>,
+            Option<&Wheels>,
+            Option<&mut EngineState>,
+            Option<&mut WheelContacts>,
+        ),
+        With<Vehicle>,
+    >,
+) {
+    for (entity, controls, drivetrain, propulsion, ship, wheels, engine, contacts) in &mut q {
+        if let Some(state) = engine_state(controls, drivetrain, propulsion, ship) {
+            match engine {
+                Some(mut e) => *e = state,
+                None => {
+                    commands.entity(entity).insert(state);
+                }
+            }
+        }
+        if let Some(w) = wheels {
+            let now = wheel_contacts(w);
+            match contacts {
+                Some(mut c) => *c = now,
+                None => {
+                    commands.entity(entity).insert(now);
+                }
+            }
+        }
     }
 }

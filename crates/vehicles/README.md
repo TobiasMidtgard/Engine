@@ -16,7 +16,6 @@ these vehicles unchanged.
 | Drivetrain | `drivetrain.rs` | Engine torque curve, clutch, gearbox with automatic shifting on road speed (with hysteresis), open/locked/limited-slip differentials, AWD splits. |
 | Aircraft | `aero.rs` | Lifting surfaces with full-range lift/drag/moment (attached flow, stall blend, separated flow), flaps and control surfaces, trim, propellers and jets. |
 | Spacecraft | `ship.rs` | Thrusters (main, hover, RCS) with a least-squares allocator that favors attitude, flight assist modes (off, rotation, full, hover), propellant mass, orbits (periapsis/apoapsis), Sutton–Graves re-entry heating with radiative cooling. |
-| Air | `air.rs` | Density, pressure, temperature, speed of sound and wind anywhere: the weather-driven standard atmosphere, or per-planet atmospheres (`VehicleAir.bodies`). |
 | Autopilots | `autopilot.rs` | Drive a path, drift a circle, take off and fly waypoints, stall and recover, launch to orbit, hold a point, hop off a pad and land. They write `VehicleControls` like a player or the NPC module would. |
 | Events | `events.rs` | Wheel tracks (`GroundContact`), engine `NoiseEvent`s, tire and exhaust `SmokeEmission`, rocket wash fanning out along the ground (`WindField`), crash `WorldImpulse` and `DamageEvent`, heat damage. |
 | Models | `models/`, `meshes.rs`, `visuals.rs`, `presets.rs` | Procedural meshes and materials; spinning, steering wheels; moving control surfaces; engine plumes; lights; hull glow when hot. |
@@ -28,23 +27,21 @@ these vehicles unchanged.
 
 Reads: `VehicleControls`, the physics contract (`RigidBody`, `Collider`, `Velocity`,
 `MassProperties`, `PhysicsQueries` raycasts, `ContactEvent`), `Gravity` (uniform and planets),
+`Atmospheres` (the shared air: weather-driven standard atmosphere or per-planet air),
 `SurfaceMaterials`, `SurfaceLayers` (mud, snow, wetness), `Ground` (flat worlds without
 colliders), `WeatherState` and `WindField`.
 
-Writes: `ExternalForce`, `RigidBody.mass_kg` (as propellant burns), `GroundContact`,
+Writes: `ExternalForce`, `RigidBody` mass, center of mass and inertia (each preset sets real
+values; mass and inertia follow propellant as it burns), `EngineState` and `WheelContacts` on
+every vehicle each step (audio plays engines and tires from them), `GroundContact`,
 `NoiseEvent`, `SmokeEmission`, `WorldImpulse`, `DamageEvent`, `ApplyImpulse`, `WindField` gusts.
-
-Requested from the core (not there yet): a center-of-mass and inertia override on `RigidBody`
-(backends derive both from collider volumes today, which puts a plane's balance point where its
-collider boxes happen to be), and a shared air/atmosphere query so other modules see the same
-air as the vehicles.
 
 ## Tests
 
 Physics comes from a small stand-in solver in `tests/support` written only against the
 contract (until the physics module lands).
 
-- `tests/cars.rs`: settles on its springs; 0–100 km/h in 4–6.5 s, shifts up through the
+- `tests/cars.rs`: settles on its springs; reports engine rpm, load and wheel contacts; 0–100 km/h in 4–6.5 s, shifts up through the
   gears and tops out at 250–310 km/h in a straight line; brakes from 100 km/h in 30–48 m
   without leaving the lane; ice takes over 5× longer; holds a 50 m skidpad at ≥ 0.8 g; a
   handbrake turn swings the tail out; the rally car holds a 25° drift on a 15 m circle on dirt;
@@ -64,4 +61,5 @@ contract (until the physics module lands).
 - A car drives, drifts and jumps convincingly; a plane takes off and stalls; a ship flies from a
   planet surface into orbit. ✓ (on the stand-in solver; to re-check on the real backend)
 - The models hold up in close-up next to the rest of the showcase.
-- Vehicles honor `LocalTimeScale` (time dilation bubbles).
+- Vehicles honor `LocalTimeScale` (time dilation bubbles). World slow motion already works;
+  a per-vehicle time scale needs the physics contract to integrate rigid bodies in entity time.

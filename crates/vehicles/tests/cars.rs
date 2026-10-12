@@ -10,7 +10,7 @@ use engine_core::prelude::*;
 use engine_vehicles::presets;
 use engine_vehicles::{Autopilot, AutopilotMode};
 use engine_world::physics::Velocity;
-use engine_world::{GroundContact, NoiseEvent};
+use engine_world::{EngineKind, EngineState, GroundContact, NoiseEvent, WheelContacts};
 use support::*;
 
 fn car_on(app: &mut App, at: DVec3, heading: Vec3) -> Entity {
@@ -345,3 +345,40 @@ fn leaves_tracks_in_mud_and_makes_noise() {
 }
 
 use engine_world::SurfaceMaterials;
+
+#[test]
+fn reports_engine_and_wheel_state_for_audio() {
+    let mut app = flat_app("concrete");
+    calm(&mut app);
+    let car = car_on(&mut app, DVec3::ZERO, Vec3::NEG_Z);
+    run_for(&mut app, 1.0);
+    let idle = *app.world.get::<EngineState>(car).expect("engine state");
+    assert!(idle.running);
+    assert!(matches!(idle.kind, EngineKind::Piston { cylinders: 6 }));
+    assert!(
+        (idle.rpm - idle.idle_rpm).abs() < 300.0,
+        "idles at {:.0} rpm",
+        idle.rpm
+    );
+    controls(&mut app, car, |c| c.throttle = 1.0);
+    run_for(&mut app, 2.5);
+    let pulling = *app.world.get::<EngineState>(car).unwrap();
+    assert!(pulling.rpm > idle.rpm + 1_500.0, "{pulling:?}");
+    // Traction control trims the torque a little off the line.
+    assert!(pulling.load > 0.5, "full throttle load {:.2}", pulling.load);
+    assert!(pulling.throttle > 0.9);
+    let contacts = app.world.get::<WheelContacts>(car).expect("wheel contacts");
+    assert_eq!(contacts.wheels.len(), 4);
+    let speed = telemetry(&app, car).speed;
+    let concrete = app
+        .world
+        .resource::<engine_world::SurfaceMaterials>()
+        .id_or_default("concrete");
+    for w in &contacts.wheels {
+        assert_eq!(w.surface, concrete);
+        assert!(w.load_kg > 200.0 && w.load_kg < 500.0, "{w:?}");
+        assert!(w.position.y.abs() < 0.05, "contact at {:?}", w.position);
+        // The driven rear wheels may spin up a little; the fronts roll at road speed.
+        assert!(w.rolling_speed > speed * 0.9, "{w:?} at {speed:.1} m/s");
+    }
+}

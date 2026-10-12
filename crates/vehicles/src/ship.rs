@@ -381,6 +381,9 @@ pub fn propellant_mass_system(mut q: Query<(&Spacecraft, &mut Vehicle, &mut Rigi
             vehicle.inertia *= ratio;
             vehicle.mass_kg = mass;
             body.mass_kg = Some(mass);
+            if let Some(inertia) = body.inertia.as_mut() {
+                *inertia *= ratio;
+            }
         }
     }
 }

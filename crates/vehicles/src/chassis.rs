@@ -8,7 +8,7 @@ use engine_core::prelude::*;
 use engine_world::physics::{ExternalForce, MassProperties, RigidBody, Velocity, point_velocity};
 use engine_world::{Gravity, WeatherState, WindField};
 
-use crate::air::{AirSample, VehicleAir};
+use engine_world::air::{AirSample, Atmospheres};
 
 /// What kind of machine this is (for UI, AI and the `vehicles.*` API).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -287,7 +287,7 @@ impl Default for VehicleSettings {
 /// Body state, mass and air for every vehicle; clears the force accumulators.
 #[allow(clippy::type_complexity)]
 pub fn prepare_frames(
-    air: Res<VehicleAir>,
+    air: Res<Atmospheres>,
     weather: Res<WeatherState>,
     gravity: Res<Gravity>,
     wind: Res<WindField>,
@@ -430,7 +430,7 @@ pub fn telemetry_system(
         };
         tel.last_velocity = f.linear;
         // Orbit about the dominant body.
-        let (_, body) = crate::air::altitude(&gravity, f.com);
+        let (_, body) = engine_world::air::altitude(&gravity, f.com);
         if let Some(i) = body {
             let b = gravity.bodies[i];
             let (pe, ap) = orbit_apsides(f.com - b.center, f.linear.as_dvec3(), b.mu);
