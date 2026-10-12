@@ -814,10 +814,15 @@ name = "engine_anim"
 version = "0.1.0"
 dependencies = [
  "bevy_ecs",
+ "bytemuck",
+ "engine_assets",
  "engine_core",
+ "engine_render",
  "engine_world",
+ "image",
  "serde",
  "serde_json",
+ "tracing",
 ]
 
 [[package]]
@@ -884,8 +889,11 @@ name = "engine_destruction"
 version = "0.1.0"
 dependencies = [
  "bevy_ecs",
+ "engine_assets",
  "engine_core",
+ "engine_render",
  "engine_world",
+ "image",
  "serde",
  "serde_json",
 ]
@@ -1011,8 +1019,11 @@ name = "engine_softbody"
 version = "0.1.0"
 dependencies = [
  "bevy_ecs",
+ "bytemuck",
  "engine_core",
+ "engine_render",
  "engine_world",
+ "image",
  "serde",
  "serde_json",
 ]
@@ -1077,10 +1088,16 @@ name = "engine_water"
 version = "0.1.0"
 dependencies = [
  "bevy_ecs",
+ "bytemuck",
+ "engine_assets",
  "engine_core",
+ "engine_render",
  "engine_world",
+ "image",
+ "parking_lot",
  "serde",
  "serde_json",
+ "wgpu",
 ]
 
 [[package]]
@@ -1088,8 +1105,11 @@ name = "engine_weather"
 version = "0.1.0"
 dependencies = [
  "bevy_ecs",
+ "bytemuck",
  "engine_core",
+ "engine_render",
  "engine_world",
+ "image",
  "serde",
  "serde_json",
 ]

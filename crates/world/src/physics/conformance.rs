@@ -15,8 +15,9 @@
 //! 60 Hz with deterministic time, and compares against physics with generous tolerances. The
 //! checks cover what other modules rely on: gravity, resting contact, impulses, contact
 //! events (one `Started` per touch carrying the impact impulse and a normal from `a` toward
-//! `b`, one `Ended` when it stops), raycasts, time dilation, precision far from the origin and
-//! the character controller (including its time scaling: a character moves in its own seconds,
+//! `b`, one `Ended` when it stops), raycasts, time dilation, precision far from the origin,
+//! following a [`WorldShift`](crate::WorldShift) (bodies keep their place relative to each
+//! other when the world is re-anchored and turned) and the character controller (including its time scaling: a character moves in its own seconds,
 //! so one that ignores world slow motion keeps full speed).
 
 use engine_core::math::{DVec3, Vec3};
@@ -47,6 +48,7 @@ const CHECKS: &[(&str, CheckFn)] = &[
     ("reports_contact_end", reports_contact_end),
     ("time_dilation_slows_bodies", time_dilation_slows_bodies),
     ("precise_far_from_origin", precise_far_from_origin),
+    ("follows_world_shifts", follows_world_shifts),
     ("character_walks_and_grounds", character_walks_and_grounds),
     (
         "character_honors_local_time_scale",
@@ -227,6 +229,51 @@ fn resting_at(install: &dyn Fn(&mut App), base: DVec3) -> Result<(), String> {
     near("crate drift sideways", p.x.hypot(p.z), 0.0, 0.05)?;
     near(
         "crate speed at rest",
+        velocity(&app, crate_e).length() as f64,
+        0.0,
+        0.05,
+    )
+}
+
+fn follows_world_shifts(install: &dyn Fn(&mut App)) -> Result<(), String> {
+    let mut app = app_with(install);
+    let g = ground(&mut app, DVec3::ZERO);
+    let crate_e = app
+        .world
+        .spawn((
+            Transform::from_xyz(0.0, 3.0, 0.0),
+            RigidBody::dynamic(),
+            Collider::cuboid(Vec3::splat(0.5)),
+            Velocity::default(),
+        ))
+        .id();
+    // Re-anchor and turn the world while the crate is falling. (A turn about the vertical, so
+    // the check doesn't also demand tilted colliders; gravity turning with the world is
+    // `engine_world`'s job and tested there.)
+    app.update_n(20);
+    app.world.write_message(crate::WorldShift {
+        rotation: engine_core::math::DQuat::from_rotation_y(0.7),
+        translation: DVec3::new(5.0e4, -300.0, 1.0e4),
+        ..crate::WorldShift::IDENTITY
+    });
+    app.update_n(160);
+    let ground_t = *app.world.get::<Transform>(g).ok_or("the ground is gone")?;
+    let local =
+        ground_t.rotation.as_dquat().inverse() * (position(&app, crate_e) - ground_t.translation);
+    near(
+        "crate resting height above the shifted ground, in the ground's frame",
+        local.y,
+        1.0,
+        0.05,
+    )?;
+    near(
+        "crate drift along the shifted ground",
+        local.x.hypot(local.z),
+        0.0,
+        0.05,
+    )?;
+    near(
+        "crate speed at rest after the shift",
         velocity(&app, crate_e).length() as f64,
         0.0,
         0.05,
