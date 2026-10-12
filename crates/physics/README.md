@@ -62,6 +62,10 @@ under a micrometer).
   merge so they can collide.
 - Static colliders are copied into every region that could touch them (the shape data is
   shared). Regions far from every `SimulationFocus` pause (`freeze_distance_m`).
+- A `WorldShift` (the space module re-anchoring the world) moves the simulation in the same
+  frame. A floating-origin move only moves region anchors: sleeping bodies stay asleep and
+  contacts carry on. A turn into another planet's frame rotates each region's contents about
+  its anchor, world-pinned joints included; a moving frame adds its velocity to every body.
 
 ## Settings (`PhysicsSettings`, editable with `resource.patch`)
 
@@ -112,7 +116,10 @@ thin walls, wall-running, crouching, characters on their own clock, sensors and 
 time, hovering, buoyancy, blasts, bodies crossing and merging regions); riding moving bodies
 (`tests/platforms.rs`: crates and characters on a deck at up to 30 km/s, lifts, a turntable, a
 thrusting and turning ship, a seesaw tipped by a character's weight, crates landing on heads,
-rays hitting bodies at orbital speed); a headless screenshot of the proving ground.
+rays hitting bodies at orbital speed); following world shifts (`tests/world_shift.rs`: a
+sleeping pile stays asleep through floating-origin moves, a stack stands through a tilting turn,
+world-pinned hinges turn with the world, a moving frame adds its velocity, characters keep their
+footing, queries see the new frame at once); a headless screenshot of the proving ground.
 
 ## Done when
 
@@ -132,4 +139,6 @@ rays hitting bodies at orbital speed); a headless screenshot of the proving grou
   together at speed stay awake; they ride correctly, they just cost CPU).
 - Debug drawing of colliders, contacts and regions through `engine_debug`.
 - A `Ground` query backed by static colliders for levels without terrain.
-- Buoyancy along the local "up" on planets (today it measures depth along world Y).
+- Buoyancy along the local "up" on planets: today it measures depth along world Y, as the
+  `Water` contract's `surface_height` does (near the focus the space module turns the world so
+  local up is +Y, so this only matters far from it).
