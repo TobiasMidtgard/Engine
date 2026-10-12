@@ -34,7 +34,8 @@ const VENT: [f64; 3] = [14.0, 0.6, -10.0];
 fn grenades() -> [([f64; 3], SmokeSource); 4] {
     [
         ([-2.5, 0.15, 1.0], {
-            let mut g = SmokeSource::grenade([0.92, 0.92, 0.9], 24.0);
+            // Burns long enough that the fans still have a screen to push.
+            let mut g = SmokeSource::grenade([0.92, 0.92, 0.9], 32.0);
             g.rate_kg_s = 0.12;
             g.radius = 0.6;
             g.temperature_c = 32.0;
