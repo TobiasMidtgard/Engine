@@ -69,15 +69,20 @@ fn fs_mv_fx(in: FullscreenOut) -> @location(0) vec4<f32> {
     let edge = smoothstep(0.25, 0.9, r);
     var color = mv_fx.tint.rgb * 0.12;
     var alpha = strength * (mv_fx.tint.w + edge * mv_fx.params.y);
-    // Radial speed lines at the edges: 160 sectors, a few lit at a time, flickering at 12 Hz,
-    // fading in toward the frame's corners.
+    // Radial speed lines at the edges: 160 sectors, a few lit at a time, flickering at 12 Hz.
+    // Each is a brush stroke: a wedge that tapers to a point toward the middle of the frame,
+    // with its own length and strength.
     let a = atan2(c.y, c.x) / TAU * 160.0;
     let sector = floor(a);
     let seed = hash12(vec2<f32>(sector, floor(mv_fx.params.w * 12.0)));
     let lit = step(0.82, seed);
-    let thin = 1.0 - abs(fract(a) - 0.5) * 2.0;
-    let start = 0.42 + 0.2 * fract(seed * 7.13);
-    let streak = lit * smoothstep(0.8, 1.0, thin) * smoothstep(start, start + 0.35, r) * lines;
+    let start = 0.4 + 0.25 * fract(seed * 7.13);
+    let grow = smoothstep(start, start + 0.5, r);
+    let half_width = mix(0.03, 0.32, grow);
+    let d = abs(fract(a) - 0.5);
+    let stroke = 1.0 - smoothstep(half_width * 0.55, half_width, d);
+    let weight = 0.55 + 0.45 * fract(seed * 13.7);
+    let streak = lit * stroke * sqrt(grow) * weight * lines;
     let line_color = mix(vec3<f32>(1.0), mv_fx.tint.rgb, 0.35);
     color = mix(color, line_color, saturate(streak / max(alpha + streak, 1e-4)));
     alpha = alpha + streak * 0.35;

@@ -151,9 +151,18 @@ fn main() {
                 .get(name)
                 .cloned()
                 .unwrap();
-            let grounded = ["impact.", "step.", "impulse.", "water.splash", "explosion."]
-                .iter()
-                .any(|p| name.starts_with(p));
+            let grounded = [
+                "impact.",
+                "step.",
+                "impulse.",
+                "water.splash",
+                "water.column",
+                "water.bow_spray",
+                "water.mist",
+                "explosion.",
+            ]
+            .iter()
+            .any(|p| name.starts_with(p));
             let pos = if grounded {
                 DVec3::ZERO
             } else {
@@ -167,7 +176,16 @@ fn main() {
                 e.insert(Circling);
             }
             let entity = e.id();
-            let secs = if desc.is_one_shot() {
+            // A blast's water column is ten meters tall: step back for it.
+            let wide = name == "water.column";
+            *app.world.get_mut::<Transform>(camera).unwrap() = if wide {
+                Transform::from_xyz(0.0, 3.0, 19.0).looking_at(DVec3::new(0.0, 4.5, 0.0), Vec3::Y)
+            } else {
+                Transform::from_xyz(0.0, 1.7, 5.5).looking_at(DVec3::new(0.0, 0.9, 0.0), Vec3::Y)
+            };
+            let secs = if wide {
+                0.9
+            } else if desc.is_one_shot() {
                 (desc.total_secs().unwrap_or(1.0) * 0.2).clamp(0.15, 0.6)
             } else {
                 1.5

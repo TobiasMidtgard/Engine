@@ -168,6 +168,21 @@ impl Ribbons {
         (self.trails.len() + self.orphans.len(), self.beams.len())
     }
 
+    /// Move every trail and beam point into a new reference frame.
+    pub fn shift(&mut self, s: &engine_world::WorldShift) {
+        for run in self.trails.values_mut().chain(self.orphans.iter_mut()) {
+            for p in &mut run.points {
+                p.pos = s.point(p.pos);
+            }
+        }
+        for (beam, run) in self.beams.values_mut() {
+            beam.target = s.point(beam.target);
+            for p in run.paths.iter_mut().flatten() {
+                *p = s.point(*p);
+            }
+        }
+    }
+
     /// Every ribbon as a list of points, for drawing.
     pub fn for_each_ribbon(&self, mut f: impl FnMut(&[RibbonPoint], RibbonStyle, f32)) {
         let mut points = Vec::new();

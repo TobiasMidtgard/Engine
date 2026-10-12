@@ -1,6 +1,10 @@
 //! Procedural planet shapes: continents, oceans, mountain ranges, hills, eroded detail,
 //! craters and flat building pads, as a pure function of direction on the sphere.
 //!
+//! On planets with weather, an analytic erosion filter carves the mountains and hills into
+//! branching valleys, spurs, gullies and couloirs ([`PlanetShape::erosion`]); the large
+//! landforms carry their slopes along (as dual numbers) to steer it.
+//!
 //! The same function feeds the renderer (chunk meshes at every level of detail), the
 //! [`Ground`](engine_world::Ground) query, footsteps and physics colliders, so what you see
 //! is what you stand on. It is deterministic for a seed and evaluated in `f64`, so a
@@ -8,7 +12,7 @@
 
 use std::sync::Arc;
 
-use engine_core::math::{DQuat, DVec3};
+use engine_core::math::{DMat3, DQuat, DVec3};
 use engine_core::prelude::*;
 
 use crate::edits::OverlayPaint;
@@ -272,6 +276,9 @@ pub struct PlanetShape {
     pub detail_scale_m: f64,
     /// Finest wavelength ever generated, meters (smaller bumps come from the shader).
     pub min_detail_m: f64,
+    /// 0..1 strength of water and ice erosion: valleys, spurs, gullies and couloirs cut down
+    /// the slopes of mountains and hills, flat valley floors (0 = none, as on the Moon).
+    pub erosion: f64,
     /// Impact craters: radius of the largest, meters (0 = none).
     pub crater_max_radius_m: f64,
     /// Smallest crater radius, meters.
@@ -310,9 +317,10 @@ impl PlanetShape {
             mountain_coverage: 0.35,
             hill_height_m: 200.0,
             hill_scale_m: 8_000.0,
-            detail_height_m: 60.0,
-            detail_scale_m: 1_800.0,
+            detail_height_m: 10.0,
+            detail_scale_m: 400.0,
             min_detail_m: 1.0,
+            erosion: 1.0,
             crater_max_radius_m: 0.0,
             crater_min_radius_m: 0.0,
             crater_density: 0.0,
@@ -341,6 +349,7 @@ impl PlanetShape {
             detail_height_m: 18.0,
             detail_scale_m: 900.0,
             min_detail_m: 0.8,
+            erosion: 0.0,
             crater_max_radius_m: 60_000.0,
             crater_min_radius_m: 4.0,
             crater_density: 0.75,
@@ -374,6 +383,7 @@ impl PlanetShape {
             detail_height_m: 30.0,
             detail_scale_m: 1_500.0,
             min_detail_m: 1.0,
+            erosion: 0.0,
             crater_max_radius_m: 40_000.0,
             crater_min_radius_m: 20.0,
             crater_density: 0.35,
@@ -428,125 +438,226 @@ impl PlanetShape {
             0.6,
         );
         let threshold = (self.ocean_fraction - 0.5) * 0.55;
-        let mut cl = cont + bays * 0.07 - threshold;
+        let mut cl = D::c(cont + bays * 0.07 - threshold);
+        // With erosion, the landforms below carry their slopes (see `D`) and stay smooth
+        // below a few kilometers: the erosion filter carves everything finer. Without, they
+        // are as rough as they need to be on their own.
+        let eroding = self.erosion > 0.0;
+        let along = |v: DVec3| v - dir * v.dot(dir);
+        let fbm = |scale: f64, seed: u64, octaves: f64, grad_octaves: u32, gain: f64| {
+            D::from(noise::fbm_d(
+                p,
+                scale,
+                seed,
+                octaves,
+                grad_octaves,
+                gain,
+                &STEER_M,
+            ))
+        };
 
         // Pads lay out the land around them: a continent, a coast, uplands and a range.
         let mut calm = 1.0f64;
         let mut range_mask = 0.0f64;
-        let mut range_h = 0.0;
+        let mut range_h = D::ZERO;
         let mut pad_ridge = None;
+        // How close to a sharp crest of the big landforms (1 on it): directions turn fast
+        // there, so the widest gullies stop just below.
+        let mut sharp_crest = 0.0f64;
         for pad in &self.pads {
             let c = pad.direction();
-            let d = great_circle(dir, c, r);
-            calm = calm.min(smooth(pad.radius_m, pad.radius_m + pad.blend_m * 3.0, d));
+            let d = surface_distance(dir, c, r);
+            calm = calm.min(smooth(pad.radius_m, pad.radius_m + pad.blend_m * 3.0, d.v));
             // Far away: the pad's continent, so it is not on an island.
-            let continent = 0.6 * (1.0 - smooth(0.6e6, 2.2e6, d));
-            let region = 1.0 - smooth(150_000.0, 450_000.0, d);
+            let continent = (1.0 - D::smooth(0.6e6, 2.2e6, d)) * 0.6;
+            let region = 1.0 - D::smooth(150_000.0, 450_000.0, d);
+            let east = DVec3::Y.cross(c).try_normalize().unwrap_or(DVec3::X);
+            let north = c.cross(east);
             let axes = |az_deg: f64| {
-                let east = DVec3::Y.cross(c).try_normalize().unwrap_or(DVec3::X);
-                let north = c.cross(east);
                 let (sa, ca) = az_deg.to_radians().sin_cos();
+                let (toward, side) = (north * ca + east * sa, east * ca - north * sa);
                 // (toward, along) in meters; r·sin(angle) ≈ distance this close to the pad.
                 (
-                    dir.dot(north * ca + east * sa) * r,
-                    dir.dot(east * ca - north * sa) * r,
+                    D::new(dir.dot(toward) * r, along(toward)),
+                    D::new(dir.dot(side) * r, along(side)),
                 )
             };
             // The sea on another horizon: a gulf with a ragged shore that widens and opens
             // into the planet's ocean far away.
-            let mut sea = 0.0;
+            let mut sea = D::ZERO;
             if pad.sea_distance_m > 0.0 && self.ocean && dir.dot(c) > 0.0 {
                 let (su, sv) = axes(pad.sea_azimuth_deg);
-                let ragged =
-                    noise::fbm_smooth(p / 22_000.0, s ^ 0x7B, octaves_for(22_000.0, 5.0), 0.55);
-                let shore = pad.sea_distance_m * (1.0 + 0.5 * ragged);
-                let half_width = 90_000.0 + 0.5 * su.max(0.0) + ragged * 40_000.0;
-                sea = smooth(shore - 3_000.0, shore + 20_000.0, su)
-                    * (1.0 - smooth(half_width, half_width * 1.5, sv.abs()))
-                    * (1.0 - smooth(1.5e6, 2.5e6, su))
+                let ragged = fbm(22_000.0, s ^ 0x7B, octaves_for(22_000.0, 5.0), 3, 0.55);
+                let shore = (1.0 + 0.5 * ragged) * pad.sea_distance_m;
+                let half_width = 90_000.0 + 0.5 * su.max(D::ZERO) + ragged * 40_000.0;
+                sea = D::smooth_t((su - shore + 3_000.0) / 23_000.0)
+                    * (1.0 - D::smooth_t((sv.abs() - half_width) / (half_width * 0.5)))
+                    * (1.0 - D::smooth(1.5e6, 2.5e6, su))
                     * smooth(0.0, 0.3, dir.dot(c));
             }
-            let open_sea = -0.45 + bays * 0.3;
-            if region <= 0.0 {
-                cl = lerp(cl + continent * (1.0 - sea), open_sea, sea);
+            let open_sea = D::c(-0.45 + bays * 0.3);
+            if region.v <= 0.0 {
+                cl = (cl + continent * (1.0 - sea)).lerp(open_sea, sea);
                 continue;
             }
             // A low plain at the pad, uplands and basins around, rising toward the range.
             let (mu, mv) = axes(pad.mountain_azimuth_deg);
-            let uplands = noise::fbm(p / 30_000.0, s ^ 0x7A, 4, 0.5);
+            let uplands = fbm(30_000.0, s ^ 0x7A, 4.0, 4, 0.5);
             let design = 0.09
-                + 0.3 * smooth(4_000.0, pad.mountain_distance_m, mu) * pad.mountains.min(1.0)
-                + uplands * 0.3 * smooth(2_000.0, 12_000.0, d);
-            cl = lerp(cl + continent * (1.0 - sea), design, region);
-            cl = lerp(cl, open_sea, sea);
+                + 0.3 * pad.mountains.min(1.0) * D::smooth(4_000.0, pad.mountain_distance_m, mu)
+                + uplands * 0.3 * D::smooth(2_000.0, 12_000.0, d);
+            cl = (cl + continent * (1.0 - sea)).lerp(design, region);
+            cl = cl.lerp(open_sea, sea);
             // The range: a bent crest line with passes; spurs and valleys run down from it.
             if pad.mountains > 0.0 {
-                let crest = pad.mountain_distance_m
-                    * (1.0 + 0.4 * noise::fbm(p / 45_000.0, s ^ 0x7C, 3, 0.5));
-                let x = mu - crest;
-                let taper = 1.0 - smooth(45_000.0, 140_000.0, mv.abs());
-                let w = pad.mountains * taper * region;
-                let core = (-(x / 11_000.0).powi(2)).exp() * w;
-                range_mask = range_mask.max((-(x / 22_000.0).powi(2)).exp() * w);
-                if core > 1e-3 {
-                    let passes = smooth(-0.35, 0.15, noise::fbm(p / 28_000.0, s ^ 0x7D, 3, 0.5));
-                    let ridge = *pad_ridge.get_or_insert_with(|| {
+                let bend = fbm(45_000.0, s ^ 0x7C, 3.0, 3, 0.5);
+                let crest = (1.0 + 0.4 * bend) * pad.mountain_distance_m;
+                let x = (mu - crest) / 11_000.0;
+                let taper = 1.0 - D::smooth(45_000.0, 140_000.0, mv.abs());
+                let w = taper * region * pad.mountains;
+                let core = (-(x * x)).exp() * w;
+                range_mask = range_mask.max((-(x.v * 0.5).powi(2)).exp() * w.v);
+                if core.v > 1e-6 {
+                    let passes = D::smooth(-0.35, 0.15, fbm(28_000.0, s ^ 0x7D, 3.0, 3, 0.5));
+                    // Erosion carves everything below a few kilometers, so the range itself
+                    // is only the big shapes then.
+                    let most = if eroding { 6.0 } else { 9.0 };
+                    let (ridge, ridge_crest) = *pad_ridge.get_or_insert_with(|| {
                         // Stretched across the crest: spurs and valleys, plus round peaks.
-                        let q = DVec3::new(mu / 16_000.0, 0.37, mv / 6_500.0);
-                        let spurs = noise::ridged(q, s ^ 0x33, octaves_for(6_500.0, 9.0));
-                        let peaks =
-                            noise::ridged(p / 12_000.0, s ^ 0x34, octaves_for(12_000.0, 9.0));
-                        0.55 * spurs + 0.45 * peaks
+                        let q = DVec3::new(mu.v / 16_000.0, 0.37, mv.v / 6_500.0);
+                        let (v, gq, spur_crest) = noise::ridged_d(
+                            q,
+                            1.0,
+                            s ^ 0x33,
+                            octaves_for(6_500.0, most),
+                            if eroding { 3 } else { 0 },
+                            &STEER_M.map(|m| m / 6_500.0),
+                        );
+                        let mut g = [DVec3::ZERO; LEVELS];
+                        for (k, g) in g.iter_mut().enumerate() {
+                            *g = mu.g[k] * (gq[k].x / 16_000.0) + mv.g[k] * (gq[k].z / 6_500.0);
+                        }
+                        let spurs = D { v, g };
+                        let (pv, pg, peak_crest) = noise::ridged_d(
+                            p,
+                            12_000.0,
+                            s ^ 0x34,
+                            octaves_for(12_000.0, most),
+                            if eroding { 3 } else { 0 },
+                            &STEER_M,
+                        );
+                        let peaks = D::from((pv, pg));
+                        (0.55 * spurs + 0.45 * peaks, spur_crest.max(peak_crest))
                     });
-                    // Crags: sharp sub-ridges and gullies on the flanks.
-                    let crags = noise::ridged(p / 3_000.0, s ^ 0x35, octaves_for(3_000.0, 7.0));
-                    range_h += core
-                        * (0.35 + 0.65 * passes)
-                        * (400.0 + 5_200.0 * ridge.powf(1.5) + 700.0 * crags * crags * ridge);
+                    let mut relief = 400.0 + 5_200.0 * ridge.powf(1.5);
+                    if !eroding {
+                        // Crags: sharp sub-ridges and gullies on the flanks.
+                        let crags = noise::ridged(p / 3_000.0, s ^ 0x35, octaves_for(3_000.0, 7.0));
+                        relief = relief + 700.0 * crags * crags * ridge;
+                    }
+                    let h = core * (0.35 + 0.65 * passes) * relief;
+                    sharp_crest = sharp_crest.max(ridge_crest * smooth(300.0, 1_500.0, h.v));
+                    range_h = range_h + h;
                 }
             }
         }
 
         let (base, coast) = if self.ocean {
-            let coast = smooth(-0.02, 0.08, cl);
-            let land_h = 15.0 + self.plateau_height_m * smooth(0.02, 0.45, cl);
-            let sea_h = -60.0 - self.ocean_depth_m * smooth(0.0, 0.22, -cl);
-            (lerp(sea_h, land_h, coast), coast)
+            let coast = D::smooth(-0.02, 0.08, cl);
+            let land_h = 15.0 + self.plateau_height_m * D::smooth(0.02, 0.45, cl);
+            let sea_h = -60.0 - self.ocean_depth_m * D::smooth(0.0, 0.22, -cl);
+            (sea_h.lerp(land_h, coast), coast)
         } else {
             // Highlands and basins instead of continents and seas.
-            (self.plateau_height_m * (cont * 1.6).clamp(-1.0, 1.0), 1.0)
+            (
+                D::c(self.plateau_height_m * (cont * 1.6).clamp(-1.0, 1.0)),
+                D::c(1.0),
+            )
         };
 
         // Mountain ranges where the range mask is high.
         let range = noise::fbm(p / (self.mountain_scale_m * 14.0), s ^ 0x31, 4, 0.5);
         let cover = (self.mountain_coverage - 0.5) * 0.6;
-        let mask = smooth(0.0, 0.35, range + cover) * coast;
+        let mask = smooth(0.0, 0.35, range + cover) * coast.v;
         let mut mountains = range_h * coast;
         if mask > 0.0 && self.mountain_height_m > 0.0 {
-            let o = octaves_for(self.mountain_scale_m, 9.0);
-            let ridge = noise::ridged(p / self.mountain_scale_m, s ^ 0x32, o);
-            mountains += mask * ridge.powf(1.7) * self.mountain_height_m * 1.6;
+            let scale = self.mountain_scale_m;
+            let ridge = if eroding {
+                let (v, g, c) =
+                    noise::ridged_d(p, scale, s ^ 0x32, octaves_for(scale, 4.0), 4, &STEER_M);
+                let h = v.max(0.0).powf(1.7) * mask * self.mountain_height_m * 1.6;
+                sharp_crest = sharp_crest.max(c * smooth(300.0, 1_500.0, h));
+                D::from((v, g))
+            } else {
+                D::c(noise::ridged(p / scale, s ^ 0x32, octaves_for(scale, 9.0)))
+            };
+            mountains = mountains + ridge.powf(1.7) * (mask * self.mountain_height_m * 1.6);
         }
-        let mask = mask.max(range_mask * coast);
+        let mask = mask.max(range_mask * coast.v);
 
-        // Hills and eroded detail.
         // Rolling hills: rounded tops and creased valleys, only ever raising the land, so
         // coastal plains stay dry.
-        let hn = noise::fbm_smooth(
-            p / self.hill_scale_m,
-            s ^ 0x41,
-            octaves_for(self.hill_scale_m, 6.0),
-            0.58,
-        );
-        let hills = ((hn * hn + 0.003).sqrt() - 0.055)
-            * 2.0
-            * self.hill_height_m
-            * if self.ocean {
-                smooth(-0.02, 0.12, cl)
+        let hill_land = if self.ocean {
+            D::smooth(-0.02, 0.12, cl)
+        } else {
+            D::c(1.0)
+        };
+        let billow = if eroding {
+            let hn = fbm(
+                self.hill_scale_m,
+                s ^ 0x41,
+                octaves_for(self.hill_scale_m, 3.0),
+                3,
+                0.58,
+            );
+            // Steered as if the creases were wide, so gullies turn gently into them.
+            hn.soft_abs(0.055, [0.3; LEVELS])
+        } else {
+            let hn = noise::fbm_smooth(
+                p / self.hill_scale_m,
+                s ^ 0x41,
+                octaves_for(self.hill_scale_m, 6.0),
+                0.58,
+            );
+            D::c((hn * hn + 0.003).sqrt() - 0.055)
+        };
+        let hills = billow * hill_land * (2.0 * self.hill_height_m * (0.25 + 0.75 * calm));
+
+        // Water and ice carve the big shapes into valleys, spurs and gullies.
+        let landforms = base + mountains + hills;
+        let mut h = landforms.v;
+        let mut slope = 0.0;
+        if eroding {
+            let land = if self.ocean {
+                smooth(-0.02, 0.12, cl.v)
             } else {
                 1.0
+            };
+            let strength = self.erosion * land * (0.35 + 0.65 * calm);
+            let steer = landforms.g.map(along);
+            slope = steer[LEVELS - 1].length();
+            if strength > 0.0 {
+                let (dh, eroded_slope) = self.erode(
+                    p,
+                    dir,
+                    &steer,
+                    h,
+                    sharp_crest,
+                    mountains.v,
+                    finest,
+                    strength,
+                );
+                h += dh;
+                slope = eroded_slope;
             }
-            * (0.25 + 0.75 * calm);
+        }
+
+        // Small eroded relief: rough on steep rock, smooth on meadows and valley floors.
+        let roughness = if eroding {
+            0.3 + 2.4 * smooth(0.35, 1.2, slope)
+        } else {
+            0.5 + 4.0 * mask
+        };
         let detail = noise::eroded(
             p / self.detail_scale_m,
             s ^ 0x51,
@@ -554,12 +665,12 @@ impl PlanetShape {
             0.48,
             Some(dir),
         ) * self.detail_height_m
-            * (0.5 + 4.0 * mask)
+            * roughness
             * (0.3 + 0.7 * calm);
+        h += detail;
 
         // Maria: dark flooded basins (flat, low).
         let mut mare = 0.0f32;
-        let mut h = base + mountains + hills + detail;
         if self.maria > 0.0 {
             let m = noise::fbm(p / (self.continent_scale_m * 0.7), s ^ 0x61, 4, 0.5);
             let t = smooth(0.0, 0.12, m - (0.5 - self.maria) * 0.5);
@@ -592,7 +703,7 @@ impl PlanetShape {
         let wet_noise = (noise::fbm(p / 900_000.0, s ^ 0x71, 4, 0.5)
             + noise::fbm(p / 40_000.0, s ^ 0x72, 3, 0.5) * 0.7) as f32;
         let coastal = if self.ocean {
-            (1.0 - smooth(0.05, 0.5, cl)) as f32 * 0.2
+            (1.0 - smooth(0.05, 0.5, cl.v)) as f32 * 0.2
         } else {
             0.0
         };
@@ -609,6 +720,132 @@ impl PlanetShape {
     /// Height only (full detail).
     pub fn height(&self, dir: DVec3) -> f64 {
         self.sample(dir, 0.0).height
+    }
+
+    /// The erosion filter: valleys, spurs, gullies and couloirs cut into landforms of
+    /// `height` at `p` (planet-local, meters; `up` is the surface normal), down to
+    /// wavelength `finest`. `steer` is the landforms' slope along the surface (rise per
+    /// meter) at each steering level ([`STEER_M`]), `crest` how close a sharp crest is
+    /// (0..1), `relief` the height of the mountains and `strength` how hard to erode.
+    /// Returns the change in height (never up) and the slope after erosion (rise over run).
+    ///
+    /// Each octave lays stripes that run downhill (see [`noise::stripes`]) and carves them
+    /// into gullies as deep as the ground is steep, leaving the crests between them where
+    /// they were. An octave follows the slope of landforms wider than its noise cells, so
+    /// its gullies run straight instead of swirling, plus part of the gullies cut so far,
+    /// so tributaries run into them at an angle and the network branches like drainage. The
+    /// widest octaves also cut in proportion to the mountains' height (valleys) and leave
+    /// sediment on their floors (flat valley bottoms); high up, crests are sharp (arêtes).
+    /// It is a filter in the spirit of Rune Skovbo Johansen's erosion filter and Clay
+    /// John's eroded terrain noise: analytic, so every patch can be built on its own at any
+    /// level of detail.
+    #[allow(clippy::too_many_arguments)]
+    fn erode(
+        &self,
+        p: DVec3,
+        up: DVec3,
+        steer: &[DVec3; LEVELS],
+        height: f64,
+        crest: f64,
+        relief: f64,
+        finest: f64,
+        strength: f64,
+    ) -> (f64, f64) {
+        use std::f64::consts::{PI, TAU};
+        // Slopes of the gullies cut so far.
+        let mut cuts = DVec3::ZERO;
+        let mut dh = 0.0;
+        // Sediment on the floors of the widest valleys, and how far from the crests and
+        // floors of the previous octave (where flow turns fast).
+        let (mut fill, mut flank) = (1.0, 1.0);
+        let mut period = EROSION_WIDEST_M;
+        let mut turn = DMat3::IDENTITY;
+        // Water leaves rounded spurs in the lowlands; ice and frost high up leave sharp
+        // arêtes between the gullies.
+        let alpine = smooth(700.0, 2_400.0, height);
+        for (i, (depth_k, incise_k)) in EROSION_DEPTH.iter().zip(EROSION_INCISE).enumerate() {
+            // Fade the octaves in with the level of detail, until their gullies are many
+            // vertices wide (see `EROSION_RESOLVED`).
+            let lod = smooth(1.0, EROSION_RESOLVED, period / finest);
+            if lod <= 0.0 {
+                break;
+            }
+            // Downhill on the landforms as wide as this octave's cells, plus part of the
+            // gullies cut so far: enough to branch, not so much that they swirl.
+            let flow = steer[i.min(LEVELS - 1)] + cuts * EROSION_BRANCHING;
+            let slope = flow.length();
+            if slope < 1e-9 {
+                break;
+            }
+            let across = up.cross(flow) / slope;
+            let cell = period * EROSION_CELL;
+            let (c, sn) = noise::stripes(
+                turn * (p / cell),
+                turn * across,
+                self.seed ^ (0xE705 + i as u64 * 0x9E37),
+                EROSION_CELL,
+            );
+            let rho = c.hypot(sn);
+            // 0 between gullies (the ground as it was), 1 on a gully floor. Gullies only
+            // ever cut: the crests between them stay where they were, and where a gully
+            // ends it simply fades out.
+            let u = (0.5 - 0.5 * c / rho.max(1e-9)).clamp(0.0, 1.0);
+            // Narrow crests between wide gullies high up (still without a crease, which
+            // would draw hairlines); rounded spurs below. An arête is rounded off over the
+            // finest detail asked for, so it is never sharper than the vertices drawing it.
+            let cut = if alpine > 0.0 {
+                let round = (PI * EROSION_CREST_ROUNDING * finest / period).powi(2);
+                let r = round.powf(0.6);
+                let arete = ((u + round).powf(0.6) - r) / ((1.0 + round).powf(0.6) - r);
+                rho * lerp(u, arete, alpine)
+            } else {
+                rho * u
+            };
+            // As deep as the ground is steep (up to about 45°), in proportion to the width;
+            // the widest valleys also in proportion to the height of the mountains. Gullies
+            // wider than a crest's rounding stop just below it.
+            let real = steer[LEVELS - 1] + cuts;
+            let steep = real.length() / (1.0 + real.length_squared()).sqrt();
+            // Where the ground here slopes another way than the wide landforms, gullies
+            // would run along the contours: fade them out.
+            let aligned = smooth(
+                0.35,
+                0.85,
+                (real.dot(flow) / (real.length() * slope + 1e-12)).abs(),
+            );
+            let incise = incise_k * relief.max(0.0) * slope / (slope + 0.05);
+            // Near a peak, saddle or pit of the wide landforms their downhill direction spins
+            // around, and so would the gullies (stars and spirals): fade them out where the
+            // wide landforms are much flatter than the ground here.
+            let calm = 0.02 + 0.2 * real.length();
+            let settled = slope * slope / (slope * slope + calm * calm);
+            let below_crest = 1.0 - crest * smooth(150.0, 600.0, period);
+            // Frost and ice cut deeper high up.
+            let depth = (depth_k * period * steep * (1.0 + EROSION_ALPINE * alpine) + incise)
+                * strength
+                * fill
+                * flank
+                * below_crest
+                * aligned
+                * settled;
+            dh -= depth * cut * lod;
+            // Slopes of the cut, from the rounded profile so directions turn smoothly over
+            // crests and floors (a jump in direction would tear the next octave apart).
+            cuts += across * (depth * 0.5 * sn * TAU / period * lod);
+            // The next octave fades toward this one's crests and floors, where flow turns
+            // sharply (it would swirl); sediment fills the floors of the widest valleys. Only
+            // as far as this octave was cut: where it faded out, its stripes may spin.
+            let shown = aligned * settled;
+            flank = 1.0 - 0.6 * (1.0 - sn * sn) * shown;
+            if i < 2 {
+                // (Continuous across c = 0: a step here would draw a hairline.)
+                let floor = c.min(0.0);
+                fill *= 1.0 - 0.7 * floor * floor * shown;
+            }
+            period *= 0.5;
+            turn *= OCTAVE_TURN;
+        }
+        (dh, (steer[LEVELS - 1] + cuts).length())
     }
 
     /// Sum of crater profiles at `p` (planet-local, meters), from the largest size class down
@@ -684,6 +921,271 @@ fn lerp(a: f64, b: f64, t: f64) -> f64 {
 fn smooth(e0: f64, e1: f64, x: f64) -> f64 {
     let t = ((x - e0) / (e1 - e0)).clamp(0.0, 1.0);
     t * t * (3.0 - 2.0 * t)
+}
+
+/// [`great_circle`] from `center` to `dir`, with its gradient (the surface direction away
+/// from `center`, one meter per meter).
+fn surface_distance(dir: DVec3, center: DVec3, r: f64) -> D {
+    let away = (dir * dir.dot(center) - center)
+        .try_normalize()
+        .unwrap_or(DVec3::ZERO);
+    D::new(great_circle(dir, center, r), away)
+}
+
+/// Widest gullies the erosion filter cuts (spacing between neighbouring spurs), meters.
+const EROSION_WIDEST_M: f64 = 2_400.0;
+/// Octaves of erosion, each half as wide: 2.4 km valleys down to 38 m gullies.
+const EROSION_OCTAVES: usize = 7;
+/// An erosion octave fades in between wavelengths of 1 and this many times the finest detail
+/// asked for (2 to 16 vertex spacings on a terrain patch). Gullies only a few vertices wide
+/// would alias: their crests zig-zag between vertices, and the shading flips from one face
+/// of a crest to the other within a vertex, so ridge silhouettes get dark, serrated rims.
+const EROSION_RESOLVED: f64 = 8.0;
+/// Radius of the rounding on top of arêtes, in units of the finest detail asked for.
+const EROSION_CREST_ROUNDING: f64 = 1.5;
+/// Gully stripes per noise cell: how far a gully runs before it forks or merges.
+const EROSION_CELL: f64 = 2.0;
+/// How much each octave's gullies steer the next (0 = all run straight down the big
+/// landforms, 1 = tributaries run down the walls of the gully they join).
+const EROSION_BRANCHING: f64 = 0.3;
+/// Depth of each octave's gullies relative to their width, on a 45° slope.
+const EROSION_DEPTH: [f64; EROSION_OCTAVES] = [0.30, 0.26, 0.23, 0.21, 0.19, 0.17, 0.16];
+/// Depth of each octave's valleys relative to the height of the mountains they cut.
+const EROSION_INCISE: [f64; EROSION_OCTAVES] = [0.18, 0.08, 0.03, 0.0, 0.0, 0.0, 0.0];
+/// How much deeper gullies are in the alpine zone (frost and ice).
+const EROSION_ALPINE: f64 = 1.2;
+/// A fixed rotation per erosion octave, so the noise cells of different octaves never line up.
+const OCTAVE_TURN: DMat3 = DMat3::from_cols(
+    DVec3::new(0.80, 0.60, 0.00),
+    DVec3::new(-0.36, 0.48, 0.80),
+    DVec3::new(0.48, -0.64, 0.60),
+);
+
+/// Steering levels: the slopes that steer erosion, low-passed to features at least this long
+/// (meters). Erosion octave `i` follows level `i` (the last level for finer octaves), whose
+/// direction holds steady across that octave's noise cells; the last level has everything.
+const STEER_M: [f64; LEVELS] = [6_000.0, 3_000.0, 1_500.0, 0.0];
+/// Number of steering levels.
+const LEVELS: usize = 4;
+
+/// A value with its gradient (per meter, planet-local) at each steering level, so the shapes
+/// of the large landforms carry their slopes along to the erosion filter.
+#[derive(Debug, Clone, Copy)]
+struct D {
+    v: f64,
+    g: [DVec3; LEVELS],
+}
+
+impl D {
+    const ZERO: D = D {
+        v: 0.0,
+        g: [DVec3::ZERO; LEVELS],
+    };
+
+    /// A value with the same (smooth, large-scale) gradient at every level.
+    #[inline]
+    fn new(v: f64, g: DVec3) -> D {
+        D { v, g: [g; LEVELS] }
+    }
+
+    /// A constant.
+    #[inline]
+    fn c(v: f64) -> D {
+        D {
+            v,
+            g: [DVec3::ZERO; LEVELS],
+        }
+    }
+
+    /// `f(self)` from `f` and its derivative at `self.v`.
+    #[inline]
+    fn chain(self, f: f64, df: f64) -> D {
+        D {
+            v: f,
+            g: self.g.map(|g| g * df),
+        }
+    }
+
+    fn exp(self) -> D {
+        let e = self.v.exp();
+        self.chain(e, e)
+    }
+
+    fn powf(self, k: f64) -> D {
+        if self.v <= 0.0 {
+            return D::ZERO;
+        }
+        let pv = self.v.powf(k);
+        self.chain(pv, k * pv / self.v)
+    }
+
+    /// `sqrt(x² + δ²) − δ`: |x| with the crease rounded over ±δ. The steering gradients are
+    /// rounded more, over `±steer[k]`, so directions taken from them turn over a crest
+    /// gradually, at a pace each level can follow.
+    fn soft_abs(self, delta: f64, steer: [f64; LEVELS]) -> D {
+        let x = self.v;
+        let mut g = self.g;
+        for (g, d) in g.iter_mut().zip(steer) {
+            *g *= x / (x * x + d * d).sqrt();
+        }
+        D {
+            v: (x * x + delta * delta).sqrt() - delta,
+            g,
+        }
+    }
+
+    fn abs(self) -> D {
+        if self.v < 0.0 { -self } else { self }
+    }
+
+    fn max(self, o: D) -> D {
+        if self.v >= o.v { self } else { o }
+    }
+
+    fn lerp(self, b: D, t: D) -> D {
+        self + (b - self) * t
+    }
+
+    /// Smoothstep of `x` between `e0` and `e1`.
+    fn smooth(e0: f64, e1: f64, x: D) -> D {
+        D::smooth_t((x - e0) / (e1 - e0))
+    }
+
+    /// Smoothstep of an already normalized `t` (0..1 ramp).
+    fn smooth_t(t: D) -> D {
+        if t.v <= 0.0 {
+            D::ZERO
+        } else if t.v >= 1.0 {
+            D::c(1.0)
+        } else {
+            t.chain(t.v * t.v * (3.0 - 2.0 * t.v), 6.0 * t.v * (1.0 - t.v))
+        }
+    }
+}
+
+impl From<(f64, [DVec3; LEVELS])> for D {
+    #[inline]
+    fn from((v, g): (f64, [DVec3; LEVELS])) -> D {
+        D { v, g }
+    }
+}
+
+impl std::ops::Add for D {
+    type Output = D;
+    #[inline]
+    fn add(self, o: D) -> D {
+        let mut g = self.g;
+        for (a, b) in g.iter_mut().zip(o.g) {
+            *a += b;
+        }
+        D { v: self.v + o.v, g }
+    }
+}
+
+impl std::ops::Sub for D {
+    type Output = D;
+    #[inline]
+    fn sub(self, o: D) -> D {
+        self + -o
+    }
+}
+
+impl std::ops::Mul for D {
+    type Output = D;
+    #[inline]
+    fn mul(self, o: D) -> D {
+        let mut g = self.g;
+        for (a, b) in g.iter_mut().zip(o.g) {
+            *a = *a * o.v + b * self.v;
+        }
+        D { v: self.v * o.v, g }
+    }
+}
+
+impl std::ops::Div for D {
+    type Output = D;
+    #[inline]
+    fn div(self, o: D) -> D {
+        let q = self.v / o.v;
+        let mut g = self.g;
+        for (a, b) in g.iter_mut().zip(o.g) {
+            *a = (*a - b * q) / o.v;
+        }
+        D { v: q, g }
+    }
+}
+
+impl std::ops::Neg for D {
+    type Output = D;
+    #[inline]
+    fn neg(self) -> D {
+        D {
+            v: -self.v,
+            g: self.g.map(|g| -g),
+        }
+    }
+}
+
+impl std::ops::Add<f64> for D {
+    type Output = D;
+    #[inline]
+    fn add(self, o: f64) -> D {
+        D {
+            v: self.v + o,
+            g: self.g,
+        }
+    }
+}
+
+impl std::ops::Sub<f64> for D {
+    type Output = D;
+    #[inline]
+    fn sub(self, o: f64) -> D {
+        self + -o
+    }
+}
+
+impl std::ops::Mul<f64> for D {
+    type Output = D;
+    #[inline]
+    fn mul(self, o: f64) -> D {
+        D {
+            v: self.v * o,
+            g: self.g.map(|g| g * o),
+        }
+    }
+}
+
+impl std::ops::Div<f64> for D {
+    type Output = D;
+    #[inline]
+    fn div(self, o: f64) -> D {
+        self * (1.0 / o)
+    }
+}
+
+impl std::ops::Add<D> for f64 {
+    type Output = D;
+    #[inline]
+    fn add(self, o: D) -> D {
+        o + self
+    }
+}
+
+impl std::ops::Sub<D> for f64 {
+    type Output = D;
+    #[inline]
+    fn sub(self, o: D) -> D {
+        -o + self
+    }
+}
+
+impl std::ops::Mul<D> for f64 {
+    type Output = D;
+    #[inline]
+    fn mul(self, o: D) -> D {
+        o * self
+    }
 }
 
 #[cfg(test)]
@@ -799,6 +1301,111 @@ mod tests {
             let coarse = shape.sample(d, 200.0).height;
             assert!((full - coarse).abs() < 150.0, "{full} vs {coarse}");
         }
+    }
+
+    /// Erosion never tears the ground: walking across the range and down to the coast, the
+    /// height has no steps or near-vertical walls (a narrowing step at a millimeter).
+    #[test]
+    fn eroded_ground_is_continuous() {
+        let pad = FlatPad::default();
+        let shape = PlanetShape::earthlike(7).with_pad(pad);
+        let c = pad.direction();
+        let east = DVec3::Y.cross(c).normalize();
+        let north = c.cross(east);
+        let at = |x: f64, y: f64| {
+            let d = (c + east * (x / shape.radius_m) + north * (y / shape.radius_m)).normalize();
+            shape.sample(d, 10.0).height
+        };
+        // Across the range (through a saddle of its big shapes, where gullies once spun
+        // around) and through the hills down to the coast.
+        for (x, y0) in [(-2_700.0, 23_500.0), (-9_000.0, -15_500.0)] {
+            let mut prev = at(x, y0);
+            for k in 1..1_500 {
+                let y = y0 + k as f64;
+                let h = at(x, y);
+                if (h - prev).abs() > 1.0 {
+                    // Narrow the steepest part of the step down to a millimeter.
+                    let (mut a, mut b) = (y - 1.0, y);
+                    for _ in 0..10 {
+                        let m = 0.5 * (a + b);
+                        if (at(x, m) - at(x, a)).abs() > (at(x, b) - at(x, m)).abs() {
+                            b = m;
+                        } else {
+                            a = m;
+                        }
+                    }
+                    let step = at(x, b) - at(x, a);
+                    assert!(step.abs() < 0.02, "step of {step} m at ({x}, {a})");
+                }
+                prev = h;
+            }
+        }
+    }
+
+    /// The eroded home landscape stays inside the terrain's conservative height range (the
+    /// renderer culls patches with it).
+    #[test]
+    fn eroded_home_stays_in_height_range() {
+        let pad = FlatPad::default();
+        let terrain = crate::PlanetTerrain {
+            shape: PlanetShape::earthlike(7).with_pad(pad),
+            ..crate::PlanetTerrain::earthlike(7)
+        };
+        let (low, high) = terrain.height_range();
+        let shape = &terrain.shape;
+        let c = pad.direction();
+        let east = DVec3::Y.cross(c).normalize();
+        let north = c.cross(east);
+        let (mut lowest, mut highest) = (f64::MAX, f64::MIN);
+        for j in 0..100 {
+            for i in 0..100 {
+                let (x, y) = (i as f64 * 600.0 - 30_000.0, j as f64 * 600.0 - 20_000.0);
+                let d =
+                    (c + east * (x / shape.radius_m) + north * (y / shape.radius_m)).normalize();
+                let h = shape.sample(d, 20.0).height;
+                lowest = lowest.min(h);
+                highest = highest.max(h);
+            }
+        }
+        assert!(
+            low < lowest && highest < high,
+            "{lowest}..{highest} outside {low}..{high}"
+        );
+    }
+
+    /// Cost of one shape sample around the home range, at patch-like levels of detail.
+    /// `cargo test --release -p engine_terrain sample_cost -- --ignored --nocapture`
+    #[test]
+    #[ignore = "timing; run in release"]
+    fn sample_cost() {
+        let pad = FlatPad::default();
+        let shape = PlanetShape::earthlike(7).with_pad(pad);
+        let c = pad.direction();
+        let east = DVec3::Y.cross(c).normalize();
+        let north = c.cross(east);
+        let mut total = 0.0;
+        let mut n_total = 0usize;
+        for wavelength in [1.0, 4.0, 16.0, 64.0, 256.0] {
+            let n = 40_000usize;
+            let started = std::time::Instant::now();
+            let mut sink = 0.0;
+            for i in 0..n {
+                // A 60 × 60 km square over the pad, the range and the coast.
+                let x = ((i * 7919) % 1000) as f64 * 60.0 - 30_000.0;
+                let y = ((i * 104_729) % 1000) as f64 * 60.0 - 20_000.0;
+                let d =
+                    (c + east * (x / shape.radius_m) + north * (y / shape.radius_m)).normalize();
+                sink += shape.sample(d, wavelength).height;
+            }
+            let us = started.elapsed().as_secs_f64() * 1e6;
+            println!(
+                "min wavelength {wavelength:>5} m: {:.2} µs/sample ({sink:.0})",
+                us / n as f64
+            );
+            total += us;
+            n_total += n;
+        }
+        println!("mean: {:.2} µs/sample", total / n_total as f64);
     }
 
     #[test]

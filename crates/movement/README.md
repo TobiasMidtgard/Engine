@@ -16,9 +16,16 @@ character's own speed and reactions.
   ignores that slow motion, so a trained player sees an elite's blink-fast dash in slow
   motion and has time to react. Cinematic slow-motion beats play on hits, kills and readable
   enemy attacks.
-- **Feel**: afterimages behind fast moves (spaced in real time and distance, so a still frame
-  shows the motion), a slow-motion screen effect (vignette, cool grade, speed lines while
-  dashing) and camera cues (FOV kick, focus narrowing, wall-run roll).
+- **Feel**: afterimages behind fast moves (full-body ghosts, spaced in real time and
+  distance, so a still frame shows the motion), a slow-motion screen effect (vignette, cool
+  grade, speed lines while dashing) and camera cues (FOV kick, focus narrowing, wall-run
+  roll).
+- **Effects** (`look::effects`, tuned by `EffectSettings`): blade trails that cut a crescent
+  behind every `look::Blade` as it strikes (one sharp arc at full speed, long and silky in
+  slow motion), sparks when a strike is blocked, a crimson slash flash on a hit (a crossed
+  cut and a flash light on a kill), and lit dust from landings, slides, dashes and wall
+  kicks. Everything lives on the world clock, is pooled and capped, and is drawn by one
+  render feature.
 
 ```rust,ignore
 use engine::prelude::*;
@@ -73,7 +80,11 @@ course zone.
      slow motion and each grunt falls in a cinematic beat.
 
 `cargo run -p engine_movement --release --example movement_filmstrip -- <dir>` renders the
-key moments of the demo (and a contact sheet) headless.
+key moments of the demo (and a contact sheet) headless, and
+`cargo run -p engine_movement --release --example effects_preview -- <dir>` renders the
+effects up close: a strike at full speed and in slow motion, a parry, a kill, slide dust and
+dash afterimages. `fighter_preview` renders the four fighter styles, close-ups and animation
+poses, and `course_preview` renders the course and the ring from fixed cameras.
 
 ## Contracts
 
@@ -104,16 +115,35 @@ see both. It steps aside as soon as a physics backend claims the contract.
 When the world re-anchors (floating origin, or a new planet's frame), `engine_world` moves
 root transforms and the shared character state. Movement moves its own world-space state in
 `WorldShiftSet::Apply`: velocities, facing, wall contacts, ledge targets, dash directions,
-knockback, and the course runner's and duel's anchor points, so a wall-run or a dash carries
-on through the shift.
+knockback, the course runner's and duel's anchor points, afterimage ghosts, and effects in
+flight (blade trails, sparks and their floors, slashes, dust, lights), so a wall-run, a dash
+or a spray of sparks carries on through the shift.
 
 ### Look
 
-`look` is a small procedural art kit for the demo: `look::meshgen` (rounded and chamfered
-boxes, lofts, lathes, extrusions, tubes) and `look::texgen` (tiling noise and a baker that
-turns a surface function into base color, normal, roughness/metal and occlusion maps). Meshes
-and materials are built once at startup and stored under keys (`movement/<name>`;
-`look::mesh(key)`, `look::material(key)`). `LookSettings::texture_size` sets the bake size.
+`look` is the demo's procedural art, built once at startup and stored under keys
+(`movement/<name>`; `look::mesh(key)`, `look::material(key)`; `LookSettings::texture_size`
+sets the bake size). Nothing in it is third-party art.
+
+- `look::meshgen` (rounded and chamfered boxes, lofts, lathes, extrusions, tubes) and
+  `look::texgen` (tiling noise and a baker that turns a surface function into base color,
+  normal, roughness/metal and occlusion maps).
+- `look::materials`: shared tiling PBR materials sized in meters (concrete, precast panels,
+  painted steel, brushed metal, rubber, hazard stripes, tread plate, floor boards, timber,
+  granite, raked gravel, cloth, lacquer).
+- `look::fighter`: armored sword fighters in four `Style`s (Pilot for the runner, Duelist for
+  the player, Elite, Grunt), each a set of rigid armor parts with baked materials and a
+  katana. The demo puts one on every character it spawns.
+- `look::rig`: the fighters' skeleton and procedural animation. `Animator` turns the
+  movement and combat state (on the character's own clock) into a pose: run cycles, slides,
+  wall-runs, jumps, dashes, windups, strikes, blocks, hit reactions and falls, with two-bone
+  IK for arms and legs.
+- `look::course`: the course as a pilot training facility (precast wall panels with guide
+  lights, a hazard-striped slide bar, a tower with a caged ladder, a start gantry, masts,
+  numbered signs) and the ring as a samurai duel arena (board floor in a carved stone band,
+  lanterns, a torii, banners, a drum, a roofed stand), plus the level column. It adds no
+  colliders: the demo's boxes stay the same and every surface a character touches is drawn
+  on a box face.
 
 ## Tuning and AI access
 
@@ -135,12 +165,13 @@ double jump heights, slide under a bar that blocks running, wall-run and wall-ju
 dash, characters on their own clocks in slow motion, the stand-in stepping aside, bodies from
 other modules being moved);
 `tests/demo.rs` (each duel round plays out as described, the rounds cycle, the runner
-finishes the course, the duel waits without a camera, `movement.duel` restarts a chosen round);
-`src/shift.rs` (a world shift moves walls, ledges and velocities); `tests/render.rs` (headless
+finishes the course, the duel waits without a camera, `movement.duel` restarts a chosen round,
+the demo's collider boxes stay the same under the new art);
+`src/shift.rs` (a world shift moves walls, ledges, velocities and sparks in flight); `tests/render.rs` (headless
 screenshot with the slow-motion effect; skipped without a GPU).
 
 ## Not done yet
 
-- Ledge hang and climb-up animations come from the animation module; mantling is a motion only.
+- Ledge hang: mantling is a vault onto the top; there is no hang-and-climb yet.
 - Lock-on targeting for the player (attacks aim at the nearest enemy in front).
 - Moving platforms: characters don't inherit a platform's velocity yet.
