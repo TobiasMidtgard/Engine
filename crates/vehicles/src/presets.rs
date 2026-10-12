@@ -15,7 +15,7 @@ use engine_core::math::{Quat, Vec3};
 use engine_core::prelude::*;
 use engine_render::{AlphaMode, MeshRef, MeshRenderer, Shape, StandardMaterial};
 use engine_world::physics::{Collider, ColliderShape, RigidBody, Velocity};
-use engine_world::{SurfaceId, VehicleControls};
+use engine_world::{EngineKind, SurfaceId, VehicleControls};
 
 use crate::aero::{
     AeroSurface, Aircraft, ControlAxis, Propulsion, Propulsor, PropulsorKind, SurfaceControl,
@@ -258,7 +258,12 @@ pub fn sports_car(commands: &mut Commands, transform: Transform, paint: u32) -> 
                 ccd: true,
                 can_sleep: false,
                 angular_damping: 0.05,
-                ..RigidBody::dynamic().with_mass(1_350.0)
+                // Pitch, yaw and roll inertia of a real front-engined coupé.
+                ..RigidBody::dynamic().with_mass_properties(
+                    1_350.0,
+                    Vec3::ZERO,
+                    Vec3::new(2_200.0, 2_500.0, 480.0),
+                )
             },
             Collider::cuboid(Vec3::new(0.88, 0.32, 2.2)).with_surface(SurfaceId(11)),
             Velocity::default(),
@@ -451,6 +456,8 @@ pub fn rally_car(commands: &mut Commands, transform: Transform) -> Entity {
             redline_rpm: 7_000.0,
             inertia: 0.2,
             engine_brake_nm: 90.0,
+            sound: EngineKind::Piston { cylinders: 4 },
+            turbo: true,
         },
         gearbox: Gearbox {
             ratios: vec![3.3, 2.1, 1.6, 1.25, 1.0],
@@ -490,7 +497,12 @@ pub fn rally_car(commands: &mut Commands, transform: Transform) -> Entity {
             RigidBody {
                 ccd: true,
                 can_sleep: false,
-                ..RigidBody::dynamic().with_mass(1_250.0)
+                // A rally hatchback: short, so it rotates quickly.
+                ..RigidBody::dynamic().with_mass_properties(
+                    1_250.0,
+                    Vec3::ZERO,
+                    Vec3::new(1_700.0, 1_950.0, 420.0),
+                )
             },
             Collider::cuboid(Vec3::new(0.86, 0.36, 2.0)).with_surface(SurfaceId(11)),
             Velocity::default(),
@@ -734,13 +746,19 @@ pub fn sport_plane(commands: &mut Commands, transform: Transform) -> Entity {
                 mass_kg: 900.0,
                 // Real light aircraft: pitch, yaw, roll.
                 inertia: Vec3::new(1_480.0, 2_130.0, 1_070.0),
-                center_of_mass: Vec3::ZERO,
+                center_of_mass: Vec3::new(0.0, -0.06, -0.016),
             },
             RigidBody {
                 ccd: true,
                 can_sleep: false,
                 angular_damping: 0.1,
-                ..RigidBody::dynamic().with_mass(900.0)
+                // Balanced just ahead of the wing's aerodynamic center; real light-aircraft
+                // inertia (pitch, yaw, roll).
+                ..RigidBody::dynamic().with_mass_properties(
+                    900.0,
+                    Vec3::new(0.0, -0.06, -0.016),
+                    Vec3::new(1_480.0, 2_130.0, 1_070.0),
+                )
             },
             Collider {
                 shape: ColliderShape::Compound(vec![
@@ -1153,7 +1171,12 @@ pub fn spaceplane(commands: &mut Commands, transform: Transform) -> Entity {
                 can_sleep: false,
                 angular_damping: 0.0,
                 linear_damping: 0.0,
-                ..RigidBody::dynamic().with_mass(mass)
+                // Fuelled; the inertia scales with mass as propellant burns.
+                ..RigidBody::dynamic().with_mass_properties(
+                    mass,
+                    Vec3::new(0.0, -0.12, 0.9),
+                    Vec3::new(3.1e6, 3.4e6, 8.0e5),
+                )
             },
             Collider {
                 shape: ColliderShape::Compound(vec![

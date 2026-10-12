@@ -39,6 +39,7 @@ fn hops_off_the_pad_hovers_and_lands() {
 
     let mut highest = 0.0f64;
     let mut hovered = false;
+    let mut hover_thrust = 0.0f32;
     let mut touchdown = None;
     let mut airborne = false;
     run_until(&mut app, 40.0, |app| {
@@ -46,6 +47,11 @@ fn hops_off_the_pad_hovers_and_lands() {
         let y = transform(app, ship).translation.y;
         highest = highest.max(y - rest);
         hovered |= phase(app, ship) == "hover";
+        if phase(app, ship) == "hover" {
+            let e = app.world.get::<engine_world::EngineState>(ship).unwrap();
+            // Holding 80 t up takes about 780 kN.
+            hover_thrust = hover_thrust.max(e.thrust_n);
+        }
         if tel.wheels_grounded == 0 && y - rest > 2.0 {
             airborne = true;
         }
@@ -56,6 +62,10 @@ fn hops_off_the_pad_hovers_and_lands() {
     })
     .expect("never landed back on the pad");
     assert!(hovered, "never hovered");
+    assert!(
+        (600_000.0..1_200_000.0).contains(&hover_thrust),
+        "hover thrust {hover_thrust:.0} N"
+    );
     assert!((15.0..24.0).contains(&highest), "hopped {highest:.1} m");
     let sink = touchdown.unwrap();
     assert!(sink > -1.5, "hard landing at {sink:.1} m/s");
@@ -76,9 +86,7 @@ fn small_planet(app: &mut App) {
         g.uniform = Vec3::ZERO;
         g.bodies = vec![GravityBody { center, mu, radius }];
     }
-    app.world
-        .resource_mut::<engine_vehicles::VehicleAir>()
-        .bodies = vec![BodyAtmosphere {
+    app.world.resource_mut::<engine_world::Atmospheres>().bodies = vec![BodyAtmosphere {
         mu,
         sea_level_density: 1.0,
         scale_height_m: 2_500.0,
