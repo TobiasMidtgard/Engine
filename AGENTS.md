@@ -6,13 +6,19 @@ Architecture and module ownership: [`ARCHITECTURE.md`](ARCHITECTURE.md).
 ## Build & test
 
 ```sh
+git config core.hooksPath .githooks   # once per clone: refuses commits and pushes `cargo fmt` would change
 cargo build --workspace
 cargo test -p <crate>                 # every crate has unit tests that need no GPU
-cargo clippy --workspace --all-targets
+cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all
 cargo run -p hello                    # windowed
 cargo run -p hello -- --headless --frames 4   # offscreen, writes screenshots/hello.png
 ```
+
+Before every push, run `cargo fmt --all`, the clippy line above, and the tests of each crate
+you changed and of every crate that uses what you changed (shared shaders, contracts and
+assets reach other modules; `cargo test --workspace` covers all). CI runs all of it on every
+pull request, and each failed run emails the repository owner.
 
 Headless GPU tests and screenshots need a GPU or a software Vulkan driver. On Debian/Ubuntu
 containers: `apt-get install -y mesa-vulkan-drivers` (lavapipe). Tests that need a GPU must
@@ -110,13 +116,28 @@ Storage (the first rule is a test, so CI enforces it):
 
 Adding a file:
 
-1. Add an entry with `sha256 = ""` and push. The Assets workflow downloads it, copies it to the
-   `asset-mirror` release, and prints `sha256 = "…"` in its log and job summary. The test job
-   stays red until the entry is pinned.
-2. Paste the pin and push. From then on `cargo run -p fetch-assets` gets the file from the
-   mirror even where the original host is blocked (as it is in the project's cloud sessions).
-   Where the host is reachable, `cargo run -p fetch-assets` fetches unpinned entries and prints
-   the pin itself.
+1. Add the entry with `sha256 = ""` and push it to a scratch branch named `assets/<area>`
+   (no pull request; CI doesn't run there). The Assets workflow downloads it, copies it to the
+   `asset-mirror` release, and prints `sha256 = "…"` in its log and job summary. Never push an
+   unpinned entry to a pull request: the test job fails until it is pinned.
+2. Paste the pin into the manifest on your working branch, push that, and delete the scratch
+   branch. From then on `cargo run -p fetch-assets` gets the file from the mirror even where
+   the original host is blocked (as it is in the project's cloud sessions). Where the host is
+   reachable, `cargo run -p fetch-assets` fetches unpinned entries and prints the pin itself.
+
+Files made here (a model converted to GLB, a baked texture, an offline recording) have no
+download link:
+
+1. Give the entry `url = "mirror"`, a `source` linking what it was made from (or the code that
+   made it), and that origin's `license` (`MIT OR Apache-2.0`, the engine's own, for art made
+   from scratch). Put the file at `assets/fetched/<path>`.
+2. Run `cargo run -p fetch-assets -- publish`. It uploads the file to the mirror and prints the
+   pin. In the project's cloud sessions, where uploads are blocked, it pushes a short-lived
+   `asset-upload/…` branch instead; the Asset upload workflow copies the files to the mirror and
+   deletes the branch. Paste the pin and push once that workflow has run.
+
+Fetching these needs a GitHub login (`gh auth login` or `GITHUB_TOKEN`) while the repository is
+private, since only the mirror has them.
 
 Sizes: 2K for most materials, 4K for hero assets and terrain close-ups, 2K–4K HDRIs for
 lighting (8K only for a visible backdrop). JPG or PNG for color, HDR or EXR only for HDR data.

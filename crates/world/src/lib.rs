@@ -8,6 +8,8 @@
 //! * **Queries** ([`physical`]): [`Gravity`], [`Ground`] and [`Water`] answer "what is at this
 //!   point" for any implementation (heightmap, voxel, planet; lake, ocean, river), and
 //!   [`Obscurance`] answers "how much smoke, fog or dust is between these two points".
+//! * **Air** ([`air`]): density, pressure, temperature, speed of sound and wind anywhere,
+//!   per planet (`Env::air`).
 //! * **Materials** ([`SurfaceMaterials`]): one table of friction, fuel, deformation, sounds.
 //! * **Events** ([`events`]): projectiles, impulses, ground contacts, ignition, damage, noise.
 //! * **Focus** ([`SimulationFocus`]): where detailed simulation happens (the player, the camera).
@@ -24,6 +26,7 @@
 //!
 //! Units everywhere: meters, kilograms, seconds, °C, m/s.
 
+pub mod air;
 pub mod animation;
 pub mod environment;
 pub mod events;
@@ -34,12 +37,16 @@ pub mod physics;
 pub mod shift;
 pub mod terrain;
 
+pub use air::{AirSample, Atmospheres, BodyAtmosphere};
 pub use environment::*;
 pub use events::*;
 pub use grid::{Blend, Grid2, Grid3};
-pub use locomotion::{LocomotionMode, LocomotionState, MoveIntent, VehicleControls};
+pub use locomotion::{
+    EngineKind, EngineState, LocomotionMode, LocomotionState, MoveIntent, VehicleControls,
+    WheelContact, WheelContacts,
+};
 pub use physical::*;
-pub use shift::{WorldShift, WorldShiftSet};
+pub use shift::{FollowsWorldShift, WorldShift, WorldShiftAppExt, WorldShiftSet};
 pub use terrain::{EditOp, EditShape, TerrainChanged, TerrainEdit};
 
 use engine_core::math::{DVec2, DVec3, Vec3};
@@ -131,6 +138,7 @@ pub struct Env<'w> {
     pub surface: Res<'w, SurfaceLayers>,
     pub heat: Res<'w, HeatField>,
     pub gravity: Res<'w, Gravity>,
+    pub atmospheres: Res<'w, Atmospheres>,
     pub ground_query: Res<'w, Ground>,
     pub water_query: Res<'w, Water>,
     pub obscurance: Res<'w, Obscurance>,
@@ -146,6 +154,12 @@ impl Env<'_> {
     /// Air temperature at `p` including altitude and nearby fires, °C.
     pub fn temperature(&self, p: DVec3) -> f32 {
         self.weather.temperature_at_altitude(p.y) + self.heat.sample(p)
+    }
+
+    /// Air at `p`: density, pressure, temperature, speed of sound, wind and altitude.
+    pub fn air(&self, p: DVec3) -> AirSample {
+        self.atmospheres
+            .sample(&self.weather, &self.gravity, &self.wind_field, p)
     }
 
     pub fn gravity(&self, p: DVec3) -> Vec3 {
@@ -193,6 +207,7 @@ impl Plugin for WorldPlugin {
             .init_resource::<SurfaceLayers>()
             .init_resource::<HeatField>()
             .init_resource::<Gravity>()
+            .init_resource::<Atmospheres>()
             .init_resource::<Ground>()
             .init_resource::<Water>()
             .init_resource::<Obscurance>()
@@ -219,6 +234,10 @@ impl Plugin for WorldPlugin {
                  time of day, sun direction.",
             )
             .register_resource::<Gravity>("Uniform gravity plus attracting bodies (planets).")
+            .register_resource::<Atmospheres>(
+                "Air per planet (matched by gravitational parameter μ): surface density, scale \
+                 height, top, temperature. Unlisted bodies use the weather's standard atmosphere.",
+            )
             .register_resource::<SurfaceMaterials>(
                 "Surface material table: friction, fuel, deformation, sounds.",
             )
@@ -234,6 +253,7 @@ impl Plugin for WorldPlugin {
                     .chain()
                     .in_set(SimSet::Environment),
             );
+        shift::register_messages(app);
     }
 }
 

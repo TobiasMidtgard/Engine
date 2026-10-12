@@ -7,7 +7,9 @@ on:
   pull_request:
     paths: ["assets/manifests/**", "tools/fetch-assets/**", ".github/workflows/assets.yml"]
   push:
-    branches: [main]
+    # `assets/<area>` scratch branches get pins without a pull request (AGENTS.md, "Adding a
+    # file"); CI doesn't run on them, so an unpinned entry never turns a check red.
+    branches: [main, "assets/**"]
     paths: ["assets/manifests/**"]
   workflow_dispatch:
 

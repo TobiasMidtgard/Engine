@@ -10,6 +10,7 @@
 //! cargo run -p fetch-assets -- showcase      only assets/manifests/showcase.toml
 //! cargo run -p fetch-assets -- check         validate the manifests (offline)
 //! cargo run -p fetch-assets -- mirror        CI only: copy listed files to the mirror, print pins
+//! cargo run -p fetch-assets -- publish       upload files made here to the mirror, print pins
 //! ```
 //!
 //! A file comes from, in order: the local cache, the GitHub release mirror (`asset-mirror` on
@@ -27,6 +28,16 @@
 //! source = "https://polyhaven.com/a/rock_face"
 //! author = "Rob Tuytel"          # required for CC-BY
 //! ```
+//!
+//! ## Files made here
+//!
+//! A file this project made (a model converted to GLB, a baked texture, a recorded clip) has no
+//! download link. Its entry says `url = "mirror"`, its `source` links what it was made from (or
+//! the code that made it), and its `license` is that origin's license (the engine's own,
+//! `MIT OR Apache-2.0`, for art made from scratch). Put the file at `assets/fetched/<path>` and
+//! run `cargo run -p fetch-assets -- publish`: it uploads the file to the mirror and prints the
+//! pin. Everyone else then fetches it from the mirror, which needs a GitHub login while the
+//! repository is private (`gh auth login`, or `GITHUB_TOKEN`).
 
 use std::collections::HashMap;
 use std::fs;
@@ -57,6 +68,9 @@ pub const LICENSES: &[&str] = &[
 /// Release on the engine repository that holds a copy of every fetched file, named by SHA-256.
 pub const MIRROR_TAG: &str = "asset-mirror";
 
+/// The `url` of a file made in this project, which only the mirror has. See the crate docs.
+pub const MADE_HERE: &str = "mirror";
+
 /// Repository of the mirror (`owner/name`); `ENGINE_ASSET_MIRROR` overrides it.
 pub const DEFAULT_MIRROR_REPO: &str = "TobiasMidtgard/Engine";
 
@@ -67,14 +81,15 @@ pub struct Entry {
     /// Where it lands, relative to `assets/fetched/` (forward slashes). Load it with the asset
     /// key `fetched/<path>`.
     pub path: String,
-    /// Direct download URL (https).
+    /// Direct download URL (https), or [`MADE_HERE`] for a file made in this project.
     pub url: String,
     /// Lowercase hex SHA-256 of the file. Empty until pinned.
     #[serde(default)]
     pub sha256: String,
     /// SPDX id, one of [`LICENSES`].
     pub license: String,
-    /// Page that shows the asset and its license (https).
+    /// Page that shows the asset and its license (https); for a file made here, what it was
+    /// made from.
     pub source: String,
     /// Creator; required for attribution licenses (CC-BY).
     #[serde(default)]
@@ -85,6 +100,11 @@ impl Entry {
     /// True once `sha256` is filled in.
     pub fn is_pinned(&self) -> bool {
         !self.sha256.is_empty()
+    }
+
+    /// True for a file made in this project, which only the mirror has.
+    pub fn is_made_here(&self) -> bool {
+        self.url == MADE_HERE
     }
 
     /// The asset key engine code loads it with (`fetched/<path>`).
@@ -190,8 +210,10 @@ pub fn validate(manifests: &[Manifest], require_pins: bool) -> Vec<String> {
                     "{at}: the same path is also listed in {other}; give one of them another path"
                 ));
             }
-            if !e.url.starts_with("https://") {
-                problems.push(format!("{at}: url must be an https download link"));
+            if !e.is_made_here() && !e.url.starts_with("https://") {
+                problems.push(format!(
+                    "{at}: url must be an https download link, or \"{MADE_HERE}\" for a file made here"
+                ));
             }
             if !e.source.starts_with("https://") {
                 problems.push(format!(
@@ -204,9 +226,15 @@ pub fn validate(manifests: &[Manifest], require_pins: bool) -> Vec<String> {
                 ));
             }
             if require_pins && !e.is_pinned() {
-                problems.push(format!(
-                    "{at}: not pinned yet; copy the sha256 the Assets workflow (or `cargo run -p fetch-assets`) printed"
-                ));
+                problems.push(if e.is_made_here() {
+                    format!(
+                        "{at}: not pinned yet; put the file in assets/fetched/ and copy the sha256 `cargo run -p fetch-assets -- publish` prints"
+                    )
+                } else {
+                    format!(
+                        "{at}: not pinned yet; copy the sha256 the Assets workflow (or `cargo run -p fetch-assets`) printed"
+                    )
+                });
             }
             if !LICENSES.contains(&e.license.as_str()) {
                 problems.push(format!(
@@ -387,6 +415,31 @@ source = "https://example.com/b"
                 "missing {expected:?} in {problems:#?}"
             );
         }
+    }
+
+    #[test]
+    fn files_made_here_live_on_the_mirror() {
+        let made = r#"
+[[file]]
+path = "anim/characters/hiker.glb"
+url = "mirror"
+license = "MIT"
+source = "https://github.com/microsoft/Microsoft-Rocketbox"
+"#;
+        let m = manifest("anim", made);
+        assert!(m.files[0].is_made_here());
+        assert!(!manifest("showcase", GOOD).files[0].is_made_here());
+        assert!(validate(std::slice::from_ref(&m), false).is_empty());
+        let problems = validate(&[m], true);
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        assert!(problems[0].contains("-- publish"), "{problems:?}");
+        // Any other non-https url is still an error.
+        let wrong = made.replace("\"mirror\"", "\"mirror:x\"");
+        assert!(
+            validate(&[manifest("anim", &wrong)], false)
+                .iter()
+                .any(|p| p.contains("https download link"))
+        );
     }
 
     #[test]

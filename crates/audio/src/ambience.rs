@@ -1,4 +1,4 @@
-//! Weather ambience: rain, wind and thunder, synthesized live from the weather state.
+//! Ambience: rain and wind from the weather, and fire, synthesized live.
 //!
 //! * **Rain** is a stereo bed of hiss plus individual drops, each hitting something near the
 //!   listener: leaves and grass tick softly, stone and concrete tap, puddles and lakes plink
@@ -7,8 +7,9 @@
 //! * **Wind** is band-passed noise whose pitch and level follow the air speed past the
 //!   listener (wind plus your own motion), with buffeting at high speed and a whistle in
 //!   storms.
-//! * **Thunder** rolls in several swells; distant strikes are duller (air eats the highs) and,
-//!   like every positioned sound, arrive late at the speed of sound.
+//! * **Fire** roars, crackles and pops more densely and deeply the more area is in flames.
+//!
+//! Thunder lives in [`crate::thunder`]: it rolls along the lightning channel.
 
 use crate::dsp::{Biquad, Bubble, Noise, Resonator, decay_coef, pan_gains};
 use crate::mixer::Sound;
@@ -329,114 +330,325 @@ impl Sound for WindSound {
     }
 }
 
-/// One thunder clap, `distance_m` away: a crack (if close) and several rolling swells.
-pub struct ThunderSound {
+/// A fire: the low roar of the flames, crackle and pops from the fuel, now and then a loud
+/// snap. Mono, so the mixer places it. Param `"size"`: area in flames, m² (0 = out; a
+/// campfire ≈ 1, a burning house ≈ 100, a forest front ≈ 2000).
+pub struct FireSound {
     fs: f32,
     rng: Noise,
+    size: f32,
+    target: f32,
+    roar: Biquad,
+    roar2: Biquad,
+    flutter: Biquad,
+    hiss: Biquad,
+    pops: Vec<Pop>,
     t: u32,
-    len: u32,
-    swells: [(u32, u32, f32, f32, f32); 6],
-    crack: u32,
-    crack_amp: f32,
-    lp: [Biquad; 2],
-    crack_hp: Biquad,
-    brown: [f32; 2],
+    // Per-block levels.
+    roar_amp: f32,
+    hiss_amp: f32,
+    pop_rate: f32,
+    snap_rate: f32,
 }
 
-impl ThunderSound {
-    pub fn new(fs: f32, distance_m: f32, seed: u64) -> Self {
-        let mut rng = Noise::new(seed);
-        let d = distance_m.max(100.0);
-        let len_s = rng.range(4.0, 8.0) + d / 3_000.0;
-        let mut swells = [(0u32, 1u32, 0.0f32, 1.0f32, 0.0f32); 6];
-        for (i, s) in swells.iter_mut().enumerate() {
-            let start = if i == 0 {
-                0.0
-            } else {
-                rng.range(0.1, len_s * 0.6)
-            };
-            let attack = rng.range(0.08, 0.6);
-            let decay = rng.range(0.8, 2.5);
-            let amp = rng.range(0.3, 1.0) * if i == 0 { 1.0 } else { 0.7 };
-            *s = (
-                (start * fs) as u32,
-                (attack * fs).max(1.0) as u32,
-                amp,
-                decay_coef(fs, decay),
-                rng.range(-0.8, 0.8),
-            );
-        }
-        let cutoff = (900.0 * (1_000.0 / d).powf(0.8)).clamp(90.0, 1_500.0);
-        // Loudness falls with distance but thunder carries far.
-        let crack_amp = if d < 1_500.0 {
-            0.5 * (1.0 - d / 1_500.0)
-        } else {
-            0.0
-        };
+struct Pop {
+    filter: Biquad,
+    amp: f32,
+    decay: f32,
+}
+
+/// Most pops sounding at once.
+const MAX_POPS: usize = 24;
+
+impl FireSound {
+    pub fn new(fs: f32, seed: u64) -> Self {
         Self {
             fs,
-            rng,
+            rng: Noise::new(seed),
+            size: 0.0,
+            target: 0.0,
+            roar: Biquad::lowpass(fs, 400.0, 0.7),
+            roar2: Biquad::lowpass(fs, 400.0, 0.7),
+            flutter: Biquad::lowpass(fs, 6.0, 0.7),
+            hiss: Biquad::highpass(fs, 3_000.0, 0.7),
+            pops: Vec::with_capacity(MAX_POPS),
             t: 0,
-            len: (len_s * fs) as u32,
-            swells,
-            crack: (0.05 * fs) as u32,
-            crack_amp,
-            lp: [Biquad::lowpass(fs, cutoff, 0.7); 2],
-            crack_hp: Biquad::highpass(fs, 1_200.0, 0.7),
-            brown: [0.0; 2],
+            roar_amp: 0.0,
+            hiss_amp: 0.0,
+            pop_rate: 0.0,
+            snap_rate: 0.0,
         }
+    }
+
+    /// Overall loudness for `size` m² of flames (linear, at the fire's reference distance).
+    pub fn level(size: f32) -> f32 {
+        if size <= 0.0 {
+            0.0
+        } else {
+            (0.12 * (1.0 + size).ln().powf(0.8)).min(0.8)
+        }
+    }
+
+    fn pop(&mut self, snap: bool) {
+        if self.pops.len() >= MAX_POPS {
+            return;
+        }
+        let fs = self.fs;
+        let r = &mut self.rng;
+        // Many small pops, a few loud ones (Pareto-like).
+        let amp = (0.05 * r.uniform().max(1e-3).powf(-0.55)).min(1.0);
+        let (f, q, t60) = if snap {
+            (r.range(700.0, 1_600.0), 1.2, r.range(0.012, 0.03))
+        } else {
+            (r.range(1_800.0, 6_500.0), 1.8, r.range(0.002, 0.008))
+        };
+        self.pops.push(Pop {
+            filter: Biquad::bandpass(fs, f, q),
+            amp: if snap { amp.max(0.35) * 1.4 } else { amp },
+            decay: decay_coef(fs, t60),
+        });
     }
 }
 
-impl Sound for ThunderSound {
-    fn channels(&self) -> usize {
-        2
+impl Sound for FireSound {
+    fn set_param(&mut self, name: &str, value: f32) {
+        if name == "size" {
+            self.target = value.max(0.0);
+        }
     }
 
     fn fill(&mut self, out: &mut [f32]) -> usize {
-        let frames = out.len() / 2;
         let fs = self.fs;
-        for f in 0..frames {
-            if self.t >= self.len {
-                return f;
-            }
-            let mut l = 0.0;
-            let mut r = 0.0;
-            let mut env = [0.0f32; 2];
-            for &(start, attack, amp, decay, pan) in &self.swells {
-                if self.t < start {
-                    continue;
-                }
-                let dt = self.t - start;
-                let e = if dt < attack {
-                    amp * dt as f32 / attack as f32
+        for o in out.iter_mut() {
+            if self.t.is_multiple_of(64) {
+                let k = 1.0 - (-64.0 / (0.5 * fs)).exp();
+                self.size += (self.target - self.size) * k;
+                let level = Self::level(self.size);
+                // Bigger fires roar deeper and crackle more densely.
+                let cutoff = (520.0 / (1.0 + self.size).powf(0.12)).max(140.0);
+                self.roar.retune(Biquad::lowpass(fs, cutoff, 0.7));
+                self.roar2.retune(Biquad::lowpass(fs, cutoff * 1.6, 0.7));
+                self.roar_amp = level * (0.5 + 0.5 * (self.size / 30.0).min(1.0));
+                self.hiss_amp = level * 0.05;
+                self.pop_rate = if self.size > 0.0 {
+                    (12.0 * self.size.sqrt()).clamp(4.0, 400.0) / fs
                 } else {
-                    amp * decay.powf((dt - attack) as f32)
+                    0.0
                 };
-                let (pl, pr) = pan_gains(pan);
-                env[0] += e * pl;
-                env[1] += e * pr;
+                self.snap_rate = if self.size > 0.0 {
+                    (0.4 + 0.15 * self.size.sqrt()).min(6.0) / fs
+                } else {
+                    0.0
+                };
             }
-            let mut roll = [0.0f32; 2];
-            for (c, o) in roll.iter_mut().enumerate() {
-                // Brown noise (integrated white) for the deep roll.
-                self.brown[c] = (self.brown[c] + self.rng.white() * 0.05) * 0.996;
-                *o = self.lp[c].process(self.brown[c] * 3.0) * env[c] * 0.6;
+            self.t = self.t.wrapping_add(1);
+            if self.rng.chance(self.pop_rate) {
+                self.pop(false);
             }
-            l += roll[0];
-            r += roll[1];
-            if self.t < self.crack && self.crack_amp > 0.0 {
-                let e = 1.0 - self.t as f32 / self.crack as f32;
-                let c = self.crack_hp.process(self.rng.white()) * self.crack_amp * e * e;
-                l += c;
-                r += c;
+            if self.rng.chance(self.snap_rate) {
+                self.pop(true);
             }
-            let fade = ((self.len - self.t) as f32 / (0.5 * fs)).min(1.0);
-            out[f * 2] = l * fade;
-            out[f * 2 + 1] = r * fade;
-            self.t += 1;
+            let level = Self::level(self.size);
+            // Turbulent flutter of the flames: slow random swells.
+            let flutter = 1.0 + 1.8 * self.flutter.process(self.rng.white());
+            let n = self.rng.white();
+            let roar =
+                self.roar2.process(self.roar.process(n)) * 2.2 * self.roar_amp * flutter.max(0.0);
+            let hiss = self.hiss.process(self.rng.white()) * self.hiss_amp;
+            let mut crackle = 0.0;
+            for p in &mut self.pops {
+                crackle += p.filter.process(self.rng.white()) * p.amp;
+                p.amp *= p.decay;
+            }
+            self.pops.retain(|p| p.amp > 1e-4);
+            *o = roar + hiss + crackle * level * 1.6;
         }
-        frames
+        out.len()
+    }
+}
+
+/// Water at the shore and in streams. Mono, so the mixer places it.
+///
+/// * `"waves"` 0..1: small waves lapping at the shore, one every couple of seconds: a slap as
+///   it hits, the wash running up and draining back, and the gurgle of bubbles in the
+///   backwash. Bigger waves come slower and wash longer.
+/// * `"flow"` m/s: moving water babbling over stones, a continuous run of bubbles and a
+///   hiss that grows into a roar in rapids.
+/// * `"spray"` kg/s: water falling or thrown into water (a waterfall's foot, a boat's bow
+///   wave): a broad roar with a deep rumble for big falls and dense bubble chatter.
+pub struct WaterSound {
+    fs: f32,
+    rng: Noise,
+    waves: f32,
+    waves_target: f32,
+    flow: f32,
+    flow_target: f32,
+    spray: f32,
+    spray_target: f32,
+    spray_band: Biquad,
+    spray_low: Biquad,
+    /// Samples until the next wave reaches the shore.
+    next_wave: u32,
+    /// The current wave: samples since it hit, its size.
+    wave_t: u32,
+    wave_size: f32,
+    slap: Biquad,
+    wash: [Biquad; 2],
+    hiss: Biquad,
+    roar: Biquad,
+    bubbles: Vec<Bubble>,
+    t: u32,
+}
+
+/// Most bubbles ringing at once.
+const MAX_BUBBLES: usize = 40;
+
+impl WaterSound {
+    pub fn new(fs: f32, seed: u64) -> Self {
+        let mut rng = Noise::new(seed);
+        let first = (rng.range(0.2, 1.5) * fs) as u32;
+        Self {
+            fs,
+            rng,
+            waves: 0.0,
+            waves_target: 0.0,
+            flow: 0.0,
+            flow_target: 0.0,
+            spray: 0.0,
+            spray_target: 0.0,
+            spray_band: Biquad::bandpass(fs, 900.0, 0.45),
+            spray_low: Biquad::lowpass(fs, 220.0, 0.7),
+            next_wave: first,
+            wave_t: u32::MAX,
+            wave_size: 0.0,
+            slap: Biquad::bandpass(fs, 700.0, 0.9),
+            wash: [
+                Biquad::lowpass(fs, 2_200.0, 0.7),
+                Biquad::highpass(fs, 180.0, 0.7),
+            ],
+            hiss: Biquad::bandpass(fs, 2_800.0, 0.5),
+            roar: Biquad::lowpass(fs, 500.0, 0.7),
+            bubbles: Vec::with_capacity(MAX_BUBBLES),
+            t: 0,
+        }
+    }
+
+    fn bubble(&mut self, small: f32, big: f32, amp: f32, delay_s: f32) {
+        if self.bubbles.len() >= MAX_BUBBLES {
+            return;
+        }
+        // Mostly small bubbles, a few big ones (bigger = lower and louder).
+        let r = small + (big - small) * self.rng.uniform().powi(3);
+        let loud = amp * (r / big).sqrt();
+        let rise = self.rng.range(0.05, 0.3);
+        self.bubbles
+            .push(Bubble::new(self.fs, r, loud, rise, delay_s).damped(1.5, self.fs));
+    }
+}
+
+impl Sound for WaterSound {
+    fn set_param(&mut self, name: &str, value: f32) {
+        match name {
+            "waves" => self.waves_target = value.clamp(0.0, 1.0),
+            "flow" => self.flow_target = value.max(0.0),
+            "spray" => self.spray_target = value.max(0.0),
+            _ => {}
+        }
+    }
+
+    fn fill(&mut self, out: &mut [f32]) -> usize {
+        let fs = self.fs;
+        let k = 1.0 - (-1.0 / (0.8 * fs)).exp();
+        for o in out.iter_mut() {
+            self.waves += (self.waves_target - self.waves) * k;
+            self.flow += (self.flow_target - self.flow) * k;
+            self.spray += (self.spray_target - self.spray) * k;
+
+            // A wave reaches the shore.
+            if self.waves > 0.01 {
+                if self.next_wave == 0 {
+                    self.wave_t = 0;
+                    self.wave_size = self.waves * self.rng.range(0.5, 1.0);
+                    let period = self.rng.range(1.4, 2.6) * (0.8 + 1.4 * self.waves);
+                    self.next_wave = (period * fs) as u32;
+                    // Backwash bubbles over the next second.
+                    let n = (4.0 + 14.0 * self.wave_size) as usize;
+                    let amp = 0.15 * self.wave_size.powf(0.7);
+                    for _ in 0..n {
+                        let at = self.rng.range(0.25, 1.4);
+                        self.bubble(0.0015, 0.007, amp, at);
+                    }
+                } else {
+                    self.next_wave -= 1;
+                }
+            }
+            let mut y = 0.0;
+            if self.wave_t != u32::MAX {
+                let t = self.wave_t as f32 / fs;
+                let size = self.wave_size;
+                let loud = size.powf(0.7);
+                let up = 0.35 + 0.4 * size;
+                let back = 0.9 + 1.2 * size;
+                if t > up + back {
+                    self.wave_t = u32::MAX;
+                } else {
+                    // Slap: a short knock as the wave lands.
+                    let slap = (-t / 0.025).exp() * loud * 2.0;
+                    // Wash: up the shore, then draining back, swishing as it goes.
+                    let wash = if t < up {
+                        (t / up).powi(2)
+                    } else {
+                        (1.0 - (t - up) / back).max(0.0).powi(2)
+                    } * loud
+                        * 0.5;
+                    let n = self.rng.white();
+                    let slap = self.slap.process(n) * slap;
+                    let low = self.wash[0].process(self.rng.white());
+                    let wash = self.wash[1].process(low) * wash;
+                    y += slap + wash;
+                    self.wave_t += 1;
+                }
+            }
+
+            // Moving water: bubbles popping up all the time, a hiss, a roar in rapids.
+            if self.flow > 0.05 {
+                let rate = (25.0 * self.flow).min(220.0) / fs;
+                if self.rng.chance(rate) {
+                    let amp = 0.08 * self.flow.min(2.0).sqrt();
+                    self.bubble(0.0012, 0.006, amp, 0.0);
+                }
+                let hiss = self.hiss.process(self.rng.white()) * 0.05 * self.flow.min(3.0);
+                let rapids = ((self.flow - 1.0) / 2.0).clamp(0.0, 1.0);
+                let roar = self.roar.process(self.rng.white()) * 0.4 * rapids;
+                y += hiss + roar;
+            }
+
+            // Falling water: roar and chatter that grow with the mass coming down.
+            if self.spray > 0.01 {
+                let level = (0.05 * self.spray.powf(0.4)).min(0.4);
+                let roar = self.spray_band.process(self.rng.white()) * level;
+                let big = ((self.spray - 5.0) / 50.0).clamp(0.0, 1.0);
+                let rumble = self.spray_low.process(self.rng.white()) * level * 1.5 * big;
+                if self
+                    .rng
+                    .chance((60.0 + 30.0 * self.spray.sqrt()).min(400.0) / fs)
+                {
+                    self.bubble(0.001, 0.005, level * 0.5, 0.0);
+                }
+                y += roar + rumble;
+            }
+
+            let mut b = 0.0;
+            for bubble in &mut self.bubbles {
+                b += bubble.process();
+            }
+            if self.t.is_multiple_of(256) {
+                self.bubbles.retain(|b| !b.done());
+            }
+            self.t = self.t.wrapping_add(1);
+            *o = y + b;
+        }
+        out.len()
     }
 }
 
@@ -450,6 +662,19 @@ mod tests {
         let mut buf = vec![0.0; (secs * FS) as usize * 2];
         let n = sound.fill(&mut buf);
         let x = &buf[..n * 2];
+        (x.iter().map(|v| v * v).sum::<f32>() / x.len().max(1) as f32).sqrt()
+    }
+
+    fn render(sound: &mut dyn Sound, secs: f32) -> Vec<f32> {
+        let mut buf = vec![0.0; (secs * FS) as usize];
+        let n = sound.fill(&mut buf);
+        buf.truncate(n);
+        buf
+    }
+
+    fn rms_of_mono(sound: &mut dyn Sound, secs: f32) -> f32 {
+        let x = render(sound, secs);
+        let x = &x[x.len() / 4..];
         (x.iter().map(|v| v * v).sum::<f32>() / x.len().max(1) as f32).sqrt()
     }
 
@@ -505,20 +730,53 @@ mod tests {
     }
 
     #[test]
-    fn distant_thunder_is_duller_and_ends() {
-        let mut near = ThunderSound::new(FS, 500.0, 1);
-        let mut far = ThunderSound::new(FS, 8_000.0, 1);
-        let mut a = vec![0.0; (12.0 * FS) as usize * 2];
-        let mut b = a.clone();
-        let na = near.fill(&mut a);
-        let nb = far.fill(&mut b);
-        assert!(na < (12.0 * FS) as usize && nb < (12.0 * FS) as usize);
-        let bright = |x: &[f32]| {
-            let e: f32 = x.iter().map(|v| v * v).sum();
-            let d: f32 = x.windows(2).map(|w| (w[1] - w[0]).powi(2)).sum();
-            d / e.max(1e-12)
+    fn fire_grows_and_goes_out() {
+        let render = |size: f32| {
+            let mut f = FireSound::new(FS, 9);
+            f.set_param("size", size);
+            let mut out = vec![0.0; (FS * 3.0) as usize];
+            f.fill(&mut out);
+            let x = &out[(FS * 1.5) as usize..];
+            (x.iter().map(|v| v * v).sum::<f32>() / x.len() as f32).sqrt()
         };
-        let left = |x: &[f32], n: usize| x[..n * 2].iter().step_by(2).copied().collect::<Vec<_>>();
-        assert!(bright(&left(&a, na)) > bright(&left(&b, nb)) * 2.0);
+        let (out, camp, house, forest) = (render(0.0), render(1.0), render(100.0), render(2_000.0));
+        assert!(out < 1e-4, "a fire that's out is silent: {out}");
+        assert!(camp > 0.005, "a campfire is audible: {camp}");
+        assert!(
+            house > camp * 1.5 && forest > house,
+            "{camp} {house} {forest}"
+        );
+        assert!(forest < 0.6, "{forest}");
+    }
+
+    #[test]
+    fn water_laps_in_waves_and_babbles_when_it_flows() {
+        let mut still = WaterSound::new(FS, 4);
+        assert!(rms_of_mono(&mut still, 3.0) < 1e-4, "still water is silent");
+
+        let mut lake = WaterSound::new(FS, 4);
+        lake.set_param("waves", 0.5);
+        let x = render(&mut lake, 12.0);
+        // Waves come and go: the level per half second swings.
+        let levels: Vec<f32> = x
+            .chunks((FS * 0.5) as usize)
+            .skip(4)
+            .map(|c| (c.iter().map(|v| v * v).sum::<f32>() / c.len() as f32).sqrt())
+            .collect();
+        let (lo, hi) = levels
+            .iter()
+            .fold((f32::MAX, 0.0f32), |(a, b), v| (a.min(*v), b.max(*v)));
+        assert!(hi > 0.005 && hi > lo * 3.0, "waves {lo}..{hi}");
+
+        let mut brook = WaterSound::new(FS, 5);
+        brook.set_param("flow", 0.8);
+        let calm = rms_of_mono(&mut brook, 4.0);
+        let mut rapids = WaterSound::new(FS, 5);
+        rapids.set_param("flow", 3.0);
+        let wild = rms_of_mono(&mut rapids, 4.0);
+        assert!(
+            calm > 0.003 && wild > calm * 1.5,
+            "brook {calm} rapids {wild}"
+        );
     }
 }

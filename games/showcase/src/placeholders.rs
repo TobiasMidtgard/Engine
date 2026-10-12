@@ -776,31 +776,6 @@ pub fn forest(commands: &mut Commands, lib: &Library, land: &Landscape, z: &Zone
     }
 }
 
-/// Wildlife meadow: grazing deer, a few hares. The Smart NPC AI thread (wildlife) and the
-/// Animation thread own it.
-pub fn meadow(commands: &mut Commands, _lib: &Library, z: &Zone, rng: &mut Rng) {
-    for _ in 0..7 {
-        let p = rng.in_unit_disk() * 25.0;
-        quadruped(
-            commands,
-            z.center + DVec3::new(p.x as f64, 0.0, p.y as f64),
-            rng.range(0.0, TAU),
-            rng.range(0.9, 1.1),
-            0x8a5a32,
-        );
-    }
-    for _ in 0..5 {
-        let p = rng.in_unit_disk() * 30.0;
-        quadruped(
-            commands,
-            z.center + DVec3::new(p.x as f64, 0.0, p.y as f64),
-            rng.range(0.0, TAU),
-            0.25,
-            0x9a8a70,
-        );
-    }
-}
-
 /// Lake: still water (the water module replaces it), a jetty and a rowboat. The Water simulation
 /// thread owns it.
 pub fn lake(
@@ -1312,79 +1287,6 @@ fn stream_water(commands: &mut Commands, meshes: &mut Assets<Mesh>, land: &Lands
             );
         }
     }
-}
-
-/// Combat arena: sand floor ringed by pillars, cover, a ramp and a wall-run wall; fighters. The
-/// Smart NPC AI and Movement and slow motion threads own it.
-pub fn arena(commands: &mut Commands, _lib: &Library, z: &Zone) {
-    let c = z.center;
-    spawn(
-        commands,
-        cyl(40.0, 0.3),
-        mat(0x9c8662, 0.95),
-        at(c + DVec3::new(0.0, 0.15, 0.0)),
-    );
-    // Stands: stepped stone rings.
-    for k in 0..4 {
-        let r = 41.5 + k as f64 * 1.6;
-        for i in 0..40 {
-            let a = i as f64 / 40.0 * TAU64;
-            if i % 10 == 0 {
-                continue;
-            }
-            spawn(
-                commands,
-                cuboid(6.8, 0.8 + k as f32 * 0.8, 1.6),
-                stone(),
-                yawed(
-                    c + DVec3::new(a.cos() * r, (0.8 + k as f64 * 0.8) * 0.5, a.sin() * r),
-                    -(a as f32) + std::f32::consts::FRAC_PI_2,
-                ),
-            );
-        }
-    }
-    for i in 0..8 {
-        let a = i as f64 / 8.0 * TAU64;
-        spawn(
-            commands,
-            cyl(1.2, 8.0),
-            concrete(),
-            at(c + DVec3::new(a.cos() * 18.0, 4.0, a.sin() * 18.0)),
-        );
-    }
-    for (x, zz) in [(-8.0, 4.0), (6.0, -6.0), (0.0, 10.0)] {
-        spawn(
-            commands,
-            cuboid(4.0, 1.2, 1.0),
-            concrete(),
-            at(c + DVec3::new(x, 0.6, zz)),
-        );
-    }
-    spawn(
-        commands,
-        cuboid(4.0, 0.5, 10.0),
-        concrete(),
-        Transform::from_translation(c + DVec3::new(12.0, 1.6, 8.0))
-            .with_rotation(Quat::from_rotation_x(0.35)),
-    );
-    spawn(
-        commands,
-        cuboid(0.8, 6.0, 24.0),
-        concrete(),
-        at(c + DVec3::new(-24.0, 3.0, 0.0)),
-    );
-    for (i, (x, zz)) in [(-3.0, -2.0), (4.0, 3.0), (2.0, -8.0)]
-        .into_iter()
-        .enumerate()
-    {
-        person(
-            commands,
-            c + DVec3::new(x, 0.3, zz),
-            i as f32 * 2.0,
-            0xa83232,
-        );
-    }
-    person(commands, c + DVec3::new(0.0, 0.3, 0.0), 0.0, 0x3260a8);
 }
 
 /// Movement course: wall-run lanes, slide tunnels, platforms and gaps. The Movement and slow
