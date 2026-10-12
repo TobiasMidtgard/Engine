@@ -21,6 +21,7 @@ pub use combat::{
     AttackPhase, AttackState, CombatLog, CombatRecord, CombatState, Fighter, Outcome,
 };
 pub use fx::{CameraFx, SlowMotionFx};
+pub use look::effects::{EffectSettings, Effects};
 pub use mover::{Dash, DashRequest, Mantle, Mover, WallContact};
 pub use player::PlayerControlled;
 pub use profile::MovementProfile;
@@ -146,11 +147,26 @@ impl Plugin for MovementPlugin {
                 Update,
                 (
                     fx::update_slow_motion_fx,
-                    (afterimage::spawn_afterimages, afterimage::fade_afterimages).chain(),
                     fx::camera_fx.after(UpdateSet::Camera),
                 ),
             )
-            .add_render_feature(fx::SlowMotionOverlay::default());
+            // Presentation that copies or samples final poses: after transforms settle.
+            .add_systems(
+                PostUpdate,
+                (
+                    afterimage::fade_afterimages,
+                    afterimage::spawn_afterimages,
+                    look::effects::step_effects,
+                    look::effects::sample_blades,
+                    look::effects::combat_effects,
+                    look::effects::dust_effects,
+                )
+                    .chain()
+                    .in_set(UpdateSet::AfterPropagate),
+            )
+            .add_render_feature(fx::SlowMotionOverlay::default())
+            .add_render_feature(look::effects::EffectsFeature::default());
+        look::effects::register(app);
         demo::register(app);
         look::register(app);
         api::register(app);

@@ -16,9 +16,16 @@ character's own speed and reactions.
   ignores that slow motion, so a trained player sees an elite's blink-fast dash in slow
   motion and has time to react. Cinematic slow-motion beats play on hits, kills and readable
   enemy attacks.
-- **Feel**: afterimages behind fast moves (spaced in real time and distance, so a still frame
-  shows the motion), a slow-motion screen effect (vignette, cool grade, speed lines while
-  dashing) and camera cues (FOV kick, focus narrowing, wall-run roll).
+- **Feel**: afterimages behind fast moves (full-body ghosts, spaced in real time and
+  distance, so a still frame shows the motion), a slow-motion screen effect (vignette, cool
+  grade, speed lines while dashing) and camera cues (FOV kick, focus narrowing, wall-run
+  roll).
+- **Effects** (`look::effects`, tuned by `EffectSettings`): blade trails that cut a crescent
+  behind every `look::Blade` as it strikes (one sharp arc at full speed, long and silky in
+  slow motion), sparks when a strike is blocked, a crimson slash flash on a hit (a crossed
+  cut and a flash light on a kill), and lit dust from landings, slides, dashes and wall
+  kicks. Everything lives on the world clock, is pooled and capped, and is drawn by one
+  render feature.
 
 ```rust,ignore
 use engine::prelude::*;
@@ -73,7 +80,10 @@ course zone.
      slow motion and each grunt falls in a cinematic beat.
 
 `cargo run -p engine_movement --release --example movement_filmstrip -- <dir>` renders the
-key moments of the demo (and a contact sheet) headless.
+key moments of the demo (and a contact sheet) headless, and
+`cargo run -p engine_movement --release --example effects_preview -- <dir>` renders the
+effects up close: a strike at full speed and in slow motion, a parry, a kill, slide dust and
+dash afterimages.
 
 ## Contracts
 

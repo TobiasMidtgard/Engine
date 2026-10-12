@@ -8,7 +8,10 @@
 //!
 //! - [`meshgen`]: the mesh toolkit (rounded and chamfered boxes, lofts, lathes, extrusions).
 //! - [`texgen`]: tiling noise and PBR texture baking.
+//! - [`effects`]: blade trails, parry sparks, slash flashes, impact lights, dust and the
+//!   render feature that draws them and the afterimage ghosts.
 
+pub mod effects;
 pub mod meshgen;
 pub mod texgen;
 
