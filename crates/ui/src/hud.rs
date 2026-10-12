@@ -902,6 +902,7 @@ pub fn hud_system(world: &mut World) {
         }
     }
 
+    step_aside_for_menus(world);
     markers_update(world);
 }
 
@@ -914,10 +915,40 @@ fn set_opacity(world: &mut World, root: Entity, id: &str, opacity: f32) {
     }
 }
 
+/// The HUD fades out while a menu (any other modal screen: dialogue, shop, inventory, map,
+/// settings) is open, and back in when it closes.
+fn step_aside_for_menus(world: &mut World) {
+    let Some(root) = screens::find_screen(world, "hud") else {
+        return;
+    };
+    let menu_open = screens::open_screens(world)
+        .iter()
+        .any(|(key, _, _, modal)| *modal && key != "hud");
+    let dt = world.resource::<Time>().real_delta_secs().min(0.1);
+    let Some(mut n) = world.get_mut::<Node>(root) else {
+        return;
+    };
+    let current = n.style.opacity.unwrap_or(1.0);
+    let target = if menu_open { 0.0 } else { 1.0 };
+    let next = if (target - current).abs() < 0.01 {
+        target
+    } else {
+        current + (target - current) * (dt * 10.0).min(1.0)
+    };
+    if n.style.opacity != Some(next) {
+        n.style.opacity = Some(next);
+    }
+}
+
 fn markers_update(world: &mut World) {
-    let hud = screens::find_screen(world, "hud")
-        .and_then(|e| world.get::<Screen>(e))
-        .map_or(0.0, |s| s.presence);
+    let hud = screens::find_screen(world, "hud").map_or(0.0, |e| {
+        let presence = world.get::<Screen>(e).map_or(0.0, |s| s.presence);
+        let shown = world
+            .get::<Node>(e)
+            .and_then(|n| n.style.opacity)
+            .unwrap_or(1.0);
+        presence * shown
+    });
     let mut q = world.query::<(Entity, &Marker, &WorldAnchor)>();
     let items: Vec<(Entity, bool, f32, bool, Vec2, f32)> = q
         .iter(world)

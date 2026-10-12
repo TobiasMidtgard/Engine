@@ -264,7 +264,7 @@ pub fn group_thousands(s: String) -> String {
         Some(d) => ("-", d),
         None => ("", s.as_str()),
     };
-    if digits.len() <= 4 || !digits.chars().all(|c| c.is_ascii_digit()) {
+    if digits.len() <= 3 || !digits.chars().all(|c| c.is_ascii_digit()) {
         return s;
     }
     let mut out = String::with_capacity(digits.len() + digits.len() / 3);
