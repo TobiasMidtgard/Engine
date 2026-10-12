@@ -32,6 +32,12 @@ pub struct FireSettings {
     pub upwind_damping: f32,
     /// Share of absorbed heat lost to the air per second (a weak fire stops at gaps).
     pub cooling: f32,
+    /// How much farther heat reaches up a slope, doublings per 10° (halvings down it).
+    pub slope_reach: f32,
+    /// How much more heat goes up a slope, doublings per 10° (halvings down it). With the
+    /// defaults a grass fire about doubles its speed for every 10° upslope; set both to 0 to
+    /// ignore slope.
+    pub slope_boost: f32,
     /// Throw embers that drift downwind and can start spot fires.
     pub embers: bool,
     /// Multiplier on ember production.
@@ -68,6 +74,8 @@ impl Default for FireSettings {
             wind_boost: s.wind_boost,
             upwind_damping: s.upwind_damping,
             cooling: s.cooling,
+            slope_reach: s.slope_reach,
+            slope_boost: s.slope_boost,
             embers: true,
             ember_rate: 1.0,
             max_embers: 3000,
@@ -91,6 +99,8 @@ impl FireSettings {
             wind_boost: self.wind_boost,
             upwind_damping: self.upwind_damping,
             cooling: self.cooling,
+            slope_reach: self.slope_reach,
+            slope_boost: self.slope_boost,
         }
     }
 }
