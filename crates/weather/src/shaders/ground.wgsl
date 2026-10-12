@@ -26,11 +26,17 @@ fn rel_at(px: vec2<i32>) -> vec4<f32> {
 }
 
 // Rings spreading from raindrops hitting standing water. Returns a normal tilt (x, z).
-fn ripples(p: vec2<f32>, t: f32) -> vec2<f32> {
+// `footprint` is the pixel's size on the ground (m): rings finer than a pixel fade out
+// instead of turning into glittering noise.
+fn ripples(p: vec2<f32>, t: f32, footprint: f32) -> vec2<f32> {
     var g = vec2<f32>(0.0);
     for (var layer = 0; layer < 3; layer++) {
         let fl = f32(layer);
-        let q = p * (3.5 + fl * 1.9) + vec2<f32>(fl * 3.7, fl * 1.3);
+        let scale = 2.2 + fl * 1.3;
+        // Ring spacing on the ground is about 1 / (scale * 12) m.
+        let resolved = saturate(1.6 - footprint * scale * 12.0 * 1.5);
+        if (resolved <= 0.0) { continue; }
+        let q = p * scale + vec2<f32>(fl * 3.7, fl * 1.3);
         let cell = floor(q);
         let f = fract(q) - 0.5;
         let h = hash12(cell + vec2<f32>(fl * 17.0, 3.0));
@@ -38,11 +44,11 @@ fn ripples(p: vec2<f32>, t: f32) -> vec2<f32> {
         let center = (vec2<f32>(hash12(cell + vec2(3.1, 0.2)), hash12(cell + vec2(7.7, 5.3))) - 0.5) * 0.5;
         let d = f - center;
         let r = length(d);
-        let x = (r - phase * 0.55) * 22.0;
+        let x = (r - phase * 0.55) * 12.0;
         let wave = sin(x * PI) * exp(-x * x * 0.5) * sq(1.0 - phase);
-        g += d / max(r, 1e-3) * wave;
+        g += d / max(r, 1e-3) * wave * resolved;
     }
-    return g * 0.35;
+    return g * 0.3;
 }
 
 // Screen-space reflection along `dir` from camera-relative `start`. rgb pre-exposed, a = hit.
@@ -121,11 +127,14 @@ fn fs_ground(in: FullscreenOut) -> @location(0) vec4<f32> {
 
     if (water > 0.003) {
         var tilt = vec2<f32>(0.0);
+        let view = normalize(rel);
         if (fx.rain.z > 0.5 && fx.rain.x > 0.0) {
-            tilt = ripples(pos, fx.rain.y) * fx.rain.x;
+            // Pixel size on the ground, stretched along the view at grazing angles.
+            let pixel = 2.0 / (frame.proj[1][1] * frame.viewport.y);
+            let footprint = length(rel) * pixel / max(abs(view.y), 0.08);
+            tilt = ripples(pos, fx.rain.y, footprint) * fx.rain.x;
         }
         let wn = normalize(vec3<f32>(-tilt.x, 1.0, -tilt.y));
-        let view = normalize(rel);
         let refl = reflect(view, wn);
         let cos_v = saturate(dot(-view, wn));
         let fresnel = 0.02 + 0.98 * pow(1.0 - cos_v, 5.0);

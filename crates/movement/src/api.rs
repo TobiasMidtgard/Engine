@@ -7,6 +7,7 @@ use engine_world::AttackKind;
 use serde_json::{Value, json};
 
 use crate::combat::{CombatLog, CombatState, Fighter};
+use crate::demo::{DuelDirector, Round};
 use crate::mover::{DashRequest, Mover};
 use crate::profile::MovementProfile;
 use crate::tempo::{PerceptionStatus, Tempo, TimePerception};
@@ -193,6 +194,32 @@ pub(crate) fn register(app: &mut App) {
                 "settings": world.resource::<TimePerception>(),
                 "status": world.resource::<PerceptionStatus>(),
             }))
+        },
+    )
+    .register_api(
+        "movement.duel",
+        "Restart the movement demo's duel: \"round\" Blink (an elite cuts down an untrained \
+         player), Focus (a trained player sees the attack in slow motion and counters) or Pack \
+         (four grunts fall in slow motion) plays that round on a loop; null cycles all three.",
+        r#"{"round": "Focus"}"#,
+        |world, args| {
+            let round: Option<Round> = match args.get("round") {
+                None | Some(Value::Null) => None,
+                Some(v) => Some(
+                    serde_json::from_value(v.clone())
+                        .map_err(|_| "\"round\" must be Blink, Focus, Pack or null".to_string())?,
+                ),
+            };
+            let mut q = world.query::<&mut DuelDirector>();
+            let mut out = Vec::new();
+            for mut d in q.iter_mut(world) {
+                d.restart(round);
+                out.push(json!({"round": d.round, "only": d.only}));
+            }
+            if out.is_empty() {
+                return Err("no duel in this world (spawn it with demo::spawn_demo)".into());
+            }
+            Ok(json!({ "duels": out }))
         },
     );
 }

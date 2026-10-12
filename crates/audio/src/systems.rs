@@ -57,6 +57,10 @@ pub(crate) fn clock_for(entity: Option<Entity>, scales: &Query<&LocalTimeScale>)
     }
 }
 
+/// Standard sea-level air: kg/m³ and m/s (15 °C).
+const SEA_LEVEL_DENSITY: f32 = 1.225;
+const SEA_LEVEL_SPEED_OF_SOUND: f32 = 340.3;
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn update_listener(
     mut audio: ResMut<Audio>,
@@ -114,23 +118,19 @@ pub(crate) fn update_listener(
         slow_motion: slow,
     });
 
-    // Air: thins out with altitude above the nearest planet (or y on flat worlds).
+    // Air: thins out with altitude, differs per planet, none in space.
+    let air = env.air(pos);
     let density = if settings.space_is_silent {
-        let altitude = env
-            .gravity
-            .bodies
-            .iter()
-            .map(|b| (pos - b.center).length() - b.radius)
-            .fold(f64::INFINITY, f64::min);
-        let altitude = if altitude.is_finite() {
-            altitude
-        } else {
-            pos.y
-        };
-        (-(altitude.max(0.0) / settings.atmosphere_height_m.max(1.0) as f64)).exp() as f32
+        (air.density / SEA_LEVEL_DENSITY).clamp(0.0, 1.0)
     } else {
         1.0
     };
+    let speed_scale = if air.density > 0.0 {
+        air.speed_of_sound / SEA_LEVEL_SPEED_OF_SOUND
+    } else {
+        1.0
+    };
+    audio.speed_of_sound = settings.speed_of_sound * speed_scale;
     // Falling and lying snow swallow the highs.
     let w = &env.weather;
     let mut hush = 0.0;
@@ -140,6 +140,7 @@ pub(crate) fn update_listener(
     hush -= 3.0 * smooth(0.02, 0.3, env.surface_state(pos).snow_m);
     audio.send(Command::SetMedium {
         density,
+        speed_scale,
         hush_db: hush,
     });
 
@@ -533,9 +534,8 @@ pub(crate) fn weather_ambience(
             state.next_thunder = next;
             let ground = env.ground(p).map(|g| g.height).unwrap_or(p.y - 1.7);
             let (channel, current) = thunder::random_strike(p, ground, up, 300.0, 8_000.0, seed);
-            if let Some(cue) =
-                thunder::play_thunder(&mut audio, &channel, current, settings.speed_of_sound, seed)
-            {
+            let speed = audio.speed_of_sound();
+            if let Some(cue) = thunder::play_thunder(&mut audio, &channel, current, speed, seed) {
                 cues.write(cue);
             }
         }

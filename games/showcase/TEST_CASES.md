@@ -32,10 +32,10 @@ are built, nothing simulates yet) · ⬜ not visible yet
 | 9 | Water splashes (particles) | `lake` | Particles and magic effects | ⬜ |
 | 10 | Fire that spreads through burnable things like grass | `field`, `fire_front`, `fire_trees`, `fire_campfire`, `fire_night` | Fire and smoke | ✅ burning meadow that spreads downwind and regrows |
 | 11 | Smoke that reacts to bullets, wind currents and explosions | `range` | Fire and smoke | 🟨 firing lanes, fans |
-| 12 | True volumetric clouds with fog | every outdoor viewpoint, `stratosphere` | Weather, wind and clouds | ⬜ flat cloud layer only |
-| 13 | Realistic rain that changes the ground (wet, puddles, mud) | `footsteps`, `plaza` | Weather, wind and clouds | ⬜ (renderer can already darken wet surfaces) |
-| 14 | Temperature, weather and wind simulation; dynamic weather that interacts with the world | `weather` hill | Weather, wind and clouds | 🟨 station instruments |
-| 15 | Snow that settles on the ground | `footsteps` snow strip, mountains | Weather, wind and clouds | 🟨 painted snow only |
+| 12 | True volumetric clouds with fog | every outdoor viewpoint, `weather_storm`, `stratosphere` | Weather, wind and clouds | ✅ volumetric clouds over the whole valley (fair-weather heaps, storm towers, overcast, fog) that drift with the wind and light up in lightning |
+| 13 | Realistic rain that changes the ground (wet, puddles, mud) | `weather_rain`, `footsteps`, `plaza` | Weather, wind and clouds | ✅ rain and splashes; the station yard gets wet and fills puddles with ripples (`weather_rain`), other wet surfaces darken |
+| 14 | Temperature, weather and wind simulation; dynamic weather that interacts with the world | `weather`, `weather_station` | Weather, wind and clouds | ✅ moving fronts, temperature and wind; the station's wind sock, anemometer, thermometer, rain gauge and snow stake follow the live weather |
+| 15 | Snow that settles on the ground | `weather_snow`, `footsteps` snow strip, mountains | Weather, wind and clouds | ✅ snow falls and piles up on the yard and the grass (`weather_snow`) |
 
 ## Ground and footsteps
 
@@ -43,7 +43,7 @@ are built, nothing simulates yet) · ⬜ not visible yet
 |---|---|---|---|---|
 | 16 | Footsteps in mud, grass, snow, sand, gravel, puddles, wood, metal (sound) | `footsteps` | Audio and footsteps | ✅ trail loop with a hiker, a runner, a dog and a horse; sound rings show each step; the ground reports the trail's surfaces to everyone else |
 | 17 | Footprints and tracks pressed into mud and snow | `tracks` (footprint lab) | Planets and terrain | ⬜ strips of mud, snow and sand with stand-in walkers |
-| 18 | Destructible walls and barricades (Rainbow Six Siege style) | `fortress` | Destructible terrain and buildings | 🟨 brick wall, barricades |
+| 18 | Destructible walls and barricades (Rainbow Six Siege style) | `fortress` | Destructible terrain and buildings | ✅ breach range: shot drywall, kicked-in barricades, thermite through rebar concrete, blown brick, a watchtower and gate that collapse, a mined cliff that caves in (replays every 20 s) |
 | 19 | Voxel digging and building (Valheim style) | `voxel` | Destructible terrain and buildings | 🟨 voxel mound with a pit |
 
 ## Living world
@@ -60,21 +60,21 @@ are built, nothing simulates yet) · ⬜ not visible yet
 
 | # | Test case | Zone / viewpoint | Owner | Status |
 |---|---|---|---|---|
-| 25 | Robust animation for humanoids | `paddock`, `arena` | Animation system | 🟨 mannequins |
-| 26 | Animation for animals | `paddock`, `meadow` | Animation system | 🟨 |
-| 27 | Animation for vehicles (wheels, gear, doors) | `paddock` cart, `track`, `airfield` | Animation system | 🟨 |
-| 28 | Muscles that flex and jiggle with movement | `paddock` | Animation system | ⬜ |
-| 29 | Clothing tension and wrinkles during movement | `paddock`, `yard` | Animation system, Cloth, soft bodies and hair | ⬜ |
+| 25 | Robust animation for humanoids | `paddock`, `arena` | Animation system | ✅ paddock: a hammer athlete, a lifter, a shirt reach, and a walker that climbs a ramp, crosses a deck, takes the stairs with IK-planted feet and runs back |
+| 26 | Animation for animals | `paddock`, `meadow` | Animation system | ✅ paddock: a horse that walks, trots, canters and gallops round an oval, and a spider picking its way over rocks |
+| 27 | Animation for vehicles (wheels, gear, doors) | `paddock` car loop, `track`, `airfield` | Animation system | ✅ paddock: a car with suspension over speed bumps, body roll, steering and spinning wheels |
+| 28 | Muscles that flex and jiggle with movement | `paddock` | Animation system | ✅ the hammer athlete's arms, shoulders and back tense on the strike and relax after; the lifter's double-biceps flex |
+| 29 | Clothing tension and wrinkles during movement | `paddock`, `yard` | Animation system, Cloth, soft bodies and hair | ✅ paddock: sleeves bunch at the elbows and the shirt stretches across the back on a reach |
 | 30 | Cloth: flags, sails, curtains, clothes | `yard` | Cloth, soft bodies and hair | ✅ flags and pennants in the wind, a curtain shot full of holes, one that burns, a cape |
 | 31 | Soft bodies (jelly, flesh) and ropes (rope bridge) | `yard` | Cloth, soft bodies and hair | ✅ jelly cubes, a clay block that dents, rope bridges, a swing, a bead curtain, a wrecking ball |
 | 32 | Hair and fur for humans and animals | `yard` | Cloth, soft bodies and hair | ✅ a walking mannequin with long hair and a dog with fur |
 | 33 | Smart NPC AI that uses the environment (cover, high ground) | `arena`, `arena_cover` | Smart NPC AI | ✅ two squads take cover, climb the platform, flank, suppress and shoot the explosive barrel (stand-in bodies) |
 | 34 | NPCs that space the player and block attacks | `arena`, `arena_duel` | Smart NPC AI | ✅ melee fighters take turns instead of ringing you, block, parry, dodge and feint; a master and a veteran duel |
 | 35 | NPC skill, reaction time and logic editable per enemy | `arena` | Smart NPC AI | ✅ every fighter's skills (reaction time, accuracy, logic, defense…) are tunable through `npc.set_skill`; head band color shows skill |
-| 36 | Titanfall-style movement: wall-run, slide, dash | `parkour` | Movement and slow motion | 🟨 walls, platforms, slide tunnel |
-| 37 | Elite enemies dash in and slice in the blink of an eye | `arena` | Movement and slow motion | ⬜ |
-| 38 | Stat-based time perception: a leveled-up player sees enemies in slow motion | `arena` | Movement and slow motion | ⬜ |
-| 39 | Slow motion when attacking or being attacked (Zoro / Sung Jin-Woo moments) | `arena` | Movement and slow motion | ⬜ |
+| 36 | Titanfall-style movement: wall-run, slide, dash | `parkour` | Movement and slow motion | ✅ a runner loops sprint, slide under a bar, wall-run, wall-jump, mantle onto a tower, double jump |
+| 37 | Elite enemies dash in and slice in the blink of an eye | `parkour` duel ring | Movement and slow motion | ✅ an elite dash-strikes a level 1 player in under 0.25 s |
+| 38 | Stat-based time perception: a leveled-up player sees enemies in slow motion | `parkour` duel ring | Movement and slow motion | ✅ at level 10 the same attack slows the world to 1/5.5; the player sidesteps and counters |
+| 39 | Slow motion when attacking or being attacked (Zoro / Sung Jin-Woo moments) | `parkour` duel ring | Movement and slow motion | ✅ four grunts attack in turn; each attack and each kill plays in slow motion |
 
 ## Effects and UI
 

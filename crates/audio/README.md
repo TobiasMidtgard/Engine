@@ -40,9 +40,18 @@ different wet, frozen, snowed on or burnt.
   the listener toward each sound, over and beside it too, so a sound round a corner is only
   partly muffled; denser materials muffle more).
 - **Space**: distance rolloff, equal-power panning, doppler, air absorption, a little
-  shading from behind and below, and sound that starts late by distance / 343 m/s.
-  `ReverbZone` boxes (caves, halls, the trail's underpass) add room echo. Air thins with
-  altitude: high up it gets quiet, and in space there is no sound at all.
+  shading from behind and below, and sound that starts late by distance / the speed of
+  sound. `ReverbZone` boxes (caves, halls, the trail's underpass) add room echo. The air
+  comes from `Env::air` at the listener, per planet: sound travels faster in warm air and
+  slower in cold, thin air high up makes everything quiet, and in space there is no sound at
+  all.
+- **Vehicles**: engines and tyres for every vehicle with `EngineState` / `WheelContacts`
+  (written by the vehicles module). A piston engine fires pulse by pulse through its
+  exhaust's resonances, so revs, load, burble on the overrun, turbo whine and pops follow the
+  engine's state; turbines whine and roar, rockets crackle and thunder for kilometres,
+  electric motors sing, thrusters hiss. Tyres roll, crunch on gravel, pack snow, squelch in
+  mud, hiss on wet roads and squeal when they slide on dry hard ground, reading each wheel's
+  ground the way footsteps do (material plus wetness, puddles, snow and frost).
 - **Slow motion**: world sounds slow down and drop in pitch with `TimeDilation`, and the
   world gets darker and roomier. Anything with a `LocalTimeScale` that ignores dilation (a
   time-dilated hero) keeps its own pitch.
@@ -70,7 +79,7 @@ Tunable at runtime (JSON, console, scripts, AI agents):
 
 | Name | What |
 |---|---|
-| `AudioSettings` | output, master volume, speed of sound, doppler, air absorption, how much slow motion lowers pitch, silence in space, footstep range, voice limit, weather, fires, water and occlusion on/off |
+| `AudioSettings` | output, master volume, speed of sound, doppler, air absorption, how much slow motion lowers pitch, silence in space, footstep range, voice limit, weather, fires, water, vehicles and occlusion on/off |
 | `AudioMix` | volume per bus (world, ambience, music, ui, voice) and mute |
 | `FootstepSurfaces` | how each surface sounds underfoot: 14 layer weights, brightness, pitch, gain |
 | `SoundRings` | coloured rings on the ground for each sound near a footstep trail (or everywhere) |
@@ -102,16 +111,16 @@ tween system cost more than writing the mixer.
 Reads (all from `engine_world`): `GroundContact`, `ContactEvent`, `WaterSplash`,
 `WorldImpulse`, `ProjectileTrace`, `AttackEvent`, `LightningStrike`, `Collider::surface`,
 `SurfaceMaterials`, `SurfaceLayers` (wetness, puddles, snow, scorch), `HeatField` and
-`Combustible` (fires), `WaterQuery` (shores and currents), `WeatherState`, wind, temperature,
-water,
-ground and gravity bodies through `Env`, `PhysicsQueries::raycast` (roof over the listener,
+`Combustible` (fires), `WaterQuery` (shores and currents), `EngineState` and
+`WheelContacts` (vehicles), `WeatherState`, wind, temperature, air, water, ground and
+gravity bodies through `Env`, `PhysicsQueries::raycast` (roof over the listener,
 walls between the listener and each sound),
 `Time` / `TimeDilation` / `LocalTimeScale`, `engine_render::Camera`.
 
 Follows `WorldShift`: the ears, every playing sound and the trail's walkers move into the
 new frame, so a floating-origin move is silent.
 
-Writes: `AudioCue` (its own message), and the `gravel` surface material when the trail demo
+Writes: `AudioCue` (its own message, moved by world shifts like the shared ones), and the `gravel` surface material when the trail demo
 spawns (if nobody defined it).
 
 ## Test cases
@@ -132,18 +141,15 @@ character's and shows as a ring in its ground's colour.
   (`--layers` prints each footstep layer's level).
 - `tests/plugin.rs`: contacts are heard, out-of-earshot steps are skipped, space is silent,
   the trail walks every surface, walls muffle what's behind them, burning ground and burning
-  things are heard, shores lap and brooks babble. `tests/screenshot.rs` renders the trail headless.
+  things are heard, shores lap and brooks babble, sounds stay put when the world shifts,
+  lightning rolls thunder late, a waterfall roars instead of dripping, engines rev and tyres
+  skid, and sound travels at the speed the air allows. `tests/screenshot.rs` renders the
+  trail headless.
 
 ## Done when
 
 - Footsteps change from grass to mud to snow; rain gets louder with intensity; slow motion
   lowers the pitch. ✓ (all three are in the trail recording and the tests)
 
-Engines (piston engines firing pulse by pulse through their exhaust, turbines, rockets,
-electric motors, thrusters) and tyres (rolling, crunching, squelching, hissing, squealing)
-are synthesized in `vehicle.rs` and render in `footstep_lab`; they play in the world once
-the vehicles module publishes engine and wheel state through `engine_world` (asked of the
-lead).
-
-Next: vehicles in the world (see above), music layers, and recorded samples alongside the
-synthesis.
+Next: music layers, and recorded samples alongside the synthesis (through the asset
+manifest, `assets/manifests/audio.toml`).

@@ -214,8 +214,14 @@ pub const GRASSY_ZONES: &[&str] = &[
     "meadow",
     "parkour",
     "fortress",
-    "voxel",
     "weather",
+];
+
+/// Rectangles inside grassy zones where a module's demo lays its own ground, so no grass grows
+/// there: zone key, then x min..max and z min..max relative to the zone center, meters.
+pub const BARE_FOOTPRINTS: &[(&str, [f64; 2], [f64; 2])] = &[
+    // The weather station's asphalt yard, sand pit and stone patio.
+    ("weather", [-13.0, 12.0], [-8.0, 9.0]),
 ];
 
 /// The stream's course (x, z), spring first: through the southern woods, over the cliff south
@@ -246,7 +252,7 @@ pub fn spawn_demos(
         match z.key {
             "plaza" => ph::plaza(commands, lib, z),
             "market" => ph::market(commands, lib, z),
-            "paddock" => ph::stage(commands, lib, z),
+            "paddock" => engine_anim::demo::spawn_demo(commands, z.center),
             "physics" => ph::physics(commands, lib, z),
             "yard" => engine_softbody::demo::spawn_demo(commands, z.center),
             "magic" => ph::magic(commands, lib, z),
@@ -259,7 +265,7 @@ pub fn spawn_demos(
             "tracks" => ph::tracks(commands, z),
             "cave" => ph::cave(commands, z, rng),
             "arena" => engine_npc::demo::spawn_demo(commands, z.center),
-            "parkour" => ph::parkour(commands, lib, z),
+            "parkour" => engine_movement::demo::spawn_demo(commands, z.center),
             "fortress" => engine_destruction::demo::spawn_demo(commands, z.center),
             "voxel" => ph::voxel(commands, meshes, z, rng),
             "field" => {
@@ -267,7 +273,7 @@ pub fn spawn_demos(
                 ph::field_edge(commands, lib, z, rng);
             }
             "range" => ph::range(commands, lib, z),
-            "weather" => ph::weather(commands, lib, z),
+            "weather" => engine_weather::demo::spawn_demo(commands, z.center),
             "track" => ph::track(commands, lib, z),
             "airfield" => ph::airfield(commands, lib, z),
             "spaceport" => ph::spaceport(commands, lib, z),
@@ -409,6 +415,60 @@ pub fn demo_views(z: &Zone) -> Vec<View> {
             )
             .warmup(6.0),
         ],
+        "weather" => {
+            let set = |preset: &str| format!(r#"{{"preset": "{preset}", "transition_s": 0}}"#);
+            vec![
+                View::new(
+                    "weather_station",
+                    "The weather station",
+                    [9.0, 3.5, 13.0],
+                    [0.0, 1.2, 0.0],
+                    15.0,
+                )
+                .warmup(1.0),
+                View::new(
+                    "weather_rain",
+                    "A downpour soaking the station yard",
+                    [6.0, 1.8, 9.0],
+                    [0.0, 0.4, -2.0],
+                    13.0,
+                )
+                .warmup(3.0)
+                .on_arrive("weather.set", &set("storm"))
+                .on_arrive("weather.advance", r#"{"seconds": 900}"#)
+                .on_arrive("weather.ground", r#"{"wetness": 1.0, "puddle_m": 0.03}"#)
+                .on_leave("weather.set", &set("partly_cloudy"))
+                .on_leave("weather.ground", r#"{"dry": true}"#),
+                View::new(
+                    "weather_snow",
+                    "Fresh snow on the station",
+                    [9.0, 3.0, 12.0],
+                    [0.0, 0.8, 0.0],
+                    12.0,
+                )
+                .warmup(3.0)
+                .on_arrive("weather.set", &set("snow"))
+                .on_arrive("weather.ground", r#"{"wetness": 0.3, "snow_m": 0.15}"#)
+                .on_leave("weather.set", &set("partly_cloudy"))
+                .on_leave("weather.ground", r#"{"dry": true}"#),
+                // The wind comes from the west-southwest (+X, a little -Z): look upwind at the
+                // front rolling in.
+                View::new(
+                    "weather_storm",
+                    "A thunderstorm rolling in",
+                    [-6.0, 3.0, 4.0],
+                    [200.0, 60.0, -70.0],
+                    15.0,
+                )
+                .warmup(2.0)
+                .on_arrive(
+                    "weather.set",
+                    r#"{"preset": "storm", "transition_s": 900, "wind_from_deg": 250}"#,
+                )
+                .on_arrive("weather.advance", r#"{"seconds": 640}"#)
+                .on_leave("weather.set", &set("partly_cloudy")),
+            ]
+        }
         _ => Vec::new(),
     }
 }
