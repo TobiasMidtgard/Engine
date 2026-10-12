@@ -16,6 +16,19 @@ pub enum Tonemapper {
     None,
 }
 
+/// How edges are smoothed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum AntiAliasing {
+    /// Temporal anti-aliasing (default): the camera shifts by a fraction of a pixel every
+    /// frame and the results are blended along motion vectors. Smooth edges, stable thin
+    /// geometry (grass, wires), and it also cleans up the noise of ambient occlusion and soft
+    /// shadows. Needs a few frames after a camera cut to converge.
+    #[default]
+    Taa,
+    /// No anti-aliasing (sharpest, jagged edges).
+    None,
+}
+
 /// What the screen shows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum DebugView {
@@ -27,6 +40,8 @@ pub enum DebugView {
     Cascades,
     /// How much open sky each surface sees (white = outdoors, black = cave or interior).
     SkyVisibility,
+    /// Screen-space ambient occlusion (white = open, black = crevices and contact).
+    AmbientOcclusion,
 }
 
 /// Renderer-wide quality and look settings.
@@ -44,8 +59,25 @@ pub struct RenderSettings {
     pub shadow_depth_bias: f32,
     /// Normal offset in shadow texels.
     pub shadow_normal_bias: f32,
-    /// PCF filter radius in texels.
+    /// Smallest shadow filter radius in texels (the edge is never sharper than this).
     pub shadow_softness: f32,
+    /// Scale of the sun's physical penumbra (1 = the real sun's size: shadows are crisp at
+    /// contact and soften with distance from the caster; 2 = twice as soft).
+    pub sun_penumbra_scale: f32,
+    /// Screen-space contact shadows: each lit pixel marches this far (meters) toward the sun
+    /// through the depth buffer, catching small shadows the shadow map is too coarse for
+    /// (pebbles, grass, feet on the ground). 0 = off.
+    pub contact_shadow_length: f32,
+    /// Ground-truth ambient occlusion (GTAO) from the depth prepass: darkens ambient light in
+    /// creases, under objects and where things touch.
+    pub ambient_occlusion: bool,
+    /// How far (meters) occluders are searched for around each pixel.
+    pub ao_radius: f32,
+    /// 0..2 strength of the ambient occlusion (1 = physical).
+    pub ao_intensity: f32,
+    pub anti_aliasing: AntiAliasing,
+    /// 0..1 sharpening after temporal anti-aliasing (restores texture detail).
+    pub sharpness: f32,
     pub tonemapper: Tonemapper,
     /// 0..1 mix of the blurred image (0.04 is subtle and physical).
     pub bloom_intensity: f32,
@@ -83,6 +115,13 @@ impl Default for RenderSettings {
             shadow_depth_bias: 0.0,
             shadow_normal_bias: 1.5,
             shadow_softness: 1.0,
+            sun_penumbra_scale: 1.0,
+            contact_shadow_length: 0.4,
+            ambient_occlusion: true,
+            ao_radius: 1.5,
+            ao_intensity: 1.0,
+            anti_aliasing: AntiAliasing::Taa,
+            sharpness: 0.3,
             tonemapper: Tonemapper::AgX,
             bloom_intensity: 0.04,
             saturation: 1.05,
