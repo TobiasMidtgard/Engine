@@ -1,0 +1,102 @@
+# Working on the engine (humans and AI agents)
+
+This file is the contract every contributor follows. `CLAUDE.md` points here.
+Architecture and module ownership: [`ARCHITECTURE.md`](ARCHITECTURE.md).
+
+## Build & test
+
+```sh
+cargo build --workspace
+cargo test -p <crate>                 # every crate has unit tests that need no GPU
+cargo clippy --workspace --all-targets
+cargo fmt --all
+cargo run -p hello                    # windowed
+cargo run -p hello -- --headless --frames 4   # offscreen, writes screenshots/hello.png
+```
+
+Headless GPU tests and screenshots need a GPU or a software Vulkan driver. On Debian/Ubuntu
+containers: `apt-get install -y mesa-vulkan-drivers` (lavapipe). Tests that need a GPU must
+pass (with a note) when `RenderDisabled` is present, so CI without a GPU stays green.
+
+Share one target directory between checkouts to avoid rebuilding dependencies:
+`export CARGO_TARGET_DIR=$HOME/target`.
+
+## Units and coordinates
+
+- Right-handed, **Y up**, cameras and lights look along **−Z** (`Transform::forward()`).
+- SI units everywhere: meters, seconds, kilograms, newtons, kelvin/°C (named `_c`), radians in
+  code (degrees only in fields named `_deg`).
+- Light in physical units: lux for the sun, lumens for lamps, cd/m² for emissive/ambient.
+  Exposure is EV100. Never "fix" brightness with magic multipliers; fix units.
+- **World positions are f64** (`Transform::translation: DVec3`, `GlobalTransform`), rotations
+  and local offsets are f32. Convert near the point of use:
+  `(world_pos - origin).as_vec3()`. Worlds span light-minutes; f32 world positions are a bug.
+- The renderer draws everything relative to the camera (`ViewData::origin`). Shaders only
+  ever see camera-relative positions (`rel`), plus `tiling_pos(rel)` for world-stable noise.
+
+## Frame and time
+
+```
+First → PreUpdate → [FixedPreUpdate → FixedUpdate → FixedPostUpdate] × N → Update
+      → PostUpdate → Extract → Render → Last
+```
+
+- Simulation that must be deterministic or stable (physics, fluids, fire spread, AI ticks,
+  movement) runs in **FixedUpdate** in a `SimSet` (`Input → Gameplay → Physics → PostPhysics →
+  Environment`). Presentation (cameras, UI, animation blending) runs in **Update**.
+- `Res<Time>` gives the right delta in both: inside fixed schedules it is the fixed step.
+- **Time dilation is built in.** `TimeDilation` slows or speeds the world (bullet time,
+  "the enemy moves in slow motion"). Entities with `LocalTimeScale` run at their own rate
+  (a player who perceives faster, an enemy that ignores slow-mo). Always scale per-entity
+  motion with `time.delta_for(local_scale)`; never read real time for gameplay.
+- Input for fixed-step systems: use `ActionState::pressed_since_tick`, not `just_pressed`.
+
+## Making a module
+
+A module is one crate (`crates/<name>`, package `engine_<name>`) with one `Plugin`.
+
+1. **Own your crate.** Don't edit other modules' crates. Changes to `engine_core`,
+   `engine_world` or `engine_render` public APIs go through the core owner (open a PR or
+   describe the change; see ARCHITECTURE.md).
+2. **Talk through contracts, not crates.** Cross-module interaction goes through
+   `engine_world`: messages (`WorldImpulse`, `ProjectileTrace`, `GroundContact`,
+   `IgniteRequest`, `DamageEvent`, `NoiseEvent`), shared fields (`WindField`, `HeatField`,
+   `SurfaceLayers`), queries (`Ground`, `Water`), `SurfaceMaterials`, `Gravity`. A smoke
+   module reacts to `ProjectileTrace` without knowing which weapon fired. Use the `Env`
+   system param to read the environment.
+3. **Make it data-driven and AI-reachable.** Every component or resource a designer (or an
+   AI agent) might tune derives `Serialize`/`Deserialize` with `#[serde(default)]` and is
+   registered with a one-line doc:
+   `app.register_component::<Wheel>("Suspension + tire for a vehicle wheel (meters, N/m).")`.
+   Expose verbs as API functions named `<module>.<verb>` with JSON in/out:
+   `app.register_api("fire.ignite", "Start a fire", r#"{"at": [0,0,0]}"#, |world, args| ...)`.
+   The AI bridge, console and scripts call these; nothing else is needed to make a feature
+   AI-controllable.
+4. **Render through `RenderFeature`.** Implement the trait (prepare/draw/draw_shadow/
+   draw_environment/overlay), add it with `app.add_render_feature(...)`. Compose shaders with
+   `GpuShared::shader(label, src, with_frame)`; use `shade_surface`, `apply_fog`,
+   `shadow_factor`, `wind_offset` from `lib_frame.wgsl` so lighting matches everything else.
+   Output **pre-exposed** radiance (`pre_expose`). Add a unit test that runs
+   `validate_wgsl(name, &compose_shader(src, true))`.
+5. **Scale with the camera.** Simulations run at full detail near `SimulationFocus` entities
+   and cheaper (or frozen) far away. Grids (`Grid2`/`Grid3`) recenter on focus.
+6. **Tests.** Unit tests for logic (no GPU). For visuals, a headless test that renders and
+   saves a PNG via `engine_render::capture_now` and checks something about the pixels.
+
+## Performance rules
+
+- No allocation per entity per frame in hot paths. Keep scratch `Vec`s in the system's
+  `Local` or the feature struct and `clear()` them.
+- Cache `QueryState` in render features; use `par_iter_mut` for large ECS loops and
+  `engine_core::tasks::par_chunks_mut` for grids.
+- GPU: instance everything; one storage buffer per kind of data; avoid per-object bind
+  groups; compute shaders for anything with more than ~10k elements (particles, fluids).
+- Measure: `Diagnostics::set("module.metric", v)` shows up in `engine.describe`.
+
+## Style
+
+- `cargo fmt`, clippy clean, Rust 2024 edition.
+- Doc comment on every public item, written for someone (or an AI) using it for the first time,
+  with units.
+- Errors returned to API callers are plain sentences that say what to do.
+- Commit messages: imperative subject, body explains why.
