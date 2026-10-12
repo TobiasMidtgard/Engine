@@ -1,4 +1,4 @@
-//! Gravity, ground and water queries, and surface materials.
+//! Gravity, ground, water and obscurance queries, and surface materials.
 
 use std::sync::Arc;
 
@@ -343,5 +343,244 @@ impl Water {
         self.sample(p)
             .map(|w| (w.surface_height - p.y) as f32)
             .unwrap_or(f32::NEG_INFINITY)
+    }
+}
+
+/// Implemented by anything that dims the air: smoke (`engine_smoke`), and later weather fog or
+/// dust from destruction. Lets NPC AI, gameplay and UI ask "can I see through this" without
+/// depending on the module that simulates it.
+///
+/// The two methods must agree: `transmittance(a, b)` is `exp(-∫ extinction ds)` along the
+/// segment. [`check_obscurance`] tests that, so a replacement module behaves the same.
+pub trait ObscuranceQuery: Send + Sync + 'static {
+    /// Fraction of light that gets from `from` to `to` through this source: 1 = clear air,
+    /// 0 = opaque. The same in both directions.
+    fn transmittance(&self, from: DVec3, to: DVec3) -> f32;
+    /// Extinction coefficient at `p`, 1/m (0 in clear air). Over `d` meters of it, light falls
+    /// to `exp(-extinction * d)`; you can see about `3 / extinction` meters.
+    fn extinction(&self, p: DVec3) -> f32;
+}
+
+/// Everything that obscures sight, combined. Each module registers its own source by name, so
+/// smoke, fog and dust stack and any one of them can be swapped out. Clear air by default.
+///
+/// ```ignore
+/// // The smoke module, once per simulation step:
+/// obscurance.set("smoke", Arc::new(smoke_snapshot));
+/// // NPC AI:
+/// let can_see = obscurance.transmittance(eye, target) > 0.3;
+/// ```
+#[derive(Resource, Clone, Default)]
+pub struct Obscurance {
+    sources: Vec<(String, Arc<dyn ObscuranceQuery>)>,
+}
+
+impl Obscurance {
+    /// Adds a source, or replaces the one already registered under `name`.
+    pub fn set(&mut self, name: impl Into<String>, source: Arc<dyn ObscuranceQuery>) {
+        let name = name.into();
+        match self.sources.iter_mut().find(|(n, _)| *n == name) {
+            Some((_, s)) => *s = source,
+            None => self.sources.push((name, source)),
+        }
+    }
+
+    /// Removes the source registered under `name`. Returns whether there was one.
+    pub fn remove(&mut self, name: &str) -> bool {
+        let before = self.sources.len();
+        self.sources.retain(|(n, _)| n != name);
+        self.sources.len() != before
+    }
+
+    /// Names of the registered sources.
+    pub fn names(&self) -> impl Iterator<Item = &str> {
+        self.sources.iter().map(|(n, _)| n.as_str())
+    }
+
+    /// Fraction of light that gets from `from` to `to` through every source: 1 = clear air,
+    /// 0 = opaque.
+    pub fn transmittance(&self, from: DVec3, to: DVec3) -> f32 {
+        self.sources
+            .iter()
+            .map(|(_, s)| s.transmittance(from, to).clamp(0.0, 1.0))
+            .product()
+    }
+
+    /// Extinction coefficient at `p` from every source, 1/m.
+    pub fn extinction(&self, p: DVec3) -> f32 {
+        self.sources
+            .iter()
+            .map(|(_, s)| s.extinction(p).max(0.0))
+            .sum()
+    }
+}
+
+/// Checks that an [`ObscuranceQuery`] keeps the contract along the segment `from`..`to`:
+/// values in range, clear over zero distance, the same both ways, and a transmittance that
+/// matches its extinction (within 0.05). Call it from the implementing module's tests with
+/// segments through clear air, thin smoke and thick smoke.
+pub fn check_obscurance(
+    source: &dyn ObscuranceQuery,
+    from: DVec3,
+    to: DVec3,
+) -> Result<(), String> {
+    let t = source.transmittance(from, to);
+    if !(0.0..=1.0).contains(&t) {
+        return Err(format!("transmittance {t} is outside 0..1"));
+    }
+    let back = source.transmittance(to, from);
+    if (t - back).abs() > 0.02 {
+        return Err(format!("transmittance differs by direction: {t} vs {back}"));
+    }
+    let here = source.transmittance(from, from);
+    if (here - 1.0).abs() > 1e-3 {
+        return Err(format!("transmittance over zero distance is {here}, not 1"));
+    }
+    const STEPS: usize = 256;
+    let step = from.distance(to) / STEPS as f64;
+    let mut optical_depth = 0.0;
+    for i in 0..STEPS {
+        let p = from.lerp(to, (i as f64 + 0.5) / STEPS as f64);
+        let e = source.extinction(p);
+        if !(e >= 0.0 && e.is_finite()) {
+            return Err(format!("extinction at {p} is {e}"));
+        }
+        optical_depth += e as f64 * step;
+    }
+    let expected = (-optical_depth).exp() as f32;
+    if (t - expected).abs() > 0.05 {
+        return Err(format!(
+            "transmittance {t} doesn't match its extinction (exp(-{optical_depth:.3}) = {expected})"
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A uniform ball of smoke.
+    struct Ball {
+        center: DVec3,
+        radius: f64,
+        extinction: f32,
+    }
+
+    impl ObscuranceQuery for Ball {
+        fn transmittance(&self, from: DVec3, to: DVec3) -> f32 {
+            // Length of the segment inside the ball.
+            let d = to - from;
+            let len = d.length();
+            if len == 0.0 {
+                return 1.0;
+            }
+            let dir = d / len;
+            let oc = from - self.center;
+            let b = oc.dot(dir);
+            let disc = b * b - (oc.length_squared() - self.radius * self.radius);
+            if disc <= 0.0 {
+                return 1.0;
+            }
+            let (t0, t1) = (-b - disc.sqrt(), -b + disc.sqrt());
+            let inside = (t1.min(len) - t0.max(0.0)).max(0.0);
+            (-(self.extinction as f64) * inside).exp() as f32
+        }
+
+        fn extinction(&self, p: DVec3) -> f32 {
+            if p.distance(self.center) < self.radius {
+                self.extinction
+            } else {
+                0.0
+            }
+        }
+    }
+
+    fn ball(x: f64, extinction: f32) -> Arc<dyn ObscuranceQuery> {
+        Arc::new(Ball {
+            center: DVec3::new(x, 0.0, 0.0),
+            radius: 1.0,
+            extinction,
+        })
+    }
+
+    const A: DVec3 = DVec3::new(-10.0, 0.0, 0.0);
+    const B: DVec3 = DVec3::new(10.0, 0.0, 0.0);
+
+    #[test]
+    fn air_is_clear_without_sources() {
+        let o = Obscurance::default();
+        assert_eq!(o.transmittance(A, B), 1.0);
+        assert_eq!(o.extinction(DVec3::ZERO), 0.0);
+    }
+
+    #[test]
+    fn sources_stack_and_replace_by_name() {
+        let mut o = Obscurance::default();
+        o.set("smoke", ball(0.0, 0.5));
+        let one = o.transmittance(A, B);
+        assert!((one - (-1.0f32).exp()).abs() < 1e-4, "{one}");
+        o.set("dust", ball(5.0, 0.5));
+        let two = o.transmittance(A, B);
+        assert!((two - one * one).abs() < 1e-4, "{two}");
+        assert_eq!(o.extinction(DVec3::ZERO), 0.5);
+        // A new snapshot replaces the old one instead of stacking on it.
+        o.set("smoke", ball(0.0, 0.0));
+        assert!((o.transmittance(A, B) - one).abs() < 1e-4);
+        assert_eq!(o.names().collect::<Vec<_>>(), ["smoke", "dust"]);
+        assert!(o.remove("dust"));
+        assert!(!o.remove("dust"));
+        assert_eq!(o.transmittance(A, B), 1.0);
+    }
+
+    #[test]
+    fn out_of_range_sources_are_clamped() {
+        struct Broken;
+        impl ObscuranceQuery for Broken {
+            fn transmittance(&self, _: DVec3, _: DVec3) -> f32 {
+                1.5
+            }
+            fn extinction(&self, _: DVec3) -> f32 {
+                -1.0
+            }
+        }
+        let mut o = Obscurance::default();
+        o.set("broken", Arc::new(Broken));
+        assert_eq!(o.transmittance(A, B), 1.0);
+        assert_eq!(o.extinction(A), 0.0);
+        assert!(check_obscurance(&Broken, A, B).is_err());
+    }
+
+    #[test]
+    fn the_check_accepts_a_consistent_source_and_rejects_others() {
+        let thick = Ball {
+            center: DVec3::ZERO,
+            radius: 1.0,
+            extinction: 2.0,
+        };
+        for (from, to) in [(A, B), (A, A), (DVec3::new(0.0, 0.5, -3.0), B)] {
+            check_obscurance(&thick, from, to).unwrap();
+        }
+        struct OneWay;
+        impl ObscuranceQuery for OneWay {
+            fn transmittance(&self, from: DVec3, to: DVec3) -> f32 {
+                if from.x < to.x { 0.5 } else { 1.0 }
+            }
+            fn extinction(&self, _: DVec3) -> f32 {
+                0.0
+            }
+        }
+        assert!(check_obscurance(&OneWay, A, B).is_err());
+        // Says the air is clear but reports thick smoke along the way.
+        struct Mismatch;
+        impl ObscuranceQuery for Mismatch {
+            fn transmittance(&self, _: DVec3, _: DVec3) -> f32 {
+                1.0
+            }
+            fn extinction(&self, _: DVec3) -> f32 {
+                1.0
+            }
+        }
+        assert!(check_obscurance(&Mismatch, A, B).is_err());
     }
 }
