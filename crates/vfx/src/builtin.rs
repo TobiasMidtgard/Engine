@@ -98,6 +98,16 @@ fn flame_colors() -> Gradient {
     ])
 }
 
+/// Fire billows: bright orange, deepening to red and fading out as they cool.
+fn billow_colors() -> Gradient {
+    g(&[
+        (0.0, [1.0, 0.62, 0.25, 0.0]),
+        (0.05, [1.0, 0.6, 0.22, 1.0]),
+        (0.5, [1.0, 0.38, 0.08, 0.95]),
+        (1.0, [0.6, 0.12, 0.03, 0.0]),
+    ])
+}
+
 fn spark_colors() -> Gradient {
     g(&[
         (0.0, [1.0, 0.88, 0.55, 1.0]),
@@ -150,6 +160,27 @@ fn sparks(name: &str, count: u32, speed: [f32; 2]) -> EmitterDesc {
         emissive: 60_000.0,
         additive: 1.0,
         soft: 0.0,
+        ..em(name)
+    }
+}
+
+/// Heat haze rising off something hot: bends the scene behind it. `strength` 0..1.
+fn haze(name: &str, strength: f32) -> EmitterDesc {
+    EmitterDesc {
+        sprite: Sprite::Haze,
+        additive: 1.0,
+        lit: 0.0,
+        emissive: 0.0,
+        soft: 0.0,
+        wind: 0.6,
+        turbulence: 1.0,
+        turbulence_scale: 0.8,
+        spin_deg: [-30.0, 30.0],
+        color: g(&[
+            (0.0, [1.0, 1.0, 1.0, 0.0]),
+            (0.25, [1.0, 1.0, 1.0, strength]),
+            (1.0, [1.0, 1.0, 1.0, 0.0]),
+        ]),
         ..em(name)
     }
 }
@@ -371,6 +402,20 @@ fn spells() -> Vec<EffectDesc> {
                     acceleration: [0.0, 0.7, 0.0],
                     ..smoke("smoke", 0.2, 0.45)
                 },
+                EmitterDesc {
+                    rate: 30.0,
+                    rate_per_meter: 8.0,
+                    shape: EmitShape::Sphere {
+                        radius: 0.2,
+                        surface: false,
+                    },
+                    speed: [0.1, 0.3],
+                    acceleration: [0.0, 1.0, 0.0],
+                    lifetime: [0.3, 0.55],
+                    size: [0.8, 1.1],
+                    size_over_life: c(&[(0.0, 0.8), (1.0, 1.4)]),
+                    ..haze("haze", 1.0)
+                },
             ],
         )
     };
@@ -404,14 +449,16 @@ fn spells() -> Vec<EffectDesc> {
                     drag: 3.5,
                     acceleration: [0.0, 3.0, 0.0],
                     turbulence: 4.0,
-                    lifetime: [0.35, 0.8],
-                    size: [0.6, 1.1],
-                    size_over_life: c(&[(0.0, 0.5), (0.25, 1.0), (1.0, 0.3)]),
-                    rotation_deg: [-20.0, 20.0],
-                    sprite: Sprite::Flame,
-                    color: flame_colors(),
-                    emissive: 12_000.0,
-                    additive: 0.85,
+                    lifetime: [0.4, 0.9],
+                    size: [0.7, 1.3],
+                    size_over_life: c(&[(0.0, 0.45), (0.3, 1.0), (1.0, 1.2)]),
+                    rotation_deg: [-180.0, 180.0],
+                    spin_deg: [-60.0, 60.0],
+                    sprite: Sprite::Billow,
+                    color: billow_colors(),
+                    emissive: 10_000.0,
+                    additive: 0.35,
+                    soft: 0.3,
                     ..em("fire")
                 },
                 EmitterDesc {
@@ -474,6 +521,20 @@ fn spells() -> Vec<EffectDesc> {
                     emissive: 30_000.0,
                     additive: 1.0,
                     ..em("embers")
+                },
+                EmitterDesc {
+                    bursts: once(14),
+                    shape: EmitShape::Sphere {
+                        radius: 0.6,
+                        surface: false,
+                    },
+                    speed: [0.3, 1.0],
+                    acceleration: [0.0, 1.5, 0.0],
+                    drag: 1.0,
+                    lifetime: [0.7, 1.2],
+                    size: [1.4, 2.2],
+                    size_over_life: c(&[(0.0, 0.6), (1.0, 1.5)]),
+                    ..haze("haze", 1.0)
                 },
             ],
         )
@@ -1463,7 +1524,7 @@ fn impacts() -> Vec<EffectDesc> {
             ],
         ),
         EffectDesc {
-            light: light([1.0, 0.6, 0.3], 120_000.0, 30.0, 0.25, 1.0),
+            light: light([1.0, 0.6, 0.3], 60_000.0, 30.0, 0.25, 1.0),
             ..effect(
                 "explosion.large",
                 "A big explosion: fireball, sparks, debris, a shockwave and a smoke column rising \
@@ -1482,13 +1543,15 @@ fn impacts() -> Vec<EffectDesc> {
                         turbulence: 5.0,
                         turbulence_scale: 2.0,
                         lifetime: [0.5, 1.2],
-                        size: [1.2, 2.4],
-                        size_over_life: c(&[(0.0, 0.5), (0.25, 1.0), (1.0, 0.4)]),
-                        rotation_deg: [-30.0, 30.0],
-                        sprite: Sprite::Flame,
-                        color: flame_colors(),
-                        emissive: 16_000.0,
-                        additive: 0.85,
+                        size: [1.6, 3.0],
+                        size_over_life: c(&[(0.0, 0.45), (0.3, 1.0), (1.0, 1.2)]),
+                        rotation_deg: [-180.0, 180.0],
+                        spin_deg: [-40.0, 40.0],
+                        sprite: Sprite::Billow,
+                        color: billow_colors(),
+                        emissive: 12_000.0,
+                        additive: 0.3,
+                        soft: 0.5,
                         ..em("fireball")
                     },
                     EmitterDesc {
@@ -1526,6 +1589,20 @@ fn impacts() -> Vec<EffectDesc> {
                         additive: 1.0,
                         soft: 0.0,
                         ..em("shockwave")
+                    },
+                    EmitterDesc {
+                        bursts: once(24),
+                        shape: EmitShape::Sphere {
+                            radius: 1.2,
+                            surface: false,
+                        },
+                        speed: [0.5, 2.0],
+                        acceleration: [0.0, 2.0, 0.0],
+                        drag: 0.8,
+                        lifetime: [1.0, 1.8],
+                        size: [3.0, 4.5],
+                        size_over_life: c(&[(0.0, 0.5), (1.0, 1.6)]),
+                        ..haze("haze", 1.0)
                     },
                 ],
             )
@@ -1792,6 +1869,18 @@ fn misc() -> Vec<EffectDesc> {
                         size: [0.2, 0.3],
                         size_over_life: c(&[(0.0, 0.5), (1.0, 3.0)]),
                         ..smoke("smoke", 0.2, 0.2)
+                    },
+                    EmitterDesc {
+                        rate: 10.0,
+                        offset: [0.0, 0.35, 0.0],
+                        shape: EmitShape::Disc { radius: 0.1 },
+                        speed: [0.05, 0.15],
+                        velocity: [0.0, 0.8, 0.0],
+                        acceleration: [0.0, 0.5, 0.0],
+                        lifetime: [0.8, 1.2],
+                        size: [0.45, 0.65],
+                        size_over_life: c(&[(0.0, 0.8), (1.0, 1.6)]),
+                        ..haze("haze", 1.0)
                     },
                 ],
             )

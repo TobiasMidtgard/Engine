@@ -26,6 +26,7 @@ use engine_render::{
     ViewData,
 };
 
+use crate::effect::Sprite;
 use crate::emitter::{ParticleFrame, PoolRange, VfxSettings};
 use crate::gpu::{CHUNK, GpuEmitter, GpuParticle, GpuSim, GpuSpawn, GpuUpdate, RibbonVertex};
 use crate::trail::{Ribbons, build_ribbon};
@@ -101,6 +102,8 @@ pub struct ParticleFeature {
     /// Run the simulation in this frame's `compute` (false when re-rendering a frame).
     simulate: bool,
     soft: bool,
+    /// Some emitter this frame draws heat haze (needs the scene color copy).
+    haze: bool,
     skipped: u32,
     stats: FeatureStats,
 }
@@ -213,6 +216,16 @@ impl RenderFeature for ParticleFeature {
                     visibility: wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::Texture {
                         sample_type: wgpu::TextureSampleType::Depth,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
                         view_dimension: wgpu::TextureViewDimension::D2,
                         multisampled: false,
                     },
@@ -380,6 +393,7 @@ impl RenderFeature for ParticleFeature {
             return;
         }
         self.soft = settings.soft_particles;
+        self.haze = false;
 
         // Ribbons follow the camera every time the frame is drawn.
         self.ribbon_vertices.clear();
@@ -466,6 +480,13 @@ impl RenderFeature for ParticleFeature {
             e.shade[0] *= glow;
             if !self.soft {
                 e.shade[3] = 0.0;
+            }
+            if e.spin_look[2] == Sprite::Haze.code() {
+                if settings.heat_haze {
+                    self.haze = true;
+                } else {
+                    e.look[3] = 0.0;
+                }
             }
             self.emitters.push(e);
 
@@ -610,6 +631,10 @@ impl RenderFeature for ParticleFeature {
                         binding: 2,
                         resource: wgpu::BindingResource::TextureView(ctx.scene_depth_copy),
                     },
+                    wgpu::BindGroupEntry {
+                        binding: 3,
+                        resource: wgpu::BindingResource::TextureView(ctx.scene_color_copy),
+                    },
                 ],
             }));
         }
@@ -667,7 +692,7 @@ impl RenderFeature for ParticleFeature {
     }
 
     fn needs_scene_copy(&self) -> bool {
-        self.soft && !self.draws.is_empty()
+        (self.soft || self.haze) && !self.draws.is_empty()
     }
 
     fn stats(&self) -> FeatureStats {
