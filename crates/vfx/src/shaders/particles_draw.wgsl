@@ -196,9 +196,11 @@ fn fs_particle(in: VsOut) -> @location(0) vec4<f32> {
     var a = 0.0;
     var rgb = in.radiance;
     switch in.sprite {
-        case 1u: { // spark: a hot streak, brightest at the head
-            a = exp(-(c.x * c.x * 10.0)) * smoothstep(1.0, 0.6, abs(c.y)) * mix(0.5, 1.0, saturate(c.y * 0.5 + 0.5));
-            rgb *= 1.0 + exp(-c.x * c.x * 40.0);
+        case 1u: { // spark: a white-hot core in a glow of deeper color, brightest at the head
+            a = exp(-(c.x * c.x * 6.0)) * smoothstep(1.0, 0.6, abs(c.y)) * mix(0.5, 1.0, saturate(c.y * 0.5 + 0.5));
+            let lum = dot(rgb, vec3<f32>(0.2126, 0.7152, 0.0722));
+            let deep = max(vec3<f32>(lum) + (rgb - vec3<f32>(lum)) * 1.5, vec3<f32>(0.0)) * 0.6;
+            rgb = mix(deep, rgb * 2.0, exp(-c.x * c.x * 40.0));
         }
         case 2u: { // smoke: a billowing puff, brighter on its sun side
             let q = c * 1.7 + vec2<f32>(in.seed * 37.0, in.seed * 11.0) + vec2<f32>(0.0, in.age * 0.6);
