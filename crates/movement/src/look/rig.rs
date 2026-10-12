@@ -650,7 +650,8 @@ pub struct AnimInput {
     /// Normal of the wall being run on (character space) and the distance from the body's
     /// axis to it, m.
     pub wall: Option<(Vec3, f32)>,
-    /// The top of the ledge being mantled (character space) and whether still rising.
+    /// The top of the ledge being mantled or hung from (character space) and whether still
+    /// rising.
     pub ledge: Option<(Vec3, bool)>,
     /// Part of a dash-strike.
     pub dash_strike: bool,
@@ -870,6 +871,7 @@ struct Weights {
     air: f32,
     wall: f32,
     mantle: f32,
+    hang: f32,
     dash: f32,
     attack: f32,
     block: f32,
@@ -905,6 +907,8 @@ pub struct Animator {
     /// Last cut angle reached (for the recovery hold).
     cut_u: f32,
     ledge: Option<(Vec3, bool)>,
+    /// Hand-over-hand cycle while shimmying along a ledge, 0..1.
+    shimmy: f32,
     secs: f32,
     last: Option<Pose>,
 }
@@ -937,6 +941,7 @@ impl Animator {
             cut: None,
             cut_u: 0.0,
             ledge: None,
+            shimmy: 0.0,
             secs: 0.0,
             last: None,
         }
@@ -1022,6 +1027,10 @@ impl Animator {
         if input.ledge.is_some() {
             self.ledge = input.ledge;
         }
+        if input.mode == LocomotionMode::Climb {
+            // One hand-over-hand cycle per 0.6 m along the ledge.
+            self.shimmy = (self.shimmy + input.velocity.x * dt / 0.6).rem_euclid(1.0);
+        }
 
         // Hits and defeat.
         if input.hits_taken > self.prev_hits {
@@ -1098,6 +1107,7 @@ impl Animator {
         );
         ease(&mut w.wall, on(mode == M::WallRun), 11.0);
         ease(&mut w.mantle, on(mode == M::Mantle), 16.0);
+        ease(&mut w.hang, on(mode == M::Climb), 14.0);
         ease(&mut w.dash, on(mode == M::Dash), 20.0);
         let attacking = input.attack.is_some();
         let attack_target = match input.attack {
@@ -1151,6 +1161,12 @@ impl Animator {
             && let Some((top, rising)) = self.ledge
         {
             p.blend(&mantle(top, rising), w.mantle, Channels::Body);
+        }
+        if w.hang > 1e-3
+            && let Some((top, _)) = self.ledge
+        {
+            let sway = (self.shimmy * TAU).sin() * smooth(0.1, 0.8, input.velocity.x.abs());
+            p.blend(&hang(top, sway), w.hang, Channels::Body);
         }
         if w.dash > 1e-3 {
             p.blend(&dash(input.dash_strike), w.dash, Channels::Body);
@@ -1246,6 +1262,16 @@ impl Animator {
             && let Some((top, _)) = self.ledge
         {
             p.blend(&mantle_arms(top, torso), w.mantle, Channels::Arms);
+        }
+        if w.hang > 1e-3
+            && let Some((top, _)) = self.ledge
+        {
+            let moving = smooth(0.1, 0.8, input.velocity.x.abs());
+            p.blend(
+                &hang_arms(top, torso, self.shimmy, moving),
+                w.hang,
+                Channels::Arms,
+            );
         }
         if w.dash > 1e-3 {
             p.blend(&to_ground(dash_arms()), w.dash, Channels::Arms);
@@ -1593,6 +1619,38 @@ fn mantle(top: Vec3, rising: bool) -> Pose {
     p
 }
 
+/// Hanging from a ledge whose top is at `top` (character space): the body below the hands,
+/// legs loose with the toes against the wall, looking up at the edge. `sway` (−1..1) swings
+/// the hips side to side while shimmying.
+fn hang(top: Vec3, sway: f32) -> Pose {
+    let mut p = Pose::BIND;
+    let wall = top.z.min(-0.2);
+    p.pelvis = v3(sway * 0.04, top.y - 0.87, wall + 0.24);
+    p.pelvis_rot = rz(sway * 0.1);
+    p.spine = pitch(-0.06);
+    p.chest = pitch(-0.1);
+    p.neck = pitch(-0.1);
+    p.head = pitch(-0.3);
+    let ankle = p.pelvis.y - 0.8;
+    p.ankle = [
+        v3(
+            -0.11 + sway * 0.03,
+            ankle + 0.02 + sway.max(0.0) * 0.05,
+            wall + 0.14,
+        ),
+        v3(
+            0.12 + sway * 0.03,
+            ankle + 0.08 + (-sway).max(0.0) * 0.05,
+            wall + 0.12,
+        ),
+    ];
+    p.foot = [pitch(0.55), pitch(0.45)];
+    p.knee = [v3(-0.1, 0.1, -1.0), v3(0.1, 0.1, -1.0)];
+    p.body = rz(-sway * 0.04);
+    p.pivot = top - v3(0.0, 0.05, 0.0);
+    p
+}
+
 /// Dashing: a low forward lunge through the air.
 fn dash(strike: bool) -> Pose {
     let mut p = Pose::BIND;
@@ -1835,6 +1893,22 @@ fn mantle_arms(top: Vec3, torso: Xf) -> Pose {
     p
 }
 
+/// Both hands on the ledge whose top is at `top` (character space). While shimmying
+/// (`moving` 0..1) they go hand over hand along it through the `cycle` (0..1).
+fn hang_arms(top: Vec3, torso: Xf, cycle: f32, moving: f32) -> Pose {
+    let mut p = mantle_arms(top, torso);
+    let a = cycle * TAU;
+    let reach = |phase: f32| 0.07 * phase.sin() * moving;
+    let lift = |phase: f32| 0.03 * phase.cos().max(0.0) * moving;
+    p.sword.pos += v3(0.06 + reach(a), lift(a), 0.0);
+    p.hand_l.pos += v3(-0.06 + reach(a + PI), lift(a + PI), 0.0);
+    p.elbow = [
+        torso.rot * v3(-0.9, -0.1, 0.4),
+        torso.rot * v3(0.9, -0.1, 0.4),
+    ];
+    p
+}
+
 /// Dashing: the sword swept back, the free hand forward.
 fn dash_arms() -> Pose {
     let mut p = Pose::BIND;
@@ -2068,6 +2142,51 @@ mod tests {
         let local = sheath.inverse().point(tip);
         assert!((local.z + BLADE_LENGTH).abs() < 0.08, "{local}");
         assert!(local.x.abs() < 0.01 && local.y.abs() < 0.03, "{local}");
+    }
+
+    #[test]
+    fn hanging_puts_both_hands_on_the_ledge_and_the_body_below_it() {
+        // A 1.8 m capsule hanging: the top 2.1 m above its feet, the wall 0.39 m in front.
+        let top = v3(0.0, 2.1, -0.39);
+        for shimmy in [0.0, 1.5] {
+            let mut anim = Animator::new(Style::Pilot);
+            let input = AnimInput {
+                mode: LocomotionMode::Climb,
+                grounded: false,
+                ledge: Some((top, true)),
+                velocity: v3(shimmy, 0.0, 0.0),
+                ..Default::default()
+            };
+            // Settled into the hang, then through two shimmy cycles.
+            run(&mut anim, input, 0.6);
+            for _ in 0..50 {
+                let pose = anim.update(&input);
+                let bones = solve(&pose);
+                let hand_r = pose.sword.then(grip_r().inverse()).pos;
+                for (wrist, target) in [
+                    (bones[Bone::HandR.index()].pos, hand_r),
+                    (bones[Bone::HandL.index()].pos, pose.hand_l.pos),
+                ] {
+                    assert!(
+                        wrist.distance(target) < 0.03,
+                        "{wrist} can't reach {target}"
+                    );
+                    assert!((wrist.y - top.y).abs() < 0.12, "hand at {wrist}");
+                    assert!(wrist.z > top.z - 0.08, "hand inside the wall: {wrist}");
+                }
+                for b in [
+                    Bone::Pelvis,
+                    Bone::Chest,
+                    Bone::Head,
+                    Bone::FootL,
+                    Bone::FootR,
+                ] {
+                    let p = bones[b.index()].pos;
+                    assert!(p.z > top.z - 0.02, "{b:?} inside the wall: {p}");
+                    assert!(p.y < top.y, "{b:?} above the ledge: {p}");
+                }
+            }
+        }
     }
 
     #[test]

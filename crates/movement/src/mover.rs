@@ -49,6 +49,15 @@ pub struct Mantle {
     pub exit_speed: f32,
 }
 
+/// Hanging from a ledge.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct Hang {
+    /// The ledge's edge in front of the hands: the wall's face at the top's height.
+    pub top: DVec3,
+    /// Out of the wall, horizontal unit.
+    pub normal: Vec3,
+}
+
 /// Ask the movement module to dash. Combat uses this for dash-strikes; gameplay can use it
 /// for scripted dashes. Consumed on the next fixed step.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -109,6 +118,8 @@ pub struct Mover {
     pub wall: Option<WallContact>,
     pub dash: Option<Dash>,
     pub mantle: Option<Mantle>,
+    /// The ledge being hung from (mode [`LocomotionMode::Climb`]).
+    pub hang: Option<Hang>,
     /// The capsule is shrunk (crouching or sliding).
     pub crouched: bool,
     /// Remaining dodge invulnerability, s (own time).
@@ -126,6 +137,8 @@ pub struct Mover {
     pub(crate) coyote: f32,
     pub(crate) jump_buffer: f32,
     pub(crate) slide_cooldown: f32,
+    /// No ledge grabs until this runs out (after letting go or kicking off), s.
+    pub(crate) grab_cooldown: f32,
     pub(crate) last_wall: Option<WallContact>,
     pub(crate) stand_height: f32,
     pub(crate) stride: f32,
@@ -157,6 +170,7 @@ impl Default for Mover {
             wall: None,
             dash: None,
             mantle: None,
+            hang: None,
             crouched: false,
             evade_secs: 0.0,
             disabled: false,
@@ -166,6 +180,7 @@ impl Default for Mover {
             coyote: 0.0,
             jump_buffer: 0.0,
             slide_cooldown: 0.0,
+            grab_cooldown: 0.0,
             last_wall: None,
             stand_height: 0.0,
             stride: 0.0,
@@ -219,12 +234,13 @@ impl Mover {
         }
     }
 
-    /// Teleport bookkeeping: clear velocity and any dash, mantle or wall-run.
+    /// Teleport bookkeeping: clear velocity and any dash, mantle, ledge hang or wall-run.
     pub fn reset_motion(&mut self) {
         self.velocity = Vec3::ZERO;
         self.knockback = Vec3::ZERO;
         self.dash = None;
         self.mantle = None;
+        self.hang = None;
         self.wall = None;
         self.last_wall = None;
         self.pending_dash = None;

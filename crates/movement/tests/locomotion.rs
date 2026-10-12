@@ -1,6 +1,6 @@
 //! Locomotion against the physics contract (run here by the stand-in character physics):
-//! sprint, jump, double jump, slide under a bar, wall-run and wall-jump, mantle, dash, and
-//! characters running on their own clocks in slow motion.
+//! sprint, jump, double jump, slide under a bar, wall-run and wall-jump, mantle, ledge hang,
+//! dash, and characters running on their own clocks in slow motion.
 
 mod support;
 
@@ -241,6 +241,101 @@ fn mantles_onto_a_ledge() {
     let m = mover(&app, c);
     assert!(m.grounded && p.x > 5.5, "standing on top: {p:?}");
     assert!((p.y - (1.6 + 0.9)).abs() < 0.05, "{p:?}");
+}
+
+/// A 3.6 m wall whose face is at x = 1.0, 8 m wide (z from −4 to 4), and a pilot in front of
+/// it that jumps at it and catches its top.
+fn hang_from_a_high_wall(app: &mut App) -> Entity {
+    block(app, DVec3::new(3.0, 1.8, 0.0), Vec3::new(4.0, 3.6, 8.0));
+    let c = character(app, DVec3::new(0.0, 0.9, 0.0), MovementProfile::pilot());
+    run(app, 0.1);
+    intent(app, c, |i| i.direction = Vec3::X);
+    tap_jump(app, c);
+    run_until(app, 1.5, |w| {
+        w.get::<Mover>(c).unwrap().mode == LocomotionMode::Climb
+    });
+    assert_eq!(mover(app, c).mode, LocomotionMode::Climb);
+    assert_eq!(triggered(app, c, "ledge_grab"), 1);
+    intent(app, c, |i| i.direction = Vec3::ZERO);
+    run(app, 0.4);
+    c
+}
+
+#[test]
+fn catches_a_ledge_too_high_to_mantle_and_shimmies_along_it() {
+    let mut app = app();
+    let c = hang_from_a_high_wall(&mut app);
+    // Hanging still: arms' length under the top, against the wall, facing it.
+    let p = pos(&app, c);
+    let m = mover(&app, c);
+    assert_eq!(m.mode, LocomotionMode::Climb);
+    assert!((p.y - (3.6 - 0.9 - 0.3)).abs() < 0.05, "{p:?}");
+    assert!((p.x - (1.0 - 0.35 - 0.04)).abs() < 0.05, "{p:?}");
+    assert!(m.facing.distance(Vec3::X) < 0.05, "{}", m.facing);
+    assert!(m.velocity.length() < 0.2, "{}", m.velocity);
+
+    // Shimmy toward +Z: hand over hand along the top, at the same height.
+    intent(&mut app, c, |i| i.direction = Vec3::Z);
+    run(&mut app, 1.0);
+    let q = pos(&app, c);
+    assert_eq!(mover(&app, c).mode, LocomotionMode::Climb);
+    assert!(q.z - p.z > 1.5, "shimmied {:.2} m", q.z - p.z);
+    assert!((q.y - p.y).abs() < 0.05, "{q:?}");
+    // ...and stops at the end of the wall instead of falling off it.
+    run(&mut app, 3.0);
+    let end = pos(&app, c);
+    assert_eq!(mover(&app, c).mode, LocomotionMode::Climb);
+    assert!(end.z > 3.0 && end.z < 4.0, "{end:?}");
+
+    // Jump: climbs up and stands on top.
+    intent(&mut app, c, |i| i.direction = Vec3::ZERO);
+    tap_jump(&mut app, c);
+    assert_eq!(mover(&app, c).mode, LocomotionMode::Mantle);
+    run(&mut app, 1.5);
+    let top = pos(&app, c);
+    let m = mover(&app, c);
+    assert!(m.grounded && top.x > 1.2, "{top:?}");
+    assert!((top.y - (3.6 + 0.9)).abs() < 0.05, "{top:?}");
+}
+
+#[test]
+fn holding_toward_the_wall_climbs_up() {
+    let mut app = app();
+    let c = hang_from_a_high_wall(&mut app);
+    intent(&mut app, c, |i| i.direction = Vec3::X);
+    let secs = run_until(&mut app, 2.0, |w| {
+        w.get::<Mover>(c).unwrap().grounded && w.get::<Transform>(c).unwrap().translation.y > 4.4
+    });
+    let p = pos(&app, c);
+    assert!(secs < 1.2 && p.x > 1.2, "on top after {secs:.2} s at {p:?}");
+}
+
+#[test]
+fn lets_go_of_a_ledge_or_kicks_off_it() {
+    let mut app = app();
+    let c = hang_from_a_high_wall(&mut app);
+    // Crouch: drops to the ground and doesn't catch the ledge again on the way down.
+    intent(&mut app, c, |i| i.crouch = true);
+    app.update();
+    intent(&mut app, c, |i| i.crouch = false);
+    assert_eq!(mover(&app, c).mode, LocomotionMode::Air);
+    run_until(&mut app, 2.0, |w| w.get::<Mover>(c).unwrap().grounded);
+    assert!(mover(&app, c).grounded);
+    assert_eq!(triggered(&app, c, "ledge_grab"), 1);
+
+    // Back up, then jump while pulling away from the wall: a kick off it.
+    intent(&mut app, c, |i| i.direction = Vec3::X);
+    tap_jump(&mut app, c);
+    run_until(&mut app, 1.5, |w| {
+        w.get::<Mover>(c).unwrap().mode == LocomotionMode::Climb
+    });
+    assert_eq!(mover(&app, c).mode, LocomotionMode::Climb);
+    intent(&mut app, c, |i| i.direction = Vec3::NEG_X);
+    tap_jump(&mut app, c);
+    let m = mover(&app, c);
+    assert_eq!(m.mode, LocomotionMode::Air);
+    assert!(m.velocity.x < -4.0 && m.velocity.y > 3.0, "{}", m.velocity);
+    assert_eq!(triggered(&app, c, "wall_jump"), 1);
 }
 
 #[test]

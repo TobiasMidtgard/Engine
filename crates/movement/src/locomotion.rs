@@ -3,7 +3,7 @@
 //! Runs in `FixedUpdate` / `SimSet::Gameplay`, before physics. It reads what the physics
 //! backend reported last step ([`CharacterState`]: ground, walls, ceiling), probes the world
 //! with [`PhysicsQueries`] (walls to run on, ledges to climb), picks a mode (run, sprint,
-//! slide, air, wall-run, mantle, dash) and writes the velocity the character controller should
+//! slide, air, wall-run, mantle, ledge hang, dash) and writes the velocity the character controller should
 //! move with ([`CharacterMove`]). Gravity is applied here, as the physics contract asks.
 //!
 //! Every character runs on its own clock: `dt = time.delta_for(LocalTimeScale)`, so slow
@@ -21,7 +21,7 @@ use engine_world::physics::{
 };
 use engine_world::{ContactKind, Gravity, Ground, GroundContact, NoiseEvent};
 
-use crate::mover::{Dash, DashRequest, Mantle, Mover, WallContact, flat, move_towards};
+use crate::mover::{Dash, DashRequest, Hang, Mantle, Mover, WallContact, flat, move_towards};
 use crate::platform::{self, Deck};
 use crate::profile::MovementProfile;
 
@@ -33,6 +33,14 @@ const GROUND_STICK: f32 = 0.5;
 const WALL_STICK: f32 = 1.5;
 /// Safety limit on a mantle, s.
 const MANTLE_MAX_SECS: f32 = 1.2;
+/// Hanging, the ledge's top is this far above the top of the capsule (arms stretched), m.
+const HANG_REACH: f32 = 0.3;
+/// Gap between the capsule and the wall while hanging, m.
+const HANG_GAP: f32 = 0.04;
+/// Fastest pull toward the hanging position after a catch, m/s.
+const HANG_PULL: f32 = 5.0;
+/// Holding toward the wall this long while hanging climbs up, s.
+const HANG_CLIMB_HOLD: f32 = 0.3;
 
 /// Messages written by the step.
 #[derive(SystemParam)]
@@ -91,6 +99,7 @@ impl Probe<'_> {
 }
 
 /// Everything about one character the step needs, gathered once.
+#[derive(Clone, Copy)]
 struct Body {
     entity: Entity,
     pos: DVec3,
@@ -214,21 +223,22 @@ pub(crate) fn step_movers(
 
         let v = step_one(&mut m, p, intent, &state, &body, &probe, &mut out, dt);
 
-        // Facing: combat target, then where the intent looks, then the motion.
-        let face = m
-            .influence
-            .face
-            .or(intent.look)
-            .map(|l| flat(l, up))
-            .filter(|l| l.length() > 0.1)
-            .or_else(|| match m.mode {
-                LocomotionMode::Dash => m.dash.map(|d| flat(d.dir, up)),
-                LocomotionMode::Mantle => m.mantle.map(|mt| mt.forward),
-                _ => {
-                    let h = flat(v, up);
-                    (h.length() > 0.5).then_some(h)
-                }
-            });
+        // Facing: the wall hung from, the combat target, where the intent looks, the motion.
+        let face = m.hang.map(|h| -h.normal).or_else(|| {
+            m.influence
+                .face
+                .or(intent.look)
+                .map(|l| flat(l, up))
+                .filter(|l| l.length() > 0.1)
+                .or_else(|| match m.mode {
+                    LocomotionMode::Dash => m.dash.map(|d| flat(d.dir, up)),
+                    LocomotionMode::Mantle => m.mantle.map(|mt| mt.forward),
+                    _ => {
+                        let h = flat(v, up);
+                        (h.length() > 0.5).then_some(h)
+                    }
+                })
+        });
         if let Some(f) = face.and_then(|f| f.try_normalize()) {
             let snap = matches!(m.mode, LocomotionMode::Dash) || m.influence.face.is_some();
             m.facing = if snap {
@@ -355,6 +365,7 @@ fn step_one(
     let dash_pressed = intent.dash_to.is_some() && !m.prev_dash;
     m.prev_dash = intent.dash_to.is_some();
     m.slide_cooldown = (m.slide_cooldown - dt).max(0.0);
+    m.grab_cooldown = (m.grab_cooldown - dt).max(0.0);
     m.evade_secs = (m.evade_secs - dt).max(0.0);
     m.dash_charges =
         (m.dash_charges + dt / p.dash_recharge_secs.max(0.01)).min(p.dash_charges as f32);
@@ -373,6 +384,7 @@ fn step_one(
     if m.disabled {
         m.dash = None;
         m.mantle = None;
+        m.hang = None;
         m.wall = None;
         let vh = flat(v, up);
         let vv = v.dot(up);
@@ -404,6 +416,7 @@ fn step_one(
     });
     if let Some(req) = request
         && m.mantle.is_none()
+        && m.hang.is_none()
         && m.dash_charges >= 1.0
     {
         start_dash(m, p, req, b, v, out);
@@ -456,6 +469,26 @@ fn step_one(
         m.mantle = None;
         m.set_mode(LocomotionMode::Run);
         return mt.forward * mt.exit_speed - up * GROUND_STICK;
+    }
+
+    // ---- hanging from a ledge
+    if let Some(h) = m.hang {
+        if !grounded {
+            return hang(
+                m,
+                p,
+                b,
+                probe,
+                h,
+                v,
+                wish,
+                jump_pressed,
+                crouch_pressed,
+                dt,
+                out,
+            );
+        }
+        m.hang = None;
     }
 
     if grounded {
@@ -562,6 +595,18 @@ fn step_one(
         let lift = v.dot(up).clamp(0.0, 3.0).max(p.wallrun_lift);
         return along + up * lift - wall.normal * WALL_STICK;
     }
+    // Too slow along the wall to run on it, or straight at it: catch its top.
+    if p.ledge_grab
+        && m.grab_cooldown <= 0.0
+        && let Some(h) = find_hang(p, b, probe, v, wish)
+    {
+        m.hang = Some(h);
+        m.set_mode(LocomotionMode::Climb);
+        m.air_jumps_left = p.air_jumps;
+        out.trigger(b.entity, "ledge_grab");
+        out.noise(b.entity, b.pos, 3.0);
+        return hang_pull(b, &h, h.top, dt);
+    }
 
     // Air control (accelerates only up to `air_speed` along the stick: momentum is never lost).
     let mut vh = flat(v, up);
@@ -617,6 +662,7 @@ fn start_dash(
     m.evade_secs = if req.strike { 0.0 } else { p.dash_iframe_secs };
     m.wall = None;
     m.mantle = None;
+    m.hang = None;
     m.set_mode(LocomotionMode::Dash);
     m.mode_secs = 0.0;
     out.trigger(b.entity, "dash");
@@ -907,15 +953,7 @@ fn find_ledge(p: &MovementProfile, b: &Body, probe: &Probe, v: Vec3, wish: Vec3)
     if ledge < p.mantle_min_height || ledge > p.mantle_max_height {
         return None;
     }
-    // Room to rise (head) and to stand on the ledge.
-    if probe
-        .ray(b.pos, up, b.height * 0.5 + ledge + 0.05)
-        .is_some()
-    {
-        return None;
-    }
-    let stand = feet + upd * (ledge as f64 + b.radius as f64 + 0.3);
-    if probe.ray(stand, inward, b.radius + 0.9).is_some() {
+    if !room_to_climb(b, probe, ledge, inward) {
         return None;
     }
     let edge = hit.point + upd * (down.point - hit.point).dot(upd);
@@ -925,6 +963,173 @@ fn find_ledge(p: &MovementProfile, b: &Body, probe: &Probe, v: Vec3, wish: Vec3)
         rising: true,
         exit_speed: vh.length().max(p.run_speed * 0.8),
     })
+}
+
+/// Room to rise `ledge` meters (head) and then to stand on the ledge, going `inward`.
+fn room_to_climb(b: &Body, probe: &Probe, ledge: f32, inward: Vec3) -> bool {
+    let up = b.up;
+    if probe
+        .ray(b.pos, up, b.height * 0.5 + ledge + 0.05)
+        .is_some()
+    {
+        return false;
+    }
+    let stand = b.feet() + (up * (ledge + b.radius + 0.3)).as_dvec3();
+    probe.ray(stand, inward, b.radius + 0.9).is_none()
+}
+
+/// The top of a wall whose face is at `face` (normal `normal`, out of the wall): where the
+/// face meets the top, if the top is walkable, clear above, and between `low` and `high`
+/// meters above the feet.
+fn ledge_top(
+    b: &Body,
+    probe: &Probe,
+    face: DVec3,
+    normal: Vec3,
+    low: f32,
+    high: f32,
+) -> Option<DVec3> {
+    let upd = b.up.as_dvec3();
+    let feet = b.feet();
+    let over = face - (normal * 0.25).as_dvec3();
+    let from = over + upd * ((feet - over).dot(upd) + high as f64 + 0.15);
+    let down = probe.ray(from, -b.up, high - low + 0.15)?;
+    if down.normal.dot(b.up) < 0.7 || down.distance < 0.01 {
+        return None;
+    }
+    let height = (down.point - feet).dot(upd) as f32;
+    (low..=high)
+        .contains(&height)
+        .then(|| face + upd * (down.point - face).dot(upd))
+}
+
+/// The wall in front of the chest along `dir`, if it is a wall (not a slope or a character).
+fn chest_wall(b: &Body, probe: &Probe, dir: Vec3) -> Option<(DVec3, Vec3)> {
+    let chest = b.pos + (b.up * (b.height * 0.25)).as_dvec3();
+    let hit = probe.ray(chest, dir, b.radius + 0.45)?;
+    if hit.normal.dot(b.up).abs() >= WALL_MAX_UP || hit.normal.dot(dir) > -0.5 {
+        return None;
+    }
+    Some((hit.point, flat(hit.normal, b.up).normalize_or_zero()))
+}
+
+/// A ledge too high to climb onto directly, in reach of the hands: near the top of a jump or
+/// falling, moving or pushing toward the wall.
+fn find_hang(p: &MovementProfile, b: &Body, probe: &Probe, v: Vec3, wish: Vec3) -> Option<Hang> {
+    let up = b.up;
+    if v.dot(up) > 1.5 {
+        return None;
+    }
+    let vh = flat(v, up);
+    let dir = wish
+        .try_normalize()
+        .filter(|_| wish.length() > 0.3)
+        .or_else(|| vh.try_normalize().filter(|_| vh.length() > 0.5))?;
+    let (face, normal) = chest_wall(b, probe, dir)?;
+    let low = p.mantle_max_height.min(p.ledge_grab_max_height);
+    let top = ledge_top(b, probe, face, normal, low, p.ledge_grab_max_height)?;
+    Some(Hang { top, normal })
+}
+
+/// Velocity toward the hanging position under `top` (sideways is left free).
+fn hang_pull(b: &Body, h: &Hang, top: DVec3, dt: f32) -> Vec3 {
+    let hold = top - (b.up * (b.height * 0.5 + HANG_REACH)).as_dvec3()
+        + (h.normal * (b.radius + HANG_GAP)).as_dvec3();
+    let side = b.up.cross(h.normal);
+    let gap = (hold - b.pos).as_vec3();
+    let gap = gap - side * gap.dot(side);
+    (gap / dt.max(1e-4)).clamp_length_max(HANG_PULL)
+}
+
+/// One step hanging from a ledge: shimmy along it, climb up, kick off or let go.
+#[allow(clippy::too_many_arguments)]
+fn hang(
+    m: &mut Mover,
+    p: &MovementProfile,
+    b: &Body,
+    probe: &Probe,
+    h: Hang,
+    v: Vec3,
+    wish: Vec3,
+    jump_pressed: bool,
+    crouch_pressed: bool,
+    dt: f32,
+    out: &mut Outputs,
+) -> Vec3 {
+    let up = b.up;
+    let feet = b.feet();
+    let let_go = |m: &mut Mover, cooldown: f32| {
+        m.hang = None;
+        m.grab_cooldown = cooldown;
+        m.set_mode(LocomotionMode::Air);
+    };
+    // Still there? (Shimmied off its end, or it broke.)
+    let held = (h.top - feet).dot(up.as_dvec3()) as f32;
+    let Some((face, normal)) =
+        chest_wall(b, probe, -h.normal).filter(|(_, n)| n.dot(h.normal) > 0.8)
+    else {
+        let_go(m, 0.3);
+        return flat(v, up);
+    };
+    let Some(top) = ledge_top(b, probe, face, normal, held - 0.35, held + 0.35) else {
+        let_go(m, 0.3);
+        return flat(v, up);
+    };
+    let h = Hang { top, normal };
+    m.hang = Some(h);
+    let right = up.cross(normal);
+    let toward = wish.dot(-normal);
+    let side = wish.dot(right);
+
+    if crouch_pressed {
+        let_go(m, 0.5);
+        out.trigger(b.entity, "let_go");
+        return normal * 1.0;
+    }
+    if jump_pressed && toward < -0.3 {
+        // Kick off the wall, steered by the stick.
+        let_go(m, 0.4);
+        m.jump_buffer = 0.0;
+        out.trigger(b.entity, "wall_jump");
+        out.noise(b.entity, b.pos, 6.0);
+        let away = normal * p.wall_jump_push + right * (side * p.run_speed * 0.6);
+        return away + up * MovementProfile::launch_speed(p.wall_jump_height, b.g);
+    }
+    let ledge = (top - feet).dot(up.as_dvec3()) as f32;
+    let climb = (jump_pressed || (toward > 0.5 && m.mode_secs >= HANG_CLIMB_HOLD))
+        && room_to_climb(b, probe, ledge, -normal);
+    if climb {
+        m.hang = None;
+        m.jump_buffer = 0.0;
+        m.mantle = Some(Mantle {
+            top,
+            forward: -normal,
+            rising: true,
+            exit_speed: p.run_speed * 0.5,
+        });
+        m.set_mode(LocomotionMode::Mantle);
+        out.trigger(b.entity, "mantle");
+        return up * p.mantle_speed;
+    }
+
+    // Shimmy, as long as the ledge goes on that way.
+    let mut along = Vec3::ZERO;
+    if side.abs() > 0.2 {
+        let dir = right * side.signum();
+        let ahead = Body {
+            pos: b.pos + (dir * (b.radius + 0.15)).as_dvec3(),
+            ..*b
+        };
+        let continues = chest_wall(&ahead, probe, -normal)
+            .filter(|(_, n)| n.dot(normal) > 0.8)
+            .and_then(|(f, n)| ledge_top(&ahead, probe, f, n, ledge - 0.3, ledge + 0.3))
+            .is_some();
+        if continues {
+            along = right * (side * p.shimmy_speed);
+        }
+    }
+    m.set_mode(LocomotionMode::Climb);
+    hang_pull(b, &h, top, dt) + along
 }
 
 fn resize_capsule(
@@ -1060,6 +1265,7 @@ fn write_params(m: &Mover, params: &mut AnimationParams, up: Vec3) {
         "effort",
         match m.mode {
             LocomotionMode::Dash | LocomotionMode::Mantle => 1.0,
+            LocomotionMode::Climb => 0.7,
             LocomotionMode::Sprint | LocomotionMode::WallRun => 0.8,
             LocomotionMode::Run => 0.5,
             _ => 0.2,

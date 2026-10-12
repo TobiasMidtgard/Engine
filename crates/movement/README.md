@@ -6,7 +6,9 @@ character's own speed and reactions.
 - **Locomotion**: run, sprint, crouch, slide (with a speed boost and slide-hops), jump, double
   jump, coyote time and jump buffering, air strafing that never loses momentum, wall-running
   (with a gravity curve and a time limit), wall-jumps, mantling onto ledges (also straight out
-  of a wall-run), and dashes with charges and a dodge window.
+  of a wall-run), ledge hangs (catch a ledge too high to vault, shimmy along it, climb up with
+  jump or by holding toward the wall, kick off it, or let go with crouch), and dashes with
+  charges and a dodge window.
 - **Combat movement**: attacks with windup, strike and recovery; dash-strikes that close
   several meters in a blink; blocks, dodges (i-frames), counters on a recovering attacker,
   stagger and knockback. Every strike is logged (`CombatLog`).
@@ -79,6 +81,8 @@ course zone.
 
 - **Parkour course**: a runner loops sprint → slide under a bar → wall-run → wall-jump →
   wall-run → mantle onto a tower → jump and double jump off it.
+- **Ledge station** (between the course and the ring): a climber jumps at a 3.6 m block, too
+  high to vault, catches its top, shimmies along it, climbs up and walks off the far end.
 - **Duel ring**, three rounds on a loop (only while a camera is within
   `DuelDirector::watch_radius`, because slow motion is world-wide):
   1. *Blink*: an elite (speed 2.5) dash-strikes a level 1 player, who is hit before a human
@@ -108,7 +112,7 @@ Writes: `CharacterMove` (velocity in the character's own seconds) and the capsul
 velocity in world seconds, blocking, attacking, vulnerable, dash stamina);
 `AnimationParams` (`speed`, `direction`, `lean`, `crouch`, `effort`, `airborne`,
 `vertical_speed`, `wallrun`) and `AnimationTrigger` (`jump`, `double_jump`, `land`, `slide`,
-`wallrun`, `wall_jump`, `mantle`, `dash`, `attack_light`, `attack_heavy`, `block`,
+`wallrun`, `wall_jump`, `mantle`, `ledge_grab`, `let_go`, `dash`, `attack_light`, `attack_heavy`, `block`,
 `hit_react`, `death`); `AttackEvent` (when an attack starts, with the world seconds until it lands);
 `DamageEvent` (strikes); `Ragdoll::weight` on defeat; `GroundContact` (landings, footsteps,
 slides, wall-run steps); `NoiseEvent`; `LocalTimeScale` (from `Tempo`); `TimeDilation`
@@ -177,16 +181,18 @@ API functions: `movement.status`, `movement.set_tempo` (`{"entity": "Player", "l
 (`{"on": true}`: play mode), `movement.lock_on` (`{"target": "Elite" | "auto" | null}`),
 `movement.duel`
 (`{"round": "Blink" | "Focus" | "Pack" | null}`: restart the duel on that round and keep
-replaying it, or `null` to go back to cycling; tour stops use it to catch a chosen moment).
+replaying it, or `null` to go back to cycling; tour stops use it to catch a chosen moment),
+`movement.climber` (restart the ledge climber's loop).
 
 ## Tests
 
 `cargo test -p engine_movement`: unit tests per file; `tests/locomotion.rs` (sprint, jump and
 double jump heights, slide under a bar that blocks running, wall-run and wall-jump, mantle,
-dash, characters on their own clocks in slow motion, the stand-in stepping aside, bodies from
+catching a ledge too high to vault, shimmying to its end, climbing up, letting go and kicking
+off, dash, characters on their own clocks in slow motion, the stand-in stepping aside, bodies from
 other modules being moved);
 `tests/demo.rs` (each duel round plays out as described, the rounds cycle, the runner
-finishes the course, the duel waits without a camera, `movement.duel` restarts a chosen round,
+finishes the course, the climber catches the ledge, shimmies, climbs up and drops off, the duel waits without a camera, `movement.duel` restarts a chosen round,
 the demo's collider boxes stay the same under the new art);
 `tests/play.rs` (play mode puts a pilot in front of the camera and follows it, a locked-on
 pilot dash-strikes its target past a closer enemy, the lock moves on when its target falls);
@@ -197,5 +203,6 @@ screenshot with the slow-motion effect; skipped without a GPU).
 
 ## Not done yet
 
-- Ledge hang: mantling is a vault onto the top; there is no hang-and-climb yet.
+- Ledge hangs on moving bodies, and corners (shimmying stops at the end of a straight
+  edge).
 - Wall-running on moving walls (only standing on a moving body carries a character).
