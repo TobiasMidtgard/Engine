@@ -22,6 +22,7 @@ use std::sync::Mutex;
 use crossbeam_channel::{Receiver, Sender, unbounded};
 use engine_core::math::{DVec3, Vec3};
 use engine_core::prelude::*;
+use engine_world::{FollowsWorldShift, WorldShift, WorldShiftAppExt};
 
 pub use footstep::{FootstepSound, FootstepSurfaces, Step, SurfaceSound};
 pub use mixer::{Bus, Clock, Meters, Sound, Spatial, VoiceId};
@@ -50,11 +51,12 @@ impl Plugin for AudioPlugin {
             .init_resource::<FootstepSurfaces>()
             .insert_resource(Audio::new())
             .add_message::<AudioCue>()
+            .shift_messages::<AudioCue>()
             .register_resource::<AudioSettings>(
                 "Audio settings: output (Auto/Device/Offline/Off), master_db, speed_of_sound (m/s), \
                  doppler (0..1), air_absorption (/m), slow_motion_pitch (0..1, how much time \
                  dilation lowers pitch), min_pitch, slow_motion_darken (0..1), space_is_silent, \
-                 atmosphere_height_m, footstep_distance_m, max_voices, weather_ambience, \
+                 footstep_distance_m, max_voices, weather_ambience, \
                  occlusion (walls muffle sounds).",
             )
             .register_resource::<AudioMix>(
@@ -86,6 +88,7 @@ impl Plugin for AudioPlugin {
                     systems::weather_ambience,
                     fires::fire_ambience,
                     water::water_ambience,
+                    vehicle::vehicle_sounds,
                     systems::reverb_zones,
                     systems::follow_emitters,
                     systems::occlusion,
@@ -125,7 +128,9 @@ pub struct AudioSettings {
     /// Read when the output starts.
     pub output: AudioOutput,
     pub master_db: f32,
-    /// m/s. Distant sounds start late by distance / speed of sound.
+    /// m/s in sea-level air. Distant sounds start late by distance / speed of sound; the
+    /// actual speed follows the air around the listener (`Env::air`: warmer air and other
+    /// planets' air carry sound at other speeds) in proportion to this.
     pub speed_of_sound: f32,
     /// 0 = no doppler shift, 1 = physical.
     pub doppler: f32,
@@ -138,10 +143,9 @@ pub struct AudioSettings {
     pub min_pitch: f32,
     /// How much slow motion muffles the world and widens the reverb, 0..1.
     pub slow_motion_darken: f32,
-    /// No air, no sound: world and ambience fade out with altitude and vanish in space.
+    /// No air, no sound: world and ambience fade with the air's density (`Env::air`, per
+    /// planet) and vanish in space.
     pub space_is_silent: bool,
-    /// Scale height of the atmosphere for that fade, meters (Earth ≈ 8500).
-    pub atmosphere_height_m: f32,
     /// Footsteps farther than this from the listener are not played, meters.
     pub footstep_distance_m: f32,
     /// Most voices at once; new sounds beyond it are skipped.
@@ -156,6 +160,9 @@ pub struct AudioSettings {
     /// Play waves lapping at nearby shores and streams babbling (from the water module's
     /// `WaterQuery`).
     pub water: bool,
+    /// Play engines and tyres of vehicles (`EngineState`, `WheelContacts` from the vehicles
+    /// module).
+    pub vehicles: bool,
 }
 
 impl Default for AudioSettings {
@@ -170,13 +177,13 @@ impl Default for AudioSettings {
             min_pitch: 0.35,
             slow_motion_darken: 0.7,
             space_is_silent: true,
-            atmosphere_height_m: 8_500.0,
             footstep_distance_m: 60.0,
             max_voices: 96,
             weather_ambience: true,
             occlusion: true,
             fires: true,
             water: true,
+            vehicles: true,
         }
     }
 }
@@ -305,6 +312,12 @@ pub struct AudioCue {
     pub name: String,
     /// Rough loudness at 1 m, 0..1.
     pub loudness: f32,
+}
+
+impl FollowsWorldShift for AudioCue {
+    fn follow(&mut self, s: &WorldShift) {
+        self.position = self.position.map(|p| s.point(p));
+    }
 }
 
 /// How to play a sound. Start from [`PlayOptions::at`] (3D) or [`PlayOptions::ui`] (2D).
@@ -479,6 +492,8 @@ pub struct Audio {
     max_voices: usize,
     listener: DVec3,
     listener_velocity: Vec3,
+    /// Speed of sound around the listener, m/s.
+    speed_of_sound: f32,
     /// The entity the ears are on (its own colliders don't block sound).
     listener_entity: Option<Entity>,
     /// Mixer sample to start new sounds at (offline output only).
@@ -506,6 +521,7 @@ impl Audio {
             max_voices: 96,
             listener: DVec3::ZERO,
             listener_velocity: Vec3::ZERO,
+            speed_of_sound: 343.0,
             listener_entity: None,
             start_sample: None,
             meters: Meters::default(),
@@ -590,6 +606,12 @@ impl Audio {
 
     pub fn listener_position(&self) -> DVec3 {
         self.listener
+    }
+
+    /// How fast sound travels around the listener now, m/s (the air there, scaled by
+    /// [`AudioSettings::speed_of_sound`]).
+    pub fn speed_of_sound(&self) -> f32 {
+        self.speed_of_sound
     }
 
     /// Latest level meters (updated every 50 ms of audio).

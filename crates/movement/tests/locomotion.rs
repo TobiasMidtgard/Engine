@@ -335,3 +335,43 @@ fn the_stand_in_physics_steps_aside_for_a_physics_module() {
         .unwrap();
     assert!(mv.velocity.x > 1.0);
 }
+
+#[test]
+fn bodies_from_other_modules_are_moved_too() {
+    // Movement claims the locomotion backend, so it moves any character with a MoveIntent and a
+    // capsule, such as an NPC spawned by another module without a MovementProfile.
+    let mut app = app();
+    let npc = app
+        .world
+        .spawn((
+            Transform::from_xyz(0.0, 1.0, 0.0),
+            CharacterController {
+                radius: 0.5,
+                height: 2.0,
+                ..Default::default()
+            },
+            MoveIntent {
+                direction: Vec3::X,
+                ..Default::default()
+            },
+        ))
+        .id();
+    // No capsule: not a character, left alone.
+    let bird = app
+        .world
+        .spawn((Transform::from_xyz(0.0, 5.0, 4.0), MoveIntent::default()))
+        .id();
+    run(&mut app, 2.0);
+    let profile = *app.world.get::<MovementProfile>(npc).expect("adopted");
+    assert_eq!(profile, MovementProfile::human());
+    assert_eq!(
+        app.world.get::<CharacterController>(npc).unwrap().radius,
+        0.5,
+        "keeps its own capsule"
+    );
+    assert!(mover(&app, npc).grounded);
+    let x = pos(&app, npc).x;
+    assert!(x > 6.0, "walked {x:.2} m in 2 s");
+    assert!(app.world.get::<Mover>(bird).is_none());
+    assert_eq!(pos(&app, bird), DVec3::new(0.0, 5.0, 4.0));
+}

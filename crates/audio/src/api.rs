@@ -7,7 +7,7 @@ use serde_json::{Value, json};
 
 use crate::effects::{ExplosionSound, ToneSound, WhizSound, WhooshSound};
 use crate::footstep::{FootstepSound, Step};
-use crate::{Audio, AudioSettings, FootstepSurfaces, PlayOptions, dsp::to_db, thunder};
+use crate::{Audio, FootstepSurfaces, PlayOptions, dsp::to_db, thunder};
 
 pub(crate) fn register(app: &mut App) {
     app.register_api(
@@ -193,11 +193,11 @@ fn play(world: &mut World, args: Value) -> Result<Value, String> {
 
 /// `audio.play` for thunder: a lightning bolt down onto `at` (or `distance_m` away).
 fn play_thunder(world: &mut World, args: &Value, at: Option<DVec3>) -> Result<Value, String> {
-    let speed_of_sound = world.resource::<AudioSettings>().speed_of_sound;
     let mut audio = world.resource_mut::<Audio>();
     if !audio.is_running() {
         return Err(format!("Audio is {}, so nothing can play.", audio.status()));
     }
+    let speed_of_sound = audio.speed_of_sound();
     let seed = audio.next_seed();
     let listener = audio.listener_position();
     let current = num(args, "peak_current_ka", 30.0);

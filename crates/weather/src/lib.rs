@@ -7,6 +7,7 @@ pub mod demo;
 pub mod lightning;
 pub mod presets;
 pub mod render;
+mod shift;
 pub mod sim;
 pub mod sky;
 pub mod surface;
@@ -20,7 +21,7 @@ use engine_world::{
 
 pub use climate::Climate;
 pub use cloudmap::CloudMap;
-pub use lightning::{ActiveBolts, Lightning, LightningStrike};
+pub use lightning::{ActiveBolts, Lightning};
 pub use presets::{Regime, WeatherPreset};
 pub use render::{CloudSettings, GroundEffectSettings, PrecipitationSettings};
 pub use sim::{ForecastStep, Weather, WeatherSim};
@@ -69,9 +70,8 @@ impl Plugin for WeatherPlugin {
             .init_resource::<ActiveBolts>()
             .init_resource::<lightning::StrikeRequests>()
             .init_resource::<CloudMap>()
-            .add_message::<LightningStrike>()
             .register_resource::<Weather>(
-                "What the weather should do: preset (clear, partly_cloudy, overcast, rain, storm, \
+                "What the weather should do: preset (clear, partly_cloudy, overcast, showers, rain, storm, \
                  snow, blizzard, fog), transition_s (game seconds for a front to arrive), auto \
                  (pick new weather by itself), forecast queue, time_scale, wind_from_deg (0 = \
                  from north/+Z, 90 = from east/−X). WeatherState is the simulated result.",
@@ -108,6 +108,10 @@ impl Plugin for WeatherPlugin {
                  X/Z in meters, absorbency (0 asphalt .. 1 sand), puddles (share that pools).",
             )
             .add_systems(Update, (sky::ensure_lights, demo::instruments_system))
+            .add_systems(
+                PostUpdate,
+                shift::shift_system.in_set(engine_world::WorldShiftSet::Apply),
+            )
             .add_systems(
                 FixedUpdate,
                 (
@@ -186,7 +190,7 @@ mod tests {
                 .as_array()
                 .unwrap()
                 .len()
-                == 8
+                == 9
         );
     }
 }

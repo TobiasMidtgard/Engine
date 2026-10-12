@@ -5,11 +5,11 @@
 
 struct Celestial {
     sun: vec4<f32>,        // direction toward the sun, angular radius (rad)
-    sun_color: vec4<f32>,  // color × illuminance (lux, not dimmed by cloud), unused
+    sun_color: vec4<f32>,  // color × illuminance (lux, not dimmed by cloud), sky yaw (rad)
     moon: vec4<f32>,       // direction toward the moon, angular radius (rad)
     moon_color: vec4<f32>, // color × luminance of the full disc (cd/m²), earthshine
     pole: vec4<f32>,       // celestial north pole direction, sidereal angle (rad)
-    params: vec4<f32>,     // star brightness (0 by day), unused, march texel size (uv)
+    params: vec4<f32>,     // star brightness (0 by day), rainbow sunlight (lux), march texel size (uv)
 };
 
 @group(1) @binding(0) var<uniform> sky: Celestial;
@@ -126,10 +126,57 @@ fn celestial(dir: vec3<f32>) -> vec3<f32> {
         c = pre_expose(c) + moon_light * 6.0 / (6.0 + max(moon_light.r, max(moon_light.g, moon_light.b))) * edge;
         return c;
     } else if (sky.params.x > 0.0) {
-        let star_dir = rotate(dir, sky.pole.xyz, -sky.pole.w);
+        // Into the sky's own axes (they turn when the world's frame turns), then the
+        // turning of the Earth.
+        let sky_dir = rotate(dir, vec3<f32>(0.0, 1.0, 0.0), sky.sun_color.w);
+        let star_dir = rotate(sky_dir, sky.pole.xyz, -sky.pole.w);
         c += (star_field(star_dir) + milky_way(star_dir)) * sky.params.x * tr;
     }
     return pre_expose(c);
+}
+
+// One wavelength band of a rainbow: angle from the antisolar point where it peaks (deg) and
+// the color it adds (columns sum to white).
+struct Band {
+    angle: f32,
+    color: vec3<f32>,
+};
+
+fn rainbow_band(i: i32) -> Band {
+    // 410, 450, 490, 530, 570, 610, 660 nm. The primary bow's angle runs from 40.6° (violet)
+    // to 42.3° (red); the secondary's from 53.4° (violet) to 50.4° (red).
+    var angle = array<f32, 7>(40.65, 40.95, 41.25, 41.55, 41.8, 42.05, 42.3);
+    var color = array<vec3<f32>, 7>(
+        vec3(0.35, 0.0, 0.6), vec3(0.0, 0.1, 1.0), vec3(0.0, 0.6, 0.6), vec3(0.1, 1.0, 0.1),
+        vec3(0.7, 0.8, 0.0), vec3(1.0, 0.35, 0.0), vec3(0.9, 0.0, 0.0),
+    );
+    var b: Band;
+    b.angle = angle[i];
+    b.color = color[i] / vec3(3.05, 2.85, 2.3);
+    return b;
+}
+
+// Rainbow radiance (cd/m² per lux of sunlight on the rain) seen in direction `dir`: the
+// primary bow with its bright inside, the fainter reversed secondary, and the dark band
+// between them. The sun's disc and the drop sizes blur each color by about half a degree.
+fn rainbow(dir: vec3<f32>, sun: vec3<f32>) -> vec3<f32> {
+    let theta = degrees(acos(clamp(dot(dir, -sun), -1.0, 1.0)));
+    if (theta > 56.0 || theta < 25.0) { return vec3(0.0); }
+    var c = vec3<f32>(0.0);
+    for (var i = 0; i < 7; i++) {
+        let b = rainbow_band(i);
+        // Primary: a sharp outer edge, light spilling inward.
+        let p = theta - b.angle;
+        var primary = exp(-p * p / (2.0 * 0.35 * 0.35));
+        if (p < 0.0) { primary = max(primary, 0.12 * exp(p / 6.0)); }
+        // Secondary: reversed colors, a sharp inner edge, about 40% as bright.
+        let s_angle = 50.4 + (42.3 - b.angle) * (3.0 / 1.65);
+        let q = theta - s_angle;
+        var secondary = exp(-q * q / (2.0 * 0.5 * 0.5));
+        if (q > 0.0) { secondary = max(secondary, 0.1 * exp(-q / 5.0)); }
+        c += b.color * (primary + 0.4 * secondary);
+    }
+    return c * 0.05 * INV_PI;
 }
 
 // Clouds sampled with a small tent filter (hides the march's per-pixel jitter).
@@ -154,14 +201,25 @@ fn fs_sky(in: FullscreenOut) -> @location(0) vec4<f32> {
     let cl = clouds_at(in.uv);
     var bg = textureSampleLevel(clear_sky, linear_clamp, in.uv, 0.0).rgb;
     bg += celestial(dir);
-    return vec4<f32>(min(cl.rgb + bg * cl.a, vec3(60000.0)), 1.0);
+    var c = cl.rgb + bg * cl.a;
+    // A rainbow on sunlit rain opposite a low sun.
+    if (sky.params.y > 0.0) {
+        let rain = textureSampleLevel(cloud_depth, linear_clamp, in.uv, 0.0).z;
+        c += pre_expose(rainbow(dir, sky.sun.xyz) * sky.params.y) * rain;
+    }
+    return vec4<f32>(min(c, vec3(60000.0)), 1.0);
 }
 
 // Sky pixels when the sky draws no clouds of its own: blend the clouds over it.
 @fragment
 fn fs_sky_over(in: FullscreenOut) -> @location(0) vec4<f32> {
     let cl = clouds_at(in.uv);
-    return vec4<f32>(min(cl.rgb, vec3(60000.0)), cl.a);
+    var c = cl.rgb;
+    if (sky.params.y > 0.0) {
+        let rain = textureSampleLevel(cloud_depth, linear_clamp, in.uv, 0.0).z;
+        c += pre_expose(rainbow(camera_dir(in.uv), sky.sun.xyz) * sky.params.y) * rain;
+    }
+    return vec4<f32>(min(c, vec3(60000.0)), cl.a);
 }
 
 @vertex

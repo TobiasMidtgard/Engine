@@ -538,3 +538,101 @@ fn a_waterfall_roars_instead_of_dripping() {
         .fold((f32::MAX, 0.0f32), |(a, b), v| (a.min(*v), b.max(*v)));
     assert!(hi < lo * 2.0, "pulsing, not roaring: {quarter:?}");
 }
+
+#[test]
+fn engines_rev_and_tyres_skid() {
+    use engine_world::{EngineKind, EngineState, WheelContact, WheelContacts};
+    let mut app = app();
+    app.world
+        .spawn((AudioListener::default(), Transform::from_xyz(0.0, 1.7, 0.0)));
+    let quiet = record(&mut app, "no_car", 30, |_, _| {});
+    let baseline = app.world.resource::<Audio>().voice_count();
+
+    // A V8 car 10 m away cruising on concrete, then locking its wheels.
+    let concrete = app
+        .world
+        .resource::<SurfaceMaterials>()
+        .id_or_default("concrete");
+    let wheels = |speed: f32, slip: f32| WheelContacts {
+        wheels: (0..4)
+            .map(|k| WheelContact {
+                position: DVec3::new(10.0 + (k % 2) as f64 * 1.6, 0.0, (k / 2) as f64 * 2.6),
+                surface: concrete,
+                rolling_speed: speed,
+                slip,
+                load_kg: 400.0,
+                radius_m: 0.33,
+            })
+            .collect(),
+    };
+    let engine = EngineState {
+        kind: EngineKind::Piston { cylinders: 8 },
+        running: true,
+        rpm: 3_000.0,
+        idle_rpm: 800.0,
+        max_rpm: 7_000.0,
+        throttle: 0.6,
+        load: 0.6,
+        ..Default::default()
+    };
+    let car = app
+        .world
+        .spawn((
+            Transform::from_xyz(10.8, 0.4, 1.3),
+            engine,
+            wheels(15.0, 0.0),
+        ))
+        .id();
+    let mut cues = Vec::new();
+    let driving = record(&mut app, "car", 60, |app, i| {
+        if i == 30 {
+            app.world.entity_mut(car).insert(wheels(15.0, 0.8));
+        }
+        let msgs = app.world.resource::<Messages<AudioCue>>();
+        cues.extend(msgs.iter_current_update_messages().map(|c| c.name.clone()));
+    });
+    let cruise = rms(&driving[driving.len() / 4..driving.len() / 2]);
+    assert!(
+        cruise > rms(&quiet) * 3.0 && cruise > 0.005,
+        "engine {cruise} vs quiet {}",
+        rms(&quiet)
+    );
+    let count = |name: &str| cues.iter().filter(|c| c.as_str() == name).count();
+    assert_eq!(count("engine.piston"), 1, "{cues:?}");
+    assert_eq!(count("tyre.skid"), 1, "{cues:?}");
+    assert_eq!(app.world.resource::<Audio>().voice_count(), baseline + 2);
+
+    // Parked with the engine off: both fade away.
+    app.world.entity_mut(car).insert((
+        EngineState {
+            running: false,
+            rpm: 0.0,
+            ..engine
+        },
+        wheels(0.0, 0.0),
+    ));
+    record(&mut app, "parked", 60, |_, _| {});
+    assert_eq!(app.world.resource::<Audio>().voice_count(), baseline);
+}
+
+#[test]
+fn sound_travels_at_the_speed_the_air_allows() {
+    let mut app = app();
+    app.world
+        .spawn((AudioListener::default(), Transform::from_xyz(0.0, 1.7, 0.0)));
+    let speed = |app: &mut App, celsius: f32| {
+        app.world
+            .resource_mut::<engine_world::WeatherState>()
+            .temperature_c = celsius;
+        app.update();
+        app.world.resource::<Audio>().speed_of_sound()
+    };
+    let cold = speed(&mut app, -20.0);
+    let mild = speed(&mut app, 15.0);
+    let hot = speed(&mut app, 40.0);
+    assert!((mild - 343.0).abs() < 3.0, "{mild}");
+    assert!(
+        cold < mild - 15.0 && hot > mild + 10.0,
+        "{cold} {mild} {hot}"
+    );
+}

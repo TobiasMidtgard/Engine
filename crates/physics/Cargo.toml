@@ -1,6 +1,6 @@
 [package]
 name = "engine_physics"
-description = "Physics (stub: scope and contracts in README.md)."
+description = "Rigid-body physics on Rapier behind the engine_world::physics contract: f64 regions for planet-scale worlds, joints, ragdolls, characters, scene queries."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -8,6 +8,14 @@ license.workspace = true
 [dependencies]
 engine_core.workspace = true
 engine_world.workspace = true
+engine_render.workspace = true
+engine_debug.workspace = true
+engine_assets.workspace = true
 bevy_ecs.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+rapier3d.workspace = true
+parking_lot.workspace = true
+
+[dev-dependencies]
+image.workspace = true
