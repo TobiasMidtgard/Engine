@@ -7,6 +7,7 @@ pub mod ecology;
 pub mod felling;
 pub mod meshgen;
 pub mod plant;
+pub mod scenery;
 pub mod shift;
 pub mod sim;
 pub mod species;
@@ -69,12 +70,21 @@ impl Plugin for FoliagePlugin {
             )
             .register_component::<LogPose>("Which way a log fell (yaw, radians) and the tree's genes.")
             .register_component::<demo::GroundCover>(
-                "Forest or cave floor laid over the ground, colored from the soil below (moss where \
-                 wet, ash where burnt, mineral crust where mineral water soaks in).",
+                "Forest or cave floor laid over the ground, textured from the soil and plants on it \
+                 (leaf litter, needles, moss where wet, ash where burnt, packed earth on the trail, \
+                 mud round pools, mineral crust where mineral water soaks in), with debris scattered.",
+            )
+            .register_component::<scenery::Rock>(
+                "A procedural boulder, stone or pebble (scale = size in meters), sunk bury_m into the \
+                 ground cover, with moss on top, lichen and a wet line below water_m.",
+            )
+            .register_component::<scenery::Debris>(
+                "Scattered twig, branch, cone, leaves or reeds; hidden beyond draw_distance_m.",
             )
             .register_component::<demo::DemoFelling>(
                 "Showcase: fells the nearest mature tree in a ring around it every every_secs seconds.",
             );
+        engine_render::RenderAppExt::add_render_feature(app, scenery::SceneryFeature::default());
         api::register(app);
 
         app.add_systems(
@@ -119,7 +129,8 @@ impl Plugin for FoliagePlugin {
                 (felling::stream_tree_colliders, felling::sync_tree_colliders).chain(),
                 felling::remove_orphan_colliders,
                 (
-                    demo::build_ground_cover,
+                    scenery::build_scenery,
+                    scenery::cull_debris,
                     assets::ensure_species_visuals,
                     visuals::sync_plant_visuals,
                     visuals::sync_log_visuals,
