@@ -21,9 +21,11 @@ use std::sync::Arc;
 use engine_assets::{Asset, Assets, Handle};
 use engine_core::math::Aabb;
 use engine_core::prelude::*;
+use engine_render::StandardMaterial;
 
 use crate::animator::Animator;
 use crate::muscle::MorphWeights;
+use crate::retarget::Retarget;
 
 /// One vertex of a [`SkinnedMesh`].
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -89,6 +91,19 @@ pub struct SkinnedMesh {
     /// Mesh space → joint space at bind time, per joint.
     pub inverse_bind: Vec<Mat4>,
     pub morph_targets: Vec<MorphTarget>,
+    /// Index ranges drawn with their own surface (see [`SkinnedMeshRenderer::surfaces`]).
+    /// Empty: the whole mesh is one surface.
+    pub submeshes: Vec<Submesh>,
+}
+
+/// A range of a mesh's triangles drawn with one textured surface.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Submesh {
+    /// First index into [`SkinnedMesh::indices`].
+    pub first_index: u32,
+    pub index_count: u32,
+    /// Index into [`SkinnedMeshRenderer::surfaces`].
+    pub surface: usize,
 }
 
 impl Asset for SkinnedMesh {}
@@ -208,6 +223,10 @@ impl Default for SkinMaterial {
 pub struct SkinnedMeshRenderer {
     pub mesh: Option<Handle<SkinnedMesh>>,
     pub material: SkinMaterial,
+    /// Textured surfaces for the mesh's [`Submesh`]es (imported characters): base color,
+    /// normal and metallic-roughness textures, alpha cutouts. The procedural detail of
+    /// `material` (cloth folds, veins, flush) still applies on top, by the vertex mask.
+    pub surfaces: Vec<StandardMaterial>,
     pub cast_shadows: bool,
     pub visible: bool,
     /// Beyond this distance from the camera, skip morphs and cloth tension, meters.
@@ -219,6 +238,7 @@ impl Default for SkinnedMeshRenderer {
         Self {
             mesh: None,
             material: SkinMaterial::default(),
+            surfaces: Vec::new(),
             cast_shadows: true,
             visible: true,
             detail_distance: 45.0,
@@ -244,10 +264,20 @@ pub struct SkinPose {
     pub joints: Vec<[[f32; 4]; 3]>,
     pub morph_weights: Vec<f32>,
     /// Mesh joint → skeleton bone, resolved by name.
-    map: Vec<Option<u16>>,
+    map: Vec<Option<JointSource>>,
     map_version: u64,
 }
 
+/// Where a mesh joint's transform comes from.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum JointSource {
+    /// The animator's skeleton.
+    Logic(u16),
+    /// The retargeted skeleton of a [`Retarget`].
+    Target(u16),
+}
+
+#[allow(clippy::type_complexity)]
 pub(crate) fn update_skin_poses(
     meshes: Option<Res<Assets<SkinnedMesh>>>,
     mut q: Query<(
@@ -255,13 +285,14 @@ pub(crate) fn update_skin_poses(
         &SkinnedMeshRenderer,
         &mut SkinPose,
         Option<&MorphWeights>,
+        Option<&Retarget>,
     )>,
 ) {
     let Some(meshes) = meshes else {
         return;
     };
     q.par_iter_mut()
-        .for_each(|(animator, renderer, mut pose, morphs)| {
+        .for_each(|(animator, renderer, mut pose, morphs, retarget)| {
             let Some(handle) = renderer.mesh else {
                 return;
             };
@@ -269,21 +300,44 @@ pub(crate) fn update_skin_poses(
                 return;
             };
             let version = meshes.version(handle);
-            if pose.map_version != version || pose.map.len() != mesh.joints.len() {
+            // A retargeted mesh's joints name the target skeleton first, then logic bones.
+            let target = retarget.map(|r| &r.retargeter.target);
+            let resolved_for_target = pose
+                .map
+                .first()
+                .is_some_and(|m| matches!(m, Some(JointSource::Target(_))) == target.is_some());
+            if pose.map_version != version
+                || pose.map.len() != mesh.joints.len()
+                || !resolved_for_target
+            {
                 pose.map = mesh
                     .joints
                     .iter()
-                    .map(|j| animator.skeleton.index_of(j).map(|i| i as u16))
+                    .map(|j| {
+                        target
+                            .and_then(|t| t.index_of(j))
+                            .map(|i| JointSource::Target(i as u16))
+                            .or_else(|| {
+                                animator
+                                    .skeleton
+                                    .index_of(j)
+                                    .map(|i| JointSource::Logic(i as u16))
+                            })
+                    })
                     .collect();
                 pose.map_version = version;
             }
             let pose = &mut *pose;
             pose.joints.clear();
             for (j, bone) in pose.map.iter().enumerate() {
-                let m = match bone {
-                    Some(b) => {
-                        animator.model[*b as usize].to_mat4()
-                            * mesh.inverse_bind.get(j).copied().unwrap_or(Mat4::IDENTITY)
+                let x = match bone {
+                    Some(JointSource::Logic(b)) => animator.model.get(*b as usize),
+                    Some(JointSource::Target(b)) => retarget.and_then(|r| r.model.get(*b as usize)),
+                    None => None,
+                };
+                let m = match x {
+                    Some(x) => {
+                        x.to_mat4() * mesh.inverse_bind.get(j).copied().unwrap_or(Mat4::IDENTITY)
                     }
                     None => Mat4::IDENTITY,
                 };
@@ -387,12 +441,9 @@ mod tests {
         let mut a = Animator::procedural(s);
         a.local[1].r = Quat::from_rotation_z(std::f32::consts::FRAC_PI_2);
         a.refresh_model();
-        let mut pose = SkinPose {
-            map: vec![Some(0), Some(1)],
-            ..Default::default()
-        };
-        for (j, b) in pose.map.clone().iter().enumerate() {
-            let m = a.model[b.unwrap() as usize].to_mat4() * mesh.inverse_bind[j];
+        let mut pose = SkinPose::default();
+        for j in 0..2 {
+            let m = a.model[j].to_mat4() * mesh.inverse_bind[j];
             pose.joints.push([
                 m.row(0).to_array(),
                 m.row(1).to_array(),

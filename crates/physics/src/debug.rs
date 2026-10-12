@@ -184,7 +184,9 @@ impl Pen<'_> {
                     let Some(c1) = world.colliders.get(pair.collider1) else {
                         continue;
                     };
-                    for m in pair.manifolds() {
+                    // Impulses live in the manifolds the solver saw (merged clusters on
+                    // terrain, meshes and compounds).
+                    for m in pair.solver_manifolds() {
                         for p in &m.points {
                             if p.data.impulse <= 0.0 {
                                 continue;

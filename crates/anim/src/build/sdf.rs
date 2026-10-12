@@ -425,45 +425,57 @@ impl Body {
     }
 
     fn add_muscles(&self, mesh: &mut SkinnedMesh) {
-        for m in &self.muscles {
-            let mut bulge = Vec::new();
-            let mut sway = Vec::new();
-            for (i, v) in mesh.vertices.iter().enumerate() {
-                let q = m.rotation.conjugate() * (v.position - m.center);
-                let r2 = (q / m.radii).length_squared();
-                if r2 >= 1.0 {
-                    continue;
-                }
-                let influence = (1.0 - r2) * (1.0 - r2);
-                bulge.push(MorphDelta {
-                    vertex: i as u32,
-                    position: v.normal * m.bulge * influence,
-                    normal: Vec3::ZERO,
-                    influence,
-                });
-                if m.sway != Vec3::ZERO {
-                    sway.push(MorphDelta {
-                        vertex: i as u32,
-                        position: m.sway * influence,
-                        normal: Vec3::ZERO,
-                        influence: 0.0,
-                    });
-                }
-            }
-            if bulge.is_empty() {
+        add_muscle_morphs(mesh, &self.muscles, |_, _| true);
+    }
+}
+
+/// Add each muscle as a bulge morph target `<name>` (along the vertex normals, strongest at
+/// the shape's center) and, if it sways, a `<name>.sway` target, with matching normal deltas.
+/// `allowed(vertex, muscle)` can keep a muscle off vertices it overlaps but doesn't belong to
+/// (an arm muscle near the chest). Works on any mesh, generated or imported.
+pub fn add_muscle_morphs(
+    mesh: &mut SkinnedMesh,
+    muscles: &[MuscleShape],
+    allowed: impl Fn(usize, &MuscleShape) -> bool,
+) {
+    for m in muscles {
+        let mut bulge = Vec::new();
+        let mut sway = Vec::new();
+        for (i, v) in mesh.vertices.iter().enumerate() {
+            let q = m.rotation.conjugate() * (v.position - m.center);
+            let r2 = (q / m.radii).length_squared();
+            if r2 >= 1.0 || !allowed(i, m) {
                 continue;
             }
-            set_normal_deltas(mesh, &mut bulge);
-            mesh.morph_targets.push(MorphTarget {
-                name: m.name.clone(),
-                deltas: bulge,
+            let influence = (1.0 - r2) * (1.0 - r2);
+            bulge.push(MorphDelta {
+                vertex: i as u32,
+                position: v.normal * m.bulge * influence,
+                normal: Vec3::ZERO,
+                influence,
             });
-            if !sway.is_empty() {
-                mesh.morph_targets.push(MorphTarget {
-                    name: format!("{}.sway", m.name),
-                    deltas: sway,
+            if m.sway != Vec3::ZERO {
+                sway.push(MorphDelta {
+                    vertex: i as u32,
+                    position: m.sway * influence,
+                    normal: Vec3::ZERO,
+                    influence: 0.0,
                 });
             }
+        }
+        if bulge.is_empty() {
+            continue;
+        }
+        set_normal_deltas(mesh, &mut bulge);
+        mesh.morph_targets.push(MorphTarget {
+            name: m.name.clone(),
+            deltas: bulge,
+        });
+        if !sway.is_empty() {
+            mesh.morph_targets.push(MorphTarget {
+                name: format!("{}.sway", m.name),
+                deltas: sway,
+            });
         }
     }
 }
@@ -664,30 +676,41 @@ impl Field<'_> {
 }
 
 /// Normal deltas for a morph target: the morphed mesh's normals minus the rest normals.
+/// Vertices split along UV or material seams share one normal (by position).
+fn welded(mesh: &SkinnedMesh) -> Vec<usize> {
+    let mut first: HashMap<[i32; 3], usize> = HashMap::new();
+    mesh.vertices
+        .iter()
+        .enumerate()
+        .map(|(i, v)| {
+            let k = (v.position * 1e5).round();
+            *first
+                .entry([k.x as i32, k.y as i32, k.z as i32])
+                .or_insert(i)
+        })
+        .collect()
+}
+
 fn set_normal_deltas(mesh: &SkinnedMesh, deltas: &mut [MorphDelta]) {
+    let weld = welded(mesh);
     let mut moved: Vec<Vec3> = mesh.vertices.iter().map(|v| v.position).collect();
     for d in deltas.iter() {
         moved[d.vertex as usize] += d.position;
     }
     let mut normals = vec![Vec3::ZERO; moved.len()];
-    for t in mesh.indices.as_chunks::<3>().0 {
-        let [a, b, c] = [t[0] as usize, t[1] as usize, t[2] as usize];
-        let face = (moved[b] - moved[a]).cross(moved[c] - moved[a]);
-        normals[a] += face;
-        normals[b] += face;
-        normals[c] += face;
-    }
     let mut rest_normals = vec![Vec3::ZERO; moved.len()];
     for t in mesh.indices.as_chunks::<3>().0 {
         let [a, b, c] = [t[0] as usize, t[1] as usize, t[2] as usize];
+        let face = (moved[b] - moved[a]).cross(moved[c] - moved[a]);
         let pa = mesh.vertices[a].position;
-        let face = (mesh.vertices[b].position - pa).cross(mesh.vertices[c].position - pa);
-        rest_normals[a] += face;
-        rest_normals[b] += face;
-        rest_normals[c] += face;
+        let rest = (mesh.vertices[b].position - pa).cross(mesh.vertices[c].position - pa);
+        for i in [a, b, c] {
+            normals[weld[i]] += face;
+            rest_normals[weld[i]] += rest;
+        }
     }
     for d in deltas.iter_mut() {
-        let i = d.vertex as usize;
+        let i = weld[d.vertex as usize];
         d.normal = normals[i].normalize_or_zero() - rest_normals[i].normalize_or_zero();
     }
 }
