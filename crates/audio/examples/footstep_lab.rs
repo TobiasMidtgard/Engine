@@ -70,6 +70,26 @@ fn main() {
         write_wav(&out.join(format!("fire_{name}.wav")), &track, 1, FS as u32).expect("write wav");
     }
 
+    // Water: a calm and a windy lake shore, a brook and rapids, eight seconds each.
+    for (name, waves, flow) in [
+        ("lake_calm", 0.2, 0.0),
+        ("lake_windy", 0.8, 0.0),
+        ("brook", 0.0, 1.0),
+        ("rapids", 0.0, 3.0),
+    ] {
+        use engine_audio::Sound;
+        let mut water = engine_audio::ambience::WaterSound::new(FS, 6);
+        water.set_param("waves", waves);
+        water.set_param("flow", flow);
+        let mut track = vec![0.0; (FS * 8.0) as usize];
+        water.fill(&mut track);
+        let tail = &track[track.len() / 4..];
+        let rms = (tail.iter().map(|v| v * v).sum::<f32>() / tail.len() as f32).sqrt();
+        let peak = tail.iter().fold(0.0f32, |m, v| m.max(v.abs()));
+        println!("water {name:<10} rms {rms:.4} peak {peak:.3}");
+        write_wav(&out.join(format!("water_{name}.wav")), &track, 1, FS as u32).expect("write wav");
+    }
+
     // Thunder from a bolt 0.5, 2 and 8 km away, mixed roughly as the mixer would (inverse
     // distance, air absorption), with its level over time.
     for (name, km) in [("near", 0.5), ("mid", 2.0), ("far", 8.0)] {

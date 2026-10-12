@@ -341,3 +341,75 @@ fn burning_ground_and_burning_things_are_heard() {
         "the grass fire should have faded out as the tree fire started"
     );
 }
+
+/// A lake east of x = 6 (its bed sloping down), and a brook running north along x = -9.
+struct Lakeside;
+
+impl engine_world::GroundQuery for Lakeside {
+    fn sample(&self, p: DVec3) -> Option<engine_world::GroundSample> {
+        let height = if p.x > 6.0 {
+            -(p.x - 6.0) * 0.3
+        } else if (p.x + 9.0).abs() < 1.0 {
+            -0.4
+        } else {
+            0.0
+        };
+        Some(engine_world::GroundSample {
+            height,
+            normal: Vec3::Y,
+            surface: Default::default(),
+        })
+    }
+}
+
+impl engine_world::WaterQuery for Lakeside {
+    fn sample(&self, p: DVec3) -> Option<engine_world::WaterSample> {
+        let (depth, velocity) = if p.x > 6.0 {
+            ((p.x - 6.0) as f32 * 0.3, Vec3::ZERO)
+        } else if (p.x + 9.0).abs() < 1.0 {
+            (0.3, Vec3::new(0.0, 0.0, -1.2))
+        } else {
+            return None;
+        };
+        Some(engine_world::WaterSample {
+            surface_height: if p.x > 6.0 { 0.0 } else { -0.1 },
+            depth,
+            velocity,
+            normal: Vec3::Y,
+        })
+    }
+}
+
+#[test]
+fn shores_lap_and_brooks_babble() {
+    let mut app = app();
+    app.insert_resource(engine_world::Ground(std::sync::Arc::new(Lakeside)));
+    app.insert_resource(engine_world::Water(std::sync::Arc::new(Lakeside)));
+    let listener = app
+        .world
+        .spawn((AudioListener::default(), Transform::from_xyz(0.0, 1.7, 0.0)))
+        .id();
+    let by_water = record(&mut app, "lakeside", 150, |_, _| {});
+    // Count only the water: compare with the same place with water sounds off.
+    app.world.resource_mut::<AudioSettings>().water = false;
+    let dry = record(&mut app, "lakeside_off", 150, |_, _| {});
+    let (wet, quiet) = (
+        rms(&by_water[by_water.len() / 2..]),
+        rms(&dry[dry.len() / 2..]),
+    );
+    assert!(
+        wet > quiet * 1.5 && wet > 0.002,
+        "by the water {wet}, off {quiet}"
+    );
+
+    // Far inland there's nothing to hear.
+    app.world.resource_mut::<AudioSettings>().water = true;
+    app.world
+        .entity_mut(listener)
+        .insert(Transform::from_xyz(-200.0, 1.7, 0.0));
+    record(&mut app, "inland_settle", 90, |_, _| {});
+    let before = app.world.resource::<Audio>().voice_count();
+    app.world.resource_mut::<AudioSettings>().water = false;
+    record(&mut app, "inland_off", 90, |_, _| {});
+    assert_eq!(app.world.resource::<Audio>().voice_count(), before);
+}

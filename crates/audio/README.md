@@ -24,6 +24,9 @@ different wet, frozen, snowed on or burnt.
   burning areas, and each plays a roar with crackle, pops and snaps that grows with the area
   in flames (a campfire, a burning house, a forest front); burning `Combustible`s (trees,
   buildings) play on their own. The loudest few play, the rest fade out.
+- **Water**: small waves lapping at the nearest shores (a slap, the wash running up and
+  draining back, the gurgle of the backwash; bigger and slower in wind) and streams babbling,
+  growing into a roar in rapids, found by sampling the water and ground around the listener.
 - **Weather**: rain from `WeatherState` (louder with intensity; ticks on soft ground, taps
   on hard, plinks in puddles, pings on metal; drums on the roof when you're under cover),
   wind (the air moving past your ears, so running into it is louder), and thunder during
@@ -64,7 +67,7 @@ Tunable at runtime (JSON, console, scripts, AI agents):
 
 | Name | What |
 |---|---|
-| `AudioSettings` | output, master volume, speed of sound, doppler, air absorption, how much slow motion lowers pitch, silence in space, footstep range, voice limit, weather, fires and occlusion on/off |
+| `AudioSettings` | output, master volume, speed of sound, doppler, air absorption, how much slow motion lowers pitch, silence in space, footstep range, voice limit, weather, fires, water and occlusion on/off |
 | `AudioMix` | volume per bus (world, ambience, music, ui, voice) and mute |
 | `FootstepSurfaces` | how each surface sounds underfoot: 14 layer weights, brightness, pitch, gain |
 | `SoundRings` | coloured rings on the ground for each sound near a footstep trail (or everywhere) |
@@ -96,6 +99,7 @@ tween system cost more than writing the mixer.
 Reads (all from `engine_world`): `GroundContact`, `ContactEvent`, `WaterSplash`,
 `WorldImpulse`, `ProjectileTrace`, `AttackEvent`, `Collider::surface`, `SurfaceMaterials`,
 `SurfaceLayers` (wetness, puddles, snow, scorch), `HeatField` and `Combustible` (fires),
+`WaterQuery` (shores and currents),
 `WeatherState`, wind, temperature, water,
 ground and gravity bodies through `Env`, `PhysicsQueries::raycast` (roof over the listener,
 walls between the listener and each sound),
@@ -117,17 +121,18 @@ character's and shows as a ring in its ground's colour.
   underpass echo and rain soaking the ground at the end. Writes `trail.mp4`, `trail.wav`
   and the frames.
 - `cargo run -p engine_audio --release --example footstep_lab -- out/` renders four steps
-  on every surface, fires of three sizes and thunder at three distances to WAV files
+  on every surface, fires of three sizes, lake shores, a brook, rapids and thunder at three
+  distances to WAV files
   (`--layers` prints each footstep layer's level).
 - `tests/plugin.rs`: contacts are heard, out-of-earshot steps are skipped, space is silent,
   the trail walks every surface, walls muffle what's behind them, burning ground and burning
-  things are heard. `tests/screenshot.rs` renders the trail headless.
+  things are heard, shores lap and brooks babble. `tests/screenshot.rs` renders the trail headless.
 
 ## Done when
 
 - Footsteps change from grass to mud to snow; rain gets louder with intensity; slow motion
   lowers the pitch. ✓ (all three are in the trail recording and the tests)
 
-Next: rolling wheels and tracks, lapping water from the water module, thunder from the
+Next: rolling wheels and tracks, thunder from the
 weather's own lightning strikes (`LightningStrike`, waiting on the lead's contract), music
 layers, and recorded samples alongside the synthesis.

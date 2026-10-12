@@ -11,6 +11,7 @@ pub mod mixer;
 mod output;
 mod systems;
 pub mod thunder;
+mod water;
 pub mod wav;
 
 use std::collections::HashMap;
@@ -80,6 +81,7 @@ impl Plugin for AudioPlugin {
                     systems::play_world_events,
                     systems::weather_ambience,
                     fires::fire_ambience,
+                    water::water_ambience,
                     systems::reverb_zones,
                     systems::follow_emitters,
                     systems::occlusion,
@@ -143,6 +145,9 @@ pub struct AudioSettings {
     /// Play the roar and crackle of fires near the listener (burning ground in `HeatField`,
     /// burning `Combustible`s).
     pub fires: bool,
+    /// Play waves lapping at nearby shores and streams babbling (from the water module's
+    /// `WaterQuery`).
+    pub water: bool,
 }
 
 impl Default for AudioSettings {
@@ -163,6 +168,7 @@ impl Default for AudioSettings {
             weather_ambience: true,
             occlusion: true,
             fires: true,
+            water: true,
         }
     }
 }

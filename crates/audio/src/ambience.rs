@@ -467,6 +467,164 @@ impl Sound for FireSound {
     }
 }
 
+/// Water at the shore and in streams. Mono, so the mixer places it.
+///
+/// * `"waves"` 0..1: small waves lapping at the shore, one every couple of seconds: a slap as
+///   it hits, the wash running up and draining back, and the gurgle of bubbles in the
+///   backwash. Bigger waves come slower and wash longer.
+/// * `"flow"` m/s: moving water babbling over stones, a continuous run of bubbles and a
+///   hiss that grows into a roar in rapids.
+pub struct WaterSound {
+    fs: f32,
+    rng: Noise,
+    waves: f32,
+    waves_target: f32,
+    flow: f32,
+    flow_target: f32,
+    /// Samples until the next wave reaches the shore.
+    next_wave: u32,
+    /// The current wave: samples since it hit, its size.
+    wave_t: u32,
+    wave_size: f32,
+    slap: Biquad,
+    wash: [Biquad; 2],
+    hiss: Biquad,
+    roar: Biquad,
+    bubbles: Vec<Bubble>,
+    t: u32,
+}
+
+/// Most bubbles ringing at once.
+const MAX_BUBBLES: usize = 40;
+
+impl WaterSound {
+    pub fn new(fs: f32, seed: u64) -> Self {
+        let mut rng = Noise::new(seed);
+        let first = (rng.range(0.2, 1.5) * fs) as u32;
+        Self {
+            fs,
+            rng,
+            waves: 0.0,
+            waves_target: 0.0,
+            flow: 0.0,
+            flow_target: 0.0,
+            next_wave: first,
+            wave_t: u32::MAX,
+            wave_size: 0.0,
+            slap: Biquad::bandpass(fs, 700.0, 0.9),
+            wash: [
+                Biquad::lowpass(fs, 2_200.0, 0.7),
+                Biquad::highpass(fs, 180.0, 0.7),
+            ],
+            hiss: Biquad::bandpass(fs, 2_800.0, 0.5),
+            roar: Biquad::lowpass(fs, 500.0, 0.7),
+            bubbles: Vec::with_capacity(MAX_BUBBLES),
+            t: 0,
+        }
+    }
+
+    fn bubble(&mut self, small: f32, big: f32, amp: f32, delay_s: f32) {
+        if self.bubbles.len() >= MAX_BUBBLES {
+            return;
+        }
+        // Mostly small bubbles, a few big ones (bigger = lower and louder).
+        let r = small + (big - small) * self.rng.uniform().powi(3);
+        let loud = amp * (r / big).sqrt();
+        let rise = self.rng.range(0.05, 0.3);
+        self.bubbles
+            .push(Bubble::new(self.fs, r, loud, rise, delay_s).damped(1.5, self.fs));
+    }
+}
+
+impl Sound for WaterSound {
+    fn set_param(&mut self, name: &str, value: f32) {
+        match name {
+            "waves" => self.waves_target = value.clamp(0.0, 1.0),
+            "flow" => self.flow_target = value.max(0.0),
+            _ => {}
+        }
+    }
+
+    fn fill(&mut self, out: &mut [f32]) -> usize {
+        let fs = self.fs;
+        let k = 1.0 - (-1.0 / (0.8 * fs)).exp();
+        for o in out.iter_mut() {
+            self.waves += (self.waves_target - self.waves) * k;
+            self.flow += (self.flow_target - self.flow) * k;
+
+            // A wave reaches the shore.
+            if self.waves > 0.01 {
+                if self.next_wave == 0 {
+                    self.wave_t = 0;
+                    self.wave_size = self.waves * self.rng.range(0.5, 1.0);
+                    let period = self.rng.range(1.4, 2.6) * (0.8 + 1.4 * self.waves);
+                    self.next_wave = (period * fs) as u32;
+                    // Backwash bubbles over the next second.
+                    let n = (4.0 + 14.0 * self.wave_size) as usize;
+                    let amp = 0.15 * self.wave_size.powf(0.7);
+                    for _ in 0..n {
+                        let at = self.rng.range(0.25, 1.4);
+                        self.bubble(0.0015, 0.007, amp, at);
+                    }
+                } else {
+                    self.next_wave -= 1;
+                }
+            }
+            let mut y = 0.0;
+            if self.wave_t != u32::MAX {
+                let t = self.wave_t as f32 / fs;
+                let size = self.wave_size;
+                let loud = size.powf(0.7);
+                let up = 0.35 + 0.4 * size;
+                let back = 0.9 + 1.2 * size;
+                if t > up + back {
+                    self.wave_t = u32::MAX;
+                } else {
+                    // Slap: a short knock as the wave lands.
+                    let slap = (-t / 0.025).exp() * loud * 2.0;
+                    // Wash: up the shore, then draining back, swishing as it goes.
+                    let wash = if t < up {
+                        (t / up).powi(2)
+                    } else {
+                        (1.0 - (t - up) / back).max(0.0).powi(2)
+                    } * loud
+                        * 0.5;
+                    let n = self.rng.white();
+                    let slap = self.slap.process(n) * slap;
+                    let low = self.wash[0].process(self.rng.white());
+                    let wash = self.wash[1].process(low) * wash;
+                    y += slap + wash;
+                    self.wave_t += 1;
+                }
+            }
+
+            // Moving water: bubbles popping up all the time, a hiss, a roar in rapids.
+            if self.flow > 0.05 {
+                let rate = (25.0 * self.flow).min(220.0) / fs;
+                if self.rng.chance(rate) {
+                    let amp = 0.08 * self.flow.min(2.0).sqrt();
+                    self.bubble(0.0012, 0.006, amp, 0.0);
+                }
+                let hiss = self.hiss.process(self.rng.white()) * 0.05 * self.flow.min(3.0);
+                let rapids = ((self.flow - 1.0) / 2.0).clamp(0.0, 1.0);
+                let roar = self.roar.process(self.rng.white()) * 0.4 * rapids;
+                y += hiss + roar;
+            }
+
+            let mut b = 0.0;
+            for bubble in &mut self.bubbles {
+                b += bubble.process();
+            }
+            if self.t.is_multiple_of(256) {
+                self.bubbles.retain(|b| !b.done());
+            }
+            self.t = self.t.wrapping_add(1);
+            *o = y + b;
+        }
+        out.len()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -477,6 +635,19 @@ mod tests {
         let mut buf = vec![0.0; (secs * FS) as usize * 2];
         let n = sound.fill(&mut buf);
         let x = &buf[..n * 2];
+        (x.iter().map(|v| v * v).sum::<f32>() / x.len().max(1) as f32).sqrt()
+    }
+
+    fn render(sound: &mut dyn Sound, secs: f32) -> Vec<f32> {
+        let mut buf = vec![0.0; (secs * FS) as usize];
+        let n = sound.fill(&mut buf);
+        buf.truncate(n);
+        buf
+    }
+
+    fn rms_of_mono(sound: &mut dyn Sound, secs: f32) -> f32 {
+        let x = render(sound, secs);
+        let x = &x[x.len() / 4..];
         (x.iter().map(|v| v * v).sum::<f32>() / x.len().max(1) as f32).sqrt()
     }
 
@@ -549,5 +720,36 @@ mod tests {
             "{camp} {house} {forest}"
         );
         assert!(forest < 0.6, "{forest}");
+    }
+
+    #[test]
+    fn water_laps_in_waves_and_babbles_when_it_flows() {
+        let mut still = WaterSound::new(FS, 4);
+        assert!(rms_of_mono(&mut still, 3.0) < 1e-4, "still water is silent");
+
+        let mut lake = WaterSound::new(FS, 4);
+        lake.set_param("waves", 0.5);
+        let x = render(&mut lake, 12.0);
+        // Waves come and go: the level per half second swings.
+        let levels: Vec<f32> = x
+            .chunks((FS * 0.5) as usize)
+            .skip(4)
+            .map(|c| (c.iter().map(|v| v * v).sum::<f32>() / c.len() as f32).sqrt())
+            .collect();
+        let (lo, hi) = levels
+            .iter()
+            .fold((f32::MAX, 0.0f32), |(a, b), v| (a.min(*v), b.max(*v)));
+        assert!(hi > 0.005 && hi > lo * 3.0, "waves {lo}..{hi}");
+
+        let mut brook = WaterSound::new(FS, 5);
+        brook.set_param("flow", 0.8);
+        let calm = rms_of_mono(&mut brook, 4.0);
+        let mut rapids = WaterSound::new(FS, 5);
+        rapids.set_param("flow", 3.0);
+        let wild = rms_of_mono(&mut rapids, 4.0);
+        assert!(
+            calm > 0.003 && wild > calm * 1.5,
+            "brook {calm} rapids {wild}"
+        );
     }
 }
