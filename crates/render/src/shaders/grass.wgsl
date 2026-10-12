@@ -52,8 +52,24 @@ fn fs_main(in: GrassOut, @builtin(front_facing) front: bool) -> @location(0) vec
         case 6u: { return vec4<f32>(pre_expose(screen_gi(in.rel)), 1.0); }
         default: {}
     }
-    let color = apply_fog(shade_surface(s, in.rel), in.rel);
-    return vec4<f32>(color, 1.0);
+    let color = shade_surface(s, in.rel) + grass_translucency(s, in.rel, in.along);
+    return vec4<f32>(apply_fog(color, in.rel), 1.0);
+}
+
+// Sunlight through the blades. A blade is thin, so lit from behind it glows a deeper, yellower
+// green, strongest looking toward the sun and toward the tips (the lower parts sit in the
+// shade of the meadow).
+fn grass_translucency(s: Surface, rel: vec3<f32>, along: f32) -> vec3<f32> {
+    let l = frame.sun_dir.xyz;
+    let v = normalize(-rel);
+    let through = saturate(-dot(s.normal, l));
+    let toward_sun = pow(saturate(dot(v, -l)), 3.0);
+    let amount = (through * 0.35 + toward_sun * 0.9) * along * along;
+    if (amount <= 0.0) { return vec3<f32>(0.0); }
+    let lit_side = select(s.normal, -s.normal, dot(s.normal, l) < 0.0);
+    let sun = frame.sun_color.rgb * sun_transmittance(rel) * shadow_factor(rel, lit_side);
+    let tint = s.albedo * saturate3(s.albedo * 4.0);
+    return pre_expose(sun * tint * amount * INV_PI);
 }
 
 struct GrassPrepassOut {

@@ -78,11 +78,11 @@ pub use features::{
     SHADER_LIB_ATMOSPHERE, SHADER_LIB_FRAME, SHADER_LIB_TYPES, compose_shader, validate_wgsl,
 };
 pub use frame::ViewData;
-pub use grass::{GrassBender, GrassField, GrassStyle};
 pub use gltf_loader::{
     GltfLoader, GltfNode, GltfPrimitive, GltfScene, GltfSceneSpawner, spawn_gltf_scene,
     spawn_gltf_scene_deferred,
 };
+pub use grass::{GrassBender, GrassField, GrassStyle};
 pub use material::{AlphaMode, StandardMaterial};
 pub use mesh::{Mesh, Shape, Vertex};
 pub use renderer::{
@@ -96,10 +96,9 @@ pub mod prelude {
     pub use crate::{
         AlphaMode, AmbientLight, AntiAliasing, Atmosphere, BoxFace, Camera, DirectionalLight,
         Exposure, FogSettings, GltfScene, GltfSceneSpawner, GrassBender, GrassField, GrassStyle,
-        Image, MaterialRef, Mesh, MeshRef,
-        MeshRenderer, PointLight, Projection, RenderAppExt, RenderFeature, RenderPhase,
-        RenderPlugin, RenderSettings, Screenshots, Shape, SkyLightVolume, StandardMaterial,
-        Tonemapper, spawn_gltf_scene, spawn_gltf_scene_deferred,
+        Image, MaterialRef, Mesh, MeshRef, MeshRenderer, PointLight, Projection, RenderAppExt,
+        RenderFeature, RenderPhase, RenderPlugin, RenderSettings, Screenshots, Shape,
+        SkyLightVolume, StandardMaterial, Tonemapper, spawn_gltf_scene, spawn_gltf_scene_deferred,
     };
 }
 

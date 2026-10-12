@@ -161,6 +161,18 @@ impl Default for GrassStyle {
     }
 }
 
+impl GrassStyle {
+    /// A ground albedo (linear RGB) that matches the meadow from afar: give it to the terrain
+    /// under the field so the ground past the draw distance and between thinned-out blades
+    /// reads as grass rather than bare soil.
+    pub fn ground_color(&self) -> [f32; 3] {
+        let d = self.dryness.clamp(0.0, 1.0);
+        std::array::from_fn(|i| {
+            (self.lush_color[i] + (self.dry_color[i] - self.lush_color[i]) * d) * 0.85
+        })
+    }
+}
+
 /// Pushes grass aside and flattens it: a character's feet or body, a rolling boulder, a
 /// landing ship. A sphere of `radius` meters around the entity; the 16 nearest the camera act.
 #[derive(Component, Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -327,7 +339,9 @@ impl FieldMap {
         let point_range = |t: u32, axis: usize, res: u32| {
             let to_grid = (res - 1) as f32 / size[axis];
             let lo = ((t as f32 * TILE) * to_grid).floor().max(0.0) as u32;
-            let hi = (((t + 1) as f32 * TILE) * to_grid).ceil().min((res - 1) as f32) as u32;
+            let hi = (((t + 1) as f32 * TILE) * to_grid)
+                .ceil()
+                .min((res - 1) as f32) as u32;
             lo..=hi.max(lo)
         };
         let mut tile_bounds = Vec::with_capacity((tiles[0] * tiles[1]) as usize);
@@ -646,7 +660,8 @@ impl RenderFeature for GrassFeature {
                         continue;
                     }
                     let center_local = (lo + hi) * 0.5;
-                    let center = origin + ax * center_local.x + ay * center_local.y + az * center_local.z;
+                    let center =
+                        origin + ax * center_local.x + ay * center_local.y + az * center_local.z;
                     let radius = ((hi - lo) * 0.5).length();
                     let visible = view.frustum.intersects_sphere(center, radius);
                     let shadows = d < style.shadow_distance;
@@ -695,7 +710,8 @@ impl RenderFeature for GrassFeature {
             if !drew {
                 continue;
             }
-            let seed = (entity.to_bits() as u32) ^ ((entity.to_bits() >> 32) as u32).wrapping_mul(0x9e37_79b9);
+            let seed = (entity.to_bits() as u32)
+                ^ ((entity.to_bits() >> 32) as u32).wrapping_mul(0x9e37_79b9);
             self.order.push(entity);
             self.fields.push(GpuField {
                 origin: origin.extend(0.0).to_array(),
@@ -731,7 +747,11 @@ impl RenderFeature for GrassFeature {
         let mut benders: Vec<[f32; 4]> = world
             .query::<(&GrassBender, &GlobalTransform)>()
             .iter(world)
-            .map(|(b, gt)| view.relative(gt.translation()).extend(b.radius.max(0.0)).to_array())
+            .map(|(b, gt)| {
+                view.relative(gt.translation())
+                    .extend(b.radius.max(0.0))
+                    .to_array()
+            })
             .filter(|s| s[3] > 0.0)
             .collect();
         benders.sort_by(|a, b| {

@@ -193,9 +193,12 @@ terrain's height and ground cover), so millions of blades cost one small texture
 with the wind (`WindField`/`WeatherState`), with gusts rolling across the field, lean and curl,
 thin out smoothly with distance (survivors widen to keep the cover; `style.draw_distance`), cast
 sun shadows near the camera, and go through the depth prepass, so AO, bounce light and TAA see
-them. `GrassBender { radius }` on feet, bodies or vehicles pushes blades aside (16 nearest the
-camera). `RenderSettings::grass_density` scales every field (quality). `engine_foliage` drives
-grass by spawning fields from its soil grid; game code can spawn them directly.
+them. Lit from behind, sunlight shines through the blades. Meadows grow in patches (taller,
+greener hollows, shorter, drier rises). `GrassBender { radius }` on feet, bodies or vehicles
+pushes blades aside (16 nearest the camera). `RenderSettings::grass_density` scales every field
+(quality). Give the ground under a field `style.ground_color()` so it reads as grass past the
+draw distance. `engine_foliage` drives grass by spawning fields from its soil grid; game code
+can spawn them directly.
 
 Shared pipelines the core will provide for modules (planned): **strands** for hair and fur
 (`engine_softbody` draws its own today) and **tension-driven wrinkle maps** in `StandardMaterial`

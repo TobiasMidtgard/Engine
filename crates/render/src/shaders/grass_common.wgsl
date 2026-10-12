@@ -122,6 +122,10 @@ fn grass_blade(instance: u32, vertex: u32, t: f32, wind: vec3<f32>, tiling: vec3
     let local = tile.corner + r0.xy * GRASS_TILE;
     if (local.x > f.axis_x.w || local.y > f.axis_y.w) { return out; }
     let m = grass_map_at(f, local);
+    // Meadows grow in patches: taller, greener hollows and shorter, drier rises a few meters
+    // across, and clumps within them.
+    let meadow_patch = value_noise2(local * 0.11 + vec2<f32>(f32(f.grid.w & 1023u)));
+    let clump = value_noise2(local * 1.3);
     let up = f.axis_y.xyz;
     let root = f.origin.xyz + f.axis_x.xyz * local.x + f.axis_z.xyz * local.y + up * m.x;
     let d = length(root);
@@ -131,7 +135,8 @@ fn grass_blade(instance: u32, vertex: u32, t: f32, wind: vec3<f32>, tiling: vec3
     if (rank >= keep) { return out; }
     // Shrink into the ground just before being thinned out, and at thin edges of the meadow.
     let fade = saturate((keep - rank) * 10.0);
-    let height = f.shape.x * (1.0 + f.shape.y * (r0.z * 2.0 - 1.0)) * mix(0.55, 1.0, saturate(m.y)) * fade;
+    let height = f.shape.x * (1.0 + f.shape.y * (r0.z * 2.0 - 1.0)) * mix(0.55, 1.0, saturate(m.y))
+        * mix(0.75, 1.2, meadow_patch) * mix(0.85, 1.15, clump) * fade;
     if (height < 0.005) { return out; }
     let width = f.shape.z * (0.75 + 0.5 * r1.x) * clamp(inverseSqrt(max(lod, 1e-3)), 1.0, 3.0);
 
@@ -181,8 +186,10 @@ fn grass_blade(instance: u32, vertex: u32, t: f32, wind: vec3<f32>, tiling: vec3
     out.along = u;
 
     // Color: fresh to dry by the map and per blade, tips paler and yellower.
-    let dryness = saturate(m.z + (r1.w - 0.5) * 0.35);
+    let dryness = saturate(m.z + (r1.w - 0.5) * 0.35 + (0.5 - meadow_patch) * 0.25);
     var albedo = mix(f.lush.rgb, f.dry.rgb, dryness) * (0.8 + 0.4 * r0.z * r1.w);
+    // A slight hue drift between patches, bluer in the lush hollows.
+    albedo *= mix(vec3<f32>(0.9, 1.0, 1.08), vec3<f32>(1.08, 1.02, 0.85), clump * 0.5 + meadow_patch * 0.5);
     albedo = mix(albedo, f.dry.rgb * 1.1, 0.35 * u * u);
     out.albedo = albedo;
     out.visible = true;

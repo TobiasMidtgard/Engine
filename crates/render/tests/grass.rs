@@ -4,7 +4,7 @@
 
 use engine_core::prelude::*;
 use engine_render::prelude::*;
-use engine_render::{GrassField, RenderDisabled, capture_now};
+use engine_render::{DebugView, GrassField, RenderDisabled, capture_now};
 use engine_world::WeatherState;
 use image::RgbaImage;
 
@@ -13,6 +13,10 @@ const H: u32 = 180;
 
 /// A flat meadow on brown soil seen from eye height, sun low ahead and to the left.
 fn meadow_app(wind: Vec3) -> App {
+    meadow_app_with(wind, |_| {})
+}
+
+fn meadow_app_with(wind: Vec3, configure: impl FnOnce(&mut RenderSettings)) -> App {
     engine_core::log::init("error");
     let mut app = App::new();
     app.world.resource_mut::<EngineConfig>().headless = true;
@@ -27,6 +31,7 @@ fn meadow_app(wind: Vec3) -> App {
         s.anti_aliasing = AntiAliasing::None;
         s.film_grain = 0.0;
         s.vignette = 0.0;
+        configure(&mut s);
     }
     app.world.insert_resource(WeatherState {
         wind,
@@ -34,7 +39,11 @@ fn meadow_app(wind: Vec3) -> App {
     });
     let w = &mut app.world;
     w.spawn((
-        Camera::perspective(60.0),
+        Camera {
+            // Fixed, so frames differ only by what moves.
+            exposure: Exposure::Manual { ev100: 14.0 },
+            ..Camera::perspective(60.0)
+        },
         Transform::from_xyz(0.0, 1.6, 8.0).looking_at(DVec3::new(0.0, 0.4, -4.0), Vec3::Y),
     ));
     w.spawn((
@@ -51,7 +60,10 @@ fn meadow_app(wind: Vec3) -> App {
             StandardMaterial::color(0.22, 0.14, 0.08).with_roughness(0.95),
         ),
     ));
-    w.spawn((Transform::default(), GrassField::flat(120.0, 120.0)));
+    // Small enough to keep a software renderer quick, big enough to fill the view.
+    let mut field = GrassField::flat(60.0, 60.0);
+    field.style.draw_distance = 40.0;
+    w.spawn((Transform::from_xyz(0.0, 0.0, -18.0), field));
     app
 }
 
@@ -107,8 +119,10 @@ fn a_meadow_covers_the_ground_with_blades() {
 
 #[test]
 fn wind_moves_the_blades() {
+    // Normals only: noisy lighting effects change every frame without TAA, the blades' shapes
+    // change only when they move.
     let diff = |wind: Vec3, name: &str| {
-        let mut app = meadow_app(wind);
+        let mut app = meadow_app_with(wind, |s| s.debug_view = DebugView::Normals);
         let a = render(&mut app, &format!("{name}_a"), 6)?;
         let b = render(&mut app, &format!("{name}_b"), 10)?;
         let (mut sum, mut n) = (0.0, 0.0);
