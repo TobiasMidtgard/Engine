@@ -219,7 +219,7 @@ pub fn places() -> Vec<Place> {
         place(
             "fortress",
             "Siege fortress on its hill",
-            near("fortress", [-2.0, 17.0, -44.0], [-3.0, 2.5, 4.0]),
+            near("fortress", [-34.0, 26.0, -62.0], [0.0, 3.0, 2.0]),
             15.0,
         ),
         place(
