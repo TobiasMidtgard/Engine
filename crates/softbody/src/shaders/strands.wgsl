@@ -6,6 +6,7 @@ struct StrandOut {
     @location(1) tangent: vec3<f32>,
     @location(2) t_shade: vec2<f32>,
     @location(3) @interpolate(flat) groom: u32,
+    @location(4) @interpolate(flat) seed: f32,
 };
 
 @vertex
@@ -25,15 +26,20 @@ fn vs_strand(@builtin(vertex_index) vertex: u32, @builtin(instance_index) instan
     out.tangent = p.tangent;
     out.t_shade = vec2<f32>(p.t, p.shade);
     out.groom = p.groom;
+    out.seed = p.seed;
     return out;
 }
 
-// Kajiya-Kay strand lighting with two shifted specular lobes (a white primary reflection and
-// a colored secondary one through the fiber), a little self-shadowing toward the root.
+// Strand lighting after Marschner et al. 2003, in the Kajiya-Kay form games use: a white
+// reflection off the cuticle (R) shifted toward the root, a colored glint that went through
+// the fiber and back (TRT) shifted toward the tip and broken up into sparkles along it, and
+// light passing straight through (TT) that makes backlit hair glow. Every strand varies a
+// little in brightness and warmth, and strands deep at the root get less light.
 @fragment
 fn fs_strand(in: StrandOut) -> @location(0) vec4<f32> {
     let g = grooms[in.groom];
-    let albedo = g.color.rgb * in.t_shade.y;
+    let warm = vec3(1.0 + 0.06 * (in.seed - 0.5), 1.0, 1.0 - 0.08 * (in.seed - 0.5));
+    let albedo = g.color.rgb * in.t_shade.y * warm;
     let t = safe_normalize(in.tangent, vec3(0.0, 1.0, 0.0));
     let v = normalize(-in.rel);
     let n = safe_normalize(v - t * dot(v, t), safe_normalize(cross(t, vec3(0.0, 0.0, 1.0)), vec3(1.0, 0.0, 0.0)));
@@ -50,8 +56,12 @@ fn fs_strand(in: StrandOut) -> @location(0) vec4<f32> {
         let th1 = dot(t1, h);
         let th2 = dot(t2, h);
         let spec1 = pow(sqrt(max(1.0 - th1 * th1, 0.0)), 90.0) * 0.06;
-        let spec2 = pow(sqrt(max(1.0 - th2 * th2, 0.0)), 24.0) * 0.12;
-        color += sun * shadow * (albedo * diffuse * INV_PI + vec3(spec1) + albedo * spec2);
+        let glint = 0.55 + 0.9 * value_noise2(vec2(in.t_shade.x * 18.0, in.seed * 97.0));
+        let spec2 = pow(sqrt(max(1.0 - th2 * th2, 0.0)), 24.0) * 0.12 * glint;
+        // Transmission: strongest looking toward the sun through the hair.
+        let tt = pow(saturate(dot(v, -l)), 5.0) * sqrt(max(1.0 - tl * tl, 0.0)) * 0.35;
+        color += sun * shadow * (albedo * diffuse * INV_PI + vec3(spec1) + albedo * spec2
+            + albedo * albedo * tt);
     }
     let sky = sky_ambient(n) * sky_visibility(in.rel, n) * PI;
     color += sky * albedo * INV_PI * 0.8;

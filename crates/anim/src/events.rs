@@ -36,10 +36,7 @@ pub(crate) fn emit_events(
     )>,
 ) {
     for (entity, animator, gt, foot_ik, gait, vehicle) in &mut q {
-        let yaw = {
-            let f = gt.rotation() * Vec3::NEG_Z;
-            f.x.atan2(-f.z)
-        };
+        let yaw = GroundContact::yaw_of(gt.rotation() * Vec3::NEG_Z);
         for e in &animator.events {
             anim_events.write(AnimationEvent {
                 entity,

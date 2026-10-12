@@ -11,7 +11,7 @@
 use engine_core::prelude::*;
 use engine_world::animation::AnimationParams;
 use engine_world::physics::PhysicsQueries;
-use engine_world::{ContactKind, Ground, SurfaceId};
+use engine_world::{ContactKind, Ground, SurfaceId, WorldShift};
 
 use crate::animator::Animator;
 use crate::ik::{GroundProbe, IkSurfaces, to_model, to_world, two_bone};
@@ -232,6 +232,24 @@ pub(crate) struct GaitRuntime {
     /// Bone indices per leg, resolved once per skeleton.
     legs: Vec<LegBones>,
     legs_skeleton: String,
+}
+
+impl GaitRuntime {
+    /// Carry planted feet and motion history into a shifted world frame.
+    pub(crate) fn follow_shift(&mut self, s: &WorldShift) {
+        for f in &mut self.feet {
+            f.pos = s.point(f.pos);
+            f.liftoff = s.point(f.liftoff);
+            f.normal = s.direction(f.normal);
+        }
+        for f in &mut self.footfalls {
+            f.position = s.point(f.position);
+            f.normal = s.direction(f.normal);
+        }
+        self.prev_origin = self.prev_origin.map(|o| s.point(o));
+        self.prev_forward = self.prev_forward.map(|f| s.direction(f));
+        self.velocity = s.direction(self.velocity);
+    }
 }
 
 impl LeggedGait {

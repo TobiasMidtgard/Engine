@@ -52,6 +52,9 @@ pub(crate) fn follow_world_shifts(
         if let Some(req) = &mut m.pending_dash {
             req.to = s.point(req.to);
         }
+        if let Some(platform) = &mut m.platform {
+            platform.shift(&s);
+        }
     }
     for mut b in &mut brains {
         if let Brain::Runner { origin, .. } = &mut *b {

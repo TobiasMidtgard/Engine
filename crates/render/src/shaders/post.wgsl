@@ -6,7 +6,7 @@ struct PostParams {
     params: vec4<f32>,
     // x: bloom intensity (0..1 mix), y: film grain, z: real time, w: bloom normalization
     params2: vec4<f32>,
-    // x: debug view, y: white balance warm(+)/cool(-), z: pre-exposure, w: night desaturation
+    // x: sharpening 0..1, y: white balance warm(+)/cool(-), z: pre-exposure, w: night desaturation
     params3: vec4<f32>,
 };
 
@@ -54,9 +54,36 @@ fn vs_fullscreen(@builtin(vertex_index) i: u32) -> FullscreenOut {
     return fullscreen_vertex(i, 0.0);
 }
 
+// Contrast-adaptive sharpening (after AMD FidelityFX CAS): pushes each pixel away from its four
+// neighbors, less where the neighborhood is already contrasty, and never beyond the
+// neighborhood's range, so temporal anti-aliasing's softness goes without halos. Works on
+// compressed values (c / (1 + c)) so bright edges don't ring.
+fn sharpened(uv: vec2<f32>, amount: f32) -> vec3<f32> {
+    let px = vec2<i32>(uv * vec2<f32>(textureDimensions(hdr_tex)));
+    let size = vec2<i32>(textureDimensions(hdr_tex)) - 1;
+    let c = textureLoad(hdr_tex, px, 0).rgb;
+    if (amount <= 0.0) { return c; }
+    let n = textureLoad(hdr_tex, clamp(px + vec2<i32>(0, -1), vec2<i32>(0), size), 0).rgb;
+    let s = textureLoad(hdr_tex, clamp(px + vec2<i32>(0, 1), vec2<i32>(0), size), 0).rgb;
+    let e = textureLoad(hdr_tex, clamp(px + vec2<i32>(1, 0), vec2<i32>(0), size), 0).rgb;
+    let w = textureLoad(hdr_tex, clamp(px + vec2<i32>(-1, 0), vec2<i32>(0), size), 0).rgb;
+    let cc = c / (1.0 + c);
+    let nc = n / (1.0 + n);
+    let sc = s / (1.0 + s);
+    let ec = e / (1.0 + e);
+    let wc = w / (1.0 + w);
+    let lo = min(cc, min(min(nc, sc), min(ec, wc)));
+    let hi = max(cc, max(max(nc, sc), max(ec, wc)));
+    // Less sharpening where the local contrast is already high.
+    let headroom = saturate3(min(lo, 1.0 - hi) / max(hi, vec3<f32>(1e-4)));
+    let k = -sqrt(headroom) * mix(0.125, 0.2, amount);
+    let r = clamp((cc + (nc + sc + ec + wc) * k) / (1.0 + 4.0 * k), lo, hi);
+    return r / max(1.0 - r, vec3<f32>(1e-4));
+}
+
 @fragment
 fn fs_tonemap(in: FullscreenOut) -> @location(0) vec4<f32> {
-    var c = textureSampleLevel(hdr_tex, post_sampler, in.uv, 0.0).rgb;
+    var c = sharpened(in.uv, post.params3.x);
     let bloom = textureSampleLevel(bloom_tex, post_sampler, in.uv, 0.0).rgb * post.params2.w;
     c = mix(c, bloom, post.params2.x);
     // Scotopic (night) vision: below ~1 cd/m^2 color fades toward a blue-gray.

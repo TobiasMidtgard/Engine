@@ -20,8 +20,8 @@ use engine_render::RenderAppExt;
 pub use body::{SoftBodySim, SoftKind};
 pub use character::{BoneCapsule, BoneColliders};
 pub use cloth::{Cloth, ClothPins};
-pub use hair::{HairEmitter, HairGroom, HairStyle};
-pub use rope::{BridgePlank, Rope, RopeBridge, RopeEnd, SoftLoad};
+pub use hair::{FurZone, HairEmitter, HairGroom, HairStyle, MeshSkin, MeshSkins};
+pub use rope::{Beads, BridgePlank, Rope, RopeBridge, RopeEnd, SoftLoad};
 pub use settings::{Pattern, SimSettings, SoftBodyConfig, SoftMaterial};
 pub use systems::SoftBodyFailed;
 pub use volume::{SoftVolume, VolumeShape};
@@ -53,7 +53,7 @@ impl Plugin for SoftBodyPlugin {
                 "Simulated cloth (flag, curtain, cape, sail): size (m), resolution, anchor (uv at the entity), pins (LeftEdge, TopEdge{every}, TopCorners, Bones{rows, bones}, Points), mass_per_m2 (kg/m²), stretch/shear/bend compliance (m/N), tear_ratio, pierceable, flammable, aero_drag, sim, material.",
             )
             .register_component::<Rope>(
-                "Rope or cable: end_a/end_b (Free, Here{offset}, World{at}, Entity{entity, offset}), length (m), segments, radius (m), mass_per_m (kg/m), compliance, cuttable, sim, material.",
+                "Rope or cable: end_a/end_b (Free, Here{offset}, World{at}, Entity{entity, offset}), length (m), segments, radius (m), mass_per_m (kg/m), compliance, cuttable, beads (spacing, radius, elongation, facets), sim, material.",
             )
             .register_component::<RopeBridge>(
                 "Walkable rope bridge along local +X: length, width, planks, sag, rail_height (m), plank size and mass (kg), sim, material.",
@@ -62,7 +62,7 @@ impl Plugin for SoftBodyPlugin {
                 "Soft solid (jelly, slime, cushion): shape (Box{size, bevel} or Sphere{radius}, m), resolution, mass_kg, shape_compliance and lattice_compliance (m/N), plasticity (1/s), yield_m, detail, sim, material.",
             )
             .register_component::<HairGroom>(
-                "Hair or fur grown from the parent's SkeletonPose bones: emitters (Scalp{bone, center, radii, guides, hairline}, Fur{bone, to, radius, guides, comb}), style (length m, segments, strands_per_guide, spread, clumping, curl, stiffness, droop, thickness, melanin, redness, tint), sim.",
+                "Hair or fur grown from the parent's SkeletonPose bones: emitters (Scalp{bone, center, radii, guides, hairline}, Fur{bone, to, radius, guides, comb}, Surface{mesh (asset key of a skinned body), guides, flow_from (bone), gravity, zones [{bone, offset, radius, length}], bones, skip_bones}), style (length m, segments, strands_per_guide, spread, clumping, curl, stiffness, droop, thickness, melanin, redness, tint), sim.",
             )
             .register_component::<BoneColliders>(
                 "Collision capsules on a character's bones for cloth and hair: capsules [{bone, to, radius (m), offset}], friction.",
@@ -88,6 +88,10 @@ impl Plugin for SoftBodyPlugin {
                     systems::step_bodies.in_set(SoftBodySet::Step),
                     (systems::emit_outputs, systems::drive_planks).in_set(SoftBodySet::Output),
                 ),
+            )
+            .add_systems(
+                PostUpdate,
+                systems::follow_world_shift.in_set(engine_world::WorldShiftSet::Apply),
             )
             .add_systems(
                 PostUpdate,

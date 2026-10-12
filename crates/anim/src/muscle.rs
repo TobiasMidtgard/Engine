@@ -16,6 +16,7 @@
 use std::sync::Arc;
 
 use engine_core::prelude::*;
+use engine_world::WorldShift;
 use engine_world::animation::AnimationParams;
 
 use crate::animator::Animator;
@@ -159,6 +160,15 @@ struct MuscleState {
 }
 
 impl MuscleRig {
+    /// Carry the jiggle's motion history into a shifted world frame.
+    pub(crate) fn follow_shift(&mut self, s: &WorldShift) {
+        self.last_origin = self.last_origin.map(|o| s.point(o));
+        for m in &mut self.state {
+            m.prev_pos = m.prev_pos.map(|p| s.direction(p));
+            m.prev_vel = m.prev_vel.map(|v| s.direction(v));
+        }
+    }
+
     pub fn new(muscles: Vec<Muscle>) -> Self {
         Self {
             muscles,

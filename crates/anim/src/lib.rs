@@ -13,6 +13,7 @@ pub mod import;
 pub mod muscle;
 pub mod procedural;
 pub mod retarget;
+mod shift;
 pub mod skeleton;
 pub mod skin;
 pub mod xform;
@@ -136,6 +137,7 @@ impl Plugin for AnimationPlugin {
                 )
                     .chain()
                     .in_set(AnimSet::Output),
+                shift::follow_world_shifts.in_set(engine_world::WorldShiftSet::Apply),
             ),
         );
     }
