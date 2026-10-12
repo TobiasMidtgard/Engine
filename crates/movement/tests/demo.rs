@@ -274,3 +274,37 @@ fn the_duel_waits_while_no_camera_is_near() {
         log(&app)
     );
 }
+
+#[test]
+fn the_duel_api_restarts_a_chosen_round() {
+    let (mut app, d) = demo_app(None);
+    run(&mut app, 2.0);
+    let r = engine_core::registry::call_api(
+        &mut app.world,
+        "movement.duel",
+        serde_json::json!({"round": "Focus"}),
+    )
+    .unwrap();
+    assert_eq!(r["duels"][0]["round"], "Focus");
+    // The focus round plays from its setup: the trained player counters the elite.
+    let elite = d.elite.unwrap();
+    run_until(&mut app, 4.0, |w| {
+        w.get::<CombatState>(elite).unwrap().defeated
+    });
+    assert!(combat(&app, elite).defeated, "{}", log(&app));
+    assert!(
+        engine_core::registry::call_api(
+            &mut app.world,
+            "movement.duel",
+            serde_json::json!({"round": "Nope"})
+        )
+        .is_err()
+    );
+    let r = engine_core::registry::call_api(
+        &mut app.world,
+        "movement.duel",
+        serde_json::json!({"round": null}),
+    )
+    .unwrap();
+    assert_eq!(r["duels"][0]["only"], serde_json::Value::Null);
+}

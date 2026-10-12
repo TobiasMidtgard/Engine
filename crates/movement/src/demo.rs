@@ -103,6 +103,20 @@ pub struct DuelDirector {
     set_up: bool,
 }
 
+impl DuelDirector {
+    /// Start a round over from its setup: `Some(round)` plays only that round on a loop,
+    /// `None` cycles through all three again (from the current round).
+    pub fn restart(&mut self, round: Option<Round>) {
+        if let Some(r) = round {
+            self.round = r;
+        }
+        self.only = round;
+        self.secs = 0.0;
+        self.decided_at = None;
+        self.set_up = false;
+    }
+}
+
 /// What a demo bot does.
 #[derive(Component, Debug, Clone, Serialize, Deserialize)]
 pub enum Brain {
