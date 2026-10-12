@@ -159,6 +159,8 @@ struct PuddleWindow {
     /// Any standing water in the window.
     wet: bool,
     since_upload: f32,
+    /// `WaterState::shifts` when the ground was read (a vertical shift keeps `origin`).
+    shifts: u64,
 }
 
 /// The water [`RenderFeature`]. Added by [`crate::WaterPlugin`].
@@ -270,7 +272,7 @@ fn polar_indices() -> Vec<u32> {
 /// fall).
 fn flow_texels(sim: &crate::flow::FlowSim) -> Vec<f32> {
     let (nx, nz) = (sim.nx, sim.nz);
-    let wet = |idx: usize| sim.depth[idx] > 0.003 && !sim.reservoir[idx].is_finite();
+    let wet = |idx: usize| sim.depth[idx] > 0.0015 && !sim.reservoir[idx].is_finite();
     let mut data = Vec::with_capacity(nx * nz * 4);
     for j in 0..nz {
         for i in 0..nx {
@@ -278,7 +280,8 @@ fn flow_texels(sim: &crate::flow::FlowSim) -> Vec<f32> {
             let bed = sim.bed[idx];
             if wet(idx) {
                 let d = sim.depth[idx];
-                let v = sim.vel[idx];
+                // The shader works in world axes.
+                let v = sim.world_dir(sim.vel[idx]);
                 data.extend_from_slice(&[bed + d, d, v.x, v.y]);
                 continue;
             }
@@ -309,7 +312,7 @@ fn flow_texels(sim: &crate::flow::FlowSim) -> Vec<f32> {
             }
             match best {
                 Some((level, n)) if level <= bed + 0.03 => {
-                    let v = sim.vel[n];
+                    let v = sim.world_dir(sim.vel[n]);
                     data.extend_from_slice(&[level, 0.006, v.x, v.y]);
                 }
                 // Under its own ground: the water's edge is where the surface dips below it.
@@ -725,7 +728,7 @@ impl WaterFeature {
             let (absorb, scatter) = optics_vectors(&sim.optics);
             let u = FlowUniform {
                 origin: [o.x, o.y, o.z, sim.cell],
-                dims: [sim.nx as f32, sim.nz as f32, 0.0, 0.0],
+                dims: [sim.nx as f32, sim.nz as f32, sim.yaw.cos(), sim.yaw.sin()],
                 absorb,
                 scatter,
                 look: [
@@ -778,11 +781,16 @@ impl WaterFeature {
                 / cell as f64)
                 .round();
         let origin = grid.origin + corner * cell as f64;
-        let moved = origin != w.origin || cell != w.cell || w.ground.len() != n * n;
+        let shifts = world
+            .get_resource::<SharedWater>()
+            .map_or(0, |s| s.0.read().shifts);
+        let moved =
+            origin != w.origin || cell != w.cell || w.ground.len() != n * n || shifts != w.shifts;
         w.since_upload += view.delta.max(0.0);
         if moved {
             w.origin = origin;
             w.cell = cell;
+            w.shifts = shifts;
             let ground = world.get_resource::<Ground>();
             let probe_y = view.origin.y + 200.0;
             w.ground = (0..n * n)

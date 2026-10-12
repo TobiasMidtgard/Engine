@@ -56,7 +56,7 @@ struct WaterUniform {
 
 struct FlowGpu {
     origin: vec4<f32>,  // corner rel camera x, base y, z, cell (m)
-    dims: vec4<f32>,    // cells x, z, unused, unused
+    dims: vec4<f32>,    // cells x, z, cos and sin of the grid's yaw
     absorb: vec4<f32>,
     scatter: vec4<f32>,
     look: vec4<f32>,
@@ -608,10 +608,15 @@ fn vs_flow(@builtin(vertex_index) vid: u32) -> FlowOut {
     let hr = select(s.r, r.r, r.g > 0.003);
     let hb = select(s.r, b.r, b.g > 0.003);
     let ht = select(s.r, t.r, t.g > 0.003);
+    // Grid axes to world axes: the grid turns with its entity's yaw.
+    let c = flow.dims.z;
+    let sn = flow.dims.w;
+    let turn = mat2x2<f32>(vec2<f32>(c, -sn), vec2<f32>(sn, c));
     var out: FlowOut;
-    out.normal = normalize(vec3<f32>(hl - hr, 2.0 * cell, hb - ht));
-    out.rel = vec3<f32>(flow.origin.x + (f32(i) + 0.5) * cell, flow.origin.y + y,
-                        flow.origin.z + (f32(j) + 0.5) * cell);
+    let gn = vec3<f32>(hl - hr, 2.0 * cell, hb - ht);
+    out.normal = normalize(vec3<f32>(turn * gn.xz, gn.y).xzy);
+    let along = turn * ((vec2<f32>(f32(i), f32(j)) + 0.5) * cell);
+    out.rel = vec3<f32>(flow.origin.x + along.x, flow.origin.y + y, flow.origin.z + along.y);
     out.clip = frame.view_proj * vec4<f32>(out.rel, 1.0);
     out.depth = s.g;
     out.vel = s.ba;
@@ -750,5 +755,33 @@ fn fs_under(in: FullscreenOut) -> @location(0) vec4<f32> {
     }
     let medium = pre_expose(medium_radiance(look, vec3<f32>(0.0), water.g.rain.w));
     let tr = exp(-(look.absorb + vec3<f32>(look.scattering)) * in_water);
-    return vec4<f32>(color * tr + medium * (1.0 - tr), 1.0);
+    var glow = medium * (1.0 - tr);
+    // Light shafts: the waves focus sunlight into moving sheets and columns. March the view
+    // ray through the first stretch of water; each point is lit through the spot on the surface
+    // straight up the refracted sun ray from it, so shafts line up with the sun and the
+    // caustics on the bottom.
+    let sun_up = saturate(frame.sun_dir.y * 3.0);
+    if (sun_up > 0.0) {
+        let sun_in = refract(-frame.sun_dir.xyz, vec3<f32>(0.0, 1.0, 0.0), 1.0 / 1.333);
+        let up_sun = -sun_in / max(-sun_in.y, 0.2);
+        let reach = min(in_water, 30.0);
+        // Per-pixel jitter (interleaved gradient noise) instead of banding; TAA smooths it.
+        let jitter = fract(52.9829189 * fract(dot(in.position.xy, vec2<f32>(0.06711056, 0.00583715))));
+        var rays = 0.0;
+        var weight = 0.0;
+        for (var i = 0; i < 12; i++) {
+            let t = reach * (f32(i) + jitter) / 12.0;
+            let s = dir * t;
+            let below = max(level - s.y, 0.0);
+            let at = tiling_pos(s).xz + up_sun.xz * below;
+            let w = exp(-0.12 * t - 0.06 * below);
+            rays += (caustics(at * 1.4) - 0.3) * w;
+            weight += w;
+        }
+        rays /= max(weight, 1e-3);
+        // Brightest looking toward the sun, faint looking away.
+        let toward = 0.4 + 2.0 * pow(saturate(dot(dir, -sun_in)), 6.0);
+        glow *= max(1.0 + rays * 2.2 * toward * sun_up * shadow_factor(vec3<f32>(0.0), vec3<f32>(0.0, 1.0, 0.0)), 0.0);
+    }
+    return vec4<f32>(color * tr + glow, 1.0);
 }

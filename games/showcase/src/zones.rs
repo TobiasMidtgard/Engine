@@ -246,18 +246,28 @@ pub const STREAM: [[f64; 2]; 7] = [
     [236.0, -235.0],
 ];
 
+/// The lake zone's water: the lake over its basin, the stream from its spring over the falls,
+/// and a jetty on the west shore facing the waterfall across the lake.
+fn lake_water<'a>(z: &Zone, ground: &'a dyn Fn(f64, f64) -> f64) -> engine_water::demo::Valley<'a> {
+    engine_water::demo::Valley {
+        lake_center: z.center,
+        lake_radius: z.radius as f32 * 1.3,
+        streams: &[engine_water::demo::ValleyStream {
+            path: &STREAM,
+            width_m: 5.0,
+            flow_m3_s: 1.0,
+        }],
+        ground,
+        jetty_bearing: Some(std::f64::consts::PI * 0.9),
+    }
+}
+
 /// The runway's two ends (x, z): 1.2 km north–south through the airfield.
 pub const RUNWAY: ([f64; 2], [f64; 2]) = ([780.0, -750.0], [780.0, 450.0]);
 
 /// What each zone shows. Each zone is one line, owned by its module's thread: swap the
 /// placeholder (`ph::…`) for your demo and leave the other lines alone.
-pub fn spawn_demos(
-    commands: &mut Commands,
-    meshes: &mut Assets<Mesh>,
-    lib: &Library,
-    land: &Landscape,
-    rng: &mut Rng,
-) {
+pub fn spawn_demos(commands: &mut Commands, lib: &Library, land: &Landscape, rng: &mut Rng) {
     for z in ZONES {
         match z.key {
             "plaza" => ph::plaza(commands, lib, z),
@@ -279,7 +289,10 @@ pub fn spawn_demos(
             "gallery2d" => ph::gallery2d(commands, lib, z),
             "forest" => engine_foliage::demo::spawn_demo(commands, z.center),
             "meadow" => engine_npc::demo::spawn_wildlife(commands, z.center, z.radius * 0.8),
-            "lake" => ph::lake(commands, meshes, lib, land, z),
+            "lake" => engine_water::demo::spawn_valley(
+                commands,
+                &lake_water(z, &|x, z| land.height(x, z)),
+            ),
             "water" => engine_water::demo::spawn_demo(commands, z.center),
             "footsteps" => engine_audio::demo::spawn_demo(commands, z.center),
             "tracks" => engine_terrain::demo::spawn_demo_with(
@@ -597,6 +610,17 @@ pub fn demo_views(z: &Zone) -> Vec<View> {
                 ),
             ]
         }
+        "lake" => {
+            let land = crate::landscape::shared();
+            engine_water::demo::valley_views(&lake_water(z, &|x, z| land.height(x, z)))
+                .iter()
+                .map(|v| View::new(v.key, v.name, v.eye, v.target, v.hour).warmup(v.warmup_secs))
+                .collect()
+        }
+        "water" => engine_water::demo::VIEWS
+            .iter()
+            .map(|v| View::new(v.key, v.name, v.eye, v.target, v.hour).warmup(v.warmup_secs))
+            .collect(),
         "yard" => vec![
             View::new(
                 "yard_banners",

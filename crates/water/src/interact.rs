@@ -30,6 +30,9 @@ pub struct WaterInteractor {
     /// Was touching the water last step (managed).
     #[serde(skip)]
     pub wet: bool,
+    /// Spray owed to `WaterSplash` messages while moving fast, kg (managed).
+    #[serde(skip)]
+    pub spray: f32,
 }
 
 impl Default for WaterInteractor {
@@ -39,6 +42,7 @@ impl Default for WaterInteractor {
             wake: 1.0,
             last: None,
             wet: false,
+            spray: 0.0,
         }
     }
 }
@@ -147,6 +151,29 @@ pub fn disturbance_system(
                     * speed.min(8.0)
                     * step
                     * (1.0 - (2.0 * submerged - 1.0).abs()).max(0.35);
+                // Fast hulls throw bow spray: sent out in puffs as `WaterSplash` so particles
+                // and audio can show and play it.
+                let fast = speed - 2.5;
+                if fast > 0.0 && it.wake >= 1.0 {
+                    it.spray += 1000.0 * r * r * fast * fast * 0.004 * it.wake * step;
+                    if it.spray > 2.0 {
+                        let dir = Vec3::new(v.x, 0.0, v.z) / speed;
+                        let side = Vec3::new(-dir.z, 0.0, dir.x)
+                            * if rng.f32() < 0.5 { -1.0 } else { 1.0 };
+                        let at = p + (dir * r * 1.6 + side * r * 0.4).as_dvec3();
+                        splashes.push(WaterSplash {
+                            position: DVec3::new(at.x, water.surface_height, at.z),
+                            velocity: dir * speed * 0.5
+                                + side * speed * 0.35
+                                + Vec3::Y * (1.0 + speed * 0.3),
+                            radius: r * 0.5,
+                            mass_kg: std::mem::take(&mut it.spray),
+                            source: Some(entity),
+                        });
+                    }
+                } else {
+                    it.spray = 0.0;
+                }
                 let bob = (v.y.abs() * step * 0.6 * r).min(0.05);
                 if push + bob > 1e-5 {
                     out.push(Disturbance {

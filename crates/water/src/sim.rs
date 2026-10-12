@@ -5,10 +5,10 @@ use std::hash::{Hash, Hasher};
 use engine_core::math::{DVec2, DVec3, EulerRot, Vec2, Vec3};
 use engine_core::prelude::*;
 use engine_render::Camera;
-use engine_world::{FocusPoints, Ground, WindField};
+use engine_world::{FocusPoints, Ground, WaterSplash, WindField};
 
 use crate::body::{WaterBed, WaterBody, WaterSettings};
-use crate::flow::{FlowBed, FlowRegion, FlowSim};
+use crate::flow::{FlowBed, FlowRegion, FlowSim, grid_point};
 use crate::state::{BodyState, SharedWater, WaterState};
 use crate::waves::{WaveSet, build_waves};
 
@@ -102,6 +102,9 @@ pub fn sync_bodies_system(
     }
 }
 
+/// How much faster springs run during the first half of a flow region's prewarm.
+const PRIME: f32 = 8.0;
+
 /// The point detail follows: the primary `SimulationFocus`, or the active camera when nothing
 /// is marked as the focus.
 pub fn focus_point(focus: &FocusPoints, cameras: &Query<(&GlobalTransform, &Camera)>) -> DVec3 {
@@ -144,6 +147,7 @@ pub fn ripple_system(
     focus: Res<FocusPoints>,
     cameras: Query<(&GlobalTransform, &Camera)>,
     mut book: ResMut<SimBook>,
+    mut spare: Local<Option<crate::ripples::RippleField>>,
 ) {
     let dt = time.delta_secs();
     let mut state = shared.0.write();
@@ -177,13 +181,22 @@ pub fn ripple_system(
                 })
         });
     }
-    state
-        .ripples
-        .step(dt, settings.ripple_damping, settings.foam_life_s);
+    // Step a copy with the water unlocked: the step runs on the compute pool, and a thread
+    // waiting for it there may pick up another system that reads the water, which would
+    // wait for this lock forever. Readers see the last step's ripples until the swap.
+    let field = spare.get_or_insert_with(|| state.ripples.clone());
+    field.clone_from(&state.ripples);
+    state.ripples.pending.clear();
+    drop(state);
+    field.step(dt, settings.ripple_damping, settings.foam_life_s);
+    let mut state = shared.0.write();
+    // Disturbances that came in meanwhile wait for the next step.
+    field.pending.append(&mut state.ripples.pending);
+    std::mem::swap(&mut state.ripples, field);
 }
 
-/// Bed heights for a new flow region (relative to its origin).
-fn flow_bed(region: &FlowRegion, origin: DVec3, ground: &Ground) -> Vec<f32> {
+/// Bed heights for a new flow region (relative to its origin; the grid turned by `yaw`).
+fn flow_bed(region: &FlowRegion, origin: DVec3, yaw: f32, ground: &Ground) -> Vec<f32> {
     let (nx, nz) = (
         region.cells[0].max(2) as usize,
         region.cells[1].max(2) as usize,
@@ -194,12 +207,13 @@ fn flow_bed(region: &FlowRegion, origin: DVec3, ground: &Ground) -> Vec<f32> {
             let mut out = Vec::with_capacity(nx * nz);
             for j in 0..nz {
                 for i in 0..nx {
-                    let p = origin
-                        + DVec3::new(
-                            (i as f64 + 0.5) * region.cell_m as f64,
-                            1000.0,
-                            (j as f64 + 0.5) * region.cell_m as f64,
-                        );
+                    let c = region.cell_m as f64;
+                    let p = grid_point(
+                        origin,
+                        yaw,
+                        DVec2::new((i as f64 + 0.5) * c, (j as f64 + 0.5) * c),
+                        1000.0,
+                    );
                     out.push(
                         ground
                             .height(p)
@@ -237,28 +251,60 @@ fn set_reservoirs(sim: &mut FlowSim, state_bodies: &[BodyState], ground: &Ground
 pub fn flow_system(
     time: Res<Time>,
     shared: Res<SharedWater>,
-    regions: Query<(Entity, &GlobalTransform, &FlowRegion)>,
+    regions: Query<(
+        Entity,
+        &GlobalTransform,
+        &Transform,
+        Option<&ChildOf>,
+        &FlowRegion,
+    )>,
     book: Res<SimBook>,
+    mut splashes: MessageWriter<WaterSplash>,
     mut last_layout: Local<u64>,
+    mut since_spray: Local<f32>,
 ) {
     let dt = time.delta_secs();
+    // Falls send their spray out as `WaterSplash` puffs (particles show it, audio plays it).
+    *since_spray += dt;
+    let spray = *since_spray >= SPRAY_PERIOD;
+    if spray {
+        *since_spray = 0.0;
+    }
     let mut state = shared.0.write();
     let state = &mut *state;
     let relayout = *last_layout != book.layout;
     *last_layout = book.layout;
     let mut seen = Vec::new();
-    for (entity, gt, region) in &regions {
+    for (entity, gt, local, parent, region) in &regions {
         seen.push(entity);
-        let origin = gt.translation();
+        // A root's own transform is its place even on the first step, before transforms have
+        // propagated (a region sampling its bed from the ground at the world origin would
+        // keep the wrong riverbed).
+        let (origin, rotation) = match parent {
+            None => (local.translation, local.rotation),
+            Some(_) => (gt.translation(), gt.rotation()),
+        };
+        let yaw = rotation.to_euler(EulerRot::YXZ).0;
         let idx = match state.flows.iter().position(|f| f.entity == entity) {
             Some(i) => i,
             None => {
-                let bed = flow_bed(region, origin, &state.ground);
+                let bed = flow_bed(region, origin, yaw, &state.ground);
                 let mut sim = FlowSim::new(entity, origin, region, bed);
+                sim.yaw = yaw;
                 set_reservoirs(&mut sim, &state.bodies, &state.ground);
-                // Let the stream establish itself before anyone looks.
+                // Let the stream establish itself before anyone looks: springs run at
+                // `PRIME` times their rate for the first half, so long flat reaches fill in a
+                // fraction of the time, then at their own rate so the stream settles to it.
                 let steps = (region.prewarm_s.max(0.0) * 30.0) as u32;
-                for _ in 0..steps {
+                for k in 0..steps {
+                    let boost = if k < steps / 2 { PRIME } else { 1.0 };
+                    for (s, r) in sim.sources.iter_mut().zip(&region.sources) {
+                        s.rate_m3_s = if r.rate_m3_s > 0.0 {
+                            r.rate_m3_s * boost
+                        } else {
+                            r.rate_m3_s
+                        };
+                    }
                     sim.step(1.0 / 30.0);
                 }
                 sim.drained_m3 = 0.0;
@@ -271,13 +317,37 @@ pub fn flow_system(
         if (sim.origin - origin).length_squared() > 1e-6 {
             sim.origin = origin;
         }
+        if (sim.yaw - yaw).abs() > 1e-6 {
+            sim.yaw = yaw;
+        }
         if relayout {
             set_reservoirs(sim, &state.bodies, &state.ground);
         }
         sim.step(dt);
+        if spray {
+            for (foot, v, power) in sim.plunges(0.5) {
+                // About 1 kg of spray per second per 2 kW of falling water.
+                let mass = power * 5e-4 * SPRAY_PERIOD;
+                if mass < 0.02 {
+                    continue;
+                }
+                // Flow times drop (m⁴/s): bigger falls throw spray higher and wider.
+                let size = (power / 9810.0).max(0.0).sqrt();
+                splashes.write(WaterSplash {
+                    position: foot,
+                    velocity: Vec3::new(v.x * 0.4, 1.5 + size.min(4.0), v.y * 0.4),
+                    radius: (0.4 + size * 0.5).min(4.0),
+                    mass_kg: mass,
+                    source: Some(sim.entity),
+                });
+            }
+        }
     }
     state.flows.retain(|f| seen.contains(&f.entity));
 }
+
+/// Seconds between spray puffs from each waterfall.
+const SPRAY_PERIOD: f32 = 0.25;
 
 /// Publish counters for `engine.describe` / `render.stats`.
 pub fn diagnostics_system(shared: Res<SharedWater>, mut diagnostics: ResMut<Diagnostics>) {
