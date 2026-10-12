@@ -112,6 +112,22 @@ pub struct NoiseEvent {
     pub source: Option<Entity>,
 }
 
+/// Something broke the water surface: an object falling in, a bullet, a footstep or wheel in
+/// shallow water, a boat's bow wave, a breaching whale. The water module writes it; particles
+/// (spray), audio (splash sound) and AI read it.
+#[derive(Message, Debug, Clone, Copy)]
+pub struct WaterSplash {
+    /// Where on the surface, world meters.
+    pub position: DVec3,
+    /// Velocity of the object relative to the water, m/s (negative y = going in).
+    pub velocity: Vec3,
+    /// Size of the disturbance, meters.
+    pub radius: f32,
+    /// Water thrown up, kg (spray amount, sound loudness).
+    pub mass_kg: f32,
+    pub source: Option<Entity>,
+}
+
 /// Smoke or gas released into the air (fires, explosions, exhausts, smoke grenades).
 /// The smoke module turns these into volumetric smoke; particles may add soot.
 #[derive(Message, Debug, Clone, Copy)]

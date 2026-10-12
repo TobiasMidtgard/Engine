@@ -33,6 +33,7 @@ const ALLOWED: &[&str] = &[
     "engine_render",
     "engine_assets",
     "engine_input",
+    "engine_debug",
 ];
 
 /// `cargo metadata` for the whole workspace (workspace packages only).

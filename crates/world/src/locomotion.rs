@@ -6,6 +6,10 @@
 //! * [`LocomotionState`]: what the character is actually doing (written by the movement
 //!   module), read by AI (is the target dashing? blocking? in the air?), cameras and UI.
 //! * [`VehicleControls`]: the same idea for cars, planes and ships.
+//! * [`LocomotionBackend`]: which module turns `MoveIntent` into motion. The movement module
+//!   calls [`claim_backend`] in its plugin's `build`; simple fallback movers (such as the NPC
+//!   module's built-in walker for games without a movement module) check for the resource at
+//!   run time and step aside when it exists.
 
 use engine_core::math::{DVec3, Vec3};
 use engine_core::prelude::*;
@@ -98,4 +102,49 @@ pub(crate) fn register(app: &mut App) {
     .register_component::<VehicleControls>(
         "Vehicle driver inputs: throttle, brake, steer/roll, pitch, yaw, lift, strafe, handbrake, boost.",
     );
+}
+
+/// Which locomotion module turns [`MoveIntent`] into motion (set by [`claim_backend`]).
+///
+/// Fallback movers check for this resource when their systems run (for example with the
+/// `resource_exists::<LocomotionBackend>` run condition), not in `Plugin::build`, because the
+/// movement plugin may be added after theirs.
+#[derive(Resource, Debug, Clone, Serialize, Deserialize)]
+pub struct LocomotionBackend {
+    pub name: String,
+}
+
+/// Call from a movement plugin's `build`. Panics with a clear message if another locomotion
+/// module is already installed, so two of them can't fight over the same characters.
+pub fn claim_backend(app: &mut App, name: &str) {
+    if let Some(existing) = app.world.get_resource::<LocomotionBackend>() {
+        panic!(
+            "Two locomotion modules: \"{}\" is installed and \"{name}\" tried to install too. \
+             Add only one movement plugin.",
+            existing.name
+        );
+    }
+    app.insert_resource(LocomotionBackend {
+        name: name.to_string(),
+    });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn claiming_records_the_backend() {
+        let mut app = App::new();
+        claim_backend(&mut app, "movement");
+        assert_eq!(app.world.resource::<LocomotionBackend>().name, "movement");
+    }
+
+    #[test]
+    #[should_panic(expected = "Two locomotion modules")]
+    fn a_second_claim_panics() {
+        let mut app = App::new();
+        claim_backend(&mut app, "movement");
+        claim_backend(&mut app, "other");
+    }
 }
