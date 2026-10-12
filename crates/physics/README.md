@@ -27,8 +27,9 @@ changing that one plugin line.
 - **Rolling resistance**: balls, barrels, logs and capsule limbs slow down and stop like real ones
   (Rapier has none, so they would roll forever). Each rolling contact pushes back with a torque of
   `Crr · N · r`: `rolling_resistance` on hard ground, more on mud, sand, snow and grass (from the
-  surface's deformation, the same amounts the vehicle tires use). Boxes tipping over an edge are
-  left alone. The contract's default `angular_damping` (0.05) slows rolling a little too.
+  surface's deformation, the same amounts the vehicle tires use), alike on boxes, terrain and
+  meshes. Boxes tipping over an edge are left alone. The contract's default `angular_damping`
+  (0.05) slows rolling a little too.
 - **Joints**: fixed, spherical (cone limit), revolute and prismatic (limits, motors), distance
   (rope), spring. `break_force` breaks a joint: the joint entity is despawned (or the `Joint`
   removed from a body entity).
@@ -146,7 +147,8 @@ sleeping pile stays asleep through floating-origin moves, a stack stands through
 world-pinned hinges turn with the world, a moving or spinning frame adds its motion at each body,
 characters keep their footing, queries see the new frame at once); rolling resistance
 (`tests/rolling.rs`: balls and logs slow at `Crr·g/(1 + I/mr²)` on concrete, faster on grass and
-sand, barrels stop on sand); the debug view (`tests/debug_draw.rs`); a headless screenshot of
+sand, the same on terrain and meshes, barrels stop on sand); the debug view
+(`tests/debug_draw.rs`, contacts on terrain included); a headless screenshot of
 the proving ground.
 
 ## Done when
@@ -162,8 +164,9 @@ the proving ground.
 ## Next
 
 - Articulated (reduced-coordinate) joints for ragdolls and robot arms: zero joint gap.
-- Smoother rolling barrels: Rapier's cylinder contacts make a rolling barrel hop a few
-  centimeters now and then.
+- Smoother rolling barrels on terrain and meshes: Rapier's cylinder-triangle contacts make a
+  barrel rolling over triangles hop up to 1.5 cm and drift sideways (on a box it rolls flat).
+  Balls and capsules roll flat on both.
 - A `rolling_resistance` field on `SurfaceMaterial`, so games can tune it per surface (today
   it comes from the surface's deformation).
 - Co-moving region frames, so cargo resting in a ship at 7 km/s can sleep (today bodies moving
