@@ -602,7 +602,11 @@ impl NavCtx<'_> {
                 }
                 if off == 0.0 && (x, z) != prev.0 {
                     let diagonal = x != prev.0.0 && z != prev.0.1;
-                    let limit = if diagonal { s.max_step * 1.42 } else { s.max_step } as f64;
+                    let limit = if diagonal {
+                        s.max_step * 1.42
+                    } else {
+                        s.max_step
+                    } as f64;
                     if (h - prev.1).abs() > limit {
                         return None;
                     }

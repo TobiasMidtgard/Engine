@@ -9,7 +9,9 @@ use engine_npc::*;
 use engine_world::WorldPlugin;
 
 fn main() {
-    let mut args = std::env::args().skip(1).map(|a| a.parse::<usize>().unwrap_or(1));
+    let mut args = std::env::args()
+        .skip(1)
+        .map(|a| a.parse::<usize>().unwrap_or(1));
     let arenas = args.next().unwrap_or(4);
     let meadows = args.next().unwrap_or(4);
     let frames = args.next().unwrap_or(600);
@@ -26,7 +28,11 @@ fn main() {
             demo::spawn_demo(&mut commands, DVec3::new(i as f64 * 120.0, 0.0, 0.0));
         }
         for i in 0..meadows {
-            demo::spawn_wildlife(&mut commands, DVec3::new(i as f64 * 200.0, 0.0, 400.0), 60.0);
+            demo::spawn_wildlife(
+                &mut commands,
+                DVec3::new(i as f64 * 200.0, 0.0, 400.0),
+                60.0,
+            );
         }
     }
     app.world.flush();

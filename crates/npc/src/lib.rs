@@ -2,6 +2,7 @@
 
 pub mod agent;
 mod api;
+pub mod art;
 pub mod brain;
 pub mod combat;
 pub mod demo;
