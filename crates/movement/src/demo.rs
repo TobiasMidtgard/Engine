@@ -26,7 +26,7 @@ use std::f32::consts::FRAC_PI_2;
 use engine_core::math::{DVec3, Quat, Vec3};
 use engine_core::prelude::*;
 use engine_core::time::LocalTimeScale;
-use engine_render::{Camera, MeshRenderer, Shape, StandardMaterial};
+use engine_render::{Camera, MeshRenderer, StandardMaterial};
 use engine_world::animation::AnimationParams;
 use engine_world::locomotion::{LocomotionMode, MoveIntent};
 use engine_world::physics::{CharacterController, Collider, RigidBody};
