@@ -630,82 +630,62 @@ fn fortress(commands: &mut Commands, pal: &Palette) {
 }
 
 fn arena(commands: &mut Commands, pal: &Palette) {
+    use engine::world::physics::{Collider, ColliderShape};
     let c = zone("arena").center;
-    spawn(
-        commands,
-        Shape::Cylinder {
-            radius: 40.0,
-            height: 0.3,
-            segments: 64,
-        },
-        StandardMaterial::hex(0x8c7a5b).with_roughness(0.95),
+    commands.spawn((
         at(c + DVec3::new(0.0, 0.15, 0.0)),
-    );
-    for i in 0..8 {
-        let a = i as f64 / 8.0 * std::f64::consts::TAU;
-        spawn(
-            commands,
+        MeshRenderer::new(
             Shape::Cylinder {
-                radius: 1.2,
-                height: 8.0,
-                segments: 24,
+                radius: 40.0,
+                height: 0.3,
+                segments: 64,
             },
-            pal.concrete,
+            StandardMaterial::hex(0x8c7a5b).with_roughness(0.95),
+        ),
+        Collider {
+            shape: ColliderShape::Cylinder {
+                radius: 40.0,
+                half_height: 0.15,
+            },
+            ..Default::default()
+        },
+    ));
+    // Pillars, turned half a step so none blocks the camera's view of the center.
+    for i in 0..8 {
+        let a = (i as f64 + 0.5) / 8.0 * std::f64::consts::TAU;
+        commands.spawn((
             at(c + DVec3::new(a.cos() * 18.0, 4.0, a.sin() * 18.0)),
-        );
+            MeshRenderer::new(
+                Shape::Cylinder {
+                    radius: 1.2,
+                    height: 8.0,
+                    segments: 24,
+                },
+                pal.concrete,
+            ),
+            Collider {
+                shape: ColliderShape::Cylinder {
+                    radius: 1.2,
+                    half_height: 4.0,
+                },
+                ..Default::default()
+            },
+        ));
     }
-    // Cover, a ramp and a wall-run wall.
-    for (x, z) in [(-8.0, 4.0), (6.0, -6.0), (0.0, 10.0)] {
-        spawn(
-            commands,
-            cuboid(4.0, 1.2, 1.0),
-            pal.concrete,
-            at(c + DVec3::new(x, 0.6, z)),
-        );
-    }
-    spawn(
-        commands,
-        cuboid(4.0, 0.5, 10.0),
-        pal.concrete,
+    // A ramp and a wall-run wall for movement.
+    commands.spawn((
         Transform::from_translation(c + DVec3::new(12.0, 1.6, 8.0))
             .with_rotation(Quat::from_rotation_x(0.35)),
-    );
-    spawn(
-        commands,
-        cuboid(0.8, 6.0, 24.0),
-        pal.concrete,
+        MeshRenderer::new(cuboid(4.0, 0.5, 10.0), pal.concrete),
+        Collider::cuboid(Vec3::new(2.0, 0.25, 5.0)),
+    ));
+    commands.spawn((
         at(c + DVec3::new(-24.0, 3.0, 0.0)),
-    );
-    // Placeholder fighters.
-    let red = StandardMaterial::hex(0xa83232).with_roughness(0.5);
-    let blue = StandardMaterial::hex(0x3260a8).with_roughness(0.5);
-    for (i, (x, z)) in [(-3.0, -2.0), (4.0, 3.0), (2.0, -8.0)]
-        .into_iter()
-        .enumerate()
-    {
-        spawn(
-            commands,
-            Shape::Capsule {
-                radius: 0.4,
-                height: 1.8,
-                segments: 16,
-            },
-            red,
-            at(c + DVec3::new(x, 0.9 + 0.3, z)),
-        );
-        if i == 0 {
-            spawn(
-                commands,
-                Shape::Capsule {
-                    radius: 0.4,
-                    height: 1.8,
-                    segments: 16,
-                },
-                blue,
-                at(c + DVec3::new(0.0, 1.2, 0.0)),
-            );
-        }
-    }
+        MeshRenderer::new(cuboid(0.8, 6.0, 24.0), pal.concrete),
+        Collider::cuboid(Vec3::new(0.4, 3.0, 12.0)),
+    ));
+    // Two squads, cover, explosive barrels, a high platform and a duel ring.
+    engine_npc::demo::spawn_demo(commands, c + DVec3::new(0.0, 0.3, 0.0));
 }
 
 fn field(commands: &mut Commands, rng: &mut Rng) {

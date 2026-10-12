@@ -1,8 +1,8 @@
 # engine_npc — NPC AI
 
-**Owner:** Smart NPC AI. **Status:** AI core in (perception, memory, tactics, navigation,
-squads, melee and ranged combat, learning, explosives). Wildlife, stand-in bodies, the showcase
-arena and the `npc.*` API land next.
+**Owner:** Smart NPC AI. **Status:** AI core (perception, memory, tactics, navigation, squads,
+melee and ranged combat, learning, explosives), wildlife, stand-in bodies and the showcase arena
+are in. Next: the `npc.*` API, smoke-aware sight, vehicles.
 
 Enemies that feel smarter than other games: they notice you gradually, remember where you went,
 use cover and high ground, flank and suppress as a squad, take turns in melee instead of
@@ -29,6 +29,41 @@ commands.entity(player).insert(Faction::PLAYER);
 Static `Collider`s (walls, crates, platforms) become the NPCs' tactical world: cover points,
 line of sight, walkable tops and the navigation grid are built from them and rebuilt when they
 change. When a physics backend is installed, sight and shot checks also use `PhysicsQueries`.
+
+## Wildlife
+
+```rust,ignore
+commands.spawn((Transform::from_xyz(5.0, 0.0, 3.0), Animal::new(Species::Deer), Herd(1), StandIn::default()));
+```
+
+Deer and rabbits graze, wander with their herd, drink at the nearest water's edge, bed down at
+night and bolt from anything inside their flight distance. That distance grows when the
+threat runs or attacks and shrinks a lot when it sneaks, so a crouching player gets close.
+Deer smell what's upwind. Panic spreads through a herd a moment after the first one bolts, and
+alert deer make the rest look up. Wolf packs roam, get hungry, track prey by scent, stalk low
+while spreading out around it, then charge, cut it off and bite; they feed on the kill and
+back away from people. Bird flocks peck on the ground and lift off together. Gunfire,
+explosions, howls and fire scare everything. `WildlifeSettings` tunes respawn, thirst, hunger,
+skittishness and howling.
+
+## Stand-in bodies
+
+`StandIn` gives an NPC or animal a primitive body posed every step from the AI state, so
+behavior reads before real models exist: gait, crouching in cover, the raised weapon of an
+attack's telegraph (glowing for a heavy guard breaker), blocks, white parry flashes, dodges,
+staggers, hit flashes, falling when downed, muzzle flashes; a head band in the skill color
+(grey, bronze, silver, gold) and an orb for alertness (yellow, orange, red). Animals graze
+head-down, flag their tails when alarmed, lie down, gallop, hop, creep and flap. With
+`NpcSettings::show_intent`, rings and lines on the ground show where each NPC is going and why
+(blue cover, orange flank, purple high ground, grey fall back, yellow search).
+
+## Showcase
+
+`demo::spawn_demo(commands, origin)` builds the combat arena: two five-fighter squads of mixed
+skill across low walls, crates, explosive barrels and a raised platform, plus a master and a
+veteran dueling in a ring. Downed fighters get up after six seconds and barrels come back, so
+the fight keeps going. `demo::spawn_wildlife(commands, center, radius)` fills a meadow with a
+deer herd, rabbits, two bird flocks and a wolf pack.
 
 ## Skills (`NpcSkills`, all 0..1 except reaction time)
 
@@ -90,6 +125,15 @@ The crate depends only on core crates (`engine_core`, `engine_world`, `engine_re
   that a master beats a veteran in a duel, that squad mates share sightings, that melee squads
   take turns, that shooters detonate explosives next to enemies, and that a ranged squad sends a
   flanker.
+- `tests/wildlife.rs`: deer bolt from a runner but let a sneaker much closer, panic spreads
+  through a herd, a wolf pack stalks, charges, kills and feeds, birds take off together and
+  land again.
+- `tests/demo.rs`: the arena fight keeps going for a minute (shots, attacks, blocks, cover,
+  downed and revived) inside the arena; the meadow lives for two minutes (grazing, wandering,
+  hunting, fleeing) without animals leaving.
+- `tests/screenshots.rs`: renders the arena, a cover fight, the duel and the meadow on a GPU
+  or lavapipe and checks the fighters and deer show up. `NPC_SCREENSHOT_DIR=dir` keeps the
+  PNGs.
 
 ## Done when
 

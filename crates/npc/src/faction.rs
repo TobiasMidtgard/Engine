@@ -28,7 +28,8 @@ impl Faction {
 pub struct Squad(pub u32);
 
 /// Relations between factions. Default: every pair of different factions is hostile, except
-/// that prey are hostile to no one (they flee instead of fighting).
+/// that prey are hostile to no one (they flee instead of fighting) and NPC fighters and
+/// animals leave each other alone (remove those pairs from `allied` to make hunters).
 #[derive(Resource, Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Factions {
@@ -61,8 +62,14 @@ impl Factions {
 }
 
 pub(crate) fn default_factions() -> Factions {
+    let mut allied = Vec::new();
+    for fighter in [Faction::ENEMY, Faction::RIVAL] {
+        for animal in [Faction::PREY, Faction::PREDATOR] {
+            allied.push([fighter.0, animal.0]);
+        }
+    }
     Factions {
-        allied: Vec::new(),
+        allied,
         passive: vec![Faction::PREY.0],
     }
 }
@@ -78,6 +85,8 @@ mod tests {
         assert!(!f.hostile(Faction::ENEMY, Faction::ENEMY));
         assert!(!f.hostile(Faction::PREY, Faction::PLAYER));
         assert!(f.hostile(Faction::PREDATOR, Faction::PREY));
+        assert!(!f.hostile(Faction::ENEMY, Faction::PREY));
+        assert!(!f.hostile(Faction::PREDATOR, Faction::RIVAL));
         f.set_allied(Faction::ENEMY, Faction::RIVAL, true);
         assert!(!f.hostile(Faction::RIVAL, Faction::ENEMY));
         f.set_allied(Faction::RIVAL, Faction::ENEMY, false);

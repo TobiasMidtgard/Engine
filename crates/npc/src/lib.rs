@@ -3,6 +3,7 @@
 pub mod agent;
 pub mod brain;
 pub mod combat;
+pub mod demo;
 pub mod faction;
 pub mod features;
 pub mod learning;
@@ -12,6 +13,8 @@ pub mod perception;
 pub mod skills;
 pub mod squad;
 pub mod tactics;
+pub mod visuals;
+pub mod wildlife;
 pub mod world_model;
 
 pub use agent::{
@@ -27,6 +30,8 @@ pub use nav::{NavAgent, NavGrid, NavSettings, PathStatus};
 pub use perception::{BodyHeight, Known, NpcMemory, Perceivables};
 pub use skills::{NpcSkills, Perception};
 pub use squad::{AttackTokens, SquadSettings};
+pub use visuals::{IntentMarker, Part, StandIn, StandInPart};
+pub use wildlife::{Animal, AnimalMind, AnimalState, BirdFlight, Herd, Species, WildlifeSettings};
 pub use world_model::{CoverPoint, TacticalWorld, WorldModelSettings};
 
 use engine_core::prelude::*;
@@ -43,6 +48,8 @@ pub enum NpcSet {
     Decide,
     /// Fallback mover, hit resolution, damage.
     Act,
+    /// Pose stand-in bodies and intent markers (`SimSet::PostPhysics`).
+    Show,
 }
 
 /// NPC AI: perception, memory, tactics, squads, combat, wildlife. See the crate docs.
@@ -59,6 +66,7 @@ impl Plugin for NpcPlugin {
             .init_resource::<Perceivables>()
             .init_resource::<AttackTokens>()
             .init_resource::<OpponentModels>()
+            .init_resource::<WildlifeSettings>()
             .register_component::<Npc>(
                 "An AI fighter: home and patrol radius, active flag, preferred range override. \
                  Adds skills, perception, weapon, vitals, faction and runtime state.",
@@ -86,12 +94,28 @@ impl Plugin for NpcPlugin {
             .register_component::<ExplosiveProp>(
                 "Explodes when damaged: radius (m), damage, health. NPCs shoot it near enemies.",
             )
+            .register_component::<Animal>(
+                "An animal: species (deer, rabbit, wolf, bird), home, roaming range (m), \
+                 skittishness (flight distance multiplier), male. Body, footsteps, faction and \
+                 health come from the species.",
+            )
+            .register_component::<StandIn>(
+                "Stand-in body posed from the AI state: color (sRGB hex, default from faction or \
+                 species), plain (no alert orb or skill band).",
+            )
+            .register_component::<Herd>(
+                "Herd id: animals with the same id graze, move and flee together (herd, pack, flock).",
+            )
             .register_component::<Footfall>(
                 "Footsteps sent by the NPC fallback mover: foot kind, mass (kg), print size, stride.",
             )
             .register_resource::<NpcSettings>(
                 "NPC module settings: built-in locomotion, hit resolution, think rate, LOD distance, \
                  intent overlay, revive time.",
+            )
+            .register_resource::<WildlifeSettings>(
+                "Wildlife: enabled, respawn_secs (killed animals return), thirst_secs, hunger_secs \
+                 (wolf packs hunt again), skittishness (all flight distances), howl.",
             )
             .register_resource::<Factions>("Which factions are allied and which never attack.")
             .register_resource::<SquadSettings>(
@@ -104,22 +128,26 @@ impl Plugin for NpcPlugin {
                     .in_set(SimSet::Input),
             )
             .configure_sets(FixedUpdate, NpcSet::Act.in_set(SimSet::Gameplay))
+            .configure_sets(FixedUpdate, NpcSet::Show.in_set(SimSet::PostPhysics))
             .add_systems(
                 FixedUpdate,
                 (
                     (
                         world_model::rebuild_world_model,
+                        wildlife::init_animals,
                         perception::tick_clocks,
                         perception::collect_perceivables,
                     )
                         .chain()
                         .in_set(NpcSet::Prepare),
-                    perception::perceive.in_set(NpcSet::Perceive),
+                    (perception::perceive, wildlife::animal_senses).in_set(NpcSet::Perceive),
                     (
                         squad::plan_squads,
                         combat::notice_attacks,
                         combat::defend,
                         brain::think_and_act,
+                        wildlife::animal_think,
+                        wildlife::animal_bites,
                     )
                         .chain()
                         .in_set(NpcSet::Decide),
@@ -132,6 +160,13 @@ impl Plugin for NpcPlugin {
                     )
                         .chain()
                         .in_set(NpcSet::Act),
+                    (
+                        visuals::build_stand_ins,
+                        visuals::pose_stand_ins,
+                        visuals::intent_markers,
+                    )
+                        .chain()
+                        .in_set(NpcSet::Show),
                 ),
             );
     }
