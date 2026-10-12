@@ -74,6 +74,22 @@ under a micrometer).
   contacts carry on. A turn into another planet's frame rotates each region's contents about
   its anchor, world-pinned joints included; a moving frame adds its velocity to every body.
 
+## Seeing what physics sees (`PhysicsDebug`)
+
+With `engine_debug::DebugPlugin` in the app, `PhysicsDebug` (a registered resource, also
+`physics.debug {"all": true}`) draws over the scene, within `radius_m` (150 m) of the focus or
+camera:
+
+- `colliders`: wireframes, green awake, blue-gray asleep, yellow kinematic, gray static,
+  magenta sensors, cyan characters (big meshes and heightfields as their bounds).
+- `contacts`: touching points with an arrow along the normal that grows with the force.
+- `joints`: both anchors joined by a line, orange turning red as a breakable joint nears its
+  break force or the anchors pull apart; a ring marks a world pin.
+- `regions`, `centers_of_mass`, `velocities` (where each body will be in 0.25 s).
+
+`PHYSICS_DEBUG=1 cargo run -p engine_physics --release --example proving_ground` renders the
+proving ground with the overlay.
+
 ## Settings (`PhysicsSettings`, editable with `resource.patch`)
 
 | Field | Default | What it does |
@@ -98,7 +114,7 @@ touching pairs, step time, substeps.
 ## API functions
 
 `physics.raycast`, `physics.shapecast`, `physics.overlap`, `physics.closest_point`,
-`physics.impulse`, `physics.blast`, `physics.stats`. `engine.describe` lists their arguments.
+`physics.impulse`, `physics.blast`, `physics.stats`, `physics.debug`. `engine.describe` lists their arguments.
 
 ## Contract details a replacement backend must match
 
@@ -130,7 +146,8 @@ sleeping pile stays asleep through floating-origin moves, a stack stands through
 world-pinned hinges turn with the world, a moving or spinning frame adds its motion at each body,
 characters keep their footing, queries see the new frame at once); rolling resistance
 (`tests/rolling.rs`: balls and logs slow at `Crr·g/(1 + I/mr²)` on concrete, faster on grass and
-sand, barrels stop on sand); a headless screenshot of the proving ground.
+sand, barrels stop on sand); the debug view (`tests/debug_draw.rs`); a headless screenshot of
+the proving ground.
 
 ## Done when
 
@@ -151,7 +168,6 @@ sand, barrels stop on sand); a headless screenshot of the proving ground.
   it comes from the surface's deformation).
 - Co-moving region frames, so cargo resting in a ship at 7 km/s can sleep (today bodies moving
   together at speed stay awake; they ride correctly, they just cost CPU).
-- Debug drawing of colliders, contacts and regions through `engine_debug`.
 - A `Ground` query backed by static colliders for levels without terrain.
 - Buoyancy along the local "up" on planets: today it measures depth along world Y, as the
   `Water` contract's `surface_height` does (near the focus the space module turns the world so

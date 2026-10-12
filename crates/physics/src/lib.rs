@@ -3,6 +3,7 @@
 mod api;
 mod character;
 mod convert;
+mod debug;
 pub mod demo;
 mod queries;
 mod rolling;
@@ -18,6 +19,7 @@ use engine_world::physics::{self as contract, PhysicsQueries};
 use engine_world::{GroundContact, NoiseEvent, WorldImpulse};
 use parking_lot::RwLock;
 
+pub use debug::PhysicsDebug;
 pub use settings::PhysicsSettings;
 
 /// Rigid-body physics on Rapier: bodies, colliders, joints, characters and scene queries,
@@ -77,6 +79,7 @@ impl Plugin for PhysicsPlugin {
             .insert_resource(PhysicsQueries(Arc::new(queries::RapierQueries(shared))))
             .init_resource::<PhysicsSettings>()
             .init_resource::<PhysicsStats>()
+            .init_resource::<PhysicsDebug>()
             .init_resource::<step::PendingRemovals>()
             // Normally added by `WorldPlugin`; repeated so plugin order doesn't matter.
             .init_resource::<engine_world::Gravity>()
@@ -92,6 +95,10 @@ impl Plugin for PhysicsPlugin {
                 "Physics tuning: solver iterations, substep length (s), region radius (m), \
                  freeze distance (m), max speed (m/s), contact/impact events, buoyancy, blasts.",
             )
+            .register_resource::<PhysicsDebug>(
+                "Physics debug drawing (needs DebugPlugin): colliders, contacts, joints, \
+                 regions, centers_of_mass, velocities (bools), radius_m around the focus, on_top.",
+            )
             .register_resource::<PhysicsStats>(
                 "Last physics step (read-only): bodies, awake bodies, regions, touching pairs, \
                  step time (ms), substeps.",
@@ -101,6 +108,7 @@ impl Plugin for PhysicsPlugin {
                 PostUpdate,
                 shift::shift_simulation.in_set(engine_world::WorldShiftSet::Apply),
             )
+            .add_systems(PostUpdate, debug::draw_physics_debug)
             .add_systems(Last, step::note_removals);
         api::register(app);
     }

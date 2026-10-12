@@ -1051,6 +1051,7 @@ version = "0.1.0"
 dependencies = [
  "bevy_ecs",
  "engine_core",
+ "engine_debug",
  "engine_render",
  "engine_world",
  "image",

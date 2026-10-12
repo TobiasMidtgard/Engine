@@ -5,13 +5,15 @@
 //! ```
 //!
 //! `only` renders just the shots whose name contains it (the rest are still simulated).
+//! `PHYSICS_DEBUG=1` draws the physics debug view over the scene (colliders, contacts, joints,
+//! centers of mass) and adds `_debug` to the file names.
 //!
 //! Needs a GPU or a software Vulkan driver (lavapipe: `apt-get install mesa-vulkan-drivers`).
 
 use engine_core::math::{DVec3, Vec3};
 use engine_core::prelude::*;
 use engine_core::time::TimeSource;
-use engine_physics::{PhysicsPlugin, PhysicsStats, demo};
+use engine_physics::{PhysicsDebug, PhysicsPlugin, PhysicsStats, demo};
 use engine_render::prelude::*;
 use engine_render::{RenderDisabled, capture_now};
 use engine_world::WorldPlugin;
@@ -80,6 +82,18 @@ fn main() {
     app.add_plugins(RenderPlugin);
     app.add_plugins(WorldPlugin);
     app.add_plugins(PhysicsPlugin);
+    let debug = std::env::var("PHYSICS_DEBUG").is_ok_and(|v| v != "0");
+    if debug {
+        app.add_plugins(engine_debug::DebugPlugin);
+        *app.world.resource_mut::<PhysicsDebug>() = PhysicsDebug {
+            colliders: true,
+            contacts: true,
+            joints: true,
+            centers_of_mass: true,
+            radius_m: 80.0,
+            ..Default::default()
+        };
+    }
     app.world
         .resource_mut::<Time>()
         .set_source(TimeSource::Manual {
@@ -135,7 +149,8 @@ fn main() {
             eprintln!("no GPU: {}", d.0);
             return;
         }
-        let path = out.join(format!("{name}.png"));
+        let suffix = if debug { "_debug" } else { "" };
+        let path = out.join(format!("{name}{suffix}.png"));
         match capture_now(&mut app.world, &path) {
             Ok(_) => {
                 let s = *app.world.resource::<PhysicsStats>();
