@@ -401,3 +401,27 @@ fn gusts_dont_jump_when_the_origin_moves() {
         assert!((a - b).length() < 1e-4, "{a} vs {b} at {here}");
     }
 }
+
+#[test]
+fn wheel_contacts_move_with_the_world() {
+    let mut app = app();
+    let at = DVec3::new(3.0, 0.0, -1.5);
+    let car = app
+        .world
+        .spawn((
+            Transform::default(),
+            WheelContacts {
+                wheels: vec![WheelContact {
+                    position: at,
+                    ..Default::default()
+                }],
+            },
+        ))
+        .id();
+    app.update();
+    let s = turned();
+    app.world.write_message(s);
+    app.update();
+    let w = app.world.get::<WheelContacts>(car).unwrap();
+    assert!((w.wheels[0].position - s.point(at)).length() < 1e-6);
+}
