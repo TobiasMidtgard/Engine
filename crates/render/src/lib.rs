@@ -64,6 +64,7 @@ pub mod sky_feature;
 mod sky_occlusion;
 pub mod targets;
 pub mod texture;
+pub mod virtual_geometry;
 
 use engine_assets::{AssetAppExt, AssetPlugin, AssetServer, Assets, Handle};
 use engine_core::prelude::*;
