@@ -16,7 +16,7 @@ are built, nothing simulates yet) · ⬜ not visible yet
 
 | # | Test case | Zone / viewpoint | Owner | Status |
 |---|---|---|---|---|
-| 1 | Huge scale: walk, drive, fly from the ground to orbit and the Moon without loading screens | `overview`, `tower`, `stratosphere`, `orbit`, `moon` | Planets and terrain | 🟨 camera flies there; planet surface from orbit is flat color |
+| 1 | Huge scale: walk, drive, fly from the ground to orbit and the Moon without loading screens | `overview`, `tower`, `stratosphere`, `orbit`, `moon` | Planets and terrain | 🟨 the camera flies there over a real planet: the valley sits in an Earth with ranges, coasts and oceans all the way round (`stratosphere`, `orbit`), and the Moon's surface has craters (`moon`); one continuous trip from the ground to the Moon is next |
 | 2 | Efficient enough for multiplanetary travel (planets, moons, orbits, reference frames) | `spaceport`, `orbit`, `moon` | Planets and terrain | ⬜ |
 | 3 | Cars with real suspension, tires and drivetrain | `track` | Cars, planes and spaceships | 🟨 demo in; being checked on the Rapier backend |
 | 4 | Planes with aerodynamic surfaces | `airfield` (1.2 km runway) | Cars, planes and spaceships | 🟨 demo in; being checked on the Rapier backend |
