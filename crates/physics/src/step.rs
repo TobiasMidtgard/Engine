@@ -253,7 +253,11 @@ pub(crate) fn physics_step(world: &mut World, mut q: Local<Option<StepQueries>>)
             // Our own writes to a body's Transform move its colliders already.
             Some(c) if c.body == Some(e) => {}
             Some(c) if c.body.is_none() => {
-                if let Some(p) = world_pose(world, e) {
+                // A world shift moves the cached pose along with the entity: nothing to do.
+                if let Some(p) = world_pose(world, e)
+                    && (c.world_pose.0.distance(p.translation) > 1e-6
+                        || !c.world_pose.1.abs_diff_eq(p.rotation, 1e-6))
+                {
                     sim.move_static(e, (p.translation, p.rotation));
                 }
             }
@@ -296,6 +300,10 @@ pub(crate) fn physics_step(world: &mut World, mut q: Local<Option<StepQueries>>)
     // ---------------------------------------------------------------- joints
     for e in q.changed_joints.iter(world).collect::<Vec<_>>() {
         let desc = world.get::<Joint>(e).unwrap().clone();
+        // A world shift moves world anchors in the cache too.
+        if sim.joints.get(&e).is_some_and(|j| j.desc == desc) {
+            continue;
+        }
         sim.remove_joint(e);
         sim.joints.insert(
             e,

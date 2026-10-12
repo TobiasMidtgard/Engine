@@ -6,6 +6,7 @@ mod convert;
 pub mod demo;
 mod queries;
 mod settings;
+mod shift;
 mod sim;
 mod step;
 
@@ -85,6 +86,7 @@ impl Plugin for PhysicsPlugin {
             .add_message::<WorldImpulse>()
             .add_message::<GroundContact>()
             .add_message::<NoiseEvent>()
+            .add_message::<engine_world::WorldShift>()
             .register_resource::<PhysicsSettings>(
                 "Physics tuning: solver iterations, substep length (s), region radius (m), \
                  freeze distance (m), max speed (m/s), contact/impact events, buoyancy, blasts.",
@@ -94,6 +96,10 @@ impl Plugin for PhysicsPlugin {
                  step time (ms), substeps.",
             )
             .add_systems(FixedUpdate, step::physics_step.in_set(SimSet::Physics))
+            .add_systems(
+                PostUpdate,
+                shift::shift_simulation.in_set(engine_world::WorldShiftSet::Apply),
+            )
             .add_systems(Last, step::note_removals);
         api::register(app);
     }
