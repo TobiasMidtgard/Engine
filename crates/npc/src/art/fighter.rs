@@ -567,7 +567,11 @@ fn sdf_mesh_tol(f: &dyn Fn(Vec3) -> f32, min: Vec3, max: Vec3, voxel: f32, toler
     let mut grid = Grid::new(min, max, voxel);
     grid.occlusion = false;
     let m = sdf::polygonize(&banded, grid);
-    charts(&decimate(&m, tolerance))
+    // In tight creases a few triangles fold over; turn them to face out (else they cull to
+    // pinholes).
+    let mut m = decimate(&m, tolerance);
+    fix_winding(&mut m);
+    charts(&m)
 }
 
 /// How far decimation may move an SDF surface, in voxels.
@@ -1588,6 +1592,12 @@ enum Tint {
         team: Vec3,
         fixed: Vec3,
     },
+    /// The iris color chosen per face, `t` of the way from its rim's to its center's, times a
+    /// brightness.
+    Iris {
+        t: f32,
+        k: f32,
+    },
 }
 
 /// The padded undersuit, dyed a little toward the team color so teams read from afar.
@@ -1612,12 +1622,14 @@ const CREAM: u32 = 0xe2d6bc;
 /// Worn paint at plate rims (mixed with the team color).
 const EDGE_WEAR: f32 = 0.3;
 
-/// A built piece: its mesh (vertex colors hold occlusion × fixed tints) and the vertices that
-/// take the team color, with their weight per channel.
+/// A built piece: its mesh (vertex colors hold occlusion × fixed tints), the vertices that
+/// take the team color, with their weight per channel, and the irises' vertices, with how far
+/// toward the pupil they are and their weight.
 #[derive(Clone, Default)]
 pub struct PieceMesh {
     mesh: Mesh,
     team: Vec<(u32, Vec3)>,
+    iris: Vec<(u32, f32, Vec3)>,
 }
 
 impl PieceMesh {
@@ -1625,7 +1637,26 @@ impl PieceMesh {
         Self {
             mesh: mirrored(&self.mesh),
             team: self.team.clone(),
+            iris: self.iris.clone(),
         }
+    }
+
+    /// The mesh with its team and iris colors (linear RGB; the iris's at its rim and center).
+    fn paint(&self, team: Vec3, iris: [Vec3; 2]) -> Mesh {
+        let mut m = self.mesh.clone();
+        let mut add = |i: u32, c: Vec3| {
+            let v = &mut m.vertices[i as usize].color;
+            v[0] += c.x;
+            v[1] += c.y;
+            v[2] += c.z;
+        };
+        for &(i, k) in &self.team {
+            add(i, team * k);
+        }
+        for &(i, t, k) in &self.iris {
+            add(i, iris[0].lerp(iris[1], t) * k);
+        }
+        m
     }
 
     pub fn triangles(&self) -> usize {
@@ -1636,8 +1667,9 @@ impl PieceMesh {
 #[derive(Default)]
 struct Builder {
     mesh: Mesh,
-    /// Per vertex: team weight per channel (0 = fixed color only) and the fixed color.
-    tint: Vec<(Vec3, Vec3)>,
+    /// Per vertex: team weight per channel (0 = fixed color only), the fixed color (for an
+    /// iris, its brightness) and, for an iris, how far toward the pupil.
+    tint: Vec<(Vec3, Vec3, Option<f32>)>,
     /// Occlusion for skin: probes closer to the surface (pores of the face: lids, nostrils,
     /// folds) and shadows that turn warm, as light scattered under the skin does.
     skin: bool,
@@ -1669,14 +1701,16 @@ impl Builder {
             out.color = [1.0; 4];
             self.mesh.vertices.push(out);
             self.tint.push(match tint(Vec3::from(v.position)) {
-                Tint::Rgb(c) => (Vec3::ZERO, c),
+                Tint::Rgb(c) => (Vec3::ZERO, c, None),
                 Tint::Team(k) if rim => (
                     Vec3::splat(k * (1.0 - EDGE_WEAR)),
                     Vec3::splat(0.55 * EDGE_WEAR),
+                    None,
                 ),
-                Tint::Team(k) => (Vec3::splat(k), Vec3::ZERO),
-                Tint::Dyed(c, k) => (Vec3::splat(k), c * (1.0 - k)),
-                Tint::Mix { team, fixed } => (team, fixed),
+                Tint::Team(k) => (Vec3::splat(k), Vec3::ZERO, None),
+                Tint::Dyed(c, k) => (Vec3::splat(k), c * (1.0 - k), None),
+                Tint::Mix { team, fixed } => (team, fixed, None),
+                Tint::Iris { t, k } => (Vec3::ZERO, Vec3::splat(k), Some(t)),
             });
         }
         self.mesh.indices.extend(m.indices.iter().map(|i| i + base));
@@ -1685,6 +1719,7 @@ impl Builder {
     /// Bake occlusion from `field` (the whole piece) and fix the colors.
     fn finish(mut self, field: &dyn Fn(Vec3) -> f32, ao: f32) -> PieceMesh {
         let mut team = Vec::new();
+        let mut iris = Vec::new();
         let probes = if self.skin {
             [0.002f32, 0.005, 0.011, 0.024]
         } else {
@@ -1705,9 +1740,14 @@ impl Builder {
             } else {
                 Vec3::splat(o)
             };
-            let (k, c) = self.tint[i];
+            let (k, c, t) = self.tint[i];
             let c = c * o;
-            v.color = [c.x, c.y, c.z, 1.0];
+            if let Some(t) = t {
+                iris.push((i as u32, t, c));
+                v.color = [0.0, 0.0, 0.0, 1.0];
+            } else {
+                v.color = [c.x, c.y, c.z, 1.0];
+            }
             if k.max_element() > 0.0 {
                 team.push((i as u32, k * o));
             }
@@ -1715,6 +1755,7 @@ impl Builder {
         PieceMesh {
             mesh: self.mesh,
             team,
+            iris,
         }
     }
 }
@@ -1804,18 +1845,132 @@ const HELM_O: Vec3 = Vec3::new(0.0, 0.158, 0.0);
 const HELM_T: f32 = 0.0055;
 const BAND_T: f32 = 0.0028;
 
-/// The big forms of the head and face, without features (the coif hugs this).
-fn face_base(p: Vec3) -> f32 {
+/// What sets one face apart from another: how its forms move and grow (meters) from the
+/// first face's. Forward is toward the face, out is away from the middle.
+#[derive(Clone, Copy)]
+struct Shape {
+    /// The brow ridge: how far forward it stands, and how thick it is.
+    brow: f32,
+    brow_r: f32,
+    /// The cheekbones: out, up and forward, and how full.
+    cheek: Vec3,
+    cheek_r: f32,
+    /// The jaw: wider at its angle, and rounder.
+    jaw: f32,
+    jaw_r: f32,
+    /// The chin: broader, lower and further forward.
+    chin: Vec3,
+    /// The nose's size: width, length and how far it stands out (scales), and a hump on its
+    /// bridge.
+    nose: Vec3,
+    hump: f32,
+    /// How much fuller the lips are (a fraction).
+    lips: f32,
+    /// How much wider the eyes open.
+    lids: f32,
+    /// The brows: how much thicker, and how much higher their arch.
+    brows: Vec2,
+}
+
+/// The face shapes: even features; craggy (a heavy brow, broad hooked nose, square jaw and a
+/// thin mouth); long and fine (high cheekbones, a long narrow nose, narrow jaw, long chin and
+/// full lips); and round (full cheeks, a short broad nose and a small chin).
+const SHAPES: [Shape; 4] = [
+    Shape {
+        brow: 0.0,
+        brow_r: 0.0,
+        cheek: Vec3::ZERO,
+        cheek_r: 0.0,
+        jaw: 0.0,
+        jaw_r: 0.0,
+        chin: Vec3::ZERO,
+        nose: Vec3::ONE,
+        hump: 0.0,
+        lips: 0.0,
+        lids: 0.0,
+        brows: Vec2::ZERO,
+    },
+    Shape {
+        brow: 0.004,
+        brow_r: 0.0015,
+        cheek: Vec3::new(0.004, 0.0, 0.001),
+        cheek_r: 0.0,
+        jaw: 0.007,
+        jaw_r: 0.002,
+        chin: Vec3::new(0.007, 0.002, 0.003),
+        nose: Vec3::new(1.12, 1.05, 1.1),
+        hump: 0.0022,
+        lips: -0.3,
+        lids: -0.0006,
+        brows: Vec2::new(0.3, -0.0018),
+    },
+    Shape {
+        brow: -0.002,
+        brow_r: -0.001,
+        cheek: Vec3::new(0.003, 0.005, 0.003),
+        cheek_r: -0.002,
+        jaw: -0.005,
+        jaw_r: -0.001,
+        chin: Vec3::new(-0.005, 0.006, 0.004),
+        nose: Vec3::new(0.86, 1.12, 1.1),
+        hump: 0.0,
+        lips: 0.25,
+        lids: 0.0003,
+        brows: Vec2::new(-0.25, 0.0022),
+    },
+    Shape {
+        brow: -0.001,
+        brow_r: 0.0,
+        cheek: Vec3::new(0.002, -0.003, 0.004),
+        cheek_r: 0.004,
+        jaw: 0.003,
+        jaw_r: 0.004,
+        chin: Vec3::new(0.003, -0.004, -0.003),
+        nose: Vec3::new(1.15, 0.88, 0.92),
+        hump: 0.0,
+        lips: 0.35,
+        lids: 0.0005,
+        brows: Vec2::new(0.1, 0.001),
+    },
+];
+
+/// How many face shapes [`Kit::face`] builds.
+pub const FACE_SHAPES: usize = SHAPES.len();
+
+/// The big forms of the head and face, without features (the coif hugs them).
+fn face_base(p: Vec3, s: &Shape) -> f32 {
     let r = p - HEAD_C;
     let a = ax(r);
     let skull = ellipsoid(r, v3(0.0, 0.03, 0.008), v3(0.074, 0.09, 0.098));
     let brow = ellipsoid(r, v3(0.0, 0.036, -0.046), v3(0.062, 0.05, 0.05));
     let mid = ellipsoid(r, v3(0.0, -0.036, -0.05), v3(0.052, 0.05, 0.046));
-    let cheek = ellipsoid(a, v3(0.045, -0.008, -0.058), v3(0.027, 0.019, 0.027));
-    let jaw = capsule(a, v3(0.057, -0.04, 0.004), v3(0.031, -0.096, -0.06), 0.0135);
-    let lower = ellipsoid(r, v3(0.0, -0.072, -0.058), v3(0.046, 0.033, 0.036));
-    let chin = ellipsoid(r, v3(0.0, -0.097, -0.07), v3(0.026, 0.02, 0.022));
-    let ridge = capsule(a, v3(0.0, 0.026, -0.089), v3(0.046, 0.027, -0.079), 0.0085);
+    let cheek = ellipsoid(
+        a,
+        v3(0.045 + s.cheek.x, -0.008 + s.cheek.y, -0.058 - s.cheek.z),
+        v3(0.027, 0.019, 0.027) + Vec3::splat(s.cheek_r),
+    );
+    let jaw = capsule(
+        a,
+        v3(0.057 + s.jaw, -0.04, 0.004),
+        v3(0.031 + s.jaw * 0.8, -0.096 - s.chin.y * 0.5, -0.06),
+        0.0135 + s.jaw_r,
+    );
+    let lower = ellipsoid(
+        r,
+        v3(0.0, -0.072 - s.chin.y * 0.4, -0.058),
+        v3(0.046 + s.jaw * 0.5, 0.033 + s.chin.y * 0.4, 0.036),
+    );
+    let chin = ellipsoid(
+        r,
+        v3(0.0, -0.097 - s.chin.y, -0.07 - s.chin.z),
+        v3(0.026 + s.chin.x, 0.02, 0.022),
+    );
+    let ridge = capsule(
+        a,
+        v3(0.0, 0.026, -0.089 - s.brow),
+        v3(0.046, 0.027, -0.079 - s.brow),
+        0.0085 + s.brow_r,
+    );
     let d = smin(skull, brow, 0.03);
     let d = smin(d, ridge, 0.012);
     let d = smin(d, mid, 0.03);
@@ -1827,21 +1982,23 @@ fn face_base(p: Vec3) -> f32 {
 
 /// The lips' lines at `x` across the mouth (folded, from the head's middle): the top of the
 /// upper lip with its cupid's bow, the mouth line, and the bottom of the lower lip (heights),
-/// and how far forward the mouth sits there.
-fn lip_lines(x: f32) -> (f32, f32, f32, f32) {
+/// and how far forward the mouth sits there. Fuller lips (`full` > 0) are taller.
+fn lip_lines(x: f32, full: f32) -> (f32, f32, f32, f32) {
     let t = (x / 0.023).min(1.0);
     let bow =
         0.0011 * (-((x - 0.0062) / 0.0028).powi(2)).exp() - 0.0004 * (-(x / 0.0022).powi(2)).exp();
-    let top = -0.0548 - 0.0074 * t * t + bow;
     let line = -0.0628 + 0.0007 * t * t;
-    let bottom = -0.0722 + 0.0088 * t * t;
+    let tall = 1.0 + 0.5 * full;
+    let top = line + (0.008 - 0.0081 * t * t + bow) * tall;
+    let bottom = line + (-0.0094 + 0.0081 * t * t) * tall;
     let front = -0.0945 + 0.0075 * t * t;
     (top, line, bottom, front)
 }
 
-/// The lips: a roll above and below the mouth line, following [`lip_lines`].
-fn lips(a: Vec3) -> f32 {
-    let (top, line, bottom, front) = lip_lines(a.x);
+/// The lips: a roll above and below the mouth line, following [`lip_lines`], `1 + full`
+/// times as deep.
+fn lips(a: Vec3, full: f32) -> f32 {
+    let (top, line, bottom, front) = lip_lines(a.x, full);
     let t = (a.x / 0.023).min(1.0);
     let roll = |lo: f32, hi: f32, depth: f32| {
         let hy = ((hi - lo) * 0.5 + 0.0008).max(0.0008);
@@ -1849,18 +2006,37 @@ fn lips(a: Vec3) -> f32 {
         let q = v2((a.y - (lo + hi) * 0.5) / hy, (a.z - front) / hz);
         (q.length() - 1.0) * hy.min(hz)
     };
-    let upper = roll(line, top, 0.0052);
-    let lower = roll(bottom, line, 0.006);
+    let upper = roll(line, top, 0.0052 * (1.0 + full));
+    let lower = roll(bottom, line, 0.006 * (1.0 + full));
     smin(upper, lower, 0.0015).max(a.x - 0.0245)
 }
 
+/// The nose (head frame, from the head's middle) and its nostrils, scaled from the top of the
+/// bridge by the shape.
+fn nose(r: Vec3, s: &Shape) -> (f32, f32) {
+    let root = v3(0.0, 0.012, -0.088);
+    let q = root + (r - root) / s.nose;
+    let a = ax(q);
+    let bridge = round_cone(q, root, v3(0.0, -0.028, -0.111), 0.0068, 0.0085);
+    let tip = sphere(q, v3(0.0, -0.032, -0.109), 0.0105);
+    let wings = sphere(a, v3(0.0125, -0.038, -0.099), 0.0085);
+    let mut nose = smin(smin(bridge, tip, 0.008), wings, 0.005);
+    if s.hump > 0.0 {
+        let hump = sphere(q, v3(0.0, -0.004, -0.0972 - s.hump), 0.0062);
+        nose = smin(nose, hump, 0.006);
+    }
+    let nostril = ellipsoid(a, v3(0.0072, -0.0455, -0.1055), v3(0.0034, 0.0022, 0.0036));
+    let k = s.nose.min_element();
+    (nose * k, nostril * k)
+}
+
 /// The face with its brows, eyelids, nose and mouth (head frame).
-fn face_form(p: Vec3) -> f32 {
+fn face_form(p: Vec3, s: &Shape) -> f32 {
     let r = p - HEAD_C;
     let a = ax(r);
     let e = EYE - HEAD_C;
     // The brows stand a little proud of the skin.
-    let mut d = face_base(p) - 0.0009 * (1.0 - smooth(-0.0015, 0.001, brow_hair(p)));
+    let mut d = face_base(p, s) - 0.0009 * (1.0 - smooth(-0.0015, 0.001, brow_hair(p, s)));
     // Orbits under the brow, then lids wrapping the eyeball.
     d = ssub(
         d,
@@ -1870,26 +2046,15 @@ fn face_form(p: Vec3) -> f32 {
     d = smin(d, sphere(a, e, EYE_R + 0.0017), 0.003);
     // The lid opening: an almond, its outer corner a little higher.
     let q = a - (e + v3(0.0005, -0.0005, -0.011));
-    let (s, c) = 0.12f32.sin_cos();
-    let q = v3(q.x * c + q.y * s, q.y * c - q.x * s, q.z);
+    let (sn, cs) = 0.12f32.sin_cos();
+    let q = v3(q.x * cs + q.y * sn, q.y * cs - q.x * sn, q.z);
     d = ssub(
         d,
-        ellipsoid(q, Vec3::ZERO, v3(0.0126, 0.0042, 0.0125)),
+        ellipsoid(q, Vec3::ZERO, v3(0.0126, 0.0042 + s.lids, 0.0125)),
         0.0015,
     );
-    // Nose.
-    let bridge = round_cone(
-        r,
-        v3(0.0, 0.012, -0.088),
-        v3(0.0, -0.028, -0.111),
-        0.0068,
-        0.0085,
-    );
-    let tip = sphere(r, v3(0.0, -0.032, -0.109), 0.0105);
-    let wings = sphere(a, v3(0.0125, -0.038, -0.099), 0.0085);
-    let nose = smin(smin(bridge, tip, 0.008), wings, 0.005);
+    let (nose, nostril) = nose(r, s);
     d = smin(d, nose, 0.006);
-    let nostril = ellipsoid(a, v3(0.0072, -0.0455, -0.1055), v3(0.0034, 0.0022, 0.0036));
     d = ssub(d, nostril, 0.0015);
     // Cheek pads over the folds running from the nose's wings past the mouth's corners.
     let pad = ellipsoid(a, v3(0.031, -0.043, -0.081), v3(0.015, 0.016, 0.007));
@@ -1902,8 +2067,8 @@ fn face_form(p: Vec3) -> f32 {
     );
     d = ssub(d, fold, 0.004);
     // The lips, and the line between them.
-    d = smin(d, lips(a), 0.0025);
-    let (_, line, _, front) = lip_lines(a.x);
+    d = smin(d, lips(a, s.lips), 0.0025);
+    let (_, line, _, front) = lip_lines(a.x, s.lips);
     let slot = ((a.y - line).abs() - 0.0008)
         .max(a.x - 0.0235)
         .max(a.z - (front + 0.002));
@@ -1917,16 +2082,18 @@ fn eyeballs(p: Vec3) -> f32 {
 
 /// Where the eyebrows grow, seen from the front (negative inside): thick at the inner end,
 /// arching and tapering outward.
-fn brow_hair(p: Vec3) -> f32 {
+fn brow_hair(p: Vec3, s: &Shape) -> f32 {
     let a = ax(p - HEAD_C);
     let q = v2(a.x, a.y);
+    let k = 1.0 + s.brows.x;
     let seg = |p0: Vec2, p1: Vec2, r0: f32, r1: f32| {
         let d = p1 - p0;
         let h = ((q - p0).dot(d) / d.length_squared()).clamp(0.0, 1.0);
-        (q - p0 - d * h).length() - (r0 + (r1 - r0) * h)
+        (q - p0 - d * h).length() - (r0 + (r1 - r0) * h) * k
     };
-    let inner = seg(v2(0.011, 0.029), v2(0.03, 0.0345), 0.0042, 0.0036);
-    let outer = seg(v2(0.03, 0.0345), v2(0.052, 0.0295), 0.0036, 0.0016);
+    let arch = v2(0.03, 0.0345 + s.brows.y);
+    let inner = seg(v2(0.011, 0.029), arch, 0.0042, 0.0036);
+    let outer = seg(arch, v2(0.052, 0.0295), 0.0036, 0.0016);
     inner.min(outer).max(a.z + 0.07)
 }
 
@@ -1948,7 +2115,12 @@ fn face_hole(p: Vec3) -> f32 {
 fn coif_whole(p: Vec3) -> f32 {
     let r = p - HEAD_C;
     let hood = ellipsoid(r, v3(0.0, 0.028, 0.01), v3(0.084, 0.101, 0.108));
-    let around = face_base(p) - 0.008;
+    // Around every face shape.
+    let around = SHAPES
+        .iter()
+        .map(|s| face_base(p, s))
+        .fold(f32::MAX, f32::min)
+        - 0.008;
     let neck = round_cone(p, v3(0.0, -0.04, -0.002), v3(0.0, 0.1, 0.004), 0.058, 0.056);
     let throat = ellipsoid(p, v3(0.0, 0.045, -0.04), v3(0.048, 0.045, 0.045));
     let d = smin(hood, around, 0.02);
@@ -2152,7 +2324,14 @@ fn helmet() -> PieceMesh {
         0.002,
     );
     let mail = cull(mail, &helmet_base, 0.015);
-    let mail = cull(mail, &face_form, 0.001);
+    // Hidden inside every face.
+    let faces = |p: Vec3| {
+        SHAPES
+            .iter()
+            .map(|s| face_form(p, s))
+            .fold(f32::MIN, f32::max)
+    };
+    let mail = cull(mail, &faces, 0.001);
     let trim = |p: Vec3| coif_whole(p) < -0.0012 || face_hole(p) < 0.004;
     b.add(
         select(&mail, &|p| !trim(p)),
@@ -2172,18 +2351,20 @@ fn helmet() -> PieceMesh {
 /// cheeks, a shadow under the eyes, a faint beard shadow, the brows, deeper and redder lips
 /// split by a dark line, and dark lash lines and lid creases. Also returns how much of the
 /// point is lip.
-fn skin_paint(p: Vec3) -> (Vec3, f32) {
+fn skin_paint(p: Vec3, s: &Shape) -> (Vec3, f32) {
     let a = ax(p - HEAD_C);
     let e = EYE - HEAD_C;
     let near = |d: f32, r: f32| 1.0 - smooth(0.0, r, d);
     let mut w = Vec3::ONE;
-    let nose = near(sphere(a, v3(0.0, -0.032, -0.109), 0.006), 0.012);
+    let root = v3(0.0, 0.012, -0.088);
+    let tip = root + (v3(0.0, -0.032, -0.109) - root) * s.nose;
+    let nose = near(sphere(a, tip, 0.006), 0.012);
     let cheek = near(sphere(a, v3(0.042, -0.022, -0.078), 0.008), 0.018);
     w *= Vec3::ONE.lerp(v3(1.07, 0.9, 0.86), nose.max(cheek * 0.8));
     let under = near(sphere(a, e + v3(0.0, -0.012, -0.004), 0.004), 0.008);
     w *= Vec3::ONE.lerp(v3(0.86, 0.82, 0.88), under);
     w *= Vec3::ONE.lerp(v3(1.03, 1.01, 0.95), smooth(0.03, 0.05, a.y));
-    let (top, line, bottom, _) = lip_lines(a.x);
+    let (top, line, bottom, _) = lip_lines(a.x, s.lips);
     let lip = smooth(-0.0005, 0.0005, top - a.y)
         * smooth(-0.0005, 0.0005, a.y - bottom)
         * smooth(0.025, 0.0215, a.x)
@@ -2195,7 +2376,7 @@ fn skin_paint(p: Vec3) -> (Vec3, f32) {
     w *= Vec3::ONE.lerp(v3(0.84, 0.56, 0.55).lerp(v3(0.7, 0.44, 0.44), upper), lip);
     let roll = (1.0 - smooth(0.0003, 0.0012, (a.y - top).abs())) * smooth(0.024, 0.018, a.x);
     w *= 1.0 + 0.12 * roll;
-    let brow = 1.0 - smooth(-0.0012, 0.0008, brow_hair(p));
+    let brow = 1.0 - smooth(-0.0012, 0.0008, brow_hair(p, s));
     w *= Vec3::ONE.lerp(v3(0.2, 0.18, 0.17), brow * 0.9);
     let seam = (1.0 - smooth(0.0004, 0.0013, (a.y - line).abs())) * smooth(0.025, 0.02, a.x);
     let lash = (1.0 - smooth(0.0006, 0.0028, sphere(a, e, EYE_R))) * smooth(-0.004, 0.0, a.y - e.y);
@@ -2205,14 +2386,16 @@ fn skin_paint(p: Vec3) -> (Vec3, f32) {
     (w, lip)
 }
 
-/// The face, its eyes and brows. The skin takes its tone from the "team" color.
-fn face() -> PieceMesh {
+/// A face, its eyes and brows. The skin takes its tone from the "team" color, the irises
+/// theirs from [`Kit::face`].
+fn face(s: &Shape) -> PieceMesh {
     let mut b = Builder {
         skin: true,
         ..Default::default()
     };
+    let form = |p: Vec3| face_form(p, s);
     let skin = sdf_mesh_tol(
-        &face_form,
+        &form,
         v3(-0.066, 0.03, -0.145),
         v3(0.066, 0.215, -0.04),
         0.0022,
@@ -2220,14 +2403,14 @@ fn face() -> PieceMesh {
     );
     let skin = cull(cull(skin, &coif, 0.0015), &eyeballs, 0.0005);
     b.add_fn(skin, Zone::Skin, &|p| {
-        let (team, lip) = skin_paint(p);
+        let (team, lip) = skin_paint(p, s);
         Tint::Mix {
             team,
             fixed: v3(0.02, 0.003, 0.003) * lip,
         }
     });
-    // Eyes looking ahead: the white, a dark ring at the iris's edge, the iris and the pupil,
-    // all wet. The upper lid shades the eyeball.
+    // Eyes looking ahead: the white, a dark ring at the iris's edge, the iris (lighter toward
+    // the pupil) and the pupil, all wet. The upper lid shades the eyeball.
     let (iris_r, limbus, pupil_r) = (0.0064, 0.0053, 0.0024);
     let on_ball = |r: f32| (EYE_R * EYE_R - r * r).sqrt();
     let t0 = (iris_r / EYE_R).asin();
@@ -2241,10 +2424,17 @@ fn face() -> PieceMesh {
         v2(iris_r, on_ball(iris_r)),
         v2(limbus, on_ball(limbus) + 0.0003),
     ];
-    let iris = [
-        v2(limbus, on_ball(limbus) + 0.0003),
-        v2(pupil_r, on_ball(pupil_r) + 0.0006),
-    ];
+    let iris: Vec<Vec2> = (0..=3)
+        .map(|k| {
+            let r = limbus + (pupil_r - limbus) * k as f32 / 3.0;
+            v2(r, on_ball(r) + 0.0003 + 0.0003 * k as f32 / 3.0)
+        })
+        .collect();
+    // From the iris's rim (0) to the pupil (1).
+    let across = |p: Vec3| {
+        let q = ax(p) - EYE;
+        ((limbus - v2(q.x, q.y).length()) / (limbus - pupil_r)).clamp(0.0, 1.0)
+    };
     let pupil = [
         v2(pupil_r, on_ball(pupil_r) + 0.0006),
         v2(0.0, EYE_R + 0.0008),
@@ -2256,16 +2446,22 @@ fn face() -> PieceMesh {
         (1.0 - 0.6 * lid) * (1.0 - 0.3 * corner)
     };
     let to_front = Quat::from_rotation_x(-FRAC_PI_2);
-    for (profile, color) in [
-        (&white[..], 0xc9bdb0),
-        (&ring[..], 0x1c120c),
-        (&iris[..], 0x4a2f1c),
-        (&pupil[..], 0x050505),
-    ] {
+    let tint = |part: usize, p: Vec3| match part {
+        0 => Tint::Rgb(lin(0xc9bdb0) * shade(p)),
+        1 => Tint::Iris {
+            t: 0.0,
+            k: 0.3 * shade(p),
+        },
+        2 => Tint::Iris {
+            t: across(p),
+            k: shade(p),
+        },
+        _ => Tint::Rgb(lin(0x050505)),
+    };
+    for (part, profile) in [&white[..], &ring, &iris, &pupil].into_iter().enumerate() {
         let right = placed(lathe(profile, 20, &[]), to_front, EYE);
-        let tint = |p: Vec3| Tint::Rgb(lin(color) * shade(p));
-        b.add_fn(mirrored(&right), Zone::Glass, &tint);
-        b.add_fn(right, Zone::Glass, &tint);
+        b.add_fn(mirrored(&right), Zone::Glass, &|p| tint(part, p));
+        b.add_fn(right, Zone::Glass, &|p| tint(part, p));
     }
     let param = helmet_param();
     let outline = |uv: Vec2| helmet_outline(param, uv);
@@ -2281,7 +2477,7 @@ fn face() -> PieceMesh {
         0.006,
     );
     let field = |p: Vec3| {
-        face_form(p)
+        face_form(p, s)
             .min(eyeballs(p))
             .min(coif(p))
             .min(shell.proxy(p))
@@ -4146,10 +4342,11 @@ impl Piece {
     }
 }
 
-/// The built kit: the atlas and every piece's mesh.
+/// The built kit: the atlas, every piece's mesh and the faces.
 pub struct Kit {
     atlas: TextureSet,
     pieces: Vec<PieceMesh>,
+    faces: Vec<PieceMesh>,
     /// Seconds it took to build (wall clock, all threads).
     pub build_secs: f32,
 }
@@ -4164,17 +4361,16 @@ impl Kit {
         }
     }
 
-    /// A piece's mesh painted with `team` (linear RGB).
+    /// A piece's mesh painted with `team` (linear RGB; for [`Piece::Face`], the skin tone of
+    /// the first face shape, with brown eyes).
     pub fn mesh(&self, piece: Piece, team: Vec3) -> Mesh {
-        let p = &self.pieces[piece as usize];
-        let mut m = p.mesh.clone();
-        for &(i, k) in &p.team {
-            let c = &mut m.vertices[i as usize].color;
-            c[0] += team.x * k.x;
-            c[1] += team.y * k.y;
-            c[2] += team.z * k.z;
-        }
-        m
+        self.pieces[piece as usize].paint(team, [lin(0x3b2617), lin(0x5e3b1f)])
+    }
+
+    /// A face of one of the [`FACE_SHAPES`] shapes (wrapping around) with a skin tone and its
+    /// irises' colors at their rim and around the pupil (linear RGB).
+    pub fn face(&self, shape: usize, skin: Vec3, iris: [Vec3; 2]) -> Mesh {
+        self.faces[shape % self.faces.len()].paint(skin, iris)
     }
 
     /// Triangles in a piece.
@@ -4186,11 +4382,13 @@ impl Kit {
 enum Job {
     Tile(Zone),
     Pieces(fn() -> Vec<(Piece, PieceMesh)>),
+    Face(usize),
 }
 
 enum Output {
     Tile(BakedTile),
     Pieces(Vec<(Piece, PieceMesh)>),
+    Face(usize, PieceMesh),
 }
 
 fn pair(right: Piece, left: Piece, make: fn() -> PieceMesh) -> Vec<(Piece, PieceMesh)> {
@@ -4203,7 +4401,6 @@ fn build_kit() -> Kit {
     let start = std::time::Instant::now();
     let mut jobs: Vec<Job> = vec![
         Job::Pieces(|| vec![(Piece::Helmet, helmet())]),
-        Job::Pieces(|| vec![(Piece::Face, face())]),
         Job::Pieces(|| vec![(Piece::Crest, crest())]),
         Job::Pieces(|| vec![(Piece::Chest, chest())]),
         Job::Pieces(|| vec![(Piece::Pelvis, pelvis())]),
@@ -4240,6 +4437,7 @@ fn build_kit() -> Kit {
             ]
         }),
     ];
+    jobs.extend((0..SHAPES.len()).map(Job::Face));
     jobs.extend(Zone::ALL.into_iter().map(Job::Tile));
     let next = AtomicUsize::new(0);
     let results: Mutex<Vec<Output>> = Mutex::new(Vec::new());
@@ -4256,6 +4454,7 @@ fn build_kit() -> Kit {
                     let out = match job {
                         Job::Tile(z) => Output::Tile(bake_tile(*z)),
                         Job::Pieces(f) => Output::Pieces(f()),
+                        Job::Face(i) => Output::Face(*i, face(&SHAPES[*i])),
                     };
                     results.lock().unwrap().push(out);
                 }
@@ -4264,6 +4463,7 @@ fn build_kit() -> Kit {
     });
     let mut tiles = Vec::new();
     let mut pieces = vec![PieceMesh::default(); Piece::ALL.len()];
+    let mut faces = vec![PieceMesh::default(); SHAPES.len()];
     for out in results.into_inner().unwrap() {
         match out {
             Output::Tile(t) => tiles.push(t),
@@ -4272,12 +4472,15 @@ fn build_kit() -> Kit {
                     pieces[p as usize] = m;
                 }
             }
+            Output::Face(i, m) => faces[i] = m,
         }
     }
+    pieces[Piece::Face as usize] = faces[0].clone();
     let atlas = assemble_atlas(&tiles);
     Kit {
         atlas,
         pieces,
+        faces,
         build_secs: start.elapsed().as_secs_f32(),
     }
 }
@@ -4293,11 +4496,46 @@ pub fn kit() -> &'static Kit {
 mod tests {
     use super::*;
 
+    /// Every triangle faces the way its vertex normals do: one turned around would be culled,
+    /// a pinhole in the surface. (Slivers seen edge-on, at rims and blade edges, may lean
+    /// either way.)
+    #[test]
+    fn triangles_face_out() {
+        let kit = kit();
+        let named = Piece::ALL
+            .iter()
+            .map(|&p| (p.name().to_string(), &kit.pieces[p as usize]))
+            .chain(
+                kit.faces
+                    .iter()
+                    .enumerate()
+                    .map(|(i, f)| (format!("face {i}"), f)),
+            );
+        for (name, piece) in named {
+            let m = &piece.mesh;
+            let turned = m
+                .indices
+                .chunks(3)
+                .filter(|t| {
+                    let [a, b, c] = [t[0], t[1], t[2]].map(|i| m.vertices[i as usize]);
+                    let [pa, pb, pc] = [a, b, c].map(|v| Vec3::from(v.position));
+                    let n = Vec3::from(a.normal) + Vec3::from(b.normal) + Vec3::from(c.normal);
+                    let g = (pb - pa).cross(pc - pa);
+                    g.normalize_or_zero().dot(n.normalize_or_zero()) < -0.5
+                })
+                .count();
+            assert_eq!(turned, 0, "{name}: {turned} triangles turned around");
+        }
+    }
+
     #[test]
     fn kit_report() {
         let kit = kit();
         for p in Piece::ALL {
             eprintln!("{:>14} {:>6} tris", p.name(), kit.triangles(p));
+        }
+        for (i, f) in kit.faces.iter().enumerate() {
+            eprintln!("{:>14} {:>6} tris", format!("face {i}"), f.triangles());
         }
         eprintln!("built in {:.2} s", kit.build_secs);
     }
