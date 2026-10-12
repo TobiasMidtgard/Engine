@@ -1,4 +1,4 @@
-//! Procedural meshes for the showcase scenery: trees, bushes, rocks, grass and flower patches,
+//! Procedural meshes for the showcase scenery: trees, bushes, grass and flower patches,
 //! houses and lamp posts. Everything is built from code (no asset files) with vertex colors, so
 //! a few shared materials draw the whole valley in a handful of instanced batches.
 
@@ -638,55 +638,6 @@ pub fn tree_far(kind: TreeKind, seed: u64) -> Mesh {
     b.finish()
 }
 
-/// A boulder: a noise-displaced sphere, flattened underneath, gray with lichen and dirt.
-pub fn rock(seed: u64, detail: u32) -> Mesh {
-    let (verts, idx) = icosphere(detail);
-    let mut rng = Rng::new(seed);
-    let squash = Vec3::new(
-        rng.range(0.9, 1.4),
-        rng.range(0.5, 0.8),
-        rng.range(0.8, 1.2),
-    );
-    let tint = Vec3::new(0.2, 0.19, 0.18) * rng.range(0.8, 1.2);
-    let mut mesh = Mesh::default();
-    for d in &verts {
-        let n = fbm3(
-            d.x as f64 * 1.3,
-            d.y as f64 * 1.3,
-            d.z as f64 * 1.3,
-            seed,
-            5,
-            2.1,
-            0.55,
-        );
-        // Faceted, chunky look: quantize the noise a bit.
-        let k = 1.0 + 0.35 * n;
-        let mut p = *d * squash * k;
-        p.y = p.y.max(-0.25);
-        let lichen = smoothstep(
-            0.2,
-            0.7,
-            d.y + 0.3
-                * perlin3(
-                    d.x as f64 * 3.0,
-                    d.y as f64 * 3.0,
-                    d.z as f64 * 3.0,
-                    seed + 1,
-                ),
-        );
-        let moss = Vec3::new(0.08, 0.1, 0.035);
-        let dirt = Vec3::new(0.09, 0.07, 0.05);
-        let mut c = tint * (0.75 + 0.5 * (n * 0.5 + 0.5));
-        c = c.lerp(moss, lichen * 0.6);
-        c = c.lerp(dirt, smoothstep(0.0, -0.3, d.y));
-        mesh.vertices
-            .push(Vertex::new(p, *d, Vec2::new(d.x, d.z)).with_color(c.extend(1.0)));
-    }
-    mesh.indices = idx;
-    mesh.compute_flat_normals();
-    mesh
-}
-
 /// A square patch of grass blades (`size` m across, centered, base at y = 0). Blades are
 /// single tapered triangles, dark at the root and sunlit at the tip.
 pub fn grass_patch(seed: u64, size: f32, blades: u32, dry: f32) -> Mesh {
@@ -1116,7 +1067,6 @@ mod tests {
             check(&tree_far(kind, 3), "far tree");
         }
         check(&tree(TreeKind::Bush, 1).crown, "bush");
-        check(&rock(5, 2), "rock");
         check(&grass_patch(1, 4.0, 300, 0.3), "grass");
         check(&flower_patch(1, 4.0, 20, Vec3::X), "flowers");
         let h = house(9);

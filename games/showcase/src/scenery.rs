@@ -7,6 +7,7 @@
 
 use crate::landscape::{Cover, Crop, Landscape, field_corners};
 use crate::meshgen::{self, TreeKind};
+use crate::rocks::{RockKit, RockLook, RockSize};
 use crate::zones::{ZONES, zone};
 use engine::prelude::*;
 
@@ -15,7 +16,6 @@ pub struct Mats {
     pub terrain: Handle<StandardMaterial>,
     pub bark: Handle<StandardMaterial>,
     pub leaves: Handle<StandardMaterial>,
-    pub rock: Handle<StandardMaterial>,
     pub grass: Handle<StandardMaterial>,
     pub flowers: Handle<StandardMaterial>,
     pub plaster: Handle<StandardMaterial>,
@@ -45,8 +45,8 @@ pub struct HouseHandles {
 pub struct Library {
     pub mats: Mats,
     pub trees: Vec<TreeHandles>,
-    pub rocks: Vec<Handle<Mesh>>,
-    pub small_rocks: Vec<Handle<Mesh>>,
+    /// Boulder variants and the rock, wet rock and moss materials.
+    pub rocks: RockKit,
     pub grass: Vec<Handle<Mesh>>,
     pub dry_grass: Vec<Handle<Mesh>>,
     pub flowers: Vec<Handle<Mesh>>,
@@ -65,6 +65,8 @@ pub fn build_library(
     materials: &mut Assets<StandardMaterial>,
     images: &mut Assets<Image>,
 ) -> Library {
+    // Rock textures, boulders and the cliffs build on other threads meanwhile.
+    let rock_job = crate::rocks::start_kit();
     let white = |r: f32| StandardMaterial::hex(0xffffff).with_roughness(r);
     let (detail, detail_normal) = meshgen::ground_detail(512);
     let mut terrain = white(0.95)
@@ -88,7 +90,6 @@ pub fn build_library(
         terrain: materials.add(terrain),
         bark: materials.add(white(0.9)),
         leaves: materials.add(leaves),
-        rock: materials.add(white(0.85)),
         grass: materials.add(grass),
         flowers: materials.add(flowers),
         plaster: materials.add(white(0.9)),
@@ -121,12 +122,6 @@ pub fn build_library(
             });
         }
     }
-    let rocks = (0..6)
-        .map(|i| meshes.add(meshgen::rock(500 + i, 3)))
-        .collect();
-    let small_rocks = (0..6)
-        .map(|i| meshes.add(meshgen::rock(600 + i, 1)))
-        .collect();
     let grass = (0..6)
         .map(|i| {
             meshes.add(meshgen::grass_patch(
@@ -167,8 +162,7 @@ pub fn build_library(
     Library {
         mats,
         trees,
-        rocks,
-        small_rocks,
+        rocks: rock_job.finish(meshes, materials, images),
         grass,
         dry_grass,
         flowers,
@@ -427,8 +421,22 @@ pub fn spawn_meadows(commands: &mut Commands, lib: &Library, land: &Landscape, r
     }
 }
 
-/// Boulders on the hills and in the woods, smaller stones along the roads.
+/// Near a scarp, where the cliff builds its own rock face and talus.
+fn near_scarp(land: &Landscape, x: f64, z: f64) -> bool {
+    land.scarps.iter().any(|sc| {
+        let (along, side) = sc.frame(DVec2::new(x, z), land.seed);
+        let len = (sc.b - sc.a).length();
+        (-5.0..len + 5.0).contains(&along) && (-14.0..22.0).contains(&side)
+    })
+}
+
+/// Boulders on the hills and in the woods, smaller stones wherever the ground is rocky.
 pub fn spawn_rocks(commands: &mut Commands, lib: &Library, land: &Landscape, rng: &mut Rng) {
+    // Shapes, scales and tilts come from their own stream, so the shared one advances exactly
+    // as it always has (everything spawned after the rocks keeps its layout).
+    let mut pick = Rng::new(land.seed ^ 0x0b01_d3e5);
+    let kit = &lib.rocks;
+    let mut count = 0;
     for _ in 0..2600 {
         let p = rng.in_unit_disk() * 1400.0;
         let (x, z) = (p.x as f64, p.y as f64);
@@ -447,25 +455,56 @@ pub fn spawn_rocks(commands: &mut Commands, lib: &Library, land: &Landscape, rng
         } else {
             rng.range(0.3, 0.9)
         };
-        let mesh = if big {
-            lib.rocks[rng.range_i32(0, lib.rocks.len() as i32) as usize]
+        let _ = rng.range_i32(0, 6);
+        let yaw = rng.range(0.0, TAU);
+        if near_scarp(land, x, z) {
+            continue;
+        }
+        let (size, scale) = if big {
+            if s > 1.9 || pick.chance(0.4) {
+                (RockSize::Large, 0.75 + (s - 1.2) / 2.3 * 0.95)
+            } else {
+                (RockSize::Medium, pick.range(1.0, 1.7))
+            }
+        } else if pick.chance(0.4) {
+            (RockSize::Medium, s * pick.range(0.8, 1.1))
         } else {
-            lib.small_rocks[rng.range_i32(0, lib.small_rocks.len() as i32) as usize]
+            (RockSize::Small, s * pick.range(1.6, 2.6))
         };
-        let tf = Transform::from_translation(DVec3::new(x, h - s as f64 * 0.25, z))
-            .with_rotation(
-                Quat::from_rotation_arc(Vec3::Y, n) * Quat::from_rotation_y(rng.range(0.0, TAU)),
-            )
-            .with_scale(Vec3::splat(s));
-        commands.spawn((
+        let v = kit.pick(size, pick.chance(0.2), &mut pick);
+        let squash = pick.range(0.8, 1.1);
+        // Settle into the slope: tilt partly with the ground and sink the downhill edge.
+        let tilt = Quat::from_rotation_arc(Vec3::Y, n.lerp(Vec3::Y, 0.35).normalize());
+        let slope = (1.0 - n.y * n.y).max(0.0).sqrt() / n.y.max(0.3);
+        let r = v.extent.x.max(v.extent.z) * scale;
+        let sink = v.extent.y * scale * squash * pick.range(0.08, 0.2) + r * slope * 0.35;
+        let tf = Transform::from_translation(DVec3::new(x, h - sink as f64, z))
+            .with_rotation(tilt * Quat::from_rotation_y(yaw))
+            .with_scale(Vec3::new(
+                scale,
+                scale * squash,
+                scale * pick.range(0.9, 1.1),
+            ));
+        kit.spawn(
+            commands,
+            v,
             tf,
-            MeshRenderer::new(mesh, lib.mats.rock),
-            Lod::hide_beyond(mesh, if big { 900.0 } else { 160.0 }),
-        ));
+            RockLook {
+                wet: false,
+                moss: pick.chance(0.85),
+            },
+        );
+        count += 1;
         if big && near_wildlife(x, z) {
-            solid(commands, DVec3::new(x, h, z), s * 0.8, s * 1.2);
+            solid(
+                commands,
+                DVec3::new(x, h, z),
+                r * 0.75,
+                v.extent.y * scale * squash,
+            );
         }
     }
+    engine::core::log::info!("scenery: {count} boulders and stones");
 }
 
 /// Where the wildlife roams, trunks and boulders get colliders so animals path around them.
@@ -483,50 +522,86 @@ fn solid(commands: &mut Commands, base: DVec3, radius: f32, height: f32) {
     ));
 }
 
-/// The cliff south of the lake faced with boulders, and stones along the stream's banks.
+/// The cliff along each scarp (layered rock with the waterfall's notch and plunge pool), talus
+/// blocks and scree at its foot, stones along the stream's banks and boulders by the falls.
 pub fn spawn_cliffs_and_stream(
     commands: &mut Commands,
+    meshes: &mut Assets<Mesh>,
     lib: &Library,
     land: &Landscape,
     rng: &mut Rng,
 ) {
-    let boulder = |commands: &mut Commands, rng: &mut Rng, p: DVec3, s: f32| {
-        let mesh = lib.rocks[rng.range_i32(0, lib.rocks.len() as i32) as usize];
-        commands.spawn((
-            Transform::from_translation(p)
-                .with_rotation(
-                    Quat::from_rotation_y(rng.range(0.0, TAU))
-                        * Quat::from_rotation_x(rng.range(-0.5, 0.5)),
-                )
-                .with_scale(Vec3::new(s, s * rng.range(0.7, 1.1), s)),
-            MeshRenderer::new(mesh, lib.mats.rock),
-            Lod::hide_beyond(mesh, 1200.0),
-        ));
-    };
-    for sc in &land.scarps {
-        let d = (sc.b - sc.a).normalize();
-        let n = DVec2::new(-d.y, d.x);
-        let len = (sc.b - sc.a).length();
-        let mut along = 12.0;
-        while along < len - 12.0 {
-            // The face sits where the wobbling line puts it.
-            let (_, side) = sc.frame(sc.a + d * along, land.seed);
-            let foot = sc.a + d * along - n * (side + 1.0);
-            let near_water = land
-                .stream_at(foot.x, foot.y)
-                .is_some_and(|(dist, _)| dist < 7.0);
-            if !near_water {
-                let low = land.height(foot.x, foot.y);
-                let top = land.height(foot.x + n.x * 4.0, foot.y + n.y * 4.0);
-                for k in 0..3 {
-                    let y = low + (top - low) * (k as f64 * 0.38) - 0.5;
-                    let jitter = n * rng.range(-0.8, 1.2) as f64;
-                    let q = foot + jitter;
-                    let size = rng.range(1.8, 3.4);
-                    boulder(commands, rng, DVec3::new(q.x, y, q.y), size);
-                }
-            }
-            along += rng.range(3.0, 4.5) as f64;
+    let t0 = std::time::Instant::now();
+    let kit = &lib.rocks;
+    let cliff = kit.take_cliff(land);
+    let (mut near_tris, mut far_tris) = (0, 0);
+    let mut talus_count = 0;
+    let rock_top = |x: f64, z: f64| cliff.rock_top(land, x, z);
+    let mut local = Rng::new(land.seed ^ 0x00c1_1ff5);
+    for spot in &cliff.talus {
+        // Scree near the face, bigger blocks further out (they roll further).
+        let roll = local.f32();
+        let size = if spot.reach > 0.5 && roll < 0.2 {
+            RockSize::Large
+        } else if roll < 0.5 {
+            RockSize::Medium
+        } else {
+            RockSize::Small
+        };
+        let v = kit.pick(size, local.chance(0.7), &mut local);
+        let scale = match size {
+            RockSize::Large => local.range(0.45, 0.9),
+            RockSize::Medium => local.range(0.6, 1.3),
+            RockSize::Small => local.range(0.8, 2.2),
+        };
+        let up = spot.normal.lerp(Vec3::Y, 0.4).normalize();
+        let tilt = Quat::from_rotation_arc(Vec3::Y, up)
+            * Quat::from_rotation_x(local.range(-0.25, 0.25))
+            * Quat::from_rotation_z(local.range(-0.25, 0.25));
+        let squash = local.range(0.75, 1.05);
+        let sink = v.extent.y * scale * squash * local.range(0.15, 0.4);
+        let tf = Transform::from_translation(spot.pos - DVec3::Y * sink as f64)
+            .with_rotation(tilt * Quat::from_rotation_y(local.range(0.0, TAU)))
+            .with_scale(Vec3::new(
+                scale,
+                scale * squash,
+                scale * local.range(0.85, 1.15),
+            ));
+        let look = RockLook {
+            wet: spot.wet,
+            moss: local.chance(0.45),
+        };
+        kit.spawn(commands, v, tf, look);
+        talus_count += 1;
+        // Scree: a few stones round each block.
+        for _ in 0..local.range_i32(1, 4) {
+            let a = local.range(0.0, TAU);
+            let d = local.range(0.5, 1.6);
+            let (x, z) = (
+                spot.pos.x + (a.cos() * d) as f64,
+                spot.pos.z + (a.sin() * d) as f64,
+            );
+            let Some(y) = rock_top(x, z) else {
+                continue;
+            };
+            let v = kit.pick(RockSize::Small, local.chance(0.7), &mut local);
+            let scale = local.range(0.5, 1.4);
+            let tf = Transform::from_translation(DVec3::new(
+                x,
+                y - (v.extent.y * scale * 0.3) as f64,
+                z,
+            ))
+            .with_rotation(
+                Quat::from_rotation_arc(Vec3::Y, spot.normal)
+                    * Quat::from_rotation_y(local.range(0.0, TAU)),
+            )
+            .with_scale(Vec3::new(scale, scale * local.range(0.6, 1.0), scale));
+            let look = RockLook {
+                wet: spot.wet,
+                moss: false,
+            };
+            kit.spawn(commands, v, tf, look);
+            talus_count += 1;
         }
     }
     for st in &land.streams {
@@ -536,34 +611,142 @@ pub fn spawn_cliffs_and_stream(
             }
             let dir = (st.path[i + 1] - *p).normalize_or(DVec2::Y);
             let side = DVec2::new(-dir.y, dir.x) * if rng.chance(0.5) { 1.0 } else { -1.0 };
-            let q = *p + side * (st.width * 0.5 + rng.range(0.3, 1.5) as f64);
+            let off = rng.range(0.3, 1.5);
+            let q = *p + side * (st.width * 0.5 + off as f64);
             let s = rng.range(0.5, 1.4);
-            let mesh = lib.small_rocks[rng.range_i32(0, lib.small_rocks.len() as i32) as usize];
-            commands.spawn((
-                Transform::from_translation(DVec3::new(q.x, land.height(q.x, q.y) - 0.2, q.y))
-                    .with_rotation(Quat::from_rotation_y(rng.range(0.0, TAU)))
-                    .with_scale(Vec3::splat(s)),
-                MeshRenderer::new(mesh, lib.mats.rock),
-                Lod::hide_beyond(mesh, 220.0),
-            ));
+            let _ = rng.range_i32(0, 6);
+            let yaw = rng.range(0.0, TAU);
+            let (size, scale) = if s > 1.0 {
+                (RockSize::Medium, s * 0.75)
+            } else {
+                (RockSize::Small, s * 1.8)
+            };
+            let v = kit.pick(size, false, &mut local);
+            let ground = land.height(q.x, q.y);
+            let y = rock_top(q.x, q.y).unwrap_or(ground);
+            if cliff.covers(q.x, q.y) && y < ground + 0.05 {
+                continue;
+            }
+            let sink = v.extent.y * scale * 0.3;
+            let tf = Transform::from_translation(DVec3::new(q.x, y - sink as f64, q.y))
+                .with_rotation(Quat::from_rotation_y(yaw))
+                .with_scale(Vec3::new(scale, scale * local.range(0.7, 1.0), scale));
+            // At the water's edge they are wet; further up the bank, dry and mossy.
+            let look = RockLook {
+                wet: off < 1.0,
+                moss: off >= 1.0,
+            };
+            kit.spawn(commands, v, tf, look);
         }
-        // Big boulders flanking the falls.
-        if let Some((top, _)) = st.falls() {
-            let lip = st.path[top];
-            let dir = (st.path[top + 1] - lip).normalize_or(DVec2::Y);
-            let side = DVec2::new(-dir.y, dir.x);
-            for s in [-1.0, 1.0] {
-                for k in 0..3 {
-                    let q = lip
-                        + side * s * (st.width * 0.5 + 1.8 + k as f64 * 1.6)
-                        + dir * (k as f64 * 1.2 - 1.0);
-                    let y = land.height(q.x, q.y) - 1.0;
-                    let size = rng.range(2.0, 3.0);
-                    boulder(commands, rng, DVec3::new(q.x, y, q.y), size);
-                }
+        let (Some((top, bottom)), Some((pool, _))) = (st.falls(), st.pool) else {
+            continue;
+        };
+        // Boulders on the rock beside the channel above the lip...
+        let lip = st.path[top];
+        let dir = (st.path[top + 1] - lip).normalize_or(DVec2::Y);
+        let side = DVec2::new(-dir.y, dir.x);
+        for s in [-1.0, 1.0] {
+            for k in 0..2 {
+                let q = lip + side * s * (st.width * 0.5 + 2.8 + k as f64 * 2.4)
+                    - dir * (2.0 + k as f64 * 3.0 + local.range(0.0, 1.5) as f64);
+                let Some(y) = rock_top(q.x, q.y) else {
+                    continue;
+                };
+                let v = kit.pick(RockSize::Large, false, &mut local);
+                let scale = local.range(0.45, 0.7);
+                let tf = Transform::from_translation(DVec3::new(
+                    q.x,
+                    y - (v.extent.y * scale * 0.25) as f64,
+                    q.y,
+                ))
+                .with_rotation(Quat::from_rotation_y(local.range(0.0, TAU)))
+                .with_scale(Vec3::splat(scale));
+                let look = RockLook {
+                    wet: false,
+                    moss: true,
+                };
+                kit.spawn(commands, v, tf, look);
             }
         }
+        // ...and fallen blocks round the plunge pool, clear of the outflow.
+        let out = (st.path[(bottom + 8).min(st.path.len() - 1)] - pool).normalize_or(DVec2::Y);
+        for k in 0..5 {
+            let a = (k as f64 - 2.0) * 0.55 + local.range(-0.15, 0.15) as f64;
+            let toward = DVec2::new(
+                out.x * a.cos() - out.y * a.sin(),
+                out.x * a.sin() + out.y * a.cos(),
+            );
+            let flip = if k % 2 == 0 { 1.0 } else { -1.0 };
+            let q = pool + DVec2::new(-toward.y, toward.x) * flip * local.range(5.8, 7.5) as f64;
+            if land
+                .stream_at(q.x, q.y)
+                .is_some_and(|(d, _)| d < st.width * 0.5 + 2.2)
+            {
+                continue;
+            }
+            let size = if k < 2 {
+                RockSize::Large
+            } else {
+                RockSize::Medium
+            };
+            let v = kit.pick(size, true, &mut local);
+            let scale = local.range(0.5, 0.8);
+            let ground = rock_top(q.x, q.y).unwrap_or_else(|| land.height(q.x, q.y));
+            let tf = Transform::from_translation(DVec3::new(
+                q.x,
+                ground - (v.extent.y * scale * 0.3) as f64,
+                q.y,
+            ))
+            .with_rotation(
+                Quat::from_rotation_y(local.range(0.0, TAU))
+                    * Quat::from_rotation_x(local.range(-0.2, 0.2)),
+            )
+            .with_scale(Vec3::splat(scale));
+            let look = RockLook {
+                wet: true,
+                moss: false,
+            };
+            kit.spawn(commands, v, tf, look);
+        }
     }
+    for ch in cliff.chunks {
+        near_tris += ch.near.triangle_count() + ch.wet.triangle_count();
+        far_tris += ch.far.triangle_count();
+        let tf = Transform::from_translation(ch.origin);
+        let switch = 160.0;
+        let near = meshes.add(ch.near);
+        let far = meshes.add(ch.far);
+        commands.spawn((
+            tf,
+            MeshRenderer::new(near, kit.mats.rock),
+            Lod {
+                near,
+                far: Some(far),
+                switch,
+                far_shown: false,
+            },
+        ));
+        if !ch.wet.indices.is_empty() {
+            let wet = meshes.add(ch.wet);
+            commands.spawn((
+                tf,
+                MeshRenderer::new(wet, kit.mats.wet),
+                Lod::hide_beyond(wet, switch),
+            ));
+        }
+        if !ch.moss.indices.is_empty() {
+            let moss = meshes.add(ch.moss);
+            commands.spawn((
+                tf,
+                MeshRenderer::new(moss, kit.mats.moss).without_shadows(),
+                Lod::hide_beyond(moss, switch * 0.75),
+            ));
+        }
+    }
+    engine::core::log::info!(
+        "scenery: cliff {near_tris} triangles near, {far_tris} far, {talus_count} talus rocks, built in {:.2} s",
+        t0.elapsed().as_secs_f32()
+    );
 }
 
 /// A house with its door facing `facing` (radians around Y; 0 = +Z).

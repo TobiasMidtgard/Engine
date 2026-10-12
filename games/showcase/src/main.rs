@@ -18,6 +18,8 @@ mod landscape;
 mod meshgen;
 mod placeholders;
 mod places;
+mod rock_textures;
+mod rocks;
 mod scenery;
 mod tour;
 mod zones;
@@ -106,7 +108,7 @@ fn setup(
     scenery::spawn_farms(&mut commands, &lib, &land, &mut rng);
     scenery::spawn_rocks(&mut commands, &lib, &land, &mut rng);
     scenery::spawn_village(&mut commands, &lib, &land, &mut rng);
-    scenery::spawn_cliffs_and_stream(&mut commands, &lib, &land, &mut rng);
+    scenery::spawn_cliffs_and_stream(&mut commands, &mut meshes, &lib, &land, &mut rng);
     placeholders::cave_shell(&mut commands, &mut meshes, &lib, &land, &mut rng);
     zones::spawn_demos(&mut commands, &mut meshes, &lib, &land, &mut rng);
     zones::moon(&mut commands);
