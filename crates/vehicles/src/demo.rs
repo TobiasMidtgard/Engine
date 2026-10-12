@@ -489,3 +489,92 @@ pub fn spawn_spaceport(commands: &mut Commands, pad: DVec3, pad_radius: f32) {
     );
     commands.entity(e).insert(Name::new("Parked spaceplane"));
 }
+
+/// A suggested camera viewpoint: eye and target relative to the demo's center (the track's
+/// center, the airfield zone's center, or the spaceport pad), the hour of day, and how long
+/// the demo should run before the shot.
+#[derive(Debug, Clone, Copy)]
+pub struct DemoView {
+    pub key: &'static str,
+    pub name: &'static str,
+    pub eye: [f64; 3],
+    pub target: [f64; 3],
+    pub hour: f32,
+    pub warmup_secs: f32,
+}
+
+/// Viewpoints for the showcase tour, by zone (`track`, `airfield`, `spaceport`). The airfield
+/// views assume the showcase runway: from 600 m south of the zone's center to 600 m north.
+pub fn views(zone: &str) -> &'static [DemoView] {
+    match zone {
+        "track" => TRACK_VIEWS,
+        "airfield" => AIRFIELD_VIEWS,
+        "spaceport" => SPACEPORT_VIEWS,
+        _ => &[],
+    }
+}
+
+const TRACK_VIEWS: &[DemoView] = &[
+    DemoView {
+        key: "track_cars",
+        name: "Sports cars racing round the oval",
+        eye: [156.0, 2.6, 34.0],
+        target: [128.0, 0.6, -4.0],
+        hour: 15.5,
+        warmup_secs: 0.5,
+    },
+    DemoView {
+        key: "track_drift",
+        name: "Rally car drifting on the dirt pad",
+        eye: [-42.0, 3.5, 4.0],
+        target: [-70.0, 0.8, -20.0],
+        hour: 16.0,
+        warmup_secs: 6.0,
+    },
+    DemoView {
+        key: "track_jump",
+        name: "The kicker jump",
+        eye: [-26.0, 3.0, 96.0],
+        target: [0.0, 1.5, 80.0],
+        hour: 15.5,
+        warmup_secs: 0.0,
+    },
+];
+
+const AIRFIELD_VIEWS: &[DemoView] = &[
+    DemoView {
+        key: "airfield_lineup",
+        name: "Sport plane lined up on the runway",
+        eye: [14.0, 3.5, -606.0],
+        target: [0.0, 1.8, -584.0],
+        hour: 10.0,
+        warmup_secs: 0.5,
+    },
+    DemoView {
+        key: "airfield_rotate",
+        name: "Sport plane rotating for take-off",
+        eye: [45.0, 4.0, -400.0],
+        target: [0.0, 4.0, -440.0],
+        hour: 10.0,
+        warmup_secs: 11.0,
+    },
+];
+
+const SPACEPORT_VIEWS: &[DemoView] = &[
+    DemoView {
+        key: "spaceport_hover",
+        name: "Spaceplane hovering over the pad",
+        eye: [38.0, 8.0, 46.0],
+        target: [0.0, 18.0, 0.0],
+        hour: 17.0,
+        warmup_secs: 10.0,
+    },
+    DemoView {
+        key: "spaceport_parked",
+        name: "Spaceplane parked on the apron",
+        eye: [82.0, 5.0, -18.0],
+        target: [58.0, 3.0, -45.0],
+        hour: 17.0,
+        warmup_secs: 0.5,
+    },
+];

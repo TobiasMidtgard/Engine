@@ -351,6 +351,10 @@ impl View {
 /// [`spawn_demos`], a module thread edits only its own zone's line.
 pub fn demo_views(z: &Zone) -> Vec<View> {
     match z.key {
+        "track" | "airfield" | "spaceport" => engine_vehicles::demo::views(z.key)
+            .iter()
+            .map(|v| View::new(v.key, v.name, v.eye, v.target, v.hour).warmup(v.warmup_secs))
+            .collect(),
         "field" => engine_fire::demo::VIEWS
             .iter()
             .map(|v| View::new(v.key, v.name, v.eye, v.target, v.hour))
