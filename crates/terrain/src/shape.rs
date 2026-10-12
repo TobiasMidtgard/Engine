@@ -701,7 +701,8 @@ impl PlanetShape {
         let temperature_c = t_lat - c.lapse_c_per_m * h.max(0.0) as f32;
         // Wet and dry regions, and woods and fields between them.
         let wet_noise = (noise::fbm(p / 900_000.0, s ^ 0x71, 4, 0.5)
-            + noise::fbm(p / 40_000.0, s ^ 0x72, 3, 0.5) * 0.7) as f32;
+            + noise::fbm_smooth(p / 40_000.0, s ^ 0x72, octaves_for(40_000.0, 3.0), 0.5) * 0.7)
+            as f32;
         let coastal = if self.ocean {
             (1.0 - smooth(0.05, 0.5, cl.v)) as f32 * 0.2
         } else {

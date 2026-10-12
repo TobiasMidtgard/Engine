@@ -163,6 +163,14 @@ fn views() -> Vec<View> {
             ..BASE
         },
         View {
+            name: "earth_leo",
+            eye: DVec3::new(0.0, 420_000.0, 150_000.0),
+            target: DVec3::new(0.0, -300_000.0, -1_500_000.0),
+            sun: (200.0, 35.0),
+            fov: 60.0,
+            ..BASE
+        },
+        View {
             name: "earth_orbit",
             eye: DVec3::new(0.0, 2_600_000.0, 7_000_000.0),
             target: DVec3::new(0.0, -6_371_000.0, 0.0),

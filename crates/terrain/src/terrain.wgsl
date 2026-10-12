@@ -145,6 +145,28 @@ fn tile_fbm(tp: vec3<f32>, freq: f32, octaves: i32) -> f32 {
     return sum / (1.0 - 2.0 * amp);
 }
 
+// Two fractal noises (0..1) over the planet's surface, from 64 km features down to a couple of
+// pixels: per-pixel detail for views from high up, where vertices are kilometers apart.
+fn far_noise(p: PlanetGpu, rel: vec3<f32>, pixel: f32) -> vec2<f32> {
+    let local = transpose(planet_rot(p)) * (rel - p.center.xyz);
+    let km = select(local, normalize(local) * p.center.w, p.params2.x > 0.5) * 0.001;
+    let pixel_km = pixel * 0.001;
+    var a = 0.0;
+    var b = 0.0;
+    var norm = 0.0;
+    var amp = 0.5;
+    var f = 1.0 / 64.0;
+    for (var i = 0; i < 9; i++) {
+        let keep = 1.0 - smoothstep(0.25, 0.5, f * pixel_km);
+        a += amp * keep * pnoise3(km * f + vec3(f32(i) * 7.1), 1.0e6);
+        b += amp * keep * pnoise3(km * f + vec3(31.7 + f32(i) * 3.3), 1.0e6);
+        norm += amp * keep;
+        f *= 2.0;
+        amp *= 0.55;
+    }
+    return vec2<f32>(a, b) / max(norm, 1e-4);
+}
+
 @vertex
 fn vs_main(in: VertexIn) -> VertexOut {
     let planet = planets[in.planet];
@@ -452,6 +474,14 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     let dp1 = dpdx(in.rel);
     let dp2 = dpdy(in.rel);
     let pixel = max(length(dp1), length(dp2));
+    // Seen from high up, pixels span hundreds of meters or more and vertices kilometers: the
+    // per-vertex climate then draws blocky, straight-edged woods, meadows and snowfields.
+    // Noise on the planet's surface, per pixel, gives those edges natural shapes.
+    let far = smoothstep(40.0, 400.0, pixel);
+    var far_n = vec2<f32>(0.5);
+    if (far > 0.0) {
+        far_n = far_noise(planet, in.rel, pixel);
+    }
     // (A sliver: seen edge-on, turned away, and a whole triangle within a pixel or two.)
     let sliver = (1.0 - smoothstep(0.03, 0.15, ndv)) * saturate((dot(up, to_eye) - ndv) * 8.0)
         * smoothstep(0.1, 0.4, pixel / max(in.lod.x, 1e-3));
@@ -511,7 +541,7 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     let crest = smoothstep(0.2, 0.7, convex);
     let gully = smoothstep(0.15, 0.6, -convex);
     let wet_bias = (macro_v - 0.5) * 0.35 * macro_fade + (meadow_v - 0.5) * 0.45 * meadow_fade
-        + (variety - 0.5) * 0.5 + (patches - 0.5) * 0.5 + gully * 0.25 - crest * 0.2;
+        + (variety - 0.5) * 0.5 + (patches - 0.5) * 0.5 + gully * 0.25 - crest * 0.2 + (far_n.y - 0.5) * 0.6 * far;
     var col: array<vec3<f32>, 9>;
     var w: array<f32, 9>;
     for (var i = 0u; i < MAT_COUNT; i++) {
@@ -536,7 +566,7 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     // trees themselves).
     let forest_edge = (mid_v - 0.5) * 0.08 * clump_fade + (patch_v - 0.5) * 0.06;
     let forest = vegetation
-        * smoothstep(0.40, 0.52, moisture * 0.6 + (0.5 - patches) * 0.9 + (variety - 0.5) * 0.4 + forest_edge + gully * 0.12 - crest * 0.12)
+        * smoothstep(0.40 - 0.1 * far, 0.52 + 0.1 * far, moisture * 0.6 + (0.5 - patches) * 0.9 + (variety - 0.5) * 0.4 + forest_edge + gully * 0.12 - crest * 0.12 + (far_n.x - 0.5) * 0.9 * far)
         * smoothstep(-6.0, 4.0, temp_c)
         * (1.0 - smoothstep(1800.0, 2600.0, altitude + (variety - 0.5) * 600.0));
     // From a couple of hundred meters the canopy (the foliage module draws trees near the camera,
@@ -546,10 +576,14 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     let undergrowth = planet.colors[C_LUSH].rgb * vec3<f32>(0.6, 0.7, 0.55);
     let litter = mix(planet.colors[C_SOIL].rgb * vec3<f32>(0.75, 0.72, 0.65), undergrowth, 0.3);
     let forest_floor = mix(undergrowth, litter, smoothstep(0.6, 0.8, patch_v));
-    col[M_FOREST] = mix(forest_floor, planet.colors[C_LUSH].rgb * vec3<f32>(0.45, 0.55, 0.45), canopy);
+    // From high up, dark needle woods and lighter broadleaf ones.
+    let canopy_tone = mix(vec3<f32>(0.45, 0.55, 0.45), mix(vec3<f32>(0.34, 0.45, 0.42), vec3<f32>(0.56, 0.63, 0.42), saturate(far_n.y * 2.5 - 0.75)), far);
+    col[M_FOREST] = mix(forest_floor, planet.colors[C_LUSH].rgb * canopy_tone, canopy);
     // Beaches and deserts.
-    let beach = vegetation * (1.0 - smoothstep(1.5, 5.0, altitude)) * step(-1.0, altitude);
-    let desert = vegetation * (1.0 - smoothstep(0.08, 0.22, moisture + (variety - 0.5) * 0.1)) * smoothstep(12.0, 22.0, temp_c);
+    // From afar the strip is far thinner than the vertices that carry it, so it fades (it
+    // drew a white outline around every coast seen from orbit).
+    let beach = vegetation * (1.0 - smoothstep(1.5, 5.0, altitude)) * step(-1.0, altitude) * (1.0 - 0.85 * smoothstep(30.0, 300.0, pixel));
+    let desert = vegetation * (1.0 - smoothstep(0.08, 0.22, moisture + (variety - 0.5) * 0.1 + (far_n.y - 0.5) * 0.15 * far)) * smoothstep(12.0, 22.0, temp_c);
     let sandy = saturate(beach + desert);
     col[M_SAND] = planet.colors[C_SAND].rgb;
     // Rock on steep ground and bare alpine heights; scree below it. Coarse patches average
@@ -614,7 +648,8 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     var bsum = 0.0;
     for (var i = 0u; i < MAT_COUNT; i++) {
         if (w[i] > 0.003) {
-            let b = max(ms[i].height + w[i] - hmax + 0.3, 0.0);
+            // From afar a pixel covers a mix of grounds in proportion to their weights.
+            let b = mix(max(ms[i].height + w[i] - hmax + 0.3, 0.0), w[i], far);
             albedo += col[i] * ms[i].detail * b;
             nsum += ms[i].normal * b;
             roughness += ms[i].roughness * b;
@@ -630,7 +665,7 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     ground_h *= inv_b;
     var n = normalize(select(n_geo, nsum, bsum > 1e-4));
     // Large-scale variation beyond the textures' reach.
-    albedo *= mix(1.0, 0.88 + 0.24 * macro_v, macro_fade);
+    albedo *= mix(1.0, 0.88 + 0.24 * macro_v, macro_fade) * mix(1.0, 0.9 + 0.2 * far_n.x, far);
     var porosity = mix(1.0 - rock * 0.6, paint_porosity(layer), paint_w);
     var reflectance = 0.5;
     var subsurface = 0.0;
@@ -668,7 +703,9 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     // ledges and fills hollows first; steep faces stay bare.
     let snow_slope = 1.0 - saturate(dot(n, up));
     let snow_line = planet.params.x;
-    let climate_snow = smoothstep(snow_line + 2.0, snow_line - 3.0, temp_c + (detail_n - 0.5) * 4.0 * fine_fade + (variety - 0.5) * 3.0 + (patches - 0.5) * 2.0 + crest * 2.0 - gully * 3.0)
+    // From afar a pixel spans patchy, drifted and wind-scoured snow, so cover thins out
+    // gradually instead of ending at a line.
+    let climate_snow = smoothstep(snow_line + 2.0 + 1.5 * far, snow_line - 3.0 - 1.5 * far, temp_c + (detail_n - 0.5) * 4.0 * fine_fade + (variety - 0.5) * 3.0 + (patches - 0.5) * 2.0 + crest * 2.0 - gully * 3.0 + (far_n.x - 0.5) * 8.0 * far)
         * (1.0 - smoothstep(rock_slope - 0.02, rock_slope + 0.14, snow_slope + (detail_n - 0.5) * 0.1 * fine_fade));
     let fallen = max(layers.z, select(0.0, frame.weather.y * 0.1, maps.flags.y < 0.5));
     let weather_snow = smoothstep(0.004, 0.04, fallen + (detail_f - 0.5) * 0.01 * fine_fade)
@@ -677,7 +714,7 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     let snow_amount = saturate(max(max(climate_snow, weather_snow), painted_snow)) * (1.0 - ocean);
     var snow = 0.0;
     if (snow_amount > 0.003) {
-        snow = fill_low(snow_amount, ground_h);
+        snow = mix(fill_low(snow_amount, ground_h), snow_amount, far);
         // Deep prints in thin snow show the ground below.
         let snow_depth = max(fallen, painted_snow * 0.25 + climate_snow * 0.5);
         snow *= 1.0 - smoothstep(0.7, 1.0, depth / max(snow_depth, 1e-3)) * print_fade;
@@ -685,7 +722,8 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
         let soft = normalize(mix(n, n_geo, 0.6 * snow));
         let sm = sample_planar(M_SNOW, tp, soft, dp1, dp2, pixel);
         let packed = saturate(depth * 12.0) * print_fade;
-        let snow_col = col[M_SNOW] * sm.detail * mix(1.0, 0.82, packed) * mix(vec3(1.0), vec3(0.93, 0.96, 1.0), packed);
+        let snow_col = col[M_SNOW] * sm.detail * mix(1.0, 0.82, packed) * mix(vec3(1.0), vec3(0.93, 0.96, 1.0), packed)
+            * mix(1.0, 0.86 + 0.18 * far_n.x, far);
         albedo = mix(albedo, snow_col, snow);
         n = normalize(mix(n, sm.normal, snow));
         roughness = mix(roughness, mix(sm.roughness, 0.45, packed), snow);
