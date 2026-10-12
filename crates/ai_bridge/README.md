@@ -11,6 +11,27 @@ game available to MCP clients such as Claude Code.
 
 ## Enable it
 
+`DefaultPlugins` (in the `engine` crate) already includes `AiBridgePlugin::default()`, which
+stays off unless `ENGINE_BRIDGE` is set. A game built on `DefaultPlugins` needs no code: start
+it with `ENGINE_BRIDGE` set, or through `engine-mcp --launch`.
+
+To keep the bridge always on, or to set a token in code, replace the copy in `DefaultPlugins`:
+
+```rust
+// Always on, on a free port (read BridgeInfo.address to find it):
+App::new().add_plugins(DefaultPlugins.set(AiBridgePlugin::listen("127.0.0.1:0")));
+// Always on, and TCP clients must send a token:
+App::new().add_plugins(
+    DefaultPlugins.set(AiBridgePlugin::listen("127.0.0.1:0").with_token("secret")),
+);
+```
+
+Don't add a second `AiBridgePlugin` after `DefaultPlugins`: an app keeps the first copy of a
+plugin and ignores the second one with its settings (it logs a warning), so its `listen(...)`
+has no effect.
+
+Apps that don't use `DefaultPlugins` add the plugin themselves:
+
 ```rust
 app.add_plugins(engine_ai_bridge::AiBridgePlugin::default()); // on when ENGINE_BRIDGE is set
 app.add_plugins(engine_ai_bridge::AiBridgePlugin::listen("127.0.0.1:0")); // always on, free port

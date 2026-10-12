@@ -47,9 +47,14 @@ server is killed.
 Other flags: `--token` (or `ENGINE_BRIDGE_TOKEN`; it is passed to a launched game too),
 `--call-timeout S`, `--list-wait S`, `--help`.
 
-> **The game must add `engine_ai_bridge::AiBridgePlugin`.** It does nothing unless
-> `ENGINE_BRIDGE` is set, so it is safe to leave in. Until `DefaultPlugins` includes it, add it
-> to your game yourself. To try the setup right away, use the demo game:
+> **The game needs `engine_ai_bridge::AiBridgePlugin`.** `DefaultPlugins` includes it, and it
+> does nothing unless `ENGINE_BRIDGE` is set, so a game built on `DefaultPlugins` works with
+> `--launch` as is. To keep the bridge always on (for `--connect`), or to set a token in code,
+> replace the copy in `DefaultPlugins`:
+> `App::new().add_plugins(DefaultPlugins.set(AiBridgePlugin::listen("127.0.0.1:7878")))`.
+> Adding a second `AiBridgePlugin` after `DefaultPlugins` does not work: it is ignored, settings
+> included. Apps that don't use `DefaultPlugins` add `AiBridgePlugin::default()` (or
+> `AiBridgePlugin::listen(...)`) themselves. To try the setup right away, use the demo game:
 > `--launch "cargo run -q -p engine_ai_bridge --example bridge_demo -- --headless"`.
 
 Build once before the first launch so the client does not wait on a cold compile:
