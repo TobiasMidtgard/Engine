@@ -1,8 +1,11 @@
 // Skinned characters. Requires lib_types + lib_frame.
 //
 // Vertices come from the compute pass (position + tension, normal + muscle activation) and a
-// static buffer (uv, color, detail coordinates, masks). Detail is procedural, so no textures
-// are needed:
+// static buffer (uv, color, detail coordinates, masks). Every draw has a *surface* (group 2):
+// base color, tangent-space normal and metallic/roughness textures with their factors
+// (imported characters), or the default surface (1x1 neutral textures, flags 0) that shades
+// procedural characters exactly as before textures existed. Procedural detail applies on top
+// of either, where the vertex masks say so:
 // - cloth (mask.x): compressed regions bunch outward and fold into rings across the limb axis;
 //   stretched regions show diagonal pull lines. Folds darken in their creases.
 // - skin (mask.y): subsurface wrap, and a slight flush where muscles work.
@@ -17,7 +20,28 @@ struct SkinMaterial {
     emissive: vec4<f32>,  // rgb (cd/m^2)
 };
 
+// Must match `GpuSurface` in feature.rs and `struct SkinSurface` in skin_shadow.wgsl.
+struct SkinSurface {
+    base_color: vec4<f32>,  // linear RGBA factor
+    params: vec4<f32>,      // perceptual roughness, metallic, normal scale, alpha cutoff (0 = none)
+    extra: vec4<f32>,       // uv scale xy, subsurface, reflectance
+    flags: vec4<u32>,       // x: SURFACE_* bits
+};
+
+const SURFACE_BASE_COLOR: u32 = 1u;
+const SURFACE_NORMAL: u32 = 2u;
+const SURFACE_METALLIC_ROUGHNESS: u32 = 4u;
+const SURFACE_DOUBLE_SIDED: u32 = 8u;
+// The surface's roughness and metallic replace the SkinMaterial's skin/cloth choice.
+const SURFACE_STANDARD: u32 = 16u;
+
 @group(1) @binding(0) var<storage, read> materials: array<SkinMaterial>;
+
+@group(2) @binding(0) var<uniform> skin_surface: SkinSurface;
+@group(2) @binding(1) var base_color_texture: texture_2d<f32>;
+@group(2) @binding(2) var normal_texture: texture_2d<f32>;
+@group(2) @binding(3) var metallic_roughness_texture: texture_2d<f32>;
+@group(2) @binding(4) var surface_sampler: sampler;
 
 struct VertexIn {
     @location(0) position_tension: vec4<f32>,
@@ -88,9 +112,58 @@ fn bump_normal(n: vec3<f32>, dp1: vec3<f32>, dp2: vec3<f32>, dh1: f32, dh2: f32)
     return select(n, b / len, len > 1e-12);
 }
 
+// Normal mapping without precomputed tangents (Schüler, "Normal Mapping Without Precomputed
+// Tangents", ShaderX5 / 2013): the cotangent frame (surface gradients of u and v) comes from
+// screen-space derivatives of the position and the texture coordinates. Same conventions as
+// the engine's mesh shader:
+// - `n` is the interpolated front-face unit normal, `tn` the tangent-space normal (+Y = green
+//   up, glTF/OpenGL convention);
+// - WebGPU window y points down, the opposite of the GL setting the formula was written for;
+//   the sign of n·(dp1 × dp2) makes the frame independent of that (and of back faces);
+// - glTF UVs start at the top-left, so its bitangent points toward decreasing v (-∇v).
+fn perturb_normal(n: vec3<f32>, dp1: vec3<f32>, dp2: vec3<f32>, duv1: vec2<f32>, duv2: vec2<f32>, tn: vec3<f32>) -> vec3<f32> {
+    let dp2perp = cross(dp2, n);
+    let dp1perp = cross(n, dp1);
+    let orientation = select(-1.0, 1.0, dot(n, cross(dp1, dp2)) >= 0.0);
+    let t = (dp2perp * duv1.x + dp1perp * duv2.x) * orientation;
+    let b = (dp2perp * duv1.y + dp1perp * duv2.y) * orientation;
+    let len2 = max(dot(t, t), dot(b, b));
+    if (len2 <= 1e-24) {
+        return n;  // degenerate UVs (all equal): keep the interpolated normal
+    }
+    let inv = inverseSqrt(len2);
+    let perturbed = t * (tn.x * inv) - b * (tn.y * inv) + n * tn.z;
+    let len = length(perturbed);
+    return select(n, perturbed / len, len > 1e-6);
+}
+
+// The interpolated normal `n`, brought to the side of the triangle the camera sees (double-sided
+// surfaces). On a back face it points away from the viewer; it is mirrored through the
+// triangle's plane (the geometric normal comes from screen-space derivatives). For a normal
+// that is perpendicular to the face this is the usual negation, but it also stays continuous
+// where bent normals cross the plane inside a triangle, which hair cards often have (their
+// normals lean toward the scalp, and duplicated layers mix both sides), so no back-facing
+// normals with a mirror-like Fresnel rim and no seams.
+fn facing_normal(n: vec3<f32>, dp1: vec3<f32>, dp2: vec3<f32>, rel: vec3<f32>) -> vec3<f32> {
+    let g = cross(dp1, dp2);
+    let len = length(g);
+    if (len <= 1e-20) {
+        return n;
+    }
+    // Toward the camera: `rel` points from the camera to the surface.
+    let toward = g * (-sign(dot(g, rel)) / len);
+    let d = dot(n, toward);
+    if (d >= 0.0) {
+        return n;
+    }
+    return normalize(n - 2.0 * d * toward);
+}
+
 @fragment
 fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     let mat = materials[in.material];
+    let surf = skin_surface;
+    let flags = surf.flags.x;
     let cloth = in.mask.x;
     let skin = in.mask.y;
     let compress = saturate(-in.tension * 5.0) * cloth;
@@ -128,13 +201,40 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     let height = depth * (compress * 0.0045 * fold_shape + stretch * 0.0016 * pull)
         + vein * 0.0012 * fade;
 
+    // Textures and every derivative up front, in uniform control flow (before the cutout);
+    // the flags pick which samples are used, so the default surface shades as untextured.
+    let uv = in.uv * surf.extra.xy;
+    let base_tex = textureSample(base_color_texture, surface_sampler, uv);
+    let normal_tex = textureSample(normal_texture, surface_sampler, uv);
+    let mr_tex = textureSample(metallic_roughness_texture, surface_sampler, uv);
     let dp1 = dpdx(in.rel);
     let dp2 = dpdy(in.rel);
-    let n0 = normalize(in.normal);
-    let n = bump_normal(n0, dp1, dp2, dpdx(height), dpdy(height));
+    let duv1 = dpdx(uv);
+    let duv2 = dpdy(uv);
+    let dh1 = dpdx(height);
+    let dh2 = dpdy(height);
 
-    var base = mat.tint * in.color;
-    var albedo = base.rgb;
+    var base = surf.base_color * in.color;
+    if ((flags & SURFACE_BASE_COLOR) != 0u) {
+        base *= base_tex;
+    }
+    // Alpha cutout (hair cards, lashes); the shadow pass cuts the same pixels.
+    if (base.a < surf.params.w) {
+        discard;
+    }
+
+    var n = normalize(in.normal);
+    if ((flags & SURFACE_DOUBLE_SIDED) != 0u) {
+        n = facing_normal(n, dp1, dp2, in.rel);
+    }
+    if ((flags & SURFACE_NORMAL) != 0u) {
+        let tn = (normal_tex.xyz * 2.0 - 1.0) * vec3<f32>(surf.params.z, surf.params.z, 1.0);
+        n = perturb_normal(n, dp1, dp2, duv1, duv2, tn);
+    }
+    // Folds, pull lines and veins perturb the (normal-mapped) normal.
+    n = bump_normal(n, dp1, dp2, dh1, dh2);
+
+    var albedo = mat.tint.rgb * base.rgb;
     // Creases are darker; stretched fabric thins and lightens a touch.
     albedo *= 1.0 - compress * (0.35 * (1.0 - fold_shape)) * fade;
     albedo *= 1.0 + stretch * 0.06 * pull;
@@ -144,11 +244,22 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
 
     var s = default_surface();
     s.albedo = saturate3(albedo);
-    s.metallic = mat.params.w;
-    s.roughness = mix(mat.params.x, mat.params.y, cloth);
-    s.reflectance = 0.5;
+    if ((flags & SURFACE_STANDARD) != 0u) {
+        var roughness = surf.params.x;
+        var metallic = surf.params.y;
+        if ((flags & SURFACE_METALLIC_ROUGHNESS) != 0u) {
+            roughness *= mr_tex.g;
+            metallic *= mr_tex.b;
+        }
+        s.roughness = clamp(roughness, 0.045, 1.0);
+        s.metallic = saturate(metallic);
+    } else {
+        s.metallic = mat.params.w;
+        s.roughness = mix(mat.params.x, mat.params.y, cloth);
+    }
+    s.reflectance = surf.extra.w;
     s.normal = n;
-    s.subsurface = mat.params.z * skin;
+    s.subsurface = max(surf.extra.z, mat.params.z * skin);
     s.occlusion = 1.0 - compress * 0.25;
     s.emissive = mat.emissive.rgb;
 

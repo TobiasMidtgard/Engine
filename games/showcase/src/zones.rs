@@ -253,7 +253,7 @@ pub fn spawn_demos(
             "plaza" => ph::plaza(commands, lib, z),
             "market" => ph::market(commands, lib, z),
             "paddock" => engine_anim::demo::spawn_demo(commands, z.center),
-            "physics" => ph::physics(commands, lib, z),
+            "physics" => engine_physics::demo::spawn_demo(commands, z.center),
             "yard" => engine_softbody::demo::spawn_demo(commands, z.center),
             "magic" => ph::magic(commands, lib, z),
             "gallery2d" => ph::gallery2d(commands, lib, z),
@@ -356,6 +356,15 @@ impl View {
 /// [`spawn_demos`], a module thread edits only its own zone's line.
 pub fn demo_views(z: &Zone) -> Vec<View> {
     match z.key {
+        "track" | "airfield" | "spaceport" => engine_vehicles::demo::views(z.key, z.center)
+            .into_iter()
+            .map(|v| {
+                let view = View::new(v.key, v.name, v.eye, v.target, v.hour).warmup(v.warmup_secs);
+                v.on_arrive
+                    .iter()
+                    .fold(view, |view, (api, args)| view.on_arrive(api, args))
+            })
+            .collect(),
         "field" => engine_fire::demo::VIEWS
             .iter()
             .map(|v| View::new(v.key, v.name, v.eye, v.target, v.hour))

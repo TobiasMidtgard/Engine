@@ -325,6 +325,7 @@ fn main() {
         .id()
     };
     let demo = spawn_demo_world(&mut app.world, DVec3::ZERO);
+    engine_anim::character::finish_loading(&mut app.world);
     app.update();
     if let Some(d) = app.world.get_resource::<RenderDisabled>() {
         eprintln!("no GPU: {}", d.0);

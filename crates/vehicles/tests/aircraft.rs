@@ -79,6 +79,13 @@ fn takes_off_from_a_short_runway_and_climbs() {
     assert!(p.y > 120.0, "only {:.0} m up after 40 s", p.y);
     assert!(!stalled, "stalled on the climb-out");
     assert!(bank_deg(&app, plane).abs() < 60.0);
+    let engine = *app.world.get::<engine_world::EngineState>(plane).unwrap();
+    assert!(
+        matches!(engine.kind, engine_world::EngineKind::Piston { .. })
+            && engine.rpm > engine.idle_rpm + 500.0
+            && engine.thrust_n > 500.0,
+        "climbing engine {engine:?}"
+    );
 }
 
 #[test]

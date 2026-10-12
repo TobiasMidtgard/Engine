@@ -489,3 +489,187 @@ pub fn spawn_spaceport(commands: &mut Commands, pad: DVec3, pad_radius: f32) {
     );
     commands.entity(e).insert(Name::new("Parked spaceplane"));
 }
+
+/// A suggested camera viewpoint: eye and target relative to the demo's center, the hour of
+/// day, how long the demo runs before the shot, and registry calls (API name, JSON args) to
+/// make on arriving, such as lining up a fresh plane so the take-off is in frame.
+#[derive(Debug, Clone)]
+pub struct DemoView {
+    pub key: &'static str,
+    pub name: &'static str,
+    pub eye: [f64; 3],
+    pub target: [f64; 3],
+    pub hour: f32,
+    pub warmup_secs: f32,
+    pub on_arrive: Vec<(&'static str, String)>,
+}
+
+impl DemoView {
+    fn new(key: &'static str, name: &'static str, eye: [f64; 3], target: [f64; 3]) -> Self {
+        Self {
+            key,
+            name,
+            eye,
+            target,
+            hour: 15.5,
+            warmup_secs: 0.5,
+            on_arrive: Vec::new(),
+        }
+    }
+
+    fn at(mut self, hour: f32, warmup_secs: f32) -> Self {
+        self.hour = hour;
+        self.warmup_secs = warmup_secs;
+        self
+    }
+
+    fn call(mut self, api: &'static str, args: serde_json::Value) -> Self {
+        self.on_arrive.push((api, args.to_string()));
+        self
+    }
+}
+
+/// Viewpoints for the showcase tour by zone (`track`, `airfield`, `spaceport`), for a demo
+/// built at `center` (the zone's center). The airfield views assume the showcase runway:
+/// from 600 m south of the zone's center to 600 m north.
+pub fn views(zone: &str, center: DVec3) -> Vec<DemoView> {
+    let abs = |x: f64, y: f64, z: f64| {
+        let p = center + DVec3::new(x, y, z);
+        [p.x, p.y, p.z]
+    };
+    match zone {
+        "track" => vec![
+            DemoView::new(
+                "track_cars",
+                "Sports cars racing round the oval",
+                [156.0, 2.6, 34.0],
+                [128.0, 0.6, -4.0],
+            ),
+            DemoView::new(
+                "track_drift",
+                "Rally car drifting on the dirt pad",
+                [-42.0, 3.5, 4.0],
+                [-70.0, 0.8, -20.0],
+            )
+            .at(16.0, 6.0),
+            DemoView::new(
+                "track_jump",
+                "The kicker jump",
+                [-26.0, 3.0, 96.0],
+                [0.0, 1.5, 80.0],
+            ),
+        ],
+        "airfield" => {
+            // A fresh plane lined up on the southern threshold for each shot, flying the
+            // same circuit as the demo's planes once it is airborne.
+            let start = center + DVec3::new(0.0, 0.0, -600.0);
+            let end = center + DVec3::new(0.0, 0.0, 600.0);
+            let mid = (start + end) * 0.5;
+            let circuit: Vec<[f64; 3]> = (0..8)
+                .map(|i| {
+                    let t = i as f64 / 8.0 * std::f64::consts::TAU;
+                    let p = mid + DVec3::new(t.sin() * 380.0, 140.0, t.cos() * 700.0);
+                    [p.x, p.y, p.z]
+                })
+                .collect();
+            let line_up = serde_json::json!({
+                "preset": "sport_plane",
+                "at": abs(0.0, 0.12, -588.0),
+                "yaw_deg": 180.0,
+                "name": "Tour plane",
+                "autopilot": {"Fly": {
+                    "waypoints": circuit,
+                    "looped": true,
+                    "cruise_speed": 60.0,
+                    "rotate_speed": 32.0,
+                }},
+            });
+            let gone = serde_json::json!({"name": "Tour plane"});
+            vec![
+                DemoView::new(
+                    "airfield_lineup",
+                    "Sport plane lined up on the runway",
+                    [14.0, 3.5, -606.0],
+                    [0.0, 1.8, -584.0],
+                )
+                .at(10.0, 0.5)
+                .call(
+                    "entity.despawn",
+                    serde_json::json!({"name": "Departing plane"}),
+                )
+                .call("entity.despawn", gone.clone())
+                .call("vehicles.spawn", line_up.clone()),
+                DemoView::new(
+                    "airfield_rotate",
+                    "Sport plane rotating for take-off",
+                    [45.0, 4.0, -400.0],
+                    [0.0, 4.0, -440.0],
+                )
+                .at(10.0, 11.0)
+                .call("entity.despawn", gone)
+                .call("vehicles.spawn", line_up),
+            ]
+        }
+        "spaceport" => vec![
+            // Restart the hop so the shot lands in the hover: from the pad it lifts off
+            // after 5 s and hovers from about 9 s to 23 s; caught in the air, it hovers at once.
+            DemoView::new(
+                "spaceport_hover",
+                "Spaceplane hovering over the pad",
+                [38.0, 8.0, 46.0],
+                [0.0, 18.0, 0.0],
+            )
+            .at(17.0, 12.0)
+            .call(
+                "vehicles.autopilot",
+                serde_json::json!({
+                    "vehicle": "Hopper",
+                    "mode": {"Hop": {
+                        "pad": abs(0.0, 0.4, 0.0),
+                        "height_m": 18.0,
+                        "hover_s": 14.0,
+                        "rest_s": 5.0,
+                    }},
+                }),
+            ),
+            DemoView::new(
+                "spaceport_parked",
+                "Spaceplane parked on the apron",
+                [82.0, 5.0, -18.0],
+                [58.0, 3.0, -45.0],
+            )
+            .at(17.0, 0.5),
+        ],
+        _ => Vec::new(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tour_hooks_name_real_apis_and_parse() {
+        let mut calls = 0;
+        for zone in ["track", "airfield", "spaceport"] {
+            for v in views(zone, DVec3::new(780.0, 0.0, -150.0)) {
+                for (api, args) in &v.on_arrive {
+                    let args: serde_json::Value = serde_json::from_str(args).unwrap();
+                    let mode = match *api {
+                        "vehicles.spawn" => args.get("autopilot"),
+                        "vehicles.autopilot" => args.get("mode"),
+                        "entity.despawn" => None,
+                        other => panic!("{} calls unknown API {other}", v.key),
+                    };
+                    if let Some(mode) = mode {
+                        let parsed: AutopilotMode = serde_json::from_value(mode.clone())
+                            .unwrap_or_else(|e| panic!("{}: {e}", v.key));
+                        assert_ne!(parsed, AutopilotMode::Off, "{}", v.key);
+                    }
+                    calls += 1;
+                }
+            }
+        }
+        assert!(calls >= 5);
+    }
+}
