@@ -20,6 +20,7 @@ use crate::muscle::{Muscle, MuscleDriver};
 use crate::procedural::spring::SpringChainDef;
 use crate::skeleton::Skeleton;
 use crate::skin::SkinnedMesh;
+use crate::xform::Xf;
 
 pub const SKELETON: &str = "humanoid";
 pub const GRAPH: &str = "humanoid";
@@ -112,6 +113,50 @@ pub fn skeleton() -> Skeleton {
         ]);
     }
     Skeleton::new(SKELETON, bones).expect("humanoid skeleton")
+}
+
+/// The humanoid skeleton sized to another character, for driving it through
+/// [`Retarget`](crate::retarget::Retarget). `joint(bone)` says where a humanoid joint sits on
+/// that character in its bind pose (model space, meters, facing −Z); bones it doesn't know
+/// keep their offsets from their parents.
+///
+/// Rest orientations stay the humanoid's, so every humanoid clip, IK rig and muscle works
+/// unchanged: arm and leg chains stay straight along their bones with the character's bone
+/// lengths, the rest of the joints move to the character's positions. Clips key the hips
+/// relative to their rest offset, so the hips keep it and the root takes up the difference.
+pub fn fit_skeleton(name: &str, joint: impl Fn(&str) -> Option<Vec3>) -> Skeleton {
+    let base = skeleton();
+    let straight = [LOWER_ARM, HAND, LOWER_LEG, FOOT].concat();
+    let n = base.len();
+    let mut rest = base.rest.clone();
+    let mut model = base.rest_model.clone();
+    let hips = base.bone("hips");
+    for b in 0..n {
+        let bone_name = base.names[b].as_str();
+        let parent = base.parents[b].map(usize::from);
+        let parent_model = parent.map_or(Xf::IDENTITY, |p| model[p]);
+        if b == base.bone("root") {
+            if let Some(h) = joint("hips") {
+                rest[b].t = h - base.rest[hips].t;
+            }
+        } else if b != hips
+            && let Some(p) = parent
+            && let Some(at) = joint(bone_name)
+        {
+            rest[b].t = if straight.contains(&bone_name) {
+                // Keep the chain straight; take the character's bone length.
+                let from = joint(&base.names[p]).unwrap_or(parent_model.t);
+                base.rest[b].t.normalize_or(Vec3::NEG_Y) * (at - from).length()
+            } else {
+                parent_model.inverse().transform_point(at)
+            };
+        }
+        model[b] = match parent {
+            Some(p) => model[p].mul(&rest[b]),
+            None => rest[b],
+        };
+    }
+    Skeleton::from_parts(name, base.names.to_vec(), base.parents.to_vec(), rest, None)
 }
 
 /// What the character wears.
@@ -1273,20 +1318,49 @@ pub fn clips(s: &Skeleton) -> Vec<AnimationClip> {
 /// Locomotion (idle/walk/run by `speed`, leaning by `turn`), plus `heavy_swing`, `block`
 /// (held while `blocking` > 0.5), `reach` and `flex` actions.
 pub fn graph() -> AnimGraph {
+    graph_with(GRAPH, &Locomotion::default())
+}
+
+/// Which clips a [`graph_with`] moves with, and the speeds (m/s) they cover.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Locomotion {
+    pub idle: String,
+    pub walk: String,
+    pub walk_speed: f32,
+    pub run: String,
+    pub run_speed: f32,
+}
+
+impl Default for Locomotion {
+    fn default() -> Self {
+        Self {
+            idle: "idle".into(),
+            walk: "walk".into(),
+            walk_speed: WALK_SPEED,
+            run: "run".into(),
+            run_speed: RUN_SPEED,
+        }
+    }
+}
+
+/// The humanoid graph named `name`, moving with other locomotion clips (motion capture,
+/// say); the actions stay the humanoid's. Walk and run clips must start on the right foot's
+/// strike, like the humanoid's, so they blend in step.
+pub fn graph_with(name: &str, motion: &Locomotion) -> AnimGraph {
     let locomotion = NodeDef::Blend1d {
         param: "speed".into(),
         children: vec![
             Blend1dChild {
                 at: 0.0,
-                node: NodeDef::clip("idle"),
+                node: NodeDef::clip(&motion.idle),
             },
             Blend1dChild {
-                at: WALK_SPEED,
-                node: NodeDef::clip("walk"),
+                at: motion.walk_speed,
+                node: NodeDef::clip(&motion.walk),
             },
             Blend1dChild {
-                at: RUN_SPEED,
-                node: NodeDef::clip("run"),
+                at: motion.run_speed,
+                node: NodeDef::clip(&motion.run),
             },
         ],
         sync: true,
@@ -1321,7 +1395,7 @@ pub fn graph() -> AnimGraph {
         speed: 1.0,
     };
     AnimGraph {
-        name: GRAPH.into(),
+        name: name.into(),
         root: NodeDef::StateMachine {
             states: vec![
                 state("move", leaning),

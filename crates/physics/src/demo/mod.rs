@@ -17,6 +17,9 @@
 //! * a sagging plank bridge that crates drop onto, with a stand-in character on it,
 //! * a kinematic turntable carrying crates and a stand-in character around,
 //! * rubber balls bouncing in the middle.
+//!
+//! The stations replay on their own cycles ([`Station::cycle_secs`]), so whoever walks in sees
+//! them play; `physics.proving_ground.replay` restarts one or all of them now.
 
 mod art;
 
@@ -24,13 +27,14 @@ use art::{Mat, Parts, dummy, props, structures};
 use engine_assets::Assets;
 use engine_core::math::{DVec3, Quat, Vec2, Vec3};
 use engine_core::prelude::*;
+use engine_core::time::FixedTime;
 use engine_render::Mesh;
 use engine_render::prelude::MeshRenderer;
 use engine_world::physics::{
     CharacterController, CharacterMove, Collider, ColliderShape, Joint, JointKind, JointMotor,
     RigidBody, Velocity,
 };
-use engine_world::{SurfaceId, SurfaceMaterial, SurfaceMaterials};
+use engine_world::{FocusPoints, SurfaceId, SurfaceMaterial, SurfaceMaterials};
 
 /// Size of the concrete yard (x, z), meters. Its top is at `origin.y`.
 pub const YARD_SIZE: [f64; 2] = [70.0, 50.0];
@@ -40,9 +44,202 @@ pub fn spawn_demo(commands: &mut Commands, origin: DVec3) {
     commands.queue(move |world: &mut World| build(world, origin));
 }
 
+/// A suggested camera stop (showcase tour, screenshots): eye and target relative to the
+/// yard's origin. Arriving restarts `station` (if any); `warmup_secs` later the action is on.
+pub struct DemoView {
+    pub key: &'static str,
+    pub name: &'static str,
+    pub eye: [f64; 3],
+    pub target: [f64; 3],
+    pub hour: f32,
+    pub station: Option<Station>,
+    pub warmup_secs: f32,
+}
+
+/// The proving ground's tour stops, one per action station.
+pub const VIEWS: &[DemoView] = &[
+    DemoView {
+        key: "physics_ragdolls",
+        name: "Crash test dummies tumbling down a staircase",
+        eye: [33.0, 4.5, -4.0],
+        target: [24.0, 1.3, -12.0],
+        hour: 16.0,
+        station: Some(Station::Ragdolls),
+        warmup_secs: 1.0,
+    },
+    DemoView {
+        key: "physics_wrecking_ball",
+        name: "A wrecking ball on a chain through a crate wall",
+        eye: [-23.0, 4.0, 27.0],
+        target: [-24.5, 2.5, 10.0],
+        hour: 16.0,
+        station: Some(Station::WreckingBall),
+        warmup_secs: 1.9,
+    },
+    DemoView {
+        key: "physics_seesaw",
+        name: "Seesaw catapult and motor-driven paddle wheel",
+        eye: [-1.0, 6.0, 25.0],
+        target: [-4.0, 2.5, 9.0],
+        hour: 16.0,
+        station: Some(Station::Seesaw),
+        warmup_secs: 2.0,
+    },
+    DemoView {
+        key: "physics_pile",
+        name: "250 crates, drums and balls raining into a bin, by a 30-crate tower",
+        eye: [-8.0, 9.0, 4.0],
+        target: [-18.0, 3.0, -15.0],
+        hour: 16.0,
+        station: Some(Station::Pile),
+        warmup_secs: 2.6,
+    },
+    DemoView {
+        key: "physics_dominoes",
+        name: "A domino run knocking itself over",
+        eye: [8.0, 4.5, -4.0],
+        target: [5.0, 0.4, -16.0],
+        hour: 16.0,
+        station: Some(Station::Dominoes),
+        warmup_secs: 5.0,
+    },
+    DemoView {
+        key: "physics_bridge",
+        name: "Crates dropping onto a sagging plank bridge",
+        eye: [27.5, 4.0, 10.0],
+        target: [18.0, 2.6, 10.0],
+        hour: 16.0,
+        station: Some(Station::Bridge),
+        warmup_secs: 6.0,
+    },
+    DemoView {
+        key: "physics_turntable",
+        name: "A turntable carrying crates and a rider",
+        eye: [37.0, 6.5, 20.0],
+        target: [30.0, 0.5, 10.0],
+        hour: 16.0,
+        station: None,
+        warmup_secs: 0.0,
+    },
+];
+
+/// The proving ground's stations, back row to front row.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Station {
+    Tower,
+    Pile,
+    Dominoes,
+    Ragdolls,
+    WreckingBall,
+    Seesaw,
+    PaddleWheel,
+    Bridge,
+    Turntable,
+    Balls,
+}
+
+impl Station {
+    pub const ALL: [Station; 10] = [
+        Station::Tower,
+        Station::Pile,
+        Station::Dominoes,
+        Station::Ragdolls,
+        Station::WreckingBall,
+        Station::Seesaw,
+        Station::PaddleWheel,
+        Station::Bridge,
+        Station::Turntable,
+        Station::Balls,
+    ];
+
+    /// The station's name in the `physics.proving_ground.replay` API.
+    pub fn key(self) -> &'static str {
+        match self {
+            Station::Tower => "tower",
+            Station::Pile => "pile",
+            Station::Dominoes => "dominoes",
+            Station::Ragdolls => "ragdolls",
+            Station::WreckingBall => "wrecking_ball",
+            Station::Seesaw => "seesaw",
+            Station::PaddleWheel => "paddle_wheel",
+            Station::Bridge => "bridge",
+            Station::Turntable => "turntable",
+            Station::Balls => "balls",
+        }
+    }
+
+    /// Where it stands in the yard (yard-local, meters).
+    pub fn base(self) -> DVec3 {
+        let (x, z) = match self {
+            Station::Tower => (-28.0, -16.0),
+            Station::Pile => (-14.0, -14.0),
+            Station::Dominoes => (-3.0, -16.0),
+            Station::Ragdolls => (24.0, -10.0),
+            Station::WreckingBall => (-26.0, 10.0),
+            Station::Seesaw => (-10.0, 10.0),
+            Station::PaddleWheel => (4.0, 10.0),
+            Station::Bridge => (18.0, 10.0),
+            Station::Turntable => (30.0, 10.0),
+            Station::Balls => (6.0, -3.0),
+        };
+        DVec3::new(x, 0.0, z)
+    }
+
+    /// World seconds between replays: a little longer than the station takes to play out and
+    /// settle. `None` for the ones that never stop (the tower stands, the wheel and table turn).
+    pub fn cycle_secs(self) -> Option<f64> {
+        match self {
+            Station::Tower | Station::PaddleWheel | Station::Turntable => None,
+            Station::Pile => Some(45.0),
+            Station::Dominoes | Station::WreckingBall | Station::Bridge => Some(30.0),
+            Station::Ragdolls | Station::Seesaw | Station::Balls => Some(20.0),
+        }
+    }
+
+    pub fn from_key(key: &str) -> Option<Station> {
+        Station::ALL.into_iter().find(|s| s.key() == key)
+    }
+
+    fn build(self, y: &mut Yard) {
+        let base = self.base();
+        match self {
+            Station::Tower => tower(y, base),
+            Station::Pile => pile(y, base),
+            Station::Dominoes => dominoes(y, base),
+            Station::Ragdolls => ragdoll_stairs(y, base),
+            Station::WreckingBall => wrecking_ball(y, base),
+            Station::Seesaw => seesaw(y, base),
+            Station::PaddleWheel => paddle_wheel(y, base),
+            Station::Bridge => bridge(y, base),
+            Station::Turntable => turntable(y, base),
+            Station::Balls => bouncy_balls(y, base),
+        }
+    }
+}
+
+/// A proving ground, on its yard's pad entity: where it is, its surfaces, and how long each
+/// station has run since it was last (re)built.
+#[derive(Component, Debug, Clone)]
+pub struct ProvingGround {
+    origin: DVec3,
+    surfaces: [SurfaceId; 4],
+    running: [f64; Station::ALL.len()],
+    /// Replay stations on their cycles (on by default).
+    pub replay: bool,
+}
+
+/// Marks everything a station spawned, so a replay clears it.
+#[derive(Component, Debug, Clone, Copy)]
+struct StationPart {
+    ground: Entity,
+    station: Station,
+}
+
 struct Yard<'w> {
     world: &'w mut World,
     origin: DVec3,
+    /// Tags what the yard spawns (the station being built).
+    tag: Option<StationPart>,
     /// The app draws meshes (there is an `Assets<Mesh>`); headless physics apps get colliders
     /// only.
     render: bool,
@@ -55,6 +252,14 @@ struct Yard<'w> {
 impl Yard<'_> {
     fn at(&self, local: DVec3) -> DVec3 {
         self.origin + local
+    }
+
+    fn spawn(&mut self, bundle: impl Bundle) -> Entity {
+        let mut e = self.world.spawn(bundle);
+        if let Some(tag) = self.tag {
+            e.insert(tag);
+        }
+        e.id()
     }
 
     /// `N` meshes cached under `key` (built by `make` the first time), each with its material.
@@ -79,7 +284,7 @@ impl Yard<'_> {
             return;
         }
         for (mesh, material) in parts {
-            self.world.spawn((
+            self.spawn((
                 Transform::default(),
                 MeshRenderer::new(mesh, material),
                 ChildOf(e),
@@ -91,33 +296,28 @@ impl Yard<'_> {
     fn scenery(&mut self, local: DVec3, rotation: Quat, parts: Parts) {
         let t = Transform::from_translation(self.at(local)).with_rotation(rotation);
         for (mesh, material) in parts {
-            self.world.spawn((t, MeshRenderer::new(mesh, material)));
+            self.spawn((t, MeshRenderer::new(mesh, material)));
         }
     }
 
     /// A static concrete box, drawn by the scenery around it.
     fn block(&mut self, local: DVec3, half: Vec3) -> Entity {
         let at = self.at(local);
-        self.world
-            .spawn((
-                Transform::from_translation(at),
-                RigidBody::fixed(),
-                Collider::cuboid(half).with_surface(self.concrete),
-            ))
-            .id()
+        self.spawn((
+            Transform::from_translation(at),
+            RigidBody::fixed(),
+            Collider::cuboid(half).with_surface(self.concrete),
+        ))
     }
 
     fn body(&mut self, local: DVec3, rotation: Quat, collider: Collider, parts: Parts) -> Entity {
         let at = self.at(local);
-        let e = self
-            .world
-            .spawn((
-                Transform::from_translation(at).with_rotation(rotation),
-                RigidBody::dynamic(),
-                collider,
-                Velocity::default(),
-            ))
-            .id();
+        let e = self.spawn((
+            Transform::from_translation(at).with_rotation(rotation),
+            RigidBody::dynamic(),
+            collider,
+            Velocity::default(),
+        ));
         self.dress(e, parts);
         e
     }
@@ -179,17 +379,15 @@ impl Yard<'_> {
             }
             None => at,
         };
-        self.world
-            .spawn(Joint {
-                kind,
-                body_a: a,
-                body_b: b,
-                anchor_a,
-                anchor_b,
-                break_force: None,
-                collide_connected: false,
-            })
-            .id()
+        self.spawn(Joint {
+            kind,
+            body_a: a,
+            body_b: b,
+            anchor_a,
+            anchor_b,
+            break_force: None,
+            collide_connected: false,
+        })
     }
 
     /// A stand-in character with its feet at `feet`: the controller the movement module
@@ -198,17 +396,14 @@ impl Yard<'_> {
     fn mannequin(&mut self, feet: DVec3, shirt: u32, name: &str) -> Entity {
         let desc = CharacterController::default();
         let center = feet + DVec3::Y * (desc.height as f64 * 0.5 + 0.02);
-        let e = self
-            .world
-            .spawn((
-                Transform::from_translation(self.at(center)),
-                desc,
-                CharacterMove {
-                    velocity: Vec3::new(0.0, -2.0, 0.0),
-                },
-                Name::new(name.to_string()),
-            ))
-            .id();
+        let e = self.spawn((
+            Transform::from_translation(self.at(center)),
+            desc,
+            CharacterMove {
+                velocity: Vec3::new(0.0, -2.0, 0.0),
+            },
+            Name::new(name.to_string()),
+        ));
         let height = desc.height;
         let parts = self.parts(
             &format!("dummy/standing/{height:.2}/{shirt:06x}"),
@@ -228,7 +423,7 @@ impl Yard<'_> {
 }
 
 fn build(world: &mut World, origin: DVec3) {
-    let (concrete, wood, metal, rubber) = {
+    let surfaces = {
         let mut table = world.get_resource_or_init::<SurfaceMaterials>();
         let rubber = match table.id("rubber") {
             Some(id) => id,
@@ -242,23 +437,14 @@ fn build(world: &mut World, origin: DVec3) {
                 ..Default::default()
             }),
         };
-        (
+        [
             table.id_or_default("concrete"),
             table.id_or_default("wood"),
             table.id_or_default("metal"),
             rubber,
-        )
+        ]
     };
-    let render = world.contains_resource::<Assets<Mesh>>();
-    let mut y = Yard {
-        world,
-        origin,
-        render,
-        concrete,
-        wood,
-        metal,
-        rubber,
-    };
+    let mut y = Yard::new(world, origin, surfaces, None);
     let half = Vec3::new(YARD_SIZE[0] as f32 * 0.5, 0.25, YARD_SIZE[1] as f32 * 0.5);
     let pad = y.block(DVec3::new(0.0, -0.25, 0.0), half);
     y.name(pad, "Proving ground");
@@ -280,17 +466,126 @@ fn build(world: &mut World, origin: DVec3) {
         [m.slab, m.curb, m.hazard]
     });
     y.scenery(DVec3::ZERO, Quat::IDENTITY, slab);
+    world.entity_mut(pad).insert(ProvingGround {
+        origin,
+        surfaces,
+        running: [0.0; Station::ALL.len()],
+        replay: true,
+    });
+    for station in Station::ALL {
+        build_station(world, pad, station);
+    }
+}
 
-    tower(&mut y, DVec3::new(-28.0, 0.0, -16.0));
-    pile(&mut y, DVec3::new(-14.0, 0.0, -14.0));
-    dominoes(&mut y, DVec3::new(-3.0, 0.0, -16.0));
-    ragdoll_stairs(&mut y, DVec3::new(24.0, 0.0, -10.0));
-    wrecking_ball(&mut y, DVec3::new(-26.0, 0.0, 10.0));
-    seesaw(&mut y, DVec3::new(-10.0, 0.0, 10.0));
-    paddle_wheel(&mut y, DVec3::new(4.0, 0.0, 10.0));
-    bridge(&mut y, DVec3::new(18.0, 0.0, 10.0));
-    turntable(&mut y, DVec3::new(30.0, 0.0, 10.0));
-    bouncy_balls(&mut y, DVec3::new(6.0, 0.0, -3.0));
+impl<'w> Yard<'w> {
+    fn new(
+        world: &'w mut World,
+        origin: DVec3,
+        [concrete, wood, metal, rubber]: [SurfaceId; 4],
+        tag: Option<StationPart>,
+    ) -> Self {
+        let render = world.contains_resource::<Assets<Mesh>>();
+        Yard {
+            world,
+            origin,
+            tag,
+            render,
+            concrete,
+            wood,
+            metal,
+            rubber,
+        }
+    }
+}
+
+/// (Re)build `station` of the proving ground on `ground`: clear what it spawned last time and
+/// spawn it fresh.
+fn build_station(world: &mut World, ground: Entity, station: Station) {
+    let Some(g) = world.get::<ProvingGround>(ground).cloned() else {
+        return;
+    };
+    let old: Vec<Entity> = world
+        .query::<(Entity, &StationPart)>()
+        .iter(world)
+        .filter(|(_, p)| p.ground == ground && p.station == station)
+        .map(|(e, _)| e)
+        .collect();
+    for e in old {
+        // Children go with their parent, so some are gone already.
+        if let Ok(e) = world.get_entity_mut(e) {
+            e.despawn();
+        }
+    }
+    let tag = StationPart { ground, station };
+    station.build(&mut Yard::new(world, g.origin, g.surfaces, Some(tag)));
+    if let Some(mut g) = world.get_mut::<ProvingGround>(ground) {
+        g.running[station as usize] = 0.0;
+    }
+}
+
+/// Proving grounds farther than this from every focus point pause their replays (nobody sees
+/// them, and far bodies are frozen anyway), meters.
+const REPLAY_RANGE_M: f64 = 250.0;
+
+/// Replay each proving ground's stations whose cycle is up (world time, so slow motion slows
+/// the cycles too).
+pub(crate) fn replay_stations(world: &mut World) {
+    let dt = world
+        .get_resource::<FixedTime>()
+        .map_or(0.0, |t| t.world_step_secs());
+    let focus = world
+        .get_resource::<FocusPoints>()
+        .map(|f| f.points.clone())
+        .unwrap_or_default();
+    let watched =
+        |at: DVec3| focus.is_empty() || focus.iter().any(|p| p.distance(at) < REPLAY_RANGE_M);
+    let mut due = Vec::new();
+    for (e, mut g) in world
+        .query::<(Entity, &mut ProvingGround)>()
+        .iter_mut(world)
+    {
+        if !g.replay || !watched(g.origin) {
+            continue;
+        }
+        for station in Station::ALL {
+            let t = &mut g.running[station as usize];
+            *t += dt;
+            if station.cycle_secs().is_some_and(|c| *t >= c) {
+                due.push((e, station));
+            }
+        }
+    }
+    for (e, station) in due {
+        build_station(world, e, station);
+    }
+}
+
+/// `physics.proving_ground.replay`: restart one station (`{"station": "dominoes"}`) or all of
+/// them (`{}`) on every proving ground. Returns the stations restarted.
+pub(crate) fn replay_api(
+    world: &mut World,
+    args: serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    let stations: Vec<Station> = match args.get("station").and_then(|v| v.as_str()) {
+        Some(key) => vec![Station::from_key(key).ok_or_else(|| {
+            let keys: Vec<_> = Station::ALL.iter().map(|s| s.key()).collect();
+            format!("unknown station `{key}`; stations: {}", keys.join(", "))
+        })?],
+        None => Station::ALL.to_vec(),
+    };
+    let grounds: Vec<Entity> = world
+        .query_filtered::<Entity, With<ProvingGround>>()
+        .iter(world)
+        .collect();
+    for &g in &grounds {
+        for &s in &stations {
+            build_station(world, g, s);
+        }
+    }
+    Ok(serde_json::json!({
+        "proving_grounds": grounds.len(),
+        "stations": stations.iter().map(|s| s.key()).collect::<Vec<_>>(),
+    }))
 }
 
 /// Deterministic pseudo-random numbers in 0..1 (the demo looks the same every run).
@@ -697,22 +992,19 @@ fn paddle_wheel(y: &mut Yard, center: DVec3) {
     });
     y.scenery(center, Quat::IDENTITY, bin);
     let hub_at = center + DVec3::new(0.0, axle as f64, 0.0);
-    let wheel = y
-        .world
-        .spawn((
-            Transform::from_translation(y.at(hub_at)),
-            RigidBody::dynamic(),
-            Velocity::default(),
-            Name::new("Paddle wheel"),
-        ))
-        .id();
+    let wheel = y.spawn((
+        Transform::from_translation(y.at(hub_at)),
+        RigidBody::dynamic(),
+        Velocity::default(),
+        Name::new("Paddle wheel"),
+    ));
     let hub = y.parts("paddle_hub", [Mat::Yellow, Mat::Steel], || {
         let h = structures::paddle_hub(0.3, 2.7);
         [h.painted, h.steel]
     });
     y.dress(wheel, hub);
     let along_x = Quat::from_rotation_z(std::f32::consts::FRAC_PI_2);
-    y.world.spawn((
+    y.spawn((
         Transform::default().with_rotation(along_x),
         Collider {
             shape: ColliderShape::Cylinder {
@@ -728,17 +1020,14 @@ fn paddle_wheel(y: &mut Yard, center: DVec3) {
     let (half, reach) = (Vec3::new(2.6, 0.75, 0.05), 1.05);
     for k in 0..4 {
         let r = Quat::from_rotation_x(k as f32 * std::f32::consts::FRAC_PI_2);
-        let paddle = y
-            .world
-            .spawn((
-                Transform::from_translation((r * Vec3::new(0.0, reach, 0.0)).as_dvec3())
-                    .with_rotation(r),
-                Collider::cuboid(half)
-                    .with_surface(y.wood)
-                    .with_density(600.0),
-                ChildOf(wheel),
-            ))
-            .id();
+        let paddle = y.spawn((
+            Transform::from_translation((r * Vec3::new(0.0, reach, 0.0)).as_dvec3())
+                .with_rotation(r),
+            Collider::cuboid(half)
+                .with_surface(y.wood)
+                .with_density(600.0),
+            ChildOf(wheel),
+        ));
         let blade = y.parts(
             "paddle_blade",
             [Mat::Timber, Mat::Yellow, Mat::Steel],
@@ -905,26 +1194,23 @@ fn bridge_hinge() -> JointKind {
 }
 
 fn turntable(y: &mut Yard, center: DVec3) {
-    let table = y
-        .world
-        .spawn((
-            Transform::from_translation(y.at(center + DVec3::Y * 0.15)),
-            RigidBody::kinematic(),
-            Collider {
-                shape: ColliderShape::Cylinder {
-                    radius: 4.0,
-                    half_height: 0.15,
-                },
-                surface: y.concrete,
-                ..Default::default()
+    let table = y.spawn((
+        Transform::from_translation(y.at(center + DVec3::Y * 0.15)),
+        RigidBody::kinematic(),
+        Collider {
+            shape: ColliderShape::Cylinder {
+                radius: 4.0,
+                half_height: 0.15,
             },
-            Velocity {
-                linear: Vec3::ZERO,
-                angular: Vec3::new(0.0, 0.4, 0.0),
-            },
-            Name::new("Turntable"),
-        ))
-        .id();
+            surface: y.concrete,
+            ..Default::default()
+        },
+        Velocity {
+            linear: Vec3::ZERO,
+            angular: Vec3::new(0.0, 0.4, 0.0),
+        },
+        Name::new("Turntable"),
+    ));
     let parts = y.parts("turntable", [Mat::Diamond, Mat::Yellow, Mat::Steel], || {
         let t = structures::turntable(4.0, 0.3);
         [t.deck, t.painted, t.steel]

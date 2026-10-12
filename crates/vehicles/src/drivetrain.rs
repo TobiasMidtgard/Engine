@@ -10,6 +10,7 @@
 //! The car's wheel system calls [`Drivetrain::substep`] several times per physics step.
 
 use engine_core::prelude::*;
+use engine_world::EngineKind;
 
 /// rad/s per rpm.
 pub const RPM_TO_RAD: f32 = std::f32::consts::TAU / 60.0;
@@ -28,6 +29,10 @@ pub struct EngineSpec {
     pub inertia: f32,
     /// Engine braking torque at the redline with the throttle closed, N·m.
     pub engine_brake_nm: f32,
+    /// What it sounds like (written to [`EngineState`](engine_world::EngineState)).
+    pub sound: EngineKind,
+    /// Turbocharged: boost builds with rpm and load.
+    pub turbo: bool,
 }
 
 impl Default for EngineSpec {
@@ -44,6 +49,8 @@ impl Default for EngineSpec {
             redline_rpm: 7_200.0,
             inertia: 0.25,
             engine_brake_nm: 80.0,
+            sound: EngineKind::Piston { cylinders: 6 },
+            turbo: false,
         }
     }
 }
