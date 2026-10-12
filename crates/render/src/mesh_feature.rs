@@ -1205,7 +1205,6 @@ impl RenderFeature for MeshFeature {
             stats.draw_calls += c.draw_calls;
             stats.instances += c.instances;
             stats.triangles += c.triangles;
-            stats.clusters = c.clusters;
         }
         self.stats = stats;
     }
@@ -1284,6 +1283,10 @@ impl RenderFeature for MeshFeature {
 
     fn stats(&self) -> FeatureStats {
         self.stats
+    }
+
+    fn clusters_drawn(&self) -> u32 {
+        self.clusters.as_ref().map_or(0, |c| c.stats().clusters)
     }
 
     fn describe(&self) -> serde_json::Value {

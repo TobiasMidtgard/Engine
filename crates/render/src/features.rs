@@ -198,8 +198,6 @@ pub struct FeatureStats {
     pub instances: u32,
     pub triangles: u64,
     pub culled: u32,
-    /// Virtual geometry clusters drawn by the camera (their triangles are in `triangles`).
-    pub clusters: u32,
 }
 
 /// A pluggable piece of the renderer. See the module docs for the frame order.
@@ -261,6 +259,13 @@ pub trait RenderFeature: Send + Sync + 'static {
 
     fn stats(&self) -> FeatureStats {
         FeatureStats::default()
+    }
+
+    /// Virtual geometry clusters the camera drew (their triangles are in `stats().triangles`).
+    /// Kept out of `FeatureStats` so features in other crates can keep building it field by
+    /// field.
+    fn clusters_drawn(&self) -> u32 {
+        0
     }
 
     /// Optional JSON describing the feature's state (for `render.stats`).

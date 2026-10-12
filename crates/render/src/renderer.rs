@@ -1161,13 +1161,14 @@ impl Renderer {
 
     fn collect_stats(&self, view: &ViewData, started: Instant) -> RenderStats {
         let mut total = FeatureStats::default();
+        let mut clusters = 0;
         for f in &self.features {
             let s = f.stats();
             total.draw_calls += s.draw_calls;
             total.instances += s.instances;
             total.triangles += s.triangles;
             total.culled += s.culled;
-            total.clusters += s.clusters;
+            clusters += f.clusters_drawn();
         }
         RenderStats {
             cpu_ms: started.elapsed().as_secs_f32() * 1000.0,
@@ -1175,7 +1176,7 @@ impl Renderer {
             instances: total.instances,
             triangles: total.triangles,
             culled: total.culled,
-            clusters: total.clusters,
+            clusters,
             point_lights: view.point_lights.len() as u32,
             ev100: view.ev100,
             width: self.targets.width,
@@ -1199,7 +1200,7 @@ impl Renderer {
                     "instances": s.instances,
                     "triangles": s.triangles,
                     "culled": s.culled,
-                    "clusters": s.clusters,
+                    "clusters": f.clusters_drawn(),
                     "state": f.describe(),
                 })
             })
