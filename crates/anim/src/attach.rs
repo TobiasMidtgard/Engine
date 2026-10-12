@@ -23,14 +23,21 @@ pub struct BoneAttachment {
 }
 
 /// A prop held loosely, like a sledgehammer carried at the side: while none of `curves` is
-/// on, it swings about `pivot` (the fist, in the bone's frame) until `axis` (its long axis in
-/// the bone's frame) points along `toward` (model space). As a curve comes on, the prop turns
-/// back into the hand's frame (two hands on a swing, a hammer braced on the shoulder).
-/// Several attachments with the same hang move as one rigid prop.
+/// on, it swings about the fist until `axis` (its long axis in the bone's frame) points along
+/// `toward` (model space). As a curve comes on, the prop turns back into the hand's frame
+/// (two hands on a swing, a hammer braced on the shoulder). Several attachments with the same
+/// hang move as one rigid prop.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Hang {
+    /// The fist in the bone's frame, where the prop is held.
     pub pivot: Vec3,
+    /// While hanging, the fist is this far past the bone along its parent bone instead (a
+    /// relaxed hand continues the forearm, whatever its twist), meters; 0 keeps `pivot`.
+    pub fist: f32,
+    /// And shifted this much toward the palm, model space (a hanging hand's palm faces the
+    /// thigh, so the fingers close beside the forearm's line).
+    pub palm: Vec3,
     pub axis: Vec3,
     pub toward: Vec3,
     pub curves: Vec<String>,
@@ -40,6 +47,8 @@ impl Default for Hang {
     fn default() -> Self {
         Self {
             pivot: Vec3::ZERO,
+            fist: 0.0,
+            palm: Vec3::ZERO,
             axis: Vec3::NEG_Y,
             toward: Vec3::NEG_Y,
             curves: Vec::new(),
@@ -81,7 +90,8 @@ impl BoneAttachment {
 
     /// Where the attachment is this frame, in the animator's model space.
     pub fn socket(&self, animator: &Animator) -> Option<Xf> {
-        let bone = animator.model[animator.skeleton.index_of(&self.bone)?];
+        let index = animator.skeleton.index_of(&self.bone)?;
+        let bone = animator.model[index];
         let Some(hang) = &self.hang else {
             return Some(bone.mul(&Xf::from_tr(self.offset, self.rotation)));
         };
@@ -94,7 +104,15 @@ impl BoneAttachment {
         let axis = (bone.r * hang.axis).normalize_or(Vec3::NEG_Y);
         let swing = rotation_between(axis, hang.toward.normalize_or(Vec3::NEG_Y));
         let r = (Quat::IDENTITY.slerp(swing, 1.0 - held) * bone.r).normalize();
-        let pivot = bone.transform_point(hang.pivot);
+        let in_hand = bone.transform_point(hang.pivot);
+        let hanging = match animator.skeleton.parents[index] {
+            Some(p) if hang.fist > 0.0 => {
+                let forearm = (bone.t - animator.model[p as usize].t).normalize_or_zero();
+                bone.t + forearm * hang.fist + hang.palm
+            }
+            _ => in_hand,
+        };
+        let pivot = hanging.lerp(in_hand, held);
         Some(Xf::from_tr(
             pivot + r * (self.offset - hang.pivot),
             (r * self.rotation).normalize(),
@@ -159,11 +177,23 @@ mod tests {
             axis: handle,
             toward: Vec3::NEG_Y,
             curves: vec!["grip".into()],
+            ..Default::default()
         });
         let fist = animator.model[1].transform_point(grip);
         let hanging = head.socket(&animator).unwrap();
         assert!(
             hanging.t.distance(fist + Vec3::NEG_Y * 0.6) < 1e-4,
+            "{}",
+            hanging.t
+        );
+        // A fist that continues the forearm (here root to hand) while hanging.
+        let mut loose = head.clone();
+        loose.hang.as_mut().unwrap().fist = 0.1;
+        let wrist = Vec3::new(0.3, 0.8, 0.0);
+        let past = wrist + wrist.normalize() * 0.1;
+        let hanging = loose.socket(&animator).unwrap();
+        assert!(
+            hanging.t.distance(past + Vec3::NEG_Y * 0.6) < 1e-4,
             "{}",
             hanging.t
         );

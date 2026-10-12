@@ -422,6 +422,8 @@ fn hammer_part(person: Entity, offset: Vec3, rotation: Quat) -> BoneAttachment {
         .with_offset(offset, rotation)
         .with_hang(Hang {
             pivot: GRIP,
+            fist: -GRIP.y,
+            palm: Vec3::new(-0.025, 0.0, 0.0),
             axis: HANDLE_DIR.normalize(),
             toward: Vec3::new(0.12, -1.0, -0.22),
             curves: vec!["grip".into(), "brace".into()],
