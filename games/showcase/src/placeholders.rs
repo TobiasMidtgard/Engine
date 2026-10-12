@@ -54,8 +54,27 @@ fn metal() -> StandardMaterial {
         .with_metallic(1.0)
         .with_roughness(0.3)
 }
-fn rock() -> StandardMaterial {
-    mat(0x5a5650, 0.9)
+/// Vertex tint for flat rock surfaces drawn with the rock kit's material (as dark as the
+/// boulders, which the textures multiply).
+const ROCK_TINT: Vec3 = Vec3::new(0.31, 0.3, 0.28);
+
+/// Finish a mesh for the rock kit's material: planar UVs in rock texture tiles, projected
+/// along each face's main axis (the same mapping the boulders use).
+fn rock_face(b: crate::meshgen::Builder) -> Mesh {
+    let mut mesh = b.finish();
+    for v in &mut mesh.vertices {
+        let p = Vec3::from(v.position);
+        let n = Vec3::from(v.normal).abs();
+        let q = if n.x >= n.y && n.x >= n.z {
+            Vec2::new(p.z, -p.y)
+        } else if n.y >= n.z {
+            Vec2::new(p.x, p.z)
+        } else {
+            Vec2::new(p.x, -p.y)
+        };
+        v.uv = (q / crate::rock_textures::ROCK_TILE_M).to_array();
+    }
+    mesh
 }
 
 /// A simple person: legs, body, head (1.8 m), facing `yaw`.
@@ -710,27 +729,39 @@ pub fn cave_shell(
 ) {
     let c = crate::zones::zone("cave").center;
     let (hx, hz, h) = CAVE_INSIDE;
-    let wall = rock();
-    // Back and side walls, thick enough to reach the edge of the hole the landscape digs.
-    spawn(
-        commands,
-        cuboid(44.0, 10.0, 7.0),
-        wall,
-        at(c + DVec3::new(0.0, 5.0, hz + 3.5)),
+    let kit = &lib.rocks;
+    // Back and side walls, thick enough to reach the edge of the hole the landscape digs, and
+    // the front wall either side of the 10 m mouth: the kit's rock, so the face reads as stone.
+    let (fx, fz, fh) = (hx as f32, hz as f32, h as f32);
+    let mut walls = crate::meshgen::Builder::default();
+    walls.cuboid(
+        Vec3::new(0.0, 5.0, fz + 3.5),
+        Vec3::new(22.0, 5.0, 3.5),
+        Quat::IDENTITY,
+        ROCK_TINT,
     );
     for s in [-1.0, 1.0] {
-        spawn(
-            commands,
-            cuboid(7.0, 10.0, 43.0),
-            wall,
-            at(c + DVec3::new(s * (hx + 3.5), 5.0, 2.5)),
+        walls.cuboid(
+            Vec3::new(s * (fx + 3.5), 5.0, 2.5),
+            Vec3::new(3.5, 5.0, 21.5),
+            Quat::IDENTITY,
+            ROCK_TINT,
+        );
+        walls.cuboid(
+            Vec3::new(s * 10.0, fh * 0.5, -fz - 0.5),
+            Vec3::new(5.0, fh * 0.5, 1.5),
+            Quat::IDENTITY,
+            ROCK_TINT,
         );
     }
+    commands.spawn((
+        at(c),
+        MeshRenderer::new(meshes.add(rock_face(walls)), kit.mats.rock),
+    ));
     cave_roof(commands, meshes, lib, land, c, h, rng);
     // Boulders sunk into the walls and hanging from the ceiling, so the inside reads as rock
     // rather than a box. Each sits with its flat base in the wall and its rounded face out.
     // (Shapes and tilts come from their own stream; the shared one advances as before.)
-    let kit = &lib.rocks;
     let mut pick = Rng::new(0x00ca_7eb0_u64);
     for k in 0..64 {
         let along = rng.range(-1.0, 1.0) as f64;
@@ -758,15 +789,6 @@ pub fn cave_shell(
             )
             .with_scale(Vec3::new(scale, scale * pick.range(0.7, 1.0), scale));
         kit.spawn(commands, v, tf, crate::rocks::RockLook::default());
-    }
-    // Front wall with the mouth (10 m wide).
-    for s in [-1.0, 1.0] {
-        spawn(
-            commands,
-            cuboid(10.0, h as f32, 3.0),
-            wall,
-            at(c + DVec3::new(s * 10.0, h * 0.5, -hz - 0.5)),
-        );
     }
     // Rocky arch over the mouth: blocks set into the hillside, faces out and a little up.
     for i in 0..9 {
@@ -811,6 +833,26 @@ pub fn cave_shell(
         let look = crate::rocks::RockLook {
             wet: false,
             moss: true,
+        };
+        kit.spawn(commands, v, tf, look);
+    }
+    // Blocks along the face above the mouth, up to where the hill's grass starts, so it breaks
+    // into ledges instead of standing as one flat wall. (Their own stream, like the shapes.)
+    for i in 0..15 {
+        let x = -22.0 + i as f64 * (44.0 / 14.0) + pick.range(-0.8, 0.8) as f64;
+        let y = h + pick.range(-1.5, 2.5) as f64;
+        let scale = pick.range(0.95, 1.45);
+        let v = kit.pick(crate::rocks::RockSize::Large, pick.chance(0.5), &mut pick);
+        let out = Vec3::new(0.0, 0.45, -1.0).normalize();
+        let p = c + DVec3::new(x, y, -hz - 2.6) - (out * v.extent.y * scale * 0.4).as_dvec3();
+        let tf = Transform::from_translation(p)
+            .with_rotation(
+                Quat::from_rotation_arc(Vec3::Y, out) * Quat::from_rotation_y(pick.range(0.0, TAU)),
+            )
+            .with_scale(Vec3::new(scale, scale * pick.range(0.6, 0.85), scale));
+        let look = crate::rocks::RockLook {
+            wet: false,
+            moss: i % 4 != 2,
         };
         kit.spawn(commands, v, tf, look);
     }
@@ -942,7 +984,7 @@ fn cave_roof(
     };
     b.quad(
         [p(0, 0, y0), p(nx, 0, y0), p(nx, nz, y0), p(0, nz, y0)],
-        Vec3::ONE,
+        ROCK_TINT,
     );
     let mut skirt = |a: (usize, usize), e: (usize, usize), out: Vec3| {
         let (ta, te) = (top(a.0, a.1) as f32, top(e.0, e.1) as f32);
@@ -955,7 +997,7 @@ fn cave_roof(
         if (q[1] - q[0]).cross(q[2] - q[0]).dot(out) < 0.0 {
             q = [q[1], q[0], q[3], q[2]];
         }
-        b.quad(q, Vec3::ONE);
+        b.quad(q, ROCK_TINT);
     };
     for i in 0..nx {
         skirt((i, 0), (i + 1, 0), Vec3::NEG_Z);
@@ -965,7 +1007,10 @@ fn cave_roof(
         skirt((0, j), (0, j + 1), Vec3::NEG_X);
         skirt((nx, j), (nx, j + 1), Vec3::X);
     }
-    commands.spawn((at(c), MeshRenderer::new(meshes.add(b.finish()), rock())));
+    commands.spawn((
+        at(c),
+        MeshRenderer::new(meshes.add(rock_face(b)), lib.rocks.mats.rock),
+    ));
 
     // Grass on the roof like on the rest of the hill.
     let mut x = x0 + 1.5;
