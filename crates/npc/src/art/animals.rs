@@ -185,7 +185,7 @@ pub struct RabbitRig {
 pub const RABBIT: RabbitRig = RabbitRig {
     body: v3(0.0, 0.10, 0.0),
     head: v3(0.0, 0.155, -0.085),
-    ear: v3(0.017, 0.205, -0.105),
+    ear: v3(0.02, 0.212, -0.108),
     tail: v3(0.0, 0.125, 0.13),
     front: [
         v3(0.028, 0.085, -0.07),
@@ -291,7 +291,7 @@ enum Skin {
 
 /// Whether a species has its sculpted body yet (the others keep primitive stand-ins).
 pub fn sculpted(species: Species) -> bool {
-    matches!(species, Species::Deer | Species::Wolf)
+    matches!(species, Species::Deer | Species::Wolf | Species::Rabbit)
 }
 
 /// The pieces of one animal with meshes and materials, or `None` without the renderer.
@@ -525,7 +525,8 @@ pub fn species_jobs(species: Species) -> Vec<Job> {
             deer::jobs(&mut jobs);
         }
         Species::Wolf => wolf::jobs(&mut jobs),
-        Species::Rabbit | Species::Bird => {}
+        Species::Rabbit => rabbit::jobs(&mut jobs),
+        Species::Bird => {}
     }
     jobs
 }
@@ -1474,7 +1475,39 @@ fn tiled_noise(uv: Vec2, nx: i32, ny: i32, seed: u32) -> f32 {
     a + (b - a) * f.y
 }
 
-fn fur_texel(f: &Fur, uv: Vec2) -> Texel {
+/// One tuft of a fur tile: where in its cell it is rooted, which way it lies, how long it
+/// is and its brightness id.
+#[derive(Debug, Clone, Copy)]
+struct Tuft {
+    root: Vec2,
+    dir: Vec2,
+    len: f32,
+    id: f32,
+}
+
+/// The tufts of every cell of a fur tile (row major).
+fn fur_tufts(f: &Fur) -> Vec<Tuft> {
+    let n = f.cells;
+    let mut out = Vec::with_capacity((n * n) as usize);
+    for wr in 0..n {
+        for wc in 0..n {
+            let stagger = if wr % 2 == 1 { 0.5 } else { 0.0 };
+            let ang = (rand3(wc, wr, 2, f.seed) - 0.5) * 0.4;
+            out.push(Tuft {
+                root: Vec2::new(
+                    0.5 + stagger + (rand3(wc, wr, 0, f.seed) - 0.5) * 0.7,
+                    rand3(wc, wr, 1, f.seed) * 0.8,
+                ),
+                dir: Vec2::new(ang.sin(), ang.cos()),
+                len: f.len * (0.8 + 0.4 * rand3(wc, wr, 3, f.seed)),
+                id: rand3(wc, wr, 4, f.seed),
+            });
+        }
+    }
+    out
+}
+
+fn fur_texel(f: &Fur, tufts: &[Tuft], uv: Vec2) -> Texel {
     let n = f.cells;
     let q = uv * n as f32;
     let (ix, iy) = (q.x.floor() as i32, q.y.floor() as i32);
@@ -1486,16 +1519,12 @@ fn fur_texel(f: &Fur, uv: Vec2) -> Texel {
         for dx in -1..=1 {
             let col = ix + dx;
             let (wc, wr) = (col.rem_euclid(n), row.rem_euclid(n));
-            let stagger = if wr % 2 == 1 { 0.5 } else { 0.0 };
-            let root = Vec2::new(
-                col as f32 + 0.5 + stagger + (rand3(wc, wr, 0, f.seed) - 0.5) * 0.7,
-                row as f32 + rand3(wc, wr, 1, f.seed) * 0.8,
-            );
-            let ang = (rand3(wc, wr, 2, f.seed) - 0.5) * 0.4;
-            let dir = Vec2::new(ang.sin(), ang.cos());
+            let tuft = tufts[(wr * n + wc) as usize];
+            let root = Vec2::new(col as f32, row as f32) + tuft.root;
+            let dir = tuft.dir;
             let d = q - root;
             let along = d.dot(dir);
-            let len = f.len * (0.8 + 0.4 * rand3(wc, wr, 3, f.seed));
+            let len = tuft.len;
             if along < 0.0 || along > len {
                 continue;
             }
@@ -1509,7 +1538,7 @@ fn fur_texel(f: &Fur, uv: Vec2) -> Texel {
                 continue;
             }
             if best.is_none_or(|b| root.y < b.0) {
-                best = Some((root.y, t, across / w, rand3(wc, wr, 4, f.seed), wc, wr));
+                best = Some((root.y, t, across / w, tuft.id, wc, wr));
             }
         }
     }
@@ -1577,7 +1606,8 @@ fn coat_texture(species: Species) -> TextureSet {
                 streaks: 0.12,
                 seed: 11,
             };
-            TextureSet::bake(512, 0.16, |uv| fur_texel(&f, uv))
+            let tufts = fur_tufts(&f);
+            TextureSet::bake(512, 0.16, |uv| fur_texel(&f, &tufts, uv))
         }
         Species::Wolf => {
             let f = Fur {
@@ -1594,24 +1624,26 @@ fn coat_texture(species: Species) -> TextureSet {
                 streaks: 0.12,
                 seed: 23,
             };
-            TextureSet::bake(512, 0.2, |uv| fur_texel(&f, uv))
+            let tufts = fur_tufts(&f);
+            TextureSet::bake(512, 0.2, |uv| fur_texel(&f, &tufts, uv))
         }
         Species::Rabbit => {
             let f = Fur {
                 cells: 24,
-                len: 2.4,
-                width: 1.4,
-                strands: 5.0,
-                height: 0.0006,
-                contrast: 0.18,
-                agouti: 0.35,
+                len: 2.6,
+                width: 1.3,
+                strands: 10.0,
+                height: 0.0005,
+                contrast: 0.1,
+                agouti: 0.45,
                 tint: Vec3::new(1.0, 0.98, 0.95),
                 band: Vec3::new(1.2, 1.1, 0.9),
                 roughness: 0.85,
                 streaks: 0.1,
                 seed: 31,
             };
-            TextureSet::bake(512, 0.07, |uv| fur_texel(&f, uv))
+            let tufts = fur_tufts(&f);
+            TextureSet::bake(256, 0.07, |uv| fur_texel(&f, &tufts, uv))
         }
         Species::Bird => TextureSet::bake(4, 0.05, |_| Texel::default()),
     }
@@ -3047,7 +3079,7 @@ mod wolf {
             region: Region::aabb(
                 v3(-0.22, 0.36, -0.56),
                 v3(0.22, 0.9, 0.5),
-                v3(0.0072, 0.0072, 0.0095),
+                v3(0.0082, 0.0082, 0.0105),
             ),
             target: 6500,
             flow: torso_flow,
@@ -3223,6 +3255,392 @@ mod wolf {
                 mesh.merge(&eye);
             }
             vec![Made::Mesh("animals/wolf/gloss".into(), mesh)]
+        }));
+    }
+}
+
+// ======================================================================= rabbit
+
+mod rabbit {
+    use super::*;
+
+    const R: RabbitRig = RABBIT;
+
+    const KIND: Kind = Kind {
+        key: "rabbit",
+        coat,
+        body,
+        scale: 0.22,
+    };
+
+    const EYE: Vec3 = v3(0.0265, 0.164, -0.122);
+    const EYE_AXIS: Vec3 = v3(0.92, 0.18, -0.34);
+    const EYE_R: f32 = 0.0098;
+    /// The head is modelled small and scaled up about its joint by this much.
+    const HS: f32 = 1.15;
+
+    /// A point of the unscaled head model where it ends up.
+    fn hs(v: Vec3) -> Vec3 {
+        R.head + (v - R.head) * HS
+    }
+
+    /// Back from the scaled head to the model.
+    fn unhs(p: Vec3) -> Vec3 {
+        R.head + (p - R.head) / HS
+    }
+    const HEAD_BALL: f32 = 0.036;
+    /// The scut at rest.
+    const SCUT: Vec3 = v3(0.0, 0.132, 0.148);
+
+    /// Crouched on all fours: a rounded back rising to the rump, big haunches.
+    pub fn torso(p: Vec3) -> f32 {
+        let m = mx(p);
+        let back = ell(p, v3(0.0, 0.106, 0.03), v3(0.063, 0.08, 0.125));
+        let rump = ell(p, v3(0.0, 0.11, 0.088), v3(0.067, 0.082, 0.068));
+        let chest = ell(p, v3(0.0, 0.088, -0.058), v3(0.05, 0.06, 0.062));
+        let haunch = ell(m, v3(0.045, 0.066, 0.074), v3(0.031, 0.058, 0.07));
+        let shoulder = ell(m, v3(0.034, 0.088, -0.062), v3(0.024, 0.04, 0.035));
+        let neck = ell(
+            p,
+            R.head + v3(0.0, -0.004, 0.012),
+            v3(HEAD_BALL / 1.15, HEAD_BALL, HEAD_BALL) + 0.003,
+        );
+        let mut d = smin(back, rump, 0.04);
+        d = smin(d, chest, 0.04);
+        d = smin(d, haunch, 0.03);
+        d = smin(d, shoulder, 0.025);
+        d = smin(d, neck, 0.03);
+        // Flattened belly resting near the ground.
+        d = smax(d, 0.026 - p.y, 0.012);
+        if d > 0.02 {
+            return d;
+        }
+        // Soft, dense fur.
+        d - 0.003 * clumps(p, v3(0.0, -0.3, 1.0), 0.008, 31)
+    }
+
+    pub fn head(p: Vec3) -> f32 {
+        head_model(unhs(p)) * HS
+    }
+
+    fn head_model(p: Vec3) -> f32 {
+        let m = mx(p);
+        let poll = ell(p, R.head, v3(HEAD_BALL / 1.15, HEAD_BALL, HEAD_BALL));
+        let cranium = ell(p, v3(0.0, 0.166, -0.112), v3(0.031, 0.033, 0.04));
+        let cheek = ell(m, v3(0.024, 0.146, -0.12), v3(0.021, 0.025, 0.03));
+        let snout = ell(p, v3(0.0, 0.142, -0.15), v3(0.021, 0.023, 0.026));
+        let nose = ell(p, v3(0.0, 0.144, -0.168), v3(0.012, 0.011, 0.009));
+        let lip = ell(m, v3(0.007, 0.132, -0.163), v3(0.009, 0.009, 0.01));
+        let mut d = smin(poll, cranium, 0.025);
+        d = smin(d, cheek, 0.015);
+        d = smin(d, snout, 0.018);
+        d = smin(d, nose, 0.008);
+        d = smin(d, lip, 0.006);
+        // Split upper lip and nostrils.
+        d = ssub(
+            d,
+            ell(p, v3(0.0, 0.134, -0.171), v3(0.0014, 0.007, 0.006)),
+            0.0015,
+        );
+        d = ssub(
+            d,
+            ell(m, v3(0.0055, 0.146, -0.176), v3(0.0028, 0.0018, 0.004)),
+            0.0012,
+        );
+        // Eye sockets with lids.
+        let axis = EYE_AXIS.normalize();
+        d = ssub(d, sphere(m, EYE + axis * 0.002, EYE_R + 0.0005), 0.002);
+        let e = m - EYE;
+        let along = e.dot(axis);
+        let ring = Vec2::new((e - axis * along).length() - EYE_R, along).length() - 0.0018;
+        smin(d, ring, 0.002)
+    }
+
+    pub fn ear_frame() -> (Vec3, Vec3, Vec3) {
+        // Up, back and a little out; the cup faces out and forward.
+        let along = v3(0.22, 0.9, 0.38).normalize();
+        let cup0 = v3(0.55, 0.0, -0.8).normalize();
+        let cup = (cup0 - along * cup0.dot(along)).normalize();
+        (along, along.cross(cup), cup)
+    }
+
+    pub fn ear(p: Vec3) -> f32 {
+        let (along, across, cup) = ear_frame();
+        let q = local(p, R.ear, across, along, cup);
+        let leaf = ell(q, v3(0.0, 0.045, -0.001), v3(0.0155, 0.046, 0.0058));
+        let base = cone(
+            q,
+            v3(0.0, -0.004, -0.002),
+            v3(0.0, 0.022, -0.001),
+            0.0085,
+            0.011,
+        );
+        let hollow = ell(q, v3(0.0, 0.048, 0.0045), v3(0.0115, 0.038, 0.0042));
+        smin(ssub(leaf, hollow, 0.002), base, 0.008)
+    }
+
+    pub fn tail(p: Vec3) -> f32 {
+        let d = ell(p, SCUT, v3(0.021, 0.024, 0.017));
+        let d = smin(d, sphere(p, R.tail, 0.012), 0.012);
+        d - 0.003 * clumps(p, v3(0.0, 1.0, 0.4), 0.005, 37)
+    }
+
+    pub fn foreleg(p: Vec3) -> f32 {
+        let f = R.front;
+        let arm = ell(p, f[0] + v3(0.0, -0.008, 0.004), v3(0.017, 0.028, 0.021));
+        let leg = cone(p, f[0], f[1], 0.0135, 0.009);
+        smin(arm, leg, 0.012)
+    }
+
+    pub fn forefoot(p: Vec3) -> f32 {
+        let f = R.front;
+        let foot = cone(p, f[1], f[2] + v3(0.0, 0.007, 0.004), 0.0092, 0.0085);
+        smax(foot, -p.y, 0.002)
+    }
+
+    pub fn hindleg(p: Vec3) -> f32 {
+        let h = R.hind;
+        // Thigh and shank folded together, as thick as the haunch they sit in.
+        let shank = cone(p, h[0] + v3(0.0, -0.022, 0.0), h[1], 0.027, 0.011);
+        smin(shank, sphere(p, h[0], 0.026), 0.016)
+    }
+
+    pub fn hindfoot(p: Vec3) -> f32 {
+        let h = R.hind;
+        let foot = cone(
+            p,
+            h[1] + v3(0.0, 0.002, 0.0),
+            h[2] + v3(0.0, 0.008, 0.006),
+            0.012,
+            0.0095,
+        );
+        let d = smax(foot, -p.y, 0.002);
+        d - 0.0015 * clumps(p, v3(0.0, 0.0, -1.0), 0.004, 41)
+    }
+
+    /// Everything, for occlusion.
+    pub fn body(p: Vec3) -> f32 {
+        const PARTS: [Bound; 6] = [
+            Bound {
+                center: v3(0.0, 0.1, 0.02),
+                radius: 0.18,
+                f: torso,
+            },
+            Bound {
+                center: v3(0.0, 0.15, -0.125),
+                radius: 0.08,
+                f: head,
+            },
+            Bound {
+                center: v3(0.03, 0.05, -0.08),
+                radius: 0.06,
+                f: foreleg,
+            },
+            Bound {
+                center: v3(0.03, 0.01, -0.095),
+                radius: 0.03,
+                f: forefoot,
+            },
+            Bound {
+                center: v3(0.047, 0.06, 0.085),
+                radius: 0.07,
+                f: hindleg,
+            },
+            Bound {
+                center: v3(0.047, 0.01, 0.06),
+                radius: 0.07,
+                f: hindfoot,
+            },
+        ];
+        union_of(&PARTS, mx(p))
+    }
+
+    /// European rabbit (linear RGB): agouti grey-brown, a rufous nape, white belly and scut
+    /// underside, black-edged ears.
+    fn coat(piece: Piece, p: Vec3, n: Vec3, _: bool) -> Vec3 {
+        let brown = hex(0x7d6a52);
+        let dark = hex(0x5a4a3a);
+        let buff = hex(0xa08a6c);
+        let white = hex(0xdcd7cc);
+        let rufous = hex(0xa0683e);
+        let black = hex(0x221d19);
+        let up = n.y;
+        let mut c = mix(buff, brown, smooth(-0.2, 0.5, up));
+        c = mix(c, dark, smooth(0.5, 1.0, up) * 0.5);
+        let under = smooth(0.0, -0.6, up) * smooth(0.07, 0.04, p.y);
+        c = mix(c, white, under * 0.85);
+        match piece {
+            Piece::Body => {
+                // Rufous nape behind the ears.
+                let nape = smooth(0.04, 0.015, p.distance(v3(0.0, 0.175, -0.065)));
+                c = mix(c, rufous, nape * 0.8);
+                // Pale chest.
+                c = mix(
+                    c,
+                    mix(white, buff, 0.5),
+                    smooth(-0.07, -0.11, p.z) * smooth(0.12, 0.08, p.y),
+                );
+            }
+            Piece::Head => {
+                let p = unhs(p);
+                let m = mx(p);
+                c = mix(brown, buff, smooth(0.0, -0.6, up) * 0.6);
+                // Pale eye ring, white chin and lips, buff muzzle.
+                let ring = smooth(0.016, 0.011, m.distance(EYE));
+                c = mix(c, hex(0xd2c19f), ring * 0.8);
+                let chin = smooth(0.14, 0.13, p.y) * smooth(-0.13, -0.15, p.z);
+                c = mix(c, white, chin * 0.85);
+                c = mix(c, buff, smooth(-0.15, -0.165, p.z) * 0.5);
+                c = mix(
+                    c,
+                    rufous,
+                    smooth(0.0, 0.6, up) * smooth(-0.11, -0.09, p.z) * 0.35,
+                );
+                let nose = smooth(0.006, 0.002, p.distance(v3(0.0, 0.147, -0.177)));
+                c = mix(c, hex(0x7a5a52), nose * 0.7);
+            }
+            Piece::Ear(_) => {
+                let (along, across, cup) = ear_frame();
+                let q = local(mx(p), R.ear, across, along, cup);
+                let inside = smooth(0.2, 0.7, mx(n).dot(cup));
+                c = mix(mix(brown, buff, 0.4), hex(0xb8a48e), inside * 0.8);
+                let rim = smooth(0.8, 1.0, q.x.abs() / 0.0155) * smooth(0.04, 0.07, q.y);
+                let tip = smooth(0.072, 0.088, q.y);
+                c = mix(c, black, (rim * 0.7 + tip).min(1.0) * 0.85);
+            }
+            Piece::Tail => {
+                // White scut, dark on top.
+                c = mix(white, hex(0xf2efe8), 0.5);
+                c = mix(c, hex(0x3a3029), smooth(0.2, 0.7, up - n.z * 0.4) * 0.9);
+            }
+            Piece::Leg(k, _) => {
+                c = mix(brown, buff, smooth(0.04, 0.0, p.y) * 0.5);
+                c = mix(c, white, smooth(0.0, 0.7, -p.x.signum() * n.x) * 0.5);
+                if k >= 2 {
+                    c = mix(c, mix(buff, white, 0.4), smooth(0.03, 0.0, p.y) * 0.6);
+                }
+            }
+            _ => {}
+        }
+        c * (1.0 + 0.08 * mottle(p, 30.0, 7))
+    }
+
+    pub fn jobs(jobs: &mut Vec<Job>) {
+        let up = Vec3::Y;
+        let back = Vec3::Z;
+        let mut specs: Vec<Spec> = Vec::new();
+        let mut torso_flow = Flow::new(v3(0.0, 0.1, -0.12), v3(0.0, 0.1, 0.17), up, 0.07).tilt(0.3);
+        torso_flow.start = 0.04;
+        torso_flow.end = 0.25;
+        specs.push(Spec {
+            piece: Piece::Body,
+            f: torso,
+            region: Region::aabb(
+                v3(-0.11, 0.0, -0.15),
+                v3(0.11, 0.21, 0.19),
+                Vec3::splat(0.0034),
+            ),
+            target: 3200,
+            flow: torso_flow,
+            pivot: R.body,
+            mirror: None,
+            variant: false,
+        });
+        let mut head_flow = Flow::new(
+            hs(v3(0.0, 0.145, -0.18)),
+            hs(v3(0.0, 0.16, -0.07)),
+            up,
+            0.05,
+        )
+        .tilt(0.2);
+        head_flow.start = 0.01;
+        specs.push(Spec {
+            piece: Piece::Head,
+            f: head,
+            region: Region::aabb(
+                v3(-0.055, 0.095, -0.2),
+                v3(0.055, 0.215, -0.035),
+                Vec3::splat(0.0018),
+            ),
+            target: 2200,
+            flow: head_flow,
+            pivot: R.head,
+            mirror: None,
+            variant: false,
+        });
+        let (along, _, cup) = ear_frame();
+        specs.push(Spec {
+            piece: Piece::Ear(1),
+            f: ear,
+            region: Region::bone(
+                R.ear - along * 0.01,
+                R.ear + along * 0.095,
+                0.022,
+                0.0011,
+                0.0016,
+            ),
+            target: 420,
+            flow: Flow::new(R.ear, R.ear + along * 0.09, cup, 0.05),
+            pivot: R.ear,
+            mirror: Some(Piece::Ear(0)),
+            variant: false,
+        });
+        specs.push(Spec {
+            piece: Piece::Tail,
+            f: tail,
+            region: Region::aabb(
+                SCUT - v3(0.03, 0.035, 0.035),
+                SCUT + v3(0.03, 0.03, 0.026),
+                Vec3::splat(0.0014),
+            ),
+            target: 320,
+            flow: Flow::new(R.tail, SCUT + v3(0.0, 0.02, 0.0), back, 0.04),
+            pivot: R.tail,
+            mirror: None,
+            variant: false,
+        });
+        let f = R.front;
+        let h = R.hind;
+        // Leg, segment, field, from, to, reach, voxel, triangles.
+        type LegSpec = (u8, u8, SdfFn, Vec3, Vec3, f32, f32, usize);
+        let legs: [LegSpec; 4] = [
+            (1, 0, foreleg, f[0], f[1], 0.03, 0.0014, 260),
+            (1, 1, forefoot, f[1], f[2], 0.016, 0.001, 140),
+            (3, 0, hindleg, h[0], h[1], 0.035, 0.0016, 320),
+            (3, 1, hindfoot, h[1], h[2], 0.022, 0.0012, 260),
+        ];
+        for (k, s, f, a, b, reach, voxel, target) in legs {
+            specs.push(Spec {
+                piece: Piece::Leg(k, s),
+                f,
+                region: Region::bone(a, b, reach, voxel, voxel * 1.4),
+                target,
+                flow: Flow::new(a, b, back, 0.04),
+                pivot: a,
+                mirror: Some(Piece::Leg(k - 1, s)),
+                variant: false,
+            });
+        }
+        specs.sort_by_key(|s| std::cmp::Reverse(s.target));
+        for spec in specs {
+            jobs.push(Box::new(move || spec.run(KIND)));
+        }
+        // Big dark eyes.
+        jobs.push(Box::new(|| {
+            let axis = EYE_AXIS.normalize();
+            let mut mesh = Mesh::default();
+            for side in [-1.0f32, 1.0] {
+                let c = hs(v3(EYE.x * side, EYE.y, EYE.z));
+                let ax = v3(axis.x * side, axis.y, axis.z);
+                let rot = Quat::from_rotation_arc(Vec3::Y, ax);
+                let g = ball(c, Vec3::splat(EYE_R * HS), rot, 10, 14);
+                let eye = g.finish(R.head, &body, 0.1, &|p, _, _| {
+                    let t = (p - c).normalize().dot(ax);
+                    mix(hex(0x2a1608), hex(0x050302), smooth(0.5, 0.8, t))
+                });
+                mesh.merge(&eye);
+            }
+            vec![Made::Mesh("animals/rabbit/gloss".into(), mesh)]
         }));
     }
 }
