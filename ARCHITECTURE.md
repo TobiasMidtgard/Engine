@@ -65,7 +65,7 @@ zone's entry; the rest of the showcase belongs to the Beautiful showcase world t
 | `engine_ai_bridge`, `tools/engine-mcp` | JSON-RPC/MCP bridge so AI agents can inspect, edit, step and screenshot a running game | Core (architecture and integration) |
 | `tools/fetch-assets`, `assets/manifests/core.toml` | Large art pipeline: manifests, download cache, release mirror, the no-large-files test (each thread owns its own `assets/manifests/<area>.toml`) | Core (architecture and integration) |
 | `engine_debug` | Debug drawing (lines, shapes, gizmos) for every module | Core (architecture and integration) |
-| `engine_render` | Renderer, lighting, shadows, sky and sky occlusion, materials; the planned strand renderer (hair, fur, grass), wrinkle maps, and 2D/2.5D rendering | Rendering and lighting |
+| `engine_render` | Renderer, lighting, shadows, sky and sky occlusion, materials, grass; the planned strand renderer (hair, fur), wrinkle maps, and 2D/2.5D rendering | Rendering and lighting |
 | `games/showcase` | The tech showcase world: environment, viewpoints, screenshot tour, and the list of every test case with its owner | Beautiful showcase world |
 | `engine_physics` | Rigid-body simulation, colliders, joints, ragdolls, queries, character controller, floating-origin physics islands | Physics and rigid bodies |
 | `engine_vehicles` | Cars (suspension, tires, drivetrain), planes (aero surfaces), spaceships (thrusters, RCS) | Cars, planes and spaceships |
@@ -186,9 +186,19 @@ over frames, and a temporal blend plus an edge-aware blur clean it up. Rays that
 or find nothing bring no light (the sky's share is the AO-darkened sky light).
 `DebugView::IndirectLight` shows the bounced light.
 
-Shared pipelines the core will provide for modules (planned): **strands** for hair, fur and grass
-(guide curves in, GPU-expanded strands with hair shading and LOD out; `engine_softbody` drives
-hair/fur, `engine_foliage` drives grass) and **tension-driven wrinkle maps** in `StandardMaterial`
+**Grass** (built): a `GrassField` component covers a rectangle of ground on its entity's local
+x/z plane with individually drawn blades, grown in the vertex shader from a map of ground
+height, density and dryness (`GrassField::sample` fills it from any function, such as a
+terrain's height and ground cover), so millions of blades cost one small texture. Blades sway
+with the wind (`WindField`/`WeatherState`), with gusts rolling across the field, lean and curl,
+thin out smoothly with distance (survivors widen to keep the cover; `style.draw_distance`), cast
+sun shadows near the camera, and go through the depth prepass, so AO, bounce light and TAA see
+them. `GrassBender { radius }` on feet, bodies or vehicles pushes blades aside (16 nearest the
+camera). `RenderSettings::grass_density` scales every field (quality). `engine_foliage` drives
+grass by spawning fields from its soil grid; game code can spawn them directly.
+
+Shared pipelines the core will provide for modules (planned): **strands** for hair and fur
+(`engine_softbody` draws its own today) and **tension-driven wrinkle maps** in `StandardMaterial`
 (a per-vertex tension value blends wrinkle/vein normal maps; written by `engine_anim` for skin,
 muscles and skinned clothes and by `engine_softbody` for simulated cloth).
 

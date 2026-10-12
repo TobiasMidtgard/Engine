@@ -52,6 +52,7 @@ pub mod features;
 pub mod frame;
 pub mod gltf_loader;
 pub mod gpu;
+pub mod grass;
 pub mod material;
 pub mod mesh;
 pub mod mesh_feature;
@@ -77,6 +78,7 @@ pub use features::{
     SHADER_LIB_ATMOSPHERE, SHADER_LIB_FRAME, SHADER_LIB_TYPES, compose_shader, validate_wgsl,
 };
 pub use frame::ViewData;
+pub use grass::{GrassBender, GrassField, GrassStyle};
 pub use gltf_loader::{
     GltfLoader, GltfNode, GltfPrimitive, GltfScene, GltfSceneSpawner, spawn_gltf_scene,
     spawn_gltf_scene_deferred,
@@ -93,7 +95,8 @@ pub use wgpu;
 pub mod prelude {
     pub use crate::{
         AlphaMode, AmbientLight, AntiAliasing, Atmosphere, BoxFace, Camera, DirectionalLight,
-        Exposure, FogSettings, GltfScene, GltfSceneSpawner, Image, MaterialRef, Mesh, MeshRef,
+        Exposure, FogSettings, GltfScene, GltfSceneSpawner, GrassBender, GrassField, GrassStyle,
+        Image, MaterialRef, Mesh, MeshRef,
         MeshRenderer, PointLight, Projection, RenderAppExt, RenderFeature, RenderPhase,
         RenderPlugin, RenderSettings, Screenshots, Shape, SkyLightVolume, StandardMaterial,
         Tonemapper, spawn_gltf_scene, spawn_gltf_scene_deferred,
@@ -145,6 +148,12 @@ impl Plugin for RenderPlugin {
             .register_component::<SkyLightVolume>(
                 "Indoor space (cave, room, ship interior): inside the box (half_extents, m, local axes) sky light drops to sky_light (0..1), rising to full within fade meters of each of open_faces (PosX/NegX/PosY/NegY/PosZ/NegZ).",
             )
+            .register_component::<GrassField>(
+                "Meadow of wind-blown grass blades over a rectangle on the entity's local x/z plane: size [x, z] m (centered), resolution [nx, nz] of the optional maps heights (m), density (0..1) and dryness (0..1), style {blades_per_m2, height, height_variation, width, bend, lush_color, dry_color, dryness, wind_response, draw_distance, shadow_distance}.",
+            )
+            .register_component::<GrassBender>(
+                "Pushes grass aside and flattens it within radius (m) of the entity: feet, bodies, boulders, landing ships. The 16 nearest the camera act.",
+            )
             .register_resource::<RenderSettings>(
                 "Renderer quality and look: shadows (sun_penumbra_scale, contact_shadow_length m), ambient_occlusion (ao_radius m, ao_intensity), anti_aliasing (Taa/None) and sharpness, tonemapper (AgX/Aces/Reinhard/None), bloom, grading, debug_view (None/Normals/Cascades/SkyVisibility/AmbientOcclusion).",
             )
@@ -160,7 +169,8 @@ impl Plugin for RenderPlugin {
             .add_systems(Extract, resolve_mesh_renderers)
             .add_systems(Render, renderer::render_system)
             .add_render_feature(sky_feature::SkyFeature::default())
-            .add_render_feature(mesh_feature::MeshFeature::default());
+            .add_render_feature(mesh_feature::MeshFeature::default())
+            .add_render_feature(grass::GrassFeature::default());
 
         app.register_api(
             "render.screenshot",
