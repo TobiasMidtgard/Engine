@@ -1,6 +1,7 @@
 //! A `WorldShift` moves everything the shared contracts hold into the new frame in the same
 //! frame, and modules see it in `WorldShiftSet::Apply`.
 
+use bevy_ecs::message::{MessageCursor, Messages};
 use engine_core::math::{DQuat, DVec2, DVec3, EulerRot, Quat, Vec3};
 use engine_core::prelude::*;
 use engine_core::time::TimeSource;
@@ -245,4 +246,182 @@ fn a_turned_world_resamples_the_ground_state_around_the_focus() {
     let half = surface.grid.width as f64 * surface.grid.cell as f64 * 0.5;
     let center = surface.grid.origin + DVec2::splat(half);
     assert!((center - DVec2::new(focus_now.x, focus_now.z)).length() < 1.0);
+}
+
+#[test]
+fn messages_waiting_to_be_read_move_with_the_world() {
+    use engine_world::physics::ApplyImpulse;
+    let mut app = app();
+    let body = app.world.spawn(Transform::default()).id();
+    app.update();
+    let s = turned();
+    let at = DVec3::new(2.0, 1.0, -3.0);
+    // Written in the old frame before the shift, read after it.
+    app.world.write_message(ApplyImpulse {
+        entity: body,
+        impulse: Vec3::new(0.0, 0.0, 10.0),
+        at: Some(at),
+        angular: Vec3::ZERO,
+    });
+    app.world.write_message(GroundContact {
+        position: at,
+        normal: Vec3::Y,
+        size: [0.1, 0.3],
+        yaw: 0.25,
+        load_kg: 80.0,
+        speed: 1.0,
+        kind: Default::default(),
+        surface: None,
+        entity: None,
+    });
+    app.world.write_message(s);
+    app.update();
+    let impulses: Vec<ApplyImpulse> = MessageCursor::default()
+        .read(app.world.resource::<Messages<ApplyImpulse>>())
+        .copied()
+        .collect();
+    assert_eq!(impulses.len(), 1);
+    assert!((impulses[0].at.unwrap() - s.point(at)).length() < 1e-6);
+    assert!((impulses[0].impulse - s.direction(Vec3::new(0.0, 0.0, 10.0))).length() < 1e-4);
+    let contacts: Vec<GroundContact> = MessageCursor::default()
+        .read(app.world.resource::<Messages<GroundContact>>())
+        .copied()
+        .collect();
+    assert!((contacts[0].position - s.point(at)).length() < 1e-6);
+    assert!((contacts[0].yaw - (0.25 + s.yaw())).abs() < 1e-6);
+
+    // Messages written after the shift are already in the new frame and stay put.
+    let fresh = DVec3::new(-7.0, 0.0, 9.0);
+    app.world.write_message(NoiseEvent {
+        position: fresh,
+        radius: 5.0,
+        source: None,
+    });
+    app.update();
+    let noises: Vec<NoiseEvent> = MessageCursor::default()
+        .read(app.world.resource::<Messages<NoiseEvent>>())
+        .copied()
+        .collect();
+    assert_eq!(noises[0].position, fresh);
+}
+
+#[test]
+fn the_wind_and_sun_stay_turned() {
+    let mut app = app();
+    app.update();
+    let wind = app.world.resource::<WeatherState>().wind;
+    let sun = app.world.resource::<WeatherState>().sun_direction;
+    let s = turned();
+    app.world.write_message(s);
+    app.update_n(5);
+    let want = s.direction(wind);
+    assert!(
+        (app.world.resource::<WindField>().prevailing - want).length() < 1e-4,
+        "the wind sync turned the wind back"
+    );
+    assert!((app.world.resource::<WeatherState>().wind - want).length() < 1e-4);
+    assert!(
+        (app.world.resource::<WeatherState>().sun_direction - s.direction(sun)).length() < 1e-5
+    );
+}
+
+#[test]
+fn something_spawned_in_the_shift_frame_picks_up_the_right_frame_motion() {
+    let mut app = app();
+    app.update();
+    let start = DVec3::new(4000.0, 10.0, -2500.0);
+    let s = turned();
+    // Spawned this frame: its `GlobalTransform` is still the origin when the shift applies.
+    let e = app
+        .world
+        .spawn((Transform::from_translation(start), Velocity::default()))
+        .id();
+    app.world.write_message(s);
+    app.update();
+    let v = app.world.get::<Velocity>(e).unwrap().linear;
+    let want = s.velocity_at(s.point(start), Vec3::ZERO);
+    assert!((v - want).length() < 1e-3, "{v} vs {want}");
+}
+
+#[test]
+fn without_a_focus_a_turned_world_keeps_its_ground_state() {
+    let mut app = app();
+    let spot = DVec3::new(-20.0, 0.0, 35.0);
+    {
+        let mut surface = app.world.resource_mut::<SurfaceLayers>();
+        // Not square, so both axes have to be centered on their own.
+        surface.grid = Grid2::new(
+            DVec2::new(-64.0, -128.0),
+            2.0,
+            64,
+            128,
+            SurfaceCell::default(),
+        );
+        let c = surface.grid.cell_at(spot);
+        for dy in -2..=2 {
+            for dx in -2..=2 {
+                surface.grid.set(
+                    c + engine_core::math::IVec2::new(dx, dy),
+                    SurfaceCell {
+                        snow_m: 0.5,
+                        ..Default::default()
+                    },
+                );
+            }
+        }
+    }
+    app.update();
+    let s = WorldShift {
+        rotation: DQuat::from_rotation_y(-0.8),
+        translation: DVec3::new(9000.0, 0.0, -4000.0),
+        ..WorldShift::IDENTITY
+    };
+    app.world.write_message(s);
+    app.update();
+    let surface = app.world.resource::<SurfaceLayers>();
+    assert_eq!(surface.grid.sample_nearest(s.point(spot)).snow_m, 0.5);
+    assert_eq!((surface.grid.width, surface.grid.height), (64, 128));
+}
+
+#[test]
+fn gusts_dont_jump_when_the_origin_moves() {
+    let mut app = app();
+    app.update_n(3);
+    let before = app.world.resource::<WindField>().clone();
+    let s = WorldShift::translate(DVec3::new(-5000.0, 0.0, 2200.0));
+    app.world.write_message(s);
+    app.update();
+    let wind = app.world.resource::<WindField>();
+    // The old field at the new moment (no local disturbances here, so only gust time moved).
+    let mut then = before.clone();
+    then.time = wind.time;
+    for here in [DVec3::new(37.0, 12.0, -81.0), DVec3::new(-3.0, 40.0, 9.0)] {
+        let a = wind.sample(s.point(here));
+        let b = then.sample(here);
+        assert!((a - b).length() < 1e-4, "{a} vs {b} at {here}");
+    }
+}
+
+#[test]
+fn wheel_contacts_move_with_the_world() {
+    let mut app = app();
+    let at = DVec3::new(3.0, 0.0, -1.5);
+    let car = app
+        .world
+        .spawn((
+            Transform::default(),
+            WheelContacts {
+                wheels: vec![WheelContact {
+                    position: at,
+                    ..Default::default()
+                }],
+            },
+        ))
+        .id();
+    app.update();
+    let s = turned();
+    app.world.write_message(s);
+    app.update();
+    let w = app.world.get::<WheelContacts>(car).unwrap();
+    assert!((w.wheels[0].position - s.point(at)).length() < 1e-6);
 }
