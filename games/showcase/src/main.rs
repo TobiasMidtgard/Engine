@@ -5,7 +5,10 @@
 //! cargo run -p showcase --release                       # fly around (see camera.rs for keys)
 //! cargo run -p showcase --release -- --headless --tour  # writes screenshots/tour/*.png
 //! cargo run -p showcase --release -- --headless --tour plaza,orbit
+//! cargo run -p showcase --release -- --headless --film overview,plaza,falls --secs 6
 //! ```
+//!
+//! `--film` saves frames and sound for a video (see `film.rs`).
 //!
 //! The map is a valley ringed by snowy mountains: a village around the material plaza, woods,
 //! a lake, and one zone per engine feature. Each zone shows placeholder content until its module
@@ -13,6 +16,7 @@
 //! owner.
 
 mod camera;
+mod film;
 mod landscape;
 mod meshgen;
 mod placeholders;
@@ -62,6 +66,16 @@ fn main() {
             .filter(|a| !a.starts_with("--"))
             .map(String::as_str);
         tour::install(&mut app, only);
+    } else if let Some(i) = args.iter().position(|a| a == "--film") {
+        let keys = args.get(i + 1).map(String::as_str).unwrap_or("overview");
+        let num = |flag: &str, default: f32| {
+            args.iter()
+                .position(|a| a == flag)
+                .and_then(|i| args.get(i + 1))
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(default)
+        };
+        film::install(&mut app, keys, num("--secs", 8.0), num("--fps", 30.0));
     }
     app.run();
 }
