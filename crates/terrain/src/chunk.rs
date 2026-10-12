@@ -25,6 +25,8 @@ pub const VERTS_PER_CHUNK: usize = GRID * GRID + 4 * GRID;
 pub const FLAG_SKIRT: u8 = 1;
 /// Vertex flag: open ocean surface (sea level drawn over the sea floor).
 pub const FLAG_OCEAN: u8 = 2;
+/// The flag byte's upper 6 bits hold the vertex's convexity (see [`encode_convexity`]).
+pub const CONVEXITY_SHIFT: u8 = 2;
 
 /// GPU vertex of a terrain patch (36 bytes).
 #[repr(C)]
@@ -159,6 +161,18 @@ fn encode_morph(offset: f64, spacing: f64) -> i16 {
     ((offset / (spacing * MORPH_RANGE)).clamp(-1.0, 1.0) * 32767.0).round() as i16
 }
 
+/// Convexity (vertex spacings above the neighbors' mean) in the flag byte's upper 6 bits:
+/// ±0.5 spacings map to the ends of the range.
+pub fn encode_convexity(spacings: f64) -> u8 {
+    let q = (((spacings * 2.0).clamp(-1.0, 1.0) * 0.5 + 0.5) * 63.0).round() as u8;
+    q << CONVEXITY_SHIFT
+}
+
+/// The shader's decoding of [`encode_convexity`], −1..1.
+pub fn decode_convexity(flags: u8) -> f32 {
+    (flags >> CONVEXITY_SHIFT) as f32 / 63.0 * 2.0 - 1.0
+}
+
 /// Tint color stored as its square root (finer steps in the darks), amount linear.
 fn encode_tint(t: [f32; 4]) -> [u8; 4] {
     let q = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
@@ -268,6 +282,24 @@ pub fn build_chunk(src: &ChunkSource, key: NodeKey) -> ChunkMesh {
             if ocean {
                 n = up;
             }
+            // How far this vertex stands out from the 8 around it, in vertex spacings (+ crests,
+            // − gullies): the shader keeps crests rocky and wind-blown and fills gullies.
+            let ring = [
+                idx - 1,
+                idx + 1,
+                idx - S,
+                idx + S,
+                idx - S - 1,
+                idx - S + 1,
+                idx + S - 1,
+                idx + S + 1,
+            ];
+            let around = ring.iter().map(|&k| pos[k]).sum::<DVec3>() / ring.len() as f64;
+            let convexity = if ocean {
+                0.0
+            } else {
+                (p - around).dot(up) / spacing
+            };
             let mut normal = encode_normal(n);
             normal[3] = encode_morph(m, spacing);
             vertices.push(TerrainVertex {
@@ -278,7 +310,7 @@ pub fn build_chunk(src: &ChunkSource, key: NodeKey) -> ChunkMesh {
                     (s.moisture.clamp(0.0, 1.0) * 255.0) as u8,
                     (((s.temperature_c + 60.0) / 120.0).clamp(0.0, 1.0) * 255.0) as u8,
                     (s.mare.clamp(0.0, 1.0) * 255.0) as u8,
-                    if ocean { FLAG_OCEAN } else { 0 },
+                    encode_convexity(convexity) | if ocean { FLAG_OCEAN } else { 0 },
                 ],
                 paint: [
                     s.paint.0,
@@ -453,6 +485,53 @@ mod tests {
             let p = DVec3::from(v.position.map(f64::from)) + c.origin;
             assert!(n.dot(p) > 0.0);
         }
+    }
+
+    #[test]
+    fn convexity_marks_crests() {
+        for (spacings, want) in [
+            (0.0, 0.0),
+            (0.25, 0.5),
+            (-0.25, -0.5),
+            (3.0, 1.0),
+            (-3.0, -1.0),
+        ] {
+            let f = encode_convexity(spacings);
+            assert_eq!(f & (FLAG_SKIRT | FLAG_OCEAN), 0);
+            let got = decode_convexity(f | FLAG_OCEAN);
+            assert!((got - want).abs() < 0.02, "{spacings}: {got}");
+        }
+        // On a real patch, every peak (above all 8 neighbors) reads as a crest.
+        let c = build_chunk(
+            &source(),
+            NodeKey {
+                face: 2,
+                level: 6,
+                x: 10,
+                y: 20,
+            },
+        );
+        let h = |i: usize, j: usize| c.vertices[j * GRID + i].altitude;
+        let mut peaks = 0;
+        for j in 1..GRID - 1 {
+            for i in 1..GRID - 1 {
+                let around = [
+                    (i - 1, j),
+                    (i + 1, j),
+                    (i, j - 1),
+                    (i, j + 1),
+                    (i - 1, j - 1),
+                    (i + 1, j - 1),
+                    (i - 1, j + 1),
+                    (i + 1, j + 1),
+                ];
+                if around.iter().all(|&(x, y)| h(i, j) > h(x, y) + 0.5) {
+                    peaks += 1;
+                    assert!(decode_convexity(c.vertices[j * GRID + i].climate[3]) > 0.0);
+                }
+            }
+        }
+        assert!(peaks > 0);
     }
 
     #[test]
