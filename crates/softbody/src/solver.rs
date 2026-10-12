@@ -98,6 +98,18 @@ pub struct Goal {
     pub compliance: f32,
 }
 
+/// One-sided contact with the skin a strand grows from: particle `p` stays `margin` meters
+/// on the outer side of the plane through `point` with unit `normal` (frame space), so fur
+/// pressed by wind or inertia lies down on the body instead of sinking into it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SkinPlane {
+    pub p: u32,
+    pub frame: u16,
+    pub point: Vec3,
+    pub normal: Vec3,
+    pub margin: f32,
+}
+
 /// Shape matching (Müller et al. 2005): particles are pulled toward their rest shape, rotated
 /// and translated to best fit where they are now. Gives jelly its wobble and its spring back.
 #[derive(Debug, Clone, PartialEq)]
@@ -203,6 +215,7 @@ pub struct Sim {
     pub tethers: Vec<Tether>,
     pub pins: Vec<Pin>,
     pub goals: Vec<Goal>,
+    pub skin_planes: Vec<SkinPlane>,
     pub shapes: Vec<ShapeMatch>,
     pub frames: Vec<Frame>,
     /// Triangles that feel the air (cloth).
@@ -623,6 +636,18 @@ impl Sim {
             fi.linear -= j;
             fi.angular -= (pos[i] - self.frames[g.frame as usize].to_pos).cross(j);
         }
+        for c in &self.skin_planes {
+            let i = c.p as usize;
+            if w[i] == 0.0 {
+                continue;
+            }
+            let (fp, fr) = self.frames[c.frame as usize].pose(t1);
+            let n = fr * c.normal;
+            let d = (pos[i] - fp - fr * c.point).dot(n) - c.margin;
+            if d < 0.0 {
+                pos[i] -= n * d;
+            }
+        }
         for s in &mut self.shapes {
             solve_shape(s, pos, w, h, inv_h2);
         }
@@ -952,6 +977,29 @@ mod tests {
         sim.step(dt, &[]);
         let j = sim.frame_impulses[f as usize].linear;
         assert!((j.y + 2.0 * 9.81 * dt).abs() < 1e-3, "{j}");
+    }
+
+    #[test]
+    fn skin_planes_hold_particles_on_the_outer_side() {
+        // A particle dropped on a tilted skin plane comes to lie on it, `margin` above.
+        let mut sim = Sim::new(DVec3::ZERO);
+        let tilt = Quat::from_rotation_z(0.3);
+        let f = sim.add_frame(Vec3::new(0.0, 1.0, 0.0), tilt);
+        let a = sim.add_particle(Vec3::new(0.0, 1.05, 0.0), 0.001);
+        sim.skin_planes.push(SkinPlane {
+            p: a,
+            frame: f,
+            point: Vec3::ZERO,
+            normal: Vec3::Y,
+            margin: 0.002,
+        });
+        for _ in 0..120 {
+            sim.step(1.0 / 60.0, &[]);
+            let height = (sim.pos[a as usize] - Vec3::Y).dot(tilt * Vec3::Y);
+            assert!(height > 0.002 - 1e-4, "{height} m above the skin");
+        }
+        let height = (sim.pos[a as usize] - Vec3::Y).dot(tilt * Vec3::Y);
+        assert!(height < 0.003, "rests on it: {height}");
     }
 
     #[test]

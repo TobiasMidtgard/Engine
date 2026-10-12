@@ -32,6 +32,8 @@ pub enum FrameSource {
     Entity(Entity),
     /// Bone `bone` of `owner`'s `SkeletonPose`.
     Bone { owner: Entity, bone: usize },
+    /// Two bones of a `SkeletonPose` blended the way skinning blends them.
+    Blend(crate::hair::BoneBlend),
 }
 
 /// Triangles to draw, following the particles.

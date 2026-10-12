@@ -34,7 +34,7 @@ Every spec component is data (serde, registered with docs), so AI agents and the
 - **Cloth** (`Cloth`): flags, curtains (gathered into folds), capes and clothing pinned to bones; per-triangle aerodynamics (pressure drag and skin friction in the world wind with gusts), tearing when overstretched, bullet holes (`ProjectileTrace`), fire that spreads upward and burns triangles away (`IgniteRequest`, `HeatField`, explosions with heat), rain soaking it heavier and darker. The drawn cloth shows fine wrinkles wherever the solver reports compression, printed patterns, fabric sheen, charring and glowing burn edges.
 - **Ropes** (`Rope`) and **rope bridges** (`RopeBridge`): ends tied to nothing, the entity, a world point or another entity; cuttable by bullets, `softbody.cut` or code. Bridge planks are kinematic colliders driven by the ropes, so walkers stand on the sagging deck.
 - **Soft volumes** (`SoftVolume`): a particle lattice with one shape-matching constraint (rotation extraction, Müller 2016) plus lattice springs; plasticity keeps dents. A smooth rounded mesh is embedded in the lattice.
-- **Hair and fur** (`HairGroom`): guide strands grow from a scalp ellipsoid or around bone capsules, draped over the skin, and are simulated as tiny ropes with goals toward their combed shape (stiffer at the root), tethers, drag and wind, colliding with the body. The renderer grows 30–60 drawn strands around each guide in the vertex shader (Catmull-Rom, spread, clumping, curl, per-strand length) with two-lobe Kajiya-Kay shading; strands thin out with distance. Melanin and redness give natural colors.
+- **Hair and fur** (`HairGroom`): guide strands grow from a scalp ellipsoid, around bone capsules, or over a whole skinned body mesh (`HairEmitter::Surface`: roots spread evenly by area, each riding the bones that carry the skin under it (`MeshSkins`; blended like the skinning at the joints, so the coat stays on bending skin), combed along the skeleton, longer or shorter by `FurZone`), draped over the skin, and are simulated as tiny ropes with goals toward their combed shape (stiffer at the root), tethers, drag and wind, colliding with the body. The renderer grows 30–60 drawn strands around each guide in the vertex shader (Catmull-Rom, spread, clumping, curl, per-strand length) with two-lobe Kajiya-Kay shading; strands thin out with distance. Melanin and redness give natural colors.
 - **Time**: runs in `FixedUpdate` / `SimSet::PostPhysics` (after rigid bodies). Bodies on a character use that character's `LocalTimeScale`, so a slowed character's cape and hair move in slow motion too.
 - **LOD**: bodies farther than `SoftBodyConfig::lod_distance` from every `SimulationFocus` step every other fixed step; past `freeze_distance` they hold still. Bodies are culled for drawing and shadows separately.
 
@@ -45,6 +45,7 @@ Every spec component is data (serde, registered with docs), so AI agents and the
 | `Cloth`, `Rope`, `RopeBridge`, `SoftVolume`, `HairGroom` | Specs. The plugin adds a `SoftBodySim` next to each (or `SoftBodyFailed` with a readable reason). |
 | `BoneColliders` | Capsules on a character's bones for cloth and hair (`humanoid()` for the usual bone names). |
 | `SoftLoad` | Weight an entity puts on rope bridges without a physics character. |
+| `MeshSkins` | Skin weights of skinned meshes in `Assets<Mesh>`, by key, so `Surface` fur moves with the skin. |
 | `SoftBodySim` | Runtime state: particles, constraints, bounds, step time. Read it for positions. |
 | `SoftBodyConfig` | `enabled`, `lod_distance`, `freeze_distance`, `quality` (substep multiplier). |
 | `softbody.list` / `stats` | What exists and what it costs. |
@@ -65,6 +66,8 @@ Hair and fur are drawn by this crate until the shared strand renderer exists. Th
 ## Demo
 
 `demo::spawn_demo(commands, origin)` builds the yard: five banners and a field of 56 pennants, a curtain shot full of holes and one that burns away and comes back, a long rope bridge with a walker and a short one that is cut and drops, a bead curtain a ball pushes through, a swing, jelly cubes a wrecking ball knocks around, clay a press dents, a caped mannequin with long hair, the same mannequin in slow motion, and a dog with fur. Until the physics and animation modules land, props are kinematic and the skeletons are animated procedurally here through the same `SkeletonPose` contract.
+
+The characters are seamless sculpted bodies (`demo::body`, `demo::sculpt`): a signed distance field of lofted limbs and torso, muscles, face and paws, blended smoothly, meshed once at 3.4–4 mm (surface nets, projection onto the surface, curvature-aware decimation to about 145k triangles for the mannequin and 120k for the dog, relaxation, baked ambient occlusion) on background threads and shared. `demo::skin` deforms each body on the CPU every frame with dual-quaternion skinning (up to four bones per vertex, no candy-wrapper twists) into a mesh asset in well under a millisecond. The mannequins are satin fiberglass (ivory, graphite); the dog's coat grows over its whole skinned body.
 
 ```sh
 cargo run -p engine_softbody --example yard --release -- out_dir 1280x720   # close-ups of each piece

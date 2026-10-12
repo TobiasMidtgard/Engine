@@ -1,8 +1,11 @@
-//! Demo characters: a mannequin and a dog on procedural skeletons (the same `SkeletonPose`
-//! contract the animation module writes), wearing this module's cloth, hair and fur.
+//! Demo characters: a display mannequin and a dog on procedural skeletons (the same
+//! `SkeletonPose` contract the animation module writes), with seamless sculpted bodies
+//! skinned on the CPU ([`super::skin`]), wearing this module's cloth, hair and fur.
 
-use super::props::*;
+use super::body::{self, BodyPart, Dog, Human, aim};
+use super::skin::SkinnedPart;
 use super::*;
+use crate::hair::FurZone;
 
 /// Which procedural rig a demo skeleton uses.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -11,27 +14,19 @@ pub enum Rig {
     Dog,
 }
 
-/// Animates this entity's `SkeletonPose` with a walk (or trot) cycle of `cycle` seconds.
+/// Animates this entity's `SkeletonPose` with a walk (or trot) cycle of `cycle` seconds,
+/// covering `stride` meters per cycle (so planted feet stay put on the ground).
 #[derive(Component, Debug, Clone, Copy, PartialEq)]
 pub struct DemoSkeleton {
     pub rig: Rig,
     pub cycle: f32,
-}
-
-/// A body part mesh placed on the bones of `owner` every step.
-#[derive(Component, Debug, Clone, Copy, PartialEq)]
-pub struct DemoLimb {
-    pub owner: Entity,
-    pub from: usize,
-    pub to: Option<usize>,
-    /// Offset in the `from` bone's space.
-    pub offset: Vec3,
+    pub stride: f32,
 }
 
 // ---------------------------------------------------------------------------------------
-// Characters
+// Skeletons
 
-const HUMANOID: [(&str, Option<u16>); 17] = [
+pub const HUMANOID: [(&str, Option<u16>); 17] = [
     ("pelvis", None),
     ("spine", Some(0)),
     ("chest", Some(1)),
@@ -51,7 +46,9 @@ const HUMANOID: [(&str, Option<u16>); 17] = [
     ("foot_r", Some(15)),
 ];
 
-const DOG: [(&str, Option<u16>); 20] = [
+/// Legs: upper leg (from the shoulder or hip), lower leg (from the elbow or stifle), pastern
+/// (from the wrist or hock) and paw.
+pub const DOG: [(&str, Option<u16>); 24] = [
     ("hips", None),
     ("spine", Some(0)),
     ("chest", Some(1)),
@@ -62,19 +59,27 @@ const DOG: [(&str, Option<u16>); 20] = [
     ("tail_3", Some(6)),
     ("leg_fl", Some(2)),
     ("knee_fl", Some(8)),
-    ("paw_fl", Some(9)),
+    ("ankle_fl", Some(9)),
+    ("paw_fl", Some(10)),
     ("leg_fr", Some(2)),
-    ("knee_fr", Some(11)),
-    ("paw_fr", Some(12)),
+    ("knee_fr", Some(12)),
+    ("ankle_fr", Some(13)),
+    ("paw_fr", Some(14)),
     ("leg_hl", Some(0)),
-    ("knee_hl", Some(14)),
-    ("paw_hl", Some(15)),
+    ("knee_hl", Some(16)),
+    ("ankle_hl", Some(17)),
+    ("paw_hl", Some(18)),
     ("leg_hr", Some(0)),
-    ("knee_hr", Some(17)),
-    ("paw_hr", Some(18)),
+    ("knee_hr", Some(20)),
+    ("ankle_hr", Some(21)),
+    ("paw_hr", Some(22)),
 ];
 
-fn skeleton(bones: &[(&str, Option<u16>)], rig: Rig) -> SkeletonPose {
+/// Meters per walk cycle of the mannequins and per trot cycle of the dog, as spawned.
+const HUMAN_STRIDE: f32 = 1.25;
+const DOG_STRIDE: f32 = 0.6;
+
+pub fn skeleton(bones: &[(&str, Option<u16>)], rig: Rig) -> SkeletonPose {
     let mut pose = SkeletonPose {
         names: bones
             .iter()
@@ -88,169 +93,356 @@ fn skeleton(bones: &[(&str, Option<u16>)], rig: Rig) -> SkeletonPose {
     pose
 }
 
-/// Direction from angle `a` (radians, toward forward = −Z) hanging down.
-fn hang(a: f32) -> Vec3 {
-    Vec3::new(0.0, -a.cos(), -a.sin())
+fn set(p: &mut [BonePose], i: usize, t: Vec3, r: Quat) {
+    p[i].translation = t;
+    p[i].rotation = r;
+    p[i].scale = Vec3::ONE;
 }
 
-fn aim(from: Vec3, to: Vec3) -> Quat {
-    let d = to - from;
-    if d.length_squared() < 1e-10 {
-        Quat::IDENTITY
-    } else {
-        Quat::from_rotation_arc(Vec3::NEG_Y, d.normalize())
-    }
+fn hermite(p0: f32, p1: f32, m0: f32, m1: f32, t: f32) -> f32 {
+    let (t2, t3) = (t * t, t * t * t);
+    (2.0 * t3 - 3.0 * t2 + 1.0) * p0
+        + (t3 - 2.0 * t2 + t) * m0
+        + (-2.0 * t3 + 3.0 * t2) * p1
+        + (t3 - t2) * m1
+}
+
+/// Smooth minimum of two heights.
+fn soft_min(a: f32, b: f32, k: f32) -> f32 {
+    let h = (0.5 + 0.5 * (b - a) / k).clamp(0.0, 1.0);
+    b + (a - b) * h - k * h * (1.0 - h)
+}
+
+/// Two-bone IK: the middle joint for a chain from `root` toward `target` (reaching as far as
+/// it can), bending toward `pole`. Returns the middle joint and the end.
+fn two_bone_ik(root: Vec3, target: Vec3, l1: f32, l2: f32, pole: Vec3) -> (Vec3, Vec3) {
+    let d = target - root;
+    let dist = d.length().clamp((l1 - l2).abs() + 1e-4, l1 + l2 - 1e-4);
+    let dir = d.normalize_or(Vec3::NEG_Y);
+    let cos_a = ((l1 * l1 + dist * dist - l2 * l2) / (2.0 * l1 * dist)).clamp(-1.0, 1.0);
+    let sin_a = (1.0 - cos_a * cos_a).max(0.0).sqrt();
+    let bend = (pole - dir * pole.dot(dir)).normalize_or(dir.any_orthonormal_vector());
+    (root + (dir * cos_a + bend * sin_a) * l1, root + dir * dist)
 }
 
 /// Write a walk (humanoid) or trot (dog) pose at `phase` radians into `pose`.
 pub fn pose_rig(rig: Rig, phase: f32, pose: &mut SkeletonPose) {
-    let p = &mut pose.bones;
-    let set = |p: &mut Vec<BonePose>, i: usize, t: Vec3, r: Quat| {
-        p[i].translation = t;
-        p[i].rotation = r;
-        p[i].scale = Vec3::ONE;
+    let stride = match rig {
+        Rig::Humanoid => HUMAN_STRIDE,
+        Rig::Dog => DOG_STRIDE,
     };
+    pose_rig_stride(rig, phase, stride, pose);
+}
+
+/// [`pose_rig`] covering `stride` meters per cycle.
+pub fn pose_rig_stride(rig: Rig, phase: f32, stride: f32, pose: &mut SkeletonPose) {
+    let u = (phase / TAU).rem_euclid(1.0);
     match rig {
         Rig::Humanoid => {
-            let bob = 0.025 * (2.0 * phase).cos();
-            let twist = 0.07 * phase.sin();
-            let pelvis = Vec3::new(0.0, 0.95 + bob, 0.0);
-            let chest = Vec3::new(0.0, 1.30 + bob, -0.02);
-            set(p, 0, pelvis, Quat::from_rotation_y(-twist));
-            set(p, 1, Vec3::new(0.0, 1.12 + bob, -0.01), Quat::IDENTITY);
-            set(p, 2, chest, Quat::from_rotation_y(twist));
-            set(p, 3, Vec3::new(0.0, 1.50 + bob, -0.03), Quat::IDENTITY);
-            set(p, 4, Vec3::new(0.0, 1.60 + bob, -0.04), Quat::IDENTITY);
-            // Facing −Z, the left side is −X.
-            for (side, base_arm, base_leg) in [(-1.0f32, 5, 11), (1.0, 8, 14)] {
-                let ph = if side > 0.0 { phase } else { phase + PI };
-                // Arm swings opposite to the leg on the same side.
-                let swing = -0.35 * ph.sin();
-                let shoulder = chest + Vec3::new(0.2 * side, 0.15, 0.0);
-                let elbow = shoulder + hang(swing) * 0.28 + Vec3::X * (0.02 * side);
-                let hand = elbow + hang(swing + 0.35) * 0.26;
-                set(p, base_arm, shoulder, aim(shoulder, elbow));
-                set(p, base_arm + 1, elbow, aim(elbow, hand));
-                set(p, base_arm + 2, hand, aim(elbow, hand));
-                // Leg: thigh swings, the knee bends through the swing phase.
-                let thigh = 0.4 * ph.sin();
-                let knee_bend = 0.1 + 0.9 * ph.cos().max(0.0).powi(2);
-                let hip = pelvis + Vec3::new(0.1 * side, -0.05, 0.0);
-                let knee = hip + hang(thigh) * 0.43;
-                let ankle = knee + hang(thigh - knee_bend) * 0.43;
-                set(p, base_leg, hip, aim(hip, knee));
-                set(p, base_leg + 1, knee, aim(knee, ankle));
-                set(p, base_leg + 2, ankle, Quat::IDENTITY);
+            if pose.bones.len() >= Human::BONES {
+                human_walk(u, stride, &mut pose.bones);
             }
         }
         Rig::Dog => {
-            let bob = 0.015 * (2.0 * phase).cos();
-            let wag = (3.0 * phase).sin();
-            let hips = Vec3::new(0.0, 0.55 + bob, 0.28);
-            let chest = Vec3::new(0.0, 0.58 + bob, -0.24);
-            set(p, 0, hips, Quat::IDENTITY);
-            set(p, 1, Vec3::new(0.0, 0.57 + bob, 0.02), Quat::IDENTITY);
-            set(p, 2, chest, Quat::IDENTITY);
-            set(p, 3, Vec3::new(0.0, 0.68 + bob, -0.38), Quat::IDENTITY);
-            let head = Vec3::new(0.0, 0.78 + bob, -0.5);
-            set(p, 4, head, Quat::from_rotation_y(0.15 * phase.sin()));
-            let t1 = Vec3::new(0.0, 0.6 + bob, 0.4);
-            let t2 = t1 + Vec3::new(0.08 * wag, 0.07, 0.18);
-            let t3 = t2 + Vec3::new(0.16 * wag, 0.04, 0.17);
-            set(p, 5, t1, aim(t1, t2));
-            set(p, 6, t2, aim(t2, t3));
-            set(p, 7, t3, aim(t2, t3));
-            // Trot: diagonal legs move together.
-            for (base, side, front, offset) in [
-                (8, -1.0f32, true, 0.0),
-                (11, 1.0, true, PI),
-                (14, -1.0, false, PI),
-                (17, 1.0, false, 0.0),
-            ] {
-                let ph = phase + offset;
-                let swing = 0.35 * ph.sin();
-                let bend = 0.15 + 0.6 * ph.cos().max(0.0).powi(2);
-                let top = if front { chest } else { hips } + Vec3::new(0.11 * side, -0.05, 0.0);
-                let knee = top + hang(swing) * 0.24;
-                let lower = if front {
-                    swing - bend
-                } else {
-                    swing + bend * 0.6
-                };
-                let paw = knee + hang(lower) * 0.27;
-                set(p, base, top, aim(top, knee));
-                set(p, base + 1, knee, aim(knee, paw));
-                set(p, base + 2, paw, Quat::IDENTITY);
+            if pose.bones.len() >= Dog::BONES {
+                dog_trot(u, stride, &mut pose.bones);
             }
         }
     }
 }
 
-/// A body-part mesh on bones `from` (→ `to`) of `owner`.
-#[allow(clippy::too_many_arguments)]
-fn limb(
-    commands: &mut Commands,
-    owner: Entity,
-    pose: &SkeletonPose,
-    from: &str,
-    to: Option<&str>,
-    radius: f32,
-    offset: Vec3,
-    material: StandardMaterial,
-) {
-    let a = pose.index_of(from).expect("bone");
-    let b = to.map(|t| pose.index_of(t).expect("bone"));
-    let shape = match b {
-        Some(b) => Shape::Capsule {
-            radius,
-            height: pose.bones[a]
-                .translation
-                .distance(pose.bones[b].translation)
-                + 2.0 * radius,
-            segments: 14,
-        },
-        None => Shape::Sphere {
-            radius,
-            segments: 20,
-        },
+// ---------------------------------------------------------------------------------------
+// The walk
+
+/// Fraction of the cycle a foot is on the ground.
+const HUMAN_STANCE: f32 = 0.6;
+const HEEL_STRIKE_PITCH: f32 = 0.3;
+const TOE_OFF_PITCH: f32 = -0.75;
+
+/// Ankle height, ankle z (relative to the hips, +Z behind) and foot pitch (+ = toes up) of
+/// a planted foot, `c` = 0 at heel strike .. 1 at toe-off: it rolls over the heel, stands flat,
+/// then peels off over the ball of the foot.
+fn planted_foot(c: f32, travel: f32) -> (f32, f32, f32) {
+    let z_ref = -0.5 * travel + travel * c;
+    let pitch = if c < 0.15 {
+        HEEL_STRIKE_PITCH * (1.0 - smoothstep(0.0, 0.15, c))
+    } else if c > 0.5 {
+        TOE_OFF_PITCH * smoothstep(0.5, 1.0, c)
+    } else {
+        0.0
     };
-    commands.spawn((
-        Transform::default(),
-        TransformInterpolation::default(),
-        MeshRenderer::new(shape, material),
-        DemoLimb {
-            owner,
-            from: a,
-            to: b,
-            offset,
+    let (sin, cos) = pitch.sin_cos();
+    let (ah, hb, bf) = (Human::ANKLE_HEIGHT, Human::HEEL_BACK, Human::BALL_FORWARD);
+    if pitch >= 0.0 {
+        // Pivot on the heel.
+        (ah * cos + hb * sin, z_ref + hb + ah * sin - hb * cos, pitch)
+    } else {
+        // Pivot on the ball of the foot.
+        (ah * cos - bf * sin, z_ref - bf + ah * sin + bf * cos, pitch)
+    }
+}
+
+/// Ankle (height, z), foot pitch at gait phase `u` (0 = heel strike).
+fn human_foot(u: f32, stride: f32) -> (f32, f32, f32) {
+    let travel = stride * HUMAN_STANCE;
+    if u < HUMAN_STANCE {
+        return planted_foot(u / HUMAN_STANCE, travel);
+    }
+    let w = (u - HUMAN_STANCE) / (1.0 - HUMAN_STANCE);
+    let (y0, z0, p0) = planted_foot(1.0, travel);
+    let (y1, z1, p1) = planted_foot(0.0, travel);
+    // Leave and land moving with the ground, swing through in between.
+    let m = stride * (1.0 - HUMAN_STANCE) * 0.5;
+    let z = hermite(z0, z1, m, m, w);
+    let y =
+        lerp(y0, y1, smoothstep(0.0, 1.0, w)) + 0.075 * (std::f32::consts::PI * w).sin().powf(1.3);
+    let pitch = lerp(p0, p1, smoothstep(0.0, 0.55, w)) + 0.15 * (std::f32::consts::PI * w).sin();
+    (y, z, pitch)
+}
+
+fn human_walk(u: f32, stride: f32, p: &mut [BonePose]) {
+    let ur = u;
+    let ul = (u + 0.5).rem_euclid(1.0);
+    let feet = [human_foot(ul, stride), human_foot(ur, stride)];
+    let wave = |x: f32| (x * TAU).cos();
+    // Pelvis: turns with the leading leg, lists toward the stance leg, sways over it.
+    let yaw = 0.07 * wave(ur);
+    let roll = 0.04 * wave(ur - 0.3);
+    let sway = 0.016 * wave(ur - 0.3);
+    let pelvis_rot =
+        Quat::from_rotation_y(yaw) * Quat::from_rotation_z(roll) * Quat::from_rotation_x(-0.04);
+    // As high as the planted legs reach (knees never quite locked).
+    let reach = 0.995 * (Human::THIGH + Human::SHIN);
+    let foot_x = 0.095;
+    let mut heights = [0.0f32; 2];
+    for (k, side) in [-1.0f32, 1.0].into_iter().enumerate() {
+        let (y, z, _) = feet[k];
+        let hip_off = pelvis_rot * (body::side_v(Human::HIP, side) - Human::PELVIS);
+        let dx = side * foot_x - (sway + hip_off.x);
+        let dz = z - hip_off.z;
+        let flat = (reach * reach - dx * dx - dz * dz).max(0.0).sqrt();
+        heights[k] = y + flat - hip_off.y;
+    }
+    let pelvis_y = soft_min(soft_min(heights[0], heights[1], 0.03), 0.957, 0.02);
+    let pelvis = Vec3::new(sway, pelvis_y, 0.0);
+    // Spine counter-rotates against the pelvis; the head stays level and forward.
+    let spine_rot = Quat::from_rotation_y(yaw * 0.3) * Quat::from_rotation_z(roll * 0.3);
+    let chest_rot = Quat::from_rotation_y(-yaw * 0.9)
+        * Quat::from_rotation_z(-roll * 0.4)
+        * Quat::from_rotation_x(-0.035);
+    let neck_rot = Quat::from_rotation_y(-yaw * 0.3) * Quat::from_rotation_x(0.04);
+    let head_rot = Quat::from_rotation_x(0.0 + 0.012 * wave(2.0 * u));
+    let spine = pelvis + pelvis_rot * (Human::SPINE - Human::PELVIS);
+    let chest = spine + spine_rot * (Human::CHEST - Human::SPINE);
+    let neck = chest + chest_rot * (Human::NECK - Human::CHEST);
+    let head = neck + neck_rot * (Human::HEAD - Human::NECK);
+    set(p, Human::PELVIS_I, pelvis, pelvis_rot);
+    set(p, Human::SPINE_I, spine, spine_rot);
+    set(p, Human::CHEST_I, chest, chest_rot);
+    set(p, Human::NECK_I, neck, neck_rot);
+    set(p, Human::HEAD_I, head, head_rot);
+    for (k, (side, arm, leg, uu)) in [
+        (-1.0f32, Human::ARM_L, Human::LEG_L, ul),
+        (1.0, Human::ARM_R, Human::LEG_R, ur),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        // Arms swing against the leg on the same side, elbows bending more going forward.
+        let swing = -0.3 * wave(uu - 0.05);
+        let spread: f32 = 0.13;
+        let down = Vec3::new(side * spread.sin(), -spread.cos(), 0.0);
+        let bend = 0.25 + 0.3 * (swing / 0.3).max(0.0);
+        let shoulder = chest + chest_rot * (body::side_v(Human::SHOULDER, side) - Human::CHEST);
+        let upper = chest_rot * (Quat::from_rotation_x(swing) * down);
+        let elbow = shoulder + upper * Human::UPPER_ARM;
+        let fore = chest_rot * (Quat::from_rotation_x(swing + bend) * down);
+        let wrist = elbow + fore * Human::FOREARM;
+        set(p, arm, shoulder, aim(shoulder, elbow));
+        set(p, arm + 1, elbow, aim(elbow, wrist));
+        set(p, arm + 2, wrist, aim(elbow, wrist));
+        // Legs: IK from the hip to the planted (or swinging) ankle, knees forward.
+        let (y, z, pitch) = feet[k];
+        let hip = pelvis + pelvis_rot * (body::side_v(Human::HIP, side) - Human::PELVIS);
+        let target = Vec3::new(side * foot_x, y, z);
+        let (knee, ankle) = two_bone_ik(
+            hip,
+            target,
+            Human::THIGH,
+            Human::SHIN,
+            Vec3::new(side * 0.1, 0.0, -1.0),
+        );
+        set(p, leg, hip, aim(hip, knee));
+        set(p, leg + 1, knee, aim(knee, ankle));
+        set(p, leg + 2, ankle, Quat::from_rotation_x(pitch));
+    }
+}
+
+// ---------------------------------------------------------------------------------------
+// The trot
+
+const DOG_STANCE: f32 = 0.42;
+
+fn dog_trot(u: f32, stride: f32, p: &mut [BonePose]) {
+    let wave = |x: f32| (x * TAU).cos();
+    // Two beats per cycle: the body dips as each diagonal pair lands.
+    let bob = 0.012 * wave(2.0 * u - 0.1);
+    let roll = 0.025 * wave(u);
+    let hips_rot = Quat::from_rotation_z(roll) * Quat::from_rotation_y(0.03 * wave(u + 0.25));
+    let spine_rot = Quat::from_rotation_z(roll * 0.5);
+    let chest_rot =
+        Quat::from_rotation_z(-roll * 0.6) * Quat::from_rotation_y(-0.03 * wave(u + 0.25));
+    let hips = Dog::HIPS + Vec3::Y * bob;
+    let spine = hips + hips_rot * (Dog::SPINE - Dog::HIPS);
+    let chest = spine + spine_rot * (Dog::CHEST - Dog::SPINE);
+    let neck_rot = Quat::from_rotation_x(0.04 * wave(2.0 * u + 0.2));
+    let neck = chest + chest_rot * (Dog::NECK - Dog::CHEST);
+    let head_rot = Quat::from_rotation_y(0.1 * (u * TAU).sin())
+        * Quat::from_rotation_x(-0.05 * wave(2.0 * u + 0.25));
+    let head = neck + neck_rot * (Dog::HEAD - Dog::NECK);
+    set(p, Dog::HIPS_I, hips, hips_rot);
+    set(p, Dog::SPINE_I, spine, spine_rot);
+    set(p, Dog::CHEST_I, chest, chest_rot);
+    set(p, Dog::NECK_I, neck, neck_rot);
+    set(p, Dog::HEAD_I, head, head_rot);
+    // Tail carried up, wagging.
+    let wag = (2.0 * u * TAU).sin();
+    let mut t = hips + hips_rot * (Dog::TAIL[0] - Dog::HIPS);
+    let mut dirs = Vec::with_capacity(3);
+    for k in 0..3 {
+        let rest = Dog::TAIL[k + 1] - Dog::TAIL[k];
+        let lift = Quat::from_rotation_x(0.35 + 0.1 * k as f32);
+        let side = Quat::from_rotation_y(0.35 * wag * (k as f32 + 1.0) / 2.0);
+        dirs.push(hips_rot * side * lift * rest);
+    }
+    for (k, dir) in dirs.iter().enumerate() {
+        let next = t + *dir;
+        set(p, Dog::TAIL_I + k, t, aim(t, next));
+        t = next;
+    }
+    // Legs: diagonal pairs move together; paws planted, pasterns folding in the swing.
+    let travel = stride * DOG_STANCE;
+    for (first, side, front, offset) in [
+        (Dog::LEG_FL, -1.0f32, true, 0.0f32),
+        (Dog::LEG_FR, 1.0, true, 0.5),
+        (Dog::LEG_HL, -1.0, false, 0.5),
+        (Dog::LEG_HR, 1.0, false, 0.0),
+    ] {
+        let joints = if front { Dog::FRONT } else { Dog::HIND };
+        let j = joints.map(|q| body::side_v(q, side));
+        let (parent, parent_rot, parent_bind) = if front {
+            (chest, chest_rot, Dog::CHEST)
+        } else {
+            (hips, hips_rot, Dog::HIPS)
+        };
+        let top = parent + parent_rot * (j[0] - parent_bind);
+        let lu = (u + offset).rem_euclid(1.0);
+        // Front paws land a little ahead of the shoulder.
+        let center = j[3].z + if front { -0.03 } else { 0.0 };
+        let (paw_y, paw_z, fold) = if lu < DOG_STANCE {
+            (
+                Dog::PAW_HEIGHT,
+                center - 0.5 * travel + travel * lu / DOG_STANCE,
+                0.0,
+            )
+        } else {
+            let w = (lu - DOG_STANCE) / (1.0 - DOG_STANCE);
+            let m = stride * (1.0 - DOG_STANCE) * 0.5;
+            let z = hermite(center + 0.5 * travel, center - 0.5 * travel, m, m, w);
+            let arc = (std::f32::consts::PI * w).sin();
+            let lift = if front { 0.07 } else { 0.06 };
+            let fold = if front { 1.4 } else { 0.7 } * arc.powf(0.7);
+            (Dog::PAW_HEIGHT + lift * arc, z, fold)
+        };
+        let paw = Vec3::new(j[3].x, paw_y, paw_z);
+        let fold_rot = Quat::from_rotation_x(-fold);
+        let wrist = paw - fold_rot * (j[3] - j[2]);
+        let (l1, l2) = (j[0].distance(j[1]), j[1].distance(j[2]));
+        let pole = if front { Vec3::Z } else { Vec3::NEG_Z };
+        let (mid, wrist) = two_bone_ik(top, wrist, l1, l2, pole);
+        let paw = wrist + fold_rot * (j[3] - j[2]);
+        set(p, first, top, aim(top, mid));
+        set(p, first + 1, mid, aim(mid, wrist));
+        set(p, first + 2, wrist, aim(wrist, paw));
+        set(p, first + 3, paw, fold_rot);
+    }
+}
+
+// ---------------------------------------------------------------------------------------
+// Spawning
+
+fn fiberglass(hex: u32, roughness: f32) -> StandardMaterial {
+    StandardMaterial {
+        reflectance: 0.5,
+        ..StandardMaterial::hex(hex)
+            .with_roughness(roughness)
+            .with_subsurface(0.12)
+    }
+}
+
+/// Capsules fitted inside the mannequin's surface (cloth keeps its thickness off them).
+pub fn mannequin_colliders() -> BoneColliders {
+    let mut capsules = vec![
+        BoneCapsule {
+            offset: [0.0, 0.0, -0.005],
+            ..BoneCapsule::capsule("pelvis", "chest", 0.08)
         },
-    ));
+        BoneCapsule::capsule("chest", "neck", 0.1),
+        BoneCapsule::capsule("upper_arm_l", "upper_arm_r", 0.052),
+        BoneCapsule::capsule("neck", "head", 0.046),
+        // The cranium as two balls, and the face.
+        BoneCapsule::sphere("head", 0.078, [0.0, 0.135, -0.012]),
+        BoneCapsule::sphere("head", 0.078, [0.0, 0.128, 0.03]),
+        BoneCapsule::sphere("head", 0.058, [0.0, 0.055, -0.03]),
+        // Hips and glutes.
+        BoneCapsule {
+            offset: [0.0, 0.0, 0.035],
+            ..BoneCapsule::capsule("thigh_l", "thigh_r", 0.088)
+        },
+    ];
+    for side in ["l", "r"] {
+        let b = |n: &str| format!("{n}_{side}");
+        capsules.push(BoneCapsule::capsule("chest", &b("upper_arm"), 0.05));
+        capsules.push(BoneCapsule::capsule(&b("upper_arm"), &b("forearm"), 0.034));
+        capsules.push(BoneCapsule::capsule(&b("forearm"), &b("hand"), 0.027));
+        capsules.push(BoneCapsule::sphere(&b("hand"), 0.034, [0.0, -0.06, 0.0]));
+        capsules.push(BoneCapsule::capsule(&b("thigh"), &b("shin"), 0.054));
+        capsules.push(BoneCapsule::capsule(&b("shin"), &b("foot"), 0.036));
+    }
+    BoneColliders {
+        capsules,
+        friction: 0.4,
+    }
 }
 
 /// A mannequin with a cape and long hair walking around `center`. `time_scale` < 1 runs it
-/// (and its cloth and hair) in slow motion.
+/// (and its cloth and hair) in slow motion. `finish` is its fiberglass color.
 pub(super) fn mannequin(
     commands: &mut Commands,
     center: DVec3,
     radius: f32,
     time_scale: f32,
     name: &str,
+    finish: StandardMaterial,
 ) -> Entity {
     let pose = skeleton(&HUMANOID, Rig::Humanoid);
+    let cycle = 1.0;
+    let speed = HUMAN_STRIDE / cycle;
     let mut root = commands.spawn((
         Name::new(name.to_string()),
         Transform::from_translation(center + DVec3::X * radius as f64),
         TransformInterpolation::default(),
-        pose.clone(),
-        BoneColliders::humanoid(),
+        pose,
+        mannequin_colliders(),
         DemoSkeleton {
             rig: Rig::Humanoid,
-            cycle: 1.05,
+            cycle,
+            stride: HUMAN_STRIDE,
         },
         DemoMotion::Circle {
             center,
             radius,
-            period: TAU * radius / 1.25,
+            period: TAU * radius / speed,
         },
         DemoClock::default(),
     ));
@@ -261,125 +453,26 @@ pub(super) fn mannequin(
         });
     }
     let man = root.id();
-    let skin = mat(0xd9c3a0, 0.55);
-    let cloth = mat(0x34495e, 0.8);
-    limb(
-        commands,
-        man,
-        &pose,
-        "pelvis",
-        Some("chest"),
-        0.15,
-        Vec3::ZERO,
-        cloth,
-    );
-    limb(
-        commands,
-        man,
-        &pose,
-        "chest",
-        Some("neck"),
-        0.155,
-        Vec3::ZERO,
-        cloth,
-    );
-    limb(
-        commands,
-        man,
-        &pose,
-        "neck",
-        Some("head"),
-        0.05,
-        Vec3::ZERO,
-        skin,
-    );
-    limb(
-        commands,
-        man,
-        &pose,
-        "head",
-        None,
-        0.1,
-        Vec3::new(0.0, 0.07, 0.0),
-        skin,
-    );
-    for s in ["l", "r"] {
-        let b = |n: &str| format!("{n}_{s}");
-        limb(
-            commands,
-            man,
-            &pose,
-            &b("upper_arm"),
-            Some(&b("forearm")),
-            0.05,
-            Vec3::ZERO,
-            cloth,
-        );
-        limb(
-            commands,
-            man,
-            &pose,
-            &b("forearm"),
-            Some(&b("hand")),
-            0.042,
-            Vec3::ZERO,
-            skin,
-        );
-        limb(
-            commands,
-            man,
-            &pose,
-            &b("hand"),
-            None,
-            0.05,
-            Vec3::new(0.0, -0.04, 0.0),
-            skin,
-        );
-        limb(
-            commands,
-            man,
-            &pose,
-            &b("thigh"),
-            Some(&b("shin")),
-            0.075,
-            Vec3::ZERO,
-            cloth,
-        );
-        limb(
-            commands,
-            man,
-            &pose,
-            &b("shin"),
-            Some(&b("foot")),
-            0.055,
-            Vec3::ZERO,
-            cloth,
-        );
-        limb(
-            commands,
-            man,
-            &pose,
-            &b("foot"),
-            None,
-            0.06,
-            Vec3::new(0.0, -0.02, -0.06),
-            mat(0x1c1c1c, 0.6),
-        );
-    }
-    // Cape tied across the chest, hanging behind the back.
+    commands.spawn((
+        Name::new(format!("{name} body")),
+        Transform::default(),
+        SkinnedPart::new(BodyPart::Mannequin, man, &format!("{name} body"), finish),
+        ChildOf(man),
+    ));
+    // Cape tied across the shoulders, hanging down the back.
     let cape = SoftMaterial::hex(0x922b3e)
         .with_pattern(Pattern::Border, 0xd4ac0d, 0xf4d03f)
         .with_roughness(0.85)
         .with_sheen(0.7);
     commands.spawn((
         Name::new(format!("{name} cape")),
-        Transform::from_xyz(0.0, 1.46, 0.21),
+        Transform::from_xyz(0.0, 1.475, 0.125),
         Cloth {
             pins: ClothPins::Bones {
                 rows: 1,
                 bones: vec!["chest".into()],
             },
-            ..Cloth::cape([0.72, 1.2], cape, &["chest"])
+            ..Cloth::cape([0.56, 1.22], cape, &["chest"])
         },
         ChildOf(man),
     ));
@@ -388,16 +481,17 @@ pub(super) fn mannequin(
         redness: 0.2,
         ..HairStyle::long()
     };
+    // The cranium of the sculpt, in the head bone's frame, with a hair's breadth to spare.
+    let cranium = Vec3::new(0.0, 1.737, 0.012) - Human::HEAD;
     commands.spawn((
         Name::new(format!("{name} hair")),
         Transform::default(),
         HairGroom {
             emitters: vec![HairEmitter::Scalp {
                 bone: "head".into(),
-                // The head mesh: a 0.1 m ball 7 cm above the head bone.
-                center: [0.0, 0.07, 0.0],
-                radii: [0.101, 0.106, 0.106],
-                guides: 300,
+                center: cranium.to_array(),
+                radii: [0.079, 0.099, 0.103],
+                guides: 380,
                 hairline: 0.55,
             }],
             ..HairGroom::long_hair("head", style)
@@ -407,193 +501,150 @@ pub(super) fn mannequin(
     man
 }
 
+/// Turn a walking entity (the bridge walker) into a skinned mannequin: a skeleton, a body and
+/// the walk cycle on its own [`DemoClock`].
+#[allow(dead_code)]
+pub(super) fn bridge_walker_body(commands: &mut Commands, walker: Entity) {
+    commands.entity(walker).insert((
+        skeleton(&HUMANOID, Rig::Humanoid),
+        mannequin_colliders(),
+        DemoSkeleton {
+            rig: Rig::Humanoid,
+            cycle: 1.0,
+            stride: HUMAN_STRIDE,
+        },
+    ));
+    commands.spawn((
+        Name::new("Bridge walker body"),
+        Transform::default(),
+        SkinnedPart::new(
+            BodyPart::Mannequin,
+            walker,
+            "Bridge walker body",
+            fiberglass(0xc8a27a, 0.72),
+        ),
+        ChildOf(walker),
+    ));
+}
+
+/// The fur's color (and the skin under it, a shade darker).
+fn dog_coat() -> HairStyle {
+    HairStyle {
+        length: 0.042,
+        length_variation: 0.3,
+        segments: 3,
+        strands_per_guide: 34,
+        // Wide enough that the coat closes over skin that stretches around a bent joint.
+        spread: 0.016,
+        clumping: 0.12,
+        curl: 0.0012,
+        curl_frequency: 25.0,
+        stiffness: 0.85,
+        droop: 0.0,
+        thickness: 0.00042,
+        melanin: 0.3,
+        redness: 0.75,
+        tint: None,
+        comb: 0.86,
+    }
+}
+
 pub(super) fn dog(commands: &mut Commands, center: DVec3) {
     let pose = skeleton(&DOG, Rig::Dog);
-    let capsules = vec![
-        BoneCapsule::capsule("hips", "chest", 0.15),
-        BoneCapsule::capsule("neck", "head", 0.07),
-        BoneCapsule::sphere("head", 0.1, [0.0, 0.02, -0.04]),
-        BoneCapsule::capsule("tail_1", "tail_3", 0.03),
-        BoneCapsule::capsule("leg_fl", "paw_fl", 0.04),
-        BoneCapsule::capsule("leg_fr", "paw_fr", 0.04),
-        BoneCapsule::capsule("leg_hl", "paw_hl", 0.045),
-        BoneCapsule::capsule("leg_hr", "paw_hr", 0.045),
+    // Capsules inside the body, for the fur.
+    let mut capsules = vec![
+        BoneCapsule::capsule("hips", "chest", 0.085),
+        BoneCapsule::capsule("neck", "head", 0.05),
+        BoneCapsule::sphere("head", 0.055, [0.0, 0.04, -0.03]),
+        BoneCapsule::sphere("head", 0.03, [0.0, 0.0, -0.15]),
+        BoneCapsule::capsule("tail_1", "tail_3", 0.015),
     ];
+    for leg in ["fl", "fr", "hl", "hr"] {
+        let b = |n: &str| format!("{n}_{leg}");
+        capsules.push(BoneCapsule::capsule(&b("leg"), &b("knee"), 0.03));
+        capsules.push(BoneCapsule::capsule(&b("knee"), &b("ankle"), 0.018));
+    }
     let radius = 2.0;
+    let cycle = 0.48;
+    let speed = DOG_STRIDE / cycle;
     let dog = commands
         .spawn((
             Name::new("Dog"),
             Transform::from_translation(center + DVec3::X * radius as f64),
             TransformInterpolation::default(),
-            pose.clone(),
+            pose,
             BoneColliders {
                 capsules,
                 friction: 0.3,
             },
             DemoSkeleton {
                 rig: Rig::Dog,
-                cycle: 0.55,
+                cycle,
+                stride: DOG_STRIDE,
             },
             DemoMotion::Circle {
                 center,
                 radius,
-                period: TAU * radius / 1.6,
+                period: TAU * radius / speed,
             },
             DemoClock::default(),
         ))
         .id();
-    let coat = mat(0xb5793c, 0.8);
-    let dark = mat(0x3b2a1e, 0.6);
-    limb(
-        commands,
-        dog,
-        &pose,
-        "hips",
-        Some("chest"),
-        0.14,
-        Vec3::ZERO,
-        coat,
-    );
-    limb(
-        commands,
-        dog,
-        &pose,
-        "neck",
-        Some("head"),
-        0.065,
-        Vec3::ZERO,
-        coat,
-    );
-    limb(
-        commands,
-        dog,
-        &pose,
-        "head",
-        None,
-        0.095,
-        Vec3::new(0.0, 0.02, -0.03),
-        coat,
-    );
-    limb(
-        commands,
-        dog,
-        &pose,
-        "head",
-        None,
-        0.05,
-        Vec3::new(0.0, -0.02, -0.13),
-        coat,
-    );
-    limb(
-        commands,
-        dog,
-        &pose,
-        "head",
-        None,
-        0.022,
-        Vec3::new(0.0, 0.0, -0.18),
-        dark,
-    );
-    for side in [-1.0f32, 1.0] {
-        limb(
-            commands,
-            dog,
-            &pose,
-            "head",
-            None,
-            0.035,
-            Vec3::new(0.07 * side, 0.08, 0.01),
-            coat,
-        );
+    let coat = dog_coat();
+    // Darker than the coat, so skin glimpsed between the hairs reads as the shade inside it.
+    let skin = coat.color().map(|c| c * 0.5);
+    let parts = [
+        (
+            BodyPart::Dog,
+            "Dog body",
+            StandardMaterial::color(skin[0], skin[1], skin[2]).with_roughness(0.8),
+        ),
+        (
+            BodyPart::DogNose,
+            "Dog nose",
+            StandardMaterial::hex(0x1b1715).with_roughness(0.32),
+        ),
+        (
+            BodyPart::DogEyes,
+            "Dog eyes",
+            StandardMaterial {
+                reflectance: 0.7,
+                ..StandardMaterial::hex(0x2a1608).with_roughness(0.04)
+            },
+        ),
+    ];
+    for (part, key, material) in parts {
+        commands.spawn((
+            Name::new(key),
+            Transform::default(),
+            SkinnedPart::new(part, dog, key, material),
+            ChildOf(dog),
+        ));
     }
-    limb(
-        commands,
-        dog,
-        &pose,
-        "tail_1",
-        Some("tail_2"),
-        0.03,
-        Vec3::ZERO,
-        coat,
-    );
-    limb(
-        commands,
-        dog,
-        &pose,
-        "tail_2",
-        Some("tail_3"),
-        0.025,
-        Vec3::ZERO,
-        coat,
-    );
-    for leg in ["fl", "fr", "hl", "hr"] {
-        let b = |n: &str| format!("{n}_{leg}");
-        limb(
-            commands,
-            dog,
-            &pose,
-            &b("leg"),
-            Some(&b("knee")),
-            0.045,
-            Vec3::ZERO,
-            coat,
-        );
-        limb(
-            commands,
-            dog,
-            &pose,
-            &b("knee"),
-            Some(&b("paw")),
-            0.035,
-            Vec3::ZERO,
-            coat,
-        );
-        limb(
-            commands,
-            dog,
-            &pose,
-            &b("paw"),
-            None,
-            0.04,
-            Vec3::new(0.0, 0.0, -0.02),
-            dark,
-        );
-    }
-    let fur = HairStyle {
-        melanin: 0.32,
-        redness: 0.75,
-        ..HairStyle::fur()
-    };
-    // Torso, neck and head bones point along the body, so fur lies back (+Z) and a little
-    // down. Leg and tail bones are aimed along their −Y, so their fur lies toward paw and tip.
-    let back = [0.0, -0.3, 1.0];
-    let along = [0.0, -1.0, 0.1];
-    let body_fur =
-        |bone: &str, to: Option<&str>, radius: f32, guides: u32, comb| HairEmitter::Fur {
-            bone: bone.into(),
-            to: to.map(Into::into),
-            radius,
+    let zones = dog_fur_zones();
+    let tail: Vec<String> = ["tail_1", "tail_2", "tail_3"].map(String::from).to_vec();
+    let surface = |guides: u32, zones: Vec<FurZone>, bones: Vec<String>, skip: Vec<String>| {
+        HairEmitter::Surface {
+            mesh: "Dog body".into(),
             guides,
-            comb,
-        };
+            flow_from: "head".into(),
+            gravity: 0.3,
+            zones,
+            bones,
+            skip_bones: skip,
+        }
+    };
+    let fur_sim = SimSettings {
+        substeps: 6,
+        ..HairGroom::hair_settings()
+    };
     commands.spawn((
         Name::new("Dog fur"),
         Transform::default(),
         HairGroom {
-            emitters: vec![
-                body_fur("hips", Some("chest"), 0.14, 420, back),
-                // The rounded ends of the body.
-                body_fur("hips", None, 0.14, 80, back),
-                body_fur("chest", None, 0.14, 80, back),
-                body_fur("neck", Some("head"), 0.065, 100, back),
-                body_fur("head", None, 0.095, 90, back),
-                body_fur("leg_fl", Some("knee_fl"), 0.045, 36, along),
-                body_fur("leg_fr", Some("knee_fr"), 0.045, 36, along),
-                body_fur("leg_hl", Some("knee_hl"), 0.045, 36, along),
-                body_fur("leg_hr", Some("knee_hr"), 0.045, 36, along),
-            ],
-            style: fur,
-            sim: HairGroom::hair_settings(),
+            emitters: vec![surface(5200, zones, Vec::new(), tail.clone())],
+            style: coat,
+            sim: fur_sim,
         },
         ChildOf(dog),
     ));
@@ -601,12 +652,21 @@ pub(super) fn dog(commands: &mut Commands, center: DVec3) {
         Name::new("Dog tail fur"),
         Transform::default(),
         HairGroom {
-            emitters: vec![body_fur("tail_1", Some("tail_3"), 0.03, 70, along)],
+            emitters: vec![surface(
+                2600,
+                vec![FurZone::new("tail_3", [0.0, -0.08, 0.0], 0.1, 0.7)],
+                tail,
+                Vec::new(),
+            )],
             style: HairStyle {
                 length: 0.11,
-                segments: 4,
-                stiffness: 0.5,
-                ..fur
+                segments: 5,
+                stiffness: 0.45,
+                spread: 0.014,
+                strands_per_guide: 36,
+                clumping: 0.3,
+                comb: 0.93,
+                ..coat
             },
             sim: HairGroom::hair_settings(),
         },
@@ -614,44 +674,65 @@ pub(super) fn dog(commands: &mut Commands, center: DVec3) {
     ));
 }
 
+/// Where the dog's coat is longer or shorter than its base length: short on the muzzle, the
+/// forehead and the paws, a ruff on the neck, feathering on the ears, brisket, belly and the
+/// backs of the legs.
+pub(crate) fn dog_fur_zones() -> Vec<FurZone> {
+    let mut zones = vec![
+        FurZone::new("head", [0.0, -0.01, -0.175], 0.11, 0.2),
+        FurZone::new("head", [0.0, 0.045, -0.06], 0.07, 0.55),
+        FurZone::new("head", [0.068, 0.0, -0.013], 0.06, 1.25),
+        FurZone::new("head", [-0.068, 0.0, -0.013], 0.06, 1.25),
+        FurZone::new("neck", [0.0, -0.07, -0.05], 0.15, 1.5),
+        FurZone::new("chest", [0.0, -0.2, -0.02], 0.15, 1.6),
+        FurZone::new("spine", [0.0, -0.12, 0.0], 0.12, 1.25),
+    ];
+    for leg in ["fl", "fr", "hl", "hr"] {
+        zones.push(FurZone::new(
+            &format!("paw_{leg}"),
+            [0.0, 0.01, -0.01],
+            0.05,
+            0.5,
+        ));
+        zones.push(FurZone::new(
+            &format!("ankle_{leg}"),
+            [0.0, -0.03, 0.0],
+            0.07,
+            0.85,
+        ));
+        zones.push(FurZone::new(
+            &format!("knee_{leg}"),
+            [0.0, -0.1, 0.02],
+            0.07,
+            0.8,
+        ));
+    }
+    for leg in ["hl", "hr"] {
+        zones.push(FurZone::new(
+            &format!("leg_{leg}"),
+            [0.0, -0.08, 0.06],
+            0.1,
+            1.35,
+        ));
+    }
+    zones
+}
+
 /// Procedural walk and trot cycles.
 pub fn animate_skeletons(mut rigs: Query<(&DemoSkeleton, &DemoClock, &mut SkeletonPose)>) {
     for (rig, clock, mut pose) in &mut rigs {
         let phase = clock.0 / rig.cycle.max(0.05) * TAU;
-        pose_rig(rig.rig, phase, &mut pose);
+        pose_rig_stride(rig.rig, phase, rig.stride, &mut pose);
     }
 }
 
-/// Put body-part meshes on their bones.
-pub fn place_limbs(
-    owners: Query<(&Transform, &SkeletonPose), Without<DemoLimb>>,
-    mut limbs: Query<(&DemoLimb, &mut Transform)>,
-) {
-    for (limb, mut t) in &mut limbs {
-        let Ok((root, pose)) = owners.get(limb.owner) else {
-            continue;
-        };
-        let g = GlobalTransform::from(*root);
-        let Some((a, ra)) = pose.bone_world(&g, limb.from) else {
-            continue;
-        };
-        let offset = (ra * limb.offset).as_dvec3();
-        match limb.to.and_then(|b| pose.bone_world(&g, b)) {
-            Some((b, _)) => {
-                let axis = (b - a).as_vec3();
-                t.translation = (a + b) * 0.5 + offset;
-                t.rotation = if axis.length_squared() > 1e-10 {
-                    Quat::from_rotation_arc(Vec3::Y, axis.normalize())
-                } else {
-                    ra
-                };
-            }
-            None => {
-                t.translation = a + offset;
-                t.rotation = ra;
-            }
-        }
-    }
+/// The ivory and graphite finishes of the two mannequins.
+pub(super) fn ivory() -> StandardMaterial {
+    fiberglass(0xe8dccb, 0.72)
+}
+
+pub(super) fn graphite() -> StandardMaterial {
+    fiberglass(0x2a2c30, 0.74)
 }
 
 #[cfg(test)]
@@ -676,5 +757,42 @@ mod tests {
                 assert!(pose.bones.iter().all(|b| b.rotation.is_normalized()));
             }
         }
+    }
+
+    #[test]
+    fn limbs_keep_their_bind_lengths_and_planted_feet_stay_put() {
+        for (bones, rig, bind) in [
+            (&HUMANOID[..], Rig::Humanoid, body::human_bind()),
+            (&DOG[..], Rig::Dog, body::dog_bind()),
+        ] {
+            let mut pose = skeleton(bones, rig);
+            for k in 0..64 {
+                pose_rig(rig, k as f32 / 64.0 * TAU, &mut pose);
+                for (i, parent) in pose.parents.iter().enumerate() {
+                    let Some(pa) = parent.map(|p| p as usize) else {
+                        continue;
+                    };
+                    let rest = bind[i].translation.distance(bind[pa].translation);
+                    let now = pose.bones[i]
+                        .translation
+                        .distance(pose.bones[pa].translation);
+                    assert!(
+                        (rest - now).abs() < 0.004,
+                        "{rig:?} {} {rest} → {now}",
+                        pose.names[i]
+                    );
+                }
+            }
+        }
+        // A planted foot moves backward at walking speed (so it stands still on the ground).
+        let mut pose = skeleton(&HUMANOID, Rig::Humanoid);
+        let foot = Human::LEG_R + 2;
+        let du = 0.01;
+        pose_rig(Rig::Humanoid, 0.3 * TAU, &mut pose);
+        let a = pose.bones[foot].translation;
+        pose_rig(Rig::Humanoid, (0.3 + du) * TAU, &mut pose);
+        let b = pose.bones[foot].translation;
+        assert!(((b.z - a.z) / du - HUMAN_STRIDE).abs() < 0.05, "{a} {b}");
+        assert!(a.y < Human::ANKLE_HEIGHT + 0.005 && (a.y - b.y).abs() < 1e-3);
     }
 }
