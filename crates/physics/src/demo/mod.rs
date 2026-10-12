@@ -20,9 +20,12 @@
 
 mod art;
 
-use engine_core::math::{DVec3, Quat, Vec3};
+use art::{Mat, Parts, dummy, props, structures};
+use engine_assets::Assets;
+use engine_core::math::{DVec3, Quat, Vec2, Vec3};
 use engine_core::prelude::*;
-use engine_render::prelude::{MeshRenderer, Shape, StandardMaterial};
+use engine_render::Mesh;
+use engine_render::prelude::MeshRenderer;
 use engine_world::physics::{
     CharacterController, CharacterMove, Collider, ColliderShape, Joint, JointKind, JointMotor,
     RigidBody, Velocity,
@@ -40,20 +43,13 @@ pub fn spawn_demo(commands: &mut Commands, origin: DVec3) {
 struct Yard<'w> {
     world: &'w mut World,
     origin: DVec3,
+    /// The app draws meshes (there is an `Assets<Mesh>`); headless physics apps get colliders
+    /// only.
+    render: bool,
     concrete: SurfaceId,
     wood: SurfaceId,
     metal: SurfaceId,
     rubber: SurfaceId,
-}
-
-fn mat(rgb: u32, roughness: f32) -> StandardMaterial {
-    StandardMaterial::hex(rgb).with_roughness(roughness)
-}
-
-fn cuboid_mesh(half: Vec3) -> Shape {
-    Shape::Cuboid {
-        size: (half * 2.0).to_array(),
-    }
 }
 
 impl Yard<'_> {
@@ -61,63 +57,102 @@ impl Yard<'_> {
         self.origin + local
     }
 
-    /// A static box (walls, posts, steps).
-    fn block(&mut self, local: DVec3, half: Vec3, rotation: Quat, color: u32) -> Entity {
+    /// `N` meshes cached under `key` (built by `make` the first time), each with its material.
+    fn parts<const N: usize>(
+        &mut self,
+        key: &str,
+        mats: [Mat; N],
+        make: impl FnOnce() -> [Mesh; N],
+    ) -> Parts {
+        if !self.render {
+            return Parts::new();
+        }
+        art::parts(self.world, key, mats, make)
+    }
+
+    /// Draw `parts` on `e` (as children when there are several materials).
+    fn dress(&mut self, e: Entity, parts: Parts) {
+        if let [(mesh, material)] = parts[..] {
+            self.world
+                .entity_mut(e)
+                .insert(MeshRenderer::new(mesh, material));
+            return;
+        }
+        for (mesh, material) in parts {
+            self.world.spawn((
+                Transform::default(),
+                MeshRenderer::new(mesh, material),
+                ChildOf(e),
+            ));
+        }
+    }
+
+    /// Render-only scenery (the colliders under it are separate boxes).
+    fn scenery(&mut self, local: DVec3, rotation: Quat, parts: Parts) {
+        let t = Transform::from_translation(self.at(local)).with_rotation(rotation);
+        for (mesh, material) in parts {
+            self.world.spawn((t, MeshRenderer::new(mesh, material)));
+        }
+    }
+
+    /// A static concrete box, drawn by the scenery around it.
+    fn block(&mut self, local: DVec3, half: Vec3) -> Entity {
         let at = self.at(local);
         self.world
             .spawn((
-                Transform::from_translation(at).with_rotation(rotation),
+                Transform::from_translation(at),
                 RigidBody::fixed(),
                 Collider::cuboid(half).with_surface(self.concrete),
-                MeshRenderer::new(cuboid_mesh(half), mat(color, 0.85)),
             ))
             .id()
     }
 
-    fn body(
-        &mut self,
-        local: DVec3,
-        rotation: Quat,
-        collider: Collider,
-        mesh: Shape,
-        material: StandardMaterial,
-    ) -> Entity {
+    fn body(&mut self, local: DVec3, rotation: Quat, collider: Collider, parts: Parts) -> Entity {
         let at = self.at(local);
-        self.world
+        let e = self
+            .world
             .spawn((
                 Transform::from_translation(at).with_rotation(rotation),
                 RigidBody::dynamic(),
                 collider,
                 Velocity::default(),
-                MeshRenderer::new(mesh, material),
             ))
-            .id()
+            .id();
+        self.dress(e, parts);
+        e
     }
 
-    /// A wooden crate (density 300 kg/m³: a crate with stuff in it).
-    fn crate_box(&mut self, local: DVec3, half: Vec3, rotation: Quat, color: u32) -> Entity {
+    /// A wooden shipping crate (density 300 kg/m³: a crate with stuff in it). `seed` varies
+    /// its boards.
+    fn crate_box(&mut self, local: DVec3, half: Vec3, rotation: Quat, seed: u32) -> Entity {
         let c = Collider::cuboid(half)
             .with_surface(self.wood)
             .with_density(300.0);
-        self.body(local, rotation, c, cuboid_mesh(half), mat(color, 0.8))
+        let key = format!("crate/{:.3}x{:.3}x{:.3}/{seed}", half.x, half.y, half.z);
+        let parts = self.parts(&key, [Mat::CrateWood(seed as u8), Mat::Dark], || {
+            let m = props::crate_box(half, seed);
+            [m.wood, m.metal]
+        });
+        self.body(local, rotation, c, parts)
     }
 
-    fn ball(
-        &mut self,
-        local: DVec3,
-        radius: f32,
-        density: f32,
-        surface: SurfaceId,
-        m: StandardMaterial,
-    ) -> Entity {
+    /// A rubber playground ball of `color` (sRGB hex).
+    fn ball(&mut self, local: DVec3, radius: f32, density: f32, color: u32) -> Entity {
         let c = Collider::sphere(radius)
-            .with_surface(surface)
+            .with_surface(self.rubber)
             .with_density(density);
-        let mesh = Shape::Sphere {
-            radius,
-            segments: 24,
-        };
-        self.body(local, Quat::IDENTITY, c, mesh, m)
+        let parts = self.parts(&format!("ball/{radius:.3}"), [Mat::Rubber(color)], || {
+            [props::playground_ball(radius)]
+        });
+        self.body(local, Quat::IDENTITY, c, parts)
+    }
+
+    /// A solid steel ball (7.8 t/m³).
+    fn steel_ball(&mut self, local: DVec3, radius: f32, parts: Parts) -> Entity {
+        let c = Collider::sphere(radius)
+            .with_surface(self.metal)
+            .with_density(7800.0);
+        self.body(local, Quat::IDENTITY, c, parts)
     }
 
     fn capsule(
@@ -126,15 +161,10 @@ impl Yard<'_> {
         rotation: Quat,
         radius: f32,
         half_height: f32,
-        color: u32,
+        parts: Parts,
     ) -> Entity {
         let c = Collider::capsule(radius, half_height).with_density(1000.0);
-        let mesh = Shape::Capsule {
-            radius,
-            height: 2.0 * (half_height + radius),
-            segments: 16,
-        };
-        self.body(local, rotation, c, mesh, mat(color, 0.7))
+        self.body(local, rotation, c, parts)
     }
 
     /// A joint at world point `at` (yard-local), with anchors computed from the bodies' poses.
@@ -163,28 +193,33 @@ impl Yard<'_> {
     }
 
     /// A stand-in character with its feet at `feet`: the controller the movement module
-    /// drives, here only falling at a steady 2 m/s, so it stands, rides and weighs.
-    fn mannequin(&mut self, feet: DVec3, color: u32, name: &str) -> Entity {
+    /// drives, here only falling at a steady 2 m/s, so it stands, rides and weighs. Drawn as a
+    /// crash test dummy whose jacket is `shirt` (sRGB hex).
+    fn mannequin(&mut self, feet: DVec3, shirt: u32, name: &str) -> Entity {
         let desc = CharacterController::default();
         let center = feet + DVec3::Y * (desc.height as f64 * 0.5 + 0.02);
-        self.world
+        let e = self
+            .world
             .spawn((
                 Transform::from_translation(self.at(center)),
                 desc,
                 CharacterMove {
                     velocity: Vec3::new(0.0, -2.0, 0.0),
                 },
-                MeshRenderer::new(
-                    Shape::Capsule {
-                        radius: desc.radius,
-                        height: desc.height,
-                        segments: 16,
-                    },
-                    mat(color, 0.6),
-                ),
                 Name::new(name.to_string()),
             ))
-            .id()
+            .id();
+        let height = desc.height;
+        let parts = self.parts(
+            &format!("dummy/standing/{height:.2}/{shirt:06x}"),
+            [Mat::Vinyl, Mat::Steel],
+            || {
+                let d = dummy::standing_dummy(height, art::kit::srgb(shirt));
+                [d.vinyl, d.steel]
+            },
+        );
+        self.dress(e, parts);
+        e
     }
 
     fn name(&mut self, e: Entity, name: &str) {
@@ -214,16 +249,18 @@ fn build(world: &mut World, origin: DVec3) {
             rubber,
         )
     };
+    let render = world.contains_resource::<Assets<Mesh>>();
     let mut y = Yard {
         world,
         origin,
+        render,
         concrete,
         wood,
         metal,
         rubber,
     };
     let half = Vec3::new(YARD_SIZE[0] as f32 * 0.5, 0.25, YARD_SIZE[1] as f32 * 0.5);
-    let pad = y.block(DVec3::new(0.0, -0.25, 0.0), half, Quat::IDENTITY, 0x8c8b86);
+    let pad = y.block(DVec3::new(0.0, -0.25, 0.0), half);
     y.name(pad, "Proving ground");
     // A curb around the yard keeps rolling crates and balls in.
     let (hx, hz, curb_h, curb_t) = (half.x, half.z, 0.8f32, 0.4f32);
@@ -231,16 +268,18 @@ fn build(world: &mut World, origin: DVec3) {
         y.block(
             DVec3::new(0.0, curb_h as f64 * 0.5, (s * (hz - curb_t * 0.5)) as f64),
             Vec3::new(hx, curb_h * 0.5, curb_t * 0.5),
-            Quat::IDENTITY,
-            0xc9a227,
         );
         y.block(
             DVec3::new((s * (hx - curb_t * 0.5)) as f64, curb_h as f64 * 0.5, 0.0),
             Vec3::new(curb_t * 0.5, curb_h * 0.5, hz - curb_t),
-            Quat::IDENTITY,
-            0xc9a227,
         );
     }
+    let size = YARD_SIZE.map(|v| v as f32);
+    let slab = y.parts("yard", [Mat::Slab, Mat::Concrete, Mat::Hazard], || {
+        let m = structures::yard(size, 0.5, curb_h, curb_t);
+        [m.slab, m.curb, m.hazard]
+    });
+    y.scenery(DVec3::ZERO, Quat::IDENTITY, slab);
 
     tower(&mut y, DVec3::new(-28.0, 0.0, -16.0));
     pile(&mut y, DVec3::new(-14.0, 0.0, -14.0));
@@ -266,17 +305,18 @@ impl Rng {
     }
 }
 
-const CRATE_COLORS: [u32; 4] = [0xb07a45, 0x9c6a3c, 0xc48d55, 0x8a5a32];
+/// Board patterns per crate size: crates of one size share their meshes.
+const CRATE_SEEDS: u32 = 3;
 
 fn tower(y: &mut Yard, base: DVec3) {
     let half = Vec3::splat(0.3);
     for i in 0..30 {
-        let c = CRATE_COLORS[i % CRATE_COLORS.len()];
         let e = y.crate_box(
             base + DVec3::new(0.0, 0.3 + 0.6 * i as f64, 0.0),
             half,
-            Quat::IDENTITY,
-            c,
+            // Every other crate turned a quarter: the boards don't line up like wallpaper.
+            Quat::from_rotation_y((i % 2) as f32 * std::f32::consts::FRAC_PI_2),
+            i as u32 % CRATE_SEEDS,
         );
         if i == 29 {
             y.name(e, "Tower top crate");
@@ -284,22 +324,33 @@ fn tower(y: &mut Yard, base: DVec3) {
     }
 }
 
+/// Crate sizes in the pile (half extents, meters).
+const PILE_CRATES: [Vec3; 5] = [
+    Vec3::new(0.3, 0.25, 0.3),
+    Vec3::new(0.42, 0.3, 0.32),
+    Vec3::new(0.26, 0.22, 0.26),
+    Vec3::new(0.36, 0.33, 0.38),
+    Vec3::new(0.45, 0.2, 0.28),
+];
+
+/// Oil drum colors (sRGB).
+const DRUM_COLORS: [u32; 3] = [0x2f5f9e, 0xb8392f, 0x3c7d3a];
+
 /// A bin (8 × 8 m inside) and 250 crates, barrels and balls dropped into it.
 fn pile(y: &mut Yard, center: DVec3) {
-    let wall = 0x6f6d68;
     for (dx, dz, hx, hz) in [
         (4.15, 0.0, 0.15, 4.3),
         (-4.15, 0.0, 0.15, 4.3),
         (0.0, 4.15, 4.0, 0.15),
         (0.0, -4.15, 4.0, 0.15),
     ] {
-        y.block(
-            center + DVec3::new(dx, 0.8, dz),
-            Vec3::new(hx, 0.8, hz),
-            Quat::IDENTITY,
-            wall,
-        );
+        y.block(center + DVec3::new(dx, 0.8, dz), Vec3::new(hx, 0.8, hz));
     }
+    let bin = y.parts("pile_bin", [Mat::Concrete, Mat::Yellow, Mat::Steel], || {
+        let b = structures::pile_bin(Vec2::new(4.0, 4.0), 0.3, 1.6);
+        [b.concrete, b.painted, b.steel]
+    });
+    y.scenery(center, Quat::IDENTITY, bin);
     let mut rng = Rng(0x5eed_1234);
     for i in 0..250 {
         let (gx, gz, layer) = ((i % 6) as f64, ((i / 6) % 6) as f64, (i / 36) as f64);
@@ -317,13 +368,8 @@ fn pile(y: &mut Yard, center: DVec3) {
         );
         match i % 5 {
             0..=2 => {
-                let half = Vec3::new(
-                    0.25 + rng.next() * 0.2,
-                    0.2 + rng.next() * 0.15,
-                    0.25 + rng.next() * 0.15,
-                );
-                let c = CRATE_COLORS[i % CRATE_COLORS.len()];
-                y.crate_box(at, half, rotation, c);
+                let half = PILE_CRATES[(rng.next() * PILE_CRATES.len() as f32) as usize];
+                y.crate_box(at, half, rotation, i as u32 % CRATE_SEEDS);
             }
             3 => {
                 // An oil barrel.
@@ -336,17 +382,14 @@ fn pile(y: &mut Yard, center: DVec3) {
                     density: 400.0,
                     ..Default::default()
                 };
-                let mesh = Shape::Cylinder {
-                    radius: 0.3,
-                    height: 0.84,
-                    segments: 20,
-                };
-                let color = [0x2f5f9e, 0xb8392f, 0x3c7d3a][i % 3];
-                y.body(at, rotation, c, mesh, mat(color, 0.5).with_metallic(0.6));
+                let color = DRUM_COLORS[i % 3];
+                let parts = y.parts(&format!("drum/{color:06x}"), [Mat::Drum(color)], || {
+                    [props::steel_drum(0.3, 0.42)]
+                });
+                y.body(at, rotation, c, parts);
             }
             _ => {
-                let s = y.rubber;
-                y.ball(at, 0.3, 300.0, s, mat(0xd8c23a, 0.6));
+                y.ball(at, 0.3, 300.0, 0xd8c23a);
             }
         }
     }
@@ -379,17 +422,17 @@ fn dominoes(y: &mut Yard, start: DVec3) {
         let d = dir.as_vec3();
         // The domino's thin side (local z) faces along the path.
         let rotation = Quat::from_rotation_arc(Vec3::Z, d);
-        let color = if i % 2 == 0 { 0xf2efe6 } else { 0x1d1d22 };
         let c = Collider::cuboid(half)
             .with_surface(y.wood)
             .with_density(700.0);
-        let e = y.body(
-            *p + DVec3::Y * 0.5,
-            rotation,
-            c,
-            cuboid_mesh(half),
-            mat(color, 0.35),
+        // Ivory and black in turn, the pips walking through a double-six set.
+        let (ivory, pips) = (i % 2 == 0, ((i % 7) as u8, ((i / 7) % 7) as u8));
+        let parts = y.parts(
+            &format!("domino/{}{}{}", pips.0, pips.1, ivory as u8),
+            [Mat::Domino],
+            || [props::domino(half, pips, ivory)],
         );
+        let e = y.body(*p + DVec3::Y * 0.5, rotation, c, parts);
         if i == 0 {
             y.name(e, "First domino");
             // Tip it forward: spin about the horizontal axis across the path.
@@ -398,104 +441,76 @@ fn dominoes(y: &mut Yard, start: DVec3) {
     }
 }
 
-/// A 10-part ragdoll with feet at `feet`, stumbling forward (+z). Returns its chest.
+/// A 10-part crash test dummy ragdoll (Hybrid III 50th-percentile proportions) with feet at
+/// `feet`, stumbling forward (+z). Returns its chest.
 fn ragdoll(y: &mut Yard, feet: DVec3, shirt: u32) -> Entity {
-    let (skin, pants) = (0xe0b090, 0x2c3140);
-    let o = feet;
+    let l = dummy::RagdollLayout::HYBRID_III_50TH;
+    // Each part's vinyl and steel meshes, in `RagdollMeshes::all` order.
+    let meshes = y.parts::<22>(
+        &format!("dummy/ragdoll/{shirt:06x}"),
+        [[Mat::Vinyl, Mat::Steel]; 11].concat().try_into().unwrap(),
+        || {
+            let m = dummy::ragdoll_parts(&l, art::kit::srgb(shirt));
+            let all: Vec<Mesh> = m
+                .all()
+                .into_iter()
+                .flat_map(|p| [p.vinyl.clone(), p.steel.clone()])
+                .collect();
+            all.try_into().unwrap()
+        },
+    );
+    let mut part = meshes.chunks(2).map(|c| c.to_vec());
+    // `meshes` is empty without a renderer.
+    let mut next = || part.next().unwrap_or_default();
+    let at = |p: Vec3| feet + p.as_dvec3();
     let pelvis = {
-        let half = Vec3::new(0.16, 0.1, 0.1);
-        let c = Collider::cuboid(half).with_density(1000.0);
-        y.body(
-            o + DVec3::new(0.0, 1.0, 0.0),
-            Quat::IDENTITY,
-            c,
-            cuboid_mesh(half),
-            mat(pants, 0.8),
-        )
+        let c = Collider::cuboid(l.pelvis_half).with_density(1000.0);
+        y.body(at(l.pelvis), Quat::IDENTITY, c, next())
     };
     let chest = y.capsule(
-        o + DVec3::new(0.0, 1.38, 0.0),
+        at(l.chest.center),
         Quat::IDENTITY,
-        0.15,
-        0.12,
-        shirt,
+        l.chest.radius,
+        l.chest.half_height,
+        next(),
     );
-    let head = y.ball(
-        o + DVec3::new(0.0, 1.8, 0.0),
-        0.12,
-        1000.0,
-        SurfaceId::DEFAULT,
-        mat(skin, 0.6),
-    );
+    let head = {
+        let c = Collider::sphere(l.head_radius).with_density(1000.0);
+        y.body(at(l.head), Quat::IDENTITY, c, next())
+    };
     let mut parts = vec![pelvis, chest, head];
     let cone = |c: f32| JointKind::Spherical {
         cone_limit: Some(c),
     };
-    let hinge = JointKind::Revolute {
+    // Hinges about X: elbows bend the hand forward (negative angles), knees the foot back.
+    let hinge = |limits: [f32; 2]| JointKind::Revolute {
         axis: Vec3::X,
-        limits: Some([-2.2, 0.0]),
+        limits: Some(limits),
         motor: None,
     };
-    y.joint(
-        cone(0.5),
-        pelvis,
-        Some(chest),
-        o + DVec3::new(0.0, 1.1, 0.0),
-    );
-    y.joint(cone(0.6), chest, Some(head), o + DVec3::new(0.0, 1.66, 0.0));
-    for side in [-1.0, 1.0] {
-        let upper = y.capsule(
-            o + DVec3::new(side * 0.3, 1.38, 0.0),
-            Quat::IDENTITY,
-            0.05,
-            0.1,
-            shirt,
-        );
-        let fore = y.capsule(
-            o + DVec3::new(side * 0.3, 1.08, 0.0),
-            Quat::IDENTITY,
-            0.045,
-            0.1,
-            skin,
-        );
-        let thigh = y.capsule(
-            o + DVec3::new(side * 0.1, 0.7, 0.0),
-            Quat::IDENTITY,
-            0.07,
-            0.14,
-            pants,
-        );
-        let shin = y.capsule(
-            o + DVec3::new(side * 0.1, 0.28, 0.0),
-            Quat::IDENTITY,
-            0.06,
-            0.15,
-            pants,
-        );
-        y.joint(
-            cone(1.4),
-            chest,
-            Some(upper),
-            o + DVec3::new(side * 0.3, 1.55, 0.0),
-        );
-        y.joint(
-            hinge.clone(),
-            upper,
-            Some(fore),
-            o + DVec3::new(side * 0.3, 1.23, 0.0),
-        );
-        y.joint(
-            cone(1.2),
-            pelvis,
-            Some(thigh),
-            o + DVec3::new(side * 0.1, 0.92, 0.0),
-        );
-        y.joint(
-            hinge.clone(),
-            thigh,
-            Some(shin),
-            o + DVec3::new(side * 0.1, 0.5, 0.0),
-        );
+    y.joint(cone(0.5), pelvis, Some(chest), at(l.waist));
+    y.joint(cone(0.6), chest, Some(head), at(l.neck));
+    // Meshes come right then left for each limb.
+    let limb_meshes: Vec<[Parts; 2]> = (0..4).map(|_| [next(), next()]).collect();
+    for (k, side) in [-1.0f32, 1.0].into_iter().enumerate() {
+        let m = |p: Vec3| at(Vec3::new(side * p.x, p.y, p.z));
+        let limb = |y: &mut Yard, spec: dummy::CapsuleSpec, parts: Parts| {
+            y.capsule(
+                m(spec.center),
+                Quat::IDENTITY,
+                spec.radius,
+                spec.half_height,
+                parts,
+            )
+        };
+        let upper = limb(y, l.upper_arm, limb_meshes[0][k].clone());
+        let fore = limb(y, l.forearm, limb_meshes[1][k].clone());
+        let thigh = limb(y, l.thigh, limb_meshes[2][k].clone());
+        let shin = limb(y, l.shin, limb_meshes[3][k].clone());
+        y.joint(cone(1.4), chest, Some(upper), m(l.shoulder));
+        y.joint(hinge([-2.2, 0.0]), upper, Some(fore), m(l.elbow));
+        y.joint(cone(1.2), pelvis, Some(thigh), m(l.hip));
+        y.joint(hinge([0.0, 2.2]), thigh, Some(shin), m(l.knee));
         parts.extend([upper, fore, thigh, shin]);
     }
     // Stumbling forward: the whole body moves, the upper body a little faster so it pitches.
@@ -514,24 +529,25 @@ const RAGDOLL_PUSH: f32 = 3.5;
 
 /// Fourteen steep steps up toward -z with a landing, and three ragdolls stumbling down them.
 fn ragdoll_stairs(y: &mut Yard, foot: DVec3) {
-    let (rise, run, steps) = (0.22, 0.32, 14);
+    let (rise, run, steps, width, deep) = (0.22, 0.32, 14, 6.0, 3.5);
     for i in 0..steps {
         let h = rise * (i + 1) as f64;
         y.block(
             foot + DVec3::new(0.0, h * 0.5, -run * (i as f64 + 0.5)),
-            Vec3::new(3.0, h as f32 * 0.5, run as f32 * 0.5),
-            Quat::IDENTITY,
-            0x9a958c,
+            Vec3::new(width * 0.5, h as f32 * 0.5, run as f32 * 0.5),
         );
     }
     let top = rise * steps as f64;
-    let landing = foot.z - run * steps as f64 - 1.75;
+    let landing = foot.z - run * steps as f64 - deep as f64 * 0.5;
     y.block(
         DVec3::new(foot.x, top * 0.5, landing),
-        Vec3::new(3.0, top as f32 * 0.5, 1.75),
-        Quat::IDENTITY,
-        0x9a958c,
+        Vec3::new(width * 0.5, top as f32 * 0.5, deep * 0.5),
     );
+    let flight = y.parts("stairs", [Mat::Concrete, Mat::Yellow], || {
+        let s = structures::stairs(rise as f32, run as f32, steps, width, deep);
+        [s.concrete, s.steel]
+    });
+    y.scenery(foot, Quat::IDENTITY, flight);
     for (dx, shirt, color) in [
         (-1.6, 0x3a6ea5, "blue"),
         (0.0, 0xb4413a, "red"),
@@ -544,32 +560,36 @@ fn ragdoll_stairs(y: &mut Yard, foot: DVec3) {
 
 /// A gantry with a steel ball on a 6-link chain, let go at 70°, and a crate wall in its path.
 fn wrecking_ball(y: &mut Yard, base: DVec3) {
-    let steel = 0x9aa0a8;
     let pivot = base + DVec3::new(0.0, 7.6, 0.0);
     for dz in [-2.4, 2.4] {
-        y.block(
-            base + DVec3::new(0.0, 3.9, dz),
-            Vec3::new(0.25, 3.9, 0.25),
-            Quat::IDENTITY,
-            0x5a5650,
-        );
+        y.block(base + DVec3::new(0.0, 3.9, dz), Vec3::new(0.25, 3.9, 0.25));
     }
-    y.block(
-        pivot + DVec3::Y * 0.3,
-        Vec3::new(0.25, 0.25, 2.65),
-        Quat::IDENTITY,
-        0x5a5650,
-    );
+    y.block(pivot + DVec3::Y * 0.3, Vec3::new(0.25, 0.25, 2.65));
+    let gantry = y.parts("gantry", [Mat::Yellow, Mat::Steel, Mat::Concrete], || {
+        let g = structures::gantry(7.6, 4.8);
+        [g.painted, g.steel, g.concrete]
+    });
+    y.scenery(base, Quat::IDENTITY, gantry);
 
     let angle = 70f32.to_radians();
     // Pulled back toward -x (the yard's edge), so the wall flies into the yard.
     let down = Vec3::new(-angle.sin(), -angle.cos(), 0.0).as_dvec3();
     let rotation = Quat::from_rotation_z(-angle);
-    let link = 0.8;
+    let link = props::CHAIN_SEGMENT_LENGTH as f64;
+    let (wire, links) = (props::CHAIN_WIRE, 6);
     let mut prev: Option<Entity> = None;
-    for i in 0..6 {
+    for i in 0..links {
         let center = pivot + down * (link * (i as f64 + 0.5));
-        let e = y.capsule(center, rotation, 0.07, 0.33, 0x3b3b3e);
+        // The last segment's bottom links are the ball's shackle.
+        let end = i == links - 1;
+        let chain = y.parts(&format!("chain/{end}"), [Mat::Steel], || {
+            [if end {
+                props::chain_end_segment(link as f32, wire)
+            } else {
+                props::chain_segment(link as f32, wire)
+            }]
+        });
+        let e = y.capsule(center, rotation, 0.07, 0.33, chain);
         let top = pivot + down * (link * i as f64);
         let kind = JointKind::Spherical { cone_limit: None };
         match prev {
@@ -579,34 +599,29 @@ fn wrecking_ball(y: &mut Yard, base: DVec3) {
         prev = Some(e);
     }
     let radius = 0.8;
-    let center = pivot + down * (link * 6.0 + radius as f64);
-    let s = y.metal;
-    let ball = y.ball(
-        center,
-        radius,
-        7800.0,
-        s,
-        mat(steel, 0.3).with_metallic(1.0),
-    );
+    let center = pivot + down * (link * links as f64 + radius as f64);
+    let parts = y.parts("wrecking_ball", [Mat::Steel], || {
+        [props::wrecking_ball(radius)]
+    });
+    let ball = y.steel_ball(center, radius, parts);
     y.world.get_mut::<Transform>(ball).unwrap().rotation = rotation;
     y.name(ball, "Wrecking ball");
     y.joint(
         JointKind::Spherical { cone_limit: None },
         prev.unwrap(),
         Some(ball),
-        pivot + down * (link * 6.0),
+        pivot + down * (link * links as f64),
     );
 
     // The wall: 6 × 4 crates on the far side of the swing.
     let half = Vec3::splat(0.4);
     for row in 0..4 {
         for col in 0..6 {
-            let c = CRATE_COLORS[(row + col) % CRATE_COLORS.len()];
             y.crate_box(
                 base + DVec3::new(1.8, 0.4 + 0.8 * row as f64, -2.0 + 0.8 * col as f64),
                 half,
                 Quat::IDENTITY,
-                c,
+                (row + col) as u32 % CRATE_SEEDS,
             );
         }
     }
@@ -614,22 +629,30 @@ fn wrecking_ball(y: &mut Yard, base: DVec3) {
 
 /// A plank on a hinge; a 7 t steel ball lands on one end and throws the crate on the other.
 fn seesaw(y: &mut Yard, base: DVec3) {
-    y.block(
-        base + DVec3::new(0.0, 0.4, 0.0),
-        Vec3::new(0.3, 0.4, 0.6),
-        Quat::IDENTITY,
-        0x5a5650,
-    );
+    let stand_half = Vec3::new(0.3, 0.4, 0.6);
+    let stand = y.block(base + DVec3::new(0.0, 0.4, 0.0), stand_half);
+    let parts = y.parts("seesaw_stand", [Mat::Dark, Mat::Steel], || {
+        let s = structures::seesaw_stand(stand_half);
+        [s.painted, s.steel]
+    });
+    y.dress(stand, parts);
     let half = Vec3::new(4.0, 0.1, 0.6);
     let plank_c = Collider::cuboid(half)
         .with_surface(y.wood)
         .with_density(300.0);
+    let parts = y.parts(
+        "seesaw_plank",
+        [Mat::Timber, Mat::Dark, Mat::Steel, Mat::Rubber(0x1e1e20)],
+        || {
+            let p = structures::seesaw_plank(half);
+            [p.timber, p.painted, p.steel, p.rubber]
+        },
+    );
     let plank = y.body(
         base + DVec3::new(0.0, 0.9, 0.0),
         Quat::IDENTITY,
         plank_c,
-        cuboid_mesh(half),
-        mat(0xa8763e, 0.8),
+        parts,
     );
     y.name(plank, "Seesaw");
     y.joint(
@@ -646,40 +669,34 @@ fn seesaw(y: &mut Yard, base: DVec3) {
         base + DVec3::new(-3.5, 1.4, 0.0),
         Vec3::splat(0.4),
         Quat::IDENTITY,
-        0xc48d55,
+        1,
     );
     if let Some(mut col) = y.world.get_mut::<Collider>(c) {
         col.density = 120.0;
     }
     y.name(c, "Catapulted crate");
-    let s = y.metal;
-    let ball = y.ball(
-        base + DVec3::new(3.5, 9.0, 0.0),
-        0.6,
-        7800.0,
-        s,
-        mat(0x9aa0a8, 0.3).with_metallic(1.0),
-    );
+    let parts = y.parts("steel_ball/0.6", [Mat::Steel], || [props::ball(0.6)]);
+    let ball = y.steel_ball(base + DVec3::new(3.5, 9.0, 0.0), 0.6, parts);
     y.name(ball, "Seesaw ball");
 }
 
 /// A bin with a four-paddle wheel turned by a hinge motor, full of balls and blocks.
 fn paddle_wheel(y: &mut Yard, center: DVec3) {
-    let wall = 0x6f6d68;
     for (dx, dz, hx, hz) in [
         (3.15, 0.0, 0.15, 2.8),
         (-3.15, 0.0, 0.15, 2.8),
         (0.0, 2.65, 3.0, 0.15),
         (0.0, -2.65, 3.0, 0.15),
     ] {
-        y.block(
-            center + DVec3::new(dx, 0.7, dz),
-            Vec3::new(hx, 0.7, hz),
-            Quat::IDENTITY,
-            wall,
-        );
+        y.block(center + DVec3::new(dx, 0.7, dz), Vec3::new(hx, 0.7, hz));
     }
-    let hub_at = center + DVec3::new(0.0, 2.0, 0.0);
+    let axle = 2.0;
+    let bin = y.parts("paddle_bin", [Mat::Concrete, Mat::Dark, Mat::Steel], || {
+        let b = structures::paddle_bin(Vec2::new(3.0, 2.5), 0.3, 1.4, axle);
+        [b.concrete, b.painted, b.steel]
+    });
+    y.scenery(center, Quat::IDENTITY, bin);
+    let hub_at = center + DVec3::new(0.0, axle as f64, 0.0);
     let wheel = y
         .world
         .spawn((
@@ -689,6 +706,11 @@ fn paddle_wheel(y: &mut Yard, center: DVec3) {
             Name::new("Paddle wheel"),
         ))
         .id();
+    let hub = y.parts("paddle_hub", [Mat::Yellow, Mat::Steel], || {
+        let h = structures::paddle_hub(0.3, 2.7);
+        [h.painted, h.steel]
+    });
+    y.dress(wheel, hub);
     let along_x = Quat::from_rotation_z(std::f32::consts::FRAC_PI_2);
     y.world.spawn((
         Transform::default().with_rotation(along_x),
@@ -701,28 +723,31 @@ fn paddle_wheel(y: &mut Yard, center: DVec3) {
             density: 2000.0,
             ..Default::default()
         },
-        MeshRenderer::new(
-            Shape::Cylinder {
-                radius: 0.3,
-                height: 5.4,
-                segments: 24,
-            },
-            mat(0x55585e, 0.4).with_metallic(1.0),
-        ),
         ChildOf(wheel),
     ));
-    let half = Vec3::new(2.6, 0.75, 0.05);
+    let (half, reach) = (Vec3::new(2.6, 0.75, 0.05), 1.05);
     for k in 0..4 {
         let r = Quat::from_rotation_x(k as f32 * std::f32::consts::FRAC_PI_2);
-        y.world.spawn((
-            Transform::from_translation((r * Vec3::new(0.0, 1.05, 0.0)).as_dvec3())
-                .with_rotation(r),
-            Collider::cuboid(half)
-                .with_surface(y.wood)
-                .with_density(600.0),
-            MeshRenderer::new(cuboid_mesh(half), mat(0x7a4f2a, 0.8)),
-            ChildOf(wheel),
-        ));
+        let paddle = y
+            .world
+            .spawn((
+                Transform::from_translation((r * Vec3::new(0.0, reach, 0.0)).as_dvec3())
+                    .with_rotation(r),
+                Collider::cuboid(half)
+                    .with_surface(y.wood)
+                    .with_density(600.0),
+                ChildOf(wheel),
+            ))
+            .id();
+        let blade = y.parts(
+            "paddle_blade",
+            [Mat::Timber, Mat::Yellow, Mat::Steel],
+            || {
+                let b = structures::paddle_blade(half, reach);
+                [b.timber, b.painted, b.steel]
+            },
+        );
+        y.dress(paddle, blade);
     }
     y.joint(
         JointKind::Revolute {
@@ -753,12 +778,11 @@ fn paddle_wheel(y: &mut Yard, center: DVec3) {
                 at,
                 Vec3::splat(0.22),
                 Quat::from_rotation_y(rng.next() * TAU),
-                0x2f8f8a,
+                i as u32 % CRATE_SEEDS,
             );
         } else {
             let color = [0xe0573a, 0x3a8fe0, 0xe0c03a][i % 3];
-            let s = y.rubber;
-            y.ball(at, 0.25, 200.0, s, mat(color, 0.5));
+            y.ball(at, 0.25, 200.0, color);
         }
     }
 }
@@ -767,13 +791,23 @@ fn paddle_wheel(y: &mut Yard, center: DVec3) {
 /// 1.2 m; three crates drop onto it.
 fn bridge(y: &mut Yard, center: DVec3) {
     let (span, planks, plank, height) = (12.0f64, 15usize, 0.82f64, 4.5f64);
+    let tower_half = Vec3::new(1.3, height as f32 * 0.5, 0.3);
     for dz in [-1.0, 1.0] {
-        y.block(
+        let tower = y.block(
             center + DVec3::new(0.0, height * 0.5, dz * (span * 0.5 + 0.3)),
-            Vec3::new(1.3, height as f32 * 0.5, 0.3),
-            Quat::IDENTITY,
-            0x5a5650,
+            tower_half,
         );
+        // The deck is on the tower's inner side.
+        let side = -dz as f32;
+        let parts = y.parts(
+            &format!("bridge_tower/{side}"),
+            [Mat::Timber, Mat::Steel, Mat::Concrete],
+            || {
+                let t = structures::bridge_tower(tower_half, side);
+                [t.timber, t.steel, t.concrete]
+            },
+        );
+        y.dress(tower, parts);
     }
     // Hang the planks on a parabola whose arc length equals the deck length.
     let arc = |sag: f64| {
@@ -816,13 +850,19 @@ fn bridge(y: &mut Yard, center: DVec3) {
         let c = Collider::cuboid(half)
             .with_surface(y.wood)
             .with_density(500.0);
-        let color = if k % 2 == 0 { 0x9c6a3c } else { 0x8a5a32 };
+        let parts = y.parts(
+            &format!("bridge_plank/{k}"),
+            [Mat::Timber, Mat::Steel],
+            || {
+                let p = structures::bridge_plank(half, k);
+                [p.timber, p.steel]
+            },
+        );
         let plank = y.body(
             (a + b) * 0.5,
             Quat::from_rotation_arc(Vec3::Z, dir),
             c,
-            cuboid_mesh(half),
-            mat(color, 0.85),
+            parts,
         );
         let hinge = bridge_hinge();
         match prev {
@@ -837,7 +877,7 @@ fn bridge(y: &mut Yard, center: DVec3) {
             center + DVec3::new(0.0, 5.5 + i as f64, dz),
             Vec3::splat(0.35),
             Quat::from_rotation_y(0.4 * i as f32),
-            CRATE_COLORS[i],
+            i as u32 % CRATE_SEEDS,
         );
     }
     // Someone standing on the deck: the bridge sags under their weight too.
@@ -882,18 +922,14 @@ fn turntable(y: &mut Yard, center: DVec3) {
                 linear: Vec3::ZERO,
                 angular: Vec3::new(0.0, 0.4, 0.0),
             },
-            MeshRenderer::new(
-                Shape::Cylinder {
-                    radius: 4.0,
-                    height: 0.3,
-                    segments: 48,
-                },
-                mat(0x4a4d55, 0.5).with_metallic(0.7),
-            ),
             Name::new("Turntable"),
         ))
         .id();
-    let _ = table;
+    let parts = y.parts("turntable", [Mat::Diamond, Mat::Yellow, Mat::Steel], || {
+        let t = structures::turntable(4.0, 0.3);
+        [t.deck, t.painted, t.steel]
+    });
+    y.dress(table, parts);
     y.mannequin(
         center + DVec3::new(1.2, 0.3, 0.0),
         0xe8772e,
@@ -906,7 +942,7 @@ fn turntable(y: &mut Yard, center: DVec3) {
             at,
             Vec3::splat(0.35),
             Quat::from_rotation_y(-a as f32),
-            CRATE_COLORS[k % 4],
+            k as u32 % CRATE_SEEDS,
         );
     }
 }
@@ -916,7 +952,6 @@ fn bouncy_balls(y: &mut Yard, center: DVec3) {
     let colors = [0xe0573a, 0x3a8fe0, 0xe0c03a, 0x6ac94a, 0xc04ad0, 0xf08a2a];
     for (i, color) in colors.into_iter().enumerate() {
         let at = center + DVec3::new(i as f64 * 1.6, 4.0 + i as f64 * 1.5, (i % 2) as f64 * 1.2);
-        let s = y.rubber;
-        y.ball(at, 0.4, 300.0, s, mat(color, 0.4));
+        y.ball(at, 0.4, 300.0, color);
     }
 }
