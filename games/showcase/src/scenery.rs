@@ -47,8 +47,12 @@ pub struct Library {
     pub trees: Vec<TreeHandles>,
     pub rocks: Vec<Handle<Mesh>>,
     pub small_rocks: Vec<Handle<Mesh>>,
+    /// Grass patches up close (curved blades) and their sparse single-triangle stand-ins for
+    /// mid distance, by the same index.
     pub grass: Vec<Handle<Mesh>>,
+    pub grass_mid: Vec<Handle<Mesh>>,
     pub dry_grass: Vec<Handle<Mesh>>,
+    pub dry_grass_mid: Vec<Handle<Mesh>>,
     pub flowers: Vec<Handle<Mesh>>,
     pub houses: Vec<HouseHandles>,
     pub lamp: (Handle<Mesh>, Handle<Mesh>),
@@ -127,19 +131,17 @@ pub fn build_library(
     let small_rocks = (0..6)
         .map(|i| meshes.add(meshgen::rock(600 + i, 1)))
         .collect();
-    let grass = (0..6)
-        .map(|i| {
-            meshes.add(meshgen::grass_patch(
-                700 + i,
-                4.0,
-                420,
-                0.15 + i as f32 * 0.05,
-            ))
-        })
-        .collect();
-    let dry_grass = (0..4)
-        .map(|i| meshes.add(meshgen::grass_patch(750 + i, 4.0, 520, 0.75)))
-        .collect();
+    let mut grass_set = |seed: u64, dry: f32| {
+        (
+            meshes.add(meshgen::grass_patch(seed, 4.0, 1300, dry, 3)),
+            meshes.add(meshgen::grass_patch(seed, 4.0, 420, dry, 1)),
+        )
+    };
+    let (grass, grass_mid): (Vec<_>, Vec<_>) = (0..6)
+        .map(|i| grass_set(700 + i, 0.15 + i as f32 * 0.05))
+        .unzip();
+    let (dry_grass, dry_grass_mid): (Vec<_>, Vec<_>) =
+        (0..4).map(|i| grass_set(750 + i, 0.75)).unzip();
     let flower_colors = [
         Vec3::new(0.9, 0.75, 0.1),
         Vec3::new(0.85, 0.85, 0.85),
@@ -170,7 +172,9 @@ pub fn build_library(
         rocks,
         small_rocks,
         grass,
+        grass_mid,
         dry_grass,
+        dry_grass_mid,
         flowers,
         houses,
         lamp: (meshes.add(iron), meshes.add(glass)),
@@ -178,12 +182,13 @@ pub fn build_library(
 }
 
 /// Distance-based detail: beyond `switch` meters from the camera the entity shows `far` (or
-/// hides when there is none).
+/// hides when there is none), and beyond `hide` it hides either way.
 #[derive(Component, Debug, Clone, Copy)]
 pub struct Lod {
     pub near: Handle<Mesh>,
     pub far: Option<Handle<Mesh>>,
     pub switch: f32,
+    pub hide: f32,
     pub far_shown: bool,
 }
 
@@ -193,6 +198,18 @@ impl Lod {
             near: mesh,
             far: None,
             switch: distance,
+            hide: f32::INFINITY,
+            far_shown: false,
+        }
+    }
+
+    /// `near` up close, `far` from `switch` meters, nothing beyond `hide`.
+    pub fn swap_then_hide(near: Handle<Mesh>, far: Handle<Mesh>, switch: f32, hide: f32) -> Self {
+        Self {
+            near,
+            far: Some(far),
+            switch,
+            hide,
             far_shown: false,
         }
     }
@@ -212,21 +229,18 @@ pub fn update_lods(
         return;
     };
     q.par_iter_mut().for_each(|(t, mut lod, mut renderer)| {
-        let far = (t.translation() - eye).length_squared() > (lod.switch as f64).powi(2);
-        if far == lod.far_shown && renderer.visible == (!far || lod.far.is_some()) {
+        let d2 = (t.translation() - eye).length_squared();
+        let far = d2 > (lod.switch as f64).powi(2);
+        let shown = d2 <= (lod.hide as f64).powi(2) && (!far || lod.far.is_some());
+        if far == lod.far_shown && renderer.visible == shown {
             return;
         }
         lod.far_shown = far;
+        renderer.visible = shown;
         match (far, lod.far) {
-            (false, _) => {
-                renderer.mesh = MeshRef::Handle(lod.near);
-                renderer.visible = true;
-            }
-            (true, Some(f)) => {
-                renderer.mesh = MeshRef::Handle(f);
-                renderer.visible = true;
-            }
-            (true, None) => renderer.visible = false,
+            (false, _) => renderer.mesh = MeshRef::Handle(lod.near),
+            (true, Some(f)) => renderer.mesh = MeshRef::Handle(f),
+            (true, None) => {}
         }
     });
 }
@@ -277,6 +291,7 @@ pub fn spawn_tree(
             near: t.crown,
             far: Some(t.far),
             switch,
+            hide: f32::INFINITY,
             far_shown: false,
         },
     ));
@@ -342,14 +357,12 @@ pub fn spawn_woods(commands: &mut Commands, lib: &Library, land: &Landscape, rng
                 TreeKind::Birch
             };
             let t = pick_tree(lib, kind, rng);
-            spawn_tree(
-                commands,
-                lib,
-                t,
-                place(land, x, z, 0.1),
-                rng.range(0.0, TAU),
-                rng.range(0.75, 1.25),
-            );
+            let scale = rng.range(0.75, 1.25);
+            let at = place(land, x, z, 0.1);
+            spawn_tree(commands, lib, t, at, rng.range(0.0, TAU), scale);
+            if near_wildlife(x, z) {
+                solid(commands, at, 0.35 * scale, 5.0 * scale);
+            }
             count += 1;
             // Bushes along the wood edges.
             if wood < 0.6 && rng.chance(0.35) {
@@ -407,12 +420,17 @@ pub fn spawn_meadows(commands: &mut Commands, lib: &Library, land: &Landscape, r
             let tf = Transform::from_translation(DVec3::new(x, h - 0.03, z))
                 .with_rotation(tilt * Quat::from_rotation_y(rng.range(0.0, TAU)))
                 .with_scale(Vec3::new(1.0, rng.range(0.8, 1.3), 1.0));
-            let mesh = lib.grass[rng.range_i32(0, lib.grass.len() as i32) as usize];
+            let k = rng.range_i32(0, lib.grass.len() as i32) as usize;
             commands.spawn((
                 tf,
-                MeshRenderer::new(mesh, lib.mats.grass).without_shadows(),
-                // Thin out gradually instead of ending in a hard line.
-                Lod::hide_beyond(mesh, rng.range(45.0, 95.0)),
+                MeshRenderer::new(lib.grass[k], lib.mats.grass).without_shadows(),
+                // Full blades up close; thin out gradually instead of ending in a hard line.
+                Lod::swap_then_hide(
+                    lib.grass[k],
+                    lib.grass_mid[k],
+                    rng.range(20.0, 26.0),
+                    rng.range(45.0, 95.0),
+                ),
             ));
             // Wildflowers in drifts.
             let drift = engine::core::math::noise::perlin2(x / 40.0, z / 40.0, 77);
@@ -464,6 +482,107 @@ pub fn spawn_rocks(commands: &mut Commands, lib: &Library, land: &Landscape, rng
             MeshRenderer::new(mesh, lib.mats.rock),
             Lod::hide_beyond(mesh, if big { 900.0 } else { 160.0 }),
         ));
+        if big && near_wildlife(x, z) {
+            solid(commands, DVec3::new(x, h, z), s * 0.8, s * 1.2);
+        }
+    }
+}
+
+/// Where the wildlife roams, trunks and boulders get colliders so animals path around them.
+fn near_wildlife(x: f64, z: f64) -> bool {
+    let m = crate::zones::zone("meadow");
+    DVec2::new(x - m.center.x, z - m.center.z).length() < m.radius + 120.0
+}
+
+/// A static upright obstacle (a trunk or a boulder) for physics and pathfinding.
+fn solid(commands: &mut Commands, base: DVec3, radius: f32, height: f32) {
+    let half = (height * 0.5 - radius).max(0.0);
+    commands.spawn((
+        Transform::from_translation(base + DVec3::new(0.0, height as f64 * 0.5, 0.0)),
+        engine::world::physics::Collider::capsule(radius, half),
+    ));
+}
+
+/// The cliff south of the lake faced with boulders, and stones along the stream's banks.
+pub fn spawn_cliffs_and_stream(
+    commands: &mut Commands,
+    lib: &Library,
+    land: &Landscape,
+    rng: &mut Rng,
+) {
+    let boulder = |commands: &mut Commands, rng: &mut Rng, p: DVec3, s: f32| {
+        let mesh = lib.rocks[rng.range_i32(0, lib.rocks.len() as i32) as usize];
+        commands.spawn((
+            Transform::from_translation(p)
+                .with_rotation(
+                    Quat::from_rotation_y(rng.range(0.0, TAU))
+                        * Quat::from_rotation_x(rng.range(-0.5, 0.5)),
+                )
+                .with_scale(Vec3::new(s, s * rng.range(0.7, 1.1), s)),
+            MeshRenderer::new(mesh, lib.mats.rock),
+            Lod::hide_beyond(mesh, 1200.0),
+        ));
+    };
+    for sc in &land.scarps {
+        let d = (sc.b - sc.a).normalize();
+        let n = DVec2::new(-d.y, d.x);
+        let len = (sc.b - sc.a).length();
+        let mut along = 12.0;
+        while along < len - 12.0 {
+            // The face sits where the wobbling line puts it.
+            let (_, side) = sc.frame(sc.a + d * along, land.seed);
+            let foot = sc.a + d * along - n * (side + 1.0);
+            let near_water = land
+                .stream_at(foot.x, foot.y)
+                .is_some_and(|(dist, _)| dist < 7.0);
+            if !near_water {
+                let low = land.height(foot.x, foot.y);
+                let top = land.height(foot.x + n.x * 4.0, foot.y + n.y * 4.0);
+                for k in 0..3 {
+                    let y = low + (top - low) * (k as f64 * 0.38) - 0.5;
+                    let jitter = n * rng.range(-0.8, 1.2) as f64;
+                    let q = foot + jitter;
+                    let size = rng.range(1.8, 3.4);
+                    boulder(commands, rng, DVec3::new(q.x, y, q.y), size);
+                }
+            }
+            along += rng.range(3.0, 4.5) as f64;
+        }
+    }
+    for st in &land.streams {
+        for (i, p) in st.path.iter().enumerate().step_by(5) {
+            if !rng.chance(0.6) || i + 1 >= st.path.len() {
+                continue;
+            }
+            let dir = (st.path[i + 1] - *p).normalize_or(DVec2::Y);
+            let side = DVec2::new(-dir.y, dir.x) * if rng.chance(0.5) { 1.0 } else { -1.0 };
+            let q = *p + side * (st.width * 0.5 + rng.range(0.3, 1.5) as f64);
+            let s = rng.range(0.5, 1.4);
+            let mesh = lib.small_rocks[rng.range_i32(0, lib.small_rocks.len() as i32) as usize];
+            commands.spawn((
+                Transform::from_translation(DVec3::new(q.x, land.height(q.x, q.y) - 0.2, q.y))
+                    .with_rotation(Quat::from_rotation_y(rng.range(0.0, TAU)))
+                    .with_scale(Vec3::splat(s)),
+                MeshRenderer::new(mesh, lib.mats.rock),
+                Lod::hide_beyond(mesh, 220.0),
+            ));
+        }
+        // Big boulders flanking the falls.
+        if let Some((top, _)) = st.falls() {
+            let lip = st.path[top];
+            let dir = (st.path[top + 1] - lip).normalize_or(DVec2::Y);
+            let side = DVec2::new(-dir.y, dir.x);
+            for s in [-1.0, 1.0] {
+                for k in 0..3 {
+                    let q = lip
+                        + side * s * (st.width * 0.5 + 1.8 + k as f64 * 1.6)
+                        + dir * (k as f64 * 1.2 - 1.0);
+                    let y = land.height(q.x, q.y) - 1.0;
+                    let size = rng.range(2.0, 3.0);
+                    boulder(commands, rng, DVec3::new(q.x, y, q.y), size);
+                }
+            }
+        }
     }
 }
 
@@ -616,13 +735,18 @@ pub fn spawn_farms(commands: &mut Commands, lib: &Library, land: &Landscape, rng
                     + u * ((i as f64 + rng.range(-0.3, 0.3) as f64) / nu as f64)
                     + v * ((j as f64 + rng.range(-0.3, 0.3) as f64) / nv as f64);
                 let h = land.height(p.x, p.y);
-                let mesh = lib.dry_grass[rng.range_i32(0, lib.dry_grass.len() as i32) as usize];
+                let k = rng.range_i32(0, lib.dry_grass.len() as i32) as usize;
                 commands.spawn((
                     Transform::from_translation(DVec3::new(p.x, h - 0.03, p.y))
                         .with_rotation(Quat::from_rotation_y(rng.range(0.0, TAU)))
                         .with_scale(Vec3::new(1.0, rng.range(1.5, 1.9), 1.0)),
-                    MeshRenderer::new(mesh, lib.mats.grass).without_shadows(),
-                    Lod::hide_beyond(mesh, rng.range(70.0, 130.0)),
+                    MeshRenderer::new(lib.dry_grass[k], lib.mats.grass).without_shadows(),
+                    Lod::swap_then_hide(
+                        lib.dry_grass[k],
+                        lib.dry_grass_mid[k],
+                        26.0,
+                        rng.range(70.0, 130.0),
+                    ),
                 ));
             }
         }
