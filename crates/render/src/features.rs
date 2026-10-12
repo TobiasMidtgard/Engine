@@ -7,12 +7,21 @@
 //! 3. `draw_environment` — draw into the sky environment map (ambient light + reflections).
 //! 4. `draw_shadow` — draw depth into one shadow cascade, or into the top-down sky occlusion
 //!    map when the index is [`SKY_OCCLUSION_VIEW`](crate::shadows::SKY_OCCLUSION_VIEW).
-//! 5. `draw` — draw into the HDR scene in a [`RenderPhase`] (opaque → sky → transparent).
-//! 6. `overlay` — draw onto the final tonemapped image (UI, debug text, editor gizmos).
+//! 5. `draw_prepass` — draw depth, normals and motion of opaque geometry. Ambient occlusion,
+//!    contact shadows and temporal anti-aliasing are computed from it before the scene is
+//!    shaded, so opaque features should implement it (geometry without it still renders, it
+//!    just gets no ambient occlusion or contact shadows, and only camera motion for TAA).
+//! 6. `draw` — draw into the HDR scene in a [`RenderPhase`] (opaque → sky → transparent).
+//! 7. `overlay` — draw onto the final tonemapped image (UI, debug text, editor gizmos).
 //!
-//! Group 0 is bound by the renderer before `draw`/`draw_environment` (frame data, lights,
-//! shadows, environment map; see `shaders/lib_frame.wgsl`) and before `draw_shadow` (the
-//! cascade's [`ShadowView`](crate::shadows::ShadowViewUniform)). Features use groups 1+.
+//! Group 0 is bound by the renderer before `draw_prepass`/`draw`/`draw_environment` (frame
+//! data, lights, shadows, environment map, ambient occlusion and the prepass maps; see
+//! `shaders/lib_frame.wgsl`) and before `draw_shadow` (the cascade's
+//! [`ShadowView`](crate::shadows::ShadowViewUniform)). Features use groups 1+.
+//!
+//! The camera is jittered by a fraction of a pixel every frame when temporal anti-aliasing is
+//! on: use `frame.view_proj` for rasterizing (it includes the jitter) and, in the prepass,
+//! `motion_clip`/`prev_motion_clip` for motion vectors. Overlays get an unjittered frame.
 //!
 //! Register a feature with [`RenderAppExt::add_render_feature`]. Water, terrain, particles,
 //! volumetric clouds, foliage and UI are all built this way.
@@ -48,6 +57,12 @@ pub struct Formats {
     pub ldr: wgpu::TextureFormat,
     pub shadow: wgpu::TextureFormat,
     pub env: wgpu::TextureFormat,
+    /// Prepass normals (octahedral normal xy, roughness, written flag).
+    pub normal: wgpu::TextureFormat,
+    /// Prepass motion vectors (uv delta).
+    pub motion: wgpu::TextureFormat,
+    /// Ambient occlusion.
+    pub ao: wgpu::TextureFormat,
 }
 
 /// Device, queue, shared layouts and samplers. Everything a feature needs to build pipelines.
@@ -88,6 +103,19 @@ impl GpuShared {
             stencil: Default::default(),
             bias: Default::default(),
         }
+    }
+
+    /// Color targets of the depth prepass, in order: normals and motion vectors. A prepass
+    /// pipeline uses these with `depth_state(true)` and returns `PrepassOutput` from its
+    /// fragment shader (see `prepass_output` in `lib_frame.wgsl`).
+    pub fn prepass_targets(&self) -> [Option<wgpu::ColorTargetState>; 2] {
+        [self.formats.normal, self.formats.motion].map(|format| {
+            Some(wgpu::ColorTargetState {
+                format,
+                blend: None,
+                write_mask: wgpu::ColorWrites::ALL,
+            })
+        })
     }
 
     /// Depth state for shadow passes (standard Z, hardware slope bias).
@@ -141,7 +169,7 @@ pub struct FrameContext<'a> {
     pub gpu: &'a GpuShared,
     /// Group 0 frame bindings (`lib_frame.wgsl`) for passes a feature records itself, such as
     /// overlays. During `compute` and `draw_environment` it still holds last frame's
-    /// environment map.
+    /// environment map; during `overlay` its matrices are unjittered.
     pub frame_group: &'a wgpu::BindGroup,
     pub view: &'a ViewData,
     pub settings: &'a RenderSettings,
@@ -200,6 +228,13 @@ pub trait RenderFeature: Send + Sync + 'static {
     /// `ctx.view.sky_occlusion.contains_sphere`). Anything that roofs over the ground (rock,
     /// buildings, canopies) should draw into both.
     fn draw_shadow(&self, pass: &mut wgpu::RenderPass<'_>, cascade: usize, ctx: &FrameContext) {}
+
+    /// Draw the depth prepass: opaque geometry with depth writes, returning `PrepassOutput`
+    /// (world normal, roughness, motion) into [`GpuShared::prepass_targets`]. Use the same
+    /// vertex math as the opaque draw and mark the clip position `@invariant`, so the opaque
+    /// pass's depth test (`GreaterEqual`) passes exactly where the prepass drew. Alpha-masked
+    /// geometry discards the same pixels as in the opaque pass.
+    fn draw_prepass(&self, pass: &mut wgpu::RenderPass<'_>, ctx: &FrameContext) {}
 
     /// Draw into the HDR scene.
     fn draw(&self, phase: RenderPhase, pass: &mut wgpu::RenderPass<'_>, ctx: &FrameContext) {}

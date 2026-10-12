@@ -14,6 +14,7 @@
 //! colliders and wind each step and reads back positions and reaction impulses.
 
 use engine_core::math::{DVec3, Mat3, Quat, Vec3};
+use engine_world::WorldShift;
 
 use crate::collide::{LocalCollider, PosedCollider};
 
@@ -95,6 +96,18 @@ pub struct Goal {
     pub frame: u16,
     pub local: Vec3,
     pub compliance: f32,
+}
+
+/// One-sided contact with the skin a strand grows from: particle `p` stays `margin` meters
+/// on the outer side of the plane through `point` with unit `normal` (frame space), so fur
+/// pressed by wind or inertia lies down on the body instead of sinking into it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SkinPlane {
+    pub p: u32,
+    pub frame: u16,
+    pub point: Vec3,
+    pub normal: Vec3,
+    pub margin: f32,
 }
 
 /// Shape matching (Müller et al. 2005): particles are pulled toward their rest shape, rotated
@@ -202,6 +215,7 @@ pub struct Sim {
     pub tethers: Vec<Tether>,
     pub pins: Vec<Pin>,
     pub goals: Vec<Goal>,
+    pub skin_planes: Vec<SkinPlane>,
     pub shapes: Vec<ShapeMatch>,
     pub frames: Vec<Frame>,
     /// Triangles that feel the air (cloth).
@@ -355,6 +369,47 @@ impl Sim {
             // n·(x - shift) + w = n·x + (w - n·shift)
             let n = Vec3::new(g[0], g[1], g[2]);
             g[3] -= n.dot(shift);
+        }
+    }
+
+    /// Follow the world into a new reference frame (floating origin, a new planet's frame):
+    /// every particle keeps its place in the world, and its velocity is seen from the new
+    /// frame. A plain floating-origin move only moves [`Sim::origin`].
+    pub fn shift(&mut self, s: &WorldShift) {
+        self.origin = s.point(self.origin);
+        if !s.is_translation_only() {
+            let r = s.rotation.as_quat();
+            for v in self
+                .pos
+                .iter_mut()
+                .chain(self.step_start.iter_mut())
+                .chain(self.prev.iter_mut())
+            {
+                *v = r * *v;
+            }
+            for f in &mut self.frames {
+                f.from_pos = r * f.from_pos;
+                f.to_pos = r * f.to_pos;
+                f.from_rot = (r * f.from_rot).normalize();
+                f.to_rot = (r * f.to_rot).normalize();
+            }
+            // n·x + w with both n and x turned keeps w.
+            for g in &mut self.ground {
+                let n = r * Vec3::new(g[0], g[1], g[2]);
+                g[..3].copy_from_slice(&n.to_array());
+            }
+            for (_, f) in &mut self.loads {
+                *f = r * *f;
+            }
+            self.params.gravity = r * self.params.gravity;
+        }
+        if !s.is_translation_only()
+            || s.velocity != DVec3::ZERO
+            || s.angular_velocity != DVec3::ZERO
+        {
+            for (v, x) in self.vel.iter_mut().zip(&self.pos) {
+                *v = s.velocity_at(self.origin + x.as_dvec3(), *v);
+            }
         }
     }
 
@@ -580,6 +635,18 @@ impl Sim {
             let fi = &mut self.frame_impulses[g.frame as usize];
             fi.linear -= j;
             fi.angular -= (pos[i] - self.frames[g.frame as usize].to_pos).cross(j);
+        }
+        for c in &self.skin_planes {
+            let i = c.p as usize;
+            if w[i] == 0.0 {
+                continue;
+            }
+            let (fp, fr) = self.frames[c.frame as usize].pose(t1);
+            let n = fr * c.normal;
+            let d = (pos[i] - fp - fr * c.point).dot(n) - c.margin;
+            if d < 0.0 {
+                pos[i] -= n * d;
+            }
         }
         for s in &mut self.shapes {
             solve_shape(s, pos, w, h, inv_h2);
@@ -913,6 +980,29 @@ mod tests {
     }
 
     #[test]
+    fn skin_planes_hold_particles_on_the_outer_side() {
+        // A particle dropped on a tilted skin plane comes to lie on it, `margin` above.
+        let mut sim = Sim::new(DVec3::ZERO);
+        let tilt = Quat::from_rotation_z(0.3);
+        let f = sim.add_frame(Vec3::new(0.0, 1.0, 0.0), tilt);
+        let a = sim.add_particle(Vec3::new(0.0, 1.05, 0.0), 0.001);
+        sim.skin_planes.push(SkinPlane {
+            p: a,
+            frame: f,
+            point: Vec3::ZERO,
+            normal: Vec3::Y,
+            margin: 0.002,
+        });
+        for _ in 0..120 {
+            sim.step(1.0 / 60.0, &[]);
+            let height = (sim.pos[a as usize] - Vec3::Y).dot(tilt * Vec3::Y);
+            assert!(height > 0.002 - 1e-4, "{height} m above the skin");
+        }
+        let height = (sim.pos[a as usize] - Vec3::Y).dot(tilt * Vec3::Y);
+        assert!(height < 0.003, "rests on it: {height}");
+    }
+
+    #[test]
     fn shape_matching_springs_back_and_plasticity_keeps_dents() {
         let build = |plasticity: f32| {
             let mut sim = Sim::new(DVec3::ZERO);
@@ -1048,5 +1138,39 @@ mod tests {
         }
         sim.step(1.0 / 60.0, &[]);
         assert!(sim.pos.iter().all(|p| p.is_finite()));
+    }
+
+    #[test]
+    fn world_shift_keeps_places_and_turns_motion() {
+        let mut sim = chain(4, 0.5, 1.0);
+        sim.origin = DVec3::new(20.0, 3.0, -7.0);
+        for _ in 0..10 {
+            sim.step(1.0 / 60.0, &[]);
+        }
+        let world: Vec<DVec3> = sim.pos.iter().map(|p| sim.origin + p.as_dvec3()).collect();
+        let vel = sim.vel.clone();
+        let s = WorldShift {
+            rotation: engine_core::math::DQuat::from_rotation_y(1.0),
+            translation: DVec3::new(-5000.0, 0.0, 120.0),
+            velocity: DVec3::new(0.0, 0.0, 3.0),
+            angular_velocity: DVec3::ZERO,
+        };
+        sim.shift(&s);
+        for (i, w) in world.iter().enumerate() {
+            let now = sim.origin + sim.pos[i].as_dvec3();
+            assert!(
+                (now - s.point(*w)).length() < 1e-3,
+                "{i}: {now} vs {}",
+                s.point(*w)
+            );
+            assert!((sim.vel[i] - s.velocity_at(now, vel[i])).length() < 1e-4);
+        }
+        // The pinned end follows its frame, which turned with everything else.
+        let f = sim.frames[0];
+        assert!((f.to_pos - sim.pos[0]).length() < 1e-4);
+        assert!((sim.params.gravity - s.direction(Vec3::new(0.0, -9.81, 0.0))).length() < 1e-4);
+        sim.step(1.0 / 60.0, &[]);
+        assert!(sim.pos.iter().all(|p| p.is_finite()));
+        assert!((sim.pos[1] - sim.pos[0]).length() < 0.51);
     }
 }

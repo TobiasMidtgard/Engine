@@ -49,6 +49,16 @@ pub struct FrameUniform {
     pub sky_occlusion: [[f32; 4]; 4],
     pub sky_occlusion_params: [f32; 4],
     pub sky_volumes: [GpuSkyVolume; MAX_SKY_VOLUMES],
+    /// `view_proj` without the TAA sub-pixel jitter (motion vectors use it).
+    pub unjittered_view_proj: [[f32; 4]; 4],
+    /// TAA jitter: NDC x, NDC y, pixels x, pixels y.
+    pub jitter: [f32; 4],
+    /// Camera origin minus the previous frame's origin (m), w = 1 when the previous frame is
+    /// a valid history (no camera cut).
+    pub camera_delta: [f32; 4],
+    /// Ambient occlusion intensity (0 = off), contact shadow length (m, 0 = off), sun
+    /// penumbra scale, ambient occlusion radius (m).
+    pub effects: [f32; 4],
 }
 
 /// Most [`SkyLightVolume`]s shaded per frame (nearest the camera first).
@@ -91,6 +101,18 @@ pub struct GpuPointLight {
     pub color_radius: [f32; 4],
 }
 
+/// What the renderer remembers about the previous frame, for motion vectors and temporal
+/// anti-aliasing.
+#[derive(Debug, Clone, Copy)]
+pub struct PreviousView {
+    /// Unjittered view-projection of the previous frame (relative to its camera).
+    pub view_proj: Mat4,
+    /// The previous camera's world position.
+    pub origin: DVec3,
+    /// The previous camera's rotation.
+    pub rotation: Quat,
+}
+
 /// Everything about the current view, in camera-relative coordinates.
 #[derive(Debug, Clone)]
 pub struct ViewData {
@@ -100,9 +122,23 @@ pub struct ViewData {
     pub rotation: Quat,
     /// Camera-relative view (rotation only).
     pub view: Mat4,
+    /// Projection including the TAA sub-pixel jitter.
     pub proj: Mat4,
+    /// `proj * view`: what geometry is rasterized with (jittered when TAA is on).
     pub view_proj: Mat4,
+    /// `proj` without the jitter.
+    pub unjittered_proj: Mat4,
+    /// `view_proj` without the jitter (stable; culling and motion vectors use it).
+    pub unjittered_view_proj: Mat4,
+    /// Previous frame's unjittered view-projection (relative to the previous camera).
     pub prev_view_proj: Mat4,
+    /// Previous frame's camera position (equals `origin` on the first frame).
+    pub prev_origin: DVec3,
+    /// TAA sub-pixel jitter this frame, pixels (zero without TAA).
+    pub jitter: Vec2,
+    /// Whether last frame's image can be reused (false on the first frame and after a camera
+    /// cut).
+    pub history_valid: bool,
     pub frustum: Frustum,
     pub near: f32,
     /// Vertical field of view in radians (0 for orthographic).
@@ -144,6 +180,11 @@ impl ViewData {
     /// Distance from the camera along its view direction.
     pub fn view_depth(&self, rel: Vec3) -> f32 {
         -(self.view.transform_point3(rel)).z
+    }
+
+    /// Camera movement since the previous frame (current origin − previous origin), meters.
+    pub fn camera_delta(&self) -> Vec3 {
+        (self.origin - self.prev_origin).as_vec3()
     }
 
     /// Camera forward (−Z) direction.
@@ -238,11 +279,15 @@ fn luminance(c: Vec3) -> f32 {
 }
 
 /// Build the view for the active camera (a default camera at the origin when there is none).
+///
+/// `jitter_px` shifts the projection by a fraction of a pixel (temporal anti-aliasing);
+/// `previous` is the previous frame's view, for motion vectors.
 pub fn build_view(
     world: &mut World,
     width: u32,
     height: u32,
-    prev_view_proj: Option<Mat4>,
+    previous: Option<PreviousView>,
+    jitter_px: Vec2,
     exposure_state: &mut ExposureState,
     frame_index: u64,
 ) -> ViewData {
@@ -288,6 +333,14 @@ pub fn build_view(
             true,
         ),
     };
+    let unjittered_proj = proj;
+    let unjittered_view_proj = proj * view;
+    // Sub-pixel jitter in NDC (pixel y points down, NDC y up).
+    let jitter_ndc = Vec2::new(
+        2.0 * jitter_px.x / width.max(1) as f32,
+        -2.0 * jitter_px.y / height.max(1) as f32,
+    );
+    let proj = Mat4::from_translation(jitter_ndc.extend(0.0)) * proj;
     let view_proj = proj * view;
 
     // Sun: the brightest directional light.
@@ -359,7 +412,7 @@ pub fn build_view(
     // Point lights: nearest first.
     let mut lights: Vec<(f32, GpuPointLight)> = Vec::new();
     let mut q = world.query::<(&PointLight, &GlobalTransform)>();
-    let frustum = Frustum::from_view_proj(&view_proj);
+    let frustum = Frustum::from_view_proj(&unjittered_view_proj);
     for (light, gt) in q.iter(world) {
         let rel = (gt.translation() - origin).as_vec3();
         if !frustum.intersects_sphere(rel, light.range) {
@@ -402,7 +455,7 @@ pub fn build_view(
             aspect,
             orthographic,
             sun_dir,
-            &proj,
+            &unjittered_proj,
         )
     } else {
         Cascades::default()
@@ -415,7 +468,12 @@ pub fn build_view(
         view,
         proj,
         view_proj,
-        prev_view_proj: prev_view_proj.unwrap_or(view_proj),
+        unjittered_proj,
+        unjittered_view_proj,
+        prev_view_proj: previous.map_or(unjittered_view_proj, |p| p.view_proj),
+        prev_origin: previous.map_or(origin, |p| p.origin),
+        jitter: jitter_px,
+        history_valid: previous.is_some(),
         frustum,
         near,
         fov_y,
@@ -570,6 +628,7 @@ pub fn frame_uniform(world: &World, v: &ViewData) -> FrameUniform {
                 DebugView::Normals => 1,
                 DebugView::Cascades => 2,
                 DebugView::SkyVisibility => 3,
+                DebugView::AmbientOcclusion => 4,
             },
             v.sky_volumes.len() as u32,
         ],
@@ -583,6 +642,27 @@ pub fn frame_uniform(world: &World, v: &ViewData) -> FrameUniform {
         sky_occlusion: mat(v.sky_occlusion.view_proj),
         sky_occlusion_params: v.sky_occlusion.params(),
         sky_volumes: std::array::from_fn(|i| v.sky_volumes.get(i).copied().unwrap_or_default()),
+        unjittered_view_proj: mat(v.unjittered_view_proj),
+        jitter: [
+            2.0 * v.jitter.x / v.width.max(1) as f32,
+            -2.0 * v.jitter.y / v.height.max(1) as f32,
+            v.jitter.x,
+            v.jitter.y,
+        ],
+        camera_delta: {
+            let d = v.camera_delta();
+            [d.x, d.y, d.z, if v.history_valid { 1.0 } else { 0.0 }]
+        },
+        effects: [
+            if settings.ambient_occlusion {
+                settings.ao_intensity.clamp(0.0, 2.0)
+            } else {
+                0.0
+            },
+            settings.contact_shadow_length.max(0.0),
+            settings.sun_penumbra_scale.max(0.0),
+            settings.ao_radius.max(0.05),
+        ],
     }
 }
 
@@ -592,10 +672,11 @@ mod tests {
 
     #[test]
     fn frame_uniform_matches_wgsl_size() {
-        // 7 mat4 + 15 vec4 + 4 mat4 + 3 vec4
+        // 7 mat4 + 15 vec4 + 4 mat4 + 3 vec4 + ground, sky occlusion, volumes, then the
+        // temporal block (mat4 + 3 vec4).
         assert_eq!(
             std::mem::size_of::<FrameUniform>(),
-            7 * 64 + 15 * 16 + 4 * 64 + 3 * 16 + 16 + 64 + 16 + MAX_SKY_VOLUMES * 80
+            7 * 64 + 15 * 16 + 4 * 64 + 3 * 16 + 16 + 64 + 16 + MAX_SKY_VOLUMES * 80 + 64 + 3 * 16
         );
         assert_eq!(std::mem::size_of::<GpuSkyVolume>(), 80);
         assert_eq!(std::mem::size_of::<GpuPointLight>(), 32);

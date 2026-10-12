@@ -315,7 +315,7 @@ pub fn build_chunk(src: &ChunkSource, key: NodeKey) -> ChunkMesh {
                 paint: [
                     s.paint.0,
                     (s.paint.1.clamp(0.0, 1.0) * 255.0) as u8,
-                    (variety(src, dirs[idx]) * 255.0) as u8,
+                    (variety(src, dirs[idx], spacing) * 255.0) as u8,
                     (patches(src, dirs[idx], spacing) * 255.0) as u8,
                 ],
                 tint: encode_tint(s.tint),
@@ -385,10 +385,13 @@ pub fn build_chunk(src: &ChunkSource, key: NodeKey) -> ChunkMesh {
     }
 }
 
-/// Regional variety 0..1 (patches of forest, meadow and scrub a few kilometers across).
-fn variety(src: &ChunkSource, dir: DVec3) -> f32 {
+/// Regional variety 0..1 (patches of forest, meadow and scrub a few kilometers across),
+/// without the layers finer than the vertices can carry: sampled kilometers apart they turned
+/// into random blotches the size of a vertex, a camouflage pattern seen from orbit.
+fn variety(src: &ChunkSource, dir: DVec3, spacing: f64) -> f32 {
     let p = dir * (src.shape.radius_m / 18_000.0);
-    let n = crate::noise::fbm(p, src.shape.seed ^ 0xB10E, 4, 0.55);
+    let octaves = ((18_000.0 / (2.0 * spacing)).log2() + 1.0).clamp(0.0, 4.0);
+    let n = crate::noise::fbm_smooth(p, src.shape.seed ^ 0xB10E, octaves, 0.55);
     (n * 0.6 + 0.5).clamp(0.0, 1.0) as f32
 }
 

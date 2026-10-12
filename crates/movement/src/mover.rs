@@ -8,6 +8,8 @@ use engine_world::animation::AnimationParams;
 use engine_world::locomotion::{LocomotionState, MoveIntent};
 use engine_world::physics::{CharacterController, CharacterMove, CharacterState};
 
+use crate::platform::Platform;
+
 /// A wall the character touches or runs on.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct WallContact {
@@ -117,6 +119,9 @@ pub struct Mover {
     pub knockback: Vec3,
     /// Dash requested by combat or gameplay, consumed next step.
     pub pending_dash: Option<DashRequest>,
+    /// The moving body under the character, if any (see [`crate::platform`]).
+    #[serde(skip)]
+    pub platform: Option<Platform>,
 
     pub(crate) coyote: f32,
     pub(crate) jump_buffer: f32,
@@ -157,6 +162,7 @@ impl Default for Mover {
             disabled: false,
             knockback: Vec3::ZERO,
             pending_dash: None,
+            platform: None,
             coyote: 0.0,
             jump_buffer: 0.0,
             slide_cooldown: 0.0,

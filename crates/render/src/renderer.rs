@@ -15,13 +15,16 @@ use engine_core::prelude::*;
 use engine_core::window::RawWindowHandle;
 use serde_json::json;
 
+use crate::effects::ScreenEffects;
 use crate::features::{
     FeatureStats, FrameContext, GpuShared, GrowBuffer, PendingRenderFeatures, RenderFeature,
     RenderPhase,
 };
-use crate::frame::{ExposureState, GpuPointLight, ViewData, build_view, frame_uniform};
+use crate::frame::{
+    ExposureState, GpuPointLight, PreviousView, ViewData, build_view, frame_uniform,
+};
 use crate::gpu::{self, SurfaceState};
-use crate::settings::{RenderSettings, Tonemapper};
+use crate::settings::{AntiAliasing, RenderSettings, Tonemapper};
 use crate::shadows::{MAX_CASCADES, SKY_OCCLUSION_VIEW, ShadowViewUniform};
 use crate::targets::{Targets, Tex};
 
@@ -137,20 +140,90 @@ pub struct Renderer {
     surface: Option<SurfaceState>,
     pub targets: Targets,
     features: Vec<Box<dyn RenderFeature>>,
+    /// Frame uniform as rasterized (TAA-jittered).
     frame_buffer: wgpu::Buffer,
+    /// The same without the jitter, for overlays drawn on the final image.
+    overlay_frame_buffer: wgpu::Buffer,
     lights: GrowBuffer,
     shadow: ShadowResources,
     sky_camera: crate::sky_occlusion::SkyCamera,
     env: [Tex; 2],
     env_current: usize,
     env_rendered: bool,
+    /// 1x1 neutral stand-ins for the screen-space maps (no occlusion, nothing in the prepass),
+    /// bound while the real ones are being drawn.
+    screen_stand_ins: ScreenMaps,
+    /// Scene passes, one per environment map buffer.
     frame_groups: [wgpu::BindGroup; 2],
+    /// The prepass and the effects that write the screen-space maps.
+    prepass_group: wgpu::BindGroup,
+    /// Overlays: unjittered matrices.
+    overlay_group: wgpu::BindGroup,
     post: PostResources,
+    effects: ScreenEffects,
     exposure: ExposureState,
     meter: crate::exposure::ExposureMeter,
-    prev_view_proj: Option<Mat4>,
+    previous: Option<PreviousView>,
+    /// How far the camera moved the frame before (camera cut detection).
+    prev_step: f64,
+    /// Anti-aliasing mode of the previous frame (a switch resets the history).
+    prev_aa: AntiAliasing,
     frame_index: u64,
     last_view: Option<ViewData>,
+}
+
+/// Views of the screen-space maps bound in the frame group (bindings 10–12).
+struct ScreenMaps {
+    ao: wgpu::TextureView,
+    normal: wgpu::TextureView,
+    depth: wgpu::TextureView,
+}
+
+impl ScreenMaps {
+    fn of(targets: &Targets) -> Self {
+        Self {
+            ao: targets.ao.view.clone(),
+            normal: targets.prepass_normal.view.clone(),
+            depth: targets.prepass_depth.view.clone(),
+        }
+    }
+
+    fn stand_ins(shared: &GpuShared) -> Self {
+        let device = &shared.device;
+        let tex = |label: &str, format: wgpu::TextureFormat| {
+            Tex::new(
+                device,
+                label,
+                1,
+                1,
+                format,
+                wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            )
+        };
+        let ao = tex("no ambient occlusion", shared.formats.ao);
+        shared.queue.write_texture(
+            ao.texture.as_image_copy(),
+            &[255u8],
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(1),
+                rows_per_image: Some(1),
+            },
+            wgpu::Extent3d {
+                width: 1,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
+        );
+        // New textures start zeroed: no normal written, depth 0 (nothing).
+        let normal = tex("no prepass normals", shared.formats.normal);
+        let depth = tex("no prepass depth", shared.formats.depth);
+        Self {
+            ao: ao.view,
+            normal: normal.view,
+            depth: depth.view,
+        }
+    }
 }
 
 impl Renderer {
@@ -169,6 +242,9 @@ impl Renderer {
             ldr: wgpu::TextureFormat::Rgba8UnormSrgb,
             shadow: wgpu::TextureFormat::Depth32Float,
             env: wgpu::TextureFormat::Rgba16Float,
+            normal: wgpu::TextureFormat::Rgba16Float,
+            motion: wgpu::TextureFormat::Rg16Float,
+            ao: wgpu::TextureFormat::R8Unorm,
         };
 
         let sampler = |label: &str, address: wgpu::AddressMode, filter: wgpu::FilterMode| {
@@ -281,6 +357,33 @@ impl Renderer {
                         min_binding_size: None,
                     },
                 ),
+                layout_entry(
+                    10,
+                    all,
+                    wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                ),
+                layout_entry(
+                    11,
+                    all,
+                    wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                ),
+                layout_entry(
+                    12,
+                    all,
+                    wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Depth,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                ),
             ],
         });
         let shadow_view_layout =
@@ -311,12 +414,16 @@ impl Renderer {
         };
 
         let targets = Targets::new(&device, &formats, width, height);
-        let frame_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("frame uniform"),
-            size: std::mem::size_of::<crate::frame::FrameUniform>() as u64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
+        let frame_uniform_buffer = |label: &str| {
+            device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some(label),
+                size: std::mem::size_of::<crate::frame::FrameUniform>() as u64,
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            })
+        };
+        let frame_buffer = frame_uniform_buffer("frame uniform");
+        let overlay_frame_buffer = frame_uniform_buffer("overlay frame uniform");
         let lights = GrowBuffer::new(
             &device,
             "point lights",
@@ -348,25 +455,19 @@ impl Renderer {
         ];
         let mut sky_camera = crate::sky_occlusion::SkyCamera::new(&shared);
         sky_camera.set_inputs(&shared, &frame_buffer, &shadow.occlusion);
-        let frame_groups = [
-            create_frame_group(
-                &shared,
-                &frame_buffer,
-                &lights,
-                &shadow,
-                &env[0],
-                &sky_camera,
-            ),
-            create_frame_group(
-                &shared,
-                &frame_buffer,
-                &lights,
-                &shadow,
-                &env[1],
-                &sky_camera,
-            ),
-        ];
+        let screen_stand_ins = ScreenMaps::stand_ins(&shared);
+        let groups = FrameGroups::new(
+            &shared,
+            [&frame_buffer, &overlay_frame_buffer],
+            &lights,
+            &shadow,
+            &env,
+            &sky_camera,
+            &ScreenMaps::of(&targets),
+            &screen_stand_ins,
+        );
         let post = create_post(&shared, &targets, surface.as_ref().map(|s| s.view_format));
+        let effects = ScreenEffects::new(&shared, &targets);
         let mut meter = crate::exposure::ExposureMeter::new(&shared);
         meter.set_source(&device, &targets.hdr.view);
 
@@ -378,17 +479,24 @@ impl Renderer {
             targets,
             features: Vec::new(),
             frame_buffer,
+            overlay_frame_buffer,
             lights,
             shadow,
             sky_camera,
             env,
             env_current: 0,
             env_rendered: false,
-            frame_groups,
+            screen_stand_ins,
+            frame_groups: groups.scene,
+            prepass_group: groups.prepass,
+            overlay_group: groups.overlay,
             post,
+            effects,
             exposure: ExposureState::default(),
             meter,
-            prev_view_proj: None,
+            previous: None,
+            prev_step: 0.0,
+            prev_aa: settings.anti_aliasing,
             frame_index: 0,
             last_view: None,
         })
@@ -433,11 +541,30 @@ impl Renderer {
             &self.targets,
             self.surface.as_ref().map(|s| s.view_format),
         );
+        self.effects.resize(&self.shared, &self.targets);
+        self.rebuild_frame_groups();
+        self.previous = None;
         self.meter
             .set_source(&self.shared.device, &self.targets.hdr.view);
         for f in &mut self.features {
             f.resize(&self.shared, width, height);
         }
+    }
+
+    fn rebuild_frame_groups(&mut self) {
+        let groups = FrameGroups::new(
+            &self.shared,
+            [&self.frame_buffer, &self.overlay_frame_buffer],
+            &self.lights,
+            &self.shadow,
+            &self.env,
+            &self.sky_camera,
+            &ScreenMaps::of(&self.targets),
+            &self.screen_stand_ins,
+        );
+        self.frame_groups = groups.scene;
+        self.prepass_group = groups.prepass;
+        self.overlay_group = groups.overlay;
     }
 
     /// Render one frame from the world's current state.
@@ -472,18 +599,51 @@ impl Renderer {
         self.exposure.measured_ev100 = self.meter.measured_ev100;
 
         // View & uniforms.
-        let view = build_view(
+        let taa = settings.anti_aliasing == AntiAliasing::Taa;
+        if settings.anti_aliasing != self.prev_aa {
+            self.effects.reset_history();
+            self.prev_aa = settings.anti_aliasing;
+        }
+        let jitter = if taa {
+            crate::effects::jitter(self.frame_index)
+        } else {
+            Vec2::ZERO
+        };
+        let mut view = build_view(
             world,
             self.targets.width,
             self.targets.height,
-            self.prev_view_proj,
+            self.previous,
+            jitter,
             &mut self.exposure,
             self.frame_index,
         );
+        if let Some(prev) = self.previous
+            && crate::effects::is_camera_cut(
+                prev.origin,
+                prev.rotation,
+                view.origin,
+                view.rotation,
+                self.prev_step,
+            )
+        {
+            view.history_valid = false;
+        }
         let mut uniform = frame_uniform(world, &view);
         uniform.shadow_params[3] = self.shadow.size as f32;
         let queue = &self.shared.queue;
         queue.write_buffer(&self.frame_buffer, 0, bytemuck::bytes_of(&uniform));
+        let mut overlay_uniform = uniform;
+        overlay_uniform.view_proj = uniform.unjittered_view_proj;
+        overlay_uniform.proj = view.unjittered_proj.to_cols_array_2d();
+        overlay_uniform.inv_proj = view.unjittered_proj.inverse().to_cols_array_2d();
+        overlay_uniform.inv_view_proj = view.unjittered_view_proj.inverse().to_cols_array_2d();
+        overlay_uniform.jitter = [0.0; 4];
+        queue.write_buffer(
+            &self.overlay_frame_buffer,
+            0,
+            bytemuck::bytes_of(&overlay_uniform),
+        );
         let light_bytes: &[u8] = if view.point_lights.is_empty() {
             &[0u8; 32]
         } else {
@@ -499,25 +659,9 @@ impl Renderer {
                 .set_inputs(&self.shared, &self.frame_buffer, &self.shadow.occlusion);
         }
         if self.lights.write(&self.shared.device, queue, light_bytes) || occlusion_resized {
-            self.frame_groups = [
-                create_frame_group(
-                    &self.shared,
-                    &self.frame_buffer,
-                    &self.lights,
-                    &self.shadow,
-                    &self.env[0],
-                    &self.sky_camera,
-                ),
-                create_frame_group(
-                    &self.shared,
-                    &self.frame_buffer,
-                    &self.lights,
-                    &self.shadow,
-                    &self.env[1],
-                    &self.sky_camera,
-                ),
-            ];
+            self.rebuild_frame_groups();
         }
+        let queue = &self.shared.queue;
         if view.sun_shadows {
             for i in 0..view.cascades.count as usize {
                 let u = ShadowViewUniform {
@@ -644,7 +788,59 @@ impl Renderer {
         }
         self.sky_camera.encode(&mut encoder);
 
-        // Scene: opaque + sky.
+        // Depth prepass: depth, normals and motion of opaque geometry.
+        {
+            let clear = wgpu::Operations {
+                load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                store: wgpu::StoreOp::Store,
+            };
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("prepass"),
+                color_attachments: &[
+                    Some(wgpu::RenderPassColorAttachment {
+                        view: &self.targets.prepass_normal.view,
+                        depth_slice: None,
+                        resolve_target: None,
+                        ops: clear,
+                    }),
+                    Some(wgpu::RenderPassColorAttachment {
+                        view: &self.targets.motion.view,
+                        depth_slice: None,
+                        resolve_target: None,
+                        ops: clear,
+                    }),
+                ],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &self.targets.depth.view,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(0.0),
+                        store: wgpu::StoreOp::Store,
+                    }),
+                    stencil_ops: None,
+                }),
+                ..Default::default()
+            });
+            pass.set_bind_group(0, &self.prepass_group, &[]);
+            for f in &self.features {
+                f.draw_prepass(&mut pass, &ctx);
+                pass.set_bind_group(0, &self.prepass_group, &[]);
+            }
+        }
+        encoder.copy_texture_to_texture(
+            self.targets.depth.texture.as_image_copy(),
+            self.targets.prepass_depth.texture.as_image_copy(),
+            wgpu::Extent3d {
+                width: self.targets.width,
+                height: self.targets.height,
+                depth_or_array_layers: 1,
+            },
+        );
+        if settings.ambient_occlusion {
+            self.effects
+                .encode_ao(&mut encoder, &self.targets, &self.prepass_group);
+        }
+
+        // Scene: opaque + sky (on the prepass depth).
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("scene"),
@@ -660,7 +856,7 @@ impl Renderer {
                 depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
                     view: &self.targets.depth.view,
                     depth_ops: Some(wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(0.0),
+                        load: wgpu::LoadOp::Load,
                         store: wgpu::StoreOp::Store,
                     }),
                     stencil_ops: None,
@@ -725,6 +921,17 @@ impl Renderer {
             }
         }
 
+        // Temporal anti-aliasing (writes the resolved image back into the HDR target).
+        if taa {
+            self.effects.encode_taa(
+                &self.shared,
+                &mut encoder,
+                &self.targets,
+                frame_group,
+                view.history_valid,
+            );
+        }
+
         // Exposure metering of the finished HDR image.
         self.meter.encode(
             &self.shared.queue,
@@ -767,7 +974,11 @@ impl Renderer {
             pass.draw(0..3, 0..1);
         }
 
-        // Overlays (UI).
+        // Overlays (UI), with unjittered matrices.
+        let ctx = FrameContext {
+            frame_group: &self.overlay_group,
+            ..ctx
+        };
         for f in &mut self.features {
             f.overlay(&mut encoder, &ctx);
         }
@@ -854,7 +1065,12 @@ impl Renderer {
         }
         world.insert_resource(stats);
 
-        self.prev_view_proj = Some(view.view_proj);
+        self.prev_step = (view.origin - view.prev_origin).length();
+        self.previous = Some(PreviousView {
+            view_proj: view.unjittered_view_proj,
+            origin: view.origin,
+            rotation: view.rotation,
+        });
         self.last_view = Some(view);
         self.frame_index += 1;
     }
@@ -881,7 +1097,11 @@ impl Renderer {
                 1.0 / levels,
             ],
             params3: [
-                0.0,
+                if settings.anti_aliasing == AntiAliasing::Taa {
+                    settings.sharpness.clamp(0.0, 1.0)
+                } else {
+                    0.0
+                },
                 settings.white_balance,
                 view.exposure,
                 settings.night_desaturation,
@@ -946,7 +1166,7 @@ impl Renderer {
     }
 }
 
-fn layout_entry(
+pub(crate) fn layout_entry(
     binding: u32,
     visibility: wgpu::ShaderStages,
     ty: wgpu::BindingType,
@@ -959,7 +1179,7 @@ fn layout_entry(
     }
 }
 
-fn fullscreen_pass<'e>(
+pub(crate) fn fullscreen_pass<'e>(
     encoder: &'e mut wgpu::CommandEncoder,
     label: &str,
     target: &wgpu::TextureView,
@@ -1082,6 +1302,43 @@ fn create_occlusion_target(shared: &GpuShared, size: u32) -> wgpu::TextureView {
         .create_view(&wgpu::TextureViewDescriptor::default())
 }
 
+/// Group 0 bind groups for every kind of pass.
+struct FrameGroups {
+    /// Scene passes, one per environment map buffer.
+    scene: [wgpu::BindGroup; 2],
+    /// Prepass and screen-space effects: stand-ins for the maps they write.
+    prepass: wgpu::BindGroup,
+    /// Overlays: the unjittered frame uniform.
+    overlay: wgpu::BindGroup,
+}
+
+impl FrameGroups {
+    /// `frame` holds the jittered and the unjittered frame uniform buffers.
+    #[allow(clippy::too_many_arguments)]
+    fn new(
+        shared: &GpuShared,
+        frame: [&wgpu::Buffer; 2],
+        lights: &GrowBuffer,
+        shadow: &ShadowResources,
+        env: &[Tex; 2],
+        sky_camera: &crate::sky_occlusion::SkyCamera,
+        maps: &ScreenMaps,
+        stand_ins: &ScreenMaps,
+    ) -> Self {
+        let group = |uniform: &wgpu::Buffer, env: &Tex, maps: &ScreenMaps| {
+            create_frame_group(shared, uniform, lights, shadow, env, sky_camera, maps)
+        };
+        Self {
+            scene: [
+                group(frame[0], &env[0], maps),
+                group(frame[0], &env[1], maps),
+            ],
+            prepass: group(frame[0], &env[0], stand_ins),
+            overlay: group(frame[1], &env[0], maps),
+        }
+    }
+}
+
 fn create_frame_group(
     shared: &GpuShared,
     frame: &wgpu::Buffer,
@@ -1089,7 +1346,11 @@ fn create_frame_group(
     shadow: &ShadowResources,
     env: &Tex,
     sky_camera: &crate::sky_occlusion::SkyCamera,
+    maps: &ScreenMaps,
 ) -> wgpu::BindGroup {
+    fn view(v: &wgpu::TextureView) -> wgpu::BindingResource<'_> {
+        wgpu::BindingResource::TextureView(v)
+    }
     shared.device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("frame"),
         layout: &shared.frame_layout,
@@ -1104,7 +1365,7 @@ fn create_frame_group(
             },
             wgpu::BindGroupEntry {
                 binding: 2,
-                resource: wgpu::BindingResource::TextureView(&shadow.array_view),
+                resource: view(&shadow.array_view),
             },
             wgpu::BindGroupEntry {
                 binding: 3,
@@ -1116,7 +1377,7 @@ fn create_frame_group(
             },
             wgpu::BindGroupEntry {
                 binding: 5,
-                resource: wgpu::BindingResource::TextureView(&env.view),
+                resource: view(&env.view),
             },
             wgpu::BindGroupEntry {
                 binding: 6,
@@ -1124,7 +1385,7 @@ fn create_frame_group(
             },
             wgpu::BindGroupEntry {
                 binding: 7,
-                resource: wgpu::BindingResource::TextureView(&shadow.occlusion),
+                resource: view(&shadow.occlusion),
             },
             wgpu::BindGroupEntry {
                 binding: 8,
@@ -1134,26 +1395,40 @@ fn create_frame_group(
                 binding: 9,
                 resource: sky_camera.buffer.as_entire_binding(),
             },
+            wgpu::BindGroupEntry {
+                binding: 10,
+                resource: view(&maps.ao),
+            },
+            wgpu::BindGroupEntry {
+                binding: 11,
+                resource: view(&maps.normal),
+            },
+            wgpu::BindGroupEntry {
+                binding: 12,
+                resource: view(&maps.depth),
+            },
         ],
     })
 }
 
+/// A pipeline that draws one fullscreen triangle (`fullscreen_vertex`) into `format`.
 #[allow(clippy::too_many_arguments)]
-fn fullscreen_pipeline(
+pub(crate) fn fullscreen_pipeline(
     shared: &GpuShared,
     label: &str,
     module: &wgpu::ShaderModule,
     vs: &str,
     fs: &str,
-    layout: &wgpu::BindGroupLayout,
+    layouts: &[&wgpu::BindGroupLayout],
     format: wgpu::TextureFormat,
     blend: Option<wgpu::BlendState>,
 ) -> wgpu::RenderPipeline {
+    let layouts: Vec<Option<&wgpu::BindGroupLayout>> = layouts.iter().map(|l| Some(*l)).collect();
     let pipeline_layout = shared
         .device
         .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some(label),
-            bind_group_layouts: &[Some(layout)],
+            bind_group_layouts: &layouts,
             immediate_size: 0,
         });
     shared
@@ -1256,7 +1531,7 @@ fn create_post(
         &post_module,
         "vs_fullscreen",
         "fs_tonemap",
-        &tonemap_layout,
+        &[&tonemap_layout],
         shared.formats.ldr,
         None,
     );
@@ -1266,7 +1541,7 @@ fn create_post(
         &bloom_module,
         "vs_bloom",
         "fs_down",
-        &bloom_layout,
+        &[&bloom_layout],
         shared.formats.hdr,
         None,
     );
@@ -1284,7 +1559,7 @@ fn create_post(
         &bloom_module,
         "vs_bloom",
         "fs_up",
-        &bloom_layout,
+        &[&bloom_layout],
         shared.formats.hdr,
         Some(additive),
     );
@@ -1295,7 +1570,7 @@ fn create_post(
             &blit_module,
             "vs_blit",
             "fs_blit",
-            &blit_layout,
+            &[&blit_layout],
             f,
             None,
         )

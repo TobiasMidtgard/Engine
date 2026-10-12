@@ -17,8 +17,9 @@ everything else (streaming, LOD, colliders, ground queries, prints) follows the 
   parent patch's shape before a split or merge, so detail never pops. Positions are `f64` and
   rendered camera-relative, so a 6,371 km Earth is exact to the centimeter at the surface.
 - **Planet shapes.** `PlanetShape` presets for an Earth-like world (continents, oceans,
-  eroded mountains, hills, climate bands), the Moon (craters, maria) and Mars (craters,
-  plains, dry ice caps), all seeded and deterministic. Detail is generated down to
+  eroded mountains whose steep sides break into rock ledges, hills, climate bands), the
+  Moon (craters, maria) and Mars (craters, plains, dry ice caps), all seeded and
+  deterministic. Detail is generated down to
   `finest_spacing_m` (0.5 m by default).
 - **Flat pads and a view worth having.** `FlatPad` blends the planet into level ground for a
   level, town or spaceport. `PlanetTerrain::home_transform(pad)` places the planet so the pad
@@ -37,7 +38,11 @@ everything else (streaming, LOD, colliders, ground queries, prints) follows the 
   fields. Footsteps, rain and the `Ground` query follow the painted layer; edits paint over it.
 - **Ground cover from afar.** Climate colors (lush, dry, desert, snow by temperature and
   altitude), woods as dark canopy, meadows and fields in patches a few hundred meters
-  across, worn bare patches, rock on steep or high ground with scree below it, beaches.
+  across, worn bare patches, beaches. Mountainsides are a patchwork: grass and woods hold
+  steep ground below the tree line, outcrops stand on spurs with grass and scree in the
+  hollows, and weathered rock (iron-stained faces, dark wet gullies) takes over on cliffs
+  and high up. From orbit, noise per pixel gives woods, snowfields and coasts natural
+  shapes instead of the vertices' blocky ones.
 - **Detailed ground materials up close.** Nine PBR materials (turf in tufts over thatch,
   leaf litter with needles and twigs, soil, churned mud, rock, snow, rippled sand, gravel,
   concrete) are generated procedurally in `materials.rs` like a node-graph material: height
@@ -121,7 +126,11 @@ a person, a dog, a horse and a rover walking them (prints and tracks appear from
 frame), plus a dug crater, a trench and a raised mound. The walkers make prints but have no
 bodies: attach a character, animal or vehicle from the module that owns it as a child of
 each `DemoWalker` entity (its `Transform` moves along the path facing forward), or pass
-`LabOptions { stand_in_bodies: true }` to `spawn_demo_with` for plain shapes.
+`LabOptions { stand_in_bodies: true }` to `spawn_demo_with` for simple figures built from
+shapes: a hiker with a backpack, a dog, a horse and a rover, whose legs and arms swing with
+their steps (`LabLimb`, trotting animals move diagonal legs together) and whose wheels roll
+with the distance driven. The strips and edits sit on the ground under each spot (sampled
+from `Ground` when they apply), so the lab works on uneven ground too.
 
 ## Known limits (next rounds)
 

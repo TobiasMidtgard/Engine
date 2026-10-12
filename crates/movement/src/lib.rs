@@ -2,13 +2,17 @@
 
 pub mod afterimage;
 mod api;
+pub mod camera;
 pub mod combat;
 pub mod demo;
 mod fallback;
 pub mod fx;
+pub mod lockon;
 mod locomotion;
 pub mod look;
 pub mod mover;
+pub mod platform;
+pub mod play;
 pub mod player;
 pub mod profile;
 mod shift;
@@ -18,12 +22,15 @@ use engine_core::prelude::*;
 use engine_render::RenderAppExt;
 
 pub use afterimage::{Afterimage, Afterimages};
+pub use camera::PilotCamera;
 pub use combat::{
     AttackPhase, AttackState, CombatLog, CombatRecord, CombatState, Fighter, Outcome,
 };
 pub use fx::{CameraFx, SlowMotionFx};
+pub use lockon::LockOn;
 pub use look::effects::{EffectSettings, Effects};
 pub use mover::{Dash, DashRequest, Mantle, Mover, WallContact};
+pub use play::{Play, PlayToggle};
 pub use player::PlayerControlled;
 pub use profile::MovementProfile;
 pub use tempo::{
@@ -34,8 +41,8 @@ pub use tempo::{
 /// Everything a game needs to use movement, in one import.
 pub mod prelude {
     pub use crate::{
-        Afterimages, CameraFx, CombatState, Fighter, MovementPlugin, MovementProfile, Mover,
-        Perceiver, PlayerControlled, SlowMotionFx, Tempo, TimePerception,
+        Afterimages, CameraFx, CombatState, Fighter, LockOn, MovementPlugin, MovementProfile,
+        Mover, Perceiver, PilotCamera, PlayerControlled, SlowMotionFx, Tempo, TimePerception,
     };
 }
 
@@ -63,6 +70,15 @@ impl Plugin for MovementPlugin {
             .init_resource::<PerceptionStatus>()
             .init_resource::<CombatLog>()
             .init_resource::<SlowMotionFx>()
+            .init_resource::<Play>()
+            .register_component::<LockOn>(
+                "Lock-on for the player: the enemy locked onto (lock_on action), lock range and \
+                 break range (m), widest pick angle from the view (deg).",
+            )
+            .register_component::<PilotCamera>(
+                "Third-person camera over a character's shoulder: look angles (rad), boom \
+                 distance, pivot height and shoulder offset (m), look speeds, follow lag.",
+            )
             .register_component::<MovementProfile>(
                 "How a character moves: run/sprint speeds (m/s), jumps (m), slide, wall-run, \
                  mantle and dash tuning. Presets: pilot, human, elite (movement.preset).",
@@ -122,6 +138,7 @@ impl Plugin for MovementPlugin {
                 (
                     (
                         locomotion::adopt_characters,
+                        lockon::lock_on.before(player::player_intent),
                         player::player_intent,
                         tempo::apply_tempo,
                     )
@@ -148,9 +165,14 @@ impl Plugin for MovementPlugin {
                 Update,
                 (
                     fx::update_slow_motion_fx,
+                    play::toggle.before(UpdateSet::Camera),
+                    camera::follow_pilots.in_set(UpdateSet::Camera),
                     fx::camera_fx.after(UpdateSet::Camera),
+                    lockon::place_markers.after(UpdateSet::Camera),
                 ),
             )
+            .add_systems(PostUpdate, play::capture_mouse)
+            .add_systems(Startup, player::bind_actions)
             // Presentation that copies or samples final poses: after transforms settle.
             .add_systems(
                 PostUpdate,

@@ -15,6 +15,10 @@
 //! a fragment stage that discards by base color alpha, so foliage cards cast leaf-shaped
 //! shadows.
 //!
+//! Depth prepass: opaque batches are drawn a first time with `vs_prepass`/`fs_prepass`, writing
+//! depth, normals, roughness and motion vectors. Motion comes from each entity's previous
+//! transform (kept per entity), so moving objects stay sharp under temporal anti-aliasing.
+//!
 //! Mirrored instances (a transform with a negative determinant, e.g. `scale.x = -1`, common in
 //! glTF files) flip their triangles' winding; they are drawn with clockwise-front pipelines so
 //! back-face culling keeps the outside, as glTF requires.
@@ -38,7 +42,8 @@ use crate::settings::RenderSettings;
 use crate::shadows::{MAX_CASCADES, SKY_OCCLUSION_VIEW};
 use crate::texture::{Image, PixelFormat};
 
-/// Per-instance vertex data (locations 4–10 in `mesh.wgsl`).
+/// Per-instance vertex data (locations 4–10 in `mesh.wgsl`, plus 11–13 for the previous
+/// matrix in the mesh feature's own pipelines).
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Pod, Zeroable)]
 pub struct MeshInstance {
@@ -48,16 +53,32 @@ pub struct MeshInstance {
     pub n: [[f32; 4]; 3],
     /// Material index, flags, mesh min y bits, mesh height bits.
     pub extra: [u32; 4],
+    /// Last frame's model matrix rows, relative to last frame's camera (motion vectors).
+    pub prev: [[f32; 4]; 3],
 }
 
 impl MeshInstance {
-    const ATTRIBUTES: [wgpu::VertexAttribute; 7] = wgpu::vertex_attr_array![
+    const ATTRIBUTES: [wgpu::VertexAttribute; 10] = wgpu::vertex_attr_array![
         4 => Float32x4, 5 => Float32x4, 6 => Float32x4,
         7 => Float32x4, 8 => Float32x4, 9 => Float32x4,
         10 => Uint32x4,
+        11 => Float32x4, 12 => Float32x4, 13 => Float32x4,
     ];
 
+    /// The instance layout other features share: model matrix, normal matrix and `extra` at
+    /// locations 4–10. The previous matrix is in the buffer but not bound, which leaves
+    /// locations 11 and up free for the feature's own vertex data.
     pub fn layout() -> wgpu::VertexBufferLayout<'static> {
+        wgpu::VertexBufferLayout {
+            array_stride: std::mem::size_of::<Self>() as u64,
+            step_mode: wgpu::VertexStepMode::Instance,
+            attributes: &Self::ATTRIBUTES[..7],
+        }
+    }
+
+    /// [`MeshInstance::layout`] plus the previous model matrix at locations 11–13, for
+    /// pipelines that write motion vectors.
+    pub fn layout_with_motion() -> wgpu::VertexBufferLayout<'static> {
         wgpu::VertexBufferLayout {
             array_stride: std::mem::size_of::<Self>() as u64,
             step_mode: wgpu::VertexStepMode::Instance,
@@ -65,21 +86,37 @@ impl MeshInstance {
         }
     }
 
-    /// Build from a camera-relative model matrix.
+    /// Build from a camera-relative model matrix (not moving: last frame's matrix is the same
+    /// world placement; see [`MeshInstance::with_previous`]).
     pub fn new(model: Mat4, material: u32, min_y: f32, height: f32) -> Self {
         let normal = Mat3::from_mat4(model).inverse().transpose();
-        let r0 = model.row(0);
-        let r1 = model.row(1);
-        let r2 = model.row(2);
+        let rows = |m: Mat4| {
+            [
+                m.row(0).to_array(),
+                m.row(1).to_array(),
+                m.row(2).to_array(),
+            ]
+        };
         Self {
-            m: [r0.to_array(), r1.to_array(), r2.to_array()],
+            m: rows(model),
             n: [
                 normal.x_axis.extend(0.0).to_array(),
                 normal.y_axis.extend(0.0).to_array(),
                 normal.z_axis.extend(0.0).to_array(),
             ],
             extra: [material, 0, min_y.to_bits(), height.to_bits()],
+            prev: rows(model),
         }
+    }
+
+    /// Set last frame's model matrix, relative to last frame's camera.
+    pub fn with_previous(mut self, prev_model: Mat4) -> Self {
+        self.prev = [
+            prev_model.row(0).to_array(),
+            prev_model.row(1).to_array(),
+            prev_model.row(2).to_array(),
+        ];
+        self
     }
 }
 
@@ -167,6 +204,7 @@ struct Item {
 }
 
 type MeshQuery = (
+    Entity,
     &'static GlobalTransform,
     &'static MeshRenderer,
     &'static ResolvedMesh,
@@ -177,6 +215,12 @@ type MeshQuery = (
 pub struct MeshFeature {
     /// Indexed by `PIPE_*` bits: double-sided, blend, mirrored (clockwise front faces).
     pipelines: Vec<wgpu::RenderPipeline>,
+    /// Depth prepass pipelines, indexed like `pipelines` (blend variants unused).
+    prepass_pipelines: Vec<wgpu::RenderPipeline>,
+    /// Each entity's world transform last frame, and the frame it was seen (motion vectors).
+    previous: HashMap<Entity, (GlobalTransform, u64)>,
+    /// Camera position last frame.
+    prev_origin: Option<DVec3>,
     /// Depth-only shadow pipeline (opaque casters).
     shadow_pipeline: Option<wgpu::RenderPipeline>,
     /// Alpha-tested shadow pipeline (masked casters).
@@ -636,7 +680,10 @@ impl RenderFeature for MeshFeature {
             ],
             immediate_size: 0,
         });
-        let buffers = [Some(Vertex::layout()), Some(MeshInstance::layout())];
+        let buffers = [
+            Some(Vertex::layout()),
+            Some(MeshInstance::layout_with_motion()),
+        ];
         self.pipelines = (0..PIPELINE_VARIANTS)
             .map(|variant| {
                 let blend = variant & PIPE_BLEND != 0;
@@ -671,6 +718,43 @@ impl RenderFeature for MeshFeature {
                             blend: blend.then_some(wgpu::BlendState::ALPHA_BLENDING),
                             write_mask: wgpu::ColorWrites::ALL,
                         })],
+                    }),
+                    multiview_mask: None,
+                    cache: None,
+                })
+            })
+            .collect();
+
+        let prepass_targets = gpu.prepass_targets();
+        self.prepass_pipelines = (0..PIPELINE_VARIANTS)
+            .map(|variant| {
+                let double = variant & PIPE_DOUBLE != 0;
+                let mirror = variant & PIPE_MIRROR != 0;
+                device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                    label: Some("mesh prepass"),
+                    layout: Some(&layout),
+                    vertex: wgpu::VertexState {
+                        module: &shader,
+                        entry_point: Some("vs_prepass"),
+                        compilation_options: Default::default(),
+                        buffers: &buffers,
+                    },
+                    primitive: wgpu::PrimitiveState {
+                        cull_mode: if double { None } else { Some(wgpu::Face::Back) },
+                        front_face: if mirror {
+                            wgpu::FrontFace::Cw
+                        } else {
+                            wgpu::FrontFace::Ccw
+                        },
+                        ..Default::default()
+                    },
+                    depth_stencil: Some(gpu.depth_state(true)),
+                    multisample: Default::default(),
+                    fragment: Some(wgpu::FragmentState {
+                        module: &shader,
+                        entry_point: Some("fs_prepass"),
+                        compilation_options: Default::default(),
+                        targets: &prepass_targets,
                     }),
                     multiview_mask: None,
                     cache: None,
@@ -806,7 +890,9 @@ impl RenderFeature for MeshFeature {
         let mut culled = 0u32;
         let shadows = view.sun_shadows || view.sky_occlusion.enabled;
 
-        for (gt, renderer, resolved) in query.iter(world_ref) {
+        let frame = self.frame;
+        let prev_origin = self.prev_origin.unwrap_or(view.origin);
+        for (entity, gt, renderer, resolved) in query.iter(world_ref) {
             if !renderer.visible {
                 continue;
             }
@@ -868,6 +954,10 @@ impl RenderFeature for MeshFeature {
                 }
             };
             let model = gt.matrix_relative_to(view.origin);
+            let prev_gt = match self.previous.insert(entity, (*gt, frame)) {
+                Some((prev, seen)) if seen + 1 == frame => prev,
+                _ => *gt,
+            };
             // A negative determinant mirrors the mesh and turns its front faces clockwise.
             let mirrored = Mat3::from_mat4(model).determinant() < 0.0;
             let pipeline = if blend { PIPE_BLEND } else { 0 }
@@ -887,13 +977,18 @@ impl RenderFeature for MeshFeature {
                 center,
                 radius,
                 dist2: center.length_squared(),
-                instance: MeshInstance::new(model, material_slot, min_y, height),
+                instance: MeshInstance::new(model, material_slot, min_y, height)
+                    .with_previous(prev_gt.matrix_relative_to(prev_origin)),
             });
             if !visible {
                 culled += 1;
             }
         }
         self.query = Some(query);
+        self.prev_origin = Some(view.origin);
+        if frame.is_multiple_of(60) {
+            self.previous.retain(|_, (_, seen)| *seen + 1 >= frame);
+        }
 
         // Order: opaque (by pipeline, texture set, mesh), transparent (back to front).
         self.items.sort_unstable_by(|a, b| {
@@ -1055,6 +1150,23 @@ impl RenderFeature for MeshFeature {
         self.draw_batches(pass, batches, |p| self.pipelines.get(p as usize), |_| true);
     }
 
+    fn draw_prepass(&self, pass: &mut wgpu::RenderPass<'_>, _ctx: &FrameContext) {
+        let (Some(group), Some(instances)) = (&self.material_group, &self.instances) else {
+            return;
+        };
+        if self.opaque.is_empty() {
+            return;
+        }
+        pass.set_bind_group(1, group, &[]);
+        pass.set_vertex_buffer(1, instances.buffer.slice(..));
+        self.draw_batches(
+            pass,
+            &self.opaque,
+            |p| self.prepass_pipelines.get(p as usize),
+            |_| true,
+        );
+    }
+
     fn draw_shadow(&self, pass: &mut wgpu::RenderPass<'_>, cascade: usize, _ctx: &FrameContext) {
         let (Some(group), Some(instances)) = (&self.material_group, &self.instances) else {
             return;
@@ -1086,5 +1198,26 @@ impl RenderFeature for MeshFeature {
             "transparent_batches": self.transparent.len(),
             "shadow_batches": self.shadow.iter().map(|s| s.len()).collect::<Vec<_>>(),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Other crates bind `MeshInstance::layout()` next to their own vertex data at locations 11
+    /// and up (the skinning feature does), so the shared layout must stay at 4–10.
+    #[test]
+    fn the_shared_instance_layout_leaves_locations_above_10_free() {
+        let shared = MeshInstance::layout();
+        assert!(
+            shared
+                .attributes
+                .iter()
+                .all(|a| (4..=10).contains(&a.shader_location))
+        );
+        let motion = MeshInstance::layout_with_motion();
+        assert_eq!(motion.array_stride, shared.array_stride);
+        assert!(motion.attributes.iter().any(|a| a.shader_location == 13));
     }
 }

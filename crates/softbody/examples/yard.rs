@@ -57,10 +57,45 @@ const SHOTS: &[Shot] = &[
         follow: Some("Mannequin"),
     },
     Shot {
+        name: "mannequin_front",
+        secs: 6.2,
+        eye: [0.9, 1.45, -2.3],
+        target: [0.0, 1.05, 0.0],
+        follow: Some("Mannequin"),
+    },
+    Shot {
+        name: "mannequin_face",
+        secs: 6.35,
+        eye: [0.3, 1.75, -0.8],
+        target: [0.0, 1.66, 0.0],
+        follow: Some("Mannequin"),
+    },
+    Shot {
         name: "dog",
         secs: 6.6,
         eye: [1.9, 0.9, 0.9],
         target: [0.0, 0.5, 0.05],
+        follow: Some("Dog"),
+    },
+    Shot {
+        name: "dog_front",
+        secs: 6.75,
+        eye: [0.9, 0.75, -1.4],
+        target: [0.0, 0.5, -0.1],
+        follow: Some("Dog"),
+    },
+    Shot {
+        name: "dog_legs",
+        secs: 6.76,
+        eye: [0.45, 0.3, -0.75],
+        target: [0.05, 0.17, -0.22],
+        follow: Some("Dog"),
+    },
+    Shot {
+        name: "dog_head",
+        secs: 6.85,
+        eye: [0.45, 0.85, -1.0],
+        target: [0.0, 0.74, -0.5],
         follow: Some("Dog"),
     },
     Shot {
@@ -112,6 +147,42 @@ const SHOTS: &[Shot] = &[
         target: [-12.0, 3.2, 6.0],
         follow: None,
     },
+    // Prop close-ups.
+    Shot {
+        name: "gun",
+        secs: 13.3,
+        eye: [-11.6, 2.0, 15.5],
+        target: [-14.2, 1.3, 11.5],
+        follow: None,
+    },
+    Shot {
+        name: "press_top",
+        secs: 13.6,
+        eye: [8.0, 3.8, 4.4],
+        target: [6.5, 3.0, 2.5],
+        follow: None,
+    },
+    Shot {
+        name: "pier",
+        secs: 13.9,
+        eye: [-5.2, 4.8, -9.5],
+        target: [-6.4, 4.2, -11.0],
+        follow: None,
+    },
+    Shot {
+        name: "tower",
+        secs: 14.2,
+        eye: [5.2, 4.6, 13.6],
+        target: [3.0, 3.2, 10.5],
+        follow: None,
+    },
+    Shot {
+        name: "crates",
+        secs: 14.5,
+        eye: [3.8, 1.6, 1.8],
+        target: [2.9, 0.7, -1.0],
+        follow: None,
+    },
 ];
 
 fn main() {
@@ -151,16 +222,6 @@ fn main() {
         },
         Transform::default().looking_at(DVec3::new(-0.45, -0.62, -0.65), Vec3::Y),
     ));
-    app.world.spawn((
-        Transform::default(),
-        MeshRenderer::new(
-            Shape::Plane {
-                size: [400.0, 400.0],
-                subdivisions: 1,
-            },
-            StandardMaterial::hex(0x4a6b2f).with_roughness(0.95),
-        ),
-    ));
     let camera = app
         .world
         .spawn((
@@ -172,6 +233,8 @@ fn main() {
         ))
         .id();
     app.add_systems(Startup, |mut commands: Commands| {
+        // Packed earth and gravel under the yard, fraying into a grass field.
+        engine_softbody::demo::spawn_review_ground(&mut commands, DVec3::ZERO);
         engine_softbody::demo::spawn_demo(&mut commands, DVec3::ZERO);
     });
 
