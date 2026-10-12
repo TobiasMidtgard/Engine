@@ -1,6 +1,7 @@
 //! Proves the physics contract and its conformance suite hold together: a deliberately tiny
 //! backend (axis-aligned boxes, no rotation) written only against `engine_world::physics`
-//! passes every check. It also shows the minimum a replacement physics module has to do.
+//! passes every check, and fails the right checks when one of its deliberate [`Bugs`] is
+//! switched on. It also shows the minimum a replacement physics module has to do.
 
 use std::collections::HashSet;
 use std::sync::{Arc, RwLock};
@@ -10,7 +11,22 @@ use engine_core::prelude::*;
 use engine_world::Gravity;
 use engine_world::physics::*;
 
-struct MiniPhysics;
+#[derive(Default)]
+struct MiniPhysics {
+    /// Deliberate contract violations, all off for a correct backend. Tests switch them on to
+    /// prove the conformance suite catches them.
+    bugs: Bugs,
+}
+
+#[derive(Resource, Default, Clone, Copy, Debug)]
+struct Bugs {
+    /// Forget which pairs touch: send `Started` every step of a contact and never `Ended`.
+    no_pair_tracking: bool,
+    /// Report every contact impulse as 0.
+    zero_impulse: bool,
+    /// Report contact normals from `b` toward `a`.
+    flipped_normal: bool,
+}
 
 #[derive(Clone, Copy)]
 struct Aabb {
@@ -41,6 +57,7 @@ impl Plugin for MiniPhysics {
         let shared = Arc::new(RwLock::new(Snapshot::default()));
         app.insert_resource(PhysicsQueries(Arc::new(Queries(shared.clone()))))
             .insert_resource(Shared(shared))
+            .insert_resource(self.bugs)
             .init_resource::<Touching>()
             .add_systems(
                 FixedUpdate,
@@ -102,10 +119,11 @@ fn resolve(pos: &mut DVec3, h: DVec3, other: &Aabb) -> Option<DVec3> {
     Some(axis)
 }
 
-#[allow(clippy::type_complexity)]
+#[allow(clippy::type_complexity, clippy::too_many_arguments)]
 fn step_bodies(
     time: Res<Time>,
     gravity: Res<Gravity>,
+    bugs: Res<Bugs>,
     mut impulses: MessageReader<ApplyImpulse>,
     mut contacts: MessageWriter<ContactEvent>,
     mut touching: ResMut<Touching>,
@@ -144,20 +162,23 @@ fn step_bodies(
                     v.linear *= 0.5; // ground friction stand-in
                 }
                 now.insert((s.entity, e));
-                if !touching.0.contains(&(s.entity, e)) {
+                if bugs.no_pair_tracking || !touching.0.contains(&(s.entity, e)) {
                     contacts.write(ContactEvent {
                         phase: ContactPhase::Started,
                         a: s.entity,
                         b: e,
                         point: pos - axis * h.y as f64,
-                        normal: n,
-                        impulse: -into * mass,
+                        normal: if bugs.flipped_normal { -n } else { n },
+                        impulse: if bugs.zero_impulse { 0.0 } else { -into * mass },
                         sensor: false,
                     });
                 }
             }
         }
         t.translation = pos;
+    }
+    if bugs.no_pair_tracking {
+        return;
     }
     for &(a, b) in touching.0.difference(&now) {
         contacts.write(ContactEvent {
@@ -316,8 +337,64 @@ impl PhysicsQuery for Queries {
 #[test]
 fn a_minimal_backend_passes_the_conformance_suite() {
     engine_world::physics::conformance::assert_all(|app| {
-        app.add_plugins(MiniPhysics);
+        app.add_plugins(MiniPhysics::default());
     });
+}
+
+#[test]
+fn the_suite_catches_wrong_contact_events() {
+    let cases: [(&str, Bugs, &[&str], &str); 3] = [
+        (
+            "Started every step and never Ended",
+            Bugs {
+                no_pair_tracking: true,
+                ..Bugs::default()
+            },
+            &["reports_contacts", "reports_contact_end"],
+            "Started",
+        ),
+        (
+            "impulse always 0",
+            Bugs {
+                zero_impulse: true,
+                ..Bugs::default()
+            },
+            &["reports_contacts"],
+            "impulse",
+        ),
+        (
+            "normal from b toward a",
+            Bugs {
+                flipped_normal: true,
+                ..Bugs::default()
+            },
+            &["reports_contacts"],
+            "normal",
+        ),
+    ];
+    for (bug, bugs, expected, says) in cases {
+        let checks = engine_world::physics::conformance::run_all(|app| {
+            app.add_plugins(MiniPhysics { bugs });
+        });
+        let failed: Vec<_> = checks.iter().filter(|c| c.result.is_err()).collect();
+        let names: Vec<&str> = failed.iter().map(|c| c.name).collect();
+        let reasons: Vec<String> = failed
+            .iter()
+            .map(|c| format!("{}: {}", c.name, c.result.as_ref().unwrap_err()))
+            .collect();
+        assert_eq!(
+            names,
+            expected,
+            "a backend whose contact events have {bug} should fail exactly these checks; it \
+             failed:\n  {}",
+            reasons.join("\n  ")
+        );
+        let first = failed[0].result.as_ref().unwrap_err();
+        assert!(
+            first.contains(says),
+            "the error for {bug} should mention {says}: {first}"
+        );
+    }
 }
 
 #[test]

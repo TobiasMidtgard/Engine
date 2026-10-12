@@ -14,8 +14,9 @@
 //! Each check builds a fresh app (core + `WorldPlugin` + your plugin), steps it at a fixed
 //! 60 Hz with deterministic time, and compares against physics with generous tolerances. The
 //! checks cover what other modules rely on: gravity, resting contact, impulses, contact
-//! events, raycasts, time dilation, precision far from the origin and the character
-//! controller.
+//! events (one `Started` per touch carrying the impact impulse and a normal from `a` toward
+//! `b`, one `Ended` when it stops), raycasts, time dilation, precision far from the origin and
+//! the character controller.
 
 use engine_core::math::{DVec3, Vec3};
 use engine_core::prelude::*;
@@ -43,6 +44,7 @@ const CHECKS: &[(&str, CheckFn)] = &[
     ("raycast_hits_static_box", raycast_hits_static_box),
     ("impulse_changes_velocity", impulse_changes_velocity),
     ("reports_contacts", reports_contacts),
+    ("reports_contact_end", reports_contact_end),
     ("time_dilation_slows_bodies", time_dilation_slows_bodies),
     ("precise_far_from_origin", precise_far_from_origin),
     ("character_walks_and_grounds", character_walks_and_grounds),
@@ -299,30 +301,151 @@ fn impulse_changes_velocity(install: &dyn Fn(&mut App)) -> Result<(), String> {
     )
 }
 
-fn reports_contacts(install: &dyn Fn(&mut App)) -> Result<(), String> {
+/// Mass of the ball the contact checks drop, kg.
+const BALL_KG: f32 = 2.0;
+/// How far the ball falls before it touches the ground, m.
+const BALL_DROP_M: f64 = 1.5;
+/// Steps the dropped ball gets to land, bounce and come to rest (3 s).
+const SETTLE_STEPS: usize = 180;
+
+/// Drop a [`BALL_KG`] ball (radius 0.5 m) from [`BALL_DROP_M`] above the ground and step until
+/// it should rest there. Returns the app, the ground and the ball.
+fn drop_ball(install: &dyn Fn(&mut App)) -> (App, Entity, Entity) {
     let mut app = app_with(install);
     let g = ground(&mut app, DVec3::ZERO);
     let ball = app
         .world
         .spawn((
-            Transform::from_xyz(0.0, 2.0, 0.0),
-            RigidBody::dynamic(),
+            Transform::from_xyz(0.0, 0.5 + 0.5 + BALL_DROP_M, 0.0),
+            RigidBody::dynamic().with_mass(BALL_KG),
             Collider::sphere(0.5),
             Velocity::default(),
         ))
         .id();
-    app.update_n(90);
-    let seen = &app.world.resource::<SeenContacts>().0;
-    let started = seen.iter().any(|c| {
-        c.phase == ContactPhase::Started && ((c.a == g && c.b == ball) || (c.a == ball && c.b == g))
-    });
-    if started {
-        Ok(())
-    } else {
-        Err(format!(
+    app.update_n(SETTLE_STEPS);
+    (app, g, ball)
+}
+
+/// Contact events seen so far.
+fn seen_contacts(app: &App) -> &[ContactEvent] {
+    &app.world.resource::<SeenContacts>().0
+}
+
+/// Events of `phase` between `x` and `y` (in either order) in `events`.
+fn pair_events(
+    events: &[ContactEvent],
+    x: Entity,
+    y: Entity,
+    phase: ContactPhase,
+) -> impl Iterator<Item = &ContactEvent> {
+    events
+        .iter()
+        .filter(move |c| c.phase == phase && ((c.a == x && c.b == y) || (c.a == y && c.b == x)))
+}
+
+fn reports_contacts(install: &dyn Fn(&mut App)) -> Result<(), String> {
+    let (mut app, g, ball) = drop_ball(install);
+    let landed = seen_contacts(&app).len();
+    app.update_n(60);
+    let seen = seen_contacts(&app);
+    let Some(first) = pair_events(seen, g, ball, ContactPhase::Started).next() else {
+        return Err(format!(
             "no ContactEvent::Started between the falling ball and the ground ({} events seen)",
             seen.len()
-        ))
+        ));
+    };
+
+    let again = pair_events(&seen[landed..], g, ball, ContactPhase::Started).count();
+    if again > 0 {
+        return Err(format!(
+            "the dropped ball should rest on the ground after 3 s, but {again} more \
+             ContactEvent::Started for it arrived in the second after that; send Started once \
+             when two colliders start touching, not every step they touch"
+        ));
+    }
+    let started = pair_events(seen, g, ball, ContactPhase::Started).count();
+    let ended = pair_events(seen, g, ball, ContactPhase::Ended).count();
+    if started != ended + 1 {
+        return Err(format!(
+            "the ball now rests on the ground, so every Started but the last needs an Ended \
+             (one per bounce), but there were {started} Started and {ended} Ended events"
+        ));
+    }
+
+    let gravity = app
+        .world
+        .resource::<crate::Gravity>()
+        .at(DVec3::ZERO)
+        .length() as f64;
+    let speed = (2.0 * gravity * BALL_DROP_M).sqrt();
+    let momentum = BALL_KG as f64 * speed;
+    let (low, high) = (0.5 * momentum, 2.5 * momentum);
+    let impulse = first.impulse as f64;
+    if !(low..=high).contains(&impulse) {
+        return Err(format!(
+            "the first Started event of a {BALL_KG} kg ball hitting the ground at {speed:.1} m/s \
+             reports an impulse of {impulse:.2} N·s; expected about m·v = {momentum:.1} N·s \
+             ({low:.1} to {high:.1} with restitution). `impulse` is the total normal impulse of \
+             the contact in that step, in N·s"
+        ));
+    }
+
+    // The ground is below the ball, so "from a toward b" is up when a is the ground.
+    let (a, b, up) = if first.a == g {
+        ("the ground", "the ball", 1.0)
+    } else {
+        ("the ball", "the ground", -1.0)
+    };
+    if first.normal.y * up < 0.5 {
+        return Err(format!(
+            "the first Started event has a = {a}, b = {b} and normal {:?}; the normal must point \
+             from a toward b, which is {} here",
+            first.normal,
+            if up > 0.0 { "up (+Y)" } else { "down (-Y)" }
+        ));
+    }
+    Ok(())
+}
+
+fn reports_contact_end(install: &dyn Fn(&mut App)) -> Result<(), String> {
+    let (mut app, g, ball) = drop_ball(install);
+    let seen = seen_contacts(&app);
+    let started = pair_events(seen, g, ball, ContactPhase::Started).count();
+    let ended = pair_events(seen, g, ball, ContactPhase::Ended).count();
+    if started <= ended {
+        return Err(format!(
+            "the ball dropped onto the ground should rest on it after 3 s, but its contact \
+             events say it is not touching ({started} Started, {ended} Ended), so the end of the \
+             contact can't be checked"
+        ));
+    }
+
+    let before = seen.len();
+    if let Some(mut t) = app.world.get_mut::<Transform>(ball) {
+        t.translation.y += 5.0;
+    }
+    if let Some(mut v) = app.world.get_mut::<Velocity>(ball) {
+        *v = Velocity::default();
+    }
+    app.update_n(10);
+    let after = &seen_contacts(&app)[before..];
+    let ended = pair_events(after, g, ball, ContactPhase::Ended).count();
+    let started = pair_events(after, g, ball, ContactPhase::Started).count();
+    match ended {
+        0 => Err(
+            "the ball was lifted 5 m off the ground but no ContactEvent::Ended followed; send \
+             Ended once when two colliders stop touching"
+                .into(),
+        ),
+        1 if started > 0 => Err(format!(
+            "the ball was lifted 5 m off the ground, touching nothing, but {started} \
+             ContactEvent::Started for it and the ground followed"
+        )),
+        1 => Ok(()),
+        n => Err(format!(
+            "the ball was lifted 5 m off the ground and {n} ContactEvent::Ended followed; send \
+             exactly one when two colliders stop touching"
+        )),
     }
 }
 
