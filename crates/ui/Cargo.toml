@@ -1,6 +1,6 @@
 [package]
 name = "engine_ui"
-description = "UI (stub: scope and contracts in README.md)."
+description = "Game UI: flexbox layout, shaped text, themes, tweens, mouse/keyboard/gamepad navigation, drag and drop; dialogue, shop, inventory, HUD, menus and a map that zooms from a planet's surface to the galaxy."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -8,6 +8,18 @@ license.workspace = true
 [dependencies]
 engine_core.workspace = true
 engine_world.workspace = true
+engine_render.workspace = true
+engine_input.workspace = true
+engine_assets.workspace = true
 bevy_ecs.workspace = true
+wgpu.workspace = true
+bytemuck.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+tracing.workspace = true
+taffy = { version = "0.14", default-features = false, features = ["std", "flexbox", "grid", "taffy_tree", "content_size"] }
+cosmic-text = { version = "0.19", default-features = false, features = ["std", "swash"] }
+resvg = { version = "0.48", default-features = false }
+
+[dev-dependencies]
+image.workspace = true
