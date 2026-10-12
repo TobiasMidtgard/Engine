@@ -7,9 +7,11 @@ pub mod demo;
 mod fallback;
 pub mod fx;
 mod locomotion;
+pub mod look;
 pub mod mover;
 pub mod player;
 pub mod profile;
+mod shift;
 pub mod tempo;
 
 use engine_core::prelude::*;
@@ -117,7 +119,12 @@ impl Plugin for MovementPlugin {
             .add_systems(
                 FixedUpdate,
                 (
-                    (player::player_intent, tempo::apply_tempo).in_set(MovementSet::Intent),
+                    (
+                        locomotion::adopt_characters,
+                        player::player_intent,
+                        tempo::apply_tempo,
+                    )
+                        .in_set(MovementSet::Intent),
                     (
                         combat::begin_attacks,
                         locomotion::step_movers,
@@ -146,6 +153,11 @@ impl Plugin for MovementPlugin {
             )
             .add_render_feature(fx::SlowMotionOverlay::default());
         demo::register(app);
+        look::register(app);
+        app.add_systems(
+            PostUpdate,
+            shift::follow_world_shifts.in_set(engine_world::WorldShiftSet::Apply),
+        );
         api::register(app);
     }
 }

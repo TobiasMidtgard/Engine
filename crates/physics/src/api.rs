@@ -7,7 +7,7 @@ use engine_world::physics::{ApplyImpulse, ColliderShape, Hit, PhysicsQueries, Qu
 use engine_world::{SurfaceMaterials, WorldImpulse};
 use serde_json::{Value, json};
 
-use crate::PhysicsStats;
+use crate::{PhysicsDebug, PhysicsStats};
 
 fn parse<T: serde::de::DeserializeOwned>(args: Value) -> Result<T, String> {
     serde_json::from_value(args).map_err(|e| format!("bad arguments: {e}"))
@@ -209,6 +209,32 @@ fn stats(world: &mut World, _: Value) -> Result<Value, String> {
     serde_json::to_value(*world.resource::<PhysicsStats>()).map_err(|e| e.to_string())
 }
 
+/// Patch the debug layers (`all` first, then single fields) and return them.
+fn debug(world: &mut World, args: Value) -> Result<Value, String> {
+    let mut d = world.resource::<PhysicsDebug>().clone();
+    if let Some(all) = args.get("all").and_then(Value::as_bool) {
+        d.set_all(all);
+    }
+    let mut patched = serde_json::to_value(&d).map_err(|e| e.to_string())?;
+    if let (Some(obj), Some(fields)) = (patched.as_object_mut(), args.as_object()) {
+        for (k, v) in fields {
+            if k == "all" {
+                continue;
+            }
+            if !obj.contains_key(k) {
+                return Err(format!(
+                    "unknown field `{k}`; fields: {}",
+                    obj.keys().cloned().collect::<Vec<_>>().join(", ")
+                ));
+            }
+            obj.insert(k.clone(), v.clone());
+        }
+    }
+    let d: PhysicsDebug = serde_json::from_value(patched).map_err(|e| e.to_string())?;
+    *world.resource_mut::<PhysicsDebug>() = d.clone();
+    serde_json::to_value(d).map_err(|e| e.to_string())
+}
+
 pub(crate) fn register(app: &mut App) {
     app.register_api(
         "physics.raycast",
@@ -260,5 +286,13 @@ pub(crate) fn register(app: &mut App) {
          substeps.",
         "{}",
         stats,
+    )
+    .register_api(
+        "physics.debug",
+        "Draw what physics sees (needs DebugPlugin): colliders, contacts, joints, regions, \
+         centers_of_mass, velocities (bools; `all` sets every one), radius_m around the \
+         focus, on_top. Returns the current settings; {} just reads them.",
+        r#"{"colliders": true, "contacts": true, "joints": true}"#,
+        debug,
     );
 }
