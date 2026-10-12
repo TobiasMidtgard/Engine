@@ -474,6 +474,8 @@ impl Sound for FireSound {
 ///   backwash. Bigger waves come slower and wash longer.
 /// * `"flow"` m/s: moving water babbling over stones, a continuous run of bubbles and a
 ///   hiss that grows into a roar in rapids.
+/// * `"spray"` kg/s: water falling or thrown into water (a waterfall's foot, a boat's bow
+///   wave): a broad roar with a deep rumble for big falls and dense bubble chatter.
 pub struct WaterSound {
     fs: f32,
     rng: Noise,
@@ -481,6 +483,10 @@ pub struct WaterSound {
     waves_target: f32,
     flow: f32,
     flow_target: f32,
+    spray: f32,
+    spray_target: f32,
+    spray_band: Biquad,
+    spray_low: Biquad,
     /// Samples until the next wave reaches the shore.
     next_wave: u32,
     /// The current wave: samples since it hit, its size.
@@ -508,6 +514,10 @@ impl WaterSound {
             waves_target: 0.0,
             flow: 0.0,
             flow_target: 0.0,
+            spray: 0.0,
+            spray_target: 0.0,
+            spray_band: Biquad::bandpass(fs, 900.0, 0.45),
+            spray_low: Biquad::lowpass(fs, 220.0, 0.7),
             next_wave: first,
             wave_t: u32::MAX,
             wave_size: 0.0,
@@ -541,6 +551,7 @@ impl Sound for WaterSound {
         match name {
             "waves" => self.waves_target = value.clamp(0.0, 1.0),
             "flow" => self.flow_target = value.max(0.0),
+            "spray" => self.spray_target = value.max(0.0),
             _ => {}
         }
     }
@@ -551,6 +562,7 @@ impl Sound for WaterSound {
         for o in out.iter_mut() {
             self.waves += (self.waves_target - self.waves) * k;
             self.flow += (self.flow_target - self.flow) * k;
+            self.spray += (self.spray_target - self.spray) * k;
 
             // A wave reaches the shore.
             if self.waves > 0.01 {
@@ -609,6 +621,21 @@ impl Sound for WaterSound {
                 let rapids = ((self.flow - 1.0) / 2.0).clamp(0.0, 1.0);
                 let roar = self.roar.process(self.rng.white()) * 0.4 * rapids;
                 y += hiss + roar;
+            }
+
+            // Falling water: roar and chatter that grow with the mass coming down.
+            if self.spray > 0.01 {
+                let level = (0.05 * self.spray.powf(0.4)).min(0.4);
+                let roar = self.spray_band.process(self.rng.white()) * level;
+                let big = ((self.spray - 5.0) / 50.0).clamp(0.0, 1.0);
+                let rumble = self.spray_low.process(self.rng.white()) * level * 1.5 * big;
+                if self
+                    .rng
+                    .chance((60.0 + 30.0 * self.spray.sqrt()).min(400.0) / fs)
+                {
+                    self.bubble(0.001, 0.005, level * 0.5, 0.0);
+                }
+                y += roar + rumble;
             }
 
             let mut b = 0.0;

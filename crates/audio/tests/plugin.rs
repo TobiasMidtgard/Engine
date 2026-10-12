@@ -456,3 +456,80 @@ fn sounds_stay_put_when_the_world_shifts() {
     );
     assert!(after.1 > after.0 * 1.5, "no longer on the right: {after:?}");
 }
+
+#[test]
+fn lightning_strikes_roll_thunder_late() {
+    let mut app = app();
+    app.world
+        .spawn((AudioListener::default(), Transform::from_xyz(0.0, 1.7, 0.0)));
+    let ground = DVec3::new(1_200.0, 0.0, 0.0);
+    let mut cues = Vec::new();
+    let x = record(&mut app, "lightning", 300, |app, i| {
+        if i == 15 {
+            app.world.write_message(engine_world::LightningStrike {
+                from: ground + DVec3::new(200.0, 2_800.0, 0.0),
+                to: ground,
+                peak_current_ka: 30.0,
+                cloud_to_ground: true,
+                seed: 5,
+            });
+            // The weather's blast at the strike point is part of the thunder, not a bomb.
+            app.world.write_message(engine_world::WorldImpulse {
+                center: ground,
+                radius: 14.0,
+                strength: 18.0,
+                energy_j: 5.0e5,
+                heat_c: 0.0,
+                source: None,
+            });
+        }
+        let msgs = app.world.resource::<Messages<AudioCue>>();
+        cues.extend(msgs.iter_current_update_messages().map(|c| c.name.clone()));
+    });
+    assert!(cues.iter().any(|c| c == "thunder"), "{cues:?}");
+    assert!(!cues.iter().any(|c| c == "explosion"), "{cues:?}");
+    // Silent until the sound has crossed 1.2 km (3.5 s after the flash at 0.5 s), then loud.
+    let rms_at = |a: f32, b: f32| rms(&x[(a * 96_000.0) as usize..(b * 96_000.0) as usize]);
+    let early = rms_at(0.6, 3.6);
+    let rolling = rms_at(4.2, 7.0);
+    assert!(
+        rolling > 0.02 && rolling > early * 8.0,
+        "early {early} rolling {rolling}"
+    );
+}
+
+#[test]
+fn a_waterfall_roars_instead_of_dripping() {
+    let mut app = app();
+    app.world
+        .spawn((AudioListener::default(), Transform::from_xyz(0.0, 1.7, 0.0)));
+    let falls = app.world.spawn(Transform::from_xyz(6.0, 0.0, 0.0)).id();
+    let mut cues = Vec::new();
+    // The water module splashes at the foot of a fall every 0.25 s.
+    let x = record(&mut app, "falls", 120, |app, i| {
+        if i < 90 && i % 7 == 0 {
+            app.world.write_message(engine_world::WaterSplash {
+                position: DVec3::new(6.0, 0.0, 0.0),
+                velocity: Vec3::new(0.0, -7.0, 0.0),
+                radius: 1.0,
+                mass_kg: 1.0,
+                source: Some(falls),
+            });
+        }
+        let msgs = app.world.resource::<Messages<AudioCue>>();
+        cues.extend(msgs.iter_current_update_messages().map(|c| c.name.clone()));
+    });
+    let sprays = cues.iter().filter(|c| *c == "spray.water").count();
+    let drips = cues.iter().filter(|c| *c == "splash.water").count();
+    assert_eq!(sprays, 1, "{cues:?}");
+    assert!(drips <= 2, "{cues:?}");
+    // A steady roar while it falls, gone after it stops.
+    let rms_at = |a: f32, b: f32| rms(&x[(a * 96_000.0) as usize..(b * 96_000.0) as usize]);
+    let roaring = rms_at(1.5, 2.8);
+    assert!(roaring > 0.005, "falls too quiet: {roaring}");
+    let quarter = [rms_at(1.5, 1.8), rms_at(1.8, 2.1), rms_at(2.1, 2.4), rms_at(2.4, 2.7)];
+    let (lo, hi) = quarter
+        .iter()
+        .fold((f32::MAX, 0.0f32), |(a, b), v| (a.min(*v), b.max(*v)));
+    assert!(hi < lo * 2.0, "pulsing, not roaring: {quarter:?}");
+}

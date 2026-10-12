@@ -9,7 +9,7 @@ use engine_render::Camera;
 use engine_world::physics::{Collider, ContactEvent, ContactPhase, PhysicsQueries, QueryFilter};
 use engine_world::{
     AttackEvent, AttackKind, Env, GroundContact, PrecipitationKind, ProjectileTrace, SurfaceCell,
-    WaterSplash, WorldImpulse,
+    WorldImpulse,
 };
 
 use crate::ambience::{RainSound, WindSound};
@@ -49,7 +49,7 @@ pub(crate) fn ensure_output(
 }
 
 /// Clock for sounds made by `entity`: its own time scale if it has one.
-fn clock_for(entity: Option<Entity>, scales: &Query<&LocalTimeScale>) -> Clock {
+pub(crate) fn clock_for(entity: Option<Entity>, scales: &Query<&LocalTimeScale>) -> Clock {
     match entity.and_then(|e| scales.get(e).ok()) {
         Some(s) if s.ignore_world_dilation => Clock::Real(s.factor),
         Some(s) => Clock::World(s.factor),
@@ -257,13 +257,13 @@ pub(crate) fn play_world_events(
     mut traces: MessageReader<ProjectileTrace>,
     mut attacks: MessageReader<AttackEvent>,
     mut contacts: MessageReader<ContactEvent>,
-    mut splashes: MessageReader<WaterSplash>,
     transforms: Query<&GlobalTransform>,
     colliders: Query<&Collider>,
     scales: Query<&LocalTimeScale>,
     env: Env,
     surfaces: Res<FootstepSurfaces>,
     time: Res<Time>,
+    strikes: Res<thunder::Strikes>,
     mut cues: MessageWriter<AudioCue>,
     mut memory: Local<ImpactMemory>,
 ) {
@@ -272,50 +272,16 @@ pub(crate) fn play_world_events(
         traces.clear();
         attacks.clear();
         contacts.clear();
-        splashes.clear();
         return;
     }
     let fs = audio.sample_rate();
     let listener = audio.listener;
 
-    // Something broke the water's surface.
-    let water = surfaces
-        .surfaces
-        .get("water")
-        .copied()
-        .or_else(|| SurfaceSound::preset("water"))
-        .unwrap_or_default();
-    for (n, s) in splashes.read().enumerate() {
-        if n >= 8 || s.position.distance(listener) > 100.0 {
-            continue;
-        }
-        let strength = (s.mass_kg.max(0.0) / 4.0).sqrt() * (1.0 + 0.1 * s.velocity.length());
-        if strength < 0.05 {
-            continue;
-        }
-        let step = Step::impact(water, strength.min(4.0), audio.next_seed());
-        let voice = audio.play(
-            FootstepSound::new(fs, &step),
-            PlayOptions::at(s.position)
-                .range(1.0 + s.radius, 100.0)
-                .clock(clock_for(s.source, &scales))
-                .source(s.source)
-                .reverb(0.35),
-        );
-        if !voice.is_none() {
-            cues.write(AudioCue {
-                voice,
-                position: Some(s.position),
-                name: "splash.water".into(),
-                loudness: (strength * 0.4).min(1.0),
-            });
-        }
-    }
-
     // Explosions and other blasts.
     for i in impulses.read() {
         let energy = i.energy_j.max(i.strength * i.strength * 2_000.0);
-        if energy < 5e4 {
+        // A lightning strike's blast is already in its thunder.
+        if energy < 5e4 || strikes.is_strike(i.center) {
             continue;
         }
         let seed = audio.next_seed();
@@ -464,6 +430,7 @@ pub(crate) fn weather_ambience(
     physics: Res<PhysicsQueries>,
     surfaces: Res<FootstepSurfaces>,
     time: Res<Time>,
+    strikes: Res<thunder::Strikes>,
     mut cues: MessageWriter<AudioCue>,
     mut state: Local<AmbienceState>,
 ) {
@@ -555,8 +522,8 @@ pub(crate) fn weather_ambience(
         state.wind = VoiceId::NONE;
     }
 
-    // Thunder.
-    if w.storm > 0.02 {
+    // Thunder, made up while the weather doesn't send its own lightning strikes.
+    if w.storm > 0.02 && !strikes.weather_has_lightning(time.real_elapsed_secs_f64()) {
         let seed = audio.next_seed();
         let rng = state.rng.get_or_insert_with(|| Noise::new(seed));
         state.next_thunder -= time.delta_secs();

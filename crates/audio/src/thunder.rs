@@ -8,9 +8,69 @@
 //! so the mixer pans, muffles and dulls each part by its own direction and distance.
 
 use engine_core::math::{DVec3, Vec3};
+use engine_core::prelude::*;
+use engine_world::LightningStrike;
 
 use crate::dsp::{Biquad, Noise, OnePole};
-use crate::{Audio, AudioCue, PlayOptions, Sound};
+use crate::{Audio, AudioCue, AudioSettings, PlayOptions, Sound};
+
+/// Points along the channel thunder is built from (`LightningStrike::path` detail: 257).
+const PATH_DETAIL: u32 = 8;
+
+/// Lightning the weather reported recently: once strikes arrive, storms stop making up their
+/// own thunder, and the blast the weather sends with a ground strike isn't also played as an
+/// explosion.
+#[derive(Resource, Debug, Default)]
+pub(crate) struct Strikes {
+    /// When the last strike arrived (real seconds).
+    pub last: Option<f64>,
+    /// Recent ground strike points and when they arrived.
+    pub ground: Vec<(DVec3, f64)>,
+}
+
+impl Strikes {
+    /// The weather has been sending strikes lately, so made-up thunder should stay quiet.
+    pub fn weather_has_lightning(&self, now: f64) -> bool {
+        self.last.is_some_and(|t| now - t < 180.0)
+    }
+
+    /// A blast at `p` is a ground strike's (already heard as thunder).
+    pub fn is_strike(&self, p: DVec3) -> bool {
+        self.ground.iter().any(|(g, _)| g.distance(p) < 30.0)
+    }
+}
+
+/// Thunder for every lightning strike, rolling along its channel.
+pub(crate) fn play_lightning(
+    mut audio: ResMut<Audio>,
+    settings: Res<AudioSettings>,
+    time: Res<Time>,
+    mut strikes: MessageReader<LightningStrike>,
+    mut seen: ResMut<Strikes>,
+    mut cues: MessageWriter<AudioCue>,
+) {
+    let now = time.real_elapsed_secs_f64();
+    seen.ground.retain(|(_, t)| now - t < 1.0);
+    for s in strikes.read() {
+        seen.last = Some(now);
+        if s.cloud_to_ground {
+            seen.ground.push((s.to, now));
+        }
+        if !audio.is_running() || !settings.weather_ambience {
+            continue;
+        }
+        let channel = s.path(PATH_DETAIL);
+        if let Some(cue) = play_thunder(
+            &mut audio,
+            &channel,
+            s.peak_current_ka,
+            settings.speed_of_sound,
+            s.seed,
+        ) {
+            cues.write(cue);
+        }
+    }
+}
 
 /// Parts the channel is split into (one voice each).
 pub const THUNDER_PARTS: usize = 4;

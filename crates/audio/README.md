@@ -27,12 +27,15 @@ different wet, frozen, snowed on or burnt.
 - **Water**: small waves lapping at the nearest shores (a slap, the wash running up and
   draining back, the gurgle of the backwash; bigger and slower in wind) and streams babbling,
   growing into a roar in rapids, found by sampling the water and ground around the listener.
+  A source that keeps sending `WaterSplash`es (a waterfall's foot, a speedboat's bow) becomes
+  one sustained roar that follows how much water comes down, instead of a drip loop.
 - **Weather**: rain from `WeatherState` (louder with intensity; ticks on soft ground, taps
   on hard, plinks in puddles, pings on metal; drums on the roof when you're under cover),
-  wind (the air moving past your ears, so running into it is louder), and thunder during
-  storms that rolls along the lightning bolt: each stretch of the channel sends its own
+  wind (the air moving past your ears, so running into it is louder), and thunder from each
+  `LightningStrike` that rolls along the bolt: each stretch of the channel sends its own
   shock wave, so the nearest part cracks first and the rest rumbles in over seconds from up
-  and along the bolt, broadside stretches loudest, distant strikes late and dull.
+  and along the bolt, broadside stretches loudest, distant strikes late and dull. (Storms
+  with no strikes reported make up their own bolts.)
 - **Walls**: sounds behind walls and terrain are quieter and duller (physics raycasts from
   the listener toward each sound, over and beside it too, so a sound round a corner is only
   partly muffled; denser materials muffle more).
@@ -97,10 +100,10 @@ tween system cost more than writing the mixer.
 ## Contracts
 
 Reads (all from `engine_world`): `GroundContact`, `ContactEvent`, `WaterSplash`,
-`WorldImpulse`, `ProjectileTrace`, `AttackEvent`, `Collider::surface`, `SurfaceMaterials`,
-`SurfaceLayers` (wetness, puddles, snow, scorch), `HeatField` and `Combustible` (fires),
-`WaterQuery` (shores and currents),
-`WeatherState`, wind, temperature, water,
+`WorldImpulse`, `ProjectileTrace`, `AttackEvent`, `LightningStrike`, `Collider::surface`,
+`SurfaceMaterials`, `SurfaceLayers` (wetness, puddles, snow, scorch), `HeatField` and
+`Combustible` (fires), `WaterQuery` (shores and currents), `WeatherState`, wind, temperature,
+water,
 ground and gravity bodies through `Env`, `PhysicsQueries::raycast` (roof over the listener,
 walls between the listener and each sound),
 `Time` / `TimeDilation` / `LocalTimeScale`, `engine_render::Camera`.
@@ -142,6 +145,5 @@ are synthesized in `vehicle.rs` and render in `footstep_lab`; they play in the w
 the vehicles module publishes engine and wheel state through `engine_world` (asked of the
 lead).
 
-Next: vehicles in the world (see above), thunder from the
-weather's own lightning strikes (`LightningStrike`, waiting on the lead's contract), music
-layers, and recorded samples alongside the synthesis.
+Next: vehicles in the world (see above), music layers, and recorded samples alongside the
+synthesis.

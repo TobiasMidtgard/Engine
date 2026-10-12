@@ -45,6 +45,7 @@ impl Plugin for AudioPlugin {
             app.add_plugins(engine_world::WorldPlugin);
         }
         app.init_resource::<AudioSettings>()
+            .init_resource::<thunder::Strikes>()
             .init_resource::<AudioMix>()
             .init_resource::<FootstepSurfaces>()
             .insert_resource(Audio::new())
@@ -78,8 +79,10 @@ impl Plugin for AudioPlugin {
                 (
                     systems::ensure_output,
                     systems::update_listener,
+                    thunder::play_lightning,
                     systems::play_footsteps,
                     systems::play_world_events,
+                    water::play_splashes,
                     systems::weather_ambience,
                     fires::fire_ambience,
                     water::water_ambience,

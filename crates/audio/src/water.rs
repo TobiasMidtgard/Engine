@@ -1,13 +1,154 @@
-//! Water near the listener: waves lapping at the nearest shores and streams babbling. The
+//! Water near the listener: waves lapping at the nearest shores and streams babbling (the
 //! ground around the listener is sampled on a grid; water next to dry ground is shore, water
-//! with a current is a stream. Each plays as a [`WaterSound`] at the nearest such place.
+//! with a current is a stream), and splashes. A splash is one sound, but a source that keeps
+//! splashing (a waterfall's foot, a speedboat's bow) becomes one sustained roar that follows
+//! how much water comes down.
+
+use std::collections::HashMap;
 
 use engine_core::math::{DVec3, Vec3};
 use engine_core::prelude::*;
-use engine_world::Env;
+use engine_world::{Env, WaterSplash};
 
 use crate::ambience::WaterSound;
-use crate::{Audio, AudioSettings, PlayOptions, VoiceId};
+use crate::footstep::{FootstepSound, FootstepSurfaces, Step, SurfaceSound};
+use crate::systems::clock_for;
+use crate::{Audio, AudioCue, AudioSettings, PlayOptions, VoiceId};
+
+/// Splashes from one source closer together than this are one ongoing spray, seconds.
+const SPRAY_GAP_S: f64 = 0.6;
+/// Splashes in a row before a source counts as ongoing spray.
+const SPRAY_AFTER: u32 = 3;
+
+#[derive(Default)]
+pub(crate) struct SplashStreams {
+    by_source: HashMap<Entity, Spray>,
+}
+
+struct Spray {
+    voice: VoiceId,
+    last: f64,
+    count: u32,
+    /// kg/s, smoothed.
+    rate: f32,
+    position: DVec3,
+}
+
+/// Play splashes: one sound each, or a sustained roar for a source that keeps splashing.
+pub(crate) fn play_splashes(
+    mut audio: ResMut<Audio>,
+    mut splashes: MessageReader<WaterSplash>,
+    scales: Query<&LocalTimeScale>,
+    surfaces: Res<FootstepSurfaces>,
+    time: Res<Time>,
+    mut cues: MessageWriter<AudioCue>,
+    mut streams: Local<SplashStreams>,
+) {
+    if !audio.is_running() {
+        splashes.clear();
+        return;
+    }
+    let now = time.elapsed_secs_f64();
+    let fs = audio.sample_rate();
+    let listener = audio.listener_position();
+    let water = surfaces
+        .surfaces
+        .get("water")
+        .copied()
+        .or_else(|| SurfaceSound::preset("water"))
+        .unwrap_or_default();
+    let mut discrete = 0;
+    for s in splashes.read() {
+        if s.position.distance(listener) > 100.0 {
+            continue;
+        }
+        // A source that keeps splashing: one ongoing roar.
+        if let Some(source) = s.source {
+            let spray = streams.by_source.entry(source).or_insert(Spray {
+                voice: VoiceId::NONE,
+                last: f64::NEG_INFINITY,
+                count: 0,
+                rate: 0.0,
+                position: s.position,
+            });
+            let gap = now - spray.last;
+            if gap < SPRAY_GAP_S {
+                spray.count += 1;
+                let rate = s.mass_kg.max(0.0) / gap.max(0.02) as f32;
+                spray.rate += (rate - spray.rate) * 0.3;
+                spray.position = spray.position.lerp(s.position, 0.3);
+            } else {
+                spray.count = 1;
+                spray.rate = 0.0;
+                spray.position = s.position;
+            }
+            spray.last = now;
+            if spray.count >= SPRAY_AFTER {
+                if !audio.is_playing(spray.voice) {
+                    let seed = audio.next_seed();
+                    let mut sound = WaterSound::new(fs, seed);
+                    crate::Sound::set_param(&mut sound, "spray", spray.rate);
+                    spray.voice = audio.play(
+                        sound,
+                        PlayOptions::at(spray.position)
+                            .range(2.0 + s.radius, 120.0)
+                            .clock(clock_for(Some(source), &scales))
+                            .source(Some(source))
+                            .fade_in(0.8)
+                            .reverb(0.3),
+                    );
+                    if !spray.voice.is_none() {
+                        cues.write(AudioCue {
+                            voice: spray.voice,
+                            position: Some(spray.position),
+                            name: "spray.water".into(),
+                            loudness: (0.1 * spray.rate.powf(0.4)).min(1.0),
+                        });
+                    }
+                } else {
+                    audio.set_param(spray.voice, "spray", spray.rate);
+                    audio.set_position(spray.voice, spray.position, Vec3::ZERO);
+                    audio.set_last(spray.voice, spray.position);
+                }
+                continue;
+            }
+        }
+        // One splash.
+        if discrete >= 8 {
+            continue;
+        }
+        let strength = (s.mass_kg.max(0.0) / 4.0).sqrt() * (1.0 + 0.1 * s.velocity.length());
+        if strength < 0.05 {
+            continue;
+        }
+        discrete += 1;
+        let step = Step::impact(water, strength.min(4.0), audio.next_seed());
+        let voice = audio.play(
+            FootstepSound::new(fs, &step),
+            PlayOptions::at(s.position)
+                .range(1.0 + s.radius, 100.0)
+                .clock(clock_for(s.source, &scales))
+                .source(s.source)
+                .reverb(0.35),
+        );
+        if !voice.is_none() {
+            cues.write(AudioCue {
+                voice,
+                position: Some(s.position),
+                name: "splash.water".into(),
+                loudness: (strength * 0.4).min(1.0),
+            });
+        }
+    }
+    // Sprays that stopped fade out.
+    streams.by_source.retain(|_, spray| {
+        let alive = now - spray.last < SPRAY_GAP_S * 2.0;
+        if !alive && !spray.voice.is_none() {
+            audio.stop(spray.voice, 1.5);
+        }
+        alive
+    });
+}
 
 /// How far out the ground is searched for water, meters.
 pub const WATER_SEARCH_M: f64 = 24.0;
