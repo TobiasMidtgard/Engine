@@ -310,9 +310,55 @@ fn deer_closeups() {
 }
 
 #[test]
+fn wolf_closeups() {
+    let w = |state| Pose::new(Species::Wolf, state);
+    render(&[
+        ("wolf_profile", w(AnimalState::Wander), 3.4, 0.0),
+        ("wolf_alert", w(AnimalState::Alert), 3.4, 35.0),
+        ("wolf_head", w(AnimalState::Wander), 1.1, 45.0),
+        (
+            "wolf_trot",
+            w(AnimalState::Wander).moving(3.0, 0.6, LocomotionMode::Run),
+            3.6,
+            15.0,
+        ),
+        (
+            "wolf_gallop",
+            Pose {
+                clock: 100.2,
+                ..w(AnimalState::Chase).moving(11.0, 0.0, LocomotionMode::Sprint)
+            },
+            3.8,
+            10.0,
+        ),
+        (
+            "wolf_stalk",
+            w(AnimalState::Stalk).moving(0.8, 2.0, LocomotionMode::Crouch),
+            3.4,
+            30.0,
+        ),
+        (
+            "wolf_bite",
+            Pose {
+                bite: true,
+                clock: 100.1,
+                ..w(AnimalState::Chase)
+            },
+            1.8,
+            50.0,
+        ),
+        ("wolf_feed", w(AnimalState::Feed), 3.2, 40.0),
+        ("wolf_rest", w(AnimalState::Rest), 3.2, 40.0),
+        ("wolf_dead", w(AnimalState::Dead), 3.2, 60.0),
+        ("wolf_rear", w(AnimalState::Wander), 3.0, -140.0),
+        ("wolf_feet", w(AnimalState::Wander), 0.8, 25.0),
+    ]);
+}
+
+#[test]
 fn meshes_fit_their_budgets() {
     let mut total = 0.0;
-    for species in [Species::Deer] {
+    for species in [Species::Deer, Species::Wolf] {
         let (meshes, secs) = animals::build_all(species);
         total += secs;
         for male in [false, true] {
