@@ -93,6 +93,9 @@ pub fn wheel_events_system(
     }
 }
 
+/// Seconds between rocket-wash smoke emissions.
+const SMOKE_INTERVAL_S: f32 = 0.1;
+
 /// Engine noise for AI, exhaust smoke and jet/rocket wash.
 #[allow(clippy::type_complexity)]
 pub fn engine_events_system(
@@ -166,13 +169,18 @@ pub fn engine_events_system(
                         );
                     }
                     if timers.smoke <= 0.0 {
+                        // Clean exhaust is nearly invisible; what shows is dust and steam
+                        // kicked up off the pad: about 0.25 kg/s under a 1 MN hover (five smoke
+                        // grenades), fading out as the ship climbs, mixed down to warm air.
+                        let near = (1.0 - height / 150.0).clamp(0.0, 1.0);
+                        let rate = 0.25 * (thrust / 1.0e6).sqrt() * near * near;
                         smoke.write(SmokeEmission {
                             position: ground,
-                            velocity: exhaust * 15.0,
-                            radius: 4.0 + thrust.sqrt() * 0.004,
-                            mass_kg: thrust * 2e-6,
-                            temperature_c: 400.0,
-                            darkness: 0.08,
+                            velocity: exhaust * 6.0,
+                            radius: 3.0 + thrust.sqrt() * 0.003,
+                            mass_kg: rate * SMOKE_INTERVAL_S,
+                            temperature_c: 45.0,
+                            darkness: 0.03,
                         });
                     }
                 }
@@ -187,7 +195,7 @@ pub fn engine_events_system(
             });
         }
         if timers.smoke <= 0.0 {
-            timers.smoke = 0.1;
+            timers.smoke = SMOKE_INTERVAL_S;
         }
     }
 }

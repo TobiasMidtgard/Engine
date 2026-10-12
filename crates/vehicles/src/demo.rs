@@ -599,13 +599,19 @@ pub fn views(zone: &str, center: DVec3) -> Vec<DemoView> {
                 )
                 .call("entity.despawn", gone.clone())
                 .call("vehicles.spawn", line_up.clone()),
+                // On the Rapier backend the plane rolls 130 m and rotates about 7.4 s after
+                // it is spawned; the shot catches the nose coming up.
                 DemoView::new(
                     "airfield_rotate",
                     "Sport plane rotating for take-off",
-                    [45.0, 4.0, -400.0],
-                    [0.0, 4.0, -440.0],
+                    [26.0, 3.0, -419.0],
+                    [0.0, 2.0, -438.0],
                 )
-                .at(10.0, 11.0)
+                .at(10.0, 7.6)
+                .call(
+                    "entity.despawn",
+                    serde_json::json!({"name": "Departing plane"}),
+                )
                 .call("entity.despawn", gone)
                 .call("vehicles.spawn", line_up),
             ]

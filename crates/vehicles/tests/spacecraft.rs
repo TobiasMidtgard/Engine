@@ -11,7 +11,7 @@ use engine_vehicles::{
     AssistMode, Autopilot, AutopilotMode, BodyAtmosphere, HeatShield, Spacecraft,
 };
 use engine_world::physics::{Collider, ColliderShape, RigidBody, Velocity};
-use engine_world::{Gravity, GravityBody, SurfaceMaterials};
+use engine_world::{Gravity, GravityBody, SmokeEmission, SurfaceMaterials};
 use support::*;
 
 fn phase(app: &App, e: Entity) -> String {
@@ -73,6 +73,50 @@ fn hops_off_the_pad_hovers_and_lands() {
     let drift = (p.x * p.x + p.z * p.z).sqrt();
     assert!(drift < 6.0, "landed {drift:.1} m off the pad's center");
     assert!((transform(&app, ship).rotation * Vec3::Y).y > 0.99, "level");
+}
+
+#[derive(Resource, Default)]
+struct Wash {
+    kg: f32,
+    darkest: f32,
+    hottest: f32,
+}
+
+fn record_wash(mut wash: ResMut<Wash>, mut smoke: MessageReader<SmokeEmission>) {
+    for s in smoke.read() {
+        wash.kg += s.mass_kg;
+        wash.darkest = wash.darkest.max(s.darkness);
+        wash.hottest = wash.hottest.max(s.temperature_c);
+    }
+}
+
+#[test]
+fn rocket_wash_kicks_up_a_light_dust_cloud() {
+    let mut app = vehicle_app();
+    calm(&mut app);
+    ground(&mut app, DVec3::ZERO, 500.0, "concrete");
+    app.init_resource::<Wash>().add_systems(Last, record_wash);
+    let t = Transform::from_translation(DVec3::new(0.0, presets::ride_height("spaceplane"), 0.0));
+    let ship = spawn_with(&mut app, |c| presets::spaceplane(c, t));
+    app.world
+        .entity_mut(ship)
+        .insert(Autopilot::new(AutopilotMode::Hop {
+            pad: DVec3::ZERO,
+            height_m: 18.0,
+            hover_s: 30.0,
+            rest_s: 2.0,
+        }));
+    run_until(&mut app, 30.0, |app| phase(app, ship) == "hover").expect("never hovered");
+    run_for(&mut app, 2.0);
+    app.world.resource_mut::<Wash>().kg = 0.0;
+    run_for(&mut app, 10.0);
+    let wash = app.world.resource::<Wash>();
+    // An 80 t ship hovering at 18 m blows dust and steam off the pad: a few smoke grenades'
+    // worth (0.05 kg/s each), pale and only warm, so it rolls along the ground.
+    let rate = wash.kg / 10.0;
+    assert!((0.05..0.6).contains(&rate), "{rate:.3} kg/s of wash");
+    assert!(wash.darkest < 0.1, "darkness {:.2}", wash.darkest);
+    assert!(wash.hottest < 100.0, "{:.0} °C", wash.hottest);
 }
 
 /// A 60 km rock with Earth's surface gravity and a thin, 15 km deep atmosphere. The planet
