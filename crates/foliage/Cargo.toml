@@ -1,6 +1,6 @@
 [package]
 name = "engine_foliage"
-description = "Foliage & ecology (stub: scope and contracts in README.md)."
+description = "Foliage & ecology: procedural trees, shrubs, ferns, grass, flowers and glowing mushrooms that grow where water, light, soil and minerals allow, compete, spread seeds, get chopped and regrow."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -8,6 +8,12 @@ license.workspace = true
 [dependencies]
 engine_core.workspace = true
 engine_world.workspace = true
+engine_render.workspace = true
+engine_assets.workspace = true
 bevy_ecs.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+image.workspace = true

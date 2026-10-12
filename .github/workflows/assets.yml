@@ -8,7 +8,8 @@ on:
     paths: ["assets/manifests/**", "tools/fetch-assets/**", ".github/workflows/assets.yml"]
   push:
     # `assets/<area>` scratch branches get pins without a pull request (AGENTS.md, "Adding a
-    # file"); CI doesn't run on them, so an unpinned entry never turns a check red.
+    # file"); CI doesn't run on them, so an unpinned entry never turns a check red. A
+    # successful run deletes the scratch branch.
     branches: [main, "assets/**"]
     paths: ["assets/manifests/**"]
   workflow_dispatch:
@@ -16,9 +17,12 @@ on:
 permissions:
   contents: write
 
-# One mirror writer at a time, so two PRs never race to create the release.
+# One run per branch at a time. A single global group would let a newer queued run cancel a
+# pending one from another branch, whose pins would then never be printed. Runs on different
+# branches may upload at once; the mirror is content-addressed, so the worst case is one
+# failed upload that the next run repeats.
 concurrency:
-  group: asset-mirror
+  group: asset-mirror-${{ github.ref }}
   cancel-in-progress: false
 
 env:
@@ -42,3 +46,12 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           ENGINE_ASSET_MIRROR: ${{ github.repository }}
         run: cargo run -q -p fetch-assets -- mirror
+      - name: Delete the scratch branch
+        # Cloud sessions can't delete branches, so the run does. The pins stay in this check
+        # run's annotations. After a failed run the branch stays, so the entry can be fixed and
+        # pushed there again. The lease leaves a branch alone that got a newer commit while this
+        # ran; that commit's own run deletes it. (From the Failing PR checks thread's #50.)
+        if: success() && startsWith(github.ref, 'refs/heads/assets/')
+        run: |
+          git push origin --delete --force-with-lease="$GITHUB_REF:$GITHUB_SHA" "$GITHUB_REF" ||
+            echo "::notice::Left $GITHUB_REF_NAME in place: it is gone already or has newer commits."

@@ -7,7 +7,7 @@ use serde_json::{Value, json};
 
 use crate::effects::{ExplosionSound, ToneSound, WhizSound, WhooshSound};
 use crate::footstep::{FootstepSound, Step};
-use crate::{Audio, FootstepSurfaces, PlayOptions, ambience::ThunderSound, dsp::to_db};
+use crate::{Audio, FootstepSurfaces, PlayOptions, dsp::to_db, thunder};
 
 pub(crate) fn register(app: &mut App) {
     app.register_api(
@@ -55,9 +55,10 @@ pub(crate) fn register(app: &mut App) {
     .register_api(
         "audio.play",
         "Play a test sound. sound: footstep (surface, kind foot|paw|hoof|wheel|body, load_kg, \
-         speed), explosion (energy_j), thunder (distance_m), whiz (speed, miss_m), whoosh \
-         (secs, strength) or tone (freq, secs). at: [x,y,z] in the world, or leave it out to \
-         play at the listener. gain_db adjusts the level.",
+         speed), explosion (energy_j), thunder (a lightning strike: at [x,y,z] on the ground, \
+         or distance_m away in a random direction; peak_current_ka), whiz (speed, miss_m), \
+         whoosh (secs, strength) or tone (freq, secs). at: [x,y,z] in the world, or leave it \
+         out to play at the listener. gain_db adjusts the level.",
         r#"{"sound": "footstep", "surface": "mud", "at": [0, 0, 2], "load_kg": 75, "speed": 1.4}"#,
         play,
     )
@@ -110,6 +111,9 @@ fn play(world: &mut World, args: Value) -> Result<Value, String> {
         _ => return Err("\"at\" needs three numbers, like [0, 0, 2].".into()),
     };
     let gain_db = num(&args, "gain_db", 0.0);
+    if kind == "thunder" {
+        return play_thunder(world, &args, at);
+    }
     let mut name = kind.clone();
     let sound: Box<dyn crate::Sound> = {
         let (fs, seed) = {
@@ -145,11 +149,6 @@ fn play(world: &mut World, args: Value) -> Result<Value, String> {
                 Box::new(FootstepSound::new(fs, &step))
             }
             "explosion" => Box::new(ExplosionSound::new(fs, num(&args, "energy_j", 1e6), seed)),
-            "thunder" => Box::new(ThunderSound::new(
-                fs,
-                num(&args, "distance_m", 1_500.0),
-                seed,
-            )),
             "whiz" => Box::new(WhizSound::new(
                 fs,
                 num(&args, "speed", 400.0),
@@ -190,4 +189,35 @@ fn play(world: &mut World, args: Value) -> Result<Value, String> {
         return Err("The sound was skipped: it is out of earshot or too many are playing.".into());
     }
     Ok(json!({ "playing": name, "voice": voice.0 }))
+}
+
+/// `audio.play` for thunder: a lightning bolt down onto `at` (or `distance_m` away).
+fn play_thunder(world: &mut World, args: &Value, at: Option<DVec3>) -> Result<Value, String> {
+    let mut audio = world.resource_mut::<Audio>();
+    if !audio.is_running() {
+        return Err(format!("Audio is {}, so nothing can play.", audio.status()));
+    }
+    let speed_of_sound = audio.speed_of_sound();
+    let seed = audio.next_seed();
+    let listener = audio.listener_position();
+    let current = num(args, "peak_current_ka", 30.0);
+    let channel = match at {
+        Some(ground) => thunder::random_bolt(ground + DVec3::new(0.0, 2_500.0, 0.0), ground, seed),
+        None => {
+            let d = num(args, "distance_m", 1_500.0).max(50.0);
+            thunder::random_strike(listener, listener.y - 1.7, Vec3::Y, d, d, seed).0
+        }
+    };
+    let first = channel
+        .iter()
+        .map(|p| p.distance(listener))
+        .fold(f64::MAX, f64::min);
+    match thunder::play_thunder(&mut audio, &channel, current, speed_of_sound, seed) {
+        Some(cue) => Ok(json!({
+            "playing": "thunder",
+            "voice": cue.voice.0,
+            "arrives_in_s": first / speed_of_sound.max(1.0) as f64,
+        })),
+        None => Err("The thunder was skipped: too many sounds are playing.".into()),
+    }
 }

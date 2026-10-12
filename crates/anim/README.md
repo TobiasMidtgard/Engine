@@ -35,7 +35,20 @@ compresses and stretches.
   vertex's edges compress or stretch against the rest pose. The material bunches compressed
   cloth outward and folds it into rings across the limb (sleeves at the elbow), draws
   diagonal pull lines where it stretches (a shirt across the back), and adds veins, flush
-  and fabric sheen. All detail is procedural (no textures) and fades by distance.
+  and fabric sheen. All of it is procedural and fades by distance. Meshes are split into
+  submeshes, each drawn with its own textured surface (base color, normal, metal/rough,
+  alpha mask for hair cards); the procedural detail goes on top where the mask says skin
+  or cloth.
+- **Imported characters and clips.** `import` reads rigged glTF/GLB characters (meshes,
+  skins, materials, textures) and their animation clips. `Retargeter` drives an imported
+  skeleton from a logic skeleton (bones matched by position and direction, in-between
+  spine bones blended, fingers closed by grip curves) and turns imported clips back into
+  logic clips. `HumanModel` dresses a humanoid in an imported Biped character: the
+  humanoid's rig, clips, IK and muscles keep running on a logic skeleton fitted to the
+  character, muscles get bulge morphs on the character's own mesh, hair cards hang on the
+  ponytail spring chain, and optional motion-capture idle, walk and run replace the
+  generated ones. Files load on background threads; until then the person keeps its
+  generated body.
 - **Contracts.** Reads `AnimationParams` and `AnimationTrigger`; writes `SkeletonPose` every
   frame and `AnimationEvent` at marked frames, so movement, AI, cloth and hair never depend
   on this crate. Footsteps and hoof falls become `GroundContact` (foot, paw or hoof, with
@@ -70,6 +83,12 @@ API: `anim.list`, `anim.state` (graph state, curves, events, muscles, gait), `an
 
 ## The paddock (showcase test cases)
 
+The four people wear Microsoft Rocketbox characters (MIT licence, © Microsoft) with
+Rocketbox motion-capture idle, walk and run. They are listed in
+`assets/manifests/animation.toml` and are not in git; fetch them with
+`cargo run -p fetch-assets -- animation`. Without them the people keep their generated
+bodies and motion, and every test still runs.
+
 | Test case | What to look for |
 |---|---|
 | Hammer athlete | Two-handed sledgehammer strike onto a tractor tire: arms, shoulders and back tense on the strike and relax after; veins on the forearms; the ponytail whips; then a braced block |
@@ -88,11 +107,12 @@ each test case (`GALLERY_SEQUENCE=horse:11:12:0.05` renders a strip of one subje
 Unit tests cover clips, graphs, IK, gaits, muscles, skinning and the shaders (WGSL validated,
 GPU struct layouts checked). `tests/demo_scene.rs` runs the paddock and checks each test case
 does what it shows (the hammer lands on the tire with both hands on the handle, muscles tense
-and relax, the walker climbs and runs, the horse gallops with working haunches).
-`tests/render.rs` renders a skinned character on the GPU and checks the pixels follow the
-pose.
+and relax, the walker climbs and runs, the horse gallops with working haunches); with the
+character files fetched it runs the same checks on the imported people. `tests/render.rs`
+renders a skinned character on the GPU and checks the pixels follow the pose, and that
+textured submeshes each draw with their own surface.
 
 ## Not yet
 
-glTF skin and animation import, retargeting, ragdolls from the physics contract, and
-scanned or artist-made characters (the paddock's characters are generated from code).
+Ragdolls from the physics contract; imported animals and vehicles (the horse, spider and
+car are still generated from code).

@@ -94,7 +94,9 @@ pub fn places() -> Vec<Place> {
     let tower = zone("spaceport").center + DVec3::new(70.0, 0.0, 60.0);
     let moon = moon_position();
     let moon_dir = moon.normalize();
-    let sun = crate::day_cycle::sun_direction(10.0).as_dvec3();
+    let sun = engine_weather::Climate::default()
+        .sun_direction(10.0, engine_weather::Sky::default().day_of_year)
+        .as_dvec3();
     let moon_side = (sun * 0.7 - moon_dir * 0.7).normalize();
     let mut list = vec![
         place(
@@ -121,7 +123,7 @@ pub fn places() -> Vec<Place> {
         place(
             "paddock",
             "Animation paddock",
-            near("paddock", [0.0, 5.0, 22.0], [0.0, 1.2, 0.0]),
+            near("paddock", [0.0, 16.0, 32.0], [0.0, 0.0, 0.0]),
             15.0,
         ),
         place(
