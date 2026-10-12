@@ -5,7 +5,12 @@
 //! cargo run -p showcase --release                       # fly around (see camera.rs for keys)
 //! cargo run -p showcase --release -- --headless --tour  # writes screenshots/tour/*.png
 //! cargo run -p showcase --release -- --headless --tour plaza,orbit
+//! cargo run -p showcase --release -- --headless --film overview,plaza,falls --secs 6
+//! cargo run -p showcase --release -- --headless --film footsteps --follow "Trail hiker" --secs 60
 //! ```
+//!
+//! `--film` saves frames and sound for a video (see `film.rs`); `--follow` films an entity, found
+//! by its `Name`, from behind.
 //!
 //! The map is a valley ringed by snowy mountains: a village around the material plaza, woods,
 //! a lake, and one zone per engine feature. Each zone shows placeholder content until its module
@@ -13,12 +18,17 @@
 //! owner.
 
 mod camera;
+mod film;
 mod landscape;
 mod meshgen;
 mod placeholders;
 mod places;
+mod rock_textures;
+mod rocks;
 mod scenery;
+mod texgen;
 mod tour;
+mod village;
 mod zones;
 
 use engine::prelude::*;
@@ -62,6 +72,27 @@ fn main() {
             .filter(|a| !a.starts_with("--"))
             .map(String::as_str);
         tour::install(&mut app, only);
+    } else if let Some(i) = args.iter().position(|a| a == "--film") {
+        let keys = args.get(i + 1).map(String::as_str).unwrap_or("overview");
+        let num = |flag: &str, default: f32| {
+            args.iter()
+                .position(|a| a == flag)
+                .and_then(|i| args.get(i + 1))
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(default)
+        };
+        let follow = args
+            .iter()
+            .position(|a| a == "--follow")
+            .and_then(|i| args.get(i + 1))
+            .cloned();
+        film::install(
+            &mut app,
+            keys,
+            num("--secs", 8.0),
+            num("--fps", 30.0),
+            follow,
+        );
     }
     app.run();
 }
@@ -99,7 +130,7 @@ fn setup(
     scenery::spawn_farms(&mut commands, &lib, &land, &mut rng);
     scenery::spawn_rocks(&mut commands, &lib, &land, &mut rng);
     scenery::spawn_village(&mut commands, &lib, &land, &mut rng);
-    scenery::spawn_cliffs_and_stream(&mut commands, &lib, &land, &mut rng);
+    scenery::spawn_cliffs_and_stream(&mut commands, &mut meshes, &lib, &land, &mut rng);
     placeholders::cave_shell(&mut commands, &mut meshes, &lib, &land, &mut rng);
     zones::spawn_demos(&mut commands, &mut meshes, &lib, &land, &mut rng);
     zones::moon(&mut commands);

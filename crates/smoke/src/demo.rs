@@ -17,14 +17,28 @@
 //! The first round is already `SmokeDemo::warmup_secs` along when the demo starts, so the
 //! smoke is there straight away.
 
-use std::f32::consts::{FRAC_PI_2, PI};
+use std::f32::consts::PI;
 
-use engine_core::math::{DVec3, Quat, Rng, Vec3};
+use engine_core::math::{DQuat, DVec3, Quat, Rng, Vec3};
 use engine_core::prelude::*;
 use engine_render::{MeshRenderer, Shape, StandardMaterial};
 use engine_world::{ProjectileTrace, SmokeEmission, WorldImpulse};
 
-use crate::sim::{self, SmokeFan, SmokeObstacle, SmokeSource, SmokeVolume};
+use crate::sim::{self, SmokeFan, SmokeSource};
+
+mod art;
+mod build;
+mod extras;
+mod fan;
+mod firing;
+mod grass;
+mod ground;
+mod gun;
+mod kit;
+mod targets;
+mod tex;
+mod track;
+mod vent;
 
 /// Half extents of the range's concrete pad (m): it fits a 60 m-wide flat area.
 pub const FOOTPRINT: [f32; 2] = [19.0, 22.0];
@@ -47,8 +61,8 @@ pub const VIEWS: &[DemoView] = &[
     DemoView {
         key: "smoke_bullets",
         name: "Bullets through a smoke screen",
-        eye: [0.3, 2.3, -20.6],
-        target: [0.0, 1.7, 8.0],
+        eye: [-1.2, 2.9, -23.3],
+        target: [0.6, 1.5, 5.0],
         hour: 10.5,
         warmup_secs: 3.5,
     },
@@ -71,10 +85,10 @@ pub const VIEWS: &[DemoView] = &[
     DemoView {
         key: "smoke_fans",
         name: "Fans blowing smoke",
-        eye: [26.0, 7.0, -14.0],
-        target: [0.0, 2.0, 3.0],
+        eye: [-22.5, 3.2, 1.0],
+        target: [-4.0, 2.4, 12.5],
         hour: 12.5,
-        warmup_secs: 25.5,
+        warmup_secs: 19.5,
     },
 ];
 
@@ -148,12 +162,61 @@ pub struct DemoFan {
 /// The cart that drives back and forth through the smoke.
 #[derive(Component, Debug, Clone, Copy)]
 pub struct DemoCart {
-    /// Track ends (world X), its Z and its height.
-    pub from: f64,
-    pub to: f64,
+    /// Track ends: where the cart is at each end, world position.
+    pub from: DVec3,
+    pub to: DVec3,
+    /// m/s.
     pub speed: f32,
     pub phase: f32,
 }
+
+/// A fan's rotor: spins up while its fan is on and coasts down when it is off.
+#[derive(Component, Debug, Clone, Copy)]
+pub struct DemoRotor {
+    /// The fan (its `SmokeFan::on` drives the rotor).
+    pub fan: Entity,
+    /// Spin, radians per second.
+    pub speed: f32,
+    /// Angle about the fan's axis, radians.
+    pub angle: f32,
+}
+
+impl Default for DemoRotor {
+    fn default() -> Self {
+        Self {
+            fan: Entity::PLACEHOLDER,
+            speed: 0.0,
+            angle: 0.0,
+        }
+    }
+}
+
+/// A wheelset of the cart: turns as the cart moves.
+#[derive(Component, Debug, Clone, Copy)]
+pub struct DemoWheel {
+    pub cart: Entity,
+    /// Wheel radius, m.
+    pub radius: f32,
+    /// Angle about the axle, radians.
+    pub angle: f32,
+    /// How far along its track the cart was when last seen, m (None before the first
+    /// frame). Measured along the track, so a world shift doesn't turn the wheels.
+    pub last_along: Option<f64>,
+}
+
+impl Default for DemoWheel {
+    fn default() -> Self {
+        Self {
+            cart: Entity::PLACEHOLDER,
+            radius: 0.3,
+            angle: 0.0,
+            last_along: None,
+        }
+    }
+}
+
+/// Top speed of the fan rotors, rad/s (about 290 rpm).
+const ROTOR_SPEED: f32 = 30.0;
 
 /// A tracer: a short-lived glowing streak along a bullet's path.
 #[derive(Component, Debug, Clone, Copy)]
@@ -170,185 +233,14 @@ const TARGETS_X: [f64; 5] = [-12.0, -6.0, 0.0, 6.0, 12.0];
 const AIM_X: [f64; 5] = [0.0, 3.0, -3.0, 1.5, -1.5];
 const BLAST: [f64; 3] = [0.0, 0.5, 1.0];
 
-/// Build the smoke range around `origin`. It needs about 38 × 44 m of flat ground.
+/// Build the smoke range around `origin`. It needs about 45 × 52 m of flat ground (the pad is
+/// 38 × 44 m; the berm and its spill reach a little past the far end and the sides).
+///
+/// The props are procedural meshes and textures registered once by key (`smoke/range/…`);
+/// building them takes a moment the first time. Without a renderer only the gameplay
+/// entities are made.
 pub fn spawn_demo(commands: &mut Commands, origin: DVec3) {
-    let demo = commands
-        .spawn((
-            Name::new("Smoke demo"),
-            Transform::from_translation(origin),
-            SmokeDemo::default(),
-            SmokeDemoState::default(),
-        ))
-        .id();
-    let at = |x: f64, y: f64, z: f64| Transform::from_translation(origin + DVec3::new(x, y, z));
-    let [hx, hz] = FOOTPRINT;
-
-    // The air over the range: 0.5 m voxels, 14 m high.
-    commands.spawn((
-        Name::new("Smoke demo: air"),
-        at(0.0, 0.0, 0.0),
-        SmokeVolume {
-            size: [hx * 2.0, 14.0, hz * 2.0],
-            cell_m: 0.5,
-        },
-    ));
-
-    let concrete = StandardMaterial::hex(0x8a8781).with_roughness(0.92);
-    let dark_concrete = StandardMaterial::hex(0x5f5d59).with_roughness(0.95);
-    let metal = StandardMaterial::hex(0x3d4247)
-        .with_roughness(0.45)
-        .with_metallic(0.8);
-    let olive = StandardMaterial::hex(0x4d5a2e).with_roughness(0.6);
-    let wood = StandardMaterial::hex(0x6e4e33).with_roughness(0.85);
-    let paper = StandardMaterial::hex(0xe8e4d8).with_roughness(0.9);
-    let red = StandardMaterial::hex(0xb3302a).with_roughness(0.7);
-    let cart_paint = StandardMaterial::hex(0xc9772b).with_roughness(0.55);
-    let mesh = |shape: Shape, material: StandardMaterial| MeshRenderer::new(shape, material);
-    let cuboid = |x: f32, y: f32, z: f32| Shape::Cuboid { size: [x, y, z] };
-    let cylinder = |radius: f32, height: f32| Shape::Cylinder {
-        radius,
-        height,
-        segments: 24,
-    };
-
-    // Pad, firing wall with the turret, back wall.
-    commands.spawn((
-        at(0.0, 0.05, 0.0),
-        mesh(cuboid(hx * 2.0, 0.1, hz * 2.0), concrete),
-    ));
-    commands.spawn((
-        at(0.0, 0.55, -19.5),
-        mesh(cuboid(26.0, 1.0, 0.8), dark_concrete),
-    ));
-    commands.spawn((
-        at(0.0, 3.0, hz as f64 - 0.5),
-        mesh(cuboid(hx * 2.0, 6.0, 1.0), dark_concrete),
-    ));
-    let [mx, my, mz] = MUZZLE;
-    commands.spawn((
-        Name::new("Smoke demo: turret"),
-        at(mx, my - 0.35, mz - 1.3),
-        mesh(cylinder(0.45, 0.5), metal),
-    ));
-    commands.spawn((at(mx, my, mz - 1.0), mesh(cuboid(0.5, 0.35, 0.9), olive)));
-    commands.spawn((
-        at(mx, my, mz - 0.35).with_rotation(Quat::from_rotation_x(FRAC_PI_2)),
-        mesh(cylinder(0.05, 0.9), metal),
-    ));
-
-    // Targets.
-    for x in TARGETS_X {
-        commands.spawn((
-            at(x, 0.9, TARGET_Z + 0.1),
-            mesh(cuboid(0.12, 1.8, 0.12), wood),
-        ));
-        commands.spawn((
-            at(x, TARGET_Y, TARGET_Z).with_rotation(Quat::from_rotation_x(FRAC_PI_2)),
-            mesh(cylinder(0.6, 0.05), paper),
-        ));
-        commands.spawn((
-            at(x, TARGET_Y, TARGET_Z - 0.03).with_rotation(Quat::from_rotation_x(FRAC_PI_2)),
-            mesh(cylinder(0.25, 0.04), red),
-        ));
-    }
-
-    // Grenades: the white screen and the signal colors by the targets.
-    let grenades = [
-        ([-2.5, 0.15, 1.0], {
-            let mut g = SmokeSource::grenade([0.92, 0.92, 0.9], 24.0);
-            g.rate_kg_s = 0.12;
-            g.radius = 0.6;
-            g.temperature_c = 32.0;
-            g.gas_m3_s = 22.0;
-            g
-        }),
-        (
-            [-9.0, 0.15, 12.0],
-            warm(SmokeSource::grenade([0.85, 0.12, 0.08], 28.0)),
-        ),
-        (
-            [0.0, 0.15, 13.5],
-            warm(SmokeSource::grenade([0.45, 0.16, 0.7], 28.0)),
-        ),
-        (
-            [9.0, 0.15, 12.0],
-            warm(SmokeSource::grenade([0.12, 0.7, 0.18], 28.0)),
-        ),
-    ];
-    for (i, (p, source)) in grenades.into_iter().enumerate() {
-        let mut idle = source;
-        idle.active = false;
-        commands.spawn((
-            Name::new(format!("Smoke demo: grenade {i}")),
-            at(p[0], p[1], p[2]),
-            mesh(cylinder(0.06, 0.22), olive),
-            idle,
-            DemoGrenade {
-                demo,
-                fresh: source,
-            },
-        ));
-    }
-
-    // Steam vent: always on.
-    commands.spawn((
-        Name::new("Smoke demo: steam vent"),
-        at(14.0, 0.6, -10.0),
-        mesh(cylinder(0.25, 1.1), metal),
-        SmokeSource {
-            rate_kg_s: 0.012,
-            radius: 0.25,
-            temperature_c: 100.0,
-            velocity: [0.0, 4.0, 0.0],
-            color: [0.97, 0.97, 0.97],
-            ..Default::default()
-        },
-    ));
-
-    // Fans along the west side, blowing east across the range.
-    for z in [-6.0, 2.0, 10.0] {
-        commands.spawn((at(-17.6, 1.0, z), mesh(cuboid(0.3, 2.0, 0.3), metal)));
-        commands.spawn((
-            Name::new("Smoke demo: fan"),
-            at(-17.4, 2.4, z).with_rotation(Quat::from_rotation_y(-FRAC_PI_2)),
-            mesh(
-                Shape::Torus {
-                    radius: 1.2,
-                    tube: 0.12,
-                    segments: 24,
-                },
-                metal,
-            ),
-            SmokeFan {
-                speed: 9.0,
-                radius: 2.4,
-                reach: 26.0,
-                on: false,
-            },
-            DemoFan { demo },
-        ));
-    }
-
-    // The cart and its rails.
-    let (rail_z, rail_from, rail_to) = (5.5, -15.0, 15.0);
-    for dz in [-0.7, 0.7] {
-        commands.spawn((
-            at(0.0, 0.14, rail_z + dz),
-            mesh(cuboid((rail_to - rail_from) as f32 + 3.0, 0.08, 0.1), metal),
-        ));
-    }
-    commands.spawn((
-        Name::new("Smoke demo: cart"),
-        at(rail_from, 1.0, rail_z),
-        mesh(cuboid(3.2, 1.6, 2.0), cart_paint),
-        SmokeObstacle { radius: 1.8 },
-        DemoCart {
-            from: origin.x + rail_from,
-            to: origin.x + rail_to,
-            speed: 3.5,
-            phase: 0.0,
-        },
-    ));
+    commands.queue(move |world: &mut World| build::build(world, origin));
 }
 
 /// Signal smoke burns hotter (it rises and spreads more).
@@ -359,19 +251,48 @@ fn warm(mut s: SmokeSource) -> SmokeSource {
     s
 }
 
+/// Where a demo is: its origin and how it is turned. The range is built along the world
+/// axes, but a world shift can turn it with the world.
+#[derive(Debug, Clone, Copy)]
+struct Place {
+    origin: DVec3,
+    rotation: DQuat,
+}
+
+impl Place {
+    /// World position of a point given relative to the demo.
+    fn world(&self, local: DVec3) -> DVec3 {
+        self.origin + self.rotation * local
+    }
+
+    /// A direction given relative to the demo, in world axes.
+    fn direction(&self, local: Vec3) -> Vec3 {
+        (self.rotation * local.as_dvec3()).as_vec3()
+    }
+}
+
 /// Drive every smoke demo: rounds of grenades, shooting, a blast and fans; the cart; tracers.
 pub fn run_demos(world: &mut World) {
     let dt = world.resource::<Time>().delta_secs();
     age_tracers(world, dt);
     drive_carts(world, dt);
+    turn_wheels(world);
+    spin_rotors(world, dt);
     let mut q = world.query::<(Entity, &GlobalTransform, &SmokeDemo, &SmokeDemoState)>();
-    let demos: Vec<(Entity, DVec3, SmokeDemo, SmokeDemoState)> = q
+    let demos: Vec<(Entity, Place, SmokeDemo, SmokeDemoState)> = q
         .iter(world)
-        .map(|(e, t, d, s)| (e, t.translation(), d.clone(), *s))
+        .map(|(e, t, d, s)| {
+            let place = Place {
+                origin: t.translation(),
+                rotation: t.rotation().as_dquat(),
+            };
+            (e, place, d.clone(), *s)
+        })
         .collect();
-    for (entity, origin, demo, mut state) in demos {
+    for (entity, place, demo, mut state) in demos {
+        let middle = place.world(DVec3::Y);
         if state.restart {
-            clear_demo(world, origin);
+            clear_demo(world, middle);
             state = SmokeDemoState {
                 frames: 2,
                 ..Default::default()
@@ -384,7 +305,7 @@ pub fn run_demos(world: &mut World) {
                 .resource::<sim::SmokeDomains>()
                 .list
                 .iter()
-                .any(|d| d.owner.is_some() && d.domain.contains(origin + DVec3::Y));
+                .any(|d| d.owner.is_some() && d.domain.contains(middle));
         if !state.started {
             if ready {
                 state.started = true;
@@ -417,7 +338,7 @@ pub fn run_demos(world: &mut World) {
                     state.shot_clock -= gap;
                     state.shots += 1;
                     let target = AIM_X[(burst + state.rounds as usize) % AIM_X.len()];
-                    shoot(world, origin, target, state.shots);
+                    shoot(world, place, target, state.shots);
                 }
             } else {
                 state.shot_clock = 0.0;
@@ -425,7 +346,7 @@ pub fn run_demos(world: &mut World) {
         }
         if t >= demo.blast_at && !state.blasted {
             state.blasted = true;
-            blast(world, origin);
+            blast(world, place);
         }
         let fans_on = t >= demo.fans[0] && t < demo.fans[1];
         let mut fans = world.query::<(&DemoFan, &mut SmokeFan)>();
@@ -438,11 +359,11 @@ pub fn run_demos(world: &mut World) {
     }
 }
 
-/// Clear the smoke and bullet tunnels in the demo's volume.
-fn clear_demo(world: &mut World, origin: DVec3) {
+/// Clear the smoke and bullet tunnels in the volume around `middle` (the demo's).
+fn clear_demo(world: &mut World, middle: DVec3) {
     let mut cleared = Vec::new();
     for d in world.resource_mut::<sim::SmokeDomains>().list.iter_mut() {
-        if d.owner.is_some() && d.domain.contains(origin + DVec3::Y) {
+        if d.owner.is_some() && d.domain.contains(middle) {
             d.domain.clear();
             cleared.push((d.domain.origin, d.domain.origin + d.domain.size()));
         }
@@ -467,15 +388,14 @@ fn pop_grenades(world: &mut World, demo: Entity) {
     }
 }
 
-fn shoot(world: &mut World, origin: DVec3, target_x: f64, n: u32) {
+fn shoot(world: &mut World, place: Place, target_x: f64, n: u32) {
     let mut rng = Rng::new(0x5_0E + n as u64 * 7919);
-    let from = origin + DVec3::from_array(MUZZLE);
-    let to = origin
-        + DVec3::new(
-            target_x + rng.range(-0.5, 0.5) as f64,
-            TARGET_Y + rng.range(-0.4, 0.4) as f64,
-            TARGET_Z,
-        );
+    let from = place.world(DVec3::from_array(MUZZLE));
+    let to = place.world(DVec3::new(
+        target_x + rng.range(-0.5, 0.5) as f64,
+        TARGET_Y + rng.range(-0.4, 0.4) as f64,
+        TARGET_Z,
+    ));
     world.write_message(ProjectileTrace {
         from,
         to,
@@ -502,8 +422,8 @@ fn shoot(world: &mut World, origin: DVec3, target_x: f64, n: u32) {
     ));
 }
 
-fn blast(world: &mut World, origin: DVec3) {
-    let center = origin + DVec3::from_array(BLAST);
+fn blast(world: &mut World, place: Place) {
+    let center = place.world(DVec3::from_array(BLAST));
     world.write_message(WorldImpulse {
         center,
         radius: 7.0,
@@ -513,8 +433,8 @@ fn blast(world: &mut World, origin: DVec3) {
         source: None,
     });
     world.write_message(SmokeEmission {
-        position: center + DVec3::Y,
-        velocity: Vec3::new(0.0, 3.0, 0.0),
+        position: center + place.direction(Vec3::Y).as_dvec3(),
+        velocity: place.direction(Vec3::new(0.0, 3.0, 0.0)),
         radius: 2.0,
         mass_kg: 0.35,
         temperature_c: 260.0,
@@ -539,11 +459,55 @@ fn age_tracers(world: &mut World, dt: f32) {
 fn drive_carts(world: &mut World, dt: f32) {
     let mut q = world.query::<(&mut DemoCart, &mut Transform)>();
     for (mut cart, mut t) in q.iter_mut(world) {
-        let span = (cart.to - cart.from).abs().max(0.1) as f32;
-        cart.phase = (cart.phase + dt * cart.speed / span) % 2.0;
+        let span = cart.to.distance(cart.from).max(0.1);
+        cart.phase = (cart.phase + dt * cart.speed / span as f32) % 2.0;
         // There and back, easing at the ends.
-        let s = 0.5 - 0.5 * (cart.phase * PI).cos();
-        t.translation.x = cart.from + (cart.to - cart.from) * s as f64;
+        t.translation = cart.from.lerp(cart.to, cart_along(&cart) / span);
+    }
+}
+
+/// Turn the cart's wheelsets by how far the cart moved.
+fn turn_wheels(world: &mut World) {
+    let mut carts = world.query::<(Entity, &DemoCart)>();
+    let along: Vec<(Entity, f64)> = carts.iter(world).map(|(e, c)| (e, cart_along(c))).collect();
+    let mut q = world.query::<(&mut DemoWheel, &mut Transform)>();
+    for (mut w, mut t) in q.iter_mut(world) {
+        let Some(&(_, s)) = along.iter().find(|(e, _)| *e == w.cart) else {
+            continue;
+        };
+        let ds = s - w.last_along.unwrap_or(s);
+        w.last_along = Some(s);
+        // Rolling toward `to` (+x on the range) turns the wheel clockwise seen from +z.
+        w.angle =
+            (w.angle - (ds / w.radius.max(0.01) as f64) as f32).rem_euclid(std::f32::consts::TAU);
+        t.rotation = Quat::from_rotation_z(w.angle);
+    }
+}
+
+/// How far the cart is from the `from` end of its track, m.
+fn cart_along(cart: &DemoCart) -> f64 {
+    let s = 0.5 - 0.5 * (cart.phase * PI).cos();
+    s as f64 * cart.to.distance(cart.from)
+}
+
+/// Spin fan rotors up while their fan is on and let them coast down when it is off.
+fn spin_rotors(world: &mut World, dt: f32) {
+    let mut fans = world.query::<(Entity, &SmokeFan)>();
+    let on: Vec<(Entity, bool)> = fans.iter(world).map(|(e, f)| (e, f.on)).collect();
+    let mut q = world.query::<(&mut DemoRotor, &mut Transform)>();
+    for (mut r, mut t) in q.iter_mut(world) {
+        let running = on.iter().any(|(e, o)| *e == r.fan && *o);
+        let (target, secs) = if running {
+            (ROTOR_SPEED, 1.6)
+        } else {
+            (0.0, 4.0)
+        };
+        r.speed += (target - r.speed) * (1.0 - (-dt / secs).exp());
+        if r.speed < 0.01 && !running {
+            r.speed = 0.0;
+        }
+        r.angle = (r.angle + r.speed * dt).rem_euclid(std::f32::consts::TAU);
+        t.rotation = Quat::from_rotation_z(r.angle);
     }
 }
 
@@ -551,7 +515,7 @@ fn drive_carts(world: &mut World, dt: f32) {
 mod tests {
     use super::*;
     use crate::SmokePlugin;
-    use crate::sim::{SmokeDomains, SmokeTunnels};
+    use crate::sim::{SmokeDomains, SmokeTunnels, SmokeVolume};
     use serde_json::json;
 
     #[test]

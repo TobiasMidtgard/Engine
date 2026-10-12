@@ -26,13 +26,14 @@ pub const FLAG_SKIRT: u8 = 1;
 /// Vertex flag: open ocean surface (sea level drawn over the sea floor).
 pub const FLAG_OCEAN: u8 = 2;
 
-/// GPU vertex of a terrain patch (32 bytes).
+/// GPU vertex of a terrain patch (36 bytes).
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Pod, Zeroable, PartialEq)]
 pub struct TerrainVertex {
     /// Terrain-local position relative to the patch origin, meters.
     pub position: [f32; 3],
-    /// Terrain-local unit normal (snorm16 xyz, w unused).
+    /// Terrain-local unit normal (snorm16 xyz) and the geomorph offset along up (w, in
+    /// [`MORPH_RANGE`] vertex spacings).
     pub normal: [i16; 4],
     /// Height above sea level, meters (the sea floor depth under ocean vertices).
     pub altitude: f32,
@@ -40,12 +41,15 @@ pub struct TerrainVertex {
     pub climate: [u8; 4],
     /// Painted layer index, paint weight, regional variety, local patches.
     pub paint: [u8; 4],
+    /// Tint of hand-made ground: color (square root of linear) and amount (unorm8).
+    pub tint: [u8; 4],
 }
 
 impl TerrainVertex {
     pub fn layout() -> wgpu::VertexBufferLayout<'static> {
-        const ATTRS: [wgpu::VertexAttribute; 5] = wgpu::vertex_attr_array![
-            0 => Float32x3, 1 => Snorm16x4, 2 => Float32, 3 => Unorm8x4, 4 => Uint8x4
+        const ATTRS: [wgpu::VertexAttribute; 6] = wgpu::vertex_attr_array![
+            0 => Float32x3, 1 => Snorm16x4, 2 => Float32, 3 => Unorm8x4, 4 => Uint8x4,
+            8 => Unorm8x4
         ];
         wgpu::VertexBufferLayout {
             array_stride: std::mem::size_of::<TerrainVertex>() as u64,
@@ -75,7 +79,7 @@ impl ChunkSource {
     /// Sample at a surface column (`base` at height 0 with `up`; `dir` for the shape).
     pub fn sample(&self, base: DVec3, up: DVec3, dir: DVec3, min_wavelength: f64) -> Sample {
         let s = self.shape.sample(dir, min_wavelength);
-        let (height, paint) = if self.edits.is_empty() {
+        let (height, mut paint) = if self.edits.is_empty() {
             (s.height, (0, 0.0))
         } else {
             let coarse = |wavelength: f64| {
@@ -85,12 +89,27 @@ impl ChunkSource {
             };
             self.edits.apply(base, up, s.height, &coarse)
         };
+        // Hand-made ground's paint, under any edits painted on it.
+        let mut tint = [0.0; 4];
+        if let Some(op) = self
+            .shape
+            .overlay
+            .as_ref()
+            .and_then(|o| o.paint_at(dir, self.shape.radius_m, s.height))
+        {
+            if op.layer != 0 && op.weight > paint.1 * 2.0 {
+                paint = (op.layer, op.weight);
+            }
+            let [r, g, b] = op.tint;
+            tint = [r, g, b, op.tint_amount];
+        }
         Sample {
             height,
             moisture: s.moisture,
             temperature_c: s.temperature_c,
             mare: s.mare,
             paint,
+            tint,
         }
     }
 }
@@ -103,6 +122,8 @@ pub struct Sample {
     pub temperature_c: f32,
     pub mare: f32,
     pub paint: (u8, f32),
+    /// Tint of hand-made ground: linear color and amount (0 = none).
+    pub tint: [f32; 4],
 }
 
 /// A built patch.
@@ -120,6 +141,28 @@ pub struct ChunkMesh {
     pub radius: f64,
     /// Vertex spacing, meters.
     pub spacing: f64,
+}
+
+/// Height drawn for a sample: the sea surface hides the sea floor when the terrain draws it.
+fn shown(src: &ChunkSource, height: f64) -> f64 {
+    if src.ocean_surface && src.shape.ocean {
+        height.max(-0.25)
+    } else {
+        height
+    }
+}
+
+/// Range of the geomorph offset, in vertex spacings (stored in the normal's w).
+pub const MORPH_RANGE: f64 = 16.0;
+
+fn encode_morph(offset: f64, spacing: f64) -> i16 {
+    ((offset / (spacing * MORPH_RANGE)).clamp(-1.0, 1.0) * 32767.0).round() as i16
+}
+
+/// Tint color stored as its square root (finer steps in the darks), amount linear.
+fn encode_tint(t: [f32; 4]) -> [u8; 4] {
+    let q = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
+    [q(t[0].sqrt()), q(t[1].sqrt()), q(t[2].sqrt()), q(t[3])]
 }
 
 fn encode_normal(n: DVec3) -> [i16; 4] {
@@ -142,13 +185,15 @@ pub fn build_chunk(src: &ChunkSource, key: NodeKey) -> ChunkMesh {
     let mut pos = vec![DVec3::ZERO; S * S];
     let mut ups = vec![DVec3::ZERO; S * S];
     let mut dirs = vec![DVec3::ZERO; S * S];
+    let mut bases = vec![DVec3::ZERO; S * S];
     let mut samples = vec![
         Sample {
             height: 0.0,
             moisture: 0.0,
             temperature_c: 0.0,
             mare: 0.0,
-            paint: (0, 0.0)
+            paint: (0, 0.0),
+            tint: [0.0; 4],
         };
         S * S
     ];
@@ -158,15 +203,44 @@ pub fn build_chunk(src: &ChunkSource, key: NodeKey) -> ChunkMesh {
             let b = lo.y + (j as f64 - 1.0) * step;
             let (base, up, dir) = map.base(key.face, a, b);
             let s = src.sample(base, up, dir, min_wavelength);
-            let shown = if src.ocean_surface && src.shape.ocean {
-                s.height.max(-0.25)
-            } else {
-                s.height
-            };
-            pos[j * S + i] = base + up * shown;
+            pos[j * S + i] = base + up * shown(src, s.height);
             ups[j * S + i] = up;
             dirs[j * S + i] = dir;
+            bases[j * S + i] = base;
             samples[j * S + i] = s;
+        }
+    }
+
+    // Geomorphing: where every vertex would be on the parent patch (sampled at the parent's
+    // detail on the even vertices, on the parent's triangles in between). The shader slides
+    // vertices there as the patch nears the distance where it merges into its parent, so
+    // detail fades in instead of popping.
+    let mut morph = vec![0.0f64; GRID * GRID];
+    if key.level > 0 {
+        const HALF: usize = GRID / 2 + 1;
+        let mut parent = vec![DVec3::ZERO; HALF * HALF];
+        for pj in 0..HALF {
+            for pi in 0..HALF {
+                let idx = (pj * 2 + 1) * S + pi * 2 + 1;
+                let (base, up, dir) = (bases[idx], ups[idx], dirs[idx]);
+                let h = src.sample(base, up, dir, min_wavelength * 2.0).height;
+                parent[pj * HALF + pi] = base + up * shown(src, h);
+            }
+        }
+        let p = |i: usize, j: usize| parent[(j / 2) * HALF + i / 2];
+        for j in 0..GRID {
+            for i in 0..GRID {
+                let target = match (i % 2, j % 2) {
+                    (0, 0) => p(i, j),
+                    (1, 0) => (p(i - 1, j) + p(i + 1, j)) * 0.5,
+                    (0, 1) => (p(i, j - 1) + p(i, j + 1)) * 0.5,
+                    // The parent quad's diagonal (see `chunk_indices`).
+                    _ if (i / 2 + j / 2) % 2 == 0 => (p(i - 1, j - 1) + p(i + 1, j + 1)) * 0.5,
+                    _ => (p(i + 1, j - 1) + p(i - 1, j + 1)) * 0.5,
+                };
+                let idx = (j + 1) * S + i + 1;
+                morph[j * GRID + i] = (target - pos[idx]).dot(ups[idx]);
+            }
         }
     }
 
@@ -186,16 +260,19 @@ pub fn build_chunk(src: &ChunkSource, key: NodeKey) -> ChunkMesh {
                 n = -n;
             }
             let s = samples[idx];
-            min_h = min_h.min(s.height);
-            max_h = max_h.max(s.height);
+            let m = morph[(j - 1) * GRID + i - 1];
+            min_h = min_h.min(s.height).min(s.height + m);
+            max_h = max_h.max(s.height).max(s.height + m);
             center_sum += p;
             let ocean = src.ocean_surface && src.shape.ocean && s.height < -0.25;
             if ocean {
                 n = up;
             }
+            let mut normal = encode_normal(n);
+            normal[3] = encode_morph(m, spacing);
             vertices.push(TerrainVertex {
                 position: (p - origin).as_vec3().to_array(),
-                normal: encode_normal(n),
+                normal,
                 altitude: s.height as f32,
                 climate: [
                     (s.moisture.clamp(0.0, 1.0) * 255.0) as u8,
@@ -209,6 +286,7 @@ pub fn build_chunk(src: &ChunkSource, key: NodeKey) -> ChunkMesh {
                     (variety(src, dirs[idx]) * 255.0) as u8,
                     (patches(src, dirs[idx], spacing) * 255.0) as u8,
                 ],
+                tint: encode_tint(s.tint),
             });
         }
     }

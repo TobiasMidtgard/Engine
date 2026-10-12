@@ -18,6 +18,8 @@ fn app() -> App {
         });
     app.insert_resource(AudioSettings {
         output: AudioOutput::Offline,
+        // Birds and insects would add voices to every test; the nature test turns them on.
+        nature: false,
         ..Default::default()
     });
     app.add_plugins(AudioPlugin);
@@ -635,4 +637,95 @@ fn sound_travels_at_the_speed_the_air_allows() {
         cold < mild - 15.0 && hot > mild + 10.0,
         "{cold} {mild} {hot}"
     );
+}
+
+#[test]
+fn birds_sing_at_dawn_hush_in_rain_and_owls_call_at_night() {
+    use engine_world::{PrecipitationKind, WeatherState};
+    let mut app = app();
+    app.world.resource_mut::<AudioSettings>().nature = true;
+    let grass = app
+        .world
+        .resource::<SurfaceMaterials>()
+        .id("grass")
+        .expect("grass is built in");
+    app.insert_resource(engine_world::Ground(std::sync::Arc::new(Meadow(grass))));
+    let listener = app
+        .world
+        .spawn((AudioListener::default(), Transform::from_xyz(0.0, 1.7, 0.0)))
+        .id();
+    let set_sky = |app: &mut App, hour: f32, sun_elevation: f32, rain: f32| {
+        let mut w = app.world.resource_mut::<WeatherState>();
+        w.time_of_day_h = hour;
+        w.sun_direction = Vec3::new(1.0, sun_elevation, 0.2).normalize();
+        w.precipitation_mm_h = rain;
+        w.precipitation_kind = if rain > 0.0 {
+            PrecipitationKind::Rain
+        } else {
+            PrecipitationKind::None
+        };
+    };
+    let birds = |app: &mut App, secs: f32| {
+        let mut heard = Vec::new();
+        for _ in 0..(secs * 30.0) as usize {
+            app.update();
+            let msgs = app.world.resource::<Messages<AudioCue>>();
+            heard.extend(
+                msgs.iter_current_update_messages()
+                    .filter(|c| c.name.starts_with("bird."))
+                    .map(|c| (c.name.clone(), c.position.unwrap_or_default())),
+            );
+        }
+        heard
+    };
+
+    // Just before sunrise: the dawn chorus.
+    set_sky(&mut app, 5.5, -0.05, 0.0);
+    let dawn = birds(&mut app, 20.0);
+    let species: BTreeSet<_> = dawn.iter().map(|(n, _)| n.clone()).collect();
+    assert!(dawn.len() >= 6, "dawn chorus: {dawn:?}");
+    assert!(species.len() >= 2, "one kind of bird only: {species:?}");
+    assert!(!species.contains("bird.owl"), "{species:?}");
+    // Up in the trees around the listener, not on top of it.
+    for (_, p) in &dawn {
+        let d = DVec3::new(p.x, 0.0, p.z).length();
+        assert!(d > 10.0 && d < 95.0 && p.y > 2.5, "perched at {p}");
+    }
+
+    // Heavy rain: the birds stop (songs already going may finish).
+    set_sky(&mut app, 9.0, 0.5, 8.0);
+    birds(&mut app, 8.0);
+    let rain = birds(&mut app, 15.0);
+    assert!(rain.is_empty(), "birds sang in the rain: {rain:?}");
+
+    // A dry night: an owl, and nothing else.
+    set_sky(&mut app, 1.0, -0.6, 0.0);
+    let night = birds(&mut app, 25.0);
+    assert!(
+        night.iter().any(|(n, _)| n == "bird.owl"),
+        "no owl: {night:?}"
+    );
+    assert!(night.iter().all(|(n, _)| n == "bird.owl"), "{night:?}");
+
+    // Flying 200 m over the meadow at dawn: the birds are far below.
+    set_sky(&mut app, 5.5, -0.05, 0.0);
+    app.world
+        .entity_mut(listener)
+        .insert(Transform::from_xyz(0.0, 200.0, 0.0));
+    birds(&mut app, 10.0);
+    let aloft = birds(&mut app, 8.0);
+    assert!(aloft.is_empty(), "birds sang up in the sky: {aloft:?}");
+}
+
+/// Flat grass everywhere.
+struct Meadow(engine_world::SurfaceId);
+
+impl engine_world::GroundQuery for Meadow {
+    fn sample(&self, _: DVec3) -> Option<engine_world::GroundSample> {
+        Some(engine_world::GroundSample {
+            height: 0.0,
+            normal: Vec3::Y,
+            surface: self.0,
+        })
+    }
 }

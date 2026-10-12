@@ -11,7 +11,7 @@ on:
     # file"); CI doesn't run on them, so an unpinned entry never turns a check red. A
     # successful run deletes the scratch branch.
     branches: [main, "assets/**"]
-    paths: ["assets/manifests/**"]
+    paths: ["assets/manifests/**", "tools/fetch-assets/**"]
   workflow_dispatch:
 
 permissions:
@@ -46,6 +46,20 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           ENGINE_ASSET_MIRROR: ${{ github.repository }}
         run: cargo run -q -p fetch-assets -- mirror
+      - name: Put the license notices on the mirror
+        # The mirror is public, so its copies carry their licenses: the notices of every file
+        # listed on main (tools/fetch-assets docs, "Notices").
+        if: github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          NOTES: >-
+            Copies of the engine's third-party art, named by SHA-256, for `cargo run -p fetch-assets`.
+            Licenses, authors and sources: THIRD_PARTY_NOTICES.md in this release, and
+            assets/manifests/ in the repository.
+        run: |
+          cargo run -q -p fetch-assets -- notices > THIRD_PARTY_NOTICES.md
+          gh release upload asset-mirror THIRD_PARTY_NOTICES.md --clobber --repo "$GITHUB_REPOSITORY"
+          gh release edit asset-mirror --notes "$NOTES" --repo "$GITHUB_REPOSITORY"
       - name: Delete the scratch branch
         # Cloud sessions can't delete branches, so the run does. The pins stay in this check
         # run's annotations. After a failed run the branch stays, so the entry can be fixed and

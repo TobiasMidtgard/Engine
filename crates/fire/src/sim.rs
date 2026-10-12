@@ -155,6 +155,9 @@ type PatchQuery<'w, 's> = Query<
 >;
 
 /// Keep [`FirePatches`] in sync and refuel cells under patches that changed.
+///
+/// A patch counts as changed only if its fuel or where it lies did: one a world shift moved
+/// (its `Transform` and its [`PlacedPatch`] both followed the shift) is not refueled.
 #[allow(clippy::too_many_arguments)]
 pub fn index_patches(
     q: PatchQuery,
@@ -167,12 +170,10 @@ pub fn index_patches(
     materials: Res<SurfaceMaterials>,
 ) {
     let removed: Vec<Entity> = removed.read().collect();
-    let changed: Vec<Entity> = q
+    let stirred = q
         .iter()
-        .filter(|(_, p, t, _, _)| p.is_changed() || t.is_changed())
-        .map(|(e, ..)| e)
-        .collect();
-    if changed.is_empty() && removed.is_empty() {
+        .any(|(_, p, t, _, _)| p.is_changed() || t.is_changed());
+    if !stirred && removed.is_empty() {
         return;
     }
     let old = std::mem::take(&mut patches.list);
@@ -193,8 +194,16 @@ pub fn index_patches(
             }
         })
         .collect();
+    let changed: Vec<Entity> = list
+        .iter()
+        .filter(|p| !old.iter().any(|o| o.entity == p.entity && o.same_as(p)))
+        .map(|p| p.entity)
+        .collect();
     list.sort_by_key(|p| std::cmp::Reverse(p.patch.priority));
     patches.list = list;
+    if changed.is_empty() && removed.is_empty() {
+        return;
+    }
 
     // Refuel where changed or removed patches were or are.
     let touched: Vec<PlacedPatch> = old
@@ -310,8 +319,10 @@ pub fn handle_ignition(
             FireCommand::Clear => {
                 let cell = field.cell_m;
                 let max_tiles = field.max_tiles;
+                let origin = field.origin;
                 *field = FireField::new(cell);
                 field.max_tiles = max_tiles;
+                field.origin = origin;
             }
         }
     }
@@ -595,7 +606,7 @@ pub fn emit_outputs(
         if !tile.active && tile.burning == 0 {
             continue;
         }
-        let origin = (tile.key * TILE).as_dvec2() * cell as f64;
+        let origin = field.tile_origin(tile.key);
         // 4×4-cell blocks: smoke, light and updraft per block.
         const B: i32 = 4;
         let mut tile_hrr = 0.0f64;
