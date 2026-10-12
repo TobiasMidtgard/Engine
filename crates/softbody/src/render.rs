@@ -48,6 +48,8 @@ const TUBE_SIDES: usize = 8;
 const TUBE_SUBDIV: usize = 3;
 /// Projected radius (px) at which hair is drawn with every strand.
 const HAIR_FULL_DENSITY_PX: f32 = 120.0;
+/// Cloth cells larger than this on screen (pixels) are drawn subdivided along curved edges.
+const REFINE_CELL_PX: f32 = 6.0;
 
 /// One surface vertex. Must match `VertexIn` in `surface.wgsl` and `shadow.wgsl`.
 #[repr(C)]
@@ -185,6 +187,36 @@ pub struct Geometry {
     normals: Vec<Vec3>,
     tension: Vec<Vec3>,
     ring: Vec<(Vec3, Vec3, Vec3, f32)>,
+    edges: Vec<(u64, u32)>,
+    edge_mid: Vec<u32>,
+}
+
+/// The midpoint of a PN-triangle edge: the cubic through both ends that leaves each end
+/// along its tangent plane, sampled halfway. Bending is capped at an eighth of the edge so
+/// noisy normals can't raise bumps. The normal is the plain average of the ends: the
+/// quadratic PN normal flips its tilt wherever the ends lean the same way, which shows as
+/// dark patches under a low sun.
+fn curved_midpoint(a: &SoftVertex, b: &SoftVertex) -> SoftVertex {
+    let (pa, pb) = (Vec3::from(a.position), Vec3::from(b.position));
+    let (na, nb) = (Vec3::from(a.normal), Vec3::from(b.normal));
+    let d = pb - pa;
+    // Ends whose normals disagree a lot sit on a crease or a fold that doubles back: there
+    // the normals say little about the surface between them, so stay close to straight.
+    let agree = ((na.dot(nb) - 0.3) / 0.5).clamp(0.0, 1.0);
+    let mut bend = -(d.dot(na) * na - d.dot(nb) * nb) / 8.0 * agree;
+    let cap = 0.12 * d.length();
+    if bend.length() > cap {
+        bend = bend.normalize_or_zero() * cap;
+    }
+    let avg = |x: [f32; 2], y: [f32; 2]| [(x[0] + y[0]) * 0.5, (x[1] + y[1]) * 0.5];
+    SoftVertex {
+        position: ((pa + pb) * 0.5 + bend).to_array(),
+        normal: (na + nb).try_normalize().unwrap_or(na).to_array(),
+        uv: avg(a.uv, b.uv),
+        tension: avg(a.tension, b.tension),
+        burn: avg(a.burn, b.burn),
+        material: a.material,
+    }
 }
 
 impl Geometry {
@@ -206,8 +238,15 @@ impl Geometry {
     }
 
     /// Append a body's surface and rope tubes; `base` is the body origin relative to the
-    /// camera. Returns its index range (empty for bodies with nothing to draw).
-    pub fn add_body(&mut self, body: &SoftBodySim, base: Vec3, alpha: f32) -> Range<u32> {
+    /// camera. `refine` splits each surface triangle in four along curved edges (for cloth
+    /// seen up close). Returns its index range (empty for bodies with nothing to draw).
+    pub fn add_body(
+        &mut self,
+        body: &SoftBodySim,
+        base: Vec3,
+        alpha: f32,
+        refine: bool,
+    ) -> Range<u32> {
         let start = self.indices.len() as u32;
         if body.surface.is_none() && body.tubes.is_empty() {
             return start..start;
@@ -228,7 +267,7 @@ impl Geometry {
         self.materials.push(gpu_material);
         self.interpolate(body, base, alpha);
         if let Some(surface) = &body.surface {
-            self.add_surface(body, surface, material);
+            self.add_surface(body, surface, material, refine);
         }
         for tube in &body.tubes {
             self.add_tube(tube, material);
@@ -236,7 +275,7 @@ impl Geometry {
         start..self.indices.len() as u32
     }
 
-    fn add_surface(&mut self, body: &SoftBodySim, s: &Surface, material: u32) {
+    fn add_surface(&mut self, body: &SoftBodySim, s: &Surface, material: u32, refine: bool) {
         let n = s.vertex_count();
         self.positions.clear();
         match &s.embed {
@@ -326,10 +365,63 @@ impl Geometry {
                 material,
             });
         }
+        if refine {
+            self.refine(first, n, &s.triangles);
+            return;
+        }
         for t in &s.triangles {
             if t.iter().all(|&i| (i as usize) < n) {
                 self.indices.extend(t.iter().map(|&i| first + i));
             }
+        }
+    }
+
+    /// Split every triangle in four through curved edge midpoints (PN triangles, Vlachos et
+    /// al. 2001): each edge bends to fit the normals at its ends, so folds and edges seen up
+    /// close are round instead of faceted. Neighbors share their edge's midpoint, so the
+    /// surface stays closed; torn edges have separate vertices and curve separately.
+    fn refine(&mut self, first: u32, n: usize, triangles: &[[u32; 3]]) {
+        // Unique edges: sort (edge key, triangle side) pairs.
+        self.edges.clear();
+        for (k, t) in triangles.iter().enumerate() {
+            if t.iter().any(|&i| i as usize >= n) {
+                continue;
+            }
+            for e in 0..3 {
+                let (a, b) = (t[e], t[(e + 1) % 3]);
+                let key = ((a.min(b) as u64) << 32) | a.max(b) as u64;
+                self.edges.push((key, (k * 3 + e) as u32));
+            }
+        }
+        self.edges.sort_unstable_by_key(|e| e.0);
+        self.edge_mid.clear();
+        self.edge_mid.resize(triangles.len() * 3, u32::MAX);
+        let mut last = u64::MAX;
+        let mut mid = 0u32;
+        for i in 0..self.edges.len() {
+            let (key, side) = self.edges[i];
+            if key != last {
+                last = key;
+                let (a, b) = ((key >> 32) as u32 + first, key as u32 + first);
+                mid = self.vertices.len() as u32;
+                let v = curved_midpoint(&self.vertices[a as usize], &self.vertices[b as usize]);
+                self.vertices.push(v);
+            }
+            self.edge_mid[side as usize] = mid;
+        }
+        for (k, t) in triangles.iter().enumerate() {
+            let m = [
+                self.edge_mid[k * 3],
+                self.edge_mid[k * 3 + 1],
+                self.edge_mid[k * 3 + 2],
+            ];
+            if m.contains(&u32::MAX) {
+                continue;
+            }
+            let [a, b, c] = t.map(|i| first + i);
+            self.indices.extend_from_slice(&[
+                a, m[0], m[2], m[0], b, m[1], m[2], m[1], c, m[0], m[1], m[2],
+            ]);
         }
     }
 
@@ -998,7 +1090,13 @@ impl RenderFeature for SoftBodyFeature {
 
         let geo = &mut self.geometry;
         for s in &seen {
-            let range = geo.add_body(s.body, s.base, alpha);
+            // Curved subdivision once cloth cells cover more than a few pixels.
+            let refine = s
+                .body
+                .cloth
+                .as_ref()
+                .is_some_and(|c| s.px / s.body.radius.max(0.01) * c.cell > REFINE_CELL_PX);
+            let range = geo.add_body(s.body, s.base, alpha, refine);
             if !range.is_empty() {
                 if s.in_view {
                     let list = if transparent(s) {
@@ -1223,7 +1321,7 @@ mod tests {
     fn cloth_vertices_follow_particles_and_report_compression() {
         let mut body = flat_cloth();
         let mut geo = Geometry::default();
-        let range = geo.add_body(&body, Vec3::ZERO, 1.0);
+        let range = geo.add_body(&body, Vec3::ZERO, 1.0, false);
         assert_eq!(geo.vertices.len(), body.sim.len());
         assert_eq!(
             range.len(),
@@ -1240,11 +1338,47 @@ mod tests {
             body.sim.step_start[i] = body.sim.pos[i];
         }
         geo.clear();
-        geo.add_body(&body, Vec3::ZERO, 1.0);
+        geo.add_body(&body, Vec3::ZERO, 1.0, false);
         for v in &geo.vertices {
             assert!((v.tension[0] + 0.3).abs() < 0.02, "{:?}", v.tension);
             assert!(v.tension[1].abs() < 0.02, "{:?}", v.tension);
         }
+    }
+
+    #[test]
+    fn refined_cloth_is_closed_and_rounds_out_curves() {
+        // Roll the cloth halfway around a cylinder of radius 0.5 about +Y.
+        let mut body = flat_cloth();
+        let r = 0.5;
+        let x0 = body.sim.pos.iter().map(|p| p.x).fold(f32::MAX, f32::min);
+        for i in 0..body.sim.len() {
+            let p = body.sim.pos[i];
+            let a = (p.x - x0) / r * 0.5;
+            body.sim.pos[i] = Vec3::new(r * a.sin(), p.y, r * a.cos());
+            body.sim.step_start[i] = body.sim.pos[i];
+        }
+        let n = body.sim.len();
+        let triangles = body.surface.as_ref().unwrap().triangles.len();
+        let mut geo = Geometry::default();
+        let range = geo.add_body(&body, Vec3::ZERO, 1.0, true);
+        assert_eq!(range.len(), triangles * 4 * 3);
+        // One shared midpoint per edge: a disc has V - E + F = 1.
+        let edges = geo.vertices.len() - n;
+        assert_eq!(n + triangles - edges, 1);
+        let off_axis =
+            |v: &SoftVertex| (Vec2::new(v.position[0], v.position[2]).length() - r).abs();
+        let worst = geo.vertices[n..].iter().map(off_axis).fold(0.0, f32::max);
+        // Straight midpoints of the rolled 0.25 m cells would sag up to 1.5 cm inside.
+        assert!(worst < 0.002, "midpoints {worst} m off the cylinder");
+        assert!(
+            geo.vertices
+                .iter()
+                .all(|v| Vec3::from(v.normal).is_normalized())
+        );
+        // The same body far away draws its own triangles.
+        geo.clear();
+        let range = geo.add_body(&body, Vec3::ZERO, 1.0, false);
+        assert_eq!(range.len(), triangles * 3);
     }
 
     #[test]
@@ -1257,7 +1391,7 @@ mod tests {
             radius: 0.05,
         }];
         let mut geo = Geometry::default();
-        let range = geo.add_body(&body, Vec3::new(10.0, 0.0, 0.0), 1.0);
+        let range = geo.add_body(&body, Vec3::new(10.0, 0.0, 0.0), 1.0, false);
         let rings = 8 * TUBE_SUBDIV + 1;
         assert_eq!(
             geo.vertices.len(),
@@ -1299,12 +1433,12 @@ mod tests {
             let mut b = std::mem::take(&mut body.tubes);
             b.iter_mut().for_each(|t| t.beads = None);
             body.tubes = b;
-            geo.add_body(&body, Vec3::ZERO, 1.0);
+            geo.add_body(&body, Vec3::ZERO, 1.0, false);
             geo.vertices.len()
         };
         body.tubes = body.bridge.as_ref().unwrap().lines.tubes();
         let mut geo = Geometry::default();
-        geo.add_body(&body, Vec3::ZERO, 1.0);
+        geo.add_body(&body, Vec3::ZERO, 1.0, false);
         // Ten beads over a meter, each a closed ellipsoid around the thread.
         let per_bead = 9 * 15;
         assert_eq!(geo.vertices.len() - plain, 10 * per_bead);
