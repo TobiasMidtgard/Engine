@@ -1691,110 +1691,11 @@ pub fn weather(commands: &mut Commands, _lib: &Library, z: &Zone) {
     );
 }
 
-/// Airfield buildings: an apron, a control tower and a hangar beside the runway (the runway
-/// and the planes come from `engine_vehicles::demo::spawn_airfield`). The Cars, planes and
-/// spaceships thread owns it.
-pub fn airfield_buildings(commands: &mut Commands, _lib: &Library, z: &Zone) {
-    let c = z.center + DVec3::new(-90.0, 0.0, 0.0);
-    spawn(
-        commands,
-        cuboid(60.0, 0.1, 120.0),
-        concrete(),
-        at(c + DVec3::new(15.0, 0.03, 0.0)),
-    );
-    // Control tower.
-    spawn(
-        commands,
-        cyl(3.0, 22.0),
-        concrete(),
-        at(c + DVec3::new(-10.0, 11.0, -50.0)),
-    );
-    let mut glass = StandardMaterial::hex(0x2a4050)
-        .with_roughness(0.05)
-        .with_alpha(0.6);
-    glass.reflectance = 0.7;
-    spawn(
-        commands,
-        cyl(5.0, 4.0),
-        glass,
-        at(c + DVec3::new(-10.0, 24.0, -50.0)),
-    );
-    spawn(
-        commands,
-        cyl(5.6, 0.6),
-        concrete(),
-        at(c + DVec3::new(-10.0, 26.3, -50.0)),
-    );
-    // Hangar.
-    spawn(
-        commands,
-        Shape::Cylinder {
-            radius: 16.0,
-            height: 50.0,
-            segments: 32,
-        },
-        mat(0x9aa2a8, 0.5).with_metallic(0.6),
-        Transform::from_translation(c + DVec3::new(-12.0, 0.0, 20.0))
-            .with_rotation(Quat::from_rotation_x(std::f32::consts::FRAC_PI_2)),
-    );
-}
-
-/// Spaceport: landing pad with lights, hangars and a 600 m launch tower for scale (the ships
-/// come from `engine_vehicles::demo::spawn_spaceport`). The Planets
-/// and terrain (space) and Cars, planes and spaceships threads own it.
+/// Spaceport: a 600 m launch tower for scale (the pad, its lights, hangars and the ships
+/// come from `engine_vehicles::demo::spawn_spaceport`). The Planets and terrain (space) and
+/// Cars, planes and spaceships threads own it.
 pub fn spaceport(commands: &mut Commands, _lib: &Library, z: &Zone) {
     let c = z.center;
-    spawn(
-        commands,
-        cyl(30.0, 0.4),
-        concrete(),
-        at(c + DVec3::new(0.0, 0.2, 0.0)),
-    );
-    spawn(
-        commands,
-        Shape::Torus {
-            radius: 22.0,
-            tube: 0.3,
-            segments: 96,
-        },
-        mat(0xf1c40f, 0.5),
-        at(c + DVec3::new(0.0, 0.42, 0.0)),
-    );
-    for i in 0..12 {
-        let a = i as f64 / 12.0 * TAU64;
-        commands.spawn((
-            at(c + DVec3::new(a.cos() * 28.0, 0.6, a.sin() * 28.0)),
-            PointLight {
-                color: [1.0, 0.5, 0.2],
-                intensity_lm: 1500.0,
-                range: 12.0,
-                radius: 0.1,
-            },
-        ));
-        spawn(
-            commands,
-            Shape::Sphere {
-                radius: 0.2,
-                segments: 8,
-            },
-            StandardMaterial::hex(0x331100).with_emissive([1.0, 0.5, 0.2], 800.0),
-            at(c + DVec3::new(a.cos() * 28.0, 0.5, a.sin() * 28.0)),
-        );
-    }
-    // Hangars along the side.
-    for k in 0..3 {
-        spawn(
-            commands,
-            Shape::Cylinder {
-                radius: 12.0,
-                height: 30.0,
-                segments: 32,
-            },
-            mat(0x9aa2a8, 0.45).with_metallic(0.6),
-            Transform::from_translation(c + DVec3::new(-70.0, 0.0, -40.0 + k as f64 * 40.0))
-                .with_rotation(Quat::from_rotation_z(std::f32::consts::FRAC_PI_2)),
-        );
-    }
     // The 600 m launch tower: a tapering spire with a lit band every 50 m.
     let tower = c + DVec3::new(70.0, 0.0, 60.0);
     let shell = mat(0xd8dce0, 0.4).with_metallic(0.3);

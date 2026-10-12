@@ -277,7 +277,6 @@ pub fn spawn_demos(
                     DVec3::new(a[0], z.center.y, a[1]),
                     DVec3::new(b[0], z.center.y, b[1]),
                 );
-                ph::airfield_buildings(commands, lib, z);
             }
             "spaceport" => {
                 ph::spaceport(commands, lib, z);

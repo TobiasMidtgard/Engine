@@ -8,7 +8,9 @@
 //!   and rocket wash) next to a parked one.
 //!
 //! Every surface a vehicle touches here has a static collider, so the demos work with any
-//! physics backend and need nothing else from the game.
+//! physics backend and need nothing else from the game. The colliders are invisible; the
+//! scenery drawn over them (asphalt, markings, buildings, lights) comes from
+//! [`crate::models::scenery`], built to the same dimensions.
 
 use engine_core::math::{DVec3, Quat, Vec3};
 use engine_core::prelude::*;
@@ -17,6 +19,7 @@ use engine_world::SurfaceMaterials;
 use engine_world::physics::{Collider, ColliderShape, RigidBody, Velocity};
 
 use crate::autopilot::{Autopilot, AutopilotMode};
+use crate::models::scenery;
 use crate::presets;
 
 /// Half-axes of the oval's center line, meters (x, z).
@@ -62,10 +65,6 @@ pub fn oval_path(center: DVec3, n: usize) -> Vec<DVec3> {
 /// Rotation that points a vehicle's nose (−Z) along `dir` (horizontal).
 pub fn facing(dir: Vec3) -> Quat {
     Quat::from_rotation_y((-dir.x).atan2(-dir.z))
-}
-
-fn material(hex: u32, roughness: f32) -> StandardMaterial {
-    StandardMaterial::hex(hex).with_roughness(roughness)
 }
 
 /// A static box with a matching collider: `size` full extents, `surface` by material name.
@@ -187,12 +186,6 @@ pub fn spawn_demo(commands: &mut Commands, origin: DVec3) {
 /// The vehicle track, centered on `center` (a point on flat ground). Fits in a 300 × 175 m
 /// rectangle (inside a 150 m circle).
 pub fn spawn_track(commands: &mut Commands, center: DVec3) {
-    let asphalt = material(0x2c2c2e, 0.75);
-    let curb_red = material(0xb3261e, 0.6);
-    let curb_white = material(0xe8e6e1, 0.6);
-    let line = material(0xf2f0e6, 0.55);
-    let concrete = material(0xa8a49c, 0.8);
-    let dirt = material(0x7a5a3c, 0.95);
     let (rx, rz) = TRACK_RADII;
 
     ground(
@@ -201,7 +194,8 @@ pub fn spawn_track(commands: &mut Commands, center: DVec3) {
         Vec3::new((rx + 40.0) as f32, 0.0, (rz + 40.0) as f32),
     );
 
-    // The oval: asphalt segments with red and white curbs on both edges.
+    // The oval: asphalt segments with curbs on both edges (drawn as one continuous road by
+    // the scenery).
     for i in 0..SEGMENTS {
         let a0 = i as f64 / SEGMENTS as f64 * std::f64::consts::TAU;
         let a1 = (i + 1) as f64 / SEGMENTS as f64 * std::f64::consts::TAU;
@@ -215,10 +209,9 @@ pub fn spawn_track(commands: &mut Commands, center: DVec3) {
             commands,
             Vec3::new(TRACK_WIDTH, 0.12, len + 0.4),
             Transform::from_translation(mid - DVec3::Y * 0.06).with_rotation(rot),
-            Some(asphalt),
+            None,
             "concrete",
         );
-        let curb = if i % 2 == 0 { curb_red } else { curb_white };
         for side in [-1.0f32, 1.0] {
             let offset = rot * Vec3::X * side * (TRACK_WIDTH * 0.5 + 0.5);
             slab(
@@ -226,23 +219,11 @@ pub fn spawn_track(commands: &mut Commands, center: DVec3) {
                 Vec3::new(1.0, 0.1, len + 0.05),
                 Transform::from_translation(mid + offset.as_dvec3() - DVec3::Y * 0.04)
                     .with_rotation(rot),
-                Some(curb),
+                None,
                 "concrete",
             );
         }
     }
-    // Start/finish line.
-    let start = oval_point(center, 0.0);
-    commands.spawn((
-        Transform::from_translation(start + DVec3::Y * 0.004)
-            .with_rotation(facing(oval_direction(0.0))),
-        MeshRenderer::new(
-            Shape::Cuboid {
-                size: [TRACK_WIDTH, 0.01, 1.2],
-            },
-            line,
-        ),
-    ));
 
     // The jump: a concrete kicker across the track, 7.5° up over 6 m.
     let jump = oval_point(center, JUMP_ANGLE);
@@ -255,25 +236,9 @@ pub fn spawn_track(commands: &mut Commands, center: DVec3) {
         commands,
         Vec3::new(TRACK_WIDTH, thick, len),
         Transform::from_translation(center_of_ramp).with_rotation(rot),
-        Some(concrete),
+        None,
         "concrete",
     );
-    for k in 0..4 {
-        // Yellow chevrons on the kicker so it reads from the air.
-        let along = -len * 0.5 + 0.9 + k as f32 * 1.4;
-        commands.spawn((
-            Transform::from_translation(
-                center_of_ramp + (rot * Vec3::new(0.0, thick * 0.5 + 0.005, along)).as_dvec3(),
-            )
-            .with_rotation(rot),
-            MeshRenderer::new(
-                Shape::Cuboid {
-                    size: [TRACK_WIDTH * 0.8, 0.01, 0.35],
-                },
-                material(0xe0b020, 0.6),
-            ),
-        ));
-    }
 
     // Drift pad: packed dirt inside the oval.
     let pad = center + DVec3::new(-70.0, 0.0, -20.0);
@@ -282,9 +247,10 @@ pub fn spawn_track(commands: &mut Commands, center: DVec3) {
         26.0,
         0.12,
         Transform::from_translation(pad),
-        Some(dirt),
+        None,
         "dirt",
     );
+    scenery::track::spawn(commands, center);
 
     // Two sports cars racing round the oval.
     let path = oval_path(center, SEGMENTS * 2);
@@ -341,7 +307,6 @@ pub fn spawn_track(commands: &mut Commands, center: DVec3) {
 /// A runway from `start` to `end` (centers of its two ends on flat ground), 45 m wide, with
 /// one plane lined up on it taking off and another flying circuits over it at 140 m.
 pub fn spawn_airfield(commands: &mut Commands, start: DVec3, end: DVec3) {
-    let line = material(0xf2f0e6, 0.55);
     let along = (end - start).with_y(0.0);
     let length = along.length();
     let dir = (along / length).as_vec3();
@@ -353,53 +318,10 @@ pub fn spawn_airfield(commands: &mut Commands, start: DVec3, end: DVec3) {
         commands,
         Vec3::new(width, 0.12, length as f32),
         Transform::from_translation(mid).with_rotation(yaw),
-        Some(material(0x3a3a3c, 0.8)),
+        None,
         "concrete",
     );
-    let top = |p: DVec3| p + DVec3::Y * 0.065;
-    // Center line dashes.
-    let dashes = ((length - 120.0) / 50.0) as i32;
-    for k in 0..dashes {
-        let at = start + (dir * (60.0 + k as f32 * 50.0 + 15.0)).as_dvec3();
-        commands.spawn((
-            Transform::from_translation(top(at)).with_rotation(yaw),
-            MeshRenderer::new(
-                Shape::Cuboid {
-                    size: [0.9, 0.01, 30.0],
-                },
-                line,
-            ),
-        ));
-    }
-    // Threshold bars at both ends.
-    for (from, toward) in [(start, dir), (end, -dir)] {
-        for k in 0..8 {
-            let x = (k as f32 - 3.5) * 4.0 + if k < 4 { -2.0 } else { 2.0 };
-            let at = from + (toward * 25.0 + side * x).as_dvec3();
-            commands.spawn((
-                Transform::from_translation(top(at)).with_rotation(yaw),
-                MeshRenderer::new(
-                    Shape::Cuboid {
-                        size: [1.8, 0.01, 30.0],
-                    },
-                    line,
-                ),
-            ));
-        }
-    }
-    // Edge lines.
-    for s in [-1.0f32, 1.0] {
-        commands.spawn((
-            Transform::from_translation(top(mid + (side * s * (width * 0.5 - 1.5)).as_dvec3()))
-                .with_rotation(yaw),
-            MeshRenderer::new(
-                Shape::Cuboid {
-                    size: [0.9, 0.01, length as f32 - 10.0],
-                },
-                line,
-            ),
-        ));
-    }
+    scenery::airfield::spawn(commands, start, end);
 
     // Planes: one flying circuits over the runway, one taking off to join it.
     let alt = 140.0;
@@ -439,8 +361,8 @@ pub fn spawn_airfield(commands: &mut Commands, start: DVec3, end: DVec3) {
 }
 
 /// A spaceplane hopping off the landing pad at `pad` (center of its top surface) and one
-/// parked beside it. `pad_radius` is the pad's size (a collider is added; the pad is drawn
-/// by the game).
+/// parked beside it. `pad_radius` is the pad's size; the pad, its apron and the spaceport
+/// around it are drawn by [`scenery::spaceport`].
 pub fn spawn_spaceport(commands: &mut Commands, pad: DVec3, pad_radius: f32) {
     let thick = 0.4f32;
     disc(
@@ -462,9 +384,10 @@ pub fn spawn_spaceport(commands: &mut Commands, pad: DVec3, pad_radius: f32) {
         commands,
         Vec3::new(34.0, 0.12, 40.0),
         Transform::from_translation(DVec3::new(apron.x, pad.y - thick as f64 + 0.06, apron.z)),
-        Some(material(0x9a968e, 0.8)),
+        None,
         "concrete",
     );
+    scenery::spaceport::spawn(commands, pad, pad_radius);
     let hover = 18.0;
     let rest = presets::ride_height("spaceplane");
     let ship_at = pad + DVec3::Y * (rest + hover as f64);
