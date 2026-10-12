@@ -21,15 +21,26 @@ struct PlanetGpu {
 
 struct VertexIn {
     @location(0) position: vec3<f32>,
+    @location(1) normal: vec4<f32>,
     @location(5) origin: vec3<f32>,
     @location(6) planet: u32,
+    @location(7) lod: vec4<f32>,
 };
 
 @vertex
 fn vs_shadow(in: VertexIn) -> @builtin(position) vec4<f32> {
     let p = planets[in.planet];
     let rot = mat3x3<f32>(p.rot[0].xyz, p.rot[1].xyz, p.rot[2].xyz);
-    let rel = in.origin + rot * in.position;
+    var rel = in.origin + rot * in.position;
+    // The same geomorph as the main pass (see terrain.wgsl), so shadows match the ground.
+    if (in.lod.w > 0.0) {
+        var up = p.rot[1].xyz;
+        if (p.params2.x > 0.5) {
+            up = normalize(rel - p.center.xyz);
+        }
+        let k = smoothstep(in.lod.z, in.lod.w, length(rel));
+        rel += up * (in.normal.w * in.lod.x * 16.0 * k);
+    }
     var clip = shadow_view.view_proj * vec4<f32>(rel, 1.0);
     // Pancake casters behind the near plane onto it so they still cast shadows.
     clip.z = max(clip.z, 0.0);

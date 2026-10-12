@@ -111,7 +111,12 @@ impl TerrainPalette {
             return ids.water;
         }
         if s.paint.1 > 0.5 && (s.paint.0 as usize) < PAINT_NAMES.len() && s.paint.0 > 0 {
-            return ids.by_name(PAINT_NAMES[s.paint.0 as usize]);
+            let name = PAINT_NAMES[s.paint.0 as usize];
+            return match name {
+                // Gravel crunches like rock where no gravel surface is registered.
+                "gravel" => ids.by_name_or(name, ids.rock),
+                _ => ids.by_name(name),
+            };
         }
         let slope = slope as f32;
         if s.temperature_c < self.snow_below_c && slope < 0.5 {
@@ -137,7 +142,9 @@ impl TerrainPalette {
     }
 
     /// The color of each paint layer (index as in [`PAINT_NAMES`]).
-    pub fn paint_colors(&self) -> [[f32; 3]; 9] {
+    pub fn paint_colors(&self) -> [[f32; 3]; 11] {
+        let mix =
+            |a: [f32; 3], b: [f32; 3], t: f32| std::array::from_fn(|i| a[i] + (b[i] - a[i]) * t);
         [
             self.soil,
             self.mud,
@@ -148,6 +155,8 @@ impl TerrainPalette {
             self.rock,
             [0.33, 0.32, 0.30],
             [0.025, 0.024, 0.023],
+            mix(self.rock, self.soil, 0.35),
+            std::array::from_fn(|i| self.soil[i] * [0.8, 0.75, 0.7][i]),
         ]
     }
 }
@@ -174,11 +183,15 @@ impl SurfaceIds {
     }
 
     pub fn by_name(&self, name: &str) -> SurfaceId {
+        self.by_name_or(name, SurfaceId::default())
+    }
+
+    /// The id of `name`, or `fallback` when no surface has that name.
+    pub fn by_name_or(&self, name: &str, fallback: SurfaceId) -> SurfaceId {
         self.names
             .iter()
             .position(|n| n == name)
-            .map(|i| SurfaceId(i as u16))
-            .unwrap_or_default()
+            .map_or(fallback, |i| SurfaceId(i as u16))
     }
 }
 
@@ -193,6 +206,7 @@ mod tests {
             temperature_c: t,
             mare: 0.0,
             paint: (0, 0.0),
+            tint: [0.0; 4],
         }
     }
 

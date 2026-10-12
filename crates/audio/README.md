@@ -131,6 +131,8 @@ a concrete underpass that echoes, sand, fallen leaves, puddles), walked by a hik
 who ignores slow motion, a dog and a horse. Each footstep is a `GroundContact` like a real
 character's and shows as a ring in its ground's colour.
 
+- The showcase films it in the valley: `showcase --headless --film footsteps --follow "Trail hiker"`
+  (the walkers are named `Trail hiker`, `Trail runner`, `Trail dog` and `Trail horse`).
 - `cargo run -p engine_audio --release --example trail_recording -- out/` films the trail
   following the hiker: every ground in turn, the runner overtaking in slow motion, the
   underpass echo and rain soaking the ground at the end. Writes `trail.mp4`, `trail.wav`

@@ -59,10 +59,26 @@ commands.entity(bodies["Mars"]).insert(PlanetTerrain::mars(5).with_radius(3_389_
 commands.spawn((StarLight::default(), DirectionalLight::default(), Transform::default()));
 ```
 
+## Far views
+
+Every planet and moon is drawn from afar by the `space bodies` render feature: a ray-traced
+spheroid (real polar flattening) with anti-aliased edges, limb darkening, relief at the
+terminator, Earth's clouds as a separate layer with shadows and sun glint on its oceans,
+thin haze rims (Venus, Mars; Earth uses the renderer's atmosphere), and Saturn's rings with
+their real radial profile, lit and unlit sides and the planet's shadow. Each look
+(`BodyLook`) is painted on the CPU into 2048×1024 maps (rings 4096 texels) with mips: a
+small map first, the full one on a background thread once the body is bigger than ~40 px.
+Gas giants are painted through their winds (`look/flow.rs`): bands and cloud texture are
+sampled where the flow brought them from, so jets shear them into streaks and vortices wind
+them up. `cargo run --release -p engine_space --example space_shots -- --maps` saves every
+map and prints bake times.
+
 ## Known limits (next rounds)
 
 - Other modules keep some world-space data outside `Transform` (field grids, particles). A
   re-anchor moves entities but not that data yet; a core `WorldShift` message is requested.
-- Bodies without a surface (the Sun's disk aside) are not drawn yet; gas giants and far
-  planets need an impostor renderer.
+- The far Earth's continents are its own; they don't match what `engine_terrain` builds up
+  close. A shared continent field (or terrain baking the far map) needs a contract.
+- Full-size bakes cost 0.4-1.5 s of CPU per body; a few looks (Mars albedo regions, Moon
+  maria outlines, Neptune's cloud streaks) still read as procedural up close.
 - Ships are not integrated on patched conics yet (`Orbit::from_state` is the first piece).

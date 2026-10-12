@@ -7,7 +7,7 @@ use engine_core::registry::call_api;
 use engine_core::time::TimeSource;
 use engine_debug::DebugDraw;
 use engine_physics::{PhysicsDebug, PhysicsPlugin};
-use engine_world::physics::{Collider, Joint, JointKind, RigidBody, Velocity};
+use engine_world::physics::{Collider, ColliderShape, Joint, JointKind, RigidBody, Velocity};
 use engine_world::{FocusPoints, WorldPlugin};
 use serde_json::json;
 
@@ -137,6 +137,41 @@ fn each_layer_draws_only_when_asked() {
         let n = lines(&mut app, layer);
         assert!(n > 0, "the {name} layer drew nothing");
     }
+}
+
+#[test]
+fn contacts_on_terrain_are_drawn() {
+    // A ball on terrain touches several triangles; Rapier merges their contacts for the solver.
+    let mut app = app();
+    let (rows, cols) = (21, 21);
+    app.world.spawn((
+        Transform::default(),
+        RigidBody::fixed(),
+        Collider {
+            shape: ColliderShape::Heightfield {
+                heights: vec![0.0; rows * cols],
+                rows: rows as u32,
+                cols: cols as u32,
+                size: [20.0, 20.0],
+            },
+            ..Default::default()
+        },
+    ));
+    app.world.spawn((
+        Transform::from_xyz(0.0, 0.3, 0.0),
+        RigidBody::dynamic(),
+        Collider::sphere(0.3),
+        Velocity::default(),
+    ));
+    app.update_n(30);
+    let n = lines(
+        &mut app,
+        PhysicsDebug {
+            contacts: true,
+            ..Default::default()
+        },
+    );
+    assert!(n > 0, "no contact drawn for a ball resting on terrain");
 }
 
 #[test]
