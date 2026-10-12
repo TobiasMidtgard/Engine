@@ -221,7 +221,7 @@ pub const GRASSY_ZONES: &[&str] = &[
 /// there: zone key, then x min..max and z min..max relative to the zone center, meters.
 pub const BARE_FOOTPRINTS: &[(&str, [f64; 2], [f64; 2])] = &[
     // The weather station's asphalt yard, sand pit and stone patio.
-    ("weather", [-13.0, 12.0], [-8.0, 9.0]),
+    ("weather", [-13.5, 13.0], [-8.0, 9.0]),
 ];
 
 /// The stream's course (x, z), spring first: through the southern woods, over the cliff south
