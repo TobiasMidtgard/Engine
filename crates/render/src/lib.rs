@@ -72,7 +72,7 @@ use serde_json::json;
 
 pub use components::{
     AmbientLight, BoxFace, Camera, DirectionalLight, Exposure, MaterialRef, MeshRef, MeshRenderer,
-    PointLight, Projection, ResolvedMesh, SkyLightVolume,
+    NoVirtualGeometry, PointLight, Projection, ResolvedMesh, SkyLightVolume,
 };
 pub use features::{
     FeatureStats, FrameContext, GpuShared, GrowBuffer, RenderAppExt, RenderFeature, RenderPhase,
@@ -97,8 +97,8 @@ pub mod prelude {
     pub use crate::{
         AlphaMode, AmbientLight, AntiAliasing, Atmosphere, BoxFace, Camera, DirectionalLight,
         Exposure, FogSettings, GltfScene, GltfSceneSpawner, GrassBender, GrassField, GrassStyle,
-        Image, MaterialRef, Mesh, MeshRef, MeshRenderer, PointLight, Projection, RenderAppExt,
-        RenderFeature, RenderPhase, RenderPlugin, RenderSettings, Screenshots, Shape,
+        Image, MaterialRef, Mesh, MeshRef, MeshRenderer, NoVirtualGeometry, PointLight, Projection,
+        RenderAppExt, RenderFeature, RenderPhase, RenderPlugin, RenderSettings, Screenshots, Shape,
         SkyLightVolume, StandardMaterial, Tonemapper, spawn_gltf_scene, spawn_gltf_scene_deferred,
     };
 }
@@ -137,7 +137,10 @@ impl Plugin for RenderPlugin {
                 "Renders the scene. Perspective (fov_y_deg, near) or Orthographic (height). Exposure Auto or Manual{ev100}. Highest `order` among active cameras wins.",
             )
             .register_component::<MeshRenderer>(
-                "Draws a mesh with a material. mesh: {\"shape\": {\"Sphere\": {\"radius\": 1, \"segments\": 32}}} | {\"handle\": n} | {\"asset\": \"models/rock.glb#Mesh0\"} (loads on first use); material: {\"inline\": {base_color, metallic, perceptual_roughness, emissive, emissive_strength, alpha_mode, base_color_texture: <image handle>, normal_texture, metallic_roughness_texture (G=roughness, B=metallic), emissive_texture, occlusion_texture, uv_scale, normal_scale}} | {\"asset\": \"models/rock.glb#Material0\"}. virtual_geometry: false keeps a dense mesh off the cluster path (debris, fragments).",
+                "Draws a mesh with a material. mesh: {\"shape\": {\"Sphere\": {\"radius\": 1, \"segments\": 32}}} | {\"handle\": n} | {\"asset\": \"models/rock.glb#Mesh0\"} (loads on first use); material: {\"inline\": {base_color, metallic, perceptual_roughness, emissive, emissive_strength, alpha_mode, base_color_texture: <image handle>, normal_texture, metallic_roughness_texture (G=roughness, B=metallic), emissive_texture, occlusion_texture, uv_scale, normal_scale}} | {\"asset\": \"models/rock.glb#Material0\"}.",
+            )
+            .register_component::<NoVirtualGeometry>(
+                "Marker: keeps this entity's dense MeshRenderer off the virtual geometry cluster path (debris, fragments, meshes that change often).",
             )
             .register_component::<DirectionalLight>(
                 "Sun/moon light along the entity's forward (-Z). illuminance in lux (noon sun 110000).",

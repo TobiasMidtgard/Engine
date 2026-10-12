@@ -233,7 +233,7 @@ occlusion map, picks each cluster's level by its projected error (`cluster_error
 draws; the clusters then go through the depth prepass, the scene pass (the same
 `StandardMaterial` shading as `mesh.wgsl`) and the shadow maps. Only storage buffers, 32-bit
 atomics and indirect draws: every backend. Smaller meshes, alpha-masked or wind-animated
-materials and `MeshRenderer::without_virtual_geometry()` stay instanced; a changed mesh is drawn
+materials and entities with the `NoVirtualGeometry` marker stay instanced; a changed mesh is drawn
 instanced until its own clusters are rebuilt. `DebugView::Clusters` and `ClusterLevels` show
 them; `render.stats` reports `clusters` (and their triangles). Next: occlusion culling (two-pass
 HZB), streaming, a compute rasterizer for tiny triangles, cached shadow pages.

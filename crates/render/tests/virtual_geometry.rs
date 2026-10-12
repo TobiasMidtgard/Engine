@@ -355,7 +355,8 @@ fn clusters_outside_the_view_are_culled() {
         .add(engine_render::mesh::icosphere(1.0, 7));
     app.world.spawn((
         Transform::from_xyz(30.0, 0.0, 0.0),
-        MeshRenderer::new(opted_out, rock_material()).without_virtual_geometry(),
+        MeshRenderer::new(opted_out, rock_material()),
+        NoVirtualGeometry,
     ));
     if !wait_for_clusters(&mut app, 1) {
         return;

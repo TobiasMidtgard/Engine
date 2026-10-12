@@ -33,9 +33,9 @@
 //! material is opaque and not wind-animated is drawn as clusters once its build has finished.
 //! Until then it is drawn by the regular instanced path, so nothing pops in or disappears.
 //! Smaller meshes (props, debris, fragments), alpha-masked and transparent materials stay on
-//! the instanced path, and so does any entity with `MeshRenderer::virtual_geometry = false`
-//! (`without_virtual_geometry()`). `RenderSettings::virtual_geometry = false` turns the
-//! cluster path off.
+//! the instanced path, and so does any entity with the
+//! [`NoVirtualGeometry`](crate::NoVirtualGeometry) marker. `RenderSettings::virtual_geometry =
+//! false` turns the cluster path off.
 //!
 //! ## Changing meshes
 //!

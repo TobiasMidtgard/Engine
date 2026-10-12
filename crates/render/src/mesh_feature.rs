@@ -35,7 +35,7 @@ use engine_assets::Assets;
 use engine_core::prelude::*;
 use wgpu::util::DeviceExt;
 
-use crate::components::{MeshRenderer, ResolvedMesh};
+use crate::components::{MeshRenderer, NoVirtualGeometry, ResolvedMesh};
 use crate::features::{
     FeatureStats, FrameContext, GpuShared, GrowBuffer, RenderFeature, RenderPhase,
 };
@@ -215,6 +215,7 @@ type MeshQuery = (
     &'static GlobalTransform,
     &'static MeshRenderer,
     &'static ResolvedMesh,
+    Has<NoVirtualGeometry>,
 );
 
 /// Draws [`MeshRenderer`] entities. Added by `RenderPlugin`.
@@ -936,7 +937,7 @@ impl RenderFeature for MeshFeature {
 
         let frame = self.frame;
         let prev_origin = self.prev_origin.unwrap_or(view.origin);
-        for (entity, gt, renderer, resolved) in query.iter(world_ref) {
+        for (entity, gt, renderer, resolved, instanced_only) in query.iter(world_ref) {
             if !renderer.visible {
                 continue;
             }
@@ -957,7 +958,7 @@ impl RenderFeature for MeshFeature {
             // then they are drawn below as usual).
             let min_triangles = settings.virtual_geometry_min_triangles as usize;
             if settings.virtual_geometry
-                && renderer.virtual_geometry
+                && !instanced_only
                 && material.alpha_mode == AlphaMode::Opaque
                 && material.wind_sway <= 0.0
                 && let Some(mesh) = mesh_assets.get(mesh_handle)
