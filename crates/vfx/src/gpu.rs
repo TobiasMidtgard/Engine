@@ -213,7 +213,7 @@ pub struct GpuUpdate {
     pub _pad: u32,
 }
 
-/// Per-frame simulation constants (32 bytes).
+/// Per-frame simulation constants (128 bytes).
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Default, PartialEq, Pod, Zeroable)]
 pub struct GpuSim {
@@ -222,6 +222,15 @@ pub struct GpuSim {
     pub shift: [f32; 4],
     /// Update chunks, spawn chunks, frame index, unused.
     pub counts: [u32; 4],
+    /// Scene collision: enabled (1/0), near plane (m), surface thickness (m), unused.
+    pub depth: [f32; 4],
+    /// The world re-anchored since the last step (see `engine_world::WorldShift`): columns of
+    /// the rotation turning particle positions and velocities, `turn[0][3]` = 1 when set.
+    pub turn: [[f32; 4]; 3],
+    /// xyz: velocity the old frame had at the last camera origin (added to particles), m/s.
+    pub frame_velocity: [f32; 4],
+    /// xyz: angular velocity of the old frame, rad/s.
+    pub frame_spin: [f32; 4],
 }
 
 /// One ribbon vertex (48 bytes): trails and beams, built on the CPU each frame.
@@ -257,7 +266,7 @@ mod tests {
         );
         assert_eq!(std::mem::size_of::<GpuSpawn>(), 64);
         assert_eq!(std::mem::size_of::<GpuUpdate>(), 16);
-        assert_eq!(std::mem::size_of::<GpuSim>(), 32);
+        assert_eq!(std::mem::size_of::<GpuSim>(), 128);
         assert_eq!(std::mem::size_of::<RibbonVertex>(), 48);
     }
 

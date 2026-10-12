@@ -117,6 +117,11 @@ pub struct VfxSettings {
     pub draw_distance: f32,
     /// Fade particles where they meet scene geometry.
     pub soft_particles: bool,
+    /// Draw heat haze (`haze` sprites bend the scene behind them).
+    pub heat_haze: bool,
+    /// Colliding particles also hit what the camera sees (walls, props, characters), using
+    /// last frame's depth; off screen only the ground plane collides.
+    pub scene_collision: bool,
     /// Draw particles at all (they keep simulating).
     pub enabled: bool,
     /// How much glow follows the camera's exposure: 1 is physical (a torch is a dim smudge
@@ -132,6 +137,8 @@ impl Default for VfxSettings {
             spawn_scale: 1.0,
             draw_distance: 5000.0,
             soft_particles: true,
+            heat_haze: true,
+            scene_collision: true,
             enabled: true,
             glow_exposure: 0.15,
         }
@@ -346,6 +353,19 @@ impl VfxRuntime {
     /// Names of effects that were asked for but are not in the library.
     pub fn missing_effects(&self) -> impl Iterator<Item = &str> {
         self.missing.iter().map(String::as_str)
+    }
+
+    /// Move every effect's world-space state into a new reference frame.
+    pub fn shift(&mut self, s: &engine_world::WorldShift) {
+        for inst in self.instances.values_mut().chain(self.orphans.iter_mut()) {
+            inst.pos = s.point(inst.pos);
+            inst.prev_pos = s.point(inst.prev_pos);
+            inst.rot = s.orientation(inst.rot);
+            inst.vel = s.velocity_at(inst.pos, inst.vel);
+            inst.plane = inst.plane.map(|(p, n)| (s.point(p), s.direction(n)));
+            inst.gravity = s.direction(inst.gravity);
+            inst.wind = s.direction(inst.wind);
+        }
     }
 }
 

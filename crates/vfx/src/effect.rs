@@ -268,6 +268,12 @@ pub enum Sprite {
     Shard,
     /// A small soft dust puff (footsteps, impacts, sand).
     Dust,
+    /// Heat haze: bends the scene behind it and adds nothing of its own (fire, explosions,
+    /// engines). Color alpha sets the strength.
+    Haze,
+    /// A billow of fire: a dense puff glowing from within, hot cracks cooling to dark smoke over
+    /// its life (explosions, fire impacts, dragon breath). Use `emissive` and a low `additive`.
+    Billow,
 }
 
 impl Sprite {
@@ -281,7 +287,7 @@ impl Sprite {
         match self {
             Sprite::Smoke | Sprite::Dust => 1.0,
             Sprite::Droplet => 0.4,
-            Sprite::Shard => 0.0,
+            Sprite::Shard | Sprite::Haze => 0.0,
             _ => 0.6,
         }
     }

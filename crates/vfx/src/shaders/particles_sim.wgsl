@@ -30,6 +30,14 @@ struct UpdateJob {
 struct Sim {
     shift: vec4<f32>,   // camera origin movement since last frame, w unused
     counts: vec4<u32>,  // update jobs, spawn jobs, frame index, unused
+    depth: vec4<f32>,   // scene collision: enabled, near plane, surface thickness, unused
+    // The world re-anchored since last frame: rotation columns (turn_x.w = 1 when set), the
+    // old frame's velocity at the last camera origin and its angular velocity.
+    turn_x: vec4<f32>,
+    turn_y: vec4<f32>,
+    turn_z: vec4<f32>,
+    frame_velocity: vec4<f32>,
+    frame_spin: vec4<f32>,
 };
 
 @group(1) @binding(0) var<storage, read_write> particles: array<Particle>;
@@ -37,6 +45,7 @@ struct Sim {
 @group(1) @binding(2) var<storage, read> spawns: array<SpawnJob>;
 @group(1) @binding(3) var<storage, read> updates: array<UpdateJob>;
 @group(1) @binding(4) var<uniform> sim: Sim;
+@group(1) @binding(5) var scene_depth: texture_depth_2d; // last frame's, reverse Z
 
 // ---------------------------------------------------------------- random numbers
 fn pcg(v: u32) -> u32 {
@@ -94,6 +103,42 @@ fn swirl(q: vec3<f32>, t: f32) -> vec3<f32> {
     return (a + b * 0.5) * 0.35;
 }
 
+// Camera-relative position of the scene surface seen at pixel `px` of last frame's depth.
+fn scene_point(px: vec2<i32>, size: vec2<f32>) -> vec3<f32> {
+    let d = textureLoad(scene_depth, clamp(px, vec2<i32>(0), vec2<i32>(size) - 1), 0);
+    let uv = (vec2<f32>(px) + 0.5) / size;
+    let ndc = vec4<f32>(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0, max(d, 1e-7), 1.0);
+    let p = frame.inv_view_proj * ndc;
+    return p.xyz / p.w;
+}
+
+// Collide with what the camera saw last frame: sparks bounce off walls and props, debris
+// lands on them. Returns the surface normal, or zero when the particle is not inside a surface.
+fn scene_hit(rel: vec3<f32>, speed: f32, dt: f32) -> vec3<f32> {
+    // Last frame's depth was rendered around last frame's camera origin.
+    let clip = frame.prev_view_proj * vec4<f32>(rel - sim.shift.xyz, 1.0);
+    if (clip.w <= 1e-4) { return vec3<f32>(0.0); }
+    let ndc = clip.xyz / clip.w;
+    if (abs(ndc.x) >= 1.0 || abs(ndc.y) >= 1.0 || ndc.z <= 0.0) { return vec3<f32>(0.0); }
+    let size = vec2<f32>(textureDimensions(scene_depth));
+    let px = vec2<i32>((ndc.xy * vec2<f32>(0.5, -0.5) + 0.5) * size);
+    let d = textureLoad(scene_depth, px, 0);
+    if (d <= 0.0) { return vec3<f32>(0.0); } // sky
+    let near = sim.depth.y;
+    let behind = near / ndc.z - near / d;
+    if (behind < 0.0 || behind > sim.depth.z + speed * dt * 1.5) { return vec3<f32>(0.0); }
+    // The surface's normal from neighboring depths, facing the camera.
+    let c = scene_point(px, size);
+    let dx = scene_point(px + vec2<i32>(2, 0), size) - scene_point(px - vec2<i32>(2, 0), size);
+    let dy = scene_point(px + vec2<i32>(0, 2), size) - scene_point(px - vec2<i32>(0, 2), size);
+    var n = cross(dy, dx);
+    let len = length(n);
+    if (len < 1e-8) { return vec3<f32>(0.0); }
+    n /= len;
+    if (dot(n, c) > 0.0) { n = -n; }
+    return n;
+}
+
 fn simulate(p: ptr<function, Particle>, e: Emitter, dt: f32) {
     if (dt <= 0.0) { return; }
     var q = *p;
@@ -141,6 +186,26 @@ fn simulate(p: ptr<function, Particle>, e: Emitter, dt: f32) {
             }
         }
     }
+    // Walls, props and characters on screen. Newborn particles get a moment to leave the
+    // surface they spawned on (sparks off an anvil, a jet out of its spout).
+    if (mode != 0u && sim.depth.x > 0.5 && q.age > 0.06) {
+        let speed = length(q.vel);
+        let n = scene_hit(particle_rel(q, e), speed, dt);
+        let vn = dot(q.vel, n);
+        if (vn < -0.1 * speed) {
+            q.pos -= q.vel * dt; // back to where it was, in front of the surface
+            if (mode == 2u) {
+                q.age = q.life;
+            } else if (mode == 3u) {
+                q.vel = vec3<f32>(0.0);
+                q.spin = 0.0;
+            } else {
+                let vt = q.vel - n * vn;
+                q.vel = vt * (1.0 - e.collide.z) - n * (vn * e.collide.y);
+                q.spin *= 0.6;
+            }
+        }
+    }
     q.rot += q.spin * dt;
     *p = q;
 }
@@ -172,7 +237,9 @@ fn particle_light(rel: vec3<f32>, translucency: f32) -> vec3<f32> {
         let d2 = dot(d, d);
         let range = pl.position_range.w;
         if (d2 > range * range) { continue; }
-        let falloff = sq(saturate(1.0 - sq(d2 / (range * range)))) / max(d2, sq(max(pl.color_radius.w, 0.05)));
+        // Particles are soft volumes, not surfaces: keep them from blowing out right next to a
+        // light (an effect's own light sits in the middle of its smoke and mist).
+        let falloff = sq(saturate(1.0 - sq(d2 / (range * range)))) / max(d2, sq(max(pl.color_radius.w, 0.75)));
         light += pl.color_radius.rgb * (falloff * iso);
     }
     return light;
@@ -198,6 +265,13 @@ fn cs_update(
     if (p.age >= p.life) { return; }
     let e = emitters[job.emitter];
     if (!is_local(e)) {
+        if (sim.turn_x.w > 0.5) {
+            // Into the new frame: turned, and carried along with the old frame's motion.
+            let r = mat3x3<f32>(sim.turn_x.xyz, sim.turn_y.xyz, sim.turn_z.xyz);
+            let turned = r * p.pos;
+            p.vel = r * p.vel + sim.frame_velocity.xyz + cross(sim.frame_spin.xyz, turned);
+            p.pos = turned;
+        }
         p.pos += sim.shift.xyz;
     }
     p.emitter = job.emitter;

@@ -18,7 +18,9 @@ use std::collections::HashMap;
 
 use engine_core::math::{DVec3, Quat, Vec3};
 use engine_core::prelude::*;
-use engine_world::{ContactKind, Env, GroundContact, ProjectileTrace, WaterSplash, WorldImpulse};
+use engine_world::{
+    ContactKind, Env, GroundContact, LightningStrike, ProjectileTrace, WaterSplash, WorldImpulse,
+};
 
 use crate::emitter::ParticleEffect;
 use crate::library::EffectLibrary;
@@ -35,6 +37,8 @@ pub struct VfxReactions {
     pub impulses: bool,
     /// Things breaking the water surface (`WaterSplash`).
     pub splashes: bool,
+    /// Where cloud-to-ground lightning lands (`LightningStrike`).
+    pub lightning: bool,
     /// Most reaction effects started per frame.
     pub max_per_frame: u32,
     /// Shortest time between two footstep effects from the same entity, seconds.
@@ -50,6 +54,7 @@ impl Default for VfxReactions {
             projectiles: true,
             impulses: true,
             splashes: true,
+            lightning: true,
             max_per_frame: 32,
             step_interval: 0.12,
             step_scale: 1.0,
@@ -155,14 +160,10 @@ pub fn react_to_world(
         }
         let c = impulse.center;
         let scale = (impulse.radius / 4.0).clamp(0.4, 4.0);
+        // Over water the water module reports the splash (see `react_to_splashes`).
         if let Some(w) = env.water(c)
             && (c.y - w.surface_height).abs() < impulse.radius as f64 * 0.5
         {
-            if let Some(name) = pick(&library, &["water.splash"]) {
-                let at = DVec3::new(c.x, w.surface_height, c.z);
-                spawn_effect_at(&mut commands, name, at, w.normal, scale);
-                budget -= 1;
-            }
             continue;
         }
         if let Some(g) = env.ground(c)
@@ -179,22 +180,11 @@ pub fn react_to_world(
         if !reactions.projectiles || budget == 0 {
             continue;
         }
-        // Crossing a water surface on the way.
+        // Into water: the water module reports the splash (see `react_to_splashes`).
         if let Some(w) = env.water(trace.to)
             && trace.from.y > w.surface_height
             && trace.to.y < w.surface_height
-            && let Some(name) = pick(&library, &["water.splash_small", "water.splash"])
         {
-            let t = (trace.from.y - w.surface_height) / (trace.from.y - trace.to.y);
-            let at = trace.from.lerp(trace.to, t);
-            spawn_effect_at(
-                &mut commands,
-                name,
-                DVec3::new(at.x, w.surface_height, at.z),
-                w.normal,
-                0.6,
-            );
-            budget -= 1;
             continue;
         }
         // Landing on the ground.
@@ -246,6 +236,70 @@ pub fn react_to_world(
     }
 }
 
+/// Which effect a splash plays (first that exists), its scale and its up direction.
+///
+/// Water thrown up hard and in bulk is a blast's column; thrown sideways it is spray off a
+/// bow; thrown gently up it is mist (a waterfall's foot). Anything going in splashes: a
+/// small splash for drops and bullets, the big one with its crown for bodies.
+fn splash_look(s: &WaterSplash) -> (&'static [&'static str], f32, Vec3) {
+    let rising = s.velocity.y > 0.5;
+    let sideways = s.velocity.with_y(0.0).length();
+    if rising && s.mass_kg >= 50.0 {
+        // The column's height is the throw's (v²/2g); the effect is 10 m tall at scale 1
+        // and its speeds scale with it, so the height goes with scale².
+        let height = (s.velocity.y * s.velocity.y / 19.62).clamp(2.0, 60.0);
+        let names: &[&str] = &["water.column", "water.splash"];
+        return (names, (height / 10.0).sqrt(), Vec3::Y);
+    }
+    if rising && sideways > 3.0 {
+        let names: &[&str] = &["water.bow_spray", "water.splash_small"];
+        let scale =
+            (s.velocity.length() / 6.0).clamp(0.5, 2.5) * s.mass_kg.clamp(0.5, 8.0).sqrt() / 1.4;
+        return (names, scale, s.velocity.normalize());
+    }
+    if rising {
+        let names: &[&str] = &["water.mist"];
+        let scale = (s.radius / 0.75).clamp(0.3, 4.0);
+        return (names, scale, Vec3::Y + s.velocity.with_y(0.0) * 0.1);
+    }
+    let names: &[&str] = if s.mass_kg < 2.0 {
+        &["water.splash_small", "water.splash"]
+    } else {
+        &["water.splash", "water.splash_small"]
+    };
+    let scale = (s.radius / 0.5).clamp(0.3, 5.0) * (s.mass_kg / 20.0).clamp(0.5, 2.0).sqrt();
+    (names, scale, Vec3::Y - s.velocity.with_y(0.0) * 0.05)
+}
+
+/// Flash, sparks and blasted soil where a cloud-to-ground strike lands, at the end of the
+/// same channel the renderer draws and audio rolls thunder along (`LightningStrike::path`).
+pub fn react_to_lightning(
+    mut commands: Commands,
+    env: Env,
+    library: Res<EffectLibrary>,
+    reactions: Res<VfxReactions>,
+    mut strikes: MessageReader<LightningStrike>,
+) {
+    for strike in strikes.read() {
+        if !reactions.lightning || !strike.cloud_to_ground {
+            continue;
+        }
+        let Some(name) = pick(
+            &library,
+            &["lightning.ground_strike", "spell.lightning_hit"],
+        ) else {
+            continue;
+        };
+        // The channel's last point is the strike point; a coarse path is enough for it.
+        let at = strike.path(2).last().copied().unwrap_or(strike.to);
+        let up = env.ground(at).map_or(Vec3::Y, |g| g.normal);
+        let scale = (strike.peak_current_ka.max(1.0) / 30.0)
+            .sqrt()
+            .clamp(0.5, 2.5);
+        spawn_effect_at(&mut commands, name, at, up, scale);
+    }
+}
+
 /// Spray where the water module reports something broke the surface.
 pub fn react_to_splashes(
     mut commands: Commands,
@@ -258,17 +312,10 @@ pub fn react_to_splashes(
         if !reactions.splashes || budget == 0 || s.mass_kg <= 0.0 {
             continue;
         }
-        // Small things (drops, bullets, feet) get the small splash; bodies the big one.
-        let names: &[&str] = if s.mass_kg < 2.0 {
-            &["water.splash_small", "water.splash"]
-        } else {
-            &["water.splash", "water.splash_small"]
-        };
+        let (names, scale, up) = splash_look(s);
         let Some(name) = pick(&library, names) else {
             continue;
         };
-        let scale = (s.radius / 0.5).clamp(0.3, 5.0) * (s.mass_kg / 20.0).clamp(0.5, 2.0).sqrt();
-        let up = Vec3::Y - s.velocity.with_y(0.0) * 0.05;
         spawn_effect_at(&mut commands, name, s.position, up, scale);
         budget -= 1;
     }
@@ -284,7 +331,10 @@ mod tests {
         app.add_plugins(WorldPlugin)
             .insert_resource(EffectLibrary::with_builtins())
             .init_resource::<VfxReactions>()
-            .add_systems(Update, (react_to_world, react_to_splashes));
+            .add_systems(
+                Update,
+                (react_to_world, react_to_splashes, react_to_lightning),
+            );
         app
     }
 
@@ -385,5 +435,67 @@ mod tests {
         let names = effects(&mut app);
         assert_eq!(names.len(), 1);
         assert!(names[0].starts_with("impact."), "{names:?}");
+    }
+
+    #[test]
+    fn each_kind_of_splash_gets_its_own_look() {
+        let splash = |velocity: Vec3, radius: f32, mass_kg: f32| WaterSplash {
+            position: DVec3::ZERO,
+            velocity,
+            radius,
+            mass_kg,
+            source: None,
+        };
+        let first = |s: WaterSplash| splash_look(&s).0[0];
+        // What the water module sends: a body falling in, a bullet, an underwater charge,
+        // spray off a boat's bow and mist at a waterfall's foot.
+        assert_eq!(
+            first(splash(Vec3::new(0.5, -6.0, 0.0), 0.4, 48.0)),
+            "water.splash"
+        );
+        assert_eq!(
+            first(splash(Vec3::new(300.0, -40.0, 0.0), 0.05, 0.4)),
+            "water.splash_small"
+        );
+        assert_eq!(first(splash(Vec3::Y * 18.0, 3.0, 2000.0)), "water.column");
+        assert_eq!(
+            first(splash(Vec3::new(9.0, 2.5, 3.0), 0.6, 2.0)),
+            "water.bow_spray"
+        );
+        assert_eq!(
+            first(splash(Vec3::new(0.6, 3.0, 0.0), 2.0, 0.8)),
+            "water.mist"
+        );
+        // Taller throws make taller columns.
+        let (_, low, _) = splash_look(&splash(Vec3::Y * 10.0, 3.0, 500.0));
+        let (_, high, _) = splash_look(&splash(Vec3::Y * 25.0, 3.0, 500.0));
+        assert!(high > low * 2.0, "{low} vs {high}");
+        for name in ["water.column", "water.bow_spray", "water.mist"] {
+            assert!(EffectLibrary::with_builtins().contains(name), "{name}");
+        }
+    }
+
+    #[test]
+    fn lightning_that_reaches_the_ground_strikes_sparks_where_it_lands() {
+        let mut app = app();
+        let strike = |cloud_to_ground| LightningStrike {
+            from: DVec3::new(30.0, 1500.0, -20.0),
+            to: DVec3::new(4.0, 0.0, 7.0),
+            peak_current_ka: 30.0,
+            cloud_to_ground,
+            seed: 7,
+        };
+        app.world.write_message(strike(false));
+        app.update();
+        assert!(
+            effects(&mut app).is_empty(),
+            "cloud-to-cloud stays in the sky"
+        );
+        app.world.write_message(strike(true));
+        app.update();
+        assert_eq!(effects(&mut app), ["lightning.ground_strike"]);
+        let mut q = app.world.query::<(&ParticleEffect, &Transform)>();
+        let (_, t) = q.iter(&app.world).next().unwrap();
+        assert_eq!(t.translation, DVec3::new(4.0, 0.0, 7.0));
     }
 }
