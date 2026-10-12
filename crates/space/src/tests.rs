@@ -131,6 +131,37 @@ fn travel_to_the_moon_and_stand_on_it() {
     // No air on the Moon: the nearest atmosphere is Earth's, far away.
     let atmo = app.world.resource::<Atmosphere>();
     assert!(atmo.planet_center.length() > 3.0e8);
+    // ...and nothing to breathe or fly in.
+    let air = sample_air(&app, DVec3::new(0.0, 2.0, 0.0));
+    assert_eq!(air.density, 0.0);
+}
+
+fn sample_air(app: &App, p: DVec3) -> engine_world::AirSample {
+    let w = &app.world;
+    w.resource::<Atmospheres>().sample(
+        w.resource::<engine_world::WeatherState>(),
+        w.resource::<Gravity>(),
+        w.resource::<engine_world::WindField>(),
+        p,
+    )
+}
+
+#[test]
+fn every_planet_has_its_own_air() {
+    let mut app = app();
+    // Earth keeps the weather-driven standard atmosphere.
+    let home = sample_air(&app, DVec3::new(0.0, 2.0, 0.0));
+    assert!((1.1..1.3).contains(&home.density), "{}", home.density);
+    // Mars: about 1.6 % of Earth's.
+    travel_to(&mut app.world, "Mars", 0.0, 0.0, 2.0).unwrap();
+    app.update();
+    let mars = sample_air(&app, DVec3::new(0.0, 2.0, 0.0));
+    assert!((0.015..0.025).contains(&mars.density), "{}", mars.density);
+    let list = &app.world.resource::<Atmospheres>().bodies;
+    assert!(
+        list.iter().any(|a| a.sea_level_density == 0.0),
+        "airless bodies listed"
+    );
 }
 
 #[test]

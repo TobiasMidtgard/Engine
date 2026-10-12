@@ -11,7 +11,7 @@ use engine_core::math::{DMat3, DQuat, DVec3, Quat, Vec3};
 use engine_core::prelude::*;
 use engine_render::prelude::{Atmosphere, DirectionalLight};
 use engine_world::physics::Velocity;
-use engine_world::{FocusPoints, Gravity, GravityBody, SimulationFocus};
+use engine_world::{Atmospheres, FocusPoints, Gravity, GravityBody, SimulationFocus};
 
 pub use look::{BodyImpostor, BodyLook, BodyRings};
 pub use orbit::{AU, DAY, Orbit};
@@ -50,6 +50,37 @@ impl Default for BodyAtmosphere {
     }
 }
 
+/// The air a body holds, for flight, drag, sound and weather (written to engine_world's
+/// [`Atmospheres`], where `Env::air` reads it). Gas giants give it at the 1 bar level.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct BodyAir {
+    /// Density at the surface, kg/m³ (Earth 1.225, Mars 0.020, Venus 65; 0 = airless).
+    pub surface_density: f32,
+    /// Altitude over which density falls by e, meters.
+    pub scale_height_m: f32,
+    /// No air above this altitude, meters.
+    pub top_m: f32,
+    /// Mean surface temperature, °C.
+    pub temperature_c: f32,
+}
+
+impl BodyAir {
+    /// No air at all (the Moon, Mercury).
+    pub const NONE: BodyAir = BodyAir {
+        surface_density: 0.0,
+        scale_height_m: 1.0,
+        top_m: 0.0,
+        temperature_c: 0.0,
+    };
+}
+
+impl Default for BodyAir {
+    fn default() -> Self {
+        Self::NONE
+    }
+}
+
 /// A star, planet or moon. Its `Transform` is driven by the space module: bodies follow their
 /// orbits on rails and spin about their axes, and the anchor body (see [`SpaceFrame`]) stays
 /// fixed in the world. Put a `PlanetTerrain` (engine_terrain) on the same entity to give it a
@@ -76,6 +107,9 @@ pub struct CelestialBody {
     /// Always shows the same face to its parent (like the Moon).
     pub tidally_locked: bool,
     pub atmosphere: Option<BodyAtmosphere>,
+    /// Physical air. `None`: airless, unless the body has an [`atmosphere`](Self::atmosphere),
+    /// in which case it gets engine_world's weather-driven standard (Earth) atmosphere.
+    pub air: Option<BodyAir>,
     /// Radiated power, watts (stars; the Sun ≈ 3.828e26).
     pub luminosity_w: f64,
     /// Color for maps and far-away dots (linear RGB).
@@ -100,6 +134,7 @@ impl Default for CelestialBody {
             rotation_at_epoch_deg: 0.0,
             tidally_locked: false,
             atmosphere: None,
+            air: None,
             luminosity_w: 0.0,
             color: [0.5, 0.5, 0.5],
             look: BodyLook::Rocky,
@@ -176,6 +211,9 @@ pub struct SpaceSettings {
     pub drive_gravity: bool,
     /// Set the renderer's `Atmosphere` to the nearest body with air.
     pub drive_atmosphere: bool,
+    /// Write engine_world's `Atmospheres::bodies` with every planet's and moon's air (airless
+    /// ones too, so the Moon has none), for flight, drag, sound and weather.
+    pub drive_air: bool,
     /// Point lights marked [`StarLight`] at their star with the right illuminance.
     pub drive_starlight: bool,
     /// Luminous efficacy of starlight, lumens per watt (sunlight ≈ 93).
@@ -195,6 +233,7 @@ impl Default for SpaceSettings {
         Self {
             drive_gravity: true,
             drive_atmosphere: true,
+            drive_air: true,
             drive_starlight: true,
             lumens_per_watt: 93.0,
             rotating_altitude_fraction: 0.15,
@@ -663,6 +702,32 @@ pub fn update_space(world: &mut World) {
         let mut g = world.resource_mut::<Gravity>();
         g.uniform = Vec3::ZERO;
         g.bodies = list;
+    }
+
+    // Physical air for every body (they are matched by μ, so the list does not depend on
+    // where they are). Bodies with a sky but no `air` keep the weather-driven standard one.
+    if settings.drive_air && world.contains_resource::<Atmospheres>() {
+        let list: Vec<engine_world::BodyAtmosphere> = bodies
+            .iter()
+            .filter(|(_, b)| b.kind != BodyKind::Star)
+            .filter_map(|(_, b)| {
+                let air = match (b.air, b.atmosphere) {
+                    (Some(air), _) => air,
+                    (None, Some(_)) => return None,
+                    (None, None) => BodyAir::NONE,
+                };
+                Some(engine_world::BodyAtmosphere {
+                    mu: b.mu,
+                    sea_level_density: air.surface_density,
+                    scale_height_m: air.scale_height_m.max(1.0),
+                    top_m: air.top_m,
+                    temperature_c: air.temperature_c,
+                })
+            })
+            .collect();
+        if world.resource::<Atmospheres>().bodies != list {
+            world.resource_mut::<Atmospheres>().bodies = list;
+        }
     }
 
     // Atmosphere: the body with air whose air is closest to the focus.

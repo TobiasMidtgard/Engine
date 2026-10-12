@@ -5,7 +5,7 @@
 //! 2000-01-01 12:00 TT.
 
 use crate::orbit::{AU, DAY, Orbit};
-use crate::{BodyAtmosphere, BodyKind, BodyLook, BodyRings, CelestialBody};
+use crate::{BodyAir, BodyAtmosphere, BodyKind, BodyLook, BodyRings, CelestialBody};
 
 /// Planet elements from semi-major axis (AU), eccentricity, inclination, longitude of the
 /// ascending node, longitude of perihelion and mean longitude (degrees).
@@ -46,10 +46,30 @@ fn planet(
     }
 }
 
+/// Air at the surface (gas giants: at 1 bar): density kg/m³, scale height m, top m, °C.
+/// NASA planetary fact sheets. Earth is left to the weather-driven standard atmosphere.
+fn air(density: f32, scale_height_m: f32, top_m: f32, temperature_c: f32) -> Option<BodyAir> {
+    Some(BodyAir {
+        surface_density: density,
+        scale_height_m,
+        top_m,
+        temperature_c,
+    })
+}
+
 /// The Sun, the eight planets and the Moon.
 pub fn solar_system() -> Vec<CelestialBody> {
     let mut bodies = bodies();
     for b in &mut bodies {
+        b.air = match b.name.as_str() {
+            "Venus" => air(65.0, 15_900.0, 250_000.0, 464.0),
+            "Mars" => air(0.020, 11_100.0, 200_000.0, -63.0),
+            "Jupiter" => air(0.16, 27_000.0, 1_000_000.0, -108.0),
+            "Saturn" => air(0.19, 59_500.0, 1_000_000.0, -139.0),
+            "Uranus" => air(0.42, 27_700.0, 1_000_000.0, -197.0),
+            "Neptune" => air(0.45, 19_700.0, 1_000_000.0, -201.0),
+            _ => None,
+        };
         match b.name.as_str() {
             "Earth" => b.look = BodyLook::Earthlike,
             "Venus" => b.look = BodyLook::Clouds,
