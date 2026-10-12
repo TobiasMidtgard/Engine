@@ -73,6 +73,10 @@ pub enum Part {
     Ear(u8),
     Antler(u8),
     Wing(u8),
+    /// Extra fighter pieces (limb segments, hands, armor plates); `humanoid.rs` names them.
+    Fighter(u8),
+    /// Extra animal pieces (leg segments, hooves, feathers); `animal.rs` names them.
+    Beast(u8),
 }
 
 /// Ground marker showing where an NPC is going (see the module docs).
