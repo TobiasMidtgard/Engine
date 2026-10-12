@@ -83,7 +83,13 @@ detail) and the demo live.
 
 ## Demo
 
-`demo::spawn_demo(commands, origin)` builds a 38 × 44 m smoke range. Every 50 s: smoke
+`demo::spawn_demo(commands, origin)` builds a smoke range (about 45 × 52 m): a 38 × 44 m
+concrete pad, a firing line of Jersey barriers and sandbags with a belt-fed machine gun,
+steel targets and gongs in front of an earth berm, three drum fans whose rotors spin up, a
+skip wagon on rails, a steam vent, and clutter (cables, range flags, ammo crates, spent
+grenades, dry grass). Every prop is a procedural mesh with baked textures (`demo/`),
+registered once by key; `examples/smoke_gallery.rs` renders the views and close-ups. Every
+50 s: smoke
 grenades pop (a white screen in the middle, red, violet and green signal smoke by the
 targets), a turret fires bursts through the white screen at the targets (each round leaves a
 see-through tunnel and a tracer), a blast in the cloud blows a hole in it and leaves a dark,
