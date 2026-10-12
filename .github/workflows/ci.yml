@@ -14,6 +14,10 @@ env:
   CARGO_INCREMENTAL: 0
   # Render tests run on lavapipe (Mesa's software Vulkan) and must not skip.
   ENGINE_REQUIRE_GPU: "1"
+  # No debug info in CI builds. With it, the ~70 test, example and game binaries (each
+  # linking wgpu, naga and bevy_ecs) filled the runner's disk and the linker died with
+  # "signal 7 [Bus error]". Panic messages still name the file and line.
+  CARGO_PROFILE_DEV_DEBUG: "0"
 
 jobs:
   check:
@@ -21,6 +25,14 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
+      - name: Free disk space
+        # Preinstalled SDKs this workspace never uses (Android, .NET, Haskell, CodeQL) take
+        # many GB. They are deleted in the background while the next steps install and
+        # restore; "Disk left" at the end shows the headroom.
+        run: |
+          df -h /
+          sudo nohup rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup \
+            /opt/hostedtoolcache/CodeQL /usr/local/share/boost /usr/share/swift >/dev/null 2>&1 &
       - uses: actions/checkout@v4
       - name: Install software Vulkan (lavapipe)
         run: |
@@ -35,3 +47,8 @@ jobs:
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: Test
         run: cargo test --workspace
+      - name: Disk left
+        if: always()
+        run: |
+          df -h /
+          du -sh target 2>/dev/null || true
