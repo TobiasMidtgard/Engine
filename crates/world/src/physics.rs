@@ -17,7 +17,11 @@
 //! 2. simulates in `FixedUpdate` / `SimSet::Physics` using `Res<Time>` (so time dilation and
 //!    slow motion work), reading the components above and writing the outputs,
 //! 3. replaces [`PhysicsQueries`] with its own implementation,
-//! 4. passes [`conformance`]: `engine_world::physics::conformance::assert_all(|app| { app.add_plugins(MyPhysics); })`.
+//! 4. follows world shifts (floating origin, planet frames): in `WorldShiftSet::Apply` it
+//!    moves its own state (bodies, statics, islands) by the [`crate::WorldShift`], as a
+//!    teleport rather than motion (kinematic bodies get no velocity from it), and by
+//!    `WorldShiftSet::Rebuild` its query snapshot answers in the new frame,
+//! 5. passes [`conformance`]: `engine_world::physics::conformance::assert_all(|app| { app.add_plugins(MyPhysics); })`.
 //!
 //! Swapping physics is then a one-line change in the game's `main`.
 //!
@@ -52,6 +56,12 @@ pub struct RigidBody {
     pub kind: BodyKind,
     /// Total mass, kg. `None` = from collider volumes and densities.
     pub mass_kg: Option<f32>,
+    /// Center of mass in the body's local space, meters. `None` = from the colliders. Set it
+    /// to a design's balance point (a plane's CG, a car's low center of mass).
+    pub center_of_mass: Option<Vec3>,
+    /// Principal moments of inertia about the center of mass, along the body's local axes,
+    /// kg·m². `None` = from the colliders.
+    pub inertia: Option<Vec3>,
     /// Fraction of linear velocity lost per second (air drag stand-in), 0..1.
     pub linear_damping: f32,
     pub angular_damping: f32,
@@ -69,6 +79,8 @@ impl Default for RigidBody {
         Self {
             kind: BodyKind::Dynamic,
             mass_kg: None,
+            center_of_mass: None,
+            inertia: None,
             linear_damping: 0.0,
             angular_damping: 0.05,
             gravity_scale: 1.0,
@@ -100,6 +112,15 @@ impl RigidBody {
 
     pub fn with_mass(mut self, kg: f32) -> Self {
         self.mass_kg = Some(kg);
+        self
+    }
+
+    /// Designed mass properties instead of the ones the colliders imply: mass (kg), center
+    /// of mass (body-local meters) and principal moments of inertia (kg·m²).
+    pub fn with_mass_properties(mut self, kg: f32, center_of_mass: Vec3, inertia: Vec3) -> Self {
+        self.mass_kg = Some(kg);
+        self.center_of_mass = Some(center_of_mass);
+        self.inertia = Some(inertia);
         self
     }
 }
@@ -253,7 +274,8 @@ pub struct ExternalForce {
     pub at: Option<DVec3>,
 }
 
-/// Written by the backend: the body's mass properties.
+/// Written by the backend on every dynamic body: the mass properties it simulates with. They
+/// are the [`RigidBody`] overrides where set, otherwise derived from the colliders.
 #[derive(Component, Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct MassProperties {
@@ -467,7 +489,8 @@ pub struct Hit {
 }
 
 /// Scene queries against the current physics state. Implementations must be safe to call
-/// from any system, any thread, at any time (they read a snapshot updated each step).
+/// from any system, any thread, at any time (they read a snapshot updated each step and
+/// after each world shift).
 pub trait PhysicsQuery: Send + Sync + 'static {
     /// First hit along a ray. `dir` is normalized.
     fn raycast(

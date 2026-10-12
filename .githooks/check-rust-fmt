@@ -1,0 +1,36 @@
+#!/bin/sh
+# check-rust-fmt REV — reads Rust file paths (one per line) on stdin and checks each file's
+# content at REV (empty REV: the index) with rustfmt, the way CI's `cargo fmt --all --check`
+# would. Prints the files rustfmt would change or cannot parse and exits 1 if there are any.
+# Used by the pre-commit and pre-push hooks.
+
+rev=$1
+
+if ! rustfmt --version >/dev/null 2>&1; then
+    echo "check-rust-fmt: rustfmt does not run here, so formatting was not checked" >&2
+    exit 0
+fi
+
+tmp=$(mktemp) || exit 1
+trap 'rm -f "$tmp" "$tmp.fmt" "$tmp.err"' EXIT
+
+status=0
+while IFS= read -r file; do
+    [ -n "$file" ] || continue
+    if ! git cat-file blob "$rev:$file" >"$tmp" 2>"$tmp.err"; then
+        echo "  $file: could not read it from git:" >&2
+        sed 's/^/    /' "$tmp.err" >&2
+        status=1
+        continue
+    fi
+    # The workspace is edition 2024 (Cargo.toml), which also sets rustfmt's style edition.
+    if ! rustfmt --edition 2024 --emit stdout <"$tmp" >"$tmp.fmt" 2>"$tmp.err"; then
+        echo "  $file: rustfmt cannot parse it:" >&2
+        sed -n '1,8s/^/    /p' "$tmp.err" >&2
+        status=1
+    elif ! cmp -s "$tmp" "$tmp.fmt"; then
+        echo "  $file: not formatted" >&2
+        status=1
+    fi
+done
+exit $status
