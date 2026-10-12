@@ -27,8 +27,8 @@ are built, nothing simulates yet) · ⬜ not visible yet
 
 | # | Test case | Zone / viewpoint | Owner | Status |
 |---|---|---|---|---|
-| 7 | Realistic water that moves efficiently | `water` (test area), `lake`, `falls` | Water simulation | 🟨 still lake and a stream with a waterfall (stand-in water in a carved bed); the test area's flat ground waits for the module's demo |
-| 8 | Water affected by the environment and players (wakes, splashes, rain filling it) | `water` (test area), `lake` | Water simulation | ⬜ |
+| 7 | Realistic water that moves efficiently | `water` (test area), `lake`, `falls` | Water simulation | 🟨 test area live (`water`): a tarn with wind waves, a waterfall, stream and pond that really flow; the valley's `lake` and `falls` still show stand-in water |
+| 8 | Water affected by the environment and players (wakes, splashes, rain filling it) | `water` (test area), `lake` | Water simulation | 🟨 test area live (`water`): boat wakes, swimmer and wader ripples, gunfire and depth-charge splashes, blocks floating by density, rain rings and puddles; `lake` next |
 | 9 | Water splashes (particles) | `lake` | Particles and magic effects | ⬜ |
 | 10 | Fire that spreads through burnable things like grass | `field`, `fire_front`, `fire_trees`, `fire_campfire`, `fire_night` | Fire and smoke | ✅ burning meadow that spreads downwind and regrows |
 | 11 | Smoke that reacts to bullets, wind currents and explosions | `range` | Fire and smoke | 🟨 firing lanes, fans |

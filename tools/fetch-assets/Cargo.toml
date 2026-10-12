@@ -1,0 +1,13 @@
+[package]
+name = "fetch-assets"
+description = "Downloads the large art files listed in assets/manifests/*.toml into assets/fetched/ (never committed), checks them against their pinned SHA-256, and keeps the GitHub release mirror filled."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+sha2 = "0.10"
+toml = { version = "0.9", default-features = false, features = ["parse", "serde", "std"] }
