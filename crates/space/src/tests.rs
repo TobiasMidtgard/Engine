@@ -112,6 +112,11 @@ fn travel_to_the_moon_and_stand_on_it() {
     let at = travel_to(&mut app.world, "Moon", 10.0, 20.0, 2.0).unwrap();
     assert_eq!(at, DVec3::new(0.0, 2.0, 0.0));
     app.update();
+    // The trip went through one world shift, so every module moved its state with it.
+    let shifts = app
+        .world
+        .resource::<bevy_ecs::message::Messages<engine_world::WorldShift>>();
+    assert_eq!(shifts.len(), 1);
     let p = focus(&mut app);
     let s = state(&app);
     assert_eq!(s.anchor.map(|a| s.bodies[a].name.as_str()), Some("Moon"));

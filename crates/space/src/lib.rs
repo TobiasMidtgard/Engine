@@ -11,7 +11,9 @@ use engine_core::math::{DMat3, DQuat, DVec3, Quat, Vec3};
 use engine_core::prelude::*;
 use engine_render::prelude::{Atmosphere, DirectionalLight};
 use engine_world::physics::Velocity;
-use engine_world::{Atmospheres, FocusPoints, Gravity, GravityBody, SimulationFocus};
+use engine_world::{
+    Atmospheres, FocusPoints, Gravity, GravityBody, SimulationFocus, WorldShift, WorldShiftSet,
+};
 
 pub use look::{BodyImpostor, BodyLook, BodyRings};
 pub use orbit::{AU, DAY, Orbit};
@@ -395,11 +397,14 @@ impl Plugin for SpacePlugin {
                 "What the space module drives: gravity, atmosphere, starlight, far-view spheres.",
             )
             .add_systems(FixedUpdate, advance_clock.in_set(SimSet::Environment))
+            .init_resource::<PendingTravel>()
+            .add_systems(PostUpdate, reanchor.in_set(WorldShiftSet::Write))
             .add_systems(
                 PostUpdate,
                 (look::spawn_impostors, update_space, look::scale_impostors)
                     .chain()
-                    .before(UpdateSet::Propagate),
+                    .after(WorldShiftSet::Apply)
+                    .before(WorldShiftSet::Rebuild),
             );
         register_apis(app);
     }
@@ -535,62 +540,86 @@ impl FrameRef<'_> {
     }
 }
 
-/// Re-express every free entity (not a body, not parented) from one frame in another, keeping
-/// its true position and motion.
-fn reframe_entities(world: &mut World, from: &FrameRef, to: &FrameRef) {
+/// The world shift that re-expresses everything from one frame in another, keeping true
+/// positions and motion: things at rest in the old frame move with its velocity and spin as
+/// seen from the new one.
+fn frame_shift(from: &FrameRef, to: &FrameRef) -> WorldShift {
     let (old, new) = (from.map, to.map);
-    let mut q = world.query_filtered::<(&mut Transform, Option<&mut Velocity>), (
-        Without<CelestialBody>,
-        Without<ChildOf>,
-    )>();
-    for (mut tf, vel) in q.iter_mut(world) {
-        let inertial = old.0.inverse() * (tf.translation - old.1);
-        tf.translation = new.0 * inertial + new.1;
-        let turn = (new.0 * old.0.inverse()).normalize();
-        tf.rotation = (turn.as_quat() * tf.rotation).normalize();
-        if let Some(mut v) = vel {
-            let v_in = old.0.inverse() * v.linear.as_dvec3() + from.velocity_at(inertial);
-            let v_new = new.0 * (v_in - to.velocity_at(inertial));
-            let w_in = old.0.inverse() * v.angular.as_dvec3() + from.spin();
-            let w_new = new.0 * (w_in - to.spin());
-            v.linear = v_new.as_vec3();
-            v.angular = w_new.as_vec3();
-        }
+    let rotation = (new.0 * old.0.inverse()).normalize();
+    // The old world origin, in inertial space.
+    let origin = old.0.inverse() * -old.1;
+    WorldShift {
+        rotation,
+        translation: new.1 - rotation * old.1,
+        velocity: new.0 * (from.velocity_at(origin) - to.velocity_at(origin)),
+        angular_velocity: new.0 * (from.spin() - to.spin()),
     }
 }
 
-/// Every frame: move bodies along their orbits, keep the anchor fixed, switch anchors on
-/// arrival, and drive gravity, the atmosphere and starlight.
-pub fn update_space(world: &mut World) {
+/// The anchor body's index: by name, else the first planet, else the first body.
+fn anchor_index(states: &[BodyState], frame: &SpaceFrame) -> usize {
+    states
+        .iter()
+        .position(|b| b.name.eq_ignore_ascii_case(&frame.anchor))
+        .or_else(|| states.iter().position(|b| b.kind == BodyKind::Planet))
+        .unwrap_or(0)
+}
+
+/// Every body and its definition.
+fn collect_bodies(world: &mut World) -> Vec<(Entity, CelestialBody)> {
     let mut q = world.query::<(Entity, &CelestialBody)>();
-    let bodies: Vec<(Entity, CelestialBody)> = q.iter(world).map(|(e, b)| (e, b.clone())).collect();
+    q.iter(world).map(|(e, b)| (e, b.clone())).collect()
+}
+
+/// A trip asked for with [`travel_to`], made at the next re-anchoring step.
+#[derive(Resource, Debug, Clone, Default)]
+struct PendingTravel {
+    trip: Option<(String, f64, f64)>,
+    /// Where the focus lands (world, new frame) once the world has shifted.
+    land: Option<DVec3>,
+}
+
+/// Before the world shifts (in [`WorldShiftSet::Write`]): decide whether the world
+/// re-anchors this frame, on arrival at another body, on climbing out of or descending into
+/// a body's low space (the world stops or starts turning with it), or for a trip asked for
+/// with [`travel_to`]. If so, write the [`WorldShift`] that takes everything into the new
+/// frame; engine_world and every module move their state with it.
+pub fn reanchor(world: &mut World) {
+    let bodies = collect_bodies(world);
     if bodies.is_empty() {
         return;
     }
     let t = world.resource::<SpaceClock>().seconds;
-    let mut states = propagate(&bodies, t);
-    let mut frame = world.resource::<SpaceFrame>().clone();
+    let states = propagate(&bodies, t);
+    let frame = world.resource::<SpaceFrame>().clone();
     let settings = world.resource::<SpaceSettings>().clone();
-    let previous = world.resource::<SpaceState>().clone();
-
-    // Anchor: by name, else the first planet, else the first body.
+    let anchor = anchor_index(&states, &frame);
+    let current = frame_for(&states[anchor], &frame);
     let find = |name: &str| {
         states
             .iter()
             .position(|b| b.name.eq_ignore_ascii_case(name))
     };
-    let mut anchor = find(&frame.anchor)
-        .or_else(|| states.iter().position(|b| b.kind == BodyKind::Planet))
-        .unwrap_or(0);
-    let mut current = frame_for(&states[anchor], &frame);
 
-    // Arrival at another body: re-anchor there with home under the focus. Climbing out of a
-    // body's low space stops the world turning with it; descending starts it again.
-    let focus = focus_position(world);
-    let mut switched = false;
-    if frame.auto_switch
-        && let Some(f) = focus
+    let trip = world
+        .get_resource_mut::<PendingTravel>()
+        .and_then(|mut p| p.trip.take());
+    let mut next_frame = None;
+    if let Some((name, lat, lon)) = trip {
+        if let Some(target) = find(&name) {
+            next_frame = Some(SpaceFrame {
+                anchor: states[target].name.clone(),
+                home_lat_deg: lat,
+                home_lon_deg: lon,
+                home_height_m: 0.0,
+                rotating: true,
+                ..frame.clone()
+            });
+        }
+    } else if frame.auto_switch
+        && let Some(f) = focus_position(world)
     {
+        // Arrival at another body: re-anchor there with home under the focus.
         let inertial = current.0.inverse() * (f - current.1);
         let probe = SpaceState {
             bodies: states.clone(),
@@ -618,7 +647,7 @@ pub fn update_space(world: &mut World) {
             altitude < limit * 1.05
         };
         if target != anchor || rotating != frame.rotating {
-            let mut next_frame = SpaceFrame {
+            let mut next = SpaceFrame {
                 anchor: states[target].name.clone(),
                 rotating,
                 ..frame.clone()
@@ -628,34 +657,69 @@ pub fn update_space(world: &mut World) {
                 let local = states[target].orientation.inverse()
                     * (inertial - states[target].inertial_position);
                 let dir = local.normalize_or(DVec3::Y);
-                next_frame.home_lat_deg = dir.y.clamp(-1.0, 1.0).asin().to_degrees();
-                next_frame.home_lon_deg = dir.x.atan2(dir.z).to_degrees();
-                next_frame.home_height_m = 0.0;
+                next.home_lat_deg = dir.y.clamp(-1.0, 1.0).asin().to_degrees();
+                next.home_lon_deg = dir.x.atan2(dir.z).to_degrees();
+                next.home_height_m = 0.0;
             }
             if !rotating {
-                next_frame.frozen_orientation = states[target].orientation.to_array();
+                next.frozen_orientation = states[target].orientation.to_array();
             }
-            let next = frame_for(&states[target], &next_frame);
-            reframe_entities(
-                world,
-                &FrameRef {
-                    anchor: &states[anchor],
-                    rotating: frame.rotating,
-                    map: current,
-                },
-                &FrameRef {
-                    anchor: &states[target],
-                    rotating,
-                    map: next,
-                },
-            );
-            frame = next_frame;
-            *world.resource_mut::<SpaceFrame>() = frame.clone();
-            anchor = target;
-            current = next;
-            switched = true;
+            next_frame = Some(next);
         }
     }
+
+    let Some(next_frame) = next_frame else {
+        return;
+    };
+    let target = anchor_index(&states, &next_frame);
+    let shift = frame_shift(
+        &FrameRef {
+            anchor: &states[anchor],
+            rotating: frame.rotating,
+            map: current,
+        },
+        &FrameRef {
+            anchor: &states[target],
+            rotating: next_frame.rotating,
+            map: frame_for(&states[target], &next_frame),
+        },
+    );
+    world.write_message(shift);
+    *world.resource_mut::<SpaceFrame>() = next_frame;
+    world.resource_mut::<SpaceState>().switches += 1;
+}
+
+/// Once the world has shifted (after [`WorldShiftSet::Apply`]): move bodies along their orbits
+/// with the anchor fixed, land a [`travel_to`] trip, and drive gravity, the air, the sky and
+/// starlight.
+pub fn update_space(world: &mut World) {
+    let bodies = collect_bodies(world);
+    if bodies.is_empty() {
+        return;
+    }
+    let t = world.resource::<SpaceClock>().seconds;
+    let mut states = propagate(&bodies, t);
+    let frame = world.resource::<SpaceFrame>().clone();
+    let settings = world.resource::<SpaceSettings>().clone();
+    let anchor = anchor_index(&states, &frame);
+    let current = frame_for(&states[anchor], &frame);
+
+    // A trip's focus lands above its spot, at rest.
+    if let Some(spot) = world
+        .get_resource_mut::<PendingTravel>()
+        .and_then(|mut p| p.land.take())
+    {
+        let mut q = world
+            .query_filtered::<(&mut Transform, Option<&mut Velocity>), With<SimulationFocus>>();
+        for (mut tf, vel) in q.iter_mut(world) {
+            tf.translation = spot;
+            if let Some(mut v) = vel {
+                v.linear = Vec3::ZERO;
+                v.angular = Vec3::ZERO;
+            }
+        }
+    }
+    let focus = focus_position(world);
 
     // World placement of every body.
     let (home_q, _) = stored_home(frame.home_lat_deg, frame.home_lon_deg);
@@ -794,7 +858,6 @@ pub fn update_space(world: &mut World) {
     state.bodies = states;
     state.anchor = Some(anchor);
     state.world_from_inertial = current;
-    state.switches = previous.switches + u64::from(switched);
 }
 
 /// The primary focus right now (current `Transform` for top-level entities, so a focus moved
@@ -820,7 +883,9 @@ fn focus_position(world: &mut World) -> Option<DVec3> {
 
 /// Put the space module's anchor on `body` with `lat`/`lon` at the world origin, and move every
 /// `SimulationFocus` entity to `altitude_m` above that spot (a quick trip, for tours and
-/// tools). Other entities keep their true positions.
+/// tools). Other entities keep their true positions. The trip is made in the next
+/// `PostUpdate`, through a [`WorldShift`] like any re-anchoring; the focus's new position is
+/// returned.
 pub fn travel_to(
     world: &mut World,
     body: &str,
@@ -828,55 +893,20 @@ pub fn travel_to(
     lon_deg: f64,
     altitude_m: f64,
 ) -> Result<DVec3, String> {
-    update_space(world);
-    let state = world.resource::<SpaceState>().clone();
-    let Some(target) = state
-        .bodies
-        .iter()
-        .position(|b| b.name.eq_ignore_ascii_case(body))
-    else {
-        let names: Vec<_> = state.bodies.iter().map(|b| b.name.as_str()).collect();
+    let names: Vec<String> = collect_bodies(world)
+        .into_iter()
+        .map(|(_, b)| b.name)
+        .collect();
+    let Some(name) = names.iter().find(|n| n.eq_ignore_ascii_case(body)) else {
         return Err(format!(
             "No body named \"{body}\". Known: {}.",
             names.join(", ")
         ));
     };
-    let anchor = state.anchor.unwrap_or(0);
-    let frame = world.resource::<SpaceFrame>().clone();
-    let new_frame = SpaceFrame {
-        anchor: state.bodies[target].name.clone(),
-        home_lat_deg: lat_deg,
-        home_lon_deg: lon_deg,
-        home_height_m: 0.0,
-        rotating: true,
-        ..frame.clone()
-    };
-    let next = frame_for(&state.bodies[target], &new_frame);
-    reframe_entities(
-        world,
-        &FrameRef {
-            anchor: &state.bodies[anchor],
-            rotating: frame.rotating,
-            map: state.world_from_inertial,
-        },
-        &FrameRef {
-            anchor: &state.bodies[target],
-            rotating: true,
-            map: next,
-        },
-    );
-    *world.resource_mut::<SpaceFrame>() = new_frame;
     let spot = DVec3::new(0.0, altitude_m, 0.0);
-    let mut q =
-        world.query_filtered::<(&mut Transform, Option<&mut Velocity>), With<SimulationFocus>>();
-    for (mut tf, vel) in q.iter_mut(world) {
-        tf.translation = spot;
-        if let Some(mut v) = vel {
-            v.linear = Vec3::ZERO;
-            v.angular = Vec3::ZERO;
-        }
-    }
-    update_space(world);
+    let mut pending = world.get_resource_or_insert_with(PendingTravel::default);
+    pending.trip = Some((name.clone(), lat_deg, lon_deg));
+    pending.land = Some(spot);
     Ok(spot)
 }
 
