@@ -5,7 +5,7 @@
 //! 2000-01-01 12:00 TT.
 
 use crate::orbit::{AU, DAY, Orbit};
-use crate::{BodyAir, BodyAtmosphere, BodyKind, BodyLook, BodyRings, CelestialBody};
+use crate::{BodyAir, BodyAtmosphere, BodyHaze, BodyKind, BodyLook, BodyRings, CelestialBody};
 
 /// Planet elements from semi-major axis (AU), eccentricity, inclination, longitude of the
 /// ascending node, longitude of perihelion and mean longitude (degrees).
@@ -57,7 +57,8 @@ fn air(density: f32, scale_height_m: f32, top_m: f32, temperature_c: f32) -> Opt
     })
 }
 
-/// The Sun, the eight planets and the Moon.
+/// The Sun, the eight planets and the Moon, with their far-view looks: a detailed portrait
+/// of each body, haze on Venus, Earth and Mars, real polar flattening and Saturn's rings.
 pub fn solar_system() -> Vec<CelestialBody> {
     let mut bodies = bodies();
     for b in &mut bodies {
@@ -71,42 +72,53 @@ pub fn solar_system() -> Vec<CelestialBody> {
             _ => None,
         };
         match b.name.as_str() {
-            "Earth" => b.look = BodyLook::Earthlike,
-            "Venus" => b.look = BodyLook::Clouds,
+            "Mercury" => b.look = BodyLook::Mercury,
+            "Venus" => {
+                b.look = BodyLook::Clouds;
+                // Haze above the cloud tops: a thin bright rim.
+                b.haze = Some(BodyHaze {
+                    optical_depth: 0.5,
+                    extinction: [1.0, 1.0, 1.05],
+                    albedo: [1.0, 0.96, 0.86],
+                    scale_height_m: 5_000.0,
+                    forward: 0.6,
+                });
+            }
+            "Earth" => {
+                b.look = BodyLook::Earthlike;
+                // Used when the renderer's atmosphere is on another body.
+                b.haze = Some(BodyHaze::default());
+                b.flattening = 0.003_353;
+            }
+            "Moon" => b.look = BodyLook::Moon,
+            "Mars" => {
+                b.look = BodyLook::Mars;
+                // Dust low down with a thin bluish haze above it.
+                b.haze = Some(BodyHaze {
+                    optical_depth: 0.3,
+                    extinction: [0.9, 1.0, 1.15],
+                    albedo: [0.95, 0.78, 0.66],
+                    scale_height_m: 11_000.0,
+                    forward: 0.6,
+                });
+                b.flattening = 0.005_89;
+            }
             "Jupiter" => {
-                b.look = BodyLook::Banded {
-                    colors: vec![
-                        [0.78, 0.7, 0.58],
-                        [0.55, 0.38, 0.25],
-                        [0.85, 0.8, 0.7],
-                        [0.62, 0.45, 0.3],
-                        [0.8, 0.72, 0.6],
-                    ],
-                    bands: 15.0,
-                    storm: Some([0.6, 0.27, 0.14]),
-                }
+                b.look = BodyLook::Jupiter;
+                b.flattening = 0.064_87;
             }
             "Saturn" => {
-                b.look = BodyLook::Banded {
-                    colors: vec![[0.82, 0.74, 0.55], [0.72, 0.62, 0.42], [0.86, 0.8, 0.62]],
-                    bands: 11.0,
-                    storm: None,
-                };
+                b.look = BodyLook::Saturn;
                 b.rings = Some(BodyRings::default());
+                b.flattening = 0.097_96;
             }
             "Uranus" => {
-                b.look = BodyLook::Banded {
-                    colors: vec![[0.6, 0.8, 0.84], [0.56, 0.76, 0.82]],
-                    bands: 6.0,
-                    storm: None,
-                }
+                b.look = BodyLook::Uranus;
+                b.flattening = 0.022_9;
             }
             "Neptune" => {
-                b.look = BodyLook::Banded {
-                    colors: vec![[0.28, 0.42, 0.85], [0.22, 0.34, 0.75], [0.32, 0.48, 0.88]],
-                    bands: 7.0,
-                    storm: Some([0.1, 0.14, 0.4]),
-                }
+                b.look = BodyLook::Neptune;
+                b.flattening = 0.017_1;
             }
             _ => {}
         }

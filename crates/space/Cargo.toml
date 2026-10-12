@@ -1,6 +1,6 @@
 [package]
 name = "engine_space"
-description = "Real-scale star systems: Kepler orbits on rails, time warp, a world frame anchored to the nearest body, gravity, atmosphere and starlight from the bodies, travel between them."
+description = "Real-scale star systems: Kepler orbits on rails, time warp, a world frame anchored to the nearest body, gravity, atmosphere and starlight from the bodies, travel between them, and far views of every body."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -11,5 +11,9 @@ engine_assets.workspace = true
 engine_world.workspace = true
 engine_render.workspace = true
 bevy_ecs.workspace = true
+bytemuck.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+
+[dev-dependencies]
+image.workspace = true

@@ -345,4 +345,78 @@ fn ring_opacity_has_the_cassini_division() {
     let cassini = look::ring_opacity(&rings, 119_000_000.0);
     assert!(b_ring > 0.6 && cassini < 0.15, "{b_ring} {cassini}");
     assert_eq!(look::ring_opacity(&rings, 60_000_000.0), 0.0);
+    // The Encke gap is nearly empty, the A ring around it is not.
+    assert!(look::ring_opacity(&rings, 133_580_000.0) < 0.05);
+    assert!(look::ring_opacity(&rings, 128_000_000.0) > 0.35);
+}
+
+#[test]
+fn bodies_shader_is_valid_wgsl() {
+    let code = engine_render::compose_shader(look::BODIES_SHADER, true);
+    engine_render::validate_wgsl("space bodies", &code).unwrap();
+}
+
+#[test]
+fn far_looks_paint_what_photos_show() {
+    let sys = system::solar_system();
+    let body = |name: &str| sys.iter().find(|b| b.name == name).unwrap();
+    let at =
+        |name: &str, lat: f32, lon: f32| look::surface_color(body(name), look::look_dir(lat, lon));
+    let luma = |c: [f32; 3]| 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2];
+    // Jupiter: the Great Red Spot is red, the North Tropical Zone brighter than the NEB.
+    let grs = at("Jupiter", -22.4, look::GRS_LON_DEG);
+    assert!(grs[0] > 1.6 * grs[1] && grs[0] > 2.0 * grs[2], "{grs:?}");
+    assert!(luma(at("Jupiter", 21.0, 60.0)) > 1.5 * luma(at("Jupiter", 13.0, 60.0)));
+    // Mars: rust at the equator, a white north polar cap.
+    let mars = at("Mars", 0.0, 150.0);
+    assert!(mars[0] > 2.0 * mars[2], "{mars:?}");
+    assert!(luma(at("Mars", 89.0, 0.0)) > 0.6);
+    // The Moon: Mare Imbrium is dark against the far side's highlands.
+    assert!(luma(at("Moon", 33.0, -16.0)) < 0.6 * luma(at("Moon", 20.0, 170.0)));
+    // Neptune is blue, Uranus cyan, Saturn butterscotch.
+    let nep = at("Neptune", 10.0, 0.0);
+    assert!(nep[2] > 2.0 * nep[0], "{nep:?}");
+    let ura = at("Uranus", 10.0, 0.0);
+    assert!(ura[2] > ura[0] && ura[1] > ura[0], "{ura:?}");
+    let sat = at("Saturn", 10.0, 0.0);
+    assert!(sat[0] > 1.3 * sat[2], "{sat:?}");
+}
+
+#[test]
+fn earth_has_oceans_land_and_clouds() {
+    let sys = system::solar_system();
+    let earth = sys.iter().find(|b| b.name == "Earth").unwrap();
+    let maps = look::bake_surface(earth, 128);
+    assert!(maps.clouds && !maps.relief);
+    assert_eq!(maps.albedo.width, 128);
+    let texels = maps.albedo.data.len() / 4;
+    let water = maps.albedo.data.chunks(4).filter(|p| p[3] > 128).count() as f32 / texels as f32;
+    let cloud = maps
+        .aux
+        .data
+        .chunks(4)
+        .map(|p| p[0] as f32 / 255.0)
+        .sum::<f32>()
+        / texels as f32;
+    assert!((0.45..0.85).contains(&water), "water {water}");
+    assert!((0.25..0.8).contains(&cloud), "cloud {cloud}");
+}
+
+#[test]
+fn rocky_maps_carry_relief_and_full_mips() {
+    let sys = system::solar_system();
+    let moon = sys.iter().find(|b| b.name == "Moon").unwrap();
+    let maps = look::bake_surface(moon, 256);
+    assert!(maps.relief && !maps.clouds);
+    assert_eq!((maps.albedo.width, maps.albedo.height), (256, 128));
+    assert!(maps.albedo.is_valid() && maps.aux.is_valid());
+    assert_eq!(maps.albedo.mips.len(), 8);
+    // Craters tilt the surface: the slopes are not all flat.
+    let tilted = maps
+        .aux
+        .data
+        .chunks(4)
+        .filter(|p| p[1].abs_diff(128) > 6)
+        .count();
+    assert!(tilted > 500, "{tilted}");
 }

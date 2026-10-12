@@ -9,13 +9,14 @@ use std::collections::HashMap;
 
 use engine_core::math::{DMat3, DQuat, DVec3, Quat, Vec3};
 use engine_core::prelude::*;
+use engine_render::RenderAppExt;
 use engine_render::prelude::{Atmosphere, DirectionalLight};
 use engine_world::physics::Velocity;
 use engine_world::{
     Atmospheres, FocusPoints, Gravity, GravityBody, SimulationFocus, WorldShift, WorldShiftSet,
 };
 
-pub use look::{BodyImpostor, BodyLook, BodyRings};
+pub use look::{BodiesFeature, BodyHaze, BodyImpostor, BodyLook, BodyRings, LookBakes};
 pub use orbit::{AU, DAY, Orbit};
 
 /// What kind of body (for maps and defaults).
@@ -116,10 +117,16 @@ pub struct CelestialBody {
     pub luminosity_w: f64,
     /// Color for maps and far-away dots (linear RGB).
     pub color: [f32; 3],
-    /// Surface pattern of the far-view sphere.
+    /// Surface pattern of the far view.
     pub look: BodyLook,
     /// Rings in the equatorial plane.
     pub rings: Option<BodyRings>,
+    /// Haze or thin air seen from afar (a glowing rim, a softer terminator). Bodies whose
+    /// `atmosphere` the renderer is drawing use that instead.
+    pub haze: Option<BodyHaze>,
+    /// Polar flattening, (equatorial − polar) / equatorial radius (Saturn ≈ 0.098). The far
+    /// view is drawn as this spheroid with `radius_m` as its mean radius.
+    pub flattening: f64,
 }
 
 impl Default for CelestialBody {
@@ -141,6 +148,8 @@ impl Default for CelestialBody {
             color: [0.5, 0.5, 0.5],
             look: BodyLook::Rocky,
             rings: None,
+            haze: None,
+            flattening: 0.0,
         }
     }
 }
@@ -376,6 +385,7 @@ pub struct SpacePlugin;
 impl Plugin for SpacePlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<SpaceClock>()
+            .init_resource::<look::LookBakes>()
             .init_resource::<SpaceFrame>()
             .init_resource::<SpaceSettings>()
             .init_resource::<SpaceState>()
@@ -406,6 +416,7 @@ impl Plugin for SpacePlugin {
                     .after(WorldShiftSet::Apply)
                     .before(WorldShiftSet::Rebuild),
             );
+        app.add_render_feature(BodiesFeature::default());
         register_apis(app);
     }
 }
