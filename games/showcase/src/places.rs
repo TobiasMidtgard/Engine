@@ -44,7 +44,7 @@ pub fn places() -> Vec<Place> {
     let moon_dir = moon.normalize();
     let sun = crate::day_cycle::sun_direction(10.0).as_dvec3();
     let moon_side = (sun * 0.7 - moon_dir * 0.7).normalize();
-    vec![
+    let mut list = vec![
         place(
             "overview",
             "The valley",
@@ -238,7 +238,21 @@ pub fn places() -> Vec<Place> {
             (DVec3::new(-26.0, 6.0, 30.0), DVec3::new(10.0, 2.0, -10.0)),
             22.5,
         ),
-    ]
+    ];
+    // The fire module's own viewpoints, right after the field.
+    let fire = zone("field").center;
+    let at = list
+        .iter()
+        .position(|p| p.key == "field")
+        .map_or(list.len(), |i| i + 1);
+    for (k, v) in engine_fire::demo::VIEWS.iter().enumerate() {
+        let view = (
+            fire + DVec3::from_array(v.eye),
+            fire + DVec3::from_array(v.target),
+        );
+        list.insert(at + k, place(v.key, v.name, view, v.hour));
+    }
+    list
 }
 
 pub fn find(key: &str) -> Option<Place> {

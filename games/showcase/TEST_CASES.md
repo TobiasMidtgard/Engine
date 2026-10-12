@@ -28,7 +28,7 @@ are built, nothing simulates yet) · ⬜ not visible yet
 | 7 | Realistic water that moves efficiently | `lake` | Water simulation | 🟨 still water stand-in |
 | 8 | Water affected by the environment and players (wakes, splashes, rain filling it) | `lake` | Water simulation | ⬜ |
 | 9 | Water splashes (particles) | `lake` | Particles and magic effects | ⬜ |
-| 10 | Fire that spreads through burnable things like grass | `field` | Fire and smoke | 🟨 dry grass, hay bales |
+| 10 | Fire that spreads through burnable things like grass | `field`, `fire_front`, `fire_trees`, `fire_campfire`, `fire_night` | Fire and smoke | ✅ burning meadow that spreads downwind and regrows |
 | 11 | Smoke that reacts to bullets, wind currents and explosions | `range` | Fire and smoke | 🟨 firing lanes, fans |
 | 12 | True volumetric clouds with fog | every outdoor viewpoint, `stratosphere` | Weather, wind and clouds | ⬜ flat cloud layer only |
 | 13 | Realistic rain that changes the ground (wet, puddles, mud) | `footsteps`, `plaza` | Weather, wind and clouds | ⬜ (renderer can already darken wet surfaces) |

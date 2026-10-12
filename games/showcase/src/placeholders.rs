@@ -1625,17 +1625,19 @@ pub fn voxel(commands: &mut Commands, meshes: &mut Assets<Mesh>, z: &Zone, rng: 
     ));
 }
 
-/// Grass field: tall dry grass to burn, hay bales and a scarecrow. The Fire and smoke thread
-/// owns it.
-pub fn field(commands: &mut Commands, lib: &Library, z: &Zone, rng: &mut Rng) {
+/// Dry grass around the fire module's burning meadow (which fills the middle of the zone), out
+/// to the fence.
+pub fn field_edge(commands: &mut Commands, lib: &Library, z: &Zone, rng: &mut Rng) {
     let c = z.center;
+    let fire = engine_fire::demo::FOOTPRINT;
     let spacing = 2.6;
     let n = (z.radius * 2.0 / spacing) as i32;
     for i in 0..n {
         for j in 0..n {
             let x = -z.radius + (i as f64 + rng.range(0.2, 0.8) as f64) * spacing;
             let zz = -z.radius + (j as f64 + rng.range(0.2, 0.8) as f64) * spacing;
-            if x * x + zz * zz > z.radius * z.radius {
+            let inside_fire = x.abs() < fire[0] as f64 + 1.5 && zz.abs() < fire[1] as f64 + 1.5;
+            if x * x + zz * zz > z.radius * z.radius || inside_fire {
                 continue;
             }
             let mesh = lib.dry_grass[rng.range_i32(0, lib.dry_grass.len() as i32) as usize];
@@ -1648,37 +1650,6 @@ pub fn field(commands: &mut Commands, lib: &Library, z: &Zone, rng: &mut Rng) {
             ));
         }
     }
-    let hay = mat(0xb89a4a, 0.95);
-    for i in 0..6 {
-        let a = i as f64 * 1.1;
-        spawn(
-            commands,
-            Shape::Cylinder {
-                radius: 0.8,
-                height: 1.2,
-                segments: 20,
-            },
-            hay,
-            Transform::from_translation(c + DVec3::new(a.cos() * 30.0, 0.8, a.sin() * 30.0))
-                .with_rotation(
-                    Quat::from_rotation_z(std::f32::consts::FRAC_PI_2)
-                        * Quat::from_rotation_x(a as f32),
-                ),
-        );
-    }
-    spawn(
-        commands,
-        cuboid(0.12, 2.6, 0.12),
-        dark_wood(),
-        at(c + DVec3::new(0.0, 1.3, 0.0)),
-    );
-    spawn(
-        commands,
-        cuboid(1.8, 0.1, 0.1),
-        dark_wood(),
-        at(c + DVec3::new(0.0, 2.0, 0.0)),
-    );
-    person(commands, c + DVec3::new(0.0, 0.6, 0.0), 0.0, 0x6b8e23);
     // Fence around the field.
     for i in 0..48 {
         let a = i as f64 / 48.0 * TAU64;

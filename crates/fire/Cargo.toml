@@ -1,6 +1,6 @@
 [package]
 name = "engine_fire"
-description = "Fire (stub: scope and contracts in README.md)."
+description = "Fire: combustion and spread through fuel (grass, wood), heat, embers, flames and scorch."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -8,6 +8,12 @@ license.workspace = true
 [dependencies]
 engine_core.workspace = true
 engine_world.workspace = true
+engine_render.workspace = true
 bevy_ecs.workspace = true
+bytemuck.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+image.workspace = true

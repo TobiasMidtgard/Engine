@@ -232,7 +232,10 @@ pub fn spawn_demos(
             "parkour" => ph::parkour(commands, lib, z),
             "fortress" => ph::fortress(commands, lib, z),
             "voxel" => ph::voxel(commands, meshes, z, rng),
-            "field" => ph::field(commands, lib, z, rng),
+            "field" => {
+                engine_fire::demo::spawn_demo(commands, z.center);
+                ph::field_edge(commands, lib, z, rng);
+            }
             "range" => ph::range(commands, lib, z),
             "weather" => ph::weather(commands, lib, z),
             "track" => ph::track(commands, lib, z),
