@@ -1,6 +1,7 @@
 //! Named viewpoints: camera bookmarks (number keys), the screenshot tour and the
 //! `showcase.goto` API all use this one list.
 
+use crate::landscape;
 use crate::zones::{moon_position, zone};
 use engine::prelude::*;
 
@@ -15,9 +16,18 @@ pub struct Place {
     pub hour: f32,
 }
 
+/// Eye and target relative to a zone's center. The eye never ends up below the ground.
 fn near(key: &str, eye: [f64; 3], look: [f64; 3]) -> (DVec3, DVec3) {
     let c = zone(key).center;
-    (c + DVec3::from_array(eye), c + DVec3::from_array(look))
+    (
+        above_ground(c + DVec3::from_array(eye), 1.7),
+        c + DVec3::from_array(look),
+    )
+}
+
+fn above_ground(p: DVec3, clearance: f64) -> DVec3 {
+    let ground = landscape::shared().height(p.x, p.z);
+    DVec3::new(p.x, p.y.max(ground + clearance), p.z)
 }
 
 /// Every viewpoint, in tour order.
@@ -37,18 +47,36 @@ pub fn places() -> Vec<Place> {
     vec![
         place(
             "overview",
-            "The whole map",
+            "The valley",
             (
-                DVec3::new(520.0, 260.0, 520.0),
-                DVec3::new(20.0, 0.0, -60.0),
+                DVec3::new(250.0, 330.0, -1050.0),
+                DVec3::new(-60.0, 0.0, 120.0),
             ),
-            10.0,
+            9.5,
         ),
         place(
             "plaza",
-            "Material plaza",
+            "Material plaza and the village",
             near("plaza", [10.0, 4.5, 16.0], [0.0, 1.8, -1.0]),
             11.0,
+        ),
+        place(
+            "market",
+            "Market street: shop, dialogue and maps",
+            near("market", [12.0, 3.2, -16.0], [0.0, 1.5, 3.0]),
+            10.5,
+        ),
+        place(
+            "stage",
+            "Animation stage",
+            near("stage", [6.0, 4.0, -26.0], [0.0, 2.5, 2.0]),
+            15.0,
+        ),
+        place(
+            "physics",
+            "Physics playground",
+            near("physics", [22.0, 7.0, 24.0], [0.0, 1.0, -4.0]),
+            13.5,
         ),
         place(
             "yard",
@@ -57,16 +85,40 @@ pub fn places() -> Vec<Place> {
             15.5,
         ),
         place(
+            "magic",
+            "Magic circle at dusk",
+            near("magic", [22.0, 4.0, 20.0], [0.0, 2.0, 0.0]),
+            18.35,
+        ),
+        place(
+            "gallery2d",
+            "2D and 2.5D gallery",
+            near("gallery2d", [0.0, 5.0, 18.0], [0.0, 4.0, -3.0]),
+            12.5,
+        ),
+        place(
             "forest",
             "Living forest",
-            near("forest", [95.0, 6.0, 60.0], [0.0, 4.0, 0.0]),
+            near("forest", [14.0, 2.5, 12.0], [-10.0, 4.0, -6.0]),
             9.0,
+        ),
+        place(
+            "meadow",
+            "Wildlife meadow in the morning",
+            near("meadow", [34.0, 3.0, 30.0], [0.0, 1.0, 0.0]),
+            7.8,
         ),
         place(
             "lake",
             "Lake",
-            near("lake", [75.0, 8.0, 70.0], [-20.0, 0.0, -10.0]),
+            near("lake", [-80.0, 6.0, 60.0], [10.0, 0.0, -10.0]),
             16.5,
+        ),
+        place(
+            "footsteps",
+            "Footstep trail: mud, puddle, sand, gravel, snow, wood, metal",
+            near("footsteps", [9.0, 3.0, -44.0], [0.0, 0.0, 0.0]),
+            14.0,
         ),
         place(
             "cave",
@@ -75,10 +127,10 @@ pub fn places() -> Vec<Place> {
             14.0,
         ),
         place(
-            "fortress",
-            "Siege fortress",
-            near("fortress", [14.0, 6.0, -38.0], [0.0, 5.0, 0.0]),
-            15.0,
+            "cave_mouth",
+            "The cave in its hill",
+            near("cave", [30.0, 6.0, -60.0], [0.0, 6.0, 0.0]),
+            15.5,
         ),
         place(
             "arena",
@@ -87,16 +139,52 @@ pub fn places() -> Vec<Place> {
             12.0,
         ),
         place(
+            "parkour",
+            "Movement course",
+            near("parkour", [32.0, 10.0, -32.0], [-5.0, 3.0, 0.0]),
+            11.5,
+        ),
+        place(
+            "fortress",
+            "Siege fortress on its hill",
+            near("fortress", [16.0, 6.0, -52.0], [0.0, 6.0, 0.0]),
+            15.0,
+        ),
+        place(
+            "voxel",
+            "Voxel hill",
+            near("voxel", [30.0, 12.0, -32.0], [0.0, 4.0, 0.0]),
+            13.0,
+        ),
+        place(
             "field",
             "Grass field",
             near("field", [-40.0, 3.0, -45.0], [0.0, 1.0, 0.0]),
-            17.3,
+            16.0,
+        ),
+        place(
+            "range",
+            "Smoke range",
+            near("range", [0.0, 4.0, -34.0], [0.0, 1.5, 10.0]),
+            12.0,
+        ),
+        place(
+            "weather",
+            "From the weather station hill",
+            near("weather", [-8.0, 3.0, -14.0], [-215.0, -20.0, -370.0]),
+            16.2,
         ),
         place(
             "track",
             "Vehicle track",
             near("track", [60.0, 60.0, 160.0], [0.0, 0.0, 0.0]),
             10.0,
+        ),
+        place(
+            "airfield",
+            "Airfield",
+            near("airfield", [-160.0, 25.0, -70.0], [-40.0, 0.0, 0.0]),
+            10.5,
         ),
         place(
             "spaceport",
@@ -146,9 +234,9 @@ pub fn places() -> Vec<Place> {
         ),
         place(
             "night",
-            "Spaceport at night",
-            near("spaceport", [-50.0, 8.0, -50.0], [0.0, 2.0, 0.0]),
-            23.0,
+            "The village at night",
+            (DVec3::new(-26.0, 6.0, 30.0), DVec3::new(10.0, 2.0, -10.0)),
+            22.5,
         ),
     ]
 }
