@@ -22,7 +22,10 @@ struct FlyCamera {
 fn setup(mut commands: Commands) {
     commands.spawn((
         Camera::default(),
-        FlyCamera { yaw: 0.0, pitch: -0.15 },
+        FlyCamera {
+            yaw: 0.0,
+            pitch: -0.15,
+        },
         Transform::from_xyz(0.0, 2.0, 8.0),
     ));
     commands.spawn((
@@ -32,7 +35,10 @@ fn setup(mut commands: Commands) {
     commands.spawn((
         Transform::default(),
         MeshRenderer::new(
-            Shape::Plane { size: [200.0, 200.0], subdivisions: 1 },
+            Shape::Plane {
+                size: [200.0, 200.0],
+                subdivisions: 1,
+            },
             StandardMaterial::hex(0x5a7d3a).with_roughness(0.95),
         ),
     ));
@@ -42,7 +48,10 @@ fn setup(mut commands: Commands) {
         commands.spawn((
             Transform::from_xyz(x, 1.0, 0.0),
             MeshRenderer::new(
-                Shape::Sphere { radius: 1.0, segments: 48 },
+                Shape::Sphere {
+                    radius: 1.0,
+                    segments: 48,
+                },
                 StandardMaterial::hex(*c).with_roughness(0.2 + i as f32 * 0.15),
             ),
         ));

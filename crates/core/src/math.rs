@@ -355,7 +355,11 @@ pub mod noise {
     }
 
     fn h2(x: i64, y: i64, seed: u64) -> u64 {
-        hash_u64((x as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ (y as u64).wrapping_mul(0xC2B2_AE3D_27D4_EB4F) ^ seed)
+        hash_u64(
+            (x as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15)
+                ^ (y as u64).wrapping_mul(0xC2B2_AE3D_27D4_EB4F)
+                ^ seed,
+        )
     }
 
     fn h3(x: i64, y: i64, z: i64, seed: u64) -> u64 {
@@ -413,7 +417,15 @@ pub mod noise {
     }
 
     /// Fractal Brownian motion over [`perlin3`].
-    pub fn fbm3(x: f64, y: f64, z: f64, seed: u64, octaves: u32, lacunarity: f64, gain: f32) -> f32 {
+    pub fn fbm3(
+        x: f64,
+        y: f64,
+        z: f64,
+        seed: u64,
+        octaves: u32,
+        lacunarity: f64,
+        gain: f32,
+    ) -> f32 {
         let (mut sum, mut amp, mut norm, mut freq) = (0.0f32, 1.0f32, 0.0f32, 1.0f64);
         for i in 0..octaves {
             sum += amp

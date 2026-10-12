@@ -250,7 +250,11 @@ impl TypeRegistry {
     /// Lookup with a helpful "did you mean" error.
     pub fn component_or_err(&self, name: &str) -> Result<&ComponentEntry, String> {
         self.components.get(name).ok_or_else(|| {
-            unknown_name_error("component", name, self.components.keys().map(|s| s.as_str()))
+            unknown_name_error(
+                "component",
+                name,
+                self.components.keys().map(|s| s.as_str()),
+            )
         })
     }
 
@@ -355,7 +359,11 @@ pub fn call_api(world: &mut World, name: &str, args: Value) -> Result<Value, Str
     let entry = {
         let registry = world.resource::<ApiRegistry>();
         registry.get(name).cloned().ok_or_else(|| {
-            unknown_name_error("api function", name, registry.entries.keys().map(|s| s.as_str()))
+            unknown_name_error(
+                "api function",
+                name,
+                registry.entries.keys().map(|s| s.as_str()),
+            )
         })?
     };
     (entry.func)(world, args)
@@ -654,12 +662,26 @@ mod tests {
     fn patch_merges_fields() {
         let mut app = App::new();
         app.register_component::<Health>("hp");
-        let e = app.world.spawn(Health { current: 1.0, max: 10.0 }).id();
-        let entry = app.world.resource::<TypeRegistry>().component("Health").unwrap().clone();
+        let e = app
+            .world
+            .spawn(Health {
+                current: 1.0,
+                max: 10.0,
+            })
+            .id();
+        let entry = app
+            .world
+            .resource::<TypeRegistry>()
+            .component("Health")
+            .unwrap()
+            .clone();
         (entry.patch)(&mut app.world, e, json!({"current": 7.0})).unwrap();
         assert_eq!(
             *app.world.get::<Health>(e).unwrap(),
-            Health { current: 7.0, max: 10.0 }
+            Health {
+                current: 7.0,
+                max: 10.0
+            }
         );
     }
 
@@ -675,7 +697,10 @@ mod tests {
         .unwrap();
         let got = call_api(&mut app.world, "entity.get", json!({"name": "Orc"})).unwrap();
         assert_eq!(got["components"]["Health"]["max"], json!(30.0));
-        assert_eq!(got["components"]["Transform"]["translation"], json!([1.0, 2.0, 3.0]));
+        assert_eq!(
+            got["components"]["Transform"]["translation"],
+            json!([1.0, 2.0, 3.0])
+        );
     }
 
     #[test]

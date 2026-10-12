@@ -192,7 +192,9 @@ impl ApplicationHandler for Handler {
                     w.width = width;
                     w.height = height;
                 }
-                self.app.world.write_message(WindowResized { width, height });
+                self.app
+                    .world
+                    .write_message(WindowResized { width, height });
             }
             WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
                 self.app.world.resource_mut::<Window>().scale_factor = scale_factor;

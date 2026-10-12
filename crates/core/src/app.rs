@@ -376,7 +376,10 @@ impl App {
     /// Run the app with its runner until it exits.
     pub fn run(&mut self) -> AppExit {
         let mut app = std::mem::replace(self, App::empty());
-        let runner = app.runner.take().unwrap_or_else(|| Box::new(default_runner));
+        let runner = app
+            .runner
+            .take()
+            .unwrap_or_else(|| Box::new(default_runner));
         app.finish();
         runner(app)
     }

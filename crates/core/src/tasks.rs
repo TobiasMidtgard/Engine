@@ -4,7 +4,9 @@
 //! compute pool. For custom data-parallel loops in simulations (grids, particles), use
 //! [`par_chunks_mut`].
 
-pub use bevy_tasks::{AsyncComputeTaskPool, ComputeTaskPool, IoTaskPool, TaskPool, TaskPoolBuilder};
+pub use bevy_tasks::{
+    AsyncComputeTaskPool, ComputeTaskPool, IoTaskPool, TaskPool, TaskPoolBuilder,
+};
 
 /// Create the compute / async / IO pools once per process.
 pub fn init_task_pools() {

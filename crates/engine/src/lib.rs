@@ -55,7 +55,10 @@ impl PluginGroup for DefaultPlugins {
 /// Call before adding plugins.
 pub fn apply_cli_args(app: &mut App) {
     let args: Vec<String> = std::env::args().collect();
-    let mut config = app.world.resource::<engine_core::config::EngineConfig>().clone();
+    let mut config = app
+        .world
+        .resource::<engine_core::config::EngineConfig>()
+        .clone();
     let mut frames = None;
     let mut i = 1;
     while i < args.len() {
@@ -73,7 +76,10 @@ pub fn apply_cli_args(app: &mut App) {
                 i += 1;
             }
             "--seed" => {
-                config.seed = args.get(i + 1).and_then(|v| v.parse().ok()).unwrap_or(config.seed);
+                config.seed = args
+                    .get(i + 1)
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(config.seed);
                 i += 1;
             }
             _ => {}

@@ -111,8 +111,8 @@ pub fn init(default_filter: &str) {
     static INIT: OnceLock<()> = OnceLock::new();
     INIT.get_or_init(|| {
         START.get_or_init(std::time::Instant::now);
-        let filter = EnvFilter::try_from_default_env()
-            .unwrap_or_else(|_| EnvFilter::new(default_filter));
+        let filter =
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(default_filter));
         let _ = tracing_subscriber::registry()
             .with(filter)
             .with(tracing_subscriber::fmt::layer().with_writer(std::io::stderr))

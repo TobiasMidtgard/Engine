@@ -25,17 +25,107 @@ use serde_json::json;
 /// Keyboard keys by physical position (US layout names).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum KeyCode {
-    A, B, C, D, E, F, G, H, I, J, K, L, M, N, O, P, Q, R, S, T, U, V, W, X, Y, Z,
-    Digit0, Digit1, Digit2, Digit3, Digit4, Digit5, Digit6, Digit7, Digit8, Digit9,
-    F1, F2, F3, F4, F5, F6, F7, F8, F9, F10, F11, F12,
-    Escape, Tab, CapsLock, ShiftLeft, ShiftRight, ControlLeft, ControlRight, AltLeft, AltRight,
-    SuperLeft, SuperRight, Space, Enter, Backspace, Delete, Insert, Home, End, PageUp, PageDown,
-    ArrowUp, ArrowDown, ArrowLeft, ArrowRight,
-    Minus, Equal, BracketLeft, BracketRight, Backslash, Semicolon, Quote, Backquote, Comma,
-    Period, Slash,
-    Numpad0, Numpad1, Numpad2, Numpad3, Numpad4, Numpad5, Numpad6, Numpad7, Numpad8, Numpad9,
-    NumpadAdd, NumpadSubtract, NumpadMultiply, NumpadDivide, NumpadEnter, NumpadDecimal,
-    PrintScreen, Pause,
+    A,
+    B,
+    C,
+    D,
+    E,
+    F,
+    G,
+    H,
+    I,
+    J,
+    K,
+    L,
+    M,
+    N,
+    O,
+    P,
+    Q,
+    R,
+    S,
+    T,
+    U,
+    V,
+    W,
+    X,
+    Y,
+    Z,
+    Digit0,
+    Digit1,
+    Digit2,
+    Digit3,
+    Digit4,
+    Digit5,
+    Digit6,
+    Digit7,
+    Digit8,
+    Digit9,
+    F1,
+    F2,
+    F3,
+    F4,
+    F5,
+    F6,
+    F7,
+    F8,
+    F9,
+    F10,
+    F11,
+    F12,
+    Escape,
+    Tab,
+    CapsLock,
+    ShiftLeft,
+    ShiftRight,
+    ControlLeft,
+    ControlRight,
+    AltLeft,
+    AltRight,
+    SuperLeft,
+    SuperRight,
+    Space,
+    Enter,
+    Backspace,
+    Delete,
+    Insert,
+    Home,
+    End,
+    PageUp,
+    PageDown,
+    ArrowUp,
+    ArrowDown,
+    ArrowLeft,
+    ArrowRight,
+    Minus,
+    Equal,
+    BracketLeft,
+    BracketRight,
+    Backslash,
+    Semicolon,
+    Quote,
+    Backquote,
+    Comma,
+    Period,
+    Slash,
+    Numpad0,
+    Numpad1,
+    Numpad2,
+    Numpad3,
+    Numpad4,
+    Numpad5,
+    Numpad6,
+    Numpad7,
+    Numpad8,
+    Numpad9,
+    NumpadAdd,
+    NumpadSubtract,
+    NumpadMultiply,
+    NumpadDivide,
+    NumpadEnter,
+    NumpadDecimal,
+    PrintScreen,
+    Pause,
     /// Any other key, by platform scan code.
     Other(u32),
 }
@@ -189,15 +279,38 @@ impl Gamepads {
 /// Raw input from the platform (or tests / AI).
 #[derive(Message, Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub enum InputEvent {
-    Key { key: KeyCode, pressed: bool },
-    MouseButton { button: MouseButton, pressed: bool },
-    CursorMoved { position: Vec2 },
+    Key {
+        key: KeyCode,
+        pressed: bool,
+    },
+    MouseButton {
+        button: MouseButton,
+        pressed: bool,
+    },
+    CursorMoved {
+        position: Vec2,
+    },
     CursorLeft,
-    MouseMotion { delta: Vec2 },
-    MouseWheel { delta: Vec2 },
-    GamepadButton { pad: u32, button: GamepadButton, pressed: bool },
-    GamepadAxis { pad: u32, axis: GamepadAxis, value: f32 },
-    GamepadConnected { pad: u32, connected: bool },
+    MouseMotion {
+        delta: Vec2,
+    },
+    MouseWheel {
+        delta: Vec2,
+    },
+    GamepadButton {
+        pad: u32,
+        button: GamepadButton,
+        pressed: bool,
+    },
+    GamepadAxis {
+        pad: u32,
+        axis: GamepadAxis,
+        value: f32,
+    },
+    GamepadConnected {
+        pad: u32,
+        connected: bool,
+    },
     /// The window lost focus: everything is released.
     FocusLost,
 }
@@ -214,12 +327,21 @@ pub enum Binding {
     Mouse(MouseButton),
     Gamepad(GamepadButton),
     /// An analog axis; `scale` flips or scales it (e.g. -1 for inverted look).
-    Axis { axis: GamepadAxis, scale: f32 },
+    Axis {
+        axis: GamepadAxis,
+        scale: f32,
+    },
     /// Mouse motion on x or y (for look actions), pixels × scale.
-    MouseMotionX { scale: f32 },
-    MouseMotionY { scale: f32 },
+    MouseMotionX {
+        scale: f32,
+    },
+    MouseMotionY {
+        scale: f32,
+    },
     /// Mouse wheel y.
-    Wheel { scale: f32 },
+    Wheel {
+        scale: f32,
+    },
 }
 
 /// How an action maps to inputs. Buttons give 0/1; axes give -1..1; 2D actions combine four
@@ -251,7 +373,11 @@ pub struct InputMap {
 
 impl InputMap {
     pub fn bind(&mut self, action: &str, binding: Binding) -> &mut Self {
-        self.actions.entry(action.into()).or_default().buttons.push(binding);
+        self.actions
+            .entry(action.into())
+            .or_default()
+            .buttons
+            .push(binding);
         self
     }
 
@@ -293,19 +419,31 @@ impl InputMap {
         look.up.push(Binding::MouseMotionY { scale: -1.0 });
         look.stick = Some((RightStickX, RightStickY));
         look.dead_zone = 0.1;
-        m.bind("jump", Binding::Key(Space)).bind("jump", Binding::Gamepad(GamepadButton::South));
-        m.bind("sprint", Binding::Key(ShiftLeft)).bind("sprint", Binding::Gamepad(GamepadButton::LeftStick));
-        m.bind("crouch", Binding::Key(ControlLeft)).bind("crouch", Binding::Gamepad(GamepadButton::East));
-        m.bind("dash", Binding::Key(Q)).bind("dash", Binding::Gamepad(GamepadButton::RightBumper));
+        m.bind("jump", Binding::Key(Space))
+            .bind("jump", Binding::Gamepad(GamepadButton::South));
+        m.bind("sprint", Binding::Key(ShiftLeft))
+            .bind("sprint", Binding::Gamepad(GamepadButton::LeftStick));
+        m.bind("crouch", Binding::Key(ControlLeft))
+            .bind("crouch", Binding::Gamepad(GamepadButton::East));
+        m.bind("dash", Binding::Key(Q))
+            .bind("dash", Binding::Gamepad(GamepadButton::RightBumper));
         m.bind("attack", Binding::Mouse(MouseButton::Left))
             .bind("attack", Binding::Gamepad(GamepadButton::RightTrigger));
         m.bind("block", Binding::Mouse(MouseButton::Right))
             .bind("block", Binding::Gamepad(GamepadButton::LeftTrigger));
-        m.bind("interact", Binding::Key(E)).bind("interact", Binding::Gamepad(GamepadButton::West));
-        m.bind("inventory", Binding::Key(Tab)).bind("inventory", Binding::Gamepad(GamepadButton::Select));
-        m.bind("map", Binding::Key(M)).bind("map", Binding::Gamepad(GamepadButton::DPadUp));
-        m.bind("pause", Binding::Key(Escape)).bind("pause", Binding::Gamepad(GamepadButton::Start));
-        m.bind_axis("zoom", Binding::Wheel { scale: 1.0 }, Binding::Wheel { scale: -1.0 });
+        m.bind("interact", Binding::Key(E))
+            .bind("interact", Binding::Gamepad(GamepadButton::West));
+        m.bind("inventory", Binding::Key(Tab))
+            .bind("inventory", Binding::Gamepad(GamepadButton::Select));
+        m.bind("map", Binding::Key(M))
+            .bind("map", Binding::Gamepad(GamepadButton::DPadUp));
+        m.bind("pause", Binding::Key(Escape))
+            .bind("pause", Binding::Gamepad(GamepadButton::Start));
+        m.bind_axis(
+            "zoom",
+            Binding::Wheel { scale: 1.0 },
+            Binding::Wheel { scale: -1.0 },
+        );
         m.bind_axis("ascend", Binding::Key(Space), Binding::Key(ControlLeft));
         m.bind_axis("roll", Binding::Key(E), Binding::Key(Q));
         m
@@ -486,7 +624,9 @@ pub fn apply_input_events_system(
             InputEvent::CursorLeft => mouse.position = None,
             InputEvent::MouseMotion { delta } => mouse.delta += delta,
             InputEvent::MouseWheel { delta } => mouse.scroll += delta,
-            InputEvent::GamepadButton { button, pressed, .. } => {
+            InputEvent::GamepadButton {
+                button, pressed, ..
+            } => {
                 if pressed {
                     pad_buttons.press(button)
                 } else {
@@ -546,9 +686,10 @@ pub fn update_actions_system(
                 }
             }
             // Keyboard diagonals shouldn't be faster than straight lines.
-            let is_digital = b.right.iter().chain(&b.up).all(|b| {
-                matches!(b, Binding::Key(_) | Binding::Mouse(_) | Binding::Gamepad(_))
-            });
+            let is_digital =
+                b.right.iter().chain(&b.up).all(|b| {
+                    matches!(b, Binding::Key(_) | Binding::Mouse(_) | Binding::Gamepad(_))
+                });
             if is_digital && axis.length() > 1.0 {
                 axis = axis.normalize();
             }
@@ -654,7 +795,10 @@ impl Plugin for InputPlugin {
                 let action = args["action"].as_str().ok_or("missing \"action\"")?;
                 let x = args.get("x").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32;
                 let y = args.get("y").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32;
-                let frames = args.get("frames").and_then(|f| f.as_u64()).map(|f| f as u32);
+                let frames = args
+                    .get("frames")
+                    .and_then(|f| f.as_u64())
+                    .map(|f| f as u32);
                 world
                     .resource_mut::<ActionState>()
                     .set_axis(action, Vec2::new(x, y), frames);
@@ -723,7 +867,8 @@ mod tests {
     fn wasd_diagonal_is_normalized() {
         let mut app = app();
         for key in [KeyCode::W, KeyCode::D] {
-            app.world.write_message(InputEvent::Key { key, pressed: true });
+            app.world
+                .write_message(InputEvent::Key { key, pressed: true });
         }
         app.update();
         let a = app.world.resource::<ActionState>().axis("move");
@@ -734,7 +879,12 @@ mod tests {
     #[test]
     fn ai_can_tap_actions() {
         let mut app = app();
-        engine_core::registry::call_api(&mut app.world, "input.press", json!({"action": "dash", "frames": 1})).unwrap();
+        engine_core::registry::call_api(
+            &mut app.world,
+            "input.press",
+            json!({"action": "dash", "frames": 1}),
+        )
+        .unwrap();
         app.update();
         assert!(app.world.resource::<ActionState>().just_pressed("dash"));
         app.update();
@@ -746,11 +896,17 @@ mod tests {
         let mut app = app();
         app.world
             .resource_mut::<Time>()
-            .set_source(engine_core::time::TimeSource::Manual { step_secs: 1.0 / 240.0 });
+            .set_source(engine_core::time::TimeSource::Manual {
+                step_secs: 1.0 / 240.0,
+            });
         app.world.resource_mut::<ActionState>().tap("jump", 1);
         // 240 fps with 60 Hz fixed steps: the press frame might have no fixed step.
         app.update();
-        let latched = app.world.resource::<ActionState>().get("jump").pressed_since_tick;
+        let latched = app
+            .world
+            .resource::<ActionState>()
+            .get("jump")
+            .pressed_since_tick;
         let steps = app.world.resource::<FixedTime>().steps_this_frame();
         assert!(latched || steps > 0);
     }

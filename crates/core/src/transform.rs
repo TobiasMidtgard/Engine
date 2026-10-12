@@ -320,7 +320,10 @@ impl GlobalTransform {
     }
 
     pub fn from_translation_rotation(translation: DVec3, rotation: Quat) -> Self {
-        Self(DAffine3::from_rotation_translation(rotation.as_dquat(), translation))
+        Self(DAffine3::from_rotation_translation(
+            rotation.as_dquat(),
+            translation,
+        ))
     }
 }
 
@@ -351,7 +354,8 @@ impl TransformInterpolation {
 
 /// Engine system (`FixedPreUpdate`): remember where interpolated entities started this step.
 pub fn snapshot_interpolation_system(mut q: Query<(&Transform, &mut TransformInterpolation)>) {
-    q.par_iter_mut().for_each(|(t, mut i)| i.previous = Some(*t));
+    q.par_iter_mut()
+        .for_each(|(t, mut i)| i.previous = Some(*t));
 }
 
 type RootQuery<'w, 's> = Query<
@@ -431,9 +435,10 @@ mod tests {
         let far = 1.5e11; // one astronomical unit
         let parent = app
             .world
-            .spawn(Transform::from_xyz(far, 0.0, 0.0).with_rotation(Quat::from_rotation_y(
-                std::f32::consts::FRAC_PI_2,
-            )))
+            .spawn(
+                Transform::from_xyz(far, 0.0, 0.0)
+                    .with_rotation(Quat::from_rotation_y(std::f32::consts::FRAC_PI_2)),
+            )
             .id();
         let child = app
             .world

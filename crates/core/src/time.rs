@@ -319,7 +319,9 @@ impl DilationRequest {
             1.0
         };
         let fade_out = match self.released_at {
-            Some(t) if self.blend_out > 0.0 => 1.0 - ((self.age - t) / self.blend_out).clamp(0.0, 1.0),
+            Some(t) if self.blend_out > 0.0 => {
+                1.0 - ((self.age - t) / self.blend_out).clamp(0.0, 1.0)
+            }
             Some(_) => 0.0,
             None => 1.0,
         };
@@ -585,7 +587,9 @@ mod tests {
     #[test]
     fn dilation_shrinks_world_delta_not_step_count() {
         let mut app = manual_app(1.0 / 60.0);
-        app.world.resource_mut::<TimeDilation>().hold("t", 0.25, 0.0);
+        app.world
+            .resource_mut::<TimeDilation>()
+            .hold("t", 0.25, 0.0);
         #[derive(Resource, Default)]
         struct Acc {
             world: f64,
@@ -599,7 +603,11 @@ mod tests {
         app.update_n(60);
         let acc = app.world.resource::<Acc>();
         assert_eq!(acc.steps, 60);
-        assert!((acc.world - 0.25).abs() < 0.02, "world advanced {}", acc.world);
+        assert!(
+            (acc.world - 0.25).abs() < 0.02,
+            "world advanced {}",
+            acc.world
+        );
     }
 
     #[test]

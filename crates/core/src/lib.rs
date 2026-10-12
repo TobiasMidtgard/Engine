@@ -43,8 +43,8 @@ pub mod prelude {
     pub use crate::registry::{ApiRegistry, TypeRegistry};
     pub use crate::scene::{EntityDoc, SceneDoc};
     pub use crate::schedule::{
-        Extract, First, FixedPostUpdate, FixedPreUpdate, FixedUpdate, Last, PostUpdate,
-        PreUpdate, Render, SimSet, Startup, Update, UpdateSet,
+        Extract, First, FixedPostUpdate, FixedPreUpdate, FixedUpdate, Last, PostUpdate, PreUpdate,
+        Render, SimSet, Startup, Update, UpdateSet,
     };
     pub use crate::time::{FixedTime, LocalTimeScale, Time, TimeDilation};
     pub use crate::transform::{GlobalTransform, Transform, TransformInterpolation};
