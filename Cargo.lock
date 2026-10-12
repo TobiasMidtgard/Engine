@@ -900,6 +900,7 @@ dependencies = [
  "engine_core",
  "engine_render",
  "engine_world",
+ "gltf",
  "image",
  "serde",
  "serde_json",
@@ -999,10 +1000,14 @@ name = "engine_foliage"
 version = "0.1.0"
 dependencies = [
  "bevy_ecs",
+ "engine_assets",
  "engine_core",
+ "engine_render",
  "engine_world",
+ "image",
  "serde",
  "serde_json",
+ "tracing",
 ]
 
 [[package]]
@@ -1051,6 +1056,7 @@ name = "engine_physics"
 version = "0.1.0"
 dependencies = [
  "bevy_ecs",
+ "engine_assets",
  "engine_core",
  "engine_debug",
  "engine_render",
@@ -1163,8 +1169,11 @@ name = "engine_vehicles"
 version = "0.1.0"
 dependencies = [
  "bevy_ecs",
+ "engine_assets",
  "engine_core",
+ "engine_render",
  "engine_world",
+ "image",
  "serde",
  "serde_json",
 ]

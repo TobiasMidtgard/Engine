@@ -18,10 +18,10 @@ are built, nothing simulates yet) · ⬜ not visible yet
 |---|---|---|---|---|
 | 1 | Huge scale: walk, drive, fly from the ground to orbit and the Moon without loading screens | `overview`, `tower`, `stratosphere`, `orbit`, `moon` | Planets and terrain | 🟨 camera flies there; planet surface from orbit is flat color |
 | 2 | Efficient enough for multiplanetary travel (planets, moons, orbits, reference frames) | `spaceport`, `orbit`, `moon` | Planets and terrain | ⬜ |
-| 3 | Cars with real suspension, tires and drivetrain | `track` | Cars, planes and spaceships | 🟨 |
-| 4 | Planes with aerodynamic surfaces | `airfield` (1.2 km runway) | Cars, planes and spaceships | 🟨 |
-| 5 | Spaceships with thrusters and RCS, launching to orbit | `spaceport` | Cars, planes and spaceships | 🟨 |
-| 6 | Extremely well built, efficient physics: stacking, joints, ragdolls | `physics` | Physics and rigid bodies | 🟨 |
+| 3 | Cars with real suspension, tires and drivetrain | `track` | Cars, planes and spaceships | 🟨 demo in; being checked on the Rapier backend |
+| 4 | Planes with aerodynamic surfaces | `airfield` (1.2 km runway) | Cars, planes and spaceships | 🟨 demo in; being checked on the Rapier backend |
+| 5 | Spaceships with thrusters and RCS, launching to orbit | `spaceport` | Cars, planes and spaceships | 🟨 demo in; being checked on the Rapier backend |
+| 6 | Extremely well built, efficient physics: stacking, joints, ragdolls | `physics`, `physics_ragdolls`, `physics_wrecking_ball`, `physics_seesaw`, `physics_pile`, `physics_dominoes`, `physics_bridge`, `physics_turntable` | Physics and rigid bodies | ✅ proving ground: a 30-crate tower standing still, 250 crates, drums and balls raining into a bin, a domino run, crash test dummy ragdolls on stairs, a wrecking ball on a chain, a seesaw catapult, a paddle wheel, a plank bridge, a turntable with a rider; stations replay every 20 to 45 s |
 
 ## Water, fire, smoke, weather
 
@@ -50,9 +50,9 @@ are built, nothing simulates yet) · ⬜ not visible yet
 
 | # | Test case | Zone / viewpoint | Owner | Status |
 |---|---|---|---|---|
-| 20 | Procedural plants that differ by species variables | `forest`, the whole valley | Foliage and ecology | 🟨 showcase's own procedural trees |
-| 21 | Chop a tree; new ones grow where water, sun and soil allow | `forest` clearing | Foliage and ecology | 🟨 stumps, fallen trunk, saplings |
-| 22 | Plants that need other resources (mineral water) and glowing cave mushrooms | `cave` | Foliage and ecology | 🟨 mushrooms glow, no growth |
+| 20 | Procedural plants that differ by species variables | `forest`, the whole valley | Foliage and ecology | ✅ `forest`: oak, birch, pine, spruce, hazel, ferns, grass and flowers, each plant shaped by inherited genes; the valley's own trees switch over next |
+| 21 | Chop a tree; new ones grow where water, sun and soil allow | `forest_clearing` (walk the trail: `forest_trail`, `forest_spring`, `forest_burn_scar`, `forest_dry_ridge`) | Foliage and ecology | ✅ a tree at the clearing's edge falls every 25 s and rots into the soil; the clear-cut regrows, the burn scar recovers, ferns crowd the spring, pines win the dry ridge |
+| 22 | Plants that need other resources (mineral water) and glowing cave mushrooms | `cave`, `cave_fungi`, `cave_pool` | Foliage and ecology | ✅ glowcaps and lantern caps grow only where the mineral pool and seep reach, glow brighter the better fed they are, and light the cave |
 | 23 | Grass that moves in the wind | everywhere | Foliage and ecology (strands: Rendering and lighting) | 🟨 grass patches sway |
 | 24 | Dynamic fauna (wildlife that grazes, drinks, flees, flocks) | `meadow`, `meadow_herd` (by the lake shore) | Smart NPC AI | ✅ deer and rabbit herds graze, drink, rest and bolt; birds flock; a wolf pack stalks and hunts (stand-in bodies) |
 

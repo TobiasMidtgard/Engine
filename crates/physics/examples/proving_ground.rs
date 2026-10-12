@@ -15,7 +15,7 @@ use engine_core::prelude::*;
 use engine_core::time::TimeSource;
 use engine_physics::{PhysicsDebug, PhysicsPlugin, PhysicsStats, demo};
 use engine_render::prelude::*;
-use engine_render::{RenderDisabled, capture_now};
+use engine_render::{RenderDisabled, Renderer, capture_now};
 use engine_world::WorldPlugin;
 
 /// (world seconds, file name, camera position, look-at target), yard-local.
@@ -58,6 +58,13 @@ const SHOTS: &[(f32, &str, [f64; 3], [f64; 3])] = &[
         "09_overview_after",
         [0.0, 24.0, 44.0],
         [0.0, 2.0, -3.0],
+    ),
+    // The dominoes replay every 30 s: standing again, the first one tipping.
+    (
+        30.6,
+        "10_dominoes_replayed",
+        [8.0, 4.5, -4.0],
+        [5.0, 0.4, -16.0],
     ),
 ];
 
@@ -130,17 +137,17 @@ fn main() {
     for (at, name, eye, target) in SHOTS.iter().filter(|s| s.1.contains(only.as_str())) {
         // Simulate up to a few frames before the shot without drawing (fast on lavapipe),
         // then draw a few frames so auto exposure settles.
-        app.world.get_mut::<Camera>(camera).unwrap().active = false;
+        let mut frames = 0;
         while t < at - 4.0 / 60.0 {
-            app.update();
+            frames += 1;
             t += 1.0 / 60.0;
         }
+        simulate(&mut app, frames);
         {
             let mut tr = app.world.get_mut::<Transform>(camera).unwrap();
             *tr = Transform::from_translation(DVec3::from_array(*eye))
                 .looking_at(DVec3::from_array(*target), Vec3::Y);
         }
-        app.world.get_mut::<Camera>(camera).unwrap().active = true;
         for _ in 0..4 {
             app.update();
             t += 1.0 / 60.0;
@@ -164,5 +171,18 @@ fn main() {
             }
             Err(e) => eprintln!("{name}: {e}"),
         }
+    }
+}
+
+/// Run `frames` frames without drawing them: the renderer draws every frame (from the origin
+/// when no camera is active), so it is parked meanwhile.
+fn simulate(app: &mut App, frames: usize) {
+    let renderer = app.world.remove_resource::<Renderer>();
+    app.world
+        .insert_resource(RenderDisabled("simulating without drawing".into()));
+    app.update_n(frames);
+    app.world.remove_resource::<RenderDisabled>();
+    if let Some(r) = renderer {
+        app.world.insert_resource(r);
     }
 }
