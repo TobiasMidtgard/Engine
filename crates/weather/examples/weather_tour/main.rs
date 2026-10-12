@@ -3,6 +3,17 @@
 //! Runs headless (needs a GPU or lavapipe). `only` is a comma-separated list of shot names.
 //! For tuning, `CLOUD_SCALE`, `CLOUD_EXT`, `CLOUD_DETAIL` and `CLOUD_SHAPE` override the
 //! matching `CloudSettings` fields.
+//!
+//! The station stands in a procedural landscape (see `landscape.rs`): a terrain with a meadow,
+//! wooded hills and a mountain range, procedural trees, rocks, grass and a farm track, all
+//! with textures painted on the CPU at startup.
+
+mod landscape;
+mod noise;
+mod rocks;
+mod terrain;
+mod texgen;
+mod trees;
 
 use engine_core::prelude::*;
 use engine_core::registry::call_api;
@@ -124,7 +135,7 @@ fn shots() -> Vec<Shot> {
         Shot {
             name: "09_sunset",
             setup: vec![dry(), set("partly_cloudy"), hour(17.6), advance(120.0)],
-            eye: DVec3::new(-10.0, 1.8, 6.0),
+            eye: DVec3::new(-10.5, 1.8, 1.6),
             target: DVec3::new(60.0, 10.0, 0.0),
             frames: 10,
             face_moon: false,
@@ -168,74 +179,81 @@ fn shots() -> Vec<Shot> {
             frames: 10,
             face_moon: false,
         },
+        // Close-ups of the station's props.
+        Shot {
+            name: "station_shelter",
+            setup: vec![dry(), set("partly_cloudy"), hour(15.0), advance(60.0)],
+            eye: DVec3::new(0.2, 1.6, 1.9),
+            target: DVec3::new(-3.6, 1.2, -3.2),
+            frames: 10,
+            face_moon: false,
+        },
+        Shot {
+            name: "station_wind_mast",
+            setup: vec![
+                dry(),
+                (
+                    "weather.set",
+                    json!({"preset": "partly_cloudy", "transition_s": 0, "wind_from_deg": 300}),
+                ),
+                hour(11.0),
+                advance(60.0),
+            ],
+            eye: DVec3::new(3.2, 1.7, -0.6),
+            target: DVec3::new(8.6, 3.4, -6.4),
+            frames: 10,
+            face_moon: false,
+        },
+        Shot {
+            name: "station_thermometer",
+            setup: vec![dry(), set("clear"), hour(13.0), advance(60.0)],
+            eye: DVec3::new(1.9, 2.0, -3.0),
+            target: DVec3::new(2.9, 2.0, -5.75),
+            frames: 10,
+            face_moon: false,
+        },
+        Shot {
+            name: "station_enclosure",
+            setup: vec![dry(), set("partly_cloudy"), hour(10.0), advance(60.0)],
+            eye: DVec3::new(-6.6, 1.8, 2.0),
+            target: DVec3::new(-10.4, 0.9, 5.4),
+            frames: 10,
+            face_moon: false,
+        },
+        Shot {
+            name: "station_wet_asphalt",
+            setup: vec![
+                set("overcast"),
+                hour(13.0),
+                advance(120.0),
+                ("weather.ground", json!({"wetness": 1.0, "puddle_m": 0.006})),
+            ],
+            eye: DVec3::new(0.6, 1.3, 2.4),
+            target: DVec3::new(-2.0, 0.0, -1.6),
+            frames: 10,
+            face_moon: false,
+        },
+        Shot {
+            name: "station_dusk_lamps",
+            setup: vec![
+                set("overcast"),
+                hour(19.6),
+                advance(120.0),
+                ("weather.ground", json!({"wetness": 1.0, "puddle_m": 0.01})),
+            ],
+            eye: DVec3::new(6.2, 1.6, 4.4),
+            target: DVec3::new(-3.0, 1.4, -3.0),
+            frames: 12,
+            face_moon: false,
+        },
     ]
 }
 
 fn scene(app: &mut App) {
-    let w = &mut app.world;
-    w.spawn((
-        Transform::default(),
-        MeshRenderer::new(
-            Shape::Plane {
-                size: [150_000.0, 150_000.0],
-                subdivisions: 1,
-            },
-            StandardMaterial::hex(0x55743a).with_roughness(0.95),
-        ),
-    ));
-    // Rolling hills and a few trees so the clouds have a landscape to sit over.
-    let hill = StandardMaterial::hex(0x4a6b34).with_roughness(0.95);
-    for (x, z, r) in [
-        (-300.0, -500.0, 180.0),
-        (250.0, -700.0, 260.0),
-        (700.0, -300.0, 220.0),
-        (-800.0, 100.0, 300.0),
-        (500.0, 600.0, 200.0),
-    ] {
-        w.spawn((
-            Transform::from_xyz(x, -r * 0.3, z).with_scale(Vec3::new(1.0, 0.55, 1.0)),
-            MeshRenderer::new(
-                Shape::Sphere {
-                    radius: r as f32,
-                    segments: 48,
-                },
-                hill,
-            ),
-        ));
-    }
-    let bark = StandardMaterial::hex(0x5a4030).with_roughness(0.9);
-    let leaves = StandardMaterial::hex(0x3d6b2a)
-        .with_roughness(0.7)
-        .with_subsurface(0.4);
-    for k in 0..14 {
-        let a = k as f64 * 2.4;
-        let r = 22.0 + (k % 4) as f64 * 6.0;
-        let (x, z) = (a.cos() * r, a.sin() * r);
-        w.spawn((
-            Transform::from_xyz(x, 1.5, z),
-            MeshRenderer::new(
-                Shape::Cylinder {
-                    radius: 0.2,
-                    height: 3.0,
-                    segments: 10,
-                },
-                bark,
-            ),
-        ));
-        w.spawn((
-            Transform::from_xyz(x, 4.2, z),
-            MeshRenderer::new(
-                Shape::Sphere {
-                    radius: 2.0,
-                    segments: 20,
-                },
-                leaves,
-            ),
-        ));
-    }
-    let mut commands = w.commands();
+    landscape::build(&mut app.world);
+    let mut commands = app.world.commands();
     engine_weather::demo::spawn_demo(&mut commands, DVec3::ZERO);
-    w.flush();
+    app.world.flush();
 }
 
 /// Let the showers drift until the sun shines on the station while a shower falls a few

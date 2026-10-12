@@ -899,6 +899,8 @@ pub struct WallLook {
     pub seed: u64,
     /// Keep the grid's outer border straight (true for walls, false for broken chunks).
     pub straight_border: bool,
+    /// The material's own exterior color (what its texture already shows).
+    pub reference: [f32; 3],
 }
 
 impl WallLook {
@@ -914,7 +916,25 @@ impl WallLook {
             plank_pitch: (wall.plank_height > 0.0).then_some(wall.plank_height + wall.plank_gap),
             seed: wall.seed,
             straight_border: true,
+            reference: props.exterior,
         }
+    }
+
+    /// Textured surfaces carry their own albedo, bricks and blocks: colors become relative to
+    /// the material's own exterior color (paint and fresh breaks still show) and the
+    /// vertex-color masonry goes.
+    pub fn with_texture(mut self, textured: bool) -> Self {
+        if textured {
+            let r = self.reference;
+            let rel =
+                |c: [f32; 3]| std::array::from_fn(|k| (c[k] / r[k].max(1e-3)).clamp(0.3, 1.35));
+            self.exterior = rel(self.exterior);
+            self.interior = rel(self.interior);
+            self.stud_interior = rel(self.stud_interior);
+            self.rebar = rel(self.rebar);
+            self.masonry = None;
+        }
+        self
     }
 
     fn outside_color(&self, p: Vec2, gi: i64, gj: i64) -> [f32; 3] {
@@ -1081,7 +1101,7 @@ pub fn mesh_cells(
                         let gy = grid.global.1 + vj as i64;
                         let color = surface_color(&v, removed, gx, gy);
                         let n = if front { Vec3::Z } else { Vec3::NEG_Z };
-                        index[slot] = mb.vertex(Vec3::new(v.xy.x, v.xy.y, z) + offset, n, color);
+                        index[slot] = mb.vertex(Vec3::new(v.xy.x, v.xy.y, z), n, color);
                     }
                     ids[k] = index[slot];
                 }
@@ -1140,18 +1160,29 @@ pub fn mesh_cells(
                 } else {
                     scale(look.exterior, 0.8)
                 };
-                let pa = Vec3::new(va.xy.x, va.xy.y, 0.0) + offset;
-                let pb = Vec3::new(vb.xy.x, vb.xy.y, 0.0) + offset;
-                mb.quad_facing(
-                    [
-                        pa + Vec3::Z * va.zf,
-                        pa + Vec3::Z * va.zb,
-                        pb + Vec3::Z * vb.zb,
-                        pb + Vec3::Z * vb.zf,
-                    ],
-                    out,
-                    color,
-                );
+                let pa = Vec3::new(va.xy.x, va.xy.y, 0.0);
+                let pb = Vec3::new(vb.xy.x, vb.xy.y, 0.0);
+                let (fa, fb) = (pa + Vec3::Z * va.zf, pb + Vec3::Z * vb.zf);
+                let (ba, bb) = (pa + Vec3::Z * va.zb, pb + Vec3::Z * vb.zb);
+                if !broken {
+                    mb.quad_facing([fa, ba, bb, fb], out, color);
+                    continue;
+                }
+                // A fracture isn't a clean extrusion: break the edge at a ridge partway
+                // through, jittered per grid vertex so neighboring edges share it.
+                let ridge = |v: &GridVertex, p: Vec3, vi: usize, vj: usize| {
+                    let (gx, gy) = (grid.global.0 + vi as i64, grid.global.1 + vj as i64);
+                    let jx = hash3(gx, gy, 31, look.seed) - 0.5;
+                    let jy = hash3(gx, gy, 32, look.seed) - 0.5;
+                    let jz = hash3(gx, gy, 33, look.seed) - 0.5;
+                    let mid = 0.5 * (v.zf + v.zb) + jz * 0.5 * (v.zf - v.zb);
+                    p + Vec3::new(jx * grid.cell.x, jy * grid.cell.y, 0.0) * 0.8 + Vec3::Z * mid
+                };
+                let ma = ridge(&va, pa, a.0, a.1);
+                let mbv = ridge(&vb, pb, b.0, b.1);
+                let lit = scale(color, 1.08);
+                mb.quad_facing([fa, ma, mbv, fb], out + Vec3::Z * 0.3, lit);
+                mb.quad_facing([ma, ba, bb, mbv], out - Vec3::Z * 0.3, color);
             }
         }
     }
@@ -1176,7 +1207,7 @@ pub fn mesh_cells(
                     y0 + grid.cell.y,
                     wob(gx, gy + 1, 22),
                 );
-                mb.rod(a + offset, b + offset, radius, look.rebar);
+                mb.rod(a, b, radius, look.rebar);
             }
             if grid.rebar[c] & HBAR != 0 {
                 let y = y0 + grid.cell.y * 0.5;
@@ -1186,10 +1217,12 @@ pub fn mesh_cells(
                     y + wob(gx + 1, gy, 23),
                     0.012 + wob(gx + 1, gy, 24),
                 );
-                mb.rod(a + offset, b + offset, radius, look.rebar);
+                mb.rod(a, b, radius, look.rebar);
             }
         }
     }
+    // Offset last, so texture coordinates stay in wall space (a chunk keeps its bricks).
+    mb.translate(offset);
     mb
 }
 

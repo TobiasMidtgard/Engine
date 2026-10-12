@@ -27,10 +27,14 @@ use engine_core::prelude::*;
 use engine_render::{MeshRenderer, Shape, StandardMaterial};
 use engine_world::{EditOp, EditShape, ProjectileTrace, TerrainEdit, WorldImpulse};
 
+use crate::DemoView;
+use crate::architecture::TowerTop;
 use crate::charges::BreachCharge;
 use crate::debris::{Debris, PendingDebris, settle};
+use crate::dress::{ArchKind, ArchModel, GravelPad, PropModel};
 use crate::hits::{Hit, HitQueue};
 use crate::material::{DestructibleMaterial, linear};
+use crate::props::PropKind;
 use crate::structure::{Fracturable, FractureShape, ShowSupport, StructuralPiece};
 use crate::voxel::VoxelVolume;
 use crate::wall::{DestructibleWall, WallAnchors, WallState};
@@ -63,6 +67,67 @@ pub struct DemoTargets {
     pub gate: Vec<Entity>,
     pub props: Vec<Entity>,
 }
+
+/// The breach range's live moments (the zone's own stop is the overview from
+/// `(-2, 17, -44)` looking at `(-3, 2.5, 4)`).
+pub const VIEWS: &[DemoView] = &[
+    DemoView {
+        key: "fortress_gate",
+        name: "The fortress gatehouse and its walls",
+        eye: [-14.0, 5.0, -54.0],
+        target: [0.0, 7.0, -31.0],
+        hour: 15.0,
+        warmup_secs: 0.2,
+    },
+    DemoView {
+        key: "fortress_bays",
+        name: "Breach bays: shot, kicked in, burned and blown open",
+        eye: [12.0, 4.5, -22.0],
+        target: [0.0, 1.4, -8.0],
+        hour: 15.0,
+        warmup_secs: 0.2,
+    },
+    DemoView {
+        key: "fortress_thermite",
+        name: "Thermite burning a doorway through rebar concrete",
+        eye: [2.2, 1.7, -13.0],
+        target: [0.0, 1.2, -8.0],
+        hour: 15.0,
+        warmup_secs: 2.0,
+    },
+    DemoView {
+        key: "fortress_charge",
+        name: "A breach charge blowing a wall open",
+        eye: [-9.5, 2.4, -17.0],
+        target: [-13.6, 1.3, -8.0],
+        hour: 15.0,
+        warmup_secs: 3.95,
+    },
+    DemoView {
+        key: "fortress_cliff",
+        name: "A mined cliff caving in",
+        eye: [3.0, 5.0, -7.0],
+        target: [-4.0, 3.5, 12.0],
+        hour: 15.0,
+        warmup_secs: 4.2,
+    },
+    DemoView {
+        key: "fortress_tower",
+        name: "A watchtower in support colors losing its posts",
+        eye: [9.0, 4.5, -5.0],
+        target: [18.0, 3.0, 9.0],
+        hour: 15.0,
+        warmup_secs: 10.1,
+    },
+    DemoView {
+        key: "fortress_arch",
+        name: "A rock arch blown off its foot",
+        eye: [-26.0, 6.0, -4.0],
+        target: [-36.0, 3.5, 16.0],
+        hour: 15.0,
+        warmup_secs: 14.0,
+    },
+];
 
 /// The running showcase script (one per [`spawn_demo`]).
 #[derive(Component, Debug, Clone, Default)]
@@ -134,6 +199,12 @@ fn prop(
         .id()
 }
 
+/// A detailed prop (see [`crate::props`]) centered at `at`.
+fn model(commands: &mut Commands, kind: PropKind, seed: u64, at: DVec3, yaw: f32) -> Entity {
+    let (t, g) = placed(at, yaw);
+    commands.spawn((t, g, PropModel::new(kind, seed))).id()
+}
+
 fn cuboid(x: f32, y: f32, z: f32) -> Shape {
     Shape::Cuboid { size: [x, y, z] }
 }
@@ -142,33 +213,35 @@ fn cuboid(x: f32, y: f32, z: f32) -> Shape {
 pub fn spawn_demo(commands: &mut Commands, origin: DVec3) {
     let o = origin;
     let yaw = std::f32::consts::PI;
-    let concrete = mat(0x9b978e, 0.85);
-    let steel = mat(0x3f4245, 0.45).with_metallic(0.8);
+    spawn_fortress(commands, o);
     // The range: a gravel pad, concrete pillars between the bays and a steel lintel on top.
-    prop(
-        commands,
-        Shape::Plane {
-            size: [52.0, 9.0],
-            subdivisions: 1,
-        },
-        mat(0x6d695f, 0.95),
-        o + DVec3::new(0.0, 0.012, ROW_Z - 1.0),
-        0.0,
-    );
+    let (t, g) = placed(o + DVec3::new(0.0, 0.0, ROW_Z - 1.0), 0.0);
+    commands.spawn((
+        Name::new("Range gravel"),
+        t,
+        g,
+        GravelPad { size: [52.0, 9.0] },
+    ));
     for k in 0..=BAYS.len() {
         let x = BAYS[0] + 3.4 - k as f64 * 6.8;
-        prop(
+        model(
             commands,
-            cuboid(0.7, 3.8, 0.7),
-            concrete,
+            PropKind::ConcretePillar {
+                size: [0.7, 3.8, 0.7],
+            },
+            k as u64,
             o + DVec3::new(x, 1.9, ROW_Z),
             0.0,
         );
     }
-    prop(
+    model(
         commands,
-        cuboid(6.8 * BAYS.len() as f32 + 0.7, 0.4, 0.8),
-        steel,
+        PropKind::SteelIBeam {
+            length: 6.8 * BAYS.len() as f32 + 0.7,
+            depth: 0.4,
+            end_plates: true,
+        },
+        1,
         o + DVec3::new(0.0, 4.0, ROW_Z),
         0.0,
     );
@@ -315,7 +388,6 @@ pub fn spawn_demo(commands: &mut Commands, origin: DVec3) {
 fn spawn_props(commands: &mut Commands, o: DVec3) -> Vec<Entity> {
     let mut out = Vec::new();
     let x0 = BAYS[5];
-    let crate_mat = mat(0x8a6238, 0.8);
     for (k, (dx, dz, s)) in [
         (-1.4, -1.6, 0.8f32),
         (-0.4, -2.0, 0.7),
@@ -333,7 +405,7 @@ fn spawn_props(commands: &mut Commands, o: DVec3) -> Vec<Entity> {
                     Name::new("Crate"),
                     t,
                     g,
-                    MeshRenderer::new(cuboid(s, s, s), crate_mat),
+                    PropModel::new(PropKind::WoodenCrate { size: [s, s, s] }, k as u64),
                     Fracturable {
                         shape: FractureShape::Box {
                             half_extents: Vec3::splat(s * 0.5),
@@ -356,13 +428,12 @@ fn spawn_props(commands: &mut Commands, o: DVec3) -> Vec<Entity> {
                     Name::new("Stone column"),
                     t,
                     g,
-                    MeshRenderer::new(
-                        Shape::Cylinder {
-                            radius: 0.3,
+                    PropModel::new(
+                        PropKind::StoneColumn {
                             height: 2.6,
-                            segments: 12,
+                            radius: 0.3,
                         },
-                        mat(0xb9b2a4, 0.7),
+                        (dx > 0.0) as u64,
                     ),
                     Fracturable {
                         shape: FractureShape::Column {
@@ -381,6 +452,125 @@ fn spawn_props(commands: &mut Commands, o: DVec3) -> Vec<Entity> {
         );
     }
     out
+}
+
+/// The fortress the range stands in: curtain walls with a stair to each wall walk, a
+/// breach in the east wall, a twin-towered gatehouse in the south wall and a tower on each
+/// corner (each with its own top). Set dressing only; nothing here breaks. It stays inside
+/// the zone's 60 m pad.
+fn spawn_fortress(commands: &mut Commands, o: DVec3) {
+    use std::f32::consts::{FRAC_PI_2, PI};
+    let (west, east, south, north) = (-47.0, 44.0, -31.0, 30.0);
+    let mut arch = |name: &str, kind: ArchKind, seed: u64, x: f64, z: f64, yaw: f32| {
+        let (t, g) = placed(o + DVec3::new(x, 0.0, z), yaw);
+        commands.spawn((
+            Name::new(name.to_string()),
+            t,
+            g,
+            ArchModel::new(kind, seed),
+        ));
+    };
+    let wall = |length: f64| ArchKind::CurtainWall {
+        length: length as f32,
+        height: 8.5,
+        thickness: 3.0,
+    };
+    // Outer faces look away from the courtyard.
+    arch(
+        "North wall",
+        wall(east - west),
+        11,
+        (west + east) * 0.5,
+        north,
+        PI,
+    );
+    arch(
+        "West wall",
+        wall(north - south),
+        12,
+        west,
+        (south + north) * 0.5,
+        FRAC_PI_2,
+    );
+    let (gap_s, gap_n) = (-6.0, 10.0);
+    arch(
+        "East wall",
+        wall(gap_s - south),
+        13,
+        east,
+        (south + gap_s) * 0.5,
+        -FRAC_PI_2,
+    );
+    arch(
+        "East wall breach",
+        ArchKind::RuinedWall {
+            length: (gap_n - gap_s) as f32,
+            height: 8.5,
+        },
+        14,
+        east,
+        (gap_s + gap_n) * 0.5,
+        -FRAC_PI_2,
+    );
+    arch(
+        "East wall",
+        wall(north - gap_n),
+        15,
+        east,
+        (gap_n + north) * 0.5,
+        -FRAC_PI_2,
+    );
+    let gate = 8.0;
+    arch(
+        "South wall",
+        wall(-gate - west),
+        16,
+        (west - gate) * 0.5,
+        south,
+        0.0,
+    );
+    arch(
+        "South wall",
+        wall(east - gate),
+        17,
+        (east + gate) * 0.5,
+        south,
+        0.0,
+    );
+    arch(
+        "Gatehouse",
+        ArchKind::Gatehouse {
+            width: 16.0,
+            height: 13.0,
+            depth: 10.0,
+        },
+        18,
+        0.0,
+        south,
+        0.0,
+    );
+    for (k, (x, z, radius, height, top)) in [
+        (west, north, 4.2, 13.0, TowerTop::SlateRoof),
+        (east, north, 4.2, 14.0, TowerTop::Hoarding),
+        (west, south, 3.8, 12.0, TowerTop::Crenellated),
+        (east, south, 3.8, 11.0, TowerTop::ShingleRoof),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        arch(
+            "Corner tower",
+            ArchKind::RoundTower {
+                radius,
+                height,
+                top,
+            },
+            20 + k as u64,
+            x,
+            z,
+            0.0,
+        );
+    }
 }
 
 fn spawn_cliff(commands: &mut Commands, o: DVec3) -> Entity {
@@ -411,17 +601,31 @@ fn piece(
     if material == DestructibleMaterial::Wood {
         p.break_energy_j = 6000.0;
     }
-    let mut e = commands.spawn((
-        Name::new(name.to_string()),
-        t,
-        GlobalTransform::from(t),
-        MeshRenderer::new(cuboid(size.x, size.y, size.z), look),
-        p,
-    ));
+    let mut e = commands.spawn((Name::new(name.to_string()), t, GlobalTransform::from(t), p));
+    // A stable seed per spot.
+    let seed = (at.x * 7.0 + at.y * 13.0 + at.z * 17.0).abs() as u64;
+    if material == DestructibleMaterial::Wood {
+        // Sawn timber, its grain along the piece.
+        e.insert(PropModel::new(
+            PropKind::Timber {
+                size: size.to_array(),
+            },
+            seed,
+        ));
+    } else if material == DestructibleMaterial::Stone {
+        e.insert(PropModel::new(
+            PropKind::StoneBlock {
+                size: size.to_array(),
+            },
+            seed,
+        ));
+    } else {
+        e.insert(MeshRenderer::new(cuboid(size.x, size.y, size.z), look));
+    }
     if tint {
         e.insert(ShowSupport {
             on: false,
-            children: false,
+            children: true,
         });
     }
     e.id()
@@ -503,19 +707,29 @@ fn spawn_tower(commands: &mut Commands, o: DVec3) -> (Vec<Entity>, Vec<Entity>) 
             true,
         ));
     }
-    // Roof: two pitched panels on the upper beams.
+    // Roof: two shingled panels on the upper beams (each panel's X runs down its slope).
     for s in [-1.0f32, 1.0] {
-        let rot = Quat::from_rotation_x(s * 0.55);
-        all.push(piece(
+        let rot =
+            Quat::from_rotation_x(s * 0.55) * Quat::from_rotation_y(-std::f32::consts::FRAC_PI_2);
+        let size = Vec3::new(2.3, 0.12, 4.0);
+        let e = piece(
             commands,
             "Roof",
             p(0.0, 6.3, s as f64 * 1.0),
             rot,
-            Vec3::new(4.0, 0.12, 2.3),
+            size,
             w,
             wood,
             true,
-        ));
+        );
+        let look = PropKind::ShinglePanel {
+            size: size.to_array(),
+            eave_at_plus_x: s > 0.0,
+        };
+        commands
+            .entity(e)
+            .insert(PropModel::new(look, if s > 0.0 { 8 } else { 7 }));
+        all.push(e);
     }
     (all, posts)
 }
@@ -753,6 +967,29 @@ pub fn demo_script_system(world: &mut World) {
             *d = demo;
         }
     }
+}
+
+/// Start every [`DestructionDemo`]'s live script over from the beginning: loose debris sinks,
+/// the live walls, cliff, arch, tower and gate are rebuilt. Returns how many demos restarted.
+pub fn restart_demos(world: &mut World) -> usize {
+    let demos: Vec<Entity> = world
+        .query_filtered::<Entity, With<DestructionDemo>>()
+        .iter(world)
+        .collect();
+    for &e in &demos {
+        let Some(mut demo) = world.get::<DestructionDemo>(e).cloned() else {
+            continue;
+        };
+        run_step(world, &mut demo, Step::Clear);
+        run_step(world, &mut demo, Step::Reset);
+        demo.time = 0.0;
+        demo.next = 0;
+        demo.cycle += 1;
+        if let Some(mut d) = world.get_mut::<DestructionDemo>(e) {
+            *d = demo;
+        }
+    }
+    demos.len()
 }
 
 fn run_step(world: &mut World, demo: &mut DestructionDemo, step: Step) {

@@ -267,6 +267,21 @@ pub(crate) fn register(app: &mut App) {
                 let sim = world.resource::<WeatherSim>();
                 (sim.seed, sim.frame)
             };
+            // The dips the ground simulation found (soft ground and paved patches differ), where
+            // it has looked already.
+            let dips: Option<Vec<Option<f32>>> = {
+                let cache = world.resource::<surface::GroundCache>();
+                let grid = &world.resource::<SurfaceLayers>().grid;
+                (cache.cells.origin == grid.origin && cache.cells.data.len() == grid.data.len())
+                    .then(|| {
+                        cache
+                            .cells
+                            .data
+                            .iter()
+                            .map(|c| c.known.then_some(c.dip))
+                            .collect()
+                    })
+            };
             let mut surface = world.resource_mut::<SurfaceLayers>();
             let grid = &mut surface.grid;
             let (origin, cell, width) = (grid.origin, grid.cell as f64, grid.width as usize);
@@ -286,7 +301,9 @@ pub(crate) fn register(app: &mut App) {
                             (i % width) as f64 + 0.5,
                             (i / width) as f64 + 0.5,
                         ) * cell;
-                    let dip = surface::puddle_dip(frame.to_pattern(xz), params.puddle_share, seed);
+                    let dip = dips.as_ref().and_then(|d| d[i]).unwrap_or_else(|| {
+                        surface::puddle_dip(frame.to_pattern(xz), params.puddle_share, seed)
+                    });
                     c.puddle_m = (p * dip).min(params.max_puddle_m);
                 }
                 if let Some(s) = snow {

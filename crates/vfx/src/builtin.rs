@@ -110,9 +110,9 @@ fn billow_colors() -> Gradient {
 
 fn spark_colors() -> Gradient {
     g(&[
-        (0.0, [1.0, 0.88, 0.55, 1.0]),
-        (0.6, [1.0, 0.5, 0.15, 1.0]),
-        (1.0, [0.8, 0.18, 0.04, 0.0]),
+        (0.0, [1.0, 0.74, 0.34, 1.0]),
+        (0.5, [1.0, 0.44, 0.1, 1.0]),
+        (1.0, [0.75, 0.14, 0.03, 0.0]),
     ])
 }
 
@@ -152,12 +152,12 @@ fn sparks(name: &str, count: u32, speed: [f32; 2]) -> EmitterDesc {
             friction: 0.25,
         },
         lifetime: [0.4, 1.1],
-        size: [0.02, 0.04],
+        size: [0.015, 0.03],
         sprite: Sprite::Spark,
         facing: Facing::Velocity,
         stretch: 0.03,
         color: spark_colors(),
-        emissive: 60_000.0,
+        emissive: 25_000.0,
         additive: 1.0,
         soft: 0.0,
         ..em(name)
@@ -384,7 +384,7 @@ fn spells() -> Vec<EffectDesc> {
                     facing: Facing::Velocity,
                     stretch: 0.06,
                     color: spark_colors(),
-                    emissive: 45_000.0,
+                    emissive: 25_000.0,
                     additive: 1.0,
                     soft: 0.0,
                     ..em("sparks")
@@ -464,7 +464,7 @@ fn spells() -> Vec<EffectDesc> {
                 EmitterDesc {
                     lifetime: [0.6, 1.5],
                     stretch: 0.035,
-                    emissive: 50_000.0,
+                    emissive: 30_000.0,
                     ..sparks("sparks", 130, [5.0, 13.0])
                 },
                 EmitterDesc {

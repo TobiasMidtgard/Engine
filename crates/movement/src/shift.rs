@@ -6,7 +6,9 @@ use engine_core::math::DVec3;
 use engine_core::prelude::*;
 use engine_world::WorldShift;
 
+use crate::afterimage::{Afterimage, Afterimages};
 use crate::demo::{Brain, DuelDirector};
+use crate::look::effects::Effects;
 use crate::mover::{Mover, WallContact};
 
 fn wall(s: &WorldShift, w: WallContact) -> WallContact {
@@ -17,11 +19,15 @@ fn wall(s: &WorldShift, w: WallContact) -> WallContact {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn follow_world_shifts(
     mut shifts: MessageReader<WorldShift>,
     mut movers: Query<(&mut Mover, Option<&GlobalTransform>)>,
     mut brains: Query<&mut Brain>,
     mut directors: Query<&mut DuelDirector>,
+    mut trails: Query<&mut Afterimages>,
+    mut ghosts: Query<&mut Afterimage>,
+    effects: Option<ResMut<Effects>>,
 ) {
     let Some(s) = shifts.read().copied().reduce(|acc, next| acc.then(&next)) else {
         return;
@@ -54,6 +60,15 @@ pub(crate) fn follow_world_shifts(
     }
     for mut d in &mut directors {
         d.origin = s.point(d.origin);
+    }
+    for mut a in &mut trails {
+        a.shift(&s);
+    }
+    for mut g in &mut ghosts {
+        g.shift(&s);
+    }
+    if let Some(mut fx) = effects {
+        fx.shift(&s);
     }
 }
 
@@ -116,5 +131,31 @@ mod tests {
             "{}",
             m.velocity
         );
+    }
+
+    #[test]
+    fn sparks_in_flight_move_with_the_world() {
+        use crate::look::effects::EffectSettings;
+        let mut app = App::new();
+        app.add_message::<WorldShift>()
+            .add_systems(Update, follow_world_shifts);
+        let mut fx = Effects::default();
+        fx.parry(
+            DVec3::new(5.0, 1.5, 0.0),
+            Vec3::X,
+            0.0,
+            &EffectSettings::default(),
+        );
+        assert!(!fx.particles.is_empty());
+        let before: Vec<_> = fx.particles.iter().map(|p| (p.pos, p.floor)).collect();
+        app.insert_resource(fx);
+        let shift = WorldShift::translate(DVec3::new(-1000.0, 20.0, 0.0));
+        app.world.write_message(shift);
+        app.update();
+        let fx = app.world.resource::<Effects>();
+        for (p, (pos, floor)) in fx.particles.iter().zip(before) {
+            assert!(p.pos.distance(pos + shift.translation) < 1e-9);
+            assert!((p.floor - (floor + 20.0)).abs() < 1e-9);
+        }
     }
 }
