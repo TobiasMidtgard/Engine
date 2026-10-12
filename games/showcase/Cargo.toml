@@ -1,0 +1,29 @@
+[package]
+name = "showcase"
+description = "Tech showcase test area: one map with a zone per engine system, a free camera that flies from the ground to orbit, a day–night cycle and an automated screenshot tour."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+engine.workspace = true
+bevy_ecs.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+engine_physics.workspace = true
+engine_vehicles.workspace = true
+engine_space.workspace = true
+engine_terrain.workspace = true
+engine_water.workspace = true
+engine_weather.workspace = true
+engine_fire.workspace = true
+engine_smoke.workspace = true
+engine_vfx.workspace = true
+engine_foliage.workspace = true
+engine_anim.workspace = true
+engine_npc.workspace = true
+engine_ui.workspace = true
+engine_destruction.workspace = true
+engine_movement.workspace = true
+engine_audio.workspace = true

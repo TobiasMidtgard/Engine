@@ -1,0 +1,124 @@
+//! The engine's tech showcase: one map with a zone per system, a camera that flies from the
+//! ground to the Moon, a day–night cycle and an automated screenshot tour.
+//!
+//! ```sh
+//! cargo run -p showcase --release                       # fly around (see camera.rs for keys)
+//! cargo run -p showcase --release -- --headless --tour  # writes screenshots/tour/*.png
+//! cargo run -p showcase --release -- --headless --tour plaza,orbit
+//! ```
+//!
+//! Each zone shows placeholder primitives until its module ships a `demo::spawn_demo`.
+
+mod camera;
+mod day_cycle;
+mod places;
+mod tour;
+mod zones;
+
+use engine::prelude::*;
+
+fn main() {
+    let mut app = App::new();
+    engine::core::log::init("info,wgpu=warn,naga=warn");
+    app.world.resource_mut::<EngineConfig>().app_name = "Engine showcase".into();
+    engine::apply_cli_args(&mut app);
+
+    app.add_plugins(DefaultPlugins)
+        .add_plugins((
+            engine_physics::PhysicsPlugin,
+            engine_vehicles::VehiclesPlugin,
+            engine_space::SpacePlugin,
+            engine_terrain::TerrainPlugin,
+            engine_water::WaterPlugin,
+            engine_weather::WeatherPlugin,
+            engine_fire::FirePlugin,
+            engine_smoke::SmokePlugin,
+        ))
+        .add_plugins((
+            engine_vfx::VfxPlugin,
+            engine_foliage::FoliagePlugin,
+            engine_anim::AnimationPlugin,
+            engine_npc::NpcPlugin,
+            engine_ui::UiPlugin,
+            engine_destruction::DestructionPlugin,
+            engine_movement::MovementPlugin,
+            engine_audio::AudioPlugin,
+        ))
+        .init_resource::<day_cycle::DayCycle>()
+        .register_resource::<day_cycle::DayCycle>("Showcase clock: hour of day and how fast it runs.")
+        .add_systems(Startup, setup)
+        .add_systems(Update, (camera::fly, day_cycle::advance).chain());
+    register_apis(&mut app);
+
+    let args: Vec<String> = std::env::args().collect();
+    if let Some(i) = args.iter().position(|a| a == "--tour") {
+        let only = args.get(i + 1).filter(|a| !a.starts_with("--")).map(String::as_str);
+        tour::install(&mut app, only);
+    }
+    app.run();
+}
+
+fn setup(mut commands: Commands, config: Res<EngineConfig>) {
+    zones::spawn_world(&mut commands, config.seed);
+    camera::spawn_camera(&mut commands);
+    day_cycle::spawn_sun(&mut commands);
+}
+
+fn register_apis(app: &mut App) {
+    app.register_api(
+        "showcase.zones",
+        "List the map's zones: where each is and which module's demo belongs there.",
+        "{}",
+        |_, _| {
+            Ok(serde_json::json!(
+                zones::ZONES
+                    .iter()
+                    .map(|z| serde_json::json!({
+                        "key": z.key, "name": z.name, "center": z.center.to_array(),
+                        "radius": z.radius, "module": z.module,
+                    }))
+                    .collect::<Vec<_>>()
+            ))
+        },
+    )
+    .register_api("showcase.places", "List the camera viewpoints (zones, orbit, Moon).", "{}", |_, _| {
+        Ok(serde_json::json!(
+            places::places()
+                .iter()
+                .map(|p| serde_json::json!({ "key": p.key, "name": p.name, "hour": p.hour }))
+                .collect::<Vec<_>>()
+        ))
+    })
+    .register_api(
+        "showcase.goto",
+        "Move the camera to a viewpoint. Set \"with_time\" to also use its time of day.",
+        r#"{"place": "lake", "with_time": false}"#,
+        |world, args| {
+            let key = args.get("place").and_then(|v| v.as_str()).unwrap_or_default();
+            let Some(place) = places::find(key) else {
+                let keys: Vec<_> = places::places().iter().map(|p| p.key).collect();
+                return Err(format!("Unknown place \"{key}\". Use one of: {}.", keys.join(", ")));
+            };
+            camera::go_to(world, &place);
+            if args.get("with_time").and_then(|v| v.as_bool()).unwrap_or(false) {
+                world.resource_mut::<day_cycle::DayCycle>().hour = place.hour;
+            }
+            Ok(serde_json::json!({ "place": place.key, "position": place.position.to_array() }))
+        },
+    )
+    .register_api(
+        "showcase.time",
+        "Set the hour of day (0–24) and optionally how many game hours pass per second.",
+        r#"{"hour": 18.0, "hours_per_second": 0.0}"#,
+        |world, args| {
+            let mut cycle = world.resource_mut::<day_cycle::DayCycle>();
+            if let Some(h) = args.get("hour").and_then(|v| v.as_f64()) {
+                cycle.hour = (h as f32).rem_euclid(24.0);
+            }
+            if let Some(s) = args.get("hours_per_second").and_then(|v| v.as_f64()) {
+                cycle.hours_per_second = s as f32;
+            }
+            Ok(serde_json::json!({ "hour": cycle.hour, "hours_per_second": cycle.hours_per_second }))
+        },
+    );
+}

@@ -28,4 +28,5 @@ Cross-module interaction goes through `engine_world` (see AGENTS.md). If a contr
 - Plugin registers its tunable components/resources (with docs) and `npc.*` API functions.
 - Fixed-step simulation in the right `SimSet`; honors `TimeDilation`/`LocalTimeScale`.
 - Rendering through `RenderFeature`; shaders validated in a unit test.
-- Unit tests plus a headless screenshot test; a scene in `games/showcase`.
+- Unit tests plus a headless screenshot test.
+- A `demo` module with `pub fn spawn_demo(commands: &mut Commands, origin: DVec3)` that builds a small showcase of the feature around `origin`; `games/showcase` places it in its zone.

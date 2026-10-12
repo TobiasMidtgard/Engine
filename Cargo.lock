@@ -2398,6 +2398,32 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f8fadd59c855ef2080decdef8ff161eb6661b86933c9d82e5ba29dc602a55aba"
 
 [[package]]
+name = "showcase"
+version = "0.1.0"
+dependencies = [
+ "bevy_ecs",
+ "engine",
+ "engine_anim",
+ "engine_audio",
+ "engine_destruction",
+ "engine_fire",
+ "engine_foliage",
+ "engine_movement",
+ "engine_npc",
+ "engine_physics",
+ "engine_smoke",
+ "engine_space",
+ "engine_terrain",
+ "engine_ui",
+ "engine_vehicles",
+ "engine_vfx",
+ "engine_water",
+ "engine_weather",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "simd-adler32"
 version = "0.3.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
