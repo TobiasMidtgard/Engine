@@ -222,6 +222,8 @@ pub struct GpuSim {
     pub shift: [f32; 4],
     /// Update chunks, spawn chunks, frame index, unused.
     pub counts: [u32; 4],
+    /// Scene collision: enabled (1/0), near plane (m), surface thickness (m), unused.
+    pub depth: [f32; 4],
 }
 
 /// One ribbon vertex (48 bytes): trails and beams, built on the CPU each frame.
@@ -257,7 +259,7 @@ mod tests {
         );
         assert_eq!(std::mem::size_of::<GpuSpawn>(), 64);
         assert_eq!(std::mem::size_of::<GpuUpdate>(), 16);
-        assert_eq!(std::mem::size_of::<GpuSim>(), 32);
+        assert_eq!(std::mem::size_of::<GpuSim>(), 48);
         assert_eq!(std::mem::size_of::<RibbonVertex>(), 48);
     }
 

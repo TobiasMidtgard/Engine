@@ -119,6 +119,9 @@ pub struct VfxSettings {
     pub soft_particles: bool,
     /// Draw heat haze (`haze` sprites bend the scene behind them).
     pub heat_haze: bool,
+    /// Colliding particles also hit what the camera sees (walls, props, characters), using
+    /// last frame's depth; off screen only the ground plane collides.
+    pub scene_collision: bool,
     /// Draw particles at all (they keep simulating).
     pub enabled: bool,
     /// How much glow follows the camera's exposure: 1 is physical (a torch is a dim smudge
@@ -135,6 +138,7 @@ impl Default for VfxSettings {
             draw_distance: 5000.0,
             soft_particles: true,
             heat_haze: true,
+            scene_collision: true,
             enabled: true,
             glow_exposure: 0.15,
         }

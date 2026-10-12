@@ -81,6 +81,8 @@ struct Gpu {
     ribbons: GrowBuffer,
     sim_group: Option<wgpu::BindGroup>,
     draw_group: Option<wgpu::BindGroup>,
+    /// View size the bind groups' scene copies were made for.
+    bound_size: (u32, u32),
 }
 
 /// Draws particles, trails and beams. Added by [`crate::VfxPlugin`].
@@ -104,6 +106,8 @@ pub struct ParticleFeature {
     soft: bool,
     /// Some emitter this frame draws heat haze (needs the scene color copy).
     haze: bool,
+    /// Colliding particles also hit last frame's scene depth (needs the scene depth copy).
+    scene_collision: bool,
     skipped: u32,
     stats: FeatureStats,
 }
@@ -201,6 +205,16 @@ impl RenderFeature for ParticleFeature {
                         ty: wgpu::BufferBindingType::Uniform,
                         has_dynamic_offset: false,
                         min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 5,
+                    visibility: compute,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Depth,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
                     },
                     count: None,
                 },
@@ -361,6 +375,7 @@ impl RenderFeature for ParticleFeature {
             ),
             sim_group: None,
             draw_group: None,
+            bound_size: (0, 0),
         });
     }
 
@@ -393,6 +408,7 @@ impl RenderFeature for ParticleFeature {
             return;
         }
         self.soft = settings.soft_particles;
+        self.scene_collision = settings.scene_collision;
         self.haze = false;
 
         // Ribbons follow the camera every time the frame is drawn.
@@ -565,6 +581,12 @@ impl RenderFeature for ParticleFeature {
                 (view.frame_index & 0xFFFF_FFFF) as u32,
                 0,
             ],
+            depth: [
+                f32::from(self.scene_collision && !view.orthographic),
+                view.near,
+                0.25,
+                0.0,
+            ],
         };
         queue.write_buffer(&g.sim, 0, bytemuck::bytes_of(&sim));
 
@@ -583,6 +605,13 @@ impl RenderFeature for ParticleFeature {
             return;
         };
         let device = &ctx.gpu.device;
+        // The scene copies are recreated when the view is resized.
+        let size = (ctx.view.width, ctx.view.height);
+        if g.bound_size != size {
+            g.bound_size = size;
+            g.sim_group = None;
+            g.draw_group = None;
+        }
         if let Some((old, bytes)) = g.old_particles.take() {
             encoder.copy_buffer_to_buffer(&old, 0, &g.particles, 0, bytes);
         }
@@ -610,6 +639,10 @@ impl RenderFeature for ParticleFeature {
                     wgpu::BindGroupEntry {
                         binding: 4,
                         resource: g.sim.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 5,
+                        resource: wgpu::BindingResource::TextureView(ctx.scene_depth_copy),
                     },
                 ],
             }));
@@ -692,7 +725,7 @@ impl RenderFeature for ParticleFeature {
     }
 
     fn needs_scene_copy(&self) -> bool {
-        (self.soft || self.haze) && !self.draws.is_empty()
+        (self.soft || self.haze || self.scene_collision) && !self.draws.is_empty()
     }
 
     fn stats(&self) -> FeatureStats {

@@ -255,3 +255,70 @@ fn sunlit_smoke_covers_what_is_behind_it() {
         "dark smoke should hide the bright panel: {b} -> {a}"
     );
 }
+
+#[test]
+fn sparks_stick_to_a_wall_the_camera_sees() {
+    // Glowing motes fly at a wall; with scene collision they stop on its face, without it they
+    // pass behind it and vanish.
+    let hit = project(DVec3::new(0.0, 1.0, -0.75));
+    let mut lumas = Vec::new();
+    for collide in [true, false] {
+        let mut app = app(DVec3::ZERO, 200.0);
+        app.world.resource_mut::<VfxSettings>().scene_collision = collide;
+        app.world.spawn((
+            Transform::from_xyz(0.0, 1.0, -1.0),
+            MeshRenderer::new(
+                Shape::Cuboid {
+                    size: [4.0, 3.0, 0.5],
+                },
+                StandardMaterial::hex(0x303030).with_roughness(0.9),
+            ),
+        ));
+        if shot(&mut app, "vfx_wall_before.png").is_none() {
+            return;
+        }
+        let darts = EffectDesc {
+            name: "test.darts".into(),
+            emitters: vec![EmitterDesc {
+                bursts: vec![engine_vfx::Burst {
+                    count: 300,
+                    ..Default::default()
+                }],
+                shape: engine_vfx::EmitShape::Sphere {
+                    radius: 0.15,
+                    surface: false,
+                },
+                speed: [0.0, 0.0],
+                velocity: [0.0, 0.0, -6.0],
+                lifetime: [20.0, 20.0],
+                size: [0.08, 0.12],
+                sprite: Sprite::Glow,
+                color: Gradient::constant([1.0, 0.6, 0.2, 1.0]),
+                emissive: 4_000.0,
+                additive: 1.0,
+                wind: 0.0,
+                collide: engine_vfx::Collide::Stick,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        app.world
+            .resource_mut::<EffectLibrary>()
+            .insert(darts)
+            .unwrap();
+        app.world.spawn((
+            Transform::from_xyz(0.0, 1.0, 2.0),
+            ParticleEffect::new("test.darts"),
+        ));
+        app.update_n(40);
+        let name = format!("vfx_wall_collide_{collide}.png");
+        let img = shot(&mut app, &name).unwrap();
+        lumas.push(luma(&img, hit, 3));
+    }
+    assert!(
+        lumas[0] > lumas[1] + 40.0,
+        "stuck on the wall {} vs passed behind it {}",
+        lumas[0],
+        lumas[1]
+    );
+}
