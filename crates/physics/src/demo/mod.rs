@@ -34,7 +34,7 @@ use engine_world::physics::{
     CharacterController, CharacterMove, Collider, ColliderShape, Joint, JointKind, JointMotor,
     RigidBody, Velocity,
 };
-use engine_world::{SurfaceId, SurfaceMaterial, SurfaceMaterials};
+use engine_world::{FocusPoints, SurfaceId, SurfaceMaterial, SurfaceMaterials};
 
 /// Size of the concrete yard (x, z), meters. Its top is at `origin.y`.
 pub const YARD_SIZE: [f64; 2] = [70.0, 50.0];
@@ -523,18 +523,28 @@ fn build_station(world: &mut World, ground: Entity, station: Station) {
     }
 }
 
+/// Proving grounds farther than this from every focus point pause their replays (nobody sees
+/// them, and far bodies are frozen anyway), meters.
+const REPLAY_RANGE_M: f64 = 250.0;
+
 /// Replay each proving ground's stations whose cycle is up (world time, so slow motion slows
 /// the cycles too).
 pub(crate) fn replay_stations(world: &mut World) {
     let dt = world
         .get_resource::<FixedTime>()
         .map_or(0.0, |t| t.world_step_secs());
+    let focus = world
+        .get_resource::<FocusPoints>()
+        .map(|f| f.points.clone())
+        .unwrap_or_default();
+    let watched =
+        |at: DVec3| focus.is_empty() || focus.iter().any(|p| p.distance(at) < REPLAY_RANGE_M);
     let mut due = Vec::new();
     for (e, mut g) in world
         .query::<(Entity, &mut ProvingGround)>()
         .iter_mut(world)
     {
-        if !g.replay {
+        if !g.replay || !watched(g.origin) {
             continue;
         }
         for station in Station::ALL {

@@ -1,5 +1,5 @@
 //! The proving ground keeps playing: stations rebuild on their cycles without piling up
-//! bodies, and the replay API restarts one now.
+//! bodies (and pause when nobody is near), and the replay API restarts one now.
 
 use engine_core::math::{DVec3, Vec3};
 use engine_core::prelude::*;
@@ -7,8 +7,8 @@ use engine_core::registry::call_api;
 use engine_core::time::TimeSource;
 use engine_physics::PhysicsPlugin;
 use engine_physics::demo::{self, Station};
-use engine_world::WorldPlugin;
 use engine_world::physics::RigidBody;
+use engine_world::{SimulationFocus, WorldPlugin};
 use serde_json::json;
 
 fn app() -> App {
@@ -75,6 +75,25 @@ fn stations_replay_on_their_cycles() {
         "the new first domino isn't standing"
     );
     assert_eq!(bodies(&mut app), total, "replays changed the body count");
+}
+
+#[test]
+fn far_away_proving_grounds_pause() {
+    let mut app = app();
+    // A camera 2 km away.
+    app.world.spawn((
+        Transform::from_xyz(2_000.0, 0.0, 0.0),
+        SimulationFocus::default(),
+    ));
+    app.update();
+    let first = named(&mut app, "First domino");
+    let cycle = Station::Dominoes.cycle_secs().unwrap();
+    app.update_n(((cycle + 2.0) * 60.0) as usize);
+    assert_eq!(
+        named(&mut app, "First domino"),
+        first,
+        "replayed with nobody near"
+    );
 }
 
 #[test]

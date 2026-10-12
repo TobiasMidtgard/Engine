@@ -139,6 +139,7 @@ showcase's physics zone places it. Render it alone with
 The stations replay on their own cycles (`demo::Station::cycle_secs`, world time: ragdolls,
 seesaw and balls every 20 s, dominoes, wrecking ball and bridge every 30 s, the pile every 45 s;
 the tower, wheel and turntable run on), so the zone is always playing when someone walks in.
+They pause while no focus point is within 250 m.
 `physics.proving_ground.replay {"station": "dominoes"}` restarts one now (`{}` restarts all).
 `demo::VIEWS` are tour stops for the action stations: arriving restarts the station, and the
 warm-up lands on its best moment. `tests/proving_ground.rs` checks that stations replay without
