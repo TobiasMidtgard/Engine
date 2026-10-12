@@ -238,7 +238,7 @@ pub fn plaza(commands: &mut Commands, lib: &Library, z: &Zone) {
             tube: 0.25,
             segments: 64,
         },
-        StandardMaterial::hex(0x202830).with_emissive([0.3, 0.7, 1.0], 8_000.0),
+        StandardMaterial::hex(0x202830).with_emissive([0.3, 0.7, 1.0], 600.0),
         Transform::from_translation(c + DVec3::new(0.0, 3.5, -6.0))
             .with_rotation(Quat::from_rotation_x(std::f32::consts::FRAC_PI_2)),
     );

@@ -1,0 +1,30 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <defs>
+    <filter id="blur" x="-50%" y="-50%" width="200%" height="200%"><feGaussianBlur stdDeviation="2.4"/></filter>
+    <radialGradient id="bub" cx=".5" cy=".5" r=".5">
+      <stop offset="0" stop-color="#5fd0ff" stop-opacity=".06"/>
+      <stop offset=".7" stop-color="#5fd0ff" stop-opacity=".22"/>
+      <stop offset=".93" stop-color="#9fe9ff" stop-opacity=".8"/>
+      <stop offset="1" stop-color="#e6fbff"/>
+    </radialGradient>
+    <clipPath id="c"><circle cx="32" cy="32" r="26"/></clipPath>
+  </defs>
+  <circle cx="32" cy="32" r="27" fill="none" stroke="#5fd0ff" stroke-width="4" filter="url(#blur)"/>
+  <circle cx="32" cy="32" r="26" fill="url(#bub)" stroke="#0c0f16" stroke-width="2"/>
+  <g clip-path="url(#c)" fill="none" stroke="#bff1ff" stroke-width="1.1" opacity=".55">
+    <path d="M32 20 L38.9 24 L38.9 32 L32 36 L25.1 32 L25.1 24 Z"/>
+    <path d="M38.9 32 L45.8 36 L45.8 44 L38.9 48 L32 44 L32 36"/>
+    <path d="M25.1 32 L18.2 36 L18.2 44 L25.1 48 L32 44"/>
+    <path d="M38.9 24 L45.8 20 L52.7 24 L52.7 32 L45.8 36"/>
+    <path d="M25.1 24 L18.2 20 L11.3 24 L11.3 32 L18.2 36"/>
+    <path d="M32 20 L32 12 L38.9 8 L45.8 12 L45.8 20 M32 12 L25.1 8 L18.2 12 L18.2 20"/>
+    <path d="M25.1 48 L25.1 56 M38.9 48 L38.9 56 M52.7 32 L59.6 36 M11.3 32 L4.4 36"/>
+  </g>
+  <g stroke="#0c0f16" stroke-width="3" stroke-linejoin="round" paint-order="stroke">
+    <path d="M32 22 C36 24 40 24 42 23.5 L42 33 C42 39 37.5 43 32 45.5 C26.5 43 22 39 22 33 L22 23.5 C24 24 28 24 32 22 Z" fill="#e8b65a"/>
+  </g>
+  <path d="M32 25 C34.5 26.2 37 26.6 39 26.5 L39 33 C39 37.4 36 40.4 32 42.4 Z" fill="#a86a1c" opacity=".6"/>
+  <path d="M24 25.5 L24 32" stroke="#fff6d8" stroke-width="1.2" stroke-linecap="round"/>
+  <path d="M12 24 C15 15 23 9 32 8.4" stroke="#ffffff" stroke-width="2.2" fill="none" stroke-linecap="round"/>
+  <circle cx="16" cy="44" r="1.4" fill="#ffffff" opacity=".7"/>
+</svg>

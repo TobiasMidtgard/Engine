@@ -49,6 +49,21 @@ fn corner(i: u32) -> vec2<f32> {
     return c[i];
 }
 
+// A flame is a strip of FLAME_SEGMENTS quads up its height (6 vertices each), so it can bend.
+const FLAME_SEGMENTS: u32 = 4u;
+
+// Corner of vertex `i` of a flame strip: x in [-1, 1], y in [0, 1] up the flame.
+fn strip_corner(i: u32) -> vec2<f32> {
+    let c = corner(i % 6u);
+    return vec2<f32>(c.x, (f32(i / 6u) + c.y) / f32(FLAME_SEGMENTS));
+}
+
+// How far downwind a flame's axis has drifted at height `y` (of its height), per unit of lean:
+// the root stands up out of the fuel and the flame bends over above it (straight past y = 1).
+fn bend(y: f32) -> f32 {
+    return select(2.0 * y - 1.0, y * y, y < 1.0);
+}
+
 // Pulse of a flame's height: each one stretches and shrinks a little on its own rhythm.
 fn pulse(seed: f32, t: f32) -> f32 {
     return 0.9 + 0.07 * sin(t * (3.0 + fract(seed) * 2.0) + seed)
@@ -61,9 +76,10 @@ fn flame_vertex(inst: FlameInstance, c: vec2<f32>, grow: f32, widen: f32) -> VsO
     let h = inst.pos_height.w * pulse(inst.shape.z, frame.time.x);
     let w = inst.shape.x * widen;
     let cam_right = vec3<f32>(frame.view[0].x, frame.view[1].x, frame.view[2].x);
-    // An axial billboard along the (wind-leaned) flame axis, turned to the camera.
-    let axis = vec3<f32>(inst.extra.x, 1.0, inst.extra.y);
-    let a = normalize(axis);
+    // An axial billboard along the flame, turned to the camera. In wind the flame bends: its
+    // root stands up and it leans over above (see `bend`), instead of shearing as a whole.
+    let lean = vec3<f32>(inst.extra.x, 0.0, inst.extra.y);
+    let a = normalize(vec3<f32>(0.0, 1.0, 0.0) + lean);
     let to_cam = normalize(-base - a * h * 0.5);
     var r = cross(a, to_cam);
     let rl = length(r);
@@ -71,14 +87,15 @@ fn flame_vertex(inst: FlameInstance, c: vec2<f32>, grow: f32, widen: f32) -> VsO
     // Flames seen from above get a little depth instead of collapsing to a line.
     let lift = (1.0 - min(rl / 0.6, 1.0)) * h * 0.4;
     let y = c.y * grow;
-    let p = base + r * (c.x * w) + axis * (y * h) + cross(r, a) * (y * lift);
+    let up = vec3<f32>(0.0, y * h, 0.0) + lean * (bend(y) * h);
+    let p = base + r * (c.x * w) + up + cross(r, a) * (y * lift);
     var out: VsOut;
     out.clip = frame.view_proj * vec4<f32>(p, 1.0);
     out.uv = vec2<f32>(c.x, y);
     out.params = vec4<f32>(inst.shape.y, inst.shape.z, inst.shape.w, inst.extra.w);
     out.size = vec2<f32>(w, h);
     out.rel = p;
-    let d = max(view_depth(base + axis * h * 0.5), 0.05);
+    let d = max(view_depth(base + a * h * 0.5), 0.05);
     out.pixels_per_m = frame.proj[1].y * 0.5 * frame.viewport.y / d;
     return out;
 }
@@ -86,9 +103,15 @@ fn flame_vertex(inst: FlameInstance, c: vec2<f32>, grow: f32, widen: f32) -> VsO
 @vertex
 fn vs_flame(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) -> VsOut {
     let inst = instances[ii];
-    let c = corner(vi);
     if (inst.shape.w < 0.5) {
-        return flame_vertex(inst, c, 1.0, 1.0);
+        return flame_vertex(inst, strip_corner(vi), 1.0, 1.0);
+    }
+    // Embers are one quad: the rest of the strip is degenerate.
+    let c = corner(vi % 6u);
+    if (vi >= 6u) {
+        var none: VsOut;
+        none.clip = vec4<f32>(0.0, 0.0, -1.0, 1.0);
+        return none;
     }
     // Ember: a short streak along its screen-space velocity (motion blur).
     let base = inst.pos_height.xyz;
@@ -212,7 +235,7 @@ fn fs_flame(in: VsOut) -> @location(0) vec4<f32> {
 @vertex
 fn vs_haze(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) -> VsOut {
     let inst = instances[ii];
-    var out = flame_vertex(inst, corner(vi), 2.2, 1.5);
+    var out = flame_vertex(inst, strip_corner(vi), 2.2, 1.5);
     // Embers make no haze: a degenerate quad.
     if (inst.shape.w > 0.5) { out.clip = vec4<f32>(0.0, 0.0, -1.0, 1.0); }
     return out;

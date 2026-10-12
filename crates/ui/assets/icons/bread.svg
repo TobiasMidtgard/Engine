@@ -1,0 +1,26 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <defs>
+    <linearGradient id="crust" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#f6c47a"/>
+      <stop offset=".45" stop-color="#cf8636"/>
+      <stop offset="1" stop-color="#6e3812"/>
+    </linearGradient>
+    <linearGradient id="crumb" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#fff2d4"/>
+      <stop offset="1" stop-color="#e6c48a"/>
+    </linearGradient>
+  </defs>
+  <g transform="rotate(-18 32 34)">
+    <g stroke="#0c0f16" stroke-width="4" stroke-linejoin="round" paint-order="stroke">
+      <path d="M5 40 C5 26 17 17 32 17 C47 17 59 26 59 39 C59 47 53 51 45 51 L19 51 C10 51 5 47 5 40 Z" fill="url(#crust)"/>
+    </g>
+    <g stroke="#0c0f16" stroke-width="1.4" stroke-linejoin="round" fill="url(#crumb)">
+      <path d="M16 31 C18 25 21 22 25 21 C24 25 21 30 18 33 Z"/>
+      <path d="M27 31 C29 25 32 22 36 21 C35 25 32 30 29 33 Z"/>
+      <path d="M38 32 C40 26 43 23 47 22.5 C46 26.5 43 31 40 34 Z"/>
+    </g>
+    <path d="M8.5 37 C10 28 18 21 29 19.6" stroke="#ffe6b8" stroke-width="1.6" fill="none" stroke-linecap="round" opacity=".9"/>
+    <path d="M9 45 C12 48 16 49 20 49 L44 49" stroke="#4a2208" stroke-width="1.4" fill="none" stroke-linecap="round" opacity=".6"/>
+    <g fill="#fff6e4" opacity=".75"><circle cx="31" cy="38" r=".9"/><circle cx="22" cy="41" r=".8"/><circle cx="43" cy="40" r=".8"/><circle cx="36" cy="44" r=".7"/><circle cx="50" cy="34" r=".7"/></g>
+  </g>
+</svg>

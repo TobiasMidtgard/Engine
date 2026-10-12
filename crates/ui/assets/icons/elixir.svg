@@ -1,0 +1,39 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <defs>
+    <radialGradient id="liq" cx=".45" cy=".4" r=".7">
+      <stop offset="0" stop-color="#fffbe0"/>
+      <stop offset=".4" stop-color="#ffd25a"/>
+      <stop offset="1" stop-color="#b86a10"/>
+    </radialGradient>
+    <linearGradient id="gold" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#fff3c4"/>
+      <stop offset=".45" stop-color="#e8b65a"/>
+      <stop offset="1" stop-color="#7f4c14"/>
+    </linearGradient>
+    <radialGradient id="halo" cx=".5" cy=".5" r=".5">
+      <stop offset="0" stop-color="#ffe9a0" stop-opacity=".7"/>
+      <stop offset="1" stop-color="#ffd25a" stop-opacity="0"/>
+    </radialGradient>
+    <clipPath id="body"><path d="M32 18 C40 24 49 32 49 42 C49 51 41 57 32 57 C23 57 15 51 15 42 C15 32 24 24 32 18 Z"/></clipPath>
+  </defs>
+  <circle cx="32" cy="41" r="26" fill="url(#halo)"/>
+  <g stroke="#0c0f16" stroke-width="4" stroke-linejoin="round" paint-order="stroke">
+    <path d="M32 18 C40 24 49 32 49 42 C49 51 41 57 32 57 C23 57 15 51 15 42 C15 32 24 24 32 18 Z" fill="#a8d4f0" fill-opacity=".22"/>
+  </g>
+  <g clip-path="url(#body)">
+    <path d="M10 34 C18 31 24 36 32 33 C40 30 46 35 54 32 L54 64 L10 64 Z" fill="url(#liq)"/>
+    <path d="M10 34 C18 31 24 36 32 33 C40 30 46 35 54 32" stroke="#fffbe0" stroke-width="1.2" fill="none"/>
+  </g>
+  <g fill="#ffffff">
+    <path d="M27 42 L28 45 L31 46 L28 47 L27 50 L26 47 L23 46 L26 45 Z"/>
+    <path d="M38 46 L38.6 47.8 L40.4 48.4 L38.6 49 L38 50.8 L37.4 49 L35.6 48.4 L37.4 47.8 Z"/>
+    <circle cx="34" cy="39" r=".9"/>
+  </g>
+  <path d="M19 38 C20.5 32 25 27 29.5 23.5" stroke="#ffffff" stroke-width="2" fill="none" stroke-linecap="round" opacity=".8"/>
+  <path d="M15.6 46 C17 53 24 57.6 32 57.6 C40 57.6 47 53 48.4 46 C44 50 38 51.5 32 51.5 C26 51.5 20 50 15.6 46 Z" fill="url(#gold)" stroke="#0c0f16" stroke-width="1.8" stroke-linejoin="round"/>
+  <path d="M26 21 C28 17 36 17 38 21 L36.5 24 L27.5 24 Z" fill="url(#gold)" stroke="#0c0f16" stroke-width="1.8" stroke-linejoin="round"/>
+  <path d="M29 16 L35 16 L34 19 L30 19 Z" fill="url(#gold)" stroke="#0c0f16" stroke-width="1.6" stroke-linejoin="round"/>
+  <path d="M32 3 L36.5 9.5 L32 16 L27.5 9.5 Z" fill="url(#gold)" stroke="#0c0f16" stroke-width="2" stroke-linejoin="round"/>
+  <path d="M32 5.5 L29.4 9.5 L32 13" stroke="#fffbe6" stroke-width="1" fill="none"/>
+  <circle cx="32" cy="9.5" r="1.4" fill="#5fd0ff" stroke="#0c0f16" stroke-width=".7"/>
+</svg>
