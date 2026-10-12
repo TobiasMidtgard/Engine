@@ -18,6 +18,7 @@ pub mod layout;
 pub mod map;
 pub mod menus;
 pub mod node;
+pub mod planet_noise;
 pub mod screens;
 pub mod shop;
 pub mod style;

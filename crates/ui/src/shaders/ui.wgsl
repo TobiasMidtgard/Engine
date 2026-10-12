@@ -135,63 +135,413 @@ fn clip_alpha(screen: vec2<f32>, clip: vec4<f32>) -> f32 {
 }
 
 // ---------------------------------------------------------------------------------------
-// Planets
+// Planet noise: simplex noise over an integer hash. `planet_noise.rs` mirrors pn_pcg3,
+// pn_seed, pn_simplex and the base octaves of pn_terrain step for step (same u32 hash, same
+// f32 operations), so game code knows where the coastlines are: keep the two in sync.
+
+const PN_F0: f32 = 1.1;
+const PN_LAC: f32 = 2.07;
+const PN_WARP_F: f32 = 0.5;
+const PN_WARP_A: f32 = 0.12;
+const PN_WARP_DECAY: f32 = 0.5;
+const PN_NORM: f32 = 68.0;
+const PN_H_SCALE: f32 = 0.42;
+const PN_MOUNTAINS: f32 = 0.16;
+const PN_RIDGE_MEAN: f32 = 0.55;
+const PN_MAX_OCT: u32 = 12u;
+const PN_SALT_WARP: u32 = 0x68BC21EBu;
+const PN_SALT_OCT: u32 = 0x9E3779B9u;
+
+// Surface models (`colors[0].w`, `draw::surface`).
+const S_ICE: u32 = 2u;
+const S_VOLCANIC: u32 = 3u;
+const S_BARREN: u32 = 4u;
+
+// PCG3D (Jarzynski & Olano 2020).
+fn pn_pcg3(v0: vec3<u32>) -> vec3<u32> {
+    var v = v0 * 1664525u + vec3(1013904223u);
+    v.x += v.y * v.z;
+    v.y += v.z * v.x;
+    v.z += v.x * v.y;
+    v = v ^ (v >> vec3(16u));
+    v.x += v.y * v.z;
+    v.y += v.z * v.x;
+    v.z += v.x * v.y;
+    return v;
+}
+
+fn pn_seed(s: f32) -> u32 {
+    return pn_pcg3(vec3(bitcast<u32>(s), 0x2545F491u, 0x9E3779B9u)).x;
+}
+
+// Three uniform values in [0, 1) for an integral lattice point.
+fn pn_rand3(c: vec3<f32>, seed: u32) -> vec3<f32> {
+    let h = pn_pcg3(bitcast<vec3<u32>>(vec3<i32>(c)) ^ vec3(seed));
+    return vec3<f32>(h >> vec3(8u)) * (1.0 / 16777216.0);
+}
+
+fn pn_grad(c: vec3<f32>, seed: u32) -> vec3<f32> {
+    let h = pn_pcg3(bitcast<vec3<u32>>(vec3<i32>(c)) ^ vec3(seed));
+    return vec3<f32>(h >> vec3(8u)) * (1.0 / 8388608.0) - 1.0;
+}
+
+// 3D simplex noise, about -1..1, with its gradient: (value, d/dx, d/dy, d/dz).
+fn pn_simplex(p: vec3<f32>, seed: u32) -> vec4<f32> {
+    let s = floor(p + (p.x + p.y + p.z) * (1.0 / 3.0));
+    let x0 = p - s + (s.x + s.y + s.z) * (1.0 / 6.0);
+    let g = step(x0.yzx, x0);
+    let l = 1.0 - g;
+    let i1 = min(g, l.zxy);
+    let i2 = max(g, l.zxy);
+    let x1 = x0 - i1 + (1.0 / 6.0);
+    let x2 = x0 - i2 + (1.0 / 3.0);
+    let x3 = x0 - 0.5;
+    let g0 = pn_grad(s, seed);
+    let g1 = pn_grad(s + i1, seed);
+    let g2 = pn_grad(s + i2, seed);
+    let g3 = pn_grad(s + 1.0, seed);
+    let w = max(vec4(0.5) - vec4(dot(x0, x0), dot(x1, x1), dot(x2, x2), dot(x3, x3)), vec4(0.0));
+    let w2 = w * w;
+    let w4 = w2 * w2;
+    let gx = vec4(dot(g0, x0), dot(g1, x1), dot(g2, x2), dot(g3, x3));
+    let n = dot(w4, gx);
+    let t = w2 * w * gx;
+    let dn = -8.0 * (t.x * x0 + t.y * x1 + t.z * x2 + t.w * x3)
+        + w4.x * g0 + w4.y * g1 + w4.z * g2 + w4.w * g3;
+    return vec4(n, dn) * PN_NORM;
+}
+
+// Octaves worth drawing for a pixel footprint `fp` (planet radii per pixel): octave k's
+// features are about 0.6 / (F0 * LAC^k) radii across; keep those over ~1.4 px. Fractional:
+// the last octave fades in, so zooming never pops.
+fn pn_lod(fp: f32) -> f32 {
+    let fmax = 0.42 / max(fp, 1e-7);
+    return clamp(log2(fmax / PN_F0) / log2(PN_LAC) + 1.0, 1.0, f32(PN_MAX_OCT));
+}
+
+struct Terrain {
+    // Height 0..1; the sea is below `shape.y`.
+    h: f32,
+    // dh / d(direction), 3D (project it onto the surface for slopes).
+    grad: vec3<f32>,
+    // A smooth continental-scale field, about -1..1 (moisture, temperature noise).
+    warp: f32,
+    // Octave 3 and the finest drawn octave, about -1..1 (texture).
+    mid: f32,
+    fine: f32,
+    // 1 - |octave| for octaves 2, 3 and 5: 1 along long thin ridge lines (cracks, fissures).
+    ridge2: f32,
+    ridge3: f32,
+    ridge5: f32,
+};
+
+// Domain-warped fractal terrain with ridged mountain chains inland. The first
+// `planet_noise::BASE_OCTAVES` octaves are the CPU's `height`; the rest (up to `lod`) only add
+// detail when zoomed in.
+fn pn_terrain(d: vec3<f32>, L: Look, lod: f32) -> Terrain {
+    var t: Terrain;
+    let seed = pn_seed(L.shape.x);
+    let p = d * PN_F0;
+    let w = pn_simplex(p * PN_WARP_F, seed ^ PN_SALT_WARP);
+    // The warp bends the continents; finer octaves follow it less and less (a full-strength
+    // warp would stretch them into fibres).
+    let disp = w.yzw * PN_WARP_A;
+    var g = 1.0;
+    var fr = 1.0;
+    var amp = 1.0;
+    var freq = PN_F0;
+    var sum = 0.0;
+    var grad = vec3(0.0);
+    var ridge = 0.0;
+    var rgrad = vec3(0.0);
+    var low = 0.0;
+    let n_oct = u32(ceil(lod));
+    for (var k = 0u; k < n_oct; k++) {
+        let wk = saturate(lod - f32(k));
+        let n = pn_simplex((p + disp * g) * fr, seed + k * PN_SALT_OCT);
+        sum += amp * (n.x * wk);
+        // Slopes lag one octave behind: the finest octave is only a pixel or two across and
+        // would shade as noise.
+        let gk = saturate(lod - f32(k) - 1.0);
+        grad += (amp * freq * gk) * n.yzw;
+        if (k >= 1u && k <= 4u) {
+            let r = 1.0 - abs(n.x);
+            ridge += amp * (wk * (r * r) + (1.0 - wk) * 0.64);
+            rgrad += (amp * freq * gk * -2.0 * r * sign(n.x)) * n.yzw;
+        }
+        if (k == 2u) {
+            low = sum;
+            t.ridge2 = (1.0 - abs(n.x)) * wk;
+        }
+        if (k == 3u) {
+            t.mid = n.x * wk;
+            t.ridge3 = (1.0 - abs(n.x)) * wk;
+        }
+        if (k == 5u) {
+            t.ridge5 = (1.0 - abs(n.x)) * wk;
+        }
+        t.fine = mix(t.fine, n.x, wk);
+        fr *= PN_LAC;
+        if (k >= 2u) {
+            g *= PN_WARP_DECAY;
+        }
+        amp *= 0.5;
+        freq *= PN_LAC;
+    }
+    if (n_oct <= 2u) {
+        low = sum;
+    }
+    // Ridge octaves too fine to draw count at their mean (small planets keep their heights).
+    for (var k = max(n_oct, 1u); k <= 4u; k++) {
+        ridge += exp2(-f32(k)) * 0.64;
+    }
+    let inland = smoothstep(0.02, 0.2, 0.5 + PN_H_SCALE * low - L.shape.y) * L.shape.z;
+    t.h = saturate(0.5 + PN_H_SCALE * sum + PN_MOUNTAINS * inland * (ridge - PN_RIDGE_MEAN));
+    t.grad = PN_H_SCALE * grad + (PN_MOUNTAINS * inland) * rgrad;
+    t.warp = w.x;
+    return t;
+}
+
+// ---------------------------------------------------------------------------------------
+// Planet surfaces
+
+struct PSurf {
+    albedo: vec3<f32>,
+    // Light the surface gives off (lava, cities), added after lighting.
+    emit: vec3<f32>,
+    // Height gradient along the surface, for relief shading.
+    grad: vec3<f32>,
+    // Open water 0..1 (sun glint, sky reflection).
+    water: f32,
+    // Night-side city lights 0..1 (living worlds).
+    city: f32,
+};
 
 fn look(i: u32) -> Look {
     return looks.items[min(i, 63u)];
 }
 
-// Terrain height 0..1 for a unit direction.
-fn planet_height(d: vec3<f32>, L: Look) -> f32 {
-    let seed = vec3(L.shape.x * 17.13, L.shape.x * 3.71, L.shape.x * 9.27);
-    let rough = L.shape.z;
-    var h = fbm3(d * 1.6 + seed, 6);
-    h += 0.35 * rough * (fbm3(d * 5.0 + seed * 1.7, 4) - 0.5);
-    return saturate(h);
+fn tangent(v: vec3<f32>, n: vec3<f32>) -> vec3<f32> {
+    return v - n * dot(v, n);
 }
 
-// Albedo of the surface (and whether it is water) at unit direction `d`.
-fn planet_surface(d: vec3<f32>, L: Look) -> vec4<f32> {
-    let lat = asin(clamp(d.y, -1.0, 1.0));
-    let abs_lat = abs(lat) / 1.5707963;
-    if (L.style.y > 0.0) {
-        // Gas giant: turbulent latitude bands.
-        let turb = fbm3(d * vec3(2.0, 6.0, 2.0) + vec3(L.shape.x), 5) - 0.5;
-        let b = sin((d.y + turb * L.style.z * 0.35) * L.style.y * 3.14159);
-        let t = b * 0.5 + 0.5;
-        var col = mix(L.colors[2].rgb, L.colors[3].rgb, t);
-        col = mix(col, L.colors[4].rgb, smoothstep(0.6, 1.0, fbm3(d * 8.0 + vec3(3.0), 3)) * 0.4);
-        // A great storm.
-        let storm_c = normalize(vec3(0.6, -0.35, 0.72));
-        let s = smoothstep(0.16, 0.0, length(d - storm_c));
-        col = mix(col, L.colors[5].rgb, s * 0.8);
-        return vec4(col, 0.0);
-    }
-    let h = planet_height(d, L);
+// Land coverage of a pixel: a crisp coastline, antialiased over the pixel's height range.
+fn land_cover(h: f32, sea: f32, slope: f32, fp: f32) -> f32 {
+    return saturate((h - sea) / max(slope * fp, 1e-6) + 0.5);
+}
+
+// Metro areas from the terrain's own octaves, sprinkled with towns from a hash grid (their
+// average once a grid cell is smaller than a pixel).
+fn city_lights(d: vec3<f32>, hab: f32, t: Terrain, fp: f32, seed: u32) -> f32 {
+    let metro = smoothstep(0.78, 1.12, hab * 0.6 + t.mid * 0.5 + t.fine * 0.2) * (0.6 + 0.4 * hab);
+    // Lit highways between them (the network of one ridge octave).
+    let roads = smoothstep(0.94, 0.99, t.ridge5) * hab * 0.12;
+    let cell = 210.0;
+    let c = d * cell;
+    let rnd = pn_rand3(floor(c), seed ^ 0xC17E5u);
+    let f = fract(c) - (0.25 + 0.5 * rnd);
+    let town = step(1.0 - 0.3 * hab, rnd.x) * exp(-dot(f, f) * 18.0) * (0.5 + rnd.y);
+    let avg = 0.3 * hab * 0.15;
+    return metro + roads + mix(town, avg, saturate(fp * cell * 1.2 - 0.4));
+}
+
+// Living worlds: oceans with shelves and turquoise shallows; biomes from temperature
+// (latitude, height) and moisture (circulation cells, noise, dry interiors); rock and snow
+// up high; sea ice and polar caps with ragged edges.
+fn surf_living(d: vec3<f32>, L: Look, t: Terrain, fp: f32) -> PSurf {
+    var s: PSurf;
     let sea = L.shape.y;
-    var col: vec3<f32>;
-    var water = 0.0;
-    if (h < sea) {
-        let depth = saturate((sea - h) / 0.12);
-        col = mix(L.colors[1].rgb, L.colors[0].rgb, smoothstep(0.0, 1.0, depth));
-        water = 1.0;
-    } else {
-        let e = saturate((h - sea) / max(1.0 - sea, 0.01));
-        let dry = smoothstep(0.35, 0.75, fbm3(d * 2.3 + vec3(L.shape.x * 5.0), 4)) * L.style.x
-            * (1.0 - smoothstep(0.35, 0.75, abs_lat));
-        let low = mix(L.colors[2].rgb, L.colors[3].rgb, dry);
-        col = mix(low, L.colors[3].rgb * 0.85, smoothstep(0.15, 0.45, e));
-        col = mix(col, L.colors[4].rgb, smoothstep(0.42, 0.7, e));
-        col = mix(col, L.colors[5].rgb, smoothstep(0.72, 0.85, e));
-        // Beaches.
-        col = mix(L.colors[3].rgb * 1.15, col, smoothstep(0.0, 0.025, h - sea));
+    let gt = tangent(t.grad, d);
+    let land = land_cover(t.h, sea, length(gt), fp);
+    let e = saturate((t.h - sea) / max(0.85 - sea, 0.12));
+    let alat = abs(asin(clamp(d.y, -1.0, 1.0))) / 1.5707963;
+    // Temperature: 1 at the equator, 0 at the ice line (`shape.w` of the way to the pole).
+    let temp = 1.0 - alat / max(L.shape.w, 0.05) + t.warp * 0.07 + t.mid * 0.04 + t.fine * 0.03;
+    let temp_land = temp - e * 0.5;
+    // Moisture: wet tropics, dry subtropics (~25 deg), wet mid-latitudes, dry poles.
+    var moist = 0.6 + 0.36 * cos(alat * 11.31) * (1.0 - 0.4 * alat);
+    moist += t.warp * 0.4 + t.mid * 0.12 + t.fine * 0.04;
+    moist -= smoothstep(0.03, 0.22, t.h - sea) * 0.2;
+    moist = saturate(moist - (L.style.x - 0.3) * 0.9);
+
+    let forest = L.colors[2].rgb;
+    let dry = L.colors[3].rgb;
+    let rock = L.colors[4].rgb;
+    let snow = L.colors[5].rgb;
+    let jungle = forest * vec3(0.72, 0.86, 0.66);
+    let grass = mix(forest, dry, 0.3) * vec3(1.05, 1.08, 0.9);
+    let savanna = mix(dry, forest, 0.28) * vec3(1.04, 0.98, 0.84);
+    let desert = dry * vec3(1.18, 1.08, 0.98);
+    let steppe = mix(dry, rock, 0.4);
+    let taiga = forest * vec3(0.55, 0.68, 0.62);
+    let tundra = mix(rock, forest, 0.25) * vec3(0.95, 0.92, 0.88);
+    let hot = mix(mix(desert, savanna, smoothstep(0.18, 0.42, moist)), jungle, smoothstep(0.5, 0.74, moist));
+    let mild = mix(mix(steppe, grass, smoothstep(0.14, 0.38, moist)), forest, smoothstep(0.42, 0.66, moist));
+    let cold = mix(tundra, taiga, smoothstep(0.25, 0.5, moist));
+    var ground = mix(cold, mild, smoothstep(0.2, 0.36, temp_land));
+    ground = mix(ground, hot, smoothstep(0.56, 0.72, temp_land));
+    ground = mix(tundra, ground, smoothstep(0.03, 0.13, temp_land));
+    ground *= 0.9 + 0.12 * t.mid + 0.1 * t.fine;
+    ground = mix(ground, rock * (0.9 + 0.2 * t.fine), smoothstep(0.42, 0.7, e + 0.08 * t.mid) * 0.85);
+    let beach = (1.0 - smoothstep(0.0, 0.006, t.h - sea)) * smoothstep(0.3, 0.6, temp) * 0.6;
+    ground = mix(ground, dry * 1.3, beach);
+    // Snow: polar caps everywhere, peaks only where there is moisture to fall.
+    let snow_t = temp_land + (L.style.x - 0.3) * 0.35 * smoothstep(0.3, 0.7, temp)
+        + t.mid * 0.07 - t.fine * 0.03 - (t.ridge3 - 0.6) * 0.12;
+    ground = mix(ground, snow * (0.94 + 0.06 * t.fine), smoothstep(0.04, -0.04, snow_t));
+
+    let depth = max(sea - t.h, 0.0);
+    var ocean = mix(L.colors[1].rgb, L.colors[0].rgb, smoothstep(0.0, 0.03, depth));
+    ocean = mix(ocean, L.colors[0].rgb * 0.6, smoothstep(0.05, 0.25, depth));
+    let shallows = (1.0 - smoothstep(0.0, 0.012, depth)) * smoothstep(0.45, 0.8, temp) * 0.7;
+    ocean = mix(ocean, L.colors[1].rgb * vec3(0.9, 1.25, 1.15), shallows);
+    ocean *= mix(0.8, 1.0, saturate(temp * 1.5));
+    let ice = smoothstep(0.0, -0.06, temp + t.fine * 0.03);
+    let pack = mix(snow * 0.94, snow * vec3(0.78, 0.86, 0.95), smoothstep(0.85, 0.97, t.ridge5));
+    ocean = mix(ocean, pack, ice);
+
+    s.albedo = mix(ocean, ground, land);
+    s.water = (1.0 - land) * (1.0 - ice);
+    s.grad = gt * (land + (1.0 - land) * ice * 0.15);
+    let hab = land * smoothstep(0.22, 0.4, temp_land) * (1.0 - smoothstep(0.8, 0.98, temp_land))
+        * smoothstep(0.12, 0.3, moist) * (1.0 - smoothstep(0.08, 0.3, e))
+        * (0.45 + 0.55 * (1.0 - smoothstep(0.0, 0.06, t.h - sea)));
+    s.city = city_lights(d, hab, t, fp, pn_seed(L.shape.x));
+    return s;
+}
+
+// A thin line along the crest of a ridge octave (`r` = 1 - |n|, gradient about `slope` per
+// planet radius): `w` wide in noise units, antialiased; fades to its average once thinner than
+// a pixel.
+fn ridge_line(r: f32, w: f32, slope: f32, fp: f32) -> f32 {
+    let px = slope * fp;
+    let ww = max(w, px);
+    return smoothstep(1.0 - ww - px * 0.5, 1.0 - ww * 0.35, r) * min(1.0, w / ww);
+}
+
+// Ice worlds: sheets of pale ice crossed by long ruddy lineae (wide double ridges and a finer
+// web), mottled with brownish chaos terrain; snowfields and blue glacier ice on the uplands,
+// rock only on the steepest highs. No open water: the "coast" is a soft ice-sheet edge.
+fn surf_ice(d: vec3<f32>, L: Look, t: Terrain, fp: f32) -> PSurf {
+    var s: PSurf;
+    let sea = L.shape.y;
+    let gt = tangent(t.grad, d);
+    let land = smoothstep(sea - 0.01, sea + 0.04, t.h);
+    let e = saturate((t.h - sea) / max(0.85 - sea, 0.12));
+    let ruddy = mix(L.colors[4].rgb, vec3(0.55, 0.32, 0.2), 0.75);
+    var floe = mix(L.colors[3].rgb, L.colors[2].rgb, smoothstep(-0.6, 0.4, t.warp + t.mid * 0.3));
+    floe = mix(floe, L.colors[1].rgb, smoothstep(0.2, 0.8, -t.warp - t.mid * 0.2) * 0.4);
+    let chaos = smoothstep(0.25, 0.6, t.mid + t.warp * 0.4 + t.fine * 0.2);
+    floe = mix(floe, mix(floe, ruddy, 0.5), chaos * 0.7);
+    floe *= 0.96 + 0.06 * t.fine;
+    let wide = ridge_line(t.ridge2, 0.1, 12.0, fp) * (0.5 + 0.5 * smoothstep(-0.3, 0.3, t.mid));
+    let mid = ridge_line(t.ridge3, 0.06, 24.0, fp);
+    let web = ridge_line(t.ridge5, 0.03, 100.0, fp) * (0.4 + 0.6 * smoothstep(-0.2, 0.4, t.warp));
+    // Double ridges: a bright crest inside each wide ruddy band.
+    let crest = ridge_line(t.ridge2, 0.02, 12.0, fp);
+    floe = mix(floe, ruddy, saturate(wide * 0.85 + mid * 0.6 + web * 0.4));
+    floe = mix(floe, L.colors[2].rgb * 1.05, crest * wide * 0.7);
+    var ground = mix(L.colors[2].rgb, L.colors[5].rgb, smoothstep(-0.2, 0.4, t.mid * 0.5 + e * 1.5));
+    ground = mix(ground, L.colors[4].rgb * (0.85 + 0.3 * t.fine), smoothstep(0.62, 0.95, e + 0.12 * t.fine) * 0.6);
+    ground = mix(ground, ruddy, web * 0.25);
+    ground *= 0.97 + 0.05 * t.fine;
+    s.albedo = mix(floe, ground, land);
+    s.grad = gt * mix(0.3, 1.0, land);
+    return s;
+}
+
+// Volcanic worlds: dark basalt and ash, glowing fissures in the lowlands, lava seas under
+// drifting crust plates.
+fn surf_volcanic(d: vec3<f32>, L: Look, t: Terrain, fp: f32) -> PSurf {
+    var s: PSurf;
+    let sea = L.shape.y;
+    let gt = tangent(t.grad, d);
+    let land = land_cover(t.h, sea, length(gt), fp);
+    let e = saturate((t.h - sea) / max(0.85 - sea, 0.12));
+    var crust = mix(L.colors[2].rgb, L.colors[3].rgb, smoothstep(-0.5, 0.5, t.mid + t.warp * 0.5));
+    crust = mix(crust, L.colors[5].rgb, smoothstep(0.35, 0.7, e + 0.1 * t.fine) * 0.6);
+    crust *= 0.85 + 0.25 * t.fine;
+    let low = 1.0 - smoothstep(0.03, 0.35, e);
+    let fis = smoothstep(0.965, 0.995, t.ridge3) * low + smoothstep(0.975, 0.997, t.ridge5) * (0.2 + 0.8 * low);
+    // Faint heat around the fissures.
+    let warmth = smoothstep(0.85, 0.99, t.ridge3) * low * 0.12;
+    // Lava seas: black crust plates drifting on the melt, glowing seams between them, white-hot
+    // only where the melt is deep and open.
+    let depth = max(sea - t.h, 0.0);
+    let pv = t.mid * 0.6 + t.fine * 0.6 + 0.5 - depth * 2.0;
+    let plate = smoothstep(0.0, 0.16, pv);
+    let open = 1.0 - plate;
+    let hot = smoothstep(0.02, 0.14, depth) * open * open;
+    let molten = mix(L.colors[1].rgb * 0.75, L.colors[0].rgb, hot);
+    let pool = mix(molten * 0.25, L.colors[4].rgb * 0.8, plate);
+    s.albedo = mix(pool, crust, land);
+    let seam = exp(-sq((pv - 0.03) / 0.05)) * 0.35;
+    s.emit = mix(molten * (open * 0.6 + seam), L.lights.rgb * (fis * 1.2 + warmth), land);
+    s.grad = gt * land;
+    return s;
+}
+
+struct Crater {
+    h: f32,
+    grad: vec3<f32>,
+    fresh: f32,
+};
+
+// Craters, at most one per lattice cell of `p` (planet direction times a scale): a bowl, a
+// raised rim and soft ejecta. Heights scale with the crater (slopes do not).
+fn crater_field(p: vec3<f32>, seed: u32) -> Crater {
+    var c: Crater;
+    let base = floor(p - 0.5);
+    for (var i = 0u; i < 8u; i++) {
+        let cell = base + vec3(f32(i & 1u), f32((i >> 1u) & 1u), f32((i >> 2u) & 1u));
+        let h = pn_pcg3(bitcast<vec3<u32>>(vec3<i32>(cell)) ^ vec3(seed));
+        if ((h.x & 255u) > 150u) {
+            continue;
+        }
+        let size = f32(h.y & 255u) / 255.0;
+        let rad = 0.1 + 0.26 * size * size;
+        let off = p - (cell + vec3<f32>(h >> vec3(8u)) * (1.0 / 16777216.0));
+        let dist = length(off);
+        let x = dist / rad;
+        if (x >= 1.4) {
+            continue;
+        }
+        let inside = step(x, 1.0);
+        let rim_e = exp(-sq((x - 1.0) * 4.0));
+        let win = 1.0 - smoothstep(1.15, 1.4, x);
+        c.h += (0.55 * (x * x - 1.0) * inside + 0.3 * rim_e * win) * rad;
+        let dh = 1.1 * x * inside - 9.6 * (x - 1.0) * rim_e * win;
+        c.grad += off / max(dist, 1e-5) * dh;
+        c.fresh = max(c.fresh, f32((h.z >> 4u) & 15u) / 15.0 * rim_e * win);
     }
-    // Ice caps.
-    let ice_n = fbm3(d * 4.0 + vec3(11.0), 3) * 0.12;
-    let ice = smoothstep(L.shape.w - 0.02, L.shape.w + 0.03, abs_lat + ice_n);
-    col = mix(col, L.colors[5].rgb, ice);
-    water = water * (1.0 - ice);
-    return vec4(col, water);
+    return c;
+}
+
+// Airless rock: regolith, dark maria in the basins, craters at three sizes (each fades in
+// once its craters span a few pixels).
+fn surf_barren(d: vec3<f32>, L: Look, t: Terrain, fp: f32) -> PSurf {
+    var s: PSurf;
+    let seed = pn_seed(L.shape.x) ^ 0x0C4A7E25u;
+    var col = mix(L.colors[2].rgb, L.colors[3].rgb, smoothstep(-0.4, 0.5, t.warp + t.mid * 0.3));
+    col = mix(col, L.colors[1].rgb, smoothstep(0.46, 0.36, t.h) * 0.85);
+    col = mix(col, L.colors[4].rgb, smoothstep(0.62, 0.8, t.h) * 0.5);
+    col *= 0.9 + 0.12 * t.fine;
+    var gr = tangent(t.grad, d) * 0.35;
+    var fresh = 0.0;
+    for (var k = 0u; k < 3u; k++) {
+        let scale = 6.0 * pow(2.7, f32(k));
+        let vis = smoothstep(2.0, 5.0, 0.2 / (scale * fp));
+        if (vis <= 0.0) {
+            continue;
+        }
+        let c = crater_field(d * scale, seed + k * 0x51ED27u);
+        gr += tangent(c.grad, d) * (vis * 2.5);
+        col *= 1.0 + clamp(c.h * 2.5, -0.5, 0.3) * 0.3 * vis;
+        fresh = max(fresh, c.fresh * vis);
+    }
+    s.albedo = mix(col, L.colors[5].rgb, fresh * 0.35);
+    s.grad = gr;
+    return s;
 }
 
 fn rot_y(v: vec3<f32>, a: f32) -> vec3<f32> {
@@ -206,63 +556,295 @@ fn rot_x(v: vec3<f32>, a: f32) -> vec3<f32> {
     return vec3(v.x, c * v.y - s * v.z, s * v.y + c * v.z);
 }
 
-fn cloud_cover(d: vec3<f32>, L: Look, t: f32) -> f32 {
-    let drift = rot_y(d, t * 0.01);
-    let n = fbm3(drift * 3.2 + vec3(L.shape.x * 2.0, 0.0, 0.0), 5);
-    let swirl = fbm3(drift * 9.0 + vec3(n * 2.0), 3);
-    let c = n * 0.75 + swirl * 0.25;
-    return smoothstep(1.0 - L.clouds.a, 1.0 - L.clouds.a + 0.22, c);
+// Rotate `v` about the unit axis `k` by `a` (counterclockwise seen from the tip of `k`).
+fn rot_axis(v: vec3<f32>, k: vec3<f32>, a: f32) -> vec3<f32> {
+    let c = cos(a);
+    return v * c + cross(k, v) * sin(a) + k * (dot(k, v) * (1.0 - c));
+}
+
+fn pn_band_rand(i: f32, seed: u32) -> f32 {
+    return f32(pn_pcg3(vec3(bitcast<u32>(i32(i)), seed, 0xBA7Du)).x >> 8u) * (1.0 / 16777216.0);
+}
+
+// Gas giants: zones and belts with uneven widths, sheared turbulence and festoons along the
+// belt edges, darker poles, a great storm with a spiral core and a string of white ovals.
+fn gas_surface(d: vec3<f32>, L: Look, lod: f32) -> PSurf {
+    var s: PSurf;
+    let seed = pn_seed(L.shape.x);
+    let bands = max(L.style.y, 1.0);
+    let turb = L.style.z;
+    // The storm: an oval vortex; twist the cloud deck around its center.
+    let sc = normalize(vec3(0.62, -0.36, 0.7));
+    let east = normalize(vec3(sc.z, 0.0, -sc.x));
+    let north = cross(sc, east);
+    let rel = d - sc;
+    let u = dot(rel, east);
+    let v = dot(rel, north);
+    let re = length(vec2(u * 0.5, v)) / 0.12;
+    let twist = 4.0 * exp(-re * re * 0.6) * step(0.0, dot(d, sc));
+    let cs = cos(twist);
+    let sn = sin(twist);
+    let u2 = (u * 0.5 * cs - v * sn) * 2.0;
+    let v2 = u * 0.5 * sn + v * cs;
+    let dd = normalize(d + east * (u2 - u) + north * (v2 - v));
+    // Turbulence stretched along the bands, swirled by eddies (flow along noise contours).
+    let n1 = pn_simplex(dd * vec3(2.2, 7.0, 2.2), seed);
+    let sw = cross(dd, n1.yzw) * 0.012;
+    let n2 = pn_simplex(dd * vec3(6.0, 20.0, 6.0) + sw * 20.0, seed + 1u);
+    var fine = n2.x;
+    if (lod > 5.0) {
+        let n3 = pn_simplex(dd * vec3(16.0, 50.0, 16.0) + cross(dd, n2.yzw) * 0.25, seed + 2u);
+        fine += n3.x * 0.6 * saturate(lod - 5.0);
+    }
+    var y = dd.y + turb * (n1.x * 0.045 + n2.x * 0.014 + sw.y);
+    let lon = atan2(dd.x, dd.z);
+    let bph = y * bands;
+    let br = pn_band_rand(floor(bph), seed);
+    let edge = abs(fract(bph) * 2.0 - 1.0);
+    // Festoons: waves rolling along the belt edges.
+    y += sin(lon * (9.0 + 14.0 * br) + n1.x * 3.0 + br * 6.0) * 0.009 * turb * edge * edge * edge;
+    // Zones (light) and belts (dark) with uneven widths, plus thin sub-bands.
+    let yb = y * bands * PI;
+    let b = sin(yb + 0.8 * sin(yb * 0.35 + 2.0)) + 0.35 * sin(yb * 2.7 + 1.3) + 0.15 * sin(yb * 6.1 + 0.4);
+    let zone = smoothstep(-0.45, 0.55, b);
+    let tone = pn_band_rand(floor(y * bands * 0.5 + 0.5), seed + 9u);
+    var col = mix(L.colors[4].rgb, L.colors[3].rgb, zone);
+    col = mix(col, L.colors[2].rgb, tone * 0.6);
+    col = mix(col, L.colors[5].rgb * 0.9, smoothstep(0.75, 1.0, tone) * (1.0 - zone) * 0.5);
+    col *= 1.0 + turb * (0.16 * fine + 0.08 * n1.x);
+    let polar = mix(L.colors[2].rgb, L.colors[4].rgb, 0.5) * vec3(0.72, 0.76, 0.86);
+    col = mix(col, polar, smoothstep(0.72, 0.95, abs(d.y)));
+    // The storm: brick red, a pale collar, spiral structure from the twist.
+    let storm = smoothstep(1.0, 0.45, re);
+    let collar = smoothstep(1.5, 1.0, re) * (1.0 - storm);
+    col = mix(col, L.colors[3].rgb * 1.08, collar * 0.6);
+    col = mix(col, L.colors[5].rgb * (0.75 + 0.45 * zone) * (1.0 + 0.15 * fine), storm * 0.92);
+    for (var i = 0u; i < 4u; i++) {
+        let lo = 0.9 + f32(i) * 0.75;
+        let oc = vec3(0.814 * sin(lo), -0.581, 0.814 * cos(lo));
+        let od = length((d - oc) * vec3(0.75, 1.5, 0.75));
+        col = mix(col, L.colors[3].rgb * 1.15, smoothstep(0.045, 0.02, od) * 0.85);
+    }
+    s.albedo = col;
+    return s;
+}
+
+// Albedo, light, relief and water of the surface at unit direction `d`, with `lod` octaves
+// for a pixel footprint of `fp` planet radii.
+fn planet_surface(d: vec3<f32>, L: Look, lod: f32, fp: f32) -> PSurf {
+    if (L.style.y > 0.0) {
+        return gas_surface(d, L, lod);
+    }
+    let t = pn_terrain(d, L, lod);
+    let model = u32(max(L.colors[0].w, 1.0) + 0.5);
+    if (model == S_ICE) {
+        return surf_ice(d, L, t, fp);
+    }
+    if (model == S_VOLCANIC) {
+        return surf_volcanic(d, L, t, fp);
+    }
+    if (model == S_BARREN) {
+        return surf_barren(d, L, t, fp);
+    }
+    return surf_living(d, L, t, fp);
+}
+
+struct Cloud {
+    // Density (`cloud_cover` turns it into coverage) and its gradient.
+    c: f32,
+    grad: vec3<f32>,
+    // Gradient of the fine octaves alone (puffy tops).
+    fine: vec3<f32>,
+};
+
+// Cloud density field: weather systems streaked along latitude by the jets, three cyclones
+// with spiral rain bands and clear eyes, a rainy equatorial belt and clear subtropics. `lod`
+// adds detail octaves.
+fn cloud_field(d: vec3<f32>, L: Look, time: f32, lod: f32) -> Cloud {
+    let seed = pn_seed(L.shape.x) ^ 0x5BD1E995u;
+    // Dry worlds have weak storms.
+    let storms = saturate(L.clouds.a * 2.2);
+    var p = rot_y(d, time * 0.006);
+    var bands = 0.0;
+    for (var i = 0u; i < 3u; i++) {
+        let r = pn_rand3(vec3(f32(i), 3.0, 7.0), seed);
+        let south = select(1.0, -1.0, r.z < 0.5);
+        let lat = (0.3 + 0.45 * r.x) * south;
+        let lon = r.y * TAU;
+        let c = vec3(cos(lat) * sin(lon), sin(lat), cos(lat) * cos(lon));
+        let size = 0.13 + 0.1 * fract(r.z * 7.0);
+        let off = p - c;
+        let dist = length(off);
+        let k = exp(-sq(dist / size));
+        if (k > 0.002) {
+            let e1 = normalize(vec3(c.z, 0.0, -c.x));
+            let ang = atan2(dot(off, cross(c, e1)), dot(off, e1)) * south;
+            let arms = 0.5 + 0.5 * cos(ang * 2.0 + log(dist / size + 0.02) * 3.5);
+            let cdo = exp(-sq(dist / (size * 0.3)));
+            bands += (k * mix(arms * arms * 0.75 - 0.1, 0.55, cdo) - 1.6 * exp(-sq(dist / (size * 0.055)))) * storms;
+            p = rot_axis(p, c, 2.6 * k * south * storms);
+        }
+    }
+    // Weather systems streaked along latitude, carried by a swirling flow (along the contours
+    // of a stream function: eddies at every scale), detail frayed by smaller eddies.
+    let s = vec3(p.x, p.y * 1.4, p.z);
+    let w = pn_simplex(s * 1.6, seed + 11u);
+    var c = w.x * 0.55 + bands;
+    var grad = w.yzw * (0.55 * 1.6);
+    var fine = vec3(0.0);
+    var q = s * 3.7 + cross(p, w.yzw) * 0.22;
+    var f = 3.7;
+    var amp = 0.4;
+    let n_oct = u32(ceil(clamp(lod, 0.0, 7.0)));
+    for (var k = 0u; k < n_oct; k++) {
+        let wk = saturate(lod - f32(k));
+        // The two coarse octaves follow the flow; finer ones are plain puffy texture.
+        let qk = select(q, d * (f * 1.15) + vec3(f32(k) * 1.7), k >= 2u);
+        let n = pn_simplex(qk, seed + 20u + k);
+        c += amp * n.x * wk;
+        grad += (amp * f * wk) * n.yzw;
+        if (k >= 1u && k <= 3u) {
+            fine += (amp * f * wk) * n.yzw;
+        }
+        q = q * 2.11 + cross(p, n.yzw) * 0.05;
+        f *= 2.11;
+        amp *= 0.58;
+    }
+    let ay = abs(d.y);
+    c += 0.16 * exp(-sq(ay / 0.1)) - 0.16 * exp(-sq((ay - 0.45) / 0.16)) + 0.06 * exp(-sq((ay - 0.78) / 0.14));
+    return Cloud(c, grad, fine);
+}
+
+// Coverage 0..1 of a cloud density (from `cloud_field`) for the look's cloud amount; `aa` is
+// how much the density changes over a pixel (the edge is never sharper than that).
+fn cloud_cover(c: f32, L: Look, aa: f32) -> f32 {
+    let thr = (0.5 - L.clouds.a) * 0.9;
+    let t = saturate((c - thr + aa * 0.5) / max(0.16, aa * 1.5));
+    // A thin translucent veil around the masses.
+    let veil = smoothstep(thr - 0.12, thr, c) * 0.16;
+    return max(t * (2.0 - t), veil);
+}
+
+// How thick the cloud is, 0 at its edge to 1 in towering cores.
+fn cloud_thickness(c: f32, L: Look) -> f32 {
+    return saturate((c - (0.5 - L.clouds.a) * 0.9) / 0.55);
+}
+
+// Cloud octaves worth drawing for a footprint of `fp` planet radii per pixel.
+fn cloud_lod(fp: f32) -> f32 {
+    return clamp(log2(0.13 / max(fp, 1e-7)) / 1.08 + 1.0, 0.0, 7.0);
+}
+
+// Display soft clip: linear up to 0.8, then a smooth shoulder toward 1 (clouds, ice and glints
+// keep their detail instead of clipping).
+fn soft_clip(c: vec3<f32>) -> vec3<f32> {
+    let k = 0.8;
+    let over = max(c - vec3(k), vec3(0.0));
+    return min(c, vec3(k)) + (1.0 - k) * (1.0 - exp(-over / (1.0 - k)));
+}
+
+const WARM_LIGHT: vec3<f32> = vec3<f32>(1.0, 0.42, 0.16);
+
+// The atmosphere seen edge-on outside the limb: dense at the surface, thinning out; blue where
+// the sun lights it, orange near the terminator, brighter when the sun is behind the planet.
+fn planet_halo(q: vec2<f32>, r: f32, sun: vec3<f32>, L: Look, width: f32) -> vec3<f32> {
+    let hgt = max(r - 1.0, 0.0) / max(width, 1e-3);
+    let en = vec3(q.x, -q.y, 0.0) / max(r, 1e-4);
+    let mu = dot(en, sun);
+    let dens = exp(-hgt * 4.5) * (1.0 - smoothstep(0.7, 1.0, hgt));
+    let lit = smoothstep(-0.2, 0.3, mu);
+    let fwd = pow(saturate(-sun.z), 4.0) * smoothstep(-0.7, 0.1, mu) * 1.2;
+    let tint = mix(WARM_LIGHT, L.atmosphere.rgb, smoothstep(-0.08, 0.08, mu));
+    return tint * dens * saturate(L.atmosphere.a) * (lit + fwd) * 0.9;
 }
 
 fn shade_planet(in: VOut) -> vec4<f32> {
     let L = look(in.kind.z);
-    let radius = min(in.rect.z, in.rect.w) * 0.5 / (1.0 + in.extra.y);
+    let width = in.extra.y;
+    let radius = min(in.rect.z, in.rect.w) * 0.5 / (1.0 + width);
     let q = in.local.xy / radius;
-    let d2 = dot(q, q);
+    let r = length(q);
+    let px = 1.0 / radius;
+    let sun = normalize(vec3(sin(in.uv.z) * cos(in.uv.w), sin(in.uv.w), cos(in.uv.z) * cos(in.uv.w)));
+    let has_air = L.atmosphere.a > 0.0 && width > 0.0;
+    var halo = vec3(0.0);
+    if (has_air && r > 1.0 - 2.0 * px) {
+        halo = planet_halo(q, max(r, 1.0), sun, L, width);
+    }
+    let edge = saturate((1.0 - r) / px + 0.5);
+    if (edge <= 0.0) {
+        return vec4(halo, 0.0) * in.params.w;
+    }
+    let z = sqrt(max(1.0 - r * r, 0.0));
     let yaw = in.uv.x;
     let pitch = in.uv.y;
-    let sun = normalize(vec3(sin(in.uv.z) * cos(in.uv.w), sin(in.uv.w), cos(in.uv.z) * cos(in.uv.w)));
-    let atmo = L.atmosphere;
-    let px = 1.0 / radius;
-    if (d2 > 1.0) {
-        // Atmosphere halo outside the limb.
-        let r = sqrt(d2);
-        let k = (r - 1.0) / max(in.extra.y, 0.01);
-        let edge_n = normalize(vec3(q / r, 0.0));
-        let lit = smoothstep(-0.35, 0.4, dot(edge_n, sun));
-        let a = exp(-k * 4.0) * atmo.a * (0.25 + 0.75 * lit) * step(r, 1.0 + in.extra.y);
-        return vec4(atmo.rgb * a, a) * in.params.w;
+    let n = normalize(rot_y(rot_x(vec3(q.x, -q.y, z), -pitch), yaw));
+    let sun_p = rot_y(rot_x(sun, -pitch), yaw);
+    let view_p = rot_y(rot_x(vec3(0.0, 0.0, 1.0), -pitch), yaw);
+    // Footprint of a pixel on the sphere (wider toward the limb).
+    let fp = px / sqrt(max(z, 0.03));
+    let gas = L.style.y > 0.0;
+    let ndl = dot(n, sun_p);
+    // Clouds first: under thick cloud the ground needs no fine detail.
+    var cov = 0.0;
+    var cf: Cloud;
+    if (!gas && L.clouds.a > 0.0) {
+        cf = cloud_field(n, L, g.time.x, min(cloud_lod(fp), 4.0));
+        cov = cloud_cover(cf.c, L, length(tangent(cf.grad, n)) * fp);
     }
-    let z = sqrt(1.0 - d2);
-    let n_view = vec3(q.x, -q.y, z);
-    let n = rot_y(rot_x(n_view, -pitch), yaw);
-    let surf = planet_surface(n, L);
-    var albedo = surf.rgb;
-    let water = surf.a;
-    let ndl = dot(n_view, sun);
-    // Soft terminator.
-    let day = smoothstep(-0.12, 0.3, ndl);
-    let diffuse = max(ndl, 0.0) * 0.9 + 0.1 * day;
-    // Clouds with their own shadow.
-    let cov = cloud_cover(n, L, g.time.x) * step(L.style.y, 0.0);
-    var col = albedo * diffuse;
-    // Ocean glint.
-    let h = normalize(sun + vec3(0.0, 0.0, 1.0));
-    let spec = pow(max(dot(n_view, h), 0.0), 60.0) * water * day * 0.9;
-    col += vec3(1.0, 0.95, 0.85) * spec;
-    // City lights on the night side.
-    let city = smoothstep(0.62, 0.8, fbm3(n * 22.0 + vec3(L.shape.x), 3))
-        * (1.0 - water) * L.lights.a * smoothstep(0.1, -0.15, ndl)
-        * smoothstep(0.25, 0.55, fbm3(n * 3.0 + vec3(7.0), 3));
-    col += L.lights.rgb * city * 1.6;
-    col = mix(col, L.clouds.rgb * (diffuse * 1.05 + 0.02), cov);
-    // Atmosphere: rim scattering on the lit side, slight blue tint over the disc.
-    let rim = pow(1.0 - z, 2.5);
-    col = mix(col, atmo.rgb * (0.2 + day), saturate(rim * atmo.a * 0.9));
-    col += atmo.rgb * pow(1.0 - z, 6.0) * day * atmo.a * 0.6;
-    // Anti-aliased limb.
-    let edge = saturate((1.0 - sqrt(d2)) / px);
-    return vec4(col, 1.0) * edge * in.params.w;
+    let s = planet_surface(n, L, min(pn_lod(fp), select(7.5, 3.0, cov > 0.995)), fp);
+    let air = saturate(L.atmosphere.a);
+    // Low sun shines through a lot of air: orange light along the terminator.
+    let sun_col = mix(vec3(1.0), WARM_LIGHT, air * 0.28 * (1.0 - smoothstep(0.0, 0.07, ndl)));
+    let sun_i = 1.3;
+    // Relief: bend the normal along the height gradient; peaks catch light past the terminator.
+    let nb = normalize(n - s.grad * (0.07 * L.shape.z));
+    let lambert = max(dot(nb, sun_p), 0.0) * smoothstep(-0.12, 0.04, ndl);
+    var col = s.albedo * sun_col * (lambert * sun_i) + s.albedo * 0.003;
+    if (gas) {
+        col *= 0.5 + 0.5 * sqrt(z);
+    }
+    // Water: a tight sun glint (GGX with Fresnel) and the sky mirrored toward the limb.
+    if (s.water > 0.0) {
+        let hv = normalize(sun_p + view_p);
+        let nh = max(dot(n, hv), 0.0);
+        let vh = max(dot(view_p, hv), 0.0);
+        let fres = 0.02 + 0.98 * pow(1.0 - vh, 5.0);
+        let glint = (d_ggx(nh, 0.07) + 0.2 * d_ggx(nh, 0.22)) * fres / (4.0 * max(z, 0.1));
+        let sky = L.atmosphere.rgb * (0.02 + 0.98 * pow(1.0 - z, 5.0)) * 0.3 * air;
+        col += (sun_col * glint * sun_i * smoothstep(-0.02, 0.1, ndl) + sky * smoothstep(-0.2, 0.2, ndl)) * s.water;
+    }
+    // Clouds, and their shadows on the ground: the density a little sunward, from the field's
+    // gradient (longer near the terminator). Tops are puffy (the fine octaves bend the normal,
+    // shaded sides turn blue-grey) and thick cores brighter than thin edges.
+    if (!gas && L.clouds.a > 0.0) {
+        let shift = tangent(sun_p, n) * (0.008 / max(ndl, 0.15));
+        let sh = cloud_cover(cf.c + dot(cf.grad, shift), L, 0.0);
+        col *= 1.0 - sh * 0.5 * (1.0 - cov);
+        let cn = normalize(n - tangent(cf.fine, n) * 0.018);
+        let bump = dot(cn, sun_p) - ndl;
+        let lit = max(ndl + bump * 0.7 * smoothstep(0.0, 0.35, ndl), 0.0) * 0.9 + 0.08 * smoothstep(-0.12, 0.08, ndl);
+        let thick = cloud_thickness(cf.c, L);
+        let tone = mix(vec3(0.68, 0.73, 0.82), vec3(1.0), saturate(0.72 + bump * 2.0)) * (0.8 + 0.2 * thick);
+        col = mix(col, L.clouds.rgb * tone * sun_col * (lit * sun_i), cov);
+    }
+    // Night side: city lights through thin cloud; lava glows by day and night.
+    let night = 1.0 - smoothstep(-0.1, 0.06, ndl);
+    col += L.lights.rgb * (s.city * night * L.lights.a * (1.0 - 0.7 * cov) * 1.5);
+    col += s.emit * (1.0 - 0.5 * cov);
+    // Atmosphere: thin haze over the disc thickening toward the limb, blue where lit, a warm
+    // band along the terminator, faint airglow on the night side.
+    if (has_air) {
+        let haze = 1.0 - exp(-air * 0.03 / (z + 0.035));
+        // Near the terminator the light reaching the haze is dimmer and reddened.
+        let lit_a = smoothstep(-0.06, 0.16, ndl);
+        let tint = mix(WARM_LIGHT * 0.55, L.atmosphere.rgb, smoothstep(-0.02, 0.1, ndl));
+        col = col * (1.0 - haze * 0.5) + tint * (haze * lit_a * sun_i);
+        col += WARM_LIGHT * (exp(-sq((ndl - 0.01) / 0.03)) * 0.015 * air);
+        col += L.atmosphere.rgb * (pow(1.0 - z, 5.0) * 0.03 * air * (1.0 - lit_a));
+    }
+    let a = edge * in.params.w;
+    return vec4(soft_clip(col) * a + halo * ((1.0 - edge) * in.params.w), a);
 }
 
 fn shade_planet_flat(in: VOut) -> vec4<f32> {
@@ -270,100 +852,236 @@ fn shade_planet_flat(in: VOut) -> vec4<f32> {
     let t = in.local.zw;
     let lon = mix(in.uv.x, in.uv.z, t.x);
     let lat = mix(in.uv.y, in.uv.w, t.y);
-    let d = vec3(cos(lat) * sin(lon), sin(lat), cos(lat) * cos(lon));
-    let surf = planet_surface(d, L);
-    var col = surf.rgb;
-    // Relief shading from the height gradient (light from the north-west).
-    if (L.style.y <= 0.0) {
-        let e = 0.004;
-        let hx = planet_height(vec3(cos(lat) * sin(lon + e), sin(lat), cos(lat) * cos(lon + e)), L);
-        let hy = planet_height(vec3(cos(lat + e) * sin(lon), sin(lat + e), cos(lat + e) * cos(lon)), L);
-        let h0 = planet_height(d, L);
-        let slope = (h0 - hx) * 18.0 + (hy - h0) * 18.0;
-        col *= 1.0 + clamp(slope, -0.4, 0.4) * (1.0 - surf.a);
-        let cov = cloud_cover(d, L, g.time.x) * in.extra.z;
-        col = mix(col, L.clouds.rgb * 0.95, cov * 0.85);
+    let cl = cos(lat);
+    let sl = sin(lat);
+    let d = vec3(cl * sin(lon), sl, cl * cos(lon));
+    // Planet radii per pixel: detail octaves follow the zoom (crisp at 16x, no aliasing when
+    // the whole world fits).
+    let dlon = abs(in.uv.z - in.uv.x) / max(in.rect.z, 1.0);
+    let dlat = abs(in.uv.w - in.uv.y) / max(in.rect.w, 1.0);
+    let fp = max(max(dlon * cl, dlat), 1e-6);
+    let s = planet_surface(d, L, pn_lod(fp), fp);
+    var col = s.albedo * mix(1.2, 0.92, saturate(luminance(s.albedo) * 1.4));
+    // Hillshade, light from the north-west.
+    let east = vec3(cos(lon), 0.0, -sin(lon));
+    let north = vec3(-sl * sin(lon), cl, -sl * cos(lon));
+    let k = 0.1 * L.shape.z;
+    let nrm = normalize(vec3(-dot(s.grad, east) * k, -dot(s.grad, north) * k, 1.0));
+    let ldir = vec3(-0.6, 0.6, 0.53);
+    col *= clamp(dot(nrm, ldir) / ldir.z, 0.3, 1.8);
+    col += s.emit;
+    // Clouds, light and detailed: it is a map. Only the denser ones, translucent at the edges
+    // and thinning out as the map zooms in; shaded like the hills.
+    if (L.style.y <= 0.0 && in.extra.z > 0.0 && L.clouds.a > 0.0) {
+        let cf = cloud_field(d, L, g.time.x, cloud_lod(fp));
+        let cov = cloud_cover(cf.c - 0.05, L, length(tangent(cf.grad, d)) * fp);
+        let thick = cloud_thickness(cf.c, L);
+        let cshade = clamp(1.0 + (dot(cf.fine, east) - dot(cf.fine, north)) * 0.012, 0.8, 1.1);
+        let zoom = mix(0.45, 1.0, smoothstep(0.0006, 0.004, fp));
+        col = mix(col, L.clouds.rgb * (0.88 + 0.12 * thick) * cshade, cov * mix(0.3, 0.75, thick) * zoom * in.extra.z);
     }
     // Graticule every 30 degrees.
     let deg = vec2(lon, lat) * 57.29578;
     let gw = abs(vec2((in.uv.z - in.uv.x) / in.rect.z, (in.uv.w - in.uv.y) / in.rect.w)) * 57.29578 * 1.2;
     let gl = abs(fract(deg / 30.0 + 0.5) - 0.5) * 30.0;
     let grid = (1.0 - smoothstep(0.0, gw.x, gl.x)) + (1.0 - smoothstep(0.0, gw.y, gl.y));
-    col = mix(col, vec3(0.85, 0.92, 1.0), saturate(grid) * 0.22 * in.extra.w);
+    col = mix(soft_clip(col), vec3(0.85, 0.92, 1.0), saturate(grid) * 0.22 * in.extra.w);
     return vec4(col, 1.0) * in.params.w;
 }
 
 // ---------------------------------------------------------------------------------------
 // Space backgrounds
 
+fn pn_rand2(c: vec2<f32>, seed: u32) -> vec3<f32> {
+    let h = pn_pcg3(vec3(bitcast<vec2<u32>>(vec2<i32>(c)), seed));
+    return vec3<f32>(h >> vec3(8u)) * (1.0 / 16777216.0);
+}
+
+// 2D simplex noise, about -1..1.
+fn pn_simplex2(p: vec2<f32>, seed: u32) -> f32 {
+    let i = floor(p + (p.x + p.y) * 0.36602540);
+    let a = p - i + (i.x + i.y) * 0.21132487;
+    let o = select(vec2(0.0, 1.0), vec2(1.0, 0.0), a.x > a.y);
+    let b = a - o + 0.21132487;
+    let c = a - 1.0 + 0.42264973;
+    let h = max(vec3(0.5) - vec3(dot(a, a), dot(b, b), dot(c, c)), vec3(0.0));
+    let ga = pn_rand2(i, seed).xy * 2.0 - 1.0;
+    let gb = pn_rand2(i + o, seed).xy * 2.0 - 1.0;
+    let gc = pn_rand2(i + 1.0, seed).xy * 2.0 - 1.0;
+    let n = h * h * h * h * vec3(dot(a, ga), dot(b, gb), dot(c, gc));
+    return dot(n, vec3(90.0));
+}
+
+fn fbm_s2(p: vec2<f32>, seed: u32, octaves: u32) -> f32 {
+    var sum = 0.0;
+    var amp = 0.5;
+    var q = p;
+    for (var i = 0u; i < octaves; i++) {
+        sum += amp * pn_simplex2(q, seed + i * PN_SALT_OCT);
+        q = mat2x2<f32>(1.6, 1.2, -1.2, 1.6) * q;
+        amp *= 0.5;
+    }
+    return sum;
+}
+
+// Star-forming knots in the arms: pink HII regions just past the dust lanes, blue clusters on
+// the crests.
+fn galaxy_knots(p: vec2<f32>, pw: f32, env: f32, seed: u32) -> vec3<f32> {
+    var col = vec3(0.0);
+    let hii = exp(-sq((pw - 0.24) / 0.2)) * env;
+    let blue = exp(-sq((pw + 0.05) / 0.35)) * env;
+    for (var k = 0u; k < 3u; k++) {
+        let cell = 0.05 / (1.0 + f32(k) * 1.4);
+        let cp = p / cell;
+        let rnd = pn_rand2(floor(cp), seed + 31u + k);
+        let dd = length(fract(cp) - (vec2(0.3) + 0.4 * rnd.xy));
+        let size = 0.05 + 0.13 * fract(rnd.z * 13.7);
+        let blob = (exp(-sq(dd / size)) + 0.3 * exp(-dd / (size * 1.6))) * (1.0 - smoothstep(0.18, 0.3, dd));
+        if (rnd.z > 0.55) {
+            col += vec3(1.0, 0.3, 0.52) * (blob * hii * 4.0 * (0.3 + (rnd.z - 0.55) / 0.45));
+        } else if (rnd.z < 0.2) {
+            col += vec3(0.62, 0.76, 1.0) * (blob * blue * 2.2 * (0.4 + rnd.z * 3.0));
+        }
+    }
+    return col;
+}
+
+// Resolved stars: three grain sizes in disk space, each fading in once its cells span a few
+// pixels; dots are round on screen (rotation and tilt undone).
+fn galaxy_stars(p: vec2<f32>, dens: f32, radius: f32, tilt: f32, ca: f32, sa: f32, seed: u32) -> vec3<f32> {
+    var col = vec3(0.0);
+    for (var k = 0u; k < 3u; k++) {
+        let cell = 0.012 / pow(2.4, f32(k));
+        let vis = smoothstep(2.0, 4.0, cell * radius * sqrt(tilt));
+        if (vis <= 0.0) {
+            continue;
+        }
+        let cp = p / cell;
+        let rnd = pn_rand2(floor(cp), seed + 50u + k);
+        if (rnd.z > dens) {
+            continue;
+        }
+        let o = (fract(cp) - (vec2(0.2) + 0.6 * rnd.xy)) * cell;
+        let dpx = vec2(o.x * ca + o.y * sa, (o.y * ca - o.x * sa) * tilt) * radius;
+        let b = 0.15 + 0.85 * pow(fract(rnd.z * 31.7), 4.0);
+        let tint = mix(vec3(0.72, 0.8, 1.0), vec3(1.0, 0.84, 0.64), fract(rnd.x * 17.3));
+        col += tint * (b * exp(-dot(dpx, dpx) / 0.9) * vis);
+    }
+    return col;
+}
+
 fn shade_galaxy(in: VOut) -> vec4<f32> {
     let center = in.uv.xy;
     let radius = in.uv.z;
     let p0 = (in.screen - center) / radius;
-    // Tilt: squash y.
-    let tilt = in.extra.y;
-    var p = vec2(p0.x, p0.y / max(tilt, 0.05));
-    let a = in.uv.w;
-    p = vec2(p.x * cos(a) - p.y * sin(a), p.x * sin(a) + p.y * cos(a));
+    // Tilt squashes y; then turn by the rotation.
+    let tilt = max(in.extra.y, 0.05);
+    let ca = cos(in.uv.w);
+    let sa = sin(in.uv.w);
+    let pt = vec2(p0.x, p0.y / tilt);
+    let p = vec2(pt.x * ca - pt.y * sa, pt.x * sa + pt.y * ca);
     let r = length(p);
     if (r > 1.6) {
         return vec4(0.0);
     }
+    let seed = 0x6A1A7E5u;
     let theta = atan2(p.y, p.x);
-    let arms = 2.0;
-    let wind = 4.2;
-    let spiral = theta * arms - log(max(r, 0.02)) * wind;
-    let n = fbm2(p * 6.0 + vec2(3.0, 1.0), 5);
-    let arm = pow(0.5 + 0.5 * cos(spiral + n * 2.2), 3.0);
-    let disk = exp(-r * 3.2);
-    let dust = smoothstep(0.55, 0.85, fbm2(p * 12.0, 4)) * arm * smoothstep(0.08, 0.3, r);
-    let bulge = exp(-r * r * 38.0);
-    let clumps = smoothstep(0.62, 0.92, fbm2(p * 28.0 + vec2(n), 3)) * arm * disk;
-    var col = vec3(0.45, 0.6, 1.0) * arm * disk * 0.9;
-    col += vec3(0.75, 0.82, 1.0) * disk * 0.25;
-    col += vec3(1.0, 0.45, 0.65) * clumps * 0.9;
-    col += vec3(1.0, 0.86, 0.62) * bulge * 2.2;
-    col *= 1.0 - dust * 0.65;
-    let intensity = saturate(max(max(col.r, col.g), col.b));
-    let fade = 1.0 - smoothstep(1.1, 1.6, r);
-    // Additive-ish: low alpha so the background glows through.
-    return vec4(col * fade * in.params.w, intensity * fade * 0.3 * in.params.w);
+    let lr = log(max(r, 0.02));
+    // Two arms along theta * 2 - ln(r) * 4.2 = 0 (map.rs puts the star systems there).
+    let warp = fbm_s2(p * 2.6 + vec2(1.7, 4.1), seed, 3);
+    let ph = theta * 2.0 - lr * 4.2 + warp * 0.6;
+    let pw = atan2(sin(ph), cos(ph));
+    let arm_env = smoothstep(0.05, 0.28, r) * exp(-max(r - 0.3, 0.0) * 2.2) * (1.0 - smoothstep(0.95, 1.3, r));
+    let arm = exp(-pw * pw * 3.2);
+    let arm_wide = exp(-pw * pw * 0.8);
+    let clumps = fbm_s2(p * 10.0 + vec2(warp * 2.0), seed + 7u, 4);
+    let arm_l = arm * arm_env * (0.3 + 1.2 * saturate(0.45 + clumps));
+    // Light (HDR): a warm bulge with a smooth cusp, a faint patchy old-star disk, young arms
+    // (whiter near the core, blue outside) in a soft violet glow, a halo.
+    let bulge = 2.2 * exp(-r / 0.035) + 0.9 * exp(-r * r / 0.01) + 0.28 * exp(-r / 0.13);
+    let disk = 0.075 * exp(-r / 0.34) * (1.0 - smoothstep(1.0, 1.4, r)) * (0.75 + 0.5 * saturate(0.5 + clumps));
+    let halo = 0.03 * exp(-r / 0.6) * (1.0 - smoothstep(1.05, 1.6, r));
+    let young = mix(vec3(0.8, 0.78, 0.92), vec3(0.36, 0.52, 1.0), smoothstep(0.12, 0.5, r));
+    var col = vec3(1.0, 0.7, 0.4) * bulge + vec3(0.9, 0.76, 0.66) * disk + young * (arm_l * 0.78)
+        + vec3(0.45, 0.42, 0.95) * (arm_wide * arm_env * 0.09) + vec3(0.5, 0.52, 0.8) * halo;
+    // Dust lanes along the inner edge of each arm (phase > 0): thick where they hug the arm,
+    // breaking into filaments and spurs that cross it; thin patchy dust between the arms.
+    let fn1 = fbm_s2(vec2(pw * 2.5, lr * 6.0) + p * 5.0, seed + 13u, 4);
+    let fil = fbm_s2(p * 18.0 + vec2(fn1 * 1.5), seed + 17u, 3);
+    let feathers = smoothstep(-0.3, 0.35, fn1);
+    let lane = exp(-sq((pw - 0.5) / 0.3)) * feathers * (0.55 + 0.6 * smoothstep(-0.2, 0.4, fil));
+    let spurs = smoothstep(0.2, 0.5, fil) * arm * smoothstep(-0.3, 0.5, pw) * 0.55;
+    let inter = 0.14 * smoothstep(0.0, 0.5, fn1) * (1.0 - arm_wide);
+    let dust_env = smoothstep(0.06, 0.25, r) * (1.0 - smoothstep(0.8, 1.15, r));
+    let tau = (lane * 1.5 + spurs + inter) * dust_env
+        + 0.25 * exp(-r / 0.1) * smoothstep(0.02, 0.09, r) * feathers;
+    col *= exp(-tau * vec3(1.0, 1.25, 1.6));
+    col += galaxy_knots(p, pw, arm_env * saturate(0.65 + clumps) * saturate(1.0 - tau * 0.5), seed);
+    let dens = saturate(arm_l * 0.8 + disk * 3.0 + bulge * 0.2 + 0.03) * 0.75;
+    col += galaxy_stars(p, dens, radius, tilt, ca, sa, seed);
+    // Tone map: no clipping; the core rolls off to a warm white.
+    let mapped = vec3(1.0) - exp(-col * 1.3);
+    let fade = 1.0 - smoothstep(1.3, 1.6, r);
+    let alpha = saturate((1.0 - exp(-tau)) * 0.45 * dust_env + luminance(mapped) * 0.6) * fade;
+    return vec4(mapped * fade, alpha) * in.params.w;
 }
 
-fn hash22(p: vec2<f32>) -> vec2<f32> {
-    let q = vec2(dot(p, vec2(127.1, 311.7)), dot(p, vec2(269.5, 183.3)));
-    return fract(sin(q) * 43758.5453);
+// Star color by temperature: 0 hot blue, 0.3 white, 0.6 yellow, 1 red.
+fn star_tint(t: f32) -> vec3<f32> {
+    let a = mix(vec3(0.6, 0.72, 1.0), vec3(1.0, 0.98, 0.96), smoothstep(0.0, 0.3, t));
+    let b = mix(a, vec3(1.0, 0.86, 0.66), smoothstep(0.4, 0.7, t));
+    return mix(b, vec3(1.0, 0.62, 0.42), smoothstep(0.75, 1.0, t));
 }
 
 fn shade_starfield(in: VOut) -> vec4<f32> {
     let pan = in.uv.xy;
     let density = in.uv.z;
-    let seed = in.uv.w;
-    var col = vec3(0.0);
-    // Faint nebula.
-    let np = (in.screen + pan * 0.2) / 900.0;
-    let neb = fbm2(np * 2.0 + vec2(seed), 5);
-    let neb2 = fbm2(np * 3.5 + vec2(seed * 2.0, 4.0), 4);
-    col += vec3(0.18, 0.08, 0.32) * smoothstep(0.45, 0.85, neb) * 0.5;
-    col += vec3(0.04, 0.16, 0.3) * smoothstep(0.5, 0.9, neb2) * 0.5;
-    // Three layers of stars with parallax.
-    for (var layer = 0; layer < 3; layer++) {
+    let seed = pn_seed(in.uv.w);
+    // Nebulae: broad faint clouds of gas in two colors, with wisps and dark dust, far away
+    // (slow parallax). Kept dark: UI sits on top.
+    let np = (in.screen + pan * 0.1) / 1100.0;
+    let w = vec2(fbm_s2(np * 1.1, seed, 2), fbm_s2(np * 1.1 + vec2(5.2, 1.3), seed + 1u, 2));
+    let n1 = fbm_s2(np * 1.6 + w * 0.8, seed + 2u, 3);
+    let n2 = fbm_s2(np * 2.1 - w * 0.7 + vec2(3.1, 7.7), seed + 3u, 3);
+    let wisp = fbm_s2(np * 6.0 + w * 2.5, seed + 4u, 4);
+    let g1 = smoothstep(-0.1, 0.5, n1) * (0.65 + 0.7 * wisp);
+    let g2 = smoothstep(-0.05, 0.55, n2) * (0.65 - 0.6 * wisp);
+    var col = vec3(0.28, 0.06, 0.22) * (saturate(g1) * 0.07) + vec3(0.03, 0.13, 0.22) * (saturate(g2) * 0.07)
+        + vec3(0.3, 0.13, 0.04) * (saturate(g1 * g2) * 0.03);
+    col *= 1.0 - smoothstep(0.1, 0.45, wisp - n1 * 0.3) * 0.6;
+    let glow = saturate((g1 + g2) * 0.5);
+    // Stars in four layers, many faint and few bright (with a soft glow, the brightest with
+    // faint spikes); nearer layers move more with the pan.
+    for (var layer = 0u; layer < 4u; layer++) {
         let lf = f32(layer);
-        let cell = 26.0 + lf * 22.0;
-        let p = (in.screen + pan * (0.15 + lf * 0.25)) / cell + vec2(seed * 13.0 + lf * 7.0);
-        let id = floor(p);
-        let f = fract(p);
-        let h = hash22(id);
-        if (h.x < density * (0.55 - lf * 0.12)) {
-            let star = hash22(id + vec2(5.3, 1.7));
-            let d = length(f - star) * cell;
-            let size = 0.6 + h.y * (1.3 - lf * 0.3);
-            let tw = 0.75 + 0.25 * sin(g.time.x * (1.0 + h.y * 3.0) + h.x * 40.0);
-            let b = exp(-d * d / (size * size)) * tw * (0.5 + h.y);
-            let temp = hash22(id + vec2(9.1, 3.3)).x;
-            let tint = mix(vec3(0.7, 0.8, 1.0), vec3(1.0, 0.85, 0.65), temp);
-            col += tint * b;
+        let cell = 7.0 * pow(2.45, lf);
+        let p = (in.screen + pan * (0.08 + 0.14 * lf)) / cell + vec2(lf * 17.0, lf * 5.0);
+        let h = pn_pcg3(vec3(bitcast<vec2<u32>>(vec2<i32>(floor(p))), seed + layer));
+        let ex = f32(h.z & 255u) / 255.0;
+        if (ex > density * (0.5 + 0.3 * glow) * (0.55 - 0.05 * lf)) {
+            continue;
         }
+        let br = f32((h.z >> 8u) & 255u) / 255.0;
+        let tp = f32((h.z >> 16u) & 255u) / 255.0;
+        let pos = 0.3 + 0.4 * vec2<f32>(h.xy >> vec2(8u)) * (1.0 / 16777216.0);
+        let dv = (fract(p) - pos) * cell;
+        let d2 = dot(dv, dv);
+        let b = (0.05 + 0.95 * pow(br, 5.0)) * (0.35 + 0.45 * lf);
+        let sigma = 0.5 + 0.12 * lf + 0.35 * br * br;
+        var s = exp(-d2 / (2.0 * sigma * sigma));
+        if (layer >= 2u) {
+            let gr = 1.2 + 2.5 * br;
+            let cut = 1.0 - smoothstep(cell * 0.12, cell * 0.28, sqrt(d2));
+            s += 0.1 * br / (1.0 + d2 / (gr * gr)) * cut;
+            if (layer == 3u && br > 0.7) {
+                let ad = abs(dv);
+                let len = 3.0 + 6.0 * br;
+                let spike = exp(-ad.x * 1.6) * exp(-ad.y / len) + exp(-ad.y * 1.6) * exp(-ad.x / len);
+                s += spike * 0.18 * (br - 0.7) / 0.3 * cut;
+            }
+        }
+        let tw = 0.85 + 0.15 * sin(g.time.x * (0.7 + 2.0 * tp) + br * 40.0);
+        col += star_tint(tp * (1.0 - 0.5 * br)) * (b * s * tw);
     }
     return vec4(col * in.params.w, 0.0);
 }

@@ -95,21 +95,45 @@ impl UiInstance {
     }
 }
 
-/// Look of a planet for the PLANET / PLANET_FLAT primitives (uploaded as a storage buffer).
+/// Surface models of rocky planets, in [`PlanetLook::colors`]`[0][3]` (gas giants are picked
+/// by `style[1]` instead).
+pub mod surface {
+    /// Oceans and biomes from temperature and moisture (terran, ocean, jungle, desert).
+    /// Also what 0 means, and the alpha [`Color::to_array`](crate::Color::to_array) leaves.
+    pub const LIVING: f32 = 1.0;
+    /// Frozen seas crossed by cracks, snowfields, glacier ice and bare rock.
+    pub const ICE: f32 = 2.0;
+    /// Dark crust with glowing fissures, lava seas under drifting plates.
+    pub const VOLCANIC: f32 = 3.0;
+    /// Airless regolith, dark maria and craters.
+    pub const BARREN: f32 = 4.0;
+}
+
+/// Look of a planet for the PLANET / PLANET_FLAT primitives (uploaded as a uniform array).
+///
+/// The terrain is shared with the CPU: [`planet_noise`](crate::planet_noise) tells game code
+/// where the land and sea are.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Pod, Zeroable)]
 pub struct PlanetLook {
-    /// Deep ocean, shallow ocean, lowland, highland, mountain/rock, snow (linear RGB + unused).
+    /// Linear RGB of: deep ocean, shallow ocean / shelf, lush lowland (forest), dry land
+    /// (sand, savanna), rock, snow and ice. Living worlds blend biomes from these (jungle,
+    /// grassland, steppe, taiga, tundra...); other models use them as their own palette
+    /// (gas giants: [2] pale zones, [3] zones, [4] belts, [5] the great storm).
+    /// `colors[0][3]` is the [`surface`] model; the other alphas are unused.
     pub colors: [[f32; 4]; 6],
-    /// Atmosphere color (rgb) and thickness (a).
+    /// Atmosphere color (rgb) and thickness (a, 0..1; 0 = airless).
     pub atmosphere: [f32; 4],
     /// Cloud color (rgb) and coverage (a, 0..1).
     pub clouds: [f32; 4],
-    /// Night-side city lights color (rgb) and amount (a).
+    /// Night-side city lights color (rgb) and amount (a); volcanic worlds: fissure glow color.
     pub lights: [f32; 4],
-    /// Seed, sea level (0..1), terrain roughness, ice caps (0..1 of latitude).
+    /// Seed, sea level (0..1 of the height range), terrain roughness (mountains and relief),
+    /// ice line (0..1 of the way from the equator to the poles; also sets the climate: biomes
+    /// are temperate halfway there).
     pub shape: [f32; 4],
-    /// Desert amount, gas giant bands (0 = rocky), band turbulence, ring (0/1).
+    /// Dryness (0 = soaked, 0.3 = Earth-like, 1 = desert), gas giant bands (0 = rocky), band
+    /// turbulence, ring (0/1).
     pub style: [f32; 4],
 }
 
@@ -118,17 +142,17 @@ impl Default for PlanetLook {
         let c = |hex: u32| Color::hex(hex).to_array();
         Self {
             colors: [
-                c(0x0b2a52),
-                c(0x1f6e9a),
-                c(0x4f7a37),
-                c(0x8a7a4a),
-                c(0x6b625a),
-                c(0xf2f4f8),
+                c(0x0b2448),
+                c(0x1b6a8a),
+                c(0x2e5626),
+                c(0xb39563),
+                c(0x75695c),
+                c(0xf0f3f7),
             ],
-            atmosphere: [0.35, 0.6, 1.0, 1.0],
-            clouds: [1.0, 1.0, 1.0, 0.45],
-            lights: [1.0, 0.75, 0.4, 0.6],
-            shape: [1.0, 0.55, 1.0, 0.82],
+            atmosphere: [0.3, 0.55, 1.0, 1.0],
+            clouds: [1.0, 1.0, 1.0, 0.48],
+            lights: [1.0, 0.72, 0.38, 0.7],
+            shape: [1.0, 0.555, 1.0, 0.82],
             style: [0.3, 0.0, 0.0, 0.0],
         }
     }

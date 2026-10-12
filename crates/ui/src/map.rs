@@ -70,6 +70,7 @@ impl PlanetKind {
 
     /// The look for this kind with `seed` (any number).
     pub fn look(self, seed: f32) -> PlanetLook {
+        use crate::draw::surface;
         let c = |hex: u32| Color::hex(hex).to_array();
         let mut l = PlanetLook::default();
         l.shape[0] = seed;
@@ -77,84 +78,88 @@ impl PlanetKind {
             PlanetKind::Terran => {}
             PlanetKind::Ocean => {
                 l.colors = [
-                    c(0x06224a),
-                    c(0x1a7fb0),
-                    c(0x5b8a3c),
-                    c(0xb8a878),
-                    c(0x7a7468),
+                    c(0x051a3a),
+                    c(0x1286a6),
+                    c(0x3a7a30),
+                    c(0xd6c696),
+                    c(0x6f6a60),
                     c(0xf4f6fa),
                 ];
-                l.shape = [seed, 0.68, 1.1, 0.86];
-                l.clouds[3] = 0.55;
-                l.lights[3] = 0.25;
+                l.shape = [seed, 0.64, 1.1, 0.86];
+                l.style[0] = 0.15;
+                l.clouds[3] = 0.54;
+                l.lights[3] = 0.3;
             }
             PlanetKind::Jungle => {
                 l.colors = [
-                    c(0x0a2c40),
-                    c(0x1e7a86),
-                    c(0x245c1e),
-                    c(0x3f7a2a),
-                    c(0x5a5a3c),
+                    c(0x08283a),
+                    c(0x178a8a),
+                    c(0x1f4f18),
+                    c(0x6f7a34),
+                    c(0x5a5442),
                     c(0xe8ecef),
                 ];
-                l.shape = [seed, 0.42, 1.2, 0.93];
-                l.clouds = [0.95, 0.98, 1.0, 0.6];
-                l.atmosphere = [0.45, 0.75, 0.9, 1.1];
+                l.shape = [seed, 0.45, 1.2, 0.95];
+                l.clouds = [0.95, 0.98, 1.0, 0.56];
+                l.atmosphere = [0.42, 0.72, 0.95, 1.0];
                 l.style[0] = 0.0;
                 l.lights[3] = 0.15;
             }
             PlanetKind::Desert => {
                 l.colors = [
-                    c(0x3a2a1a),
-                    c(0x8a6a3a),
-                    c(0xc89a5a),
-                    c(0xe0b878),
-                    c(0x9a6a44),
+                    c(0x16405a),
+                    c(0x4a9a96),
+                    c(0x7a6a3a),
+                    c(0xd29a5a),
+                    c(0x8a4a30),
                     c(0xf0e0c8),
                 ];
-                l.shape = [seed, 0.08, 1.3, 0.94];
+                l.shape = [seed, 0.3, 1.3, 0.96];
                 l.style = [1.0, 0.0, 0.0, 0.0];
-                l.atmosphere = [0.95, 0.65, 0.4, 0.7];
-                l.clouds[3] = 0.12;
-                l.lights = [1.0, 0.7, 0.35, 0.4];
+                l.atmosphere = [0.95, 0.62, 0.38, 0.7];
+                l.clouds = [1.0, 0.96, 0.9, 0.1];
+                l.lights = [1.0, 0.7, 0.35, 0.35];
             }
             PlanetKind::Ice => {
                 l.colors = [
-                    c(0x1a3a5a),
-                    c(0x6aa0c8),
-                    c(0xc8d8e4),
-                    c(0xa8bccc),
-                    c(0x7c8a98),
-                    c(0xffffff),
+                    c(0x0e2a44),
+                    c(0x8fb4d0),
+                    c(0xd8e4ee),
+                    c(0x9fb8cc),
+                    c(0x6a6e78),
+                    c(0xf8fbff),
                 ];
-                l.shape = [seed, 0.32, 1.0, 0.45];
-                l.atmosphere = [0.6, 0.8, 1.0, 0.8];
-                l.clouds[3] = 0.3;
-                l.lights[3] = 0.1;
+                l.colors[0][3] = surface::ICE;
+                l.shape = [seed, 0.47, 1.0, 0.0];
+                l.atmosphere = [0.6, 0.8, 1.0, 0.6];
+                l.clouds = [0.95, 0.97, 1.0, 0.25];
+                l.lights[3] = 0.0;
             }
             PlanetKind::Lava => {
                 l.colors = [
-                    c(0xffb040),
-                    c(0xff5a1a),
-                    c(0x2a1e1c),
-                    c(0x3c2a24),
-                    c(0x1c1414),
-                    c(0x5a4a44),
+                    c(0xffc04a),
+                    c(0xff4a12),
+                    c(0x231a18),
+                    c(0x3a2a24),
+                    c(0x140f0e),
+                    c(0x6a5a52),
                 ];
-                l.shape = [seed, 0.36, 1.4, 1.2];
-                l.atmosphere = [1.0, 0.45, 0.2, 0.6];
-                l.clouds = [0.25, 0.2, 0.2, 0.25];
-                l.lights = [1.0, 0.45, 0.1, 1.0];
+                l.colors[0][3] = surface::VOLCANIC;
+                l.shape = [seed, 0.42, 1.4, 1.0];
+                l.atmosphere = [1.0, 0.45, 0.2, 0.55];
+                l.clouds = [0.3, 0.25, 0.23, 0.3];
+                l.lights = [1.0, 0.4, 0.08, 1.0];
             }
             PlanetKind::Barren => {
                 l.colors = [
                     c(0x2a2a2c),
-                    c(0x3a3a3c),
-                    c(0x6e6a66),
-                    c(0x8a8580),
-                    c(0x5a5652),
-                    c(0xd8d4d0),
+                    c(0x3c3a38),
+                    c(0x7a7570),
+                    c(0x948f88),
+                    c(0x5e5a56),
+                    c(0xc8c4be),
                 ];
+                l.colors[0][3] = surface::BARREN;
                 l.shape = [seed, 0.0, 1.5, 1.2];
                 l.atmosphere = [0.6, 0.6, 0.6, 0.0];
                 l.clouds[3] = 0.0;
@@ -164,12 +169,12 @@ impl PlanetKind {
                 l.colors = [
                     c(0x000000),
                     c(0x000000),
-                    c(0xd8b08a),
-                    c(0xf0e0c4),
-                    c(0xa86a48),
-                    c(0xc0583a),
+                    c(0xe6d2b0),
+                    c(0xf2e6cc),
+                    c(0xa0643e),
+                    c(0xb8482c),
                 ];
-                l.style = [0.0, 9.0, 1.0, 1.0];
+                l.style = [0.0, 14.0, 1.0, 1.0];
                 l.atmosphere = [0.95, 0.8, 0.6, 0.6];
                 l.clouds[3] = 0.0;
                 l.lights[3] = 0.0;
