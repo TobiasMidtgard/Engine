@@ -665,6 +665,16 @@ pub fn demo_views(z: &Zone) -> Vec<View> {
                 )
             })
             .collect(),
+        // Each stop restarts the paddock and waits for its moment (the tour settles 0.4 s
+        // before its warm-up).
+        "paddock" => engine_anim::demo::VIEWS
+            .iter()
+            .map(|v| {
+                View::new(v.key, v.name, v.eye, v.target, v.hour)
+                    .warmup((v.at - 0.4).max(0.0))
+                    .on_arrive("anim.demo_restart", "{}")
+            })
+            .collect(),
         "magic" => engine_vfx::demo::VIEWS
             .iter()
             .map(|v| View::new(v.key, v.name, v.eye, v.target, v.hour).warmup(v.warmup))
