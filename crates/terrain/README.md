@@ -47,6 +47,14 @@ everything else (streaming, LOD, colliders, ground queries, prints) follows the 
   poke through their neighbors), tiles never visibly repeat (two offset lookups switched by
   noise), and rock is projected on three axes at three scales so cliffs read as rock from
   kilometers away. `examples/material_swatches.rs` saves a lit preview of each.
+- **Photo-scanned ground where fetched.** Seven materials (grass, forest floor, soil, mud,
+  rock, sand, gravel) have CC0 Poly Haven scans listed in `assets/manifests/terrain.toml`.
+  After `cargo run -p fetch-assets -- terrain` they replace the procedural versions
+  (`TerrainSettings::scanned_materials`, on by default); the 2K color, normal, roughness,
+  occlusion and height maps are filtered down to the material resolution through the same
+  mip builder. Snow and concrete stay procedural, and any material whose files are missing
+  or unreadable falls back on its own. The `terrain.scanned_materials` diagnostic counts the
+  scans in use.
 - **Edits.** `TerrainEdit` messages dig, raise, smooth and paint (sphere, capsule, box).
   Edits are analytic, so they are exact at every level of detail and from any distance, and
   rebuild only the patches and colliders they touch.

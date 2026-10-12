@@ -1,8 +1,9 @@
 //! Bake the ground materials and save a lit preview of each (plus its albedo, normal and
-//! height maps) for reviewing them without the renderer.
+//! height maps) for reviewing them without the renderer. Scans are read from `scan_dir`
+//! (default `assets/fetched/terrain`; `none` for procedural only).
 //!
 //! ```text
-//! cargo run --release -p engine_terrain --example material_swatches -- [out_dir] [size]
+//! cargo run --release -p engine_terrain --example material_swatches -- [out_dir] [size] [scan_dir]
 //! ```
 
 use engine_terrain::materials::{GroundMaterial, bake};
@@ -11,12 +12,18 @@ fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let out = std::path::PathBuf::from(args.first().cloned().unwrap_or_else(|| "swatches".into()));
     let size: u32 = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(1024);
+    let scans = match args.get(2).map(String::as_str) {
+        Some("none") => None,
+        Some(dir) => Some(std::path::PathBuf::from(dir)),
+        None => Some("assets/fetched/terrain".into()),
+    };
     std::fs::create_dir_all(&out).expect("output folder");
-    let baked = bake(size);
+    let baked = bake(size, scans.as_deref());
     println!(
-        "baked {} materials at {size}² in {:.2}s",
+        "baked {} materials at {size}² in {:.2}s, {} from scans",
         baked.stats.len(),
-        baked.bake_secs
+        baked.bake_secs,
+        baked.scanned()
     );
     let n = size as usize;
     // Low sun from the upper left, a little sky fill.
@@ -78,13 +85,14 @@ fn main() {
             .expect("save");
         let s = baked.stats[k];
         println!(
-            "{name:<13} albedo {:.3} {:.3} {:.3}  roughness {:.2}  occlusion {:.2}  height {:.1} cm",
+            "{name:<13} albedo {:.3} {:.3} {:.3}  roughness {:.2}  occlusion {:.2}  height {:.1} cm  {:?}",
             s.mean_albedo[0],
             s.mean_albedo[1],
             s.mean_albedo[2],
             s.mean_roughness,
             s.mean_occlusion,
-            s.height_m * 100.0
+            s.height_m * 100.0,
+            baked.sources[k]
         );
     }
     sheet.save(out.join("sheet.png")).expect("save");

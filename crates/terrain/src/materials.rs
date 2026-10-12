@@ -15,11 +15,17 @@
 //! detail (texel / mean) into the planet palette's color for it, so the same textures serve
 //! the Earth, the Moon and Mars, and the ground looks the same from near and far.
 //!
+//! Where a photo-scanned version of a material has been fetched (CC0 scans from Poly Haven,
+//! listed in `assets/manifests/terrain.toml`; `cargo run -p fetch-assets -- terrain`), it
+//! replaces the procedural one: its color, normal, roughness, occlusion and height maps go
+//! through the same mip builder. Anything missing or unreadable falls back to procedural.
+//!
 //! [`shared`] bakes once per process on a background thread (about a second in release
 //! builds for 1024² textures); the terrain draws plain colors until it is ready.
 
 use std::collections::HashMap;
 use std::f32::consts::TAU;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 
 /// Number of ground materials (texture array layers).
@@ -87,6 +93,40 @@ impl GroundMaterial {
             _ => 4.0,
         }
     }
+
+    /// The photo-scanned texture set that can replace the procedural one, if there is one.
+    pub fn scan(self) -> Option<Scan> {
+        let (slug, tile_m) = match self {
+            GroundMaterial::Grass => ("leafy_grass", 2.0),
+            GroundMaterial::ForestFloor => ("forrest_ground_01", 4.0),
+            GroundMaterial::Soil => ("dry_ground_01", 2.0),
+            GroundMaterial::Mud => ("brown_mud_02", 2.0),
+            GroundMaterial::Rock => ("rock_face", 4.0),
+            GroundMaterial::Sand => ("aerial_beach_01", 4.0),
+            GroundMaterial::Gravel => ("gravel_floor_02", 2.0),
+            // The snow scans' dirty prints repeat into a visible grid; procedural snow tiles
+            // cleanly.
+            GroundMaterial::Snow | GroundMaterial::Concrete => return None,
+        };
+        Some(Scan { slug, tile_m })
+    }
+}
+
+/// A CC0 photo-scanned texture set (Poly Haven, 2K): `<folder>/<slug>/<slug>_{diff, nor_gl,
+/// arm, disp}_2k.jpg`, where the folder is usually `<asset root>/fetched/terrain`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Scan {
+    pub slug: &'static str,
+    /// Meters of ground one tile covers (a power of two, like [`GroundMaterial::tile_m`]).
+    pub tile_m: f32,
+}
+
+/// Where a baked material's textures came from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MaterialSource {
+    Procedural,
+    /// Built from this scan.
+    Scanned(&'static str),
 }
 
 /// Averages the shader falls back to once a material's texture is too small on screen to
@@ -99,6 +139,8 @@ pub struct MaterialStats {
     pub mean_occlusion: f32,
     /// Height range of the texture, meters (lowest to highest point).
     pub height_m: f32,
+    /// Meters of ground one texture tile covers.
+    pub tile_m: f32,
 }
 
 /// Baked textures for every [`GroundMaterial`], ready to upload.
@@ -112,32 +154,54 @@ pub struct BakedMaterials {
     /// `[material][mip]`: RGBA8 texels, normal x and y (0..1 = -1..1), roughness, occlusion.
     pub normal_rough_ao: Vec<Vec<Vec<u8>>>,
     pub stats: Vec<MaterialStats>,
+    pub sources: Vec<MaterialSource>,
     /// Wall-clock bake time, seconds.
     pub bake_secs: f32,
 }
 
+impl BakedMaterials {
+    /// How many materials come from scans.
+    pub fn scanned(&self) -> usize {
+        self.sources
+            .iter()
+            .filter(|s| matches!(s, MaterialSource::Scanned(_)))
+            .count()
+    }
+}
+
 type Slot = Arc<OnceLock<Arc<BakedMaterials>>>;
 
-/// The process-wide baked set at `size` (a power of two, at least 16). The first call starts
-/// the bake on a background thread and returns `None`; later calls return it once done.
-pub fn shared(size: u32) -> Option<Arc<BakedMaterials>> {
-    static BAKES: OnceLock<Mutex<HashMap<u32, Slot>>> = OnceLock::new();
+/// The process-wide baked set at `size` (a power of two, at least 16), using the scans in
+/// `scans` where present. The first call starts the bake on a background thread and returns
+/// `None`; later calls return it once done.
+pub fn shared(size: u32, scans: Option<&Path>) -> Option<Arc<BakedMaterials>> {
+    type Key = (u32, Option<PathBuf>);
+    static BAKES: OnceLock<Mutex<HashMap<Key, Slot>>> = OnceLock::new();
     let size = size.next_power_of_two().max(16);
+    let key: Key = (size, scans.map(Path::to_path_buf));
     let slot = {
         let mut map = BAKES
             .get_or_init(Default::default)
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        if let Some(slot) = map.get(&size) {
+        if let Some(slot) = map.get(&key) {
             slot.clone()
         } else {
             let slot: Slot = Arc::new(OnceLock::new());
-            map.insert(size, slot.clone());
+            map.insert(key.clone(), slot.clone());
             let worker = slot.clone();
             std::thread::Builder::new()
                 .name("terrain materials".into())
                 .spawn(move || {
-                    let _ = worker.set(Arc::new(bake(size)));
+                    let baked = bake(size, key.1.as_deref());
+                    engine_core::log::info!(
+                        "terrain materials: {}² in {:.2}s, {} of {} from scans",
+                        baked.size,
+                        baked.bake_secs,
+                        baked.scanned(),
+                        MATERIAL_COUNT
+                    );
+                    let _ = worker.set(Arc::new(baked));
                 })
                 .expect("spawn the terrain material baker");
             slot
@@ -146,15 +210,30 @@ pub fn shared(size: u32) -> Option<Arc<BakedMaterials>> {
     slot.get().cloned()
 }
 
-/// Bake every material at `size`² texels (a power of two), one thread per material.
-pub fn bake(size: u32) -> BakedMaterials {
+/// Bake every material at `size`² texels (a power of two), one thread per material, from
+/// the scans in `scans` where present and procedurally otherwise.
+pub fn bake(size: u32, scans: Option<&Path>) -> BakedMaterials {
     let started = std::time::Instant::now();
     let size = size.next_power_of_two().max(16);
     let mut results: Vec<Option<Finished>> = (0..MATERIAL_COUNT).map(|_| None).collect();
     std::thread::scope(|scope| {
         for (slot, material) in results.iter_mut().zip(GroundMaterial::ALL) {
             scope.spawn(move || {
-                *slot = Some(bake_one(material, size as usize));
+                let scanned = scans.zip(material.scan()).and_then(|(folder, scan)| {
+                    // Not fetched: procedural, quietly.
+                    if !folder.join(scan.slug).is_dir() {
+                        return None;
+                    }
+                    load_scan(folder, scan, size as usize)
+                        .inspect_err(|e| {
+                            engine_core::log::warn!(
+                                "terrain material {}: scan not used ({e})",
+                                material.name()
+                            )
+                        })
+                        .ok()
+                });
+                *slot = Some(scanned.unwrap_or_else(|| bake_one(material, size as usize)));
             });
         }
     });
@@ -164,12 +243,14 @@ pub fn bake(size: u32) -> BakedMaterials {
         albedo_height: Vec::new(),
         normal_rough_ao: Vec::new(),
         stats: Vec::new(),
+        sources: Vec::new(),
         bake_secs: 0.0,
     };
     for f in results.into_iter().flatten() {
         out.albedo_height.push(f.albedo_height);
         out.normal_rough_ao.push(f.normal_rough_ao);
         out.stats.push(f.stats);
+        out.sources.push(f.source);
     }
     out.bake_secs = started.elapsed().as_secs_f32();
     out
@@ -193,7 +274,7 @@ pub fn bake_one(material: GroundMaterial, size: usize) -> Finished {
         GroundMaterial::Gravel => gravel(&mut l),
         GroundMaterial::Concrete => concrete(&mut l),
     };
-    finish(l, cavity)
+    finish(l, cavity, material.tile_m())
 }
 
 /// One baked material: mips of both textures and its averages.
@@ -202,6 +283,7 @@ pub struct Finished {
     pub albedo_height: Vec<Vec<u8>>,
     pub normal_rough_ao: Vec<Vec<u8>>,
     pub stats: MaterialStats,
+    pub source: MaterialSource,
 }
 
 // ------------------------------------------------------------------------------ noise
@@ -1249,7 +1331,7 @@ fn to_unorm8(c: f32) -> u8 {
 }
 
 /// Derive normals, occlusion and cavity tint from the height field, then build the mips.
-fn finish(mut l: Layer, cavity: f32) -> Finished {
+fn finish(mut l: Layer, cavity: f32, tile_m: f32) -> Finished {
     let n = l.n;
     let texel = l.texel();
     let (lo, hi) = range(&l.h);
@@ -1281,17 +1363,27 @@ fn finish(mut l: Layer, cavity: f32) -> Finished {
         }
     }
     let height01: Vec<f32> = l.h.iter().map(|h| (h - lo) / span).collect();
+    let mut out = build_mips(n, l.albedo, height01, normal, l.roughness, ao);
+    out.stats.height_m = span;
+    out.stats.tile_m = tile_m;
+    out
+}
 
-    // Mip chain in linear space; roughness widens where averaged normals disagree.
+/// Encode a material's maps (linear albedo, 0..1 height, unit normals, roughness, occlusion;
+/// `n`² texels, a power of two) with a mip chain built in linear space. Roughness widens
+/// where averaged normals disagree, so distant ground does not sparkle.
+fn build_mips(
+    n: usize,
+    mut alb: Vec<[f32; 3]>,
+    mut hgt: Vec<f32>,
+    mut nrm: Vec<[f32; 3]>,
+    mut rough: Vec<f32>,
+    mut occ: Vec<f32>,
+) -> Finished {
     let mip_count = n.trailing_zeros() as usize + 1;
     let mut albedo_height = Vec::with_capacity(mip_count);
     let mut normal_rough_ao = Vec::with_capacity(mip_count);
     let mut size = n;
-    let mut alb = l.albedo;
-    let mut hgt = height01;
-    let mut nrm = normal;
-    let mut rough = l.roughness;
-    let mut occ = ao;
     loop {
         let mut a8 = Vec::with_capacity(size * size * 4);
         let mut b8 = Vec::with_capacity(size * size * 4);
@@ -1352,13 +1444,143 @@ fn finish(mut l: Layer, cavity: f32) -> Finished {
         mean_albedo: alb[0],
         mean_roughness: rough[0],
         mean_occlusion: occ[0],
-        height_m: span,
+        height_m: 0.0,
+        tile_m: 0.0,
     };
     Finished {
         albedo_height,
         normal_rough_ao,
         stats,
+        source: MaterialSource::Procedural,
     }
+}
+
+// ------------------------------------------------------------------------------ scans
+
+/// Load a scanned texture set from `folder` and build it at `size`² texels. Larger scans are
+/// box-filtered down (wrapping, so they stay seamless), widening roughness like the mips do;
+/// smaller ones are stretched.
+fn load_scan(folder: &Path, scan: Scan, size: usize) -> Result<Finished, String> {
+    let file = |map: &str| {
+        folder
+            .join(scan.slug)
+            .join(format!("{}_{map}_2k.jpg", scan.slug))
+    };
+    let open = |map: &str| {
+        let path = file(map);
+        image::open(&path).map_err(|e| format!("{}: {e}", path.display()))
+    };
+    let diff = open("diff")?.into_rgb8();
+    let src = diff.width() as usize;
+    if src != diff.height() as usize || src == 0 {
+        return Err(format!("{} is not square", file("diff").display()));
+    }
+    let fit = |img: image::DynamicImage, map: &str| -> Result<image::DynamicImage, String> {
+        if img.width() as usize != src || img.height() as usize != src {
+            return Err(format!("{} is not {src}²", file(map).display()));
+        }
+        Ok(img)
+    };
+    let nor = fit(open("nor_gl")?, "nor_gl")?.into_rgb8();
+    let arm = fit(open("arm")?, "arm")?.into_rgb8();
+    let disp = fit(open("disp")?, "disp")?.into_luma8();
+    let (diff, nor, arm, disp) = if src.is_power_of_two() && src >= size {
+        (diff, nor, arm, disp)
+    } else {
+        // Stretch to the bake size (scans normally are 2K, a power of two).
+        use image::imageops::{FilterType, resize};
+        let n = size as u32;
+        (
+            resize(&diff, n, n, FilterType::CatmullRom),
+            resize(&nor, n, n, FilterType::CatmullRom),
+            resize(&arm, n, n, FilterType::CatmullRom),
+            resize(&disp, n, n, FilterType::CatmullRom),
+        )
+    };
+    let src = diff.width() as usize;
+    let k = src / size;
+
+    let srgb: Vec<f32> = (0..256)
+        .map(|c| {
+            let c = c as f32 / 255.0;
+            if c <= 0.040_45 {
+                c / 12.92
+            } else {
+                ((c + 0.055) / 1.055).powf(2.4)
+            }
+        })
+        .collect();
+    let unit = |c: u8| c as f32 / 255.0;
+    // Height: stretch the 0.5th..99.5th percentile to 0..1, so a few outliers do not
+    // flatten the rest.
+    let mut histogram = [0usize; 256];
+    for &v in disp.as_raw() {
+        histogram[v as usize] += 1;
+    }
+    let percentile = |p: f32| {
+        let target = (p * (src * src) as f32) as usize;
+        let mut sum = 0;
+        for (v, &count) in histogram.iter().enumerate() {
+            sum += count;
+            if sum > target {
+                return v as f32 / 255.0;
+            }
+        }
+        1.0
+    };
+    let (lo, hi) = (percentile(0.005), percentile(0.995));
+    let span = (hi - lo).max(1.0 / 255.0);
+
+    let texels = size * size;
+    let mut alb = vec![[0.0f32; 3]; texels];
+    let mut hgt = vec![0.0f32; texels];
+    let mut nrm = vec![[0.0f32; 3]; texels];
+    let mut rough = vec![0.0f32; texels];
+    let mut occ = vec![0.0f32; texels];
+    let (diff, nor, arm, disp) = (diff.as_raw(), nor.as_raw(), arm.as_raw(), disp.as_raw());
+    let weight = 1.0 / (k * k) as f32;
+    for y in 0..size {
+        for x in 0..size {
+            let o = y * size + x;
+            let mut sum_n = [0.0f32; 3];
+            let mut sum_a2 = 0.0;
+            for sy in y * k..(y + 1) * k {
+                for sx in x * k..(x + 1) * k {
+                    let i = sy * src + sx;
+                    for c in 0..3 {
+                        alb[o][c] += srgb[diff[i * 3 + c] as usize] * weight;
+                    }
+                    hgt[o] += ((unit(disp[i]) - lo) / span).clamp(0.0, 1.0) * weight;
+                    // OpenGL normal maps: green points up the image, toward lower rows;
+                    // here +y runs down the rows.
+                    let v = [
+                        unit(nor[i * 3]) * 2.0 - 1.0,
+                        1.0 - unit(nor[i * 3 + 1]) * 2.0,
+                        unit(nor[i * 3 + 2]) * 2.0 - 1.0,
+                    ];
+                    let len = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt().max(1e-4);
+                    for c in 0..3 {
+                        sum_n[c] += v[c] / len * weight;
+                    }
+                    occ[o] += unit(arm[i * 3]) * weight;
+                    let a = unit(arm[i * 3 + 1]).powi(2);
+                    sum_a2 += a * a * weight;
+                }
+            }
+            let len = (sum_n[0] * sum_n[0] + sum_n[1] * sum_n[1] + sum_n[2] * sum_n[2])
+                .sqrt()
+                .max(1e-4);
+            nrm[o] = [sum_n[0] / len, sum_n[1] / len, sum_n[2] / len];
+            let variance = ((1.0 - len) / len).max(0.0);
+            rough[o] = (sum_a2 + variance).sqrt().sqrt().min(1.0);
+        }
+    }
+    let mut out = build_mips(size, alb, hgt, nrm, rough, occ);
+    // Scans carry no height scale; assume relief of about 5% of the tile.
+    out.stats.height_m = scan.tile_m * 0.05;
+    out.stats.tile_m = scan.tile_m;
+    out.source = MaterialSource::Scanned(scan.slug);
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -1380,7 +1602,7 @@ mod tests {
 
     #[test]
     fn every_material_bakes_with_plausible_values() {
-        let baked = bake(64);
+        let baked = bake(64, None);
         assert_eq!(baked.albedo_height.len(), MATERIAL_COUNT);
         assert_eq!(baked.mip_count, 7);
         for (m, stats) in GroundMaterial::ALL.iter().zip(&baked.stats) {
@@ -1410,6 +1632,69 @@ mod tests {
         let snow = baked.stats[GroundMaterial::Snow as usize].mean_albedo[1];
         let mud = baked.stats[GroundMaterial::Mud as usize].mean_albedo[1];
         assert!(snow > 0.7 && mud < 0.2, "snow {snow}, mud {mud}");
+    }
+
+    #[test]
+    fn scans_load_and_fall_back() {
+        let dir = std::env::temp_dir().join(format!("terrain-scan-test-{}", std::process::id()));
+        let scan = GroundMaterial::Gravel.scan().unwrap();
+        let folder = dir.join(scan.slug);
+        std::fs::create_dir_all(&folder).unwrap();
+        let n = 64;
+        // A bump in the middle: its upper half faces up the image (OpenGL green > 0.5).
+        let save = |map: &str, img: image::DynamicImage| {
+            img.save(folder.join(format!("{}_{map}_2k.jpg", scan.slug)))
+                .unwrap();
+        };
+        save(
+            "diff",
+            image::RgbImage::from_pixel(n, n, image::Rgb([188, 188, 188])).into(),
+        );
+        save(
+            "arm",
+            image::RgbImage::from_pixel(n, n, image::Rgb([230, 200, 0])).into(),
+        );
+        save(
+            "nor_gl",
+            image::RgbImage::from_fn(n, n, |_, y| {
+                image::Rgb([128, if y < n / 2 { 200 } else { 56 }, 230])
+            })
+            .into(),
+        );
+        save(
+            "disp",
+            image::GrayImage::from_fn(n, n, |x, y| image::Luma([((x + y) * 2) as u8])).into(),
+        );
+
+        let baked = bake(32, Some(&dir));
+        let k = GroundMaterial::Gravel as usize;
+        assert_eq!(baked.sources[k], MaterialSource::Scanned(scan.slug));
+        assert_eq!(baked.scanned(), 1, "only gravel has files");
+        assert_eq!(baked.stats[k].tile_m, scan.tile_m);
+        let s = baked.stats[k];
+        // sRGB 188 is about 0.5 linear.
+        assert!((s.mean_albedo[1] - 0.5).abs() < 0.03, "{:?}", s.mean_albedo);
+        assert!(
+            (s.mean_occlusion - 0.9).abs() < 0.03,
+            "{}",
+            s.mean_occlusion
+        );
+        let top = &baked.normal_rough_ao[k][0];
+        let ny = |row: usize| top[(row * 32 + 5) * 4 + 1] as f32 / 127.5 - 1.0;
+        // Upper rows face toward lower rows: -y here.
+        assert!(ny(4) < -0.3 && ny(28) > 0.3, "{} {}", ny(4), ny(28));
+        let h = &baked.albedo_height[k][0];
+        assert!(
+            h[3] < 40 && h[(32 * 32 - 1) * 4 + 3] > 215,
+            "height stretched to 0..1"
+        );
+        // Missing files: procedural, same layout.
+        assert_eq!(
+            baked.sources[GroundMaterial::Rock as usize],
+            MaterialSource::Procedural
+        );
+        assert_eq!(baked.albedo_height[k].len(), baked.mip_count as usize);
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

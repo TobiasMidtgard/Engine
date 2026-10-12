@@ -2,6 +2,7 @@
 //! slots, shadows, and the ground maps (footprints, wetness, puddles, snow) the shader reads.
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 
 use bytemuck::{Pod, Zeroable};
 use engine_core::diagnostics::Diagnostics;
@@ -73,7 +74,7 @@ impl MaterialsGpu {
             flags: [0.0; 4],
         };
         for (i, m) in materials::GroundMaterial::ALL.iter().enumerate() {
-            let (albedo, rough, occl, height) = baked
+            let (albedo, rough, occl, height, tile) = baked
                 .and_then(|b| b.stats.get(i))
                 .map(|s| {
                     (
@@ -81,10 +82,11 @@ impl MaterialsGpu {
                         s.mean_roughness,
                         s.mean_occlusion,
                         s.height_m,
+                        s.tile_m,
                     )
                 })
-                .unwrap_or(([0.5; 3], 0.8, 1.0, 0.0));
-            out.info[2 * i] = [albedo[0], albedo[1], albedo[2], m.tile_m()];
+                .unwrap_or(([0.5; 3], 0.8, 1.0, 0.0, m.tile_m()));
+            out.info[2 * i] = [albedo[0], albedo[1], albedo[2], tile];
             out.info[2 * i + 1] = [rough, occl, height, 0.0];
         }
         out.flags[0] = if baked.is_some() { 1.0 } else { 0.0 };
@@ -139,6 +141,10 @@ struct Gpu {
     mat_sampler: wgpu::Sampler,
     /// Resolution of the uploaded material textures (0 = placeholders).
     mat_size: u32,
+    /// Resolution and scan folder of the uploaded materials.
+    mat_key: Option<(u32, Option<PathBuf>)>,
+    /// Materials built from scans.
+    mat_scanned: usize,
     group: Option<wgpu::BindGroup>,
 }
 
@@ -389,20 +395,28 @@ impl TerrainFeature {
     }
 
     /// Swap in the baked ground materials once the background bake is done.
-    fn upload_materials(&mut self, gpu_shared: &GpuShared, resolution: u32) {
+    fn upload_materials(
+        &mut self,
+        gpu_shared: &GpuShared,
+        resolution: u32,
+        scans: Option<PathBuf>,
+    ) {
         let Some(gpu) = self.gpu.as_mut() else {
             return;
         };
-        if resolution == 0 || gpu.mat_size == resolution.next_power_of_two().max(16) {
+        let key = (resolution.next_power_of_two().max(16), scans);
+        if resolution == 0 || gpu.mat_key.as_ref() == Some(&key) {
             return;
         }
-        let Some(baked) = materials::shared(resolution) else {
+        let Some(baked) = materials::shared(resolution, key.1.as_deref()) else {
             return;
         };
         let (albedo, normal) = material_arrays(gpu_shared, Some(&baked));
         gpu.mat_albedo = albedo;
         gpu.mat_normal = normal;
         gpu.mat_size = baked.size;
+        gpu.mat_scanned = baked.scanned();
+        gpu.mat_key = Some(key);
         gpu_shared.queue.write_buffer(
             &gpu.mat_info,
             0,
@@ -824,6 +838,8 @@ impl RenderFeature for TerrainFeature {
             mat_info,
             mat_sampler,
             mat_size: 0,
+            mat_key: None,
+            mat_scanned: 0,
             group: None,
         });
     }
@@ -852,11 +868,16 @@ impl RenderFeature for TerrainFeature {
             return;
         };
         if !terrains.entries.is_empty() {
-            self.upload_materials(gpu_shared, settings.material_resolution);
+            let scans = settings.scan_folder(world);
+            self.upload_materials(gpu_shared, settings.material_resolution, scans);
         }
-        let materials_ready = self.gpu.as_ref().is_some_and(|g| g.mat_size > 0);
+        let (materials_ready, scanned) = self
+            .gpu
+            .as_ref()
+            .map_or((false, 0), |g| (g.mat_size > 0, g.mat_scanned));
         if let Some(mut d) = world.get_resource_mut::<Diagnostics>() {
             d.set("terrain.materials_ready", materials_ready as u32 as f64);
+            d.set("terrain.scanned_materials", scanned as f64);
         }
         let Some(terrains) = world.get_resource::<Terrains>() else {
             return;

@@ -322,12 +322,18 @@ fn main() {
         ));
         // Let the walkers lay their trails and the terrain finish streaming, with the ground
         // materials baked.
-        let resolution = app
+        let settings = app
             .world
             .get_resource::<engine_terrain::TerrainSettings>()
-            .map(|s| s.material_resolution)
-            .unwrap_or(1024);
-        while resolution > 0 && engine_terrain::materials::shared(resolution).is_none() {
+            .cloned()
+            .unwrap_or_default();
+        let (resolution, scans) = (
+            settings.material_resolution,
+            settings.scan_folder(&app.world),
+        );
+        while resolution > 0
+            && engine_terrain::materials::shared(resolution, scans.as_deref()).is_none()
+        {
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
         app.update_n(12);

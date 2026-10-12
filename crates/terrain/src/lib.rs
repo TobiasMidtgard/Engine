@@ -265,6 +265,23 @@ pub struct TerrainSettings {
     /// Texels per side of the ground material textures (grass, leaves, rock, snow…), a power
     /// of two. They bake once per process on a background thread; 0 draws plain colors.
     pub material_resolution: u32,
+    /// Use the CC0 photo scans in `<asset root>/fetched/terrain` for the materials that have
+    /// one (`cargo run -p fetch-assets -- terrain`); the rest stay procedural.
+    pub scanned_materials: bool,
+}
+
+impl TerrainSettings {
+    /// Folder the ground material scans are read from, if scans are on: `fetched/terrain`
+    /// under the [`AssetServer`](engine_assets::AssetServer) root (or `assets/` without one).
+    pub fn scan_folder(&self, world: &World) -> Option<std::path::PathBuf> {
+        self.scanned_materials.then(|| {
+            world
+                .get_resource::<engine_assets::AssetServer>()
+                .map(|a| a.root())
+                .unwrap_or_else(|| "assets".into())
+                .join("fetched/terrain")
+        })
+    }
 }
 
 impl Default for TerrainSettings {
@@ -279,6 +296,7 @@ impl Default for TerrainSettings {
             wireframe_lod: false,
             geomorph: true,
             material_resolution: 1024,
+            scanned_materials: true,
         }
     }
 }
