@@ -123,6 +123,9 @@ pub struct WindField {
     pub gustiness: f32,
     /// World time, for gust animation.
     pub time: f32,
+    /// Where the gust pattern is anchored, world meters. World shifts move it, so gusts don't
+    /// jump when the origin does.
+    pub gust_origin: DVec3,
     /// Local disturbances added on top, m/s. Decays toward zero.
     pub local: Grid3<Vec3>,
 }
@@ -133,6 +136,7 @@ impl Default for WindField {
             prevailing: Vec3::new(3.0, 0.0, 1.0),
             gustiness: 0.3,
             time: 0.0,
+            gust_origin: DVec3::ZERO,
             local: Grid3::new(
                 DVec3::new(-64.0, -16.0, -64.0),
                 4.0,
@@ -149,10 +153,11 @@ impl WindField {
         // Log-ish profile: calmer near the ground, stronger aloft.
         let h = (p.y - self.local.origin.y - 16.0).max(0.5) as f32;
         let profile = (h / 10.0).powf(0.14).clamp(0.3, 2.5);
+        let q = p - self.gust_origin;
         let g = engine_core::math::noise::perlin3(
-            p.x * 0.02 + self.time as f64 * 0.3,
-            p.y * 0.02,
-            p.z * 0.02 - self.time as f64 * 0.2,
+            q.x * 0.02 + self.time as f64 * 0.3,
+            q.y * 0.02,
+            q.z * 0.02 - self.time as f64 * 0.2,
             0xA11CE,
         );
         let gust = 1.0 + g * self.gustiness;

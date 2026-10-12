@@ -1,0 +1,1448 @@
+//! A procedural human: skeleton, two outfits, muscles, foot IK, a ponytail on springs, and
+//! clips for idle, walk, run, leaning into turns, a heavy overhead swing, a block, a two-arm
+//! reach and a double-biceps flex, wired into one locomotion graph.
+//!
+//! Conventions: Y up, the character faces −Z, its right side is +X. Arm bones are rotated in
+//! their rest pose so that, for every arm bone, rotating about local X bends it forward
+//! (shoulder flexion, elbow flexion) and about local Z swings it outward on the right side.
+//! Leg bones have no rest rotation: +X lifts the thigh forward, −X bends the knee.
+
+use engine_core::prelude::*;
+
+use super::sdf::{Body, Paint, Shape};
+use super::{PoseBuilder, bone, bump, cycle, cycle_sin, keyed};
+use crate::clip::AnimationClip;
+use crate::graph::{
+    AnimGraph, Blend1dChild, Cmp, Condition, NodeDef, StateDef, TransitionDef, Weight,
+};
+use crate::ik::{FootIk, LegIk};
+use crate::muscle::{Muscle, MuscleDriver};
+use crate::procedural::spring::SpringChainDef;
+use crate::skeleton::Skeleton;
+use crate::skin::SkinnedMesh;
+
+pub const SKELETON: &str = "humanoid";
+pub const GRAPH: &str = "humanoid";
+
+/// Walk and run speeds the clips are authored for, m/s.
+pub const WALK_SPEED: f32 = 1.4;
+pub const RUN_SPEED: f32 = 3.8;
+
+pub const CLAVICLE: [&str; 2] = ["clavicle_l", "clavicle_r"];
+pub const UPPER_ARM: [&str; 2] = ["upper_arm_l", "upper_arm_r"];
+pub const LOWER_ARM: [&str; 2] = ["lower_arm_l", "lower_arm_r"];
+pub const HAND: [&str; 2] = ["hand_l", "hand_r"];
+pub const UPPER_LEG: [&str; 2] = ["upper_leg_l", "upper_leg_r"];
+pub const LOWER_LEG: [&str; 2] = ["lower_leg_l", "lower_leg_r"];
+pub const FOOT: [&str; 2] = ["foot_l", "foot_r"];
+pub const TOE: [&str; 2] = ["toe_l", "toe_r"];
+/// Side sign: left is −X, right is +X.
+const S: [f32; 2] = [-1.0, 1.0];
+const SIDE: [&str; 2] = ["l", "r"];
+
+pub fn skeleton() -> Skeleton {
+    let i = Quat::IDENTITY;
+    let mut bones = vec![
+        bone("root", None, Vec3::ZERO, i),
+        bone("hips", Some("root"), Vec3::new(0.0, 0.98, 0.0), i),
+        bone("spine", Some("hips"), Vec3::new(0.0, 0.12, 0.0), i),
+        bone("chest", Some("spine"), Vec3::new(0.0, 0.18, 0.0), i),
+        bone("neck", Some("chest"), Vec3::new(0.0, 0.22, 0.0), i),
+        bone("head", Some("neck"), Vec3::new(0.0, 0.10, 0.0), i),
+        bone("ponytail_1", Some("head"), Vec3::new(0.0, 0.14, 0.095), i),
+        bone(
+            "ponytail_2",
+            Some("ponytail_1"),
+            Vec3::new(0.0, -0.08, 0.035),
+            i,
+        ),
+        bone(
+            "ponytail_3",
+            Some("ponytail_2"),
+            Vec3::new(0.0, -0.09, 0.015),
+            i,
+        ),
+    ];
+    for side in 0..2 {
+        let s = S[side];
+        bones.extend([
+            bone(
+                CLAVICLE[side],
+                Some("chest"),
+                Vec3::new(0.03 * s, 0.17, 0.0),
+                i,
+            ),
+            bone(
+                UPPER_ARM[side],
+                Some(CLAVICLE[side]),
+                Vec3::new(0.15 * s, 0.0, 0.0),
+                Quat::from_rotation_z(30f32.to_radians() * s),
+            ),
+            bone(
+                LOWER_ARM[side],
+                Some(UPPER_ARM[side]),
+                Vec3::new(0.0, -0.29, 0.0),
+                i,
+            ),
+            bone(
+                HAND[side],
+                Some(LOWER_ARM[side]),
+                Vec3::new(0.0, -0.25, 0.0),
+                i,
+            ),
+            bone(
+                UPPER_LEG[side],
+                Some("hips"),
+                Vec3::new(0.095 * s, -0.07, 0.0),
+                i,
+            ),
+            bone(
+                LOWER_LEG[side],
+                Some(UPPER_LEG[side]),
+                Vec3::new(0.0, -0.43, 0.0),
+                i,
+            ),
+            bone(
+                FOOT[side],
+                Some(LOWER_LEG[side]),
+                Vec3::new(0.0, -0.40, 0.0),
+                i,
+            ),
+            bone(TOE[side], Some(FOOT[side]), Vec3::new(0.0, -0.05, -0.14), i),
+        ]);
+    }
+    Skeleton::new(SKELETON, bones).expect("humanoid skeleton")
+}
+
+/// What the character wears.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Outfit {
+    /// Tank top and shorts: bare arms and legs show muscles and veins. Has a ponytail.
+    Athlete,
+    /// Long-sleeved shirt and trousers: shows cloth bunching and stretching.
+    Shirt,
+    /// Bare-chested, in shorts: chest, shoulder and back muscles show when flexing.
+    Lifter,
+}
+
+struct Look {
+    skin: Paint,
+    top: Paint,
+    arms: Paint,
+    forearms: Paint,
+    bottom: Paint,
+    shins: Paint,
+    calves: Paint,
+    shoes: Paint,
+    hair: Paint,
+    ponytail: bool,
+}
+
+fn look(outfit: Outfit) -> Look {
+    match outfit {
+        Outfit::Athlete => {
+            let skin = [0.62, 0.38, 0.25];
+            Look {
+                skin: Paint::skin(skin),
+                top: Paint::cloth([0.42, 0.045, 0.035]),
+                arms: Paint::veined(skin),
+                forearms: Paint::veined(skin),
+                bottom: Paint::cloth([0.025, 0.035, 0.085]),
+                shins: Paint::skin(skin),
+                calves: Paint::veined(skin),
+                shoes: Paint::hard([0.75, 0.75, 0.78]),
+                hair: Paint::hide([0.06, 0.035, 0.02]),
+                ponytail: true,
+            }
+        }
+        Outfit::Shirt => {
+            let skin = [0.34, 0.19, 0.11];
+            let shirt = Paint::cloth([0.22, 0.38, 0.62]);
+            let trousers = Paint::cloth([0.33, 0.27, 0.16]);
+            Look {
+                skin: Paint::skin(skin),
+                top: shirt,
+                arms: shirt,
+                forearms: shirt,
+                bottom: trousers,
+                shins: trousers,
+                calves: trousers,
+                shoes: Paint::hard([0.11, 0.055, 0.03]),
+                hair: Paint::hide([0.015, 0.012, 0.01]),
+                ponytail: false,
+            }
+        }
+        Outfit::Lifter => {
+            let skin = [0.2, 0.105, 0.06];
+            Look {
+                skin: Paint::skin(skin),
+                top: Paint::skin(skin),
+                arms: Paint::veined(skin),
+                forearms: Paint::veined(skin),
+                bottom: Paint::cloth([0.03, 0.03, 0.033]),
+                shins: Paint::skin(skin),
+                calves: Paint::veined(skin),
+                shoes: Paint::hard([0.05, 0.05, 0.055]),
+                hair: Paint::hide([0.012, 0.01, 0.009]),
+                ponytail: false,
+            }
+        }
+    }
+}
+
+fn joint(s: &Skeleton, name: &str) -> Vec3 {
+    s.rest_model[s.bone(name)].t
+}
+
+/// The body shape for an outfit (bind pose).
+pub fn body(outfit: Outfit) -> Body {
+    let sk = skeleton();
+    let l = look(outfit);
+    let mut b = Body::default();
+    // Torso.
+    b.part(
+        "hips",
+        Shape::ellipsoid(Vec3::new(0.0, 0.95, 0.005), Vec3::new(0.165, 0.115, 0.115)),
+        l.bottom,
+        0.06,
+    )
+    .part(
+        "spine",
+        Shape::ellipsoid(Vec3::new(0.0, 1.11, -0.01), Vec3::new(0.145, 0.13, 0.105)),
+        l.top,
+        0.07,
+    )
+    .part(
+        "chest",
+        Shape::ellipsoid(Vec3::new(0.0, 1.29, 0.0), Vec3::new(0.16, 0.165, 0.11)),
+        l.top,
+        0.07,
+    )
+    .part(
+        "chest",
+        Shape::ellipsoid(Vec3::new(0.0, 1.40, 0.005), Vec3::new(0.185, 0.085, 0.10)),
+        l.top,
+        0.05,
+    )
+    // Neck and head.
+    .part(
+        "neck",
+        Shape::capsule(
+            Vec3::new(0.0, 1.44, 0.012),
+            Vec3::new(0.0, 1.62, 0.0),
+            0.056,
+            0.05,
+        ),
+        l.skin,
+        0.04,
+    )
+    .part(
+        "head",
+        Shape::ellipsoid(Vec3::new(0.0, 1.715, 0.005), Vec3::new(0.087, 0.112, 0.10)),
+        l.skin,
+        0.03,
+    )
+    .part(
+        "head",
+        Shape::ellipsoid(Vec3::new(0.0, 1.655, -0.035), Vec3::new(0.066, 0.05, 0.062)),
+        l.skin,
+        0.04,
+    )
+    .part(
+        "head",
+        Shape::capsule(
+            Vec3::new(0.0, 1.715, -0.097),
+            Vec3::new(0.0, 1.686, -0.112),
+            0.011,
+            0.016,
+        ),
+        l.skin,
+        0.015,
+    )
+    .part(
+        "head",
+        Shape::ellipsoid(Vec3::new(0.0, 1.746, -0.083), Vec3::new(0.07, 0.016, 0.024)),
+        l.skin,
+        0.02,
+    )
+    .part(
+        "head",
+        Shape::ellipsoid(Vec3::new(0.0, 1.758, 0.016), Vec3::new(0.093, 0.09, 0.104)),
+        l.hair,
+        0.01,
+    );
+    if l.ponytail {
+        let p1 = joint(&sk, "ponytail_1");
+        let p2 = joint(&sk, "ponytail_2");
+        let p3 = joint(&sk, "ponytail_3");
+        let tip = p3 + Vec3::new(0.0, -0.09, 0.0);
+        b.part(
+            "head",
+            Shape::capsule(p1 + Vec3::new(0.0, 0.0, -0.02), p1, 0.028, 0.026),
+            l.hair,
+            0.02,
+        )
+        .part(
+            "ponytail_1",
+            Shape::capsule(p1, p2, 0.026, 0.024),
+            l.hair,
+            0.012,
+        )
+        .part(
+            "ponytail_2",
+            Shape::capsule(p2, p3, 0.024, 0.02),
+            l.hair,
+            0.012,
+        )
+        .part(
+            "ponytail_3",
+            Shape::capsule(p3, tip, 0.02, 0.01),
+            l.hair,
+            0.012,
+        );
+    }
+    for side in 0..2 {
+        let s = S[side];
+        let rot = Quat::from_rotation_z(30f32.to_radians() * s);
+        let shoulder = joint(&sk, UPPER_ARM[side]);
+        let elbow = joint(&sk, LOWER_ARM[side]);
+        let wrist = joint(&sk, HAND[side]);
+        let d = (elbow - shoulder).normalize();
+        let hip = joint(&sk, UPPER_LEG[side]);
+        let knee = joint(&sk, LOWER_LEG[side]);
+        let ankle = joint(&sk, FOOT[side]);
+        let x = |v: f32| v * s;
+        // Chest muscles, shoulder blades, trapezius.
+        b.part(
+            "chest",
+            Shape::ellipsoid(
+                Vec3::new(x(0.075), 1.345, -0.07),
+                Vec3::new(0.075, 0.06, 0.045),
+            ),
+            l.top,
+            0.04,
+        )
+        .part(
+            "chest",
+            Shape::ellipsoid(Vec3::new(x(0.09), 1.36, 0.075), Vec3::new(0.08, 0.09, 0.04)),
+            l.top,
+            0.04,
+        )
+        .part(
+            CLAVICLE[side],
+            Shape::capsule(
+                Vec3::new(0.0, 1.50, 0.025),
+                Vec3::new(x(0.15), 1.455, 0.01),
+                0.05,
+                0.035,
+            ),
+            l.top,
+            0.04,
+        )
+        .part(
+            "hips",
+            Shape::ellipsoid(
+                Vec3::new(x(0.075), 0.90, 0.075),
+                Vec3::new(0.085, 0.095, 0.07),
+            ),
+            l.bottom,
+            0.05,
+        )
+        .part(
+            "head",
+            Shape::ellipsoid(
+                Vec3::new(x(0.087), 1.705, 0.012),
+                Vec3::new(0.012, 0.03, 0.02),
+            ),
+            l.skin,
+            0.012,
+        )
+        .part(
+            "head",
+            Shape::ellipsoid(
+                Vec3::new(x(0.034), 1.722, -0.088),
+                Vec3::new(0.014, 0.012, 0.01),
+            ),
+            Paint::hard([0.02, 0.018, 0.016]),
+            0.004,
+        );
+        // Arm.
+        b.part(
+            UPPER_ARM[side],
+            Shape::ellipsoid(
+                shoulder + Vec3::new(x(0.025), 0.0, 0.0),
+                Vec3::new(0.062, 0.07, 0.065),
+            ),
+            l.arms,
+            0.05,
+        )
+        .part(
+            UPPER_ARM[side],
+            Shape::capsule(shoulder, elbow, 0.05, 0.04),
+            l.arms,
+            0.04,
+        )
+        .part(
+            UPPER_ARM[side],
+            Shape::ellipsoid(
+                shoulder + d * 0.15 + Vec3::new(0.0, 0.0, -0.022),
+                Vec3::new(0.034, 0.075, 0.034),
+            )
+            .rotated(rot),
+            l.arms,
+            0.03,
+        )
+        .part(
+            UPPER_ARM[side],
+            Shape::ellipsoid(
+                shoulder + d * 0.13 + Vec3::new(0.0, 0.0, 0.026),
+                Vec3::new(0.036, 0.085, 0.032),
+            )
+            .rotated(rot),
+            l.arms,
+            0.03,
+        )
+        .part(
+            LOWER_ARM[side],
+            Shape::capsule(elbow, wrist, 0.042, 0.03),
+            l.forearms,
+            0.04,
+        )
+        .part(
+            LOWER_ARM[side],
+            Shape::ellipsoid(
+                elbow + d * 0.075 + Vec3::new(0.0, 0.0, -0.008),
+                Vec3::new(0.042, 0.075, 0.038),
+            )
+            .rotated(rot),
+            l.forearms,
+            0.03,
+        )
+        .part(
+            HAND[side],
+            Shape::round_box(wrist + d * 0.07, Vec3::new(0.017, 0.05, 0.043), 0.014).rotated(rot),
+            l.skin,
+            0.025,
+        )
+        .part(
+            HAND[side],
+            Shape::round_box(wrist + d * 0.145, Vec3::new(0.013, 0.04, 0.04), 0.012).rotated(rot),
+            l.skin,
+            0.015,
+        )
+        .part(
+            HAND[side],
+            Shape::capsule(
+                wrist + d * 0.03 + Vec3::new(0.0, 0.0, -0.035),
+                wrist + d * 0.085 + Vec3::new(x(-0.012), 0.0, -0.06),
+                0.012,
+                0.01,
+            ),
+            l.skin,
+            0.015,
+        );
+        // Leg.
+        b.part(
+            UPPER_LEG[side],
+            Shape::capsule(hip + Vec3::new(0.0, 0.03, 0.0), knee, 0.085, 0.052),
+            l.bottom,
+            0.06,
+        )
+        .part(
+            UPPER_LEG[side],
+            Shape::ellipsoid(
+                Vec3::new(x(0.095), 0.69, -0.04),
+                Vec3::new(0.055, 0.15, 0.045),
+            ),
+            l.bottom,
+            0.04,
+        )
+        .part(
+            LOWER_LEG[side],
+            Shape::ellipsoid(
+                knee + Vec3::new(0.0, 0.0, -0.035),
+                Vec3::new(0.035, 0.035, 0.025),
+            ),
+            l.shins,
+            0.03,
+        )
+        .part(
+            LOWER_LEG[side],
+            Shape::capsule(knee, ankle, 0.05, 0.03),
+            l.shins,
+            0.04,
+        )
+        .part(
+            LOWER_LEG[side],
+            Shape::ellipsoid(
+                Vec3::new(x(0.095), 0.34, 0.035),
+                Vec3::new(0.046, 0.10, 0.045),
+            ),
+            l.calves,
+            0.04,
+        )
+        .part(
+            FOOT[side],
+            Shape::round_box(
+                Vec3::new(x(0.095), 0.045, -0.055),
+                Vec3::new(0.045, 0.045, 0.115),
+                0.035,
+            ),
+            l.shoes,
+            0.03,
+        )
+        .part(
+            TOE[side],
+            Shape::round_box(
+                Vec3::new(x(0.095), 0.032, -0.18),
+                Vec3::new(0.043, 0.03, 0.05),
+                0.025,
+            ),
+            l.shoes,
+            0.02,
+        );
+        // Muscle shapes (morph targets).
+        let n = |m: &str| format!("{m}_{}", SIDE[side]);
+        b.muscle(
+            &n("biceps"),
+            shoulder + d * 0.15 + Vec3::new(0.0, 0.0, -0.035),
+            Vec3::new(0.06, 0.1, 0.06),
+            0.02,
+            Vec3::new(0.0, -0.004, 0.004),
+        )
+        .muscle(
+            &n("triceps"),
+            shoulder + d * 0.13 + Vec3::new(0.0, 0.0, 0.04),
+            Vec3::new(0.06, 0.11, 0.055),
+            0.012,
+            Vec3::new(0.0, -0.007, 0.0),
+        )
+        .muscle(
+            &n("forearm"),
+            elbow + d * 0.075 + Vec3::new(0.0, 0.0, -0.02),
+            Vec3::new(0.06, 0.095, 0.055),
+            0.011,
+            Vec3::ZERO,
+        )
+        .muscle(
+            &n("deltoid"),
+            shoulder + Vec3::new(x(0.04), 0.01, 0.0),
+            Vec3::new(0.07, 0.08, 0.08),
+            0.012,
+            Vec3::ZERO,
+        )
+        .muscle(
+            &n("pec"),
+            Vec3::new(x(0.08), 1.34, -0.1),
+            Vec3::new(0.085, 0.07, 0.06),
+            0.01,
+            Vec3::new(0.0, -0.004, 0.0),
+        )
+        .muscle(
+            &n("trap"),
+            Vec3::new(x(0.08), 1.48, 0.03),
+            Vec3::new(0.08, 0.05, 0.06),
+            0.012,
+            Vec3::ZERO,
+        )
+        .muscle(
+            &n("lat"),
+            Vec3::new(x(0.14), 1.25, 0.05),
+            Vec3::new(0.06, 0.12, 0.07),
+            0.01,
+            Vec3::ZERO,
+        )
+        .muscle(
+            &n("quad"),
+            Vec3::new(x(0.095), 0.70, -0.07),
+            Vec3::new(0.07, 0.16, 0.06),
+            0.013,
+            Vec3::new(0.0, 0.0, -0.004),
+        )
+        .muscle(
+            &n("calf"),
+            Vec3::new(x(0.095), 0.35, 0.06),
+            Vec3::new(0.06, 0.1, 0.05),
+            0.012,
+            Vec3::new(0.0, -0.003, 0.003),
+        )
+        .muscle(
+            &n("glute"),
+            Vec3::new(x(0.085), 0.88, 0.12),
+            Vec3::new(0.09, 0.09, 0.07),
+            0.008,
+            Vec3::new(0.0, -0.007, 0.0),
+        );
+    }
+    b
+}
+
+/// The skinned mesh for an outfit.
+pub fn mesh(outfit: Outfit) -> SkinnedMesh {
+    body(outfit).build(&skeleton(), 0.0135, 0.028)
+}
+
+/// Muscles for [`MuscleRig`](crate::muscle::MuscleRig), matching the morph targets of
+/// [`mesh`].
+pub fn muscles() -> Vec<Muscle> {
+    let mut out = Vec::new();
+    let input = |name: &str, weight: f32| MuscleDriver::Input {
+        name: name.into(),
+        weight,
+    };
+    for side in 0..2 {
+        let s = S[side];
+        let n = |m: &str| format!("{m}_{}", SIDE[side]);
+        let muscle = |name: &str, bone: &str, drivers: Vec<MuscleDriver>| Muscle {
+            name: name.into(),
+            bulge: name.into(),
+            sway: Some(format!("{name}.sway")),
+            drivers,
+            bone: bone.into(),
+            ..Default::default()
+        };
+        out.extend([
+            muscle(
+                &n("biceps"),
+                UPPER_ARM[side],
+                vec![
+                    MuscleDriver::Joint {
+                        bone: LOWER_ARM[side].into(),
+                        axis: Vec3::X,
+                        from_deg: 20.0,
+                        to_deg: 125.0,
+                        weight: 0.5,
+                    },
+                    input("effort", 0.6),
+                    input("flex", 1.0),
+                ],
+            ),
+            muscle(
+                &n("triceps"),
+                UPPER_ARM[side],
+                vec![
+                    input("effort", 0.65),
+                    input("brace", 0.5),
+                    input("flex", 0.6),
+                ],
+            ),
+            muscle(
+                &n("forearm"),
+                LOWER_ARM[side],
+                vec![
+                    input("effort", 0.75),
+                    input("brace", 0.4),
+                    input("flex", 0.7),
+                ],
+            ),
+            muscle(
+                &n("deltoid"),
+                UPPER_ARM[side],
+                vec![
+                    MuscleDriver::Joint {
+                        bone: UPPER_ARM[side].into(),
+                        axis: Vec3::Z,
+                        from_deg: 0.0,
+                        to_deg: 60.0 * s,
+                        weight: 0.4,
+                    },
+                    input("effort", 0.55),
+                    input("brace", 0.4),
+                    input("flex", 0.8),
+                ],
+            ),
+            muscle(
+                &n("pec"),
+                "chest",
+                vec![
+                    input("effort", 0.55),
+                    input("brace", 0.5),
+                    input("flex", 0.5),
+                ],
+            ),
+            muscle(
+                &n("trap"),
+                CLAVICLE[side],
+                vec![input("effort", 0.45), input("flex", 0.7)],
+            ),
+            muscle(
+                &n("lat"),
+                "chest",
+                vec![input("effort", 0.5), input("flex", 0.9)],
+            ),
+            muscle(
+                &n("quad"),
+                UPPER_LEG[side],
+                vec![
+                    MuscleDriver::Joint {
+                        bone: LOWER_LEG[side].into(),
+                        axis: Vec3::X,
+                        from_deg: -5.0,
+                        to_deg: -70.0,
+                        weight: 0.45,
+                    },
+                    input("effort", 0.3),
+                    input("move_effort", 0.35),
+                ],
+            ),
+            muscle(
+                &n("calf"),
+                LOWER_LEG[side],
+                vec![
+                    MuscleDriver::Joint {
+                        bone: FOOT[side].into(),
+                        axis: Vec3::X,
+                        from_deg: 0.0,
+                        to_deg: -25.0,
+                        weight: 0.6,
+                    },
+                    input("move_effort", 0.3),
+                ],
+            ),
+            muscle(
+                &n("glute"),
+                "hips",
+                vec![input("effort", 0.3), input("move_effort", 0.2)],
+            ),
+        ]);
+    }
+    out
+}
+
+pub fn foot_ik() -> FootIk {
+    FootIk {
+        legs: (0..2)
+            .map(|side| LegIk {
+                upper: UPPER_LEG[side].into(),
+                lower: LOWER_LEG[side].into(),
+                foot: FOOT[side].into(),
+                toe: Some(TOE[side].into()),
+                knee_direction: Vec3::NEG_Z,
+            })
+            .collect(),
+        ..Default::default()
+    }
+}
+
+pub fn ponytail() -> SpringChainDef {
+    SpringChainDef {
+        bones: vec![
+            "ponytail_1".into(),
+            "ponytail_2".into(),
+            "ponytail_3".into(),
+        ],
+        stiffness: 0.06,
+        damping: 0.86,
+        gravity: 0.6,
+        wind: 0.4,
+        tip_length: 0.09,
+    }
+}
+
+// ----------------------------------------------------------------------------------- clips
+
+/// Arm pose: shoulder flexion (forward), twist (internal), abduction (outward), elbow, wrist.
+#[derive(Clone, Copy)]
+struct Arm {
+    flex: f32,
+    twist: f32,
+    abduct: f32,
+    elbow: f32,
+    wrist: f32,
+    /// Clavicle protraction (shoulder forward) and elevation, degrees.
+    protract: f32,
+    elevate: f32,
+}
+
+impl Arm {
+    const HANG: Arm = Arm {
+        flex: 4.0,
+        twist: 0.0,
+        abduct: -15.0,
+        elbow: 12.0,
+        wrist: 0.0,
+        protract: 0.0,
+        elevate: 0.0,
+    };
+}
+
+fn arm(p: &mut PoseBuilder, side: usize, a: Arm) {
+    let s = S[side];
+    p.rot(CLAVICLE[side], 0.0, a.protract * s, a.elevate * s)
+        .rot(UPPER_ARM[side], a.flex, a.twist * s, a.abduct * s)
+        .rot(LOWER_ARM[side], a.elbow, 0.0, 0.0)
+        .rot(HAND[side], a.wrist, 0.0, 0.0);
+}
+
+/// Leg pose: hip flexion (forward), abduction, knee (positive = bent), ankle (positive =
+/// toes up), toe bend.
+fn leg(p: &mut PoseBuilder, side: usize, hip: f32, abduct: f32, knee: f32, ankle: f32, toe: f32) {
+    let s = S[side];
+    p.rot(UPPER_LEG[side], hip, 0.0, abduct * s)
+        .rot(LOWER_LEG[side], -knee, 0.0, 0.0)
+        .rot(FOOT[side], ankle, 0.0, 0.0)
+        .rot(TOE[side], toe, 0.0, 0.0);
+}
+
+/// A crouch that keeps the feet flat under the hips: returns how far the hips drop.
+fn crouch(p: &mut PoseBuilder, side: usize, hip: f32) -> f32 {
+    leg(p, side, hip, 0.0, 2.0 * hip, hip, 0.0);
+    0.83 * (1.0 - hip.to_radians().cos())
+}
+
+fn spine(p: &mut PoseBuilder, x: [f32; 4], yaw: [f32; 4], roll: [f32; 4]) {
+    for (i, b) in ["spine", "chest", "neck", "head"].into_iter().enumerate() {
+        p.rot(b, x[i], yaw[i], roll[i]);
+    }
+}
+
+fn idle(s: &Skeleton) -> AnimationClip {
+    AnimationClip::from_fn("idle", 3.2, 33, true, |ph| {
+        let mut p = PoseBuilder::new(s);
+        let breath = cycle_sin(ph);
+        let sway = cycle_sin(ph);
+        p.rot_move(
+            "hips",
+            Vec3::new(0.012 * sway, -0.008, 0.0),
+            0.0,
+            2.0 * sway,
+            -1.5 * sway,
+        );
+        spine(
+            &mut p,
+            [-1.0, 1.2 * breath, 1.0, -1.0 - 0.6 * breath],
+            [-sway, -0.8 * sway, 0.5 * sway, 1.0 * sway],
+            [1.0 * sway, 0.5 * sway, -0.8 * sway, -0.8 * sway],
+        );
+        for (side, s) in S.iter().enumerate() {
+            arm(
+                &mut p,
+                side,
+                Arm {
+                    elevate: 1.2 * breath,
+                    flex: 4.0 + 1.0 * breath,
+                    ..Arm::HANG
+                },
+            );
+            let k = 4.0 + 2.0 * s * sway;
+            leg(&mut p, side, 2.0 + k * 0.5, 1.5, k, k * 0.5 - 2.0, 0.0);
+        }
+        p.take()
+    })
+}
+
+fn walk(s: &Skeleton) -> AnimationClip {
+    AnimationClip::from_fn("walk", 1.1, 45, true, |ph| {
+        let mut p = PoseBuilder::new(s);
+        let c = cycle(ph);
+        p.rot_move(
+            "hips",
+            Vec3::new(0.018 * cycle_sin(ph), -0.025 - 0.022 * cycle(ph * 2.0), 0.0),
+            3.0,
+            5.0 * c,
+            3.0 * cycle_sin(ph),
+        );
+        spine(
+            &mut p,
+            [-2.0, 1.0, 1.0, -2.0],
+            [-3.0 * c, -5.0 * c, 1.5 * c, 1.5 * c],
+            [
+                -1.5 * cycle_sin(ph),
+                -cycle_sin(ph),
+                1.0 * cycle_sin(ph),
+                1.0 * cycle_sin(ph),
+            ],
+        );
+        for side in 0..2 {
+            // Right foot strikes at phase 0, left at 0.5.
+            let q = (ph + if side == 1 { 0.0 } else { 0.5 }).rem_euclid(1.0);
+            let cq = cycle(q);
+            let hip = 18.0 * cq + 4.0;
+            let knee = 4.0 + 14.0 * bump(q, 0.12, 0.09) + 58.0 * bump(q, 0.73, 0.14);
+            let ankle =
+                4.0 * bump(q, 0.0, 0.06) - 14.0 * bump(q, 0.55, 0.08) + 6.0 * bump(q, 0.8, 0.1);
+            let toe = 24.0 * bump(q, 0.53, 0.07);
+            leg(&mut p, side, hip, 1.0, knee, ankle, toe);
+            arm(
+                &mut p,
+                side,
+                Arm {
+                    flex: -16.0 * cq + 2.0,
+                    elbow: 20.0 - 6.0 * cq,
+                    protract: -3.0 * cq,
+                    ..Arm::HANG
+                },
+            );
+        }
+        p.take()
+    })
+    .with_event(0.02, "footstep", Some("foot_r"))
+    .with_event(0.52, "footstep", Some("foot_l"))
+}
+
+fn run(s: &Skeleton) -> AnimationClip {
+    AnimationClip::from_fn("run", 0.7, 41, true, |ph| {
+        let mut p = PoseBuilder::new(s);
+        let c = cycle(ph);
+        p.rot_move(
+            "hips",
+            Vec3::new(
+                0.012 * cycle_sin(ph),
+                -0.05 - 0.035 * cycle((ph - 0.15) * 2.0),
+                0.0,
+            ),
+            6.0,
+            8.0 * c,
+            4.0 * cycle_sin(ph),
+        );
+        spine(
+            &mut p,
+            [-9.0, -4.0, 6.0, 1.0],
+            [-4.0 * c, -9.0 * c, 3.0 * c, 2.0 * c],
+            [
+                -2.0 * cycle_sin(ph),
+                -cycle_sin(ph),
+                1.5 * cycle_sin(ph),
+                1.0 * cycle_sin(ph),
+            ],
+        );
+        for side in 0..2 {
+            let q = (ph + if side == 1 { 0.0 } else { 0.5 }).rem_euclid(1.0);
+            let hip = 30.0 * cycle(q - 0.05) + 12.0;
+            let knee = 22.0 + 18.0 * bump(q, 0.15, 0.1) + 85.0 * bump(q, 0.68, 0.15);
+            let ankle = -18.0 * bump(q, 0.35, 0.08) + 10.0 * bump(q, 0.85, 0.12) + 4.0;
+            let toe = 20.0 * bump(q, 0.33, 0.07);
+            leg(&mut p, side, hip, 1.0, knee, ankle, toe);
+            let cq = cycle(q);
+            arm(
+                &mut p,
+                side,
+                Arm {
+                    flex: -32.0 * cq + 6.0,
+                    abduct: -11.0,
+                    elbow: 82.0 - 12.0 * cq,
+                    wrist: 5.0,
+                    protract: -6.0 * cq,
+                    ..Arm::HANG
+                },
+            );
+        }
+        p.take()
+    })
+    .with_event(0.02, "footstep", Some("foot_r"))
+    .with_event(0.52, "footstep", Some("foot_l"))
+}
+
+/// Upper-body lean into a turn (additive). `dir`: +1 left, −1 right.
+fn lean(s: &Skeleton, name: &str, dir: f32) -> AnimationClip {
+    AnimationClip::from_fn(name, 1.0, 2, true, |_| {
+        let mut p = PoseBuilder::new(s);
+        spine(
+            &mut p,
+            [0.0; 4],
+            [2.0 * dir, 3.0 * dir, 2.0 * dir, 3.0 * dir],
+            [7.0 * dir, 5.0 * dir, -4.0 * dir, -6.0 * dir],
+        );
+        p.take()
+    })
+}
+
+fn heavy_swing(s: &Skeleton) -> AnimationClip {
+    let effort = [
+        (0.0, 0.0),
+        (0.15, 0.25),
+        (0.32, 0.55),
+        (0.45, 1.0),
+        (0.58, 1.0),
+        (0.75, 0.15),
+        (1.0, 0.0),
+    ];
+    AnimationClip::from_fn("heavy_swing", 2.0, 61, false, |ph| {
+        let mut p = PoseBuilder::new(s);
+        let k = |keys: &[(f32, f32)]| keyed(ph, keys);
+        let bend = k(&[
+            (0.0, 2.0),
+            (0.32, 8.0),
+            (0.55, 27.0),
+            (0.65, 28.0),
+            (0.88, 6.0),
+            (1.0, 2.0),
+        ]);
+        let mut drop = 0.0;
+        for side in 0..2 {
+            drop = crouch(&mut p, side, bend);
+        }
+        p.rot_move(
+            "hips",
+            Vec3::new(0.0, -drop, 0.0),
+            k(&[(0.0, 0.0), (0.55, 10.0), (1.0, 0.0)]),
+            k(&[(0.0, 0.0), (0.32, -10.0), (0.55, 8.0), (1.0, 0.0)]),
+            0.0,
+        );
+        let chest_yaw = k(&[
+            (0.0, 0.0),
+            (0.32, -22.0),
+            (0.53, 4.0),
+            (0.65, 6.0),
+            (1.0, 0.0),
+        ]);
+        spine(
+            &mut p,
+            [
+                k(&[
+                    (0.0, -1.0),
+                    (0.32, 10.0),
+                    (0.42, 12.0),
+                    (0.55, -22.0),
+                    (0.65, -26.0),
+                    (0.85, -6.0),
+                    (1.0, -1.0),
+                ]),
+                k(&[
+                    (0.0, 0.0),
+                    (0.32, 8.0),
+                    (0.55, -12.0),
+                    (0.65, -14.0),
+                    (1.0, 0.0),
+                ]),
+                k(&[(0.0, 0.0), (0.55, 10.0), (1.0, 0.0)]),
+                k(&[(0.0, 0.0), (0.32, 6.0), (0.55, -2.0), (1.0, 0.0)]),
+            ],
+            [
+                chest_yaw * 0.4,
+                chest_yaw * 0.6,
+                -chest_yaw * 0.3,
+                -chest_yaw * 0.4,
+            ],
+            [0.0, 0.0, 0.0, 0.0],
+        );
+        // Right arm swings the hammer (the left hand follows it on the handle through
+        // ReachIk while the `grip` curve is on). The wrists cock the hammer back on the lift
+        // and snap it in line with the arms for the strike.
+        arm(
+            &mut p,
+            1,
+            Arm {
+                flex: k(&[
+                    (0.0, 4.0),
+                    (0.12, 30.0),
+                    (0.32, 165.0),
+                    (0.42, 160.0),
+                    (0.53, 62.0),
+                    (0.6, 58.0),
+                    (0.68, 50.0),
+                    (0.85, 10.0),
+                    (1.0, 4.0),
+                ]),
+                twist: k(&[(0.0, 0.0), (0.32, -20.0), (0.53, 0.0), (1.0, 0.0)]),
+                abduct: k(&[
+                    (0.0, -15.0),
+                    (0.32, 8.0),
+                    (0.53, -10.0),
+                    (0.7, -10.0),
+                    (1.0, -15.0),
+                ]),
+                elbow: k(&[
+                    (0.0, 12.0),
+                    (0.32, 115.0),
+                    (0.42, 120.0),
+                    (0.5, 15.0),
+                    (0.53, 8.0),
+                    (0.65, 10.0),
+                    (1.0, 12.0),
+                ]),
+                wrist: k(&[
+                    (0.0, 0.0),
+                    (0.32, -30.0),
+                    (0.45, -20.0),
+                    (0.53, -70.0),
+                    (0.65, -60.0),
+                    (0.85, -20.0),
+                    (1.0, 0.0),
+                ]),
+                protract: k(&[
+                    (0.0, 0.0),
+                    (0.32, -8.0),
+                    (0.53, 12.0),
+                    (0.7, 8.0),
+                    (1.0, 0.0),
+                ]),
+                elevate: k(&[(0.0, 0.0), (0.32, 10.0), (0.55, 0.0)]),
+            },
+        );
+        arm(
+            &mut p,
+            0,
+            Arm {
+                flex: k(&[
+                    (0.0, 4.0),
+                    (0.32, 40.0),
+                    (0.52, -30.0),
+                    (0.8, 0.0),
+                    (1.0, 4.0),
+                ]),
+                abduct: k(&[(0.0, -15.0), (0.32, 10.0), (0.52, 5.0), (1.0, -15.0)]),
+                elbow: k(&[(0.0, 12.0), (0.32, 60.0), (0.52, 35.0), (1.0, 12.0)]),
+                ..Arm::HANG
+            },
+        );
+        p.take()
+    })
+    .with_curve("effort", 61, |ph| keyed(ph, &effort))
+    // Two hands on the handle from the lift to the recovery (drives the off hand's ReachIk).
+    .with_curve("grip", 61, |ph| {
+        keyed(ph, &[(0.0, 0.0), (0.1, 1.0), (0.8, 1.0), (0.95, 0.0)])
+    })
+    .with_event(0.53, "impact", Some("hand_r"))
+}
+
+fn block(s: &Skeleton) -> AnimationClip {
+    AnimationClip::from_fn("block", 1.2, 25, true, |ph| {
+        let mut p = PoseBuilder::new(s);
+        let tremble = (ph * 6.0 * std::f32::consts::TAU).sin();
+        let mut drop = 0.0;
+        for side in 0..2 {
+            drop = crouch(&mut p, side, 14.0);
+        }
+        p.rot_move("hips", Vec3::new(0.0, -drop, 0.0), 4.0, 0.0, 0.0);
+        spine(&mut p, [-8.0, -6.0, 2.0, -12.0], [0.0; 4], [0.0; 4]);
+        for side in 0..2 {
+            arm(
+                &mut p,
+                side,
+                Arm {
+                    flex: 72.0 + 0.6 * tremble,
+                    twist: 30.0,
+                    abduct: 16.0,
+                    elbow: 122.0 + 0.8 * tremble,
+                    wrist: -10.0,
+                    protract: 6.0,
+                    elevate: 6.0,
+                },
+            );
+        }
+        p.take()
+    })
+    .with_curve("effort", 25, |ph| {
+        0.85 + 0.05 * (ph * 3.0 * std::f32::consts::TAU).sin()
+    })
+    .with_curve("brace", 2, |_| 1.0)
+}
+
+fn reach(s: &Skeleton) -> AnimationClip {
+    let effort = [
+        (0.0, 0.0),
+        (0.22, 0.25),
+        (0.5, 0.45),
+        (0.78, 0.4),
+        (1.0, 0.0),
+    ];
+    AnimationClip::from_fn("reach", 2.6, 53, false, |ph| {
+        let mut p = PoseBuilder::new(s);
+        let k = |keys: &[(f32, f32)]| keyed(ph, keys);
+        p.rot_move(
+            "hips",
+            Vec3::new(
+                0.0,
+                -0.01,
+                k(&[(0.0, 0.0), (0.5, 0.04), (0.78, 0.04), (1.0, 0.0)]),
+            ),
+            k(&[(0.0, 0.0), (0.5, 6.0), (0.78, 6.0), (1.0, 0.0)]),
+            0.0,
+            0.0,
+        );
+        spine(
+            &mut p,
+            [
+                k(&[(0.0, 0.0), (0.5, -8.0), (0.78, -8.0), (1.0, 0.0)]),
+                k(&[
+                    (0.0, 0.0),
+                    (0.22, 2.0),
+                    (0.5, -16.0),
+                    (0.78, -16.0),
+                    (1.0, 0.0),
+                ]),
+                k(&[(0.0, 0.0), (0.5, 9.0), (0.78, 9.0), (1.0, 0.0)]),
+                k(&[(0.0, 0.0), (0.5, 8.0), (0.78, 8.0), (1.0, 0.0)]),
+            ],
+            [0.0; 4],
+            [0.0; 4],
+        );
+        for side in 0..2 {
+            arm(
+                &mut p,
+                side,
+                Arm {
+                    flex: k(&[
+                        (0.0, 4.0),
+                        (0.22, 45.0),
+                        (0.32, 45.0),
+                        (0.5, 92.0),
+                        (0.78, 92.0),
+                        (1.0, 4.0),
+                    ]),
+                    twist: k(&[(0.0, 0.0), (0.22, 25.0), (0.5, 0.0)]),
+                    abduct: k(&[
+                        (0.0, -15.0),
+                        (0.22, -20.0),
+                        (0.5, -4.0),
+                        (0.78, -4.0),
+                        (1.0, -15.0),
+                    ]),
+                    elbow: k(&[
+                        (0.0, 12.0),
+                        (0.22, 135.0),
+                        (0.32, 135.0),
+                        (0.5, 4.0),
+                        (0.78, 4.0),
+                        (1.0, 12.0),
+                    ]),
+                    wrist: k(&[
+                        (0.0, 0.0),
+                        (0.22, -10.0),
+                        (0.5, 10.0),
+                        (0.78, 10.0),
+                        (1.0, 0.0),
+                    ]),
+                    protract: k(&[
+                        (0.0, 0.0),
+                        (0.22, -5.0),
+                        (0.5, 24.0),
+                        (0.78, 24.0),
+                        (1.0, 0.0),
+                    ]),
+                    elevate: k(&[(0.0, 0.0), (0.5, 4.0), (1.0, 0.0)]),
+                },
+            );
+            leg(&mut p, side, 2.0, 1.5, 3.0, 1.0, 0.0);
+        }
+        p.take()
+    })
+    .with_curve("effort", 53, |ph| keyed(ph, &effort))
+}
+
+fn flex(s: &Skeleton) -> AnimationClip {
+    let flex = [(0.0, 0.0), (0.2, 1.0), (0.8, 1.0), (1.0, 0.0)];
+    AnimationClip::from_fn("flex", 3.0, 31, false, |ph| {
+        let mut p = PoseBuilder::new(s);
+        let w = keyed(ph, &flex);
+        let shake = (ph * 9.0 * std::f32::consts::TAU).sin() * w;
+        p.rot_move("hips", Vec3::new(0.0, -0.01, 0.0), 0.0, 0.0, 0.0);
+        spine(
+            &mut p,
+            [0.0, 4.0 * w, -2.0 * w, 2.0 * w],
+            [0.0; 4],
+            [0.0; 4],
+        );
+        for side in 0..2 {
+            arm(
+                &mut p,
+                side,
+                Arm {
+                    flex: 4.0 * (1.0 - w) + 5.0 * w,
+                    twist: -90.0 * w,
+                    abduct: -15.0 + 78.0 * w,
+                    elbow: 12.0 + 108.0 * w + 0.6 * shake,
+                    wrist: 20.0 * w,
+                    protract: -6.0 * w,
+                    elevate: 8.0 * w,
+                },
+            );
+            leg(&mut p, side, 3.0, 4.0 * w + 1.5, 6.0, 3.0, 0.0);
+        }
+        p.take()
+    })
+    .with_curve("flex", 31, |ph| keyed(ph, &flex))
+}
+
+/// Every clip the humanoid graph uses.
+pub fn clips(s: &Skeleton) -> Vec<AnimationClip> {
+    vec![
+        idle(s),
+        walk(s),
+        run(s),
+        lean(s, "lean_left", 1.0),
+        lean(s, "lean_right", -1.0),
+        heavy_swing(s),
+        block(s),
+        reach(s),
+        flex(s),
+    ]
+}
+
+/// Locomotion (idle/walk/run by `speed`, leaning by `turn`), plus `heavy_swing`, `block`
+/// (held while `blocking` > 0.5), `reach` and `flex` actions.
+pub fn graph() -> AnimGraph {
+    let locomotion = NodeDef::Blend1d {
+        param: "speed".into(),
+        children: vec![
+            Blend1dChild {
+                at: 0.0,
+                node: NodeDef::clip("idle"),
+            },
+            Blend1dChild {
+                at: WALK_SPEED,
+                node: NodeDef::clip("walk"),
+            },
+            Blend1dChild {
+                at: RUN_SPEED,
+                node: NodeDef::clip("run"),
+            },
+        ],
+        sync: true,
+        match_speed: true,
+    };
+    let leaning = NodeDef::Additive {
+        base: Box::new(locomotion),
+        additive: Box::new(NodeDef::Blend1d {
+            param: "turn".into(),
+            children: vec![
+                Blend1dChild {
+                    at: -1.0,
+                    node: NodeDef::clip("lean_right"),
+                },
+                Blend1dChild {
+                    at: 0.0,
+                    node: NodeDef::Rest,
+                },
+                Blend1dChild {
+                    at: 1.0,
+                    node: NodeDef::clip("lean_left"),
+                },
+            ],
+            sync: false,
+            match_speed: false,
+        }),
+        weight: Weight::default(),
+    };
+    let state = |name: &str, node: NodeDef| StateDef {
+        name: name.into(),
+        node,
+        speed: 1.0,
+    };
+    AnimGraph {
+        name: GRAPH.into(),
+        root: NodeDef::StateMachine {
+            states: vec![
+                state("move", leaning),
+                state("heavy_swing", NodeDef::one_shot("heavy_swing")),
+                state("block", NodeDef::clip("block")),
+                state("reach", NodeDef::one_shot("reach")),
+                state("flex", NodeDef::one_shot("flex")),
+            ],
+            transitions: vec![
+                TransitionDef::new(
+                    "move",
+                    "heavy_swing",
+                    Condition::trigger("heavy_swing"),
+                    0.2,
+                ),
+                TransitionDef::new("heavy_swing", "move", Condition::Finished, 0.35).inertialize(),
+                TransitionDef::new("move", "block", Condition::trigger("block"), 0.15)
+                    .inertialize(),
+                TransitionDef::new(
+                    "block",
+                    "move",
+                    Condition::param("blocking", Cmp::Lt, 0.5),
+                    0.3,
+                ),
+                TransitionDef::new("move", "reach", Condition::trigger("reach"), 0.25),
+                TransitionDef::new("reach", "move", Condition::Finished, 0.35).inertialize(),
+                TransitionDef::new("move", "flex", Condition::trigger("flex"), 0.3),
+                TransitionDef::new("flex", "move", Condition::Finished, 0.4).inertialize(),
+            ],
+            initial: Some("move".into()),
+        },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::graph::GraphInstance;
+    use crate::muscle::MorphWeights;
+    use std::sync::Arc;
+
+    #[test]
+    fn skeleton_proportions() {
+        let s = skeleton();
+        let y = |b: &str| joint(&s, b).y;
+        assert!((y("foot_r") - 0.08).abs() < 1e-5);
+        assert!((y("head") - 1.60).abs() < 1e-5);
+        // Right arm hangs to +X; its local X is the elbow's bend axis.
+        let elbow = joint(&s, "lower_arm_r");
+        assert!(elbow.x > 0.3 && elbow.y < 1.25);
+    }
+
+    #[test]
+    fn arm_rotations_bend_the_way_the_clips_expect() {
+        let s = skeleton();
+        let mut local = s.rest.clone();
+        let mut model = s.rest_model.clone();
+        let mut p = PoseBuilder::new(&s);
+        // Elbow flexion and shoulder flexion bring the hand forward (−Z), on both sides.
+        for side in 0..2 {
+            arm(
+                &mut p,
+                side,
+                Arm {
+                    flex: 30.0,
+                    elbow: 90.0,
+                    ..Arm::HANG
+                },
+            );
+        }
+        for (bone, x) in p.take() {
+            local[s.bone(bone)].r = x.r;
+        }
+        s.to_model(&local, &mut model);
+        for side in 0..2 {
+            let hand = model[s.bone(HAND[side])].t;
+            let elbow = model[s.bone(LOWER_ARM[side])].t;
+            assert!(hand.z < elbow.z - 0.15, "{side}: hand {hand} elbow {elbow}");
+            assert!(
+                hand.x * S[side] > 0.05,
+                "{side}: hand crossed the body: {hand}"
+            );
+        }
+    }
+
+    #[test]
+    fn graph_compiles_and_swing_has_effort() {
+        let s = Arc::new(skeleton());
+        let clips: Vec<Arc<AnimationClip>> = clips(&s).into_iter().map(Arc::new).collect();
+        let lookup = |n: &str| clips.iter().find(|c| c.name == n).cloned();
+        let g = GraphInstance::compile(&graph(), &s, &lookup).unwrap();
+        assert!(g.in_state("move"));
+        let swing = lookup("heavy_swing").unwrap();
+        assert!(swing.curve("effort", 1.0).unwrap() > 0.9);
+        assert!(swing.curve("effort", 0.0).unwrap() < 0.05);
+    }
+
+    #[test]
+    fn mesh_has_every_muscle_target() {
+        let mesh = mesh(Outfit::Athlete);
+        assert!(mesh.triangle_count() > 8000, "{}", mesh.triangle_count());
+        let morphs = MorphWeights::new(mesh.morph_names());
+        for m in muscles() {
+            assert!(morphs.index_of(&m.bulge).is_some(), "no target {}", m.bulge);
+        }
+        // The shirt covers the forearms, the athlete's are bare and veined.
+        let s = skeleton();
+        let forearm = s.bone("lower_arm_r") as u16;
+        let bare = mesh
+            .vertices
+            .iter()
+            .filter(|v| v.joints[0] == forearm && v.weights[0] > 0.9)
+            .all(|v| v.mask.z > 0.5);
+        assert!(bare);
+        let shirt = super::mesh(Outfit::Shirt);
+        assert!(
+            shirt
+                .vertices
+                .iter()
+                .filter(|v| v.joints[0] == forearm && v.weights[0] > 0.9)
+                .all(|v| v.mask.x > 0.5)
+        );
+    }
+}
