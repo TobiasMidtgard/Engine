@@ -465,7 +465,7 @@ pub fn demo_map() -> MapData {
         id: "veyra".into(),
         name: "Veyra".into(),
         kind: PlanetKind::Terran,
-        seed: 3.7,
+        seed: 160.8,
         radius_km: 1180.0,
         orbit_au: 1.0,
         phase_deg: 205.0,
@@ -2825,6 +2825,23 @@ mod tests {
         let json = serde_json::to_value(&m).unwrap();
         let back: MapData = serde_json::from_value(json).unwrap();
         assert_eq!(back, m);
+    }
+
+    #[test]
+    fn demo_places_stand_on_land() {
+        use crate::planet_noise::is_water;
+        let m = demo_map();
+        let (_, veyra) = m.planet("veyra").unwrap();
+        let look = veyra.look();
+        for poi in &veyra.pois {
+            assert!(!is_water(poi.lon, poi.lat, &look), "{} is at sea", poi.name);
+        }
+        assert!(
+            !is_water(m.player.lon, m.player.lat, &look),
+            "the player is at sea"
+        );
+        let w = m.waypoint.as_ref().unwrap();
+        assert!(!is_water(w.lon, w.lat, &look), "the waypoint is at sea");
     }
 
     #[test]
