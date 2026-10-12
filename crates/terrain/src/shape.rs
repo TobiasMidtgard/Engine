@@ -751,7 +751,7 @@ impl PlanetShape {
         finest: f64,
         strength: f64,
     ) -> (f64, f64) {
-        use std::f64::consts::TAU;
+        use std::f64::consts::{PI, TAU};
         // Slopes of the gullies cut so far.
         let mut cuts = DVec3::ZERO;
         let mut dh = 0.0;
@@ -764,8 +764,9 @@ impl PlanetShape {
         // arêtes between the gullies.
         let alpine = smooth(700.0, 2_400.0, height);
         for (i, (depth_k, incise_k)) in EROSION_DEPTH.iter().zip(EROSION_INCISE).enumerate() {
-            // Fade the finest octave in and out with the level of detail.
-            let lod = ((period / finest).log2() + 1.0).clamp(0.0, 1.0);
+            // Fade the octaves in with the level of detail, until their gullies are many
+            // vertices wide (see `EROSION_RESOLVED`).
+            let lod = smooth(1.0, EROSION_RESOLVED, period / finest);
             if lod <= 0.0 {
                 break;
             }
@@ -790,8 +791,16 @@ impl PlanetShape {
             // ends it simply fades out.
             let u = (0.5 - 0.5 * c / rho.max(1e-9)).clamp(0.0, 1.0);
             // Narrow crests between wide gullies high up (still without a crease, which
-            // would draw hairlines); rounded spurs below.
-            let cut = rho * lerp(u, u.powf(0.6), alpine);
+            // would draw hairlines); rounded spurs below. An arête is rounded off over the
+            // finest detail asked for, so it is never sharper than the vertices drawing it.
+            let cut = if alpine > 0.0 {
+                let round = (PI * EROSION_CREST_ROUNDING * finest / period).powi(2);
+                let r = round.powf(0.6);
+                let arete = ((u + round).powf(0.6) - r) / ((1.0 + round).powf(0.6) - r);
+                rho * lerp(u, arete, alpine)
+            } else {
+                rho * u
+            };
             // As deep as the ground is steep (up to about 45°), in proportion to the width;
             // the widest valleys also in proportion to the height of the mountains. Gullies
             // wider than a crest's rounding stop just below it.
@@ -927,6 +936,13 @@ fn surface_distance(dir: DVec3, center: DVec3, r: f64) -> D {
 const EROSION_WIDEST_M: f64 = 2_400.0;
 /// Octaves of erosion, each half as wide: 2.4 km valleys down to 38 m gullies.
 const EROSION_OCTAVES: usize = 7;
+/// An erosion octave fades in between wavelengths of 1 and this many times the finest detail
+/// asked for (2 to 16 vertex spacings on a terrain patch). Gullies only a few vertices wide
+/// would alias: their crests zig-zag between vertices, and the shading flips from one face
+/// of a crest to the other within a vertex, so ridge silhouettes get dark, serrated rims.
+const EROSION_RESOLVED: f64 = 8.0;
+/// Radius of the rounding on top of arêtes, in units of the finest detail asked for.
+const EROSION_CREST_ROUNDING: f64 = 1.5;
 /// Gully stripes per noise cell: how far a gully runs before it forks or merges.
 const EROSION_CELL: f64 = 2.0;
 /// How much each octave's gullies steer the next (0 = all run straight down the big
