@@ -43,6 +43,7 @@
 //! ```
 
 pub mod components;
+pub mod effects;
 pub mod exposure;
 pub mod features;
 pub mod frame;
@@ -81,17 +82,17 @@ pub use mesh::{Mesh, Shape, Vertex};
 pub use renderer::{
     RenderDisabled, RenderStats, Renderer, ScreenshotInfo, Screenshots, capture_now,
 };
-pub use settings::{Atmosphere, DebugView, FogSettings, RenderSettings, Tonemapper};
+pub use settings::{AntiAliasing, Atmosphere, DebugView, FogSettings, RenderSettings, Tonemapper};
 pub use texture::{Image, ImageLoader, PixelFormat};
 pub use wgpu;
 
 pub mod prelude {
     pub use crate::{
-        AlphaMode, AmbientLight, Atmosphere, BoxFace, Camera, DirectionalLight, Exposure,
-        FogSettings, GltfScene, GltfSceneSpawner, Image, MaterialRef, Mesh, MeshRef, MeshRenderer,
-        PointLight, Projection, RenderAppExt, RenderFeature, RenderPhase, RenderPlugin,
-        RenderSettings, Screenshots, Shape, SkyLightVolume, StandardMaterial, Tonemapper,
-        spawn_gltf_scene, spawn_gltf_scene_deferred,
+        AlphaMode, AmbientLight, AntiAliasing, Atmosphere, BoxFace, Camera, DirectionalLight,
+        Exposure, FogSettings, GltfScene, GltfSceneSpawner, Image, MaterialRef, Mesh, MeshRef,
+        MeshRenderer, PointLight, Projection, RenderAppExt, RenderFeature, RenderPhase,
+        RenderPlugin, RenderSettings, Screenshots, Shape, SkyLightVolume, StandardMaterial,
+        Tonemapper, spawn_gltf_scene, spawn_gltf_scene_deferred,
     };
 }
 
@@ -141,7 +142,7 @@ impl Plugin for RenderPlugin {
                 "Indoor space (cave, room, ship interior): inside the box (half_extents, m, local axes) sky light drops to sky_light (0..1), rising to full within fade meters of each of open_faces (PosX/NegX/PosY/NegY/PosZ/NegZ).",
             )
             .register_resource::<RenderSettings>(
-                "Renderer quality and look: shadows, tonemapper (AgX/Aces/Reinhard/None), bloom, grading, debug_view (None/Normals/Cascades).",
+                "Renderer quality and look: shadows (sun_penumbra_scale, contact_shadow_length m), ambient_occlusion (ao_radius m, ao_intensity), anti_aliasing (Taa/None) and sharpness, tonemapper (AgX/Aces/Reinhard/None), bloom, grading, debug_view (None/Normals/Cascades/SkyVisibility/AmbientOcclusion).",
             )
             .register_resource::<FogSettings>("Height fog: density per meter, height_falloff, base_height, color (albedo).")
             .register_resource::<Atmosphere>(
@@ -328,7 +329,7 @@ mod tests {
     /// Every shader must compile against the shader library (no GPU needed).
     #[test]
     fn shaders_validate() {
-        let shaders: [(&str, &str, bool); 7] = [
+        let shaders: [(&str, &str, bool); 9] = [
             ("mesh", include_str!("shaders/mesh.wgsl"), true),
             (
                 "mesh_shadow",
@@ -340,6 +341,8 @@ mod tests {
             ("bloom", include_str!("shaders/bloom.wgsl"), false),
             ("blit", include_str!("shaders/blit.wgsl"), false),
             ("exposure", include_str!("shaders/exposure.wgsl"), false),
+            ("gtao", include_str!("shaders/gtao.wgsl"), true),
+            ("taa", include_str!("shaders/taa.wgsl"), true),
         ];
         let mut errors = Vec::new();
         for (name, src, frame) in shaders {

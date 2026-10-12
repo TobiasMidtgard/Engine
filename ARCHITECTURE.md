@@ -149,6 +149,7 @@ Writes: `HeatField`, `WorldImpulse`, `IgniteRequest`, `DamageEvent`, `NoiseEvent
 | `prepare(world, …)` | read the ECS, cull, upload buffers |
 | `compute(encoder, …)` | GPU simulation (particles, fluids, clouds) |
 | `draw_environment` | add to the sky environment map (clouds, nebulae) |
+| `draw_prepass` | write depth, normal, roughness and motion for opaque geometry (`vs`/`fs` using `prepass_output` from `lib_frame.wgsl`, targets `GpuShared::prepass_targets()`); ambient occlusion, contact shadows and TAA motion work only on surfaces drawn here, and the scene pass must then write the same depth (mark clip positions `@invariant`) |
 | `draw_shadow(cascade)` | cast sun shadows; with `cascade == SKY_OCCLUSION_VIEW`, draw into the top-down sky occlusion map so whatever roofs over the ground (rock, buildings, canopies) keeps sky light and rain out |
 | `draw(Opaque/Sky/Transparent)` | draw into the HDR scene; transparent can read scene color/depth copies |
 | `overlay` | draw onto the final LDR image (UI, debug) |
@@ -164,6 +165,16 @@ only, so walls don't keep the low sky out: caves, rooms, tunnels and ship interi
 cave mouth; it follows its entity, so a ship's interior moves with the ship). Up to 16 volumes
 nearest the camera are used. `RenderSettings::debug_view = SkyVisibility` shows the result.
 
+**Screen-space effects** (built): every frame starts with a depth prepass that also writes
+normals, roughness and motion vectors. From it come ground-truth ambient occlusion (GTAO,
+`RenderSettings::ambient_occlusion`, `ao_radius`, `ao_intensity`; `screen_ao(rel)` in shaders,
+applied to ambient light only, with multi-bounce color and specular occlusion), screen-space
+contact shadows toward the sun (`contact_shadow_length`), and temporal anti-aliasing
+(`anti_aliasing = Taa`, the default). Under TAA the projection is jittered by a sub-pixel
+offset every frame (`frame.jitter`); `frame.unjittered_view_proj` and `prev_view_proj` give
+stable positions, and overlays get an unjittered frame group. Sun shadows use PCSS: the
+penumbra widens with distance from the caster like the real sun's (`sun_penumbra_scale`).
+
 Shared pipelines the core will provide for modules (planned): **strands** for hair, fur and grass
 (guide curves in, GPU-expanded strands with hair shading and LOD out; `engine_softbody` drives
 hair/fur, `engine_foliage` drives grass) and **tension-driven wrinkle maps** in `StandardMaterial`
@@ -171,7 +182,8 @@ hair/fur, `engine_foliage` drives grass) and **tension-driven wrinkle maps** in 
 muscles and skinned clothes and by `engine_softbody` for simulated cloth).
 
 Shader library: `lib_types.wgsl` (types, noise, BRDF) and `lib_frame.wgsl` (group 0 frame
-data, `shade_surface`, `shadow_factor`, `sky_visibility`, `apply_fog`, atmosphere, `wind_offset`).
+data, `shade_surface`, `shadow_factor`, `contact_shadow`, `screen_ao`, `sky_visibility`, `apply_fog`,
+atmosphere, `wind_offset`, `prepass_output`).
 
 ## AI integration
 

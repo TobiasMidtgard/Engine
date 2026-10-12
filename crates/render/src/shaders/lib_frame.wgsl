@@ -13,6 +13,11 @@
 @group(0) @binding(7) var sky_occlusion_map: texture_depth_2d; // top-down depth of the highest surface (0 = top)
 @group(0) @binding(8) var sky_occlusion_sampler: sampler;      // nearest, for textureGather on the map
 @group(0) @binding(9) var<storage, read> sky_camera: array<vec4<f32>>; // [0].x: sky visibility at the camera
+// Screen-space results of the depth prepass (see `RenderFeature::draw_prepass`). In the prepass
+// itself and in passes that write them, these hold neutral 1x1 stand-ins.
+@group(0) @binding(10) var ao_map: texture_2d<f32>;          // ambient occlusion (R, 1 = open)
+@group(0) @binding(11) var prepass_normal: texture_2d<f32>;  // octahedral world normal xy, perceptual roughness, 1 where written
+@group(0) @binding(12) var prepass_depth: texture_depth_2d;  // depth after the prepass (reverse-Z, 0 = nothing)
 
 // Multiply final radiance by this before writing to the HDR target.
 fn pre_expose(c: vec3<f32>) -> vec3<f32> { return c * frame.exposure.x; }
@@ -26,6 +31,105 @@ fn tiling_pos(rel: vec3<f32>) -> vec3<f32> { return rel + frame.camera_world_fra
 // Distance along the camera's forward axis (positive in front).
 fn view_depth(rel: vec3<f32>) -> f32 {
     return -(frame.view * vec4<f32>(rel, 1.0)).z;
+}
+
+// ---------------------------------------------------------------- screen space
+// Pixel coordinates (top-left origin, centers at .5) of a camera-relative point in the current,
+// jittered view: the pixel a fragment at `rel` was rasterized into.
+fn pixel_of(rel: vec3<f32>) -> vec2<f32> {
+    let clip = frame.view_proj * vec4<f32>(rel, 1.0);
+    let ndc = clip.xy / clip.w;
+    return (ndc * vec2<f32>(0.5, -0.5) + 0.5) * frame.viewport.xy;
+}
+
+// View-space position (camera at the origin looking down -Z) of the depth-buffer value `z` at
+// screen `uv`.
+fn view_position(uv: vec2<f32>, z: f32) -> vec3<f32> {
+    let p = frame.inv_proj * vec4<f32>(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0, z, 1.0);
+    return p.xyz / p.w;
+}
+
+// Distance along the view axis of the depth-buffer value `z` at screen `uv` (meters).
+fn scene_linear_depth(uv: vec2<f32>, z: f32) -> f32 {
+    return -view_position(uv, z).z;
+}
+
+// Whether the prepass drew the surface at camera-relative `rel` (so its normal, ambient
+// occlusion and motion are in the screen-space maps). Fragments of features without a prepass,
+// transparent surfaces and anything in front of the prepass geometry get false.
+fn in_prepass(rel: vec3<f32>, pixel: vec2<i32>) -> bool {
+    let size = vec2<i32>(textureDimensions(prepass_depth));
+    if (any(pixel < vec2<i32>(0)) || any(pixel >= size)) { return false; }
+    let z = textureLoad(prepass_depth, pixel, 0);
+    if (z <= 0.0 || textureLoad(prepass_normal, pixel, 0).w < 0.5) { return false; }
+    let uv = (vec2<f32>(pixel) + 0.5) * frame.viewport.zw;
+    let d = view_depth(rel);
+    return abs(scene_linear_depth(uv, z) - d) <= 0.01 * d + 0.01;
+}
+
+// Screen-space ambient occlusion for the surface at `rel` (1 = open sky and walls far away,
+// toward 0 in creases and under objects). 1 when ambient occlusion is off or the surface wasn't
+// in the prepass.
+fn screen_ao(rel: vec3<f32>) -> f32 {
+    let strength = frame.effects.x;
+    if (strength <= 0.0) { return 1.0; }
+    let pixel = vec2<i32>(floor(pixel_of(rel)));
+    if (!in_prepass(rel, pixel)) { return 1.0; }
+    let ao = textureLoad(ao_map, pixel, 0).r;
+    return pow(saturate(ao), strength);
+}
+
+// Ambient occlusion with interreflections (Jimenez et al. 2016, "Practical Real-Time Strategies
+// for Accurate Indirect Occlusion"): bright surfaces bounce light into their own creases.
+fn ao_multibounce(visibility: f32, albedo: vec3<f32>) -> vec3<f32> {
+    let a = 2.0404 * albedo - 0.3324;
+    let b = -4.7951 * albedo + 0.6417;
+    let c = 2.7552 * albedo + 0.6903;
+    return max(vec3<f32>(visibility), ((visibility * a + b) * visibility + c) * visibility);
+}
+
+// Occlusion of reflected environment light from ambient occlusion (Lagarde & de Rousiers 2014).
+// `roughness` is the squared (alpha) roughness.
+fn specular_occlusion(n_dot_v: f32, visibility: f32, roughness: f32) -> f32 {
+    return saturate(pow(n_dot_v + visibility, exp2(-16.0 * roughness - 1.0)) - 1.0 + visibility);
+}
+
+// ---------------------------------------------------------------- prepass output
+// What a feature's prepass fragment shader returns (`RenderFeature::draw_prepass`; targets from
+// `GpuShared::prepass_targets`). Fill it with `prepass_output`.
+struct PrepassOutput {
+    @location(0) normal: vec4<f32>,  // octahedral world normal xy, perceptual roughness, 1
+    @location(1) motion: vec2<f32>,  // screen motion since last frame (uv units, current - previous)
+};
+
+// Unjittered clip position of a camera-relative point, for motion vectors. Pass it from the
+// vertex to the fragment shader as a vec4 and hand it to `prepass_output`.
+fn motion_clip(rel: vec3<f32>) -> vec4<f32> {
+    return frame.unjittered_view_proj * vec4<f32>(rel, 1.0);
+}
+
+// Clip position of where a point was last frame, from its position relative to LAST frame's
+// camera (`prev_rel`). For geometry that doesn't move in the world use `static_prev_rel(rel)`.
+fn prev_motion_clip(prev_rel: vec3<f32>) -> vec4<f32> {
+    return frame.prev_view_proj * vec4<f32>(prev_rel, 1.0);
+}
+
+// Last frame's camera-relative position of a point that is fixed in the world.
+fn static_prev_rel(rel: vec3<f32>) -> vec3<f32> {
+    return rel + frame.camera_delta.xyz;
+}
+
+// Prepass output from the shaded normal (world space, unit), perceptual roughness and the two
+// interpolated motion clip positions.
+fn prepass_output(normal: vec3<f32>, roughness: f32, clip_now: vec4<f32>, clip_prev: vec4<f32>) -> PrepassOutput {
+    var out: PrepassOutput;
+    out.normal = vec4<f32>(oct_encode(normal), roughness, 1.0);
+    var motion = vec2<f32>(0.0);
+    if (clip_prev.w > 1e-6 && clip_now.w > 1e-6) {
+        motion = (clip_now.xy / clip_now.w - clip_prev.xy / clip_prev.w) * vec2<f32>(0.5, -0.5);
+    }
+    out.motion = motion;
+    return out;
 }
 
 // Wind displacement for a vertex: `sway` meters at the top (`height01` = 1), none at the root.
@@ -44,38 +148,138 @@ fn wind_offset(rel: vec3<f32>, height01: f32, sway: f32) -> vec3<f32> {
 }
 
 // ---------------------------------------------------------------- shadows
+const SHADOW_BLOCKER_TAPS: i32 = 8;
+const SHADOW_PCF_TAPS: i32 = 16;
+const GOLDEN_ANGLE: f32 = 2.39996323;
+
+// Per-pixel noise in [0, 1) that changes every frame when temporal anti-aliasing is on (its
+// history averages it out); fixed otherwise.
+fn frame_noise(pixel: vec2<f32>) -> f32 {
+    var offset = 0.0;
+    if (any(frame.jitter.zw != vec2<f32>(0.0))) {
+        offset = f32(u32(frame.time.w) % 64u) * 5.588238;
+    }
+    return interleaved_gradient_noise(pixel + offset);
+}
+
+// Point i of n on a Vogel (sunflower) disk of radius 1, turned by `angle`.
+fn vogel_disk(i: i32, n: i32, angle: f32) -> vec2<f32> {
+    let r = sqrt((f32(i) + 0.5) / f32(n));
+    let theta = f32(i) * GOLDEN_ANGLE + angle;
+    return vec2<f32>(cos(theta), sin(theta)) * r;
+}
+
+// Sun visibility (0 = in shadow, 1 = lit) at camera-relative `rel` with normal `n`.
+//
+// Percentage-closer soft shadows: a blocker search estimates how far the caster is from the
+// receiver, and the filter grows with that distance times the sun's angular size
+// (`RenderSettings::sun_penumbra_scale`): crisp where things touch the ground, soft at the end of
+// a tree's shadow. Filter taps are rotated per pixel, and cascades blend with a dithered band.
 fn shadow_factor(rel: vec3<f32>, n: vec3<f32>) -> f32 {
     if (frame.sun_color.w < 0.5) { return 1.0; }
     let depth = view_depth(rel);
+    if (depth > frame.shadow_splits[3]) { return 1.0; }
+    let noise = frame_noise(pixel_of(rel));
     var cascade = 0u;
     for (var i = 0u; i < 3u; i++) {
         if (depth > frame.shadow_splits[i]) { cascade = i + 1u; }
     }
-    if (depth > frame.shadow_splits[3]) { return 1.0; }
+    // Dither into the next cascade over the last 10% of this one.
+    if (cascade < 3u) {
+        let split = frame.shadow_splits[cascade];
+        let band = split * 0.1;
+        if (depth > split - band && noise > (split - depth) / band) { cascade += 1u; }
+    }
     let map_size = frame.shadow_params.w;
-    // World size of one shadow texel in this cascade (cascade matrices are orthographic).
+    // World size of one shadow texel in this cascade, and NDC depth per meter (orthographic).
     let m = frame.shadow_cascades[cascade];
     let texel_world = 2.0 / (map_size * length(vec3<f32>(m[0].x, m[1].x, m[2].x)));
-    let n_dot_l = dot(n, frame.sun_dir.xyz);
+    let z_per_meter = length(vec3<f32>(m[0].z, m[1].z, m[2].z));
+    let l = frame.sun_dir.xyz;
+    let n_dot_l = dot(n, l);
     let normal_bias = frame.shadow_params.y * texel_world * (1.0 - 0.5 * saturate(n_dot_l));
     let p = rel + n * normal_bias;
-    let lp = frame.shadow_cascades[cascade] * vec4<f32>(p, 1.0);
+    let lp = m * vec4<f32>(p, 1.0);
     let uv = lp.xy * vec2<f32>(0.5, -0.5) + 0.5;
     let z = lp.z - frame.shadow_params.x;
     if (any(uv < vec2(0.0)) || any(uv > vec2(1.0)) || z > 1.0) { return 1.0; }
     let texel = 1.0 / map_size;
-    let radius = frame.shadow_params.z;
-    var sum = 0.0;
-    for (var y = -1; y <= 1; y++) {
-        for (var x = -1; x <= 1; x++) {
-            let o = vec2<f32>(f32(x), f32(y)) * texel * radius;
-            sum += textureSampleCompareLevel(shadow_map, shadow_sampler, uv + o, cascade, z);
+    let angle = noise * TAU;
+    let tan_sun = tan(frame.sun_dir.w) * frame.effects.z;
+    let min_radius = max(frame.shadow_params.z, 0.5);
+
+    // Blocker search over the largest penumbra a caster up to 30 m away could make.
+    let search = clamp(30.0 * tan_sun / texel_world, min_radius, 16.0);
+    var blocker_sum = 0.0;
+    var blockers = 0.0;
+    for (var i = 0; i < SHADOW_BLOCKER_TAPS; i++) {
+        let o = vogel_disk(i, SHADOW_BLOCKER_TAPS, angle) * search * texel;
+        let d = textureSampleLevel(shadow_map, sky_occlusion_sampler, uv + o, cascade, 0);
+        if (d < z) {
+            blocker_sum += d;
+            blockers += 1.0;
         }
     }
-    var s = sum / 9.0;
+    if (blockers < 0.5) { return 1.0; }
+    let blocker_distance = max(z - blocker_sum / blockers, 0.0) / max(z_per_meter, 1e-9);
+    let radius = clamp(blocker_distance * tan_sun / texel_world, min_radius, 24.0);
+    // Wider filters reach further across sloped receivers: bias with the slope.
+    let slope = sqrt(max(1.0 - n_dot_l * n_dot_l, 0.0)) / max(abs(n_dot_l), 0.2);
+    let z_ref = z - radius * texel_world * min(slope, 5.0) * z_per_meter * 0.5;
+
+    var sum = 0.0;
+    for (var i = 0; i < SHADOW_PCF_TAPS; i++) {
+        let o = vogel_disk(i, SHADOW_PCF_TAPS, angle) * radius * texel;
+        sum += textureSampleCompareLevel(shadow_map, shadow_sampler, uv + o, cascade, z_ref);
+    }
+    let s = sum / f32(SHADOW_PCF_TAPS);
     // Fade out at the end of the last cascade.
     let fade = saturate((frame.shadow_splits[3] - depth) / (frame.shadow_splits[3] * 0.1));
     return mix(1.0, s, fade);
+}
+
+// Screen-space contact shadow toward the sun: marches `frame.effects.y` meters through the
+// prepass depth and returns 0 where something closer to the camera blocks the ray. Catches the
+// small shadows (pebbles, grass, a foot on the ground) the shadow map is too coarse for. Only
+// for surfaces in the prepass, within 60 m.
+const CONTACT_STEPS: i32 = 10;
+
+fn contact_shadow(rel: vec3<f32>, n: vec3<f32>) -> f32 {
+    let len = frame.effects.y;
+    if (len <= 0.0) { return 1.0; }
+    let depth = view_depth(rel);
+    if (depth > 60.0) { return 1.0; }
+    let pixel = pixel_of(rel);
+    if (!in_prepass(rel, vec2<i32>(floor(pixel)))) { return 1.0; }
+    let l = frame.sun_dir.xyz;
+    let noise = frame_noise(pixel.yx + 17.0);
+    let start = rel + n * (0.005 + depth * 0.002);
+    let size = vec2<i32>(textureDimensions(prepass_depth));
+    var shadow = 1.0;
+    for (var i = 0; i < CONTACT_STEPS; i++) {
+        let t = (f32(i) + noise) / f32(CONTACT_STEPS);
+        let q = start + l * (len * t);
+        let clip = frame.view_proj * vec4<f32>(q, 1.0);
+        if (clip.w <= 0.0) { break; }
+        let uv = clip.xy / clip.w * vec2<f32>(0.5, -0.5) + 0.5;
+        if (any(uv <= vec2(0.0)) || any(uv >= vec2(1.0))) { break; }
+        let px = vec2<i32>(uv * frame.viewport.xy);
+        let z = textureLoad(prepass_depth, clamp(px, vec2<i32>(0), size - 1), 0);
+        if (z <= 0.0) { continue; }
+        let scene = scene_linear_depth(uv, z);
+        let ray = view_depth(q);
+        let diff = ray - scene;
+        // In front of the ray by more than the depth noise, but not so far it's a separate
+        // object floating in front (thickness).
+        let bias = 0.01 + ray * 0.003;
+        let thickness = 0.25 + ray * 0.02;
+        if (diff > bias && diff < thickness) {
+            // Fade with distance along the ray and toward the 60 m limit.
+            shadow = mix(1.0, t * 0.5, 1.0 - smoothstep(40.0, 60.0, depth));
+            break;
+        }
+    }
+    return shadow;
 }
 
 // ---------------------------------------------------------------- atmosphere (single scattering)
@@ -394,7 +598,10 @@ fn shade_surface(s: Surface, rel: vec3<f32>) -> vec3<f32> {
     let n_dot_l = saturate(n_dot_l_raw);
     let sun_light = frame.sun_color.rgb * sun_transmittance(rel);
     if (dot(sun_light, sun_light) > 0.0) {
-        let shadow = shadow_factor(rel, n);
+        var shadow = shadow_factor(rel, n);
+        if (shadow > 0.0 && n_dot_l_raw > 0.0) {
+            shadow *= contact_shadow(rel, n);
+        }
         let h = normalize(l + v);
         let n_dot_h = saturate(dot(n, h));
         let l_dot_h = saturate(dot(l, h));
@@ -430,14 +637,17 @@ fn shade_surface(s: Surface, rel: vec3<f32>) -> vec3<f32> {
         color += (diffuse_color * INV_PI * max(nl, wrap * s.subsurface) + spec * nl) * light.color_radius.rgb * falloff;
     }
 
-    // Sky / ambient (occluded in caves and interiors; the constant fill stays).
+    // Sky / ambient (occluded in caves and interiors; the constant fill stays), darkened in
+    // creases by the material's and the screen-space ambient occlusion.
     let sky_vis = sky_visibility(rel, n);
     let fill = frame.ambient.rgb;
     let irradiance = ((sky_ambient(n) - fill) * sky_vis + fill) * PI;
     let r = reflect(-v, n);
     let spec_env = (mix(sample_env(r), sky_ambient(r), saturate(roughness * 1.5)) - fill) * sky_vis + fill;
     let env_brdf = env_brdf_approx(f0, s.roughness, n_dot_v);
-    color += (diffuse_color * irradiance * INV_PI + spec_env * env_brdf) * s.occlusion;
+    let visibility = min(s.occlusion, screen_ao(rel));
+    color += diffuse_color * irradiance * INV_PI * ao_multibounce(visibility, diffuse_color);
+    color += spec_env * env_brdf * specular_occlusion(n_dot_v, visibility, roughness);
 
     color += s.emissive;
     return pre_expose(color);

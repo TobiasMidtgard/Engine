@@ -40,10 +40,15 @@ struct VertexIn {
     @location(8) n1: vec4<f32>,
     @location(9) n2: vec4<f32>,
     @location(10) extra: vec4<u32>,  // material index, flags, mesh min y (f32 bits), mesh height (f32 bits)
+    // Last frame's model matrix rows, relative to last frame's camera (motion vectors).
+    @location(11) p0: vec4<f32>,
+    @location(12) p1: vec4<f32>,
+    @location(13) p2: vec4<f32>,
 };
 
+// `@invariant` keeps the prepass and the main pass depths bit-identical.
 struct VertexOut {
-    @builtin(position) clip: vec4<f32>,
+    @builtin(position) @invariant clip: vec4<f32>,
     @location(0) rel: vec3<f32>,
     @location(1) normal: vec3<f32>,
     @location(2) uv: vec2<f32>,
@@ -51,16 +56,23 @@ struct VertexOut {
     @location(4) @interpolate(flat) material: u32,
 };
 
+// Wind sway of a vertex (meters, camera-relative).
+fn vertex_wind(in: VertexIn, rel: vec3<f32>) -> vec3<f32> {
+    let sway = materials[in.extra.x].params2.y;
+    if (sway <= 0.0) { return vec3<f32>(0.0); }
+    let h01 = saturate((in.position.y - bitcast<f32>(in.extra.z)) / max(bitcast<f32>(in.extra.w), 1e-3));
+    return wind_offset(rel, h01, sway);
+}
+
+fn vertex_rel(in: VertexIn) -> vec3<f32> {
+    let p = vec4<f32>(in.position, 1.0);
+    let rel = vec3<f32>(dot(in.m0, p), dot(in.m1, p), dot(in.m2, p));
+    return rel + vertex_wind(in, rel);
+}
+
 @vertex
 fn vs_main(in: VertexIn) -> VertexOut {
-    let p = vec4<f32>(in.position, 1.0);
-    var rel = vec3<f32>(dot(in.m0, p), dot(in.m1, p), dot(in.m2, p));
-    let mat = materials[in.extra.x];
-    let sway = mat.params2.y;
-    if (sway > 0.0) {
-        let h01 = saturate((in.position.y - bitcast<f32>(in.extra.z)) / max(bitcast<f32>(in.extra.w), 1e-3));
-        rel += wind_offset(rel, h01, sway);
-    }
+    let rel = vertex_rel(in);
     var out: VertexOut;
     out.rel = rel;
     out.normal = normalize(mat3x3<f32>(in.n0.xyz, in.n1.xyz, in.n2.xyz) * in.normal);
@@ -168,6 +180,9 @@ fn fs_main(in: VertexOut, @builtin(front_facing) front: bool) -> @location(0) ve
     if (frame.counts.z == 3u) {
         return vec4<f32>(vec3(sky_visibility(in.rel, n)), 1.0);
     }
+    if (frame.counts.z == 4u) {
+        return vec4<f32>(vec3(screen_ao(in.rel)), 1.0);
+    }
     var color: vec3<f32>;
     if ((flags & 16u) != 0u) {
         color = s.albedo + pre_expose(s.emissive);
@@ -185,4 +200,74 @@ fn fs_main(in: VertexOut, @builtin(front_facing) front: bool) -> @location(0) ve
         color *= tint;
     }
     return vec4<f32>(color, base.a);
+}
+
+// ---------------------------------------------------------------- depth prepass
+// Depth, normals, roughness and motion for ambient occlusion, contact shadows and temporal
+// anti-aliasing. Same vertex positions as `vs_main` (invariant), so the main pass's depth test
+// passes exactly where the prepass drew.
+
+struct PrepassVertexOut {
+    @builtin(position) @invariant clip: vec4<f32>,
+    @location(0) rel: vec3<f32>,
+    @location(1) normal: vec3<f32>,
+    @location(2) uv: vec2<f32>,
+    @location(3) color: vec4<f32>,
+    @location(4) @interpolate(flat) material: u32,
+    @location(5) motion_now: vec4<f32>,
+    @location(6) motion_prev: vec4<f32>,
+};
+
+@vertex
+fn vs_prepass(in: VertexIn) -> PrepassVertexOut {
+    let rel = vertex_rel(in);
+    let p = vec4<f32>(in.position, 1.0);
+    let prev = vec3<f32>(dot(in.p0, p), dot(in.p1, p), dot(in.p2, p)) + (rel - vec3<f32>(dot(in.m0, p), dot(in.m1, p), dot(in.m2, p)));
+    var out: PrepassVertexOut;
+    out.rel = rel;
+    out.normal = normalize(mat3x3<f32>(in.n0.xyz, in.n1.xyz, in.n2.xyz) * in.normal);
+    out.uv = in.uv;
+    out.color = in.color;
+    out.material = in.extra.x;
+    out.clip = frame.view_proj * vec4<f32>(rel, 1.0);
+    out.motion_now = motion_clip(rel);
+    out.motion_prev = prev_motion_clip(prev);
+    return out;
+}
+
+@fragment
+fn fs_prepass(in: PrepassVertexOut, @builtin(front_facing) front: bool) -> PrepassOutput {
+    let mat = materials[in.material];
+    let flags = mat.flags.x;
+    let uv = in.uv * mat.uv.xy;
+    let base_tex = textureSample(base_color_texture, material_sampler, uv);
+    let normal_tex = textureSample(normal_texture, material_sampler, uv);
+    let mr_tex = textureSample(metallic_roughness_texture, material_sampler, uv);
+    let dp1 = dpdx(in.rel);
+    let dp2 = dpdy(in.rel);
+    let duv1 = dpdx(uv);
+    let duv2 = dpdy(uv);
+
+    var base = mat.base_color * in.color;
+    if ((flags & TEX_BASE_COLOR) != 0u) {
+        base *= base_tex;
+    }
+    if ((flags & 15u) == 1u && base.a < mat.params.w) {
+        discard;
+    }
+    var n = normalize(in.normal);
+    if ((flags & TEX_NORMAL) != 0u) {
+        let tn = (normal_tex.xyz * 2.0 - 1.0) * vec3<f32>(mat.params2.z, mat.params2.z, 1.0);
+        n = perturb_normal(n, dp1, dp2, duv1, duv2, tn);
+    }
+    if (!front) { n = -n; }
+    var roughness = mat.params.y;
+    if ((flags & TEX_METALLIC_ROUGHNESS) != 0u) {
+        roughness = clamp(roughness * mr_tex.g, 0.045, 1.0);
+    }
+    if ((flags & 64u) != 0u) {
+        let wet = frame.weather.x * saturate(n.y * 0.7 + 0.5);
+        roughness = mix(roughness, 0.12, wet * 0.85);
+    }
+    return prepass_output(n, roughness, in.motion_now, in.motion_prev);
 }
