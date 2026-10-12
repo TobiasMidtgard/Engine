@@ -315,7 +315,13 @@ fn build(view: &View, size: (u32, u32)) -> App {
     ));
     if view.lab {
         let mut commands = app.world.commands();
-        demo::spawn_demo(&mut commands, DVec3::ZERO);
+        demo::spawn_demo_with(
+            &mut commands,
+            DVec3::ZERO,
+            demo::LabOptions {
+                stand_in_bodies: true,
+            },
+        );
         app.world.flush();
     }
     if !view.lab {
