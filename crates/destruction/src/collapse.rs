@@ -255,8 +255,9 @@ pub fn voxel_support_system(
         let mut lost = 0.0;
         for group in groups {
             lost += group.len() as f32 * voxel_m3;
-            // Big overhangs break into several boulders that fall together.
-            let k = (group.len() / 300).clamp(1, settings.max_chunks_per_hit.min(8));
+            // Big overhangs break into boulders of a few cubic meters that fall together.
+            let group_m3 = group.len() as f32 * voxel_m3;
+            let k = ((group_m3 / 2.5).ceil() as usize).clamp(1, settings.max_chunks_per_hit.max(1));
             let centers: Vec<Vec3> = group
                 .iter()
                 .map(|(idx, ..)| {
@@ -264,10 +265,8 @@ pub fn voxel_support_system(
                     state.center(i, j, k)
                 })
                 .collect();
-            let seeds: Vec<Vec3> = (0..k)
-                .map(|_| centers[rng.range_i32(0, centers.len() as i32) as usize])
-                .collect();
-            let mut parts: Vec<Vec<(usize, u8, u8)>> = vec![Vec::new(); k];
+            let seeds = spread_seeds(&centers, k, rng);
+            let mut parts: Vec<Vec<(usize, u8, u8)>> = vec![Vec::new(); seeds.len()];
             for (v, c) in group.iter().zip(&centers) {
                 let jitter = rng.unit_vector() * state.size * 1.5;
                 let best = seeds
@@ -317,11 +316,8 @@ pub fn voxel_support_system(
                     hull: reduce_points(&pts, 24),
                     mass_kg: volume_m3 * props.density,
                     material: volume.material,
-                    shatter_speed: if volume_m3 > 0.5 {
-                        props.shatter_speed
-                    } else {
-                        0.0
-                    },
+                    // Boulders keep their rock shape: they land and roll, they don't burst into boxes.
+                    shatter_speed: 0.0,
                     lifetime: None,
                     reuse: None,
                     scale: None,
@@ -337,6 +333,30 @@ pub fn voxel_support_system(
         out.stats.collapses += 1;
         out.stats.voxels_removed_m3 += lost;
     }
+}
+
+/// `k` seed points spread through `points` (farthest-point sampling), so Voronoi pieces come
+/// out about the same size instead of a few slivers and one giant.
+fn spread_seeds(points: &[Vec3], k: usize, rng: &mut Rng) -> Vec<Vec3> {
+    let mut seeds = vec![points[rng.range_i32(0, points.len() as i32) as usize]];
+    let mut dist: Vec<f32> = points
+        .iter()
+        .map(|p| p.distance_squared(seeds[0]))
+        .collect();
+    while seeds.len() < k {
+        let Some((far, d)) = dist.iter().enumerate().max_by(|a, b| a.1.total_cmp(b.1)) else {
+            break;
+        };
+        if *d <= 0.0 {
+            break;
+        }
+        let seed = points[far];
+        seeds.push(seed);
+        for (d, p) in dist.iter_mut().zip(points) {
+            *d = d.min(p.distance_squared(seed));
+        }
+    }
+    seeds
 }
 
 fn ctx<'a>(

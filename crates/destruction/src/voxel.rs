@@ -17,7 +17,7 @@
 use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashMap};
 
-use engine_core::math::noise::{fbm2, fbm3, perlin2};
+use engine_core::math::noise::{fbm2, fbm3, perlin2, perlin3};
 use engine_core::math::{Quat, Vec3};
 use engine_core::prelude::*;
 use engine_render::BoxFace;
@@ -161,6 +161,9 @@ pub struct VoxelState {
     pub chunk_dirty: Vec<bool>,
     pub support_dirty: bool,
     pub initial_volume: f32,
+    /// How well each voxel holds sideways, 0..255 around 128 (coherent noise, so rock breaks
+    /// along a rough, natural surface instead of a straight cut). Empty = uniform.
+    pub grain: Vec<u8>,
 }
 
 fn face_index(face: BoxFace) -> usize {
@@ -300,6 +303,7 @@ impl VoxelState {
             chunk_dirty: vec![true; chunk_count],
             support_dirty: false,
             initial_volume: 0.0,
+            grain: vec![128; n],
         };
         for k in 0..dims[2] {
             for j in 0..dims[1] {
@@ -308,6 +312,15 @@ impl VoxelState {
                     let sd = shape_sdf(volume, p);
                     let idx = state.idx(i, j, k);
                     state.density[idx] = ((0.5 + sd / s).clamp(0.0, 1.0) * 255.0).round() as u8;
+                    if state.density[idx] >= SOLID {
+                        let g = perlin3(
+                            p.x as f64 * 0.7,
+                            p.y as f64 * 0.7,
+                            p.z as f64 * 0.7,
+                            volume.seed + 11,
+                        );
+                        state.grain[idx] = (128.0 + g * 180.0).clamp(0.0, 255.0) as u8;
+                    }
                 }
             }
         }
@@ -678,7 +691,12 @@ impl VoxelState {
                 let loss = if vertical {
                     p.vertical_loss_per_m
                 } else {
-                    p.horizontal_loss_per_m
+                    // Weaker and stronger seams: ±40 % sideways.
+                    let grain = self
+                        .grain
+                        .get(nidx)
+                        .map_or(1.0, |g| 1.4 - 0.8 * *g as f32 / 255.0);
+                    p.horizontal_loss_per_m * grain
                 } * s;
                 // A material carries no more than it can hold (soft topsoil can't bridge rock).
                 let cand = sup.min(p.max_support) - loss;
@@ -782,6 +800,7 @@ impl VoxelState {
             chunk_dirty: vec![true],
             support_dirty: false,
             initial_volume: 0.0,
+            grain: Vec::new(),
         };
         for &(idx, d, m) in voxels {
             let (i, j, k) = self.coords(idx);
