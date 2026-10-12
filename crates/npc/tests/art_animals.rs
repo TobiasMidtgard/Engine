@@ -100,7 +100,8 @@ fn spawn(app: &mut App, poses: &[Pose]) -> Vec<(Entity, DVec3)> {
         let e = app
             .world
             .spawn((
-                Transform::from_translation(at).with_rotation(Quat::from_rotation_y(-std::f32::consts::FRAC_PI_2)),
+                Transform::from_translation(at)
+                    .with_rotation(Quat::from_rotation_y(-std::f32::consts::FRAC_PI_2)),
                 animal,
                 StandIn::default(),
                 SelfPropelled,
@@ -139,7 +140,12 @@ fn hold(app: &mut App, animals: &[(Entity, DVec3)], poses: &[Pose]) {
     }
 }
 
-fn shoot(app: &mut App, cam: Entity, dir: &std::path::Path, name: &str) -> Option<image::RgbaImage> {
+fn shoot(
+    app: &mut App,
+    cam: Entity,
+    dir: &std::path::Path,
+    name: &str,
+) -> Option<image::RgbaImage> {
     let mut q = app.world.query::<(Entity, &mut Camera)>();
     for (e, mut c) in q.iter_mut(&mut app.world) {
         c.active = e == cam;
@@ -189,37 +195,74 @@ fn busy(img: &image::RgbaImage) -> usize {
     n
 }
 
-fn render(poses: &[(&str, Pose, f64)]) {
+/// One close-up: file name, pose, camera distance (m) and camera azimuth (degrees from the
+/// animal's side toward its front).
+type Shot<'a> = (&'a str, Pose, f64, f64);
+
+fn render(shots: &[Shot]) {
     let mut app = app();
     app.update_n(2);
     if app.world.get_resource::<RenderDisabled>().is_some() {
         eprintln!("skipping: no GPU");
         return;
     }
-    let list: Vec<Pose> = poses.iter().map(|p| p.1).collect();
+    let list: Vec<Pose> = shots.iter().map(|p| p.1).collect();
     let animals = spawn(&mut app, &list);
     let dir = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("npc_art_animals");
     std::fs::create_dir_all(&dir).expect("dir");
-    for (i, (name, pose, dist)) in poses.iter().enumerate() {
+    for (i, (name, pose, dist, azimuth)) in shots.iter().enumerate() {
         let at = animals[i].1;
-        let h = match pose.species {
-            Species::Deer => 0.8,
-            Species::Wolf => 0.5,
-            Species::Rabbit => 0.12,
-            Species::Bird => 0.08,
+        let (h, ahead) = match pose.species {
+            Species::Deer if pose.male => (0.95, 0.4),
+            Species::Deer => (0.85, 0.35),
+            Species::Wolf => (0.45, 0.25),
+            Species::Rabbit => (0.1, 0.03),
+            Species::Bird => (0.06, 0.0),
         };
-        let lift = if pose.state == AnimalState::Flying { 0.6 } else { 0.0 };
-        // Three-quarter view from the animal's right front.
-        let eye = at + DVec3::new(dist * 0.55, h + dist * 0.18 + lift, dist * 0.85);
-        let target = at + DVec3::new(0.0, h * 0.8 + lift, 0.0);
-        let cam = camera(&mut app, eye, target, 40.0);
+        let h = match pose.state {
+            AnimalState::Rest | AnimalState::Dead => h * 0.5,
+            AnimalState::Graze | AnimalState::Feed => h * 0.75,
+            _ => h,
+        };
+        // Portraits (names ending in "_head") look at the head, "_feet" at the forefeet.
+        let (h, ahead) = if name.ends_with("_head") {
+            match pose.species {
+                Species::Deer if pose.state == AnimalState::Alert => (1.5, 1.0),
+                Species::Deer => (1.22, 1.08),
+                Species::Wolf => (0.72, 0.62),
+                Species::Rabbit => (0.16, 0.1),
+                Species::Bird => (0.1, 0.05),
+            }
+        } else if name.ends_with("_feet") {
+            match pose.species {
+                Species::Deer => (0.12, 0.42),
+                Species::Wolf => (0.06, 0.36),
+                _ => (0.02, 0.08),
+            }
+        } else {
+            (h, ahead)
+        };
+        let lift = if pose.state == AnimalState::Flying {
+            0.6
+        } else {
+            0.0
+        };
+        let az = azimuth.to_radians();
+        // The animal faces +X: look at its middle, a little toward the head.
+        let target = at + DVec3::new(ahead, h + lift, 0.0);
+        let eye = target + DVec3::new(dist * az.sin(), dist * 0.22, dist * az.cos());
+        let cam = camera(&mut app, eye, target, 28.0);
         hold(&mut app, &animals, &list);
         app.update();
         hold(&mut app, &animals, &list);
         let Some(img) = shoot(&mut app, cam, &dir, &format!("animal_{name}.png")) else {
             return;
         };
-        assert!(busy(&img) > 400, "{name}: the animal should show up ({} px)", busy(&img));
+        assert!(
+            busy(&img) > 400,
+            "{name}: the animal should show up ({} px)",
+            busy(&img)
+        );
     }
 }
 
@@ -231,20 +274,38 @@ fn deer_closeups() {
         ..Pose::new(Species::Deer, state)
     };
     render(&[
-        ("deer_stag_alert", stag(AnimalState::Alert), 4.5),
-        ("deer_hind_graze", p(AnimalState::Graze), 4.0),
-        ("deer_hind_walk", p(AnimalState::Wander).moving(1.3, 1.3, LocomotionMode::Walk), 4.0),
-        ("deer_stag_trot", stag(AnimalState::Wander).moving(3.2, 0.4, LocomotionMode::Run), 4.5),
+        ("deer_stag_alert", stag(AnimalState::Alert), 5.0, 35.0),
+        ("deer_stag_profile", stag(AnimalState::Wander), 5.0, 0.0),
+        ("deer_hind_profile", p(AnimalState::Wander), 4.5, 0.0),
+        ("deer_hind_head", p(AnimalState::Alert), 1.6, 50.0),
+        ("deer_side_head", p(AnimalState::Wander), 1.3, 0.0),
+        ("deer_stag_head", stag(AnimalState::Wander), 2.4, 35.0),
+        ("deer_hind_feet", p(AnimalState::Wander), 1.0, 20.0),
+        ("deer_hind_graze", p(AnimalState::Graze), 4.5, 30.0),
+        (
+            "deer_hind_walk",
+            p(AnimalState::Wander).moving(1.3, 1.3, LocomotionMode::Walk),
+            4.5,
+            15.0,
+        ),
+        (
+            "deer_stag_trot",
+            stag(AnimalState::Wander).moving(3.2, 0.4, LocomotionMode::Run),
+            5.0,
+            15.0,
+        ),
         (
             "deer_hind_gallop",
             Pose {
                 clock: 100.15,
                 ..p(AnimalState::Flee).moving(10.0, 0.0, LocomotionMode::Sprint)
             },
-            4.5,
+            5.0,
+            10.0,
         ),
-        ("deer_stag_rest", stag(AnimalState::Rest), 4.0),
-        ("deer_hind_dead", p(AnimalState::Dead), 4.0),
+        ("deer_stag_rest", stag(AnimalState::Rest), 4.5, 40.0),
+        ("deer_hind_dead", p(AnimalState::Dead), 4.5, 60.0),
+        ("deer_hind_rear", p(AnimalState::Alert), 3.5, -140.0),
     ]);
 }
 

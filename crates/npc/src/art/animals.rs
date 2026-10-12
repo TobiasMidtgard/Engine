@@ -98,13 +98,13 @@ fn flip_x(p: Vec3) -> Vec3 {
 /// Red deer hind (stags use the same rig scaled by [`STAG_SCALE`]): 1.15 m at the shoulder.
 pub const DEER: QuadRig = QuadRig {
     body: v3(0.0, 0.90, -0.02),
-    neck: v3(0.0, 0.92, -0.55),
-    neck2: v3(0.0, 1.18, -0.70),
-    head: v3(0.0, 1.44, -0.85),
-    jaw: v3(0.0, 1.37, -0.89),
-    ear: v3(0.044, 1.4543, -0.914),
+    neck: v3(0.0, 0.93, -0.55),
+    neck2: v3(0.0, 1.14, -0.75),
+    head: v3(0.0, 1.36, -0.93),
+    jaw: v3(0.0, 1.29, -0.97),
+    ear: v3(0.044, 1.3973, -1.0132),
     tail: v3(0.0, 1.075, 0.565),
-    tail2: v3(0.0, 0.94, 0.63),
+    tail2: v3(0.0, 0.935, 0.605),
     front: LegRest {
         joints: [
             v3(0.12, 0.88, -0.47),
@@ -184,8 +184,16 @@ pub const RABBIT: RabbitRig = RabbitRig {
     head: v3(0.0, 0.155, -0.085),
     ear: v3(0.017, 0.205, -0.105),
     tail: v3(0.0, 0.125, 0.13),
-    front: [v3(0.028, 0.085, -0.07), v3(0.03, 0.025, -0.085), v3(0.03, 0.0, -0.105)],
-    hind: [v3(0.045, 0.105, 0.065), v3(0.05, 0.014, 0.105), v3(0.045, 0.0, 0.015)],
+    front: [
+        v3(0.028, 0.085, -0.07),
+        v3(0.03, 0.025, -0.085),
+        v3(0.03, 0.0, -0.105),
+    ],
+    hind: [
+        v3(0.045, 0.105, 0.065),
+        v3(0.05, 0.014, 0.105),
+        v3(0.045, 0.0, 0.015),
+    ],
 };
 
 /// Starling standing on the ground: 0.2 m long, 0.38 m wingspan.
@@ -278,6 +286,11 @@ enum Skin {
     Bare,
 }
 
+/// Whether a species has its sculpted body yet (the others keep primitive stand-ins).
+pub fn sculpted(species: Species) -> bool {
+    matches!(species, Species::Deer)
+}
+
 /// The pieces of one animal with meshes and materials, or `None` without the renderer.
 /// `tint` (linear RGB, 1 = as painted) multiplies the coat.
 pub fn pieces(
@@ -286,7 +299,7 @@ pub fn pieces(
     tint: Option<Vec3>,
     art: &mut ArtAssets,
 ) -> Option<Vec<(Piece, MeshRef, MaterialRef)>> {
-    if !art.available() || !matches!(species, Species::Deer) {
+    if !art.available() || !sculpted(species) {
         return None;
     }
     ensure_species(species, art);
@@ -306,7 +319,10 @@ pub fn pieces(
 
 /// The pieces an animal is made of (also without the renderer).
 pub fn piece_names(species: Species, male: bool) -> Vec<Piece> {
-    piece_list(species, male).into_iter().map(|(p, _)| p).collect()
+    piece_list(species, male)
+        .into_iter()
+        .map(|(p, _)| p)
+        .collect()
 }
 
 fn species_key(s: Species) -> &'static str {
@@ -330,10 +346,18 @@ fn mesh_key(species: Species, piece: Piece, male: bool) -> String {
 
 /// What each animal is made of.
 fn piece_list(species: Species, male: bool) -> Vec<(Piece, Skin)> {
-    let mut v = vec![(Piece::Body, Skin::Coat), (Piece::Head, Skin::Coat), (Piece::Gloss, Skin::Gloss)];
+    let mut v = vec![
+        (Piece::Body, Skin::Coat),
+        (Piece::Head, Skin::Coat),
+        (Piece::Gloss, Skin::Gloss),
+    ];
     match species {
         Species::Deer => {
-            v.extend([(Piece::Neck, Skin::Coat), (Piece::Neck2, Skin::Coat), (Piece::Tail, Skin::Coat)]);
+            v.extend([
+                (Piece::Neck, Skin::Coat),
+                (Piece::Neck2, Skin::Coat),
+                (Piece::Tail, Skin::Coat),
+            ]);
             v.extend([(Piece::Ear(0), Skin::Coat), (Piece::Ear(1), Skin::Coat)]);
             for k in 0..4 {
                 for s in 0..4 {
@@ -356,7 +380,11 @@ fn piece_list(species: Species, male: bool) -> Vec<(Piece, Skin)> {
             }
         }
         Species::Rabbit => {
-            v.extend([(Piece::Tail, Skin::Coat), (Piece::Ear(0), Skin::Coat), (Piece::Ear(1), Skin::Coat)]);
+            v.extend([
+                (Piece::Tail, Skin::Coat),
+                (Piece::Ear(0), Skin::Coat),
+                (Piece::Ear(1), Skin::Coat),
+            ]);
             for k in 0..4 {
                 for s in 0..2 {
                     v.push((Piece::Leg(k, s), Skin::Coat));
@@ -364,7 +392,10 @@ fn piece_list(species: Species, male: bool) -> Vec<(Piece, Skin)> {
             }
         }
         Species::Bird => {
-            v.extend([(Piece::Tail, Skin::Feather), (Piece::TailFan, Skin::Feather)]);
+            v.extend([
+                (Piece::Tail, Skin::Feather),
+                (Piece::TailFan, Skin::Feather),
+            ]);
             for s in 0..2 {
                 for w in 0..3 {
                     v.push((Piece::Wing(s, w), Skin::Feather));
@@ -477,11 +508,17 @@ pub fn species_jobs(species: Species) -> Vec<Job> {
     let k = species_key(species);
     let mut jobs: Vec<Job> = Vec::new();
     let coat_key = format!("animals/{k}/coat");
-    jobs.push(Box::new(move || vec![Made::Tex(coat_key, coat_texture(species))]));
+    jobs.push(Box::new(move || {
+        vec![Made::Tex(coat_key, coat_texture(species))]
+    }));
     match species {
         Species::Deer => {
-            jobs.push(Box::new(|| vec![Made::Tex("animals/hoof".into(), hoof_texture())]));
-            jobs.push(Box::new(|| vec![Made::Tex("animals/antler".into(), antler_texture())]));
+            jobs.push(Box::new(|| {
+                vec![Made::Tex("animals/hoof".into(), hoof_texture())]
+            }));
+            jobs.push(Box::new(|| {
+                vec![Made::Tex("animals/antler".into(), antler_texture())]
+            }));
             deer::jobs(&mut jobs);
         }
         Species::Wolf | Species::Rabbit | Species::Bird => {}
@@ -511,7 +548,10 @@ pub fn triangles_per_animal(species: Species, male: bool, meshes: &[(String, usi
         .into_iter()
         .map(|(p, _)| {
             let key = mesh_key(species, p, male);
-            meshes.iter().find(|(k, _)| *k == key).map_or(0, |(_, t)| *t)
+            meshes
+                .iter()
+                .find(|(k, _)| *k == key)
+                .map_or(0, |(_, t)| *t)
         })
         .sum()
 }
@@ -524,6 +564,9 @@ pub fn piece_count(species: Species, male: bool) -> usize {
 // ======================================================================= sdf meshing
 
 type Field<'a> = &'a (dyn Fn(Vec3) -> f32 + Sync);
+
+/// A plain signed distance function.
+type SdfFn = fn(Vec3) -> f32;
 
 /// A box in a piece's own frame: `rot` turns local coordinates into rest coordinates.
 #[derive(Debug, Clone, Copy)]
@@ -736,10 +779,12 @@ struct Paint<'a> {
     pivot: Vec3,
 }
 
-/// Baked ambient occlusion at `p` (normal `n`) against `field`: 1 open, lower in creases.
-fn occlusion(field: Field, p: Vec3, n: Vec3, scale: f32) -> f32 {
+/// Baked ambient occlusion at `p` (normal `n`): small creases against the piece's own `near`
+/// field (so seams where posed pieces meet stay clean), wider shadowing against `far`.
+fn occlusion(near: Field, far: Field, p: Vec3, n: Vec3, scale: f32) -> f32 {
     let mut occ = 0.0;
     for (dist, w) in [(0.01, 0.3), (0.028, 0.3), (0.065, 0.25), (0.14, 0.2)] {
+        let field = if dist < 0.05 { near } else { far };
         let dist = dist * scale;
         let d = field(p + n * dist);
         occ += w * ((dist - d) / dist).clamp(0.0, 1.0);
@@ -978,7 +1023,13 @@ fn decimate(pos: Vec<Vec3>, idx: Vec<u32>, target: usize, paint: &[Vec3]) -> (Ve
             let c = c as usize;
             let (x, y) = (a.min(c), a.max(c));
             let (cst, _) = cost(&q, &p, x, y);
-            heap.push(Reverse((cst.to_bits(), x as u32, y as u32, stamp[x], stamp[y])));
+            heap.push(Reverse((
+                cst.to_bits(),
+                x as u32,
+                y as u32,
+                stamp[x],
+                stamp[y],
+            )));
         }
     }
     // Compact.
@@ -1025,7 +1076,7 @@ fn sculpt(f: Field, region: Region, target: usize, paint: &Paint) -> Mesh {
                 p -= gradient(f, p, e) * d;
             }
             let n = gradient(f, p, e);
-            let ao = occlusion(&ao_field, p, n, paint.scale);
+            let ao = occlusion(&f, &ao_field, p, n, paint.scale);
             let c = (paint.color)(p, n) * ao;
             Vertex::new(p - paint.pivot, n, paint.flow.uv(p)).with_color(c.extend(1.0))
         })
@@ -1142,7 +1193,7 @@ impl Geo {
         let vertices = (0..self.positions.len())
             .map(|i| {
                 let (p, n, uv) = (self.positions[i], self.normals[i], self.uvs[i]);
-                let ao = occlusion(body, p, n, scale).max(0.55);
+                let ao = occlusion(body, body, p, n, scale).max(0.55);
                 let c = color(p, n, uv) * ao;
                 Vertex::new(p - pivot, n, uv).with_color(c.extend(1.0))
             })
@@ -1161,13 +1212,19 @@ fn ball(center: Vec3, radius: Vec3, rot: Quat, rings: usize, sides: usize) -> Ge
             let unit = Vec3::new(th.sin() * ph.cos(), th.cos(), th.sin() * ph.sin());
             g.positions.push(center + rot * (unit * radius));
             g.normals.push((rot * (unit / radius)).normalize());
-            g.uvs.push(Vec2::new(j as f32 / sides as f32, i as f32 / rings as f32));
+            g.uvs
+                .push(Vec2::new(j as f32 / sides as f32, i as f32 / rings as f32));
         }
     }
     let w = sides as u32 + 1;
     for i in 0..rings as u32 {
         for j in 0..sides as u32 {
-            let (a, b, c, d) = (i * w + j, i * w + j + 1, (i + 1) * w + j + 1, (i + 1) * w + j);
+            let (a, b, c, d) = (
+                i * w + j,
+                i * w + j + 1,
+                (i + 1) * w + j + 1,
+                (i + 1) * w + j,
+            );
             g.indices.extend_from_slice(&[a, b, c, a, c, d]);
         }
     }
@@ -1204,7 +1261,8 @@ fn spline(p: &[Vec3], r: &[f32], per: usize) -> (Vec<Vec3>, Vec<f32>) {
 fn tube(pts: &[Vec3], rad: &[f32], sides: usize) -> Geo {
     let mut g = Geo::default();
     let n = pts.len();
-    let tangent = |i: usize| (pts[(i + 1).min(n - 1)] - pts[i.saturating_sub(1)]).normalize_or(Vec3::Y);
+    let tangent =
+        |i: usize| (pts[(i + 1).min(n - 1)] - pts[i.saturating_sub(1)]).normalize_or(Vec3::Y);
     let mut normal = tangent(0).any_orthonormal_vector();
     let mut along = 0.0;
     for i in 0..n {
@@ -1230,7 +1288,12 @@ fn tube(pts: &[Vec3], rad: &[f32], sides: usize) -> Geo {
     let w = sides as u32 + 1;
     for i in 0..n as u32 - 1 {
         for j in 0..sides as u32 {
-            let (a, b, c, d) = (i * w + j, i * w + j + 1, (i + 1) * w + j + 1, (i + 1) * w + j);
+            let (a, b, c, d) = (
+                i * w + j,
+                i * w + j + 1,
+                (i + 1) * w + j + 1,
+                (i + 1) * w + j,
+            );
             g.indices.extend_from_slice(&[a, c, b, a, d, c]);
         }
     }
@@ -1320,7 +1383,23 @@ struct Fur {
     tint: Vec3,
     band: Vec3,
     roughness: f32,
+    /// Brightness variation in long streaks along the hair.
+    streaks: f32,
     seed: u32,
+}
+
+/// Smooth value noise tiling every `nx` × `ny` cells over the unit square, −1..1.
+fn tiled_noise(uv: Vec2, nx: i32, ny: i32, seed: u32) -> f32 {
+    let q = uv * Vec2::new(nx as f32, ny as f32);
+    let (ix, iy) = (q.x.floor() as i32, q.y.floor() as i32);
+    let f = q - Vec2::new(ix as f32, iy as f32);
+    let f = f * f * (Vec2::splat(3.0) - 2.0 * f);
+    let v = |dx: i32, dy: i32| {
+        rand3((ix + dx).rem_euclid(nx), (iy + dy).rem_euclid(ny), 5, seed) * 2.0 - 1.0
+    };
+    let a = v(0, 0) + (v(1, 0) - v(0, 0)) * f.x;
+    let b = v(0, 1) + (v(1, 1) - v(0, 1)) * f.x;
+    a + (b - a) * f.y
 }
 
 fn fur_texel(f: &Fur, uv: Vec2) -> Texel {
@@ -1350,7 +1429,10 @@ fn fur_texel(f: &Fur, uv: Vec2) -> Texel {
             }
             let t = along / len;
             let across = d.x * dir.y - d.y * dir.x;
-            let w = f.width * 0.5 * (1.0 - t.powf(1.8)).max(0.0).sqrt() * (0.55 + 0.45 * smooth(0.0, 0.25, t));
+            let w = f.width
+                * 0.5
+                * (1.0 - t.powf(1.8)).max(0.0).sqrt()
+                * (0.55 + 0.45 * smooth(0.0, 0.25, t));
             if across.abs() > w {
                 continue;
             }
@@ -1359,9 +1441,12 @@ fn fur_texel(f: &Fur, uv: Vec2) -> Texel {
             }
         }
     }
+    let streak = 1.0
+        + f.streaks
+            * (0.65 * tiled_noise(uv, 9, 2, f.seed) + 0.35 * tiled_noise(uv, 23, 4, f.seed + 1));
     let Some((_, t, s, id, wc, wr)) = best else {
         return Texel {
-            albedo: f.tint * 0.45,
+            albedo: f.tint * 0.6 * streak,
             height: 0.0,
             roughness: f.roughness + 0.05,
             metallic: 0.0,
@@ -1380,13 +1465,18 @@ fn fur_texel(f: &Fur, uv: Vec2) -> Texel {
         * (1.0 + f.contrast * (id - 0.5))
         * (1.0 + f.contrast * 0.8 * (sr - 0.5))
         * (0.62 + 0.38 * smooth(0.0, 0.35, t))
-        * (0.9 + 0.1 * ridge);
+        * (0.9 + 0.1 * ridge)
+        * streak;
     if f.agouti > 0.0 {
         let guard = sr < f.agouti;
         if guard && t > 0.62 {
             albedo *= 0.22 + 0.25 * (1.0 - smooth(0.62, 0.72, t));
         } else if t > 0.35 && t < 0.62 {
-            albedo = mix(albedo, f.band, 0.35 * smooth(0.35, 0.45, t) * (1.0 - smooth(0.52, 0.62, t)));
+            albedo = mix(
+                albedo,
+                f.band,
+                0.35 * smooth(0.35, 0.45, t) * (1.0 - smooth(0.52, 0.62, t)),
+            );
         }
     }
     Texel {
@@ -1402,16 +1492,17 @@ fn coat_texture(species: Species) -> TextureSet {
     match species {
         Species::Deer => {
             let f = Fur {
-                cells: 26,
-                len: 2.6,
-                width: 1.35,
-                strands: 5.0,
-                height: 0.0011,
-                contrast: 0.16,
+                cells: 14,
+                len: 3.6,
+                width: 1.15,
+                strands: 7.0,
+                height: 0.0009,
+                contrast: 0.22,
                 agouti: 0.0,
                 tint: Vec3::new(1.0, 0.97, 0.94),
                 band: Vec3::ONE,
-                roughness: 0.78,
+                roughness: 0.8,
+                streaks: 0.12,
                 seed: 11,
             };
             TextureSet::bake(512, 0.16, |uv| fur_texel(&f, uv))
@@ -1428,6 +1519,7 @@ fn coat_texture(species: Species) -> TextureSet {
                 tint: Vec3::new(1.0, 0.98, 0.95),
                 band: Vec3::new(1.25, 1.15, 0.95),
                 roughness: 0.82,
+                streaks: 0.12,
                 seed: 23,
             };
             TextureSet::bake(512, 0.2, |uv| fur_texel(&f, uv))
@@ -1444,6 +1536,7 @@ fn coat_texture(species: Species) -> TextureSet {
                 tint: Vec3::new(1.0, 0.98, 0.95),
                 band: Vec3::new(1.2, 1.1, 0.9),
                 roughness: 0.85,
+                streaks: 0.1,
                 seed: 31,
             };
             TextureSet::bake(512, 0.07, |uv| fur_texel(&f, uv))
@@ -1477,7 +1570,7 @@ fn antler_texture() -> TextureSet {
         Texel {
             albedo: Vec3::splat(0.75 + 0.3 * h),
             height: 0.0012 * h,
-            roughness: 0.62 - 0.15 * h,
+            roughness: 0.82 - 0.12 * h,
             metallic: 0.0,
             occlusion: 0.7 + 0.3 * h,
         }
@@ -1500,12 +1593,15 @@ mod deer {
     pub const UP: Vec3 = v3(0.0, 0.768, -0.64);
 
     /// Head-local coordinates: x right, y up the face, z along it toward the nose.
+    /// The skull's frame sits a little above the joint the head turns on.
+    const SKULL: Vec3 = v3(0.0, R.head.y + UP.y * 0.03, R.head.z + UP.z * 0.03);
+
     fn hl(p: Vec3) -> Vec3 {
-        local(p, R.head, Vec3::X, UP, FWD)
+        local(p, SKULL, Vec3::X, UP, FWD)
     }
 
     fn hp(q: Vec3) -> Vec3 {
-        R.head + Vec3::X * q.x + UP * q.y + FWD * q.z
+        SKULL + Vec3::X * q.x + UP * q.y + FWD * q.z
     }
 
     const EYE: Vec3 = v3(0.05, 0.03, 0.152);
@@ -1516,13 +1612,13 @@ mod deer {
     pub fn torso(p: Vec3) -> f32 {
         let m = mx(p);
         let barrel = ell(p, v3(0.0, 0.89, -0.13), v3(0.19, 0.245, 0.38));
-        let chest = ell(p, v3(0.0, 0.85, -0.42), v3(0.145, 0.215, 0.2));
+        let chest = ell(p, v3(0.0, 0.84, -0.44), v3(0.145, 0.21, 0.215));
         let belly = ell(p, v3(0.0, 0.89, 0.12), v3(0.175, 0.2, 0.27));
         let loin = ell(p, v3(0.0, 0.99, 0.3), v3(0.15, 0.13, 0.22));
         let withers = cone(p, v3(0.0, 1.08, -0.47), v3(0.0, 1.06, -0.2), 0.075, 0.058);
         let back = cone(p, v3(0.0, 1.06, -0.2), v3(0.0, 1.07, 0.42), 0.052, 0.058);
         // Shoulder blades and the triceps behind the upper arm.
-        let scap = ell(m, v3(0.12, 0.98, -0.37), v3(0.06, 0.15, 0.1));
+        let scap = ell(m, v3(0.112, 0.955, -0.37), v3(0.045, 0.14, 0.095));
         let triceps = ell(m, v3(0.112, 0.77, -0.355), v3(0.062, 0.12, 0.085));
         let point = ell(m, v3(0.108, 0.85, -0.5), v3(0.058, 0.075, 0.05));
         // Haunches: thigh, buttock and hamstring down the back of the leg.
@@ -1530,9 +1626,9 @@ mod deer {
         let butt = ell(m, v3(0.062, 0.94, 0.5), v3(0.075, 0.125, 0.09));
         let ham = cone(m, v3(0.075, 0.95, 0.52), v3(0.1, 0.71, 0.44), 0.065, 0.042);
         let hip = ell(m, v3(0.115, 1.06, 0.29), v3(0.045, 0.045, 0.055));
-        // Base of the neck, where it leaves the chest.
-        let stub = cone(p, v3(0.0, 0.96, -0.48), v3(0.0, 1.06, -0.6), 0.15, 0.13);
-        let stub = smax(stub, -(p.y - 0.8), 0.05);
+        // Base of the neck: a ball around the neck joint a little bigger than the neck's own,
+        // so the neck turns in it without opening a seam.
+        let socket = neck_ball(p, NECK_R + 0.004);
         let mut d = smin(barrel, chest, 0.1);
         d = smin(d, belly, 0.12);
         d = smin(d, loin, 0.1);
@@ -1545,7 +1641,17 @@ mod deer {
         d = smin(d, butt, 0.06);
         d = smin(d, ham, 0.05);
         d = smin(d, hip, 0.05);
-        smin(d, stub, 0.08)
+        smin(d, socket, 0.07)
+    }
+
+    /// Neck thickness at its base (depth; the sides are narrower by [`NECK_SQUASH`]) and at
+    /// the mid-neck joint.
+    const NECK_R: f32 = 0.16;
+    const NECK_R2: f32 = 0.112;
+    const NECK_SQUASH: f32 = 1.35;
+
+    fn neck_ball(p: Vec3, r: f32) -> f32 {
+        ell(p, R.neck, v3(r / NECK_SQUASH, r, r))
     }
 
     fn fj(i: usize) -> Vec3 {
@@ -1558,7 +1664,13 @@ mod deer {
 
     /// Upper arm: mostly inside the chest; fills the elbow as the leg swings.
     pub fn arm(p: Vec3) -> f32 {
-        cone(p, fj(0) + v3(-0.005, 0.0, 0.0), fj(1) + v3(0.0, 0.01, 0.0), 0.06, 0.047)
+        cone(
+            p,
+            fj(0) + v3(-0.005, 0.0, 0.0),
+            fj(1) + v3(0.0, 0.01, 0.0),
+            0.06,
+            0.047,
+        )
     }
 
     pub fn forearm(p: Vec3) -> f32 {
@@ -1595,7 +1707,7 @@ mod deer {
     }
 
     fn coronet(j3: Vec3, toe: Vec3) -> Vec3 {
-        j3 + (toe - j3) * 0.55 + v3(0.0, 0.006, 0.006)
+        j3 + (toe - j3) * 0.6 + v3(0.0, 0.006, 0.0)
     }
 
     fn pastern(p: Vec3, j3: Vec3, toe: Vec3) -> f32 {
@@ -1610,25 +1722,56 @@ mod deer {
         pastern(p, hj(3), hj(4))
     }
 
-    /// A cloven hoof: two pointed claws with a cleft, flat soles and dewclaws behind.
+    /// Signed distance to a convex polygon in the plane (vertices counter-clockwise), exact
+    /// inside and close enough outside for small roundings.
+    fn convex2(p: Vec2, poly: &[Vec2]) -> f32 {
+        let mut d = f32::MIN;
+        for i in 0..poly.len() {
+            let a = poly[i];
+            let b = poly[(i + 1) % poly.len()];
+            let e = (b - a).normalize();
+            d = d.max((p - a).perp_dot(e));
+        }
+        d
+    }
+
+    /// A cloven hoof: two pointed claws with a cleft between them, a sloped front wall, heel
+    /// bulbs, flat soles and dewclaws behind the fetlock.
     fn hoof(p: Vec3, j3: Vec3, toe: Vec3) -> f32 {
-        let fwd = Vec3::new(0.0, 0.0, (toe.z - j3.z).signum());
+        let f = (toe.z - j3.z).signum();
         let q = p - v3(toe.x, 0.0, 0.0);
         let x = q.x.abs();
-        let qx = Vec3::new(x - 0.0105, q.y, q.z);
-        let heel = v3(0.0, 0.019, toe.z - fwd.z * 0.058);
-        let tip = v3(-0.002, 0.007, toe.z - fwd.z * 0.006);
-        let body = cone(qx, heel, tip, 0.0145, 0.0055);
-        let top = ell(qx, heel + v3(0.0, 0.012, fwd.z * 0.014), v3(0.012, 0.018, 0.022));
-        let mut d = smin(body, top, 0.01);
-        // Flat sole on the ground and the cleft between the claws.
-        d = smax(d, -p.y, 0.002);
-        d = smax(d, -(x - 0.0016), 0.0015);
-        // Dewclaws behind the fetlock.
+        // Side profile in (back, up), measured from the toe tip.
+        let b = (toe.z - p.z) * f;
+        let s = Vec2::new(b, p.y);
+        let profile = [
+            Vec2::new(-0.004, 0.0),
+            Vec2::new(0.058, 0.0),
+            Vec2::new(0.062, 0.026),
+            Vec2::new(0.031, 0.042),
+            Vec2::new(-0.004, 0.005),
+        ];
+        let side = convex2(s, &profile);
+        // Each claw narrows to its point; the outer wall is rounded.
+        let t = smooth(-0.004, 0.045, b);
+        let half = 0.0035 + 0.006 * t;
+        let mid = 0.0035 + half;
+        let across = (x - mid).abs() - half;
+        let claw = smax(side, across, 0.006);
+        let bulb = ell(
+            Vec3::new(x, p.y, b),
+            v3(0.011, 0.013, 0.051),
+            v3(0.009, 0.013, 0.012),
+        );
+        let mut d = smin(claw, bulb, 0.008);
+        // Flat sole on the ground.
+        d = smax(d, -p.y, 0.0015);
+        // Dewclaws behind the fetlock, pointing down and back.
+        let bj = (toe.z - j3.z) * f;
         let dew = cone(
-            Vec3::new(x, p.y, p.z),
-            v3(0.016, j3.y - 0.025, j3.z + fwd.z * -0.03),
-            v3(0.016, j3.y - 0.045, j3.z + fwd.z * -0.024),
+            Vec3::new(x, p.y, b),
+            v3(0.012, j3.y - 0.022, bj + 0.016),
+            v3(0.013, j3.y - 0.04, bj + 0.026),
             0.0065,
             0.0035,
         );
@@ -1651,7 +1794,14 @@ mod deer {
     pub fn gaskin(p: Vec3) -> f32 {
         let g = cone_x(p, hj(1), hj(2), 0.052, 0.027, 1.15);
         let calf = ell(p, v3(0.122, 0.625, 0.36), v3(0.038, 0.095, 0.05));
-        let achilles = cone_x(p, v3(0.118, 0.62, 0.405), v3(0.115, 0.47, 0.49), 0.02, 0.014, 1.3);
+        let achilles = cone_x(
+            p,
+            v3(0.118, 0.62, 0.405),
+            v3(0.115, 0.47, 0.49),
+            0.02,
+            0.014,
+            1.3,
+        );
         let hock = ell(p, hj(2), v3(0.027, 0.034, 0.034));
         let point = ell(p, v3(0.115, 0.468, 0.487), v3(0.018, 0.022, 0.02));
         let mut d = smin(g, calf, 0.05);
@@ -1660,18 +1810,37 @@ mod deer {
         smin(d, point, 0.015)
     }
 
+    /// Both neck pieces are round (in the joint's plane) where they meet the chest, each other
+    /// and the head, so nodding and grazing turn them without opening seams.
     fn neck1_with(p: Vec3, s: f32) -> f32 {
-        let n = cone_x(p, R.neck, R.neck2, 0.15 * s, 0.112 * s, 1.32);
-        // Fuller underside where the neck meets the chest.
-        let dew = ell(p, v3(0.0, 0.9, -0.66), v3(0.09 * s, 0.11, 0.09));
-        smin(n, dew, 0.08)
+        let r0 = NECK_R.min(NECK_R * s);
+        cone_x(p, R.neck, R.neck2, r0, NECK_R2 * s, NECK_SQUASH)
     }
 
     fn neck2_with(p: Vec3, s: f32) -> f32 {
-        let n = cone_x(p, R.neck2, R.head + v3(0.0, -0.02, 0.02), 0.112 * s, 0.082, 1.26);
-        let throat = ell(p, hp(v3(0.0, -0.085, 0.05)), v3(0.045, 0.06, 0.07));
-        smin(n, throat, 0.05)
+        let n = cone_x(
+            p,
+            R.neck2,
+            R.head,
+            NECK_R2 * s + 0.003,
+            HEAD_BALL - 0.004,
+            1.3,
+        );
+        // Throat and the windpipe under it, ahead of the joint.
+        let throat = ell(p, hp(v3(0.0, -0.08, 0.04)), v3(0.042, 0.055, 0.065));
+        let pipe = cone_x(
+            p,
+            R.neck2 + v3(0.0, -0.07, -0.06),
+            hp(v3(0.0, -0.08, 0.02)),
+            0.035,
+            0.035,
+            1.2,
+        );
+        smin(smin(n, throat, 0.05), pipe, 0.06)
     }
+
+    /// The ball at the top of the neck the head turns on (part of the head).
+    const HEAD_BALL: f32 = 0.07;
 
     pub fn neck1(p: Vec3) -> f32 {
         neck1_with(p, 1.0)
@@ -1690,11 +1859,17 @@ mod deer {
         let axis = (R.head - R.neck).normalize();
         let down = Vec3::X.cross(axis).normalize();
         let along = (p - R.neck).dot(axis) / R.neck.distance(R.head);
-        let under = smooth(-0.02, 0.06, (p - R.neck).dot(-down) + 0.02) * smooth(0.05, 0.25, along) * smooth(1.05, 0.75, along);
+        let under = smooth(-0.02, 0.06, (p - R.neck).dot(-down) + 0.02)
+            * smooth(0.05, 0.25, along)
+            * smooth(1.05, 0.75, along);
         if under <= 0.0 {
             return base;
         }
-        let q = Vec3::new(p.x * 30.0, (p - R.neck).dot(axis) * 6.0, (p - R.neck).dot(down) * 30.0);
+        let q = Vec3::new(
+            p.x * 30.0,
+            (p - R.neck).dot(axis) * 6.0,
+            (p - R.neck).dot(down) * 30.0,
+        );
         let shag = fbm3(q, 3, 0.55, 5) * 0.5 + 0.5;
         base - under * (0.03 + 0.035 * shag)
     }
@@ -1704,19 +1879,37 @@ mod deer {
     }
 
     pub fn neck2_stag(p: Vec3) -> f32 {
-        mane(p, neck2_with(p, 1.1))
+        mane(p, neck2_with(p, 1.12))
     }
 
     pub fn head(p: Vec3) -> f32 {
         let q = hl(p);
         let m = Vec3::new(q.x.abs(), q.y, q.z);
-        let cranium = ell(q, v3(0.0, 0.0, 0.06), v3(0.067, 0.07, 0.09));
-        let face = cone_x(q, v3(0.0, 0.0, 0.11), v3(0.0, -0.022, 0.33), 0.06, 0.036, 1.15);
+        let poll = ell(p, R.head, v3(HEAD_BALL / 1.3, HEAD_BALL, HEAD_BALL));
+        let cranium = smin(
+            ell(q, v3(0.0, 0.0, 0.06), v3(0.067, 0.07, 0.09)),
+            poll,
+            0.04,
+        );
+        let face = cone_x(
+            q,
+            v3(0.0, 0.0, 0.11),
+            v3(0.0, -0.022, 0.33),
+            0.06,
+            0.036,
+            1.15,
+        );
         let cheek = ell(m, v3(0.041, -0.036, 0.145), v3(0.031, 0.048, 0.07));
-        let jaw = cone(m, v3(0.035, -0.075, 0.08), v3(0.018, -0.066, 0.31), 0.031, 0.018);
+        let jaw = cone(
+            m,
+            v3(0.035, -0.075, 0.08),
+            v3(0.018, -0.066, 0.31),
+            0.031,
+            0.018,
+        );
         let ramus = ell(m, v3(0.035, -0.07, 0.065), v3(0.025, 0.055, 0.04));
         let muzzle = ell(q, v3(0.0, -0.032, 0.352), v3(0.035, 0.044, 0.048));
-        let chin = ell(q, v3(0.0, -0.074, 0.318), v3(0.02, 0.02, 0.028));
+        let chin = ell(q, v3(0.0, -0.074, 0.32), v3(0.02, 0.02, 0.028));
         let brow = ell(m, v3(0.037, 0.038, 0.142), v3(0.02, 0.012, 0.034));
         let larynx = ell(q, v3(0.0, -0.095, 0.03), v3(0.035, 0.035, 0.05));
         let mut d = smin(cranium, face, 0.05);
@@ -1736,8 +1929,18 @@ mod deer {
         d = smin(d, ring, 0.004);
         // Preorbital gland, nostrils and the mouth line.
         d = ssub(d, ell(m, GLAND, v3(0.006, 0.008, 0.016)), 0.004);
-        d = ssub(d, ell(m, v3(0.015, -0.012, 0.392), v3(0.0055, 0.0045, 0.012)), 0.003);
-        let lip = cone(m, v3(0.028, -0.057, 0.29), v3(0.012, -0.06, 0.385), 0.002, 0.002);
+        d = ssub(
+            d,
+            ell(m, v3(0.015, -0.012, 0.392), v3(0.0055, 0.0045, 0.012)),
+            0.003,
+        );
+        let lip = cone(
+            m,
+            v3(0.028, -0.057, 0.29),
+            v3(0.012, -0.06, 0.385),
+            0.002,
+            0.002,
+        );
         ssub(d, lip, 0.003)
     }
 
@@ -1748,7 +1951,11 @@ mod deer {
 
     pub fn gloss_nose(p: Vec3) -> f32 {
         let q = hl(p);
-        smax(head(p) - 0.0018, ell(q, NOSE, v3(0.03, 0.028, 0.024)), 0.003)
+        smax(
+            head(p) - 0.0018,
+            ell(q, NOSE, v3(0.03, 0.028, 0.024)),
+            0.003,
+        )
     }
 
     /// Ear frame (right ear): along the ear, across it, out of the cup.
@@ -1777,24 +1984,60 @@ mod deer {
     /// Everything, for occlusion.
     pub fn body(p: Vec3) -> f32 {
         const PARTS: [Bound; 9] = [
-            Bound { center: v3(0.0, 0.9, -0.02), radius: 0.7, f: torso },
-            Bound { center: v3(0.0, 1.07, -0.62), radius: 0.3, f: neck1 },
-            Bound { center: v3(0.0, 1.3, -0.77), radius: 0.25, f: neck2 },
-            Bound { center: v3(0.0, 1.25, -1.0), radius: 0.3, f: head },
-            Bound { center: v3(0.12, 0.52, -0.38), radius: 0.19, f: forearm },
-            Bound { center: v3(0.11, 0.24, -0.39), radius: 0.17, f: front_cannon },
-            Bound { center: v3(0.12, 0.58, 0.34), radius: 0.22, f: gaskin },
-            Bound { center: v3(0.11, 0.28, 0.43), radius: 0.2, f: hind_cannon },
-            Bound { center: v3(0.0, 1.0, 0.6), radius: 0.12, f: tail },
+            Bound {
+                center: v3(0.0, 0.9, -0.02),
+                radius: 0.7,
+                f: torso,
+            },
+            Bound {
+                center: v3(0.0, 1.03, -0.65),
+                radius: 0.32,
+                f: neck1,
+            },
+            Bound {
+                center: v3(0.0, 1.25, -0.84),
+                radius: 0.25,
+                f: neck2,
+            },
+            Bound {
+                center: v3(0.0, 1.22, -1.08),
+                radius: 0.3,
+                f: head,
+            },
+            Bound {
+                center: v3(0.12, 0.52, -0.38),
+                radius: 0.19,
+                f: forearm,
+            },
+            Bound {
+                center: v3(0.11, 0.24, -0.39),
+                radius: 0.17,
+                f: front_cannon,
+            },
+            Bound {
+                center: v3(0.12, 0.58, 0.34),
+                radius: 0.22,
+                f: gaskin,
+            },
+            Bound {
+                center: v3(0.11, 0.28, 0.43),
+                radius: 0.2,
+                f: hind_cannon,
+            },
+            Bound {
+                center: v3(0.0, 1.0, 0.6),
+                radius: 0.12,
+                f: tail,
+            },
         ];
         union_of(&PARTS, mx(p))
     }
 
     /// Red deer coat pattern (linear RGB) at a rest-pose surface point.
     fn coat(piece: Piece, p: Vec3, n: Vec3, stag: bool) -> Vec3 {
-        let red = hex(0x85553a);
-        let dark = hex(0x5c3b27);
-        let grey = hex(0x6f5d4e);
+        let red = hex(0x7f573e);
+        let dark = hex(0x573d2c);
+        let grey = hex(0x6b5d50);
         let belly = hex(0xa89983);
         let cream = hex(0xd6c59f);
         let mut c = red;
@@ -1813,7 +2056,8 @@ mod deer {
                 c = mix(c, mix(belly, grey, 0.4), inner * 0.5);
                 if k >= 2 {
                     // The rump patch reaches down the back of the thighs.
-                    let patch = smooth(0.1, 0.6, n.z) * smooth(0.66, 0.8, p.y) * smooth(0.42, 0.5, p.z);
+                    let patch =
+                        smooth(0.1, 0.6, n.z) * smooth(0.66, 0.8, p.y) * smooth(0.42, 0.5, p.z);
                     c = mix(c, cream, patch * 0.7);
                 }
             }
@@ -1821,22 +2065,30 @@ mod deer {
                 // Buff rump patch around the tail, edged darker above.
                 let r = ((p - v3(0.0, 0.96, 0.6)) * v3(1.35, 0.95, 1.0)).length();
                 let patch = (1.0 - smooth(0.12, 0.18, r)) * smooth(-0.25, 0.25, n.z);
-                let edge = (smooth(0.13, 0.18, r) - smooth(0.18, 0.26, r)) * smooth(0.0, 0.4, n.z) * smooth(0.92, 1.04, p.y);
+                let edge = (smooth(0.13, 0.18, r) - smooth(0.18, 0.26, r))
+                    * smooth(0.0, 0.4, n.z)
+                    * smooth(0.92, 1.04, p.y);
                 c = mix(c, dark * 0.75, edge * 0.55);
                 c = mix(c, cream, patch);
                 // Faint dark line along the spine.
-                c = mix(c, dark * 0.85, smooth(0.04, 0.0, p.x.abs()) * smooth(0.8, 0.98, up) * 0.45);
+                c = mix(
+                    c,
+                    dark * 0.85,
+                    smooth(0.04, 0.0, p.x.abs()) * smooth(0.8, 0.98, up) * 0.45,
+                );
                 // Greyer chest front.
                 c = mix(c, mix(red, grey, 0.6), smooth(-0.45, -0.62, p.z) * 0.5);
             }
             Piece::Neck | Piece::Neck2 => {
-                c = mix(c, mix(red, grey, 0.5), 0.55);
+                // Greyer, like the chest it grows from.
+                c = mix(c, mix(red, grey, 0.6), 0.5);
                 if stag {
                     let mane = smooth(0.1, -0.6, up);
                     c = mix(c, hex(0x48352a), 0.45 + 0.45 * mane);
                 }
                 // Pale throat patch under the jaw.
-                let throat = smooth(0.09, 0.0, p.distance(hp(v3(0.0, -0.09, 0.04)))) * smooth(0.2, -0.4, up);
+                let throat =
+                    smooth(0.09, 0.0, p.distance(hp(v3(0.0, -0.09, 0.04)))) * smooth(0.2, -0.4, up);
                 c = mix(c, belly, throat * 0.55);
             }
             Piece::Head | Piece::Jaw => {
@@ -1845,16 +2097,20 @@ mod deer {
                 c = mix(face, dark, smooth(0.3, 0.9, up) * 0.3);
                 // Darker muzzle, white chin and lips, pale eye ring, dark gland.
                 c = mix(c, hex(0x4f3f33), smooth(0.27, 0.35, q.z) * 0.7);
-                let chin = smooth(-0.045, -0.07, q.y) * smooth(0.22, 0.3, q.z);
-                c = mix(c, hex(0xd2cabd), chin);
-                let lips = smooth(0.012, 0.0, (q.y + 0.058).abs()) * smooth(0.28, 0.33, q.z);
-                c = mix(c, hex(0xd2cabd), lips * 0.8);
+                let chin = smooth(-0.05, -0.075, q.y) * smooth(0.25, 0.32, q.z);
+                c = mix(c, hex(0xc4b8a6), chin * 0.85);
+                let lips = smooth(0.008, 0.0, (q.y + 0.058).abs()) * smooth(0.3, 0.35, q.z);
+                c = mix(c, hex(0xc4b8a6), lips * 0.6);
                 let m = Vec3::new(q.x.abs(), q.y, q.z);
                 let ring = smooth(0.034, 0.022, m.distance(EYE));
-                c = mix(c, hex(0xae977b), ring * 0.65);
+                c = mix(c, hex(0xa08a70), ring * 0.3);
                 let gland = smooth(0.016, 0.006, m.distance(GLAND));
                 c = mix(c, hex(0x2a1d16), gland);
-                c = mix(c, belly, smooth(-0.055, -0.1, q.y) * smooth(0.2, 0.05, q.z) * 0.7);
+                c = mix(
+                    c,
+                    belly,
+                    smooth(-0.055, -0.1, q.y) * smooth(0.2, 0.05, q.z) * 0.7,
+                );
             }
             Piece::Ear(_) => {
                 let (along, across, cup) = ear_frame();
@@ -1866,8 +2122,9 @@ mod deer {
                 c = mix(c, hex(0x35281f), rim.min(1.0) * 0.8);
             }
             Piece::Tail => {
-                c = mix(cream, hex(0xece6da), smooth(0.0, -0.6, n.z) * 0.5 + smooth(0.0, -0.6, up) * 0.5);
-                c = mix(c, hex(0x5a4030), smooth(0.4, 0.9, up) * 0.3);
+                // Buff above, paler where it lies against the rump.
+                c = mix(hex(0xb3976f), cream, smooth(0.2, -0.5, n.z));
+                c = mix(c, hex(0x8a6a4c), smooth(0.3, 0.9, up) * 0.45);
             }
             _ => {}
         }
@@ -1885,7 +2142,11 @@ mod deer {
         specs.push(Spec {
             piece: Piece::Body,
             f: torso,
-            region: Region::aabb(v3(-0.3, 0.55, -0.75), v3(0.3, 1.25, 0.72), v3(0.0095, 0.0095, 0.013)),
+            region: Region::aabb(
+                v3(-0.3, 0.55, -0.75),
+                v3(0.3, 1.25, 0.72),
+                v3(0.0095, 0.0095, 0.013),
+            ),
             target: 7000,
             flow: torso_flow,
             pivot: R.body,
@@ -1894,8 +2155,11 @@ mod deer {
         });
         // Necks (hind and stag).
         for stag in [false, true] {
-            let (f1, f2): (fn(Vec3) -> f32, fn(Vec3) -> f32) =
-                if stag { (neck1_stag, neck2_stag) } else { (neck1, neck2) };
+            let (f1, f2): (SdfFn, SdfFn) = if stag {
+                (neck1_stag, neck2_stag)
+            } else {
+                (neck1, neck2)
+            };
             specs.push(Spec {
                 piece: Piece::Neck,
                 f: f1,
@@ -1924,7 +2188,13 @@ mod deer {
         specs.push(Spec {
             piece: Piece::Head,
             f: head,
-            region: Region::bone(R.head - FWD * 0.08 + UP * 0.02, nose + FWD * 0.03, 0.15, 0.004, 0.005),
+            region: Region::bone(
+                R.head - FWD * 0.08 + UP * 0.02,
+                nose + FWD * 0.03,
+                0.15,
+                0.004,
+                0.005,
+            ),
             target: 4200,
             flow: head_flow,
             pivot: R.head,
@@ -1936,7 +2206,13 @@ mod deer {
         specs.push(Spec {
             piece: Piece::Ear(1),
             f: ear,
-            region: Region::bone(R.ear - along * 0.03, R.ear + along * 0.2, 0.07, 0.0032, 0.0045),
+            region: Region::bone(
+                R.ear - along * 0.03,
+                R.ear + along * 0.2,
+                0.07,
+                0.0032,
+                0.0045,
+            ),
             target: 650,
             flow: Flow::new(R.ear, R.ear + along * 0.2, cup, 0.1),
             pivot: R.ear,
@@ -1954,7 +2230,14 @@ mod deer {
             variant: false,
         });
         // Legs: right side sculpted, left mirrored.
-        type Legs = (u8, [fn(Vec3) -> f32; 4], fn(Vec3) -> f32, LegRest, [f32; 4], [usize; 4]);
+        type Legs = (
+            u8,
+            [fn(Vec3) -> f32; 4],
+            fn(Vec3) -> f32,
+            LegRest,
+            [f32; 4],
+            [usize; 4],
+        );
         let legs: [Legs; 2] = [
             (
                 1,
@@ -1978,13 +2261,17 @@ mod deer {
             let across = [0.008, 0.0055, 0.004, 0.003];
             let along = [0.012, 0.01, 0.01, 0.0045];
             for s in 0..4 {
-                let (a, b) = if s == 3 { (j[3], coronet(j[3], j[4])) } else { (j[s], j[s + 1]) };
+                let (a, b) = if s == 3 {
+                    (j[3], coronet(j[3], j[4]))
+                } else {
+                    (j[s], j[s + 1])
+                };
                 specs.push(Spec {
                     piece: Piece::Leg(k, s as u8),
                     f: fields[s],
                     region: Region::bone(a, b, reach[s], across[s], along[s]),
                     target: target[s],
-                    flow: Flow::new(a, b, back, 0.16),
+                    flow: Flow::new(a, b, back, if s >= 2 { 0.09 } else { 0.12 }),
                     pivot: j[s],
                     mirror: Some(Piece::Leg(k - 1, s as u8)),
                     variant: false,
@@ -2005,10 +2292,17 @@ mod deer {
                     pivot: j[3],
                 };
                 let c = v3(j[4].x, 0.04, (j[3].z + j[4].z) * 0.5);
-                let region = Region::aabb(c - v3(0.045, 0.05, 0.07), c + v3(0.045, 0.07, 0.07), Vec3::splat(0.0018));
+                let region = Region::aabb(
+                    c - v3(0.045, 0.05, 0.07),
+                    c + v3(0.045, 0.07, 0.07),
+                    Vec3::splat(0.0018),
+                );
                 let mesh = sculpt(&hoof_f, region, 520, &paint);
                 vec![
-                    Made::Mesh(format!("animals/deer/{}", Piece::Hoof(k - 1).key()), mirrored(&mesh)),
+                    Made::Mesh(
+                        format!("animals/deer/{}", Piece::Hoof(k - 1).key()),
+                        mirrored(&mesh),
+                    ),
                     Made::Mesh(format!("animals/deer/{}", Piece::Hoof(k).key()), mesh),
                 ]
             }));
@@ -2030,7 +2324,11 @@ mod deer {
             let nose = hp(NOSE);
             let mut mesh = sculpt(
                 &gloss_nose,
-                Region::aabb(nose - Vec3::splat(0.05), nose + Vec3::splat(0.05), Vec3::splat(0.0018)),
+                Region::aabb(
+                    nose - Vec3::splat(0.05),
+                    nose + Vec3::splat(0.05),
+                    Vec3::splat(0.0018),
+                ),
                 500,
                 &paint,
             );
@@ -2041,7 +2339,8 @@ mod deer {
             }
             let axis = EYE_AXIS.normalize();
             for (i, c) in eye_center().into_iter().enumerate() {
-                let ax = Vec3::X * axis.x * if i == 0 { -1.0 } else { 1.0 } + UP * axis.y + FWD * axis.z;
+                let ax =
+                    Vec3::X * axis.x * if i == 0 { -1.0 } else { 1.0 } + UP * axis.y + FWD * axis.z;
                 let rot = Quat::from_rotation_arc(Vec3::Y, ax);
                 let g = ball(c, Vec3::splat(0.0168), rot, 10, 14);
                 let eye = g.finish(R.head, &body, 0.2, &|p, _, _| {
@@ -2053,7 +2352,9 @@ mod deer {
             vec![Made::Mesh("animals/deer/gloss".into(), mesh)]
         }));
         // Antlers.
-        jobs.push(Box::new(|| vec![Made::Mesh("animals/deer/antlers".into(), antlers())]));
+        jobs.push(Box::new(|| {
+            vec![Made::Mesh("animals/deer/antlers".into(), antlers())]
+        }));
     }
 
     /// One sculpted deer piece.
@@ -2084,9 +2385,15 @@ mod deer {
             let suffix = if stag { "_stag" } else { "" };
             let mut out = Vec::new();
             if let Some(m) = self.mirror {
-                out.push(Made::Mesh(format!("animals/deer/{}{suffix}", m.key()), mirrored(&mesh)));
+                out.push(Made::Mesh(
+                    format!("animals/deer/{}{suffix}", m.key()),
+                    mirrored(&mesh),
+                ));
             }
-            out.push(Made::Mesh(format!("animals/deer/{}{suffix}", piece.key()), mesh));
+            out.push(Made::Mesh(
+                format!("animals/deer/{}{suffix}", piece.key()),
+                mesh,
+            ));
             out
         }
     }
@@ -2095,19 +2402,68 @@ mod deer {
     fn antlers() -> Mesh {
         let burr = hp(v3(0.034, 0.055, 0.045));
         let o = |x: f32, y: f32, z: f32| burr + v3(x, y, z);
-        let beam = [o(0.0, -0.01, 0.0), o(0.03, 0.10, 0.025), o(0.09, 0.26, 0.06), o(0.15, 0.42, 0.07), o(0.19, 0.56, 0.04), o(0.19, 0.66, 0.0)];
+        let beam = [
+            o(0.0, -0.01, 0.0),
+            o(0.03, 0.10, 0.025),
+            o(0.09, 0.26, 0.06),
+            o(0.15, 0.42, 0.07),
+            o(0.19, 0.56, 0.04),
+            o(0.19, 0.66, 0.0),
+        ];
         let beam_r = [0.024, 0.022, 0.019, 0.017, 0.015, 0.013];
         let tines: [(&[Vec3], &[f32]); 6] = [
-            (&[o(0.012, 0.045, 0.0), o(0.03, 0.08, -0.12), o(0.04, 0.15, -0.22)], &[0.015, 0.011, 0.005]),
-            (&[o(0.03, 0.10, 0.02), o(0.06, 0.135, -0.1), o(0.07, 0.19, -0.16)], &[0.013, 0.009, 0.0045]),
-            (&[o(0.14, 0.38, 0.07), o(0.17, 0.42, -0.05), o(0.18, 0.49, -0.11)], &[0.012, 0.009, 0.0045]),
-            (&[o(0.19, 0.64, 0.0), o(0.18, 0.72, -0.03), o(0.17, 0.79, -0.04)], &[0.012, 0.009, 0.0045]),
-            (&[o(0.19, 0.62, 0.02), o(0.25, 0.68, 0.06), o(0.29, 0.74, 0.09)], &[0.011, 0.008, 0.0042]),
-            (&[o(0.19, 0.6, 0.03), o(0.15, 0.68, 0.1), o(0.12, 0.74, 0.14)], &[0.011, 0.008, 0.0042]),
+            (
+                &[
+                    o(0.012, 0.045, 0.0),
+                    o(0.03, 0.08, -0.12),
+                    o(0.04, 0.15, -0.22),
+                ],
+                &[0.015, 0.011, 0.005],
+            ),
+            (
+                &[
+                    o(0.03, 0.10, 0.02),
+                    o(0.06, 0.135, -0.1),
+                    o(0.07, 0.19, -0.16),
+                ],
+                &[0.013, 0.009, 0.0045],
+            ),
+            (
+                &[
+                    o(0.14, 0.38, 0.07),
+                    o(0.17, 0.42, -0.05),
+                    o(0.18, 0.49, -0.11),
+                ],
+                &[0.012, 0.009, 0.0045],
+            ),
+            (
+                &[
+                    o(0.19, 0.64, 0.0),
+                    o(0.18, 0.72, -0.03),
+                    o(0.17, 0.79, -0.04),
+                ],
+                &[0.012, 0.009, 0.0045],
+            ),
+            (
+                &[
+                    o(0.19, 0.62, 0.02),
+                    o(0.25, 0.68, 0.06),
+                    o(0.29, 0.74, 0.09),
+                ],
+                &[0.011, 0.008, 0.0042],
+            ),
+            (
+                &[o(0.19, 0.6, 0.03), o(0.15, 0.68, 0.1), o(0.12, 0.74, 0.14)],
+                &[0.011, 0.008, 0.0042],
+            ),
         ];
         let mut g = Geo::default();
         let (p, r) = spline(&beam, &beam_r, 5);
-        let bumpy: Vec<f32> = r.iter().enumerate().map(|(i, r)| r * (1.0 + 0.05 * ((i as f32) * 2.7).sin())).collect();
+        let bumpy: Vec<f32> = r
+            .iter()
+            .enumerate()
+            .map(|(i, r)| r * (1.0 + 0.05 * ((i as f32) * 2.7).sin()))
+            .collect();
         g.append(tube(&p, &bumpy, 12));
         for (pts, rad) in tines {
             let (p, r) = spline(pts, rad, 5);
@@ -2121,12 +2477,17 @@ mod deer {
             let a = TAU * i as f32 / 16.0;
             ring.push(burr + axis * 0.004 + Quat::from_axis_angle(axis, a) * side * 0.024);
         }
-        let rr: Vec<f32> = (0..ring.len()).map(|i| 0.008 + 0.002 * ((i * 7 % 5) as f32 / 5.0)).collect();
+        let rr: Vec<f32> = (0..ring.len())
+            .map(|i| 0.008 + 0.002 * ((i * 7 % 5) as f32 / 5.0))
+            .collect();
         g.append(tube(&ring, &rr, 7));
         let color = |p: Vec3, _n: Vec3, _uv: Vec2| {
             let h = (p.y - burr.y) / 0.7;
-            let tip_d = tines.iter().map(|(pts, _)| p.distance(*pts.last().unwrap_or(&p))).fold(p.distance(beam[5]), f32::min);
-            let base = mix(hex(0x5a4532), hex(0x8f7a5c), smooth(0.0, 0.6, h));
+            let tip_d = tines
+                .iter()
+                .map(|(pts, _)| p.distance(*pts.last().unwrap_or(&p)))
+                .fold(p.distance(beam[5]), f32::min);
+            let base = mix(hex(0x6e5840), hex(0xa8916f), smooth(0.0, 0.6, h));
             mix(base, hex(0xe9dfc8), smooth(0.07, 0.015, tip_d))
         };
         let right = g.finish(R.head, &body, 0.5, &color);
