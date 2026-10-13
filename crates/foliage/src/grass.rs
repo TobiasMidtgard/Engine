@@ -16,7 +16,7 @@ use engine_render::{GrassField, GrassStyle};
 use engine_world::Ground;
 
 use crate::ecology::{InRegion, RegionState};
-use crate::felling::LogPose;
+use crate::felling::LogPlaced;
 use crate::plant::{EcologyRegion, EcologySettings, FelledLog, Plant};
 use crate::scenery::Rock;
 use crate::species::{PlantForm, PlantLibrary};
@@ -179,7 +179,7 @@ pub fn sync_region_grass(
     regions: Query<(Entity, &EcologyRegion, &RegionState, Option<&RegionGrass>)>,
     mut fields: Query<(&mut GrassField, &mut Transform, &GrassOf)>,
     plants: Query<(&Plant, &Transform, &InRegion), Without<GrassField>>,
-    logs: Query<(&FelledLog, &LogPose, &Transform), Without<GrassField>>,
+    logs: Query<(&FelledLog, &Transform), (With<LogPlaced>, Without<GrassField>)>,
     rocks: Query<&Transform, (With<Rock>, Without<GrassField>)>,
     orphans: Query<(Entity, &GrassOf)>,
 ) {
@@ -229,17 +229,17 @@ pub fn sync_region_grass(
                 )
             })
             .collect();
+        // A log's transform sits at its butt (the model's base); the trunk runs up its axis.
         let mut covers: Vec<Cover> = logs
             .iter()
-            .filter_map(|(log, pose, t)| {
+            .filter_map(|(log, t)| {
                 let sp = library.get(log.species);
                 let a = local(t);
-                let dir = Vec2::new(pose.yaw.cos(), pose.yaw.sin());
-                let length = sp.max_height_m * log.size * 0.8;
+                let axis = t.rotation * Vec3::Y * (sp.max_height_m * t.scale.y * 0.85);
                 let r = (sp.trunk_radius_m * log.size * 1.6).max(0.15);
                 inside(a).then_some(Cover {
-                    a: a - dir * length * 0.5,
-                    b: a + dir * length * 0.5,
+                    a,
+                    b: a + Vec2::new(axis.x, axis.z),
                     radius: r,
                 })
             })
@@ -377,6 +377,41 @@ mod tests {
         assert!(at(-10.0, 0.0) > 0.7, "lawn {}", at(-10.0, 0.0));
         assert!(at(14.0, 5.0) < 0.05, "bare {}", at(14.0, 5.0));
         assert_eq!(at(10.0, 0.0), 0.0, "keep-clear");
+
+        // A log lying in the lawn along +z: no grass along its length, grass behind its butt.
+        let oak = lib.id("oak").unwrap();
+        app.world.spawn((
+            Transform::from_xyz(50.0 - 10.0, 0.0, -10.0),
+            FelledLog {
+                species: oak,
+                size: 0.8,
+                ..Default::default()
+            },
+            crate::felling::LogPose {
+                yaw: std::f32::consts::FRAC_PI_2,
+                ..Default::default()
+            },
+        ));
+        app.update_n(200);
+        // It rests a little to the side of where it fell, its butt off the stump.
+        let butt = app
+            .world
+            .query_filtered::<&Transform, With<FelledLog>>()
+            .single(&app.world)
+            .unwrap()
+            .translation;
+        let (x, z) = ((butt.x - 50.0) as f32, butt.z as f32);
+        let field = app.world.get::<GrassField>(field_e).unwrap();
+        let at = |x: f32, z: f32| {
+            let i = ((x / field.size[0] + 0.5) * (rx - 1) as f32).round() as u32;
+            let j = ((z / field.size[1] + 0.5) * (rz - 1) as f32).round() as u32;
+            field.density[(j * rx + i) as usize]
+        };
+        let length = lib.get(oak).max_height_m * 0.8;
+        for s in [0.1, 0.4, 0.7] {
+            assert_eq!(at(x, z + length * s), 0.0, "under the log at {s}");
+        }
+        assert!(at(x, z - 2.0) > 0.7, "behind the butt");
 
         // Turned off: the field goes, and the tufts draw again.
         app.world.resource_mut::<EcologySettings>().gpu_grass = false;

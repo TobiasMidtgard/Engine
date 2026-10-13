@@ -105,6 +105,7 @@ impl Plugin for FoliagePlugin {
                     felling::apply_damage,
                     felling::update_falling_trees,
                     felling::place_logs,
+                    felling::release_grass_presses,
                 )
                     .chain()
                     .in_set(SimSet::PostPhysics),

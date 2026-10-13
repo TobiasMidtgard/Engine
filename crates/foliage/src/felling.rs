@@ -22,6 +22,7 @@
 
 use bevy_ecs::message::MessageCursor;
 use engine_core::prelude::*;
+use engine_render::GrassBender;
 use engine_world::physics::{Collider, ColliderShape, PhysicsQueries, QueryFilter, RigidBody};
 use engine_world::{
     BurnState, Combustible, ContactKind, DamageEvent, DamageKind, FocusPoints, Gravity, Ground,
@@ -66,6 +67,13 @@ pub struct FallingTree {
     pub years_dead: f32,
     /// After landing: blend from the impact pose to the resting pose (0..1).
     pub settle: Option<(f32, Transform)>,
+}
+
+/// On a child of a falling tree: presses the meadow grass under it ([`GrassBender`]) as the
+/// trunk and crown come down, and lets go `linger_secs` after the log has settled.
+#[derive(Component, Debug, Clone, Copy)]
+pub struct GrassPress {
+    pub linger_secs: f32,
 }
 
 /// A static collider owned by a plant or log (a separate entity, so the plant's non-uniform
@@ -285,6 +293,25 @@ pub fn fell_tree(world: &mut World, entity: Entity, dir: Vec3) -> Option<Entity>
             },
         ))
         .id();
+    // Grass parts under the trunk as it comes down and the crown presses it flat. Points on
+    // the model's axis, so they follow the falling transform.
+    let trunk_r = (sp.trunk_radius_m * plant.size * plant.genes.crown).max(0.15);
+    let crown_r = (sp.crown_radius_m * plant.size * plant.genes.crown).max(0.8);
+    let along = |s: f32| (cut + (height - cut) * s) as f64;
+    let presses = [
+        (along(0.12), trunk_r * 2.5),
+        (along(0.32), trunk_r * 2.5),
+        (along(0.52), trunk_r * 2.5),
+        (along(0.74), crown_r),
+    ];
+    world.spawn_batch(presses.map(|(y, radius)| {
+        (
+            Transform::from_xyz(0.0, y, 0.0),
+            GrassBender { radius },
+            GrassPress { linger_secs: 4.0 },
+            ChildOf(log),
+        )
+    }));
     world.write_message(NoiseEvent {
         position: hinge,
         radius: 30.0 + 40.0 * plant.size,
@@ -362,6 +389,26 @@ pub fn log_rest_transform(
         translation: butt - cut_point.as_dvec3(),
         rotation,
         scale,
+    }
+}
+
+/// Let the grass pressed by a falling tree spring back a few seconds after the log has settled
+/// (by then the field no longer grows grass under the log).
+pub fn release_grass_presses(
+    mut commands: Commands,
+    time: Res<Time>,
+    mut presses: Query<(Entity, &ChildOf, &mut GrassPress)>,
+    falling: Query<(), With<FallingTree>>,
+) {
+    let dt = time.delta_secs();
+    for (e, parent, mut press) in &mut presses {
+        if falling.contains(parent.parent()) {
+            continue;
+        }
+        press.linger_secs -= dt;
+        if press.linger_secs <= 0.0 {
+            commands.entity(e).despawn();
+        }
     }
 }
 
@@ -910,6 +957,40 @@ mod tests {
         for c in body {
             assert!(c.forward().dot(fall) > 0.99, "{:?} vs {fall}", c.forward());
         }
+    }
+
+    #[test]
+    fn a_falling_tree_presses_the_grass_until_it_has_settled() {
+        let (mut app, tree) = app_with_oak(0.8);
+        app.update();
+        let log = fell_tree(&mut app.world, tree, Vec3::X).expect("the oak falls");
+        let presses = |app: &mut App| -> Vec<(DVec3, f32)> {
+            app.world
+                .query::<(&GrassBender, &GlobalTransform, &ChildOf)>()
+                .iter(&app.world)
+                .filter(|(_, _, c)| c.parent() == log)
+                .map(|(b, g, _)| (g.translation(), b.radius))
+                .collect()
+        };
+        app.update_n(2);
+        let standing = presses(&mut app);
+        assert_eq!(standing.len(), 4);
+        // Upright: stacked up the trunk, the widest one in the crown.
+        assert!(standing.iter().all(|(p, _)| (p.x - 3.0).abs() < 0.5));
+        assert!(standing[3].1 > standing[0].1 * 2.0);
+        let mut frames = 0;
+        while app.world.get::<FelledLog>(log).is_none() {
+            frames += 1;
+            assert!(frames < 600, "the tree never landed");
+            app.update();
+        }
+        // Down: lying along +X near the ground, still pressing.
+        let down = presses(&mut app);
+        assert_eq!(down.len(), 4);
+        assert!(down.iter().all(|(p, _)| p.y < 3.0), "{down:?}");
+        assert!(down[3].0.x > down[0].0.x + 3.0, "{down:?}");
+        app.update_n(5 * 60);
+        assert!(presses(&mut app).is_empty());
     }
 
     #[test]
