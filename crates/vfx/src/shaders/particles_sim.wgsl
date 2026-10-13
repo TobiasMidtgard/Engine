@@ -258,7 +258,10 @@ fn particle_light(rel: vec3<f32>, translucency: f32) -> vec3<f32> {
     if (dot(sun, sun) > 0.0) {
         let v = rel / max(length(rel), 1e-4);
         let shadow = shadow_factor(rel, l);
-        let phase = mix(0.5 * INV_PI, phase_mie(dot(v, l), 0.55), translucency);
+        // A puff is thick enough to scatter light many times over, so with the sun behind the
+        // viewer it still glows (as a cloud does) rather than going as dark as one bounce of
+        // the forward-peaked phase would leave it.
+        let phase = mix(0.5 * INV_PI, max(phase_mie(dot(v, l), 0.55), 0.15 * INV_PI), translucency);
         light += sun * (shadow * phase);
     }
     let up = vec3<f32>(0.0, 1.0, 0.0);

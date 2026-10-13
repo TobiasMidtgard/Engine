@@ -6,6 +6,7 @@ pub mod demo;
 pub mod effect;
 pub mod emitter;
 pub mod events;
+pub mod exhaust;
 pub mod feature;
 pub mod gpu;
 pub mod library;
@@ -31,6 +32,7 @@ pub use effect::{
 };
 pub use emitter::{ParticleEffect, VfxLight, VfxRuntime, VfxSettings, VfxStats};
 pub use events::{VfxReactions, spawn_effect_at};
+pub use exhaust::{ExhaustNozzle, exhaust_effect};
 pub use feature::ParticleFeature;
 pub use library::{EffectFile, EffectLibrary, EffectLoader};
 pub use marks::{Mark, MarkDesc, MarkKind, Marks};
@@ -88,6 +90,9 @@ impl Plugin for VfxPlugin {
             .add_message::<engine_world::LightningStrike>()
             .add_message::<engine_world::WorldShift>();
 
+        // Every engine's nozzles get a flame (owners hide their stand-in plumes).
+        engine_world::locomotion::draws_exhausts(app, "vfx");
+
         app.insert_resource(EffectLibrary::with_builtins())
             .init_resource::<VfxSettings>()
             .init_resource::<VfxReactions>()
@@ -128,6 +133,7 @@ impl Plugin for VfxPlugin {
                     events::react_to_world,
                     events::react_to_splashes,
                     events::react_to_lightning,
+                    exhaust::follow_exhausts,
                     marks::age_marks,
                     tick_lifetimes,
                     (
@@ -138,6 +144,7 @@ impl Plugin for VfxPlugin {
                         demo::run_lightning,
                         demo::run_walkers,
                         demo::run_droppers,
+                        demo::run_engines,
                         demo::art::follow_exposure,
                     ),
                 ),

@@ -3,7 +3,8 @@
 //!
 //! Naming: `spell.*` magic, `water.*` splashes and fountains, `impact.<surface>` hits on a
 //! surface material (the names `SurfaceMaterial::impact_effect` uses), `step.<surface>`
-//! footstep kicks, `impulse.*` ground shockwaves, `fire.*`, `ambient.*`, `magic.*`.
+//! footstep kicks, `impulse.*` ground shockwaves, `exhaust.*` engine flames and fumes, `fire.*`,
+//! `ambient.*`, `magic.*`.
 //!
 //! Glow is in cd/m²: daylight scenes expose for roughly 5 000–100 000 cd/m², so cores of
 //! 40 000–100 000 read as white-hot by day and bloom at night.
@@ -87,6 +88,17 @@ fn light(color: [f32; 3], lumens: f32, range: f32, flicker: f32, fade: f32) -> O
         offset: [0.0; 3],
         fade_secs: fade,
     })
+}
+
+/// A light `offset` m out from the effect along its local axes.
+fn light_at(
+    color: [f32; 3],
+    lumens: f32,
+    range: f32,
+    flicker: f32,
+    offset: [f32; 3],
+) -> Option<EffectLight> {
+    light(color, lumens, range, flicker, 0.15).map(|l| EffectLight { offset, ..l })
 }
 
 /// Fade in quickly, hold, fade out: `[t, alpha]` shape applied to one color.
@@ -319,6 +331,7 @@ pub fn all() -> Vec<EffectDesc> {
     v.extend(water());
     v.extend(impacts());
     v.extend(steps());
+    v.extend(exhausts());
     v.extend(misc());
     v
 }
@@ -2440,6 +2453,313 @@ fn steps() -> Vec<EffectDesc> {
     ]
 }
 
+/// The flame of one nozzle: short, overlapping plume sprites standing on the nozzle (so it
+/// shimmers), `length` m long and `width` m across at its widest, glowing `glow` cd/m².
+fn plume(name: &str, rgb: [f32; 3], length: f32, width: f32, glow: f32) -> EmitterDesc {
+    EmitterDesc {
+        rate: 12.0,
+        speed: [0.0, 0.0],
+        lifetime: [0.16, 0.24],
+        size: [length * 0.94, length * 1.06],
+        rotation_deg: [0.0, 0.0],
+        local_space: true,
+        sprite: Sprite::Plume,
+        facing: Facing::Axis,
+        stretch: width / length,
+        color: fade(rgb, 1.0, 0.3, 0.7),
+        emissive: glow,
+        additive: 1.0,
+        wind: 0.0,
+        soft: 0.4,
+        ..em(name)
+    }
+}
+
+/// The white-hot mouth of a nozzle, a glow that faces the camera so a flame seen end-on still
+/// shows: `size` m across.
+fn nozzle_glow(rgb: [f32; 3], size: f32, glow: f32) -> EmitterDesc {
+    EmitterDesc {
+        rate: 12.0,
+        speed: [0.0, 0.0],
+        offset: [0.0, size * 0.15, 0.0],
+        lifetime: [0.2, 0.3],
+        size: [size * 0.9, size * 1.1],
+        local_space: true,
+        color: fade(rgb, 1.0, 0.3, 0.6),
+        emissive: glow,
+        additive: 1.0,
+        wind: 0.0,
+        soft: 0.1,
+        ..em("nozzle")
+    }
+}
+
+/// Engine flames and fumes. Every one plays at a nozzle with its +Y axis pointing out of it,
+/// down the exhaust; `scale` 1 is the nozzle size each describes and `intensity` follows the
+/// throttle. Plumes widen and lose their shock diamonds as the air thins.
+fn exhausts() -> Vec<EffectDesc> {
+    const KEROSENE: [f32; 3] = [1.0, 0.6, 0.3];
+    const AFTERBURNER: [f32; 3] = [1.0, 0.55, 0.28];
+    const ION_BLUE: [f32; 3] = [0.55, 0.72, 1.0];
+    vec![
+        EffectDesc {
+            light: light_at(KEROSENE, 10_000.0, 30.0, 0.12, [0.0, 0.6, 0.0]),
+            ..effect(
+                "exhaust.rocket",
+                "A kerosene rocket engine at full thrust: a blinding orange plume with a train \
+                 of shock diamonds and a ragged tail, a white-hot nozzle and a cloud of exhaust \
+                 billowing up where the plume dies away. Scale 1 is a nozzle 1 m across.",
+                None,
+                vec![
+                    plume("plume", KEROSENE, 9.0, 3.3, 14_000.0),
+                    nozzle_glow([1.0, 0.86, 0.62], 1.0, 40_000.0),
+                    // Licks of flame torn off the plume's edge, streaking out along it.
+                    EmitterDesc {
+                        rate: 70.0,
+                        shape: EmitShape::Cone {
+                            angle_deg: 4.0,
+                            radius: 0.35,
+                        },
+                        offset: [0.0, 2.0, 0.0],
+                        speed: [24.0, 34.0],
+                        drag: 2.0,
+                        turbulence: 10.0,
+                        turbulence_scale: 1.0,
+                        lifetime: [0.12, 0.22],
+                        size: [0.7, 1.2],
+                        size_over_life: c(&[(0.0, 0.7), (1.0, 1.8)]),
+                        sprite: Sprite::Flame,
+                        facing: Facing::Velocity,
+                        stretch: 0.03,
+                        color: flame_colors(),
+                        emissive: 9000.0,
+                        additive: 1.0,
+                        wind: 0.0,
+                        soft: 0.3,
+                        ..em("licks")
+                    },
+                    // The exhaust cloud billowing up where the plume dies away.
+                    EmitterDesc {
+                        rate: 30.0,
+                        shape: EmitShape::Sphere {
+                            radius: 0.8,
+                            surface: false,
+                        },
+                        offset: [0.0, 7.0, 0.0],
+                        spread_deg: 25.0,
+                        speed: [4.0, 8.0],
+                        drag: 1.2,
+                        acceleration: [0.0, 0.5, 0.0],
+                        collide: Collide::Bounce {
+                            restitution: 0.05,
+                            friction: 0.05,
+                        },
+                        turbulence: 1.5,
+                        turbulence_scale: 4.0,
+                        lifetime: [3.0, 5.0],
+                        size: [1.6, 2.4],
+                        size_over_life: c(&[(0.0, 0.6), (1.0, 4.0)]),
+                        soft: 1.0,
+                        ..smoke("cloud", 0.68, 0.35)
+                    },
+                    EmitterDesc {
+                        rate: 30.0,
+                        offset: [0.0, 2.0, 0.0],
+                        spread_deg: 6.0,
+                        speed: [12.0, 18.0],
+                        lifetime: [0.3, 0.5],
+                        size: [2.5, 3.5],
+                        size_over_life: c(&[(0.0, 0.6), (1.0, 1.6)]),
+                        ..haze("haze", 1.0)
+                    },
+                ],
+            )
+        },
+        EffectDesc {
+            light: light_at(AFTERBURNER, 120_000.0, 45.0, 0.15, [0.0, 2.0, 0.0]),
+            ..effect(
+                "exhaust.afterburner",
+                "A jet engine on afterburner: a long flame with glowing shock diamonds, a blue \
+                 heart in the nozzle and a stream of heat haze. Scale 1 is a nozzle 1 m across.",
+                None,
+                vec![
+                    plume("plume", AFTERBURNER, 7.0, 3.3, 16_000.0),
+                    nozzle_glow([0.35, 0.45, 1.0], 1.2, 10_000.0),
+                    EmitterDesc {
+                        rate: 36.0,
+                        offset: [0.0, 1.0, 0.0],
+                        spread_deg: 5.0,
+                        speed: [18.0, 26.0],
+                        lifetime: [0.35, 0.6],
+                        size: [1.4, 2.0],
+                        size_over_life: c(&[(0.0, 0.6), (1.0, 2.2)]),
+                        ..haze("haze", 1.0)
+                    },
+                ],
+            )
+        },
+        effect(
+            "exhaust.jet",
+            "A jet engine at dry thrust: no flame, only the dull glow of the turbine deep in \
+             the nozzle and a fast stream of shimmering hot air. Scale 1 is a nozzle 1 m across.",
+            None,
+            vec![
+                EmitterDesc {
+                    rate: 6.0,
+                    speed: [0.0, 0.0],
+                    offset: [0.0, -0.15, 0.0],
+                    lifetime: [0.4, 0.6],
+                    size: [0.8, 0.9],
+                    local_space: true,
+                    color: fade([1.0, 0.45, 0.2], 0.8, 0.3, 0.6),
+                    emissive: 2500.0,
+                    additive: 1.0,
+                    wind: 0.0,
+                    soft: 0.05,
+                    ..em("turbine")
+                },
+                EmitterDesc {
+                    rate: 40.0,
+                    shape: EmitShape::Sphere {
+                        radius: 0.3,
+                        surface: false,
+                    },
+                    offset: [0.0, 0.5, 0.0],
+                    spread_deg: 5.0,
+                    speed: [20.0, 30.0],
+                    lifetime: [0.4, 0.7],
+                    size: [1.0, 1.4],
+                    size_over_life: c(&[(0.0, 0.6), (1.0, 2.6)]),
+                    ..haze("haze", 1.0)
+                },
+            ],
+        ),
+        EffectDesc {
+            light: light_at(ION_BLUE, 50_000.0, 25.0, 0.05, [0.0, 1.0, 0.0]),
+            ..effect(
+                "exhaust.thruster",
+                "A spacecraft's thruster: a pale blue flame with a white-hot throat, which \
+                 balloons into a wide, faint bell in the vacuum of space. Scale 1 is a nozzle \
+                 1 m across.",
+                None,
+                vec![
+                    plume("plume", ION_BLUE, 6.0, 3.4, 8_000.0),
+                    nozzle_glow([0.75, 0.85, 1.0], 1.3, 30_000.0),
+                ],
+            )
+        },
+        effect(
+            "exhaust.tailpipe",
+            "A car's tailpipe at idle: faint puffs of fumes and a shimmer of hot air; raise \
+             `rate` as it revs. Scale 1 is a tailpipe 6 cm across.",
+            None,
+            vec![
+                EmitterDesc {
+                    rate: 9.0,
+                    shape: EmitShape::Sphere {
+                        radius: 0.02,
+                        surface: false,
+                    },
+                    spread_deg: 12.0,
+                    speed: [1.5, 2.5],
+                    drag: 2.5,
+                    acceleration: [0.0, 0.4, 0.0],
+                    turbulence: 0.5,
+                    turbulence_scale: 0.4,
+                    lifetime: [1.2, 2.2],
+                    size: [0.12, 0.2],
+                    size_over_life: c(&[(0.0, 0.8), (1.0, 6.0)]),
+                    soft: 0.1,
+                    ..smoke("fumes", 0.62, 0.3)
+                },
+                EmitterDesc {
+                    rate: 14.0,
+                    offset: [0.0, 0.1, 0.0],
+                    spread_deg: 10.0,
+                    speed: [1.0, 1.8],
+                    lifetime: [0.4, 0.7],
+                    size: [0.15, 0.22],
+                    size_over_life: c(&[(0.0, 0.6), (1.0, 2.0)]),
+                    ..haze("haze", 0.7)
+                },
+            ],
+        ),
+        EffectDesc {
+            light: light_at([1.0, 0.6, 0.3], 9000.0, 6.0, 0.6, [0.0, 0.3, 0.0]),
+            ..effect(
+                "exhaust.backfire",
+                "A tailpipe backfire: a bang of flame out of the pipe, a few sparks and a puff \
+                 of dark smoke. Scale 1 is a tailpipe 6 cm across.",
+                Some(0.06),
+                vec![
+                    EmitterDesc {
+                        rate: 0.0,
+                        bursts: vec![at(0.0, 1), at(0.03, 1)],
+                        lifetime: [0.09, 0.13],
+                        ..plume("flame", [1.0, 0.55, 0.22], 0.6, 0.25, 15_000.0)
+                    },
+                    EmitterDesc {
+                        color: g(&[(0.0, [1.0, 0.8, 0.45, 1.0]), (1.0, [1.0, 0.35, 0.08, 0.0])]),
+                        shape: EmitShape::Point,
+                        spread_deg: 25.0,
+                        lifetime: [0.2, 0.5],
+                        size: [0.008, 0.015],
+                        ..sparks("sparks", 10, [5.0, 10.0])
+                    },
+                    EmitterDesc {
+                        bursts: vec![at(0.02, 4)],
+                        shape: EmitShape::Sphere {
+                            radius: 0.03,
+                            surface: false,
+                        },
+                        spread_deg: 20.0,
+                        speed: [2.5, 4.0],
+                        drag: 3.0,
+                        lifetime: [0.8, 1.4],
+                        size: [0.15, 0.25],
+                        size_over_life: c(&[(0.0, 0.6), (1.0, 3.5)]),
+                        ..smoke("smoke", 0.12, 0.5)
+                    },
+                ],
+            )
+        },
+        EffectDesc {
+            light: light_at(ION_BLUE, 20_000.0, 8.0, 0.3, [0.0, 0.4, 0.0]),
+            ..effect(
+                "exhaust.jumpjet",
+                "A jump pack's jet: a short blue-white flame, a shimmer of hot air and a few \
+                 sparks, for as long as it fires. Scale 1 is a nozzle 12 cm across.",
+                None,
+                vec![
+                    plume("flame", [0.62, 0.78, 1.0], 1.1, 0.42, 12_000.0),
+                    nozzle_glow([0.8, 0.88, 1.0], 0.3, 30_000.0),
+                    EmitterDesc {
+                        rate: 40.0,
+                        offset: [0.0, 0.3, 0.0],
+                        spread_deg: 8.0,
+                        speed: [6.0, 9.0],
+                        lifetime: [0.25, 0.4],
+                        size: [0.3, 0.45],
+                        size_over_life: c(&[(0.0, 0.6), (1.0, 2.0)]),
+                        ..haze("haze", 0.9)
+                    },
+                    EmitterDesc {
+                        rate: 30.0,
+                        bursts: Vec::new(),
+                        color: g(&[(0.0, [0.85, 0.92, 1.0, 1.0]), (1.0, [0.4, 0.6, 1.0, 0.0])]),
+                        shape: EmitShape::Point,
+                        spread_deg: 12.0,
+                        gravity: 0.3,
+                        lifetime: [0.15, 0.35],
+                        size: [0.006, 0.012],
+                        ..sparks("sparks", 0, [8.0, 14.0])
+                    },
+                ],
+            )
+        },
+    ]
+}
+
 fn misc() -> Vec<EffectDesc> {
     let lightning_ground = EffectDesc {
         light: light([0.75, 0.82, 1.0], 400_000.0, 60.0, 0.9, 0.35),
@@ -2693,7 +3013,7 @@ fn misc() -> Vec<EffectDesc> {
                         shape: EmitShape::Disc { radius: 0.12 },
                         speed: [0.3, 0.8],
                         velocity: [0.0, 1.2, 0.0],
-                        acceleration: [0.0, 0.8, 0.0],
+                        acceleration: [0.0, 0.5, 0.0],
                         drag: 1.0,
                         turbulence: 4.0,
                         turbulence_scale: 0.35,
