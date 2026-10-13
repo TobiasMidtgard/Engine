@@ -1,6 +1,7 @@
 // Sky: physically based atmosphere (lib_atmosphere: multiple scattering from look-up tables),
-// sun disc, a simple cloud layer and stars. Also renders the equirectangular environment map
-// used for ambient light and reflections. Requires lib_types + lib_frame + lib_atmosphere.
+// sun disc, a simple cloud layer and stars, behind the volumetric fog. Also renders the
+// equirectangular environment map used for ambient light and reflections. Requires lib_types +
+// lib_frame + lib_atmosphere.
 
 fn star_field(dir: vec3<f32>) -> vec3<f32> {
     let p = dir * 400.0;
@@ -125,7 +126,9 @@ fn vs_sky(@builtin(vertex_index) i: u32) -> FullscreenOut {
 @fragment
 fn fs_sky(in: FullscreenOut) -> @location(0) vec4<f32> {
     let dir = view_dir(in.uv);
-    let c = pre_expose(sky_radiance(dir, true));
+    // Fog in front of the sky, up to the volumetric fog's range: sunbeams against the sky and
+    // the sun's disc dimmed by mist.
+    let c = apply_sky_fog(pre_expose(sky_radiance(dir, true)), dir);
     return vec4<f32>(min(c, vec3(60000.0)), 1.0);
 }
 
