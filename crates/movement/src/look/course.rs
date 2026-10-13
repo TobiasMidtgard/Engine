@@ -38,6 +38,7 @@ use super::texgen::{Surface, bake, fbm, hex, perlin, rand2, smoothstep};
 use super::{Cap, Library, MeshBuilder, Section};
 use crate::demo::layout;
 
+mod freight;
 mod grapple_tower;
 
 type M = MeshBuilder;
@@ -74,6 +75,10 @@ const STEEL_YELLOW: &str = "mat/painted_steel_yellow";
 const STEEL_ORANGE: &str = "mat/painted_steel_orange";
 const STEEL_WHITE: &str = "mat/painted_steel_white";
 const STEEL_OLIVE: &str = "mat/painted_steel_olive";
+const OXIDE: &str = "mat/weathered_oxide";
+const ROOF_GREY: &str = "mat/weathered_grey";
+const RUST: &str = "mat/rusted_steel";
+const BALLAST: &str = "mat/ballast";
 const ALU: &str = "mat/brushed_metal";
 const RUBBER: &str = "mat/rubber";
 const HAZARD: &str = "mat/hazard";
@@ -279,6 +284,8 @@ pub fn generate(lib: &mut Library) {
     build_props().register(lib, "props");
     build_ledge().register(lib, "ledge");
     grapple_tower::build().register(lib, "grapple");
+    freight::build_track().register(lib, "freight");
+    freight::build_car().register(lib, "freight_car");
     build_plinth().register(lib, "plinth");
     build_apron().register(lib, "apron");
     build_torii().register(lib, "torii");
@@ -345,11 +352,29 @@ const COURSE_LIGHTS: &[([f64; 3], [f32; 3], f32, f32)] = &[
     // The grapple station's floodlight, and the glow of its target.
     ([3.75, 6.6, 19.75], [0.85, 0.92, 1.0], 9000.0, 26.0),
     ([8.0, 8.65, 27.6], [0.37, 0.85, 1.0], 700.0, 5.0),
+    // Under the freight platform's lamp heads.
+    ([-22.0, 5.9, 25.6], [1.0, 0.86, 0.68], 5000.0, 16.0),
+    ([-14.0, 5.9, 25.6], [1.0, 0.86, 0.68], 5000.0, 16.0),
+    ([-6.0, 5.9, 25.6], [1.0, 0.86, 0.68], 5000.0, 16.0),
 ];
+
+/// Spawns the freight car's body, trucks and fittings as children of the moving `car` entity
+/// (its transform is the center of its collider box).
+pub fn dress_freight_car(commands: &mut Commands, car: Entity) {
+    for &(group, mat, shadows) in freight::CAR_SET {
+        let mut r = MeshRenderer::new(
+            MeshRef::Asset(format!("movement/{}", kit_key(group, mat))),
+            material_ref(mat),
+        );
+        r.cast_shadows = shadows;
+        commands.spawn((Transform::default(), r, ChildOf(car)));
+    }
+}
 
 /// Spawns the parkour course's set dressing around the demo `origin` (no colliders).
 pub fn dress_course(commands: &mut Commands, origin: DVec3) {
     spawn_set(commands, origin, Quat::IDENTITY, COURSE_SET);
+    spawn_set(commands, origin, Quat::IDENTITY, freight::TRACK_SET);
     for &(p, color, lm, range) in COURSE_LIGHTS {
         light(commands, origin + DVec3::from_array(p), color, lm, range);
     }
@@ -909,7 +934,16 @@ const PAINT_ROWS: &[(&str, usize, f32)] = &[
     (">>>", 9, 0.0),
     ("07", 0, 160.0),
     ("GRAPPLE", 1, 160.0),
+    ("08", 0, 320.0),
+    ("RIDE", 2, 160.0),
+    ("MIND THE GAP", 3, 160.0),
+    ("MTRN 4108", 4, 160.0),
 ];
+/// The freight station's paint rows.
+const PAINT_08: usize = 12;
+const PAINT_RIDE: usize = 13;
+const PAINT_MIND: usize = 14;
+const PAINT_MARK: usize = 15;
 const PAINT_ROW_PX: f32 = 96.0;
 const PAINT_SCALE: f32 = 12.0;
 const PAINT_PAD: f32 = 12.0;
@@ -989,6 +1023,7 @@ const SIGN_ROWS: &[(&str, usize, f32)] = &[
     ("START", 6, 0.0),
     ("06 LEDGE", 7, 0.0),
     ("07 GRAPPLE", 6, 384.0),
+    ("08 RIDE", 4, 460.0),
 ];
 const SIGN_ROW_PX: f32 = 128.0;
 const SIGN_SCALE: f32 = 11.0;
@@ -3385,6 +3420,8 @@ fn build_signs() -> Kit {
         ),
         // The grapple station's, at the pad's front corner, facing the course.
         (12.45, 19.4, 8, 1.1),
+        // The freight station's, past the platform's west end, facing along the track.
+        (-27.6, 24.3, 9, FRAC_PI_2),
     ];
     for (x, z, row, yaw) in spots {
         let q = Quat::from_rotation_y(yaw);
@@ -5427,7 +5464,15 @@ mod tests {
     #[test]
     fn every_spawned_part_has_a_mesh_and_a_material() {
         let (meshes, _, materials) = library();
-        let sets = [COURSE_SET, RING_SET, LANTERN_SET, BANNER_SET, COLUMN_SET];
+        let sets = [
+            COURSE_SET,
+            freight::TRACK_SET,
+            freight::CAR_SET,
+            RING_SET,
+            LANTERN_SET,
+            BANNER_SET,
+            COLUMN_SET,
+        ];
         for set in sets {
             for &(group, mat, _) in set {
                 let key = format!("movement/{}", kit_key(group, mat));
@@ -5460,13 +5505,21 @@ mod tests {
     #[test]
     fn every_generated_mesh_is_spawned() {
         let (meshes, _, _) = library();
-        let mut spawned: Vec<String> = [COURSE_SET, RING_SET, LANTERN_SET, BANNER_SET, COLUMN_SET]
-            .iter()
-            .flat_map(|s| {
-                s.iter()
-                    .map(|&(g, m, _)| format!("movement/{}", kit_key(g, m)))
-            })
-            .collect();
+        let mut spawned: Vec<String> = [
+            COURSE_SET,
+            freight::TRACK_SET,
+            freight::CAR_SET,
+            RING_SET,
+            LANTERN_SET,
+            BANNER_SET,
+            COLUMN_SET,
+        ]
+        .iter()
+        .flat_map(|s| {
+            s.iter()
+                .map(|&(g, m, _)| format!("movement/{}", kit_key(g, m)))
+        })
+        .collect();
         for v in 0..2 {
             spawned.push(format!(
                 "movement/{}",
@@ -5552,6 +5605,38 @@ mod tests {
             .map(|v| v.position[2])
             .fold(f32::MAX, f32::min);
         assert!((face - g0.z).abs() < 1e-4, "{face}");
+        // The freight platform's top and the car's roof and sides are their colliders'.
+        let (f0, f1) = bounds(layout::FREIGHT_PLATFORM);
+        for mat in [CONCRETE, STONE] {
+            let top = get("freight", mat)
+                .vertices
+                .iter()
+                .map(|v| v.position[1])
+                .fold(f32::MIN, f32::max);
+            assert!((top - f1.y).abs() < 1e-4, "{mat} {top}");
+        }
+        let half = Vec3::from(layout::FREIGHT_CAR_SIZE) * 0.5;
+        let car = get("freight_car", OXIDE);
+        let roof = get("freight_car", ROOF_GREY)
+            .vertices
+            .iter()
+            .filter(|v| v.position[2].abs() < half.z - 0.1)
+            .map(|v| v.position[1])
+            .fold(f32::MIN, f32::max);
+        assert!(roof >= half.y && roof < half.y + 0.01, "{roof}");
+        let mut side: f32 = 0.0;
+        for v in &car.vertices {
+            let p = Vec3::from(v.position);
+            assert!(
+                p.z.abs() <= half.z + 1e-4,
+                "car body outside its collider: {p}"
+            );
+            if p.x.abs() < half.x - 0.2 && p.y > 0.0 {
+                side = side.max(p.z.abs());
+            }
+        }
+        assert!((side - half.z).abs() < 1e-4, "{side}");
+        assert!(f0.z < f1.z);
         // Ring floor at the collider top.
         let floor = get("plinth", PLANKS);
         for v in &floor.vertices {
@@ -5617,7 +5702,7 @@ mod tests {
             );
             banners += tris(&format!("banner_crest{v}"), CREST_WHITE);
         }
-        let course = sum(COURSE_SET);
+        let course = sum(COURSE_SET) + sum(freight::TRACK_SET) + sum(freight::CAR_SET);
         let ring = sum(RING_SET) + LANTERNS.len() * sum(LANTERN_SET) + BANNERS.len() * banners / 2;
         let column = sum(COLUMN_SET);
         let total = course + ring + column;

@@ -15,7 +15,7 @@ use engine_core::math::{DVec3, Vec3};
 use engine_core::prelude::*;
 use engine_core::time::TimeSource;
 use engine_movement::combat::{AttackPhase, CombatState};
-use engine_movement::demo::{self, Brain, DuelDirector, Round};
+use engine_movement::demo::{self, Brain, DuelDirector, Ride, Round};
 use engine_movement::{MovementPlugin, Mover};
 use engine_render::prelude::*;
 use engine_render::{RenderDisabled, Renderer, capture_now};
@@ -37,6 +37,8 @@ struct Cast {
     elite: Entity,
     grunts: Vec<Entity>,
     director: Entity,
+    rider: Entity,
+    car: Entity,
 }
 
 struct Shot {
@@ -61,6 +63,13 @@ fn combat(w: &World, e: Entity) -> &CombatState {
 
 fn round(w: &World, c: &Cast) -> Round {
     w.get::<DuelDirector>(c.director).unwrap().round
+}
+
+fn ride(w: &World, c: &Cast) -> Ride {
+    match w.get::<Brain>(c.rider).unwrap() {
+        Brain::Rider { step, .. } => *step,
+        _ => Ride::Start,
+    }
 }
 
 fn runner_step(w: &World, c: &Cast) -> usize {
@@ -203,6 +212,45 @@ const SHOTS: &[Shot] = &[
             )
         },
     },
+    // The freight station, framed as the showcase tour stop frames it.
+    Shot {
+        file: "10_leap_onto_the_moving_freight_car.png",
+        when: |w, c| mover(w, c.rider).mode == LocomotionMode::WallRun,
+        camera: |_, _| {
+            (
+                DVec3::new(-20.0, 3.6, 21.0),
+                DVec3::new(-15.5, 3.0, 28.5),
+                55.0,
+            )
+        },
+    },
+    Shot {
+        file: "11_climb_aboard_the_freight_car.png",
+        when: |w, c| {
+            let m = mover(w, c.rider);
+            ride(w, c) == Ride::Climb && m.mode == LocomotionMode::Mantle && m.mode_secs > 0.12
+        },
+        camera: |w, c| {
+            let p = pos(w, c.rider);
+            (
+                p + DVec3::new(-2.6, 0.3, -3.4),
+                p + DVec3::new(0.6, 0.0, 0.6),
+                55.0,
+            )
+        },
+    },
+    Shot {
+        file: "12_ride_the_freight_car.png",
+        when: |w, c| ride(w, c) == Ride::Aboard && pos(w, c.car).x > -12.0,
+        camera: |w, c| {
+            let p = pos(w, c.rider);
+            (
+                p + DVec3::new(-6.0, -2.0, -6.5),
+                p + DVec3::new(1.5, -1.2, 0.5),
+                50.0,
+            )
+        },
+    },
 ];
 
 fn build_app() -> (App, Cast, Entity) {
@@ -314,6 +362,8 @@ fn build_app() -> (App, Cast, Entity) {
         elite: d.elite.unwrap(),
         grunts: d.grunts.clone(),
         director,
+        rider: named(&mut app, "Rider"),
+        car: named(&mut app, "Freight car"),
     };
     (app, cast, camera)
 }

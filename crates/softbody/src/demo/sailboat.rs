@@ -61,6 +61,8 @@ pub struct Helm {
     pub capsized_for: f32,
     /// Where it waits when there is no water.
     pub mooring: Transform,
+    /// Start over from the mooring on the next step (`softbody.sailboat_home`).
+    pub restart: bool,
 }
 
 /// Lateral resistance of hull and centerboard: N·s/m and N·s²/m².
@@ -136,6 +138,7 @@ pub fn spawn_sailboat(commands: &mut Commands, home: DVec3, range: f32) -> Entit
         rudder_angle: 0.0,
         capsized_for: 0.0,
         mooring,
+        restart: false,
     });
     dress(commands, boat, rig, rudder);
     boat
@@ -243,7 +246,8 @@ pub fn sail_boats(
             helm.capsized_for = 0.0;
         }
         let lost = (pos - helm.home).length() > (helm.range * 2.5) as f64;
-        if !afloat || lost || helm.capsized_for > 4.0 {
+        let restart = std::mem::take(&mut helm.restart);
+        if !afloat || lost || restart || helm.capsized_for > 4.0 {
             // Wait at the mooring (or start over there), head to wind.
             let wind = env.wind(pos);
             let into = -Vec3::new(wind.x, 0.0, wind.z).normalize_or(Vec3::X);
