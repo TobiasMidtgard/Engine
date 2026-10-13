@@ -14,7 +14,9 @@ pub struct Vertex {
     pub position: [f32; 3],
     pub normal: [f32; 3],
     pub uv: [f32; 2],
-    /// Linear RGBA vertex color (multiplied with the material's base color).
+    /// Linear RGBA vertex color (multiplied with the material's base color). On materials with
+    /// `StandardMaterial::wind_sway` the alpha is the vertex's wind weight (0 = still, 1 = full
+    /// sway) instead of opacity.
     pub color: [f32; 4],
 }
 

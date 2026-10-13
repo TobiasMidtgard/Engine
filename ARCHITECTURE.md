@@ -269,6 +269,11 @@ colors (stone, plaster, bark, soil, metal plates) don't look flat; it fades out 
 instead of sparkling. It sticks to the object; terrain and other meshes split into pieces use
 `with_detail_in_world()` so it lines up across seams.
 
+**Wind sway** (built): `StandardMaterial::wind_sway` (m) bends a mesh downwind, growing with height
+in the mesh, in the scene, depth and shadow passes alike. Each vertex scales it by its color's
+alpha, its wind weight (0 = still, such as a trunk's base or a branch's joint; 1 = full sway, the
+default of meshes without vertex colors); on swaying materials the vertex alpha is not opacity.
+
 **Virtual geometry** (built: cluster LOD and GPU-driven drawing; `crates/render/src/virtual_geometry`):
 dense opaque meshes (`RenderSettings::virtual_geometry_min_triangles`, 50 000 by default) are
 split into 128-triangle clusters with a level-of-detail DAG (groups simplified with locked
