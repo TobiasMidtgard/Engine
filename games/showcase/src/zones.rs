@@ -271,7 +271,39 @@ pub fn spawn_demos(
             "cave" => engine_foliage::demo::spawn_cave_demo(commands, z.center),
             "arena" => engine_npc::demo::spawn_demo(commands, z.center),
             "parkour" => engine_movement::demo::spawn_demo(commands, z.center),
-            "fortress" => engine_destruction::demo::spawn_demo(commands, z.center),
+            "fortress" => {
+                engine_destruction::demo::spawn_demo(commands, z.center);
+                // The burning storehouse has straw on its floor (it goes up fast and grows back
+                // for the next loop) and stands in a bare earth yard ringed by green grass, so
+                // its fire stays a house fire: no grass fire runs off across the valley, and
+                // embers on the wind die where they land (most come down well inside 60 m).
+                let barn = z.center + DVec3::from_array(engine_destruction::barn::BARN);
+                commands.spawn((
+                    Name::new("Storehouse straw floor"),
+                    Transform::from_translation(barn),
+                    engine_fire::FuelPatch::grass(engine_fire::PatchShape::Rect {
+                        half_extents: [2.3, 1.8],
+                    })
+                    .with_load(0.6)
+                    .with_moisture(0.05)
+                    .with_regrow(90.0)
+                    .with_priority(20),
+                ));
+                commands.spawn((
+                    Name::new("Storehouse yard (firebreak)"),
+                    Transform::from_translation(barn),
+                    engine_fire::FuelPatch::firebreak(engine_fire::PatchShape::Disc {
+                        radius: 8.0,
+                    }),
+                ));
+                commands.spawn((
+                    Name::new("Storehouse green grass"),
+                    Transform::from_translation(barn),
+                    engine_fire::FuelPatch::grass(engine_fire::PatchShape::Disc { radius: 60.0 })
+                        .with_moisture(1.0)
+                        .with_priority(5),
+                ));
+            }
             "voxel" => engine_destruction::hill::spawn_voxel_hill(commands, z.center),
             "field" => {
                 engine_fire::demo::spawn_demo(commands, z.center);
