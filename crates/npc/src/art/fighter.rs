@@ -3609,11 +3609,17 @@ fn face(s: &Shape) -> FaceSet {
             .min(teeth(p, true))
     };
     let jaw_inner = |p: Vec3| (form(p) + JAW_UNDER).max(cut(p)).min(teeth(p, false));
-    // Deep inside the head, where nothing shows even with the mouth open (not the inside of
-    // the mouth or the teeth).
-    let buried = |p: Vec3| {
-        (form(p) + 0.006)
-            .max(0.002 - mouth(ax(p - HEAD_C), s))
+    // What of a solid can't show even with the mouth open (negative there): deeper than the
+    // opening lets one see, or past `lo`..`hi` across the cut (the face's top and bottom,
+    // behind its skin or inside the jaw's solid; the jaw's front, behind its skin); but not
+    // the inside of the mouth or the teeth.
+    let hidden = |p: Vec3, lo: f32, hi: f32| {
+        let a = ax(p - HEAD_C);
+        let c = jaw_cut(a, s);
+        (form(p) + 0.0035)
+            .min(hi - c)
+            .min(c - lo)
+            .max(0.002 - mouth(a, s))
             .max(0.001 - teeth(p, true).min(teeth(p, false)))
     };
     // The occlusion: each half sees its own solid, the other half's skin, the eyes, the coif
@@ -3659,9 +3665,9 @@ fn face(s: &Shape) -> FaceSet {
     let (lo, hi) = FACE_BOX;
     let [above, below] = jaw_split(&face_skin(s), s);
     let line = HEAD_C.y + lip_lines(0.0, s.lips).1;
-    let behind = |f: &dyn Fn(Vec3) -> f32, top: f32| {
-        let m = sdf_mesh_tol(f, lo, v3(hi.x, top, hi.z), 0.0022, 0.0005);
-        cull(cull(m, &coif, 0.0015), &buried, 0.0)
+    let behind = |f: &dyn Fn(Vec3) -> f32, top: f32, band: (f32, f32)| {
+        let m = sdf_mesh_tol(f, lo, v3(hi.x, top, hi.z), 0.0022, 0.001);
+        cull(cull(m, &coif, 0.0015), &|p| hidden(p, band.0, band.1), 0.0)
     };
 
     let mut b = Builder {
@@ -3669,9 +3675,14 @@ fn face(s: &Shape) -> FaceSet {
         ..Default::default()
     };
     b.add_fn(above, Zone::Skin, &|p| skin_tint(p, 1.0));
-    b.add_fn(behind(&inner, line + JAW_ROOF + 0.004), Zone::Skin, &|p| {
-        inside(p, true)
-    });
+    // (Above the cut, the solid's front only half way up: higher, it would show only to an eye
+    // looking steeply up into the opened mouth.)
+    let band = (0.0008 - JAW_BAND, 0.5 * JAW_ROOF);
+    b.add_fn(
+        behind(&inner, line + JAW_ROOF + 0.004, band),
+        Zone::Skin,
+        &|p| inside(p, true),
+    );
     let face = b.finish(&face_seen, 1.0);
 
     let mut b = Builder {
@@ -3679,9 +3690,11 @@ fn face(s: &Shape) -> FaceSet {
         ..Default::default()
     };
     b.add_fn(below, Zone::Skin, &|p| skin_tint(p, 1.0));
-    b.add_fn(behind(&jaw_inner, line + 0.006), Zone::Skin, &|p| {
-        inside(p, false)
-    });
+    b.add_fn(
+        behind(&jaw_inner, line + 0.006, (-0.0015, 1.0)),
+        Zone::Skin,
+        &|p| inside(p, false),
+    );
     let jaw = b.finish(&jaw_seen, 1.0);
     FaceSet {
         face,
@@ -3699,7 +3712,7 @@ const FACE_BOX: (Vec3, Vec3) = (
 /// The face's skin.
 fn face_skin(s: &Shape) -> Mesh {
     let (lo, hi) = FACE_BOX;
-    let skin = sdf_mesh_tol(&|p| face_form(p, s), lo, hi, 0.0022, 0.0008);
+    let skin = sdf_mesh_tol(&|p| face_form(p, s), lo, hi, 0.0022, 0.0012);
     cull(cull(skin, &coif, 0.0015), &eyeballs, 0.0005)
 }
 
@@ -3878,9 +3891,10 @@ fn lids(s: &Shape) -> PieceMesh {
         let el = edge(az) + w * over;
         EYE + v3(az.sin() * el.cos(), el.sin(), -az.cos() * el.cos()) * r
     };
-    // Up the lid (so the normal points out), then across it from the inner corner.
-    let ws = super::mesh::steps(0.0, 1.0, 10);
-    let azs = super::mesh::steps(-1.25, 1.25, 18);
+    // Up the lid (so the normal points out; closer rows at the lash line, where the shade
+    // changes fastest), then across it from the inner corner.
+    let ws = [0.0, 0.05, 0.12, 0.25, 0.4, 0.62, 1.0];
+    let azs = super::mesh::steps(-1.25, 1.25, 12);
     let right = super::mesh::surface(&ws, &azs, &|w, az| at(w, az), &|w, az, _| {
         v2(az * r, w * over * r)
     });
@@ -3914,10 +3928,13 @@ fn eye() -> PieceMesh {
     let mut b = Builder::default();
     let (iris_r, limbus, pupil_r) = (0.0064, 0.0053, 0.0024);
     let on_ball = |r: f32| (EYE_R * EYE_R - r * r).sqrt();
+    // The white from as far round as shows in the opening with the eye turned its furthest
+    // (the back of the eyeball is inside the head).
     let t0 = (iris_r / EYE_R).asin();
-    let white: Vec<Vec2> = (0..=12)
+    let back = 1.9;
+    let white: Vec<Vec2> = (0..=5)
         .map(|k| {
-            let t = PI - (PI - t0) * k as f32 / 12.0;
+            let t = back - (back - t0) * k as f32 / 5.0;
             v2(EYE_R * t.sin(), EYE_R * t.cos())
         })
         .collect();
@@ -3925,10 +3942,10 @@ fn eye() -> PieceMesh {
         v2(iris_r, on_ball(iris_r)),
         v2(limbus, on_ball(limbus) + 0.0003),
     ];
-    let iris: Vec<Vec2> = (0..=3)
+    let iris: Vec<Vec2> = (0..=2)
         .map(|k| {
-            let r = limbus + (pupil_r - limbus) * k as f32 / 3.0;
-            v2(r, on_ball(r) + 0.0003 + 0.0003 * k as f32 / 3.0)
+            let r = limbus + (pupil_r - limbus) * k as f32 / 2.0;
+            v2(r, on_ball(r) + 0.0003 + 0.0003 * k as f32 / 2.0)
         })
         .collect();
     // From the iris's rim (0) to the pupil (1).
@@ -3956,7 +3973,7 @@ fn eye() -> PieceMesh {
         _ => Tint::Rgb(lin(0x050505)),
     };
     for (part, profile) in [&white[..], &ring, &iris, &pupil].into_iter().enumerate() {
-        let m = placed(lathe(profile, 20, &[]), to_front, Vec3::ZERO);
+        let m = placed(lathe(profile, 16, &[]), to_front, Vec3::ZERO);
         b.add_fn(m, Zone::Glass, &|p| tint(part, p));
     }
     b.finish(&|p: Vec3| p.length() - EYE_R, 0.0)
