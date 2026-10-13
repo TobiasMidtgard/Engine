@@ -102,7 +102,7 @@ struct Subject {
     eye_y: f32,
     /// Close-ups for `--detail`: look-at height, how far ahead of the walker's centre,
     /// distance, angle round from the side (radians, toward the front).
-    detail: [(f32, f32, f32, f32); 4],
+    detail: &'static [(f32, f32, f32, f32)],
 }
 
 const SUBJECTS: [Subject; 4] = [
@@ -112,7 +112,7 @@ const SUBJECTS: [Subject; 4] = [
         look_y: 0.95,
         dist: 3.0,
         eye_y: 1.25,
-        detail: [
+        detail: &[
             (1.62, 0.0, 0.75, 0.0),
             (1.62, 0.0, 0.75, 1.1),
             (0.25, 0.0, 1.2, 0.5),
@@ -125,7 +125,7 @@ const SUBJECTS: [Subject; 4] = [
         look_y: 0.95,
         dist: 3.2,
         eye_y: 1.2,
-        detail: [
+        detail: &[
             (1.6, 0.0, 0.75, 0.0),
             (1.6, 0.0, 0.75, 1.1),
             (0.25, 0.0, 1.2, 0.5),
@@ -138,7 +138,7 @@ const SUBJECTS: [Subject; 4] = [
         look_y: 0.36,
         dist: 1.55,
         eye_y: 0.6,
-        detail: [
+        detail: &[
             (0.55, 0.45, 0.6, 0.0),
             (0.55, 0.45, 0.6, 1.0),
             (0.15, 0.0, 0.9, 0.4),
@@ -151,11 +151,17 @@ const SUBJECTS: [Subject; 4] = [
         look_y: 1.1,
         dist: 4.9,
         eye_y: 1.5,
-        detail: [
+        // Head from the side and three-quarters, feet, back; then from the front and behind,
+        // and the fore and hind quarters close up.
+        detail: &[
             (1.45, 1.1, 1.3, 0.2),
             (1.45, 1.1, 1.3, 1.1),
             (0.4, 0.0, 1.8, 0.4),
             (1.2, 0.0, 2.8, 2.6),
+            (1.15, 0.0, 3.2, 1.57),
+            (1.15, 0.0, 3.2, -1.57),
+            (1.1, 0.5, 1.8, 0.3),
+            (1.1, -0.5, 1.8, -0.3),
         ],
     },
 ];

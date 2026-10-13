@@ -34,7 +34,7 @@ use crate::dress::PropModel;
 use crate::material::{DestructibleMaterial, DestructionMaterials};
 use crate::props::PropKind;
 use crate::structure::{Obb, PieceState, ShowSupport, StructuralPiece};
-use crate::voxel::VoxelState;
+use crate::voxel::{VoxelState, rock_below};
 
 /// Pitch of [`BuildKind::WoodRoof`]: one up in two across (26.6°).
 pub const ROOF_PITCH: f32 = 0.463_647_6;
@@ -933,14 +933,18 @@ pub fn build_system(
 ) {
     let requests: Vec<BuildRequest> = requests.read().copied().collect();
     let ground = ground.as_deref();
+    // Pieces stand on the terrain or on voxel rock, as in the structure solver.
+    let rock: Vec<(&GlobalTransform, &VoxelState)> = volumes.iter().collect();
     let ground_height = |p: DVec3| {
-        ground
+        let terrain = ground
             .and_then(|g| g.height(p))
-            .unwrap_or(f64::NEG_INFINITY)
+            .unwrap_or(f64::NEG_INFINITY);
+        rock_below(&rock, p).map_or(terrain, |r| r.max(terrain))
     };
     let mut placed: Vec<Obb> = Vec::new();
     let mut removed: Vec<Entity> = Vec::new();
     let mut show_any = false;
+    let mut showing: Vec<Entity> = Vec::new();
     for (e, mut b, mut preview, gt) in &mut builders {
         let (origin, dir) = aim_ray(&b, gt);
         let mut scene = scene_near(pieces.iter(), origin, b.reach_m as f64 + 6.0);
@@ -1016,7 +1020,10 @@ pub fn build_system(
         let (placement, target) = plan_now(&b, &scene);
         preview.placement = placement;
         preview.target = target;
-        show_any |= b.active && b.show_support;
+        if b.active && b.show_support {
+            show_any = true;
+            showing.push(e);
+        }
         // The ghost: moved along, rebuilt when the piece changes, gone when there is none.
         let ghost = preview.ghost.and_then(|g| ghosts.get_mut(g).ok());
         match (placement, ghost) {
@@ -1054,9 +1061,11 @@ pub fn build_system(
         }
     }
     // Built pieces show their support while someone builds.
-    for (_, mut show) in &mut shown {
-        if show.on != show_any {
-            show.on = show_any;
+    for (built, mut show) in &mut shown {
+        // A builder's own pieces follow its view; pieces placed by the AI follow anyone's.
+        let on = built.builder.map_or(show_any, |b| showing.contains(&b));
+        if show.on != on {
+            show.on = on;
         }
     }
 }
@@ -1129,11 +1138,14 @@ pub fn plan_in_world(
         .get_resource::<DestructionMaterials>()
         .cloned()
         .unwrap_or_default();
+    let mut vq = world.query::<(&GlobalTransform, &VoxelState)>();
+    let rock: Vec<(&GlobalTransform, &VoxelState)> = vq.iter(world).collect();
     let ground_height = |p: DVec3| {
-        ground
+        let terrain = ground
             .as_ref()
             .and_then(|g| g.height(p))
-            .unwrap_or(f64::NEG_INFINITY)
+            .unwrap_or(f64::NEG_INFINITY);
+        rock_below(&rock, p).map_or(terrain, |r| r.max(terrain))
     };
     let target = hit
         .piece
