@@ -39,7 +39,10 @@ fracture and debris.
   its connection to the ground (dig under an overhang, blow out an arch's foot) breaks into a
   few big chunks and falls.
 - **Fracture** (`Fracturable`): props break into Voronoi pieces with real hulls on a big
-  enough hit, and debris that lands hard shatters again.
+  enough hit, and debris that lands hard shatters again. Fracture faces are rough (broken
+  into small bumpy triangles that meet the piece's edges, `BreakLook`) and drawn in a
+  joint-free broken material, so a shattered ashlar block shows broken stone, not mortar
+  lines; glass and metal break clean.
 - **Debris** uses the physics module when one is installed (physics-contract bodies) and a
   built-in solver otherwise: oriented boxes with friction, bounce and sleep that land on the
   ground (not yet on each other). Chips and dust are cheap; the oldest debris sinks away past
@@ -147,5 +150,5 @@ headless to 22 screenshots.
 - Breach a reinforced wall with a charge; shoot holes in a wooden barricade; dig and collapse a
   voxel cliff. **Done** (tests above and the showcase).
 
-Next: building pieces you can place in game, angular rock fracture for falling boulders,
-debris resting on debris without a physics module.
+Next: building pieces you can place in game, debris resting on debris without a physics
+module.

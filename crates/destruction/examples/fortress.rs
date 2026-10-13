@@ -1,10 +1,12 @@
 //! Renders the destruction showcase headless and saves screenshots of every test case.
 //!
 //! ```sh
-//! cargo run -p engine_destruction --release --example fortress -- [out_dir] [WxH]
+//! cargo run -p engine_destruction --release --example fortress -- [out_dir] [WxH] [only]
 //! ```
 //!
-//! Needs a GPU or lavapipe (`mesa-vulkan-drivers`).
+//! `only` is a comma-separated list of words; just the shots whose names contain one are
+//! saved (`cliff,gate`). Time between shots is simulated without drawing. Needs a GPU or
+//! lavapipe (`mesa-vulkan-drivers`).
 
 use std::path::PathBuf;
 
@@ -13,7 +15,7 @@ use engine_core::prelude::*;
 use engine_core::time::TimeSource;
 use engine_destruction::{DestructionPlugin, DestructionStats, demo};
 use engine_render::prelude::*;
-use engine_render::{RenderDisabled, capture_now};
+use engine_render::{RenderDisabled, Renderer, capture_now};
 use engine_world::WorldPlugin;
 
 /// (seconds into the demo, file name, camera position, look-at point)
@@ -179,6 +181,10 @@ fn main() {
         .and_then(|s| s.split_once('x'))
         .and_then(|(a, b)| Some((a.parse().ok()?, b.parse().ok()?)))
         .unwrap_or((1280u32, 720u32));
+    let only: Vec<String> = args
+        .get(3)
+        .map(|s| s.split(',').map(str::to_string).collect())
+        .unwrap_or_default();
     std::fs::create_dir_all(&out).expect("create output dir");
 
     let mut app = App::new();
@@ -198,9 +204,22 @@ fn main() {
 
     let mut t = 0.0f32;
     for (at, name, eye, target) in shots() {
+        if !only.is_empty() && !only.iter().any(|w| name.contains(w.as_str())) {
+            continue;
+        }
+        // Simulate up to the shot without drawing (a CPU renderer takes seconds a frame).
+        let renderer = app.world.remove_resource::<Renderer>();
+        if renderer.is_some() {
+            app.world
+                .insert_resource(RenderDisabled("between shots".into()));
+        }
         while t + 1e-4 < at {
             app.update();
             t += step as f32;
+        }
+        if let Some(r) = renderer {
+            app.world.remove_resource::<RenderDisabled>();
+            app.world.insert_resource(r);
         }
         {
             let mut q = app.world.query_filtered::<&mut Transform, With<Camera>>();
