@@ -232,6 +232,15 @@ fn ruts(s: f64, x: f32, w: Vec2) -> f32 {
     h
 }
 
+/// The gravel's loose banks along the edging and its packed walking line, meters up and
+/// down: `(bank, packed)`.
+fn gravel_banks(x: f32, w: Vec2) -> (f32, f32) {
+    let ax = x.abs();
+    let bank = 0.011 * smooth(0.6, 1.2, ax) * (0.7 + 0.5 * fbm_world(w.x, w.y, 0.6, 2, 0x62));
+    let packed = 0.003 * (1.0 - smooth(0.1, 0.55, ax));
+    (bank.max(0.0), packed)
+}
+
 /// The level water stands at in the mud's ruts.
 const RUT_WATER: f32 = PATH_Y - 0.03;
 
@@ -296,7 +305,12 @@ impl Stretch {
             }
             "snow" => snow::snow().at(s, x, w).y,
             "ice" => b + band * fbm_world(w.x, w.y, 1.2, 2, 0x51) * 0.002,
-            "gravel" => b + e * band * fbm_world(w.x, w.y, 0.4, 3, 0x61) * 0.004,
+            "gravel" => {
+                // Loose gravel kicked aside and banked against the edging; the walking line
+                // down the middle packed down.
+                let (windrow, packed) = gravel_banks(x, w);
+                b + e * (band * fbm_world(w.x, w.y, 0.4, 3, 0x61) * 0.004 + windrow - packed)
+            }
             "sand" => {
                 let dunes = fbm_world(w.x, w.y, 1.3, 3, 0x91) * 0.01;
                 let drift = 0.03
@@ -509,10 +523,15 @@ impl Stretch {
             }
             "ice" => {
                 Vec3::splat(0.92 + 0.12 * n)
-                    * Vec3::new(0.95, 1.0, 1.05)
-                        .lerp(Vec3::new(1.4, 1.4, 1.4), smooth(0.75, 1.2, ax))
+                    * Vec3::new(0.95, 1.0, 1.05).lerp(Vec3::splat(1.2), smooth(0.75, 1.2, ax))
             }
-            "gravel" => Vec3::splat(0.92 + 0.14 * n),
+            "gravel" => {
+                // Packed fines are paler and dustier, the loose banks darker between stones.
+                let (windrow, packed) = gravel_banks(x, w);
+                Vec3::splat(0.92 + 0.14 * n)
+                    * Vec3::ONE.lerp(Vec3::new(1.12, 1.09, 1.04), packed / 0.003)
+                    * (1.0 - 5.0 * windrow)
+            }
             "sand" => {
                 Vec3::new(1.0, 0.98, 0.95)
                     * (0.94 + 0.1 * n)
@@ -1491,19 +1510,16 @@ fn spill(b: &mut Batch, rng: &mut Rand, kind: &str, onto: &Stretch, at: f64, dir
                 );
             }
             "snow" => {
-                let size = rng.range(0.02, 0.07);
-                let base = &rock_kit(0.45)[rng.below(KIT)];
+                // Kicked crumbs and flat clumps, half sunk.
+                let size = rng.range(0.012, 0.06);
+                let base = &rock_kit(0.55)[rng.below(KIT)];
                 append(
                     b.at(s, Mat::Straw),
                     base,
                     Quat::from_rotation_y(rng.range(0.0, TAU)),
-                    Vec3::new(
-                        size,
-                        size * rng.range(0.35, 0.6),
-                        size * rng.range(0.8, 1.3),
-                    ),
-                    p,
-                    Vec4::new(0.92, 0.94, 0.98, 1.0) * rng.range(0.9, 1.05),
+                    Vec3::new(size, size * rng.range(0.2, 0.4), size * rng.range(0.8, 1.6)),
+                    p - Vec3::Y * size * 0.08,
+                    Vec4::new(0.84, 0.87, 0.93, 1.0) * rng.range(0.9, 1.05),
                 );
             }
             "sand" => {

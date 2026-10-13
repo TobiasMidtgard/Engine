@@ -384,7 +384,7 @@ fn material(mat: Mat, tex: &std::collections::HashMap<&str, TexHandles>) -> Stan
         }
         Mat::Dirt => ground(tex, "dirt", 1.5, 0xffffff, 1.0),
         Mat::Mud => ground(tex, "mud", 2.0, 0xffffff, 1.0),
-        Mat::WetMud => ground(tex, "mud", 2.0, 0xd8d0c8, 0.55),
+        Mat::WetMud => ground(tex, "mud", 2.0, 0xd0c8c0, 0.8),
         Mat::Snow => ground(tex, "snow", 2.0, 0xffffff, 1.0).with_subsurface(0.45),
         Mat::Ice => {
             let mut m = ground(tex, "ice", 2.5, 0xffffff, 1.0).with_subsurface(0.15);
