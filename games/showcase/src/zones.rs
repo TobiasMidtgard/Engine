@@ -685,6 +685,11 @@ pub fn demo_views(z: &Zone) -> Vec<View> {
                     r#"{"screen": "inventory", "select": "greatsword"}"#,
                 ),
                 ui(
+                    "market_journal",
+                    "Quest journal",
+                    r#"{"screen": "journal", "select": "silent_relay"}"#,
+                ),
+                ui(
                     "market_map_galaxy",
                     "Galaxy map",
                     r#"{"screen": "map", "zoom": 3.6, "select": {"type": "system", "id": "veyra_system"}}"#,
