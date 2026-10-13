@@ -157,6 +157,9 @@ pub(crate) fn physics_step(world: &mut World, mut q: Local<Option<StepQueries>>)
     // ---------------------------------------------------------------- settings & environment
     let settings = world.resource::<PhysicsSettings>().clone();
     if settings != sim.settings {
+        if settings.articulated_joints != sim.settings.articulated_joints {
+            sim.unmake_joints();
+        }
         sim.settings = settings.clone();
         for r in sim.regions.iter_mut().flatten() {
             settings.apply_to(&mut r.world.integration_parameters);
@@ -312,14 +315,11 @@ pub(crate) fn physics_step(world: &mut World, mut q: Local<Option<StepQueries>>)
             continue;
         }
         sim.remove_joint(e);
-        sim.joints.insert(
-            e,
-            crate::sim::JointEntry {
-                desc,
-                created: None,
-                no_contact: Vec::new(),
-            },
-        );
+        sim.joints.insert(e, crate::sim::JointEntry::new(desc));
+    }
+    if !sim.regroup.is_empty() {
+        let graph = sim.joint_graph();
+        sim.rearticulate(&graph);
     }
     let waiting: Vec<Entity> = sim
         .joints
@@ -327,9 +327,14 @@ pub(crate) fn physics_step(world: &mut World, mut q: Local<Option<StepQueries>>)
         .filter(|(_, j)| j.created.is_none())
         .map(|(e, _)| *e)
         .collect();
+    let graph = if waiting.is_empty() {
+        Default::default()
+    } else {
+        sim.joint_graph()
+    };
     for e in waiting {
         let lookup = |x: Entity| world_pose(world, x).map(|t| (t.translation, t.rotation));
-        sim.create_joint(e, &lookup);
+        sim.create_joint(e, &lookup, &graph);
     }
 
     // ---------------------------------------------------------------- characters
@@ -532,7 +537,9 @@ pub(crate) fn physics_step(world: &mut World, mut q: Local<Option<StepQueries>>)
                 let r = s.regions[rid as usize].as_mut().expect("live region");
                 r.world.integration_parameters.dt = sub_dt;
                 let collector = std::mem::take(&mut r.collector);
+                crate::articulation::before_step(&mut r.world, &r.links);
                 r.world.step_with_events(&filter, &collector);
+                crate::articulation::after_step(&mut r.world, &mut r.links);
                 r.collector = collector;
                 r.needs_refresh = false;
             }
@@ -1145,7 +1152,7 @@ fn break_joints(sim: &mut Simulation, rid: RegionId, sub_dt: f32) {
         .iter()
         .filter_map(|(e, j)| {
             let (r, h) = j.created?;
-            (r == rid).then_some((*e, h, j.desc.break_force?))
+            (r == rid).then_some((*e, h.impulse()?, j.desc.break_force?))
         })
         .collect();
     let iterations = sim.settings.solver_iterations.clamp(1, 64) as f32;

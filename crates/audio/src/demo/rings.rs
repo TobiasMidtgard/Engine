@@ -4,6 +4,7 @@ use engine_core::math::{DVec3, Vec3};
 use engine_core::prelude::*;
 use engine_render::{MeshRenderer, Shape, StandardMaterial};
 
+use super::bodies::gait::GROUND;
 use crate::AudioCue;
 
 /// Coloured rings on the ground for the sounds the audio module plays: on and around footstep
@@ -107,10 +108,23 @@ pub(super) fn spawn_rings(
                 color,
                 level: 0,
             },
-            Transform::from_translation(p + DVec3::new(0.0, 0.03, 0.0)).with_uniform_scale(0.05),
+            Transform::from_translation(DVec3::new(p.x, ring_height(&rings.near, p) + 0.03, p.z))
+                .with_uniform_scale(0.05),
             MeshRenderer::new(ring_shape(), ring_material(color, 0)),
         ));
     }
+}
+
+/// How high a ring sits: on a trail's surface where the sound lands on the path, else where
+/// the sound is. Bodies from other modules put their footsteps on the ground under the path,
+/// which would hide the ring beneath it.
+fn ring_height(trails: &[DVec3], p: DVec3) -> f64 {
+    trails
+        .iter()
+        .filter(|o| super::surface_under(p - **o).is_some())
+        .map(|o| o.y + GROUND)
+        .filter(|top| p.y > top - 0.5)
+        .fold(p.y, f64::max)
 }
 
 pub(super) fn grow_rings(
@@ -134,5 +148,27 @@ pub(super) fn grow_rings(
             r.level = level;
             mesh.material = ring_material(r.color, level).into();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rings_sit_on_the_path_not_under_it() {
+        let origin = DVec3::new(3.0, 1.0, 150.0);
+        let (on_path, _) = super::super::trail_point(5.0);
+        // A footstep on the ground a few centimetres under the path comes up onto it.
+        let p = origin + on_path + DVec3::new(0.0, 0.01, 0.0);
+        assert_eq!(ring_height(&[origin], p), origin.y + GROUND);
+        // Above it, or off the path, a ring stays where the sound is.
+        let above = p + DVec3::new(0.0, 1.0, 0.0);
+        assert_eq!(ring_height(&[origin], above), above.y);
+        let off = origin + DVec3::new(0.0, 0.0, 40.0);
+        assert_eq!(ring_height(&[origin], off), off.y);
+        // Well below the path (under a bridge) it stays too.
+        let below = p - DVec3::new(0.0, 2.0, 0.0);
+        assert_eq!(ring_height(&[origin], below), below.y);
     }
 }

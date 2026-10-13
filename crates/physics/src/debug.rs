@@ -14,7 +14,7 @@ use rapier3d::prelude::{
 };
 
 use crate::SharedSimulation;
-use crate::sim::Simulation;
+use crate::sim::{JointHandle, Simulation};
 
 /// Which physics debug layers to draw. A registered resource: patch it by name, or use
 /// `physics.debug {"colliders": true}`.
@@ -241,22 +241,48 @@ impl Pen<'_> {
             };
             let region = sim.region(rid);
             let world = &region.world;
-            let Some(joint) = world.impulse_joints.get(h) else {
+            // Both bodies, both attachment frames, and the constraint impulse if it has one.
+            let (h1, f1, h2, f2, impulses) = match h {
+                JointHandle::Impulse(h) => {
+                    let Some(joint) = world.impulse_joints.get(h) else {
+                        continue;
+                    };
+                    (
+                        joint.body1(),
+                        joint.data.local_frame1,
+                        joint.body2(),
+                        joint.data.local_frame2,
+                        Some(joint.impulses),
+                    )
+                }
+                JointHandle::Articulated { link, .. } => {
+                    let Some((mb, id)) = world.multibody_joints.get(link) else {
+                        continue;
+                    };
+                    let child = mb.link(id).unwrap();
+                    let Some(parent) = child.parent_id().and_then(|p| mb.link(p)) else {
+                        continue;
+                    };
+                    (
+                        parent.rigid_body_handle(),
+                        child.joint.data.local_frame1,
+                        child.rigid_body_handle(),
+                        child.joint.data.local_frame2,
+                        None,
+                    )
+                }
+            };
+            let (Some(b1), Some(b2)) = (world.bodies.get(h1), world.bodies.get(h2)) else {
                 continue;
             };
-            let (Some(b1), Some(b2)) = (
-                world.bodies.get(joint.body1()),
-                world.bodies.get(joint.body2()),
-            ) else {
-                continue;
-            };
-            let a = region.global(*b1.position() * joint.data.local_frame1.translation);
-            let b = region.global(*b2.position() * joint.data.local_frame2.translation);
+            let a = region.global(*b1.position() * f1.translation);
+            let b = region.global(*b2.position() * f2.translation);
             if !self.near(a, 0.0) {
                 continue;
             }
-            let i = joint.impulses;
-            let force = Vec3::new(i[0], i[1], i[2]).length() * iterations / sub_dt;
+            let force = impulses.map_or(0.0, |i| {
+                Vec3::new(i[0], i[1], i[2]).length() * iterations / sub_dt
+            });
             let stress = match entry.desc.break_force {
                 Some(limit) if limit > 0.0 => (force / limit).clamp(0.0, 1.0),
                 _ => 0.0,
@@ -266,7 +292,7 @@ impl Pen<'_> {
             self.draw.cross(a, 0.08, c).depth(DepthMode::OnTop);
             self.draw.cross(b, 0.08, c).depth(DepthMode::OnTop);
             self.draw.line(a, b, c).depth(DepthMode::OnTop);
-            if joint.body1() == region.ground || joint.body2() == region.ground {
+            if h1 == region.ground || h2 == region.ground {
                 // Pinned to the world: mark the world side.
                 self.draw
                     .circle(b, Vec3::Y, 0.12, c)
