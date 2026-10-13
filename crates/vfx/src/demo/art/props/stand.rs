@@ -116,7 +116,7 @@ pub fn engine_stand() -> Prop {
         .to(0.18, 2.82)
         .to(0.235, 3.0)
         .to(0.285, 3.22)
-        .to(0.318, 3.45)
+        .to(0.32, 3.45)
         .corner(EXIT_RADIUS, BELL_END)
         .corner(EXIT_RADIUS - 0.014, BELL_END);
     iron.merge(&on_axis(colored(

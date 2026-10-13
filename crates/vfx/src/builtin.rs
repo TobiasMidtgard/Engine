@@ -2503,7 +2503,7 @@ fn exhausts() -> Vec<EffectDesc> {
     const ION_BLUE: [f32; 3] = [0.55, 0.72, 1.0];
     vec![
         EffectDesc {
-            light: light_at(KEROSENE, 14_000.0, 40.0, 0.12, [0.0, 0.6, 0.0]),
+            light: light_at(KEROSENE, 10_000.0, 30.0, 0.12, [0.0, 0.6, 0.0]),
             ..effect(
                 "exhaust.rocket",
                 "A kerosene rocket engine at full thrust: a blinding orange plume with a train \
@@ -2560,7 +2560,7 @@ fn exhausts() -> Vec<EffectDesc> {
                         size: [1.6, 2.4],
                         size_over_life: c(&[(0.0, 0.6), (1.0, 4.0)]),
                         soft: 1.0,
-                        ..smoke("cloud", 0.68, 0.45)
+                        ..smoke("cloud", 0.68, 0.35)
                     },
                     EmitterDesc {
                         rate: 30.0,
