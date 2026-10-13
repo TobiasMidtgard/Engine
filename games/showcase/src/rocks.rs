@@ -772,23 +772,9 @@ pub fn uncarved_height(land: &Landscape, x: f64, z: f64) -> f64 {
 fn rebuilt_height(land: &Landscape, p: DVec2) -> f64 {
     let mut h = land.natural(p.x, p.y);
     for sc in &land.scarps {
-        h += scarp_rise(sc, p, land.seed);
+        h += sc.rise(p, land.seed);
     }
     h - p.length_squared() / (2.0 * 6_360_000.0)
-}
-
-/// Mirror of the landscape's scarp step (`Scarp::rise`), from its public frame.
-fn scarp_rise(sc: &Scarp, p: DVec2, seed: u64) -> f64 {
-    let sm = |e0: f64, e1: f64, x: f64| smoothstep(e0 as f32, e1 as f32, x as f32) as f64;
-    let (along, side) = sc.frame(p, seed);
-    let len = (sc.b - sc.a).length();
-    let ends = sm(-5.0, 40.0, along) * sm(-5.0, 40.0, len - along);
-    if ends <= 0.0 || side < -2.0 {
-        return 0.0;
-    }
-    let face = sm(-1.5, 2.0, side);
-    let back = 1.0 - sm(sc.reach * 0.6, sc.reach * 1.4, side);
-    sc.height * face * back * ends
 }
 
 /// Rock strata: beds of alternating hard (thick, protruding) and soft (thin, recessed) rock.

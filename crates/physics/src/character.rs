@@ -357,7 +357,11 @@ fn move_one(sim: &mut Simulation, region_id: RegionId, e: Entity, gravity: &Grav
     let mut stands_on = None;
     if let Some((h, hit)) = probe_ground(world, body, &shape, &desc, end, up) {
         let n = hit.normal1;
-        if n.dot(up) >= cos_slope - 1e-3 {
+        // Ground within snapping reach only counts once the character is on it: the controller
+        // snaps down only characters that started the move on the ground, so one falling toward
+        // the floor would otherwise read grounded while still 30 cm up and falling fast.
+        let on_it = grounded || hit.time_of_impact <= TOUCH_MARGIN;
+        if on_it && n.dot(up) >= cos_slope - 1e-3 {
             state.grounded = true;
         }
         if state.grounded {

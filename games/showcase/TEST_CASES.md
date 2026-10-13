@@ -16,12 +16,12 @@ are built, nothing simulates yet) · ⬜ not visible yet
 
 | # | Test case | Zone / viewpoint | Owner | Status |
 |---|---|---|---|---|
-| 1 | Huge scale: walk, drive, fly from the ground to orbit and the Moon without loading screens | `overview`, `tower`, `stratosphere`, `orbit`, `moon` | Planets and terrain | 🟨 camera flies there; planet surface from orbit is flat color |
-| 2 | Efficient enough for multiplanetary travel (planets, moons, orbits, reference frames) | `spaceport`, `orbit`, `moon` | Planets and terrain | ⬜ |
+| 1 | Huge scale: walk, drive, fly from the ground to orbit and the Moon without loading screens | `overview`, `tower`, `stratosphere`, `orbit`, `moon` | Planets and terrain | ✅ the valley sits on a full-size Earth (6,371 km); the camera flies from the ground to a 420 km orbit and to the Moon at its real distance with no loading screens, and ground detail streams in by level of detail |
+| 2 | Efficient enough for multiplanetary travel (planets, moons, orbits, reference frames) | `spaceport`, `orbit`, `moon` | Planets and terrain | 🟨 Earth and the Moon are real terrain at real scale; engine_space (Kepler orbits on rails, time warp, re-anchoring the world on the nearest body, `space.travel`) runs in its `space_shots` example but the showcase doesn't spawn the solar system yet |
 | 3 | Cars with real suspension, tires and drivetrain | `track` | Cars, planes and spaceships | 🟨 demo in; being checked on the Rapier backend |
 | 4 | Planes with aerodynamic surfaces | `airfield` (1.2 km runway) | Cars, planes and spaceships | 🟨 demo in; being checked on the Rapier backend |
 | 5 | Spaceships with thrusters and RCS, launching to orbit | `spaceport` | Cars, planes and spaceships | 🟨 demo in; being checked on the Rapier backend |
-| 6 | Extremely well built, efficient physics: stacking, joints, ragdolls | `physics`, `physics_ragdolls`, `physics_wrecking_ball`, `physics_seesaw`, `physics_pile`, `physics_dominoes`, `physics_bridge`, `physics_turntable` | Physics and rigid bodies | ✅ proving ground: a 30-crate tower standing still, 250 crates, drums and balls raining into a bin, a domino run, crash test dummy ragdolls on stairs, a wrecking ball on a chain, a seesaw catapult, a paddle wheel, a plank bridge, a turntable with a rider; stations replay every 20 to 45 s |
+| 6 | Extremely well built, efficient physics: stacking, joints, ragdolls | `physics`, `physics_ragdolls`, `physics_wrecking_ball`, `physics_seesaw`, `physics_pile`, `physics_dominoes`, `physics_bridge`, `physics_barrel_run`, `physics_turntable` | Physics and rigid bodies | ✅ proving ground: a 30-crate tower standing still, 250 crates, drums and balls raining into a bin, a domino run, crash test dummy ragdolls on stairs, a wrecking ball on a chain, a seesaw catapult, a paddle wheel, a plank bridge, a turntable with a rider, oil drums rolling flat and straight down a 47 m mesh runway into a sand pit; stations replay every 20 to 45 s |
 
 ## Water, fire, smoke, weather
 
@@ -42,7 +42,7 @@ are built, nothing simulates yet) · ⬜ not visible yet
 | # | Test case | Zone / viewpoint | Owner | Status |
 |---|---|---|---|---|
 | 16 | Footsteps in mud, grass, snow, sand, gravel, puddles, wood, metal (sound) | `footsteps` | Audio and footsteps | ✅ trail loop with a hiker, a runner, a dog and a horse; sound rings show each step; the ground reports the trail's surfaces to everyone else |
-| 17 | Footprints and tracks pressed into mud and snow | `tracks` (footprint lab) | Planets and terrain | ⬜ strips of mud, snow and sand with stand-in walkers |
+| 17 | Footprints and tracks pressed into mud and snow | `tracks` (footprint lab) | Planets and terrain | ✅ footprint lab: a hiker, a dog, a horse and a rover leave prints and tracks in strips of mud, snow, sand and grass; rain fills the prints, snowfall covers them; a blast crater, a dug trench and a raised mound |
 | 18 | Destructible walls and barricades (Rainbow Six Siege style) | `fortress` | Destructible terrain and buildings | ✅ breach range: shot drywall, kicked-in barricades, thermite through rebar concrete, blown brick, a watchtower and gate that collapse, a mined cliff that caves in (replays every 20 s) |
 | 19 | Voxel digging and building (Valheim style) | `voxel` | Destructible terrain and buildings | 🟨 voxel mound with a pit |
 
@@ -71,7 +71,7 @@ are built, nothing simulates yet) · ⬜ not visible yet
 | 33 | Smart NPC AI that uses the environment (cover, high ground) | `arena`, `arena_cover` | Smart NPC AI | ✅ two squads take cover, climb the platform, flank, suppress and shoot the explosive barrel (stand-in bodies) |
 | 34 | NPCs that space the player and block attacks | `arena`, `arena_duel` | Smart NPC AI | ✅ melee fighters take turns instead of ringing you, block, parry, dodge and feint; a master and a veteran duel |
 | 35 | NPC skill, reaction time and logic editable per enemy | `arena` | Smart NPC AI | ✅ every fighter's skills (reaction time, accuracy, logic, defense…) are tunable through `npc.set_skill`; head band color shows skill |
-| 36 | Titanfall-style movement: wall-run, slide, dash | `parkour`, `parkour_course`, `parkour_ledge`, `parkour_play` | Movement and slow motion | ✅ a runner loops sprint, slide under a bar, wall-run, wall-jump, mantle onto a tower, double jump; a climber catches a ledge too high to vault, shimmies along it and climbs up; press P to play it yourself (third-person pilot, lock-on with the middle mouse) |
+| 36 | Titanfall-style movement: wall-run, slide, dash | `parkour`, `parkour_course`, `parkour_ledge`, `parkour_grapple`, `parkour_play` | Movement and slow motion | ✅ a runner loops sprint, slide under a bar, wall-run, wall-jump, mantle onto a tower, double jump; a climber catches a ledge too high to vault, shimmies along it and climbs up; a pilot grapples the top of a 9 m tower, is reeled up and climbs over; press P to play it yourself (third-person pilot, F to grapple, lock-on with the middle mouse) |
 | 37 | Elite enemies dash in and slice in the blink of an eye | `parkour` duel ring, `parkour_blink` | Movement and slow motion | ✅ an elite dash-strikes a level 1 player in under 0.25 s |
 | 38 | Stat-based time perception: a leveled-up player sees enemies in slow motion | `parkour` duel ring, `parkour_focus`, `parkour_counter` | Movement and slow motion | ✅ at level 10 the same attack slows the world to 1/5.5; the player sidesteps and counters |
 | 39 | Slow motion when attacking or being attacked (Zoro / Sung Jin-Woo moments) | `parkour` duel ring, `parkour_pack` | Movement and slow motion | ✅ four grunts attack in turn; each attack and each kill plays in slow motion |
@@ -80,7 +80,7 @@ are built, nothing simulates yet) · ⬜ not visible yet
 
 | # | Test case | Zone / viewpoint | Owner | Status |
 |---|---|---|---|---|
-| 40 | Beautiful magic spells (particles) | `magic`, `magic_spells`, `magic_portal`, `magic_footsteps`, `magic_marks`, `magic_impacts` | Particles and magic effects | ✅ Spell court: arcane portal, a standing portal in the gate arch swirling the valley seen through it, fireballs and frost bolts hitting a wall and leaving a glowing scorch and a frost film on it, lightning between obelisks, a healing aura, fountain, anvil sparks, torches and fireflies; footprint puffs on mud, snow, sand and water and shot impacts on six materials (chipping the rock) |
+| 40 | Beautiful magic spells (particles) | `magic`, `magic_spells`, `magic_portal`, `magic_starburst`, `magic_footsteps`, `magic_marks`, `magic_impacts` | Particles and magic effects | ✅ Spell court: arcane portal, a standing portal in the gate arch swirling the valley seen through it, starburst fireworks whose stars trail glitter and crackle, fireballs and frost bolts hitting a wall and leaving a glowing scorch and a frost film on it, lightning between obelisks, a healing aura, fountain, anvil sparks that split as they skid, torches and fireflies; footprint puffs on mud, snow, sand and water and shot impacts on six materials (chipping the rock) |
 | 41 | Conversation UI between two people | `market_dialogue` | UI system and maps | ✅ portraits that talk and blink, typewriter text, choices (one opens the shop) |
 | 42 | Shop UI | `market_shop` | UI system and maps | ✅ buy and sell tabs, item cards, quantity, prices and gold |
 | 43 | Inventory UI | `market_inventory` | UI system and maps | ✅ bag grid with drag and drop, equipment, weight, item details |

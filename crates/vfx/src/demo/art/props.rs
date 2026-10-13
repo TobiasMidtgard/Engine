@@ -9,6 +9,7 @@
 //! - [`forge`]: the anvil on its stump.
 //! - [`beds`]: footstep patches and impact plates.
 //! - [`rim`]: braziers and shrubs.
+//! - [`launcher`]: the firework mortar.
 //! - [`golem`]: the walking stone golem and the dropped stones.
 
 pub mod beds;
@@ -16,6 +17,7 @@ pub mod court;
 pub mod forge;
 pub mod golem;
 pub mod lane;
+pub mod launcher;
 pub mod portal;
 pub mod rim;
 pub mod storm;
