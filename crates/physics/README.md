@@ -15,7 +15,10 @@ changing that one plugin line.
 
 ## What it does
 
-- **Bodies**: dynamic, kinematic (moved by `Transform` *or* by `Velocity`), static. Mass from
+- **Bodies**: dynamic, kinematic, static. A kinematic body moves by `Velocity`, or by writing
+  its `Transform`: it then glides there over the step, carrying what stands on it (a train car,
+  a door swung by gameplay); writing the `Transform` of one moving by `Velocity` jumps it there
+  and it goes on from there. Mass from
   collider densities or `RigidBody::mass_kg`; a designed `center_of_mass` and `inertia` (a car's
   low balance point, a plane's trim) override what the shapes imply, and a moved center of mass
   keeps the shapes' inertia about it. Damping, gravity scale, CCD, sleeping, rotation locks.

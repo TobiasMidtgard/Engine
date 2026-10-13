@@ -195,6 +195,9 @@ pub struct BodyEntry {
     pub forces_set: bool,
     /// Moved by gameplay through `Velocity` (kinematic) rather than `Transform`.
     pub kinematic_by_velocity: bool,
+    /// Where gameplay last put this kinematic body through its `Transform` (region-local):
+    /// the substeps of the next step carry it there evenly.
+    pub kinematic_goal: Option<Pose>,
     /// Was asleep after the last step (its Transform needs no write).
     pub was_sleeping: bool,
     /// Mass properties need writing back.
@@ -534,6 +537,7 @@ impl Simulation {
                 time_factor: 1.0,
                 forces_set: false,
                 kinematic_by_velocity: false,
+                kinematic_goal: None,
                 was_sleeping: false,
                 mass_dirty: true,
             },

@@ -378,25 +378,33 @@ pub(crate) fn physics_step(world: &mut World, mut q: Local<Option<StepQueries>>)
             continue;
         };
         let (rid, handle, kind) = (entry.region, entry.handle, entry.kind);
-        let teleported = entry
-            .written
-            .is_some_and(|w| w != (t.translation, t.rotation));
+        // A kinematic body moved by its `Transform` is never written back, so until gameplay
+        // moves it there is nothing to compare with: take its pose as gameplay's.
+        let teleported = match entry.written {
+            Some(w) => w != (t.translation, t.rotation),
+            None => kind == BodyKind::Kinematic,
+        };
         let new_velocity = v.filter(|v| entry.written_velocity.is_none_or(|w| w != *v));
         let new_force = f
             .map(|f| (f.force, f.torque, f.at))
             .filter(|f| *f != entry.external);
         if teleported {
             let pose = world_pose(world, e).unwrap_or(t);
+            let by_velocity = match new_velocity {
+                Some(v) => v.linear != Vec3::ZERO || v.angular != Vec3::ZERO,
+                None => entry.kinematic_by_velocity,
+            };
             let region = sim.region_mut(rid);
             let p = Pose::from_parts(region.local(pose.translation), pose.rotation);
-            if let Some(rb) = region.world.bodies.get_mut(handle) {
-                if kind == BodyKind::Kinematic {
-                    rb.set_next_kinematic_position(p);
-                } else {
-                    rb.set_position(p, true);
-                }
+            // A kinematic body driven by its `Transform` moves there over the step, carrying
+            // what it touches; one driven by `Velocity` jumps there and goes on from it.
+            let glide = kind == BodyKind::Kinematic && !by_velocity;
+            if !glide && let Some(rb) = region.world.bodies.get_mut(handle) {
+                rb.set_position(p, true);
             }
-            sim.bodies.get_mut(&e).unwrap().written = Some((t.translation, t.rotation));
+            let entry = sim.bodies.get_mut(&e).unwrap();
+            entry.written = Some((t.translation, t.rotation));
+            entry.kinematic_goal = glide.then_some(p);
         }
         if let Some(v) = new_velocity {
             let entry = sim.bodies.get_mut(&e).unwrap();
@@ -477,6 +485,7 @@ pub(crate) fn physics_step(world: &mut World, mut q: Local<Option<StepQueries>>)
             (r.frozen, r.movers)
         };
         if frozen || movers == 0 || substeps == 0 {
+            place_kinematics(&mut sim, rid);
             let s = &mut *sim;
             let filter = ContactFilter {
                 no_contact: &s.no_contact,
@@ -501,7 +510,7 @@ pub(crate) fn physics_step(world: &mut World, mut q: Local<Option<StepQueries>>)
             }
             character::find_platforms(&mut sim, rid, &gravity);
         }
-        for _ in 0..substeps {
+        for sub in 0..substeps {
             // Every substep: water pressure follows the pose (forces held over several
             // substeps lag behind it and pump energy into a floating body's rocking).
             prepare_forces(
@@ -512,7 +521,7 @@ pub(crate) fn physics_step(world: &mut World, mut q: Local<Option<StepQueries>>)
                 water.as_ref(),
                 settings.buoyancy,
             );
-            drive_kinematics(&mut sim, rid, sub_dt);
+            drive_kinematics(&mut sim, rid, sub_dt, substeps - sub);
             let scaled = scale_time(&mut sim, rid, true);
             {
                 let s = &mut *sim;
@@ -1021,13 +1030,28 @@ fn refresh_contact_hooks(world: &mut PhysicsWorld) {
     }
 }
 
-/// Kinematic bodies moved by `Velocity`: advance their target pose by one substep.
-fn drive_kinematics(sim: &mut Simulation, rid: RegionId, sub_dt: f32) {
+/// Kinematic bodies moved by gameplay: those driven by `Velocity` advance by one substep, and
+/// those put somewhere through their `Transform` go 1/`left` of the rest of the way there
+/// (`left` substeps of this step remain, this one included).
+fn drive_kinematics(sim: &mut Simulation, rid: RegionId, sub_dt: f32, left: u32) {
     let moving: Vec<(rapier3d::prelude::RigidBodyHandle, Velocity)> = sim
         .bodies
         .values()
         .filter(|b| b.region == rid && b.kinematic_by_velocity)
         .map(|b| (b.handle, b.written_velocity.unwrap_or_default()))
+        .collect();
+    let gliding: Vec<(rapier3d::prelude::RigidBodyHandle, Pose)> = sim
+        .bodies
+        .values_mut()
+        .filter(|b| b.region == rid)
+        .filter_map(|b| {
+            let goal = if left <= 1 {
+                b.kinematic_goal.take()
+            } else {
+                b.kinematic_goal
+            };
+            goal.map(|g| (b.handle, g))
+        })
         .collect();
     let region = sim.region_mut(rid);
     for (h, v) in moving {
@@ -1041,6 +1065,41 @@ fn drive_kinematics(sim: &mut Simulation, rid: RegionId, sub_dt: f32) {
             ));
         }
     }
+    for (h, goal) in gliding {
+        if let Some(rb) = region.world.bodies.get_mut(h) {
+            let next = if left <= 1 {
+                goal
+            } else {
+                let (p, k) = (*rb.position(), 1.0 / left as f32);
+                Pose::from_parts(
+                    p.translation.lerp(goal.translation, k),
+                    p.rotation.slerp(goal.rotation, k).normalize(),
+                )
+            };
+            rb.set_next_kinematic_position(next);
+        }
+    }
+}
+
+/// Kinematic bodies put somewhere through their `Transform` in a region that doesn't step
+/// (asleep, out of reach or paused): place them there now.
+fn place_kinematics(sim: &mut Simulation, rid: RegionId) {
+    let placed: Vec<(rapier3d::prelude::RigidBodyHandle, Pose)> = sim
+        .bodies
+        .values_mut()
+        .filter(|b| b.region == rid)
+        .filter_map(|b| b.kinematic_goal.take().map(|g| (b.handle, g)))
+        .collect();
+    if placed.is_empty() {
+        return;
+    }
+    let region = sim.region_mut(rid);
+    for (h, goal) in placed {
+        if let Some(rb) = region.world.bodies.get_mut(h) {
+            rb.set_position(goal, true);
+        }
+    }
+    region.needs_refresh = true;
 }
 
 /// Bodies with their own time rate (`LocalTimeScale`): scale velocity and gravity so they move
