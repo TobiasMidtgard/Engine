@@ -337,13 +337,13 @@ fn ale_corner(
     let board = at(9.6, -8.4);
     let out = board - origin;
     chalkboard(world, mats, board, out.x.atan2(out.z) as f32);
-    for (x, z, yaw) in [(8.4, -11.6, 0.75f32), (11.2, -6.6, 1.1)] {
+    for (x, z, yaw) in [(2.2, -12.3, 0.25f32), (11.2, -6.6, 1.1)] {
         flower_trough(world, mats, at(x, z), yaw, rng);
     }
     // Lights: from two poles behind the tables to the lamp post nearest them.
     let a = 3.0 / 4.0 * std::f64::consts::TAU + 0.35;
     let lamp = at(a.cos() * 7.5, a.sin() * 7.5) + DVec3::Y * 3.0;
-    let poles = [at(2.0, -12.9), at(7.9, -12.5)];
+    let poles = [at(1.2, -13.4), at(6.4, -13.9)];
     let mut tops = Vec::new();
     for p in poles {
         tops.push(light_pole(world, mats, p));
@@ -686,18 +686,23 @@ fn flower_trough(world: &mut World, mats: &Mats, at: DVec3, yaw: f32, rng: &mut 
         rgba(hex(0x3a2a1c)),
     ));
     let (dirs, faces) = icosphere(1);
-    let blob = |c: Vec3, r: Vec3, col: Vec4, seed: u32| {
+    // An ellipsoid of half-extents `r`, turned by `rot`, centred at `c`.
+    let blob = |c: Vec3, r: Vec3, rot: Quat, col: Vec4| {
         let mut m = Mesh {
             vertices: dirs
                 .iter()
                 .map(|&d| {
-                    let lump = 1.0 + 0.25 * noise::n3(d.x * 3.0, d.y * 3.0, d.z * 3.0, seed);
-                    vtx(c + d * r * lump, d, Vec2::ZERO, col)
+                    vtx(
+                        c + rot * (d * r),
+                        rot * (d / r).normalize(),
+                        Vec2::ZERO,
+                        col,
+                    )
                 })
                 .collect(),
             indices: faces.iter().flat_map(|f| f.iter().copied()).collect(),
         };
-        m.compute_normals();
+        fix_winding(&mut m);
         m
     };
     let palette = [
@@ -708,30 +713,52 @@ fn flower_trough(world: &mut World, mats: &Mats, at: DVec3, yaw: f32, rng: &mut 
         hex(0xe07a2c),
     ];
     let picks = [rng.range_i32(0, 5) as usize, rng.range_i32(0, 5) as usize];
-    let n = 9;
+    let n = 8;
     for k in 0..n {
         let x = -len * 0.5 + 0.12 + (len - 0.24) * (k as f32 + rng.range(0.2, 0.8)) / n as f32;
-        let z = rng.range(-0.1, 0.1);
-        let base = Vec3::new(x, hgt - 0.01, z);
-        let leaf = Vec3::new(0.11, 0.09, 0.1) * rng.range(0.8, 1.2);
-        plants.merge(&blob(
-            base + Vec3::Y * 0.06,
-            leaf,
-            rgba(hex(0x3d6a2a) * rng.range(0.8, 1.15)),
-            rng.next_u32() % 999,
-        ));
-        for _ in 0..rng.range_i32(3, 6) {
-            let o = Vec3::new(
-                rng.range(-0.09, 0.09),
-                rng.range(0.1, 0.2),
-                rng.range(-0.08, 0.08),
-            );
-            let col = palette[picks[rng.range_i32(0, 2) as usize]] * rng.range(0.85, 1.1);
+        let base = Vec3::new(x, hgt - 0.015, rng.range(-0.09, 0.09));
+        // A rosette of leaf blades arching out and up.
+        let a0 = rng.range(0.0, TAU);
+        for j in 0..rng.range_i32(7, 11) {
+            let yaw = a0 + j as f32 * 2.4;
+            let pitch = rng.range(0.35, 1.05);
+            let len_l = rng.range(0.06, 0.1);
+            let rot = Quat::from_rotation_y(yaw) * Quat::from_rotation_x(-pitch);
+            let col = rgba(hex(0x2f5a22) * rng.range(0.75, 1.2));
             plants.merge(&blob(
-                base + o,
-                Vec3::splat(rng.range(0.022, 0.034)),
-                rgba(col),
-                rng.next_u32() % 999,
+                base + rot * Vec3::new(0.0, 0.0, len_l * 0.9) + Vec3::Y * 0.01,
+                Vec3::new(len_l * 0.32, 0.005, len_l),
+                rot,
+                col,
+            ));
+        }
+        // Flowers on stems: five petals round a dark eye.
+        for _ in 0..rng.range_i32(2, 5) {
+            let top = base
+                + Vec3::new(
+                    rng.range(-0.06, 0.06),
+                    rng.range(0.12, 0.22),
+                    rng.range(-0.05, 0.05),
+                );
+            plants.merge(&tint(tube(base, top, 0.0035, 5), rgba(hex(0x3d6a2a))));
+            let face = Quat::from_rotation_y(rng.range(0.0, TAU))
+                * Quat::from_rotation_x(rng.range(-0.5, 0.5));
+            let col = rgba(palette[picks[rng.range_i32(0, 2) as usize]] * rng.range(0.85, 1.1));
+            let pr = rng.range(0.016, 0.024);
+            for p in 0..5 {
+                let rot = face * Quat::from_rotation_y(p as f32 * TAU / 5.0);
+                plants.merge(&blob(
+                    top + rot * Vec3::new(0.0, 0.0, pr),
+                    Vec3::new(pr * 0.55, 0.004, pr),
+                    rot,
+                    col,
+                ));
+            }
+            plants.merge(&blob(
+                top + face * Vec3::Y * 0.004,
+                Vec3::new(pr * 0.4, pr * 0.3, pr * 0.4),
+                face,
+                rgba(hex(0x5a3a12)),
             ));
         }
     }
