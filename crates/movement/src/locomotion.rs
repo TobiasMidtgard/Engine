@@ -21,6 +21,7 @@ use engine_world::physics::{
 };
 use engine_world::{ContactKind, Gravity, Ground, GroundContact, NoiseEvent};
 
+use crate::grapple;
 use crate::mover::{Dash, DashRequest, Hang, Mantle, Mover, WallContact, flat, move_towards};
 use crate::platform::{self, Deck};
 use crate::profile::MovementProfile;
@@ -51,14 +52,14 @@ pub(crate) struct Outputs<'w> {
 }
 
 impl Outputs<'_> {
-    fn trigger(&mut self, entity: Entity, name: &str) {
+    pub(crate) fn trigger(&mut self, entity: Entity, name: &str) {
         self.triggers.write(AnimationTrigger {
             entity,
             name: name.to_string(),
         });
     }
 
-    fn noise(&mut self, entity: Entity, position: DVec3, radius: f32) {
+    pub(crate) fn noise(&mut self, entity: Entity, position: DVec3, radius: f32) {
         self.noise.write(NoiseEvent {
             position,
             radius,
@@ -68,7 +69,7 @@ impl Outputs<'_> {
 }
 
 /// Scene probes for one character (walls, ledges, ground below).
-struct Probe<'a> {
+pub(crate) struct Probe<'a> {
     queries: &'a PhysicsQueries,
     filter: &'a QueryFilter,
     /// Character entities: never wall-run on or climb another character.
@@ -76,7 +77,7 @@ struct Probe<'a> {
 }
 
 impl Probe<'_> {
-    fn ray(&self, origin: DVec3, dir: Vec3, max: f32) -> Option<Hit> {
+    pub(crate) fn ray(&self, origin: DVec3, dir: Vec3, max: f32) -> Option<Hit> {
         if max <= 0.0 {
             return None;
         }
@@ -100,18 +101,18 @@ impl Probe<'_> {
 
 /// Everything about one character the step needs, gathered once.
 #[derive(Clone, Copy)]
-struct Body {
-    entity: Entity,
-    pos: DVec3,
-    up: Vec3,
+pub(crate) struct Body {
+    pub(crate) entity: Entity,
+    pub(crate) pos: DVec3,
+    pub(crate) up: Vec3,
     /// Gravity magnitude, m/s².
-    g: f32,
-    radius: f32,
-    height: f32,
+    pub(crate) g: f32,
+    pub(crate) radius: f32,
+    pub(crate) height: f32,
 }
 
 impl Body {
-    fn feet(&self) -> DVec3 {
+    pub(crate) fn feet(&self) -> DVec3 {
         self.pos - (self.up * self.height * 0.5).as_dvec3()
     }
 }
@@ -226,8 +227,12 @@ pub(crate) fn step_movers(
             v -= up * (m.settle - GROUND_STICK);
         }
 
-        // Facing: the wall hung from, the combat target, where the intent looks, the motion.
-        let face = m.hang.map(|h| -h.normal).or_else(|| {
+        // Facing: the wall hung from, the grapple's hook, the combat target, where the intent
+        // looks, the motion.
+        let hook = m
+            .grapple
+            .and_then(|g| flat((g.anchor - pos).as_vec3(), up).try_normalize());
+        let face = m.hang.map(|h| -h.normal).or(hook).or_else(|| {
             m.influence
                 .face
                 .or(intent.look)
@@ -381,6 +386,8 @@ fn step_one(
     m.prev_dash = intent.dash_to.is_some();
     m.slide_cooldown = (m.slide_cooldown - dt).max(0.0);
     m.grab_cooldown = (m.grab_cooldown - dt).max(0.0);
+    m.grapple_cooldown = (m.grapple_cooldown - dt).max(0.0);
+    let shot = m.pending_grapple.take();
     m.evade_secs = (m.evade_secs - dt).max(0.0);
     m.dash_charges =
         (m.dash_charges + dt / p.dash_recharge_secs.max(0.01)).min(p.dash_charges as f32);
@@ -402,6 +409,7 @@ fn step_one(
         m.dash = None;
         m.mantle = None;
         m.hang = None;
+        m.grapple = None;
         m.wall = None;
         let vh = flat(v, up);
         let vv = v.dot(up);
@@ -419,6 +427,11 @@ fn step_one(
         wish = wish.normalize();
     }
     wish *= m.influence.move_scale;
+
+    // Dashing, climbing or hanging lets go of the grapple.
+    if m.grapple.is_some() && (m.dash.is_some() || m.mantle.is_some() || m.hang.is_some()) {
+        grapple::release(m, p, b.entity, out);
+    }
 
     // ---- dash (from intent or from combat)
     let request = m.pending_dash.take().or_else(|| {
@@ -506,6 +519,47 @@ fn step_one(
             );
         }
         m.hang = None;
+    }
+
+    // ---- grapple hook
+    if let Some(reel) = grapple::step(
+        m,
+        p,
+        b,
+        probe,
+        shot,
+        v,
+        wish,
+        jump_pressed,
+        crouch_pressed,
+        grounded,
+        dt,
+        out,
+    ) {
+        // Reeled in to a ledge: climb onto it (the rope lifts the body as high as a hang
+        // reaches).
+        let pull = reel.velocity;
+        let toward = if wish.length() > 0.3 { wish } else { m.facing };
+        let reach = MovementProfile {
+            mantle_max_height: p.mantle_max_height.max(p.ledge_grab_max_height),
+            ..*p
+        };
+        if p.mantle
+            && let Some(mut mt) = find_ledge(&reach, b, probe, pull, toward)
+        {
+            grapple::release(m, p, b.entity, out);
+            mt.exit_speed = mt.exit_speed.min(p.sprint_speed);
+            m.mantle = Some(mt);
+            m.set_mode(LocomotionMode::Mantle);
+            out.trigger(b.entity, "mantle");
+            return up * p.mantle_speed;
+        }
+        if !reel.arrived {
+            m.set_mode(LocomotionMode::Air);
+            return pull;
+        }
+        // All the way in: let go and fly on.
+        grapple::release(m, p, b.entity, out);
     }
 
     if grounded {
@@ -1278,9 +1332,11 @@ fn write_params(m: &Mover, params: &mut AnimationParams, up: Vec3) {
             0.0
         },
     );
+    let reeling = m.grapple.is_some_and(|g| g.attached);
     params.set(
         "effort",
         match m.mode {
+            _ if reeling => 0.9,
             LocomotionMode::Dash | LocomotionMode::Mantle => 1.0,
             LocomotionMode::Climb => 0.7,
             LocomotionMode::Sprint | LocomotionMode::WallRun => 0.8,
@@ -1298,6 +1354,7 @@ fn write_params(m: &Mover, params: &mut AnimationParams, up: Vec3) {
             0.0
         },
     );
+    params.set("grapple", if reeling { 1.0 } else { 0.0 });
 }
 
 /// Rotate unit vector `from` toward `to` by at most `max_angle` radians.

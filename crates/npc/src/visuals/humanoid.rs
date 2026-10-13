@@ -53,8 +53,10 @@ const PLAIN_SHIELD: Part = Part::Fighter(29);
 /// The face under the helmet.
 const FACE: Part = Part::Fighter(30);
 /// Pieces with painted plates. Those are a mesh of their own (textured by the paint texture
-/// in the team color, as worn as the fighter's skill says), a part from `PAINT0` on (in this
-/// order) posed with its piece.
+/// in the team color, as worn as the fighter's skill says), a part posed with its piece: the
+/// `i`th piece's is `Part::Fighter(PAINT0 + hue * PAINTED.len() + i)`, where `hue` is the
+/// team color's (see [`hue_of`]), which the plates flash in when hit (the pose doesn't know
+/// the team, and the flash can't reach the paint texture).
 const PAINTED: [Part; 11] = [
     Part::Torso,
     Part::Head,
@@ -84,23 +86,50 @@ const IRISES: [[u32; 2]; 4] = [
     [0x56626a, 0x8e989d],
 ];
 
-/// Gambeson colors (sRGB), picked per fighter: undyed linen, oatmeal, brown and grey wool.
-const GAMBESONS: [u32; 4] = [0xc6baa0, 0xad9a79, 0x765c46, 0x88857e];
-/// Hose colors (sRGB), picked per fighter: dark brown, charcoal and olive-brown wool.
-const HOSE: [u32; 3] = [0x5a4836, 0x4a4a4d, 0x585340];
+/// Gambeson colors (sRGB), picked per fighter: undyed linen and oatmeal, and wool in tan,
+/// grey, dark brown, olive drab and charcoal (mostly darker than the arena's sand, so the
+/// team's colors stand out on them).
+const GAMBESONS: [u32; 7] = [
+    0xbcb09a, 0x7f6449, 0x7c7a73, 0xa08c6c, 0x5f4a38, 0x6b6649, 0x5c5b56,
+];
+/// Hose colors (sRGB), picked per fighter: dark brown, charcoal, olive-brown and umber wool.
+const HOSE: [u32; 4] = [0x5a4836, 0x4a4a4d, 0x585340, 0x463a30];
 
-/// The part of a piece's painted plates.
-fn paint_of(part: Part) -> Option<Part> {
+/// The hues painted plates flash in: grey, then twelve round the color circle.
+const HUES: u8 = 13;
+
+/// A team color's hue, for its plates' flash: 0 for a grey, else 1 plus the nearest of twelve
+/// hues round the circle, in steps of 30° from red (so 5 is green, 8 azure).
+fn hue_of(team_hex: u32) -> u8 {
+    let [r, g, b] = [16, 8, 0].map(|s| ((team_hex >> s) & 0xff) as f32);
+    let (max, min) = (r.max(g).max(b), r.min(g).min(b));
+    if max - min < 0.25 * max || max == 0.0 {
+        return 0;
+    }
+    // In sixths of the circle.
+    let h = if max == r {
+        (g - b) / (max - min)
+    } else if max == g {
+        2.0 + (b - r) / (max - min)
+    } else {
+        4.0 + (r - g) / (max - min)
+    };
+    1 + ((h * 2.0).round() as i32).rem_euclid(12) as u8
+}
+
+/// The part of a piece's painted plates, for a team of hue `hue`.
+fn paint_of(part: Part, hue: u8) -> Option<Part> {
     let i = PAINTED.iter().position(|&p| p == part)?;
-    Some(Part::Fighter(PAINT0 + i as u8))
+    Some(Part::Fighter(PAINT0 + hue * PAINTED.len() as u8 + i as u8))
 }
 
 /// Where a part's pose is kept (painted plates: their piece's).
 fn slot(part: Part) -> Option<usize> {
+    let plates = PAINT0..PAINT0 + HUES * PAINTED.len() as u8;
     if let Part::Fighter(n) = part
-        && let Some(&piece) = PAINTED.get(n.wrapping_sub(PAINT0) as usize)
+        && plates.contains(&n)
     {
-        return slot(piece);
+        return slot(PAINTED[(n - PAINT0) as usize % PAINTED.len()]);
     }
     let i = match part {
         Part::Torso => 0,
@@ -120,7 +149,7 @@ fn slot(part: Part) -> Option<usize> {
     (i < SLOTS).then_some(i)
 }
 
-/// Armor pieces that flash white when hit.
+/// Armor pieces that flash when hit.
 const ARMOR: [Part; 12] = [
     Part::Torso,
     Part::Head,
@@ -173,6 +202,52 @@ fn lit(hex: u32, nits: f32) -> StandardMaterial {
     StandardMaterial::hex(hex)
         .with_emissive(linear(hex).to_array(), nits)
         .with_roughness(0.4)
+}
+
+/// A part for an instant after a hit or a parry: lit up in a warm white over its own colors.
+/// It keeps the mesh's vertex colors (the cloth's, the leather's and the team's, and the
+/// baked occlusion) but not the textures, `FLASH` times as bright, plus a faint glow that
+/// shows in shade but cannot blow it out to white in daylight.
+fn flash() -> StandardMaterial {
+    tinted_flash(Vec3::new(FLASH, FLASH * 0.96, FLASH * 0.88))
+}
+
+/// How much brighter a struck part's own colors get.
+const FLASH: f32 = 1.5;
+
+/// The flash of painted plates (whose color is in the texture the flash can't keep), for a
+/// team of hue `hue` (see [`hue_of`]): a light tint of the team's hue, so a struck fighter
+/// lights up without losing its team.
+fn plate_flash(hue: u8) -> StandardMaterial {
+    let tint = if hue == 0 {
+        Vec3::new(1.0, 0.96, 0.88)
+    } else {
+        // The hue at full value and saturation `PLATE_FLASH.1` (sRGB), in linear.
+        let h = (hue - 1) as f32 * 0.5;
+        let c = [5.0, 3.0, 1.0].map(|n: f32| {
+            let k = (n + h) % 6.0;
+            1.0 - PLATE_FLASH.1 * k.min(4.0 - k).clamp(0.0, 1.0)
+        });
+        let hex = c
+            .iter()
+            .fold(0, |hex, c| hex << 8 | (c * 255.0).round() as u32);
+        linear(hex)
+    };
+    tinted_flash(tint * PLATE_FLASH.0)
+}
+
+/// The albedo of struck painted plates, and how saturated their tint is.
+const PLATE_FLASH: (f32, f32) = (0.75, 0.35);
+
+/// A flash material: untextured, the vertex colors times `albedo`, with a faint glow.
+fn tinted_flash(albedo: Vec3) -> StandardMaterial {
+    let glow = albedo / albedo.max_element();
+    StandardMaterial {
+        base_color: [albedo.x, albedo.y, albedo.z, 1.0],
+        perceptual_roughness: 0.6,
+        ..Default::default()
+    }
+    .with_emissive(glow.to_array(), 500.0)
 }
 
 /// The string between a bow tip and the nock (constant: the limbs bend instead).
@@ -283,10 +358,13 @@ pub(super) fn parts(
     let Some(paint) = paint_material(art, wear, team_hex) else {
         return plain_parts(kind, team_hex);
     };
-    // Under the armor: a gambeson and hose in undyed or earthy wool and linen.
+    // Under the armor: a gambeson and hose in undyed or earthy wool and linen. Golden-ratio
+    // steps spread neighboring seeds (a squad's) over the colors.
+    let pick =
+        |n: usize, offset: f64| ((seed as f64 * 0.618_034 + offset).fract() * n as f64) as usize;
     let cloth_hex = [
-        GAMBESONS[(seed * 3 + seed / 5) % GAMBESONS.len()],
-        HOSE[(seed + seed / 3) % HOSE.len()],
+        GAMBESONS[pick(GAMBESONS.len(), 0.0)],
+        HOSE[pick(HOSE.len(), 0.37)],
     ];
     let cloth = cloth_hex.map(linear);
     let mut out = Vec::with_capacity(list.len() + 2);
@@ -321,7 +399,7 @@ pub(super) fn parts(
             _ => MeshRenderer::new(mesh, atlas),
         };
         out.push((part, r, Vec3::ONE));
-        if let Some(plates) = paint_of(part).filter(|_| kit.painted(piece)) {
+        if let Some(plates) = paint_of(part, hue_of(team_hex)).filter(|_| kit.painted(piece)) {
             let key = format!("fighter/{}/paint", piece.name());
             let Some(mesh) = art.mesh(&key, || kit.paint_mesh(piece).unwrap_or_default()) else {
                 return plain_parts(kind, team_hex);
@@ -1330,23 +1408,26 @@ pub(super) fn humanoid(
             }
             _ => {}
         }
-        // White flash when hit.
+        // A flash when hit (the plates in their team's hue, whichever that is).
         if c.last_hurt > 0.0 && now - c.last_hurt < 0.12 {
-            for part in ARMOR
-                .into_iter()
-                .chain(ARMOR.into_iter().filter_map(paint_of))
-            {
-                materials.push((part, lit(0xffffff, 20_000.0)));
+            for part in ARMOR {
+                materials.push((part, flash()));
+            }
+            for hue in 0..HUES {
+                let m = plate_flash(hue);
+                for part in ARMOR.into_iter().filter_map(|p| paint_of(p, hue)) {
+                    materials.push((part, m));
+                }
             }
         }
     }
     if parry {
         blade_glow = Some(lit(0xffffff, 25_000.0));
-        for part in [Some(Part::Shield), paint_of(Part::Shield)]
-            .into_iter()
-            .flatten()
-        {
-            materials.push((part, lit(0xffffff, 25_000.0)));
+        materials.push((Part::Shield, flash()));
+        for hue in 0..HUES {
+            if let Some(plates) = paint_of(Part::Shield, hue) {
+                materials.push((plates, plate_flash(hue)));
+            }
         }
     }
     if let Some(m) = blade_glow {
@@ -1595,6 +1676,26 @@ mod tests {
             let nock = weapons::BOW_TIP.z + draw;
             let len = Vec2::new(tip.y, nock - tip.z).length();
             assert!((len - STRING_HALF).abs() < 1e-3);
+        }
+    }
+
+    #[test]
+    fn plates_flash_in_their_teams_hue() {
+        // Crimson, green, azure, grey.
+        assert_eq!(hue_of(0xb02f35), 1);
+        assert_eq!(hue_of(0x3d8a4e), 5);
+        assert_eq!(hue_of(0x2f7cf2), 8);
+        assert_eq!(hue_of(0x8a8a8a), 0);
+        let [red, blue] = [1, 8].map(|hue| plate_flash(hue).base_color);
+        assert!(red[0] > 2.0 * red[2] && blue[2] > 2.0 * blue[0]);
+        // Every hue's plates are posed with their piece, and no two share a part.
+        let mut seen = std::collections::HashSet::new();
+        for hue in 0..HUES {
+            for &piece in &PAINTED {
+                let plates = paint_of(piece, hue).unwrap();
+                assert!(seen.insert(plates));
+                assert_eq!(slot(plates), slot(piece));
+            }
         }
     }
 }

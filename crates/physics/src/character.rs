@@ -13,11 +13,12 @@ use rapier3d::control::{
     CharacterAutostep, CharacterCollision, CharacterLength, KinematicCharacterController,
 };
 use rapier3d::parry::bounding_volume::BoundingVolume;
-use rapier3d::parry::query::{ShapeCastHit, ShapeCastOptions, contact};
+use rapier3d::parry::query::{QueryDispatcher, ShapeCastHit, ShapeCastOptions};
 use rapier3d::prelude::{
     Collider, ColliderHandle, PhysicsWorld, Pose, QueryFilter, RigidBodyHandle, SharedShape,
 };
 
+use crate::capsule_box;
 use crate::convert;
 use crate::sim::{RegionId, Simulation};
 
@@ -92,8 +93,9 @@ fn probe_ground(
     pos: Vec3,
     up: Vec3,
 ) -> Option<(ColliderHandle, ShapeCastHit)> {
+    let queries = capsule_box::dispatcher();
     let qp = world.broad_phase.as_query_pipeline(
-        world.narrow_phase.query_dispatcher(),
+        &queries,
         &world.bodies,
         &world.colliders,
         query_filter(body, desc),
@@ -123,16 +125,18 @@ fn touching(
     shape: &SharedShape,
     pose: &Pose,
 ) -> Vec<(ColliderHandle, Vec3)> {
-    let qp = world.broad_phase.as_query_pipeline(
-        world.narrow_phase.query_dispatcher(),
-        &world.bodies,
-        &world.colliders,
-        filter,
-    );
+    let queries = capsule_box::dispatcher();
+    let qp = world
+        .broad_phase
+        .as_query_pipeline(&queries, &world.bodies, &world.colliders, filter);
     let aabb = shape.compute_aabb(pose).loosened(TOUCH_MARGIN);
     qp.intersect_aabb_conservative(aabb)
         .filter_map(|(h, c)| {
-            let hit = contact(pose, &**shape, c.position(), c.shape(), TOUCH_MARGIN).ok()??;
+            let pos12 = pose.inv_mul(c.position());
+            let mut hit = queries
+                .contact(&pos12, &**shape, c.shape(), TOUCH_MARGIN)
+                .ok()??;
+            hit.transform_by_mut(pose, c.position());
             Some((h, surface_normal(shape, pose, c, hit.point2, hit.normal2)))
         })
         .collect()
@@ -278,6 +282,7 @@ fn move_one(sim: &mut Simulation, region_id: RegionId, e: Entity, gravity: &Grav
         normal_nudge_factor: 1.0e-4,
     };
     let filter = query_filter(body, &desc);
+    let queries = capsule_box::dispatcher();
     // Horizontal first, then vertical: with gravity folded into one diagonal move, the floor
     // stops the sweep before it reaches a step's edge and stairs can't be climbed.
     let vertical = up * desired.dot(up);
@@ -309,7 +314,7 @@ fn move_one(sim: &mut Simulation, region_id: RegionId, e: Entity, gravity: &Grav
                 .collect();
             let keep = |h: ColliderHandle, _: &Collider| !leaving.contains(&h);
             let qp = world.broad_phase.as_query_pipeline(
-                world.narrow_phase.query_dispatcher(),
+                &queries,
                 &world.bodies,
                 &world.colliders,
                 filter.predicate(&keep),
@@ -357,7 +362,11 @@ fn move_one(sim: &mut Simulation, region_id: RegionId, e: Entity, gravity: &Grav
     let mut stands_on = None;
     if let Some((h, hit)) = probe_ground(world, body, &shape, &desc, end, up) {
         let n = hit.normal1;
-        if n.dot(up) >= cos_slope - 1e-3 {
+        // Ground within snapping reach only counts once the character is on it: the controller
+        // snaps down only characters that started the move on the ground, so one falling toward
+        // the floor would otherwise read grounded while still 30 cm up and falling fast.
+        let on_it = grounded || hit.time_of_impact <= TOUCH_MARGIN;
+        if on_it && n.dot(up) >= cos_slope - 1e-3 {
             state.grounded = true;
         }
         if state.grounded {

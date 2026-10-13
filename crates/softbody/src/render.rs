@@ -26,6 +26,7 @@ use engine_render::{
 };
 
 use crate::body::{SoftBodySim, SoftKind, Surface, Tube};
+use crate::gpu_cloth::{GpuCloths, GpuDraw};
 use crate::rope::Beads;
 use crate::settings::SoftMaterial;
 
@@ -882,6 +883,7 @@ fn pipeline(gpu: &GpuShared, s: PipelineSpec) -> wgpu::RenderPipeline {
 #[derive(Default)]
 pub struct SoftBodyFeature {
     gpu: Option<Gpu>,
+    cloths: Option<GpuCloths>,
     query: Option<QueryState<&'static SoftBodySim>>,
     geometry: Geometry,
     draws: Draws,
@@ -1013,6 +1015,7 @@ impl RenderFeature for SoftBodyFeature {
             material_group,
             strand_group,
         });
+        self.cloths = Some(GpuCloths::new(gpu));
     }
 
     fn prepare(
@@ -1135,6 +1138,13 @@ impl RenderFeature for SoftBodyFeature {
             + self.draws.transparent.len()
             + self.draws.hair.iter().filter(|h| h.in_view).count())
             as u32;
+        if let Some(cloths) = self.cloths.as_mut() {
+            cloths.prepare(world, gpu, view, &mut geo.materials);
+            for d in cloths.draws.iter().filter(|d| d.in_view) {
+                self.stats.triangles += (d.indices.len() / 3) as u64;
+                self.stats.draw_calls += 1;
+            }
+        }
 
         // Upload.
         let (device, queue) = (&gpu.device, &gpu.queue);
@@ -1185,6 +1195,12 @@ impl RenderFeature for SoftBodyFeature {
         }
     }
 
+    fn compute(&mut self, encoder: &mut wgpu::CommandEncoder, ctx: &FrameContext) {
+        if let Some(cloths) = self.cloths.as_mut() {
+            cloths.compute(encoder, &ctx.gpu.device);
+        }
+    }
+
     fn draw_shadow(&self, pass: &mut wgpu::RenderPass<'_>, cascade: usize, _ctx: &FrameContext) {
         let Some(g) = &self.gpu else {
             return;
@@ -1199,6 +1215,8 @@ impl RenderFeature for SoftBodyFeature {
                 pass.draw_indexed(r.clone(), 0, 0..1);
             }
         }
+        let bit = 1 << cascade.min(MAX_CASCADES);
+        self.draw_gpu_cloths(pass, &g.shadow, &g.material_group, |d| d.shadows & bit != 0);
         if cascade < MAX_CASCADES {
             let mut bound = false;
             for h in self
@@ -1235,6 +1253,10 @@ impl RenderFeature for SoftBodyFeature {
                 pass.draw_indexed(r.clone(), 0, 0..1);
             }
         }
+        let transparent = phase == RenderPhase::Transparent;
+        self.draw_gpu_cloths(pass, pipeline, &g.material_group, |d| {
+            d.in_view && d.transparent == transparent
+        });
         if phase == RenderPhase::Opaque {
             let mut bound = false;
             for h in self.draws.hair.iter().filter(|h| h.in_view) {
@@ -1258,7 +1280,35 @@ impl RenderFeature for SoftBodyFeature {
             "vertices": self.geometry.vertices.len(),
             "strands": self.geometry.strands,
             "guides": self.geometry.guides.len(),
+            "gpu_cloths": self.cloths.as_ref().map_or(0, GpuCloths::count),
+            "gpu_cloth_ms": self.cloths.as_ref().and_then(GpuCloths::gpu_ms),
         })
+    }
+}
+
+impl SoftBodyFeature {
+    /// Draw the GPU-simulated cloths `pick` chooses, from their own vertex buffer.
+    fn draw_gpu_cloths(
+        &self,
+        pass: &mut wgpu::RenderPass<'_>,
+        pipeline: &wgpu::RenderPipeline,
+        materials: &wgpu::BindGroup,
+        pick: impl Fn(&GpuDraw) -> bool,
+    ) {
+        let Some(cloths) = &self.cloths else {
+            return;
+        };
+        let mut bound = false;
+        for d in cloths.draws.iter().filter(|d| pick(d)) {
+            if !bound {
+                pass.set_pipeline(pipeline);
+                pass.set_bind_group(1, materials, &[]);
+                pass.set_vertex_buffer(0, cloths.vertices.slice(..));
+                pass.set_index_buffer(cloths.indices.buffer.slice(..), wgpu::IndexFormat::Uint32);
+                bound = true;
+            }
+            pass.draw_indexed(d.indices.clone(), d.base_vertex, 0..1);
+        }
     }
 }
 
@@ -1313,6 +1363,7 @@ mod tests {
             Entity::PLACEHOLDER,
             &GlobalTransform::default(),
             None,
+            false,
         )
         .unwrap()
     }

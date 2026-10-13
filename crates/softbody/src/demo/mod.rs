@@ -3,7 +3,7 @@
 //! [`spawn_demo`] builds it around a center point (the showcase calls it at the yard zone):
 //!
 //! - **Flags** on tall poles with printed patterns, streaming in the world wind, and a field
-//!   of 56 pennants (cheap enough to have many).
+//!   of 56 pennants simulated on the GPU (`SimSettings::gpu`).
 //! - **Curtains**: one shot full of holes by a turret, one set on fire that burns away and
 //!   comes back.
 //! - **Self-collision**: a wool blanket dropped over a stone ball every few seconds, heaping
@@ -25,6 +25,9 @@
 //! generated once per world at startup (`texgen`, about 36 MB), shared as keyed assets so
 //! repeated props draw instanced (`kit`). [`spawn_review_ground`] adds a cheap textured
 //! ground (earth and gravel fraying into grass) for screenshots.
+//!
+//! [`boat_models`] builds a gaff-rigged clinker dinghy (hull, swinging rig, rudder; its
+//! dimensions in [`boat_dims`]) for the sailing cloth, with [`boat_stand`] to show it on.
 
 use std::f32::consts::{FRAC_PI_2, TAU};
 use std::sync::Arc;
@@ -50,9 +53,11 @@ mod kit;
 mod meshkit;
 mod props;
 mod props_anim;
+mod props_boat;
 mod props_bridge;
 mod props_machines;
 mod props_stage;
+pub mod sailboat;
 pub mod sculpt;
 pub mod skin;
 mod texgen;
@@ -65,9 +70,11 @@ pub use characters::{
 };
 use characters::{dog, graphite, ivory, mannequin};
 pub use ground::spawn_review_ground;
+pub use kit::Model;
 use kit::{Mat, register_mesh};
 use props::*;
 pub use props_anim::{AimAxis, DemoAim, DemoRoll, DemoScrewWheel};
+pub use props_boat::{BoatModels, boat_models, boat_stand, dims as boat_dims, hull_points};
 use props_bridge::{bridge_plank, plank_size, stone_pier, timber_tower};
 use props_machines::{
     GANTRY_PIVOT, PRESS_SCREW, gantry, plank_crate, press_frame, press_ram, press_wheel,
@@ -77,6 +84,7 @@ use props_stage::{
     GUN_PIVOT, GUN_TURNTABLE, bead_frame, burner, curtain_ring_xs, curtain_stage, gun_body,
     gun_pedestal, gun_yoke, stone_ball, swing_frame, swing_seat,
 };
+pub use sailboat::spawn_sailboat;
 
 /// How a demo prop moves (kinematic until the physics module lands).
 #[derive(Component, Debug, Clone, PartialEq)]
@@ -174,6 +182,7 @@ pub fn register(app: &mut App) {
             burn_and_restore,
             cut_and_restore,
             respawn_volumes,
+            sailboat::sail_boats,
         )
             .chain()
             .in_set(SimSet::Gameplay),
@@ -273,10 +282,12 @@ fn flag_field(commands: &mut Commands, corner: DVec3) {
                     0,
                 )
                 .with_sheen(0.2);
+            // Simulated on the GPU: one dispatch for the whole field, at twice the CPU
+            // pennants' detail.
             let mut spec = Cloth::flag([1.0, 0.6], material);
-            spec.resolution = [10, 6];
+            spec.resolution = [20, 12];
             spec.sim.wind_scale = 2.4;
-            spec.sim.substeps = 8;
+            spec.sim.gpu = true;
             commands.spawn((
                 Name::new(format!("Pennant {}", row * 7 + col + 1)),
                 at(base + DVec3::new(0.03, 2.35, 0.0)),

@@ -52,6 +52,12 @@ changing that one plugin line.
   walls it only touches (running along a wall). Its normals come from exact point projections
   between the capsule's core and the surface, not from the sweeps: those point sideways about
   one step in a hundred while the capsule sits in its 2 cm gap, a wall in the middle of a field.
+  A falling character reads `grounded` only once it is on the ground (within 5 cm), not while
+  ground is merely within snapping reach below it.
+  Capsules against boxes are solved exactly (`src/capsule_box.rs`) for characters and
+  `physics.shapecast`: Parry's GJK let a character sink 20 cm into a 25 m box when it stood
+  within a few millimeters of the box's center, and meters into a 500 m one. Characters now
+  keep their 2 cm gap on boxes from 1 m to 10 km across.
 - **Events**: one `ContactEvent::Started` per touch with the impact impulse and a normal from
   `a` to `b`, one `Ended` when it stops; sensors too. Hard impacts also send `NoiseEvent` (AI
   hearing) and, against static ground, `GroundContact` (dents, dust, impact sounds).
@@ -141,18 +147,23 @@ touching pairs, step time, substeps.
 yard (with a curb, so nothing rolls off) with a 30-crate tower, a bin filling with 250
 crates/barrels/balls, a domino snake, crash test dummy ragdolls tumbling down a steep staircase,
 a wrecking ball smashing a crate wall, a seesaw catapult, a motor-driven paddle wheel, a sagging
-plank bridge, a kinematic turntable and bouncing rubber balls. It sits on the ground at `origin`,
-its top `demo::SLAB_RISE` (10 cm) above it; the showcase's physics zone places it. Render it alone with
+plank bridge, a kinematic turntable, bouncing rubber balls and, along the front, a **barrel run**:
+three oil drums roll off a 2 m ramp and 47 m down an asphalt runway (one triangle mesh, an edge
+every 2 m) into a sand pit, staying flat and in their painted lanes, past galvanized guardrails to a
+tire wall. It sits on the ground at `origin`, its top `demo::SLAB_RISE` (10 cm) above it; the
+showcase's physics zone places it. Render it alone with
 `cargo run -p engine_physics --release --example proving_ground -- out_dir`.
 
 The stations replay on their own cycles (`demo::Station::cycle_secs`, world time: ragdolls,
-seesaw and balls every 20 s, dominoes, wrecking ball and bridge every 30 s, the pile every 45 s;
-the tower, wheel and turntable run on), so the zone is always playing when someone walks in.
+seesaw and balls every 20 s, the barrel run every 25 s, dominoes, wrecking ball and bridge every
+30 s, the pile every 45 s; the tower, wheel and turntable run on), so the zone is always
+playing when someone walks in.
 They pause while no focus point is within 250 m.
 `physics.proving_ground.replay {"station": "dominoes"}` restarts one now (`{}` restarts all).
 `demo::VIEWS` are tour stops for the action stations: arriving restarts the station, and the
 warm-up lands on its best moment. `tests/proving_ground.rs` checks that stations replay without
-piling up bodies.
+piling up bodies, and that the barrel run's drums stay within 1 cm of the deck and 30 cm of their
+lanes and stop in the sand.
 
 Everything in it is drawn with detailed procedural art (`src/demo/art/`): beveled meshes sized to
 their colliders (shipping crates with brackets and bolts, 200 l drums, chain links, a cast
@@ -164,21 +175,21 @@ renderer get colliders only. `cargo run -p engine_physics --release --example ar
 
 Tests (`cargo test -p engine_physics`): the conformance suite; the "done when" scenarios below
 (`tests/scenarios.rs`); behaviors other modules rely on (`tests/behaviors.rs`: removal, compound
-bodies, joint breaking and motors, hinges swinging through the fixed body they hang on, kinematic platforms, stairs and steep slopes, dashing into
-thin walls, wall-running, no phantom walls on flat ground, running over heightfield hills, crouching, characters on their own clock, sensors and layers, local
-time, hovering, buoyancy, blasts, bodies crossing and merging regions); riding moving bodies
-(`tests/platforms.rs`: crates and characters on a deck at up to 30 km/s, lifts, a turntable, a
-thrusting and turning ship, a seesaw tipped by a character's weight, crates landing on heads,
-rays hitting bodies at orbital speed); mass overrides (`tests/mass.rs`: a moved center of mass,
-dropping an override); following world shifts (`tests/world_shift.rs`: a
-sleeping pile stays asleep through floating-origin moves, a stack stands through a tilting turn,
-world-pinned hinges turn with the world, a moving or spinning frame adds its motion at each body,
-characters keep their footing, queries see the new frame at once); rolling resistance
-(`tests/rolling.rs`: balls and logs slow at `Crr·g/(1 + I/mr²)` on concrete, faster on grass and
-sand, the same on terrain and meshes, barrels stop on sand, barrels at 4 and 8 m/s roll over
-terrain and meshes within 5 mm of flat and 25 cm of straight); the debug view
-(`tests/debug_draw.rs`, contacts on terrain included); a headless screenshot of
-the proving ground.
+bodies, joint breaking and motors, hinges swinging through the fixed body they hang on, kinematic
+platforms, stairs and steep slopes, dashing into thin walls, wall-running, no phantom walls on flat
+ground, running over heightfield hills, crouching, landing from a fall, standing exactly on boxes
+from 1 m to 10 km across, characters on their own clock, sensors and layers, local time, hovering,
+buoyancy, blasts, bodies crossing and merging regions); riding moving bodies (`tests/platforms.rs`:
+crates and characters on a deck at up to 30 km/s, lifts, a turntable, a thrusting and turning ship,
+a seesaw tipped by a character's weight, crates landing on heads, rays hitting bodies at orbital
+speed); mass overrides (`tests/mass.rs`: a moved center of mass, dropping an override); following
+world shifts (`tests/world_shift.rs`: a sleeping pile stays asleep through floating-origin moves, a
+stack stands through a tilting turn, world-pinned hinges turn with the world, a moving or spinning
+frame adds its motion at each body, characters keep their footing, queries see the new frame at
+once); rolling resistance (`tests/rolling.rs`: balls and logs slow at `Crr·g/(1 + I/mr²)` on
+concrete, faster on grass and sand, the same on terrain and meshes, barrels stop on sand, barrels at
+4 and 8 m/s roll over terrain and meshes within 5 mm of flat and 25 cm of straight); the debug view
+(`tests/debug_draw.rs`, contacts on terrain included); a headless screenshot of the proving ground.
 
 ## Done when
 

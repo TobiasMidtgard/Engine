@@ -1,8 +1,11 @@
 //! Renders the Valheim dig-and-build hill headless and saves screenshots of its test cases.
 //!
 //! ```sh
-//! cargo run -p engine_destruction --release --example hill -- [out_dir] [WxH]
+//! cargo run -p engine_destruction --release --example hill -- [out_dir] [WxH] [only]
 //! ```
+//!
+//! `only` is a comma-separated list of words; just the shots whose names contain one are
+//! rendered (the others are skipped, not simulated faster).
 //!
 //! Needs a GPU or lavapipe (`mesa-vulkan-drivers`).
 
@@ -13,7 +16,7 @@ use engine_core::prelude::*;
 use engine_core::time::TimeSource;
 use engine_destruction::{DestructionPlugin, DestructionStats, hill};
 use engine_render::prelude::*;
-use engine_render::{RenderDisabled, capture_now};
+use engine_render::{RenderDisabled, Renderer, capture_now};
 use engine_world::WorldPlugin;
 
 /// (seconds into the loop, file name, camera position, look-at point)
@@ -56,6 +59,42 @@ fn shots() -> Vec<(f32, &'static str, [f64; 3], [f64; 3])> {
             "07_hut_half_down",
             [9.5, 3.5, -16.5],
             [15.0, 1.8, -10.0],
+        ),
+        (
+            6.2,
+            "09_build_walls_going_up",
+            [-20.5, 3.6, -17.5],
+            [-14.0, 1.2, -24.0],
+        ),
+        (
+            10.2,
+            "10_build_roof_ghost",
+            [-20.0, 5.5, -17.0],
+            [-14.0, 2.0, -24.5],
+        ),
+        (
+            14.3,
+            "11_build_red_ghost_close",
+            [-5.0, 3.4, -19.5],
+            [-9.5, 2.2, -24.8],
+        ),
+        (
+            18.0,
+            "12_build_deck_at_the_limit",
+            [-3.0, 5.4, -16.0],
+            [-11.0, 1.9, -24.5],
+        ),
+        (
+            20.3,
+            "13_shelter_roof_ghost",
+            [15.5, 6.8, -3.0],
+            [8.6, 4.6, 2.1],
+        ),
+        (
+            22.2,
+            "14_shelter_on_the_rock",
+            [15.5, 6.8, -3.0],
+            [8.6, 4.6, 2.1],
         ),
         (
             22.0,
@@ -104,6 +143,10 @@ fn main() {
         .and_then(|s| s.split_once('x'))
         .and_then(|(a, b)| Some((a.parse().ok()?, b.parse().ok()?)))
         .unwrap_or((1280u32, 720u32));
+    let only: Vec<String> = args
+        .get(3)
+        .map(|s| s.split(',').map(str::to_string).collect())
+        .unwrap_or_default();
     std::fs::create_dir_all(&out).expect("create output dir");
 
     let mut app = App::new();
@@ -123,9 +166,22 @@ fn main() {
 
     let mut t = 0.0f32;
     for (at, name, eye, target) in shots() {
+        if !only.is_empty() && !only.iter().any(|w| name.contains(w.as_str())) {
+            continue;
+        }
+        // Simulate up to the shot without drawing (a CPU renderer takes seconds a frame).
+        let renderer = app.world.remove_resource::<Renderer>();
+        if renderer.is_some() {
+            app.world
+                .insert_resource(RenderDisabled("between shots".into()));
+        }
         while t + 1e-4 < at {
             app.update();
             t += step as f32;
+        }
+        if let Some(r) = renderer {
+            app.world.remove_resource::<RenderDisabled>();
+            app.world.insert_resource(r);
         }
         {
             let mut q = app.world.query_filtered::<&mut Transform, With<Camera>>();
