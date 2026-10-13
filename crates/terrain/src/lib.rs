@@ -13,6 +13,7 @@ pub mod materials;
 pub mod noise;
 pub mod palette;
 pub mod render;
+pub mod rivers;
 pub mod shape;
 
 use std::collections::HashMap;

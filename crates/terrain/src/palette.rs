@@ -114,7 +114,8 @@ impl TerrainPalette {
 
     /// The surface material at a sampled point (`slope` = 1 − cos of the slope angle).
     pub fn classify(&self, s: &Sample, slope: f64, under_sea: bool, ids: &SurfaceIds) -> SurfaceId {
-        if under_sea {
+        // The sea, and rivers (splashing footsteps).
+        if under_sea || s.water > 0.5 {
             return ids.water;
         }
         if s.paint.1 > 0.5 && (s.paint.0 as usize) < PAINT_NAMES.len() && s.paint.0 > 0 {
@@ -212,6 +213,9 @@ mod tests {
             moisture: m,
             temperature_c: t,
             mare: 0.0,
+            water: 0.0,
+            lake: 0.0,
+            banks: 0.0,
             paint: (0, 0.0),
             tint: [0.0; 4],
         }

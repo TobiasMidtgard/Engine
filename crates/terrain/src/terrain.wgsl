@@ -83,6 +83,7 @@ struct VertexIn {
     @location(6) planet: u32,
     @location(7) lod: vec4<f32>,       // vertex spacing (m), level
     @location(8) tint: vec4<f32>,      // hand-made ground tint: sqrt(color), amount
+    @location(11) river: vec4<f32>,    // river and lake water (0..1), lake share, river banks, spare
 };
 
 // `@invariant` keeps the prepass and the scene pass depths bit-identical.
@@ -101,6 +102,7 @@ struct VertexOut {
     @location(8) paint_a: vec4<f32>,
     @location(9) paint_b: vec4<f32>,
     @location(10) paint_c: vec2<f32>,
+    @location(11) water: vec3<f32>,       // river and lake water, lake share, river banks
 };
 
 // Geomorph offsets are stored in vertex spacings (`chunk::MORPH_RANGE`).
@@ -616,6 +618,7 @@ fn vs_main(in: VertexIn) -> VertexOut {
     out.paint_b = in.paint_b;
     out.paint_c = in.paint_c.xy;
     out.lod = vec4<f32>(in.lod.xy, convex, 0.0);
+    out.water = in.river.xyz;
     out.tint = vec4<f32>(in.tint.rgb * in.tint.rgb, in.tint.a);
     out.clip = frame.view_proj * vec4<f32>(rel, 1.0);
     return out;
@@ -635,6 +638,7 @@ struct PrepassOut {
     @location(3) up: vec3<f32>,
     @location(4) ocean: f32,
     @location(5) rel: vec3<f32>,
+    @location(6) river: f32,
 };
 
 @vertex
@@ -650,6 +654,7 @@ fn vs_prepass(in: VertexIn) -> PrepassOut {
     out.motion_now = motion_clip(rel);
     out.motion_prev = prev_motion_clip(static_prev_rel(rel) - planet.motion.xyz);
     out.ocean = select(0.0, 1.0, (flags & 2u) != 0u) * planet.params.w;
+    out.river = in.river.x;
     return out;
 }
 
@@ -666,7 +671,8 @@ fn fs_prepass(in: PrepassOut) -> PrepassOutput {
         smoothstep(0.0005, 0.015, layers.y),
         smoothstep(0.015, 0.04, depth) * smoothstep(0.5, 0.85, rain_wet),
     );
-    let water = max(pool * (1.0 - snow) * (1.0 - in.ocean), in.ocean);
+    let river = smoothstep(0.2, 0.6, in.river) * (1.0 - in.ocean);
+    let water = max(max(pool * (1.0 - snow) * (1.0 - in.ocean), in.ocean), river);
     let n = normalize(mix(normalize(in.normal), in.up, water));
     let ground = 0.85 - 0.35 * rain_wet * (1.0 - snow);
     let roughness = mix(ground, mix(0.04, 0.08, in.ocean), water);
@@ -1067,10 +1073,17 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     // Seen from orbit a pixel spans many woods and fields: the woods' share of it grows
     // gradually with the wetness (a sharp threshold traced the triangles of the vertices).
     let orbit = smoothstep(1500.0, 15000.0, pixel);
-    let forest = vegetation
+    let woodland = vegetation
         * smoothstep(0.40 - 0.1 * far - 0.12 * orbit, 0.52 + 0.1 * far + 0.15 * orbit, moisture * 0.6 + (0.5 - patches) * 0.9 + (variety - 0.5) * 0.4 + forest_edge + gully * 0.12 - crest * 0.12 + (far_n.x - 0.5) * 0.9 * far * (1.0 - 0.4 * orbit))
         * smoothstep(-6.0, 4.0, temp_c)
         * (1.0 - smoothstep(1800.0, 2600.0, altitude + (variety - 0.5) * 600.0));
+    // Gallery woods: trees line the banks of rivers, in a ragged strip (on into dry country,
+    // where nothing else grows).
+    let gallery = vegetation
+        * smoothstep(0.3, 0.65, in.water.z + (patch_v - 0.5) * 0.25 + (mid_v - 0.5) * 0.15 * clump_fade)
+        * smoothstep(-6.0, 4.0, temp_c)
+        * (1.0 - smoothstep(1800.0, 2600.0, altitude));
+    let forest = max(woodland, gallery);
     // From a couple of hundred meters the canopy (the foliage module draws trees near the camera,
     // and bare leaf litter there read as a brown hole in the land). Up close: ferns and grass
     // with patches of litter between them.
@@ -1456,6 +1469,35 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     albedo = mix(albedo, albedo * 0.35, puddle);
     roughness = mix(roughness, 0.04, puddle);
     reflectance = mix(reflectance, 0.354, puddle);
+
+    // ---- Rivers and lakes: the water of the channels and basins the shape carves and fills
+    // (rivers.rs), still and glossy with ripples drifting on it. Where the vertices resolve a
+    // channel its banks are sharp and a little ragged; from afar, where a river is narrower
+    // than the vertices, it is a share of the pixel. Frozen in hard frost.
+    let river_in = in.water.x;
+    var river = 0.0;
+    if (river_in > 0.002) {
+        let crisp = 1.0 - smoothstep(2.0, 12.0, in.lod.x);
+        let banks = smoothstep(0.35, 0.6, river_in + (detail_n - 0.5) * 0.25 * fine_fade);
+        river = mix(river_in, banks, crisp) * (1.0 - ocean);
+        // A strip of wet mud and gravel along the water's edge.
+        let shore = smoothstep(0.03, 0.3, river_in) * (1.0 - river) * crisp * (1.0 - in.water.y / max(river_in, 1e-3));
+        albedo = mix(albedo, mix(col[M_SOIL], planet.colors[C_ROCK].rgb, 0.4) * 0.7, saturate(shore) * 0.7);
+        roughness = mix(roughness, 0.5, saturate(shore) * 0.5);
+        let frozen = smoothstep(-2.0, -8.0, temp_c);
+        // Silty, green-brown rivers; lakes clearer and bluer.
+        var river_col = mix(planet.colors[C_OCEAN].rgb * vec3<f32>(0.75, 1.1, 0.85), planet.colors[C_SOIL].rgb * 0.5, 0.35);
+        river_col = mix(river_col, planet.colors[C_OCEAN].rgb * vec3<f32>(0.8, 1.0, 0.95), saturate(in.water.y / max(river_in, 1e-3)));
+        river_col = mix(river_col, planet.colors[C_SNOW].rgb * 0.85, frozen);
+        let ripple_fade = (1.0 - smoothstep(0.5, 8.0, pixel)) * (1.0 - frozen);
+        let river_n = normalize(mix(up, bump(up, dp1, dp2, dw1, dw2), ripple_fade * 0.25));
+        albedo = mix(albedo, river_col, river);
+        n = normalize(mix(n, river_n, river));
+        roughness = mix(roughness, mix(0.06, 0.5, frozen), river);
+        reflectance = mix(reflectance, 0.354, river);
+        occlusion = mix(occlusion, 1.0, river);
+        subsurface = mix(subsurface, 0.0, river);
+    }
 
     // ---- Scorch marks.
     let scorch = layers.w;
