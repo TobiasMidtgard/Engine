@@ -1,7 +1,8 @@
 //! Moving parts: wheels that steer, spin and ride the suspension, landing gear that folds
-//! away, control surfaces that deflect, propellers that spin, exhaust plumes that grow with thrust, brake lights, and hulls
-//! that glow with re-entry heat. All are child entities of the vehicle, updated in `Update`
-//! from the simulation state, so they work with any physics backend.
+//! away, control surfaces that deflect, propellers that spin, exhaust plumes that grow with
+//! thrust, brake lights, and hulls that glow with re-entry heat. All are child entities of the
+//! vehicle, updated in `Update` from the simulation state, so they work with any physics
+//! backend.
 
 use engine_core::math::{Quat, Vec3};
 use engine_core::prelude::*;

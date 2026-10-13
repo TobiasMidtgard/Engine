@@ -99,9 +99,14 @@ pub struct Autopilot {
     /// Altitude when the autopilot was engaged (runway height), m.
     #[serde(skip)]
     pub start_altitude: Option<f64>,
-    /// Integrator for holding a spot (spacecraft): sideways error over time, m·s.
+    /// Integrator for holding a spot (spacecraft) or a runway's centerline (planes):
+    /// sideways error over time, m·s.
     #[serde(skip)]
     pub hold_integral: Vec3,
+    /// The runway's line for a take-off: where the roll began and the level direction the
+    /// nose pointed.
+    #[serde(skip)]
+    pub runway: Option<(DVec3, Vec3)>,
 }
 
 impl Autopilot {
@@ -580,8 +585,6 @@ fn fly(
     dt: f32,
 ) {
     let f = &forces.frame;
-    let start = *ap.start_altitude.get_or_insert(tel.altitude_m);
-    let height = (tel.altitude_m - start) as f32;
     let Some(mut aircraft) = aircraft else { return };
     if waypoints.is_empty() {
         return;
@@ -593,22 +596,48 @@ fn fly(
     let heading_err = signed_angle(fwd_flat, to_flat, -up); // + = waypoint to the right
     c.brake = 0.0;
     c.handbrake = false;
-    let on_ground = tel.wheels_grounded > 0 && height < 2.0;
     if ap.phase.is_empty() && ap.timer < 0.1 {
-        // Wheel contacts aren't known until the wheels have run once.
+        // Wheel contacts and telemetry aren't known until the vehicle has run once.
         return;
     }
-    if ap.phase.is_empty() && on_ground {
-        ap.set_phase("takeoff roll");
-    } else if ap.phase.is_empty() {
-        ap.set_phase("cruise");
+    // Runway height, read once the telemetry has run: it reads 0 m before, which for a
+    // runway on high ground (or a planet's surface) put the plane far above it.
+    let start = *ap.start_altitude.get_or_insert(tel.altitude_m);
+    let height = (tel.altitude_m - start) as f32;
+    let on_ground = tel.wheels_grounded > 0 && height < 2.0;
+    if ap.phase.is_empty() {
+        // Too slow to fly means a take-off, even when the wheels are off the ground for a
+        // moment (a plane put down on a runway bounces as it settles). Cruise logic at
+        // walking speed would turn the nose into the wind and roll off the runway.
+        if on_ground || tel.speed < rotate_speed * 0.5 {
+            ap.set_phase("takeoff roll");
+            ap.runway = Some((f.position, fwd_flat));
+        } else {
+            ap.set_phase("cruise");
+        }
     }
+    // On the runway: steer the nose wheel for a point on the runway's line ahead, which
+    // holds the centerline in a crosswind (with an integral for the steady push of the wind
+    // on the tail).
+    let (start, along) = ap.runway.unwrap_or((f.position, fwd_flat));
+    let right = along.cross(up);
+    let off = (f.position - start).as_vec3().dot(right);
+    if on_ground && ap.runway.is_some() {
+        ap.hold_integral.x = (ap.hold_integral.x + off * dt).clamp(-10.0, 10.0);
+    }
+    let off = off + ap.hold_integral.x * 0.4;
+    let runway_yaw = |speed: f32| {
+        let ahead = speed.max(10.0);
+        let aim = (along * ahead - right * off).normalize_or_zero();
+        let err = signed_angle(fwd_flat, aim, -up);
+        (err * 3.0 + f.local_angular().y * 0.5).clamp(-1.0, 1.0)
+    };
     match ap.phase.as_str() {
         "takeoff roll" => {
             aircraft.flaps = 0.4;
             aircraft.gear_down = true;
             c.throttle = 1.0;
-            c.yaw = (heading_err * 3.0 - f.local_angular().y * -0.5).clamp(-1.0, 1.0);
+            c.yaw = runway_yaw(tel.speed);
             c.steer = hold_bank(forces, 0.0, up);
             c.pitch = hold_pitch(forces, 0.0, up) * 0.3;
             if tel.airspeed > rotate_speed {
@@ -625,8 +654,13 @@ fn fly(
             } else {
                 hold_pitch(forces, target_pitch, up)
             };
-            c.steer = hold_bank(forces, (heading_err * 0.8).clamp(-0.25, 0.25), up);
-            c.yaw = (tel.sideslip_deg.to_radians() * 2.0).clamp(-1.0, 1.0);
+            if on_ground {
+                c.steer = hold_bank(forces, 0.0, up);
+                c.yaw = runway_yaw(tel.speed);
+            } else {
+                c.steer = hold_bank(forces, (heading_err * 0.8).clamp(-0.25, 0.25), up);
+                c.yaw = (tel.sideslip_deg.to_radians() * 2.0).clamp(-1.0, 1.0);
+            }
             if height > 15.0 {
                 ap.set_phase("climb");
                 aircraft.gear_down = false;
@@ -785,6 +819,10 @@ fn ascend(
         c.yaw = y;
         c.steer = r;
     };
+    if ap.phase.is_empty() && ap.timer < 0.1 {
+        // The telemetry's altitude reads 0 m until the vehicle has run once.
+        return;
+    }
     let start = *ap.start_altitude.get_or_insert(alt);
     if ap.phase.is_empty() {
         // A ship standing on its tail goes straight up; one lying on its belly (a VTOL
