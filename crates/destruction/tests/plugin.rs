@@ -148,6 +148,50 @@ fn a_breach_charge_opens_drywall_but_only_scars_reinforced_concrete() {
     );
 }
 
+#[test]
+fn debris_piles_up_on_resting_chunks_and_falls_when_they_go() {
+    let mut app = app();
+    let half = Vec3::new(0.5, 0.1, 0.4);
+    let corners: Vec<Vec3> = (0..8)
+        .map(|k| {
+            let s = |b: usize| if k & b == 0 { -1.0 } else { 1.0 };
+            half * Vec3::new(s(1), s(2), s(4))
+        })
+        .collect();
+    let slab = |at: DVec3, asleep: bool| {
+        let mut body = debris::DebrisBody::new(80.0, half, corners.clone(), 0.6);
+        body.asleep = asleep;
+        (
+            Transform::from_translation(at),
+            Debris {
+                mass_kg: 80.0,
+                lifetime: 600.0,
+                ..Default::default()
+            },
+            body,
+        )
+    };
+    // A slab lies on the ground; another drops onto it, a little off center.
+    let below = app.world.spawn(slab(DVec3::new(0.0, 0.1, 0.0), true)).id();
+    let above = app
+        .world
+        .spawn(slab(DVec3::new(0.15, 1.5, 0.1), false))
+        .id();
+    run_secs(&mut app, 2.0);
+    let y = |app: &App| app.world.get::<Transform>(above).unwrap().translation.y;
+    assert!(
+        (y(&app) - 0.3).abs() < 0.03,
+        "lies on the slab below: {}",
+        y(&app)
+    );
+    let body = app.world.get::<debris::DebrisBody>(above).unwrap();
+    assert!(body.asleep && body.on == Some(below), "{:?}", body.on);
+    // Take the bottom one away: the top one drops to the ground.
+    app.world.despawn(below);
+    run_secs(&mut app, 2.0);
+    assert!((y(&app) - 0.1).abs() < 0.03, "on the ground: {}", y(&app));
+}
+
 fn spawn_flat(app: &mut App, wall: DestructibleWall, at: DVec3) -> Entity {
     let t = Transform::from_translation(at).with_rotation(DestructibleWall::flat());
     app.world.spawn((t, GlobalTransform::from(t), wall)).id()

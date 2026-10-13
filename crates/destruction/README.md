@@ -90,7 +90,9 @@ fracture and debris.
   stop you and you can walk along their wall walks.
 - **Debris** uses the physics module when one is installed (physics-contract bodies) and a
   built-in solver otherwise: oriented boxes with friction, bounce and sleep that land on the
-  ground and on voxel rock (not yet on each other), and wake when the rock under them is dug.
+  ground, on voxel rock and on each other, and wake when the rock or the chunk under them
+  goes. A chunk at rest is a box the rest land on (sampled box on box, so a slab lies across
+  the edge of one below rather than tipping through it), so a collapse leaves a heap.
   Boulders cut from the rock itself (a cave-in, a blast's rubble) pass through rock onto the
   ground so they don't catch on the rim of the hole they fall out of. Chips and dust are
   cheap; the oldest debris sinks away past the budget (`max_debris`, `max_chips`).
@@ -232,7 +234,7 @@ still holds it, red), then under both, and the shelter drops into the pit.
   a burning shed charring and coming down, build mode placing snapped pieces and taking them
   down, the hill's cabin going up with its red ghost and its door swung open and its shelter
   standing on the terrace's rock, pieces on voxel rock falling when it is dug out from under
-  them, doors opening away from whoever presses interact and falling with their doorway,
+  them, a slab dropped onto a resting one lying on it and falling when it goes, doors opening away from whoever presses interact and falling with their doorway,
   stairs built up to the cabin's deck and their ramp-shaped colliders, a floor shot through
   from below and blown open from above, hatches smashed in or cut out while steel stops
   bullets and charges, built openings surviving a rebuild, and the breach house's loop).
@@ -246,6 +248,6 @@ still holds it, red), then under both, and the shelter drops into the pit.
 - Breach a reinforced wall with a charge; shoot holes in a wooden barricade; dig and collapse a
   voxel cliff. **Done** (tests above and the showcase).
 
-Next: debris resting on other debris without a physics module, cave-in boulders resting on
+Next: cave-in boulders resting on
 rock ledges (they need side contacts, not just floors), and ladders you can climb (they need
 a climbing contract from movement).
