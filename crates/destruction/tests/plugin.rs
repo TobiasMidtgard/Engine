@@ -409,6 +409,35 @@ fn the_hill_demo_tunnels_caves_in_builds_and_rebuilds() {
         hut_down >= 2,
         "the front of the hut fell ({hut_down} pieces)"
     );
+    // The terrace's shelter stands on the leveled rock: its stone floor is grounded (blue).
+    let hill = app
+        .world
+        .query::<&hill::HillDemo>()
+        .iter(&app.world)
+        .next()
+        .unwrap()
+        .clone();
+    let terrace = hill.builders[hill::Site::Terrace as usize].unwrap();
+    let shelter: Vec<(BuildKind, PieceState, bool)> = app
+        .world
+        .query_filtered::<(&BuiltPiece, &PieceState, &ShowSupport), Without<Debris>>()
+        .iter(&app.world)
+        .filter(|(b, ..)| b.builder == Some(terrace))
+        .map(|(b, s, show)| (b.kind, *s, show.on))
+        .collect();
+    assert_eq!(shelter.len(), 8, "the terrace shelter is up: {shelter:?}");
+    for (kind, state, shown) in &shelter {
+        assert!(shown, "the shelter shows its support");
+        assert!(state.collapse_in.is_none(), "{kind:?} stands: {state:?}");
+        if *kind == BuildKind::StoneFloor {
+            assert_eq!(state.support, state.max_support, "on the rock: {state:?}");
+        } else {
+            assert!(
+                state.support >= 0.7 * state.max_support,
+                "{kind:?} is green: {state:?}"
+            );
+        }
+    }
 
     run(&mut app, 6.5);
     let rebuilt = volume(&mut app);
@@ -417,6 +446,75 @@ fn the_hill_demo_tunnels_caves_in_builds_and_rebuilds() {
         "the loop rebuilt the hill ({start} -> {raised} -> {rebuilt})"
     );
     assert!(built(&mut app) <= 1, "the cabin starts over");
+}
+
+#[test]
+fn pieces_stand_on_voxel_rock_until_it_is_dug_out_from_under_them() {
+    let mut app = app();
+    let rock = VoxelVolume {
+        dims: [16, 8, 16],
+        voxel_size: 0.25,
+        shape: VoxelShape::Solid,
+        topsoil: None,
+        ..VoxelVolume::default()
+    };
+    app.world.spawn((Transform::default(), rock));
+    app.update();
+    // A builder lays a stone slab on the rock's top (2 m up, far above the flat ground).
+    let b = app
+        .world
+        .spawn((Transform::default(), Builder::default()))
+        .id();
+    {
+        let mut builder = app.world.get_mut::<Builder>(b).unwrap();
+        builder.kind = BuildKind::StoneFloor;
+        builder.aim_at(DVec3::new(0.3, 5.0, 0.6), DVec3::new(0.0, 1.0, 0.0));
+    }
+    app.update();
+    let p = app
+        .world
+        .get::<build::BuildPreview>(b)
+        .unwrap()
+        .placement
+        .unwrap();
+    assert!(p.valid() && p.grounded, "rock is ground: {p:?}");
+    app.world.write_message(BuildRequest {
+        builder: b,
+        action: BuildAction::Place,
+    });
+    run_secs(&mut app, 0.3);
+    let slab = app
+        .world
+        .query_filtered::<Entity, With<BuiltPiece>>()
+        .single(&app.world)
+        .unwrap();
+    let state = *app.world.get::<PieceState>(slab).unwrap();
+    assert_eq!(state.support, state.max_support, "{state:?}");
+    // Dig the rock out from under it: it falls.
+    for x in [-0.6, 0.6] {
+        for z in [-0.6, 0.6] {
+            app.world.write_message(TerrainEdit {
+                center: DVec3::new(x, 1.4, z),
+                shape: EditShape::Sphere { radius: 0.9 },
+                op: EditOp::Remove,
+                surface: None,
+                source: None,
+            });
+        }
+    }
+    run_secs(&mut app, 1.0);
+    assert!(
+        app.world.get::<StructuralPiece>(slab).is_none(),
+        "the slab fell into the hole"
+    );
+    // It comes to rest in the hole, on the rock (not through it, on the flat ground under it).
+    run_secs(&mut app, 4.0);
+    let y = app.world.get::<Transform>(slab).unwrap().translation.y;
+    let body = app.world.get::<debris::DebrisBody>(slab).unwrap();
+    assert!(
+        y > 0.45 && y < 2.0 && body.velocity.length() < 0.5,
+        "the slab lies in the hole at y {y:.2}: {body:?}"
+    );
 }
 
 #[test]

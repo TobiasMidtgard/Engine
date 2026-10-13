@@ -143,10 +143,6 @@ impl FromWorld for StepQueries {
     }
 }
 
-/// Boxes with a half extent over this (m) get a warning: Rapier's sweeps and contacts against
-/// them lose centimeters to decimeters (a character on a 500 m box sinks into it).
-const BIG_BOX_HALF: f32 = 50.0;
-
 /// The physics step (`FixedUpdate`, `SimSet::Physics`).
 pub(crate) fn physics_step(world: &mut World, mut q: Local<Option<StepQueries>>) {
     let started = Instant::now();
@@ -284,17 +280,6 @@ pub(crate) fn physics_step(world: &mut World, mut q: Local<Option<StepQueries>>)
             );
             continue;
         };
-        if let Some(b) = shape.as_cuboid()
-            && b.half_extents.max_element() > BIG_BOX_HALF
-        {
-            engine_core::log::warn!(
-                "physics: collider on {e} is a box {} m across; sweeps against boxes this big \
-                 are off by centimeters or more and characters sink into them. Use boxes up to \
-                 {} m, a heightfield or a mesh",
-                2.0 * b.half_extents.max_element(),
-                2.0 * BIG_BOX_HALF
-            );
-        }
         let found = owning_body(world, e);
         let owner = found.filter(|(b, k)| *k != BodyKind::Static && sim.bodies.contains_key(b));
         match owner {
