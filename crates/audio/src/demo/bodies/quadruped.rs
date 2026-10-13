@@ -1,4 +1,5 @@
-//! Four-legged walkers: a brown retriever and a bay horse, and their four-beat walk.
+//! Four-legged walkers: a brown retriever and a bay horse (whose meshes are in `horse.rs`),
+//! and their four-beat walk.
 //!
 //! Each leg is a three-bone chain (upper, lower, cannon) and a foot (paw, or pastern and
 //! hoof). The upper bone starts high in the body where the shoulder blade turns, so the whole
@@ -15,8 +16,7 @@ use super::super::{TrailWalker, trail_point, yaw};
 use super::gait::{self, GROUND, Gait};
 use super::rig::{Xf, aim_down, curve, soft_min, two_bone};
 use super::shape::{
-    Grid, Key, Loft, Paint, bump, ellipsoid, key, lerp, merged, mirror_x, placed, rgb, sheet,
-    smooth,
+    Grid, Key, Loft, Paint, bump, ellipsoid, key, lerp, merged, mirror_x, rgb, smooth,
 };
 use super::textures::{Textures, albedo, normal};
 use super::{Part, Parts};
@@ -37,7 +37,7 @@ pub const fn leg(foot: usize) -> usize {
 pub const PASTERN: [usize; 4] = [25, 26, 27, 28];
 
 /// Is foot `f` a fore foot, and which side is it on?
-fn foot_info(f: usize) -> (bool, f32) {
+pub(super) fn foot_info(f: usize) -> (bool, f32) {
     match f {
         0 => (true, -1.0),
         1 => (false, 1.0),
@@ -63,6 +63,10 @@ pub struct Species {
     /// Upper, lower and cannon bone lengths.
     pub fore: [f32; 3],
     pub hind: [f32; 3],
+    /// How far the fore and hind legs lean forward from straight down in the rest pose
+    /// (radians, the fore leg's upper bone usually leans back): the angle the shoulders and
+    /// thighs are built at, about where they work in the walk.
+    pub lean: [f32; 2],
     /// The foot bone's joint (fetlock) above the ground, and how far behind the footprint
     /// centre.
     pub foot_h: f32,
@@ -124,6 +128,7 @@ pub const DOG: Species = Species {
     hip: Vec3::new(0.066, -0.01, 0.0),
     fore: [0.21, 0.2, 0.08],
     hind: [0.19, 0.2, 0.1],
+    lean: [0.0, 0.0],
     foot_h: 0.045,
     foot_z: 0.016,
     toe: 0.035,
@@ -153,9 +158,10 @@ pub const HORSE: Species = Species {
     rear_h: 1.16,
     hinge: 0.0,
     shoulder: Vec3::new(0.15, 0.26, -0.07),
-    hip: Vec3::new(0.17, -0.02, -0.02),
-    fore: [0.6, 0.4, 0.27],
-    hind: [0.37, 0.36, 0.33],
+    hip: Vec3::new(0.17, 0.08, -0.02),
+    fore: [0.52, 0.48, 0.27],
+    hind: [0.41, 0.4, 0.33],
+    lean: [-0.3, 0.66],
     foot_h: 0.2,
     foot_z: 0.09,
     toe: 0.07,
@@ -168,7 +174,7 @@ pub const HORSE: Species = Species {
     neck_len: 0.74,
     neck_up: 0.55,
     head_down: 0.95,
-    tail_base: Vec3::new(0.0, 0.24, 0.3),
+    tail_base: Vec3::new(0.0, 0.29, 0.28),
     tail_seg: [0.26, 0.34, 0.34],
     tail_droop: 1.05,
     tail_curl: 0.18,
@@ -381,8 +387,8 @@ pub fn pose(w: &TrailWalker, sp: &Species, out: &mut [Xf]) {
     }
 }
 
-/// The rest pose the meshes are built in: standing square on level ground, legs straight
-/// down, neck, head and tail at their rest angles.
+/// The rest pose the meshes are built in: standing square on level ground, each leg straight
+/// and leaning by `lean`, neck, head and tail at their rest angles.
 pub fn rest(sp: &Species, out: &mut [Xf]) {
     let hinge = sp.hinge_rest();
     out[FRONT] = Xf::new(Quat::IDENTITY, hinge);
@@ -409,15 +415,21 @@ pub fn rest(sp: &Species, out: &mut [Xf]) {
     }
     for i in 0..4 {
         let (fore, side) = foot_info(i);
-        let len = if fore { sp.fore } else { sp.hind };
+        let (len, lean) = if fore {
+            (sp.fore, sp.lean[0])
+        } else {
+            (sp.hind, sp.lean[1])
+        };
+        // Turning −Y about X by a positive angle tips it forward (−Z).
+        let r = Quat::from_rotation_x(lean);
         let mut at = leg_joint(sp, fore, side) + hinge;
         let b = leg(i);
         for (k, l) in len.iter().enumerate() {
-            out[b + k] = Xf::new(Quat::IDENTITY, at);
-            at.y -= l;
+            out[b + k] = Xf::new(r, at);
+            at += r * Vec3::NEG_Y * *l;
         }
-        out[b + 3] = Xf::new(Quat::IDENTITY, at);
-        out[PASTERN[i]] = Xf::new(aim_down(sp.coronet, Vec3::NEG_Z), at);
+        out[b + 3] = Xf::new(r, at);
+        out[PASTERN[i]] = Xf::new(r * aim_down(sp.coronet, Vec3::NEG_Z), at);
     }
 }
 
@@ -437,28 +449,28 @@ fn cannon_dir(sp: &Species, fore: bool, joint: Vec3, foot: Vec3, swing: f32, fwd
 // ---------------------------------------------------------------------------------------
 
 /// Cross-section on a forward (−Z) spine: centre (0, y, z), half width, below, above.
-fn fwd(z: f32, y: f32, w: f32, below: f32, above: f32) -> Key {
+pub(super) fn fwd(z: f32, y: f32, w: f32, below: f32, above: f32) -> Key {
     key(Vec3::new(0.0, y, z), w, below).q2(below, above)
 }
 
 /// Cross-section on a downward spine: half width, front and back radii.
-fn down(y: f32, w: f32, front: f32, back: f32) -> Key {
+pub(super) fn down(y: f32, w: f32, front: f32, back: f32) -> Key {
     key(Vec3::new(0.0, y, 0.0), w, back).q2(back, front)
 }
 
 /// A limb segment hanging from its joint: (y, half width, front, back) keys, domed ends.
-fn limb(keys: &[[f32; 4]], cols: usize, spacing: f32) -> Loft {
+pub(super) fn limb(keys: &[[f32; 4]], cols: usize, spacing: f32) -> Loft {
     let k: Vec<Key> = keys.iter().map(|&[y, w, f, b]| down(y, w, f, b)).collect();
     let top = keys[0][1].min(keys[0][2]);
     let end = keys[keys.len() - 1][1];
     Loft::new(k, cols, spacing).caps(top, end)
 }
 
-fn mat(roughness: f32) -> StandardMaterial {
+pub(super) fn mat(roughness: f32) -> StandardMaterial {
     StandardMaterial::color(1.0, 1.0, 1.0).with_roughness(roughness)
 }
 
-fn side_of(s: f32, m: Mesh) -> Mesh {
+pub(super) fn side_of(s: f32, m: Mesh) -> Mesh {
     if s < 0.0 { mirror_x(m) } else { m }
 }
 
@@ -469,11 +481,11 @@ pub const CUT: f32 = 0.5;
 type Fur = fn(Vec3, Vec3) -> (f32, Vec3);
 
 /// Weight rising from 0 at `a` to 1 at `b` along a point's Y, Z.
-fn along_y(a: f32, b: f32) -> impl Fn(Vec3) -> f32 + Copy + 'static {
+pub(super) fn along_y(a: f32, b: f32) -> impl Fn(Vec3) -> f32 + Copy + 'static {
     move |p: Vec3| smooth(a, b, p.y)
 }
 
-fn along_z(a: f32, b: f32) -> impl Fn(Vec3) -> f32 + Copy + 'static {
+pub(super) fn along_z(a: f32, b: f32) -> impl Fn(Vec3) -> f32 + Copy + 'static {
     move |p: Vec3| smooth(a, b, p.z)
 }
 
@@ -931,553 +943,6 @@ fn paw() -> Mesh {
         )
     });
     merged(std::iter::once(body).chain(toes))
-}
-
-// ----- Horse ----------------------------------------------------------------------------
-
-/// Bay coat at absolute height `y`: red-brown, darker over the top, black points below.
-fn bay(v: &Paint, y: f32) -> Vec4 {
-    let coat = rgb(0x743a1b);
-    let top = rgb(0x4d2511);
-    let belly = rgb(0x8c4c26);
-    let mut c = coat.lerp(top, smooth(0.3, 0.95, v.n.y) * 0.55);
-    c = c.lerp(belly, smooth(-0.3, -0.9, v.n.y) * 0.35);
-    let n = (v.p.x * 9.0 + v.p.z * 5.0).sin() * (v.p.y * 7.0 - v.p.z * 3.0).sin();
-    c *= 1.0 + 0.04 * n;
-    c.lerp(BLACK_POINTS, smooth(0.6, 0.47, y))
-}
-
-fn black_points() -> Vec4 {
-    BLACK_POINTS
-}
-
-const BLACK_POINTS: Vec4 = Vec4::new(0.012, 0.009, 0.008, 1.0);
-const HORSE_HAIR: u32 = 0x120c0a;
-
-fn horse_trunk() -> Grid {
-    // (z, centre y, half width, below, above, exponent below, above): buttock to chest.
-    let rows: [[f32; 7]; 12] = [
-        [0.86, 1.2, 0.1, 0.2, 0.16, 2.0, 2.2],
-        [0.78, 1.18, 0.21, 0.32, 0.27, 2.1, 2.3],
-        [0.62, 1.2, 0.27, 0.32, 0.32, 2.1, 2.5],
-        [0.45, 1.2, 0.29, 0.28, 0.32, 2.2, 2.5],
-        [0.3, 1.2, 0.295, 0.3, 0.3, 2.2, 2.4],
-        [0.12, 1.17, 0.31, 0.35, 0.3, 2.1, 2.3],
-        [-0.08, 1.16, 0.32, 0.37, 0.3, 2.1, 2.2],
-        [-0.25, 1.16, 0.31, 0.37, 0.32, 2.1, 2.0],
-        [-0.4, 1.18, 0.28, 0.36, 0.36, 2.1, 1.75],
-        [-0.55, 1.18, 0.25, 0.32, 0.32, 2.1, 1.8],
-        [-0.68, 1.15, 0.22, 0.23, 0.23, 2.0, 2.0],
-        [-0.78, 1.12, 0.16, 0.14, 0.13, 2.0, 2.0],
-    ];
-    let keys = rows
-        .iter()
-        .map(|&[z, y, w, b, a, pb, pa]| fwd(z, y, w, b, a).pow2(pb, pa))
-        .collect();
-    Loft::new(keys, 112, 0.022)
-        .caps(0.06, 0.06)
-        .grid()
-        .deform(|p, c, _, _| {
-            let out = Vec3::new(p.x, p.y - c.y, 0.0).normalize_or(Vec3::X);
-            let ax = p.x.abs();
-            let b = |cx: f32, cy: f32, cz: f32, r: Vec3| {
-                bump(Vec3::new(ax - cx, p.y - cy, p.z - cz), r)
-            };
-            // Quarters over the hips; the shoulder blade sloping down and forward to the
-            // point of shoulder; the chest's two pectorals; hollows behind the elbow and in
-            // front of the stifle; a groove along the croup.
-            let quarter = b(0.24, 1.2, 0.6, Vec3::new(0.1, 0.22, 0.24));
-            let blade = b(0.22, 1.32, -0.5, Vec3::new(0.08, 0.14, 0.09))
-                + b(0.2, 1.12, -0.64, Vec3::new(0.08, 0.12, 0.08));
-            let point = b(0.15, 1.1, -0.77, Vec3::new(0.06, 0.07, 0.06));
-            let chest = b(0.08, 1.0, -0.74, Vec3::new(0.07, 0.1, 0.08));
-            let girth = b(0.26, 0.92, -0.38, Vec3::new(0.08, 0.1, 0.1));
-            let flank = b(0.27, 1.02, 0.3, Vec3::new(0.06, 0.12, 0.09));
-            let groove = bump(
-                Vec3::new(p.x, p.y - 1.52, p.z - 0.55),
-                Vec3::new(0.035, 0.03, 0.28),
-            );
-            p + out * (0.03 * quarter + 0.025 * blade + 0.02 * point - 0.02 * girth - 0.022 * flank)
-                + Vec3::new(0.0, -0.012 * groove, -0.035 * chest)
-        })
-}
-
-fn horse_neck() -> Loft {
-    Loft::new(
-        vec![
-            fwd(0.26, -0.08, 0.17, 0.33, 0.2),
-            fwd(0.08, -0.03, 0.165, 0.29, 0.17),
-            fwd(-0.12, 0.0, 0.15, 0.23, 0.14),
-            fwd(-0.34, 0.01, 0.12, 0.18, 0.115),
-            fwd(-0.54, 0.01, 0.095, 0.145, 0.09),
-            fwd(-0.68, 0.0, 0.08, 0.125, 0.075),
-            fwd(-0.78, -0.01, 0.07, 0.105, 0.065),
-        ]
-        .into_iter()
-        .map(|k| k.pow2(2.0, 2.3))
-        .collect(),
-        80,
-        0.025,
-    )
-    .caps(0.1, 0.05)
-}
-
-pub fn horse_parts(tex: &Textures) -> Vec<Part> {
-    let sp = HORSE;
-    let coat = normal(mat(0.62).with_subsurface(0.15), tex.coat, 0.03, 0.45);
-    let mut hair = mat(0.42).with_subsurface(0.2).with_alpha_mask(0.35);
-    hair.double_sided = true;
-    if let Some(t) = tex.hair_cards {
-        hair = hair.with_base_color_texture(t);
-    }
-    let hoof_mat = normal(mat(0.55), tex.leather, 0.03, 0.3);
-    let dark = mat(0.06);
-    let mut parts = Parts::new("horse");
-    let hinge = sp.hinge_rest();
-    parts.add(
-        FRONT,
-        "body",
-        move || {
-            placed(
-                horse_trunk().mesh(|v: &Paint| bay(v, 1.2)),
-                Quat::IDENTITY,
-                -hinge,
-            )
-        },
-        coat,
-    );
-    // The neck's root stays with the body and its top with the head.
-    let neck_blend = |parts: &mut Parts| {
-        parts.parent(FRONT, along_z(-0.15, 0.15)).child(
-            HEAD,
-            along_z(-HORSE.neck_len + 0.08, -HORSE.neck_len - 0.06),
-        );
-    };
-    neck_blend(&mut parts);
-    parts.add(
-        NECK,
-        "neck",
-        || {
-            horse_neck()
-                .grid()
-                .deform(|p, c, _, _| {
-                    // The crest arches up along the top line.
-                    let crest = smooth(0.0, 0.06, p.y - c.y)
-                        * smooth(0.15, -0.3, p.z)
-                        * smooth(-0.8, -0.45, p.z);
-                    p + Vec3::new(0.0, 0.03 * crest, 0.0)
-                })
-                .mesh(|v: &Paint| bay(v, 1.6))
-        },
-        coat,
-    );
-    neck_blend(&mut parts);
-    parts.add(NECK, "mane", mane, hair);
-    parts
-        .parent(NECK, along_z(-0.06, 0.08))
-        .add(HEAD, "head", horse_head, coat);
-    parts.add(HEAD, "forelock", forelock, hair);
-    parts.add(HEAD, "eyes", horse_eyes, dark);
-    for (i, s) in [-1.0f32, 1.0].into_iter().enumerate() {
-        parts.add(
-            EAR[i],
-            &format!("ear{i}"),
-            move || {
-                // A pointed leaf, cupped forward, darker inside and at the rim.
-                let m = Loft::new(
-                    vec![
-                        key(Vec3::new(0.0, -0.01, 0.0), 0.028, 0.03).q2(0.03, 0.022),
-                        key(Vec3::new(0.0, 0.05, 0.002), 0.034, 0.026).q2(0.022, 0.026),
-                        key(Vec3::new(0.0, 0.11, 0.01), 0.022, 0.016),
-                        key(Vec3::new(0.0, 0.14, 0.016), 0.008, 0.007),
-                    ],
-                    36,
-                    0.01,
-                )
-                .caps(0.01, 0.012)
-                .grid()
-                .deform(|p, c, _, _| {
-                    let front = smooth(0.0, -0.012, p.z - c.z);
-                    let mid = (1.0 - (p.x / 0.03).powi(2)).max(0.0);
-                    let along = smooth(0.0, 0.03, p.y) * smooth(0.14, 0.09, p.y);
-                    p + Vec3::new(0.0, 0.0, 0.032 * front * mid * along)
-                })
-                .mesh(|v: &Paint| {
-                    let rim = smooth(0.1, 0.15, v.p.y);
-                    let inside = smooth(-0.1, -0.6, v.n.z) * smooth(0.02, 0.0, v.p.x.abs() - 0.012);
-                    bay(v, 1.8)
-                        .lerp(rgb(0x2a1a12), inside * 0.8)
-                        .lerp(rgb(0x1a120e), rim)
-                });
-                side_of(
-                    s,
-                    placed(
-                        m,
-                        Quat::from_rotation_x(0.55) * Quat::from_rotation_z(-0.22),
-                        Vec3::ZERO,
-                    ),
-                )
-            },
-            coat,
-        );
-    }
-    // Tail: the dock, then a long fall of black hair.
-    parts
-        .parent(REAR, along_z(0.06, -0.04))
-        .child(
-            TAIL[1],
-            along_z(sp.tail_seg[0] - 0.04, sp.tail_seg[0] + 0.04),
-        )
-        .add(
-            TAIL[0],
-            "dock",
-            || {
-                Loft::new(
-                    vec![
-                        key(Vec3::new(0.0, 0.0, -0.04), 0.065, 0.07),
-                        key(Vec3::new(0.0, 0.0, 0.12), 0.055, 0.06),
-                        key(Vec3::new(0.0, 0.0, HORSE.tail_seg[0] + 0.03), 0.045, 0.05),
-                    ],
-                    32,
-                    0.02,
-                )
-                .caps(0.05, 0.04)
-                .mesh(|v: &Paint| bay(v, 1.5).lerp(rgb(HORSE_HAIR), smooth(0.02, 0.16, v.p.z)))
-            },
-            coat,
-        );
-    for k in 1..3 {
-        parts.parent(TAIL[k - 1], along_z(0.06, -0.02));
-        if k == 1 {
-            let len = sp.tail_seg[1];
-            parts.child(TAIL[2], along_z(len - 0.05, len + 0.05));
-        }
-        parts.add(TAIL[k], &format!("tail{k}"), move || tail_hair(k), hair);
-    }
-    for (f, pastern_bone) in PASTERN.into_iter().enumerate() {
-        let (fore, s) = foot_info(f);
-        let b = leg(f);
-        let lens = if fore { sp.fore } else { sp.hind };
-        let segs: [Vec<[f32; 4]>; 3] = if fore {
-            [
-                // From where the shoulder blade turns (hidden) down to the elbow.
-                vec![
-                    [0.0, 0.025, 0.035, 0.035],
-                    [-0.15, 0.055, 0.07, 0.08],
-                    [-0.35, 0.07, 0.08, 0.09],
-                    [-0.5, 0.065, 0.075, 0.1],
-                    [-lens[0], 0.065, 0.075, 0.09],
-                ],
-                vec![
-                    [0.03, 0.07, 0.075, 0.08],
-                    [-0.06, 0.068, 0.075, 0.07],
-                    [-0.25, 0.048, 0.048, 0.044],
-                    [-0.34, 0.05, 0.048, 0.046],
-                    [-lens[1], 0.048, 0.044, 0.05],
-                ],
-                vec![
-                    [0.0, 0.045, 0.04, 0.05],
-                    [-0.06, 0.037, 0.032, 0.042],
-                    [-0.2, 0.035, 0.032, 0.045],
-                    [-lens[2], 0.045, 0.042, 0.06],
-                ],
-            ]
-        } else {
-            [
-                // Hip joint to stifle: the thigh, its top hidden in the quarters.
-                vec![
-                    [0.06, 0.05, 0.06, 0.07],
-                    [-0.05, 0.1, 0.14, 0.17],
-                    [-0.2, 0.11, 0.14, 0.18],
-                    [-0.32, 0.095, 0.1, 0.13],
-                    [-lens[0], 0.085, 0.08, 0.1],
-                ],
-                vec![
-                    [0.02, 0.085, 0.08, 0.1],
-                    [-0.08, 0.075, 0.06, 0.1],
-                    [-0.25, 0.05, 0.045, 0.06],
-                    [-lens[1], 0.055, 0.05, 0.075],
-                ],
-                vec![
-                    [0.0, 0.05, 0.05, 0.065],
-                    [-0.08, 0.04, 0.035, 0.045],
-                    [-0.27, 0.037, 0.034, 0.046],
-                    [-lens[2], 0.045, 0.042, 0.06],
-                ],
-            ]
-        };
-        for (k, seg) in segs.into_iter().enumerate() {
-            let len = lens[k];
-            // The top of the leg stays with the body (the shoulder and the quarters); the
-            // elbows, knees, stifles, hocks and fetlocks bend smoothly.
-            if k == 0 {
-                let (body, depth) = if fore { (FRONT, -0.35) } else { (REAR, -0.22) };
-                parts.parent(body, along_y(depth, 0.0));
-            } else {
-                parts.parent(b + k - 1, along_y(-0.06, 0.06));
-            }
-            let end = [0.06, 0.05, 0.035][k];
-            let below = if k == 2 { pastern_bone } else { b + k + 1 };
-            parts.child(below, along_y(-len + end, -len - end));
-            parts.add(
-                b + k,
-                &format!("leg{f}_{k}"),
-                move || {
-                    side_of(
-                        s,
-                        limb(&seg, 40, 0.02).mesh(move |v: &Paint| match (fore, k) {
-                            // Black from just above the knee or hock down.
-                            (true, 1) => bay(v, 0.62 + (v.p.y + len) * 0.9),
-                            (false, 1) => bay(v, 0.58 + (v.p.y + len) * 0.6),
-                            (_, 2) => black_points(),
-                            _ => bay(v, 1.0),
-                        }),
-                    )
-                },
-                coat,
-            );
-        }
-        parts.parent(b + 2, along_y(-0.03, 0.03)).add(
-            pastern_bone,
-            &format!("pastern{f}"),
-            move || side_of(s, pastern()),
-            coat,
-        );
-        parts.add(
-            b + 3,
-            &format!("hoof{f}"),
-            move || side_of(s, hoof()),
-            hoof_mat,
-        );
-    }
-    parts.list
-}
-
-fn horse_head_loft() -> Loft {
-    // Poll to muzzle along −Z (head frame at the poll, +Y the forehead): deep round jowls
-    // under a broad flat forehead, a straight face narrowing to the nose, and the muzzle
-    // widening again round the nostrils.
-    let keys = vec![
-        fwd(0.04, -0.05, 0.07, 0.08, 0.05).pow2(2.2, 2.4),
-        fwd(-0.03, -0.085, 0.092, 0.15, 0.072).pow2(2.2, 2.6),
-        fwd(-0.12, -0.1, 0.104, 0.16, 0.085).pow2(2.3, 2.8),
-        fwd(-0.2, -0.1, 0.09, 0.12, 0.08).pow2(2.3, 2.8),
-        fwd(-0.3, -0.095, 0.072, 0.085, 0.075).pow2(2.3, 2.7),
-        fwd(-0.42, -0.09, 0.063, 0.075, 0.068).pow2(2.2, 2.6),
-        fwd(-0.52, -0.092, 0.07, 0.074, 0.064).pow2(2.2, 2.5),
-        fwd(-0.59, -0.1, 0.064, 0.066, 0.055).pow2(2.2, 2.4),
-        fwd(-0.625, -0.105, 0.05, 0.052, 0.042).pow2(2.2, 2.3),
-    ];
-    Loft::new(keys, 96, 0.01).caps(0.05, 0.028)
-}
-
-/// Where the horse's eyes sit on its head (right side).
-const HORSE_EYE: Vec3 = Vec3::new(0.086, -0.045, -0.13);
-
-fn horse_head() -> Mesh {
-    horse_head_loft()
-        .grid()
-        .deform(|p, _, _, _| {
-            let ax = p.x.abs();
-            let side = Vec3::new(p.x.signum(), 0.0, 0.0);
-            let b = |cx: f32, cy: f32, cz: f32, r: Vec3| {
-                bump(Vec3::new(ax - cx, p.y - cy, p.z - cz), r)
-            };
-            // The flat round cheeks over the back of the jaw, the facial crest running down
-            // from under the eye, the bony orbit over the eye and the hollow above it.
-            let cheek = b(0.09, -0.17, -0.08, Vec3::new(0.04, 0.07, 0.08));
-            let crest = b(0.085, -0.085, -0.25, Vec3::new(0.02, 0.016, 0.08));
-            let orbit = b(0.09, -0.025, -0.13, Vec3::new(0.025, 0.018, 0.035));
-            let hollow = b(0.075, -0.0, -0.06, Vec3::new(0.03, 0.025, 0.03));
-            // Nostrils: flared rims with deep openings; the soft upper lip and the chin, and
-            // the groove between the jaw and the chin.
-            let rim = b(0.058, -0.07, -0.545, Vec3::new(0.02, 0.03, 0.035));
-            let nostril = b(0.062, -0.075, -0.562, Vec3::new(0.012, 0.018, 0.016));
-            let lip = bump(
-                Vec3::new(p.x, p.y + 0.13, p.z + 0.6),
-                Vec3::new(0.05, 0.03, 0.03),
-            );
-            let chin = bump(
-                Vec3::new(p.x, p.y + 0.165, p.z + 0.545),
-                Vec3::new(0.035, 0.02, 0.035),
-            );
-            let groove = bump(
-                Vec3::new(p.x, p.y + 0.17, p.z + 0.46),
-                Vec3::new(0.05, 0.03, 0.03),
-            );
-            let mouth = b(0.05, -0.132, -0.58, Vec3::new(0.03, 0.004, 0.05));
-            p + side
-                * (0.012 * cheek + 0.008 * crest + 0.01 * orbit - 0.008 * hollow + 0.014 * rim
-                    - 0.022 * nostril
-                    - 0.006 * mouth)
-                + Vec3::new(
-                    0.0,
-                    0.006 * orbit - 0.012 * chin + 0.012 * groove,
-                    -0.008 * lip,
-                )
-        })
-        .mesh(|v: &Paint| {
-            let mut c = bay(v, 1.8);
-            // A dark, soft muzzle with darker nostrils and mouth, and bare darker skin
-            // round the eyes.
-            c = c.lerp(rgb(0x1e1512), smooth(-0.45, -0.55, v.p.z) * 0.85);
-            let ax = v.p.x.abs();
-            let nostril = bump(
-                Vec3::new(ax - 0.06, v.p.y + 0.075, v.p.z + 0.562),
-                Vec3::new(0.012, 0.016, 0.014),
-            );
-            let mouth = bump(
-                Vec3::new(ax - 0.045, v.p.y + 0.132, v.p.z + 0.58),
-                Vec3::new(0.02, 0.004, 0.05),
-            );
-            let around_eye = bump(
-                Vec3::new(ax - HORSE_EYE.x, v.p.y - HORSE_EYE.y, v.p.z - HORSE_EYE.z),
-                Vec3::new(0.02, 0.024, 0.03),
-            );
-            c = c.lerp(rgb(0x2a1a12), around_eye * 0.6);
-            c.lerp(rgb(0x050404), (nostril + mouth).min(1.0))
-        })
-}
-
-/// A horse's eye: a dark brown, glossy globe with a hint of the iris.
-fn horse_eyes() -> Mesh {
-    merged([-1.0f32, 1.0].map(|s| {
-        ellipsoid(
-            HORSE_EYE * Vec3::new(s, 1.0, 1.0),
-            Vec3::new(0.014, 0.017, 0.022),
-            28,
-            move |v: &Paint| {
-                // Looking out to the side and a little forward.
-                let f = v.n.dot(Vec3::new(s, 0.0, -0.35).normalize());
-                rgb(0x22140c).lerp(rgb(0x070505), smooth(0.7, 0.9, f))
-            },
-        )
-    }))
-}
-
-fn hair_color(s: f32, t: f32) -> Vec4 {
-    let n = (s * 41.0).sin() * (t * 7.0 + s * 13.0).sin();
-    rgb(HORSE_HAIR) * (1.0 + 0.25 * n)
-}
-
-/// The mane: layered hair cards falling from the crest down the right side of the neck.
-fn mane() -> Mesh {
-    let loft = horse_neck();
-    let neck_len = 1.04;
-    let cards = [(0.006, 0.95, 0.0), (0.016, 1.15, 0.33), (0.026, 1.0, 0.71)];
-    merged(cards.iter().map(|&(off, span, phase)| {
-        sheet(
-            40,
-            8,
-            |s, t| {
-                let s = lerp(0.12, 0.985, s);
-                let k = loft.at(s);
-                let tangent = (loft.at(s + 0.01).c - loft.at(s - 0.01).c).normalize();
-                let a = -PI * 0.5 + 0.08 + span * t;
-                let p = loft.ring_point(&k, tangent, a);
-                let crest = smooth(0.0, 0.06, p.y - k.c.y)
-                    * smooth(0.15, -0.3, p.z)
-                    * smooth(-0.8, -0.45, p.z);
-                let out = (p - k.c).normalize_or(Vec3::Y);
-                p + Vec3::Y * (0.03 * crest) + out * (off + 0.012 * t)
-            },
-            |s, t| Vec2::new(s * neck_len / 0.11 + phase, t * 0.97),
-            hair_color,
-        )
-    }))
-}
-
-/// The forelock: two cards over the forehead between the ears.
-fn forelock() -> Mesh {
-    merged([(0.012, 0.0), (0.02, 0.5)].map(|(off, phase)| {
-        sheet(
-            12,
-            6,
-            move |s, t| {
-                let x = lerp(-0.045, 0.045, t) * (1.0 - 0.35 * s);
-                let z = lerp(0.03, -0.2, s);
-                Vec3::new(x, off + 0.02 * (1.0 - s) - 0.014 - 3.0 * x * x, z)
-            },
-            move |s, t| Vec2::new(t * 0.8 + phase, s * 0.85),
-            hair_color,
-        )
-    }))
-}
-
-/// Tail segment `k` (1 or 2): a dark core and three crossed hair cards that fan out down
-/// the fall.
-fn tail_hair(k: usize) -> Mesh {
-    let len = HORSE.tail_seg[k];
-    let (w0, w1) = if k == 1 { (0.07, 0.12) } else { (0.12, 0.16) };
-    let (v0, v1) = if k == 1 { (0.0, 0.48) } else { (0.48, 0.97) };
-    let core = Loft::new(
-        vec![
-            key(Vec3::new(0.0, 0.0, -0.03), 0.045, 0.045),
-            key(Vec3::new(0.0, 0.0, len * 0.6), 0.045, 0.045),
-            key(
-                Vec3::new(0.0, 0.0, len + 0.02),
-                if k == 1 { 0.04 } else { 0.012 },
-                0.03,
-            ),
-        ],
-        20,
-        0.04,
-    )
-    .caps(0.02, 0.03)
-    .mesh(|v: &Paint| hair_color(v.p.z, v.p.x) * 0.8);
-    let cards = (0..3).map(|i| {
-        let rot = Quat::from_rotation_z(i as f32 * PI / 3.0 + 0.2);
-        sheet(
-            16,
-            6,
-            move |s, t| {
-                let w = lerp(w0, w1, s);
-                let z = lerp(-0.02, len + 0.02, s);
-                rot * Vec3::new(lerp(-w, w, t), 0.01 * (t * PI).sin(), z)
-            },
-            move |s, t| Vec2::new(t * 1.4 + i as f32 * 0.37, lerp(v0, v1, s)),
-            hair_color,
-        )
-    });
-    merged(std::iter::once(core).chain(cards))
-}
-
-/// Pastern from the fetlock down to the coronet along its bone (−Y).
-fn pastern() -> Mesh {
-    let len = HORSE.coronet.length();
-    limb(
-        &[
-            [0.03, 0.044, 0.04, 0.055],
-            [0.0, 0.046, 0.045, 0.058],
-            [-len * 0.5, 0.039, 0.038, 0.04],
-            [-len, 0.047, 0.047, 0.045],
-        ],
-        36,
-        0.012,
-    )
-    .mesh(|_| black_points())
-}
-
-/// Hoof: a truncated cone, wider at the ground, the toe sloping forward.
-fn hoof() -> Mesh {
-    let sp = HORSE;
-    let floor = -sp.foot_h;
-    let c = sp.coronet;
-    let cz = -sp.foot_z;
-    // Keys run downward: +q points back.
-    let keys = vec![
-        key(Vec3::new(0.0, c.y + 0.012, c.z + 0.004), 0.048, 0.04).q2(0.04, 0.046),
-        key(Vec3::new(0.0, c.y - 0.01, c.z - 0.002), 0.054, 0.046).q2(0.046, 0.054),
-        key(Vec3::new(0.0, floor + 0.04, cz + 0.004), 0.06, 0.052).q2(0.052, 0.065),
-        key(Vec3::new(0.0, floor + 0.004, cz - 0.004), 0.064, 0.055).q2(0.055, 0.072),
-    ];
-    Loft::new(keys, 40, 0.01)
-        .caps(0.02, 0.004)
-        .mesh(move |v: &Paint| {
-            let ridges = 0.93 + 0.07 * (v.p.y * 240.0).sin();
-            let band = smooth(c.y + 0.0, c.y + 0.012, v.p.y);
-            (rgb(0x2b2622) * ridges).lerp(black_points(), band)
-        })
 }
 
 #[cfg(test)]

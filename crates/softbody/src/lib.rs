@@ -6,6 +6,7 @@ pub mod character;
 pub mod cloth;
 pub mod collide;
 pub mod demo;
+pub mod gpu_cloth;
 pub mod hair;
 pub mod render;
 pub mod rope;
@@ -20,6 +21,7 @@ use engine_render::RenderAppExt;
 pub use body::{SoftBodySim, SoftKind};
 pub use character::{BoneCapsule, BoneColliders};
 pub use cloth::{Cloth, ClothPins};
+pub use gpu_cloth::GpuClothProbe;
 pub use hair::{FurZone, HairEmitter, HairGroom, HairStyle, MeshSkin, MeshSkins};
 pub use rope::{Beads, BridgePlank, Rope, RopeBridge, RopeEnd, SoftLoad};
 pub use settings::{Pattern, SimSettings, SoftBodyConfig, SoftMaterial};
@@ -46,6 +48,7 @@ impl Plugin for SoftBodyPlugin {
         app.init_resource::<SoftBodyConfig>()
             .init_resource::<systems::ColliderWorld>()
             .init_resource::<systems::LoadList>()
+            .init_resource::<gpu_cloth::GpuClothShift>()
             .register_resource::<SoftBodyConfig>(
                 "Soft-body quality: enabled, lod_distance and freeze_distance (m from the focus), quality (substep multiplier).",
             )
@@ -91,7 +94,8 @@ impl Plugin for SoftBodyPlugin {
             )
             .add_systems(
                 PostUpdate,
-                systems::follow_world_shift.in_set(engine_world::WorldShiftSet::Apply),
+                (systems::follow_world_shift, gpu_cloth::follow_world_shift)
+                    .in_set(engine_world::WorldShiftSet::Apply),
             )
             .add_systems(
                 PostUpdate,

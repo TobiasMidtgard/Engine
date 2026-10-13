@@ -3,7 +3,7 @@
 //! [`spawn_demo`] builds it around a center point (the showcase calls it at the yard zone):
 //!
 //! - **Flags** on tall poles with printed patterns, streaming in the world wind, and a field
-//!   of 56 pennants (cheap enough to have many).
+//!   of 56 pennants simulated on the GPU (`SimSettings::gpu`).
 //! - **Curtains**: one shot full of holes by a turret, one set on fire that burns away and
 //!   comes back.
 //! - **Self-collision**: a wool blanket dropped over a stone ball every few seconds, heaping
@@ -282,10 +282,12 @@ fn flag_field(commands: &mut Commands, corner: DVec3) {
                     0,
                 )
                 .with_sheen(0.2);
+            // Simulated on the GPU: one dispatch for the whole field, at twice the CPU
+            // pennants' detail.
             let mut spec = Cloth::flag([1.0, 0.6], material);
-            spec.resolution = [10, 6];
+            spec.resolution = [20, 12];
             spec.sim.wind_scale = 2.4;
-            spec.sim.substeps = 8;
+            spec.sim.gpu = true;
             commands.spawn((
                 Name::new(format!("Pennant {}", row * 7 + col + 1)),
                 at(base + DVec3::new(0.03, 2.35, 0.0)),

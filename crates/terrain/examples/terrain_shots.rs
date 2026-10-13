@@ -145,6 +145,18 @@ fn views() -> Vec<View> {
             sun: (230.0, 32.0),
             painted: true,
             ground: Ground::Snow,
+            exposure: Exposure::Manual { ev100: 15.0 },
+            ..BASE
+        },
+        View {
+            name: "snow_eye",
+            eye: DVec3::new(25.0, 0.0, -12.0),
+            target: DVec3::new(-15.0, -1.5, 22.0),
+            above_ground: Some(1.7),
+            sun: (230.0, 16.0),
+            exposure: Exposure::Manual { ev100: 15.0 },
+            painted: true,
+            ground: Ground::Snow,
             ..BASE
         },
         View {
