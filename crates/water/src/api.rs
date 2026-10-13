@@ -1,6 +1,6 @@
 //! `water.*` functions for the AI bridge, console and scripts.
 
-use engine_core::math::{DVec2, DVec3, Vec3};
+use engine_core::math::{DVec2, DVec3, EulerRot, Vec3};
 use engine_core::prelude::*;
 use serde_json::{Value, json};
 
@@ -172,8 +172,8 @@ pub fn register(app: &mut App) {
             let radius = f32_arg(&args, "radius", 1.0).max(0.1);
             let mut q = world.query::<(Entity, &GlobalTransform, &mut FlowRegion)>();
             for (e, gt, mut region) in q.iter_mut(world) {
-                let o = gt.translation();
-                let local = DVec2::new(at.x - o.x, at.z - o.z);
+                let yaw = gt.rotation().to_euler(EulerRot::YXZ).0;
+                let local = crate::flow::grid_local(gt.translation(), yaw, at);
                 let size = DVec2::new(region.cells[0] as f64, region.cells[1] as f64)
                     * region.cell_m as f64;
                 if local.x >= 0.0 && local.y >= 0.0 && local.x < size.x && local.y < size.y {

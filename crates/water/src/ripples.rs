@@ -9,7 +9,8 @@
 //! heights feed buoyancy and the `Water` query (boats rock on each other's wakes), and the
 //! renderer uploads them as a texture each frame.
 
-use engine_core::math::{DVec2, Vec2};
+use engine_core::math::{DVec2, DVec3, Vec2};
+use engine_world::WorldShift;
 
 /// Cells at the grid edge where waves are absorbed instead of reflected.
 const SPONGE: usize = 10;
@@ -282,6 +283,59 @@ impl RippleField {
             + (at(&self.h, i + 1, j + 1) - at(&self.h, i + 1, j)) * fx)
             / self.cell;
         Some((h, Vec2::new(gx, gz), foam))
+    }
+
+    /// Follow a world shift. A plain move keeps every cell and moves the corner. A turn can't
+    /// turn the grid (it stays square to the world axes): it is resampled around the same
+    /// place, so ripples already running carry on where they were.
+    pub fn shift(&mut self, s: &WorldShift) {
+        let to_xz = |p: DVec3| DVec2::new(p.x, p.z);
+        let moved = |p: DVec2| to_xz(s.point(DVec3::new(p.x, 0.0, p.y)));
+        for d in &mut self.pending {
+            d.pos = moved(d.pos);
+        }
+        self.version += 1;
+        if s.is_translation_only() {
+            self.origin += to_xz(s.translation);
+            return;
+        }
+        let old = self.clone();
+        let half = DVec2::splat(self.size() * 0.5);
+        self.origin = moved(old.origin + half) - half;
+        let n = self.n;
+        for j in 0..n {
+            for i in 0..n {
+                let c = self.cell_center(i, j);
+                let back = s.inverse_point(DVec3::new(c.x, 0.0, c.y));
+                let k = j * n + i;
+                let at = DVec2::new(back.x, back.z);
+                self.h[k] = old.bilinear(&old.h, at);
+                self.prev[k] = old.bilinear(&old.prev, at);
+                self.foam[k] = old.bilinear(&old.foam, at);
+                // Speeds follow the depth there; rebuilt properly on the next step.
+                let g = ((at - old.origin) / old.cell as f64).floor();
+                self.speed2[k] = if g.x >= 0.0 && g.y >= 0.0 && g.x < n as f64 && g.y < n as f64 {
+                    old.speed2[g.y as usize * n + g.x as usize]
+                } else {
+                    0.0
+                };
+            }
+        }
+    }
+
+    /// `buf` (one of the grids) at world x/z, bilinear; 0 outside.
+    fn bilinear(&self, buf: &[f32], p: DVec2) -> f32 {
+        let g = (p - self.origin) / self.cell as f64 - DVec2::splat(0.5);
+        let n = self.n as f64;
+        if g.x < 0.0 || g.y < 0.0 || g.x >= n - 1.0 || g.y >= n - 1.0 {
+            return 0.0;
+        }
+        let (i, j) = (g.x as usize, g.y as usize);
+        let (fx, fz) = ((g.x - i as f64) as f32, (g.y - j as f64) as f32);
+        let at = |ii: usize, jj: usize| buf[jj * self.n + ii];
+        let a = at(i, j) + (at(i + 1, j) - at(i, j)) * fx;
+        let b = at(i, j + 1) + (at(i + 1, j + 1) - at(i, j + 1)) * fx;
+        a + (b - a) * fz
     }
 
     /// Total wave energy (Σ h²), for tests and diagnostics.

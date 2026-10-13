@@ -56,7 +56,7 @@ struct WaterUniform {
 
 struct FlowGpu {
     origin: vec4<f32>,  // corner rel camera x, base y, z, cell (m)
-    dims: vec4<f32>,    // cells x, z, unused, unused
+    dims: vec4<f32>,    // cells x, z, cos and sin of the grid's yaw
     absorb: vec4<f32>,
     scatter: vec4<f32>,
     look: vec4<f32>,
@@ -608,10 +608,15 @@ fn vs_flow(@builtin(vertex_index) vid: u32) -> FlowOut {
     let hr = select(s.r, r.r, r.g > 0.003);
     let hb = select(s.r, b.r, b.g > 0.003);
     let ht = select(s.r, t.r, t.g > 0.003);
+    // Grid axes to world axes: the grid turns with its entity's yaw.
+    let c = flow.dims.z;
+    let sn = flow.dims.w;
+    let turn = mat2x2<f32>(vec2<f32>(c, -sn), vec2<f32>(sn, c));
     var out: FlowOut;
-    out.normal = normalize(vec3<f32>(hl - hr, 2.0 * cell, hb - ht));
-    out.rel = vec3<f32>(flow.origin.x + (f32(i) + 0.5) * cell, flow.origin.y + y,
-                        flow.origin.z + (f32(j) + 0.5) * cell);
+    let gn = vec3<f32>(hl - hr, 2.0 * cell, hb - ht);
+    out.normal = normalize(vec3<f32>(turn * gn.xz, gn.y).xzy);
+    let along = turn * ((vec2<f32>(f32(i), f32(j)) + 0.5) * cell);
+    out.rel = vec3<f32>(flow.origin.x + along.x, flow.origin.y + y, flow.origin.z + along.y);
     out.clip = frame.view_proj * vec4<f32>(out.rel, 1.0);
     out.depth = s.g;
     out.vel = s.ba;
@@ -620,6 +625,12 @@ fn vs_flow(@builtin(vertex_index) vid: u32) -> FlowOut {
 
 @fragment
 fn fs_flow(in: FlowOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f32> {
+    // Where the surface drops more than its width in one cell, and at least half a meter
+    // (`FALL_SLOPE`, `FALL_LEAST_DROP`), the water falls free: the curtain (`fs_falls`) draws
+    // it, not the grid's steep triangles.
+    let face = normalize(cross(dpdx(in.rel), dpdy(in.rel)));
+    let tan_fall = max(1.0, 0.5 / flow.origin.w);
+    if (abs(face.y) < inverseSqrt(1.0 + tan_fall * tan_fall) * 1.02) { discard; }
     // Triangles touching water are drawn whole: the terrain hides the parts under it, so
     // the waterline follows the ground rather than the grid.
     if (in.depth < 0.0005) { discard; }
@@ -654,6 +665,167 @@ fn fs_flow(in: FlowOut, @builtin(front_facing) front: bool) -> @location(0) vec4
         color = shade_underside(in.rel, n, look, in.clip);
     }
     return vec4<f32>(color, 1.0);
+}
+
+// ---------------------------------------------------------------- falling water
+// A curtain arcs out over each lip (`FlowSim::lips`) on its free-fall path down to the water or
+// ground below. It leaves the lip as a glassy sheet and breaks up into aerated white streaks as
+// it speeds up; the streak pattern rides down with the water, so it stretches as it falls.
+struct FallIn {
+    @location(0) rel_q: vec4<f32>,       // camera-relative position, m²/s over the lip
+    @location(1) normal_frac: vec4<f32>, // outward normal, 0 at the lip .. 1 at the foot
+    @location(2) across_side: vec4<f32>, // direction across the curtain, strip edge (-1, 1)
+    @location(3) uv_speed: vec4<f32>,    // meters across, seconds since the lip, lip speed
+};
+
+struct FallOut {
+    @builtin(position) clip: vec4<f32>,
+    @location(0) rel: vec3<f32>,
+    @location(1) normal: vec3<f32>,
+    @location(2) across: vec3<f32>,
+    @location(3) uv: vec2<f32>,
+    @location(4) look: vec4<f32>,        // q, frac, side, lip speed
+    @location(5) @interpolate(flat) kind: f32, // 0 curtain, 1 spray cloud
+};
+
+@vertex
+fn vs_falls(v: FallIn) -> FallOut {
+    var out: FallOut;
+    out.rel = v.rel_q.xyz;
+    out.clip = frame.view_proj * vec4<f32>(out.rel, 1.0);
+    out.normal = v.normal_frac.xyz;
+    out.across = v.across_side.xyz;
+    out.uv = v.uv_speed.xy;
+    out.look = vec4<f32>(v.rel_q.w, v.normal_frac.w, v.across_side.w, v.uv_speed.z);
+    out.kind = v.uv_speed.w;
+    return out;
+}
+
+// The cloud of spray where a fall lands: a camera-facing puff (corner -1..1 in `normal.xy`,
+// radius `normal.z`, density `look.y`, a seed in `uv.x`) billowing up from the pool.
+fn fall_mist(in: FallOut) -> vec4<f32> {
+    let c = in.normal.xy;
+    let r = length(c);
+    if (r >= 1.0) { discard; }
+    let t = time_s();
+    let p = c * 1.6 + vec2<f32>(in.uv.x, 0.0);
+    let billow = fbm2(p + vec2<f32>(0.0, -t * 0.45), 4) / 0.9375;
+    let wisps = fbm2(p * 2.3 + vec2<f32>(5.3, -t * 0.9), 3) / 0.875;
+    // Densest where it boils off the pool, thinning out as it rises and spreads.
+    let shape = (1.0 - smoothstep(0.1, 1.0, r)) * (1.0 - 0.8 * smoothstep(-0.1, 0.9, c.y));
+    var alpha = shape * smoothstep(0.15, 0.75, billow * 0.65 + wisps * 0.35) * in.look.y;
+    // Soft against the rock behind, the pool and the bank.
+    let size = vec2<f32>(textureDimensions(scene_color));
+    let pix = vec2<i32>(clamp(in.clip.xy, vec2<f32>(0.0), size - 1.0));
+    let z_scene = linear_depth(textureLoad(scene_depth, pix, 0));
+    alpha *= saturate((z_scene - max(view_depth(in.rel), 1e-3)) / (in.normal.z * 0.35));
+    if (alpha < 0.003) { discard; }
+    // Fine droplets: bright toward the sun, lit by the open sky in front of the cliff.
+    let v = -in.rel / max(length(in.rel), 1e-4);
+    let l = frame.sun_dir.xyz;
+    let sun = frame.sun_color.rgb * sun_transmittance(in.rel) * shadow_factor(in.rel, l);
+    let phase = 0.3 + 1.6 * pow(saturate(dot(-v, l)), 6.0);
+    let out_dir = normalize(vec3<f32>(v.x, 0.0, v.z) + vec3<f32>(0.0, 1e-3, 0.0));
+    let n = normalize(out_dir + vec3<f32>(0.0, 0.7, 0.0));
+    let sky = sky_ambient(n) * sky_visibility(in.rel, n) * PI;
+    let color = apply_fog(pre_expose(0.9 * (sun * phase + sky) * INV_PI), in.rel);
+    return vec4<f32>(color * alpha, alpha);
+}
+
+// Streaks of the curtain at `u` meters across for water that left the lip at time `t0`:
+// fingers about a meter apart that come and go as the flow over the lip pulses, with finer
+// threads in them (`fine` fades those out where a pixel is wider than a thread), 0..1.
+fn fall_streaks(u: f32, t0: f32, fine: f32) -> f32 {
+    let broad = fbm2(vec2<f32>(u * 1.6, t0 * 2.2), 3) / 0.875;
+    let mid = value_noise2(vec2<f32>(u * 5.0 + 11.3, t0 * 5.0));
+    let thread = value_noise2(vec2<f32>(u * 17.0 + 3.7, t0 * 11.0));
+    let raw = broad * 0.6 + mid * 0.4;
+    return smoothstep(0.25, 0.75, mix(raw, raw * 0.7 + thread * 0.3, fine));
+}
+
+@fragment
+fn fs_falls(in: FallOut) -> @location(0) vec4<f32> {
+    if (in.kind > 0.5) { return fall_mist(in); }
+    let q = in.look.x;
+    let frac = in.look.y;
+    let side = in.look.z;
+    let tau = in.uv.y;
+    let u = in.uv.x;
+    let dist = length(in.rel);
+    let v = -in.rel / max(dist, 1e-4);
+    // The pattern belongs to the water: what is here now left the lip `tau` seconds ago.
+    let t0 = time_s() - tau;
+    let fine = saturate(1.5 - footprint(in.rel).across * 40.0);
+    let s = fall_streaks(u, t0, fine);
+    let s_du = fall_streaks(u + 0.03, t0, fine);
+    let s_dt = fall_streaks(u, t0 + 0.02, fine);
+    // Glassy as it rolls over the lip, white with air a few tenths of a second later. From
+    // behind or below, the churned water under the tongue shows.
+    let front = dot(in.normal, v) >= 0.0;
+    let aerated = max(smoothstep(0.03, 0.22, tau + (s - 0.5) * 0.1), select(0.6, 0.0, front));
+
+    // Coverage: a thick flow stays a closed sheet; lower down and at its edges it frays into
+    // fingers with the rock showing between them, and thin threads are see-through.
+    let body = saturate(q * 12.0 + 0.3);
+    let gaps = smoothstep(0.1, 1.0, frac) * 0.45 * (1.2 - body * 0.4);
+    var alpha = smoothstep(gaps, gaps + 0.2, s) * body * (0.7 + 0.3 * smoothstep(0.2, 0.7, s));
+    alpha *= 1.0 - smoothstep(0.6, 1.0, abs(side) + (s - 0.5) * 0.4);
+    // Soft where it meets the rock behind it and the pool it lands in.
+    let size = vec2<f32>(textureDimensions(scene_color));
+    let pix = vec2<i32>(clamp(in.clip.xy, vec2<f32>(0.0), size - 1.0));
+    let z_scene = linear_depth(textureLoad(scene_depth, pix, 0));
+    let z_frag = max(view_depth(in.rel), 1e-3);
+    alpha *= saturate((z_scene - z_frag) / 0.5);
+    if (alpha < 0.004) { discard; }
+
+    // Streak relief: each finger is rounded across, and the surges in it ripple the tongue.
+    // Lit from the side we see: the outer face, or the cliff side and underside from behind.
+    let along = cross(in.normal, in.across);
+    var n = normalize(in.normal + in.across * (s - s_du) * 6.0 + along * (s - s_dt) * 4.0);
+    if (!front) { n = -n; }
+    let n_dot_v = max(dot(n, v), 1e-3);
+
+    // Light: sun (wrapping round, and glowing through the froth with the sun behind it),
+    // sky, and glints off the wet surface.
+    let l = frame.sun_dir.xyz;
+    let sun = frame.sun_color.rgb * sun_transmittance(in.rel);
+    let shadow = shadow_factor(in.rel, n);
+    let sky_vis = sky_visibility(in.rel, n);
+    let up = sky_ambient(n) * sky_vis * PI;
+    let wrap = saturate(dot(n, l) * 0.6 + 0.4);
+    let through = pow(saturate(dot(-v, l)), 4.0) * 0.8;
+    let froth = pre_expose(0.9 * (sun * shadow * (wrap + through) + up) * INV_PI);
+
+    // The glassy tongue: what is behind it, bent and dimmed by the water it passes through
+    // (a long way at a glancing look, where the stirred water's own color takes over), plus
+    // the sky in it.
+    let nv = (frame.view * vec4<f32>(n, 0.0)).xyz;
+    let uv = clamp(in.clip.xy / size + vec2<f32>(nv.x, -nv.y) * 0.04, vec2<f32>(0.0), vec2<f32>(0.999));
+    let behind = textureSampleLevel(scene_color, linear_clamp, uv, 0.0).rgb;
+    let thick = clamp(q / max(in.look.w, 0.3), 0.01, 0.5);
+    let path = thick / max(n_dot_v, 0.05);
+    let tint = exp(-vec3<f32>(0.5, 0.11, 0.08) * path * 6.0 - path * 5.0);
+    let stirred = froth * vec3<f32>(0.3, 0.38, 0.36);
+    // From below (its underside) it reflects the dark water and rock under it, not the sky.
+    let fresnel = (0.02 + 0.98 * pow(1.0 - n_dot_v, 5.0)) * select(0.2, 1.0, front);
+    let r = reflect(-v, n);
+    let fill = frame.ambient.rgb;
+    let refl = pre_expose((sample_env(r) - fill) * sky_vis + fill);
+    let glass = (behind * tint + stirred * (1.0 - tint)) * (1.0 - fresnel) + refl * fresnel;
+
+    let h = normalize(l + v);
+    let n_dot_l = saturate(dot(n, l));
+    let a = 0.12 * 0.12;
+    let spec = d_ggx(saturate(dot(n, h)), a) * v_smith_ggx_correlated(n_dot_v, max(n_dot_l, 1e-3), a)
+        * f_schlick(vec3<f32>(0.02), saturate(dot(l, h))) * n_dot_l;
+    let glint = pre_expose(spec * sun * shadow) * (0.3 + 0.7 * s);
+
+    // Denser froth is whiter; thin threads let a little of the water's own color through.
+    var color = mix(glass, froth * (0.7 + 0.45 * s), aerated) + glint;
+    // Over the lip the tongue is unbroken: `glass` already lets what's behind show through.
+    alpha = mix(max(alpha, body), alpha, aerated);
+    color = apply_fog(color, in.rel);
+    return vec4<f32>(color * alpha, alpha);
 }
 
 // ---------------------------------------------------------------- puddles
@@ -750,5 +922,33 @@ fn fs_under(in: FullscreenOut) -> @location(0) vec4<f32> {
     }
     let medium = pre_expose(medium_radiance(look, vec3<f32>(0.0), water.g.rain.w));
     let tr = exp(-(look.absorb + vec3<f32>(look.scattering)) * in_water);
-    return vec4<f32>(color * tr + medium * (1.0 - tr), 1.0);
+    var glow = medium * (1.0 - tr);
+    // Light shafts: the waves focus sunlight into moving sheets and columns. March the view
+    // ray through the first stretch of water; each point is lit through the spot on the surface
+    // straight up the refracted sun ray from it, so shafts line up with the sun and the
+    // caustics on the bottom.
+    let sun_up = saturate(frame.sun_dir.y * 3.0);
+    if (sun_up > 0.0) {
+        let sun_in = refract(-frame.sun_dir.xyz, vec3<f32>(0.0, 1.0, 0.0), 1.0 / 1.333);
+        let up_sun = -sun_in / max(-sun_in.y, 0.2);
+        let reach = min(in_water, 30.0);
+        // Per-pixel jitter (interleaved gradient noise) instead of banding; TAA smooths it.
+        let jitter = fract(52.9829189 * fract(dot(in.position.xy, vec2<f32>(0.06711056, 0.00583715))));
+        var rays = 0.0;
+        var weight = 0.0;
+        for (var i = 0; i < 12; i++) {
+            let t = reach * (f32(i) + jitter) / 12.0;
+            let s = dir * t;
+            let below = max(level - s.y, 0.0);
+            let at = tiling_pos(s).xz + up_sun.xz * below;
+            let w = exp(-0.12 * t - 0.06 * below);
+            rays += (caustics(at * 1.4) - 0.3) * w;
+            weight += w;
+        }
+        rays /= max(weight, 1e-3);
+        // Brightest looking toward the sun, faint looking away.
+        let toward = 0.4 + 2.0 * pow(saturate(dot(dir, -sun_in)), 6.0);
+        glow *= max(1.0 + rays * 2.2 * toward * sun_up * shadow_factor(vec3<f32>(0.0), vec3<f32>(0.0, 1.0, 0.0)), 0.0);
+    }
+    return vec4<f32>(color * tr + glow, 1.0);
 }
