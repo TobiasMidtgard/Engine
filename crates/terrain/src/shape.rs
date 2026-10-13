@@ -57,6 +57,10 @@ pub struct FlatPad {
     pub sea_azimuth_deg: f64,
     /// Distance to the coast, meters (0 = no sea nearby, the pad is far inland).
     pub sea_distance_m: f64,
+    /// Turn of the planet about the world's up axis at the home spot, degrees (spheres):
+    /// north points toward −Z at 0 and toward +Z at 180 (east toward +X / −X), for a game
+    /// whose compass is the other way round. Match `SpaceFrame::home_heading_deg`.
+    pub heading_deg: f64,
 }
 
 impl Default for FlatPad {
@@ -73,6 +77,7 @@ impl Default for FlatPad {
             mountain_distance_m: 26_000.0,
             sea_azimuth_deg: 200.0,
             sea_distance_m: 16_000.0,
+            heading_deg: 0.0,
         }
     }
 }
@@ -81,6 +86,13 @@ impl FlatPad {
     /// Planet-local unit direction of the pad center.
     pub fn direction(&self) -> DVec3 {
         dir_from_lat_lon(self.lat_deg, self.lon_deg)
+    }
+
+    /// Planet-local to world rotation that puts the pad on top (+Y) with north toward −Z
+    /// turned by [`heading_deg`](Self::heading_deg) about +Y.
+    pub fn home_rotation(&self) -> DQuat {
+        let q = crate::cube::home_rotation(self.lat_deg, self.lon_deg);
+        (DQuat::from_rotation_y(self.heading_deg.to_radians()) * q).normalize()
     }
 }
 
@@ -106,8 +118,9 @@ pub fn lat_lon_from_dir(d: DVec3) -> (f64, f64) {
 #[derive(Clone)]
 pub struct HeightOverlay {
     /// Ground height (world y) at world `(x, z)`, meters, in the home frame (the home spot at
-    /// the origin, +Y up, north toward −Z) as if the world were flat. The terrain adds the
-    /// planet's curvature, so the ground passes exactly through these points.
+    /// the origin, +Y up, north toward −Z unless the pad's heading turns it). The ground passes exactly through these points:
+    /// the terrain converts them to heights on the sphere itself, so don't subtract the
+    /// planet's curvature unless the level is meant to follow it.
     pub height: Arc<dyn Fn(f64, f64) -> f64 + Send + Sync>,
     /// Full strength within this distance of the home spot, meters.
     pub radius_m: f64,
@@ -878,16 +891,24 @@ impl PlanetShape {
         (dh, (steer[LEVELS - 1] + cuts).length())
     }
 
+    /// Seed of the crater scatter (16 bits, so the shader gets it exactly as an `f32`).
+    pub fn crater_seed(&self) -> u32 {
+        (self.seed & 0xFFFF) as u32
+    }
+
     /// Sum of crater profiles at `p` (planet-local, meters), from the largest size class down
     /// to `finest`. Each class scatters at most one crater per cell of a 3D grid; the profile
     /// uses the 3D distance to the crater's center, so centers below or above the surface make
     /// smaller and shallower craters (natural size variety). A crater reaches at most half a
     /// cell, so the 2×2×2 cells around `p` find every crater that touches it.
+    ///
+    /// The terrain shader scatters the same craters (`crater_detail` in terrain.wgsl) to shade
+    /// the ones too small for the vertices; keep the two in step.
     fn craters(&self, p: DVec3, finest: f64, mare: &mut f32) -> f64 {
         let mut total = 0.0;
         let mut radius = self.crater_max_radius_m;
         let min_r = self.crater_min_radius_m.max(finest * 0.75);
-        let mut class = 0u64;
+        let mut class = 0u32;
         while radius >= min_r {
             let cell = radius * 3.2;
             let q = p / cell - 0.5;
@@ -896,24 +917,25 @@ impl PlanetShape {
                 for dy in 0..2 {
                     for dx in 0..2 {
                         let (cx, cy, cz) =
-                            (base.x as i64 + dx, base.y as i64 + dy, base.z as i64 + dz);
-                        let seed = self.seed ^ (class * 0x9E37);
-                        if noise::cell_random(cx, cy, cz, seed, 1) > self.crater_density {
+                            (base.x as i32 + dx, base.y as i32 + dy, base.z as i32 + dz);
+                        let seed = self.crater_seed() ^ class.wrapping_mul(0x9E37);
+                        let rnd = |salt| noise::cell_random32(cx, cy, cz, seed, salt);
+                        if rnd(1) > self.crater_density {
                             continue;
                         }
-                        let center = DVec3::new(
-                            cx as f64 + noise::cell_random(cx, cy, cz, seed, 2),
-                            cy as f64 + noise::cell_random(cx, cy, cz, seed, 3),
-                            cz as f64 + noise::cell_random(cx, cy, cz, seed, 4),
-                        ) * cell;
-                        let rc = radius * (0.55 + 0.45 * noise::cell_random(cx, cy, cz, seed, 5));
+                        let center =
+                            DVec3::new(cx as f64 + rnd(2), cy as f64 + rnd(3), cz as f64 + rnd(4))
+                                * cell;
+                        let rc = radius * (0.55 + 0.45 * rnd(5));
                         let x = (p - center).length() / rc;
                         if x >= 1.5 {
                             continue;
                         }
                         // Bigger craters are shallower relative to size, with flat floors.
-                        let depth = rc * if rc > 8_000.0 { 0.06 } else { 0.18 };
-                        let rim = rc * 0.045;
+                        // Old craters are worn down: shallower, with low rims.
+                        let wear = 1.0 - 0.65 * smooth(0.1, 0.9, rnd(6));
+                        let depth = rc * if rc > 8_000.0 { 0.06 } else { 0.18 } * wear;
+                        let rim = rc * 0.045 * wear * wear;
                         let bowl = if x < 1.0 {
                             let floor = if rc > 8_000.0 { 0.55 } else { 0.0 };
                             let xf = ((x - floor) / (1.0 - floor)).max(0.0);

@@ -299,8 +299,13 @@ pub struct EcologySettings {
     pub paused: bool,
     /// Draw small plants (grass, flowers, ferns, mushrooms) up to this distance, meters.
     pub small_plant_distance_m: f32,
+    /// Small plants beyond this distance use their simplified mesh, meters.
+    pub small_plant_lod_distance_m: f32,
     /// Trees beyond this distance use their simplified mesh, meters.
     pub tree_lod_distance_m: f32,
+    /// Only trees this close to a `FocusPoints` focus have a trunk collider, meters (colliders
+    /// stream in and out as the focus moves; every tree has one when there is no focus).
+    pub collider_distance_m: f32,
     /// Most catch-up years a far region simulates when the player returns.
     pub max_catch_up_years: f32,
 }
@@ -311,7 +316,9 @@ impl Default for EcologySettings {
             years_per_second: 1.0 / 600.0,
             paused: false,
             small_plant_distance_m: 110.0,
+            small_plant_lod_distance_m: 22.0,
             tree_lod_distance_m: 70.0,
+            collider_distance_m: 150.0,
             max_catch_up_years: 40.0,
         }
     }

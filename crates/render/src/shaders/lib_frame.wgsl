@@ -8,7 +8,9 @@
 @group(0) @binding(2) var shadow_map: texture_depth_2d_array;
 @group(0) @binding(3) var shadow_sampler: sampler_comparison;
 @group(0) @binding(4) var linear_clamp: sampler;
-@group(0) @binding(5) var env_map: texture_2d<f32>;   // equirect sky radiance (cd/m^2, not pre-exposed)
+// Equirect sky radiance (cd/m^2, not pre-exposed) prefiltered for reflections: mip 0 is the sharp
+// sky, the last mip what a fully rough surface reflects (`sample_env`, `sample_env_rough`).
+@group(0) @binding(5) var env_map: texture_2d<f32>;
 @group(0) @binding(6) var linear_repeat: sampler;
 @group(0) @binding(7) var sky_occlusion_map: texture_depth_2d; // top-down depth of the highest surface (0 = top)
 @group(0) @binding(8) var sky_occlusion_sampler: sampler;      // nearest, for textureGather on the map
@@ -18,6 +20,23 @@
 @group(0) @binding(10) var ao_map: texture_2d<f32>;          // ambient occlusion (R, 1 = open)
 @group(0) @binding(11) var prepass_normal: texture_2d<f32>;  // octahedral world normal xy, perceptual roughness, 1 where written
 @group(0) @binding(12) var prepass_depth: texture_depth_2d;  // depth after the prepass (reverse-Z, 0 = nothing)
+// Atmosphere look-up tables (see lib_atmosphere.wgsl).
+@group(0) @binding(13) var transmittance_lut: texture_2d<f32>; // sunlight transmittance to the top of the atmosphere
+@group(0) @binding(14) var multiscatter_lut: texture_2d<f32>;  // light from all higher orders of scattering
+@group(0) @binding(15) var sky_view_lut: texture_2d<f32>;      // the sky seen from the camera (this frame)
+// Sky light for diffuse surfaces: cosine-weighted sky radiance around each normal (equirect).
+@group(0) @binding(16) var env_irradiance: texture_2d<f32>;
+@group(0) @binding(17) var env_sampler: sampler; // equirect maps: wraps around, clamps at the poles
+// Screen-space reflections: reflected radiance (cd/m^2, not pre-exposed), coverage (see
+// `screen_reflection`). A stand-in while it is being drawn.
+@group(0) @binding(18) var ssr_map: texture_2d<f32>;
+// Volumetric fog (volumetrics.rs): light scattered toward the camera (pre-exposed) and
+// transmittance from the camera to the far edge of each depth slice of the froxel grid (see
+// `volumetric_fog_at`). A clear stand-in while it is being computed and when it is off.
+@group(0) @binding(19) var volumetric_fog: texture_3d<f32>;
+// Screen-space global illumination: light bounced onto each pixel from nearby surfaces
+// (cd/m^2, not pre-exposed; see `screen_gi`). A stand-in while it is being drawn.
+@group(0) @binding(20) var gi_map: texture_2d<f32>;
 
 // Multiply final radiance by this before writing to the HDR target.
 fn pre_expose(c: vec3<f32>) -> vec3<f32> { return c * frame.exposure.x; }
@@ -77,6 +96,26 @@ fn screen_ao(rel: vec3<f32>) -> f32 {
     if (!in_prepass(rel, pixel)) { return 1.0; }
     let ao = textureLoad(ao_map, pixel, 0).r;
     return pow(saturate(ao), strength);
+}
+
+// Screen-space reflection for the surface at `rel`: reflected radiance (cd/m^2, not
+// pre-exposed) and how much of the reflection it covers (0 = reflect the sky only). Zero when
+// reflections are off or the surface wasn't in the prepass.
+fn screen_reflection(rel: vec3<f32>) -> vec4<f32> {
+    if (frame.reflections.x <= 0.0) { return vec4<f32>(0.0); }
+    let pixel = vec2<i32>(floor(pixel_of(rel)));
+    if (!in_prepass(rel, pixel)) { return vec4<f32>(0.0); }
+    return textureLoad(ssr_map, pixel, 0);
+}
+
+// Diffuse light bounced onto the surface at `rel` from nearby surfaces on screen, as radiance
+// (multiply by the diffuse color), or 0 where screen-space GI is off or `rel` isn't what the
+// prepass drew.
+fn screen_gi(rel: vec3<f32>) -> vec3<f32> {
+    if (frame.reflections.w <= 0.0) { return vec3<f32>(0.0); }
+    let pixel = vec2<i32>(floor(pixel_of(rel)));
+    if (!in_prepass(rel, pixel)) { return vec3<f32>(0.0); }
+    return textureLoad(gi_map, pixel, 0).rgb * frame.reflections.w;
 }
 
 // Ambient occlusion with interreflections (Jimenez et al. 2016, "Practical Real-Time Strategies
@@ -282,172 +321,36 @@ fn contact_shadow(rel: vec3<f32>, n: vec3<f32>) -> f32 {
     return shadow;
 }
 
-// ---------------------------------------------------------------- atmosphere (single scattering)
-// Rayleigh + Mie scattering on a spherical planet. Works from the ground and from space.
-const RAYLEIGH_BETA: vec3<f32> = vec3<f32>(5.802e-6, 13.558e-6, 33.1e-6);
-const MIE_BETA: f32 = 3.996e-6;
-const MIE_EXT: f32 = 4.40e-6;
-const OZONE_BETA: vec3<f32> = vec3<f32>(0.650e-6, 1.881e-6, 0.085e-6);
-
-fn ray_sphere(origin: vec3<f32>, dir: vec3<f32>, center: vec3<f32>, radius: f32) -> vec2<f32> {
-    let oc = origin - center;
-    let b = dot(oc, dir);
-    let c = dot(oc, oc) - radius * radius;
-    let h = b * b - c;
-    if (h < 0.0) { return vec2<f32>(-1.0, -1.0); }
-    let s = sqrt(h);
-    return vec2<f32>(-b - s, -b + s);
-}
-
-// Height above the planet surface. Exact for the camera (computed in f64 on the CPU).
-fn planet_height(p: vec3<f32>) -> f32 {
-    if (all(p == vec3<f32>(0.0))) { return frame.camera_world.w; }
-    return length(p - frame.planet.xyz) - frame.planet.w;
-}
-
-// Ray vs the sphere `shell` meters above the planet surface, for a ray starting at height `h`.
-// Numerically stable at planetary scale in f32 (no |oc|^2 - r^2 cancellation).
-fn ray_shell(origin: vec3<f32>, h: f32, dir: vec3<f32>, shell: f32) -> vec2<f32> {
-    let b = dot(origin - frame.planet.xyz, dir);
-    let c = (h - shell) * (2.0 * frame.planet.w + h + shell);
-    let d = b * b - c;
-    if (d < 0.0) { return vec2<f32>(-1.0, -1.0); }
-    let s = sqrt(d);
-    var q = -b - select(1.0, -1.0, b < 0.0) * s;
-    if (abs(q) < 1e-6) { q = 1e-6; }
-    let t0 = q;
-    let t1 = c / q;
-    return vec2<f32>(min(t0, t1), max(t0, t1));
-}
-
-fn phase_rayleigh(cos_t: f32) -> f32 { return 3.0 / (16.0 * PI) * (1.0 + cos_t * cos_t); }
-
-fn phase_mie(cos_t: f32, g: f32) -> f32 {
-    let g2 = g * g;
-    return 3.0 / (8.0 * PI) * ((1.0 - g2) * (1.0 + cos_t * cos_t))
-        / ((2.0 + g2) * pow(max(1.0 + g2 - 2.0 * g * cos_t, 1e-4), 1.5));
-}
-
-fn ozone_density(h: f32) -> f32 {
-    return max(0.0, 1.0 - abs(h - 25000.0) / 15000.0);
-}
-
-// Densities (rayleigh, mie, ozone) at height h.
-fn atmo_density(h: f32) -> vec3<f32> {
-    let hh = max(h, 0.0);
-    return vec3<f32>(exp(-hh / frame.atmosphere.y), exp(-hh / frame.atmosphere.z), ozone_density(hh));
-}
-
-fn extinction(od: vec3<f32>) -> vec3<f32> {
-    return RAYLEIGH_BETA * od.x + vec3(MIE_EXT) * od.y + OZONE_BETA * od.z;
-}
-
-// Optical depth (rayleigh, mie, ozone) from point p (height h) toward the sun. x < 0 when the
-// planet blocks the sun.
-fn optical_depth_to_sun(p: vec3<f32>, h: f32, sun: vec3<f32>, samples: i32) -> vec3<f32> {
-    if (ray_shell(p, h, sun, -50.0).x > 0.0) { return vec3<f32>(-1.0); }
-    let len = max(ray_shell(p, h, sun, frame.atmosphere.x).y, 0.0);
-    var od = vec3<f32>(0.0);
-    var prev = 0.0;
-    for (var j = 0; j < samples; j++) {
-        let f = f32(j + 1) / f32(samples);
-        let t = len * f * f;
-        let tm = (prev + t) * 0.5;
-        od += atmo_density(planet_height(p + sun * tm)) * (t - prev);
-        prev = t;
-    }
-    return od;
-}
-
-struct AtmosphereSample {
-    radiance: vec3<f32>,       // in-scattered radiance along the ray (per lux of sun color)
-    transmittance: vec3<f32>,  // fraction of background light reaching the eye
-    ground_t: f32,             // distance to the planet surface along the ray, or -1
-};
-
-const MULTI_SCATTER: f32 = 1.6;
-
-// Integrate scattering from `origin` (camera-relative) along `dir` for up to `max_dist` meters.
-// Samples are spaced quadratically (dense near the eye, sparse far away).
-fn atmosphere(origin: vec3<f32>, dir: vec3<f32>, max_dist: f32, steps: i32) -> AtmosphereSample {
-    var result: AtmosphereSample;
-    result.radiance = vec3(0.0);
-    result.transmittance = vec3(1.0);
-    result.ground_t = -1.0;
-    let r_planet = frame.planet.w;
-    if (r_planet <= 0.0) { return result; }
-    let h0 = planet_height(origin);
-    let hit_atmo = ray_shell(origin, h0, dir, frame.atmosphere.x);
-    if (hit_atmo.y < 0.0) { return result; }
-    let t0 = max(hit_atmo.x, 0.0);
-    var t1 = min(hit_atmo.y, max_dist);
-    let hit_ground = ray_shell(origin, h0, dir, 0.0);
-    if (hit_ground.x > 0.0) {
-        result.ground_t = hit_ground.x;
-        t1 = min(t1, hit_ground.x);
-    }
-    if (t1 <= t0) { return result; }
-
-    let sun = frame.sun_dir.xyz;
-    let cos_t = dot(dir, sun);
-    let pr = phase_rayleigh(cos_t);
-    let pm = phase_mie(cos_t, frame.atmosphere.w);
-    let len = t1 - t0;
-    var od = vec3<f32>(0.0);
-    var sum_r = vec3(0.0);
-    var sum_m = vec3(0.0);
-    var prev = 0.0;
-    for (var i = 0; i < steps; i++) {
-        let f = f32(i + 1) / f32(steps);
-        let tt = len * f * f;
-        let seg = tt - prev;
-        let p = origin + dir * (t0 + (prev + tt) * 0.5);
-        prev = tt;
-        let dens = atmo_density(planet_height(p)) * seg;
-        let od_mid = od + dens * 0.5;
-        od += dens;
-        let sun_od = optical_depth_to_sun(p, planet_height(p), sun, 4);
-        if (sun_od.x < 0.0) { continue; }
-        let att = exp(-extinction(od_mid + sun_od));
-        sum_r += att * dens.x;
-        sum_m += att * dens.y;
-    }
-    result.transmittance = exp(-extinction(od));
-    let scatter_r = sum_r * RAYLEIGH_BETA;
-    let scatter_m = sum_m * MIE_BETA;
-    // Single scattering + a cheap isotropic multiple-scattering term.
-    result.radiance = scatter_r * pr + scatter_m * pm + (scatter_r + scatter_m) * (MULTI_SCATTER / (4.0 * PI));
-    return result;
-}
-
-// Sunlight transmittance to a camera-relative point through the atmosphere.
-fn sun_transmittance(rel: vec3<f32>) -> vec3<f32> {
-    if (frame.planet.w <= 0.0) { return vec3(1.0); }
-    let od = optical_depth_to_sun(rel, planet_height(rel), frame.sun_dir.xyz, 6);
-    if (od.x < 0.0) { return vec3(0.0); }
-    return exp(-extinction(od));
-}
+// ---------------------------------------------------------------- atmosphere
+// The sky, sunlight through the air and aerial perspective live in lib_atmosphere.wgsl
+// (`atmosphere`, `sun_transmittance`, `sky_view_radiance`, `planet_height`, `ray_shell`).
 
 // ---------------------------------------------------------------- environment lighting
+// The sky (and, without a planet, the ground below the horizon) as seen from the camera,
+// redrawn and filtered every `environment_interval` frames (environment.rs).
 fn sample_env(dir: vec3<f32>) -> vec3<f32> {
-    return textureSampleLevel(env_map, linear_repeat, dir_to_equirect(dir), 0.0).rgb;
+    return textureSampleLevel(env_map, env_sampler, dir_to_equirect(dir), 0.0).rgb;
 }
 
-// Light bounced off the ground below (cd/m^2): sky from above plus sun, times ground albedo.
-// Fades out high above the planet (frame.ground.w).
+// The sky reflected toward `dir` by a surface of perceptual `roughness`: GGX-prefiltered, so
+// rough surfaces reflect a blurred sky.
+fn sample_env_rough(dir: vec3<f32>, roughness: f32) -> vec3<f32> {
+    let lod = saturate(roughness) * f32(textureNumLevels(env_map) - 1u);
+    return textureSampleLevel(env_map, env_sampler, dir_to_equirect(dir), lod).rgb;
+}
+
+// Light bounced off the ground below (cd/m^2): sky irradiance from above plus sun, times the
+// ground albedo. Fades out high above the planet (frame.ground.w).
 fn ground_radiance() -> vec3<f32> {
-    let sky_up = sample_env(vec3<f32>(0.0, 1.0, 0.0));
+    let sky = textureSampleLevel(env_irradiance, env_sampler, vec2<f32>(0.5, 0.0), 0.0).rgb;
     let sun = frame.sun_camera.rgb * saturate(frame.sun_dir.y) * INV_PI;
-    return frame.ground.rgb * frame.ground.w * (sky_up + sun);
+    return frame.ground.rgb * frame.ground.w * (sky + sun);
 }
 
-// Approximate cosine-weighted sky radiance (cd/m^2) around normal `n`, plus ambient fill.
+// Cosine-weighted sky radiance (cd/m^2) around normal `n`, plus ambient fill: diffuse sky light
+// is `sky_ambient(n) * albedo`.
 fn sky_ambient(n: vec3<f32>) -> vec3<f32> {
-    let up = sample_env(normalize(n + vec3(0.0, 0.6, 0.0)));
-    let side = sample_env(normalize(vec3(n.x, 0.15, n.z) + vec3(0.0001)));
-    let sky = mix(side, up, 0.6);
-    let w = saturate(n.y * 0.5 + 0.5);
-    return mix(ground_radiance(), sky, w) + frame.ambient.rgb;
+    return textureSampleLevel(env_irradiance, env_sampler, dir_to_equirect(n), 0.0).rgb + frame.ambient.rgb;
 }
 
 // Fraction of the open sky seen from camera-relative `rel` with normal `n`: 1 outdoors, toward 0
@@ -584,6 +487,13 @@ fn fog_sky_visibility(rel: vec3<f32>) -> f32 {
 // ---------------------------------------------------------------- surface shading
 // Returns pre-exposed radiance for a lit surface at camera-relative position `rel`.
 fn shade_surface(s: Surface, rel: vec3<f32>) -> vec3<f32> {
+    return shade_surface_shadowed(s, rel, 1.0);
+}
+
+// `shade_surface` with extra sun visibility (0..1) from relief too small for the shadow maps,
+// such as parallax self-shadowing: deep mortar joints and the gaps between cobbles stay dark
+// in low sun.
+fn shade_surface_shadowed(s: Surface, rel: vec3<f32>, sun_visibility: f32) -> vec3<f32> {
     let v = normalize(-rel);
     let n = s.normal;
     let roughness = s.roughness * s.roughness;
@@ -598,7 +508,7 @@ fn shade_surface(s: Surface, rel: vec3<f32>) -> vec3<f32> {
     let n_dot_l = saturate(n_dot_l_raw);
     let sun_light = frame.sun_color.rgb * sun_transmittance(rel);
     if (dot(sun_light, sun_light) > 0.0) {
-        var shadow = shadow_factor(rel, n);
+        var shadow = shadow_factor(rel, n) * sun_visibility;
         if (shadow > 0.0 && n_dot_l_raw > 0.0) {
             shadow *= contact_shadow(rel, n);
         }
@@ -642,11 +552,17 @@ fn shade_surface(s: Surface, rel: vec3<f32>) -> vec3<f32> {
     let sky_vis = sky_visibility(rel, n);
     let fill = frame.ambient.rgb;
     let irradiance = ((sky_ambient(n) - fill) * sky_vis + fill) * PI;
+    // Rough surfaces reflect around a direction between the mirror direction and the normal
+    // (Lagarde and de Rousiers 2014).
     let r = reflect(-v, n);
-    let spec_env = (mix(sample_env(r), sky_ambient(r), saturate(roughness * 1.5)) - fill) * sky_vis + fill;
+    let dominant = normalize(mix(n, r, (1.0 - roughness) * (sqrt(1.0 - roughness) + roughness)));
+    let ssr = screen_reflection(rel);
+    let spec_env = mix(sample_env_rough(dominant, s.roughness) * sky_vis + fill, ssr.rgb, ssr.a);
     let env_brdf = env_brdf_approx(f0, s.roughness, n_dot_v);
     let visibility = min(s.occlusion, screen_ao(rel));
     color += diffuse_color * irradiance * INV_PI * ao_multibounce(visibility, diffuse_color);
+    // Light bounced from nearby surfaces (its rays already stop at whatever occludes them).
+    color += diffuse_color * screen_gi(rel);
     color += spec_env * env_brdf * specular_occlusion(n_dot_v, visibility, roughness);
 
     color += s.emissive;
@@ -654,44 +570,202 @@ fn shade_surface(s: Surface, rel: vec3<f32>) -> vec3<f32> {
 }
 
 // ---------------------------------------------------------------- fog / aerial perspective
-// Height used by fog: altitude above the planet surface, or world y without a planet.
+// Height used by fog: altitude above the planet surface, or world y without a planet. Exact to
+// millimeters near the camera (no r - R cancellation at planetary scale).
 fn fog_height(rel: vec3<f32>) -> f32 {
-    if (frame.planet.w > 0.0) { return planet_height(rel); }
+    if (frame.planet.w > 0.0) {
+        let r0 = frame.planet.w + frame.camera_world.w;
+        let q = 2.0 * r0 * dot(rel, normalize(-frame.planet.xyz)) + dot(rel, rel); // r^2 - r0^2
+        return frame.camera_world.w + q / (sqrt(max(r0 * r0 + q, 0.0)) + r0);
+    }
     return frame.camera_world.y + rel.y;
 }
 
-// Applies height fog and atmospheric haze to pre-exposed color seen at camera-relative `rel`.
+// Extinction of the height fog (1/m) at camera-relative `rel` (`FogSettings`: density at the
+// base height, falling off exponentially above it).
+fn height_fog_density(rel: vec3<f32>) -> f32 {
+    let h = fog_height(rel) - frame.fog.z;
+    return frame.fog.x * exp(-max(frame.fog.y, 1e-5) * max(h, -100.0));
+}
+
+// Optical depth of the height fog along `dir` from `t0` to `t1` meters from the camera: the
+// analytic integral of density * exp(-falloff * height) with height linear along the ray.
+// Stable for any distance and altitude (orbit, the Moon): both exponents are clamped.
+fn height_fog_optical_depth(dir: vec3<f32>, t0: f32, t1: f32) -> f32 {
+    let falloff = max(frame.fog.y, 1e-5);
+    let ha = fog_height(dir * t0) - frame.fog.z;
+    let hb = fog_height(dir * t1) - frame.fog.z;
+    let ea = exp(-falloff * max(ha, -100.0));
+    let eb = exp(-falloff * max(hb, -100.0));
+    let dh = hb - ha;
+    let len = t1 - t0;
+    if (abs(dh) > 0.01) {
+        return frame.fog.x * len * (ea - eb) / (falloff * dh);
+    }
+    return frame.fog.x * len * ea;
+}
+
+// Sky light reaching fog from every direction (cd/m^2, without the ambient fill): the sky's and
+// the ground's radiance averaged over the whole sphere, which fog scatters about evenly.
+fn fog_sky_light() -> vec3<f32> {
+    let up = textureSampleLevel(env_irradiance, env_sampler, vec2<f32>(0.5, 0.0), 0.0).rgb;
+    let down = textureSampleLevel(env_irradiance, env_sampler, vec2<f32>(0.5, 1.0), 0.0).rgb;
+    return 0.5 * (up + down);
+}
+
+// Radiance (cd/m^2, not pre-exposed) of height fog thick enough to hide everything behind it,
+// seen along `dir` with the fog at `at`: sunlight through the air with the fog's phase function
+// and sky light, both scaled by `lit` (the open sky the fog sees), plus the ambient fill. No
+// shadows: this is the fog beyond the volumetric range (or all of it with volumetrics off).
+fn height_fog_radiance(dir: vec3<f32>, at: vec3<f32>, lit: f32) -> vec3<f32> {
+    let sun = frame.sun_color.rgb * sun_transmittance(at) * henyey_greenstein(dot(dir, frame.sun_dir.xyz), frame.fog_color.w);
+    return frame.fog_color.rgb * ((sun + fog_sky_light()) * lit + frame.ambient.rgb);
+}
+
+// Volumetric fog between the camera and view depth `depth` (meters, up to the range) in the
+// direction of camera-relative `rel`: light scattered toward the camera (pre-exposed) and
+// transmittance. Depth slices are spaced exponentially (fine near the camera); texel z of the
+// volume holds the integral to the far edge of slice z.
+//
+// The four froxel columns around the pixel are read and blended by hand:
+// - Between the two edges of the slice the depth falls in, a column's fog is taken as uniform:
+//   transmittance falls exponentially and the light builds up as it does in `cs_integrate`.
+//   (Blending the edges linearly shows each slice as a band where fog is thick, such as a valley
+//   of ground fog seen from above.)
+// - The froxels hold the fog along their columns' center rays. Where the height fog changes fast
+//   from one column to the next (a thin layer of ground fog seen at a glance, where the rows' rays
+//   meet the layer meters apart), blending them misjudges how much fog this pixel's ray crosses,
+//   in bands one row of froxels apart. So the height fog's share of the transmittance is set
+//   right analytically: what the blended columns' rays cross is swapped for what this ray
+//   crosses.
+// - What is blended for the light is the fog's radiance (light per opacity), which changes
+//   smoothly from column to column (the sun's glow), not the light itself, which is mostly the
+//   foggiest column's.
+fn volumetric_fog_at(rel: vec3<f32>, depth: f32) -> vec4<f32> {
+    let v = frame.volumetrics;
+    let clip = frame.unjittered_view_proj * vec4<f32>(rel, 1.0);
+    let uv = clip.xy / max(clip.w, 1e-6) * vec2<f32>(0.5, -0.5) + 0.5;
+    let d = clamp(depth, 0.0, v.x);
+    let s = min(v.w * log2(1.0 + d * v.y) * v.z, v.w - 1e-3); // slice coordinate, 0..slices
+    let k = floor(s);
+    // How far into the slice `depth` is, in meters (the slices' depth mapping inverted).
+    let d0 = (exp2(k / (v.w * v.z)) - 1.0) / v.y;
+    let d1 = (exp2((k + 1.0) / (v.w * v.z)) - 1.0) / v.y;
+    let f = saturate((d - d0) / max(d1 - d0, 1e-6));
+
+    let grid = vec2<f32>(textureDimensions(volumetric_fog).xy);
+    let g = uv * grid - 0.5;
+    let i0 = floor(g);
+    let w = g - i0;
+    var t_froxels = 0.0; // the columns' transmittance, blended
+    var t_columns = 0.0; // the height fog's share of it, analytically
+    var light = vec3<f32>(0.0);
+    var radiance = vec3<f32>(0.0);
+    var radiance_weight = 0.0;
+    for (var j = 0u; j < 4u; j++) {
+        let o = vec2<f32>(f32(j & 1u), f32(j >> 1u));
+        let cell = clamp(i0 + o, vec2<f32>(0.0), grid - 1.0);
+        let weight = mix(1.0 - w.x, w.x, o.x) * mix(1.0 - w.y, w.y, o.y);
+        let fog = froxel_column_fog(vec2<i32>(cell), i32(k), f);
+        let height_fog = froxel_column_height_fog_t((cell + 0.5) / grid, d0, d1, f);
+        t_froxels += weight * fog.a;
+        t_columns += weight * height_fog;
+        light += weight * fog.rgb;
+        // Columns with next to no fog have no radiance to speak of (and an imprecise one).
+        let opacity = 1.0 - fog.a;
+        let r = weight * saturate(opacity * 50.0);
+        radiance += r * fog.rgb / max(opacity, 1e-4);
+        radiance_weight += r;
+    }
+    let dist = length(rel);
+    let t_ray = exp(-height_fog_optical_depth(rel / max(dist, 1e-6), 0.0, dist * d / max(view_depth(rel), 1e-6)));
+    let t = clamp(t_froxels * t_ray / max(t_columns, 1e-6), 0.0, 1.0);
+    if (radiance_weight > 1e-3) {
+        light = radiance / radiance_weight * (1.0 - t);
+    }
+    return vec4<f32>(light, t);
+}
+
+// Column `cell` of the volumetric fog up to fraction `f` of slice `k`: in-scattered light and
+// transmittance, the fog taken as uniform within the slice.
+fn froxel_column_fog(cell: vec2<i32>, k: i32, f: f32) -> vec4<f32> {
+    // The integral to the near edge of the slice (clear air at the camera for k = 0) and to its
+    // far edge.
+    var near = vec4<f32>(0.0, 0.0, 0.0, 1.0);
+    if (k >= 1) { near = textureLoad(volumetric_fog, vec3<i32>(cell, k - 1), 0); }
+    let far = textureLoad(volumetric_fog, vec3<i32>(cell, k), 0);
+    // Transmittance across the whole slice, then up to the depth.
+    let slice_t = clamp(far.a / max(near.a, 1e-6), 1e-6, 1.0);
+    let t = pow(slice_t, f);
+    var share = f; // of the slice's in-scattered light
+    if (slice_t < 0.999) { share = (1.0 - t) / (1.0 - slice_t); }
+    return vec4<f32>(near.rgb + (far.rgb - near.rgb) * share, near.a * t);
+}
+
+// The height fog's transmittance along the center ray of the froxel column at screen `uv`, to
+// fraction `f` of the slice from view depth `d0` to `d1`, taken as `froxel_column_fog` takes it.
+fn froxel_column_height_fog_t(uv: vec2<f32>, d0: f32, d1: f32, f: f32) -> f32 {
+    // The column's ray, per meter of view depth.
+    let view = vec3<f32>((uv.x * 2.0 - 1.0) / frame.proj[0][0], (1.0 - uv.y * 2.0) / frame.proj[1][1], -1.0);
+    let ray = (frame.inv_view * vec4<f32>(view, 0.0)).xyz;
+    let len = length(ray);
+    let dir = ray / len;
+    let near = exp(-height_fog_optical_depth(dir, 0.0, d0 * len));
+    let slice = exp(-height_fog_optical_depth(dir, d0 * len, d1 * len));
+    return near * pow(clamp(slice, 1e-6, 1.0), f);
+}
+
+// Keeps fog (in-scattered light, transmittance) from hiding more than
+// `FogSettings::max_opacity` of what is behind it.
+fn limit_fog_opacity(fog: vec4<f32>) -> vec4<f32> {
+    let min_t = 1.0 - frame.fog.w;
+    if (fog.a >= min_t) { return fog; }
+    return vec4<f32>(fog.rgb * (frame.fog.w / max(1.0 - fog.a, 1e-4)), min_t);
+}
+
+// Applies fog and atmospheric haze to pre-exposed color seen at camera-relative `rel`.
+//
+// Within `RenderSettings::volumetric_fog_range` the fog comes from the volumetric fog (height
+// fog and fog volumes, with light shafts, sky occlusion and lamps); beyond it the height fog
+// continues analytically from the end of the range, so nothing is counted twice. With
+// volumetric fog off the analytic height fog starts at the camera.
 fn apply_fog(color: vec3<f32>, rel: vec3<f32>) -> vec3<f32> {
     let dist = length(rel);
     let dir = rel / max(dist, 1e-4);
-    // Height fog: analytic integral of density * exp(-falloff * height) along the ray. Heights
-    // are altitudes above the planet surface (world y when there is no planet). Stable for
-    // any distance and altitude (orbit, the Moon): both exponents are clamped.
-    let density = frame.fog.x;
-    let falloff = max(frame.fog.y, 1e-5);
-    let h0 = fog_height(vec3(0.0)) - frame.fog.z;
-    let h1 = fog_height(rel) - frame.fog.z;
-    let e0 = exp(-falloff * max(h0, -100.0));
-    let e1 = exp(-falloff * max(h1, -100.0));
-    let dh = h1 - h0;
-    var amount = density * dist * e0;
-    if (abs(dh) > 0.01) {
-        amount = density * dist * (e0 - e1) / (falloff * dh);
+    // In-scattered light (pre-exposed) and transmittance between the camera and the point.
+    var fog = vec4<f32>(0.0, 0.0, 0.0, 1.0);
+    var start = 0.0;
+    if (frame.volumetrics.x > 0.0) {
+        let depth = view_depth(rel);
+        let range = frame.volumetrics.x;
+        fog = volumetric_fog_at(rel, min(depth, range));
+        start = select(dist, dist * range / depth, depth > range);
     }
-    let fog_t = min(1.0 - exp(-amount), frame.fog.w);
-    let sun_amt = pow(saturate(dot(dir, frame.sun_dir.xyz)), 8.0) * frame.fog_color.w;
-    // Fog is lit by the sky near the horizon and by forward-scattered sun; fog_color is its albedo.
-    // Haze inside caves and rooms gets neither (it still hides what's behind it).
-    let horizon = sample_env(normalize(vec3<f32>(dir.x, 0.05, dir.z) + vec3(0.0001)));
-    var lit = 1.0;
-    if (fog_t > 1e-4) { lit = fog_sky_visibility(rel); }
-    let outside = (horizon + frame.sun_camera.rgb * sun_amt * INV_PI * 0.05) * lit;
-    let fog_col = frame.fog_color.rgb * (outside + frame.ambient.rgb);
-    var c = mix(color, pre_expose(fog_col), fog_t);
-    // Aerial perspective: cheap atmosphere integral for distant geometry.
-    if (dist > 500.0) {
-        let a = atmosphere(vec3(0.0), dir, dist, 6);
+    if (start < dist) {
+        let tr = exp(-height_fog_optical_depth(dir, start, dist));
+        if (tr < 0.9999) {
+            // Haze inside caves and rooms is lit by neither the sky nor the sun (it still hides
+            // what's behind it).
+            let lit = fog_sky_visibility(rel);
+            let l = pre_expose(height_fog_radiance(dir, dir * start, lit)) * (1.0 - tr);
+            fog = vec4<f32>(fog.rgb + l * fog.a, fog.a * tr);
+        }
+    }
+    fog = limit_fog_opacity(fog);
+    var c = color * fog.a + fog.rgb;
+    // Aerial perspective: the atmosphere between the camera and distant geometry (negligible
+    // closer than a couple hundred meters).
+    if (dist > 200.0) {
+        let a = atmosphere(vec3(0.0), dir, dist, 8);
         c = c * a.transmittance + pre_expose(a.radiance * frame.sun_color.rgb);
     }
     return c;
+}
+
+// Volumetric fog in front of the sky (up to the volumetric range) for pre-exposed sky color
+// seen along `dir`. The sky pass calls this; geometry uses `apply_fog`.
+fn apply_sky_fog(color: vec3<f32>, dir: vec3<f32>) -> vec3<f32> {
+    if (frame.volumetrics.x <= 0.0) { return color; }
+    let fog = limit_fog_opacity(volumetric_fog_at(dir, frame.volumetrics.x));
+    return color * fog.a + fog.rgb;
 }

@@ -15,7 +15,8 @@ struct PlanetGpu {
     center: vec4<f32>,              // terrain origin relative to the camera, base radius
     colors: array<vec4<f32>, 10>,   // lush, dry, soil, rock, sand, snow, dark, ocean, mud, concrete
     params: vec4<f32>,              // snow below °C, rock slope, vegetation (0/1), ocean surface (0/1)
-    params2: vec4<f32>,             // sphere (0/1)
+    params2: vec4<f32>,             // sphere (0/1), crater density, largest crater radius, crater seed
+    motion: vec4<f32>,              // how far the terrain moved in the world since last frame
 };
 
 // Must match `MapsGpu` in render.rs.
@@ -69,23 +70,33 @@ struct VertexIn {
     @location(1) normal: vec4<f32>,
     @location(2) altitude: f32,
     @location(3) climate: vec4<f32>,   // moisture, temperature (-60..60 °C), mare, flags/255
-    @location(4) paint: vec4<u32>,     // layer index, weight, regional variety, local patches (0..255)
+    // Weights of the painted layers 1..10 (mud, snow, sand, dirt, grass, rock, concrete, ash,
+    // gravel, leaves), regional variety, local patches.
+    @location(4) paint_a: vec4<f32>,
+    @location(9) paint_b: vec4<f32>,
+    @location(10) paint_c: vec4<f32>,
     @location(5) origin: vec3<f32>,
     @location(6) planet: u32,
     @location(7) lod: vec4<f32>,       // vertex spacing (m), level
     @location(8) tint: vec4<f32>,      // hand-made ground tint: sqrt(color), amount
 };
 
+// `@invariant` keeps the prepass and the scene pass depths bit-identical.
 struct VertexOut {
-    @builtin(position) clip: vec4<f32>,
+    @builtin(position) @invariant clip: vec4<f32>,
     @location(0) rel: vec3<f32>,
     @location(1) normal: vec3<f32>,
     @location(2) up: vec3<f32>,
     @location(3) climate: vec4<f32>,      // moisture, temperature °C, mare, altitude (m)
     @location(4) ocean_paint: vec4<f32>,  // ocean flag, paint weight, regional variety, local patches (0..1)
-    @location(5) @interpolate(flat) ids: vec2<u32>,  // planet, paint layer
+    @location(5) @interpolate(flat) planet: u32,
     @location(6) lod: vec4<f32>,          // vertex spacing (m), level, convexity (-1 gully .. +1 crest)
     @location(7) tint: vec4<f32>,         // linear color, amount
+    // Painted layer weights (see `VertexIn`), interpolated: painted areas meet smoothly
+    // instead of in triangle steps.
+    @location(8) paint_a: vec4<f32>,
+    @location(9) paint_b: vec4<f32>,
+    @location(10) paint_c: vec2<f32>,
 };
 
 // Geomorph offsets are stored in vertex spacings (`chunk::MORPH_RANGE`).
@@ -167,11 +178,147 @@ fn far_noise(p: PlanetGpu, rel: vec3<f32>, pixel: f32) -> vec2<f32> {
     return vec2<f32>(a, b) / max(norm, 1e-4);
 }
 
-@vertex
-fn vs_main(in: VertexIn) -> VertexOut {
-    let planet = planets[in.planet];
-    let rot = planet_rot(planet);
-    var rel = in.origin + rot * in.position;
+// Must match `noise::cell_random32` in noise.rs.
+fn crater_hash(c: vec3<i32>, seed: u32, salt: u32) -> f32 {
+    var h = (bitcast<u32>(c.x) * 0x8da6b343u) ^ (bitcast<u32>(c.y) * 0xd8163841u)
+        ^ (bitcast<u32>(c.z) * 0xcb1ab31fu) ^ seed ^ (salt * 0x9e3779b9u);
+    h ^= h >> 16u;
+    h *= 0x7feb352du;
+    h ^= h >> 15u;
+    h *= 0x846ca68bu;
+    h ^= h >> 16u;
+    return f32(h >> 8u) / 16777216.0;
+}
+
+// Derivative of smoothstep(e0, e1, x).
+fn smoothstep_d(e0: f32, e1: f32, x: f32) -> f32 {
+    let t = saturate((x - e0) / (e1 - e0));
+    return 6.0 * t * (1.0 - t) / (e1 - e0);
+}
+
+// Small craters on barren ground near the camera (none of them in the shape): slope along the
+// surface (xyz) and the albedo gain of fresh ones (w). Cells of 8 m down to 1 m divide the
+// 4096 m tiling period, so `tp` keeps them in place.
+fn micro_craters(tp: vec3<f32>, up: vec3<f32>, pixel: f32) -> vec4<f32> {
+    var grad = vec3<f32>(0.0);
+    var bright = 0.0;
+    var cell = 8.0;
+    for (var size_class = 0u; size_class < 4u; size_class++) {
+        let radius = cell / 3.2;
+        let seen = smoothstep(0.7 * pixel, 2.5 * pixel, radius);
+        if (seen <= 0.0) {
+            break;
+        }
+        let base = vec3<i32>(floor(tp / cell - 0.5));
+        let cs = 0x5eedu ^ (size_class * 0x9e37u);
+        for (var k = 0; k < 8; k++) {
+            let c = base + vec3<i32>(k & 1, (k >> 1) & 1, (k >> 2) & 1);
+            if (crater_hash(c, cs, 1u) > 0.55) {
+                continue;
+            }
+            let center = (vec3<f32>(c) + vec3<f32>(crater_hash(c, cs, 2u), crater_hash(c, cs, 3u), crater_hash(c, cs, 4u))) * cell;
+            let rc = radius * (0.5 + 0.5 * crater_hash(c, cs, 5u));
+            let d = tp - center;
+            let dist = length(d);
+            let x = dist / rc;
+            if (x >= 1.5) {
+                continue;
+            }
+            let age = crater_hash(c, cs, 6u);
+            let wear = 1.0 - 0.7 * smoothstep(0.1, 0.9, age);
+            let depth = rc * 0.2 * wear;
+            let rim = rc * 0.05 * wear * wear;
+            var dh = 0.0;
+            if (x < 1.0) {
+                dh = depth * 2.0 * x + rim * smoothstep_d(0.6, 1.0, x);
+            } else {
+                dh = rim * 2.0 * (-smoothstep_d(1.0, 1.5, x) * (1.5 - x) - (1.0 - smoothstep(1.0, 1.5, x)));
+            }
+            grad += d * (dh / (rc * max(dist, 1e-4))) * seen;
+            let fresh = 1.0 - smoothstep(0.1, 0.3, age);
+            bright += fresh * seen * smoothstep(0.5, 0.9, x) * (1.0 - smoothstep(1.05, 1.5, x)) * 0.25;
+        }
+        cell *= 0.5;
+    }
+    return vec4<f32>(grad - up * dot(grad, up), bright);
+}
+
+struct Craters {
+    slope: vec3<f32>, // gradient of the crater height along the surface (world)
+    bright: f32,      // albedo gain of fresh walls and ejecta
+};
+
+// The craters the shape scatters (`craters` in shape.rs, same hash and profile) that the
+// vertices are too far apart to draw, as slopes for shading, and the bright walls and ejecta
+// of fresh ones. Only craters at least a pixel across, and 40 m or more.
+fn crater_detail(p: PlanetGpu, rel: vec3<f32>, pixel: f32, spacing: f32) -> Craters {
+    var out: Craters;
+    out.slope = vec3<f32>(0.0);
+    out.bright = 0.0;
+    let density = p.params2.y;
+    var radius = p.params2.z;
+    let rot = planet_rot(p);
+    let local = transpose(rot) * (rel - p.center.xyz);
+    let up = normalize(local);
+    let pos = up * p.center.w;
+    let seed = u32(p.params2.w);
+    let smallest = max(pixel * 0.7, 40.0);
+    var grad = vec3<f32>(0.0);
+    var size_class = 0u;
+    loop {
+        if (radius < smallest || size_class > 16u) {
+            break;
+        }
+        // Vertices draw craters a few spacings across; pixels show ones a couple of pixels across.
+        let shade = 1.0 - smoothstep(1.5 * spacing, 6.0 * spacing, radius);
+        let seen = smoothstep(0.7 * pixel, 2.0 * pixel, radius);
+        let cell = radius * 3.2;
+        let base = vec3<i32>(floor(pos / cell - 0.5));
+        let cs = seed ^ (size_class * 0x9e37u);
+        for (var k = 0; k < 8; k++) {
+            let c = base + vec3<i32>(k & 1, (k >> 1) & 1, (k >> 2) & 1);
+            if (crater_hash(c, cs, 1u) > density) {
+                continue;
+            }
+            let center = (vec3<f32>(c) + vec3<f32>(crater_hash(c, cs, 2u), crater_hash(c, cs, 3u), crater_hash(c, cs, 4u))) * cell;
+            let rc = radius * (0.55 + 0.45 * crater_hash(c, cs, 5u));
+            let d = pos - center;
+            let dist = length(d);
+            let x = dist / rc;
+            if (x >= 1.5) {
+                continue;
+            }
+            let big = rc > 8000.0;
+            let age = crater_hash(c, cs, 6u);
+            let wear = 1.0 - 0.65 * smoothstep(0.1, 0.9, age);
+            let depth = rc * select(0.18, 0.06, big) * wear;
+            let rim = rc * 0.045 * wear * wear;
+            var dh = 0.0;
+            if (x < 1.0) {
+                let fl = select(0.0, 0.55, big);
+                if (x > fl) {
+                    dh = depth * 2.0 * (x - fl) / ((1.0 - fl) * (1.0 - fl));
+                }
+                dh += rim * smoothstep_d(0.6, 1.0, x);
+            } else {
+                dh = rim * 2.0 * (-smoothstep_d(1.0, 1.5, x) * (1.5 - x) - (1.0 - smoothstep(1.0, 1.5, x)));
+            }
+            grad += d * (dh / (rc * max(dist, 1e-3))) * shade;
+            let fresh = 1.0 - smoothstep(0.08, 0.25, age);
+            let walls = smoothstep(0.45, 0.9, x) * (1.0 - smoothstep(1.05, 1.5, x));
+            out.bright += fresh * seen * (walls * 0.6 + (1.0 - smoothstep(0.0, 0.9, x)) * 0.2);
+        }
+        radius *= 0.5;
+        size_class += 1u;
+    }
+    out.slope = rot * (grad - up * dot(grad, up));
+    return out;
+}
+
+// Camera-relative position of a vertex: geomorphed toward its parent patch and lowered by
+// prints. Shared by the scene pass and the prepass so both rasterize the same depth.
+fn place_vertex(in: VertexIn, planet: PlanetGpu) -> vec3<f32> {
+    var rel = in.origin + planet_rot(planet) * in.position;
     let up = planet_up(planet, rel);
     // Geomorph toward the parent patch's shape as it nears the distance where it takes over.
     if (in.lod.w > 0.0) {
@@ -179,11 +326,8 @@ fn vs_main(in: VertexIn) -> VertexOut {
         rel += up * (in.normal.w * in.lod.x * MORPH_RANGE * k);
     }
     let flags = u32(round(in.climate.w * 255.0));
-    let ocean = select(0.0, 1.0, (flags & 2u) != 0u);
-    let convex = f32(flags >> 2u) / 63.0 * 2.0 - 1.0;
-
     // Prints and tracks lower fine patches a little (shading carries the detail).
-    if (maps.flags.x > 0.5 && in.lod.x < 1.5 && ocean < 0.5) {
+    if (maps.flags.x > 0.5 && in.lod.x < 1.5 && (flags & 2u) == 0u) {
         let uv = deform_uv(rel);
         let o = 0.35 * in.lod.x / (maps.deform.z * maps.deform.w);
         var d = textureSampleLevel(deform_tex, map_sampler, uv, 0.0).r * 0.4;
@@ -193,20 +337,88 @@ fn vs_main(in: VertexIn) -> VertexOut {
         d += textureSampleLevel(deform_tex, map_sampler, uv - vec2(0.0, o), 0.0).r * 0.15;
         rel -= up * d * inside01(uv);
     }
+    return rel;
+}
+
+@vertex
+fn vs_main(in: VertexIn) -> VertexOut {
+    let planet = planets[in.planet];
+    let rot = planet_rot(planet);
+    let rel = place_vertex(in, planet);
+    let up = planet_up(planet, rel);
+    let flags = u32(round(in.climate.w * 255.0));
+    let ocean = select(0.0, 1.0, (flags & 2u) != 0u);
+    let convex = f32(flags >> 2u) / 63.0 * 2.0 - 1.0;
 
     var out: VertexOut;
     out.rel = rel;
     out.normal = normalize(rot * in.normal.xyz);
     out.up = up;
     out.climate = vec4<f32>(in.climate.x, in.climate.y * 120.0 - 60.0, in.climate.z, in.altitude);
-    out.ocean_paint = vec4<f32>(ocean, vec3<f32>(in.paint.yzw) / 255.0);
-    out.ids = vec2<u32>(in.planet, in.paint.x);
+    let painted = dot(in.paint_a, vec4(1.0)) + dot(in.paint_b, vec4(1.0)) + in.paint_c.x + in.paint_c.y;
+    out.ocean_paint = vec4<f32>(ocean, saturate(painted), in.paint_c.zw);
+    out.planet = in.planet;
+    out.paint_a = in.paint_a;
+    out.paint_b = in.paint_b;
+    out.paint_c = in.paint_c.xy;
     out.lod = vec4<f32>(in.lod.xy, convex, 0.0);
     out.tint = vec4<f32>(in.tint.rgb * in.tint.rgb, in.tint.a);
     out.clip = frame.view_proj * vec4<f32>(rel, 1.0);
     return out;
 }
 
+
+// ---------------------------------------------------------------- depth prepass
+// Depth, normals, roughness and motion for ambient occlusion, contact shadows, reflections and
+// temporal anti-aliasing. The patch normal is enough for those, except where water lies still
+// (open sea, puddles, flooded prints): that is flat and glossy so it mirrors the scene.
+
+struct PrepassOut {
+    @builtin(position) @invariant clip: vec4<f32>,
+    @location(0) normal: vec3<f32>,
+    @location(1) motion_now: vec4<f32>,
+    @location(2) motion_prev: vec4<f32>,
+    @location(3) up: vec3<f32>,
+    @location(4) ocean: f32,
+    @location(5) rel: vec3<f32>,
+};
+
+@vertex
+fn vs_prepass(in: VertexIn) -> PrepassOut {
+    let planet = planets[in.planet];
+    let rel = place_vertex(in, planet);
+    let flags = u32(round(in.climate.w * 255.0));
+    var out: PrepassOut;
+    out.clip = frame.view_proj * vec4<f32>(rel, 1.0);
+    out.normal = normalize(planet_rot(planet) * in.normal.xyz);
+    out.up = planet_up(planet, rel);
+    out.rel = rel;
+    out.motion_now = motion_clip(rel);
+    out.motion_prev = prev_motion_clip(static_prev_rel(rel) - planet.motion.xyz);
+    out.ocean = select(0.0, 1.0, (flags & 2u) != 0u) * planet.params.w;
+    return out;
+}
+
+@fragment
+fn fs_prepass(in: PrepassOut) -> PrepassOutput {
+    // Rain from the surface layers (or the weather where they don't reach), standing water and
+    // prints, pooled the way the scene pass pools them (without the material detail).
+    let suv = surface_uv(in.rel);
+    let layers = textureSampleLevel(surface_tex, map_sampler, suv, 0.0) * inside01(suv) * maps.flags.y;
+    let rain_wet = saturate(max(layers.x, select(0.0, frame.weather.x, maps.flags.y < 0.5)));
+    let duv = deform_uv(in.rel);
+    let depth = textureSampleLevel(deform_tex, map_sampler, duv, 0.0).r * inside01(duv) * maps.flags.x;
+    let snow = smoothstep(0.005, 0.03, layers.z);
+    let pool = max(
+        smoothstep(0.0005, 0.015, layers.y),
+        smoothstep(0.015, 0.04, depth) * smoothstep(0.5, 0.85, rain_wet),
+    );
+    let water = max(pool * (1.0 - snow) * (1.0 - in.ocean), in.ocean);
+    let n = normalize(mix(normalize(in.normal), in.up, water));
+    let ground = 0.85 - 0.35 * rain_wet * (1.0 - snow);
+    let roughness = mix(ground, mix(0.04, 0.08, in.ocean), water);
+    return prepass_output(n, roughness, in.motion_now, in.motion_prev);
+}
 
 // Bump the normal by a scalar height field `h` using screen-space derivatives
 // (Mikkelsen, "Bump Mapping Unparametrized Surfaces on the GPU", 2010).
@@ -218,6 +430,14 @@ fn bump(n: vec3<f32>, dp1: vec3<f32>, dp2: vec3<f32>, dh1: f32, dh2: f32) -> vec
     let b = abs(det) * n - grad;
     let len = length(b);
     return select(n, b / len, len > 1e-12);
+}
+
+// Weight of each painted layer (index 0 = none) at a pixel.
+fn paint_weights(in: VertexOut) -> array<f32, 11> {
+    return array<f32, 11>(
+        0.0, in.paint_a.x, in.paint_a.y, in.paint_a.z, in.paint_a.w,
+        in.paint_b.x, in.paint_b.y, in.paint_b.z, in.paint_b.w, in.paint_c.x, in.paint_c.y,
+    );
 }
 
 // Painted layer -> ground material.
@@ -450,7 +670,7 @@ fn fill_low(amount: f32, height: f32) -> f32 {
 
 @fragment
 fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
-    let planet = planets[in.ids.x];
+    let planet = planets[in.planet];
     let up = normalize(in.up);
     let n_geo = normalize(in.normal);
     let moisture = in.climate.x;
@@ -460,7 +680,7 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     let paint_w = in.ocean_paint.y;
     let variety = in.ocean_paint.z;
     let patches = in.ocean_paint.w;
-    let layer = in.ids.y;
+    var pw = paint_weights(in);
     let tp = tiling_pos(in.rel);
     let dist = length(in.rel);
     // Ridge outlines: where a crest hides the slope behind it, a sliver of that back slope
@@ -561,7 +781,11 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     grass = mix(grass, planet.colors[C_DRY].rgb, worn * 0.3 * smoothstep(0.1, 0.5, pixel));
     col[M_GRASS] = grass;
     // Bare ground (cold, barren, regolith) and dark maria.
-    col[M_SOIL] = mix(planet.colors[C_SOIL].rgb, planet.colors[C_DARK].rgb, mare);
+    // Airless worlds from afar: maria with ragged, gradual shores, and in shades.
+    let airless_far = far * (1.0 - vegetation);
+    let mare_soft = saturate(mare + (far_n.y - 0.5) * 0.7 * airless_far);
+    let mare_col = planet.colors[C_DARK].rgb * mix(1.0, 0.8 + 0.4 * far_n.x, airless_far);
+    col[M_SOIL] = mix(planet.colors[C_SOIL].rgb, mare_col, mare_soft);
     // Woods: the forest floor up close, dark canopy from afar (the foliage module draws the
     // trees themselves).
     let forest_edge = (mid_v - 0.5) * 0.08 * clump_fade + (patch_v - 0.5) * 0.06;
@@ -603,7 +827,7 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     let rock = saturate(smoothstep(rock_slope - 0.08, rock_slope + 0.05, slope + (detail_n - 0.5) * 0.12 * fine_fade) + alpine * 0.8 + sharp * 0.8);
     // Weathered rock: warmer, iron-stained faces next to gray ones, water-darkened gullies.
     let stain = saturate((patch_v - 0.55) * 4.0) * macro_fade;
-    let rock_col = mix(planet.colors[C_ROCK].rgb * (0.85 + 0.3 * variety), planet.colors[C_DARK].rgb, mare)
+    let rock_col = mix(planet.colors[C_ROCK].rgb * (0.85 + 0.3 * variety), mare_col, mare_soft)
         * mix(vec3<f32>(1.0), vec3<f32>(1.08, 0.98, 0.86), stain * vegetation) * (1.0 - gully * 0.3);
     // Layered rock: bands along altitude, warped so they bend with the land, at 37 m and 10 m.
     let strata_h = altitude + (macro_v - 0.5) * 60.0 * macro_fade + (mid_v - 0.5) * 6.0 * clump_fade;
@@ -611,7 +835,7 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
         + sin(strata_h * 0.61 + 1.3) * 0.4 * (1.0 - smoothstep(1.0, 4.0, pixel));
     col[M_ROCK] = rock_col * (1.0 + strata * 0.1);
     let scree = (1.0 - rock) * saturate(smoothstep(rock_slope - 0.14, rock_slope - 0.04, slope) * 0.7 + alpine * 0.6 + stony_crest * 0.9);
-    col[M_GRAVEL] = mix(rock_col, planet.colors[C_SOIL].rgb, 0.35);
+    col[M_GRAVEL] = mix(mix(rock_col, planet.colors[C_SOIL].rgb, 0.35), mix(rock_col, col[M_SOIL], 0.6), 1.0 - vegetation);
     col[M_CONCRETE] = planet.colors[C_CONCRETE].rgb;
     col[M_MUD] = planet.colors[C_MUD].rgb;
     col[M_SNOW] = planet.colors[C_SNOW].rgb;
@@ -625,19 +849,33 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     w[M_SOIL] = 1.0 - veg + max(veg - forest, 0.0) * bare_patch;
     for (var i = 0u; i < MAT_COUNT; i++) { w[i] *= 1.0 - sandy; }
     w[M_SAND] = sandy;
+    // Barren worlds: stony patches in the regolith.
+    let barren = 1.0 - vegetation;
+    let stony = w[M_SOIL] * barren * smoothstep(0.55, 0.8, patch_v + (detail_n - 0.5) * 0.3 * fine_fade) * 0.6;
+    w[M_SOIL] -= stony;
+    w[M_GRAVEL] += stony;
     for (var i = 0u; i < MAT_COUNT; i++) { w[i] *= 1.0 - scree; }
     w[M_GRAVEL] += scree;
     for (var i = 0u; i < MAT_COUNT; i++) { w[i] *= 1.0 - rock; }
     w[M_ROCK] += rock;
-    // Painted ground (snow and mud paint are overlays, below).
-    let painted = paint_material(layer);
-    let paint_base = select(paint_w, 0.0, painted == M_MUD || painted == M_SNOW);
+    // Painted ground, each layer by its weight (snow and mud paint are overlays, below).
+    let paint_base = saturate(paint_w - pw[1] - pw[2]);
     for (var i = 0u; i < MAT_COUNT; i++) { w[i] *= 1.0 - paint_base; }
-    w[painted] += paint_base;
-    col[painted] = mix(col[painted], paint_color(planet, layer), paint_base);
+    for (var l = 3u; l < 11u; l++) {
+        let p = pw[l];
+        if (p > 0.0) {
+            let m = paint_material(l);
+            // The layer's color for its share of the material.
+            col[m] = mix(col[m], paint_color(planet, l), p / max(w[m] + p, 1e-4));
+            w[m] += p;
+        }
+    }
     // Hand-made ground's tint (fields, roads): its color with each material's texture detail.
+    // Snow and mud lie on top of the ground and keep their own colors.
     if (in.tint.a > 0.001) {
-        for (var i = 0u; i < MAT_COUNT; i++) { col[i] = mix(col[i], in.tint.rgb, in.tint.a); }
+        for (var i = 0u; i < MAT_COUNT; i++) {
+            if (i != M_SNOW && i != M_MUD) { col[i] = mix(col[i], in.tint.rgb, in.tint.a); }
+        }
     }
 
     // ---- Sample the materials present and blend them by height.
@@ -646,6 +884,15 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     for (var i = 0u; i < MAT_COUNT; i++) {
         if (w[i] > 0.003) {
             ms[i] = sample_ground(i, tp, n_geo, dp1, dp2, pixel);
+            // Barren worlds' bare ground is powdery regolith, not the cracked earth of the
+            // soil texture: most of its relief and pattern is smoothed away (small craters
+            // stand in for it).
+            if (i == M_SOIL && barren > 0.0) {
+                let k = 0.75 * barren;
+                ms[i].normal = normalize(mix(ms[i].normal, n_geo, k));
+                ms[i].detail = mix(ms[i].detail, vec3<f32>(1.0), k);
+                ms[i].height = mix(ms[i].height, 0.5, k);
+            }
             hmax = max(hmax, ms[i].height + w[i]);
         }
     }
@@ -674,8 +921,25 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     ground_h *= inv_b;
     var n = normalize(select(n_geo, nsum, bsum > 1e-4));
     // Large-scale variation beyond the textures' reach.
-    albedo *= mix(1.0, 0.88 + 0.24 * macro_v, macro_fade) * mix(1.0, 0.9 + 0.2 * far_n.x, far);
-    var porosity = mix(1.0 - rock * 0.6, paint_porosity(layer), paint_w);
+    albedo *= mix(1.0, 0.88 + 0.24 * macro_v, macro_fade) * mix(1.0, 0.9 + 0.2 * far_n.x, far)
+        * mix(1.0, 0.8 + 0.4 * far_n.y, airless_far);
+    // Pockmarks near the camera: craters from 2.5 m down to 30 cm, smaller than the shape's.
+    if (barren > 0.0 && planet.params2.y > 0.0 && pixel < 0.5) {
+        let pock = micro_craters(tp, up, pixel);
+        n = normalize(n - pock.xyz * barren * w[M_SOIL]);
+        albedo *= 1.0 + pock.w * barren * w[M_SOIL];
+    }
+    // Craters too small for the vertices, and fresh craters' bright ejecta.
+    if (planet.params2.y > 0.0 && planet.params2.z > 0.0) {
+        let crater = crater_detail(planet, in.rel, pixel, in.lod.x);
+        // Past the terminator the walls of real craters sit in the shadow of the land around
+        // them (which these slopes cannot cast), so they only shade where the sun is up.
+        let sun_up = smoothstep(-0.02, 0.2, dot(up, frame.sun_dir.xyz));
+        n = normalize(n - crater.slope * sun_up);
+        albedo *= 1.0 + crater.bright;
+    }
+    var porosity = (1.0 - rock * 0.6) * (1.0 - paint_w);
+    for (var l = 1u; l < 11u; l++) { porosity += pw[l] * paint_porosity(l); }
     var reflectance = 0.5;
     var subsurface = 0.0;
 
@@ -719,7 +983,7 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     let fallen = max(layers.z, select(0.0, frame.weather.y * 0.1, maps.flags.y < 0.5));
     let weather_snow = smoothstep(0.004, 0.04, fallen + (detail_f - 0.5) * 0.01 * fine_fade)
         * (1.0 - smoothstep(0.55, 0.8, snow_slope));
-    let painted_snow = select(0.0, paint_w, layer == 2u);
+    let painted_snow = pw[2];
     let snow_amount = saturate(max(max(climate_snow, weather_snow), painted_snow)) * (1.0 - ocean);
     var snow = 0.0;
     if (snow_amount > 0.003) {
@@ -747,11 +1011,10 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     let wet = saturate(rain_wet) * porosity;
     // Bare soil turns to mud; grass stays grass (darker, with a sheen) unless it is trodden.
     let natural_bare = 1.0 - veg;
-    let painted_bare = select(0.0, 1.0, layer == 0u || layer == 1u || layer == 4u || layer == 8u || layer == 10u);
-    let bare = mix(natural_bare, painted_bare, paint_w);
+    let bare = natural_bare * (1.0 - paint_w) + pw[1] + pw[4] + pw[8] + pw[10];
     let trodden = saturate(depth * 25.0) * print_fade + flattened * 0.6;
     let soil_like = (1.0 - rock) * saturate(bare + trodden);
-    let mud_amount = saturate(max(select(0.0, paint_w, layer == 1u), wet * soil_like * smoothstep(0.55, 0.9, rain_wet) * 0.8)) * (1.0 - snow);
+    let mud_amount = saturate(max(pw[1], wet * soil_like * smoothstep(0.55, 0.9, rain_wet) * 0.8)) * (1.0 - snow);
     var mud = 0.0;
     if (mud_amount > 0.003) {
         mud = fill_low(mud_amount, ground_h) * 0.9;
@@ -812,6 +1075,9 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     }
     if (frame.counts.z == 3u) {
         return vec4<f32>(vec3(sky_visibility(in.rel, n)), 1.0);
+    }
+    if (frame.counts.z == 4u) {
+        return vec4<f32>(vec3(screen_ao(in.rel)), 1.0);
     }
 
     var s = default_surface();

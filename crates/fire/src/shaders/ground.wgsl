@@ -24,12 +24,18 @@ struct GroundParams {
 @group(1) @binding(3) var layer_sampler: sampler;
 @group(1) @binding(4) var scorch_map: texture_2d<f32>;  // R = fire scorch over the rectangle
 @group(1) @binding(5) var scorch_sampler: sampler;
+@group(1) @binding(6) var heights: texture_2d<f32>;     // ground height above the center at each vertex, (GRID + 1)²
 
 struct GroundOut {
     @builtin(position) clip: vec4<f32>,
     @location(0) rel: vec3<f32>,
     @location(1) local: vec2<f32>,
+    @location(2) up: vec3<f32>,
 };
+
+fn vertex_height(c: vec2<i32>) -> f32 {
+    return textureLoad(heights, clamp(c, vec2<i32>(0), vec2<i32>(i32(GRID))), 0).r;
+}
 
 const GRID: u32 = 48u;
 
@@ -43,11 +49,21 @@ fn vs_ground(@builtin(vertex_index) index: u32) -> GroundOut {
     let cell = vec2<u32>(quad % GRID, quad / GRID) + corner;
     let f = vec2<f32>(cell) / f32(GRID);
     let local = (f * 2.0 - 1.0) * ground.extent.xy;
-    let rel = ground.origin.xyz + vec3<f32>(local.x, 0.0, local.y);
+    // Draped over the ground; the normal from the neighboring vertices.
+    let c = vec2<i32>(cell);
+    let lo = max(c - 1, vec2<i32>(0));
+    let hi = min(c + 1, vec2<i32>(i32(GRID)));
+    let step = 2.0 * ground.extent.xy / f32(GRID);
+    let dx = (vertex_height(vec2<i32>(hi.x, c.y)) - vertex_height(vec2<i32>(lo.x, c.y)))
+        / (f32(hi.x - lo.x) * step.x);
+    let dz = (vertex_height(vec2<i32>(c.x, hi.y)) - vertex_height(vec2<i32>(c.x, lo.y)))
+        / (f32(hi.y - lo.y) * step.y);
+    let rel = ground.origin.xyz + vec3<f32>(local.x, vertex_height(c), local.y);
     var out: GroundOut;
     out.clip = frame.view_proj * vec4<f32>(rel, 1.0);
     out.rel = rel;
     out.local = local;
+    out.up = normalize(vec3<f32>(-dx, 1.0, -dz));
     return out;
 }
 
@@ -197,9 +213,11 @@ fn fs_ground(in: GroundOut) -> @location(0) vec4<f32> {
         nrm *= 1.0 - 0.6 * k;
     }
 
-    // Tangent space: +X along world X, image-up along world -Z.
+    // Tangent space: +X along world X, image-up along world -Z, tilted with the ground.
     let tn = vec3<f32>(nrm.x, nrm.y, sqrt(saturate(1.0 - dot(nrm, nrm))));
-    let n = normalize(vec3<f32>(tn.x, tn.z, -tn.y));
+    let up = normalize(in.up);
+    let tx = normalize(vec3<f32>(1.0, 0.0, 0.0) - up * up.x);
+    let n = normalize(tx * tn.x + up * tn.z - cross(tx, up) * tn.y);
 
     var s = default_surface();
     s.albedo = albedo;

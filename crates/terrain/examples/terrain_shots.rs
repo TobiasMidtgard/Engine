@@ -130,6 +130,31 @@ fn views() -> Vec<View> {
             ..BASE
         },
         View {
+            name: "painted_snow",
+            eye: DVec3::new(-35.0, 38.0, 75.0),
+            target: DVec3::new(15.0, 0.0, -45.0),
+            sun: (230.0, 32.0),
+            painted: true,
+            ground: Ground::Snow,
+            ..BASE
+        },
+        View {
+            name: "painted_patchwork",
+            eye: DVec3::new(-60.0, 32.0, -150.0),
+            target: DVec3::new(20.0, 0.0, -260.0),
+            sun: (230.0, 32.0),
+            painted: true,
+            ..BASE
+        },
+        View {
+            name: "painted_border",
+            eye: DVec3::new(-4.0, 2.2, -172.0),
+            target: DVec3::new(8.0, 0.0, -200.0),
+            sun: (235.0, 28.0),
+            painted: true,
+            ..BASE
+        },
+        View {
             name: "earth_range",
             eye: DVec3::new(-600.0, 0.0, -1_500.0),
             target: DVec3::new(2_000.0, 1_200.0, -32_000.0),
@@ -263,6 +288,14 @@ fn painted_ground(x: f64, z: f64) -> Option<OverlayPaint> {
             1 => OverlayPaint::tint([0.17, 0.11, 0.24], 0.8),
             _ => OverlayPaint::layer("dirt", 1.0).tinted([0.11, 0.075, 0.045], 0.6),
         });
+    }
+    // A patchwork of grounds at full weight meeting edge to edge, the way a level paints its
+    // valley cover by cover: their borders blend instead of stepping along triangles.
+    if (-170.0..170.0).contains(&x) && (-330.0..-170.0).contains(&z) {
+        let (wx, wz) = (x + 9.0 * (z / 23.0).sin(), z + 9.0 * (x / 31.0).sin());
+        let cell = ((wx / 40.0).floor() as i64 * 7 + (wz / 40.0).floor() as i64 * 3).rem_euclid(5);
+        let layer = ["grass", "sand", "dirt", "gravel", "leaves"][cell as usize];
+        return Some(OverlayPaint::layer(layer, 1.0));
     }
     // Woods: leaf litter.
     if (-170.0..-30.0).contains(&x) && (-150.0..-25.0).contains(&z) {
@@ -410,9 +443,14 @@ fn main() {
         let mut eye = view.eye;
         if let Some(h) = view.above_ground {
             let ground = app.world.resource::<engine_world::Ground>().clone();
-            let y = ground
-                .height(DVec3::new(eye.x, 50_000.0, eye.z))
-                .unwrap_or(0.0);
+            // On a planet the ground is found along the local vertical, so ask again from
+            // just above it: from high up the answer lies a little to the side.
+            let mut y = 50_000.0;
+            for _ in 0..3 {
+                y = ground
+                    .height(DVec3::new(eye.x, y + 10.0, eye.z))
+                    .unwrap_or(0.0);
+            }
             eye.y = y + h;
         }
         app.world.spawn((

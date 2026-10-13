@@ -13,7 +13,7 @@
 //! The solver knows nothing about the ECS. The plugin feeds it frames (bones, entities),
 //! colliders and wind each step and reads back positions and reaction impulses.
 
-use engine_core::math::{DVec3, Mat3, Quat, Vec3};
+use engine_core::math::{DVec3, IVec3, Mat3, Quat, Vec3};
 use engine_world::WorldShift;
 
 use crate::collide::{LocalCollider, PosedCollider};
@@ -165,6 +165,9 @@ pub struct SimParams {
     /// edge off extreme accelerations (a dashing character's cape and hair) without
     /// changing how they move at normal speeds.
     pub follow: Option<(u16, f32)>,
+    /// Cloth against itself: particles stay this far (m) from the body's own triangles, on
+    /// the side they came from. 0 = off.
+    pub self_collide: f32,
 }
 
 impl Default for SimParams {
@@ -182,6 +185,7 @@ impl Default for SimParams {
             aero: None,
             max_speed: 60.0,
             follow: None,
+            self_collide: 0.0,
         }
     }
 }
@@ -235,6 +239,7 @@ pub struct Sim {
     pub contacts: u32,
     accel: Vec<Vec3>,
     posed: Vec<PosedCollider>,
+    self_contacts: SelfContacts,
 }
 
 impl Sim {
@@ -495,6 +500,16 @@ impl Sim {
             self.finish_step();
             return;
         }
+        if self.params.self_collide > 0.0 && !self.aero_triangles.is_empty() {
+            self.self_contacts.update(
+                &self.pos,
+                &self.inv_mass,
+                &self.aero_triangles,
+                self.params.self_collide,
+            );
+        } else {
+            self.self_contacts = SelfContacts::default();
+        }
         let n = self.substeps_for(dt);
         let h = dt / n as f32;
         for k in 0..n {
@@ -651,6 +666,17 @@ impl Sim {
         for s in &mut self.shapes {
             solve_shape(s, pos, w, h, inv_h2);
         }
+        if !self.self_contacts.pairs.is_empty() {
+            collide_self(
+                pos,
+                &self.prev,
+                w,
+                &self.aero_triangles,
+                p.self_collide,
+                p.friction,
+                &self.self_contacts.pairs,
+            );
+        }
 
         // Collisions.
         self.posed.clear();
@@ -722,6 +748,215 @@ impl Sim {
             self.vel[i] = v;
         }
     }
+}
+
+/// Candidate pairs for cloth self-collision (a Verlet list): each particle with the
+/// triangles it is within `gap` plus a skin of, found again only once the cloth has bent
+/// by half the skin. Swinging and turning as a whole (a curtain swaying, a cape on a
+/// running character) doesn't count, since it changes no distances.
+#[derive(Debug, Clone, Default)]
+struct SelfContacts {
+    pairs: Vec<(u32, u32)>,
+    /// Positions at the last search, about their center.
+    at_search: Vec<Vec3>,
+    /// How the cloth has turned since the last search.
+    turned: Quat,
+    /// Farthest any particle has bent away from the turned search shape, m.
+    bent: f32,
+    skin: f32,
+    /// Particles bucketed by hashed cell: bucket starts, then particle ids.
+    starts: Vec<u32>,
+    ids: Vec<u32>,
+}
+
+impl SelfContacts {
+    fn update(&mut self, pos: &[Vec3], w: &[f32], triangles: &[[u32; 3]], gap: f32) {
+        let center = pos.iter().sum::<Vec3>() / pos.len().max(1) as f32;
+        let mut growth = 0.5 * gap;
+        if self.at_search.len() == pos.len() {
+            let mut a = Mat3::ZERO;
+            for (p, s) in pos.iter().zip(&self.at_search) {
+                let r = *p - center;
+                a += Mat3::from_cols(r * s.x, r * s.y, r * s.z);
+            }
+            extract_rotation(&a, &mut self.turned, 3);
+            let rot = Mat3::from_quat(self.turned);
+            let bent = pos
+                .iter()
+                .zip(&self.at_search)
+                .map(|(p, s)| (*p - center - rot * *s).length_squared())
+                .fold(0.0, f32::max)
+                .sqrt();
+            growth = (bent - self.bent).max(0.0);
+            self.bent = bent;
+            // Safe for one more step at this rate: no pair can have closed the skin.
+            if 2.0 * (bent + growth) <= self.skin {
+                return;
+            }
+        }
+        let sample = triangles.len().min(64);
+        let edge = triangles[..sample]
+            .iter()
+            .map(|t| (pos[t[1] as usize] - pos[t[0] as usize]).length())
+            .sum::<f32>()
+            / sample as f32;
+        // A few steps of bending at the current rate, but under half a triangle, so
+        // neighbours in the same sheet (a triangle away) never become candidates.
+        self.skin = (4.0 * growth)
+            .max(2.0 * gap)
+            .min((0.5 * edge - gap).max(gap));
+        self.at_search.clear();
+        self.at_search.extend(pos.iter().map(|p| *p - center));
+        self.turned = Quat::IDENTITY;
+        self.bent = 0.0;
+        self.search(pos, w, triangles, gap + self.skin, edge);
+    }
+
+    /// Every free particle within `reach` of a triangle (not its own), over or beside it.
+    fn search(&mut self, pos: &[Vec3], w: &[f32], triangles: &[[u32; 3]], reach: f32, edge: f32) {
+        self.pairs.clear();
+        let inv = 1.0 / edge.max(reach).max(1e-3);
+        // Dense hashing: cells hash into twice as many buckets as particles, filled by
+        // counting.
+        let mask = (2 * pos.len()).next_power_of_two() as u32 - 1;
+        let bucket = |c: IVec3| -> usize {
+            let h = (c.x.wrapping_mul(92_837_111))
+                ^ (c.y.wrapping_mul(689_287_499))
+                ^ (c.z.wrapping_mul(283_923_481));
+            (h as u32 & mask) as usize
+        };
+        let cell_of = |p: Vec3| (p * inv).floor().as_ivec3();
+        let (starts, ids) = (&mut self.starts, &mut self.ids);
+        starts.clear();
+        starts.resize(mask as usize + 2, 0);
+        for p in pos {
+            starts[bucket(cell_of(*p)) + 1] += 1;
+        }
+        for b in 1..starts.len() {
+            starts[b] += starts[b - 1];
+        }
+        ids.clear();
+        ids.resize(pos.len(), 0);
+        let mut fill = starts.clone();
+        for (i, p) in pos.iter().enumerate() {
+            let b = bucket(cell_of(*p));
+            ids[fill[b] as usize] = i as u32;
+            fill[b] += 1;
+        }
+        let beside = -reach / edge.max(1e-3) - 0.05;
+        for (t, tri) in triangles.iter().enumerate() {
+            let [a, b, c] = tri.map(|i| pos[i as usize]);
+            let Some(n) = (b - a).cross(c - a).try_normalize() else {
+                continue;
+            };
+            let (lo, hi) = (a.min(b).min(c) - reach, a.max(b).max(c) + reach);
+            let (clo, chi) = (cell_of(lo), cell_of(hi));
+            if (chi - clo).max_element() > 4 {
+                continue; // torn loose and stretched across the scene
+            }
+            for z in clo.z..=chi.z {
+                for y in clo.y..=chi.y {
+                    for x in clo.x..=chi.x {
+                        let slot = bucket(IVec3::new(x, y, z));
+                        for &i in &ids[starts[slot] as usize..starts[slot + 1] as usize] {
+                            let p = pos[i as usize];
+                            if w[i as usize] == 0.0
+                                || p.cmplt(lo).any()
+                                || p.cmpgt(hi).any()
+                                || tri.contains(&i)
+                            {
+                                continue;
+                            }
+                            let d = (p - a).dot(n);
+                            if d.abs() < reach
+                                && barycentric(p - n * d, a, b, c).iter().all(|&u| u > beside)
+                            {
+                                self.pairs.push((i, t as u32));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Keep each candidate particle at least `gap` from its triangle, on the side it was on at
+/// the start of the substep, with friction, sharing the push between them by inverse mass.
+fn collide_self(
+    pos: &mut [Vec3],
+    prev: &[Vec3],
+    w: &[f32],
+    triangles: &[[u32; 3]],
+    gap: f32,
+    friction: f32,
+    pairs: &[(u32, u32)],
+) {
+    for &(i, t) in pairs {
+        let i = i as usize;
+        let [ia, ib, ic] = triangles[t as usize].map(|j| j as usize);
+        let (a, b, c) = (pos[ia], pos[ib], pos[ic]);
+        let Some(n) = (b - a).cross(c - a).try_normalize() else {
+            continue;
+        };
+        let d = (pos[i] - a).dot(n);
+        if d.abs() >= gap {
+            continue;
+        }
+        let bary = barycentric(pos[i] - n * d, a, b, c);
+        if bary.iter().any(|&x| x < -0.02) {
+            continue;
+        }
+        // The side it was on before this substep moved anything.
+        let was = (prev[i] - prev[ia]).dot((prev[ib] - prev[ia]).cross(prev[ic] - prev[ia]));
+        let side = if was.abs() > 1e-12 {
+            was.signum()
+        } else {
+            d.signum()
+        };
+        let short = gap - side * d;
+        if short <= 0.0 {
+            continue;
+        }
+        let wt: f32 = [ia, ib, ic]
+            .iter()
+            .zip(bary)
+            .map(|(&j, b)| w[j] * b * b)
+            .sum();
+        let total = w[i] + wt;
+        if total <= 0.0 {
+            continue;
+        }
+        // Friction: cancel up to `friction × push` of their sliding past each other.
+        let moved = |j: usize| pos[j] - prev[j];
+        let rel = moved(i) - (moved(ia) * bary[0] + moved(ib) * bary[1] + moved(ic) * bary[2]);
+        let slide = rel - n * rel.dot(n);
+        let limit = friction * short;
+        let slide = if slide.length_squared() > limit * limit {
+            slide * (limit / slide.length())
+        } else {
+            slide
+        };
+        let push = (n * (side * short) - slide) / total;
+        pos[i] += push * w[i];
+        for (&j, b) in [ia, ib, ic].iter().zip(bary) {
+            pos[j] -= push * (w[j] * b);
+        }
+    }
+}
+
+/// Barycentric weights of `p` (in the triangle's plane) in triangle `a b c`.
+fn barycentric(p: Vec3, a: Vec3, b: Vec3, c: Vec3) -> [f32; 3] {
+    let (v0, v1, v2) = (b - a, c - a, p - a);
+    let (d00, d01, d11) = (v0.dot(v0), v0.dot(v1), v1.dot(v1));
+    let (d20, d21) = (v2.dot(v0), v2.dot(v1));
+    let den = d00 * d11 - d01 * d01;
+    if den.abs() < 1e-20 {
+        return [1.0, 0.0, 0.0];
+    }
+    let v = (d11 * d20 - d01 * d21) / den;
+    let w = (d00 * d21 - d01 * d20) / den;
+    [1.0 - v - w, v, w]
 }
 
 /// Two cheap, smooth pseudo-random signals in -1..1 that vary over space and time (gusts).

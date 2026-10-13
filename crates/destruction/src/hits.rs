@@ -269,7 +269,8 @@ pub struct Ctx<'a> {
     pub rng: &'a mut Rng,
     pub pending: &'a mut PendingDebris,
     pub stats: &'a mut DestructionStats,
-    pub dust_events: Vec<(DVec3, f32, f32)>,
+    /// Clouds for the smoke module: position, size (m), darkness, temperature (°C).
+    pub dust_events: Vec<(DVec3, f32, f32, f32)>,
     pub noise_events: Vec<(DVec3, f32)>,
 }
 
@@ -282,7 +283,7 @@ impl Ctx<'_> {
             darkness,
             count,
         });
-        self.dust_events.push((at, size, darkness));
+        self.dust_events.push((at, size, darkness, 25.0));
     }
 
     pub(crate) fn chips(
@@ -418,7 +419,8 @@ pub fn apply_hits_system(
                         position: center,
                         velocity: Vec3::Y * 3.0,
                         radius: 0.8 * scale,
-                        mass_kg: (0.05 * scale * scale * scale).min(3.0),
+                        // A smoke grenade's cloud is about 0.5 kg.
+                        mass_kg: (0.01 * scale * scale * scale).min(0.5),
                         temperature_c: 250.0,
                         darkness: 0.55,
                     });
@@ -479,14 +481,21 @@ pub fn apply_hits_system(
                 }
             }
         }
-        for (at, size, darkness) in std::mem::take(&mut ctx.dust_events) {
-            if size > 0.6 {
+        for (at, size, darkness, temperature_c) in std::mem::take(&mut ctx.dust_events) {
+            let hot = temperature_c > 100.0;
+            if size > 0.6 || hot {
+                // Light: the smoke module keeps clouds around for a long time, and a dense
+                // one hides the breach the player is looking at.
                 smoke.push(SmokeEmission {
                     position: at,
-                    velocity: Vec3::Y * 0.8,
+                    velocity: Vec3::Y * if hot { 2.5 } else { 0.8 },
                     radius: size * 0.6,
-                    mass_kg: (0.02 * size * size).min(1.0),
-                    temperature_c: 25.0,
+                    mass_kg: if hot {
+                        0.002
+                    } else {
+                        (0.008 * size * size).min(0.4)
+                    },
+                    temperature_c,
                     darkness,
                 });
             }
@@ -1252,7 +1261,8 @@ fn cut(
             mid.y as f64,
             (side * t * 0.5) as f64,
         ));
-        ctx.dust_events.push((at, 0.7, 0.05));
+        // Hot, so it rises off the cut in a plume instead of filling the bay.
+        ctx.dust_events.push((at, 0.5, 0.05, 700.0));
     }
     let islands = state.detach_unsupported();
     for island in islands {

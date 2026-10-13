@@ -29,6 +29,7 @@ pub use chunk::{ChunkMesh, ChunkSource, TerrainVertex};
 pub use cube::{NodeKey, SurfaceMap, TerrainDomain, home_rotation};
 pub use deform::{DeformationMap, DeformationSettings};
 pub use edits::{EditLayer, LocalEdit, OverlayPaint, PAINT_NAMES, paint_index};
+pub use ground::GroundSurface;
 pub use palette::TerrainPalette;
 pub use shape::{
     Climate, FlatPad, HeightOverlay, OverlayPaintFn, PlanetShape, ShapeSample, dir_from_lat_lon,
@@ -60,6 +61,10 @@ pub struct PlanetTerrain {
     pub cast_shadows: bool,
     /// Answer the world's `Ground` query (height, normal, surface material) from this terrain.
     pub ground: bool,
+    /// Another query that names the surface material while this terrain answers height and
+    /// normal (see [`Self::with_ground_surface`]). Not saved with the terrain.
+    #[serde(skip)]
+    pub ground_surface: Option<GroundSurface>,
     /// Keep physics heightfield colliders around the simulation focus.
     pub colliders: bool,
 }
@@ -82,6 +87,7 @@ impl PlanetTerrain {
             ocean_surface: true,
             cast_shadows: true,
             ground: true,
+            ground_surface: None,
             colliders: true,
         }
     }
@@ -133,9 +139,12 @@ impl PlanetTerrain {
     ///
     /// `height(x, z)` returns the world y of the ground at world `(x, z)` in the home frame
     /// that [`home_transform`](Self::home_transform) sets up (or the space module's frame on
-    /// the same spot), as if the world were flat. The terrain bends it onto the planet so the
-    /// ground passes exactly through those points, and everything reads it: rendering, the
-    /// `Ground` query, footprints and physics colliders. Call it after `with_pad`/`with_radius`.
+    /// the same spot). The ground passes exactly through `(x, height(x, z), z)`: the terrain
+    /// converts it to heights on the sphere itself. A level built flat stays flat, standing
+    /// up to `r² / 2R` above the curved planet (6 m at 9 km on Earth) until the blend; one whose
+    /// heights already drop by `(x² + z²) / 2R` follows the sphere. Everything reads it:
+    /// rendering, the `Ground` query, footprints and physics colliders. Call it after
+    /// `with_pad`/`with_radius`.
     ///
     /// ```ignore
     /// let terrain = PlanetTerrain::earthlike(7)
@@ -222,8 +231,28 @@ impl PlanetTerrain {
         self
     }
 
+    /// Let another ground query name the surface material (grass, mud, snow...) while this
+    /// terrain keeps answering height and normal, edits included: for hand-made ground whose
+    /// materials live elsewhere. It is asked half a meter above the surface point. Where it
+    /// returns `None`, under the sea and where an edit painted a layer, the terrain's own
+    /// material answers.
+    ///
+    /// Never pass the world's `Ground`: with `ground` on, that is this terrain asking itself.
+    ///
+    /// ```ignore
+    /// let earth = PlanetTerrain::earthlike(7)
+    ///     .with_pad(pad)
+    ///     .with_overlay(9_000.0, 6_000.0, valley_height)
+    ///     .with_ground_surface(Arc::new(ValleyMaterials::new()));
+    /// ```
+    pub fn with_ground_surface(mut self, query: Arc<dyn engine_world::GroundQuery>) -> Self {
+        self.ground_surface = Some(GroundSurface(query));
+        self
+    }
+
     /// The transform that puts `pad`'s center at the world origin with +Y up and north toward
-    /// −Z (planet center at about `(0, −radius − pad height, 0)`).
+    /// −Z, or as the pad's `heading_deg` turns it (planet center at about
+    /// `(0, −radius − pad height, 0)`).
     ///
     /// `Transform` holds an `f32` rotation, which is only good to ~0.4 m at Earth's radius, so
     /// the translation is computed for the rotation as stored: the pad lands on the origin
@@ -232,7 +261,7 @@ impl PlanetTerrain {
         if !matches!(self.domain, TerrainDomain::Sphere) {
             return Transform::from_translation(DVec3::new(0.0, -pad.height_m, 0.0));
         }
-        let rot = home_rotation(pad.lat_deg, pad.lon_deg).as_quat();
+        let rot = pad.home_rotation().as_quat();
         let stored = rot.as_dquat().normalize();
         let pad_point = pad.direction() * (self.shape.radius_m + pad.height_m);
         Transform::from_translation(-(stored * pad_point)).with_rotation(rot)
@@ -366,6 +395,17 @@ impl TerrainRuntime {
         }
     }
 
+    /// This terrain as the ground query sees it.
+    pub fn ground_terrain(&self) -> ground::GroundTerrain {
+        ground::GroundTerrain {
+            source: self.source.clone(),
+            palette: self.config.palette.clone(),
+            position: self.position,
+            rotation: self.rotation,
+            surface_override: self.config.ground_surface.clone(),
+        }
+    }
+
     /// World point → terrain-local.
     pub fn to_local(&self, p: DVec3) -> DVec3 {
         self.rotation.inverse() * (p - self.position)
@@ -410,13 +450,8 @@ impl Terrains {
         materials: &SurfaceMaterials,
     ) -> Option<(DVec3, Vec3, engine_world::SurfaceId, f64)> {
         let (_, t) = self.nearest(p)?;
-        let g = ground::GroundTerrain {
-            source: t.source.clone(),
-            palette: t.config.palette.clone(),
-            position: t.position,
-            rotation: t.rotation,
-        };
-        g.surface(p, &palette::SurfaceIds::new(materials))
+        t.ground_terrain()
+            .surface(p, &palette::SurfaceIds::new(materials))
     }
 }
 
@@ -553,12 +588,7 @@ fn sync_terrains(
         .entries
         .values()
         .filter(|t| t.config.ground)
-        .map(|t| ground::GroundTerrain {
-            source: t.source.clone(),
-            palette: t.config.palette.clone(),
-            position: t.position,
-            rotation: t.rotation,
-        })
+        .map(TerrainRuntime::ground_terrain)
         .collect();
     if list.is_empty() {
         if *installed {
@@ -650,12 +680,7 @@ fn apply_edits(
             .entries
             .values()
             .filter(|t| t.config.ground)
-            .map(|t| ground::GroundTerrain {
-                source: t.source.clone(),
-                palette: t.config.palette.clone(),
-                position: t.position,
-                rotation: t.rotation,
-            })
+            .map(TerrainRuntime::ground_terrain)
             .collect();
         if !list.is_empty() {
             *ground = engine_world::Ground(ground::provider(list, &materials));
@@ -910,15 +935,34 @@ mod tests {
 
     #[test]
     fn overlay_ground_passes_through_its_points() {
+        // Also with the planet turned under the level (north toward +Z).
+        for heading_deg in [0.0, 180.0] {
+            overlay_passes_through_its_points(heading_deg);
+        }
+    }
+
+    fn overlay_passes_through_its_points(heading_deg: f64) {
         let valley = |x: f64, z: f64| 12.0 + 0.02 * x + (z / 150.0).sin() * 6.0;
         let mut app = App::new();
         app.add_plugins(engine_world::WorldPlugin)
             .add_plugins(TerrainPlugin);
-        let pad = FlatPad::default();
+        let pad = FlatPad {
+            heading_deg,
+            ..FlatPad::default()
+        };
         let t = PlanetTerrain::earthlike(3)
             .with_radius(6_371_000.0)
             .with_pad(pad)
             .with_overlay(8_000.0, 3_000.0, valley);
+        // North is where the heading turned it.
+        let rot = t.home_transform(pad).rotation.as_dquat();
+        let r = 6_371_060.0;
+        let to_pole = rot * (dir_from_lat_lon(40.01, 0.0) * r - dir_from_lat_lon(40.0, 0.0) * r);
+        let north_z = if heading_deg == 0.0 { -1.0 } else { 1.0 };
+        assert!(
+            to_pole.z * north_z > 1_000.0 && to_pole.x.abs() < 1.0,
+            "{to_pole:?}"
+        );
         let tf = t.home_transform(pad);
         app.world.spawn((tf, t));
         app.world.spawn((
@@ -937,7 +981,7 @@ mod tests {
             let h = g.height(DVec3::new(x, 500.0, z)).unwrap();
             assert!(
                 (h - valley(x, z)).abs() < 0.01,
-                "({x}, {z}): {h} vs {}",
+                "{heading_deg}°: ({x}, {z}): {h} vs {}",
                 valley(x, z)
             );
         }
@@ -1026,6 +1070,65 @@ mod tests {
         assert!(h < -3.0, "crater floor {h}");
         let t = app.world.resource::<Terrains>();
         assert_eq!(t.entries.values().next().unwrap().edits.len(), 1);
+    }
+
+    /// An override names the ground; height, normal and edits stay the terrain's, and a layer
+    /// an edit painted wins over the override.
+    #[test]
+    fn ground_surface_override_names_the_ground() {
+        struct EastSand(engine_world::SurfaceId);
+        impl engine_world::GroundQuery for EastSand {
+            fn sample(&self, p: DVec3) -> Option<engine_world::GroundSample> {
+                (p.x > 0.0).then_some(engine_world::GroundSample {
+                    height: 1_000.0,
+                    normal: Vec3::X,
+                    surface: self.0,
+                })
+            }
+        }
+        let mut app = App::new();
+        app.add_plugins(engine_world::WorldPlugin)
+            .add_plugins(TerrainPlugin);
+        let mats = app.world.resource::<SurfaceMaterials>();
+        let (sand, grass, mud) = (mats.id("sand").unwrap(), mats.id("grass"), mats.id("mud"));
+        let pad = FlatPad::default();
+        let t = PlanetTerrain::earthlike(3)
+            .with_pad(pad)
+            .with_ground_surface(Arc::new(EastSand(sand)));
+        app.world.spawn((t.home_transform(pad), t));
+        app.world.spawn((
+            Transform::from_xyz(0.0, 2.0, 0.0),
+            engine_world::SimulationFocus::default(),
+        ));
+        app.update_n(2);
+        let g = app.world.resource::<engine_world::Ground>().clone();
+        let east = g.sample(DVec3::new(10.0, 5.0, -20.0)).expect("ground");
+        assert!(east.height.abs() < 0.05, "pad height {}", east.height);
+        assert!(east.normal.y > 0.999);
+        assert_eq!(east.surface, sand);
+        let west = g.sample(DVec3::new(-10.0, 5.0, -20.0)).expect("ground");
+        assert_eq!(Some(west.surface), grass);
+
+        app.world.write_message(TerrainEdit {
+            center: DVec3::new(20.0, 0.0, 20.0),
+            shape: EditShape::Sphere { radius: 6.0 },
+            op: EditOp::Paint,
+            surface: mud,
+            source: None,
+        });
+        app.world.write_message(TerrainEdit {
+            center: DVec3::new(30.0, 0.0, -30.0),
+            shape: EditShape::Sphere { radius: 4.0 },
+            op: EditOp::Remove,
+            surface: None,
+            source: None,
+        });
+        app.update_n(2);
+        let g = app.world.resource::<engine_world::Ground>().clone();
+        let painted = g.sample(DVec3::new(20.0, 5.0, 20.0)).unwrap();
+        assert_eq!(Some(painted.surface), mud);
+        let pit = g.sample(DVec3::new(30.0, 5.0, -30.0)).unwrap();
+        assert!(pit.height < -3.0, "pit floor {}", pit.height);
     }
 
     #[test]

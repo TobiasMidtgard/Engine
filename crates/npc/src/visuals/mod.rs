@@ -10,7 +10,8 @@
 //! a muzzle flash and kick); archers draw to the jaw. Faces show under open helmets worn over
 //! mail coifs. The helmet's horsehair crest shows skill (grey rookie, bronze, silver, gold
 //! master) and a light in its brow band glows with alertness (yellow suspicious, orange
-//! searching, red fighting).
+//! searching, red fighting). Their painted armor shows skill too: a rookie's is nearly new, a
+//! veteran's or master's chipped to the steel, scratched, dented and dirty.
 //!
 //! Animals are sculpted procedural red deer, grey wolves, rabbits and starlings (see
 //! `art::animals`; cheap primitives without the renderer). They plant their feet as they walk,
@@ -118,8 +119,8 @@ const WOOD: u32 = 0x7a5230;
 fn faction_color(f: Option<&Faction>) -> u32 {
     match f.map(|f| f.0) {
         Some(0) => 0x3d8a4e,
-        Some(1) => 0xb93c2e,
-        Some(2) => 0x2f6ad8,
+        Some(1) => 0xb02f35,
+        Some(2) => 0x3272e6,
         _ => 0x8a8a8a,
     }
 }

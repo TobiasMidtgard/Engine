@@ -49,6 +49,10 @@ pub(crate) fn follow_world_shifts(
             mantle.top = s.point(mantle.top);
             mantle.forward = s.direction(mantle.forward);
         }
+        if let Some(hang) = &mut m.hang {
+            hang.top = s.point(hang.top);
+            hang.normal = s.direction(hang.normal);
+        }
         if let Some(req) = &mut m.pending_dash {
             req.to = s.point(req.to);
         }
@@ -57,7 +61,7 @@ pub(crate) fn follow_world_shifts(
         }
     }
     for mut b in &mut brains {
-        if let Brain::Runner { origin, .. } = &mut *b {
+        if let Brain::Runner { origin, .. } | Brain::Climber { origin, .. } = &mut *b {
             *origin = s.point(*origin);
         }
     }

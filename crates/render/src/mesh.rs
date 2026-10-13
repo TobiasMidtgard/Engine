@@ -176,6 +176,21 @@ pub enum Shape {
     Quad {
         size: [f32; 2],
     },
+    /// Box with rounded edges and corners of `radius` meters, like anything real (crates,
+    /// walls, steps, furniture): the rounded edges catch the light. `segments` per quarter
+    /// circle (0 = automatic).
+    RoundedCuboid {
+        size: [f32; 3],
+        radius: f32,
+        segments: u32,
+    },
+    /// A faceted, weathered rock `size` meters across, different for every `seed`, resting on
+    /// its base. `detail` subdivision level 1..=7 (0 = automatic for the size). See `rock`.
+    Rock {
+        size: [f32; 3],
+        seed: u32,
+        detail: u32,
+    },
 }
 
 impl Shape {
@@ -184,34 +199,128 @@ impl Shape {
         format!("shape:{self:?}")
     }
 
+    /// The triangle mesh. Round shapes with `segments: 0` get enough segments that their
+    /// silhouettes stay smooth at any size (`auto_segments`).
     pub fn mesh(&self) -> Mesh {
+        let auto = |segments: u32, radius: f32| {
+            if segments == 0 {
+                auto_segments(radius)
+            } else {
+                segments.max(3)
+            }
+        };
         match *self {
             Shape::Cuboid { size } => cuboid(Vec3::from(size)),
-            Shape::Sphere { radius, segments } => uv_sphere(radius, segments.max(3)),
+            Shape::Sphere { radius, segments } => uv_sphere(radius, auto(segments, radius)),
             Shape::Plane { size, subdivisions } => plane(Vec2::from(size), subdivisions),
             Shape::Capsule {
                 radius,
                 height,
                 segments,
-            } => capsule(radius, height, segments.max(3)),
+            } => capsule(radius, height, auto(segments, radius)),
             Shape::Cylinder {
                 radius,
                 height,
                 segments,
-            } => cylinder(radius, radius, height, segments.max(3)),
+            } => cylinder(radius, radius, height, auto(segments, radius)),
             Shape::Cone {
                 radius,
                 height,
                 segments,
-            } => cylinder(radius, 0.0, height, segments.max(3)),
+            } => cylinder(radius, 0.0, height, auto(segments, radius)),
             Shape::Torus {
                 radius,
                 tube,
                 segments,
-            } => torus(radius, tube, segments.max(3)),
+            } => torus(radius, tube, auto(segments, radius + tube)),
             Shape::Quad { size } => quad(Vec2::from(size)),
+            Shape::RoundedCuboid {
+                size,
+                radius,
+                segments,
+            } => rounded_cuboid(
+                Vec3::from(size),
+                radius,
+                if segments == 0 {
+                    (auto_segments(radius) / 4).clamp(2, 16)
+                } else {
+                    segments
+                },
+            ),
+            Shape::Rock { size, seed, detail } => crate::rock::rock(Vec3::from(size), seed, detail),
         }
     }
+}
+
+/// Segments around a circle of `radius` meters so its outline strays less than half a millimeter
+/// from the true circle (24..=256).
+pub fn auto_segments(radius: f32) -> u32 {
+    const TOLERANCE: f32 = 0.0005;
+    if radius <= TOLERANCE {
+        return 24;
+    }
+    let n = PI / (1.0 - TOLERANCE / radius).acos();
+    (n.ceil() as u32).clamp(24, 256)
+}
+
+/// Box centered on the origin with edges and corners rounded to `radius` meters, `segments`
+/// per quarter circle. Each face is a grid that is dense only across the rounded band; its
+/// points are pushed out from the inner box (shrunk by `radius`) to exactly `radius`, so
+/// neighboring faces meet seamlessly. UVs are in meters along each face.
+pub fn rounded_cuboid(size: Vec3, radius: f32, segments: u32) -> Mesh {
+    let h = size * 0.5;
+    let r = radius.clamp(0.0, h.min_element());
+    if r <= 1e-5 {
+        return cuboid(size);
+    }
+    let inner = h - Vec3::splat(r);
+    // Grid coordinates along one face axis of half extent `e`: the band from the edge to
+    // `e - r` is spaced evenly in angle (each face owns 45° of the rounded edge).
+    let steps = segments.max(1);
+    let axis = |e: f32| -> Vec<f32> {
+        let band = |k: u32| r * ((k as f32 / steps as f32) * std::f32::consts::FRAC_PI_4).tan();
+        let mut t: Vec<f32> = (0..=steps).rev().map(|k| -(e - r) - band(k)).collect();
+        if e - r > 1e-5 {
+            t.extend((0..=steps).map(|k| (e - r) + band(k)));
+        } else {
+            t.extend((1..=steps).map(band));
+        }
+        t
+    };
+    let faces: [(Vec3, Vec3, Vec3); 6] = [
+        (Vec3::X, Vec3::NEG_Z, Vec3::Y),
+        (Vec3::NEG_X, Vec3::Z, Vec3::Y),
+        (Vec3::Y, Vec3::X, Vec3::NEG_Z),
+        (Vec3::NEG_Y, Vec3::X, Vec3::Z),
+        (Vec3::Z, Vec3::X, Vec3::Y),
+        (Vec3::NEG_Z, Vec3::NEG_X, Vec3::Y),
+    ];
+    let mut m = Mesh::default();
+    for (n, u, v) in faces {
+        let eu = u.abs().dot(h);
+        let ev = v.abs().dot(h);
+        let (us, vs) = (axis(eu), axis(ev));
+        let base = m.vertices.len() as u32;
+        for &tv in &vs {
+            for &tu in &us {
+                let p = n * n.abs().dot(h) + u * tu + v * tv;
+                let core = p.clamp(-inner, inner);
+                let out = (p - core).normalize_or(n);
+                let pos = core + out * r;
+                // Meters along the face, measured on the flat part plus arc length on the band.
+                m.vertices.push(Vertex::new(pos, out, Vec2::new(tu, -tv)));
+            }
+        }
+        let row = us.len() as u32;
+        for j in 0..vs.len() as u32 - 1 {
+            for i in 0..row - 1 {
+                let a = base + j * row + i;
+                m.indices
+                    .extend_from_slice(&[a, a + 1, a + row + 1, a, a + row + 1, a + row]);
+            }
+        }
+    }
+    m
 }
 
 /// Box centered on the origin.
@@ -309,6 +418,81 @@ pub fn uv_sphere(radius: f32, segments: u32) -> Mesh {
         }
     }
     m
+}
+
+/// Sphere made by subdividing an icosahedron `subdivisions` times: evenly sized triangles
+/// everywhere (no poles), `20 · 4^subdivisions` of them, so it is a good base for dense
+/// procedural shapes such as rocks and asteroids (displace the vertices, then
+/// [`Mesh::compute_normals`]). Every vertex is shared by its triangles. Texture coordinates are
+/// spherical (u around +Y, v from the top) and wrap without a seam split, so a texture smears
+/// across one meridian: use [`uv_sphere`] for textured spheres.
+pub fn icosphere(radius: f32, subdivisions: u32) -> Mesh {
+    let t = (1.0 + 5f32.sqrt()) * 0.5;
+    let mut points: Vec<Vec3> = [
+        (-1.0, t, 0.0),
+        (1.0, t, 0.0),
+        (-1.0, -t, 0.0),
+        (1.0, -t, 0.0),
+        (0.0, -1.0, t),
+        (0.0, 1.0, t),
+        (0.0, -1.0, -t),
+        (0.0, 1.0, -t),
+        (t, 0.0, -1.0),
+        (t, 0.0, 1.0),
+        (-t, 0.0, -1.0),
+        (-t, 0.0, 1.0),
+    ]
+    .iter()
+    .map(|&(x, y, z)| Vec3::new(x, y, z).normalize())
+    .collect();
+    let mut faces: Vec<[u32; 3]> = vec![
+        [0, 11, 5],
+        [0, 5, 1],
+        [0, 1, 7],
+        [0, 7, 10],
+        [0, 10, 11],
+        [1, 5, 9],
+        [5, 11, 4],
+        [11, 10, 2],
+        [10, 7, 6],
+        [7, 1, 8],
+        [3, 9, 4],
+        [3, 4, 2],
+        [3, 2, 6],
+        [3, 6, 8],
+        [3, 8, 9],
+        [4, 9, 5],
+        [2, 4, 11],
+        [6, 2, 10],
+        [8, 6, 7],
+        [9, 8, 1],
+    ];
+    for _ in 0..subdivisions.min(10) {
+        let mut midpoints: std::collections::HashMap<(u32, u32), u32> =
+            std::collections::HashMap::with_capacity(faces.len() * 3 / 2);
+        let mut mid = |a: u32, b: u32, points: &mut Vec<Vec3>| {
+            *midpoints.entry((a.min(b), a.max(b))).or_insert_with(|| {
+                points.push((points[a as usize] + points[b as usize]).normalize());
+                points.len() as u32 - 1
+            })
+        };
+        let mut next = Vec::with_capacity(faces.len() * 4);
+        for [a, b, c] in faces {
+            let ab = mid(a, b, &mut points);
+            let bc = mid(b, c, &mut points);
+            let ca = mid(c, a, &mut points);
+            next.extend_from_slice(&[[a, ab, ca], [b, bc, ab], [c, ca, bc], [ab, bc, ca]]);
+        }
+        faces = next;
+    }
+    let vertices = points
+        .iter()
+        .map(|&n| {
+            let uv = Vec2::new(0.5 + n.z.atan2(n.x) / TAU, n.y.clamp(-1.0, 1.0).acos() / PI);
+            Vertex::new(n * radius, n, uv)
+        })
+        .collect();
+    Mesh::new(vertices, faces.into_iter().flatten().collect())
 }
 
 /// Cylinder (or cone when `top_radius` is 0) along +Y, centered on the origin, with caps.
@@ -489,11 +673,82 @@ mod tests {
                 segments: 16,
             },
             Shape::Quad { size: [1.0, 1.0] },
+            Shape::RoundedCuboid {
+                size: [1.0, 2.0, 3.0],
+                radius: 0.1,
+                segments: 0,
+            },
+            Shape::RoundedCuboid {
+                size: [0.5, 0.5, 0.5],
+                radius: 0.25,
+                segments: 4,
+            },
+            Shape::Sphere {
+                radius: 2.0,
+                segments: 0,
+            },
+            Shape::Rock {
+                size: [1.5, 1.0, 1.2],
+                seed: 4,
+                detail: 3,
+            },
         ] {
             let m = shape.mesh();
             assert!(!m.indices.is_empty(), "{shape:?}");
             check_winding(&m);
         }
+    }
+
+    #[test]
+    fn rounded_cuboid_keeps_its_size_and_rounds_its_edges() {
+        let size = Vec3::new(2.0, 1.0, 0.5);
+        let m = rounded_cuboid(size, 0.1, 4);
+        let b = m.aabb();
+        assert!((b.max - b.min).abs_diff_eq(size, 1e-5), "{b:?}");
+        // Every vertex lies on the rounded surface: `radius` from the inner box.
+        let inner = size * 0.5 - Vec3::splat(0.1);
+        for v in &m.vertices {
+            let p = Vec3::from(v.position);
+            let d = (p - p.clamp(-inner, inner)).length();
+            assert!((d - 0.1).abs() < 1e-5, "{p:?} is {d} from the core");
+            let n = Vec3::from(v.normal);
+            assert!((n.length() - 1.0).abs() < 1e-5);
+        }
+        // The corner itself is cut: no vertex at the sharp corner.
+        let corner = size * 0.5;
+        assert!(
+            m.vertices
+                .iter()
+                .all(|v| Vec3::from(v.position).distance(corner) > 0.03)
+        );
+    }
+
+    #[test]
+    fn icosphere_is_closed_and_counter_clockwise() {
+        let m = icosphere(2.0, 3);
+        assert_eq!(m.triangle_count(), 20 * 64);
+        assert_eq!(m.vertices.len(), 10 * 64 + 2);
+        check_winding(&m);
+        assert!(
+            m.vertices
+                .iter()
+                .all(|v| (Vec3::from(v.position).length() - 2.0).abs() < 1e-5)
+        );
+    }
+
+    #[test]
+    fn automatic_segments_keep_outlines_smooth() {
+        assert_eq!(auto_segments(0.0), 24);
+        for r in [0.05, 0.5, 1.0, 5.0] {
+            let n = auto_segments(r);
+            let error = r * (1.0 - (PI / n as f32).cos());
+            assert!(
+                error <= 0.0005 + 1e-6 || n == 256,
+                "r {r}: {n} segments, {error} m"
+            );
+        }
+        assert!(auto_segments(1.0) >= 90);
+        assert_eq!(auto_segments(1000.0), 256);
     }
 
     #[test]

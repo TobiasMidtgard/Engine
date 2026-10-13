@@ -246,6 +246,37 @@ fn the_runner_completes_the_parkour_route() {
 }
 
 #[test]
+fn the_climber_catches_the_ledge_shimmies_climbs_up_and_drops_off() {
+    let (mut app, _) = demo_app(None);
+    let mut q = app.world.query::<(Entity, &Name)>();
+    let climber = q
+        .iter(&app.world)
+        .find(|(_, n)| n.as_str() == "Climber")
+        .unwrap()
+        .0;
+    let origin = DVec3::ZERO;
+    let top = demo::layout::LEDGE_TOP;
+    let (mut hung_from, mut shimmied, mut stood_on_top, mut back_down) = (None, 0.0, false, false);
+    run_until(&mut app, 12.0, |w| {
+        let m = w.get::<Mover>(climber).unwrap();
+        let p = w.get::<Transform>(climber).unwrap().translation - origin;
+        if m.mode == LocomotionMode::Climb {
+            let x0 = *hung_from.get_or_insert(p.x);
+            shimmied = (p.x - x0).max(shimmied);
+        }
+        stood_on_top |= m.grounded && p.y > top + 0.8;
+        back_down |= stood_on_top && m.grounded && p.y < 1.5;
+        back_down
+    });
+    let summary = format!("hung from {hung_from:?}, shimmied {shimmied:.2} m");
+    assert_eq!(triggered(&app, climber, "ledge_grab"), 1, "{summary}");
+    assert!(shimmied > 2.5, "{summary}");
+    assert!(triggered(&app, climber, "mantle") >= 1, "{summary}");
+    assert!(stood_on_top && back_down, "{summary}");
+    assert_eq!(triggered(&app, climber, "jump"), 1, "{summary}");
+}
+
+#[test]
 fn the_duel_waits_while_no_camera_is_near() {
     let (mut app, d) = demo_app(None);
     let camera = app
@@ -343,6 +374,8 @@ fn the_demo_spawns_the_same_static_collider_boxes() {
         ([22.0, 2.75, 11.0], [3.0, 2.75, 3.5]), // tower
         ([0.0, 0.05, -14.0], [8.0, 0.05, 8.0]), // ring
         ([0.0, 0.15, -25.5], [8.0, 0.15, 1.5]), // stands
+        ([17.0, 0.05, 2.0], [6.0, 0.05, 3.5]),  // ledge station
+        ([17.0, 1.9, 1.2], [3.0, 1.8, 0.8]),    // ledge block
     ];
     let key = |b: &([f64; 3], [f32; 3])| {
         b.0.map(|v| (v * 1000.0).round() as i64)

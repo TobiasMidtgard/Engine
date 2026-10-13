@@ -60,8 +60,16 @@ pub struct Targets {
     /// Raw ambient occlusion (noisy), then the blurred result shading reads.
     pub ao_raw: Tex,
     pub ao: Tex,
-    /// Temporal anti-aliasing history, ping-ponged every frame.
+    /// Temporal anti-aliasing history, ping-ponged every frame. Without TAA, the finished HDR
+    /// image is kept here for screen-space reflections.
     pub history: [Tex; 2],
+    /// Screen-space reflections: radiance (not pre-exposed), coverage.
+    pub ssr: Tex,
+    /// Screen-space global illumination: this frame's rays, the temporal results (ping-ponged,
+    /// view depth in alpha) and the blurred result the scene reads.
+    pub gi_raw: Tex,
+    pub gi_history: [Tex; 2],
+    pub gi: Tex,
     pub color_copy: Tex,
     pub depth_copy: Tex,
     /// Tonemapped display image (sRGB). Screenshots read this.
@@ -120,9 +128,14 @@ impl Targets {
                 width,
                 height,
                 formats.hdr,
-                U::RENDER_ATTACHMENT | U::TEXTURE_BINDING | U::COPY_SRC,
+                U::RENDER_ATTACHMENT | U::TEXTURE_BINDING | U::COPY_SRC | U::COPY_DST,
             )
         });
+        let ssr = screen("screen-space reflections", formats.hdr);
+        let gi_raw = screen("screen-space gi trace", formats.hdr);
+        let gi_history =
+            [0, 1].map(|i| screen(&format!("screen-space gi history {i}"), formats.hdr));
+        let gi = screen("screen-space gi", formats.hdr);
         let color_copy = Tex::new(
             device,
             "scene color copy",
@@ -173,6 +186,10 @@ impl Targets {
             ao_raw,
             ao,
             history,
+            ssr,
+            gi_raw,
+            gi_history,
+            gi,
             color_copy,
             depth_copy,
             ldr,

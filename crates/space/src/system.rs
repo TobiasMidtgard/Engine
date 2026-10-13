@@ -86,6 +86,9 @@ pub fn solar_system() -> Vec<CelestialBody> {
             }
             "Earth" => {
                 b.look = BodyLook::Earthlike;
+                // Greenwich sidereal time at J2000 (280.46°): space clock 0 is 12:00 UT on
+                // 2000-01-01, noon at 0° E.
+                b.rotation_at_epoch_deg = 280.460_618 + 90.0 - 360.0;
                 // Used when the renderer's atmosphere is on another body.
                 b.haze = Some(BodyHaze::default());
                 b.flattening = 0.003_353;
