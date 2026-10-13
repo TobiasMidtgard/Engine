@@ -3675,6 +3675,11 @@ pub fn plank_door(size: Vec3, seed: u64) -> Vec<PropPart> {
         .collect();
     let handle = Vec2::new(w * 0.5 - 0.13, 0.1);
     let upright = Mat3::from_cols(Vec3::Y, Vec3::Z, Vec3::X);
+    // Oiled darker and warmer than the walls' boards, so the door reads from across the yard.
+    let stain = |rng: &mut Rng| {
+        let c = wood_tint(rng);
+        [c[0] * 0.8, c[1] * 0.66, c[2] * 0.55]
+    };
     let b = kit.mb(WOOD);
     let v0 = b.vertices.len();
     let t0 = b.indices.len();
@@ -3695,7 +3700,7 @@ pub fn plank_door(size: Vec3, seed: u64) -> Vec<PropPart> {
             &BoxSpec::new(half, 0.004)
                 .chamfer()
                 .splits([&along, &[], &[]])
-                .tint(wood_tint(&mut rng))
+                .tint(stain(&mut rng))
                 .uv(rng_uv(&mut rng)),
         );
     }
@@ -3709,7 +3714,7 @@ pub fn plank_door(size: Vec3, seed: u64) -> Vec<PropPart> {
             &BoxSpec::new(half, 0.005)
                 .chamfer()
                 .splits([&along, &[], &[]])
-                .tint(wood_tint(&mut rng))
+                .tint(stain(&mut rng))
                 .uv(rng_uv(&mut rng)),
         );
     }
@@ -3728,7 +3733,7 @@ pub fn plank_door(size: Vec3, seed: u64) -> Vec<PropPart> {
             &BoxSpec::new(half, 0.005)
                 .chamfer()
                 .splits([&along, &[], &[]])
-                .tint(wood_tint(&mut rng))
+                .tint(stain(&mut rng))
                 .uv(rng_uv(&mut rng)),
         );
     }

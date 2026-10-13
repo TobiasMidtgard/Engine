@@ -53,8 +53,8 @@ const YARD_START: f32 = 0.5;
 const YARD_STEP: f32 = 0.42;
 /// When the finished cabin shows its support colors (with the red ghost of the last step).
 const YARD_SUPPORT_AT: f32 = 14.2;
-/// When the plank door hung in the cabin's doorway (placed at about 12.2 s) swings open, in
-/// from the front.
+/// When the plank door hung in the cabin's doorway (placed at about 12.2 s) swings open, out
+/// into the yard.
 const YARD_DOOR_OPENS_AT: f32 = 12.7;
 /// Where the terrace's shelter stands, relative to the origin: the middle of the leveled
 /// terrace, on its rock.
@@ -117,8 +117,8 @@ pub const VIEWS: &[DemoView] = &[
     DemoView {
         key: "voxel_cabin_door",
         name: "The plank door hung in the cabin's doorway swung open",
-        eye: [-10.9, 1.9, -18.2],
-        target: [-13.1, 1.3, -22.2],
+        eye: [-10.6, 1.8, -18.6],
+        target: [-13.2, 1.2, -21.8],
         hour: 10.5,
         warmup_secs: 13.9,
     },
@@ -232,7 +232,7 @@ enum Step {
     Place(Site),
     /// A site's finished building shows its support colors.
     ShowSupport(Site),
-    /// The doors a site's builder hung swing open, in from the front.
+    /// The doors a site's builder hung swing open, out from inside.
     OpenDoors(Site),
     Reset,
 }
@@ -903,8 +903,8 @@ fn run_step(world: &mut World, demo: &mut HillDemo, step: Step) {
                 .filter(|(p, _)| p.builder == Some(b))
                 .map(|(_, h)| h.0)
                 .collect();
-            // Opened by someone standing in front of the cabin.
-            let from = o + site.offset() + DVec3::new(1.0, 1.4, 4.0);
+            // Opened from inside the cabin, so it swings out into the light.
+            let from = o + site.offset() + DVec3::new(1.0, 1.4, 0.0);
             for door in doors {
                 world.write_message(DoorRequest {
                     door,

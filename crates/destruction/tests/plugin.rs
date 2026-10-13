@@ -388,8 +388,8 @@ fn the_hill_demo_tunnels_caves_in_builds_and_rebuilds() {
     assert_eq!(doors.len(), 1, "a door hangs in the cabin's doorway");
     let (door, t) = doors[0];
     assert!(
-        door.is_open() && door.toward < 0.0 && t.translation.z < -0.3,
-        "the cabin's door swung open, in from the front: {door:?} at {t:?}"
+        door.is_open() && door.toward > 0.0 && t.translation.z > 0.3,
+        "the cabin's door swung open, out into the yard: {door:?} at {t:?}"
     );
     let fallen: f32 = app
         .world
