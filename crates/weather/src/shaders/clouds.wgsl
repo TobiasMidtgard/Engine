@@ -139,7 +139,9 @@ struct CloudResult {
     transmittance: f32,
     front: f32,             // distance where the cloud starts (m)
     back: f32,              // distance where it has become nearly opaque (m)
-    rain: f32,              // opacity of the rain shafts along the ray (for rainbows)
+    rain: f32,              // opacity of the rain shafts along the ray (rainbows, veiling hills)
+    rain_front: f32,        // where the rain shafts start and end along the ray (m)
+    rain_back: f32,
 };
 
 // Interleaved gradient noise: a stable per-pixel start offset that hides banding.
@@ -286,8 +288,11 @@ fn march_clouds(dir: vec3<f32>, steps: i32, light_steps: i32, jitter: f32) -> Cl
             let belly = 1.0 - 0.55 * saturate(w.b * 6.0) * (1.0 - h01);
             let cover = saturate(w.r * 1.2);
             let ground_below = ground_sun * (1.0 - 0.85 * cover) + ground_sky * (1.0 - 0.5 * cover);
+            // The ambient fill is light from all around: a cloud scattering nearly all it gets
+            // shines with it as fog does (darkening it made night decks several times darker
+            // than the fog under them).
             var s = key * light * powder * mix(belly, 1.0, 0.4)
-                + (mix(ground_below, sky, sqrt(h01)) + fill) * belly * (0.5 + 0.5 * h01);
+                + mix(ground_below, sky, sqrt(h01)) * belly * (0.5 + 0.5 * h01) + fill;
             // Lightning lights the cloud from inside: the light diffuses through kilometers of
             // droplets, so the whole cloud base around the channel glows.
             if (clouds.flash.w > 0.0) {
@@ -403,18 +408,21 @@ fn rain_shafts(dir: vec3<f32>, max_t: f32, deck: vec4<f32>) -> CloudResult {
     return r;
 }
 
-// Clouds plus rain shafts in front of them.
+// Clouds plus rain shafts in front of them. `front` and `back` stay the clouds' own; the
+// rain's span is kept apart so hills inside the rain are veiled by the rain in front of them.
 fn clouds_and_rain(dir: vec3<f32>, steps: i32, light_steps: i32, jitter: f32) -> CloudResult {
     var c = march_clouds(dir, steps, light_steps, jitter);
+    c.rain_front = clouds.layer.w;
+    c.rain_back = clouds.layer.w;
     let cover = 1.0 - c.transmittance;
     let deck = vec4<f32>(c.radiance / max(cover, 1e-3), smoothstep(0.05, 0.6, cover));
     let s = rain_shafts(dir, c.front, deck);
     if (s.transmittance >= 1.0) { return c; }
     c.radiance = s.radiance + c.radiance * s.transmittance;
-    c.front = min(c.front, s.front);
-    c.back = select(s.back, c.back, c.transmittance < 0.999);
     c.transmittance *= s.transmittance;
     c.rain = 1.0 - s.transmittance;
+    c.rain_front = s.front;
+    c.rain_back = s.back;
     return c;
 }
 
@@ -457,8 +465,8 @@ fn vs_full(@builtin(vertex_index) i: u32) -> FullscreenOut {
 
 struct MarchOut {
     @location(0) color: vec4<f32>,   // pre-exposed radiance, transmittance
-    @location(1) depth: vec4<f32>,   // front, back (km), rain opacity
-    @location(2) sky: vec4<f32>,     // pre-exposed clear sky
+    @location(1) depth: vec4<f32>,   // cloud front, cloud back (km), rain opacity, rain front (km)
+    @location(2) sky: vec4<f32>,     // pre-exposed clear sky, rain back (km)
 };
 
 // Low-resolution march of the whole view (no scene depth; composited per pixel later).
@@ -468,8 +476,8 @@ fn fs_march(in: FullscreenOut) -> MarchOut {
     let r = clouds_and_rain(dir, i32(clouds.light.w), i32(clouds.light_dir.w), ign(in.position.xy));
     var out: MarchOut;
     out.color = vec4<f32>(min(pre_expose(r.radiance), vec3(60000.0)), r.transmittance);
-    out.depth = vec4<f32>(r.front * 0.001, r.back * 0.001, r.rain, 1.0);
-    out.sky = vec4<f32>(min(pre_expose(clear_sky(dir)), vec3(60000.0)), 1.0);
+    out.depth = vec4<f32>(r.front * 0.001, r.back * 0.001, r.rain, r.rain_front * 0.001);
+    out.sky = vec4<f32>(min(pre_expose(clear_sky(dir)), vec3(60000.0)), r.rain_back * 0.001);
     return out;
 }
 
