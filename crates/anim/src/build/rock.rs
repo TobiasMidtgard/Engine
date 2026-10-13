@@ -125,31 +125,20 @@ pub fn body(half: Vec3, seed: u32) -> Body {
 
 /// The rock as a static mesh, its origin at the walkable box's center.
 pub fn mesh(half: Vec3, seed: u32) -> Mesh {
-    static_mesh(&body(half, seed), 0.018, |p| {
-        // Darker low down, where soil and damp cling to it.
-        let low = ((p.y + half.y) / (half.y * 1.2)).clamp(0.0, 1.0);
-        0.72 + 0.28 * low
-    })
-}
-
-/// A static (unskinned) mesh of a body whose parts are all on bone `root`, meshed at `cell`
-/// meters, its paint darkened by `shade` (0..1) at each vertex position.
-pub fn static_mesh(body: &Body, cell: f32, shade: impl Fn(Vec3) -> f32) -> Mesh {
-    let skeleton = Skeleton::new(
-        "static",
-        vec![bone("root", None, Vec3::ZERO, Quat::IDENTITY)],
-    )
-    .expect("one-bone skeleton");
-    let skinned = body.build(&skeleton, cell, 0.02);
+    let skeleton = Skeleton::new("rock", vec![bone("root", None, Vec3::ZERO, Quat::IDENTITY)])
+        .expect("rock skeleton");
+    let skinned = body(half, seed).build(&skeleton, 0.018, 0.02);
     let vertices = skinned
         .vertices
         .iter()
         .map(|v| {
-            let k = shade(v.position);
+            // Darker low down, where soil and damp cling to it.
+            let low = ((v.position.y + half.y) / (half.y * 1.2)).clamp(0.0, 1.0);
+            let shade = 0.72 + 0.28 * low;
             Vertex::new(v.position, v.normal, v.uv).with_color(Vec4::new(
-                v.color.x * k,
-                v.color.y * k,
-                v.color.z * k,
+                v.color.x * shade,
+                v.color.y * shade,
+                v.color.z * shade,
                 1.0,
             ))
         })

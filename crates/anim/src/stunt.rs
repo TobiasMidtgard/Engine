@@ -6,15 +6,12 @@
 
 use std::f32::consts::PI;
 
-use engine_assets::Assets;
 use engine_core::prelude::*;
-use engine_render::{MaterialPreset, Mesh, MeshRenderer, Shape as MeshShape, StandardMaterial};
+use engine_render::{MaterialPreset, MeshRenderer, Shape as MeshShape, StandardMaterial};
 use engine_world::Ground;
 use engine_world::animation::{BodyRequest, Ragdoll, SkeletonPose};
 use engine_world::physics::{Collider, PhysicsQueries, RigidBody};
 
-use crate::build::rock;
-use crate::build::sdf::{Body, Paint, Shape};
 use crate::ik::{GroundProbe, IkShape, IkSurface, IkSurfaces};
 use crate::ragdoll::BLEND_OUT_SECS;
 use crate::xform::smoothing;
@@ -173,11 +170,9 @@ pub fn spawn_yard(world: &mut World, origin: DVec3) -> Entity {
             Collider::cuboid(half),
         ));
     }
-    // The crash mat east of the deck.
+    // The crash mat east of the deck: three folding panels of blue vinyl, the creases between
+    // them where their rounded edges meet.
     let mat = Transform::from_translation(at(MAT.x as f64 + 0.25, MAT.y as f64, 0.0));
-    let mesh = world
-        .get_resource_or_init::<Assets<Mesh>>()
-        .get_or_insert_keyed("anim/crash_mat", || mat_mesh(MAT));
     world.spawn((
         mat,
         GlobalTransform::from(mat),
@@ -186,10 +181,26 @@ pub fn spawn_yard(world: &mut World, origin: DVec3) -> Entity {
             half_extents: MAT.to_array(),
             surface: 0,
         },
-        MeshRenderer::new(mesh, StandardMaterial::hex(0xffffff).with_roughness(0.55)),
         RigidBody::fixed(),
         Collider::cuboid(MAT),
     ));
+    let vinyl = StandardMaterial::hex(0x618aba).with_roughness(0.55);
+    let panel = MAT.x * 2.0 / 3.0;
+    for k in [-1.0f32, 0.0, 1.0] {
+        let t = Transform::from_translation(mat.translation + DVec3::X * (k * panel) as f64);
+        world.spawn((
+            t,
+            GlobalTransform::from(t),
+            MeshRenderer::new(
+                MeshShape::RoundedCuboid {
+                    size: [panel - 0.004, MAT.y * 2.0, MAT.z * 2.0],
+                    radius: 0.06,
+                    segments: 0,
+                },
+                vinyl,
+            ),
+        ));
+    }
 
     let stunt = Stunt::new(origin);
     let [sx, sz, _] = stunt.run[0];
@@ -204,31 +215,6 @@ pub fn spawn_yard(world: &mut World, origin: DVec3) -> Entity {
             stunt,
         ))
         .id()
-}
-
-/// A folding gym mat: blue vinyl panels with piped edges and creases between them.
-fn mat_mesh(half: Vec3) -> Mesh {
-    let vinyl = Paint::hard([0.13, 0.27, 0.52]);
-    let piping = Paint::hard([0.09, 0.17, 0.33]);
-    let mut b = Body::default();
-    b.part("root", Shape::round_box(Vec3::ZERO, half, 0.06), vinyl, 0.0);
-    // Two creases across the top, splitting it into three folding panels.
-    for x in [-half.x / 3.0, half.x / 3.0] {
-        b.cut(
-            "root",
-            Shape::round_box(
-                Vec3::new(x, half.y + 0.012, 0.0),
-                Vec3::new(0.012, 0.03, half.z + 0.1),
-                0.01,
-            ),
-            piping,
-            0.02,
-        );
-    }
-    rock::static_mesh(&b, 0.02, |p| {
-        // A little darker toward the floor.
-        0.8 + 0.2 * ((p.y + half.y) / (2.0 * half.y)).clamp(0.0, 1.0)
-    })
 }
 
 #[allow(clippy::type_complexity)]
