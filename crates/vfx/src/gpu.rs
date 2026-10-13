@@ -16,6 +16,8 @@ pub const COLOR_SAMPLES: usize = 16;
 pub const SIZE_SAMPLES: usize = 16;
 /// Particles per update/spawn work item (one compute workgroup).
 pub const CHUNK: u32 = 256;
+/// [`GpuEmitter::ring`] cursor of an emitter only the CPU spawns into.
+pub const NO_CURSOR: u32 = u32::MAX;
 
 /// One particle (64 bytes). Positions are camera-relative for world-space emitters and
 /// emitter-relative for local-space ones.
@@ -39,7 +41,7 @@ pub struct GpuParticle {
     pub emitter: u32,
 }
 
-/// Per-emitter parameters for one frame (608 bytes). The static part is baked from an
+/// Per-emitter parameters for one frame (688 bytes). The static part is baked from an
 /// [`EmitterDesc`] once; positions, wind, gravity and the collision plane change per frame.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Pod, Zeroable)]
@@ -80,6 +82,18 @@ pub struct GpuEmitter {
     pub shade: [f32; 4],
     /// Stretch (s), translucency (0..1), size multiplier, opacity multiplier.
     pub look: [f32; 4],
+    /// Sub-emitters: emitter-table index + 1 of the layer fed when a particle hits something
+    /// (x), dies (y) and flies (z), 0 for none; w unused.
+    pub sub_target: [u32; 4],
+    /// Particles per hit and per death, and per second of flight; w unused.
+    pub sub_count: [f32; 4],
+    /// Chance that a hit, death or trail spawns anything; w unused.
+    pub sub_chance: [f32; 4],
+    /// Fraction of the particle's velocity the new ones keep, per kind; w unused.
+    pub sub_keep: [f32; 4],
+    /// This emitter's ring of slots: first slot, size, and the index of its GPU spawn cursor
+    /// ([`NO_CURSOR`] when only the CPU spawns into it); w unused.
+    pub ring: [u32; 4],
     /// Color over life (linear RGB, coverage).
     pub color: [[f32; 4]; COLOR_SAMPLES],
     /// Size multiplier over life, four samples per element.
@@ -108,6 +122,17 @@ impl GpuEmitter {
             size_curve[i / 4][i % 4] = *v;
         }
         let [lo, hi] = desc.lifetime;
+        let (mut sub_count, mut sub_chance, mut sub_keep) = ([0.0; 4], [0.0; 4], [0.0; 4]);
+        for (k, s) in [&desc.on_hit, &desc.on_death, &desc.trailing]
+            .into_iter()
+            .enumerate()
+        {
+            if let Some(s) = s {
+                sub_count[k] = s.count.min(crate::effect::MAX_SUB_COUNT) as f32;
+                sub_chance[k] = s.chance.clamp(0.0, 1.0);
+                sub_keep[k] = s.inherit_velocity.clamp(0.0, 1.0);
+            }
+        }
         Self {
             origin: [0.0; 4],
             prev: [0.0, 0.0, 0.0, if desc.local_space { 1.0 } else { 0.0 }],
@@ -162,6 +187,11 @@ impl GpuEmitter {
                 desc.soft.max(0.0),
             ],
             look: [desc.stretch.max(0.0), desc.sprite.translucency(), 1.0, 1.0],
+            sub_target: [0; 4],
+            sub_count,
+            sub_chance,
+            sub_keep,
+            ring: [0, 0, NO_CURSOR, 0],
             color: desc.color.bake(),
             size_curve,
         }
@@ -225,6 +255,28 @@ pub struct GpuSpawn {
     pub to: [f32; 4],
 }
 
+/// A particle that hit something, died or flew on and feeds another layer (64 bytes).
+/// `cs_update` appends these; `cs_sub_spawn` turns each into new particles.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Pod, Zeroable)]
+pub struct GpuSubEvent {
+    /// Camera-relative position.
+    pub pos: [f32; 3],
+    /// Emitter-table index of the layer that gets the particles.
+    pub emitter: u32,
+    /// Velocity the new particles inherit, m/s.
+    pub vel: [f32; 3],
+    /// New particles.
+    pub count: u32,
+    /// Surface normal on a hit (zero otherwise).
+    pub normal: [f32; 3],
+    pub seed: u32,
+    /// Where the particle was at the start of the step, relative to `pos`: trail particles are
+    /// spread along it (zero for hits and deaths).
+    pub back: [f32; 3],
+    pub _pad: u32,
+}
+
 /// A range of particle slots to update (16 bytes).
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Pod, Zeroable)]
@@ -242,7 +294,7 @@ pub struct GpuSim {
     /// xyz: how far the camera origin moved since last frame (added to world-space particles),
     /// w: world time for turbulence (wrapped), seconds.
     pub shift: [f32; 4],
-    /// Update chunks, spawn chunks, frame index, unused.
+    /// Update chunks, spawn chunks, frame index, most sub-emitter events this frame.
     pub counts: [u32; 4],
     /// Scene collision: enabled (1/0), near plane (m), surface thickness (m), unused.
     pub depth: [f32; 4],
@@ -284,8 +336,9 @@ mod tests {
         assert_eq!(std::mem::size_of::<GpuParticle>(), 64);
         assert_eq!(
             std::mem::size_of::<GpuEmitter>(),
-            18 * 16 + 16 * 16 + 4 * 16
+            23 * 16 + 16 * 16 + 4 * 16
         );
+        assert_eq!(std::mem::size_of::<GpuSubEvent>(), 64);
         assert_eq!(std::mem::size_of::<GpuSpawn>(), 64);
         assert_eq!(std::mem::size_of::<GpuUpdate>(), 16);
         assert_eq!(std::mem::size_of::<GpuSim>(), 128);

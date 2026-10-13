@@ -253,7 +253,13 @@ fn sequence(spec: &str) -> Vec<Shot> {
             Vec3::new(v[0], v[1], v[2])
         })
         .unwrap_or(Vec3::new(-3.6, 1.3, -0.6));
-    let target = Vec3::new(0.0, (eye.y * 0.85).min(1.3), 0.0);
+    let target = parts
+        .get(5)
+        .map(|p| {
+            let v: Vec<f32> = p.split(',').filter_map(|x| x.parse().ok()).collect();
+            Vec3::new(v[0], v[1], v[2])
+        })
+        .unwrap_or(Vec3::new(0.0, (eye.y * 0.85).min(1.3), 0.0));
     let mut out = Vec::new();
     let mut t = start;
     let mut k = 0;
@@ -334,7 +340,7 @@ fn main() {
 
     let mut pending = match std::env::var("GALLERY_SEQUENCE") {
         // A strip of one subject over time, for tuning a motion:
-        // GALLERY_SEQUENCE=athlete:0.6:2.6:0.1[:x,y,z]
+        // GALLERY_SEQUENCE=athlete:0.6:2.6:0.1[:eye x,y,z[:target x,y,z]]
         Ok(spec) => sequence(&spec),
         Err(_) => shots(),
     };

@@ -5,6 +5,7 @@
 // The modules carry a few parts and options the proving ground does not use (yet).
 #![allow(dead_code)]
 
+pub(crate) mod barrel_run;
 pub(crate) mod dummy;
 pub(crate) mod kit;
 pub(crate) mod props;
@@ -50,6 +51,14 @@ pub(crate) enum Mat {
     Domino,
     /// The crash test dummies' vinyl; their colors are vertex colors.
     Vinyl,
+    /// The barrel run's asphalt.
+    Asphalt,
+    /// Raked sand: the barrel run's catch pit.
+    Sand,
+    /// Thermoplastic road paint: the barrel run's lane lines.
+    Paint,
+    /// Hot-dip galvanized steel: guardrails.
+    Galvanized,
 }
 
 /// Texture sets, generated once per app.
@@ -67,6 +76,9 @@ enum Tex {
     Drum(u32),
     Rubber,
     Vinyl,
+    Asphalt,
+    Sand,
+    Galvanized,
 }
 
 /// Generated texture sets' images.
@@ -113,6 +125,9 @@ impl Tex {
             Tex::Drum(hex) => textures::painted_steel(res(256), paint(hex), 0.35),
             Tex::Rubber => textures::rubber(res(512)),
             Tex::Vinyl => textures::vinyl_skin(res(512)),
+            Tex::Asphalt => textures::asphalt(res(1024)),
+            Tex::Sand => textures::raked_sand(res(512)),
+            Tex::Galvanized => textures::galvanized(res(512)),
         }
     }
 }
@@ -173,6 +188,10 @@ pub(crate) fn material(world: &mut World, m: Mat) -> Handle<StandardMaterial> {
         Mat::Rubber(hex) => textured(world, Tex::Rubber, hex),
         Mat::Domino => StandardMaterial::hex(white).with_roughness(0.3),
         Mat::Vinyl => textured(world, Tex::Vinyl, white).with_subsurface(0.1),
+        Mat::Asphalt => textured(world, Tex::Asphalt, white),
+        Mat::Sand => textured(world, Tex::Sand, white),
+        Mat::Paint => StandardMaterial::hex(0xe9e6dc).with_roughness(0.55),
+        Mat::Galvanized => textured(world, Tex::Galvanized, white),
     };
     let h = world.resource_mut::<Assets<StandardMaterial>>().add(made);
     world.resource_mut::<ArtCache>().materials.insert(m, h);

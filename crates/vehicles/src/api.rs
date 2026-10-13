@@ -1,10 +1,11 @@
 //! `vehicles.*` API functions: spawn, drive and read vehicles from the AI bridge, the console
 //! and scripts.
 
-use engine_core::math::{DQuat, DVec3};
+use engine_core::math::{DQuat, DVec3, Vec3};
 use engine_core::prelude::*;
 use engine_core::registry::resolve_entity;
 use engine_world::VehicleControls;
+use engine_world::physics::Velocity;
 use serde_json::{Value, json};
 
 use crate::autopilot::{Autopilot, AutopilotMode};
@@ -80,6 +81,56 @@ fn spawn_api(world: &mut World, args: Value) -> Result<Value, String> {
     };
     world.flush();
     Ok(json!({"id": entity.to_bits()}))
+}
+
+fn place_api(world: &mut World, args: Value) -> Result<Value, String> {
+    let e = vehicle_entity(world, &args)?;
+    // Preset key from the vehicle's name ("sports car" → "sports_car") for its ride height.
+    let kind = world
+        .get::<Vehicle>(e)
+        .map(|v| v.name.replace(' ', "_"))
+        .unwrap_or_default();
+    let at = vec3_arg(&args, "at")?.ok_or("missing \"at\"")?;
+    let yaw = args.get("yaw_deg").and_then(Value::as_f64).unwrap_or(0.0);
+    let on_ground = args
+        .get("on_ground")
+        .and_then(Value::as_bool)
+        .unwrap_or(true);
+    let lift = if on_ground {
+        presets::ride_height(&kind)
+    } else {
+        0.0
+    };
+    let rotation = DQuat::from_rotation_y(-yaw.to_radians()).as_quat();
+    let forward = rotation * Vec3::NEG_Z;
+    let speed = args.get("speed").and_then(Value::as_f64).unwrap_or(0.0) as f32;
+    let linear = match vec3_arg(&args, "velocity")? {
+        Some(v) => v.as_vec3(),
+        None => forward * speed,
+    };
+    let yaw_rate = args
+        .get("yaw_rate_deg")
+        .and_then(Value::as_f64)
+        .unwrap_or(0.0) as f32;
+    if let Some(mut t) = world.get_mut::<Transform>(e) {
+        t.translation = at + DVec3::Y * lift;
+        t.rotation = rotation;
+    }
+    world.entity_mut(e).insert(Velocity {
+        linear,
+        angular: Vec3::Y * yaw_rate.to_radians(),
+    });
+    if let Some(mut i) = world.get_mut::<TransformInterpolation>(e) {
+        i.reset();
+    }
+    crate::wheels::set_rolling(world, e, linear.dot(forward));
+    // A path follower looks for its place on the path again (a drift keeps its phase).
+    if let Some(mut ap) = world.get_mut::<Autopilot>(e)
+        && matches!(ap.mode, AutopilotMode::Drive { .. })
+    {
+        *ap = Autopilot::new(ap.mode.clone());
+    }
+    Ok(json!({"id": e.to_bits()}))
 }
 
 fn list_api(world: &mut World, _args: Value) -> Result<Value, String> {
@@ -176,6 +227,16 @@ pub(crate) fn register(app: &mut App) {
          autopilot. Returns its id.",
         r#"{"preset": "sports_car", "at": [0, 0, 0], "yaw_deg": 90, "name": "Red car", "autopilot": {"Drive": {"path": [[0,0,0],[100,0,0],[100,0,100]], "looped": true, "max_speed": 30, "lateral_g": 0.8}}}"#,
         spawn_api,
+    )
+    .register_api(
+        "vehicles.place",
+        "Move a vehicle to a point (world meters; on the ground there unless on_ground is \
+         false), facing yaw_deg (0 = −Z, 90 = +X), moving at speed (m/s, along the nose) or \
+         velocity ([x, y, z] m/s) and turning left at yaw_rate_deg (°/s), with its wheels \
+         rolling and its gearbox in the matching gear. A driving autopilot finds its place on \
+         its path again.",
+        r#"{"vehicle": "Red car", "at": [120, 0, -40], "yaw_deg": 150, "speed": 30}"#,
+        place_api,
     )
     .register_api(
         "vehicles.list",

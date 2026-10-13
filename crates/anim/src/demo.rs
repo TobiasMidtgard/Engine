@@ -21,9 +21,9 @@
 use std::collections::HashSet;
 use std::f32::consts::PI;
 
-use engine_assets::Assets;
+use engine_assets::{AssetServer, Assets};
 use engine_core::prelude::*;
-use engine_render::{MeshRenderer, Shape as MeshShape, StandardMaterial};
+use engine_render::{GltfScene, MeshRenderer, Shape as MeshShape, StandardMaterial};
 use engine_world::Ground;
 use engine_world::animation::AnimationParams;
 use engine_world::physics::PhysicsQueries;
@@ -33,6 +33,7 @@ use crate::animator::{AnimationLibrary, Animator, AnimatorSettings};
 use crate::attach::{BoneAttachment, Hang};
 use crate::build::{car, horse, humanoid, spider};
 use crate::character::HumanModel;
+use crate::horse_model::HorseModel;
 use crate::ik::{GroundProbe, IkShape, IkSurface, IkSurfaces, LookAt, Reach, ReachIk};
 use crate::muscle::{MorphWeights, MuscleRig};
 use crate::procedural::spring::SpringChains;
@@ -46,6 +47,8 @@ pub const RADIUS: f64 = 36.0;
 /// Where the hammer athlete stands (local x, z) and how far ahead of them the tire lies.
 const ATHLETE: DVec3 = DVec3::new(-2.6, 0.0, 5.4);
 const TIRE_AHEAD: f64 = 1.3;
+/// The realistic horse (`assets/manifests/animation.toml`).
+const HORSE_FILE: &str = "anim/animals/horse/Horse.gltf";
 /// The hammer in the right hand's frame: the fist's center, and the handle's direction toward
 /// the head (perpendicular to the forearm, tipped down a little, as a hand holds a hammer).
 const GRIP: Vec3 = Vec3::new(0.0, -0.085, 0.0);
@@ -221,6 +224,9 @@ pub(crate) fn register(app: &mut App) {
         lib.add_graph(horse::graph());
         lib.add_skeleton(spider::skeleton());
         lib.add_skeleton(car::skeleton());
+        let concept = lib.add_skeleton(car::concept_skeleton());
+        lib.add_clip(car::concept_door_clip(&concept));
+        lib.add_graph(car::concept_parked_graph());
     }
     app.register_component::<DemoPath>(
         "Demo mover: follows a closed path of [x, z, speed] waypoints (m, m/s) on the ground.",
@@ -505,11 +511,12 @@ pub fn hammer_head(world: &World, person: Entity) -> Option<DVec3> {
     Some(crate::ik::to_world(gt, head.socket(animator)?.t))
 }
 
+/// A horse; it wears the realistic horse model once that has loaded (when fetched).
 pub fn spawn_horse(world: &mut World, transform: Transform) -> Entity {
     let handle = mesh_handle(world, "anim/horse", horse::mesh);
     let anim = animator(world, horse::SKELETON, horse::GRAPH);
     let morphs = morphs(world, handle);
-    world
+    let horse = world
         .spawn((
             Name::new("Horse"),
             transform,
@@ -533,7 +540,31 @@ pub fn spawn_horse(world: &mut World, transform: Transform) -> Entity {
             horse::gait(),
             SpringChains::new(vec![horse::tail()]),
         ))
-        .id()
+        .id();
+    match horse_model() {
+        Some(model) => {
+            world.entity_mut(horse).insert(model);
+        }
+        None => {
+            static MISSING: std::sync::Once = std::sync::Once::new();
+            MISSING.call_once(|| {
+                tracing::info!(
+                    "animation paddock: horse model not fetched (cargo run -p fetch-assets -- \
+                     animation); using the generated horse"
+                )
+            });
+        }
+    }
+    horse
+}
+
+/// The paddock's realistic horse (see [`HorseModel`]), if it has been fetched.
+pub fn horse_model() -> Option<HorseModel> {
+    Some(HorseModel {
+        path: fetched_path(HORSE_FILE)?,
+        // The file's horse stands 1.9 m at the withers: make it a 1.6 m riding horse.
+        scale: 0.85,
+    })
 }
 
 pub fn spawn_spider(world: &mut World, transform: Transform) -> Entity {
@@ -567,7 +598,29 @@ pub fn spawn_spider(world: &mut World, transform: Transform) -> Entity {
         .id()
 }
 
+/// The paddock car: the detailed concept car when it has been fetched (and the world loads
+/// glTF files), else a procedural car in `paint` (linear RGB).
 pub fn spawn_car(world: &mut World, transform: Transform, paint: [f32; 3]) -> Entity {
+    if let Some(scene) = concept_car_scene(world) {
+        let skeleton = world
+            .resource::<AnimationLibrary>()
+            .skeletons
+            .get(car::CONCEPT_SKELETON)
+            .cloned()
+            .expect("concept car skeleton");
+        return world
+            .spawn((
+                Name::new("Car"),
+                transform,
+                GlobalTransform::from(transform),
+                AnimatorSettings::new(car::CONCEPT_SKELETON, ""),
+                Animator::procedural(skeleton),
+                AnimationParams::default(),
+                car::concept_rig(),
+                car::concept_model(scene),
+            ))
+            .id();
+    }
     let key = format!("anim/car/{:.2}_{:.2}_{:.2}", paint[0], paint[1], paint[2]);
     let handle = mesh_handle(world, &key, || car::mesh(paint));
     let skeleton = world
@@ -598,6 +651,52 @@ pub fn spawn_car(world: &mut World, transform: Transform, paint: [f32; 3]) -> En
             car::rig(),
         ))
         .id()
+}
+
+/// The concept car's glTF scene, loading, if the file has been fetched and the world has an
+/// asset server with the glTF loader (the renderer's).
+/// A parked concept car whose doors open and shut ([`car::concept_door_clip`]); `None`
+/// without the fetched concept car (the generated car has no doors).
+pub fn spawn_parked_car(world: &mut World, transform: Transform) -> Option<Entity> {
+    let scene = concept_car_scene(world)?;
+    let anim = animator(world, car::CONCEPT_SKELETON, car::CONCEPT_PARKED_GRAPH);
+    Some(
+        world
+            .spawn((
+                Name::new("Parked car"),
+                transform,
+                GlobalTransform::from(transform),
+                AnimatorSettings::new(car::CONCEPT_SKELETON, car::CONCEPT_PARKED_GRAPH),
+                anim,
+                AnimationParams::default(),
+                car::concept_rig(),
+                car::concept_model(scene),
+            ))
+            .id(),
+    )
+}
+
+fn concept_car_scene(world: &mut World) -> Option<engine_assets::Handle<GltfScene>> {
+    static MISSING: std::sync::Once = std::sync::Once::new();
+    let fetched = world
+        .get_resource::<AssetServer>()
+        .is_some_and(|server| server.root().join(car::CONCEPT_FILE).exists());
+    if !fetched || !world.contains_resource::<Assets<GltfScene>>() {
+        MISSING.call_once(|| {
+            tracing::info!(
+                "animation paddock: concept car not fetched (cargo run -p fetch-assets -- \
+                 animation) or no glTF loader; using the generated car"
+            )
+        });
+        return None;
+    }
+    Some(
+        world.resource_scope(|world, mut scenes: Mut<Assets<GltfScene>>| {
+            world
+                .resource::<AssetServer>()
+                .load(&mut scenes, car::CONCEPT_FILE)
+        }),
+    )
 }
 
 /// Spawn every exhibit around `origin`. Returns the main characters.
@@ -724,6 +823,14 @@ pub const VIEWS: &[DemoView] = &[
         target: [3.0, 0.64, -16.82],
         hour: 15.0,
         at: 4.57,
+    },
+    DemoView {
+        key: "paddock_doors",
+        name: "Parked car opening its doors",
+        eye: [3.4, 1.5, -18.4],
+        target: [0.0, 0.75, -21.6],
+        hour: 15.0,
+        at: 3.6,
     },
 ];
 
@@ -1100,6 +1207,12 @@ fn build_paddock(world: &mut World, origin: DVec3) -> DemoEntities {
             ],
         )
     });
+
+    // Inside the loop, a parked concept car opens and shuts its doors (when fetched).
+    spawn_parked_car(
+        world,
+        Transform::from_translation(at(0.0, 0.0, -22.0)).with_rotation(facing(-90.0)),
+    );
 
     DemoEntities {
         athlete,

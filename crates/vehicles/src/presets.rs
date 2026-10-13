@@ -13,7 +13,6 @@
 
 use engine_core::math::{Quat, Vec3};
 use engine_core::prelude::*;
-use engine_render::{MeshRef, MeshRenderer, Shape, StandardMaterial};
 use engine_world::physics::{Collider, ColliderShape, RigidBody, Velocity};
 use engine_world::{EngineKind, SurfaceId, VehicleControls};
 
@@ -22,10 +21,8 @@ use crate::aero::{
 };
 use crate::chassis::{AeroBody, Vehicle, VehicleKind};
 use crate::drivetrain::{Differential, DriveAxle, Drivetrain, EngineSpec, Gearbox};
-use crate::meshes;
 use crate::ship::{FlightAssist, HeatShield, Spacecraft, Thruster, ThrusterRole};
 use crate::tire::{MagicFormula, TireModel};
-use crate::visuals::{BrakeLight, WheelVisual};
 use crate::wheels::{AntiRollBar, Assists, SteerInput, Suspension, Wheel, Wheels};
 
 /// Every preset by name.
@@ -69,112 +66,6 @@ pub fn spawn(commands: &mut Commands, kind: &str, transform: Transform) -> Optio
         "spaceplane" => spaceplane(commands, transform),
         _ => return None,
     })
-}
-
-// ---------------------------------------------------------------- shared drawing helpers
-
-fn register_meshes(commands: &mut Commands) {
-    commands.queue(|world: &mut World| {
-        if let Some(mut m) = world.get_resource_mut::<engine_assets::Assets<engine_render::Mesh>>()
-        {
-            meshes::register(&mut m);
-        }
-    });
-}
-
-fn part(
-    commands: &mut Commands,
-    parent: Entity,
-    mesh: impl Into<MeshRef>,
-    material: StandardMaterial,
-    transform: Transform,
-) -> Entity {
-    commands
-        .spawn((
-            transform,
-            MeshRenderer::new(mesh, material),
-            ChildOf(parent),
-        ))
-        .id()
-}
-
-fn asset(key: &str) -> MeshRef {
-    MeshRef::Asset(key.to_string())
-}
-
-fn at(x: f32, y: f32, z: f32) -> Transform {
-    Transform::from_xyz(x as f64, y as f64, z as f64)
-}
-
-fn rubber() -> StandardMaterial {
-    StandardMaterial::hex(0x141414).with_roughness(0.92)
-}
-
-fn chrome() -> StandardMaterial {
-    StandardMaterial::hex(0xc9ccd1)
-        .with_metallic(1.0)
-        .with_roughness(0.22)
-}
-
-fn glass() -> StandardMaterial {
-    let mut m = StandardMaterial::hex(0x0b1118)
-        .with_roughness(0.04)
-        .with_metallic(0.1);
-    m.reflectance = 0.9;
-    m.receives_wetness = false;
-    m
-}
-
-/// A drawn wheel: tire, rim, spokes (so spin shows) and a hub cap.
-fn wheel_visual(commands: &mut Commands, parent: Entity, w: &Wheel, index: usize, retracts: bool) {
-    let mount = w.mount - Vec3::Y * w.suspension.travel_m * 0.6;
-    let wheel = commands
-        .spawn((
-            Transform::from_translation(mount.as_dvec3()),
-            WheelVisual { index, retracts },
-            ChildOf(parent),
-        ))
-        .id();
-    let side = Quat::from_rotation_z(std::f32::consts::FRAC_PI_2);
-    let outward = if w.mount.x >= 0.0 { 1.0 } else { -1.0 };
-    part(
-        commands,
-        wheel,
-        Shape::Cylinder {
-            radius: w.radius,
-            height: w.width,
-            segments: 28,
-        },
-        rubber(),
-        Transform::from_rotation(side),
-    );
-    part(
-        commands,
-        wheel,
-        Shape::Cylinder {
-            radius: w.radius * 0.66,
-            height: w.width + 0.012,
-            segments: 24,
-        },
-        chrome(),
-        Transform::from_rotation(side),
-    );
-    let face = (w.width * 0.5 + 0.012) * outward;
-    for k in 0..5 {
-        let a = k as f32 / 5.0 * std::f32::consts::TAU;
-        part(
-            commands,
-            wheel,
-            Shape::Cuboid {
-                size: [0.03, w.radius * 1.25, w.radius * 0.16],
-            },
-            StandardMaterial::hex(0x2a2c30)
-                .with_metallic(0.8)
-                .with_roughness(0.35),
-            Transform::from_translation(Vec3::new(face, 0.0, 0.0).as_dvec3())
-                .with_rotation(Quat::from_rotation_x(a)),
-        );
-    }
 }
 
 fn tire(grip: f32) -> TireModel {
@@ -240,7 +131,6 @@ pub fn sports_car_wheels() -> Wheels {
 
 /// A rear-drive sports car in `paint` (sRGB hex).
 pub fn sports_car(commands: &mut Commands, transform: Transform, paint: u32) -> Entity {
-    register_meshes(commands);
     let wheels = sports_car_wheels();
     let body = commands
         .spawn((
@@ -275,100 +165,9 @@ pub fn sports_car(commands: &mut Commands, transform: Transform, paint: u32) -> 
             },
         ))
         .id();
-    for (i, w) in wheels.wheels.iter().enumerate() {
-        wheel_visual(commands, body, w, i, false);
-    }
+    crate::models::cars::sports_car_visuals(commands, body, &wheels, paint);
     commands.entity(body).insert(wheels);
-    let paint = StandardMaterial::hex(paint)
-        .with_metallic(0.55)
-        .with_roughness(0.26);
-    part(
-        commands,
-        body,
-        asset(meshes::CAR_BODY),
-        paint,
-        Transform::default(),
-    );
-    part(
-        commands,
-        body,
-        asset(meshes::CAR_CABIN),
-        glass(),
-        Transform::default(),
-    );
-    car_lights(commands, body, 2.2, 0.05, 0.62);
-    // A small rear wing.
-    part(
-        commands,
-        body,
-        Shape::Cuboid {
-            size: [1.5, 0.04, 0.32],
-        },
-        StandardMaterial::hex(0x18181a).with_roughness(0.5),
-        at(0.0, 0.62, 2.0),
-    );
-    for x in [-0.55f32, 0.55] {
-        part(
-            commands,
-            body,
-            Shape::Cuboid {
-                size: [0.04, 0.22, 0.12],
-            },
-            StandardMaterial::hex(0x18181a).with_roughness(0.5),
-            at(x, 0.5, 2.0),
-        );
-    }
     body
-}
-
-/// Headlights, brake lights and reverse lights.
-fn car_lights(commands: &mut Commands, body: Entity, half_length: f32, y: f32, x: f32) {
-    let head = StandardMaterial::hex(0xf4f4ee).with_emissive([1.0, 0.97, 0.9], 2_500.0);
-    for side in [-1.0f32, 1.0] {
-        part(
-            commands,
-            body,
-            Shape::Cuboid {
-                size: [0.36, 0.09, 0.05],
-            },
-            head,
-            at(side * x, y, -half_length - 0.01),
-        );
-        let off = StandardMaterial::hex(0x5a0808).with_emissive([1.0, 0.03, 0.02], 60.0);
-        let on = StandardMaterial::hex(0x8a0a0a).with_emissive([1.0, 0.03, 0.02], 1_800.0);
-        commands.spawn((
-            at(side * x, y + 0.08, half_length + 0.02),
-            MeshRenderer::new(
-                Shape::Cuboid {
-                    size: [0.42, 0.08, 0.05],
-                },
-                off,
-            ),
-            BrakeLight {
-                off,
-                on,
-                reverse: false,
-            },
-            ChildOf(body),
-        ));
-        let rev_off = StandardMaterial::hex(0x9a9a9a).with_roughness(0.2);
-        let rev_on = rev_off.with_emissive([1.0, 1.0, 1.0], 1_500.0);
-        commands.spawn((
-            at(side * (x - 0.3), y + 0.08, half_length + 0.02),
-            MeshRenderer::new(
-                Shape::Cuboid {
-                    size: [0.12, 0.06, 0.05],
-                },
-                rev_off,
-            ),
-            BrakeLight {
-                off: rev_off,
-                on: rev_on,
-                reverse: true,
-            },
-            ChildOf(body),
-        ));
-    }
 }
 
 /// The rally car's wheels: long travel, gravel tires.
@@ -435,7 +234,6 @@ pub fn rally_car_wheels() -> Wheels {
 
 /// An all-wheel-drive rally car.
 pub fn rally_car(commands: &mut Commands, transform: Transform) -> Entity {
-    register_meshes(commands);
     let wheels = rally_car_wheels();
     let lsd = Differential::Limited {
         preload_nm: 120.0,
@@ -514,59 +312,8 @@ pub fn rally_car(commands: &mut Commands, transform: Transform) -> Entity {
             },
         ))
         .id();
-    for (i, w) in wheels.wheels.iter().enumerate() {
-        wheel_visual(commands, body, w, i, false);
-    }
+    crate::models::cars::rally_car_visuals(commands, body, &wheels);
     commands.entity(body).insert(wheels);
-    let blue = StandardMaterial::hex(0x1747a6)
-        .with_metallic(0.4)
-        .with_roughness(0.32);
-    part(
-        commands,
-        body,
-        asset(meshes::RALLY_BODY),
-        blue,
-        Transform::default(),
-    );
-    part(
-        commands,
-        body,
-        asset(meshes::RALLY_CABIN),
-        glass(),
-        Transform::default(),
-    );
-    // Livery stripe, roof scoop and mud flaps.
-    let white = StandardMaterial::hex(0xf2f2f2).with_roughness(0.4);
-    part(
-        commands,
-        body,
-        Shape::Cuboid {
-            size: [0.36, 0.02, 4.0],
-        },
-        white,
-        at(0.0, 0.47, 0.0),
-    );
-    part(
-        commands,
-        body,
-        Shape::Cuboid {
-            size: [0.5, 0.12, 0.5],
-        },
-        StandardMaterial::hex(0x202022).with_roughness(0.6),
-        at(0.0, 1.05, 0.1),
-    );
-    for x in [-0.8f32, 0.8] {
-        part(
-            commands,
-            body,
-            Shape::Cuboid {
-                size: [0.26, 0.3, 0.02],
-            },
-            StandardMaterial::hex(0xe03a1e).with_roughness(0.7),
-            at(x, -0.32, 1.66),
-        );
-    }
-    car_lights(commands, body, 2.05, 0.1, 0.6);
     body
 }
 
