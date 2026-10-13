@@ -331,7 +331,14 @@ impl Drivetrain {
                 && (rpm > self.gearbox.upshift_rpm && settled
                     || rpm > self.engine.redline_rpm * 0.99)
             {
+                // Over the limiter (a car thrown or towed faster than its gear allows), skip
+                // straight to the gear that fits instead of one at a time, each held back by
+                // engine braking hard enough to lock the driven wheels.
+                let over = rpm > self.engine.redline_rpm * 0.99;
                 st.gear += 1;
+                while over && st.gear < n && rpm_in(st.gear) > self.gearbox.upshift_rpm {
+                    st.gear += 1;
+                }
                 st.shifting = self.gearbox.shift_time;
                 st.since_shift = 0.0;
             } else if st.gear > 1
@@ -346,6 +353,31 @@ impl Drivetrain {
             }
         }
         (throttle, brake)
+    }
+
+    /// Select the forward gear an automatic would hold with the driven wheels turning at
+    /// `driven_omega` (rad/s), spin the engine up to match and close the clutch: for a car
+    /// that starts out moving (spawned or placed at speed), which would otherwise sit in
+    /// first at idle and lock its driven wheels with engine braking.
+    pub fn match_speed(&mut self, driven_omega: f32) {
+        let gb = &self.gearbox;
+        let rpm_in = |gear: usize| driven_omega * gb.ratios[gear - 1] * gb.final_drive / RPM_TO_RAD;
+        let n = gb.ratios.len().max(1);
+        let mut gear = 1;
+        while gear < n && rpm_in(gear) > gb.upshift_rpm * 0.9 {
+            gear += 1;
+        }
+        let st = &mut self.state;
+        st.gear = gear as i32;
+        st.rpm = if gb.ratios.is_empty() {
+            self.engine.idle_rpm
+        } else {
+            rpm_in(gear).clamp(self.engine.idle_rpm, self.engine.redline_rpm)
+        };
+        st.clutch = 1.0;
+        st.shifting = 0.0;
+        st.since_shift = 0.0;
+        st.reverse_hold = 0.0;
     }
 
     /// One substep of the coupled engine/clutch/wheel system.
