@@ -246,7 +246,7 @@ fn the_runner_completes_the_parkour_route() {
 }
 
 #[test]
-fn the_climber_catches_the_ledge_shimmies_climbs_up_and_drops_off() {
+fn the_climber_catches_the_ledge_shimmies_around_the_corner_climbs_up_and_drops_off() {
     let (mut app, _) = demo_app(None);
     let mut q = app.world.query::<(Entity, &Name)>();
     let climber = q
@@ -271,6 +271,7 @@ fn the_climber_catches_the_ledge_shimmies_climbs_up_and_drops_off() {
     let summary = format!("hung from {hung_from:?}, shimmied {shimmied:.2} m");
     assert_eq!(triggered(&app, climber, "ledge_grab"), 1, "{summary}");
     assert!(shimmied > 2.5, "{summary}");
+    assert_eq!(triggered(&app, climber, "ledge_corner"), 1, "{summary}");
     assert!(triggered(&app, climber, "mantle") >= 1, "{summary}");
     assert!(stood_on_top && back_down, "{summary}");
     assert_eq!(triggered(&app, climber, "jump"), 1, "{summary}");

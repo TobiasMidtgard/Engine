@@ -9,7 +9,7 @@ use engine_core::math::{DVec3, Vec3};
 use engine_core::prelude::*;
 use engine_movement::prelude::*;
 use engine_world::locomotion::{LocomotionState, MoveIntent};
-use engine_world::physics::CharacterController;
+use engine_world::physics::{CharacterController, Velocity};
 use engine_world::{GroundContact, LocomotionMode};
 use support::*;
 
@@ -362,11 +362,22 @@ fn catches_a_ledge_too_high_to_mantle_and_shimmies_along_it() {
     assert_eq!(mover(&app, c).mode, LocomotionMode::Climb);
     assert!(q.z - p.z > 1.5, "shimmied {:.2} m", q.z - p.z);
     assert!((q.y - p.y).abs() < 0.05, "{q:?}");
-    // ...and stops at the end of the wall instead of falling off it.
-    run(&mut app, 3.0);
-    let end = pos(&app, c);
-    assert_eq!(mover(&app, c).mode, LocomotionMode::Climb);
-    assert!(end.z > 3.0 && end.z < 4.0, "{end:?}");
+    // ...and at the end of the wall goes on around the corner onto its end face, still
+    // holding +Z, at the same height.
+    run(&mut app, 2.5);
+    let around = pos(&app, c);
+    let m = mover(&app, c);
+    assert_eq!(m.mode, LocomotionMode::Climb);
+    assert_eq!(triggered(&app, c, "ledge_corner"), 1);
+    let h = m.hang.unwrap();
+    assert!(
+        h.corner.is_none() && h.normal.distance(Vec3::Z) < 0.05,
+        "{h:?}"
+    );
+    assert!(m.facing.distance(Vec3::NEG_Z) < 0.1, "{}", m.facing);
+    assert!((around.z - (4.0 + 0.35 + 0.04)).abs() < 0.05, "{around:?}");
+    assert!(around.x > 1.3, "{around:?}");
+    assert!((around.y - p.y).abs() < 0.05, "{around:?}");
 
     // Jump: climbs up and stands on top.
     intent(&mut app, c, |i| i.direction = Vec3::ZERO);
@@ -377,6 +388,57 @@ fn catches_a_ledge_too_high_to_mantle_and_shimmies_along_it() {
     let m = mover(&app, c);
     assert!(m.grounded && top.x > 1.2, "{top:?}");
     assert!((top.y - (3.6 + 0.9)).abs() < 0.05, "{top:?}");
+}
+
+#[test]
+fn shimmies_into_an_inside_corner_and_on_along_the_other_wall() {
+    let mut app = app();
+    let c = hang_from_a_high_wall(&mut app);
+    // A wall across the way: its face at z = 2 runs out in front of the first one.
+    block(
+        &mut app,
+        DVec3::new(1.0, 1.8, 3.0),
+        Vec3::new(4.0, 3.6, 2.0),
+    );
+    let p = pos(&app, c);
+    intent(&mut app, c, |i| i.direction = Vec3::Z);
+    let secs = run_until(&mut app, 3.0, |w| {
+        let m = w.get::<Mover>(c).unwrap();
+        m.hang
+            .is_some_and(|h| h.corner.is_none() && h.normal.dot(Vec3::NEG_Z) > 0.99)
+    });
+    let m = mover(&app, c);
+    assert!(secs < 2.5, "{:?}", m.hang);
+    assert_eq!(triggered(&app, c, "ledge_corner"), 1);
+    // Hanging from the second wall, clear of the first, and still going (the stick still
+    // held toward +Z): along the second wall, away from the corner.
+    let q = pos(&app, c);
+    assert!((q.z - (2.0 - 0.35 - 0.04)).abs() < 0.06, "{q:?}");
+    assert!(q.x < 1.0 - 0.35, "{q:?}");
+    run(&mut app, 0.3);
+    let r = pos(&app, c);
+    assert_eq!(mover(&app, c).mode, LocomotionMode::Climb);
+    assert!(r.x < q.x - 0.2, "{q:?} → {r:?}");
+    assert!((r.y - p.y).abs() < 0.05, "{r:?}");
+}
+
+#[test]
+fn stops_in_a_corner_whose_other_wall_is_too_high() {
+    let mut app = app();
+    let c = hang_from_a_high_wall(&mut app);
+    block(
+        &mut app,
+        DVec3::new(1.0, 3.0, 3.0),
+        Vec3::new(4.0, 6.0, 2.0),
+    );
+    intent(&mut app, c, |i| i.direction = Vec3::Z);
+    run(&mut app, 2.0);
+    let m = mover(&app, c);
+    let q = pos(&app, c);
+    assert_eq!(m.mode, LocomotionMode::Climb);
+    assert_eq!(triggered(&app, c, "ledge_corner"), 0);
+    assert!(m.hang.unwrap().normal.distance(Vec3::NEG_X) < 0.05);
+    assert!(q.z > 1.4 && q.z < 1.7, "{q:?}");
 }
 
 #[test]
@@ -749,6 +811,84 @@ fn wall_runs_on_a_moving_wall_and_jumps_off_with_its_speed() {
         "{}",
         m.velocity
     );
+}
+
+/// The wall from the wall-run test moving along its length at `speed` (m/s along +X), with
+/// a `Velocity` that says so.
+fn sliding_wall(app: &mut App, speed: f32) -> Entity {
+    drifting(app);
+    let wall = block(app, DVec3::new(15.0, 2.5, 1.5), Vec3::new(30.0, 5.0, 0.6));
+    app.world.entity_mut(wall).insert((
+        Drift(Vec3::X * speed),
+        Velocity {
+            linear: Vec3::X * speed,
+            angular: Vec3::ZERO,
+        },
+    ));
+    wall
+}
+
+fn wall_ran(app: &mut App, c: Entity, secs: f64) -> f64 {
+    let mut wallrun_secs = 0.0;
+    run_until(app, secs, |w| {
+        if w.get::<Mover>(c).unwrap().mode == LocomotionMode::WallRun {
+            wallrun_secs += DT;
+        }
+        false
+    });
+    wallrun_secs
+}
+
+#[test]
+fn running_beside_a_wall_as_fast_as_it_moves_is_no_wall_run() {
+    let mut app = app();
+    sliding_wall(&mut app, 7.0);
+    let c = character(
+        &mut app,
+        DVec3::new(0.0, 0.9, 0.0),
+        MovementProfile::pilot(),
+    );
+    // Sprint beside it and jump at it, as in the wall-run test: 1.5 m/s past it is too slow.
+    intent(&mut app, c, |i| {
+        i.direction = Vec3::X;
+        i.sprint = true;
+    });
+    run(&mut app, 1.0);
+    tap_jump(&mut app, c);
+    intent(&mut app, c, |i| {
+        i.direction = Vec3::new(0.2, 0.0, 1.0).normalize()
+    });
+    let secs = wall_ran(&mut app, c, 1.2);
+    assert_eq!(secs, 0.0, "wall-ran for {secs:.2} s");
+    assert_eq!(triggered(&app, c, "wallrun"), 0);
+}
+
+#[test]
+fn a_jump_at_a_wall_sliding_past_runs_along_it() {
+    let mut app = app();
+    sliding_wall(&mut app, -9.0);
+    let c = character(
+        &mut app,
+        DVec3::new(0.0, 0.9, 0.0),
+        MovementProfile::pilot(),
+    );
+    // Walk up to it and jump: barely moving along it, but it slides past at 9 m/s.
+    intent(&mut app, c, |i| i.direction = Vec3::new(0.0, 0.0, 0.4));
+    run(&mut app, 0.3);
+    tap_jump(&mut app, c);
+    intent(&mut app, c, |i| {
+        i.direction = Vec3::new(0.2, 0.0, 1.0).normalize()
+    });
+    run_until(&mut app, 1.0, |w| {
+        w.get::<Mover>(c).unwrap().mode == LocomotionMode::WallRun
+    });
+    assert_eq!(triggered(&app, c, "wallrun"), 1);
+    // It runs along the wall the way the wall passes it (+X relative to the wall).
+    intent(&mut app, c, |i| i.direction = Vec3::X);
+    let secs = wall_ran(&mut app, c, 0.6);
+    assert!(secs > 0.5, "wall-ran for {secs:.2} s");
+    let m = mover(&app, c);
+    assert!(m.velocity.x > 6.0, "along the wall: {}", m.velocity);
 }
 
 #[test]

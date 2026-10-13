@@ -509,7 +509,12 @@ pub fn demo_views(z: &Zone) -> Vec<View> {
             .collect(),
         "field" => engine_fire::demo::VIEWS
             .iter()
-            .map(|v| View::new(v.key, v.name, v.eye, v.target, v.hour))
+            .map(|v| {
+                // Each stop starts a fresh fire its own way along, so it catches its moment.
+                View::new(v.key, v.name, v.eye, v.target, v.hour)
+                    .on_arrive("fire.demo", &format!(r#"{{"at_secs": {}}}"#, v.at_secs))
+                    .warmup(v.warmup_secs)
+            })
             .collect(),
         "parkour" => {
             // The duel runs from its setup when the camera arrives (movement.duel), so each
@@ -566,16 +571,17 @@ pub fn demo_views(z: &Zone) -> Vec<View> {
                 .on_arrive("movement.duel", &duel("Pack"))
                 .on_leave("movement.duel", cycle),
                 // The ledge station: the climber restarts its loop on arrival and is caught
-                // shimmying along the block's top. The Blink round has no slow motion, so the
-                // climber keeps its pace.
+                // going around the corner at the end of the block's top. The Blink round has
+                // no slow motion, so the climber keeps its pace.
                 View::new(
                     "parkour_ledge",
-                    "Ledge hang: catch a ledge too high to climb, shimmy along it, climb up",
-                    [11.4, 3.0, 8.4],
-                    [17.0, 2.3, 1.6],
+                    "Ledge hang: catch a ledge too high to climb, shimmy along it and around \
+                     its corner, climb up",
+                    [24.6, 3.3, 6.2],
+                    [19.7, 2.6, 1.7],
                     16.0,
                 )
-                .warmup(2.6)
+                .warmup(4.4)
                 .on_arrive("movement.duel", &duel("Blink"))
                 .on_arrive("movement.climber", "{}")
                 .on_leave("movement.duel", cycle),
@@ -773,6 +779,17 @@ pub fn demo_views(z: &Zone) -> Vec<View> {
                 14.5,
             )
             .warmup(7.0),
+            // The unveiling starts over on arrival: the crane lowers the silk over the statue,
+            // leaves it on and is lifting it off when the picture is taken.
+            View::new(
+                "yard_statue",
+                "Unveiling: silk lifted off a marble statue",
+                [-10.5, 2.3, -8.4],
+                [-14.0, 2.6, -4.0],
+                15.0,
+            )
+            .on_arrive("softbody.unveil", "{}")
+            .warmup(17.4),
             // On the lake: the dinghy's mooring is 85 m east and 110 m south of the yard. It
             // starts its lane over on arrival, so it is out on the water in view.
             View::new(

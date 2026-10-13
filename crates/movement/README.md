@@ -182,7 +182,8 @@ sets the bake size). Nothing in it is third-party art.
   the player, Elite, Grunt), each a set of rigid armor parts with baked materials and a
   katana. The duelist and elite are armored samurai (laced lames, pleated hakama, sleeves of
   mail with laced splints; the duelist in a ribbed helmet with gilt horns over a sculpted
-  face mask and a throat guard); the pilot and grunt are soldiers in plate carriers with
+  face mask and a throat guard, the elite in a riveted black helmet over a snarling demon
+  mask with glowing eyes and fangs); the pilot and grunt are soldiers in plate carriers with
   magazine pouches and cargo trousers, the pilot in a close helmet with a narrow visor and
   a respirator, the grunt in a gas mask under a brimmed helmet. The demo puts one on every
   character it spawns.
