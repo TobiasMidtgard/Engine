@@ -6,6 +6,8 @@
 //! still at 0. The PNGs land in the test's temp dir; set `NPC_SCREENSHOT_DIR` to also copy
 //! them there.
 
+use std::f32::consts::{FRAC_PI_2, PI};
+
 use engine_core::prelude::*;
 use engine_core::time::TimeSource;
 use engine_npc::*;
@@ -16,14 +18,23 @@ use engine_world::locomotion::{LocomotionMode, LocomotionState};
 
 const W: u32 = 1280;
 const H: u32 = 720;
+/// The ground of the close-ups.
+const EARTH: u32 = 0x8c7a5b;
+/// The arena's sand.
+const SAND: u32 = 0xf2dfb8;
 
 fn app() -> App {
+    app_on(W, H, EARTH)
+}
+
+/// An app rendering `w` × `h` pixels, with the sun up and a plane of `ground` color.
+fn app_on(w: u32, h: u32, ground: u32) -> App {
     let mut app = App::new();
     app.world.resource_mut::<EngineConfig>().headless = true;
     {
-        let mut w = app.world.resource_mut::<Window>();
-        w.width = W;
-        w.height = H;
+        let mut win = app.world.resource_mut::<Window>();
+        win.width = w;
+        win.height = h;
     }
     app.world
         .resource_mut::<Time>()
@@ -43,7 +54,7 @@ fn app() -> App {
                 size: [80.0, 80.0],
                 subdivisions: 1,
             },
-            StandardMaterial::hex(0x8c7a5b).with_roughness(0.95),
+            StandardMaterial::hex(ground).with_roughness(0.95),
         ),
     ));
     app
@@ -63,6 +74,8 @@ struct Pose {
     loco: LocomotionState,
     gait: f32,
     downed: bool,
+    /// Just hit (flashing).
+    hurt: bool,
 }
 
 impl Pose {
@@ -80,6 +93,7 @@ impl Pose {
             loco: LocomotionState::default(),
             gait: 0.0,
             downed: false,
+            hurt: false,
         }
     }
 }
@@ -115,6 +129,8 @@ fn spawn(app: &mut App, p: Pose) {
         NpcCombat {
             phase: p.phase,
             defense: p.defense,
+            // The clock stands at 0: a hit "at" 0.05 s is under the flash's 0.12 s.
+            last_hurt: if p.hurt { 0.05 } else { 0.0 },
             ..Default::default()
         },
     ));
@@ -386,4 +402,121 @@ fn fighter_armor_wear() {
     }
     shoot(&mut app, squad, "npc_fighters_armor_wear.png");
     shoot(&mut app, close, "npc_fighters_armor_closeup.png");
+}
+
+/// Pixels that read as the red or the blue team (as the arena screenshots count them).
+fn is_red(p: &image::Rgba<u8>) -> bool {
+    let [r, g, b] = [p[0], p[1], p[2]].map(f32::from);
+    r > 70.0 && r > g * 1.7 && r > b * 1.7
+}
+
+fn is_blue(p: &image::Rgba<u8>) -> bool {
+    let [r, g, b] = [p[0], p[1], p[2]].map(f32::from);
+    b > 70.0 && b > r * 1.5 && b > g * 1.2
+}
+
+/// Where `p` lands on a `w` × `h` image seen from `eye` looking at `target` with a vertical
+/// field of view of `fov` degrees.
+fn project(eye: DVec3, target: DVec3, fov: f64, w: u32, h: u32, p: DVec3) -> (f64, f64) {
+    let f = (target - eye).normalize();
+    let right = f.cross(DVec3::Y).normalize();
+    let up = right.cross(f);
+    let d = p - eye;
+    let k = f64::from(h) * 0.5 / (fov.to_radians() * 0.5).tan() / d.dot(f);
+    (
+        f64::from(w) * 0.5 + d.dot(right) * k,
+        f64::from(h) * 0.5 - d.dot(up) * k,
+    )
+}
+
+/// Two squads 33 m off on the sand, seen from as high as the arena overview: every fighter,
+/// whichever way it faces and whatever it carries, reads as its team's color.
+#[test]
+fn fighter_teams_at_distance() {
+    let (w, h) = (960, 540);
+    let mut app = app_on(w, h, SAND);
+    let kit = [
+        (NpcWeapon::sword_and_shield(), NpcSkills::rookie()),
+        (NpcWeapon::sword(), NpcSkills::soldier()),
+        (NpcWeapon::rifle(), NpcSkills::veteran()),
+        (NpcWeapon::bow(), NpcSkills::master()),
+    ];
+    let yaws = [0.0, FRAC_PI_2, PI, -FRAC_PI_2];
+    let mut fighters = Vec::new();
+    for (team, side) in [(1, -1.0), (2, 1.0)] {
+        for (i, (weapon, skills)) in kit.iter().enumerate() {
+            let at = DVec3::new(side * (2.0 + 2.2 * i as f64), 0.0, 2.0);
+            fighters.push((team, at));
+            spawn(
+                &mut app,
+                Pose {
+                    at,
+                    yaw: yaws[(i + team as usize) % 4],
+                    skills: *skills,
+                    ..Pose::new(0.0, team, *weapon)
+                },
+            );
+        }
+    }
+    // Behind them, one of each team just hit: they flash, tinted, not blown out to white.
+    for (team, x) in [(1, -0.7), (2, 0.7)] {
+        spawn(
+            &mut app,
+            Pose {
+                at: DVec3::new(x, 0.0, 8.0),
+                hurt: true,
+                ..Pose::new(0.0, team, NpcWeapon::sword())
+            },
+        );
+    }
+    let (eye, target, fov) = (
+        DVec3::new(0.0, 16.0, -31.0),
+        DVec3::new(0.0, 0.0, 4.0),
+        60.0,
+    );
+    let cam = camera(&mut app, eye, target, fov as f32);
+    let struck = camera(
+        &mut app,
+        DVec3::new(0.0, 2.2, 3.4),
+        DVec3::new(0.0, 1.0, 8.0),
+        40.0,
+    );
+    app.update_n(2);
+    if app.world.get_resource::<RenderDisabled>().is_some() {
+        eprintln!("skipping: no GPU");
+        return;
+    }
+    let Some(img) = shoot(&mut app, cam, "npc_fighters_teams_far.png") else {
+        return;
+    };
+    shoot(&mut app, struck, "npc_fighters_hit_flash.png");
+    // Each fighter, a box round it (60 cm to each side, feet to crest): about 6 × 24 pixels.
+    let mut squads = [0; 2];
+    for (team, at) in fighters {
+        let (x0, y1) = project(eye, target, fov, w, h, at + DVec3::new(0.6, 0.0, 0.0));
+        let (x1, y0) = project(eye, target, fov, w, h, at + DVec3::new(-0.6, 2.0, 0.0));
+        let (mut red, mut blue) = (0, 0);
+        for y in y0.floor() as u32..=(y1.ceil() as u32).min(h - 1) {
+            for x in x0.floor() as u32..=(x1.ceil() as u32).min(w - 1) {
+                let p = img.get_pixel(x, y);
+                red += usize::from(is_red(p));
+                blue += usize::from(is_blue(p));
+            }
+        }
+        eprintln!(
+            "team {team} at x {:+.1}: red {red} px, blue {blue} px",
+            at.x
+        );
+        let (own, other) = if team == 1 { (red, blue) } else { (blue, red) };
+        assert!(
+            own >= 12 && other <= 2,
+            "the team {team} fighter at x {:+.1} shows {own} px of its color, {other} of the other",
+            at.x
+        );
+        squads[team as usize - 1] += own;
+    }
+    assert!(
+        squads.iter().all(|&n| n >= 90),
+        "team colors shown by each squad: {squads:?} px"
+    );
 }
