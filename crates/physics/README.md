@@ -68,8 +68,10 @@ changing that one plugin line.
   waterline sampled every 2 m under the body, so floating bodies get the righting moments real
   ones do: a log lies down, a half-density cube floats on its edge, a 0.9-density cube floats
   flat, a barge pitches on a passing swell. Heave and rocking are damped across the wetted
-  bottom (half of critical), so floaters settle instead of bobbing forever. Other shapes
-  (meshes, heightfields) use the submerged share of their bounding box.
+  bottom (half of critical), so floaters settle instead of bobbing forever; water forces are
+  recomputed every substep. Turning drag is per axis, by how far the shape reaches across it
+  (a log rolls easily, end over end it drags its whole length). Other shapes (meshes,
+  heightfields) use the submerged share of their bounding box.
 - **Time**: runs in `FixedUpdate` / `SimSet::Physics` on world time, so `TimeDilation` slows it;
   each fixed step is split into substeps of at most `max_substep_secs`, so 10× fast-forward is
   as stable as 1×. `LocalTimeScale` speeds a single body up or down (its `Velocity` is in its
@@ -180,6 +182,16 @@ about a second in release builds (debug builds make them a quarter the size). Ap
 renderer get colliders only. `cargo run -p engine_physics --release --example art_props`
 (`art_structures`, `art_dummy`, `art_textures`) previews each part on its own.
 
+`demo::spawn_floaters(commands, at)` puts the **float test** on any water (`at` on the surface,
+about 14 × 8 m of open water at least 2 m deep): eight things dropped in, each settling as the real
+one does. A 2.4 m timber post dropped on end topples and floats rolled onto a corner; a raft of
+five such posts floats flat; a half-density crate tips onto an edge, 45° over; a waterlogged crate
+(0.9 of the water's density) floats flat with 8 cm showing; a plank thrown in on its edge lands
+flat; a light ball rides high; a sealed empty drum floats on its side; a steel ball sinks. It drops
+again every 40 s of world time (`demo::FLOAT_CYCLE_SECS`) while someone is within 250 m.
+`cargo run -p engine_physics --release --example float_test -- out_dir` renders it in a concrete
+pool; `tests/floaters.rs` checks each result.
+
 Tests (`cargo test -p engine_physics`): the conformance suite; the "done when" scenarios below
 (`tests/scenarios.rs`); behaviors other modules rely on (`tests/behaviors.rs`: removal, compound
 bodies, joint breaking and motors, hinges swinging through the fixed body they hang on, kinematic
@@ -187,7 +199,8 @@ platforms, stairs and steep slopes, dashing into thin walls, wall-running, no ph
 ground, running over heightfield hills, crouching, landing from a fall, standing exactly on boxes
 from 1 m to 10 km across, characters on their own clock, sensors and layers, local time, hovering,
 buoyancy, floating the way real bodies do (logs, planks, cubes on their edge, a ball's draft, a
-barge on a swell), blasts, bodies crossing and merging regions); riding moving bodies (`tests/platforms.rs`:
+barge on a swell), blasts, bodies crossing and merging regions); the float test
+(`tests/floaters.rs`); riding moving bodies (`tests/platforms.rs`:
 crates and characters on a deck at up to 30 km/s, lifts, a turntable, a thrusting and turning ship,
 a seesaw tipped by a character's weight, crates landing on heads, rays hitting bodies at orbital
 speed); mass overrides (`tests/mass.rs`: a moved center of mass, dropping an override); following

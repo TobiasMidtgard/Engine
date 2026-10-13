@@ -494,14 +494,6 @@ pub(crate) fn physics_step(world: &mut World, mut q: Local<Option<StepQueries>>)
         let g = gravity.at(sim.region(rid).anchor);
         sim.region_mut(rid).world.gravity = g;
         refresh_contact_hooks(&mut sim.region_mut(rid).world);
-        prepare_forces(
-            &mut sim,
-            rid,
-            &gravity,
-            g,
-            water.as_ref(),
-            settings.buoyancy,
-        );
         if sim.characters.values().any(|c| c.region == rid) {
             let r = sim.region_mut(rid);
             if r.stale_all || !r.fresh.is_empty() {
@@ -510,6 +502,16 @@ pub(crate) fn physics_step(world: &mut World, mut q: Local<Option<StepQueries>>)
             character::find_platforms(&mut sim, rid, &gravity);
         }
         for _ in 0..substeps {
+            // Every substep: water pressure follows the pose (forces held over several
+            // substeps lag behind it and pump energy into a floating body's rocking).
+            prepare_forces(
+                &mut sim,
+                rid,
+                &gravity,
+                g,
+                water.as_ref(),
+                settings.buoyancy,
+            );
             drive_kinematics(&mut sim, rid, sub_dt);
             let scaled = scale_time(&mut sim, rid, true);
             {
@@ -849,8 +851,6 @@ fn prepare_forces(
                     }
                     let aabb = c.compute_aabb();
                     let height = (aabb.maxs.y - aabb.mins.y).max(1e-3);
-                    // How far the shape reaches: what a spin drags through the water.
-                    let reach = (aabb.maxs - aabb.mins).max_element();
                     // Lift (and its torque) from the pressure on the real shape where there
                     // is a mesh for it, else from the fraction of the box under water.
                     let hull = hulls.get(c.shared_shape());
@@ -895,7 +895,7 @@ fn prepare_forces(
                     // Water drag relative to the current, and rotational drag.
                     let rel = v - current;
                     force -= rel * (mass * 0.8 * frac);
-                    torque -= w_ang * (mass * 0.3 * frac * reach * reach);
+                    torque -= spin_drag(c, w_ang) * (mass * 0.3 * frac);
                     if !meshed {
                         // Bobbing dies out within a few periods (waves carry the energy
                         // away): heave damping at about half the critical value. Meshes damp
@@ -919,6 +919,20 @@ fn prepare_forces(
         }
         sim.bodies.get_mut(&e).unwrap().forces_set = needs || (wet && had_forces);
     }
+}
+
+/// Water's drag on a collider turning at `spin`, per unit of the body's mass and wetness: about
+/// each of the shape's own axes, as far as the shape reaches across that axis (a log rolls
+/// through the water easily, end over end it sweeps its whole length).
+fn spin_drag(c: &rapier3d::geometry::Collider, spin: Vec3) -> Vec3 {
+    let h = c.shape().compute_local_aabb().half_extents();
+    let reach = Vec3::new(
+        h.y * h.y + h.z * h.z,
+        h.x * h.x + h.z * h.z,
+        h.x * h.x + h.y * h.y,
+    );
+    let rot = c.position().rotation;
+    rot * (reach * 2.0 * (rot.inverse() * spin))
 }
 
 /// A body whose far edge moves faster than this from turning alone, m/s, gets its contacts

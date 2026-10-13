@@ -116,11 +116,16 @@ impl Hull {
             let first = q[0] * d[0] + q[1] * d[1] + q[2] * d[2] + (q[0] + q[1] + q[2]) * s;
             out.torque += (first / 12.0).cross(-area_n * rho_g);
             if area_n.y < 0.0 {
+                // r × up is linear in r, so over the triangle ∫ (r × up) dA = A c × up and
+                // ∫ (r × up)(r × up)ᵀ dA = A/12 (Σ aᵢaᵢᵀ + Σa Σaᵀ) with aᵢ = qᵢ × up.
                 let a = -area_n.y;
-                let arm = ((q[0] + q[1] + q[2]) / 3.0).cross(Vec3::Y);
+                let arms = q.map(|p| p.cross(Vec3::Y));
+                let sum = arms[0] + arms[1] + arms[2];
+                let outer = |v: Vec3| Mat3::from_cols(v * v.x, v * v.y, v * v.z);
                 base += a;
-                base_arm += arm * a;
-                base_inertia += Mat3::from_cols(arm * arm.x, arm * arm.y, arm * arm.z) * a;
+                base_arm += sum * (a / 3.0);
+                base_inertia +=
+                    (outer(arms[0]) + outer(arms[1]) + outer(arms[2]) + outer(sum)) * (a / 12.0);
             }
         };
         for t in &self.tris {
