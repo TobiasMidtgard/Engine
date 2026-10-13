@@ -1,9 +1,10 @@
 //! Procedural wildlife: red deer (stags carry branching antlers and a dark neck mane), grey
-//! wolves, European rabbits and starlings.
+//! wolves, wild boar (bristly, with a mane along the spine; boars carry tusks, piglets are
+//! striped), European rabbits and starlings.
 //!
 //! Every animal is a set of rigid pieces (torso, neck, head, jaw, ears, tail, leg segments,
-//! hooves, wings) that the pose code in `visuals::animal` places each step. Deer and wolf
-//! torsos come in two halves, the fore half and the croup, hinged at the loin so the back
+//! hooves, tusks, wings) that the pose code in `visuals::animal` places each step. Deer, wolf
+//! and boar torsos come in two halves, the fore half and the croup, hinged at the loin so the back
 //! bends: the fore half carries a ball behind the cut (the cut's cross-section swept round the
 //! hinge) that the croup's rim slides over, so the seam stays closed as the croup tucks and
 //! lifts, and the ball is painted as the cut it was drawn out of, so the coat runs on across
@@ -55,7 +56,7 @@ impl LegRest {
     }
 }
 
-/// Rest-pose joints of a four-legged animal (deer and wolves).
+/// Rest-pose joints of a four-legged animal (deer, wolves and boars).
 #[derive(Debug, Clone, Copy)]
 pub struct QuadRig {
     /// Torso pivot.
@@ -178,6 +179,47 @@ pub const WOLF: QuadRig = QuadRig {
     head_len: 0.27,
 };
 
+/// Wild boar sow: 0.8 m at the withers, deep and heavy in front, short-legged, the long wedge
+/// of the head carried low. The neck is one piece (`neck2` sits on the poll); boars use the
+/// same rig scaled by [`BOAR_SCALE`], piglets by [`PIGLET_SCALE`].
+pub const BOAR: QuadRig = QuadRig {
+    body: v3(0.0, 0.56, -0.02),
+    loin: v3(0.0, 0.66, 0.03),
+    neck: v3(0.0, 0.58, -0.36),
+    neck2: v3(0.0, 0.62, -0.56),
+    head: v3(0.0, 0.62, -0.56),
+    jaw: v3(0.0, 0.518, -0.569),
+    ear: v3(0.048, 0.6575, -0.6338),
+    tail: v3(0.0, 0.66, 0.475),
+    tail2: v3(0.0, 0.44, 0.545),
+    front: LegRest {
+        joints: [
+            v3(0.11, 0.56, -0.36),
+            v3(0.12, 0.40, -0.30),
+            v3(0.11, 0.19, -0.33),
+            v3(0.105, 0.07, -0.335),
+            v3(0.105, 0.0, -0.40),
+        ],
+    },
+    hind: LegRest {
+        joints: [
+            v3(0.10, 0.62, 0.30),
+            v3(0.125, 0.42, 0.20),
+            v3(0.11, 0.23, 0.36),
+            v3(0.10, 0.07, 0.34),
+            v3(0.10, 0.0, 0.28),
+        ],
+    },
+    belly: 0.36,
+    half_width: 0.165,
+    head_len: 0.45,
+};
+
+/// Boars are this much bigger than sows.
+pub const BOAR_SCALE: f32 = 1.12;
+/// Striped piglets, a few months old.
+pub const PIGLET_SCALE: f32 = 0.45;
+
 /// European rabbit crouched on all fours, about 0.2 m tall.
 #[derive(Debug, Clone, Copy)]
 pub struct RabbitRig {
@@ -257,6 +299,8 @@ pub enum Piece {
     Tail2,
     /// Both antlers (stags), riding on the head.
     Antlers,
+    /// A boar's tusks (both pairs), riding on the jaw.
+    Tusks,
     /// Leg `k` (0 left front, 1 right front, 2 left hind, 3 right hind), segment 0 (upper
     /// arm or thigh) .. 3 (pastern or paw).
     Leg(u8, u8),
@@ -282,6 +326,7 @@ impl Piece {
             Piece::Tail => "tail".into(),
             Piece::Tail2 => "tail2".into(),
             Piece::Antlers => "antlers".into(),
+            Piece::Tusks => "tusks".into(),
             Piece::Leg(k, s) => format!("leg{k}_{s}"),
             Piece::Hoof(k) => format!("hoof{k}"),
             Piece::Wing(s, w) => format!("wing{s}_{w}"),
@@ -299,17 +344,20 @@ enum Skin {
     Gloss,
     Hoof,
     Antler,
+    /// Tusks: smooth ivory, colored by the vertices.
+    Ivory,
     /// Wing and tail feathers (double sided).
     Feather,
     /// Bare skin: bird legs.
     Bare,
 }
 
-/// The pieces of one animal with meshes and materials, or `None` without the renderer.
-/// `tint` (linear RGB, 1 = as painted) multiplies the coat.
+/// The pieces of one animal (a male, or young) with meshes and materials, or `None` without
+/// the renderer. `tint` (linear RGB, 1 = as painted) multiplies the coat.
 pub fn pieces(
     species: Species,
     male: bool,
+    young: bool,
     tint: Option<Vec3>,
     art: &mut ArtAssets,
 ) -> Option<Vec<(Piece, MeshRef, MaterialRef)>> {
@@ -317,10 +365,10 @@ pub fn pieces(
         return None;
     }
     ensure_species(species, art);
-    let list = piece_list(species, male);
+    let list = piece_list(species, male, young);
     let mut out = Vec::with_capacity(list.len());
     for (piece, skin) in list {
-        let key = mesh_key(species, piece, male);
+        let key = mesh_key(species, piece, male, young);
         let mesh = art.mesh(&key, Mesh::default)?;
         let mut material = material(species, skin, art)?;
         if let (Some(t), Skin::Coat, MaterialRef::Inline(m)) = (tint, skin, &mut material) {
@@ -332,8 +380,8 @@ pub fn pieces(
 }
 
 /// The pieces an animal is made of (also without the renderer).
-pub fn piece_names(species: Species, male: bool) -> Vec<Piece> {
-    piece_list(species, male)
+pub fn piece_names(species: Species, male: bool, young: bool) -> Vec<Piece> {
+    piece_list(species, male, young)
         .into_iter()
         .map(|(p, _)| p)
         .collect()
@@ -345,21 +393,35 @@ fn species_key(s: Species) -> &'static str {
         Species::Wolf => "wolf",
         Species::Rabbit => "rabbit",
         Species::Bird => "bird",
+        Species::Boar => "boar",
     }
 }
 
-fn mesh_key(species: Species, piece: Piece, male: bool) -> String {
+fn mesh_key(species: Species, piece: Piece, male: bool, young: bool) -> String {
     let stag = species == Species::Deer && male && matches!(piece, Piece::Neck | Piece::Neck2);
+    // Piglets are striped: their own torso, neck and head.
+    let piglet = species == Species::Boar
+        && young
+        && matches!(
+            piece,
+            Piece::Body | Piece::Croup | Piece::Neck | Piece::Head
+        );
     format!(
         "animals/{}/{}{}",
         species_key(species),
         piece.key(),
-        if stag { "_stag" } else { "" }
+        if stag {
+            "_stag"
+        } else if piglet {
+            "_young"
+        } else {
+            ""
+        }
     )
 }
 
 /// What each animal is made of.
-fn piece_list(species: Species, male: bool) -> Vec<(Piece, Skin)> {
+fn piece_list(species: Species, male: bool, young: bool) -> Vec<(Piece, Skin)> {
     let mut v = vec![
         (Piece::Body, Skin::Coat),
         (Piece::Head, Skin::Coat),
@@ -422,6 +484,24 @@ fn piece_list(species: Species, male: bool) -> Vec<(Piece, Skin)> {
                 v.push((Piece::Leg(s, 0), Skin::Bare));
             }
         }
+        Species::Boar => {
+            v.extend([
+                (Piece::Croup, Skin::Coat),
+                (Piece::Neck, Skin::Coat),
+                (Piece::Jaw, Skin::Coat),
+                (Piece::Tail, Skin::Coat),
+            ]);
+            v.extend([(Piece::Ear(0), Skin::Coat), (Piece::Ear(1), Skin::Coat)]);
+            for k in 0..4 {
+                for s in 0..4 {
+                    v.push((Piece::Leg(k, s), Skin::Coat));
+                }
+                v.push((Piece::Hoof(k), Skin::Hoof));
+            }
+            if male && !young {
+                v.push((Piece::Tusks, Skin::Ivory));
+            }
+        }
     }
     v
 }
@@ -444,6 +524,12 @@ fn material(species: Species, skin: Skin, art: &mut ArtAssets) -> Option<Materia
         }
         Skin::Hoof => art.material("animals/hoof", white, hoof_texture),
         Skin::Antler => art.material("animals/antler", white, antler_texture),
+        Skin::Ivory => {
+            let mut m = white.with_roughness(0.38);
+            m.reflectance = 0.5;
+            m.subsurface = 0.15;
+            Some(MaterialRef::Inline(m))
+        }
         Skin::Feather => {
             let mut base = white;
             base.double_sided = true;
@@ -461,7 +547,7 @@ fn material(species: Species, skin: Skin, art: &mut ArtAssets) -> Option<Materia
 
 /// Generate a species' meshes and textures (in parallel) unless they already exist.
 fn ensure_species(species: Species, art: &mut ArtAssets) {
-    let probe = format!("npc/{}", mesh_key(species, Piece::Body, false));
+    let probe = format!("npc/{}", mesh_key(species, Piece::Body, false, false));
     if art
         .meshes
         .as_ref()
@@ -548,6 +634,12 @@ pub fn species_jobs(species: Species) -> Vec<Job> {
             }));
             bird::jobs(&mut jobs);
         }
+        Species::Boar => {
+            jobs.push(Box::new(|| {
+                vec![Made::Tex("animals/hoof".into(), hoof_texture())]
+            }));
+            boar::jobs(&mut jobs);
+        }
     }
     jobs
 }
@@ -568,12 +660,22 @@ pub fn build_all(species: Species) -> (Vec<(String, usize)>, f32) {
     (out, secs)
 }
 
-/// Triangles of one animal: the pieces it is made of.
+/// Triangles of one grown animal: the pieces it is made of.
 pub fn triangles_per_animal(species: Species, male: bool, meshes: &[(String, usize)]) -> usize {
-    piece_list(species, male)
+    triangles_of(species, male, false, meshes)
+}
+
+/// Triangles of one animal, grown or young.
+pub fn triangles_of(
+    species: Species,
+    male: bool,
+    young: bool,
+    meshes: &[(String, usize)],
+) -> usize {
+    piece_list(species, male, young)
         .into_iter()
         .map(|(p, _)| {
-            let key = mesh_key(species, p, male);
+            let key = mesh_key(species, p, male, young);
             meshes
                 .iter()
                 .find(|(k, _)| *k == key)
@@ -582,9 +684,9 @@ pub fn triangles_per_animal(species: Species, male: bool, meshes: &[(String, usi
         .sum()
 }
 
-/// How many pieces one animal has.
+/// How many pieces one grown animal has.
 pub fn piece_count(species: Species, male: bool) -> usize {
-    piece_list(species, male).len()
+    piece_list(species, male, false).len()
 }
 
 // ======================================================================= sdf meshing
@@ -1549,6 +1651,8 @@ struct Kind {
     key: &'static str,
     /// Coat color (linear RGB) at a rest-pose point with its normal; the flag is `variant`.
     coat: fn(Piece, Vec3, Vec3, bool) -> Vec3,
+    /// What a variant's mesh keys end in (a stag's neck, a piglet's striped torso).
+    variant: &'static str,
     /// The whole body, for occlusion.
     body: SdfFn,
     /// Size of the animal relative to a deer (scales occlusion probes).
@@ -1568,7 +1672,7 @@ impl Spec {
             seam: self.seam,
         };
         let mesh = sculpt(&self.f, self.region, self.target, &paint);
-        let suffix = if variant { "_stag" } else { "" };
+        let suffix = if variant { kind.variant } else { "" };
         let mut out = Vec::new();
         if let Some(m) = self.mirror {
             out.push(Made::Mesh(
@@ -1799,6 +1903,25 @@ fn coat_texture(species: Species) -> TextureSet {
             TextureSet::bake(256, 0.07, |uv| fur_texel(&f, &tufts, uv))
         }
         Species::Bird => plumage_texture(),
+        Species::Boar => {
+            // Long coarse bristles, split at the tips, a pale band on many: grizzled.
+            let f = Fur {
+                cells: 14,
+                len: 4.4,
+                width: 0.9,
+                strands: 4.5,
+                height: 0.0024,
+                contrast: 0.3,
+                agouti: 0.45,
+                tint: Vec3::new(1.0, 0.98, 0.97),
+                band: Vec3::new(1.4, 1.36, 1.3),
+                roughness: 0.86,
+                streaks: 0.18,
+                seed: 47,
+            };
+            let tufts = fur_tufts(&f);
+            TextureSet::bake(512, 0.2, |uv| fur_texel(&f, &tufts, uv))
+        }
     }
 }
 
@@ -1947,6 +2070,7 @@ mod deer {
     const KIND: Kind = Kind {
         key: "deer",
         coat,
+        variant: "_stag",
         body,
         scale: 1.0,
     };
@@ -2884,6 +3008,7 @@ mod wolf {
     const KIND: Kind = Kind {
         key: "wolf",
         coat,
+        variant: "",
         body,
         scale: 0.75,
     };
@@ -3597,6 +3722,865 @@ mod wolf {
     }
 }
 
+// ======================================================================= wild boar
+
+mod boar {
+    use super::*;
+
+    const R: QuadRig = BOAR;
+
+    const KIND: Kind = Kind {
+        key: "boar",
+        coat,
+        variant: "_young",
+        body,
+        scale: 0.7,
+    };
+
+    /// Head frame: the face slopes down this way in the rest pose (38° below level).
+    pub const FWD: Vec3 = v3(0.0, -0.616, -0.788);
+    pub const UP: Vec3 = v3(0.0, 0.788, -0.616);
+
+    /// Head-local coordinates from the poll: x right, y up the face, z along it to the snout.
+    fn hl(p: Vec3) -> Vec3 {
+        local(p, R.head, Vec3::X, UP, FWD)
+    }
+
+    fn hp(q: Vec3) -> Vec3 {
+        R.head + Vec3::X * q.x + UP * q.y + FWD * q.z
+    }
+
+    const EYE: Vec3 = v3(0.054, 0.034, 0.165);
+    const EYE_AXIS: Vec3 = v3(0.8, 0.32, 0.5);
+    const EYE_R: f32 = 0.0105;
+    /// The snout's disc (head-local center) and its half width and height.
+    const DISC: Vec3 = v3(0.0, -0.014, 0.43);
+    const DISC_R: Vec2 = v2(0.043, 0.036);
+    const NECK_R: f32 = 0.165;
+    const HEAD_BALL: f32 = 0.1;
+    /// The tip of the tail at rest.
+    const TIP: Vec3 = R.tail2;
+
+    fn fj(i: usize) -> Vec3 {
+        R.front.joints[i]
+    }
+
+    fn hj(i: usize) -> Vec3 {
+        R.hind.joints[i]
+    }
+
+    /// The cut between the fore half of the torso and the croup.
+    pub(super) const SEAM: Seam = Seam {
+        pivot: R.loin,
+        reach: 0.22,
+    };
+
+    fn fore(p: Vec3) -> f32 {
+        SEAM.fore(torso, p)
+    }
+
+    fn croup(p: Vec3) -> f32 {
+        SEAM.croup(torso, p)
+    }
+
+    /// The crest of long bristles along the spine (the mane), longest over the shoulders and
+    /// the nape, and a coarse, tufted coat everywhere, on a surface `d` near `p`.
+    fn bristles(p: Vec3, d: f32, crest: f32, seed: u32) -> f32 {
+        if d > 0.06 {
+            return d;
+        }
+        let ridge = smooth(0.075, 0.0, p.x.abs()) * crest;
+        let tufts = clumps(p, v3(0.0, 0.25, 1.0), 0.016, seed);
+        let mane = if ridge > 0.0 {
+            let c = clumps(p, v3(0.0, 0.8, 1.0), 0.013, seed + 1);
+            ridge * (0.45 + 0.55 * c * c)
+        } else {
+            0.0
+        };
+        d - 0.006 * tufts - mane
+    }
+
+    pub fn torso(p: Vec3) -> f32 {
+        let m = mx(p);
+        // Deep forequarters with the hump of the shoulders, a long barrel, a narrower croup.
+        let chest = ell(p, v3(0.0, 0.57, -0.3), v3(0.15, 0.215, 0.2));
+        let hump = ell(p, v3(0.0, 0.665, -0.26), v3(0.145, 0.15, 0.21));
+        let barrel = ell(p, v3(0.0, 0.585, -0.02), v3(0.165, 0.205, 0.34));
+        let belly = ell(p, v3(0.0, 0.53, 0.06), v3(0.14, 0.15, 0.24));
+        let loin = ell(p, v3(0.0, 0.655, 0.22), v3(0.13, 0.115, 0.2));
+        let rump = ell(p, v3(0.0, 0.6, 0.35), v3(0.12, 0.14, 0.14));
+        let back = cone(p, v3(0.0, 0.77, -0.34), v3(0.0, 0.72, 0.34), 0.05, 0.048);
+        // Shoulder blades and the triceps behind the upper arm.
+        let scap = ell(m, v3(0.103, 0.66, -0.31), v3(0.05, 0.13, 0.09));
+        let triceps = ell(m, v3(0.106, 0.48, -0.3), v3(0.055, 0.09, 0.075));
+        let point = ell(m, v3(0.098, 0.55, -0.41), v3(0.05, 0.06, 0.05));
+        // Haunches: thigh, buttock and hamstring.
+        let haunch = ell(m, v3(0.085, 0.6, 0.3), v3(0.075, 0.15, 0.14));
+        let butt = ell(m, v3(0.055, 0.6, 0.42), v3(0.06, 0.1, 0.075));
+        let ham = cone(m, v3(0.07, 0.6, 0.43), v3(0.092, 0.43, 0.33), 0.055, 0.04);
+        let fold = ell(m, v3(0.122, 0.45, 0.19), v3(0.045, 0.065, 0.07));
+        // The neck turns in a ball a little bigger than its own base.
+        let socket = ell(
+            p,
+            R.neck,
+            v3((NECK_R + 0.004) / 1.1, NECK_R + 0.004, NECK_R + 0.004),
+        );
+        // Balls the upper arm and thigh turn in.
+        let shoulder = sphere(m, fj(0), 0.055);
+        let hip = sphere(m, hj(0), 0.062);
+        let mut d = smin(chest, hump, 0.1);
+        d = smin(d, barrel, 0.1);
+        d = smin(d, belly, 0.1);
+        d = smin(d, loin, 0.1);
+        d = smin(d, rump, 0.08);
+        d = smin(d, back, 0.07);
+        d = smin(d, scap, 0.05);
+        d = smin(d, triceps, 0.05);
+        d = smin(d, point, 0.045);
+        d = smin(d, haunch, 0.07);
+        d = smin(d, butt, 0.05);
+        d = smin(d, ham, 0.05);
+        d = smin(d, fold, 0.06);
+        d = smin(d, socket, 0.07);
+        d = smin(d, shoulder, 0.04);
+        d = smin(d, hip, 0.04);
+        // The mane runs from the withers along the back, fading out over the loin.
+        let crest = (0.012 + 0.04 * smooth(0.15, -0.3, p.z)) * smooth(0.66, 0.76, p.y);
+        bristles(p, d, crest, 3)
+    }
+
+    pub fn neck(p: Vec3) -> f32 {
+        let n = cone_x(p, R.neck, R.head, NECK_R, HEAD_BALL + 0.008, 1.1);
+        // The heavy throat.
+        let throat = ell(p, v3(0.0, 0.47, -0.5), v3(0.09, 0.085, 0.11));
+        let d = smin(n, throat, 0.06);
+        // The mane at its longest over the nape.
+        let axis = (R.head - R.neck).normalize();
+        let nape = Vec3::X.cross(axis).normalize();
+        let top = smooth(0.4, 0.9, (p - R.neck).dot(nape) / NECK_R);
+        bristles(p, d, 0.055 * top, 7)
+    }
+
+    pub fn head(p: Vec3) -> f32 {
+        let q = hl(p);
+        let m = Vec3::new(q.x.abs(), q.y, q.z);
+        let poll = ell(p, R.head, v3(HEAD_BALL / 1.1, HEAD_BALL, HEAD_BALL));
+        let cranium = ell(q, v3(0.0, 0.012, 0.06), v3(0.078, 0.082, 0.11));
+        // Heavy jowls.
+        let jowl = ell(m, v3(0.058, -0.045, 0.075), v3(0.042, 0.065, 0.085));
+        // The long wedge of the face, taller than wide, out to the snout.
+        let face = cone_x(
+            q,
+            v3(0.0, 0.004, 0.12),
+            v3(0.0, -0.012, 0.41),
+            0.068,
+            0.04,
+            1.22,
+        );
+        // The snout's flat disc, a little wider than the snout.
+        let e = Vec2::new(q.x / DISC_R.x, (q.y - DISC.y) / DISC_R.y);
+        let rim = (e.length() - 1.0) * DISC_R.y;
+        let thick = (q.z - DISC.z).abs() - 0.018;
+        let disc =
+            Vec2::new(rim.max(0.0), thick.max(0.0)).length() + rim.max(thick).min(0.0) - 0.006;
+        // The upper lip flaring over the tusks, and the brows.
+        let lip = ell(m, v3(0.03, -0.042, 0.35), v3(0.022, 0.024, 0.065));
+        let brow = ell(m, v3(0.044, 0.048, 0.15), v3(0.024, 0.014, 0.034));
+        let mut d = smin(poll, cranium, 0.05);
+        d = smin(d, jowl, 0.04);
+        d = smin(d, face, 0.05);
+        d = smin(d, disc, 0.02);
+        d = smin(d, lip, 0.02);
+        d = smin(d, brow, 0.02);
+        // Small eyes deep in their sockets.
+        let axis = EYE_AXIS.normalize();
+        d = ssub(d, sphere(m, EYE + axis * 0.003, EYE_R + 0.001), 0.003);
+        let ee = m - EYE;
+        let along = ee.dot(axis);
+        let ring = Vec2::new((ee - axis * along).length() - EYE_R, along - 0.001).length() - 0.0035;
+        d = smin(d, ring, 0.003);
+        // Nostrils in the disc.
+        d = ssub(
+            d,
+            ell(m, v3(0.014, -0.012, 0.449), v3(0.0075, 0.0095, 0.01)),
+            0.002,
+        );
+        if d > 0.05 {
+            return d;
+        }
+        // Bristly: tufts over the crown, a ruff of longer hair down the cheeks.
+        let crown = smooth(0.22, 0.05, q.z) * smooth(-0.04, 0.03, q.y);
+        let cheek = smooth(0.03, 0.06, m.x) * smooth(0.0, -0.06, q.y) * smooth(0.2, 0.06, q.z);
+        let amount = 0.008 * crown + 0.014 * cheek;
+        if amount <= 0.0 {
+            return d;
+        }
+        d - amount * (0.3 + 0.7 * clumps(m, v3(0.2, -0.2, -1.0), 0.012, 29))
+    }
+
+    pub fn jaw(p: Vec3) -> f32 {
+        let q = hl(p);
+        let m = Vec3::new(q.x.abs(), q.y, q.z);
+        let jaw = cone_x(
+            q,
+            v3(0.0, -0.078, 0.07),
+            v3(0.0, -0.058, 0.39),
+            0.045,
+            0.022,
+            0.95,
+        );
+        let chin = ell(q, v3(0.0, -0.07, 0.38), v3(0.024, 0.02, 0.03));
+        let lip = ell(m, v3(0.02, -0.055, 0.3), v3(0.016, 0.012, 0.08));
+        let d = smin(smin(jaw, chin, 0.02), lip, 0.015);
+        // Bristles under the chin.
+        let fur = smooth(0.3, 0.1, q.z) * smooth(-0.08, -0.11, q.y);
+        d - fur * 0.01 * clumps(m, v3(0.0, -0.4, -1.0), 0.012, 31)
+    }
+
+    /// The tusks of one side (head-local): the lower one curving up out of the jaw and back,
+    /// the upper one curling up against it.
+    fn tusk_curves() -> [(Vec<Vec3>, Vec<f32>); 2] {
+        [
+            (
+                vec![
+                    v3(0.022, -0.068, 0.345),
+                    v3(0.042, -0.048, 0.362),
+                    v3(0.064, -0.014, 0.366),
+                    v3(0.078, 0.018, 0.35),
+                    v3(0.082, 0.038, 0.322),
+                ],
+                vec![0.0115, 0.011, 0.0092, 0.006, 0.0018],
+            ),
+            (
+                vec![
+                    v3(0.024, -0.03, 0.338),
+                    v3(0.046, -0.02, 0.352),
+                    v3(0.064, -0.002, 0.348),
+                    v3(0.07, 0.014, 0.332),
+                ],
+                vec![0.0085, 0.008, 0.0052, 0.0018],
+            ),
+        ]
+    }
+
+    /// Ear frame (right ear): along the ear, across it, out of the cup.
+    pub fn ear_frame() -> (Vec3, Vec3, Vec3) {
+        let along = (Vec3::X * 0.32 + UP * 0.92 - FWD * 0.22).normalize();
+        let cup0 = (Vec3::X * 0.45 + FWD * 0.85 + UP * 0.1).normalize();
+        let cup = (cup0 - along * cup0.dot(along)).normalize();
+        let across = along.cross(cup);
+        (along, across, cup)
+    }
+
+    /// Erect and pointed, thick with hair, a fringe of bristles round the rim.
+    pub fn ear(p: Vec3) -> f32 {
+        let (along, across, cup) = ear_frame();
+        let q = local(p, R.ear, across, along, cup);
+        let s = Vec2::new(q.x, q.y);
+        let tri = convex2(s, &[v2(-0.042, -0.01), v2(0.042, -0.01), v2(0.004, 0.1)]) - 0.004;
+        let th = 0.013 - 0.007 * (q.y / 0.1).clamp(0.0, 1.0);
+        let plate = smax(tri, q.z.abs() - th, 0.008) - 0.002;
+        let hollow = smax(
+            convex2(s, &[v2(-0.03, 0.006), v2(0.03, 0.006), v2(0.004, 0.08)]),
+            (q.z - th - 0.004).abs() - th * 0.8,
+            0.005,
+        );
+        let base = ell(q, v3(0.0, 0.0, -0.004), v3(0.04, 0.026, 0.021));
+        let d = smin(ssub(plate, hollow, 0.004), base, 0.012);
+        if d > 0.02 {
+            return d;
+        }
+        let rim = smooth(-0.012, 0.0, tri);
+        d - 0.006 * rim * clumps(q, v3(0.0, 1.0, 0.0), 0.006, 41)
+    }
+
+    /// Thin, hanging straight down, a flat tassel of bristles at the end.
+    pub fn tail(p: Vec3) -> f32 {
+        let d = cone(p, R.tail, TIP, 0.02, 0.011);
+        let tuft = ell(p, TIP + v3(0.0, -0.025, 0.004), v3(0.022, 0.05, 0.011));
+        let d = smin(d, tuft, 0.02);
+        if d > 0.03 {
+            return d;
+        }
+        d - 0.008 * clumps(p, TIP - R.tail, 0.01, 37)
+    }
+
+    pub fn arm(p: Vec3) -> f32 {
+        cone(p, fj(0), fj(1), 0.052, 0.042)
+    }
+
+    pub fn forearm(p: Vec3) -> f32 {
+        let fa = cone_x(p, fj(1), fj(2), 0.044, 0.026, 1.1);
+        let olecranon = ell(p, fj(1) + v3(0.0, 0.0, 0.03), v3(0.026, 0.035, 0.028));
+        let muscle = ell(
+            p,
+            (fj(1) + fj(2)) * 0.5 + v3(0.0, 0.04, -0.006),
+            v3(0.034, 0.07, 0.032),
+        );
+        let carpus = ell(p, fj(2), v3(0.024, 0.028, 0.026));
+        let mut d = smin(fa, olecranon, 0.03);
+        d = smin(d, muscle, 0.035);
+        smin(d, carpus, 0.02)
+    }
+
+    fn cannon(p: Vec3, top: Vec3, bottom: Vec3, ra: f32) -> f32 {
+        let c = cone_x(p, top, bottom, ra, 0.02, 1.15);
+        let fetlock = ell(p, bottom + v3(0.0, 0.0, 0.004), v3(0.024, 0.026, 0.028));
+        smin(c, fetlock, 0.02)
+    }
+
+    pub fn front_cannon(p: Vec3) -> f32 {
+        cannon(p, fj(2), fj(3), 0.023)
+    }
+
+    pub fn hind_cannon(p: Vec3) -> f32 {
+        cannon(p, hj(2), hj(3), 0.024)
+    }
+
+    fn coronet(j3: Vec3, toe: Vec3) -> Vec3 {
+        j3 + (toe - j3) * 0.55 + v3(0.0, 0.008, 0.0)
+    }
+
+    fn pastern(p: Vec3, j3: Vec3, toe: Vec3) -> f32 {
+        cone_x(p, j3, coronet(j3, toe), 0.02, 0.022, 1.05)
+    }
+
+    pub fn front_pastern(p: Vec3) -> f32 {
+        pastern(p, fj(3), fj(4))
+    }
+
+    pub fn hind_pastern(p: Vec3) -> f32 {
+        pastern(p, hj(3), hj(4))
+    }
+
+    /// A pig's trotter: two blunt, rounded claws with a cleft between them, heel bulbs, flat
+    /// soles, and big dewclaws set low behind, nearly touching the ground.
+    fn hoof(p: Vec3, j3: Vec3, toe: Vec3) -> f32 {
+        let f = (toe.z - j3.z).signum();
+        let q = p - v3(toe.x, 0.0, 0.0);
+        let x = q.x.abs();
+        // Side profile in (back, up), measured from the toe tip.
+        let b = (toe.z - p.z) * f;
+        let s = Vec2::new(b, p.y);
+        let profile = [
+            Vec2::new(-0.002, 0.0),
+            Vec2::new(0.05, 0.0),
+            Vec2::new(0.054, 0.024),
+            Vec2::new(0.028, 0.04),
+            Vec2::new(0.004, 0.022),
+            Vec2::new(-0.004, 0.006),
+        ];
+        let side = convex2(s, &profile);
+        // Each claw rounds off toward its tip.
+        let t = smooth(-0.004, 0.04, b);
+        let half = 0.005 + 0.0055 * t;
+        let mid = 0.004 + half;
+        let across = (x - mid).abs() - half;
+        let claw = smax(side, across, 0.007);
+        let bulb = ell(
+            Vec3::new(x, p.y, b),
+            v3(0.012, 0.013, 0.045),
+            v3(0.01, 0.013, 0.012),
+        );
+        let mut d = smin(claw, bulb, 0.008);
+        // Flat soles on the ground.
+        d = smax(d, -p.y, 0.0015);
+        // Dewclaws behind the fetlock, pointing down and back.
+        let bj = (toe.z - j3.z) * f;
+        let dew = cone(
+            Vec3::new(x, p.y, b),
+            v3(0.015, j3.y - 0.012, bj + 0.012),
+            v3(0.017, 0.016, bj + 0.03),
+            0.008,
+            0.0045,
+        );
+        d.min(dew)
+    }
+
+    pub fn front_hoof(p: Vec3) -> f32 {
+        hoof(p, fj(3), fj(4))
+    }
+
+    pub fn hind_hoof(p: Vec3) -> f32 {
+        hoof(p, hj(3), hj(4))
+    }
+
+    /// Thigh: the bone and the heavy muscle round it under the haunch.
+    pub fn thigh(p: Vec3) -> f32 {
+        let bone = cone(p, hj(0), hj(1), 0.064, 0.05);
+        let quarter = ell(p, v3(0.11, 0.5, 0.27), v3(0.06, 0.1, 0.09));
+        smin(bone, quarter, 0.06)
+    }
+
+    pub fn gaskin(p: Vec3) -> f32 {
+        let g = cone_x(p, hj(1), hj(2), 0.05, 0.027, 1.12);
+        let calf = cone_x(
+            p,
+            v3(0.122, 0.39, 0.25),
+            v3(0.115, 0.29, 0.34),
+            0.046,
+            0.026,
+            1.15,
+        );
+        let achilles = cone(
+            p,
+            v3(0.115, 0.32, 0.33),
+            hj(2) + v3(0.0, 0.012, 0.022),
+            0.016,
+            0.012,
+        );
+        let hock = ell(p, hj(2) + v3(0.0, 0.004, 0.012), v3(0.022, 0.026, 0.022));
+        let stifle = sphere(p, hj(1) + v3(-0.006, 0.0, 0.008), 0.048);
+        let mut d = smin(g, calf, 0.04);
+        d = smin(d, stifle, 0.04);
+        d = smin(d, achilles, 0.025);
+        smin(d, hock, 0.015)
+    }
+
+    pub fn gloss_nose(p: Vec3) -> f32 {
+        let q = hl(p);
+        smax(
+            head(p) - 0.0018,
+            ell(q, DISC + v3(0.0, 0.0, 0.018), v3(0.05, 0.043, 0.016)),
+            0.003,
+        )
+    }
+
+    /// Everything, for occlusion.
+    pub fn body(p: Vec3) -> f32 {
+        const PARTS: [Bound; 10] = [
+            Bound {
+                center: v3(0.0, 0.58, 0.0),
+                radius: 0.6,
+                f: torso,
+            },
+            Bound {
+                center: v3(0.0, 0.6, -0.46),
+                radius: 0.28,
+                f: neck,
+            },
+            Bound {
+                center: v3(0.0, 0.48, -0.74),
+                radius: 0.3,
+                f: head,
+            },
+            Bound {
+                center: v3(0.0, 0.42, -0.74),
+                radius: 0.26,
+                f: jaw,
+            },
+            Bound {
+                center: v3(0.115, 0.3, -0.32),
+                radius: 0.17,
+                f: forearm,
+            },
+            Bound {
+                center: v3(0.105, 0.12, -0.33),
+                radius: 0.1,
+                f: front_cannon,
+            },
+            Bound {
+                center: v3(0.12, 0.33, 0.28),
+                radius: 0.18,
+                f: gaskin,
+            },
+            Bound {
+                center: v3(0.1, 0.14, 0.35),
+                radius: 0.11,
+                f: hind_cannon,
+            },
+            Bound {
+                center: v3(0.115, 0.52, 0.25),
+                radius: 0.18,
+                f: thigh,
+            },
+            Bound {
+                center: v3(0.0, 0.55, 0.51),
+                radius: 0.16,
+                f: tail,
+            },
+        ];
+        union_of(&PARTS, mx(p))
+    }
+
+    /// Wild boar coat (linear RGB): dark grey-brown, grizzled on the flanks and pale on the
+    /// cheeks, near black along the mane, down the legs and on the snout. Piglets (`young`)
+    /// are rufous with pale stripes running the length of the body.
+    fn coat(piece: Piece, p: Vec3, n: Vec3, young: bool) -> Vec3 {
+        if young {
+            return piglet(piece, p, n);
+        }
+        let base = hex(0x312a25);
+        let dark = hex(0x141110);
+        let grizzle = hex(0x7a7369);
+        let up = n.y;
+        let mut c = mix(base, dark, smooth(0.2, 0.9, up) * 0.4);
+        // Grizzled patches where the pale-banded bristles lie thick.
+        let patch = smooth(0.0, 0.6, mottle(p, 5.0, 17));
+        match piece {
+            Piece::Body | Piece::Croup | Piece::Neck => {
+                c = mix(c, grizzle, patch * 0.3 * smooth(0.9, 0.3, up));
+                let mane = smooth(0.09, 0.0, p.x.abs()) * smooth(0.3, 0.85, up);
+                c = mix(c, dark * 0.7, mane * 0.9);
+                // Darker under the belly and between the legs.
+                let under = smooth(0.0, -0.6, up) * smooth(0.52, 0.42, p.y);
+                c = mix(c, dark, under * 0.5);
+                if piece == Piece::Neck {
+                    // Grizzled down the sides of the throat.
+                    let side = smooth(0.3, 0.8, n.x.abs()) * smooth(0.6, 0.48, p.y);
+                    c = mix(c, grizzle, side * 0.3);
+                }
+            }
+            Piece::Leg(_, s) => {
+                // Near black, darkest toward the trotters.
+                c = mix(base, dark, 0.55 + 0.35 * smooth(0.45, 0.1, p.y));
+                if s == 0 {
+                    c = mix(c, base, smooth(0.45, 0.6, p.y) * 0.5);
+                }
+            }
+            Piece::Head | Piece::Jaw => {
+                let q = hl(p);
+                let m = Vec3::new(q.x.abs(), q.y, q.z);
+                c = mix(base, dark, smooth(0.3, 0.9, up) * 0.35);
+                // Pale grizzled whiskers along the jaw line, from under the eye back onto
+                // the throat.
+                let cheek = smooth(0.02, 0.05, m.x)
+                    * smooth(0.0, -0.035, q.y)
+                    * smooth(-0.12, -0.075, q.y)
+                    * smooth(0.3, 0.2, q.z)
+                    * smooth(0.08, 0.15, q.z);
+                c = mix(c, grizzle * 1.1, cheek * 0.6);
+                // The long snout darkens to near black; the disc is wet and dark.
+                c = mix(c, dark, smooth(0.2, 0.34, q.z) * 0.85);
+                let disc = smooth(0.415, 0.43, q.z);
+                c = mix(c, hex(0x2e2624), disc);
+                // Dark round the small eyes.
+                let ring = smooth(0.03, 0.016, m.distance(EYE));
+                c = mix(c, dark, ring * 0.6);
+                if piece == Piece::Jaw {
+                    let lip = smooth(0.006, 0.0, (q.y + 0.05).abs()) * smooth(0.2, 0.26, q.z);
+                    c = mix(c, hex(0x2a2220), lip * 0.8);
+                    let mouth = smooth(0.3, 0.8, up)
+                        * smooth(-0.058, -0.048, q.y)
+                        * smooth(0.02, 0.012, m.x);
+                    c = mix(c, hex(0x5a3a38), mouth);
+                }
+            }
+            Piece::Ear(_) => {
+                let (along, across, cup) = ear_frame();
+                let q = local(mx(p), R.ear, across, along, cup);
+                let inside = smooth(0.2, 0.7, mx(n).dot(cup));
+                c = mix(dark, grizzle * 0.8, inside * 0.6);
+                c = mix(c, dark * 0.7, smooth(0.08, 0.11, q.y) * 0.8);
+            }
+            Piece::Tail => {
+                c = mix(dark, base, smooth(0.6, 0.5, p.y) * 0.3);
+            }
+            _ => {}
+        }
+        c * (1.0 + 0.12 * mottle(p, 7.0, 9))
+    }
+
+    /// A piglet's coat: buff and chestnut stripes running the length of the body from the dark
+    /// line down the spine, breaking into spots on the haunches, and on down the face.
+    fn piglet(piece: Piece, p: Vec3, n: Vec3) -> Vec3 {
+        let brown = hex(0x4b3829);
+        let pale = hex(0xb0a084);
+        let dark = hex(0x221913);
+        let up = n.y;
+        let mut c = mix(brown, dark, smooth(0.3, 0.95, up) * 0.25);
+        // Angle round the long axis from the spine (0) to the belly (π), and where along.
+        let (a, along) = match piece {
+            Piece::Head | Piece::Jaw => {
+                let q = hl(p);
+                (q.x.atan2(q.y).abs(), q.z * 0.5 - 0.6)
+            }
+            Piece::Neck => (p.x.atan2(p.y - 0.58).abs(), p.z),
+            _ => (p.x.atan2(p.y - 0.57).abs(), p.z),
+        };
+        let wave = 0.08 * (along * 11.0).sin();
+        let phase = a / PI * 6.0 + wave;
+        let stripe = smooth(0.55, 0.85, (phase * TAU).cos());
+        // Broken into dashes on the haunches.
+        let dash = 1.0 - smooth(0.25, 0.4, along) * smooth(-0.2, 0.4, (along * 55.0).sin());
+        let flank = smooth(0.25, 0.45, a) * smooth(2.4, 2.0, a);
+        // The face is plain.
+        let face = match piece {
+            Piece::Head | Piece::Jaw => smooth(0.16, 0.06, hl(p).z),
+            _ => 1.0,
+        };
+        c = mix(c, pale, stripe * flank * dash * face * 0.85);
+        // The dark line down the spine, and a paler belly.
+        c = mix(c, dark, smooth(0.22, 0.08, a) * 0.8);
+        c = mix(c, mix(brown, pale, 0.5), smooth(2.3, 2.7, a) * 0.6);
+        if matches!(piece, Piece::Head | Piece::Jaw) {
+            let q = hl(p);
+            c = mix(c, dark, smooth(0.3, 0.4, q.z) * 0.8);
+            c = mix(c, hex(0x5a4440), smooth(0.415, 0.43, q.z));
+        }
+        c * (1.0 + 0.08 * mottle(p, 9.0, 13))
+    }
+
+    pub fn jobs(jobs: &mut Vec<Job>) {
+        let up = Vec3::Y;
+        let back = Vec3::Z;
+        let mut specs: Vec<Spec> = Vec::new();
+        let mut torso_flow =
+            Flow::new(v3(0.0, 0.58, -0.55), v3(0.0, 0.58, 0.5), up, 0.2).tilt(0.35);
+        torso_flow.start = 0.14;
+        // In two halves, the croup bending on the fore half at the loin; both painted with
+        // the same flow so the coat runs on across the cut. Piglets get their own, striped,
+        // and a little coarser (they are small).
+        let voxel = v3(0.0085, 0.0085, 0.011);
+        let cut = R.loin.z;
+        let neck_flow = Flow::new(R.head, R.neck, up - back, 0.2).tilt(0.2);
+        let nose = hp(v3(0.0, 0.0, 0.46));
+        let mut head_flow = Flow::new(nose, hp(v3(0.0, 0.0, -0.08)), UP, 0.14).tilt(0.15);
+        head_flow.start = 0.02;
+        for young in [false, true] {
+            let k = if young { 0.6 } else { 1.0 };
+            let n = |t: f32| (t * k) as usize;
+            specs.push(Spec {
+                piece: Piece::Body,
+                f: fore,
+                region: Region::aabb(v3(-0.27, 0.28, -0.62), v3(0.27, 0.93, cut + 0.14), voxel),
+                target: n(4400.0),
+                flow: torso_flow,
+                pivot: R.body,
+                mirror: None,
+                variant: young,
+                seam: Some(SEAM),
+            });
+            specs.push(Spec {
+                piece: Piece::Croup,
+                f: croup,
+                region: Region::aabb(v3(-0.27, 0.28, cut - 0.05), v3(0.27, 0.93, 0.6), voxel),
+                target: n(3300.0),
+                flow: torso_flow,
+                pivot: R.loin,
+                mirror: None,
+                variant: young,
+                seam: None,
+            });
+            specs.push(Spec {
+                piece: Piece::Neck,
+                f: neck,
+                region: Region::bone(R.neck, R.head, 0.25, 0.0068, 0.0085),
+                target: n(2400.0),
+                flow: neck_flow,
+                pivot: R.neck,
+                mirror: None,
+                variant: young,
+                seam: None,
+            });
+            specs.push(Spec {
+                piece: Piece::Head,
+                f: head,
+                region: Region::bone(hp(v3(0.0, 0.0, -0.1)), nose, 0.15, 0.0036, 0.0045),
+                target: n(4800.0),
+                flow: head_flow,
+                pivot: R.head,
+                mirror: None,
+                variant: young,
+                seam: None,
+            });
+        }
+        specs.push(Spec {
+            piece: Piece::Jaw,
+            f: jaw,
+            region: Region::bone(
+                hp(v3(0.0, -0.075, 0.0)),
+                hp(v3(0.0, -0.06, 0.42)),
+                0.075,
+                0.0032,
+                0.0042,
+            ),
+            target: 1200,
+            flow: Flow::new(
+                hp(v3(0.0, -0.06, 0.42)),
+                hp(v3(0.0, -0.075, 0.0)),
+                -UP,
+                0.12,
+            ),
+            pivot: R.jaw,
+            mirror: None,
+            variant: false,
+            seam: None,
+        });
+        let (along, _, cup) = ear_frame();
+        specs.push(Spec {
+            piece: Piece::Ear(1),
+            f: ear,
+            region: Region::bone(
+                R.ear - along * 0.02,
+                R.ear + along * 0.12,
+                0.065,
+                0.0028,
+                0.0036,
+            ),
+            target: 650,
+            flow: Flow::new(R.ear, R.ear + along * 0.12, cup, 0.08),
+            pivot: R.ear,
+            mirror: Some(Piece::Ear(0)),
+            variant: false,
+            seam: None,
+        });
+        specs.push(Spec {
+            piece: Piece::Tail,
+            f: tail,
+            region: Region::bone(R.tail, TIP, 0.08, 0.004, 0.005),
+            target: 520,
+            flow: Flow::new(R.tail, TIP, back, 0.1),
+            pivot: R.tail,
+            mirror: None,
+            variant: false,
+            seam: None,
+        });
+        // Legs: right side sculpted, left mirrored.
+        type Legs = (u8, [SdfFn; 4], SdfFn, LegRest, [f32; 4], [usize; 4]);
+        let legs: [Legs; 2] = [
+            (
+                1,
+                [arm, forearm, front_cannon, front_pastern],
+                front_hoof,
+                R.front,
+                [0.15, 0.1, 0.06, 0.045],
+                [520, 900, 520, 320],
+            ),
+            (
+                3,
+                [thigh, gaskin, hind_cannon, hind_pastern],
+                hind_hoof,
+                R.hind,
+                [0.2, 0.12, 0.06, 0.045],
+                [950, 1100, 520, 320],
+            ),
+        ];
+        for (k, fields, hoof_f, leg, reach, target) in legs {
+            let j = leg.joints;
+            let across = [0.0068, 0.005, 0.0036, 0.003];
+            let along = [0.01, 0.0085, 0.008, 0.0045];
+            for s in 0..4 {
+                let (a, b) = if s == 3 {
+                    (j[3], coronet(j[3], j[4]))
+                } else {
+                    (j[s], j[s + 1])
+                };
+                specs.push(Spec {
+                    piece: Piece::Leg(k, s as u8),
+                    f: fields[s],
+                    region: Region::bone(a, b, reach[s], across[s], along[s]),
+                    target: target[s],
+                    flow: Flow::new(a, b, back, if s >= 2 { 0.08 } else { 0.12 }),
+                    pivot: j[s],
+                    mirror: Some(Piece::Leg(k - 1, s as u8)),
+                    variant: false,
+                    seam: None,
+                });
+            }
+            // Trotter.
+            jobs.push(Box::new(move || {
+                let color = |p: Vec3, n: Vec3| {
+                    let sole = smooth(0.006, 0.0, p.y);
+                    mix(hex(0x262120), hex(0x4a403a), sole * 0.6) * (1.0 + 0.05 * n.y)
+                };
+                let paint = Paint {
+                    flow: Flow::new(j[3], j[4], back, 0.05),
+                    color: &color,
+                    body: &body,
+                    scale: 0.35,
+                    pivot: j[3],
+                    seam: None,
+                };
+                let c = v3(j[4].x, 0.035, (j[3].z + j[4].z) * 0.5);
+                let region = Region::aabb(
+                    c - v3(0.045, 0.04, 0.065),
+                    c + v3(0.045, 0.06, 0.065),
+                    Vec3::splat(0.0017),
+                );
+                let mesh = sculpt(&hoof_f, region, 520, &paint);
+                vec![
+                    Made::Mesh(
+                        format!("animals/boar/{}", Piece::Hoof(k - 1).key()),
+                        mirrored(&mesh),
+                    ),
+                    Made::Mesh(format!("animals/boar/{}", Piece::Hoof(k).key()), mesh),
+                ]
+            }));
+        }
+        specs.sort_by_key(|s| std::cmp::Reverse(s.target));
+        for spec in specs {
+            jobs.push(Box::new(move || spec.run(KIND)));
+        }
+        // The snout's disc and the small dark eyes.
+        jobs.push(Box::new(|| {
+            let color = |_p: Vec3, _n: Vec3| Vec3::ONE;
+            let paint = Paint {
+                flow: Flow::new(R.head, hp(DISC), UP, 0.1),
+                color: &color,
+                body: &body,
+                scale: 0.25,
+                pivot: R.head,
+                seam: None,
+            };
+            let disc = hp(DISC);
+            let mut mesh = sculpt(
+                &gloss_nose,
+                Region::aabb(
+                    disc - Vec3::splat(0.065),
+                    disc + Vec3::splat(0.065),
+                    Vec3::splat(0.0016),
+                ),
+                500,
+                &paint,
+            );
+            for v in &mut mesh.vertices {
+                let ao = v.color[0].clamp(0.4, 1.0);
+                v.color = (hex(0x3a2e2b) * ao).extend(1.0).to_array();
+            }
+            let axis = EYE_AXIS.normalize();
+            for side in [-1.0f32, 1.0] {
+                let c = hp(v3(EYE.x * side, EYE.y, EYE.z));
+                let ax = Vec3::X * axis.x * side + UP * axis.y + FWD * axis.z;
+                let rot = Quat::from_rotation_arc(Vec3::Y, ax);
+                let g = ball(c, Vec3::splat(EYE_R), rot, 10, 14);
+                let eye = g.finish(R.head, &body, 0.2, &|p, _, _| {
+                    let t = (p - c).normalize().dot(ax);
+                    mix(hex(0x2a1a10), hex(0x070504), smooth(0.6, 0.9, t))
+                });
+                mesh.merge(&eye);
+            }
+            vec![Made::Mesh("animals/boar/gloss".into(), mesh)]
+        }));
+        // Tusks.
+        jobs.push(Box::new(|| {
+            vec![Made::Mesh("animals/boar/tusks".into(), tusks())]
+        }));
+    }
+
+    /// A boar's tusks, both sides, stored relative to the jaw's hinge.
+    fn tusks() -> Mesh {
+        let mut g = Geo::default();
+        let mut tips = Vec::new();
+        for (pts, rad) in tusk_curves() {
+            let pts: Vec<Vec3> = pts.into_iter().map(hp).collect();
+            tips.push((pts[0], pts[pts.len() - 1]));
+            let (p, r) = spline(&pts, &rad, 5);
+            g.append(tube(&p, &r, 10));
+        }
+        let color = move |p: Vec3, _n: Vec3, _uv: Vec2| {
+            // Yellowed at the root, worn white toward the tip.
+            let (root, tip) = tips[0];
+            let t = ((p - root).length() / (tip - root).length().max(1e-3)).clamp(0.0, 1.0);
+            mix(hex(0xa8946a), hex(0xeee7d6), smooth(0.15, 0.85, t))
+        };
+        let right = g.finish(R.jaw, &body, 0.3, &color);
+        let mut mesh = mirrored(&right);
+        mesh.merge(&right);
+        mesh
+    }
+}
+
 // ======================================================================= rabbit
 
 mod rabbit {
@@ -3606,6 +4590,7 @@ mod rabbit {
 
     const KIND: Kind = Kind {
         key: "rabbit",
+        variant: "",
         coat,
         body,
         scale: 0.22,
@@ -3997,6 +4982,7 @@ mod bird {
 
     const KIND: Kind = Kind {
         key: "bird",
+        variant: "",
         coat,
         body,
         scale: 0.09,
@@ -4705,20 +5691,22 @@ mod bird {
     }
 }
 
+pub use boar::{FWD as BOAR_HEAD_FWD, UP as BOAR_HEAD_UP};
 pub use deer::{FWD as DEER_HEAD_FWD, UP as DEER_HEAD_UP};
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// Deer and wolf torsos bend at the loin: the fore half's ball stays inside the torso,
-    /// and the croup, bent either way a little further than the gallop bends it, stays
+    /// Deer, wolf and boar torsos bend at the loin: the fore half's ball stays inside the
+    /// torso, and the croup, bent either way a little further than the gallop bends it, stays
     /// inside the fore half (no lip where the halves meet).
     #[test]
     fn torso_halves_stay_joined_when_the_back_bends() {
-        let cases: [(&str, Seam, SdfFn, f32); 2] = [
+        let cases: [(&str, Seam, SdfFn, f32); 3] = [
             ("deer", deer::SEAM, deer::torso, 0.2),
             ("wolf", wolf::SEAM, wolf::torso, 0.32),
+            ("boar", boar::SEAM, boar::torso, 0.2),
         ];
         for (name, seam, torso, bend) in cases {
             let (mut ball, mut lip) = (0.0f32, 0.0f32);
@@ -4770,5 +5758,26 @@ mod tests {
         assert!(stag <= 42_000, "{stag}");
         assert!(piece_count(Species::Deer, true) <= 30);
         assert!(meshes.iter().all(|(_, t)| *t > 0));
+    }
+
+    #[test]
+    fn boar_meshes_fit_the_budget() {
+        let (meshes, secs) = build_all(Species::Boar);
+        for (k, t) in &meshes {
+            eprintln!("{k}: {t}");
+        }
+        let sow = triangles_of(Species::Boar, false, false, &meshes);
+        let boar = triangles_of(Species::Boar, true, false, &meshes);
+        let piglet = triangles_of(Species::Boar, false, true, &meshes);
+        eprintln!("boar: sow {sow} boar {boar} piglet {piglet} triangles, {secs:.2} s");
+        assert!(boar <= 42_000 && piglet <= 42_000, "{boar} {piglet}");
+        assert!(piece_count(Species::Boar, true) <= 30);
+        // Every piece of every build has its mesh.
+        for (male, young) in [(false, false), (true, false), (false, true)] {
+            for piece in piece_names(Species::Boar, male, young) {
+                let key = mesh_key(Species::Boar, piece, male, young);
+                assert!(meshes.iter().any(|(k, t)| *k == key && *t > 0), "{key}");
+            }
+        }
     }
 }

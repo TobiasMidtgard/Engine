@@ -12,8 +12,9 @@
 //!   seconds and barrels come back, so the fight never ends. Rings on the ground show where
 //!   each fighter decided to go and why.
 //! * [`spawn_wildlife`]: a living meadow. A deer herd grazes and wanders, rabbits nibble near
-//!   cover, bird flocks peck in the open, and a wolf pack roams the far edge and hunts when
-//!   hungry.
+//!   cover, bird flocks peck in the open, a sounder of wild boar (two sows and their striped
+//!   piglets) roots along the woods edge with a lone tusker not far off, and a wolf pack roams
+//!   the far edge and hunts when hungry.
 
 use std::f64::consts::TAU;
 
@@ -476,6 +477,45 @@ pub fn spawn_wildlife(commands: &mut Commands, center: DVec3, radius: f64) {
             );
         }
     }
+    // Wild boar along the woods edge: a sounder of two sows and their piglets, and a lone
+    // tusker further along.
+    let boar = |commands: &mut Commands,
+                at: DVec3,
+                herd: u32,
+                range: f32,
+                male: bool,
+                young: bool,
+                yaw: f32| {
+        commands.spawn((
+            Transform::from_translation(at).with_rotation(Quat::from_rotation_y(yaw)),
+            Animal {
+                range,
+                male,
+                young,
+                ..Animal::new(Species::Boar)
+            },
+            Herd(herd),
+            StandIn::default(),
+        ));
+    };
+    let sounder_at = center + DVec3::new(-r * 0.7, 0.0, -r * 0.75);
+    for k in 0..6 {
+        let a = rand() * std::f64::consts::TAU;
+        let d = 1.0 + rand() * 3.0;
+        let p = sounder_at + DVec3::new(a.cos() * d, 0.0, a.sin() * d);
+        let yaw = (rand() * std::f64::consts::TAU) as f32;
+        boar(commands, p, 40, (r * 0.4) as f32, false, k >= 2, yaw);
+    }
+    let yaw = (rand() * std::f64::consts::TAU) as f32;
+    boar(
+        commands,
+        center + DVec3::new(r * 0.75, 0.0, -r * 0.6),
+        41,
+        (r * 0.5) as f32,
+        true,
+        false,
+        yaw,
+    );
     // A wolf pack at the far edge: it roams and hunts when hungry.
     let pack_at = center + DVec3::new(r * 0.8, 0.0, r * 0.9);
     for _ in 0..3 {
