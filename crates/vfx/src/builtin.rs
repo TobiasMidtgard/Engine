@@ -629,7 +629,7 @@ fn spells() -> Vec<EffectDesc> {
                     speed: [0.1, 0.3],
                     lifetime: [0.8, 1.4],
                     size: [0.3, 0.5],
-                    emissive: 900.0,
+                    emissive: 150.0,
                     color: fade([0.6, 0.82, 1.0], 0.35, 0.15, 0.4),
                     ..smoke("mist", 0.85, 0.35)
                 },
@@ -702,7 +702,7 @@ fn spells() -> Vec<EffectDesc> {
                     lifetime: [1.5, 2.5],
                     size: [0.8, 1.2],
                     size_over_life: c(&[(0.0, 0.6), (1.0, 3.0)]),
-                    emissive: 600.0,
+                    emissive: 100.0,
                     ..smoke("mist", 0.85, 0.5)
                 },
                 EmitterDesc {
@@ -730,7 +730,7 @@ fn spells() -> Vec<EffectDesc> {
         prewarm: 3.0,
         light: Some(EffectLight {
             offset: [0.0, 1.0, 0.0],
-            ..light([0.7, 0.45, 1.0], 9000.0, 14.0, 0.15, 0.6).unwrap()
+            ..light([0.7, 0.45, 1.0], 5000.0, 14.0, 0.15, 0.6).unwrap()
         }),
         ..effect(
             "spell.arcane_portal",
@@ -826,7 +826,7 @@ fn spells() -> Vec<EffectDesc> {
                     size: [1.2, 1.8],
                     local_space: true,
                     color: g(&[(0.0, [0.8, 0.5, 1.0, 0.5]), (1.0, [0.5, 0.2, 1.0, 0.0])]),
-                    emissive: 20_000.0,
+                    emissive: 3_000.0,
                     additive: 1.0,
                     wind: 0.0,
                     ..em("core")
@@ -1053,48 +1053,53 @@ fn spells() -> Vec<EffectDesc> {
     };
 
     let charge = EffectDesc {
-        light: light([0.6, 0.8, 1.0], 6000.0, 10.0, 0.25, 0.2),
+        light: light([0.6, 0.8, 1.0], 2500.0, 10.0, 0.25, 0.2),
         ..effect(
             "spell.charge",
-            "Gathering energy before a cast: streaks pulled in from all around into a pulsing \
-             white-blue core.",
+            "Gathering energy before a cast: motes drawn in from all around on spiraling paths, \
+             brightening as they near a pulsing white-blue core.",
             None,
             vec![
+                // Motes appear faint and blue on a sphere around the core and spiral in on
+                // comet tails, so the pull reads at a glance instead of as scattered dashes.
                 EmitterDesc {
-                    rate: 220.0,
+                    rate: 70.0,
                     shape: EmitShape::Sphere {
                         radius: 2.2,
                         surface: true,
                     },
                     speed: [0.0, 0.0],
-                    attract: 18.0,
-                    drag: 0.5,
+                    attract: 16.0,
+                    vortex: 9.0,
+                    drag: 1.2,
                     wind: 0.0,
                     local_space: true,
-                    lifetime: [0.6, 0.9],
-                    size: [0.04, 0.08],
-                    sprite: Sprite::Spark,
+                    lifetime: [0.7, 1.0],
+                    size: [0.06, 0.1],
+                    size_over_life: c(&[(0.0, 0.6), (0.7, 1.0), (1.0, 0.5)]),
                     facing: Facing::Velocity,
-                    stretch: 0.08,
+                    stretch: 0.05,
                     color: g(&[
-                        (0.0, [0.6, 0.8, 1.0, 0.0]),
-                        (0.3, [0.7, 0.85, 1.0, 1.0]),
-                        (1.0, [1.0, 1.0, 1.0, 1.0]),
+                        (0.0, [0.35, 0.55, 1.0, 0.0]),
+                        (0.45, [0.45, 0.65, 1.0, 0.7]),
+                        (0.85, [0.75, 0.88, 1.0, 1.0]),
+                        (1.0, [0.9, 0.95, 1.0, 0.0]),
                     ]),
-                    emissive: 30_000.0,
+                    emissive: 10_000.0,
                     additive: 1.0,
                     soft: 0.0,
                     ..em("converge")
                 },
+                // Few enough overlapping puffs that the core stays blue around a white heart.
                 EmitterDesc {
-                    rate: 40.0,
+                    rate: 20.0,
                     speed: [0.0, 0.0],
                     local_space: true,
                     lifetime: [0.25, 0.4],
                     size: [0.6, 1.0],
                     size_over_life: c(&[(0.0, 0.4), (0.5, 1.0), (1.0, 0.7)]),
                     color: g(&[(0.0, [0.85, 0.92, 1.0, 1.0]), (1.0, [0.5, 0.7, 1.0, 0.0])]),
-                    emissive: 30_000.0,
+                    emissive: 9_000.0,
                     additive: 1.0,
                     wind: 0.0,
                     ..em("core")
@@ -1155,10 +1160,11 @@ fn spells() -> Vec<EffectDesc> {
     };
 
     let orb = EffectDesc {
-        light: light([1.0, 0.8, 0.5], 1500.0, 7.0, 0.15, 0.4),
+        light: light([1.0, 0.75, 0.45], 700.0, 6.0, 0.15, 0.4),
         ..effect(
             "magic.orb",
-            "A floating light orb (wisp, lantern spirit): soft core with orbiting sparkles.",
+            "A floating light orb (wisp, lantern spirit): a small white-hot heart in a soft amber \
+             halo, with orbiting sparkles.",
             None,
             vec![
                 EmitterDesc {
@@ -1166,12 +1172,29 @@ fn spells() -> Vec<EffectDesc> {
                     speed: [0.0, 0.0],
                     local_space: true,
                     lifetime: [0.2, 0.3],
-                    size: [0.35, 0.45],
-                    color: g(&[(0.0, [1.0, 0.85, 0.6, 0.9]), (1.0, [1.0, 0.6, 0.3, 0.0])]),
+                    size: [0.13, 0.17],
+                    color: g(&[(0.0, [1.0, 0.9, 0.7, 0.95]), (1.0, [1.0, 0.7, 0.4, 0.0])]),
                     emissive: 25_000.0,
                     additive: 1.0,
                     wind: 0.0,
                     ..em("core")
+                },
+                // A dim glow around the heart, so it reads as a ball of light rather than a dot.
+                EmitterDesc {
+                    rate: 12.0,
+                    speed: [0.0, 0.0],
+                    local_space: true,
+                    lifetime: [0.5, 0.7],
+                    size: [0.5, 0.65],
+                    color: g(&[
+                        (0.0, [1.0, 0.55, 0.2, 0.0]),
+                        (0.3, [1.0, 0.55, 0.2, 0.35]),
+                        (1.0, [1.0, 0.45, 0.15, 0.0]),
+                    ]),
+                    emissive: 3_000.0,
+                    additive: 1.0,
+                    wind: 0.0,
+                    ..em("halo")
                 },
                 EmitterDesc {
                     rate: 14.0,
@@ -1215,7 +1238,7 @@ fn spells() -> Vec<EffectDesc> {
             (0.8, [1.0, 0.62, 0.3, 1.0]),
             (1.0, [1.0, 0.9, 0.8, 1.0]),
         ]),
-        emissive: 80_000.0,
+        emissive: 30_000.0,
         additive: 1.0,
         soft: 0.0,
         ..em(name)
@@ -1237,7 +1260,7 @@ fn spells() -> Vec<EffectDesc> {
         facing: Facing::Velocity,
         stretch: 0.07,
         color: colors,
-        emissive: 120_000.0,
+        emissive: 35_000.0,
         additive: 1.0,
         soft: 0.0,
         ..em(name)
@@ -1257,7 +1280,7 @@ fn spells() -> Vec<EffectDesc> {
         size_over_life: c(&[(0.0, 1.0), (1.0, 0.3)]),
         sprite: Sprite::Glow,
         color: colors,
-        emissive: 70_000.0,
+        emissive: 20_000.0,
         additive: 1.0,
         soft: 0.0,
         ..em(name)
@@ -1365,7 +1388,7 @@ fn spells() -> Vec<EffectDesc> {
                     (0.5, [1.0, 0.88, 0.62, 1.0]),
                     (1.0, [1.0, 0.7, 0.4, 0.0]),
                 ]),
-                emissive: 150_000.0,
+                emissive: 50_000.0,
                 additive: 1.0,
                 soft: 0.0,
                 ..em("crackle")

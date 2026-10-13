@@ -209,8 +209,10 @@ impl GpuEmitter {
             * Vec3::from(desc.acceleration)
             * (scale * thickness);
         // A gravity multiplier under 1 stands for the air holding dust, smoke and spray up;
-        // without air they fall like stones. Light (glows, sparks, magic) keeps its own.
-        let held = if desc.additive < 0.5 && desc.gravity < 1.0 {
+        // without air they fall like stones. Light (glows, sparks, magic) keeps its own, and so
+        // does a layer riding its emitter (a portal's face, a rune circle), which the air
+        // doesn't carry.
+        let held = if desc.additive < 0.5 && desc.gravity < 1.0 && !desc.local_space {
             1.0 - (1.0 - desc.gravity) * thickness.min(1.0)
         } else {
             desc.gravity
@@ -428,5 +430,16 @@ mod tests {
         let mut gpu = GpuEmitter::bake(&glow, 1.0);
         gpu.set_forces(Vec3::new(0.0, -1.62, 0.0), 0.0, &glow, 1.0);
         assert_eq!(gpu.forces[1], -1.62 * glow.gravity);
+
+        // Nor is a weightless layer riding its emitter: a portal's face stays in its arch
+        // above sea level, where the air is a little thinner.
+        let face = EmitterDesc {
+            gravity: 0.0,
+            local_space: true,
+            ..Default::default()
+        };
+        let mut gpu = GpuEmitter::bake(&face, 1.0);
+        gpu.set_forces(Vec3::new(0.0, -9.81, 0.0), SEA_LEVEL_AIR * 0.9, &face, 1.0);
+        assert_eq!(gpu.forces[1], 0.0);
     }
 }

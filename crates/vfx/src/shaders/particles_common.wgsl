@@ -87,9 +87,9 @@ struct ParticleFog {
 };
 
 fn particle_fog(rel: vec3<f32>) -> ParticleFog {
-    // `apply_fog` is linear in the color, so a black and a white point split it.
+    let f = surface_fog(rel);
     var fog: ParticleFog;
-    fog.inscatter = apply_fog(vec3<f32>(0.0), rel);
-    fog.through = max(apply_fog(vec3<f32>(1.0), rel) - fog.inscatter, vec3<f32>(0.0));
+    fog.inscatter = f.inscatter;
+    fog.through = f.transmittance;
     return fog;
 }
