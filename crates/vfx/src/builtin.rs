@@ -2727,9 +2727,9 @@ fn exhausts() -> Vec<EffectDesc> {
             light: light_at(ION_BLUE, 20_000.0, 8.0, 0.3, [0.0, 0.4, 0.0]),
             ..effect(
                 "exhaust.jumpjet",
-                "A burst from a jump pack's jet: a short blue-white flame, a shimmer of hot air \
-                 and a few sparks. Scale 1 is a nozzle 12 cm across.",
-                Some(0.3),
+                "A jump pack's jet: a short blue-white flame, a shimmer of hot air and a few \
+                 sparks, for as long as it fires. Scale 1 is a nozzle 12 cm across.",
+                None,
                 vec![
                     plume("flame", [0.62, 0.78, 1.0], 1.1, 0.42, 12_000.0),
                     nozzle_glow([0.8, 0.88, 1.0], 0.3, 30_000.0),

@@ -55,7 +55,10 @@ rises on Mars, dust kicked up on the Moon flies in clean ballistic arcs, and an 
 loses its shock diamonds and balloons out as the air thins toward space.
 
 Engine exhausts (`exhaust.*`) play at a nozzle with the effect's +Y pointing down the exhaust;
-`scale` 1 is the nozzle size each one names and `intensity` follows the throttle. The `plume`
+`scale` 1 is the nozzle size each one names and `intensity` follows the throttle. Every nozzle
+of an `Exhausts` component (written by vehicles, jump kits) gets its kind's effect by itself,
+sized by its radius and following its level; running jets and tailpipes keep idling while the
+entity's `EngineState` says the engine runs ([`exhaust`]). The `plume`
 sprite draws the flame procedurally: a white-hot core, a train of shock diamonds about a
 nozzle's width apart with the gas banded bright and dark around them, and a turbulent tail
 that flickers and tears away.
@@ -135,7 +138,9 @@ and `VfxReactions`. Components: `ParticleEffect`, `Trail`, `Beam`.
 ## Contracts
 
 Reads: `WindField`, `Gravity`, `Ground`, `Water`, `SurfaceLayers` (puddles, snow),
-`SurfaceMaterials`, `TimeDilation`/`LocalTimeScale`, and the messages above.
+`SurfaceMaterials`, `Exhausts` and `EngineState`, `TimeDilation`/`LocalTimeScale`, and the
+messages above. Inserts `ExhaustEffects` (`draws_exhausts`), so owners hide their stand-in
+plumes.
 Writes: rendering only (plus the point lights of effects). The showcase demo writes
 `GroundContact` and `WorldImpulse` like a game would.
 
