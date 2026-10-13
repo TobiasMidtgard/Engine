@@ -361,6 +361,20 @@ fn the_hill_demo_tunnels_caves_in_builds_and_rebuilds() {
     assert!(pieces >= 11, "the hut is up ({pieces} pieces)");
 
     run(&mut app, 6.0);
+    let built = |app: &mut App| {
+        app.world
+            .query_filtered::<&BuiltPiece, With<StructuralPiece>>()
+            .iter(&app.world)
+            .count()
+    };
+    assert_eq!(built(&mut app), 27, "the yard's cabin is up");
+    let ghosts: Vec<usize> = app
+        .world
+        .query::<&build::BuildGhost>()
+        .iter(&app.world)
+        .map(|g| g.level)
+        .collect();
+    assert_eq!(ghosts, vec![5], "the deck's third row is a red ghost");
     let fallen: f32 = app
         .world
         .query::<&Debris>()
@@ -377,6 +391,13 @@ fn the_hill_demo_tunnels_caves_in_builds_and_rebuilds() {
 
     run(&mut app, 4.0);
     let raised = volume(&mut app);
+    let showing = app
+        .world
+        .query_filtered::<&ShowSupport, With<BuiltPiece>>()
+        .iter(&app.world)
+        .filter(|s| s.on)
+        .count();
+    assert_eq!(showing, 27, "the finished cabin shows its support colors");
     run(&mut app, 4.0);
     let hut_down = app
         .world
@@ -395,6 +416,155 @@ fn the_hill_demo_tunnels_caves_in_builds_and_rebuilds() {
         (rebuilt - start).abs() < 1.0,
         "the loop rebuilt the hill ({start} -> {raised} -> {rebuilt})"
     );
+    assert!(built(&mut app) <= 1, "the cabin starts over");
+}
+
+#[test]
+fn build_mode_places_snapped_pieces_and_takes_them_down() {
+    let mut app = app();
+    let b = app
+        .world
+        .spawn((
+            Transform::default(),
+            Builder {
+                kind: BuildKind::StoneFloor,
+                ..Builder::default()
+            },
+        ))
+        .id();
+    let aim = |app: &mut App, kind: BuildKind, from: [f64; 3], to: [f64; 3]| {
+        let mut builder = app.world.get_mut::<Builder>(b).unwrap();
+        builder.kind = kind;
+        builder.aim_at(DVec3::from_array(from), DVec3::from_array(to));
+    };
+    let send = |app: &mut App, action: BuildAction| {
+        app.world.write_message(BuildRequest { builder: b, action });
+        app.update();
+    };
+    let standing = |app: &mut App| -> Vec<(Entity, DVec3)> {
+        app.world
+            .query_filtered::<(Entity, &Transform), (With<BuiltPiece>, With<StructuralPiece>)>()
+            .iter(&app.world)
+            .map(|(e, t)| (e, t.translation))
+            .collect()
+    };
+    // A stone slab on the ground.
+    aim(
+        &mut app,
+        BuildKind::StoneFloor,
+        [0.4, 3.0, 0.8],
+        [0.0, 0.0, 0.0],
+    );
+    app.update();
+    let p = app
+        .world
+        .get::<build::BuildPreview>(b)
+        .unwrap()
+        .placement
+        .unwrap();
+    assert!(p.valid() && p.grounded, "{p:?}");
+    send(&mut app, BuildAction::Place);
+    assert_eq!(standing(&mut app).len(), 1);
+    // A board wall aimed near the slab's back edge snaps onto it.
+    aim(
+        &mut app,
+        BuildKind::WoodWall,
+        [0.3, 3.0, 0.1],
+        [0.1, 0.4, -0.85],
+    );
+    send(&mut app, BuildAction::Place);
+    let pieces = standing(&mut app);
+    assert_eq!(pieces.len(), 2);
+    let wall = pieces
+        .iter()
+        .find(|(_, at)| at.y > 1.0)
+        .copied()
+        .expect("a wall");
+    assert!(
+        wall.1.distance(DVec3::new(0.0, 1.4, -1.0)) < 1e-3,
+        "on the slab's back edge: {:?}",
+        wall.1
+    );
+    let fuel = app
+        .world
+        .get::<engine_world::Combustible>(wall.0)
+        .unwrap()
+        .fuel_kg;
+    assert!(
+        (fuel - 90.0).abs() < 1.0,
+        "boards hold half a solid box's wood ({fuel} kg)"
+    );
+    // Aimed at the same spot again, the ghost moves on to the next free snap.
+    send(&mut app, BuildAction::Place);
+    let pieces = standing(&mut app);
+    assert_eq!(pieces.len(), 3);
+    assert!(
+        pieces
+            .iter()
+            .all(|(e, at)| *e == wall.0 || at.distance(wall.1) > 0.5),
+        "not inside the first wall: {pieces:?}"
+    );
+    // A wall floating in the air can't be placed either.
+    aim(
+        &mut app,
+        BuildKind::WoodWall,
+        [10.0, 5.0, 0.0],
+        [10.0, 0.0, 0.0],
+    );
+    app.update();
+    let p = app
+        .world
+        .get::<build::BuildPreview>(b)
+        .unwrap()
+        .placement
+        .unwrap();
+    assert!(p.valid() && p.grounded, "on the ground it can: {p:?}");
+    // Take the slab down: the wall it carried loses its support and falls.
+    aim(
+        &mut app,
+        BuildKind::WoodWall,
+        [0.4, 3.0, 0.8],
+        [0.3, 0.4, 0.3],
+    );
+    send(&mut app, BuildAction::Remove);
+    run_secs(&mut app, 1.5);
+    assert!(standing(&mut app).is_empty(), "the wall fell with the slab");
+    assert!(app.world.get::<Debris>(wall.0).is_some());
+
+    // The AI's way: aim and place in one call, or just look.
+    let out = call_api(
+        &mut app.world,
+        "destruction.build",
+        json!({"kind": "stone_wall", "at": [5, 0, 5], "yaw_deg": 90}),
+    )
+    .unwrap();
+    assert_eq!(out["valid"], true, "{out}");
+    assert!(out["id"].is_u64(), "{out}");
+    assert!(
+        (out["yaw_deg"].as_f64().unwrap() - 90.0).abs() < 1e-3,
+        "{out}"
+    );
+    let preview = call_api(
+        &mut app.world,
+        "destruction.build",
+        json!({"kind": "wood_floor", "from": [5, 4, 9], "to": [5, 1.0, 5.2], "preview": true}),
+    )
+    .unwrap();
+    assert!(preview.get("id").is_none(), "{preview}");
+    assert_eq!(preview["snapped"], true, "{preview}");
+    let err = call_api(
+        &mut app.world,
+        "destruction.build",
+        json!({"kind": "castle"}),
+    )
+    .unwrap_err();
+    assert!(err.contains("wood_floor"), "{err}");
+    let gone = call_api(
+        &mut app.world,
+        "destruction.unbuild",
+        json!({"entity": out["id"]}),
+    );
+    assert!(gone.is_ok(), "{gone:?}");
 }
 
 #[test]
