@@ -244,6 +244,7 @@ fn spark(at: DVec3, velocity: Vec3, rng: &mut Rng) -> DebrisSpawn {
         reuse: None,
         scale: None,
         resting: false,
+        from_rock: false,
     }
 }
 

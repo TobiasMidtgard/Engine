@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use engine_core::math::{DVec2, DVec3, Vec2, Vec3};
 use engine_core::prelude::*;
-use engine_world::{Ground, WaterQuery, WaterSample};
+use engine_world::{Ground, WaterQuery, WaterSample, WorldShift};
 use parking_lot::RwLock;
 
 use crate::body::{WaterBed, WaterBody};
@@ -39,6 +39,18 @@ impl BodyState {
     /// Offset from the wave reference point (the center), unrotated (waves live in world axes).
     pub fn wave_coords(&self, p: DVec3) -> Vec2 {
         DVec2::new(p.x - self.center.x, p.z - self.center.z).as_vec2()
+    }
+
+    /// Follow a world shift: the body moves and turns with the world, its waves keep their
+    /// phase and turn with it, so the surface is the same where it was.
+    pub fn shift(&mut self, s: &WorldShift) {
+        self.center = s.point(self.center);
+        self.yaw = crate::flow::turned_yaw(s, self.yaw);
+        self.wind = s.direction(self.wind);
+        for w in &mut self.waves.waves {
+            let d = s.direction(Vec3::new(w.dir.x, 0.0, w.dir.y));
+            w.dir = Vec2::new(d.x, d.z).normalize_or(w.dir);
+        }
     }
 
     pub fn contains(&self, p: DVec3) -> bool {
@@ -78,6 +90,12 @@ pub struct WaterState {
     pub ground: Ground,
     /// World seconds simulated.
     pub time: f64,
+    /// World shifts followed so far (anything caching world positions rebuilds when it changes).
+    pub shifts: u64,
+    /// Moving interactors pushing the surface this step (x/z, radius). The dip a hull digs
+    /// under itself drives its wake but isn't what it floats on: a boat would settle into its
+    /// own trough, so the ripples are left out of [`WaterState::sample`] under each one.
+    pub hulls: Vec<(DVec2, f32)>,
 }
 
 impl WaterState {
@@ -88,7 +106,26 @@ impl WaterState {
             flows: Vec::new(),
             ground: Ground::default(),
             time: 0.0,
+            shifts: 0,
+            hulls: Vec::new(),
         }
+    }
+
+    /// Move everything into the frame after a world shift, so queries answer in the new frame
+    /// at once.
+    pub fn shift(&mut self, s: &WorldShift) {
+        for b in &mut self.bodies {
+            b.shift(s);
+        }
+        self.ripples.shift(s);
+        for f in &mut self.flows {
+            f.shift(s);
+        }
+        for (c, _) in &mut self.hulls {
+            let p = s.point(DVec3::new(c.x, 0.0, c.y));
+            *c = DVec2::new(p.x, p.z);
+        }
+        self.shifts += 1;
     }
 
     /// Still-water depth of the deepest body covering `p` (for ripple wave speeds).
@@ -100,6 +137,16 @@ impl WaterState {
             .fold(None, |acc: Option<f32>, d| {
                 Some(acc.map_or(d, |a| a.max(d)))
             })
+    }
+
+    /// How much of the ripples count at `p`: 0 under a moving interactor (its own push), 1
+    /// clear of them.
+    pub fn hull_weight(&self, p: DVec2) -> f32 {
+        self.hulls.iter().fold(1.0, |w, (c, r)| {
+            let d = (p - *c).length() as f32;
+            let t = ((d - r * 0.9) / (r * 0.9)).clamp(0.0, 1.0);
+            w.min(t * t * (3.0 - 2.0 * t))
+        })
     }
 
     /// Sample one body at `p`: (surface height, depth, velocity, normal, foam).
@@ -115,8 +162,9 @@ impl WaterState {
         if b.body.interactive
             && let Some((h, grad, f)) = self.ripples.sample(DVec2::new(p.x, p.z))
         {
-            height += h as f64;
-            normal = (normal + Vec3::new(-grad.x, 0.0, -grad.y)).normalize_or(Vec3::Y);
+            let own = self.hull_weight(DVec2::new(p.x, p.z));
+            height += (h * own) as f64;
+            normal = (normal + Vec3::new(-grad.x, 0.0, -grad.y) * own).normalize_or(Vec3::Y);
             foam = f;
         }
         let velocity = Vec3::new(b.body.current[0], 0.0, b.body.current[1]) + w.velocity;
@@ -163,10 +211,10 @@ impl WaterState {
             }
         }
         for f in &self.flows {
-            let local = p - f.origin;
+            let local = f.local(p);
             let (i, j) = (
                 (local.x / f.cell as f64).floor(),
-                (local.z / f.cell as f64).floor(),
+                (local.y / f.cell as f64).floor(),
             );
             if i >= 0.0 && j >= 0.0 && (i as usize) < f.nx && (j as usize) < f.nz {
                 return Some(f.origin.y + f.bed[j as usize * f.nx + i as usize] as f64);

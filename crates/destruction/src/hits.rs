@@ -321,6 +321,7 @@ impl Ctx<'_> {
                 reuse: None,
                 scale: None,
                 resting: false,
+                from_rock: false,
             });
         }
     }
@@ -876,6 +877,7 @@ fn wall_chunks(
             reuse: None,
             scale: None,
             resting: false,
+            from_rock: false,
         });
     }
 }
@@ -1124,6 +1126,8 @@ fn blast(
                 reuse: None,
                 scale: None,
                 resting: false,
+                // Out of the crater: clear of the rock before it lands on it.
+                from_rock: true,
             });
         }
         ctx.dust(
@@ -1448,6 +1452,7 @@ pub(crate) fn break_fracturable(
             reuse: None,
             scale: None,
             resting: false,
+            from_rock: false,
         });
     }
     let at = gt.translation();

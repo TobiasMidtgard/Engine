@@ -178,6 +178,36 @@ fn strands(count: usize, len: f32, width: f32, seed: u64) -> Height {
     out
 }
 
+/// Value noise with `cx` cells across and `cy` down the tile (stretched along v).
+fn vnoise2(x: f32, y: f32, cx: i64, cy: i64, seed: u64) -> f32 {
+    let (fx, fy) = (x * cx as f32, y * cy as f32);
+    let (ix, iy) = (fx.floor() as i64, fy.floor() as i64);
+    let (tx, ty) = (fx - ix as f32, fy - iy as f32);
+    let s = |t: f32| t * t * (3.0 - 2.0 * t);
+    let h = |x: i64, y: i64| hash01(x.rem_euclid(cx), y.rem_euclid(cy), 1, seed);
+    let a = h(ix, iy) + (h(ix + 1, iy) - h(ix, iy)) * s(tx);
+    let b = h(ix, iy + 1) + (h(ix + 1, iy + 1) - h(ix, iy + 1)) * s(tx);
+    a + (b - a) * s(ty)
+}
+
+/// A short, sleek coat (a horse's summer coat): fine hairs lying down the tile (v), combed
+/// into tracts a few hairs wide that catch the light together, so the coat shows its grain
+/// from a few meters away as well as close up.
+fn coat_hair(seed: u64) -> Height {
+    let fine = strands(2400, 0.2, 0.7, seed);
+    Height::new(|x, y| {
+        let (i, j) = ((x * N as f32) as usize % N, (y * N as f32) as usize % N);
+        let mut tracts = 0.0;
+        let mut amp = 0.5;
+        for o in 0..3 {
+            let k = 1i64 << o;
+            tracts += amp * vnoise2(x, y, 24 * k, 4 * k, seed + 7 + o as u64);
+            amp *= 0.5;
+        }
+        0.55 * fine.0[j * N + i] + 0.6 * tracts
+    })
+}
+
 /// Pebbled leather grain.
 fn leather() -> Height {
     Height::new(|x, y| {
@@ -313,6 +343,7 @@ pub struct Textures {
     pub fur: Option<Handle<Image>>,
     pub fur_albedo: Option<Handle<Image>>,
     pub coat: Option<Handle<Image>>,
+    pub coat_albedo: Option<Handle<Image>>,
     pub hair: Option<Handle<Image>>,
     pub hair_albedo: Option<Handle<Image>>,
     pub leather: Option<Handle<Image>>,
@@ -340,9 +371,8 @@ impl Textures {
             fur_albedo: make("audio/trail/fur_albedo", &|| {
                 strands(900, 0.35, 1.3, 41).albedo(0.62)
             }),
-            coat: make("audio/trail/coat", &|| {
-                strands(1400, 0.18, 0.9, 43).normals(0.8)
-            }),
+            coat: make("audio/trail/coat", &|| coat_hair(43).normals(1.4)),
+            coat_albedo: make("audio/trail/coat_albedo", &|| coat_hair(43).albedo(0.84)),
             hair: make("audio/trail/hair", &|| {
                 strands(1200, 0.6, 1.0, 47).normals(2.5)
             }),

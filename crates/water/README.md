@@ -1,7 +1,8 @@
 # engine_water — Water
 
-**Owner:** Water simulation. **Status:** round 1 — lakes, streams, interaction, puddles and the
-test area work end to end; oceans and planet-scale water come next.
+**Owner:** Water simulation. **Status:** round 2: lakes, streams, interaction, puddles, the
+test area and the showcase valley's lake and stream work end to end. Oceans and planet-scale
+water come next.
 Background research: `game-engine-research/graphics.md` in the project files.
 
 ## What it does
@@ -16,7 +17,9 @@ Background research: `game-engine-research/graphics.md` in the project files.
 - **Interaction**: a ripple field follows the camera (or the first `SimulationFocus`) over the
   nearest interactive body. Swimmers and waders (`WaterInteractor`, `GroundContact`), bullets
   (`ProjectileTrace`), blasts (`WorldImpulse`, domes from underwater charges), drops and wakes
-  push it. Every splash is published as `WaterSplash` (particles, audio) and `NoiseEvent` (AI).
+  push it. Every splash is published as `WaterSplash` (particles, audio) and `NoiseEvent` (AI),
+  including steady puffs of spray from fast boats' bows and from the foot of every waterfall
+  the flow finds.
 - **Floating** (`Buoyancy`): Archimedes over a probe grid with drag and wave forces; physics
   bodies get `ApplyImpulse`, and without a physics backend the module moves them itself
   (`Floating`). Blasts throw floating things; hitting the water splashes. `Tether` moors boats
@@ -27,13 +30,19 @@ Background research: `game-engine-research/graphics.md` in the project files.
   scattering, caustics on the bed, screen-space and sky reflections, sun glitter, light through
   thin crests, foam (whitecaps, wakes, rapids, shorelines), soft waterlines, ripples that fade
   with the pixel footprint (no shimmer at grazing angles), puddles, and an underwater view
-  (Snell's window, fog, caustics). Shaders are validated in a unit test.
+  (Snell's window, fog, caustics, light shafts). Shaders are validated in a unit test.
 - **Script API**: `water.sample`, `water.splash`, `water.bodies`, `water.spawn_lake`,
   `water.spawn_ocean`, `water.pour`, `water.calm`.
 
-## Test area (`demo::spawn_demo`, showcase zone "lake")
+## Test area (`demo::spawn_demo`, showcase zone "water")
 
-A tarn on a hill with a stream out of it; the showcase places it in the lake zone.
+A tarn on a hill with a stream out of it; the showcase places it in its "water" zone.
+`demo::area_height` and `demo::area_surface` describe the hill's ground, so a world's terrain
+can carry it instead (`spawn_demo_with(.., DemoOptions { ground_mesh: false })`).
+
+The showcase valley's own lake and the stream that falls over the cliff into it get real water
+from `demo::spawn_valley`: the lake as a body over the landscape's ground, and each stream as a
+flow region from its spring, prewarmed so it already runs into the lake.
 
 | Test case | Shows |
 | --- | --- |
@@ -78,8 +87,7 @@ ask the core owner to add it rather than depending on another module's crate.
   per-planet gravity and optics).
 - GPU ripple simulation (larger, finer interactive area); flow beds that follow terrain the
   destruction module changes.
-- Detailed props and terrain in the test area; a whiter, misty waterfall face and plunge pool;
-  god rays underwater.
+- Wave shoaling and shore breakers from a depth map of the ground under each body.
 
 ## Checklist
 
