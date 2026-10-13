@@ -106,6 +106,9 @@ impl Default for Rope {
                 substeps: 16,
                 damping: 0.1,
                 thickness: 0.015,
+                // Hemp sinks slowly once wet.
+                buoyancy: 0.9,
+                soak: 0.8,
                 ..SimSettings::default()
             },
             material: SoftMaterial::hex(0x8a7350)

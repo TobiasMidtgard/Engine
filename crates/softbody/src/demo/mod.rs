@@ -18,6 +18,8 @@
 //!   mannequin in slow motion (its own `LocalTimeScale`), and a dog with fur.
 //! - **Mesh colliders**: a crane lowers a silk sheet over a marble statue (the mannequin's body
 //!   posed once, its surface a triangle-mesh collider) and lifts it off again (`statue`).
+//! - **Water**: dyed silks tied to a bamboo pole across a stream, streaming out soaked in the
+//!   current ([`rinse::spawn_rinse`], placed by the world on a real stream).
 //!
 //! Until the physics and animation modules land, the moving props are kinematic and the
 //! skeletons are animated procedurally here (the same `SkeletonPose` contract the animation
@@ -59,6 +61,7 @@ mod props_boat;
 mod props_bridge;
 mod props_machines;
 mod props_stage;
+pub mod rinse;
 pub mod sailboat;
 pub mod sculpt;
 pub mod skin;
@@ -200,6 +203,7 @@ pub fn register(app: &mut App) {
             respawn_volumes,
             sailboat::sail_boats,
             statue::hang_cords,
+            rinse::tie_silks,
         )
             .chain()
             .in_set(SimSet::Gameplay),

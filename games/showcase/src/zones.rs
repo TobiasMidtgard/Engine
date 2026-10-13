@@ -270,6 +270,16 @@ fn float_test(lake: &Zone) -> DVec3 {
     lake.center + DVec3::new(20.0, crate::landscape::LAKE_LEVEL, -20.0)
 }
 
+/// Where the yard's silk rinse stands (x, z), and the way the stream runs there: across the
+/// stream in the southern woods, 30 m above the falls, where it runs half a meter deep at
+/// about 0.8 m/s in a channel about 5 m wide.
+fn rinse_site() -> (DVec2, DVec2) {
+    let (a, b) = (DVec2::from(STREAM[2]), DVec2::from(STREAM[3]));
+    let down = (b - a).normalize();
+    // 28 m down this reach, a meter toward its deeper (west) side.
+    (a + down * 28.0 + DVec2::new(-down.y, down.x) * 0.6, down)
+}
+
 /// The runway's two ends (x, z): 1.2 km north–south through the airfield.
 pub const RUNWAY: ([f64; 2], [f64; 2]) = ([780.0, -750.0], [780.0, 450.0]);
 
@@ -355,6 +365,15 @@ pub fn spawn_demos(
                 commands
                     .entity(boat)
                     .insert(engine_water::WaterInteractor::new(0.8).with_wake(1.0));
+                // Dyed silks rinsed in the stream above the falls (they tie on once the
+                // lake zone's stream is running).
+                let (at, down) = rinse_site();
+                engine_softbody::demo::rinse::spawn_rinse(
+                    commands,
+                    DVec3::new(at.x, land.height(at.x, at.y) + 0.5, at.y),
+                    Vec3::new(down.x as f32, 0.0, down.y as f32),
+                    6.0,
+                );
             }
             "magic" => engine_vfx::demo::spawn_demo(commands, z.center),
             "gallery2d" => ph::gallery2d(commands, lib, z),
@@ -814,6 +833,21 @@ pub fn demo_views(z: &Zone) -> Vec<View> {
             )
             .on_arrive("softbody.sailboat_home", "{}")
             .warmup(12.0),
+            // Up the stream in the southern woods, behind the silk rinse (its water is about
+            // 11.9 m up): the silks stream away toward the falls, with the lake beyond.
+            {
+                let (at, down) = rinse_site();
+                let west = DVec2::new(-down.y, down.x);
+                let rel = |p: DVec2, y: f64| [p.x - z.center.x, y, p.y - z.center.z];
+                View::new(
+                    "yard_rinse",
+                    "Dyed silks rinsed in a mountain stream",
+                    rel(at - down * 4.0 + west * 1.4, 13.6),
+                    rel(at + down * 10.0, 11.0),
+                    15.0,
+                )
+                .warmup(6.0)
+            },
         ],
         "fortress" => destruction_views(engine_destruction::demo::VIEWS),
         "voxel" => destruction_views(engine_destruction::hill::VIEWS),
@@ -1146,6 +1180,69 @@ pub fn moon_position() -> DVec3 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_silk_rinse_streams_out_in_the_running_stream() {
+        use engine::core::time::TimeSource;
+        use engine::world::{Ground, SurfaceMaterials, Water};
+        let land = crate::landscape::shared();
+        let mut app = App::new();
+        app.world.resource_mut::<EngineConfig>().headless = true;
+        app.world
+            .resource_mut::<Time>()
+            .set_source(TimeSource::Manual {
+                step_secs: 1.0 / 30.0,
+            });
+        app.add_plugins((
+            engine::world::WorldPlugin,
+            engine_water::WaterPlugin,
+            engine_softbody::SoftBodyPlugin,
+        ));
+        let ground =
+            crate::landscape::LandscapeGround::new(land.clone(), &mut SurfaceMaterials::default());
+        app.insert_resource(Ground(std::sync::Arc::new(ground)));
+        let (at, down) = rinse_site();
+        app.add_systems(Startup, move |mut commands: Commands| {
+            engine_water::demo::spawn_valley(
+                &mut commands,
+                &lake_water(zone("lake"), &|x, z| land.height(x, z)),
+            );
+            engine_softbody::demo::rinse::spawn_rinse(
+                &mut commands,
+                DVec3::new(at.x, land.height(at.x, at.y) + 0.5, at.y),
+                Vec3::new(down.x as f32, 0.0, down.y as f32),
+                6.0,
+            );
+        });
+        app.update_n(30 * 10);
+
+        // The stream runs deep and steady there, down this reach.
+        let w = app
+            .world
+            .resource::<Water>()
+            .0
+            .sample(DVec3::new(at.x, 20.0, at.y));
+        let w = w.expect("the stream at the rinse");
+        let flow = DVec2::new(w.velocity.x as f64, w.velocity.z as f64);
+        assert!(w.depth > 0.3, "{w:?}");
+        assert!(flow.dot(down) > 0.4, "{w:?}");
+        // Five silks tied on, wet, streaming downstream from the pole.
+        let mut q = app.world.query::<&engine_softbody::SoftBodySim>();
+        let silks: Vec<_> = q.iter(&app.world).collect();
+        assert_eq!(silks.len(), 5);
+        for b in silks {
+            let reach = (0..b.particle_count())
+                .map(|i| {
+                    let p = b.world_position(i);
+                    assert!(p.is_finite());
+                    DVec2::new(p.x - at.x, p.z - at.y).dot(down)
+                })
+                .fold(f64::MIN, f64::max);
+            let wet = b.wet.iter().sum::<f32>() / b.wet.len() as f32;
+            assert!(reach > 5.0, "a silk reaches only {reach:.2} m downstream");
+            assert!(wet > 0.5, "a silk is only {wet:.2} wet");
+        }
+    }
 
     #[test]
     fn the_float_test_has_open_deep_water() {
