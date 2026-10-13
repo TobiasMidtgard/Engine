@@ -193,12 +193,14 @@ fn fs_smoke(in: VsOut) -> @location(0) vec4<f32> {
             smoke.size.w,
         );
         if (s.x > 1e-4) {
-            // Fade toward the open sides and top so the box never shows.
+            // Fade toward the open sides and top so the box never shows: over a few cells, along
+            // a ragged line (by the billow noise), so a plume drifting out of the box dissolves
+            // instead of ending in a straight wall.
             let edge = min(
                 min(min(local.x, smoke.size.x - local.x), min(local.z, smoke.size.z - local.z)),
                 smoke.size.y - local.y,
             );
-            var k = saturate(edge / (cell * 2.5));
+            var k = saturate((edge - cell * 3.0 * (lumps - 0.5)) / (cell * 5.0));
             if (detail > 0.0) {
                 // Erode: where the smoke is thin it breaks into round billows and wisps; dense
                 // cores keep their shape. `d` is how dense it is (σ = 2/m is halfway; for fog
