@@ -676,9 +676,14 @@ mod tests {
     #[test]
     fn duplicate_plugins_are_ignored() {
         let mut app = App::new();
-        app.add_plugins((CountPlugin, CountPlugin));
+        // Watched, like every test that makes the duplicate warning, so its first use never
+        // happens unobserved on a parallel test thread (see `warnings_during`).
+        let warnings = warnings_during(|| {
+            app.add_plugins((CountPlugin, CountPlugin));
+        });
         app.update();
         assert_eq!(app.world.resource::<Counter>().0, 1);
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
     }
 
     #[test]
@@ -727,6 +732,11 @@ mod tests {
     }
 
     /// Messages of the warnings logged on this thread while `f` runs.
+    ///
+    /// Tests run on parallel threads, and `tracing` caches per log statement whether anyone
+    /// listens. If another thread uses the statement first, while this subscriber is being set
+    /// up, the cache can say "nobody" and the warning is dropped; so the cache is rebuilt once
+    /// the subscriber is in place.
     fn warnings_during(f: impl FnOnce()) -> Vec<String> {
         use std::sync::{Arc, Mutex};
         use tracing::field::{Field, Visit};
@@ -755,7 +765,10 @@ mod tests {
 
         let warnings = Warnings::default();
         let subscriber = tracing_subscriber::registry().with(warnings.clone());
-        tracing::subscriber::with_default(subscriber, f);
+        tracing::subscriber::with_default(subscriber, || {
+            tracing::callsite::rebuild_interest_cache();
+            f()
+        });
         warnings.0.lock().unwrap().clone()
     }
 

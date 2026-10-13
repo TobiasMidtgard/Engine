@@ -338,6 +338,15 @@ pub fn spawn_demos(
             "physics" => engine_physics::demo::spawn_demo(commands, z.center),
             "yard" => {
                 engine_softbody::demo::spawn_demo(commands, z.center);
+                // Bare earth under the burning curtain's burner, so its flame lights the
+                // curtain and not the meadow.
+                commands.spawn((
+                    Name::new("Curtain burner (firebreak)"),
+                    Transform::from_translation(z.center + engine_softbody::demo::CURTAIN_BURNER),
+                    engine_fire::FuelPatch::firebreak(engine_fire::PatchShape::Disc {
+                        radius: 4.0,
+                    }),
+                ));
                 // The sailing dinghy works the lake east of the jetty, leaving a wake as wide
                 // as its hull.
                 let home =
@@ -600,6 +609,21 @@ pub fn demo_views(z: &Zone) -> Vec<View> {
                 .on_arrive("movement.duel", &duel("Blink"))
                 .on_arrive("movement.grappler", "{}")
                 .on_leave("movement.duel", cycle),
+                // The zip line: the grappler restarts its loop on arrival and is caught past the
+                // middle of the line, coming at the camera with the cable running back up to
+                // the gantry on the tower.
+                View::new(
+                    "parkour_zip",
+                    "Zip line: jump into the cable off the tower roof and ride it down to the gate",
+                    [25.9, 4.4, 17.5],
+                    [20.5, 7.3, 26.8],
+                    16.0,
+                )
+                // Past the middle of the line about 7.75 s into the loop.
+                .warmup(7.3)
+                .on_arrive("movement.duel", &duel("Blink"))
+                .on_arrive("movement.grappler", "{}")
+                .on_leave("movement.duel", cycle),
                 // The freight station: the rider restarts its loop on arrival, with the car
                 // about to pull out, and is caught leaping onto the car's side.
                 View::new(
@@ -782,16 +806,18 @@ pub fn demo_views(z: &Zone) -> Vec<View> {
             )
             .warmup(7.0),
             // The unveiling starts over on arrival: the crane lowers the silk over the statue,
-            // leaves it on and is lifting it off when the picture is taken.
+            // leaves it on and has just lifted it clear of the head when the picture is taken.
+            // The camera looks east past the statue's right side, toward the village, with
+            // the curtains (and the burning one's smoke) out of the frame.
             View::new(
                 "yard_statue",
                 "Unveiling: silk lifted off a marble statue",
-                [-10.5, 2.3, -8.4],
-                [-14.0, 2.6, -4.0],
+                [-9.6, 1.85, -6.3],
+                [-14.0, 2.7, -4.0],
                 15.0,
             )
             .on_arrive("softbody.unveil", "{}")
-            .warmup(17.4),
+            .warmup(18.4),
             // On the lake: the dinghy's mooring is 85 m east and 110 m south of the yard. It
             // starts its lane over on arrival, so it is out on the water in view.
             View::new(

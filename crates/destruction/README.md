@@ -64,8 +64,8 @@ fracture and debris.
 - **Doors** (`door`): a ledged and braced plank door (iron strap hinges, clenched nails, a
   ring pull on each face) hangs in every doorway built in build mode. `interact` (E, gamepad
   West) opens or shuts the door nearest a character within 2.2 m; it swings 95° away from
-  whoever opens it, either way, and with a physics module its collider swings with it (shut,
-  it closes the doorway). When its doorway falls the door swings shut and falls with it; take
+  whoever opens it, either way, and with a physics module it is a kinematic body that swings
+  with it (shut, it closes the doorway; swinging, it shoves crates out of its way). When its doorway falls the door swings shut and falls with it; take
   the doorway down and the door goes too.
 - **Burning wood** (`burn`): wooden building pieces get an `engine_world::Combustible`
   holding their wood as fuel, so the fire module (when installed) can light and burn them.
@@ -110,8 +110,8 @@ Writes: `WorldImpulse` (falling structures, strength only), `NoiseEvent` (breaks
 doors),
 `SmokeEmission` (dust and thermite smoke for the smoke module), `GroundContact` (debris
 landing on a surface, for footstep-style impact sounds), physics-contract bodies for debris
-and static colliders for standing building pieces, breakable props, set dressing and doors
-(moved with them).
+and static colliders for standing building pieces, breakable props and set dressing, and
+kinematic bodies for doors (moved by their `Transform`).
 
 ## Using it
 
@@ -182,7 +182,10 @@ the Siege fortress zone). It is about 80 × 40 m and runs a 20 s loop, then rebu
   concrete, and a drywall shot up and then blown open by a charge.
 - **Breach house** (vertical play, north of the tower): a brick room with an open front and a
   window in each side wall under a timber roof deck on joists, with a stair up its back wall
-  to the roof and a steel ladder under each of its two rimmed hatches. Its west roof bay was
+  to the roof and a steel ladder under each of its two rimmed hatches. Galvanized
+  tube-and-clamp guard railings (`PropKind::PipeRailing`: cast clamp fittings, base flanges,
+  a timber toe board) run round the roof, open at the stair's head, and up the stair's open
+  side on palms bolted to its stringer. Its west roof bay was
   shot up from below long ago, so sunlight comes through the holes; every loop the room fires
   up through the east bay, a charge on the roof blows a hole and the boards rain in, thermite
   cuts the steel hatch out and its plate drops onto the floor, and a sledgehammer smashes the
@@ -244,5 +247,5 @@ still holds it, red), then under both, and the shelter drops into the pit.
   voxel cliff. **Done** (tests above and the showcase).
 
 Next: debris resting on other debris without a physics module, cave-in boulders resting on
-rock ledges (they need side contacts, not just floors), railings, and ladders you can climb
-(they need a climbing contract from movement).
+rock ledges (they need side contacts, not just floors), and ladders you can climb (they need
+a climbing contract from movement).

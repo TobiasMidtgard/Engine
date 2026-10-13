@@ -1,7 +1,7 @@
 //! The grapple station: a nine-meter precast tower nobody climbs without the hook. A glowing
 //! anchor plate under its top edge is the target and painted chevrons lead the eye up to it.
-//! Railings guard only its sides: the front edge is where the rope pulls a pilot over, the back
-//! edge where they drop off onto the pad. Saw-cut pad bays with start, take-off and landing
+//! Railings guard only its sides: the front edge is where the rope pulls a pilot over, and the
+//! +X side opens where the zip line ([`super::zip_station`]) leaves the roof. Saw-cut pad bays with start, take-off and landing
 //! paint, a numbered backlit sign (in [`build_signs`]), a floodlight on a pole, a door, a
 //! downpipe and roof gear.
 
@@ -280,22 +280,36 @@ fn tower(kit: &mut Kit, base: f32, t0: Vec3, t1: Vec3) {
         );
     }
     // Railings down both sides, returning a little onto the front and back edges at the
-    // corners; the middle of the front and back stays open.
+    // corners; the middle of the front and back stays open, and so does the stretch of the +X
+    // side the zip line leaves over.
     let off = 0.05;
+    let (gap0, gap1) = zip_gap(t1);
     for (x_edge, inward) in [(t0.x - off, 1.0f32), (t1.x + off, -1.0)] {
         let ret = x_edge + inward * 1.0;
-        railing(
-            &mut yellow,
-            &mut dark,
-            &[
+        let runs: Vec<Vec<Vec3>> = if inward > 0.0 {
+            vec![vec![
                 v3(ret, top, t0.z - off),
                 v3(x_edge, top, t0.z - off),
                 v3(x_edge, top, t1.z + off),
                 v3(ret, top, t1.z + off),
-            ],
-            t0,
-            t1,
-        );
+            ]]
+        } else {
+            vec![
+                vec![
+                    v3(ret, top, t0.z - off),
+                    v3(x_edge, top, t0.z - off),
+                    v3(x_edge, top, gap0),
+                ],
+                vec![
+                    v3(x_edge, top, gap1),
+                    v3(x_edge, top, t1.z + off),
+                    v3(ret, top, t1.z + off),
+                ],
+            ]
+        };
+        for path in runs {
+            railing(&mut yellow, &mut dark, &path, t0, t1);
+        }
     }
 
     // A door in the back face, with a canopy and a lamp.
@@ -545,6 +559,15 @@ fn tower(kit: &mut Kit, base: f32, t0: Vec3, t1: Vec3) {
     kit.add(GLOW_WHITE, white);
 }
 
+/// Where the railing on the tower's +X side opens for the zip line (z from, to): 2 m round
+/// where the line crosses that edge.
+fn zip_gap(t1: Vec3) -> (f32, f32) {
+    let (along, _) = layout::zip_axes();
+    let from = DVec3::from_array(layout::ZIP_FROM);
+    let z = from.z + along[2] * (t1.x as f64 - from.x) / along[0];
+    (z as f32 - 1.0, z as f32 + 1.0)
+}
+
 /// A guard rail along `path` (on the roof, just outside its edge): posts bracketed to the
 /// faces, two rails bent round the corners and a toe board.
 fn railing(yellow: &mut M, dark: &mut M, path: &[Vec3], t0: Vec3, t1: Vec3) {
@@ -626,18 +649,19 @@ fn roof(kit: &mut Kit, t0: Vec3, t1: Vec3) {
     steel.append(
         &pipe(
             &[
-                v3(t1.x - 1.0, top, t0.z + 2.4),
-                v3(t1.x - 1.0, top + 0.7, t0.z + 2.4),
-                v3(t1.x - 1.0, top + 0.86, t0.z + 2.52),
-                v3(t1.x - 1.0, top + 0.82, t0.z + 2.7),
+                v3(t0.x + 1.0, top, t1.z - 2.6),
+                v3(t0.x + 1.0, top + 0.7, t1.z - 2.6),
+                v3(t0.x + 1.0, top + 0.86, t1.z - 2.48),
+                v3(t0.x + 1.0, top + 0.82, t1.z - 2.3),
             ],
             0.09,
             14,
         ),
         Mat4::IDENTITY,
     );
-    // An air-handling box on rubber feet.
-    let (ax, az) = (t1.x - 1.2, t1.z - 1.6);
+    // An air-handling box on rubber feet (on the −X side: the zip line's gantry stands on the
+    // +X side).
+    let (ax, az) = (t0.x + 1.6, t0.z + 1.7);
     steel.append(
         &slab(
             v3(ax - 0.55, top + 0.08, az - 0.4),
@@ -675,14 +699,31 @@ fn roof(kit: &mut Kit, t0: Vec3, t1: Vec3) {
             Mat4::IDENTITY,
         );
     }
+    // And on the +X edge where the zip line leaves.
+    let (gap0, gap1) = zip_gap(t1);
+    hz.append(
+        &slab(
+            v3(t1.x - 0.3, top, gap0),
+            v3(t1.x, top + 0.002, gap1),
+            0.0,
+            100.0,
+        ),
+        Mat4::IDENTITY,
+    );
     kit.add(HAZARD, hz);
+    // Chevrons in the middle of the roof point the way on: down the zip line.
+    let (along, across) = layout::zip_axes();
+    let (along, across) = (
+        DVec3::from_array(along).as_vec3(),
+        DVec3::from_array(across).as_vec3(),
+    );
     let mut paint = M::new();
     stencil(
         &mut paint,
         9,
         v3((t0.x + t1.x) * 0.5, top + 0.003, (t0.z + t1.z) * 0.5),
-        Vec3::Z,
-        Vec3::X,
+        along,
+        -across,
         0.4,
         paint_color(WHITE_PAINT),
     );

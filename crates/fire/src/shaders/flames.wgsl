@@ -7,7 +7,7 @@
 struct FlameInstance {
     pos_height: vec4<f32>, // camera-relative base (flames) or center (embers), height (m)
     shape: vec4<f32>,      // half-width (m), intensity 0..1, seed, kind (0 flame, 1 ember)
-    extra: vec4<f32>,      // flames: lean x, lean z (m per m of height), heat, 0; embers: velocity xyz, heat
+    extra: vec4<f32>,      // flames: lean x, lean z (m per m of height), heat, root fade; embers: velocity xyz, heat
 };
 
 @group(1) @binding(0) var<storage, read> instances: array<FlameInstance>;
@@ -23,7 +23,7 @@ const BOOK_FPS: f32 = 60.0;
 struct VsOut {
     @builtin(position) clip: vec4<f32>,
     @location(0) uv: vec2<f32>,
-    @location(1) @interpolate(flat) params: vec4<f32>, // intensity, seed, kind, heat
+    @location(1) @interpolate(flat) params: vec4<f32>, // intensity, seed, kind, heat (embers) or root fade (flames)
     @location(2) size: vec2<f32>,                      // half-width, height (m)
     @location(3) rel: vec3<f32>,
     @location(4) @interpolate(flat) pixels_per_m: f32, // screen pixels per meter at the flame
@@ -76,12 +76,13 @@ fn flame_vertex(inst: FlameInstance, c: vec2<f32>, grow: f32, widen: f32) -> VsO
     let h = inst.pos_height.w * pulse(inst.shape.z, frame.time.x);
     let w = inst.shape.x * widen;
     let cam_right = vec3<f32>(frame.view[0].x, frame.view[1].x, frame.view[2].x);
-    // An axial billboard along the flame, turned to the camera. In wind the flame bends: its
-    // root stands up and it leans over above (see `bend`), instead of shearing as a whole.
+    // An upright billboard turned to the camera. In wind the flame bends: its root stands up
+    // and it leans over above (see `bend`), instead of shearing as a whole. Its sides stay
+    // level, so its root lies along the fuel rather than tilting with the lean.
     let lean = vec3<f32>(inst.extra.x, 0.0, inst.extra.y);
     let a = normalize(vec3<f32>(0.0, 1.0, 0.0) + lean);
     let to_cam = normalize(-base - a * h * 0.5);
-    var r = cross(a, to_cam);
+    var r = cross(vec3<f32>(0.0, 1.0, 0.0), to_cam);
     let rl = length(r);
     r = select(cam_right, r / max(rl, 1e-4), rl > 0.25);
     // Flames seen from above get a little depth instead of collapsing to a line.
@@ -167,7 +168,8 @@ fn flame_sample(uv: vec2<f32>, size: vec2<f32>, seed: f32, t: f32) -> vec2<f32> 
     let flip = select(1.0, -1.0, fract(seed * 0.37) > 0.5);
     let wob = value_noise3(vec3<f32>(uv.x * 1.3 + seed, uv.y * 1.7 - t * 0.9, t * 0.35 + seed)) - 0.5;
     let x = (uv.x * flip + wob * 0.18 * uv.y) * 0.5 + 0.5;
-    // The flipbook's flames reach about 0.7 of its height (wisps above): that's the sprite's top.
+    // The flipbook's flames reach about 0.65 of its height, licking higher now and then (wisps
+    // above): the sprite's top is at 0.7.
     let y = uv.y * 0.7;
     let dims = vec2<f32>(textureDimensions(flipbook).xy);
     let half_texel = 0.5 / dims;
@@ -215,10 +217,16 @@ fn fs_flame(in: VsOut) -> @location(0) vec4<f32> {
         return vec4<f32>(col, 0.0);
     }
 
-    let s = flame_sample(in.uv, in.size, seed, t);
-    // The bottom of the sprite fades in (the base of a flame is thin, bluish and dim), wisps
-    // fade out at its top, and the whole flame dims as it dies down.
-    let base = smoothstep(0.0, 0.1, in.uv.y) * (1.0 - smoothstep(0.82, 1.0, in.uv.y));
+    // Faded toward the sprite's sides too, so soot spreading wide never ends in a straight
+    // edge (from close by, a flame's sprite can fill the view).
+    let s = flame_sample(in.uv, in.size, seed, t) * (1.0 - smoothstep(0.7, 1.0, abs(in.uv.x)));
+    // The root of the sprite fades in (the base of a flame is thin, bluish and dim; a flame
+    // rising out of a bigger fire has no base of its own), raggedly so it never shows a
+    // straight edge; wisps fade out at its top, and the whole flame dims as it dies down.
+    let root = in.params.w;
+    let ragged = value_noise3(vec3<f32>(in.uv.x * 2.5 + seed, t * 0.8, seed * 0.37));
+    let base = smoothstep(0.0, root * (0.6 + 0.8 * ragged), in.uv.y)
+        * (1.0 - smoothstep(0.82, 1.0, in.uv.y));
     let fade = soft_fade(in.clip, in.rel, 0.3) * smoothstep(0.0, 0.03, intensity);
     let heat = s.x * base;
     let soot = s.y * (1.0 - smoothstep(0.05, 0.3, heat));
@@ -239,9 +247,12 @@ fn fs_flame(in: VsOut) -> @location(0) vec4<f32> {
     // A flame is mostly emission, but bright enough to hide part of what's behind it, other
     // flames included (so dozens of overlapping sprites in a fire front don't add up to a
     // washed-out cream). Only the hot core: thin edges stay see-through (no dark rims by day).
-    let alpha = saturate(body * 0.7 * smoothstep(0.35, 0.8, heat) + soot_a) * fade;
-    let col = apply_fog(c + soot_c * soot_a, in.rel) * fade;
-    return vec4<f32>(col, alpha);
+    let cover = saturate(body * 0.7 * smoothstep(0.35, 0.8, heat) + soot_a);
+    // Fog dims the light and lays its own glow over only what the flame covers: the clear
+    // gas round its tongues adds no second helping of fog (pale halos at night).
+    let fog = surface_fog(in.rel);
+    let col = ((c + soot_c * soot_a) * fog.transmittance + fog.inscatter * cover) * fade;
+    return vec4<f32>(col, cover * fade);
 }
 
 // ---------------------------------------------------------------- heat haze
