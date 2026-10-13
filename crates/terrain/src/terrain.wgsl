@@ -1095,6 +1095,12 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     let straw = planet.colors[C_DRY].rgb * 1.1;
     var grass_col = mix(col[M_GRASS], straw, saturate(clump) * 0.45 + saturate(sward - 0.2) * 0.25);
     grass_col *= (1.0 - saturate(-clump) * 0.35) * mix(vec3<f32>(1.0), vec3<f32>(0.88, 0.96, 1.05), saturate(-sward) * 0.5);
+    // Hand-painted pasture (its tint sets one color) still lies across the land the way grass
+    // grows: lusher and darker in hollows, sun-dried on crests and knolls, in drifts tens to
+    // hundreds of meters across. (Natural grass has this in its own color already.)
+    let lay = ((meadow_v - 0.5) * 2.5 * meadow_fade + (macro_v - 0.5) * 1.2 * macro_fade + (crest - gully) * 0.8) * in.tint.a;
+    grass_col = mix(grass_col, straw, saturate(lay) * 0.5);
+    grass_col *= mix(vec3<f32>(1.0), vec3<f32>(0.7, 0.85, 0.95), saturate(-lay));
     col[M_GRASS] = grass_col;
     // Bare ground in patches too: damper, darker earth next to dry, pale stretches.
     let bare_v = 1.0 + (mid_v - 0.5) * 0.3 * clump_fade + (patch_v - 0.5) * 0.2 * macro_fade;
