@@ -72,11 +72,13 @@ impl Style {
     fn palette(self) -> Palette {
         match self {
             Style::Pilot => Palette {
-                paint_a: (0x353b41, 0.42),
-                paint_b: (0x9aa1a6, 0.4),
-                suit: 0x16191c,
-                leather: 0x2a2520,
-                trim: (0x7a8085, 0.32),
+                paint_a: (0x2e3337, 0.52),
+                paint_b: (0x7b8085, 0.5),
+                suit: 0x1b1e21,
+                cloth: 0x2e3129,
+                sash: 0x3a3d33,
+                leather: 0x2b2621,
+                trim: (0x6e7378, 0.38),
                 glow: 0x2bffd2,
                 glass: 0x05080a,
                 ito: 0x141414,
@@ -87,11 +89,13 @@ impl Style {
                 edge_nits: 3500.0,
             },
             Style::Duelist => Palette {
-                paint_a: (0xe6e8ec, 0.3),
-                paint_b: (0x1f4fb4, 0.32),
-                suit: 0x1a2232,
-                leather: 0x3b2a1f,
-                trim: (0xd6a650, 0.26),
+                paint_a: (0xd5cfc1, 0.42),
+                paint_b: (0x22305a, 0.42),
+                suit: 0x1b2030,
+                cloth: 0x1c233d,
+                sash: 0x8c6a32,
+                leather: 0x3a291d,
+                trim: (0xb08a48, 0.32),
                 glow: 0x8fdcff,
                 glass: 0x04070c,
                 ito: 0x1b3c8a,
@@ -102,11 +106,13 @@ impl Style {
                 edge_nits: 3500.0,
             },
             Style::Elite => Palette {
-                paint_a: (0x0c0c0f, 0.22),
-                paint_b: (0x7c0a17, 0.28),
-                suit: 0x0b0b0d,
-                leather: 0x160e0e,
-                trim: (0x34343a, 0.2),
+                paint_a: (0x131315, 0.36),
+                paint_b: (0x5c0b14, 0.38),
+                suit: 0x0e0e10,
+                cloth: 0x1a191d,
+                sash: 0x6e0d16,
+                leather: 0x170f0f,
+                trim: (0x2e2e33, 0.28),
                 glow: 0xff1e30,
                 glass: 0x030303,
                 ito: 0x0b0b0b,
@@ -117,11 +123,13 @@ impl Style {
                 edge_nits: 5000.0,
             },
             Style::Grunt => Palette {
-                paint_a: (0xc6631f, 0.48),
-                paint_b: (0x5c6066, 0.45),
-                suit: 0x2b2e29,
+                paint_a: (0x9a5023, 0.58),
+                paint_b: (0x565a4e, 0.6),
+                suit: 0x2c2e27,
+                cloth: 0x5a5442,
+                sash: 0x6a6450,
                 leather: 0x4a3524,
-                trim: (0x8c8f92, 0.38),
+                trim: (0x8a8d90, 0.45),
                 glow: 0xff9a30,
                 glass: 0x0a0806,
                 ito: 0x3a2a1e,
@@ -141,6 +149,10 @@ struct Palette {
     paint_a: (u32, f32),
     paint_b: (u32, f32),
     suit: u32,
+    /// Woven cloth: hakama trousers.
+    cloth: u32,
+    /// The waist sash and the shoulder lacing of the hakama styles.
+    sash: u32,
     leather: u32,
     /// Fittings (sRGB hex, roughness): gold, steel, black chrome.
     trim: (u32, f32),
@@ -165,8 +177,12 @@ pub enum Mat {
     PaintA,
     /// Secondary painted armor.
     PaintB,
-    /// Rubberized undersuit.
+    /// Undersuit: a technical twill.
     Suit,
+    /// Heavy woven cloth: hakama trousers.
+    Cloth,
+    /// Woven sash and lacing cord.
+    Sash,
     Carbon,
     Leather,
     /// Machined metal fittings.
@@ -194,10 +210,12 @@ pub enum Mat {
 }
 
 impl Mat {
-    pub const ALL: [Mat; 16] = [
+    pub const ALL: [Mat; 18] = [
         Mat::PaintA,
         Mat::PaintB,
         Mat::Suit,
+        Mat::Cloth,
+        Mat::Sash,
         Mat::Carbon,
         Mat::Leather,
         Mat::Trim,
@@ -218,6 +236,8 @@ impl Mat {
             Mat::PaintA => "paint_a",
             Mat::PaintB => "paint_b",
             Mat::Suit => "suit",
+            Mat::Cloth => "cloth",
+            Mat::Sash => "sash",
             Mat::Carbon => "carbon",
             Mat::Leather => "leather",
             Mat::Trim => "trim",
@@ -542,6 +562,17 @@ impl Pl {
     /// A thin strip (accent lines, inlays).
     fn strip() -> Self {
         Self::new(0.0022, 0.0, 1.0)
+    }
+}
+
+/// Turns `m` (an open sheet) to face away from `inside`.
+fn face_out(m: &mut MeshBuilder, inside: Vec3) {
+    let Some(t) = m.indices.as_chunks::<3>().0.first().copied() else {
+        return;
+    };
+    let p = t.map(|i| Vec3::from(m.vertices[i as usize].position));
+    if (p[1] - p[0]).cross(p[2] - p[0]).dot(p[0] - inside) < 0.0 {
+        m.flip();
     }
 }
 
@@ -1197,9 +1228,9 @@ fn torso_vol(bulk: f32) -> Vol {
         (0.8, [0.0, 0.015, 0.125, 0.085, 0.09, 2.4]),
         (0.86, [0.0, 0.01, 0.152, 0.098, 0.112, 2.5]),
         (0.93, [0.0, 0.0, 0.163, 0.104, 0.118, 2.6]),
-        (1.0, [0.0, 0.0, 0.157, 0.1, 0.104, 2.6]),
-        (1.07, [0.0, 0.0, 0.142, 0.095, 0.09, 2.5]),
-        (1.15, [0.0, 0.0, 0.149, 0.1, 0.094, 2.5]),
+        (1.0, [0.0, 0.0, 0.15, 0.1, 0.104, 2.6]),
+        (1.07, [0.0, 0.0, 0.134, 0.093, 0.088, 2.5]),
+        (1.15, [0.0, 0.0, 0.143, 0.099, 0.093, 2.5]),
         (1.24, [0.0, -0.004, 0.164, 0.114, 0.1, 2.6]),
         (1.33, [0.0, -0.008, 0.176, 0.124, 0.104, 2.8]),
         (1.41, [0.0, -0.004, 0.181, 0.118, 0.104, 3.0]),
@@ -1598,16 +1629,21 @@ fn pelvis(kit: &mut Kit, s: &Spec) {
     kit.bind(Pelvis, Mat::Suit, || {
         v.tube(0.84, 1.1, 9, 32, 0.0, 0.07, 0.0)
     });
-    // Belt with a buckle and pouches.
+    // Belt with a buckle and pouches; the hakama styles wear a sash over it instead.
+    let hakama = matches!(style, Style::Duelist | Style::Elite);
     kit.bind(Pelvis, Mat::Leather, || {
-        let mut m = v.plate(
-            (-FRAC_PI_2 + 0.07, 1.5 * PI - 0.07),
-            (0.995, 1.045),
-            0.012,
-            Pl::new(0.006, 0.0, 1.25),
-            36,
-            2,
-        );
+        let mut m = if hakama {
+            MeshBuilder::new()
+        } else {
+            v.plate(
+                (-FRAC_PI_2 + 0.07, 1.5 * PI - 0.07),
+                (0.995, 1.045),
+                0.012,
+                Pl::new(0.006, 0.0, 1.25),
+                36,
+                2,
+            )
+        };
         let pouch = |phi: f32, size: Vec3| {
             let p = v.at(0.99, phi, 0.012 + size.z * 0.5);
             let out = (p - v.center(0.99)).normalize_or(Vec3::Z);
@@ -1646,8 +1682,12 @@ fn pelvis(kit: &mut Kit, s: &Spec) {
     });
     kit.bind(Pelvis, Mat::Trim, || {
         let p = v.at(1.02, FRAC_PI_2, 0.022);
-        let mut m = MeshBuilder::chamfer_box(v3(0.064, 0.046, 0.012), 0.003)
-            .transformed(Mat4::from_translation(p));
+        let mut m = if hakama {
+            MeshBuilder::new()
+        } else {
+            MeshBuilder::chamfer_box(v3(0.064, 0.046, 0.012), 0.003)
+                .transformed(Mat4::from_translation(p))
+        };
         for phi in [-0.55f32, -1.05] {
             let q = v.at(1.005, phi, 0.05);
             let out = (q - v.center(1.005)).normalize_or(Vec3::Z);
@@ -1655,11 +1695,15 @@ fn pelvis(kit: &mut Kit, s: &Spec) {
         }
         m
     });
-    kit.bind(Pelvis, Mat::Glow, || {
-        let p = v.at(1.02, FRAC_PI_2, 0.0285);
-        MeshBuilder::rounded_box(v3(0.03, 0.008, 0.002), 0.001, 1)
-            .transformed(Mat4::from_translation(p))
-    });
+    if hakama {
+        kit.bind(Pelvis, Mat::Sash, || obi(&v));
+    } else {
+        kit.bind(Pelvis, Mat::Glow, || {
+            let p = v.at(1.02, FRAC_PI_2, 0.0285);
+            MeshBuilder::rounded_box(v3(0.03, 0.008, 0.002), 0.001, 1)
+                .transformed(Mat4::from_translation(p))
+        });
+    }
     // Faulds front and back.
     if style != Style::Pilot {
         kit.bind(Pelvis, Mat::PaintB, || {
@@ -1782,6 +1826,55 @@ fn pelvis(kit: &mut Kit, s: &Spec) {
     }
 }
 
+/// The sash wound twice around the waist over the armor's lower edge, knotted in front
+/// right of center (clear of the sword) with two tails hanging from the knot.
+fn obi(v: &Vol) -> MeshBuilder {
+    let g = 0.024;
+    let cloth = |t: f32| Pl::new(t, 0.0015, 0.85);
+    let mut m = v.plate(
+        (-FRAC_PI_2 + 0.03, 1.5 * PI - 0.03),
+        (0.976, 1.074),
+        g,
+        cloth(0.006),
+        44,
+        3,
+    );
+    // The second turn crosses the front on a slant.
+    m.append(
+        &v.shaped(
+            (FRAC_PI_2 - 1.9, FRAC_PI_2 + 1.3),
+            |u| (0.986 + 0.03 * u, 1.034 + 0.03 * u),
+            |_, _| g + 0.0072,
+            cloth(0.0045),
+            26,
+            2,
+        ),
+        Mat4::IDENTITY,
+    );
+    let phi = FRAC_PI_2 - 0.42;
+    let p = v.at(1.03, phi, g + 0.026);
+    let out = (p - v.center(1.03)).with_y(0.0).normalize_or(Vec3::NEG_Z);
+    let across = Vec3::Y.cross(out).normalize_or(Vec3::X);
+    m.append(
+        &block(v3(0.058, 0.044, 0.03), 0.013, across, Vec3::Y, p),
+        Mat4::IDENTITY,
+    );
+    // Tails: fall from the knot, splay a little and end on a slant.
+    for (lean, len, w) in [(-0.2f32, 0.15f32, 0.046f32), (0.16, 0.115, 0.04)] {
+        let down = (Vec3::NEG_Y + across * lean).normalize();
+        let top = p - Vec3::Y * 0.012 + out * 0.004;
+        m.append(
+            &plate(2, 6, cloth(0.004), top - out, |u, t| {
+                let l = len * (1.0 - 0.18 * u * lean.signum());
+                let bow = (PI * t).sin() * 0.008 + t * 0.006;
+                top + across * (u - 0.5) * w + down * t * l + out * bow
+            }),
+            Mat4::IDENTITY,
+        );
+    }
+    m
+}
+
 fn shoulder_vol(scale: f32, exp: f32) -> Vol {
     Vol::y(&[
         (1.24, [0.205, 0.02, 0.068, 0.068, 0.068, exp]),
@@ -1804,6 +1897,100 @@ fn shoulder_shell(scale: f32, e: f32) -> Shell {
         front: 0.083 * scale,
         back: 0.083 * scale,
         e,
+    }
+}
+
+/// One lame of a sode (shoulder guard) on a shoulder volume.
+#[derive(Debug, Clone, Copy)]
+struct Lame {
+    /// Bottom and top height.
+    y: (f32, f32),
+    /// Growth off the volume at the bottom and at the top (it flares out downward).
+    g: (f32, f32),
+    /// Thickness.
+    t: f32,
+}
+
+impl Lame {
+    /// `n` lames `h` tall hanging from `top`, each overlapping the one above by `lap` and
+    /// lying on top of it (one plate thickness `t` further out), each flaring out by `flare`
+    /// toward its lower edge. The first starts `g0` off the volume.
+    fn stack(top: f32, n: usize, h: f32, lap: f32, g0: f32, flare: f32, t: f32) -> Vec<Lame> {
+        let step = flare + t + 0.0012;
+        (0..n)
+            .map(|k| {
+                let y1 = top - k as f32 * (h - lap);
+                let g1 = g0 + k as f32 * step;
+                Lame {
+                    y: (y1 - h, y1),
+                    g: (g1 + flare, g1),
+                    t,
+                }
+            })
+            .collect()
+    }
+
+    fn g_at(&self, y: f32) -> f32 {
+        let v = ((y - self.y.0) / (self.y.1 - self.y.0)).clamp(0.0, 1.0);
+        lerp(self.g.0, self.g.1, v)
+    }
+
+    fn plate(
+        &self,
+        sv: &Vol,
+        phi: (f32, f32),
+        bulge: f32,
+        edge: f32,
+        nu: usize,
+        nv: usize,
+    ) -> MeshBuilder {
+        let l = *self;
+        sv.shaped(
+            phi,
+            |_| l.y,
+            |_, v| lerp(l.g.0, l.g.1, v),
+            Pl::new(l.t, bulge, edge),
+            nu,
+            nv,
+        )
+    }
+
+    /// A strip along the lame between `from` and `to` above its lower edge, `off` above its
+    /// face.
+    fn edge(&self, sv: &Vol, phi: (f32, f32), from: f32, to: f32, off: f32, pl: Pl) -> MeshBuilder {
+        let l = *self;
+        let y = (l.y.0 + from, l.y.0 + to);
+        sv.shaped(
+            phi,
+            |_| y,
+            |_, v| l.g_at(lerp(y.0, y.1, v)) + l.t + off,
+            pl,
+            14,
+            1,
+        )
+    }
+
+    /// Pairs of cords laced down every lame at the angles `cols`, `off` above the faces.
+    fn lacing(lames: &[Lame], sv: &Vol, cols: &[f32], off: f32) -> MeshBuilder {
+        let mut m = MeshBuilder::new();
+        for l in lames {
+            let y = (l.y.0 + 0.003, l.y.1 - 0.002);
+            let k = sv.params((y.0 + y.1) * 0.5);
+            let r = k[2].max(k[3]) + l.g.1;
+            let (w, d) = (0.0021 / r, 0.0042 / r);
+            for &c in cols {
+                for side in [-1.0f32, 1.0] {
+                    let a = c + side * d;
+                    let mut cord = surface(1, 3, |u, v| {
+                        let h = lerp(y.0, y.1, v);
+                        sv.at(h, lerp(a - w, a + w, u), l.g_at(h) + l.t + off)
+                    });
+                    face_out(&mut cord, sv.center((y.0 + y.1) * 0.5));
+                    m.append(&cord, Mat4::IDENTITY);
+                }
+            }
+        }
+        m
     }
 }
 
@@ -1887,37 +2074,32 @@ fn arms(kit: &mut Kit, s: &Spec) {
             8,
         )
     });
-    // Pauldrons.
+    // Pauldrons: a cap over the shoulder and a sode of overlapping lames hanging from it.
     match style {
         Style::Duelist => {
             let sv = shoulder_vol(1.0 * b, 2.3);
             let sh = shoulder_shell(1.0 * b, 2.8);
+            let lames = Lame::stack(1.468, 4, 0.056, 0.013, 0.012, 0.003, 0.0055);
+            let phi = (-1.62, 1.62);
             kit.pair(PauldronR, Mat::PaintA, || {
-                let low = sh.polar_at(1.44);
-                let mut m = sh.dome(|_| low, 0.02, s.a(0.008), 12);
-                m.append(
-                    &sh.band((-2.1, 2.1), (1.47, 1.36), 0.014, s.a(0.005), 16, 4),
-                    Mat4::IDENTITY,
-                );
+                let low = sh.polar_at(1.452);
+                let mut m = sh.dome(|_| low, 0.02, s.a(0.006), 12);
+                for l in &lames {
+                    m.append(&l.plate(&sv, phi, 0.0015, s.edge_a, 16, 4), Mat4::IDENTITY);
+                }
                 m
             });
-            kit.pair(PauldronR, Mat::PaintB, || {
-                sv.plate((-1.6, 1.6), (1.275, 1.375), 0.009, s.b(0.004), 14, 4)
+            kit.pair(PauldronR, Mat::Wrap, || {
+                Lame::lacing(&lames, &sv, &[-1.12, -0.38, 0.38, 1.12], 0.0018)
             });
             kit.pair(PauldronR, Mat::Trim, || {
-                sv.plate(
-                    (-1.6, 1.6),
-                    (1.27, 1.285),
-                    0.009 + s.t * 0.85 + 0.001,
-                    Pl::new(0.003, 0.0, 1.0),
-                    14,
-                    1,
-                )
+                let l = &lames[lames.len() - 1];
+                l.edge(&sv, phi, 0.0, 0.007, 0.0008, Pl::new(0.0025, 0.0, 1.0))
             });
             kit.pair(PauldronR, Mat::Glow, || {
                 sh.band(
                     (-1.4, 1.4),
-                    (1.462, 1.456),
+                    (1.468, 1.462),
                     0.02 + s.t + 0.0018,
                     Pl::strip(),
                     12,
@@ -1928,19 +2110,18 @@ fn arms(kit: &mut Kit, s: &Spec) {
         Style::Elite => {
             let sv = shoulder_vol(0.95 * b, 2.6);
             let sh = shoulder_shell(0.95 * b, 2.6);
+            let lames = Lame::stack(1.462, 4, 0.052, 0.012, 0.011, 0.0035, 0.005);
+            let phi = (-1.6, 1.6);
             kit.pair(PauldronR, Mat::PaintA, || {
-                // Lower over the outside of the arm.
-                let mut m = sh.dome(
-                    |phi| sh.polar_at(1.35 + 0.02 * phi.abs() / PI),
-                    0.014,
-                    s.a(0.008),
-                    12,
-                );
-                m.append(
-                    &sv.plate((-1.6, 1.6), (1.29, 1.385), 0.01, s.a(0.003), 14, 4),
-                    Mat4::IDENTITY,
-                );
+                let low = sh.polar_at(1.448);
+                let mut m = sh.dome(|_| low, 0.014, s.a(0.006), 12);
+                for l in &lames {
+                    m.append(&l.plate(&sv, phi, 0.0012, s.edge_a, 16, 4), Mat4::IDENTITY);
+                }
                 m
+            });
+            kit.pair(PauldronR, Mat::Sash, || {
+                Lame::lacing(&lames, &sv, &[-1.1, -0.37, 0.37, 1.1], 0.0015)
             });
             // Swept crimson blade rising off the shoulder.
             kit.pair(PauldronR, Mat::PaintB, || {
@@ -1949,55 +2130,42 @@ fn arms(kit: &mut Kit, s: &Spec) {
                         let t = i as f32 / 9.0;
                         sh.at(
                             lerp(1.4, -1.7, t),
-                            sh.polar_at(lerp(1.5, 1.41, t)),
-                            0.016 + s.t * 0.8,
+                            sh.polar_at(lerp(1.505, 1.462, t)),
+                            0.014 + s.t * 0.8,
                         )
                     })
                     .collect();
-                let mut m = fin(&path, 0.005, |t| 0.012 + 0.05 * t * t, v3(0.6, 0.8, 0.0));
-                m.append(
-                    &sv.plate(
-                        (-1.6, 1.6),
-                        (1.29, 1.3),
-                        0.01 + s.t + 0.001,
-                        Pl::new(0.003, 0.0, 1.3),
-                        14,
-                        1,
-                    ),
-                    Mat4::IDENTITY,
-                );
-                m
+                fin(&path, 0.005, |t| 0.012 + 0.05 * t * t, v3(0.6, 0.8, 0.0))
             });
             kit.pair(PauldronR, Mat::Glow, || {
-                sh.band(
-                    (-1.5, 1.5),
-                    (1.398, 1.392),
-                    0.014 + s.t + 0.003,
-                    Pl::strip(),
-                    12,
-                    1,
-                )
+                let l = &lames[lames.len() - 1];
+                l.edge(&sv, (-1.5, 1.5), 0.004, 0.0075, 0.0014, Pl::strip())
             });
         }
         Style::Grunt => {
             let sv = shoulder_vol(1.2 * b, 3.6);
             let sh = shoulder_shell(1.12 * b, 3.6);
+            let lames = Lame::stack(1.45, 3, 0.07, 0.016, 0.017, 0.003, 0.008);
+            let phi = (-1.7, 1.7);
             kit.pair(PauldronR, Mat::PaintA, || {
-                let low = sh.polar_at(1.36);
+                let low = sh.polar_at(1.44);
                 let mut m = sh.dome(|_| low, 0.02, s.a(0.0), 12);
-                m.append(
-                    &sv.plate((-1.7, 1.7), (1.25, 1.375), 0.015, s.a(0.006), 14, 5),
-                    Mat4::IDENTITY,
-                );
+                for l in &lames {
+                    m.append(&l.plate(&sv, phi, 0.002, s.edge_a, 16, 4), Mat4::IDENTITY);
+                }
                 m
             });
             kit.pair(PauldronR, Mat::Trim, || {
                 let mut m = MeshBuilder::new();
-                for k in 0..5 {
-                    let phi = -1.2 + k as f32 * 0.6;
-                    let p = sv.at(1.29, phi, 0.015 + s.t + 0.002);
-                    let out = (p - sv.center(1.29)).normalize_or(Vec3::X);
-                    m.append(&disk(0.0065, 0.005, out, p, 10), Mat4::IDENTITY);
+                for l in &lames {
+                    for k in 0..4 {
+                        let p = -1.14 + k as f32 * 0.76;
+                        let y = l.y.0 + 0.014;
+                        let g = l.g_at(y) + l.t + 0.0015;
+                        let q = sv.at(y, p, g);
+                        let out = (q - sv.center(y)).normalize_or(Vec3::X);
+                        m.append(&disk(0.0055, 0.004, out, q, 8), Mat4::IDENTITY);
+                    }
                 }
                 m
             });
@@ -2009,7 +2177,7 @@ fn arms(kit: &mut Kit, s: &Spec) {
                     m.append(
                         &sh.band(
                             (phi, phi + 0.16),
-                            (1.5, 1.43),
+                            (1.5, 1.445),
                             0.02 + s.t + 0.0008,
                             Pl::new(0.002, 0.0, 1.0),
                             2,
@@ -2288,6 +2456,44 @@ fn hands(kit: &mut Kit, s: &Spec) {
     kit.local(FingersL, armor, || left_fingers().1);
 }
 
+/// Where the hakama's thigh part ends, just below the knee (bind pose).
+const HAKAMA_HEM: f32 = 0.465;
+
+/// How far the hakama stands off the leg at angle `phi` (0 = outside, π = inside, toward
+/// the other leg), `open` 0..1 down the leg: wide outside, in front and behind, close
+/// between the legs, with knife pleats opening toward the hem and a soft drape.
+fn hakama_g(phi: f32, open: f32) -> f32 {
+    let inner = ((1.0 - phi.cos()) * 0.5).powi(2);
+    let flare = lerp(0.046, 0.012, inner) * open.max(0.0).powf(1.3);
+    // Knife pleats: the cloth rises across each pleat and drops back at its fold.
+    let s = (phi / TAU * 15.0).rem_euclid(1.0);
+    let pleat = s * s * (0.0035 + 0.0075 * open) * (1.0 - inner);
+    let drape = 0.0035 * open * (phi * 3.0 + 1.3).sin();
+    0.011 + flare + pleat + drape
+}
+
+/// A cloth tube around a leg volume between the heights `y`, `g(phi, y)` off it, with a
+/// hem; the seam runs down the inside of the leg.
+fn hakama_leg(
+    v: &Vol,
+    y: (f32, f32),
+    nu: usize,
+    nv: usize,
+    g: impl Fn(f32, f32) -> f32,
+) -> MeshBuilder {
+    plate(
+        nu,
+        nv,
+        Pl::new(0.004, 0.0, 0.8),
+        v.center((y.0 + y.1) * 0.5),
+        |u, w| {
+            let phi = PI + u * TAU;
+            let h = lerp(y.0, y.1, w);
+            v.at(h, phi, g(phi, h))
+        },
+    )
+}
+
 fn legs(kit: &mut Kit, s: &Spec) {
     use Bone::*;
     let b = s.bulk;
@@ -2317,8 +2523,23 @@ fn legs(kit: &mut Kit, s: &Spec) {
     kit.pair(ShinR, Mat::Suit, || {
         shin.tube(0.08, 0.53, 10, 22, 0.0, 0.0, 0.03)
     });
-    // Thigh armor.
+    // Thigh armor; the hakama styles wear wide pleated trousers instead.
+    let hakama = matches!(style, Style::Duelist | Style::Elite);
     match style {
+        _ if hakama => {
+            kit.pair(ThighR, Mat::Cloth, || {
+                hakama_leg(&thigh, (HAKAMA_HEM, 1.035), 84, 16, |phi, y| {
+                    hakama_g(phi, (1.035 - y) / (1.035 - HAKAMA_HEM))
+                })
+            });
+            kit.pair(ShinR, Mat::Cloth, || {
+                // Bloused below the knee and gathered into the greave.
+                hakama_leg(&shin, (0.385, 0.575), 72, 8, |phi, y| {
+                    let open = smooth(0.39, 0.475, y);
+                    lerp(0.0045, hakama_g(phi, 0.55) - 0.012, open)
+                })
+            });
+        }
         Style::Pilot => {
             kit.pair(ThighR, Mat::PaintB, || {
                 thigh.plate(
@@ -2400,12 +2621,13 @@ fn legs(kit: &mut Kit, s: &Spec) {
             });
         }
     }
-    // Knee cop.
+    // Knee cop (strapped over the hakama).
+    let knee = if hakama { 0.036 } else { 0.016 };
     kit.pair(ShinR, Mat::PaintB, || {
         let mut m = shin.plate(
             (FRAC_PI_2 - 0.9, FRAC_PI_2 + 0.9),
             (0.45, 0.565),
-            0.016,
+            knee,
             s.b(0.014),
             12,
             8,
@@ -2414,7 +2636,7 @@ fn legs(kit: &mut Kit, s: &Spec) {
             &shin.plate(
                 (FRAC_PI_2 - 0.8, FRAC_PI_2 + 0.8),
                 (0.42, 0.455),
-                0.012,
+                knee - 0.004,
                 s.b(0.004),
                 10,
                 3,
@@ -2424,7 +2646,7 @@ fn legs(kit: &mut Kit, s: &Spec) {
         m
     });
     kit.pair(ShinR, Mat::Glow, || {
-        let p = shin.at(0.52, FRAC_PI_2, 0.016 + s.t + 0.012);
+        let p = shin.at(0.52, FRAC_PI_2, knee + s.t + 0.012);
         disk(0.009, 0.003, Vec3::NEG_Z, p, 16)
     });
     // Greave.
@@ -3846,6 +4068,7 @@ fn materials(lib: &mut Library) {
     let size = lib.texture_size.max(64);
     let half = (size / 2).max(64);
     let suit = Tex::upload(lib, bake(half, 0.2, 1.5, suit_surface));
+    let cloth = Tex::upload(lib, bake(half, 0.35, 1.4, cloth_surface));
     let leather = Tex::upload(lib, bake(half, 0.4, 1.2, leather_surface));
     let trim = Tex::upload(lib, bake(half, 0.25, 1.0, trim_surface));
     let carbon = Tex::upload(lib, bake(half, 0.2, 1.0, carbon_surface));
@@ -3907,6 +4130,14 @@ fn materials(lib: &mut Library) {
             &key(Mat::Suit),
             suit.apply(tint(p.suit).with_uv_scale(5.0, 5.0)),
         );
+        // Cloth is seen from inside too (under the hem, inside the sash's tails).
+        let woven = |c: u32, scale: f32| {
+            let mut m = cloth.apply(tint(c).with_uv_scale(scale, scale));
+            m.double_sided = true;
+            m
+        };
+        lib.material(&key(Mat::Cloth), woven(p.cloth, 4.0));
+        lib.material(&key(Mat::Sash), woven(p.sash, 7.0));
         lib.material(
             &key(Mat::Leather),
             leather.apply(tint(p.leather).with_uv_scale(2.5, 2.5)),
@@ -3997,26 +4228,53 @@ impl LerpTo for f32 {
     }
 }
 
-/// Undersuit: rubberized fabric with a hexagonal pattern of grip dots (white: the material
-/// tints it).
+/// Undersuit: a technical twill (diagonal ribs), a little sheen, with a ribbed stretch panel
+/// band and soft creases (white: the material tints it).
 fn suit_surface(uv: Vec2) -> Surface {
-    let n = 48.0;
-    let rows = 28.0;
-    let r3 = 3f32.sqrt();
-    let p = Vec2::new(uv.x * n, uv.y * rows * r3);
-    let a = Vec2::new(p.x.round(), (p.y / r3).round() * r3);
-    let b = Vec2::new(p.x.floor() + 0.5, ((p.y / r3).floor() + 0.5) * r3);
-    let d = p.distance(a).min(p.distance(b));
-    let pad = smoothstep(0.46, 0.36, d);
-    let weave = (perlin(uv * 256.0, 256, 5) * 0.5 + 0.5) * 0.5
-        + (perlin(uv * 128.0, 128, 6) * 0.5 + 0.5) * 0.5;
+    let n = 160.0;
+    let rib = ((uv.x + uv.y) * n).fract();
+    let rib = (PI * rib).sin().max(0.0).powf(0.7);
+    let slub = perlin(Vec2::new(uv.x * 512.0, uv.y * 32.0), 512, 5) * 0.5 + 0.5;
+    let band = smoothstep(
+        0.02,
+        0.0,
+        (uv.y * 4.0).fract().min(1.0 - (uv.y * 4.0).fract()) - 0.008,
+    );
+    let crease = ridged(uv * 3.0, 3, 4, 7);
     let lo = fbm(uv * 4.0, 4, 3, 0.5, 9);
     Surface {
-        albedo: Vec3::splat((0.78 + 0.18 * pad + 0.06 * weave) * (1.0 + 0.06 * lo)),
-        height: pad * 0.0003 + weave * 0.00003,
-        roughness: lerp(0.86, 0.62, pad) + 0.04 * lo,
+        albedo: Vec3::splat((0.8 + 0.1 * rib + 0.05 * slub - 0.1 * band) * (1.0 + 0.07 * lo)),
+        height: rib * 0.00004 - band * 0.0002 - crease * crease * 0.0006,
+        roughness: (0.78 - 0.1 * rib + 0.05 * lo).clamp(0.3, 1.0),
         metallic: 0.0,
-        ao: lerp(0.8, 1.0, pad),
+        ao: 0.82 + 0.18 * rib - 0.15 * band,
+    }
+}
+
+/// Heavy woven cloth (cotton or linen): plain weave with slubby yarns, fuzz and soft fold
+/// creases (white: the material tints it).
+fn cloth_surface(uv: Vec2) -> Surface {
+    let n = 96.0;
+    let p = uv * n;
+    let (ix, iy) = (p.x.floor() as i32, p.y.floor() as i32);
+    let f = p - p.floor();
+    let over = (ix + iy).rem_euclid(2) == 0;
+    let (across, along) = if over { (f.x, f.y) } else { (f.y, f.x) };
+    let yarn = (PI * across).sin().max(0.0).powf(0.6) * (0.8 + 0.2 * (PI * along).sin());
+    let slub = rand2(if over { ix } else { iy }, 0, 211) * 0.5 + rand2(ix / 3, iy / 3, 212) * 0.5;
+    let fuzz = perlin(uv * 384.0, 384, 213) * 0.5 + 0.5;
+    let fold = ridged(uv * 2.0, 2, 4, 214);
+    let fade = fbm(uv * 3.0, 3, 4, 0.5, 215) * 0.5 + 0.5;
+    Surface {
+        albedo: Vec3::splat(
+            (0.74 + 0.16 * yarn + 0.08 * slub + 0.04 * fuzz)
+                * (0.92 + 0.16 * fade)
+                * (1.0 - 0.12 * fold),
+        ),
+        height: yarn * 0.00008 + slub * 0.00002 - fold * fold * 0.0012,
+        roughness: (0.9 - 0.06 * yarn + 0.04 * fuzz).clamp(0.4, 1.0),
+        metallic: 0.0,
+        ao: 0.72 + 0.28 * yarn,
     }
 }
 
@@ -4202,7 +4460,7 @@ mod tests {
                 }
             }
             assert!(
-                (30_000..=60_000).contains(&total),
+                (30_000..=80_000).contains(&total),
                 "{style:?}: {total} triangles"
             );
         }
