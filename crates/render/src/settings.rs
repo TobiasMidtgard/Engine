@@ -180,6 +180,10 @@ pub struct RenderSettings {
     /// Width of the area it covers, meters (resolution is `sky_occlusion_size`²).
     pub sky_occlusion_extent: f32,
     pub sky_occlusion_size: u32,
+    /// Cloud shadows: when a module draws the cloud shadow map (the weather's clouds; see
+    /// `cloud_shadows`), the sunlight on every surface and in the fog is shaded by it. Off: the
+    /// map is not drawn and nothing is shaded by clouds.
+    pub cloud_shadows: bool,
     /// How many EV darker than "average gray" very dark scenes are shown (0 = a moonlit night
     /// is exposed like noon; 2.5 = night looks like night). Ramps in below EV100 ≈ 5.
     pub night_exposure_bias: f32,
@@ -245,6 +249,7 @@ impl Default for RenderSettings {
             sky_occlusion: true,
             sky_occlusion_extent: 256.0,
             sky_occlusion_size: 512,
+            cloud_shadows: true,
             night_exposure_bias: 2.5,
             night_desaturation: 0.7,
             virtual_geometry: true,
@@ -266,6 +271,10 @@ impl Default for RenderSettings {
 ///
 /// Weather sets `density` (it adds `WeatherState::fog * 0.02` per meter on top); artists tune
 /// the rest. Ground fog at dawn: `density` 0.03–0.08, `height_falloff` 0.15–0.3.
+///
+/// With the [`Atmosphere`] disabled (an airless body), fog height is world y: on a planet placed
+/// with `PlanetTerrain::home_transform` the globe's far side is at y ≈ −2 × its radius, and fog
+/// piles up there when seen from orbit. Airless scenes should set `density` to 0.
 #[derive(Resource, Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct FogSettings {
@@ -307,22 +316,56 @@ impl Default for FogSettings {
 
 /// The planet whose atmosphere the sky, aerial perspective and sunlight use. Space travel
 /// updates this to the nearest planet (or disables it in deep space).
+///
+/// The air is the planet's own: what its gas (Rayleigh) and its haze or dust (Mie) do to light,
+/// per meter at the surface, in the renderer's three color channels (red 680 nm, green 550 nm,
+/// blue 440 nm), thinning with height over `rayleigh_scale_height` and `mie_scale_height`.
+/// The default is Earth ([`Atmosphere::earth`]); [`Atmosphere::mars`] is Mars. A planet module
+/// fills these in per body; the sky's look-up tables are recomputed whenever they change.
 #[derive(Resource, Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Atmosphere {
     pub enabled: bool,
     /// Planet center in world coordinates, meters.
     pub planet_center: DVec3,
+    /// Planet radius, meters.
     pub planet_radius: f64,
     /// Height of the atmosphere above the surface, meters.
     pub thickness: f32,
+    /// Height over which the gas thins by a factor e (Rayleigh scattering), meters.
     pub rayleigh_scale_height: f32,
+    /// Height over which the haze or dust thins by a factor e (Mie scattering and absorption),
+    /// meters.
     pub mie_scale_height: f32,
-    /// Mie anisotropy (0.76 hazy .. 0.9 clear).
+    /// Mie anisotropy (0.76 hazy .. 0.9 clear): how strongly the haze scatters forward, into
+    /// the glow around the sun. `mie_g_offset` varies it per color channel.
     pub mie_g: f32,
     /// Albedo (linear RGB) of the planet surface beyond the terrain: the ground seen from high
     /// up and toward the horizon, and the color of light bounced off the ground.
     pub ground_color: [f32; 3],
+    /// Rayleigh scattering by the gas at the surface, per meter, RGB. Molecules scatter blue
+    /// most (as 1/λ⁴), which makes a sky blue and a low sun red; they absorb nothing. Earth:
+    /// 5.802e-6, 13.558e-6, 33.1e-6.
+    pub rayleigh_scattering: [f32; 3],
+    /// Mie scattering by haze, dust or droplets at the surface, per meter, RGB: mostly forward
+    /// (`mie_g`), so the sky glows around the sun and pales toward the horizon. Earth's clear
+    /// air: 3.996e-6 in every channel.
+    pub mie_scattering: [f32; 3],
+    /// Light the haze or dust absorbs at the surface, per meter, RGB (its extinction is
+    /// scattering plus absorption). Earth's haze is gray, 0.404e-6; Mars' iron-bearing dust
+    /// absorbs blue most, which turns the sky it lights butterscotch.
+    pub mie_absorption: [f32; 3],
+    /// Absorption by an ozone layer (10–40 km up, densest at 25 km) at its densest, per meter,
+    /// RGB. Ozone absorbs orange, which keeps a twilight sky blue overhead. Earth: 0.650e-6,
+    /// 1.881e-6, 0.085e-6; 0 for air without ozone.
+    pub ozone_absorption: [f32; 3],
+    /// Added to `mie_g` per channel (R, G, B). Dust grains a little larger than the wavelength
+    /// (Mars') scatter blue into a narrower, stronger forward peak than red: a larger blue
+    /// anisotropy puts a blue glow around the sun, plainest at sunset. 0 = `mie_g` for all.
+    pub mie_g_offset: [f32; 3],
+    /// Scales the density of the whole air, every coefficient above (1 = as given, 2 = twice as
+    /// dense, 0 = no air): a season of higher pressure, a thicker variant of the same air.
+    pub density_scale: f32,
 }
 
 impl Default for Atmosphere {
@@ -336,19 +379,103 @@ impl Default for Atmosphere {
             mie_scale_height: 1_200.0,
             mie_g: 0.8,
             ground_color: [0.12, 0.15, 0.09],
+            rayleigh_scattering: [5.802e-6, 13.558e-6, 33.1e-6],
+            mie_scattering: [3.996e-6; 3],
+            mie_absorption: [0.404e-6; 3],
+            ozone_absorption: [0.650e-6, 1.881e-6, 0.085e-6],
+            mie_g_offset: [0.0; 3],
+            density_scale: 1.0,
         }
     }
 }
 
+/// The air's coefficients at the surface as the shaders use them (per meter, times
+/// [`Atmosphere::density_scale`]).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct AirOptics {
+    pub rayleigh: Vec3,
+    pub mie_scattering: Vec3,
+    /// Mie scattering plus absorption.
+    pub mie_extinction: Vec3,
+    pub ozone: Vec3,
+    /// Mie anisotropy per channel.
+    pub mie_g: Vec3,
+}
+
 impl Atmosphere {
+    /// Earth (the default): the Rayleigh, Mie and ozone of Bruneton's and Hillaire's (2020)
+    /// reference atmosphere. A blue sky, red sunsets.
+    pub fn earth() -> Self {
+        Self::default()
+    }
+
+    /// Mars: thin CO₂ under a veil of dust, with the planet's surface at y = 0. By day the sky
+    /// is butterscotch (the dust scatters red and absorbs blue); at sunset a blue glow
+    /// surrounds the sun (the dust's forward peak is stronger in blue) and the sun itself stays
+    /// pale instead of turning red.
+    ///
+    /// - Planet: mean radius 3389.5 km, the gas's scale height 11.1 km (NASA Mars fact sheet).
+    /// - Gas: CO₂'s Rayleigh scattering at Mars' mean surface pressure and temperature with
+    ///   the parameters of Schneegans et al. 2024, "Physically Based Real-Time Rendering of
+    ///   Atmospheres using Mie Theory" (Computer Graphics Forum 43(2), Table 1: refractive
+    ///   index n − 1 = 3.37e-6, depolarization 0.09), at 680, 550 and 440 nm: about 1.8 % of
+    ///   Earth's.
+    /// - Dust: scattering and absorption at the surface from the same table (Mie theory for
+    ///   ~1.4 µm feldspar grains with 3 % hematite, which absorbs blue): albedo 0.96 red,
+    ///   0.83 green, 0.69 blue. Mixed through the gas's 11.1 km scale height, as Costa et al.
+    ///   2021 ("Interactive Visualization of Atmospheric Effects for Celestial Bodies", IEEE
+    ///   TVCG) do, it gives a vertical optical depth of 0.34: Mars' clear season.
+    /// - Anisotropy 0.7, rising toward blue (0.64, 0.7, 0.8): a single forward lobe can't hold
+    ///   the diffraction peak, which for these grains is narrower and stronger in blue (and
+    ///   stronger still where hematite absorbs blue, which Schneegans et al. name as a cause of
+    ///   the blue halo around the Martian sun). Costa et al. fit a far wider spread (0.03 red,
+    ///   0.4 green, 0.67 blue), which Schneegans et al. find gives a very wide blue halo;
+    ///   Collienne et al. 2013, "Physically Based Rendering of the Martian Atmosphere", used a
+    ///   single 0.76.
+    /// - Ground: rusty regolith, linear albedo 0.3 red to 0.08 blue (Mars' Bond albedo is 0.25).
+    pub fn mars() -> Self {
+        let radius = 3_389_500.0;
+        Self {
+            enabled: true,
+            planet_center: DVec3::new(0.0, -radius, 0.0),
+            planet_radius: radius,
+            thickness: 100_000.0,
+            rayleigh_scale_height: 11_100.0,
+            mie_scale_height: 11_100.0,
+            mie_g: 0.7,
+            ground_color: [0.3, 0.16, 0.08],
+            rayleigh_scattering: [0.102e-6, 0.238e-6, 0.580e-6],
+            mie_scattering: [30.67e-6, 25.39e-6, 20.93e-6],
+            mie_absorption: [1.26e-6, 5.25e-6, 9.33e-6],
+            ozone_absorption: [0.0; 3],
+            mie_g_offset: [-0.06, 0.0, 0.1],
+            density_scale: 1.0,
+        }
+    }
+
+    /// The coefficients the shaders get: per meter at the surface, times `density_scale`.
+    pub(crate) fn optics(&self) -> AirOptics {
+        let k = self.density_scale.max(0.0);
+        let scaled = |c: [f32; 3]| Vec3::from(c) * k;
+        let g = Vec3::splat(self.mie_g) + Vec3::from(self.mie_g_offset);
+        AirOptics {
+            rayleigh: scaled(self.rayleigh_scattering),
+            mie_scattering: scaled(self.mie_scattering),
+            mie_extinction: (Vec3::from(self.mie_scattering) + Vec3::from(self.mie_absorption)) * k,
+            ozone: scaled(self.ozone_absorption),
+            mie_g: g.clamp(Vec3::splat(-0.999), Vec3::splat(0.999)),
+        }
+    }
+
     /// Fraction of sunlight (RGB) reaching camera-relative point `p` through the atmosphere,
-    /// matching `sun_transmittance` in the shader library.
+    /// matching `sun_transmittance` in the shader library: through the gas (Rayleigh) and the
+    /// haze or dust (Mie scattering and absorption), times `density_scale`. It leaves out the
+    /// thin ozone layer, as it always has (a few percent of Earth's noon sun).
     pub fn sun_transmittance(&self, p_rel: DVec3, center_rel: DVec3, sun_dir: Vec3) -> Vec3 {
         if !self.enabled || self.planet_radius <= 0.0 {
             return Vec3::ONE;
         }
-        const RAYLEIGH: Vec3 = Vec3::new(5.802e-6, 13.558e-6, 33.1e-6);
-        const MIE_EXT: f32 = 4.40e-6;
+        let air = self.optics();
         let sun = sun_dir.as_dvec3();
         let r_planet = self.planet_radius;
         let r_atmo = r_planet + self.thickness as f64;
@@ -368,7 +495,7 @@ impl Atmosphere {
             sr += (-h / self.rayleigh_scale_height as f64).exp() * seg;
             sm += (-h / self.mie_scale_height as f64).exp() * seg;
         }
-        let tau = RAYLEIGH * sr as f32 + Vec3::splat(MIE_EXT * sm as f32);
+        let tau = air.rayleigh * sr as f32 + air.mie_extinction * sm as f32;
         Vec3::new((-tau.x).exp(), (-tau.y).exp(), (-tau.z).exp())
     }
 }
@@ -383,4 +510,88 @@ fn ray_sphere(origin: DVec3, dir: DVec3, center: DVec3, radius: f64) -> Option<(
     }
     let s = h.sqrt();
     Some((-b - s, -b + s))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Sunlight through `air` reaching a point on its planet's surface (the camera), with the sun
+    /// `elevation_deg` above the horizon.
+    fn sun_at_surface(air: &Atmosphere, elevation_deg: f32) -> Vec3 {
+        let e = elevation_deg.to_radians();
+        let center_rel = DVec3::new(0.0, -air.planet_radius, 0.0);
+        air.sun_transmittance(DVec3::ZERO, center_rel, Vec3::new(0.0, e.sin(), -e.cos()))
+    }
+
+    #[test]
+    fn earth_is_the_default_with_the_old_constants() {
+        assert_eq!(Atmosphere::earth(), Atmosphere::default());
+        // Exactly what the shaders and the CPU used before the air became data.
+        let air = Atmosphere::earth().optics();
+        assert_eq!(air.rayleigh, Vec3::new(5.802e-6, 13.558e-6, 33.1e-6));
+        assert_eq!(air.mie_scattering, Vec3::splat(3.996e-6));
+        assert_eq!(air.mie_extinction, Vec3::splat(4.40e-6));
+        assert_eq!(air.ozone, Vec3::new(0.650e-6, 1.881e-6, 0.085e-6));
+        assert_eq!(air.mie_g, Vec3::splat(0.8));
+    }
+
+    #[test]
+    fn sun_transmittance_follows_the_air() {
+        let (earth, mars) = (Atmosphere::earth(), Atmosphere::mars());
+        let blue_over_red = |t: Vec3| t.z / t.x.max(1e-9);
+
+        // Overhead, Mars' dust (optical depth about 0.34) lets through less than Earth's air.
+        let earth_noon = sun_at_surface(&earth, 90.0);
+        let mars_noon = sun_at_surface(&mars, 90.0);
+        eprintln!("noon: Earth {earth_noon}, Mars {mars_noon}");
+        assert!(
+            (0.65..0.8).contains(&mars_noon.y),
+            "Mars' noon sun: {mars_noon}"
+        );
+        assert!(earth_noon.y > 0.85, "Earth's noon sun: {earth_noon}");
+
+        // A low sun: Earth's air reddens it, Mars' nearly gray dust dims it without reddening.
+        let earth_low = sun_at_surface(&earth, 5.0);
+        let mars_low = sun_at_surface(&mars, 5.0);
+        eprintln!("5° up: Earth {earth_low}, Mars {mars_low}");
+        assert!(
+            blue_over_red(earth_low) < 0.5,
+            "Earth's low sun isn't red: {earth_low}"
+        );
+        assert!(
+            blue_over_red(mars_low) > 0.9,
+            "Mars' low sun is reddened: {mars_low}"
+        );
+        assert!(
+            mars_low.y < earth_low.y * 0.5,
+            "Mars' dust doesn't dim the low sun: {mars_low} vs Earth's {earth_low}"
+        );
+
+        // Dust that absorbs more blue lets less blue through.
+        let mars_20 = sun_at_surface(&mars, 20.0);
+        let blue_absorbing = Atmosphere {
+            mie_absorption: [1.26e-6, 5.25e-6, 30e-6],
+            ..mars
+        };
+        let t = sun_at_surface(&blue_absorbing, 20.0);
+        assert!(t.z < mars_20.z * 0.9, "{t} vs {mars_20}");
+
+        // The density scale scales the optical depth: twice as dense squares the transmittance;
+        // no air lets everything through.
+        let dense = Atmosphere {
+            density_scale: 2.0,
+            ..mars
+        };
+        let t = sun_at_surface(&dense, 20.0);
+        assert!(
+            (t - mars_20 * mars_20).abs().max_element() < 1e-4,
+            "{t} vs {mars_20}"
+        );
+        let none = Atmosphere {
+            density_scale: 0.0,
+            ..mars
+        };
+        assert_eq!(sun_at_surface(&none, 20.0), Vec3::ONE);
+    }
 }
