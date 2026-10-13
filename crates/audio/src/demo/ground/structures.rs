@@ -146,6 +146,8 @@ pub(super) fn boardwalk() -> Out {
         let len = 2.6 + rng.normal(0.01);
         let off = Vec2::new(rng.range(0.0, 2.0), rng.range(0.0, 0.5));
         let moss_seed = rng.seed();
+        // Grit and dust carried on from the gravel, over the first boards.
+        let carried = 1.0 - smooth(0.0, 1.8, (s - s0) as f32);
         let mesh = beveled_box(Vec3::new(len, 0.028, 0.14), 0.0045, 0.2, off, |p| {
             let ax = p.x.abs();
             let end = smooth(0.95, 1.3, ax);
@@ -159,7 +161,14 @@ pub(super) fn boardwalk() -> Out {
             let under = 1.0 - smooth(-0.014, 0.0, p.y);
             let c = tone * (1.0 + 0.1 * worn) * (1.0 - 0.3 * end) * (1.0 - 0.45 * under);
             let c = c.lerp(Vec3::new(0.32, 0.4, 0.18), moss * 0.55);
-            c.extend(1.0)
+            let grit = carried
+                * (0.35 + 0.65 * worn)
+                * smooth(
+                    -0.3,
+                    0.3,
+                    fbm_world(p.x * 2.0, s as f32 * 3.0, 0.5, 2, moss_seed),
+                );
+            c.lerp(Vec3::new(0.62, 0.58, 0.52), grit * 0.6).extend(1.0)
         });
         let rot = trail_rot(s)
             * Quat::from_rotation_y(rng.normal(0.004))
@@ -1049,13 +1058,15 @@ pub(super) fn underpass() -> Out {
     }
 
     // Floor slabs with expansion joints; lighter and smoother where people walk, dirtier
-    // toward the wall.
+    // toward the wall, and dusted with sand blown in from the dunes at the far end.
     let slabs = 3;
     let slab_len = (u.s1 - u.s0) as f32 / slabs as f32;
     let inside = u.inside;
+    let end = u.s1 as f32;
     for k in 0..slabs {
         let s = u.s0 + slab_len as f64 * (k as f64 + 0.5);
         let seed = rng.seed();
+        let mid = s as f32;
         let slab = beveled_box(
             Vec3::new(4.6, 0.09, slab_len - 0.014),
             0.004,
@@ -1071,7 +1082,10 @@ pub(super) fn underpass() -> Out {
                 );
                 let c =
                     Vec3::splat(1.0 + 0.1 * worn) * (1.0 - 0.25 * wallward) * (1.0 - 0.18 * stain);
-                c.extend(1.0)
+                let to_sand = end - (mid - p.z);
+                let streaks = fbm_world(p.x * 0.5, p.z * 2.0, 0.4, 3, seed ^ 0x5a);
+                let dust = 1.0 - smooth(-0.3, 2.4, to_sand + 1.1 * streaks);
+                c.lerp(Vec3::new(1.15, 0.95, 0.64), dust * 0.85).extend(1.0)
             },
         );
         out.parts.push(Part {

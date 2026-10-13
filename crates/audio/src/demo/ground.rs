@@ -1,9 +1,11 @@
 //! The trail's grounds and props: a displaced ribbon of ground per stretch that follows the
 //! curve, with textured shoulders blending into the surrounding ground and ragged, soft
-//! transitions into the next stretch; grass verges along the whole loop; each stretch
-//! dressed with its own props (grass, ruts and prints, snow banks, a boardwalk, a bar
-//! grating over a pit, a cast-concrete underpass, dunes and driftwood, a leaf-strewn forest
-//! floor, puddles); and a trail marker at the start of every stretch.
+//! transitions into the next stretch, each spilling a little onto the next; grass verges
+//! along the whole loop (a dense renderer-drawn meadow plus tufts, seed heads, weeds,
+//! pebbles and fallen leaves); each stretch dressed with its own props (grass, ruts and
+//! prints, a snow blanket, a boardwalk, a bar grating over a pit, a cast-concrete
+//! underpass, dunes and driftwood, a leaf-strewn forest floor, puddles); and a trail marker
+//! at the start of every stretch.
 //!
 //! Everything is procedural: tileable PBR texture sets are painted and baked at spawn
 //! ([`textures`]), meshes are generated from noise ([`procgen`]), both in parallel. Small
@@ -190,6 +192,7 @@ type Item = (
 pub struct TrailGroundCache {
     items: Vec<Item>,
     lights: Vec<(Vec3, PointLight)>,
+    grass: Option<engine_render::GrassField>,
 }
 
 /// Lay the grounds, dress every stretch and build the underpass round `origin`.
@@ -228,6 +231,13 @@ pub(super) fn spawn(commands: &mut Commands, origin: DVec3) {
                 Name::new("Underpass lamp"),
                 light,
                 Transform::from_translation(origin + at.as_dvec3()),
+            ));
+        }
+        if let Some(grass) = cache.grass {
+            world.spawn((
+                Name::new("Trail verge grass"),
+                grass,
+                Transform::from_translation(origin),
             ));
         }
     });
@@ -319,6 +329,7 @@ fn build(world: &mut World) -> TrailGroundCache {
     TrailGroundCache {
         items,
         lights: all.lights,
+        grass: Some(dress::meadow()),
     }
 }
 
