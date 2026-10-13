@@ -182,9 +182,9 @@ pub fn rock_materials(
     images: &mut Assets<Image>,
     t: RockImages,
 ) -> RockMaterials {
-    let albedo = images.add(t.rock_albedo);
-    let normal = images.add(t.rock_normal);
-    let orm = images.add(t.rock_orm);
+    let albedo = images.insert_keyed("showcase/rock/albedo", t.rock_albedo);
+    let normal = images.insert_keyed("showcase/rock/normal", t.rock_normal);
+    let orm = images.insert_keyed("showcase/rock/orm", t.rock_orm);
     // Roughness comes from the texture (G, 0.45–1); the factor scales it.
     let mut rock = StandardMaterial::hex(0xffffff)
         .with_roughness(1.0)
@@ -202,8 +202,8 @@ pub fn rock_materials(
     let tiles = ROCK_TILE_M / MOSS_TILE_M;
     let mut moss = StandardMaterial::hex(0xffffff)
         .with_roughness(0.92)
-        .with_base_color_texture(images.add(t.moss_albedo))
-        .with_normal_texture(images.add(t.moss_normal))
+        .with_base_color_texture(images.insert_keyed("showcase/moss/albedo", t.moss_albedo))
+        .with_normal_texture(images.insert_keyed("showcase/moss/normal", t.moss_normal))
         .with_alpha_mask(0.5)
         .with_uv_scale(tiles, tiles)
         .with_subsurface(0.3);

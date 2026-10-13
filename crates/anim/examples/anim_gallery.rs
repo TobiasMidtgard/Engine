@@ -196,8 +196,16 @@ fn shots() -> Vec<Shot> {
             name: "15_spider",
             when: When::At(6.0),
             subject: |d| d.spider,
-            eye: Vec3::new(2.4, 1.3, -2.4),
-            target: Vec3::new(0.0, 0.35, 0.0),
+            eye: Vec3::new(1.9, 1.0, -1.7),
+            target: Vec3::new(0.0, 0.3, 0.05),
+            fov_deg: 45.0,
+        },
+        Shot {
+            name: "23_spider_head",
+            when: When::At(3.0),
+            subject: |d| d.spider,
+            eye: Vec3::new(0.45, 0.5, -0.85),
+            target: Vec3::new(0.0, 0.3, -0.25),
             fov_deg: 45.0,
         },
         Shot {
@@ -223,6 +231,44 @@ fn shots() -> Vec<Shot> {
             fov_deg: 45.0,
         },
         Shot {
+            name: "19_dog_head",
+            when: When::At(1.5),
+            subject: |d| d.dog,
+            eye: Vec3::new(0.62, 0.78, -1.05),
+            target: Vec3::new(0.0, 0.64, -0.45),
+            fov_deg: 35.0,
+        },
+        Shot {
+            name: "20_dog_coat",
+            when: When::At(2.0),
+            subject: |d| d.dog,
+            eye: Vec3::new(0.62, 0.62, 0.12),
+            target: Vec3::new(0.0, 0.45, -0.08),
+            fov_deg: 32.0,
+        },
+        Shot {
+            name: "21_dog_trot",
+            when: When::First {
+                after: 0.5,
+                test: |w, d| param(w, d.dog, "gait.stage") == 1.0 && param(w, d.dog, "speed") > 2.3,
+            },
+            subject: |d| d.dog,
+            eye: Vec3::new(2.0, 0.65, -0.6),
+            target: Vec3::new(0.0, 0.38, 0.0),
+            fov_deg: 38.0,
+        },
+        Shot {
+            name: "22_dog_gallop",
+            when: When::First {
+                after: 0.5,
+                test: |w, d| param(w, d.dog, "gait.stage") == 3.0 && param(w, d.dog, "speed") > 8.0,
+            },
+            subject: |d| d.dog,
+            eye: Vec3::new(2.4, 0.6, -1.0),
+            target: Vec3::new(0.0, 0.38, 0.0),
+            fov_deg: 38.0,
+        },
+        Shot {
             name: "18_overview",
             when: When::At(12.0),
             subject: |d| d.athlete,
@@ -242,6 +288,7 @@ fn sequence(spec: &str) -> Vec<Shot> {
         "walker" => |d| d.walker,
         "horse" => |d| d.horse,
         "spider" => |d| d.spider,
+        "dog" => |d| d.dog,
         _ => |d| d.car,
     };
     let num = |i: usize, default: f64| parts.get(i).and_then(|p| p.parse().ok()).unwrap_or(default);

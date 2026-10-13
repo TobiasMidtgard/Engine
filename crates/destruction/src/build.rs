@@ -8,7 +8,8 @@
 //! top of the ground or a floor, against the side of a wall or the edge of a floor. Then it
 //! snaps: every piece has snap points (the ends and middle of poles and beams; the corners and
 //! edge midpoints of walls, floors and roofs, on the top face of the ones that lie flat; the
-//! corners, edge midpoints and face centers of blocks), and the ghost moves so that the
+//! corners, edge midpoints and face centers of blocks; the ends and middle of a stair's foot
+//! and head), and the ghost moves so that the
 //! closest pair of its own and a neighbor's snap points meet, skipping spots where it would
 //! sit inside another piece. Its support is predicted the way the structure solver will
 //! compute it once placed, so a ghost reaching out too far from anything that holds it up is
@@ -17,8 +18,8 @@
 //! With `use_input`, the builder reads the action map: `build_mode` (B, d-pad left) toggles,
 //! `build_place` (left mouse, right trigger) places, `build_remove` (X, north button) takes
 //! down the built piece aimed at, `build_rotate` (R, d-pad right) turns the ghost 22.5°,
-//! `build_next` (C, left bumper) and `build_piece_1` to `build_piece_12` (keys 1 to 9, 0, −
-//! and =) pick the piece. Scripts send [`BuildRequest`]s; the AI bridge has `destruction.build`.
+//! `build_next` (C, left bumper) and `build_piece_1` to `build_piece_13` (keys 1 to 9, 0, −,
+//! = and [) pick the piece. Scripts send [`BuildRequest`]s; the AI bridge has `destruction.build`.
 
 use std::f32::consts::{FRAC_PI_2, FRAC_PI_4};
 
@@ -33,7 +34,7 @@ use crate::assets::DestructionAssets;
 use crate::burn::{TIMBER_MOISTURE, WOOD_IGNITION_C};
 use crate::dress::PropModel;
 use crate::material::{DestructibleMaterial, DestructionMaterials};
-use crate::props::{PropKind, wall_opening};
+use crate::props::{PropKind, STAIR_SLAB_M, stair_band, stair_steps, wall_opening};
 use crate::structure::{Obb, PieceState, ShowSupport, StructuralPiece};
 use crate::sync::solid_half;
 use crate::voxel::{VoxelState, rock_below};
@@ -86,10 +87,13 @@ pub enum BuildKind {
     WoodDoorway,
     /// Board wall, 2 × 2 m, with a window (0.9 × 0.75 m) in its middle at chest height.
     WoodWindow,
+    /// A flight of stairs 1 m wide rising 1.2 m over a 2 m run in seven steps, climbing away
+    /// from the builder (−Z): two flights reach a floor over a stone plinth.
+    WoodStair,
 }
 
 impl BuildKind {
-    pub const ALL: [BuildKind; 12] = [
+    pub const ALL: [BuildKind; 13] = [
         BuildKind::WoodFloor,
         BuildKind::WoodWall,
         BuildKind::WoodPole,
@@ -102,6 +106,7 @@ impl BuildKind {
         BuildKind::WoodGable,
         BuildKind::WoodDoorway,
         BuildKind::WoodWindow,
+        BuildKind::WoodStair,
     ];
 
     pub fn name(self) -> &'static str {
@@ -118,6 +123,7 @@ impl BuildKind {
             BuildKind::WoodGable => "wood_gable",
             BuildKind::WoodDoorway => "wood_doorway",
             BuildKind::WoodWindow => "wood_window",
+            BuildKind::WoodStair => "wood_stair",
         }
     }
 
@@ -145,6 +151,7 @@ impl BuildKind {
             BuildKind::WoodGable => "Wood gable 26°",
             BuildKind::WoodDoorway => "Wood doorway 2×2",
             BuildKind::WoodWindow => "Wood window 2×2",
+            BuildKind::WoodStair => "Wood stair 1.2 m",
         }
     }
 
@@ -173,6 +180,7 @@ impl BuildKind {
             BuildKind::StoneWall => Vec3::new(2.0, 1.0, 0.8),
             BuildKind::StonePillar => Vec3::new(0.6, 2.0, 0.6),
             BuildKind::WoodGable => Vec3::new(ROOF_RUN, ROOF_RUN * ROOF_PITCH.tan(), 0.1),
+            BuildKind::WoodStair => Vec3::new(1.0, 1.2, 2.0),
         }
     }
 
@@ -208,6 +216,7 @@ impl BuildKind {
             BuildKind::WoodGable => PropKind::BoardGable { size },
             BuildKind::WoodDoorway => PropKind::BoardDoorway { size },
             BuildKind::WoodWindow => PropKind::BoardWindow { size },
+            BuildKind::WoodStair => PropKind::WoodStair { size },
         }
     }
 
@@ -222,13 +231,17 @@ impl BuildKind {
             BuildKind::WoodDoorway => 0.4,
             BuildKind::WoodWindow => 0.45,
             BuildKind::WoodRoof | BuildKind::WoodRoof45 => 0.3,
+            // Two stringers and seven treads in a 2.4 m³ box.
+            BuildKind::WoodStair => 0.06,
             _ => 1.0,
         }
     }
 
     /// The solid part of a piece with box half size `half` (its own axes): the box, the
-    /// triangle a gable fills (a box would stand up through the roof over its low end), or the
-    /// wall around a doorway or window (so you walk through the one and see out of the other).
+    /// triangle a gable fills (a box would stand up through the roof over its low end), the
+    /// wall around a doorway or window (so you walk through the one and see out of the other),
+    /// or a stair's sloping slab, its top a ramp through the middles of the treads (so a
+    /// character walks up it smoothly, with a step of half a rise at the foot).
     pub fn solid(self, half: Vec3) -> ColliderShape {
         match self {
             BuildKind::WoodDoorway | BuildKind::WoodWindow => {
@@ -254,6 +267,15 @@ impl BuildKind {
                     }
                 }
                 ColliderShape::Compound(boxes)
+            }
+            BuildKind::WoodStair => {
+                let (steps, rise, _) = stair_steps(self.size());
+                ColliderShape::ConvexHull {
+                    points: stair_band(half * 2.0, steps, -rise * 0.5, STAIR_SLAB_M)
+                        .into_iter()
+                        .flat_map(|p| [Vec3::new(-half.x, p.y, p.x), Vec3::new(half.x, p.y, p.x)])
+                        .collect(),
+                }
             }
             BuildKind::WoodGable => ColliderShape::ConvexHull {
                 points: [(-half.x, -half.y), (half.x, -half.y), (half.x, half.y)]
@@ -453,6 +475,8 @@ pub struct ScenePiece {
     /// Its current support (0 while it is about to fall).
     pub support: f32,
     pub built: bool,
+    /// The piece build mode placed, if it did.
+    pub kind: Option<BuildKind>,
 }
 
 /// What the aim ray hit.
@@ -507,6 +531,24 @@ pub fn snap_points(obb: &Obb) -> Vec<DVec3> {
                     }
                 }
             }
+        }
+    }
+    out
+}
+
+/// Snap points of a piece of `kind` (if build mode placed it) with box `obb`: a stair's are
+/// the ends and middle of its foot (the bottom edge at +Z) and its head (the top edge at −Z),
+/// so flights meet head to foot and a head meets the edge of a floor; any other piece's are
+/// its box's [`snap_points`].
+pub fn piece_snap_points(kind: Option<BuildKind>, obb: &Obb) -> Vec<DVec3> {
+    if kind != Some(BuildKind::WoodStair) {
+        return snap_points(obb);
+    }
+    let h = obb.half;
+    let mut out = Vec::with_capacity(6);
+    for (y, z) in [(-h.y, h.z), (h.y, -h.z)] {
+        for x in [-h.x, 0.0, h.x] {
+            out.push(obb.center + (obb.rotation * Vec3::new(x, y, z)).as_dvec3());
         }
     }
     out
@@ -654,10 +696,10 @@ pub fn plan(
     let targets: Vec<DVec3> = scene
         .iter()
         .filter(|p| (p.obb.center - center).length() < reach + p.obb.half.length() as f64)
-        .flat_map(|p| snap_points(&p.obb))
+        .flat_map(|p| piece_snap_points(p.kind, &p.obb))
         .collect();
     let mut pairs: Vec<(f64, DVec3)> = Vec::new();
-    for g in snap_points(&ghost(center)) {
+    for g in piece_snap_points(Some(kind), &ghost(center)) {
         for t in &targets {
             let d = g.distance(*t);
             if d < SNAP_RADIUS_M as f64 {
@@ -852,6 +894,7 @@ pub fn bind_actions(map: Option<ResMut<InputMap>>) {
         KeyCode::Digit0,
         KeyCode::Minus,
         KeyCode::Equal,
+        KeyCode::BracketLeft,
     ];
     for (i, key) in digits.into_iter().enumerate() {
         bind(&format!("build_piece_{}", i + 1), &[Binding::Key(key)]);
@@ -949,7 +992,7 @@ fn scene_near<'a>(
             Option<&'a ChildOf>,
             &'a StructuralPiece,
             &'a PieceState,
-            bool,
+            Option<&'a BuiltPiece>,
         ),
     >,
     around: DVec3,
@@ -977,7 +1020,8 @@ fn scene_near<'a>(
                     } else {
                         state.support
                     },
-                    built,
+                    built: built.is_some(),
+                    kind: built.map(|b| b.kind),
                 }
             })
         })
@@ -1000,7 +1044,7 @@ pub fn build_system(
         Option<&ChildOf>,
         &StructuralPiece,
         &PieceState,
-        Has<BuiltPiece>,
+        Option<&BuiltPiece>,
     )>,
     volumes: Query<(&GlobalTransform, &VoxelState)>,
     mut ghosts: Query<(Entity, &mut BuildGhost, &mut Transform), Without<StructuralPiece>>,
@@ -1093,6 +1137,7 @@ pub fn build_system(
                             obb: p.obb(),
                             support: p.support,
                             built: true,
+                            kind: Some(p.kind),
                         });
                         placed.push(p.obb());
                         noise.write(NoiseEvent {
@@ -1205,7 +1250,7 @@ pub fn plan_in_world(
         Option<&ChildOf>,
         &StructuralPiece,
         &PieceState,
-        Has<BuiltPiece>,
+        Option<&BuiltPiece>,
     )>();
     let scene = scene_near(q.iter(world), origin, reach as f64 + 6.0);
     let ground = world.get_resource::<Ground>().cloned();
@@ -1299,6 +1344,7 @@ mod tests {
             },
             support,
             built: true,
+            kind: Some(kind),
         }
     }
 

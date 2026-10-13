@@ -1,9 +1,11 @@
 //! The trail's grounds and props: a displaced ribbon of ground per stretch that follows the
 //! curve, with textured shoulders blending into the surrounding ground and ragged, soft
-//! transitions into the next stretch; grass verges along the whole loop; each stretch
-//! dressed with its own props (grass, ruts and prints, snow banks, a boardwalk, a bar
-//! grating over a pit, a cast-concrete underpass, dunes and driftwood, a leaf-strewn forest
-//! floor, puddles); and a trail marker at the start of every stretch.
+//! transitions into the next stretch, each spilling a little onto the next; grass verges
+//! along the whole loop (a dense renderer-drawn meadow plus tufts, seed heads, weeds,
+//! pebbles and fallen leaves); each stretch dressed with its own props (grass, ruts and
+//! prints, a snow blanket, a boardwalk, a bar grating over a pit, a cast-concrete
+//! underpass, dunes and driftwood, a leaf-strewn forest floor, puddles); and a trail marker
+//! at the start of every stretch.
 //!
 //! Everything is procedural: tileable PBR texture sets are painted and baked at spawn
 //! ([`textures`]), meshes are generated from noise ([`procgen`]), both in parallel. Small
@@ -26,6 +28,7 @@ use engine_render::{
 mod dress;
 pub(super) mod procgen;
 mod ribbon;
+mod snow;
 mod structures;
 mod textures;
 
@@ -48,6 +51,10 @@ pub(super) enum Mat {
     Planks,
     Timber,
     Zinc,
+    /// The worn tops of the grating's bars (see `textures::tread`).
+    Tread,
+    /// Weathered galvanized steel, gone dull: the grating's bars and its frame.
+    Grating,
     Steel,
     Leaf,
     Stone,
@@ -185,12 +192,14 @@ type Item = (
 pub struct TrailGroundCache {
     items: Vec<Item>,
     lights: Vec<(Vec3, PointLight)>,
+    grass: Option<engine_render::GrassField>,
 }
 
 /// Lay the grounds, dress every stretch and build the underpass round `origin`.
 pub(super) fn spawn(commands: &mut Commands, origin: DVec3) {
     commands.queue(move |world: &mut World| {
         structures::underpass_volumes(world, origin);
+        structures::grating_volume(world, origin);
         let renders = world.contains_resource::<Assets<Mesh>>()
             && world.contains_resource::<Assets<Image>>()
             && world.contains_resource::<Assets<StandardMaterial>>();
@@ -222,6 +231,13 @@ pub(super) fn spawn(commands: &mut Commands, origin: DVec3) {
                 Name::new("Underpass lamp"),
                 light,
                 Transform::from_translation(origin + at.as_dvec3()),
+            ));
+        }
+        if let Some(grass) = cache.grass {
+            world.spawn((
+                Name::new("Trail verge grass"),
+                grass,
+                Transform::from_translation(origin),
             ));
         }
     });
@@ -313,6 +329,7 @@ fn build(world: &mut World) -> TrailGroundCache {
     TrailGroundCache {
         items,
         lights: all.lights,
+        grass: Some(dress::meadow()),
     }
 }
 
@@ -367,7 +384,7 @@ fn material(mat: Mat, tex: &std::collections::HashMap<&str, TexHandles>) -> Stan
         }
         Mat::Dirt => ground(tex, "dirt", 1.5, 0xffffff, 1.0),
         Mat::Mud => ground(tex, "mud", 2.0, 0xffffff, 1.0),
-        Mat::WetMud => ground(tex, "mud", 2.0, 0xd8d0c8, 0.55),
+        Mat::WetMud => ground(tex, "mud", 2.0, 0xd0c8c0, 0.8),
         Mat::Snow => ground(tex, "snow", 2.0, 0xffffff, 1.0).with_subsurface(0.45),
         Mat::Ice => {
             let mut m = ground(tex, "ice", 2.5, 0xffffff, 1.0).with_subsurface(0.15);
@@ -375,7 +392,7 @@ fn material(mat: Mat, tex: &std::collections::HashMap<&str, TexHandles>) -> Stan
             m
         }
         Mat::Gravel => ground(tex, "gravel", 1.0, 0xffffff, 1.0),
-        Mat::PitFloor => ground(tex, "gravel", 1.0, 0x6a6560, 0.55),
+        Mat::PitFloor => ground(tex, "gravel", 1.0, 0x6a6560, 0.8),
         Mat::Concrete => ground(tex, "concrete", 2.0, 0xffffff, 1.0),
         Mat::Formwork => textured(plain(0xffffff, 1.0), tex, "formwork", (3.0, 3.0)),
         Mat::Sand => ground(tex, "sand", 1.5, 0xffffff, 1.0),
@@ -385,6 +402,18 @@ fn material(mat: Mat, tex: &std::collections::HashMap<&str, TexHandles>) -> Stan
         Mat::Timber => textured(plain(0xb8aa98, 1.0), tex, "planks", (2.0, 0.5)),
         Mat::Zinc => textured(
             plain(0xffffff, 1.0).with_metallic(1.0),
+            tex,
+            "zinc",
+            (0.4, 0.4),
+        ),
+        Mat::Tread => textured(
+            plain(0xffffff, 1.0).with_metallic(1.0),
+            tex,
+            "tread",
+            (2.56, 1.92),
+        ),
+        Mat::Grating => textured(
+            plain(0xffffff, 1.0).with_metallic(0.45),
             tex,
             "zinc",
             (0.4, 0.4),

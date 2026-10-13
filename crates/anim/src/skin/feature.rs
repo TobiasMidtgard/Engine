@@ -11,6 +11,15 @@
 //! * `draw`/`draw_shadow` draw each instance from its slice of the shared output buffer, one
 //!   indexed draw per [`Submesh`](super::Submesh) with that submesh's surface.
 //!
+//! ## Fur
+//!
+//! A character whose material has fur ([`SkinMaterial::fur_length`]) is drawn again as
+//! *shells* after the opaque pass: copies of its instance (`extra.z` = shell 1..=N,
+//! `extra.w` = N) that the vertex shader pushes out along the normal, the tips sagging and
+//! combed back, and that the fragment shader cuts into tapering strands on a jittered grid in
+//! bind-pose space (so the strands stick to the skin through every shell). Shells thin out with
+//! distance ([`SkinMaterial::fur_lod`]); far away the skin alone carries the coat's color.
+//!
 //! ## Surfaces and textures
 //!
 //! Each draw binds a *surface* (group 2 in the scene pass, group 1 in the masked shadow pass):
@@ -188,6 +197,10 @@ struct GpuSkinMaterial {
     vein: [f32; 4],
     /// emissive rgb (cd/m²), unused
     emissive: [f32; 4],
+    /// fur length (m), strands per meter, droop, comb
+    fur: [f32; 4],
+    /// fur tip rgb, root brightness
+    fur_tip: [f32; 4],
 }
 
 impl GpuSkinMaterial {
@@ -213,8 +226,30 @@ impl GpuSkinMaterial {
                 m.emissive[2] * m.emissive_strength,
                 0.0,
             ],
+            fur: [
+                m.fur_length.max(0.0),
+                m.fur_density.max(1.0),
+                m.fur_droop.clamp(0.0, 1.0),
+                m.fur_comb.clamp(0.0, 1.0),
+            ],
+            fur_tip: [
+                m.fur_tip[0],
+                m.fur_tip[1],
+                m.fur_tip[2],
+                m.fur_root.clamp(0.0, 1.0),
+            ],
         }
     }
+}
+
+/// How many fur shells to draw for a character `distance` meters from the camera.
+fn fur_shells(m: &SkinMaterial, distance: f32) -> u32 {
+    if m.fur_length <= 0.0 || m.fur_shells == 0 {
+        return 0;
+    }
+    let lod = m.fur_lod.max(0.1);
+    let k = (2.0 - distance / lod).clamp(0.0, 1.0);
+    (m.fur_shells as f32 * k).round() as u32
 }
 
 /// Factors of one surface: binding 0 of the surface bind group (`struct SkinSurface` in
@@ -792,6 +827,9 @@ struct Instance {
     /// This instance's draws in `SkinningFeature::parts`.
     part_base: u32,
     part_count: u32,
+    /// Its fur shells: instances `shell_first..shell_first + shells` (after every item's own).
+    shell_first: u32,
+    shells: u32,
 }
 
 type SkinQuery = (
@@ -859,7 +897,7 @@ impl SkinningFeature {
                     uv: v.uv.to_array(),
                     _pad: [0.0; 2],
                     color: v.color.to_array(),
-                    pattern: v.pattern.extend(0.0).to_array(),
+                    pattern: v.pattern.extend(v.fur).to_array(),
                     axis: v.axis.extend(0.0).to_array(),
                     mask: v.mask.to_array(),
                 });
@@ -1337,6 +1375,8 @@ impl RenderFeature for SkinningFeature {
         ];
         let mut out_base = 0u32;
         let mut culled = 0u32;
+        // Fur shells per item, appended after the items' own instances.
+        let mut furred: Vec<(usize, u32)> = Vec::new();
         for (gt, renderer, pose) in query.iter(world_ref) {
             let Some(handle) = renderer.mesh.filter(|_| renderer.visible) else {
                 continue;
@@ -1391,7 +1431,18 @@ impl RenderFeature for SkinningFeature {
             let mut instance =
                 MeshInstance::new(gt.matrix_relative_to(view.origin), material, 0.0, 1.0);
             instance.extra[1] = flags;
+            // Shell 0 (the skin itself); `extra.w` says how many shells cover it.
+            let shells = if visible {
+                fur_shells(&renderer.material, center.length())
+            } else {
+                0
+            };
+            instance.extra[2] = 0;
+            instance.extra[3] = shells;
             self.instance_data.push(instance);
+            if shells > 0 {
+                furred.push((self.items.len(), shells));
+            }
 
             // Draws: one per submesh with its surface, or the whole mesh with the first surface
             // (the default surface for procedural characters).
@@ -1432,6 +1483,8 @@ impl RenderFeature for SkinningFeature {
                 radius,
                 part_base,
                 part_count: self.parts.len() as u32 - part_base,
+                shell_first: 0,
+                shells: 0,
             });
             out_base += slot.vertex_count;
             if !visible {
@@ -1439,6 +1492,17 @@ impl RenderFeature for SkinningFeature {
             }
         }
         self.query = Some(query);
+        for (i, shells) in furred {
+            let first = self.instance_data.len() as u32;
+            let base = self.instance_data[i];
+            for k in 1..=shells {
+                let mut shell = base;
+                shell.extra[2] = k;
+                self.instance_data.push(shell);
+            }
+            self.items[i].shell_first = first;
+            self.items[i].shells = shells;
+        }
 
         // Sun shadow cascades only. Characters stay out of the top-down sky occlusion map: they
         // don't roof over the ground, and a body there shades its own clothes from the sky,
@@ -1522,6 +1586,10 @@ impl RenderFeature for SkinningFeature {
             for part in self.parts_of(item) {
                 stats.draw_calls += 1;
                 stats.triangles += (part.count / 3) as u64;
+                if item.shells > 0 && !part.masked {
+                    stats.draw_calls += 1;
+                    stats.triangles += (part.count / 3) as u64 * item.shells as u64;
+                }
             }
         }
         for list in &self.shadow {
@@ -1606,6 +1674,28 @@ impl RenderFeature for SkinningFeature {
                     }
                     pass.draw_indexed(part.first..part.first + part.count, 0, n..n + 1);
                 }
+            }
+        }
+        // Fur shells over the opaque skin (hair cards and other cutouts grow none).
+        let mut pipeline_set = false;
+        let mut current = u32::MAX;
+        for item in self.items.iter().filter(|i| i.visible && i.shells > 0) {
+            if !self.bind_vertices(pass, item) {
+                continue;
+            }
+            if !pipeline_set {
+                pass.set_pipeline(&p.draw);
+                pipeline_set = true;
+            }
+            let shells = item.shell_first..item.shell_first + item.shells;
+            for part in self.parts_of(item).iter().filter(|p| !p.masked) {
+                if part.surface != current
+                    && let Some(set) = surfaces.set(part.surface)
+                {
+                    pass.set_bind_group(2, &set.group, &[]);
+                    current = part.surface;
+                }
+                pass.draw_indexed(part.first..part.first + part.count, 0, shells.clone());
             }
         }
     }
@@ -1702,7 +1792,7 @@ mod tests {
         assert_eq!(std::mem::size_of::<GpuStatic>(), 80);
         assert_eq!(std::mem::size_of::<GpuMorph>(), 32);
         assert_eq!(std::mem::size_of::<GpuJob>(), 32);
-        assert_eq!(std::mem::size_of::<GpuSkinMaterial>(), 80);
+        assert_eq!(std::mem::size_of::<GpuSkinMaterial>(), 112);
         assert!(std::mem::size_of::<GpuJob>() as u64 <= JOB_STRIDE);
         // `struct SkinSurface` (uniform layout: four 16-byte rows).
         assert_eq!(std::mem::size_of::<GpuSurface>(), 64);
@@ -1710,6 +1800,28 @@ mod tests {
         assert_eq!(std::mem::offset_of!(GpuSurface, params), 16);
         assert_eq!(std::mem::offset_of!(GpuSurface, extra), 32);
         assert_eq!(std::mem::offset_of!(GpuSurface, flags), 48);
+    }
+
+    #[test]
+    fn fur_shells_thin_out_with_distance() {
+        let fur = SkinMaterial {
+            fur_length: 0.015,
+            fur_shells: 16,
+            fur_lod: 8.0,
+            ..Default::default()
+        };
+        assert_eq!(fur_shells(&fur, 2.0), 16);
+        assert_eq!(fur_shells(&fur, 8.0), 16);
+        assert_eq!(fur_shells(&fur, 12.0), 8);
+        assert_eq!(fur_shells(&fur, 16.0), 0);
+        assert_eq!(
+            fur_shells(&SkinMaterial::default(), 1.0),
+            0,
+            "no fur, no shells"
+        );
+        let gpu = GpuSkinMaterial::new(&fur);
+        assert_eq!(gpu.fur[0], 0.015);
+        assert_eq!(gpu.fur_tip[3], fur.fur_root);
     }
 
     #[test]

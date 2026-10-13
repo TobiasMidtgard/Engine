@@ -2,7 +2,8 @@
 //! a details panel comparing the highlighted item with what is worn, weight and gold.
 //!
 //! Open it with `ui.show {"screen": "inventory"}` (optionally `"owner": "Player"`, the name of
-//! the entity with the [`Inventory`]). Drag items between slots to move or stack them, onto
+//! the entity with the [`Inventory`]; `tab`, the category tab; `select`, a bag slot index or
+//! an item id to open with it selected). Drag items between slots to move or stack them, onto
 //! an equipment slot to equip, onto the trash to drop; right click (or X) uses or equips.
 
 use bevy_ecs::message::MessageCursor;
@@ -681,13 +682,24 @@ fn details(world: &World, st: &InventoryScreen) -> El {
 /// Builder for `ui.show {"screen": "inventory"}`.
 pub fn build_screen(world: &mut World, args: &Value) -> Result<Entity, String> {
     let owner = find_owner(world, args)?;
+    let snapshot = world.get::<Inventory>(owner).cloned();
+    let selected = match args.get("select") {
+        Some(Value::String(id)) => snapshot.as_ref().and_then(|inv| {
+            inv.slots
+                .iter()
+                .position(|s| s.as_ref().is_some_and(|s| s.item == *id))
+        }),
+        Some(v) => v.as_u64().map(|i| i as usize),
+        None => None,
+    }
+    .map(SlotRef::Bag);
     let st = InventoryScreen {
         owner,
         tab: args.get("tab").and_then(Value::as_u64).unwrap_or(0) as usize,
-        selected: None,
-        shown: None,
+        selected,
+        shown: selected,
         dirty: false,
-        snapshot: world.get::<Inventory>(owner).cloned(),
+        snapshot,
     };
     let content = build(world, &st);
     let el = El::new()

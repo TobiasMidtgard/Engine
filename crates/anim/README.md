@@ -23,7 +23,10 @@ compresses and stretches.
 - **Procedural motion.** `LeggedGait` drives any number of legs from the entity's actual
   motion: gait stages by speed (a horse walks, trots, canters and gallops), step timing,
   swing arcs, body bob, pitch and roll, turning, and per-leg load for muscles. Leg styles:
-  two-bone, yaw-root (spiders) and hoofed (folding cannon). `VehicleRig` gives cars sprung
+  two-bone, yaw-root (spiders), hoofed (in the swing the cannon folds and the hoof curls back
+  behind the fetlock; a planted foot far behind tips the cannon on its toe) and scapular (a
+  hoofed leg under a rocking shoulder blade, for dogs and cats); `stance_offset` centers a
+  leg's stride, so hind legs stride from under the hip. `VehicleRig` gives cars sprung
   suspension, body roll and pitch from acceleration, steering and wheel spin.
   `SpringChains` make tails, manes and ponytails lag and swing.
 - **Muscles.** `MuscleRig` activates each muscle from joint angles, clip curves (`effort`,
@@ -39,6 +42,11 @@ compresses and stretches.
   submeshes, each drawn with its own textured surface (base color, normal, metal/rough,
   alpha mask for hair cards); the procedural detail goes on top where the mask says skin
   or cloth.
+- **Fur.** A `SkinMaterial` with `fur_length` grows a coat where the vertices say so
+  (`SkinVertex::fur`): the mesh is drawn again as shells pushed out along the normal, the
+  strands' tips sagging and combed back along the body, each shell cut into tapering strands
+  on a jittered grid that sticks to the skin. Roots are darker than tips, light scatters
+  through the coat, and the shells thin out with distance (`fur_lod`).
 - **Imported characters and clips.** `import` reads rigged glTF/GLB characters (meshes,
   skins, materials, textures) and their animation clips. `Retargeter` drives an imported
   skeleton from a logic skeleton (bones matched by position and direction, in-between
@@ -54,14 +62,15 @@ compresses and stretches.
   on this crate. Footsteps and hoof falls become `GroundContact` (foot, paw or hoof, with
   load and speed) and `NoiseEvent`; hammer impacts are loud `NoiseEvent`s.
 - **Bodies on request.** A module that moves an entity itself puts `BodyRequest` on it
-  (`human`, `horse` or `spider`, an optional model path, height and seed) and gets a body:
+  (`human`, `horse`, `dog` or `spider`, an optional model path, height and seed) and gets a body:
   the paddock's rigs and models, animated from the entity's motion (`LocomotionState` or
   the transform's frame-to-frame movement; speed picks walk or run, a horse's trot, canter
   or gallop, turning leans), with footstep `AnimationEvent`s and `GroundContact`s. The
   `SkeletonPose` appearing is the answer; removing the request takes the body away and
   leaves the entity as it was. People are the fetched Rocketbox characters by seed (or by
   height: 1.74 m or 1.81 m), else generated; the imported horse is scaled to the requested
-  shoulder height. Other kinds (a dog) get no body yet and keep the requester's stand-in.
+  shoulder height and the dog is built at it. Other kinds get no body and keep the
+  requester's stand-in.
 - **Time.** Every animator uses `Time::delta_for(LocalTimeScale)`, so `TimeDilation` slows
   animation and a hero who ignores world dilation keeps moving at full speed. Animators
   beyond `lod_distance` from the simulation focus update at a quarter rate.
@@ -77,7 +86,7 @@ compresses and stretches.
 engine_anim::demo::spawn_demo(&mut commands, zone_center);
 ```
 
-or spawn single characters with `demo::spawn_humanoid`, `spawn_horse`, `spawn_spider`,
+or spawn single characters with `demo::spawn_humanoid`, `spawn_horse`, `spawn_dog`, `spawn_spider`,
 `spawn_car`, or from an AI agent with `anim.spawn {"kind": "horse", "at": [0, 0, 0]}`.
 To animate your own character, register a `Skeleton`, clips and an `AnimGraph` in the
 `AnimationLibrary`, then spawn an entity with `AnimatorSettings`, `AnimationParams` and a
@@ -107,7 +116,15 @@ by Eric Chadwick and Darmstadt Graphics Group GmbH (CC BY 4.0; the Khronos logos
 shown), its body, wheels, calipers and doors driven by the vehicle rig through a
 [`RigModel`](src/model.rs). All are listed in `assets/manifests/animation.toml` and are not in
 git; fetch them with `cargo run -p fetch-assets -- animation`. Without them the paddock keeps
-its generated people, horse and car, and every test still runs.
+its generated people, horse and car, and every test still runs. The dog is generated from
+code ([`build::dog`](src/build/dog.rs)) at any size: a Labrador's deep chest and tucked
+belly, drop ears and an otter tail on springs, a furred golden coat, and a rotary gallop
+whose speeds and stride rate scale with its size. The spider is a giant red-knee tarantula
+from code ([`build::spider`](src/build/spider.rs)): a tan-rimmed carapace with fovea and
+grooves, eight eyes, furred chelicerae over folded fangs, tapping pedipalps, a long-haired
+abdomen on a spring, and stout hairy legs with orange knees. The paddock's props wear the
+renderer's generated materials (planks, concrete, sand, rock), and the spider climbs
+[`build::rock`](src/build/rock.rs) boulders whose flat tops are its walkable boxes.
 
 | Test case | What to look for |
 |---|---|
@@ -115,8 +132,9 @@ its generated people, horse and car, and every test still runs.
 | Lifter | Double-biceps flex: biceps, shoulders and chest bulge |
 | Shirt reach | Sleeves bunch at the elbows on the wind-up, the shirt stretches across the back on the reach |
 | Step course | A walker climbs a ramp, crosses a deck, walks down stairs with feet planted by IK, then runs back leaning into the turns |
-| Horse oval | A textured horse walks, trots, canters and gallops by speed; fetlocks bend, haunches and shoulders flex with each stride; the mane rides the neck and the tail streams |
-| Spider garden | Eight procedural legs pick their way over rocks |
+| Horse oval | A textured horse walks, trots, canters and gallops by speed; in the swing the knees fold, the hocks bend and the hooves curl back behind the fetlocks; haunches and shoulders flex with each stride; the mane rides the neck and the tail streams |
+| Dog run | A furred Labrador walks off, trots, canters out of a turn and gallops down the far straight, the spine flexing with each stride, ears and tail swinging; it pants as it goes (`paddock_dog_trot`, `paddock_dog`) |
+| Spider garden | A furred red-knee tarantula climbs over boulders in alternating sets of legs, a wave running from the back legs forward; its palps tap, its jaws work and its abdomen sways (`paddock_spider`) |
 | Car loop | A concept car: suspension over speed bumps, roll in corners, steering and spinning wheels with the brake calipers held still |
 | Parked car | A second concept car inside the loop swings its doors open on their front hinges, holds, and shuts them with a bounce on the latch |
 
@@ -131,16 +149,18 @@ tour stops, each restarting the paddock and waiting for its moment
 Unit tests cover clips, graphs, IK, gaits, muscles, skinning and the shaders (WGSL validated,
 GPU struct layouts checked). `tests/demo_scene.rs` runs the paddock and checks each test case
 does what it shows (the hammer lands on the tire with both hands on the handle, muscles tense
-and relax, the walker climbs and runs, the horse gallops with working haunches); with the
+and relax, the walker climbs and runs, the horse gallops with working haunches, the dog's
+planted paws stay on the ground at a walk and trot); with the
 character files fetched it runs the same checks on the imported people. `tests/render.rs`
 renders a skinned character on the GPU and checks the pixels follow the pose, and that
-textured submeshes each draw with their own surface. `tests/world_shift.rs` runs two
+textured submeshes each draw with their own surface, and that fur shells grow strands over a
+furred skin. `tests/world_shift.rs` runs two
 paddocks, shifts one halfway, and checks every pose and place still matches.
-`tests/body_request.rs` asks for a hiker, a horse and an unknown kind on entities the test
-moves itself: the bodies walk, run and gallop from that motion, step on the ground, keep the
+`tests/body_request.rs` asks for a hiker, a horse, a 40 cm dog and an unknown kind on
+entities the test moves itself: the bodies walk, run and gallop from that motion, step on the ground, keep the
 requester's own parameters, rebuild on a changed request and go with a removed one.
 
 ## Not yet
 
-Ragdolls from the physics contract; an imported spider (it is still generated from code);
-gallop poses tuned for the imported horse's shorter hind legs.
+Ragdolls from the physics contract; an imported spider (no free realistic one exists, so it
+is generated from code).

@@ -2,17 +2,20 @@
 
 use std::f32::consts::{PI, TAU};
 
-use engine_core::math::{Quat, Vec2, Vec3, Vec4};
-use engine_render::Mesh;
+use engine_core::math::{DVec3, Quat, Vec2, Vec3, Vec4};
+use engine_render::{GrassField, GrassStyle, Mesh};
 
 use super::procgen::{
     Rand, append, blade, fbm_world, hex, leaf, rock, smooth, smooth_normals_from, tube, vert,
 };
 use super::ribbon::{
-    self, PATH_Y, Ribbon, base, columns, ends, frame, fray, point, side_columns, verge_height,
+    self, PATH_Y, Ribbon, Surf, base, columns, ends, frame, fray, point, side_columns, verge_height,
 };
+use super::snow;
 use super::{Batch, Mat, Out, Part, structures};
-use crate::demo::{STRETCHES, stretch_start};
+use crate::demo::{
+    BEND_RADIUS, HALF_STRAIGHT, STRETCHES, nearest_on_trail, stretch_start, surface_at,
+};
 
 /// A build job: one piece of the trail, run on the compute pool.
 pub(super) type Job = Box<dyn Fn() -> Out + Send + Sync>;
@@ -25,6 +28,7 @@ pub(super) fn jobs() -> Vec<Job> {
         jobs.push(Box::new(move || Stretch::new(i).props()));
     }
     jobs.push(Box::new(verges));
+    jobs.push(Box::new(boundaries));
     jobs.push(Box::new(structures::boardwalk));
     jobs.push(Box::new(structures::grating));
     jobs.push(Box::new(structures::underpass));
@@ -35,28 +39,28 @@ pub(super) fn jobs() -> Vec<Job> {
 // ------------------------------------------------------------------------------ prints
 
 #[derive(Clone, Copy, PartialEq)]
-enum PrintKind {
+pub(super) enum PrintKind {
     Boot,
     Hoof,
     Paw,
 }
 
 #[derive(Clone, Copy)]
-struct Print {
-    s: f64,
-    x: f32,
-    yaw: f32,
-    kind: PrintKind,
-    depth: f32,
+pub(super) struct Print {
+    pub s: f64,
+    pub x: f32,
+    pub yaw: f32,
+    pub kind: PrintKind,
+    pub depth: f32,
     /// Softer, older print (wider walls, shallower rim).
-    soft: f32,
+    pub soft: f32,
 }
 
 /// Foot, paw and hoof prints of the trail's walkers, sorted along the trail.
-struct Prints(Vec<Print>);
+pub(super) struct Prints(pub Vec<Print>);
 
 impl Prints {
-    fn walkers(s0: f64, s1: f64, seed: u64, depth: f32) -> Self {
+    pub fn walkers(s0: f64, s1: f64, seed: u64, depth: f32) -> Self {
         let mut rng = Rand::new(seed);
         let mut p = Vec::new();
         let mut walk =
@@ -108,7 +112,7 @@ impl Prints {
     }
 
     /// Relief the prints add at (s, x): negative in them, a raised rim round them.
-    fn relief(&self, s: f64, x: f32) -> f32 {
+    pub fn relief(&self, s: f64, x: f32) -> f32 {
         let i = self.0.partition_point(|p| p.s < s - 0.2);
         let mut h = 0.0f32;
         let mut deepest = 0.0f32;
@@ -142,7 +146,7 @@ impl Prints {
             let rim =
                 (1.0 - ((inside + 0.014) / 0.014).powi(2)).max(0.0) * (inside < 0.0) as u8 as f32;
             deepest = deepest.min(-p.depth * dip);
-            h += p.depth * 0.3 * (1.0 - p.soft * 0.6) * rim;
+            h += p.depth * 0.3 * (1.0 - p.soft * 0.6).max(0.0) * rim;
         }
         deepest + h * (1.0 + deepest / 0.02).clamp(0.0, 1.0)
     }
@@ -215,13 +219,6 @@ impl Hollow {
     }
 }
 
-/// Snow banks pushed up beside a trodden path, `amp` meters high.
-fn bank(x: f32, amp: f32, w: Vec2) -> f32 {
-    let ax = x.abs();
-    let lump = 0.75 + 0.5 * fbm_world(w.x, w.y, 0.6, 3, 0x5b);
-    amp * smooth(0.75, 1.55, ax) * (1.0 - smooth(1.95, 2.55, ax)) * lump
-}
-
 fn ruts(s: f64, x: f32, w: Vec2) -> f32 {
     let mut h = 0.0;
     for side in [-1.0f32, 1.0] {
@@ -235,6 +232,15 @@ fn ruts(s: f64, x: f32, w: Vec2) -> f32 {
     h
 }
 
+/// The gravel's loose banks along the edging and its packed walking line, meters up and
+/// down: `(bank, packed)`.
+fn gravel_banks(x: f32, w: Vec2) -> (f32, f32) {
+    let ax = x.abs();
+    let bank = 0.011 * smooth(0.6, 1.2, ax) * (0.7 + 0.5 * fbm_world(w.x, w.y, 0.6, 2, 0x62));
+    let packed = 0.003 * (1.0 - smooth(0.1, 0.55, ax));
+    (bank.max(0.0), packed)
+}
+
 /// The level water stands at in the mud's ruts.
 const RUT_WATER: f32 = PATH_Y - 0.03;
 
@@ -245,7 +251,6 @@ impl Stretch {
         let s1 = s0 + len;
         let depth = match name {
             "mud" => 0.022,
-            "snow" => 0.03,
             "sand" => 0.016,
             "water" => 0.018,
             "grass" => 0.006,
@@ -298,16 +303,14 @@ impl Stretch {
                     + fbm_world(w.x, w.y, 0.12, 2, 0x32) * 0.003;
                 b + e * band * (ruts(s, x, w) + self.prints.relief(s, x) + lumps)
             }
-            "snow" => {
-                let amp = 0.2 * smooth(self.s0 as f32, self.s0 as f32 + 1.6, s as f32);
-                let trodden = 1.0 - smooth(0.25, 0.65, x.abs());
-                let soft = 0.014 + fbm_world(w.x, w.y, 0.8, 3, 0x41) * 0.006;
-                b + soft * smooth(self.s0 as f32, self.s0 as f32 + 0.8, s as f32)
-                    + bank(x, amp, w)
-                    + e * (self.prints.relief(s, x) - 0.011 * trodden)
+            "snow" => snow::snow().at(s, x, w).y,
+            "ice" => b + band * fbm_world(w.x, w.y, 1.2, 2, 0x51) * 0.002,
+            "gravel" => {
+                // Loose gravel kicked aside and banked against the edging; the walking line
+                // down the middle packed down.
+                let (windrow, packed) = gravel_banks(x, w);
+                b + e * (band * fbm_world(w.x, w.y, 0.4, 3, 0x61) * 0.004 + windrow - packed)
             }
-            "ice" => b + e * band * fbm_world(w.x, w.y, 1.2, 2, 0x51) * 0.002,
-            "gravel" => b + e * band * fbm_world(w.x, w.y, 0.4, 3, 0x61) * 0.004,
             "sand" => {
                 let dunes = fbm_world(w.x, w.y, 1.3, 3, 0x91) * 0.01;
                 let drift = 0.03
@@ -329,28 +332,30 @@ impl Stretch {
         }
     }
 
-    /// Height of the snow along the ice stretch's edges, continuing the snow stretch's banks
-    /// and dying away toward the gravel.
-    fn ice_edge_height(&self, s: f64, x: f32, w: Vec2) -> f32 {
-        let t = ((s - self.s0) / (self.s1 - self.s0)) as f32;
-        let amp = 0.2 - 0.13 * smooth(0.0, 0.35, t);
-        let soft = 0.014 + fbm_world(w.x, w.y, 0.8, 3, 0x41) * 0.006;
-        let fade = 1.0 - smooth(self.s1 as f32 - 1.2, self.s1 as f32 + 0.4, s as f32);
-        base(x, w) + (soft + bank(x, amp, w)) * fade + 0.002
-    }
-
-    /// The ground's top where props stand: this stretch's surface on the path, the verge off it.
+    /// The ground's top where props stand: this stretch's surface on the path, the verge off it,
+    /// the snow wherever it lies.
     fn ground_y(&self, s: f64, x: f32) -> f32 {
         let p = point(s, x, 0.0);
         let w = Vec2::new(p.x, p.z);
         let (solid, _) = self.cover();
-        if self.name == "ice" && x.abs() > 1.05 {
-            return self.ice_edge_height(s, x, w);
+        if matches!(self.name, "snow" | "ice") {
+            let a = snow::snow().at(s, x, w);
+            if a.depth > 0.0 {
+                return a.y;
+            }
+            if self.name == "ice" && x.abs() <= solid {
+                return self.height(s, x, w);
+            }
+            return if x.abs() < 1.15 {
+                base(x, w)
+            } else {
+                verge_height(x, w)
+            };
         }
         match self.name {
             "wood" | "metal" | "concrete" if x.abs() < 1.45 => PATH_Y,
             _ if x.abs() <= solid + 0.1 => self.height(s, x, w),
-            _ => verge_height(x, w).max(self.height(s, x, w) * (self.name == "snow") as u8 as f32),
+            _ => verge_height(x, w),
         }
     }
 
@@ -359,7 +364,7 @@ impl Stretch {
         match self.name {
             "grass" => (1.2, 1.5),
             "snow" => (2.0, 2.6),
-            "ice" => (1.0, 1.25),
+            "ice" => (1.2, 1.45),
             "gravel" => (1.31, 1.33),
             "sand" | "leaves" => (1.2, 1.9),
             _ => (1.05, 1.5),
@@ -385,10 +390,11 @@ impl Stretch {
         match self.name {
             // Built structures lay their own ground (see `structures`).
             "wood" | "metal" | "concrete" => return out,
+            "snow" => return snow::ground(),
             _ => {}
         }
         let (solid, ragged) = self.cover();
-        let fine = matches!(self.name, "mud" | "snow" | "sand" | "water" | "grass");
+        let fine = matches!(self.name, "mud" | "sand" | "water" | "grass");
         let cols = if fine {
             columns(ragged, 0.02, 0.55, 0.035, 1.25, 0.06)
         } else {
@@ -396,33 +402,46 @@ impl Stretch {
         };
         let fade_in = match self.name {
             "gravel" => 0.45,
-            "ice" => 0.6,
+            "ice" => 0.35,
             "sand" => 0.7,
             _ => 0.8,
         };
-        let cover = move |x: f32| fray(x, solid, ragged);
-        let height = |s: f64, x: f32, w: Vec2| self.height(s, x, w);
-        let tint = |s: f64, x: f32, w: Vec2| self.tint(s, x, w);
+        // The ice starts under the end of the snow (which opens onto it) and the mud runs on
+        // under the start of the snow; where thick snow hides them they are left out.
+        let (s0, s1) = match self.name {
+            "ice" => (self.s0 - 1.55, self.s1 + 0.04),
+            "mud" => (self.s0, self.s1 + 1.6),
+            _ => (self.s0, self.s1 + 0.04),
+        };
+        let under_snow = matches!(self.name, "ice" | "mud");
+        let surface = |s: f64, x: f32, w: Vec2| {
+            let cover = if under_snow && snow::snow().covers(s, x, w) {
+                -1.0
+            } else {
+                fray(x, solid, ragged)
+            };
+            Surf::new(self.height(s, x, w), cover, self.tint(s, x, w))
+        };
         out.parts.extend(ribbon::ribbon(&Ribbon {
             mat: self.material(),
-            s0: self.s0,
-            s1: self.s1 + 0.04,
+            s0,
+            s1,
             fade_in,
             fade_out: 0.0,
             ds: if fine { 0.02 } else { 0.04 },
             columns: cols,
-            cover: &cover,
-            height: &height,
-            tint: &tint,
-            shadows: matches!(self.name, "snow" | "mud" | "sand" | "water"),
+            surface: &surface,
+            shadows: matches!(self.name, "mud" | "sand" | "water"),
         }));
         match self.name {
             "grass" => {
                 // The worn earth line down the middle.
-                let cover = |x: f32| fray(x, 0.1, 0.4);
-                let h = |s: f64, x: f32, w: Vec2| self.height(s, x, w) + 0.0015;
-                let tint = |_: f64, _: f32, w: Vec2| {
-                    Vec3::splat(0.9 + 0.15 * fbm_world(w.x, w.y, 1.5, 2, 0x13))
+                let surface = |s: f64, x: f32, w: Vec2| {
+                    Surf::new(
+                        self.height(s, x, w) + 0.0015,
+                        fray(x, 0.1, 0.4),
+                        Vec3::splat(0.9 + 0.15 * fbm_world(w.x, w.y, 1.5, 2, 0x13)),
+                    )
                 };
                 out.parts.extend(ribbon::ribbon(&Ribbon {
                     mat: Mat::Dirt,
@@ -432,45 +451,38 @@ impl Stretch {
                     fade_out: 1.2,
                     ds: 0.02,
                     columns: columns(0.5, 0.02, 0.6, 0.02, 0.6, 0.02),
-                    cover: &cover,
-                    height: &h,
-                    tint: &tint,
+                    surface: &surface,
                     shadows: false,
                 }));
             }
             "ice" => {
-                // Frost and snow along both edges, creeping onto the ice.
-                let cover = |x: f32| {
-                    let ax = x.abs();
-                    if ax < 1.15 {
-                        1.0 - 0.55 * ((1.15 - ax) / 0.3).min(1.0)
-                    } else {
-                        fray(x, 2.05, 2.5)
-                    }
+                // The snow carries on along both edges, thinning toward the gravel. These
+                // ribbons start just under the end of the snow stretch's (a little lower, so
+                // that one wins) and continue it without a seam.
+                let snow = snow::snow();
+                let i0 = self.s0 as f32;
+                let surface = |s: f64, x: f32, w: Vec2| {
+                    let mut f = snow.surface(s, x, w);
+                    f.y -= 0.0015 * (1.0 - smooth(i0 + 0.04, i0 + 0.1, s as f32));
+                    f
                 };
-                let h = |s: f64, x: f32, w: Vec2| self.ice_edge_height(s, x, w);
-                let tint = |_: f64, x: f32, w: Vec2| snow_tint(x, w);
                 for side in [-1.0, 1.0] {
                     out.parts.extend(ribbon::ribbon(&Ribbon {
                         mat: Mat::Snow,
-                        s0: self.s0 - 0.04,
-                        s1: self.s1 - 0.6,
+                        s0: self.s0 - 0.06,
+                        s1: self.s1 + 0.5,
                         fade_in: 0.0,
-                        fade_out: 1.0,
+                        fade_out: 0.0,
                         ds: 0.04,
-                        columns: side_columns(0.85, 2.5, 0.05, side),
-                        cover: &cover,
-                        height: &h,
-                        tint: &tint,
+                        columns: side_columns(0.75, 3.2, 0.035, side),
+                        surface: &surface,
                         shadows: true,
                     }));
                 }
             }
             "mud" => {
                 // Water standing in the ruts.
-                let cover = |_: f32| 1.0;
-                let h = |_: f64, _: f32, _: Vec2| RUT_WATER;
-                let tint = |_: f64, _: f32, _: Vec2| Vec3::ONE;
+                let surface = |_: f64, _: f32, _: Vec2| Surf::new(RUT_WATER, 1.0, Vec3::ONE);
                 for side in [-1.0, 1.0] {
                     out.parts.extend(ribbon::ribbon(&Ribbon {
                         mat: Mat::Water,
@@ -480,9 +492,7 @@ impl Stretch {
                         fade_out: 0.0,
                         ds: 0.1,
                         columns: side_columns(0.45, 0.8, 0.05, side),
-                        cover: &cover,
-                        height: &h,
-                        tint: &tint,
+                        surface: &surface,
                         shadows: false,
                     }));
                 }
@@ -511,13 +521,17 @@ impl Stretch {
                 let r = ruts(s, x, w);
                 Vec3::splat(0.95 + 0.12 * n) * (1.0 - 0.15 * wet) * (1.0 + 3.0 * r.min(0.0))
             }
-            "snow" => snow_tint(x, w) * (1.0 - 0.06 * (1.0 - smooth(0.2, 0.6, ax))),
             "ice" => {
                 Vec3::splat(0.92 + 0.12 * n)
-                    * Vec3::new(0.95, 1.0, 1.05)
-                        .lerp(Vec3::new(1.4, 1.4, 1.4), smooth(0.75, 1.2, ax))
+                    * Vec3::new(0.95, 1.0, 1.05).lerp(Vec3::splat(1.2), smooth(0.75, 1.2, ax))
             }
-            "gravel" => Vec3::splat(0.92 + 0.14 * n),
+            "gravel" => {
+                // Packed fines are paler and dustier, the loose banks darker between stones.
+                let (windrow, packed) = gravel_banks(x, w);
+                Vec3::splat(0.92 + 0.14 * n)
+                    * Vec3::ONE.lerp(Vec3::new(1.12, 1.09, 1.04), packed / 0.003)
+                    * (1.0 - 5.0 * windrow)
+            }
             "sand" => {
                 Vec3::new(1.0, 0.98, 0.95)
                     * (0.94 + 0.1 * n)
@@ -658,46 +672,116 @@ impl Stretch {
     }
 
     fn frozen_props(&self, b: &mut Batch, rng: &mut Rand) {
-        // Frozen grass tips poking out of the snow at the edges.
-        let n = ((self.s1 - self.s0) * 40.0) as usize;
-        for _ in 0..n {
-            let s = rng.range(self.s0 as f32, self.s1 as f32) as f64;
+        let snow = snow::snow();
+        let s1 = self.s1 + if self.name == "ice" { 0.4 } else { 0.0 };
+        let len = (s1 - self.s0) as f32;
+        // Winter grass through thin snow and round the blanket's edges, rooted in the ground
+        // under the snow so only the tops show where it lies deeper.
+        for _ in 0..(len * 150.0) as usize {
+            let s = rng.range(self.s0 as f32, s1 as f32) as f64;
             let side = if rng.chance(0.5) { -1.0 } else { 1.0 };
-            let x = side * rng.range(1.75, 2.75);
+            let ax = rng.range(1.15, 3.3);
+            let x = side * ax;
             let p = point(s, x, 0.0);
             let w = Vec2::new(p.x, p.z);
-            let y = if self.name == "ice" {
-                self.ice_edge_height(s, x, w)
-            } else {
-                self.height(s, x, w)
+            let a = snow.at(s, x, w);
+            let patchy = smooth(-0.35, 0.35, fbm_world(w.x, w.y, 0.7, 2, 0x6a1));
+            let keep = (1.0 - 0.93 * smooth(0.012, 0.06, a.depth))
+                * (1.0 - 0.7 * smooth(2.7, 3.3, ax))
+                * (0.3 + 0.7 * patchy);
+            if !rng.chance(keep) {
+                continue;
             }
-            .max(verge_height(x, w));
+            let ground = verge_height(x, w);
+            let buried = (a.y - ground).max(0.0);
+            let h = buried + rng.range(0.05, 0.24);
+            let palette = if rng.chance(0.45) {
+                Palette::Frozen
+            } else {
+                Palette::Winter
+            };
             clump(
                 b.at(s, Mat::Grass),
                 rng,
-                point(s, x, y - 0.01),
+                point(s, x, ground - 0.004),
                 ClumpStyle {
-                    blades: (4, 12),
-                    radius: 0.05,
-                    height: (0.05, 0.2),
-                    lean: (0.1, 0.5),
+                    blades: (5, 14),
+                    radius: 0.045,
+                    height: (h * 0.6, h),
+                    lean: (0.05, 0.35),
                     toward: None,
                     width: (0.003, 0.006),
-                    palette: Palette::Frozen,
+                    palette,
                 },
             );
         }
         if self.name == "snow" {
-            // A few stones the snow hasn't covered.
-            for _ in 0..10 {
+            // A few stones out of the thin snow at the edges.
+            for _ in 0..16 {
                 let s = rng.range(self.s0 as f32 + 1.0, self.s1 as f32 - 0.5) as f64;
                 let side = if rng.chance(0.5) { -1.0 } else { 1.0 };
-                let x = side * rng.range(1.0, 2.2);
+                let x = side * rng.range(1.5, 2.7);
                 let p = point(s, x, 0.0);
-                let y = self.height(s, x, Vec2::new(p.x, p.z));
-                let size = rng.range(0.08, 0.16);
-                stone(b, rng, s, point(s, x, y - 0.02), size, hex(0x5d5a56), 0.5);
+                let w = Vec2::new(p.x, p.z);
+                if snow.at(s, x, w).depth > 0.045 {
+                    continue;
+                }
+                let size = rng.range(0.09, 0.2);
+                stone(
+                    b,
+                    rng,
+                    s,
+                    point(s, x, verge_height(x, w) - 0.01),
+                    size,
+                    hex(0x5d5a56),
+                    0.45,
+                );
             }
+        }
+        // Leaves and twigs blown onto the snow, sunk a little into it; trodden darker in the
+        // trench.
+        let browns = [
+            Vec3::new(0.62, 0.42, 0.2),
+            Vec3::new(0.52, 0.31, 0.13),
+            Vec3::new(0.7, 0.52, 0.26),
+            Vec3::new(0.46, 0.32, 0.17),
+        ];
+        for _ in 0..(len * 2.2) as usize {
+            let s = rng.range(self.s0 as f32, s1 as f32) as f64;
+            let x = rng.range(-2.4, 2.4);
+            let p = point(s, x, 0.0);
+            let a = snow.at(s, x, Vec2::new(p.x, p.z));
+            if a.depth < 0.012 {
+                continue;
+            }
+            let col =
+                browns[rng.below(browns.len())] * rng.range(0.8, 1.1) * (1.0 - 0.35 * a.trodden);
+            let len = rng.range(0.04, 0.08);
+            let rot = super::procgen::tilt(
+                Vec3::new(rng.normal(0.15), 1.0, rng.normal(0.15)),
+                rng.range(0.0, TAU),
+            );
+            leaf(
+                b.at(s, Mat::Leaf),
+                point(s, x, a.y + 0.003),
+                rot,
+                len,
+                len * rng.range(0.6, 0.95),
+                rng.range(-0.006, 0.004),
+                rng.range(0.0, 0.008),
+                rng.below(4) as u32,
+                col.extend(1.0),
+            );
+        }
+        for _ in 0..(len * 0.6) as usize {
+            let s = rng.range(self.s0 as f32, s1 as f32) as f64;
+            let x = rng.range(-2.2, 2.2);
+            let p = point(s, x, 0.0);
+            let a = snow.at(s, x, Vec2::new(p.x, p.z));
+            if a.depth < 0.012 {
+                continue;
+            }
+            twig(b.at(s, Mat::Bark), rng, point(s, x, a.y - 0.004));
         }
     }
 
@@ -935,20 +1019,29 @@ impl Stretch {
         }
     }
 
-    /// Grass along the outer edges of the stretch.
+    /// Grass along the outer edges of the stretch: tufts gathered in drifts with gaps
+    /// between, trampled flat and leaning away at the path's edge, taller further out and
+    /// thinning into the lawn; seed heads above them, broad-leaved weeds and flowers among
+    /// them, and pebbles, fallen leaves and twigs where the path frays into the verge.
     fn verge_grass(&self, b: &mut Batch, rng: &mut Rand) {
         let (from, density, palette, tall) = match self.name {
             "snow" | "ice" | "sand" => return,
             "grass" => (1.35, 1.0, Palette::Meadow, 1.0),
             "wood" => (1.32, 1.0, Palette::Meadow, 1.1),
-            "metal" => (1.5, 0.9, Palette::Meadow, 1.0),
+            "metal" => (1.56, 0.9, Palette::Meadow, 1.0),
             "concrete" => (2.55, 0.5, Palette::Meadow, 0.7),
             "leaves" => (1.9, 0.45, Palette::Forest, 0.8),
             "water" => (1.45, 1.0, Palette::Lush, 1.1),
             _ => (1.4, 1.0, Palette::Meadow, 1.0),
         };
         let len = (self.s1 - self.s0) as f32;
-        let n = (len * 2.0 * 10.0 * density) as usize;
+        let seed = 0x7e1 + self.i as u32 * 31;
+        // Dense where this is high, gaps where it is low.
+        let drift = |s: f64, x: f32| {
+            let p = point(s, x, 0.0);
+            smooth(-0.35, 0.35, fbm_world(p.x, p.z, 0.7, 3, seed))
+        };
+        let n = (len * 2.0 * 15.0 * density) as usize;
         for _ in 0..n {
             let s = rng.range(self.s0 as f32, self.s1 as f32) as f64;
             let side = if rng.chance(0.5) { -1.0 } else { 1.0 };
@@ -958,8 +1051,19 @@ impl Stretch {
                 continue;
             }
             let x = side * ax;
+            let lush = drift(s, x);
+            if !rng.chance(0.15 + 0.85 * lush) {
+                continue;
+            }
             let y = self.ground_y(s, x);
-            let h = tall * (0.16 + 0.36 * (1.0 - smooth(1.8, 3.2, ax))) * rng.range(0.6, 1.25);
+            let (_, d, r) = frame(s);
+            let trample = 1.0 - smooth(from, from + 0.35, ax);
+            let h = tall
+                * (0.16 + 0.36 * (1.0 - smooth(1.8, 3.2, ax)))
+                * rng.range(0.6, 1.25)
+                * (0.8 + 0.4 * lush)
+                * (1.0 - 0.4 * trample);
+            let away = (r * side + d * rng.normal(0.8)).normalize_or(r * side);
             clump(
                 b.at(s, Mat::Grass),
                 rng,
@@ -968,14 +1072,37 @@ impl Stretch {
                     blades: (7, 16),
                     radius: 0.05,
                     height: (h * 0.5, h),
-                    lean: (0.1, 0.55),
-                    toward: None,
+                    lean: (0.1 + 0.5 * trample, 0.55 + 0.6 * trample),
+                    toward: (trample > 0.3).then_some(away),
                     width: (0.0045, 0.008),
                     palette,
                 },
             );
+            // Seed heads standing over the taller tufts.
+            if palette != Palette::Forest && h > 0.18 && rng.chance(0.35) {
+                for _ in 0..1 + rng.below(3) {
+                    let at =
+                        point(s, x, y - 0.006) + Vec3::new(rng.normal(0.02), 0.0, rng.normal(0.02));
+                    let stalk = h * rng.range(1.1, 1.6);
+                    seed_head(b.at(s, Mat::Grass), rng, at, stalk);
+                }
+            }
         }
         self.turf(b, rng, from, palette, 26.0 * density);
+        // Broad-leaved weeds flat among the grass (plantain, dandelion), more in the drifts'
+        // gaps where the grass is short.
+        if palette != Palette::Forest {
+            for _ in 0..(len * 2.0 * 3.0 * density) as usize {
+                let s = rng.range(self.s0 as f32, self.s1 as f32) as f64;
+                let side = if rng.chance(0.5) { -1.0 } else { 1.0 };
+                let x = side * (from + rng.f().powf(1.4) * (2.9 - from));
+                if !rng.chance(0.35 + 0.65 * (1.0 - drift(s, x))) {
+                    continue;
+                }
+                let y = self.ground_y(s, x);
+                rosette(b.at(s, Mat::Leaf), rng, point(s, x, y - 0.002));
+            }
+        }
         if matches!(self.name, "grass" | "gravel" | "wood" | "water" | "mud") {
             for _ in 0..(len * 2.5) as usize {
                 let s = rng.range(self.s0 as f32, self.s1 as f32) as f64;
@@ -986,6 +1113,132 @@ impl Stretch {
                 flower(b.at(s, Mat::Flowers), rng, point(s, x, y - 0.004), kind);
             }
         }
+        // Pebbles where an unbuilt path's ground frays into the verge, and leaves and twigs
+        // blown off the trees.
+        let (solid, ragged) = self.cover();
+        if !matches!(self.name, "wood" | "metal" | "concrete") {
+            for _ in 0..(len * 2.0 * 7.0) as usize {
+                let s = rng.range(self.s0 as f32, self.s1 as f32) as f64;
+                let side = if rng.chance(0.5) { -1.0 } else { 1.0 };
+                let x = side * (solid - 0.12 + rng.f() * (ragged - solid + 0.3));
+                let y = self.ground_y(s, x);
+                let col =
+                    [hex(0x8a8278), hex(0x6f6a63), hex(0x9c9184), hex(0x5d5852)][rng.below(4)];
+                let size = rng.range(0.008, 0.03) * if rng.chance(0.1) { 2.2 } else { 1.0 };
+                stone(b, rng, s, point(s, x, y), size, col, 0.45);
+            }
+        }
+        if palette != Palette::Forest {
+            let browns = [hex(0x8a5a2a), hex(0x6e4a26), hex(0x9a7038), hex(0x5a3c22)];
+            for _ in 0..(len * 2.0 * 2.5) as usize {
+                let s = rng.range(self.s0 as f32, self.s1 as f32) as f64;
+                let side = if rng.chance(0.5) { -1.0 } else { 1.0 };
+                let x = side * rng.range(from - 0.1, 2.6);
+                let y = self.ground_y(s, x);
+                let l = rng.range(0.04, 0.08);
+                leaf(
+                    b.at(s, Mat::Leaf),
+                    point(s, x, y + 0.004),
+                    super::procgen::tilt(
+                        Vec3::new(rng.normal(0.3), 1.0, rng.normal(0.3)),
+                        rng.range(0.0, TAU),
+                    ),
+                    l,
+                    l * rng.range(0.6, 0.9),
+                    rng.range(-0.008, 0.004),
+                    rng.range(0.0, 0.01),
+                    rng.below(4) as u32,
+                    (browns[rng.below(4)] * rng.range(0.7, 1.1)).extend(1.0),
+                );
+            }
+            for _ in 0..(len * 0.5) as usize {
+                let s = rng.range(self.s0 as f32, self.s1 as f32) as f64;
+                let side = if rng.chance(0.5) { -1.0 } else { 1.0 };
+                let x = side * rng.range(from, 2.4);
+                let y = self.ground_y(s, x) + 0.004;
+                twig(b.at(s, Mat::Bark), rng, point(s, x, y));
+            }
+        }
+    }
+}
+
+/// A grass stalk gone to seed: a thin stem `h` tall, leaning a little, with a seed spike.
+fn seed_head(m: &mut Mesh, rng: &mut Rand, at: Vec3, h: f32) {
+    let lean = Vec3::new(rng.normal(0.15), 1.0, rng.normal(0.15)).normalize();
+    let bow = Vec3::new(rng.normal(0.05), 0.0, rng.normal(0.05));
+    let pts: Vec<Vec3> = (0..4)
+        .map(|k| {
+            let t = k as f32 / 3.0;
+            at + lean * h * t + bow * h * t * t
+        })
+        .collect();
+    let straw = rng.chance(0.6);
+    let stem = if straw {
+        hex(0xa89a68) * rng.range(0.75, 1.0)
+    } else {
+        hex(0x6f8a3a) * rng.range(0.8, 1.0)
+    };
+    append(
+        m,
+        &tube(
+            &pts,
+            3,
+            false,
+            |t, _| 0.0013 * (1.0 - 0.4 * t),
+            |t| (stem * (0.55 + 0.45 * t)).extend(1.0),
+        ),
+        Quat::IDENTITY,
+        Vec3::ONE,
+        Vec3::ZERO,
+        Vec4::ONE,
+    );
+    let top = pts[3];
+    let dir = (pts[3] - pts[2]).normalize_or(Vec3::Y);
+    let spike = if straw {
+        hex(0xb8a77a) * rng.range(0.8, 1.05)
+    } else {
+        hex(0x7d6a5a) * rng.range(0.8, 1.05)
+    };
+    let l = rng.range(0.025, 0.05);
+    ball(
+        m,
+        top - dir * l * 0.4,
+        Quat::from_rotation_arc(Vec3::Y, dir) * Quat::from_rotation_y(rng.range(0.0, TAU)),
+        Vec3::new(0.007, l, 0.007),
+        spike,
+    );
+}
+
+/// A broad-leaved weed lying flat in the grass: a rosette of five to nine leaves round
+/// `at` (plantain's ovals or a dandelion's lobed ones), tilted up a little.
+fn rosette(m: &mut Mesh, rng: &mut Rand, at: Vec3) {
+    let dandelion = rng.chance(0.4);
+    let leaves = 5 + rng.below(5);
+    let size = rng.range(0.05, 0.11);
+    let green = if dandelion {
+        Vec3::new(0.26, 0.4, 0.12)
+    } else {
+        Vec3::new(0.2, 0.33, 0.1)
+    } * rng.range(0.8, 1.15);
+    let turn = rng.range(0.0, TAU);
+    for k in 0..leaves {
+        let yaw = turn + k as f32 / leaves as f32 * TAU + rng.normal(0.2);
+        let tilt = rng.range(0.12, 0.45);
+        let l = size * rng.range(0.7, 1.1);
+        let rot = Quat::from_rotation_y(yaw) * Quat::from_rotation_x(-tilt);
+        let dir = rot * Vec3::Z;
+        let (cell, w) = if dandelion { (1, 0.42) } else { (2, 0.55) };
+        leaf(
+            m,
+            at + dir * l * 0.5,
+            rot,
+            l,
+            l * w * rng.range(0.85, 1.1),
+            rng.range(-0.006, 0.0),
+            rng.range(0.002, 0.008),
+            cell,
+            (green * rng.range(0.85, 1.1)).extend(1.0),
+        );
     }
 }
 
@@ -1018,12 +1271,6 @@ impl Stretch {
             );
         }
     }
-}
-
-fn snow_tint(x: f32, w: Vec2) -> Vec3 {
-    let n = fbm_world(w.x, w.y, 1.8, 2, 0x4a);
-    let bank = smooth(0.8, 1.5, x.abs());
-    Vec3::new(1.0, 1.0, 1.02) * (0.97 + 0.04 * n) * (1.0 + 0.04 * bank)
 }
 
 /// A puddle: a level, dark water surface sitting in a hollow (the ground hides its edges).
@@ -1063,27 +1310,33 @@ fn puddle(h: &Hollow) -> Part {
 
 // ----------------------------------------------------------------------- the verges
 
-/// The grass verges along both sides of the whole loop (skipped where snow covers them and
-/// inside the built stretches).
+/// The grass verges along both sides of the whole loop (left out where thick snow hides
+/// them and inside the built stretches).
 fn verges() -> Out {
     let mut out = Out::default();
+    let snow = snow::snow();
     for (i, &(name, _)) in STRETCHES.iter().enumerate() {
         let st = Stretch::new(i);
         let from = match name {
-            "snow" | "ice" => continue,
+            "snow" | "ice" => 1.0,
             "wood" => 1.28,
             "metal" => 1.44,
             "concrete" => 2.28,
             _ => 0.95,
         };
-        let cover = |x: f32| fray(x, 2.25, 2.68);
-        let h = |_: f64, x: f32, w: Vec2| verge_height(x, w);
-        let tint = |_: f64, x: f32, w: Vec2| {
+        let wintry = matches!(name, "mud" | "snow" | "ice" | "gravel");
+        let surface = |s: f64, x: f32, w: Vec2| {
             let n = fbm_world(w.x, w.y, 3.0, 3, 0x99);
             let dry = smooth(0.2, 0.8, fbm_world(w.x, w.y, 5.0, 2, 0x9a));
-            Vec3::new(1.0 + 0.12 * dry, 1.0, 0.9 - 0.1 * dry)
+            let tint = Vec3::new(1.0 + 0.12 * dry, 1.0, 0.9 - 0.1 * dry)
                 * (0.9 + 0.16 * n)
-                * (1.0 - 0.12 * (1.0 - smooth(1.0, 1.6, x.abs())))
+                * (1.0 - 0.12 * (1.0 - smooth(1.0, 1.6, x.abs())));
+            let cover = if wintry && snow.covers(s, x, w) {
+                -1.0
+            } else {
+                fray(x, 2.25, 2.68)
+            };
+            Surf::new(verge_height(x, w), cover, tint)
         };
         for side in [-1.0, 1.0] {
             // Global columns so overlapping verges of neighbours match exactly.
@@ -1102,9 +1355,7 @@ fn verges() -> Out {
                 fade_out: 0.0,
                 ds: 0.08,
                 columns: cols,
-                cover: &cover,
-                height: &h,
-                tint: &tint,
+                surface: &surface,
                 shadows: false,
             }));
         }
@@ -1112,14 +1363,239 @@ fn verges() -> Out {
     out
 }
 
+// ------------------------------------------------------------------------ the meadow
+
+/// Grass blades along the verges, drawn by the renderer's grass (a dense meadow for the
+/// cost of a small map): one field over the whole loop, thick along both sides of the path
+/// in drifts with thinner gaps, bare on the path itself, under the snow and inside the
+/// built stretches, short and trampled where it meets the path, fading raggedly into the
+/// lawn; dry and straw-coloured round the winter stretches, the dunes and the wood.
+/// Centred on the trail's origin.
+pub(super) fn meadow() -> GrassField {
+    let (h, r) = (HALF_STRAIGHT as f32, BEND_RADIUS as f32);
+    let reach = 4.6;
+    let size = [2.0 * (h + r + reach), 2.0 * (r + reach)];
+    let res = [(size[0] / 0.2) as u32, (size[1] / 0.2) as u32];
+    let snow = snow::snow();
+    GrassField::flat(size[0], size[1])
+        .with_style(GrassStyle {
+            blades_per_m2: 560.0,
+            height: 0.25,
+            height_variation: 0.55,
+            width: 0.0055,
+            bend: 0.5,
+            lush_color: [0.1, 0.21, 0.045],
+            dry_color: [0.42, 0.35, 0.17],
+            dryness: 0.2,
+            wind_response: 0.8,
+            draw_distance: 45.0,
+            shadow_distance: 14.0,
+        })
+        .sample(res, |x, z| {
+            let w = Vec2::new(x, z);
+            let (along, _) = nearest_on_trail(DVec3::new(x as f64, 0.0, z as f64));
+            let (c, _, right) = frame(along);
+            let xs = (Vec3::new(x, 0.0, z) - c).dot(right);
+            let side = xs.abs();
+            let name = surface_at(along);
+            // Where the grass starts beside each ground, and how dry it is there.
+            let (start, dry) = match name {
+                "grass" => (0.3, 0.15),
+                "leaves" => (1.85, 0.5),
+                "sand" => (1.8, 0.6),
+                "snow" | "ice" => (1.25, 0.9),
+                "wood" => (1.38, 0.25),
+                "metal" => (1.6, 0.2),
+                "concrete" => (2.8, 0.25),
+                _ => (1.45, 0.2),
+            };
+            let drift = fbm_world(x, z, 1.1, 3, 0x6a1);
+            let mut density = smooth(start, start + 0.35, side + 0.08 * drift)
+                * (1.0 - smooth(2.3, 4.4, side + 0.6 * fbm_world(x, z, 0.9, 2, 0x6a2)))
+                * (0.3 + 0.7 * smooth(-0.4, 0.35, drift));
+            if name == "grass" {
+                // Short and thin where the walkers tread, either side of the worn line.
+                density *= 0.35 + 0.65 * smooth(1.0, 1.4, side);
+            }
+            if matches!(name, "mud" | "snow" | "ice" | "gravel") && density > 0.0 {
+                let a = snow.at(along, xs, w);
+                density *= 1.0 - smooth(0.0, 0.02, a.depth);
+            }
+            let height = if side < 1.15 {
+                base(xs, w)
+            } else {
+                verge_height(xs, w)
+            };
+            let trampled = 1.0 - smooth(start, start + 0.6, side);
+            let dryness = (dry
+                + 0.18 * fbm_world(x, z, 2.5, 2, 0x6a3)
+                + 0.25 * trampled
+                + 0.15 * smooth(3.0, 4.0, side))
+            .clamp(0.0, 1.0);
+            (height, density, dryness)
+        })
+}
+
+// ---------------------------------------------------------------------- boundaries
+
+/// Where one ground meets the next a little of each spills across the line, so no
+/// boundary is a clean cut: gravel kicked onto the boards, mud clods carried into the
+/// grass, snow lumps on the ice, leaves blown over the sand, sand and grit on the concrete.
+/// More is carried forward (the way the walkers go) than drifts back.
+fn boundaries() -> Out {
+    let mut b = Batch::default();
+    let mut rng = Rand::new(0xb0de);
+    let n = STRETCHES.len();
+    for k in 0..n {
+        let (a, next) = (Stretch::new(k), Stretch::new((k + 1) % n));
+        let at = next.s0;
+        spill(&mut b, &mut rng, a.name, &next, at, 1.0);
+        spill(&mut b, &mut rng, next.name, &a, at, -1.0);
+    }
+    let mut out = Out::default();
+    out.parts.extend(b.finish());
+    out
+}
+
+/// Scatter the loose bits of ground `kind` onto stretch `onto`, from the line at `at`
+/// going `dir` (+1 forward along the trail, -1 back), thinning out with distance.
+fn spill(b: &mut Batch, rng: &mut Rand, kind: &str, onto: &Stretch, at: f64, dir: f64) {
+    let forward = dir > 0.0;
+    // How far and how many per meter of trail.
+    let (reach, per_m) = match (kind, forward) {
+        ("leaves", false) => (1.4, 110.0),
+        ("leaves", true) => (1.6, 40.0),
+        ("gravel", true) => (1.3, 55.0),
+        ("gravel", false) => (0.8, 30.0),
+        ("mud" | "water", true) => (1.6, 30.0),
+        ("mud" | "water", false) => (0.8, 14.0),
+        ("grass", _) => (0.9, 10.0),
+        ("sand", true) => (1.0, 18.0),
+        ("sand", false) => (1.4, 40.0),
+        ("snow", true) => (1.5, 22.0),
+        ("snow", false) => (0.6, 12.0),
+        ("concrete", _) => (0.6, 12.0),
+        ("wood", _) => (0.8, 4.0),
+        _ => return,
+    };
+    let built = matches!(onto.name, "wood" | "metal" | "concrete");
+    for _ in 0..(reach * per_m) as usize {
+        let t = rng.f().powf(1.7) * reach;
+        let s = at + dir * t as f64;
+        let x = rng.normal(0.6).clamp(-1.25, 1.25) * if built { 0.8 } else { 1.0 };
+        let y = onto.ground_y(s, x);
+        let p = point(s, x, y);
+        match kind {
+            "gravel" | "concrete" => {
+                let col =
+                    [hex(0xa39a8c), hex(0x8a8278), hex(0xb5ab9a), hex(0x77716a)][rng.below(4)];
+                let size = rng.range(0.008, 0.03);
+                stone(b, rng, s, p, size, col, 0.3);
+            }
+            "mud" | "water" => {
+                let size = rng.range(0.012, 0.04);
+                let col = hex(0x4a3524) * rng.range(0.6, 1.0);
+                let base = &rock_kit(0.5)[rng.below(KIT)];
+                append(
+                    b.at(s, Mat::Stone),
+                    base,
+                    Quat::from_rotation_y(rng.range(0.0, TAU)),
+                    Vec3::new(
+                        size,
+                        size * rng.range(0.25, 0.45),
+                        size * rng.range(0.9, 1.6),
+                    ),
+                    p,
+                    col.extend(1.0),
+                );
+            }
+            "snow" => {
+                // Kicked crumbs and flat clumps, half sunk.
+                let size = rng.range(0.012, 0.06);
+                let base = &rock_kit(0.55)[rng.below(KIT)];
+                append(
+                    b.at(s, Mat::Straw),
+                    base,
+                    Quat::from_rotation_y(rng.range(0.0, TAU)),
+                    Vec3::new(size, size * rng.range(0.2, 0.4), size * rng.range(0.8, 1.6)),
+                    p - Vec3::Y * size * 0.08,
+                    Vec4::new(0.84, 0.87, 0.93, 1.0) * rng.range(0.9, 1.05),
+                );
+            }
+            "sand" => {
+                if rng.chance(0.15) {
+                    shell(b.at(s, Mat::Shell), rng, p + Vec3::Y * 0.001);
+                } else {
+                    let col = [hex(0xc9b48a), hex(0xa79d8c), hex(0xb7a58a)][rng.below(3)];
+                    let size = rng.range(0.005, 0.016);
+                    stone(b, rng, s, p, size, col, 0.35);
+                }
+            }
+            "grass" => {
+                if built {
+                    continue;
+                }
+                let h = rng.range(0.04, 0.1);
+                clump(
+                    b.at(s, Mat::Grass),
+                    rng,
+                    p - Vec3::Y * 0.004,
+                    ClumpStyle {
+                        blades: (3, 8),
+                        radius: 0.03,
+                        height: (h * 0.5, h),
+                        lean: (0.2, 0.7),
+                        toward: None,
+                        width: (0.003, 0.0055),
+                        palette: Palette::Meadow,
+                    },
+                );
+            }
+            "leaves" | "wood" => {
+                if kind == "wood" || rng.chance(0.06) {
+                    twig(b.at(s, Mat::Bark), rng, p + Vec3::Y * 0.004);
+                    continue;
+                }
+                let autumn = [
+                    Vec3::new(0.62, 0.16, 0.03),
+                    Vec3::new(0.75, 0.33, 0.05),
+                    Vec3::new(0.8, 0.52, 0.1),
+                    Vec3::new(0.55, 0.36, 0.12),
+                    Vec3::new(0.42, 0.2, 0.07),
+                    Vec3::new(0.3, 0.22, 0.1),
+                ];
+                let l = rng.range(0.05, 0.1);
+                leaf(
+                    b.at(s, Mat::Leaf),
+                    p + Vec3::Y * 0.004,
+                    super::procgen::tilt(
+                        Vec3::new(rng.normal(0.25), 1.0, rng.normal(0.25)),
+                        rng.range(0.0, TAU),
+                    ),
+                    l,
+                    l * rng.range(0.7, 0.95),
+                    rng.range(-0.01, 0.005),
+                    rng.range(0.0, 0.01),
+                    rng.below(4) as u32,
+                    (autumn[rng.below(autumn.len())] * rng.range(0.7, 1.15)).extend(1.0),
+                );
+            }
+            _ => {}
+        }
+    }
+}
+
 // -------------------------------------------------------------------------- grasses
 
 #[derive(Clone, Copy, PartialEq)]
-enum Palette {
+pub(super) enum Palette {
     Meadow,
     Lush,
     Forest,
+    /// Frosted, pale tips.
     Frozen,
+    /// Dead winter grass: straw and faded olive.
+    Winter,
     Dune,
     Reed,
 }
@@ -1154,6 +1630,14 @@ impl Palette {
                 let t = hex(0xd8dcd8) * rng.range(0.75, 1.0);
                 (hex(0x8a8466) * 0.8, t)
             }
+            Palette::Winter => {
+                let t = if rng.chance(0.3) {
+                    hex(0x8c8a5a) * v
+                } else {
+                    hex(0xb49e6e) * v
+                };
+                (hex(0x5a5236) * 0.8, t)
+            }
             Palette::Dune => {
                 let t = if rng.chance(0.35) {
                     hex(0xcdb98a) * v
@@ -1174,20 +1658,20 @@ impl Palette {
     }
 }
 
-struct ClumpStyle {
-    blades: (usize, usize),
-    radius: f32,
-    height: (f32, f32),
+pub(super) struct ClumpStyle {
+    pub blades: (usize, usize),
+    pub radius: f32,
+    pub height: (f32, f32),
     /// Root lean (radians from vertical), and how much more the tips bend.
-    lean: (f32, f32),
+    pub lean: (f32, f32),
     /// Lean every blade this way (trampled), else outward from the clump.
-    toward: Option<Vec3>,
-    width: (f32, f32),
-    palette: Palette,
+    pub toward: Option<Vec3>,
+    pub width: (f32, f32),
+    pub palette: Palette,
 }
 
 /// A tuft of grass blades rooted round `at`.
-fn clump(m: &mut Mesh, rng: &mut Rand, at: Vec3, st: ClumpStyle) {
+pub(super) fn clump(m: &mut Mesh, rng: &mut Rand, at: Vec3, st: ClumpStyle) {
     let n = st.blades.0 + rng.below(st.blades.1 - st.blades.0 + 1);
     for _ in 0..n {
         let a = rng.range(0.0, TAU);

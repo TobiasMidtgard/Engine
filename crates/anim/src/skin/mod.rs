@@ -45,6 +45,9 @@ pub struct SkinVertex {
     pub axis: Vec3,
     /// x: cloth (wrinkles and bunching), y: skin (subsurface, flush), z: veins, w: sheen.
     pub mask: Vec4,
+    /// How much fur grows here, 0..1 of the material's [`SkinMaterial::fur_length`] (0 on
+    /// noses, pads, eyes and anything without fur).
+    pub fur: f32,
 }
 
 impl Default for SkinVertex {
@@ -59,6 +62,7 @@ impl Default for SkinVertex {
             pattern: Vec3::ZERO,
             axis: Vec3::Y,
             mask: Vec4::ZERO,
+            fur: 0.0,
         }
     }
 }
@@ -194,6 +198,23 @@ pub struct SkinMaterial {
     pub emissive: [f32; 3],
     /// Emission luminance, cd/m².
     pub emissive_strength: f32,
+    /// Fur: strands this long (meters) grow where the vertices say so ([`SkinVertex::fur`]),
+    /// drawn as shells over the skin. 0 = no fur.
+    pub fur_length: f32,
+    /// Fur strands per meter across the skin.
+    pub fur_density: f32,
+    /// Shells drawn up close (each a copy of the mesh one step further out).
+    pub fur_shells: u32,
+    /// Full shells up to this distance from the camera, none beyond twice it, meters.
+    pub fur_lod: f32,
+    /// How much the tips sag under their weight (0..1).
+    pub fur_droop: f32,
+    /// How much the coat lies back along the body, toward the tail (0..1).
+    pub fur_comb: f32,
+    /// Brightness at the roots relative to the tips (self-shadowing in the coat, 0..1).
+    pub fur_root: f32,
+    /// Color multiplier at the tips (sun-bleached or darker guard hairs).
+    pub fur_tip: [f32; 3],
 }
 
 impl Default for SkinMaterial {
@@ -212,6 +233,14 @@ impl Default for SkinMaterial {
             sheen: 0.3,
             emissive: [0.0; 3],
             emissive_strength: 0.0,
+            fur_length: 0.0,
+            fur_density: 900.0,
+            fur_shells: 16,
+            fur_lod: 8.0,
+            fur_droop: 0.35,
+            fur_comb: 0.45,
+            fur_root: 0.45,
+            fur_tip: [1.0; 3],
         }
     }
 }

@@ -115,6 +115,12 @@ pub enum PropKind {
     PlankDoor {
         size: [f32; 3],
     },
+    /// A straight flight of wooden stairs filling `size` (x wide, y rise, z run), climbing
+    /// toward −Z from its foot at +Z (see [`stair_steps`]): plank treads with open risers
+    /// nailed onto three sawtooth-cut stringers.
+    WoodStair {
+        size: [f32; 3],
+    },
     RoofTiles {
         width: f32,
         depth: f32,
@@ -183,6 +189,9 @@ impl PropKind {
             PropKind::PlankDoor {
                 size: [0.85, 1.85, 0.05],
             },
+            PropKind::WoodStair {
+                size: [1.0, 1.2, 2.0],
+            },
             PropKind::RoofTiles {
                 width: 4.0,
                 depth: 3.4,
@@ -221,6 +230,7 @@ impl PropKind {
             PropKind::BoardDoorway { size } => board_wall_opening(Vec3::from(size), true, seed),
             PropKind::BoardWindow { size } => board_wall_opening(Vec3::from(size), false, seed),
             PropKind::PlankDoor { size } => plank_door(Vec3::from(size), seed),
+            PropKind::WoodStair { size } => wood_stair(Vec3::from(size), seed),
             PropKind::RoofTiles {
                 width,
                 depth,
@@ -248,7 +258,8 @@ impl PropKind {
             | PropKind::BoardGable { size }
             | PropKind::BoardDoorway { size }
             | PropKind::BoardWindow { size }
-            | PropKind::PlankDoor { size } => Vec3::from(size),
+            | PropKind::PlankDoor { size }
+            | PropKind::WoodStair { size } => Vec3::from(size),
             PropKind::SteelDrum { .. } => Vec3::new(DRUM_DIAMETER, DRUM_HEIGHT, DRUM_DIAMETER),
             PropKind::Sandbag => Vec3::new(BAG_LEN, BAG_HEIGHT, BAG_WIDTH),
             PropKind::SandbagWall { length, courses } => sandbag_wall_size(length, courses),
@@ -3973,6 +3984,252 @@ pub fn board_gable(size: Vec3, seed: u64) -> Vec<PropPart> {
     auto_smooth(b, v0, t0, 30.0);
     kit.finish(Ao {
         reach: 0.15,
+        strength: 0.6,
+        ground: false,
+    })
+}
+
+/// Rise of one step that a flight aims for, m (seven to a 1.2 m flight).
+const STAIR_RISE_M: f32 = 0.175;
+/// Depth of the slab a stair's collider makes under its walking line (across the pitch), m.
+pub const STAIR_SLAB_M: f32 = 0.235;
+/// Wood a cut stringer keeps under the inner corners of its notches (across the pitch), m.
+const STRINGER_THROAT_M: f32 = 0.13;
+
+/// A flight of stairs filling `size` (x wide, y rise, z run): its number of steps, and each
+/// one's rise and going (nosing to nosing), m.
+pub fn stair_steps(size: Vec3) -> (usize, f32, f32) {
+    let n = (size.y / STAIR_RISE_M).round().max(1.0) as usize;
+    (n, size.y / n as f32, size.z / n as f32)
+}
+
+/// Side view `(z, y)` of a band along a flight `size` big with `steps` steps, climbing toward
+/// −Z: from `above` (m, plumb) over the line through the treads' nosings down to `depth` (m,
+/// across the pitch) under that line, cut level at the foot and the head and plumb at both
+/// ends of the run. A convex polygon, counter-clockwise.
+pub fn stair_band(size: Vec3, steps: usize, above: f32, depth: f32) -> Vec<Vec2> {
+    let (hy, hz) = (size.y * 0.5, size.z * 0.5);
+    let n = steps.max(1) as f32;
+    let (rise, going) = (size.y / n, size.z / n);
+    let slope = rise / going;
+    // The first nosing is a rise over the foot at the front; the last is level with the top.
+    let top = |z: f32| -hy + rise + (hz - z) * slope + above;
+    let plumb = depth * (1.0 + slope * slope).sqrt();
+    let far = size.y + size.z;
+    let (z0, z1) = (-hz - far, hz + far);
+    let mut poly = vec![
+        Vec2::new(z0, top(z0) - plumb),
+        Vec2::new(z1, top(z1) - plumb),
+        Vec2::new(z1, top(z1)),
+        Vec2::new(z0, top(z0)),
+    ];
+    for cut in [
+        Vec3::new(1.0, 0.0, -hz),
+        Vec3::new(-1.0, 0.0, -hz),
+        Vec3::new(0.0, 1.0, -hy),
+        Vec3::new(0.0, -1.0, -hy),
+    ] {
+        poly = clip_convex(&poly, |p| cut.x * p.x + cut.y * p.y + cut.z);
+    }
+    poly
+}
+
+/// The part of a convex polygon where `f(p) <= 0` (Sutherland–Hodgman), without repeated
+/// points.
+fn clip_convex(poly: &[Vec2], f: impl Fn(Vec2) -> f32) -> Vec<Vec2> {
+    let n = poly.len();
+    let mut out: Vec<Vec2> = Vec::with_capacity(n + 2);
+    let mut push = |p: Vec2| {
+        if out.last().is_none_or(|q| q.distance(p) > 1e-5) {
+            out.push(p);
+        }
+    };
+    for i in 0..n {
+        let (a, b) = (poly[i], poly[(i + 1) % n]);
+        let (fa, fb) = (f(a), f(b));
+        if fa <= 0.0 {
+            push(a);
+        }
+        if (fa <= 0.0) != (fb <= 0.0) {
+            push(a + (b - a) * (fa / (fa - fb)));
+        }
+    }
+    if out.len() > 1 && out[0].distance(out[out.len() - 1]) <= 1e-5 {
+        out.pop();
+    }
+    out
+}
+
+/// A simple polygon (either winding) with every edge moved `d` inward (mitered corners; `d`
+/// small next to its edges).
+fn inset_polygon(poly: &[Vec2], d: f32) -> Vec<Vec2> {
+    let n = poly.len();
+    let s = if signed_area(poly) >= 0.0 { 1.0 } else { -1.0 };
+    let inward = |e: Vec2| Vec2::new(-e.y, e.x).normalize_or_zero() * s;
+    (0..n)
+        .map(|i| {
+            let (a, p, b) = (poly[(i + n - 1) % n], poly[i], poly[(i + 1) % n]);
+            let (e1, e2) = (p - a, b - p);
+            let (p1, p2) = (p + inward(e1) * d, p + inward(e2) * d);
+            let den = e1.perp_dot(e2);
+            if den.abs() < 1e-9 {
+                p1
+            } else {
+                p1 + e1 * ((p2 - p1).perp_dot(e2) / den)
+            }
+        })
+        .collect()
+}
+
+/// A flight of wooden stairs (see [`PropKind::WoodStair`]): plank treads with rounded nosings
+/// across the full width, each a little over the one below and open between, nailed down
+/// onto three cut stringers (two on narrow stairs). Each stringer has a level seat sawn for
+/// every tread and a plumb riser cut under its nosing, keeps a hand's depth of wood under the
+/// notches, sits level at the foot and stops plumb at the head, its grain up the pitch, so
+/// flights built head to foot read as one stair. Boots have dished and darkened the treads'
+/// middles, and splash has darkened the stringers' feet.
+pub fn wood_stair(size: Vec3, seed: u64) -> Vec<PropPart> {
+    let size = size.max(Vec3::new(0.4, 0.3, 0.4));
+    let mut rng = Rng::new(seed ^ 0x57A1_25ED);
+    let mut kit = Kit::new();
+    let (hx, hy, hz) = (size.x * 0.5, size.y * 0.5, size.z * 0.5);
+    let (steps, rise, going) = stair_steps(size);
+    let slope = rise / going;
+    let stringer_t = 0.045f32.min(size.x * 0.1);
+    let tread_t = 0.042f32.min(rise * 0.4);
+    let nosing = 0.025f32.min(going * 0.2);
+    let iron = [0.34, 0.32, 0.3];
+
+    // A stringer's side view `(z, y)`: tread `k` (1 up) sits on a seat sawn level from the
+    // riser cut under its nosing back to the next riser; the straight lower edge runs parallel
+    // to the line through the notches' inner corners, the throat under it.
+    let seat = |k: usize| -hy + k as f32 * rise - tread_t;
+    let riser = |k: usize| hz - (k - 1) as f32 * going - nosing;
+    let throat = STRINGER_THROAT_M * (1.0 + slope * slope).sqrt();
+    let lower = |z: f32| -hy - tread_t + (hz - nosing - z) * slope - throat;
+    let z_seat = hz - nosing - (tread_t + throat) / slope;
+    let mut outline = vec![
+        Vec2::new(-hz, lower(-hz)),
+        Vec2::new(z_seat, -hy),
+        Vec2::new(riser(1), -hy),
+    ];
+    for k in 1..=steps {
+        outline.push(Vec2::new(riser(k), seat(k)));
+        outline.push(Vec2::new(
+            if k < steps { riser(k + 1) } else { -hz },
+            seat(k),
+        ));
+    }
+    // Into the stringers' frame: local X across the flight, local Z up the pitch, so the grain
+    // on their faces runs up it.
+    let frame = Frame::xz(Vec3::ZERO, Vec3::X, Vec3::new(0.0, rise, -going));
+    let to_frame = |p: Vec2| {
+        let w = Vec3::new(0.0, p.y, p.x);
+        Vec2::new(w.dot(frame.rot.z_axis), w.dot(frame.rot.y_axis))
+    };
+    let full: Vec<Vec2> = outline.into_iter().map(to_frame).collect();
+    let bevel = 0.004;
+    let inner = inset_polygon(&full, bevel);
+    let xo = hx - 0.035 - stringer_t * 0.5;
+    let stringers: Vec<f32> = if size.x > 0.8 {
+        vec![-xo, 0.0, xo]
+    } else {
+        vec![-xo, xo]
+    };
+    let b = kit.mb(WOOD);
+    let v0 = b.vertices.len();
+    for &x in &stringers {
+        let (x0, x1) = (x - stringer_t * 0.5, x + stringer_t * 0.5);
+        let rings = [
+            (x0, inner.as_slice()),
+            (x0 + bevel, full.as_slice()),
+            (x1 - bevel, full.as_slice()),
+            (x1, inner.as_slice()),
+        ];
+        loft(
+            b,
+            &frame,
+            &rings,
+            30.0,
+            [true, true],
+            wood_tint(&mut rng),
+            rng_uv(&mut rng),
+        );
+    }
+    let foot = -hy;
+    shade(b, v0, |p, _| {
+        let k = 1.0 - 0.2 * (1.0 - smoothstep(foot, foot + 0.3, p.y));
+        [k, k * 0.98, k * 0.95]
+    });
+
+    // Treads across the full width, each from its nosing back to the next riser.
+    let tv = b.vertices.len();
+    let tt = b.indices.len();
+    let mut treads = Vec::with_capacity(steps);
+    for k in 1..=steps {
+        let front = hz - (k - 1) as f32 * going;
+        let back = (front - going - nosing).max(-hz);
+        let half = Vec3::new(hx - 0.004, tread_t * 0.5, (front - back) * 0.5);
+        let center = Vec3::new(
+            rng.range(-0.002, 0.002),
+            seat(k) + half.y + rng.range(0.0, 0.0015),
+            (front + back) * 0.5,
+        );
+        let along = stations(-half.x, half.x, &[0.0], 0.15);
+        bevel_box(
+            b,
+            &Frame::new(
+                center,
+                Mat3::from_rotation_y(rng.range(-0.004, 0.004))
+                    * Mat3::from_rotation_x(rng.range(-0.003, 0.003)),
+            ),
+            &BoxSpec::new(half, 0.007)
+                .splits([&along, &[], &[]])
+                .tint(wood_tint(&mut rng))
+                .uv(rng_uv(&mut rng)),
+        );
+        treads.push((center, half));
+    }
+    // Dished a few millimeters where boots land, and darker there.
+    let s = seed;
+    deform(b, tv, |p| {
+        let w = (-(p.x / (hx * 0.45)).powi(2)).exp();
+        p - Vec3::Y * (0.0025 * w) + Vec3::Y * (0.0006 * n3(p, 5.0, s))
+    });
+    shade(b, tv, |p, n| {
+        if n.y > 0.5 {
+            let w = (-(p.x / (hx * 0.4)).powi(2)).exp();
+            let k = 1.0 - 0.16 * w;
+            [k, k * 0.97, k * 0.92]
+        } else {
+            [1.0; 3]
+        }
+    });
+    auto_smooth(b, tv, tt, 30.0);
+
+    // Two nails down through each tread into each stringer.
+    let m = kit.mb(METAL);
+    for (k, &(c, half)) in treads.iter().enumerate() {
+        let r = riser(k + 1);
+        for &x in &stringers {
+            for u in [0.3f32, 0.7] {
+                let z = (r - going * u).max(c.z - half.z + 0.03);
+                nail(
+                    m,
+                    Vec3::new(
+                        x + rng.range(-0.005, 0.005),
+                        c.y + half.y,
+                        z + rng.range(-0.01, 0.01),
+                    ),
+                    Vec3::Y,
+                    0.005,
+                    iron,
+                );
+            }
+        }
+    }
+    kit.finish(Ao {
+        reach: 0.18,
         strength: 0.6,
         ground: false,
     })

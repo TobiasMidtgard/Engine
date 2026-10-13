@@ -6,7 +6,7 @@ use engine_core::prelude::*;
 use engine_render::{Mesh, PointLight};
 
 use super::procgen::{Rand, append, beveled_box, fbm_world, hex, smooth, tube, unit, vert};
-use super::ribbon::{self, PATH_Y, Ribbon, columns, frame, point};
+use super::ribbon::{self, PATH_Y, Ribbon, Surf, columns, frame, point};
 use super::{Batch, Mat, Out, Part, sky_volume};
 use crate::ReverbZone;
 use crate::demo::{STRETCHES, TRAIL_WIDTH, stretch_start, trail_point};
@@ -90,12 +90,13 @@ pub(super) fn boardwalk() -> Out {
     let mut rng = Rand::new(0xb0a2d);
 
     // Damp soil under the boards.
-    let cover = |_: f32| 1.0;
-    let h = |_: f64, x: f32, w: Vec2| {
-        0.006 + fbm_world(w.x, w.y, 0.4, 3, 0x81) * 0.004 + 0.03 * smooth(1.2, 1.45, x.abs())
+    let soil = |_: f64, x: f32, w: Vec2| {
+        Surf::new(
+            0.006 + fbm_world(w.x, w.y, 0.4, 3, 0x81) * 0.004 + 0.03 * smooth(1.2, 1.45, x.abs()),
+            1.0,
+            Vec3::splat(0.75 + 0.15 * fbm_world(w.x, w.y, 1.0, 2, 0x82)),
+        )
     };
-    let tint =
-        |_: f64, _: f32, w: Vec2| Vec3::splat(0.75 + 0.15 * fbm_world(w.x, w.y, 1.0, 2, 0x82));
     out.parts.extend(ribbon::ribbon(&Ribbon {
         mat: Mat::Soil,
         s0: s0 - 0.02,
@@ -104,9 +105,7 @@ pub(super) fn boardwalk() -> Out {
         fade_out: 0.0,
         ds: 0.1,
         columns: columns(1.45, 0.1, 2.0, 0.1, 2.0, 0.1),
-        cover: &cover,
-        height: &h,
-        tint: &tint,
+        surface: &soil,
         shadows: false,
     }));
 
@@ -147,6 +146,8 @@ pub(super) fn boardwalk() -> Out {
         let len = 2.6 + rng.normal(0.01);
         let off = Vec2::new(rng.range(0.0, 2.0), rng.range(0.0, 0.5));
         let moss_seed = rng.seed();
+        // Grit and dust carried on from the gravel, over the first boards.
+        let carried = 1.0 - smooth(0.0, 1.8, (s - s0) as f32);
         let mesh = beveled_box(Vec3::new(len, 0.028, 0.14), 0.0045, 0.2, off, |p| {
             let ax = p.x.abs();
             let end = smooth(0.95, 1.3, ax);
@@ -160,7 +161,14 @@ pub(super) fn boardwalk() -> Out {
             let under = 1.0 - smooth(-0.014, 0.0, p.y);
             let c = tone * (1.0 + 0.1 * worn) * (1.0 - 0.3 * end) * (1.0 - 0.45 * under);
             let c = c.lerp(Vec3::new(0.32, 0.4, 0.18), moss * 0.55);
-            c.extend(1.0)
+            let grit = carried
+                * (0.35 + 0.65 * worn)
+                * smooth(
+                    -0.3,
+                    0.3,
+                    fbm_world(p.x * 2.0, s as f32 * 3.0, 0.5, 2, moss_seed),
+                );
+            c.lerp(Vec3::new(0.62, 0.58, 0.52), grit * 0.6).extend(1.0)
         });
         let rot = trail_rot(s)
             * Quat::from_rotation_y(rng.normal(0.004))
@@ -281,22 +289,37 @@ fn railings_timber(out: &mut Out, rng: &mut Rand, s0: f64, s1: f64) {
 
 // ------------------------------------------------------------------------- grating
 
+/// Half the width of the pit the grating spans, meters.
+const PIT_HALF: f32 = 1.27;
+/// Height of the bearing bars, meters.
+const BAR_H: f32 = 0.03;
+
 /// A walkway of galvanized bar grating panels (bearing bars across, twisted cross rods)
-/// in an angle-iron frame on concrete curbs, over a dark pit with stones and standing
-/// water, with tubular steel railings.
+/// set between two steel channel stringers on concrete curbs, over a dark pit of wet silt,
+/// stones and leaves, with tubular steel railings. The bar tops are worn bright down the
+/// middle where feet go and grimy and rusty toward the sides; the bars darken down into
+/// the pit, which a sky-light volume keeps in shade ([`grating_volume`]). Weeds grow up
+/// through the gaps along the edges.
 pub(super) fn grating() -> Out {
     let (s0, s1) = range("metal");
     let mut out = Out::default();
     let mut b = Batch::default();
     let mut rng = Rand::new(0x9a7e);
-    let pit_half = 1.27f32;
+    let len = (s1 - s0) as f32;
+    let mid = (s0 + s1) * 0.5;
 
-    // The pit floor and its puddles.
-    let cover = |_: f32| 1.0;
-    let floor = |_: f64, _: f32, w: Vec2| 0.0045 + fbm_world(w.x, w.y, 0.5, 3, 0x91) * 0.0045;
-    let tint = |_: f64, x: f32, w: Vec2| {
-        Vec3::splat(0.55 + 0.15 * fbm_world(w.x, w.y, 0.8, 2, 0x92))
-            * (1.0 - 0.3 * smooth(0.9, 1.27, x.abs()))
+    // The pit floor: dark, wet silt and grit a few centimeters under the bars.
+    let floor = |_: f64, x: f32, w: Vec2| {
+        let wet = smooth(-0.2, 0.4, fbm_world(w.x, w.y, 0.7, 2, 0x93));
+        let tone = 0.4 + 0.12 * fbm_world(w.x, w.y, 0.8, 2, 0x92);
+        Surf::new(
+            0.003 + fbm_world(w.x, w.y, 0.5, 3, 0x91) * 0.003,
+            1.0,
+            Vec3::new(1.0, 0.93, 0.84)
+                * tone
+                * (1.0 - 0.35 * wet)
+                * (1.0 - 0.3 * smooth(0.9, PIT_HALF, x.abs())),
+        )
     };
     out.parts.extend(ribbon::ribbon(&Ribbon {
         mat: Mat::PitFloor,
@@ -305,25 +328,8 @@ pub(super) fn grating() -> Out {
         fade_in: 0.0,
         fade_out: 0.0,
         ds: 0.05,
-        columns: columns(pit_half, 0.05, 2.0, 0.05, 2.0, 0.05),
-        cover: &cover,
-        height: &floor,
-        tint: &tint,
-        shadows: false,
-    }));
-    let water = |_: f64, _: f32, _: Vec2| 0.0052;
-    let white = |_: f64, _: f32, _: Vec2| Vec3::ONE;
-    out.parts.extend(ribbon::ribbon(&Ribbon {
-        mat: Mat::Water,
-        s0: s0 + 0.15,
-        s1: s1 - 0.15,
-        fade_in: 0.0,
-        fade_out: 0.0,
-        ds: 0.25,
-        columns: columns(pit_half - 0.02, 0.2, 2.0, 0.2, 2.0, 0.2),
-        cover: &cover,
-        height: &water,
-        tint: &white,
+        columns: columns(PIT_HALF, 0.05, 2.0, 0.05, 2.0, 0.05),
+        surface: &floor,
         shadows: false,
     }));
     for _ in 0..90 {
@@ -337,90 +343,192 @@ pub(super) fn grating() -> Out {
             Quat::from_rotation_y(rng.range(0.0, 6.3)),
             Vec3::new(size, size * 0.6, size * rng.range(0.8, 1.3)),
             point(s, x, 0.002),
-            (hex(0x4a4642) * rng.range(0.7, 1.2)).extend(1.0),
+            (hex(0x3e3a36) * rng.range(0.7, 1.2)).extend(1.0),
+        );
+    }
+    // Wet, blackened leaves blown in on the pit floor, and dry ones on the bars and caught
+    // in the gaps (fewer where feet go).
+    for k in 0..(len * 14.0) as usize {
+        let in_pit = k % 3 != 0;
+        let s = rng.range(s0 as f32 + 0.15, s1 as f32 - 0.15) as f64;
+        let x = rng.range(-1.24, 1.24);
+        let trodden = 1.0 - smooth(0.35, 0.8, x.abs());
+        if !in_pit && rng.chance(0.75 * trodden) {
+            continue;
+        }
+        let browns = [hex(0x8a5a2a), hex(0x6e4a26), hex(0x9a7038), hex(0x5a3c22)];
+        let (y, tilt_sd, col) = if in_pit {
+            (0.008, 0.25, browns[rng.below(4)] * rng.range(0.35, 0.55))
+        } else if rng.chance(0.4) {
+            // Wedged in a gap, standing steeply.
+            (
+                PATH_Y - 0.012,
+                1.4,
+                browns[rng.below(4)] * rng.range(0.7, 1.0),
+            )
+        } else {
+            (
+                PATH_Y + 0.004,
+                0.12,
+                browns[rng.below(4)] * rng.range(0.75, 1.05),
+            )
+        };
+        let rot = super::procgen::tilt(
+            Vec3::new(rng.normal(tilt_sd), 1.0, rng.normal(tilt_sd)),
+            rng.range(0.0, 6.3),
+        );
+        let l = rng.range(0.04, 0.08);
+        super::procgen::leaf(
+            b.at(s, Mat::Leaf),
+            point(s, x, y),
+            rot,
+            l,
+            l * rng.range(0.6, 0.9),
+            rng.range(-0.008, 0.002),
+            rng.range(0.0, 0.01),
+            rng.below(4) as u32,
+            col.extend(1.0),
+        );
+    }
+    // Weeds rooted in the silt along the edges, growing up through the gaps in clusters.
+    let mut s = s0 + 0.2;
+    while s < s1 - 0.2 {
+        s += rng.range(0.08, 0.3) as f64;
+        let side = if rng.chance(0.5) { -1.0 } else { 1.0 };
+        let p = point(s, side, 0.0);
+        if fbm_world(p.x, p.z, 0.9, 2, 0x9a1) < 0.05 {
+            continue;
+        }
+        let x = side * (PIT_HALF - 0.03 - rng.f().powf(1.6) * 0.32);
+        let tall = rng.range(0.07, 0.24);
+        super::dress::clump(
+            b.at(s, Mat::Grass),
+            &mut rng,
+            point(s, x, 0.004),
+            super::dress::ClumpStyle {
+                blades: (3, 10),
+                radius: 0.035,
+                height: (tall * 0.5, tall),
+                lean: (0.05, 0.35),
+                toward: None,
+                width: (0.003, 0.006),
+                palette: super::dress::Palette::Meadow,
+            },
         );
     }
 
-    // Concrete curbs along both sides and across both ends.
-    let len = (s1 - s0) as f32;
-    let mid = (s0 + s1) * 0.5;
+    // Concrete curbs along both sides (just above the ground, under the stringers and the
+    // railing posts) and across both ends.
     for side in [-1.0f32, 1.0] {
+        let seed = rng.seed();
         let curb = beveled_box(
-            Vec3::new(0.2, 0.07, len),
-            0.008,
-            0.5,
+            Vec3::new(0.28, 0.04, len),
+            0.01,
+            0.4,
             Vec2::new(rng.f(), 0.0),
             |p| {
-                let low = 1.0 - smooth(-0.03, 0.02, p.y);
-                (Vec3::splat(0.82) * (1.0 - 0.3 * low)).extend(1.0)
+                let low = 1.0 - smooth(-0.02, 0.02, p.y);
+                let stain = smooth(0.0, 0.6, fbm_world(p.z, p.y * 4.0 + p.x, 0.5, 3, seed));
+                // Moss creeping in from the lawn side.
+                let moss = smooth(0.2, 0.7, fbm_world(p.z, p.x * 3.0, 0.35, 3, seed ^ 0x55))
+                    * smooth(-0.04, 0.14, p.x * side);
+                let c = Vec3::splat(0.8 * (1.0 - 0.3 * low) * (1.0 - 0.25 * stain));
+                c.lerp(Vec3::new(0.32, 0.38, 0.18), moss * 0.7).extend(1.0)
             },
         );
-        let mut part = Part::own(
-            curb,
-            Mat::Concrete,
-            point(mid, side * (pit_half + 0.1), 0.021),
-        );
+        let mut part = Part::own(curb, Mat::Concrete, point(mid, side * 1.41, -0.005));
         part.rot = trail_rot(mid);
         out.parts.push(part);
     }
     for ss in [s0 + 0.06, s1 - 0.06] {
         let curb = beveled_box(
-            Vec3::new(2.0 * pit_half, 0.07, 0.12),
+            Vec3::new(2.0 * PIT_HALF, 0.07, 0.12),
             0.008,
             0.5,
             Vec2::new(rng.f(), 0.0),
-            |_| Vec4::new(0.8, 0.8, 0.8, 1.0),
+            |p| {
+                let low = 1.0 - smooth(-0.03, 0.02, p.y);
+                (Vec3::splat(0.8) * (1.0 - 0.3 * low)).extend(1.0)
+            },
         );
         let mut part = Part::own(curb, Mat::Concrete, point(ss, 0.0, 0.021));
         part.rot = trail_rot(ss);
         out.parts.push(part);
     }
 
-    // The angle-iron frame round the opening, with bolts.
-    let frame_len = len - 0.24;
+    // Steel channel stringers on the curbs along both sides, toes outward, the grating set
+    // inside them: web, top and bottom flanges, stiffeners at every panel joint and a bolt
+    // through the web every half meter.
+    let inner = len - 0.24;
+    let panels = inner.round().max(1.0) as usize;
+    let joint = |k: usize| s0 + 0.12 + (inner as f64) * k as f64 / panels as f64;
+    let st_len = len - 0.04;
     for side in [-1.0f32, 1.0] {
-        let x = side * pit_half;
-        let vert_leg = block(Vec3::new(0.005, 0.035, frame_len));
-        let mut part = Part::own(
-            vert_leg,
-            Mat::Zinc,
-            point(mid, x - side * 0.0025, PATH_Y - 0.0175),
-        );
-        part.rot = trail_rot(mid);
-        out.parts.push(part);
-        let flat_leg = block(Vec3::new(0.045, 0.005, frame_len));
-        let mut part = Part::own(
-            flat_leg,
-            Mat::Zinc,
-            point(mid, x + side * 0.0225, PATH_Y - 0.0025),
-        );
-        part.rot = trail_rot(mid);
-        out.parts.push(part);
-        let mut s = s0 + 0.3;
-        while s < s1 - 0.25 {
-            let p = point(s, x + side * 0.03, PATH_Y);
-            let bolt = tube(
-                &[p, p + Vec3::Y * 0.006],
-                6,
-                true,
-                |_, _| 0.0095,
-                |_| Vec4::new(0.8, 0.8, 0.8, 1.0),
-            );
+        let seed = rng.seed();
+        for (size, x, y) in [
+            (Vec3::new(0.006, 0.063, st_len), PIT_HALF + 0.003, 0.0465),
+            (Vec3::new(0.05, 0.006, st_len), PIT_HALF + 0.025, 0.075),
+            (Vec3::new(0.05, 0.006, st_len), PIT_HALF + 0.025, 0.018),
+        ] {
+            let piece = beveled_box(size, 0.0015, 0.25, Vec2::new(rng.f(), 0.0), |p| {
+                weathered_steel(p.z, y + p.y, x * side, seed)
+            });
+            let mut part = Part::own(piece, Mat::Grating, point(mid, side * x, y));
+            part.rot = trail_rot(mid);
+            out.parts.push(part);
+        }
+        let web_out = PIT_HALF + 0.006;
+        for k in 0..=panels {
+            let s = joint(k).clamp(s0 + 0.05, s1 - 0.05);
+            let mut plate = block(Vec3::new(0.043, 0.051, 0.006));
+            paint(&mut plate, |p| {
+                weathered_steel(s as f32, p.y + 0.0465, side, seed)
+            });
             append(
-                b.at(s, Mat::Zinc),
-                &bolt,
-                Quat::IDENTITY,
+                b.at(s, Mat::Grating),
+                &plate,
+                trail_rot(s),
                 Vec3::ONE,
-                Vec3::ZERO,
+                point(s, side * (web_out + 0.0215), 0.0465),
                 Vec4::ONE,
             );
-            s += 0.45;
+        }
+        let mut s = s0 + 0.3;
+        while s < s1 - 0.25 {
+            let n = side * frame(s).2;
+            let p = point(s, side * web_out, 0.0465);
+            let c = weathered_steel(s as f32, 0.04, side, seed).truncate() * 0.85;
+            let washer = tube(
+                &[p, p + n * 0.002],
+                12,
+                true,
+                |_, _| 0.012,
+                |_| c.extend(1.0),
+            );
+            let head = tube(
+                &[p + n * 0.002, p + n * 0.0075],
+                6,
+                true,
+                |_, _| 0.0085,
+                |_| c.extend(1.0),
+            );
+            for m in [&washer, &head] {
+                append(
+                    b.at(s, Mat::Zinc),
+                    m,
+                    Quat::IDENTITY,
+                    Vec3::ONE,
+                    Vec3::ZERO,
+                    Vec4::ONE,
+                );
+            }
+            s += 0.5;
         }
     }
     // A support beam along the middle, under the bars.
     {
-        let mut beam = block(Vec3::new(0.07, 0.006, frame_len));
-        let web = block(Vec3::new(0.006, 0.022, frame_len));
+        let mut beam = block(Vec3::new(0.07, 0.006, inner));
+        let web = block(Vec3::new(0.006, 0.022, inner));
         append(
             &mut beam,
             &web,
@@ -429,50 +537,196 @@ pub(super) fn grating() -> Out {
             Vec3::new(0.0, -0.014, 0.0),
             Vec4::ONE,
         );
-        let mut part = Part::own(beam, Mat::Zinc, point(mid, 0.0, 0.027));
+        paint(&mut beam, |_| Vec4::new(0.45, 0.43, 0.4, 1.0));
+        let mut part = Part::own(beam, Mat::Grating, point(mid, 0.0, 0.027));
         part.rot = trail_rot(mid);
         out.parts.push(part);
     }
 
-    // Grating panels.
-    let inner = len - 0.24;
-    let panels = (inner / 1.0).round().max(1.0) as usize;
+    // Grating panels, each a little different, held down by clips at their corners.
     let panel_len = inner / panels as f32 - 0.006;
-    let span = 2.0 * pit_half - 0.012;
-    let key = "grating-panel";
-    out.shared
-        .push((key.into(), grating_panel(span, panel_len)));
+    let span = 2.0 * PIT_HALF - 0.012;
     for k in 0..panels {
-        let s = s0 + 0.12 + (inner as f64) * (k as f64 + 0.5) / panels as f64;
-        out.parts.push(Part::shared(
-            key,
-            Mat::Zinc,
-            point(s, 0.0, PATH_Y),
-            trail_rot(s),
-            Vec3::ONE,
-        ));
+        let s = (joint(k) + joint(k + 1)) * 0.5;
+        let (mut tops, mut steel) = (Mesh::default(), Mesh::default());
+        grating_panel(&mut tops, &mut steel, span, panel_len, s, &mut rng);
+        let rot = trail_rot(s);
+        let at = point(s, 0.0, PATH_Y);
+        append(b.at(s, Mat::Tread), &tops, rot, Vec3::ONE, at, Vec4::ONE);
+        append(b.at(s, Mat::Grating), &steel, rot, Vec3::ONE, at, Vec4::ONE);
     }
 
-    railings_steel(&mut out, &mut b, s0, s1);
+    railings_steel(&mut out, &mut b, s0, s1, 0.015);
     out.parts.extend(b.finish());
     out
 }
 
-/// One grating panel, its top at y = 0: bearing bars across (x) every 33 mm, twisted
-/// square cross rods along (z) every 100 mm, banding bars at both ends.
-fn grating_panel(span: f32, len: f32) -> Mesh {
-    let mut m = Mesh::default();
+/// Colour of weathered galvanized steel at `along` meters and `y` up: duller and darker
+/// low down, with rust bleeding out in patches toward the ground.
+fn weathered_steel(along: f32, y: f32, x: f32, seed: u32) -> Vec4 {
+    let low = 1.0 - smooth(0.0, 0.07, y);
+    let rust = smooth(0.15, 0.6, fbm_world(along, y * 6.0 + x, 0.3, 3, seed)) * (0.35 + 0.65 * low);
+    let grey = Vec3::splat(0.82 - 0.38 * low) * Vec3::new(1.0, 0.98, 0.94);
+    grey.lerp(Vec3::new(0.52, 0.3, 0.16), rust * 0.75)
+        .extend(1.0)
+}
+
+/// Recolour every vertex of `m` by its position.
+fn paint(m: &mut Mesh, color: impl Fn(Vec3) -> Vec4) {
+    for v in &mut m.vertices {
+        v.color = color(Vec3::from(v.position)).to_array();
+    }
+}
+
+/// A quad `p` (corners in order round it) facing `n`.
+fn quad(m: &mut Mesh, p: [Vec3; 4], n: Vec3, uv: [Vec2; 4], c: [Vec4; 4]) {
+    let base = m.vertices.len() as u32;
+    for i in 0..4 {
+        m.vertices.push(vert(p[i], n, uv[i], c[i]));
+    }
+    let g = (p[1] - p[0]).cross(p[2] - p[0]);
+    if g.dot(n) >= 0.0 {
+        m.indices
+            .extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+    } else {
+        m.indices
+            .extend_from_slice(&[base, base + 2, base + 1, base, base + 3, base + 2]);
+    }
+}
+
+/// How one grating bar looks: UVs of its top, its top's colour, and its sides' colour at
+/// (x, z) and `t` up its side (0 at the bottom, 1 at the top).
+struct BarLook<'a> {
+    top_uv: &'a dyn Fn(f32, f32) -> Vec2,
+    top: Vec4,
+    side: &'a dyn Fn(f32, f32, f32) -> Vec4,
+}
+
+/// A flat bar on edge, `BAR_H` tall under y = 0 and `thick` thick, from `a` to `b` along
+/// local x at z = `at` (or along z at x = `at` when `along_z`). Its top goes into `tops`,
+/// its two long sides into `steel`, split about every 0.2 m for their colours; the
+/// underside and ends are never seen.
+#[allow(clippy::too_many_arguments)]
+fn flat_bar(
+    tops: &mut Mesh,
+    steel: &mut Mesh,
+    along_z: bool,
+    at: f32,
+    a: f32,
+    b: f32,
+    thick: f32,
+    look: &BarLook,
+) {
+    let h = thick * 0.5;
+    let p = |l: f32, c: f32, y: f32| {
+        if along_z {
+            Vec3::new(at + c, y, l)
+        } else {
+            Vec3::new(l, y, at + c)
+        }
+    };
+    let across = if along_z { Vec3::X } else { Vec3::Z };
+    let corners = [p(a, -h, 0.0), p(b, -h, 0.0), p(b, h, 0.0), p(a, h, 0.0)];
+    quad(
+        tops,
+        corners,
+        Vec3::Y,
+        corners.map(|q| (look.top_uv)(q.x, q.z)),
+        [look.top; 4],
+    );
+    let n = ((b - a) / 0.2).ceil().max(1.0) as usize;
+    for sign in [-1.0f32, 1.0] {
+        for i in 0..n {
+            let (la, lb) = (
+                a + (b - a) * i as f32 / n as f32,
+                a + (b - a) * (i + 1) as f32 / n as f32,
+            );
+            let q = [
+                p(la, sign * h, -BAR_H),
+                p(lb, sign * h, -BAR_H),
+                p(lb, sign * h, 0.0),
+                p(la, sign * h, 0.0),
+            ];
+            let c = [0.0, 0.0, 1.0, 1.0];
+            quad(
+                steel,
+                q,
+                across * sign,
+                [0, 1, 2, 3].map(|k| Vec2::new([la, lb, lb, la][k], q[k].y)),
+                [0, 1, 2, 3].map(|k| (look.side)(q[k].x, q[k].z, c[k])),
+            );
+        }
+    }
+}
+
+/// One grating panel centred on the trail at `s`, its top at y = 0 (local x across, z back
+/// along the trail): bearing bars across every 33 mm, twisted square cross rods along every
+/// 100 mm, banding bars round it and a clip at each corner. The bar tops go into `tops`
+/// (the worn tread, mapped across the walkway and along the trail), everything else into
+/// `steel`, darkening and rusting down into the pit.
+fn grating_panel(tops: &mut Mesh, steel: &mut Mesh, span: f32, len: f32, s: f64, rng: &mut Rand) {
+    let tone = rng.range(0.86, 1.04);
+    let v_off = rng.range(0.0, 1.92);
+    let seed = rng.seed();
+    let along = |z: f32| s as f32 - z;
+    let top_uv = |x: f32, z: f32| Vec2::new(x + 1.28, along(z) + v_off);
+    // Lighter at the top edge and dark toward the pit; the upper edges polished down the
+    // middle where feet go; dirt in patches away from it, grime toward the stringers and
+    // rust in patches, mostly in the corners.
+    let side = |x: f32, z: f32, t: f32| {
+        let at = along(z);
+        let joint = 1.0 - smooth(0.0, 0.1, len * 0.5 - z.abs());
+        let edge = smooth(span * 0.5 - 0.35, span * 0.5, x.abs());
+        let band = 1.0
+            - smooth(
+                0.3,
+                0.85,
+                x.abs() + 0.12 * fbm_world(x, at, 0.5, 2, seed ^ 0x3),
+            );
+        let rust = smooth(
+            0.3,
+            0.7,
+            fbm_world(x, at, 0.25, 3, seed) + 0.3 * edge + 0.25 * joint,
+        ) * (1.0 - 0.5 * t);
+        let dirt = smooth(0.0, 0.5, fbm_world(x, at, 0.45, 3, seed ^ 0x9)) * (1.0 - 0.6 * band);
+        let worn = band * t.powi(3);
+        let g = ((0.26 + 0.56 * t.powf(0.8)) * (1.0 - 0.35 * edge) * (1.0 - 0.3 * dirt)
+            + 0.22 * worn)
+            * tone;
+        (Vec3::splat(g) * Vec3::new(1.0, 0.97, 0.92).lerp(Vec3::new(1.0, 0.9, 0.78), dirt))
+            .lerp(Vec3::new(0.5, 0.29, 0.16) * (0.55 + 0.45 * t), rust * 0.6)
+            .extend(1.0)
+    };
+    let edge = span * 0.5 - 0.005;
     let bars = (len / 0.033).floor() as usize;
     for k in 0..=bars {
-        let z = -len * 0.5 + 0.004 + (len - 0.008) * k as f32 / bars as f32;
-        let bar = block(Vec3::new(span, 0.03, 0.004));
-        append(
-            &mut m,
-            &bar,
-            Quat::IDENTITY,
-            Vec3::ONE,
-            Vec3::new(0.0, -0.015, z),
-            Vec4::ONE,
+        let z = -len * 0.5 + 0.0075 + (len - 0.015) * k as f32 / bars as f32;
+        let bt = tone * rng.range(0.93, 1.05);
+        let look = BarLook {
+            top_uv: &top_uv,
+            top: Vec4::new(bt, bt, bt, 1.0),
+            side: &side,
+        };
+        flat_bar(tops, steel, false, z, -edge, edge, 0.004, &look);
+    }
+    let band = BarLook {
+        top_uv: &top_uv,
+        top: Vec4::new(tone, tone, tone, 1.0),
+        side: &side,
+    };
+    for z in [-len * 0.5 + 0.0025, len * 0.5 - 0.0025] {
+        flat_bar(tops, steel, false, z, -span * 0.5, span * 0.5, 0.005, &band);
+    }
+    for x in [-span * 0.5 + 0.0025, span * 0.5 - 0.0025] {
+        flat_bar(
+            tops,
+            steel,
+            true,
+            x,
+            -len * 0.5 + 0.005,
+            len * 0.5 - 0.005,
+            0.005,
+            &band,
         );
     }
     let rods = (span / 0.1).floor() as usize;
@@ -490,10 +744,10 @@ fn grating_panel(span: f32, len: f32) -> Mesh {
                 let twist = (a * 2.0 + t * 40.0).cos().abs();
                 0.0035 + 0.0012 * twist
             },
-            |_| Vec4::ONE,
+            |t| side(x, -len * 0.5 + len * t, 0.8),
         );
         append(
-            &mut m,
+            steel,
             &rod,
             Quat::IDENTITY,
             Vec3::ONE,
@@ -501,43 +755,55 @@ fn grating_panel(span: f32, len: f32) -> Mesh {
             Vec4::ONE,
         );
     }
-    for z in [-len * 0.5 + 0.0025, len * 0.5 - 0.0025] {
-        let band = block(Vec3::new(span, 0.03, 0.005));
+    // Saddle clips bolted down at the corners.
+    for (cx, cz) in [(-1.0f32, -1.0f32), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)] {
+        let at = Vec3::new(cx * (span * 0.5 - 0.07), 0.0, cz * (len * 0.5 - 0.06));
+        let c = side(at.x, at.z, 0.9) * Vec4::new(0.85, 0.85, 0.85, 1.0);
+        let clip = block(Vec3::new(0.036, 0.004, 0.075));
         append(
-            &mut m,
-            &band,
+            steel,
+            &clip,
             Quat::IDENTITY,
             Vec3::ONE,
-            Vec3::new(0.0, -0.015, z),
+            at + Vec3::Y * 0.002,
+            c,
+        );
+        let head = tube(
+            &[at + Vec3::Y * 0.004, at + Vec3::Y * 0.0095],
+            6,
+            true,
+            |_, _| 0.0075,
+            |_| c,
+        );
+        append(
+            steel,
+            &head,
+            Quat::IDENTITY,
+            Vec3::ONE,
+            Vec3::ZERO,
             Vec4::ONE,
         );
     }
-    for x in [-span * 0.5 + 0.0025, span * 0.5 - 0.0025] {
-        let band = block(Vec3::new(0.005, 0.03, len));
-        append(
-            &mut m,
-            &band,
-            Quat::IDENTITY,
-            Vec3::ONE,
-            Vec3::new(x, -0.015, 0.0),
-            Vec4::ONE,
-        );
-    }
-    m
 }
 
-fn railings_steel(out: &mut Out, b: &mut Batch, s0: f64, s1: f64) {
+/// Tubular steel railings on both sides, the posts standing on base plates at `foot`
+/// meters up (grimy toward their feet).
+fn railings_steel(out: &mut Out, b: &mut Batch, s0: f64, s1: f64, foot: f32) {
     let x = 1.43;
     let top = 1.07;
     let n = ((s1 - s0) / 1.5).round().max(1.0) as usize;
     let white = |_: f32| Vec4::ONE;
+    let grimy = |t: f32| {
+        let g = 0.72 + 0.28 * smooth(0.0, 0.12, t);
+        Vec4::new(g, g * 0.98, g * 0.94, 1.0)
+    };
     out.shared.push(("rail-post".into(), {
         let mut m = tube(
-            &[Vec3::ZERO, Vec3::Y * (top - PATH_Y)],
+            &[Vec3::ZERO, Vec3::Y * (top - foot)],
             16,
             true,
             |_, _| 0.021,
-            white,
+            grimy,
         );
         let plate = block(Vec3::new(0.11, 0.008, 0.11));
         append(
@@ -567,7 +833,7 @@ fn railings_steel(out: &mut Out, b: &mut Batch, s0: f64, s1: f64) {
                 Quat::IDENTITY,
                 Vec3::ONE,
                 Vec3::ZERO,
-                Vec4::ONE,
+                Vec4::new(0.75, 0.72, 0.68, 1.0),
             );
         }
         m
@@ -580,7 +846,7 @@ fn railings_steel(out: &mut Out, b: &mut Batch, s0: f64, s1: f64) {
             out.parts.push(Part::shared(
                 "rail-post",
                 Mat::Zinc,
-                point(s, side * x, PATH_Y),
+                point(s, side * x, foot),
                 trail_rot(s),
                 Vec3::ONE,
             ));
@@ -697,6 +963,29 @@ pub(super) fn underpass_volumes(world: &mut World, origin: DVec3) {
     ));
 }
 
+/// Shade in the pit under the grating: the renderer would light the pit floor and the
+/// bars' lower sides with the whole open sky, but down there they see little more than the
+/// bars and the pit walls. Sky light fades out over the bars' depth to a dim floor, so the
+/// gaps read as deep and dark. Spawned with or without a renderer.
+pub(super) fn grating_volume(world: &mut World, origin: DVec3) {
+    let Some(s0) = stretch_start("metal") else {
+        return;
+    };
+    let (_, s1) = range("metal");
+    let mid = (s0 + s1) * 0.5;
+    let (_, d) = trail_point(mid);
+    let half_y = 0.045;
+    world.spawn((
+        Name::new("Grating pit shade"),
+        Transform::from_translation(origin + point(mid, 0.0, PATH_Y - half_y).as_dvec3())
+            .with_rotation(crate::demo::yaw(d)),
+        engine_render::SkyLightVolume::new([PIT_HALF + 0.01, half_y, (s1 - s0) as f32 * 0.5 - 0.1])
+            .open(engine_render::BoxFace::PosY)
+            .with_sky_light(0.12)
+            .with_fade(0.05),
+    ));
+}
+
 /// Cast concrete: a board-formed wall on the loop's inside, chamfered pillars on the
 /// outside, a slab roof with warm lamps under it, floor slabs with expansion joints and
 /// wear, and a channel drain along the wall.
@@ -769,13 +1058,15 @@ pub(super) fn underpass() -> Out {
     }
 
     // Floor slabs with expansion joints; lighter and smoother where people walk, dirtier
-    // toward the wall.
+    // toward the wall, and dusted with sand blown in from the dunes at the far end.
     let slabs = 3;
     let slab_len = (u.s1 - u.s0) as f32 / slabs as f32;
     let inside = u.inside;
+    let end = u.s1 as f32;
     for k in 0..slabs {
         let s = u.s0 + slab_len as f64 * (k as f64 + 0.5);
         let seed = rng.seed();
+        let mid = s as f32;
         let slab = beveled_box(
             Vec3::new(4.6, 0.09, slab_len - 0.014),
             0.004,
@@ -791,7 +1082,10 @@ pub(super) fn underpass() -> Out {
                 );
                 let c =
                     Vec3::splat(1.0 + 0.1 * worn) * (1.0 - 0.25 * wallward) * (1.0 - 0.18 * stain);
-                c.extend(1.0)
+                let to_sand = end - (mid - p.z);
+                let streaks = fbm_world(p.x * 0.5, p.z * 2.0, 0.4, 3, seed ^ 0x5a);
+                let dust = 1.0 - smooth(-0.3, 2.4, to_sand + 1.1 * streaks);
+                c.lerp(Vec3::new(1.15, 0.95, 0.64), dust * 0.85).extend(1.0)
             },
         );
         out.parts.push(Part {

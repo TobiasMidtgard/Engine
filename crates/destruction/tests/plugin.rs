@@ -454,6 +454,41 @@ fn the_hill_demo_tunnels_caves_in_builds_and_rebuilds() {
             );
         }
     }
+    // The yard's builder put its support view away and built stairs up to the deck's end: a
+    // flight on the ground and one from its head to the deck's edge, both standing.
+    let yard = hill.builders[hill::Site::Yard as usize].unwrap();
+    let yard_pieces: Vec<(BuildKind, PieceState, bool)> = app
+        .world
+        .query_filtered::<(&BuiltPiece, &PieceState, &ShowSupport), Without<Debris>>()
+        .iter(&app.world)
+        .filter(|(b, ..)| b.builder == Some(yard))
+        .map(|(b, s, show)| (b.kind, *s, show.on))
+        .collect();
+    assert_eq!(yard_pieces.len(), 34, "the cabin and its stairs");
+    assert!(
+        yard_pieces.iter().all(|(.., shown)| !shown),
+        "the cabin is back in its own colors"
+    );
+    let stairs: Vec<&PieceState> = yard_pieces
+        .iter()
+        .filter(|(k, ..)| *k == BuildKind::WoodStair)
+        .map(|(_, s, _)| s)
+        .collect();
+    assert_eq!(stairs.len(), 2, "two flights of stairs");
+    for state in stairs {
+        assert!(
+            state.collapse_in.is_none() && state.support >= 0.45 * state.max_support,
+            "the stairs stand: {state:?}"
+        );
+    }
+    let yard_ghosts = app
+        .world
+        .query::<&build::BuildGhost>()
+        .iter(&app.world)
+        .filter(|g| g.builder == yard)
+        .count();
+    assert_eq!(yard_ghosts, 0, "done, the yard's builder shows no ghost");
+
     // Then a pit is dug under it and the whole shelter drops in.
     run(&mut app, 4.3);
     let fallen = app
@@ -784,6 +819,7 @@ fn standing_pieces_are_solid_with_a_physics_module() {
     for (kind, at) in [
         (BuildKind::WoodFloor, [0.0, 0.0, 0.0]),
         (BuildKind::WoodGable, [5.0, 0.0, 0.0]),
+        (BuildKind::WoodStair, [10.0, 0.0, 0.0]),
     ] {
         {
             let mut builder = app.world.get_mut::<Builder>(b).unwrap();
@@ -819,7 +855,7 @@ fn standing_pieces_are_solid_with_a_physics_module() {
         .iter(&app.world)
         .map(|(e, p)| (e, p.kind))
         .collect();
-    assert_eq!(built.len(), 2, "{built:?}");
+    assert_eq!(built.len(), 3, "{built:?}");
     for (e, kind) in built {
         let c = app
             .world
@@ -845,6 +881,28 @@ fn standing_pieces_are_solid_with_a_physics_module() {
                     .map(|p| p.y)
                     .fold(f32::MIN, f32::max);
                 assert!(low_end_top < -h.y * 0.9, "{points:?}");
+            }
+            // A sloping slab whose top is a ramp through the treads: half a step up at the
+            // foot (+Z), level with the top at the head, and open underneath the head.
+            (BuildKind::WoodStair, ColliderShape::ConvexHull { points }) => {
+                let at = |near_foot: bool| {
+                    points
+                        .iter()
+                        .filter(|p| {
+                            if near_foot {
+                                p.z > h.z * 0.95
+                            } else {
+                                p.z < -h.z * 0.95
+                            }
+                        })
+                        .map(|p| p.y)
+                        .fold((f32::MAX, f32::MIN), |(lo, hi), y| (lo.min(y), hi.max(y)))
+                };
+                let (foot_lo, foot_hi) = at(true);
+                let (head_lo, head_hi) = at(false);
+                assert!(foot_lo < -h.y + 0.03 && foot_hi < -h.y + 0.12, "{points:?}");
+                assert!(head_hi > h.y - 0.02, "{points:?}");
+                assert!(head_lo > -h.y + 0.5, "{points:?}");
             }
             other => panic!("unexpected shape {other:?}"),
         }

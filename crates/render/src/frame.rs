@@ -70,6 +70,16 @@ pub struct FrameUniform {
     pub far_shadow: [[f32; 4]; 4],
     /// Far shadow map: reach (m, 0 = off), texel size (m), clip depth per meter, array layer.
     pub far_shadow_params: [f32; 4],
+    /// Sky: the flat cloud layer on (1/0, `RenderSettings::sky_cloud_layer`), night (0 day ..
+    /// 1 night: stars and the night sky's floor; see [`sky_night`]), the stand-in moon's glow
+    /// opposite a sun below the horizon (0..1), unused.
+    pub sky: [f32; 4],
+    /// The ground's weather map (`surface_weather`, set by the renderer): its minimum corner
+    /// relative to the camera (x, z, m) and its size along x and z (m; 0 = no map).
+    pub surface_map: [f32; 4],
+    /// The open ground's weather in the map's encoding (wetness, standing water / 0.04 m, snow /
+    /// 0.3 m, scorch): beyond the map, and for roofs over ground they keep dry.
+    pub surface_open: [f32; 4],
 }
 
 /// Most [`SkyLightVolume`]s shaded per frame (nearest the camera first).
@@ -290,6 +300,34 @@ pub fn estimate_scene_luminance(sun_dir: Vec3, sun_camera: Vec3, ambient: f32) -
 fn luminance(c: Vec3) -> f32 {
     c.dot(Vec3::new(0.2126, 0.7152, 0.0722))
 }
+
+/// How much it is night for the sky (stars and the night sky's floor): 0 by day .. 1 at night,
+/// and how much of the stand-in moon (a glow opposite the sun) shows.
+///
+/// Night is decided by the main light (the brightest directional light): `sun_dir` toward it,
+/// `up` the local vertical, `sun_color` its color times illuminance (lux) and `sun_camera` what
+/// reaches the camera through the air. A light brings day when it is up (night falls as it sinks
+/// from 10° above the horizon to 4° below) and brighter than a moon: more than 0.5 to 2 lux after
+/// the air. So a sun is day however dim (one under a storm deck at noon gives about 10 lux), a
+/// moon (0.3 lux at most) that is the brightest light still shows the stars, and a sun at full
+/// illuminance below the horizon gives night even without an atmosphere to dim it.
+///
+/// The stand-in moon belongs to a sun: it shows at night when the light is brighter than a moon.
+/// When the light is moon-dim it is the moon itself (above the horizon, drawn as the light's
+/// disc) or a scene that drives a real moon (one that has set, or a sun dimmed below it), so no
+/// second, stand-in moon is drawn.
+pub fn sky_night(sun_dir: Vec3, up: Vec3, sun_color: Vec3, sun_camera: Vec3) -> (f32, f32) {
+    let above = (sun_dir.dot(up) * 4.0 + 0.3).clamp(0.0, 1.0);
+    let daylight = above * smoothstep(MOON_LUX, SUN_LUX, luminance(sun_camera));
+    let night = 1.0 - daylight;
+    let stand_in_moon = night * smoothstep(MOON_LUX, SUN_LUX, luminance(sun_color));
+    (night, stand_in_moon)
+}
+
+/// Main light illuminance (lux) up to which it is taken for a moon (a full moon gives 0.3) …
+const MOON_LUX: f32 = 0.5;
+/// … and from which on for a sun, however dim (a sun under a storm deck gives about 10).
+const SUN_LUX: f32 = 2.0;
 
 /// Build the view for the active camera (a default camera at the origin when there is none).
 ///
@@ -555,6 +593,12 @@ pub fn frame_uniform(world: &World, v: &ViewData) -> FrameUniform {
     let center_rel = atmosphere.planet_center - v.origin;
     let altitude = (-center_rel).length() - atmosphere.planet_radius;
     let sun_camera = v.sun_color * atmosphere.sun_transmittance(DVec3::ZERO, center_rel, v.sun_dir);
+    let up = if atmosphere.enabled {
+        (-center_rel).normalize_or(DVec3::Y).as_vec3()
+    } else {
+        Vec3::Y
+    };
+    let (night, stand_in_moon) = sky_night(v.sun_dir, up, v.sun_color, sun_camera);
     let frac = DVec3::new(
         v.origin.x.rem_euclid(4096.0),
         v.origin.y.rem_euclid(4096.0),
@@ -715,6 +759,14 @@ pub fn frame_uniform(world: &World, v: &ViewData) -> FrameUniform {
         volumetrics: crate::volumetrics::frame_params(settings, v),
         far_shadow: mat(v.far_shadow.view_proj),
         far_shadow_params: v.far_shadow.params(),
+        sky: [
+            if settings.sky_cloud_layer { 1.0 } else { 0.0 },
+            night,
+            stand_in_moon,
+            0.0,
+        ],
+        surface_map: [0.0; 4],
+        surface_open: [0.0; 4],
     }
 }
 
@@ -725,7 +777,8 @@ mod tests {
     #[test]
     fn frame_uniform_matches_wgsl_size() {
         // 7 mat4 + 15 vec4 + 4 mat4 + 3 vec4 + ground, sky occlusion, volumes, then the
-        // screen-space block (mat4 + 4 vec4), volumetric fog (vec4), far shadow (mat4 + vec4).
+        // screen-space block (mat4 + 4 vec4), volumetric fog (vec4), far shadow (mat4 + vec4),
+        // sky (vec4), surface weather (2 vec4).
         assert_eq!(
             std::mem::size_of::<FrameUniform>(),
             7 * 64
@@ -740,9 +793,41 @@ mod tests {
                 + 5 * 16
                 + 64
                 + 16
+                + 16
+                + 2 * 16
         );
         assert_eq!(std::mem::size_of::<GpuSkyVolume>(), 80);
         assert_eq!(std::mem::size_of::<GpuPointLight>(), 32);
+    }
+
+    #[test]
+    fn night_follows_the_main_lights_illuminance() {
+        let up = Vec3::Y;
+        let high = Vec3::new(0.0, 0.8, -0.6);
+        let low = Vec3::new(0.0, -0.3, -0.95).normalize();
+        let sun = Vec3::splat(110_000.0);
+        let moon = Vec3::splat(0.3);
+        // A sun up: day, no stand-in moon.
+        assert_eq!(sky_night(high, up, sun, sun * 0.8), (0.0, 0.0));
+        // A moon up and the brightest light: night, and its own disc is the moon.
+        assert_eq!(sky_night(high, up, moon, moon * 0.8), (1.0, 0.0));
+        // A sun dimmed to 12 lux by a storm deck at noon, 60° up: still day.
+        let up60 = Vec3::new(0.0, 0.866, -0.5);
+        let storm = Vec3::splat(12.0);
+        assert_eq!(sky_night(up60, up, storm, storm * 0.85), (0.0, 0.0));
+        // A sun at full illuminance below the horizon: night with the stand-in moon, whether
+        // the air dims it to nothing or there is no atmosphere at all.
+        assert_eq!(sky_night(low, up, sun, Vec3::ZERO), (1.0, 1.0));
+        assert_eq!(sky_night(low, up, sun, sun), (1.0, 1.0));
+        // A moon below the horizon: still night, no stand-in.
+        assert_eq!(sky_night(low, up, moon, moon), (1.0, 0.0));
+        // On a planet, up is away from its center, not world y.
+        let side = Vec3::X;
+        assert_eq!(sky_night(Vec3::X, side, sun, sun), (0.0, 0.0));
+        assert_eq!(sky_night(Vec3::NEG_X, side, sun, sun).0, 1.0);
+        // Dusk: a sun on the horizon is half way.
+        let horizon = sky_night(Vec3::new(0.0, 0.0, -1.0), up, sun, sun * 0.01);
+        assert!((0.6..0.8).contains(&horizon.0), "{horizon:?}");
     }
 
     #[test]

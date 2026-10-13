@@ -852,6 +852,7 @@ fn pn_midpoint(a: &SkinVertex, b: &SkinVertex, na: Vec3, nb: Vec3) -> SkinVertex
         pattern: position,
         axis: (a.axis + b.axis).normalize_or(a.axis),
         mask: (a.mask + b.mask) * 0.5,
+        fur: (a.fur + b.fur) * 0.5,
     }
 }
 
@@ -1023,6 +1024,7 @@ impl Cards {
                     pattern: p + side * x,
                     axis: tangent,
                     mask: HAIR_MASK,
+                    fur: 0.0,
                 });
             }
         }

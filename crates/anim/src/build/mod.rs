@@ -3,12 +3,15 @@
 //! Everything here is generated from code (no art files), so the showcase works out of the
 //! box and every piece doubles as an example of the API: [`humanoid`] (locomotion, heavy
 //! swing, block, reach; muscles and clothing), [`horse`] (four-legged gait with flank
-//! muscles), [`spider`] (an eight-legged procedural creature) and [`car`] (suspension,
-//! steering, wheel spin).
+//! muscles), [`dog`] (a furred dog of any size with a rotary gallop), [`spider`] (a furred
+//! tarantula on eight procedural legs) and [`car`] (suspension, steering, wheel spin), plus
+//! [`rock`] boulders for the paddock.
 
 pub mod car;
+pub mod dog;
 pub mod horse;
 pub mod humanoid;
+pub mod rock;
 pub mod sdf;
 pub mod spider;
 

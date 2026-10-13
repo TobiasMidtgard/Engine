@@ -214,8 +214,8 @@ impl Plugin for DestructionPlugin {
             .register_component::<Builder>(
                 "Valheim-style build mode on this entity (the player's camera, a script): active, kind \
                  (wood_floor, wood_wall, wood_pole, wood_beam, wood_roof, wood_roof_45, wood_gable, \
-                 wood_doorway, wood_window, stone_floor, stone_wall, stone_pillar), yaw rad, reach_m, \
-                 use_input, aim ray, show_support.",
+                 wood_doorway, wood_window, wood_stair, stone_floor, stone_wall, stone_pillar), yaw \
+                 rad, reach_m, use_input, aim ray, show_support.",
             )
             .register_component::<BuiltPiece>("A building piece placed in build mode: kind.")
             .register_component::<Door>(
@@ -810,7 +810,8 @@ fn build_api(app: &mut App) {
          straight down at \"at\"), the piece snaps to the pieces around it and is placed if it is \
          free and supported. Kinds: wood_floor, wood_wall, wood_pole, wood_beam, wood_roof, \
          wood_roof_45, wood_gable, wood_doorway (a plank door hangs in it), wood_window, \
-         stone_floor, stone_wall, stone_pillar. \"preview\": true only says where it would go. \
+         wood_stair (1.2 m up over 2 m, climbing away from `from`; its head snaps to a floor's \
+         edge, its foot to another flight's head), stone_floor, stone_wall, stone_pillar. \"preview\": true only says where it would go. \
          Returns where, its support and the new piece's id.",
         BUILD,
         |world, args| {
