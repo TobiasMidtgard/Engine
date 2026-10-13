@@ -348,6 +348,30 @@ fn in_zone(x: f64, z: f64, margin: f64) -> bool {
     })
 }
 
+/// On a zone's wooded rim (see [`crate::zones::WOODED_RIMS`]) and inside no other zone, clear
+/// of the forest trail's way in: the valley's trees may grow here.
+fn on_wooded_rim(x: f64, z: f64) -> bool {
+    let rim = crate::zones::WOODED_RIMS.iter().any(|&(key, inner)| {
+        let c = crate::zones::zone(key).center;
+        let p = DVec2::new(x - c.x, z - c.z);
+        // The trail comes in from beyond the +X edge.
+        let t = engine_foliage::demo::TRAIL;
+        let (a, b) = (
+            DVec2::new(t[1][0] as f64, t[1][1] as f64),
+            DVec2::new(t[0][0] as f64, t[0][1] as f64),
+        );
+        let way_in = (b - a).normalize();
+        let along = (p - b).dot(way_in);
+        let off = (p - b - way_in * along).length();
+        let on_trail = key == "forest" && along > -25.0 && off < 4.0;
+        p.length() > inner && !on_trail
+    });
+    rim && !ZONES.iter().any(|zn| {
+        let d = DVec2::new(x - zn.center.x, z - zn.center.z).length();
+        d < zn.radius + 12.0 && !crate::zones::WOODED_RIMS.iter().any(|(k, _)| *k == zn.key)
+    })
+}
+
 /// Inside a zone whose ground is paved, built over or its own (no scenery grass there).
 fn in_hard_zone(x: f64, z: f64) -> bool {
     ZONES.iter().any(|zn| {
@@ -372,7 +396,8 @@ pub fn spawn_woods(commands: &mut Commands, lib: &Library, land: &Landscape, rng
             let x = -extent + (i as f64 + rng.range(0.1, 0.9) as f64) * spacing;
             let z = -extent + (j as f64 + rng.range(0.1, 0.9) as f64) * spacing;
             let r = (x * x + z * z).sqrt();
-            if r > extent || in_zone(x, z, 12.0) {
+            let rim = on_wooded_rim(x, z);
+            if r > extent || (in_zone(x, z, 12.0) && !rim) {
                 continue;
             }
             let wood = land.woodland(x, z);
@@ -380,7 +405,7 @@ pub fn spawn_woods(commands: &mut Commands, lib: &Library, land: &Landscape, rng
             if rng.f32() as f64 > p {
                 continue;
             }
-            if land.road_weight(x, z) > 0.0 || land.pad_weight(x, z) > 0.3 {
+            if land.road_weight(x, z) > 0.0 || (land.pad_weight(x, z) > 0.3 && !rim) {
                 continue;
             }
             let h = land.height(x, z);
