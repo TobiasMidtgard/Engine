@@ -21,7 +21,7 @@ use super::*;
 use crate::art::mesh::{bake_par_alpha, smooth_normals};
 
 /// The raked layer lies this far above the trampled sand.
-const RAKE_LIFT: f32 = 0.005;
+const RAKE_LIFT: f32 = 0.003;
 /// Damp-sand decals float this far above the sand (and the raked layer).
 const DECAL_LIFT: f32 = 0.009;
 /// The walls facing this way (radians) hold the deepest drifts: the wind comes over the
@@ -31,8 +31,9 @@ const WIND: f32 = 1.05;
 const APOTHEM: f32 = 40.25;
 /// The gates, as angles.
 const GATES: [f32; 4] = [0.0, FRAC_PI_2, PI, PI + FRAC_PI_2];
-/// Raked layer coverage below which a vertex is plain trampled sand.
-const TORN: f32 = 0.49;
+/// Raked layer vertex alpha at and below which a vertex is plain trampled sand (the raked
+/// texture's alpha is 0.5 and up, the mask cuts below 0.5).
+const TORN: f32 = 0.5;
 
 fn polar(a: f32, rho: f32) -> Vec2 {
     Vec2::new(a.cos(), a.sin()) * rho
@@ -403,7 +404,7 @@ impl Grounds {
                 dir = Vec2::from_angle(rng.signed() * 0.25).rotate(dir);
                 p += dir * rng.range(0.35, 0.6);
             }
-            g.straw.push((polar(a, rho_t - 0.9), 1.0, 70));
+            g.straw.push((polar(a, rho_t - 0.9), 1.0, 40));
         }
         // Weapon racks.
         for (k, deg) in [57.0f32, 123.0, 203.0, 337.0].into_iter().enumerate() {
@@ -460,9 +461,10 @@ impl Grounds {
     }
 
     /// The raked layer's vertex alpha for trampling `t`: exactly 1 where it is untouched,
-    /// below [`TORN`] where only trampled sand shows.
+    /// [`TORN`] where only trampled sand shows. In between the grooves crumble away: the
+    /// raked texture's scuff alpha (spread evenly over 0.5..1) decides which bits go first.
     fn rake(t: f32) -> f32 {
-        1.0 - 0.55 * smooth(0.22, 0.62, t)
+        1.0 - 0.52 * smooth(0.2, 0.6, t)
     }
 
     /// Dust banked against the curb, meters.
@@ -498,21 +500,15 @@ impl Grounds {
     /// a hair to spare for the floor's triangles cutting across the curved sand.
     fn top(&self, q: Vec2) -> f32 {
         let t = self.trample(q);
-        self.height(q, t)
-            + 0.003
-            + if Self::rake(t) >= TORN {
-                RAKE_LIFT
-            } else {
-                0.0
-            }
+        self.height(q, t) + 0.003 + if Self::rake(t) > TORN { RAKE_LIFT } else { 0.0 }
     }
 
     /// Vertex tint of the sand: darker where trampled, paler where dust drifted.
     fn tint(q: Vec2, t: f32, drift: f32) -> Vec4 {
         let p = v3(q, 0.0);
         let macro_n = vn3(p * 0.12, 911) * 0.6 + vn3(p * 0.37, 912) * 0.4;
-        let k = (1.0 + 0.06 * macro_n) * (1.0 - 0.14 * t);
-        let c = Vec3::new(k, k * (0.995 - 0.01 * t), k * (0.99 - 0.025 * t));
+        let k = (1.0 + 0.06 * macro_n) * (1.0 - 0.04 * t);
+        let c = Vec3::new(k, k * (0.998 - 0.006 * t), k * (0.995 - 0.012 * t));
         c.lerp(Vec3::new(1.08, 1.07, 1.05), smooth(0.0, 0.05, drift) * 0.85)
             .extend(1.0)
     }
@@ -649,7 +645,7 @@ impl Grounds {
                     base.indices.push(id);
                 }
             }
-            if a.iter().any(|&x| x >= TORN) {
+            if a.iter().any(|&x| x > TORN) {
                 let c = (pts[t[0] as usize].q + pts[t[1] as usize].q + pts[t[2] as usize].q) / 3.0;
                 let s = (angle(c) / sector).floor().min(7.0) as u32;
                 let mid = (s as f32 + 0.5) * sector;
@@ -820,17 +816,23 @@ impl Grounds {
         m
     }
 
-    /// Damp sand (soft decals, alpha in the vertex color) and puddles (flat water).
-    pub fn wet_meshes(&self) -> (Mesh, Mesh) {
-        let mut damp = Mesh::default();
+    /// Wet sand and standing water, one blended film so it draws in order: damp sand (soft
+    /// decals, alpha in the vertex color), then soaked sand along each puddle's waterline, then
+    /// the puddles' water, its edge thinning over the soaked sand. u picks the wetness in
+    /// [`wet_set`].
+    pub fn wet_mesh(&self) -> Mesh {
+        let mut m = Mesh::default();
+        fn vertex(m: &mut Mesh, p: Vec3, u: f32, a: f32) {
+            m.vertices.push(
+                Vertex::new(p, Vec3::Y, Vec2::new(u, 0.5)).with_color(Vec4::new(1.0, 1.0, 1.0, a)),
+            );
+        }
         for (k, &(c, r, strength)) in self.damp.iter().enumerate() {
             let (na, nr) = if r > 0.5 { (36usize, 6usize) } else { (12, 2) };
             let seed = 970 + k as u32;
-            let base = damp.vertices.len() as u32;
+            let base = m.vertices.len() as u32;
             let at = |q: Vec2| v3(q, self.ground(q) + DECAL_LIFT);
-            damp.vertices.push(
-                Vertex::new(at(c), Vec3::Y, c).with_color(Vec4::new(1.0, 1.0, 1.0, strength)),
-            );
+            vertex(&mut m, at(c), WET_DAMP, strength);
             for i in 0..na {
                 let th = i as f32 / na as f32 * TAU;
                 let dir = Vec2::from_angle(th);
@@ -842,71 +844,129 @@ impl Grounds {
                     let s = j as f32 / nr as f32;
                     let q = c + dir * reach * s;
                     let n = vn3(v3(q, 0.0) * 2.3, seed + 2);
-                    let a = strength * (1.0 - s * s).powf(1.5) * (0.8 + 0.2 * n);
-                    damp.vertices.push(
-                        Vertex::new(at(q), Vec3::Y, q).with_color(Vec4::new(1.0, 1.0, 1.0, a)),
-                    );
+                    // Wettest in the middle, a slightly darker front where it is drying,
+                    // fading out softly.
+                    let front = (-((s - 0.8) / 0.12).powi(2)).exp();
+                    let a = strength
+                        * ((1.0 - s * s).powf(1.2) * 0.85 + 0.15 * front)
+                        * (0.8 + 0.2 * n);
+                    vertex(&mut m, at(q), WET_DAMP, a);
                 }
             }
             let ring = |i: usize, j: usize| base + 1 + ((i % na) * nr + j - 1) as u32;
             for i in 0..na {
-                damp.indices
+                m.indices
                     .extend_from_slice(&[base, ring(i + 1, 1), ring(i, 1)]);
                 for j in 1..nr {
                     let (a, b) = (ring(i, j), ring(i, j + 1));
                     let (c2, d) = (ring(i + 1, j + 1), ring(i + 1, j));
-                    damp.indices.extend_from_slice(&[a, d, c2, a, c2, b]);
+                    m.indices.extend_from_slice(&[a, d, c2, a, c2, b]);
                 }
             }
         }
-        fix_up(&mut damp);
-        smooth_normals(&mut damp);
-        let mut puddles = Mesh::default();
-        for (k, &(c, r)) in self.puddles.iter().enumerate() {
-            let seed = 990 + k as u32;
-            let n = 28;
-            let outline: Vec<(Vec2, f32)> = (0..n)
-                .map(|i| {
-                    let dir = Vec2::from_angle(i as f32 / n as f32 * TAU);
-                    let reach = r
-                        * (1.0
-                            + 0.3 * vn3(Vec3::new(dir.x * 1.4, 0.0, dir.y * 1.4), seed)
-                            + 0.12 * vn3(Vec3::new(dir.x * 4.0, 0.0, dir.y * 4.0), seed + 1));
-                    (dir, reach)
-                })
-                .collect();
-            // Water finds its level just over the highest sand along its edge (and over the
-            // damp sand decal round it).
-            let level = outline
-                .iter()
-                .map(|&(dir, reach)| self.ground(c + dir * reach))
-                .fold(self.ground(c), f32::max)
-                + DECAL_LIFT
-                + 0.003;
-            let base = puddles.vertices.len() as u32;
-            // Muddy water over wet sand: the bottom shows through, lighter toward the rim.
-            let mud = Vec4::new(5.3, 3.1, 2.0, 1.0);
-            let rim = Vec4::new(10.0, 6.0, 4.0, 1.0);
-            puddles
-                .vertices
-                .push(Vertex::new(v3(c, level), Vec3::Y, c).with_color(mud));
-            for &(dir, reach) in &outline {
-                for (s, col) in [(0.75, mud.lerp(rim, 0.35)), (1.0, rim)] {
+        // Each puddle's middle, outline (directions and reaches) and level.
+        const N: u32 = 28;
+        type Puddle = (Vec2, Vec<(Vec2, f32)>, f32);
+        let puddles: Vec<Puddle> = self
+            .puddles
+            .iter()
+            .enumerate()
+            .map(|(k, &(c, r))| {
+                let seed = 990 + k as u32;
+                let outline: Vec<(Vec2, f32)> = (0..N)
+                    .map(|i| {
+                        let dir = Vec2::from_angle(i as f32 / N as f32 * TAU);
+                        let reach = r
+                            * (1.0
+                                + 0.3 * vn3(Vec3::new(dir.x * 1.4, 0.0, dir.y * 1.4), seed)
+                                + 0.12 * vn3(Vec3::new(dir.x * 4.0, 0.0, dir.y * 4.0), seed + 1));
+                        (dir, reach)
+                    })
+                    .collect();
+                // Water finds its level just over the highest sand along its edge (and over
+                // the damp sand decal round it).
+                let level = outline
+                    .iter()
+                    .map(|&(dir, reach)| self.ground(c + dir * reach))
+                    .fold(self.ground(c), f32::max)
+                    + DECAL_LIFT
+                    + 0.003;
+                (c, outline, level)
+            })
+            .collect();
+        // Rings round each outline (fractions of its reach, wetness, alpha), joined in strips.
+        let rings = |m: &mut Mesh,
+                     c: Vec2,
+                     outline: &[(Vec2, f32)],
+                     level: f32,
+                     rings: &[(f32, f32, f32)]| {
+            let base = m.vertices.len() as u32;
+            for &(dir, reach) in outline {
+                for &(s, u, a) in rings {
                     let q = c + dir * (reach * s);
-                    puddles
-                        .vertices
-                        .push(Vertex::new(v3(q, level), Vec3::Y, q).with_color(col));
+                    // Inside the waterline on the water, outside it on the sand.
+                    let y = if s <= 1.0 {
+                        level
+                    } else {
+                        self.ground(q) + DECAL_LIFT + 0.001
+                    };
+                    vertex(m, v3(q, y), u, a);
                 }
             }
-            for i in 0..n as u32 {
-                let (a, b) = (base + 1 + 2 * i, base + 1 + 2 * ((i + 1) % n as u32));
-                puddles
-                    .indices
-                    .extend_from_slice(&[base, b, a, a, b, b + 1, a, b + 1, a + 1]);
+            let k = rings.len() as u32;
+            let at = |i: u32, j: u32| base + (i % N) * k + j;
+            for i in 0..N {
+                for j in 0..k - 1 {
+                    let (a, b) = (at(i, j), at(i, j + 1));
+                    let (c2, d) = (at(i + 1, j + 1), at(i + 1, j));
+                    m.indices.extend_from_slice(&[a, d, c2, a, c2, b]);
+                }
+            }
+        };
+        // Soaked sand along the waterlines, from under the water's thinning edge out onto the
+        // damp sand.
+        for (c, outline, level) in &puddles {
+            rings(
+                &mut m,
+                *c,
+                outline,
+                *level,
+                &[
+                    (0.85, WET_SOAKED, 0.0),
+                    (1.0, WET_SOAKED, 0.6),
+                    (1.12, 0.3, 0.35),
+                    (1.3, WET_DAMP, 0.0),
+                ],
+            );
+        }
+        // The water: the dark bottom under a mirror, thinning over its last centimeters.
+        let water_from = m.vertices.len();
+        let water = [
+            (0.3, WET_WATER, 0.88),
+            (0.6, WET_WATER, 0.88),
+            (0.85, WET_WATER, 0.88),
+            (1.0, WET_WATER, 0.0),
+        ];
+        for (c, outline, level) in &puddles {
+            let base = m.vertices.len() as u32;
+            vertex(&mut m, v3(*c, *level), WET_WATER, 0.88);
+            rings(&mut m, *c, outline, *level, &water);
+            let k = water.len() as u32;
+            for i in 0..N {
+                let (a, b) = (base + 1 + k * i, base + 1 + k * ((i + 1) % N));
+                m.indices.extend_from_slice(&[base, b, a]);
             }
         }
-        fix_up(&mut puddles);
-        (damp, puddles)
+        fix_up(&mut m);
+        smooth_normals(&mut m);
+        // A breath of wind on the water: its normals tilted a few degrees in slow swells, so
+        // the sky's reflection shifts across it.
+        for v in &mut m.vertices[water_from..] {
+            let p = Vec3::from(v.position) * 3.1;
+            let tilt = Vec3::new(vn3(p, 996), 0.0, vn3(p, 997)) * 0.07;
+            v.normal = (Vec3::Y + tilt).normalize().to_array();
+        }
+        m
     }
 
     // -------------------------------------------------------------------------- litter
@@ -1235,114 +1295,317 @@ fn shard(wood: &mut Mesh, rng: &mut Rng, q: Vec2, y: f32, size: f32) {
 
 // ================================================================================ textures
 
-/// Freshly raked sand (3 m repeat, grooves along u): lanes of tine grooves a rake pass wide,
-/// sand pushed up where passes meet, wavering lines, skipped tines and dragged pebbles. The
-/// alpha tears the raked layer open toward trampled ground: clumps, and a few tracks of
-/// footprints that show only where the layer's vertex alpha is below one.
+/// One rake pass along a lane (meters along the grooves): the rake set down at `start`,
+/// over the end of the pass before (whose lift-off ridge, at `start + over`, it rakes half
+/// flat), sitting `off` to the side and drifting `drift` per meter.
+struct Pass {
+    start: f32,
+    over: f32,
+    off: f32,
+    drift: f32,
+    press: f32,
+    seed: u32,
+}
+
+/// A lane of raking: a band across the grooves, raked pass after pass with one rake whose
+/// head reaches `reach` past the band on either side (into the neighbors' grooves).
+struct Lane {
+    y0: f32,
+    y1: f32,
+    reach: f32,
+    /// When it was raked (the later lies on top where lanes overlap).
+    order: f32,
+    /// Each tine's offset from its slot (spacings) and how deep it cuts.
+    tines: Vec<(f32, f32)>,
+    passes: Vec<Pass>,
+}
+
+/// Lanes across a `size` m tile (grooves along x, lanes stacked along y).
+fn lanes(size: f32, seed: u64) -> Vec<Lane> {
+    let mut rng = Rng::new(seed);
+    let n = 6;
+    let widths: Vec<f32> = (0..n).map(|_| rng.range(0.55, 0.85)).collect();
+    let scale = size / widths.iter().sum::<f32>();
+    let mut y = rng.range(0.0, 0.3);
+    let mut out = Vec::new();
+    for (l, w) in widths.into_iter().enumerate() {
+        let w = w * scale;
+        // A coarse rake on some lanes, a finer one on others; worn and bent tines.
+        let count = (w / rng.range(0.03, 0.04)).round() as usize;
+        let tines = (0..count)
+            .map(|_| {
+                let worn = if rng.f() < 0.12 { 0.5 } else { 1.0 };
+                (rng.signed() * 0.12, rng.range(0.75, 1.15) * worn)
+            })
+            .collect();
+        // Passes: 2..3 per tile, each set down 10..35 cm back over the last one's end.
+        let k = 2 + (rng.f() < 0.5) as usize;
+        let mut cuts: Vec<f32> = (0..k).map(|_| rng.range(0.0, size)).collect();
+        cuts.sort_by(f32::total_cmp);
+        let passes = cuts
+            .into_iter()
+            .enumerate()
+            .map(|(p, b)| {
+                let over = rng.range(0.1, 0.35);
+                Pass {
+                    start: (b - over).rem_euclid(size),
+                    over,
+                    off: rng.signed() * 0.035,
+                    drift: rng.signed() * 0.02,
+                    press: rng.range(0.8, 1.1),
+                    seed: 700 + l as u32 * 16 + p as u32,
+                }
+            })
+            .collect();
+        out.push(Lane {
+            y0: y,
+            y1: y + w,
+            reach: rng.range(0.04, 0.08),
+            order: rng.f(),
+            tines,
+            passes,
+        });
+        y += w;
+    }
+    out
+}
+
+/// What one column (a position along the grooves) of a lane looks like: which pass lies on
+/// top there, how far the rake sits off the lane's line, how hard it was pressed, how the
+/// grooves fade in where the rake was set down and the half-raked ridge where the pass
+/// before was lifted.
+#[derive(Clone, Copy, Default)]
+struct Column {
+    pass: u32,
+    shift: f32,
+    press: f32,
+    set_down: f32,
+    ridge: f32,
+}
+
+fn columns(lane: &Lane, size: f32, res: usize) -> Vec<Column> {
+    (0..res)
+        .map(|i| {
+            let x = (i as f32 + 0.5) / res as f32 * size;
+            let (p, pass, rel) = lane
+                .passes
+                .iter()
+                .enumerate()
+                .map(|(p, pass)| (p, pass, (x - pass.start).rem_euclid(size)))
+                .min_by(|a, b| a.2.total_cmp(&b.2))
+                .unwrap();
+            let u = x / size;
+            // The whole rake head wavers as it is pulled (all tines together).
+            let wob = 0.006 * fb(Vec2::new(u * 3.0, 0.5), (3, 0), 2, pass.seed)
+                + 0.0015 * pn(Vec2::new(u * 19.0, 0.5), (19, 0), pass.seed + 40);
+            let bell = |d: f32, w: f32| (-(d / w).powi(2)).exp();
+            Column {
+                pass: p as u32,
+                shift: pass.off + pass.drift * rel + wob,
+                press: pass.press
+                    * (0.85 + 0.2 * fb(Vec2::new(u * 5.0, 1.5), (5, 0), 2, pass.seed + 80)),
+                set_down: smooth(-0.004, 0.03, rel) * (1.0 + 0.5 * bell(rel - 0.012, 0.01)),
+                ridge: bell(rel - pass.over, 0.035),
+            }
+        })
+        .collect()
+}
+
+/// Remap `image`'s alpha (level 0) so its values spread evenly over `lo..=255`, and rebuild
+/// the mips.
+fn equalize_alpha(image: &mut Image, lo: u8) {
+    let mut hist = [0u32; 256];
+    for p in image.data.as_chunks::<4>().0 {
+        hist[p[3] as usize] += 1;
+    }
+    let total = (image.data.len() / 4).max(1) as f32;
+    let mut map = [0u8; 256];
+    let mut below = 0u32;
+    for (v, &count) in hist.iter().enumerate() {
+        // The middle of this value's share of the distribution.
+        let cdf = (below as f32 + count as f32 * 0.5) / total;
+        map[v] = (lo as f32 + cdf * (255 - lo) as f32).round() as u8;
+        below += count;
+    }
+    for p in image.data.as_chunks_mut::<4>().0 {
+        p[3] = map[p[3] as usize];
+    }
+    image.generate_mips();
+}
+
+/// Fade a normal map's relief down its mip chain by `keep[level - 1]` (the last factor for
+/// every level past the list), so fine grooves soften with distance instead of turning to
+/// stripes.
+fn fade_normal_mips(image: &mut Image, keep: &[f32]) {
+    for (k, level) in image.mips.iter_mut().enumerate() {
+        let f = keep[k.min(keep.len() - 1)];
+        for p in level.as_chunks_mut::<4>().0 {
+            let x = (p[0] as f32 / 255.0 * 2.0 - 1.0) * f;
+            let y = (p[1] as f32 / 255.0 * 2.0 - 1.0) * f;
+            let z = (1.0 - x * x - y * y).max(0.0).sqrt();
+            p[0] = ((x * 0.5 + 0.5) * 255.0).round() as u8;
+            p[1] = ((y * 0.5 + 0.5) * 255.0).round() as u8;
+            p[2] = ((z * 0.5 + 0.5) * 255.0).round() as u8;
+        }
+    }
+}
+
+/// Fade an ORM map's occlusion (R) toward open down its mip chain, as [`fade_normal_mips`].
+fn fade_occlusion_mips(image: &mut Image, keep: &[f32]) {
+    for (k, level) in image.mips.iter_mut().enumerate() {
+        let f = keep[k.min(keep.len() - 1)];
+        for p in level.as_chunks_mut::<4>().0 {
+            p[0] = (255.0 - (255.0 - p[0] as f32) * f).round() as u8;
+        }
+    }
+}
+
+/// Freshly raked sand (4 m repeat, grooves along u). Lanes raked pass by pass: the rake
+/// wavers, tines sit a little out of line and some are worn short, each pass is set down
+/// over the end of the one before (grooves jump a little there, over a half-raked ridge),
+/// and neighboring lanes overlap where the rake reached past its band. Grooves are soft and
+/// a millimeter or so deep, and fade down the mip chain. People walked across after the
+/// raking: their prints dent the grooves. The alpha is a scuff pattern (streaks along the
+/// grooves, broken into grains) spread evenly over 0.5..1, so where the layer's vertex alpha
+/// falls toward trampled ground the grooves crumble away a little at a time.
 pub fn raked_set() -> TextureSet {
+    const RES: usize = 1024;
     let size = span::RAKED;
-    let marks = marks(size, 505, 16, 6, 0);
+    let marks = marks(size, 505, 6, 0, 5);
     let cs = size / MARK_CELLS as f32;
-    let lanes = 5;
-    let tines = 14.0;
-    let px = 512.0;
-    bake_par_alpha(512, size, |uv| {
+    let lanes = lanes(size, 506);
+    let cols: Vec<Vec<Column>> = lanes.iter().map(|l| columns(l, size, RES)).collect();
+    let mut set = bake_par_alpha(RES as u32, size, |uv| {
         let m = uv * size;
-        let lane_f = uv.y * lanes as f32;
-        let li = (lane_f.floor() as i32).rem_euclid(lanes);
-        let lt = lane_f - lane_f.floor();
-        let ls = li as u32 * 7 + 3;
-        // The rake wavers along its pass; each pass starts its tines somewhere else.
-        let wob = fb(Vec2::new(uv.x * 3.0, li as f32 * 1.7), (3, 0), 2, 600 + ls) * 0.12
-            + pn(Vec2::new(uv.x * 23.0, li as f32), (23, 0), 610 + ls) * 0.05;
-        let g = lt * tines + wob + r2(li, 0, 611) * 0.9;
-        let gi = g.floor();
-        let tine = gi as i32 + li * 31;
-        // Tines bent a little out of line, some worn shorter than others.
-        let gf = g - gi + (r2(tine, 1, 612) - 0.5) * 0.24;
-        let width = 0.2 + 0.08 * r2(tine, 2, 613);
-        let groove = (-((gf - 0.5) / width).powi(2)).exp();
-        let lumps = 0.55 + 0.45 * fb(Vec2::new(uv.x * 40.0, g * 0.5), (40, 0), 2, 614);
-        let crest = (-(gf.min(1.0 - gf) / 0.17).powi(2)).exp() * lumps;
-        // Now and then a tine skips or rides up.
-        let skip = smooth(
-            0.3,
-            0.55,
-            pn(Vec2::new(uv.x * 5.0, tine as f32 * 0.61), (5, 0), 620),
+        let ix = ((uv.x * RES as f32) as usize).min(RES - 1);
+        let iy = (uv.y * RES as f32) as i32;
+        // The lane raked last over this spot.
+        let mut top: Option<(usize, f32)> = None;
+        for (l, lane) in lanes.iter().enumerate() {
+            let c = cols[l][ix];
+            let b0 = lane.y0 - lane.reach + c.shift;
+            let b1 = lane.y1 + lane.reach + c.shift;
+            for y in [m.y, m.y - size, m.y + size] {
+                if (b0..b1).contains(&y) && top.is_none_or(|(t, _)| lanes[t].order < lane.order) {
+                    top = Some((l, y - b0));
+                }
+            }
+        }
+        let (mut groove, mut crest, mut edge, mut ridge) = (0.0f32, 0.0f32, 1.0f32, 0.0f32);
+        let shade;
+        if let Some((l, across)) = top {
+            let lane = &lanes[l];
+            let c = cols[l][ix];
+            let n = lane.tines.len();
+            let width = lane.y1 - lane.y0 + 2.0 * lane.reach;
+            let s = width / n as f32;
+            let f = across / s - 0.5;
+            let k0 = f.round() as i32;
+            let depth = 0.0012 * c.press * c.set_down;
+            for k in (k0 - 1).max(0)..=(k0 + 1).min(n as i32 - 1) {
+                let (jit, cut) = lane.tines[k as usize];
+                let outer = if k == 0 || k == n as i32 - 1 {
+                    0.6
+                } else {
+                    1.0
+                };
+                let d = across - (k as f32 + 0.5 + jit) * s;
+                groove += depth * cut * outer * (-(d / (0.3 * s)).powi(2)).exp();
+                crest += (-((d.abs() - 0.5 * s) / (0.2 * s)).powi(2)).exp() * 0.5;
+            }
+            // Sand pushed out at the head's ends, and the ridge left where the pass before
+            // was lifted (raked half flat again).
+            let e = across.min(width - across);
+            edge = smooth(0.0, 0.02, e);
+            ridge = 0.0006 * (-((e - 0.006) / 0.01).powi(2)).exp() + 0.0012 * c.ridge;
+            // Lanes raked in turn one way and back the other, so neighbors catch the light
+            // differently, like mown stripes (the rings seen from the stands); each pass
+            // turned the sand a little differently too, and the head's ends left a darker line.
+            let way = if l % 2 == 0 { 1.0 } else { -1.0 };
+            shade = (1.0 + way * (0.025 + 0.015 * r2(l as i32, 0, 616)))
+                * (0.995 + 0.01 * r2(l as i32, c.pass as i32 + 1, 617))
+                * (1.0 - 0.05 * (-((e - 0.012) / 0.012).powi(2)).exp());
+        } else {
+            // A strip the rake missed: smooth, a little packed.
+            shade = 0.97;
+        }
+        // Prints of people who crossed after the raking.
+        let (gx, gy) = (
+            (m.x / cs).floor() as i32 % MARK_CELLS,
+            (m.y / cs).floor() as i32 % MARK_CELLS,
         );
-        let depth = 0.0027 * (0.6 + 0.6 * r2(tine, 3, 615)) * (1.0 - 0.75 * skip);
-        // Where passes meet: a low ridge, the grooves fading into it.
-        let e = lt.min(1.0 - lt) * size / lanes as f32;
-        let ridge = (-(e / 0.025).powi(2)).exp();
-        let fade = smooth(0.0, 0.05, e);
+        let (mut dig, mut raise, mut packed, mut loose) = (0.0f32, 0.0f32, 0.0f32, 0.0f32);
+        for &i in &marks.grid[(gy.max(0) * MARK_CELLS + gx.max(0)) as usize] {
+            let mk = &marks.marks[i as usize];
+            let (h, inside, rim) = mark_effect(mk, wrap_delta(m - mk.at, size));
+            dig = dig.min(h);
+            raise = raise.max(h);
+            packed = packed.max(inside);
+            loose = loose.max(rim);
+        }
+        let intact = 1.0 - 0.85 * packed.max(loose * 0.5);
+        groove *= intact;
         let low = fb(uv * 4.0, (4, 4), 3, 630);
-        let fine = fb(uv * 60.0, (60, 60), 2, 631);
-        let grains = fb(uv * 160.0, (160, 160), 1, 635);
-        let (ix, iy) = ((uv.x * px) as i32, (uv.y * px) as i32);
-        let speck = rand3(ix, iy, 0, 632);
+        let mid = fb(uv * 22.0, (22, 22), 2, 632);
+        let fine = fb(uv * 120.0, (120, 120), 2, 631);
+        let speck = rand3(iy, ix as i32, 0, 634);
         // Pebbles the tines dragged, each at the end of the furrow it ploughed.
-        let pc = cell(uv * 30.0, (30, 30), 633);
-        let pebble = if pc.id < 0.06 {
-            let r = 0.12 + 0.12 * pc.id / 0.06;
+        let pc = cell(uv * 40.0, (40, 40), 633);
+        let pebble = if pc.id < 0.05 {
+            let r = 0.1 + 0.12 * pc.id / 0.05;
             let bump = 1.0 - smooth(r * 0.5, r, pc.d1);
             let furrow = if pc.rel.x < 0.0 && pc.rel.x > -1.2 {
                 (-(pc.rel.y / (r * 0.6)).powi(2)).exp() * smooth(-1.2, -0.2, pc.rel.x)
             } else {
                 0.0
             };
-            (bump, furrow)
+            (bump, furrow * intact)
         } else {
             (0.0, 0.0)
         };
-        let height = -depth * groove * fade
-            + 0.0011 * crest * fade
-            + 0.0022 * ridge
-            + 0.0012 * low
-            + 0.0003 * fine
-            + 0.00035 * grains
-            + 0.0002 * (speck - 0.5)
-            + 0.003 * pebble.0
-            - 0.0018 * pebble.1;
-        let mut a = mix(hex(0xcdb185), hex(0xdcc49b), smooth(-0.3, 0.6, low));
-        a *= 1.0 - 0.1 * groove * fade + 0.04 * crest * fade + 0.05 * ridge;
-        a *= 0.95 + 0.1 * rand3(ix / 2, iy / 2, 1, 634);
-        // Each pass of the rake turned the sand a little differently.
-        a *= 0.95 + 0.1 * r2(li, 5, 616);
-        if speck > 0.988 {
-            a = mix(a, hex(0x6b5a48), 0.6);
-        } else if speck < 0.008 {
-            a = mix(a, hex(0xf2ead8), 0.6);
+        let height = -groove
+            + 0.0004 * crest * intact * edge
+            + ridge
+            + 0.0015 * low
+            + 0.0003 * mid
+            + 0.00015 * fine
+            + dig
+            + raise
+            + 0.0025 * pebble.0
+            - 0.0012 * pebble.1;
+        let g = (groove / 0.0012).min(1.5);
+        let mut a = mix(hex(0xcdb084), hex(0xdac39e), smooth(-0.4, 0.6, low));
+        a *= 0.95 + 0.1 * smooth(-0.6, 0.6, mid);
+        // Groove floors are the damper sand turned up; crests dry paler.
+        a *= (1.0 - 0.035 * g) * (1.0 + 0.02 * crest * intact) * shade;
+        a *= 1.0 - 0.05 * packed + 0.04 * loose;
+        a *= 0.97 + 0.06 * rand3(iy / 2, ix as i32 / 2, 1, 635);
+        if speck > 0.996 {
+            a = mix(a, hex(0x7b6650), 0.45);
+        } else if speck < 0.003 {
+            a = mix(a, hex(0xf2ead8), 0.45);
         }
         a = mix(a, hex(0x7a5d48) * (0.7 + speck * 0.6), pebble.0 * 0.85);
-        a *= 1.0 - 0.08 * pebble.1;
-        // The tear: clumps kicked up, and footprints walked through the lanes.
-        let (cx, cy) = (
-            (m.x / cs).floor() as i32 % MARK_CELLS,
-            (m.y / cs).floor() as i32 % MARK_CELLS,
-        );
-        let mut print = 0.0f32;
-        for &i in &marks.grid[(cy.max(0) * MARK_CELLS + cx.max(0)) as usize] {
-            let mk = &marks.marks[i as usize];
-            if mk.kind == 1 {
-                continue;
-            }
-            let (_, inside, _) = mark_effect(mk, wrap_delta(m - mk.at, size));
-            print = print.max(smooth(0.2, 0.6, inside));
-        }
-        // Prints tear through first (vertex alpha just under one), clumps further in.
-        let clumps = smooth(-0.35, 0.55, fb(uv * 18.0, (18, 18), 3, 640));
-        let alpha = 1.0 - 0.5 * print.max(clumps * 0.8);
+        // Scuffs: streaks along the grooves a few centimeters wide, broken into grains.
+        let streak = fb(Vec2::new(uv.x * 24.0, uv.y * 110.0), (24, 110), 3, 640);
+        let grain = rand3(iy / 2, ix as i32 / 2, 2, 641);
+        let alpha = (0.5 + 0.35 * streak + 0.25 * (grain - 0.5)).clamp(0.0, 1.0);
         (
             Texel {
                 albedo: a,
                 height,
-                roughness: (0.97 - 0.15 * pebble.0).clamp(0.5, 1.0),
+                roughness: (0.95 - 0.04 * g - 0.15 * pebble.0).clamp(0.5, 1.0),
                 metallic: 0.0,
-                occlusion: (1.0 - 0.25 * groove * fade - 0.1 * pebble.1).clamp(0.5, 1.0),
+                occlusion: (1.0 - 0.1 * g - 0.08 * pebble.1 - 0.06 * packed).clamp(0.6, 1.0),
             },
             alpha,
         )
-    })
+    });
+    equalize_alpha(&mut set.albedo, 128);
+    let keep = [0.85, 0.65, 0.45, 0.3, 0.2, 0.12];
+    fade_normal_mips(&mut set.normal, &keep);
+    fade_occlusion_mips(&mut set.orm, &keep);
+    set
 }
 
 // ================================================================================== straw
@@ -1467,9 +1730,9 @@ fn stalks() -> Vec<Stalk> {
                 len *= 0.7;
             }
             let Some(pts) = pts else { continue };
-            let fresh = mix(hex(0xebc977), hex(0xf7ecc8), rng.f().powi(2));
+            let fresh = mix(hex(0xdcb466), hex(0xead296), rng.f().powi(2));
             // Weathered straw bleaches toward a silvery beige.
-            let aged = mix(hex(0xd8bf8c), hex(0xcbc0a6), rng.f());
+            let aged = mix(hex(0xccb07c), hex(0xbfb094), rng.f());
             out.push(Stalk {
                 pts,
                 half: width * 0.5 * per_m,
@@ -1661,6 +1924,61 @@ fn straw_card(m: &mut Mesh, g: &Grounds, q: Vec2, turn: f32, size: f32, kind: u3
     }
 }
 
+/// Still water in a trough or cask (1 m repeat): the bottom seen through it, greened with
+/// algae, silted in patches and laced with the sun's caustics, under a surface faintly
+/// rippled and mirror smooth.
+pub fn water_set() -> TextureSet {
+    bake_par(256, 1.0, |uv| {
+        let swell = fb(uv * 5.0, (5, 5), 3, 670);
+        let ripple = pn(uv * 21.0, (21, 21), 671);
+        let silt = fb(uv * 3.0, (3, 3), 3, 672);
+        let algae = fb(uv * 7.0, (7, 7), 2, 673);
+        // Caustics: the ripples focus the sun into a bright net on the bottom.
+        let warp = Vec2::new(fb(uv * 5.0, (5, 5), 2, 674), fb(uv * 5.0, (5, 5), 2, 675)) * 0.9;
+        let c = cell(uv * 14.0 + warp * 1.5, (14, 14), 676);
+        let broken = smooth(-0.2, 0.5, fb(uv * 6.0, (6, 6), 2, 677));
+        let net = (1.0 - smooth(0.0, 0.09, c.d2 - c.d1)) * broken;
+        let mut a = mix(hex(0x4b4c39), hex(0x5f5944), smooth(-0.4, 0.6, silt));
+        a = mix(a, hex(0x3e4531), smooth(0.1, 0.7, algae) * 0.45);
+        a *= 1.0 + 0.22 * net;
+        Texel {
+            albedo: a,
+            height: 0.0012 * swell + 0.0004 * ripple,
+            roughness: 0.05,
+            metallic: 0.0,
+            occlusion: 1.0,
+        }
+    })
+}
+
+/// Where on [`wet_set`] damp sand, soaked sand and standing water lie (u; the film's mesh
+/// sets it per vertex and the texture ramps between them).
+const WET_DAMP: f32 = 0.05;
+const WET_SOAKED: f32 = 0.5;
+const WET_WATER: f32 = 0.95;
+
+/// Damp sand to soaked sand to standing water along u (v unused). Damp sand is about a third
+/// of the dry sand's color (at the decal's ~60% alpha the sand below comes out some 40%
+/// darker, its grain still showing) and a little glossy; soaked sand is darker and glossier;
+/// water is the dark bottom under a mirror (the material's reflectance makes the sheet read
+/// in full sun, where the sky's reflection is faint next to the sunlit sand).
+pub fn wet_set() -> TextureSet {
+    bake_par(64, 1.0, |uv| {
+        let soaked = smooth(WET_DAMP + 0.05, WET_SOAKED - 0.05, uv.x);
+        let water = smooth(WET_SOAKED + 0.05, WET_WATER - 0.05, uv.x);
+        let albedo = Vec3::new(0.17, 0.12, 0.066)
+            .lerp(Vec3::new(0.1, 0.07, 0.04), soaked)
+            .lerp(Vec3::new(0.075, 0.06, 0.042), water);
+        Texel {
+            albedo,
+            height: 0.0,
+            roughness: (0.5 + (0.25 - 0.5) * soaked) * (1.0 - water) + 0.05 * water,
+            metallic: 0.0,
+            occlusion: 1.0,
+        }
+    })
+}
+
 // ================================================================================== props
 
 /// Water level in a trough above its base, meters.
@@ -1729,14 +2047,26 @@ pub fn trough_meshes(seed: u64) -> (Mesh, Mesh, Mesh) {
             Vec3::new(sx * (hx - wall * 0.5), top + 0.002, sz * (hz - wall)),
         );
     }
+    // The water: its edge against the stone in the walls' shade, a ring 6 cm in lighter.
     let (wx, wz) = (hx - wall + 0.03, hz - wall + 0.03);
-    let water = Mesh::new(
-        [(-wx, -wz), (wx, -wz), (wx, wz), (-wx, wz)]
-            .iter()
-            .map(|&(x, z)| Vertex::new(Vec3::new(x, TROUGH_WATER, z), Vec3::Y, Vec2::new(x, z)))
-            .collect(),
-        vec![0, 2, 1, 0, 3, 2],
-    );
+    let mut water = Mesh::default();
+    for (inset, k) in [(0.0, 0.55), (0.06, 1.0)] {
+        for (x, z) in [(-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)] {
+            let (x, z) = (x * (wx - inset), z * (wz - inset));
+            water.vertices.push(
+                Vertex::new(Vec3::new(x, TROUGH_WATER, z), Vec3::Y, Vec2::new(x, z))
+                    .with_color(Vec4::new(k, k, k, 1.0)),
+            );
+        }
+    }
+    for i in 0..4u32 {
+        let j = (i + 1) % 4;
+        water
+            .indices
+            .extend_from_slice(&[i, j, 4 + j, i, 4 + j, 4 + i]);
+    }
+    water.indices.extend_from_slice(&[4, 5, 6, 4, 6, 7]);
+    fix_up(&mut water);
     (ms.mesh, iron, water)
 }
 
@@ -1799,6 +2129,7 @@ pub fn cask_meshes(seed: u64) -> (Mesh, Mesh, Mesh) {
         offset_uv(&mut b, Vec2::new(0.0, y0 * 3.0));
         iron.merge(&b);
     }
+    // The water: dark against the staves, lighter in the middle.
     let rw = rt - wall + 0.006;
     let mut water = Mesh::default();
     water.vertices.push(Vertex::new(
@@ -1806,15 +2137,19 @@ pub fn cask_meshes(seed: u64) -> (Mesh, Mesh, Mesh) {
         Vec3::Y,
         Vec2::ZERO,
     ));
-    for k in 0..24 {
+    for k in 0..24u32 {
         let a = k as f32 / 24.0 * TAU;
-        let p = Vec3::new(a.cos() * rw, h - 0.06, a.sin() * rw);
-        water
-            .vertices
-            .push(Vertex::new(p, Vec3::Y, Vec2::new(p.x, p.z)));
+        for (r, c) in [(rw, 0.5), (rw - 0.06, 0.9)] {
+            let p = Vec3::new(a.cos() * r, h - 0.06, a.sin() * r);
+            water.vertices.push(
+                Vertex::new(p, Vec3::Y, Vec2::new(p.x, p.z)).with_color(Vec4::new(c, c, c, 1.0)),
+            );
+        }
+        let (o, i) = (1 + 2 * k, 2 + 2 * k);
+        let (o2, i2) = (1 + 2 * ((k + 1) % 24), 2 + 2 * ((k + 1) % 24));
         water
             .indices
-            .extend_from_slice(&[0, 1 + (k + 1) % 24, 1 + k]);
+            .extend_from_slice(&[0, i2, i, i, i2, o2, i, o2, o]);
     }
     fix_up(&mut water);
     (wood, iron, water)
@@ -2041,7 +2376,7 @@ mod tests {
         assert!(min >= 128, "raked alpha {min} would tear untouched sand");
         assert!(
             set.albedo.data.chunks(4).any(|p| p[3] < 160),
-            "the raked alpha has footprints to tear"
+            "the raked alpha has scuffs to crumble"
         );
     }
 

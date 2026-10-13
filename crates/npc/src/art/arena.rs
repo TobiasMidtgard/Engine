@@ -244,7 +244,7 @@ fn wrap_delta(d: Vec2, size: f32) -> Vec2 {
 /// Meters one repeat of each arena texture covers (set `uv_scale` to the inverse).
 pub mod span {
     pub const SAND: f32 = 6.0;
-    pub const RAKED: f32 = 3.0;
+    pub const RAKED: f32 = 4.0;
     pub const STONE: f32 = 2.0;
     pub const WOOD: f32 = 2.0;
     pub const IRON: f32 = 1.0;
@@ -453,10 +453,12 @@ fn mark_effect(m: &Mark, d: Vec2) -> (f32, f32, f32) {
     }
 }
 
-/// Trampled arena sand: tracks of sandal prints, fighting spots, drag scuffs, pebbles,
-/// compacted and loose patches and faint wind ripples (6 m repeat).
+/// Trampled arena sand: overlapping tracks of sandal prints, fighting spots churned by
+/// pivoting feet, drag scuffs, clods kicked loose, pebbles, lumpy ground mottled pale where
+/// it lies loose and dry and darker where it was packed, and faint wind ripples (6 m
+/// repeat).
 pub fn sand_set() -> TextureSet {
-    let marks = marks(span::SAND, 404, 18, 12, 40);
+    let marks = marks(span::SAND, 404, 34, 26, 70);
     let size = span::SAND;
     let cs = size / MARK_CELLS as f32;
     let px = 1024.0;
@@ -493,7 +495,18 @@ pub fn sand_set() -> TextureSet {
             loose = loose.max(rim);
         }
         let disturbed = packed.max(loose);
-        let ripple = 0.0012 * ripple_amt * ripple_shape * (1.0 - disturbed);
+        let ripple = 0.0008 * ripple_amt * ripple_shape * (1.0 - disturbed);
+        // Lumps of loose sand kicked up and left: clods a few centimeters across.
+        let lumps = fb(uv * 14.0, (14, 14), 3, 9);
+        let cc = cell(uv * 70.0, (70, 70), 10);
+        let clod = if cc.id < 0.3 {
+            let r = 0.2 + 0.25 * cc.id / 0.3;
+            (1.0 - smooth(r * 0.3, r, cc.d1)) * (0.5 + 0.5 * cc.id / 0.3)
+        } else {
+            0.0
+        };
+        // Pale where the sand lies loose and dry, darker where feet packed it.
+        let mottle = fb(uv * 5.0, (5, 5), 3, 11) * 0.6 + fb(uv * 17.0, (17, 17), 2, 12) * 0.4;
         // Pebbles.
         let pc = cell(uv * 140.0, (140, 140), 8);
         let peb_r = 0.22 + 0.25 * pc.id;
@@ -503,27 +516,31 @@ pub fn sand_set() -> TextureSet {
             0.0
         };
         let height = 0.004 * low
+            + 0.003 * lumps
             + 0.0012 * mid
             + 0.0004 * fine
             + 0.00025 * (speck - 0.5)
             + ripple
             + dig
             + raise
+            + 0.002 * clod
             + 0.0025 * pebble;
-        let warm = hex(0xc9a978);
-        let pale = hex(0xd8c29a);
-        let dark = hex(0xae8b5c);
+        let warm = hex(0xcdae80);
+        let pale = hex(0xddc7a2);
+        let dark = hex(0xb59468);
         let mut a = mix(warm, pale, smooth(-0.2, 0.7, low * 0.8 + mid * 0.4));
-        a = mix(a, dark, smooth(0.1, 0.8, -low * 0.7 + fine * 0.4) * 0.6);
+        a = mix(a, dark, smooth(0.1, 0.8, -low * 0.7 + fine * 0.4) * 0.45);
         a *= 0.94 + 0.12 * speck2 + 0.02 * ripple_shape * ripple_amt;
-        if speck > 0.985 {
-            a = mix(a, hex(0x6b5a48), 0.6);
-        } else if speck < 0.01 {
-            a = mix(a, hex(0xf2ead8), 0.6);
+        if speck > 0.993 {
+            a = mix(a, hex(0x7b6650), 0.45);
+        } else if speck < 0.006 {
+            a = mix(a, hex(0xf2ead8), 0.45);
         }
-        a *= 1.0 - 0.1 * packed + 0.04 * loose;
+        a *= 1.0 - 0.08 * packed + 0.07 * loose + 0.06 * clod;
+        a *= 1.0 + 0.09 * mottle + 0.03 * lumps;
         a = mix(a, hex(0x7a5d48) * (0.7 + speck * 0.6), pebble * 0.85);
-        let rough = (0.95 - 0.1 * packed - 0.25 * pebble + 0.03 * fine).clamp(0.5, 1.0);
+        let rough =
+            (0.95 - 0.1 * packed - 0.25 * pebble + 0.03 * fine + 0.03 * clod).clamp(0.5, 1.0);
         let occ = (1.0 - 0.18 * packed + 0.05 * raise.min(0.0)).clamp(0.6, 1.0);
         Texel {
             albedo: a,
@@ -3649,9 +3666,13 @@ pub enum Mat {
     Flame,
     /// Freshly raked sand, alpha-masked over the trampled sand.
     Raked,
-    /// Damp sand: the sand's textures, darker and glossier, blended over the floor.
+    /// Wet sand and puddles: a film blended over the floor (vertex alpha), its texture running
+    /// from damp sand, dark and a little glossy, through soaked sand to standing water, the
+    /// dark bottom under a mirror ([`grounds::wet_set`]; the mesh picks the wetness per
+    /// vertex).
     Damp,
-    /// Still water (troughs, casks, puddles): plain, dark and mirror smooth.
+    /// Still water in the troughs and casks: murky, faintly rippled and mirror smooth
+    /// ([`grounds::water_set`]).
     Water,
     /// Straw and feathers: plain, colored per vertex, two-sided and a little translucent.
     Fiber,
@@ -3685,17 +3706,9 @@ impl Mat {
         Mat::Fiber,
     ];
 
-    /// The material whose baked images this one uses (its own, or the sand's for damp sand).
-    fn source(self) -> Mat {
-        match self {
-            Mat::Damp => Mat::Sand,
-            m => m,
-        }
-    }
-
     /// Whether the material has a texture set (plain ones and the flame don't).
     fn textured(self) -> bool {
-        !matches!(self, Mat::Flame | Mat::Water | Mat::Fiber)
+        !matches!(self, Mat::Flame | Mat::Fiber)
     }
 
     fn key(self) -> &'static str {
@@ -3760,16 +3773,17 @@ impl Mat {
                 ..tiled(1.0)
             }
             .with_subsurface(0.25),
+            // Water's reflectance is lower, but in full sun its sky reflection is faint next to
+            // the sunlit sand: more of it makes the puddles read at a glance.
             Mat::Damp => StandardMaterial {
-                base_color: [0.5, 0.45, 0.4, 1.0],
                 alpha_mode: AlphaMode::Blend,
-                ..tiled(span::SAND)
+                reflectance: 1.4,
+                receives_wetness: false,
+                ..tiled(1.0)
             },
             Mat::Water => StandardMaterial {
-                base_color: [0.03, 0.036, 0.032, 1.0],
-                perceptual_roughness: 0.04,
                 receives_wetness: false,
-                ..Default::default()
+                ..tiled(1.0)
             },
             Mat::Fiber => {
                 let mut m = StandardMaterial {
@@ -3781,14 +3795,6 @@ impl Mat {
                 m.double_sided = true;
                 m
             }
-        }
-    }
-
-    /// Factor on the texture's roughness (damp sand is glossier than dry).
-    fn roughness(self) -> f32 {
-        match self {
-            Mat::Damp => 0.6,
-            _ => 1.0,
         }
     }
 
@@ -3820,7 +3826,9 @@ impl Mat {
             },
             Mat::Raked => set(grounds::raked_set()),
             Mat::Straw => set(grounds::straw_set()),
-            Mat::Damp | Mat::Water | Mat::Fiber => Baked {
+            Mat::Water => set(grounds::water_set()),
+            Mat::Damp => set(grounds::wet_set()),
+            Mat::Fiber => Baked {
                 set: None,
                 glow: None,
             },
@@ -3840,10 +3848,9 @@ impl Mat {
         let Some(images) = art.images.as_ref() else {
             return false;
         };
-        let source = self.source();
-        (!source.textured()
+        (!self.textured()
             || images
-                .loaded_by_key(&format!("npc/{}/orm", source.key()))
+                .loaded_by_key(&format!("npc/{}/orm", self.key()))
                 .is_some())
             && self
                 .glow_key()
@@ -3855,19 +3862,19 @@ impl Mat {
 /// for another world). `None` without the renderer.
 pub fn material(art: &mut ArtAssets, m: Mat) -> Option<MaterialRef> {
     if !m.loaded(art) {
-        store(art, m.source(), &baked(m.source()))?;
+        store(art, m, &baked(m))?;
     }
     let images = art.images.as_mut()?;
     let mut s = m.base();
     if m.textured() {
-        let k = format!("npc/{}", m.source().key());
+        let k = format!("npc/{}", m.key());
         let orm = images.loaded_by_key(&format!("{k}/orm"))?;
         s.base_color_texture = Some(images.loaded_by_key(&format!("{k}/albedo"))?);
         s.normal_texture = Some(images.loaded_by_key(&format!("{k}/normal"))?);
         s.metallic_roughness_texture = Some(orm);
         s.occlusion_texture = Some(orm);
         // The ORM map carries roughness and metalness; the factors scale it.
-        s.perceptual_roughness = m.roughness();
+        s.perceptual_roughness = 1.0;
         s.metallic = 1.0;
     }
     if let Some(k) = m.glow_key() {
@@ -4055,13 +4062,7 @@ fn specs(layout: &ArenaLayout, g: &Arc<Grounds>) -> Vec<Spec> {
         .tagged(g.tag),
     );
     let gc = g.clone();
-    v.push(
-        spec(["arena/damp", "arena/puddles"], move || {
-            let (d, p) = gc.wet_meshes();
-            [d, p]
-        })
-        .tagged(g.tag),
-    );
+    v.push(spec(["arena/wet"], move || [gc.wet_mesh()]).tagged(g.tag));
     let gc = g.clone();
     v.push(
         spec(
@@ -4191,10 +4192,7 @@ impl Kit {
     /// another world), store it, and collect the handles.
     fn load(art: &mut ArtAssets, layout: &ArenaLayout, g: &Arc<Grounds>) -> Option<Kit> {
         let specs = specs(layout, g);
-        let missing_mats: Vec<Mat> = Mat::ALL
-            .into_iter()
-            .filter(|&m| m.source() == m && !m.loaded(art))
-            .collect();
+        let missing_mats: Vec<Mat> = Mat::ALL.into_iter().filter(|&m| !m.loaded(art)).collect();
         let missing_specs: Vec<&Spec> = {
             let store = art.meshes.as_ref()?;
             specs
@@ -4353,15 +4351,14 @@ pub fn dress(world: &mut World, layout: &ArenaLayout) {
     };
     let origin = layout.origin;
     let id = Transform::default();
-    // The floor: trampled sand, the raked layer, drifts, ruts and drag marks, damp sand and
-    // puddles (each its own entity, so the blended decals sort on their own), and litter.
+    // The floor: trampled sand, the raked layer, drifts, ruts and drag marks, wet sand and
+    // puddles (one blended film, so the puddles draw over the damp sand), and litter.
     for (key, mat, shadows) in [
         ("arena/floor", Mat::Sand, false),
         ("arena/floor_raked", Mat::Raked, false),
         ("arena/drifts", Mat::Sand, false),
         ("arena/tracks", Mat::Sand, false),
-        ("arena/damp", Mat::Damp, false),
-        ("arena/puddles", Mat::Water, false),
+        ("arena/wet", Mat::Damp, false),
         // Litter is too fine for the shadow maps (it would only shadow itself).
         ("arena/straw", Mat::Straw, false),
         ("arena/fiber", Mat::Fiber, false),
