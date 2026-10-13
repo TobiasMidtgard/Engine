@@ -47,8 +47,9 @@ engine_foliage::spawn_plant(world, "oak", DVec3::new(3.0, 0.0, 4.0), 0.2, None)?
 - **History**: a region can prewarm (grow 110 years, then clear-cut or burn part of it, then
   regrow) the first time it runs, so a game starts in an old forest with a recovering clearing.
 - **Scale**: regions far from every `SimulationFocus` stop and catch up in coarse steps when
-  the player returns. Trees use a cheaper mesh far away; small plants vanish beyond
-  `EcologySettings::small_plant_distance_m`. Each species has four mesh variants shared by all
+  the player returns. Trees use a cheaper mesh far away; grass, ferns and flowers switch to a
+  far mesh (about a tenth of the triangles) past `EcologySettings::small_plant_lod_distance_m`
+  and vanish beyond `small_plant_distance_m`. Each species has four mesh variants shared by all
   its plants, so a forest draws in a few instanced batches.
 - **Chopping** (`felling`): `DamageEvent`s on a plant, its drawn parts or its trunk collider
   add chop damage (axes count fully, bullets a little, fire not at all). Past the species'
@@ -62,8 +63,17 @@ engine_foliage::spawn_plant(world, "oak", DVec3::new(3.0, 0.0, 4.0), 0.2, None)?
 - **Glow**: glowing species pick a brighter material the healthier and better fed they are,
   breathe slowly, and light their surroundings through a pool of point lights (one per
   cluster, at most 40).
-- **Trunk colliders**: every tree and log gets a static capsule collider on its own entity
+- **Trunk colliders**: trees within `EcologySettings::collider_distance_m` (150 m) of a
+  `SimulationFocus`, and every log, get a static capsule collider on its own entity
   (`FoliageCollider`), so players, vehicles and bullets hit trunks once a physics backend runs.
+  Farther trees drop theirs and get it back when a focus comes near.
+- **Looks**: procedural, per species: bark texture sets (albedo, normal, occlusion and
+  roughness), painted leaf and needle atlases with normal maps, crowns built from clumps of
+  shaded sprays, detailed grass, ferns, flowers and fungi with their own maps. Small plants
+  lean with the slope they grow on. `examples/lookdev_*` render each set close up.
+- **World shifts**: forests follow `WorldShift` (floating origin, planet frames): soil grids,
+  region centers, falling trees, which way logs lie and what plants are posed on move with
+  the world (`shift`).
 
 ## API (`foliage.*`)
 

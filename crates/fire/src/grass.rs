@@ -6,6 +6,9 @@
 //! lush and green. [`GrassFeature`] draws them on the GPU, one instance per blade, thinning
 //! and simplifying them with distance, swaying in the wind and casting shadows.
 //!
+//! Blades stand on the ground (the `Ground` contract, sampled once per fire cell into a height
+//! map the vertex shader reads), so a meadow can lie over a hillside.
+//!
 //! Each frame [`update_grass`] reads the [`FireField`] under the meadow into a [`GrassBurn`]
 //! map (one texel per fire cell): standing grass stands; burning grass glows at its cut ends,
 //! blackens and collapses within a second or so; burnt cells keep short black stubble with
@@ -24,6 +27,8 @@ use engine_render::{
     FeatureStats, FrameContext, GpuShared, RenderFeature, RenderPhase, RenderSettings, ViewData,
 };
 
+use engine_world::Ground;
+
 use crate::field::{Cell, CellState, FireField};
 use crate::fuel::{FuelKind, FuelPatch};
 use crate::sim::FirePatches;
@@ -33,8 +38,9 @@ pub const GRASS_SHADER: &str = include_str!("shaders/grass.wgsl");
 pub const GRASS_SHADOW_SHADER: &str = include_str!("shaders/grass_shadow.wgsl");
 
 /// A meadow of grass blades over the rectangle around its entity (local X/Z, no rotation),
-/// standing on the ground at the entity's height. Blades grow only where the fire module's fuel
-/// is grass, and burn, collapse and regrow with the fire field.
+/// standing on the ground (`Ground`; at the entity's height where there is none). Blades grow
+/// only where the fire module's fuel is grass, and burn, collapse and regrow with the fire
+/// field.
 #[derive(Component, Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct GrassMeadow {
@@ -185,6 +191,12 @@ pub struct GrassBurn {
     pub cells: Vec<GrassCell>,
     /// Bumped whenever the map changes visibly.
     pub version: u64,
+    /// World height the map was made at (the meadow entity's).
+    pub base_y: f64,
+    /// Ground height at each cell's center above `base_y`, meters.
+    pub ground: Vec<f32>,
+    /// Different for every sampling of `ground`.
+    pub ground_id: u64,
 }
 
 impl GrassBurn {
@@ -199,6 +211,8 @@ pub fn update_grass(world: &mut World) {
     if !world.contains_resource::<FireField>() {
         return;
     }
+    static GROUND_IDS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    let ground = world.get_resource::<Ground>().cloned();
     let dt = world.resource::<Time>().delta_secs();
     let mut fresh: Vec<(Entity, GrassBurn)> = Vec::new();
     world.resource_scope(|world, field: Mut<FireField>| {
@@ -224,7 +238,9 @@ pub fn update_grass(world: &mut World) {
                 field.cell_at(DVec3::new(p.x, c.y, p.y))
             };
             match burn {
-                Some(mut b) if b.size == size && b.min == min && b.cell_m == cell_m => {
+                Some(mut b)
+                    if b.size == size && b.min == min && b.cell_m == cell_m && b.base_y == c.y =>
+                {
                     let mut changed = false;
                     for (i, cell) in b.cells.iter_mut().enumerate() {
                         let Some(target) = grass_target(at(i as u32)) else {
@@ -244,6 +260,21 @@ pub fn update_grass(world: &mut World) {
                     let cells = (0..size[0] * size[1])
                         .map(|i| grass_target(at(i)).unwrap_or_default())
                         .collect();
+                    // Ask from above the highest ground a meadow this size might cover (for
+                    // terrain with caves, the first surface below is the meadow's).
+                    let hint = c.y + 2.0 + half.max_element();
+                    let ground = (0..size[0] * size[1])
+                        .map(|i| {
+                            let p = min
+                                + (DVec2::new((i % size[0]) as f64, (i / size[0]) as f64) + 0.5)
+                                    * cell_m as f64;
+                            ground
+                                .as_ref()
+                                .and_then(|g| g.height(DVec3::new(p.x, hint, p.y)))
+                                .filter(|h| h.is_finite())
+                                .map_or(0.0, |h| (h - c.y) as f32)
+                        })
+                        .collect();
                     fresh.push((
                         entity,
                         GrassBurn {
@@ -252,6 +283,10 @@ pub fn update_grass(world: &mut World) {
                             size,
                             cells,
                             version: 1,
+                            base_y: c.y,
+                            ground,
+                            ground_id: GROUND_IDS
+                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed),
                         },
                     ));
                 }
@@ -509,6 +544,11 @@ struct MeadowGpu {
     map_size: [u32; 2],
     map_texture: wgpu::Texture,
     map_version: u64,
+    /// Ground heights under the meadow (R32Float, one texel per burn-map cell).
+    ground_texture: wgpu::Texture,
+    ground_id: u64,
+    /// Lowest and highest ground under each chunk, meters above the center.
+    chunk_y: Vec<[f32; 2]>,
     group: wgpu::BindGroup,
     blade_count: u32,
     seen: bool,
@@ -622,11 +662,22 @@ impl GrassFeature {
                 depth_or_array_layers: 1,
             },
         );
-        let group = Self::bind_group(device, layout, sampler, &buffer, &params, &map_texture);
+        // Flat ground until the burn map (and its heights) arrives.
+        let ground_texture = Self::ground_texture(gpu, [1, 1], &[0.0]);
+        let group = Self::bind_group(
+            device,
+            layout,
+            sampler,
+            &buffer,
+            &params,
+            &map_texture,
+            &ground_texture,
+        );
         let gpu_meadow = MeadowGpu {
             entity,
             fingerprint,
             center,
+            chunk_y: vec![[0.0; 2]; chunks.len()],
             chunks,
             blade_count: blades.len() as u32,
             blades: buffer,
@@ -634,6 +685,8 @@ impl GrassFeature {
             map_size: [1, 1],
             map_texture,
             map_version: 0,
+            ground_texture,
+            ground_id: 0,
             group,
             seen: true,
         };
@@ -646,6 +699,35 @@ impl GrassFeature {
         }
     }
 
+    fn ground_texture(gpu: &GpuShared, size: [u32; 2], heights: &[f32]) -> wgpu::Texture {
+        let extent = wgpu::Extent3d {
+            width: size[0],
+            height: size[1],
+            depth_or_array_layers: 1,
+        };
+        let texture = gpu.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("grass ground heights"),
+            size: extent,
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::R32Float,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        gpu.queue.write_texture(
+            texture.as_image_copy(),
+            bytemuck::cast_slice(heights),
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(size[0] * 4),
+                rows_per_image: Some(size[1]),
+            },
+            extent,
+        );
+        texture
+    }
+
     fn bind_group(
         device: &wgpu::Device,
         layout: &wgpu::BindGroupLayout,
@@ -653,8 +735,10 @@ impl GrassFeature {
         blades: &wgpu::Buffer,
         params: &wgpu::Buffer,
         map: &wgpu::Texture,
+        ground: &wgpu::Texture,
     ) -> wgpu::BindGroup {
         let view = map.create_view(&Default::default());
+        let ground_view = ground.create_view(&Default::default());
         device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("grass"),
             layout,
@@ -675,6 +759,10 @@ impl GrassFeature {
                     binding: 3,
                     resource: wgpu::BindingResource::Sampler(sampler),
                 },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: wgpu::BindingResource::TextureView(&ground_view),
+                },
             ],
         })
     }
@@ -684,11 +772,20 @@ impl GrassFeature {
             return;
         };
         let m = &mut self.meadows[i];
-        if m.map_version == burn.version && m.map_size == burn.size {
+        if m.map_version == burn.version && m.map_size == burn.size && m.ground_id == burn.ground_id
+        {
             return;
         }
         let [w, h] = burn.size;
+        let mut rebind = false;
+        if m.ground_id != burn.ground_id && burn.ground.len() == (w * h) as usize {
+            m.ground_texture = Self::ground_texture(gpu, burn.size, &burn.ground);
+            m.ground_id = burn.ground_id;
+            m.chunk_y = chunk_heights(&m.chunks, burn, m.center);
+            rebind = true;
+        }
         if m.map_size != burn.size {
+            rebind = true;
             m.map_texture = gpu.device.create_texture(&wgpu::TextureDescriptor {
                 label: Some("grass burn map"),
                 size: wgpu::Extent3d {
@@ -704,6 +801,8 @@ impl GrassFeature {
                 view_formats: &[],
             });
             m.map_size = burn.size;
+        }
+        if rebind {
             m.group = Self::bind_group(
                 &gpu.device,
                 layout,
@@ -711,6 +810,7 @@ impl GrassFeature {
                 &m.blades,
                 &m.params,
                 &m.map_texture,
+                &m.ground_texture,
             );
         }
         gpu.queue.write_texture(
@@ -729,6 +829,40 @@ impl GrassFeature {
         );
         m.map_version = burn.version;
     }
+}
+
+/// Lowest and highest ground (meters above `center`) under each chunk, from the burn map's
+/// heights.
+fn chunk_heights(chunks: &[BladeChunk], burn: &GrassBurn, center: DVec3) -> Vec<[f32; 2]> {
+    let [w, h] = burn.size;
+    let offset = (center.y - burn.base_y) as f32;
+    let cell = burn.cell_m as f64;
+    let texel = |x: f32, z: f32, round_up: bool| {
+        let f = |v: f64, n: u32| {
+            let t = v / cell - 0.5;
+            let t = if round_up { t.ceil() } else { t.floor() };
+            t.clamp(0.0, n as f64 - 1.0) as u32
+        };
+        (
+            f(center.x + x as f64 - burn.min.x, w),
+            f(center.z + z as f64 - burn.min.y, h),
+        )
+    };
+    chunks
+        .iter()
+        .map(|c| {
+            let (x0, z0) = texel(c.min.x, c.min.y, false);
+            let (x1, z1) = texel(c.max.x, c.max.y, true);
+            let mut range = [f32::INFINITY, f32::NEG_INFINITY];
+            for z in z0..=z1 {
+                for x in x0..=x1 {
+                    let y = burn.ground[(z * w + x) as usize] - offset;
+                    range = [range[0].min(y), range[1].max(y)];
+                }
+            }
+            if range[0] > range[1] { [0.0; 2] } else { range }
+        })
+        .collect()
 }
 
 /// What the meadow's blades depend on. Patches count relative to the meadow, so a world shift
@@ -795,6 +929,15 @@ impl RenderFeature for GrassFeature {
                 entry(
                     3,
                     wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    wgpu::ShaderStages::VERTEX,
+                ),
+                entry(
+                    4,
+                    wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
                     wgpu::ShaderStages::VERTEX,
                 ),
             ],
@@ -953,9 +1096,9 @@ impl RenderFeature for GrassFeature {
             gpu.queue
                 .write_buffer(&m.params, 0, bytemuck::bytes_of(&params));
             // Cull and pick each chunk's density and detail.
-            for c in &m.chunks {
-                let lo = rel + Vec3::new(c.min.x, 0.0, c.min.y);
-                let hi = rel + Vec3::new(c.max.x, c.tallest + 0.3, c.max.y);
+            for (c, y) in m.chunks.iter().zip(&m.chunk_y) {
+                let lo = rel + Vec3::new(c.min.x, y[0], c.min.y);
+                let hi = rel + Vec3::new(c.max.x, y[1] + c.tallest + 0.3, c.max.y);
                 let center = (lo + hi) * 0.5;
                 let radius = (hi - lo).length() * 0.5;
                 let nearest = Vec3::ZERO.clamp(lo, hi).length();

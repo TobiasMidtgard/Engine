@@ -623,19 +623,52 @@ fn nets(f: Field, r: &Region) -> (Vec<Vec3>, Vec<u32>) {
     let rest = |q: Vec3| r.center + r.rot * q;
     let idx = |x: usize, y: usize, z: usize| (z * ny + y) * nx + x;
     let mut field = vec![0.0f32; nx * ny * nz];
-    const B: usize = 4;
-    let reach = (v * B as f32).length() * 0.5 * 1.3 + v.max_element();
-    for bz in (0..nz).step_by(B) {
-        for by in (0..ny).step_by(B) {
-            for bx in (0..nx).step_by(B) {
-                let (ex, ey, ez) = ((bx + B).min(nx), (by + B).min(ny), (bz + B).min(nz));
-                let c = (local(bx, by, bz) + local(ex - 1, ey - 1, ez - 1)) * 0.5;
-                let dc = f(rest(c));
-                let far = dc.abs() > reach;
-                for z in bz..ez {
-                    for y in by..ey {
-                        for x in bx..ex {
-                            field[idx(x, y, z)] = if far { dc } else { f(rest(local(x, y, z))) };
+    // Blocks of `size`³ samples whose center is farther from the surface than `reach` take
+    // the center's value (the sign is all the cells away from the surface need); nearer
+    // blocks of 4³ are split into blocks of 2³ the same way, and only those are sampled.
+    let reach = |size: usize| (v * size as f32).length() * 0.5 * 1.3 + v.max_element();
+    let (reach4, reach2) = (reach(4), reach(2));
+    let block = |field: &mut Vec<f32>, lo: (usize, usize, usize), size: usize, r: f32| {
+        let hi = (
+            (lo.0 + size).min(nx),
+            (lo.1 + size).min(ny),
+            (lo.2 + size).min(nz),
+        );
+        let c = (local(lo.0, lo.1, lo.2) + local(hi.0 - 1, hi.1 - 1, hi.2 - 1)) * 0.5;
+        let dc = f(rest(c));
+        let far = dc.abs() > r;
+        if far {
+            for z in lo.2..hi.2 {
+                for y in lo.1..hi.1 {
+                    for x in lo.0..hi.0 {
+                        field[idx(x, y, z)] = dc;
+                    }
+                }
+            }
+        }
+        (far, hi)
+    };
+    for bz in (0..nz).step_by(4) {
+        for by in (0..ny).step_by(4) {
+            for bx in (0..nx).step_by(4) {
+                let (far, hi) = block(&mut field, (bx, by, bz), 4, reach4);
+                if far {
+                    continue;
+                }
+                for sz in (bz..hi.2).step_by(2) {
+                    for sy in (by..hi.1).step_by(2) {
+                        for sx in (bx..hi.0).step_by(2) {
+                            let (far, h) = block(&mut field, (sx, sy, sz), 2, reach2);
+                            if far {
+                                continue;
+                            }
+                            for z in sz..h.2 {
+                                for y in sy..h.1 {
+                                    for x in sx..h.0 {
+                                        field[idx(x, y, z)] = f(rest(local(x, y, z)));
+                                    }
+                                }
+                            }
                         }
                     }
                 }
@@ -925,7 +958,6 @@ fn decimate(pos: Vec<Vec3>, idx: Vec<u32>, target: usize, paint: &[Vec3]) -> (Ve
     let paint: Vec<Vec3> = paint.to_vec();
     let mut alive = vec![true; nv];
     let mut stamp = vec![0u32; nv];
-    let mut heap = BinaryHeap::new();
     let cost = |q: &[Quadric], p: &[DVec3], a: usize, b: usize| -> (f64, DVec3) {
         let mut qq = q[a];
         qq.add(&q[b]);
@@ -941,25 +973,30 @@ fn decimate(pos: Vec<Vec3>, idx: Vec<u32>, target: usize, paint: &[Vec3]) -> (Ve
         let l2 = p[a].distance_squared(p[b]);
         (best.0 + 2e-5 * dc * l2 + 1e-9 * l2 * l2, best.1)
     };
-    let mut seen = std::collections::HashSet::new();
+    // Heap order: non-negative costs sort like their bits (as f32: smaller entries).
+    let key = |c: f64| (c as f32).to_bits();
+    // Each edge once: a closed mesh has it as a→b in one triangle and b→a in the other.
+    // (Edges listed twice or not at all, at the region's border or where the surface is
+    // pinched, are not collapsible anyway.)
+    let mut edges = Vec::with_capacity(faces.len() * 3 / 2 + 1);
     for f in &faces {
         for (a, b) in [(f[0], f[1]), (f[1], f[2]), (f[2], f[0])] {
-            let (a, b) = (a.min(b) as usize, a.max(b) as usize);
-            if seen.insert((a, b)) {
-                let (c, _) = cost(&q, &p, a, b);
-                heap.push(Reverse((c.to_bits(), a as u32, b as u32, 0u32, 0u32)));
+            if a < b {
+                let (c, _) = cost(&q, &p, a as usize, b as usize);
+                edges.push(Reverse((key(c), a, b, 0u32)));
             }
         }
     }
-    drop(seen);
+    let mut heap = BinaryHeap::from(edges);
     let mut na: Vec<u32> = Vec::new();
     let mut nb: Vec<u32> = Vec::new();
     while tris > target {
-        let Some(Reverse((_, a, b, sa, sb))) = heap.pop() else {
+        let Some(Reverse((_, a, b, s))) = heap.pop() else {
             break;
         };
         let (a, b) = (a as usize, b as usize);
-        if !alive[a] || !alive[b] || stamp[a] != sa || stamp[b] != sb {
+        // Stamps only grow, so their sum tells whether either end changed since.
+        if !alive[a] || !alive[b] || stamp[a] + stamp[b] != s {
             continue;
         }
         let (_, np) = cost(&q, &p, a, b);
@@ -1030,13 +1067,7 @@ fn decimate(pos: Vec<Vec3>, idx: Vec<u32>, target: usize, paint: &[Vec3]) -> (Ve
             let c = c as usize;
             let (x, y) = (a.min(c), a.max(c));
             let (cst, _) = cost(&q, &p, x, y);
-            heap.push(Reverse((
-                cst.to_bits(),
-                x as u32,
-                y as u32,
-                stamp[x],
-                stamp[y],
-            )));
+            heap.push(Reverse((key(cst), x as u32, y as u32, stamp[x] + stamp[y])));
         }
     }
     // Compact.
@@ -1059,6 +1090,19 @@ fn decimate(pos: Vec<Vec3>, idx: Vec<u32>, target: usize, paint: &[Vec3]) -> (Ve
     (out_pos, out_idx)
 }
 
+/// Area-weighted vertex normals of a triangle mesh.
+fn mesh_normals(pos: &[Vec3], idx: &[u32]) -> Vec<Vec3> {
+    let mut n = vec![Vec3::ZERO; pos.len()];
+    for t in idx.as_chunks::<3>().0 {
+        let [a, b, c] = t.map(|i| i as usize);
+        let f = (pos[b] - pos[a]).cross(pos[c] - pos[a]);
+        n[a] += f;
+        n[b] += f;
+        n[c] += f;
+    }
+    n.into_iter().map(|v| v.normalize_or(Vec3::Y)).collect()
+}
+
 /// Mesh the zero surface of `f` in `region`, simplified to about `target` triangles,
 /// projected onto the surface, painted and stored relative to the pivot.
 fn sculpt(f: Field, region: Region, target: usize, paint: &Paint) -> Mesh {
@@ -1067,7 +1111,8 @@ fn sculpt(f: Field, region: Region, target: usize, paint: &Paint) -> Mesh {
     let e = region.voxel.min_element() * 0.35;
     let rough: Vec<Vec3> = positions
         .iter()
-        .map(|&p| (paint.color)(p, gradient(f, p, e)))
+        .zip(mesh_normals(&positions, &indices))
+        .map(|(&p, n)| (paint.color)(p, n))
         .collect();
     let (positions, indices) = decimate(positions, indices, target, &rough);
     let ao_field = |p: Vec3| f(p).min((paint.body)(p));
@@ -1842,6 +1887,8 @@ mod deer {
         let butt = ell(m, v3(0.062, 0.94, 0.5), v3(0.075, 0.125, 0.09));
         let ham = cone(m, v3(0.075, 0.95, 0.52), v3(0.1, 0.71, 0.44), 0.065, 0.042);
         let hip = ell(m, v3(0.115, 1.06, 0.29), v3(0.045, 0.045, 0.055));
+        // The flank fold: skin from the belly to the stifle, over the thigh bone.
+        let fold = ell(m, v3(0.122, 0.76, 0.225), v3(0.06, 0.082, 0.085));
         // Base of the neck: a ball around the neck joint a little bigger than the neck's own,
         // so the neck turns in it without opening a seam.
         let socket = neck_ball(p, NECK_R + 0.004);
@@ -1860,6 +1907,7 @@ mod deer {
         d = smin(d, butt, 0.06);
         d = smin(d, ham, 0.05);
         d = smin(d, hip, 0.05);
+        d = smin(d, fold, 0.07);
         d = smin(d, shoulder, 0.05);
         d = smin(d, hip_ball, 0.05);
         smin(d, socket, 0.07)
@@ -1883,9 +1931,9 @@ mod deer {
         R.hind.joints[i]
     }
 
-    /// Upper arm: mostly inside the chest; fills the elbow as the leg swings.
+    /// Upper arm: slim enough to stay inside the chest and triceps as the leg swings.
     pub fn arm(p: Vec3) -> f32 {
-        cone(p, fj(0), fj(1), 0.06, 0.048)
+        cone(p, fj(0), fj(1) + v3(-0.008, 0.01, 0.0), 0.046, 0.036)
     }
 
     pub fn forearm(p: Vec3) -> f32 {
@@ -1988,32 +2036,39 @@ mod deer {
         hoof(p, hj(3), hj(4))
     }
 
-    /// Thigh bone: inside the haunch; shows at the stifle as the leg swings.
+    /// Thigh: the bone and the muscle round it under the haunch, filling the flank as the leg
+    /// swings.
     pub fn thigh(p: Vec3) -> f32 {
-        let bone = cone(p, hj(0), hj(1), 0.07, 0.055);
-        // The lower thigh muscles move with the femur (inside the haunch at rest).
-        let muscle = ell(
-            p,
-            hj(0) + (hj(1) - hj(0)) * 0.6 + v3(-0.004, 0.0, 0.035),
-            v3(0.056, 0.1, 0.085),
-        );
-        smin(bone, muscle, 0.04)
+        let bone = cone(p, hj(0), hj(1), 0.058, 0.046);
+        let quarter = ell(p, v3(0.112, 0.8, 0.28), v3(0.062, 0.1, 0.09));
+        smin(bone, quarter, 0.06)
     }
 
     pub fn gaskin(p: Vec3) -> f32 {
         let g = cone_x(p, hj(1), hj(2), 0.052, 0.027, 1.15);
-        let calf = ell(p, v3(0.122, 0.625, 0.36), v3(0.038, 0.095, 0.05));
+        // Gaskin muscles: thick under the stifle, tapering into the Achilles tendon.
+        let calf = cone_x(
+            p,
+            v3(0.128, 0.68, 0.27),
+            v3(0.12, 0.55, 0.4),
+            0.052,
+            0.026,
+            1.2,
+        );
         let achilles = cone_x(
             p,
-            v3(0.118, 0.62, 0.405),
+            v3(0.12, 0.58, 0.385),
             v3(0.115, 0.47, 0.49),
-            0.02,
+            0.021,
             0.014,
             1.3,
         );
         let hock = ell(p, hj(2), v3(0.027, 0.034, 0.034));
         let point = ell(p, v3(0.115, 0.468, 0.487), v3(0.018, 0.022, 0.02));
+        // The stifle: a round top the leg turns in under the flank fold.
+        let stifle = sphere(p, hj(1) + v3(-0.006, 0.0, 0.01), 0.05);
         let mut d = smin(g, calf, 0.05);
+        d = smin(d, stifle, 0.04);
         d = smin(d, achilles, 0.03);
         d = smin(d, hock, 0.02);
         smin(d, point, 0.015)
@@ -2186,8 +2241,16 @@ mod deer {
         smin(ssub(smin(leaf, tip, 0.02), hollow, 0.006), roll, 0.015)
     }
 
+    /// Short, broad and flat, lying on the rump patch, with a tuft of longer hair at the tip.
     pub fn tail(p: Vec3) -> f32 {
-        cone_x(p, R.tail, R.tail2, 0.032, 0.022, 0.8)
+        let tip = R.tail2 + (R.tail2 - R.tail) * 0.12;
+        let d = cone_x(p, R.tail, tip, 0.036, 0.014, 0.62);
+        let tuft = ell(p, R.tail2 + v3(0.0, 0.0, 0.004), v3(0.03, 0.045, 0.02));
+        let d = smin(d, tuft, 0.03);
+        if d > 0.02 {
+            return d;
+        }
+        d - 0.007 * clumps(p, R.tail2 - R.tail, 0.012, 61)
     }
 
     /// Everything, for occlusion.
@@ -2331,9 +2394,9 @@ mod deer {
                 c = mix(c, hex(0x35281f), rim.min(1.0) * 0.8);
             }
             Piece::Tail => {
-                // Buff above, paler where it lies against the rump.
-                c = mix(hex(0xb3976f), cream, smooth(0.2, -0.5, n.z));
-                c = mix(c, hex(0x8a6a4c), smooth(0.3, 0.9, up) * 0.45);
+                // Sandy brown on the outside, cream where it lies against the rump.
+                c = mix(hex(0x9c7a58), cream, smooth(0.1, -0.6, n.z));
+                c = mix(c, hex(0x7a5a40), smooth(0.2, 0.9, up) * 0.5);
             }
             _ => {}
         }
@@ -2462,7 +2525,7 @@ mod deer {
                 hind_hoof,
                 R.hind,
                 [0.3, 0.16, 0.08, 0.05],
-                [550, 1100, 650, 320],
+                [1000, 1100, 650, 320],
             ),
         ];
         for (k, fields, hoof_f, leg, reach, target) in legs {
@@ -3643,7 +3706,7 @@ mod rabbit {
             region: Region::aabb(
                 v3(-0.11, 0.0, -0.15),
                 v3(0.11, 0.21, 0.19),
-                Vec3::splat(0.0034),
+                Vec3::splat(0.0042),
             ),
             target: 3200,
             flow: torso_flow,
@@ -3665,7 +3728,7 @@ mod rabbit {
             region: Region::aabb(
                 v3(-0.055, 0.095, -0.2),
                 v3(0.055, 0.215, -0.035),
-                Vec3::splat(0.0018),
+                Vec3::splat(0.0024),
             ),
             target: 2200,
             flow: head_flow,
@@ -3696,7 +3759,7 @@ mod rabbit {
             region: Region::aabb(
                 SCUT - v3(0.03, 0.035, 0.035),
                 SCUT + v3(0.03, 0.03, 0.026),
-                Vec3::splat(0.0014),
+                Vec3::splat(0.002),
             ),
             target: 320,
             flow: Flow::new(R.tail, SCUT + v3(0.0, 0.02, 0.0), back, 0.04),
@@ -3709,10 +3772,10 @@ mod rabbit {
         // Leg, segment, field, from, to, reach, voxel, triangles.
         type LegSpec = (u8, u8, SdfFn, Vec3, Vec3, f32, f32, usize);
         let legs: [LegSpec; 4] = [
-            (1, 0, foreleg, f[0], f[1], 0.03, 0.0014, 260),
-            (1, 1, forefoot, f[1], f[2], 0.016, 0.001, 140),
-            (3, 0, hindleg, h[0], h[1], 0.035, 0.0016, 320),
-            (3, 1, hindfoot, h[1], h[2], 0.022, 0.0012, 260),
+            (1, 0, foreleg, f[0], f[1], 0.03, 0.002, 260),
+            (1, 1, forefoot, f[1], f[2], 0.016, 0.0014, 140),
+            (3, 0, hindleg, h[0], h[1], 0.035, 0.0024, 320),
+            (3, 1, hindfoot, h[1], h[2], 0.022, 0.0018, 260),
         ];
         for (k, s, f, a, b, reach, voxel, target) in legs {
             specs.push(Spec {
@@ -4076,7 +4139,7 @@ mod bird {
                 outer: 0.42,
                 camber: 0.0008,
                 droop: 0.002,
-                point: 0.8,
+                point: 0.35,
                 ..Quill::new(v3(x, 0.0862 + f * 0.0012, -0.019), dir, len, 0.0135, tint)
             };
             mesh.merge(&q.mesh(q.free(3, 6), R.shoulder));
@@ -4115,15 +4178,15 @@ mod bird {
         .finish(w, &body, KIND.scale, &|_, _, _| sheen);
         for (i, &len) in LEN.iter().enumerate() {
             let f = i as f32 / 8.0;
-            let a = 0.3 + 0.95 * f.powf(1.2);
+            let a = 0.34 + 0.82 * f.powf(1.2);
             let dir = v3(a.sin(), 0.0, a.cos());
             let root = w.lerp(HAND, f) + v3(0.0, (1.0 - f) * 0.0012 - 0.0004, 0.004);
             let q = Quill {
                 outer: 0.3,
                 camber: 0.0009,
                 droop: 0.004,
-                point: 1.6,
-                ..Quill::new(root, dir, len, 0.016 - 0.003 * f, DULL * 0.95)
+                point: 0.55,
+                ..Quill::new(root, dir, len, 0.0165 - 0.003 * f, DULL * 0.95)
             };
             mesh.merge(&q.mesh(q.free(3, 8), w));
             let c = Quill {
@@ -4256,11 +4319,13 @@ mod bird {
             for i in 0..6 {
                 let f = i as f32;
                 let a = side * (0.012 + f * fan);
-                let dir = v3(a.sin(), -0.12, a.cos());
+                // The middle pair lies on top; the outer ones a little lower, so the folded
+                // tail is gently keeled.
+                let dir = v3(a.sin(), -0.11 - 0.006 * f, a.cos());
                 let root = R.tail
                     + v3(
                         side * (0.0012 + f * (0.0012 + fan * 0.006)),
-                        (5.0 - f) * 0.00025,
+                        (5.0 - f) * 0.0003,
                         0.0,
                     );
                 // The narrow outer vane faces away from the middle.
@@ -4273,30 +4338,41 @@ mod bird {
                 };
                 let q = Quill {
                     outer,
-                    camber: 0.0006,
+                    camber: 0.0009,
                     droop: 0.001,
-                    point: 0.8,
+                    point: 0.45,
                     ..Quill::new(root, dir, 0.064 - 0.0004 * f, 0.0125, DULL)
                 };
                 mesh.merge(&q.mesh(q.free(3, 6), R.tail));
             }
-            for k in 0..2 {
-                let x = side * (0.0025 + 0.004 * k as f32);
-                let over = Quill::new(
-                    v3(x, 0.0788, 0.04),
-                    v3(x * 0.3, -0.05, 1.0),
-                    0.03,
-                    0.012,
-                    mix(GREEN, BRONZE, 0.5) * 0.85,
-                );
+            // Long coverts over and under the base taper the tail into the body: glossy
+            // above, buff-fringed below.
+            for k in 0..3 {
+                let x = side * (0.0018 + 0.0036 * k as f32);
+                let over = Quill {
+                    camber: 0.0008,
+                    point: 0.7,
+                    ..Quill::new(
+                        v3(x, 0.0792 - 0.0004 * k as f32, 0.036),
+                        v3(x * 0.3, -0.09, 1.0),
+                        0.036 - 0.003 * k as f32,
+                        0.013,
+                        mix(GREEN, BRONZE, 0.5) * 0.85,
+                    )
+                };
                 mesh.merge(&over.mesh(over.free(2, 4), R.tail));
-                let under = Quill::new(
-                    v3(x, 0.0665, 0.043),
-                    v3(x * 0.3, -0.06, 1.0),
-                    0.032,
-                    0.012,
-                    DULL,
-                );
+                let under = Quill {
+                    up: Vec3::NEG_Y,
+                    camber: 0.0008,
+                    point: 0.7,
+                    ..Quill::new(
+                        v3(x, 0.0662 + 0.0004 * k as f32, 0.037),
+                        v3(x * 0.3, 0.035, 1.0),
+                        0.042 - 0.004 * k as f32,
+                        0.0135,
+                        DULL * 1.1,
+                    )
+                };
                 mesh.merge(&under.mesh(under.free(2, 4), R.tail));
             }
         }
@@ -4373,7 +4449,7 @@ mod bird {
                 region: Region::aabb(
                     v3(-0.033, 0.028, -0.068),
                     v3(0.033, 0.106, 0.082),
-                    Vec3::splat(0.0015),
+                    Vec3::splat(0.0019),
                 ),
                 target: 2000,
                 flow: torso_flow,

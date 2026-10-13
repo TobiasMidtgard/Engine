@@ -443,10 +443,13 @@ pub struct EmitterDesc {
     // ---- motion
     /// Multiplier on world gravity (1 = falls like a stone, 0 = floats, negative = rises).
     pub gravity: f32,
-    /// Constant world-space acceleration, m/s² (buoyancy of flames and smoke: `[0, 3, 0]`).
+    /// Constant acceleration, m/s², as on flat ground in sea-level air (buoyancy of flames and
+    /// smoke: `[0, 3, 0]`). Its +Y turns to the local up on a planet, and it scales with the
+    /// air's density, so smoke barely rises in thin air and not at all in a vacuum.
     pub acceleration: [f32; 3],
-    /// How fast particles take on the motion of the surrounding air, per second
-    /// (0 = no air resistance, 1 = embers, 4 = light smoke).
+    /// How fast particles take on the motion of the surrounding air, per second, in sea-level
+    /// air (0 = no air resistance, 1 = embers, 4 = light smoke). Scales with the air's density,
+    /// as does `turbulence`.
     pub drag: f32,
     /// How much of the wind the surrounding air carries for this layer (0..1).
     pub wind: f32,
@@ -683,6 +686,9 @@ pub struct EffectDesc {
     pub light: Option<EffectLight>,
     /// A ribbon trail behind the effect while it moves.
     pub trail: Option<Trail>,
+    /// A mark left where the effect starts, facing along its up axis (scorch, frost, wet
+    /// stone, a chip), sized by its scale.
+    pub mark: Option<crate::marks::MarkDesc>,
 }
 
 impl Default for EffectDesc {
@@ -695,6 +701,7 @@ impl Default for EffectDesc {
             emitters: Vec::new(),
             light: None,
             trail: None,
+            mark: None,
         }
     }
 }
@@ -705,9 +712,13 @@ impl EffectDesc {
         if self.name.trim().is_empty() {
             return Err("The effect needs a \"name\", like \"spell.fireball\".".into());
         }
-        if self.emitters.is_empty() && self.light.is_none() && self.trail.is_none() {
+        if self.emitters.is_empty()
+            && self.light.is_none()
+            && self.trail.is_none()
+            && self.mark.is_none()
+        {
             return Err(format!(
-                "Effect \"{}\" has no emitters, light or trail, so it would show nothing.",
+                "Effect \"{}\" has no emitters, light, trail or mark, so it would show nothing.",
                 self.name
             ));
         }

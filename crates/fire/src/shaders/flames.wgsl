@@ -172,7 +172,7 @@ fn flame_sample(uv: vec2<f32>, size: vec2<f32>, seed: f32, t: f32) -> vec2<f32> 
 // smear).
 fn flame_peak(intensity: f32) -> f32 {
     let stops = log2(max(9000.0 * frame.exposure.x, 1e-6));
-    let lo = 0.3;
+    let lo = -0.6;
     let hi = 1.0;
     // Smooth max with lo, then smooth min with hi.
     let raised = lo + log2(1.0 + exp2(stops - lo));
@@ -223,9 +223,10 @@ fn fs_flame(in: VsOut) -> @location(0) vec4<f32> {
     let soot_a = saturate(soot * 1.4) * 0.45 * saturate(intensity * 2.0);
     let soot_c = pre_expose(sky_ambient(vec3<f32>(0.0, 1.0, 0.0))) * 0.04
         + blackbody(1300.0) * flame_peak(intensity) * 0.015;
-    // A flame is mostly emission, but bright enough to hide part of what's behind it.
-    // Only the hot core: the thin edges stay see-through (no dark rims by day).
-    let alpha = saturate(body * 0.45 * smoothstep(0.35, 0.8, heat) + soot_a) * fade;
+    // A flame is mostly emission, but bright enough to hide part of what's behind it, other
+    // flames included (so dozens of overlapping sprites in a fire front don't add up to a
+    // washed-out cream). Only the hot core: thin edges stay see-through (no dark rims by day).
+    let alpha = saturate(body * 0.7 * smoothstep(0.35, 0.8, heat) + soot_a) * fade;
     let col = apply_fog(c + soot_c * soot_a, in.rel) * fade;
     return vec4<f32>(col, alpha);
 }

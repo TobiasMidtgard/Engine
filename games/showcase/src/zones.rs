@@ -225,6 +225,8 @@ pub const BARE_FOOTPRINTS: &[(&str, [f64; 2], [f64; 2])] = &[
     ("weather", [-13.5, 13.0], [-8.0, 9.0]),
     // The siege fortress's gravel breach range.
     ("fortress", [-26.5, 26.5], [-14.0, -4.0]),
+    // The market's cobbled square (grass still grows where its edge frays out).
+    ("market", [-11.0, 11.0], [-11.0, 11.0]),
 ];
 
 /// The stream's course (x, z), spring first: through the southern woods, over the cliff south
@@ -254,10 +256,7 @@ pub fn spawn_demos(
     for z in ZONES {
         match z.key {
             "plaza" => ph::plaza(commands, lib, z),
-            "market" => {
-                ph::market(commands, lib, z);
-                engine_ui::demo::spawn_demo(commands, z.center);
-            }
+            "market" => engine_ui::demo::spawn_demo(commands, z.center),
             "paddock" => engine_anim::demo::spawn_demo(commands, z.center),
             "physics" => engine_physics::demo::spawn_demo(commands, z.center),
             "yard" => engine_softbody::demo::spawn_demo(commands, z.center),
@@ -297,7 +296,6 @@ pub fn spawn_demos(
                     DVec3::new(a[0], z.center.y, a[1]),
                     DVec3::new(b[0], z.center.y, b[1]),
                 );
-                ph::airfield_buildings(commands, lib, z);
             }
             "spaceport" => {
                 ph::spaceport(commands, lib, z);
@@ -438,6 +436,36 @@ pub fn demo_views(z: &Zone) -> Vec<View> {
                 .warmup(1.75)
                 .on_arrive("movement.duel", &duel("Pack"))
                 .on_leave("movement.duel", cycle),
+                // The ledge station: the climber restarts its loop on arrival and is caught
+                // shimmying along the block's top. The Blink round has no slow motion, so the
+                // climber keeps its pace.
+                View::new(
+                    "parkour_ledge",
+                    "Ledge hang: catch a ledge too high to climb, shimmy along it, climb up",
+                    [11.4, 3.0, 8.4],
+                    [17.0, 2.3, 1.6],
+                    16.0,
+                )
+                .warmup(2.6)
+                .on_arrive("movement.duel", &duel("Blink"))
+                .on_arrive("movement.climber", "{}")
+                .on_leave("movement.duel", cycle),
+                // Play mode (P): a pilot in front of the camera, locked onto the elite.
+                View::new(
+                    "parkour_play",
+                    "Play mode: your pilot dash-strikes the locked-on elite (press P to play)",
+                    [-8.0, 2.0, -6.0],
+                    [-2.0, 1.0, -17.0],
+                    16.0,
+                )
+                // The capture lands mid-strike (dash 0.2 s, strike from 0.3 s).
+                .warmup(0.0)
+                .on_arrive("movement.duel", &duel("Focus"))
+                .on_arrive("movement.play", r#"{"on": true}"#)
+                .on_arrive("movement.lock_on", r#"{"target": "Elite"}"#)
+                .on_arrive("movement.attack", r#"{"entity": "Pilot", "kind": "dash"}"#)
+                .on_leave("movement.play", r#"{"on": false}"#)
+                .on_leave("movement.duel", cycle),
             ]
         }
         // Each stop restarts the range, so fans, grenades and bullets are at the same moment.
@@ -463,8 +491,9 @@ pub fn demo_views(z: &Zone) -> Vec<View> {
             })
             .collect(),
         "market" => {
+            let (eye, target) = engine_ui::demo::market::ui_view();
             let ui = |key, name, screen: &'static str| {
-                View::new(key, name, [-1.5, 1.8, -5.5], [-11.8, 1.8, 9.2], 15.0)
+                View::new(key, name, eye.to_array(), target.to_array(), 15.0)
                     .warmup(1.5)
                     .on_arrive("ui.show", screen)
                     .on_leave("ui.hide_all", "{}")
@@ -663,6 +692,16 @@ pub fn demo_views(z: &Zone) -> Vec<View> {
                     v.target.to_array(),
                     v.hour,
                 )
+            })
+            .collect(),
+        // Each stop restarts the paddock and waits for its moment (the tour settles 0.4 s
+        // before its warm-up).
+        "paddock" => engine_anim::demo::VIEWS
+            .iter()
+            .map(|v| {
+                View::new(v.key, v.name, v.eye, v.target, v.hour)
+                    .warmup((v.at - 0.4).max(0.0))
+                    .on_arrive("anim.demo_restart", "{}")
             })
             .collect(),
         "magic" => engine_vfx::demo::VIEWS

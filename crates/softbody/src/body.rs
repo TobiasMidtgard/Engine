@@ -32,6 +32,8 @@ pub enum FrameSource {
     Entity(Entity),
     /// Bone `bone` of `owner`'s `SkeletonPose`.
     Bone { owner: Entity, bone: usize },
+    /// Two bones of a `SkeletonPose` blended the way skinning blends them.
+    Blend(crate::hair::BoneBlend),
 }
 
 /// Triangles to draw, following the particles.
@@ -70,6 +72,7 @@ pub struct Embedding {
 pub struct Tube {
     pub particles: Vec<u32>,
     pub radius: f32,
+    pub beads: Option<crate::rope::Beads>,
 }
 
 /// Runtime state of one soft body. Added by the plugin; read it for positions

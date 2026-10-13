@@ -155,11 +155,27 @@ fn views() -> Vec<View> {
             ..BASE
         },
         View {
+            name: "earth_cliffs",
+            eye: DVec3::new(-11_500.0, 0.0, -22_400.0),
+            target: DVec3::new(-13_000.0, 1_900.0, -21_700.0),
+            above_ground: Some(350.0),
+            sun: (175.0, 28.0),
+            ..BASE
+        },
+        View {
             name: "earth_high",
             eye: DVec3::new(-10_000.0, 45_000.0, 90_000.0),
             target: DVec3::new(0.0, 0.0, -30_000.0),
             sun: (230.0, 28.0),
             fov: 65.0,
+            ..BASE
+        },
+        View {
+            name: "earth_leo",
+            eye: DVec3::new(0.0, 420_000.0, 150_000.0),
+            target: DVec3::new(0.0, -300_000.0, -1_500_000.0),
+            sun: (200.0, 35.0),
+            fov: 60.0,
             ..BASE
         },
         View {
@@ -315,7 +331,13 @@ fn build(view: &View, size: (u32, u32)) -> App {
     ));
     if view.lab {
         let mut commands = app.world.commands();
-        demo::spawn_demo(&mut commands, DVec3::ZERO);
+        demo::spawn_demo_with(
+            &mut commands,
+            DVec3::ZERO,
+            demo::LabOptions {
+                stand_in_bodies: true,
+            },
+        );
         app.world.flush();
     }
     if !view.lab {
@@ -388,9 +410,14 @@ fn main() {
         let mut eye = view.eye;
         if let Some(h) = view.above_ground {
             let ground = app.world.resource::<engine_world::Ground>().clone();
-            let y = ground
-                .height(DVec3::new(eye.x, 50_000.0, eye.z))
-                .unwrap_or(0.0);
+            // On a planet the ground is found along the local vertical, so ask again from
+            // just above it: from high up the answer lies a little to the side.
+            let mut y = 50_000.0;
+            for _ in 0..3 {
+                y = ground
+                    .height(DVec3::new(eye.x, y + 10.0, eye.z))
+                    .unwrap_or(0.0);
+            }
             eye.y = y + h;
         }
         app.world.spawn((

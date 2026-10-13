@@ -30,8 +30,16 @@ world re-anchors on the next body.
   anchor's), the anchor switches to the body that holds it, with the home spot right under
   the focus. Every free entity keeps its true position, orientation and velocity across the
   switch (velocities include the change of frame motion and spin).
+- **What you leave stays put.** When the world stops turning with a body (climbing out, or a
+  trip elsewhere), everything on or near it (below half that height: the valley, its
+  houses, props, parked cars and NPCs) is noted in `Parked` with its pose and motion on the
+  body, and put back there when the world turns with that body again, wherever you land.
+  Otherwise those things would keep the place the new frame mapped them to while the planet
+  turned away beneath them. `SpaceSettings::keep_surfaces` turns it off.
 - **Travel.** `travel_to(world, body, lat, lon, altitude)` / `space.travel` makes a body the
   anchor and puts the focus at a spot on it: the quick trip for tours, tools and fast travel.
+  `travel_home(world, altitude)` / `space.travel {"home": true}` returns to the frame the
+  world started in, so a level built around the home spot is exactly where it was.
 - **Gravity, air and light.** Writes `Gravity::bodies` (the anchor and any body whose reach
   holds the focus), sets the renderer's `Atmosphere` to the nearest body with air (off when
   none), and points every `DirectionalLight` marked `StarLight` at its star with the right
@@ -75,8 +83,8 @@ map and prints bake times.
 
 ## Known limits (next rounds)
 
-- Other modules keep some world-space data outside `Transform` (field grids, particles). A
-  re-anchor moves entities but not that data yet; a core `WorldShift` message is requested.
+- While the world is anchored elsewhere, what was left on a body is not simulated with it:
+  it keeps the place the shift mapped it to (far out of view) until it is put back.
 - The far Earth's continents are its own; they don't match what `engine_terrain` builds up
   close. A shared continent field (or terrain baking the far map) needs a contract.
 - Full-size bakes cost 0.4-1.5 s of CPU per body; a few looks (Mars albedo regions, Moon

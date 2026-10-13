@@ -1,6 +1,7 @@
-//! Painted ground: a flat rectangle of terrain whose surface is blended per pixel from tiling
+//! Painted ground: a rectangle of terrain whose surface is blended per pixel from tiling
 //! procedural layers ([`GroundKind`]: meadow litter, dirt, gravel, mud, ash) by painted
-//! shapes with soft, ragged, height-aware edges, instead of hard-edged colored boxes.
+//! shapes with soft, ragged, height-aware edges, instead of hard-edged colored boxes. It lies
+//! over the ground (the `Ground` contract), hills and all.
 //!
 //! The layer textures (albedo with height, normal, roughness, occlusion; 1K each, mipmapped)
 //! are generated once, the first time a [`PaintedGround`] is drawn, and shared by all of them.
@@ -17,6 +18,8 @@ use engine_render::{
     FeatureStats, FrameContext, GpuShared, Image, RenderFeature, RenderPhase, RenderSettings,
     ViewData,
 };
+
+use engine_world::Ground;
 
 use crate::field::{FireField, TILE};
 use crate::fuel::PatchShape;
@@ -84,8 +87,9 @@ impl GroundPaint {
     }
 }
 
-/// A flat rectangle of painted ground around its entity (no rotation), drawn `lift_m` above
-/// the entity so it covers the terrain under it. Its outer edge frays out over `edge_m`.
+/// A rectangle of painted ground around its entity (no rotation), draped over the ground
+/// (`Ground`; flat at the entity's height where there is none) and drawn `lift_m` above it so
+/// it covers the terrain under it. Its outer edge frays out over `edge_m`.
 #[derive(Component, Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct PaintedGround {
@@ -179,6 +183,26 @@ struct GroundGpu {
     scorch: Option<(wgpu::Texture, wgpu::TextureView)>,
     scorch_size: [u32; 2],
     scorch_key: (u64, [i64; 2]),
+    /// Ground height above the entity at each mesh vertex (R32Float, `GRID + 1` square).
+    heights: Option<(wgpu::Texture, wgpu::TextureView)>,
+    heights_key: [i64; 5],
+}
+
+/// Ground height above `at.y` at each of the ground mesh's `(GRID + 1)²` vertices.
+fn ground_heights(ground: Option<&Ground>, at: DVec3, half: [f32; 2]) -> Vec<f32> {
+    let n = GRID + 1;
+    let hint = at.y + 2.0 + half[0].max(half[1]) as f64;
+    (0..n * n)
+        .map(|i| {
+            let f = DVec2::new((i % n) as f64, (i / n) as f64) / GRID as f64 * 2.0 - 1.0;
+            let x = at.x + f.x * half[0] as f64;
+            let z = at.z + f.y * half[1] as f64;
+            ground
+                .and_then(|g| g.height(DVec3::new(x, hint, z)))
+                .filter(|h| h.is_finite())
+                .map_or(0.0, |h| (h - at.y) as f32)
+        })
+        .collect()
 }
 
 /// The scorch map of a ground: one texel per fire cell over its rectangle (`min`, `size`
@@ -367,6 +391,16 @@ impl RenderFeature for GroundFeature {
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                     count: None,
                 },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 6,
+                    visibility: wgpu::ShaderStages::VERTEX,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
             ],
         });
         let shader = gpu.shader("painted ground", GROUND_SHADER, true);
@@ -446,6 +480,7 @@ impl RenderFeature for GroundFeature {
         };
         self.grounds
             .retain(|g| grounds.iter().any(|(e, ..)| *e == g.entity));
+        let terrain = world.get_resource::<Ground>().cloned();
         let field = world.get_resource::<FireField>();
         let field_version = field.map_or(0, |f| {
             f.tiles
@@ -476,6 +511,8 @@ impl RenderFeature for GroundFeature {
                         scorch: None,
                         scorch_size: [0, 0],
                         scorch_key: (u64::MAX, [0, 0]),
+                        heights: None,
+                        heights_key: [i64::MAX; 5],
                     });
                     self.grounds.len() - 1
                 }
@@ -541,8 +578,50 @@ impl RenderFeature for GroundFeature {
                 );
                 g.scorch_key = key;
             }
+            // The ground under the rectangle, sampled again whenever it moves or resizes.
+            let mm = |v: f64| (v * 1000.0).round() as i64;
+            let heights_key = [
+                mm(at.x),
+                mm(at.y),
+                mm(at.z),
+                mm(ground.half_extents[0] as f64),
+                mm(ground.half_extents[1] as f64),
+            ];
+            if g.heights.is_none() || g.heights_key != heights_key {
+                let n = GRID + 1;
+                let extent = wgpu::Extent3d {
+                    width: n,
+                    height: n,
+                    depth_or_array_layers: 1,
+                };
+                let texture = gpu.device.create_texture(&wgpu::TextureDescriptor {
+                    label: Some("painted ground heights"),
+                    size: extent,
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format: wgpu::TextureFormat::R32Float,
+                    usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                    view_formats: &[],
+                });
+                let heights = ground_heights(terrain.as_ref(), at, ground.half_extents);
+                gpu.queue.write_texture(
+                    texture.as_image_copy(),
+                    bytemuck::cast_slice(&heights),
+                    wgpu::TexelCopyBufferLayout {
+                        offset: 0,
+                        bytes_per_row: Some(n * 4),
+                        rows_per_image: Some(n),
+                    },
+                    extent,
+                );
+                let view = texture.create_view(&Default::default());
+                g.heights = Some((texture, view));
+                g.heights_key = heights_key;
+                g.group = None;
+            }
             if g.group.is_none()
-                && let Some((_, scorch)) = &g.scorch
+                && let (Some((_, scorch)), Some((_, heights))) = (&g.scorch, &g.heights)
             {
                 g.group = Some(gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
                     label: Some("painted ground"),
@@ -571,6 +650,10 @@ impl RenderFeature for GroundFeature {
                         wgpu::BindGroupEntry {
                             binding: 5,
                             resource: wgpu::BindingResource::Sampler(&gpu.linear_clamp),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 6,
+                            resource: wgpu::BindingResource::TextureView(heights),
                         },
                     ],
                 }));
@@ -621,6 +704,37 @@ mod tests {
         );
         assert!(GROUND_SHADER.contains(&format!("const GRID: u32 = {GRID}u;")));
         assert!(GROUND_SHADER.contains(&format!("const MAX_PAINTS: u32 = {MAX_PAINTS}u;")));
+    }
+
+    #[test]
+    fn heights_follow_the_ground_under_the_rectangle() {
+        struct Ramp;
+        impl engine_world::GroundQuery for Ramp {
+            fn sample(&self, p: DVec3) -> Option<engine_world::GroundSample> {
+                Some(engine_world::GroundSample {
+                    height: 3.0 + 0.25 * p.x,
+                    normal: engine_core::math::Vec3::Y,
+                    surface: engine_world::SurfaceId(3),
+                })
+            }
+        }
+        let ramp = Ground(std::sync::Arc::new(Ramp));
+        let h = ground_heights(Some(&ramp), DVec3::new(4.0, 3.0, 0.0), [8.0, 2.0]);
+        let n = (GRID + 1) as usize;
+        assert_eq!(h.len(), n * n);
+        // Corners at x = -4 and 12: the ramp is 1 m below and 3 m above the entity there.
+        assert!((h[0] - (3.0 + 0.25 * -4.0 - 3.0)).abs() < 1e-5, "{}", h[0]);
+        assert!(
+            (h[n - 1] - (3.0 + 0.25 * 12.0 - 3.0)).abs() < 1e-5,
+            "{}",
+            h[n - 1]
+        );
+        // No ground: flat at the entity.
+        assert!(
+            ground_heights(None, DVec3::ZERO, [1.0, 1.0])
+                .iter()
+                .all(|&v| v == 0.0)
+        );
     }
 
     #[test]

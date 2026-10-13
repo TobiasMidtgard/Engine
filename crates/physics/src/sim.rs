@@ -1250,8 +1250,28 @@ impl Simulation {
             let region = self.region_mut(id);
             let delta = (new_anchor - region.anchor).as_vec3();
             region.anchor = new_anchor;
-            let handles: Vec<RigidBodyHandle> =
-                region.world.bodies.iter().map(|(h, _)| h).collect();
+            // The ground body stays at the local origin (new joints pinned to the world are
+            // placed relative to it): the world-side frames of joints on it move instead.
+            let ground = region.ground;
+            let handles: Vec<RigidBodyHandle> = region
+                .world
+                .bodies
+                .iter()
+                .map(|(h, _)| h)
+                .filter(|h| *h != ground)
+                .collect();
+            for (_, j) in region.world.impulse_joints.iter_mut() {
+                if j.body1() == ground {
+                    let mut f = j.data.local_frame1;
+                    f.translation -= delta;
+                    j.data.set_local_frame1(f);
+                }
+                if j.body2() == ground {
+                    let mut f = j.data.local_frame2;
+                    f.translation -= delta;
+                    j.data.set_local_frame2(f);
+                }
+            }
             for h in handles {
                 let rb = &mut region.world.bodies[h];
                 let mut pose = *rb.position();

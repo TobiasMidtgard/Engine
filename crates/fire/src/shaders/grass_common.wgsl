@@ -26,6 +26,7 @@ struct GrassParams {
 @group(1) @binding(1) var<storage, read> blades: array<Blade>;
 @group(1) @binding(2) var burn_map: texture_2d<f32>;
 @group(1) @binding(3) var burn_sampler: sampler;
+@group(1) @binding(4) var ground_map: texture_2d<f32>;  // ground height above the center, one texel per burn-map cell
 
 const LOD_STRIDE: u32 = 64u;
 
@@ -44,6 +45,22 @@ struct BladeVertex {
 // Fraction of blades drawn at distance `d` (each blade's density rank is compared with it).
 fn grass_density(d: f32) -> f32 {
     return clamp(pow(grass.lod.x / max(d, 1e-3), 1.5), grass.lod.y, 1.0);
+}
+
+// Ground height under `pos` (x, z from the meadow's center), bilinear between cell centers.
+fn ground_height(pos: vec2<f32>) -> f32 {
+    let dims = vec2<i32>(textureDimensions(ground_map));
+    let f = (pos - grass.map.xy) / grass.map.zw * vec2<f32>(dims) - 0.5;
+    let i = vec2<i32>(floor(f));
+    let t = f - floor(f);
+    let hi = dims - 1;
+    let a = clamp(i, vec2<i32>(0), hi);
+    let b = clamp(i + 1, vec2<i32>(0), hi);
+    let h00 = textureLoad(ground_map, a, 0).r;
+    let h10 = textureLoad(ground_map, vec2<i32>(b.x, a.y), 0).r;
+    let h01 = textureLoad(ground_map, vec2<i32>(a.x, b.y), 0).r;
+    let h11 = textureLoad(ground_map, b, 0).r;
+    return mix(mix(h00, h10, t.x), mix(h01, h11, t.x), t.y);
 }
 
 fn blade_segments(band: u32) -> u32 {
@@ -81,7 +98,7 @@ fn build_blade(instance: u32, vertex: u32, wind: vec3<f32>, time: f32, tiling: v
     let rank = f32((blade.b >> 16u) & 0xffu) / 255.0;
     let flags = blade.b >> 24u;
 
-    let root = grass.origin.xyz + vec3<f32>(blade.pos.x, 0.0, blade.pos.y);
+    let root = grass.origin.xyz + vec3<f32>(blade.pos.x, ground_height(blade.pos), blade.pos.y);
     let dist = length(root);
     let density = grass_density(dist);
     // Thin out with distance (by rank) and widen what's left so the field stays as full.

@@ -7,26 +7,41 @@
 //! 3. `draw_environment` — draw into the sky environment map (ambient light + reflections).
 //! 4. `draw_shadow` — draw depth into one shadow cascade, or into the top-down sky occlusion
 //!    map when the index is [`SKY_OCCLUSION_VIEW`](crate::shadows::SKY_OCCLUSION_VIEW).
-//! 5. `draw` — draw into the HDR scene in a [`RenderPhase`] (opaque → sky → transparent).
-//! 6. `overlay` — draw onto the final tonemapped image (UI, debug text, editor gizmos).
+//! 5. `draw_prepass` — draw depth, normals and motion of opaque geometry. Ambient occlusion,
+//!    contact shadows and temporal anti-aliasing are computed from it before the scene is
+//!    shaded, so opaque features should implement it (geometry without it still renders, it
+//!    just gets no ambient occlusion or contact shadows, and only camera motion for TAA).
+//! 6. `draw` — draw into the HDR scene in a [`RenderPhase`] (opaque → sky → transparent).
+//! 7. `overlay` — draw onto the final tonemapped image (UI, debug text, editor gizmos).
 //!
-//! Group 0 is bound by the renderer before `draw`/`draw_environment` (frame data, lights,
-//! shadows, environment map; see `shaders/lib_frame.wgsl`) and before `draw_shadow` (the
-//! cascade's [`ShadowView`](crate::shadows::ShadowViewUniform)). Features use groups 1+.
+//! Group 0 is bound by the renderer before `draw_prepass`/`draw`/`draw_environment` (frame
+//! data, lights, shadows, environment map, ambient occlusion and the prepass maps; see
+//! `shaders/lib_frame.wgsl`) and before `draw_shadow` (the cascade's
+//! [`ShadowView`](crate::shadows::ShadowViewUniform)). Features use groups 1+.
+//!
+//! The camera is jittered by a fraction of a pixel every frame when temporal anti-aliasing is
+//! on: use `frame.view_proj` for rasterizing (it includes the jitter) and, in the prepass,
+//! `motion_clip`/`prev_motion_clip` for motion vectors. Overlays get an unjittered frame.
 //!
 //! Register a feature with [`RenderAppExt::add_render_feature`]. Water, terrain, particles,
 //! volumetric clouds, foliage and UI are all built this way.
+
+use std::sync::Arc;
 
 use bevy_ecs::prelude::*;
 use engine_core::App;
 
 use crate::frame::ViewData;
+use crate::material_library::{MaterialLibrary, MaterialMaps, MaterialPreset, MaterialTextures};
 use crate::settings::RenderSettings;
 
 /// Shared types and pure functions (no bindings).
 pub const SHADER_LIB_TYPES: &str = include_str!("shaders/lib_types.wgsl");
-/// Group 0 frame bindings, shadows, atmosphere, PBR shading and fog. Requires `SHADER_LIB_TYPES`.
+/// Group 0 frame bindings, shadows, PBR shading and fog. Requires `SHADER_LIB_TYPES`.
 pub const SHADER_LIB_FRAME: &str = include_str!("shaders/lib_frame.wgsl");
+/// The atmosphere: sky radiance, sunlight transmittance, aerial perspective. Requires
+/// `SHADER_LIB_TYPES` and `SHADER_LIB_FRAME`.
+pub const SHADER_LIB_ATMOSPHERE: &str = include_str!("shaders/lib_atmosphere.wgsl");
 
 /// Which part of the scene pass a draw belongs to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -48,6 +63,12 @@ pub struct Formats {
     pub ldr: wgpu::TextureFormat,
     pub shadow: wgpu::TextureFormat,
     pub env: wgpu::TextureFormat,
+    /// Prepass normals (octahedral normal xy, roughness, written flag).
+    pub normal: wgpu::TextureFormat,
+    /// Prepass motion vectors (uv delta).
+    pub motion: wgpu::TextureFormat,
+    /// Ambient occlusion.
+    pub ao: wgpu::TextureFormat,
 }
 
 /// Device, queue, shared layouts and samplers. Everything a feature needs to build pipelines.
@@ -66,6 +87,8 @@ pub struct GpuShared {
     pub adapter_info: wgpu::AdapterInfo,
     /// Optional features the device has (e.g. `DEPTH_CLIP_CONTROL`).
     pub features: wgpu::Features,
+    /// Generated material textures (presets), built on first use and shared by every feature.
+    pub materials: MaterialLibrary,
 }
 
 impl GpuShared {
@@ -79,6 +102,23 @@ impl GpuShared {
             })
     }
 
+    /// The GPU-resident textures of a material preset at `size`² texels (a power of two,
+    /// 64..4096), generating them the first time they are asked for. Feature shaders can bind
+    /// the views like any texture (base color is an sRGB view).
+    pub fn material_textures(&self, preset: MaterialPreset, size: u32) -> Arc<MaterialTextures> {
+        self.materials.get(self, preset, size)
+    }
+
+    /// Copy a preset's maps back to the CPU (mip 0), generating them first if needed. Blocks
+    /// until the GPU is done. For tests and exporting.
+    pub fn read_material_maps(
+        &self,
+        preset: MaterialPreset,
+        size: u32,
+    ) -> Result<MaterialMaps, String> {
+        self.materials.read_back(self, preset, size)
+    }
+
     /// Standard depth state for scene passes (reverse-Z: greater is closer).
     pub fn depth_state(&self, write: bool) -> wgpu::DepthStencilState {
         wgpu::DepthStencilState {
@@ -88,6 +128,19 @@ impl GpuShared {
             stencil: Default::default(),
             bias: Default::default(),
         }
+    }
+
+    /// Color targets of the depth prepass, in order: normals and motion vectors. A prepass
+    /// pipeline uses these with `depth_state(true)` and returns `PrepassOutput` from its
+    /// fragment shader (see `prepass_output` in `lib_frame.wgsl`).
+    pub fn prepass_targets(&self) -> [Option<wgpu::ColorTargetState>; 2] {
+        [self.formats.normal, self.formats.motion].map(|format| {
+            Some(wgpu::ColorTargetState {
+                format,
+                blend: None,
+                write_mask: wgpu::ColorWrites::ALL,
+            })
+        })
     }
 
     /// Depth state for shadow passes (standard Z, hardware slope bias).
@@ -108,12 +161,19 @@ impl GpuShared {
 
 /// Build the full WGSL source for a feature shader.
 pub fn compose_shader(source: &str, with_frame: bool) -> String {
-    let mut code =
-        String::with_capacity(SHADER_LIB_TYPES.len() + SHADER_LIB_FRAME.len() + source.len() + 2);
+    let mut code = String::with_capacity(
+        SHADER_LIB_TYPES.len()
+            + SHADER_LIB_FRAME.len()
+            + SHADER_LIB_ATMOSPHERE.len()
+            + source.len()
+            + 3,
+    );
     code.push_str(SHADER_LIB_TYPES);
     code.push('\n');
     if with_frame {
         code.push_str(SHADER_LIB_FRAME);
+        code.push('\n');
+        code.push_str(SHADER_LIB_ATMOSPHERE);
         code.push('\n');
     }
     code.push_str(source);
@@ -141,7 +201,7 @@ pub struct FrameContext<'a> {
     pub gpu: &'a GpuShared,
     /// Group 0 frame bindings (`lib_frame.wgsl`) for passes a feature records itself, such as
     /// overlays. During `compute` and `draw_environment` it still holds last frame's
-    /// environment map.
+    /// environment map; during `overlay` its matrices are unjittered.
     pub frame_group: &'a wgpu::BindGroup,
     pub view: &'a ViewData,
     pub settings: &'a RenderSettings,
@@ -201,6 +261,13 @@ pub trait RenderFeature: Send + Sync + 'static {
     /// buildings, canopies) should draw into both.
     fn draw_shadow(&self, pass: &mut wgpu::RenderPass<'_>, cascade: usize, ctx: &FrameContext) {}
 
+    /// Draw the depth prepass: opaque geometry with depth writes, returning `PrepassOutput`
+    /// (world normal, roughness, motion) into [`GpuShared::prepass_targets`]. Use the same
+    /// vertex math as the opaque draw and mark the clip position `@invariant`, so the opaque
+    /// pass's depth test (`GreaterEqual`) passes exactly where the prepass drew. Alpha-masked
+    /// geometry discards the same pixels as in the opaque pass.
+    fn draw_prepass(&self, pass: &mut wgpu::RenderPass<'_>, ctx: &FrameContext) {}
+
     /// Draw into the HDR scene.
     fn draw(&self, phase: RenderPhase, pass: &mut wgpu::RenderPass<'_>, ctx: &FrameContext) {}
 
@@ -214,6 +281,13 @@ pub trait RenderFeature: Send + Sync + 'static {
 
     fn stats(&self) -> FeatureStats {
         FeatureStats::default()
+    }
+
+    /// Virtual geometry clusters the camera drew (their triangles are in `stats().triangles`).
+    /// Kept out of `FeatureStats` so features in other crates can keep building it field by
+    /// field.
+    fn clusters_drawn(&self) -> u32 {
+        0
     }
 
     /// Optional JSON describing the feature's state (for `render.stats`).

@@ -149,6 +149,13 @@ const COURSE_SET: &[(&str, &str, bool)] = &[
     ("props", STEEL_OLIVE, true),
     ("props", RUBBER, true),
     ("props", STEEL_WHITE, false),
+    ("ledge", CONCRETE, true),
+    ("ledge", PANEL, true),
+    ("ledge", STEEL_DARK, true),
+    ("ledge", ALU, false),
+    ("ledge", GLOW_CYAN, false),
+    ("ledge", HAZARD, false),
+    ("ledge", PAINT, false),
 ];
 
 /// Mesh groups spawned once at the ring center.
@@ -253,6 +260,7 @@ pub fn generate(lib: &mut Library) {
     build_masts().register(lib, "masts");
     build_signs().register(lib, "signs");
     build_props().register(lib, "props");
+    build_ledge().register(lib, "ledge");
     build_plinth().register(lib, "plinth");
     build_apron().register(lib, "apron");
     build_torii().register(lib, "torii");
@@ -944,6 +952,7 @@ const SIGN_ROWS: &[&str] = &[
     "05 JUMP",
     "PILOT TRAINING",
     "START",
+    "06 LEDGE",
 ];
 const SIGN_ROW_PX: f32 = 128.0;
 const SIGN_SCALE: f32 = 11.0;
@@ -1391,6 +1400,8 @@ struct CourseLayout {
     tower: (Vec3, Vec3),
     bar: (Vec3, Vec3),
     posts: [(Vec3, Vec3); 2],
+    ledge_pad: (Vec3, Vec3),
+    ledge_wall: (Vec3, Vec3),
 }
 
 fn bounds(b: layout::Block) -> (Vec3, Vec3) {
@@ -1412,6 +1423,8 @@ fn course_layout() -> CourseLayout {
             bounds(layout::SLIDE_POSTS[0]),
             bounds(layout::SLIDE_POSTS[1]),
         ],
+        ledge_pad: bounds(layout::LEDGE_PAD),
+        ledge_wall: bounds(layout::LEDGE_WALL),
     }
 }
 
@@ -1692,10 +1705,14 @@ struct WallSpec {
     y0: f32,
     y1: f32,
     panels: usize,
-    /// Big number painted on the face (paint atlas row) and the chevron row direction.
-    number: usize,
+    /// Big number painted on the face (paint atlas row), with the "WALL RUN" label beside it.
+    number: Option<usize>,
+    /// Height of the chevron row on the face.
+    chevron_y: f32,
     /// The runner runs toward −x in this frame (chevrons point that way).
     run_neg_x: bool,
+    /// Kicker braces, conduits, a junction box and a cable on the back (a free-standing wall).
+    braced: bool,
     seed: u32,
 }
 
@@ -1838,6 +1855,9 @@ fn wall_parts(s: &WallSpec, kit: &mut Kit, to_world: Mat4) {
             y += 0.9;
         }
         bolts(&mut steel, &pts, Vec3::Z, 0.008);
+        if !s.braced {
+            continue;
+        }
         // Brace: clevis at the strongback, pipe down to a bolted floor plate.
         let top_pt = v3(x, 3.3, t + 0.2);
         let foot = v3(x, y0 + 0.07, t + reach);
@@ -1873,6 +1893,19 @@ fn wall_parts(s: &WallSpec, kit: &mut Kit, to_world: Mat4) {
             Mat4::IDENTITY,
         );
     }
+    kit.add(STEEL_DARK, steel.transformed(to_world));
+    kit.add(HAZARD, ends.transformed(to_world));
+    if s.braced {
+        wall_back(s, kit, to_world, braces);
+    }
+    wall_face(s, kit, to_world);
+}
+
+/// Conduits, a junction box and a cable on the back of a free-standing wall, and its braces.
+fn wall_back(s: &WallSpec, kit: &mut Kit, to_world: Mat4, braces: M) {
+    let (len, t, y0) = (s.len, s.t, s.y0);
+    let w = len / s.panels as f32;
+    let mut steel = M::new();
     // Conduits along the back on brackets, dropping to a junction box.
     let mut conduit = M::new();
     let cz = t + 0.21;
@@ -1909,7 +1942,6 @@ fn wall_parts(s: &WallSpec, kit: &mut Kit, to_world: Mat4) {
     );
     kit.add(STEEL, conduit.transformed(to_world));
     kit.add(STEEL_DARK, steel.transformed(to_world));
-    kit.add(HAZARD, ends.transformed(to_world));
     kit.add(STEEL_YELLOW, braces.transformed(to_world));
 
     // A heavy cable from the junction box down to the floor and along the wall's back.
@@ -1936,8 +1968,12 @@ fn wall_parts(s: &WallSpec, kit: &mut Kit, to_world: Mat4) {
     };
     cable.append(&pipe(&cable_path, 0.032, 10), Mat4::IDENTITY);
     kit.add(CABLE, cable.transformed(to_world));
+}
 
-    // Face paint: hazard foot band, a big number, chevrons above the guide light.
+/// Face paint: hazard foot band, a big number and its label, a row of chevrons.
+fn wall_face(s: &WallSpec, kit: &mut Kit, to_world: Mat4) {
+    let (len, y0) = (s.len, s.y0);
+    let w = len / s.panels as f32;
     let mut hz = M::new();
     hz.append(
         &slab(v3(0.0, y0, -0.003), v3(len, y0 + 0.28, 0.0), 0.0, 100.0),
@@ -1948,24 +1984,45 @@ fn wall_parts(s: &WallSpec, kit: &mut Kit, to_world: Mat4) {
     let right = Vec3::NEG_X;
     let face = -0.004;
     let num_x = if s.run_neg_x { len - 1.25 } else { 1.25 };
-    stencil(
-        &mut paint,
-        s.number,
-        v3(num_x, 3.75, face),
-        right,
-        Vec3::Y,
-        1.3,
-        paint_color(ORANGE_PAINT),
-    );
+    if let Some(number) = s.number {
+        stencil(
+            &mut paint,
+            number,
+            v3(num_x, 3.75, face),
+            right,
+            Vec3::Y,
+            1.3,
+            paint_color(ORANGE_PAINT),
+        );
+        // Wall label next to the number.
+        let word_x = if s.run_neg_x {
+            num_x - 2.2
+        } else {
+            num_x + 2.2
+        };
+        stencil(
+            &mut paint,
+            7,
+            v3(word_x, 3.5, face),
+            right,
+            Vec3::Y,
+            0.32,
+            paint_color(WHITE_PAINT),
+        );
+    }
     let chev_row = 9;
-    let mut x = 2.4;
-    while x < len - 1.8 {
-        if (x - num_x).abs() > 1.4 {
+    let (mut x, last) = if s.number.is_some() {
+        (2.4, len - 1.8)
+    } else {
+        (w * 0.5, len - w * 0.5 + 0.01)
+    };
+    while x < last {
+        if s.number.is_none() || (x - num_x).abs() > 1.4 {
             let dir = if s.run_neg_x { right } else { -right };
             stencil(
                 &mut paint,
                 chev_row,
-                v3(x, GUIDE_Y + 0.42, face),
+                v3(x, s.chevron_y, face),
                 dir,
                 Vec3::Y,
                 0.36,
@@ -1974,21 +2031,6 @@ fn wall_parts(s: &WallSpec, kit: &mut Kit, to_world: Mat4) {
         }
         x += w;
     }
-    // Wall label next to the number.
-    let word_x = if s.run_neg_x {
-        num_x - 2.2
-    } else {
-        num_x + 2.2
-    };
-    stencil(
-        &mut paint,
-        7,
-        v3(word_x, 3.5, face),
-        right,
-        Vec3::Y,
-        0.32,
-        paint_color(WHITE_PAINT),
-    );
     kit.add(PAINT, paint.transformed(to_world));
 }
 
@@ -2005,8 +2047,10 @@ fn build_walls() -> Kit {
             y0: a0.y,
             y1: a1.y,
             panels: 5,
-            number: 1,
+            number: Some(1),
+            chevron_y: GUIDE_Y + 0.42,
             run_neg_x: false,
+            braced: true,
             seed: 401,
         },
         &mut kit,
@@ -2020,8 +2064,10 @@ fn build_walls() -> Kit {
             y0: b0.y,
             y1: b1.y,
             panels: 5,
-            number: 2,
+            number: Some(2),
+            chevron_y: GUIDE_Y + 0.42,
             run_neg_x: true,
+            braced: true,
             seed: 402,
         },
         &mut kit,
@@ -2031,6 +2077,105 @@ fn build_walls() -> Kit {
 }
 
 /// The slide bar: hazard-striped steel beam on bolted posts, beacons, a sign.
+/// The ledge station: a slab between the course and the ring with a precast block on it, too
+/// high to climb straight onto. Pilots catch its steel coping, shimmy along it (the chevrons
+/// under the coping point the way), climb up and walk off the far end onto the landing box.
+fn build_ledge() -> Kit {
+    let l = course_layout();
+    let mut kit = Kit::default();
+    let (p0, p1) = l.ledge_pad;
+    let (w0, w1) = l.ledge_wall;
+    let top = p1.y;
+    // The slab in 3 m bays, with a joint in line with the block's face.
+    let xs: Vec<f32> = (0..=((p1.x - p0.x) / 3.0).round() as i32)
+        .map(|i| p0.x + i as f32 * 3.0)
+        .collect();
+    let zs = [p0.z, w0.z, w1.z, p1.z];
+    let g = 0.003;
+    let mut concrete = M::new();
+    for xw in xs.windows(2) {
+        for zw in zs.windows(2) {
+            let ga = |v: f32, edge: f32| if (v - edge).abs() < 1e-3 { 0.0 } else { g };
+            let min = v3(xw[0] + ga(xw[0], p0.x), -0.3, zw[0] + ga(zw[0], p0.z));
+            let max = v3(xw[1] - ga(xw[1], p1.x), top, zw[1] - ga(zw[1], p1.z));
+            concrete.append(&slab(min, max, 0.008, 0.7), Mat4::IDENTITY);
+        }
+    }
+    concrete.shade(|p, _| {
+        let q = Vec2::new(p.x, p.z);
+        let d = rect_dist(q, Vec2::new(w0.x, w0.z), Vec2::new(w1.x, w1.z));
+        let ao = 1.0 - 0.4 * (-d / 0.35).exp();
+        // Scuffed where pilots take off and land.
+        let takeoff = (-((p.z - (w1.z + 1.4)) / 0.6).powi(2)).exp()
+            * smoothstep(w0.x - 0.5, w0.x + 0.5, p.x)
+            * smoothstep(w1.x + 0.5, w1.x - 0.5, p.x);
+        let landing = (-(Vec2::new(p.x - (w1.x + 2.0), p.z - (w0.z + w1.z) * 0.5).length() / 1.2)
+            .powi(2))
+        .exp();
+        let blot = 0.9 + 0.1 * pn(p.x * 0.25, p.z * 0.25, 16);
+        blot * ao * (1.0 - 0.1 * takeoff - 0.12 * landing)
+    });
+    kit.add(CONCRETE, concrete);
+
+    // Hazard bands on the slab's sides.
+    let mut hz = M::new();
+    let t = 0.004;
+    for (min, max) in [
+        (v3(p0.x, -0.02, p0.z - t), v3(p1.x, top - 0.012, p0.z)),
+        (v3(p0.x, -0.02, p1.z), v3(p1.x, top - 0.012, p1.z + t)),
+        (v3(p0.x - t, -0.02, p0.z), v3(p0.x, top - 0.012, p1.z)),
+        (v3(p1.x, -0.02, p0.z), v3(p1.x + t, top - 0.012, p1.z)),
+    ] {
+        hz.append(&slab(min, max, 0.0, 100.0), Mat4::IDENTITY);
+    }
+    kit.add(HAZARD, hz);
+
+    // The block: a precast wall like the course's, face toward +Z (frame x runs to −X).
+    wall_parts(
+        &WallSpec {
+            len: w1.x - w0.x,
+            t: w1.z - w0.z,
+            y0: w0.y,
+            y1: w1.y,
+            panels: 3,
+            number: None,
+            chevron_y: w1.y - 0.55,
+            run_neg_x: true,
+            braced: false,
+            seed: 403,
+        },
+        &mut kit,
+        rt(Quat::from_rotation_y(PI), v3(w1.x, 0.0, w1.z)),
+    );
+
+    // Floor paint: the take-off line a stride from the face, a landing box past the far end.
+    let mut p = M::new();
+    let y = top + 0.0025;
+    let yellow = paint_color(YELLOW_PAINT);
+    let white = paint_color(WHITE_PAINT);
+    p_line(
+        &mut p,
+        v3((w0.x + w1.x) * 0.5, y, w1.z + 1.4),
+        Vec3::X,
+        w1.x - w0.x,
+        0.08,
+        yellow,
+    );
+    let mid_z = (w0.z + w1.z) * 0.5;
+    let land = v3(w1.x + 2.0, y, mid_z);
+    for (dx, dz, len, dir) in [
+        (0.0, -1.2, 2.4, Vec3::X),
+        (0.0, 1.2, 2.4, Vec3::X),
+        (-1.2, 0.0, 2.48, Vec3::Z),
+        (1.2, 0.0, 2.48, Vec3::Z),
+    ] {
+        p_line(&mut p, land + v3(dx, 0.0, dz), dir, len, 0.08, white);
+    }
+    stencil(&mut p, 9, land, Vec3::X, Vec3::NEG_Z, 0.45, white);
+    kit.add(PAINT, p);
+    kit
+}
+
 fn build_bar() -> Kit {
     let l = course_layout();
     let mut kit = Kit::default();
@@ -3193,6 +3338,13 @@ fn build_signs() -> Kit {
             l.pad_min.z + 0.45,
             2,
             0.6,
+        ),
+        // The ledge station's sign, by the block's start.
+        (
+            l.ledge_wall.0.x - 1.1,
+            l.ledge_wall.1.z + 0.6,
+            7,
+            FRAC_PI_2 - 0.5,
         ),
     ];
     for (x, z, row, yaw) in spots {

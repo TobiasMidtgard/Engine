@@ -516,8 +516,9 @@ impl<'a> Quad<'a> {
                     head: if deer { 0.45 } else { 0.4 },
                     ear_fwd: if deer { -0.6 } else { -0.8 },
                     ear_up: -0.1,
+                    // A fleeing deer lifts its tail to flash the rump patch.
                     tail: if deer {
-                        1.9
+                        0.6
                     } else if st == AnimalState::Chase {
                         0.95
                     } else {
@@ -776,7 +777,12 @@ impl<'a> Quad<'a> {
             p += Vec3::new(j[i + 1].x - j[i].x, d.x, d.y);
         }
         let side = if k.is_multiple_of(2) { -1.0 } else { 1.0 };
-        let splay = if front { 0.08 } else { 0.32 } * w_fold + 0.12 * self.dead;
+        let splay = match (front, self.deer) {
+            (true, _) => 0.08,
+            (false, true) => 0.5,
+            (false, false) => 0.32,
+        } * w_fold
+            + 0.12 * self.dead;
         let rab = Quat::from_rotation_z(side * splay);
         let pos = j[0] + rab * (p - j[0]);
         let rot = rab * Quat::from_rotation_x(ang[seg as usize] - rest[seg as usize]);
@@ -794,7 +800,7 @@ impl<'a> Quad<'a> {
             if front {
                 [2.6, -1.35, 1.75, 2.6]
             } else {
-                [-2.05, 1.45, -1.55, -1.2]
+                [-2.4, 1.9, -1.65, -1.3]
             }
         } else if front {
             [2.75, -1.45, -1.6, -1.55]

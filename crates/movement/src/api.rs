@@ -8,7 +8,9 @@ use serde_json::{Value, json};
 
 use crate::combat::{CombatLog, CombatState, Fighter};
 use crate::demo::{DuelDirector, Round};
+use crate::lockon::{self, LockOn};
 use crate::mover::{DashRequest, Mover};
+use crate::play::{self, Play};
 use crate::profile::MovementProfile;
 use crate::tempo::{PerceptionStatus, Tempo, TimePerception};
 
@@ -220,6 +222,68 @@ pub(crate) fn register(app: &mut App) {
                 return Err("no duel in this world (spawn it with demo::spawn_demo)".into());
             }
             Ok(json!({ "duels": out }))
+        },
+    );
+    app.register_api(
+        "movement.climber",
+        "Restart the movement demo's ledge climber from the start of its loop: it jumps at the \
+         ledge block, catches the top, shimmies along it, climbs up and walks off the end.",
+        "{}",
+        |world, _args| {
+            let n = crate::demo::restart_climbers(world);
+            if n == 0 {
+                return Err("no climber in this world (spawn it with demo::spawn_demo)".into());
+            }
+            Ok(json!({ "climbers": n }))
+        },
+    );
+    app.register_api(
+        "movement.play",
+        "Play mode: \"on\" true puts a level 10 pilot on the ground in front of the active \
+         camera (or with its feet at \"at\") and a third-person camera behind it; false ends \
+         it. Leave \"on\" out to switch. Controls: the default action map, lock_on, Escape \
+         frees the mouse.",
+        r#"{"on": true, "at": [0.0, 0.0, -10.0]}"#,
+        |world, args| {
+            let on = match args.get("on") {
+                None | Some(Value::Null) => world.resource::<Play>().pilot.is_none(),
+                Some(v) => v.as_bool().ok_or("\"on\" must be true or false")?,
+            };
+            if !on {
+                let was_on = play::stop(world);
+                return Ok(json!({ "playing": false, "was_playing": was_on }));
+            }
+            let at = match args.get("at") {
+                None | Some(Value::Null) => None,
+                Some(_) => Some(vec3_arg(&args, "at")?),
+            };
+            let pilot = play::start(world, at)?;
+            Ok(json!({ "playing": true, "pilot": mover_json(world, pilot) }))
+        },
+    );
+    app.register_api(
+        "movement.lock_on",
+        "Lock a character with LockOn (default: the play-mode pilot) onto \"target\" (an id or \
+         a name), onto the best enemy in view with \"target\": \"auto\", or let go with null.",
+        r#"{"target": "Elite"}"#,
+        |world, args| {
+            let me = match args.get("entity") {
+                Some(_) => entity_arg(world, &args)?,
+                None => world
+                    .resource::<Play>()
+                    .pilot
+                    .ok_or("no pilot: pass \"entity\" or start play mode")?,
+            };
+            if world.get::<LockOn>(me).is_none() {
+                return Err("that character has no LockOn".into());
+            }
+            let target = match args.get("target") {
+                None | Some(Value::Null) => None,
+                Some(Value::String(s)) if s == "auto" => lockon::best_target(world, me),
+                Some(sel) => Some(resolve_entity(world, sel)?),
+            };
+            world.get_mut::<LockOn>(me).unwrap().target = target;
+            Ok(json!({ "entity": me.to_bits(), "target": target.map(Entity::to_bits) }))
         },
     );
 }

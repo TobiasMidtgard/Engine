@@ -8,6 +8,8 @@ use engine_world::animation::AnimationParams;
 use engine_world::locomotion::{LocomotionState, MoveIntent};
 use engine_world::physics::{CharacterController, CharacterMove, CharacterState};
 
+use crate::platform::Platform;
+
 /// A wall the character touches or runs on.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct WallContact {
@@ -45,6 +47,15 @@ pub struct Mantle {
     pub rising: bool,
     /// Horizontal speed to leave with, m/s.
     pub exit_speed: f32,
+}
+
+/// Hanging from a ledge.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct Hang {
+    /// The ledge's edge in front of the hands: the wall's face at the top's height.
+    pub top: DVec3,
+    /// Out of the wall, horizontal unit.
+    pub normal: Vec3,
 }
 
 /// Ask the movement module to dash. Combat uses this for dash-strikes; gameplay can use it
@@ -107,6 +118,8 @@ pub struct Mover {
     pub wall: Option<WallContact>,
     pub dash: Option<Dash>,
     pub mantle: Option<Mantle>,
+    /// The ledge being hung from (mode [`LocomotionMode::Climb`]).
+    pub hang: Option<Hang>,
     /// The capsule is shrunk (crouching or sliding).
     pub crouched: bool,
     /// Remaining dodge invulnerability, s (own time).
@@ -117,15 +130,23 @@ pub struct Mover {
     pub knockback: Vec3,
     /// Dash requested by combat or gameplay, consumed next step.
     pub pending_dash: Option<DashRequest>,
+    /// The moving body under the character, if any (see [`crate::platform`]).
+    #[serde(skip)]
+    pub platform: Option<Platform>,
 
     pub(crate) coyote: f32,
     pub(crate) jump_buffer: f32,
     pub(crate) slide_cooldown: f32,
+    /// No ledge grabs until this runs out (after letting go or kicking off), s.
+    pub(crate) grab_cooldown: f32,
     pub(crate) last_wall: Option<WallContact>,
     pub(crate) stand_height: f32,
     pub(crate) stride: f32,
     pub(crate) left_foot: bool,
     pub(crate) fall_speed: f32,
+    /// Just landed and still coming down onto the ground at this speed, m/s (see
+    /// `locomotion::settle`).
+    pub(crate) settle: f32,
     pub(crate) prev_jump: bool,
     pub(crate) prev_crouch: bool,
     pub(crate) prev_dash: bool,
@@ -152,19 +173,23 @@ impl Default for Mover {
             wall: None,
             dash: None,
             mantle: None,
+            hang: None,
             crouched: false,
             evade_secs: 0.0,
             disabled: false,
             knockback: Vec3::ZERO,
             pending_dash: None,
+            platform: None,
             coyote: 0.0,
             jump_buffer: 0.0,
             slide_cooldown: 0.0,
+            grab_cooldown: 0.0,
             last_wall: None,
             stand_height: 0.0,
             stride: 0.0,
             left_foot: false,
             fall_speed: 0.0,
+            settle: 0.0,
             prev_jump: false,
             prev_crouch: false,
             prev_dash: false,
@@ -213,12 +238,13 @@ impl Mover {
         }
     }
 
-    /// Teleport bookkeeping: clear velocity and any dash, mantle or wall-run.
+    /// Teleport bookkeeping: clear velocity and any dash, mantle, ledge hang or wall-run.
     pub fn reset_motion(&mut self) {
         self.velocity = Vec3::ZERO;
         self.knockback = Vec3::ZERO;
         self.dash = None;
         self.mantle = None;
+        self.hang = None;
         self.wall = None;
         self.last_wall = None;
         self.pending_dash = None;

@@ -5,9 +5,13 @@ on:
   push:
     branches: [main]
 
+# A new push to a pull request replaces the run on its old head. On main the running check
+# always finishes and only a queued one gives way to a newer merge: with merges minutes apart,
+# cancelling every run left main untested for hours (3 finished runs in 40 merges on
+# 2026-10-12), so a break between two merged pull requests went unnoticed.
 concurrency:
   group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   CARGO_TERM_COLOR: always

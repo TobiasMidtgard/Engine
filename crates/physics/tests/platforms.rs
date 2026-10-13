@@ -171,6 +171,51 @@ fn characters_turn_with_a_turntable() {
 }
 
 #[test]
+fn crates_ride_a_turntable_without_creeping_off() {
+    // Rapier reuses contacts while two bodies barely move relative to each other, with its
+    // lever arms frozen until a body has turned about 11°: crates riding a turning deck crept
+    // outward at a tenth of its speed and slid off the edge.
+    let mut app = app();
+    app.world.spawn((
+        Transform::from_xyz(0.0, -0.15, 0.0),
+        RigidBody::kinematic(),
+        Collider {
+            shape: ColliderShape::Cylinder {
+                radius: 4.0,
+                half_height: 0.15,
+            },
+            ..Default::default()
+        },
+        velocity(Vec3::ZERO, Vec3::new(0.0, 0.4, 0.0)),
+    ));
+    let crates: Vec<(Entity, f64)> = [1.5, 3.0]
+        .into_iter()
+        .map(|r| {
+            let e = app
+                .world
+                .spawn((
+                    Transform::from_xyz(r, 0.35, 0.0),
+                    RigidBody::dynamic(),
+                    Collider::cuboid(Vec3::splat(0.35)),
+                    Velocity::default(),
+                ))
+                .id();
+            (e, r)
+        })
+        .collect();
+    // Over a turn and a quarter.
+    app.update_n(20 * 60);
+    for (e, r) in crates {
+        let p = pos(&app, e);
+        let now = p.with_y(0.0).length();
+        assert!(
+            (now - r).abs() < 0.05 && p.y > 0.3,
+            "a crate placed {r} m from the axis is {now} m out: {p:?}"
+        );
+    }
+}
+
+#[test]
 fn characters_walk_inside_a_thrusting_ship() {
     let mut app = app();
     app.world.resource_mut::<Gravity>().uniform = Vec3::ZERO;

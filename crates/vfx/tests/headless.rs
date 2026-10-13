@@ -1,6 +1,6 @@
 //! Renders particles offscreen and checks the pixels: glowing particles appear where their
 //! emitter is (also 30 000 km from the world origin), a spell's light brightens the ground
-//! around it, and smoke lit by the sun covers what's behind it. Needs a GPU or a software
+//! around it, smoke lit by the sun covers what's behind it, and marks change the ground. Needs a GPU or a software
 //! Vulkan driver (lavapipe); passes with a note when neither is available (`RenderDisabled`),
 //! unless `ENGINE_REQUIRE_GPU=1`.
 
@@ -10,7 +10,7 @@ use engine_core::time::TimeSource;
 use engine_render::prelude::*;
 use engine_render::{RenderDisabled, capture_now};
 use engine_vfx::prelude::*;
-use engine_vfx::{EffectDesc, Gradient, Sprite};
+use engine_vfx::{EffectDesc, Gradient, Mark, MarkKind, Marks, Sprite};
 
 const W: u32 = 320;
 const H: u32 = 180;
@@ -364,4 +364,38 @@ fn particles_stay_put_when_the_world_re_anchors() {
             i + 1
         );
     }
+}
+
+#[test]
+fn marks_char_frost_and_wet_the_ground() {
+    let mut app = app(DVec3::ZERO, 3000.0);
+    let spots = [
+        DVec3::new(-1.6, 0.0, 1.5),
+        DVec3::new(0.0, 0.0, 1.5),
+        DVec3::new(1.6, 0.0, 1.5),
+    ];
+    let Some(before) = shot(&mut app, "vfx_marks_before.png") else {
+        return;
+    };
+    {
+        let mut marks = app.world.resource_mut::<Marks>();
+        let mark = |kind, at, r| Mark {
+            life_secs: 600.0,
+            ..Mark::round(kind, at, Vec3::Y, r)
+        };
+        marks.add(mark(MarkKind::Scorch, spots[0], 0.6));
+        marks.add(mark(MarkKind::Frost, spots[1], 0.6));
+        marks.add(mark(MarkKind::Wet, spots[2], 0.6));
+    }
+    let after = shot(&mut app, "vfx_marks_after.png").unwrap();
+    let at = |img: &image::RgbaImage, p: DVec3| luma(img, project(p), 2);
+    let (b, a) = (at(&before, spots[0]), at(&after, spots[0]));
+    assert!(a < b * 0.6, "scorch: {b} -> {a}");
+    let (b, a) = (at(&before, spots[1]), at(&after, spots[1]));
+    assert!(a > b + 15.0, "frost: {b} -> {a}");
+    let (b, a) = (at(&before, spots[2]), at(&after, spots[2]));
+    assert!(a < b * 0.85, "wet: {b} -> {a}");
+    // Away from the marks nothing changed.
+    let aside = DVec3::new(0.0, 0.0, -2.5);
+    assert!((at(&after, aside) - at(&before, aside)).abs() < 2.0);
 }

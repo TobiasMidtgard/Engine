@@ -329,6 +329,14 @@ fn leaves_tracks_in_mud_and_makes_noise() {
         seen.contacts.len()
     );
     assert!(seen.contacts.iter().all(|c| c.entity == Some(car)));
+    // Tracks point the way the car drives (-Z here), in the contract's yaw convention.
+    for c in &seen.contacts {
+        assert!(
+            c.forward().dot(Vec3::NEG_Z) > 0.95,
+            "track yaw {:.2}",
+            c.yaw
+        );
+    }
     assert!(seen.noises >= 5, "{} noise events", seen.noises);
     // Mud slows it down compared with concrete.
     let mud_speed = telemetry(&app, car).speed;

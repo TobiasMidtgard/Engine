@@ -38,6 +38,11 @@ how they look (`sprite`: glow, spark, smoke, flame, droplet, ring, star, rune, s
 `light` with flicker and fade, a `trail`, and `prewarm` so loops look settled from the first
 frame.
 
+Effects are authored for flat ground in sea-level air and adapt to where they play: gravity
+comes from `Env::gravity`, buoyancy (`acceleration`) turns to the local up on a planet, and
+buoyancy, `drag` and `turbulence` scale with the air's density from `Env::air`. Smoke barely
+rises on Mars, and dust kicked up on the Moon flies in clean ballistic arcs.
+
 ## Built-in effects
 
 | Family | Effects |
@@ -60,10 +65,29 @@ The module reads `engine_world` messages and plays effects without any game code
 - `WorldImpulse`: a dust ring on the ground or a burst on water.
 - `WaterSplash`: spray sized by the water displaced.
 
+## Marks
+
+[`Marks`] holds what effects leave behind, drawn by [`MarksFeature`] as boxes projected onto
+whatever is under them (terrain, walls, props), so nothing needs UVs:
+
+- **Scorch**: a charred blast mark with ash flecks where a spell hit; embers glow in its cracks
+  and cool over `glow_secs`.
+- **Frost**: a pale film with crystal feathers over the surface, melting back from its edges.
+- **Wet**: splashed stone that darkens and dries from the edges.
+- **Chip**: a pock with cracks and a dust ring where a shot hit stone or concrete.
+
+An effect leaves one with `mark` in its [`EffectDesc`] (`spell.fireball_impact`,
+`spell.frost_impact`, `impact.rock`, `impact.concrete`); games and scripts add their own with
+[`Marks::add`] or `vfx.mark`. Marks fade with age and distance and follow world shifts; the
+newest 2048 are kept, and a mark landing on top of one of its kind replaces it. Footprints
+are not marks: the terrain module presses every `GroundContact` into its ground, and burning
+leaves the fire module's own scorch. `cargo run -p engine_vfx --release --example marks`
+renders every kind.
+
 ## APIs
 
 `vfx.effects`, `vfx.describe`, `vfx.define`, `vfx.spawn`, `vfx.stop`, `vfx.clear`, `vfx.beam`,
-`vfx.stats`. Tunables: `VfxSettings` (particle budget, density, draw distance, soft particles)
+`vfx.mark`, `vfx.stats`. Tunables: `VfxSettings` (particle budget, density, draw distance, soft particles)
 and `VfxReactions`. Components: `ParticleEffect`, `Trail`, `Beam`.
 
 ## How it works
@@ -91,16 +115,16 @@ Writes: rendering only (plus the point lights of effects). The showcase demo wri
 ## Showcase: the Spell court
 
 `demo::spawn_demo` builds the test area in the showcase's `magic` zone, and `demo::VIEWS` lists
-its tour stops (`magic_spells` at dusk, `magic_splashes`, `magic_footsteps` and
-`magic_impacts`): an arcane portal with orbiting orbs, fireballs and frost bolts hitting a
-wall, lightning between two obelisks, a healing aura, a fountain, an anvil throwing sparks, a
-pond with stones splashing in, footsteps over mud, snow, sand and water, shot impacts on six
-materials, torches and fireflies.
+its tour stops (`magic_spells` at dusk, `magic_splashes`, `magic_footsteps`, `magic_marks` and
+`magic_impacts`): an arcane portal with orbiting orbs, fireballs and frost bolts scorching and
+frosting a wall, lightning between two obelisks, a healing aura, a fountain, an anvil throwing
+sparks, a pond with stones splashing in, a golem stomping over mud, snow, sand and water, shot
+impacts on six materials (chipping the rock), torches and fireflies.
 
 ## Next
 
 GPU sub-emitters (spawn on collision or death), depth-buffer collision, sorting within an
-emitter, distortion (heat haze), decals, mesh particles, LOD, and a 1M-particle benchmark.
+emitter, distortion (heat haze), tire tracks, mesh particles, LOD, and a 1M-particle benchmark.
 
 ## Checklist
 

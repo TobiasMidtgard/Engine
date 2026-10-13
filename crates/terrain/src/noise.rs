@@ -424,9 +424,38 @@ pub fn cell_random(x: i64, y: i64, z: i64, seed: u64, salt: u64) -> f64 {
     hash3(x, y, z, seed ^ salt.wrapping_mul(0xA24B_AED4_963E_E407)) as f64 / 4_294_967_296.0
 }
 
+/// Value in `[0, 1)` for an integer cell, in 32-bit arithmetic with 24-bit results so the
+/// terrain shader (`crater_hash` in terrain.wgsl) computes exactly the same value: features
+/// scattered with it (craters) can be drawn by the shader where vertices are too far apart.
+#[inline]
+pub fn cell_random32(x: i32, y: i32, z: i32, seed: u32, salt: u32) -> f64 {
+    let mut h = (x as u32).wrapping_mul(0x8DA6_B343)
+        ^ (y as u32).wrapping_mul(0xD816_3841)
+        ^ (z as u32).wrapping_mul(0xCB1A_B31F)
+        ^ seed
+        ^ salt.wrapping_mul(0x9E37_79B9);
+    h ^= h >> 16;
+    h = h.wrapping_mul(0x7FEB_352D);
+    h ^= h >> 15;
+    h = h.wrapping_mul(0x846C_A68B);
+    h ^= h >> 16;
+    (h >> 8) as f64 / 16_777_216.0
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The terrain shader repeats this hash (`crater_hash`) to draw the same craters: pinned
+    /// values catch a change on one side only.
+    #[test]
+    fn cell_random32_is_pinned() {
+        assert_eq!(cell_random32(1, -2, 3, 7, 2), 12_697_250.0 / 16_777_216.0);
+        assert_eq!(
+            cell_random32(-40_000, 12, 99_999, 0xBEEF, 5),
+            16_668_524.0 / 16_777_216.0
+        );
+    }
 
     #[test]
     fn noise_is_bounded_and_deterministic() {
