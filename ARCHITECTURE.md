@@ -95,7 +95,7 @@ module's **contract** in `engine_world`:
 | Contract (`engine_world::…`) | Implemented by | Used by |
 |---|---|---|
 | `physics`: `RigidBody`, `Collider`, `Velocity`, `ExternalForce`, `Joint`, `CharacterController`/`CharacterMove`/`CharacterState`, `ApplyImpulse`, `ContactEvent`, `PhysicsQueries` (raycast, shapecast, overlap, closest point) | `engine_physics` | vehicles, softbody, destruction, movement, npc, anim (ragdolls), space, gameplay |
-| `animation`: `SkeletonPose`, `AnimationParams`, `AnimationTrigger`, `AnimationEvent`, `Ragdoll` | `engine_anim` | movement, npc, softbody (cloth/hair pinning), vfx, audio |
+| `animation`: `SkeletonPose`, `AnimationParams`, `AnimationTrigger`, `AnimationEvent`, `Ragdoll`, `BodyRequest` (a person or animal on an entity someone else moves) | `engine_anim` | movement, npc, softbody (cloth/hair pinning), vfx, audio (trail walkers) |
 | `locomotion`: `MoveIntent`, `LocomotionState`, `VehicleControls`, `LocomotionBackend` (`claim_backend`, so fallback movers can step aside) | `engine_movement`, `engine_vehicles` | npc, player input, cameras, UI |
 | `EngineState`, `WheelContacts`: what a vehicle's engine and wheels are doing | `engine_vehicles` | audio (engine and tyre sounds), ui (HUDs), npc (hearing), vfx (spray, exhaust) |
 | `air`: `Atmospheres` per planet and `Env::air(p)` (density, pressure, temperature, speed of sound, wind, altitude) | games and `engine_space` tune `Atmospheres`; weather drives sea-level conditions | vehicles, weather, audio, vfx, smoke, space |
