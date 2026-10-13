@@ -87,7 +87,9 @@ engine_foliage::spawn_plant(world, "oak", DVec3::new(3.0, 0.0, 4.0), 0.2, None)?
 - **Looks**: procedural, per species: bark texture sets (albedo, normal, occlusion and
   roughness), painted leaf and needle atlases with normal maps, crowns built from clumps of
   shaded sprays, detailed grass, ferns, flowers and fungi with their own maps. Small plants
-  lean with the slope they grow on. `examples/lookdev_*` render each set close up.
+  lean with the slope they grow on. `examples/lookdev_*` render each set close up. Ground
+  covers and rocks draw into the depth prepass, so ambient occlusion, contact shadows,
+  reflections and bounce light see them.
 - **World shifts**: forests follow `WorldShift` (floating origin, planet frames): soil grids,
   region centers, falling trees, which way logs lie and what plants are posed on move with
   the world (`shift`).
@@ -106,6 +108,15 @@ regrowing with a tree felled every 25 s at its edge, a burn scar, a spring-fed p
 rocky ridge) and `demo::spawn_cave_demo(commands, center)` the mushroom cave (mineral pool and
 seep feeding glowcaps and lantern caps, a cave floor with mineral crust). Both run 20–30× faster
 than the world default so regrowth is visible while you watch.
+
+`demo::spawn_cave_chamber(commands, center)` builds the rock around it: a `CaveChamber`
+(`cave`) is one sculpted vault (bulges, alcoves, ledges along bedding planes, wet flowstone
+folds) open at a mouth facing −Z, with stalactites hanging from the roof and stalagmites at the
+walls' foot, and a `SkyLightVolume` that keeps the sky out except through the mouth. It is drawn
+with the scenery rock shader: moss and lichen only where daylight reaches in from the mouth, wet
+dark rock deeper in. It roofs the sky occlusion map, so nothing under it sees or reflects the
+sky, and casts its shadow from a sheet pushed out beyond the rock, so no sunlight leaks onto
+the inside. A static triangle-mesh collider (`ChamberCollider`) follows it.
 
 `cargo run -p engine_foliage --example foliage_shots --release -- <dir>` renders both from
 several viewpoints (including a tree mid-fall, the clearing through the year and ten years

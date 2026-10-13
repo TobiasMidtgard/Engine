@@ -2,6 +2,7 @@
 
 pub mod api;
 pub mod assets;
+pub mod cave;
 pub mod demo;
 pub mod ecology;
 pub mod felling;
@@ -88,6 +89,11 @@ impl Plugin for FoliagePlugin {
                 "A procedural boulder, stone or pebble (scale = size in meters), sunk bury_m into the \
                  ground cover, with moss on top, lichen and a wet line below water_m.",
             )
+            .register_component::<cave::CaveChamber>(
+                "A cave's rock chamber seen from inside (origin = floor center): sculpted walls and \
+                 a vaulted roof with stalactites and stalagmites, open at the floor and at a mouth \
+                 in the -Z wall; moss and lichen only in the mouth's daylight.",
+            )
             .register_component::<scenery::Debris>(
                 "Scattered twig, branch, cone, leaves or reeds; hidden beyond draw_distance_m.",
             )
@@ -141,6 +147,7 @@ impl Plugin for FoliagePlugin {
                 season::follow_weather_calendar,
                 grass::sync_region_grass,
                 felling::remove_orphan_colliders,
+                cave::sync_chamber_colliders,
                 (
                     scenery::build_scenery,
                     scenery::cull_debris,

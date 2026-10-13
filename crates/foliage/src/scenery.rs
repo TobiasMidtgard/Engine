@@ -27,6 +27,7 @@ use engine_assets::{Assets, Handle};
 use engine_core::math::hash_u64;
 use engine_core::math::noise::{fbm2, fbm3, perlin2};
 use engine_core::prelude::*;
+use engine_render::shadows::{MAX_CASCADES, SKY_OCCLUSION_VIEW};
 use engine_render::wgpu;
 use engine_render::{
     AlphaMode, FeatureStats, FrameContext, GpuShared, GrowBuffer, Image, Mesh, MeshRenderer,
@@ -2047,7 +2048,9 @@ pub struct RockVertex {
 pub const ROCK_VERTEX_BYTES: usize = 28;
 
 /// A rock mesh in a unit box: x and z in −0.5..0.5, y from 0 (the flat bottom) to 1.
-/// A [`Rock`]'s `Transform` scale is its size in meters.
+/// A [`Rock`]'s `Transform` scale is its size in meters. (A [`crate::cave::CaveChamber`]'s mesh
+/// is in meters.) `data` is the cavity occlusion (255 = open), then, both 0 on rocks, how dark
+/// it is (255: no moss or lichen grow) and how wet.
 #[derive(Debug, Clone, Default)]
 pub struct RockMesh {
     pub vertices: Vec<RockVertex>,
@@ -3568,7 +3571,7 @@ struct GroundIn {
 };
 
 struct GroundOut {
-    @builtin(position) clip: vec4<f32>,
+    @builtin(position) @invariant clip: vec4<f32>,
     @location(0) rel: vec3<f32>,
     @location(1) local: vec3<f32>,
     @location(2) normal: vec3<f32>,
@@ -3623,11 +3626,44 @@ fn finish(s: Surface, rel: vec3<f32>) -> vec4<f32> {
     if (frame.counts.z == 3u) {
         return vec4<f32>(vec3(sky_visibility(rel, s.normal)), 1.0);
     }
+    if (frame.counts.z == 2u) {
+        // The sun's visibility, tinted by shadow cascade.
+        let depth = view_depth(rel);
+        var tint = vec3<f32>(1.0, 0.4, 0.4);
+        if (depth > frame.shadow_splits[0]) { tint = vec3(0.4, 1.0, 0.4); }
+        if (depth > frame.shadow_splits[1]) { tint = vec3(0.4, 0.4, 1.0); }
+        if (depth > frame.shadow_splits[2]) { tint = vec3(1.0, 1.0, 0.4); }
+        return vec4<f32>(tint * (0.05 + 0.95 * shadow_factor(rel, s.normal)), 1.0);
+    }
+    if (frame.counts.z == 4u) {
+        return vec4<f32>(vec3(screen_ao(rel)), 1.0);
+    }
+    if (frame.counts.z == 5u) {
+        let r = screen_reflection(rel);
+        return vec4<f32>(pre_expose(r.rgb) * r.a, 1.0);
+    }
+    if (frame.counts.z == 6u) {
+        return vec4<f32>(pre_expose(screen_gi(rel)), 1.0);
+    }
     return vec4<f32>(apply_fog(shade_surface(s, rel), rel), 1.0);
 }
 
 @fragment
 fn fs_ground(in: GroundOut) -> @location(0) vec4<f32> {
+    return finish(ground_surface(in), in.rel);
+}
+
+// Depth, normal, roughness and motion for ambient occlusion, reflections and bounce light.
+@fragment
+fn fs_ground_prepass(in: GroundOut) -> PrepassOutput {
+    return surface_prepass(ground_surface(in), in.rel);
+}
+
+fn surface_prepass(s: Surface, rel: vec3<f32>) -> PrepassOutput {
+    return prepass_output(s.normal, s.roughness, motion_clip(rel), prev_motion_clip(static_prev_rel(rel)));
+}
+
+fn ground_surface(in: GroundOut) -> Surface {
     let p = in.local.xz;
     let dpx = dpdx(p);
     let dpy = dpdy(p);
@@ -3704,7 +3740,7 @@ fn fs_ground(in: GroundOut) -> @location(0) vec4<f32> {
     s.subsurface = subsurface;
     wet_surface(&s, in.extra.x, porosity, height, geo_n);
     weather_surface(&s, in.rel);
-    return finish(s, in.rel);
+    return s;
 }
 
 // ---------------------------------------------------------------- rocks
@@ -3724,7 +3760,7 @@ struct RockIn {
 };
 
 struct RockOut {
-    @builtin(position) clip: vec4<f32>,
+    @builtin(position) @invariant clip: vec4<f32>,
     @location(0) rel: vec3<f32>,
     @location(1) normal: vec3<f32>,
     @location(2) data: vec4<f32>,
@@ -3747,6 +3783,15 @@ fn vs_rock(in: RockIn) -> RockOut {
 
 @fragment
 fn fs_rock(in: RockOut) -> @location(0) vec4<f32> {
+    return finish(rock_surface(in), in.rel);
+}
+
+@fragment
+fn fs_rock_prepass(in: RockOut) -> PrepassOutput {
+    return surface_prepass(rock_surface(in), in.rel);
+}
+
+fn rock_surface(in: RockOut) -> Surface {
     let wp = tiling_pos(in.rel);
     let q = wp + vec3(in.tint.w * 13.1, in.tint.w * 7.3, in.tint.w * 5.7);
     let ng = normalize(in.normal);
@@ -3783,7 +3828,9 @@ fn fs_rock(in: RockOut) -> @location(0) vec4<f32> {
 
     // Lichen: crusty pale spots on the open faces.
     let l1 = value_noise3(q * 9.0) * 0.6 + value_noise3(q * 31.0) * 0.4;
-    let lichen = smoothstep(0.63, 0.67, l1) * in.params.y * saturate(ng.y + 0.7);
+    // In the dark (data.y), nothing grows.
+    let lit = 1.0 - in.data.y;
+    let lichen = smoothstep(0.63, 0.67, l1) * in.params.y * saturate(ng.y + 0.7) * lit;
     let lichen_c = mix(vec3(0.2, 0.22, 0.17), vec3(0.3, 0.22, 0.06), smoothstep(0.7, 0.8, value_noise3(q * 2.3)));
     albedo = mix(albedo, lichen_c, lichen * 0.65);
     rough = mix(rough, 0.92, lichen);
@@ -3791,7 +3838,7 @@ fn fs_rock(in: RockOut) -> @location(0) vec4<f32> {
     // Moss on top: where faces look up, more in hollows, height-blended with the rock.
     let mn = value_noise2(wp.xz * 2.5) * 0.6 + value_noise2(wp.xz * 9.0) * 0.4;
     let up = smoothstep(0.1, 0.75, n.y + (mn - 0.5) * 0.7);
-    let moss_w = in.params.x * up;
+    let moss_w = in.params.x * up * lit;
     let moss = smoothstep(-0.06, 0.06, moss_w * 1.25 + mossy.a * 0.45 - 0.55 - height * 0.35);
     albedo = mix(albedo, mossy.rgb, moss);
     rough = mix(rough, mossn.b, moss);
@@ -3809,6 +3856,9 @@ fn fs_rock(in: RockOut) -> @location(0) vec4<f32> {
     // Cavities from the mesh.
     ao *= in.data.x;
     albedo *= mix(0.5, 1.0, in.data.x);
+    // Seeping water (data.z): darker, glossy rock.
+    albedo *= 1.0 - 0.3 * in.data.z * (1.0 - moss);
+    rough = mix(rough, 0.18, in.data.z * (1.0 - moss));
 
     var s = default_surface();
     s.albedo = albedo;
@@ -3826,7 +3876,7 @@ fn fs_rock(in: RockOut) -> @location(0) vec4<f32> {
     s.albedo = mix(s.albedo, vec3(0.035, 0.045, 0.02), band * 0.65);
     s.roughness = mix(s.roughness, 0.1, wet);
     weather_surface(&s, in.rel);
-    return finish(s, in.rel);
+    return s;
 }
 "#;
 
@@ -3906,7 +3956,9 @@ struct RockBatch {
 #[derive(Default)]
 pub struct SceneryFeature {
     ground_pipeline: Option<wgpu::RenderPipeline>,
+    ground_prepass_pipeline: Option<wgpu::RenderPipeline>,
     rock_pipeline: Option<wgpu::RenderPipeline>,
+    rock_prepass_pipeline: Option<wgpu::RenderPipeline>,
     rock_shadow_pipeline: Option<wgpu::RenderPipeline>,
     texture_layout: Option<wgpu::BindGroupLayout>,
     cover_layout: Option<wgpu::BindGroupLayout>,
@@ -3915,6 +3967,8 @@ pub struct SceneryFeature {
     textures: Option<(wgpu::Texture, wgpu::Texture, wgpu::BindGroup)>,
     covers: HashMap<Entity, GpuCover>,
     rock_meshes: Vec<GpuRockMesh>,
+    /// Cave chambers' meshes in `rock_meshes`, by their recipe.
+    chambers: HashMap<u64, u32>,
     instances: Option<GrowBuffer>,
     instance_bytes: Vec<u8>,
     items: Vec<RockItem>,
@@ -4047,19 +4101,8 @@ impl SceneryFeature {
         }
         for shape in 0..ROCK_SHAPES {
             for lod in 0..ROCK_LODS {
-                let m = rock_mesh(shape, lod);
-                let mut bytes = Vec::with_capacity(m.vertices.len() * ROCK_VERTEX_BYTES);
-                for v in &m.vertices {
-                    push_f32s(&mut bytes, &v.position);
-                    push_f32s(&mut bytes, &v.normal);
-                    bytes.extend_from_slice(&v.data);
-                }
-                let index: Vec<u8> = m.indices.iter().flat_map(|i| i.to_le_bytes()).collect();
-                self.rock_meshes.push(GpuRockMesh {
-                    vertex: buffer_init(gpu, "rock vertices", &bytes, wgpu::BufferUsages::VERTEX),
-                    index: buffer_init(gpu, "rock indices", &index, wgpu::BufferUsages::INDEX),
-                    index_count: m.indices.len() as u32,
-                });
+                self.rock_meshes
+                    .push(upload_rock_mesh(gpu, &rock_mesh(shape, lod)));
             }
         }
     }
@@ -4146,10 +4189,49 @@ impl SceneryFeature {
         self.covers.retain(|_, c| c.seen == frame);
     }
 
-    fn prepare_rocks(&mut self, world: &mut World, view: &ViewData) {
+    /// Draw the ground covers and the rocks with these pipelines (the scene's or the
+    /// prepass's).
+    fn draw_opaque(
+        &self,
+        pass: &mut wgpu::RenderPass<'_>,
+        ground: Option<&wgpu::RenderPipeline>,
+        rocks: Option<&wgpu::RenderPipeline>,
+    ) {
+        let Some((_, _, textures)) = &self.textures else {
+            return;
+        };
+        if let Some(pipeline) = ground
+            && !self.covers.is_empty()
+        {
+            pass.set_pipeline(pipeline);
+            pass.set_bind_group(1, textures, &[]);
+            for c in self.covers.values() {
+                pass.set_bind_group(2, &c.group, &[]);
+                pass.set_vertex_buffer(0, c.vertex.slice(..));
+                pass.set_index_buffer(c.index.slice(..), wgpu::IndexFormat::Uint32);
+                pass.draw_indexed(0..c.index_count, 0, 0..1);
+            }
+        }
+        if let (Some(pipeline), Some(instances)) = (rocks, &self.instances)
+            && !self.rock_draws.is_empty()
+        {
+            pass.set_pipeline(pipeline);
+            pass.set_bind_group(1, textures, &[]);
+            pass.set_vertex_buffer(1, instances.buffer.slice(..));
+            for b in &self.rock_draws {
+                let m = &self.rock_meshes[b.mesh as usize];
+                pass.set_vertex_buffer(0, m.vertex.slice(..));
+                pass.set_index_buffer(m.index.slice(..), wgpu::IndexFormat::Uint32);
+                pass.draw_indexed(0..m.index_count, 0, b.first..b.first + b.count);
+            }
+        }
+    }
+
+    fn prepare_rocks(&mut self, world: &mut World, gpu: &GpuShared, view: &ViewData) {
         self.items.clear();
+        self.prepare_chambers(world, gpu, view);
         let mut q = world.query::<(&Rock, &GlobalTransform)>();
-        let shadows = view.sun_shadows;
+        let shadows = view.sun_shadows || view.sky_occlusion.enabled;
         for (rock, t) in q.iter(world) {
             let scale = t.scale();
             let size = scale.max_element();
@@ -4225,20 +4307,35 @@ impl SceneryFeature {
             .filter(|i| i.visible)
             .map(|i| (i.mesh, i.instance));
         push_batches(&mut visible, &mut self.instance_bytes, &mut self.rock_draws);
-        let cascades = if shadows {
-            (view.cascades.count as usize).min(engine_render::shadows::MAX_CASCADES)
+        // One list per sun cascade, then the sky occlusion map: rocks and cave roofs keep the
+        // open sky off whatever lies under them.
+        let cascades = if view.sun_shadows {
+            (view.cascades.count as usize).min(MAX_CASCADES)
         } else {
             0
         };
-        self.shadow_draws.resize_with(cascades, Vec::new);
+        self.shadow_draws
+            .resize_with(SKY_OCCLUSION_VIEW + 1, Vec::new);
         for (c, draws) in self.shadow_draws.iter_mut().enumerate() {
             draws.clear();
+            let inside = |i: &RockItem| {
+                if c == SKY_OCCLUSION_VIEW {
+                    view.sky_occlusion.enabled
+                        && view.sky_occlusion.contains_sphere(i.center, i.radius)
+                } else {
+                    c < cascades && view.cascades.sphere_in_cascade(c, i.center, i.radius)
+                }
+            };
             let mut casters: Vec<(u32, [f32; 32])> = self
                 .items
                 .iter()
-                .filter(|i| i.casts && view.cascades.sphere_in_cascade(c, i.center, i.radius))
+                .filter(|i| i.casts && inside(i))
                 .map(|i| {
-                    // Shadows use the coarser shape.
+                    // Shadows use the coarser shape; chambers their shadow caster, next to
+                    // their rock.
+                    if i.mesh >= BUILT_IN_ROCK_MESHES {
+                        return (i.mesh + 1, i.instance);
+                    }
                     let shape = i.mesh / ROCK_LODS as u32;
                     let lod = (i.mesh % ROCK_LODS as u32).max(1);
                     (shape * ROCK_LODS as u32 + lod, i.instance)
@@ -4246,6 +4343,88 @@ impl SceneryFeature {
                 .collect();
             casters.sort_unstable_by_key(|c| c.0);
             push_batches(&mut casters.into_iter(), &mut self.instance_bytes, draws);
+        }
+    }
+}
+
+/// Rock meshes the feature makes itself: every shape at every level of detail. Cave chambers'
+/// meshes follow them.
+const BUILT_IN_ROCK_MESHES: u32 = ROCK_SHAPES * ROCK_LODS as u32;
+
+fn upload_rock_mesh(gpu: &GpuShared, m: &RockMesh) -> GpuRockMesh {
+    let mut bytes = Vec::with_capacity(m.vertices.len() * ROCK_VERTEX_BYTES);
+    for v in &m.vertices {
+        push_f32s(&mut bytes, &v.position);
+        push_f32s(&mut bytes, &v.normal);
+        bytes.extend_from_slice(&v.data);
+    }
+    let index: Vec<u8> = m.indices.iter().flat_map(|i| i.to_le_bytes()).collect();
+    GpuRockMesh {
+        vertex: buffer_init(gpu, "rock vertices", &bytes, wgpu::BufferUsages::VERTEX),
+        index: buffer_init(gpu, "rock indices", &index, wgpu::BufferUsages::INDEX),
+        index_count: m.indices.len() as u32,
+    }
+}
+
+impl SceneryFeature {
+    /// Cave chambers, drawn (and casting shadows) like rocks from their own meshes, built the
+    /// first time each recipe is seen.
+    fn prepare_chambers(&mut self, world: &mut World, gpu: &GpuShared, view: &ViewData) {
+        use std::hash::{Hash, Hasher};
+        let mut q = world.query::<(&crate::cave::CaveChamber, &GlobalTransform)>();
+        for (chamber, t) in q.iter(world) {
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            format!("{chamber:?}").hash(&mut h);
+            let key = h.finish();
+            let mesh = match self.chambers.get(&key) {
+                Some(&i) => i,
+                None => {
+                    let start = std::time::Instant::now();
+                    let m = crate::cave::cave_chamber_mesh(chamber);
+                    tracing::info!(
+                        "foliage: built a cave chamber ({} triangles) in {:.0} ms",
+                        m.indices.len() / 3,
+                        start.elapsed().as_secs_f32() * 1000.0
+                    );
+                    // The rock, then its shadow caster.
+                    let i = self.rock_meshes.len() as u32;
+                    self.rock_meshes.push(upload_rock_mesh(gpu, &m));
+                    let shadow = crate::cave::cave_chamber_shadow_mesh(&m);
+                    self.rock_meshes.push(upload_rock_mesh(gpu, &shadow));
+                    self.chambers.insert(key, i);
+                    i
+                }
+            };
+            let [hx, hz] = chamber.half_extents;
+            let base = (t.translation() - view.origin).as_vec3();
+            let center = base + Vec3::Y * chamber.height_m * 0.5;
+            let radius = Vec3::new(hx + 2.0, chamber.height_m * 0.5 + 2.0, hz + 2.0).length();
+            let visible = view.frustum.intersects_sphere(center, radius);
+            let casts = view.sun_shadows || view.sky_occlusion.enabled;
+            if !visible && !casts {
+                continue;
+            }
+            let model = t.matrix_relative_to(view.origin);
+            let normal = Mat3::from_mat4(model).inverse().transpose();
+            let mut inst = [0.0f32; 32];
+            inst[0..4].copy_from_slice(&model.row(0).to_array());
+            inst[4..8].copy_from_slice(&model.row(1).to_array());
+            inst[8..12].copy_from_slice(&model.row(2).to_array());
+            inst[12..15].copy_from_slice(&normal.x_axis.to_array());
+            inst[16..19].copy_from_slice(&normal.y_axis.to_array());
+            inst[20..23].copy_from_slice(&normal.z_axis.to_array());
+            inst[24..28].copy_from_slice(&[chamber.moss, chamber.lichen, base.y, -1e6]);
+            let seed = unit(chamber.seed, 0xca7e);
+            let [r, g, b] = chamber.tint;
+            inst[28..32].copy_from_slice(&[r, g, b, seed]);
+            self.items.push(RockItem {
+                mesh,
+                center,
+                radius,
+                casts,
+                visible,
+                instance: inst,
+            });
         }
     }
 }
@@ -4358,6 +4537,31 @@ impl RenderFeature for SceneryFeature {
                 cache: None,
             },
         ));
+        // Same vertices as the scene pass (the clip position is invariant), so its depth test
+        // passes exactly where the prepass drew.
+        self.ground_prepass_pipeline = Some(device.create_render_pipeline(
+            &wgpu::RenderPipelineDescriptor {
+                label: Some("ground prepass"),
+                layout: Some(&ground_layout),
+                vertex: wgpu::VertexState {
+                    module: &shader,
+                    entry_point: Some("vs_ground"),
+                    compilation_options: Default::default(),
+                    buffers: &ground_buffers,
+                },
+                primitive,
+                depth_stencil: Some(gpu.depth_state(true)),
+                multisample: Default::default(),
+                fragment: Some(wgpu::FragmentState {
+                    module: &shader,
+                    entry_point: Some("fs_ground_prepass"),
+                    compilation_options: Default::default(),
+                    targets: &gpu.prepass_targets(),
+                }),
+                multiview_mask: None,
+                cache: None,
+            },
+        ));
         let rock_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("rocks"),
             bind_group_layouts: &[Some(&gpu.frame_layout), Some(&texture_layout)],
@@ -4404,6 +4608,29 @@ impl RenderFeature for SceneryFeature {
                 cache: None,
             }),
         );
+        self.rock_prepass_pipeline = Some(device.create_render_pipeline(
+            &wgpu::RenderPipelineDescriptor {
+                label: Some("rocks prepass"),
+                layout: Some(&rock_layout),
+                vertex: wgpu::VertexState {
+                    module: &shader,
+                    entry_point: Some("vs_rock"),
+                    compilation_options: Default::default(),
+                    buffers: &rock_buffers,
+                },
+                primitive,
+                depth_stencil: Some(gpu.depth_state(true)),
+                multisample: Default::default(),
+                fragment: Some(wgpu::FragmentState {
+                    module: &shader,
+                    entry_point: Some("fs_rock_prepass"),
+                    compilation_options: Default::default(),
+                    targets: &gpu.prepass_targets(),
+                }),
+                multiview_mask: None,
+                cache: None,
+            },
+        ));
         let shadow_shader = gpu.shader("foliage rock shadow", ROCK_SHADOW_SHADER, false);
         let shadow_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("rock shadow"),
@@ -4454,7 +4681,11 @@ impl RenderFeature for SceneryFeature {
         }
         self.frame += 1;
         let any = world
-            .query_filtered::<(), Or<(With<GroundSurface>, With<Rock>)>>()
+            .query_filtered::<(), Or<(
+                With<GroundSurface>,
+                With<Rock>,
+                With<crate::cave::CaveChamber>,
+            )>>()
             .iter(world)
             .next()
             .is_some();
@@ -4469,7 +4700,7 @@ impl RenderFeature for SceneryFeature {
         self.ensure_textures(gpu);
         self.ensure_rock_meshes(gpu);
         self.prepare_covers(world, gpu, view);
-        self.prepare_rocks(world, view);
+        self.prepare_rocks(world, gpu, view);
         if let Some(buf) = &mut self.instances {
             buf.write(&gpu.device, &gpu.queue, &self.instance_bytes);
         }
@@ -4493,38 +4724,23 @@ impl RenderFeature for SceneryFeature {
         self.stats = stats;
     }
 
+    fn draw_prepass(&self, pass: &mut wgpu::RenderPass<'_>, _ctx: &FrameContext) {
+        self.draw_opaque(
+            pass,
+            self.ground_prepass_pipeline.as_ref(),
+            self.rock_prepass_pipeline.as_ref(),
+        );
+    }
+
     fn draw(&self, phase: RenderPhase, pass: &mut wgpu::RenderPass<'_>, _ctx: &FrameContext) {
         if phase != RenderPhase::Opaque {
             return;
         }
-        let Some((_, _, textures)) = &self.textures else {
-            return;
-        };
-        if let Some(pipeline) = &self.ground_pipeline
-            && !self.covers.is_empty()
-        {
-            pass.set_pipeline(pipeline);
-            pass.set_bind_group(1, textures, &[]);
-            for c in self.covers.values() {
-                pass.set_bind_group(2, &c.group, &[]);
-                pass.set_vertex_buffer(0, c.vertex.slice(..));
-                pass.set_index_buffer(c.index.slice(..), wgpu::IndexFormat::Uint32);
-                pass.draw_indexed(0..c.index_count, 0, 0..1);
-            }
-        }
-        if let (Some(pipeline), Some(instances)) = (&self.rock_pipeline, &self.instances)
-            && !self.rock_draws.is_empty()
-        {
-            pass.set_pipeline(pipeline);
-            pass.set_bind_group(1, textures, &[]);
-            pass.set_vertex_buffer(1, instances.buffer.slice(..));
-            for b in &self.rock_draws {
-                let m = &self.rock_meshes[b.mesh as usize];
-                pass.set_vertex_buffer(0, m.vertex.slice(..));
-                pass.set_index_buffer(m.index.slice(..), wgpu::IndexFormat::Uint32);
-                pass.draw_indexed(0..m.index_count, 0, b.first..b.first + b.count);
-            }
-        }
+        self.draw_opaque(
+            pass,
+            self.ground_pipeline.as_ref(),
+            self.rock_pipeline.as_ref(),
+        );
     }
 
     fn draw_shadow(&self, pass: &mut wgpu::RenderPass<'_>, cascade: usize, _ctx: &FrameContext) {
