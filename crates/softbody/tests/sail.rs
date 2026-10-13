@@ -111,11 +111,17 @@ fn sailboat_home_sends_a_dinghy_back_to_its_mooring() {
         });
     app.world.resource_mut::<FixedTime>().set_hz(60.0);
     app.insert_resource(Water(Arc::new(Pond)));
+    // Wind along +X: head to wind is a quarter turn from the heading it spawns with.
+    {
+        let mut weather = app.world.resource_mut::<WeatherState>();
+        weather.wind = Vec3::new(6.0, 0.0, 0.0);
+        weather.gustiness = 0.0;
+    }
     let home = DVec3::new(10.0, 0.0, -5.0);
     app.add_systems(Startup, move |mut commands: Commands| {
         engine_softbody::demo::spawn_sailboat(&mut commands, home, 22.0);
     });
-    app.update_n(3);
+    app.update_n(30);
     let mut boats = app
         .world
         .query_filtered::<Entity, With<engine_softbody::demo::sailboat::Helm>>();
@@ -123,11 +129,23 @@ fn sailboat_home_sends_a_dinghy_back_to_its_mooring() {
 
     // Out on its lane (afloat, not lost), it stays where it is...
     let away = home + DVec3::new(8.0, 0.0, 3.0);
-    app.world.get_mut::<Transform>(boat).unwrap().translation = away;
-    app.update();
+    {
+        let mut t = app.world.get_mut::<Transform>(boat).unwrap();
+        t.translation = away;
+        t.rotation = Quat::from_rotation_y(2.5);
+    }
+    app.update_n(30);
     let at = app.world.get::<Transform>(boat).unwrap().translation;
     assert!((at - away).length() < 1.0, "left its lane on its own: {at}");
-    // ...until it is sent home.
+
+    // ...until it is sent home: back at its mooring, and the sail goes along rather than
+    // being dragged across the jump and torn.
+    let mut sails = app.world.query::<(&Cloth, &SoftBodySim)>();
+    let version = sails
+        .single(&app.world)
+        .expect("the sail")
+        .1
+        .topology_version;
     let reply = call_api(
         &mut app.world,
         "softbody.sailboat_home",
@@ -135,7 +153,16 @@ fn sailboat_home_sends_a_dinghy_back_to_its_mooring() {
     )
     .unwrap();
     assert_eq!(reply["boats"], 1);
-    app.update();
+    app.update_n(10);
     let at = app.world.get::<Transform>(boat).unwrap().translation;
     assert!((at - home).length() < 0.05, "not back at its mooring: {at}");
+    let (_, sail) = sails.single(&app.world).unwrap();
+    assert_eq!(sail.topology_version, version, "the sail tore in the jump");
+    let far = (0..sail.sim.len())
+        .map(|i| (sail.world_position(i) - home).length())
+        .fold(0.0, f64::max);
+    assert!(
+        far < 6.0,
+        "sail particles left behind: {far} m from the boat"
+    );
 }
