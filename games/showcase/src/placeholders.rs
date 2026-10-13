@@ -37,8 +37,11 @@ fn mat(hex: u32, roughness: f32) -> StandardMaterial {
     StandardMaterial::hex(hex).with_roughness(roughness)
 }
 
+/// Dressed stone (walls, pedestals, planters): warm cast stone, mapped in the object's meters.
 fn stone() -> StandardMaterial {
-    mat(0x8a857c, 0.85)
+    StandardMaterial::preset(MaterialPreset::Concrete)
+        .with_tint_hex(0xe6ddd0)
+        .with_triplanar()
 }
 fn wood() -> StandardMaterial {
     mat(0x7a5434, 0.8)
@@ -117,13 +120,31 @@ fn person(commands: &mut Commands, base: DVec3, yaw: f32, shirt: u32) {
 /// inside an emissive ring and pedestals. The Rendering and lighting thread owns its content.
 pub fn plaza(commands: &mut Commands, lib: &Library, z: &Zone) {
     let c = z.center;
-    // Paving: concentric rings of slightly different stone.
-    for (i, r) in [31.0f32, 24.0, 16.0, 8.0].into_iter().enumerate() {
-        let shade = [0x8f877c, 0x9d958a, 0x8a8277, 0xa39b90][i];
+    // Paving: granite setts in concentric bands (a darker band of smaller setts between two
+    // light ones) round a polished marble middle, laid in world meters so the joints line up.
+    let cobbles = |tile: f32, tint: u32| {
+        StandardMaterial::preset(MaterialPreset::Cobblestone)
+            .with_texture_scale(tile)
+            .with_tint_hex(tint)
+    };
+    let paving = [
+        (31.0f32, cobbles(1.5, 0xf2eee8)),
+        (24.0, cobbles(1.0, 0xc4beb6)),
+        (16.0, cobbles(1.5, 0xfaf6f0)),
+        (
+            8.0,
+            StandardMaterial::preset(MaterialPreset::Marble).with_texture_scale(1.6),
+        ),
+    ];
+    for (i, (r, material)) in paving.into_iter().enumerate() {
         spawn(
             commands,
-            cyl(r, 0.2),
-            mat(shade, 0.85),
+            Shape::Cylinder {
+                radius: r,
+                height: 0.2,
+                segments: 128,
+            },
+            material.with_triplanar_world(),
             at(c + DVec3::new(0.0, 0.1 + i as f64 * 0.005, 0.0)),
         );
     }
