@@ -206,7 +206,7 @@ Shared pipelines the core will provide for modules (planned): **strands** for ha
 muscles and skinned clothes and by `engine_softbody` for simulated cloth).
 
 Shader library: `lib_types.wgsl` (types, noise, BRDF), `lib_frame.wgsl` (group 0 frame
-data, `shade_surface`, `shadow_factor`, `contact_shadow`, `screen_ao`, `sky_visibility`, `apply_fog`,
+data, `shade_surface`, `shade_surface_shadowed`, `shadow_factor`, `contact_shadow`, `screen_ao`, `sky_visibility`, `apply_fog`,
 `sample_env`, `sample_env_rough`, `sky_ambient`, `wind_offset`, `prepass_output`) and `lib_atmosphere.wgsl` (`atmosphere` for aerial perspective,
 `sun_transmittance`, `sky_view_radiance`, `planet_height`, `ray_shell`).
 
@@ -237,6 +237,26 @@ materials and entities with the `NoVirtualGeometry` marker stay instanced; a cha
 instanced until its own clusters are rebuilt. `DebugView::Clusters` and `ClusterLevels` show
 them; `render.stats` reports `clusters` (and their triangles). Next: occlusion culling (two-pass
 HZB), streaming, a compute rasterizer for tiny triangles, cached shadow pages.
+
+**Material presets** (built): `StandardMaterial::preset(MaterialPreset::Brick)` (and cobblestone,
+rock, concrete, plaster, wood planks, bark, rusty steel, painted metal, sand, forest soil,
+gravel, snow, marble, grass) is a ready-made PBR surface whose maps (sRGB base color, normal,
+occlusion/roughness/metalness, height) are generated on the GPU by compute shaders the first time
+it is drawn, once per process, at `RenderSettings::material_texture_size` (1024 by default),
+tileable and mipmapped. Each preset is a small WGSL program in `shaders/materials/` over a
+library of tileable noise, Voronoi, brick and scratch generators, slope blur, and maps derived
+from its height (normal, ambient occlusion, curvature for edge wear and dirt), so a new preset
+is one file. Presets work in meters: `with_texture_scale(m)` sets the size of one tile (the
+relief depth follows), `with_tint` recolors, `detail` adds large-scale variation. Generated maps
+fill the material's empty texture slots in the mesh feature's ordinary texture sets;
+`GpuShared::material_textures` hands them to other features, and `read_material_maps` reads them
+back. Any material with a height map (`with_height_texture`, every preset) gets parallax
+occlusion mapping, fading out with distance and at grazing angles, with soft self-shadowing
+toward the sun; `with_triplanar()` (object space) or `with_triplanar_world()` projects the
+textures along three axes in meters with sharpened blending and surface-gradient normal
+blending, for rocks, spheres and terrain without UVs. The prepass evaluates the same material
+(parallax, triplanar, normal maps), so ambient occlusion, reflections and TAA see the detailed
+normals.
 
 **Sky light** (built): every time the sky environment map is redrawn
 (`RenderSettings::environment_interval`), the GPU filters it twice: prefiltered for GGX

@@ -148,6 +148,9 @@ pub struct RenderSettings {
     /// screen pixels, so shadows use coarser clusters than the camera). The default of 2 halves
     /// the shadow triangles of 1 with no visible change under the shadow filter.
     pub cluster_shadow_error_texels: f32,
+    /// Texels per side of each map of a generated material preset (`StandardMaterial::preset`):
+    /// a power of two, 64..4096. Each preset is generated once per size, on first use.
+    pub material_texture_size: u32,
 }
 
 impl Default for RenderSettings {
@@ -191,6 +194,7 @@ impl Default for RenderSettings {
             virtual_geometry_min_triangles: 50_000,
             cluster_error_px: 1.0,
             cluster_shadow_error_texels: 2.0,
+            material_texture_size: 1024,
         }
     }
 }

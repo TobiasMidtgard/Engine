@@ -445,6 +445,7 @@ impl Renderer {
             nearest_clamp,
             adapter_info: gpu.info.clone(),
             features: device.features(),
+            materials: Default::default(),
         };
 
         let targets = Targets::new(&device, &formats, width, height);
