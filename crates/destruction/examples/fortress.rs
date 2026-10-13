@@ -130,6 +130,37 @@ fn shots() -> Vec<(f32, &'static str, [f64; 3], [f64; 3])> {
             [-26.0, 6.0, -4.0],
             [-36.0, 3.0, 16.0],
         ),
+        (0.5, "22_house_roof", [20.5, 8.5, 13.5], [15.0, 3.0, 21.0]),
+        (
+            0.55,
+            "23_house_under_the_roof",
+            [16.2, 1.6, 25.4],
+            [15.1, 2.1, 20.4],
+        ),
+        (
+            6.3,
+            "24_house_roof_charge",
+            [20.5, 8.5, 13.5],
+            [15.0, 3.0, 21.0],
+        ),
+        (
+            10.2,
+            "25_house_hatch_thermite",
+            [18.0, 6.0, 17.0],
+            [15.6, 3.2, 20.4],
+        ),
+        (
+            13.0,
+            "26_house_under_the_roof_after",
+            [16.2, 1.6, 25.4],
+            [15.1, 2.1, 20.4],
+        ),
+        (
+            13.2,
+            "27_house_roof_after",
+            [20.5, 8.5, 13.5],
+            [15.0, 3.0, 21.0],
+        ),
         (
             17.0,
             "21_everything_after",
@@ -222,10 +253,13 @@ fn main() {
             app.world.insert_resource(r);
         }
         {
-            let mut q = app.world.query_filtered::<&mut Transform, With<Camera>>();
-            for mut c in q.iter_mut(&mut app.world) {
+            // Indoors is about three stops darker than the sunlit courtyard.
+            let ev100 = if name.contains("under") { 12.3 } else { 14.6 };
+            let mut q = app.world.query::<(&mut Transform, &mut Camera)>();
+            for (mut c, mut cam) in q.iter_mut(&mut app.world) {
                 *c = Transform::from_translation(DVec3::from_array(eye))
                     .looking_at(DVec3::from_array(target), Vec3::Y);
+                cam.exposure = Exposure::Manual { ev100 };
             }
         }
         // Render the new view (exposure adapts over a couple of frames) without moving time.

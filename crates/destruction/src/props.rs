@@ -121,6 +121,18 @@ pub enum PropKind {
     WoodStair {
         size: [f32; 3],
     },
+    /// A fixed steel ladder under a floor hatch, `height` meters tall.
+    SteelLadder {
+        height: f32,
+    },
+    /// A cast concrete floor slab.
+    ConcreteSlab {
+        size: [f32; 3],
+    },
+    /// A bolted steel rim around a floor hatch opening `size` [w, d] meters.
+    HatchRim {
+        size: [f32; 2],
+    },
     RoofTiles {
         width: f32,
         depth: f32,
@@ -192,6 +204,11 @@ impl PropKind {
             PropKind::WoodStair {
                 size: [1.0, 1.2, 2.0],
             },
+            PropKind::SteelLadder { height: 3.0 },
+            PropKind::ConcreteSlab {
+                size: [3.0, 0.15, 2.0],
+            },
+            PropKind::HatchRim { size: [1.0, 1.0] },
             PropKind::RoofTiles {
                 width: 4.0,
                 depth: 3.4,
@@ -231,6 +248,9 @@ impl PropKind {
             PropKind::BoardWindow { size } => board_wall_opening(Vec3::from(size), false, seed),
             PropKind::PlankDoor { size } => plank_door(Vec3::from(size), seed),
             PropKind::WoodStair { size } => wood_stair(Vec3::from(size), seed),
+            PropKind::SteelLadder { height } => steel_ladder(height, seed),
+            PropKind::ConcreteSlab { size } => concrete_slab(Vec3::from(size), seed),
+            PropKind::HatchRim { size } => hatch_rim(Vec2::from(size)),
             PropKind::RoofTiles {
                 width,
                 depth,
@@ -259,7 +279,10 @@ impl PropKind {
             | PropKind::BoardDoorway { size }
             | PropKind::BoardWindow { size }
             | PropKind::PlankDoor { size }
-            | PropKind::WoodStair { size } => Vec3::from(size),
+            | PropKind::WoodStair { size }
+            | PropKind::ConcreteSlab { size } => Vec3::from(size),
+            PropKind::SteelLadder { height } => ladder_size(height),
+            PropKind::HatchRim { size } => hatch_rim_size(Vec2::from(size)),
             PropKind::SteelDrum { .. } => Vec3::new(DRUM_DIAMETER, DRUM_HEIGHT, DRUM_DIAMETER),
             PropKind::Sandbag => Vec3::new(BAG_LEN, BAG_HEIGHT, BAG_WIDTH),
             PropKind::SandbagWall { length, courses } => sandbag_wall_size(length, courses),
@@ -4200,7 +4223,7 @@ pub fn wood_stair(size: Vec3, seed: u64) -> Vec<PropPart> {
         if n.y > 0.5 {
             let w = (-(p.x / (hx * 0.4)).powi(2)).exp();
             let k = 1.0 - 0.16 * w;
-            [k, k * 0.97, k * 0.92]
+            [k, k * 0.94, k * 0.86]
         } else {
             [1.0; 3]
         }
@@ -4903,6 +4926,222 @@ pub fn roof_tiles(width: f32, depth: f32, pitch: f32, seed: u64) -> Vec<PropPart
         reach: 0.25,
         strength: 0.85,
         ground: false,
+    })
+}
+
+// ============================================================================================
+// Hatch ladder and floor slab
+// ============================================================================================
+
+/// Half the distance between a ladder's stiles (centers), m.
+const LADDER_HALF_W: f32 = 0.236;
+/// Depth of a ladder from its foot plates' front edge to its top brackets' back face, m. The
+/// stiles stand [`LADDER_STILE_Z`] in front of the middle.
+const LADDER_DEPTH: f32 = 0.24;
+/// Where a centered ladder's stiles stand along Z (its top brackets reach back to −Z).
+pub const LADDER_STILE_Z: f32 = 0.06;
+
+fn ladder_size(height: f32) -> Vec3 {
+    Vec3::new(2.0 * (LADDER_HALF_W + 0.03), height.max(1.0), LADDER_DEPTH)
+}
+
+/// Fixed steel ladder `height` meters tall for a floor hatch: two flat-bar stiles, round
+/// rungs every 0.28 m welded through them, foot plates bolted to the floor and two brackets at
+/// the top reaching back (−Z) to the hatch frame. Galvanized, rubbed bright where hands and
+/// boots go.
+pub fn steel_ladder(height: f32, seed: u64) -> Vec<PropPart> {
+    let h = height.max(1.0);
+    let mut rng = Rng::new(seed ^ 0x001A_DDE2);
+    let mut kit = Kit::new();
+    let galv = [0.9, 0.91, 0.93];
+    let dark = [0.62, 0.62, 0.63];
+    let (hw, st, sd) = (LADDER_HALF_W, 0.006, 0.0325);
+    let m = kit.mb(METAL);
+    // Stiles stand on z = 0 here; the box is centered at the end.
+    for sx in [-1.0f32, 1.0] {
+        let x = sx * hw;
+        let v0 = m.vertices.len();
+        bevel_box(
+            m,
+            &Frame::at(Vec3::new(x, h * 0.5, 0.0)),
+            &BoxSpec::new(Vec3::new(st, h * 0.5, sd), 0.0015)
+                .splits([&[], &stations(-h * 0.5, h * 0.5, &[], 0.25), &[]])
+                .tint(galv),
+        );
+        // Dull zinc bloom and a few rust-brown runs from the bolts.
+        let streak = rng.range(0.0, 1.0);
+        shade(m, v0, move |q, _| {
+            let bloom = 0.9 + 0.1 * fbm(q * Vec3::new(1.0, 0.4, 1.0), 3.0, seed, 3);
+            let run = (1.0 - ((q.y / h - 0.9) * 6.0 + streak).abs()).clamp(0.0, 1.0) * 0.08;
+            [bloom - run, bloom - run * 1.3, bloom - run * 1.7]
+        });
+        // Foot plate with two anchor bolts.
+        bevel_box(
+            m,
+            &Frame::at(Vec3::new(x, 0.004, 0.0)),
+            &BoxSpec::new(Vec3::new(0.03, 0.004, 0.06), 0.0015)
+                .faces(ALL & !NY)
+                .tint(mul(galv, 0.92)),
+        );
+        for dz in [-0.04f32, 0.04] {
+            hex_head(m, Vec3::new(x, 0.008, dz), Vec3::Y, 0.009, 0.007, dark);
+        }
+        // Top bracket back to the frame, ending in a bolted plate.
+        let yb = h - 0.12;
+        let reach = LADDER_DEPTH - LADDER_STILE_Z - 0.008 - sd;
+        bevel_box(
+            m,
+            &Frame::at(Vec3::new(x, yb, -sd - reach * 0.5)),
+            &BoxSpec::new(Vec3::new(0.004, 0.025, reach * 0.5 + 0.002), 0.0012).tint(galv),
+        );
+        let zp = -(LADDER_DEPTH - LADDER_STILE_Z) + 0.004;
+        bevel_box(
+            m,
+            &Frame::at(Vec3::new(x, yb, zp)),
+            &BoxSpec::new(Vec3::new(0.035, 0.05, 0.004), 0.0012).tint(galv),
+        );
+        for dy in [-0.028f32, 0.028] {
+            hex_head(
+                m,
+                Vec3::new(x, yb + dy, zp + 0.004),
+                Vec3::Z,
+                0.008,
+                0.006,
+                dark,
+            );
+        }
+    }
+    // Rungs: knurled bars through both stiles, worn bright in the middle.
+    let mut y = 0.25;
+    while y < h - 0.1 {
+        let v0 = m.vertices.len();
+        let path: Vec<Vec3> = (0..=6)
+            .map(|k| Vec3::new(-hw - st + 2.0 * (hw + st) * k as f32 / 6.0, y, 0.0))
+            .collect();
+        tube(m, &path, 0.0125, 10, true, galv);
+        shade(m, v0, |q, n| {
+            let worn = (1.0 - (q.x / hw).abs()).clamp(0.0, 1.0) * n.y.max(0.0);
+            let knurl = 0.94 + 0.06 * ((q.x * 900.0).sin() * (n.z * 9.0).sin()).abs();
+            [knurl * (0.88 + 0.22 * worn); 3]
+        });
+        // Weld beads where the rungs come through.
+        for sx in [-1.0f32, 1.0] {
+            nail(
+                m,
+                Vec3::new(sx * (hw + st), y, 0.0),
+                Vec3::X * sx,
+                0.016,
+                dark,
+            );
+        }
+        y += 0.28;
+    }
+    // Stiles at z = 0 sit LADDER_STILE_Z in front of the middle once centered.
+    kit.translate(Vec3::new(0.0, -h * 0.5, LADDER_STILE_Z));
+    kit.finish(Ao {
+        reach: 0.15,
+        strength: 0.7,
+        ground: true,
+    })
+}
+
+/// Cast concrete floor slab of `size` (Y up): chamfered edges, trowelled top with darker scuffs
+/// where feet go and grime along its edges.
+pub fn concrete_slab(size: Vec3, seed: u64) -> Vec<PropPart> {
+    let size = size.max(Vec3::new(0.3, 0.05, 0.3));
+    let h = size * 0.5;
+    let mut kit = Kit::new();
+    let b = kit.mb(CONCRETE);
+    let sx = stations(-h.x, h.x, &[-h.x + 0.15, h.x - 0.15], 0.4);
+    let sz = stations(-h.z, h.z, &[-h.z + 0.15, h.z - 0.15], 0.4);
+    let v0 = b.vertices.len();
+    bevel_box(
+        b,
+        &Frame::ID,
+        &BoxSpec::new(h, 0.012)
+            .chamfer()
+            .splits([&sx, &[], &sz])
+            .uv(Vec2::new(seed as f32 * 0.37 % 2.0, 0.0)),
+    );
+    shade(b, v0, move |q, n| {
+        let edge = (h.x - q.x.abs()).min(h.z - q.z.abs());
+        let grime = (1.0 - edge / 0.6).clamp(0.0, 1.0) * 0.12;
+        let scuff = fbm(q, 0.7, seed, 3).max(0.0) * 0.16;
+        let top = n.y.max(0.0);
+        // Swept dust on the floor warms the cement's grey.
+        let k = 1.0 - (grime + scuff) * top;
+        [k, k * 0.97, k * 0.92]
+    });
+    kit.finish(Ao {
+        reach: 0.3,
+        strength: 0.5,
+        ground: false,
+    })
+}
+
+/// Width and thickness of a hatch rim's flange, m.
+const RIM_W: f32 = 0.05;
+const RIM_T: f32 = 0.006;
+/// Height of its bolt heads above the flange, m.
+const RIM_BOLT_H: f32 = 0.005;
+
+fn hatch_rim_size(opening: Vec2) -> Vec3 {
+    let o = opening.max(Vec2::splat(0.2));
+    Vec3::new(o.x + 2.0 * RIM_W, RIM_T + RIM_BOLT_H, o.y + 2.0 * RIM_W)
+}
+
+/// Steel flat-bar rim around a floor hatch opening of `opening` [w, d] (X, Z): a flange
+/// screwed down onto the boards around the opening's edge, so a hatch cover reads as a hatch
+/// from above, its paint worn to bare steel where feet go.
+pub fn hatch_rim(opening: Vec2) -> Vec<PropPart> {
+    let o = opening.max(Vec2::splat(0.2)) * 0.5;
+    let mut kit = Kit::new();
+    let paint = [0.55, 0.57, 0.58];
+    let bolt = [0.4, 0.4, 0.42];
+    let m = kit.mb(METAL);
+    let y = RIM_T * 0.5;
+    let v0 = m.vertices.len();
+    for s in [-1.0f32, 1.0] {
+        bevel_box(
+            m,
+            &Frame::at(Vec3::new(0.0, y, s * (o.y + RIM_W * 0.5))),
+            &BoxSpec::new(Vec3::new(o.x + RIM_W, y, RIM_W * 0.5), 0.0015)
+                .faces(ALL & !NY)
+                .tint(paint),
+        );
+        bevel_box(
+            m,
+            &Frame::at(Vec3::new(s * (o.x + RIM_W * 0.5), y, 0.0)),
+            &BoxSpec::new(Vec3::new(RIM_W * 0.5, y, o.y), 0.0015)
+                .faces(ALL & !NY)
+                .tint(paint),
+        );
+    }
+    // Scuffed bright along the inner edges where boots step over.
+    shade(m, v0, move |q, n| {
+        let inner = ((q.x.abs() - o.x).max(q.z.abs() - o.y) / RIM_W).clamp(0.0, 1.0);
+        let worn = (1.0 - inner) * n.y.max(0.0) * (0.6 + 0.4 * fbm(q, 9.0, 3, 2));
+        [1.0 + 0.25 * worn; 3]
+    });
+    let bolts = |len: f32| {
+        let n = ((len / 0.22).round() as usize).max(2);
+        (0..=n).map(move |k| -len * 0.5 + len * k as f32 / n as f32)
+    };
+    for s in [-1.0f32, 1.0] {
+        for x in bolts(2.0 * o.x + RIM_W) {
+            let p = Vec3::new(x, RIM_T, s * (o.y + RIM_W * 0.5));
+            hex_head(m, p, Vec3::Y, 0.007, RIM_BOLT_H, bolt);
+        }
+        for z in bolts(2.0 * o.y - 0.1) {
+            let p = Vec3::new(s * (o.x + RIM_W * 0.5), RIM_T, z);
+            hex_head(m, p, Vec3::Y, 0.007, RIM_BOLT_H, bolt);
+        }
+    }
+    kit.center();
+    kit.finish(Ao {
+        reach: 0.05,
+        strength: 0.5,
+        ground: true,
     })
 }
 

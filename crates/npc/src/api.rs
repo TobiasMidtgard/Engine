@@ -343,6 +343,13 @@ fn inspect(world: &mut World, args: Value) -> Result<Value, String> {
         ),
     );
     out.insert("in_cover".into(), json!(brain.in_cover));
+    out.insert(
+        "revive".into(),
+        json!(brain.revive.map(|a| json!({
+            "ally": a.to_bits(),
+            "kneeling_secs": round(brain.revive_progress as f64),
+        }))),
+    );
     let mut scores: Vec<_> = brain.scores.clone();
     scores.sort_by(|a, b| b.1.total_cmp(&a.1));
     out.insert(
