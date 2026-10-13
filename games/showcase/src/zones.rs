@@ -675,6 +675,17 @@ pub fn demo_views(z: &Zone) -> Vec<View> {
                 14.5,
             )
             .warmup(7.0),
+            // The unveiling starts over on arrival: the crane lowers the silk over the statue,
+            // leaves it on and is lifting it off when the picture is taken.
+            View::new(
+                "yard_statue",
+                "Unveiling: silk lifted off a marble statue",
+                [-9.3, 2.3, -1.0],
+                [-14.0, 2.6, -4.0],
+                15.0,
+            )
+            .on_arrive("softbody.unveil", "{}")
+            .warmup(17.4),
             // On the lake: the dinghy's mooring is 85 m east and 110 m south of the yard. It
             // starts its lane over on arrival, so it is out on the water in view.
             View::new(

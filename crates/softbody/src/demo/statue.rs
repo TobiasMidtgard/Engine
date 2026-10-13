@@ -1,15 +1,16 @@
-//! The unveiling: a marble orator on a sandstone plinth under a crimson silk sheet, which a
+//! The unveiling: a marble youth on a sandstone plinth under a crimson silk sheet, which a
 //! timber jib crane lifts off and lowers back on, again and again.
 //!
-//! The figure is the mannequin's sculpted body skinned once into [`statue_pose`]; its posed
-//! surface becomes a triangle-mesh collider ([`cast_statues`]), which the cloth solver bakes
-//! into a distance grid, so the silk drapes over the raised arm, the turned head and the folds
-//! between the legs rather than over stand-in capsules.
+//! The figure is the mannequin's sculpted body skinned once into [`statue_pose`] (after
+//! Michelangelo's David), with carved curls on its head; its posed surface becomes a
+//! triangle-mesh collider ([`cast_statues`]), which the cloth solver bakes into a distance
+//! grid, so the silk drapes over the curls, the raised hand and the shoulders rather than over
+//! stand-in capsules.
 
 use engine_assets::Assets;
 use engine_render::Mesh;
 
-use super::body::BodyPart;
+use super::body::{BodyPart, Human};
 use super::characters::statue_pose;
 use super::kit::{Mat, Model, ModelBuilder, cuboid, part, register_mesh, renderer};
 use super::meshkit::*;
@@ -24,14 +25,19 @@ const PLINTH_TOP: f32 = 0.95;
 /// Side of the square silk sheet, m, and its particles along each side (odd, so one sits in
 /// the middle, where the crane's hook holds it).
 const SHEET: f32 = 4.0;
-const SHEET_RES: u32 = 53;
-/// The crane: height of its post, how far its jib reaches from the post, m.
+const SHEET_RES: u32 = 45;
+/// Height of the crane's post, m.
 const CRANE_HEIGHT: f32 = 7.0;
+/// The cranium of the mannequin's sculpt in its head bone's bind frame: center and radii.
+const CRANIUM: Vec3 = Vec3::new(0.0, 1.737, 0.012);
+const CRANIUM_RADII: Vec3 = Vec3::new(0.079, 0.099, 0.103);
 
-/// A posed body to turn into fixed geometry: once it's skinned, its mesh becomes its
-/// collider and stops being skinned.
-#[derive(Component, Debug, Clone, Copy)]
-pub struct DemoStatue;
+/// A posed body to turn into fixed geometry: once it's skinned, its mesh plus `extra` (in
+/// the same space, carved details) becomes its collider and it stops being skinned.
+#[derive(Component, Debug, Clone)]
+pub struct DemoStatue {
+    pub extra: Mesh,
+}
 
 /// A cord hanging from `top` down to `hook` (drawn as a stretched tube), `above` meters over
 /// the hook's origin.
@@ -47,9 +53,57 @@ fn marble() -> StandardMaterial {
     StandardMaterial {
         reflectance: 0.55,
         ..StandardMaterial::hex(0xece7de)
-            .with_roughness(0.24)
-            .with_subsurface(0.45)
+            .with_roughness(0.26)
+            .with_subsurface(0.2)
     }
+}
+
+/// Short carved curls over the scalp, posed with the head (`head`, `head_rot`: the head
+/// bone in model space): flattened blobs packed over the cranium behind a hairline that runs
+/// over the brow, above the ears and down to the nape, darker where they meet the scalp.
+fn curls(head: Vec3, head_rot: Quat) -> Mesh {
+    let mut out = Mesh::default();
+    let n = 560u32;
+    let golden = std::f32::consts::PI * (3.0 - 5f32.sqrt());
+    for i in 0..n {
+        let y = 1.0 - 2.0 * (i as f32 + 0.5) / n as f32;
+        let r = (1.0 - y * y).sqrt();
+        let a = golden * i as f32;
+        let d = Vec3::new(r * a.cos(), y, r * a.sin());
+        let forward = -d.z;
+        let hairline = if forward > 0.0 {
+            0.05 + 0.32 * smoothstep(0.0, 0.7, forward)
+        } else {
+            0.05 - 0.55 * smoothstep(0.0, 0.8, -forward)
+        };
+        let ear = d.x.abs() > 0.8 && d.y < 0.3 && d.z < 0.35;
+        if d.y < hairline || ear {
+            continue;
+        }
+        let k = super::hash01(i * 7 + 3);
+        let normal = (d / CRANIUM_RADII).normalize();
+        let at = CRANIUM + d * CRANIUM_RADII * 0.985;
+        let size = 0.016 + 0.007 * k;
+        let spin = Quat::from_rotation_y(TAU * super::hash01(i * 7 + 5));
+        let mut blob = xf(
+            &sphere(size, 10),
+            Mat4::from_scale_rotation_translation(
+                Vec3::new(1.0, 0.55 + 0.2 * k, 1.0),
+                Quat::from_rotation_arc(Vec3::Y, normal) * spin,
+                at,
+            ),
+        );
+        for v in &mut blob.vertices {
+            let ao = 0.62 + 0.38 * Vec3::from(v.normal).dot(normal).max(0.0);
+            v.color = [ao, ao, ao, 1.0];
+        }
+        out.merge(&blob);
+    }
+    out.transform(&Mat4::from_rotation_translation(
+        head_rot,
+        head - head_rot * Human::HEAD,
+    ));
+    out
 }
 
 /// Build the unveiling with the plinth at `c` (on the ground) and the statue facing
@@ -61,7 +115,7 @@ pub fn spawn_unveiling(commands: &mut Commands, c: DVec3, facing: Vec3) {
     plinth.spawn_solid(commands, at(c).with_rotation(face), plinth_shape);
 
     let mut pose = skeleton(&HUMANOID, Rig::Humanoid);
-    let crown = statue_pose(&mut pose.bones);
+    let (head, head_rot) = statue_pose(&mut pose.bones);
     let base = c + DVec3::Y * f64::from(PLINTH_TOP);
     let statue = commands
         .spawn((
@@ -70,6 +124,14 @@ pub fn spawn_unveiling(commands: &mut Commands, c: DVec3, facing: Vec3) {
             pose,
         ))
         .id();
+    let hair = curls(head, head_rot);
+    let key = "softbody/yard/statue/curls".to_string();
+    register_mesh(commands, key.clone(), hair.clone());
+    commands.spawn((
+        Transform::default(),
+        MeshRenderer::new(engine_render::MeshRef::Asset(key), marble()),
+        ChildOf(statue),
+    ));
     commands.spawn((
         Name::new("Marble statue body"),
         Transform::default(),
@@ -79,9 +141,11 @@ pub fn spawn_unveiling(commands: &mut Commands, c: DVec3, facing: Vec3) {
             "softbody/yard/statue/body",
             marble(),
         ),
-        DemoStatue,
+        DemoStatue { extra: hair },
         ChildOf(statue),
     ));
+    // The top of the curls, where the hook sets the sheet down.
+    let crown = head + head_rot * (CRANIUM + Vec3::Y * (CRANIUM_RADII.y + 0.012) - Human::HEAD);
     let crown = base + (face * crown).as_dvec3();
 
     // The crane stands behind the statue's left shoulder, its jib over the head.
@@ -100,7 +164,8 @@ pub fn spawn_unveiling(commands: &mut Commands, c: DVec3, facing: Vec3) {
     let silk = SoftMaterial::hex(0x8c1c2c)
         .with_pattern(Pattern::Border, 0xc9a227, 0xe8c547)
         .with_roughness(0.42)
-        .with_sheen(0.85);
+        .with_sheen(0.85)
+        .with_wrinkles(0.35);
     let mid = SHEET_RES / 2;
     let sheet = commands
         .spawn((
@@ -123,7 +188,7 @@ pub fn spawn_unveiling(commands: &mut Commands, c: DVec3, facing: Vec3) {
                     thickness: 0.012,
                     friction: 0.55,
                     damping: 0.12,
-                    wind_scale: 0.5,
+                    wind_scale: 0.3,
                     prewarm_secs: 3.0,
                     ..SimSettings::default()
                 },
@@ -488,21 +553,23 @@ fn hook_ring(commands: &mut Commands) -> Model {
 pub fn cast_statues(
     mut commands: Commands,
     meshes: Option<Res<Assets<Mesh>>>,
-    statues: Query<(Entity, &SkinnedPart), With<DemoStatue>>,
+    statues: Query<(Entity, &SkinnedPart, &DemoStatue)>,
 ) {
     let Some(meshes) = meshes else {
         return;
     };
-    for (e, part) in &statues {
+    for (e, part, statue) in &statues {
         let Some(mesh) = part.mesh.and_then(|h| meshes.get(h)) else {
             continue;
         };
-        let vertices = mesh
+        let mut all = mesh.clone();
+        all.merge(&statue.extra);
+        let vertices = all
             .vertices
             .iter()
             .map(|v| Vec3::from(v.position))
             .collect();
-        let indices = mesh.indices.as_chunks::<3>().0.to_vec();
+        let indices = all.indices.as_chunks::<3>().0.to_vec();
         commands
             .entity(e)
             .insert((

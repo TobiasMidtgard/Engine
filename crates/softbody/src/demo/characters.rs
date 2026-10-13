@@ -281,15 +281,11 @@ fn human_walk(u: f32, stride: f32, p: &mut [BonePose]) {
 // ---------------------------------------------------------------------------------------
 // The statue
 
-/// The crown of the mannequin's head in its head bone's bind frame: where a cover hung over
-/// the head rests.
-const CROWN: Vec3 = Vec3::new(0.0, 1.838, 0.012);
-
-/// A standing orator in marble, written into a humanoid pose: weight on the right leg, the
-/// left knee eased forward on a raised heel, hips and shoulders tilted against each other,
-/// the right arm raised ahead in address and the head turned after it, the left forearm
-/// held forward. Returns the crown of the head (model space).
-pub fn statue_pose(p: &mut [BonePose]) -> Vec3 {
+/// A standing youth in marble after Michelangelo's David, written into a humanoid pose:
+/// weight on the right leg, the left knee eased forward on a raised heel, hips and shoulders
+/// tilted against each other, the right arm hanging, the left hand raised to the shoulder and
+/// the head turned to the left. Returns the head bone's pose (model space).
+pub fn statue_pose(p: &mut [BonePose]) -> (Vec3, Quat) {
     // The standing hip rides up and the pelvis sways over the standing foot.
     let pelvis_rot =
         Quat::from_rotation_y(-0.08) * Quat::from_rotation_z(0.07) * Quat::from_rotation_x(-0.03);
@@ -300,13 +296,13 @@ pub fn statue_pose(p: &mut [BonePose]) -> Vec3 {
     let (dx, dz) = (stand.x - (sway + hip_off.x), stand.z - hip_off.z);
     let flat = (reach * reach - dx * dx - dz * dz).max(0.0).sqrt();
     let pelvis = Vec3::new(sway, stand.y + flat - hip_off.y, 0.0);
-    // The shoulders tilt against the hips and turn the right one forward, after the arm.
-    let spine_rot = Quat::from_rotation_z(-0.03) * Quat::from_rotation_y(0.04);
+    // The shoulders tilt against the hips; the head turns over the raised hand.
+    let spine_rot = Quat::from_rotation_z(-0.03) * Quat::from_rotation_y(0.03);
     let chest_rot =
-        Quat::from_rotation_y(0.12) * Quat::from_rotation_z(-0.08) * Quat::from_rotation_x(-0.02);
-    let neck_rot = Quat::from_rotation_y(-0.05) * Quat::from_rotation_z(0.03);
+        Quat::from_rotation_y(0.06) * Quat::from_rotation_z(-0.07) * Quat::from_rotation_x(-0.02);
+    let neck_rot = Quat::from_rotation_y(0.12) * Quat::from_rotation_z(0.03);
     let head_rot =
-        Quat::from_rotation_y(-0.3) * Quat::from_rotation_x(0.06) * Quat::from_rotation_z(0.04);
+        Quat::from_rotation_y(0.42) * Quat::from_rotation_x(0.08) * Quat::from_rotation_z(0.05);
     let spine = pelvis + pelvis_rot * (Human::SPINE - Human::PELVIS);
     let chest = spine + spine_rot * (Human::CHEST - Human::SPINE);
     let neck = chest + chest_rot * (Human::NECK - Human::CHEST);
@@ -321,14 +317,14 @@ pub fn statue_pose(p: &mut [BonePose]) -> Vec3 {
         (
             -1.0f32,
             Human::ARM_L,
-            Vec3::new(-0.16, -0.97, 0.06),
-            Vec3::new(-0.08, -0.55, -0.83),
+            Vec3::new(-0.25, -0.9, -0.25),
+            Vec3::new(0.3, 0.75, -0.45),
         ),
         (
             1.0,
             Human::ARM_R,
-            Vec3::new(0.22, 0.32, -0.92),
-            Vec3::new(0.12, 0.62, -0.78),
+            Vec3::new(0.12, -0.99, 0.02),
+            Vec3::new(0.08, -0.95, -0.25),
         ),
     ] {
         let shoulder = chest + chest_rot * (body::side_v(Human::SHOULDER, side) - Human::CHEST);
@@ -364,7 +360,7 @@ pub fn statue_pose(p: &mut [BonePose]) -> Vec3 {
         set(p, leg + 1, knee, aim(knee, ankle));
         set(p, leg + 2, ankle, foot);
     }
-    head + head_rot * (CROWN - Human::HEAD)
+    (head, head_rot)
 }
 
 // ---------------------------------------------------------------------------------------

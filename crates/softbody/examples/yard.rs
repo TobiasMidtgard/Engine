@@ -197,6 +197,21 @@ const SHOTS: &[Shot] = &[
         target: [2.9, 0.7, -1.0],
         follow: None,
     },
+    // The unveiling: the silk resting on the statue, then lifted off it.
+    Shot {
+        name: "statue_covered",
+        secs: 15.0,
+        eye: [-10.3, 1.9, -1.0],
+        target: [-14.0, 1.9, -4.0],
+        follow: None,
+    },
+    Shot {
+        name: "statue_revealed",
+        secs: 20.0,
+        eye: [-11.1, 1.9, -1.7],
+        target: [-14.0, 1.9, -4.0],
+        follow: None,
+    },
 ];
 
 fn main() {
