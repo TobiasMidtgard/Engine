@@ -8,9 +8,10 @@
 //! Renders (640×360): a lineup of every tree species at full size (also with every tree forced
 //! to its far level of detail), the oak's root flares, an oak crown lit from the front and
 //! from behind (the sun shining through the leaves), single leaves up close, the conifers,
-//! birch and hazel, and a small mixed grove from 40 m and from 150 m. Name shots after the
-//! directory to render only those (`lineup`, `lineup_lod`, `roots`, `crown_front`,
-//! `leaves_close`, `crown_back`, `conifers`, `birch_hazel`, `grove`, `grove_far`), `textures`
+//! birch and hazel, the pine's crown from below, and a small mixed grove from 40 m and from
+//! 150 m. Name shots after the directory to render only those (`lineup`, `lineup_lod`, `roots`,
+//! `crown_front`, `leaves_close`, `crown_back`, `conifers`, `pine_crown`, `birch_hazel`,
+//! `grove`, `grove_far`), `textures`
 //! to save the leaf atlases and their normal maps instead, or `stats` to print triangle counts.
 
 use engine_core::prelude::*;
@@ -312,6 +313,17 @@ fn main() {
             "conifers",
             DVec3::new(13.0, 5.0, 24.0),
             DVec3::new(13.0, 8.5, 0.0),
+            front_sun,
+        );
+    }
+    if wanted("pine_crown") {
+        // Up into the pine's crown: its limbs and the pads of needles on them.
+        shot(
+            &mut app,
+            &out,
+            "pine_crown",
+            DVec3::new(13.0, 11.0, 12.0),
+            DVec3::new(7.0, 16.5, 0.0),
             front_sun,
         );
     }
