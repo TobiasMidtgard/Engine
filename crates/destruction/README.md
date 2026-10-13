@@ -169,7 +169,8 @@ of a third row that couldn't stand.
 Then the hoe levels a floor pad in the terrace and a second builder puts up a **shelter on the
 rock**: a stone floor laid on the bare rock (blue, because rock is ground), board walls at the
 ends, a shingle roof, and the back walls and their gable against the cut bank, open toward
-the valley.
+the valley. Then a pickaxe digs a pit under it: under one floor slab first (the other slab
+still holds it, red), then under both, and the shelter drops into the pit.
 `--example hill -- <out_dir> [WxH] [only]` renders it (`only`: `build` for the yard,
 `shelter` for the terrace).
 

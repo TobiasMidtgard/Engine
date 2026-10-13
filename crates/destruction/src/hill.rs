@@ -15,7 +15,9 @@
 //!   red because nothing could hold it;
 //! - on the leveled terrace a second builder lays a stone floor on the bare rock, stands board
 //!   walls at its ends, roofs them and walls in the back against the cut bank; then the
-//!   shelter shows its support colors, the floor blue because the rock is ground.
+//!   shelter shows its support colors, the floor blue because the rock is ground. A pickaxe
+//!   digs a pit under it: under one slab first (the other still holds it, red), then under
+//!   both, and the shelter drops into the pit.
 //!
 //! Then the hill, the hut and the cabin are rebuilt and it starts again.
 
@@ -58,6 +60,10 @@ const TERRACE_START: f32 = 18.2;
 const TERRACE_STEP: f32 = 0.38;
 /// When the finished shelter shows its support colors (its floor blue on the rock).
 const TERRACE_SUPPORT_AT: f32 = 22.0;
+/// The pickaxe's strokes digging a pit under the shelter (when, and where along the shelter,
+/// m from its middle): first under the +Z floor slab, which the other slab still holds (red),
+/// then under that one too, and the whole shelter drops into the pit.
+const UNDERMINE: [(f32, f64); 3] = [(23.2, 1.3), (24.4, -1.3), (24.8, 0.0)];
 
 const TUNNEL_DIGS: u32 = 15;
 const CHAMBER_DIGS: u32 = 15;
@@ -119,6 +125,14 @@ pub const VIEWS: &[DemoView] = &[
         target: [8.6, 4.6, 2.1],
         hour: 10.5,
         warmup_secs: 22.2,
+    },
+    DemoView {
+        key: "voxel_shelter_pit",
+        name: "A pit dug under the shelter: with the rock gone, it drops in",
+        eye: [14.5, 8.5, -2.0],
+        target: [8.8, 2.8, 2.1],
+        hour: 10.5,
+        warmup_secs: 26.5,
     },
     DemoView {
         key: "voxel_hut",
@@ -198,6 +212,8 @@ enum Step {
     Smooth,
     /// Cut and fill a flat floor pad for the shelter in the rounded terrace.
     Pad,
+    /// Dig the rock out from under the shelter (one of [`UNDERMINE`]).
+    Undermine(usize),
     KnockPost(usize),
     /// A site's builder picks a piece and aims; then places it.
     Aim(Site, usize),
@@ -238,6 +254,9 @@ fn timeline() -> Vec<(f32, Step)> {
     }
     t.push((YARD_SUPPORT_AT, Step::ShowSupport(Site::Yard)));
     t.push((TERRACE_SUPPORT_AT, Step::ShowSupport(Site::Terrace)));
+    for (k, (at, _)) in UNDERMINE.iter().enumerate() {
+        t.push((*at, Step::Undermine(k)));
+    }
     t.push((18.5, Step::KnockPost(0)));
     t.push((19.6, Step::KnockPost(1)));
     t.push((HILL_CYCLE_SECS - 0.01, Step::Reset));
@@ -783,6 +802,28 @@ fn run_step(world: &mut World, demo: &mut HillDemo, step: Step) {
                     (op == EditOp::Add).then_some("dirt"),
                 );
             }
+        }
+        Step::Undermine(k) => {
+            // A pit under the shelter, a pick stroke at a time: once the rock under both floor
+            // slabs is gone, nothing holds the shelter up.
+            let Some(&(_, z)) = UNDERMINE.get(k) else {
+                return;
+            };
+            // The builder looks up from its finished shelter, or the last piece's ghost would
+            // hang red in the air once the shelter is gone.
+            if let Some(mut builder) =
+                demo.builders[Site::Terrace as usize].and_then(|b| world.get_mut::<Builder>(b))
+            {
+                let at = o + Site::Terrace.offset();
+                builder.aim_at(at + DVec3::Y * 20.0, at + DVec3::Y * 21.0);
+            }
+            edit(
+                world,
+                o + DVec3::from_array(TERRACE) + DVec3::new(0.0, -0.7, z),
+                EditShape::Sphere { radius: 1.5 },
+                EditOp::Remove,
+                None,
+            );
         }
         Step::KnockPost(k) => {
             // Both posts on the −X side: that side's beam, the ridge and the roof panel over it
