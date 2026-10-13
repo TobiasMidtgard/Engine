@@ -9,6 +9,7 @@ pub mod interact;
 pub mod puddles;
 pub mod render;
 pub mod ripples;
+pub mod shift;
 pub mod sim;
 pub mod state;
 pub mod waves;
@@ -17,7 +18,7 @@ pub use body::{
     RainShower, WaterBed, WaterBody, WaterExtent, WaterOptics, WaterSettings, WaveSettings,
 };
 pub use buoyancy::{Buoyancy, Floating, Tether};
-pub use flow::{FlowBed, FlowFill, FlowRegion, FlowSource};
+pub use flow::{FlowBed, FlowFill, FlowRegion, FlowSource, Lip};
 pub use interact::WaterInteractor;
 pub use render::WaterFeature;
 pub use state::{SharedWater, WaterState};
@@ -26,7 +27,7 @@ use std::sync::Arc;
 
 use engine_core::prelude::*;
 use engine_render::RenderAppExt;
-use engine_world::Water;
+use engine_world::{Water, WorldShiftSet};
 
 /// Water: bodies with wind waves, interactive ripples, flowing regions, buoyancy, puddles, and
 /// the water renderer. Installs itself as the `engine_world::Water` query provider.
@@ -91,6 +92,10 @@ impl Plugin for WaterPlugin {
                     .in_set(SimSet::Environment),
             )
             .add_systems(FixedUpdate, demo::demo_system.in_set(SimSet::Gameplay))
+            .add_systems(
+                PostUpdate,
+                shift::shift_system.in_set(WorldShiftSet::Apply),
+            )
             .add_render_feature(WaterFeature::default());
         api::register(app);
     }

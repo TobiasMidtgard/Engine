@@ -372,6 +372,113 @@ fn lets_go_of_a_ledge_or_kicks_off_it() {
     assert_eq!(triggered(&app, c, "wall_jump"), 1);
 }
 
+/// A 9 m roof whose face is at x = 6 (8 m deep, z from −4 to 4) and a pilot 6 m in front of
+/// it.
+fn under_a_roof(app: &mut App) -> Entity {
+    block(app, DVec3::new(10.0, 4.5, 0.0), Vec3::new(8.0, 9.0, 8.0));
+    let c = character(app, DVec3::new(0.0, 0.9, 0.0), MovementProfile::pilot());
+    run(app, 0.1);
+    c
+}
+
+/// Fire the grapple at `at` (one step).
+fn fire_grapple(app: &mut App, c: Entity, at: DVec3) {
+    app.world.get_mut::<Mover>(c).unwrap().pending_grapple = Some(at);
+    app.update();
+}
+
+fn hooked(w: &mut World, c: Entity) -> bool {
+    w.get::<Mover>(c)
+        .unwrap()
+        .grapple
+        .is_some_and(|g| g.attached)
+}
+
+#[test]
+fn grapples_up_onto_a_roof() {
+    let mut app = app();
+    let c = under_a_roof(&mut app);
+    // Standing still, hook the roof's edge: the rope lifts the pilot off the ground, reels it
+    // up the wall and it climbs over the top.
+    fire_grapple(&mut app, c, DVec3::new(6.0, 8.6, 0.0));
+    assert_eq!(triggered(&app, c, "grapple_fire"), 1);
+    // The hook flies the 9.5 m at 90 m/s, then bites.
+    let flight = run_until(&mut app, 0.5, |w| hooked(w, c));
+    assert!(flight > 0.08 && flight < 0.15, "hook flew {flight:.2} s");
+    assert_eq!(triggered(&app, c, "grapple_hit"), 1);
+    let mut fastest: f32 = 0.0;
+    let secs = run_until(&mut app, 3.0, |w| {
+        let m = w.get::<Mover>(c).unwrap();
+        fastest = fastest.max(m.velocity.length());
+        let on_top = w.get::<Transform>(c).unwrap().translation.y > 9.5;
+        m.grounded && m.mode != LocomotionMode::Mantle && on_top
+    });
+    let p = pos(&app, c);
+    let m = mover(&app, c);
+    assert!(
+        secs < 1.6 && p.x > 6.2,
+        "on the roof after {secs:.2} s at {p:?}"
+    );
+    assert!((p.y - (9.0 + 0.9)).abs() < 0.05, "{p:?}");
+    assert_eq!(triggered(&app, c, "mantle"), 1);
+    assert_eq!(triggered(&app, c, "grapple_release"), 1);
+    assert!(m.grapple.is_none() && m.grapple_cooldown() > 1.5);
+    let limit = MovementProfile::pilot().grapple_speed * 1.3;
+    assert!(fastest <= limit + 0.01, "{fastest} m/s");
+    // Over the edge at a run, not flung across the roof.
+    assert!(m.horizontal_speed() <= MovementProfile::pilot().sprint_speed + 0.01);
+}
+
+#[test]
+fn a_shot_at_nothing_comes_back_and_a_jump_lets_go() {
+    let mut app = app();
+    let c = under_a_roof(&mut app);
+    // Straight up: nothing to bite. The hook flies out to full range and comes back.
+    fire_grapple(&mut app, c, DVec3::new(0.0, 50.0, 0.0));
+    assert!(mover(&app, c).grapple.is_some_and(|g| g.miss));
+    run(&mut app, 1.2);
+    assert!(mover(&app, c).grapple.is_none());
+    assert!(pos(&app, c).y < 1.0, "never pulled: {:?}", pos(&app, c));
+    assert_eq!(triggered(&app, c, "grapple_hit"), 0);
+
+    // Hook the wall high up and jump halfway: an air jump that keeps the rope's momentum.
+    fire_grapple(&mut app, c, DVec3::new(6.0, 7.0, 0.0));
+    run_until(&mut app, 0.5, |w| hooked(w, c));
+    run(&mut app, 0.25);
+    let before = mover(&app, c).velocity;
+    assert!(before.x > 5.0 && before.y > 3.0, "{before}");
+    tap_jump(&mut app, c);
+    let m = mover(&app, c);
+    assert!(m.grapple.is_none());
+    assert_eq!(triggered(&app, c, "grapple_release"), 1);
+    assert_eq!(triggered(&app, c, "double_jump"), 1);
+    assert!(m.velocity.x > before.x * 0.9, "{} vs {before}", m.velocity);
+    // Recharging: a shot right away does nothing.
+    fire_grapple(&mut app, c, DVec3::new(6.0, 7.0, 0.0));
+    assert!(mover(&app, c).grapple.is_none());
+    assert_eq!(triggered(&app, c, "grapple_fire"), 2);
+}
+
+#[test]
+fn humans_have_no_grapple() {
+    let mut app = app();
+    block(
+        &mut app,
+        DVec3::new(10.0, 4.5, 0.0),
+        Vec3::new(8.0, 9.0, 8.0),
+    );
+    let c = character(
+        &mut app,
+        DVec3::new(0.0, 0.9, 0.0),
+        MovementProfile::human(),
+    );
+    run(&mut app, 0.1);
+    fire_grapple(&mut app, c, DVec3::new(6.0, 8.6, 0.0));
+    run(&mut app, 0.5);
+    assert!(mover(&app, c).grapple.is_none());
+    assert_eq!(triggered(&app, c, "grapple_fire"), 0);
+}
+
 #[test]
 fn dashes_fast_with_charges_and_a_dodge_window() {
     let mut app = app();

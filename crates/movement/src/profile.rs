@@ -3,7 +3,8 @@
 
 use engine_core::prelude::*;
 
-/// How a character moves: speeds, jumps, slides, wall-runs, mantles, ledge hangs and dashes.
+/// How a character moves: speeds, jumps, slides, wall-runs, mantles, ledge hangs, dashes and
+/// the grapple hook.
 ///
 /// All speeds are in meters per second of the character's **own** time (see
 /// [`Tempo`](crate::tempo::Tempo)): a character with `Tempo::speed = 2` does everything twice
@@ -124,6 +125,20 @@ pub struct MovementProfile {
     /// A dash toward a point (`MoveIntent::dash_to`) stops this far short of it, m.
     pub dash_stop_distance: f32,
 
+    // ------------------------------------------------------------ grapple
+    /// Fire a grapple hook at a surface ([`Mover::pending_grapple`](crate::Mover)) and get
+    /// reeled in: jump or fire again to let go, crouch drops, and a ledge at the end is
+    /// climbed onto.
+    pub grapple: bool,
+    /// Longest shot, m.
+    pub grapple_range: f32,
+    /// Pull along the rope, m/s².
+    pub grapple_pull: f32,
+    /// Fastest reel-in along the rope, m/s.
+    pub grapple_speed: f32,
+    /// Seconds after letting go before the next shot.
+    pub grapple_cooldown_secs: f32,
+
     // ------------------------------------------------------------ feedback
     /// Body mass for footsteps and landings, kg.
     pub mass_kg: f32,
@@ -139,7 +154,8 @@ impl Default for MovementProfile {
 }
 
 impl MovementProfile {
-    /// Titanfall-style pilot: fast, momentum-keeping, wall-runs, double jump, two dashes.
+    /// Titanfall-style pilot: fast, momentum-keeping, wall-runs, double jump, two dashes, a
+    /// grapple hook.
     pub fn pilot() -> Self {
         Self {
             run_speed: 5.5,
@@ -191,12 +207,17 @@ impl MovementProfile {
             dash_iframe_secs: 0.15,
             dash_exit_speed: 9.0,
             dash_stop_distance: 1.3,
+            grapple: true,
+            grapple_range: 40.0,
+            grapple_pull: 40.0,
+            grapple_speed: 20.0,
+            grapple_cooldown_secs: 2.5,
             mass_kg: 80.0,
             stride_footsteps: true,
         }
     }
 
-    /// A grounded soldier: no wall-running or double jump, one short dash.
+    /// A grounded soldier: no wall-running, double jump or grapple, one short dash.
     pub fn human() -> Self {
         Self {
             run_speed: 4.5,
@@ -211,6 +232,7 @@ impl MovementProfile {
             dash_charges: 1,
             dash_recharge_secs: 2.0,
             dash_exit_speed: 5.0,
+            grapple: false,
             ..Self::pilot()
         }
     }

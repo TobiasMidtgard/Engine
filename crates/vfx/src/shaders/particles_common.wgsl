@@ -35,6 +35,11 @@ struct Emitter {
     spin_look: vec4<f32>,  // spin min/max, sprite, facing
     shade: vec4<f32>,      // emissive (cd/m^2), lit, additive, soft (m)
     look: vec4<f32>,       // stretch, translucency, size mult, opacity mult
+    sub_target: vec4<u32>, // layer fed on hit, death, flight (table index + 1, 0 none)
+    sub_count: vec4<f32>,  // particles per hit, per death, per second of flight
+    sub_chance: vec4<f32>, // chance per hit, death, trail
+    sub_keep: vec4<f32>,   // velocity kept per hit, death, trail
+    ring: vec4<u32>,       // first slot, size, GPU spawn cursor (0xffffffff none), unused
     color: array<vec4<f32>, 16>,
     size_curve: array<vec4<f32>, 4>,
 };

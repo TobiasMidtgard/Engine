@@ -30,6 +30,12 @@ pub struct WaterInteractor {
     /// Was touching the water last step (managed).
     #[serde(skip)]
     pub wet: bool,
+    /// Spray owed to `WaterSplash` messages while moving fast, kg (managed).
+    #[serde(skip)]
+    pub spray: f32,
+    /// Seconds the trough it dug under itself lasts after its last push (managed).
+    #[serde(skip)]
+    pub trough_s: f32,
 }
 
 impl Default for WaterInteractor {
@@ -39,6 +45,8 @@ impl Default for WaterInteractor {
             wake: 1.0,
             last: None,
             wet: false,
+            spray: 0.0,
+            trough_s: 0.0,
         }
     }
 }
@@ -99,8 +107,11 @@ pub fn disturbance_system(
     let mut out: Vec<Disturbance> = Vec::new();
     let mut noises: Vec<NoiseEvent> = Vec::new();
     let mut splashes: Vec<WaterSplash> = Vec::new();
+    let mut hulls: Vec<(DVec2, f32)> = Vec::new();
+    let had_hulls;
     {
         let state = shared.0.read();
+        had_hulls = !state.hulls.is_empty();
 
         // Swimmers, boats, wading animals.
         for (entity, gt, mut it, local) in &mut interactors {
@@ -147,8 +158,39 @@ pub fn disturbance_system(
                     * speed.min(8.0)
                     * step
                     * (1.0 - (2.0 * submerged - 1.0).abs()).max(0.35);
+                // Fast hulls throw bow spray: sent out in puffs as `WaterSplash` so particles
+                // and audio can show and play it.
+                let fast = speed - 2.5;
+                if fast > 0.0 && it.wake >= 1.0 {
+                    it.spray += 1000.0 * r * r * fast * fast * 0.004 * it.wake * step;
+                    if it.spray > 2.0 {
+                        let dir = Vec3::new(v.x, 0.0, v.z) / speed;
+                        let side = Vec3::new(-dir.z, 0.0, dir.x)
+                            * if rng.f32() < 0.5 { -1.0 } else { 1.0 };
+                        let at = p + (dir * r * 1.6 + side * r * 0.4).as_dvec3();
+                        splashes.push(WaterSplash {
+                            position: DVec3::new(at.x, water.surface_height, at.z),
+                            velocity: dir * speed * 0.5
+                                + side * speed * 0.35
+                                + Vec3::Y * (1.0 + speed * 0.3),
+                            radius: r * 0.5,
+                            mass_kg: std::mem::take(&mut it.spray),
+                            source: Some(entity),
+                        });
+                    }
+                } else {
+                    it.spray = 0.0;
+                }
                 let bob = (v.y.abs() * step * 0.6 * r).min(0.05);
+                it.trough_s = (it.trough_s - step).max(0.0);
+                if it.trough_s > 0.0 {
+                    hulls.push((DVec2::new(p.x, p.z), r));
+                }
                 if push + bob > 1e-5 {
+                    if it.trough_s <= 0.0 {
+                        hulls.push((DVec2::new(p.x, p.z), r));
+                    }
+                    it.trough_s = 1.0;
                     out.push(Disturbance {
                         pos: DVec2::new(p.x, p.z),
                         radius: r * 0.9,
@@ -297,8 +339,9 @@ pub fn disturbance_system(
             }
         }
     }
-    if !out.is_empty() {
+    if !out.is_empty() || !hulls.is_empty() || had_hulls {
         let mut state = shared.0.write();
+        state.hulls = hulls;
         for d in out {
             state.ripples.disturb(d);
         }

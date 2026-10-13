@@ -16,7 +16,9 @@
 //! * a motor-driven paddle wheel churning a bin of balls and blocks,
 //! * a sagging plank bridge that crates drop onto, with a stand-in character on it,
 //! * a kinematic turntable carrying crates and a stand-in character around,
-//! * rubber balls bouncing in the middle.
+//! * rubber balls bouncing in the middle,
+//! * along the front, three oil drums rolling down a ramp and 47 m along an asphalt runway
+//!   (one triangle mesh) into a sand pit: they stay flat and in their lanes.
 //!
 //! The stations replay on their own cycles ([`Station::cycle_secs`]), so whoever walks in sees
 //! them play; `physics.proving_ground.replay` restarts one or all of them now.
@@ -121,6 +123,15 @@ pub const VIEWS: &[DemoView] = &[
         warmup_secs: 6.0,
     },
     DemoView {
+        key: "physics_barrel_run",
+        name: "Oil drums rolling flat and straight down a 47 m runway into a sand pit",
+        eye: [0.0, 1.7, 23.2],
+        target: [-9.0, 0.35, 18.9],
+        hour: 16.0,
+        station: Some(Station::BarrelRun),
+        warmup_secs: 7.5,
+    },
+    DemoView {
         key: "physics_turntable",
         name: "A turntable carrying crates and a rider",
         eye: [37.0, 6.5, 20.0],
@@ -144,10 +155,11 @@ pub enum Station {
     Bridge,
     Turntable,
     Balls,
+    BarrelRun,
 }
 
 impl Station {
-    pub const ALL: [Station; 10] = [
+    pub const ALL: [Station; 11] = [
         Station::Tower,
         Station::Pile,
         Station::Dominoes,
@@ -158,6 +170,7 @@ impl Station {
         Station::Bridge,
         Station::Turntable,
         Station::Balls,
+        Station::BarrelRun,
     ];
 
     /// The station's name in the `physics.proving_ground.replay` API.
@@ -173,6 +186,7 @@ impl Station {
             Station::Bridge => "bridge",
             Station::Turntable => "turntable",
             Station::Balls => "balls",
+            Station::BarrelRun => "barrel_run",
         }
     }
 
@@ -189,6 +203,7 @@ impl Station {
             Station::Bridge => (18.0, 10.0),
             Station::Turntable => (30.0, 10.0),
             Station::Balls => (6.0, -3.0),
+            Station::BarrelRun => (0.0, 19.5),
         };
         DVec3::new(x, 0.0, z)
     }
@@ -201,6 +216,7 @@ impl Station {
             Station::Pile => Some(45.0),
             Station::Dominoes | Station::WreckingBall | Station::Bridge => Some(30.0),
             Station::Ragdolls | Station::Seesaw | Station::Balls => Some(20.0),
+            Station::BarrelRun => Some(25.0),
         }
     }
 
@@ -221,6 +237,7 @@ impl Station {
             Station::Bridge => bridge(y, base),
             Station::Turntable => turntable(y, base),
             Station::Balls => bouncy_balls(y, base),
+            Station::BarrelRun => barrel_run(y, base),
         }
     }
 }
@@ -423,6 +440,26 @@ impl Yard<'_> {
         );
         self.dress(e, parts);
         e
+    }
+
+    /// A static collider of `shape` on `surface`.
+    fn fixed(
+        &mut self,
+        local: DVec3,
+        rotation: Quat,
+        shape: ColliderShape,
+        surface: SurfaceId,
+    ) -> Entity {
+        let at = self.at(local);
+        self.spawn((
+            Transform::from_translation(at).with_rotation(rotation),
+            RigidBody::fixed(),
+            Collider {
+                shape,
+                surface,
+                ..Default::default()
+            },
+        ))
     }
 
     fn name(&mut self, e: Entity, name: &str) {
@@ -1062,13 +1099,17 @@ fn paddle_wheel(y: &mut Yard, center: DVec3) {
         None,
         hub_at,
     );
+    // On the bin's floor, clear of the paddles: dropped onto the turning wheel from above,
+    // they bounced out and rolled across the yard.
     let mut rng = Rng(77);
+    let rows = [-2.15, -1.55, -0.95, 0.95, 1.55, 2.15];
     for i in 0..50 {
+        let (col, row) = (i / rows.len(), i % rows.len());
         let at = center
             + DVec3::new(
-                (rng.next() as f64 - 0.5) * 5.0,
-                3.5 + i as f64 * 0.15,
-                (rng.next() as f64 - 0.5) * 4.0,
+                -2.45 + col as f64 * 0.6 + (rng.next() as f64 - 0.5) * 0.08,
+                0.3,
+                rows[row] + (rng.next() as f64 - 0.5) * 0.08,
             );
         if i % 3 == 0 {
             y.crate_box(
@@ -1247,5 +1288,131 @@ fn bouncy_balls(y: &mut Yard, center: DVec3) {
     for (i, color) in colors.into_iter().enumerate() {
         let at = center + DVec3::new(i as f64 * 1.6, 4.0 + i as f64 * 1.5, (i % 2) as f64 * 1.2);
         y.ball(at, 0.4, 300.0, color);
+    }
+}
+
+/// Three oil drums roll down a ramp and along the runway into the sand pit. The ramp and the
+/// runway are one triangle mesh, so the drums cross a triangle edge every 2 m at up to 5 m/s:
+/// they stay flat and in their lanes (see `tests/rolling.rs`), and the sand's rolling
+/// resistance stops them.
+fn barrel_run(y: &mut Yard, base: DVec3) {
+    use art::barrel_run::{self as run, *};
+    let sand = y
+        .world
+        .get_resource_or_init::<SurfaceMaterials>()
+        .id_or_default("sand");
+    let cuboid = |x0: f32, x1: f32, y0: f32, y1: f32, half_z: f32| {
+        (
+            DVec3::new(((x0 + x1) * 0.5) as f64, ((y0 + y1) * 0.5) as f64, 0.0),
+            Vec3::new((x1 - x0) * 0.5, (y1 - y0) * 0.5, half_z),
+        )
+    };
+    let (vertices, indices) = run::deck_collider();
+    let deck = y.fixed(
+        base,
+        Quat::IDENTITY,
+        ColliderShape::TriMesh { vertices, indices },
+        y.concrete,
+    );
+    y.name(deck, "Barrel run");
+    // The sand pit (2 cm below the asphalt) and the tire wall.
+    let (at, half) = cuboid(X_PIT, X_WALL, SAND_Y - 0.2, SAND_Y, HALF_WIDTH);
+    y.fixed(
+        base + at,
+        Quat::IDENTITY,
+        ColliderShape::Cuboid { half_extents: half },
+        sand,
+    );
+    let (at, half) = cuboid(X_WALL, X_END, 0.0, WALL_HEIGHT, WALL_HALF);
+    let rubber = y.rubber;
+    y.fixed(
+        base + at,
+        Quat::IDENTITY,
+        ColliderShape::Cuboid { half_extents: half },
+        rubber,
+    );
+    // The ramp's body and its cheek walls, down to the yard, and guardrails a ball can't roll
+    // under: balls roaming the yard stay out of the lanes.
+    let profile = run::deck_profile(0.5);
+    let hull = |outline: &[Vec2], z: f32, half_t: f32| {
+        let points = outline
+            .iter()
+            .flat_map(|p| {
+                [
+                    Vec3::new(p.x, p.y, z - half_t),
+                    Vec3::new(p.x, p.y, z + half_t),
+                ]
+            })
+            .collect();
+        ColliderShape::ConvexHull { points }
+    };
+    let concrete = y.concrete;
+    let body = hull(&run::ramp_body_outline(), 0.0, HALF_WIDTH);
+    y.fixed(base, Quat::IDENTITY, body, concrete);
+    let cheek = run::cheek_outline(&profile);
+    let metal = y.metal;
+    let rail_top = RAIL_Y + 0.16;
+    for s in [-1.0f32, 1.0] {
+        let wall = hull(&cheek, s * (HALF_WIDTH + CHEEK_T * 0.5), CHEEK_T * 0.5);
+        y.fixed(base, Quat::IDENTITY, wall, concrete);
+        // The pit's curbs.
+        let (at, half) = cuboid(X_PIT, X_WALL, 0.0, 0.12, 0.1);
+        y.block(base + at + DVec3::Z * (s * (HALF_WIDTH + 0.1)) as f64, half);
+        // The rails: straight along the deck, and the flare at their start.
+        let (x0, x1) = run::rail_straight();
+        let (at, half) = cuboid(x0, x1, 0.0, rail_top, 0.05);
+        let shape = ColliderShape::Cuboid { half_extents: half };
+        let z = (s * (RAIL_Z + 0.05)) as f64;
+        y.fixed(base + at + DVec3::Z * z, Quat::IDENTITY, shape, metal);
+        let (a, b) = run::rail_flare();
+        let (a, b) = (Vec2::new(a.x, s * a.y), Vec2::new(b.x, s * b.y));
+        let mid = (a + b) * 0.5;
+        let half = Vec3::new(a.distance(b) * 0.5, rail_top * 0.5, 0.05);
+        let turn = Quat::from_rotation_y(-(b.y - a.y).atan2(b.x - a.x));
+        let at = DVec3::new(mid.x as f64, (rail_top * 0.5) as f64, mid.y as f64);
+        let shape = ColliderShape::Cuboid { half_extents: half };
+        y.fixed(base + at, turn, shape, metal);
+    }
+    let mats = [
+        Mat::Asphalt,
+        Mat::Concrete,
+        Mat::Paint,
+        Mat::Galvanized,
+        Mat::Sand,
+        Mat::Rubber(0xffffff),
+        Mat::Yellow,
+    ];
+    let parts = y.parts("barrel_run", mats, || {
+        let r = run::barrel_run();
+        [
+            r.asphalt,
+            r.concrete,
+            r.paint,
+            r.galvanized,
+            r.sand,
+            r.tires,
+            r.yellow,
+        ]
+    });
+    y.scenery(base, Quat::IDENTITY, parts);
+    // The drums, lying across their lanes on the slope just past the crest.
+    let (radius, half_height) = (0.3, 0.42);
+    for (lane, color) in (-1..=1).zip(DRUM_COLORS) {
+        let c = Collider {
+            shape: ColliderShape::Cylinder {
+                radius,
+                half_height,
+            },
+            surface: y.metal,
+            density: 400.0,
+            ..Default::default()
+        };
+        let parts = y.parts(&format!("drum/{color:06x}"), [Mat::Drum(color)], || {
+            [props::steel_drum(radius, half_height)]
+        });
+        let at = base + run::barrel_start(lane, radius).as_dvec3();
+        let lying = Quat::from_rotation_x(std::f32::consts::FRAC_PI_2);
+        let drum = y.body(at, lying, c, parts);
+        y.name(drum, &format!("Run drum {}", lane + 2));
     }
 }

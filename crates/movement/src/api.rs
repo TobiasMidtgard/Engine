@@ -238,6 +238,19 @@ pub(crate) fn register(app: &mut App) {
         },
     );
     app.register_api(
+        "movement.grappler",
+        "Restart the movement demo's grappler from the start of its loop: it sprints at the \
+         grapple tower, jumps, hooks its top edge, is reeled up the wall and climbs over.",
+        "{}",
+        |world, _args| {
+            let n = crate::demo::restart_grapplers(world);
+            if n == 0 {
+                return Err("no grappler in this world (spawn it with demo::spawn_demo)".into());
+            }
+            Ok(json!({ "grapplers": n }))
+        },
+    );
+    app.register_api(
         "movement.play",
         "Play mode: \"on\" true puts a level 10 pilot on the ground in front of the active \
          camera (or with its feet at \"at\") and a third-person camera behind it; false ends \

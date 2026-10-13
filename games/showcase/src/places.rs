@@ -189,7 +189,8 @@ pub fn places() -> Vec<Place> {
         place(
             "forest",
             "Living forest",
-            near("forest", [14.0, 2.5, 12.0], [-10.0, 4.0, -6.0]),
+            // From above its edge, looking down over the whole wood (Foliage's framing).
+            near("forest", [112.0, 32.0, 92.0], [8.0, 0.0, 12.0]),
             9.0,
         ),
         // Water's own test area: a tarn on a hill spilling over falls into a pond. The stream
