@@ -514,7 +514,8 @@ pub fn spawn_debris_system(
             if item.from_rock {
                 body.rock = RockContact::Ignores;
             }
-            e.insert(body);
+            // A piece that stood with a collider loses it: this solver moves it now.
+            e.insert(body).remove::<Collider>();
         }
         if chip {
             stats.chips_spawned += 1;
