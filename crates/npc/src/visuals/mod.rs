@@ -5,6 +5,8 @@
 //! on a skeleton whose knees and elbows bend. Their feet stay where they are set on the ground
 //! while the body walks, runs or turns over them, the stride lengthening into a run with the
 //! heels kicking up and the arms pumping; on guard they shuffle without breaking their stance.
+//! Turning on the spot, the hips come round after the body and the feet pivot on their balls
+//! and step round under them.
 //! Standing, they breathe and shift their weight from leg to leg (on guard, bob and rock on
 //! bent knees), and they kneel behind low cover. A swing coils back onto the rear foot during
 //! the attack's telegraph (the blade glows orange for a heavy guard breaker), then the hips
@@ -12,18 +14,26 @@
 //! follows through; a feint called off mid-telegraph lurches into the release, checks and
 //! rocks back onto its guard instead of snapping there. A dash pushes off the rear foot: the
 //! body is drawn low behind the owner and eases after it as the drive leg extends, the lead
-//! foot reaching ahead. They raise the guard or shield to the line the blow comes on (overhead
-//! against a heavy cut from above, on the side a cut comes from, low across a thrust or a
-//! dash), bracing and rocking back as it lands (on a parry the blade beats the blow aside and
+//! foot reaching ahead. They raise the guard or shield to the line the blow comes on (a roof
+//! over the helmet against a heavy cut from above, the elbows high and out so the face shows,
+//! on the side a cut comes from, low across a thrust or a dash), bracing and rocking back as
+//! it lands (on a parry the blade beats the blow aside and
 //! glints white, and the shield lights up), hop aside to dodge and step back under themselves,
 //! and are thrown back and stumble when staggered. A blow that lands throws them by where it
-//! struck (the head snaps along it, the trunk doubles over and turns away, the legs buckle on
-//! the struck side), and they light up for an instant (tinted, never blown out to white: the
+//! struck (the head is wrenched round away from it, the shoulders following, as they stumble
+//! back half a step; the trunk doubles over and turns away; the legs buckle on the struck
+//! side), and they light up for an instant (tinted, never blown out to white: the
 //! plates light up in a pale tint of the team's color). Downed, the knees give, the body
 //! topples back along the blow and lands hips, back, then head, the legs kick and settle (one
 //! straight, one folded out) and the arms flop out on the ground, the weapon dropped beside
-//! them. Shooters shoulder their carbine (with a muzzle flash and kick); archers
-//! draw to the jaw. Faces show under open helmets worn over mail coifs. The helmet's horsehair
+//! them. Shooters carry their carbine at port arms on the move and shoulder it to aim, the
+//! muzzle drifting a little as they breathe; a shot flashes and kicks the muzzle up, and it
+//! settles; every few shots they change the magazine as it cools down (stripped, stowed in the
+//! hip pouch, a fresh one seated, the charging handle racked). Archers draw to the corner of the
+//! mouth and hold, loose (the string hand flies back along the jaw, the bow rolls forward in
+//! the hand), then draw the next arrow from the quiver over the shoulder and nock it. The
+//! crest, the tabards and the belt pouches swing after the body (a stop throws them on, a blow
+//! snaps them round) and settle. Faces show under open helmets worn over mail coifs. The helmet's horsehair
 //! crest shows skill (grey rookie, bronze, silver, gold master) and a light in its brow band
 //! glows with alertness (yellow suspicious, orange searching, red fighting). Their painted
 //! armor shows skill too: a rookie's is nearly new, a veteran's or master's chipped to the

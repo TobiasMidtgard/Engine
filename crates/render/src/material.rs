@@ -101,7 +101,9 @@ pub struct StandardMaterial {
     pub unlit: bool,
     /// Wraps light around the terminator for thin, translucent things (leaves, skin, cloth).
     pub subsurface: f32,
-    /// Responds to world wetness (rain darkens and adds gloss).
+    /// Responds to the weather on the ground where it stands (`SurfaceLayers`, per pixel):
+    /// rain darkens a rough, porous surface and glosses a smooth, sealed one (porosity follows
+    /// roughness), snow settles on top faces, fire scorch chars it.
     pub receives_wetness: bool,
     /// Vertex sway amplitude in meters for foliage-like wind animation (0 = rigid), growing with
     /// height in the mesh. Each vertex scales it by its color's alpha, its wind weight (0 = still,

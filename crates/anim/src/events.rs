@@ -2,14 +2,15 @@
 //! the noise they make.
 //!
 //! * Clip events become [`AnimationEvent`]s. Events named `footstep…` with a foot bone also
-//!   become a [`GroundContact`] (footprints in mud and snow, bent grass, footstep sounds) and
-//!   a quiet [`NoiseEvent`] (AI hearing); `impact…` events make a loud one.
+//!   become a [`GroundContact`] (footprints in mud and snow, bent grass, footstep sounds) at
+//!   the character's `speed` parameter, and a quiet [`NoiseEvent`] (AI hearing); `impact…`
+//!   events make a loud one.
 //! * Procedural gaits report every footfall the same way (a `footstep` event on the foot's
 //!   bone and a contact with the creature's weight).
 //! * Vehicle rigs report each wheel's contact every frame (tire tracks).
 
 use engine_core::prelude::*;
-use engine_world::animation::AnimationEvent;
+use engine_world::animation::{AnimationEvent, AnimationParams};
 use engine_world::{ContactKind, Ground, GroundContact, NoiseEvent};
 
 use crate::animator::Animator;
@@ -32,11 +33,12 @@ pub(crate) fn emit_events(
         &Animator,
         &GlobalTransform,
         Option<&FootIk>,
+        Option<&AnimationParams>,
         Option<&mut LeggedGait>,
         Option<&mut VehicleRig>,
     )>,
 ) {
-    for (entity, animator, gt, foot_ik, gait, vehicle) in &mut q {
+    for (entity, animator, gt, foot_ik, params, gait, vehicle) in &mut q {
         let yaw = GroundContact::yaw_of(gt.rotation() * Vec3::NEG_Z);
         for e in &animator.events {
             anim_events.write(AnimationEvent {
@@ -64,7 +66,8 @@ pub(crate) fn emit_events(
                     size: BIPED_FOOT,
                     yaw,
                     load_kg: BIPED_KG,
-                    speed: 0.0,
+                    // How fast the character moves (sounds key loudness and roll on it).
+                    speed: params.map_or(0.0, |p| p.get("speed").max(0.0)),
                     kind: ContactKind::Foot,
                     surface: sample.map(|s| s.surface),
                     entity: Some(entity),

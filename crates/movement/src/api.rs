@@ -227,7 +227,8 @@ pub(crate) fn register(app: &mut App) {
     app.register_api(
         "movement.climber",
         "Restart the movement demo's ledge climber from the start of its loop: it jumps at the \
-         ledge block, catches the top, shimmies along it, climbs up and walks off the end.",
+         ledge block, catches the top, shimmies along it and around the corner at its end, \
+         climbs up and walks off.",
         "{}",
         |world, _args| {
             let n = crate::demo::restart_climbers(world);

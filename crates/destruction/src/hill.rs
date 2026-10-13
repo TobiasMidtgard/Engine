@@ -11,8 +11,10 @@
 //!   ([`crate::build`]) aims, the ghost of each piece snaps into place in the support color it
 //!   will have and the piece goes down: a stone plinth, posts, board walls, a loft floor, a
 //!   shingle roof and a deck reaching out from the gable; the plank door that hangs in its
-//!   doorway swings open. Then the cabin shows its support colors: the deck's second row orange at the edge of support, and the ghost of a third row
-//!   red because nothing could hold it;
+//!   doorway swings open. Then the cabin shows its support colors: the deck's second row
+//!   orange at the edge of support, and the ghost of a third row red because nothing could
+//!   hold it. The builder puts the support view away and builds stairs up to the deck's end:
+//!   a flight on the ground, and one from its head to the deck's edge;
 //! - on the leveled terrace a second builder lays a stone floor on the bare rock, stands board
 //!   walls at its ends, roofs them and walls in the back against the cut bank; then the
 //!   shelter shows its support colors, the floor blue because the rock is ground. A pickaxe
@@ -56,6 +58,11 @@ const YARD_SUPPORT_AT: f32 = 14.2;
 /// When the plank door hung in the cabin's doorway (placed at about 12.2 s) swings open, out
 /// into the yard.
 const YARD_DOOR_OPENS_AT: f32 = 12.7;
+/// When the yard's builder, done showing the deck's reach, puts the support view away and
+/// starts on the stairs up to the deck.
+const YARD_STAIRS_AT: f32 = 18.8;
+/// Flights of stairs up to the deck.
+const YARD_FLIGHTS: usize = 2;
 /// Where the terrace's shelter stands, relative to the origin: the middle of the leveled
 /// terrace, on its rock.
 pub const TERRACE: [f64; 3] = [8.8, TERRACE_Y, 2.1];
@@ -129,6 +136,14 @@ pub const VIEWS: &[DemoView] = &[
         target: [-11.0, 1.9, -24.5],
         hour: 10.5,
         warmup_secs: 18.0,
+    },
+    DemoView {
+        key: "voxel_stairs",
+        name: "Stairs built up to the cabin's deck: two flights, head to foot",
+        eye: [-2.0, 3.0, -30.0],
+        target: [-7.0, 1.3, -23.0],
+        hour: 10.5,
+        warmup_secs: 20.4,
     },
     DemoView {
         key: "voxel_shelter",
@@ -230,8 +245,11 @@ enum Step {
     /// A site's builder picks a piece and aims; then places it.
     Aim(Site, usize),
     Place(Site),
-    /// A site's finished building shows its support colors.
-    ShowSupport(Site),
+    /// A site's builder turns its support view on (its building shows its support colors) or
+    /// off.
+    Support(Site, bool),
+    /// A site's builder is done: it aims at the sky, so no ghost shows.
+    Rest(Site),
     /// The doors a site's builder hung swing open, out from inside.
     OpenDoors(Site),
     Reset,
@@ -258,17 +276,24 @@ fn timeline() -> Vec<(f32, Step)> {
     t.push((18.0, Step::Pad));
     for site in Site::ALL {
         let (start, each) = site.start_and_step();
+        let mut at = start;
         for (k, step) in site.plan().iter().enumerate() {
-            let at = start + k as f32 * each;
+            at = step.at.unwrap_or(at);
             t.push((at, Step::Aim(site, k)));
             if step.place {
                 t.push((at + each * 0.8, Step::Place(site)));
             }
+            at += each;
         }
     }
-    t.push((YARD_SUPPORT_AT, Step::ShowSupport(Site::Yard)));
+    t.push((YARD_SUPPORT_AT, Step::Support(Site::Yard, true)));
     t.push((YARD_DOOR_OPENS_AT, Step::OpenDoors(Site::Yard)));
-    t.push((TERRACE_SUPPORT_AT, Step::ShowSupport(Site::Terrace)));
+    t.push((YARD_STAIRS_AT - 0.4, Step::Support(Site::Yard, false)));
+    t.push((
+        YARD_STAIRS_AT + YARD_FLIGHTS as f32 * YARD_STEP,
+        Step::Rest(Site::Yard),
+    ));
+    t.push((TERRACE_SUPPORT_AT, Step::Support(Site::Terrace, true)));
     for (k, (at, _)) in UNDERMINE.iter().enumerate() {
         t.push((*at, Step::Undermine(k)));
     }
@@ -364,8 +389,10 @@ pub struct BuildStep {
     pub from: DVec3,
     pub target: DVec3,
     pub center: DVec3,
-    /// Placed (the last step only shows its ghost).
+    /// Placed (a ghost that can't go only shows).
     pub place: bool,
+    /// When the builder aims (seconds into the loop), if not right after the step before.
+    pub at: Option<f32>,
 }
 
 /// The yard's cabin in build order: a 4 × 4 m stone plinth, corner posts, board walls (a
@@ -383,6 +410,7 @@ pub fn yard_plan() -> Vec<BuildStep> {
             target,
             center,
             place: true,
+            at: None,
         });
     };
     let quarters = [(-1.0, -1.0), (1.0, -1.0), (-1.0, 1.0), (1.0, 1.0)];
@@ -517,6 +545,28 @@ pub fn yard_plan() -> Vec<BuildStep> {
         target: v(6.0, 2.35, -1.0),
         center: v(7.0, 2.35, -1.0),
         place: false,
+        at: None,
+    });
+    // Then stairs up to the deck's end, climbing toward it (−X): a flight on the ground, aimed
+    // at where it stands, then one aimed at the deck's end, which snaps its foot onto the
+    // first one's head and its head onto the deck's edge.
+    steps.push(BuildStep {
+        kind: BuildKind::WoodStair,
+        yaw: FRAC_PI_2,
+        from: v(9.0, 2.6, 2.0),
+        target: v(9.0, 0.0, 1.0),
+        center: v(9.0, 0.6, 1.0),
+        place: true,
+        at: Some(YARD_STAIRS_AT),
+    });
+    steps.push(BuildStep {
+        kind: BuildKind::WoodStair,
+        yaw: FRAC_PI_2,
+        from: v(8.6, 2.35, 1.0),
+        target: v(6.0, 2.35, 1.0),
+        center: v(7.0, 1.8, 1.0),
+        place: true,
+        at: None,
     });
     steps
 }
@@ -535,6 +585,7 @@ pub fn terrace_plan() -> Vec<BuildStep> {
             target,
             center,
             place: true,
+            at: None,
         });
     };
     for z in [-1.0, 1.0] {
@@ -886,11 +937,19 @@ fn run_step(world: &mut World, demo: &mut HillDemo, step: Step) {
                 builder.aim_at(at + step.from, at + step.target);
             }
         }
-        Step::ShowSupport(site) => {
+        Step::Support(site, on) => {
             if let Some(mut builder) =
                 demo.builders[site as usize].and_then(|b| world.get_mut::<Builder>(b))
             {
-                builder.show_support = true;
+                builder.show_support = on;
+            }
+        }
+        Step::Rest(site) => {
+            let at = o + site.offset();
+            if let Some(mut builder) =
+                demo.builders[site as usize].and_then(|b| world.get_mut::<Builder>(b))
+            {
+                builder.aim_at(at + DVec3::Y * 20.0, at + DVec3::Y * 21.0);
             }
         }
         Step::OpenDoors(site) => {
@@ -988,7 +1047,7 @@ mod tests {
             );
             if !step.place {
                 assert_eq!(p.problem, Some(BuildProblem::TooWeak), "{p:?}");
-                break;
+                continue;
             }
             assert!(p.valid(), "step {k}: {p:?}");
             levels.push(p.level());
@@ -997,13 +1056,16 @@ mod tests {
                 obb: p.obb(),
                 support: 0.0,
                 built: true,
+                kind: Some(step.kind),
             });
             // Supports as the solver will see them.
             let items: Vec<(Entity, Obb, bool)> =
                 scene.iter().map(|s| (s.entity, s.obb, false)).collect();
             let graph = build_graph(&items, |_| 0.0);
-            let props: Vec<_> = steps[..scene.len()]
+            let props: Vec<_> = steps
                 .iter()
+                .filter(|s| s.place)
+                .take(scene.len())
                 .map(|s| table.get(s.kind.material()))
                 .collect();
             for (s, support) in scene.iter_mut().zip(solve_support(&graph, &props)) {
@@ -1016,10 +1078,12 @@ mod tests {
     #[test]
     fn the_yard_cabin_snaps_together_as_planned() {
         let levels = build_levels(&yard_plan());
-        // Blue plinth, the deck's second row orange at the edge of support.
+        // Blue plinth, the deck's second row orange at the edge of support; then a blue flight
+        // of stairs on the ground and a yellow one up to the deck.
         assert!(levels[..4].iter().all(|l| *l == 0), "{levels:?}");
-        assert_eq!(levels[levels.len() - 1], 3, "{levels:?}");
-        assert_eq!(levels.len(), 32);
+        assert_eq!(levels[31], 3, "{levels:?}");
+        assert_eq!(levels[32..], [0, 2], "{levels:?}");
+        assert_eq!(levels.len(), 34);
     }
 
     #[test]

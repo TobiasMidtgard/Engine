@@ -566,16 +566,17 @@ pub fn demo_views(z: &Zone) -> Vec<View> {
                 .on_arrive("movement.duel", &duel("Pack"))
                 .on_leave("movement.duel", cycle),
                 // The ledge station: the climber restarts its loop on arrival and is caught
-                // shimmying along the block's top. The Blink round has no slow motion, so the
-                // climber keeps its pace.
+                // going around the corner at the end of the block's top. The Blink round has
+                // no slow motion, so the climber keeps its pace.
                 View::new(
                     "parkour_ledge",
-                    "Ledge hang: catch a ledge too high to climb, shimmy along it, climb up",
-                    [11.4, 3.0, 8.4],
-                    [17.0, 2.3, 1.6],
+                    "Ledge hang: catch a ledge too high to climb, shimmy along it and around \
+                     its corner, climb up",
+                    [24.6, 3.3, 6.2],
+                    [19.7, 2.6, 1.7],
                     16.0,
                 )
-                .warmup(2.6)
+                .warmup(4.4)
                 .on_arrive("movement.duel", &duel("Blink"))
                 .on_arrive("movement.climber", "{}")
                 .on_leave("movement.duel", cycle),
@@ -665,31 +666,36 @@ pub fn demo_views(z: &Zone) -> Vec<View> {
                     r#"{"screen": "dialogue", "tree": "merchant_intro", "node": "offer"}"#,
                 )
                 .warmup(6.0),
-                ui("market_shop", "The trader's shop", r#"{"screen": "shop"}"#),
+                // Each screen opens with something picked, so its details panel is filled.
+                ui(
+                    "market_shop",
+                    "The trader's shop",
+                    r#"{"screen": "shop", "select": "rifle"}"#,
+                ),
                 ui(
                     "market_inventory",
                     "Inventory and equipment",
-                    r#"{"screen": "inventory"}"#,
+                    r#"{"screen": "inventory", "select": "greatsword"}"#,
                 ),
                 ui(
                     "market_map_galaxy",
                     "Galaxy map",
-                    r#"{"screen": "map", "zoom": 3.6}"#,
+                    r#"{"screen": "map", "zoom": 3.6, "select": {"type": "system", "id": "veyra_system"}}"#,
                 ),
                 ui(
                     "market_map_system",
                     "Star system map",
-                    r#"{"screen": "map", "zoom": 2.6}"#,
+                    r#"{"screen": "map", "zoom": 2.6, "select": {"type": "planet", "id": "veyra"}}"#,
                 ),
                 ui(
                     "market_map_globe",
                     "Planet globe",
-                    r#"{"screen": "map", "zoom": 1.4}"#,
+                    r#"{"screen": "map", "zoom": 1.4, "select": {"type": "poi", "id": "relay_tower"}}"#,
                 ),
                 ui(
                     "market_map_surface",
                     "Surface map",
-                    r#"{"screen": "map", "zoom": 0.5}"#,
+                    r#"{"screen": "map", "zoom": 0.5, "select": {"type": "poi", "id": "hollow_reach"}}"#,
                 ),
                 ui("market_pause", "Pause menu", r#"{"screen": "pause"}"#),
                 ui(
@@ -768,6 +774,17 @@ pub fn demo_views(z: &Zone) -> Vec<View> {
                 14.5,
             )
             .warmup(7.0),
+            // The unveiling starts over on arrival: the crane lowers the silk over the statue,
+            // leaves it on and is lifting it off when the picture is taken.
+            View::new(
+                "yard_statue",
+                "Unveiling: silk lifted off a marble statue",
+                [-10.5, 2.3, -8.4],
+                [-14.0, 2.6, -4.0],
+                15.0,
+            )
+            .on_arrive("softbody.unveil", "{}")
+            .warmup(17.4),
             // On the lake: the dinghy's mooring is 85 m east and 110 m south of the yard. It
             // starts its lane over on arrival, so it is out on the water in view.
             View::new(
