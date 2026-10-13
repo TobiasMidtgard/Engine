@@ -985,9 +985,42 @@ fn apply_fog(color: vec3<f32>, rel: vec3<f32>) -> vec3<f32> {
 }
 
 // Volumetric fog in front of the sky (up to the volumetric range) for pre-exposed sky color
-// seen along `dir`. The sky pass calls this; geometry uses `apply_fog`.
+// seen along `dir`: the near part of `apply_full_sky_fog`. Geometry uses `apply_fog`.
 fn apply_sky_fog(color: vec3<f32>, dir: vec3<f32>) -> vec3<f32> {
     if (frame.volumetrics.x <= 0.0) { return color; }
     let fog = limit_fog_opacity(volumetric_fog_at(dir, frame.volumetrics.x));
+    return color * fog.a + fog.rgb;
+}
+
+// All the fog in front of the sky along `dir`, for pre-exposed sky color: the volumetric fog up
+// to its range and the height fog beyond it out to the planet's surface (or 100 km), taken as
+// `surface_fog` takes them for geometry. So a fogged hillside fades into a fogged sky instead
+// of ending in a hard bright edge, and the default haze thickens toward the horizon the way it
+// does over distant ground. The sky pass calls this; `pixel` (the pixel's center) jitters the
+// samples of the haze's mountain shadows.
+fn apply_full_sky_fog(color: vec3<f32>, dir: vec3<f32>, pixel: vec2<f32>) -> vec3<f32> {
+    // Below the horizon the ray ends on the planet.
+    var end = 100000.0;
+    if (frame.planet.w > 0.0) {
+        let ground = ray_shell_mu(frame.camera_world.w, dot(dir, normalize(-frame.planet.xyz)), 0.0);
+        if (ground.x > 0.0) { end = min(end, ground.x); }
+    }
+    var fog = vec4<f32>(0.0, 0.0, 0.0, 1.0);
+    var start = 0.0;
+    if (frame.volumetrics.x > 0.0) {
+        // The range is a view depth: toward the screen's edges it ends further along the ray.
+        let depth = max(view_depth(dir), 1e-3);
+        fog = volumetric_fog_at(dir, min(frame.volumetrics.x, end * depth));
+        start = frame.volumetrics.x / depth;
+    }
+    if (frame.fog.x > 0.0 && start < end) {
+        let tr = exp(-height_fog_optical_depth(dir, start, end));
+        if (tr < 0.9999) {
+            let sun = height_fog_sun_visibility(dir, start, end, tr, frame_noise(pixel));
+            let l = pre_expose(height_fog_radiance(dir, dir * start, 1.0, sun)) * (1.0 - tr);
+            fog = vec4<f32>(fog.rgb + l * fog.a, fog.a * tr);
+        }
+    }
+    fog = limit_fog_opacity(fog);
     return color * fog.a + fog.rgb;
 }
