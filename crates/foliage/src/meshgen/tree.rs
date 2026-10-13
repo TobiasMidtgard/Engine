@@ -20,6 +20,7 @@
 
 use engine_core::math::{Quat, Rng, Vec2, Vec3, Vec4, noise, smoothstep};
 
+use super::bark::layout;
 use super::textures::{CLUSTER_CELL, LeafKind, atlas_cell, kind_of};
 use super::{MeshBuilder, rgb};
 use crate::species::{BarkStyle, LeafStyle, PlantForm, PlantSpecies};
@@ -550,6 +551,109 @@ fn moss_log(mesh: &mut engine_render::Mesh, seed: u64) {
     }
 }
 
+/// Break the end of a trunk at `top` (radius `r`, pointing along `axis`) off jaggedly: the
+/// rotten heart sinks into a hollow and the sound wood around it stands in uneven teeth. Their
+/// outsides keep the `bark`; their torn faces show weathered grey wood, its fibers running up
+/// the teeth. Call it right after the tube whose end cap is the heart.
+fn break_top(b: &mut MeshBuilder, top: Vec3, axis: Vec3, r: f32, bark: Vec4, seed: u64) {
+    use std::f32::consts::TAU;
+    // Sink the heart: the cap's inner rings drop below the rim.
+    for v in &mut b.vertices {
+        let p = Vec3::from(v.position) - top;
+        let rel = (p - axis * p.dot(axis)).length() / r;
+        if p.dot(axis).abs() < 0.1 * r && rel < 0.97 {
+            let sink = 0.55 * r * (1.0 - rel).powf(0.7);
+            v.position = (Vec3::from(v.position) - axis * sink).into();
+        }
+    }
+    let (n, m) = axis.any_orthonormal_pair();
+    let dir = |a: f32| n * a.cos() + m * a.sin();
+    let tangent = |a: f32| m * a.cos() - n * a.sin();
+    let rnd = |k: u32, salt: i64| engine_core::math::hash01(k as i64, salt, 0, seed);
+    let wood = Vec4::new(0.3, 0.29, 0.27, 1.0);
+    let rot = Vec4::new(0.025, 0.018, 0.013, 1.0);
+    let [cu, cv] = layout::CUT_CENTER;
+    let [ru, rv] = layout::CUT_RADIUS;
+    // Torn wood samples the end-grain disc sideways: across a face runs across the growth
+    // rings, up it runs along them, so the rings read as fibers running up the tooth.
+    let grain = |across: f32, up: f32, k: u32| {
+        let rho = 0.5 + 0.4 * across;
+        let th = TAU * rnd(k, 9) + 0.35 * up / r;
+        Vec2::new(cu + ru * rho * th.cos(), cv + rv * rho * th.sin())
+    };
+    let tile_u = layout::BARK_U1 - layout::BARK_U0;
+    let tile_v = layout::TILE_WIDTH_M * layout::TILE_ASPECT;
+    let count = 11;
+    for k in 0..count {
+        // Now and then a tooth has broken away entirely.
+        if rnd(k, 1) < 0.15 {
+            continue;
+        }
+        let step = TAU / count as f32;
+        let a0 = (k as f32 + 0.2 * rnd(k, 2)) * step;
+        let a1 = a0 + step * (0.6 + 0.4 * rnd(k, 3));
+        let mid = 0.5 * (a0 + a1) + 0.3 * (a1 - a0) * (rnd(k, 4) - 0.5);
+        let half = 0.12 * (a1 - a0);
+        // Mostly short stubs, a few long slivers.
+        let tall = r * (0.2 + 1.9 * rnd(k, 5).powi(2));
+        let inner = r * (0.6 + 0.25 * rnd(k, 6));
+        let tip_r = r * (0.82 + 0.12 * rnd(k, 7));
+        let base = -0.01 * r;
+        let at = |a: f32, radius: f32, s: f32| top + dir(a) * radius + axis * s;
+        let o0 = at(a0, r, base);
+        let o1 = at(a1, r, base);
+        let i0 = at(a0, inner, base);
+        let i1 = at(a1, inner, base);
+        let t0 = at(mid - half, tip_r, tall * (0.75 + 0.2 * rnd(k, 8)));
+        let t1 = at(mid + half, tip_r, tall);
+        let up = |p: Vec3| (p - top).dot(axis);
+        let fade = |p: Vec3| rot.lerp(wood, (up(p) / (0.3 * r)).clamp(0.0, 1.0));
+        // The bark side: the tube's bark tile carried on up.
+        let u = |a: f32| layout::BARK_U0 + tile_u * (0.1 + (a - a0) * r / layout::TILE_WIDTH_M);
+        let outer = [o0, o1, t1, t0].map(|p| {
+            let a = (p - top).dot(m).atan2((p - top).dot(n));
+            let a = a0 + (a - a0).rem_euclid(TAU);
+            (
+                p,
+                Vec2::new(u(a).min(layout::BARK_U1), 0.5 - up(p) / tile_v),
+                bark,
+            )
+        });
+        flat_face(b, &outer, dir(mid));
+        let torn = |p: Vec3, across: f32| (p, grain(across, up(p), k), fade(p));
+        flat_face(
+            b,
+            &[torn(i1, 1.0), torn(i0, 0.0), torn(t0, 0.3), torn(t1, 0.7)],
+            -dir(mid),
+        );
+        flat_face(
+            b,
+            &[torn(i0, 0.0), torn(o0, 1.0), torn(t0, 0.6)],
+            -tangent(a0),
+        );
+        flat_face(
+            b,
+            &[torn(o1, 1.0), torn(i1, 0.0), torn(t1, 0.6)],
+            tangent(a1),
+        );
+    }
+}
+
+/// A flat polygon (a fan, convex) with its own vertices, wound to face `out`.
+fn flat_face(b: &mut MeshBuilder, corners: &[(Vec3, Vec2, Vec4)], out: Vec3) {
+    let normal = (corners[1].0 - corners[0].0).cross(corners[2].0 - corners[0].0);
+    let flip = normal.dot(out) < 0.0;
+    let normal = if flip { -normal } else { normal };
+    let ids: Vec<u32> = corners
+        .iter()
+        .map(|&(p, uv, c)| b.vertex(p, normal, uv, c))
+        .collect();
+    for i in 1..ids.len() as u32 - 1 {
+        let (x, y) = if flip { (i + 1, i) } else { (i, i + 1) };
+        b.tri(ids[0], ids[x as usize], ids[y as usize]);
+    }
+}
+
 /// Moss around the foot of a standing snag, in patches, thinning out a meter or so up.
 fn moss_foot(mesh: &mut engine_render::Mesh, seed: u64) {
     let moss = Vec3::new(0.052, 0.07, 0.026);
@@ -828,14 +932,19 @@ fn assemble(
         let rad = &trunk_r[cut_i..end];
         let color = |i: usize, _a: f32| bark_color(sp, path[i].y, h, i + cut_i, seed);
         let cap = |r: f32| cut_color(rim, r);
-        let rotten = |_: f32| Vec4::new(0.09, 0.065, 0.045, 1.0);
+        let rotten = |r: f32| (Vec3::new(0.018, 0.013, 0.009) * (0.6 + 0.4 * r)).extend(1.0);
         let broken = |_: f32| rgb(sp.bark_color, 0.55);
         b.tube(path, rad, 10, 0.5, &color, Some(&cap), Some(&rotten));
-        // Short broken stubs where the thickest limbs were (the thin ones snap off flush).
+        let last = path.len() - 1;
+        let axis = (path[last] - path[last - 1]).normalize_or(Vec3::Y);
+        break_top(&mut b, path[last], axis, rad[last], color(last, 0.0), seed);
+        // Short broken stubs where the thickest limbs were (the thin ones snap off flush). Limbs
+        // forking right at the break went with the top.
+        let below = top_y - 2.0 * rad[last];
         let mut limbs: Vec<_> = branches
             .iter()
             .enumerate()
-            .filter(|(_, br)| br.level == 1 && br.path[0].y < top_y)
+            .filter(|(_, br)| br.level == 1 && br.path[0].y < below)
             .collect();
         limbs.sort_by(|a, b| b.1.radius[0].total_cmp(&a.1.radius[0]));
         limbs.truncate((limbs.len() / 3).clamp(2, 9));

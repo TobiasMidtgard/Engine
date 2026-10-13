@@ -7,8 +7,9 @@
 //! ```
 //!
 //! `shots` picks shots by name (`oak`, `birch`, `pine`, `spruce`, `hazel`, `stump`, `log`,
-//! `old_logs` for logs that have lain for years, `row`, `close` for arm's-length oak, birch and
-//! pine); `--dump` saves the painted bark textures instead.
+//! `old_logs` for logs that have lain for years, `log_ends` for their butts and broken tops,
+//! `row`, `close` for arm's-length oak, birch and pine); `--dump` saves the painted bark
+//! textures instead.
 //!
 //! The sun rakes across the trunks from the side, which is the light that shows (or betrays)
 //! bark relief. Every shot is a close-up a player could walk up to.
@@ -301,6 +302,49 @@ fn main() {
             old_logs + DVec3::new(-2.5, 1.8, -3.5),
             old_logs + DVec3::new(5.0, 0.2, 4.0),
         );
+    }
+    if want("log_ends") {
+        // The oak at the head of the row, from beside its sawn butt and its broken-off top.
+        let library = app.world.resource::<PlantLibrary>().clone();
+        let mut logs = app.world.query::<(&FelledLog, &LogPose, &Transform)>();
+        let oak = logs
+            .iter(&app.world)
+            .find(|(l, _, _)| library.get(l.species).name == "oak")
+            .map(|(l, p, t)| (l.species, p.genes.variant, *t));
+        // How long the bare log is: its mesh's height along the trunk, scaled.
+        let length = |species: engine_foliage::SpeciesId, variant: u8, scale: f32| {
+            let vis = app
+                .world
+                .resource::<engine_foliage::assets::FoliageVisuals>();
+            let sv = vis.species.get(species.0 as usize)?.as_ref()?;
+            let v = &sv.variants[variant as usize % sv.variants.len()];
+            let meshes = app
+                .world
+                .resource::<engine_assets::Assets<engine_render::Mesh>>();
+            Some(meshes.get(v.log?)?.aabb().max.y * scale)
+        };
+        if let Some((species, variant, t)) = oak
+            && let Some(len) = length(species, variant, t.scale.y)
+        {
+            let axis = (t.rotation * Vec3::Y).as_dvec3();
+            let side = DVec3::Y.cross(axis).normalize();
+            let butt = t.translation;
+            let top = butt + axis * len as f64;
+            shot(
+                &mut app,
+                &out,
+                "13_log_butt",
+                butt - axis * 2.2 + side * 1.2 + DVec3::Y * 0.9,
+                butt + axis * 0.6,
+            );
+            shot(
+                &mut app,
+                &out,
+                "14_log_top",
+                top + axis * 0.9 - side * 0.7 + DVec3::Y * 0.6,
+                top - axis * 0.25,
+            );
+        }
     }
     if want("row") {
         shot(
