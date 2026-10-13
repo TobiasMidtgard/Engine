@@ -101,17 +101,22 @@ pub fn footprint(w: &TrailWalker, foot: u8, root_along: f64) -> (DVec3, Vec3, f6
     let s = root_along + (fore + Gait::of(w).ahead) as f64;
     let (p, d) = trail_point(s);
     let right = Vec3::new(-d.z, 0.0, d.x);
+    let across = side * w.stance + w.lane_at(s);
     (
-        w.origin + p + (right * side * w.stance).as_dvec3() + DVec3::new(0.0, GROUND, 0.0),
-        d,
+        w.origin + p + (right * across).as_dvec3() + DVec3::new(0.0, GROUND, 0.0),
+        (d + right * w.lane_slope(s)).normalize(),
         s,
     )
 }
 
-/// Where the walker's root is (on the trail's surface) and which way it faces.
+/// Where the walker's root is (on the trail's surface, in its lane) and which way it faces.
 pub fn root(w: &TrailWalker) -> (DVec3, Vec3) {
     let (p, d) = trail_point(w.along);
-    (w.origin + p + DVec3::new(0.0, GROUND, 0.0), d)
+    let right = Vec3::new(-d.z, 0.0, d.x);
+    (
+        w.origin + p + (right * w.lane_at(w.along)).as_dvec3() + DVec3::new(0.0, GROUND, 0.0),
+        (d + right * w.lane_slope(w.along)).normalize(),
+    )
 }
 
 #[cfg(test)]

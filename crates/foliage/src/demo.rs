@@ -23,16 +23,13 @@
 //! the back-left wall feed glowcaps and tall lantern caps; the rest of the floor stays bare.
 //! The mushrooms glow brighter the better fed they are and light the cave around them.
 
-use engine_assets::Assets;
-use engine_core::math::noise::fbm2;
 use engine_core::prelude::*;
-use engine_render::{Mesh, MeshRenderer, Shape, StandardMaterial, Vertex};
-use engine_world::Ground;
+use engine_render::{MeshRenderer, Shape, StandardMaterial};
 
-use crate::ecology::RegionState;
 use crate::felling::fell_tree;
 use crate::plant::{Disturbance, EcologyRegion, Plant, PlantStage, RegionHistory, ResourceSource};
-use crate::species::{PlantLibrary, srgb};
+use crate::scenery::{PlacedRock, Pool, random_rock, rock_cluster, spawn_rocks};
+use crate::species::PlantLibrary;
 
 /// Forest clear-cut, local to the zone center (x, z, radius).
 pub const CLEARING: [f32; 3] = [40.0, 28.0, 18.0];
@@ -42,6 +39,8 @@ pub const BURN: [f32; 3] = [-34.0, 52.0, 17.0];
 pub const POND: [f32; 3] = [-10.0, 10.0, 4.5];
 /// Dry ridge (x, z, radius).
 pub const RIDGE: [f32; 3] = [-55.0, -40.0, 26.0];
+/// Height of the pond's water above the ground, meters (its shore sinks to meet it).
+pub const POND_WATER_M: f32 = 0.06;
 /// Years since the forest was cut and burnt.
 pub const YEARS_SINCE: f32 = 5.0;
 /// The forest trail (local x, z): in from the +X edge, across the clearing, past the pond and
@@ -267,6 +266,153 @@ pub fn forest_sources() -> Vec<(Vec2, ResourceSource)> {
     ]
 }
 
+/// The forest's rocks, local to the zone center: lichen-grey outcrops and loose stones on the
+/// dry ridge, stones kicked to the trail's sides, rounded stones at the pond's edge, sooty
+/// boulders in the burn scar and mossy boulders under the trees.
+pub fn forest_rocks() -> Vec<PlacedRock> {
+    let mut rng = Rng::new(0x51d6e);
+    let mut out = Vec::new();
+    let off_trail = |p: Vec2, r: f32| polyline_distance(p, &TRAIL) > TRAIL_HALF_WIDTH + r + 0.25;
+    let pond = Vec2::new(POND[0], POND[1]);
+    let ridge = Vec2::new(RIDGE[0], RIDGE[1]);
+    let burn = Vec2::new(BURN[0], BURN[1]);
+    let granite = [1.0, 0.98, 0.95];
+
+    // The ridge: outcrops, then rocks and stones strewn between them.
+    let mut outcrops: Vec<(Vec2, f32)> = Vec::new();
+    for _ in 0..300 {
+        if outcrops.len() >= 11 {
+            break;
+        }
+        let p = ridge + rng.in_unit_disk() * RIDGE[2] * 0.9;
+        let size = rng.range(1.1, 3.2);
+        if !off_trail(p, size * 1.3)
+            || outcrops
+                .iter()
+                .any(|(q, s)| q.distance(p) < (s + size) * 1.5)
+        {
+            continue;
+        }
+        outcrops.push((p, size));
+        rock_cluster(&mut rng, p, size, 0.2, granite, &mut out);
+    }
+    for _ in 0..90 {
+        let p = ridge + rng.in_unit_disk() * RIDGE[2];
+        let w = if rng.chance(0.25) {
+            rng.range(0.4, 0.9)
+        } else {
+            rng.range(0.1, 0.32)
+        };
+        if off_trail(p, w) {
+            out.push(random_rock(&mut rng, p, w, false, 0.15, granite));
+        }
+    }
+    // Stones kicked to the trail's sides.
+    for w in TRAIL.windows(2) {
+        let (a, b) = (Vec2::from(w[0]), Vec2::from(w[1]));
+        let n = (a.distance(b) / 4.5).ceil() as usize;
+        let side = (b - a).perp().normalize_or_zero();
+        for i in 0..n {
+            if !rng.chance(0.6) {
+                continue;
+            }
+            let p = a.lerp(b, (i as f32 + rng.f32()) / n as f32);
+            let width = rng.range(0.1, 0.42);
+            let sign = if rng.chance(0.5) { 1.0 } else { -1.0 };
+            let out_m = TRAIL_HALF_WIDTH + 0.35 + width * 0.5 + rng.range(0.0, 0.9);
+            let q = p + side * sign * out_m;
+            if q.distance(pond) < POND[2] + 1.0 || !off_trail(q, width * 0.5 - 0.3) {
+                continue;
+            }
+            let rounded = rng.chance(0.2);
+            out.push(random_rock(&mut rng, q, width, rounded, 0.4, granite));
+        }
+    }
+    // Stones worn flat by feet, sunk into the trail.
+    let mut embedded = Vec::new();
+    for w in TRAIL.windows(2) {
+        let (a, b) = (Vec2::from(w[0]), Vec2::from(w[1]));
+        let n = (a.distance(b) / 2.5).ceil() as usize;
+        let side = (b - a).perp().normalize_or_zero();
+        for i in 0..n {
+            if !rng.chance(0.55) {
+                continue;
+            }
+            let p = a.lerp(b, (i as f32 + rng.f32()) / n as f32)
+                + side * rng.range(-0.8, 0.8) * TRAIL_HALF_WIDTH;
+            if p.distance(pond) < POND[2] + 1.0 {
+                continue;
+            }
+            let width = rng.range(0.12, 0.38);
+            let rounded = rng.chance(0.4);
+            let mut r = random_rock(&mut rng, p, width, rounded, 0.0, [0.9, 0.86, 0.8]);
+            r.size.y = width * rng.range(0.3, 0.45);
+            r.rock.bury_m = r.size.y * rng.range(0.6, 0.8);
+            r.rock.lichen = 0.05;
+            embedded.push(r);
+        }
+    }
+    // Round the pond: rounded stones at the water's edge and a mossy boulder or two.
+    for _ in 0..22 {
+        let a = rng.range(0.0, TAU);
+        let p = pond + Vec2::from_angle(a) * (POND[2] + rng.range(-0.5, 1.4));
+        let w = rng.range(0.14, 0.5);
+        let rounded = rng.chance(0.7);
+        if off_trail(p, w) {
+            out.push(random_rock(
+                &mut rng,
+                p,
+                w,
+                rounded,
+                0.6,
+                [0.95, 0.95, 0.92],
+            ));
+        }
+    }
+    for a in [0.6f32, 3.9] {
+        let p = pond + Vec2::from_angle(a) * (POND[2] + 1.6);
+        let size = rng.range(0.9, 1.4);
+        if off_trail(p, 1.0) {
+            rock_cluster(&mut rng, p, size, 0.9, granite, &mut out);
+        }
+    }
+    // Sooty boulders in the burn scar.
+    for _ in 0..4 {
+        let p = burn + rng.in_unit_disk() * BURN[2] * 0.7;
+        let size = rng.range(0.7, 1.4);
+        if off_trail(p, 1.0) {
+            rock_cluster(&mut rng, p, size, 0.0, [0.5, 0.47, 0.45], &mut out);
+        }
+    }
+    // Mossy boulders under the trees.
+    let mut placed = 0;
+    for _ in 0..200 {
+        if placed >= 16 {
+            break;
+        }
+        let p = rng.in_unit_disk() * 80.0;
+        let size = rng.range(0.6, 1.8);
+        if p.distance(ridge) < RIDGE[2] + 4.0
+            || p.distance(pond) < POND[2] + 4.0
+            || p.distance(burn) < BURN[2] + 3.0
+            || !off_trail(p, size * 1.4)
+        {
+            continue;
+        }
+        placed += 1;
+        let mossy = [0.92, 0.95, 0.9];
+        if rng.chance(0.5) {
+            rock_cluster(&mut rng, p, size, 0.95, mossy, &mut out);
+        } else {
+            out.push(random_rock(&mut rng, p, size, false, 0.95, mossy));
+        }
+    }
+    // Nothing broken off an outcrop lies on the trail itself; only the sunk stones do.
+    out.retain(|r| polyline_distance(r.pos, &TRAIL) > TRAIL_HALF_WIDTH + r.radius() * 0.5);
+    out.extend(embedded);
+    out
+}
+
 /// The living forest at `center` (flat ground or whatever `engine_world::Ground` says).
 pub fn spawn_demo(commands: &mut Commands, center: DVec3) {
     commands.spawn((Transform::from_translation(center), forest_region()));
@@ -276,59 +422,43 @@ pub fn spawn_demo(commands: &mut Commands, center: DVec3) {
             source,
         ));
     }
-    // The pond: dark still water inside a ring of wet mud.
-    let mut water = StandardMaterial::hex(0x0d1f1d).with_roughness(0.02);
+    // The pond: dark still water sunk below a shore of wet mud and gravel (the ground
+    // cover), stones and reeds round it.
+    let mut water = StandardMaterial::hex(0x0b1a18).with_roughness(0.015);
     water.reflectance = 0.6;
     water.receives_wetness = false;
-    let mut mud = StandardMaterial::hex(0x2a2116).with_roughness(0.35);
-    mud.reflectance = 0.3;
-    mud.receives_wetness = false;
-    for (radius, height, material) in [(POND[2] + 0.9, 0.035, mud), (POND[2], 0.05, water)] {
-        commands.spawn((
-            Transform::from_translation(
-                local(center, POND[0], POND[1]) + DVec3::Y * (height * 0.5),
-            ),
-            MeshRenderer::new(
-                Shape::Cylinder {
-                    radius,
-                    height: height as f32,
-                    segments: 48,
-                },
-                material,
-            ),
-        ));
-    }
-    // Rocks on the dry ridge.
-    let rock = StandardMaterial::hex(0x6d6a62).with_roughness(0.9);
-    let mut rng = Rng::new(0x51d6e);
-    for _ in 0..26 {
-        let p = rng.in_unit_disk() * RIDGE[2] * 0.8;
-        let s = rng.range(0.5, 1.9);
-        commands.spawn((
-            Transform::from_translation(
-                local(center, RIDGE[0] + p.x, RIDGE[1] + p.y) + DVec3::Y * (0.15 * s) as f64,
-            )
-            .with_rotation(Quat::from_rotation_y(rng.range(0.0, TAU)))
-            .with_scale(Vec3::new(s * 1.5, s * 0.65, s)),
-            MeshRenderer::new(
-                Shape::Sphere {
-                    radius: 1.0,
-                    segments: 10,
-                },
-                rock,
-            ),
-        ));
-    }
-    // Leaf litter, moss and ash under the trees.
+    commands.spawn((
+        Transform::from_translation(
+            local(center, POND[0], POND[1]) + DVec3::Y * (POND_WATER_M - 0.01) as f64,
+        ),
+        MeshRenderer::new(
+            Shape::Cylinder {
+                radius: POND[2] + 0.7,
+                height: 0.02,
+                segments: 72,
+            },
+            water,
+        ),
+    ));
+    spawn_rocks(commands, center, forest_rocks());
+    // Leaf litter, needles, moss, ash and packed earth under the trees.
     commands.spawn((
         Transform::from_translation(center),
         GroundCover {
             half_extents: [92.0, 92.0],
             round: true,
+            cell_m: 0.5,
             style: CoverStyle::ForestFloor,
             scorched: vec![[BURN[0], BURN[1], BURN[2] + 2.0, YEARS_SINCE]],
             trail: TRAIL.to_vec(),
             trail_half_width: TRAIL_HALF_WIDTH,
+            pools: vec![Pool {
+                center: [POND[0], POND[1]],
+                radius: POND[2],
+                water_m: POND_WATER_M,
+                mineral: false,
+            }],
+            debris: 1.0,
             ..Default::default()
         },
     ));
@@ -348,6 +478,8 @@ pub fn spawn_demo(commands: &mut Commands, center: DVec3) {
 
 /// Cave pool, local to the cave center (x, z, radius).
 pub const CAVE_POOL: [f32; 3] = [0.0, 4.0, 5.0];
+/// Height of the cave pool's water above the floor, meters.
+pub const CAVE_WATER_M: f32 = 0.05;
 /// Mineral seep along the back-left wall (x, z, radius).
 pub const CAVE_SEEP: [f32; 3] = [-9.5, 11.5, 5.0];
 
@@ -411,33 +543,108 @@ pub fn spawn_cave_demo(commands: &mut Commands, center: DVec3) {
             source,
         ));
     }
-    // The pool: dark mineral water with a faint glow of its own.
+    // The pool: dark mineral water with a faint glow of its own, held by a rim of crust.
     let mut pool = StandardMaterial::hex(0x061a1e)
         .with_roughness(0.03)
         .with_emissive([0.1, 0.9, 0.75], 0.12);
     pool.reflectance = 0.5;
     pool.receives_wetness = false;
     commands.spawn((
-        Transform::from_translation(local(center, CAVE_POOL[0], CAVE_POOL[1]) + DVec3::Y * 0.05),
+        Transform::from_translation(
+            local(center, CAVE_POOL[0], CAVE_POOL[1]) + DVec3::Y * (CAVE_WATER_M - 0.01) as f64,
+        ),
         MeshRenderer::new(
             Shape::Cylinder {
-                radius: CAVE_POOL[2],
+                radius: CAVE_POOL[2] + 0.5,
                 height: 0.02,
-                segments: 64,
+                segments: 72,
             },
             pool,
         ),
     ));
+    spawn_rocks(commands, center, cave_rocks());
     commands.spawn((
         Transform::from_translation(center),
         GroundCover {
             half_extents: [14.2, 16.2],
             round: false,
-            cell_m: 0.5,
+            cell_m: 0.25,
             style: CoverStyle::CaveFloor,
+            pools: vec![Pool {
+                center: [CAVE_POOL[0], CAVE_POOL[1]],
+                radius: CAVE_POOL[2],
+                water_m: CAVE_WATER_M,
+                mineral: true,
+            }],
+            debris: 0.6,
             ..Default::default()
         },
     ));
+}
+
+/// The cave's rocks, local to the zone center: rubble fallen along the walls (where the fungi
+/// do not grow) and stones at the pool's edge.
+pub fn cave_rocks() -> Vec<PlacedRock> {
+    let mut rng = Rng::new(0xca7e);
+    let stone = [0.62, 0.6, 0.58];
+    let mut out = Vec::new();
+    let seep = Vec2::new(CAVE_SEEP[0], CAVE_SEEP[1]);
+    // Along the side and back walls (inner faces at x = ±14, z = +16).
+    let wall = |rng: &mut Rng, p: Vec2, out: &mut Vec<PlacedRock>| {
+        if p.distance(seep) < CAVE_SEEP[2] + 1.0 {
+            return;
+        }
+        if rng.chance(0.45) {
+            let size = rng.range(0.7, 1.5);
+            rock_cluster(rng, p, size, 0.0, stone, out);
+        } else {
+            for _ in 0..rng.range_i32(1, 4) {
+                let q = p + rng.in_unit_disk() * 1.2;
+                let w = rng.range(0.2, 0.7);
+                out.push(random_rock(rng, q, w, false, 0.0, stone));
+            }
+        }
+    };
+    let mut z = -15.0;
+    while z < 15.0 {
+        for x in [-13.2f32, 13.2] {
+            if rng.chance(0.7) {
+                let x = x + rng.range(-0.3, 0.4) * x.signum();
+                wall(&mut rng, Vec2::new(x, z), &mut out);
+            }
+        }
+        z += rng.range(2.2, 3.6);
+    }
+    let mut x = -12.0;
+    while x < 12.0 {
+        if rng.chance(0.7) {
+            let z = 15.2 + rng.range(-0.3, 0.3);
+            wall(&mut rng, Vec2::new(x, z), &mut out);
+        }
+        x += rng.range(2.4, 3.8);
+    }
+    // Inside the mouth, either side.
+    for x in [-7.5f32, 7.5] {
+        wall(&mut rng, Vec2::new(x, -15.0), &mut out);
+    }
+    // Stones at the pool's edge, half in the water.
+    let pool = Vec2::new(CAVE_POOL[0], CAVE_POOL[1]);
+    for _ in 0..9 {
+        let p =
+            pool + Vec2::from_angle(rng.range(0.0, TAU)) * (CAVE_POOL[2] + rng.range(-0.3, 0.4));
+        let w = rng.range(0.15, 0.45);
+        out.push(random_rock(&mut rng, p, w, true, 0.0, stone));
+    }
+    // Loose stones over the floor, away from the fungi.
+    for _ in 0..40 {
+        let p = Vec2::new(rng.range(-13.0, 13.0), rng.range(-15.0, 15.0));
+        if p.distance(pool) < 10.0 || p.distance(seep) < CAVE_SEEP[2] + 0.5 {
+            continue;
+        }
+        let w = rng.range(0.08, 0.3);
+        out.push(random_rock(&mut rng, p, w, false, 0.0, stone));
+    }
+    out
 }
 
 // ---------------------------------------------------------------- ground cover
@@ -452,8 +659,12 @@ pub enum CoverStyle {
     CaveFloor,
 }
 
-/// A ground layer (forest floor, cave floor) laid over the ground and colored from the soil
-/// of the ecology region beneath it: wetter is mossier, minerals leave crust, fire leaves ash.
+/// A ground layer (forest floor, cave floor) laid over the ground, textured from the soil of
+/// the ecology region beneath it and the plants on it: leaf litter under broadleaves, needles
+/// under conifers, moss where wet, ash where burnt, packed earth on the trail, mud and gravel
+/// round pools, mineral crust where mineral water soaks in. Debris (twigs, branches, cones,
+/// leaves, pebbles) and reeds are scattered over it once the plants have grown; see
+/// [`crate::scenery`].
 #[derive(Component, Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct GroundCover {
@@ -469,6 +680,10 @@ pub struct GroundCover {
     /// A dirt trail through it: local `[x, z]` points.
     pub trail: Vec<[f32; 2]>,
     pub trail_half_width: f32,
+    /// Pools of water: sunken shores of wet mud and gravel (or mineral crust) and reeds.
+    pub pools: Vec<Pool>,
+    /// How much debris (twigs, branches, cones, leaves, pebbles) to scatter, 0..1+.
+    pub debris: f32,
     pub seed: u64,
 }
 
@@ -482,151 +697,10 @@ impl Default for GroundCover {
             scorched: Vec::new(),
             trail: Vec::new(),
             trail_half_width: 1.5,
+            pools: Vec::new(),
+            debris: 1.0,
             seed: 3,
         }
-    }
-}
-
-fn mix(a: [f32; 3], b: [f32; 3], t: f32) -> [f32; 3] {
-    let t = t.clamp(0.0, 1.0);
-    [0, 1, 2].map(|i| a[i] + (b[i] - a[i]) * t)
-}
-
-fn smooth(e0: f32, e1: f32, x: f32) -> f32 {
-    let t = ((x - e0) / (e1 - e0)).clamp(0.0, 1.0);
-    t * t * (3.0 - 2.0 * t)
-}
-
-/// Color of the cover at a world point. `soil` is `[water, nutrients, minerals]`.
-pub fn cover_color(cover: &GroundCover, local: Vec2, world: DVec3, soil: [f32; 3]) -> [f32; 3] {
-    let n = fbm2(world.x * 0.07, world.z * 0.07, cover.seed, 3, 2.0, 0.5);
-    let n2 = fbm2(
-        world.x * 0.35,
-        world.z * 0.35,
-        cover.seed ^ 0x77,
-        2,
-        2.0,
-        0.5,
-    );
-    let [water, nutrients, minerals] = soil;
-    match cover.style {
-        CoverStyle::ForestFloor => {
-            let litter = srgb(0x4b3c2a);
-            let moss = srgb(0x3e5a27);
-            let humus = srgb(0x2b231a);
-            let needles = srgb(0x6a4b30);
-            let ash = srgb(0x1b1917);
-            let lawn = srgb(0x55743a);
-            let mut c = mix(litter, moss, smooth(0.38, 0.72, water + 0.18 * n));
-            c = mix(
-                c,
-                humus,
-                0.45 * smooth(-0.1, 0.7, n2) + 0.2 * smooth(0.5, 0.9, nutrients),
-            );
-            c = mix(c, needles, smooth(0.28, 0.12, water) * 0.7);
-            for s in &cover.scorched {
-                let d = (local - Vec2::new(s[0], s[1])).length();
-                let f = (1.0 - d / s[2].max(0.1)).clamp(0.0, 1.0).powf(0.5) / (1.0 + s[3] * 0.18);
-                c = mix(c, ash, f * (0.8 + 0.2 * n2));
-            }
-            if cover.round {
-                let e = Vec2::new(
-                    local.x / cover.half_extents[0],
-                    local.y / cover.half_extents[1],
-                )
-                .length();
-                c = mix(c, lawn, smooth(0.88 + 0.05 * n, 1.0, e));
-            }
-            if cover.trail.len() >= 2 {
-                // Packed earth in the middle, trampled litter at the sides.
-                let d = polyline_distance(local, &cover.trail) + 0.35 * n2;
-                let hw = cover.trail_half_width;
-                c = mix(c, srgb(0x5d4c3a), smooth(hw * 1.6, hw * 0.9, d) * 0.5);
-                c = mix(
-                    c,
-                    srgb(0x75624b),
-                    smooth(hw * 0.9, hw * 0.3, d) * (0.8 + 0.2 * n),
-                );
-            }
-            c
-        }
-        CoverStyle::CaveFloor => {
-            let rock = srgb(0x2a2826);
-            let mud = srgb(0x3a3027);
-            let crust = srgb(0xa3b8ae);
-            let mut c = mix(rock, mud, smooth(0.45, 0.75, water + 0.2 * n));
-            c = mix(
-                c,
-                [rock[0] * 0.6, rock[1] * 0.6, rock[2] * 0.6],
-                0.5 * smooth(0.0, 0.8, n2),
-            );
-            let crusty = smooth(0.5, 0.95, minerals) * (0.55 + 0.45 * smooth(-0.3, 0.6, n2));
-            mix(c, crust, crusty * 0.85)
-        }
-    }
-}
-
-/// Build the mesh of every new ground cover (after the regions beneath have grown their soil).
-pub fn build_ground_cover(
-    mut commands: Commands,
-    mut meshes: ResMut<Assets<Mesh>>,
-    ground: Option<Res<Ground>>,
-    covers: Query<(Entity, &GroundCover, &Transform), Without<MeshRenderer>>,
-    regions: Query<&RegionState>,
-) {
-    for (e, cover, t) in &covers {
-        let center = t.translation;
-        let cell = cover.cell_m.max(0.25);
-        let nx = (cover.half_extents[0] * 2.0 / cell).ceil() as u32 + 1;
-        let nz = (cover.half_extents[1] * 2.0 / cell).ceil() as u32 + 1;
-        let mut vertices = Vec::with_capacity((nx * nz) as usize);
-        let mut inside = Vec::with_capacity((nx * nz) as usize);
-        for j in 0..nz {
-            for i in 0..nx {
-                let lx = -cover.half_extents[0] + i as f32 * cell;
-                let lz = -cover.half_extents[1] + j as f32 * cell;
-                let world = center + DVec3::new(lx as f64, 0.0, lz as f64);
-                let y = ground
-                    .as_deref()
-                    .and_then(|g| g.height(world + DVec3::Y * 4.0))
-                    .unwrap_or(center.y);
-                let soil = regions
-                    .iter()
-                    .find(|r| r.sim.soil.contains(world))
-                    .map(|r| r.sim.soil.sample(world))
-                    .unwrap_or([0.4, 0.4, 0.0]);
-                let local = Vec2::new(lx, lz);
-                let c = cover_color(cover, local, world, soil);
-                let e = Vec2::new(lx / cover.half_extents[0], lz / cover.half_extents[1]).length();
-                inside.push(!cover.round || e <= 1.0);
-                vertices.push(
-                    Vertex::new(
-                        Vec3::new(lx, (y - center.y) as f32 + 0.025, lz),
-                        Vec3::Y,
-                        Vec2::new(lx * 0.25, lz * 0.25),
-                    )
-                    .with_color(Vec4::new(c[0], c[1], c[2], 1.0)),
-                );
-            }
-        }
-        let mut indices = Vec::new();
-        for j in 0..nz - 1 {
-            for i in 0..nx - 1 {
-                let a = j * nx + i;
-                let (b, c, d) = (a + 1, a + nx + 1, a + nx);
-                if [a, b, c, d].iter().any(|&k| !inside[k as usize]) {
-                    continue;
-                }
-                indices.extend_from_slice(&[a, c, b, a, d, c]);
-            }
-        }
-        let mut mesh = Mesh::new(vertices, indices);
-        mesh.compute_normals();
-        let mut material = StandardMaterial::color(1.0, 1.0, 1.0).with_roughness(0.93);
-        material.receives_wetness = true;
-        let mut r = MeshRenderer::new(meshes.add(mesh), material);
-        r.cast_shadows = false;
-        commands.entity(e).insert(r);
     }
 }
 

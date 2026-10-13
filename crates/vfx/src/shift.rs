@@ -3,7 +3,7 @@
 //!
 //! The shared contracts move entities' transforms; this module moves what the effects keep of
 //! their own: emitter positions and collision planes, trail and beam points, beam targets,
-//! and the demo's waypoints. The GPU particles move in the render feature's next simulation
+//! marks on the ground, and the demo's waypoints. The GPU particles move in the render feature's next simulation
 //! step, which takes the shifts collected in [`PendingShift`].
 
 use engine_core::prelude::*;
@@ -11,6 +11,7 @@ use engine_world::WorldShift;
 
 use crate::demo;
 use crate::emitter::VfxRuntime;
+use crate::marks::Marks;
 use crate::trail::{Beam, Ribbons};
 
 /// World shifts the GPU particles have not followed yet, combined in order. The render
@@ -32,6 +33,7 @@ pub(crate) fn follow_world_shift(
     mut shifts: MessageReader<WorldShift>,
     mut runtime: ResMut<VfxRuntime>,
     mut ribbons: ResMut<Ribbons>,
+    mut marks: ResMut<Marks>,
     mut pending: ResMut<PendingShift>,
     mut beams: Query<&mut Beam>,
     mut demo: demo::ShiftQueries,
@@ -41,6 +43,7 @@ pub(crate) fn follow_world_shift(
     };
     runtime.shift(&s);
     ribbons.shift(&s);
+    marks.shift(&s);
     for mut b in &mut beams {
         b.target = s.point(b.target);
     }

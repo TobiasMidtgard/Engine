@@ -111,7 +111,8 @@ pub struct CellFuel {
     pub kind: FuelKind,
     /// Dry fuel load, kg/m².
     pub load_kg_m2: f32,
-    /// Fuel moisture, kg water per kg dry fuel (cured grass ≈ 0.06, green grass ≈ 0.6).
+    /// Fuel moisture, kg water per kg dry fuel (cured grass ≈ 0.06, green grass ≈ 0.6). From
+    /// [`LIVE_MOISTURE`](crate::field::LIVE_MOISTURE) up it is green fuel and stays that wet.
     pub moisture: f32,
     /// °C at which the dried fuel ignites.
     pub ignition_c: f32,
@@ -176,7 +177,9 @@ pub struct FuelPatch {
     pub kind: FuelKind,
     /// Dry fuel load, kg/m² (cured grass 0.2–0.6, litter 0.5–1.5, brush 2–5).
     pub load_kg_m2: f32,
-    /// Fuel moisture, kg water per kg dry fuel (cured grass 0.04–0.1, green 0.5+).
+    /// Fuel moisture, kg water per kg dry fuel (cured grass 0.04–0.1, green 0.5+). From
+    /// [`LIVE_MOISTURE`](crate::field::LIVE_MOISTURE) up it is green fuel: weather doesn't
+    /// dry it out.
     pub moisture: f32,
     /// °C at which the dried fuel ignites.
     pub ignition_c: f32,

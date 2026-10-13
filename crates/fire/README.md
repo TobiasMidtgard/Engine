@@ -22,8 +22,10 @@ objects, embers and spot fires, flames, scorch, light, heat, smoke emission and 
   meadow, a forest floor of litter, brush, or a firebreak (`FuelKind::None`).
 - **Moisture** matters the way it does in reality: wet fuel needs more heat to ignite and
   burns weaker (Rothermel damping), and above the fuel's extinction moisture it won't carry a
-  fire at all. Rain soaks fuel and puts fires out; dry weather dries it toward the humidity's
-  equilibrium; puddles, snow and surface wetness (`SurfaceLayers`) count too.
+  fire at all. Rain soaks fuel and puts fires out; dry weather dries dead fuel toward the
+  humidity's equilibrium. Green fuel (placed at moisture 0.3 or more, like a watered lawn or a
+  living hedge) dries back to its own moisture instead, so a green firebreak stays green.
+  Puddles, snow and surface wetness (`SurfaceLayers`) count too.
 - **Burnout and regrowth:** fuel burns down to glowing coals, then black scorch. With
   `regrow_secs` the char fades and the fuel grows back.
 - **Objects** with a `Combustible` (trees, walls, crates, hay) heat up from the ground fire,

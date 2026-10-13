@@ -7,7 +7,7 @@
 
 use engine_core::math::Vec3;
 use engine_world::{Deformation, SurfaceMaterial};
-use rapier3d::prelude::{ColliderHandle, RigidBodyHandle, ShapeType};
+use rapier3d::prelude::{Collider, ColliderHandle, RigidBody, RigidBodyHandle, ShapeType};
 
 use crate::convert;
 use crate::sim::{RegionId, Simulation};
@@ -33,6 +33,49 @@ fn rolls(shape: ShapeType) -> bool {
             | ShapeType::RoundCylinder
             | ShapeType::RoundCone
     )
+}
+
+/// How `collider` (on `body`) spins about its own axis of symmetry: the angular velocity about
+/// that axis, a point on the axis, and the shape's radius. Spinning like this (a ball rolling,
+/// a barrel or wheel turning on its axle) moves no part of the surface. `None` for shapes that
+/// aren't round, and for fixed and kinematic bodies.
+pub(crate) fn symmetric_spin(collider: &Collider, body: &RigidBody) -> Option<(Vec3, Vec3, f32)> {
+    if !body.is_dynamic() {
+        return None;
+    }
+    let shape = collider.shape();
+    // The axis (`None` for a ball: any axis through its center) and a point on it, locally.
+    let (axis, on_axis, radius) = match shape.shape_type() {
+        ShapeType::Ball => (None, Vec3::ZERO, shape.as_ball()?.radius),
+        ShapeType::Capsule => {
+            let c = shape.as_capsule()?;
+            let axis = (c.segment.b - c.segment.a).normalize_or(Vec3::Y);
+            (Some(axis), c.segment.a, c.radius)
+        }
+        ShapeType::Cylinder => (Some(Vec3::Y), Vec3::ZERO, shape.as_cylinder()?.radius),
+        ShapeType::Cone => (Some(Vec3::Y), Vec3::ZERO, shape.as_cone()?.radius),
+        ShapeType::RoundCylinder => {
+            let s = shape.as_round_cylinder()?;
+            let r = s.inner_shape.radius + s.border_radius;
+            (Some(Vec3::Y), Vec3::ZERO, r)
+        }
+        ShapeType::RoundCone => {
+            let s = shape.as_round_cone()?;
+            let r = s.inner_shape.radius + s.border_radius;
+            (Some(Vec3::Y), Vec3::ZERO, r)
+        }
+        _ => return None,
+    };
+    let pose = collider.position();
+    let w = body.angvel();
+    let spin = match axis {
+        None => w,
+        Some(local) => {
+            let axis = pose.rotation * local;
+            axis * w.dot(axis)
+        }
+    };
+    Some((spin, pose.transform_point(on_axis), radius))
 }
 
 /// One contact's pushback: body handles, the turn axis and the angular impulse it may take.

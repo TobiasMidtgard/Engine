@@ -239,4 +239,54 @@ mod tests {
         assert_eq!(puddled(0.0, 0.0, 5.0), 0, "puddles in the sand pit");
         assert!(puddled(20.0, 20.0, 8.0) > 60, "no puddles on the asphalt");
     }
+
+    #[test]
+    fn ground_api_finds_the_dips_right_after_the_player_moves() {
+        // A teleport moves the ground grid, and a tour sets the ground before the ground
+        // simulation has looked at the new place: water must still only go where it pools.
+        let mut app = app();
+        let far = engine_core::math::DVec3::new(300.0, 0.0, 300.0);
+        app.world.spawn((
+            Transform::from_translation(far),
+            GroundPatch {
+                half_extents: [9.0, 9.0],
+                absorbency: 0.05,
+                puddles: 0.5,
+            },
+        ));
+        app.update_n(3);
+        app.world.resource_mut::<FocusPoints>().points = vec![far];
+        app.world
+            .resource_mut::<SurfaceLayers>()
+            .grid
+            .recenter(engine_core::math::DVec2::new(far.x, far.z));
+        call_api(
+            &mut app.world,
+            "weather.ground",
+            json!({"wetness": 1.0, "puddle_m": 0.02}),
+        )
+        .unwrap();
+        let surface = app.world.resource::<SurfaceLayers>();
+        let puddled = |x: f64, z: f64, r: f64| {
+            let mut n = 0;
+            for i in 0..21 {
+                for j in 0..21 {
+                    let p = far
+                        + engine_core::math::DVec3::new(
+                            x + (i as f64 / 10.0 - 1.0) * r,
+                            0.0,
+                            z + (j as f64 / 10.0 - 1.0) * r,
+                        );
+                    if surface.sample(p).puddle_m > 0.001 {
+                        n += 1;
+                    }
+                }
+            }
+            n
+        };
+        // The test world's ground is a grass meadow: it drains.
+        let meadow = puddled(-40.0, 0.0, 20.0);
+        assert!(meadow < 20, "{meadow} of 441 meadow samples hold water");
+        assert!(puddled(0.0, 0.0, 8.0) > 60, "no puddles on the asphalt");
+    }
 }

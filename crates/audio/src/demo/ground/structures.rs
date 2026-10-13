@@ -677,7 +677,23 @@ pub(super) fn underpass_volumes(world: &mut World, origin: DVec3) {
     world.spawn((
         Name::new("Underpass shade"),
         Transform::from_translation(center).with_rotation(rot),
-        sky_volume([u.half_w + 0.2, u.h * 0.5, 4.9], open),
+        sky_volume([u.half_w + 0.2, u.h * 0.5, 4.9], open, 0.2, 2.5),
+    ));
+    // The renderer lights a surface facing down with the sunlit ground of the whole valley,
+    // but under the roof the ceiling and the tops of the walls mostly see the shaded floor:
+    // a darker volume up there, fading in from 1.6 m up, keeps them grey instead of grass
+    // green.
+    let top = 0.725;
+    world.spawn((
+        Name::new("Underpass ceiling shade"),
+        Transform::from_translation(center + DVec3::new(0.0, (u.h * 0.5 - top + 0.05) as f64, 0.0))
+            .with_rotation(rot),
+        engine_render::SkyLightVolume::new([u.half_w + 0.4, top, 4.9])
+            .open(engine_render::BoxFace::PosZ)
+            .open(engine_render::BoxFace::NegZ)
+            .open(engine_render::BoxFace::NegY)
+            .with_sky_light(0.06)
+            .with_fade(1.2),
     ));
 }
 

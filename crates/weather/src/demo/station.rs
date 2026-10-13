@@ -1164,7 +1164,8 @@ fn spawn(world: &mut World, origin: DVec3, kit: &StationKit) {
     s.world.entity_mut(yard).insert(GroundPatch {
         half_extents: [hx, hz],
         absorbency: 0.03,
-        puddles: 0.5,
+        // Distinct puddles in the ruts and low spots, dark wet asphalt between them.
+        puddles: 0.35,
     });
     for (mesh, mat) in [
         (k.patch, m.asphalt_patch),

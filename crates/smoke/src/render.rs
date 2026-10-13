@@ -42,7 +42,7 @@ pub struct SmokeParams {
     pub size: [f32; 4],
     /// Voxels (xyz), firelight scale (w).
     pub dims: [f32; 4],
-    /// Detail, most steps, tunnel count, 1 when the light pass should run.
+    /// Detail, most steps, tunnel count, 1 for a fog bank (soft, wide fog).
     pub look: [f32; 4],
     /// Per tunnel: from (xyz, camera-relative) + radius, to (xyz) + strength.
     pub tunnels: [[f32; 4]; MAX_TUNNELS * 2],
@@ -603,7 +603,7 @@ impl RenderFeature for SmokeFeature {
                     settings.detail,
                     settings.max_steps.clamp(8, 512) as f32,
                     count as f32,
-                    0.0,
+                    if dom.fog { 1.0 } else { 0.0 },
                 ],
                 tunnels: packed,
             };

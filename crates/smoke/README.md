@@ -35,6 +35,15 @@ shadowed volumes.
   billows are added with noise (fading out with distance), the march stops at the scene's
   depth, and the result is fogged like the rest of the scene. Motion between simulation steps
   is blended so it stays smooth at any frame rate.
+- **Fog banks:** a `FogBank` on a `SmokeVolume` fills that volume's low ground with fog up to
+  a level (`depth_m` above the lowest ground, with a soft top): valleys and hollows fill,
+  hills stand out of it. The fog is chilled, white air in the same simulation, so it sinks,
+  drains off slopes and pools, the wind carries it, bullets, blasts, fans and vehicles cut
+  through it, and it forms again behind them (`form_secs`). It follows the weather's fog
+  (`WeatherState::fog`) unless given a fixed `amount`, and burns off when there should be
+  less of it (`burn_secs`). `visibility_m` sets how far you see inside it. It's drawn as a
+  wide, soft bank rather than billowing smoke, so the low sun lights its top and trees cast
+  shafts across it.
 - **Visibility for gameplay:** after every step a copy of the smoke goes to the engine's
   `Obscurance` contract (as "smoke"), so NPC AI asks `obscurance.transmittance(eye, target)`
   without depending on this module, and fog or dust from other modules stack with it. The
@@ -43,7 +52,7 @@ shadowed volumes.
 ## Contracts
 
 Reads: `SmokeEmission`, `ProjectileTrace`, `WorldImpulse`, `WindField`, `WeatherState` (air
-temperature), `Ground` (the floor of each volume), `FocusPoints` (volumes far from every
+temperature; fog for fog banks), `Ground` (the floor of each volume), `FocusPoints` (volumes far from every
 focus, or the camera, pause).
 
 Writes: `WindField` (fans), `Obscurance` (the "smoke" source).
@@ -71,6 +80,10 @@ commands.spawn((transform, SmokeSource { rate_kg_s: 0.01, temperature_c: 180.0, 
 // A fan blowing along the entity's forward direction, and a car that stirs the smoke.
 commands.spawn((transform, SmokeFan { speed: 9.0, radius: 2.0, reach: 20.0, on: true }));
 commands.spawn((car_transform, SmokeObstacle { radius: 2.0 }));
+
+// Ground fog in a valley: follows the weather, 40 m visibility inside, 15 m deep.
+commands.spawn((valley_transform, SmokeVolume { size: [200.0, 30.0, 400.0], cell_m: 3.0 },
+    FogBank { visibility_m: 40.0, depth_m: 15.0, ..default() }));
 
 // Can the guard see the player? (Any module can ask; this one answers.)
 let seen = env.obscurance.transmittance(eye, target) > 0.3; // env: engine_world::Env
@@ -100,6 +113,10 @@ away. `demo::VIEWS` lists camera spots (bullet holes from behind the turret, the
 signal smoke, the fans), each with how long after a restart (`smoke.demo` with
 `{"restart": true}`) its moment comes, so a screenshot tour catches it.
 
+`examples/smoke_fog.rs` is the fog test scene: a wooded valley at dawn filled with a fog
+bank up to about 14 m, seen from a ridge, down the valley, from inside the fog and from just
+above its top.
+
 ## Performance
 
 Volumes step at `sim_hz` (20 Hz) of world time, in parallel, and only inside the box around
@@ -111,7 +128,6 @@ and relights a volume only when it changed.
 ## Not yet
 
 - Smoke crossing from one volume into a neighbor (each volume is on its own).
-- Volumetric fog banks (ground fog that rolls in valleys) on the same simulation.
 - Smoke lit from below by the flames' own shape (firelight is point lights). Heat haze is
   drawn by the fire module.
 - Half-resolution raymarching for very large volumes on slow GPUs.

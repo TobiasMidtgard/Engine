@@ -105,7 +105,7 @@ pub struct ParticleFeature {
     /// Run the simulation in this frame's `compute` (false when re-rendering a frame).
     simulate: bool,
     soft: bool,
-    /// Some emitter this frame draws heat haze (needs the scene color copy).
+    /// Some emitter this frame draws heat haze or a portal (needs the scene color copy).
     haze: bool,
     /// Colliding particles also hit last frame's scene depth (needs the scene depth copy).
     scene_collision: bool,
@@ -523,6 +523,10 @@ impl RenderFeature for ParticleFeature {
                 } else {
                     e.look[3] = 0.0;
                 }
+            }
+            // A portal shows the scene behind it, swirled.
+            if e.spin_look[2] == Sprite::Vortex.code() {
+                self.haze = true;
             }
             self.emitters.push(e);
 
