@@ -674,6 +674,7 @@ fn weapon(p: &crate::theme::Palette) -> El {
                 })
                 .child(
                     El::icon("pistol")
+                        .id("hud_weapon_icon")
                         .with_style(|s| s.size(54.0, 54.0))
                         .pick_ignore(),
                 ),
@@ -908,6 +909,18 @@ pub fn hud_system(world: &mut World) {
             "hud_vignette",
             ((0.35 - health) / 0.35).clamp(0.0, 1.0),
         );
+        let weapon_icon = world
+            .get_resource::<UiData>()
+            .and_then(|d| d.get_str("weapon.icon"))
+            .filter(|i| !i.is_empty())
+            .map(String::from);
+        if let Some(name) = weapon_icon
+            && let Some(e) = screens::find_in(world, root, "hud_weapon_icon")
+            && let Some(mut icon) = world.get_mut::<Icon>(e)
+            && icon.name != name
+        {
+            icon.name = name;
+        }
         if let Some(e) = screens::find_in(world, root, "hud_prompt_key")
             && let Some(mut k) = world.get_mut::<KeyHint>(e)
         {
@@ -938,14 +951,15 @@ fn set_opacity(world: &mut World, root: Entity, id: &str, opacity: f32) {
 }
 
 /// The HUD fades out while a menu (any other modal screen: dialogue, shop, inventory, map,
-/// settings) is open, and back in when it closes.
+/// settings) is open, and back in when it closes. It stays up under the quick-select wheel,
+/// so the ammo and the slow-motion gauge read while choosing.
 fn step_aside_for_menus(world: &mut World) {
     let Some(root) = screens::find_screen(world, "hud") else {
         return;
     };
     let menu_open = screens::open_screens(world)
         .iter()
-        .any(|(key, _, _, modal)| *modal && key != "hud");
+        .any(|(key, _, _, modal)| *modal && !matches!(key.as_str(), "hud" | "wheel"));
     let dt = world.resource::<Time>().real_delta_secs().min(0.1);
     let Some(mut n) = world.get_mut::<Node>(root) else {
         return;

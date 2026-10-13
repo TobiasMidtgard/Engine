@@ -157,6 +157,19 @@ fn main() {
         shot(&mut app, &dir, "hud");
         api(&mut app, "time.set_speed", json!({"scale": 1.0}));
     }
+    if want("wheel") {
+        // The quick-select wheel over the HUD, pointing at the rail rifle.
+        show(&mut app, "hud", json!({}));
+        api(&mut app, "ui.show", json!({"screen": "wheel"}));
+        app.update_n(30);
+        if let Some(c) = center_of(&mut app, "wheel_canvas") {
+            let a = std::f32::consts::TAU / 8.0;
+            let p = c + Vec2::new(a.sin(), -a.cos()) * 240.0;
+            send(&mut app, InputEvent::CursorMoved { position: p });
+        }
+        app.update_n(40);
+        shot(&mut app, &dir, "wheel");
+    }
     if want("dialogue") {
         show(&mut app, "dialogue", json!({"tree": "merchant_intro"}));
         app.update_n(200);

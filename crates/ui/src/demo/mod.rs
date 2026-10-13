@@ -180,6 +180,7 @@ pub fn setup_data(world: &mut World) {
     crate::dialogue::add_demo_trees(world);
     crate::map::add_demo_map(world);
     crate::quests::add_demo_quests(world);
+    crate::wheel::add_demo_items(world);
 }
 
 /// Marks the UI test area's world objects.

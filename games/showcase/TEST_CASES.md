@@ -88,7 +88,7 @@ are built, nothing simulates yet) · ⬜ not visible yet
 | 42 | Shop UI | `market_shop` | UI system and maps | ✅ buy and sell tabs, item cards, quantity, prices and gold |
 | 43 | Inventory UI | `market_inventory` | UI system and maps | ✅ bag grid with drag and drop, equipment, weight, item details |
 | 44 | Interactive maps: flat map, 3D globe, galaxy map | `market_map_surface`, `market_map_globe`, `market_map_system`, `market_map_galaxy` | UI system and maps | ✅ one map zooming surface → globe → star system → galaxy, with POIs, waypoint and info cards |
-| 45 | HUD | `market_hud` (any zone via `ui.show {"screen": "hud"}`) | UI system and maps | ✅ vitals, compass, minimap, quest, hotbar, slow-motion gauge, world markers; also `market_pause`, `market_settings`, and `market_journal` (quests by kind with objectives, rewards and a live map of the place; tracking one moves the HUD tracker and the waypoint) |
+| 45 | HUD | `market_hud` (any zone via `ui.show {"screen": "hud"}`) | UI system and maps | ✅ vitals, compass, minimap, quest, hotbar, slow-motion gauge, world markers; also `market_pause`, `market_settings`, and `market_journal` (quests by kind with objectives, rewards and a live map of the place; tracking one moves the HUD tracker and the waypoint) and `market_wheel` (a quick-select wheel over the HUD that slows the world while you pick a weapon, item or ability) |
 
 ## Engine-wide
 

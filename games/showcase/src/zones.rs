@@ -689,6 +689,18 @@ pub fn demo_views(z: &Zone) -> Vec<View> {
                     "Quest journal",
                     r#"{"screen": "journal", "select": "silent_relay"}"#,
                 ),
+                // Over the HUD, so the slow-motion gauge shows the world slowing.
+                View::new(
+                    "market_wheel",
+                    "Quick-select wheel (slows time)",
+                    eye.to_array(),
+                    target.to_array(),
+                    15.0,
+                )
+                .warmup(1.5)
+                .on_arrive("ui.show", r#"{"screen": "hud", "instant": true}"#)
+                .on_arrive("ui.show", r#"{"screen": "wheel"}"#)
+                .on_leave("ui.hide_all", "{}"),
                 ui(
                     "market_map_galaxy",
                     "Galaxy map",
