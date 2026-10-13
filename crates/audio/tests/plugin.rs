@@ -172,6 +172,84 @@ fn the_trail_walks_every_surface() {
     }
 }
 
+#[test]
+fn trail_people_ask_for_bodies_and_step_aside_for_them() {
+    use engine_world::animation::{BodyRequest, SkeletonPose};
+    let mut app = app();
+    app.add_systems(Startup, |mut commands: Commands| {
+        engine_audio::demo::spawn_demo(&mut commands, DVec3::ZERO);
+    });
+    #[derive(Resource, Default)]
+    struct Steps(Vec<Entity>);
+    app.init_resource::<Steps>().add_systems(
+        Last,
+        |mut contacts: MessageReader<GroundContact>, mut steps: ResMut<Steps>| {
+            steps.0.extend(contacts.read().filter_map(|c| c.entity));
+        },
+    );
+    app.update();
+    let mut named = |name: &str| {
+        app.world
+            .query::<(Entity, &Name)>()
+            .iter(&app.world)
+            .find(|(_, n)| n.as_str() == name)
+            .map(|(e, _)| e)
+            .unwrap_or_else(|| panic!("no {name}"))
+    };
+    let (hiker, runner, horse) = (
+        named("Trail hiker"),
+        named("Trail runner"),
+        named("Trail horse"),
+    );
+    for e in [hiker, runner] {
+        let body = app
+            .world
+            .get::<BodyRequest>(e)
+            .expect("a person asks for a body");
+        assert_eq!(body.kind, "human");
+        assert!(body.model.is_some());
+    }
+
+    // Until a body arrives the stand-ins walk and step.
+    app.update_n(60);
+    let steps = std::mem::take(&mut app.world.resource_mut::<Steps>().0);
+    assert!(steps.contains(&hiker) && steps.contains(&horse));
+
+    // (Headless, the stand-in's parts have no renderer; give them one to see them hide.)
+    let parts: Vec<Entity> = app.world.get::<Children>(hiker).unwrap().to_vec();
+    assert!(!parts.is_empty());
+    for &p in &parts {
+        app.world
+            .entity_mut(p)
+            .insert(engine_render::MeshRenderer::default());
+    }
+    let shown = |app: &App| {
+        parts
+            .iter()
+            .filter(|&&p| {
+                app.world
+                    .get::<engine_render::MeshRenderer>(p)
+                    .unwrap()
+                    .visible
+            })
+            .count()
+    };
+
+    // The animation module answers for the hiker: its body shows and its own feet step.
+    app.world.entity_mut(hiker).insert(SkeletonPose::default());
+    app.update_n(60);
+    let steps = std::mem::take(&mut app.world.resource_mut::<Steps>().0);
+    assert!(!steps.contains(&hiker), "the hiker stepped twice");
+    assert!(steps.contains(&horse));
+    assert_eq!(shown(&app), 0, "the stand-in still shows");
+
+    // The body goes again: the stand-in is back.
+    app.world.entity_mut(hiker).remove::<SkeletonPose>();
+    app.update_n(60);
+    assert!(app.world.resource::<Steps>().0.contains(&hiker));
+    assert_eq!(shown(&app), parts.len());
+}
+
 /// A concrete wall: the plane x = 5, as tall and wide as you like.
 struct Wall;
 

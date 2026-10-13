@@ -16,6 +16,7 @@ use std::sync::Arc;
 use engine_assets::{Assets, Handle};
 use engine_core::prelude::*;
 use engine_render::{Mesh, MeshRenderer, StandardMaterial, Vertex};
+use engine_world::animation::{BodyRequest, SkeletonPose};
 
 use super::{TrailWalker, yaw};
 use rig::Xf;
@@ -204,6 +205,7 @@ fn spawn(
     name: &'static str,
     walker: TrailWalker,
     scale: Option<LocalTimeScale>,
+    body: Option<BodyRequest>,
     rig: Rig,
     parts: impl FnOnce(&textures::Textures) -> Vec<Part> + Send + 'static,
 ) {
@@ -261,6 +263,9 @@ fn spawn(
         if let Some(s) = scale {
             root.insert(s);
         }
+        if let Some(b) = body {
+            root.insert(b);
+        }
         let root = root.id();
         for (p, (h, skin)) in parts.iter().zip(built) {
             let mut e = world.spawn((Transform::default(), BodyPart(p.bone as u8), ChildOf(root)));
@@ -276,6 +281,9 @@ fn spawn(
 
 /// A hiker (`runner` false: red shell jacket, daypack, boots) or a runner (fitted top,
 /// tights, running shoes). `garment` is the jacket or top colour (sRGB hex).
+///
+/// Both ask the animation module for a body (a scanned person, animated from how the walker
+/// moves); the body built here stands in until one arrives, and stays without one.
 pub(super) fn person(
     commands: &mut Commands,
     walker: TrailWalker,
@@ -284,6 +292,11 @@ pub(super) fn person(
     scale: Option<LocalTimeScale>,
 ) {
     let build = if runner { human::RUNNER } else { human::HIKER };
+    let body = if runner {
+        BodyRequest::human(2).with_model("anim/characters/athlete.glb")
+    } else {
+        BodyRequest::human(1).with_model("anim/characters/walker.glb")
+    };
     spawn(
         commands,
         if runner {
@@ -293,6 +306,7 @@ pub(super) fn person(
         },
         walker,
         scale,
+        Some(body),
         Rig::Human(build),
         move |tex| human::parts(&build, garment, tex),
     );
@@ -304,6 +318,7 @@ pub(super) fn dog(commands: &mut Commands, walker: TrailWalker) {
         commands,
         "Trail dog",
         walker,
+        None,
         None,
         Rig::Dog,
         quadruped::dog_parts,
@@ -317,22 +332,44 @@ pub(super) fn horse(commands: &mut Commands, walker: TrailWalker) {
         "Trail horse",
         walker,
         None,
+        None,
         Rig::Horse,
         quadruped::horse_parts,
     );
 }
 
 /// Pose every walker's body for this frame, and bend the meshes at their joints.
+#[allow(clippy::type_complexity)]
 pub(super) fn animate(
-    walkers: Query<(&TrailWalker, &Rig, &Children)>,
-    mut parts: Query<(&BodyPart, &mut Transform, Option<&mut Skin>), Without<TrailWalker>>,
+    walkers: Query<(&TrailWalker, &Rig, &Children, Has<SkeletonPose>)>,
+    mut parts: Query<
+        (
+            &BodyPart,
+            &mut Transform,
+            Option<&mut Skin>,
+            Option<&mut MeshRenderer>,
+        ),
+        Without<TrailWalker>,
+    >,
     mut meshes: Option<ResMut<Assets<Mesh>>>,
 ) {
-    for (w, rig, children) in &walkers {
+    for (w, rig, children, dressed) in &walkers {
+        // The animation module has given this walker a body: hide the stand-in (and show it
+        // again if the body goes).
+        for &child in &children[..] {
+            if let Ok((_, _, _, Some(mut r))) = parts.get_mut(child)
+                && r.visible == dressed
+            {
+                r.visible = !dressed;
+            }
+        }
+        if dressed {
+            continue;
+        }
         let pose = rig.pose(w);
         let rest = rig.rest();
         for &child in &children[..] {
-            let Ok((part, mut t, skin)) = parts.get_mut(child) else {
+            let Ok((part, mut t, skin, _)) = parts.get_mut(child) else {
                 continue;
             };
             let bone = part.0 as usize;
