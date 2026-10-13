@@ -91,7 +91,7 @@ fn clearing(reflections: bool) -> App {
                         height: 4.0,
                         segments: 0,
                     },
-                    bark.clone(),
+                    bark,
                 ),
             ));
             w.spawn((
@@ -102,7 +102,7 @@ fn clearing(reflections: bool) -> App {
                         height,
                         segments: 0,
                     },
-                    needles.clone(),
+                    needles,
                 ),
             ));
         }

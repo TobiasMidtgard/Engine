@@ -111,7 +111,7 @@ fn floor_app(
         ] {
             w.spawn((
                 Transform::from_translation(center),
-                MeshRenderer::new(Shape::Cuboid { size }, stone.clone()),
+                MeshRenderer::new(Shape::Cuboid { size }, stone),
             ));
         }
     }

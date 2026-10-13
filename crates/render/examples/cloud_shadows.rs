@@ -193,7 +193,7 @@ fn landscape(clouds: bool) -> App {
                 Shape::Cuboid {
                     size: [24.0, h as f32, 24.0],
                 },
-                stone.clone(),
+                stone,
             ),
         ));
     }
