@@ -53,6 +53,15 @@ compresses and stretches.
   frame and `AnimationEvent` at marked frames, so movement, AI, cloth and hair never depend
   on this crate. Footsteps and hoof falls become `GroundContact` (foot, paw or hoof, with
   load and speed) and `NoiseEvent`; hammer impacts are loud `NoiseEvent`s.
+- **Bodies on request.** A module that moves an entity itself puts `BodyRequest` on it
+  (`human`, `horse` or `spider`, an optional model path, height and seed) and gets a body:
+  the paddock's rigs and models, animated from the entity's motion (`LocomotionState` or
+  the transform's frame-to-frame movement; speed picks walk or run, a horse's trot, canter
+  or gallop, turning leans), with footstep `AnimationEvent`s and `GroundContact`s. The
+  `SkeletonPose` appearing is the answer; removing the request takes the body away and
+  leaves the entity as it was. People are the fetched Rocketbox characters by seed (or by
+  height: 1.74 m or 1.81 m), else generated; the imported horse is scaled to the requested
+  shoulder height. Other kinds (a dog) get no body yet and keep the requester's stand-in.
 - **Time.** Every animator uses `Time::delta_for(LocalTimeScale)`, so `TimeDilation` slows
   animation and a hero who ignores world dilation keeps moving at full speed. Animators
   beyond `lod_distance` from the simulation focus update at a quarter rate.
@@ -127,6 +136,9 @@ character files fetched it runs the same checks on the imported people. `tests/r
 renders a skinned character on the GPU and checks the pixels follow the pose, and that
 textured submeshes each draw with their own surface. `tests/world_shift.rs` runs two
 paddocks, shifts one halfway, and checks every pose and place still matches.
+`tests/body_request.rs` asks for a hiker, a horse and an unknown kind on entities the test
+moves itself: the bodies walk, run and gallop from that motion, step on the ground, keep the
+requester's own parameters, rebuild on a changed request and go with a removed one.
 
 ## Not yet
 
