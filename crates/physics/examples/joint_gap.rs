@@ -44,13 +44,13 @@ fn main() {
         gaps
     });
     let mut csv = String::from("frame,seconds,constraint_mm,articulated_mm\n");
-    for f in 0..FRAMES {
+    for (f, (c, a)) in runs[0].iter().zip(&runs[1]).enumerate() {
         csv += &format!(
             "{},{:.4},{:.2},{:.2}\n",
             f + 1,
             (f + 1) as f64 / 60.0,
-            runs[0][f] * 1000.0,
-            runs[1][f] * 1000.0
+            c * 1000.0,
+            a * 1000.0
         );
     }
     std::fs::write(&out, csv).expect("write the CSV");
