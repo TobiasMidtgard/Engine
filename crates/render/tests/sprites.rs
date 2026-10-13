@@ -514,16 +514,28 @@ fn cutout_sprite_hides_meshes_behind_it_and_is_hidden_by_meshes_in_front() {
             unlit(0x0000ff),
         ),
     ));
+    // A translucent white strip between the plate and the card's top, drawn after everything
+    // opaque: only the card's depth keeps it off the card.
+    app.world.spawn((
+        Transform::from_xyz(0.0, 0.75, -0.5),
+        Sprite::solid([1.0, 1.0, 1.0, 0.9], [3.0, 0.3]),
+    ));
     let Some(img) = render(&mut app, "cutout_depth", 3) else {
         return;
     };
     let card = project(&mut app, DVec3::new(0.75, 0.75, 0.0));
     let hole = project(&mut app, DVec3::new(0.0, 0.1, 0.0));
     let bar = project(&mut app, DVec3::new(-0.75, -0.75, 1.0));
+    let strip = project(&mut app, DVec3::new(1.4, 0.75, -0.5));
     let red = px(&img, card.0, card.1);
     assert!(
         red[0] > 150 && red[1] < 60 && red[2] < 60,
-        "the card in front of the plate: {red:?}"
+        "the card in front of the plate and the strip: {red:?}"
+    );
+    let white = px(&img, strip.0, strip.1);
+    assert!(
+        white.iter().take(3).all(|&c| c > 150),
+        "the strip beside the card: {white:?}"
     );
     let green = px(&img, hole.0, hole.1);
     assert!(
@@ -743,9 +755,8 @@ fn parallax_layers_follow_the_camera_at_their_factor_and_repeat() {
     app.world.get_mut::<Transform>(camera).unwrap().translation = DVec3::new(3.0, 0.0, 10.0);
     let img = render(&mut app, "parallax_3", 1).unwrap();
     let moved = red_columns(&img);
-    // Copy 0 at x = 1.5 m → screen -1.5 m (pixels 0..50); copy 1 at 5.5 m → 2.5 m (off screen
-    // past 200)... the camera's view spans world 1..5: copy 0 covers 1..2 (px 0..50 minus the
-    // part off screen), copy 1 none.
+    // The view spans x = 1..5: the block (moved 1.5 m) spans 1..2, pixels 0..50; its next
+    // copy, 4 m on, spans 5..6, just out of view.
     assert_eq!(
         (moved.first(), moved.last()),
         (Some(&0), Some(&49)),
