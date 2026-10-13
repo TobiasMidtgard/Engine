@@ -281,15 +281,27 @@ fn fs_particle(in: VsOut) -> @location(0) vec4<f32> {
             // Denser centers read a little darker, wispy edges brighter (fake self-shadowing).
             rgb *= mix(1.15, 0.8, saturate(a)) * volume_shade(c, wobble * 0.9, in.sun);
         }
-        case 3u: { // flame: licking tongues; hot cores whiten, cool edges deepen
-            let q = vec2<f32>(c.x * (1.2 + c.y * 0.5), c.y * 0.85 + 0.12);
-            let shape = smoothstep(1.0, 0.2, length(q));
-            let flow = vec2<f32>(in.seed * 17.0, in.seed * 5.0 - in.age * 2.5);
-            let warp = vec2<f32>(fbm2(c * 1.3 + flow, 2), fbm2(c * 1.3 + flow + vec2<f32>(3.1, 7.7), 2)) - 0.5;
-            let n = fbm2(vec2<f32>(c.x * 2.2, c.y * 1.5 - in.age * 4.5) + warp * 1.4 + in.seed * 23.0, 3);
-            let core = exp(-(sq(c.x) * 5.0 + sq(c.y + 0.3) * 2.5));
-            let heat = saturate(shape * (0.3 + n * 1.25) * 1.3 - 0.12 + core * 0.35 * shape);
-            a = smoothstep(0.03, 0.4, heat);
+        case 3u: { // flame: a licking tongue, round at the root and drawn up to a flickering point
+            let s = in.seed * 23.0;
+            let up = saturate(c.y * 0.5 + 0.5);
+            // Rising swirls sway the tongue, more the higher up; finer ones flicker its edges.
+            let f = vec2<f32>(c.x * 1.4 + s, c.y * 0.9 - in.age * 3.0 + s * 0.7);
+            let w = vec2<f32>(fbm2(f, 2), fbm2(f + vec2<f32>(5.2, 1.3), 2)) - 0.45;
+            let e = fbm2(vec2<f32>(c.x * 4.0 + s + 2.7, c.y * 2.5 - in.age * 7.0 + s), 2) - 0.45;
+            let p = c + vec2<f32>(w.x * 0.9 + e * 0.35, w.y * 0.4) * (0.25 + up * 0.9);
+            // Teardrop: a round root below `yb`, narrowing to a point at the top.
+            let yb = -0.35;
+            var hw = 0.68 * pow(saturate((0.95 - p.y) / (0.95 - yb)), 1.4);
+            if (p.y < yb) {
+                hw = 0.68 * sqrt(saturate(1.0 - sq((p.y - yb) / 0.55)));
+            }
+            let body = smoothstep(1.0, 0.45, abs(p.x) / max(hw, 1e-3)) * step(1e-3, hw);
+            // Licks rising through it; where they thin out near the top the tongue tears.
+            let n = fbm2(vec2<f32>(p.x * 3.4, p.y * 1.3 - in.age * 5.0) + s, 4);
+            let core = exp(-(p.x * p.x * 9.0 + sq(p.y + 0.4) * 3.0));
+            let heat = saturate(body * (n * 1.6 - 0.5 + (1.0 - up) * 0.3 + core * 0.45));
+            // The root, right over the fuel, is dim and clear.
+            a = smoothstep(0.04, 0.25, heat) * (0.25 + 0.75 * smoothstep(-0.95, -0.45, p.y));
             rgb = flame_shade(rgb, heat);
         }
         case 4u: { // droplet: a soft drop (a streak when stretched) mirroring the sky
