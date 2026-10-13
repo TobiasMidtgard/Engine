@@ -1057,6 +1057,8 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     let painted_snow = pw[2];
     let snow_amount = saturate(max(max(climate_snow, weather_snow), painted_snow)) * (1.0 - ocean);
     var snow = 0.0;
+    var glint = 0.0;
+    var glint_n = up;
     if (snow_amount > 0.003) {
         snow = mix(fill_low(snow_amount, ground_h), snow_amount, far);
         // Deep prints in thin snow show the ground below.
@@ -1081,15 +1083,15 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
         n = normalize(mix(n, sm.normal, snow));
         roughness = mix(roughness, mix(sm.roughness, 0.45, packed), snow);
         // Glints: here and there an ice crystal faces just right and flashes in the sun. In
-        // cells at least a pixel across, one in thirty gets a tilted, glossy facet.
+        // cells at least a pixel across, one in sixteen holds a tilted mirror facet (lit below,
+        // on top of the snow's own shading, which it leaves alone).
         if (pixel < 0.03) {
             let cell = exp2(ceil(log2(max(pixel * 1.5, 0.002))));
             let gp = floor(tp / cell);
-            let glint = step(0.967, hash13(gp + vec3<f32>(0.0, 71.3, 0.0))) * (1.0 - smoothstep(0.012, 0.03, pixel))
+            glint = step(0.94, hash13(gp + vec3<f32>(0.0, 71.3, 0.0))) * (1.0 - smoothstep(0.012, 0.03, pixel))
                 * snow * (1.0 - packed);
             let tilt = vec3<f32>(hash13(gp + 1.7), hash13(gp + 5.3), hash13(gp + 9.1)) * 2.0 - 1.0;
-            n = normalize(mix(n, normalize(n + tilt * 0.5), glint));
-            roughness = mix(roughness, 0.18, glint);
+            glint_n = normalize(n + tilt * 0.5);
         }
         occlusion = mix(occlusion, sm.occlusion, snow);
         subsurface = mix(subsurface, 0.35, snow);
@@ -1179,6 +1181,15 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     s.occlusion = occlusion;
     s.subsurface = subsurface;
     var color = shade_surface(s, in.rel);
+    // Snow glints: the sun mirrored in a crystal facet (a glossy GGX lobe; facets stacked in
+    // the crystal reflect far more than one ice surface's 2 %).
+    let to_sun = frame.sun_dir.xyz;
+    if (glint > 0.0 && dot(n, to_sun) > 0.0) {
+        let v = normalize(-in.rel);
+        let d = d_ggx(saturate(dot(glint_n, normalize(to_sun + v))), 0.08);
+        let flash = d * 0.15 * 0.25 / max(dot(n, v), 0.2) * glint;
+        color += pre_expose(frame.sun_color.rgb * sun_transmittance(in.rel) * shadow_factor(in.rel, n) * flash);
+    }
     if (maps.flags.z > 0.5) {
         let level = in.lod.y;
         let tint = vec3<f32>(fract(level * 0.37), fract(level * 0.61 + 0.3), fract(level * 0.83 + 0.6));
