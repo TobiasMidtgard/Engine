@@ -12,7 +12,7 @@ use engine_render::prelude::*;
 use engine_render::{RenderDisabled, capture_now};
 
 /// The way the statue faces.
-const FACING: Vec3 = Vec3::new(0.91, 0.0, 0.41);
+const FACING: Vec3 = Vec3::new(0.5, 0.0, -0.87);
 
 /// Seconds into the cycle, and the camera: distance out in front, to the statue's right,
 /// height; and the height it looks at.
@@ -60,12 +60,16 @@ fn main() {
     app.world
         .resource_mut::<engine_softbody::demo::skin::BodyLibrary>()
         .blocking = true;
+    // Afternoon sun over the statue's right shoulder, as at the showcase's tour stop.
+    let sun = (FACING * 0.55 + Vec3::new(-FACING.z, 0.0, FACING.x) * 0.45 + Vec3::Y * 0.7)
+        .normalize()
+        .as_dvec3();
     app.world.spawn((
         DirectionalLight {
             illuminance: 100_000.0,
             ..Default::default()
         },
-        Transform::default().looking_at(DVec3::new(-0.45, -0.62, -0.65), Vec3::Y),
+        Transform::default().looking_at(-sun, Vec3::Y),
     ));
     let camera = app
         .world

@@ -773,7 +773,7 @@ pub fn demo_views(z: &Zone) -> Vec<View> {
             View::new(
                 "yard_statue",
                 "Unveiling: silk lifted off a marble statue",
-                [-9.3, 2.3, -1.0],
+                [-10.5, 2.3, -8.4],
                 [-14.0, 2.6, -4.0],
                 15.0,
             )

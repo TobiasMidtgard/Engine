@@ -244,7 +244,7 @@ pub fn spawn_demo(commands: &mut Commands, origin: DVec3) {
     statue::spawn_unveiling(
         commands,
         c + DVec3::new(-14.0, 0.0, -4.0),
-        Vec3::new(0.91, 0.0, 0.41),
+        Vec3::new(0.5, 0.0, -0.87),
     );
 }
 

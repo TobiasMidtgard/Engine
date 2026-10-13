@@ -50,7 +50,7 @@ fn the_crane_drapes_the_statue_then_lifts_the_sheet_clear() {
         library.blocking = true;
         library.quality = BodyQuality(2.0);
     }
-    let facing = Vec3::new(0.91, 0.0, 0.41);
+    let facing = Vec3::new(0.5, 0.0, -0.87);
     app.add_systems(Startup, move |mut commands: Commands| {
         spawn_unveiling(&mut commands, DVec3::ZERO, facing);
     });
