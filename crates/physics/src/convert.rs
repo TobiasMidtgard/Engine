@@ -154,25 +154,131 @@ pub fn up_rotation(up: Vec3) -> Quat {
 pub struct JointFrames {
     pub anchor1: Vec3,
     pub anchor2: Vec3,
-    /// Joint axis in body 1's local space.
-    pub axis1: Vec3,
-    /// The same axis in body 2's local space (so the joint starts unstrained).
-    pub axis2: Vec3,
+    /// Joint axis (hinge or slide) in body 1's local space.
+    pub axis: Vec3,
+    /// Body 1's rotation seen from body 2 at rest (`rot2⁻¹ · rot1` when the joint was made):
+    /// body 2's frame is body 1's turned by it, so the rest pose is the joint's zero (hinge
+    /// angle 0, slide 0, a fixed joint holds the bodies as they were, a cone is centered on it).
+    pub rest: Quat,
+}
+
+impl JointFrames {
+    /// The same joint seen from body 2.
+    pub fn swapped(self) -> Self {
+        Self {
+            anchor1: self.anchor2,
+            anchor2: self.anchor1,
+            axis: self.rest * self.axis,
+            rest: self.rest.inverse(),
+        }
+    }
 }
 
 /// Build a Rapier joint for `kind` between two bodies.
 pub fn joint(kind: &JointKind, frames: JointFrames, collide_connected: bool) -> GenericJoint {
+    build(kind, frames, collide_connected, true)
+}
+
+/// Build the articulation link for `kind` (see [`articulates`]): the same joint without a cone
+/// limit, which [`cone_limit`] adds as a separate constraint (a ball joint's articulation
+/// coordinates integrate the spin, so they drift from the true swing angle).
+pub fn articulation(
+    kind: &JointKind,
+    frames: JointFrames,
+    collide_connected: bool,
+) -> GenericJoint {
+    build(kind, frames, collide_connected, false)
+}
+
+/// Whether `kind` can be an articulation link (ropes and springs are constraints by nature).
+pub fn articulates(kind: &JointKind) -> bool {
+    matches!(
+        kind,
+        JointKind::Fixed
+            | JointKind::Spherical { .. }
+            | JointKind::Revolute { .. }
+            | JointKind::Prismatic { .. }
+    )
+}
+
+/// A ball joint's cone limit on its own: frees every axis, limits the two swing axes.
+pub fn cone_limit(limit: f32, frames: JointFrames, collide_connected: bool) -> GenericJoint {
+    let l = limit.abs();
+    let mut joint = GenericJointBuilder::new(JointAxesMask::empty())
+        .limits(JointAxis::AngY, [-l, l])
+        .limits(JointAxis::AngZ, [-l, l])
+        .contacts_enabled(collide_connected)
+        .build();
+    place(&mut joint, frames, None);
+    joint
+}
+
+/// `kind` as seen from body B: hinge and slide coordinates change sign.
+pub fn swapped(kind: &JointKind) -> JointKind {
+    let flip = |limits: &Option<[f32; 2]>, motor: &Option<JointMotor>| {
+        (
+            limits.map(|[lo, hi]| [-hi, -lo]),
+            motor.map(|m| JointMotor {
+                target_velocity: -m.target_velocity,
+                target_position: m.target_position.map(|p| -p),
+                ..m
+            }),
+        )
+    };
+    match kind {
+        JointKind::Revolute {
+            axis,
+            limits,
+            motor,
+        } => {
+            let (limits, motor) = flip(limits, motor);
+            JointKind::Revolute {
+                axis: *axis,
+                limits,
+                motor,
+            }
+        }
+        JointKind::Prismatic {
+            axis,
+            limits,
+            motor,
+        } => {
+            let (limits, motor) = flip(limits, motor);
+            JointKind::Prismatic {
+                axis: *axis,
+                limits,
+                motor,
+            }
+        }
+        other => other.clone(),
+    }
+}
+
+/// Set both frames: anchors, body 1's frame along `axis` (when the joint has one) and body
+/// 2's frame matching it at rest.
+fn place(joint: &mut GenericJoint, frames: JointFrames, axis: Option<Vec3>) {
+    if let Some(axis) = axis {
+        joint.set_local_axis1(axis.try_normalize().unwrap_or(Vec3::X));
+    }
+    let f1 = joint.local_frame1.rotation;
+    joint.set_local_frame1(Pose::from_parts(frames.anchor1, f1));
+    joint.set_local_frame2(Pose::from_parts(
+        frames.anchor2,
+        (frames.rest * f1).normalize(),
+    ));
+}
+
+fn build(
+    kind: &JointKind,
+    frames: JointFrames,
+    collide_connected: bool,
+    cone: bool,
+) -> GenericJoint {
     let mut joint: GenericJoint = match kind {
-        JointKind::Fixed => FixedJointBuilder::new()
-            .local_anchor1(frames.anchor1)
-            .local_anchor2(frames.anchor2)
-            .build()
-            .into(),
+        JointKind::Fixed => FixedJointBuilder::new().build().into(),
         JointKind::Spherical { cone_limit } => {
-            let mut b = SphericalJointBuilder::new()
-                .local_anchor1(frames.anchor1)
-                .local_anchor2(frames.anchor2);
-            if let Some(limit) = cone_limit {
+            let mut b = SphericalJointBuilder::new();
+            if let Some(limit) = cone_limit.filter(|_| cone) {
                 let l = limit.abs();
                 // Rapier limits each swing axis separately: a square cone of half-angle `l`.
                 b = b
@@ -181,17 +287,8 @@ pub fn joint(kind: &JointKind, frames: JointFrames, collide_connected: bool) -> 
             }
             b.build().into()
         }
-        JointKind::Revolute {
-            axis,
-            limits,
-            motor,
-        } => {
-            let mut j = RevoluteJointBuilder::new(axis.try_normalize().unwrap_or(Vec3::X))
-                .local_anchor1(frames.anchor1)
-                .local_anchor2(frames.anchor2)
-                .build();
-            j.data.set_local_axis1(frames.axis1);
-            j.data.set_local_axis2(frames.axis2);
+        JointKind::Revolute { limits, motor, .. } => {
+            let mut j = RevoluteJointBuilder::new(Vec3::X).build();
             if let Some([lo, hi]) = limits {
                 j.data.set_limits(JointAxis::AngX, [*lo, *hi]);
             }
@@ -200,17 +297,8 @@ pub fn joint(kind: &JointKind, frames: JointFrames, collide_connected: bool) -> 
             }
             j.data
         }
-        JointKind::Prismatic {
-            axis,
-            limits,
-            motor,
-        } => {
-            let mut j = PrismaticJointBuilder::new(axis.try_normalize().unwrap_or(Vec3::Y))
-                .local_anchor1(frames.anchor1)
-                .local_anchor2(frames.anchor2)
-                .build();
-            j.data.set_local_axis1(frames.axis1);
-            j.data.set_local_axis2(frames.axis2);
+        JointKind::Prismatic { limits, motor, .. } => {
+            let mut j = PrismaticJointBuilder::new(Vec3::X).build();
             if let Some([lo, hi]) = limits {
                 j.data.set_limits(JointAxis::LinX, [*lo, *hi]);
             }
@@ -220,10 +308,7 @@ pub fn joint(kind: &JointKind, frames: JointFrames, collide_connected: bool) -> 
             j.data
         }
         JointKind::Distance { limits } => {
-            let mut j = RopeJointBuilder::new(limits[1].max(0.0))
-                .local_anchor1(frames.anchor1)
-                .local_anchor2(frames.anchor2)
-                .build();
+            let mut j = RopeJointBuilder::new(limits[1].max(0.0)).build();
             j.data
                 .set_limits(JointAxis::LinX, [limits[0].max(0.0), limits[1].max(0.0)]);
             j.data
@@ -233,12 +318,15 @@ pub fn joint(kind: &JointKind, frames: JointFrames, collide_connected: bool) -> 
             stiffness,
             damping,
         } => SpringJointBuilder::new(rest_length.max(0.0), *stiffness, *damping)
-            .local_anchor1(frames.anchor1)
-            .local_anchor2(frames.anchor2)
             .spring_model(MotorModel::ForceBased)
             .build()
             .into(),
     };
+    let axis = match kind {
+        JointKind::Revolute { .. } | JointKind::Prismatic { .. } => Some(frames.axis),
+        _ => None,
+    };
+    place(&mut joint, frames, axis);
     joint.set_contacts_enabled(collide_connected);
     joint
 }
