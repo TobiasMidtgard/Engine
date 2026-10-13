@@ -183,9 +183,13 @@ stable positions, and overlays get an unjittered frame group. Sun shadows use PC
 penumbra widens with distance from the caster like the real sun's (`sun_penumbra_scale`). Screen-space
 reflections (`screen_space_reflections`, `ssr_max_roughness`; `screen_reflection(rel)` in
 shaders, used by `shade_surface`) trace the prepass depth and read the previous frame's finished
-image, so polished floors, wet streets, metal and glossy paint mirror what is on screen, blurred
-with roughness, and fall back to the prefiltered sky elsewhere. `DebugView::Reflections` shows
-them. Screen-space global illumination (`screen_space_gi`, `gi_intensity`; `screen_gi(rel)` in
+image, so polished floors, wet streets, metal and glossy paint mirror what is on screen, and fall
+back to the prefiltered sky elsewhere. Glossy reflections gather over the GGX lobe's footprint at
+the hit from a blurred mip chain of that image, so a rough floor shows a soft glow of the window
+rather than a sharp image broken up by its bumps; they fade out over the upper half of
+`ssr_max_roughness`. A ray that passes over the sky before anything hides it (out through a
+window or a gap in the canopy) reflects what the camera sees there, or the sky in its exact
+direction for a mirror, even indoors. `DebugView::Reflections` shows them. Screen-space global illumination (`screen_space_gi`, `gi_intensity`; `screen_gi(rel)` in
 shaders, added by `shade_surface` times the diffuse color) traces short cosine-distributed rays
 through the prepass depth into the same previous image, so sunlit walls tint the ground beside
 them and lamps, fires and other emissive surfaces light their surroundings; light keeps bouncing
