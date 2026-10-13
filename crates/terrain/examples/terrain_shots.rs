@@ -145,6 +145,28 @@ fn views() -> Vec<View> {
             sun: (230.0, 32.0),
             painted: true,
             ground: Ground::Snow,
+            exposure: Exposure::Manual { ev100: 15.0 },
+            ..BASE
+        },
+        View {
+            name: "snow_eye",
+            eye: DVec3::new(25.0, 0.0, -12.0),
+            target: DVec3::new(-15.0, -1.5, 22.0),
+            above_ground: Some(1.7),
+            sun: (230.0, 16.0),
+            exposure: Exposure::Manual { ev100: 15.0 },
+            painted: true,
+            ground: Ground::Snow,
+            ..BASE
+        },
+        View {
+            name: "snow_valley",
+            eye: DVec3::new(-40.0, 140.0, 330.0),
+            target: DVec3::new(20.0, 0.0, -300.0),
+            sun: (230.0, 25.0),
+            exposure: Exposure::Manual { ev100: 15.0 },
+            painted: true,
+            ground: Ground::Snow,
             ..BASE
         },
         View {
@@ -194,6 +216,22 @@ fn views() -> Vec<View> {
             target: DVec3::new(2_000.0, 1_200.0, -32_000.0),
             above_ground: Some(25.0),
             sun: (245.0, 16.0),
+            ..BASE
+        },
+        View {
+            name: "earth_hills",
+            eye: DVec3::new(0.0, 0.0, 900.0),
+            target: DVec3::new(-300.0, 0.0, -2_500.0),
+            above_ground: Some(450.0),
+            sun: (230.0, 35.0),
+            ..BASE
+        },
+        View {
+            name: "woods_aerial",
+            eye: DVec3::new(380.0, 0.0, 470.0),
+            target: DVec3::new(380.0, 0.0, 250.0),
+            above_ground: Some(90.0),
+            sun: (230.0, 35.0),
             ..BASE
         },
         View {

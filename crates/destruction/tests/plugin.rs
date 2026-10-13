@@ -367,7 +367,7 @@ fn the_hill_demo_tunnels_caves_in_builds_and_rebuilds() {
             .iter(&app.world)
             .count()
     };
-    assert_eq!(built(&mut app), 27, "the yard's cabin is up");
+    assert_eq!(built(&mut app), 31, "the yard's cabin is up");
     let ghosts: Vec<usize> = app
         .world
         .query::<&build::BuildGhost>()
@@ -397,7 +397,7 @@ fn the_hill_demo_tunnels_caves_in_builds_and_rebuilds() {
         .iter(&app.world)
         .filter(|s| s.on)
         .count();
-    assert_eq!(showing, 27, "the finished cabin shows its support colors");
+    assert_eq!(showing, 31, "the finished cabin shows its support colors");
     run(&mut app, 4.0);
     let hut_down = app
         .world
@@ -425,7 +425,7 @@ fn the_hill_demo_tunnels_caves_in_builds_and_rebuilds() {
         .filter(|(b, ..)| b.builder == Some(terrace))
         .map(|(b, s, show)| (b.kind, *s, show.on))
         .collect();
-    assert_eq!(shelter.len(), 8, "the terrace shelter is up: {shelter:?}");
+    assert_eq!(shelter.len(), 10, "the terrace shelter is up: {shelter:?}");
     for (kind, state, shown) in &shelter {
         assert!(shown, "the shelter shows its support");
         assert!(state.collapse_in.is_none(), "{kind:?} stands: {state:?}");
@@ -438,8 +438,17 @@ fn the_hill_demo_tunnels_caves_in_builds_and_rebuilds() {
             );
         }
     }
+    // Then a pit is dug under it and the whole shelter drops in.
+    run(&mut app, 4.3);
+    let fallen = app
+        .world
+        .query_filtered::<&BuiltPiece, With<Debris>>()
+        .iter(&app.world)
+        .filter(|b| b.builder == Some(terrace))
+        .count();
+    assert_eq!(fallen, 10, "the shelter fell into the pit dug under it");
 
-    run(&mut app, 6.5);
+    run(&mut app, 2.2);
     let rebuilt = volume(&mut app);
     assert!(
         (rebuilt - start).abs() < 1.0,

@@ -467,7 +467,17 @@ struct MaterialSample {
     emissive: vec3<f32>,
     sun: f32,               // parallax self-shadowing toward the sun (1 = lit)
     subsurface: f32,
+    face: vec3<f32>,        // the triangle's geometric normal, toward the camera (the side in view)
+    thin: bool,             // a thin sheet (double-sided or alpha-masked): `shade_thin_surface`
 };
+
+const MATERIAL_DOUBLE_SIDED: u32 = 32u;
+
+// Whether a material is a thin sheet seen from either side (leaves, petals, cloth, cards):
+// double-sided, or alpha-masked (cutout cards, which are often drawn with a triangle per side).
+fn material_is_thin(flags: u32) -> bool {
+    return (flags & MATERIAL_DOUBLE_SIDED) != 0u || (flags & 15u) == 1u;
+}
 
 fn evaluate_material(si: SurfaceIn, shadows: bool) -> MaterialSample {
     let mat = materials[si.material];
@@ -495,6 +505,12 @@ fn evaluate_material(si: SurfaceIn, shadows: bool) -> MaterialSample {
     if (!si.front) { n = -n; }
     let v = normalize(-si.rel);
     let footprint = max(max(length(dp1), length(dp2)), 1e-6);
+    // The side of the triangle in view: its own plane's normal, turned toward the camera
+    // (whatever the winding and the vertex normals say).
+    let g = cross(dp1, dp2);
+    let g_len = length(g);
+    var face = select(n, g / g_len, g_len > 1e-24);
+    if (dot(face, v) < 0.0) { face = -face; }
 
     var base = vec4<f32>(1.0);
     var mr = vec4<f32>(1.0);
@@ -580,6 +596,15 @@ fn evaluate_material(si: SurfaceIn, shadows: bool) -> MaterialSample {
     out.emissive = mat.emissive.rgb * emissive;
     out.sun = sun;
     out.subsurface = mat.params2.x;
+    out.face = face;
+    out.thin = material_is_thin(flags);
+    // A thin sheet is shaded on the side in view: a shading normal that points into the sheet
+    // (vertex normals that disagree with the winding, a normal map tilting past the plane) is
+    // mirrored out of it, so the side away from a light never lights up or catches its glare.
+    let into = dot(out.normal, face);
+    if (out.thin && into < 0.0) {
+        out.normal = normalize(out.normal - 2.0 * into * face);
+    }
 
     // Weather: rain darkens porous surfaces and makes them glossy; snow settles on top faces.
     if ((flags & 64u) != 0u) {
@@ -648,6 +673,9 @@ fn fs_main(in: VertexOut, @builtin(front_facing) front: bool) -> @location(0) ve
     var color: vec3<f32>;
     if ((flags & 16u) != 0u) {
         color = s.albedo + pre_expose(s.emissive);
+    } else if (m.thin) {
+        // Leaves, petals, cloth: lit from behind they glow by `subsurface`, never shine.
+        color = shade_thin_surface(s, in.rel, m.sun, m.face);
     } else {
         color = shade_surface_shadowed(s, in.rel, m.sun);
     }

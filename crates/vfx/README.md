@@ -131,9 +131,10 @@ a gate whose arch holds a standing portal swirling the valley seen through it, a
 starburst fireworks over the court, fireballs and frost bolts scorching and frosting a wall,
 lightning between two obelisks, a healing aura, a fountain, an anvil throwing sparks that
 split as they skid, a pond with stones splashing in, a golem stomping over mud, snow, sand and
-water, shot impacts on six materials (chipping the rock), torches and fireflies.
+water, shot impacts on six materials (chipping the rock), and braziers burning charcoal around
+the rim, with fireflies in the shrubs beyond.
 `cargo run -p engine_vfx --release --example sub_emitters` renders the firework and the
-splitting sparks.
+splitting sparks; `--example braziers` renders the brazier fires by day, at dusk and at night.
 
 ## Next
 

@@ -11,6 +11,7 @@ pub(crate) mod kit;
 pub(crate) mod props;
 pub(crate) mod structures;
 pub(crate) mod textures;
+pub(crate) mod timber;
 
 use std::collections::HashMap;
 

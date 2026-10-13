@@ -24,6 +24,10 @@
 //! them play; `physics.proving_ground.replay` restarts one or all of them now.
 
 mod art;
+mod floaters;
+
+pub(crate) use floaters::replay_floaters;
+pub use floaters::{FLOAT_CYCLE_SECS, FloatTest, spawn_floaters};
 
 use art::{Mat, Parts, dummy, props, structures};
 use engine_assets::Assets;
@@ -265,6 +269,8 @@ struct Yard<'w> {
     origin: DVec3,
     /// Tags what the yard spawns (the station being built).
     tag: Option<StationPart>,
+    /// Everything spawned so far, children included.
+    spawned: Vec<Entity>,
     /// The app draws meshes (there is an `Assets<Mesh>`); headless physics apps get colliders
     /// only.
     render: bool,
@@ -284,7 +290,9 @@ impl Yard<'_> {
         if let Some(tag) = self.tag {
             e.insert(tag);
         }
-        e.id()
+        let e = e.id();
+        self.spawned.push(e);
+        e
     }
 
     /// `N` meshes cached under `key` (built by `make` the first time), each with its material.
@@ -350,9 +358,21 @@ impl Yard<'_> {
     /// A wooden shipping crate (density 300 kg/m³: a crate with stuff in it). `seed` varies
     /// its boards.
     fn crate_box(&mut self, local: DVec3, half: Vec3, rotation: Quat, seed: u32) -> Entity {
+        self.crate_of(local, half, rotation, seed, 300.0)
+    }
+
+    /// A wooden crate of `density` kg/m³.
+    fn crate_of(
+        &mut self,
+        local: DVec3,
+        half: Vec3,
+        rotation: Quat,
+        seed: u32,
+        density: f32,
+    ) -> Entity {
         let c = Collider::cuboid(half)
             .with_surface(self.wood)
-            .with_density(300.0);
+            .with_density(density);
         let key = format!("crate/{:.3}x{:.3}x{:.3}/{seed}", half.x, half.y, half.z);
         let parts = self.parts(&key, [Mat::CrateWood(seed as u8), Mat::Dark], || {
             let m = props::crate_box(half, seed);
@@ -467,28 +487,31 @@ impl Yard<'_> {
     }
 }
 
-fn build(world: &mut World, origin: DVec3) {
-    let surfaces = {
-        let mut table = world.get_resource_or_init::<SurfaceMaterials>();
-        let rubber = match table.id("rubber") {
-            Some(id) => id,
-            None => table.add(SurfaceMaterial {
-                name: "rubber".into(),
-                friction: 0.9,
-                restitution: 0.85,
-                density: 1100.0,
-                footstep_sound: "footstep.rubber".into(),
-                impact_effect: "impact.rubber".into(),
-                ..Default::default()
-            }),
-        };
-        [
-            table.id_or_default("concrete"),
-            table.id_or_default("wood"),
-            table.id_or_default("metal"),
-            rubber,
-        ]
+/// The demo's surfaces (concrete, wood, metal, rubber), adding rubber to the table if needed.
+fn surfaces(world: &mut World) -> [SurfaceId; 4] {
+    let mut table = world.get_resource_or_init::<SurfaceMaterials>();
+    let rubber = match table.id("rubber") {
+        Some(id) => id,
+        None => table.add(SurfaceMaterial {
+            name: "rubber".into(),
+            friction: 0.9,
+            restitution: 0.85,
+            density: 1100.0,
+            footstep_sound: "footstep.rubber".into(),
+            impact_effect: "impact.rubber".into(),
+            ..Default::default()
+        }),
     };
+    [
+        table.id_or_default("concrete"),
+        table.id_or_default("wood"),
+        table.id_or_default("metal"),
+        rubber,
+    ]
+}
+
+fn build(world: &mut World, origin: DVec3) {
+    let surfaces = surfaces(world);
     let mut y = Yard::new(world, origin, surfaces, None);
     let half = Vec3::new(YARD_SIZE[0] as f32 * 0.5, 0.25, YARD_SIZE[1] as f32 * 0.5);
     let pad = y.block(DVec3::new(0.0, -0.25, 0.0), half);
@@ -534,6 +557,7 @@ impl<'w> Yard<'w> {
             world,
             origin,
             tag,
+            spawned: Vec::new(),
             render,
             concrete,
             wood,

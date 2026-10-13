@@ -7,6 +7,11 @@
 //! whole path: contact → surface → ground state (wet, snowy, burnt) → synthesis → 3D mix.
 //! Coloured rings on the ground show each sound as it plays.
 //!
+//! Every walker asks the animation module for a body
+//! ([`BodyRequest`](engine_world::animation::BodyRequest)); once it answers with a
+//! `SkeletonPose` that walker's own stand-in body hides and the animated feet write the
+//! contacts.
+//!
 //! ```ignore
 //! engine_audio::demo::spawn_demo(&mut commands, zone.center);
 //! ```
@@ -15,6 +20,7 @@ use std::f64::consts::PI;
 
 use engine_core::math::{DVec3, Quat, Vec3};
 use engine_core::prelude::*;
+use engine_world::animation::SkeletonPose;
 use engine_world::physical::{Deformation, SurfaceMaterial};
 use engine_world::{ContactKind, GroundContact, SurfaceMaterials};
 
@@ -428,6 +434,7 @@ fn yaw(dir: Vec3) -> Quat {
 
 /// Move the walkers along the trail and put their feet down where their bodies plant them
 /// (see `bodies::gait`).
+#[allow(clippy::type_complexity)]
 fn walk_trail(
     time: Res<Time>,
     materials: Res<SurfaceMaterials>,
@@ -436,19 +443,20 @@ fn walk_trail(
         &mut TrailWalker,
         &mut Transform,
         Option<&LocalTimeScale>,
+        Has<SkeletonPose>,
     )>,
     mut contacts: MessageWriter<GroundContact>,
 ) {
     // Make way: everyone picks a lane from where the others are.
     let all: Vec<(f64, f32, f64)> = walkers
         .iter()
-        .map(|(_, w, _, _)| (w.along, w.speed, w.reach()))
+        .map(|(_, w, _, _, _)| (w.along, w.speed, w.reach()))
         .collect();
-    for (i, (_, mut w, _, _)) in walkers.iter_mut().enumerate() {
+    for (i, (_, mut w, _, _, _)) in walkers.iter_mut().enumerate() {
         let lane = wanted_lane(i, &all);
         w.steer_to(lane);
     }
-    for (entity, mut w, mut t, scale) in &mut walkers {
+    for (entity, mut w, mut t, scale, dressed) in &mut walkers {
         let dt = time.delta_for(scale);
         if dt <= 0.0 {
             continue;
@@ -469,6 +477,10 @@ fn walk_trail(
             // it relative to where the walker was when it came down: a heel strikes ahead of
             // the hips, a hoof ahead of its shoulder or hip.
             let root_along = w.along + (w.to_next_step - w.step_len) as f64;
+            // A body from the animation module puts its own feet down.
+            if dressed {
+                continue;
+            }
             let (position, fd, foot_s) = bodies::gait::footprint(&w, foot, root_along);
             let surface = surface_at(foot_s);
             let load = if w.feet == 2 {
