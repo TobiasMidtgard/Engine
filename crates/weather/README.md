@@ -41,10 +41,12 @@ gusts and a gust front ahead of storms. Fires warm the ground around them throug
 density) with Perlin-Worley shape noise and Worley detail noise: flat stratus sheets, heaped
 cumulus with cauliflower tops, and towering storm clouds that narrow as they climb and spread
 into an anvil. Lit by the sun or the moon with self-shadowing, a strong forward glow (silver
-linings), multiple-scattering diffusion, dark rain bellies, sky and ground ambient light, and
-lightning lighting them from inside. They sit in the atmosphere (aerial perspective, distance
-haze), cast grey rain shafts under distant showers, wrap around mountains and the camera when it
-flies through them, and are visible from above (a sea of clouds from a plane or a mountain).
+linings), multiple scattering, light that diffuses down through thick decks (a storm's base is
+grey, not navy), dark rain bellies, sky and ground ambient light, and lightning lighting them
+from inside. They sit in the atmosphere (aerial perspective, distance haze, and the renderer's
+fog in front of them out to any distance, so fogged hills fade into the sky instead of ending in
+a wall), cast grey rain shafts under distant showers, wrap around mountains and the camera when
+it flies through them, and are visible from above (a sea of clouds from a plane or a mountain).
 They also feed the environment map, so reflections and ambient light change with the sky.
 
 **Rain and snow.** Rain streaks with motion blur that catch the light of lamps behind them,
@@ -73,12 +75,14 @@ spot, send `NoiseEvent` (thunder for AI), `WorldImpulse` and, where the ground i
 drawn main channel is `LightningStrike::path`, so thunder rolls along the bolt you see.
 
 **Day and night.** A clock and calendar (`Sky`) for a place on a planet (`Climate`: latitude,
-axial tilt, year length) drive the sun and moon `DirectionalLight`s: real sun paths through
-the seasons, twilight, a moon with phases that rises and sets, and a turning star field with the
-Milky Way. Thick cloud dims the sun. With the sun low behind you and a shower ahead, a
-rainbow stands on the rain: the primary bow, the fainter reversed secondary and the dark band
-between them. A world without a directional light gets a sun and moon
-spawned; a game with its own untagged light keeps control (tag it `SunLight` to hand it over).
+axial tilt, year length) drive the sun and moon `DirectionalLight`s: real sun paths through the
+seasons, twilight, a moon with phases that rises and sets, and a turning star field with the
+Milky Way. Thick cloud dims the sun until under a full deck the ground is lit by the deck
+itself; by day the sun stays brighter than the moon so the renderer keeps it as its sun. With
+the sun low behind you and a shower ahead, a rainbow stands on the rain: the primary bow, the
+fainter reversed secondary and the dark band between them. A world without a directional light
+gets a sun and moon spawned; a game with its own untagged light keeps control (tag it `SunLight`
+to hand it over).
 
 ## Showcase
 

@@ -189,12 +189,27 @@ fn clouds_at(uv: vec2<f32>) -> vec4<f32> {
     return c * 0.25;
 }
 
+// The renderer's fog in front of the sky (pre-exposed `color` seen along `dir`): its height
+// fog beyond the volumetric range, then the volumetric fog in front of that. Geometry gets the
+// height fog out to any distance, so without the far part a fogged hillside ended in a hard
+// bright wall under a dark sky; with it the fog thins upward into the sky as it does outside.
+fn fog_over_sky(color: vec3<f32>, dir: vec3<f32>) -> vec3<f32> {
+    var c = color;
+    let start = max(frame.volumetrics.x, 0.0);
+    let tr = exp(-height_fog_optical_depth(dir, start, 100000.0));
+    if (tr < 0.9999) {
+        c = c * tr + pre_expose(height_fog_radiance(dir, dir * start, 1.0)) * (1.0 - tr);
+    }
+    return apply_sky_fog(c, dir);
+}
+
 @vertex
 fn vs_sky(@builtin(vertex_index) i: u32) -> FullscreenOut {
     return fullscreen_vertex(i, 0.0);
 }
 
-// Sky pixels: clear sky + sun/moon/stars, clouds in front (replaces the sky's own picture).
+// Sky pixels: clear sky + sun/moon/stars, clouds in front, the renderer's fog in front of all
+// (replaces the sky's own picture).
 @fragment
 fn fs_sky(in: FullscreenOut) -> @location(0) vec4<f32> {
     let dir = camera_dir(in.uv);
@@ -207,6 +222,7 @@ fn fs_sky(in: FullscreenOut) -> @location(0) vec4<f32> {
         let rain = textureSampleLevel(cloud_depth, linear_clamp, in.uv, 0.0).z;
         c += pre_expose(rainbow(dir, sky.sun.xyz) * sky.params.y) * rain;
     }
+    c = fog_over_sky(c, dir);
     return vec4<f32>(min(c, vec3(60000.0)), 1.0);
 }
 
