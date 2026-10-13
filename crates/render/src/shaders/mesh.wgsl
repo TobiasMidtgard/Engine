@@ -73,9 +73,11 @@ struct VertexOut {
     @location(9) @interpolate(flat) axis_z: vec3<f32>,
 };
 
-// Wind sway of a vertex (meters, camera-relative).
+// Wind sway of a vertex (meters, camera-relative): the material's `wind_sway` times the vertex
+// color's alpha, its wind weight (0 = still, such as a trunk's base; 1 = full sway, the default
+// of meshes without vertex colors), growing with height in the mesh.
 fn vertex_wind(in: VertexIn, rel: vec3<f32>) -> vec3<f32> {
-    let sway = materials[in.extra.x].params2.y;
+    let sway = materials[in.extra.x].params2.y * saturate(in.color.a);
     if (sway <= 0.0) { return vec3<f32>(0.0); }
     let h01 = saturate((in.position.y - bitcast<f32>(in.extra.z)) / max(bitcast<f32>(in.extra.w), 1e-3));
     return wind_offset(rel, h01, sway);
@@ -107,6 +109,13 @@ fn vertex_axis(in: VertexIn, i: u32) -> vec3<f32> {
     return c / max(length(c), 1e-12);
 }
 
+// The vertex color the surface sees. On swaying materials the alpha is the wind weight
+// (`vertex_wind`), not opacity.
+fn vertex_surface_color(in: VertexIn) -> vec4<f32> {
+    let swaying = materials[in.extra.x].params2.y > 0.0;
+    return select(in.color, vec4<f32>(in.color.rgb, 1.0), swaying);
+}
+
 fn vertex_rel(in: VertexIn) -> vec3<f32> {
     let p = vec4<f32>(in.position, 1.0);
     let rel = vec3<f32>(dot(in.m0, p), dot(in.m1, p), dot(in.m2, p));
@@ -125,7 +134,7 @@ fn standard_vertex(in: VertexIn) -> VertexOut {
     out.rel = rel;
     out.normal = normalize(mat3x3<f32>(in.n0.xyz, in.n1.xyz, in.n2.xyz) * in.normal);
     out.uv = in.uv;
-    out.color = in.color;
+    out.color = vertex_surface_color(in);
     out.material = in.extra.x;
     out.local = vertex_local(in);
     out.object_normal = vertex_object_normal(in);
@@ -686,7 +695,10 @@ fn fs_main(in: VertexOut, @builtin(front_facing) front: bool) -> @location(0) ve
         if (depth > frame.shadow_splits[0]) { tint = vec3(0.4, 1.0, 0.4); }
         if (depth > frame.shadow_splits[1]) { tint = vec3(0.4, 0.4, 1.0); }
         if (depth > frame.shadow_splits[2]) { tint = vec3(1.0, 1.0, 0.4); }
-        if (depth > frame.shadow_splits[3]) { tint = vec3(1.0); }
+        if (depth > frame.shadow_splits[3]) {
+            // Magenta where only the far shadow map reaches.
+            tint = select(vec3(1.0), vec3(1.0, 0.4, 1.0), length(in.rel) < frame.far_shadow_params.x);
+        }
         color *= tint;
     }
     return vec4<f32>(color, m.base.a);
@@ -727,7 +739,7 @@ fn standard_prepass_vertex(in: VertexIn) -> PrepassVertexOut {
     out.rel = rel;
     out.normal = normalize(mat3x3<f32>(in.n0.xyz, in.n1.xyz, in.n2.xyz) * in.normal);
     out.uv = in.uv;
-    out.color = in.color;
+    out.color = vertex_surface_color(in);
     out.material = in.extra.x;
     out.clip = frame.view_proj * vec4<f32>(rel, 1.0);
     out.motion_now = motion_clip(rel);

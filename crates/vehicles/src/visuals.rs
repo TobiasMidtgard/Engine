@@ -36,6 +36,17 @@ pub struct PropellerVisual {
     pub base: Quat,
 }
 
+/// The blades (`blur: false`) or the blur disc (`blur: true`) of engine `index`'s propeller,
+/// a child of its [`PropellerVisual`]: the disc shows in place of the blades at speed.
+#[derive(Component, Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct PropellerPart {
+    pub index: usize,
+    pub blur: bool,
+}
+
+/// Engine level above which a propeller turns too fast to see its blades.
+const PROP_BLUR_LEVEL: f32 = 0.12;
+
 /// An exhaust plume for thruster `index` of the parent [`Spacecraft`]: scaled along its
 /// local +Z by the thruster's level, hidden when off.
 #[derive(Component, Debug, Clone, Copy, Serialize, Deserialize)]
@@ -94,11 +105,23 @@ pub fn wheel_visuals(
 }
 
 /// Control surfaces and propellers.
+#[allow(clippy::type_complexity)]
 pub fn aircraft_visuals(
     aircraft: Query<&Aircraft>,
     engines: Query<&Propulsion>,
-    mut surfaces: Query<(&ChildOf, &SurfaceVisual, &mut Transform), Without<PropellerVisual>>,
-    mut props: Query<(&ChildOf, &PropellerVisual, &mut Transform), Without<SurfaceVisual>>,
+    pivots: Query<&ChildOf, With<PropellerVisual>>,
+    mut surfaces: Query<
+        (&ChildOf, &SurfaceVisual, &mut Transform),
+        (Without<PropellerVisual>, Without<PropellerPart>),
+    >,
+    mut props: Query<
+        (&ChildOf, &PropellerVisual, &mut Transform),
+        (Without<SurfaceVisual>, Without<PropellerPart>),
+    >,
+    mut parts: Query<
+        (&ChildOf, &PropellerPart, &mut Transform),
+        (Without<SurfaceVisual>, Without<PropellerVisual>),
+    >,
 ) {
     for (parent, vis, mut t) in &mut surfaces {
         let Ok(a) = aircraft.get(parent.parent()) else {
@@ -121,6 +144,23 @@ pub fn aircraft_visuals(
             continue;
         };
         t.rotation = vis.base * Quat::from_rotation_z(e.spin_angle);
+    }
+    for (pivot, part, mut t) in &mut parts {
+        let Ok(body) = pivots.get(pivot.parent()) else {
+            continue;
+        };
+        let Some(e) = engines
+            .get(body.parent())
+            .ok()
+            .and_then(|p| p.engines.get(part.index))
+        else {
+            continue;
+        };
+        let shown = (e.level > PROP_BLUR_LEVEL) == part.blur;
+        let scale = if shown { Vec3::ONE } else { Vec3::splat(1e-3) };
+        if t.scale != scale {
+            t.scale = scale;
+        }
     }
 }
 

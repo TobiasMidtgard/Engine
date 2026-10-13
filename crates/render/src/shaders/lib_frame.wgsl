@@ -208,17 +208,28 @@ fn vogel_disk(i: i32, n: i32, angle: f32) -> vec2<f32> {
     return vec2<f32>(cos(theta), sin(theta)) * r;
 }
 
-// Sun visibility (0 = in shadow, 1 = lit) at camera-relative `rel` with normal `n`.
+// Sun visibility (0 = in shadow, 1 = lit) at camera-relative `rel` with normal `n`: the shadow
+// cascades out to `RenderSettings::shadow_distance`, blending over their last tenth into the
+// far shadow map (big casters only, out to `far_shadow_distance`; `far_shadow_visibility`).
+fn shadow_factor(rel: vec3<f32>, n: vec3<f32>) -> f32 {
+    if (frame.sun_color.w < 0.5) { return 1.0; }
+    let depth = view_depth(rel);
+    let noise = frame_noise(pixel_of(rel));
+    let reach = frame.shadow_splits[3];
+    let near = saturate((reach - depth) / (reach * 0.1));
+    var s = 1.0;
+    if (near > 0.0) { s = cascade_visibility(rel, n, depth, noise); }
+    if (near >= 1.0) { return s; }
+    return mix(far_shadow_visibility(rel, n, noise), s, near);
+}
+
+// Sun visibility from the shadow cascades at view depth `depth` (within their reach).
 //
 // Percentage-closer soft shadows: a blocker search estimates how far the caster is from the
 // receiver, and the filter grows with that distance times the sun's angular size
 // (`RenderSettings::sun_penumbra_scale`): crisp where things touch the ground, soft at the end of
 // a tree's shadow. Filter taps are rotated per pixel, and cascades blend with a dithered band.
-fn shadow_factor(rel: vec3<f32>, n: vec3<f32>) -> f32 {
-    if (frame.sun_color.w < 0.5) { return 1.0; }
-    let depth = view_depth(rel);
-    if (depth > frame.shadow_splits[3]) { return 1.0; }
-    let noise = frame_noise(pixel_of(rel));
+fn cascade_visibility(rel: vec3<f32>, n: vec3<f32>, depth: f32, noise: f32) -> f32 {
     var cascade = 0u;
     for (var i = 0u; i < 3u; i++) {
         if (depth > frame.shadow_splits[i]) { cascade = i + 1u; }
@@ -271,10 +282,45 @@ fn shadow_factor(rel: vec3<f32>, n: vec3<f32>) -> f32 {
         let o = vogel_disk(i, SHADOW_PCF_TAPS, angle) * radius * texel;
         sum += textureSampleCompareLevel(shadow_map, shadow_sampler, uv + o, cascade, z_ref);
     }
-    let s = sum / f32(SHADOW_PCF_TAPS);
-    // Fade out at the end of the last cascade.
-    let fade = saturate((frame.shadow_splits[3] - depth) / (frame.shadow_splits[3] * 0.1));
-    return mix(1.0, s, fade);
+    return sum / f32(SHADOW_PCF_TAPS);
+}
+
+// Sun visibility from the far shadow map: one coarse map around the camera (texels of several
+// meters) holding only big casters, so mountains shade the valley and ridges shade themselves
+// kilometers away. 1 where it is off or doesn't reach; fades out over its outer tenth.
+const FAR_SHADOW_TAPS: i32 = 12;
+
+fn far_shadow_visibility(rel: vec3<f32>, n: vec3<f32>, noise: f32) -> f32 {
+    let params = frame.far_shadow_params;
+    let reach = params.x;
+    if (reach <= 0.0) { return 1.0; }
+    let dist = length(rel);
+    let fade = saturate((reach - dist) / (reach * 0.1));
+    if (fade <= 0.0) { return 1.0; }
+    let texel_world = params.y;
+    let z_per_meter = params.z;
+    let layer = i32(params.w);
+    let l = frame.sun_dir.xyz;
+    let n_dot_l = dot(n, l);
+    // Surfaces facing away from the sun are dark anyway; their own texels must not shade them.
+    let normal_bias = frame.shadow_params.y * texel_world * (1.0 - 0.5 * saturate(n_dot_l));
+    let lp = frame.far_shadow * vec4<f32>(rel + n * normal_bias, 1.0);
+    let uv = lp.xy * vec2<f32>(0.5, -0.5) + 0.5;
+    if (any(uv < vec2(0.0)) || any(uv > vec2(1.0)) || lp.z > 1.0) { return 1.0; }
+    // A fixed filter of a texel and a half: wider than the sun's penumbra of a ridge a few
+    // kilometers away, so edges stay smooth at this resolution. Biased with the slope like the
+    // cascades.
+    let radius = 1.5;
+    let slope = sqrt(max(1.0 - n_dot_l * n_dot_l, 0.0)) / max(abs(n_dot_l), 0.2);
+    let z_ref = lp.z - frame.shadow_params.x - (0.5 + radius * min(slope, 5.0) * 0.5) * texel_world * z_per_meter;
+    let texel = 1.0 / frame.shadow_params.w;
+    let angle = noise * TAU;
+    var sum = 0.0;
+    for (var i = 0; i < FAR_SHADOW_TAPS; i++) {
+        let o = vogel_disk(i, FAR_SHADOW_TAPS, angle) * radius * texel;
+        sum += textureSampleCompareLevel(shadow_map, shadow_sampler, uv + o, layer, z_ref);
+    }
+    return mix(1.0, sum / f32(FAR_SHADOW_TAPS), fade);
 }
 
 // Screen-space contact shadow toward the sun: marches `frame.effects.y` meters through the
@@ -721,11 +767,60 @@ fn fog_sky_light() -> vec3<f32> {
 
 // Radiance (cd/m^2, not pre-exposed) of height fog thick enough to hide everything behind it,
 // seen along `dir` with the fog at `at`: sunlight through the air with the fog's phase function
-// and sky light, both scaled by `lit` (the open sky the fog sees), plus the ambient fill. No
-// shadows: this is the fog beyond the volumetric range (or all of it with volumetrics off).
-fn height_fog_radiance(dir: vec3<f32>, at: vec3<f32>, lit: f32) -> vec3<f32> {
-    let sun = frame.sun_color.rgb * sun_transmittance(at) * henyey_greenstein(dot(dir, frame.sun_dir.xyz), frame.fog_color.w);
-    return frame.fog_color.rgb * ((sun + fog_sky_light()) * lit + frame.ambient.rgb);
+// (`sun`: the share of the fog it reaches, `height_fog_sun_visibility`) and sky light, both
+// scaled by `lit` (the open sky the fog sees), plus the ambient fill. This is the fog beyond
+// the volumetric range (or all of it with volumetrics off).
+fn height_fog_radiance(dir: vec3<f32>, at: vec3<f32>, lit: f32, sun: f32) -> vec3<f32> {
+    let sunlight = frame.sun_color.rgb * sun_transmittance(at) * henyey_greenstein(dot(dir, frame.sun_dir.xyz), frame.fog_color.w);
+    return frame.fog_color.rgb * ((sunlight * sun + fog_sky_light()) * lit + frame.ambient.rgb);
+}
+
+// Whether sunlight reaches camera-relative point `rel` in the air past the far shadow map's
+// casters (mountains, terrain, big buildings): one filtered tap, 1 outside the map.
+fn far_shadow_sun(rel: vec3<f32>) -> f32 {
+    let params = frame.far_shadow_params;
+    let lp = frame.far_shadow * vec4<f32>(rel, 1.0);
+    let uv = lp.xy * vec2<f32>(0.5, -0.5) + 0.5;
+    if (any(uv < vec2(0.0)) || any(uv > vec2(1.0)) || lp.z > 1.0) { return 1.0; }
+    // Two texels toward the sun, so air just above the ground isn't shaded by the ground's own
+    // texels.
+    let z_ref = lp.z - 2.0 * params.y * params.z;
+    return textureSampleCompareLevel(shadow_map, shadow_sampler, uv, i32(params.w), z_ref);
+}
+
+// The sunlit share of the light the height fog between `t0` and `t1` meters along `dir` scatters
+// toward the camera, from the far shadow map: haze in the shadow of a mountain or a ridge doesn't
+// glow, so a mountain with the sun behind it keeps its contrast instead of hiding behind sunlit
+// haze, and low sun casts mountain shadows into the valley's haze. `tr` is the fog's
+// transmittance over the segment. The samples sit at equal steps of what the fog scatters
+// (1 - transmittance), so a thin layer of ground haze is sampled where the ray crosses it.
+// 1 without the far shadow map.
+const HAZE_SHADOW_SAMPLES: i32 = 8;
+
+fn height_fog_sun_visibility(dir: vec3<f32>, t0: f32, t1: f32, tr: f32, noise: f32) -> f32 {
+    if (frame.far_shadow_params.x <= 0.0 || frame.sun_color.w < 0.5 || tr >= 1.0) { return 1.0; }
+    let falloff = max(frame.fog.y, 1e-5);
+    let density = max(frame.fog.x, 1e-12);
+    let ha = max(fog_height(dir * t0) - frame.fog.z, -100.0);
+    let hb = max(fog_height(dir * t1) - frame.fog.z, -100.0);
+    let len = t1 - t0;
+    let dh = hb - ha;
+    let ea = exp(-falloff * ha);
+    var sum = 0.0;
+    for (var i = 0; i < HAZE_SHADOW_SAMPLES; i++) {
+        // Optical depth from t0 at which this share of the segment's scattering is reached,
+        // then where along the ray the fog adds up to it (the inverse of
+        // `height_fog_optical_depth`).
+        let tau = -log(1.0 - (f32(i) + noise) / f32(HAZE_SHADOW_SAMPLES) * (1.0 - tr));
+        var t = tau / (density * ea);
+        if (abs(dh) > 0.01) {
+            let slope = dh / len;
+            let e = max(ea - tau * falloff * slope / density, 1e-30);
+            t = (-log(e) / falloff - ha) / slope;
+        }
+        sum += far_shadow_sun(dir * (t0 + clamp(t, 0.0, len)));
+    }
+    return sum / f32(HAZE_SHADOW_SAMPLES);
 }
 
 // Volumetric fog between the camera and view depth `depth` (meters, up to the range) in the
@@ -829,13 +924,23 @@ fn limit_fog_opacity(fog: vec4<f32>) -> vec4<f32> {
     return vec4<f32>(fog.rgb * (frame.fog.w / max(1.0 - fog.a, 1e-4)), min_t);
 }
 
-// Applies fog and atmospheric haze to pre-exposed color seen at camera-relative `rel`.
-//
+// Fog and atmospheric haze between the camera and a surface at camera-relative `rel`, in two
+// parts: the light they scatter toward the camera (pre-exposed) and the share of the surface's
+// own light that gets through, per channel (the air dims blue more than red). What `apply_fog`
+// applies; use it directly where the two parts are needed apart (particles and smoke blended
+// over the scene: `color * transmittance` for what they let through, `inscatter` once).
+struct SurfaceFog {
+    inscatter: vec3<f32>,
+    transmittance: vec3<f32>,
+};
+
 // Within `RenderSettings::volumetric_fog_range` the fog comes from the volumetric fog (height
 // fog and fog volumes, with light shafts, sky occlusion and lamps); beyond it the height fog
-// continues analytically from the end of the range, so nothing is counted twice. With
-// volumetric fog off the analytic height fog starts at the camera.
-fn apply_fog(color: vec3<f32>, rel: vec3<f32>) -> vec3<f32> {
+// continues analytically from the end of the range, so nothing is counted twice, its sunlight
+// shaded by the far shadow map's mountains (`height_fog_sun_visibility`). With
+// volumetric fog off the analytic height fog starts at the camera. The atmosphere's aerial
+// perspective comes on top.
+fn surface_fog(rel: vec3<f32>) -> SurfaceFog {
     let dist = length(rel);
     let dir = rel / max(dist, 1e-4);
     // In-scattered light (pre-exposed) and transmittance between the camera and the point.
@@ -853,19 +958,30 @@ fn apply_fog(color: vec3<f32>, rel: vec3<f32>) -> vec3<f32> {
             // Haze inside caves and rooms is lit by neither the sky nor the sun (it still hides
             // what's behind it).
             let lit = fog_sky_visibility(rel);
-            let l = pre_expose(height_fog_radiance(dir, dir * start, lit)) * (1.0 - tr);
+            let sun = height_fog_sun_visibility(dir, start, dist, tr, frame_noise(pixel_of(rel)));
+            let l = pre_expose(height_fog_radiance(dir, dir * start, lit, sun)) * (1.0 - tr);
             fog = vec4<f32>(fog.rgb + l * fog.a, fog.a * tr);
         }
     }
     fog = limit_fog_opacity(fog);
-    var c = color * fog.a + fog.rgb;
+    var out: SurfaceFog;
+    out.inscatter = fog.rgb;
+    out.transmittance = vec3<f32>(fog.a);
     // Aerial perspective: the atmosphere between the camera and distant geometry (negligible
     // closer than a couple hundred meters).
     if (dist > 200.0) {
         let a = atmosphere(vec3(0.0), dir, dist, 8);
-        c = c * a.transmittance + pre_expose(a.radiance * frame.sun_color.rgb);
+        out.inscatter = out.inscatter * a.transmittance + pre_expose(a.radiance * frame.sun_color.rgb);
+        out.transmittance *= a.transmittance;
     }
-    return c;
+    return out;
+}
+
+// Applies fog and atmospheric haze (`surface_fog`) to pre-exposed color seen at camera-relative
+// `rel`.
+fn apply_fog(color: vec3<f32>, rel: vec3<f32>) -> vec3<f32> {
+    let f = surface_fog(rel);
+    return color * f.transmittance + f.inscatter;
 }
 
 // Volumetric fog in front of the sky (up to the volumetric range) for pre-exposed sky color

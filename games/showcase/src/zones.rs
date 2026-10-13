@@ -276,14 +276,14 @@ pub fn spawn_demos(commands: &mut Commands, lib: &Library, land: &Landscape, rng
             "physics" => engine_physics::demo::spawn_demo(commands, z.center),
             "yard" => {
                 engine_softbody::demo::spawn_demo(commands, z.center);
-                // The sailing dinghy works the lake east of the jetty (it waits at its mooring
-                // until the lake is water the physics module floats it on).
+                // The sailing dinghy works the lake east of the jetty, leaving a wake as wide
+                // as its hull.
                 let home =
                     zone("lake").center + DVec3::new(-30.0, crate::landscape::LAKE_LEVEL, 30.0);
                 let boat = engine_softbody::demo::spawn_sailboat(commands, home, 22.0);
                 commands
                     .entity(boat)
-                    .insert(engine_water::WaterInteractor::new(0.6).with_wake(0.35));
+                    .insert(engine_water::WaterInteractor::new(0.8).with_wake(1.0));
             }
             "magic" => engine_vfx::demo::spawn_demo(commands, z.center),
             "gallery2d" => ph::gallery2d(commands, lib, z),
@@ -529,6 +529,19 @@ pub fn demo_views(z: &Zone) -> Vec<View> {
                 .on_arrive("movement.duel", &duel("Blink"))
                 .on_arrive("movement.grappler", "{}")
                 .on_leave("movement.duel", cycle),
+                // The freight station: the rider restarts its loop on arrival, with the car
+                // about to pull out, and is caught leaping onto the car's side.
+                View::new(
+                    "parkour_freight",
+                    "Ride a moving freight car: leap onto its side, wall-run along it, climb aboard",
+                    [-20.0, 3.6, 21.0],
+                    [-15.5, 3.0, 28.5],
+                    16.0,
+                )
+                .warmup(1.65)
+                .on_arrive("movement.duel", &duel("Blink"))
+                .on_arrive("movement.rider", "{}")
+                .on_leave("movement.duel", cycle),
                 // Play mode (P): a pilot in front of the camera, locked onto the elite.
                 View::new(
                     "parkour_play",
@@ -675,7 +688,8 @@ pub fn demo_views(z: &Zone) -> Vec<View> {
                 14.5,
             )
             .warmup(7.0),
-            // On the lake: the dinghy's mooring is 85 m east and 110 m south of the yard.
+            // On the lake: the dinghy's mooring is 85 m east and 110 m south of the yard. It
+            // starts its lane over on arrival, so it is out on the water in view.
             View::new(
                 "yard_sailboat",
                 "A gaff dinghy sailing on the wind in its sail",
@@ -683,7 +697,8 @@ pub fn demo_views(z: &Zone) -> Vec<View> {
                 [85.0, 1.8, -110.0],
                 15.5,
             )
-            .warmup(20.0),
+            .on_arrive("softbody.sailboat_home", "{}")
+            .warmup(12.0),
         ],
         "fortress" => destruction_views(engine_destruction::demo::VIEWS),
         "voxel" => destruction_views(engine_destruction::hill::VIEWS),

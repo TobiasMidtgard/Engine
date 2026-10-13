@@ -1,6 +1,6 @@
 //! Keeps the runtime state, meshes and colliders of walls and voxel volumes in step with
 //! their components: (re)builds state when a component is added or changed, and remeshes only
-//! the tiles and chunks that damage touched.
+//! the tiles and chunks that damage touched. Standing building pieces get colliders too.
 
 use std::time::Instant;
 
@@ -9,12 +9,16 @@ use engine_assets::{Assets, Handle};
 use engine_core::math::{Quat, Vec2, Vec3};
 use engine_core::prelude::*;
 use engine_render::{MaterialRef, Mesh, MeshRef, MeshRenderer};
+use engine_world::SurfaceMaterials;
 use engine_world::physics::{Collider, ColliderShape, PhysicsBackend};
 
 use crate::DestructionStats;
 use crate::assets::DestructionAssets;
+use crate::build::BuiltPiece;
+use crate::debris::Debris;
 use crate::material::DestructionMaterials;
 use crate::meshing::MeshBuilder;
+use crate::structure::{Fracturable, FractureShape, StructuralPiece};
 use crate::voxel::{VoxelLook, VoxelState, VoxelVolume, mesh_chunk_layers};
 use crate::wall::{DestructibleWall, TILE, WallLook, WallState, greedy_rects, mesh_cells};
 
@@ -126,6 +130,80 @@ pub fn init_voxels_system(
                 commands.entity(e).insert(fresh);
             }
         }
+    }
+}
+
+/// How far a standing piece's collider sits inside its box on every side, m: pieces snapped
+/// face to face don't start a fall wedged into the neighbors that still stand.
+pub const PIECE_SKIN_M: f32 = 0.015;
+
+/// Half size of a standing piece's collider for a piece box of half size `half`.
+pub fn solid_half(half: Vec3) -> Vec3 {
+    (half - Vec3::splat(PIECE_SKIN_M)).max(half * 0.5)
+}
+
+/// Make standing [`StructuralPiece`]s solid when a physics module is installed: a static
+/// collider in the piece's box (a gable's triangle) with its material's surface. Players walk
+/// on floors and decks and are stopped by walls, vehicles crash into them, and debris lands on
+/// them. A piece that gives way becomes a debris body with its own hull. [`Fracturable`]
+/// props (crates, columns) get their box or column until they break.
+pub fn piece_colliders_system(
+    mut commands: Commands,
+    backend: Option<Res<PhysicsBackend>>,
+    table: Res<DestructionMaterials>,
+    surfaces: Res<SurfaceMaterials>,
+    props: Query<(Entity, &Fracturable), (Without<Collider>, Without<Debris>)>,
+    pieces: Query<
+        (
+            Entity,
+            &StructuralPiece,
+            &Transform,
+            Option<&GlobalTransform>,
+            Has<ChildOf>,
+            Option<&BuiltPiece>,
+        ),
+        (Without<Collider>, Without<Debris>),
+    >,
+) {
+    if backend.is_none() {
+        return;
+    }
+    for (e, prop) in &props {
+        let props = table.get(prop.material);
+        commands.entity(e).insert(Collider {
+            shape: match prop.shape {
+                FractureShape::Box { half_extents } => ColliderShape::Cuboid { half_extents },
+                FractureShape::Column {
+                    radius,
+                    half_height,
+                    ..
+                } => ColliderShape::Cylinder {
+                    radius,
+                    half_height,
+                },
+            },
+            surface: surfaces.id_or_default(&props.surface),
+            density: props.density,
+            ..Collider::default()
+        });
+    }
+    for (e, piece, t, gt, child, built) in &pieces {
+        // The backend scales shapes by the entity's world scale; the piece's box is in meters.
+        let scale = match (child, gt) {
+            (true, Some(gt)) => gt.scale(),
+            _ => t.scale,
+        }
+        .max(Vec3::splat(1e-3));
+        let half = solid_half(piece.half_extents) / scale;
+        let props = table.get(piece.material);
+        commands.entity(e).insert(Collider {
+            shape: built.map_or(ColliderShape::Cuboid { half_extents: half }, |b| {
+                b.kind.solid(half)
+            }),
+            surface: surfaces.id_or_default(&props.surface),
+            density: props.density,
+            ..Collider::default()
+        });
     }
 }
 

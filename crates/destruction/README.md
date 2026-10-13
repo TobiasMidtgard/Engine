@@ -24,7 +24,10 @@ fracture and debris.
   meter up and more per meter sideways, by material (wood carries far less sideways than
   stone). Break a post and whatever depended on it falls after a short creak. `ShowSupport`
   paints pieces blue (grounded), green, yellow, orange and red (about to fall), like Valheim's
-  build mode.
+  build mode. With a physics module, standing pieces are solid: each gets a static collider
+  (its box a skin smaller, a gable's triangle) with its material's surface, so you walk on
+  floors and decks and walls stop you, debris lands on what still stands, and a car that hits
+  a wall breaks it. A piece that falls becomes a debris body.
 - **Build mode** (`build`, Valheim's hammer): a `Builder` (the player's camera, a script)
   picks one of ten pieces (wood floor, wall, pole, beam, 26° and 45° shingle roofs, a 26°
   board gable to close a roof's end; stone floor, wall and pillar) and aims. A translucent ghost of the piece sits on what the aim hits
@@ -32,7 +35,8 @@ fracture and debris.
   nearest snap point meets a neighbor's (pole and beam ends, panel corners and edge midpoints,
   a floor's on its top face, block corners), skipping spots inside other pieces. The ghost
   shows the support it would get in the support colors, or a deep red where it would sit
-  inside something, touch nothing, or reach too far from support to stand; place it, turn it
+  inside something, touch nothing, reach too far from support to stand, or (with a physics
+  module) close around someone standing there; place it, turn it
   in 22.5° steps, or take built pieces down (what they held falls). Pieces stand on the
   terrain or on voxel rock alike (dig the rock out from under them and they fall). Built
   pieces show their support colors while their builder has the support view on. Keys (bound
@@ -55,7 +59,10 @@ fracture and debris.
   enough hit, and debris that lands hard shatters again. Fracture faces are rough (broken
   into small bumpy triangles that meet the piece's edges, `BreakLook`) and drawn in a
   joint-free broken material, so a shattered ashlar block shows broken stone, not mortar
-  lines; glass and metal break clean.
+  lines; glass and metal break clean. With a physics module they stand solid (their box or
+  column) until they break, and set dressing (`ArchModel` masonry, a `PropModel` on nothing
+  that breaks) is solid as drawn, a static triangle mesh of its model: the fortress's walls
+  stop you and you can walk along their wall walks.
 - **Debris** uses the physics module when one is installed (physics-contract bodies) and a
   built-in solver otherwise: oriented boxes with friction, bounce and sleep that land on the
   ground and on voxel rock (not yet on each other), and wake when the rock under them is dug.
@@ -76,7 +83,8 @@ through soft material and lose energy), `ContactEvent` (hard impacts, debris lan
 
 Writes: `WorldImpulse` (falling structures, strength only), `NoiseEvent` (breaks, collapses),
 `SmokeEmission` (dust and thermite smoke for the smoke module), `GroundContact` (debris
-landing on a surface, for footstep-style impact sounds), physics-contract bodies for debris.
+landing on a surface, for footstep-style impact sounds), physics-contract bodies for debris
+and static colliders for standing building pieces, breakable props and set dressing.
 
 ## Using it
 
@@ -169,7 +177,8 @@ of a third row that couldn't stand.
 Then the hoe levels a floor pad in the terrace and a second builder puts up a **shelter on the
 rock**: a stone floor laid on the bare rock (blue, because rock is ground), board walls at the
 ends, a shingle roof, and the back walls and their gable against the cut bank, open toward
-the valley.
+the valley. Then a pickaxe digs a pit under it: under one floor slab first (the other slab
+still holds it, red), then under both, and the shelter drops into the pit.
 `--example hill -- <out_dir> [WxH] [only]` renders it (`only`: `build` for the yard,
 `shelter` for the terrace).
 

@@ -88,6 +88,10 @@ course zone.
 - **Grapple station** (behind the course): a pilot sprints at a 9 m tower, jumps, fires the
   hook at an anchor plate under its top edge, is reeled up the face, climbs over the edge,
   crosses the roof and drops off the back onto the pad.
+- **Freight station** (west of the grapple station): a box car shuttles along a short track
+  beside a loading platform. A pilot waits for it to pull out, sprints down the platform,
+  leaps onto the car's side, wall-runs along it, climbs onto the roof, rides it to the end of
+  the track and steps off.
 - **Duel ring**, three rounds on a loop (only while a camera is within
   `DuelDirector::watch_radius`, because slow motion is world-wide):
   1. *Blink*: an elite (speed 2.5) dash-strikes a level 1 player, who is hit before a human
@@ -136,19 +140,29 @@ see both. It steps aside as soon as a physics backend claims the contract.
 The physics backend carries a character standing on a moving body; movement keeps the deck's
 velocity when the character jumps or walks off (a jump from a moving train keeps the train's
 speed), takes it off again when it lands from the air (a jump straight up comes down on the
-same spot), and turns the character with a turning deck (`platform`). Where physics reports no
+same spot), and turns the character with a turning deck (`platform`). Walls, ledges and
+hooks ride along too: a character running along a moving wall, hanging from or climbing onto
+a moving ledge moves with that body (physics only carries what stands on it, so movement
+carries the rest), the ledge and a grapple hook are pinned to their body (`platform::Pin`), and
+the rope reels in relative to a hook in a moving body. Where physics reports no
 ground but the feet are on the [`Ground`](engine_world::Ground) surface (terrain that has no
 collider yet), the character stands on the surface instead of falling through. A backend
 that reports the ground before the feet touch it (within its snap distance) doesn't leave a
 landing character hovering: it keeps coming down at its fall speed until the backend stops it.
+
+The demo's freight car is a kinematic body moved by `demo::Shuttle`. With a physics backend
+the shuttle sets the body's `Velocity` and the backend moves it (a kinematic body whose
+`Transform` is written each frame doesn't move on Rapier, so nothing standing on it would be
+carried); with only the stand-in it writes the `Transform`. After a teleport (a tour stop
+restarting the loop) it stands still for a step so the backend places it first.
 
 ### World shifts
 
 When the world re-anchors (floating origin, or a new planet's frame), `engine_world` moves
 root transforms and the shared character state. Movement moves its own world-space state in
 `WorldShiftSet::Apply`: velocities, facing, wall contacts, ledge targets, grapple anchors and
-aims, dash directions, knockback, the course runner's, climber's, grappler's and duel's anchor
-points, afterimage ghosts, and effects in
+aims, dash directions, knockback, the course runner's, climber's, grappler's, rider's and
+duel's anchor points, the freight car's track ends, afterimage ghosts, and effects in
 flight (blade trails, sparks and their floors, slashes, dust, lights), so a wall-run, a dash
 or a spray of sparks carries on through the shift.
 
@@ -176,7 +190,10 @@ sets the bake size). Nothing in it is third-party art.
   when it bites, claws spread.
 - `look::course`: the course as a pilot training facility (precast wall panels with guide
   lights, a hazard-striped slide bar, a tower with a caged ladder, a start gantry, masts,
-  numbered signs, and the grapple station's nine-meter tower with its glowing anchor plate)
+  numbered signs, the grapple station's nine-meter tower with its glowing anchor plate, and
+  the freight station: ballast, concrete sleepers and rails between buffer stops, a loading
+  platform with granite coping and painted warnings, lamp posts, and a weathered box car on
+  two bogies with sprung wheelsets, sliding doors, ladders, buffers and couplings)
   and the ring as a samurai duel arena (board floor in a carved stone band,
   lanterns, a torii, banners, a drum, a roofed stand), plus the level column. It adds no
   colliders: the demo's boxes stay the same and every surface a character touches is drawn
@@ -197,7 +214,8 @@ API functions: `movement.status`, `movement.set_tempo` (`{"entity": "Player", "l
 (`{"round": "Blink" | "Focus" | "Pack" | null}`: restart the duel on that round and keep
 replaying it, or `null` to go back to cycling; tour stops use it to catch a chosen moment),
 `movement.climber` (restart the ledge climber's loop), `movement.grappler` (restart the
-grappler's loop).
+grappler's loop), `movement.rider` (restart the freight rider's loop with the car about to
+pull out).
 
 ## Tests
 
@@ -205,23 +223,26 @@ grappler's loop).
 pointing toe-first, jump and double jump heights, slide under a bar that blocks running, wall-run and wall-jump, mantle,
 catching a ledge too high to vault, shimmying to its end, climbing up, letting go and kicking
 off, grappling up onto a roof, a shot at nothing coming back, a jump letting go of the rope,
-humans having no hook, dash, characters on their own clocks in slow motion, the stand-in stepping aside, bodies from
+humans having no hook, wall-running on a wall that slides away and jumping off it with its
+speed, hanging from a rising, sliding ledge and climbing onto it, a hook riding a moving roof,
+dash, characters on their own clocks in slow motion, the stand-in stepping aside, bodies from
 other modules being moved);
 `tests/demo.rs` (each duel round plays out as described, the rounds cycle, the runner
 finishes the course, the climber catches the ledge, shimmies, climbs up and drops off, the
-grappler hooks the anchor plate, is reeled up, climbs over and lands on the pad, the duel
+grappler hooks the anchor plate, is reeled up, climbs over and lands on the pad, the rider
+leaps onto the moving freight car, wall-runs along it, climbs aboard and steps off at the end
+of the track, the duel
 waits without a camera, `movement.duel` restarts a chosen round,
 the demo's collider boxes stay the same under the new art);
 `tests/play.rs` (play mode puts a pilot in front of the camera and follows it, a locked-on
 pilot dash-strikes its target past a closer enemy, the lock moves on when its target falls);
 `src/platform.rs` (a jump keeps a deck's speed and lands on the same spot, a turning deck
-turns the character); `src/shift.rs` (a world shift moves walls, ledges, velocities and sparks
+turns the character, a pin moves and turns with its body); `src/shift.rs` (a world shift moves walls, ledges, velocities and sparks
 in flight); `tests/render.rs` (headless
 screenshot with the slow-motion effect; skipped without a GPU).
 
 ## Not done yet
 
-- Ledge hangs on moving bodies, and corners (shimmying stops at the end of a straight
-  edge).
-- Wall-running on moving walls (only standing on a moving body carries a character).
-- A grapple hook in a moving body stays where it bit instead of riding along with it.
+- Ledge corners (shimmying stops at the end of a straight edge).
+- Starting a wall-run checks the runner's speed in the world's frame, not relative to the
+  wall, so a runner keeping pace with a fast wall can start a run it drops right away.

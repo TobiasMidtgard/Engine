@@ -313,6 +313,8 @@ pub struct Simulation {
     pub no_contact: HashMap<(Entity, Entity), u32>,
     /// Static colliders that take part in [`Self::no_contact`] (their copies run the filter).
     pub filtered_statics: EntityHashSet,
+    /// Meshes that float bodies ([`crate::buoyancy`]), by shape.
+    pub hulls: crate::buoyancy::HullCache,
 }
 
 /// Rapier hooks: drop the contacts listed in [`Simulation::no_contact`], and keep round bodies

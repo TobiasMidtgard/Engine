@@ -37,7 +37,7 @@ use engine_assets::Assets;
 use engine_core::prelude::*;
 use wgpu::util::DeviceExt;
 
-use crate::components::{MeshRenderer, NoVirtualGeometry, ResolvedMesh};
+use crate::components::{MaxDrawDistance, MeshRenderer, NoVirtualGeometry, ResolvedMesh};
 use crate::features::{
     FeatureStats, FrameContext, GpuShared, GrowBuffer, RenderFeature, RenderPhase,
 };
@@ -48,7 +48,7 @@ use crate::mesh::{Mesh, Vertex};
 use crate::settings::RenderSettings;
 use crate::shadows::{MAX_CASCADES, SKY_OCCLUSION_VIEW};
 use crate::texture::{Image, PixelFormat};
-use crate::virtual_geometry::{ClusterInstance, ClusterRenderer};
+use crate::virtual_geometry::{ClusterInstance, ClusterRenderer, FAR_SHADOW_CLUSTERS};
 
 /// Per-instance vertex data (locations 4–10 in `mesh.wgsl`, plus 11–13 for the previous
 /// matrix in the mesh feature's own pipelines).
@@ -242,7 +242,14 @@ type MeshQuery = (
     &'static MeshRenderer,
     &'static ResolvedMesh,
     Has<NoVirtualGeometry>,
+    Option<&'static MaxDrawDistance>,
 );
+
+/// Whether a bounding sphere at camera-relative `center` lies wholly beyond the entity's
+/// [`MaxDrawDistance`].
+fn beyond_draw_distance(max: Option<&MaxDrawDistance>, center: Vec3, radius: f32) -> bool {
+    max.is_some_and(|m| center.length() - radius > m.0)
+}
 
 /// Draws [`MeshRenderer`] entities. Added by `RenderPlugin`.
 #[derive(Default)]
@@ -281,6 +288,8 @@ pub struct MeshFeature {
     transparent: Vec<Batch>,
     /// Per shadow cascade, then the sky occlusion map (index `SKY_OCCLUSION_VIEW`).
     shadow: [Vec<Batch>; MAX_CASCADES + 1],
+    /// Big casters in the far shadow map.
+    far_shadow: Vec<Batch>,
     query: Option<QueryState<MeshQuery>>,
     items: Vec<Item>,
     keys: Vec<BatchKey>,
@@ -544,6 +553,28 @@ impl MeshFeature {
             .and_then(Option::as_ref)
             .or_else(|| self.texture_sets.first().and_then(Option::as_ref))
             .map(|s| &s.group)
+    }
+
+    /// Draw a shadow view's batches and its clusters (`view`: a cascade, `SKY_OCCLUSION_VIEW`
+    /// or `FAR_SHADOW_CLUSTERS`).
+    fn draw_shadow_view(&self, pass: &mut wgpu::RenderPass<'_>, batches: &[Batch], view: usize) {
+        let (Some(group), Some(instances)) = (&self.material_group, &self.instances) else {
+            return;
+        };
+        let clusters = self.clusters.as_ref().filter(|c| c.is_active());
+        if batches.is_empty() && clusters.is_none() {
+            return;
+        }
+        pass.set_bind_group(1, group, &[]);
+        pass.set_vertex_buffer(1, instances.buffer.slice(..));
+        let pipeline_for = |p: u8| match p {
+            SHADOW_MASKED => self.shadow_masked_pipeline.as_ref(),
+            _ => self.shadow_pipeline.as_ref(),
+        };
+        self.draw_batches(pass, batches, pipeline_for, |p| p == SHADOW_MASKED);
+        if let Some(clusters) = clusters {
+            clusters.draw_shadow(pass, view);
+        }
     }
 
     fn draw_batches<'a>(
@@ -988,7 +1019,8 @@ impl RenderFeature for MeshFeature {
 
         let frame = self.frame;
         let prev_origin = self.prev_origin.unwrap_or(view.origin);
-        for (entity, gt, renderer, resolved, instanced_only) in query.iter(world_ref) {
+        for (entity, gt, renderer, resolved, instanced_only, max_distance) in query.iter(world_ref)
+        {
             if !renderer.visible {
                 continue;
             }
@@ -1017,6 +1049,18 @@ impl RenderFeature for MeshFeature {
                 && let Some(clusters) = &mut self.clusters
                 && clusters.ready(mesh_index, version, mesh)
             {
+                self.clustered.insert(mesh_index);
+                if let Some(bounds) = clusters.bounds(mesh_index)
+                    && max_distance.is_some()
+                {
+                    let center =
+                        (gt.transform_point(bounds.center.as_dvec3()) - view.origin).as_vec3();
+                    let radius = bounds.radius * gt.scale().abs().max_element();
+                    if beyond_draw_distance(max_distance, center, radius) {
+                        culled += 1;
+                        continue;
+                    }
+                }
                 let (material_slot, textures) = self.material_slot(
                     gpu,
                     material_handle.index(),
@@ -1039,7 +1083,6 @@ impl RenderFeature for MeshFeature {
                         casts_shadows: shadows && renderer.cast_shadows,
                     });
                 }
-                self.clustered.insert(mesh_index);
                 continue;
             }
 
@@ -1061,6 +1104,10 @@ impl RenderFeature for MeshFeature {
             let center = (center_world - view.origin).as_vec3();
             let radius = gpu_mesh.half_extents.length() * scale;
             let (min_y, height) = (gpu_mesh.min_y, gpu_mesh.height);
+            if beyond_draw_distance(max_distance, center, radius) {
+                culled += 1;
+                continue;
+            }
             let visible = view.frustum.intersects_sphere(center, radius);
             let blend = material.alpha_mode == AlphaMode::Blend;
             let masked = matches!(material.alpha_mode, AlphaMode::Mask(_));
@@ -1141,6 +1188,7 @@ impl RenderFeature for MeshFeature {
         for s in &mut self.shadow {
             s.clear();
         }
+        self.far_shadow.clear();
         self.keys.clear();
 
         // Opaque.
@@ -1218,6 +1266,18 @@ impl RenderFeature for MeshFeature {
                 }
                 Self::batch(&self.keys, first as u32, &mut self.shadow[c]);
             }
+            if view.sun_shadows && view.far_shadow.enabled {
+                let first = self.instance_data.len();
+                self.keys.clear();
+                for &n in &self.casters {
+                    let item = &self.items[n as usize];
+                    if view.far_shadow.casts(item.center, item.radius) {
+                        self.instance_data.push(item.instance);
+                        self.keys.push(shadow_key(item));
+                    }
+                }
+                Self::batch(&self.keys, first as u32, &mut self.far_shadow);
+            }
         }
 
         // Upload.
@@ -1262,6 +1322,7 @@ impl RenderFeature for MeshFeature {
             }
         }
         stats.draw_calls += self.shadow.iter().map(|s| s.len() as u32).sum::<u32>();
+        stats.draw_calls += self.far_shadow.len() as u32;
         if let Some(clusters) = &self.clusters {
             let c = clusters.stats();
             stats.draw_calls += c.draw_calls;
@@ -1323,24 +1384,11 @@ impl RenderFeature for MeshFeature {
     }
 
     fn draw_shadow(&self, pass: &mut wgpu::RenderPass<'_>, cascade: usize, _ctx: &FrameContext) {
-        let (Some(group), Some(instances)) = (&self.material_group, &self.instances) else {
-            return;
-        };
-        let batches = &self.shadow[cascade];
-        let clusters = self.clusters.as_ref().filter(|c| c.is_active());
-        if batches.is_empty() && clusters.is_none() {
-            return;
-        }
-        pass.set_bind_group(1, group, &[]);
-        pass.set_vertex_buffer(1, instances.buffer.slice(..));
-        let pipeline_for = |p: u8| match p {
-            SHADOW_MASKED => self.shadow_masked_pipeline.as_ref(),
-            _ => self.shadow_pipeline.as_ref(),
-        };
-        self.draw_batches(pass, batches, pipeline_for, |p| p == SHADOW_MASKED);
-        if let Some(clusters) = clusters {
-            clusters.draw_shadow(pass, cascade);
-        }
+        self.draw_shadow_view(pass, &self.shadow[cascade], cascade);
+    }
+
+    fn draw_far_shadow(&self, pass: &mut wgpu::RenderPass<'_>, _ctx: &FrameContext) {
+        self.draw_shadow_view(pass, &self.far_shadow, FAR_SHADOW_CLUSTERS);
     }
 
     fn stats(&self) -> FeatureStats {
@@ -1360,6 +1408,7 @@ impl RenderFeature for MeshFeature {
             "opaque_batches": self.opaque.len(),
             "transparent_batches": self.transparent.len(),
             "shadow_batches": self.shadow.iter().map(|s| s.len()).collect::<Vec<_>>(),
+            "far_shadow_batches": self.far_shadow.len(),
             "virtual_geometry": self.clusters.as_ref().map(ClusterRenderer::describe),
         })
     }

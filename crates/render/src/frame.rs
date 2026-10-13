@@ -13,7 +13,7 @@ use crate::components::{
     AmbientLight, Camera, DirectionalLight, Exposure, PointLight, Projection, SkyLightVolume,
 };
 use crate::settings::{Atmosphere, DebugView, FogSettings, RenderSettings};
-use crate::shadows::{Cascades, SkyOcclusionView};
+use crate::shadows::{Cascades, FarShadowView, SkyOcclusionView};
 
 /// GPU layout of `struct Frame` in `lib_types.wgsl`.
 #[repr(C)]
@@ -66,6 +66,10 @@ pub struct FrameUniform {
     /// Volumetric fog: range (m, 0 = off), 1 / depth scale (1/m), 1 / log2(1 + range / depth
     /// scale), depth slices (see `volumetrics::frame_params`).
     pub volumetrics: [f32; 4],
+    /// Camera-relative → far shadow map clip space (see [`FarShadowView`]).
+    pub far_shadow: [[f32; 4]; 4],
+    /// Far shadow map: reach (m, 0 = off), texel size (m), clip depth per meter, array layer.
+    pub far_shadow_params: [f32; 4],
 }
 
 /// Most [`SkyLightVolume`]s shaded per frame (nearest the camera first).
@@ -159,6 +163,8 @@ pub struct ViewData {
     pub sun_color: Vec3,
     pub sun_shadows: bool,
     pub cascades: Cascades,
+    /// The coarse sun shadow map beyond the cascades (big casters only).
+    pub far_shadow: FarShadowView,
     /// Top-down sky occlusion map around the camera.
     pub sky_occlusion: SkyOcclusionView,
     /// Multiply radiance by this before writing HDR (1 / max luminance).
@@ -468,6 +474,17 @@ pub fn build_view(
     } else {
         Cascades::default()
     };
+    let far_shadow = if cascades.count > 0 {
+        FarShadowView::new(
+            origin,
+            sun_dir,
+            cascades.map_size,
+            settings.far_shadow_distance,
+            cascades.splits[cascades.count as usize - 1],
+        )
+    } else {
+        FarShadowView::default()
+    };
 
     ViewData {
         camera: camera_entity,
@@ -492,6 +509,7 @@ pub fn build_view(
         sun_color,
         sun_shadows: sun_shadows && cascades.count > 0,
         cascades,
+        far_shadow,
         sky_occlusion: SkyOcclusionView::new(
             origin,
             settings.sky_occlusion_size.clamp(64, 4096),
@@ -695,6 +713,8 @@ pub fn frame_uniform(world: &World, v: &ViewData) -> FrameUniform {
             },
         ],
         volumetrics: crate::volumetrics::frame_params(settings, v),
+        far_shadow: mat(v.far_shadow.view_proj),
+        far_shadow_params: v.far_shadow.params(),
     }
 }
 
@@ -705,10 +725,21 @@ mod tests {
     #[test]
     fn frame_uniform_matches_wgsl_size() {
         // 7 mat4 + 15 vec4 + 4 mat4 + 3 vec4 + ground, sky occlusion, volumes, then the
-        // screen-space block (mat4 + 4 vec4), volumetric fog (vec4).
+        // screen-space block (mat4 + 4 vec4), volumetric fog (vec4), far shadow (mat4 + vec4).
         assert_eq!(
             std::mem::size_of::<FrameUniform>(),
-            7 * 64 + 15 * 16 + 4 * 64 + 3 * 16 + 16 + 64 + 16 + MAX_SKY_VOLUMES * 80 + 64 + 5 * 16
+            7 * 64
+                + 15 * 16
+                + 4 * 64
+                + 3 * 16
+                + 16
+                + 64
+                + 16
+                + MAX_SKY_VOLUMES * 80
+                + 64
+                + 5 * 16
+                + 64
+                + 16
         );
         assert_eq!(std::mem::size_of::<GpuSkyVolume>(), 80);
         assert_eq!(std::mem::size_of::<GpuPointLight>(), 32);

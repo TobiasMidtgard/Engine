@@ -41,6 +41,7 @@ fn every_surface_makes_a_textured_material() {
                 | Surface::RuneLife
                 | Surface::RuneEmber
                 | Surface::Crystal
+                | Surface::Coals
         );
         assert_eq!(m.emissive_texture.is_some(), glows, "{s:?}");
         assert_eq!(m.emissive_strength > 0.0, glows, "{s:?}");

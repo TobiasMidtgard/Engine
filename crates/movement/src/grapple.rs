@@ -9,6 +9,8 @@
 //!   [`grapple_speed`](MovementProfile::grapple_speed) against gravity, never lets it swing
 //!   further out than the rope (so a hook overhead swings it), and the stick steers across
 //!   the rope. A character on the ground is lifted off it.
+//! * **Moving targets.** A hook that bites a moving body (a ship, a lift, a train) moves with
+//!   it, and the rope reels the character in relative to it.
 //! * **Letting go.** Jump (an air jump, if one is left), crouch, or fire again lets go and
 //!   keeps the momentum; so does arriving at the hook, the rope snagging on something, or
 //!   holding on for [`MAX_SECS`]. A ledge in front at the end is climbed onto (or caught,
@@ -78,6 +80,8 @@ fn fire(m: &mut Mover, p: &MovementProfile, b: &Body, probe: &Probe, at: DVec3, 
             miss: false,
             length: h.distance,
             secs: 0.0,
+            on: probe.pin(h.entity, h.point, h.normal),
+            anchor_velocity: Vec3::ZERO,
         },
         None => Grapple {
             anchor: from + (dir * p.grapple_range).as_dvec3(),
@@ -87,6 +91,8 @@ fn fire(m: &mut Mover, p: &MovementProfile, b: &Body, probe: &Probe, at: DVec3, 
             miss: true,
             length: p.grapple_range,
             secs: 0.0,
+            on: None,
+            anchor_velocity: Vec3::ZERO,
         },
     });
     out.trigger(b.entity, "grapple_fire");
@@ -166,8 +172,10 @@ pub(crate) fn step(
         return None;
     }
 
-    // ---- reeling in, easing off near the hook
-    let mut v = v;
+    // ---- reeling in, easing off near the hook. The rope pulls relative to the hook, which
+    // moves with the body it bit into.
+    let carry = g.anchor_velocity - m.platform.map_or(Vec3::ZERO, |d| d.velocity);
+    let mut v = v - carry;
     let along = v.dot(dir);
     let speed = p
         .grapple_speed
@@ -186,7 +194,7 @@ pub(crate) fn step(
             v -= dir * away;
         }
     }
-    v = v.clamp_length_max(p.grapple_speed * 1.3);
+    v = v.clamp_length_max(p.grapple_speed * 1.3) + carry;
     // Off the ground: the feet would otherwise stay pinned to it.
     if grounded && dir.dot(up) > 0.2 && v.dot(up) < 2.0 {
         v += up * (2.0 - v.dot(up));
@@ -212,6 +220,8 @@ mod tests {
             miss: false,
             length: 10.0,
             secs: 0.0,
+            on: None,
+            anchor_velocity: Vec3::ZERO,
         };
         let from = DVec3::ZERO;
         assert!((hook_position(&g, from) - DVec3::new(0.0, 0.0, -4.0)).length() < 1e-9);

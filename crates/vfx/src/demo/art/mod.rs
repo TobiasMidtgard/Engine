@@ -58,6 +58,8 @@ pub enum Surface {
     RuneEmber,
     /// Faceted magic crystal (obelisk caps, the caster's focus).
     Crystal,
+    /// Burning charcoal with glowing fissures (the braziers' fuel).
+    Coals,
 }
 
 /// One mesh of a prop and what it is made of.

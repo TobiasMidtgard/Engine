@@ -1,13 +1,14 @@
 //! Locomotion against the physics contract (run here by the stand-in character physics):
 //! sprint, jump, double jump, slide under a bar, wall-run and wall-jump, mantle, ledge hang,
-//! dash, and characters running on their own clocks in slow motion.
+//! grapple, riding moving walls, ledges and hooks, dash, and characters running on their own
+//! clocks in slow motion.
 
 mod support;
 
 use engine_core::math::{DVec3, Vec3};
 use engine_core::prelude::*;
 use engine_movement::prelude::*;
-use engine_world::locomotion::MoveIntent;
+use engine_world::locomotion::{LocomotionState, MoveIntent};
 use engine_world::physics::CharacterController;
 use engine_world::{GroundContact, LocomotionMode};
 use support::*;
@@ -210,6 +211,8 @@ fn wall_runs_along_a_wall_and_wall_jumps_off() {
     run_until(&mut app, 1.6, |w| {
         if w.get::<Mover>(c).unwrap().mode == LocomotionMode::WallRun {
             wallrun_secs += DT;
+            // On the wall: steer along it (steering into it near its top climbs over).
+            w.get_mut::<MoveIntent>(c).unwrap().direction = Vec3::X;
         }
         false
     });
@@ -227,6 +230,9 @@ fn wall_runs_along_a_wall_and_wall_jumps_off() {
     assert!(m.velocity.x > 8.0, "full speed along the wall");
 
     // Wall-jump: away from the wall (−Z) and up.
+    intent(&mut app, c, |i| {
+        i.direction = Vec3::new(0.2, 0.0, 1.0).normalize()
+    });
     tap_jump(&mut app, c);
     let m = mover(&app, c);
     assert_eq!(m.mode, LocomotionMode::Air);
@@ -239,6 +245,54 @@ fn wall_runs_along_a_wall_and_wall_jumps_off() {
     // It doesn't stick straight back onto the wall it just left.
     run(&mut app, 0.3);
     assert_ne!(mover(&app, c).mode, LocomotionMode::WallRun);
+}
+
+#[test]
+fn steering_into_a_low_wall_while_wall_running_climbs_over_its_top() {
+    let mut app = app();
+    // A 3.4 m wall along +X whose face is at z = 1.2.
+    block(
+        &mut app,
+        DVec3::new(15.0, 1.7, 2.2),
+        Vec3::new(30.0, 3.4, 2.0),
+    );
+    let c = character(
+        &mut app,
+        DVec3::new(0.0, 0.9, 0.0),
+        MovementProfile::pilot(),
+    );
+    intent(&mut app, c, |i| {
+        i.direction = Vec3::X;
+        i.sprint = true;
+    });
+    run(&mut app, 1.0);
+    tap_jump(&mut app, c);
+    intent(&mut app, c, |i| {
+        i.direction = Vec3::new(0.2, 0.0, 1.0).normalize()
+    });
+    run_until(&mut app, 1.0, |w| {
+        w.get::<Mover>(c).unwrap().mode == LocomotionMode::WallRun
+    });
+    // Along the wall first: it runs on it rather than climbing at once.
+    intent(&mut app, c, |i| i.direction = Vec3::X);
+    run(&mut app, 0.3);
+    assert_eq!(mover(&app, c).mode, LocomotionMode::WallRun);
+    assert_eq!(triggered(&app, c, "mantle"), 0);
+    // Into the wall: over the top, at a run.
+    intent(&mut app, c, |i| {
+        i.direction = Vec3::new(1.0, 0.0, 1.0).normalize()
+    });
+    run_until(&mut app, 0.5, |w| {
+        w.get::<Mover>(c).unwrap().mode == LocomotionMode::Mantle
+    });
+    assert_eq!(triggered(&app, c, "mantle"), 1);
+    run_until(&mut app, 1.5, |w| {
+        let m = w.get::<Mover>(c).unwrap();
+        m.grounded && m.mode != LocomotionMode::Mantle
+    });
+    let p = pos(&app, c);
+    assert!(mover(&app, c).grounded && p.z > 1.4, "{p:?}");
+    assert!((p.y - (3.4 + 0.9)).abs() < 0.05, "{p:?}");
 }
 
 #[test]
@@ -610,4 +664,218 @@ fn bodies_from_other_modules_are_moved_too() {
     assert!(x > 6.0, "walked {x:.2} m in 2 s");
     assert!(app.world.get::<Mover>(bird).is_none());
     assert_eq!(pos(&app, bird), DVec3::new(0.0, 5.0, 4.0));
+}
+
+/// Moves a body at a steady velocity, m/s (a lift, a ship sliding past). The stand-in physics
+/// sees colliders where their transforms are each step.
+#[derive(Component)]
+struct Drift(Vec3);
+
+fn drift(time: Res<Time>, mut q: Query<(&mut Transform, &Drift)>) {
+    for (mut t, d) in &mut q {
+        t.translation += (d.0 * time.delta_secs()).as_dvec3();
+    }
+}
+
+fn drifting(app: &mut App) {
+    app.add_systems(FixedUpdate, drift.in_set(SimSet::Physics));
+}
+
+#[test]
+fn wall_runs_on_a_moving_wall_and_jumps_off_with_its_speed() {
+    let mut app = app();
+    drifting(&mut app);
+    // The wall from the wall-run test, sliding away from the runner and along its length.
+    let wall = block(
+        &mut app,
+        DVec3::new(15.0, 2.5, 1.5),
+        Vec3::new(30.0, 5.0, 0.6),
+    );
+    let c = character(
+        &mut app,
+        DVec3::new(0.0, 0.9, 0.0),
+        MovementProfile::pilot(),
+    );
+    intent(&mut app, c, |i| {
+        i.direction = Vec3::X;
+        i.sprint = true;
+    });
+    run(&mut app, 1.0);
+    tap_jump(&mut app, c);
+    intent(&mut app, c, |i| {
+        i.direction = Vec3::new(0.2, 0.0, 1.0).normalize()
+    });
+    run_until(&mut app, 1.0, |w| {
+        w.get::<Mover>(c).unwrap().mode == LocomotionMode::WallRun
+    });
+    intent(&mut app, c, |i| i.direction = Vec3::X);
+    // On the wall: it starts sliding away from the runner and along its length.
+    let speed = Vec3::new(3.0, 0.0, 2.0);
+    app.world.entity_mut(wall).insert(Drift(speed));
+    let mut wallrun_secs = 0.0;
+    run_until(&mut app, 1.2, |w| {
+        if w.get::<Mover>(c).unwrap().mode == LocomotionMode::WallRun {
+            wallrun_secs += DT;
+        }
+        false
+    });
+    let m = mover(&app, c);
+    assert!(wallrun_secs > 1.1, "wall-ran for {wallrun_secs:.2} s");
+    assert_eq!(m.mode, LocomotionMode::WallRun);
+    // Still against the wall, which slid 2.4 m away from where it started.
+    let face = app.world.get::<Transform>(wall).unwrap().translation.z - 0.3;
+    let p = pos(&app, c);
+    assert!(face > 3.5, "{face}");
+    assert!(
+        (face - 0.35 - p.z).abs() < 0.15,
+        "wall at {face:.2}, runner at {p:?}"
+    );
+    // Running at full speed along the wall, plus the wall's own speed.
+    let world = app.world.get::<LocomotionState>(c).unwrap().velocity;
+    assert!(m.velocity.x > 9.0, "along the wall: {}", m.velocity);
+    assert!(world.x > 12.0 && world.z > 1.5, "in the world: {world}");
+
+    // Wall-jump: off the wall, keeping its speed.
+    intent(&mut app, c, |i| {
+        i.direction = Vec3::new(0.2, 0.0, 1.0).normalize()
+    });
+    tap_jump(&mut app, c);
+    assert_eq!(mover(&app, c).mode, LocomotionMode::Air);
+    app.update();
+    let m = mover(&app, c);
+    assert!(m.platform.is_none());
+    assert!(
+        m.velocity.x > 12.0 && m.velocity.z < -2.0 && m.velocity.y > 2.0,
+        "{}",
+        m.velocity
+    );
+}
+
+#[test]
+fn hangs_from_a_moving_ledge_and_climbs_onto_it() {
+    let mut app = app();
+    drifting(&mut app);
+    let c = hang_from_a_high_wall(&mut app);
+    let start = pos(&app, c);
+    // The wall becomes a lift that also slides along its ledge.
+    let wall = app
+        .world
+        .query_filtered::<Entity, With<engine_world::physics::Collider>>()
+        .iter(&app.world)
+        .next()
+        .unwrap();
+    let speed = Vec3::new(0.0, 0.5, 2.0);
+    app.world.entity_mut(wall).insert(Drift(speed));
+    run(&mut app, 1.5);
+    let p = pos(&app, c);
+    let m = mover(&app, c);
+    assert_eq!(m.mode, LocomotionMode::Climb);
+    assert_eq!(m.platform.map(|d| d.entity), Some(wall));
+    let rode = p - start;
+    assert!(
+        (rode - (speed * 1.5).as_dvec3()).length() < 0.1,
+        "rode {rode:?}"
+    );
+    assert!(
+        m.velocity.length() < 0.3,
+        "still against the wall: {}",
+        m.velocity
+    );
+
+    // Climb up: the mantle follows the moving ledge onto the top.
+    tap_jump(&mut app, c);
+    assert_eq!(mover(&app, c).mode, LocomotionMode::Mantle);
+    let secs = run_until(&mut app, 1.5, |w| {
+        let m = w.get::<Mover>(c).unwrap();
+        m.grounded && m.mode != LocomotionMode::Mantle
+    });
+    let top = app.world.get::<Transform>(wall).unwrap().translation.y + 1.8;
+    let p = pos(&app, c);
+    assert!(secs < 1.2 && p.x > 1.2, "on top after {secs:.2} s at {p:?}");
+    assert!(
+        (p.y - (top + 0.9)).abs() < 0.08,
+        "{p:?} on a top at {top:.2}"
+    );
+}
+
+#[test]
+fn a_grapple_hook_rides_a_moving_roof() {
+    let mut app = app();
+    drifting(&mut app);
+    let c = under_a_roof(&mut app);
+    let roof = app
+        .world
+        .query_filtered::<Entity, With<engine_world::physics::Collider>>()
+        .iter(&app.world)
+        .next()
+        .unwrap();
+    app.world
+        .entity_mut(roof)
+        .insert(Drift(Vec3::new(0.0, 0.0, 3.0)));
+    fire_grapple(&mut app, c, DVec3::new(6.0, 8.6, 0.0));
+    // The hook stays where it bit on the roof while the roof slides on.
+    let mut held = 0;
+    let secs = run_until(&mut app, 3.0, |w| {
+        let roof_z = w.get::<Transform>(roof).unwrap().translation.z;
+        let m = w.get::<Mover>(c).unwrap();
+        if let Some(g) = m.grapple.filter(|g| g.attached) {
+            // (The roof slides on after the character's step.)
+            let then = roof_z - 3.0 * DT;
+            assert!((g.anchor.z - then).abs() < 0.01, "{} vs {then}", g.anchor.z);
+            assert!((g.anchor_velocity.z - 3.0).abs() < 0.01);
+            held += 1;
+        }
+        let on_top = w.get::<Transform>(c).unwrap().translation.y > 9.5;
+        m.grounded && m.mode != LocomotionMode::Mantle && on_top
+    });
+    assert!(held > 10, "held for {held} steps");
+    let p = pos(&app, c);
+    assert!(
+        secs < 1.8 && p.x > 6.2,
+        "on the roof after {secs:.2} s at {p:?}"
+    );
+    // Pulled along with the roof on the way up, and over its edge.
+    assert!(p.z > 2.0, "{p:?}");
+    assert!((p.y - (9.0 + 0.9)).abs() < 0.05, "{p:?}");
+}
+
+#[test]
+fn the_stand_in_carries_a_character_on_a_moving_box_and_a_jump_lands_on_the_same_spot() {
+    let mut app = app();
+    drifting(&mut app);
+    let deck = block(
+        &mut app,
+        DVec3::new(0.0, 0.5, 0.0),
+        Vec3::new(6.0, 1.0, 6.0),
+    );
+    let c = character(
+        &mut app,
+        DVec3::new(0.0, 1.9, 0.0),
+        MovementProfile::pilot(),
+    );
+    run(&mut app, 0.3);
+    app.world
+        .entity_mut(deck)
+        .insert(Drift(Vec3::new(4.0, 0.0, 1.0)));
+    run(&mut app, 1.0);
+    let rel = |app: &App| pos(app, c) - app.world.get::<Transform>(deck).unwrap().translation;
+    let before = rel(&app);
+    assert!(mover(&app, c).grounded);
+    assert!(before.x.abs() < 0.1 && before.z.abs() < 0.1, "{before:?}");
+    let world = app.world.get::<LocomotionState>(c).unwrap().velocity;
+    assert!(
+        (world.x - 4.0).abs() < 0.1 && (world.z - 1.0).abs() < 0.1,
+        "{world}"
+    );
+
+    tap_jump(&mut app, c);
+    let mut flew = 0.0;
+    run_until(&mut app, 2.0, |w| {
+        let m = w.get::<Mover>(c).unwrap();
+        flew = m.air_secs.max(flew);
+        m.grounded && flew > 0.3
+    });
+    let after = rel(&app);
+    assert!(flew > 0.3, "never left the box");
+    assert!((after - before).length() < 0.15, "{before:?} -> {after:?}");
 }

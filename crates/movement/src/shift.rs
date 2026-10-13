@@ -7,7 +7,7 @@ use engine_core::prelude::*;
 use engine_world::WorldShift;
 
 use crate::afterimage::{Afterimage, Afterimages};
-use crate::demo::{Brain, DuelDirector};
+use crate::demo::{Brain, DuelDirector, Shuttle};
 use crate::look::effects::Effects;
 use crate::mover::{Mover, WallContact};
 
@@ -25,6 +25,7 @@ pub(crate) fn follow_world_shifts(
     mut movers: Query<(&mut Mover, Option<&GlobalTransform>)>,
     mut brains: Query<&mut Brain>,
     mut directors: Query<&mut DuelDirector>,
+    mut shuttles: Query<&mut Shuttle>,
     mut trails: Query<&mut Afterimages>,
     mut ghosts: Query<&mut Afterimage>,
     effects: Option<ResMut<Effects>>,
@@ -59,6 +60,7 @@ pub(crate) fn follow_world_shifts(
         if let Some(g) = &mut m.grapple {
             g.anchor = s.point(g.anchor);
             g.normal = s.direction(g.normal);
+            g.anchor_velocity = s.velocity_at(g.anchor, g.anchor_velocity);
         }
         m.pending_grapple = m.pending_grapple.map(|at| s.point(at));
         if let Some(platform) = &mut m.platform {
@@ -68,13 +70,18 @@ pub(crate) fn follow_world_shifts(
     for mut b in &mut brains {
         if let Brain::Runner { origin, .. }
         | Brain::Climber { origin, .. }
-        | Brain::Grappler { origin, .. } = &mut *b
+        | Brain::Grappler { origin, .. }
+        | Brain::Rider { origin, .. } = &mut *b
         {
             *origin = s.point(*origin);
         }
     }
     for mut d in &mut directors {
         d.origin = s.point(d.origin);
+    }
+    for mut sh in &mut shuttles {
+        sh.from = s.point(sh.from);
+        sh.to = s.point(sh.to);
     }
     for mut a in &mut trails {
         a.shift(&s);
@@ -115,6 +122,7 @@ mod tests {
                         forward: Vec3::X,
                         rising: true,
                         exit_speed: 3.0,
+                        on: None,
                     }),
                     ..Default::default()
                 },

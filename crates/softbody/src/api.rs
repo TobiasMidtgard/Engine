@@ -234,6 +234,20 @@ pub fn register(app: &mut App) {
         },
     )
     .register_api(
+        "softbody.sailboat_home",
+        "Send every self-sailing dinghy back to its mooring to start its lane over (head to wind, at rest). Returns how many.",
+        "{}",
+        |world, _| {
+            let mut q = world.query::<&mut crate::demo::sailboat::Helm>();
+            let mut n = 0;
+            for mut helm in q.iter_mut(world) {
+                helm.restart = true;
+                n += 1;
+            }
+            Ok(json!({ "boats": n }))
+        },
+    )
+    .register_api(
         "softbody.stats",
         "Soft-body totals: bodies, particles, frozen bodies, last step time (ms).",
         "{}",
