@@ -16,6 +16,9 @@
 //! | `emissive_texture` | RGB | sRGB (per `Image::srgb`) | × `emissive` × `emissive_strength` |
 //! | `occlusion_texture` | R = ambient occlusion | linear | mixed by `occlusion_strength` |
 //!
+//! Plain or textured, a material can add procedural surface detail (`with_detail`): bumps,
+//! mottled color and roughness from 3D noise, anchored to the object (or the world).
+//!
 //! Texture coordinates are multiplied by `uv_scale` (tiling). Normal maps need no vertex
 //! tangents: the shader builds the tangent frame from screen-space derivatives. In JSON a
 //! texture is its handle index (`"base_color_texture": 3`); `assets.load` lists the handles
@@ -88,6 +91,16 @@ pub struct StandardMaterial {
     /// How strongly the occlusion texture darkens ambient light (glTF
     /// `occlusionTexture.strength`), 0..1.
     pub occlusion_strength: f32,
+    /// Procedural surface detail, 0 (off) .. 1: fine bumps, mottled color and roughness from
+    /// 3D noise, so plain-colored surfaces (stone, plaster, bark, soil, metal plates) don't look
+    /// flat. Works without textures and on top of them.
+    pub detail: f32,
+    /// Size of the detail's bumps in meters (its mottling is about 8 times larger).
+    pub detail_scale: f32,
+    /// Anchor the detail to the world instead of the object: for terrain and other meshes split
+    /// into pieces whose detail must line up across the seams. Object-anchored detail (the
+    /// default) moves with the object.
+    pub detail_in_world: bool,
 }
 
 impl Default for StandardMaterial {
@@ -113,6 +126,9 @@ impl Default for StandardMaterial {
             uv_scale: [1.0, 1.0],
             normal_scale: 1.0,
             occlusion_strength: 1.0,
+            detail: 0.0,
+            detail_scale: 0.25,
+            detail_in_world: false,
         }
     }
 }
@@ -202,6 +218,19 @@ impl StandardMaterial {
         self
     }
 
+    /// Add procedural surface detail: `strength` 0..1, bumps about `scale` meters across.
+    pub fn with_detail(mut self, strength: f32, scale: f32) -> Self {
+        self.detail = strength;
+        self.detail_scale = scale;
+        self
+    }
+
+    /// Anchor the surface detail to the world (seamless across meshes split into pieces).
+    pub fn with_detail_in_world(mut self) -> Self {
+        self.detail_in_world = true;
+        self
+    }
+
     /// Cut out pixels whose alpha is below `cutoff` (in the scene and in shadows).
     pub fn with_alpha_mask(mut self, cutoff: f32) -> Self {
         self.alpha_mode = AlphaMode::Mask(cutoff);
@@ -246,6 +275,9 @@ impl StandardMaterial {
         if self.receives_wetness {
             flags |= 1 << 6;
         }
+        if self.detail_in_world {
+            flags |= DETAIL_IN_WORLD_FLAG;
+        }
         for (i, t) in self.textures().iter().enumerate() {
             if t.is_some() {
                 flags |= TEXTURE_FLAG_BASE << i;
@@ -271,7 +303,12 @@ impl StandardMaterial {
                 self.normal_scale,
                 self.occlusion_strength.clamp(0.0, 1.0),
             ],
-            uv: [self.uv_scale[0], self.uv_scale[1], 0.0, 0.0],
+            uv: [
+                self.uv_scale[0],
+                self.uv_scale[1],
+                self.detail.clamp(0.0, 1.0),
+                self.detail_scale.max(1e-3),
+            ],
             flags: [flags, 0, 0, 0],
         }
     }
@@ -295,6 +332,8 @@ pub fn srgb_hex_to_linear(rgb: u32) -> [f32; 3] {
 pub const TEXTURE_FLAG_BASE: u32 = 1 << 7;
 /// Mask of all texture-present bits in `GpuMaterial::flags[0]`.
 pub const TEXTURE_FLAGS: u32 = 0b11111 << 7;
+/// `GpuMaterial::flags[0]` bit: surface detail anchored to the world.
+pub const DETAIL_IN_WORLD_FLAG: u32 = 1 << 12;
 
 /// GPU layout of a material (one entry of the material storage buffer, `struct Material` in
 /// `mesh.wgsl` / `mesh_shadow.wgsl`). 96 bytes.
@@ -307,10 +346,10 @@ pub struct GpuMaterial {
     pub params: [f32; 4],
     /// subsurface, wind sway, normal scale, occlusion strength
     pub params2: [f32; 4],
-    /// uv scale xy, unused zw
+    /// uv scale xy, detail strength, detail scale (m)
     pub uv: [f32; 4],
     /// x: bits 0-3 alpha mode, 4 unlit, 5 double sided, 6 receives wetness, 7-11 texture
-    /// present (base color, normal, metallic/roughness, emissive, occlusion)
+    /// present (base color, normal, metallic/roughness, emissive, occlusion), 12 detail in world
     pub flags: [u32; 4],
 }
 
@@ -347,7 +386,7 @@ mod tests {
             gpu.flags[0] & TEXTURE_FLAGS,
             TEXTURE_FLAG_BASE | (TEXTURE_FLAG_BASE << 1)
         );
-        assert_eq!(gpu.uv, [2.0, 3.0, 0.0, 0.0]);
+        assert_eq!(gpu.uv, [2.0, 3.0, 0.0, 0.25]);
         let json = serde_json::to_value(textured).unwrap();
         assert_eq!(json["base_color_texture"], 3);
         let back: StandardMaterial = serde_json::from_value(json).unwrap();

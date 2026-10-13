@@ -18,7 +18,7 @@ struct Material {
     emissive: vec4<f32>,
     params: vec4<f32>,   // metallic, roughness, reflectance, alpha cutoff
     params2: vec4<f32>,  // subsurface, wind sway, normal scale, occlusion strength
-    uv: vec4<f32>,       // uv scale xy
+    uv: vec4<f32>,       // uv scale xy, detail strength, detail scale
     flags: vec4<u32>,    // x: bits 0-3 alpha mode, 7 base color texture present
 };
 

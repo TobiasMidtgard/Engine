@@ -28,6 +28,11 @@ pub const HIGH_PERCENT: f32 = 0.97;
 pub const BLACK_LOG2: f32 = -9.0;
 /// Below this fraction of metered (non-black) pixels there is no reading.
 pub const MIN_COVERAGE: f64 = 0.02;
+/// How much brighter than the meter reading auto exposure sets the image, in EV. The meter
+/// averages the brighter part of the image, which outdoors is mostly sky; like a photographer
+/// exposing for the land rather than the sky, the exposure opens up from there. Calibrated on
+/// the showcase: a sunny day then lands near the photographic "sunny 16" (EV100 ≈ 15).
+pub const METER_BIAS_EV: f32 = 1.5;
 /// Pixels are sampled on a grid with this spacing (in pixels) to keep metering cheap.
 const STRIDE: u32 = 4;
 const WORKGROUP: u32 = 16;
