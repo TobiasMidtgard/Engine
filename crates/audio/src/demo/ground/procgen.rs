@@ -328,6 +328,9 @@ pub struct Texel {
     pub metal: f32,
     /// Extra baked occlusion multiplied with the cavity term.
     pub ao: f32,
+    /// Extra tilt of this texel's normal (tangent-space x and y slopes), for facets that
+    /// catch the light on their own: ice crystals in snow, chips on worn metal.
+    pub facet: Vec2,
 }
 
 impl Default for Texel {
@@ -339,6 +342,7 @@ impl Default for Texel {
             rough: 0.8,
             metal: 0.0,
             ao: 1.0,
+            facet: Vec2::ZERO,
         }
     }
 }
@@ -456,8 +460,12 @@ impl Canvas {
                 let t = &self.px[i];
                 let dx = (at(x + 1, y) - at(x - 1, y)) / (2.0 * m);
                 let dy = (at(x, y + 1) - at(x, y - 1)) / (2.0 * m);
-                let n = Vec3::new(-dx * normal_strength * su, dy * normal_strength * sv, 1.0)
-                    .normalize();
+                let n = Vec3::new(
+                    -dx * normal_strength * su + t.facet.x,
+                    dy * normal_strength * sv + t.facet.y,
+                    1.0,
+                )
+                .normalize();
                 normal.extend_from_slice(&[
                     byte(n.x * 0.5 + 0.5),
                     byte(n.y * 0.5 + 0.5),
