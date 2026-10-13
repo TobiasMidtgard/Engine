@@ -48,6 +48,9 @@ pub enum DebugView {
     SkyVisibility,
     /// Screen-space ambient occlusion (white = open, black = crevices and contact).
     AmbientOcclusion,
+    /// Screen-space reflections: what each surface reflects from the screen, times how much of
+    /// its reflection that covers (black where only the sky is reflected).
+    Reflections,
 }
 
 /// Renderer-wide quality and look settings.
@@ -81,6 +84,12 @@ pub struct RenderSettings {
     pub ao_radius: f32,
     /// 0..2 strength of the ambient occlusion (1 = physical).
     pub ao_intensity: f32,
+    /// Screen-space reflections: smooth and glossy surfaces reflect what is on screen (as of
+    /// the previous frame), blending into the prefiltered sky where the reflection leaves the
+    /// screen or is hidden.
+    pub screen_space_reflections: bool,
+    /// Surfaces rougher than this (perceptual roughness) reflect only the sky.
+    pub ssr_max_roughness: f32,
     pub anti_aliasing: AntiAliasing,
     /// 0..1 sharpening after temporal anti-aliasing (restores texture detail).
     pub sharpness: f32,
@@ -126,6 +135,8 @@ impl Default for RenderSettings {
             ambient_occlusion: true,
             ao_radius: 1.5,
             ao_intensity: 1.0,
+            screen_space_reflections: true,
+            ssr_max_roughness: 0.6,
             anti_aliasing: AntiAliasing::Taa,
             sharpness: 0.3,
             tonemapper: Tonemapper::AgXPunchy,

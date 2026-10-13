@@ -148,7 +148,7 @@ Writes: `HeatField`, `WorldImpulse`, `IgniteRequest`, `DamageEvent`, `NoiseEvent
 |---|---|
 | `prepare(world, …)` | read the ECS, cull, upload buffers |
 | `compute(encoder, …)` | GPU simulation (particles, fluids, clouds) |
-| `draw_environment` | add to the sky environment map (clouds, nebulae) |
+| `draw_environment` | add to the sky environment map (clouds, nebulae); it is filtered afterwards, so what is drawn here lights every surface and shows in rough reflections |
 | `draw_prepass` | write depth, normal, roughness and motion for opaque geometry (`vs`/`fs` using `prepass_output` from `lib_frame.wgsl`, targets `GpuShared::prepass_targets()`); ambient occlusion, contact shadows and TAA motion work only on surfaces drawn here, and the scene pass must then write the same depth (mark clip positions `@invariant`) |
 | `draw_shadow(cascade)` | cast sun shadows; with `cascade == SKY_OCCLUSION_VIEW`, draw into the top-down sky occlusion map so whatever roofs over the ground (rock, buildings, canopies) keeps sky light and rain out |
 | `draw(Opaque/Sky/Transparent)` | draw into the HDR scene; transparent can read scene color/depth copies |
@@ -173,7 +173,12 @@ contact shadows toward the sun (`contact_shadow_length`), and temporal anti-alia
 (`anti_aliasing = Taa`, the default). Under TAA the projection is jittered by a sub-pixel
 offset every frame (`frame.jitter`); `frame.unjittered_view_proj` and `prev_view_proj` give
 stable positions, and overlays get an unjittered frame group. Sun shadows use PCSS: the
-penumbra widens with distance from the caster like the real sun's (`sun_penumbra_scale`).
+penumbra widens with distance from the caster like the real sun's (`sun_penumbra_scale`). Screen-space
+reflections (`screen_space_reflections`, `ssr_max_roughness`; `screen_reflection(rel)` in
+shaders, used by `shade_surface`) trace the prepass depth and read the previous frame's finished
+image, so polished floors, wet streets, metal and glossy paint mirror what is on screen, blurred
+with roughness, and fall back to the prefiltered sky elsewhere. `DebugView::Reflections` shows
+them.
 
 Shared pipelines the core will provide for modules (planned): **strands** for hair, fur and grass
 (guide curves in, GPU-expanded strands with hair shading and LOD out; `engine_softbody` drives
@@ -183,7 +188,7 @@ muscles and skinned clothes and by `engine_softbody` for simulated cloth).
 
 Shader library: `lib_types.wgsl` (types, noise, BRDF), `lib_frame.wgsl` (group 0 frame
 data, `shade_surface`, `shadow_factor`, `contact_shadow`, `screen_ao`, `sky_visibility`, `apply_fog`,
-`wind_offset`, `prepass_output`) and `lib_atmosphere.wgsl` (`atmosphere` for aerial perspective,
+`sample_env`, `sample_env_rough`, `sky_ambient`, `wind_offset`, `prepass_output`) and `lib_atmosphere.wgsl` (`atmosphere` for aerial perspective,
 `sun_transmittance`, `sky_view_radiance`, `planet_height`, `ray_shell`).
 
 **Surface detail** (built): `StandardMaterial::with_detail(strength, scale)` adds procedural
@@ -191,6 +196,14 @@ bumps, mottled color and roughness from 3D noise to any material, textured or no
 colors (stone, plaster, bark, soil, metal plates) don't look flat; it fades out with distance
 instead of sparkling. It sticks to the object; terrain and other meshes split into pieces use
 `with_detail_in_world()` so it lines up across seams.
+
+**Sky light** (built): every time the sky environment map is redrawn
+(`RenderSettings::environment_interval`), the GPU filters it twice: prefiltered for GGX
+reflections, one mip per roughness step (`sample_env_rough(dir, roughness)`), and convolved into
+a small irradiance map for diffuse light (`sky_ambient(normal)`). `shade_surface` uses both, so
+rough metal, plastic and wet stone reflect a blurred sky, and sky light follows the real sky:
+blue in shadows by day, warm from the sunset side. Without a planet, the ground below the horizon
+is a plane lit by the sun and sky.
 
 **Atmosphere** (built): Rayleigh, Mie and ozone scattering on a spherical planet with multiple
 scattering, after Hillaire 2020. Look-up tables (sunlight transmittance and multiple scattering,

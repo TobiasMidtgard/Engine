@@ -1,9 +1,9 @@
 //! The frame loop.
 //!
 //! ```text
-//! prepare (features read the world) → compute → environment map → shadow cascades
-//! → scene pass [opaque → sky] → (scene copies) → transparent pass
-//! → bloom → tonemap to LDR → overlays (UI) → screenshot readback → blit to window
+//! prepare (features read the world) → compute → environment map (+ filters) → shadow cascades
+//! → prepass → AO, reflections → scene pass [opaque → sky] → (scene copies) → transparent pass
+//! → TAA → bloom → tonemap to LDR → overlays (UI) → screenshot readback → blit to window
 //! ```
 
 use std::path::{Path, PathBuf};
@@ -17,6 +17,7 @@ use serde_json::json;
 
 use crate::atmosphere::AtmosphereLuts;
 use crate::effects::ScreenEffects;
+use crate::environment::EnvironmentMaps;
 use crate::features::{
     FeatureStats, FrameContext, GpuShared, GrowBuffer, PendingRenderFeatures, RenderFeature,
     RenderPhase,
@@ -28,9 +29,6 @@ use crate::gpu::{self, SurfaceState};
 use crate::settings::{AntiAliasing, RenderSettings, Tonemapper};
 use crate::shadows::{MAX_CASCADES, SKY_OCCLUSION_VIEW, ShadowViewUniform};
 use crate::targets::{Targets, Tex};
-
-const ENV_WIDTH: u32 = 256;
-const ENV_HEIGHT: u32 = 128;
 
 /// Set when the renderer could not start (no GPU); rendering is skipped. With the environment
 /// variable `ENGINE_REQUIRE_GPU=1` (as in CI) the renderer panics instead, so GPU tests can't
@@ -148,14 +146,13 @@ pub struct Renderer {
     lights: GrowBuffer,
     shadow: ShadowResources,
     sky_camera: crate::sky_occlusion::SkyCamera,
-    env: [Tex; 2],
-    env_current: usize,
+    environment: EnvironmentMaps,
     env_rendered: bool,
     /// 1x1 neutral stand-ins for the screen-space maps (no occlusion, nothing in the prepass),
     /// bound while the real ones are being drawn.
     screen_stand_ins: ScreenMaps,
-    /// Scene passes, one per environment map buffer.
-    frame_groups: [wgpu::BindGroup; 2],
+    /// Scene passes.
+    frame_group: wgpu::BindGroup,
     /// The prepass and the effects that write the screen-space maps.
     prepass_group: wgpu::BindGroup,
     /// Overlays: unjittered matrices.
@@ -170,6 +167,9 @@ pub struct Renderer {
     prev_step: f64,
     /// Anti-aliasing mode of the previous frame (a switch resets the history).
     prev_aa: AntiAliasing,
+    /// Pre-exposure the previous frame's image was rendered with (screen-space reflections
+    /// read it).
+    prev_exposure: f32,
     frame_index: u64,
     last_view: Option<ViewData>,
 }
@@ -179,6 +179,7 @@ struct ScreenMaps {
     ao: wgpu::TextureView,
     normal: wgpu::TextureView,
     depth: wgpu::TextureView,
+    ssr: wgpu::TextureView,
 }
 
 impl ScreenMaps {
@@ -187,6 +188,7 @@ impl ScreenMaps {
             ao: targets.ao.view.clone(),
             normal: targets.prepass_normal.view.clone(),
             depth: targets.prepass_depth.view.clone(),
+            ssr: targets.ssr.view.clone(),
         }
     }
 
@@ -217,13 +219,15 @@ impl ScreenMaps {
                 depth_or_array_layers: 1,
             },
         );
-        // New textures start zeroed: no normal written, depth 0 (nothing).
+        // New textures start zeroed: no normal written, depth 0 (nothing), no reflections.
         let normal = tex("no prepass normals", shared.formats.normal);
         let depth = tex("no prepass depth", shared.formats.depth);
+        let ssr = tex("no screen-space reflections", shared.formats.hdr);
         Self {
             ao: ao.view,
             normal: normal.view,
             depth: depth.view,
+            ssr: ssr.view,
         }
     }
 }
@@ -395,6 +399,16 @@ impl Renderer {
                 layout_entry(13, all, float_texture),
                 layout_entry(14, all, float_texture),
                 layout_entry(15, all, float_texture),
+                // Sky light: irradiance and the environment sampler (binding 5 is the
+                // prefiltered environment map).
+                layout_entry(16, all, float_texture),
+                layout_entry(
+                    17,
+                    all,
+                    wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                ),
+                // Screen-space reflections (a screen-space map like 10-12).
+                layout_entry(18, all, float_texture),
             ],
         });
         let shadow_view_layout =
@@ -446,24 +460,7 @@ impl Renderer {
             settings.shadow_map_size.clamp(256, 8192),
             settings.sky_occlusion_size.clamp(64, 4096),
         );
-        let env = [
-            Tex::new(
-                &device,
-                "environment 0",
-                ENV_WIDTH,
-                ENV_HEIGHT,
-                formats.env,
-                wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
-            ),
-            Tex::new(
-                &device,
-                "environment 1",
-                ENV_WIDTH,
-                ENV_HEIGHT,
-                formats.env,
-                wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
-            ),
-        ];
+        let environment = EnvironmentMaps::new(&shared);
         let mut sky_camera = crate::sky_occlusion::SkyCamera::new(&shared);
         sky_camera.set_inputs(&shared, &frame_buffer, &shadow.occlusion);
         let screen_stand_ins = ScreenMaps::stand_ins(&shared);
@@ -473,7 +470,7 @@ impl Renderer {
             [&frame_buffer, &overlay_frame_buffer],
             &lights,
             &shadow,
-            &env,
+            &environment,
             &sky_camera,
             &atmosphere,
             &ScreenMaps::of(&targets),
@@ -496,12 +493,11 @@ impl Renderer {
             lights,
             shadow,
             sky_camera,
-            env,
-            env_current: 0,
+            environment,
             env_rendered: false,
             screen_stand_ins,
             atmosphere,
-            frame_groups: groups.scene,
+            frame_group: groups.scene,
             prepass_group: groups.prepass,
             overlay_group: groups.overlay,
             post,
@@ -511,6 +507,7 @@ impl Renderer {
             previous: None,
             prev_step: 0.0,
             prev_aa: settings.anti_aliasing,
+            prev_exposure: 0.0,
             frame_index: 0,
             last_view: None,
         })
@@ -571,13 +568,13 @@ impl Renderer {
             [&self.frame_buffer, &self.overlay_frame_buffer],
             &self.lights,
             &self.shadow,
-            &self.env,
+            &self.environment,
             &self.sky_camera,
             &self.atmosphere,
             &ScreenMaps::of(&self.targets),
             &self.screen_stand_ins,
         );
-        self.frame_groups = groups.scene;
+        self.frame_group = groups.scene;
         self.prepass_group = groups.prepass;
         self.overlay_group = groups.overlay;
     }
@@ -646,6 +643,13 @@ impl Renderer {
         }
         let mut uniform = frame_uniform(world, &view);
         uniform.shadow_params[3] = self.shadow.size as f32;
+        // Screen-space reflections need the previous frame's image of the same view.
+        let ssr = settings.screen_space_reflections
+            && self.effects.has_previous()
+            && view.history_valid
+            && self.prev_exposure > 0.0;
+        uniform.reflections[0] = if ssr { 1.0 } else { 0.0 };
+        uniform.reflections[1] = if ssr { self.prev_exposure } else { 0.0 };
         let queue = &self.shared.queue;
         queue.write_buffer(&self.frame_buffer, 0, bytemuck::bytes_of(&uniform));
         let mut overlay_uniform = uniform;
@@ -714,7 +718,7 @@ impl Renderer {
         });
         let ctx = FrameContext {
             gpu: &self.shared,
-            frame_group: &self.frame_groups[self.env_current],
+            frame_group: &self.frame_group,
             view: &view,
             settings: &settings,
             scene_color_copy: &self.targets.color_copy.view,
@@ -727,15 +731,15 @@ impl Renderer {
             f.compute(&mut encoder, &ctx);
         }
 
-        // Environment map (double-buffered: draw into one while the other is bound).
+        // Environment map: draw the sky, then filter it for reflections and diffuse light. The
+        // passes drawing it read last frame's filtered maps.
         let interval = settings.environment_interval.max(1) as u64;
         if !self.env_rendered || self.frame_index.is_multiple_of(interval) {
-            let target = 1 - self.env_current;
             {
                 let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                     label: Some("environment"),
                     color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                        view: &self.env[target].view,
+                        view: &self.environment.target,
                         depth_slice: None,
                         resolve_target: None,
                         ops: wgpu::Operations {
@@ -745,16 +749,15 @@ impl Renderer {
                     })],
                     ..Default::default()
                 });
-                pass.set_bind_group(0, &self.frame_groups[self.env_current], &[]);
+                pass.set_bind_group(0, &self.frame_group, &[]);
                 for f in &self.features {
                     f.draw_environment(&mut pass, &ctx);
                 }
             }
-            self.env_current = target;
+            self.environment.filter(&mut encoder);
             self.env_rendered = true;
         }
-        let frame_group = &self.frame_groups[self.env_current];
-        let ctx = FrameContext { frame_group, ..ctx };
+        let frame_group = &self.frame_group;
 
         // Shadows.
         if view.sun_shadows {
@@ -855,6 +858,10 @@ impl Renderer {
             self.effects
                 .encode_ao(&mut encoder, &self.targets, &self.prepass_group);
         }
+        if ssr {
+            self.effects
+                .encode_ssr(&mut encoder, &self.targets, &self.prepass_group);
+        }
 
         // Scene: opaque + sky (on the prepass depth).
         {
@@ -937,7 +944,8 @@ impl Renderer {
             }
         }
 
-        // Temporal anti-aliasing (writes the resolved image back into the HDR target).
+        // Temporal anti-aliasing (writes the resolved image back into the HDR target). Either
+        // way the finished image is kept for next frame's reflections.
         if taa {
             self.effects.encode_taa(
                 &self.shared,
@@ -946,7 +954,10 @@ impl Renderer {
                 frame_group,
                 view.history_valid,
             );
+        } else if settings.screen_space_reflections {
+            self.effects.keep_frame(&mut encoder, &self.targets);
         }
+        self.prev_exposure = view.exposure;
 
         // Exposure metering of the finished HDR image.
         self.meter.encode(
@@ -1322,8 +1333,8 @@ fn create_occlusion_target(shared: &GpuShared, size: u32) -> wgpu::TextureView {
 
 /// Group 0 bind groups for every kind of pass.
 struct FrameGroups {
-    /// Scene passes, one per environment map buffer.
-    scene: [wgpu::BindGroup; 2],
+    /// Scene passes.
+    scene: wgpu::BindGroup,
     /// Prepass and screen-space effects: stand-ins for the maps they write.
     prepass: wgpu::BindGroup,
     /// Overlays: the unjittered frame uniform.
@@ -1338,24 +1349,21 @@ impl FrameGroups {
         frame: [&wgpu::Buffer; 2],
         lights: &GrowBuffer,
         shadow: &ShadowResources,
-        env: &[Tex; 2],
+        env: &EnvironmentMaps,
         sky_camera: &crate::sky_occlusion::SkyCamera,
         atmosphere: &AtmosphereLuts,
         maps: &ScreenMaps,
         stand_ins: &ScreenMaps,
     ) -> Self {
-        let group = |uniform: &wgpu::Buffer, env: &Tex, maps: &ScreenMaps| {
+        let group = |uniform: &wgpu::Buffer, maps: &ScreenMaps| {
             create_frame_group(
                 shared, uniform, lights, shadow, env, sky_camera, atmosphere, maps,
             )
         };
         Self {
-            scene: [
-                group(frame[0], &env[0], maps),
-                group(frame[0], &env[1], maps),
-            ],
-            prepass: group(frame[0], &env[0], stand_ins),
-            overlay: group(frame[1], &env[0], maps),
+            scene: group(frame[0], maps),
+            prepass: group(frame[0], stand_ins),
+            overlay: group(frame[1], maps),
         }
     }
 }
@@ -1366,7 +1374,7 @@ fn create_frame_group(
     frame: &wgpu::Buffer,
     lights: &GrowBuffer,
     shadow: &ShadowResources,
-    env: &Tex,
+    env: &EnvironmentMaps,
     sky_camera: &crate::sky_occlusion::SkyCamera,
     atmosphere: &AtmosphereLuts,
     maps: &ScreenMaps,
@@ -1400,7 +1408,7 @@ fn create_frame_group(
             },
             wgpu::BindGroupEntry {
                 binding: 5,
-                resource: view(&env.view),
+                resource: view(&env.specular),
             },
             wgpu::BindGroupEntry {
                 binding: 6,
@@ -1441,6 +1449,18 @@ fn create_frame_group(
             wgpu::BindGroupEntry {
                 binding: 15,
                 resource: view(&atmosphere.sky_view.view),
+            },
+            wgpu::BindGroupEntry {
+                binding: 16,
+                resource: view(&env.irradiance.view),
+            },
+            wgpu::BindGroupEntry {
+                binding: 17,
+                resource: wgpu::BindingResource::Sampler(&env.sampler),
+            },
+            wgpu::BindGroupEntry {
+                binding: 18,
+                resource: view(&maps.ssr),
             },
         ],
     })

@@ -59,6 +59,9 @@ pub struct FrameUniform {
     /// Ambient occlusion intensity (0 = off), contact shadow length (m, 0 = off), sun
     /// penumbra scale, ambient occlusion radius (m).
     pub effects: [f32; 4],
+    /// Screen-space reflections this frame (1/0), the previous frame's pre-exposure (set by the
+    /// renderer; 0 = no previous image), maximum perceptual roughness, unused.
+    pub reflections: [f32; 4],
 }
 
 /// Most [`SkyLightVolume`]s shaded per frame (nearest the camera first).
@@ -630,6 +633,7 @@ pub fn frame_uniform(world: &World, v: &ViewData) -> FrameUniform {
                 DebugView::Cascades => 2,
                 DebugView::SkyVisibility => 3,
                 DebugView::AmbientOcclusion => 4,
+                DebugView::Reflections => 5,
             },
             v.sky_volumes.len() as u32,
         ],
@@ -664,6 +668,16 @@ pub fn frame_uniform(world: &World, v: &ViewData) -> FrameUniform {
             settings.sun_penumbra_scale.max(0.0),
             settings.ao_radius.max(0.05),
         ],
+        reflections: [
+            if settings.screen_space_reflections {
+                1.0
+            } else {
+                0.0
+            },
+            0.0,
+            settings.ssr_max_roughness.clamp(0.0, 1.0),
+            0.0,
+        ],
     }
 }
 
@@ -674,10 +688,10 @@ mod tests {
     #[test]
     fn frame_uniform_matches_wgsl_size() {
         // 7 mat4 + 15 vec4 + 4 mat4 + 3 vec4 + ground, sky occlusion, volumes, then the
-        // temporal block (mat4 + 3 vec4).
+        // screen-space block (mat4 + 4 vec4).
         assert_eq!(
             std::mem::size_of::<FrameUniform>(),
-            7 * 64 + 15 * 16 + 4 * 64 + 3 * 16 + 16 + 64 + 16 + MAX_SKY_VOLUMES * 80 + 64 + 3 * 16
+            7 * 64 + 15 * 16 + 4 * 64 + 3 * 16 + 16 + 64 + 16 + MAX_SKY_VOLUMES * 80 + 64 + 4 * 16
         );
         assert_eq!(std::mem::size_of::<GpuSkyVolume>(), 80);
         assert_eq!(std::mem::size_of::<GpuPointLight>(), 32);

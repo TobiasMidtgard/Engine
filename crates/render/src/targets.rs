@@ -60,8 +60,11 @@ pub struct Targets {
     /// Raw ambient occlusion (noisy), then the blurred result shading reads.
     pub ao_raw: Tex,
     pub ao: Tex,
-    /// Temporal anti-aliasing history, ping-ponged every frame.
+    /// Temporal anti-aliasing history, ping-ponged every frame. Without TAA, the finished HDR
+    /// image is kept here for screen-space reflections.
     pub history: [Tex; 2],
+    /// Screen-space reflections: radiance (not pre-exposed), coverage.
+    pub ssr: Tex,
     pub color_copy: Tex,
     pub depth_copy: Tex,
     /// Tonemapped display image (sRGB). Screenshots read this.
@@ -120,9 +123,10 @@ impl Targets {
                 width,
                 height,
                 formats.hdr,
-                U::RENDER_ATTACHMENT | U::TEXTURE_BINDING | U::COPY_SRC,
+                U::RENDER_ATTACHMENT | U::TEXTURE_BINDING | U::COPY_SRC | U::COPY_DST,
             )
         });
+        let ssr = screen("screen-space reflections", formats.hdr);
         let color_copy = Tex::new(
             device,
             "scene color copy",
@@ -173,6 +177,7 @@ impl Targets {
             ao_raw,
             ao,
             history,
+            ssr,
             color_copy,
             depth_copy,
             ldr,
