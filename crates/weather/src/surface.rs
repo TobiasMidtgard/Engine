@@ -348,6 +348,9 @@ pub fn update_cells(
 
 /// Roofs higher than this above the ground don't keep rain off it (m).
 const ROOF_SEARCH_M: f32 = 120.0;
+/// Colliders this close above the ground's height are the ground itself (m): the physics
+/// terrain is built separately and can sit a little off it.
+const GROUND_SLACK_M: f32 = 1.0;
 
 /// How far around the player API calls look at the ground before changing it (m).
 pub(crate) const PREPARE_RADIUS_M: f64 = 64.0;
@@ -499,12 +502,14 @@ impl LookUp<'_> {
             .get(sample.map(|s| s.surface).unwrap_or(SurfaceId::DEFAULT))
             .absorbency;
         let flat = sample.map(|s| s.normal.y).unwrap_or(1.0);
+        // Look down from the sky for the first thing above the ground. Looking up from the
+        // ground instead started under the physics terrain wherever it sits a little above
+        // the height the ground reports, and took the terrain for a roof.
         let exposure = match self.physics {
             Some(q) => {
-                let from = DVec3::new(xz.x, height + 0.3, xz.y);
-                if q.raycast(from, Vec3::Y, ROOF_SEARCH_M, &self.filter)
-                    .is_some()
-                {
+                let from = DVec3::new(xz.x, height + ROOF_SEARCH_M as f64, xz.y);
+                let reach = ROOF_SEARCH_M - GROUND_SLACK_M;
+                if q.raycast(from, -Vec3::Y, reach, &self.filter).is_some() {
                     0.0
                 } else {
                     1.0
@@ -911,6 +916,85 @@ mod tests {
             "{puddled} of {} cells of open meadow hold water",
             open_meadow.len()
         );
+    }
+
+    /// Physics with a terrain 40 cm above the height the ground reports (they are built
+    /// separately) and a roof 2.5 m up over 6 × 6 m around the origin. Rays hit both from
+    /// either side, like a heightfield does from below.
+    struct RoofOverTerrain;
+    impl engine_world::physics::PhysicsQuery for RoofOverTerrain {
+        fn raycast(
+            &self,
+            origin: DVec3,
+            dir: Vec3,
+            max_distance: f32,
+            _: &QueryFilter,
+        ) -> Option<engine_world::physics::Hit> {
+            let under_roof = origin.x.abs() < 3.0 && origin.z.abs() < 3.0;
+            let planes: &[f64] = if under_roof { &[0.4, 2.5, 2.7] } else { &[0.4] };
+            planes
+                .iter()
+                .map(|&y| ((y - origin.y) / dir.y as f64) as f32)
+                .filter(|t| (0.0..=max_distance).contains(t))
+                .min_by(f32::total_cmp)
+                .map(|t| engine_world::physics::Hit {
+                    entity: Entity::PLACEHOLDER,
+                    point: origin + dir.as_dvec3() * t as f64,
+                    normal: -dir,
+                    distance: t,
+                    surface: SurfaceId::DEFAULT,
+                })
+        }
+        fn shapecast(
+            &self,
+            _: &engine_world::physics::ColliderShape,
+            _: DVec3,
+            _: engine_core::math::Quat,
+            _: Vec3,
+            _: f32,
+            _: &QueryFilter,
+        ) -> Option<engine_world::physics::Hit> {
+            None
+        }
+        fn overlap(
+            &self,
+            _: &engine_world::physics::ColliderShape,
+            _: DVec3,
+            _: engine_core::math::Quat,
+            _: &QueryFilter,
+            _: &mut Vec<Entity>,
+        ) {
+        }
+        fn closest_point(
+            &self,
+            _: DVec3,
+            _: f32,
+            _: &QueryFilter,
+        ) -> Option<engine_world::physics::Hit> {
+            None
+        }
+    }
+
+    #[test]
+    fn roofs_keep_rain_off_but_the_terrain_is_no_roof() {
+        let (surface, _, _) = setup();
+        let mut cache = GroundCache::default();
+        cache.align(&surface.grid);
+        refresh_cache(
+            &mut cache,
+            100_000,
+            &Ground::default(),
+            Some(&PhysicsQueries(std::sync::Arc::new(RoofOverTerrain))),
+            &SurfaceMaterials::default(),
+            0.3,
+            &WeatherSim::default(),
+        );
+        let exposure = |x: f64, z: f64| {
+            let c = cache.cells.cell_at(DVec3::new(x, 0.0, z));
+            cache.cells.data[cache.cells.index(c).unwrap()].exposure
+        };
+        assert_eq!(exposure(0.5, -1.5), 0.0, "under the roof");
+        assert_eq!(exposure(10.5, -6.5), 1.0, "open meadow");
     }
 
     #[test]
