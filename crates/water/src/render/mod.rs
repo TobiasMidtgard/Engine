@@ -36,6 +36,99 @@ const MAX_RINGS: u32 = 420;
 const PUDDLE_N: u32 = 128;
 /// How far an ocean is drawn, meters.
 const OCEAN_REACH: f64 = 30_000.0;
+/// Water falls free where its surface drops more than this many cells' widths in one cell
+/// (steeper than 45°), and at least [`FALL_LEAST_DROP`]; the flow surface hides triangles as
+/// steep as that (`fs_flow`).
+const FALL_SLOPE: f32 = 1.0;
+/// Least drop drawn as a falling curtain, meters.
+const FALL_LEAST_DROP: f32 = 0.5;
+/// Segments down each falling curtain.
+const FALL_SEGMENTS: usize = 12;
+/// Most lips drawn (nearest first).
+const MAX_LIPS: usize = 1024;
+/// Lips further than this from the camera aren't drawn, meters.
+const FALLS_REACH: f64 = 1500.0;
+
+/// One vertex of a falling curtain (see `vs_falls`).
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct FallVertex {
+    /// Camera-relative position, and the water over the lip per meter of it (m²/s).
+    rel_q: [f32; 4],
+    /// Outward normal, and how far down the fall (0 lip, 1 foot).
+    normal_frac: [f32; 4],
+    /// Horizontal direction across the curtain, and which edge of this strip (-1, 1).
+    across_side: [f32; 4],
+    /// Meters across (continuous between neighboring strips), seconds since the water left
+    /// the lip, speed it left at (m/s), and 0 (a curtain; 1 is a spray cloud, see
+    /// [`mist_puff`]).
+    uv_speed: [f32; 4],
+}
+
+/// The falling curtain under `lip` as triangles, relative to the camera (`top` is the lip's
+/// camera-relative position).
+fn fall_strip(lip: &crate::flow::Lip, top: Vec3, out: &mut Vec<FallVertex>) {
+    const G: f32 = 9.81;
+    let dir = Vec3::new(lip.dir.x, 0.0, lip.dir.y);
+    let across = Vec3::new(-lip.dir.y, 0.0, lip.dir.x);
+    // Across coordinate from world x/z, so strips side by side share one pattern.
+    let u0 = (lip.top.x * across.x as f64 + lip.top.z * across.z as f64).rem_euclid(4096.0) as f32;
+    // Carry on a little under the surface it lands in.
+    let fall = lip.drop + 0.4;
+    let t_end = (2.0 * fall / G).sqrt();
+    let ring = |k: usize| {
+        let frac = k as f32 / FALL_SEGMENTS as f32;
+        let t = t_end * frac;
+        let p = top + dir * lip.speed * t - Vec3::Y * (0.5 * G * t * t);
+        let vel = dir * lip.speed - Vec3::Y * (G * t);
+        let normal = across.cross(vel.normalize());
+        // The sheet spreads and frays as it falls.
+        let half = lip.width * (0.66 + 0.3 * frac);
+        [-1.0f32, 1.0].map(|side| FallVertex {
+            rel_q: (p + across * (half * side)).extend(lip.q).to_array(),
+            normal_frac: normal.extend(frac).to_array(),
+            across_side: across.extend(side).to_array(),
+            uv_speed: [u0 + half * side, t, lip.speed, 0.0],
+        })
+    };
+    let mut prev = ring(0);
+    for k in 1..=FALL_SEGMENTS {
+        let next = ring(k);
+        // Wound so the front face is the one `normal` points out of.
+        out.extend_from_slice(&[prev[0], prev[1], next[0], prev[1], next[1], next[0]]);
+        prev = next;
+    }
+}
+
+/// The cloud of spray where a fall of `power` watts lands at `foot` (world; `rel` relative
+/// to the camera): a quad facing the camera (`right`, `up`), drawn over the curtain's foot.
+/// Corners go in `normal_frac.xy`, its radius in `.z` and how dense it is in `.w`.
+fn mist_puff(foot: DVec3, rel: Vec3, power: f32, right: Vec3, up: Vec3, out: &mut Vec<FallVertex>) {
+    // Flow times drop (m⁴/s), as for the spray particles: bigger falls make bigger clouds.
+    let size = (power / 9810.0).max(0.0).sqrt();
+    let radius = (0.8 + size * 0.9).min(8.0);
+    let strength = (0.45 + size * 0.2).min(1.0);
+    // Its lower half is under the pool; it boils up from where the curtain goes in.
+    let center = rel + Vec3::Y * (radius * 0.1);
+    // Each cloud billows differently.
+    let seed = (foot.x * 0.37 + foot.z * 0.61).rem_euclid(97.0) as f32;
+    let corner = |cx: f32, cy: f32| FallVertex {
+        rel_q: (center + (right * cx + up * cy) * radius)
+            .extend(0.0)
+            .to_array(),
+        normal_frac: [cx, cy, radius, strength],
+        across_side: [0.0; 4],
+        uv_speed: [seed, 0.0, 0.0, 1.0],
+    };
+    out.extend_from_slice(&[
+        corner(-1.0, -1.0),
+        corner(1.0, -1.0),
+        corner(-1.0, 1.0),
+        corner(-1.0, 1.0),
+        corner(1.0, -1.0),
+        corner(1.0, 1.0),
+    ]);
+}
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
@@ -144,6 +237,11 @@ struct Gpu {
     puddle_tex: wgpu::Texture,
     group1: Option<wgpu::BindGroup>,
     flows: Vec<FlowGpu>,
+    falls: wgpu::RenderPipeline,
+    fall_buffer: wgpu::Buffer,
+    /// Vertices the buffer holds, and how many to draw this frame.
+    fall_capacity: usize,
+    fall_count: u32,
 }
 
 /// What the puddle window holds.
@@ -470,6 +568,44 @@ impl WaterFeature {
             gpu.depth_state(false),
         );
         let under = pipeline("underwater", &layout1, "vs_under", "fs_under", always);
+        // Falling curtains: aerated water blended over everything (premultiplied alpha).
+        let falls = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("water falls"),
+            layout: Some(&layout1),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_falls"),
+                compilation_options: Default::default(),
+                buffers: &[Some(wgpu::VertexBufferLayout {
+                    array_stride: std::mem::size_of::<FallVertex>() as u64,
+                    step_mode: wgpu::VertexStepMode::Vertex,
+                    attributes: &wgpu::vertex_attr_array![
+                        0 => Float32x4, 1 => Float32x4, 2 => Float32x4, 3 => Float32x4
+                    ],
+                })],
+            },
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                cull_mode: None,
+                ..Default::default()
+            },
+            depth_stencil: Some(gpu.depth_state(false)),
+            multisample: Default::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_falls"),
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: gpu.formats.hdr,
+                    blend: Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            multiview_mask: None,
+            cache: None,
+        });
+        let fall_capacity = 64 * FALL_SEGMENTS * 6;
+        let fall_buffer = Self::fall_buffer(device, fall_capacity);
 
         use wgpu::util::DeviceExt;
         let uniform = device.create_buffer(&wgpu::BufferDescriptor {
@@ -518,7 +654,60 @@ impl WaterFeature {
             puddle_tex,
             group1: None,
             flows: Vec::new(),
+            falls,
+            fall_buffer,
+            fall_capacity,
+            fall_count: 0,
         }
+    }
+
+    fn fall_buffer(device: &wgpu::Device, vertices: usize) -> wgpu::Buffer {
+        device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("water falls"),
+            size: (vertices * std::mem::size_of::<FallVertex>()) as u64,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        })
+    }
+
+    /// Curtains of water falling free over the flowing regions' lips.
+    fn upload_falls(gpu: &mut Gpu, shared: &GpuShared, state: &WaterState, view: &ViewData) {
+        let mut lips: Vec<(f64, crate::flow::Lip)> = state
+            .flows
+            .iter()
+            .filter(|sim| sim.visible)
+            .flat_map(|sim| sim.lips((sim.cell * FALL_SLOPE).max(FALL_LEAST_DROP)))
+            .map(|lip| (lip.top.distance(view.origin), lip))
+            .filter(|(d, _)| *d < FALLS_REACH)
+            .collect();
+        lips.sort_by(|a, b| a.0.total_cmp(&b.0));
+        lips.truncate(MAX_LIPS);
+        let mut vertices = Vec::with_capacity(lips.len() * FALL_SEGMENTS * 6);
+        for (_, lip) in &lips {
+            fall_strip(lip, view.relative(lip.top), &mut vertices);
+        }
+        // Spray clouds last, so they draw over the curtains' feet.
+        if !lips.is_empty() {
+            let (right, up) = (view.rotation * Vec3::X, view.rotation * Vec3::Y);
+            for sim in state.flows.iter().filter(|sim| sim.visible) {
+                for (foot, _, power) in sim.plunges((sim.cell * FALL_SLOPE).max(FALL_LEAST_DROP)) {
+                    if foot.distance(view.origin) < FALLS_REACH {
+                        mist_puff(foot, view.relative(foot), power, right, up, &mut vertices);
+                    }
+                }
+            }
+        }
+        gpu.fall_count = vertices.len() as u32;
+        if vertices.is_empty() {
+            return;
+        }
+        if vertices.len() > gpu.fall_capacity {
+            gpu.fall_capacity = vertices.len().next_power_of_two();
+            gpu.fall_buffer = Self::fall_buffer(&shared.device, gpu.fall_capacity);
+        }
+        shared
+            .queue
+            .write_buffer(&gpu.fall_buffer, 0, bytemuck::cast_slice(&vertices));
     }
 
     /// Fill one body's uniform and decide which grid bands to draw.
@@ -978,13 +1167,15 @@ impl RenderFeature for WaterFeature {
 
         Self::upload_ripples(gpu, shared, &state);
         Self::upload_flows(gpu, shared, &state, view);
+        Self::upload_falls(gpu, shared, &state, view);
 
         // Stats.
         let flows = gpu.flows.iter().filter(|f| f.drawn);
         self.stats.draw_calls = self.bodies.len() as u32
             + flows.clone().count() as u32
             + puddles_on as u32
-            + self.underwater as u32;
+            + self.underwater as u32
+            + (gpu.fall_count > 0) as u32;
         self.stats.instances = self.bodies.len() as u32;
         self.stats.triangles = self
             .bodies
@@ -992,6 +1183,7 @@ impl RenderFeature for WaterFeature {
             .map(|d| ((d.last_band - d.first_band) * SEGMENTS * 2) as u64)
             .sum::<u64>()
             + flows.map(|f| f.index_count as u64 / 3).sum::<u64>()
+            + gpu.fall_count as u64 / 3
             + if puddles_on {
                 ((PUDDLE_N - 1) * (PUDDLE_N - 1) * 2) as u64
             } else {
@@ -1079,6 +1271,11 @@ impl RenderFeature for WaterFeature {
                 );
             }
         }
+        if gpu.fall_count > 0 {
+            pass.set_pipeline(&gpu.falls);
+            pass.set_vertex_buffer(0, gpu.fall_buffer.slice(..));
+            pass.draw(0..gpu.fall_count, 0..1);
+        }
     }
 
     fn needs_scene_copy(&self) -> bool {
@@ -1087,7 +1284,7 @@ impl RenderFeature for WaterFeature {
             || self
                 .gpu
                 .as_ref()
-                .is_some_and(|g| g.flows.iter().any(|f| f.drawn))
+                .is_some_and(|g| g.fall_count > 0 || g.flows.iter().any(|f| f.drawn))
     }
 
     fn stats(&self) -> FeatureStats {
@@ -1101,6 +1298,7 @@ impl RenderFeature for WaterFeature {
             "underwater": self.underwater,
             "puddles": self.puddles.wet,
             "flows": self.gpu.as_ref().map_or(0, |g| g.flows.iter().filter(|f| f.drawn).count()),
+            "fall_triangles": self.gpu.as_ref().map_or(0, |g| g.fall_count / 3),
         })
     }
 }
@@ -1135,6 +1333,64 @@ mod tests {
             assert!((ring_radius(i, s0, alpha) - r).abs() < 1e-6 * r.max(1.0));
         }
         assert!(ring_radius(MAX_RINGS as f64, s0, alpha) > OCEAN_REACH);
+    }
+
+    #[test]
+    fn a_curtain_falls_from_its_lip_to_its_foot() {
+        let lip = crate::flow::Lip {
+            top: DVec3::new(10.0, 9.0, 0.0),
+            dir: Vec2::X,
+            speed: 2.0,
+            q: 0.2,
+            drop: 8.0,
+            width: 0.75,
+        };
+        let mut v = Vec::new();
+        fall_strip(&lip, Vec3::new(1.0, 2.0, 3.0), &mut v);
+        assert_eq!(v.len(), FALL_SEGMENTS * 6);
+        let pos = |f: &FallVertex| Vec3::from_slice(&f.rel_q[..3]);
+        // Starts at the lip, a strip as wide as the lip (a little more, to overlap).
+        let first = &v[0];
+        assert!(first.normal_frac[3] == 0.0 && first.normal_frac[1] > 0.99);
+        assert!((pos(first) - Vec3::new(1.0, 2.0, 3.0 - 0.75 * 0.66)).length() < 1e-4);
+        // Ends a little under where it lands, having carried on outward on its arc.
+        let last = v
+            .iter()
+            .max_by(|a, b| a.normal_frac[3].total_cmp(&b.normal_frac[3]));
+        let end = pos(last.unwrap());
+        assert!((end.y - (2.0 - 8.4)).abs() < 1e-3, "{end}");
+        let t = (2.0 * 8.4f32 / 9.81).sqrt();
+        assert!((end.x - (1.0 + 2.0 * t)).abs() < 1e-3, "{end}");
+        // Every triangle faces outward or up, never into the cliff, and is wound so its front
+        // face is that side.
+        for f in &v {
+            let n = Vec3::from_slice(&f.normal_frac[..3]);
+            assert!(n.x >= -1e-4 && (n.length() - 1.0).abs() < 1e-3, "{n}");
+        }
+        for tri in v.chunks(3) {
+            let [a, b, c] = [pos(&tri[0]), pos(&tri[1]), pos(&tri[2])];
+            let n = Vec3::from_slice(&tri[0].normal_frac[..3]);
+            assert!((b - a).cross(c - a).dot(n) > 0.0);
+        }
+    }
+
+    #[test]
+    fn spray_clouds_face_the_camera_over_the_foot() {
+        let (right, up) = (Vec3::X, Vec3::Y);
+        let mut v = Vec::new();
+        let foot = Vec3::new(0.0, -5.0, -20.0);
+        // A small stream falling 8 m (0.2 m³/s): about 16 kW.
+        mist_puff(DVec3::new(3.0, 1.0, 4.0), foot, 16_000.0, right, up, &mut v);
+        assert_eq!(v.len(), 6);
+        let pos = |f: &FallVertex| Vec3::from_slice(&f.rel_q[..3]);
+        let center = v.iter().map(pos).sum::<Vec3>() / 6.0;
+        let radius = v[0].normal_frac[2];
+        assert!((1.5..3.0).contains(&radius), "{radius}");
+        assert!(center.y > foot.y && (center.with_y(0.0) - foot.with_y(0.0)).length() < 1e-4);
+        for f in &v {
+            assert_eq!(f.uv_speed[3], 1.0);
+            assert!((pos(f).z - foot.z).abs() < 1e-4, "not facing the camera");
+        }
     }
 
     #[test]

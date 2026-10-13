@@ -33,6 +33,9 @@ pub struct WaterInteractor {
     /// Spray owed to `WaterSplash` messages while moving fast, kg (managed).
     #[serde(skip)]
     pub spray: f32,
+    /// Seconds the trough it dug under itself lasts after its last push (managed).
+    #[serde(skip)]
+    pub trough_s: f32,
 }
 
 impl Default for WaterInteractor {
@@ -43,6 +46,7 @@ impl Default for WaterInteractor {
             last: None,
             wet: false,
             spray: 0.0,
+            trough_s: 0.0,
         }
     }
 }
@@ -103,8 +107,11 @@ pub fn disturbance_system(
     let mut out: Vec<Disturbance> = Vec::new();
     let mut noises: Vec<NoiseEvent> = Vec::new();
     let mut splashes: Vec<WaterSplash> = Vec::new();
+    let mut hulls: Vec<(DVec2, f32)> = Vec::new();
+    let had_hulls;
     {
         let state = shared.0.read();
+        had_hulls = !state.hulls.is_empty();
 
         // Swimmers, boats, wading animals.
         for (entity, gt, mut it, local) in &mut interactors {
@@ -175,7 +182,15 @@ pub fn disturbance_system(
                     it.spray = 0.0;
                 }
                 let bob = (v.y.abs() * step * 0.6 * r).min(0.05);
+                it.trough_s = (it.trough_s - step).max(0.0);
+                if it.trough_s > 0.0 {
+                    hulls.push((DVec2::new(p.x, p.z), r));
+                }
                 if push + bob > 1e-5 {
+                    if it.trough_s <= 0.0 {
+                        hulls.push((DVec2::new(p.x, p.z), r));
+                    }
+                    it.trough_s = 1.0;
                     out.push(Disturbance {
                         pos: DVec2::new(p.x, p.z),
                         radius: r * 0.9,
@@ -324,8 +339,9 @@ pub fn disturbance_system(
             }
         }
     }
-    if !out.is_empty() {
+    if !out.is_empty() || !hulls.is_empty() || had_hulls {
         let mut state = shared.0.write();
+        state.hulls = hulls;
         for d in out {
             state.ripples.disturb(d);
         }

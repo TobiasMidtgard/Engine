@@ -92,6 +92,10 @@ pub struct WaterState {
     pub time: f64,
     /// World shifts followed so far (anything caching world positions rebuilds when it changes).
     pub shifts: u64,
+    /// Moving interactors pushing the surface this step (x/z, radius). The dip a hull digs
+    /// under itself drives its wake but isn't what it floats on: a boat would settle into its
+    /// own trough, so the ripples are left out of [`WaterState::sample`] under each one.
+    pub hulls: Vec<(DVec2, f32)>,
 }
 
 impl WaterState {
@@ -103,6 +107,7 @@ impl WaterState {
             ground: Ground::default(),
             time: 0.0,
             shifts: 0,
+            hulls: Vec::new(),
         }
     }
 
@@ -115,6 +120,10 @@ impl WaterState {
         self.ripples.shift(s);
         for f in &mut self.flows {
             f.shift(s);
+        }
+        for (c, _) in &mut self.hulls {
+            let p = s.point(DVec3::new(c.x, 0.0, c.y));
+            *c = DVec2::new(p.x, p.z);
         }
         self.shifts += 1;
     }
@@ -130,6 +139,16 @@ impl WaterState {
             })
     }
 
+    /// How much of the ripples count at `p`: 0 under a moving interactor (its own push), 1
+    /// clear of them.
+    pub fn hull_weight(&self, p: DVec2) -> f32 {
+        self.hulls.iter().fold(1.0, |w, (c, r)| {
+            let d = (p - *c).length() as f32;
+            let t = ((d - r * 0.9) / (r * 0.9)).clamp(0.0, 1.0);
+            w.min(t * t * (3.0 - 2.0 * t))
+        })
+    }
+
     /// Sample one body at `p`: (surface height, depth, velocity, normal, foam).
     pub fn sample_body(&self, b: &BodyState, p: DVec3) -> Option<(f64, f32, Vec3, Vec3, f32)> {
         let depth = b.depth_at(p, &self.ground)?;
@@ -143,8 +162,9 @@ impl WaterState {
         if b.body.interactive
             && let Some((h, grad, f)) = self.ripples.sample(DVec2::new(p.x, p.z))
         {
-            height += h as f64;
-            normal = (normal + Vec3::new(-grad.x, 0.0, -grad.y)).normalize_or(Vec3::Y);
+            let own = self.hull_weight(DVec2::new(p.x, p.z));
+            height += (h * own) as f64;
+            normal = (normal + Vec3::new(-grad.x, 0.0, -grad.y) * own).normalize_or(Vec3::Y);
             foam = f;
         }
         let velocity = Vec3::new(b.body.current[0], 0.0, b.body.current[1]) + w.velocity;

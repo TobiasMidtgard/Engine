@@ -45,6 +45,8 @@ pub const JETTY_LENGTH: f32 = 18.0;
 /// Cell size of a stream's flow grid, meters: fine enough for a 5 m channel to be several
 /// cells wide, coarse enough for a few hundred meters of stream to cost little.
 pub const STREAM_CELL: f32 = 0.75;
+/// Priming springs go this far apart down a stream's course, meters.
+const PRIMING_STEP: f64 = 25.0;
 
 /// Fill `valley` with water: the lake as a body over the ground, each stream as a flowing
 /// region that already runs into the lake when the world starts.
@@ -190,6 +192,24 @@ pub fn stream_region(stream: &ValleyStream, base: f64) -> Option<(DVec3, FlowReg
             fills.push(FlowFill::to_spill([p.x as f32, p.y as f32]));
         }
     }
+    // While it primes, springs every 25 m down the course fill it all at once.
+    let mut priming = Vec::new();
+    let mut along = 0.0;
+    for w in stream.path.windows(2) {
+        let (a, b) = (DVec2::from_array(w[0]), DVec2::from_array(w[1]));
+        let len = a.distance(b);
+        let mut next = (along / PRIMING_STEP).floor() * PRIMING_STEP + PRIMING_STEP;
+        while next < along + len {
+            let p = a.lerp(b, (next - along) / len) - lo;
+            priming.push(FlowSource {
+                at: [p.x as f32, p.y as f32],
+                radius_m: (stream.width_m * 0.4).max(STREAM_CELL),
+                rate_m3_s: stream.flow_m3_s,
+            });
+            next += PRIMING_STEP;
+        }
+        along += len;
+    }
     Some((
         DVec3::new(lo.x, base, lo.y),
         FlowRegion {
@@ -202,6 +222,7 @@ pub fn stream_region(stream: &ValleyStream, base: f64) -> Option<(DVec3, FlowReg
                 rate_m3_s: stream.flow_m3_s,
             }],
             fills,
+            priming,
             // The banks keep the water in; the lake (a body over the region) takes it at the end.
             open_edges: false,
             friction: 0.35,

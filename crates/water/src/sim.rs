@@ -42,7 +42,13 @@ pub fn sync_bodies_system(
     shared: Res<SharedWater>,
     wind: Res<WindField>,
     ground: Res<Ground>,
-    bodies: Query<(Entity, &GlobalTransform, &WaterBody)>,
+    bodies: Query<(
+        Entity,
+        &GlobalTransform,
+        &Transform,
+        Option<&ChildOf>,
+        &WaterBody,
+    )>,
     mut book: ResMut<SimBook>,
 ) {
     let dt = time.delta_secs();
@@ -51,9 +57,14 @@ pub fn sync_bodies_system(
     state.time += dt as f64;
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     let mut seen = Vec::with_capacity(state.bodies.len());
-    for (entity, gt, body) in &bodies {
-        let center = gt.translation();
-        let yaw = gt.rotation().to_euler(EulerRot::YXZ).0;
+    for (entity, gt, local, parent, body) in &bodies {
+        // A root's own transform is its place even on its first step, before transforms have
+        // propagated: flow regions made that step fill from the lakes they spill from.
+        let (center, rotation) = match parent {
+            None => (local.translation, local.rotation),
+            Some(_) => (gt.translation(), gt.rotation()),
+        };
+        let yaw = rotation.to_euler(EulerRot::YXZ).0;
         entity.hash(&mut hasher);
         for v in [center.x, center.y, center.z, yaw as f64] {
             v.to_bits().hash(&mut hasher);
@@ -101,9 +112,6 @@ pub fn sync_bodies_system(
         book.since_rebuild = f32::INFINITY;
     }
 }
-
-/// How much faster springs run during the first half of a flow region's prewarm.
-const PRIME: f32 = 8.0;
 
 /// The point detail follows: the primary `SimulationFocus`, or the active camera when nothing
 /// is marked as the focus.
@@ -292,21 +300,23 @@ pub fn flow_system(
                 let mut sim = FlowSim::new(entity, origin, region, bed);
                 sim.yaw = yaw;
                 set_reservoirs(&mut sim, &state.bodies, &state.ground);
-                // Let the stream establish itself before anyone looks: springs run at
-                // `PRIME` times their rate for the first half, so long flat reaches fill in a
-                // fraction of the time, then at their own rate so the stream settles to it.
+                // Let the stream establish itself before anyone looks: its priming springs
+                // run alongside its own for the first half, so a long course fills along its
+                // whole length, then its own alone so the stream settles to them.
                 let steps = (region.prewarm_s.max(0.0) * 30.0) as u32;
+                sim.sources = region
+                    .sources
+                    .iter()
+                    .chain(&region.priming)
+                    .copied()
+                    .collect();
                 for k in 0..steps {
-                    let boost = if k < steps / 2 { PRIME } else { 1.0 };
-                    for (s, r) in sim.sources.iter_mut().zip(&region.sources) {
-                        s.rate_m3_s = if r.rate_m3_s > 0.0 {
-                            r.rate_m3_s * boost
-                        } else {
-                            r.rate_m3_s
-                        };
+                    if k == steps / 2 {
+                        sim.sources = region.sources.clone();
                     }
                     sim.step(1.0 / 30.0);
                 }
+                sim.sources = region.sources.clone();
                 sim.drained_m3 = 0.0;
                 state.flows.push(sim);
                 state.flows.len() - 1

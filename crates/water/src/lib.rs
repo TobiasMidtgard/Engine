@@ -18,7 +18,7 @@ pub use body::{
     RainShower, WaterBed, WaterBody, WaterExtent, WaterOptics, WaterSettings, WaveSettings,
 };
 pub use buoyancy::{Buoyancy, Floating, Tether};
-pub use flow::{FlowBed, FlowFill, FlowRegion, FlowSource};
+pub use flow::{FlowBed, FlowFill, FlowRegion, FlowSource, Lip};
 pub use interact::WaterInteractor;
 pub use render::WaterFeature;
 pub use state::{SharedWater, WaterState};

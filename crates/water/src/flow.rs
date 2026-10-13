@@ -85,7 +85,10 @@ impl Default for FlowFill {
 
 /// The level the hollow around cell `seed` holds before it spills: climb out of it lowest
 /// cell first, until the next cell is lower than the water (the way out) or on the edge.
+/// Millimeters don't count: a flat floor that tilts a little (the planet's curve) is still
+/// the floor, not the way out.
 fn spill_level(bed: &[f32], nx: usize, nz: usize, seed: usize) -> f32 {
+    const SPILL_TOLERANCE: f32 = 0.02;
     use std::cmp::Reverse;
     use std::collections::BinaryHeap;
 
@@ -109,7 +112,7 @@ fn spill_level(bed: &[f32], nx: usize, nz: usize, seed: usize) -> f32 {
     heap.push(Reverse(Cell(bed[seed], seed)));
     seen[seed] = true;
     while let Some(Reverse(Cell(b, idx))) = heap.pop() {
-        if b < level - 1e-4 {
+        if b < level - SPILL_TOLERANCE {
             break;
         }
         level = level.max(b);
@@ -194,6 +197,10 @@ pub struct FlowRegion {
     /// Seconds of flow to simulate before the first frame, so a stream already runs when the
     /// player arrives.
     pub prewarm_s: f32,
+    /// Extra springs that run only through the first half of the prewarm: placed along a long
+    /// course, they fill it everywhere at once instead of from one end, without flooding the
+    /// head of the stream.
+    pub priming: Vec<FlowSource>,
     pub optics: WaterOptics,
     pub visible: bool,
 }
@@ -210,10 +217,28 @@ impl Default for FlowRegion {
             friction: 0.3,
             fills: Vec::new(),
             prewarm_s: 0.0,
+            priming: Vec::new(),
             optics: WaterOptics::stream(),
             visible: true,
         }
     }
+}
+
+/// An edge water pours over into a drop (see [`FlowSim::lips`]).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Lip {
+    /// Middle of the edge, at the water's surface (world).
+    pub top: DVec3,
+    /// Horizontal direction the water leaves in (world, unit).
+    pub dir: Vec2,
+    /// Speed it leaves at, m/s.
+    pub speed: f32,
+    /// Water over the edge per meter of edge, m²/s.
+    pub q: f32,
+    /// Height it falls to the water or ground below, meters.
+    pub drop: f32,
+    /// Length of the edge, meters.
+    pub width: f32,
 }
 
 /// Simulation state of one [`FlowRegion`].
@@ -325,61 +350,116 @@ impl FlowSim {
     }
 
     /// Where water falls over a drop: (world position at the foot, horizontal velocity of the
-    /// falling water m/s, power ρgQΔh in watts), one entry per cluster of nearby falling
-    /// cells. Drops under `min_drop` meters are ignored.
+    /// falling water m/s, power ρgQΔh in watts), one entry per cluster of nearby
+    /// [`lips`](Self::lips). Drops under `min_drop` meters are ignored.
     pub fn plunges(&self, min_drop: f32) -> Vec<(DVec3, Vec2, f32)> {
-        // Cells cluster into buckets of 8 × 8, so a wide fall is one plunge, two falls are two.
-        const BUCKET: usize = 8;
-        let mut buckets: Vec<(usize, DVec3, Vec2, f32)> = Vec::new();
-        let level = |idx: usize| self.bed[idx] + self.depth[idx];
-        for j in 0..self.nz {
-            for i in 0..self.nx {
-                let idx = j * self.nx + i;
-                // Water racing over a lip is thin: any water moving counts.
-                if self.depth[idx] < 0.0005 || self.reservoir[idx].is_finite() {
-                    continue;
+        // Feet cluster into squares 8 cells wide, so a wide fall is one plunge, two falls two.
+        let size = 8.0 * self.cell as f64;
+        let mut buckets: Vec<((i64, i64), DVec3, Vec2, f32)> = Vec::new();
+        for lip in self.lips(min_drop) {
+            // Where its free-fall arc meets the water or ground below.
+            let t = (2.0 * lip.drop / 9.81).sqrt();
+            let reach = (lip.dir * lip.speed * t).as_dvec2();
+            let foot = lip.top + DVec3::new(reach.x, -lip.drop as f64, reach.y);
+            let power = 1000.0 * 9.81 * lip.q * lip.width * lip.drop;
+            let v = lip.dir * lip.speed;
+            let key = (
+                (foot.x / size).floor() as i64,
+                (foot.z / size).floor() as i64,
+            );
+            match buckets.iter_mut().find(|b| b.0 == key) {
+                Some(b) => {
+                    b.1 += foot * power as f64;
+                    b.2 += v * power;
+                    b.3 += power;
                 }
-                let out = self.flux[idx];
-                for (k, (di, dj)) in [(-1i64, 0i64), (1, 0), (0, -1), (0, 1)]
-                    .into_iter()
-                    .enumerate()
-                {
-                    let (ni, nj) = (i as i64 + di, j as i64 + dj);
-                    if ni < 0
-                        || nj < 0
-                        || ni >= self.nx as i64
-                        || nj >= self.nz as i64
-                        || out[k] <= 1e-4
-                    {
-                        continue;
-                    }
-                    let n = nj as usize * self.nx + ni as usize;
-                    let drop = level(idx) - level(n);
-                    if drop < min_drop {
-                        continue;
-                    }
-                    let power = 1000.0 * 9.81 * out[k] * drop;
-                    let foot =
-                        self.cell_center(ni as usize, nj as usize) + DVec3::Y * level(n) as f64;
-                    let key =
-                        (nj as usize / BUCKET) * self.nx.div_ceil(BUCKET) + ni as usize / BUCKET;
-                    let dir = Vec2::new(di as f32, dj as f32);
-                    let v = dir * (self.vel[idx].dot(dir)).max(0.5);
-                    match buckets.iter_mut().find(|b| b.0 == key) {
-                        Some(b) => {
-                            b.1 += foot * power as f64;
-                            b.2 += v * power;
-                            b.3 += power;
-                        }
-                        None => buckets.push((key, foot * power as f64, v * power, power)),
-                    }
-                }
+                None => buckets.push((key, foot * power as f64, v * power, power)),
             }
         }
         buckets
             .into_iter()
-            .map(|(_, p, v, w)| (p / w as f64, self.world_dir(v / w), w))
+            .map(|(_, p, v, w)| (p / w as f64, v / w, w))
             .collect()
+    }
+
+    /// Where water pours over an edge into a drop of at least `min_drop` meters within one
+    /// cell, and so leaves the ground and falls free: one [`Lip`] per wet cell at the brink,
+    /// facing the way its water goes over (diagonal where the brink runs across the grid), with
+    /// where it lands.
+    pub fn lips(&self, min_drop: f32) -> Vec<Lip> {
+        let level = |idx: usize| self.bed[idx] + self.depth[idx];
+        let steps: [(i64, i64); 4] = [(-1, 0), (1, 0), (0, -1), (0, 1)];
+        let at = |i: i64, j: i64| {
+            (i >= 0 && j >= 0 && i < self.nx as i64 && j < self.nz as i64)
+                .then(|| j as usize * self.nx + i as usize)
+        };
+        let mut out = Vec::new();
+        for j in 0..self.nz {
+            for i in 0..self.nx {
+                let idx = j * self.nx + i;
+                // Water thins out as it speeds up over a brink: any film counts.
+                if self.depth[idx] < 0.0005 || self.reservoir[idx].is_finite() {
+                    continue;
+                }
+                let top = level(idx);
+                let (mut flux, mut way, mut drop) = (0.0f32, Vec2::ZERO, 0.0f32);
+                for (k, (di, dj)) in steps.into_iter().enumerate() {
+                    let f = self.flux[idx][k];
+                    let Some(n) = at(i as i64 + di, j as i64 + dj) else {
+                        continue;
+                    };
+                    if f < 2e-4 * self.cell || top - level(n) < min_drop {
+                        continue;
+                    }
+                    // Water already falling through this cell belongs to the lip above it.
+                    if at(i as i64 - di, j as i64 - dj).is_some_and(|b| level(b) - top >= min_drop)
+                    {
+                        continue;
+                    }
+                    // Follow the drop down to where it stops falling steeply: the foot.
+                    let (mut m, mut mi, mut mj) = (n, i as i64 + di, j as i64 + dj);
+                    for _ in 0..64 {
+                        match at(mi + di, mj + dj) {
+                            Some(next) if level(next) < level(m) - self.cell * 0.5 => {
+                                (m, mi, mj) = (next, mi + di, mj + dj);
+                            }
+                            _ => break,
+                        }
+                    }
+                    flux += f;
+                    way += Vec2::new(di as f32, dj as f32) * f;
+                    drop += (top - level(m)) * f;
+                }
+                if flux <= 0.0 {
+                    continue;
+                }
+                let dir = way.normalize_or(Vec2::X);
+                // The brink is as long as the cell is wide across the way the water goes.
+                let width = self.cell * (dir.x.abs() + dir.y.abs());
+                let q = flux / width;
+                let edge = (Vec2::new(i as f32, j as f32) + 0.5)
+                    + dir * (0.5 / dir.x.abs().max(dir.y.abs()));
+                // Water leaves a brink at about 1.4 times the critical speed (g q)^⅓, or as
+                // fast as it came if faster. (The grid's own velocity in the brink cell is
+                // pulled by the whole height of the drop.)
+                let back = if dir.x.abs() >= dir.y.abs() {
+                    (i as i64 - dir.x.signum() as i64, j as i64)
+                } else {
+                    (i as i64, j as i64 - dir.y.signum() as i64)
+                };
+                let approach = at(back.0, back.1).map_or(0.0, |b| self.vel[b].dot(dir));
+                let speed = (1.4 * (9.81 * q).cbrt()).max(approach).clamp(0.3, 12.0);
+                out.push(Lip {
+                    top: self.world((edge * self.cell).as_dvec2(), top as f64),
+                    dir: self.world_dir(dir),
+                    speed,
+                    q,
+                    drop: drop / flux,
+                    width,
+                });
+            }
+        }
+        out
     }
 
     /// Total water in the region, m³.
@@ -702,8 +782,9 @@ mod tests {
         let falls = sim.plunges(0.5);
         assert_eq!(falls.len(), 1, "{falls:?}");
         let (foot, v, power) = falls[0];
-        // At the foot of the step (cells are 0.5 m: x = 10 m), going +x, about ρgQΔh.
-        assert!((foot.x - 10.25).abs() < 0.6, "{foot:?}");
+        // Where the water lands past the step (its edge is at x = 10 m), going +x, about ρgQΔh.
+        assert!(foot.x > 10.2 && foot.x < 11.5, "{foot:?}");
+        assert!((foot.y - 1.0 + 0.1).abs() < 0.25, "{foot:?}");
         assert!(v.x > 0.3, "{v:?}");
         assert!(power > 1000.0 * 9.81 * 0.1 * 1.5, "{power}");
         // Gentle slopes don't count.
@@ -796,6 +877,116 @@ mod tests {
     }
 
     #[test]
+    fn water_leaves_a_cliff_edge_as_a_lip() {
+        // A 4 m high shelf (x < 5 m) with a spring on it, ending in a cliff over a flat
+        // floor; cells are 0.5 m.
+        let mut bed = vec![0.0f32; 40 * 6];
+        for j in 0..6 {
+            for i in 0..10 {
+                bed[j * 40 + i] = 4.0;
+            }
+        }
+        let r = FlowRegion {
+            cells: [40, 6],
+            cell_m: 0.5,
+            sources: vec![FlowSource {
+                at: [1.0, 1.5],
+                radius_m: 0.6,
+                rate_m3_s: 0.05,
+            }],
+            open_edges: false,
+            ..Default::default()
+        };
+        let mut sim = FlowSim::new(Entity::PLACEHOLDER, DVec3::ZERO, &r, bed);
+        for _ in 0..30 * 20 {
+            sim.step(1.0 / 30.0);
+        }
+        let lips = sim.lips(1.0);
+        assert!(!lips.is_empty(), "no lip");
+        for lip in &lips {
+            // On the cliff's edge (x = 5 m), pouring toward +x, about 4 m down.
+            assert!((lip.top.x - 5.0).abs() < 1e-3, "{lip:?}");
+            assert!(lip.dir.x > 0.99 && lip.speed > 0.3, "{lip:?}");
+            assert!(lip.drop > 3.8 && lip.drop < 4.2, "{lip:?}");
+        }
+        let poured: f32 = lips.iter().map(|l| l.q * l.width).sum();
+        // Once the shelf is wet, what the spring gives goes over the edge.
+        assert!(
+            poured > 0.03 && poured < 0.08,
+            "{poured} m³/s over the edge"
+        );
+        // Gentle slopes have none.
+        assert!(sim.lips(4.5).is_empty());
+    }
+
+    #[test]
+    fn a_brink_across_the_grid_pours_across_it() {
+        // A 3 m shelf whose edge runs diagonally across the grid (cells are 0.5 m).
+        let n = 30;
+        let bed: Vec<f32> = (0..n * n)
+            .map(|k| if k % n + k / n < 24 { 3.0 } else { 0.0 })
+            .collect();
+        let r = FlowRegion {
+            cells: [n as u32, n as u32],
+            cell_m: 0.5,
+            sources: vec![FlowSource {
+                at: [3.0, 3.0],
+                radius_m: 1.0,
+                rate_m3_s: 0.1,
+            }],
+            open_edges: false,
+            ..Default::default()
+        };
+        let mut sim = FlowSim::new(Entity::PLACEHOLDER, DVec3::ZERO, &r, bed);
+        for _ in 0..30 * 20 {
+            sim.step(1.0 / 30.0);
+        }
+        let lips = sim.lips(1.0);
+        assert!(lips.len() > 5, "{} lips", lips.len());
+        // One per brink cell, facing down the diagonal, not a zigzag of x and z strips.
+        let diagonal = Vec2::ONE.normalize();
+        let along = lips.iter().filter(|l| l.dir.dot(diagonal) > 0.95).count();
+        assert!(
+            along * 5 >= lips.len() * 4,
+            "{along} of {} diagonal",
+            lips.len()
+        );
+    }
+
+    #[test]
+    fn a_stepped_face_has_one_lip_at_its_top() {
+        // The same shelf, with its face spread over two cells (4 m, 2 m, then the floor).
+        let mut bed = vec![0.0f32; 40 * 6];
+        for j in 0..6 {
+            for i in 0..11 {
+                bed[j * 40 + i] = if i < 10 { 4.0 } else { 2.0 };
+            }
+        }
+        let r = FlowRegion {
+            cells: [40, 6],
+            cell_m: 0.5,
+            sources: vec![FlowSource {
+                at: [1.0, 1.5],
+                radius_m: 0.6,
+                rate_m3_s: 0.05,
+            }],
+            open_edges: false,
+            ..Default::default()
+        };
+        let mut sim = FlowSim::new(Entity::PLACEHOLDER, DVec3::ZERO, &r, bed);
+        for _ in 0..30 * 20 {
+            sim.step(1.0 / 30.0);
+        }
+        let lips = sim.lips(1.0);
+        assert!(!lips.is_empty(), "no lip");
+        for lip in &lips {
+            // Water on the face's middle step is already falling: no second curtain there.
+            assert!((lip.top.x - 5.0).abs() < 1e-3, "{lip:?}");
+            assert!(lip.drop > 3.8 && lip.drop < 4.2, "{lip:?}");
+        }
+    }
+
+    #[test]
     fn a_hollow_fills_to_its_brim() {
         // A pool (bed 0) in a 7 × 5 patch of ground at 3, whose rim dips to 2 on its east side
         // where a channel (bed 1) leads away to the edge.
@@ -815,5 +1006,14 @@ mod tests {
         // A seed on a slope or in the channel (no hollow) fills nothing.
         let d = flood(&bed, 7, 5, 1.0, &[FlowFill::to_spill([5.5, 2.5])]);
         assert!(d.iter().all(|d| *d == 0.0));
+        // A floor that tilts by a millimeter a cell is still a floor.
+        let mut tilted = bed.clone();
+        for j in 1..4 {
+            for i in 1..4 {
+                tilted[j * 7 + i] = 0.003 - 0.001 * i as f32;
+            }
+        }
+        let d = flood(&tilted, 7, 5, 1.0, &[FlowFill::to_spill([1.5, 2.5])]);
+        assert!((d[2 * 7 + 3] - 2.0).abs() < 1e-4, "{}", d[2 * 7 + 3]);
     }
 }
