@@ -1,6 +1,7 @@
 #![doc = include_str!("../README.md")]
 
 pub mod builtin;
+pub mod debris;
 pub mod demo;
 pub mod effect;
 pub mod emitter;
@@ -25,8 +26,8 @@ use engine_world::{
 use serde_json::{Value, json};
 
 pub use effect::{
-    Burst, Collide, Curve, EffectDesc, EffectLight, EmitShape, EmitterDesc, Facing, Gradient,
-    MAX_SUB_COUNT, Sprite, SubEmit,
+    Burst, Collide, Curve, Debris, EffectDesc, EffectLight, EmitShape, EmitterDesc, Facing,
+    Gradient, MAX_SUB_COUNT, Sprite, SubEmit,
 };
 pub use emitter::{ParticleEffect, VfxLight, VfxRuntime, VfxSettings, VfxStats};
 pub use events::{VfxReactions, spawn_effect_at};

@@ -68,7 +68,8 @@ pub struct GpuEmitter {
     pub shape: [f32; 4],
     /// Shape offset (local, m), w cosine of the spread angle.
     pub offset: [f32; 4],
-    /// Main direction (local, unit), w unused.
+    /// Main direction (local, unit), w the debris piece drawn instead of a sprite
+    /// ([`Debris::code`](crate::Debris::code), 0 for sprites).
     pub direction: [f32; 4],
     /// Extra birth velocity (local, m/s), w unused.
     pub extra_vel: [f32; 4],
@@ -155,7 +156,12 @@ impl GpuEmitter {
                 desc.offset[2] * s,
                 spread_cos,
             ],
-            direction: [dir[0], dir[1], dir[2], 0.0],
+            direction: [
+                dir[0],
+                dir[1],
+                dir[2],
+                desc.debris.map_or(0.0, |d| d.code()),
+            ],
             extra_vel: [
                 desc.velocity[0] * s,
                 desc.velocity[1] * s,
