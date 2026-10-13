@@ -7,6 +7,8 @@
 //!   module), read by AI (is the target dashing? blocking? in the air?), cameras and UI.
 //! * [`VehicleControls`]: the same idea for cars, planes and ships; the vehicles module
 //!   reports back [`EngineState`] and [`WheelContacts`] (engine and tyre sounds, HUDs, AI).
+//! * [`Climbable`]: a ladder (or rungs, a climbing net) any module can place; the movement
+//!   module climbs it in [`LocomotionMode::Climb`] and NPC navigation can use it as a link.
 //! * [`LocomotionBackend`]: which module turns `MoveIntent` into motion. The movement module
 //!   calls [`claim_backend`] in its plugin's `build`; simple fallback movers (such as the NPC
 //!   module's built-in walker for games without a movement module) check for the resource at
@@ -157,6 +159,103 @@ pub struct WheelContact {
     pub radius_m: f32,
 }
 
+/// Something a character can climb, such as a ladder through a roof hatch or up a scaffold. Any
+/// module places it on the ladder's entity (destruction's ladders, a game's level); the
+/// movement module climbs it, and NPC navigation can treat bottom → [`exit`](Self::exit) as a
+/// link.
+///
+/// Everything is in the entity's own space, so it moves, turns and follows world shifts with the
+/// entity. A climber grabs on when it walks into the climb line facing the ladder (or
+/// interacts), climbs with [`MoveIntent`] forward and back in [`LocomotionMode::Climb`], and
+/// steps off at the top to `exit` or at the bottom to the ground. When the component goes
+/// (the ladder is shot away), climbers drop off.
+#[derive(Component, Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Climbable {
+    /// Where a climber's feet are on the lowest rung, m.
+    pub bottom: Vec3,
+    /// Where a climber's feet are on the top rung, m.
+    pub top: Vec3,
+    /// Half the ladder's width, m: how far beside the line a character can be and still grab it.
+    pub half_width: f32,
+    /// The way a climber faces while on it, toward the ladder (unit, horizontal).
+    pub facing: Vec3,
+    /// Where a climber stands after stepping off at the top (onto the floor through a hatch,
+    /// over a parapet), m.
+    pub exit: Vec3,
+}
+
+impl Default for Climbable {
+    /// A 3 m ladder at the origin, climbed facing −Z, stepped off forward at the top.
+    fn default() -> Self {
+        Self::ladder(Vec3::ZERO, Vec3::Y * 3.0, Vec3::NEG_Z)
+    }
+}
+
+impl Climbable {
+    /// A 0.5 m wide ladder from `bottom` to `top`, climbed facing `facing`, stepped off 0.6 m
+    /// beyond the top in that direction.
+    pub fn ladder(bottom: Vec3, top: Vec3, facing: Vec3) -> Self {
+        let facing = facing.with_y(0.0).normalize_or(Vec3::NEG_Z);
+        Self {
+            bottom,
+            top,
+            half_width: 0.25,
+            facing,
+            exit: top + facing * 0.6,
+        }
+    }
+
+    pub fn with_half_width(mut self, half_width: f32) -> Self {
+        self.half_width = half_width;
+        self
+    }
+
+    pub fn with_exit(mut self, exit: Vec3) -> Self {
+        self.exit = exit;
+        self
+    }
+
+    /// The climb in world space for a ladder entity at `at`.
+    pub fn in_world(&self, at: &GlobalTransform) -> ClimbLine {
+        ClimbLine {
+            bottom: at.transform_point(self.bottom.as_dvec3()),
+            top: at.transform_point(self.top.as_dvec3()),
+            exit: at.transform_point(self.exit.as_dvec3()),
+            facing: at.transform_vector(self.facing).normalize_or(self.facing),
+            half_width: self.half_width * at.scale().x,
+        }
+    }
+}
+
+/// A [`Climbable`] in world space ([`Climbable::in_world`]).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ClimbLine {
+    pub bottom: DVec3,
+    pub top: DVec3,
+    pub exit: DVec3,
+    pub facing: Vec3,
+    pub half_width: f32,
+}
+
+impl ClimbLine {
+    /// How far up the climb the point nearest `p` is: 0 at the bottom rung, 1 at the top.
+    pub fn along(&self, p: DVec3) -> f64 {
+        let line = self.top - self.bottom;
+        ((p - self.bottom).dot(line) / line.length_squared().max(1e-12)).clamp(0.0, 1.0)
+    }
+
+    /// The point on the climb line `t` of the way up (0 bottom, 1 top).
+    pub fn at(&self, t: f64) -> DVec3 {
+        self.bottom.lerp(self.top, t.clamp(0.0, 1.0))
+    }
+
+    /// How far `p` is from the climb line, m.
+    pub fn distance(&self, p: DVec3) -> f64 {
+        p.distance(self.at(self.along(p)))
+    }
+}
+
 pub(crate) fn register(app: &mut App) {
     app.register_component::<MoveIntent>(
         "What a character wants: move direction (0..1 of top speed), look, jump, sprint, crouch, \
@@ -176,6 +275,11 @@ pub(crate) fn register(app: &mut App) {
     .register_component::<WheelContacts>(
         "Wheels on the ground this frame (written by vehicles): position, surface, rolling \
          speed, slip, load.",
+    )
+    .register_component::<Climbable>(
+        "A ladder characters can climb, in the entity's space: bottom and top (feet on the \
+         lowest and top rung), half width, facing (toward the ladder), exit (where you step off \
+         at the top).",
     );
 }
 
@@ -207,6 +311,40 @@ pub fn claim_backend(app: &mut App, name: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use engine_core::math::Quat;
+
+    #[test]
+    fn a_ladder_turns_and_moves_with_its_entity() {
+        let ladder = Climbable::ladder(Vec3::ZERO, Vec3::Y * 4.0, Vec3::NEG_Z);
+        assert_eq!(ladder.exit, Vec3::new(0.0, 4.0, -0.6));
+        // Turned a quarter to the left and standing at (10, 2, 5).
+        let at = GlobalTransform::from(Transform {
+            translation: DVec3::new(10.0, 2.0, 5.0),
+            rotation: Quat::from_rotation_y(std::f32::consts::FRAC_PI_2),
+            ..Transform::IDENTITY
+        });
+        let line = ladder.in_world(&at);
+        assert!(line.bottom.distance(DVec3::new(10.0, 2.0, 5.0)) < 1e-6);
+        assert!(line.top.distance(DVec3::new(10.0, 6.0, 5.0)) < 1e-6);
+        assert!(line.facing.distance(Vec3::NEG_X) < 1e-6, "{}", line.facing);
+        assert!(
+            line.exit.distance(DVec3::new(9.4, 6.0, 5.0)) < 1e-5,
+            "{}",
+            line.exit
+        );
+        let halfway_beside = DVec3::new(10.0, 4.0, 5.3);
+        assert!((line.along(halfway_beside) - 0.5).abs() < 1e-9);
+        assert!((line.distance(halfway_beside) - 0.3).abs() < 1e-9);
+        assert_eq!(line.along(DVec3::new(10.0, -3.0, 5.0)), 0.0);
+    }
+
+    #[test]
+    fn ladders_from_data_fill_in_the_rest() {
+        let ladder: Climbable = serde_json::from_str(r#"{"top": [0, 5, 0]}"#).unwrap();
+        assert_eq!(ladder.top, Vec3::Y * 5.0);
+        assert_eq!(ladder.facing, Vec3::NEG_Z);
+        assert_eq!(ladder.half_width, 0.25);
+    }
 
     #[test]
     fn claiming_records_the_backend() {
