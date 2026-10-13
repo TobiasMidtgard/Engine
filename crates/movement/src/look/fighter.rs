@@ -89,7 +89,7 @@ impl Style {
                 edge_nits: 3500.0,
             },
             Style::Duelist => Palette {
-                paint_a: (0xd5cfc1, 0.42),
+                paint_a: (0xd5cfc1, 0.4),
                 paint_b: (0x22305a, 0.42),
                 suit: 0x1b2030,
                 cloth: 0x1c233d,
@@ -106,11 +106,11 @@ impl Style {
                 edge_nits: 3500.0,
             },
             Style::Elite => Palette {
-                paint_a: (0x17171a, 0.5),
-                paint_b: (0x5c0b14, 0.46),
+                paint_a: (0x17171a, 0.4),
+                paint_b: (0x5c0b14, 0.42),
                 suit: 0x0e0e10,
                 cloth: 0x1a191d,
-                sash: 0x6e0d16,
+                sash: 0x1f1d22,
                 leather: 0x170f0f,
                 trim: (0x2e2e33, 0.28),
                 glow: 0xff1e30,
@@ -151,7 +151,7 @@ struct Palette {
     suit: u32,
     /// Woven cloth: hakama trousers.
     cloth: u32,
-    /// The waist sash and the shoulder lacing of the hakama styles.
+    /// The waist sash of the hakama styles.
     sash: u32,
     leather: u32,
     /// Fittings (sRGB hex, roughness): gold, steel, black chrome.
@@ -181,7 +181,7 @@ pub enum Mat {
     Suit,
     /// Heavy woven cloth: hakama trousers.
     Cloth,
-    /// Woven sash and lacing cord.
+    /// Woven sash.
     Sash,
     Carbon,
     Leather,
@@ -1706,7 +1706,12 @@ fn pelvis(kit: &mut Kit, s: &Spec) {
     }
     // Faulds front and back.
     if style != Style::Pilot {
-        kit.bind(Pelvis, Mat::PaintB, || {
+        let fauld = if style == Style::Elite {
+            Mat::PaintA
+        } else {
+            Mat::PaintB
+        };
+        kit.bind(Pelvis, fauld, || {
             v.shaped(
                 (FRAC_PI_2 - 0.45, FRAC_PI_2 + 0.45),
                 |u| (0.9 + 0.03 * (u - 0.5).abs() * 2.0, 0.99),
@@ -2120,7 +2125,7 @@ fn arms(kit: &mut Kit, s: &Spec) {
                 }
                 m
             });
-            kit.pair(PauldronR, Mat::Sash, || {
+            kit.pair(PauldronR, Mat::PaintB, || {
                 Lame::lacing(&lames, &sv, &[-1.1, -0.37, 0.37, 1.1], 0.0015)
             });
             // Swept crimson blade rising off the shoulder.
@@ -2628,7 +2633,7 @@ fn legs(kit: &mut Kit, s: &Spec) {
             (FRAC_PI_2 - 0.9, FRAC_PI_2 + 0.9),
             (0.45, 0.565),
             knee,
-            s.b(0.014),
+            s.b(if hakama { 0.006 } else { 0.014 }),
             12,
             8,
         );
@@ -2649,29 +2654,77 @@ fn legs(kit: &mut Kit, s: &Spec) {
         let p = shin.at(0.52, FRAC_PI_2, knee + s.t + 0.012);
         disk(0.009, 0.003, Vec3::NEG_Z, p, 16)
     });
-    // Greave.
-    kit.pair(ShinR, Mat::PaintA, || {
-        shin.shaped_panels(
-            (FRAC_PI_2 - 1.2, FRAC_PI_2 + 1.2),
-            |u| (0.2 + 0.03 * (u - 0.5).abs() * 2.0, 0.425),
-            |u, _| 0.009 + 0.006 * (1.0 - (2.0 * u - 1.0).abs()),
-            s.a(0.006),
-            14,
-            10,
-            &[0.5],
-            &[],
-        )
-    });
-    kit.pair(ShinR, Mat::Glow, || {
-        shin.plate(
-            (FRAC_PI_2 - 0.035, FRAC_PI_2 + 0.035),
-            (0.24, 0.4),
-            0.009 + s.t + 0.0045,
-            Pl::strip(),
-            1,
-            8,
-        )
-    });
+    // Greave: on the hakama styles, splints (narrow plates over a leather backing).
+    if hakama {
+        let splint = |k: i32| {
+            let mid = 1.0 - k.abs() as f32 / 2.0;
+            let phi = FRAC_PI_2 + k as f32 * 0.47;
+            let y = (0.215, 0.4 + 0.022 * mid);
+            let g = move |v: f32| 0.016 + 0.003 * mid + 0.002 * v;
+            (phi, y, g)
+        };
+        let pl = Pl::new(s.t * 0.8, 0.003, s.edge_a);
+        kit.pair(ShinR, Mat::Leather, || {
+            shin.plate(
+                (FRAC_PI_2 - 1.3, FRAC_PI_2 + 1.3),
+                (0.2, 0.415),
+                0.009,
+                Pl::new(0.003, 0.0, 1.1),
+                18,
+                6,
+            )
+        });
+        kit.pair(ShinR, Mat::PaintA, || {
+            let mut m = MeshBuilder::new();
+            for k in -2..=2 {
+                let (phi, y, g) = splint(k);
+                m.append(
+                    &shin.shaped((phi - 0.19, phi + 0.19), |_| y, |_, v| g(v), pl, 4, 8),
+                    Mat4::IDENTITY,
+                );
+            }
+            m
+        });
+        kit.pair(ShinR, Mat::Glow, || {
+            // Down the middle splint, on its pillowed face.
+            let (phi, y, g) = splint(0);
+            let span = (0.25, 0.39);
+            shin.shaped(
+                (phi - 0.03, phi + 0.03),
+                |_| span,
+                |_, v| {
+                    let w = (lerp(span.0, span.1, v) - y.0) / (y.1 - y.0);
+                    g(w) + pl.t + pl.bulge * (PI * w).sin() + 0.0012
+                },
+                Pl::strip(),
+                1,
+                8,
+            )
+        });
+    } else {
+        kit.pair(ShinR, Mat::PaintA, || {
+            shin.shaped_panels(
+                (FRAC_PI_2 - 1.2, FRAC_PI_2 + 1.2),
+                |u| (0.2 + 0.03 * (u - 0.5).abs() * 2.0, 0.425),
+                |u, _| 0.009 + 0.006 * (1.0 - (2.0 * u - 1.0).abs()),
+                s.a(0.006),
+                14,
+                10,
+                &[0.5],
+                &[],
+            )
+        });
+        kit.pair(ShinR, Mat::Glow, || {
+            shin.plate(
+                (FRAC_PI_2 - 0.035, FRAC_PI_2 + 0.035),
+                (0.24, 0.4),
+                0.009 + s.t + 0.0045,
+                Pl::strip(),
+                1,
+                8,
+            )
+        });
+    }
     // Gaiter over the boot top.
     kit.pair(ShinR, Mat::Leather, || {
         let mut m = shin.tube(0.1, 0.205, 3, 28, 0.009, 0.0, 0.0);
@@ -3251,7 +3304,7 @@ fn helmet(kit: &mut Kit, s: &Spec) {
                 n: 3,
             };
             kit.bind(Head, Mat::PaintA, || shikoro.plates(0.001, s.edge_a));
-            kit.bind(Head, Mat::Sash, || shikoro.lacing(&[-1.0, 0.0, 1.0]));
+            kit.bind(Head, Mat::PaintB, || shikoro.lacing(&[-1.0, 0.0, 1.0]));
             // Teeth: vertical slits across the jaw.
             kit.bind(Head, Mat::Glass, || {
                 let mut m = MeshBuilder::new();
@@ -4215,17 +4268,23 @@ fn materials(lib: &mut Library) {
         let (ito, same) = (hex(p.ito), hex(p.same));
         let wrap = Tex::upload(lib, bake(256, 0.012, 2.0, move |uv| cord_surface(uv, ito)));
         let skin = Tex::upload(lib, bake(256, 0.03, 1.5, move |uv| same_surface(uv, same)));
-        let painted =
-            |t: Tex| t.apply(StandardMaterial::color(1.0, 1.0, 1.0).with_uv_scale(1.67, 1.67));
+        // The baked roughness is absolute (the material's factor multiplies it).
+        let painted = |t: Tex| {
+            t.apply(
+                StandardMaterial::color(1.0, 1.0, 1.0)
+                    .with_roughness(1.0)
+                    .with_uv_scale(1.67, 1.67),
+            )
+        };
         lib.material(&key(Mat::PaintA), painted(paint_a));
         lib.material(&key(Mat::PaintB), painted(paint_b));
         lib.material(
             &key(Mat::Suit),
-            suit.apply(tint(p.suit).with_uv_scale(5.0, 5.0)),
+            suit.apply(tint(p.suit).with_roughness(1.0).with_uv_scale(5.0, 5.0)),
         );
         // Cloth is seen from inside too (under the hem, inside the sash's tails).
         let woven = |c: u32, scale: f32| {
-            let mut m = cloth.apply(tint(c).with_uv_scale(scale, scale));
+            let mut m = cloth.apply(tint(c).with_roughness(1.0).with_uv_scale(scale, scale));
             m.double_sided = true;
             m
         };
@@ -4233,7 +4292,7 @@ fn materials(lib: &mut Library) {
         lib.material(&key(Mat::Sash), woven(p.sash, 7.0));
         lib.material(
             &key(Mat::Leather),
-            leather.apply(tint(p.leather).with_uv_scale(2.5, 2.5)),
+            leather.apply(tint(p.leather).with_roughness(0.9).with_uv_scale(2.5, 2.5)),
         );
         let (trim_hex, trim_rough) = p.trim;
         lib.material(
