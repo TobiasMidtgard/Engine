@@ -16,6 +16,8 @@ pub struct Place {
     pub hour: f32,
     /// Simulated seconds the tour waits here before the screenshot (a fight getting going).
     pub warmup_secs: f32,
+    /// The tour runs the warm-up without drawing ([`crate::zones::View::quick_warmup`]).
+    pub quick_warmup: bool,
     /// API calls (name, JSON args) made on arriving, e.g. `("ui.show", r#"{"screen":"shop"}"#)`.
     pub on_arrive: Vec<(String, String)>,
     /// API calls made when the camera moves on to another place.
@@ -124,6 +126,7 @@ pub fn places() -> Vec<Place> {
         target,
         hour,
         warmup_secs: 0.0,
+        quick_warmup: false,
         on_arrive: Vec::new(),
         on_leave: Vec::new(),
     };
@@ -369,6 +372,7 @@ pub fn places() -> Vec<Place> {
                     target: z.center + DVec3::from_array(v.target),
                     hour: v.hour,
                     warmup_secs: v.warmup_secs,
+                    quick_warmup: v.quick_warmup,
                     on_arrive: v.on_arrive,
                     on_leave: v.on_leave,
                 },

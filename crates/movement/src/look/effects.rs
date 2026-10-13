@@ -1159,6 +1159,52 @@ impl Effects {
         );
     }
 
+    /// Sparks streaming off a glove gripping a zip line at `at`, riding along `heading` at
+    /// `speed` m/s, for `dt` seconds: none below 6 m/s, a steady stream at full speed. They
+    /// leave with part of the hand's speed and fall away behind it.
+    pub fn zip_sparks(
+        &mut self,
+        at: DVec3,
+        heading: Vec3,
+        speed: f32,
+        dt: f32,
+        s: &EffectSettings,
+    ) {
+        let rate = 110.0 * ((speed - 6.0) / 9.0).clamp(0.0, 1.0);
+        if rate <= 0.0 || dt <= 0.0 {
+            return;
+        }
+        let n = (rate * dt + self.rand()).floor() as u32;
+        let ahead = heading.normalize_or(Vec3::X);
+        let back = (-ahead * 0.6 - Vec3::Y * 0.5).normalize_or(-ahead);
+        for _ in 0..n.min(10) {
+            let dir = self.cone(back, 0.9);
+            let v = ahead * speed * self.range(0.55, 0.85) + dir * self.range(1.0, 4.5);
+            let size = self.range(0.007, 0.013);
+            let seed = self.rand();
+            let heat = self.range(3800.0, 5600.0);
+            let lum = s.spark_nits * self.range(0.5, 1.0);
+            let life = self.range(0.12, 0.35);
+            let jitter = self.unit() * 0.01;
+            self.push(Particle {
+                kind: ParticleKind::Spark,
+                pos: at + jitter.as_dvec3(),
+                vel: v,
+                age: 0.0,
+                life,
+                size,
+                end_size: size * 0.5,
+                color: Vec3::ONE,
+                nits: lum,
+                drag: 2.5,
+                gravity: 1.0,
+                heat,
+                floor: at.y - 50.0,
+                seed,
+            });
+        }
+    }
+
     /// Advance everything by `dt` world seconds (and `real_dt` real seconds).
     pub fn step(&mut self, dt: f32, gravity: Vec3) {
         if dt <= 0.0 {

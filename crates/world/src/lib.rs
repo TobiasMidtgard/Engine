@@ -42,8 +42,8 @@ pub use environment::*;
 pub use events::*;
 pub use grid::{Blend, Grid2, Grid3};
 pub use locomotion::{
-    ClimbLine, Climbable, EngineKind, EngineState, LocomotionMode, LocomotionState, MoveIntent,
-    VehicleControls, WheelContact, WheelContacts,
+    ClimbLine, Climbable, EngineKind, EngineState, Exhaust, ExhaustEffects, ExhaustKind, Exhausts,
+    LocomotionMode, LocomotionState, MoveIntent, VehicleControls, WheelContact, WheelContacts,
 };
 pub use physical::*;
 pub use shift::{FollowsWorldShift, WorldShift, WorldShiftAppExt, WorldShiftSet};
@@ -382,6 +382,7 @@ mod tests {
             "AnimationParams",
             "BodyRequest",
             "Climbable",
+            "Exhausts",
         ] {
             assert!(
                 registry.component(name).is_some(),
