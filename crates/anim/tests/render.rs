@@ -1,7 +1,7 @@
 //! Renders skinned meshes offscreen and checks the pictures: the GPU skinning pass draws a
 //! character with its paint and the drawn pose follows the animation (a flex raises the
 //! arms); textured submeshes draw with their own surfaces (a checker, an alpha cutout on a
-//! double-sided card). Needs a GPU or a software Vulkan driver (lavapipe); passes with a note
+//! double-sided card); fur shells grow strands over a furred skin. Needs a GPU or a software Vulkan driver (lavapipe); passes with a note
 //! when neither is available (CI sets ENGINE_REQUIRE_GPU=1, which turns that into a failure).
 
 use std::sync::Arc;
@@ -9,7 +9,7 @@ use std::sync::Arc;
 use engine_anim::build::humanoid::Outfit;
 use engine_anim::demo::spawn_humanoid;
 use engine_anim::skeleton::BoneDef;
-use engine_anim::skin::{SkinVertex, Submesh};
+use engine_anim::skin::{SkinMaterial, SkinVertex, Submesh};
 use engine_anim::{AnimationPlugin, Animator, Skeleton, SkinnedMesh, SkinnedMeshRenderer};
 use engine_assets::Assets;
 use engine_core::prelude::*;
@@ -323,5 +323,122 @@ fn textured_submeshes_draw_their_own_surfaces() {
     assert!(
         shadow < total / 20,
         "the cut-out half casts a shadow: {shadow} dark of {total} pixels"
+    );
+}
+
+/// A 1 m square lying flat at `y`, facing up, red, with fur everywhere.
+fn furred_floor(y: f32) -> (Skeleton, SkinnedMesh) {
+    let skeleton = Skeleton::new("floor", vec![BoneDef::new("root", None, Vec3::ZERO)]).unwrap();
+    let mut mesh = SkinnedMesh {
+        joints: vec!["root".into()],
+        inverse_bind: skeleton.inverse_bind.clone(),
+        ..Default::default()
+    };
+    // A grid, so the shells' strands have vertices to bend with.
+    let n = 8;
+    for j in 0..=n {
+        for i in 0..=n {
+            let (u, v) = (i as f32 / n as f32, j as f32 / n as f32);
+            let p = Vec3::new(u - 0.5, y, v - 0.5);
+            mesh.vertices.push(SkinVertex {
+                position: p,
+                normal: Vec3::Y,
+                color: Vec4::new(0.8, 0.05, 0.04, 1.0),
+                pattern: p,
+                mask: Vec4::new(0.0, 0.6, 0.0, 1.0),
+                fur: 1.0,
+                ..Default::default()
+            });
+        }
+    }
+    for j in 0..n {
+        for i in 0..n {
+            let a = j * (n + 1) + i;
+            let (b, c, d) = (a + 1, a + n + 1, a + n + 2);
+            mesh.indices.extend([a, c, b, b, c, d]);
+        }
+    }
+    (skeleton, mesh)
+}
+
+#[test]
+fn fur_shells_grow_strands_over_the_skin() {
+    let mut app = headless_app();
+    let w = &mut app.world;
+    w.spawn((
+        DirectionalLight {
+            illuminance: 80_000.0,
+            ..Default::default()
+        },
+        Transform::default().looking_at(DVec3::new(0.2, -1.0, -0.4), Vec3::Y),
+    ));
+    w.spawn((
+        Transform::from_xyz(0.0, 0.5, -1.5)
+            .with_rotation(Quat::from_rotation_x(std::f32::consts::FRAC_PI_2)),
+        MeshRenderer::new(
+            Shape::Plane {
+                size: [12.0, 12.0],
+                subdivisions: 1,
+            },
+            StandardMaterial::color(0.4, 0.4, 0.4).with_roughness(0.9),
+        ),
+    ));
+    // Nearly edge-on: the bare floor is a thin line across the middle of the picture, and fur
+    // shows as a band of strands above it.
+    w.spawn((
+        Camera::perspective(40.0),
+        Transform::from_xyz(0.0, 0.62, 3.0).looking_at(DVec3::new(0.0, 0.5, 0.0), Vec3::Y),
+    ));
+    let (skeleton, mesh) = furred_floor(0.5);
+    let mesh = w.get_resource_or_init::<Assets<SkinnedMesh>>().add(mesh);
+    let bare = SkinMaterial {
+        wrinkles: 0.0,
+        veins: 0.0,
+        ..Default::default()
+    };
+    let floor = w
+        .spawn((
+            Transform::default(),
+            GlobalTransform::default(),
+            Animator::procedural(Arc::new(skeleton)),
+            SkinnedMeshRenderer::new(mesh, bare),
+        ))
+        .id();
+    app.update_n(5);
+    if let Some(d) = app.world.get_resource::<RenderDisabled>() {
+        eprintln!("skipping: no GPU ({})", d.0);
+        return;
+    }
+    // Just above the bare floor (rows 0.492..0.51): the thick lower half of 15 cm strands
+    // (their thin tips are mostly narrower than a pixel at this distance).
+    let band = (0.3, 0.7, 0.475, 0.492);
+    let red = |r: f32, g: f32, b: f32| r > 25.0 && r > 2.0 * g && r > 2.0 * b;
+    let img = capture(&mut app, "anim_fur_bare.png");
+    let (before, total) = count(&img, band, red);
+    assert!(
+        before < total / 50,
+        "the bare floor fills the band: {before} of {total}"
+    );
+
+    app.world
+        .get_mut::<SkinnedMeshRenderer>(floor)
+        .unwrap()
+        .material = SkinMaterial {
+        fur_length: 0.15,
+        fur_density: 60.0,
+        ..bare
+    };
+    app.update_n(3);
+    let img = capture(&mut app, "anim_fur_shells.png");
+    let (after, _) = count(&img, band, red);
+    let stats = app.world.resource::<engine_render::RenderStats>().clone();
+    assert!(
+        after > total / 6,
+        "no fur above the floor: {after} red of {total} pixels ({stats:?})"
+    );
+    // Strands, not a slab: the backdrop shows between them.
+    assert!(
+        after < total * 19 / 20,
+        "the fur is a solid slab: {after} red of {total} pixels"
     );
 }

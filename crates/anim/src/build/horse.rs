@@ -455,6 +455,7 @@ pub fn gait() -> LeggedGait {
                 kind: FootKind::Hoof,
                 foot_size: [0.13, 0.15],
                 sole: 0.18,
+                stance_offset: Vec3::ZERO,
             });
         }
     }

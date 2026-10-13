@@ -18,6 +18,7 @@ use engine_core::prelude::*;
 use super::buildings::{self, Hangar, Place, dashed, flat, line, rect, text};
 use super::kit::{Builder, gray, hex};
 use super::noise::{mix, rand1, smoothstep, world_fbm};
+use super::solid::Solid;
 use super::{BuildStats, Parts, Scene, Surface, tex};
 
 /// Thickness of the pad collider (its top is the pad's surface).
@@ -40,6 +41,155 @@ const LAUNCH_TOWER: Vec2 = Vec2::new(70.0, 60.0);
 const SERVICE_TOWER: Vec3 = Vec3::new(40.0, 0.0, 8.0);
 /// The sound-suppression water tower south of the pad.
 const WATER_TOWER: Vec3 = Vec3::new(-18.0, 0.0, -82.0);
+/// The tank farm's bund (x0, x1, z0, z1), its two spheres (x, at z = 73, radius 6 on 1.6 m
+/// legs) and two horizontal tanks (x of the west end, 12 m long at z = 87.5).
+const BUND: (f32, f32, f32, f32) = (-56.0, -14.0, 62.0, 94.0);
+const SPHERES: [f32; 2] = [-44.0, -26.0];
+const SPHERE_R: f32 = 6.0;
+const H_TANKS: [f32; 2] = [-50.0, -32.0];
+/// The hangars on the west apron: center z, door groups open, operator board.
+const HANGARS: [(f32, (f32, f32), &str); 2] = [
+    (-32.0, (0.0, 0.0), "ORBITAL"),
+    (17.5, (0.35, 0.85), "PULSAR"),
+];
+/// Floodlight masts round the pad: bearing (degrees), 57 m out, 30 m tall.
+const MASTS: [f32; 4] = [20.0, 135.0, 225.0, 315.0];
+
+/// The spaceport's static collision shapes, local to the ground under the pad's center: the
+/// hangars, blast walls, tank farm, service tower with its crew arm, water tower and
+/// floodlight masts. The pad and aprons come from `demo::spawn_spaceport`.
+pub fn solids() -> Vec<Solid> {
+    let mut out = Vec::new();
+    let x0 = HANGAR_APRON.0.0;
+    for (zc, open, name) in HANGARS {
+        let at = Place::new(Vec3::new(x0, 0.0, zc), -FRAC_PI_2);
+        out.extend(buildings::hangar_solids(at, &hangar(open, name)));
+    }
+    for (_, _, p, face) in blast_wall_units() {
+        let rot = buildings::facing_z(face);
+        out.push(Solid::cuboid(
+            p + Vec3::Y * 0.2,
+            Vec3::new(0.6, 0.2, 0.9),
+            rot,
+            "concrete",
+        ));
+        out.push(Solid::cuboid(
+            p + Vec3::Y * (BLAST_WALL_H * 0.5 + 0.2) + face * 0.25,
+            Vec3::new(0.6, BLAST_WALL_H * 0.5 + 0.1, 0.16),
+            rot,
+            "concrete",
+        ));
+    }
+    let (bx0, bx1, bz0, bz1) = BUND;
+    let pts = [
+        Vec3::new(bx0, 0.0, bz0),
+        Vec3::new(bx1, 0.0, bz0),
+        Vec3::new(bx1, 0.0, bz1),
+        Vec3::new(bx0, 0.0, bz1),
+    ];
+    for k in 0..4 {
+        out.push(Solid::wall(
+            pts[k],
+            pts[(k + 1) % 4],
+            0.3,
+            0.0,
+            1.2,
+            "concrete",
+        ));
+    }
+    for x in SPHERES {
+        let ctr = Vec3::new(x, 1.6 + SPHERE_R, 73.0);
+        out.push(Solid::ball(ctr, SPHERE_R, "metal"));
+        for k in 0..8 {
+            let a = k as f32 / 8.0 * TAU;
+            let top = ctr + Vec3::new(a.cos(), 0.0, a.sin()) * SPHERE_R;
+            out.push(Solid::post(top.with_y(0.0), 0.3, top.y, "metal"));
+        }
+    }
+    for x in H_TANKS {
+        out.push(Solid {
+            center: Vec3::new(x + 6.0, 2.3, 87.5),
+            rotation: Quat::from_rotation_z(FRAC_PI_2),
+            shape: engine_world::physics::ColliderShape::Capsule {
+                radius: 1.6,
+                half_height: 6.0,
+            },
+            surface: "metal",
+        });
+        out.push(Solid::cuboid(
+            Vec3::new(x + 6.0, 0.45, 87.5),
+            Vec3::new(4.55, 0.45, 1.5),
+            Quat::IDENTITY,
+            "concrete",
+        ));
+    }
+    // Service tower and its retracted crew access arm.
+    let o = SERVICE_TOWER;
+    out.push(Solid::cuboid(
+        o + Vec3::Y * 16.0,
+        Vec3::new(2.7, 16.0, 2.7),
+        Quat::IDENTITY,
+        "metal",
+    ));
+    let arm_y = 0.5 + 5.0 * 4.0;
+    out.push(Solid::cuboid(
+        o + Vec3::new(-2.5, arm_y + 1.4, 2.5 + 5.5),
+        Vec3::new(1.25, 1.5, 5.5),
+        Quat::IDENTITY,
+        "metal",
+    ));
+    // Water tower: four raked legs and the tank.
+    let o = WATER_TOWER;
+    let (r, bottom, foot, head) = (7.5f32, 40.0f32, 6.5f32, 4.6f32);
+    for (sx, sz) in [(-1.0f32, -1.0f32), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)] {
+        let a = o + Vec3::new(sx * foot, 0.0, sz * foot);
+        let b = o + Vec3::new(sx * head, bottom + r * 0.55, sz * head);
+        out.push(Solid::beam(a, b, 0.35, "metal"));
+    }
+    out.push(Solid::ball(o + Vec3::Y * (bottom + r), r, "metal"));
+    for deg in MASTS {
+        let a = deg.to_radians();
+        let base = Vec3::new(a.cos() * 57.0, 0.0, a.sin() * 57.0);
+        out.push(buildings::floodlight_mast_solid(base, 30.0));
+    }
+    out
+}
+
+/// A spaceport hangar with its doors open by `open` and `name` over them.
+fn hangar(open: (f32, f32), name: &str) -> Hangar {
+    Hangar {
+        w: 34.0,
+        d: 28.0,
+        eave: 12.0,
+        rise: 3.0,
+        door_h: 11.0,
+        open,
+        wall: hex(0xdfe1df),
+        door: hex(0xc4c9cd),
+        trim: hex(0x2a2f36),
+        board: tex::board_index(name),
+        floor: HANGAR_Y + 0.06,
+    }
+}
+
+/// Blast wall T-units: wall index, unit index along it, base center and the face toward
+/// the pad.
+fn blast_wall_units() -> Vec<(usize, i32, Vec3, Vec3)> {
+    let mut units = Vec::new();
+    for (wi, (r, a0, a1)) in WALLS.into_iter().enumerate() {
+        let (a0, a1) = (a0.to_radians(), a1.to_radians());
+        let n = ((a1 - a0) * r / 1.24).floor() as i32;
+        for k in 0..n {
+            let a = a0 + (k as f32 + 0.5) * 1.24 / r;
+            let p = Vec3::new(a.cos() * r, 0.0, a.sin() * r);
+            units.push((wi, k, p, -Vec3::new(a.cos(), 0.0, a.sin())));
+        }
+    }
+    units
+}
+
+/// Height of a blast wall unit's stem.
+const BLAST_WALL_H: f32 = 3.8;
 
 /// Queue the spaceport scenery around the pad whose top center is `pad`.
 pub fn spawn(commands: &mut Commands, pad: DVec3, pad_radius: f32) {
@@ -67,7 +217,7 @@ pub fn build(world: &mut World, pad: DVec3, pad_radius: f32) -> Option<BuildStat
     water_tower(&mut parts);
     // Floodlight masts round the pad; the south-east one stands off the diagonal, out of
     // the overview of the pad from the south-east.
-    for deg in [20.0f32, 135.0, 225.0, 315.0] {
+    for deg in MASTS {
         let a = deg.to_radians();
         let base = Vec3::new(a.cos() * 57.0, 0.0, a.sin() * 57.0);
         buildings::floodlight_mast(&mut parts, base, 30.0, Vec3::new(0.0, PAD_THICK, 0.0), 6);
@@ -439,30 +589,14 @@ fn hangars(parts: &mut Parts) {
     let ((x0, x1), (z0, z1)) = HANGAR_APRON;
     slab_grid(parts.get(Surface::Slabs), x0, x1, z0, z1, HANGAR_Y, 83);
     kerb(parts, x0, x1, z0, z1, HANGAR_Y);
-    let specs = [
-        (-32.0f32, (0.0f32, 0.0f32), "ORBITAL"),
-        (17.5, (0.35, 0.85), "PULSAR"),
-    ];
-    for (zc, open, name) in specs {
-        let h = Hangar {
-            w: 34.0,
-            d: 28.0,
-            eave: 12.0,
-            rise: 3.0,
-            door_h: 11.0,
-            open,
-            wall: hex(0xdfe1df),
-            door: hex(0xc4c9cd),
-            trim: hex(0x2a2f36),
-            board: tex::board_index(name),
-            floor: HANGAR_Y + 0.06,
-        };
-        buildings::hangar(parts, Place::new(Vec3::new(x0, 0.0, zc), -FRAC_PI_2), &h);
+    for (zc, open, name) in HANGARS {
+        let at = Place::new(Vec3::new(x0, 0.0, zc), -FRAC_PI_2);
+        buildings::hangar(parts, at, &hangar(open, name));
     }
     // Lead lines into the hangars.
     let p = parts.get(Surface::PaintSlabs);
     p.color(hex(0xf0b414));
-    for (zc, _, _) in specs {
+    for (zc, _, _) in HANGARS {
         line(
             p,
             Vec3::new(x1 - 1.0, 0.0, zc),
@@ -499,23 +633,15 @@ fn t_wall(c: &mut Builder, base: Vec3, face: Vec3, h: f32) {
 }
 
 fn blast_walls(parts: &mut Parts) {
-    let h = 3.8f32;
     let mut boards = Vec::new();
-    for (wi, (r, a0, a1)) in WALLS.iter().enumerate() {
-        let (a0, a1) = (a0.to_radians(), a1.to_radians());
-        let n = ((a1 - a0) * r / 1.24).floor() as i32;
-        for k in 0..n {
-            let a = a0 + (k as f32 + 0.5) * 1.24 / r;
-            let p = Vec3::new(a.cos() * r, 0.0, a.sin() * r);
-            let face = -Vec3::new(a.cos(), 0.0, a.sin());
-            let shade = 0.86 + 0.14 * rand1(k + wi as i32 * 100, 3);
-            let c = parts.get(Surface::Concrete);
-            c.color(gray(shade));
-            t_wall(c, p, face, h);
-            // Scorch on the pad side: soot-darkened faces on units facing the pad.
-            if k % 9 == 4 {
-                boards.push((p, face));
-            }
+    for (wi, k, p, face) in blast_wall_units() {
+        let shade = 0.86 + 0.14 * rand1(k + wi as i32 * 100, 3);
+        let c = parts.get(Surface::Concrete);
+        c.color(gray(shade));
+        t_wall(c, p, face, BLAST_WALL_H);
+        // Warning boards on every ninth unit.
+        if k % 9 == 4 {
+            boards.push((p, face));
         }
     }
     // Warning boards on the outside faces.
@@ -532,7 +658,7 @@ fn blast_walls(parts: &mut Parts) {
 }
 
 fn tank_farm(parts: &mut Parts) {
-    let (x0, x1, z0, z1) = (-56.0f32, -14.0f32, 62.0f32, 94.0f32);
+    let (x0, x1, z0, z1) = BUND;
     // Bund: a 1.2 m wall with a sump floor.
     let c = parts.get(Surface::Concrete);
     c.color(gray(0.9));
@@ -558,8 +684,8 @@ fn tank_farm(parts: &mut Parts) {
     g.color(gray(0.9));
     ring_rect(g, x0 + 0.15, x1 - 0.15, z0 + 0.15, z1 - 0.15, 0.03);
     // Two spheres on legs (oxidizer, fuel), two horizontal storage tanks on saddles.
-    let r = 6.0f32;
-    for (x, col) in [(-44.0f32, gray(0.93)), (-26.0, hex(0xd0d4d6))] {
+    let r = SPHERE_R;
+    for (x, col) in SPHERES.into_iter().zip([gray(0.93), hex(0xd0d4d6)]) {
         let ctr = Vec3::new(x, 1.6 + r, 73.0);
         let p = parts.get(Surface::Painted);
         p.color(col);
@@ -666,7 +792,7 @@ fn tank_farm(parts: &mut Parts) {
         );
         buildings::railing(parts, &rail, 1.0, 1.4);
     }
-    for x in [-50.0f32, -32.0] {
+    for x in H_TANKS {
         let a = Vec3::new(x, 2.3, 87.5);
         let b = Vec3::new(x + 12.0, 2.3, 87.5);
         let p = parts.get(Surface::Painted);

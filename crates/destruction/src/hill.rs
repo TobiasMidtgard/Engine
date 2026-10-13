@@ -10,8 +10,8 @@
 //! - in the build yard off the hill's other foot a builder in Valheim build mode
 //!   ([`crate::build`]) aims, the ghost of each piece snaps into place in the support color it
 //!   will have and the piece goes down: a stone plinth, posts, board walls, a loft floor, a
-//!   shingle roof and a deck reaching out from the gable. Then the cabin shows its support
-//!   colors: the deck's second row orange at the edge of support, and the ghost of a third row
+//!   shingle roof and a deck reaching out from the gable; the plank door that hangs in its
+//!   doorway swings open. Then the cabin shows its support colors: the deck's second row orange at the edge of support, and the ghost of a third row
 //!   red because nothing could hold it;
 //! - on the leveled terrace a second builder lays a stone floor on the bare rock, stands board
 //!   walls at its ends, roofs them and walls in the back against the cut bank; then the
@@ -30,6 +30,7 @@ use engine_world::{DamageEvent, DamageKind, EditOp, EditShape, SurfaceMaterials,
 use crate::DemoView;
 use crate::build::{BuildAction, BuildKind, BuildRequest, Builder, BuiltPiece};
 use crate::debris::Debris;
+use crate::door::{DoorRequest, HungDoor};
 use crate::dress::PropModel;
 use crate::material::DestructibleMaterial;
 use crate::props::PropKind;
@@ -52,6 +53,9 @@ const YARD_START: f32 = 0.5;
 const YARD_STEP: f32 = 0.42;
 /// When the finished cabin shows its support colors (with the red ghost of the last step).
 const YARD_SUPPORT_AT: f32 = 14.2;
+/// When the plank door hung in the cabin's doorway (placed at about 12.2 s) swings open, out
+/// into the yard.
+const YARD_DOOR_OPENS_AT: f32 = 12.7;
 /// Where the terrace's shelter stands, relative to the origin: the middle of the leveled
 /// terrace, on its rock.
 pub const TERRACE: [f64; 3] = [8.8, TERRACE_Y, 2.1];
@@ -109,6 +113,14 @@ pub const VIEWS: &[DemoView] = &[
         target: [-14.0, 2.0, -24.5],
         hour: 10.5,
         warmup_secs: 9.9,
+    },
+    DemoView {
+        key: "voxel_cabin_door",
+        name: "The plank door hung in the cabin's doorway swung open",
+        eye: [-10.6, 1.8, -18.6],
+        target: [-13.2, 1.2, -21.8],
+        hour: 10.5,
+        warmup_secs: 13.9,
     },
     DemoView {
         key: "voxel_build_reach",
@@ -220,6 +232,8 @@ enum Step {
     Place(Site),
     /// A site's finished building shows its support colors.
     ShowSupport(Site),
+    /// The doors a site's builder hung swing open, out from inside.
+    OpenDoors(Site),
     Reset,
 }
 
@@ -253,6 +267,7 @@ fn timeline() -> Vec<(f32, Step)> {
         }
     }
     t.push((YARD_SUPPORT_AT, Step::ShowSupport(Site::Yard)));
+    t.push((YARD_DOOR_OPENS_AT, Step::OpenDoors(Site::Yard)));
     t.push((TERRACE_SUPPORT_AT, Step::ShowSupport(Site::Terrace)));
     for (k, (at, _)) in UNDERMINE.iter().enumerate() {
         t.push((*at, Step::Undermine(k)));
@@ -408,8 +423,14 @@ pub fn yard_plan() -> Vec<BuildStep> {
     for side in [-1.0, 1.0] {
         for z in [-1.0, 1.0] {
             let at = v(side * 1.85, 0.4, z);
+            // A window in each side, toward the front on −X and the back on +X.
+            let kind = if side * z < 0.0 {
+                BuildKind::WoodWindow
+            } else {
+                BuildKind::WoodWall
+            };
             add(
-                BuildKind::WoodWall,
+                kind,
                 side as f32 * FRAC_PI_2,
                 at + v(-side * 0.95, 2.6, 0.3),
                 at,
@@ -460,6 +481,16 @@ pub fn yard_plan() -> Vec<BuildStep> {
     // The gables over the side walls, aimed from under the roof at the loft floor's edge on
     // the wall: each half rises toward the ridge.
     add_gables(&mut add, &[-2.0, 2.0], 2.4);
+    // A doorway in the front's right half, aimed from outside at the plinth under it (from
+    // above, the loft and roof are in the way now).
+    let at = v(1.0, 0.4, 1.85);
+    add(
+        BuildKind::WoodDoorway,
+        0.0,
+        at + v(0.3, 1.2, 1.55),
+        at,
+        v(1.0, 1.4, 2.0),
+    );
     // The deck: off the outside of the +X walls under their tops, then off the deck's edge.
     for z in [-1.0, 1.0] {
         add(
@@ -862,6 +893,26 @@ fn run_step(world: &mut World, demo: &mut HillDemo, step: Step) {
                 builder.show_support = true;
             }
         }
+        Step::OpenDoors(site) => {
+            let Some(b) = demo.builders[site as usize] else {
+                return;
+            };
+            let doors: Vec<Entity> = world
+                .query::<(&BuiltPiece, &HungDoor)>()
+                .iter(world)
+                .filter(|(p, _)| p.builder == Some(b))
+                .map(|(_, h)| h.0)
+                .collect();
+            // Opened from inside the cabin, so it swings out into the light.
+            let from = o + site.offset() + DVec3::new(1.0, 1.4, 0.0);
+            for door in doors {
+                world.write_message(DoorRequest {
+                    door,
+                    open: Some(true),
+                    from: Some(from),
+                });
+            }
+        }
         Step::Place(site) => {
             if let Some(b) = demo.builders[site as usize] {
                 world.write_message(BuildRequest {
@@ -968,7 +1019,7 @@ mod tests {
         // Blue plinth, the deck's second row orange at the edge of support.
         assert!(levels[..4].iter().all(|l| *l == 0), "{levels:?}");
         assert_eq!(levels[levels.len() - 1], 3, "{levels:?}");
-        assert_eq!(levels.len(), 31);
+        assert_eq!(levels.len(), 32);
     }
 
     #[test]

@@ -29,8 +29,9 @@ fracture and debris.
   floors and decks and walls stop you, debris lands on what still stands, and a car that hits
   a wall breaks it. A piece that falls becomes a debris body.
 - **Build mode** (`build`, Valheim's hammer): a `Builder` (the player's camera, a script)
-  picks one of ten pieces (wood floor, wall, pole, beam, 26° and 45° shingle roofs, a 26°
-  board gable to close a roof's end; stone floor, wall and pillar) and aims. A translucent ghost of the piece sits on what the aim hits
+  picks one of twelve pieces (wood floor, wall, pole, beam, 26° and 45° shingle roofs, a
+  26° board gable to close a roof's end, a wall with a doorway and one with a window; stone
+  floor, wall and pillar) and aims. A translucent ghost of the piece sits on what the aim hits
   (on top of the ground or a floor, against a wall's side or a floor's edge) and snaps so its
   nearest snap point meets a neighbor's (pole and beam ends, panel corners and edge midpoints,
   a floor's on its top face, block corners), skipping spots inside other pieces. The ghost
@@ -41,7 +42,13 @@ fracture and debris.
   terrain or on voxel rock alike (dig the rock out from under them and they fall). Built
   pieces show their support colors while their builder has the support view on. Keys (bound
   unless the game binds them): B build mode, left mouse place, X remove, R rotate, C next
-  piece, 1 to 9 and 0 pick a piece.
+  piece, 1 to 9, 0, − and = pick a piece.
+- **Doors** (`door`): a ledged and braced plank door (iron strap hinges, clenched nails, a
+  ring pull on each face) hangs in every doorway built in build mode. `interact` (E, gamepad
+  West) opens or shuts the door nearest a character within 2.2 m; it swings 95° away from
+  whoever opens it, either way, and with a physics module its collider swings with it (shut,
+  it closes the doorway). When its doorway falls the door swings shut and falls with it; take
+  the doorway down and the door goes too.
 - **Burning wood** (`burn`): wooden building pieces get an `engine_world::Combustible`
   holding their wood as fuel, so the fire module (when installed) can light and burn them.
   As they burn they char (scorched, then black alligator char with embers glowing in its
@@ -78,13 +85,15 @@ module. Voxel volumes here are local destructible rock (cliffs, caves, arches) p
 Reads: `DamageEvent` (bullets, melee, explosions; `target` picks the wall or piece),
 `WorldImpulse` (explosions: energy falls off with distance), `ProjectileTrace` (bullets pass
 through soft material and lose energy), `ContactEvent` (hard impacts, debris landing),
-`TerrainEdit` (dig and build rock), `Combustible` state, the `build_*` input actions,
-`BuildRequest` (script a builder).
+`TerrainEdit` (dig and build rock), `Combustible` state, the `build_*` and `interact` input
+actions, `BuildRequest` (script a builder), `DoorRequest` (open or shut a door).
 
-Writes: `WorldImpulse` (falling structures, strength only), `NoiseEvent` (breaks, collapses),
+Writes: `WorldImpulse` (falling structures, strength only), `NoiseEvent` (breaks, collapses,
+doors),
 `SmokeEmission` (dust and thermite smoke for the smoke module), `GroundContact` (debris
 landing on a surface, for footstep-style impact sounds), physics-contract bodies for debris
-and static colliders for standing building pieces, breakable props and set dressing.
+and static colliders for standing building pieces, breakable props, set dressing and doors
+(moved with them).
 
 ## Using it
 
@@ -128,6 +137,7 @@ grenade writes `WorldImpulse`, a pickaxe writes `TerrainEdit`.
 | `destruction.build` | Place a piece like a player in build mode: `{kind, from, to}` or `{kind, at}`, `yaw_deg`, `preview` |
 | `destruction.unbuild` | Take down a built piece `{entity}` or the one aimed at `{from, to}` |
 | `destruction.build_pieces` | The pieces build mode can place, with sizes |
+| `destruction.door` | Open or shut the door nearest `{near}` (it swings away from there) or `{entity}`; `open` true, false or left out to toggle |
 | `destruction.inspect` | Integrity, cells, rebar, volume of one entity `{entity}` |
 | `destruction.stats`, `destruction.clear_debris` | Counters; remove all debris |
 
@@ -171,7 +181,8 @@ hill zone) on a 28 s loop: a tunnel dug into the hill until its hall caves in, a
 and leveled with the hoe, a timber hut in support colors losing two posts, and the **build
 yard**, where a builder in build mode puts up a cabin piece by piece, each ghost snapping into
 place before the piece goes down: a stone plinth (blue), corner posts and board walls with a
-doorway, a loft floor, a shingle roof with board gables closing its ends, and a deck reaching
+window in each side, a loft floor, a shingle roof with board gables closing its ends, a
+framed doorway in the front whose plank door then swings open, and a deck reaching
 out from the +X gable whose second row is orange at the edge of support, then the red ghost
 of a third row that couldn't stand.
 Then the hoe levels a floor pad in the terrace and a second builder puts up a **shelter on the
@@ -189,8 +200,9 @@ still holds it, red), then under both, and the shelter drops into the pit.
   barricade, thermite through reinforced concrete, a charge on drywall vs reinforced, a tower
   falling when its post breaks, digging under an overhang drops it, the AI functions, the demo,
   a burning shed charring and coming down, build mode placing snapped pieces and taking them
-  down, the hill's cabin going up with its red ghost and its shelter standing on the terrace's
-  rock, pieces on voxel rock falling when it is dug out from under them).
+  down, the hill's cabin going up with its red ghost and its door swung open and its shelter
+  standing on the terrace's rock, pieces on voxel rock falling when it is dug out from under
+  them, doors opening away from whoever presses interact and falling with their doorway).
 - `hill::tests::the_yard_cabin_snaps_together_as_planned` and
   `the_terrace_shelter_snaps_together_as_planned` aim every step of the cabin and the shelter
   and check each piece lands where it should with the support the solver gives it.
