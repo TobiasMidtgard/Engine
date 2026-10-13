@@ -3,7 +3,7 @@
 //!
 //! Every screen can then be opened from the console or by an AI agent:
 //! `ui.show {"screen": "dialogue", "tree": "merchant_intro"}`, `{"screen": "shop"}`,
-//! `{"screen": "inventory"}`, `{"screen": "map"}`, `{"screen": "pause"}`.
+//! `{"screen": "inventory"}`, `{"screen": "map"}`, `{"screen": "journal"}`, `{"screen": "pause"}`.
 
 use bevy_ecs::prelude::*;
 use engine_core::math::DVec3;
@@ -134,7 +134,7 @@ pub fn player_data(data: &mut UiData) {
         json!({
             "title": "The Silent Relay",
             "step": "Reach the relay tower on Veyra's northern ridge",
-            "progress": 2, "progress_max": 3,
+            "progress": 2, "progress_max": 4,
             "distance_m": 1_240.0
         }),
     );
@@ -179,6 +179,7 @@ pub fn setup_data(world: &mut World) {
     player_data(&mut world.resource_mut::<UiData>());
     crate::dialogue::add_demo_trees(world);
     crate::map::add_demo_map(world);
+    crate::quests::add_demo_quests(world);
 }
 
 /// Marks the UI test area's world objects.
