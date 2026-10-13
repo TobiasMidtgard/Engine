@@ -56,6 +56,7 @@ pub mod material;
 pub mod mesh;
 pub mod mesh_feature;
 pub mod renderer;
+pub mod rock;
 pub mod settings;
 pub mod shadows;
 pub mod sky_feature;
