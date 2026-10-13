@@ -4963,6 +4963,19 @@ const LADDER_HALF_W: f32 = 0.236;
 const LADDER_DEPTH: f32 = 0.24;
 /// Where a centered ladder's stiles stand along Z (its top brackets reach back to −Z).
 pub const LADDER_STILE_Z: f32 = 0.06;
+/// Height of a steel ladder's lowest rung over its foot, and the rise from rung to rung, m.
+const LADDER_FIRST_RUNG: f32 = 0.25;
+const LADDER_RUNG_PITCH: f32 = 0.28;
+
+/// Heights of a `height` m steel ladder's lowest and top rungs over its foot, m.
+pub fn ladder_rungs(height: f32) -> (f32, f32) {
+    let h = height.max(1.0);
+    let n = ((h - 0.1 - LADDER_FIRST_RUNG) / LADDER_RUNG_PITCH)
+        .ceil()
+        .max(1.0)
+        - 1.0;
+    (LADDER_FIRST_RUNG, LADDER_FIRST_RUNG + n * LADDER_RUNG_PITCH)
+}
 
 fn ladder_size(height: f32) -> Vec3 {
     Vec3::new(2.0 * (LADDER_HALF_W + 0.03), height.max(1.0), LADDER_DEPTH)
@@ -5035,7 +5048,7 @@ pub fn steel_ladder(height: f32, seed: u64) -> Vec<PropPart> {
         }
     }
     // Rungs: knurled bars through both stiles, worn bright in the middle.
-    let mut y = 0.25;
+    let mut y = LADDER_FIRST_RUNG;
     while y < h - 0.1 {
         let v0 = m.vertices.len();
         let path: Vec<Vec3> = (0..=6)
@@ -5057,7 +5070,7 @@ pub fn steel_ladder(height: f32, seed: u64) -> Vec<PropPart> {
                 dark,
             );
         }
-        y += 0.28;
+        y += LADDER_RUNG_PITCH;
     }
     // Stiles at z = 0 sit LADDER_STILE_Z in front of the middle once centered.
     kit.translate(Vec3::new(0.0, -h * 0.5, LADDER_STILE_Z));
