@@ -342,6 +342,11 @@ fn model_spin(genes: &Genes) -> Quat {
 /// Years a log keeps its twigs; after that it is drawn bare (the plant's `log` mesh).
 pub const LOG_BARE_YEARS: f32 = 1.2;
 
+/// Years a felled crown stays green before its leaves brown. Longer than one ecology step of
+/// a time-lapse region (a quarter year in the showcase forest), so a tree that just came down
+/// lies green for a while before the clock browns it.
+pub const LOG_GREEN_YEARS: f32 = 0.3;
+
 fn log_scale(genes: &Genes, size: f32) -> Vec3 {
     let s = size.max(0.02);
     Vec3::new(s * genes.crown, s * genes.height, s * genes.crown)

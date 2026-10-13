@@ -513,7 +513,9 @@ fn trunk(
 /// once the twigs have rotted off), patchy along it, and a darker, damp underside. The cut
 /// faces stay bare.
 fn moss_log(mesh: &mut engine_render::Mesh, seed: u64) {
-    let moss = Vec3::new(0.06, 0.085, 0.022);
+    // Olive, not lawn green: moss on deadwood is dark and dull, drier and yellower in places.
+    let moss = Vec3::new(0.052, 0.07, 0.026);
+    let dry = Vec3::new(0.075, 0.074, 0.036);
     for v in &mut mesh.vertices {
         let n = Vec3::from(v.normal).normalize_or_zero();
         let side = 1.0 - n.y.abs();
@@ -527,10 +529,21 @@ fn moss_log(mesh: &mut engine_render::Mesh, seed: u64) {
             2.0,
             0.5,
         );
-        let top = smoothstep(-0.15 - 0.3 * patch, 0.55, n.x) * smoothstep(-0.5, 0.05, patch);
+        let tint = noise::fbm3(
+            p.x as f64 * 2.1,
+            p.y as f64 * 1.7,
+            p.z as f64 * 2.1,
+            seed ^ 0x0d27,
+            2,
+            2.0,
+            0.5,
+        );
+        // Cushions with bark between them, mostly along the top.
+        let top = smoothstep(-0.15 - 0.3 * patch, 0.55, n.x) * smoothstep(-0.1, 0.25, patch);
         let under = smoothstep(0.0, 0.7, -n.x);
+        let moss = moss.lerp(dry, smoothstep(-0.2, 0.4, tint));
         let c = Vec3::new(v.color[0], v.color[1], v.color[2]);
-        let c = c.lerp(moss, top * side * 0.85) * (1.0 - 0.35 * under * side);
+        let c = c.lerp(moss, top * side * 0.8) * (1.0 - 0.35 * under * side);
         v.color = [c.x, c.y, c.z, v.color[3]];
     }
 }

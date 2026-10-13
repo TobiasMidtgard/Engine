@@ -13,7 +13,10 @@
 use engine_core::prelude::*;
 use engine_core::time::TimeSource;
 use engine_foliage::demo;
-use engine_foliage::{FoliagePlugin, Plant, PlantLibrary, PlantStage, fell_tree};
+use engine_foliage::scenery::random_rock;
+use engine_foliage::{
+    FallingTree, FelledLog, FoliagePlugin, Plant, PlantLibrary, PlantStage, fell_tree,
+};
 use engine_render::prelude::*;
 use engine_render::{Exposure, RenderDisabled, Screenshots, SkyLightVolume};
 use engine_world::WeatherState;
@@ -58,6 +61,18 @@ fn shot(app: &mut App, out: &str, name: &str, eye: DVec3, target: DVec3, hour: f
     println!("saved {path}");
 }
 
+/// How far the tree being felled leans from upright, radians (`None` once it has settled).
+fn fall_angle(app: &mut App) -> Option<f32> {
+    let mut q = app.world.query::<&FallingTree>();
+    q.iter(&app.world).next().map(|f| f.angle)
+}
+
+fn set_step(app: &mut App, step_secs: f64) {
+    app.world
+        .resource_mut::<Time>()
+        .set_source(TimeSource::Manual { step_secs });
+}
+
 /// Run frames without drawing them (software rendering is the slow part here).
 fn simulate(app: &mut App, frames: usize) {
     let renderer = app.world.remove_resource::<engine_render::Renderer>();
@@ -70,9 +85,10 @@ fn simulate(app: &mut App, frames: usize) {
     }
 }
 
-/// A simple cave around the cave demo (the showcase builds its own).
+/// A simple cave around the cave demo (the showcase builds its own): plain walls and a roof,
+/// lined inside with crags so the walls read as rock.
 fn cave_walls(commands: &mut Commands, c: DVec3) {
-    let rock = StandardMaterial::hex(0x3e3b39).with_roughness(0.9);
+    let rock = StandardMaterial::hex(0x2c2a28).with_roughness(0.9);
     let (w, h, d) = (30.0f32, 9.0f32, 34.0f32);
     let mut wall = |size: [f32; 3], at: DVec3| {
         commands.spawn((
@@ -104,10 +120,55 @@ fn cave_walls(commands: &mut Commands, c: DVec3) {
     }
     commands.spawn((
         Transform::from_translation(c + DVec3::new(0.0, h as f64 * 0.5, 0.0)),
-        SkyLightVolume::new([w * 0.5 - 1.0, h * 0.5, d * 0.5 - 1.0])
+        // Past the walls' inner faces, or the sky lights them (and the cracks between them).
+        SkyLightVolume::new([w * 0.5 + 1.5, h * 0.5 + 0.5, d * 0.5 + 1.5])
             .open(BoxFace::NegZ)
             .with_fade(12.0),
     ));
+
+    // Crags along the inside of the walls, just outside the cave floor's cover.
+    let mut rng = Rng::new(0xc4a6);
+    let (hx, hz) = (w * 0.5, d * 0.5);
+    let mut runs: Vec<(Vec2, Vec2)> = vec![
+        (Vec2::new(-hx, hz), Vec2::new(hx, hz)),
+        (Vec2::new(-hx, -hz), Vec2::new(-hx, hz)),
+        (Vec2::new(hx, -hz), Vec2::new(hx, hz)),
+    ];
+    for x in [-1.0, 1.0] {
+        runs.push((Vec2::new(x * 5.5, -hz), Vec2::new(x * hx, -hz)));
+    }
+    let mut crags = Vec::new();
+    for (a, b) in runs {
+        let n = (a.distance(b) / 3.2).ceil() as usize;
+        for i in 0..=n {
+            let width = rng.range(6.0, 9.0);
+            let mut r = random_rock(
+                &mut rng,
+                a.lerp(b, i as f32 / n as f32),
+                width,
+                false,
+                0.0,
+                [0.55, 0.53, 0.5],
+            );
+            r.size.y = rng.range(h * 0.45, h * 0.85);
+            r.rock.bury_m = r.size.y * 0.15;
+            r.rock.lichen = 0.1;
+            // Outside the cover, rocks keep their place: sink them by hand.
+            r.rock.settled = true;
+            crags.push(r);
+        }
+    }
+    let crags = crags.into_iter().map(move |r| {
+        (
+            Transform::from_translation(
+                c + DVec3::new(r.pos.x as f64, -r.rock.bury_m as f64, r.pos.y as f64),
+            )
+            .with_rotation(r.rotation)
+            .with_scale(r.size),
+            r.rock,
+        )
+    });
+    commands.spawn_batch(crags);
 }
 
 fn main() {
@@ -201,78 +262,141 @@ fn main() {
     take(&mut app, "02_trail", &by_name("forest_trail"));
     take(&mut app, "03_clearing", &by_name("forest_clearing"));
 
-    // From the clearing viewpoint, fell a big tree ahead across the view and photograph it.
+    // Fell a big tree at the edge of the clear-cut into the open, and photograph it coming
+    // down from across the clearing.
     let library = app.world.resource::<PlantLibrary>().clone();
     let view = by_name("forest_clearing");
     let fwd = (view.target - view.eye).with_y(0.0).normalize();
+    let clearing = FOREST + DVec3::new(demo::CLEARING[0] as f64, 0.0, demo::CLEARING[1] as f64);
     let mut q = app.world.query::<(Entity, &Plant, &Transform)>();
-    // Bushes and trees standing between the camera and a tree would hide its fall.
-    let screens: Vec<(DVec3, f64)> = q
+    // Trees between the camera and the falling one would hide it (bushes and saplings only
+    // hide its foot); anything at the camera would fill the frame.
+    let standing: Vec<(DVec3, f32, f64)> = q
         .iter(&app.world)
-        .filter(|(_, p, _)| {
-            let sp = library.get(p.species);
-            p.stage.is_alive() && p.size * sp.max_height_m > 1.2
-        })
+        .filter(|(_, p, _)| p.stage.is_alive())
         .map(|(_, p, t)| {
             let sp = library.get(p.species);
-            (t.translation, p.crown_radius(sp) as f64 + 0.3)
+            (t.translation, p.height(sp), p.crown_radius(sp) as f64 + 0.3)
         })
         .collect();
-    let in_view = |base: DVec3| {
-        let to = (base - view.eye).with_y(0.0);
+    let in_view = |eye: DVec3, base: DVec3| {
+        let to = (base - eye).with_y(0.0);
         let len = to.length();
         let dir = to / len;
-        !screens.iter().any(|&(p, r)| {
-            let rel = (p - view.eye).with_y(0.0);
+        !standing.iter().any(|&(p, h, r)| {
+            let rel = (p - eye).with_y(0.0);
             let along = rel.dot(dir);
-            along > 1.0 && along < len - 4.0 && (rel - dir * along).length() < r
+            h > 6.0 && along > 1.0 && along < len - 4.0 && (rel - dir * along).length() < r
         })
     };
-    let tree = q
+    let crowded = |eye: DVec3| {
+        standing
+            .iter()
+            .any(|&(p, h, r)| h > 1.2 && (p - eye).with_y(0.0).length() < r + 1.0)
+    };
+    let candidates: Vec<(Entity, DVec3, f32)> = q
         .iter(&app.world)
         .filter(|(_, p, t)| {
-            let to = (t.translation - view.eye).with_y(0.0);
+            let edge = (t.translation - clearing).with_y(0.0).length();
             p.stage == PlantStage::Alive
                 && library.get(p.species).is_tree()
                 && p.size > 0.6
-                && (18.0..40.0).contains(&to.length())
-                && to.normalize().dot(fwd) > 0.85
+                && (demo::CLEARING[2] as f64 - 3.0..demo::CLEARING[2] as f64 + 3.0).contains(&edge)
         })
-        .max_by(|a, b| {
-            let score = |p: &Plant, t: &Transform| {
-                let clear = if in_view(t.translation) { 10.0 } else { 0.0 };
-                clear + p.size - 0.02 * t.translation.distance(view.eye) as f32
-            };
-            score(a.1, a.2).total_cmp(&score(b.1, b.2))
-        })
-        .map(|(e, _, t)| (e, t.translation));
-    if let Some((tree, base)) = tree.filter(|_| wanted("04_falling") || wanted("05_fallen")) {
-        // It falls sideways, toward the middle of the view.
-        let to = (base - view.eye).with_y(0.0);
-        let side = DVec3::Y.cross(fwd);
-        let dir = if to.dot(side) > 0.0 { -side } else { side }.as_vec3();
-        let look = base + DVec3::Y * 7.0 + dir.as_dvec3() * 5.0;
-        aim(&mut app.world, view.eye, look);
+        .map(|(e, p, t)| (e, t.translation, p.size))
+        .collect();
+    let camera_for = |base: DVec3| {
+        let outward = (base - clearing).with_y(0.0).normalize();
+        (outward, (base - outward * 34.0).with_y(view.eye.y + 0.5))
+    };
+    let felled = candidates.into_iter().max_by(|a, b| {
+        // Clear line of sight, nothing at the camera, a big tree, the morning sun as in the
+        // clearing view.
+        let score = |&(_, base, size): &(Entity, DVec3, f32)| {
+            let (outward, eye) = camera_for(base);
+            let clear = if in_view(eye, base) { 10.0 } else { 0.0 };
+            let room = if crowded(eye) { 0.0 } else { 5.0 };
+            clear + room + size + 2.0 * outward.dot(fwd) as f32
+        };
+        score(a).total_cmp(&score(b))
+    });
+    if let Some((tree, base, _)) = felled.filter(|_| wanted("04_falling") || wanted("05_fallen")) {
+        let (outward, eye) = camera_for(base);
+        println!(
+            "felling a tree {:.0} m from the camera ({}, {})",
+            (base - eye).with_y(0.0).length(),
+            if in_view(eye, base) {
+                "in plain view"
+            } else {
+                "partly hidden"
+            },
+            if crowded(eye) {
+                "a plant at the camera"
+            } else {
+                "room at the camera"
+            }
+        );
+        // Into the clearing, across the view and toward the camera.
+        let dir = (DVec3::Y.cross(outward) - outward).normalize();
+        let look = base + dir * 10.0 + DVec3::Y * 7.0;
+        aim(&mut app.world, eye, look);
+        set_hour(&mut app.world, view.hour);
         app.update_n(6);
-        fell_tree(&mut app.world, tree, dir);
-        // A 20 m tree takes about 3 s to fall.
-        simulate(&mut app, 22);
-        app.update_n(4);
+        fell_tree(&mut app.world, tree, dir.as_vec3());
+        // It tips slowly, then comes down fast: photograph it halfway, with time stopped so
+        // the frame is sharp.
+        let mut frames = 0;
+        while fall_angle(&mut app).is_some_and(|a| a < 0.95) && frames < 300 {
+            simulate(&mut app, 1);
+            frames += 1;
+        }
+        println!(
+            "after {:.1} s it leans {:.0} degrees",
+            frames as f64 * STEP,
+            fall_angle(&mut app).unwrap_or(0.0).to_degrees()
+        );
         if wanted("04_falling") {
+            set_step(&mut app, 0.0);
+            app.update_n(6);
             app.world
                 .resource_mut::<Screenshots>()
                 .request(format!("{out}/04_falling.png"));
+            app.update();
+            println!("saved {out}/04_falling.png");
+            set_step(&mut app, STEP);
         }
-        app.update();
-        simulate(&mut app, 30);
-        shot(
-            &mut app,
-            &out,
-            "05_fallen",
-            view.eye,
-            look - DVec3::Y * 5.0,
-            9.5,
-        );
+        // Down and settled: walk up to it, looking across the log from the clearing side.
+        let length = {
+            let mut q = app.world.query::<&FallingTree>();
+            q.iter(&app.world).next().map_or(15.0, |f| f.length as f64)
+        };
+        while fall_angle(&mut app).is_some() && frames < 600 {
+            simulate(&mut app, 1);
+            frames += 1;
+        }
+        simulate(&mut app, 4);
+        let mut logs = app.world.query::<(&FelledLog, &Transform)>();
+        let lying = logs
+            .iter(&app.world)
+            .map(|(_, t)| (t.translation, (t.rotation * Vec3::Y).as_dvec3()))
+            .min_by(|a, b| a.0.distance(base).total_cmp(&b.0.distance(base)));
+        let (eye, target) = match lying {
+            Some((butt, axis)) => {
+                let mid = butt + axis * length * 0.45;
+                let across = DVec3::Y.cross(axis).with_y(0.0).normalize();
+                let toward_clearing = if (clearing - mid).dot(across) > 0.0 {
+                    across
+                } else {
+                    -across
+                };
+                (
+                    (mid + toward_clearing * 13.0).with_y(view.eye.y),
+                    mid + DVec3::Y * 0.6,
+                )
+            }
+            None => (eye, look - DVec3::Y * 5.0),
+        };
+        shot(&mut app, &out, "05_fallen", eye, target, view.hour);
     }
     take(&mut app, "06_spring", &by_name("forest_spring"));
     take(&mut app, "07_burn_scar", &by_name("forest_burn_scar"));

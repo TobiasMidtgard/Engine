@@ -15,7 +15,7 @@ use engine_render::{Camera, Mesh, MeshRenderer, PointLight, StandardMaterial};
 
 use crate::assets::{FoliageVisuals, GLOW_LEVELS, SpeciesVisual, TINTS, VARIANTS};
 use crate::ecology::InRegion;
-use crate::felling::{FallingTree, LOG_BARE_YEARS, LogPose};
+use crate::felling::{FallingTree, LOG_BARE_YEARS, LOG_GREEN_YEARS, LogPose};
 use crate::grass::RegionGrass;
 use crate::plant::{EcologySettings, FelledLog, Plant, PlantStage};
 use crate::species::{Layer, PlantForm, PlantLibrary, PlantSpecies};
@@ -332,7 +332,7 @@ pub fn desired_log_parts(
     };
     let leaves = if pose.charred || years >= LOG_BARE_YEARS {
         None
-    } else if years < 0.15 {
+    } else if years < LOG_GREEN_YEARS {
         Some(vis.leaves_still[tint])
     } else {
         Some(vis.dead_leaves_still)
