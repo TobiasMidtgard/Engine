@@ -88,8 +88,12 @@ All art is generated in code (`src/art`), since no third-party art may go in the
   feathered wings that fold, spread and beat.
 - **Arena** (`art/arena.rs`): a sandstone amphitheater with arched stands, gates with
   portcullises, fluted columns, banners, braziers with flickering fire and light, rubble,
-  timber barricades, crates and drums, all with baked PBR textures. The art dresses the
-  gameplay entities; colliders never change.
+  timber barricades, crates and drums, all with baked PBR textures. The floor (`art/arena/
+  grounds.rs`) is lived in: raked sand in overlapping lanes, trampled tracks with footprints
+  between the gates, ring, lane and cover, cart ruts and drag marks at the gates, dust drifts
+  against the walls and columns, straw, broken arrows and splinters, and stone troughs, water
+  casks and weapon racks along the walls with soaked sand where water was spilled. The art
+  dresses the gameplay entities; colliders never change.
 
 Everything is built once per world and shared. Without a renderer (headless tests) the art
 falls back to primitive shapes so tests stay fast.
