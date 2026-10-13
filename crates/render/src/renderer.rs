@@ -28,7 +28,10 @@ use crate::frame::{
 };
 use crate::gpu::{self, SurfaceState};
 use crate::settings::{AntiAliasing, RenderSettings, Tonemapper};
-use crate::shadows::{MAX_CASCADES, SKY_OCCLUSION_VIEW, ShadowViewUniform};
+use crate::shadows::{FAR_SHADOW_LAYER, MAX_CASCADES, SKY_OCCLUSION_VIEW, ShadowViewUniform};
+
+/// Index of the far shadow map's view buffer and bind group (after the sky occlusion map's).
+const FAR_SHADOW_VIEW: usize = SKY_OCCLUSION_VIEW + 1;
 use crate::targets::{Targets, Tex};
 
 /// Set when the renderer could not start (no GPU); rendering is skipped. With the environment
@@ -104,8 +107,10 @@ struct ShadowResources {
     #[allow(dead_code)]
     texture: wgpu::Texture,
     array_view: wgpu::TextureView,
+    /// One per cascade, then the far shadow map's (`FAR_SHADOW_LAYER`).
     layer_views: Vec<wgpu::TextureView>,
-    /// One per cascade, then one for the sky occlusion map (index `SKY_OCCLUSION_VIEW`).
+    /// One per cascade, then one for the sky occlusion map (index `SKY_OCCLUSION_VIEW`) and one
+    /// for the far shadow map (`FAR_SHADOW_VIEW`).
     view_buffers: Vec<wgpu::Buffer>,
     view_bind_groups: Vec<wgpu::BindGroup>,
     compare_sampler: wgpu::Sampler,
@@ -729,6 +734,19 @@ impl Renderer {
                 queue.write_buffer(&self.shadow.view_buffers[i], 0, bytemuck::bytes_of(&u));
             }
         }
+        if view.sun_shadows && view.far_shadow.enabled {
+            let u = ShadowViewUniform {
+                view_proj: view.far_shadow.view_proj.to_cols_array_2d(),
+                wind: [view.wind.x, view.wind.y, view.wind.z, 0.0],
+                time: [view.time, view.real_time, view.delta, 0.0],
+                camera_frac: uniform.camera_world_frac,
+            };
+            queue.write_buffer(
+                &self.shadow.view_buffers[FAR_SHADOW_VIEW],
+                0,
+                bytemuck::bytes_of(&u),
+            );
+        }
         if view.sky_occlusion.enabled {
             let u = ShadowViewUniform {
                 view_proj: view.sky_occlusion.view_proj.to_cols_array_2d(),
@@ -815,6 +833,26 @@ impl Renderer {
                 pass.set_bind_group(0, &self.shadow.view_bind_groups[i], &[]);
                 for f in &self.features {
                     f.draw_shadow(&mut pass, i, &ctx);
+                }
+            }
+            // The far shadow map: big casters out to `far_shadow_distance`.
+            if view.far_shadow.enabled {
+                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("far shadow"),
+                    color_attachments: &[],
+                    depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                        view: &self.shadow.layer_views[FAR_SHADOW_LAYER],
+                        depth_ops: Some(wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(1.0),
+                            store: wgpu::StoreOp::Store,
+                        }),
+                        stencil_ops: None,
+                    }),
+                    ..Default::default()
+                });
+                pass.set_bind_group(0, &self.shadow.view_bind_groups[FAR_SHADOW_VIEW], &[]);
+                for f in &self.features {
+                    f.draw_far_shadow(&mut pass, &ctx);
                 }
             }
         }
@@ -1290,7 +1328,7 @@ fn create_shadow_resources(shared: &GpuShared, size: u32, occlusion_size: u32) -
         size: wgpu::Extent3d {
             width: size,
             height: size,
-            depth_or_array_layers: MAX_CASCADES as u32,
+            depth_or_array_layers: FAR_SHADOW_LAYER as u32 + 1,
         },
         mip_level_count: 1,
         sample_count: 1,
@@ -1304,7 +1342,7 @@ fn create_shadow_resources(shared: &GpuShared, size: u32, occlusion_size: u32) -
         dimension: Some(wgpu::TextureViewDimension::D2Array),
         ..Default::default()
     });
-    let layer_views = (0..MAX_CASCADES as u32)
+    let layer_views = (0..=FAR_SHADOW_LAYER as u32)
         .map(|i| {
             texture.create_view(&wgpu::TextureViewDescriptor {
                 label: Some("shadow layer"),
@@ -1315,7 +1353,7 @@ fn create_shadow_resources(shared: &GpuShared, size: u32, occlusion_size: u32) -
             })
         })
         .collect();
-    let view_buffers: Vec<wgpu::Buffer> = (0..=SKY_OCCLUSION_VIEW)
+    let view_buffers: Vec<wgpu::Buffer> = (0..=FAR_SHADOW_VIEW)
         .map(|_| {
             device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("shadow view"),

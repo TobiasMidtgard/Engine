@@ -6,7 +6,8 @@
 //! 2. `compute` — record compute or offscreen passes (particles, simulation, clouds).
 //! 3. `draw_environment` — draw into the sky environment map (ambient light + reflections).
 //! 4. `draw_shadow` — draw depth into one shadow cascade, or into the top-down sky occlusion
-//!    map when the index is [`SKY_OCCLUSION_VIEW`](crate::shadows::SKY_OCCLUSION_VIEW).
+//!    map when the index is [`SKY_OCCLUSION_VIEW`](crate::shadows::SKY_OCCLUSION_VIEW);
+//!    `draw_far_shadow` — big casters (terrain, mountains) into the coarse far shadow map.
 //! 5. `draw_prepass` — draw depth, normals and motion of opaque geometry. Ambient occlusion,
 //!    contact shadows and temporal anti-aliasing are computed from it before the scene is
 //!    shaded, so opaque features should implement it (geometry without it still renders, it
@@ -260,6 +261,14 @@ pub trait RenderFeature: Send + Sync + 'static {
     /// `ctx.view.sky_occlusion.contains_sphere`). Anything that roofs over the ground (rock,
     /// buildings, canopies) should draw into both.
     fn draw_shadow(&self, pass: &mut wgpu::RenderPass<'_>, cascade: usize, ctx: &FrameContext) {}
+
+    /// Draw depth into the far shadow map: one coarse map (texels of several meters) around the
+    /// camera that gives sun shadows beyond the cascades, out to
+    /// `RenderSettings::far_shadow_distance`. Draw only what is big enough to show at that
+    /// resolution, culled with `ctx.view.far_shadow.casts(center, radius)`: terrain, mountains,
+    /// cliffs, large buildings. Same pipeline and group 0 layout as `draw_shadow`. Features that
+    /// don't implement it simply cast no shadows past the cascades.
+    fn draw_far_shadow(&self, pass: &mut wgpu::RenderPass<'_>, ctx: &FrameContext) {}
 
     /// Draw the depth prepass: opaque geometry with depth writes, returning `PrepassOutput`
     /// (world normal, roughness, motion) into [`GpuShared::prepass_targets`]. Use the same

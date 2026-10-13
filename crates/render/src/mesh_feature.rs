@@ -48,7 +48,7 @@ use crate::mesh::{Mesh, Vertex};
 use crate::settings::RenderSettings;
 use crate::shadows::{MAX_CASCADES, SKY_OCCLUSION_VIEW};
 use crate::texture::{Image, PixelFormat};
-use crate::virtual_geometry::{ClusterInstance, ClusterRenderer};
+use crate::virtual_geometry::{ClusterInstance, ClusterRenderer, FAR_SHADOW_CLUSTERS};
 
 /// Per-instance vertex data (locations 4–10 in `mesh.wgsl`, plus 11–13 for the previous
 /// matrix in the mesh feature's own pipelines).
@@ -281,6 +281,8 @@ pub struct MeshFeature {
     transparent: Vec<Batch>,
     /// Per shadow cascade, then the sky occlusion map (index `SKY_OCCLUSION_VIEW`).
     shadow: [Vec<Batch>; MAX_CASCADES + 1],
+    /// Big casters in the far shadow map.
+    far_shadow: Vec<Batch>,
     query: Option<QueryState<MeshQuery>>,
     items: Vec<Item>,
     keys: Vec<BatchKey>,
@@ -544,6 +546,28 @@ impl MeshFeature {
             .and_then(Option::as_ref)
             .or_else(|| self.texture_sets.first().and_then(Option::as_ref))
             .map(|s| &s.group)
+    }
+
+    /// Draw a shadow view's batches and its clusters (`view`: a cascade, `SKY_OCCLUSION_VIEW`
+    /// or `FAR_SHADOW_CLUSTERS`).
+    fn draw_shadow_view(&self, pass: &mut wgpu::RenderPass<'_>, batches: &[Batch], view: usize) {
+        let (Some(group), Some(instances)) = (&self.material_group, &self.instances) else {
+            return;
+        };
+        let clusters = self.clusters.as_ref().filter(|c| c.is_active());
+        if batches.is_empty() && clusters.is_none() {
+            return;
+        }
+        pass.set_bind_group(1, group, &[]);
+        pass.set_vertex_buffer(1, instances.buffer.slice(..));
+        let pipeline_for = |p: u8| match p {
+            SHADOW_MASKED => self.shadow_masked_pipeline.as_ref(),
+            _ => self.shadow_pipeline.as_ref(),
+        };
+        self.draw_batches(pass, batches, pipeline_for, |p| p == SHADOW_MASKED);
+        if let Some(clusters) = clusters {
+            clusters.draw_shadow(pass, view);
+        }
     }
 
     fn draw_batches<'a>(
@@ -1141,6 +1165,7 @@ impl RenderFeature for MeshFeature {
         for s in &mut self.shadow {
             s.clear();
         }
+        self.far_shadow.clear();
         self.keys.clear();
 
         // Opaque.
@@ -1218,6 +1243,18 @@ impl RenderFeature for MeshFeature {
                 }
                 Self::batch(&self.keys, first as u32, &mut self.shadow[c]);
             }
+            if view.sun_shadows && view.far_shadow.enabled {
+                let first = self.instance_data.len();
+                self.keys.clear();
+                for &n in &self.casters {
+                    let item = &self.items[n as usize];
+                    if view.far_shadow.casts(item.center, item.radius) {
+                        self.instance_data.push(item.instance);
+                        self.keys.push(shadow_key(item));
+                    }
+                }
+                Self::batch(&self.keys, first as u32, &mut self.far_shadow);
+            }
         }
 
         // Upload.
@@ -1262,6 +1299,7 @@ impl RenderFeature for MeshFeature {
             }
         }
         stats.draw_calls += self.shadow.iter().map(|s| s.len() as u32).sum::<u32>();
+        stats.draw_calls += self.far_shadow.len() as u32;
         if let Some(clusters) = &self.clusters {
             let c = clusters.stats();
             stats.draw_calls += c.draw_calls;
@@ -1323,24 +1361,11 @@ impl RenderFeature for MeshFeature {
     }
 
     fn draw_shadow(&self, pass: &mut wgpu::RenderPass<'_>, cascade: usize, _ctx: &FrameContext) {
-        let (Some(group), Some(instances)) = (&self.material_group, &self.instances) else {
-            return;
-        };
-        let batches = &self.shadow[cascade];
-        let clusters = self.clusters.as_ref().filter(|c| c.is_active());
-        if batches.is_empty() && clusters.is_none() {
-            return;
-        }
-        pass.set_bind_group(1, group, &[]);
-        pass.set_vertex_buffer(1, instances.buffer.slice(..));
-        let pipeline_for = |p: u8| match p {
-            SHADOW_MASKED => self.shadow_masked_pipeline.as_ref(),
-            _ => self.shadow_pipeline.as_ref(),
-        };
-        self.draw_batches(pass, batches, pipeline_for, |p| p == SHADOW_MASKED);
-        if let Some(clusters) = clusters {
-            clusters.draw_shadow(pass, cascade);
-        }
+        self.draw_shadow_view(pass, &self.shadow[cascade], cascade);
+    }
+
+    fn draw_far_shadow(&self, pass: &mut wgpu::RenderPass<'_>, _ctx: &FrameContext) {
+        self.draw_shadow_view(pass, &self.far_shadow, FAR_SHADOW_CLUSTERS);
     }
 
     fn stats(&self) -> FeatureStats {
@@ -1360,6 +1385,7 @@ impl RenderFeature for MeshFeature {
             "opaque_batches": self.opaque.len(),
             "transparent_batches": self.transparent.len(),
             "shadow_batches": self.shadow.iter().map(|s| s.len()).collect::<Vec<_>>(),
+            "far_shadow_batches": self.far_shadow.len(),
             "virtual_geometry": self.clusters.as_ref().map(ClusterRenderer::describe),
         })
     }

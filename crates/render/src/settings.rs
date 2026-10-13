@@ -93,8 +93,14 @@ pub struct RenderSettings {
     pub vsync: bool,
     /// Shadows are drawn up to this distance from the camera, meters.
     pub shadow_distance: f32,
-    /// Shadow map resolution per cascade (applied at startup).
+    /// Shadow map resolution per cascade and of the far shadow map (applied at startup).
     pub shadow_map_size: u32,
+    /// Far shadows: beyond `shadow_distance`, big casters (terrain, mountains, cliffs, large
+    /// buildings) still cast sun shadows out to this distance from the camera, meters, from one
+    /// coarse shadow map (`shadow_map_size`², so 8 km gives texels of about 8 m at 2048). Mountains
+    /// shade the valley at low sun and ridges shade themselves. 0 = off (no sun shadows beyond
+    /// `shadow_distance`).
+    pub far_shadow_distance: f32,
     /// 0 = uniform cascade splits, 1 = logarithmic.
     pub shadow_split_lambda: f32,
     pub shadow_depth_bias: f32,
@@ -194,6 +200,7 @@ impl Default for RenderSettings {
             vsync: true,
             shadow_distance: 350.0,
             shadow_map_size: 2048,
+            far_shadow_distance: 8000.0,
             shadow_split_lambda: 0.8,
             shadow_depth_bias: 0.0,
             shadow_normal_bias: 1.5,

@@ -151,8 +151,19 @@ Writes: `HeatField`, `WorldImpulse`, `IgniteRequest`, `DamageEvent`, `NoiseEvent
 | `draw_environment` | add to the sky environment map (clouds, nebulae); it is filtered afterwards, so what is drawn here lights every surface and shows in rough reflections |
 | `draw_prepass` | write depth, normal, roughness and motion for opaque geometry (`vs`/`fs` using `prepass_output` from `lib_frame.wgsl`, targets `GpuShared::prepass_targets()`); ambient occlusion, contact shadows and TAA motion work only on surfaces drawn here, and the scene pass must then write the same depth (mark clip positions `@invariant`) |
 | `draw_shadow(cascade)` | cast sun shadows; with `cascade == SKY_OCCLUSION_VIEW`, draw into the top-down sky occlusion map so whatever roofs over the ground (rock, buildings, canopies) keeps sky light and rain out |
+| `draw_far_shadow` | big casters only (terrain, mountains, cliffs, large buildings; cull with `ctx.view.far_shadow.casts(center, radius)`): the coarse far shadow map that shades the land beyond the cascades |
 | `draw(Opaque/Sky/Transparent)` | draw into the HDR scene; transparent can read scene color/depth copies |
 | `overlay` | draw onto the final LDR image (UI, debug) |
+
+**Sun shadows** (built): four cascades out to `RenderSettings::shadow_distance` (rotation-
+invariant spheres snapped to texels, PCSS filtering), then a **far shadow map** out to
+`far_shadow_distance` (8 km by default; 0 = off): one `shadow_map_size`² map around the camera
+(texels of about 8 m), snapped to world texels, in the shadow array's last layer
+(`FAR_SHADOW_LAYER`). Only casters at least two of its texels across draw into it
+(`draw_far_shadow`; the mesh feature, instanced and clustered, does), so it costs little, and
+mountains shade the valley at low sun and ridges shade themselves kilometers away.
+`shadow_factor` blends from the cascades into it over their last tenth; `DebugView::Cascades`
+shows its region in magenta.
 
 **Sky occlusion** (built): a 512² top-down depth map of the highest surface within 128 m of
 the camera. `sky_visibility(rel, normal)` in `lib_frame.wgsl` returns how much open sky a point
@@ -240,7 +251,7 @@ Shared pipelines the core will provide for modules (planned): **strands** for ha
 muscles and skinned clothes and by `engine_softbody` for simulated cloth).
 
 Shader library: `lib_types.wgsl` (types, noise, BRDF, `henyey_greenstein`), `lib_frame.wgsl` (group 0 frame
-data, `shade_surface`, `shade_surface_shadowed`, `shadow_factor`, `contact_shadow`, `screen_ao`, `sky_visibility`, `apply_fog`,
+data, `shade_surface`, `shade_surface_shadowed`, `shadow_factor` (cascades, then `far_shadow_visibility`), `contact_shadow`, `screen_ao`, `sky_visibility`, `apply_fog`,
 `apply_sky_fog`, `volumetric_fog_at`, `height_fog_density`, `fog_sky_light`,
 `sample_env`, `sample_env_rough`, `sky_ambient`, `wind_offset`, `prepass_output`) and `lib_atmosphere.wgsl` (`atmosphere` for aerial perspective,
 `sun_transmittance`, `sky_view_radiance`, `planet_height`, `ray_shell`).

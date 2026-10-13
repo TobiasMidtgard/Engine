@@ -658,7 +658,10 @@ fn fs_main(in: VertexOut, @builtin(front_facing) front: bool) -> @location(0) ve
         if (depth > frame.shadow_splits[0]) { tint = vec3(0.4, 1.0, 0.4); }
         if (depth > frame.shadow_splits[1]) { tint = vec3(0.4, 0.4, 1.0); }
         if (depth > frame.shadow_splits[2]) { tint = vec3(1.0, 1.0, 0.4); }
-        if (depth > frame.shadow_splits[3]) { tint = vec3(1.0); }
+        if (depth > frame.shadow_splits[3]) {
+            // Magenta where only the far shadow map reaches.
+            tint = select(vec3(1.0), vec3(1.0, 0.4, 1.0), length(in.rel) < frame.far_shadow_params.x);
+        }
         color *= tint;
     }
     return vec4<f32>(color, m.base.a);
