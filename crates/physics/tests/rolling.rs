@@ -200,6 +200,42 @@ fn balls_slow_the_same_on_terrain_and_meshes() {
 }
 
 #[test]
+fn barrels_roll_flat_and_straight_over_terrain_and_meshes() {
+    // Each new triangle a fast barrel rolls onto used to kick it: up to 20 cm into the air at
+    // 8 m/s, and meters off its line within a few seconds.
+    for kind in [Ground::Terrain, Ground::Mesh] {
+        for speed0 in [4.0, 8.0] {
+            let mut app = app();
+            ground_of(&mut app, kind, "concrete");
+            let e = launch(&mut app, Roller::Barrel, speed0);
+            app.update_n(30);
+            let (mut low, mut high) = (f64::MAX, f64::MIN);
+            for _ in 0..180 {
+                app.update();
+                let y = app.world.get::<Transform>(e).unwrap().translation.y;
+                (low, high) = (low.min(y), high.max(y));
+            }
+            let at = app.world.get::<Transform>(e).unwrap().translation;
+            assert!(
+                high - low < 0.005,
+                "{kind:?} at {speed0} m/s: bounced {:.1} mm",
+                (high - low) * 1000.0
+            );
+            assert!(
+                at.z.abs() < 0.25,
+                "{kind:?} at {speed0} m/s: veered {:.2} m off its line",
+                at.z
+            );
+            assert!(
+                speed(&app, e) > speed0 - 0.4,
+                "{kind:?}: slowed from {speed0} to {} m/s",
+                speed(&app, e)
+            );
+        }
+    }
+}
+
+#[test]
 fn barrels_slow_down_and_stop_on_sand() {
     // Rapier's cylinders hop a little as they roll, so check the outcome rather than the rate.
     let after = |crr: f32, surface: &str, secs: usize| {
