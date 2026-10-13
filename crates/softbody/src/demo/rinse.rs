@@ -27,7 +27,7 @@ const STAKE_RADIUS: f32 = 0.024;
 /// The stakes lean this far from upright, either way along the stream (radians).
 const STAKE_LEAN: f32 = 0.38;
 /// Strips across the stream, m apart.
-const STRIP_PITCH: f32 = 0.78;
+const STRIP_PITCH: f32 = 0.7;
 
 /// A rinsing frame: tied once the water under it is known.
 #[derive(Component, Debug, Clone, Copy, PartialEq)]

@@ -1044,12 +1044,21 @@ const DRAIN: f32 = 0.02;
 /// Wetness lost per second in still air at 15 °C.
 const DRY: f32 = 0.003;
 
+/// Water shallower than this (m) doesn't count: a film running down a stream's wall reports
+/// a surface as high as the wall, and the surface over a body would slope up to meet it.
+const MIN_WATER_DEPTH: f32 = 0.05;
+
 /// The water surface over a body (3 × 3 samples across its bounds) in its local frame, or
 /// `None` when no water is near. Where a sample falls on dry land (past a stream's bank), the
 /// surface carries on level with the water's mean height there: what is on the bank stands
 /// above it anyway.
 fn water_surface(env: &Env, center: DVec3, radius: f32, origin: DVec3) -> Option<WaterSurface> {
-    let mid = env.water_query.sample(center)?;
+    let sample = |p: DVec3| {
+        env.water_query
+            .sample(p)
+            .filter(|w| w.depth >= MIN_WATER_DEPTH)
+    };
+    let mid = sample(center)?;
     if mid.surface_height < center.y - f64::from(radius) - 0.25 {
         return None;
     }
@@ -1059,7 +1068,7 @@ fn water_surface(env: &Env, center: DVec3, radius: f32, origin: DVec3) -> Option
     let (mut sum, mut wet) = (0.0, 0);
     for (k, h) in heights.iter_mut().enumerate() {
         let p = center + DVec3::new((k % 3) as f64 - 1.0, 0.0, (k / 3) as f64 - 1.0) * r;
-        if let Some(w) = env.water_query.sample(p) {
+        if let Some(w) = sample(p) {
             let y = (w.surface_height - origin.y) as f32;
             *h = Some(y);
             sum += y;

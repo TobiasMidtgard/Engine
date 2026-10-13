@@ -80,11 +80,14 @@ fn seigaiha(p: vec2<f32>) -> f32 {
             break;
         }
     }
-    // Four arcs to a fan, and a solid dot at its heart.
+    // Four arcs to a fan, and a solid dot at its heart. Antialiased by the pattern's own
+    // footprint (fwidth of `rings` jumps where fans meet), and faded to the share of line in
+    // the pattern where a pixel spans more than an arc.
     let rings = r * 4.0;
-    let w = max(fwidth(rings), 1e-4);
+    let w = max(length(fwidth(p)) * 4.0, 1e-4);
     let line = 1.0 - smoothstep(0.16 - w, 0.16 + w, abs(rings - round(rings)));
-    return max(select(line, 0.0, rings < 0.5), 1.0 - smoothstep(0.42 - w, 0.42 + w, rings));
+    let ink = max(select(line, 0.0, rings < 0.5), 1.0 - smoothstep(0.42 - w, 0.42 + w, rings));
+    return mix(ink, 0.33, smoothstep(0.2, 0.6, w));
 }
 
 // Plum blossoms scattered over cells of `p` (one cell per blossom spacing), some cells bare:
@@ -102,7 +105,7 @@ fn blossoms(p: vec2<f32>) -> vec2<f32> {
             let size = mix(0.16, 0.3, hash12(cell + 11.7));
             let spin = hash12(cell + 5.9) * 6.2832;
             let q = (p - c) / size;
-            let w = max(fwidth(q.x), 1e-4);
+            let w = max(length(fwidth(p)) / size, 1e-4);
             var d = length(q) - 0.45;
             for (var k = 0; k < 5; k++) {
                 let a = spin + f32(k) * 1.2566;
@@ -113,7 +116,9 @@ fn blossoms(p: vec2<f32>) -> vec2<f32> {
             heart = max(heart * (1.0 - smoothstep(-w, w, d)), 1.0 - smoothstep(0.2 - w, 0.2 + w, length(q)));
         }
     }
-    return vec2(petal, heart);
+    // Where a pixel spans a good part of a blossom, its share of the cloth.
+    let far = smoothstep(0.1, 0.4, length(fwidth(p)));
+    return mix(vec2(petal, heart), vec2(0.1, 0.012), far);
 }
 
 // Kanoko shibori (tie-dye dots): rows of small squarish rings, every other row shifted, each
@@ -125,10 +130,11 @@ fn shibori(p: vec2<f32>) -> f32 {
     let f = fract(q) - 0.5 + (vec2(hash12(cell + 1.3), hash12(cell + 9.1)) - 0.5) * 0.08;
     // Rounded square: the binding thread pinched the cloth into a little tent.
     let d = pow(pow(abs(f.x), 3.0) + pow(abs(f.y), 3.0), 1.0 / 3.0);
-    let w = max(fwidth(p.x), 1e-4) * 1.5;
+    let w = max(length(fwidth(p)), 1e-4);
     let size = mix(0.2, 0.25, hash12(cell + 4.4));
     let ring = smoothstep(size * 0.55 - w, size * 0.55 + w, d) * (1.0 - smoothstep(size - w, size + w * 3.0, d));
-    return ring;
+    // Where a pixel spans a dot, the dots' share of the cloth.
+    return mix(ring, 0.11, smoothstep(0.08, 0.25, w));
 }
 
 // Printed pattern color at `uv` (0..1 over the cloth).
