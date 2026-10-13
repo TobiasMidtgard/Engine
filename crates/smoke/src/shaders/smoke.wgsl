@@ -269,7 +269,7 @@ fn fs_smoke(in: VsOut) -> @location(0) vec4<f32> {
     if (alpha < 0.002) { discard; }
     // Fog between the camera and the smoke (at its weighted depth) veils it like anything else.
     let rel_mid = dir * (t_weighted / alpha);
-    let haze = apply_fog(vec3(0.0), rel_mid);
-    let lit = apply_fog(pre_expose(color), rel_mid) - haze * transmittance;
+    let veil = surface_fog(rel_mid);
+    let lit = pre_expose(color) * veil.transmittance + veil.inscatter * alpha;
     return vec4<f32>(max(lit, vec3(0.0)), alpha);
 }

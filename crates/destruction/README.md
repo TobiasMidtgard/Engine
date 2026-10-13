@@ -29,8 +29,9 @@ fracture and debris.
   floors and decks and walls stop you, debris lands on what still stands, and a car that hits
   a wall breaks it. A piece that falls becomes a debris body.
 - **Build mode** (`build`, Valheim's hammer): a `Builder` (the player's camera, a script)
-  picks one of ten pieces (wood floor, wall, pole, beam, 26° and 45° shingle roofs, a 26°
-  board gable to close a roof's end; stone floor, wall and pillar) and aims. A translucent ghost of the piece sits on what the aim hits
+  picks one of twelve pieces (wood floor, wall, pole, beam, 26° and 45° shingle roofs, a
+  26° board gable to close a roof's end, a wall with a doorway and one with a window; stone
+  floor, wall and pillar) and aims. A translucent ghost of the piece sits on what the aim hits
   (on top of the ground or a floor, against a wall's side or a floor's edge) and snaps so its
   nearest snap point meets a neighbor's (pole and beam ends, panel corners and edge midpoints,
   a floor's on its top face, block corners), skipping spots inside other pieces. The ghost
@@ -41,7 +42,7 @@ fracture and debris.
   terrain or on voxel rock alike (dig the rock out from under them and they fall). Built
   pieces show their support colors while their builder has the support view on. Keys (bound
   unless the game binds them): B build mode, left mouse place, X remove, R rotate, C next
-  piece, 1 to 9 and 0 pick a piece.
+  piece, 1 to 9, 0, − and = pick a piece.
 - **Burning wood** (`burn`): wooden building pieces get an `engine_world::Combustible`
   holding their wood as fuel, so the fire module (when installed) can light and burn them.
   As they burn they char (scorched, then black alligator char with embers glowing in its
@@ -171,7 +172,8 @@ hill zone) on a 28 s loop: a tunnel dug into the hill until its hall caves in, a
 and leveled with the hoe, a timber hut in support colors losing two posts, and the **build
 yard**, where a builder in build mode puts up a cabin piece by piece, each ghost snapping into
 place before the piece goes down: a stone plinth (blue), corner posts and board walls with a
-doorway, a loft floor, a shingle roof with board gables closing its ends, and a deck reaching
+window in each side, a loft floor, a shingle roof with board gables closing its ends, a
+framed doorway in the front, and a deck reaching
 out from the +X gable whose second row is orange at the edge of support, then the red ghost
 of a third row that couldn't stand.
 Then the hoe levels a floor pad in the terrace and a second builder puts up a **shelter on the

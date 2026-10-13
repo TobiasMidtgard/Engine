@@ -320,6 +320,59 @@ fn the_grappler_hooks_the_tower_is_reeled_up_and_climbs_over() {
 }
 
 #[test]
+fn the_rider_wall_runs_along_the_moving_car_climbs_aboard_and_rides_it() {
+    let (mut app, _) = demo_app(None);
+    let mut q = app.world.query::<(Entity, &Name)>();
+    let named = |w: &World, name: &str| {
+        let mut q = w.try_query::<(Entity, &Name)>().unwrap();
+        q.iter(w).find(|(_, n)| n.as_str() == name).unwrap().0
+    };
+    let _ = &mut q;
+    let rider = named(&app.world, "Rider");
+    let car = named(&app.world, "Freight car");
+    let roof = demo::layout::FREIGHT_ROOF;
+    let (mut ran_on_car, mut aboard_from, mut rode, mut landed) = (0.0, None, 0.0, None);
+    let mut fastest: f32 = 0.0;
+    run_until(&mut app, 16.0, |w| {
+        let m = w.get::<Mover>(rider).unwrap().clone();
+        let p = w.get::<Transform>(rider).unwrap().translation;
+        let c = w.get::<Transform>(car).unwrap().translation;
+        if m.mode == LocomotionMode::WallRun && m.platform.is_some_and(|d| d.entity == car) {
+            ran_on_car += DT;
+            let v = w
+                .get::<engine_world::locomotion::LocomotionState>(rider)
+                .unwrap()
+                .velocity;
+            fastest = fastest.max(v.x);
+        }
+        // Standing on the roof, over the car.
+        if m.grounded && p.y > roof + 0.8 && (p.z - c.z).abs() < 1.5 {
+            let start = *aboard_from.get_or_insert(c.x);
+            rode = c.x - start;
+        }
+        if aboard_from.is_some() && m.grounded && p.y < roof - 1.0 {
+            landed.get_or_insert(p);
+        }
+        landed.is_some()
+    });
+    let summary = format!(
+        "wall-ran {ran_on_car:.2} s on the car (fastest {fastest:.1} m/s), rode it {rode:.1} m, \
+         landed at {landed:?}"
+    );
+    assert!(ran_on_car > 0.1, "{summary}");
+    // Faster along the car than a wall-run anywhere else: its speed plus the car's.
+    assert!(fastest > 10.5, "{summary}");
+    assert_eq!(triggered(&app, rider, "mantle"), 1, "{summary}");
+    assert!(rode > 3.0, "{summary}");
+    let landed = landed.expect(&summary);
+    let platform = demo::layout::FREIGHT_PLATFORM;
+    assert!(
+        (landed.y - (platform.center[1] + 0.5 + 0.9)).abs() < 0.1,
+        "back on the platform: {summary}"
+    );
+}
+
+#[test]
 fn the_duel_waits_while_no_camera_is_near() {
     let (mut app, d) = demo_app(None);
     let camera = app
@@ -421,6 +474,7 @@ fn the_demo_spawns_the_same_static_collider_boxes() {
         ([17.0, 1.9, 1.2], [3.0, 1.8, 0.8]),    // ledge block
         ([8.0, 0.05, 29.0], [5.0, 0.05, 11.0]), // grapple pad
         ([8.0, 4.5, 31.0], [4.0, 4.5, 3.0]),    // grapple tower
+        ([-14.0, 0.5, 25.4], [12.0, 0.5, 1.9]), // freight platform
     ];
     let key = |b: &([f64; 3], [f32; 3])| {
         b.0.map(|v| (v * 1000.0).round() as i64)
