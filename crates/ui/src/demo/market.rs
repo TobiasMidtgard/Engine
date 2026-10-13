@@ -343,7 +343,7 @@ fn ale_corner(
     // Lights: from two poles behind the tables to the lamp post nearest them.
     let a = 3.0 / 4.0 * std::f64::consts::TAU + 0.35;
     let lamp = at(a.cos() * 7.5, a.sin() * 7.5) + DVec3::Y * 3.0;
-    let poles = [at(1.2, -13.4), at(6.4, -13.9)];
+    let poles = [at(1.2, -13.4), at(5.5, -14.6)];
     let mut tops = Vec::new();
     for p in poles {
         tops.push(light_pole(world, mats, p));
