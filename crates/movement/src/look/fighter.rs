@@ -2052,6 +2052,15 @@ fn arms(kit: &mut Kit, s: &Spec) {
     kit.pair(UpperArmR, Mat::Suit, || {
         upper.tube(1.13, 1.49, 9, 24, 0.0, 0.03, 0.04)
     });
+    if matches!(s.style, Style::Duelist | Style::Elite) {
+        // Kote: a fitted cloth sleeve over the upper arm, creased around the elbow.
+        kit.pair(UpperArmR, Mat::Cloth, || {
+            hakama_leg(&upper, (1.14, 1.47), 40, 10, |phi, y| {
+                let crease = 0.5 + 0.5 * (phi * 4.0 + y * 26.0).sin();
+                0.005 + 0.0045 * crease * smooth(1.42, 1.2, y)
+            })
+        });
+    }
     kit.pair(ForearmR, Mat::Suit, || {
         fore.tube(0.88, 1.17, 9, 24, 0.0, 0.0, 0.035)
     });
@@ -2059,7 +2068,12 @@ fn arms(kit: &mut Kit, s: &Spec) {
     // Upper arm armor.
     if style != Style::Pilot {
         kit.pair(UpperArmR, Mat::PaintB, || {
-            upper.plate((-1.15, 1.15), (1.2, 1.35), 0.008, s.b(0.004), 12, 6)
+            let g = if matches!(style, Style::Duelist | Style::Elite) {
+                0.015
+            } else {
+                0.008
+            };
+            upper.plate((-1.15, 1.15), (1.2, 1.35), g, s.b(0.004), 12, 6)
         });
     } else {
         kit.pair(UpperArmR, Mat::Leather, || {
@@ -2506,8 +2520,8 @@ fn hakama_g(phi: f32, open: f32) -> f32 {
     0.011 + flare + pleat + drape
 }
 
-/// A cloth tube around a leg volume between the heights `y`, `g(phi, y)` off it, with a
-/// hem; the seam runs down the inside of the leg.
+/// A cloth tube around a limb volume between the heights `y`, `g(phi, y)` off it, with a
+/// hem; the seam runs down the inside of the limb.
 fn hakama_leg(
     v: &Vol,
     y: (f32, f32),
