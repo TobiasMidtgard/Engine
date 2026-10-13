@@ -17,11 +17,13 @@ use engine_core::prelude::*;
 use crate::skeleton::Skeleton;
 use crate::skin::{MorphDelta, MorphTarget, SkinVertex, SkinnedMesh};
 
-/// Vertex paint: linear RGBA and the detail mask (cloth, skin, veins, sheen).
+/// Vertex paint: linear RGBA, the detail mask (cloth, skin, veins, sheen) and how much fur
+/// grows (0..1 of the material's fur length).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Paint {
     pub color: Vec4,
     pub mask: Vec4,
+    pub fur: f32,
 }
 
 impl Paint {
@@ -30,6 +32,7 @@ impl Paint {
         Self {
             color: Vec3::from(rgb).extend(1.0),
             mask: Vec4::new(0.0, 1.0, 0.0, 0.15),
+            fur: 0.0,
         }
     }
     /// Bare skin over working muscle (veins show when it flexes).
@@ -37,6 +40,7 @@ impl Paint {
         Self {
             color: Vec3::from(rgb).extend(1.0),
             mask: Vec4::new(0.0, 1.0, 1.0, 0.15),
+            fur: 0.0,
         }
     }
     /// Fabric that wrinkles under compression and stretch.
@@ -44,6 +48,7 @@ impl Paint {
         Self {
             color: Vec3::from(rgb).extend(1.0),
             mask: Vec4::new(1.0, 0.0, 0.0, 0.8),
+            fur: 0.0,
         }
     }
     /// Short fur or hide: skin-like light wrap with sheen.
@@ -51,6 +56,14 @@ impl Paint {
         Self {
             color: Vec3::from(rgb).extend(1.0),
             mask: Vec4::new(0.0, 0.6, 0.5, 1.0),
+            fur: 0.0,
+        }
+    }
+    /// A furred coat: hide underneath, `amount` (0..1) of the material's fur length on top.
+    pub fn fur(rgb: [f32; 3], amount: f32) -> Self {
+        Self {
+            fur: amount,
+            ..Self::hide(rgb)
         }
     }
     /// Hard material (paint, plastic, chitin): no detail.
@@ -58,6 +71,7 @@ impl Paint {
         Self {
             color: Vec3::from(rgb).extend(1.0),
             mask: Vec4::ZERO,
+            fur: 0.0,
         }
     }
 }
@@ -376,6 +390,7 @@ impl Body {
             let mut paint_w = 0.0;
             let mut color = Vec4::ZERO;
             let mut mask = Vec4::ZERO;
+            let mut fur = 0.0;
             let mut axis = Vec3::ZERO;
             for (i, part) in self.parts.iter().enumerate() {
                 let w = (-(dists[i] - d_min).max(0.0) / falloff.max(1e-4)).exp();
@@ -390,6 +405,7 @@ impl Body {
                 paint_w += pw;
                 color += part.paint.color * pw;
                 mask += part.paint.mask * pw;
+                fur += part.paint.fur * pw;
                 let a = part.axis.unwrap_or_else(|| part.shape.axis());
                 // Axes are directions without sign: align before averaging.
                 axis += if axis.dot(a) < 0.0 { -a } else { a } * w;
@@ -418,6 +434,7 @@ impl Body {
                 pattern: p,
                 axis: axis.normalize_or(Vec3::Y),
                 mask: mask / paint_w.max(1e-6),
+                fur: fur / paint_w.max(1e-6),
             });
         }
         self.add_muscles(&mut mesh);

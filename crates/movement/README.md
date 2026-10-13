@@ -180,7 +180,10 @@ sets the bake size). Nothing in it is third-party art.
   granite, raked gravel, cloth, lacquer).
 - `look::fighter`: armored sword fighters in four `Style`s (Pilot for the runner, Duelist for
   the player, Elite, Grunt), each a set of rigid armor parts with baked materials and a
-  katana. The demo puts one on every character it spawns.
+  katana. The duelist and elite are armored samurai (laced lames, pleated hakama); the pilot
+  and grunt are soldiers in plate carriers with magazine pouches and cargo trousers, the
+  pilot in a close helmet with a narrow visor and a respirator, the grunt in a gas mask
+  under a brimmed helmet. The demo puts one on every character it spawns.
 - `look::rig`: the fighters' skeleton and procedural animation. `Animator` turns the
   movement and combat state (on the character's own clock) into a pose: run cycles, slides,
   wall-runs, jumps, ledge hangs, grapple shots and reels, dashes, windups, strikes, blocks,

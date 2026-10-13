@@ -49,6 +49,7 @@ pub fn body(paint: [f32; 3]) -> Body {
     let car = Paint {
         color: Vec3::from(paint).extend(1.0),
         mask: Vec4::new(0.0, 0.0, 0.0, 0.6),
+        fur: 0.0,
     };
     let glass = Paint::hard([0.02, 0.025, 0.03]);
     let trim = Paint::hard([0.03, 0.03, 0.032]);

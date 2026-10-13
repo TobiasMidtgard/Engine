@@ -20,7 +20,7 @@ use crate::agent::{
 };
 use crate::features::ExplosiveProp;
 use crate::learning::OpponentModels;
-use crate::perception::{NpcMemory, Perceivables};
+use crate::perception::{NpcMemory, Perceivable, Perceivables};
 use crate::skills::NpcSkills;
 use crate::squad::AttackTokens;
 use crate::world_model::{TacticalWorld, physics_backend};
@@ -411,6 +411,23 @@ pub(crate) fn resolve_attacks(
     }
 }
 
+/// Where a landed cut strikes `target` (struck along `dir`): a heavy blow comes down on the head
+/// and shoulders, a cut on the run drives into the trunk, and the rest land on the trunk or, about
+/// one in four (picked by the swing's time, so a run repeats), low on the legs. The point is on
+/// the side of the body the blade came from.
+fn strike_point(s: &Strike, target: &Perceivable, dir: Vec3) -> DVec3 {
+    let low = (s.at * 7.31).fract() < 0.27;
+    let up = if s.heavy {
+        0.9
+    } else if s.moving || !low {
+        0.6
+    } else {
+        0.33
+    };
+    let near_side = -dir * 0.18;
+    target.position + DVec3::Y * (target.height * up) as f64 + near_side.as_dvec3()
+}
+
 fn resolve_melee(
     s: &Strike,
     q: &mut Query<FighterItem>,
@@ -482,7 +499,7 @@ fn resolve_melee(
                 target: target.entity,
                 amount,
                 kind: DamageKind::Slash,
-                point: target.position + DVec3::Y * (target.height as f64 * 0.6),
+                point: strike_point(s, &target, dir),
                 impulse: dir * amount * 3.0,
                 source: Some(s.attacker),
             });
@@ -822,6 +839,7 @@ pub(crate) fn revive(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::faction::Faction;
 
     #[test]
     fn ray_segment_distance() {
@@ -839,5 +857,59 @@ mod tests {
             DVec3::new(5.0, 3.0, 0.0),
         );
         assert!((d - 2.0).abs() < 1e-4);
+    }
+
+    /// Landed cuts strike high, mid and low (not one fixed point), from the attacker's side.
+    #[test]
+    fn cuts_land_high_mid_and_low() {
+        let target = Perceivable {
+            entity: Entity::PLACEHOLDER,
+            faction: Faction(1),
+            position: DVec3::new(0.0, 2.0, 0.0),
+            forward: Vec3::Z,
+            velocity: Vec3::ZERO,
+            height: 1.8,
+            mode: LocomotionMode::Walk,
+            blocking: false,
+            attacking: false,
+            vulnerable: false,
+        };
+        let swing = |at: f64, heavy: bool, moving: bool| Strike {
+            attacker: Entity::PLACEHOLDER,
+            target: Some(target.entity),
+            heavy,
+            weapon: NpcWeapon::sword(),
+            accuracy: 1.0,
+            suppression: 0.0,
+            moving,
+            origin: DVec3::new(0.0, 2.0, 1.5),
+            forward: -Vec3::Z,
+            aim: target.position,
+            at,
+        };
+        let dir = -Vec3::Z;
+        let (mut head, mut body, mut legs) = (0, 0, 0);
+        for i in 0..200 {
+            let at = 3.0 + i as f64 * 0.37;
+            let p = strike_point(&swing(at, false, false), &target, dir) - target.position;
+            assert!(p.z > 0.1, "a cut lands on the near side: {p}");
+            match p.y {
+                y if y < 0.85 => legs += 1,
+                y if y > 1.45 => head += 1,
+                _ => body += 1,
+            }
+            let heavy = strike_point(&swing(at, true, false), &target, dir) - target.position;
+            assert!(heavy.y > 1.45, "a heavy blow comes down high: {heavy}");
+            let run = strike_point(&swing(at, false, true), &target, dir) - target.position;
+            assert!(
+                (0.85..1.45).contains(&run.y),
+                "a cut on the run takes the trunk: {run}"
+            );
+        }
+        assert_eq!(head, 0, "light cuts land below the head");
+        assert!(
+            body > 120 && legs > 25,
+            "light cuts mix trunk and legs: {body} {legs}"
+        );
     }
 }

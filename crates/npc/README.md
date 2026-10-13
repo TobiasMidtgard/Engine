@@ -57,7 +57,12 @@ the team color), falling when downed, muzzle flashes, a rank crest in the skill 
 alert light. Fighters plant their feet (a planted foot keeps its spot while the body moves over
 it; a test fails if a grounded foot slides), stride longer as they speed up, shuffle and
 side-step on guard, coil onto the rear foot in a telegraph and drive onto the front foot in the
-swing, brace into blocks, hop wide in a dodge and stumble back when staggered. Animals graze
+swing, brace into blocks, hop wide in a dodge and stumble back when staggered. Guards and
+parries meet the line of the incoming blow (overhead for a heavy cut, low across for a lunge,
+left or right), a dash pushes off the rear foot, a feinted blow checks and returns to guard,
+hits throw the head, trunk or legs by where the cut lands (heavy cuts high, cuts on the run
+mid, other cuts mid or low), and a downed fighter falls from whatever pose it was in: knees
+give, hips, back and head land, limbs settle and the weapon drops beside it. Animals graze
 head-down, flag their tails when alarmed, lie down, gallop, hop, creep and flap. With
 `NpcSettings::show_intent`, rings and lines on the ground show where each NPC is going and why
 (blue cover, orange flank, purple high ground, grey fall back, yellow search).

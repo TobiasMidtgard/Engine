@@ -18,6 +18,7 @@ use engine_core::prelude::*;
 
 use super::kit::{Builder, Frame, gray, hex};
 use super::noise::{mix, rand1, rand2, smoothstep, world_fbm};
+use super::solid::Solid;
 use super::{BuildStats, Parts, Scene, Surface, tex};
 use crate::demo::{JUMP_ANGLE, TRACK_RADII, TRACK_SURFACE, TRACK_WIDTH};
 
@@ -63,6 +64,250 @@ pub fn build(world: &mut World, center: DVec3) -> Option<BuildStats> {
     drift_pad(&mut parts);
     parts.spawn(&mut scene, "track");
     Some(scene.finish("track", started))
+}
+
+// ---------------------------------------------------------------- colliders
+
+/// The track's static collision shapes (track-local): Armco, concrete walls with their catch
+/// fences, tire walls, gravel traps, the grandstand, pit building, transporters, gantry,
+/// footbridge, marshal posts, boards and floodlight masts. The asphalt, curbs and kicker
+/// colliders come from `demo::spawn_track`.
+pub fn solids() -> Vec<Solid> {
+    let o = Oval::new();
+    let (st, l) = (o.start(), o.length);
+    let mut out = Vec::new();
+    let wall0 = st - pit::OUTER_WALL;
+    let wall1 = st + pit::OUTER_WALL;
+    // Armco: posts at the barrier line, rails up to 1.24 m on the traffic side.
+    follow(&o, wall1 - 2.0, wall0 + l + 2.0, 2.0, &mut out, |s| {
+        let d = outer_barrier(&o, s);
+        (d - 0.3, d + 0.08, 0.0, 1.24, "metal")
+    });
+    let inner0 = st + pit::EXIT_END + 3.0;
+    let inner1 = st + pit::ENTRY - 3.0 + l;
+    follow(&o, inner0, inner1, 2.0, &mut out, |_| {
+        (-11.08, -10.7, 0.0, 1.24, "metal")
+    });
+    // Concrete walls and the catch fences leaning toward the traffic over them.
+    follow(&o, wall0, wall1, 4.0, &mut out, |_| {
+        (9.7, 10.3, 0.0, 1.05, "concrete")
+    });
+    follow(&o, wall0, wall1, 4.0, &mut out, |_| {
+        (9.55, 10.05, 1.05, 4.65, "metal")
+    });
+    let (w0, w1) = (st + pit::WALL.0, st + pit::WALL.1);
+    let wd = pit::WALL_D;
+    follow(&o, w0, w1, 4.0, &mut out, |_| {
+        (wd - 0.3, wd + 0.3, 0.0, 1.05, "concrete")
+    });
+    follow(&o, w0, w1, 4.0, &mut out, |_| {
+        (wd - 0.05, wd + 0.45, 1.05, 4.65, "metal")
+    });
+    for k in 0..2 {
+        let apex = o.apex(k);
+        // Tire stacks with their belt in front of the Armco.
+        follow(
+            &o,
+            apex - TIRE_WALL_HALF,
+            apex + TIRE_WALL_HALF,
+            2.0,
+            &mut out,
+            |s| {
+                let d = outer_barrier(&o, s);
+                (d - 1.45, d - 0.1, 0.0, 0.95, "tire_wall")
+            },
+        );
+        // Gravel: its loose surface a little above the grass, where the trap is wide enough.
+        let (mut s0, mut s1) = (apex, apex);
+        while gravel_width(&o, s0 - 1.0) > 0.8 {
+            s0 -= 1.0;
+        }
+        while gravel_width(&o, s1 + 1.0) > 0.8 {
+            s1 += 1.0;
+        }
+        follow(&o, s0, s1, 2.0, &mut out, |s| {
+            let d = CURB.1 + 0.35;
+            (d, d + gravel_width(&o, s), -0.3, 0.04, "gravel_trap")
+        });
+    }
+    // Grandstand: the stepped deck as a ramp from the front parapet to the back wall, the
+    // roof slab over it.
+    let (s0, s1) = (st - pit::STAND, st + pit::STAND);
+    let deck = [
+        (stand::D_FRONT - 0.25, 0.0),
+        (stand::D_FRONT - 0.25, stand::Y0 + 0.95),
+        (stand::D_BACK + 0.25, stand::Y_TOP + 1.1),
+        (stand::D_BACK + 0.25, 0.0),
+    ];
+    prisms(&o, s0, s1, 4.0, &deck, "concrete", &mut out);
+    let (f, b) = (stand::ROOF_FRONT, stand::ROOF_BACK);
+    let roof = [(f.0, f.1 - 0.3), (f.0, f.1), (b.0, b.1), (b.0, b.1 - 0.3)];
+    prisms(&o, s0, s1, 4.0, &roof, "metal", &mut out);
+    // Pit building with its first-floor balcony.
+    let (s0, s1) = (st - pit::BUILDING, st + pit::BUILDING);
+    let building = [
+        (pit::BACK, 0.0),
+        (pit::BACK, pit::H2 + 0.45),
+        (pit::FACADE, pit::H2 + 0.45),
+        (pit::FACADE, 0.0),
+    ];
+    prisms(&o, s0, s1, 4.0, &building, "concrete", &mut out);
+    let balcony = [
+        (pit::FACADE, pit::H1),
+        (pit::FACADE, pit::H1 + 0.35),
+        (pit::FACADE + 1.8, pit::H1 + 0.35),
+        (pit::FACADE + 1.8, pit::H1),
+    ];
+    prisms(&o, s0, s1, 4.0, &balcony, "concrete", &mut out);
+    // Transporters in the paddock (cab, chassis, trailer) and the paddock's floodlights.
+    let d1 = pit::BACK - 30.0;
+    for s in paddock_spots(&o) {
+        let inward = -o.out(s);
+        let at =
+            super::buildings::Place::new(o.at(s, d1 + 4.0, 0.03), (-inward.x).atan2(-inward.z));
+        for (c, h) in [
+            (Vec3::new(0.0, 2.0, 1.2), Vec3::new(1.25, 2.0, 1.2)),
+            (Vec3::new(0.0, 0.8, 3.4), Vec3::new(1.25, 0.6, 1.1)),
+            (Vec3::new(0.0, 2.2, 11.3), Vec3::new(1.28, 1.87, 6.8)),
+        ] {
+            out.push(Solid::cuboid(at.p(c.x, c.y, c.z), h, at.r, "metal"));
+        }
+    }
+    for s in [st - pit::BUILDING - 2.0, st + pit::BUILDING + 2.0] {
+        out.push(Solid::post(o.at(s, d1 + 1.5, 0.0), 0.75, 16.0, "metal"));
+    }
+    // Start gantry: legs and truss.
+    let s = st + 1.0;
+    let rot = Quat::from_rotation_arc(Vec3::Z, o.dir(s));
+    let ((d_out, d_in), (y0, y1)) = GANTRY;
+    for d in [d_out, d_in] {
+        let base = o.at(s, d, 0.0);
+        out.push(Solid::cuboid(
+            base + Vec3::Y * (y1 + 0.2) * 0.5,
+            Vec3::new(0.55, (y1 + 0.2) * 0.5, 0.55),
+            rot,
+            "metal",
+        ));
+    }
+    out.push(Solid::cuboid(
+        o.at(s, (d_out + d_in) * 0.5, (y0 + y1) * 0.5),
+        Vec3::new((d_out - d_in) * 0.5, (y1 - y0) * 0.5 + 0.06, 0.45),
+        rot,
+        "metal",
+    ));
+    // Footbridge: legs, stair towers, deck, the trusses either side and the roof.
+    let (before, (d0, d1), (y0, y1)) = FOOTBRIDGE;
+    let s = o.jump() - before;
+    let fwd = o.dir(s);
+    let rot = Quat::from_rotation_arc(Vec3::Z, fwd);
+    for d in [d0, d1] {
+        let base = o.at(s, d, 0.0);
+        for off in [-1.2f32, 1.2] {
+            out.push(Solid::cuboid(
+                base + fwd * off + Vec3::Y * y1 * 0.5,
+                Vec3::new(0.25, y1 * 0.5, 0.25),
+                rot,
+                "metal",
+            ));
+        }
+        out.push(Solid::cuboid(
+            base + o.out(s) * d.signum() * 2.0 + Vec3::Y * y0 * 0.5,
+            Vec3::new(1.2, y0 * 0.5, 1.8),
+            rot,
+            "metal",
+        ));
+    }
+    let half = (d1 - d0) * 0.5;
+    let mid = |y: f32| o.at(s, (d0 + d1) * 0.5, y);
+    out.push(Solid::cuboid(
+        mid(y0),
+        Vec3::new(half, 0.12, 1.3),
+        rot,
+        "metal",
+    ));
+    out.push(Solid::cuboid(
+        mid(y1 + 0.15),
+        Vec3::new(half + 0.3, 0.08, 1.5),
+        rot,
+        "metal",
+    ));
+    for off in [-1.2f32, 1.2] {
+        out.push(Solid::cuboid(
+            mid((y0 + y1) * 0.5) + fwd * off,
+            Vec3::new(half, (y1 - y0) * 0.5, 0.12),
+            rot,
+            "metal",
+        ));
+    }
+    // Marshal posts (platform, cabin and roof) and the sponsor boards in the turns.
+    for s in marshal_spots(&o) {
+        let rot = Quat::from_rotation_arc(Vec3::Z, o.dir(s));
+        let c = o.at(s, outer_barrier(&o, s) + 2.8, 0.0);
+        out.push(Solid::cuboid(
+            c + Vec3::Y * 1.75,
+            Vec3::new(1.3, 1.75, 1.3),
+            rot,
+            "metal",
+        ));
+    }
+    for s in billboard_spots(&o) {
+        follow(&o, s, s + 6.5, 6.5, &mut out, |s| {
+            let d = outer_barrier(&o, s) + 1.0;
+            (d - 0.02, d + 0.13, 0.0, 2.5, "metal")
+        });
+    }
+    out
+}
+
+/// Boxes following the oval from `s0` to `s1` in pieces of about `step` meters: `span(s)`
+/// gives the lateral range (d0, d1), heights (y0, y1) and surface at `s`.
+fn follow(
+    o: &Oval,
+    s0: f32,
+    s1: f32,
+    step: f32,
+    out: &mut Vec<Solid>,
+    span: impl Fn(f32) -> (f32, f32, f32, f32, &'static str),
+) {
+    let n = ((s1 - s0) / step).ceil().max(1.0) as usize;
+    for i in 0..n {
+        let sa = s0 + (s1 - s0) * i as f32 / n as f32;
+        let sb = s0 + (s1 - s0) * (i + 1) as f32 / n as f32;
+        let (a0, a1, y0, y1, surface) = span(sa);
+        let (b0, b1, ..) = span(sb);
+        let a = o.at(sa, (a0 + a1) * 0.5, 0.0);
+        let b = o.at(sb, (b0 + b1) * 0.5, 0.0);
+        let width = (a1 - a0).max(b1 - b0);
+        // A few centimeters of overlap so pieces leave no seam to catch on.
+        let mut s = Solid::wall(a, b, width, y0, y1, surface);
+        if let engine_world::physics::ColliderShape::Cuboid { half_extents } = &mut s.shape {
+            half_extents.z += 0.03;
+        }
+        out.push(s);
+    }
+}
+
+/// Convex prisms of a cross-section `profile` (d, y, convex) swept along the oval from `s0`
+/// to `s1` in pieces of about `step` meters.
+fn prisms(
+    o: &Oval,
+    s0: f32,
+    s1: f32,
+    step: f32,
+    profile: &[(f32, f32)],
+    surface: &'static str,
+    out: &mut Vec<Solid>,
+) {
+    let n = ((s1 - s0) / step).ceil().max(1.0) as usize;
+    for i in 0..n {
+        let sa = s0 + (s1 - s0) * i as f32 / n as f32;
+        let sb = s0 + (s1 - s0) * (i + 1) as f32 / n as f32;
+        let points: Vec<Vec3> = [sa, sb]
+            .iter()
+            .flat_map(|&s| profile.iter().map(move |&(d, y)| o.at(s, d, y)))
+            .collect();
+        out.push(Solid::hull(&points, surface));
+    }
 }
 
 // ---------------------------------------------------------------- the oval
@@ -233,7 +478,31 @@ mod pit {
     pub const STAND: f32 = 52.0;
     /// Concrete wall + fence extent along the outside.
     pub const OUTER_WALL: f32 = 78.0;
+    /// Pit building: garage floor to first floor, and roof height.
+    pub const H1: f32 = 5.2;
+    pub const H2: f32 = 9.4;
 }
+
+/// The grandstand's stepped deck (rows, front edge d, tread, rise, front row height) and its
+/// roof (d, y at the front and back edges).
+mod stand {
+    pub const ROWS: usize = 16;
+    pub const D_FRONT: f32 = 13.25;
+    pub const TREAD: f32 = 0.85;
+    pub const RISE: f32 = 0.42;
+    pub const Y0: f32 = 2.2;
+    pub const D_BACK: f32 = D_FRONT + TREAD * ROWS as f32;
+    pub const Y_TOP: f32 = Y0 + RISE * (ROWS - 1) as f32;
+    pub const ROOF_FRONT: (f32, f32) = (D_FRONT - 1.0, 15.2);
+    pub const ROOF_BACK: (f32, f32) = (D_BACK + 0.6, 14.2);
+}
+
+/// Tire walls reach this far either side of each turn's apex (m along the lap).
+const TIRE_WALL_HALF: f32 = 35.0;
+/// The start gantry: legs outside (d) and inside, truss bottom and top heights.
+const GANTRY: ((f32, f32), (f32, f32)) = ((8.6, -8.4), (6.3, 7.5));
+/// The footbridge: 80 m before the kicker, legs at d0 and d1, deck and top chord heights.
+const FOOTBRIDGE: (f32, (f32, f32), (f32, f32)) = (80.0, (-12.5, 13.5), (6.0, 8.4));
 
 /// Lateral position of the outer barrier at `s` (Armco or wall face line).
 fn outer_barrier(o: &Oval, s: f32) -> f32 {
@@ -1075,8 +1344,8 @@ fn tire_walls(o: &Oval, parts: &mut Parts) {
         let apex = o.apex(k);
         let (mut s0, mut s1) = (apex, apex);
         // Tire walls only where an off is most likely: 70 m round the apex of each turn.
-        s0 -= 35.0;
-        s1 += 35.0;
+        s0 -= TIRE_WALL_HALF;
+        s1 += TIRE_WALL_HALF;
         let mut belt = Vec::new();
         let mut s = s0;
         let mut i = 0u32;
@@ -1247,10 +1516,9 @@ fn tire_mesh(full: bool) -> engine_render::Mesh {
 fn grandstand(o: &Oval, parts: &mut Parts) {
     let st = o.start();
     let (s0, s1) = (st - pit::STAND, st + pit::STAND);
-    let rows = 16usize;
-    let (d_front, tread, rise, y0) = (13.25f32, 0.85f32, 0.42f32, 2.2f32);
-    let d_back = d_front + tread * rows as f32;
-    let y_top = y0 + rise * (rows - 1) as f32;
+    let rows = stand::ROWS;
+    let (d_front, tread, rise, y0) = (stand::D_FRONT, stand::TREAD, stand::RISE, stand::Y0);
+    let (d_back, y_top) = (stand::D_BACK, stand::Y_TOP);
     let frames: Vec<Frame> = (0..=26)
         .map(|i| o.frame(s0 + (s1 - s0) * i as f32 / 26.0, 0.0, 0.0, true))
         .collect();
@@ -1350,8 +1618,7 @@ fn grandstand(o: &Oval, parts: &mut Parts) {
         }
     }
     // Roof: cantilevered sheet on columns at the back, trusses to the front edge.
-    let roof_front = (d_front - 1.0, 15.2f32);
-    let roof_back = (d_back + 0.6, 14.2f32);
+    let (roof_front, roof_back) = (stand::ROOF_FRONT, stand::ROOF_BACK);
     {
         let c = parts.get(Surface::Cladding);
         c.color(gray(0.78));
@@ -1596,8 +1863,7 @@ fn pits(o: &Oval, parts: &mut Parts) {
     let bays = 12usize;
     let bay = (s1 - s0) / bays as f32;
     let (front, back) = (pit::FACADE, pit::BACK);
-    let h1 = 5.2f32; // garage floor to first floor
-    let h2 = 9.4f32; // roof
+    let (h1, h2) = (pit::H1, pit::H2);
     let frames = |d: f32, y: f32| -> Vec<Frame> {
         (0..=24)
             .map(|i| o.frame(s0 + (s1 - s0) * i as f32 / 24.0, d, y, true))
@@ -1961,19 +2227,14 @@ fn paddock(o: &Oval, parts: &mut Parts) {
         c.sweep(&prof, &[true; 4], &frames, false);
     }
     // Parking bay lines.
-    let teams = [
-        "KESTREL", "ORBITAL", "VELOCE", "HELIX", "QUANTA", "FULCRUM", "APEX OIL",
-    ];
-    let gap = 14.0f32;
     let p = parts.get(Surface::PaintSlabs);
     p.color(white());
-    let first = st - gap * (teams.len() as f32 - 1.0) * 0.5;
-    for k in 0..=teams.len() {
-        let s = first + (k as f32 - 0.5) * gap;
+    let spots = paddock_spots(o);
+    for k in 0..=spots.len() {
+        let s = spots[0] + (k as f32 - 0.5) * PADDOCK_GAP;
         line_on(p, o, s, d0 - 2.0, d1 + 3.0, 0.12, y + 0.003);
     }
-    for (k, team) in teams.iter().enumerate() {
-        let s = first + k as f32 * gap;
+    for (k, (team, s)) in PADDOCK_TEAMS.iter().zip(spots).enumerate() {
         let idx = tex::board_index(team).unwrap_or(0);
         let color = tex::BOARDS[idx].bg[0];
         let inward = -o.out(s);
@@ -1996,6 +2257,19 @@ fn paddock(o: &Oval, parts: &mut Parts) {
         let target = o.at(toward, (d0 + d1) * 0.5, 0.0);
         super::buildings::floodlight_mast(parts, base, 16.0, target, 4);
     }
+}
+
+/// The teams parked in the paddock and the spacing of their bays (m along the lap).
+const PADDOCK_TEAMS: [&str; 7] = [
+    "KESTREL", "ORBITAL", "VELOCE", "HELIX", "QUANTA", "FULCRUM", "APEX OIL",
+];
+const PADDOCK_GAP: f32 = 14.0;
+
+/// Lap distance of each team's transporter, centered on the start line.
+fn paddock_spots(o: &Oval) -> Vec<f32> {
+    let n = PADDOCK_TEAMS.len();
+    let first = o.start() - PADDOCK_GAP * (n as f32 - 1.0) * 0.5;
+    (0..n).map(|k| first + k as f32 * PADDOCK_GAP).collect()
 }
 
 /// A painted line across the oval at `s` from `da` to `db`.
@@ -2389,7 +2663,7 @@ fn pit_back(o: &Oval, parts: &mut Parts) {
     let bays = 12usize;
     let bay = (s1 - s0) / bays as f32;
     let d = pit::BACK - 0.02;
-    let h1 = 5.2f32;
+    let h1 = pit::H1;
     // A quad on the back wall between s = sa..sb and heights y0..y1, `off` in front of it.
     let wall_quad = |b: &mut Builder, sa: f32, sb: f32, y0: f32, y1: f32, off: f32, ribs: bool| {
         let n = -o.out((sa + sb) * 0.5);
@@ -2522,8 +2796,7 @@ fn gantry(o: &Oval, parts: &mut Parts) {
     let s = o.start() + 1.0;
     let fwd = o.dir(s);
     let rot = Quat::from_rotation_arc(Vec3::Z, fwd);
-    let (d_out, d_in) = (8.6f32, -8.4f32);
-    let (y0, y1) = (6.3f32, 7.5f32);
+    let ((d_out, d_in), (y0, y1)) = GANTRY;
     let g = parts.get(Surface::Painted);
     g.color(gray(0.2));
     for d in [d_out, d_in] {
@@ -2619,16 +2892,34 @@ fn gantry(o: &Oval, parts: &mut Parts) {
 
 // ---------------------------------------------------------------- marshal posts, boards
 
-fn marshal_posts(o: &Oval, parts: &mut Parts) {
+/// Where the marshal posts stand along the lap (m), just outside the outer barrier.
+fn marshal_spots(o: &Oval) -> [f32; 5] {
     let l = o.length;
-    let spots = [
+    [
         l - 95.0,
         70.0,
         0.25 * l - 40.0,
         0.5 * l - 95.0,
         0.5 * l + 70.0,
-    ];
-    for (i, &s) in spots.iter().enumerate() {
+    ]
+}
+
+/// Lap distance of each 6.5 m sponsor board behind the outer barrier in the turns.
+fn billboard_spots(o: &Oval) -> Vec<f32> {
+    let mut spots = Vec::new();
+    for which in 0..2 {
+        let apex = o.apex(which);
+        let mut s = apex - 70.0;
+        while s < apex + 70.0 {
+            spots.push(s);
+            s += 8.5;
+        }
+    }
+    spots
+}
+
+fn marshal_posts(o: &Oval, parts: &mut Parts) {
+    for (i, &s) in marshal_spots(o).iter().enumerate() {
         let d = outer_barrier(o, s) + 2.8;
         let c = o.at(s, d, 0.0);
         let rot = Quat::from_rotation_arc(Vec3::Z, o.dir(s));
@@ -2698,28 +2989,23 @@ fn billboards(o: &Oval, parts: &mut Parts) {
         "QUANTA",
     ];
     let mut k = 0usize;
-    for which in 0..2 {
-        let apex = o.apex(which);
-        let mut s = apex - 70.0;
-        while s < apex + 70.0 {
-            let d = outer_barrier(o, s) + 1.0;
-            let idx = tex::board_index(names[k % names.len()]).unwrap_or(0);
-            let sg = parts.get(Surface::Signs);
-            board_on_track(sg, o, s, s + 6.5, d, 0.9, 2.5, idx, false);
-            let p = parts.get(Surface::Painted);
-            p.color(gray(0.3));
-            board_back(p, o, s, s + 6.5, d + 0.03, 0.9, 2.5);
-            for e in [s + 0.5, s + 6.0] {
-                let c = o.at(e, d + 0.08, 0.0);
-                p.cuboid(
-                    c + Vec3::Y * 1.25,
-                    Vec3::new(0.05, 1.25, 0.05),
-                    Quat::from_rotation_arc(Vec3::Z, o.dir(e)),
-                );
-            }
-            s += 8.5;
-            k += 1;
+    for s in billboard_spots(o) {
+        let d = outer_barrier(o, s) + 1.0;
+        let idx = tex::board_index(names[k % names.len()]).unwrap_or(0);
+        let sg = parts.get(Surface::Signs);
+        board_on_track(sg, o, s, s + 6.5, d, 0.9, 2.5, idx, false);
+        let p = parts.get(Surface::Painted);
+        p.color(gray(0.3));
+        board_back(p, o, s, s + 6.5, d + 0.03, 0.9, 2.5);
+        for e in [s + 0.5, s + 6.0] {
+            let c = o.at(e, d + 0.08, 0.0);
+            p.cuboid(
+                c + Vec3::Y * 1.25,
+                Vec3::new(0.05, 1.25, 0.05),
+                Quat::from_rotation_arc(Vec3::Z, o.dir(e)),
+            );
         }
+        k += 1;
     }
     // Boards on the outer concrete wall's traffic face and on the pit wall.
     let st = o.start();
@@ -2750,11 +3036,10 @@ fn board_back(b: &mut Builder, o: &Oval, s0: f32, s1: f32, d: f32, y0: f32, y1: 
 
 /// A truss footbridge over the south straight with a big sponsor banner.
 fn footbridge(o: &Oval, parts: &mut Parts) {
-    let s = o.jump() - 80.0;
+    let (before, (d0, d1), (y0, y1)) = FOOTBRIDGE;
+    let s = o.jump() - before;
     let fwd = o.dir(s);
     let rot = Quat::from_rotation_arc(Vec3::Z, fwd);
-    let (d0, d1) = (-12.5f32, 13.5f32);
-    let (y0, y1) = (6.0f32, 8.4f32);
     let g = parts.get(Surface::Painted);
     g.color(gray(0.85));
     for d in [d0, d1] {

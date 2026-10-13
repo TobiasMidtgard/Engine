@@ -482,6 +482,7 @@ pub fn import_gltf(
                 pattern: pos,
                 axis: Vec3::Y,
                 mask: Vec4::new(0.0, 0.0, 0.0, 0.0),
+                fur: 0.0,
             });
         }
         // glTF winding is counter-clockwise, like ours; a mirroring node would flip it, but
