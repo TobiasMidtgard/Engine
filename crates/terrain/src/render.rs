@@ -114,15 +114,20 @@ struct PlanetGpu {
     params2: [f32; 4],
     /// How far the terrain moved in the world since last frame (xyz, for motion vectors).
     motion: [f32; 4],
-    /// Regolith scattering (0..1), rayed craters in `rays`, unused, unused.
+    /// Regolith scattering (0..1), rayed craters in `rays`, young areas in `young`, unused.
     params3: [f32; 4],
     /// Rayed craters: planet-local unit direction of the center (xyz), radius on the ground
     /// (w, meters).
     rays: [[f32; 4]; MAX_RAYED],
+    /// Young ground with few craters: planet-local direction of the middle times its youth
+    /// (xyz), angular radius (w, radians).
+    young: [[f32; 4]; MAX_YOUNG],
 }
 
 /// Rayed craters per planet the shader draws.
 const MAX_RAYED: usize = 8;
+/// Young areas per planet the shader thins craters in.
+const MAX_YOUNG: usize = 12;
 
 /// Ground maps around the focus (uniform). Matches `Maps` in terrain.wgsl.
 #[repr(C)]
@@ -260,6 +265,9 @@ struct PlanetState {
     /// The shape's rayed craters, packed for the shader.
     rays: [[f32; 4]; MAX_RAYED],
     rayed: usize,
+    /// The shape's young areas, packed for the shader.
+    young: [[f32; 4]; MAX_YOUNG],
+    young_count: usize,
     /// Detail multiplier from [`TerrainSettings::patch_budget`] (1 = none).
     boost: f64,
 }
@@ -274,6 +282,16 @@ impl PlanetState {
                 rayed += 1;
             }
         }
+        let mut young = [[0.0; 4]; MAX_YOUNG];
+        let mut young_count = 0;
+        if src.map.is_sphere() {
+            let shape = &t.config.shape;
+            for (a, slot) in shape.landforms.young_areas(shape.radius_m).zip(&mut young) {
+                let c = a.center * a.youth;
+                *slot = [c.x as f32, c.y as f32, c.z as f32, a.angle as f32];
+                young_count += 1;
+            }
+        }
         Self {
             lod: Lod::new(src.map, t.config.height_range(), t.config.finest_spacing_m),
             version: t.version,
@@ -283,6 +301,8 @@ impl PlanetState {
             last_position: None,
             rays,
             rayed,
+            young,
+            young_count,
             boost: 1.0,
         }
     }
@@ -1271,8 +1291,14 @@ impl RenderFeature for TerrainFeature {
                     t.config.shape.crater_seed() as f32,
                 ],
                 motion: motion.extend(0.0).to_array(),
-                params3: [p.regolith, state.rayed as f32, 0.0, 0.0],
+                params3: [
+                    p.regolith,
+                    state.rayed as f32,
+                    state.young_count as f32,
+                    0.0,
+                ],
                 rays: state.rays,
+                young: state.young,
             });
         }
         self.built_last_frame = built_total;
@@ -1565,7 +1591,7 @@ mod tests {
     fn gpu_structs_match_shader_sizes() {
         assert_eq!(
             std::mem::size_of::<PlanetGpu>(),
-            16 * (3 + 1 + 10 + 4 + MAX_RAYED)
+            16 * (3 + 1 + 10 + 4 + MAX_RAYED + MAX_YOUNG)
         );
         assert_eq!(std::mem::size_of::<MapsGpu>(), 64);
         assert_eq!(std::mem::size_of::<TerrainVertex>(), 44);

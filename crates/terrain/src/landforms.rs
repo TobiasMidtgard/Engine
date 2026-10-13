@@ -121,6 +121,17 @@ pub struct Landforms {
     pub mottling: f64,
 }
 
+/// Ground resurfaced by lava recently enough to have gathered few craters since.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct YoungArea {
+    /// Planet-local unit direction of the middle.
+    pub center: DVec3,
+    /// Angular radius, radians.
+    pub angle: f64,
+    /// 0..1 how few craters it keeps (1 = none).
+    pub youth: f64,
+}
+
 /// What the landforms leave at a point besides height.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Marks {
@@ -135,6 +146,16 @@ fn smooth(e0: f64, e1: f64, x: f64) -> f64 {
     t * t * (3.0 - 2.0 * t)
 }
 
+/// The youth one area gives `dir`: full out to three quarters of its radius, fading to none
+/// at its edge.
+pub fn youth_of(a: &YoungArea, dir: DVec3) -> f64 {
+    let d = dir.dot(a.center);
+    if d <= a.angle.cos() {
+        return 0.0;
+    }
+    a.youth * (1.0 - smooth(0.75, 1.0, d.min(1.0).acos() / a.angle))
+}
+
 /// Two directions across the ground at `c`, for angles around it.
 fn frame(c: DVec3) -> (DVec3, DVec3) {
     let e1 = DVec3::Y.cross(c).try_normalize().unwrap_or(DVec3::X);
@@ -144,6 +165,29 @@ fn frame(c: DVec3) -> (DVec3, DVec3) {
 impl Landforms {
     pub fn is_empty(&self) -> bool {
         *self == Self::default()
+    }
+
+    /// The young ground: shield volcanoes and their aprons (almost no craters), the rises
+    /// they stand on and the lowland plains (fewer).
+    pub fn young_areas(&self, r: f64) -> impl Iterator<Item = YoungArea> + '_ {
+        let area = move |at: &Spot, reach: f64, youth: f64| YoungArea {
+            center: at.direction(),
+            angle: at.radius_m * reach / r,
+            youth,
+        };
+        self.volcanoes
+            .iter()
+            .map(move |v| area(&v.at, 1.15, 0.95))
+            .chain(self.rises.iter().map(move |(at, _)| area(at, 1.0, 0.5)))
+            .chain(self.lowlands.iter().map(move |(at, _)| area(at, 1.0, 0.6)))
+    }
+
+    /// How young the ground at `dir` is (0 old .. 1 fresh lava), which thins out its craters.
+    /// `youth_at` in terrain.wgsl computes the same from [`young_areas`](Self::young_areas).
+    pub fn youth(&self, dir: DVec3, r: f64) -> f64 {
+        self.young_areas(r)
+            .map(|a| youth_of(&a, dir))
+            .fold(0.0, f64::max)
     }
 
     /// How far below and above the procedural shape the landforms can reach, meters
@@ -469,6 +513,23 @@ mod tests {
             "{above_scarp} {below_scarp}"
         );
         assert!(height(10.0 + 1.4 * deg, 40.0).abs() < 1.0);
+    }
+
+    #[test]
+    fn volcanoes_are_young_ground() {
+        let forms = Landforms {
+            volcanoes: vec![ShieldVolcano {
+                at: Spot::new(0.0, 0.0, 100_000.0),
+                height_m: 5_000.0,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let deg = 100_000.0 / R * 180.0 / std::f64::consts::PI;
+        assert!((forms.youth(dir_from_lat_lon(0.0, 0.0), R) - 0.95).abs() < 1e-9);
+        assert!(forms.youth(dir_from_lat_lon(0.0, 0.7 * deg), R) > 0.9);
+        assert_eq!(forms.youth(dir_from_lat_lon(0.0, 1.2 * deg), R), 0.0);
+        assert_eq!(Landforms::default().youth(DVec3::Y, R), 0.0);
     }
 
     #[test]

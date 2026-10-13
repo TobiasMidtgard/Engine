@@ -48,8 +48,12 @@ everything else (streaming, LOD, colliders, ground queries, prints) follows the 
   Argyre and Isidis basins, both polar caps on their layered domes with spiral troughs and
   Chasma Boreale, the dark regions seen from Earth (Syrtis Major, Mare Acidalium, ...) with
   wind-streaked edges, and a dusty mottling between them. The seed varies only the small
-  things. Any planet can carry its own `Landforms`. Ice on barren worlds takes on the
-  planet's dust where it is thin. Climate temperatures run from −130 to +60 °C.
+  things. Any planet can carry its own `Landforms`. Young lava keeps few craters: the shape
+  and the shader thin them out on the volcanoes (to a tenth), the rises and the lowland
+  plains (`Landforms::youth`). Ice on barren worlds takes on the planet's dust where it is
+  thin. Climate temperatures run from −130 to +60 °C. On airless worlds (no atmosphere to
+  hide the sun below the horizon) the ground past the terminator stays dark however its
+  slopes face, except peaks standing far above the land around them.
 - **Flat pads and a view worth having.** `FlatPad` blends the planet into level ground for a
   level, town or spaceport. `PlanetTerrain::home_transform(pad)` places the planet so the pad
   sits at the world origin with +Y up (north toward −Z; `heading_deg` 180 turns north to +Z,
@@ -214,5 +218,3 @@ from `Ground` when they apply), so the lab works on uneven ground too.
 - Mars has a black sky: the renderer's atmosphere scatters light with Earth's colors only, so
   the test views turn it off there. A thin, dusty, butterscotch sky needs per-planet
   scattering in the renderer.
-- Craters on Mars are spread evenly, so young surfaces such as Olympus Mons carry as many as
-  the old southern highlands.

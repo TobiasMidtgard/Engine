@@ -1039,6 +1039,9 @@ impl PlanetShape {
                         let center =
                             DVec3::new(cx as f64 + rnd(2), cy as f64 + rnd(3), cz as f64 + rnd(4))
                                 * cell;
+                        if self.young_crater_gone(center, rnd(1)) {
+                            continue;
+                        }
                         let rc = radius * (0.55 + 0.45 * rnd(5));
                         // Centers off the surface make smaller craters (see `craters`).
                         let off = center.length() - self.radius_m;
@@ -1054,6 +1057,21 @@ impl PlanetShape {
             radius *= 0.5;
         }
         all
+    }
+
+    /// Whether young ground ([`Landforms::youth`]) at a crater's center has buried the crater
+    /// drawn with `pick` (its density draw): young lava keeps a tenth of the craters.
+    fn young_crater_gone(&self, center: DVec3, pick: f64) -> bool {
+        if self.landforms.volcanoes.is_empty()
+            && self.landforms.rises.is_empty()
+            && self.landforms.lowlands.is_empty()
+        {
+            return false;
+        }
+        let youth = self
+            .landforms
+            .youth(center.normalize_or_zero(), self.radius_m);
+        pick > self.crater_density * (1.0 - 0.9 * youth)
     }
 
     /// Sum of crater profiles at `p` (planet-local, meters), from the largest size class down
@@ -1088,7 +1106,7 @@ impl PlanetShape {
                                 * cell;
                         let rc = radius * (0.55 + 0.45 * rnd(5));
                         let x = (p - center).length() / rc;
-                        if x >= 1.5 {
+                        if x >= 1.5 || self.young_crater_gone(center, rnd(1)) {
                             continue;
                         }
                         // Bigger craters are shallower relative to size, with flat floors.
