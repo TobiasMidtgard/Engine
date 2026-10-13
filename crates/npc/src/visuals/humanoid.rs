@@ -665,14 +665,14 @@ enum Line {
     /// From above: a heavy cut.
     High,
     /// From the left: a right-handed cut from in front.
-    #[default]
     Left,
     /// From the right: a cut from a fighter off to that side.
     Right,
     /// Straight in: a thrust or a lunge.
     Thrust,
-    /// Shot or thrown.
-    Missile,
+    /// Squared up to it: a shot, or a blow whose line can't be told (the plain guard).
+    #[default]
+    Square,
 }
 
 impl Line {
@@ -682,14 +682,15 @@ impl Line {
         Line::Left,
         Line::Right,
         Line::Thrust,
-        Line::Missile,
+        Line::Square,
     ];
 
     /// The line of an attack (`how` it was telegraphed, if seen; `ranged` as the defender
     /// noticed it) from an attacker in the state `foe`, at a defender at `at` facing `facing`:
-    /// a shot is a missile, a dash attack a thrust, a heavy blow a cut from above; a light cut
-    /// comes in from the side the attacker's sword arm is on (the left, from in front), or
-    /// from the right when it stands off to that side.
+    /// a shot is met squarely, a dash attack is a thrust, a heavy blow a cut from above; a
+    /// light cut comes in from the side the attacker's sword arm is on (the left, from in
+    /// front), or from the right when it stands off to that side. Without an attacker to look
+    /// at, the guard is raised squarely.
     fn of(
         how: Option<AttackKind>,
         ranged: bool,
@@ -701,13 +702,13 @@ impl Line {
             || matches!(how, Some(AttackKind::Ranged | AttackKind::Spell))
             || foe.is_some_and(|f| f.ranged)
         {
-            return Line::Missile;
+            return Line::Square;
         }
         if how == Some(AttackKind::Dash) || foe.is_some_and(|f| f.dashing) {
             return Line::Thrust;
         }
         let Some(foe) = foe else {
-            return Line::Left;
+            return Line::Square;
         };
         if foe.heavy {
             return Line::High;
@@ -728,7 +729,7 @@ impl Line {
             Line::Left => (v3(0.06, 0.0, 0.05) * r, rz(-0.3 * r)),
             Line::Right => (v3(-0.06, 0.0, 0.05) * r, rz(0.3 * r)),
             Line::Thrust => (v3(0.0, 0.0, 0.09) * r, rx(0.1 * r)),
-            Line::Missile => (v3(0.0, 0.03, 0.07) * r, rx(0.25 * r)),
+            Line::Square => (v3(0.0, 0.03, 0.07) * r, rx(0.25 * r)),
         }
     }
 }
@@ -1713,7 +1714,7 @@ fn block_body(k: f32, hit: f32, parry: bool, line: Line) -> Body {
             lean: 0.06 * k,
             ..Default::default()
         },
-        Line::Missile => Body::default(),
+        Line::Square => Body::default(),
     };
     braced.plus(to_line)
 }
@@ -1820,7 +1821,7 @@ fn stand(i: &Input) -> Skeleton {
             hit,
             parry,
             line,
-        } => block_body(k, hit, parry, if ranged { Line::Missile } else { line }),
+        } => block_body(k, hit, parry, if ranged { Line::Square } else { line }),
         Act::Stagger { k, e } => {
             let s = snap(e);
             Body {
@@ -2022,9 +2023,9 @@ fn stand(i: &Input) -> Skeleton {
     let mut head_roll = -chest_roll * 0.5;
     match i.act {
         // Flinching from the blow, chin down behind the guard (not off a shouldered stock),
-        // ducking under one from above, looking at one from the side.
+        // looking up from under one from above, looking at one from the side.
         Act::Block { k, hit, line, .. } => {
-            let duck = if line == Line::High { 0.05 } else { 0.0 };
+            let duck = if line == Line::High { -0.12 } else { 0.0 };
             head_pitch += (0.1 + duck + 0.12 * recoil(hit)) * k * (1.0 - aiming);
             head_yaw += match line {
                 Line::Left => 0.18,
@@ -2730,8 +2731,8 @@ fn longsword(act: Act, chest: Bone, swing: f32, jiggle: Vec2) -> Arms {
     };
     let lines = [
         (
-            blade(v3(-0.02, 0.67, -0.29), v3(-0.97, 0.2, -0.12), Vec3::Y),
-            blade(v3(-0.04, 0.62, -0.33), v3(-0.82, -0.3, -0.48), Vec3::Y),
+            blade(v3(-0.08, 0.69, -0.2), v3(-0.97, 0.2, -0.12), Vec3::Y),
+            blade(v3(-0.06, 0.64, -0.26), v3(-0.82, -0.3, -0.48), Vec3::Y),
         ),
         (
             blade(v3(-0.1, 0.36, -0.33), v3(-0.25, 0.92, -0.3), Vec3::NEG_X),
@@ -3053,7 +3054,7 @@ fn fists(act: Act, chest: Bone, ready: bool) -> Arms {
                 Line::Left => [v3(-0.2, 0.52, -0.2), v3(0.06, 0.42, -0.28)],
                 Line::Right => [v3(-0.06, 0.42, -0.28), v3(0.2, 0.52, -0.2)],
                 Line::Thrust => [v3(-0.06, 0.2, -0.33), v3(0.06, 0.22, -0.31)],
-                Line::Missile => [v3(-0.07, 0.48, -0.26), v3(0.07, 0.48, -0.26)],
+                Line::Square => [v3(-0.07, 0.48, -0.26), v3(0.07, 0.48, -0.26)],
             };
             [guard[0].lerp(up[0], k), guard[1].lerp(up[1], k)]
         }
@@ -3849,7 +3850,9 @@ mod tests {
         let dash = Some(AttackKind::Dash);
         assert_eq!(line(dash, foe(0.0, -1.7, false), ahead), Line::Thrust);
         let shot = Some(AttackKind::Ranged);
-        assert_eq!(line(shot, foe(0.0, -9.0, false), ahead), Line::Missile);
+        assert_eq!(line(shot, foe(0.0, -9.0, false), ahead), Line::Square);
+        let unseen = Line::of(Some(AttackKind::Melee), false, None, DVec3::ZERO, ahead);
+        assert_eq!(unseen, Line::Square);
 
         // The guard goes there (in the chest's frame: x right, y up, −z ahead).
         let guard = |kind, line| {
