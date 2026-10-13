@@ -32,10 +32,16 @@ everything else (streaming, LOD, colliders, ground queries, prints) follows the 
   replaces the ground around the home spot with your own height function `f(x, z) → y` in
   world coordinates (a level, the showcase valley) and blends it back into the planet at the
   edge. The terrain bends it onto the sphere so the ground passes through `(x, f(x, z), z)`
-  to the centimeter, and rendering, the `Ground` query, prints and colliders all use it.
+  to the centimeter (heights are world y as given: subtract the curvature drop
+  `(x² + z²) / 2R` yourself only if the level should follow the sphere), and rendering, the
+  `Ground` query, prints and colliders all use it.
   `with_overlay_paint(|x, z| …)` paints it: an `OverlayPaint` layer (grass, leaves, dirt,
   mud, sand, gravel, rock, concrete, snow, ash) for roads, plazas and woods, and a tint for
   fields. Footsteps, rain and the `Ground` query follow the painted layer; edits paint over it.
+  When the level already has its own material map, `with_ground_surface(Arc<dyn GroundQuery>)`
+  lets that query name the material while the terrain answers height and normal, edits
+  included (the sea and edit-painted layers stay the terrain's; never pass the world's
+  `Ground`, which is the terrain itself).
 - **Ground cover from afar.** Climate colors (lush, dry, desert, snow by temperature and
   altitude), woods as dark canopy, meadows and fields in patches a few hundred meters
   across, worn bare patches, beaches. Mountainsides are a patchwork: grass and woods hold
