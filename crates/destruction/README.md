@@ -24,7 +24,10 @@ fracture and debris.
   meter up and more per meter sideways, by material (wood carries far less sideways than
   stone). Break a post and whatever depended on it falls after a short creak. `ShowSupport`
   paints pieces blue (grounded), green, yellow, orange and red (about to fall), like Valheim's
-  build mode.
+  build mode. With a physics module, standing pieces are solid: each gets a static collider
+  (its box a skin smaller, a gable's triangle) with its material's surface, so you walk on
+  floors and decks and walls stop you, debris lands on what still stands, and a car that hits
+  a wall breaks it. A piece that falls becomes a debris body.
 - **Build mode** (`build`, Valheim's hammer): a `Builder` (the player's camera, a script)
   picks one of ten pieces (wood floor, wall, pole, beam, 26° and 45° shingle roofs, a 26°
   board gable to close a roof's end; stone floor, wall and pillar) and aims. A translucent ghost of the piece sits on what the aim hits
@@ -76,7 +79,8 @@ through soft material and lose energy), `ContactEvent` (hard impacts, debris lan
 
 Writes: `WorldImpulse` (falling structures, strength only), `NoiseEvent` (breaks, collapses),
 `SmokeEmission` (dust and thermite smoke for the smoke module), `GroundContact` (debris
-landing on a surface, for footstep-style impact sounds), physics-contract bodies for debris.
+landing on a surface, for footstep-style impact sounds), physics-contract bodies for debris
+and static colliders for standing building pieces.
 
 ## Using it
 

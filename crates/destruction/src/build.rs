@@ -26,6 +26,7 @@ use engine_core::math::{DVec3, Quat, Vec3};
 use engine_core::prelude::*;
 use engine_input::{ActionState, Binding, GamepadButton, InputMap, KeyCode, MouseButton};
 use engine_render::{MaterialRef, MeshRenderer};
+use engine_world::physics::ColliderShape;
 use engine_world::{Combustible, Ground, NoiseEvent};
 
 use crate::assets::DestructionAssets;
@@ -203,6 +204,20 @@ impl BuildKind {
             BuildKind::WoodGable => 0.25,
             BuildKind::WoodRoof | BuildKind::WoodRoof45 => 0.3,
             _ => 1.0,
+        }
+    }
+
+    /// The solid part of a piece with box half size `half` (its own axes): the box, or the
+    /// triangle a gable fills (a box would stand up through the roof over its low end).
+    pub fn solid(self, half: Vec3) -> ColliderShape {
+        match self {
+            BuildKind::WoodGable => ColliderShape::ConvexHull {
+                points: [(-half.x, -half.y), (half.x, -half.y), (half.x, half.y)]
+                    .into_iter()
+                    .flat_map(|(x, y)| [Vec3::new(x, y, -half.z), Vec3::new(x, y, half.z)])
+                    .collect(),
+            },
+            _ => ColliderShape::Cuboid { half_extents: half },
         }
     }
 }

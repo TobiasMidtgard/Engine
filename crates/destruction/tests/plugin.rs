@@ -8,9 +8,10 @@ use engine_core::registry::call_api;
 use engine_core::time::TimeSource;
 use engine_destruction::*;
 use engine_render::{Mesh, StandardMaterial};
+use engine_world::physics::{Collider, ColliderShape, PhysicsBackend, RigidBody};
 use engine_world::{
-    DamageEvent, DamageKind, EditOp, EditShape, ProjectileTrace, TerrainEdit, WorldPlugin,
-    WorldShift,
+    DamageEvent, DamageKind, EditOp, EditShape, ProjectileTrace, SurfaceMaterials, TerrainEdit,
+    WorldPlugin, WorldShift,
 };
 use serde_json::json;
 
@@ -524,6 +525,113 @@ fn pieces_stand_on_voxel_rock_until_it_is_dug_out_from_under_them() {
         y > 0.45 && y < 2.0 && body.velocity.length() < 0.5,
         "the slab lies in the hole at y {y:.2}: {body:?}"
     );
+}
+
+#[test]
+fn standing_pieces_are_solid_with_a_physics_module() {
+    // With no physics module, pieces get no colliders (nothing would read them).
+    let mut bare = app();
+    let floor = bare
+        .world
+        .spawn((
+            Transform::default(),
+            StructuralPiece::new(DestructibleMaterial::Wood, Vec3::new(2.0, 0.1, 2.0)),
+        ))
+        .id();
+    bare.update();
+    assert!(bare.world.get::<Collider>(floor).is_none());
+
+    let mut app = app();
+    app.insert_resource(PhysicsBackend {
+        name: "test".into(),
+    });
+    let b = app
+        .world
+        .spawn((Transform::default(), Builder::default()))
+        .id();
+    for (kind, at) in [
+        (BuildKind::WoodFloor, [0.0, 0.0, 0.0]),
+        (BuildKind::WoodGable, [5.0, 0.0, 0.0]),
+    ] {
+        {
+            let mut builder = app.world.get_mut::<Builder>(b).unwrap();
+            builder.kind = kind;
+            let to = DVec3::from_array(at);
+            builder.aim_at(to + DVec3::new(0.3, 3.0, 0.6), to);
+        }
+        app.update();
+        app.world.write_message(BuildRequest {
+            builder: b,
+            action: BuildAction::Place,
+        });
+        app.update();
+    }
+    // A beam hanging in the air: it falls as soon as the solver sees it.
+    let beam = app
+        .world
+        .spawn((
+            Transform::from_xyz(0.0, 6.0, 8.0),
+            StructuralPiece::new(DestructibleMaterial::Wood, Vec3::new(2.0, 0.2, 0.2)),
+        ))
+        .id();
+    app.update();
+    let wood = app.world.resource::<SurfaceMaterials>().id_or_default(
+        &app.world
+            .resource::<DestructionMaterials>()
+            .get(DestructibleMaterial::Wood)
+            .surface,
+    );
+    let built: Vec<(Entity, BuildKind)> = app
+        .world
+        .query::<(Entity, &BuiltPiece)>()
+        .iter(&app.world)
+        .map(|(e, p)| (e, p.kind))
+        .collect();
+    assert_eq!(built.len(), 2, "{built:?}");
+    for (e, kind) in built {
+        let c = app
+            .world
+            .get::<Collider>(e)
+            .expect("a standing piece is solid");
+        assert_eq!(c.surface, wood, "footsteps on it sound like wood");
+        let h = app.world.get::<StructuralPiece>(e).unwrap().half_extents;
+        match (kind, &c.shape) {
+            // Its box, a skin smaller so snapped neighbors don't overlap.
+            (BuildKind::WoodFloor, ColliderShape::Cuboid { half_extents }) => {
+                let skin = h - *half_extents;
+                assert!(
+                    skin.min_element() > 0.005 && skin.max_element() < 0.02,
+                    "{h} vs {half_extents}"
+                );
+            }
+            // The triangle under the roof, not the box (which would stick up through it).
+            (BuildKind::WoodGable, ColliderShape::ConvexHull { points }) => {
+                assert_eq!(points.len(), 6);
+                let low_end_top = points
+                    .iter()
+                    .filter(|p| p.x < 0.0)
+                    .map(|p| p.y)
+                    .fold(f32::MIN, f32::max);
+                assert!(low_end_top < -h.y * 0.9, "{points:?}");
+            }
+            other => panic!("unexpected shape {other:?}"),
+        }
+    }
+    // Once a piece gives way it is a debris body with its own hull, not a static box.
+    assert!(matches!(
+        app.world.get::<Collider>(beam).map(|c| &c.shape),
+        Some(ColliderShape::Cuboid { .. })
+    ));
+    run_secs(&mut app, 2.0);
+    assert!(
+        app.world.get::<StructuralPiece>(beam).is_none(),
+        "the beam fell"
+    );
+    assert!(app.world.get::<RigidBody>(beam).is_some());
+    assert!(matches!(
+        app.world.get::<Collider>(beam).map(|c| &c.shape),
+        Some(ColliderShape::ConvexHull { .. })
+    ));
 }
 
 #[test]
