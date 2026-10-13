@@ -200,6 +200,28 @@ fn main() {
     let view = by_name("forest_clearing");
     let fwd = (view.target - view.eye).with_y(0.0).normalize();
     let mut q = app.world.query::<(Entity, &Plant, &Transform)>();
+    // Bushes and trees standing between the camera and a tree would hide its fall.
+    let screens: Vec<(DVec3, f64)> = q
+        .iter(&app.world)
+        .filter(|(_, p, _)| {
+            let sp = library.get(p.species);
+            p.stage.is_alive() && p.size * sp.max_height_m > 1.2
+        })
+        .map(|(_, p, t)| {
+            let sp = library.get(p.species);
+            (t.translation, p.crown_radius(sp) as f64 + 0.3)
+        })
+        .collect();
+    let in_view = |base: DVec3| {
+        let to = (base - view.eye).with_y(0.0);
+        let len = to.length();
+        let dir = to / len;
+        !screens.iter().any(|&(p, r)| {
+            let rel = (p - view.eye).with_y(0.0);
+            let along = rel.dot(dir);
+            along > 1.0 && along < len - 4.0 && (rel - dir * along).length() < r
+        })
+    };
     let tree = q
         .iter(&app.world)
         .filter(|(_, p, t)| {
@@ -211,8 +233,10 @@ fn main() {
                 && to.normalize().dot(fwd) > 0.85
         })
         .max_by(|a, b| {
-            let score =
-                |p: &Plant, t: &Transform| p.size - 0.02 * t.translation.distance(view.eye) as f32;
+            let score = |p: &Plant, t: &Transform| {
+                let clear = if in_view(t.translation) { 10.0 } else { 0.0 };
+                clear + p.size - 0.02 * t.translation.distance(view.eye) as f32
+            };
             score(a.1, a.2).total_cmp(&score(b.1, b.2))
         })
         .map(|(e, _, t)| (e, t.translation));
