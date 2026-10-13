@@ -71,7 +71,11 @@ first, then the head), glance at flankers and noises, blink, set the jaw for a h
 shout as it lands, grimace when hit and breathe hard when tired; badly hurt, they limp on the
 struck leg or hunch over a body wound and press a hand to it at ease. At ease the weapon rests
 on the shoulder or hangs low and comes to guard when a foe is spotted, and a revived fighter
-rolls over, kneels, takes up its weapon and stands into its guard. Animals plant their feet too (a
+rolls over, kneels, takes up its weapon and stands into its guard where it lay. A fighter
+reviving a mate goes down on both knees beside it. It sets its sword or carbine down on the
+ground; an archer or a shield bearer holds the bow or shield aside. It puts its hands on the
+chest and presses, and looks up at the enemy now and then. Then it takes its weapon up and
+stands. Animals plant their feet too (a
 test fails if a hoof or paw on the ground slides) in each species' footfalls: deer walk in
 lateral sequence, trot and gallop (rotary) and bound away when they bolt from a stand, wolves
 walk, trot, lope and gallop, rabbits hop and half-bound with the hind feet landing ahead of the
@@ -90,7 +94,7 @@ downstroke, folded upstroke), bound on folded wings between bursts, glide, bank 
 push off with their legs to take off and flare to land, and tumble out of the air when
 killed. With
 `NpcSettings::show_intent`, rings and lines on the ground show where each NPC is going and why
-(blue cover, orange flank, purple high ground, grey fall back, yellow search).
+(blue cover, orange flank, purple high ground, grey fall back, yellow search, teal revive).
 
 All art is generated in code (`src/art`), since no third-party art may go in the repository:
 
@@ -145,7 +149,8 @@ and a wall-run wall. Two five-fighter squads of mixed skill fight across low wal
 explosive barrels and a raised platform; a master and a veteran duel in a ring; and a sparring
 lane on the east side puts five sword-and-shield fighters, rookie to master, in front of posts
 that swing at them, so you can watch skill decide who gets hit, who blocks and who parries.
-Downed fighters get up after six seconds and barrels come back, so the fight keeps going. A
+A squad mate often runs to a downed fighter, kneels and gets it up where it lies. One that
+nobody reaches gets up after six seconds, and barrels come back, so the fight keeps going. A
 camera at (0, 16, −31) from the origin looking at (0, 0, 4) frames the fight. `demo::spawn_wildlife(commands, center, radius)` fills a meadow with a
 deer herd, rabbits, two bird flocks and a wolf pack.
 
@@ -200,6 +205,32 @@ punish window), cooldown, spread and shield.
    game code) and it wall-runs and slides like the player; NPCs without them keep the
    built-in mover.
 
+## Squad revives
+
+A squad mate can revive a downed fighter where it lies. Each mate weighs the run: how far it
+is, how much the spot is in the enemy's view, how much fire the mate is under, its own health,
+and whether the squad is winning. Sight lines go through smoke, so smoke over the spot helps.
+An enemy that looks elsewhere, or that a mate is shooting at, counts for less. Only the best
+placed mate of the squad goes. Ranged mates with some teamwork cover it with suppressive fire.
+
+Skill changes the choice. A rookie notices late, then runs straight in. A skilled fighter waits
+while the spot is watched or it is under fire, and goes once things calm down. The reviver runs
+over, kneels beside the chest and works on it. After `ally_revive_secs` the ally gets up where
+it lies with `ally_revive_health` of its health. Teamwork 1 makes it a fifth quicker, teamwork
+0 a fifth slower. A reviver that is hit, staggered or stuck, or that finds it too hot, lets go.
+It waits a moment before it tries again.
+
+| Setting | Default | Does |
+| --- | --- | --- |
+| `ally_revive_secs` | 2 s | How long a revive takes. 0 turns squad revives off. |
+| `ally_revive_health` | 0.4 | The share of health a revived fighter gets up with. |
+| `ally_revive_range` | 20 m | How far a mate goes to revive. |
+| `revive_secs` | 0 (6 s in the demo) | The showcase timer. 0 turns it off. |
+
+The showcase timer is the fallback. It waits while a mate is on the way or kneeling. When it
+runs out, a fighter with a squad mate standing within `ally_revive_range` gets up where it lies
+with `ally_revive_health`. Only a fighter with nobody near is sent back to its home, whole.
+
 When the world is re-anchored (a floating-origin move or a new reference frame, `WorldShift`),
 everything NPCs and animals keep in world space moves with it in `WorldShiftSet::Apply`: homes,
 orders, destinations and candidate spots, paths, remembered positions, velocities and
@@ -234,8 +265,17 @@ The crate depends only on core crates (`engine_core`, `engine_world`, `engine_re
   through a herd, a wolf pack stalks, charges, kills and feeds, birds take off together and
   land again.
 - `tests/demo.rs`: the arena fight keeps going for a minute (shots, attacks, blocks, cover,
-  downed and revived) inside the arena; the meadow lives for two minutes (grazing, wandering,
+  downed and revived, squad mates reviving at least twice) inside the arena; the meadow lives for two minutes (grazing, wandering,
   hunting, fleeing) without animals leaving.
+- `tests/revive.rs`: a squad mate kneels beside a downed ally and gets it up where it lies.
+  Skilled fighters don't go in the enemy's view or under fire; a rookie does. A reviver that is
+  hit lets go and tries again later. Nobody revives when it is off. The showcase timer waits
+  for a revive, gets a fighter with a mate near up in place, and sends home only one that is
+  alone.
+- `tests/art_revive.rs`: a captioned strip, before and after. Before, a lone fighter lies six
+  seconds and is sent home. After, a squad mate runs in, kneels, sets its carbine down, puts
+  its hands on the chest and looks up at the enemy, and the ally gets up where it lay. It
+  writes `fighters-revive-before-after.png`.
 - `tests/training.rs`: the same post swings at a rookie, soldier, veteran, elite and master;
   the share of swings defended climbs with skill (0 % to about 100 %) and the master parries.
 - `tests/smoke.rs`: thick smoke hides a player until it clears, thin smoke slows spotting,
