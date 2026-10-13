@@ -190,15 +190,20 @@ impl FireFeature {
                     if h < 0.12 {
                         continue;
                     }
-                    // The flipbook's flame fills about 70% of the sprite's width at its base.
-                    let w = (size as f32 * 0.8 + h * 0.3).max(0.3);
+                    // The flipbook's flame fills about 70% of the sprite's width at its base. A
+                    // short flame stays about as wide as it is tall: stretched across its whole
+                    // cell it would lie on the burnt ground as a flat red smear.
+                    let w = (size as f32 * 0.8 + h * 0.3)
+                        .min(h * 0.6 + size as f32 * 0.1 * block as f32)
+                        .max(0.08);
                     let rel = (p - origin).as_vec3();
                     let lean = lean_of(p, h);
                     self.scratch.push(FlameInstance {
                         pos_height: [rel.x, rel.y, rel.z, h.max(0.2)],
                         // Ground flames overlap a lot along a front: each one is dimmer.
                         shape: [w, burn.min(1.0) * 0.55, r1 * 97.0 + r2 * 13.0, 0.0],
-                        extra: [lean[0], lean[1], burn, 0.0],
+                        // The root fades in over the bottom tenth, down among the blades.
+                        extra: [lean[0], lean[1], burn, 0.1],
                     });
                 }
             }
@@ -237,6 +242,9 @@ impl FireFeature {
                     base + DVec3::new((a.cos() * rad) as f64, y0 as f64, (a.sin() * rad) as f64);
                 let rel = (p - origin).as_vec3();
                 let lean = lean_of(p, h);
+                // The flames crowding round rise out of the fire, not off a flat line in the
+                // air: their roots fade in over a third of their height.
+                let root = if i == 0 { 0.15 } else { 0.35 };
                 self.scratch.push(FlameInstance {
                     pos_height: [rel.x, rel.y, rel.z, h],
                     shape: [
@@ -248,7 +256,7 @@ impl FireFeature {
                         r(5) * 113.0,
                         0.0,
                     ],
-                    extra: [lean[0], lean[1], b.intensity, 0.0],
+                    extra: [lean[0], lean[1], b.intensity, root],
                 });
             }
         }

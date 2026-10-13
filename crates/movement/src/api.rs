@@ -241,7 +241,8 @@ pub(crate) fn register(app: &mut App) {
     app.register_api(
         "movement.grappler",
         "Restart the movement demo's grappler from the start of its loop: it sprints at the \
-         grapple tower, jumps, hooks its top edge, is reeled up the wall and climbs over.",
+         grapple tower, jumps, hooks its top edge, is reeled up the wall, climbs over, then runs \
+         and jumps into the zip line on the roof and rides it down to the landing gate.",
         "{}",
         |world, _args| {
             let n = crate::demo::restart_grapplers(world);
