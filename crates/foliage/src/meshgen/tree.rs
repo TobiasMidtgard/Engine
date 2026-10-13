@@ -448,48 +448,64 @@ pub fn woody(sp: &PlantSpecies, seed: u64, sapling: bool) -> PlantMeshes {
 impl PlantMeshes {
     /// Give the swaying parts (wood, foliage and their LODs) the same vertical bounds, so they
     /// sway in the wind exactly together: the renderer's sway uses the height within the mesh
-    /// bounds. Also records the plant's height.
+    /// bounds. Also records the plant's height. The distant level shares bounds of its own
+    /// (its big cards reach a little past the crown), so the near ones and the plant's height
+    /// stay as they were.
     pub fn share_bounds(&mut self) {
-        let parts = [
-            &self.wood,
-            &self.foliage,
-            &self.wood_lod,
-            &self.foliage_lod,
-            &self.wood_distant,
-            &self.foliage_distant,
-        ];
-        let (mut lo, mut hi) = (0.0f32, 0.0f32);
-        for m in parts.into_iter().flatten() {
-            let b = m.aabb();
-            lo = lo.min(b.min.y);
-            hi = hi.max(b.max.y);
+        fn bounds<'a>(parts: impl IntoIterator<Item = &'a engine_render::Mesh>) -> (f32, f32) {
+            parts.into_iter().fold((0.0f32, 0.0f32), |(lo, hi), m| {
+                let b = m.aabb();
+                (lo.min(b.min.y), hi.max(b.max.y))
+            })
         }
-        // Thinned crowns lie within the full one, and must sway with it.
-        let thin = self
-            .foliage_thin
-            .iter_mut()
-            .chain(&mut self.foliage_lod_thin)
-            .chain(&mut self.foliage_distant_thin);
-        for m in [
-            &mut self.wood,
-            &mut self.foliage,
-            &mut self.wood_lod,
-            &mut self.foliage_lod,
-            &mut self.wood_distant,
-            &mut self.foliage_distant,
-        ]
-        .into_iter()
-        .flatten()
-        .chain(thin)
-        {
-            for y in [lo, hi] {
-                m.vertices.push(engine_render::Vertex::new(
-                    Vec3::new(0.0, y, 0.0),
-                    Vec3::Y,
-                    Vec2::ZERO,
-                ));
+        fn widen<'a>(
+            parts: impl IntoIterator<Item = &'a mut engine_render::Mesh>,
+            lo: f32,
+            hi: f32,
+        ) {
+            for m in parts {
+                for y in [lo, hi] {
+                    m.vertices.push(engine_render::Vertex::new(
+                        Vec3::new(0.0, y, 0.0),
+                        Vec3::Y,
+                        Vec2::ZERO,
+                    ));
+                }
             }
         }
+        let (lo, hi) = bounds(
+            [&self.wood, &self.foliage, &self.wood_lod, &self.foliage_lod]
+                .into_iter()
+                .flatten(),
+        );
+        // Thinned crowns lie within the full one, and must sway with it.
+        widen(
+            [
+                &mut self.wood,
+                &mut self.foliage,
+                &mut self.wood_lod,
+                &mut self.foliage_lod,
+            ]
+            .into_iter()
+            .flatten()
+            .chain(&mut self.foliage_thin)
+            .chain(&mut self.foliage_lod_thin),
+            lo,
+            hi,
+        );
+        let (dlo, dhi) = bounds(
+            [&self.wood_distant, &self.foliage_distant]
+                .into_iter()
+                .flatten(),
+        );
+        widen(
+            [&mut self.wood_distant, &mut self.foliage_distant]
+                .into_iter()
+                .flatten()
+                .chain(&mut self.foliage_distant_thin),
+            lo.min(dlo),
+            hi.max(dhi),
+        );
         self.height = hi;
     }
 }
@@ -2392,6 +2408,13 @@ mod tests {
                     + m.foliage_lod.as_ref().unwrap().triangle_count();
                 let near = wood.triangle_count() + foliage.triangle_count();
                 assert!(lod * 2 < near, "{name} LOD");
+                // The distant level: a few hundred triangles for whole wooded hillsides.
+                let distant = m.wood_distant.as_ref().unwrap().triangle_count()
+                    + m.foliage_distant.as_ref().unwrap().triangle_count();
+                assert!(
+                    distant * 2 < lod && distant < 1_500,
+                    "{name}: {distant} far off"
+                );
                 // A near tree stays affordable for a forest of instanced trees.
                 assert!(near < 40_000, "{name}: {near} triangles");
                 // Parts share vertical bounds, so they sway together.
