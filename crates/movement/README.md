@@ -7,8 +7,10 @@ character's own speed and reactions.
   jump, coyote time and jump buffering, air strafing that never loses momentum, wall-running
   (with a gravity curve and a time limit), wall-jumps, mantling onto ledges (also straight out
   of a wall-run), ledge hangs (catch a ledge too high to vault, shimmy along it, climb up with
-  jump or by holding toward the wall, kick off it, or let go with crouch), and dashes with
-  charges and a dodge window.
+  jump or by holding toward the wall, kick off it, or let go with crouch), dashes with
+  charges and a dodge window, and a grapple hook (pilots only: fire at a surface up to 40 m
+  away, the rope reels the pilot in at up to 20 m/s and climbs them over the edge at the top;
+  jump, crouch or firing again lets go with the momentum).
 - **Combat movement**: attacks with windup, strike and recovery; dash-strikes that close
   several meters in a blink; blocks, dodges (i-frames), counters on a recovering attacker,
   stagger and knockback. Every strike is logged (`CombatLog`).
@@ -60,8 +62,8 @@ down) to put a level 10 pilot on the ground in front of the camera, with a third
 [`PilotCamera`](camera::PilotCamera) over its shoulder (mouse or right stick to look; the boom
 pulls in at walls and the view's up follows gravity). Controls are the default action map:
 move, jump (again in the air to double jump), sprint, crouch (slide while running), dash,
-attack (a dash-strike when the enemy is far), block, and `lock_on` (middle mouse, right stick
-click): the pilot faces the enemy nearest the center of view, attacks go to it, the camera
+`grapple` (F, left bumper: the hook flies where the camera aims), attack (a dash-strike when
+the enemy is far), block, and `lock_on` (middle mouse, right stick click): the pilot faces the enemy nearest the center of view, attacks go to it, the camera
 keeps both in frame and a marker hangs over it. Escape frees the mouse; P again ends play
 mode. `movement.play` and `movement.lock_on` do the same from the console.
 
@@ -76,13 +78,16 @@ and attack are edge-triggered, so hold them for one step. Because movement is th
 ## Showcase
 
 `demo::spawn_demo(commands, origin)` builds the test cases around a point (they fill about
-64 × 45 m, from x −28 to +36 and z −28 to +17). The showcase places it in its movement
+64 × 68 m, from x −28 to +36 and z −28 to +40). The showcase places it in its movement
 course zone.
 
 - **Parkour course**: a runner loops sprint → slide under a bar → wall-run → wall-jump →
   wall-run → mantle onto a tower → jump and double jump off it.
 - **Ledge station** (between the course and the ring): a climber jumps at a 3.6 m block, too
   high to vault, catches its top, shimmies along it, climbs up and walks off the far end.
+- **Grapple station** (behind the course): a pilot sprints at a 9 m tower, jumps, fires the
+  hook at an anchor plate under its top edge, is reeled up the face, climbs over the edge,
+  crosses the roof and drops off the back onto the pad.
 - **Duel ring**, three rounds on a loop (only while a camera is within
   `DuelDirector::watch_radius`, because slow motion is world-wide):
   1. *Blink*: an elite (speed 2.5) dash-strikes a level 1 player, who is hit before a human
@@ -104,16 +109,18 @@ poses, and `course_preview` renders the course and the ring from fixed cameras.
 
 Reads: `MoveIntent`; the physics contract (`CharacterState` after each step, `PhysicsQueries`
 raycasts for walls and ledges); `Gravity` (up and strength at the character); `Time`,
-`TimeDilation`, `LocalTimeScale`; `ActionState` (player input); `DamageEvent` (to the
+`TimeDilation`, `LocalTimeScale`; `ActionState` (player input; `PhysicsQueries` also aims the
+player's grapple along the camera); `DamageEvent` (to the
 characters it moves); `SkeletonPose` (when present, the animation module emits footsteps).
 
 Writes: `CharacterMove` (velocity in the character's own seconds) and the capsule height
 (`CharacterController::height` shrinks while sliding or crouching); `LocomotionState` (mode,
 velocity in world seconds, blocking, attacking, vulnerable, dash stamina);
 `AnimationParams` (`speed`, `direction`, `lean`, `crouch`, `effort`, `airborne`,
-`vertical_speed`, `wallrun`) and `AnimationTrigger` (`jump`, `double_jump`, `land`, `slide`,
-`wallrun`, `wall_jump`, `mantle`, `ledge_grab`, `let_go`, `dash`, `attack_light`, `attack_heavy`, `block`,
-`hit_react`, `death`); `AttackEvent` (when an attack starts, with the world seconds until it lands);
+`vertical_speed`, `wallrun`, `grapple`) and `AnimationTrigger` (`jump`, `double_jump`, `land`,
+`slide`, `wallrun`, `wall_jump`, `mantle`, `ledge_grab`, `let_go`, `dash`, `grapple_fire`,
+`grapple_hit`, `grapple_release`, `attack_light`, `attack_heavy`, `block`, `hit_react`,
+`death`); `AttackEvent` (when an attack starts, with the world seconds until it lands);
 `DamageEvent` (strikes); `Ragdoll::weight` on defeat; `GroundContact` (landings, footsteps,
 slides, wall-run steps); `NoiseEvent`; `LocalTimeScale` (from `Tempo`); `TimeDilation`
 requests `"perception"` (focus) and `"cinematic"` (beats). Claims the `LocomotionBackend`.
@@ -139,8 +146,9 @@ landing character hovering: it keeps coming down at its fall speed until the bac
 
 When the world re-anchors (floating origin, or a new planet's frame), `engine_world` moves
 root transforms and the shared character state. Movement moves its own world-space state in
-`WorldShiftSet::Apply`: velocities, facing, wall contacts, ledge targets, dash directions,
-knockback, the course runner's and duel's anchor points, afterimage ghosts, and effects in
+`WorldShiftSet::Apply`: velocities, facing, wall contacts, ledge targets, grapple anchors and
+aims, dash directions, knockback, the course runner's, climber's, grappler's and duel's anchor
+points, afterimage ghosts, and effects in
 flight (blade trails, sparks and their floors, slashes, dust, lights), so a wall-run, a dash
 or a spray of sparks carries on through the shift.
 
@@ -161,11 +169,15 @@ sets the bake size). Nothing in it is third-party art.
   katana. The demo puts one on every character it spawns.
 - `look::rig`: the fighters' skeleton and procedural animation. `Animator` turns the
   movement and combat state (on the character's own clock) into a pose: run cycles, slides,
-  wall-runs, jumps, dashes, windups, strikes, blocks, hit reactions and falls, with two-bone
-  IK for arms and legs.
+  wall-runs, jumps, ledge hangs, grapple shots and reels, dashes, windups, strikes, blocks,
+  hit reactions and falls, with two-bone IK for arms and legs.
+- `look::rope`: the grapple's braided steel cable and three-clawed hook, laid each frame from
+  the pilot's left fist (as drawn) to the hook: snaking behind it in flight, snapping taut
+  when it bites, claws spread.
 - `look::course`: the course as a pilot training facility (precast wall panels with guide
   lights, a hazard-striped slide bar, a tower with a caged ladder, a start gantry, masts,
-  numbered signs) and the ring as a samurai duel arena (board floor in a carved stone band,
+  numbered signs, and the grapple station's nine-meter tower with its glowing anchor plate)
+  and the ring as a samurai duel arena (board floor in a carved stone band,
   lanterns, a torii, banners, a drum, a roofed stand), plus the level column. It adds no
   colliders: the demo's boxes stay the same and every surface a character touches is drawn
   on a box face.
@@ -184,17 +196,21 @@ API functions: `movement.status`, `movement.set_tempo` (`{"entity": "Player", "l
 `movement.duel`
 (`{"round": "Blink" | "Focus" | "Pack" | null}`: restart the duel on that round and keep
 replaying it, or `null` to go back to cycling; tour stops use it to catch a chosen moment),
-`movement.climber` (restart the ledge climber's loop).
+`movement.climber` (restart the ledge climber's loop), `movement.grappler` (restart the
+grappler's loop).
 
 ## Tests
 
 `cargo test -p engine_movement`: unit tests per file; `tests/locomotion.rs` (sprint, footprints
 pointing toe-first, jump and double jump heights, slide under a bar that blocks running, wall-run and wall-jump, mantle,
 catching a ledge too high to vault, shimmying to its end, climbing up, letting go and kicking
-off, dash, characters on their own clocks in slow motion, the stand-in stepping aside, bodies from
+off, grappling up onto a roof, a shot at nothing coming back, a jump letting go of the rope,
+humans having no hook, dash, characters on their own clocks in slow motion, the stand-in stepping aside, bodies from
 other modules being moved);
 `tests/demo.rs` (each duel round plays out as described, the rounds cycle, the runner
-finishes the course, the climber catches the ledge, shimmies, climbs up and drops off, the duel waits without a camera, `movement.duel` restarts a chosen round,
+finishes the course, the climber catches the ledge, shimmies, climbs up and drops off, the
+grappler hooks the anchor plate, is reeled up, climbs over and lands on the pad, the duel
+waits without a camera, `movement.duel` restarts a chosen round,
 the demo's collider boxes stay the same under the new art);
 `tests/play.rs` (play mode puts a pilot in front of the camera and follows it, a locked-on
 pilot dash-strikes its target past a closer enemy, the lock moves on when its target falls);
@@ -208,3 +224,4 @@ screenshot with the slow-motion effect; skipped without a GPU).
 - Ledge hangs on moving bodies, and corners (shimmying stops at the end of a straight
   edge).
 - Wall-running on moving walls (only standing on a moving body carries a character).
+- A grapple hook in a moving body stays where it bit instead of riding along with it.
