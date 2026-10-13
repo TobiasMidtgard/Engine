@@ -71,10 +71,12 @@ compresses and stretches.
   height: 1.74 m or 1.81 m), else generated; the imported horse is scaled to the requested
   shoulder height and the dog is built at it. Other kinds get no body and keep the
   requester's stand-in.
-- **Ragdolls.** A person with `Ragdoll { weight }` (the physics contract) turns physical:
-  fourteen capsule bodies (pelvis, belly, chest, head, upper and lower arms and legs, feet)
-  weighing 75 kg at 1.75 m, with real joint ranges (hinged elbows and knees, cones and twist
-  limits at hips, shoulders, spine and ankles) and joint friction. At weight 1 the body is
+- **Ragdolls.** A person, dog or horse with `Ragdoll { weight }` (the physics contract)
+  turns physical. A person is fourteen capsule bodies (pelvis, belly, chest, head, upper and
+  lower arms and legs, feet) weighing 75 kg at 1.75 m, with real joint ranges (hinged elbows
+  and knees, cones and twist limits at hips, shoulders, spine and ankles) and joint friction.
+  Dogs (30 kg at 56 cm, scaled by size) and horses (500 kg) are sixteen: trunk, neck, head
+  and three parts a leg, the elbows and hocks folding forward, the carpi and stifles back. At weight 1 the body is
   limp and carries the momentum it had; between 0 and 1 each part is pulled toward the
   animated pose and held up against gravity, so a half-limp person staggers and sags instead
   of collapsing. The pose follows the bodies (feet, gait and footsteps stop) and blends back
@@ -176,9 +178,9 @@ requester's own parameters, rebuild on a changed request and go with a removed o
 jointed parts that start together, keep the walk's momentum and ignore each other and the
 owner's controller; the pose follows them, footsteps stop, half-limp parts are pulled
 toward the animation and held up, hard hits sound like a body falling, and the pose blends
-back to standing.
+back to standing. A dog and a horse go limp at their weight and get up again too.
 
 ## Not yet
 
-Ragdolls for dogs, horses and spiders (people only so far); an imported spider (no free
-realistic one exists, so it is generated from code).
+Ragdolls for spiders; an imported spider (no free realistic one exists, so it is generated
+from code).

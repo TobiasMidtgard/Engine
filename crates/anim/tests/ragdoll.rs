@@ -322,3 +322,97 @@ fn the_stuntman_climbs_the_deck_goes_limp_at_its_edge_and_comes_round_again() {
     let at = app.world.get::<Transform>(e).unwrap().translation;
     assert!(at.y.abs() < 0.05, "back on the ground: {at}");
 }
+
+#[test]
+fn dogs_and_horses_go_limp_at_their_weight_and_get_up_again() {
+    let mut app = app(true);
+    let mut animals = Vec::new();
+    for (kind, height, x, kg) in [("dog", 0.56, -3.0, 30.0), ("horse", 1.6, 3.0, 500.0)] {
+        let t = Transform::from_xyz(x, 0.0, 0.0);
+        let e = app
+            .world
+            .spawn((
+                Name::new(kind),
+                t,
+                GlobalTransform::from(t),
+                BodyRequest::new(kind).with_height(height),
+            ))
+            .id();
+        animals.push((kind, e, kg));
+    }
+    app.update();
+    engine_anim::character::finish_loading(&mut app.world);
+    for _ in 0..90 {
+        for (_, e, _) in &animals {
+            app.world.get_mut::<Transform>(*e).unwrap().translation.z -= 2.0 * STEP;
+        }
+        app.update();
+    }
+    // Where each body sits on its entity while it walks.
+    let mut standing = Vec::new();
+    for (_, e, _) in &animals {
+        let origin = app.world.get::<GlobalTransform>(*e).unwrap().translation();
+        standing.push(bone(&app, *e, "body") - origin);
+        app.world.entity_mut(*e).insert(Ragdoll { weight: 1.0 });
+    }
+    app.update();
+    for (kind, e, kg) in &animals {
+        let mut q = app.world.query::<(Entity, &RagdollPart)>();
+        let ps: Vec<Entity> = q
+            .iter(&app.world)
+            .filter(|(_, p)| p.owner == *e)
+            .map(|(pe, _)| pe)
+            .collect();
+        assert_eq!(
+            ps.len(),
+            16,
+            "{kind}: trunk, neck, head and four legs of three parts"
+        );
+        let mut mass = 0.0;
+        let mut momentum = Vec3::ZERO;
+        for p in &ps {
+            let m = app.world.get::<RigidBody>(*p).unwrap().mass_kg.unwrap();
+            mass += m;
+            momentum += app.world.get::<Velocity>(*p).unwrap().linear * m;
+        }
+        // The imported horse may be a little bigger or smaller than the generated one.
+        assert!((mass - kg).abs() < kg * 0.35, "{kind}: {mass} kg");
+        let v = momentum / mass;
+        assert!(v.z < -1.4 && v.z > -2.6, "{kind} moves on at {v}");
+        let mut joints = app.world.query::<&Joint>();
+        let joints: Vec<Joint> = joints
+            .iter(&app.world)
+            .filter(|j| ps.contains(&j.body_a))
+            .cloned()
+            .collect();
+        assert_eq!(joints.len(), 15, "{kind}");
+        for j in &joints {
+            let a = app.world.get::<Transform>(j.body_a).unwrap();
+            let b = app.world.get::<Transform>(j.body_b.unwrap()).unwrap();
+            let gap = (a.translation + (a.rotation * j.anchor_a).as_dvec3())
+                - (b.translation + (b.rotation * j.anchor_b.as_vec3()).as_dvec3());
+            assert!(gap.length() < 1e-3, "{kind} joint apart by {gap}");
+        }
+    }
+    // The pose follows the bodies, then blends back onto the entity.
+    wait(&mut app, 0.5);
+    for (kind, e, _) in &animals {
+        let body = bone(&app, *e, "body");
+        let origin = app.world.get::<GlobalTransform>(*e).unwrap().translation();
+        assert!(
+            body.z < origin.z - 0.5,
+            "{kind} drifted on: {body} vs {origin}"
+        );
+        app.world.get_mut::<Ragdoll>(*e).unwrap().weight = 0.0;
+    }
+    wait(&mut app, BLEND_OUT_SECS as f64 + 0.2);
+    for ((kind, e, _), was) in animals.iter().zip(standing) {
+        let origin = app.world.get::<GlobalTransform>(*e).unwrap().translation();
+        let body = bone(&app, *e, "body") - origin;
+        assert!(
+            (body - was).length() < 0.3,
+            "{kind} back on its feet: {body} vs {was}"
+        );
+        assert!(!app.world.get::<RagdollRig>(*e).unwrap().is_physical());
+    }
+}

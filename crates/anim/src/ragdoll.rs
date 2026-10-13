@@ -208,11 +208,14 @@ impl RagdollDef {
     }
 
     /// The ragdoll for a skeleton, by its family (the name before any `.` or `@`): the
-    /// humanoid and people fitted to it.
+    /// humanoid and people fitted to it, dogs of any size, and horses (the imported horse
+    /// too).
     pub fn for_skeleton(skeleton: &Skeleton) -> Option<Self> {
         let family = skeleton.name.split(['.', '@']).next().unwrap_or_default();
         let def = match family {
             "humanoid" => Self::humanoid(skeleton),
+            "dog" => Self::dog(skeleton),
+            "horse" => Self::horse(skeleton),
             _ => return None,
         };
         def.map_err(|e| tracing::warn!("no ragdoll for {}: {e}", skeleton.name))
@@ -223,11 +226,7 @@ impl RagdollDef {
     /// thighs, shins and feet, with segment masses from biomechanics tables (Winter) for a
     /// 75 kg adult scaled by size.
     pub fn humanoid(s: &Skeleton) -> Result<Self, String> {
-        let at = |name: &str| {
-            s.index_of(name)
-                .map(|i| s.rest_model[i].t)
-                .ok_or_else(|| format!("skeleton {} has no bone {name}", s.name))
-        };
+        let at = bone_at(s);
         let rest_rot = |name: &str| {
             s.index_of(name)
                 .map_or(Quat::IDENTITY, |i| s.rest_model[i].r)
@@ -244,7 +243,6 @@ impl RagdollDef {
         let k = ((head.y - ankle) / 1.52).clamp(0.2, 5.0);
         let kg = 75.0 * k.powi(3);
         let across = |c: Vec3, half: f32| [c - Vec3::X * half, c + Vec3::X * half];
-        let ball = |x: [f32; 2], y: [f32; 2], z: [f32; 2]| JointDef::Ball { limits: [x, y, z] };
         let hip_width = (at("upper_leg_r")?.x - at("upper_leg_l")?.x).abs();
         let mut parts = vec![
             PartDef {
@@ -351,6 +349,143 @@ impl RagdollDef {
                 parent: Some(upper_leg + 1),
                 joint: ball([-0.7, 0.35], [-0.25, 0.25], [-0.3, 0.3]),
             });
+        }
+        Self::new(s, parts, Vec3::NEG_Y)
+    }
+
+    /// A dog: chest, loin, neck and head, and legs of upper arm or thigh, forearm or shin,
+    /// and cannon with the paw. 30 kg for a 56 cm Labrador, scaled by size.
+    pub fn dog(s: &Skeleton) -> Result<Self, String> {
+        let at = bone_at(s);
+        let (body, loin, neck, head, jaw, tail) = (
+            at("body")?,
+            at("loin")?,
+            at("neck_1")?,
+            at("head")?,
+            at("jaw")?,
+            at("tail_1")?,
+        );
+        let k = (body.y / 0.44).clamp(0.2, 5.0);
+        let mut parts = vec![
+            PartDef {
+                bone: "body".into(),
+                segment: [
+                    Vec3::new(0.0, body.y - 0.03 * k, neck.z + 0.02 * k),
+                    Vec3::new(0.0, body.y - 0.03 * k, loin.z - 0.12 * k),
+                ],
+                radius: 0.115 * k,
+                mass_kg: 0.36,
+                parent: None,
+                joint: ball([0.0; 2], [0.0; 2], [0.0; 2]),
+            },
+            PartDef {
+                bone: "loin".into(),
+                segment: [
+                    Vec3::new(0.0, loin.y - 0.03 * k, loin.z - 0.06 * k),
+                    Vec3::new(0.0, loin.y - 0.02 * k, tail.z - 0.07 * k),
+                ],
+                radius: 0.085 * k,
+                mass_kg: 0.2,
+                parent: Some(0),
+                joint: ball([-0.45, 0.45], [-0.35, 0.35], [-0.25, 0.25]),
+            },
+            PartDef {
+                bone: "neck_1".into(),
+                segment: [neck, neck.lerp(head, 0.8)],
+                radius: 0.055 * k,
+                mass_kg: 0.05,
+                parent: Some(0),
+                joint: ball([-1.0, 0.6], [-0.9, 0.9], [-0.4, 0.4]),
+            },
+            PartDef {
+                bone: "head".into(),
+                segment: [
+                    head + Vec3::new(0.0, 0.01, 0.03) * k,
+                    jaw + Vec3::new(0.0, 0.0, -0.1) * k,
+                ],
+                radius: 0.06 * k,
+                mass_kg: 0.07,
+                parent: Some(2),
+                joint: ball([-0.6, 0.5], [-0.6, 0.6], [-0.4, 0.4]),
+            },
+        ];
+        let legs = Legs {
+            radius: [[0.035, 0.025, 0.02], [0.045, 0.03, 0.022]].map(|r| r.map(|r| r * k)),
+            mass: [[0.028, 0.014, 0.008], [0.045, 0.018, 0.009]],
+            parent: [0, 1],
+            foot: "paw",
+        };
+        legs.add(s, &mut parts)?;
+        Self::with_mass(s, parts, 30.0 * k.powi(3))
+    }
+
+    /// A horse: barrel, neck in two, head, and legs of upper arm or thigh, forearm or gaskin,
+    /// and cannon with the pastern and hoof. 500 kg at the generated horse's size.
+    pub fn horse(s: &Skeleton) -> Result<Self, String> {
+        let at = bone_at(s);
+        let (body, neck_1, neck_2, head, tail) = (
+            at("body")?,
+            at("neck_1")?,
+            at("neck_2")?,
+            at("head")?,
+            at("tail_1")?,
+        );
+        let k = (body.y / 1.25).clamp(0.2, 5.0);
+        let mut parts = vec![
+            PartDef {
+                bone: "body".into(),
+                segment: [
+                    Vec3::new(0.0, body.y - 0.04 * k, neck_1.z * 0.75),
+                    Vec3::new(0.0, body.y - 0.02 * k, tail.z * 0.62),
+                ],
+                radius: 0.33 * k,
+                mass_kg: 0.62,
+                parent: None,
+                joint: ball([0.0; 2], [0.0; 2], [0.0; 2]),
+            },
+            PartDef {
+                bone: "neck_1".into(),
+                segment: [neck_1, neck_2],
+                radius: 0.17 * k,
+                mass_kg: 0.05,
+                parent: Some(0),
+                joint: ball([-0.9, 0.5], [-0.7, 0.7], [-0.3, 0.3]),
+            },
+            PartDef {
+                bone: "neck_2".into(),
+                segment: [neck_2, head],
+                radius: 0.12 * k,
+                mass_kg: 0.025,
+                parent: Some(1),
+                joint: ball([-0.6, 0.5], [-0.6, 0.6], [-0.3, 0.3]),
+            },
+            PartDef {
+                bone: "head".into(),
+                segment: [
+                    head + Vec3::new(0.0, -0.02, 0.02) * k,
+                    head + Vec3::new(0.0, -0.33, -0.3) * k,
+                ],
+                radius: 0.1 * k,
+                mass_kg: 0.045,
+                parent: Some(2),
+                joint: ball([-0.6, 0.6], [-0.5, 0.5], [-0.3, 0.3]),
+            },
+        ];
+        let legs = Legs {
+            radius: [[0.09, 0.07, 0.045], [0.11, 0.075, 0.05]].map(|r| r.map(|r| r * k)),
+            mass: [[0.025, 0.016, 0.008], [0.045, 0.018, 0.01]],
+            parent: [0, 0],
+            foot: "hoof",
+        };
+        legs.add(s, &mut parts)?;
+        Self::with_mass(s, parts, 500.0 * k.powi(3))
+    }
+
+    /// A ragdoll whose part masses are shares of `kg`.
+    fn with_mass(s: &Skeleton, mut parts: Vec<PartDef>, kg: f32) -> Result<Self, String> {
+        let total: f32 = parts.iter().map(|p| p.mass_kg).sum();
+        for p in &mut parts {
+            p.mass_kg *= kg / total;
         }
         Self::new(s, parts, Vec3::NEG_Y)
     }
@@ -463,6 +598,87 @@ impl RagdollDef {
             break_force: None,
             collide_connected: false,
         }
+    }
+}
+
+/// Where `name` sits in `s`'s rest pose, or an error naming the missing bone.
+fn bone_at(s: &Skeleton) -> impl Fn(&str) -> Result<Vec3, String> + '_ {
+    move |name: &str| {
+        s.index_of(name)
+            .map(|i| s.rest_model[i].t)
+            .ok_or_else(|| format!("skeleton {} has no bone {name}", s.name))
+    }
+}
+
+fn ball(x: [f32; 2], y: [f32; 2], z: [f32; 2]) -> JointDef {
+    JointDef::Ball { limits: [x, y, z] }
+}
+
+/// A four-legged animal's legs (front, then hind): radius and mass share of the upper,
+/// lower and cannon parts, the trunk part each pair hangs from, and the foot bone's name.
+struct Legs {
+    radius: [[f32; 3]; 2],
+    mass: [[f32; 3]; 2],
+    parent: [usize; 2],
+    foot: &'static str,
+}
+
+impl Legs {
+    /// Swing at the shoulder or hip; the elbow and hock fold forward, the carpus and stifle
+    /// back. The cannon reaches the ground at rest.
+    fn add(&self, s: &Skeleton, parts: &mut Vec<PartDef>) -> Result<(), String> {
+        let at = bone_at(s);
+        for (side, sign) in [("l", -1.0f32), ("r", 1.0)] {
+            let side_range = |lo: f32, hi: f32| if sign > 0.0 { [lo, hi] } else { [-hi, -lo] };
+            for (pair, prefix) in ["front", "hind"].into_iter().enumerate() {
+                let bone = |b: &str| format!("{prefix}_{b}_{side}");
+                let (upper, lower, cannon, foot) = (
+                    at(&bone("upper"))?,
+                    at(&bone("lower"))?,
+                    at(&bone("cannon"))?,
+                    at(&bone(self.foot))?,
+                );
+                let [r_upper, r_lower, r_cannon] = self.radius[pair];
+                let [m_upper, m_lower, m_cannon] = self.mass[pair];
+                let (middle, low) = if pair == 0 {
+                    ([-0.3, 1.6], [-2.0, 0.2])
+                } else {
+                    ([-1.4, 0.3], [-0.3, 1.8])
+                };
+                let first = parts.len();
+                parts.push(PartDef {
+                    bone: bone("upper"),
+                    segment: [upper, lower],
+                    radius: r_upper,
+                    mass_kg: m_upper,
+                    parent: Some(self.parent[pair]),
+                    joint: ball([-0.8, 1.0], [-0.3, 0.3], side_range(-0.2, 0.5)),
+                });
+                parts.push(PartDef {
+                    bone: bone("lower"),
+                    segment: [lower, cannon],
+                    radius: r_lower,
+                    mass_kg: m_lower,
+                    parent: Some(first),
+                    joint: JointDef::Hinge {
+                        axis: Vec3::X,
+                        limits: middle,
+                    },
+                });
+                parts.push(PartDef {
+                    bone: bone("cannon"),
+                    segment: [cannon, Vec3::new(foot.x, r_cannon, foot.z)],
+                    radius: r_cannon,
+                    mass_kg: m_cannon,
+                    parent: Some(first + 1),
+                    joint: JointDef::Hinge {
+                        axis: Vec3::X,
+                        limits: low,
+                    },
+                });
+            }
+        }
+        Ok(())
     }
 }
 
@@ -1027,6 +1243,39 @@ mod tests {
         let head = def.parts.iter().find(|p| p.bone == "neck").unwrap();
         let top = head.segment[1].y + head.radius;
         assert!((1.7..1.85).contains(&top), "head top at {top}");
+    }
+
+    #[test]
+    fn dogs_and_horses_have_ragdolls_of_their_weight() {
+        use crate::build::{dog, horse};
+        for (s, kg) in [
+            (dog::skeleton(1.0), 30.0),
+            (
+                dog::skeleton(dog::scale_for_height(0.4)),
+                30.0 * (0.4f32 / 0.56).powi(3),
+            ),
+            (horse::skeleton(), 500.0),
+        ] {
+            let def = RagdollDef::for_skeleton(&s).expect("a ragdoll");
+            assert_eq!(def.parts.len(), 16, "{}", s.name);
+            assert!(
+                (def.mass() - kg).abs() < kg * 0.02,
+                "{}: {} kg",
+                s.name,
+                def.mass()
+            );
+            // Every foot stands on the ground, and bodies map back onto their bones.
+            for p in def.parts.iter().filter(|p| p.bone.contains("cannon")) {
+                assert!((p.segment[1].y - p.radius).abs() < 1e-4, "{}", p.bone);
+            }
+            let gt = GlobalTransform::default();
+            for i in 0..def.parts.len() {
+                let rest = s.rest_model[def.bones[i]];
+                let (p, r) = def.body_pose(i, &rest, &gt);
+                let m = def.bone_model(i, p, r, &gt);
+                assert!(m.t.abs_diff_eq(rest.t, 1e-4), "{}", def.parts[i].bone);
+            }
+        }
     }
 
     #[test]
