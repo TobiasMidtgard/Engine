@@ -200,7 +200,7 @@ fn march_clouds(dir: vec3<f32>, steps: i32, light_steps: i32, jitter: f32) -> Cl
     // Light bounced off the ground below. The ground's color only tints it (a meadow doesn't
     // turn the cloud base green), and under the deck itself the ground is in the cloud's
     // shadow (scaled per sample by the cover there).
-    let albedo = frame.ground.rgb;
+    let albedo = weathered_ground();
     let ground_tint = mix(vec3(dot(albedo, vec3<f32>(0.2126, 0.7152, 0.0722))), albedo, 0.4);
     let ground_sun = ground_tint * key * saturate(ldir.y) * INV_PI;
     let ground_sky = ground_tint * sky * 0.4;
@@ -452,6 +452,17 @@ fn clouds_and_rain(dir: vec3<f32>, steps: i32, light_steps: i32, jitter: f32) ->
     return c;
 }
 
+// The open ground's color as the weather leaves it (`frame.surface_open`): snow whitens it
+// and rain darkens it. The cloud bases and the far ground in the environment map (which lights
+// the fog and everything from below) see this, so in a snowfall the valley is lit from below by
+// white snow rather than a green planet, and the falling snow hazes white instead of tan.
+fn weathered_ground() -> vec3<f32> {
+    let open = frame.surface_open;
+    let snow = saturate(open.z * SURFACE_SNOW_SCALE_M * 10.0);
+    let wet = mix(1.0, 0.6, saturate(open.x));
+    return mix(frame.ground.rgb * wet, vec3<f32>(0.8), snow);
+}
+
 // The planet's surface far away (as in sky.wgsl).
 fn planet_ground(dir: vec3<f32>, t: f32) -> vec3<f32> {
     let p = dir * t;
@@ -460,7 +471,7 @@ fn planet_ground(dir: vec3<f32>, t: f32) -> vec3<f32> {
     let n_dot_l = dot(n, sun);
     let sun_light = frame.sun_color.rgb * sun_transmittance(p + n * 10.0) * saturate(n_dot_l);
     let sky_light = frame.sun_color.rgb * 0.12 * smoothstep(-0.15, 0.3, n_dot_l);
-    let albedo = frame.ground.rgb;
+    let albedo = weathered_ground();
     return albedo * (sun_light + sky_light) * INV_PI + frame.ambient.rgb * albedo;
 }
 
@@ -530,7 +541,7 @@ fn fs_env(in: FullscreenOut) -> @location(0) vec4<f32> {
         // Under a deck the far ground, and the haze in front of it, lie in the clouds'
         // shadow too.
         let shade = mix(0.2, 1.0, r.transmittance);
-        let lit = planet_ground(dir, ground_t) * shade + frame.ground.rgb * sky_up * 0.8;
+        let lit = planet_ground(dir, ground_t) * shade + weathered_ground() * sky_up * 0.8;
         let haze = a.radiance * frame.sun_color.rgb * shade
             + (vec3(1.0) - a.transmittance) * sky_up * (1.0 - shade) * 0.8;
         let c = haze + lit * a.transmittance;
