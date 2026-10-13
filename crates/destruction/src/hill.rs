@@ -809,6 +809,14 @@ fn run_step(world: &mut World, demo: &mut HillDemo, step: Step) {
             let Some(&(_, z)) = UNDERMINE.get(k) else {
                 return;
             };
+            // The builder looks up from its finished shelter, or the last piece's ghost would
+            // hang red in the air once the shelter is gone.
+            if let Some(mut builder) =
+                demo.builders[Site::Terrace as usize].and_then(|b| world.get_mut::<Builder>(b))
+            {
+                let at = o + Site::Terrace.offset();
+                builder.aim_at(at + DVec3::Y * 20.0, at + DVec3::Y * 21.0);
+            }
             edit(
                 world,
                 o + DVec3::from_array(TERRACE) + DVec3::new(0.0, -0.7, z),
