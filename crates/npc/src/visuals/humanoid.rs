@@ -84,6 +84,11 @@ const IRISES: [[u32; 2]; 4] = [
     [0x56626a, 0x8e989d],
 ];
 
+/// Gambeson colors (sRGB), picked per fighter: undyed linen, oatmeal, brown and grey wool.
+const GAMBESONS: [u32; 4] = [0xc6baa0, 0xad9a79, 0x765c46, 0x88857e];
+/// Hose colors (sRGB), picked per fighter: dark brown, charcoal and olive-brown wool.
+const HOSE: [u32; 3] = [0x5a4836, 0x4a4a4d, 0x585340];
+
 /// The part of a piece's painted plates.
 fn paint_of(part: Part) -> Option<Part> {
     let i = PAINTED.iter().position(|&p| p == part)?;
@@ -278,6 +283,12 @@ pub(super) fn parts(
     let Some(paint) = paint_material(art, wear, team_hex) else {
         return plain_parts(kind, team_hex);
     };
+    // Under the armor: a gambeson and hose in undyed or earthy wool and linen.
+    let cloth_hex = [
+        GAMBESONS[(seed * 3 + seed / 5) % GAMBESONS.len()],
+        HOSE[(seed + seed / 3) % HOSE.len()],
+    ];
+    let cloth = cloth_hex.map(linear);
     let mut out = Vec::with_capacity(list.len() + 2);
     for (part, piece) in list {
         let mesh = if piece == Piece::Face {
@@ -287,13 +298,18 @@ pub(super) fn parts(
             );
             let iris = iris_hex.map(linear);
             art.mesh(&key, || kit.face(shape, linear(skin_hex), iris))
-        } else if piece.team_colored() {
-            let key = format!("fighter/{}/{team_hex:06x}", piece.name());
-            art.mesh(&key, || kit.mesh(piece, team))
         } else {
-            art.mesh(&format!("fighter/{}", piece.name()), || {
-                kit.mesh(piece, team)
-            })
+            // Keyed by the colors it takes.
+            let mut key = format!("fighter/{}", piece.name());
+            if piece.team_colored() {
+                key += &format!("/{team_hex:06x}");
+            }
+            for (used, hex) in piece.cloth_colored().into_iter().zip(cloth_hex) {
+                if used {
+                    key += &format!("/{hex:06x}");
+                }
+            }
+            art.mesh(&key, || kit.mesh(piece, team, cloth))
         };
         let Some(mesh) = mesh else {
             return plain_parts(kind, team_hex);
@@ -343,6 +359,8 @@ fn paint_material(art: &mut ArtAssets, wear: usize, team_hex: u32) -> Option<Sta
         // The ORM map carries roughness and metalness; the factors scale it.
         perceptual_roughness: 1.0,
         metallic: 1.0,
+        // Satin paint mirrors less of the sky than the default (which would wash it pale).
+        reflectance: 0.3,
         ..Default::default()
     })
 }

@@ -17,8 +17,9 @@ use crate::assets::DestructionAssets;
 use crate::debris::{
     Debris, DebrisBody, DebrisLook, DebrisSpawn, DustRequest, PendingDebris, reduce_points,
 };
-use crate::fracture::ConvexPoly;
+use crate::fracture::{BreakLook, ConvexPoly};
 use crate::material::{DestructibleMaterial, DestructionMaterials, MaterialProps};
+use crate::meshing::MeshBuilder;
 use crate::structure::{Fracturable, Obb, PieceState, StructuralPiece, piece_colors, shatter};
 use crate::sync::{VoxelChunk, WallTile};
 use crate::voxel::{VoxelOp, VoxelState, VoxelVolume, box_sdf, capsule_sdf};
@@ -1097,19 +1098,23 @@ fn blast(
         let (ext_c, int_c) = piece_colors(None, volume.material, ctx.table, ctx.textured);
         let shape = ConvexPoly::cuboid(half * 2.0);
         let parts = shatter(&shape, Vec3::ZERO, pieces, ctx.rng);
+        let look = BreakLook::of(volume.material, ext_c, int_c);
         for (poly, c, vol) in parts {
             let dir = (c.normalize_or(Vec3::Y) + Vec3::Y * 0.6).normalize();
             let at = gt.transform_point((local + c * 0.5).as_dvec3());
             let out_dir = ((at - center).as_vec3()).normalize_or(dir);
             let speed = (energy / 1.0e5).sqrt().clamp(2.0, 18.0) * ctx.rng.range(0.5, 1.2);
-            let mb = poly.to_mesh(c, ext_c, int_c);
-            let pts: Vec<Vec3> = mb.vertices.iter().map(|v| Vec3::from(v.position)).collect();
+            let (outside, inside) = poly.broken_meshes(c, &look, ctx.rng.next_u64());
+            let pts: Vec<Vec3> = poly.vertices().iter().map(|p| *p - c).collect();
             ctx.pending.items.push(DebrisSpawn {
                 position: at,
                 rotation: Quat::IDENTITY,
                 velocity: (out_dir + Vec3::Y * 0.5).normalize() * speed,
                 angular: ctx.rng.unit_vector() * 8.0,
-                look: DebrisLook::Mesh(mb.build()),
+                look: DebrisLook::Broken {
+                    outside: outside.map(MeshBuilder::build),
+                    inside: inside.build(),
+                },
                 half_extents: half,
                 hull: reduce_points(&pts, 16),
                 mass_kg: vol * props.density,
@@ -1415,9 +1420,10 @@ pub(crate) fn break_fracturable(
     let parts = shatter(&f.shape.poly(), impact, f.pieces, ctx.rng);
     let rot = gt.rotation();
     let size = f.shape.half_extents().max_element() * 2.0;
+    let look = BreakLook::of(f.material, ext, int);
     for (poly, c, vol) in parts {
-        let mb = poly.to_mesh(c, ext, int);
-        let pts: Vec<Vec3> = mb.vertices.iter().map(|v| Vec3::from(v.position)).collect();
+        let (outside, inside) = poly.broken_meshes(c, &look, ctx.rng.next_u64());
+        let pts: Vec<Vec3> = poly.vertices().iter().map(|p| *p - c).collect();
         let (lo, hi) = poly.bounds();
         let dist = c.distance(impact);
         let falloff = 1.0 / (1.0 + 2.0 * dist / size.max(0.1));
@@ -1429,7 +1435,10 @@ pub(crate) fn break_fracturable(
             rotation: rot,
             velocity,
             angular: ctx.rng.unit_vector() * (speed * falloff * 2.0).min(12.0),
-            look: DebrisLook::Mesh(mb.build()),
+            look: DebrisLook::Broken {
+                outside: outside.map(MeshBuilder::build),
+                inside: inside.build(),
+            },
             half_extents: (hi - lo) * 0.5,
             hull: reduce_points(&pts, 16),
             mass_kg: vol * props.density,

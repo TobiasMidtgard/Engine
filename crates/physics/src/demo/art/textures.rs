@@ -1,5 +1,6 @@
 //! Procedural PBR texture sets for the physics proving ground: concrete, wood, steel, rubber,
-//! vinyl, safety paint and grass, generated in code at startup (no files to ship).
+//! vinyl, safety paint, grass, asphalt, sand and galvanized steel, generated in code at startup
+//! (no files to ship).
 //!
 //! Every set is
 //! * **tileable**: all noise is periodic over the tile, scattered features wrap around it;
@@ -1383,6 +1384,219 @@ pub fn lawn(res: u32) -> TextureSet {
         }
     });
     cv.finish(&[(2, 0.004, 0.35), (6, 0.008, 0.25)])
+}
+
+/// Dense asphalt for the barrel run's deck: dark bitumen binder packed with grey and brown
+/// stone chips (about 3 to 14 mm) that traffic has polished and exposed, lighter where the binder
+/// has weathered, fresh black sealant over a few cracks, oil drips and grey dust in the pores.
+/// `tile_m = 4`. Roughness ~0.5 (sealant, oil) .. 0.95 (binder), stones ~0.7.
+pub fn asphalt(res: u32) -> TextureSet {
+    const T: f32 = 4.0;
+    let n = res.max(16);
+    let low = Field::<5>::new(n / 4, |u, v| {
+        [
+            fbm(u, v, 2, 2, 4, 0.5, 1201),
+            fbm(u, v, 5, 5, 4, 0.5, 1202),
+            fbm(u, v, 12, 12, 3, 0.5, 1203),
+            fbm(u, v, 3, 3, 3, 0.5, 1204),
+            fbm(u, v, 30, 30, 2, 0.5, 1205),
+        ]
+    });
+    // Stone chips: two sizes of Worley cells, a chip where a cell's center is near.
+    let (big, small) = (290, 640); // cells per tile: 14 mm and 6 mm apart
+    let cracks = Strokes::thin(
+        10,
+        scratch_strokes(&mut Rng(1211), 7, T, (0.6, 1.8), 9.0),
+        n,
+    );
+    let mut rng = Rng(1213);
+    let mut oil = spots(&mut rng, 4, T, (0.08, 0.22), (0.25, 0.5));
+    oil.extend(spots(&mut rng, 22, T, (0.01, 0.04), (0.3, 0.6)));
+    let oil = Strokes::new(10, oil);
+    let cv = Canvas::new(n, T, |u, v| {
+        let l = low.at(u, v);
+        let grain = grain(u, v, n, 1206);
+        // Weathered (oxidized) binder turns grey; fresh patches stay near black.
+        let weather = sstep(-0.3, 0.4, l[0] + 0.4 * l[3]);
+        let binder = mix3([0.018, 0.017, 0.016], [0.05, 0.048, 0.045], weather);
+        let mut c = scale3(binder, 1.0 + 0.15 * l[2] + 0.2 * grain);
+        let mut r = 0.9 + 0.04 * l[1] + 0.02 * grain;
+        let mut h = 0.0003 * l[4] + 0.00015 * grain;
+        let mut ao = 1.0;
+        for (cells, seed, size, rise) in [
+            (big, 1207u32, 0.36f32, 0.0016f32),
+            (small, 1208, 0.33, 0.0009),
+        ] {
+            let cell = worley(u, v, cells, 0.9, seed);
+            let r_chip = size * (0.7 + 0.5 * unit(hash(cell.id ^ 5)));
+            if cell.d < r_chip {
+                // Exposed chip: rounded top, polished by tires, its own shade and hue.
+                let dome = (1.0 - (cell.d / r_chip).powi(2)).sqrt();
+                let exposed = sstep(0.15, 0.55, unit(hash(cell.id ^ 7)) + 0.3 * l[1]);
+                let tone = unit(hash(cell.id ^ 11));
+                let stone = mix3([0.11, 0.105, 0.1], [0.2, 0.17, 0.13], tone * tone);
+                let stone = scale3(stone, 0.7 + 0.6 * unit(hash(cell.id ^ 13)));
+                let k = exposed * sstep(0.0, 0.25, dome);
+                c = mix3(c, stone, k);
+                r = lerp(r, 0.68 + 0.1 * tone, k);
+                h = h.max(rise * dome * (0.4 + 0.6 * exposed));
+            } else if cell.d < r_chip * 1.25 {
+                // The binder dips around each chip: dust and shade collect there.
+                let rim = sstep(r_chip * 1.25, r_chip, cell.d);
+                ao *= 1.0 - 0.25 * rim;
+                h -= 0.0003 * rim;
+            }
+        }
+        // Black sealant poured over cracks: glossy, slightly raised bands.
+        let mut seal = 0.0f32;
+        cracks.visit(u, v, |s, d, t| {
+            let k = line_cov(s.hw, d, n) * sstep(0.0, 0.05, t) * sstep(1.0, 0.95, t);
+            seal = seal.max(k);
+        });
+        c = mix3(c, [0.012, 0.012, 0.012], 0.9 * seal);
+        r = lerp(r, 0.45, seal);
+        h = lerp(h, 0.0008, seal);
+        // Oil drips: darker and glossier, with a lighter rim where they dried.
+        let mut drip = 0.0f32;
+        oil.visit(u, v, |s, d, _| {
+            // `hw` is 1.5 radii, so the drip's edge is at x = 1.
+            let x = 1.5 * d / s.hw;
+            let ragged = 0.7 + 0.3 * perlin(u * 90.0, v * 90.0, 90, 90, 1214);
+            drip = drip.max(s.k * sstep(1.0, 0.6, x) * ragged);
+        });
+        c = scale3(c, 1.0 - 0.45 * drip);
+        r = lerp(r, 0.5, drip);
+        Px {
+            h,
+            c,
+            r: r.clamp(0.4, 0.97),
+            ao,
+            ..Px::default()
+        }
+    });
+    cv.finish(&[(2, 0.0006, 0.45), (6, 0.001, 0.25)])
+}
+
+/// Raked sand for the barrel run's pit: fine quartz and feldspar grains, the rake's parallel
+/// grooves running along U (the run), softened and broken up where the sand slumped, a scatter
+/// of small pebbles and a few darker damp patches. `tile_m = 3`. Roughness ~0.85 .. 0.97.
+pub fn raked_sand(res: u32) -> TextureSet {
+    const T: f32 = 3.0;
+    let n = res.max(16);
+    let low = Field::<4>::new(n / 4, |u, v| {
+        [
+            fbm(u, v, 3, 3, 4, 0.5, 1301),
+            fbm(u, v, 9, 9, 3, 0.5, 1302),
+            fbm(u, v, 2, 2, 3, 0.5, 1303),
+            fbm(u, v, 6, 6, 3, 0.5, 1304),
+        ]
+    });
+    let grains = (n as f32 / 1.5) as i32;
+    let cv = Canvas::new(n, T, |u, v| {
+        let l = low.at(u, v);
+        let fine = perlin(u * grains as f32, v * grains as f32, grains, grains, 1305);
+        let grain = grain(u, v, n, 1306);
+        // Rake grooves along U, 6 cm apart (50 per tile), wandering a little.
+        let across = v * 50.0 + 0.6 * l[1] + 0.15 * l[3];
+        let groove = 0.5 - 0.5 * (across * TAU).cos();
+        let slump = sstep(-0.1, 0.5, l[0]);
+        let rake = groove * (1.0 - 0.75 * slump);
+        let damp = sstep(0.2, 0.6, l[2] + 0.2 * l[3]);
+        let base = mix3([0.52, 0.42, 0.26], [0.6, 0.5, 0.33], 0.5 + 0.5 * l[3]);
+        let mut c = scale3(
+            base,
+            (1.0 + 0.12 * fine + 0.18 * grain - 0.08 * rake) * (1.0 - 0.3 * damp),
+        );
+        // Dark (mafic) and bright (quartz) grains.
+        let g = unit(hash2((u * n as f32) as i32, (v * n as f32) as i32, 1307));
+        if g > 0.93 {
+            c = scale3(c, 0.45);
+        } else if g < 0.05 {
+            c = scale3(c, 1.35);
+        }
+        let mut h = 0.004 * rake + 0.0004 * fine + 0.0002 * grain;
+        let mut r = 0.95 - 0.08 * damp + 0.02 * grain;
+        let mut ao = 1.0;
+        // Pebbles: 4 to 10 mm, grey to rust, half buried.
+        let cell = worley(u, v, 140, 0.9, 1308);
+        let pr = 0.18 * (0.5 + unit(hash(cell.id ^ 3)));
+        if unit(hash(cell.id)) < 0.35 && cell.d < pr {
+            let dome = (1.0 - (cell.d / pr).powi(2)).sqrt();
+            let tone = unit(hash(cell.id ^ 9));
+            c = mix3([0.16, 0.15, 0.14], [0.3, 0.17, 0.1], tone);
+            c = scale3(c, 0.8 + 0.5 * dome);
+            h = h.max(0.003 + 0.004 * dome);
+            r = 0.75;
+        } else if cell.d < pr * 1.3 && unit(hash(cell.id)) < 0.35 {
+            ao = 0.8;
+        }
+        Px {
+            h,
+            c,
+            r,
+            ao,
+            ..Px::default()
+        }
+    });
+    cv.finish(&[(2, 0.001, 0.3), (8, 0.003, 0.3)])
+}
+
+/// Hot-dip galvanized steel for guardrails: the zinc coat's spangle (crystals about 14 mm
+/// across, each its own grey and sheen, with fine grain boundaries), dulled to a matte grey
+/// patina where it weathered, white rust (zinc oxide) blooms, and grime streaks running down
+/// (+V). `tile_m = 1`. Metallic 0.85 .. 1 (0 under white rust), roughness ~0.4 .. 0.9.
+pub fn galvanized(res: u32) -> TextureSet {
+    const T: f32 = 1.0;
+    let n = res.max(16);
+    let low = Field::<4>::new(n / 4, |u, v| {
+        [
+            fbm(u, v, 3, 3, 4, 0.5, 1401),
+            fbm(u, v, 8, 8, 3, 0.5, 1402),
+            // Stretched along V: streaks.
+            fbm(u, v, 12, 2, 3, 0.5, 1403),
+            fbm(u, v, 16, 16, 3, 0.5, 1404),
+        ]
+    });
+    let bloom = Strokes::new(10, spots(&mut Rng(1405), 7, T, (0.006, 0.025), (0.25, 0.6)));
+    let cv = Canvas::new(n, T, |u, v| {
+        let l = low.at(u, v);
+        let grain = grain(u, v, n, 1406);
+        let (edge, id) = voronoi_edge(u, v, 70, 0.95, 1407);
+        let (tone, sheen) = (unit(hash(id ^ 3)), unit(hash(id ^ 5)));
+        let patina = sstep(-0.45, 0.35, l[0] + 0.3 * l[1]);
+        let spangle = 1.0 - 0.7 * patina;
+        let mut c = scale3(
+            [0.6, 0.61, 0.62],
+            1.0 + spangle * 0.14 * (tone - 0.5) + 0.03 * grain,
+        );
+        c = mix3(c, [0.45, 0.46, 0.46], 0.6 * patina);
+        let mut r = lerp(0.4 + 0.18 * sheen, 0.66, patina) + 0.04 * l[3] + 0.02 * grain;
+        let mut m = lerp(1.0, 0.85, patina);
+        // The crystals' boundaries are faint grooves.
+        let mut h = -0.00003 * sstep(0.08, 0.0, edge) * spangle + 0.00001 * grain;
+        // Grime washed down from the top.
+        let streak = sstep(0.15, 0.7, l[2]) * 0.6;
+        c = scale3(c, 1.0 - 0.35 * streak);
+        r = lerp(r, 0.75, 0.5 * streak);
+        // White rust: chalky zinc oxide in blooms.
+        let mut white = 0.0f32;
+        bloom.visit(u, v, |s, d, _| {
+            let x = 1.5 * d / s.hw + 0.25 * l[3];
+            white = white.max(s.k * sstep(1.0, 0.35, x));
+        });
+        c = mix3(c, [0.74, 0.74, 0.72], white);
+        r = lerp(r, 0.92, white);
+        m = lerp(m, 0.0, white);
+        h += 0.00015 * white;
+        Px {
+            h,
+            c,
+            r: r.clamp(0.25, 0.95),
+            m,
+            ..Px::default()
+        }
+    });
+    cv.finish(&[(2, 0.0001, 0.2)])
 }
 
 // =============================================================================================
