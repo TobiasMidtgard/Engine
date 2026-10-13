@@ -151,7 +151,59 @@ pub struct TrailWalker {
     pub height: f32,
     next_foot: u8,
     to_next_step: f32,
+    /// Where it walks across the trail; walkers step aside to pass each other.
+    lane: Lane,
 }
+
+/// A walker's sideways place on the trail, meters from the middle (+ toward the inside of the
+/// loop, the walker's right), as a move from one place to another over a stretch of the trail.
+/// Being a function of distance along the trail, a foot planted before a move keeps its spot.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Lane {
+    /// Where along the trail the move starts, meters.
+    start: f64,
+    /// Meters of travel the move takes.
+    len: f64,
+    from: f32,
+    to: f32,
+}
+
+impl Lane {
+    fn stay(along: f64) -> Self {
+        Self {
+            start: along,
+            len: 1.0,
+            from: 0.0,
+            to: 0.0,
+        }
+    }
+
+    /// How far through the move `along` is (0..1, unclamped), the nearest lap.
+    fn progress(&self, along: f64) -> f64 {
+        let d =
+            (along - self.start + TRAIL_LENGTH * 0.5).rem_euclid(TRAIL_LENGTH) - TRAIL_LENGTH * 0.5;
+        d / self.len
+    }
+
+    fn at(&self, along: f64) -> f32 {
+        let t = self.progress(along).clamp(0.0, 1.0) as f32;
+        self.from + (self.to - self.from) * t * t * (3.0 - 2.0 * t)
+    }
+
+    /// Sideways meters per meter along the trail.
+    fn slope(&self, along: f64) -> f32 {
+        let t = self.progress(along).clamp(0.0, 1.0) as f32;
+        (self.to - self.from) * 6.0 * t * (1.0 - t) / self.len as f32
+    }
+}
+
+/// The lane a walker takes to pass someone slower (toward the inside of the loop, away from
+/// the follow camera) and the one it moves to while someone faster passes it.
+const PASS_LANE: f32 = 0.8;
+const GIVE_WAY_LANE: f32 = -0.35;
+/// A lane change starts this far ahead of the walker, past every footprint its feet are
+/// already headed for, so no swinging foot's target moves.
+const LANE_LEAD: f64 = 3.0;
 
 impl TrailWalker {
     fn new(origin: DVec3, along: f64, kind: ContactKind, mass_kg: f32, speed: f32) -> Self {
@@ -174,8 +226,85 @@ impl TrailWalker {
             height,
             next_foot: 0,
             to_next_step: step_len * 0.5,
+            lane: Lane::stay(along),
         }
     }
+
+    /// Sideways offset from the trail's middle at `along`, meters (+ toward the inside).
+    pub fn lane_at(&self, along: f64) -> f32 {
+        self.lane.at(along)
+    }
+
+    /// How fast the lane changes per meter along the trail at `along`.
+    pub fn lane_slope(&self, along: f64) -> f32 {
+        self.lane.slope(along)
+    }
+
+    /// Half its length along the trail, meters, with some room.
+    fn reach(&self) -> f64 {
+        match self.kind {
+            ContactKind::Hoof => 1.3,
+            ContactKind::Paw => 0.5,
+            _ => 0.3,
+        }
+    }
+
+    /// Plan a move to `lane` once the last move is done and a stride behind it (so every
+    /// planted foot is past it).
+    fn steer_to(&mut self, lane: f32) {
+        if self.lane.from != self.lane.to {
+            let stride = bodies::gait::stride(self) as f64;
+            if self.lane.progress(self.along) < 1.0 + stride / self.lane.len {
+                return;
+            }
+            // Done: hold the new place (a finished move would read as not started once the
+            // walker is half a lap past it).
+            self.lane = Lane {
+                from: self.lane.to,
+                ..self.lane
+            };
+        }
+        if (self.lane.to - lane).abs() < 1e-3 {
+            return;
+        }
+        self.lane = Lane {
+            start: self.along + LANE_LEAD,
+            len: (self.speed as f64 * 0.8).max(2.5),
+            from: self.lane.to,
+            to: lane,
+        };
+    }
+}
+
+/// Which lane walker `me` wants, from everyone's (along, speed, reach): the passing lane while
+/// it closes on and passes someone slower, the give-way lane while someone faster does that to
+/// it, else the middle.
+fn wanted_lane(me: usize, all: &[(f64, f32, f64)]) -> f32 {
+    let (along, speed, reach) = all[me];
+    let mut lane = 0.0;
+    for (i, &(other, other_speed, other_reach)) in all.iter().enumerate() {
+        if i == me {
+            continue;
+        }
+        // How far ahead the other is, the nearest way round.
+        let gap =
+            (other - along + TRAIL_LENGTH * 0.5).rem_euclid(TRAIL_LENGTH) - TRAIL_LENGTH * 0.5;
+        let clear = reach + other_reach + 0.8;
+        if speed > other_speed + 0.05 {
+            // Catching up: move over in time, as if the other stood still, and stay over
+            // until well past.
+            let len = (speed as f64 * 0.8).max(2.5);
+            if gap > -clear && gap < clear + LANE_LEAD + len {
+                return PASS_LANE;
+            }
+        } else if other_speed > speed + 0.05 {
+            let len = (other_speed as f64 * 0.8).max(2.5);
+            if gap < clear && gap > -(clear + LANE_LEAD + len) {
+                lane = GIVE_WAY_LANE;
+            }
+        }
+    }
+    lane
 }
 
 impl TrailWalker {
@@ -310,6 +439,15 @@ fn walk_trail(
     )>,
     mut contacts: MessageWriter<GroundContact>,
 ) {
+    // Make way: everyone picks a lane from where the others are.
+    let all: Vec<(f64, f32, f64)> = walkers
+        .iter()
+        .map(|(_, w, _, _)| (w.along, w.speed, w.reach()))
+        .collect();
+    for (i, (_, mut w, _, _)) in walkers.iter_mut().enumerate() {
+        let lane = wanted_lane(i, &all);
+        w.steer_to(lane);
+    }
     for (entity, mut w, mut t, scale) in &mut walkers {
         let dt = time.delta_for(scale);
         if dt <= 0.0 {
@@ -360,6 +498,61 @@ fn walk_trail(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn walkers_step_aside_to_pass() {
+        // The hiker, with a horse, a runner or a dog coming up 8 m behind.
+        for (kind, mass, speed) in [
+            (ContactKind::Hoof, 500.0, 1.7),
+            (ContactKind::Foot, 68.0, 4.0),
+            (ContactKind::Paw, 22.0, 1.8),
+        ] {
+            let mut ws = [
+                TrailWalker::new(DVec3::ZERO, 10.0, ContactKind::Foot, 75.0, 1.4),
+                TrailWalker::new(DVec3::ZERO, 2.0, kind, mass, speed),
+            ];
+            let dt = 1.0 / 30.0;
+            let (mut closest, mut widest, mut aside) = (f64::MAX, 0.0f32, 0.0f32);
+            for _ in 0..(90.0 / dt) as usize {
+                let all: Vec<_> = ws.iter().map(|w| (w.along, w.speed, w.reach())).collect();
+                for (i, w) in ws.iter_mut().enumerate() {
+                    w.steer_to(wanted_lane(i, &all));
+                }
+                for w in &mut ws {
+                    w.along = (w.along + (w.speed * dt) as f64).rem_euclid(TRAIL_LENGTH);
+                }
+                // The passer's body runs from its tail to its nose along its heading.
+                let (hiker, _) = bodies::gait::root(&ws[0]);
+                let (p, d) = bodies::gait::root(&ws[1]);
+                let half = (ws[1].reach() - 0.2).max(0.1);
+                let (a, b) = (p - d.as_dvec3() * half, p + d.as_dvec3() * half);
+                let t = ((hiker - a).dot(b - a) / (b - a).length_squared()).clamp(0.0, 1.0);
+                closest = closest.min(hiker.distance(a + (b - a) * t));
+                widest = widest.max(ws[1].lane_at(ws[1].along));
+                aside = aside.min(ws[0].lane_at(ws[0].along));
+                // Far apart, both walk the middle.
+                let gap = (ws[1].along - ws[0].along + TRAIL_LENGTH * 0.5).rem_euclid(TRAIL_LENGTH)
+                    - TRAIL_LENGTH * 0.5;
+                if gap.abs() > 20.0 {
+                    for w in &ws {
+                        assert_eq!(w.lane_at(w.along), 0.0, "{kind:?} at gap {gap}");
+                    }
+                }
+            }
+            assert!(
+                closest > 0.8,
+                "{kind:?} came within {closest:.2} m of the hiker"
+            );
+            assert!(
+                widest > PASS_LANE * 0.99,
+                "{kind:?} never moved over: {widest}"
+            );
+            assert!(
+                aside < GIVE_WAY_LANE * 0.99,
+                "the hiker never gave way: {aside}"
+            );
+        }
+    }
 
     #[test]
     fn trail_is_a_closed_loop() {

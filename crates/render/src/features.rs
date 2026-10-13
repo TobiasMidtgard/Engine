@@ -26,10 +26,13 @@
 //! Register a feature with [`RenderAppExt::add_render_feature`]. Water, terrain, particles,
 //! volumetric clouds, foliage and UI are all built this way.
 
+use std::sync::Arc;
+
 use bevy_ecs::prelude::*;
 use engine_core::App;
 
 use crate::frame::ViewData;
+use crate::material_library::{MaterialLibrary, MaterialMaps, MaterialPreset, MaterialTextures};
 use crate::settings::RenderSettings;
 
 /// Shared types and pure functions (no bindings).
@@ -84,6 +87,8 @@ pub struct GpuShared {
     pub adapter_info: wgpu::AdapterInfo,
     /// Optional features the device has (e.g. `DEPTH_CLIP_CONTROL`).
     pub features: wgpu::Features,
+    /// Generated material textures (presets), built on first use and shared by every feature.
+    pub materials: MaterialLibrary,
 }
 
 impl GpuShared {
@@ -95,6 +100,23 @@ impl GpuShared {
                 label: Some(label),
                 source: wgpu::ShaderSource::Wgsl(code.into()),
             })
+    }
+
+    /// The GPU-resident textures of a material preset at `size`² texels (a power of two,
+    /// 64..4096), generating them the first time they are asked for. Feature shaders can bind
+    /// the views like any texture (base color is an sRGB view).
+    pub fn material_textures(&self, preset: MaterialPreset, size: u32) -> Arc<MaterialTextures> {
+        self.materials.get(self, preset, size)
+    }
+
+    /// Copy a preset's maps back to the CPU (mip 0), generating them first if needed. Blocks
+    /// until the GPU is done. For tests and exporting.
+    pub fn read_material_maps(
+        &self,
+        preset: MaterialPreset,
+        size: u32,
+    ) -> Result<MaterialMaps, String> {
+        self.materials.read_back(self, preset, size)
     }
 
     /// Standard depth state for scene passes (reverse-Z: greater is closer).
@@ -259,6 +281,13 @@ pub trait RenderFeature: Send + Sync + 'static {
 
     fn stats(&self) -> FeatureStats {
         FeatureStats::default()
+    }
+
+    /// Virtual geometry clusters the camera drew (their triangles are in `stats().triangles`).
+    /// Kept out of `FeatureStats` so features in other crates can keep building it field by
+    /// field.
+    fn clusters_drawn(&self) -> u32 {
+        0
     }
 
     /// Optional JSON describing the feature's state (for `render.stats`).

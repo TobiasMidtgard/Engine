@@ -9,6 +9,7 @@
 //! 40 000–100 000 read as white-hot by day and bloom at night.
 
 use crate::effect::*;
+use crate::marks::{MarkDesc, MarkKind};
 use crate::trail::{RibbonStyle, Trail};
 
 fn em(name: &str) -> EmitterDesc {
@@ -63,6 +64,18 @@ fn effect(
         emitters,
         ..Default::default()
     }
+}
+
+/// The mark an effect leaves where it starts: `radius` m at scale 1, lasting `life` s, with
+/// embers glowing for `glow` s (scorches).
+fn mark(kind: MarkKind, radius: f32, life: f32, glow: f32) -> Option<MarkDesc> {
+    Some(MarkDesc {
+        kind,
+        radius,
+        life_secs: life,
+        strength: 1.0,
+        glow_secs: glow,
+    })
 }
 
 fn light(color: [f32; 3], lumens: f32, range: f32, flicker: f32, fade: f32) -> Option<EffectLight> {
@@ -422,6 +435,7 @@ fn spells() -> Vec<EffectDesc> {
 
     let fireball_impact = EffectDesc {
         light: light([1.0, 0.55, 0.25], 45_000.0, 18.0, 0.2, 0.7),
+        mark: mark(MarkKind::Scorch, 1.1, 120.0, 8.0),
         ..effect(
             "spell.fireball_impact",
             "A fireball exploding: flash, fire burst, bouncing sparks, a smoke cloud, a ground \
@@ -625,6 +639,7 @@ fn spells() -> Vec<EffectDesc> {
 
     let frost_impact = EffectDesc {
         light: light([0.55, 0.8, 1.0], 20_000.0, 14.0, 0.1, 0.5),
+        mark: mark(MarkKind::Frost, 1.3, 30.0, 0.0),
         ..effect(
             "spell.frost_impact",
             "An ice bolt shattering: flash, a spray of bouncing ice shards, glints, a frost ring \
@@ -815,6 +830,106 @@ fn spells() -> Vec<EffectDesc> {
                     additive: 1.0,
                     wind: 0.0,
                     ..em("core")
+                },
+            ],
+        )
+    };
+
+    let gate = EffectDesc {
+        prewarm: 3.0,
+        light: Some(EffectLight {
+            offset: [0.0, 0.6, 0.0],
+            ..light(violet, 3_000.0, 12.0, 0.12, 0.8).unwrap()
+        }),
+        ..effect(
+            "spell.portal_gate",
+            "A standing portal 5 m across: the world behind it swirled into a violet vortex that \
+             darkens toward its eye, glowing arms turning inward, a burning rim crackling with \
+             sparks, motes drawn in and stars spilling out. Turn the effect so its up axis faces \
+             out of the portal.",
+            None,
+            vec![
+                EmitterDesc {
+                    bursts: every(30.0, 1),
+                    speed: [0.0, 0.0],
+                    lifetime: [30.0, 30.0],
+                    size: [4.9, 4.9],
+                    rotation_deg: [0.0, 0.0],
+                    spin_deg: [-14.0, -14.0],
+                    local_space: true,
+                    sprite: Sprite::Vortex,
+                    facing: Facing::Horizontal,
+                    color: fade(violet, 1.0, 0.03, 0.97),
+                    emissive: 2_500.0,
+                    additive: 0.0,
+                    soft: 0.0,
+                    wind: 0.0,
+                    ..em("vortex")
+                },
+                // Energy crackling around the rim.
+                EmitterDesc {
+                    rate: 260.0,
+                    shape: EmitShape::Ring {
+                        radius: 2.3,
+                        thickness: 0.08,
+                    },
+                    speed: [0.0, 0.0],
+                    velocity: [0.0, 0.15, 0.0],
+                    orbit_speed: 1.6,
+                    drag: 0.4,
+                    wind: 0.0,
+                    lifetime: [0.25, 0.6],
+                    size: [0.03, 0.07],
+                    sprite: Sprite::Spark,
+                    facing: Facing::Velocity,
+                    stretch: 0.06,
+                    color: g(&[(0.0, [1.0, 0.8, 1.0, 1.0]), (1.0, [0.8, 0.35, 1.0, 0.0])]),
+                    emissive: 40_000.0,
+                    additive: 1.0,
+                    ..em("rim_sparks")
+                },
+                // Motes drawn in, spiraling toward the eye.
+                EmitterDesc {
+                    rate: 220.0,
+                    shape: EmitShape::Ring {
+                        radius: 2.6,
+                        thickness: 0.7,
+                    },
+                    speed: [0.0, 0.1],
+                    velocity: [0.0, -0.1, 0.0],
+                    orbit_speed: 2.4,
+                    vortex: 2.0,
+                    attract: 1.7,
+                    drag: 0.5,
+                    wind: 0.0,
+                    lifetime: [1.4, 2.4],
+                    size: [0.04, 0.09],
+                    color: g(&[
+                        (0.0, [0.6, 0.35, 1.0, 0.0]),
+                        (0.2, [0.8, 0.5, 1.0, 1.0]),
+                        (1.0, [1.0, 0.55, 0.95, 0.0]),
+                    ]),
+                    emissive: 25_000.0,
+                    additive: 1.0,
+                    ..em("inflow")
+                },
+                // Stars spilling out toward whoever stands before it, drifting down.
+                EmitterDesc {
+                    rate: 14.0,
+                    shape: EmitShape::Disc { radius: 1.4 },
+                    speed: [0.0, 0.3],
+                    velocity: [0.0, 1.4, 0.0],
+                    gravity: 0.15,
+                    drag: 0.6,
+                    wind: 0.3,
+                    lifetime: [1.2, 2.2],
+                    size: [0.08, 0.16],
+                    spin_deg: [-90.0, 90.0],
+                    sprite: Sprite::Star,
+                    color: g(&[(0.0, [0.95, 0.8, 1.0, 1.0]), (1.0, [0.6, 0.3, 1.0, 0.0])]),
+                    emissive: 30_000.0,
+                    additive: 1.0,
+                    ..em("spill")
                 },
             ],
         )
@@ -1088,6 +1203,7 @@ fn spells() -> Vec<EffectDesc> {
         frost_bolt,
         frost_impact,
         portal,
+        gate,
         heal,
         charge,
         lightning_hit,
@@ -1514,26 +1630,32 @@ fn impacts() -> Vec<EffectDesc> {
             [0.32, 0.25, 0.18],
             vec![],
         ),
-        surface(
-            "impact.rock",
-            "A hit on rock: grey dust, stone chips and a few sparks.",
-            rock,
-            rock,
-            vec![EmitterDesc {
-                lifetime: [0.2, 0.5],
-                ..sparks("sparks", 6, [3.0, 8.0])
-            }],
-        ),
-        surface(
-            "impact.concrete",
-            "A hit on concrete: pale dust, chips and a few sparks.",
-            [0.62, 0.6, 0.56],
-            [0.6, 0.58, 0.55],
-            vec![EmitterDesc {
-                lifetime: [0.2, 0.5],
-                ..sparks("sparks", 5, [3.0, 8.0])
-            }],
-        ),
+        EffectDesc {
+            mark: mark(MarkKind::Chip, 0.07, 120.0, 0.0),
+            ..surface(
+                "impact.rock",
+                "A hit on rock: grey dust, stone chips, a few sparks and a chipped pock.",
+                rock,
+                rock,
+                vec![EmitterDesc {
+                    lifetime: [0.2, 0.5],
+                    ..sparks("sparks", 6, [3.0, 8.0])
+                }],
+            )
+        },
+        EffectDesc {
+            mark: mark(MarkKind::Chip, 0.07, 120.0, 0.0),
+            ..surface(
+                "impact.concrete",
+                "A hit on concrete: pale dust, chips, a few sparks and a chipped pock.",
+                [0.62, 0.6, 0.56],
+                [0.6, 0.58, 0.55],
+                vec![EmitterDesc {
+                    lifetime: [0.2, 0.5],
+                    ..sparks("sparks", 5, [3.0, 8.0])
+                }],
+            )
+        },
         surface(
             "impact.wood",
             "A hit on wood: splinters and light dust.",

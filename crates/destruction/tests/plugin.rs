@@ -441,3 +441,93 @@ fn a_world_shift_carries_the_demos_and_falling_debris_along() {
         b.velocity
     );
 }
+
+/// Stand-in for a fire module: everything hotter than its ignition temperature burns
+/// through its fuel in `burn_secs`, then is burnt.
+fn burn_everything_lit(app: &mut App, burn_secs: f32) {
+    use engine_world::{BurnState, Combustible};
+    let dt = STEP as f32;
+    let mut q = app.world.query::<&mut Combustible>();
+    for mut c in q.iter_mut(&mut app.world) {
+        if c.state == BurnState::Intact && c.temperature_c >= c.ignition_c {
+            c.state = BurnState::Burning;
+        }
+        if c.state == BurnState::Burning {
+            c.fuel_kg -= c.fuel_kg.max(0.5) * dt / burn_secs;
+            if c.fuel_kg <= 0.0 {
+                c.fuel_kg = 0.0;
+                c.state = BurnState::Burnt;
+            }
+        }
+    }
+}
+
+#[test]
+fn a_burning_shed_chars_and_comes_down() {
+    use engine_destruction::barn::{BarnFire, BarnPiece, spawn_barn};
+    use engine_destruction::burn::Charring;
+    use engine_world::{BurnState, Combustible};
+    let mut app = app();
+    let barn = {
+        let mut queue = bevy_ecs::world::CommandQueue::default();
+        let mut commands = Commands::new(&mut queue, &app.world);
+        let e = spawn_barn(&mut commands, DVec3::ZERO, 0.0);
+        queue.apply(&mut app.world);
+        e
+    };
+    run_secs(&mut app, 0.5);
+    let standing = |app: &mut App| {
+        app.world
+            .query_filtered::<(), (With<BarnPiece>, With<StructuralPiece>)>()
+            .iter(&app.world)
+            .count()
+    };
+    let total = standing(&mut app);
+    let fallen: Vec<String> = app
+        .world
+        .query_filtered::<(&Name, &Transform), (With<BarnPiece>, Without<StructuralPiece>)>()
+        .iter(&app.world)
+        .map(|(n, t)| format!("{} at {:?}", n.as_str(), t.translation))
+        .collect();
+    assert!(total == 22, "{total} pieces standing; fell: {fallen:?}");
+    // Every piece is fuel, and nothing burns before the woodpile is lit.
+    let fuel = app
+        .world
+        .query_filtered::<&Combustible, With<BarnPiece>>()
+        .iter(&app.world)
+        .count();
+    assert_eq!(fuel, total);
+    // Lit at 2 s; the stand-in fire spreads by lighting everything once the woodpile burns.
+    for k in 0..(40.0 / STEP) as usize {
+        burn_everything_lit(&mut app, 12.0);
+        if k as f64 * STEP > 4.0 {
+            let mut q = app.world.query::<&mut Combustible>();
+            for mut c in q.iter_mut(&mut app.world) {
+                c.temperature_c = c.temperature_c.max(400.0);
+            }
+        }
+        app.update();
+    }
+    let charred = app
+        .world
+        .query::<&Charring>()
+        .iter(&app.world)
+        .filter(|c| c.level.is_some())
+        .count();
+    assert!(charred >= total / 2, "{charred} of {total} charred");
+    let left = standing(&mut app);
+    assert!(left < total / 2, "{left} of {total} pieces still standing");
+    let burnt = app
+        .world
+        .query::<&Combustible>()
+        .iter(&app.world)
+        .filter(|c| c.state == BurnState::Burnt)
+        .count();
+    assert!(burnt > 0);
+    // The loop rebuilds it whole.
+    let cycle = app.world.get::<BarnFire>(barn).unwrap().cycle;
+    call_api(&mut app.world, RESTART_API, json!({})).unwrap();
+    run_secs(&mut app, 0.5);
+    assert_eq!(app.world.get::<BarnFire>(barn).unwrap().cycle, cycle + 1);
+    assert_eq!(standing(&mut app), total);
+}

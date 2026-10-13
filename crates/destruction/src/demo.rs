@@ -120,6 +120,14 @@ pub const VIEWS: &[DemoView] = &[
         warmup_secs: 10.1,
     },
     DemoView {
+        key: "fortress_fire",
+        name: "A timber storehouse burning down",
+        eye: [39.0, 3.2, 8.0],
+        target: [31.0, 2.0, 20.0],
+        hour: 15.0,
+        warmup_secs: 45.0,
+    },
+    DemoView {
         key: "fortress_arch",
         name: "A rock arch blown off its foot",
         eye: [-26.0, 6.0, -4.0],
@@ -356,6 +364,7 @@ pub fn spawn_demo(commands: &mut Commands, origin: DVec3) {
         props: Vec::new(),
     };
     let (tower, posts) = spawn_tower(commands, o);
+    crate::barn::spawn_barn(commands, o + DVec3::from_array(crate::barn::BARN), 0.0);
     let mut targets = targets;
     targets.tower = tower;
     targets.tower_posts = posts;
@@ -1117,7 +1126,8 @@ fn run_step(world: &mut World, demo: &mut DestructionDemo, step: Step) {
             }
         }
         Step::Clear => {
-            let mut q = world.query::<&mut Debris>();
+            // The storehouse keeps its own (longer) loop.
+            let mut q = world.query_filtered::<&mut Debris, Without<crate::barn::BarnPiece>>();
             for mut d in q.iter_mut(world) {
                 if d.lifetime < FOREVER * 0.5 {
                     d.age = d.age.max(d.lifetime);

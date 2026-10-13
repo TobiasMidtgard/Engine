@@ -4,8 +4,11 @@
 
 pub mod architecture;
 pub mod assets;
+pub mod barn;
+pub mod burn;
 pub mod charges;
 pub mod collapse;
+pub mod cracks;
 pub mod debris;
 pub mod demo;
 pub mod dress;
@@ -109,6 +112,9 @@ pub struct DestructionSettings {
     pub cells_per_chunk: usize,
     /// Seconds an unsupported building piece hangs before it falls.
     pub collapse_delay_secs: f32,
+    /// Wooden building pieces get an `engine_world::Combustible`, so a fire module burns
+    /// them: they char, weaken and come down.
+    pub wood_burns: bool,
 }
 
 impl Default for DestructionSettings {
@@ -132,6 +138,7 @@ impl Default for DestructionSettings {
             max_chunks_per_hit: 14,
             cells_per_chunk: 6,
             collapse_delay_secs: 0.3,
+            wood_burns: true,
         }
     }
 }
@@ -221,13 +228,14 @@ impl Plugin for DestructionPlugin {
                 FixedUpdate,
                 (
                     (demo::demo_script_system,
-                hill::hill_script_system, charges::charges_system)
+                hill::hill_script_system, barn::barn_script_system, charges::charges_system)
                         .chain()
                         .in_set(SimSet::Gameplay),
                     debris::simulate_debris_system.in_set(SimSet::Physics),
                     (
                         hits::collect_hits_system,
                         hits::apply_hits_system,
+                        burn::burn_weaken_system,
                         collapse::structure_system,
                         collapse::voxel_support_system,
                         collapse::shatter_system,
@@ -247,7 +255,10 @@ impl Plugin for DestructionPlugin {
                     debris::age_debris_system,
                     charges::charge_visuals_system,
                     dress::build_prop_models_system,
+                    barn::barn_fuel_system,
+                    burn::make_wood_combustible_system,
                     structure::support_tint_system,
+                    burn::char_system,
                 )
                     .chain()
                     .in_set(UpdateSet::Logic),
@@ -574,13 +585,15 @@ fn register_api(app: &mut App) {
     );
     app.register_api(
         "destruction.demo_restart",
-        "Start the destruction demos (the breach range and the dig-and-build hill) over from the \
-         beginning of their loops, so a camera arriving now sees every step.",
+        "Start the destruction demos (the breach range, the burning storehouse and the \
+         dig-and-build hill) over from the beginning of their loops, so a camera arriving now \
+         sees every step.",
         "{}",
         |world, _| {
             let range = demo::restart_demos(world);
             let hills = hill::restart_hills(world);
-            Ok(json!({"range": range, "hills": hills}))
+            let barns = barn::restart_barns(world);
+            Ok(json!({"range": range, "hills": hills, "barns": barns}))
         },
     );
     app.register_api(
