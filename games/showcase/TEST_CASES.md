@@ -16,8 +16,8 @@ are built, nothing simulates yet) · ⬜ not visible yet
 
 | # | Test case | Zone / viewpoint | Owner | Status |
 |---|---|---|---|---|
-| 1 | Huge scale: walk, drive, fly from the ground to orbit and the Moon without loading screens | `overview`, `tower`, `stratosphere`, `orbit`, `moon` | Planets and terrain | 🟨 camera flies there; planet surface from orbit is flat color |
-| 2 | Efficient enough for multiplanetary travel (planets, moons, orbits, reference frames) | `spaceport`, `orbit`, `moon` | Planets and terrain | ⬜ |
+| 1 | Huge scale: walk, drive, fly from the ground to orbit and the Moon without loading screens | `overview`, `tower`, `stratosphere`, `orbit`, `moon` | Planets and terrain | ✅ the valley sits on a full-size Earth (6,371 km); the camera flies from the ground to a 420 km orbit and to the Moon at its real distance with no loading screens, and ground detail streams in by level of detail |
+| 2 | Efficient enough for multiplanetary travel (planets, moons, orbits, reference frames) | `spaceport`, `orbit`, `moon` | Planets and terrain | 🟨 Earth and the Moon are real terrain at real scale; engine_space (Kepler orbits on rails, time warp, re-anchoring the world on the nearest body, `space.travel`) runs in its `space_shots` example but the showcase doesn't spawn the solar system yet |
 | 3 | Cars with real suspension, tires and drivetrain | `track` | Cars, planes and spaceships | 🟨 demo in; being checked on the Rapier backend |
 | 4 | Planes with aerodynamic surfaces | `airfield` (1.2 km runway) | Cars, planes and spaceships | 🟨 demo in; being checked on the Rapier backend |
 | 5 | Spaceships with thrusters and RCS, launching to orbit | `spaceport` | Cars, planes and spaceships | 🟨 demo in; being checked on the Rapier backend |
@@ -42,7 +42,7 @@ are built, nothing simulates yet) · ⬜ not visible yet
 | # | Test case | Zone / viewpoint | Owner | Status |
 |---|---|---|---|---|
 | 16 | Footsteps in mud, grass, snow, sand, gravel, puddles, wood, metal (sound) | `footsteps` | Audio and footsteps | ✅ trail loop with a hiker, a runner, a dog and a horse; sound rings show each step; the ground reports the trail's surfaces to everyone else |
-| 17 | Footprints and tracks pressed into mud and snow | `tracks` (footprint lab) | Planets and terrain | ⬜ strips of mud, snow and sand with stand-in walkers |
+| 17 | Footprints and tracks pressed into mud and snow | `tracks` (footprint lab) | Planets and terrain | ✅ footprint lab: a hiker, a dog, a horse and a rover leave prints and tracks in strips of mud, snow, sand and grass; rain fills the prints, snowfall covers them; a blast crater, a dug trench and a raised mound |
 | 18 | Destructible walls and barricades (Rainbow Six Siege style) | `fortress` | Destructible terrain and buildings | ✅ breach range: shot drywall, kicked-in barricades, thermite through rebar concrete, blown brick, a watchtower and gate that collapse, a mined cliff that caves in (replays every 20 s) |
 | 19 | Voxel digging and building (Valheim style) | `voxel` | Destructible terrain and buildings | 🟨 voxel mound with a pit |
 
