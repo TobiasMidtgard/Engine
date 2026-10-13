@@ -2,14 +2,18 @@
 //! wolves, European rabbits and starlings.
 //!
 //! Every animal is a set of rigid pieces (torso, neck, head, jaw, ears, tail, leg segments,
-//! hooves, wings) that the pose code in `visuals::animal` places each step. Each piece is
-//! sculpted in the animal's rest pose as a signed distance field and meshed with surface nets
-//! on a grid aligned with its bone (fine across, coarse along), or built directly as tubes
-//! (antlers, bird legs) and feather ribbons (a starling's wings and tail, the folded wings laid
-//! onto its body). Vertices carry the coat pattern (countershading, rump patch, masks, agouti
-//! saddle, a starling's iridescent sheen) times ambient occlusion baked against the whole body,
-//! and UVs that follow the fur's flow, so the tiled fur, plumage, feather, horn and hoof
-//! textures run the right way.
+//! hooves, wings) that the pose code in `visuals::animal` places each step. Deer and wolf
+//! torsos come in two halves, the fore half and the croup, hinged at the loin so the back
+//! bends: the fore half carries a ball behind the cut (the cut's cross-section swept round the
+//! hinge) that the croup's rim slides over, so the seam stays closed as the croup tucks and
+//! lifts, and the ball is painted as the cut it was drawn out of, so the coat runs on across
+//! it. Each piece is sculpted in the animal's rest pose as a signed distance field and meshed
+//! with surface nets on a grid aligned with its bone (fine across, coarse along), or built
+//! directly as tubes (antlers, bird legs) and feather ribbons (a starling's wings and tail, the
+//! folded wings laid onto its body). Vertices carry the coat pattern (countershading, rump
+//! patch, masks, agouti saddle, a starling's iridescent sheen) times ambient occlusion baked
+//! against the whole body, and UVs that follow the fur's flow, so the tiled fur, plumage,
+//! feather, horn and hoof textures run the right way.
 //!
 //! Rest coordinates: meters, Y up, −Z forward, origin on the ground under the body; the right
 //! side is +X. A piece's mesh is stored relative to its pivot (the joint it turns about), with
@@ -56,6 +60,9 @@ impl LegRest {
 pub struct QuadRig {
     /// Torso pivot.
     pub body: Vec3,
+    /// The loin: where the croup bends on the fore half of the torso (on the spine, at the
+    /// cut between the two halves).
+    pub loin: Vec3,
     /// Neck base (inside the chest) and mid-neck joint.
     pub neck: Vec3,
     pub neck2: Vec3,
@@ -103,6 +110,7 @@ fn flip_x(p: Vec3) -> Vec3 {
 /// Red deer hind (stags use the same rig scaled by [`STAG_SCALE`]): 1.15 m at the shoulder.
 pub const DEER: QuadRig = QuadRig {
     body: v3(0.0, 0.90, -0.02),
+    loin: v3(0.0, 1.04, 0.0),
     neck: v3(0.0, 0.93, -0.55),
     neck2: v3(0.0, 1.14, -0.75),
     head: v3(0.0, 1.36, -0.93),
@@ -139,6 +147,7 @@ pub const STAG_SCALE: f32 = 1.1;
 /// Grey wolf: 0.8 m at the shoulder. The neck is one piece (`neck2` sits on the poll).
 pub const WOLF: QuadRig = QuadRig {
     body: v3(0.0, 0.60, -0.02),
+    loin: v3(0.0, 0.70, -0.02),
     neck: v3(0.0, 0.655, -0.34),
     neck2: v3(0.0, 0.80, -0.56),
     head: v3(0.0, 0.80, -0.56),
@@ -230,7 +239,11 @@ pub const BIRD: BirdRig = BirdRig {
 /// A rigid piece of an animal's body.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Piece {
+    /// The torso; for deer and wolves its fore half (chest and barrel), the croup riding on it.
     Body,
+    /// The hind half of a deer's or wolf's torso (loin, croup and haunches), bending on the
+    /// fore half at the loin.
+    Croup,
     Neck,
     Neck2,
     Head,
@@ -259,6 +272,7 @@ impl Piece {
     fn key(self) -> String {
         match self {
             Piece::Body => "body".into(),
+            Piece::Croup => "croup".into(),
             Piece::Neck => "neck".into(),
             Piece::Neck2 => "neck2".into(),
             Piece::Head => "head".into(),
@@ -354,6 +368,7 @@ fn piece_list(species: Species, male: bool) -> Vec<(Piece, Skin)> {
     match species {
         Species::Deer => {
             v.extend([
+                (Piece::Croup, Skin::Coat),
                 (Piece::Neck, Skin::Coat),
                 (Piece::Neck2, Skin::Coat),
                 (Piece::Tail, Skin::Coat),
@@ -370,7 +385,11 @@ fn piece_list(species: Species, male: bool) -> Vec<(Piece, Skin)> {
             }
         }
         Species::Wolf => {
-            v.extend([(Piece::Neck, Skin::Coat), (Piece::Jaw, Skin::Coat)]);
+            v.extend([
+                (Piece::Croup, Skin::Coat),
+                (Piece::Neck, Skin::Coat),
+                (Piece::Jaw, Skin::Coat),
+            ]);
             v.extend([(Piece::Tail, Skin::Coat), (Piece::Tail2, Skin::Coat)]);
             v.extend([(Piece::Ear(0), Skin::Coat), (Piece::Ear(1), Skin::Coat)]);
             for k in 0..4 {
@@ -817,6 +836,15 @@ struct Paint<'a> {
     /// Size of the animal: scales the occlusion probe distances.
     scale: f32,
     pivot: Vec3,
+    /// Paint the ball behind this cut as the cut itself (see [`Seam`]).
+    seam: Option<Seam>,
+}
+
+impl Paint<'_> {
+    /// The rest point and normal a surface point is painted as.
+    fn source(&self, p: Vec3, n: Vec3) -> (Vec3, Vec3) {
+        self.seam.map_or((p, n), |s| s.unbend(p, n))
+    }
 }
 
 /// Baked ambient occlusion at `p` (normal `n`): small creases against the piece's own `near`
@@ -1112,7 +1140,10 @@ fn sculpt(f: Field, region: Region, target: usize, paint: &Paint) -> Mesh {
     let rough: Vec<Vec3> = positions
         .iter()
         .zip(mesh_normals(&positions, &indices))
-        .map(|(&p, n)| (paint.color)(p, n))
+        .map(|(&p, n)| {
+            let (p, n) = paint.source(p, n);
+            (paint.color)(p, n)
+        })
         .collect();
     let (positions, indices) = decimate(positions, indices, target, &rough);
     let ao_field = |p: Vec3| f(p).min((paint.body)(p));
@@ -1128,9 +1159,10 @@ fn sculpt(f: Field, region: Region, target: usize, paint: &Paint) -> Mesh {
                 p -= gradient(f, p, e) * d;
             }
             let n = gradient(f, p, e);
-            let ao = occlusion(&f, &ao_field, p, n, paint.scale);
-            let c = (paint.color)(p, n) * ao;
-            Vertex::new(p - paint.pivot, n, paint.flow.uv(p)).with_color(c.extend(1.0))
+            let (q, m) = paint.source(p, n);
+            let ao = occlusion(&f, &ao_field, q, m, paint.scale);
+            let c = (paint.color)(q, m) * ao;
+            Vertex::new(p - paint.pivot, n, paint.flow.uv(q)).with_color(c.extend(1.0))
         })
         .collect();
     Mesh::new(vertices, indices)
@@ -1153,6 +1185,73 @@ fn mirrored(mesh: &Mesh) -> Mesh {
         t.swap(1, 2);
     }
     Mesh::new(vertices, indices)
+}
+
+// ======================================================================= the bending torso
+
+/// Where a deer's or wolf's torso is cut in two, so its spine can flex and extend: the fore
+/// half (chest and barrel, [`Piece::Body`]) ahead of the plane square to the body through
+/// `pivot` (the loin), the croup ([`Piece::Croup`]) behind it, turning about the pivot's X
+/// axis.
+///
+/// Behind the cut the fore half carries a ball: the torso's cross-section at the cut swept
+/// round the pivot, up to `reach` radians either way. However the croup turns (within
+/// `reach`), the edge of its cut face stays on that ball, so the wedge that opens over the
+/// back or under the belly is filled with skin meeting both halves edge to edge, and the
+/// side closing tucks the croup inside the fore half; at rest the ball lies inside the croup.
+/// The croup reaches a little way into the fore half, its edge hidden there. The ball is painted as the cross-section it was swept from (coat, fur direction and
+/// occlusion), so the coat runs on across the seam however far it opens, the hair drawn out
+/// along the stretch.
+#[derive(Debug, Clone, Copy)]
+struct Seam {
+    pivot: Vec3,
+    reach: f32,
+}
+
+/// How far the fore half of a torso reaches past the cut, so no face lies on it (m).
+const SEAM_OVERLAP: f32 = 0.003;
+/// How far the croup reaches into the fore half, a hair inside its skin, so the croup's edge
+/// (which meshing rounds off) stays hidden there (m).
+const SEAM_TUCK: f32 = 0.02;
+
+impl Seam {
+    /// The fore half of `torso` with its ball.
+    fn fore(&self, torso: SdfFn, p: Vec3) -> f32 {
+        let r = p - self.pivot;
+        let ahead = torso(p).max(r.z - SEAM_OVERLAP);
+        let behind = -r.z - SEAM_OVERLAP;
+        if behind >= ahead {
+            return ahead;
+        }
+        let rho = r.y.hypot(r.z);
+        let swept = torso(v3(p.x, self.pivot.y + rho.copysign(r.y), self.pivot.z));
+        let (s, c) = self.reach.sin_cos();
+        let sector = r.z.abs() * c - r.y.abs() * s;
+        ahead.min(swept.max(sector).max(behind))
+    }
+
+    /// The croup: `torso` behind the cut, reaching a little way into the fore half.
+    fn croup(&self, torso: SdfFn, p: Vec3) -> f32 {
+        let cut = self.pivot.z;
+        let inset = 0.0025 * smooth(cut, cut - SEAM_TUCK, p.z);
+        (torso(p) + inset).max(cut - SEAM_TUCK - p.z)
+    }
+
+    /// The rest point and normal a point of the fore half is painted as: on the ball, turned
+    /// back about the pivot onto the cross-section it was swept from.
+    fn unbend(&self, p: Vec3, n: Vec3) -> (Vec3, Vec3) {
+        let r = p - self.pivot;
+        if r.z <= 0.0 {
+            return (p, n);
+        }
+        let a = if r.y >= 0.0 {
+            r.z.atan2(r.y)
+        } else {
+            -r.z.atan2(-r.y)
+        };
+        let q = Quat::from_rotation_x(-a);
+        (self.pivot + q * r, q * n)
+    }
 }
 
 // ======================================================================= uv flow
@@ -1440,6 +1539,8 @@ struct Spec {
     mirror: Option<Piece>,
     /// A variant of the piece (a stag's neck).
     variant: bool,
+    /// The fore half of a torso cut at this seam: its ball is painted as the cut.
+    seam: Option<Seam>,
 }
 
 /// How a species paints and shades its pieces.
@@ -1464,6 +1565,7 @@ impl Spec {
             body: &kind.body,
             scale: kind.scale,
             pivot: self.pivot,
+            seam: self.seam,
         };
         let mesh = sculpt(&self.f, self.region, self.target, &paint);
         let suffix = if variant { "_stag" } else { "" };
@@ -1913,6 +2015,20 @@ mod deer {
         smin(d, socket, 0.07)
     }
 
+    /// The cut between the fore half of the torso and the croup.
+    pub(super) const SEAM: Seam = Seam {
+        pivot: R.loin,
+        reach: 0.25,
+    };
+
+    fn fore(p: Vec3) -> f32 {
+        SEAM.fore(torso, p)
+    }
+
+    fn croup(p: Vec3) -> f32 {
+        SEAM.croup(torso, p)
+    }
+
     /// Neck thickness at its base (depth; the sides are narrower by [`NECK_SQUASH`]) and at
     /// the mid-neck joint.
     const NECK_R: f32 = 0.16;
@@ -2333,7 +2449,7 @@ mod deer {
                     c = mix(c, cream, patch * 0.7);
                 }
             }
-            Piece::Body => {
+            Piece::Body | Piece::Croup => {
                 // Buff rump patch around the tail, edged darker above.
                 let r = ((p - v3(0.0, 0.96, 0.6)) * v3(1.35, 0.95, 1.0)).length();
                 let patch = (1.0 - smooth(0.12, 0.18, r)) * smooth(-0.25, 0.25, n.z);
@@ -2411,19 +2527,31 @@ mod deer {
         let mut torso_flow = Flow::new(v3(0.0, 0.9, -0.6), v3(0.0, 0.9, 0.62), up, 0.16).tilt(0.45);
         torso_flow.start = 0.22;
         torso_flow.end = 1.0;
+        // In two halves, the croup bending on the fore half at the loin; both painted with
+        // the same flow so the coat runs on across the cut.
+        let voxel = v3(0.0095, 0.0095, 0.013);
+        let cut = R.loin.z;
         specs.push(Spec {
             piece: Piece::Body,
-            f: torso,
-            region: Region::aabb(
-                v3(-0.3, 0.55, -0.75),
-                v3(0.3, 1.25, 0.72),
-                v3(0.0095, 0.0095, 0.013),
-            ),
-            target: 7000,
+            f: fore,
+            region: Region::aabb(v3(-0.3, 0.55, -0.75), v3(0.3, 1.25, cut + 0.16), voxel),
+            target: 4300,
             flow: torso_flow,
             pivot: R.body,
             mirror: None,
             variant: false,
+            seam: Some(SEAM),
+        });
+        specs.push(Spec {
+            piece: Piece::Croup,
+            f: croup,
+            region: Region::aabb(v3(-0.3, 0.55, cut - 0.05), v3(0.3, 1.25, 0.72), voxel),
+            target: 3600,
+            flow: torso_flow,
+            pivot: R.loin,
+            mirror: None,
+            variant: false,
+            seam: None,
         });
         // Necks (hind and stag).
         for stag in [false, true] {
@@ -2441,6 +2569,7 @@ mod deer {
                 pivot: R.neck,
                 mirror: None,
                 variant: stag,
+                seam: None,
             });
             specs.push(Spec {
                 piece: Piece::Neck2,
@@ -2451,6 +2580,7 @@ mod deer {
                 pivot: R.neck2,
                 mirror: None,
                 variant: stag,
+                seam: None,
             });
         }
         // Head.
@@ -2472,6 +2602,7 @@ mod deer {
             pivot: R.head,
             mirror: None,
             variant: false,
+            seam: None,
         });
         // Ears (right sculpted, left mirrored) and tail.
         let (along, _, cup) = ear_frame();
@@ -2490,6 +2621,7 @@ mod deer {
             pivot: R.ear,
             mirror: Some(Piece::Ear(0)),
             variant: false,
+            seam: None,
         });
         specs.push(Spec {
             piece: Piece::Tail,
@@ -2500,6 +2632,7 @@ mod deer {
             pivot: R.tail,
             mirror: None,
             variant: false,
+            seam: None,
         });
         // Legs: right side sculpted, left mirrored.
         type Legs = (
@@ -2547,6 +2680,7 @@ mod deer {
                     pivot: j[s],
                     mirror: Some(Piece::Leg(k - 1, s as u8)),
                     variant: false,
+                    seam: None,
                 });
             }
             // Hoof.
@@ -2562,6 +2696,7 @@ mod deer {
                     body: &body,
                     scale: 0.4,
                     pivot: j[3],
+                    seam: None,
                 };
                 let c = v3(j[4].x, 0.04, (j[3].z + j[4].z) * 0.5);
                 let region = Region::aabb(
@@ -2592,6 +2727,7 @@ mod deer {
                 body: &body,
                 scale: 0.3,
                 pivot: R.head,
+                seam: None,
             };
             let nose = hp(NOSE);
             let mut mesh = sculpt(
@@ -2779,6 +2915,20 @@ mod wolf {
 
     fn hj(i: usize) -> Vec3 {
         R.hind.joints[i]
+    }
+
+    /// The cut between the fore half of the torso and the croup.
+    pub(super) const SEAM: Seam = Seam {
+        pivot: R.loin,
+        reach: 0.36,
+    };
+
+    fn fore(p: Vec3) -> f32 {
+        SEAM.fore(torso, p)
+    }
+
+    fn croup(p: Vec3) -> f32 {
+        SEAM.croup(torso, p)
     }
 
     pub fn torso(p: Vec3) -> f32 {
@@ -3130,7 +3280,7 @@ mod wolf {
         let up = n.y;
         let mut c = grey;
         match piece {
-            Piece::Body | Piece::Neck => {
+            Piece::Body | Piece::Croup | Piece::Neck => {
                 c = mix(
                     c,
                     saddle,
@@ -3241,19 +3391,31 @@ mod wolf {
         let mut torso_flow =
             Flow::new(v3(0.0, 0.62, -0.47), v3(0.0, 0.62, 0.45), up, 0.2).tilt(0.4);
         torso_flow.start = 0.12;
+        // In two halves, the croup bending on the fore half at the loin; both painted with
+        // the same flow so the coat runs on across the cut.
+        let voxel = v3(0.0082, 0.0082, 0.0105);
+        let cut = R.loin.z;
         specs.push(Spec {
             piece: Piece::Body,
-            f: torso,
-            region: Region::aabb(
-                v3(-0.22, 0.36, -0.56),
-                v3(0.22, 0.9, 0.5),
-                v3(0.0082, 0.0082, 0.0105),
-            ),
-            target: 6500,
+            f: fore,
+            region: Region::aabb(v3(-0.22, 0.36, -0.56), v3(0.22, 0.9, cut + 0.12), voxel),
+            target: 4000,
             flow: torso_flow,
             pivot: R.body,
             mirror: None,
             variant: false,
+            seam: Some(SEAM),
+        });
+        specs.push(Spec {
+            piece: Piece::Croup,
+            f: croup,
+            region: Region::aabb(v3(-0.22, 0.36, cut - 0.05), v3(0.22, 0.9, 0.5), voxel),
+            target: 3200,
+            flow: torso_flow,
+            pivot: R.loin,
+            mirror: None,
+            variant: false,
+            seam: None,
         });
         specs.push(Spec {
             piece: Piece::Neck,
@@ -3264,6 +3426,7 @@ mod wolf {
             pivot: R.neck,
             mirror: None,
             variant: false,
+            seam: None,
         });
         let nose = hp(v3(0.0, 0.0, 0.28));
         let mut head_flow = Flow::new(nose, hp(v3(0.0, 0.0, -0.06)), up, 0.12).tilt(0.2);
@@ -3277,6 +3440,7 @@ mod wolf {
             pivot: R.head,
             mirror: None,
             variant: false,
+            seam: None,
         });
         specs.push(Spec {
             piece: Piece::Jaw,
@@ -3293,6 +3457,7 @@ mod wolf {
             pivot: R.jaw,
             mirror: None,
             variant: false,
+            seam: None,
         });
         let (along, _, cup) = ear_frame();
         specs.push(Spec {
@@ -3310,6 +3475,7 @@ mod wolf {
             pivot: R.ear,
             mirror: Some(Piece::Ear(0)),
             variant: false,
+            seam: None,
         });
         specs.push(Spec {
             piece: Piece::Tail,
@@ -3320,6 +3486,7 @@ mod wolf {
             pivot: R.tail,
             mirror: None,
             variant: false,
+            seam: None,
         });
         specs.push(Spec {
             piece: Piece::Tail2,
@@ -3330,6 +3497,7 @@ mod wolf {
             pivot: R.tail2,
             mirror: None,
             variant: false,
+            seam: None,
         });
         type Legs = (u8, [SdfFn; 4], LegRest, [f32; 4], [usize; 4]);
         let legs: [Legs; 2] = [
@@ -3377,6 +3545,7 @@ mod wolf {
                     pivot: j[s],
                     mirror: Some(Piece::Leg(k - 1, s as u8)),
                     variant: false,
+                    seam: None,
                 });
             }
         }
@@ -3393,6 +3562,7 @@ mod wolf {
                 body: &body,
                 scale: 0.25,
                 pivot: R.head,
+                seam: None,
             };
             let nose = hp(NOSE);
             let mut mesh = sculpt(
@@ -3713,6 +3883,7 @@ mod rabbit {
             pivot: R.body,
             mirror: None,
             variant: false,
+            seam: None,
         });
         let mut head_flow = Flow::new(
             hs(v3(0.0, 0.145, -0.18)),
@@ -3735,6 +3906,7 @@ mod rabbit {
             pivot: R.head,
             mirror: None,
             variant: false,
+            seam: None,
         });
         let (along, _, cup) = ear_frame();
         specs.push(Spec {
@@ -3752,6 +3924,7 @@ mod rabbit {
             pivot: R.ear,
             mirror: Some(Piece::Ear(0)),
             variant: false,
+            seam: None,
         });
         specs.push(Spec {
             piece: Piece::Tail,
@@ -3766,6 +3939,7 @@ mod rabbit {
             pivot: R.tail,
             mirror: None,
             variant: false,
+            seam: None,
         });
         let f = R.front;
         let h = R.hind;
@@ -3787,6 +3961,7 @@ mod rabbit {
                 pivot: a,
                 mirror: Some(Piece::Leg(k - 1, s)),
                 variant: false,
+                seam: None,
             });
         }
         specs.sort_by_key(|s| std::cmp::Reverse(s.target));
@@ -4456,6 +4631,7 @@ mod bird {
                 pivot: R.body,
                 mirror: None,
                 variant: false,
+                seam: None,
             },
             Spec {
                 piece: Piece::Head,
@@ -4470,6 +4646,7 @@ mod bird {
                 pivot: R.head,
                 mirror: None,
                 variant: false,
+                seam: None,
             },
         ];
         for spec in specs {
@@ -4519,6 +4696,7 @@ mod bird {
                 body: &body,
                 scale: KIND.scale,
                 pivot: R.head,
+                seam: None,
             };
             let region = Region::bone(BILL, BILL_TIP, 0.0075, 0.00035, 0.0006);
             mesh.merge(&sculpt(&bill, region, 360, &paint));
@@ -4532,6 +4710,53 @@ pub use deer::{FWD as DEER_HEAD_FWD, UP as DEER_HEAD_UP};
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Deer and wolf torsos bend at the loin: the fore half's ball stays inside the torso,
+    /// and the croup, bent either way a little further than the gallop bends it, stays
+    /// inside the fore half (no lip where the halves meet).
+    #[test]
+    fn torso_halves_stay_joined_when_the_back_bends() {
+        let cases: [(&str, Seam, SdfFn, f32); 2] = [
+            ("deer", deer::SEAM, deer::torso, 0.2),
+            ("wolf", wolf::SEAM, wolf::torso, 0.32),
+        ];
+        for (name, seam, torso, bend) in cases {
+            let (mut ball, mut lip) = (0.0f32, 0.0f32);
+            for ix in 0..40 {
+                for iy in 0..120 {
+                    for iz in 0..70 {
+                        let p = seam.pivot
+                            + v3(
+                                ix as f32 * 0.005,
+                                iy as f32 * 0.005 - 0.45,
+                                iz as f32 * 0.005 - 0.12,
+                            );
+                        let f = seam.fore(torso, p);
+                        if f < 0.0 {
+                            ball = ball.max(torso(p));
+                        }
+                        if p.z < seam.pivot.z {
+                            for th in [-bend, bend] {
+                                let r = seam.pivot + Quat::from_rotation_x(-th) * (p - seam.pivot);
+                                if seam.croup(torso, r) < 0.0 {
+                                    lip = lip.max(f);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            eprintln!("{name}: ball out {ball:.4} m, croup out {lip:.4} m");
+            assert!(
+                ball < 0.002,
+                "{name}: the ball stands {ball:.4} m out of the torso"
+            );
+            assert!(
+                lip < 0.0025,
+                "{name}: the croup stands {lip:.4} m out at the seam"
+            );
+        }
+    }
 
     #[test]
     fn deer_meshes_fit_the_budget() {

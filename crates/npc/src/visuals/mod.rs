@@ -362,7 +362,15 @@ pub(crate) fn pose_stand_ins(
                     crouch: loco.mode == LocomotionMode::Crouch,
                     biting: mind.is_some_and(|m| now < m.bite_ready - 0.55),
                     vary: ((me.to_bits() as u32) as f32 * 0.618_034).fract(),
-                    senses: mind.map(|m| animal::Senses::of(m, now)).unwrap_or_default(),
+                    senses: mind
+                        .map(|m| animal::Senses {
+                            prey: m
+                                .prey
+                                .and_then(|e| foes.get(e).ok())
+                                .map(|f| f.0.translation),
+                            ..animal::Senses::of(m, now)
+                        })
+                        .unwrap_or_default(),
                     bird: bird.copied(),
                 };
                 let pose = animal::animal(&input, &mut st.beast);

@@ -1,6 +1,8 @@
 //! Close-up renders of the procedural wildlife frozen in chosen states (grazing, alert,
-//! walking, trotting, galloping, lying, dead, stalking, biting, hopping, sitting up, pecking,
-//! flying), flipbook strips of them on the move, plus budget checks on the generated meshes.
+//! walking, trotting, galloping, the back gathered and extended, lying, dead, stalking,
+//! biting, hopping, sitting up, pecking, flying), flipbook strips of them on the move (gaits,
+//! an alarm, a wolf's hunt from stalk to bite, a deer killed at a gallop), plus budget checks
+//! on the generated meshes.
 //! Rendering needs a GPU or lavapipe and passes with a note without one. Set
 //! `NPC_SCREENSHOT_DIR` to keep the PNGs, and `NPC_STRIPS` (names, comma separated) to shoot
 //! only some strips.
@@ -88,7 +90,7 @@ fn app() -> App {
         Transform::default(),
         MeshRenderer::new(
             Shape::Plane {
-                size: [600.0, 600.0],
+                size: [2000.0, 2000.0],
                 subdivisions: 1,
             },
             StandardMaterial::hex(0x55703a).with_roughness(0.95),
@@ -315,6 +317,20 @@ fn deer_closeups() {
             5.0,
             10.0,
         ),
+        // The spine through the gallop: gathered (croup tucked, back arched, hind feet
+        // reaching under) and extended (croup raised, back hollowed, legs stretched out).
+        (
+            "deer_hind_gathered",
+            p(AnimalState::Flee).moving(10.0, 2.51, LocomotionMode::Sprint),
+            4.2,
+            0.0,
+        ),
+        (
+            "deer_hind_extended",
+            p(AnimalState::Flee).moving(10.0, 5.65, LocomotionMode::Sprint),
+            4.2,
+            0.0,
+        ),
         ("deer_stag_rest", stag(AnimalState::Rest), 4.5, 40.0),
         ("deer_hind_dead", p(AnimalState::Dead), 4.5, 60.0),
         ("deer_hind_rear", p(AnimalState::Alert), 3.5, -140.0),
@@ -342,6 +358,18 @@ fn wolf_closeups() {
             },
             3.8,
             10.0,
+        ),
+        (
+            "wolf_gathered",
+            w(AnimalState::Chase).moving(11.0, 1.88, LocomotionMode::Sprint),
+            3.2,
+            0.0,
+        ),
+        (
+            "wolf_extended",
+            w(AnimalState::Chase).moving(11.0, 5.03, LocomotionMode::Sprint),
+            3.2,
+            0.0,
         ),
         (
             "wolf_stalk",
@@ -501,6 +529,12 @@ struct Cue {
     threat: Option<(Vec2, f32)>,
     /// The noise is heard at this moment.
     heard: bool,
+    /// Wolves: the animal it hunts is this far (m) ahead of it.
+    prey: Option<f32>,
+    /// Wolves: it bites (once; the bite is ready again a second later).
+    bite: bool,
+    /// Hurt (killed) by something here (world x, z from where the course starts).
+    shot: Option<Vec2>,
 }
 
 impl Cue {
@@ -513,6 +547,9 @@ impl Cue {
             state,
             threat: None,
             heard: false,
+            prey: None,
+            bite: false,
+            shot: None,
         }
     }
 }
@@ -527,14 +564,31 @@ struct Drive {
     course: Course,
     origin: DVec3,
     delay: f64,
+    /// Stands in for the animal a wolf hunts.
+    prey: Entity,
 }
+
+/// What a scripted wolf hunts: a bare point the course keeps ahead of it.
+#[derive(Component)]
+struct Quarry;
+
+type DriveItem<'a> = (
+    &'a Drive,
+    &'a NpcClock,
+    &'a Transform,
+    &'a mut MoveIntent,
+    &'a mut AnimalMind,
+);
 
 /// Where a probe animal was at each step of its course (course time, position).
 #[derive(Component, Default)]
 struct Track(Vec<(f64, DVec3)>);
 
-fn drive(mut q: Query<(&Drive, &NpcClock, &mut MoveIntent, &mut AnimalMind)>) {
-    for (d, clock, mut intent, mut mind) in &mut q {
+fn drive(
+    mut q: Query<DriveItem>,
+    mut quarry: Query<&mut Transform, (With<Quarry>, Without<Drive>)>,
+) {
+    for (d, clock, tf, mut intent, mut mind) in &mut q {
         let t = clock.now - d.delay;
         let mut cue = (d.course)(t.max(0.0) as f32);
         if t < 0.0 {
@@ -560,6 +614,19 @@ fn drive(mut q: Query<(&Drive, &NpcClock, &mut MoveIntent, &mut AnimalMind)>) {
             if cue.heard {
                 mind.heard = Some((at, 1.0));
             }
+        }
+        mind.hurt_from = cue
+            .shot
+            .map(|p| d.origin + DVec3::new(f64::from(p.x), 0.0, f64::from(p.y)));
+        mind.prey = cue.prey.map(|ahead| {
+            if let Ok(mut q) = quarry.get_mut(d.prey) {
+                q.translation = tf.translation + (tf.rotation * Vec3::NEG_Z * ahead).as_dvec3();
+            }
+            d.prey
+        });
+        // As the wildlife code bites: ready again 0.9..1.3 s on.
+        if cue.bite && clock.now >= mind.bite_ready {
+            mind.bite_ready = clock.now + 1.1;
         }
     }
 }
@@ -748,6 +815,18 @@ fn deer_stop(t: f32) -> Cue {
         Cue::new(AnimalState::Graze, 0.0, 0.0)
     }
 }
+/// Shot dead at a gallop from off its right side: it drops, skids to a stop, falls onto its
+/// left side and settles.
+fn deer_death(t: f32) -> Cue {
+    if t < 1.0 {
+        deer_gallop(t)
+    } else {
+        Cue {
+            shot: Some(Vec2::new(14.0, 20.0)),
+            ..Cue::new(AnimalState::Dead, 0.0, 0.0)
+        }
+    }
+}
 /// Walking round a tight bend to the left.
 fn deer_bend(t: f32) -> Cue {
     let a = 0.9 * t;
@@ -773,6 +852,25 @@ fn wolf_stalk(_: f32) -> Cue {
     Cue {
         crouch: true,
         ..Cue::new(AnimalState::Stalk, 0.4, 0.0)
+    }
+}
+/// Stalking its prey 10 m ahead, then the rush: it sprints in and bites as the wildlife code
+/// bites, within 1.6 m.
+fn wolf_hunt(t: f32) -> Cue {
+    if t < 1.2 {
+        Cue {
+            crouch: true,
+            prey: Some(10.0),
+            ..Cue::new(AnimalState::Stalk, 0.3, 0.0)
+        }
+    } else {
+        let d = (10.0 - 6.0 * (t - 1.2)).max(1.4);
+        Cue {
+            sprint: true,
+            prey: Some(d),
+            bite: d < 1.6,
+            ..Cue::new(AnimalState::Chase, 1.0, 0.0)
+        }
     }
 }
 fn rabbit_hop(_: f32) -> Cue {
@@ -814,6 +912,10 @@ fn held(mut s: Strip) -> Strip {
 fn course_animal(app: &mut App, s: &Strip, origin: DVec3, delay: f64) -> Entity {
     let mut animal = Animal::new(s.species);
     animal.male = s.male;
+    let prey = app
+        .world
+        .spawn((Transform::from_translation(origin), Quarry))
+        .id();
     let mut e = app.world.spawn((
         Transform::from_translation(origin)
             .with_rotation(Quat::from_rotation_y(-std::f32::consts::FRAC_PI_2)),
@@ -826,6 +928,7 @@ fn course_animal(app: &mut App, s: &Strip, origin: DVec3, delay: f64) -> Entity 
                 course,
                 origin,
                 delay,
+                prey,
             });
         }
         None => {
@@ -864,9 +967,10 @@ fn live_until(app: &mut App, clock_of: Entity, until: f64) {
 }
 
 /// Flipbook strips of the wildlife on the move: each animal runs a course with the fallback
-/// mover (no AI) and is shot at eight moments side by side, so gaits, footfalls, starts and
-/// stops, alarms and flight read frame by frame as an animator reads them. The PNGs are
-/// `animal_motion_<strip>.png`.
+/// mover (no AI; the course sets what the wildlife code would: state, threat, prey, bite,
+/// killing blow) and is shot at eight moments side by side, so gaits, footfalls, starts and
+/// stops, alarms, the hunt, the fall and flight read frame by frame as an animator reads
+/// them. The PNGs are `animal_motion_<strip>.png`.
 #[test]
 fn wildlife_motion_strips() {
     let mut app = App::new();
@@ -939,6 +1043,12 @@ fn wildlife_motion_strips() {
             deer_alarm,
             [0.6, 0.95, 1.4, 2.2, 2.5, 2.62, 2.75, 3.0],
         ),
+        strip(
+            "deer-death",
+            Species::Deer,
+            deer_death,
+            [0.9, 1.08, 1.2, 1.32, 1.45, 1.58, 1.75, 2.3],
+        ),
         held(strip(
             "deer-stop",
             Species::Deer,
@@ -957,6 +1067,14 @@ fn wildlife_motion_strips() {
             Species::Wolf,
             wolf_chase,
             [0.5, 1.2, 1.27, 1.34, 2.4, 2.45, 2.5, 2.55],
+        ),
+        // One stride of the gallop.
+        strip("wolf-gallop", Species::Wolf, wolf_chase, every(2.4, 0.033)),
+        strip(
+            "wolf-hunt",
+            Species::Wolf,
+            wolf_hunt,
+            [0.7, 1.15, 1.27, 1.4, 1.6, 2.5, 2.62, 2.75],
         ),
         held(strip(
             "wolf-stalk",
@@ -1039,6 +1157,11 @@ fn wildlife_motion_strips() {
             Species::Rabbit => (0.8, 0.12),
             Species::Bird => (0.55, 0.12),
         };
+        // Lower for a strip that ends with the animal on the ground.
+        let down = s
+            .course
+            .is_some_and(|c| c(s.times[FRAMES - 1]).state == AnimalState::Dead);
+        let h = if down { h * 0.5 } else { h };
         let width = gap * FRAMES as f64;
         let row = DVec3::new(0.0, 0.0, 100.0 * k as f64);
         let at = grid(s.times[FRAMES - 1]);
