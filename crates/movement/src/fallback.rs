@@ -7,8 +7,11 @@
 //! both. It steps aside on its own as soon as a physics backend is installed
 //! ([`PhysicsBackend`] exists), so it never fights a real one.
 //!
-//! It is deliberately simple: no rotation of characters, no rigid bodies, no pushing.
+//! It is deliberately simple: no rotation of characters, no rigid bodies, no pushing. A
+//! character standing on a box that moves (a lift, a train car) is carried by how far the box
+//! moved, as the contract asks.
 
+use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
 use engine_core::math::{DVec3, Quat, Vec3};
@@ -37,6 +40,8 @@ struct Aabb {
 #[derive(Default)]
 struct Snapshot {
     boxes: Vec<Aabb>,
+    /// How far each box moved since the snapshot before, meters (only boxes that moved).
+    moved: HashMap<Entity, DVec3>,
 }
 
 /// The stand-in's shared state (its queries read the same snapshot).
@@ -93,15 +98,30 @@ pub(crate) fn publish(
     ground: Res<Ground>,
     colliders: Query<(Entity, &Transform, &Collider), Without<CharacterController>>,
 ) {
-    let boxes = colliders
+    let boxes: Vec<Aabb> = colliders
         .iter()
         .filter(|(_, _, c)| !c.sensor)
         .map(|(e, t, c)| aabb(e, t, c))
         .collect();
     match fallback {
-        Some(f) => f.snapshot.write().expect("snapshot lock").boxes = boxes,
+        Some(f) => {
+            let mut snap = f.snapshot.write().expect("snapshot lock");
+            let before: HashMap<Entity, DVec3> =
+                snap.boxes.iter().map(|b| (b.entity, b.min)).collect();
+            snap.moved = boxes
+                .iter()
+                .filter_map(|b| {
+                    let d = b.min - *before.get(&b.entity)?;
+                    (d != DVec3::ZERO).then_some((b.entity, d))
+                })
+                .collect();
+            snap.boxes = boxes;
+        }
         None => {
-            let snapshot = Arc::new(RwLock::new(Snapshot { boxes }));
+            let snapshot = Arc::new(RwLock::new(Snapshot {
+                boxes,
+                moved: HashMap::new(),
+            }));
             commands.insert_resource(PhysicsQueries(Arc::new(Queries {
                 snapshot: snapshot.clone(),
                 ground: ground.clone(),
@@ -136,7 +156,13 @@ pub(crate) fn step_characters(
             continue;
         }
         let h = DVec3::new(cc.radius as f64, cc.height as f64 * 0.5, cc.radius as f64);
-        let start = t.translation;
+        // Carried by the box it stood on, if that moved.
+        let carried = state
+            .ground_entity
+            .and_then(|g| snap.moved.get(&g))
+            .copied()
+            .unwrap_or(DVec3::ZERO);
+        let start = t.translation + carried;
         let travel = mv.velocity.as_dvec3() * dt;
         let steps = (travel.length() / SUBSTEP_METERS).ceil().clamp(1.0, 64.0) as u32;
         let mut pos = start;
@@ -398,6 +424,7 @@ mod tests {
         let q = Queries {
             snapshot: Arc::new(RwLock::new(Snapshot {
                 boxes: vec![wall()],
+                ..Default::default()
             })),
             ground: Ground::default(),
         };

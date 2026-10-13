@@ -529,6 +529,19 @@ pub fn demo_views(z: &Zone) -> Vec<View> {
                 .on_arrive("movement.duel", &duel("Blink"))
                 .on_arrive("movement.grappler", "{}")
                 .on_leave("movement.duel", cycle),
+                // The freight station: the rider restarts its loop on arrival, with the car
+                // about to pull out, and is caught leaping onto the car's side.
+                View::new(
+                    "parkour_freight",
+                    "Ride a moving freight car: leap onto its side, wall-run along it, climb aboard",
+                    [-20.0, 3.6, 21.0],
+                    [-15.5, 3.0, 28.5],
+                    16.0,
+                )
+                .warmup(1.65)
+                .on_arrive("movement.duel", &duel("Blink"))
+                .on_arrive("movement.rider", "{}")
+                .on_leave("movement.duel", cycle),
                 // Play mode (P): a pilot in front of the camera, locked onto the elite.
                 View::new(
                     "parkour_play",
