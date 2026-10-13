@@ -142,16 +142,19 @@ fn fs_ground(in: FullscreenOut) -> @location(0) vec4<f32> {
     if (n.y < 0.75 && buried < 0.01) { discard; }
     let flat_ground = smoothstep(0.85, 0.97, n.y);
 
-    // Standing water: the simulated depth plus noise for organic shorelines.
-    // Water stands only once the dips hold a few millimeters, and not under snow.
+    // Standing water: the shore runs where the simulated water depth meets the ground's small
+    // unevenness (noise). The depth map is smooth between its 1 m cells, so the shore sits
+    // part way up the depth, not at its thin edge, which would spread every puddle into the
+    // cells around it. Water stands only once the dips hold a few millimeters, and not under snow.
     let shore = fbm2(pos * 0.45, 4) - 0.5 + (value_noise2(pos * 3.1) - 0.5) * 0.25;
     let depth_mm = cov.g * fx.rain.w * 1000.0;
-    let level = depth_mm / 4.0 - 0.4 + shore * 0.6;
+    let level = (depth_mm - 5.0 + shore * 8.0) / 3.0;
     let snowed = saturate(cov.b * fx.params.y * 40.0);
     // Water stands on the ground itself, not on grass blades, benches or tabletops.
     let on_ground = 1.0 - smoothstep(0.04, 0.08, ground.x);
-    let water = smoothstep(0.0, 0.05, level) * flat_ground * (1.0 - snowed) * on_ground;
-    let damp = smoothstep(-0.3, 0.0, level);
+    let water = smoothstep(0.0, 0.1, level) * flat_ground * (1.0 - snowed) * on_ground;
+    // A dark rim of soaked ground around the water.
+    let damp = smoothstep(-1.2, 0.0, level);
     // Wetness the renderer didn't already apply (it uses the value at the camera).
     let extra_wet = saturate(max(cov.r, damp * cov.r) - frame.weather.x);
     let lying = saturate(saturate(snow_m * 10.0) - saturate(frame.weather.y * 10.0)) * smoothstep(0.75, 0.9, n.y);

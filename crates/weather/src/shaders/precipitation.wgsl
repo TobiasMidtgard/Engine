@@ -180,10 +180,13 @@ fn vs_snow(@builtin(vertex_index) v: u32, @builtin(instance_index) i: u32) -> Pr
     out.misc = vec4(0.0);
     out.position = frame.view_proj * vec4<f32>(p, 1.0);
     out.uv = vec2<f32>(c.x, c.y * 2.0 - 1.0);
-    // White, lit by sky and sun (with shadows) like any rough surface.
+    // White, lit by sky and sun (with shadows) like any rough surface. Flakes are thin lace
+    // that lets part of the light behind them through, so against a bright overcast they
+    // read as soft grey specks, not as dark ash.
     let n = normalize(to_eye + vec3<f32>(0.0, 0.6, 0.0));
     let sun = frame.sun_camera.rgb * saturate(dot(n, frame.sun_dir.xyz) * 0.5 + 0.5) * shadow_factor(rel, n) * INV_PI;
-    let light = (sky_ambient(n) + sun) * 0.9;
+    let behind = sample_env(-to_eye);
+    let light = (sky_ambient(n) + sun) * 0.9 * 0.65 + behind * 0.4;
     out.color = vec4<f32>(pre_expose(light), precip.look.y * fade * coverage);
     return out;
 }

@@ -9,6 +9,26 @@ use engine_world::{GroundQuery, GroundSample, SurfaceId, SurfaceMaterials};
 use crate::chunk::ChunkSource;
 use crate::palette::{SurfaceIds, TerrainPalette};
 
+/// Another ground query that names the surface material on a terrain, while the terrain
+/// still answers height and normal (see [`PlanetTerrain::with_ground_surface`]).
+///
+/// [`PlanetTerrain::with_ground_surface`]: crate::PlanetTerrain::with_ground_surface
+#[derive(Clone)]
+pub struct GroundSurface(pub Arc<dyn GroundQuery>);
+
+impl std::fmt::Debug for GroundSurface {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("GroundSurface(..)")
+    }
+}
+
+/// The same query object (setting a new one counts as a change and rebuilds the terrain).
+impl PartialEq for GroundSurface {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
 /// One terrain as the ground query sees it.
 #[derive(Clone)]
 pub struct GroundTerrain {
@@ -16,6 +36,8 @@ pub struct GroundTerrain {
     pub palette: TerrainPalette,
     pub position: DVec3,
     pub rotation: DQuat,
+    /// Names the surface material instead of the palette (see [`GroundSurface`]).
+    pub surface_override: Option<GroundSurface>,
 }
 
 impl GroundTerrain {
@@ -47,11 +69,20 @@ impl GroundTerrain {
             n = -n;
         }
         let slope = 1.0 - n.dot(up);
-        let surface =
-            self.palette
-                .classify(&s, slope, s.height < 0.0 && self.source.shape.ocean, ids);
+        let under_sea = s.height < 0.0 && self.source.shape.ocean;
+        let mut surface = self.palette.classify(&s, slope, under_sea, ids);
         let world_point = self.position + self.rotation * point_local;
         let world_normal = (self.rotation * n).as_vec3();
+        // The override names the ground, except for the sea and for layers edits painted
+        // (a dug pit or a mud splash is newer than the landscape's materials).
+        if let Some(o) = &self.surface_override
+            && !under_sea
+            && !(self.source.edits.touches(point_local, 0.5)
+                && self.source.edit_paint(base, up, dir).1 > 0.5)
+            && let Some(g) = o.0.sample(world_point + self.rotation * up * 0.5)
+        {
+            surface = g.surface;
+        }
         Some((world_point, world_normal, surface, s.height))
     }
 }

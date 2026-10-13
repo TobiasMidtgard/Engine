@@ -477,7 +477,10 @@ pub(crate) fn physics_step(world: &mut World, mut q: Local<Option<StepQueries>>)
         };
         if frozen || movers == 0 || substeps == 0 {
             let s = &mut *sim;
-            let filter = ContactFilter(&s.no_contact);
+            let filter = ContactFilter {
+                no_contact: &s.no_contact,
+                dt: 0.0,
+            };
             let r = s.regions[rid as usize].as_mut().expect("live region");
             if r.needs_refresh {
                 r.world.detect_collisions(&filter, &());
@@ -489,7 +492,7 @@ pub(crate) fn physics_step(world: &mut World, mut q: Local<Option<StepQueries>>)
         }
         let g = gravity.at(sim.region(rid).anchor);
         sim.region_mut(rid).world.gravity = g;
-        refresh_contacts_on_turning_bodies(&mut sim.region_mut(rid).world);
+        refresh_contact_hooks(&mut sim.region_mut(rid).world);
         prepare_forces(
             &mut sim,
             rid,
@@ -510,7 +513,10 @@ pub(crate) fn physics_step(world: &mut World, mut q: Local<Option<StepQueries>>)
             let scaled = scale_time(&mut sim, rid, true);
             {
                 let s = &mut *sim;
-                let filter = ContactFilter(&s.no_contact);
+                let filter = ContactFilter {
+                    no_contact: &s.no_contact,
+                    dt: sub_dt,
+                };
                 let r = s.regions[rid as usize].as_mut().expect("live region");
                 r.world.integration_parameters.dt = sub_dt;
                 let collector = std::mem::take(&mut r.collector);
@@ -885,17 +891,25 @@ const TURNING_EDGE_SPEED: f32 = 0.02;
 const STILL_EDGE_SPEED: f32 = 0.01;
 /// Dynamic bodies reaching less than this from their center of mass, m, never count as decks.
 const DECK_REACH_M: f32 = 1.2;
+/// A round collider whose rim moves faster than this from spinning on its axis, m/s, gets the
+/// rolling correction of `ContactFilter::modify_solver_contacts`; below [`SLOW_ROLL_SPEED`] it
+/// goes back to plain contacts. Slower spin makes too little of a false gap to matter.
+const FAST_ROLL_SPEED: f32 = 1.0;
+const SLOW_ROLL_SPEED: f32 = 0.5;
 
-/// Rapier reuses ("recycles") a contact pair while its bodies barely move relative to each
-/// other, with the solver's lever arms frozen in world space until either body has turned
-/// about 11°. Cargo riding a turning body (a turntable, a ship coming about) never moves
-/// relative to it, so its friction pulls at points up to 11° behind and the cargo creeps
-/// outward at about a tenth of the deck's speed until it slides off. Pairs with a contact hook
-/// are never recycled, so turning decks get a (no-op) one. The error grows with the deck's
-/// size, so only bodies big enough to carry something count ([`DECK_REACH_M`]): debris and
-/// crates tumbling in a settling pile keep the speed-up (about a tenth of a 1000-body pile's
-/// step time).
-fn refresh_contacts_on_turning_bodies(world: &mut PhysicsWorld) {
+/// Give the colliders that need it the contact hook (`ContactFilter::modify_solver_contacts`),
+/// and take it off again when they settle. Pairs with a hook are never recycled, and recycling
+/// is worth keeping wherever it does no harm (about a tenth of a 1000-body pile's step time).
+///
+/// - Turning decks. Rapier reuses ("recycles") a contact pair while its bodies barely move
+///   relative to each other, with the solver's lever arms frozen in world space until either
+///   body has turned about 11°. Cargo riding a turning body (a turntable, a ship coming about)
+///   never moves relative to it, so its friction pulls at points up to 11° behind and the cargo
+///   creeps outward at about a tenth of the deck's speed until it slides off. The error grows
+///   with the deck's size, so only bodies big enough to carry something count
+///   ([`DECK_REACH_M`]): debris and crates tumbling in a settling pile keep the speed-up.
+/// - Fast-rolling balls, barrels and wheels, whose contacts the hook corrects.
+fn refresh_contact_hooks(world: &mut PhysicsWorld) {
     let PhysicsWorld {
         bodies, colliders, ..
     } = world;
@@ -903,11 +917,8 @@ fn refresh_contacts_on_turning_bodies(world: &mut PhysicsWorld) {
         if rb.is_fixed() {
             continue;
         }
-        let spin = if rb.is_sleeping() {
-            0.0
-        } else {
-            rb.angvel().length()
-        };
+        let awake = !rb.is_sleeping();
+        let spin = if awake { rb.angvel().length() } else { 0.0 };
         let edge_speed = if rb.is_kinematic() {
             // Gameplay turns these on purpose, and steadily: any turning counts.
             if spin > 1.0e-4 { f32::INFINITY } else { 0.0 }
@@ -934,13 +945,21 @@ fn refresh_contacts_on_turning_bodies(world: &mut PhysicsWorld) {
         for &h in rb.colliders() {
             // Look before touching: `get_mut` marks the collider modified, which costs the
             // broad phase work every step.
-            let Some(hooks) = colliders.get(h).map(|c| c.active_hooks()) else {
+            let Some(c) = colliders.get(h) else {
                 continue;
             };
+            let roll_speed = if awake {
+                crate::rolling::symmetric_spin(c, rb).map_or(0.0, |(w, _, r)| w.length() * r)
+            } else {
+                0.0
+            };
+            let hooks = c.active_hooks();
             let hooked = hooks.contains(ActiveHooks::MODIFY_SOLVER_CONTACTS);
-            let hooks = if !hooked && edge_speed > TURNING_EDGE_SPEED {
+            let wants = edge_speed > TURNING_EDGE_SPEED || roll_speed > FAST_ROLL_SPEED;
+            let settled = edge_speed < STILL_EDGE_SPEED && roll_speed < SLOW_ROLL_SPEED;
+            let hooks = if !hooked && wants {
                 hooks | ActiveHooks::MODIFY_SOLVER_CONTACTS
-            } else if hooked && edge_speed < STILL_EDGE_SPEED {
+            } else if hooked && settled {
                 hooks - ActiveHooks::MODIFY_SOLVER_CONTACTS
             } else {
                 continue;
