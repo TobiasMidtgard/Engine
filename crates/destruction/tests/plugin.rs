@@ -409,6 +409,35 @@ fn the_hill_demo_tunnels_caves_in_builds_and_rebuilds() {
         hut_down >= 2,
         "the front of the hut fell ({hut_down} pieces)"
     );
+    // The terrace's shelter stands on the leveled rock: its stone floor is grounded (blue).
+    let hill = app
+        .world
+        .query::<&hill::HillDemo>()
+        .iter(&app.world)
+        .next()
+        .unwrap()
+        .clone();
+    let terrace = hill.builders[hill::Site::Terrace as usize].unwrap();
+    let shelter: Vec<(BuildKind, PieceState, bool)> = app
+        .world
+        .query_filtered::<(&BuiltPiece, &PieceState, &ShowSupport), Without<Debris>>()
+        .iter(&app.world)
+        .filter(|(b, ..)| b.builder == Some(terrace))
+        .map(|(b, s, show)| (b.kind, *s, show.on))
+        .collect();
+    assert_eq!(shelter.len(), 8, "the terrace shelter is up: {shelter:?}");
+    for (kind, state, shown) in &shelter {
+        assert!(shown, "the shelter shows its support");
+        assert!(state.collapse_in.is_none(), "{kind:?} stands: {state:?}");
+        if *kind == BuildKind::StoneFloor {
+            assert_eq!(state.support, state.max_support, "on the rock: {state:?}");
+        } else {
+            assert!(
+                state.support >= 0.7 * state.max_support,
+                "{kind:?} is green: {state:?}"
+            );
+        }
+    }
 
     run(&mut app, 6.5);
     let rebuilt = volume(&mut app);

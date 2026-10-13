@@ -33,8 +33,9 @@ fracture and debris.
   a floor's on its top face, block corners), skipping spots inside other pieces. The ghost
   shows the support it would get in the support colors, or a deep red where it would sit
   inside something, touch nothing, or reach too far from support to stand; place it, turn it
-  in 22.5° steps, or take built pieces down (what they held falls). Built pieces show their
-  support colors while someone is building. Keys (bound unless the game binds them): B build
+  in 22.5° steps, or take built pieces down (what they held falls). Pieces stand on the
+  terrain or on voxel rock alike (dig the rock out from under them and they fall). Built
+  pieces show their support colors while their builder has the support view on. Keys (bound unless the game binds them): B build
   mode, left mouse place, X remove, R rotate, C next piece, 1 to 9 pick a piece.
 - **Burning wood** (`burn`): wooden building pieces get an `engine_world::Combustible`
   holding their wood as fuel, so the fire module (when installed) can light and burn them.
@@ -161,7 +162,11 @@ yard**, where a builder in build mode puts up a cabin piece by piece, each ghost
 place before the piece goes down: a stone plinth (blue), corner posts and board walls with a
 doorway, a loft floor, a shingle roof, and a deck reaching out from the gable whose second
 row is orange at the edge of support, then the red ghost of a third row that couldn't stand.
-`--example hill -- <out_dir> [WxH] [only]` renders it (`only`: `build` for the yard).
+Then the hoe levels a floor pad in the terrace and a second builder puts up a **shelter on the
+rock**: a stone floor laid on the bare rock (blue, because rock is ground), board walls at the
+ends, a shingle roof and the back walls against the cut bank, open toward the valley.
+`--example hill -- <out_dir> [WxH] [only]` renders it (`only`: `build` for the yard,
+`shelter` for the terrace).
 
 ## Tests
 
@@ -170,9 +175,11 @@ row is orange at the edge of support, then the red ghost of a third row that cou
   barricade, thermite through reinforced concrete, a charge on drywall vs reinforced, a tower
   falling when its post breaks, digging under an overhang drops it, the AI functions, the demo,
   a burning shed charring and coming down, build mode placing snapped pieces and taking them
-  down, the hill's cabin going up with its red ghost).
-- `hill::tests::the_yard_cabin_snaps_together_as_planned` aims every step of the cabin and
-  checks each piece lands where it should with the support the solver gives it.
+  down, the hill's cabin going up with its red ghost and its shelter standing on the terrace's
+  rock, pieces on voxel rock falling when it is dug out from under them).
+- `hill::tests::the_yard_cabin_snaps_together_as_planned` and
+  `the_terrace_shelter_snaps_together_as_planned` aim every step of the cabin and the shelter
+  and check each piece lands where it should with the support the solver gives it.
 - `tests/headless.rs`: renders a cut wall offscreen and checks the doorway shows.
 
 ## Done when
@@ -180,5 +187,5 @@ row is orange at the edge of support, then the red ghost of a third row that cou
 - Breach a reinforced wall with a charge; shoot holes in a wooden barricade; dig and collapse a
   voxel cliff. **Done** (tests above and the showcase).
 
-Next: building on voxel rock (pieces there are not grounded yet), debris resting on debris
-without a physics module.
+Next: debris resting on voxel rock and on other debris without a physics module (with one,
+large debris already lands on the rock's colliders), gable and triangle pieces.

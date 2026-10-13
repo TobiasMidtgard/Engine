@@ -3,7 +3,8 @@
 //!
 //! - a pickaxe drives a tunnel into the hill's rocky side, then opens a chamber too wide for the
 //!   rock and soil above it, which caves in;
-//! - a hoe cuts and fills a level terrace on the other flank and rounds its edges;
+//! - a hoe cuts and fills a level terrace on the other flank, rounds its edges and levels a
+//!   floor pad in its middle;
 //! - beside the hill a timber shelter goes up piece by piece in build-mode support colors (blue
 //!   on the ground through red at the limit), then loses two posts and half of it comes down;
 //! - in the build yard off the hill's other foot a builder in Valheim build mode
@@ -11,7 +12,9 @@
 //!   will have and the piece goes down: a stone plinth, posts, board walls, a loft floor, a
 //!   shingle roof and a deck reaching out from the gable. Then the cabin shows its support
 //!   colors: the deck's second row orange at the edge of support, and the ghost of a third row
-//!   red because nothing could hold it.
+//!   red because nothing could hold it;
+//! - on the leveled terrace a second builder lays a stone floor on the bare rock (blue: the
+//!   rock is ground), stands board walls against the cut bank and puts a roof over them.
 //!
 //! Then the hill, the hut and the cabin are rebuilt and it starts again.
 
@@ -46,6 +49,12 @@ const YARD_START: f32 = 0.5;
 const YARD_STEP: f32 = 0.5;
 /// When the finished cabin shows its support colors (with the red ghost of the last step).
 const YARD_SUPPORT_AT: f32 = 14.2;
+/// Where the terrace's shelter stands, relative to the origin: the middle of the leveled
+/// terrace, on its rock.
+pub const TERRACE: [f64; 3] = [8.8, TERRACE_Y, 2.1];
+/// When the terrace's builder starts (the hoe is done at 17.8 s), and the seconds per piece.
+const TERRACE_START: f32 = 18.3;
+const TERRACE_STEP: f32 = 0.45;
 
 const TUNNEL_DIGS: u32 = 15;
 const CHAMBER_DIGS: u32 = 15;
@@ -55,6 +64,8 @@ const TERRACE_Y: f64 = 3.6;
 /// The hoe's level-ground strokes; each pass averages the soil with its neighbors once, so a
 /// few in a row turn the raised mounds' edges into a soft bank.
 const SMOOTH_PASSES: u32 = 6;
+/// Half size of the floor pad the hoe levels for the terrace's shelter (x, z), m.
+const PAD_HALF: [f64; 2] = [1.7, 2.5];
 
 /// The dig-and-build hill's moments.
 pub const VIEWS: &[DemoView] = &[
@@ -99,6 +110,14 @@ pub const VIEWS: &[DemoView] = &[
         warmup_secs: 18.0,
     },
     DemoView {
+        key: "voxel_shelter",
+        name: "A shelter built on the leveled terrace: its stone floor is blue, the rock is ground",
+        eye: [15.5, 6.8, -3.0],
+        target: [8.6, 4.6, 2.1],
+        hour: 10.5,
+        warmup_secs: 22.2,
+    },
+    DemoView {
         key: "voxel_hut",
         name: "A timber hut in support colors losing its posts",
         eye: [9.5, 3.5, -16.5],
@@ -119,8 +138,51 @@ pub struct HillDemo {
     pub hill: Option<Entity>,
     /// Hut pieces built so far this loop.
     pub hut: Vec<Entity>,
-    /// The build yard's builder.
-    pub builder: Option<Entity>,
+    /// The builders of the yard and the terrace (by [`Site`]).
+    pub builders: [Option<Entity>; 2],
+}
+
+/// Where a builder of the hill works.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Site {
+    /// The build yard off the hill's foot (the cabin).
+    Yard,
+    /// The terrace the hoe leveled (the shelter on the rock).
+    Terrace,
+}
+
+impl Site {
+    pub const ALL: [Site; 2] = [Site::Yard, Site::Terrace];
+
+    /// The site relative to the hill's origin.
+    pub fn offset(self) -> DVec3 {
+        match self {
+            Site::Yard => DVec3::from_array(YARD),
+            Site::Terrace => DVec3::from_array(TERRACE),
+        }
+    }
+
+    /// What is built there, relative to [`Site::offset`].
+    pub fn plan(self) -> Vec<BuildStep> {
+        match self {
+            Site::Yard => yard_plan(),
+            Site::Terrace => terrace_plan(),
+        }
+    }
+
+    fn start_and_step(self) -> (f32, f32) {
+        match self {
+            Site::Yard => (YARD_START, YARD_STEP),
+            Site::Terrace => (TERRACE_START, TERRACE_STEP),
+        }
+    }
+
+    fn builder_name(self) -> &'static str {
+        match self {
+            Site::Yard => "Yard builder",
+            Site::Terrace => "Terrace builder",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -131,10 +193,12 @@ enum Step {
     Raise(u32),
     Level,
     Smooth,
+    /// Cut and fill a flat floor pad for the shelter in the rounded terrace.
+    Pad,
     KnockPost(usize),
-    /// The yard's builder picks a piece and aims; then places it.
-    Aim(usize),
-    Place,
+    /// A site's builder picks a piece and aims; then places it.
+    Aim(Site, usize),
+    Place(Site),
     /// The finished cabin shows its support colors.
     ShowSupport,
     Reset,
@@ -158,11 +222,15 @@ fn timeline() -> Vec<(f32, Step)> {
     for k in 0..SMOOTH_PASSES {
         t.push((17.2 + k as f32 * 0.12, Step::Smooth));
     }
-    for (k, step) in yard_plan().iter().enumerate() {
-        let at = YARD_START + k as f32 * YARD_STEP;
-        t.push((at, Step::Aim(k)));
-        if step.place {
-            t.push((at + YARD_STEP * 0.8, Step::Place));
+    t.push((18.0, Step::Pad));
+    for site in Site::ALL {
+        let (start, each) = site.start_and_step();
+        for (k, step) in site.plan().iter().enumerate() {
+            let at = start + k as f32 * each;
+            t.push((at, Step::Aim(site, k)));
+            if step.place {
+                t.push((at + each * 0.8, Step::Place(site)));
+            }
         }
     }
     t.push((YARD_SUPPORT_AT, Step::ShowSupport));
@@ -249,9 +317,10 @@ fn hut_plan() -> Vec<PieceSpec> {
     v
 }
 
-/// One piece of the yard's cabin: what the builder picks, how it turns it, and where it aims
-/// (from `from` at `target`, relative to the yard); `center` is where the piece should snap.
-pub struct YardStep {
+/// One piece a hill builder puts down: what it picks, how it turns it, and where it aims
+/// (from `from` at `target`, relative to its [`Site`]); `center` is where the piece should
+/// snap.
+pub struct BuildStep {
     pub kind: BuildKind,
     pub yaw: f32,
     pub from: DVec3,
@@ -264,11 +333,11 @@ pub struct YardStep {
 /// The yard's cabin in build order: a 4 × 4 m stone plinth, corner posts, board walls (a
 /// doorway left in the front), a loft floor on the walls, a 1-in-2 shingle roof, and a deck
 /// reaching out from the +X gable two rows deep, then the ghost of a third row.
-pub fn yard_plan() -> Vec<YardStep> {
+pub fn yard_plan() -> Vec<BuildStep> {
     let v = |x: f64, y: f64, z: f64| DVec3::new(x, y, z);
     let mut steps = Vec::new();
     let mut add = |kind, yaw, from: DVec3, target: DVec3, center: DVec3| {
-        steps.push(YardStep {
+        steps.push(BuildStep {
             kind,
             yaw,
             from,
@@ -383,7 +452,7 @@ pub fn yard_plan() -> Vec<YardStep> {
             v(5.0, 2.35, z),
         );
     }
-    steps.push(YardStep {
+    steps.push(BuildStep {
         kind: BuildKind::WoodFloor,
         yaw: 0.0,
         from: v(7.5, 2.35, -1.0),
@@ -391,6 +460,73 @@ pub fn yard_plan() -> Vec<YardStep> {
         center: v(7.0, 2.35, -1.0),
         place: false,
     });
+    steps
+}
+
+/// The terrace's shelter in build order, on the rock the hoe leveled (y 0 here): a 2 × 4 m
+/// stone floor, board walls at both ends, a 1-in-2 shingle roof from end to end and board
+/// walls along the back (against the cut bank) under it, open toward the valley (+X).
+pub fn terrace_plan() -> Vec<BuildStep> {
+    let v = |x: f64, y: f64, z: f64| DVec3::new(x, y, z);
+    let mut steps = Vec::new();
+    let mut add = |kind, yaw, from: DVec3, target: DVec3, center: DVec3| {
+        steps.push(BuildStep {
+            kind,
+            yaw,
+            from,
+            target,
+            center,
+            place: true,
+        });
+    };
+    for z in [-1.0, 1.0] {
+        // Aimed at the bare rock, from above and to the front.
+        let at = v(0.0, 0.0, z);
+        add(
+            BuildKind::StoneFloor,
+            0.0,
+            at + v(0.4, 2.6, 0.8),
+            at,
+            v(0.0, 0.2, z),
+        );
+    }
+    // The end walls, aimed at the floor just inside its edge, battens inside.
+    for (side, yaw) in [(-1.0, PI), (1.0, 0.0)] {
+        let at = v(0.0, 0.4, side * 1.85);
+        add(
+            BuildKind::WoodWall,
+            yaw,
+            at + v(0.3, 2.6, -side * 0.95),
+            at,
+            v(0.0, 1.4, side * 2.0),
+        );
+    }
+    // The roof, aimed at the inside of each end wall just under its top: the eave lands on
+    // the wall and the two slopes meet over the middle. (With the back walls up first, the
+    // roof's gable edge would snap onto their tops instead.)
+    for (side, yaw) in [(-1.0, FRAC_PI_2), (1.0, -FRAC_PI_2)] {
+        let rotation = BuildKind::WoodRoof.rotation(yaw);
+        let half = BuildKind::WoodRoof.size() * 0.5;
+        let top_mid = v(0.0, 2.9, side);
+        add(
+            BuildKind::WoodRoof,
+            yaw,
+            v(0.3, 2.6, side * 0.5),
+            v(0.0, 2.38, side * 1.95),
+            top_mid - (rotation * Vec3::Y * half.y).as_dvec3(),
+        );
+    }
+    // Then the back walls under the roof's gable, against the cut bank, aimed from inside.
+    for z in [-1.0, 1.0] {
+        let at = v(-0.85, 0.4, z);
+        add(
+            BuildKind::WoodWall,
+            -FRAC_PI_2,
+            at + v(1.45, 1.5, 0.2),
+            at,
+            v(-1.0, 1.4, z),
+        );
+    }
     steps
 }
 
@@ -409,34 +545,40 @@ pub fn spawn_voxel_hill(commands: &mut Commands, origin: DVec3) {
             hill_volume(),
         ))
         .id();
-    let yard = origin + DVec3::from_array(YARD);
-    let builder = commands
-        .spawn((
-            Name::new("Yard builder"),
-            Transform::from_translation(yard),
-            idle_builder(yard),
-        ))
-        .id();
+    let builders = Site::ALL.map(|site| {
+        let at = origin + site.offset();
+        Some(
+            commands
+                .spawn((
+                    Name::new(site.builder_name()),
+                    Transform::from_translation(at),
+                    idle_builder(site, at),
+                ))
+                .id(),
+        )
+    });
     commands.spawn((
         Name::new("Hill demo"),
         HillDemo {
             origin,
             hill: Some(hill),
-            builder: Some(builder),
+            builders,
             ..Default::default()
         },
     ));
 }
 
-/// The yard's builder between loops: in build mode, aiming at the sky (no ghost), the
-/// pieces in their own colors until the cabin is done.
-fn idle_builder(yard: DVec3) -> Builder {
+/// A site's builder between loops: in build mode, aiming at the sky (no ghost). The yard's
+/// pieces keep their own colors until the cabin is done; the terrace's show their support
+/// from the first slab, blue on the rock.
+fn idle_builder(site: Site, at: DVec3) -> Builder {
     let mut b = Builder {
         reach_m: 6.0,
-        show_support: false,
+        show_support: site == Site::Terrace,
         ..Builder::default()
     };
-    b.aim_at(yard + DVec3::Y, yard + DVec3::Y * 2.0);
+    // From high above, so the terrace's builder is not inside the hill before it is dug.
+    b.aim_at(at + DVec3::Y * 20.0, at + DVec3::Y * 21.0);
     b
 }
 
@@ -595,6 +737,25 @@ fn run_step(world: &mut World, demo: &mut HillDemo, step: Step) {
                 None,
             );
         }
+        Step::Pad => {
+            // Smoothing rounds the terrace into a ramp; the floor needs it flat again where it
+            // stands: cut the high side down and fill the low side up, leaving a low cut bank
+            // behind the shelter.
+            let [hx, hz] = PAD_HALF;
+            let at = o + DVec3::from_array(TERRACE);
+            for (dy, half_y, op) in [(2.0, 2.0, EditOp::Remove), (-1.2, 1.2, EditOp::Add)] {
+                edit(
+                    world,
+                    at + DVec3::new(0.0, dy, 0.0),
+                    EditShape::Box {
+                        half_extents: Vec3::new(hx as f32, half_y, hz as f32),
+                        rotation: Quat::IDENTITY,
+                    },
+                    op,
+                    (op == EditOp::Add).then_some("dirt"),
+                );
+            }
+        }
         Step::KnockPost(k) => {
             // Both posts on the −X side: that side's beam, the ridge and the roof panel over it
             // lose their path to the ground and fall; the +X half stands.
@@ -613,25 +774,27 @@ fn run_step(world: &mut World, demo: &mut HillDemo, step: Step) {
                 source: None,
             });
         }
-        Step::Aim(k) => {
-            let plan = yard_plan();
-            let (Some(step), Some(b)) = (plan.get(k), demo.builder) else {
+        Step::Aim(site, k) => {
+            let plan = site.plan();
+            let (Some(step), Some(b)) = (plan.get(k), demo.builders[site as usize]) else {
                 return;
             };
-            let yard = o + DVec3::from_array(YARD);
+            let at = o + site.offset();
             if let Some(mut builder) = world.get_mut::<Builder>(b) {
                 builder.kind = step.kind;
                 builder.yaw = step.yaw;
-                builder.aim_at(yard + step.from, yard + step.target);
+                builder.aim_at(at + step.from, at + step.target);
             }
         }
         Step::ShowSupport => {
-            if let Some(mut builder) = demo.builder.and_then(|b| world.get_mut::<Builder>(b)) {
+            if let Some(mut builder) =
+                demo.builders[Site::Yard as usize].and_then(|b| world.get_mut::<Builder>(b))
+            {
                 builder.show_support = true;
             }
         }
-        Step::Place => {
-            if let Some(b) = demo.builder {
+        Step::Place(site) => {
+            if let Some(b) = demo.builders[site as usize] {
                 world.write_message(BuildRequest {
                     builder: b,
                     action: BuildAction::Place,
@@ -639,7 +802,10 @@ fn run_step(world: &mut World, demo: &mut HillDemo, step: Step) {
             }
         }
         Step::Reset => {
-            if let Some(b) = demo.builder {
+            for site in Site::ALL {
+                let Some(b) = demo.builders[site as usize] else {
+                    continue;
+                };
                 let built: Vec<Entity> = world
                     .query::<(Entity, &BuiltPiece)>()
                     .iter(world)
@@ -650,7 +816,7 @@ fn run_step(world: &mut World, demo: &mut HillDemo, step: Step) {
                     world.despawn(e);
                 }
                 if let Some(mut builder) = world.get_mut::<Builder>(b) {
-                    *builder = idle_builder(o + DVec3::from_array(YARD));
+                    *builder = idle_builder(site, o + site.offset());
                 }
             }
             if let Some(h) = demo.hill
@@ -674,13 +840,14 @@ mod tests {
     use crate::material::DestructionMaterials;
     use crate::structure::{Obb, build_graph, solve_support};
 
-    #[test]
-    fn the_yard_cabin_snaps_together_as_planned() {
+    /// Build a site's plan on flat ground at y 0, checking each aim hits its target and each
+    /// piece snaps where planned; the support level of each placed piece.
+    fn build_levels(steps: &[BuildStep]) -> Vec<usize> {
         let table = DestructionMaterials::default();
         let ground = |_: DVec3| Some((0.0, Vec3::Y));
         let mut scene: Vec<ScenePiece> = Vec::new();
         let mut levels = Vec::new();
-        for (k, step) in yard_plan().iter().enumerate() {
+        for (k, step) in steps.iter().enumerate() {
             let dir = (step.target - step.from).as_vec3().normalize();
             let surface = ground_hit(&ground, step.from, dir, 6.0);
             let hit = nearest_hit(&scene, step.from, dir, 6.0, surface)
@@ -715,7 +882,7 @@ mod tests {
             let items: Vec<(Entity, Obb, bool)> =
                 scene.iter().map(|s| (s.entity, s.obb, false)).collect();
             let graph = build_graph(&items, |_| 0.0);
-            let props: Vec<_> = yard_plan()[..scene.len()]
+            let props: Vec<_> = steps[..scene.len()]
                 .iter()
                 .map(|s| table.get(s.kind.material()))
                 .collect();
@@ -723,10 +890,23 @@ mod tests {
                 s.support = support;
             }
         }
+        levels
+    }
+
+    #[test]
+    fn the_yard_cabin_snaps_together_as_planned() {
+        let levels = build_levels(&yard_plan());
         // Blue plinth, the deck's second row orange at the edge of support.
         assert!(levels[..4].iter().all(|l| *l == 0), "{levels:?}");
         assert_eq!(levels[levels.len() - 1], 3, "{levels:?}");
         assert_eq!(levels.len(), 27);
+    }
+
+    #[test]
+    fn the_terrace_shelter_snaps_together_as_planned() {
+        let levels = build_levels(&terrace_plan());
+        // A blue floor on the rock, green walls and roof.
+        assert_eq!(levels, vec![0, 0, 1, 1, 1, 1, 1, 1]);
     }
 
     #[test]
