@@ -17,7 +17,7 @@ use crate::structure::{
     Fracturable, FractureShape, Obb, PieceState, StructuralPiece, StructureGraph, build_graph,
     solve_support,
 };
-use crate::voxel::{VoxelLook, VoxelState, VoxelVolume, mesh_all};
+use crate::voxel::{VoxelLook, VoxelState, VoxelVolume, mesh_all, rock_below};
 
 /// Keep the support graph of [`StructuralPiece`]s current, update every [`PieceState`], and
 /// drop pieces that lost support (after a short, slightly random delay so collapses cascade).
@@ -43,6 +43,8 @@ pub fn structure_system(
         ),
     >,
     mut removed: RemovedComponents<StructuralPiece>,
+    rock: Query<(&GlobalTransform, &VoxelState)>,
+    rock_changed: Query<(), Changed<VoxelState>>,
     mut pieces: Query<(
         Entity,
         &Transform,
@@ -56,7 +58,8 @@ pub fn structure_system(
     mut rng: Local<Option<Rng>>,
 ) {
     let rng = rng.get_or_insert_with(|| Rng::new(0xC011_A95E));
-    if !changed.is_empty() || removed.read().count() > 0 {
+    // Rock dug out from under a piece (or added under it) changes what stands on the ground.
+    if !changed.is_empty() || removed.read().count() > 0 || !rock_changed.is_empty() {
         graph.dirty = true;
     }
     let dt = time.delta_secs();
@@ -83,7 +86,12 @@ pub fn structure_system(
                 )
             })
             .collect();
-        let ground = |p: DVec3| env.ground(p).map(|g| g.height).unwrap_or(f64::NEG_INFINITY);
+        // Pieces stand on the terrain or on voxel rock.
+        let rock: Vec<(&GlobalTransform, &VoxelState)> = rock.iter().collect();
+        let ground = |p: DVec3| {
+            let terrain = env.ground(p).map(|g| g.height).unwrap_or(f64::NEG_INFINITY);
+            rock_below(&rock, p).map_or(terrain, |r| r.max(terrain))
+        };
         let mut g = build_graph(&items, ground);
         let mut props: Vec<MaterialProps> = Vec::with_capacity(items.len());
         for (e, ..) in &items {
