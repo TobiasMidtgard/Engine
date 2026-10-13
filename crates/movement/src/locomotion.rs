@@ -1005,9 +1005,19 @@ fn wall_run(
     if m.mode_secs >= p.wallrun_max_secs || tangent.length() < p.wallrun_min_speed * 0.5 {
         return detach(m, v, 1.5);
     }
-    // Wall-run into a ledge: climb it.
+    // Wall-run into a ledge ahead, or steer into the wall near its top: climb over it (and
+    // step onto it at a jog rather than at the full speed of the run along it).
+    let over = || {
+        (wish.dot(-wall.normal) > 0.75)
+            .then(|| find_ledge(p, b, probe, v, -wall.normal))
+            .flatten()
+            .map(|mt| Mantle {
+                exit_speed: mt.exit_speed.min(p.run_speed * 0.6),
+                ..mt
+            })
+    };
     if p.mantle
-        && let Some(mt) = find_ledge(p, b, probe, v, tdir)
+        && let Some(mt) = find_ledge(p, b, probe, v, tdir).or_else(over)
     {
         m.wall = None;
         m.mantle = Some(mt);
