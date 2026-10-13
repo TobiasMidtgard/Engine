@@ -379,6 +379,18 @@ fn the_hill_demo_tunnels_caves_in_builds_and_rebuilds() {
         .map(|g| g.level)
         .collect();
     assert_eq!(ghosts, vec![5], "the deck's third row is a red ghost");
+    let doors: Vec<(Door, Transform)> = app
+        .world
+        .query::<(&Door, &Transform)>()
+        .iter(&app.world)
+        .map(|(d, t)| (*d, *t))
+        .collect();
+    assert_eq!(doors.len(), 1, "a door hangs in the cabin's doorway");
+    let (door, t) = doors[0];
+    assert!(
+        door.is_open() && door.toward < 0.0 && t.translation.z < -0.3,
+        "the cabin's door swung open, in from the front: {door:?} at {t:?}"
+    );
     let fallen: f32 = app
         .world
         .query::<&Debris>()
@@ -639,6 +651,112 @@ fn build_mode_does_not_put_a_piece_where_someone_stands() {
     let (p, built) = place(&mut app);
     assert!(p.valid(), "{p:?}");
     assert_eq!(built, 1);
+}
+
+#[test]
+fn doors_hang_in_doorways_swing_away_from_you_and_fall_with_them() {
+    let mut app = app();
+    app.add_plugins(engine_input::InputPlugin);
+    app.insert_resource(PhysicsBackend {
+        name: "test".into(),
+    });
+    let table = app.world.resource::<DestructionMaterials>().clone();
+    let doorway = |app: &mut App, at: DVec3| {
+        let (piece, _) = build::built_piece(
+            BuildKind::WoodDoorway,
+            Transform::from_translation(at),
+            None,
+            false,
+            &table,
+        );
+        app.world.spawn(piece).id()
+    };
+    // A doorway standing on the ground, its front toward +Z.
+    let frame = doorway(&mut app, DVec3::new(0.0, 1.0, 0.0));
+    app.update();
+    let door = app
+        .world
+        .get::<door::HungDoor>(frame)
+        .expect("a door hangs in the doorway")
+        .0;
+    // Shut, a box fills the opening; it has no body, so the backend moves it with the door.
+    assert!(app.world.get::<RigidBody>(door).is_none());
+    let Some(Collider {
+        shape: ColliderShape::Cuboid { half_extents },
+        ..
+    }) = app.world.get::<Collider>(door)
+    else {
+        panic!("no box collider on the door");
+    };
+    assert!(
+        half_extents.x > 0.4 && half_extents.y > 0.9,
+        "{half_extents}"
+    );
+    let open_state = |app: &App| *app.world.get::<Door>(door).unwrap();
+    let leaf_z = |app: &App| app.world.get::<Transform>(door).unwrap().translation.z;
+    assert_eq!(open_state(&app).open, 0.0);
+    assert!(leaf_z(&app).abs() < 0.01, "shut, it sits in the wall");
+
+    // Someone in front presses interact: it swings in, away from them; again, it shuts.
+    let walker = app
+        .world
+        .spawn((
+            Transform::from_xyz(0.3, 1.0, 1.2),
+            CharacterController::default(),
+        ))
+        .id();
+    app.update();
+    let interact = |app: &mut App| {
+        app.world
+            .resource_mut::<engine_input::ActionState>()
+            .tap("interact", 1);
+        run_secs(app, 1.2);
+    };
+    interact(&mut app);
+    let d = open_state(&app);
+    assert!(d.is_open() && d.toward < 0.0, "{d:?}");
+    assert!(leaf_z(&app) < -0.3, "swung in to {}", leaf_z(&app));
+    interact(&mut app);
+    assert_eq!(open_state(&app).open, 0.0, "shut again");
+    // From behind it swings out through the front.
+    app.world.get_mut::<Transform>(walker).unwrap().translation = DVec3::new(0.3, 1.0, -1.2);
+    app.update();
+    interact(&mut app);
+    let d = open_state(&app);
+    assert!(d.is_open() && d.toward > 0.0, "{d:?}");
+    assert!(leaf_z(&app) > 0.3, "swung out to {}", leaf_z(&app));
+    // Out of reach, interact does nothing.
+    app.world.get_mut::<Transform>(walker).unwrap().translation = DVec3::new(0.3, 1.0, -6.0);
+    app.update();
+    interact(&mut app);
+    assert!(open_state(&app).is_open());
+    // AI agents open and shut it by where they stand.
+    let r = call_api(
+        &mut app.world,
+        "destruction.door",
+        json!({"near": [0.3, 1.0, 1.2], "open": false}),
+    )
+    .unwrap();
+    assert_eq!(r["opening"], json!(false));
+    run_secs(&mut app, 1.2);
+    assert_eq!(open_state(&app).open, 0.0);
+
+    // A doorway hanging in the air falls; its door swings shut and falls with it.
+    let high = doorway(&mut app, DVec3::new(6.0, 5.0, 0.0));
+    app.update();
+    let high_door = app.world.get::<door::HungDoor>(high).unwrap().0;
+    run_secs(&mut app, 1.0);
+    assert!(app.world.get::<Debris>(high).is_some(), "the doorway fell");
+    let d = *app.world.get::<Door>(high_door).unwrap();
+    assert!(d.loose && d.open == 0.0, "{d:?}");
+    assert!(
+        app.world.get::<Collider>(high_door).is_none(),
+        "the door rides its doorway down, no collider of its own"
+    );
+    // Taken down, a doorway takes its door with it.
+    app.world.despawn(frame);
+    app.update();
+    assert!(app.world.get_entity(door).is_err());
 }
 
 #[test]

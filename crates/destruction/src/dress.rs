@@ -178,6 +178,7 @@ pub fn build_prop_models_system(
             With<Fracturable>,
             With<Debris>,
             With<Collider>,
+            With<crate::door::Door>,
         )>,
     >,
 ) {
