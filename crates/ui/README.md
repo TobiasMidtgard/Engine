@@ -22,8 +22,8 @@ to 0 and restores it when it closes.
 | Screen | What it shows | Arguments |
 |---|---|---|
 | `dialogue` | Two-person conversation: talking, blinking portraits, typewriter text, choices with tags, letterbox | `tree` (id or whole tree), `node`, `speed` |
-| `shop` | Buy and sell tabs, rarity-coloured item cards, quantity picker, price and gold | `vendor`, `owner` |
-| `inventory` | Bag grid with drag and drop, equipment slots, weight, item details, use, drop, sort | `owner` |
+| `shop` | Buy and sell tabs, rarity-coloured item cards, quantity picker, price and gold | `vendor`, `owner`, `mode`, `select` |
+| `inventory` | Bag grid with drag and drop, equipment slots, weight, item details, use, drop, sort | `owner`, `tab`, `select` |
 | `hud` | Vitals with portrait, compass with waypoint bearing, minimap, quest tracker, hotbar with cooldowns, weapon, interaction prompt, slow-motion gauge, world markers | |
 | `map` | One map that zooms surface → planet globe → star system → galaxy, with POIs, layers, waypoint and info cards | `zoom` (0-4), `system`, `planet`, `select` |
 | `pause` | Pause menu with a character card; pauses game time | |
