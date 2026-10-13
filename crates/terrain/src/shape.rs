@@ -16,6 +16,7 @@ use engine_core::math::{DMat3, DQuat, DVec3};
 use engine_core::prelude::*;
 
 use crate::edits::OverlayPaint;
+use crate::landforms::{Broken, Canyon, DarkRegion, IceCap, Landforms, ShieldVolcano, Spot};
 use crate::noise;
 
 /// What a planet looks like at one point.
@@ -310,6 +311,9 @@ pub struct PlanetShape {
     /// 0..1 how readily the big impact basins of a world with maria filled with dark lava
     /// (the Moon: 1); at 0 they stay pale, dusty depressions like Mars's Hellas and Argyre.
     pub lava_basins: f64,
+    /// Named landforms placed by latitude and longitude (Mars: Olympus Mons, Valles
+    /// Marineris, the polar caps, ...).
+    pub landforms: Landforms,
     pub climate: Climate,
     /// Flat areas for levels and bases.
     pub pads: Vec<FlatPad>,
@@ -351,6 +355,7 @@ impl PlanetShape {
             crater_density: 0.0,
             maria: 0.0,
             lava_basins: 0.0,
+            landforms: Landforms::default(),
             climate: Climate::default(),
             pads: Vec::new(),
             overlay: None,
@@ -383,6 +388,7 @@ impl PlanetShape {
             crater_density: 0.75,
             maria: 0.35,
             lava_basins: 1.0,
+            landforms: Landforms::default(),
             climate: Climate {
                 equator_c: 10.0,
                 pole_c: -150.0,
@@ -394,7 +400,11 @@ impl PlanetShape {
         }
     }
 
-    /// A Mars-like desert world: red dust, canyons and old craters, polar ice.
+    /// Mars: red dust over old cratered highlands and smooth northern lowlands, with the
+    /// real planet's landmarks where they are ([`mars_landforms`]): the Tharsis volcanoes
+    /// and Olympus Mons, Valles Marineris, Hellas, Argyre and Isidis, the polar caps, and the
+    /// dark regions seen from Earth (Syrtis Major, Mare Acidalium, ...). The seed varies only
+    /// the small things (craters, hills, ragged edges).
     pub fn mars(seed: u64) -> Self {
         Self {
             seed,
@@ -403,8 +413,8 @@ impl PlanetShape {
             ocean_fraction: 0.0,
             continent_scale_m: 2_000_000.0,
             ocean_depth_m: 0.0,
-            plateau_height_m: 3_000.0,
-            mountain_height_m: 6_000.0,
+            plateau_height_m: 1_800.0,
+            mountain_height_m: 3_000.0,
             mountain_scale_m: 120_000.0,
             mountain_coverage: 0.25,
             hill_height_m: 300.0,
@@ -418,11 +428,13 @@ impl PlanetShape {
             crater_max_radius_m: 40_000.0,
             crater_min_radius_m: 20.0,
             crater_density: 0.35,
-            maria: 0.15,
+            maria: 0.0,
             lava_basins: 0.0,
+            landforms: mars_landforms(),
+            // Cold, but only the caps hold ice all year.
             climate: Climate {
                 equator_c: -20.0,
-                pole_c: -110.0,
+                pole_c: -85.0,
                 lapse_c_per_m: 0.0025,
                 wetness: 0.02,
             },
@@ -739,6 +751,9 @@ impl PlanetShape {
             * (0.3 + 0.7 * calm);
         h += detail;
 
+        // Landforms laid out by latitude and longitude.
+        let marks = self.landforms.apply(dir, r, finest, s, &mut h);
+
         // Maria: dark flooded basins (flat, low).
         let mut mare = 0.0f32;
         if self.maria > 0.0 {
@@ -755,6 +770,8 @@ impl PlanetShape {
             let tone = (0.75 + 0.5 * noise::fbm(p / 400_000.0, s ^ 0x62, 3, 0.5).abs()).min(1.0);
             mare = basin.max(t * tone) as f32;
         }
+
+        mare = mare.max(marks.dark as f32);
 
         // Craters.
         if self.crater_max_radius_m > 0.0 {
@@ -777,6 +794,8 @@ impl PlanetShape {
         let c = &self.climate;
         let t_lat = c.pole_c + (c.equator_c - c.pole_c) * (lat.cos() as f32).powf(1.6);
         let temperature_c = t_lat - c.lapse_c_per_m * h.max(0.0) as f32;
+        // Polar caps hold their ice whatever the latitude says.
+        let temperature_c = temperature_c + (POLAR_ICE_C - temperature_c) * marks.ice as f32;
         // Wet and dry regions, and woods and fields between them.
         let wet_noise = (noise::fbm(p / 900_000.0, s ^ 0x71, 4, 0.5)
             + noise::fbm_smooth(p / 40_000.0, s ^ 0x72, octaves_for(40_000.0, 3.0), 0.5) * 0.7)
@@ -1115,8 +1134,171 @@ fn crater_profile(x: f64, depth: f64, rim: f64, floor: f64, worn: f64) -> f64 {
     lerp(bowl, dish, worn)
 }
 
+/// The landmarks of the real Mars, at their latitudes and longitudes (degrees east).
+pub fn mars_landforms() -> Landforms {
+    const KM: f64 = 1_000.0;
+    let volcano = |lat, lon, radius_km: f64, height_m, caldera_km: f64, scarp_m| ShieldVolcano {
+        at: Spot::new(lat, lon, radius_km * KM),
+        height_m,
+        caldera_m: caldera_km * KM,
+        scarp_m,
+    };
+    let path = |points: &[[f64; 3]]| -> Vec<[f64; 3]> {
+        points
+            .iter()
+            .map(|&[lat, lon, w]| [lat, lon, w * KM])
+            .collect()
+    };
+    let broken = |lat, lon, radius_km: f64, depth_m, cell_km: f64, chaos| Broken {
+        at: Spot::new(lat, lon, radius_km * KM),
+        depth_m,
+        cell_m: cell_km * KM,
+        chaos,
+    };
+    let dark = |lat, lon, radius_km: f64, darkness| DarkRegion {
+        at: Spot::new(lat, lon, radius_km * KM),
+        darkness,
+    };
+    Landforms {
+        // The northern lowlands (the Borealis basin), about 4 km below the highlands.
+        lowlands: vec![(Spot::new(67.0, 208.0, 4_140.0 * KM), 4_000.0)],
+        // The Tharsis and Elysium rises.
+        rises: vec![
+            (Spot::new(2.0, 252.0, 2_800.0 * KM), 6_500.0),
+            (Spot::new(24.0, 146.0, 900.0 * KM), 3_000.0),
+        ],
+        basins: vec![
+            (Spot::new(-42.4, 70.5, 1_150.0 * KM), 7_000.0), // Hellas
+            (Spot::new(-49.7, 316.0, 900.0 * KM), 4_500.0),  // Argyre
+            (Spot::new(12.9, 87.0, 750.0 * KM), 3_000.0),    // Isidis
+        ],
+        volcanoes: vec![
+            volcano(18.65, 226.2, 300.0, 21_000.0, 40.0, 6_000.0), // Olympus Mons
+            volcano(11.8, 255.5, 230.0, 14_000.0, 28.0, 0.0),      // Ascraeus Mons
+            volcano(1.5, 247.0, 190.0, 11_000.0, 25.0, 0.0),       // Pavonis Mons
+            volcano(-8.3, 239.9, 220.0, 12_000.0, 55.0, 0.0),      // Arsia Mons
+            volcano(40.5, 250.4, 650.0, 5_000.0, 30.0, 0.0),       // Alba Mons
+            volcano(24.8, 146.9, 120.0, 9_000.0, 7.0, 0.0),        // Elysium Mons
+            volcano(32.1, 150.2, 90.0, 4_800.0, 6.0, 0.0),         // Hecates Tholus
+        ],
+        canyons: vec![
+            // Valles Marineris: Ius, Melas, Coprates, Eos and Capri Chasmata.
+            Canyon {
+                path: path(&[
+                    [-6.5, 268.0, 12.0],
+                    [-7.0, 275.0, 25.0],
+                    [-7.8, 280.5, 35.0],
+                    [-9.5, 286.0, 75.0],
+                    [-11.0, 291.0, 50.0],
+                    [-12.8, 297.0, 40.0],
+                    [-13.5, 303.0, 45.0],
+                    [-13.0, 308.0, 55.0],
+                    [-11.0, 313.0, 70.0],
+                    [-7.0, 318.0, 60.0],
+                ]),
+                depth_m: 7_000.0,
+            },
+            // Candor and Ophir Chasmata, north of Melas.
+            Canyon {
+                path: path(&[
+                    [-4.0, 280.0, 25.0],
+                    [-5.5, 284.0, 45.0],
+                    [-6.8, 289.0, 55.0],
+                    [-7.3, 293.5, 30.0],
+                ]),
+                depth_m: 6_000.0,
+            },
+            // Tithonium Chasma.
+            Canyon {
+                path: path(&[
+                    [-4.2, 268.0, 10.0],
+                    [-4.6, 276.0, 15.0],
+                    [-4.2, 281.0, 12.0],
+                ]),
+                depth_m: 5_000.0,
+            },
+            // Hebes Chasma, closed all round.
+            Canyon {
+                path: path(&[[-1.0, 282.0, 18.0], [-0.8, 286.5, 20.0]]),
+                depth_m: 5_000.0,
+            },
+            // Ganges Chasma.
+            Canyon {
+                path: path(&[
+                    [-8.5, 309.0, 25.0],
+                    [-6.5, 312.0, 35.0],
+                    [-3.0, 314.0, 25.0],
+                ]),
+                depth_m: 4_000.0,
+            },
+            // Chasma Boreale, cut into the north polar cap.
+            Canyon {
+                path: path(&[
+                    [80.8, 346.0, 45.0],
+                    [82.3, 353.0, 60.0],
+                    [84.0, 2.0, 50.0],
+                    [85.6, 16.0, 32.0],
+                    [86.5, 30.0, 15.0],
+                ]),
+                depth_m: 2_000.0,
+            },
+        ],
+        broken: vec![
+            broken(-6.5, 258.0, 350.0, 4_500.0, 160.0, false), // Noctis Labyrinthus
+            broken(-8.0, 326.0, 280.0, 3_500.0, 40.0, true),   // Aurorae Chaos
+            broken(0.8, 325.0, 220.0, 4_000.0, 35.0, true),    // Hydraotes Chaos
+            broken(-2.0, 342.0, 250.0, 3_000.0, 35.0, true),   // Iani Chaos
+        ],
+        ice_caps: vec![
+            IceCap {
+                at: Spot::new(90.0, 0.0, 550.0 * KM),
+                dome_m: 2_800.0,
+                troughs: 12.0,
+            },
+            IceCap {
+                at: Spot::new(-87.0, 315.0, 220.0 * KM),
+                dome_m: 3_000.0,
+                troughs: -7.0,
+            },
+        ],
+        dark_regions: vec![
+            dark(16.0, 68.0, 300.0, 0.9), // Syrtis Major
+            dark(5.0, 70.0, 500.0, 0.95),
+            dark(-8.0, 15.0, 500.0, 0.8), // Sinus Sabaeus
+            dark(-9.0, 35.0, 550.0, 0.8),
+            dark(-7.0, 52.0, 450.0, 0.75),
+            dark(-2.0, 357.0, 400.0, 0.85),  // Sinus Meridiani
+            dark(-10.0, 335.0, 500.0, 0.75), // Margaritifer Sinus
+            dark(-25.0, 325.0, 900.0, 0.8),  // Mare Erythraeum
+            dark(-22.0, 300.0, 600.0, 0.7),
+            dark(-15.0, 310.0, 400.0, 0.6),  // Aurorae Sinus
+            dark(-26.0, 270.0, 300.0, 0.75), // Solis Lacus
+            dark(-32.0, 205.0, 700.0, 0.75), // Mare Sirenum
+            dark(-25.0, 180.0, 500.0, 0.6),
+            dark(-22.0, 145.0, 800.0, 0.8), // Mare Cimmerium
+            dark(-18.0, 105.0, 700.0, 0.8), // Mare Tyrrhenum
+            dark(-10.0, 90.0, 400.0, 0.6),
+            dark(-30.0, 40.0, 400.0, 0.6), // Mare Serpentis
+            dark(-35.0, 85.0, 350.0, 0.5), // Mare Hadriacum
+            dark(45.0, 330.0, 800.0, 0.9), // Mare Acidalium
+            dark(55.0, 345.0, 500.0, 0.7),
+            dark(42.0, 100.0, 500.0, 0.6), // Utopia
+            dark(30.0, 75.0, 350.0, 0.5),  // Nilosyrtis
+            dark(-60.0, 0.0, 700.0, 0.6),  // Mare Australe
+            dark(-60.0, 120.0, 600.0, 0.5),
+            dark(81.0, 180.0, 450.0, 0.85), // Olympia Undae, the dunes around the north cap
+            dark(79.0, 240.0, 350.0, 0.7),
+            dark(80.0, 120.0, 300.0, 0.6),
+        ],
+        mottling: 0.6,
+    }
+}
+
 /// Impact basins on a world with maria.
 const BASINS: u32 = 14;
+
+/// Temperature of a polar cap's ice, °C: far below any snow line.
+const POLAR_ICE_C: f32 = -125.0;
 
 /// A unit vector from two numbers in `[0, 1)`, evenly spread over the sphere.
 fn unit_from(u: f64, v: f64) -> DVec3 {
@@ -1516,6 +1698,32 @@ mod tests {
             max = max.max(h);
         }
         assert!(max - min > 100.0, "relief {min}..{max}");
+    }
+
+    #[test]
+    fn mars_landmarks_stand_where_they_are() {
+        let shape = PlanetShape::mars(5);
+        let at = |lat: f64, lon: f64| shape.sample(dir_from_lat_lon(lat, lon), 2_000.0);
+        // Olympus Mons towers over the plains around it.
+        let summit = at(18.65, 226.2).height;
+        let plain = at(18.65, 240.0).height;
+        assert!(summit - plain > 15_000.0, "Olympus {summit} over {plain}");
+        // Valles Marineris cuts kilometers below its rims.
+        let floor = at(-9.5, 286.0).height;
+        let rim = at(-14.0, 286.0).height;
+        assert!(rim - floor > 4_000.0, "Melas floor {floor} under rim {rim}");
+        // Hellas lies deep; the northern lowlands lie below the southern highlands.
+        assert!(at(-42.4, 70.5).height < -4_000.0);
+        assert!(at(60.0, 200.0).height < at(-30.0, 200.0).height);
+        // The north pole is icy, the equator is not; Syrtis Major is dark.
+        let pole = at(89.0, 0.0);
+        assert!(
+            pole.temperature_c < -100.0,
+            "pole {} °C",
+            pole.temperature_c
+        );
+        assert!(at(0.0, 200.0).temperature_c > -60.0);
+        assert!(at(10.0, 69.0).mare > 0.5);
     }
 
     #[test]
