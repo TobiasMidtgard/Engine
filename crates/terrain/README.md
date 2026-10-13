@@ -101,6 +101,14 @@ everything else (streaming, LOD, colliders, ground queries, prints) follows the 
   dust scatters light the way regolith does (`TerrainPalette::regolith`), so a full Moon is
   as bright at its edge as in its middle and brightens toward full phase. Underfoot the
   regolith is powdery and gently lumpy, with stones poking out of it everywhere.
+- **Climate zones from orbit.** On worlds with air and sea (`Climate::circulation`, 0 for
+  the Moon and Mars), rain follows the planet's wind belts: wet near the equator, desert
+  belts around 25° north and south, wetter storm tracks around 55°, dry poles. Ground far
+  inland is drier, and land behind a mountain range (upwind is west poleward of 30°, east
+  nearer the equator) lies in its rain shadow. Ocean currents warm and cool the sea by up
+  to 9 °C, so sea ice reaches further toward the equator in some places than others; the
+  ice breaks into floes at its edge. Shallow shelf seas glow teal (more so in warm water),
+  cold deep seas are greener, and deserts mix sand with dark stony plains.
 - **Detailed ground materials up close.** Nine PBR materials (turf in tufts over thatch,
   leaf litter with needles and twigs, soil, churned mud, rock, snow, rippled sand, gravel,
   concrete) are generated procedurally in `materials.rs` like a node-graph material: height
@@ -191,7 +199,8 @@ commands.entity(bodies["Moon"]).insert(PlanetTerrain::moon(7).with_radius(1_737_
 ground and a patchwork of painted layers, a meadow tinted the way the showcase paints its
 valley and a natural one at eye height, snow at eye height and over the valley, woods from the air, the range, the range at dusk
 (`range_dusk`: ridges casting long shadows), the coast, the Moon
-underfoot, from low orbit, half lit and full, and Mars: from orbit (`mars_orbit`,
+underfoot, from low orbit, half lit and full, the Earth's climate belts from far out
+(`earth_globe`), and Mars: from orbit (`mars_orbit`,
 `mars_valles`), Olympus Mons (`mars_olympus`), the north pole (`mars_pole`), and the floor and
 rim of Valles Marineris (`mars_canyon`, `mars_rim`))
 with the game's auto exposure, and `examples/terrain_map.rs` draws a relief map around the

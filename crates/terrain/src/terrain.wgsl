@@ -1064,8 +1064,11 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     // Woods: the forest floor up close, dark canopy from afar (the foliage module draws the
     // trees themselves).
     let forest_edge = (mid_v - 0.5) * 0.08 * clump_fade + (patch_v - 0.5) * 0.06 + (macro_v - 0.5) * 0.12 * macro_fade;
+    // Seen from orbit a pixel spans many woods and fields: the woods' share of it grows
+    // gradually with the wetness (a sharp threshold traced the triangles of the vertices).
+    let orbit = smoothstep(1500.0, 15000.0, pixel);
     let forest = vegetation
-        * smoothstep(0.40 - 0.1 * far, 0.52 + 0.1 * far, moisture * 0.6 + (0.5 - patches) * 0.9 + (variety - 0.5) * 0.4 + forest_edge + gully * 0.12 - crest * 0.12 + (far_n.x - 0.5) * 0.9 * far)
+        * smoothstep(0.40 - 0.1 * far - 0.12 * orbit, 0.52 + 0.1 * far + 0.15 * orbit, moisture * 0.6 + (0.5 - patches) * 0.9 + (variety - 0.5) * 0.4 + forest_edge + gully * 0.12 - crest * 0.12 + (far_n.x - 0.5) * 0.9 * far * (1.0 - 0.4 * orbit))
         * smoothstep(-6.0, 4.0, temp_c)
         * (1.0 - smoothstep(1800.0, 2600.0, altitude + (variety - 0.5) * 600.0));
     // From a couple of hundred meters the canopy (the foliage module draws trees near the camera,
@@ -1098,6 +1101,10 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     let desert = vegetation * (1.0 - smoothstep(0.08, 0.22, moisture + (variety - 0.5) * 0.1 + (far_n.y - 0.5) * 0.15 * far)) * smoothstep(12.0, 22.0, temp_c);
     let sandy = saturate(beach + desert);
     col[M_SAND] = planet.colors[C_SAND].rgb;
+    // Deserts are mostly stony plains and plateaus, browner and darker than the pale sand
+    // seas between them.
+    let reg = desert * smoothstep(0.42, 0.62, far_n.x + (variety - 0.5) * 0.3 + (macro_v - 0.5) * 0.2 * macro_fade);
+    col[M_SAND] = mix(col[M_SAND], mix(planet.colors[C_SOIL].rgb * 1.6, planet.colors[C_ROCK].rgb, 0.4), reg * 0.6);
     // Rock on steep ground and bare alpine heights; scree below it. Coarse patches average
     // slopes out, so their thresholds are lower.
     // Grass and woods hold steeper ground below the tree line (rock shows on cliffs there).
@@ -1458,12 +1465,28 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     // ---- Open sea.
     let sea_depth = max(-altitude, 0.0);
     let shallow = exp(-sea_depth / 25.0);
-    let water = mix(planet.colors[C_OCEAN].rgb, planet.colors[C_OCEAN].rgb * vec3(1.6, 3.2, 2.6), shallow * 0.7);
+    // Seen from high up, the shelf seas along the coasts are paler and greener, most of all
+    // in warm water; cold seas are a deeper, greener blue than the subtropical ones.
+    let shelf = exp(-sea_depth / 150.0) * far * (0.35 + 0.65 * smoothstep(5.0, 25.0, temp_c));
+    let deep = mix(vec3<f32>(1.0), vec3<f32>(0.8, 1.05, 0.95), (1.0 - smoothstep(0.0, 20.0, temp_c)) * far);
+    var water = mix(planet.colors[C_OCEAN].rgb * deep, planet.colors[C_OCEAN].rgb * vec3(1.6, 3.2, 2.6), max(shallow * 0.7, shelf * 0.55));
     let wave_fade = 1.0 - smoothstep(0.5, 8.0, pixel);
-    let wave_n = normalize(mix(up, bump(up, dp1, dp2, dw1, dw2), wave_fade * 0.6));
+    var wave_n = normalize(mix(up, bump(up, dp1, dp2, dw1, dw2), wave_fade * 0.6));
+    var sea_rough = mix(0.12, 0.05, wave_fade);
+    // Sea ice on cold seas: floes of snow-covered ice with dark leads of open water between
+    // them, thinning out to drift ice at its edge.
+    let ice_edge = -9.0 + (far_n.x - 0.5) * 6.0 + (macro_v - 0.5) * 3.0 * macro_fade;
+    let sea_ice = smoothstep(ice_edge + 2.0, ice_edge - 2.0, temp_c) * planet.params.z;
+    if (sea_ice > 0.0) {
+        let floes = smoothstep(0.35, 0.5, far_n.y + (detail_n - 0.5) * 0.2 * fine_fade + (patch_v - 0.5) * 0.3 * macro_fade);
+        let cover = sea_ice * mix(floes, 1.0, smoothstep(0.3, 1.0, sea_ice));
+        water = mix(water, planet.colors[C_SNOW].rgb * (0.82 + 0.18 * far_n.x), cover);
+        wave_n = normalize(mix(wave_n, up, cover));
+        sea_rough = mix(sea_rough, 0.6, cover);
+    }
     albedo = mix(albedo, water, ocean);
     n = normalize(mix(n, wave_n, ocean));
-    roughness = mix(roughness, mix(0.12, 0.05, wave_fade), ocean);
+    roughness = mix(roughness, sea_rough, ocean);
     reflectance = mix(reflectance, 0.354, ocean);
     occlusion = mix(occlusion, 1.0, ocean);
     subsurface = mix(subsurface, 0.0, ocean);
