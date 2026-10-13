@@ -29,6 +29,11 @@ pub struct SimSettings {
     /// Cloth keeps from passing through itself (folds stack instead of merging), at
     /// `thickness` × 1.5 between layers. Costs about as much as the rest of the step again.
     pub self_collide: bool,
+    /// Cloth simulated on the GPU instead (flags, banners, pennants): visual only, so no
+    /// collisions, self-collision, tearing, bullet holes, fire or pushing rigid bodies, and
+    /// not listed in `SoftBodySim`. Grids up to 512 particles, pinned along edges or at the
+    /// top corners; anything else stays on the CPU. Costs next to nothing on the CPU.
+    pub gpu: bool,
     /// Simulate this many seconds immediately when built, so it starts settled instead of
     /// falling into place on screen.
     pub prewarm_secs: f32,
@@ -48,6 +53,7 @@ impl Default for SimSettings {
             follow: 0.0,
             collide: true,
             self_collide: false,
+            gpu: false,
             prewarm_secs: 0.0,
             max_speed: 60.0,
         }
