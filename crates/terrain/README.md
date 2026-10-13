@@ -52,8 +52,8 @@ everything else (streaming, LOD, colliders, ground queries, prints) follows the 
   `Ground`, which is the terrain itself).
 - **Ground cover from afar.** Climate colors (lush, dry, desert, snow by temperature and
   altitude), woods as dark canopy, meadows and fields in patches a few hundred meters
-  across, worn bare patches, beaches. Natural woods seen from the air (from a few dozen
-  meters out, until a pixel spans a few meters) show their trees: crowns of random size in
+  across, worn bare patches, beaches. Natural woods seen from well above them (from 30 to
+  80 m up, a few dozen meters out, until a pixel spans a few meters) show their trees: crowns of random size in
   groups, heaped from leaf clumps, each tree its own green (now and then a dark spruce or a
   pale birch), casting shadows away from the sun onto the gaps and crowns beside them, and
   thinning out tree by tree into the meadow at the woods' edges. Further out, stands of

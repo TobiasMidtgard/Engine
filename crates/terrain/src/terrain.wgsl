@@ -959,7 +959,11 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     let canopy = smoothstep(15.0, 90.0, dist);
     // Until a pixel spans a few meters, the canopy shows its trees: crowns with shade between
     // them inside the woods, and meadow between the last trees at their edges.
-    let crown_k = canopy * (1.0 - smoothstep(1.5, 6.0, pixel)) * step(0.003, forest);
+    // Crowns painted on the ground only pass for trees seen from well above them and from
+    // high enough an angle (from lower down they read as flat discs: the canopy stays plain).
+    let eye_height = dot(-in.rel, up);
+    let crown_k = canopy * (1.0 - smoothstep(1.5, 6.0, pixel)) * step(0.003, forest)
+        * smoothstep(30.0, 80.0, eye_height) * smoothstep(0.15, 0.3, dot(to_eye, up));
     var crown = Crowns(1.0, vec2<f32>(0.0), 0.5, 0.0, 0.0);
     var woods = forest;
     if (crown_k > 0.0) {
