@@ -613,16 +613,25 @@ pub fn step_gait(
                 two_bone(&mut edit, a, b, c, target, def.pole, 1.0);
             }
             (LegStyle::Hoofed, &[a, b, ankle, end, ..]) => {
-                // Keep the cannon as animated; flip it back during the swing.
+                // Keep the cannon as animated, flipped back during the swing, and reach the
+                // knee (hock) to where the flipped cannon puts the hoof on its path.
                 let ankle_rot = edit.model[ankle].r;
                 let cannon = edit.position(end) - edit.position(ankle);
-                let hock_goal = target - cannon;
-                two_bone(&mut edit, a, b, ankle, hock_goal, def.pole, 1.0);
+                let fold = (std::f32::consts::PI * swing.clamp(0.0, 1.0)).sin() * 1.1;
+                let lateral = up_model.cross(def.pole).normalize_or(Vec3::X);
+                let flip = Quat::from_axis_angle(lateral, -fold);
+                two_bone(
+                    &mut edit,
+                    a,
+                    b,
+                    ankle,
+                    target - flip * cannon,
+                    def.pole,
+                    1.0,
+                );
                 edit.set_model_rotation(ankle, ankle_rot);
-                if swing > 0.0 {
-                    let fold = (std::f32::consts::PI * swing).sin() * 1.1;
-                    let lateral = up_model.cross(def.pole).normalize_or(Vec3::X);
-                    edit.rotate_model(ankle, Quat::from_axis_angle(lateral, -fold));
+                if fold > 0.0 {
+                    edit.rotate_model(ankle, flip);
                 }
             }
             _ => {}

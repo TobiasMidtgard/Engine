@@ -992,3 +992,67 @@ fn bodies_from_different_regions_collide() {
         "no collision happened"
     );
 }
+
+#[test]
+fn falling_characters_are_grounded_only_once_they_land() {
+    let mut app = app();
+    ground(&mut app, DVec3::ZERO, 50.0);
+    let ch = app
+        .world
+        .spawn((
+            Transform::from_xyz(0.0, 3.0, 0.0),
+            CharacterController::default(),
+            CharacterMove {
+                velocity: Vec3::new(0.0, -6.0, 0.0),
+            },
+        ))
+        .id();
+    let mut seen = Vec::new();
+    for _ in 0..60 {
+        app.update();
+        let state = *app.world.get::<CharacterState>(ch).unwrap();
+        seen.push((pos(&app, ch).y, state.grounded));
+    }
+    let (standing, landed) = *seen.last().unwrap();
+    assert!(landed, "never landed");
+    for (y, grounded) in seen {
+        assert!(
+            !grounded || y - standing < 0.03,
+            "grounded {:.3} m above the floor, still falling",
+            y - standing
+        );
+    }
+}
+
+#[test]
+fn characters_stand_exactly_on_boxes_of_any_size() {
+    // Parry's GJK sweeps let a character sink 10-20 cm into a 5-25 m box when it stood within
+    // a few millimeters of the box's center axis, and meters into a 500 m box.
+    for half in [5.0f32, 25.0, 500.0, 5000.0] {
+        for off in [0.0, 0.002, 0.37] {
+            let mut app = app();
+            ground(&mut app, DVec3::ZERO, half);
+            let ch = app
+                .world
+                .spawn((
+                    Transform::from_xyz(off, 0.95, off * 0.7),
+                    CharacterController::default(),
+                    // Gravity as the movement module applies it, after a fall.
+                    CharacterMove {
+                        velocity: Vec3::new(0.0, -9.0, 0.0),
+                    },
+                ))
+                .id();
+            for step in 0..60 {
+                app.update();
+                // The capsule's feet sit 0.9 m below its center; the controller keeps 2 cm.
+                let gap = pos(&app, ch).y - 0.9;
+                assert!(
+                    (gap - 0.02).abs() < 0.003,
+                    "{half} m box, {off} m off center, step {step}: feet {gap:.3} m above it"
+                );
+                assert!(app.world.get::<CharacterState>(ch).unwrap().grounded);
+            }
+        }
+    }
+}

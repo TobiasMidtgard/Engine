@@ -52,6 +52,12 @@ changing that one plugin line.
   walls it only touches (running along a wall). Its normals come from exact point projections
   between the capsule's core and the surface, not from the sweeps: those point sideways about
   one step in a hundred while the capsule sits in its 2 cm gap, a wall in the middle of a field.
+  A falling character reads `grounded` only once it is on the ground (within 5 cm), not while
+  ground is merely within snapping reach below it.
+  Capsules against boxes are solved exactly (`src/capsule_box.rs`) for characters and
+  `physics.shapecast`: Parry's GJK let a character sink 20 cm into a 25 m box when it stood
+  within a few millimeters of the box's center, and meters into a 500 m one. Characters now
+  keep their 2 cm gap on boxes from 1 m to 10 km across.
 - **Events**: one `ContactEvent::Started` per touch with the impact impulse and a normal from
   `a` to `b`, one `Ended` when it stops; sensors too. Hard impacts also send `NoiseEvent` (AI
   hearing) and, against static ground, `GroundContact` (dents, dust, impact sounds).
@@ -169,21 +175,21 @@ renderer get colliders only. `cargo run -p engine_physics --release --example ar
 
 Tests (`cargo test -p engine_physics`): the conformance suite; the "done when" scenarios below
 (`tests/scenarios.rs`); behaviors other modules rely on (`tests/behaviors.rs`: removal, compound
-bodies, joint breaking and motors, hinges swinging through the fixed body they hang on, kinematic platforms, stairs and steep slopes, dashing into
-thin walls, wall-running, no phantom walls on flat ground, running over heightfield hills, crouching, characters on their own clock, sensors and layers, local
-time, hovering, buoyancy, blasts, bodies crossing and merging regions); riding moving bodies
-(`tests/platforms.rs`: crates and characters on a deck at up to 30 km/s, lifts, a turntable, a
-thrusting and turning ship, a seesaw tipped by a character's weight, crates landing on heads,
-rays hitting bodies at orbital speed); mass overrides (`tests/mass.rs`: a moved center of mass,
-dropping an override); following world shifts (`tests/world_shift.rs`: a
-sleeping pile stays asleep through floating-origin moves, a stack stands through a tilting turn,
-world-pinned hinges turn with the world, a moving or spinning frame adds its motion at each body,
-characters keep their footing, queries see the new frame at once); rolling resistance
-(`tests/rolling.rs`: balls and logs slow at `Crr·g/(1 + I/mr²)` on concrete, faster on grass and
-sand, the same on terrain and meshes, barrels stop on sand, barrels at 4 and 8 m/s roll over
-terrain and meshes within 5 mm of flat and 25 cm of straight); the debug view
-(`tests/debug_draw.rs`, contacts on terrain included); a headless screenshot of
-the proving ground.
+bodies, joint breaking and motors, hinges swinging through the fixed body they hang on, kinematic
+platforms, stairs and steep slopes, dashing into thin walls, wall-running, no phantom walls on flat
+ground, running over heightfield hills, crouching, landing from a fall, standing exactly on boxes
+from 1 m to 10 km across, characters on their own clock, sensors and layers, local time, hovering,
+buoyancy, blasts, bodies crossing and merging regions); riding moving bodies (`tests/platforms.rs`:
+crates and characters on a deck at up to 30 km/s, lifts, a turntable, a thrusting and turning ship,
+a seesaw tipped by a character's weight, crates landing on heads, rays hitting bodies at orbital
+speed); mass overrides (`tests/mass.rs`: a moved center of mass, dropping an override); following
+world shifts (`tests/world_shift.rs`: a sleeping pile stays asleep through floating-origin moves, a
+stack stands through a tilting turn, world-pinned hinges turn with the world, a moving or spinning
+frame adds its motion at each body, characters keep their footing, queries see the new frame at
+once); rolling resistance (`tests/rolling.rs`: balls and logs slow at `Crr·g/(1 + I/mr²)` on
+concrete, faster on grass and sand, the same on terrain and meshes, barrels stop on sand, barrels at
+4 and 8 m/s roll over terrain and meshes within 5 mm of flat and 25 cm of straight); the debug view
+(`tests/debug_draw.rs`, contacts on terrain included); a headless screenshot of the proving ground.
 
 ## Done when
 

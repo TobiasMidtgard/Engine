@@ -244,6 +244,28 @@ impl Wheels {
     }
 }
 
+/// Spin every wheel of vehicle `e` as if rolling at `forward_speed` (m/s) and put its
+/// drivetrain in the matching gear: for a vehicle spawned or placed already moving, whose
+/// wheels would otherwise start still and skid until the tires spin them up.
+pub fn set_rolling(world: &mut World, e: Entity, forward_speed: f32) {
+    let Some(mut wheels) = world.get_mut::<Wheels>(e) else {
+        return;
+    };
+    let mut spin = [0.0f32; MAX_WHEELS];
+    for (i, w) in wheels.wheels.iter_mut().enumerate() {
+        w.state.spin = forward_speed / w.radius.max(0.05);
+        if let Some(s) = spin.get_mut(i) {
+            *s = w.state.spin;
+        }
+        w.state.slip_ratio = 0.0;
+    }
+    let n = wheels.wheels.len().min(MAX_WHEELS);
+    if let Some(mut d) = world.get_mut::<Drivetrain>(e) {
+        let driven = d.driven_speed(&spin[..n]);
+        d.match_speed(driven);
+    }
+}
+
 /// What a ray down from a wheel mount found.
 struct GroundHit {
     distance: f32,

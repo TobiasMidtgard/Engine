@@ -292,4 +292,16 @@ fn main() {
         d.get("softbody.particles"),
         d.get("softbody.step_ms"),
     );
+    if let Some(r) = app.world.get_resource::<engine_render::Renderer>() {
+        let r = r.describe();
+        let state = r["features"]
+            .as_array()
+            .and_then(|f| f.iter().find(|f| f["name"] == "softbody"))
+            .map(|f| f["state"].clone())
+            .unwrap_or_default();
+        println!(
+            "GPU cloths: {}, simulation pass: {} ms on {}",
+            state["gpu_cloths"], state["gpu_cloth_ms"], r["adapter"]
+        );
+    }
 }

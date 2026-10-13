@@ -142,6 +142,35 @@ fn pnoise3(p: vec3<f32>, period: f32) -> f32 {
     return mix(a, b, u.z);
 }
 
+// `pnoise3` with its own lattice period per axis, for patterns stretched along one axis.
+fn pnoise3v(p: vec3<f32>, period: vec3<f32>) -> f32 {
+    let i = floor(p);
+    let f = fract(p);
+    let u = f * f * (3.0 - 2.0 * f);
+    let i0 = i - period * floor(i / period);
+    let i1 = (i0 + 1.0) - period * floor((i0 + 1.0) / period);
+    let a = mix(mix(hash13(vec3(i0.x, i0.y, i0.z)), hash13(vec3(i1.x, i0.y, i0.z)), u.x),
+                mix(hash13(vec3(i0.x, i1.y, i0.z)), hash13(vec3(i1.x, i1.y, i0.z)), u.x), u.y);
+    let b = mix(mix(hash13(vec3(i0.x, i0.y, i1.z)), hash13(vec3(i1.x, i0.y, i1.z)), u.x),
+                mix(hash13(vec3(i0.x, i1.y, i1.z)), hash13(vec3(i1.x, i1.y, i1.z)), u.x), u.y);
+    return mix(a, b, u.z);
+}
+
+// Wind-packed snow: low drifts and ridges stretched along the prevailing east-west wind,
+// 16 m long and 4 m across down to a quarter of that. Height in meters (about ±10 cm).
+fn snow_drift(tp: vec3<f32>) -> f32 {
+    var sum = 0.0;
+    var amp = 0.06;
+    var f = vec2<f32>(1.0 / 16.0, 1.0 / 4.0);
+    for (var i = 0; i < 3; i++) {
+        let q = vec3<f32>(tp.x * f.x, f32(i) * 17.0, tp.z * f.y);
+        sum += amp * (pnoise3v(q, vec3<f32>(4096.0 * f.x, 4096.0, 4096.0 * f.y)) * 2.0 - 1.0);
+        f *= 2.0;
+        amp *= 0.5;
+    }
+    return sum;
+}
+
 // Fractal sum of `pnoise3` on tiling coordinates, starting at `freq` cycles per meter (a power
 // of two), doubling per octave. Returns about 0..1.
 fn tile_fbm(tp: vec3<f32>, freq: f32, octaves: i32) -> f32 {
@@ -911,9 +940,15 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     var grass_col = mix(col[M_GRASS], straw, saturate(clump) * 0.45 + saturate(sward - 0.2) * 0.25);
     grass_col *= (1.0 - saturate(-clump) * 0.35) * mix(vec3<f32>(1.0), vec3<f32>(0.88, 0.96, 1.05), saturate(-sward) * 0.5);
     col[M_GRASS] = grass_col;
+    // Bare ground in patches too: damper, darker earth next to dry, pale stretches.
+    let bare_v = 1.0 + (mid_v - 0.5) * 0.3 * clump_fade + (patch_v - 0.5) * 0.2 * macro_fade;
+    col[M_SOIL] *= bare_v;
+    col[M_SAND] *= bare_v;
+    col[M_GRAVEL] *= bare_v;
 
     // ---- Sample the materials present and blend them by height.
     var ms: array<MatSample, 9>;
+    var bh: array<f32, 9>;
     var hmax = -10.0;
     for (var i = 0u; i < MAT_COUNT; i++) {
         if (w[i] > 0.003) {
@@ -935,7 +970,12 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
                 ms[i].detail = mix(ms[i].detail, vec3<f32>(1.0), k);
                 ms[i].height = mix(ms[i].height, 0.5, k);
             }
-            hmax = max(hmax, ms[i].height + w[i]);
+            // Plants creep over the edges of roads, plazas and beds and bare ground bites
+            // into the turf: where growing and bare ground meet, the border wanders instead
+            // of following the paint.
+            let creep = select(-1.0, 1.0, i == M_GRASS || i == M_FOREST);
+            bh[i] = ms[i].height + w[i] + creep * (detail_n - 0.5) * 1.2 * fine_fade;
+            hmax = max(hmax, bh[i]);
         }
     }
     var albedo = vec3<f32>(0.0);
@@ -947,7 +987,7 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     for (var i = 0u; i < MAT_COUNT; i++) {
         if (w[i] > 0.003) {
             // From afar a pixel covers a mix of grounds in proportion to their weights.
-            let b = mix(max(ms[i].height + w[i] - hmax + 0.3, 0.0), w[i], far);
+            let b = mix(max(bh[i] - hmax + 0.3, 0.0), w[i], far);
             albedo += col[i] * ms[i].detail * b;
             nsum += ms[i].normal * b;
             roughness += ms[i].roughness * b;
@@ -1028,20 +1068,42 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     let painted_snow = pw[2];
     let snow_amount = saturate(max(max(climate_snow, weather_snow), painted_snow)) * (1.0 - ocean);
     var snow = 0.0;
+    var glint = 0.0;
+    var glint_n = up;
     if (snow_amount > 0.003) {
         snow = mix(fill_low(snow_amount, ground_h), snow_amount, far);
         // Deep prints in thin snow show the ground below.
         let snow_depth = max(fallen, painted_snow * 0.25 + climate_snow * 0.5);
         snow *= 1.0 - smoothstep(0.7, 1.0, depth / max(snow_depth, 1e-3)) * print_fade;
-        // A blanket of snow softens the shapes under it.
-        let soft = normalize(mix(n, n_geo, 0.6 * snow));
+        // A blanket of snow softens the shapes under it, and the wind lays it in drifts.
+        var soft = normalize(mix(n, n_geo, 0.6 * snow));
+        let drift_fade = 1.0 - smoothstep(0.5, 6.0, pixel);
+        var drift = 0.0;
+        if (drift_fade > 0.0) {
+            drift = snow_drift(tp);
+            let e = 0.25;
+            let dh = vec2<f32>(snow_drift(tp + vec3<f32>(e, 0.0, 0.0)), snow_drift(tp + vec3<f32>(0.0, 0.0, e))) - drift;
+            soft = normalize(soft - vec3<f32>(dh.x, 0.0, dh.y) / e * drift_fade);
+        }
         let sm = sample_planar(M_SNOW, tp, soft, dp1, dp2, tex_pixel);
         let packed = saturate(depth * 12.0) * print_fade;
+        // Drift crests a touch whiter, the hollows between them a touch grayer.
         let snow_col = col[M_SNOW] * sm.detail * mix(1.0, 0.82, packed) * mix(vec3(1.0), vec3(0.93, 0.96, 1.0), packed)
-            * mix(1.0, 0.86 + 0.18 * far_n.x, far);
+            * mix(1.0, 0.86 + 0.18 * far_n.x, far) * (1.0 + drift * 0.6 * drift_fade);
         albedo = mix(albedo, snow_col, snow);
         n = normalize(mix(n, sm.normal, snow));
         roughness = mix(roughness, mix(sm.roughness, 0.45, packed), snow);
+        // Glints: here and there an ice crystal faces just right and flashes in the sun. In
+        // cells at least a pixel across, one in sixteen holds a tilted mirror facet (lit below,
+        // on top of the snow's own shading, which it leaves alone).
+        if (pixel < 0.03) {
+            let cell = exp2(ceil(log2(max(pixel * 1.5, 0.002))));
+            let gp = floor(tp / cell);
+            glint = step(0.94, hash13(gp + vec3<f32>(0.0, 71.3, 0.0))) * (1.0 - smoothstep(0.012, 0.03, pixel))
+                * snow * (1.0 - packed);
+            let tilt = vec3<f32>(hash13(gp + 1.7), hash13(gp + 5.3), hash13(gp + 9.1)) * 2.0 - 1.0;
+            glint_n = normalize(n + tilt * 0.5);
+        }
         occlusion = mix(occlusion, sm.occlusion, snow);
         subsurface = mix(subsurface, 0.35, snow);
         ground_h = mix(ground_h, 1.0, snow);
@@ -1130,6 +1192,15 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     s.occlusion = occlusion;
     s.subsurface = subsurface;
     var color = shade_surface(s, in.rel);
+    // Snow glints: the sun mirrored in a crystal facet (a glossy GGX lobe; facets stacked in
+    // the crystal reflect far more than one ice surface's 2 %).
+    let to_sun = frame.sun_dir.xyz;
+    if (glint > 0.0 && dot(n, to_sun) > 0.0) {
+        let v = normalize(-in.rel);
+        let d = d_ggx(saturate(dot(glint_n, normalize(to_sun + v))), 0.08);
+        let flash = d * 0.15 * 0.25 / max(dot(n, v), 0.2) * glint;
+        color += pre_expose(frame.sun_color.rgb * sun_transmittance(in.rel) * shadow_factor(in.rel, n) * flash);
+    }
     if (maps.flags.z > 0.5) {
         let level = in.lod.y;
         let tint = vec3<f32>(fract(level * 0.37), fract(level * 0.61 + 0.3), fract(level * 0.83 + 0.6));

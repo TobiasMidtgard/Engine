@@ -11,6 +11,7 @@ use rapier3d::prelude::{
     Collider as RapierCollider, ColliderHandle, Pose, QueryFilter as RFilter, Ray,
 };
 
+use crate::capsule_box;
 use crate::convert;
 use crate::sim::{Region, Simulation};
 
@@ -102,11 +103,20 @@ impl PhysicsQuery for RapierQueries {
         let sim = self.0.read();
         let pad = s.compute_local_aabb().half_extents().length() as f64;
         let pred = |_: ColliderHandle, c: &RapierCollider| accepts(filter, c);
+        // Exact for capsules against boxes, which Parry's GJK can miss by decimeters.
+        let queries = capsule_box::dispatcher();
         let mut best: Option<Hit> = None;
         for region in regions_near(&sim, origin, dir, max_distance, pad) {
             let pose = Pose::from_parts(region.local(origin), rotation);
             let max = best.map_or(max_distance, |b| b.distance);
-            if let Some((h, cast)) = region.world.cast_shape(
+            let world = &region.world;
+            let qp = world.broad_phase.as_query_pipeline(
+                &queries,
+                &world.bodies,
+                &world.colliders,
+                RFilter::new().predicate(&pred),
+            );
+            if let Some((h, cast)) = qp.cast_shape(
                 &pose,
                 dir,
                 &*s,
@@ -116,7 +126,6 @@ impl PhysicsQuery for RapierQueries {
                     stop_at_penetration: true,
                     compute_impact_geometry_on_penetration: true,
                 },
-                RFilter::new().predicate(&pred),
             ) {
                 let c = &region.world.colliders[h];
                 best = Some(hit(
