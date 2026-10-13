@@ -279,6 +279,9 @@ pub struct PlanetShape {
     /// 0..1 strength of water and ice erosion: valleys, spurs, gullies and couloirs cut down
     /// the slopes of mountains and hills, flat valley floors (0 = none, as on the Moon).
     pub erosion: f64,
+    /// Height of the rock ledges that steep eroded mountainsides break into, meters (a
+    /// second set a third as high sits on top; 0 = none).
+    pub ledge_height_m: f64,
     /// Impact craters: radius of the largest, meters (0 = none).
     pub crater_max_radius_m: f64,
     /// Smallest crater radius, meters.
@@ -321,6 +324,7 @@ impl PlanetShape {
             detail_scale_m: 400.0,
             min_detail_m: 1.0,
             erosion: 1.0,
+            ledge_height_m: 60.0,
             crater_max_radius_m: 0.0,
             crater_min_radius_m: 0.0,
             crater_density: 0.0,
@@ -350,6 +354,7 @@ impl PlanetShape {
             detail_scale_m: 900.0,
             min_detail_m: 0.8,
             erosion: 0.0,
+            ledge_height_m: 0.0,
             crater_max_radius_m: 60_000.0,
             crater_min_radius_m: 4.0,
             crater_density: 0.75,
@@ -384,6 +389,7 @@ impl PlanetShape {
             detail_scale_m: 1_500.0,
             min_detail_m: 1.0,
             erosion: 0.0,
+            ledge_height_m: 0.0,
             crater_max_radius_m: 40_000.0,
             crater_min_radius_m: 20.0,
             crater_density: 0.35,
@@ -649,6 +655,29 @@ impl PlanetShape {
                 );
                 h += dh;
                 slope = eroded_slope;
+            }
+        }
+
+        // Rock ledges: steep mountainsides break into steps along the bedding planes, so
+        // cliffs read as layered rock and the ledges hold snow, scree and grass. The layers
+        // tilt and wander across the range; each set fades out where the vertices are too
+        // far apart to draw its steps.
+        if eroding && self.ledge_height_m > 0.0 {
+            let steep = smooth(0.7, 1.4, slope);
+            if steep > 0.0 {
+                let tilt = noise::fbm(p / 3_000.0, s ^ 0x1ED6, 2, 0.5);
+                let mut step = self.ledge_height_m;
+                for k in 0..2 {
+                    let lod = 1.0 - smooth(step * 0.15, step * 0.4, finest);
+                    if lod <= 0.0 {
+                        break;
+                    }
+                    let t = (h + tilt * step * 3.0) / step + k as f64 * 0.37;
+                    let f = t - t.floor();
+                    // Nearly flat for the lower part of each step, then a steep riser.
+                    h += (smooth(0.45, 1.0, f) - f) * step * 0.85 * steep * lod;
+                    step *= 0.3;
+                }
             }
         }
 

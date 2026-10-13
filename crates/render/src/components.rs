@@ -186,6 +186,12 @@ pub struct MeshRenderer {
     pub visible: bool,
 }
 
+/// Keeps a dense [`MeshRenderer`] off the virtual geometry cluster path, so it is always drawn
+/// instanced: for debris, fragments and other meshes that change often. Without it, meshes of
+/// at least `RenderSettings::virtual_geometry_min_triangles` are drawn as clusters.
+#[derive(Component, Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
+pub struct NoVirtualGeometry;
+
 impl Default for MeshRenderer {
     fn default() -> Self {
         Self {
@@ -202,8 +208,7 @@ impl MeshRenderer {
         Self {
             mesh: mesh.into(),
             material: material.into(),
-            cast_shadows: true,
-            visible: true,
+            ..Default::default()
         }
     }
 

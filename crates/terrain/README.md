@@ -17,8 +17,9 @@ everything else (streaming, LOD, colliders, ground queries, prints) follows the 
   parent patch's shape before a split or merge, so detail never pops. Positions are `f64` and
   rendered camera-relative, so a 6,371 km Earth is exact to the centimeter at the surface.
 - **Planet shapes.** `PlanetShape` presets for an Earth-like world (continents, oceans,
-  eroded mountains, hills, climate bands), the Moon (craters, maria) and Mars (craters,
-  plains, dry ice caps), all seeded and deterministic. Detail is generated down to
+  eroded mountains whose steep sides break into rock ledges, hills, climate bands), the
+  Moon (craters, maria) and Mars (craters, plains, dry ice caps), all seeded and
+  deterministic. Detail is generated down to
   `finest_spacing_m` (0.5 m by default).
 - **Flat pads and a view worth having.** `FlatPad` blends the planet into level ground for a
   level, town or spaceport. `PlanetTerrain::home_transform(pad)` places the planet so the pad
@@ -37,7 +38,11 @@ everything else (streaming, LOD, colliders, ground queries, prints) follows the 
   fields. Footsteps, rain and the `Ground` query follow the painted layer; edits paint over it.
 - **Ground cover from afar.** Climate colors (lush, dry, desert, snow by temperature and
   altitude), woods as dark canopy, meadows and fields in patches a few hundred meters
-  across, worn bare patches, rock on steep or high ground with scree below it, beaches.
+  across, worn bare patches, beaches. Mountainsides are a patchwork: grass and woods hold
+  steep ground below the tree line, outcrops stand on spurs with grass and scree in the
+  hollows, and weathered rock (iron-stained faces, dark wet gullies) takes over on cliffs
+  and high up. From orbit, noise per pixel gives woods, snowfields and coasts natural
+  shapes instead of the vertices' blocky ones.
 - **Detailed ground materials up close.** Nine PBR materials (turf in tufts over thatch,
   leaf litter with needles and twigs, soil, churned mud, rock, snow, rippled sand, gravel,
   concrete) are generated procedurally in `materials.rs` like a node-graph material: height

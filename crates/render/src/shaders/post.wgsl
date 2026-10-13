@@ -2,7 +2,8 @@
 // Requires lib_types only.
 
 struct PostParams {
-    // x: tonemapper (0 AgX, 1 ACES, 2 Reinhard, 3 none), y: saturation, z: contrast, w: vignette
+    // x: tonemapper (0 AgX, 1 ACES, 2 Reinhard, 3 none, 4 AgX punchy, 5 PBR neutral),
+    // y: saturation, z: contrast, w: vignette
     params: vec4<f32>,
     // x: bloom intensity (0..1 mix), y: film grain, z: real time, w: bloom normalization
     params2: vec4<f32>,
@@ -21,7 +22,9 @@ fn agx_contrast(x: vec3<f32>) -> vec3<f32> {
     return 15.5 * x4 * x2 - 40.14 * x4 * x + 31.96 * x4 - 6.868 * x2 * x + 0.4298 * x2 + 0.1191 * x - 0.00232;
 }
 
-fn agx(c: vec3<f32>) -> vec3<f32> {
+// AgX (Troy Sobotka; fit by Benjamin Wrensch) with an ASC CDL look in AgX space: `power`
+// adds contrast, `sat` color. (1, 1) is the base look, (1.35, 1.4) Blender's "Punchy".
+fn agx(c: vec3<f32>, power: f32, sat: f32) -> vec3<f32> {
     let agx_mat = mat3x3<f32>(
         vec3<f32>(0.842479062253094, 0.0423282422610123, 0.0423756549057051),
         vec3<f32>(0.0784335999999992, 0.878468636469772, 0.0784336),
@@ -36,8 +39,28 @@ fn agx(c: vec3<f32>) -> vec3<f32> {
     v = clamp(log2(max(v, vec3(1e-10))), vec3(min_ev), vec3(max_ev));
     v = (v - min_ev) / (max_ev - min_ev);
     v = agx_contrast(v);
+    v = pow(max(v, vec3(0.0)), vec3(power));
+    let l = dot(v, vec3<f32>(0.2126, 0.7152, 0.0722));
+    v = l + sat * (v - l);
     v = inv_mat * v;
     return pow(max(v, vec3(0.0)), vec3(2.2));
+}
+
+// Khronos PBR Neutral tone mapping.
+fn pbr_neutral(color: vec3<f32>) -> vec3<f32> {
+    let start = 0.8 - 0.04;
+    let desat = 0.15;
+    let x = min(color.r, min(color.g, color.b));
+    var offset = 0.04;
+    if (x < 0.08) { offset = x - 6.25 * x * x; }
+    var c = color - offset;
+    let peak = max(c.r, max(c.g, c.b));
+    if (peak < start) { return c; }
+    let d = 1.0 - start;
+    let new_peak = 1.0 - d * d / (peak + d - start);
+    c *= new_peak / peak;
+    let g = 1.0 - 1.0 / (desat * (peak - new_peak) + 1.0);
+    return mix(c, vec3(new_peak), g);
 }
 
 fn aces_fitted(c: vec3<f32>) -> vec3<f32> {
@@ -102,11 +125,15 @@ fn fs_tonemap(in: FullscreenOut) -> @location(0) vec4<f32> {
     let mode = u32(post.params.x);
     var mapped: vec3<f32>;
     if (mode == 0u) {
-        mapped = agx(c);
+        mapped = agx(c, 1.0, 1.0);
     } else if (mode == 1u) {
         mapped = aces_fitted(c * 0.8);
     } else if (mode == 2u) {
         mapped = c / (1.0 + c);
+    } else if (mode == 4u) {
+        mapped = agx(c, 1.35, 1.4);
+    } else if (mode == 5u) {
+        mapped = pbr_neutral(c);
     } else {
         mapped = saturate3(c);
     }

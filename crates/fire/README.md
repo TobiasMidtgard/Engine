@@ -10,9 +10,13 @@ objects, embers and spot fires, flames, scorch, light, heat, smoke emission and 
   fuel (kind, load in kg/m², moisture), absorbed heat, flame intensity, coals, scorch and the
   ground height. Every step, burning cells heat the fuel around them through a kernel that
   leans with the local wind (`WindField`), so fires run downwind, creep on their flanks and
-  barely back into the wind. A cell ignites once it has absorbed the energy to heat its fuel
-  and boil off its water. Calibrated against CSIRO grassland spread: about 0.03 m/s in still
-  air, 0.6 m/s at 3 m/s wind, 2 m/s at 10 m/s (`field::tests::calibrate`).
+  barely back into the wind. It also tilts with the ground under each tile (a plane fitted to
+  the cells' heights): heat reaches farther and stronger up a slope, so fires run uphill
+  (about twice as fast for every 10°, McArthur's rule) and slow to a creep going down. A cell
+  ignites once it has absorbed the energy to heat its fuel and boil off its water. Calibrated
+  against CSIRO grassland spread: about 0.05 m/s in still air, 0.6 m/s at 3 m/s wind, 2 m/s at
+  10 m/s (`field::tests::calibrate`); 1.9× at 10° upslope, 3.6× at 20°, 0.4× at 10° downslope
+  (`field::tests::fire_runs_uphill_and_slows_downhill`).
 - **Fuel** comes from the ground material (`SurfaceMaterials`: grass, leaves and wood burn;
   rock, sand, water don't) or from `FuelPatch` components that override it in an area: a dry
   meadow, a forest floor of litter, brush, or a firebreak (`FuelKind::None`).
@@ -93,7 +97,8 @@ when the demo starts so there's something to see right away. `demo::VIEWS` lists
 for it (fire front, burning trees, campfire at dusk, the fire coming at you at night).
 
 The grass is a `GrassMeadow` (`grass.rs`): a few hundred thousand curved, tapered blades
-drawn on the GPU, thinned with distance, swaying in the wind and casting shadows. It grows
+drawn on the GPU, thinned with distance, swaying in the wind and casting shadows, standing on
+the `Ground` (hills too). It grows
 only where the fuel is grass (roads and fire pits stay bare, the soaked patch is lush green)
 and follows the fire field: burning blades glow at their cut ends and collapse, burnt cells
 keep black stubble, and regrowth comes up green and cures to straw.
@@ -105,9 +110,13 @@ shed (framed board walls with gaps, a ledged door on strap hinges, a corrugated 
 hay bales with twine, and a campfire ring of shaped fieldstones around split logs and charcoal.
 Materials carry albedo, normal, roughness/AO and an emissive mask, so charring props glow in
 their cracks. The `PaintedGround` (dirt, gravel road, mud, fire-pit ash, litter) darkens to
-char and ash wherever the fire map is scorched. `examples/fire_gallery.rs` renders every view
+char and ash wherever the fire map is scorched; it drapes over the `Ground` like the grass. `examples/fire_gallery.rs` renders every view
 and close-ups of each prop (`fire_gallery [out_dir] [views|all] [width] [height]`; a view may
 be `key@secs` to take it at another time).
+
+`examples/fire_hill.rs` lights a fire low on a dry hillside in calm air and renders it climbing
+toward the ridge (`fire_hill [out_dir] [view@secs,...] [width] [height]`): the check for slope
+spread and for grass and ground that follow a hill.
 
 `examples/flame_look.rs` is a bench for the flames alone (a grass fire, a campfire, a burning
 crate, by day or night); `flame_look sheet` writes the flipbook as a contact sheet.
@@ -121,6 +130,7 @@ into 1 × 1, 2 × 2 or 4 × 4-cell blocks with distance.
 
 ## Not yet
 
-- Fire climbing slopes faster (the field knows ground height; the kernel doesn't use slope).
+- Slope within a tile: each 16 m tile uses one fitted slope, so a ridge inside a tile counts
+  as flat.
 - Fuel from foliage instances (each grass blade or bush as fuel) once foliage exposes them.
 - Building interiors: fire spreading room to room through openings.

@@ -135,8 +135,8 @@ touching pairs, step time, substeps.
 yard (with a curb, so nothing rolls off) with a 30-crate tower, a bin filling with 250
 crates/barrels/balls, a domino snake, crash test dummy ragdolls tumbling down a steep staircase,
 a wrecking ball smashing a crate wall, a seesaw catapult, a motor-driven paddle wheel, a sagging
-plank bridge, a kinematic turntable and bouncing rubber balls. Its top surface is at `origin`; the
-showcase's physics zone places it. Render it alone with
+plank bridge, a kinematic turntable and bouncing rubber balls. It sits on the ground at `origin`,
+its top `demo::SLAB_RISE` (10 cm) above it; the showcase's physics zone places it. Render it alone with
 `cargo run -p engine_physics --release --example proving_ground -- out_dir`.
 
 The stations replay on their own cycles (`demo::Station::cycle_secs`, world time: ragdolls,

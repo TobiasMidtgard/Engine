@@ -44,6 +44,7 @@ struct Frame {
     jitter: vec4<f32>,             // TAA jitter: NDC xy, pixels zw
     camera_delta: vec4<f32>,       // camera origin - previous origin (m), w = 1 if the previous frame is valid history
     effects: vec4<f32>,            // AO intensity (0 = off), contact shadow length (m), sun penumbra scale, AO radius (m)
+    reflections: vec4<f32>,        // screen-space reflections this frame (1/0), previous frame's pre-exposure (0 = none), max perceptual roughness, screen-space GI strength (0 = off)
 };
 
 // An indoor space (`SkyLightVolume`): sky light comes in only through its open faces.

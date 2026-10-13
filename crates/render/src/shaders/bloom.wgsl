@@ -16,8 +16,16 @@ fn karis_weight(c: vec3<f32>) -> f32 {
     return 1.0 / (1.0 + luminance(c));
 }
 
+// A NaN, infinite or negative pixel (a broken shader anywhere in the frame) would otherwise
+// spread over the whole screen through the blur chain; such taps count as black. Checked on the
+// bits, which no compiler optimizes away.
+fn finite_or_black(c: vec3<f32>) -> vec3<f32> {
+    let bad = (bitcast<vec3<u32>>(c) & vec3(0x7f800000u)) == vec3(0x7f800000u);
+    return clamp(select(c, vec3(0.0), bad), vec3(0.0), vec3(60000.0));
+}
+
 fn tap(uv: vec2<f32>) -> vec3<f32> {
-    return min(textureSampleLevel(src_tex, src_sampler, uv, 0.0).rgb, vec3(60000.0));
+    return finite_or_black(textureSampleLevel(src_tex, src_sampler, uv, 0.0).rgb);
 }
 
 @vertex

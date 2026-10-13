@@ -67,6 +67,11 @@ pub struct SpreadParams {
     pub upwind_damping: f32,
     /// Fraction of absorbed heat a cell loses to the air per second.
     pub cooling: f32,
+    /// How much farther heat reaches up a slope (flames lean over the fuel above them):
+    /// doublings per 10° of slope, halvings down it.
+    pub slope_reach: f32,
+    /// How much more heat goes up a slope: doublings per 10°, halvings down it.
+    pub slope_boost: f32,
 }
 
 impl Default for SpreadParams {
@@ -77,7 +82,9 @@ impl Default for SpreadParams {
             wind_reach: 0.3,
             wind_boost: 1.0,
             upwind_damping: 0.9,
-            cooling: 0.04,
+            cooling: 0.03,
+            slope_reach: 0.3,
+            slope_boost: 1.0,
         }
     }
 }
@@ -740,7 +747,14 @@ impl FireField {
             let half = TILE as f64 * cell as f64 * 0.5;
             let c = tile_origin(field_origin, cell, t.key) + DVec2::splat(half);
             let w = (input.wind)(DVec3::new(c.x, t.base_y + 2.0, c.y));
-            build_kernel(&mut t.kernel, Vec2::new(w.x, w.z), cell, &input.params);
+            let slope = ground_slope(&t.cells, cell);
+            build_kernel(
+                &mut t.kernel,
+                Vec2::new(w.x, w.z),
+                slope,
+                cell,
+                &input.params,
+            );
         }
 
         // Gather incoming heat for every processed tile (reads neighbors, writes scratch).
@@ -1043,10 +1057,49 @@ fn tile_origin(field_origin: DVec2, cell_m: f32, key: IVec2) -> DVec2 {
     field_origin + (key * TILE).as_dvec2() * cell_m as f64
 }
 
+/// The tilt of a tile's ground (a plane fitted to its cells' heights): rise per meter along
+/// world X and Z, pointing uphill.
+pub fn ground_slope(cells: &[Cell], cell: f32) -> Vec2 {
+    let (mut n, mut sx, mut sz, mut sy) = (0.0f32, 0.0f32, 0.0f32, 0.0f32);
+    for (i, c) in cells.iter().enumerate() {
+        if c.ground_y.is_finite() {
+            n += 1.0;
+            sx += (i as i32 % TILE) as f32;
+            sz += (i as i32 / TILE) as f32;
+            sy += c.ground_y;
+        }
+    }
+    if n < 3.0 {
+        return Vec2::ZERO;
+    }
+    let (mx, mz, my) = (sx / n, sz / n, sy / n);
+    let (mut xx, mut zz, mut xz, mut xy, mut zy) = (0.0f32, 0.0f32, 0.0f32, 0.0f32, 0.0f32);
+    for (i, c) in cells.iter().enumerate() {
+        if c.ground_y.is_finite() {
+            let x = (i as i32 % TILE) as f32 - mx;
+            let z = (i as i32 / TILE) as f32 - mz;
+            let y = c.ground_y - my;
+            xx += x * x;
+            zz += z * z;
+            xz += x * z;
+            xy += x * y;
+            zy += z * y;
+        }
+    }
+    let det = xx * zz - xz * xz;
+    if det.abs() < 1e-6 {
+        return Vec2::ZERO;
+    }
+    let g = Vec2::new(zz * xy - xz * zy, xx * zy - xz * xy) / det / cell;
+    // Cliffs and overhangs aren't slopes a fire runs up.
+    g.clamp_length_max(1.0)
+}
+
 /// Fill `kernel` with the share of a burning cell's heat that reaches each offset, for wind
-/// `wind` (m/s, world X/Z). Offsets are indexed `(dy + REACH) * KERNEL_W + (dx + REACH)` and
-/// point from the receiving cell to the burning one.
-pub fn build_kernel(kernel: &mut [f32], wind: Vec2, cell: f32, p: &SpreadParams) {
+/// `wind` (m/s, world X/Z) on ground tilted by `slope` (rise per meter along X/Z). Offsets are
+/// indexed `(dy + REACH) * KERNEL_W + (dx + REACH)` and point from the receiving cell to the
+/// burning one.
+pub fn build_kernel(kernel: &mut [f32], wind: Vec2, slope: Vec2, cell: f32, p: &SpreadParams) {
     let speed = wind.length();
     let dir = if speed > 1e-3 {
         wind / speed
@@ -1081,8 +1134,13 @@ pub fn build_kernel(kernel: &mut [f32], wind: Vec2, cell: f32, p: &SpreadParams)
             };
             let down = cos.max(0.0);
             let up = (-cos).max(0.0);
-            let reach = p.reach_m * (1.0 + p.wind_reach * speed * down);
-            let boost = 1.0 + p.wind_boost * speed * down * down;
+            // Slope toward the receiver, in tens of degrees (negative: downhill).
+            let tens = (o.normalize().dot(slope)).atan().to_degrees() / 10.0;
+            let reach = p.reach_m
+                * (1.0 + p.wind_reach * speed * down)
+                * (tens * p.slope_reach).clamp(-2.0, 3.0).exp2();
+            let boost = (1.0 + p.wind_boost * speed * down * down)
+                * (tens * p.slope_boost).clamp(-2.0, 3.0).exp2();
             let damp = (-p.upwind_damping * speed * up).exp();
             kernel[idx] = (-d / reach).exp() / d * boost * damp / still;
         }
@@ -1365,9 +1423,21 @@ mod tests {
     }
 
     fn spread_rates_with(wind_speed: f32, secs: f32, params: SpreadParams) -> (f64, f64) {
+        spread_rates_on(wind_speed, secs, params, 0.0)
+    }
+
+    /// Like `spread_rates_with`, on grass that climbs toward +X at `slope_deg` (the head runs
+    /// uphill, the back downhill; negative runs the head downhill).
+    fn spread_rates_on(
+        wind_speed: f32,
+        secs: f32,
+        params: SpreadParams,
+        slope_deg: f64,
+    ) -> (f64, f64) {
         pools();
         let mut field = FireField::new(0.5);
-        let mut fuel = grass;
+        let rise = slope_deg.to_radians().tan();
+        let mut fuel = move |p: DVec3| (grass(p).0, p.x * rise);
         let (wind, dt) = input(Vec3::new(wind_speed, 0.0, 0.0), 0.05);
         let wet = |_p: DVec3| 0.0;
         let step = StepInput {
@@ -1444,6 +1514,106 @@ mod tests {
             strong_back < strong * 0.15,
             "backing fire: {strong_back} vs {strong}"
         );
+    }
+
+    #[test]
+    #[ignore]
+    fn calibrate_calm() {
+        for (transfer, cooling) in [(0.2, 0.036), (0.2, 0.033), (0.2, 0.03)] {
+            let p = SpreadParams {
+                transfer,
+                cooling,
+                ..Default::default()
+            };
+            let calm = spread_rates_with(0.0, 120.0, p);
+            let calm_early = spread_rates_with(0.0, 30.0, p);
+            let light = spread_rates_with(3.0, 12.0, p);
+            let strong = spread_rates_with(10.0, 6.0, p);
+            let slope = spread_rates_on(0.0, 40.0, p, 20.0);
+            eprintln!(
+                "t {transfer} c {cooling}: calm {:.4}/{:.4} (30 s {:.4}) 3 m/s {:.3}/{:.3} 10 m/s {:.3}/{:.3} 20° {:.3}/{:.3}",
+                calm.0,
+                calm.1,
+                calm_early.0,
+                light.0,
+                light.1,
+                strong.0,
+                strong.1,
+                slope.0,
+                slope.1
+            );
+        }
+    }
+
+    #[test]
+    #[ignore]
+    fn calibrate_slope() {
+        for (reach, boost) in [(0.0, 0.0), (1.0, 0.0), (0.5, 0.5), (0.3, 1.0), (0.4, 1.2)] {
+            let p = SpreadParams {
+                slope_reach: reach,
+                slope_boost: boost,
+                ..Default::default()
+            };
+            let still: Vec<_> = [0.0, 10.0, 20.0, 30.0]
+                .map(|deg| spread_rates_on(0.0, 60.0, p, deg))
+                .into();
+            let windy: Vec<_> = [-20.0, -10.0, 0.0, 10.0, 20.0]
+                .map(|deg| spread_rates_on(3.0, 12.0, p, deg).0)
+                .into();
+            let strong: Vec<_> = [-10.0, 0.0, 10.0]
+                .map(|deg| spread_rates_on(10.0, 6.0, p, deg).0)
+                .into();
+            eprintln!(
+                "reach {reach} boost {boost}: still {:.3?}  3 m/s -20..20° {:.3?}  10 m/s -10..10° {:.3?}",
+                still, windy, strong
+            );
+        }
+    }
+
+    #[test]
+    fn fire_runs_uphill_and_slows_downhill() {
+        let p = SpreadParams::default();
+        let rate = |deg: f64| spread_rates_on(3.0, 12.0, p, deg).0;
+        let (flat, up10, up20, down10, down20) =
+            (rate(0.0), rate(10.0), rate(20.0), rate(-10.0), rate(-20.0));
+        eprintln!(
+            "3 m/s: flat {flat:.3}, uphill {up10:.3} at 10° {up20:.3} at 20°, \
+             downhill {down10:.3} at 10° {down20:.3} at 20°"
+        );
+        // McArthur: a grass fire about doubles its speed for every 10° upslope and halves it
+        // for every 10° down.
+        assert!(
+            (1.5..2.5).contains(&(up10 / flat)),
+            "10° up: {up10} vs {flat}"
+        );
+        assert!(
+            (2.5..4.5).contains(&(up20 / flat)),
+            "20° up: {up20} vs {flat}"
+        );
+        assert!(
+            (0.3..0.7).contains(&(down10 / flat)),
+            "10° down: {down10} vs {flat}"
+        );
+        assert!(down20 < down10, "20° down: {down20} vs {down10}");
+        // In still air a slope alone drives the fire up it, and it barely backs down.
+        let (up, back) = spread_rates_on(0.0, 30.0, p, 15.0);
+        assert!(up > 0.1, "still air, 15° up: {up} m/s");
+        assert!(back < up * 0.2, "still air, 15° down: {back} vs {up} m/s");
+    }
+
+    #[test]
+    fn a_tilted_tile_measures_its_slope() {
+        let cell = 0.5;
+        let cells: Vec<Cell> = (0..TILE_CELLS as i32)
+            .map(|i| {
+                let (x, z) = ((i % TILE) as f32 * cell, (i / TILE) as f32 * cell);
+                Cell::from_fuel(CellFuel::NONE, 0.3 * x - 0.1 * z)
+            })
+            .collect();
+        let g = ground_slope(&cells, cell);
+        assert!((g - Vec2::new(0.3, -0.1)).length() < 1e-3, "{g}");
+        let flat = vec![Cell::from_fuel(CellFuel::NONE, 2.0); TILE_CELLS];
+        assert_eq!(ground_slope(&flat, cell), Vec2::ZERO);
     }
 
     #[test]
