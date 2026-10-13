@@ -20,10 +20,11 @@ Background research: `game-engine-research/graphics.md` in the project files.
   push it. Every splash is published as `WaterSplash` (particles, audio) and `NoiseEvent` (AI),
   including steady puffs of spray from fast boats' bows and from the foot of every waterfall
   the flow finds.
-- **Floating** (`Buoyancy`): Archimedes over a probe grid with drag and wave forces; physics
-  bodies get `ApplyImpulse`, and without a physics backend the module moves them itself
-  (`Floating`). Blasts throw floating things; hitting the water splashes. `Tether` moors boats
-  and buoys.
+- **Floating** (`Buoyancy`): Archimedes over a probe grid with drag and wave forces, for props
+  the module moves itself (`Floating`): buoys, moored boats, debris. Physics bodies
+  (`RigidBody`) float in the physics module from their real collider shapes, through the same
+  `Water` query, so `Buoyancy` leaves them alone. Blasts throw floating things; hitting the
+  water splashes. `Tether` moors boats and buoys.
 - **Rain**: weather rain and local `RainShower`s draw rings on water and fill puddles in hollows
   (`SurfaceLayers::puddle_m`), which soak in and evaporate by material, temperature and wind.
 - **Rendering** (`WaterFeature`): refraction of the scene behind, depth absorption and
@@ -76,7 +77,7 @@ Reads: `WindField`, `WeatherState` (rain, temperature, wind), `Ground` and `Surf
 `FocusPoints`, `GroundContact`, `ProjectileTrace`, `WorldImpulse`.
 
 Writes: the `Water` query (surface height, depth, velocity, normal), `SurfaceLayers` puddles,
-`WaterSplash`, `NoiseEvent`, `ApplyImpulse`.
+`WaterSplash`, `NoiseEvent`.
 
 Cross-module interaction goes through `engine_world` (see AGENTS.md). If a contract is missing,
 ask the core owner to add it rather than depending on another module's crate.
