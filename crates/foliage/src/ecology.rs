@@ -242,8 +242,7 @@ pub fn play_history(
                     sim.rng.range(-1.0, 1.0) as f64 * region.half_extents[1] as f64,
                 );
             if sim.soil.blocked[sim.soil.index(p)]
-                || (layer == Layer::Canopy
-                    && !region.tree_allowed(DVec2::new(p.x - center.x, p.z - center.z)))
+                || !region.may_root(layer, DVec2::new(p.x - center.x, p.z - center.z))
             {
                 continue;
             }
@@ -366,7 +365,13 @@ struct LogSpan {
 impl LogSpan {
     fn of(center: DVec3, log: &SimLog, library: &PlantLibrary) -> Self {
         let sp = library.get(log.species);
-        let length = sp.max_height_m * log.size * 0.85;
+        // Bare old logs have lost their tops (`meshgen::tree`).
+        let reach = if log.years >= crate::felling::LOG_BARE_YEARS {
+            0.4
+        } else {
+            0.85
+        };
+        let length = sp.max_height_m * log.size * reach;
         let a = Vec2::new((log.pos.x - center.x) as f32, (log.pos.z - center.z) as f32);
         Self {
             a,
@@ -979,13 +984,16 @@ mod tests {
     }
 
     #[test]
-    fn no_tree_roots_in_a_sight_line() {
+    fn only_ground_plants_grow_in_a_sight_line() {
         let lib = PlantLibrary::default();
         let region = EcologyRegion {
-            no_trees: vec![[0.0, 0.0, 8.0]],
+            sight_lines: vec![[0.0, 0.0, 8.0]],
+            species: ["oak", "birch", "pine", "hazel", "fern", "grass"]
+                .map(String::from)
+                .to_vec(),
             history: RegionHistory {
                 grow_years: 60.0,
-                initial_plants: [80, 0, 200],
+                initial_plants: [80, 60, 200],
                 ..Default::default()
             },
             ..forest()
@@ -997,9 +1005,9 @@ mod tests {
             !plants
                 .iter()
                 .filter(inside)
-                .any(|p| layer(p) == Layer::Canopy)
+                .any(|p| layer(p) != Layer::Ground)
         );
-        // Ground plants still grow there; trees grow outside it.
+        // Ground plants still grow there; trees and shrubs grow outside it.
         assert!(
             plants
                 .iter()
@@ -1007,6 +1015,7 @@ mod tests {
                 .any(|p| layer(p) == Layer::Ground)
         );
         assert!(plants.iter().any(|p| layer(p) == Layer::Canopy));
+        assert!(plants.iter().any(|p| layer(p) == Layer::Understory));
     }
 
     #[test]

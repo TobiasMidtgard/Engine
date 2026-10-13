@@ -339,6 +339,9 @@ fn model_spin(genes: &Genes) -> Quat {
     plant_pose(&plant).0
 }
 
+/// Years a log keeps its twigs; after that it is drawn bare (the plant's `log` mesh).
+pub const LOG_BARE_YEARS: f32 = 1.2;
+
 fn log_scale(genes: &Genes, size: f32) -> Vec3 {
     let s = size.max(0.02);
     Vec3::new(s * genes.crown, s * genes.height, s * genes.crown)
@@ -359,13 +362,17 @@ pub fn falling_transform(f: &FallingTree, pose: &LogPose, sp: &PlantSpecies) -> 
 }
 
 /// Where a log comes to rest beside its stump: the butt slides off the stump onto the ground,
-/// the crown props the top end up a little, and it lies along the slope.
+/// the crown props the top end up a little, and it lies along the slope. A log that has lain
+/// `years` (with `rot` of its rotting done, 0..1) has lost its crown, so its top end lies on
+/// the ground too, it has sunk into the litter, and its mossy side (the model's +X) is up.
 pub fn log_rest_transform(
     ground: Option<&Ground>,
     stump: DVec3,
     pose: &LogPose,
     size: f32,
     sp: &PlantSpecies,
+    years: f32,
+    rot: f32,
 ) -> Transform {
     let (height, cut) = model_heights(sp);
     let scale = log_scale(&pose.genes, size);
@@ -374,16 +381,28 @@ pub fn log_rest_transform(
     let r = (sp.trunk_radius_m * size * pose.genes.crown).max(0.04);
     let length = ((height - cut) * scale.y).max(0.5);
     let flip = if pose.genes.hue >= 0.0 { 1.0 } else { -1.0 };
+    let old = years >= LOG_BARE_YEARS;
+    let sink = 0.9 - 0.4 * rot.clamp(0.0, 1.0);
     let mut butt = stump + (side * r * 2.2 * flip + dir * r).as_dvec3();
-    butt.y = ground_y(ground, butt) + r as f64 * 0.9;
+    butt.y = ground_y(ground, butt) + (r * sink) as f64;
     let mut tip_p = butt + (dir * length).as_dvec3();
-    let crown_support = (sp.crown_radius_m * size * pose.genes.crown * 0.12).max(r);
+    let crown_support = if old {
+        r * 0.35 * sink
+    } else {
+        (sp.crown_radius_m * size * pose.genes.crown * 0.12).max(r)
+    };
     tip_p.y = ground_y(ground, tip_p) + crown_support as f64;
     let axis = (tip_p - butt).as_vec3().normalize_or(dir);
-    let roll = pose.genes.lean_dir * 3.1;
-    let rotation = Quat::from_axis_angle(axis, roll)
-        * Quat::from_rotation_arc(Vec3::Y, axis)
-        * model_spin(&pose.genes);
+    let lying = Quat::from_rotation_arc(Vec3::Y, axis) * model_spin(&pose.genes);
+    let roll = if old {
+        // Turn the model's +X side (where the log mesh carries its moss) up, give or take.
+        let x = lying * Vec3::X;
+        let up = (Vec3::Y - axis * axis.y).normalize_or(Vec3::Y);
+        axis.dot(x.cross(up)).atan2(x.dot(up)) + 0.4 * pose.genes.lean_dir.sin()
+    } else {
+        pose.genes.lean_dir * 3.1
+    };
+    let rotation = Quat::from_axis_angle(axis, roll) * lying;
     let cut_point = rotation * (scale * Vec3::Y * cut);
     Transform {
         translation: butt - cut_point.as_dvec3(),
@@ -498,7 +517,7 @@ pub fn update_falling_trees(
         let sp = library.get(f.species);
         if let Some((t, from)) = f.settle {
             let t = (t + dt / 0.45).min(1.0);
-            let rest = log_rest_transform(ground, f.stump, pose, f.size, sp);
+            let rest = log_rest_transform(ground, f.stump, pose, f.size, sp, f.years_dead, 0.0);
             let k = t * t * (3.0 - 2.0 * t);
             *transform = from.lerp(&rest, k);
             f.settle = Some((t, from));
@@ -515,7 +534,7 @@ pub fn update_falling_trees(
                         },
                         LogPlaced,
                     ));
-                spawn_log_collider(&mut commands, entity, &rest, sp, f.size, &pose.genes);
+                spawn_log_collider(&mut commands, entity, &rest, sp, f.size, &pose.genes, 0.7);
             }
             continue;
         }
@@ -634,13 +653,28 @@ pub fn place_logs(
 ) {
     for (e, log, pose, mut t) in &mut logs {
         let sp = library.get(log.species);
-        let rest = log_rest_transform(ground.as_deref(), t.translation, pose, log.size, sp);
+        let rot = log.years / log.rot_years.max(0.1);
+        let rest = log_rest_transform(
+            ground.as_deref(),
+            t.translation,
+            pose,
+            log.size,
+            sp,
+            log.years,
+            rot,
+        );
         *t = rest;
         commands.entity(e).insert(LogPlaced);
-        spawn_log_collider(&mut commands, e, &rest, sp, log.size, &pose.genes);
+        let reach = if log.years >= LOG_BARE_YEARS {
+            0.32
+        } else {
+            0.7
+        };
+        spawn_log_collider(&mut commands, e, &rest, sp, log.size, &pose.genes, reach);
     }
 }
 
+/// A capsule along the log from its butt, `reach` of the trunk above the cut long.
 fn spawn_log_collider(
     commands: &mut Commands,
     log: Entity,
@@ -648,11 +682,12 @@ fn spawn_log_collider(
     sp: &PlantSpecies,
     size: f32,
     genes: &Genes,
+    reach: f32,
 ) {
     let (height, cut) = model_heights(sp);
     let r = (sp.trunk_radius_m * size * genes.crown).max(0.04);
     let axis = rest.rotation * Vec3::Y;
-    let length = (height - cut) * rest.scale.y * 0.7;
+    let length = (height - cut) * rest.scale.y * reach;
     let butt = rest.translation + (rest.rotation * (rest.scale * Vec3::Y * cut)).as_dvec3();
     let collider = commands
         .spawn((
@@ -991,6 +1026,37 @@ mod tests {
         assert!(down[3].0.x > down[0].0.x + 3.0, "{down:?}");
         app.update_n(5 * 60);
         assert!(presses(&mut app).is_empty());
+    }
+
+    #[test]
+    fn old_logs_lie_low_with_their_mossy_side_up() {
+        let lib = PlantLibrary::default();
+        let sp = lib.get(lib.id("oak").unwrap());
+        for k in 0..12 {
+            let pose = LogPose {
+                yaw: k as f32 * 0.7,
+                genes: Genes {
+                    lean_dir: k as f32 * 1.3,
+                    hue: if k % 2 == 0 { 0.4 } else { -0.4 },
+                    ..Default::default()
+                },
+                charred: false,
+            };
+            let fresh = log_rest_transform(None, DVec3::ZERO, &pose, 0.8, sp, 0.0, 0.0);
+            let old = log_rest_transform(None, DVec3::ZERO, &pose, 0.8, sp, 6.0, 0.4);
+            let rotten = log_rest_transform(None, DVec3::ZERO, &pose, 0.8, sp, 12.0, 0.9);
+            // Within half a radian of straight up.
+            assert!((old.rotation * Vec3::X).y > 0.4f32.cos() * 0.98, "{k}");
+            let tip = |t: &Transform| t.translation + (t.rotation * Vec3::Y * 10.0).as_dvec3();
+            assert!(
+                tip(&old).y < tip(&fresh).y,
+                "the crown no longer props it up"
+            );
+            assert!(
+                rotten.translation.y < old.translation.y,
+                "it sinks as it rots"
+            );
+        }
     }
 
     #[test]

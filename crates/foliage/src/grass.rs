@@ -17,7 +17,7 @@ use engine_render::{GrassField, GrassStyle};
 use engine_world::Ground;
 
 use crate::ecology::{InRegion, RegionState};
-use crate::felling::LogPlaced;
+use crate::felling::{LOG_BARE_YEARS, LogPlaced};
 use crate::plant::{EcologyRegion, EcologySettings, FelledLog, Plant};
 use crate::scenery::Rock;
 use crate::species::{PlantForm, PlantLibrary};
@@ -247,7 +247,13 @@ pub fn sync_region_grass(
             .filter_map(|(log, t)| {
                 let sp = library.get(log.species);
                 let a = local(t);
-                let axis = t.rotation * Vec3::Y * (sp.max_height_m * t.scale.y * 0.85);
+                // Bare old logs have lost their thin tops (`meshgen::tree`).
+                let reach = if log.years >= LOG_BARE_YEARS {
+                    0.62
+                } else {
+                    0.85
+                };
+                let axis = t.rotation * Vec3::Y * (sp.max_height_m * t.scale.y * reach);
                 let r = (sp.trunk_radius_m * log.size * 1.6).max(0.15);
                 inside(a).then_some(Cover {
                     a,

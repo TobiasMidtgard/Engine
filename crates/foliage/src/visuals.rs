@@ -15,7 +15,7 @@ use engine_render::{Camera, Mesh, MeshRenderer, PointLight, StandardMaterial};
 
 use crate::assets::{FoliageVisuals, GLOW_LEVELS, SpeciesVisual, TINTS, VARIANTS};
 use crate::ecology::InRegion;
-use crate::felling::{FallingTree, LogPose};
+use crate::felling::{FallingTree, LOG_BARE_YEARS, LogPose};
 use crate::grass::RegionGrass;
 use crate::plant::{EcologySettings, FelledLog, Plant, PlantStage};
 use crate::species::{Layer, PlantForm, PlantLibrary, PlantSpecies};
@@ -315,7 +315,7 @@ pub fn desired_log_parts(
     let lod = distance > settings.tree_lod_distance_m * (0.5 + size) && v.wood_lod.is_some();
     let (wood, foliage) = if size < 0.22 && v.sapling_wood.is_some() {
         (v.sapling_wood, v.sapling_foliage)
-    } else if (years >= 1.2 || pose.charred) && v.log.is_some() {
+    } else if (years >= LOG_BARE_YEARS || pose.charred) && v.log.is_some() {
         // The twigs have rotted (or burnt) off.
         (v.log, None)
     } else if lod {
@@ -330,7 +330,7 @@ pub fn desired_log_parts(
     } else {
         vis.bark_rigid
     };
-    let leaves = if pose.charred || years >= 1.2 {
+    let leaves = if pose.charred || years >= LOG_BARE_YEARS {
         None
     } else if years < 0.15 {
         Some(vis.leaves_still[tint])

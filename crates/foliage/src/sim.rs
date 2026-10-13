@@ -796,10 +796,9 @@ impl RegionSim {
             if !self.soil.contains(q) || self.soil.blocked[self.soil.index(q)] {
                 continue;
             }
-            if layer == Layer::Canopy
-                && !ctx
-                    .region
-                    .tree_allowed(DVec2::new(q.x - ctx.center.x, q.z - ctx.center.z))
+            if !ctx
+                .region
+                .may_root(layer, DVec2::new(q.x - ctx.center.x, q.z - ctx.center.z))
             {
                 continue;
             }

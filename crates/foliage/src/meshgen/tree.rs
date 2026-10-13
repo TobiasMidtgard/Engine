@@ -18,7 +18,7 @@
 //! hanging shoots in a tapering cone, pines brushes of long needles in cloud-like clumps at
 //! the ends of upturned limbs.
 
-use engine_core::math::{Quat, Rng, Vec2, Vec3, Vec4, smoothstep};
+use engine_core::math::{Quat, Rng, Vec2, Vec3, Vec4, noise, smoothstep};
 
 use super::textures::{CLUSTER_CELL, LeafKind, atlas_cell, kind_of};
 use super::{MeshBuilder, rgb};
@@ -509,6 +509,32 @@ fn trunk(
     (path, radius)
 }
 
+/// Moss over the model's +X side of a log (the side `felling::log_rest_transform` turns up
+/// once the twigs have rotted off), patchy along it, and a darker, damp underside. The cut
+/// faces stay bare.
+fn moss_log(mesh: &mut engine_render::Mesh, seed: u64) {
+    let moss = Vec3::new(0.06, 0.085, 0.022);
+    for v in &mut mesh.vertices {
+        let n = Vec3::from(v.normal).normalize_or_zero();
+        let side = 1.0 - n.y.abs();
+        let p = Vec3::from(v.position);
+        let patch = noise::fbm3(
+            p.x as f64 * 1.3,
+            p.y as f64 * 0.8,
+            p.z as f64 * 1.3,
+            seed ^ 0x6d055,
+            3,
+            2.0,
+            0.5,
+        );
+        let top = smoothstep(-0.15 - 0.3 * patch, 0.55, n.x) * smoothstep(-0.5, 0.05, patch);
+        let under = smoothstep(0.0, 0.7, -n.x);
+        let c = Vec3::new(v.color[0], v.color[1], v.color[2]);
+        let c = c.lerp(moss, top * side * 0.85) * (1.0 - 0.35 * under * side);
+        v.color = [c.x, c.y, c.z, v.color[3]];
+    }
+}
+
 /// Sides of the trunk near the camera. The stump and the wood above it use the same count so
 /// their rings meet at the cut without cracks (which would show the cut faces through them).
 const TRUNK_SIDES: u32 = 14;
@@ -750,18 +776,27 @@ fn assemble(
         }
         out.base = Some(b.finish());
 
+        // A bare log: the top has broken off where the trunk thins and rotted away, leaving a
+        // dark, rotten end (about a third of the tree's height remains).
         let mut b = MeshBuilder::new();
-        let path = &trunk_path[cut_i..];
-        let rad = &trunk_r[cut_i..];
+        let snap = 0.55 + 0.15 * engine_core::math::hash01(7, 0, 0, seed);
+        let end = (cut_i..trunk_path.len())
+            .find(|&i| trunk_r[i] < sp.trunk_radius_m * snap)
+            .unwrap_or(trunk_path.len())
+            .max(cut_i + 2);
+        let top_y = trunk_path[end - 1].y;
+        let path = &trunk_path[cut_i..end];
+        let rad = &trunk_r[cut_i..end];
         let color = |i: usize, _a: f32| bark_color(sp, path[i].y, h, i + cut_i, seed);
         let cap = |r: f32| cut_color(rim, r);
+        let rotten = |_: f32| Vec4::new(0.09, 0.065, 0.045, 1.0);
         let broken = |_: f32| rgb(sp.bark_color, 0.55);
-        b.tube(path, rad, 10, 0.5, &color, Some(&cap), Some(&broken));
+        b.tube(path, rad, 10, 0.5, &color, Some(&cap), Some(&rotten));
         // Short broken stubs where the thickest limbs were (the thin ones snap off flush).
         let mut limbs: Vec<_> = branches
             .iter()
             .enumerate()
-            .filter(|(_, br)| br.level == 1)
+            .filter(|(_, br)| br.level == 1 && br.path[0].y < top_y)
             .collect();
         limbs.sort_by(|a, b| b.1.radius[0].total_cmp(&a.1.radius[0]));
         limbs.truncate((limbs.len() / 3).clamp(2, 9));
@@ -773,7 +808,9 @@ fn assemble(
             let color = |i: usize, _a: f32| bark_color(sp, stub[i].y, h, i + bi * 7, seed);
             b.tube(&stub, &r, 5, 0.5, &color, None, Some(&broken));
         }
-        out.log = Some(b.finish());
+        let mut log = b.finish();
+        moss_log(&mut log, seed);
+        out.log = Some(log);
     }
     let kind = kind_of(sp.shape.leaf);
     let shading = Shading {

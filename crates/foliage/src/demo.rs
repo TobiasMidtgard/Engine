@@ -170,8 +170,8 @@ pub fn forest_viewpoints(center: DVec3) -> Vec<Viewpoint> {
     ]
 }
 
-/// Room in front of the forest's ground-level viewpoints, so no trunk takes root right in
-/// front of the lens (shrubs and ferns still frame the view).
+/// Room in front of the forest's ground-level viewpoints, so no trunk or bush grows right in
+/// front of the lens (ferns and grass still frame the view).
 fn lens_clearance() -> Vec<[f32; 3]> {
     forest_viewpoints(DVec3::ZERO)
         .iter()
@@ -236,7 +236,7 @@ pub fn forest_region() -> EcologyRegion {
         step_years: 0.25,
         time_scale: 30.0,
         keep_clear: [vec![POND], trail_clearance()].concat(),
-        no_trees: lens_clearance(),
+        sight_lines: lens_clearance(),
         history: RegionHistory {
             grow_years: 110.0,
             initial_plants: [260, 120, 1500],
