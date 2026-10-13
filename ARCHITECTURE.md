@@ -167,7 +167,7 @@ mountains shade the valley at low sun and ridges shade themselves kilometers awa
 shows its region in magenta.
 
 **Cloud shadows** (built; `cloud_shadows.rs`): a top-down map of the sunlight the clouds let
-through, frame binding 21 (`cloud_shadow_map`), anchored to the world. The module that draws
+through, frame binding 22 (`cloud_shadow_map`), anchored to the world. The module that draws
 clouds (weather) asks for it from its render feature: `RenderFeature::cloud_shadows()` returns a
 `CloudShadowRequest` (texels per side, meters across, the cloud layer's `base_height` and
 `top_height` in world y, the transmittance `outside` the map), and `compute` then gets
@@ -183,10 +183,11 @@ sun glow beyond it and the planet's far ground multiply the sun by it; other cra
 call `cloud_shadow(rel)`. Writers draw a fullscreen triangle and get the camera-relative point on
 the cloud base under a texel from `cloud_shadow_plane_point(uv)`, or rasterize with
 `frame.cloud_shadow` (camera-relative → map clip space, projected along the sun); during
-`compute` the frame group binds a white stand-in at 21, so the pass that draws the map can bind
+`compute` the frame group binds a white stand-in at 22, so the pass that draws the map can bind
 it. Green, blue and alpha are not read: they are free for the writer's own top-down data
-(group 0 binds 14 sampled textures). Until a module draws it the map stays 1, the lookup is
-skipped and every image is unchanged; `RenderSettings::cloud_shadows` turns it off.
+(group 0 binds 15 sampled textures with the ground weather map; don't add another). Until a
+module draws it the map stays 1, the lookup is skipped and every image is unchanged;
+`RenderSettings::cloud_shadows` turns it off.
 
 **Sky occlusion** (built): a 512² top-down depth map of the highest surface within 128 m of
 the camera. `sky_visibility(rel, normal)` in `lib_frame.wgsl` returns how much open sky a point
@@ -222,6 +223,26 @@ horizon. `shade_surface` takes the smaller of `sky_visibility` and the direction
 glossy surfaces (rough ones, whose lobe is wide, use the cover overhead alone; the march is
 skipped from perceptual roughness 0.71) and applies the fade to all. `RenderSettings::debug_view =
 SkyVisibility` shows the result.
+
+**Ground weather** (built): `SurfaceLayers` (the weather's 512 m grid of 1 m cells around the
+focus: wetness, standing water, snow, scorch) is uploaded as a texture (frame binding 21,
+`Rgba8Unorm` in the weather module's encoding: wetness, standing water / 0.04 m, snow / 0.3 m,
+scorch) whenever it changes (change detection, at most 10 times a second while it keeps changing)
+or moves, and drawn where the uploaded grid lay. `surface_weather(rel)` in `lib_frame.wgsl` returns
+that vec4 at a camera-relative point, filtered, in any stage (`SURFACE_PUDDLE_SCALE_M`,
+`SURFACE_SNOW_SCALE_M` decode it); terrain and foliage shaders use it to match the meshes. Beyond
+the grid (fading in over its outer tenth) it is the open ground's state, the upper quartile of the
+grid's rim (`frame.surface_open`), as the terrain uses there. The grid describes the ground, so
+under a roof it is dry; a surface with nothing above it in the sky occlusion map that stands on
+ground much drier than the open ground is the cover itself (a roof, a vehicle's top, a canopy) and
+gets the open ground's wetness and snow instead, leaving puddles and scorch to the ground below.
+Materials with `receives_wetness` (the default) read it per pixel (walls half a meter in front of
+them): scorch singes and then chars them to matte soot, snow settles on top faces, and rain wets
+them by porosity, which follows roughness (Lagarde 2013): rough, porous surfaces (roughness 0.8 and
+up: grass, soil, unsealed stone) darken to about half and lose only a fifth of their roughness,
+while smooth, sealed ones (0.35 and below: paint, glazed tile, metal) hardly darken and gloss to
+roughness 0.1. Puddle-level gloss on porous ground is the weather's own ground pass.
+`render.surface_weather_uploads` in `Diagnostics` counts the uploads.
 
 **Screen-space effects** (built): every frame starts with a depth prepass that also writes
 normals, roughness and motion vectors. From it come ground-truth ambient occlusion (GTAO,
@@ -309,7 +330,7 @@ muscles and skinned clothes and by `engine_softbody` for simulated cloth).
 Shader library: `lib_types.wgsl` (types, noise, BRDF, `henyey_greenstein`, `default_surface`, `surface_smooth_normal`), `lib_frame.wgsl` (group 0 frame
 data, `shade_surface`, `shade_surface_shadowed`, `shade_thin_surface`, `shadow_factor` (cascades, then `far_shadow_visibility`), `cloud_shadow` (and `cloud_shadow_plane_point` for writers), `contact_shadow`, `screen_ao`, `sky_visibility`, `apply_fog` (`color * transmittance + inscatter` of `surface_fog`, which returns a `SurfaceFog` for callers that need the two apart, such as blended particles),
 `apply_sky_fog`, `volumetric_fog_at`, `height_fog_density`, `fog_sky_light`,
-`sample_env`, `sample_env_rough`, `sky_ambient`, `sky_ambient_covered`, `specular_sky_visibility`, `specular_horizon_fade`, `wind_offset`, `prepass_output`) and `lib_atmosphere.wgsl` (`atmosphere` for aerial perspective,
+`sample_env`, `sample_env_rough`, `sky_ambient`, `sky_ambient_covered`, `specular_sky_visibility`, `specular_horizon_fade`, `surface_weather`, `wind_offset`, `prepass_output`) and `lib_atmosphere.wgsl` (`atmosphere` for aerial perspective,
 `sun_transmittance`, `sky_view_radiance`, `planet_height`, `ray_shell`).
 
 **Shapes** (built): `Shape` builds procedural meshes. Round shapes given `segments: 0` get
@@ -397,7 +418,19 @@ scattering, after Hillaire 2020. Look-up tables (sunlight transmittance and mult
 recomputed when the planet or its air changes; the sky seen from the camera, every frame) make the
 sky cheap and physically consistent from the ground, from orbit and from the Moon. Clouds,
 fog and anything else lit by the sun should use `sun_transmittance(rel)` for the sunlight
-reaching a point.
+reaching a point. The sky draws its own flat cloud layer (a 2D deck 1.5 km up whose cover follows
+`WeatherState::cloud_cover`) in the sky and in the environment map; a feature that draws its own
+clouds turns it off with `RenderSettings::sky_cloud_layer = false` and blends over a clear sky.
+The sun is the brightest `DirectionalLight`, so a moon becomes the sky's light once it outshines
+a fading sun; its disc is then drawn as the light's. Night (stars and the night sky's floor,
+`frame.sky.y`, 0 day .. 1 night) is decided by that light (`frame::sky_night`): it brings day when
+it is above the horizon (night falls as it sinks from 10° above to 4° below; up is away from the
+planet's center) and brighter than a moon, more than 0.5 to 2 lux after the air at the camera
+(`frame.sun_camera`). So a sun is day however dim (about 10 lux under a storm deck at noon), a moon
+(0.3 lux at most) never makes day, and a sun at full illuminance below the horizon gives night even
+without an atmosphere. A stand-in moon glows opposite a main light brighter than a moon once it is
+below the horizon (`frame.sky.z`); a moon-dim light is the moon itself, or a scene with a real
+moon, so then there is none.
 
 ## AI integration
 

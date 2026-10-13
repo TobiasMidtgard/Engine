@@ -158,7 +158,9 @@ pub struct Renderer {
     lights: GrowBuffer,
     shadow: ShadowResources,
     sky_camera: crate::sky_occlusion::SkyCamera,
-    /// The cloud shadow map (frame binding 21) and its stand-in for compute passes.
+    /// `SurfaceLayers` around the camera for `surface_weather` (frame binding 21).
+    surface_weather: crate::surface_weather::SurfaceWeatherMap,
+    /// The cloud shadow map (frame binding 22) and its stand-in for compute passes.
     cloud_shadows: CloudShadowMap,
     /// Whether the stand-in has been cleared to 1 yet (textures start at 0).
     cloud_stand_in_ready: bool,
@@ -450,8 +452,10 @@ impl Renderer {
                 ),
                 // Screen-space global illumination.
                 layout_entry(20, all, float_texture),
-                // Cloud shadows (cloud_shadows.rs). The 14th sampled texture in group 0.
+                // The ground's weather around the camera (`surface_weather`).
                 layout_entry(21, all, float_texture),
+                // Cloud shadows (cloud_shadows.rs). The 15th sampled texture in group 0.
+                layout_entry(22, all, float_texture),
             ],
         });
         let shadow_view_layout =
@@ -510,6 +514,7 @@ impl Renderer {
         let volumetrics = crate::volumetrics::Volumetrics::new(&shared, &targets);
         let screen_stand_ins = ScreenMaps::stand_ins(&shared, &volumetrics);
         let atmosphere = AtmosphereLuts::new(&shared, &frame_buffer);
+        let surface_weather = crate::surface_weather::SurfaceWeatherMap::new(&shared);
         let cloud_shadows = CloudShadowMap::new(&device);
         let groups = FrameGroups::new(
             &shared,
@@ -519,6 +524,7 @@ impl Renderer {
             &environment,
             &sky_camera,
             &atmosphere,
+            &surface_weather.view,
             &ScreenMaps::of(&targets, &volumetrics),
             &screen_stand_ins,
             &cloud_shadows,
@@ -540,6 +546,7 @@ impl Renderer {
             lights,
             shadow,
             sky_camera,
+            surface_weather,
             cloud_shadows,
             cloud_stand_in_ready: false,
             environment,
@@ -623,6 +630,7 @@ impl Renderer {
             &self.environment,
             &self.sky_camera,
             &self.atmosphere,
+            &self.surface_weather.view,
             &ScreenMaps::of(&self.targets, &self.volumetrics),
             &self.screen_stand_ins,
             &self.cloud_shadows,
@@ -697,6 +705,12 @@ impl Renderer {
         }
         let mut uniform = frame_uniform(world, &view);
         uniform.shadow_params[3] = self.shadow.size as f32;
+        let real_dt = world
+            .get_resource::<Time>()
+            .map_or(0.0, |t| t.real_delta_secs());
+        let surface_resized = self.surface_weather.prepare(world, &self.shared, real_dt);
+        (uniform.surface_map, uniform.surface_open) =
+            self.surface_weather.frame_params(view.origin);
         // Screen-space reflections and bounce light need the previous frame's image of the same
         // view.
         let previous =
@@ -739,7 +753,7 @@ impl Renderer {
         let fog_moved =
             self.volumetrics
                 .prepare(world, &self.shared, &view, &settings, uniform.volumetrics);
-        if lights_moved || occlusion_resized || fog_moved {
+        if lights_moved || occlusion_resized || fog_moved || surface_resized {
             self.rebuild_frame_groups();
         }
         let queue = &self.shared.queue;
@@ -1243,6 +1257,10 @@ impl Renderer {
             d.set("render.triangles", stats.triangles as f64);
             d.set("render.clusters", stats.clusters as f64);
             d.set("render.ev100", stats.ev100 as f64);
+            d.set(
+                "render.surface_weather_uploads",
+                self.surface_weather.uploads as f64,
+            );
             if let Some(ev) = self.meter.measured_ev100 {
                 d.set("render.ev100_metered", ev as f64);
             }
@@ -1530,13 +1548,14 @@ impl FrameGroups {
         env: &EnvironmentMaps,
         sky_camera: &crate::sky_occlusion::SkyCamera,
         atmosphere: &AtmosphereLuts,
+        surface: &wgpu::TextureView,
         maps: &ScreenMaps,
         stand_ins: &ScreenMaps,
         clouds: &CloudShadowMap,
     ) -> Self {
         let group = |uniform: &wgpu::Buffer, maps: &ScreenMaps, clouds: &wgpu::TextureView| {
             create_frame_group(
-                shared, uniform, lights, shadow, env, sky_camera, atmosphere, maps, clouds,
+                shared, uniform, lights, shadow, env, sky_camera, atmosphere, surface, maps, clouds,
             )
         };
         Self {
@@ -1557,6 +1576,7 @@ fn create_frame_group(
     env: &EnvironmentMaps,
     sky_camera: &crate::sky_occlusion::SkyCamera,
     atmosphere: &AtmosphereLuts,
+    surface: &wgpu::TextureView,
     maps: &ScreenMaps,
     clouds: &wgpu::TextureView,
 ) -> wgpu::BindGroup {
@@ -1653,6 +1673,10 @@ fn create_frame_group(
             },
             wgpu::BindGroupEntry {
                 binding: 21,
+                resource: view(surface),
+            },
+            wgpu::BindGroupEntry {
+                binding: 22,
                 resource: view(clouds),
             },
         ],

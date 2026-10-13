@@ -37,10 +37,13 @@
 // Screen-space global illumination: light bounced onto each pixel from nearby surfaces
 // (cd/m^2, not pre-exposed; see `screen_gi`). A stand-in while it is being drawn.
 @group(0) @binding(20) var gi_map: texture_2d<f32>;
+// The ground's weather around the camera (`SurfaceLayers` on 1 m cells, Rgba8; read it with
+// `surface_weather`). A 1x1 stand-in until the layers are uploaded.
+@group(0) @binding(21) var surface_weather_map: texture_2d<f32>;
 // Cloud shadows (cloud_shadows.rs): r = sunlight let through by the clouds to the cloud base,
 // top-down around the camera (see `cloud_shadow`); g, b, a are free for the module that draws
 // it. 1 where nobody draws it, and a white stand-in during `RenderFeature::compute`.
-@group(0) @binding(21) var cloud_shadow_map: texture_2d<f32>;
+@group(0) @binding(22) var cloud_shadow_map: texture_2d<f32>;
 
 // Multiply final radiance by this before writing to the HDR target.
 fn pre_expose(c: vec3<f32>) -> vec3<f32> { return c * frame.exposure.x; }
@@ -652,6 +655,54 @@ fn fog_sky_visibility(rel: vec3<f32>) -> f32 {
         }
     }
     return map * volumes;
+}
+
+// ---------------------------------------------------------------- ground weather
+// What 1.0 in `surface_weather`'s y and z stands for: standing water and snow depth (m).
+const SURFACE_PUDDLE_SCALE_M: f32 = 0.04;
+const SURFACE_SNOW_SCALE_M: f32 = 0.3;
+
+// The weather on the ground at camera-relative `rel`, from the `SurfaceLayers` grid the weather
+// keeps around the player (1 m cells, filtered), in the weather module's own encoding:
+// x wetness (0 dry .. 1 soaked), y standing water depth / SURFACE_PUDDLE_SCALE_M, z snow depth /
+// SURFACE_SNOW_SCALE_M (both at most 1), w scorch (0 .. 1 charred). Beyond the grid (fading in
+// over its outer tenth, as on the terrain) and without one it is the open ground's state along
+// the grid's rim (`frame.surface_open`). Any stage.
+//
+// The grid describes the ground: under a roof it stays dry. A surface that has nothing above it
+// (in the sky occlusion map) yet stands on ground much drier than the open ground is the cover
+// itself (a roof, a vehicle's top, a canopy), so it gets the open ground's wetness and snow, and
+// the puddles and scorch stay on the ground below. Walls: pass a point half a meter in front of
+// them, so they read the ground there rather than the roof over their own footprint.
+fn surface_weather(rel: vec3<f32>) -> vec4<f32> {
+    let open = frame.surface_open;
+    let size = frame.surface_map.zw;
+    if (size.x <= 0.0 || size.y <= 0.0) { return open; }
+    let uv = (rel.xz - frame.surface_map.xy) / size;
+    let edge = min(min(uv.x, uv.y), min(1.0 - uv.x, 1.0 - uv.y));
+    if (edge <= 0.0) { return open; }
+    var w = mix(open, textureSampleLevel(surface_weather_map, linear_clamp, uv, 0.0), smoothstep(0.0, 0.1, edge));
+    // How much drier than the open ground: what a shelter leaves under it.
+    let sheltered = saturate((open.x - w.x) / max(open.x, 0.05));
+    let params = frame.sky_occlusion_params;
+    if (sheltered <= 0.0 || params.x < 0.5) { return w; }
+    let c = frame.sky_occlusion * vec4<f32>(rel, 1.0);
+    let map_edge = max(abs(c.x), abs(c.y));
+    if (map_edge >= 1.0 || c.z <= 0.0 || c.z >= 1.0) { return w; }
+    // Cover at least half a meter above the point, blended over the 2x2 texels around it
+    // (gather order: (0,1), (1,1), (1,0), (0,0)).
+    let tuv = c.xy * vec2<f32>(0.5, -0.5) + 0.5;
+    let tops = textureGather(sky_occlusion_map, sky_occlusion_sampler, tuv);
+    let covered = step(vec4<f32>(0.5), (vec4<f32>(c.z) - tops) * params.w);
+    let f = fract(tuv * vec2<f32>(textureDimensions(sky_occlusion_map)) - 0.5);
+    let cover = mix(mix(covered.w, covered.z, f.x), mix(covered.x, covered.y, f.x), f.y);
+    // Fade out over the outer eighth of the map, like `sky_visibility`.
+    let k = sheltered * (1.0 - cover) * (1.0 - saturate((map_edge - 0.875) * 8.0));
+    w.x = mix(w.x, open.x, k);
+    w.z = mix(w.z, max(w.z, open.z), k);
+    w.y *= 1.0 - k;
+    w.w *= 1.0 - k;
+    return w;
 }
 
 // ---------------------------------------------------------------- surface shading

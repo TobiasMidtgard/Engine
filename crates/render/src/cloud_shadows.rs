@@ -36,7 +36,7 @@
 //! sun onto the base plane). Writers can also use a compute shader: the texture is a storage
 //! texture too.
 //!
-//! The map is bound at frame binding 21 (`cloud_shadow_map`). While features run `compute` the
+//! The map is bound at frame binding 22 (`cloud_shadow_map`). While features run `compute` the
 //! frame group holds a white stand-in there instead, so a writer can bind `ctx.frame_group` in
 //! the pass that draws the map (and `cloud_shadow` returns 1 in compute passes).
 
@@ -254,7 +254,7 @@ pub struct CloudShadowTarget<'a> {
     pub area: CloudShadowArea,
 }
 
-/// The texture behind frame binding 21, and the white stand-in compute passes see there.
+/// The texture behind frame binding 22, and the white stand-in compute passes see there.
 pub(crate) struct CloudShadowMap {
     pub view: wgpu::TextureView,
     pub size: u32,

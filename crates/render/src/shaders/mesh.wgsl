@@ -621,13 +621,35 @@ fn evaluate_material(si: SurfaceIn, shadows: bool) -> MaterialSample {
         out.smooth_normal = normalize(n - 2.0 * smooth_into * face);
     }
 
-    // Weather: rain darkens porous surfaces and makes them glossy; snow settles on top faces.
+    // Weather, per pixel from the ground's state where the surface stands (`surface_weather`;
+    // walls read the ground just in front of them): fire scorch, rain and snow.
     if ((flags & 64u) != 0u) {
         let n_up = out.normal.y;
-        let wet = frame.weather.x * saturate(n_up * 0.7 + 0.5);
-        out.albedo *= mix(1.0, 0.55, wet * (1.0 - out.metallic));
-        out.roughness = mix(out.roughness, 0.12, wet * 0.85);
-        let snow_cover = saturate(frame.weather.y * 10.0) * smoothstep(0.35, 0.8, n_up);
+        let ground = surface_weather(si.rel + vec3<f32>(face.x, 0.0, face.z) * 0.5);
+        // Scorch: singed darker, then charred to a matte soot that hides metal and lets no light
+        // through.
+        let scorch = ground.w;
+        if (scorch > 0.0) {
+            let soot = vec3<f32>(0.035, 0.03, 0.027) * (0.6 + 0.8 * value_noise2(tiling_pos(si.rel).xz * 3.1));
+            out.albedo = mix(out.albedo * (1.0 - 0.6 * scorch), soot, smoothstep(0.35, 0.9, scorch));
+            out.roughness = mix(out.roughness, 0.85, scorch);
+            out.metallic *= 1.0 - scorch;
+            out.subsurface *= 1.0 - scorch;
+        }
+        // Rain. Rough, porous surfaces (soil, grass, unsealed stone and wood) soak the water up:
+        // they darken to about half and lose only a fifth of their roughness. Smooth, sealed ones
+        // (paint, metal, glazed tile, polished stone) take none in and hardly darken, but carry
+        // a film of water that makes them nearly mirror-like. Porosity follows roughness
+        // (Lagarde 2013, "Water drop 3b: physically based wet surfaces"); puddles are the
+        // weather's own pass.
+        let wet = ground.x * saturate(n_up * 0.7 + 0.5);
+        let porosity = smoothstep(0.35, 0.8, out.roughness) * (1.0 - out.metallic);
+        let darken = mix(mix(0.92, 0.5, porosity), 1.0, out.metallic);
+        out.albedo *= mix(1.0, darken, wet);
+        let soaked = out.roughness * (1.0 - 0.2 * wet * porosity);
+        out.roughness = mix(soaked, min(soaked, 0.1), wet * (1.0 - porosity));
+        // Snow settles on top faces.
+        let snow_cover = saturate(ground.z * SURFACE_SNOW_SCALE_M * 10.0) * smoothstep(0.35, 0.8, n_up);
         let snow_noise = value_noise2(tiling_pos(si.rel).xz * 1.7);
         let snow = saturate(snow_cover * (0.75 + 0.5 * snow_noise));
         out.albedo = mix(out.albedo, vec3<f32>(0.9, 0.92, 0.95), snow);

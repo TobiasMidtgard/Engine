@@ -217,7 +217,7 @@ pub struct FrameContext<'a> {
     /// The cloud shadow map to draw into: set only in [`RenderFeature::compute`], and only for
     /// the feature whose [`RenderFeature::cloud_shadows`] asked for it this frame (see
     /// [`crate::cloud_shadows`]). It has been cleared to 1 (no shadow). During `compute`,
-    /// `frame_group` binds a white stand-in in its place (frame binding 21), so the pass that
+    /// `frame_group` binds a white stand-in in its place (frame binding 22), so the pass that
     /// draws the map can bind `frame_group` too.
     pub cloud_shadows: Option<CloudShadowTarget<'a>>,
 }

@@ -13,10 +13,11 @@
 //! - **Volumetric fog**: height fog and [`FogVolume`]s in a froxel grid lit by the shadowed
 //!   sun, the sky and lamps: sunbeams through trees and windows, lamps glowing in mist, dark
 //!   caves. See [`volumetrics`].
-//! - **Cascaded sun shadows** (4 × 2048², texel-snapped), point lights, wind sway, wetness
-//!   and snow on surfaces driven by `engine_world` weather. Alpha-masked materials (leaves,
-//!   fences) cut out their shadows too. Cloud shadows from whichever module draws the clouds
-//!   (see [`cloud_shadows`]) shade the sunlight on every surface and in the fog.
+//! - **Cascaded sun shadows** (4 × 2048², texel-snapped), point lights, wind sway, wetness,
+//!   snow and fire scorch on surfaces, per pixel from `engine_world`'s `SurfaceLayers`
+//!   (`surface_weather` in shaders). Alpha-masked materials (leaves, fences) cut out their
+//!   shadows too. Cloud shadows from whichever module draws the clouds (see
+//!   [`cloud_shadows`]) shade the sunlight on every surface and in the fog.
 //! - **Textured PBR materials**: [`StandardMaterial`] takes base color, normal,
 //!   metallic/roughness, emissive and occlusion [`Image`]s (glTF conventions, mipmapped,
 //!   anisotropic). Normal maps need no tangents. See [`material`] and [`texture`].
@@ -68,6 +69,7 @@ pub mod settings;
 pub mod shadows;
 pub mod sky_feature;
 mod sky_occlusion;
+mod surface_weather;
 pub mod targets;
 pub mod texture;
 pub mod virtual_geometry;
@@ -104,6 +106,7 @@ pub use renderer::{
 pub use settings::{
     AntiAliasing, Atmosphere, DebugView, FogSettings, RenderSettings, Tonemapper, VolumetricQuality,
 };
+pub use surface_weather::{SURFACE_PUDDLE_SCALE_M, SURFACE_SNOW_SCALE_M};
 pub use texture::{Image, ImageLoader, PixelFormat};
 pub use wgpu;
 

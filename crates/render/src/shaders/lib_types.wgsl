@@ -48,6 +48,9 @@ struct Frame {
     volumetrics: vec4<f32>,        // volumetric fog range (m, 0 = off), 1 / depth scale (1/m), 1 / log2(1 + range / depth scale), depth slices
     far_shadow: mat4x4<f32>,       // camera-relative -> far shadow map clip space (big casters beyond the cascades)
     far_shadow_params: vec4<f32>,  // reach (m, 0 = off), texel size (m), clip depth per meter, shadow map layer
+    sky: vec4<f32>,                // the sky's flat cloud layer on (1/0), night (0 day .. 1 night, from the main light's illuminance at the camera), stand-in moon glow opposite a sun below the horizon (0..1), unused
+    surface_map: vec4<f32>,        // ground weather map (`surface_weather`): min corner relative to the camera (x, z, m), size along x and z (m, 0 = none)
+    surface_open: vec4<f32>,       // the open ground's weather in the map's encoding: beyond the map and on roofs over ground they keep dry
     cloud_shadow: mat4x4<f32>,     // camera-relative -> cloud shadow map clip space, projected along the sun onto the cloud base (`cloud_shadow`)
     cloud_shadow_params: vec4<f32>, // drawn this frame (1/0), cloud base height relative to the camera (m), cloud layer thickness (m), sun transmittance beyond the map
     cloud_shadow_area: vec4<f32>,  // camera-relative x and z of the map corner at uv (0, 0) (m), side (m), texels per side
