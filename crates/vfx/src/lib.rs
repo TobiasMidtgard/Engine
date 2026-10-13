@@ -26,7 +26,7 @@ use serde_json::{Value, json};
 
 pub use effect::{
     Burst, Collide, Curve, EffectDesc, EffectLight, EmitShape, EmitterDesc, Facing, Gradient,
-    Sprite,
+    MAX_SUB_COUNT, Sprite, SubEmit,
 };
 pub use emitter::{ParticleEffect, VfxLight, VfxRuntime, VfxSettings, VfxStats};
 pub use events::{VfxReactions, spawn_effect_at};

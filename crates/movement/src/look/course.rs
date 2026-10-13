@@ -12,7 +12,8 @@
 //!   steel strongbacks and kicker braces, cyan guide lights recessed in the joint the runner
 //!   wall-runs along, a hazard-striped slide bar on bolted posts, a concrete tower with
 //!   railings, a caged ladder, floodlights and a door, a start gantry, floodlight masts,
-//!   numbered backlit signs, floor paint, cables, conduits and vents.
+//!   numbered backlit signs, floor paint, cables, conduits and vents. Behind it the grapple
+//!   station ([`grapple_tower`]): a nine-meter tower with a glowing anchor plate to hook.
 //! - **Ring**: a stone plinth with an octagonal board floor inside a carved stone band, an
 //!   engraved ring inlay that glows faintly, raked-gravel corners and apron, four stone
 //!   lanterns with warm lights, a torii gate, nobori banners, a taiko drum, a roofed stand
@@ -36,6 +37,8 @@ use super::materials::PANEL_TILE;
 use super::texgen::{Surface, bake, fbm, hex, perlin, rand2, smoothstep};
 use super::{Cap, Library, MeshBuilder, Section};
 use crate::demo::layout;
+
+mod grapple_tower;
 
 type M = MeshBuilder;
 
@@ -156,6 +159,20 @@ const COURSE_SET: &[(&str, &str, bool)] = &[
     ("ledge", GLOW_CYAN, false),
     ("ledge", HAZARD, false),
     ("ledge", PAINT, false),
+    ("grapple", CONCRETE, true),
+    ("grapple", PANEL, true),
+    ("grapple", STEEL_DARK, true),
+    ("grapple", STEEL_YELLOW, true),
+    ("grapple", STEEL, true),
+    ("grapple", STEEL_ORANGE, true),
+    ("grapple", ALU, true),
+    ("grapple", TREAD, true),
+    ("grapple", CABLE, true),
+    ("grapple", HAZARD, false),
+    ("grapple", GLOW_CYAN, false),
+    ("grapple", GLOW_WHITE, false),
+    ("grapple", GLOW_RED, false),
+    ("grapple", PAINT, false),
 ];
 
 /// Mesh groups spawned once at the ring center.
@@ -261,6 +278,7 @@ pub fn generate(lib: &mut Library) {
     build_signs().register(lib, "signs");
     build_props().register(lib, "props");
     build_ledge().register(lib, "ledge");
+    grapple_tower::build().register(lib, "grapple");
     build_plinth().register(lib, "plinth");
     build_apron().register(lib, "apron");
     build_torii().register(lib, "torii");
@@ -324,6 +342,9 @@ const COURSE_LIGHTS: &[([f64; 3], [f32; 3], f32, f32)] = &[
     // Masts.
     ([-27.0, 10.2, 17.9], [0.9, 0.95, 1.0], 26000.0, 45.0),
     ([27.0, 10.2, 6.1], [0.9, 0.95, 1.0], 26000.0, 45.0),
+    // The grapple station's floodlight, and the glow of its target.
+    ([3.75, 6.6, 19.75], [0.85, 0.92, 1.0], 9000.0, 26.0),
+    ([8.0, 8.65, 27.6], [0.37, 0.85, 1.0], 700.0, 5.0),
 ];
 
 /// Spawns the parkour course's set dressing around the demo `origin` (no colliders).
@@ -873,9 +894,21 @@ impl Canvas {
 
 // ---------------------------------------------------------------------------- paint atlas
 
-/// Rows of the paint atlas (stencils painted on floors and walls).
-const PAINT_ROWS: &[&str] = &[
-    "01", "02", "03", "04", "05", "SLIDE", "START", "WALL RUN", "JUMP", ">>>",
+/// Rows of the paint atlas (stencils painted on floors and walls): text, atlas line and left
+/// edge in px (short words share a line).
+const PAINT_ROWS: &[(&str, usize, f32)] = &[
+    ("01", 0, 0.0),
+    ("02", 1, 0.0),
+    ("03", 2, 0.0),
+    ("04", 3, 0.0),
+    ("05", 4, 0.0),
+    ("SLIDE", 5, 0.0),
+    ("START", 6, 0.0),
+    ("WALL RUN", 7, 0.0),
+    ("JUMP", 8, 0.0),
+    (">>>", 9, 0.0),
+    ("07", 0, 160.0),
+    ("GRAPPLE", 1, 160.0),
 ];
 const PAINT_ROW_PX: f32 = 96.0;
 const PAINT_SCALE: f32 = 12.0;
@@ -884,11 +917,12 @@ const ATLAS_PX: f32 = 1024.0;
 
 /// Atlas rectangle (top-left uv, bottom-right uv) and width / height of a paint row.
 fn paint_rect(row: usize) -> (Vec2, Vec2, f32) {
-    let w = text_width(PAINT_ROWS[row]) * PAINT_SCALE + 2.0 * PAINT_PAD;
-    let y0 = row as f32 * PAINT_ROW_PX;
+    let (text, line, x0) = PAINT_ROWS[row];
+    let w = text_width(text) * PAINT_SCALE + 2.0 * PAINT_PAD;
+    let y0 = line as f32 * PAINT_ROW_PX;
     (
-        Vec2::new(0.0, y0 / ATLAS_PX),
-        Vec2::new(w / ATLAS_PX, (y0 + PAINT_ROW_PX) / ATLAS_PX),
+        Vec2::new(x0 / ATLAS_PX, y0 / ATLAS_PX),
+        Vec2::new((x0 + w) / ATLAS_PX, (y0 + PAINT_ROW_PX) / ATLAS_PX),
         w / PAINT_ROW_PX,
     )
 }
@@ -905,11 +939,11 @@ fn paint_atlas(size: u32) -> Image {
     let n = size as usize;
     let k = size as f32 / ATLAS_PX;
     let mut c = Canvas::new(n, n, [1.0, 1.0, 1.0, 0.0]);
-    for (row, text) in PAINT_ROWS.iter().enumerate() {
-        let y0 = row as f32 * PAINT_ROW_PX;
+    for &(text, line, x0) in PAINT_ROWS {
+        let y0 = line as f32 * PAINT_ROW_PX;
         c.text(
             text,
-            PAINT_PAD * k,
+            (x0 + PAINT_PAD) * k,
             (y0 + PAINT_ROW_PX - PAINT_PAD) * k,
             PAINT_SCALE * k,
             1.05,
@@ -943,27 +977,30 @@ fn paint_atlas(size: u32) -> Image {
 
 // ---------------------------------------------------------------------------- sign atlas
 
-/// Rows of the backlit sign atlas. A leading two-digit number gets an orange box.
-const SIGN_ROWS: &[&str] = &[
-    "01 SLIDE",
-    "02 WALL RUN",
-    "03 WALL JUMP",
-    "04 MANTLE",
-    "05 JUMP",
-    "PILOT TRAINING",
-    "START",
-    "06 LEDGE",
+/// Rows of the backlit sign atlas: text, atlas line and left edge in px (a short sign shares
+/// its line). A leading two-digit number gets an orange box.
+const SIGN_ROWS: &[(&str, usize, f32)] = &[
+    ("01 SLIDE", 0, 0.0),
+    ("02 WALL RUN", 1, 0.0),
+    ("03 WALL JUMP", 2, 0.0),
+    ("04 MANTLE", 3, 0.0),
+    ("05 JUMP", 4, 0.0),
+    ("PILOT TRAINING", 5, 0.0),
+    ("START", 6, 0.0),
+    ("06 LEDGE", 7, 0.0),
+    ("07 GRAPPLE", 6, 384.0),
 ];
 const SIGN_ROW_PX: f32 = 128.0;
 const SIGN_SCALE: f32 = 11.0;
 
 /// Atlas rectangle and width / height of a sign row.
 fn sign_rect(row: usize) -> (Vec2, Vec2, f32) {
-    let w = sign_row_width(SIGN_ROWS[row]);
-    let y0 = row as f32 * SIGN_ROW_PX;
+    let (text, line, x0) = SIGN_ROWS[row];
+    let w = sign_row_width(text);
+    let y0 = line as f32 * SIGN_ROW_PX;
     (
-        Vec2::new(0.0, y0 / ATLAS_PX),
-        Vec2::new(w / ATLAS_PX, (y0 + SIGN_ROW_PX) / ATLAS_PX),
+        Vec2::new(x0 / ATLAS_PX, y0 / ATLAS_PX),
+        Vec2::new((x0 + w) / ATLAS_PX, (y0 + SIGN_ROW_PX) / ATLAS_PX),
         w / SIGN_ROW_PX,
     )
 }
@@ -980,14 +1017,14 @@ fn sign_atlas(size: u32) -> Image {
     let mut c = Canvas::new(n, n, [0.012, 0.014, 0.018, 1.0]);
     let orange = [1.0, 0.36, 0.06, 1.0];
     let white = [0.95, 0.96, 1.0, 1.0];
-    for (row, text) in SIGN_ROWS.iter().enumerate() {
-        let y0 = row as f32 * SIGN_ROW_PX;
+    for &(text, line, x0) in SIGN_ROWS {
+        let y0 = line as f32 * SIGN_ROW_PX;
         let w = sign_row_width(text);
         // A thin cyan rule along the bottom.
         c.rect(
-            14.0 * k,
+            (x0 + 14.0) * k,
             (y0 + 112.0) * k,
-            (w - 14.0) * k,
+            (x0 + w - 14.0) * k,
             (y0 + 116.0) * k,
             1.0,
             [0.2, 0.75, 1.0, 1.0],
@@ -998,22 +1035,22 @@ fn sign_atlas(size: u32) -> Image {
             let (num, word) = text.split_at(2);
             let box_w = text_width(num) * SIGN_SCALE + 28.0;
             c.rect(
-                12.0 * k,
+                (x0 + 12.0) * k,
                 (y0 + 14.0) * k,
-                (12.0 + box_w) * k,
+                (x0 + 12.0 + box_w) * k,
                 (y0 + 106.0) * k,
                 6.0 * k,
                 orange,
             );
             c.text(
                 num,
-                26.0 * k,
+                (x0 + 26.0) * k,
                 base,
                 SIGN_SCALE * k,
                 1.15,
                 [0.02, 0.02, 0.02, 1.0],
             );
-            let x = 12.0 + box_w + 16.0 - SPACE_ADVANCE * SIGN_SCALE;
+            let x = x0 + 12.0 + box_w + 16.0 - SPACE_ADVANCE * SIGN_SCALE;
             c.text(
                 word,
                 (x + SPACE_ADVANCE * SIGN_SCALE) * k,
@@ -1023,7 +1060,7 @@ fn sign_atlas(size: u32) -> Image {
                 white,
             );
         } else {
-            c.text(text, 34.0 * k, base, SIGN_SCALE * k, 0.95, white);
+            c.text(text, (x0 + 34.0) * k, base, SIGN_SCALE * k, 0.95, white);
         }
     }
     c.image(true)
@@ -3346,6 +3383,8 @@ fn build_signs() -> Kit {
             7,
             FRAC_PI_2 - 0.5,
         ),
+        // The grapple station's, at the pad's front corner, facing the course.
+        (12.45, 19.4, 8, 1.1),
     ];
     for (x, z, row, yaw) in spots {
         let q = Quat::from_rotation_y(yaw);
@@ -5499,6 +5538,20 @@ mod tests {
             .map(|v| v.position[1])
             .fold(f32::MAX, f32::min);
         assert!((low - l.bar.0.y).abs() < 1e-4, "{low}");
+        // The grapple tower: its top and the face the hook bites are the collider's.
+        let (g0, g1) = bounds(layout::GRAPPLE_TOWER);
+        let top = get("grapple", CONCRETE)
+            .vertices
+            .iter()
+            .map(|v| v.position[1])
+            .fold(f32::MIN, f32::max);
+        assert!((top - g1.y).abs() < 1e-4, "{top}");
+        let face = get("grapple", PANEL)
+            .vertices
+            .iter()
+            .map(|v| v.position[2])
+            .fold(f32::MAX, f32::min);
+        assert!((face - g0.z).abs() < 1e-4, "{face}");
         // Ring floor at the collider top.
         let floor = get("plinth", PLANKS);
         for v in &floor.vertices {
@@ -5522,6 +5575,18 @@ mod tests {
             let (_, uv1, _) = sign_rect(row);
             assert!(uv1.x <= 1.0, "sign row {row} too wide");
         }
+        // Rows sharing an atlas line don't overlap.
+        let rects = |n: usize, rect: &dyn Fn(usize) -> (Vec2, Vec2, f32)| {
+            for a in 0..n {
+                for b in a + 1..n {
+                    let ((a0, a1, _), (b0, b1, _)) = (rect(a), rect(b));
+                    let apart = a1.x <= b0.x || b1.x <= a0.x || a1.y <= b0.y || b1.y <= a0.y;
+                    assert!(apart, "atlas rows {a} and {b} overlap");
+                }
+            }
+        };
+        rects(PAINT_ROWS.len(), &paint_rect);
+        rects(SIGN_ROWS.len(), &sign_rect);
         let crest = crest_image(64);
         assert!(crest.data.chunks(4).filter(|p| p[3] > 128).count() > 300);
     }

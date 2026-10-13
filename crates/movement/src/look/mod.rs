@@ -13,6 +13,7 @@
 //! - [`course`]: set dressing for the parkour course and the duel ring.
 //! - [`fighter`]: the armored sword fighters (four styles) and their parts.
 //! - [`rig`]: the fighters' skeleton, poses, two-bone IK and the procedural animator.
+//! - [`rope`]: the grapple's cable and hook.
 //! - [`effects`]: blade trails, parry sparks, slash flashes, impact lights, dust and the
 //!   render feature that draws them and the afterimage ghosts.
 
@@ -22,6 +23,7 @@ pub mod fighter;
 pub mod materials;
 pub mod meshgen;
 pub mod rig;
+pub mod rope;
 pub mod texgen;
 
 use engine_assets::Assets;
@@ -76,6 +78,7 @@ pub const LIBRARY: &[Generator] = &[
     materials::generate,
     course::generate,
     fighter::generate,
+    rope::generate,
     crate::lockon::generate,
 ];
 

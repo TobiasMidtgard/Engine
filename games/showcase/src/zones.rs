@@ -204,6 +204,11 @@ pub fn zone(key: &str) -> &'static Zone {
     ZONES.iter().find(|z| z.key == key).expect("zone")
 }
 
+/// Zones whose demo stops short of the pad's edge, with the radius it fills (m). The valley's
+/// woods grow on the rest of the pad, right up to the demo, so it sits inside a forest instead
+/// of on a bare disc. The foliage demo's forest reaches about 90 m.
+pub const WOODED_RIMS: &[(&str, f64)] = &[("forest", 94.0)];
+
 /// Zones with natural ground, where the valley's grass and flowers grow too.
 pub const GRASSY_ZONES: &[&str] = &[
     "market",
@@ -277,7 +282,13 @@ pub fn spawn_demos(
             "lake" => ph::lake(commands, meshes, lib, land, z),
             "water" => engine_water::demo::spawn_demo(commands, z.center),
             "footsteps" => engine_audio::demo::spawn_demo(commands, z.center),
-            "tracks" => ph::tracks(commands, z),
+            "tracks" => engine_terrain::demo::spawn_demo_with(
+                commands,
+                z.center,
+                engine_terrain::demo::LabOptions {
+                    stand_in_bodies: true,
+                },
+            ),
             "cave" => engine_foliage::demo::spawn_cave_demo(commands, z.center),
             "arena" => engine_npc::demo::spawn_demo(commands, z.center),
             "parkour" => engine_movement::demo::spawn_demo(commands, z.center),
@@ -491,6 +502,19 @@ pub fn demo_views(z: &Zone) -> Vec<View> {
                 .warmup(2.6)
                 .on_arrive("movement.duel", &duel("Blink"))
                 .on_arrive("movement.climber", "{}")
+                .on_leave("movement.duel", cycle),
+                // The grapple station: the grappler restarts its loop on arrival and is caught
+                // mid-reel, the cable taut from its fist to the anchor plate.
+                View::new(
+                    "parkour_grapple",
+                    "Grapple hook: fire at the top of a 9 m tower, reel in, climb over",
+                    [15.5, 2.4, 20.5],
+                    [8.0, 6.0, 26.5],
+                    16.0,
+                )
+                .warmup(1.9)
+                .on_arrive("movement.duel", &duel("Blink"))
+                .on_arrive("movement.grappler", "{}")
                 .on_leave("movement.duel", cycle),
                 // Play mode (P): a pilot in front of the camera, locked onto the elite.
                 View::new(
@@ -880,8 +904,8 @@ pub fn landscape(seed: u64) -> Landscape {
             (DVec2::new(-900.0, -100.0), 300.0),
             (DVec2::new(1050.0, 300.0), 300.0),
         ],
-        patches: ground_patches(),
-        painters: vec![footstep_trail],
+        patches: Vec::new(),
+        painters: vec![footstep_trail, footprint_lab],
         fields: Vec::new(),
         // A cliff south of the lake, with the land behind it raised 9 m.
         scarps: vec![Scarp {
@@ -889,6 +913,7 @@ pub fn landscape(seed: u64) -> Landscape {
             b: DVec2::new(150.0, -300.0),
             height: 9.0,
             reach: 400.0,
+            notch: None,
         }],
         // From a spring in the southern woods, over the cliff as a waterfall, into the lake.
         streams: vec![Stream::new(&STREAM, 5.0, 1.4)],
@@ -898,22 +923,27 @@ pub fn landscape(seed: u64) -> Landscape {
     land
 }
 
-/// The footprint lab's ground: 10 m wide strips running 32 m north–south.
-pub const TRACK_STRIPS: [Cover; 4] = [Cover::Mud, Cover::Snow, Cover::Sand, Cover::Grass];
+/// The footprint lab's strips from −X to +X (the last is the valley's own grass).
+pub const TRACK_STRIPS: [Option<Cover>; 4] =
+    [Some(Cover::Mud), Some(Cover::Snow), Some(Cover::Sand), None];
 
-/// Ground patches: the footprint lab's strips.
-pub fn ground_patches() -> Vec<(DVec2, DVec2, Cover)> {
-    let mut out = Vec::new();
-    let t = zone("tracks").center;
-    for (i, cover) in TRACK_STRIPS.iter().enumerate() {
-        let x0 = t.x - 20.0 + i as f64 * 10.0;
-        out.push((
-            DVec2::new(x0, t.z - 16.0),
-            DVec2::new(x0 + 10.0, t.z + 16.0),
-            *cover,
-        ));
+/// The footprint lab's ground, the same shape the terrain module's lab paints: each strip a
+/// row of seven 5.2 m circles 5 m apart along Z, 10 m between strips. Footsteps and the
+/// ground paint then agree with the terrain's own strips.
+fn footprint_lab(x: f64, z: f64) -> Option<Cover> {
+    let c = zone("tracks").center;
+    let (dx, dz) = (x - c.x, z - c.z);
+    if dx.abs() > 21.0 || dz.abs() > 21.0 {
+        return None;
     }
-    out
+    TRACK_STRIPS.iter().enumerate().find_map(|(i, cover)| {
+        let sx = dx + 15.0 - i as f64 * 10.0;
+        let inside = (0..7).any(|k| {
+            let sz = dz + 15.0 - k as f64 * 5.0;
+            sx * sx + sz * sz < 5.2 * 5.2
+        });
+        cover.filter(|_| inside)
+    })
 }
 
 /// The audio module's footstep trail, painted into the ground so the player, NPCs and rain find

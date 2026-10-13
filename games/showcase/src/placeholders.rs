@@ -37,8 +37,11 @@ fn mat(hex: u32, roughness: f32) -> StandardMaterial {
     StandardMaterial::hex(hex).with_roughness(roughness)
 }
 
+/// Dressed stone (walls, pedestals, planters): warm cast stone, mapped in the object's meters.
 fn stone() -> StandardMaterial {
-    mat(0x8a857c, 0.85)
+    StandardMaterial::preset(MaterialPreset::Concrete)
+        .with_tint_hex(0xe6ddd0)
+        .with_triplanar()
 }
 fn wood() -> StandardMaterial {
     mat(0x7a5434, 0.8)
@@ -74,111 +77,35 @@ fn rock_face(b: crate::meshgen::Builder) -> Mesh {
     mesh
 }
 
-/// A simple person: legs, body, head (1.8 m), facing `yaw`.
-fn person(commands: &mut Commands, base: DVec3, yaw: f32, shirt: u32) {
-    let skin = mat(0xc89878, 0.6).with_subsurface(0.4);
-    let cloth = mat(shirt, 0.85);
-    let pants = mat(0x2a2e3a, 0.85);
-    for side in [-0.12, 0.12] {
-        let off = Quat::from_rotation_y(yaw) * Vec3::new(side, 0.0, 0.0);
-        spawn(
-            commands,
-            Shape::Capsule {
-                radius: 0.09,
-                height: 0.85,
-                segments: 10,
-            },
-            pants,
-            at(base + off.as_dvec3() + DVec3::new(0.0, 0.45, 0.0)),
-        );
-    }
-    spawn(
-        commands,
-        Shape::Capsule {
-            radius: 0.2,
-            height: 0.7,
-            segments: 14,
-        },
-        cloth,
-        yawed(base + DVec3::new(0.0, 1.22, 0.0), yaw).with_scale(Vec3::new(1.0, 1.0, 0.65)),
-    );
-    spawn(
-        commands,
-        Shape::Sphere {
-            radius: 0.12,
-            segments: 16,
-        },
-        skin,
-        at(base + DVec3::new(0.0, 1.7, 0.0)),
-    );
-}
-
-/// A four-legged animal of boxes and capsules (deer-sized at scale 1), facing `yaw`.
-fn quadruped(commands: &mut Commands, base: DVec3, yaw: f32, scale: f32, coat: u32) {
-    let fur = mat(coat, 0.9).with_subsurface(0.2);
-    let rot = Quat::from_rotation_y(yaw);
-    let p = |v: Vec3| base + (rot * (v * scale)).as_dvec3();
-    spawn(
-        commands,
-        Shape::Capsule {
-            radius: 0.28,
-            height: 1.3,
-            segments: 12,
-        },
-        fur,
-        Transform::from_translation(p(Vec3::new(0.0, 1.05, 0.0)))
-            .with_rotation(rot * Quat::from_rotation_x(std::f32::consts::FRAC_PI_2))
-            .with_scale(Vec3::splat(scale)),
-    );
-    for (x, z) in [(-0.17, 0.45), (0.17, 0.45), (-0.17, -0.45), (0.17, -0.45)] {
-        spawn(
-            commands,
-            Shape::Capsule {
-                radius: 0.05,
-                height: 0.85,
-                segments: 8,
-            },
-            fur,
-            Transform::from_translation(p(Vec3::new(x, 0.45, z))).with_scale(Vec3::splat(scale)),
-        );
-    }
-    spawn(
-        commands,
-        Shape::Capsule {
-            radius: 0.09,
-            height: 0.55,
-            segments: 8,
-        },
-        fur,
-        Transform::from_translation(p(Vec3::new(0.0, 1.45, 0.62)))
-            .with_rotation(rot * Quat::from_rotation_x(0.6))
-            .with_scale(Vec3::splat(scale)),
-    );
-    spawn(
-        commands,
-        Shape::Capsule {
-            radius: 0.1,
-            height: 0.32,
-            segments: 8,
-        },
-        fur,
-        Transform::from_translation(p(Vec3::new(0.0, 1.68, 0.8)))
-            .with_rotation(rot * Quat::from_rotation_x(1.3))
-            .with_scale(Vec3::splat(scale)),
-    );
-}
-
 /// Material plaza: a paved square with a roughness ladder (dielectric and metal), a glass orb
 /// inside an emissive ring and pedestals. The Rendering and lighting thread owns its content.
 pub fn plaza(commands: &mut Commands, lib: &Library, z: &Zone) {
     let c = z.center;
-    // Paving: concentric rings of slightly different stone.
-    for (i, r) in [31.0f32, 24.0, 16.0, 8.0].into_iter().enumerate() {
-        let shade = [0x8f877c, 0x9d958a, 0x8a8277, 0xa39b90][i];
+    // Paving: granite setts in concentric bands (a darker band of smaller setts between two
+    // light ones) round a polished marble middle, laid in world meters so the joints line up.
+    let cobbles = |tile: f32, tint: u32| {
+        StandardMaterial::preset(MaterialPreset::Cobblestone)
+            .with_texture_scale(tile)
+            .with_tint_hex(tint)
+    };
+    let paving = [
+        (31.0f32, cobbles(1.5, 0xf2eee8)),
+        (24.0, cobbles(1.0, 0xc4beb6)),
+        (16.0, cobbles(1.5, 0xfaf6f0)),
+        (
+            8.0,
+            StandardMaterial::preset(MaterialPreset::Marble).with_texture_scale(1.6),
+        ),
+    ];
+    for (i, (r, material)) in paving.into_iter().enumerate() {
         spawn(
             commands,
-            cyl(r, 0.2),
-            mat(shade, 0.85),
+            Shape::Cylinder {
+                radius: r,
+                height: 0.2,
+                segments: 128,
+            },
+            material.with_triplanar_world(),
             at(c + DVec3::new(0.0, 0.1 + i as f64 * 0.005, 0.0)),
         );
     }
@@ -581,46 +508,6 @@ pub fn cave_shell(
             .open(BoxFace::NegZ)
             .with_fade(12.0),
     ));
-}
-
-/// Footprint lab: strips of mud, snow, sand and grass (painted into the ground by the
-/// landscape) with walkers that will leave tracks. The Planets and terrain thread owns it.
-pub fn tracks(commands: &mut Commands, z: &Zone) {
-    let c = z.center;
-    for (i, x) in [-15.0, -5.0, 5.0, 15.0].into_iter().enumerate() {
-        person(
-            commands,
-            c + DVec3::new(x, 0.0, -10.0 + i as f64 * 5.0),
-            0.0,
-            [0x8e44ad, 0x2c3e50, 0xc0392b, 0x16a085][i],
-        );
-    }
-    quadruped(
-        commands,
-        c + DVec3::new(-5.0, 0.0, 8.0),
-        0.0,
-        1.35,
-        0x5a3a22,
-    );
-    quadruped(
-        commands,
-        c + DVec3::new(5.0, 0.0, 10.0),
-        0.3,
-        0.55,
-        0x9a8a70,
-    );
-    spawn(
-        commands,
-        cuboid(0.12, 2.0, 0.12),
-        dark_wood(),
-        at(c + DVec3::new(-22.0, 1.0, -18.0)),
-    );
-    spawn(
-        commands,
-        cuboid(1.6, 0.8, 0.08),
-        wood(),
-        at(c + DVec3::new(-22.0, 1.9, -18.0)),
-    );
 }
 
 /// The cave's roof: the hillside carried on over the cave (grass on top, rock underneath and
@@ -1030,47 +917,11 @@ pub fn field_edge(commands: &mut Commands, lib: &Library, z: &Zone, rng: &mut Rn
     }
 }
 
-/// Spaceport: a 600 m launch tower for scale (the pad, its lights, hangars and the ships
+/// Spaceport: a 600 m observation tower for scale (the pad, its lights, hangars and the ships
 /// come from `engine_vehicles::demo::spawn_spaceport`). The Planets and terrain (space) and
 /// Cars, planes and spaceships threads own it.
-pub fn spaceport(commands: &mut Commands, _lib: &Library, z: &Zone) {
+pub fn spaceport(commands: &mut Commands, lib: &Library, z: &Zone) {
     let c = z.center;
-    // The 600 m launch tower: a tapering spire with a lit band every 50 m.
-    let tower = c + DVec3::new(70.0, 0.0, 60.0);
-    let shell = mat(0xd8dce0, 0.4).with_metallic(0.3);
-    for i in 0..40 {
-        let y = i as f64 * 15.0;
-        let r0 = 14.0 - i as f32 * 0.3;
-        spawn(
-            commands,
-            Shape::Cylinder {
-                radius: r0,
-                height: 15.2,
-                segments: 48,
-            },
-            shell,
-            at(tower + DVec3::new(0.0, y + 7.5, 0.0)),
-        );
-        if i % 4 == 3 {
-            spawn(
-                commands,
-                Shape::Torus {
-                    radius: r0 + 0.3,
-                    tube: 0.35,
-                    segments: 64,
-                },
-                StandardMaterial::hex(0x101820).with_emissive([0.5, 0.8, 1.0], 3_000.0),
-                at(tower + DVec3::new(0.0, y + 14.0, 0.0)),
-            );
-        }
-    }
-    spawn(
-        commands,
-        Shape::Sphere {
-            radius: 2.0,
-            segments: 24,
-        },
-        StandardMaterial::hex(0x400000).with_emissive([1.0, 0.1, 0.05], 50_000.0),
-        at(tower + DVec3::new(0.0, 606.0, 0.0)),
-    );
+    // The 600 m telecom and observation tower (`tower.rs`).
+    crate::tower::spawn(commands, &lib.tower, c + DVec3::new(70.0, 0.0, 60.0));
 }

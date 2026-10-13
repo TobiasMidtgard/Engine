@@ -27,6 +27,9 @@ struct VsOut {
     @location(11) pixels: f32,         // sprite width on screen in pixels
 };
 
+// Narrowest a sprite is drawn, pixels.
+const MIN_PIXELS: f32 = 1.5;
+
 fn hidden() -> VsOut {
     var out: VsOut;
     out.position = vec4<f32>(2.0, 2.0, 2.0, 1.0);
@@ -76,6 +79,22 @@ fn vs_particle(@builtin(vertex_index) vi: u32, @builtin(instance_index) slot: u3
         right = cx * cr + cy * sr;
         up = cy * cr - cx * sr;
     }
+    // Sprites thinner than MIN_PIXELS on screen grow to it and dim to match, so distant
+    // sparks, stars and drops still show (and don't shimmer) with the same total light.
+    let px_per_m = frame.proj[1][1] * frame.viewport.y * 0.5 / max(length(rel), 1e-3);
+    let width_px = 2.0 * half.x * px_per_m;
+    var dim = 1.0;
+    if (width_px < MIN_PIXELS && width_px > 0.0) {
+        let grow = MIN_PIXELS / width_px;
+        half.x *= grow;
+        if (facing == 1u && speed > 1e-3) {
+            // A streak keeps its length; only its width grows.
+            dim = 1.0 / grow;
+        } else {
+            half.y *= grow;
+            dim = 1.0 / (grow * grow);
+        }
+    }
     let pos = center + right * (corner.x * half.x) + up * (corner.y * half.y);
 
     var out: VsOut;
@@ -87,13 +106,13 @@ fn vs_particle(@builtin(vertex_index) vi: u32, @builtin(instance_index) slot: u3
     out.inscatter = fog.inscatter;
     // Fade particles that come very close to the camera instead of filling the screen.
     let near_fade = saturate((length(rel) - frame.exposure.z * 4.0) / max(size * 1.5, 0.1));
-    out.coverage = col.a * near_fade;
+    out.coverage = col.a * near_fade * dim;
     out.additive = e.shade.z;
     out.sprite = u32(e.spin_look.z);
     out.seed = p.seed;
     out.soft = e.shade.w;
     out.age = t;
-    out.pixels = 2.0 * half.x * frame.proj[1][1] * frame.viewport.y * 0.5 / max(length(rel), 1e-3);
+    out.pixels = 2.0 * half.x * px_per_m;
     if (e.shade.y > 0.0 && frame.sun_dir.y > -0.05) {
         // Smoke and dust read as volumes when their sun side is brighter (see `volume_shade`).
         let to_eye = -rel / max(length(rel), 1e-4);

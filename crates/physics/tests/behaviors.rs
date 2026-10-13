@@ -992,3 +992,34 @@ fn bodies_from_different_regions_collide() {
         "no collision happened"
     );
 }
+
+#[test]
+fn falling_characters_are_grounded_only_once_they_land() {
+    let mut app = app();
+    ground(&mut app, DVec3::ZERO, 50.0);
+    let ch = app
+        .world
+        .spawn((
+            Transform::from_xyz(0.0, 3.0, 0.0),
+            CharacterController::default(),
+            CharacterMove {
+                velocity: Vec3::new(0.0, -6.0, 0.0),
+            },
+        ))
+        .id();
+    let mut seen = Vec::new();
+    for _ in 0..60 {
+        app.update();
+        let state = *app.world.get::<CharacterState>(ch).unwrap();
+        seen.push((pos(&app, ch).y, state.grounded));
+    }
+    let (standing, landed) = *seen.last().unwrap();
+    assert!(landed, "never landed");
+    for (y, grounded) in seen {
+        assert!(
+            !grounded || y - standing < 0.03,
+            "grounded {:.3} m above the floor, still falling",
+            y - standing
+        );
+    }
+}

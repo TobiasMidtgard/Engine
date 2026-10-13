@@ -10,6 +10,7 @@
 //! | north | Arcane portal: rune circles, spiraling motes, orbiting orbs with trails |
 //! | middle lane | Fireballs and frost bolts flying into a target wall, with impacts and shockwaves |
 //! | west | Lightning arcing between two obelisks, striking with sparks |
+//! | north-west | A mortar firing starburst fireworks: stars that trail glitter and crackle |
 //! | center | Healing aura on a dais |
 //! | east | Fountain (water jets landing in a basin) and an anvil throwing sparks |
 //! | south | Pond with stones splashing in, footsteps on mud, snow, sand and water, impacts on six materials |
@@ -60,6 +61,14 @@ pub const VIEWS: &[DemoView] = &[
         target: [0.0, 4.2, -17.4],
         hour: 18.4,
         warmup: 2.0,
+    },
+    DemoView {
+        key: "magic_starburst",
+        name: "Starburst fireworks over the court",
+        eye: [6.0, 1.7, 12.0],
+        target: [-11.5, 21.0, -11.5],
+        hour: 18.9,
+        warmup: 3.0,
     },
     DemoView {
         key: "magic_splashes",
@@ -255,6 +264,8 @@ mod layout {
     pub const DAIS: (f64, f64) = (-2.5, 4.0);
     pub const FOUNTAIN: (f64, f64) = (7.0, 5.5);
     pub const ANVIL: (f64, f64) = (12.0, 0.5);
+    /// The firework mortar, between two braziers.
+    pub const LAUNCHER: (f64, f64) = (-11.5, -11.5);
     pub const POND: (f64, f64) = (1.5, 11.5);
     /// Start of the footstep strip (it runs 8 m toward +X).
     pub const STRIP: (f64, f64) = (-9.5, 14.0);
@@ -283,6 +294,7 @@ pub fn clearings() -> Vec<props::court::Clearing> {
         rect((CASTER_X, LANE_Z), 0.55, 0.55),
         rect((WALL_X + 0.4, LANE_Z), 0.45, 2.4),
         circle(DAIS, 2.2),
+        circle(LAUNCHER, 0.85),
         circle(FOUNTAIN, 2.6),
         circle(POND, 3.75),
         rect((STRIP.0 + 4.0, STRIP.1), 4.15, 0.95),
@@ -459,6 +471,27 @@ pub fn spawn_demo(commands: &mut Commands, origin: DVec3) {
             effect: "impact.metal".into(),
             period: 1.1,
             timer: 0.3,
+            up: Vec3::Y,
+            scale: 1.0,
+            spread: 0.0,
+            shots: 0,
+        },
+    ));
+
+    // North-west: a mortar firing starburst fireworks over the court.
+    let launcher = ground(LAUNCHER);
+    art::spawn_prop(
+        commands,
+        "court.mortar",
+        at(launcher),
+        props::launcher::mortar,
+    );
+    commands.spawn((
+        at(launcher + DVec3::new(0.0, props::launcher::MUZZLE as f64, 0.0)),
+        DemoRepeater {
+            effect: "spell.starburst".into(),
+            period: 3.2,
+            timer: 1.0,
             up: Vec3::Y,
             scale: 1.0,
             spread: 0.0,
