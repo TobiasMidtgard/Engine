@@ -1,7 +1,9 @@
 //! Close-up renders of the procedural wildlife frozen in chosen states (grazing, alert,
 //! walking, trotting, galloping, lying, dead, stalking, biting, hopping, sitting up, pecking,
-//! flying), plus budget checks on the generated meshes. Rendering needs a GPU or lavapipe and
-//! passes with a note without one. Set `NPC_SCREENSHOT_DIR` to keep the PNGs.
+//! flying), flipbook strips of them on the move, plus budget checks on the generated meshes.
+//! Rendering needs a GPU or lavapipe and passes with a note without one. Set
+//! `NPC_SCREENSHOT_DIR` to keep the PNGs, and `NPC_STRIPS` (names, comma separated) to shoot
+//! only some strips.
 
 use engine_core::prelude::*;
 use engine_core::time::TimeSource;
@@ -897,7 +899,7 @@ fn wildlife_motion_strips() {
         Transform::default(),
         MeshRenderer::new(
             Shape::Plane {
-                size: [2000.0, 2000.0],
+                size: [4000.0, 4000.0],
                 subdivisions: 1,
             },
             StandardMaterial::hex(0x55703a).with_roughness(0.95),
@@ -974,6 +976,16 @@ fn wildlife_motion_strips() {
             [0.5, 0.65, 0.73, 1.4, 2.6, 3.2, 4.4, 4.8],
         ),
     ];
+    // `NPC_STRIPS=deer-walk,rabbit-hop` shoots only those.
+    let only = std::env::var("NPC_STRIPS").ok();
+    let strips: Vec<Strip> = strips
+        .into_iter()
+        .filter(|s| {
+            only.as_ref()
+                .is_none_or(|o| o.split(',').any(|n| n == s.name))
+        })
+        .collect();
+    assert!(!strips.is_empty(), "NPC_STRIPS names no strip");
     // Moments on the 60 Hz grid.
     let grid = |t: f32| (f64::from(t) * 60.0).round() / 60.0;
     // A first run of each course finds where the animal is at each moment.

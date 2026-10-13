@@ -42,10 +42,12 @@
 //! hose under it are undyed or earthy, and differ between fighters.
 //!
 //! Animals are sculpted procedural red deer, grey wolves, rabbits and starlings (see
-//! `art::animals`; cheap primitives without the renderer). They plant their feet as they walk,
-//! trot and gallop, graze head-down, raise their heads when alert, lie down to rest, hop
-//! (rabbits), creep low when stalking, peck, flap and bank in flight, and fall over when
-//! killed.
+//! `art::animals`; cheap primitives without the renderer), posed by `animal.rs` from their
+//! state and what their body did the step before (kept on `StandInState`): planted feet in
+//! each species' footfalls, a body that rides on them, flexes its spine in the gallop and
+//! throws its weight on starts, stops and turns, ears and tails that answer noises and alarm,
+//! grazing, alert freezes, rest, stalking, hopping, a starling's wing beat, bounds, glides,
+//! banks, takeoffs and landings, and falling over when killed.
 //!
 //! With `NpcSettings::show_intent` on, a ring on the ground marks where each NPC decided to
 //! go and a line leads to it, colored by why: blue cover, orange flank, purple high ground,
@@ -56,7 +58,7 @@ mod humanoid;
 
 use engine_core::prelude::*;
 use engine_render::{MaterialRef, MeshRenderer, Shape, StandardMaterial};
-use engine_world::locomotion::{LocomotionState, MoveIntent};
+use engine_world::locomotion::{LocomotionMode, LocomotionState, MoveIntent};
 use engine_world::{AttackEvent, AttackKind, DamageEvent};
 
 use crate::agent::{NpcBrain, NpcClock, NpcCombat, NpcMotor, NpcSettings, NpcVitals, NpcWeapon};
@@ -122,13 +124,15 @@ pub struct IntentMarker {
     line: bool,
 }
 
-/// Per-body bookkeeping for effects, and a fighter's motion from one pose to the next.
+/// Per-body bookkeeping for effects, and a fighter's or animal's motion from one pose to the
+/// next.
 #[derive(Component, Debug, Clone, Copy, Default)]
 pub struct StandInState {
     was_winding: bool,
     flash_until: f64,
     markers: Option<[Entity; 2]>,
     motion: humanoid::Motion,
+    beast: animal::Motion,
 }
 
 fn mat(hex: u32) -> StandardMaterial {
@@ -314,7 +318,6 @@ pub(crate) fn pose_stand_ins(
     {
         let now = clock.map(|c| c.now).unwrap_or(0.0);
         let phase = mover.map(|m| m.phase).unwrap_or(0.0);
-        let speed = Vec3::new(loco.velocity.x, 0.0, loco.velocity.z).length();
         let (animal, mind, bird, motor) = animal;
         let mut materials: Vec<(Part, StandardMaterial)> = Vec::new();
         let placed: Box<dyn Fn(Part) -> Placed> = match animal.map(|a| a.species) {
@@ -346,16 +349,24 @@ pub(crate) fn pose_stand_ins(
                 Box::new(pose)
             }
             Some(species) => {
-                let state = mind.map(|m| m.state).unwrap_or_default();
-                let since = mind.map(|m| m.since).unwrap_or(0.0);
-                let biting = mind.is_some_and(|m| now < m.bite_ready - 0.55);
-                let flap = bird.map(|b| b.flap).unwrap_or(0.0);
-                let male = animal.is_some_and(|a| a.male);
-                Box::new(move |p| {
-                    animal::animal_pose(
-                        species, p, state, since, now, phase, speed, loco, biting, flap, male,
-                    )
-                })
+                let input = animal::Input {
+                    species,
+                    male: animal.is_some_and(|a| a.male),
+                    state: mind.map(|m| m.state).unwrap_or_default(),
+                    since: mind.map(|m| m.since).unwrap_or(0.0),
+                    now,
+                    phase,
+                    at: owner.translation,
+                    facing: owner.rotation,
+                    vel: loco.velocity,
+                    crouch: loco.mode == LocomotionMode::Crouch,
+                    biting: mind.is_some_and(|m| now < m.bite_ready - 0.55),
+                    vary: ((me.to_bits() as u32) as f32 * 0.618_034).fract(),
+                    senses: mind.map(|m| animal::Senses::of(m, now)).unwrap_or_default(),
+                    bird: bird.copied(),
+                };
+                let pose = animal::animal(&input, &mut st.beast);
+                Box::new(move |p| pose.place(p))
             }
         };
         for child in children.iter() {
