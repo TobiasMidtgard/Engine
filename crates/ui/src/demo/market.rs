@@ -15,8 +15,8 @@ use super::art::mesh::{beam, bevel_box, icosphere, lathe, tube};
 use super::art::props::{barrel_mesh, sack_mesh};
 use super::art::stall::{Goods, StallMats, spawn_stall};
 use super::art::textures::{
-    CREAM, HeightGrid, canvas_texel, cobble_texel, linen_texel, parchment_map_texel, rock_texel,
-    wicker_texel, wood_texel,
+    CREAM, HeightGrid, canvas_texel, chalkboard_texel, cobble_texel, linen_texel,
+    parchment_map_texel, rock_texel, wicker_texel, wood_texel,
 };
 use super::art::{
     TexSet, add_mat, add_mesh, bake_set, fix_winding, hex, lamp, moved, noise, rgba, sat, sstep,
@@ -68,6 +68,8 @@ struct Mats {
     pottery: Handle<StandardMaterial>,
     burlap: Handle<StandardMaterial>,
     lamp_glass: Handle<StandardMaterial>,
+    /// String-light bulbs: warmer and dimmer than a lantern.
+    bulb: Handle<StandardMaterial>,
     produce: Handle<StandardMaterial>,
     cloth: Handle<StandardMaterial>,
     wicker: Handle<StandardMaterial>,
@@ -122,6 +124,7 @@ impl Mats {
                 },
             ),
             lamp_glass: add_mat(world, lamp([1.0, 0.62, 0.3], 900.0)),
+            bulb: add_mat(world, lamp([1.0, 0.68, 0.36], 380.0)),
             produce: add_mat(
                 world,
                 StandardMaterial {
@@ -310,6 +313,526 @@ pub fn spawn_market(world: &mut World, origin: DVec3) {
         .collect();
     spots.push((cart, -0.6, Vec2::new(1.6, 1.4), 45));
     straw(world, &mats, origin, &ground_y, &spots, &mut rng);
+    ale_corner(world, &mats, origin, &ground_y, &mut rng);
+}
+
+/// The open side of the square, between the smith and the produce stall: a corner for a
+/// drink. Two barrel tables with stools, tankards, a jug and bread; a chalkboard facing the
+/// way in; flower troughs; and strings of warm lights from two poles to the nearest lamp.
+fn ale_corner(
+    world: &mut World,
+    mats: &Mats,
+    origin: DVec3,
+    ground_y: &dyn Fn(DVec3) -> f64,
+    rng: &mut Rng,
+) {
+    let at = |x: f64, z: f64| {
+        let p = origin + DVec3::new(x, 0.0, z);
+        DVec3::new(p.x, ground_y(p), p.z)
+    };
+    for (x, z) in [(3.6, -10.9), (6.2, -10.2)] {
+        drink_table(world, mats, at(x, z), rng);
+    }
+    // Facing out of the square, toward people walking in.
+    let board = at(9.6, -8.4);
+    let out = board - origin;
+    chalkboard(world, mats, board, out.x.atan2(out.z) as f32);
+    for (x, z, yaw) in [(8.4, -11.6, 0.75f32), (11.2, -6.6, 1.1)] {
+        flower_trough(world, mats, at(x, z), yaw, rng);
+    }
+    // Lights: from two poles behind the tables to the lamp post nearest them.
+    let a = 3.0 / 4.0 * std::f64::consts::TAU + 0.35;
+    let lamp = at(a.cos() * 7.5, a.sin() * 7.5) + DVec3::Y * 3.0;
+    let poles = [at(2.0, -12.9), at(7.9, -12.5)];
+    let mut tops = Vec::new();
+    for p in poles {
+        tops.push(light_pole(world, mats, p));
+    }
+    string_lights(world, mats, tops[0], lamp, 0.45, rng);
+    string_lights(world, mats, tops[1], lamp, 0.5, rng);
+    string_lights(world, mats, tops[0], tops[1], 0.4, rng);
+}
+
+/// An upended barrel with a round plank top, three stools and what's being eaten.
+fn drink_table(world: &mut World, mats: &Mats, at: DVec3, rng: &mut Rng) {
+    let (mut wood, mut iron, mut pot, mut food) = (
+        Mesh::default(),
+        Mesh::default(),
+        Mesh::default(),
+        Mesh::default(),
+    );
+    let top_y = 0.975f32;
+    let (bw, bi) = barrel_mesh(0.92, 0.3);
+    wood.merge(&tint(bw, Vec4::new(0.92, 0.74, 0.6, 1.0)));
+    iron.merge(&bi);
+    wood.merge(&tint(
+        lathe(
+            &[
+                (0.0, 0.915),
+                (0.43, 0.915),
+                (0.45, 0.93),
+                (0.45, 0.96),
+                (0.435, top_y),
+                (0.0, top_y),
+            ],
+            36,
+            0.45,
+        ),
+        Vec4::new(0.8, 0.62, 0.48, 1.0),
+    ));
+    let a0 = rng.range(0.0, TAU);
+    for k in 0..3 {
+        let a = a0 + k as f32 * TAU / 3.0 + rng.range(-0.3, 0.3);
+        let d = rng.range(0.66, 0.8);
+        wood.merge(&moved(
+            stool(rng),
+            Mat4::from_rotation_translation(
+                Quat::from_rotation_y(rng.range(0.0, TAU)),
+                Vec3::new(a.cos() * d, 0.0, a.sin() * d),
+            ),
+        ));
+    }
+    // On the table: a tankard or two, and a jug or a plate of bread.
+    let spot = |rng: &mut Rng| {
+        let (a, r) = (rng.range(0.0, TAU), rng.range(0.08, 0.3));
+        Vec3::new(a.cos() * r, top_y, a.sin() * r)
+    };
+    let mut placed: Vec<Vec3> = Vec::new();
+    let mut free = |rng: &mut Rng, clear: f32| {
+        for _ in 0..12 {
+            let p = spot(rng);
+            if placed.iter().all(|q| q.distance(p) > clear) {
+                placed.push(p);
+                return p;
+            }
+        }
+        spot(rng)
+    };
+    for _ in 0..rng.range_i32(1, 3) {
+        let p = free(rng, 0.14);
+        let (w, i, foam) = tankard(rng.range(0.0, TAU));
+        let m = Mat4::from_translation(p);
+        wood.merge(&moved(w, m));
+        iron.merge(&moved(i, m));
+        pot.merge(&moved(foam, m));
+    }
+    if rng.chance(0.5) {
+        let p = free(rng, 0.2);
+        pot.merge(&moved(
+            tint(
+                lathe(
+                    &[
+                        (0.0, 0.0),
+                        (0.05, 0.0),
+                        (0.075, 0.06),
+                        (0.07, 0.13),
+                        (0.036, 0.19),
+                        (0.042, 0.222),
+                        (0.036, 0.226),
+                        (0.03, 0.2),
+                        (0.0, 0.2),
+                    ],
+                    24,
+                    0.07,
+                ),
+                rgba(hex(0xa8603a)),
+            ),
+            Mat4::from_translation(p),
+        ));
+    } else {
+        let p = free(rng, 0.24);
+        pot.merge(&moved(
+            tint(
+                lathe(
+                    &[
+                        (0.0, 0.0),
+                        (0.08, 0.0),
+                        (0.115, 0.016),
+                        (0.11, 0.019),
+                        (0.08, 0.007),
+                        (0.0, 0.007),
+                    ],
+                    28,
+                    0.11,
+                ),
+                rgba(hex(0xd9cdb4)),
+            ),
+            Mat4::from_translation(p),
+        ));
+        for k in 0..rng.range_i32(1, 3) {
+            let o = Vec3::new(-0.03 + 0.06 * k as f32, 0.035, rng.range(-0.02, 0.02));
+            food.merge(&moved(
+                tint(
+                    sack_mesh(Vec3::new(0.05, 0.034, 0.075), rng.next_u32() % 1000),
+                    Vec4::new(0.72, 0.46, 0.24, 1.0),
+                ),
+                Mat4::from_rotation_translation(Quat::from_rotation_y(rng.range(0.0, TAU)), p + o),
+            ));
+        }
+    }
+    let t =
+        Transform::from_translation(at).with_rotation(Quat::from_rotation_y(rng.range(0.0, TAU)));
+    spawn(world, wood, mats.wood, t);
+    spawn(world, iron, mats.iron, t);
+    spawn(world, pot, mats.pottery, t);
+    spawn(world, food, mats.produce, t);
+}
+
+/// A three-legged stool, its seat 0.47 m up.
+fn stool(rng: &mut Rng) -> Mesh {
+    let mut m = lathe(
+        &[
+            (0.0, 0.42),
+            (0.15, 0.42),
+            (0.165, 0.435),
+            (0.165, 0.46),
+            (0.155, 0.47),
+            (0.0, 0.47),
+        ],
+        20,
+        0.16,
+    );
+    for k in 0..3 {
+        let a = k as f32 * TAU / 3.0;
+        let (c, s) = (a.cos(), a.sin());
+        m.merge(&tube(
+            Vec3::new(c * 0.17, 0.0, s * 0.17),
+            Vec3::new(c * 0.09, 0.425, s * 0.09),
+            0.017,
+            6,
+        ));
+    }
+    tint(m, Vec4::new(1.0, 0.86, 0.72, 1.0) * rng.range(0.85, 1.05))
+}
+
+/// A wooden tankard with iron hoops and a head of foam: (wood, iron, foam), standing at the
+/// origin with its handle turned `yaw`.
+fn tankard(yaw: f32) -> (Mesh, Mesh, Mesh) {
+    let (r, h) = (0.043f32, 0.13f32);
+    let mut wood = lathe(
+        &[
+            (0.0, 0.0),
+            (r, 0.0),
+            (r + 0.003, 0.006),
+            (r + 0.002, h),
+            (r - 0.005, h),
+            (r - 0.006, h - 0.012),
+        ],
+        20,
+        r,
+    );
+    // Handle: a C of short tubes.
+    let steps = 7;
+    let c = |t: f32| Vec3::new(r + 0.004 + 0.032 * (PI * t).sin(), 0.03 + 0.075 * t, 0.0);
+    for k in 0..steps {
+        let (t0, t1) = (k as f32 / steps as f32, (k + 1) as f32 / steps as f32);
+        wood.merge(&tube(c(t0), c(t1), 0.0075, 6));
+    }
+    let mut iron = Mesh::default();
+    for y in [0.022f32, h - 0.025] {
+        iron.merge(&lathe(
+            &[
+                (r + 0.002, y - 0.006),
+                (r + 0.0045, y - 0.005),
+                (r + 0.0045, y + 0.005),
+                (r + 0.002, y + 0.006),
+            ],
+            20,
+            r,
+        ));
+    }
+    // Foam: a lumpy cap just over the rim.
+    let foam = tint(
+        moved(
+            sack_mesh(
+                Vec3::new(r - 0.004, 0.018, r - 0.004),
+                (yaw * 100.0) as u32 % 1000,
+            ),
+            Mat4::from_translation(Vec3::Y * (h - 0.004)),
+        ),
+        Vec4::new(1.0, 1.0, 0.95, 1.0),
+    );
+    let rot = Mat4::from_rotation_y(yaw);
+    (
+        tint(moved(wood, rot), Vec4::new(0.8, 0.58, 0.4, 1.0)),
+        moved(iron, rot),
+        foam,
+    )
+}
+
+/// An A-frame chalkboard with the day's menu, its written side facing `yaw`.
+fn chalkboard(world: &mut World, mats: &Mats, at: DVec3, yaw: f32) {
+    let (w, h, foot) = (0.6f32, 0.95f32, 0.24f32);
+    let lean = (foot / h).asin();
+    let mut wood = Mesh::default();
+    let mut slate = Mesh::default();
+    for side in [1.0f32, -1.0] {
+        // Board space: x across, y up from the foot, the face toward +Z; then lean it back
+        // and set its foot out front (or behind, for the back board).
+        let place = Mat4::from_translation(Vec3::new(0.0, 0.0, side * foot))
+            * Mat4::from_rotation_y(if side > 0.0 { 0.0 } else { PI })
+            * Mat4::from_rotation_x(-lean);
+        let fw = 0.045f32;
+        let mut frame = Mesh::default();
+        for (a, b) in [
+            (Vec3::new(-w * 0.5, 0.0, 0.0), Vec3::new(-w * 0.5, h, 0.0)),
+            (Vec3::new(w * 0.5, 0.0, 0.0), Vec3::new(w * 0.5, h, 0.0)),
+        ] {
+            frame.merge(&beam(a, b, fw, 0.03, 0.006));
+        }
+        for y in [0.16f32, h - fw * 0.5] {
+            frame.merge(&beam(
+                Vec3::new(-w * 0.5, y, 0.0),
+                Vec3::new(w * 0.5, y, 0.0),
+                fw,
+                0.03,
+                0.006,
+            ));
+        }
+        // The backing board, then the slate face on its front.
+        frame.merge(&moved(
+            bevel_box(Vec3::new(w - fw, h - 0.16 - fw, 0.012), 0.003, 0),
+            Mat4::from_translation(Vec3::new(0.0, (h + 0.16 - fw * 0.5) * 0.5, -0.004)),
+        ));
+        wood.merge(&moved(frame, place));
+        let (x0, x1, y0, y1) = (
+            -w * 0.5 + fw * 0.5,
+            w * 0.5 - fw * 0.5,
+            0.16 + fw * 0.5,
+            h - fw,
+        );
+        let n = Vec3::Z;
+        let c = Vec4::ONE;
+        let quad = Mesh {
+            vertices: vec![
+                vtx(Vec3::new(x0, y1, 0.0035), n, Vec2::new(0.0, 0.0), c),
+                vtx(Vec3::new(x1, y1, 0.0035), n, Vec2::new(1.0, 0.0), c),
+                vtx(Vec3::new(x1, y0, 0.0035), n, Vec2::new(1.0, 1.0), c),
+                vtx(Vec3::new(x0, y0, 0.0035), n, Vec2::new(0.0, 1.0), c),
+            ],
+            indices: vec![0, 2, 1, 0, 3, 2],
+        };
+        let mut quad = quad;
+        fix_winding(&mut quad);
+        slate.merge(&moved(quad, place));
+    }
+    // Hinges at the top and a chain between the boards.
+    let mut iron = Mesh::default();
+    let top = Vec3::new(0.0, h * lean.cos() - 0.02, 0.0);
+    for x in [-0.2f32, 0.2] {
+        iron.merge(&tube(
+            top + Vec3::new(x - 0.03, 0.0, 0.0),
+            top + Vec3::new(x + 0.03, 0.0, 0.0),
+            0.012,
+            8,
+        ));
+    }
+    let mid = 0.42f32;
+    let reach = foot - mid * lean.tan() - 0.02;
+    iron.merge(&tube(
+        Vec3::new(-w * 0.5 + 0.02, mid, reach),
+        Vec3::new(-w * 0.5 + 0.02, mid - 0.04, -reach),
+        0.004,
+        5,
+    ));
+    let set = bake_set(world, 512, 800, 1.0, false, 1.0, chalkboard_texel);
+    let board = add_mat(world, textured(&set, 1.0));
+    let t = Transform::from_translation(at).with_rotation(Quat::from_rotation_y(yaw));
+    spawn(world, wood, mats.wood, t);
+    spawn(world, iron, mats.iron, t);
+    spawn(world, slate, board, t);
+}
+
+/// A plank trough of flowers: soil, leafy clumps and blooms in two or three colours.
+fn flower_trough(world: &mut World, mats: &Mats, at: DVec3, yaw: f32, rng: &mut Rng) {
+    let (len, wid, hgt) = (1.3f32, 0.42f32, 0.36f32);
+    let mut wood = Mesh::default();
+    for sz in [-1.0f32, 1.0] {
+        for k in 0..3 {
+            let y = 0.06 + k as f32 * 0.1;
+            wood.merge(&moved(
+                bevel_box(Vec3::new(len, 0.095, 0.03), 0.006, 0),
+                Mat4::from_translation(Vec3::new(0.0, y + 0.05, sz * (wid * 0.5 - 0.015))),
+            ));
+        }
+    }
+    for sx in [-1.0f32, 1.0] {
+        wood.merge(&moved(
+            bevel_box(Vec3::new(0.03, hgt - 0.04, wid), 0.006, 2),
+            Mat4::from_translation(Vec3::new(
+                sx * (len * 0.5 - 0.015),
+                (hgt - 0.04) * 0.5 + 0.06,
+                0.0,
+            )),
+        ));
+        for sz in [-1.0f32, 1.0] {
+            wood.merge(&moved(
+                bevel_box(Vec3::new(0.06, hgt + 0.02, 0.06), 0.008, 1),
+                Mat4::from_translation(Vec3::new(
+                    sx * (len * 0.5 - 0.02),
+                    (hgt + 0.02) * 0.5,
+                    sz * (wid * 0.5 - 0.02),
+                )),
+            ));
+        }
+    }
+    let mut plants = Mesh::default();
+    // Soil.
+    plants.merge(&tint(
+        moved(
+            bevel_box(Vec3::new(len - 0.06, 0.03, wid - 0.06), 0.01, 0),
+            Mat4::from_translation(Vec3::Y * (hgt - 0.03)),
+        ),
+        rgba(hex(0x3a2a1c)),
+    ));
+    let (dirs, faces) = icosphere(1);
+    let blob = |c: Vec3, r: Vec3, col: Vec4, seed: u32| {
+        let mut m = Mesh {
+            vertices: dirs
+                .iter()
+                .map(|&d| {
+                    let lump = 1.0 + 0.25 * noise::n3(d.x * 3.0, d.y * 3.0, d.z * 3.0, seed);
+                    vtx(c + d * r * lump, d, Vec2::ZERO, col)
+                })
+                .collect(),
+            indices: faces.iter().flat_map(|f| f.iter().copied()).collect(),
+        };
+        m.compute_normals();
+        m
+    };
+    let palette = [
+        hex(0xb8324a),
+        hex(0xe8c040),
+        hex(0xe9e4dc),
+        hex(0x7a4ab0),
+        hex(0xe07a2c),
+    ];
+    let picks = [rng.range_i32(0, 5) as usize, rng.range_i32(0, 5) as usize];
+    let n = 9;
+    for k in 0..n {
+        let x = -len * 0.5 + 0.12 + (len - 0.24) * (k as f32 + rng.range(0.2, 0.8)) / n as f32;
+        let z = rng.range(-0.1, 0.1);
+        let base = Vec3::new(x, hgt - 0.01, z);
+        let leaf = Vec3::new(0.11, 0.09, 0.1) * rng.range(0.8, 1.2);
+        plants.merge(&blob(
+            base + Vec3::Y * 0.06,
+            leaf,
+            rgba(hex(0x3d6a2a) * rng.range(0.8, 1.15)),
+            rng.next_u32() % 999,
+        ));
+        for _ in 0..rng.range_i32(3, 6) {
+            let o = Vec3::new(
+                rng.range(-0.09, 0.09),
+                rng.range(0.1, 0.2),
+                rng.range(-0.08, 0.08),
+            );
+            let col = palette[picks[rng.range_i32(0, 2) as usize]] * rng.range(0.85, 1.1);
+            plants.merge(&blob(
+                base + o,
+                Vec3::splat(rng.range(0.022, 0.034)),
+                rgba(col),
+                rng.next_u32() % 999,
+            ));
+        }
+    }
+    let t = Transform::from_translation(at).with_rotation(Quat::from_rotation_y(yaw));
+    spawn(
+        world,
+        tint(wood, Vec4::new(0.75, 0.62, 0.5, 1.0)),
+        mats.wood,
+        t,
+    );
+    spawn(world, plants, mats.produce, t);
+}
+
+/// A plain timber pole 3.1 m tall with a cross-arm the light strings tie to; returns the
+/// tie point.
+fn light_pole(world: &mut World, mats: &Mats, at: DVec3) -> DVec3 {
+    let h = 3.1f32;
+    let mut wood = beam(Vec3::ZERO, Vec3::Y * h, 0.11, 0.11, 0.012);
+    wood.merge(&beam(
+        Vec3::new(-0.25, h - 0.18, 0.0),
+        Vec3::new(0.25, h - 0.18, 0.0),
+        0.07,
+        0.07,
+        0.01,
+    ));
+    // Two braces to the cobbles.
+    for sx in [-1.0f32, 1.0] {
+        wood.merge(&beam(
+            Vec3::new(sx * 0.6, 0.0, 0.0),
+            Vec3::new(sx * 0.05, 0.9, 0.0),
+            0.06,
+            0.06,
+            0.008,
+        ));
+    }
+    spawn(
+        world,
+        tint(wood, Vec4::new(0.7, 0.56, 0.44, 1.0)),
+        mats.wood,
+        Transform::from_translation(at),
+    );
+    at + DVec3::Y * (h as f64 - 0.12)
+}
+
+/// A string of warm bulbs from `a` to `b`, sagging `sag` m in the middle, one every 0.45 m.
+fn string_lights(world: &mut World, mats: &Mats, a: DVec3, b: DVec3, sag: f64, rng: &mut Rng) {
+    let span = b - a;
+    let len = span.length();
+    let at = |t: f64| a + span * t - DVec3::Y * (sag * 4.0 * t * (1.0 - t));
+    let mut wire = Mesh::default();
+    let segs = (len / 0.25).ceil() as usize;
+    let local = |p: DVec3| (p - a).as_vec3();
+    for k in 0..segs {
+        let (t0, t1) = (k as f64 / segs as f64, (k + 1) as f64 / segs as f64);
+        wire.merge(&tube(local(at(t0)), local(at(t1)), 0.004, 5));
+    }
+    let mut bulbs = Mesh::default();
+    let (dirs, faces) = icosphere(2);
+    let n = (len / 0.45).floor() as usize;
+    for k in 1..n {
+        let t = k as f64 / n as f64;
+        let p = local(at(t)) - Vec3::Y * 0.05;
+        // A short drop from the wire, a cap, and the bulb.
+        wire.merge(&tube(p + Vec3::Y * 0.05, p + Vec3::Y * 0.025, 0.003, 4));
+        wire.merge(&moved(
+            lathe(
+                &[(0.0, 0.0), (0.014, 0.0), (0.012, 0.022), (0.0, 0.026)],
+                8,
+                0.012,
+            ),
+            Mat4::from_translation(p),
+        ));
+        let r = 0.026 * rng.range(0.95, 1.05);
+        bulbs.vertices.extend(dirs.iter().map(|&d| {
+            let q = Vec3::new(d.x * r, d.y * r * 1.25 - r * 1.1, d.z * r);
+            vtx(p + q, d, Vec2::ZERO, Vec4::ONE)
+        }));
+        let base = (bulbs.vertices.len() - dirs.len()) as u32;
+        bulbs
+            .indices
+            .extend(faces.iter().flat_map(|f| f.iter().map(|i| i + base)));
+    }
+    let t = Transform::from_translation(a);
+    spawn(world, wire, mats.iron, t);
+    let h = add_mesh(world, bulbs);
+    let mut r = MeshRenderer::new(h, mats.bulb);
+    r.cast_shadows = false;
+    world.spawn((t, r, MarketArt));
+    // A few soft lights along the string so the bulbs light what's under them.
+    for t in [0.3, 0.7] {
+        world.spawn((
+            PointLight {
+                color: [1.0, 0.7, 0.4],
+                intensity_lm: 120.0,
+                range: 5.0,
+                radius: 0.05,
+            },
+            Transform::from_translation(at(t) - DVec3::Y * 0.1),
+            MarketArt,
+        ));
+    }
 }
 
 /// Straw lying on the cobbles: `count` clumps of loosely aligned blades in an ellipse of half
