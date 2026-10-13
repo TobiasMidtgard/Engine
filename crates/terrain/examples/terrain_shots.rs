@@ -255,6 +255,14 @@ fn views() -> Vec<View> {
             ..BASE
         },
         View {
+            name: "range_dusk",
+            eye: DVec3::new(2_000.0, 0.0, -11_000.0),
+            target: DVec3::new(-3_000.0, 1_500.0, -20_000.0),
+            above_ground: Some(300.0),
+            sun: (285.0, 7.0),
+            ..BASE
+        },
+        View {
             name: "earth_cliffs",
             eye: DVec3::new(-11_500.0, 0.0, -22_400.0),
             target: DVec3::new(-13_000.0, 1_900.0, -21_700.0),
@@ -588,6 +596,17 @@ fn main() {
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
         app.update_n(12);
+        // The far shadow map's patches stream in a few a frame after the view's own.
+        for _ in 0..120 {
+            let built = app
+                .world
+                .resource::<engine_core::diagnostics::Diagnostics>()
+                .get("terrain.patches_built");
+            if built.unwrap_or(0.0) == 0.0 {
+                break;
+            }
+            app.update();
+        }
         let path = out.join(format!("{}.png", view.name));
         match capture_now(&mut app.world, &path) {
             Ok(_) => {
@@ -595,10 +614,11 @@ fn main() {
                     .world
                     .resource::<engine_core::diagnostics::Diagnostics>();
                 println!(
-                    "{:<16} {:>6.1}s  patches drawn {:>5}  resident {:>5}  -> {}",
+                    "{:<16} {:>6.1}s  patches drawn {:>5}  far shadow {:>5}  resident {:>5}  -> {}",
                     view.name,
                     started.elapsed().as_secs_f32(),
                     d.get("terrain.patches_drawn").unwrap_or(0.0),
+                    d.get("terrain.far_shadow_patches").unwrap_or(0.0),
                     d.get("terrain.patches_resident").unwrap_or(0.0),
                     path.display()
                 );
