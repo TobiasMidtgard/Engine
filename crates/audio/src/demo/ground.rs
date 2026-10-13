@@ -49,6 +49,10 @@ pub(super) enum Mat {
     Planks,
     Timber,
     Zinc,
+    /// The worn tops of the grating's bars (see `textures::tread`).
+    Tread,
+    /// Weathered galvanized steel, gone dull: the grating's bars and its frame.
+    Grating,
     Steel,
     Leaf,
     Stone,
@@ -192,6 +196,7 @@ pub struct TrailGroundCache {
 pub(super) fn spawn(commands: &mut Commands, origin: DVec3) {
     commands.queue(move |world: &mut World| {
         structures::underpass_volumes(world, origin);
+        structures::grating_volume(world, origin);
         let renders = world.contains_resource::<Assets<Mesh>>()
             && world.contains_resource::<Assets<Image>>()
             && world.contains_resource::<Assets<StandardMaterial>>();
@@ -376,7 +381,7 @@ fn material(mat: Mat, tex: &std::collections::HashMap<&str, TexHandles>) -> Stan
             m
         }
         Mat::Gravel => ground(tex, "gravel", 1.0, 0xffffff, 1.0),
-        Mat::PitFloor => ground(tex, "gravel", 1.0, 0x6a6560, 0.55),
+        Mat::PitFloor => ground(tex, "gravel", 1.0, 0x6a6560, 0.8),
         Mat::Concrete => ground(tex, "concrete", 2.0, 0xffffff, 1.0),
         Mat::Formwork => textured(plain(0xffffff, 1.0), tex, "formwork", (3.0, 3.0)),
         Mat::Sand => ground(tex, "sand", 1.5, 0xffffff, 1.0),
@@ -386,6 +391,18 @@ fn material(mat: Mat, tex: &std::collections::HashMap<&str, TexHandles>) -> Stan
         Mat::Timber => textured(plain(0xb8aa98, 1.0), tex, "planks", (2.0, 0.5)),
         Mat::Zinc => textured(
             plain(0xffffff, 1.0).with_metallic(1.0),
+            tex,
+            "zinc",
+            (0.4, 0.4),
+        ),
+        Mat::Tread => textured(
+            plain(0xffffff, 1.0).with_metallic(1.0),
+            tex,
+            "tread",
+            (2.56, 1.92),
+        ),
+        Mat::Grating => textured(
+            plain(0xffffff, 1.0).with_metallic(0.45),
             tex,
             "zinc",
             (0.4, 0.4),

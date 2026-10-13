@@ -28,6 +28,7 @@ pub(super) const RECIPES: &[(&str, Recipe)] = &[
     ("forest", forest_floor),
     ("planks", planks),
     ("zinc", galvanized),
+    ("tread", tread),
     ("leaf", leaf_atlas),
     ("stone", stone),
 ];
@@ -834,6 +835,48 @@ fn galvanized() -> TexSet {
         }
     });
     c.bake(1.0, 5.0)
+}
+
+/// The tops of the grating's bearing bars over a 2.56 × 1.92 m patch (u across the
+/// walkway from its left edge, v along it; it repeats along only): dull spangled zinc,
+/// polished to bright steel down the middle where feet go, rust where the zinc has worn
+/// through but feet don't polish it, and grime toward the sides and in patches.
+fn tread() -> TexSet {
+    let mut c = Canvas::new(512, 384, Vec2::new(2.56, 1.92));
+    c.fill(|u, v| {
+        let x = u * 2.56 - 1.28;
+        // Features `f` per 0.64 m, round in meters (the patch is 4 × 3 of them).
+        let n = |f: i32, octaves: u32, seed: u32| fbm2(u, v, f * 4, f * 3, octaves, seed);
+        let band = (x - 0.1 * n(1, 2, 141)).abs() + 0.16 * n(3, 3, 142);
+        let wear = 1.0 - smooth(0.25, 0.85, band);
+        let polish = smooth(0.15, 0.75, wear + 0.25 * n(6, 2, 143));
+        let spangle = n(20, 2, 144);
+        let zinc = Vec3::new(0.46, 0.46, 0.45) * (1.0 + 0.12 * spangle);
+        let bright = Vec3::new(0.84, 0.84, 0.82);
+        let grime = ((0.85 * smooth(0.8, 1.22, x.abs()) + 0.6 * smooth(0.15, 0.6, n(4, 3, 145)))
+            * (1.0 - 0.8 * polish))
+            .min(1.0);
+        let rust = smooth(
+            0.3,
+            0.6,
+            n(8, 3, 146) + 0.35 * wear * (1.0 - polish) + 0.25 * smooth(0.9, 1.25, x.abs()),
+        );
+        let rust_col =
+            Vec3::new(0.3, 0.13, 0.06).lerp(Vec3::new(0.5, 0.27, 0.11), 0.5 + 0.5 * n(16, 2, 147));
+        let col = zinc
+            .lerp(bright, polish)
+            .lerp(rust_col, rust * 0.85)
+            .lerp(Vec3::new(0.14, 0.12, 0.1), grime * 0.7);
+        Texel {
+            color: col,
+            rough: lerp(0.58 + 0.08 * spangle, 0.36, polish)
+                .max(0.85 * rust)
+                .max(0.9 * grime),
+            metal: lerp(0.8, 1.0, polish) * (1.0 - rust * 0.9) * (1.0 - 0.8 * grime),
+            ..Default::default()
+        }
+    });
+    c.bake(1.0, 0.0)
 }
 
 /// Four leaves in a 2×2 atlas (maple, oak, beech, chestnut), pale so vertex colours tint

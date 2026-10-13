@@ -1003,7 +1003,7 @@ impl Stretch {
             "snow" | "ice" | "sand" => return,
             "grass" => (1.35, 1.0, Palette::Meadow, 1.0),
             "wood" => (1.32, 1.0, Palette::Meadow, 1.1),
-            "metal" => (1.5, 0.9, Palette::Meadow, 1.0),
+            "metal" => (1.56, 0.9, Palette::Meadow, 1.0),
             "concrete" => (2.55, 0.5, Palette::Meadow, 0.7),
             "leaves" => (1.9, 0.45, Palette::Forest, 0.8),
             "water" => (1.45, 1.0, Palette::Lush, 1.1),
@@ -1175,7 +1175,7 @@ fn verges() -> Out {
 // -------------------------------------------------------------------------- grasses
 
 #[derive(Clone, Copy, PartialEq)]
-enum Palette {
+pub(super) enum Palette {
     Meadow,
     Lush,
     Forest,
@@ -1245,20 +1245,20 @@ impl Palette {
     }
 }
 
-struct ClumpStyle {
-    blades: (usize, usize),
-    radius: f32,
-    height: (f32, f32),
+pub(super) struct ClumpStyle {
+    pub blades: (usize, usize),
+    pub radius: f32,
+    pub height: (f32, f32),
     /// Root lean (radians from vertical), and how much more the tips bend.
-    lean: (f32, f32),
+    pub lean: (f32, f32),
     /// Lean every blade this way (trampled), else outward from the clump.
-    toward: Option<Vec3>,
-    width: (f32, f32),
-    palette: Palette,
+    pub toward: Option<Vec3>,
+    pub width: (f32, f32),
+    pub palette: Palette,
 }
 
 /// A tuft of grass blades rooted round `at`.
-fn clump(m: &mut Mesh, rng: &mut Rand, at: Vec3, st: ClumpStyle) {
+pub(super) fn clump(m: &mut Mesh, rng: &mut Rand, at: Vec3, st: ClumpStyle) {
     let n = st.blades.0 + rng.below(st.blades.1 - st.blades.0 + 1);
     for _ in 0..n {
         let a = rng.range(0.0, TAU);
