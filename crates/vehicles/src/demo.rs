@@ -253,13 +253,13 @@ pub fn spawn_track(commands: &mut Commands, center: DVec3) {
     );
     scenery::track::spawn(commands, center);
 
-    // Two sports cars racing round the oval.
+    // Two sports cars racing round the oval, cornering at 85 % of what their tires hold.
     let path = oval_path(center, SEGMENTS * 2);
     let race = |max_speed: f32| AutopilotMode::Drive {
         path: path.clone(),
         looped: true,
         max_speed,
-        lateral_g: 0.95,
+        lateral_g: 0.85,
     };
     let lift = DVec3::Y * presets::ride_height("sports_car");
     for (angle, speed, name, paint) in [
@@ -504,9 +504,9 @@ pub fn views(zone: &str, center: DVec3) -> Vec<DemoView> {
                     "track_cars",
                     "Sports cars racing round the oval",
                     [142.4, 1.3, 29.3],
-                    [136.5, 0.9, 6.0],
+                    [135.8, 0.9, 10.5],
                 )
-                .at(15.5, 2.5)
+                .at(15.5, 3.2)
                 .call("vehicles.place", on_oval("Red car", -0.7, 30.0))
                 .call("vehicles.place", on_oval("Blue car", -0.95, 30.0)),
                 DemoView::new(
@@ -517,14 +517,15 @@ pub fn views(zone: &str, center: DVec3) -> Vec<DemoView> {
                 )
                 .at(16.0, 1.2)
                 .call("vehicles.place", drift),
-                // Low on the grass past the kicker, the car in the air coming at the camera.
+                // Behind the barrier just past the kicker, the car flying by in the morning sun
+                // with the kicker behind it.
                 DemoView::new(
                     "track_jump",
                     "The kicker jump",
-                    [-30.0, 1.0, 87.6],
-                    [-10.0, 1.8, 79.5],
+                    [-20.0, 1.8, 93.0],
+                    [-14.0, 2.0, 84.0],
                 )
-                .at(15.5, 1.5)
+                .at(9.5, 1.4)
                 .call(
                     "vehicles.place",
                     on_oval("Red car", JUMP_ANGLE - 0.42, 40.0),
