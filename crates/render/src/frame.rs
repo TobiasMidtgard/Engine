@@ -286,6 +286,9 @@ pub struct ExposureState {
     /// EV100 measured from a recent frame's luminance histogram (GPU metering). `None` until the
     /// first reading arrives; the scene-luminance estimate is used meanwhile.
     pub measured_ev100: Option<f32>,
+    /// Set on a camera cut: hold the exposure until the meter has measured the new view, then
+    /// jump straight to it instead of adapting from the old view's exposure.
+    pub snap: bool,
 }
 
 impl Default for ExposureState {
@@ -294,6 +297,7 @@ impl Default for ExposureState {
             ev100: 14.0,
             initialized: false,
             measured_ev100: None,
+            snap: false,
         }
     }
 }
@@ -443,7 +447,13 @@ pub fn build_view(
     let real_elapsed = time.real_elapsed_secs_f64();
     let delta = time.delta_secs();
     let ev100 = match camera.exposure {
-        Exposure::Manual { ev100 } => ev100,
+        Exposure::Manual { ev100 } => {
+            exposure_state.snap = false;
+            ev100
+        }
+        Exposure::Auto { .. } if exposure_state.snap && exposure_state.measured_ev100.is_none() => {
+            exposure_state.ev100
+        }
         Exposure::Auto {
             min_ev100,
             max_ev100,
@@ -458,8 +468,9 @@ pub fn build_view(
             let night = smoothstep(5.0, -2.0, metered) * settings.night_exposure_bias;
             let target = (metered + night - compensation - crate::exposure::METER_BIAS_EV)
                 .clamp(min_ev100, max_ev100);
-            if !exposure_state.initialized {
+            if !exposure_state.initialized || exposure_state.snap {
                 exposure_state.ev100 = target;
+                exposure_state.snap = false;
             } else {
                 let k = 1.0 - (-speed.max(0.0) * real_dt).exp();
                 exposure_state.ev100 += (target - exposure_state.ev100) * k;
