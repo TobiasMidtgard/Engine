@@ -11,6 +11,7 @@ pub mod plane_build;
 pub mod plane_paint;
 pub mod plane_parts;
 pub mod ship_build;
+pub mod ship_gear;
 pub mod ship_paint;
 pub mod ship_parts;
 pub mod ship_surfaces;

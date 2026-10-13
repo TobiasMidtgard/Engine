@@ -650,8 +650,8 @@ pub fn views(zone: &str, center: DVec3) -> Vec<DemoView> {
                 DemoView::new(
                     "airfield_lineup",
                     "Sport plane lined up on the runway",
-                    [14.0, 3.5, -606.0],
-                    [0.0, 1.8, -584.0],
+                    [8.5, 2.0, -598.5],
+                    [0.0, 1.5, -585.0],
                 )
                 .at(10.0, 0.5)
                 .call(
@@ -661,12 +661,12 @@ pub fn views(zone: &str, center: DVec3) -> Vec<DemoView> {
                 .call("entity.despawn", gone.clone())
                 .call("vehicles.spawn", line_up.clone()),
                 // On the Rapier backend the plane rolls 130 m and rotates about 7.4 s after
-                // it is spawned; the shot catches the nose coming up.
+                // it is spawned; the shot (8 s after) catches the nose coming up near z −438.
                 DemoView::new(
                     "airfield_rotate",
                     "Sport plane rotating for take-off",
-                    [26.0, 3.0, -419.0],
-                    [0.0, 2.0, -438.0],
+                    [14.0, 1.6, -424.0],
+                    [0.0, 2.6, -440.0],
                 )
                 .at(10.0, 7.6)
                 .call(
@@ -683,8 +683,8 @@ pub fn views(zone: &str, center: DVec3) -> Vec<DemoView> {
             DemoView::new(
                 "spaceport_hover",
                 "Spaceplane hovering over the pad",
-                [38.0, 8.0, 46.0],
-                [0.0, 18.0, 0.0],
+                [24.0, 6.0, 29.0],
+                [0.0, 17.0, 0.0],
             )
             .at(17.0, 12.0)
             .call(
@@ -702,7 +702,7 @@ pub fn views(zone: &str, center: DVec3) -> Vec<DemoView> {
             DemoView::new(
                 "spaceport_parked",
                 "Spaceplane parked on the apron",
-                [82.0, 5.0, -18.0],
+                [75.0, 3.6, -26.0],
                 [58.0, 3.0, -45.0],
             )
             .at(17.0, 0.5),

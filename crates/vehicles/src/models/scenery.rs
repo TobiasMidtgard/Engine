@@ -104,7 +104,10 @@ pub enum Surface {
     Screen,
 }
 
-/// Texture sizes. 2048² for the hero surfaces seen up close, 1024² elsewhere.
+/// Texture sizes. 2048² for the hero surfaces seen up close (track asphalt, sign text),
+/// 1024² elsewhere. The runway and the pad slabs tile over hundreds of meters and are seen
+/// from a cockpit's height at the closest, where 1024² reads the same at a quarter of the
+/// memory (2048² sets cost 48 MB of pixels each, again on the GPU).
 const HERO: u32 = 2048;
 const STD: u32 = 1024;
 
@@ -404,7 +407,7 @@ impl<'w> Scene<'w> {
             })
         };
         let runway = |w: &mut World| {
-            textures(w, "runway", HERO, |px| {
+            textures(w, "runway", STD, |px| {
                 tex::asphalt(px, RUNWAY_TILE, Some(0.038), 12)
             })
         };
@@ -413,7 +416,7 @@ impl<'w> Scene<'w> {
                 tex::concrete(px, CONCRETE_TILE, 13)
             })
         };
-        let slabs = |w: &mut World| textures(w, "slabs", HERO, |px| tex::slabs(px, SLAB_PANEL, 14));
+        let slabs = |w: &mut World| textures(w, "slabs", STD, |px| tex::slabs(px, SLAB_PANEL, 14));
         let paint = |w: &mut World, tile: f32, name: &str| {
             textures(w, name, STD, move |px| tex::paint(px, tile, 0.18, 15))
         };

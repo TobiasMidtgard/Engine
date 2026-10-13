@@ -8,7 +8,7 @@ use engine_core::math::{DVec3, Quat, Vec3};
 use engine_core::prelude::*;
 use engine_vehicles::presets;
 use engine_vehicles::{
-    AssistMode, Autopilot, AutopilotMode, BodyAtmosphere, HeatShield, Spacecraft,
+    Aircraft, AssistMode, Autopilot, AutopilotMode, BodyAtmosphere, HeatShield, Spacecraft,
 };
 use engine_world::physics::{Collider, ColliderShape, RigidBody, Velocity};
 use engine_world::{Gravity, GravityBody, SmokeEmission, SurfaceMaterials};
@@ -42,9 +42,12 @@ fn hops_off_the_pad_hovers_and_lands() {
     let mut hover_thrust = 0.0f32;
     let mut touchdown = None;
     let mut airborne = false;
+    let (mut tucked, mut gear_at_touchdown) = (1.0f32, 0.0f32);
     run_until(&mut app, 40.0, |app| {
         let tel = telemetry(app, ship);
         let y = transform(app, ship).translation.y;
+        let gear = app.world.get::<Aircraft>(ship).unwrap().gear;
+        tucked = tucked.min(gear);
         highest = highest.max(y - rest);
         hovered |= phase(app, ship) == "hover";
         if phase(app, ship) == "hover" {
@@ -57,11 +60,20 @@ fn hops_off_the_pad_hovers_and_lands() {
         }
         if airborne && tel.wheels_grounded > 0 && touchdown.is_none() {
             touchdown = Some(tel.vertical_speed);
+            gear_at_touchdown = gear;
         }
         airborne && phase(app, ship) == "on the pad"
     })
     .expect("never landed back on the pad");
     assert!(hovered, "never hovered");
+    assert!(
+        tucked < 0.3,
+        "the gear stayed out in the hover ({tucked:.2})"
+    );
+    assert_eq!(
+        gear_at_touchdown, 1.0,
+        "touched down before the gear was down"
+    );
     assert!(
         (600_000.0..1_200_000.0).contains(&hover_thrust),
         "hover thrust {hover_thrust:.0} N"

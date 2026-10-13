@@ -303,6 +303,7 @@ pub fn autopilot_system(
                             forces,
                             tel,
                             wheels,
+                            aircraft,
                             &mut ship,
                             *pad,
                             *height_m,
@@ -938,6 +939,7 @@ fn hop(
     forces: &VehicleForces,
     tel: &VehicleTelemetry,
     wheels: Option<&Wheels>,
+    aircraft: Option<Mut<Aircraft>>,
     ship: &mut Spacecraft,
     pad: DVec3,
     height: f32,
@@ -948,6 +950,16 @@ fn hop(
     let f = &forces.frame;
     let dt = f.dt;
     let on_ground = wheels.is_some_and(|w| w.grounded() > 0);
+    // Gear: tucked away while hovering high, out again before coming down.
+    let mut aircraft = aircraft;
+    let gear_out = aircraft.as_ref().map_or(1.0, |a| a.gear);
+    let mut gear = |down: bool| {
+        if let Some(a) = aircraft.as_mut()
+            && a.gear_down != down
+        {
+            a.gear_down = down;
+        }
+    };
     if ap.phase.is_empty() && ap.timer < 0.1 {
         // Wheel contacts aren't known until the wheels have run once.
         return;
@@ -976,6 +988,7 @@ fn hop(
     };
     match ap.phase.as_str() {
         "on the pad" => {
+            gear(true);
             idle(c, ship);
             if on_ground && ap.timer > 0.5 && ap.timer < 1.0 {
                 // Settled on the gear: remember how high the ship sits.
@@ -990,6 +1003,9 @@ fn hop(
             hold(c, forces, ship, &mut ap.hold_integral, target, up, 12.0, dt);
             if ap.phase == "lift off" && (above - rest_height) > (height * 0.8) as f64 {
                 ap.set_phase("hover");
+            }
+            if ap.phase == "hover" && height > 10.0 {
+                gear(false);
             }
             if ap.phase == "hover" && ap.timer > hover_s {
                 ap.set_phase("landing");
@@ -1007,9 +1023,15 @@ fn hop(
                 12.0,
                 dt,
             );
-            // Come down fast high up, gently near the pad.
+            // Come down fast high up, gently near the pad; wait a few meters up for the
+            // gear to come all the way down.
+            gear(true);
             let h = (above - rest_height) as f32;
-            let sink = (h * 0.35).clamp(0.6, 8.0);
+            let sink = if gear_out < 1.0 && h < 5.0 {
+                0.0
+            } else {
+                (h * 0.35).clamp(0.6, 8.0)
+            };
             let v_up = tel.vertical_speed;
             let dv = -sink - v_up;
             c.lift = (dv * 0.4).clamp(-1.0, 1.0);
