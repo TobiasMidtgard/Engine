@@ -41,6 +41,19 @@ world re-anchors on the next body.
   anchor and puts the focus at a spot on it: the quick trip for tours, tools and fast travel.
   `travel_home(world, altitude)` / `space.travel {"home": true}` returns to the frame the
   world started in, so a level built around the home spot is exactly where it was.
+- **Ships coast through time warp.** Physics runs in real time, so while the clock runs faster
+  (`SpaceSettings::rails_above_warp`, 1.5×) every free physics body out in space (above the
+  top of a body's air, or 0.8 % of its radius over an airless one) flies its exact Kepler path
+  instead: `OnRails` holds the body it falls around and its `Conic` (ellipse, parabola or
+  escape hyperbola, `conic.rs`). Paths are patched where they cross a sphere of influence, so a
+  ship sent toward the Moon swings past it or falls into orbit around it, and one past escape
+  speed ends up around the Sun. Coasting ships hold their attitude. When the warp drops, physics
+  takes each ship back with its position and motion; a ship that coasts down into air or low
+  space drops the warp to real time there, so physics flies the reentry or landing. Things on
+  the ground, things left on other bodies (`Parked`) and anything marked `NoRails` stay with
+  physics. `space.rails` lists coasting ships (body, altitude, speed, lowest and highest
+  points, period). Orient a chase camera after `rails::fly` (`PostUpdate`), or it trails a
+  frame behind a ship moving thousands of kilometers per frame.
 - **Gravity, air and light.** Writes `Gravity::bodies` (the anchor and any body whose reach
   holds the focus), sets the renderer's `Atmosphere` to the nearest body with air (off when
   none), and points every `DirectionalLight` marked `StarLight` at its star with the right
@@ -63,10 +76,12 @@ Reads: `SimulationFocus` / `FocusPoints`, `Time` (fixed steps, dilated), and wit
 `follow_world_clock` the `WeatherState` time and day.
 
 Writes: body `Transform`s, `Gravity` (bodies, uniform = 0), `engine_render::Atmosphere`,
-`StarLight` lights and, with one, `WeatherState`'s sun direction, time and day, and the
-`Transform`/`Velocity` of free entities when the world re-anchors.
+`StarLight` lights and, with one, `WeatherState`'s sun direction, time and day, the
+`Transform`/`Velocity` of free entities when the world re-anchors, and those of free
+`RigidBody`s out in space while they coast through time warp (`OnRails`).
 
-API: `space.bodies`, `space.warp {warp, days}`, `space.travel {body, lat, lon, altitude}`.
+API: `space.bodies`, `space.warp {warp, days}`, `space.rails`, `space.travel {body, lat, lon,
+altitude}`.
 
 ## Use it
 
@@ -102,4 +117,9 @@ map and prints bake times.
   close. A shared continent field (or terrain baking the far map) needs a contract.
 - Full-size bakes cost 0.4-1.5 s of CPU per body; a few looks (Mars albedo regions, Moon
   maria outlines, Neptune's cloud streaks) still read as procedural up close.
-- Ships are not integrated on patched conics yet (`Orbit::from_state` is the first piece).
+- Coasting ships feel one body at a time (patched conics): no Lagrange points or slow
+  three-body drifts, and a sphere of influence grazed by less than ~1 % of its radius in one
+  sampled step can be missed at extreme warps. Engines can't fire on rails: drop the warp to
+  burn (maneuver nodes are a later round).
+- Physics below the rails' floor still runs in real time at any warp, so an aircraft flying
+  while the clock races sees the sky and the other planets move fast.
