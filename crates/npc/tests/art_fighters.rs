@@ -700,12 +700,12 @@ impl Strip {
 fn fighter_motion_strips() {
     let (w, h) = (1920, 540);
     let mut app = app_on(w, h, EARTH);
-    // A floor for the long row of strips.
+    // A floor for the long row of strips and the telegraphs.
     app.world.spawn((
         Transform::from_translation(DVec3::new(0.0, -0.002, 0.0)),
         MeshRenderer::new(
             Shape::Plane {
-                size: [340.0, 120.0],
+                size: [340.0, 220.0],
                 subdivisions: 1,
             },
             StandardMaterial::hex(EARTH).with_roughness(0.95),
@@ -767,6 +767,8 @@ fn fighter_motion_strips() {
         },
         Strip {
             skills: NpcSkills::soldier(),
+            // Three quarters on from its left, so that the knock back shows.
+            yaw: -1.0,
             ..Strip::new(
                 "stagger",
                 Scene::Stagger,
@@ -777,7 +779,7 @@ fn fighter_motion_strips() {
         Strip {
             skills: NpcSkills::rookie(),
             alert: AlertLevel::Relaxed,
-            ..Strip::new("idle", Scene::Stand, NpcWeapon::sword(), frames(0.55))
+            ..Strip::new("idle", Scene::Stand, NpcWeapon::sword(), frames(0.8))
         },
         Strip::new(
             "guard",
@@ -876,13 +878,52 @@ fn fighter_motion_strips() {
         );
         shots.push((cam, format!("npc_motion_{}.png", strip.name)));
     }
-    // The heavy telegraph's peak, as a player 10 m off sees it.
-    let k = strips.iter().position(|s| s.name == "swing_heavy").unwrap();
-    let peak = slot(&strips[k], k, 3);
+    // The telegraphs as a player 10 m off sees them: on guard, a light swing and a heavy one
+    // most of the way through their windups, side by side away from the strips.
+    let sword = NpcWeapon::sword();
+    let row = DVec3::new(0.0, 0.0, -80.0);
+    let telegraphs = [
+        (Scene::Stand, 0.0),
+        (
+            Scene::Swing { heavy: false },
+            0.85 * f64::from(sword.windup),
+        ),
+        (
+            Scene::Swing { heavy: true },
+            0.85 * 1.6 * f64::from(sword.windup),
+        ),
+    ];
+    for (i, (scene, time)) in telegraphs.into_iter().enumerate() {
+        let at = row + DVec3::new(1.7 - 1.7 * i as f64, 0.0, 0.0);
+        let cap = EVENT + time;
+        let e = spawn(
+            &mut app,
+            Pose {
+                at,
+                yaw: 0.5,
+                skills: NpcSkills::master(),
+                ..Pose::new(0.0, 2, sword)
+            },
+        );
+        app.world.entity_mut(e).insert((
+            NpcClock {
+                now: cap - WARM,
+                dt: 0.0,
+                rate: 1.0,
+            },
+            Script {
+                scene,
+                weapon: sword,
+                at,
+                yaw: 0.5,
+                cap,
+            },
+        ));
+    }
     let far = camera(
         &mut app,
-        peak + DVec3::new(-3.0, 1.6, -9.5),
-        peak + DVec3::new(0.0, 1.0, 0.0),
+        row + DVec3::new(-2.0, 1.7, -10.0),
+        row + DVec3::new(0.0, 1.1, 0.0),
         40.0,
     );
     shots.push((far, "npc_motion_heavy_at_10m.png".into()));

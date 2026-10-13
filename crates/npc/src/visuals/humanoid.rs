@@ -1,8 +1,11 @@
 //! Fighter bodies. With the renderer they are built from the procedural armored kit of
 //! [`crate::art::fighter`]; without it, from a few capsules. Either way one skeleton is posed
-//! every step from the AI state: the pelvis, chest and head are placed from the gait, stance
-//! and action, then two-bone chains solve the legs (feet planted or swinging along the gait)
-//! and the arms (hands on the weapon's grips), so knees and elbows bend.
+//! every step from the AI state and from what the body did the step before (`Motion`): the
+//! feet stay where they are on the ground while the body moves over them, and step along the
+//! gait (or, standing, back under the body when out of place); the pelvis, chest and head are
+//! placed from the gait, stance and action (the body behind a blow, a block or a stagger);
+//! then two-bone chains solve the legs and the arms (hands on the weapon's grips), so knees
+//! and elbows bend.
 
 use std::f32::consts::{FRAC_PI_2, PI, TAU};
 
@@ -641,8 +644,8 @@ enum Act {
     /// Guard raised against a blow: `k` how far (easing in as it rises, out as it ends), `hit`
     /// seconds since the blow landed on it (negative before), `parry` a timed deflection.
     Block { k: f32, hit: f32, parry: bool },
-    /// Knocked off balance (`k` eases in and out).
-    Stagger { k: f32 },
+    /// Knocked off balance (`k` eases in and out), `e` s ago.
+    Stagger { k: f32, e: f32 },
 }
 
 /// Everything the pose depends on.
@@ -1292,6 +1295,12 @@ fn recoil(hit: f32) -> f32 {
     }
 }
 
+/// How hard a blow that knocked the body off balance `e` s ago still throws it (0..1): at
+/// once, easing off over a few tenths of a second.
+fn snap(e: f32) -> f32 {
+    (e / 0.04).clamp(0.0, 1.0) * (-(e - 0.04).max(0.0) / 0.2).exp()
+}
+
 /// The body braced behind a raised guard, rocked back as the blow lands.
 fn block_body(k: f32, hit: f32, parry: bool) -> Body {
     let r = recoil(hit) * k;
@@ -1322,9 +1331,10 @@ fn solve(i: &Input) -> Skeleton {
     let sway = clock(7.3, 13.0);
     let glance = (i.now * 0.37 + i.seed * 5.0).sin() as f32;
     // Standing at ease the weight rests on one leg, then the other.
-    let settle = (3.0 * clock(11.0, 3.0)).tanh();
-    // On guard, a fighter's weight bobs lightly on bent knees.
+    let settle = (3.0 * clock(8.0, 3.0)).tanh();
+    // On guard, a fighter's weight bobs lightly on bent knees and rocks between the feet.
     let bounce = clock(0.9, 2.0);
+    let rock = clock(2.7, 5.0);
     let ranged = matches!(i.kind, Kind::Rifle | Kind::Bow);
     let melee = !ranged && i.kind != Kind::Fists;
     let blow_scale = |heavy: bool| match (melee, heavy) {
@@ -1338,10 +1348,15 @@ fn solve(i: &Input) -> Skeleton {
         }
         Act::Strike { t, dur, heavy } if !ranged => blow_body(t, i.windup, dur, blow_scale(heavy)),
         Act::Block { k, hit, parry } => block_body(k, hit, parry),
-        Act::Stagger { k } => Body {
-            shift: v3(0.0, -0.06 * k, 0.15 * k),
-            ..Default::default()
-        },
+        Act::Stagger { k, e } => {
+            let s = snap(e);
+            Body {
+                shift: v3(0.0, -0.06 * k - 0.04 * s, 0.12 * k + 0.1 * s),
+                yaw: 0.12 * s,
+                twist: -0.2 * s,
+                ..Default::default()
+            }
+        }
         _ => Body::default(),
     };
     if kneel > 0.0 {
@@ -1384,7 +1399,7 @@ fn solve(i: &Input) -> Skeleton {
     let bob = lerp(0.016, -0.03, run) * (2.0 * mid).cos() * moving;
     // Over the foot that is down; at ease, on one leg; on guard, swaying a little.
     let weight = -0.026 * mid.cos() * moving * (1.0 - 0.6 * run)
-        + still * if ready { 0.008 * sway } else { 0.032 * settle };
+        + still * if ready { 0.008 * sway } else { 0.04 * settle };
     // On guard the knees stay bent until the fighter breaks into a run.
     let striding = if ready {
         moving * step(1.5, 3.5, g.speed)
@@ -1393,13 +1408,18 @@ fn solve(i: &Input) -> Skeleton {
     };
     let mut hip_y = rig::HIP_Y - lerp(st.drop, 0.035 * (1.0 + run), striding) + bob + body.shift.y;
     if ready && !down {
-        hip_y -= 0.007 * (1.0 + bounce) * still;
+        hip_y -= 0.01 * (1.0 + bounce) * still;
     }
     if i.crouch {
         hip_y = lerp(0.52, 0.68, moving);
     }
     hip_y -= 0.12 * i.dodge.abs();
-    let yaw = lerp(st.yaw, gait_yaw, moving) * (1.0 - 0.5 * kneel) - 0.2 * kneel + body.yaw;
+    // At ease the hips turn a little toward the leg they rest on; on guard the weight rocks
+    // between the front foot and the back.
+    let at_ease = if ready { 0.0 } else { 0.05 * settle * still };
+    let rocking = if ready && !down { rock * still } else { 0.0 };
+    let yaw =
+        lerp(st.yaw, gait_yaw, moving) * (1.0 - 0.5 * kneel) - 0.2 * kneel + body.yaw + at_ease;
     // Leaning into the run and into speeding up; rolling into a sidestep.
     let push = (-i.accel.y * 0.02).clamp(-0.1, 0.14) * (1.0 - kneel);
     let tilt = 0.03 + 0.08 * run + if i.crouch { 0.25 } else { 0.0 } + push * 0.5;
@@ -1413,7 +1433,7 @@ fn solve(i: &Input) -> Skeleton {
         v3(
             weight + 0.12 * i.dodge + body.shift.x + support.x,
             hip_y,
-            body.shift.z + support.y,
+            body.shift.z + support.y - 0.025 * rocking,
         ),
         pelvis_rot,
     );
@@ -1483,8 +1503,10 @@ fn solve(i: &Input) -> Skeleton {
     ));
 
     // ---------------------------------------------------------------- chest and head
-    let mut lean =
-        lerp(st.lean, 0.06 + 0.16 * run, moving) + 0.12 * kneel - 0.025 * breath + body.lean + push;
+    let mut lean = lerp(st.lean, 0.06 + 0.16 * run, moving) + 0.12 * kneel - 0.025 * breath
+        + body.lean
+        + push
+        + 0.03 * rocking;
     let mut twist = lerp(st.twist, -gait_yaw * 1.6, moving) + body.twist;
     let mut chest_roll = -roll * 0.6 - 0.35 * i.dodge + body.roll * 0.5;
     match i.act {
@@ -1495,8 +1517,8 @@ fn solve(i: &Input) -> Skeleton {
             // The kick rocks the shoulders back.
             lean -= 0.05 * (-t / 0.06).exp();
         }
-        Act::Stagger { k } => {
-            lean -= (0.3 + 0.05 * (i.now * 12.0).sin() as f32) * k;
+        Act::Stagger { k, e } => {
+            lean -= (0.22 + 0.06 * (i.now * 12.0).sin() as f32) * k + 0.3 * snap(e);
             chest_roll += 0.1 * k * (i.now * 7.0).sin() as f32;
         }
         _ => {}
@@ -1520,9 +1542,12 @@ fn solve(i: &Input) -> Skeleton {
     let head_yaw = -net_yaw * lerp(0.85, 1.0, aiming) + look;
     let mut head_pitch = -(tilt + lean) * 0.75;
     let mut head_roll = -chest_roll * 0.5;
-    if let Act::Block { k, hit, .. } = i.act {
-        // Flinching from the blow, chin down behind the guard.
-        head_pitch -= 0.1 * k + 0.12 * recoil(hit) * k;
+    match i.act {
+        // Flinching from the blow, chin down behind the guard (not off a shouldered stock).
+        Act::Block { k, hit, .. } => head_pitch += (0.1 + 0.12 * recoil(hit)) * k * (1.0 - aiming),
+        // Snapped back by the blow.
+        Act::Stagger { e, .. } => head_pitch -= 0.35 * snap(e),
+        _ => {}
     }
     if i.kind == Kind::Rifle {
         // Cheek on the stock.
@@ -1813,7 +1838,7 @@ impl Blade {
                     Bone::new(up.pos + v3(0.0, 0.03, 0.07) * r, rx(0.25 * r) * up.rot)
                 }
             }
-            Act::Stagger { k } => self.guard.mix(self.stagger, k),
+            Act::Stagger { k, .. } => self.guard.mix(self.stagger, k),
         }
     }
 }
@@ -1873,7 +1898,7 @@ fn longsword(act: Act, chest: Bone, swing: f32, jiggle: Vec2) -> Arms {
         w
     };
     let weapon = chest.then(w);
-    let left = if relaxed || matches!(act, Act::Stagger { k } if k > 0.3) {
+    let left = if relaxed || matches!(act, Act::Stagger { k, .. } if k > 0.3) {
         if relaxed {
             Hand::Swing
         } else {
@@ -1947,7 +1972,13 @@ fn sword_and_shield(act: Act, chest: Bone, swing: f32, jiggle: Vec2) -> Arms {
     let sh = match act {
         Act::Relaxed => swung(low, 0, 0.5 * swing),
         Act::Guard => Bone::new(guard.pos + v3(0.0, 0.008 * jiggle.y, 0.0), guard.rot),
-        Act::Windup { p, .. } => guard.mix(tucked, 0.5 * step(0.85, 1.0, p)),
+        Act::Windup { p, heavy } => {
+            // Kept toward the foe as the shoulders coil away from it, until the release.
+            let keep =
+                step(0.1, 0.6, p) * (1.0 - step(0.88, 1.0, p)) * if heavy { 0.6 } else { 0.4 };
+            let held = guard.mix(tucked, 0.5 * step(0.85, 1.0, p));
+            Bone::new(ry(keep) * held.pos, ry(keep) * held.rot)
+        }
         Act::Strike { t, dur, .. } => guard.mix(
             tucked,
             (0.5 + 0.5 * step(0.0, 0.06, t)) * (1.0 - step(dur * 0.4, dur, t)),
@@ -1962,7 +1993,7 @@ fn sword_and_shield(act: Act, chest: Bone, swing: f32, jiggle: Vec2) -> Arms {
                 Bone::new(up.pos + v3(0.0, 0.02, 0.08) * r, rx(0.2 * r) * up.rot)
             }
         }
-        Act::Stagger { k } => guard.mix(thrown, k),
+        Act::Stagger { k, .. } => guard.mix(thrown, k),
     };
     let w = if act == Act::Relaxed {
         swung(w, 1, -0.6 * swing)
@@ -1989,7 +2020,7 @@ fn sword_and_shield(act: Act, chest: Bone, swing: f32, jiggle: Vec2) -> Arms {
 fn rifle(act: Act, chest: Bone, head: Bone, aiming: f32) -> Arms {
     // Carried across the chest at port arms (knocked aside when staggered).
     let mut dir = v3(-0.55, 0.65, -0.3);
-    if let Act::Stagger { k } = act {
+    if let Act::Stagger { k, .. } = act {
         dir = dir.lerp(v3(-0.3, 0.9, -0.35), k);
     }
     let low = chest.then(Bone::new(
@@ -2100,7 +2131,7 @@ fn fists(act: Act, chest: Bone, ready: bool) -> Arms {
             guard[0].lerp(v3(-0.07, 0.48, -0.26), k),
             guard[1].lerp(v3(0.07, 0.48, -0.26), k),
         ],
-        Act::Stagger { k } => [
+        Act::Stagger { k, .. } => [
             guard[0].lerp(v3(-0.45, 0.2, -0.05), k),
             guard[1].lerp(v3(0.45, 0.2, -0.05), k),
         ],
@@ -2186,7 +2217,7 @@ pub(super) fn humanoid(
                 let dur = vitals.map(|v| v.stagger_secs).unwrap_or(1.0).max(0.2);
                 let left = (until - now) as f32;
                 let k = step(0.0, 0.12, dur - left).min(step(0.0, 0.25, left));
-                act = Act::Stagger { k };
+                act = Act::Stagger { k, e: dur - left };
             }
             _ => {}
         }
@@ -2312,7 +2343,7 @@ pub(super) fn humanoid(
     // The feet: knocked back, they stumble back under the body (and step up again after).
     let ready = (fighting || act != Act::Relaxed) && !is_down;
     let back = match act {
-        Act::Stagger { k } => 0.16 * k,
+        Act::Stagger { k, .. } => 0.24 * k,
         _ => 0.0,
     };
     let dashing = loco.mode == LocomotionMode::Dash && !is_down;
@@ -2479,7 +2510,10 @@ mod tests {
 
     #[test]
     fn hands_reach_their_grips() {
-        let mut acts = vec![Act::Relaxed, Act::Guard, Act::Stagger { k: 1.0 }];
+        let mut acts = vec![Act::Relaxed, Act::Guard];
+        for e in [0.0, 0.04, 0.2, 0.6] {
+            acts.push(Act::Stagger { k: 1.0, e });
+        }
         for heavy in [false, true] {
             for p in [0.05, 0.2, 0.4, 0.6, 0.8, 0.9, 0.95, 1.0] {
                 acts.push(Act::Windup { p, heavy });
