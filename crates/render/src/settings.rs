@@ -175,6 +175,10 @@ pub struct RenderSettings {
     /// Width of the area it covers, meters (resolution is `sky_occlusion_size`²).
     pub sky_occlusion_extent: f32,
     pub sky_occlusion_size: u32,
+    /// Cloud shadows: when a module draws the cloud shadow map (the weather's clouds; see
+    /// `cloud_shadows`), the sunlight on every surface and in the fog is shaded by it. Off: the
+    /// map is not drawn and nothing is shaded by clouds.
+    pub cloud_shadows: bool,
     /// How many EV darker than "average gray" very dark scenes are shown (0 = a moonlit night
     /// is exposed like noon; 2.5 = night looks like night). Ramps in below EV100 ≈ 5.
     pub night_exposure_bias: f32,
@@ -239,6 +243,7 @@ impl Default for RenderSettings {
             sky_occlusion: true,
             sky_occlusion_extent: 256.0,
             sky_occlusion_size: 512,
+            cloud_shadows: true,
             night_exposure_bias: 2.5,
             night_desaturation: 0.7,
             virtual_geometry: true,

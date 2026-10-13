@@ -9,6 +9,7 @@ use engine_core::math::Frustum;
 use engine_core::prelude::*;
 use engine_world::{SurfaceLayers, WeatherState, WindField};
 
+use crate::cloud_shadows::GpuCloudShadow;
 use crate::components::{
     AmbientLight, Camera, DirectionalLight, Exposure, PointLight, Projection, SkyLightVolume,
 };
@@ -70,6 +71,9 @@ pub struct FrameUniform {
     pub far_shadow: [[f32; 4]; 4],
     /// Far shadow map: reach (m, 0 = off), texel size (m), clip depth per meter, array layer.
     pub far_shadow_params: [f32; 4],
+    /// The cloud shadow map (see [`crate::cloud_shadows`]); all zero (off) until a feature asks
+    /// for it, which the renderer fills in after `prepare`.
+    pub cloud_shadow: GpuCloudShadow,
 }
 
 /// Most [`SkyLightVolume`]s shaded per frame (nearest the camera first).
@@ -715,6 +719,7 @@ pub fn frame_uniform(world: &World, v: &ViewData) -> FrameUniform {
         volumetrics: crate::volumetrics::frame_params(settings, v),
         far_shadow: mat(v.far_shadow.view_proj),
         far_shadow_params: v.far_shadow.params(),
+        cloud_shadow: GpuCloudShadow::default(),
     }
 }
 
@@ -725,7 +730,8 @@ mod tests {
     #[test]
     fn frame_uniform_matches_wgsl_size() {
         // 7 mat4 + 15 vec4 + 4 mat4 + 3 vec4 + ground, sky occlusion, volumes, then the
-        // screen-space block (mat4 + 4 vec4), volumetric fog (vec4), far shadow (mat4 + vec4).
+        // screen-space block (mat4 + 4 vec4), volumetric fog (vec4), far shadow (mat4 + vec4),
+        // cloud shadows (mat4 + 2 vec4).
         assert_eq!(
             std::mem::size_of::<FrameUniform>(),
             7 * 64
@@ -740,6 +746,8 @@ mod tests {
                 + 5 * 16
                 + 64
                 + 16
+                + 64
+                + 2 * 16
         );
         assert_eq!(std::mem::size_of::<GpuSkyVolume>(), 80);
         assert_eq!(std::mem::size_of::<GpuPointLight>(), 32);

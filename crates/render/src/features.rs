@@ -3,7 +3,8 @@
 //! A [`RenderFeature`] owns its GPU resources and hooks into fixed points of the frame:
 //!
 //! 1. `prepare` — read the world, cull, upload buffers (CPU side, `&mut World` access).
-//! 2. `compute` — record compute or offscreen passes (particles, simulation, clouds).
+//! 2. `compute` — record compute or offscreen passes (particles, simulation, clouds). A feature
+//!    that asked for the cloud shadow map ([`RenderFeature::cloud_shadows`]) draws it here.
 //! 3. `draw_environment` — draw into the sky environment map (ambient light + reflections).
 //! 4. `draw_shadow` — draw depth into one shadow cascade, or into the top-down sky occlusion
 //!    map when the index is [`SKY_OCCLUSION_VIEW`](crate::shadows::SKY_OCCLUSION_VIEW);
@@ -32,6 +33,7 @@ use std::sync::Arc;
 use bevy_ecs::prelude::*;
 use engine_core::App;
 
+use crate::cloud_shadows::{CloudShadowRequest, CloudShadowTarget};
 use crate::frame::ViewData;
 use crate::material_library::{MaterialLibrary, MaterialMaps, MaterialPreset, MaterialTextures};
 use crate::settings::RenderSettings;
@@ -212,6 +214,12 @@ pub struct FrameContext<'a> {
     pub scene_depth_copy: &'a wgpu::TextureView,
     /// The final LDR image (overlays draw here).
     pub ldr: &'a wgpu::TextureView,
+    /// The cloud shadow map to draw into: set only in [`RenderFeature::compute`], and only for
+    /// the feature whose [`RenderFeature::cloud_shadows`] asked for it this frame (see
+    /// [`crate::cloud_shadows`]). It has been cleared to 1 (no shadow). During `compute`,
+    /// `frame_group` binds a white stand-in in its place (frame binding 21), so the pass that
+    /// draws the map can bind `frame_group` too.
+    pub cloud_shadows: Option<CloudShadowTarget<'a>>,
 }
 
 /// Counters a feature reports for `render.stats`.
@@ -252,6 +260,15 @@ pub trait RenderFeature: Send + Sync + 'static {
 
     /// Record compute or offscreen work before the scene is drawn.
     fn compute(&mut self, encoder: &mut wgpu::CommandEncoder, ctx: &FrameContext) {}
+
+    /// The cloud shadow map this feature draws this frame, if any (the weather module's clouds;
+    /// see [`crate::cloud_shadows`]). Called every frame after `prepare`. When it returns a
+    /// request, `compute` gets the map, placed around the camera, in `ctx.cloud_shadows`, and
+    /// everything the sun lights is shaded by it. The first feature (in `order`) that asks
+    /// gets it. Nothing asks by default: the map stays 1 and costs nothing.
+    fn cloud_shadows(&self) -> Option<CloudShadowRequest> {
+        None
+    }
 
     /// Draw into the environment map (equirectangular, radiance not pre-exposed).
     fn draw_environment(&self, pass: &mut wgpu::RenderPass<'_>, ctx: &FrameContext) {}

@@ -37,6 +37,10 @@
 // Screen-space global illumination: light bounced onto each pixel from nearby surfaces
 // (cd/m^2, not pre-exposed; see `screen_gi`). A stand-in while it is being drawn.
 @group(0) @binding(20) var gi_map: texture_2d<f32>;
+// Cloud shadows (cloud_shadows.rs): r = sunlight let through by the clouds to the cloud base,
+// top-down around the camera (see `cloud_shadow`); g, b, a are free for the module that draws
+// it. 1 where nobody draws it, and a white stand-in during `RenderFeature::compute`.
+@group(0) @binding(21) var cloud_shadow_map: texture_2d<f32>;
 
 // Multiply final radiance by this before writing to the HDR target.
 fn pre_expose(c: vec3<f32>) -> vec3<f32> { return c * frame.exposure.x; }
@@ -367,6 +371,41 @@ fn contact_shadow(rel: vec3<f32>, n: vec3<f32>) -> f32 {
     return shadow;
 }
 
+// ---------------------------------------------------------------- cloud shadows
+// Share of the sunlight (0..1) the clouds let through to camera-relative `rel`: multiply
+// sunlight by it, with the shadow maps and `sun_transmittance`. `shade_surface`,
+// `shade_thin_surface`, the fog's sunlight and the grass already do; shaders that light with
+// the sun themselves (terrain, water, foliage) call it. 1 when no module draws cloud shadows.
+//
+// The map lies on the cloud base, top-down and anchored to the world (cloud_shadows.rs): it is
+// read where the sun ray through `rel` crosses the base, so shadows fall away from the sun and
+// are right at any height below the clouds. Inside the cloud layer the shadow fades out toward
+// its top; beyond the map's square the sunlight is the writer's `outside` value, which the map
+// fades into over its outer tenth.
+fn cloud_shadow(rel: vec3<f32>) -> f32 {
+    let params = frame.cloud_shadow_params;
+    if (params.x < 0.5) { return 1.0; }
+    let c = frame.cloud_shadow * vec4<f32>(rel, 1.0);
+    let edge = max(abs(c.x), abs(c.y));
+    var t = params.w;
+    if (edge < 1.0) {
+        let uv = c.xy * vec2<f32>(0.5, -0.5) + 0.5;
+        let map = textureSampleLevel(cloud_shadow_map, linear_clamp, uv, 0.0).r;
+        t = mix(map, params.w, saturate((edge - 0.9) * 10.0));
+    }
+    let in_layer = saturate((rel.y - params.y) / max(params.z, 1.0));
+    return mix(saturate(t), 1.0, in_layer);
+}
+
+// For modules that draw the cloud shadow map: the camera-relative point on the cloud base at
+// map coordinates `uv` (u along world x, v along world z, as `fullscreen_vertex` gives them).
+// The texel there holds the sunlight that reaches this point down the sun direction
+// (`frame.sun_dir`).
+fn cloud_shadow_plane_point(uv: vec2<f32>) -> vec3<f32> {
+    let area = frame.cloud_shadow_area;
+    return vec3<f32>(area.x + uv.x * area.z, frame.cloud_shadow_params.y, area.y + uv.y * area.z);
+}
+
 // ---------------------------------------------------------------- atmosphere
 // The sky, sunlight through the air and aerial perspective live in lib_atmosphere.wgsl
 // (`atmosphere`, `sun_transmittance`, `sky_view_radiance`, `planet_height`, `ray_shell`).
@@ -631,7 +670,7 @@ fn shade_surface_sides(s: Surface, rel: vec3<f32>, sun_visibility: f32, face: ve
     let l = frame.sun_dir.xyz;
     let n_dot_l_raw = dot(n, l);
     let n_dot_l = saturate(n_dot_l_raw);
-    let sun_light = frame.sun_color.rgb * sun_transmittance(rel);
+    let sun_light = frame.sun_color.rgb * sun_transmittance(rel) * cloud_shadow(rel);
     let sides = thin_surface_sides(face, l);
     if (thin && dot(sun_light, sun_light) > 0.0 && (sides.x > 0.0 || (translucent && sides.y > 0.0))) {
         // Shadowed as seen from the sheet's sunlit side, so the sheet doesn't shadow itself.
@@ -767,7 +806,8 @@ fn fog_sky_light() -> vec3<f32> {
 
 // Radiance (cd/m^2, not pre-exposed) of height fog thick enough to hide everything behind it,
 // seen along `dir` with the fog at `at`: sunlight through the air with the fog's phase function
-// (`sun`: the share of the fog it reaches, `height_fog_sun_visibility`) and sky light, both
+// (`sun`: the share of the fog it reaches past mountains and clouds,
+// `height_fog_sun_visibility`) and sky light, both
 // scaled by `lit` (the open sky the fog sees), plus the ambient fill. This is the fog beyond
 // the volumetric range (or all of it with volumetrics off).
 fn height_fog_radiance(dir: vec3<f32>, at: vec3<f32>, lit: f32, sun: f32) -> vec3<f32> {
@@ -789,16 +829,19 @@ fn far_shadow_sun(rel: vec3<f32>) -> f32 {
 }
 
 // The sunlit share of the light the height fog between `t0` and `t1` meters along `dir` scatters
-// toward the camera, from the far shadow map: haze in the shadow of a mountain or a ridge doesn't
-// glow, so a mountain with the sun behind it keeps its contrast instead of hiding behind sunlit
-// haze, and low sun casts mountain shadows into the valley's haze. `tr` is the fog's
+// toward the camera, from the far shadow map and the cloud shadows: haze in the shadow of a
+// mountain or a ridge doesn't glow, so a mountain with the sun behind it keeps its contrast
+// instead of hiding behind sunlit haze, low sun casts mountain shadows into the valley's haze,
+// and haze under a cloud is as dim as the ground there (its sun glow too). `tr` is the fog's
 // transmittance over the segment. The samples sit at equal steps of what the fog scatters
 // (1 - transmittance), so a thin layer of ground haze is sampled where the ray crosses it.
-// 1 without the far shadow map.
+// 1 without either.
 const HAZE_SHADOW_SAMPLES: i32 = 8;
 
 fn height_fog_sun_visibility(dir: vec3<f32>, t0: f32, t1: f32, tr: f32, noise: f32) -> f32 {
-    if (frame.far_shadow_params.x <= 0.0 || frame.sun_color.w < 0.5 || tr >= 1.0) { return 1.0; }
+    let mountains = frame.far_shadow_params.x > 0.0 && frame.sun_color.w > 0.5;
+    let clouds = frame.cloud_shadow_params.x > 0.5;
+    if ((!mountains && !clouds) || tr >= 1.0) { return 1.0; }
     let falloff = max(frame.fog.y, 1e-5);
     let density = max(frame.fog.x, 1e-12);
     let ha = max(fog_height(dir * t0) - frame.fog.z, -100.0);
@@ -818,7 +861,11 @@ fn height_fog_sun_visibility(dir: vec3<f32>, t0: f32, t1: f32, tr: f32, noise: f
             let e = max(ea - tau * falloff * slope / density, 1e-30);
             t = (-log(e) / falloff - ha) / slope;
         }
-        sum += far_shadow_sun(dir * (t0 + clamp(t, 0.0, len)));
+        let q = dir * (t0 + clamp(t, 0.0, len));
+        var lit = 1.0;
+        if (mountains) { lit = far_shadow_sun(q); }
+        if (clouds) { lit *= cloud_shadow(q); }
+        sum += lit;
     }
     return sum / f32(HAZE_SHADOW_SAMPLES);
 }
