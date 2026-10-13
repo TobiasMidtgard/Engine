@@ -16,7 +16,7 @@ struct Body {
     shade: vec4<f32>,   // minnaert exponent, lunar-lambert weight, glint strength, cloud height (R)
     haze: vec4<f32>,    // relative extinction per channel, w: vertical optical depth
     haze2: vec4<f32>,   // single-scattering albedo per channel, w: scale height (R)
-    haze3: vec4<f32>,   // x: forward scattering g, yzw unused
+    haze3: vec4<f32>,   // x: forward scattering g; cloud shell: y radius (R), z fade, w hole (R)
     rings: vec4<f32>,   // inner radius (R), outer radius (R), brightness, unused
     flags: vec4<u32>,   // x: F_* bits
 };
@@ -28,6 +28,7 @@ const F_AIR: u32 = 8u;         // the renderer's atmosphere is this body's: use 
 const F_FULLSCREEN: u32 = 16u;
 const F_HAZE: u32 = 32u;
 const F_SOLID_AIR: u32 = 64u;  // unused
+const F_SHELL_ON: u32 = 128u;  // a cloud shell (fs_shell) draws the cloud tops: shade only
 
 @group(1) @binding(0) var<storage, read> bodies: array<Body>;
 @group(1) @binding(1) var map_sampler: sampler;   // repeat in u, clamp in v, trilinear, anisotropic
@@ -215,7 +216,7 @@ fn fs_body(in: VsOut) -> FsOut {
         // Clouds (Earth): a layer above the ground that also shades it.
         var cloud = 0.0;
         if ((flags & F_CLOUDS) != 0u) {
-            cloud = cloud_s;
+            cloud = select(cloud_s, 0.0, (flags & F_SHELL_ON) != 0u);
             let east = normalize(cross(vec3<f32>(0.0, 1.0, 0.0), n) + vec3<f32>(1e-6, 0.0, 0.0));
             let north = cross(n, east);
             let lift = b.shade.w / max(mu0_smooth, 0.08);
@@ -241,7 +242,7 @@ fn fs_body(in: VsOut) -> FsOut {
             let g = 1.0 / (4.0 * max(mu0, 0.05) * mu);
             surf += light * d * fres * g * mu0 * albedo_s.a * b.shade.z * (1.0 - cloud);
         }
-        if ((flags & F_CLOUDS) != 0u) {
+        if ((flags & F_CLOUDS) != 0u && (flags & F_SHELL_ON) == 0u) {
             let cmu0 = max(mu0_smooth, 0.0);
             let c_light = select(sun_e, sun_e * sun_transmittance(rel_hit), (flags & F_AIR) != 0u);
             let lit = 0.82 * c_light * INV_PI * (0.85 * cmu0 + 0.15 * pow(cmu0, 0.3) * step(0.0, mu0_smooth));
@@ -352,5 +353,156 @@ fn fs_body(in: VsOut) -> FsOut {
     var out: FsOut;
     out.depth = depth_of(dir * (max(t_depth, 1e-6) * r_eq));
     out.color = vec4<f32>(pre_expose(rgb), alpha);
+    return out;
+}
+
+// ---------------------------------------------------------------- cloud shell
+// Seen from high up over a body with clouds, the cloud tops are drawn as their own layer a few
+// kilometers above the ground (over the terrain that covers the body up close): the baked
+// cloud map, broken up with finer procedural detail, lit by the sun through the air and
+// veiled by the air in front of it. A hole around the camera's ground point leaves the local
+// weather's volumetric clouds to themselves.
+
+fn shell_hash(p: vec3<f32>) -> f32 {
+    var q = fract(p * vec3<f32>(0.1031, 0.1030, 0.0973));
+    q += dot(q, q.yxz + 33.33);
+    return fract((q.x + q.y) * q.z);
+}
+
+// Value noise, 0..1, smooth (quintic) between lattice points.
+fn shell_noise(p: vec3<f32>) -> f32 {
+    let i = floor(p);
+    let f = p - i;
+    let u = f * f * f * (f * (f * 6.0 - 15.0) + 10.0);
+    let a = mix(mix(shell_hash(i), shell_hash(i + vec3<f32>(1.0, 0.0, 0.0)), u.x),
+                mix(shell_hash(i + vec3<f32>(0.0, 1.0, 0.0)), shell_hash(i + vec3<f32>(1.0, 1.0, 0.0)), u.x), u.y);
+    let b = mix(mix(shell_hash(i + vec3<f32>(0.0, 0.0, 1.0)), shell_hash(i + vec3<f32>(1.0, 0.0, 1.0)), u.x),
+                mix(shell_hash(i + vec3<f32>(0.0, 1.0, 1.0)), shell_hash(i + vec3<f32>(1.0, 1.0, 1.0)), u.x), u.y);
+    return mix(a, b, u.z);
+}
+
+@fragment
+fn fs_shell(in: VsOut) -> FsOut {
+    let b = bodies[in.body];
+    let flags = b.flags.x;
+    let dir = normalize(in.ray);
+    let r_eq = b.axis_x.w;
+    let e = r_eq / b.axis_y.w;
+    let ax = b.axis_x.xyz;
+    let ay = b.axis_y.xyz;
+    let az = b.axis_z.xyz;
+    let k = b.haze3.y;
+
+    // As the body does, but on the shell: stretched so it is a sphere, then scaled to 1.
+    let ow = -b.center.xyz / r_eq;
+    let o = vec3<f32>(dot(ow, ax), dot(ow, ay), dot(ow, az));
+    let dl = vec3<f32>(dot(dir, ax), dot(dir, ay), dot(dir, az));
+    let os = vec3<f32>(o.x, o.y * e, o.z) / k;
+    let ds_raw = vec3<f32>(dl.x, dl.y * e, dl.z) / k;
+    let ds_len = length(ds_raw);
+    let ds = ds_raw / ds_len;
+    let bq = dot(os, ds);
+    let q = os - bq * ds;
+    let q_len = length(q);
+    let h = 1.0 - q_len * q_len;
+    let outside = dot(os, os) > 1.0;
+    let ahead = bq < 0.0;
+    let ps = select(q / max(q_len, 1e-6), q - sqrt(max(h, 0.0)) * ds, h > 0.0);
+    let t_hit = (-bq - sqrt(max(h, 0.0))) / ds_len;  // along dl, R
+    let pix = pixel_angle() * max(-bq, 1e-3);
+    var cover = clamp(0.5 - (q_len - 1.0) / pix, 0.0, 1.0);
+    if (!outside || !ahead) { cover = 0.0; }
+
+    // Map coordinates (as the body's) and their derivatives.
+    let lon = atan2(ps.x, ps.z);
+    let lat = asin(clamp(ps.y, -1.0, 1.0));
+    let u1 = lon * (0.5 * INV_PI) + 0.5;
+    let u2 = fract(u1 + 0.5);
+    let vv = 0.5 - lat * INV_PI;
+    let du1 = vec2<f32>(dpdx(u1), dpdy(u1));
+    let du2 = vec2<f32>(dpdx(u2), dpdy(u2));
+    let du = select(du1, du2, abs(du2) < abs(du1));
+    let dv = vec2<f32>(dpdx(vv), dpdy(vv));
+    let cloud_uv = vec2<f32>(u1 + b.sun.w, vv);
+    let coverage = textureSampleGrad(aux_map, map_sampler, cloud_uv, vec2<f32>(du.x, dv.x),
+                                     vec2<f32>(du.y, dv.y)).r;
+
+    // Detail: octaves of noise turning with the clouds' drift, each faded out before it is
+    // smaller than a couple of pixels (seen slanted, the footprint stretches).
+    let n = normalize(vec3<f32>(ps.x, ps.y * e, ps.z));
+    let mu_v = max(abs(dot(n, dl)), 0.08);
+    let foot = pixel_angle() * t_hit / mu_v;  // R per pixel on the shell
+    let turn = b.sun.w * 2.0 * PI;
+    let ct = cos(turn);
+    let st = sin(turn);
+    let pn = vec3<f32>(ps.x * ct + ps.z * st, ps.y, ps.z * ct - ps.x * st);
+    // Octaves too small to see count as their mean, so far away the map's soft coverage
+    // shows as it is, and up close it breaks into crisp clouds covering the same share.
+    var detail = 0.0;
+    var texture = 0.0;
+    var seen = 0.0;
+    var total = 0.0;
+    // From about the map's texel (20 km on Earth) down to a few hundred meters.
+    var freq = 150.0;
+    var amp = 1.0;
+    for (var i = 0; i < 7; i++) {
+        let w = clamp(1.0 / (freq * foot) * 0.5 - 0.5, 0.0, 1.0);
+        let v = shell_noise(pn * freq + vec3<f32>(f32(i) * 17.1));
+        detail += (v - 0.5) * amp * w;
+        // Billows: rounded cells with darker seams between them.
+        if (i >= 3) { texture += (0.5 - abs(2.0 * v - 1.0)) * amp * w; }
+        seen += amp * w;
+        total += amp;
+        freq *= 2.6;
+        amp *= 0.7;
+    }
+    detail /= total;
+    texture /= total;
+    let resolved = seen / total;
+    let edge = 0.08 + 0.4 * (1.0 - resolved);
+    // Threshold the detail so the share of sky it covers matches the map's coverage (the
+    // detail is about normal with spread 0.19 when fully resolved; a logistic stands in for
+    // its inverse distribution), and keep thin cloud translucent.
+    let c = clamp(coverage, 0.01, 0.99);
+    let density = 0.11 * resolved * log(c / (1.0 - c)) + (c - 0.5) * (1.0 - resolved)
+        + detail * 2.4;
+    let thickness = 0.55 + 0.45 * smoothstep(0.2, 0.7, coverage);
+    let puffs = smoothstep(-edge, edge * 1.6, density) * thickness;
+    // Under the broken clouds, a thin veil where the map is cloudy keeps the weather systems
+    // reading from afar.
+    let veil = 0.45 * smoothstep(0.08, 0.7, coverage) * clamp(0.75 + 6.0 * detail, 0.3, 1.0);
+    var alpha = (puffs + (1.0 - puffs) * veil) * cover * b.haze3.z;
+    // The weather draws the clouds around the camera itself.
+    if (b.haze3.w > 0.0) {
+        let hit = o + dl * t_hit;
+        let apart = acos(clamp(dot(normalize(hit), normalize(o)), -1.0, 1.0));
+        alpha *= smoothstep(b.haze3.w * 0.7, b.haze3.w, apart);
+    }
+    if (alpha <= 1e-4) {
+        discard;
+    }
+
+    // Light: sunlit tops, a soft terminator, reddened through the air on the way in, thin
+    // edges glowing forward toward the sun.
+    let s = normalize(b.sun.xyz);
+    let mu0 = dot(n, s);
+    let rel_hit = dir * (t_hit * r_eq);
+    var sun_e = b.light.rgb;
+    if ((flags & F_AIR) != 0u) {
+        sun_e *= sun_transmittance(rel_hit);
+    }
+    let cmu0 = max(mu0, 0.0);
+    let thin = 1.0 - smoothstep(0.0, 0.25, density);
+    let forward = 1.0 + 0.8 * thin * phase_hg(dot(s, dl), 0.6) * step(0.0, mu0);
+    // Cloud tops scatter light many times: brighter at a low sun than a matte surface.
+    let shade = 0.6 * cmu0 + 0.4 * sqrt(cmu0);
+    var lit = 0.9 * sun_e * INV_PI * shade * forward * (0.85 + 4.0 * texture + 0.15 * (1.0 - thin));
+    if ((flags & F_AIR) != 0u) {
+        let a = atmosphere(vec3<f32>(0.0), dir, t_hit * r_eq, 8);
+        lit = lit * a.transmittance + a.radiance * frame.sun_color.rgb;
+    }
+    var out: FsOut;
+    out.depth = depth_of(rel_hit);
+    out.color = vec4<f32>(pre_expose(lit) * alpha, alpha);
     return out;
 }
