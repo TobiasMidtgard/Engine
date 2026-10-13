@@ -7,7 +7,6 @@ pub mod chassis;
 pub mod demo;
 pub mod drivetrain;
 pub mod events;
-pub mod meshes;
 pub mod models;
 pub mod presets;
 pub mod ship;
@@ -109,20 +108,12 @@ impl Plugin for VehiclesPlugin {
                     visuals::plume_visuals,
                     visuals::light_visuals,
                     visuals::heat_visuals,
+                    models::cars::caliper_visuals,
                 )
                     .in_set(UpdateSet::Logic),
             );
         register_types(app);
         api::register(app);
-    }
-
-    fn finish(&self, app: &mut App) {
-        if let Some(mut m) = app
-            .world
-            .get_resource_mut::<engine_assets::Assets<engine_render::Mesh>>()
-        {
-            meshes::register(&mut m);
-        }
     }
 }
 

@@ -155,7 +155,7 @@ fn setup(
     scenery::spawn_village(&mut commands, &lib, &land, &mut rng);
     scenery::spawn_cliffs_and_stream(&mut commands, &mut meshes, &lib, &land, &mut rng);
     placeholders::cave_shell(&mut commands, &mut meshes, &lib, &land, &mut rng);
-    zones::spawn_demos(&mut commands, &mut meshes, &lib, &land, &mut rng);
+    zones::spawn_demos(&mut commands, &lib, &land, &mut rng);
     if use_planet.is_none() {
         zones::moon(&mut commands);
     }

@@ -1,10 +1,12 @@
 //! Procedural fighters: near-future arena combatants. Quilted gambesons with a standing collar
 //! and wool hose (undyed or earthy, chosen per fighter) under segmented, painted armor plates
-//! with rolled rims, leather belts and straps, the team's colors on the plates, arm bands and
-//! tabards, open helmets with a horsehair crest and a brow light over leather-bound mail coifs,
-//! sculpted faces (four face shapes; skin tone and eye color vary between fighters), gloved
-//! fists, boots, and their weapons (a two-handed longsword, an arming sword with a steel-rimmed
-//! heater shield, a carbine with an optic, and a composite recurve bow).
+//! with rolled rims (the cuirass wraps round the flanks), leather belts and straps, the team's
+//! colors on the plates, broad arm bands and knee-length tabards (large enough to tell the
+//! squads apart across the arena), open helmets with a horsehair crest and a brow light over
+//! leather-bound mail coifs, sculpted faces (four face shapes; skin tone and eye color vary
+//! between fighters), gloved fists, boots, and their weapons (a two-handed longsword, an arming
+//! sword with a steel-rimmed heater shield, a carbine with an optic, and a composite recurve
+//! bow).
 //!
 //! Every mesh is built from one of three tools: signed-distance sculpting meshed with surface
 //! nets for the soft, organic parts (gambeson, hose, gloves, boots, face, coif, crest),
@@ -1915,7 +1917,8 @@ pub const WEARS: usize = 3;
 const WEAR: [f32; WEARS] = [0.2, 0.55, 1.0];
 /// Side of the paint texture, texels.
 const PAINT_SIZE: u32 = 1024;
-/// Texel size of the painted plates' charts, meters (the shield's is coarser).
+/// Texel size of the painted plates' charts, meters (the shield's and the back plate's are
+/// coarser).
 const PAINT_TEXEL: f32 = 0.001;
 /// Texels left free between charts.
 const CHART_GAP: u32 = 2;
@@ -2554,12 +2557,12 @@ fn paint_color(team: Vec3) -> Vec3 {
     mix(l * v3(1.0, 0.93, 0.86), team, 0.74) * 0.86
 }
 
-/// Pack chart sizes into the paint texture, biggest first, each as low as it fits (skyline):
-/// their corners, or `None` when they do not fit.
+/// Pack chart sizes into the paint texture, longest side first, each as low as it fits
+/// (skyline): their corners, or `None` when they do not fit.
 fn pack(sizes: &[(u32, u32)]) -> Option<Vec<(u32, u32)>> {
     let n = PAINT_SIZE as usize;
     let mut order: Vec<usize> = (0..sizes.len()).collect();
-    order.sort_by_key(|&i| std::cmp::Reverse((sizes[i].0 * sizes[i].1, i)));
+    order.sort_by_key(|&i| std::cmp::Reverse((sizes[i].0.max(sizes[i].1), i)));
     let mut sky = vec![0u32; n];
     let mut out = vec![(0, 0); sizes.len()];
     for i in order {
@@ -3655,6 +3658,13 @@ fn torso_base(p: Vec3) -> f32 {
     smin(smin(rib, pec, 0.04), abd, 0.06)
 }
 
+/// Under the cuirass: the chest with the broad back muscles under the arms, so its plates wrap
+/// round the sides.
+fn cuirass_base(p: Vec3) -> f32 {
+    let lat = ellipsoid(ax(p), v3(0.1, 0.22, 0.04), v3(0.07, 0.14, 0.08));
+    smin(torso_base(p), lat, 0.04)
+}
+
 fn chest_suit(p: Vec3) -> f32 {
     let body = torso_base(p) + 0.006;
     let a = ax(p);
@@ -3673,15 +3683,19 @@ fn chest_suit(p: Vec3) -> f32 {
 
 fn chest() -> PieceMesh {
     let mut b = Builder::default();
-    let base = |p: Vec3| torso_base(p);
-    // Breastplate with a center crease, scooped neck and arm holes.
+    let base = |p: Vec3| cuirass_base(p);
+    // Breastplate with a center crease, scooped neck and arm holes, wrapping round the sides
+    // to meet the back plate under the arms.
     let front = Param::cyl(Vec3::ZERO, Quat::IDENTITY, 0.15);
     let breast_out = |uv: Vec2| {
-        let bottom = 0.17 + 0.06 * (uv.x / 0.17).powi(2) - uv.y;
-        let d = box2(uv, v2(0.0, 0.29), v2(0.175, 0.12), 0.03).max(bottom);
+        // Curving up over the belly, down again over the flanks.
+        let a = uv.x.abs();
+        let bottom =
+            0.17 + 0.05 * (a.min(0.13) / 0.17).powi(2) - 0.06 * smooth(0.12, 0.24, a) - uv.y;
+        let d = box2(uv, v2(0.0, 0.29), v2(0.215, 0.12), 0.03).max(bottom);
         let d = d.max(-circle2(uv, v2(0.0, 0.47), 0.085));
-        d.max(-circle2(uv, v2(0.205, 0.415), 0.07))
-            .max(-circle2(uv, v2(-0.205, 0.415), 0.07))
+        d.max(-circle2(uv, v2(0.235, 0.41), 0.075))
+            .max(-circle2(uv, v2(-0.235, 0.41), 0.075))
     };
     let breast_h = |uv: Vec2, s: f32| {
         0.011
@@ -3694,17 +3708,17 @@ fn chest() -> PieceMesh {
         0.006,
         &breast_out,
         &breast_h,
-        v2(-0.23, 0.13),
-        v2(0.23, 0.45),
+        v2(-0.25, 0.13),
+        v2(0.25, 0.45),
         0.013,
     );
     // Back plate.
     let back = Param::cyl(Vec3::ZERO, Quat::from_rotation_y(PI), 0.15);
     let back_out = |uv: Vec2| {
-        let d = box2(uv, v2(0.0, 0.27), v2(0.165, 0.13), 0.03);
+        let d = box2(uv, v2(0.0, 0.26), v2(0.2, 0.14), 0.03);
         let d = d.max(-circle2(uv, v2(0.0, 0.47), 0.08));
-        d.max(-circle2(uv, v2(0.2, 0.43), 0.07))
-            .max(-circle2(uv, v2(-0.2, 0.43), 0.07))
+        d.max(-circle2(uv, v2(0.23, 0.42), 0.075))
+            .max(-circle2(uv, v2(-0.23, 0.42), 0.075))
     };
     let back_h =
         |uv: Vec2, s: f32| 0.01 + 0.004 * (-(uv.x / 0.02).powi(2)).exp() + lip(s, 0.012, 0.0025);
@@ -3714,8 +3728,8 @@ fn chest() -> PieceMesh {
         0.006,
         &back_out,
         &back_h,
-        v2(-0.22, 0.12),
-        v2(0.22, 0.45),
+        v2(-0.25, 0.1),
+        v2(0.25, 0.45),
         0.015,
     );
     // Two abdominal lames, the upper one over the lower.
@@ -3770,7 +3784,7 @@ fn chest() -> PieceMesh {
             &collar_h,
             v2(-0.2, 0.38),
             v2(0.2, 0.48),
-            0.012,
+            0.014,
         )
     };
     // Leather straps over the shoulders joining breast and back plates.
@@ -3797,26 +3811,15 @@ fn chest() -> PieceMesh {
         0.008,
     );
     b.add(suit, Zone::Suit, GAMBESON);
-    // The gambeson's side seams, from the armpit down to the waist: a corded welt.
-    for side in [-1.0f32, 1.0] {
-        let path: Vec<Vec3> = (0..8)
-            .map(|i| {
-                let y = 0.29 - 0.04 * i as f32;
-                let (p, n) = cast(&chest_suit, v3(0.0, y, 0.015), v3(side, 0.0, 0.0), 0.3);
-                p + n * 0.0012
-            })
-            .collect();
-        b.add(
-            tube(&path, &[0.0026; 8], 5, Vec3::Z),
-            Zone::Suit,
-            Tint::Cloth { t: 0.0, k: 0.85 },
-        );
-    }
     b.paint(&breast, 1.0, Wear::new(0.4, v2(0.0, -1.0), 2).hits(3, 3));
+    // The back plate is seen less closely: coarser texels leave the paint texture room.
     b.paint(
         &backplate,
         0.9,
-        Wear::new(0.45, v2(0.0, -1.0), 3).hits(1, 1),
+        Wear {
+            texel: 0.0013,
+            ..Wear::new(0.45, v2(0.0, -1.0), 3).hits(1, 1)
+        },
     );
     b.paint(&lame1, 0.95, Wear::new(0.55, v2(0.0, -1.0), 4));
     b.paint(&lame2, 0.9, Wear::new(0.6, v2(0.0, -1.0), 5));
@@ -3940,13 +3943,14 @@ fn pelvis() -> PieceMesh {
     b.finish(&field, 1.0)
 }
 
-/// Tabard flap hanging from the belt; origin at its hinge, hanging along −Y, facing −Z
-/// (`front`) or +Z.
+/// Tabard flap hanging from the belt to the knee, flaring to the hips' width; origin at its
+/// hinge, hanging along −Y, facing −Z (`front`) or +Z. A broad field of the team's color,
+/// front and back, that still reads at a distance.
 fn tabard(front: bool) -> PieceMesh {
-    let len = if front { 0.43 } else { 0.4 };
+    let len = if front { 0.5 } else { 0.47 };
     let base = |p: Vec3| (Vec2::new(p.x, p.z) - Vec2::new(0.0, 0.32)).length() - 0.32;
     let param = Param::cyl(v3(0.0, 0.0, 0.32), Quat::IDENTITY, 0.32);
-    let (w0, w1) = (0.12, 0.145);
+    let (w0, w1) = (0.135, 0.175);
     let outline = move |uv: Vec2| {
         let t = (-uv.y / len).clamp(0.0, 1.0);
         let w = w0 + (w1 - w0) * t;
@@ -3970,9 +3974,9 @@ fn tabard(front: bool) -> PieceMesh {
             0.0,
             &outline,
             &folds,
-            v2(-0.16, -len - 0.01),
-            v2(0.16, 0.01),
-            0.015,
+            v2(-0.19, -len - 0.01),
+            v2(0.19, 0.01),
+            0.017,
         )
     };
     // Trim band at the hem and the team emblem (front only).
@@ -3990,13 +3994,13 @@ fn tabard(front: bool) -> PieceMesh {
             0.0,
             &trim_out,
             &trim_h,
-            v2(-0.16, -len - 0.01),
-            v2(0.16, -len + 0.11),
-            0.01,
+            v2(-0.19, -len - 0.01),
+            v2(0.19, -len + 0.11),
+            0.011,
         )
     };
     let emblem_out = |uv: Vec2| {
-        let q = uv - v2(0.0, -0.15);
+        let q = uv - v2(0.0, -0.17);
         // A chevron over a diamond.
         let diamond = (q.x.abs() + (q.y + 0.025).abs()) - 0.035;
         let chev = (q.x.abs() * 0.75 - (q.y - 0.04)).abs() - 0.012;
@@ -4013,8 +4017,8 @@ fn tabard(front: bool) -> PieceMesh {
             0.0,
             &emblem_out,
             &emblem_h,
-            v2(-0.09, -0.25),
-            v2(0.09, -0.06),
+            v2(-0.09, -0.27),
+            v2(0.09, -0.08),
             0.007,
         )
     };
@@ -4326,7 +4330,7 @@ fn upper_arm() -> PieceMesh {
             &cap_h,
             v2(-0.06, -0.11),
             v2(0.17, 0.11),
-            0.012,
+            0.0135,
         )
     };
     let arm_param = Param::cyl(Vec3::ZERO, Quat::from_rotation_y(-FRAC_PI_2), 0.06);
@@ -4371,20 +4375,26 @@ fn upper_arm() -> PieceMesh {
         )
     };
     let plates = |p: Vec3| cap.proxy(p).min(l1.proxy(p)).min(l2.proxy(p));
+    // A broad band of the team's cloth round the arm above the elbow (a brassard).
+    let (band_lo, band_hi) = (-0.25, -0.178);
+    let under_band = |p: Vec3| (p.y - (band_lo + band_hi) * 0.5).abs() - (band_hi - band_lo) * 0.5;
     let suit = cull(
-        sdf_mesh(
-            &upper_arm_suit,
-            v3(-0.09, -0.36, -0.09),
-            v3(0.1, 0.08, 0.09),
-            0.0125,
+        cull(
+            sdf_mesh(
+                &upper_arm_suit,
+                v3(-0.09, -0.36, -0.09),
+                v3(0.1, 0.08, 0.09),
+                0.0125,
+            ),
+            &plates,
+            0.008,
         ),
-        &plates,
-        0.008,
+        &under_band,
+        0.006,
     );
     b.add(suit, Zone::Suit, GAMBESON);
-    // A band of the team's cloth round the arm above the elbow.
     b.add(
-        wrap_band(&upper_arm_suit, Vec3::ZERO, -0.245, -0.205, 0.003, 24),
+        wrap_band(&upper_arm_suit, Vec3::ZERO, band_lo, band_hi, 0.003, 24),
         Zone::Cloth,
         DYED_WOOL,
     );

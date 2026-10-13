@@ -46,7 +46,7 @@ use engine_render::features::{
 use engine_render::frame::ViewData;
 use engine_render::mesh_feature::MeshInstance;
 use engine_render::settings::RenderSettings;
-use engine_render::shadows::{MAX_CASCADES, SKY_OCCLUSION_VIEW};
+use engine_render::shadows::MAX_CASCADES;
 use engine_render::wgpu;
 use wgpu::util::DeviceExt;
 
@@ -828,6 +828,7 @@ pub struct SkinningFeature {
     weight_data: Vec<f32>,
     instance_data: Vec<MeshInstance>,
     material_data: Vec<GpuSkinMaterial>,
+    /// Items per shadow view: the sun cascades, then the sky occlusion view (always empty).
     shadow: [Vec<u32>; MAX_CASCADES + 1],
     stats: FeatureStats,
 }
@@ -1328,7 +1329,7 @@ impl RenderFeature for SkinningFeature {
         }
 
         let images = world_ref.get_resource::<Assets<Image>>();
-        let shadows = view.sun_shadows || view.sky_occlusion.enabled;
+        let shadows = view.sun_shadows;
         let identity = [
             [1.0, 0.0, 0.0, 0.0],
             [0.0, 1.0, 0.0, 0.0],
@@ -1439,23 +1440,14 @@ impl RenderFeature for SkinningFeature {
         }
         self.query = Some(query);
 
+        // Sun shadow cascades only. Characters stay out of the top-down sky occlusion map: they
+        // don't roof over the ground, and a body there shades its own clothes from the sky,
+        // wrinkle by wrinkle, as blotches.
         if shadows {
-            let cascades = if view.sun_shadows {
-                (view.cascades.count as usize).min(MAX_CASCADES)
-            } else {
-                0
-            };
-            for c in (0..cascades).chain(view.sky_occlusion.enabled.then_some(SKY_OCCLUSION_VIEW)) {
+            let cascades = (view.cascades.count as usize).min(MAX_CASCADES);
+            for c in 0..cascades {
                 for (i, item) in self.items.iter().enumerate() {
-                    if !item.casts {
-                        continue;
-                    }
-                    let inside = if c == SKY_OCCLUSION_VIEW {
-                        view.sky_occlusion.contains_sphere(item.center, item.radius)
-                    } else {
-                        view.cascades.sphere_in_cascade(c, item.center, item.radius)
-                    };
-                    if inside {
+                    if item.casts && view.cascades.sphere_in_cascade(c, item.center, item.radius) {
                         self.shadow[c].push(i as u32);
                     }
                 }
