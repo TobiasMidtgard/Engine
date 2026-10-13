@@ -313,6 +313,12 @@ fn arena_art_close_ups() {
             v(-21.0, 0.0, 32.4),
             55.0,
         ),
+        (
+            "art_water.png",
+            v(-29.7, 1.6, 23.2),
+            v(-30.9, 0.45, 24.2),
+            50.0,
+        ),
     ];
     app.update_n(3);
     if let Some(d) = app.world.get_resource::<RenderDisabled>() {
