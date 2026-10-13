@@ -7,9 +7,9 @@ mod support;
 use engine_core::math::{DVec3, Vec3};
 use engine_core::prelude::*;
 use engine_movement::prelude::*;
-use engine_world::LocomotionMode;
 use engine_world::locomotion::MoveIntent;
 use engine_world::physics::CharacterController;
+use engine_world::{GroundContact, LocomotionMode};
 use support::*;
 
 fn character(app: &mut App, pos: DVec3, profile: MovementProfile) -> Entity {
@@ -61,6 +61,33 @@ fn sprints_to_profile_speed_on_the_ground() {
     assert!((pos(&app, c).y - 0.9).abs() < 0.05, "stays on the ground");
     // It turned to face where it runs.
     assert!(m.facing.dot(Vec3::X) > 0.99);
+}
+
+#[test]
+fn footprints_point_the_way_the_character_runs() {
+    let mut app = app();
+    let c = character(
+        &mut app,
+        DVec3::new(0.0, 0.9, 0.0),
+        MovementProfile::pilot(),
+    );
+    intent(&mut app, c, |i| i.direction = Vec3::X);
+    let mut cursor = app.world.resource::<Messages<GroundContact>>().get_cursor();
+    let mut toes = Vec::new();
+    run_until(&mut app, 1.5, |w| {
+        let contacts = w.resource::<Messages<GroundContact>>();
+        toes.extend(
+            cursor
+                .read(contacts)
+                .filter(|g| g.entity == Some(c))
+                .map(|g| g.forward()),
+        );
+        false
+    });
+    assert!(toes.len() >= 2, "{} steps", toes.len());
+    for toe in toes {
+        assert!(toe.dot(Vec3::X) > 0.9, "toe along {toe}, running along +X");
+    }
 }
 
 #[test]

@@ -693,7 +693,7 @@ fn land(m: &mut Mover, p: &MovementProfile, b: &Body, out: &mut Outputs) {
     }
     let feet = b.feet();
     let right = m.facing.cross(b.up).as_dvec3() * 0.12;
-    let yaw = m.facing.x.atan2(m.facing.z);
+    let yaw = GroundContact::yaw_of(m.facing);
     for side in [-1.0, 1.0] {
         out.contacts.write(GroundContact {
             position: feet + right * side,
@@ -1242,7 +1242,7 @@ fn feedback(
         position,
         normal,
         size,
-        yaw: m.facing.x.atan2(m.facing.z),
+        yaw: GroundContact::yaw_of(m.facing),
         load_kg: p.mass_kg,
         speed,
         kind,

@@ -188,8 +188,8 @@ replaying it, or `null` to go back to cycling; tour stops use it to catch a chos
 
 ## Tests
 
-`cargo test -p engine_movement`: unit tests per file; `tests/locomotion.rs` (sprint, jump and
-double jump heights, slide under a bar that blocks running, wall-run and wall-jump, mantle,
+`cargo test -p engine_movement`: unit tests per file; `tests/locomotion.rs` (sprint, footprints
+pointing toe-first, jump and double jump heights, slide under a bar that blocks running, wall-run and wall-jump, mantle,
 catching a ledge too high to vault, shimmying to its end, climbing up, letting go and kicking
 off, dash, characters on their own clocks in slow motion, the stand-in stepping aside, bodies from
 other modules being moved);
