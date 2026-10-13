@@ -14,7 +14,8 @@ const H: u32 = 180;
 
 /// A camera on the ground looking toward -z, `pitch` degrees up, with a `fov` degree view; one
 /// directional light of `lux` at `elevation` degrees straight ahead (negative: below the
-/// horizon). Tone curve off so pixel values follow radiance.
+/// horizon; past 90°: over the camera and behind it). Tone curve off so pixel values follow
+/// radiance.
 fn sky_app(pitch: f64, fov: f32, elevation: f64, lux: f32, ev100: f32) -> App {
     engine_core::log::init("error");
     let mut app = App::new();
@@ -118,5 +119,104 @@ fn turning_the_cloud_layer_off_clears_the_sky_and_its_light() {
     assert!(
         without_layer < 0.5,
         "with the layer off the sky should look clear ({without_layer})"
+    );
+}
+
+/// Pixels clearly brighter than the sky two pixels around them (stars), in a view of the sky.
+fn stars(img: &RgbaImage) -> usize {
+    let luma = |x: u32, y: u32| {
+        let p = img.get_pixel(x, y);
+        0.2126 * p[0] as f32 + 0.7152 * p[1] as f32 + 0.0722 * p[2] as f32
+    };
+    let mut n = 0;
+    for y in 2..img.height() - 2 {
+        for x in 2..img.width() - 2 {
+            let around = [
+                luma(x - 2, y),
+                luma(x + 2, y),
+                luma(x, y - 2),
+                luma(x, y + 2),
+            ]
+            .into_iter()
+            .fold(f32::MAX, f32::min);
+            if luma(x, y) > around + 10.0 {
+                n += 1;
+            }
+        }
+    }
+    n
+}
+
+/// A 24° view 60° up of a sky lit by one light of `lux` 50° up behind the camera (out of view),
+/// at 960x540: star cells are three pixels wide, and there are a few hundred of them.
+fn starry_sky(lux: f32, ev100: f32, name: &str) -> Option<RgbaImage> {
+    let mut app = sky_app(60.0, 24.0, 130.0, lux, ev100);
+    {
+        let mut w = app.world.resource_mut::<Window>();
+        w.width = 960;
+        w.height = 540;
+    }
+    render(&mut app, name)
+}
+
+#[test]
+fn a_moon_overhead_keeps_the_stars_out_of_its_night() {
+    // A full moon is the only (so the brightest) light.
+    let Some(moonlit) = starry_sky(0.3, -3.0, "night_moon_overhead") else {
+        return;
+    };
+    let n = stars(&moonlit);
+    eprintln!("stars under a moon overhead: {n}");
+    assert!(
+        n >= 10,
+        "a moonlit sky is night: its stars should show ({n} star pixels)"
+    );
+    // The same light at a sun's illuminance is day: no stars.
+    let day = starry_sky(110_000.0, 14.5, "night_sun_overhead").unwrap();
+    let n = stars(&day);
+    eprintln!("stars under a sun overhead: {n}");
+    assert_eq!(n, 0, "a sunny sky has no stars");
+}
+
+/// Mean luma of the 9x9 pixels around (`cx`, `cy`) (0..255).
+fn luma_around(img: &RgbaImage, cx: u32, cy: u32) -> f32 {
+    let mut sum = 0.0;
+    for y in cy - 4..=cy + 4 {
+        for x in cx - 4..=cx + 4 {
+            let p = img.get_pixel(x, y);
+            sum += 0.2126 * p[0] as f32 + 0.7152 * p[1] as f32 + 0.0722 * p[2] as f32;
+        }
+    }
+    sum / 81.0
+}
+
+#[test]
+fn the_stand_in_moon_shows_only_opposite_a_sun() {
+    // The light 25° below the horizon behind the camera, which looks 25° up with a 10° view:
+    // right where a stand-in moon glows opposite it.
+    let Some(sun_set) = render(
+        &mut sky_app(25.0, 10.0, 205.0, 110_000.0, -4.0),
+        "stand_in_moon_sun",
+    ) else {
+        return;
+    };
+    let moon_set = render(
+        &mut sky_app(25.0, 10.0, 205.0, 0.3, -4.0),
+        "stand_in_moon_moon",
+    )
+    .unwrap();
+    // The middle of the view against the night sky in its corner.
+    let glow = |img: &RgbaImage| luma_around(img, W / 2, H / 2) - luma_around(img, 10, 10);
+    let (with_sun, with_moon) = (glow(&sun_set), glow(&moon_set));
+    eprintln!(
+        "stand-in moon over the night sky: opposite a set sun {with_sun}, a set moon {with_moon}"
+    );
+    assert!(
+        with_sun > 100.0,
+        "a sun below the horizon keeps its stand-in moon ({with_sun})"
+    );
+    assert!(
+        with_moon.abs() < 5.0,
+        "when the moon is the light there is no second, stand-in moon ({with_moon})"
     );
 }

@@ -358,6 +358,14 @@ fog and anything else lit by the sun should use `sun_transmittance(rel)` for the
 reaching a point. The sky draws its own flat cloud layer (a 2D deck 1.5 km up whose cover follows
 `WeatherState::cloud_cover`) in the sky and in the environment map; a feature that draws its own
 clouds turns it off with `RenderSettings::sky_cloud_layer = false` and blends over a clear sky.
+The sun is the brightest `DirectionalLight`, so a moon becomes the sky's light once it outshines
+a fading sun; its disc is then drawn as the light's. Night (stars and the night sky's floor,
+`frame.sky.y`, 0 day .. 1 night) is decided by that light (`frame::sky_night`): it brings day only
+when it is above the horizon (night falls as it sinks from 10° above to 4° below; up is away from
+the planet's center) and bright, between 1 and 50 lux after the air at the camera
+(`frame.sun_camera`). A moon (0.3 lux at most) never makes day, and a sun at full illuminance below
+the horizon gives night even without an atmosphere. A stand-in moon glows opposite a sun below the
+horizon (`frame.sky.z`), not when the light is the moon itself.
 
 ## AI integration
 
