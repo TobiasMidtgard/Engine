@@ -136,7 +136,11 @@ see both. It steps aside as soon as a physics backend claims the contract.
 The physics backend carries a character standing on a moving body; movement keeps the deck's
 velocity when the character jumps or walks off (a jump from a moving train keeps the train's
 speed), takes it off again when it lands from the air (a jump straight up comes down on the
-same spot), and turns the character with a turning deck (`platform`). Where physics reports no
+same spot), and turns the character with a turning deck (`platform`). Walls, ledges and
+hooks ride along too: a character running along a moving wall, hanging from or climbing onto
+a moving ledge moves with that body (physics only carries what stands on it, so movement
+carries the rest), the ledge and a grapple hook are pinned to their body (`platform::Pin`), and
+the rope reels in relative to a hook in a moving body. Where physics reports no
 ground but the feet are on the [`Ground`](engine_world::Ground) surface (terrain that has no
 collider yet), the character stands on the surface instead of falling through. A backend
 that reports the ground before the feet touch it (within its snap distance) doesn't leave a
@@ -205,7 +209,9 @@ grappler's loop).
 pointing toe-first, jump and double jump heights, slide under a bar that blocks running, wall-run and wall-jump, mantle,
 catching a ledge too high to vault, shimmying to its end, climbing up, letting go and kicking
 off, grappling up onto a roof, a shot at nothing coming back, a jump letting go of the rope,
-humans having no hook, dash, characters on their own clocks in slow motion, the stand-in stepping aside, bodies from
+humans having no hook, wall-running on a wall that slides away and jumping off it with its
+speed, hanging from a rising, sliding ledge and climbing onto it, a hook riding a moving roof,
+dash, characters on their own clocks in slow motion, the stand-in stepping aside, bodies from
 other modules being moved);
 `tests/demo.rs` (each duel round plays out as described, the rounds cycle, the runner
 finishes the course, the climber catches the ledge, shimmies, climbs up and drops off, the
@@ -215,13 +221,12 @@ the demo's collider boxes stay the same under the new art);
 `tests/play.rs` (play mode puts a pilot in front of the camera and follows it, a locked-on
 pilot dash-strikes its target past a closer enemy, the lock moves on when its target falls);
 `src/platform.rs` (a jump keeps a deck's speed and lands on the same spot, a turning deck
-turns the character); `src/shift.rs` (a world shift moves walls, ledges, velocities and sparks
+turns the character, a pin moves and turns with its body); `src/shift.rs` (a world shift moves walls, ledges, velocities and sparks
 in flight); `tests/render.rs` (headless
 screenshot with the slow-motion effect; skipped without a GPU).
 
 ## Not done yet
 
-- Ledge hangs on moving bodies, and corners (shimmying stops at the end of a straight
-  edge).
-- Wall-running on moving walls (only standing on a moving body carries a character).
-- A grapple hook in a moving body stays where it bit instead of riding along with it.
+- Ledge corners (shimmying stops at the end of a straight edge).
+- Starting a wall-run checks the runner's speed in the world's frame, not relative to the
+  wall, so a runner keeping pace with a fast wall can start a run it drops right away.

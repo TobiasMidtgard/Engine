@@ -59,6 +59,7 @@ pub(crate) fn follow_world_shifts(
         if let Some(g) = &mut m.grapple {
             g.anchor = s.point(g.anchor);
             g.normal = s.direction(g.normal);
+            g.anchor_velocity = s.velocity_at(g.anchor, g.anchor_velocity);
         }
         m.pending_grapple = m.pending_grapple.map(|at| s.point(at));
         if let Some(platform) = &mut m.platform {
@@ -115,6 +116,7 @@ mod tests {
                         forward: Vec3::X,
                         rising: true,
                         exit_speed: 3.0,
+                        on: None,
                     }),
                     ..Default::default()
                 },
