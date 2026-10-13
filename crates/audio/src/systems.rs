@@ -6,6 +6,7 @@ use std::collections::HashMap;
 use engine_core::math::{DVec3, Quat, Vec3};
 use engine_core::prelude::*;
 use engine_render::Camera;
+use engine_world::animation::AnimationParams;
 use engine_world::physics::{Collider, ContactEvent, ContactPhase, PhysicsQueries, QueryFilter};
 use engine_world::{
     AttackEvent, AttackKind, Env, GroundContact, PrecipitationKind, ProjectileTrace, SurfaceCell,
@@ -181,6 +182,7 @@ pub(crate) fn play_footsteps(
     surfaces: Res<FootstepSurfaces>,
     settings: Res<AudioSettings>,
     scales: Query<&LocalTimeScale>,
+    animated: Query<&AnimationParams>,
     mut cues: MessageWriter<AudioCue>,
 ) {
     if !audio.is_running() {
@@ -214,7 +216,13 @@ pub(crate) fn play_footsteps(
             wading,
             &snow,
         );
-        let step = Step::from_contact(sound, c.kind, c.load_kg, c.speed, audio.next_seed());
+        // A contact that leaves its speed out (an animation clip's footstep) goes at the pace
+        // its walker's animation says, so a stride sounds like a stride.
+        let speed = match c.entity.and_then(|e| animated.get(e).ok()) {
+            Some(params) if c.speed <= 0.0 => params.get("speed").max(0.0),
+            _ => c.speed,
+        };
+        let step = Step::from_contact(sound, c.kind, c.load_kg, speed, audio.next_seed());
         let fs = audio.sample_rate();
         let opts = PlayOptions::at(c.position)
             .range(1.5, max)
