@@ -141,18 +141,23 @@ touching pairs, step time, substeps.
 yard (with a curb, so nothing rolls off) with a 30-crate tower, a bin filling with 250
 crates/barrels/balls, a domino snake, crash test dummy ragdolls tumbling down a steep staircase,
 a wrecking ball smashing a crate wall, a seesaw catapult, a motor-driven paddle wheel, a sagging
-plank bridge, a kinematic turntable and bouncing rubber balls. It sits on the ground at `origin`,
-its top `demo::SLAB_RISE` (10 cm) above it; the showcase's physics zone places it. Render it alone with
+plank bridge, a kinematic turntable, bouncing rubber balls and, along the front, a **barrel run**:
+three oil drums roll off a 2 m ramp and 47 m down an asphalt runway (one triangle mesh, an edge
+every 2 m) into a sand pit, staying flat and in their painted lanes, past galvanized guardrails to a
+tire wall. It sits on the ground at `origin`, its top `demo::SLAB_RISE` (10 cm) above it; the
+showcase's physics zone places it. Render it alone with
 `cargo run -p engine_physics --release --example proving_ground -- out_dir`.
 
 The stations replay on their own cycles (`demo::Station::cycle_secs`, world time: ragdolls,
-seesaw and balls every 20 s, dominoes, wrecking ball and bridge every 30 s, the pile every 45 s;
-the tower, wheel and turntable run on), so the zone is always playing when someone walks in.
+seesaw and balls every 20 s, the barrel run every 25 s, dominoes, wrecking ball and bridge every
+30 s, the pile every 45 s; the tower, wheel and turntable run on), so the zone is always
+playing when someone walks in.
 They pause while no focus point is within 250 m.
 `physics.proving_ground.replay {"station": "dominoes"}` restarts one now (`{}` restarts all).
 `demo::VIEWS` are tour stops for the action stations: arriving restarts the station, and the
 warm-up lands on its best moment. `tests/proving_ground.rs` checks that stations replay without
-piling up bodies.
+piling up bodies, and that the barrel run's drums stay within 1 cm of the deck and 30 cm of their
+lanes and stop in the sand.
 
 Everything in it is drawn with detailed procedural art (`src/demo/art/`): beveled meshes sized to
 their colliders (shipping crates with brackets and bolts, 200 l drums, chain links, a cast

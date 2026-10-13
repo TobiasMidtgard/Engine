@@ -28,6 +28,11 @@ pub struct DestructionAssets {
     pub chips: Vec<Handle<Mesh>>,
     /// Chip material per [`DestructibleMaterial`] (the broken interior color).
     pub chip_material: Vec<Handle<StandardMaterial>>,
+    /// Fresh fracture faces per [`DestructibleMaterial`]: the surface material, except where
+    /// the surface texture has mortar joints (stone, brick), which a broken face shows as
+    /// plain broken stone or fired clay instead. Shared with the surface until
+    /// [`Self::texture`].
+    pub broken: Vec<Handle<StandardMaterial>>,
     /// Glowing spark material (thermite, metal grinding).
     pub spark: Handle<StandardMaterial>,
     /// Dust puff sphere.
@@ -170,6 +175,7 @@ impl DestructionAssets {
         .map(|m| materials.add(m));
         Self {
             grass: surface[DestructibleMaterial::Dirt.index()],
+            broken: surface.clone(),
             gravel,
             char,
             surface,
@@ -219,7 +225,35 @@ impl DestructionAssets {
         gravel.receives_wetness = true;
         materials.set(self.gravel, gravel);
         self.texture_char(materials, images);
+        self.texture_broken(materials, images);
         self.textured = true;
+    }
+
+    /// Joint-free fracture materials for masonry: the rock texture tinted so that, under the
+    /// same vertex colors as the surface, it averages the material's own color.
+    fn texture_broken(
+        &mut self,
+        materials: &mut Assets<StandardMaterial>,
+        images: &mut Assets<Image>,
+    ) {
+        let table = DestructionMaterials::default();
+        let rock = table.get(DestructibleMaterial::Rock).exterior;
+        for m in [DestructibleMaterial::Stone, DestructibleMaterial::Brick] {
+            let own = table.get(m).exterior;
+            let mut mat = textured(SurfaceKind::Rock, 0xB40C + m.index() as u64, images);
+            // Half as saturated as the ratio: the masonry textures average greyer than their
+            // nominal colors, and a broken face beside them shouldn't look orange.
+            let tint: [f32; 3] = std::array::from_fn(|k| own[k] / rock[k].max(1e-3));
+            let grey = (tint[0] + tint[1] + tint[2]) / 3.0;
+            mat.base_color = [
+                (tint[0] + grey) * 0.5,
+                (tint[1] + grey) * 0.5,
+                (tint[2] + grey) * 0.5,
+                1.0,
+            ];
+            mat.receives_wetness = true;
+            self.broken[m.index()] = materials.add(mat);
+        }
     }
 
     /// Char materials from the charred-timber texture, the embers glowing in its cracks.
@@ -266,6 +300,10 @@ impl DestructionAssets {
 
     pub fn surface(&self, m: DestructibleMaterial) -> Handle<StandardMaterial> {
         self.surface[m.index()]
+    }
+
+    pub fn broken(&self, m: DestructibleMaterial) -> Handle<StandardMaterial> {
+        self.broken[m.index()]
     }
 
     pub fn chip_material(&self, m: DestructibleMaterial) -> Handle<StandardMaterial> {
