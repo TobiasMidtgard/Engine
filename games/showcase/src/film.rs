@@ -233,6 +233,11 @@ fn run(world: &mut World) {
         world.write_message(AppExit::Success);
         return;
     }
+    // The Moon moves, so its views follow it.
+    let places: Vec<Place> = places
+        .iter()
+        .map(|p| crate::planet::aim(world, p))
+        .collect();
     if frame == 0 {
         if let Err(e) = std::fs::create_dir_all(OUT_DIR) {
             engine::core::log::warn!("film: can't create {OUT_DIR}: {e}");

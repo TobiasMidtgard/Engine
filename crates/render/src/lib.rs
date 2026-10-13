@@ -377,6 +377,11 @@ mod tests {
             ("gtao", include_str!("shaders/gtao.wgsl").into(), true),
             ("taa", include_str!("shaders/taa.wgsl").into(), true),
             ("ssr", include_str!("shaders/ssr.wgsl").into(), true),
+            (
+                "ssr_chain",
+                include_str!("shaders/ssr_chain.wgsl").into(),
+                false,
+            ),
             ("ssgi", include_str!("shaders/ssgi.wgsl").into(), true),
             (
                 "atmosphere_luts",
