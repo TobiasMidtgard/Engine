@@ -257,7 +257,8 @@ fn lake_water<'a>(z: &Zone, ground: &'a dyn Fn(f64, f64) -> f64) -> engine_water
         streams: &[engine_water::demo::ValleyStream {
             path: &STREAM,
             width_m: 5.0,
-            flow_m3_s: 1.0,
+            // Enough to fill the brink across: at 1 m³/s the falls split into two thin strands.
+            flow_m3_s: 2.0,
         }],
         ground,
         jetty_bearing: Some(std::f64::consts::PI * 0.9),
@@ -277,15 +278,29 @@ pub const RUNWAY: ([f64; 2], [f64; 2]) = ([780.0, -750.0], [780.0, 450.0]);
 #[derive(Resource, Debug, Clone, PartialEq)]
 pub struct DemoZones(pub Vec<String>);
 
+/// Viewpoint names that belong to a zone of another name: the fire stops (`fire_front`) are the
+/// field's, the smoke stops (`smoke_range`) the range's.
+const ZONE_ALIASES: [(&str, &str); 2] = [("fire", "field"), ("smoke", "range")];
+
 /// The zone a viewpoint belongs to: the zone with its key, or whose key and `_` start it
-/// (`paddock_car` is the paddock's).
+/// (`paddock_car` is the paddock's), or the zone a [`ZONE_ALIASES`] prefix names.
 pub fn zone_of(place: &str) -> Option<&'static str> {
-    ZONES.iter().map(|z| z.key).find(|key| {
-        place == *key
+    let named = |key: &str| {
+        place == key
             || place
                 .strip_prefix(key)
                 .is_some_and(|rest| rest.starts_with('_'))
-    })
+    };
+    ZONES
+        .iter()
+        .map(|z| z.key)
+        .find(|key| named(key))
+        .or_else(|| {
+            ZONE_ALIASES
+                .iter()
+                .find(|(prefix, _)| named(prefix))
+                .map(|(_, zone)| *zone)
+        })
 }
 
 /// Which zones get their demos, from the `--zones` flag (`a,b`, `none` or `all`) or else from
@@ -460,6 +475,8 @@ pub struct View {
     pub hour: f32,
     /// Simulated seconds to wait before the screenshot.
     pub warmup_secs: f32,
+    /// Run the warm-up without drawing (see [`View::quick_warmup`]).
+    pub quick_warmup: bool,
     /// API calls (name, JSON args) made on arriving and on leaving.
     pub on_arrive: Vec<(String, String)>,
     pub on_leave: Vec<(String, String)>,
@@ -484,6 +501,7 @@ impl View {
             target,
             hour,
             warmup_secs: 0.0,
+            quick_warmup: false,
             on_arrive: Vec::new(),
             on_leave: Vec::new(),
         }
@@ -491,6 +509,16 @@ impl View {
 
     pub fn warmup(mut self, secs: f32) -> Self {
         self.warmup_secs = secs;
+        self
+    }
+
+    /// The tour parks the renderer through this stop's warm-up and draws only the frames that
+    /// settle the picture: a software renderer spends seconds on every frame, the simulation
+    /// milliseconds. Only for stops whose look comes from CPU simulations (fire, smoke, water,
+    /// physics, animation): GPU-simulated effects (particles, GPU cloth) stand still while the
+    /// renderer is parked.
+    pub fn quick_warmup(mut self) -> Self {
+        self.quick_warmup = true;
         self
     }
 
@@ -1189,6 +1217,9 @@ mod tests {
         assert_eq!(zone_of("track_cars"), Some("track"));
         assert_eq!(zone_of("tracks"), Some("tracks"));
         assert_eq!(zone_of("overview"), None);
+        assert_eq!(zone_of("fire_front"), Some("field"));
+        assert_eq!(zone_of("smoke_fans"), Some("range"));
+        assert_eq!(zone_of("firefly"), None);
         let only = |keys: &[&str]| Some(DemoZones(keys.iter().map(|k| k.to_string()).collect()));
         assert_eq!(
             demo_zones(None, Some("paddock_car,yard,paddock")),
@@ -1204,5 +1235,17 @@ mod tests {
             demo_zones(Some("lake,water"), None),
             only(&["lake", "water"])
         );
+    }
+
+    #[test]
+    fn every_demo_view_belongs_to_its_zone() {
+        // Otherwise a tour of that view loads every zone, which a software renderer can't fit.
+        let strays: Vec<String> = ZONES
+            .iter()
+            .flat_map(|z| demo_views(z).into_iter().map(move |v| (z.key, v.key)))
+            .filter(|&(zone, key)| zone_of(key) != Some(zone))
+            .map(|(zone, key)| format!("{key} (in {zone})"))
+            .collect();
+        assert!(strays.is_empty(), "views outside their zone: {strays:?}");
     }
 }
