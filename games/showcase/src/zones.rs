@@ -831,6 +831,7 @@ pub fn landscape(seed: u64) -> Landscape {
             b: DVec2::new(150.0, -300.0),
             height: 9.0,
             reach: 400.0,
+            notch: None,
         }],
         // From a spring in the southern woods, over the cliff as a waterfall, into the lake.
         streams: vec![Stream::new(&STREAM, 5.0, 1.4)],
