@@ -46,7 +46,9 @@ changing that one plugin line.
   of a group of dynamic bodies jointed together are solved in reduced coordinates (Rapier
   multibodies): each body only moves along its joint's free axes under its parent, so a ragdoll
   or a loose chain never opens up at a joint, however hard it lands (constraint joints gapped up
-  to 2–5 cm for a frame when the proving ground's dummies hit the stairs; articulated, 0). Everything
+  to 54 mm for a frame, and 1–3 mm at rest, as the proving ground's dummies tumble down the
+  stairs; articulated, 0 every frame: `cargo run -p engine_physics --release --example joint_gap`
+  measures both and writes them to a CSV). Everything
   a body gets still works: a written pose sets the joint coordinates (moving one part of a
   ragdoll far, or its root, moves the whole ragdoll; a small move bends the joints), written
   velocities, impulses, character pushes and blasts act through the articulation's mass matrix
