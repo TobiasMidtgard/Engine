@@ -749,6 +749,21 @@ fn the_breach_house_roof_is_breached_from_below_and_above_every_cycle() {
     let hatch = wall(&mut app, "Wooden hatch");
     let steel = wall(&mut app, "Steel hatch");
     let bay2 = wall(&mut app, "Breach house roof bay 2");
+    // Both hatch ladders can be climbed, from a step off the floor up to the deck behind them.
+    let ladders: Vec<_> = app
+        .world
+        .query::<(&engine_world::Climbable, &GlobalTransform)>()
+        .iter(&app.world)
+        .map(|(c, gt)| c.in_world(gt))
+        .collect();
+    assert_eq!(ladders.len(), 2);
+    for l in &ladders {
+        assert!((l.bottom.y - 0.27).abs() < 0.02, "{l:?}");
+        assert!(l.top.y > 2.9 && l.top.y < l.exit.y, "{l:?}");
+        assert!((l.exit.y - 3.29).abs() < 0.02, "onto the deck: {l:?}");
+        assert!(l.exit.z < l.top.z - 0.4, "over the header behind it: {l:?}");
+        assert!(l.facing.distance(Vec3::NEG_Z) < 1e-4, "{l:?}");
+    }
     assert!(
         integrity(&app, old) < 0.995,
         "the west bay starts shot up ({})",

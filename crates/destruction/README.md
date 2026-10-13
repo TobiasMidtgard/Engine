@@ -122,7 +122,8 @@ doors, reinforcement going up),
 `SmokeEmission` (dust and thermite smoke for the smoke module), `GroundContact` (debris
 landing on a surface, for footstep-style impact sounds), physics-contract bodies for debris
 and static colliders for standing building pieces, breakable props and set dressing, and
-kinematic bodies for doors (moved by their `Transform`).
+kinematic bodies for doors (moved by their `Transform`), and `Climbable` on the breach house's
+ladders (climbed by the movement module, linked by NPC navigation).
 
 ## Using it
 
@@ -197,7 +198,7 @@ the Siege fortress zone). It is about 80 × 40 m and runs a 20 s loop, then rebu
   thermite burns a doorway through wall and panel together.
 - **Breach house** (vertical play, north of the tower): a brick room with an open front and a
   window in each side wall under a timber roof deck on joists, with a stair up its back wall
-  to the roof and a steel ladder under each of its two rimmed hatches. Galvanized
+  to the roof and a climbable steel ladder under each of its two rimmed hatches. Galvanized
   tube-and-clamp guard railings (`PropKind::PipeRailing`: cast clamp fittings, base flanges,
   a timber toe board) run round the roof, open at the stair's head, and up the stair's open
   side on palms bolted to its stringer. Its west roof bay was
@@ -247,8 +248,9 @@ still holds it, red), then under both, and the shelter drops into the pit.
   a burning shed charring and coming down, build mode placing snapped pieces and taking them
   down, the hill's cabin going up with its red ghost and its door swung open and its shelter
   standing on the terrace's rock, pieces on voxel rock falling when it is dug out from under
-  them, a slab dropped onto a resting one lying on it and falling when it goes, doors opening away from whoever presses interact and falling with their doorway,
-  stairs built up to the cabin's deck and their ramp-shaped colliders, a floor shot through
+  them, a slab dropped onto a resting one lying on it and falling when it goes, doors
+  opening away from whoever presses interact and falling with their doorway, stairs built up
+  to the cabin's deck and their ramp-shaped colliders, a floor shot through
   from below and blown open from above, hatches smashed in or cut out while steel stops
   bullets and charges, built openings surviving a rebuild, the breach house's loop,
   reinforcement panels set and braced behind a drywall that stop bullets and a charge until
@@ -264,6 +266,4 @@ still holds it, red), then under both, and the shelter drops into the pit.
 - Breach a reinforced wall with a charge; shoot holes in a wooden barricade; dig and collapse a
   voxel cliff. **Done** (tests above and the showcase).
 
-Next: cave-in boulders resting on
-rock ledges (they need side contacts, not just floors), and ladders you can climb (they need
-a climbing contract from movement).
+Next: cave-in boulders resting on rock ledges (they need side contacts, not just floors).
