@@ -106,8 +106,9 @@ pub fn lat_lon_from_dir(d: DVec3) -> (f64, f64) {
 #[derive(Clone)]
 pub struct HeightOverlay {
     /// Ground height (world y) at world `(x, z)`, meters, in the home frame (the home spot at
-    /// the origin, +Y up, north toward −Z) as if the world were flat. The terrain adds the
-    /// planet's curvature, so the ground passes exactly through these points.
+    /// the origin, +Y up, north toward −Z). The ground passes exactly through these points:
+    /// the terrain converts them to heights on the sphere itself, so don't subtract the
+    /// planet's curvature unless the level is meant to follow it.
     pub height: Arc<dyn Fn(f64, f64) -> f64 + Send + Sync>,
     /// Full strength within this distance of the home spot, meters.
     pub radius_m: f64,

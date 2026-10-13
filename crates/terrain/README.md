@@ -32,7 +32,9 @@ everything else (streaming, LOD, colliders, ground queries, prints) follows the 
   replaces the ground around the home spot with your own height function `f(x, z) → y` in
   world coordinates (a level, the showcase valley) and blends it back into the planet at the
   edge. The terrain bends it onto the sphere so the ground passes through `(x, f(x, z), z)`
-  to the centimeter, and rendering, the `Ground` query, prints and colliders all use it.
+  to the centimeter (heights are world y as given: subtract the curvature drop
+  `(x² + z²) / 2R` yourself only if the level should follow the sphere), and rendering, the
+  `Ground` query, prints and colliders all use it.
   `with_overlay_paint(|x, z| …)` paints it: an `OverlayPaint` layer (grass, leaves, dirt,
   mud, sand, gravel, rock, concrete, snow, ash) for roads, plazas and woods, and a tint for
   fields. Footsteps, rain and the `Ground` query follow the painted layer; edits paint over it.

@@ -139,9 +139,12 @@ impl PlanetTerrain {
     ///
     /// `height(x, z)` returns the world y of the ground at world `(x, z)` in the home frame
     /// that [`home_transform`](Self::home_transform) sets up (or the space module's frame on
-    /// the same spot), as if the world were flat. The terrain bends it onto the planet so the
-    /// ground passes exactly through those points, and everything reads it: rendering, the
-    /// `Ground` query, footprints and physics colliders. Call it after `with_pad`/`with_radius`.
+    /// the same spot). The ground passes exactly through `(x, height(x, z), z)`: the terrain
+    /// converts it to heights on the sphere itself. A level built flat stays flat, standing
+    /// up to `r² / 2R` above the curved planet (6 m at 9 km on Earth) until the blend; one whose
+    /// heights already drop by `(x² + z²) / 2R` follows the sphere. Everything reads it:
+    /// rendering, the `Ground` query, footprints and physics colliders. Call it after
+    /// `with_pad`/`with_radius`.
     ///
     /// ```ignore
     /// let terrain = PlanetTerrain::earthlike(7)
