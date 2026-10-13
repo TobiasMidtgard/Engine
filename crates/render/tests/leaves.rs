@@ -1,7 +1,9 @@
 //! Thin sheets (leaf cards: double-sided or alpha-masked materials) seen from the side away
 //! from the sun: sunlight shines through them by `subsurface`, tinted by the leaf, and never
-//! lights up or glints off the side in view, whatever their vertex normals say. Needs a GPU or
-//! lavapipe; passes with a note when neither is available.
+//! glints off the side in view, whatever their vertex normals say. A flat leaf's dark side
+//! stays dark; cards whose normals are bent up or out (grass tufts, tree crowns shaded as one
+//! volume) keep the diffuse light their normals face. Needs a GPU or lavapipe; passes with a
+//! note when neither is available.
 
 use engine_assets::Assets;
 use engine_core::prelude::*;
@@ -191,7 +193,7 @@ fn sunlight_shines_through_backlit_leaves() {
 }
 
 #[test]
-fn the_dark_side_of_a_leaf_never_catches_the_sun() {
+fn the_dark_side_of_a_leaf_never_glints() {
     let sun = toward_sun();
     // The half vector between the sun and the camera: a normal that mirrors the sun into the
     // camera, as a crown's bent normals or a normal map can on the side away from the sun.
@@ -220,14 +222,58 @@ fn the_dark_side_of_a_leaf_never_catches_the_sun() {
         luma(lit) > luma(reference) * 2.0 + 20.0,
         "the sunlit side should be much brighter than the dark side: {lit:.1} vs {reference:.1}"
     );
-    // Card 1 has the reference's geometry and must look the same; card 2's bent normal also
-    // reflects the bright sky around the sun, but no sunlight.
-    for (i, slack) in [(1, 1.15), (2, 1.8)] {
-        let c = card_color(&back, i);
-        eprintln!("card {i}: {c:.1} on its dark side");
+    // Card 1 has the reference's geometry and must look the same.
+    let wrong = card_color(&back, 1);
+    eprintln!("card 1: {wrong:.1} on its dark side");
+    assert!(
+        luma(wrong) < luma(reference) * 1.15 + 4.0,
+        "card 1 catches the sun on its dark side: {wrong:.1} vs {reference:.1}"
+    );
+    // Card 2's bent normal faces the sun about as much as the sunlit reference does, so it
+    // keeps that much diffuse light (and reflects the bright sky around the sun), but the sun
+    // mirrored straight into the camera would be several times brighter.
+    let bent = card_color(&back, 2);
+    eprintln!("card 2: {bent:.1} on its dark side");
+    assert!(
+        luma(bent) > luma(reference) * 1.5 + 10.0,
+        "card 2 lost the light its bent normal faces: {bent:.1} vs {reference:.1}"
+    );
+    assert!(
+        luma(bent) < luma(lit) * 1.3 + 8.0,
+        "card 2 glints on its dark side: {bent:.1} vs the sunlit reference {lit:.1}"
+    );
+}
+
+#[test]
+fn grass_cards_with_upward_normals_stay_lit_from_behind() {
+    // Grass and crown cards bend their normals up or out so a tuft shades as one volume: seen
+    // from the side away from the sun they must stay about as bright as from the sunlit side,
+    // with no `subsurface` to shine through.
+    let clump = |out: Vec3| (Vec3::Y * 0.65 + out * 0.35).normalize();
+    let cards = [
+        Card::DoubleSided(Vec3::Y),
+        Card::TwoQuads {
+            front: Vec3::Y,
+            back: Vec3::Y,
+        },
+        // Bent out toward the sun's side of the tuft, the same seen from either side.
+        Card::TwoQuads {
+            front: clump(Vec3::X),
+            back: clump(Vec3::X),
+        },
+    ];
+    let (Some(back), Some(front)) = (
+        render(leaves_app(cards, 0.0, 0.8, false), "grass_cards_dark_side"),
+        render(leaves_app(cards, 0.0, 0.8, true), "grass_cards_sunlit_side"),
+    ) else {
+        return;
+    };
+    for i in 0..3 {
+        let (away, toward) = (card_color(&back, i), card_color(&front, i));
+        eprintln!("card {i}: {away:.1} seen from the side away from the sun, {toward:.1} sunlit");
         assert!(
-            luma(c) < luma(reference) * slack + 4.0,
-            "card {i} catches the sun on its dark side: {c:.1} vs {reference:.1}"
+            luma(away) > luma(toward) * 0.75,
+            "card {i} goes dark seen from the side away from the sun: {away:.1} vs {toward:.1}"
         );
     }
 }

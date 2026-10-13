@@ -825,7 +825,7 @@ pub fn run_lightning(
         let on = l.timer < l.on;
         beam.visible = on;
         let flicker = 0.6 + 0.4 * ((time.elapsed_secs() * 37.0).sin() * 0.5 + 0.5);
-        light.intensity_lm = if on { 30_000.0 * flicker } else { 0.0 };
+        light.intensity_lm = if on { 5_000.0 * flicker } else { 0.0 };
         if on && !was {
             let a = gt.translation();
             spawn_effect_at(&mut commands, "spell.lightning_hit", a, Vec3::Y, 0.6);
