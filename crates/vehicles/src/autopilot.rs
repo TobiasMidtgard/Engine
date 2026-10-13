@@ -380,18 +380,18 @@ fn drive(
     let to = (to - up * to.dot(up)).normalize_or_zero();
     let alpha = signed_angle(fwd, to, -up); // + = target to the right
     let wheelbase = wheels.map(|w| w.wheelbase()).unwrap_or(2.6);
-    let max_steer = wheels
-        .and_then(|w| w.wheels.iter().map(|w| w.max_steer_deg).reduce(f32::max))
-        .unwrap_or(30.0)
-        .to_radians()
-        .max(0.05);
+    // The lock a full steering input gives at this speed (it shrinks as the car goes faster).
+    let lock = wheels
+        .map(|w| w.steer_lock(speed))
+        .unwrap_or(30f32.to_radians())
+        .max(0.02);
     // Pure pursuit; full lock toward the line when it is behind us.
     let delta = if alpha.abs() > std::f32::consts::FRAC_PI_2 {
-        alpha.signum() * max_steer
+        alpha.signum() * lock
     } else {
         (2.0 * wheelbase * alpha.sin() / lookahead as f32).atan()
     };
-    c.steer = (delta / max_steer).clamp(-1.0, 1.0);
+    c.steer = (delta / lock).clamp(-1.0, 1.0);
     // Corner speed: the slowest speed needed anywhere in braking distance ahead.
     let decel = 6.0f32;
     let horizon = (speed * speed / (2.0 * decel) + 25.0) as f64;

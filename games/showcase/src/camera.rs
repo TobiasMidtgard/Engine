@@ -52,6 +52,7 @@ pub fn look(t: &mut Transform, cam: &mut ShowcaseCamera, position: DVec3, target
 }
 
 pub fn go_to(world: &mut World, place: &Place) {
+    let place = crate::planet::aim(world, place);
     let mut q = world.query::<(&mut Transform, &mut ShowcaseCamera)>();
     for (mut t, mut cam) in q.iter_mut(world) {
         look(&mut t, &mut cam, place.position, place.target);
@@ -77,6 +78,7 @@ pub fn fly(
     play: Option<Res<engine_movement::Play>>,
     views: Query<&GlobalTransform, Without<ShowcaseCamera>>,
     mut play_view: Local<Option<(DVec3, Vec3)>>,
+    bodies: Query<(&engine_space::CelestialBody, &Transform), Without<ShowcaseCamera>>,
 ) {
     // While someone plays (P), the pilot's camera renders and owns the keys, mouse and cursor.
     // This one waits, then carries on from where the pilot's camera was when play ends.
@@ -113,7 +115,14 @@ pub fn fly(
     ]
     .into_iter()
     .find(|(k, _)| keys.just_pressed(*k))
-    .and_then(|(_, key)| places::find(key));
+    .and_then(|(_, key)| places::find(key))
+    .map(|p| match bodies.iter().find(|(b, _)| b.name == "Moon") {
+        // The Moon moves: aim at it where it is now.
+        Some((_, moon)) if p.key == "moon" => {
+            crate::planet::at_moon(&p, moon.translation, sky.day_of_year)
+        }
+        _ => p,
+    });
 
     if keys.just_pressed(KeyCode::BracketLeft) {
         sky.hour = (sky.hour - 1.0).rem_euclid(24.0);
