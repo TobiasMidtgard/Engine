@@ -146,6 +146,7 @@ impl Plugin for FoliagePlugin {
                     scenery::cull_debris,
                     assets::ensure_species_visuals,
                     season::apply_season_colors,
+                    season::apply_litter_color,
                     visuals::sync_plant_visuals,
                     visuals::sync_log_visuals,
                     visuals::update_glow_lights,

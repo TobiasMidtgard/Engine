@@ -56,8 +56,14 @@ engine_foliage::spawn_plant(world, "oak", DVec3::new(3.0, 0.0, 4.0), 0.2, None)?
   toughness the tree falls away from the blow: it swings down around the stump, crashes
   (`WorldImpulse` for foliage and dust, `NoiseEvent` for AI, `GroundContact`s for audio and
   terrain, `DamageEvent`s for whatever it lands on), crushes saplings and settles as a
-  `FelledLog` beside its stump. Logs lose their leaves, then their twigs, grey and rot away,
-  feeding the soil. Oak, birch and hazel stumps resprout. Explosions knock trees over too.
+  `FelledLog` beside its stump. Logs lose their leaves, then their twigs, moss over in
+  stages (cushions of moss on the bark, alpha-masked from the forest floor's moss), grey and
+  rot away, feeding the soil. Oak, birch and hazel stumps resprout. Explosions knock trees
+  over too.
+- **Deadwood fungi** (`meshgen::fungi`): a few years after a tree dies, bracket fungi fruit
+  on its snag, stump and log (drawn near the camera): tinder hooves on birch snags and birch
+  polypores on its logs, red-belted conks on conifers, tiers of sulphur shelf on oak snags,
+  turkey tail rosettes on oak logs and stumps.
 - **Fire**: plants are `Combustible`; when the fire module burns them they become charred
   snags that collapse into ash, which enriches the soil for the next generation.
 - **Seasons** (`season`): plants show `FoliageSeason::day_of_year` (midsummer unless set,
@@ -65,8 +71,10 @@ engine_foliage::spawn_plant(world, "oak", DVec3::new(3.0, 0.0, 4.0), 0.2, None)?
   (`PlantSpecies::seasons`): oak, birch and hazel leaf out in fresh yellow-green, turn their
   own autumn colors (birch first and yellow, oak last and russet), thin out through leaf fall
   (each crown has thinned copies; the same leaves go first) and stand bare in winter; bracken
-  rusts and dies back, flowers go to seed and vanish, meadow grass turns to straw. Each leaf
-  tint runs a week apart and every plant a few days of its own, so a wood turns patchily.
+  rusts and dies back, flowers go to seed and vanish, meadow grass turns to straw, and the
+  leaf litter on the forest floor lies bright with fresh leaves in autumn and dark and sodden
+  through winter. Each leaf tint runs a week apart and every plant a few days of its own, so
+  a wood turns patchily.
 - **Glow**: glowing species pick a brighter material the healthier and better fed they are,
   breathe slowly, and light their surroundings through a pool of point lights (one per
   cluster, at most 40).
@@ -115,4 +123,5 @@ Writes: `Combustible` on plants and logs, static `RigidBody` + `Collider` entiti
 - Grass meadows through the renderer's shared strand pipeline (blades bend under feet).
 - Impostors for distant forests and planet-scale scattering on terrain.
 - A falling tree as a dynamic body when a physics backend is installed.
-- Snow on branches and crowns in winter; fallen leaves on the forest floor in autumn.
+- Snow on branches and crowns in winter, from the weather's snow cover.
+- Seedlings on nurse logs, and logs collapsing as they rot.

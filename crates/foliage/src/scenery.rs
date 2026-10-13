@@ -3434,7 +3434,7 @@ struct Cover {
     offset: vec4<f32>,               // camera-relative origin xyz
     layers: array<vec4<u32>, 2>,     // texture layer of each weight slot
     inv_tile: array<vec4<f32>, 2>,   // 1 / tile size (m) of each slot
-    params: vec4<f32>,               // height influence, blend depth, normal strength, unused
+    params: vec4<f32>,               // height influence, blend depth, normal strength, litter season
 };
 @group(2) @binding(0) var<uniform> cover: Cover;
 
@@ -3469,6 +3469,25 @@ fn layer_subsurface(l: u32) -> f32 {
         case 3u: { return 0.3; }
         default: { return 0.0; }
     }
+}
+
+// Fallen leaves through the year (`cover.params.w`, from `season::litter_season`): above 0
+// freshly fallen autumn leaves in patches of birch yellow, maple orange and oak russet; below
+// 0 the dark, sodden litter of winter. The painted litter's own light and dark leaves show
+// through.
+fn seasonal_litter(albedo: vec3<f32>, wp: vec2<f32>) -> vec3<f32> {
+    let s = cover.params.w;
+    if (s > 0.0) {
+        let hue = value_noise2(wp * 0.45 + vec2(17.0, 5.0)) + 0.35 * value_noise2(wp * 2.3);
+        let yellow = vec3(0.66, 0.38, 0.045);
+        let orange = vec3(0.5, 0.15, 0.018);
+        let russet = vec3(0.27, 0.085, 0.02);
+        let c = mix(mix(russet, orange, smoothstep(0.25, 0.6, hue)), yellow, smoothstep(0.7, 1.05, hue));
+        let w = vec3(0.3, 0.55, 0.15);
+        let fresh = c * (dot(albedo, w) / dot(c, w)) * 1.4;
+        return mix(albedo, fresh, s * 0.85);
+    }
+    return albedo * mix(vec3(1.0), vec3(0.68, 0.66, 0.64), -s);
 }
 
 struct Mat {
@@ -3622,6 +3641,9 @@ fn fs_ground(in: GroundOut) -> @location(0) vec4<f32> {
         score[i] = -10.0;
         if (w[i] > 0.004) {
             mats[i] = sample_layer(slot_layer(i), p, slot_inv_tile(i), dpx, dpy, mixer);
+            if (slot_layer(i) == L_LITTER) {
+                mats[i].albedo = seasonal_litter(mats[i].albedo, wp.xz);
+            }
             score[i] = w[i] + mats[i].height * cover.params.x;
             best = max(best, score[i]);
         }
@@ -4047,6 +4069,9 @@ impl SceneryFeature {
             return;
         };
         let frame = self.frame;
+        let litter = world
+            .get_resource::<crate::FoliageSeason>()
+            .map_or(0.0, |s| crate::season::litter_season(s.day_of_year));
         let mut q = world.query::<(Entity, &GroundSurface, &GlobalTransform)>();
         for (e, surface, t) in q.iter(world) {
             let offset = (t.translation() - view.origin).as_vec3();
@@ -4114,7 +4139,7 @@ impl SceneryFeature {
                 for s in c.slots {
                     push_f32s(&mut u, &[1.0 / s.tile_m()]);
                 }
-                push_f32s(&mut u, &[0.55, 0.16, 1.0, 0.0]);
+                push_f32s(&mut u, &[0.55, 0.16, 1.0, litter]);
                 gpu.queue.write_buffer(&c.uniform, 0, &u);
             }
         }
