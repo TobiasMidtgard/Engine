@@ -1323,6 +1323,6 @@ mod tests {
     fn gpu_structs_match_shader_sizes() {
         assert_eq!(std::mem::size_of::<PlanetGpu>(), 16 * (3 + 1 + 10 + 3));
         assert_eq!(std::mem::size_of::<MapsGpu>(), 48);
-        assert_eq!(std::mem::size_of::<TerrainVertex>(), 36);
+        assert_eq!(std::mem::size_of::<TerrainVertex>(), 44);
     }
 }

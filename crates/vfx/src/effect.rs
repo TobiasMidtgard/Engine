@@ -274,6 +274,11 @@ pub enum Sprite {
     /// A billow of fire: a dense puff glowing from within, hot cracks cooling to dark smoke over
     /// its life (explosions, fire impacts, dragon breath). Use `emissive` and a low `additive`.
     Billow,
+    /// A portal: the world behind it swirled into a vortex that sinks into the particle's color
+    /// toward its eye, with glowing arms turning inward and a burning rim (gates, rifts). Stand
+    /// it in a doorway with `facing: horizontal` and an effect turned so its up axis faces out;
+    /// give it a long life and `additive` 0. `emissive` lights the arms and rim.
+    Vortex,
 }
 
 impl Sprite {
@@ -287,7 +292,7 @@ impl Sprite {
         match self {
             Sprite::Smoke | Sprite::Dust => 1.0,
             Sprite::Droplet => 0.4,
-            Sprite::Shard | Sprite::Haze => 0.0,
+            Sprite::Shard | Sprite::Haze | Sprite::Vortex => 0.0,
             _ => 0.6,
         }
     }

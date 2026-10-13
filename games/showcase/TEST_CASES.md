@@ -80,7 +80,7 @@ are built, nothing simulates yet) · ⬜ not visible yet
 
 | # | Test case | Zone / viewpoint | Owner | Status |
 |---|---|---|---|---|
-| 40 | Beautiful magic spells (particles) | `magic`, `magic_spells`, `magic_footsteps`, `magic_impacts` | Particles and magic effects | ✅ Spell court: arcane portal, fireballs and frost bolts hitting a wall, lightning between obelisks, a healing aura, fountain, anvil sparks, torches and fireflies; footprint puffs on mud, snow, sand and water and shot impacts on six materials |
+| 40 | Beautiful magic spells (particles) | `magic`, `magic_spells`, `magic_portal`, `magic_footsteps`, `magic_marks`, `magic_impacts` | Particles and magic effects | ✅ Spell court: arcane portal, a standing portal in the gate arch swirling the valley seen through it, fireballs and frost bolts hitting a wall and leaving a glowing scorch and a frost film on it, lightning between obelisks, a healing aura, fountain, anvil sparks, torches and fireflies; footprint puffs on mud, snow, sand and water and shot impacts on six materials (chipping the rock) |
 | 41 | Conversation UI between two people | `market_dialogue` | UI system and maps | ✅ portraits that talk and blink, typewriter text, choices (one opens the shop) |
 | 42 | Shop UI | `market_shop` | UI system and maps | ✅ buy and sell tabs, item cards, quantity, prices and gold |
 | 43 | Inventory UI | `market_inventory` | UI system and maps | ✅ bag grid with drag and drop, equipment, weight, item details |
