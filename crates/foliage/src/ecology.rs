@@ -2,6 +2,7 @@
 //! when they first run, then step every few simulated weeks; plants grow smoothly in between.
 
 use std::collections::HashMap;
+use std::f32::consts::{FRAC_PI_2, PI};
 
 use engine_core::prelude::*;
 use engine_world::{
@@ -291,7 +292,46 @@ pub fn play_history(
         h.years_since,
         region.step_years.max(0.5),
     );
+    // Paths, shores and plots stay passable: a trunk that came down across a keep-clear circle
+    // was dragged around to lie beside it, or hauled away when it fits nowhere.
+    logs.retain_mut(|l| {
+        let yaw = l.yaw;
+        [
+            0.0,
+            PI,
+            0.5,
+            -0.5,
+            PI + 0.5,
+            PI - 0.5,
+            FRAC_PI_2,
+            -FRAC_PI_2,
+        ]
+        .into_iter()
+        .any(|turn| {
+            l.yaw = (yaw + turn).rem_euclid(TAU);
+            !blocks_keep_clear(region, center, l, library)
+        })
+    });
     (plants, logs)
+}
+
+/// Whether a log lies across one of the region's keep-clear circles.
+fn blocks_keep_clear(
+    region: &EcologyRegion,
+    center: DVec3,
+    log: &SimLog,
+    library: &PlantLibrary,
+) -> bool {
+    let sp = library.get(log.species);
+    let length = sp.max_height_m * log.size * 0.85;
+    let a = Vec2::new((log.pos.x - center.x) as f32, (log.pos.z - center.z) as f32);
+    let b = a + Vec2::new(log.yaw.cos(), log.yaw.sin()) * length;
+    let reach = (sp.trunk_radius_m * log.size).max(0.1);
+    region.keep_clear.iter().any(|c| {
+        let p = Vec2::new(c[0], c[1]);
+        let t = ((p - a).dot(b - a) / (b - a).length_squared().max(1e-6)).clamp(0.0, 1.0);
+        p.distance(a + (b - a) * t) < c[2] + reach
+    })
 }
 
 fn disturb(
@@ -720,16 +760,20 @@ pub fn trample(
 
 /// Terrain was dug or raised: plants move with the ground, or are uprooted.
 pub fn follow_terrain(
+    mut commands: Commands,
     mut changes: MessageReader<engine_world::TerrainChanged>,
     ground: Option<Res<Ground>>,
-    mut plants: Query<(&mut Transform, &mut Plant)>,
+    mut plants: Query<(Entity, &mut Transform, &mut Plant)>,
 ) {
     let Some(ground) = ground else { return };
     for c in changes.read() {
-        for (mut t, mut plant) in &mut plants {
+        for (e, mut t, mut plant) in &mut plants {
             if t.translation.distance(c.center) > c.radius as f64 + 1.0 {
                 continue;
             }
+            // Small plants lean with the new slope (worked out again when next drawn).
+            commands.entity(e).remove::<crate::visuals::PlantBase>();
+            plant.set_changed();
             let Some(h) = ground.height(t.translation + DVec3::Y * 2.0) else {
                 continue;
             };
@@ -745,7 +789,8 @@ pub fn follow_terrain(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::plant::RegionHistory;
+    use crate::plant::{Genes, RegionHistory};
+    use std::f32::consts::FRAC_PI_2;
 
     fn forest() -> EcologyRegion {
         EcologyRegion {
@@ -783,6 +828,46 @@ mod tests {
                 p.plant.species == id && p.plant.stage.is_alive() && p.plant.size >= min_size
             })
             .count()
+    }
+
+    #[test]
+    fn logs_across_a_path_are_hauled_away() {
+        let lib = PlantLibrary::default();
+        let region = EcologyRegion {
+            keep_clear: vec![[0.0, 5.0, 1.5]],
+            ..forest()
+        };
+        let center = DVec3::new(100.0, 0.0, 0.0);
+        let log = |x: f64, yaw: f32| SimLog {
+            entity: None,
+            pos: center + DVec3::new(x, 0.0, 0.0),
+            yaw,
+            species: lib.id("oak").unwrap(),
+            size: 0.8,
+            years: 0.0,
+            rot_years: 10.0,
+            genes: Genes::default(),
+        };
+        // Falling toward +Z, the trunk reaches across the clearing at (0, 5).
+        assert!(blocks_keep_clear(
+            &region,
+            center,
+            &log(0.0, FRAC_PI_2),
+            &lib
+        ));
+        // Falling away from it, or beside it, it stays.
+        assert!(!blocks_keep_clear(
+            &region,
+            center,
+            &log(0.0, -FRAC_PI_2),
+            &lib
+        ));
+        assert!(!blocks_keep_clear(
+            &region,
+            center,
+            &log(6.0, FRAC_PI_2),
+            &lib
+        ));
     }
 
     #[test]
