@@ -4,6 +4,11 @@
 //! the center of mass to the contact). Hard ground gives `PhysicsSettings::rolling_resistance`;
 //! soft ground (mud, sand, snow, grass) adds what sinking in costs, the same amounts the vehicle
 //! tires use. Only round shapes roll: a box tipping over a hard edge squashes nothing.
+//!
+//! Spinning in place about the contact normal is held back the same way: by friction over the
+//! contact patch, about `μ · N · SPIN_LEVER`. Rapier's twist friction only covers flat
+//! multi-point contacts between plain bodies, so without this a ball spinning on its spot, or a
+//! ragdoll's head (articulation links get no twist friction), would spin forever.
 
 use engine_core::math::Vec3;
 use engine_world::{Deformation, SurfaceMaterial};
@@ -78,6 +83,13 @@ pub(crate) fn symmetric_spin(collider: &Collider, body: &RigidBody) -> Option<(V
     Some((spin, pose.transform_point(on_axis), radius))
 }
 
+/// Lever of spin friction, meters: two thirds of the radius of a hard contact's patch (1.5 cm).
+const SPIN_LEVER: f32 = 0.01;
+
+/// Spin slower than this fraction of the roll is left alone (tan 3°: how far a contact normal
+/// can be off).
+const SPIN_SLACK: f32 = 0.05;
+
 /// One contact's pushback: body handles, the turn axis and the angular impulse it may take.
 struct Resist {
     pair: (ColliderHandle, ColliderHandle),
@@ -91,7 +103,7 @@ struct Resist {
     budget: f32,
 }
 
-/// Take rolling resistance out of every rolling contact touched in the last substep.
+/// Take rolling resistance and spin friction out of the contacts touched in the last substep.
 pub(crate) fn resist_rolling(sim: &mut Simulation, rid: RegionId) {
     let base = sim.settings.rolling_resistance.max(0.0);
     let materials = &sim.materials;
@@ -114,10 +126,15 @@ pub(crate) fn resist_rolling(sim: &mut Simulation, rid: RegionId) {
             rolls(c1.shape().shape_type()),
             rolls(c2.shape().shape_type()),
         );
-        if !(round1 || round2) {
+        let (a, b) = (c1.parent(), c2.parent());
+        let link = |h: Option<RigidBodyHandle>| {
+            h.is_some_and(|h| world.multibody_joints.rigid_body_link(h).is_some())
+        };
+        // Spin friction where Rapier has none: round shapes touch at a point, links get none.
+        let spins = round1 || round2 || link(a) || link(b);
+        if !spins {
             continue;
         }
-        let (a, b) = (c1.parent(), c2.parent());
         let dynamic = |h: Option<RigidBodyHandle>| {
             h.and_then(|h| world.bodies.get(h))
                 .is_some_and(|rb| rb.is_dynamic() && !rb.is_sleeping())
@@ -129,9 +146,8 @@ pub(crate) fn resist_rolling(sim: &mut Simulation, rid: RegionId) {
             + materials
                 .rolling(convert::surface_of(c1.user_data))
                 .max(materials.rolling(convert::surface_of(c2.user_data)));
-        if crr <= 0.0 {
-            continue;
-        }
+        // Rapier's default rule for combining two colliders' friction.
+        let mu = (c1.friction() + c2.friction()) * 0.5;
         // Normal impulse this substep, where it acted and along which normal. The impulses
         // live in the manifolds the solver saw: on terrain, meshes and compounds (one manifold
         // per triangle or part) those are merged clusters, and the plain ones hold none.
@@ -157,10 +173,23 @@ pub(crate) fn resist_rolling(sim: &mut Simulation, rid: RegionId) {
         };
         let ((w1, com1), (w2, com2)) = (state(a), state(b));
         let rel = w1 - w2;
-        // Spinning about the normal is twist friction's job (Rapier has it).
-        let roll = rel - normal * rel.dot(normal);
+        let spin = rel.dot(normal);
+        let roll = rel - normal * spin;
         let rate = roll.length();
-        if rate < 1e-6 {
+        // A normal a little off (an edge of the ground's triangles) shows some of a fast roll
+        // as spin: leave that much alone, or a rolling barrel gets steered.
+        let spinning = spin.abs() - rate * SPIN_SLACK;
+        if mu > 0.0 && spinning > 1e-6 {
+            pushes.push(Resist {
+                pair: (pair.collider1, pair.collider2),
+                a,
+                b,
+                axis: normal * spin.signum(),
+                rate: spinning,
+                budget: mu * jn * SPIN_LEVER,
+            });
+        }
+        if !(round1 || round2) || crr <= 0.0 || rate < 1e-6 {
             continue;
         }
         let axis = roll / rate;
@@ -190,7 +219,8 @@ pub(crate) fn resist_rolling(sim: &mut Simulation, rid: RegionId) {
             budget: crr * jn * lever,
         });
     }
-    // A fixed order, so the sums come out bit-identical every run.
+    // A fixed order, so the sums come out bit-identical every run (a contact's spin push comes
+    // before its roll push).
     pushes.sort_by_key(|p| (p.pair.0.into_raw_parts(), p.pair.1.into_raw_parts()));
     for p in pushes {
         let inv = |h: Option<RigidBodyHandle>| {
