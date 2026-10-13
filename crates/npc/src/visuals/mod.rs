@@ -7,15 +7,15 @@
 //! during an attack's telegraph (it glows orange for a heavy guard breaker), raise the guard
 //! or shield to block (on a parry the blade glints white and the shield lights up), lean into
 //! dodges, reel when staggered, light up for an instant when hit (tinted, never blown out to
-//! white), and fall and drop their weapon when downed. Shooters shoulder their carbine (with
-//! a muzzle flash and kick); archers draw to the jaw. Faces show under open helmets worn over
-//! mail coifs. The helmet's horsehair crest shows skill (grey rookie, bronze, silver, gold
-//! master) and a light in its brow band glows with alertness (yellow suspicious, orange
-//! searching, red fighting). Their painted armor shows skill too: a rookie's is nearly new, a
-//! veteran's or master's chipped to the steel, scratched, dented and dirty. The team's color
-//! covers the cuirass, helmet, pauldrons, knee-length tabards and arm bands, so squads tell
-//! apart across the arena; the gambesons and hose under it are undyed or earthy, and differ
-//! between fighters.
+//! white: the plates light up in a pale tint of the team's color), and fall and drop their
+//! weapon when downed. Shooters shoulder their carbine (with a muzzle flash and kick); archers
+//! draw to the jaw. Faces show under open helmets worn over mail coifs. The helmet's horsehair
+//! crest shows skill (grey rookie, bronze, silver, gold master) and a light in its brow band
+//! glows with alertness (yellow suspicious, orange searching, red fighting). Their painted
+//! armor shows skill too: a rookie's is nearly new, a veteran's or master's chipped to the
+//! steel, scratched, dented and dirty. The team's color covers the cuirass, helmet, pauldrons,
+//! knee-length tabards and arm bands, so squads tell apart across the arena; the gambesons and
+//! hose under it are undyed or earthy, and differ between fighters.
 //!
 //! Animals are sculpted procedural red deer, grey wolves, rabbits and starlings (see
 //! `art::animals`; cheap primitives without the renderer). They plant their feet as they walk,
