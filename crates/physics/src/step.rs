@@ -321,16 +321,30 @@ pub(crate) fn physics_step(world: &mut World, mut q: Local<Option<StepQueries>>)
         let graph = sim.joint_graph();
         sim.rearticulate(&graph);
     }
+    // The articulation budget looks every few steps, and whenever joints are being made (so a
+    // new ragdoll past the budget starts on constraint joints).
+    sim.budget_clock += 1;
+    let mut graph = None;
+    if sim.settings.articulated_joints
+        && (sim.budget_clock >= crate::sim::BUDGET_EVERY
+            || sim.joints.values().any(|j| j.created.is_none()))
+    {
+        sim.budget_clock = 0;
+        let g = sim.joint_graph();
+        let lookup = |x: Entity| world_pose(world, x).map(|t| (t.translation, t.rotation));
+        sim.budget_articulations(&g, &foci, &lookup);
+        graph = Some(g);
+    }
     let waiting: Vec<Entity> = sim
         .joints
         .iter()
         .filter(|(_, j)| j.created.is_none())
         .map(|(e, _)| *e)
         .collect();
-    let graph = if waiting.is_empty() {
-        Default::default()
-    } else {
-        sim.joint_graph()
+    let graph = match graph {
+        Some(g) => g,
+        None if waiting.is_empty() => Default::default(),
+        None => sim.joint_graph(),
     };
     for e in waiting {
         let lookup = |x: Entity| world_pose(world, x).map(|t| (t.translation, t.rotation));
@@ -498,7 +512,11 @@ pub(crate) fn physics_step(world: &mut World, mut q: Local<Option<StepQueries>>)
             };
             let r = s.regions[rid as usize].as_mut().expect("live region");
             if r.needs_refresh {
-                r.world.detect_collisions(&filter, &());
+                // A zero-length step: Rapier applies the removals and updates the contacts and
+                // its islands together (its collision-only pass leaves the islands a link
+                // behind the contact graph, and a later contact gets mislinked).
+                r.world.integration_parameters.dt = 0.0;
+                r.world.step_with_events(&filter, &());
                 r.needs_refresh = false;
                 r.queries_refreshed();
                 r.update_bounds();
@@ -527,6 +545,7 @@ pub(crate) fn physics_step(world: &mut World, mut q: Local<Option<StepQueries>>)
                 settings.buoyancy,
             );
             drive_kinematics(&mut sim, rid, sub_dt, substeps - sub);
+            crate::cones::orient(&mut sim, rid);
             let scaled = scale_time(&mut sim, rid, true);
             {
                 let s = &mut *sim;
@@ -547,6 +566,7 @@ pub(crate) fn physics_step(world: &mut World, mut q: Local<Option<StepQueries>>)
                 scale_time(&mut sim, rid, false);
             }
             crate::rolling::resist_rolling(&mut sim, rid);
+            crate::cones::rub(&mut sim, rid);
             if settings.contact_events {
                 sim.process_contacts(rid, sub_dt);
             } else {

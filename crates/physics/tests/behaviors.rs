@@ -111,6 +111,36 @@ fn despawned_bodies_leave_the_simulation() {
     assert!((hit_b.point.y - 1.0).abs() < 0.02);
 }
 
+/// A region emptied of every moving body, then filled again, keeps simulating: the step that
+/// only applies removals must keep Rapier's islands in step with its contact graph (it used to
+/// leave them a link behind, and a later contact panicked in debug builds and was mislinked in
+/// release ones; a ragdoll going limp a second time hit it).
+#[test]
+fn a_region_emptied_and_filled_again_keeps_simulating() {
+    let mut app = app();
+    ground(&mut app, DVec3::ZERO, 20.0);
+    let first: Vec<Entity> = (0..3)
+        .map(|i| cube(&mut app, DVec3::new(2.0 * i as f64, 0.25, 0.0), 0.25))
+        .collect();
+    app.update_n(30);
+    for e in first {
+        app.world.despawn(e);
+    }
+    app.update_n(5);
+    let a = cube(&mut app, DVec3::new(0.0, 0.25, 0.0), 0.25);
+    let b = cube(&mut app, DVec3::new(2.0, 0.25, 0.0), 0.25);
+    app.update_n(30);
+    app.world.get_mut::<Transform>(a).unwrap().translation.y = 6.0;
+    app.update_n(120);
+    for e in [a, b] {
+        assert!(
+            (pos(&app, e).y - 0.25).abs() < 0.01,
+            "{e:?} rests at {:?}",
+            pos(&app, e)
+        );
+    }
+}
+
 #[test]
 fn collider_changes_rebuild_the_shape() {
     let mut app = app();
