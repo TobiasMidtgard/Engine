@@ -361,7 +361,7 @@ fn build_species(
         // are thicker. Both are matte enough that a grazing sun doesn't turn them white.
         let mut m = StandardMaterial::color(color[0], color[1], color[2])
             .with_roughness(if needles { 0.82 } else { 0.86 })
-            .with_subsurface(if needles { 0.45 } else { 0.65 })
+            .with_subsurface(if needles { 0.3 } else { 0.65 })
             .with_wind_sway(sp.wind_sway_m);
         // Leaves reflect less than the default dielectric (F0 ≈ 0.03).
         m.reflectance = 0.3;

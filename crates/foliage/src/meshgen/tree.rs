@@ -15,8 +15,8 @@
 //! the far level of detail keeps a third of them, flat and larger.
 //!
 //! Conifers stack whorls of drooping limbs: spruces carry flat needle sprays with curtains of
-//! hanging shoots in a tapering cone, pines brushes of long needles in cloud-like clumps at
-//! the ends of upturned limbs.
+//! hanging shoots in a tapering cone under a clad spire, pines dense pads of small sprays
+//! (branch ends of needle brushes) at the ends of upturned limbs.
 
 use engine_core::math::{Quat, Rng, Vec2, Vec3, Vec4, noise, smoothstep};
 
@@ -1190,10 +1190,13 @@ fn emit_card(
             grid_pts.push((p, uv, normal, (c.tint * (ao * inner)).extend(1.0)));
         }
     }
+    // Needle brushes are tufts all round their shoot rather than flat leaves, so a card of
+    // them shades with its clump as a whole and only the strongest turns away are pushed back.
+    let min_dot = if kind.is_needles() { -0.2 } else { 0.25 };
     let hemisphere = |v: Vec3, side: Vec3| {
         let d = v.dot(side);
-        if d < 0.25 {
-            (v + side * (0.25 - d)).normalize_or(side)
+        if d < min_dot {
+            (v + side * (min_dot - d)).normalize_or(side)
         } else {
             v
         }
@@ -1855,6 +1858,21 @@ fn conifer(sp: &PlantSpecies, seed: u64, sapling: bool) -> PlantMeshes {
         let dir = (Vec3::Y * 2.5 + out).normalize();
         cr.spray(&mut rng, base, dir, out, size, tc, tint, -0.05);
     }
+    // A spruce's top is a narrow spire clad down the leader: short shoots all round it, so
+    // the trunk never shows between its small top whorls.
+    if !pine {
+        let n = 12;
+        for k in 0..n {
+            let f = (k as f32 + rng.range(0.0, 0.8)) / n as f32;
+            let y = h - 0.5 - 2.8 * f;
+            let (p, _, _) = point_at(&path, &radius, (y / (h * 0.99)).clamp(0.0, 0.995));
+            let a = k as f32 * 2.399_963 + rng.range(-0.3, 0.3);
+            let out = Vec3::new(a.cos(), 0.0, a.sin());
+            let size = leaf * (0.45 + 0.35 * f);
+            let dir = (Vec3::Y * 1.2 + out * (0.7 + 0.6 * f)).normalize();
+            cr.spray(&mut rng, p, dir, out, size, tc, tint, 0.05);
+        }
+    }
     let shading = if pine {
         (0.6, 0.3, 0.3)
     } else {
@@ -1980,21 +1998,29 @@ fn pine_limb(
     sapling: bool,
 ) -> usize {
     let leaf = cr.leaf;
-    let crown = cr.crown;
     let (kc, _, _) = point_at(bp, br, 0.72);
     let clump = cr.clump(kc + Vec3::Y * 0.15, length * 0.45 + leaf * 0.6);
-    // A brush of needles: sprays fanning around the shoot, a tuft at its end.
-    let brush = |cr: &mut Crowns, rng: &mut Rng, p: Vec3, d: Vec3, scale: f32| {
-        let out = crown.outward(p, d);
-        let n = if sapling { 2 } else { 3 };
+    // A pad of needles round the shoot's end: smaller sprays over a flattened dome, growing
+    // out from its middle and facing the sky, overlapping into one tufted mass with a few
+    // tufts seen end-on on top. Its outline is ragged with brushes, not a few big cards.
+    let pad = |cr: &mut Crowns, rng: &mut Rng, p: Vec3, d: Vec3, scale: f32| {
+        let r = leaf * scale * 0.42;
+        let n = if sapling { 4 } else { 11 };
+        let a0 = rng.range(0.0, std::f32::consts::TAU);
         for i in 0..n {
-            let roll = i as f32 * 2.1 + rng.range(-0.4, 0.4);
-            let dir = (d + Vec3::Y * 0.35 + rotate(out, d, roll) * 0.25).normalize();
+            let a = a0 + i as f32 * 2.399_963 + rng.range(-0.3, 0.3);
+            let up = rng.range(-0.3, 0.9);
+            let ring = (1.0 - up * up).max(0.0).sqrt();
+            let v = Vec3::new(ring * a.cos(), up * 0.55, ring * a.sin());
+            let at = p + d * leaf * 0.1 + v * r;
+            let out = (v + Vec3::Y * 0.35).normalize_or(Vec3::Y);
+            let dir = (out + d * 0.6 + jitter(rng, 0.2)).normalize();
+            let roll = rng.range(-0.6, 0.6);
             let face = rotate((Vec3::Y - dir * dir.y).normalize_or(out), dir, roll);
-            let size = leaf * scale * rng.range(0.8, 1.05);
+            let size = leaf * scale * rng.range(0.6, 0.78);
             cr.spray(
                 rng,
-                p - dir * size * 0.55,
+                at - dir * size * 0.5,
                 dir,
                 face,
                 size,
@@ -2003,15 +2029,11 @@ fn pine_limb(
                 0.06,
             );
         }
-        let end = p + d * leaf * 0.08;
-        cr.cluster(
-            rng,
-            end,
-            (d + Vec3::Y * 0.3).normalize(),
-            leaf * scale * 0.65,
-            clump,
-            tint,
-        );
+        for _ in 0..if sapling { 1 } else { 2 } {
+            let at = p + d * leaf * 0.12 + Vec3::Y * r * 0.3 + jitter(rng, r * 0.4);
+            let face = (d * 0.6 + Vec3::Y * 0.6 + jitter(rng, 0.3)).normalize();
+            cr.cluster(rng, at, face, leaf * scale * 0.5, clump, tint);
+        }
     };
     let n2 = if sapling {
         1
@@ -2026,7 +2048,7 @@ fn pine_limb(
         let l2 = (length * (1.0 - s) * 0.6 + 0.25).min(1.4) * rng.range(0.8, 1.1);
         let shoot = grow(p, d2, l2, 3, |_, _| Vec3::Y * 0.12 + jitter(rng, 0.08));
         let (tp, td, _) = point_at(&shoot, &[0.0; 4], 1.0);
-        brush(cr, rng, tp, td, 0.85);
+        pad(cr, rng, tp, td, 0.85);
         cr.branches.push(Branch {
             path: shoot,
             radius: vec![rp * 0.5, rp * 0.35, rp * 0.22, 0.006],
@@ -2034,7 +2056,7 @@ fn pine_limb(
         });
     }
     let (tp, td, _) = point_at(bp, br, 1.0);
-    brush(cr, rng, tp, td, 1.0);
+    pad(cr, rng, tp, td, 1.0);
     clump
 }
 
@@ -2085,15 +2107,18 @@ fn spruce_limb(
         // Shelf: a spray fanning out sideways, tilted down a little, facing the sky.
         let a = rng.range(0.45, 1.0) * side;
         let dir = (rotate(d, Vec3::Y, a) - Vec3::Y * rng.range(0.15, 0.45)).normalize();
-        // Rolled toward the outside so the sprays show from the side too.
+        // Rolled toward the outside so the sprays show from the side too; higher up, where
+        // the limbs are short, they face out more, so the trunk doesn't show between whorls.
         let out = crown.outward(p, d);
-        let face = rotate((Vec3::Y + out * 0.5).normalize(), dir, rng.range(-0.7, 0.7));
+        let facing = Vec3::Y * (1.0 - 0.5 * rel) + out * (0.5 + 0.9 * rel);
+        let face = rotate(facing.normalize(), dir, rng.range(-1.0, 1.0));
         let sz = size * rng.range(0.9, 1.15) * (1.0 - 0.2 * s);
         cr.spray(rng, p, dir, face, sz, clump, tint, 0.22);
-        // Curtain: shoots hanging from the limb, seen from outside the crown.
-        if rng.chance(0.55 + 0.3 * (1.0 - rel)) && s > 0.25 {
+        // Curtain: shoots hanging from the limb, seen from outside the crown. Few enough
+        // that the limbs still read as tiers.
+        if rng.chance(0.35 + 0.25 * (1.0 - rel)) && s > 0.25 {
             let dir = (Vec3::NEG_Y * 1.2 + d * 0.5 + flat * side * 0.3).normalize();
-            let sz = size * rng.range(0.65, 0.9);
+            let sz = size * rng.range(0.5, 0.7);
             cr.spray(rng, p, dir, out, sz, clump, tint * 0.9, -0.1);
         }
         s += step * rng.range(0.8, 1.2);

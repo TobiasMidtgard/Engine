@@ -17,6 +17,9 @@
 //!
 //! Mip levels keep the alpha coverage of the full-size image, so distant crowns stay full
 //! instead of thinning out into see-through ghosts (the classic alpha-test mip problem).
+//! Needle atlases paint their larger mip levels again at that size instead of averaging the
+//! level above: averaged, hair-thin needles melt into solid leaf-shaped blobs, so each level
+//! keeps a share of its needles as sharp strokes a pixel wide (see [`Canvas::needle_width`]).
 
 use engine_core::math::{Rng, Vec2, Vec3, noise::perlin2, smoothstep};
 use engine_render::Image;
@@ -61,7 +64,15 @@ impl LeafKind {
     pub fn is_atlas(self) -> bool {
         self != LeafKind::Frond
     }
+
+    /// Pine and spruce needles.
+    pub fn is_needles(self) -> bool {
+        matches!(self, LeafKind::LongNeedles | LeafKind::ShortNeedles)
+    }
 }
+
+/// The smallest atlas cell (pixels) whose mip level is painted rather than averaged.
+const MIN_PAINTED_CELL: u32 = 8;
 
 /// Alpha cutoff used by leaf materials.
 pub const ALPHA_CUTOFF: f32 = 0.5;
@@ -101,6 +112,12 @@ struct Canvas {
     px: Vec<[f32; 4]>,
     /// Tangent-space normal (x right, y up), blended by coverage.
     nrm: Vec<[f32; 3]>,
+    /// Needles thinner than this many pixels are widened to it, and only a matching share of
+    /// them painted (0: paint every needle as it is). See [`Canvas::needle_width`].
+    min_needle_px: f32,
+    /// Picks which thin needles to keep, apart from the painter's own random numbers so the
+    /// layout stays the same at every size.
+    thin: Rng,
 }
 
 impl Canvas {
@@ -109,7 +126,25 @@ impl Canvas {
             size,
             px: vec![[0.0; 4]; (size * size) as usize],
             nrm: vec![[0.0, 0.0, 1.0]; (size * size) as usize],
+            min_needle_px: 0.0,
+            thin: Rng::new(0x7e1e ^ size as u64),
         }
+    }
+
+    /// How much wider to paint a needle `w` wide and `l` long (canvas units), or `None` to
+    /// leave it out. On a small canvas (a painted mip level) a needle under `min_needle_px`
+    /// pixels wide is widened to that, and kept with the chance that leaves the needles' total
+    /// coverage as it was: the brush keeps reading as separate sharp needles instead of a
+    /// blurred blob. Needles too short to show as a stroke (spruce's, far off) stay as they
+    /// are and blend into a fuzzy shoot.
+    fn needle_width(&mut self, w: f32, l: f32) -> Option<f32> {
+        let px = w * self.size as f32;
+        if px >= self.min_needle_px || l * self.size as f32 <= 3.0 {
+            return Some(1.0);
+        }
+        self.thin
+            .chance(px / self.min_needle_px)
+            .then_some(self.min_needle_px / px)
     }
 
     fn index(&self, x: i32, y: i32) -> Option<usize> {
@@ -317,7 +352,30 @@ impl Canvas {
 
     /// Finish: fill the color of transparent texels from their neighbors (so filtering doesn't
     /// pull in a dark fringe), build coverage-preserving mips, encode both images.
-    fn into_textures(mut self) -> LeafTextures {
+    fn into_textures(self) -> LeafTextures {
+        Canvas::into_mipped_textures(vec![self], false)
+    }
+
+    /// Finish a painted image and its painted mip levels (each half the size of the one
+    /// before); the levels below the last painted one are averaged from it. `dither`: see
+    /// [`encode_color`].
+    fn into_mipped_textures(levels: Vec<Canvas>, dither: bool) -> LeafTextures {
+        let size = levels[0].size;
+        let (px, nrm): (Vec<_>, Vec<_>) = levels
+            .into_iter()
+            .map(|mut c| {
+                c.prepare();
+                (c.px, c.nrm)
+            })
+            .unzip();
+        LeafTextures {
+            color: encode_color(size, px, dither),
+            normal: encode_normal(size, nrm),
+        }
+    }
+
+    /// Normalize the normals, un-premultiply the edges and fill transparent texels' color.
+    fn prepare(&mut self) {
         let size = self.size as usize;
         // Normalize the blended normals.
         for n in &mut self.nrm {
@@ -387,16 +445,12 @@ impl Canvas {
                 p[..3].copy_from_slice(&avg);
             }
         }
-
-        let color = encode_color(self.size, self.px);
-        let normal = encode_normal(self.size, self.nrm);
-        LeafTextures { color, normal }
     }
 }
 
-/// Box-filter mip chain of a square image of `[f32; N]` pixels.
-fn mip_chain<const N: usize>(level0: Vec<[f32; N]>) -> Vec<Vec<[f32; N]>> {
-    let mut levels = vec![level0];
+/// Mip chain of a square image of `[f32; N]` pixels: the given levels (each half the size
+/// of the one before), then box-filtered down from the last of them to 1×1.
+fn mip_chain<const N: usize>(mut levels: Vec<Vec<[f32; N]>>) -> Vec<Vec<[f32; N]>> {
     while levels.last().unwrap().len() > 1 {
         let prev = levels.last().unwrap();
         let ps = (prev.len() as f32).sqrt() as u32;
@@ -420,23 +474,34 @@ fn mip_chain<const N: usize>(level0: Vec<[f32; N]>) -> Vec<Vec<[f32; N]>> {
     levels
 }
 
-fn encode_color(size: u32, px: Vec<[f32; 4]>) -> Image {
+/// Encode the color with its mips. Each mip keeps the full-size image's alpha coverage:
+/// scaled until as many texels pass the cutoff, or with `dither` error-diffused to 0 or 1 at
+/// the same mean, so a thin, see-through brush of needles stays a speckle of texels (which
+/// the temporal anti-aliasing's jitter resolves to the sky showing through) instead of
+/// swelling into a solid blob.
+fn encode_color(size: u32, px: Vec<Vec<[f32; 4]>>, dither: bool) -> Image {
     let levels = mip_chain(px);
     let target = coverage(&levels[0], 1.0);
-    let encode = |level: &[[f32; 4]], alpha_scale: f32| -> Vec<u8> {
+    let encode = |level: &[[f32; 4]], alpha: Vec<f32>| -> Vec<u8> {
         let mut out = Vec::with_capacity(level.len() * 4);
-        for p in level {
+        for (p, a) in level.iter().zip(alpha) {
             for c in &p[..3] {
                 out.push((linear_to_srgb(*c).clamp(0.0, 1.0) * 255.0 + 0.5) as u8);
             }
-            out.push(((p[3] * alpha_scale).clamp(0.0, 1.0) * 255.0 + 0.5) as u8);
+            out.push((a.clamp(0.0, 1.0) * 255.0 + 0.5) as u8);
         }
         out
     };
-    let data = encode(&levels[0], 1.0);
+    let scaled = |level: &[[f32; 4]], scale: f32| level.iter().map(|p| p[3] * scale).collect();
+    let data = encode(&levels[0], scaled(&levels[0], 1.0));
     let mips = levels[1..]
         .iter()
         .map(|level| {
+            if dither {
+                let mean = level.iter().map(|p| p[3]).sum::<f32>() / level.len() as f32;
+                let alpha = dither_alpha(scaled(level, target / mean.max(1e-6)));
+                return encode(level, alpha);
+            }
             // Find the alpha scale that keeps the coverage above the cutoff.
             let (mut lo, mut hi) = (0.5f32, 6.0f32);
             for _ in 0..14 {
@@ -447,7 +512,7 @@ fn encode_color(size: u32, px: Vec<[f32; 4]>) -> Image {
                     hi = mid;
                 }
             }
-            encode(level, 0.5 * (lo + hi))
+            encode(level, scaled(level, 0.5 * (lo + hi)))
         })
         .collect();
     let mut image = Image::new(size, size, data, true);
@@ -455,7 +520,35 @@ fn encode_color(size: u32, px: Vec<[f32; 4]>) -> Image {
     image
 }
 
-fn encode_normal(size: u32, nrm: Vec<[f32; 3]>) -> Image {
+/// Floyd-Steinberg error diffusion (serpentine) of a square image's alpha to 0 or 1.
+fn dither_alpha(mut a: Vec<f32>) -> Vec<f32> {
+    let n = (a.len() as f32).sqrt() as usize;
+    for y in 0..n {
+        let forward = y % 2 == 0;
+        for i in 0..n {
+            let x = if forward { i } else { n - 1 - i };
+            let old = a[y * n + x];
+            let new = if old >= ALPHA_CUTOFF { 1.0 } else { 0.0 };
+            a[y * n + x] = new;
+            let e = old - new;
+            let ahead = if forward { x + 1 } else { x.wrapping_sub(1) };
+            let behind = if forward { x.wrapping_sub(1) } else { x + 1 };
+            for (xx, yy, w) in [
+                (ahead, y, 7.0 / 16.0),
+                (behind, y + 1, 3.0 / 16.0),
+                (x, y + 1, 5.0 / 16.0),
+                (ahead, y + 1, 1.0 / 16.0),
+            ] {
+                if xx < n && yy < n {
+                    a[yy * n + xx] += e * w;
+                }
+            }
+        }
+    }
+    a
+}
+
+fn encode_normal(size: u32, nrm: Vec<Vec<[f32; 3]>>) -> Image {
     let levels = mip_chain(nrm);
     let encode = |level: &[[f32; 3]]| -> Vec<u8> {
         let mut out = Vec::with_capacity(level.len() * 4);
@@ -1076,7 +1169,7 @@ fn broad_cluster(cv: &mut Canvas, kind: LeafKind, rng: &mut Rng) {
 fn needle_color(rng: &mut Rng, base: [f32; 3], fresh: f32) -> [f32; 3] {
     let lum = rng.range(0.7, 1.05);
     let c = scale3(base, lum);
-    mix3(c, [base[0] * 1.25, base[1] * 1.15, base[2] * 0.75], fresh)
+    mix3(c, [base[0] * 1.12, base[1] * 1.1, base[2] * 0.86], fresh)
 }
 
 /// A brush of needles along `path` from `t0` to its tip.
@@ -1107,16 +1200,22 @@ fn needle_brush(
             let l = length * rng.range(0.8, 1.15) * taper;
             let bend = rot(nd, side * rng.range(-0.12, 0.2));
             let c = needle_color(rng, color, fresh);
-            let mid = p + nd * l * 0.5;
-            cv.stem(p, mid, width, width * 0.85, scale3(c, 0.8), c);
-            cv.stem(mid, mid + bend * l * 0.5, width * 0.85, width * 0.35, c, c);
+            let Some(k) = cv.needle_width(width, l) else {
+                continue;
+            };
+            let (w, mid) = (width * k, p + nd * l * 0.5);
+            cv.stem(p, mid, w, w * 0.85, scale3(c, 0.8), c);
+            cv.stem(mid, mid + bend * l * 0.5, w * 0.85, w * 0.35, c, c);
         }
         // A needle pointing toward or away from the viewer: foreshortened.
         if rng.chance(0.7) {
             let nd = rot(d, rng.range(-1.2, 1.2));
             let l = length * rng.range(0.25, 0.6) * taper;
             let c = needle_color(rng, color, fresh);
-            cv.stem(p, p + nd * l, width * 1.1, width * 0.5, scale3(c, 0.85), c);
+            if let Some(k) = cv.needle_width(width, l) {
+                let w = width * k;
+                cv.stem(p, p + nd * l, w * 1.1, w * 0.5, scale3(c, 0.85), c);
+            }
         }
     }
 }
@@ -1124,61 +1223,79 @@ fn needle_brush(
 const PINE_NEEDLE: [f32; 3] = [0.74, 0.86, 0.74];
 const SPRUCE_NEEDLE: [f32; 3] = [0.72, 0.86, 0.7];
 
-/// Pine: a branchlet whose shoots end in long brushes of needles.
+/// Length of a polyline.
+fn path_length(path: &[Vec2]) -> f32 {
+    path.windows(2).map(|w| w[0].distance(w[1])).sum()
+}
+
+/// Pine needles on the last `reach` (canvas units) of a shoot: a bottle-brush of needles
+/// spread all round it, gathered into a tuft at its tip. The needles behind the shoot are
+/// painted first, in its shade.
+fn pine_brush(cv: &mut Canvas, rng: &mut Rng, path: &[Vec2], reach: f32, shade: f32) {
+    let total = path_length(path).max(1e-3);
+    needle_brush(
+        cv,
+        rng,
+        path,
+        (1.0 - reach / total).max(0.0),
+        PINE_NEEDLE_LENGTH,
+        (0.75, 1.25),
+        0.003,
+        0.0045,
+        scale3(PINE_NEEDLE, shade),
+        (1.0 - 0.06 / total).max(0.0),
+    );
+}
+
+/// How long a pine needle is on a spray card (canvas units): a card spans a branch end of
+/// about a meter, and a Scots pine's needles are 4-7 cm.
+const PINE_NEEDLE_LENGTH: f32 = 0.055;
+
+/// Pine: the end of a branch, at true scale. A shoot with a whorl of side shoots for each of
+/// the last few years (the older, lower ones longer and forking again), every shoot bare
+/// wood except for the brush of needles on its last 20-odd centimeters. From afar a card
+/// reads as a ragged pad of small brushes, as a pine's foliage does, rather than as one big
+/// leaf (which oversized brushes did).
 fn pine_spray(cv: &mut Canvas, rng: &mut Rng) {
     let base = Vec2::new(0.5, 0.995);
     let main = shoot(
         base,
-        rot(Vec2::NEG_Y, rng.range(-0.12, 0.12)),
-        rng.range(0.66, 0.74),
-        rng.range(-0.3, 0.3),
-        6,
+        rot(Vec2::NEG_Y, rng.range(-0.15, 0.15)),
+        rng.range(0.78, 0.86),
+        rng.range(-0.35, 0.35),
+        8,
     );
-    let mut shoots = Vec::new();
-    let n = rng.range_i32(2, 4);
-    for k in 0..n {
-        let t = 0.25 + 0.4 * (k as f32 + rng.range(0.0, 0.5)) / n as f32;
-        let (p, d) = along(&main, t);
-        let sgn = if k % 2 == 0 { 1.0 } else { -1.0 };
-        shoots.push(shoot(
-            p,
-            rot(d, sgn * rng.range(0.55, 0.8)),
-            rng.range(0.3, 0.4) * (1.0 - 0.3 * t),
-            -sgn * 0.35,
-            4,
-        ));
+    let mut shoots: Vec<Vec<Vec2>> = Vec::new();
+    for (t, len, forks) in [(0.3, 0.36, true), (0.53, 0.3, true), (0.75, 0.2, false)] {
+        let (p, d) = along(&main, t + rng.range(-0.04, 0.04));
+        for sgn in [-1.0f32, 1.0] {
+            let a = sgn * rng.range(0.55, 0.95);
+            let l = len * rng.range(0.8, 1.15);
+            // Side shoots curve back up toward the light.
+            let s = shoot(p, rot(d, a), l, -sgn * rng.range(0.2, 0.5), 5);
+            if forks {
+                let (q, e) = along(&s, rng.range(0.45, 0.6));
+                let b = rng.range(0.5, 0.9) * if rng.chance(0.5) { 1.0 } else { -1.0 };
+                shoots.push(shoot(q, rot(e, b), l * 0.5, -b * 0.5, 3));
+            }
+            shoots.push(s);
+        }
+        // One pointing at the viewer, foreshortened.
+        if rng.chance(0.6) {
+            let a = rng.range(-0.3, 0.3);
+            shoots.push(shoot(p, rot(d, a), len * 0.4, 0.0, 3));
+        }
     }
-    cv.stem_path(&main, 0.016, 0.009, TWIG);
+    cv.stem_path(&main, 0.014, 0.006, TWIG);
     for s in &shoots {
-        cv.stem_path(s, 0.01, 0.007, TWIG);
+        cv.stem_path(s, 0.008, 0.004, TWIG);
     }
-    let len = 0.17;
-    for s in &shoots {
-        needle_brush(
-            cv,
-            rng,
-            s,
-            0.15,
-            len,
-            (0.3, 0.75),
-            0.0048,
-            0.0075,
-            PINE_NEEDLE,
-            0.8,
-        );
+    shoots.push(main);
+    for shade in [0.6, 1.0] {
+        for s in &shoots {
+            pine_brush(cv, rng, s, 0.22, shade);
+        }
     }
-    needle_brush(
-        cv,
-        rng,
-        &main,
-        0.4,
-        len * 1.1,
-        (0.3, 0.75),
-        0.005,
-        0.007,
-        PINE_NEEDLE,
-        0.85,
-    );
 }
 
 /// Spruce: a flat, comb-like spray of shoots densely covered in short needles.
@@ -1254,34 +1371,77 @@ fn needle_tuft(cv: &mut Canvas, rng: &mut Rng, long: bool) {
     let c = Vec2::splat(0.5);
     let color = if long { PINE_NEEDLE } else { SPRUCE_NEEDLE };
     if long {
-        for _ in 0..520 {
-            let a = rng.range(0.0, TAU);
-            let d = Vec2::new(a.cos(), a.sin());
-            let r0 = rng.range(0.0, 0.07);
-            let l = rng.range(0.2, 0.4);
-            let fresh = rng.range(0.0, 0.5);
-            let col = needle_color(rng, color, fresh);
-            let p = c + d * r0;
-            let bend = rot(d, rng.range(-0.15, 0.15));
-            cv.stem(p, p + d * l * 0.5, 0.0055, 0.0048, scale3(col, 0.75), col);
+        // A branch end seen from its tip: shoots radiating from the middle, each with its
+        // brush, and the nearest brushes seen end-on as round tufts.
+        let k = rng.range_i32(5, 8);
+        let a0 = rng.range(0.0, TAU);
+        let mut shoots = Vec::new();
+        for i in 0..k {
+            let a = a0 + i as f32 / k as f32 * TAU + rng.range(-0.3, 0.3);
+            let len = rng.range(0.24, 0.36);
+            shoots.push(shoot(
+                c,
+                Vec2::new(a.cos(), a.sin()),
+                len,
+                rng.range(-0.3, 0.3),
+                4,
+            ));
+        }
+        for s in &shoots {
+            cv.stem_path(s, 0.01, 0.005, TWIG);
+        }
+        for shade in [0.6, 1.0] {
+            for s in &shoots {
+                pine_brush(cv, rng, s, 0.2, shade);
+            }
+        }
+        // End-on brushes: needles splaying from a point, the middle one the leader's.
+        let tufts = rng.range_i32(3, 6);
+        for j in 0..=tufts {
+            let at = if j == 0 {
+                c
+            } else {
+                let a = rng.range(0.0, TAU);
+                c + Vec2::new(a.cos(), a.sin()) * rng.range(0.1, 0.24)
+            };
+            for _ in 0..70 {
+                let a = rng.range(0.0, TAU);
+                let d = Vec2::new(a.cos(), a.sin());
+                let l = PINE_NEEDLE_LENGTH * rng.range(0.5, 1.3);
+                let fresh = rng.range(0.0, 0.5);
+                let col = needle_color(rng, color, fresh);
+                let p = at + d * rng.range(0.0, 0.012);
+                let bend = rot(d, rng.range(-0.15, 0.15));
+                let Some(k) = cv.needle_width(0.0032, l) else {
+                    continue;
+                };
+                cv.stem(
+                    p,
+                    p + d * l * 0.5,
+                    0.0032 * k,
+                    0.0028 * k,
+                    scale3(col, 0.75),
+                    col,
+                );
+                cv.stem(
+                    p + d * l * 0.5,
+                    p + d * l * 0.5 + bend * l * 0.5,
+                    0.0028 * k,
+                    0.0012 * k,
+                    col,
+                    col,
+                );
+            }
+            // The bud in the middle.
             cv.stem(
-                p + d * l * 0.5,
-                p + d * l * 0.5 + bend * l * 0.5,
-                0.0048,
-                0.002,
-                col,
-                col,
+                at - Vec2::splat(0.006),
+                at + Vec2::splat(0.006),
+                0.016,
+                0.016,
+                [0.42, 0.3, 0.2],
+                [0.5, 0.36, 0.22],
             );
         }
-        // The bud in the middle.
-        cv.stem(
-            c - Vec2::splat(0.012),
-            c + Vec2::splat(0.012),
-            0.03,
-            0.03,
-            [0.42, 0.3, 0.2],
-            [0.5, 0.36, 0.22],
-        );
     } else {
         let n = 8;
         for k in 0..n {
@@ -1311,8 +1471,9 @@ fn needle_tuft(cv: &mut Canvas, rng: &mut Rng, long: bool) {
 }
 
 /// Paint one cell of an atlas (or the whole frond image) on its own canvas.
-fn paint_cell(kind: LeafKind, cell: usize, size: u32, seed: u64) -> Canvas {
+fn paint_cell(kind: LeafKind, cell: usize, size: u32, seed: u64, min_needle_px: f32) -> Canvas {
     let mut cv = Canvas::new(size);
+    cv.min_needle_px = min_needle_px;
     let mut rng = Rng::new(seed ^ (cell as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15));
     match kind {
         LeafKind::Broad | LeafKind::Small | LeafKind::Lobed => {
@@ -1375,14 +1536,28 @@ fn paint_cell(kind: LeafKind, cell: usize, size: u32, seed: u64) -> Canvas {
 /// [`ATLAS_CELLS`]² cells (see [`atlas_cell`]); fronds one image.
 pub fn leaf_textures(kind: LeafKind, size: u32, seed: u64) -> LeafTextures {
     if !kind.is_atlas() {
-        return paint_cell(kind, 0, size, seed).into_textures();
+        return paint_cell(kind, 0, size, seed, 0.0).into_textures();
     }
+    let cs = (size / ATLAS_CELLS).max(1);
+    let mut levels = vec![paint_atlas(kind, cs, seed, 0.0)];
+    if kind.is_needles() {
+        // Paint the mip levels too, needles at least a pixel wide (see `Canvas::needle_width`).
+        let mut c = cs / 2;
+        while c >= MIN_PAINTED_CELL {
+            levels.push(paint_atlas(kind, c, seed, 1.0));
+            c /= 2;
+        }
+    }
+    Canvas::into_mipped_textures(levels, kind.is_needles())
+}
+
+/// Paint every cell of an atlas, `cs` pixels each.
+fn paint_atlas(kind: LeafKind, cs: u32, seed: u64, min_needle_px: f32) -> Canvas {
     let n = ATLAS_CELLS;
-    let cs = (size / n).max(1);
     // The cells are independent: paint them in parallel.
     let cells: Vec<Canvas> = std::thread::scope(|scope| {
         let handles: Vec<_> = (0..(n * n) as usize)
-            .map(|c| scope.spawn(move || paint_cell(kind, c, cs, seed)))
+            .map(|c| scope.spawn(move || paint_cell(kind, c, cs, seed, min_needle_px)))
             .collect();
         handles
             .into_iter()
@@ -1400,7 +1575,7 @@ pub fn leaf_textures(kind: LeafKind, size: u32, seed: u64) -> LeafTextures {
             atlas.nrm[dst].copy_from_slice(&cell.nrm[src]);
         }
     }
-    atlas.into_textures()
+    atlas
 }
 
 /// Paint a leaf texture (color and alpha only; see [`leaf_textures`] for the normal map).
@@ -1437,6 +1612,43 @@ mod tests {
             let c3 = cover(&img.mips[2]);
             assert!((c3 - c0).abs() < 0.12, "{kind:?} mip coverage {c3} vs {c0}");
         }
+    }
+
+    #[test]
+    fn needle_mips_are_see_through_speckles() {
+        let opaque = |data: &[u8]| {
+            data.as_chunks::<4>()
+                .0
+                .iter()
+                .filter(|p| p[3] >= 128)
+                .count() as f32
+                / (data.len() / 4) as f32
+        };
+        for kind in [LeafKind::LongNeedles, LeafKind::ShortNeedles] {
+            let img = leaf_texture(kind, 256, 7);
+            let c0 = opaque(&img.data);
+            for (i, mip) in img.mips.iter().enumerate().take(5) {
+                // Each texel passes the cutoff or doesn't (dithered), rather than a brush
+                // averaging into a solid, half-transparent blob...
+                let texels = mip.as_chunks::<4>().0;
+                assert!(
+                    texels.iter().all(|p| p[3] == 0 || p[3] == 255),
+                    "{kind:?} mip {i}"
+                );
+                // ...and as many pass as at full size.
+                let c = opaque(mip);
+                assert!((c - c0).abs() < 0.05, "{kind:?} mip {i}: {c} vs {c0}");
+            }
+        }
+        // Broad leaves keep smooth alpha edges.
+        let img = leaf_texture(LeafKind::Lobed, 256, 7);
+        assert!(
+            img.mips[1]
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .any(|p| p[3] > 0 && p[3] < 255)
+        );
     }
 
     #[test]
