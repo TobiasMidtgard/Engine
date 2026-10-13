@@ -196,8 +196,16 @@ fn shots() -> Vec<Shot> {
             name: "15_spider",
             when: When::At(6.0),
             subject: |d| d.spider,
-            eye: Vec3::new(2.4, 1.3, -2.4),
-            target: Vec3::new(0.0, 0.35, 0.0),
+            eye: Vec3::new(1.9, 1.0, -1.7),
+            target: Vec3::new(0.0, 0.3, 0.05),
+            fov_deg: 45.0,
+        },
+        Shot {
+            name: "23_spider_head",
+            when: When::At(3.0),
+            subject: |d| d.spider,
+            eye: Vec3::new(0.45, 0.5, -0.85),
+            target: Vec3::new(0.0, 0.3, -0.25),
             fov_deg: 45.0,
         },
         Shot {

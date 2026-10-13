@@ -660,6 +660,7 @@ pub fn step_gait(
                     def.pole,
                     swing,
                     up_model,
+                    fwd_axis,
                 );
             }
             (LegStyle::Hoofed, &[a, b, ankle, end, ..]) => {
@@ -672,6 +673,7 @@ pub fn step_gait(
                     def.pole,
                     swing,
                     up_model,
+                    fwd_axis,
                 );
             }
             _ => {}
@@ -689,8 +691,11 @@ pub fn step_gait(
 }
 
 /// A hoofed leg `[upper, lower, ankle, end]`: keep the cannon as animated (`ankle_rot`),
-/// flipped back during the swing (and tipped on the toe when out of reach), and reach the
-/// knee (hock) to where that cannon puts the hoof on its path.
+/// folded during the swing (and tipped on the toe when out of reach), and reach the knee
+/// (hock) to where that cannon puts the hoof on its path. In the swing a foreleg's cannon
+/// folds back under the knee and a hind leg's swings forward as the hock bends; either way
+/// the hoof (paw) curls back behind the fetlock, as a horse's or dog's does.
+#[allow(clippy::too_many_arguments)]
 fn hoofed(
     edit: &mut PoseEdit,
     [a, b, ankle, end]: [usize; 4],
@@ -699,9 +704,13 @@ fn hoofed(
     pole: Vec3,
     swing: f32,
     up_model: Vec3,
+    fwd: Vec3,
 ) {
     let cannon = edit.position(end) - edit.position(ankle);
-    let fold = (std::f32::consts::PI * swing.clamp(0.0, 1.0)).sin() * 1.1;
+    let lift = (std::f32::consts::PI * swing.clamp(0.0, 1.0)).sin();
+    // A knee that bends forward (the stifle) marks a hind leg, whose hock folds less.
+    let hind = pole.dot(fwd) > 0.0;
+    let fold = lift * if hind { 0.8 } else { 1.1 };
     let lateral = up_model.cross(pole).normalize_or(Vec3::X);
     let flip = Quat::from_axis_angle(lateral, -fold);
     // A foot the leg can't reach with the cannon as animated pivots on its toe: the cannon
@@ -733,6 +742,13 @@ fn hoofed(
     edit.set_model_rotation(ankle, ankle_rot);
     if fold > 0.0 || tip != Quat::IDENTITY {
         edit.rotate_model(ankle, tip * flip);
+    }
+    if lift > 0.0 {
+        // The fetlock flexes: the hoof swings back toward the back of the cannon (on a hind
+        // leg first undoing the hock's forward fold).
+        let curl = 0.6 * lift + if hind { fold } else { 0.0 };
+        let back = fwd.cross(up_model).normalize_or(Vec3::X);
+        edit.rotate_model(end, Quat::from_axis_angle(back, -curl));
     }
 }
 
