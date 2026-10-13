@@ -196,8 +196,12 @@ under a roof it is dry; a surface with nothing above it in the sky occlusion map
 ground much drier than the open ground is the cover itself (a roof, a vehicle's top, a canopy) and
 gets the open ground's wetness and snow instead, leaving puddles and scorch to the ground below.
 Materials with `receives_wetness` (the default) read it per pixel (walls half a meter in front of
-them): scorch singes and then chars them to matte soot, rain darkens and glosses them, snow settles
-on top faces. `render.surface_weather_uploads` in `Diagnostics` counts the uploads.
+them): scorch singes and then chars them to matte soot, snow settles on top faces, and rain wets
+them by porosity, which follows roughness (Lagarde 2013): rough, porous surfaces (roughness 0.8 and
+up: grass, soil, unsealed stone) darken to about half and lose only a fifth of their roughness,
+while smooth, sealed ones (0.35 and below: paint, glazed tile, metal) hardly darken and gloss to
+roughness 0.1. Puddle-level gloss on porous ground is the weather's own ground pass.
+`render.surface_weather_uploads` in `Diagnostics` counts the uploads.
 
 **Screen-space effects** (built): every frame starts with a depth prepass that also writes
 normals, roughness and motion vectors. From it come ground-truth ambient occlusion (GTAO,

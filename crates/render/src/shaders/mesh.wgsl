@@ -630,10 +630,19 @@ fn evaluate_material(si: SurfaceIn, shadows: bool) -> MaterialSample {
             out.metallic *= 1.0 - scorch;
             out.subsurface *= 1.0 - scorch;
         }
-        // Rain darkens porous surfaces and makes them glossy; snow settles on top faces.
+        // Rain. Rough, porous surfaces (soil, grass, unsealed stone and wood) soak the water up:
+        // they darken to about half and lose only a fifth of their roughness. Smooth, sealed ones
+        // (paint, metal, glazed tile, polished stone) take none in and hardly darken, but carry
+        // a film of water that makes them nearly mirror-like. Porosity follows roughness
+        // (Lagarde 2013, "Water drop 3b: physically based wet surfaces"); puddles are the
+        // weather's own pass.
         let wet = ground.x * saturate(n_up * 0.7 + 0.5);
-        out.albedo *= mix(1.0, 0.55, wet * (1.0 - out.metallic));
-        out.roughness = mix(out.roughness, 0.12, wet * 0.85);
+        let porosity = smoothstep(0.35, 0.8, out.roughness) * (1.0 - out.metallic);
+        let darken = mix(mix(0.92, 0.5, porosity), 1.0, out.metallic);
+        out.albedo *= mix(1.0, darken, wet);
+        let soaked = out.roughness * (1.0 - 0.2 * wet * porosity);
+        out.roughness = mix(soaked, min(soaked, 0.1), wet * (1.0 - porosity));
+        // Snow settles on top faces.
         let snow_cover = saturate(ground.z * SURFACE_SNOW_SCALE_M * 10.0) * smoothstep(0.35, 0.8, n_up);
         let snow_noise = value_noise2(tiling_pos(si.rel).xz * 1.7);
         let snow = saturate(snow_cover * (0.75 + 0.5 * snow_noise));
