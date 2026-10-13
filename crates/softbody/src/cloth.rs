@@ -19,7 +19,7 @@ use engine_world::animation::SkeletonPose;
 
 use crate::body::{FrameSource, SoftBodySim, SoftKind, Surface};
 use crate::settings::{SimSettings, SoftMaterial};
-use crate::solver::{Aero, Sim, Tether};
+use crate::solver::{Aero, Goal, Sim, Tether};
 
 /// What holds a cloth up.
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
@@ -38,6 +38,14 @@ pub enum ClothPins {
     Bones { rows: u32, bones: Vec<String> },
     /// Specific grid points `[column, row]`.
     Points(Vec<[u32; 2]>),
+    /// Whole edges: a gaff sail laced to its mast, gaff and boom (left, top, bottom), a
+    /// trampoline on all four.
+    Edges {
+        left: bool,
+        top: bool,
+        right: bool,
+        bottom: bool,
+    },
 }
 
 /// Simulated cloth. Add it to an entity (with a `Transform`) and the plugin builds the
@@ -45,7 +53,12 @@ pub enum ClothPins {
 ///
 /// The cloth lies in the entity's local XY plane: `u` runs along +X, `v` runs down along −Y,
 /// the front faces +Z, and the point `anchor` (in 0..1 of the size) sits at the entity's
-/// origin. Pins follow the entity, so a flag on a moving ship stays on its mast.
+/// origin. Pins follow the entity, so a flag on a moving ship stays on its mast. With a
+/// [`panel`](Self::panel) the cloth is that four-sided shape instead.
+///
+/// On an entity carried by a dynamic rigid body (the entity itself or an ancestor), the
+/// pins hold the cloth with very stiff springs instead, and the wind on the cloth pushes the
+/// body through them: a sail drives its boat.
 #[derive(Component, Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Cloth {
@@ -56,6 +69,15 @@ pub struct Cloth {
     /// The point of the cloth at the entity origin: [0, 0] top-left (flags),
     /// [0.5, 0] top-center (curtains, capes).
     pub anchor: [f32; 2],
+    /// Corners of a four-sided panel in the entity's local XY plane, meters: top-left,
+    /// top-right, bottom-right, bottom-left (a gaff or lug sail, a kite, an awning). `u` runs
+    /// from the left edge to the right one, `v` from the top edge down. `None` = the `size`
+    /// rectangle placed by `anchor`.
+    pub panel: Option<[[f32; 2]; 4]>,
+    /// Belly sewn into the cloth, as a fraction of its width (sails 0.08–0.12): deepest two
+    /// fifths of the way across, fading to every edge, bulging toward +Z. Wind from the front
+    /// pops it through to the other side. 0 = flat.
+    pub camber: f32,
     pub pins: ClothPins,
     /// Width the cloth is gathered to along its top, as a fraction of `size[0]` (curtains on
     /// rings ≈ 0.7). Below 1 it starts in folds between the pins. 1 = flat.
@@ -88,6 +110,8 @@ impl Default for Cloth {
             size: [2.0, 1.4],
             resolution: [20, 14],
             anchor: [0.0, 0.0],
+            panel: None,
+            camber: 0.0,
             pins: ClothPins::LeftEdge,
             gather: 1.0,
             mass_per_m2: 0.15,
@@ -166,6 +190,45 @@ impl Cloth {
                 friction: 0.3,
                 damping: 0.15,
                 prewarm_secs: 1.0,
+                ..SimSettings::default()
+            },
+            ..Self::default()
+        }
+    }
+
+    /// A fore-and-aft sail laced along its luff (left edge), head (top) and foot (bottom),
+    /// with the leech free. `corners` are throat, peak, clew and tack in the entity's local XY
+    /// plane (see [`panel`](Self::panel)): a gaff sail, or a lug sail with its yard. Put it on
+    /// a child of the boat's rigid body and the wind in it drives the boat.
+    pub fn sail(corners: [[f32; 2]; 4], material: SoftMaterial) -> Self {
+        let [throat, peak, clew, tack] = corners.map(Vec2::from_array);
+        let across = 0.5 * (throat.distance(peak) + tack.distance(clew));
+        let down = 0.5 * (throat.distance(tack) + peak.distance(clew));
+        Self {
+            size: [across, down],
+            resolution: [
+                ((across / 0.11).round() as u32).clamp(8, 48),
+                ((down / 0.11).round() as u32).clamp(8, 48),
+            ],
+            panel: Some(corners),
+            camber: 0.1,
+            pins: ClothPins::Edges {
+                left: true,
+                top: true,
+                right: false,
+                bottom: true,
+            },
+            mass_per_m2: 0.28,
+            shear_compliance: 4e-3,
+            bend_compliance: 6e-4,
+            tear_ratio: Some(1.8),
+            aero_drag: 1.6,
+            aero_friction: 0.03,
+            material,
+            sim: SimSettings {
+                substeps: 12,
+                damping: 0.1,
+                prewarm_secs: 2.0,
                 ..SimSettings::default()
             },
             ..Self::default()
@@ -516,6 +579,12 @@ pub fn segment_triangle(from: Vec3, dir: Vec3, a: Vec3, b: Vec3, c: Vec3) -> Opt
     (0.0..=1.0).contains(&t).then_some(t)
 }
 
+/// Depth of a sewn-in belly at (u, v), 0..1: deepest two fifths of the way across and halfway
+/// down (where a sail carries its draft), 0 along every edge.
+fn belly(u: f32, v: f32) -> f32 {
+    (PI * u.clamp(0.0, 1.0).powf(0.756)).sin() * (PI * v.clamp(0.0, 1.0)).sin()
+}
+
 fn hash01(a: u64, b: u64) -> f32 {
     (hash_u64(a.wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ b) >> 40) as f32 / (1u64 << 24) as f32
 }
@@ -523,12 +592,18 @@ fn hash01(a: u64, b: u64) -> f32 {
 /// The skeleton a bone-pinned cloth hangs from: the owner entity, its transform and pose.
 pub type SkeletonRef<'a> = (Entity, &'a GlobalTransform, &'a SkeletonPose);
 
-/// Build the simulation for `spec` on entity `entity` placed at `transform`.
+/// Stiffness of the springs that hold pinned cloth to a body that moves under physics
+/// (m/N): stiff enough to read as pinned, soft enough to pass the cloth's pull on.
+const CARRIED_PIN_COMPLIANCE: f32 = 1e-7;
+
+/// Build the simulation for `spec` on entity `entity` placed at `transform`. `carried`: a
+/// dynamic rigid body carries the entity, so pins become stiff springs that pull on it.
 pub fn build(
     spec: &Cloth,
     entity: Entity,
     transform: &GlobalTransform,
     skeleton: Option<SkeletonRef>,
+    carried: bool,
 ) -> Result<SoftBodySim, String> {
     let nu = spec.resolution[0].max(2) as usize;
     let nv = spec.resolution[1].max(2) as usize;
@@ -537,21 +612,53 @@ pub fn build(
             "Cloth resolution {nu}×{nv} is too fine; use at most 40 000 particles."
         ));
     }
-    let [w, h] = [spec.size[0].max(0.01), spec.size[1].max(0.01)];
     let origin = transform.translation();
     let rot = transform.rotation();
     let scale = transform.scale();
+    let panel = spec.panel.map(|c| c.map(Vec2::from_array));
+    let (w, h, area) = match panel {
+        Some([tl, tr, br, bl]) => {
+            let area = 0.5 * ((br - tl).perp_dot(bl - tr)).abs();
+            if area < 1e-4 {
+                return Err("Cloth panel corners enclose no area.".into());
+            }
+            (
+                0.5 * (tl.distance(tr) + bl.distance(br)),
+                0.5 * (tl.distance(bl) + tr.distance(br)),
+                area,
+            )
+        }
+        None => {
+            let [w, h] = [spec.size[0].max(0.01), spec.size[1].max(0.01)];
+            (w, h, w * h)
+        }
+    };
     let mut sim = Sim::new(origin);
-    let mass = spec.mass_per_m2.max(1e-4) * w * h / (nu * nv) as f32;
+    let mass = spec.mass_per_m2.max(1e-4) * area / (nu * nv) as f32;
     let mut pattern = Vec::with_capacity(nu * nv);
     let mut uv = Vec::with_capacity(nu * nv);
     for j in 0..nv {
         for i in 0..nu {
             let u = i as f32 / (nu - 1) as f32;
             let v = j as f32 / (nv - 1) as f32;
-            let local = Vec3::new((u - spec.anchor[0]) * w, -(v - spec.anchor[1]) * h, 0.0);
+            let (flat, width) = match panel {
+                Some([tl, tr, br, bl]) => {
+                    let (top, bottom) = (tl.lerp(tr, u), bl.lerp(br, u));
+                    let width = tl.lerp(bl, v).distance(tr.lerp(br, v));
+                    (top.lerp(bottom, v), width)
+                }
+                None => (
+                    Vec2::new((u - spec.anchor[0]) * w, -(v - spec.anchor[1]) * h),
+                    w,
+                ),
+            };
+            let local = flat.extend(spec.camber * width * belly(u, v));
             sim.add_particle(rot * (local * scale), mass);
-            pattern.push(Vec2::new(u * w, v * h));
+            pattern.push(if panel.is_some() {
+                Vec2::new(flat.x, -flat.y)
+            } else {
+                Vec2::new(u * w, v * h)
+            });
             uv.push(Vec2::new(u, v));
         }
     }
@@ -598,9 +705,7 @@ pub fn build(
     edge_list.sort_by_key(|(_, e)| *e);
     let mut edge_rest = vec![0.0; edge_tris.len()];
     for ((a, b), e) in &edge_list {
-        let pa = pattern[*a as usize];
-        let pb = pattern[*b as usize];
-        let diagonal = pa.x != pb.x && pa.y != pb.y;
+        let diagonal = a % nu as u32 != b % nu as u32 && a / nu as u32 != b / nu as u32;
         let compliance = if diagonal {
             spec.shear_compliance
         } else {
@@ -636,7 +741,7 @@ pub fn build(
     // Gathered cloth starts in folds: squeeze it along u and let it bow out alternately in
     // front of and behind the pins, so the arc length between pins stays the same.
     let gather = spec.gather.clamp(0.2, 1.0);
-    if gather < 0.999 {
+    if gather < 0.999 && panel.is_none() {
         let pin_spacing = match spec.pins {
             ClothPins::TopEdge { every } => every.max(1) as f32 * w / (nu - 1) as f32,
             _ => 0.3,
@@ -685,6 +790,24 @@ pub fn build(
                 }
             }
         }
+        ClothPins::Edges {
+            left,
+            top,
+            right,
+            bottom,
+        } => {
+            for j in 0..nv {
+                for i in 0..nu {
+                    if (*left && i == 0)
+                        || (*right && i == nu - 1)
+                        || (*top && j == 0)
+                        || (*bottom && j == nv - 1)
+                    {
+                        pin_points.push((i, j));
+                    }
+                }
+            }
+        }
         ClothPins::Bones { rows, bones } => {
             let Some((owner, owner_t, pose)) = skeleton else {
                 return Err(
@@ -726,15 +849,30 @@ pub fn build(
             time_owner = Some(owner);
         }
     }
+    let mut held = vec![false; nu * nv];
     for (i, j) in &pin_points {
-        sim.pin_here(id(*i, *j), self_frame);
+        let p = id(*i, *j);
+        held[p as usize] = true;
+        if carried {
+            let local = rot.conjugate() * sim.pos[p as usize];
+            sim.goals.push(Goal {
+                p,
+                frame: self_frame,
+                local,
+                compliance: CARRIED_PIN_COMPLIANCE,
+            });
+        } else {
+            sim.pin_here(p, self_frame);
+        }
     }
 
     // Long-range tethers to the nearest pin, in pattern space.
-    let pinned: Vec<usize> = (0..nu * nv).filter(|&p| sim.is_pinned(p as u32)).collect();
+    let pinned: Vec<usize> = (0..nu * nv)
+        .filter(|&p| held[p] || sim.is_pinned(p as u32))
+        .collect();
     if !pinned.is_empty() {
         for p in 0..nu * nv {
-            if sim.is_pinned(p as u32) {
+            if held[p] || sim.is_pinned(p as u32) {
                 continue;
             }
             if let Some(&a) = pinned.iter().min_by(|&&a, &&b| {
@@ -830,6 +968,7 @@ mod tests {
             Entity::PLACEHOLDER,
             &GlobalTransform::from(Transform::from_xyz(5.0, 3.0, 0.0)),
             None,
+            false,
         )
         .unwrap()
     }
@@ -845,6 +984,56 @@ mod tests {
         // Front faces +Z.
         let [a, b, c] = surface.triangles[0].map(|i| body.sim.pos[i as usize]);
         assert!((b - a).cross(c - a).z > 0.0);
+    }
+
+    /// A gaff sail's throat, peak, clew and tack.
+    const GAFF: [[f32; 2]; 4] = [[0.1, 3.4], [1.9, 4.7], [2.85, 1.13], [0.1, 1.12]];
+
+    fn sail(carried: bool) -> SoftBodySim {
+        let spec = Cloth::sail(GAFF, SoftMaterial::hex(0xf2ead8));
+        let t = GlobalTransform::default();
+        build(&spec, Entity::PLACEHOLDER, &t, None, carried).unwrap()
+    }
+
+    #[test]
+    fn a_sail_panel_takes_its_shape_and_holds_its_belly() {
+        let body = sail(false);
+        let spec = Cloth::sail(GAFF, SoftMaterial::default());
+        let [nu, nv] = body.cloth.as_ref().unwrap().resolution.map(|n| n as usize);
+        let at = |i: usize, j: usize| body.sim.pos[j * nu + i];
+        let corners = [(0, 0), (nu - 1, 0), (nu - 1, nv - 1), (0, nv - 1)];
+        for ((i, j), c) in corners.into_iter().zip(GAFF) {
+            let want = Vec2::from_array(c).extend(0.0);
+            assert!(at(i, j).distance(want) < 1e-4, "{} vs {c:?}", at(i, j));
+        }
+        // About a tenth of the chord deep, two fifths of the way back, toward +Z.
+        let mid = at(nu * 2 / 5, nv / 2);
+        let chord = at(0, nv / 2).distance(at(nu - 1, nv / 2));
+        assert!(
+            (mid.z / chord - 0.1).abs() < 0.02,
+            "belly {} in {chord}",
+            mid.z
+        );
+        // Luff, head and foot are pinned; the leech is free.
+        assert_eq!(body.sim.pins.len(), 2 * nu + nv - 2);
+        assert!(!body.sim.is_pinned((nv / 2 * nu + nu - 1) as u32));
+        // Rows and columns are stretch edges even though the panel isn't a rectangle.
+        let stretch = body
+            .sim
+            .distances
+            .iter()
+            .filter(|d| d.compliance == spec.stretch_compliance)
+            .count();
+        assert_eq!(stretch, (nu - 1) * nv + nu * (nv - 1));
+    }
+
+    #[test]
+    fn a_carried_sail_hangs_on_stiff_goals_instead_of_pins() {
+        let body = sail(true);
+        let [nu, nv] = body.cloth.as_ref().unwrap().resolution.map(|n| n as usize);
+        assert!(body.sim.pins.is_empty());
+        assert_eq!(body.sim.goals.len(), 2 * nu + nv - 2);
+        assert_eq!(body.sim.tethers.len(), nu * nv - (2 * nu + nv - 2));
     }
 
     #[test]

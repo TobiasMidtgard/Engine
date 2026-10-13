@@ -51,6 +51,7 @@ mod props_anim;
 mod props_bridge;
 mod props_machines;
 mod props_stage;
+pub mod sailboat;
 pub mod sculpt;
 pub mod skin;
 mod texgen;
@@ -75,6 +76,7 @@ use props_stage::{
     GUN_PIVOT, GUN_TURNTABLE, bead_frame, burner, curtain_ring_xs, curtain_stage, gun_body,
     gun_pedestal, gun_yoke, stone_ball, swing_frame, swing_seat,
 };
+pub use sailboat::spawn_sailboat;
 
 /// How a demo prop moves (kinematic until the physics module lands).
 #[derive(Component, Debug, Clone, PartialEq)]
@@ -171,6 +173,7 @@ pub fn register(app: &mut App) {
             burn_and_restore,
             cut_and_restore,
             respawn_volumes,
+            sailboat::sail_boats,
         )
             .chain()
             .in_set(SimSet::Gameplay),

@@ -317,9 +317,10 @@ impl Sim {
         self.inv_mass[i] = 0.0;
     }
 
-    /// Release particle `p`'s pin, if any.
+    /// Release particle `p`'s pin and the goals holding it, if any.
     pub fn unpin(&mut self, p: u32) {
         let i = p as usize;
+        self.goals.retain(|g| g.p != p);
         let slot = self.pin_of[i];
         if slot == u32::MAX {
             return;
@@ -619,7 +620,11 @@ impl Sim {
             let d = pos[i] - pos[a];
             let len = d.length();
             if len > c.max {
-                pos[i] -= d * ((len - c.max) / len);
+                // A pinned anchor doesn't move; one held by a goal (cloth on a moving body)
+                // takes its share, so the goal passes the pull on to the body.
+                let corr = d * ((len - c.max) / (len * (w[i] + w[a])));
+                pos[i] -= corr * w[i];
+                pos[a] += corr * w[a];
             }
         }
         for g in &self.goals {
