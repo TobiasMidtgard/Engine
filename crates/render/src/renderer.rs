@@ -1223,6 +1223,21 @@ impl Renderer {
         self.shared
             .queue
             .write_buffer(&self.post.params, 0, bytemuck::bytes_of(&u));
+        // The first bloom downsample reads the scene and limits each pixel's brightness.
+        if let Some(first) = self.post.bloom_params.first() {
+            let src = &self.targets.hdr;
+            let b = BloomUniform {
+                params: [
+                    1.0 / src.width as f32,
+                    1.0 / src.height as f32,
+                    1.0,
+                    settings.bloom_limit.max(0.0),
+                ],
+            };
+            self.shared
+                .queue
+                .write_buffer(first, 0, bytemuck::bytes_of(&b));
+        }
     }
 
     fn collect_stats(&self, view: &ViewData, started: Instant) -> RenderStats {

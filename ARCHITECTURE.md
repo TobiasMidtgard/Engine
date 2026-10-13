@@ -278,6 +278,11 @@ default of meshes without vertex colors); on swaying materials the vertex alpha 
 it, and its shadow, once its bounding sphere is wholly farther than that from the camera: small
 props and clutter. Instanced and cluster-drawn meshes alike; skipped entities count as `culled`.
 
+**Bloom** (built): a chain of 13-tap downsamples and tent upsamples (Jimenez 2014) without a
+threshold, mixed in by `RenderSettings::bloom_intensity` (0.04). What a pixel brings in is
+limited to `bloom_limit` times white at the current exposure (64; it rolls off smoothly from half
+of that), so a neon sign at night or the sun's disc glows instead of swamping the frame.
+
 **Virtual geometry** (built: cluster LOD and GPU-driven drawing; `crates/render/src/virtual_geometry`):
 dense opaque meshes (`RenderSettings::virtual_geometry_min_triangles`, 50 000 by default) are
 split into 128-triangle clusters with a level-of-detail DAG (groups simplified with locked

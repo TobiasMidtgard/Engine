@@ -153,6 +153,11 @@ pub struct RenderSettings {
     pub tonemapper: Tonemapper,
     /// 0..1 mix of the blurred image (0.04 is subtle and physical).
     pub bloom_intensity: f32,
+    /// The most a pixel brings into the bloom, in multiples of white at the current exposure
+    /// (pre-exposed). Above half of it brightness rolls off smoothly toward it, so lights far
+    /// brighter than the exposure (a neon ring at night, the sun) glow without swamping the
+    /// frame, while everything up to half of it blooms as before. 0 = no limit.
+    pub bloom_limit: f32,
     pub saturation: f32,
     pub contrast: f32,
     pub vignette: f32,
@@ -222,6 +227,7 @@ impl Default for RenderSettings {
             sharpness: 0.3,
             tonemapper: Tonemapper::AgXPunchy,
             bloom_intensity: 0.04,
+            bloom_limit: 64.0,
             saturation: 1.05,
             contrast: 1.0,
             vignette: 0.2,
