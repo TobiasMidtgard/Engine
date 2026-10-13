@@ -244,6 +244,7 @@ fn wrap_delta(d: Vec2, size: f32) -> Vec2 {
 /// Meters one repeat of each arena texture covers (set `uv_scale` to the inverse).
 pub mod span {
     pub const SAND: f32 = 6.0;
+    pub const WET: f32 = 2.0;
     pub const RAKED: f32 = 4.0;
     pub const STONE: f32 = 2.0;
     pub const WOOD: f32 = 2.0;
@@ -3666,10 +3667,8 @@ pub enum Mat {
     Flame,
     /// Freshly raked sand, alpha-masked over the trampled sand.
     Raked,
-    /// Wet sand and puddles: a film blended over the floor (vertex alpha), its texture running
-    /// from damp sand, dark and a little glossy, through soaked sand to standing water, the
-    /// dark bottom under a mirror ([`grounds::wet_set`]; the mesh picks the wetness per
-    /// vertex).
+    /// Wet sand: soaked sand blended over the floor ([`grounds::wet_set`]), the vertex alpha
+    /// how wet.
     Damp,
     /// Still water in the troughs and casks: murky, faintly rippled and mirror smooth
     /// ([`grounds::water_set`]).
@@ -3773,13 +3772,10 @@ impl Mat {
                 ..tiled(1.0)
             }
             .with_subsurface(0.25),
-            // Water's reflectance is lower, but in full sun its sky reflection is faint next to
-            // the sunlit sand: more of it makes the puddles read at a glance.
             Mat::Damp => StandardMaterial {
                 alpha_mode: AlphaMode::Blend,
-                reflectance: 1.4,
                 receives_wetness: false,
-                ..tiled(1.0)
+                ..tiled(span::WET)
             },
             Mat::Water => StandardMaterial {
                 receives_wetness: false,
@@ -4352,7 +4348,7 @@ pub fn dress(world: &mut World, layout: &ArenaLayout) {
     let origin = layout.origin;
     let id = Transform::default();
     // The floor: trampled sand, the raked layer, drifts, ruts and drag marks, wet sand and
-    // puddles (one blended film, so the puddles draw over the damp sand), and litter.
+    // litter.
     for (key, mat, shadows) in [
         ("arena/floor", Mat::Sand, false),
         ("arena/floor_raked", Mat::Raked, false),
