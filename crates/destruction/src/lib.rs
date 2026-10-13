@@ -659,7 +659,9 @@ fn register_api(app: &mut App) {
     app.register_api(
         "destruction.spawn_wall",
         "Spawn a destructible wall: preset soft (drywall), barricade (planks), reinforced, brick, \
-         stone or concrete; size [w,h] m. Returns its id.",
+         stone or concrete; size [w,h] m. Presets floor (boards on joists), hatch (wooden cover) \
+         and steel_hatch lie flat, their top at `at`'s height plus half their thickness, size \
+         [w, length] running along -Z (turned by yaw_deg). Returns its id.",
         SPAWN_WALL,
         |world, args| {
             let a: SpawnWallArgs = parse(args, SPAWN_WALL)?;
@@ -671,22 +673,33 @@ fn register_api(app: &mut App) {
                 "brick" => DestructibleWall::masonry(DestructibleMaterial::Brick, w, h, 0.22),
                 "stone" => DestructibleWall::masonry(DestructibleMaterial::Stone, w, h, 0.4),
                 "concrete" => DestructibleWall::concrete(w, h, 0.2),
+                "floor" => DestructibleWall::floor(w, h),
+                "hatch" => DestructibleWall::hatch(w, h),
+                "steel_hatch" => DestructibleWall::steel_hatch(w, h),
                 other => {
                     return Err(format!(
-                        "Unknown preset \"{other}\". Use soft, barricade, reinforced, brick, stone or concrete."
+                        "Unknown preset \"{other}\". Use soft, barricade, reinforced, brick, stone, \
+                         concrete, floor, hatch or steel_hatch."
                     ));
                 }
             };
+            let flat = matches!(
+                a.preset.as_deref(),
+                Some("floor" | "hatch" | "steel_hatch")
+            );
             if let Some(t) = a.thickness {
                 wall.thickness = t.clamp(0.02, 2.0);
             }
             if let Some(m) = material_arg(a.material.as_deref())? {
                 wall.material = m;
             }
+            let mut rotation = Quat::from_rotation_y(a.yaw_deg.to_radians());
+            if flat {
+                rotation *= DestructibleWall::flat();
+            }
             let e = world
                 .spawn((
-                    Transform::from_translation(DVec3::from_array(a.at))
-                        .with_rotation(Quat::from_rotation_y(a.yaw_deg.to_radians())),
+                    Transform::from_translation(DVec3::from_array(a.at)).with_rotation(rotation),
                     wall,
                 ))
                 .id();

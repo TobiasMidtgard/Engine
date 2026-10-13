@@ -19,6 +19,13 @@
 //! colors loses its posts one by one and comes down; a stone gate is blasted and its lintel
 //! falls; a voxel cliff is mined until its overhang loses support and breaks off; a rock arch
 //! loses a pillar and its span collapses.
+//!
+//! **Breach house** (Siege vertical play, north of the tower): a brick room with an open front
+//! and a soft timber roof deck on joists. Its west bay was shot up from below long ago
+//! (sunlight comes through the holes); every cycle the room fires up through the east bay, a
+//! breach charge on the roof blows a hole into the room, thermite cuts the steel hatch out and
+//! a sledgehammer smashes the wooden hatch in. A stair up the back climbs to the roof and a
+//! steel ladder hangs under each hatch.
 
 use bevy_ecs::system::RunSystemOnce;
 use bevy_ecs::world::CommandQueue;
@@ -54,6 +61,24 @@ const TOWER: [f64; 3] = [18.0, 0.0, 9.0];
 const GATE: [f64; 3] = [-22.0, 0.0, 7.0];
 const CLIFF: [f64; 3] = [-4.0, 0.0, 16.0];
 const ARCH: [f64; 3] = [-36.0, 0.0, 16.0];
+/// The breach house's floor middle (north of the tower, in the sun); its open front looks +Z.
+pub const HOUSE: [f64; 3] = [15.0, 0.0, 22.0];
+/// House-local: top of the walls and joists (the roof deck lies on them) and the deck boards.
+const JOIST_TOP: f64 = 3.24;
+const DECK_T: f32 = 0.05;
+/// Middles (x) of the deck's four bays between joists and side walls, and their width.
+const DECK_BAYS: [f64; 4] = [-2.565, -0.855, 0.855, 2.565];
+const BAY_W: f32 = 1.71;
+/// The deck runs from z = `DECK_FRONT` back over the back wall.
+const DECK_FRONT: f64 = 3.08;
+const DECK_LEN: f32 = 6.1;
+/// Middles (x, z) of the wooden hatch (bay 2) and the steel one (bay 3), 1 m square.
+const HATCH: [f64; 2] = [-0.855, -1.6];
+const STEEL_HATCH: [f64; 2] = [0.855, -1.6];
+const HATCH_M: f32 = 1.0;
+/// Where the live breach charge sits on the roof (house-local x, z): in front of the steel
+/// hatch, mid-room, so what it blows through rains onto the floor.
+const ROOF_CHARGE: [f64; 2] = [0.855, 0.9];
 
 /// Entities the live script acts on.
 #[derive(Debug, Clone, Default)]
@@ -66,6 +91,11 @@ pub struct DemoTargets {
     pub tower_posts: Vec<Entity>,
     pub gate: Vec<Entity>,
     pub props: Vec<Entity>,
+    /// The breach house's live roof bays (the charge's, then the one shot up) and its two
+    /// hatch covers.
+    pub roof: Vec<Entity>,
+    pub hatch: Option<Entity>,
+    pub steel_hatch: Option<Entity>,
 }
 
 /// The breach range's live moments (the zone's own stop is the overview from
@@ -128,6 +158,22 @@ pub const VIEWS: &[DemoView] = &[
         warmup_secs: 45.0,
     },
     DemoView {
+        key: "fortress_roof",
+        name: "Vertical breach: a charge blows a hole through a soft roof",
+        eye: [20.5, 8.5, 13.5],
+        target: [15.0, 3.0, 21.0],
+        hour: 15.0,
+        warmup_secs: 6.3,
+    },
+    DemoView {
+        key: "fortress_hatches",
+        name: "Under the roof: bullet holes, a blown bay and breached hatches",
+        eye: [16.2, 1.6, 25.4],
+        target: [15.1, 2.1, 20.4],
+        hour: 15.0,
+        warmup_secs: 13.0,
+    },
+    DemoView {
         key: "fortress_arch",
         name: "A rock arch blown off its foot",
         eye: [-26.0, 6.0, -4.0],
@@ -157,6 +203,10 @@ enum Step {
     BreakPost(usize),
     BlastGate,
     BlastArch,
+    RoofBurst(u32),
+    RoofCharge,
+    ThermiteHatch,
+    SmashHatch(u32),
     SupportView(bool),
     Clear,
     Reset,
@@ -174,6 +224,14 @@ fn timeline() -> Vec<(f32, Step)> {
     }
     for (k, at) in [8.0, 9.0, 10.0, 11.0].into_iter().enumerate() {
         t.push((at, Step::BreakPost(k)));
+    }
+    for k in 0..4 {
+        t.push((2.0 + k as f32 * 0.4, Step::RoofBurst(k)));
+    }
+    t.push((3.4, Step::RoofCharge));
+    t.push((7.6, Step::ThermiteHatch));
+    for k in 0..4 {
+        t.push((9.2 + k as f32 * 0.4, Step::SmashHatch(k)));
     }
     t.push((6.0, Step::SupportView(true)));
     t.push((12.0, Step::SupportView(false)));
@@ -264,13 +322,18 @@ pub fn spawn_demo(commands: &mut Commands, origin: DVec3) {
         "Drywall (bullets)",
         DestructibleWall::soft(WALL_W, WALL_H).with_seed(11),
     );
+    // Bay 2: a doorway and a window (wall-local x is mirrored by the yaw).
+    let door = (Vec2::new(-1.4, 0.0), Vec2::new(-0.2, 2.2));
+    let window = (Vec2::new(0.6, 1.0), Vec2::new(1.9, 2.1));
     let a2 = wall(
         commands,
         1,
         "Drywall (barricades)",
         DestructibleWall::soft(WALL_W, WALL_H)
             .with_seed(12)
-            .with_paint([0.55, 0.6, 0.62]),
+            .with_paint([0.55, 0.6, 0.62])
+            .with_opening(door.0, door.1)
+            .with_opening(window.0, window.1),
     );
     let a3 = wall(
         commands,
@@ -305,13 +368,11 @@ pub fn spawn_demo(commands: &mut Commands, origin: DVec3) {
         DestructibleWall::masonry(DestructibleMaterial::Brick, WALL_W, WALL_H, 0.22).with_seed(17),
     );
 
-    // Bay 2: barricades in a doorway and a window (wall-local x is mirrored by the yaw).
+    // Bay 2: barricades in the doorway and the window.
     let local = |bay: usize, x: f32, y: f32, z: f32| {
         let (t, _) = placed(o + DVec3::new(BAYS[bay], 0.0, ROW_Z), yaw);
         GlobalTransform::from(t).transform_point(DVec3::new(x as f64, y as f64, z as f64))
     };
-    let door = (Vec2::new(-1.4, 0.0), Vec2::new(-0.2, 2.2));
-    let window = (Vec2::new(0.6, 1.0), Vec2::new(1.9, 2.1));
     let mut barricades = Vec::new();
     for (name, (lo, hi), seed) in [
         ("Door barricade", door, 21),
@@ -353,6 +414,7 @@ pub fn spawn_demo(commands: &mut Commands, origin: DVec3) {
         }
     }
 
+    let house = spawn_breach_house(commands, o);
     let targets = DemoTargets {
         thermite_wall: Some(b1),
         soft_wall: Some(b2),
@@ -362,6 +424,9 @@ pub fn spawn_demo(commands: &mut Commands, origin: DVec3) {
         tower_posts: Vec::new(),
         gate: spawn_gate(commands, o),
         props: Vec::new(),
+        roof: house.roof,
+        hatch: Some(house.hatch),
+        steel_hatch: Some(house.steel_hatch),
     };
     let (tower, posts) = spawn_tower(commands, o);
     crate::barn::spawn_barn(commands, o + DVec3::from_array(crate::barn::BARN), 0.0);
@@ -388,8 +453,6 @@ pub fn spawn_demo(commands: &mut Commands, origin: DVec3) {
         a3,
         a4,
         a5,
-        door_rect: door,
-        window_rect: window,
     };
     commands.queue(move |world: &mut World| apply_aftermath(world, ids));
 }
@@ -786,6 +849,206 @@ fn spawn_gate(commands: &mut Commands, o: DVec3) -> Vec<Entity> {
     out
 }
 
+/// The breach house's breakable parts.
+struct House {
+    roof: Vec<Entity>,
+    hatch: Entity,
+    steel_hatch: Entity,
+}
+
+/// The breach house: brick walls on three sides with a window in each side wall, an open
+/// front on concrete pillars and a steel beam, joists across and a timber roof deck in four
+/// bays, a framed and rimmed hatch in each middle bay (one wooden, one steel) with a steel
+/// ladder under it, a concrete floor and a wooden stair up the outside of the back wall.
+fn spawn_breach_house(commands: &mut Commands, o: DVec3) -> House {
+    use std::f32::consts::{FRAC_PI_2, PI};
+    let h = o + DVec3::from_array(HOUSE);
+    let at = |x: f64, y: f64, z: f64| h + DVec3::new(x, y, z);
+    let wall_h = JOIST_TOP as f32;
+    let brick = |w: f32, seed: u64| {
+        DestructibleWall::masonry(DestructibleMaterial::Brick, w, wall_h, 0.22)
+            .with_seed(seed)
+            .with_anchors(WallAnchors::ALL)
+    };
+    let (t, g) = placed(at(0.0, 0.0, -2.91), PI);
+    commands.spawn((Name::new("Breach house back wall"), t, g, brick(6.84, 31)));
+    // Side walls with a window each (a concrete lintel and sill; bricks are 7.5 cm courses).
+    for (k, side) in [1.0f64, -1.0].into_iter().enumerate() {
+        let x = side * 3.31;
+        let wall =
+            brick(5.6, 32 + k as u64).with_opening(Vec2::new(-0.6, 1.05), Vec2::new(0.6, 2.25));
+        let (t, g) = placed(at(x, 0.0, 0.0), side as f32 * FRAC_PI_2);
+        let name = if side > 0.0 { "east" } else { "west" };
+        commands.spawn((Name::new(format!("Breach house {name} wall")), t, g, wall));
+        for (size, y, out, seed) in [
+            ([0.25, 0.15, 1.5], 2.175, 0.0, 34),
+            ([0.32, 0.06, 1.35], 1.02, 0.05, 36),
+        ] {
+            model(
+                commands,
+                PropKind::ConcreteSlab { size },
+                seed + k as u64,
+                at(x + side * out, y, 0.0),
+                0.0,
+            );
+        }
+    }
+    model(
+        commands,
+        PropKind::ConcreteSlab {
+            size: [6.4, 0.12, 6.0],
+        },
+        3,
+        at(0.0, -0.04, 0.2),
+        0.0,
+    );
+    // The open front: two pillars and a steel beam under the joist ends.
+    for (k, x) in [-3.31, 3.31].into_iter().enumerate() {
+        model(
+            commands,
+            PropKind::ConcretePillar {
+                size: [0.44, 2.7, 0.44],
+            },
+            40 + k as u64,
+            at(x, 1.35, 2.95),
+            0.0,
+        );
+    }
+    model(
+        commands,
+        PropKind::SteelIBeam {
+            length: 7.06,
+            depth: 0.3,
+            end_plates: false,
+        },
+        2,
+        at(0.0, 2.85, 2.95),
+        0.0,
+    );
+    // Joists from the back wall over the beam, a framed hatch opening in each middle bay.
+    let joist_len = DECK_FRONT + 2.8;
+    for (k, x) in [-1.71, 0.0, 1.71].into_iter().enumerate() {
+        model(
+            commands,
+            PropKind::Timber {
+                size: [0.1, 0.24, joist_len as f32],
+            },
+            50 + k as u64,
+            at(x, JOIST_TOP - 0.12, DECK_FRONT - joist_len * 0.5),
+            0.0,
+        );
+    }
+    let half = HATCH_M as f64 * 0.5;
+    for (k, [hx, hz]) in [HATCH, STEEL_HATCH].into_iter().enumerate() {
+        let seed = 60 + 4 * k as u64;
+        let header = (BAY_W - 0.1) as f64;
+        for (j, dz) in [-half, half].into_iter().enumerate() {
+            model(
+                commands,
+                PropKind::Timber {
+                    size: [header as f32, 0.24, 0.1],
+                },
+                seed + j as u64,
+                at(hx, JOIST_TOP - 0.12, hz + dz),
+                0.0,
+            );
+        }
+        for (j, dx) in [-half, half].into_iter().enumerate() {
+            model(
+                commands,
+                PropKind::Timber {
+                    size: [0.1, 0.2, HATCH_M - 0.1],
+                },
+                seed + 2 + j as u64,
+                at(hx + dx, JOIST_TOP - 0.1, hz),
+                0.0,
+            );
+        }
+        // The ladder hangs off the back header, its brackets bolted to its face.
+        let ladder_h = 3.18;
+        model(
+            commands,
+            PropKind::SteelLadder { height: ladder_h },
+            k as u64,
+            at(hx, 0.02 + ladder_h as f64 * 0.5, hz - half + 0.05 + 0.12),
+            0.0,
+        );
+    }
+    // The roof deck: one board panel per bay, the hatch openings left out.
+    let deck_y = JOIST_TOP + DECK_T as f64 * 0.5;
+    let rel = |x: f64, z: f64, bay: f64| Vec2::new((x - bay) as f32, (DECK_FRONT - z) as f32);
+    let mut bays = Vec::new();
+    for (k, x) in DECK_BAYS.into_iter().enumerate() {
+        let mut deck = DestructibleWall::floor(BAY_W, DECK_LEN).with_seed(70 + k as u64);
+        for [hx, hz] in [HATCH, STEEL_HATCH] {
+            if (hx - x).abs() < 0.1 {
+                let c = rel(hx, hz, x);
+                let r = Vec2::splat(HATCH_M * 0.5);
+                deck = deck.with_opening(c - r, c + r);
+            }
+        }
+        let t = Transform::from_translation(at(x, deck_y, DECK_FRONT))
+            .with_rotation(DestructibleWall::flat());
+        bays.push(
+            commands
+                .spawn((
+                    Name::new(format!("Breach house roof bay {}", k + 1)),
+                    t,
+                    GlobalTransform::from(t),
+                    deck,
+                ))
+                .id(),
+        );
+    }
+    // Hatch covers resting on the frames: wooden boards across the deck's, a steel plate.
+    let (hx, hz) = (HATCH[0], HATCH[1]);
+    let t = Transform::from_translation(at(hx + half, JOIST_TOP + 0.03, hz))
+        .with_rotation(Quat::from_rotation_y(FRAC_PI_2) * DestructibleWall::flat());
+    let hatch = commands
+        .spawn((
+            Name::new("Wooden hatch"),
+            t,
+            GlobalTransform::from(t),
+            DestructibleWall::hatch(HATCH_M, HATCH_M).with_seed(80),
+        ))
+        .id();
+    let (sx, sz) = (STEEL_HATCH[0], STEEL_HATCH[1]);
+    let t = Transform::from_translation(at(sx, JOIST_TOP + 0.025, sz + half))
+        .with_rotation(DestructibleWall::flat());
+    let steel_hatch = commands
+        .spawn((
+            Name::new("Steel hatch"),
+            t,
+            GlobalTransform::from(t),
+            DestructibleWall::steel_hatch(HATCH_M, HATCH_M).with_seed(81),
+        ))
+        .id();
+    // Steel rims around the hatch openings, screwed onto the boards.
+    let deck_top = JOIST_TOP + DECK_T as f64;
+    for (k, [x, z]) in [HATCH, STEEL_HATCH].into_iter().enumerate() {
+        let rim = PropKind::HatchRim {
+            size: [HATCH_M, HATCH_M],
+        };
+        let y = deck_top + rim.size().y as f64 * 0.5;
+        model(commands, rim, k as u64, at(x, y, z), 0.0);
+    }
+    // The stair up the outside of the back wall, climbing west to the deck's back edge.
+    model(
+        commands,
+        PropKind::WoodStair {
+            size: [1.0, deck_top as f32, 5.0],
+        },
+        5,
+        at(0.0, deck_top * 0.5, -3.57),
+        FRAC_PI_2,
+    );
+    House {
+        roof: vec![bays[2], bays[3]],
+        hatch,
+        steel_hatch,
+    }
+}
+
 /// Entities and openings the aftermath damages.
 #[derive(Debug, Clone, Copy)]
 struct Aftermath {
@@ -797,8 +1060,6 @@ struct Aftermath {
     a3: Entity,
     a4: Entity,
     a5: Entity,
-    door_rect: (Vec2, Vec2),
-    window_rect: (Vec2, Vec2),
 }
 
 fn wall_world(world: &World, wall: Entity, local: Vec3) -> DVec3 {
@@ -810,11 +1071,6 @@ fn wall_world(world: &World, wall: Entity, local: Vec3) -> DVec3 {
 fn apply_aftermath(world: &mut World, ids: Aftermath) {
     crate::assets::ensure_assets(world);
     let _ = world.run_system_once(crate::sync::init_walls_system);
-    // Built openings in bay 2.
-    if let Some(mut s) = world.get_mut::<WallState>(ids.a2) {
-        s.open(ids.door_rect.0, ids.door_rect.1);
-        s.open(ids.window_rect.0, ids.window_rect.1);
-    }
     let mut rng = Rng::new(42);
     let mut hits = Vec::new();
     // Bay 1: three rifle bursts, a vault hole kicked through low down, a breach charge hole.
@@ -852,7 +1108,7 @@ fn apply_aftermath(world: &mut World, ids: Aftermath) {
         energy_j: 1.6e5,
     });
     // Bay 2: the door barricade shot up and kicked open in the middle; the window one intact.
-    let door_mid = (ids.door_rect.0 + ids.door_rect.1) * 0.5;
+    let door_mid = Vec2::new(-0.8, 1.1);
     for k in 0..8 {
         let p = Vec3::new(
             door_mid.x + ((k % 4) as f32 - 1.5) * 0.2,
@@ -906,6 +1162,21 @@ fn apply_aftermath(world: &mut World, ids: Aftermath) {
         center: wall_world(world, ids.a5, Vec3::new(0.6, 1.0, 0.35)),
         energy_j: 1.8e6,
     });
+    // The breach house's west roof bay: three bursts fired up through it from the room.
+    let h = ids.origin + DVec3::from_array(HOUSE);
+    for (cx, cz) in [(-2.6f64, -2.0f64), (-2.2, -0.4), (-2.5, 1.3)] {
+        let shooter = h + DVec3::new(-1.8, 1.5, cz + 1.4);
+        for _ in 0..12 {
+            let d = rng.in_unit_disk() * 0.35;
+            let aim = h + DVec3::new(cx + d.x as f64, JOIST_TOP, cz + d.y as f64);
+            hits.push(Hit::Trace {
+                from: shooter,
+                to: shooter + (aim - shooter) * 1.6,
+                energy_j: 1400.0,
+                caliber: 0.008,
+            });
+        }
+    }
     world.resource_mut::<HitQueue>().hits.extend(hits);
     let _ = world.run_system_once(crate::hits::apply_hits_system);
     let ground = {
@@ -1118,6 +1389,61 @@ fn run_step(world: &mut World, demo: &mut DestructionDemo, step: Step) {
                 });
             }
         }
+        Step::RoofBurst(k) => {
+            // Fired up through the east roof bay from the room below.
+            let mut rng = Rng::new(seed + 50 + k as u64);
+            let h = o + DVec3::from_array(HOUSE);
+            let shooter = h + DVec3::new(2.3 + 0.1 * k as f64, 1.5, 0.3);
+            let (cx, cz) = (2.2 + 0.35 * (k % 3) as f64, -2.2 + 0.3 * k as f64);
+            for _ in 0..5 {
+                let d = rng.in_unit_disk() * 0.25;
+                let aim = h + DVec3::new(cx + d.x as f64, JOIST_TOP, cz + d.y as f64);
+                world.write_message(ProjectileTrace {
+                    from: shooter,
+                    to: shooter + (aim - shooter) * 1.6,
+                    radius: 0.01,
+                    speed: 850.0,
+                    shooter: None,
+                });
+            }
+        }
+        Step::RoofCharge => {
+            if let Some(&roof) = t.roof.first() {
+                let [x, z] = ROOF_CHARGE;
+                let at = Vec2::new((x - DECK_BAYS[2]) as f32, (DECK_FRONT - z) as f32);
+                let mut c = BreachCharge::explosive(roof, at, 6.0e5);
+                c.fuse_secs = 2.8;
+                world.spawn((Name::new("Roof breach charge"), c));
+            }
+        }
+        Step::ThermiteHatch => {
+            if let Some(hatch) = t.steel_hatch {
+                let mid = Vec2::new(0.0, HATCH_M * 0.5);
+                let mut c = BreachCharge::thermite(hatch, mid, [0.8, 0.8]);
+                c.fuse_secs = 0.6;
+                world.spawn((Name::new("Hatch thermite charge"), c));
+            }
+        }
+        Step::SmashHatch(k) => {
+            // A sledgehammer from above, a swing into each quarter of the hatch.
+            if let Some(hatch) = t.hatch
+                && world.get::<WallState>(hatch).is_some()
+            {
+                let [dx, dz] =
+                    [[0.17, -0.15], [-0.17, -0.15], [-0.15, 0.17], [0.16, 0.17]][k as usize % 4];
+                let at = o
+                    + DVec3::from_array(HOUSE)
+                    + DVec3::new(HATCH[0] + dx, JOIST_TOP + 0.08, HATCH[1] + dz);
+                world.resource_mut::<HitQueue>().hits.push(Hit::Impact {
+                    point: at,
+                    dir: Vec3::NEG_Y,
+                    energy_j: 9000.0 + 1000.0 * (k / 3) as f32,
+                    min_radius: 0.16,
+                    melee: true,
+                    target: Some(hatch),
+                });
+            }
+        }
         Step::SupportView(on) => {
             for &e in &t.tower {
                 if let Some(mut s) = world.get_mut::<ShowSupport>(e) {
@@ -1135,7 +1461,8 @@ fn run_step(world: &mut World, demo: &mut DestructionDemo, step: Step) {
             }
         }
         Step::Reset => {
-            for w in [t.thermite_wall, t.soft_wall].into_iter().flatten() {
+            let live = [t.thermite_wall, t.soft_wall, t.hatch, t.steel_hatch];
+            for w in live.into_iter().flatten().chain(t.roof.iter().copied()) {
                 if let Some(mut wall) = world.get_mut::<DestructibleWall>(w) {
                     wall.set_changed();
                 }
