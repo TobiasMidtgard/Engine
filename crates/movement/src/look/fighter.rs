@@ -93,7 +93,7 @@ impl Style {
                 paint_b: (0x22305a, 0.42),
                 suit: 0x1b2030,
                 cloth: 0x1c233d,
-                sash: 0x8c6a32,
+                sash: 0x6f5a36,
                 leather: 0x3a291d,
                 trim: (0xb08a48, 0.32),
                 glow: 0x8fdcff,
@@ -106,8 +106,8 @@ impl Style {
                 edge_nits: 3500.0,
             },
             Style::Elite => Palette {
-                paint_a: (0x131315, 0.36),
-                paint_b: (0x5c0b14, 0.38),
+                paint_a: (0x17171a, 0.5),
+                paint_b: (0x5c0b14, 0.46),
                 suit: 0x0e0e10,
                 cloth: 0x1a191d,
                 sash: 0x6e0d16,
@@ -2875,6 +2875,119 @@ fn shell_vents(h: &Shell, phi: f32, th: f32, g: f32, n: usize, step: f32) -> Mes
     m
 }
 
+/// A shikoro: a helmet's neck guard, `n` overlapping lames flaring out from the skull below
+/// the polar angle `rim`, around the back between the azimuths `phi`.
+#[derive(Debug, Clone, Copy)]
+struct Shikoro {
+    h: Shell,
+    rim: f32,
+    phi: (f32, f32),
+    /// Outward run per meter of drop.
+    slope: f32,
+    /// How far the first lame stands off the skull.
+    g: f32,
+    /// Lame height, overlap and thickness.
+    lh: f32,
+    lap: f32,
+    t: f32,
+    n: usize,
+}
+
+impl Shikoro {
+    /// The point at azimuth `phi`, `d` below the rim, `g` out.
+    fn at(&self, phi: f32, d: f32, g: f32) -> Vec3 {
+        let out = v3(phi.cos(), 0.0, -phi.sin());
+        self.h.at(phi, self.rim, 0.0) + out * (d * self.slope + g) - Vec3::Y * d
+    }
+
+    /// Drop range and offset of lame `k` (each lies one thickness over the one above).
+    fn lame(&self, k: usize) -> ((f32, f32), f32) {
+        let d0 = k as f32 * (self.lh - self.lap);
+        ((d0, d0 + self.lh), self.g + k as f32 * (self.t + 0.0012))
+    }
+
+    fn plates(&self, bulge: f32, edge: f32) -> MeshBuilder {
+        let mut m = MeshBuilder::new();
+        for k in 0..self.n {
+            let (d, g) = self.lame(k);
+            m.append(
+                &plate(30, 3, Pl::new(self.t, bulge, edge), self.h.c, |u, v| {
+                    self.at(lerp(self.phi.0, self.phi.1, u), lerp(d.0, d.1, v), g)
+                }),
+                Mat4::IDENTITY,
+            );
+        }
+        m
+    }
+
+    /// Pairs of cords down every lame at the angles `cols` from the back.
+    fn lacing(&self, cols: &[f32]) -> MeshBuilder {
+        let back = (self.phi.0 + self.phi.1) * 0.5;
+        let r = self.h.rx + self.g + 0.02;
+        let (w, sep) = (0.0019 / r, 0.0042 / r);
+        let mut m = MeshBuilder::new();
+        for k in 0..self.n {
+            let (d, g) = self.lame(k);
+            let g = g + self.t + 0.0016;
+            for &c in cols {
+                for side in [-1.0f32, 1.0] {
+                    let a = back + c + side * sep;
+                    let mut cord = surface(1, 3, |u, v| {
+                        self.at(lerp(a - w, a + w, u), lerp(d.0 + 0.003, d.1 - 0.002, v), g)
+                    });
+                    face_out(&mut cord, self.h.c);
+                    m.append(&cord, Mat4::IDENTITY);
+                }
+            }
+        }
+        m
+    }
+
+    /// The frame of the wing (the top lames' front ends turned back) at the end `end`: its
+    /// top front corner, the direction it folds back in, down, and its outward normal.
+    fn wing_frame(&self, end: f32) -> (Vec3, Vec3, Vec3, Vec3) {
+        let into = if end == self.phi.0 { 1.0 } else { -1.0 };
+        let g = self.g + self.n as f32 * (self.t + 0.0012);
+        let p = self.at(end, -0.004, g);
+        let out = v3(end.cos(), 0.0, -end.sin());
+        let along = (self.at(end + into * 0.05, -0.004, g) - p).normalize_or(Vec3::Z);
+        // Folded out and back from the guard's front edge.
+        let across = (out * 0.75 + along * 0.66).normalize();
+        let down = (Vec3::NEG_Y + out * self.slope * 0.6).normalize();
+        let n = across.cross(down);
+        let n = if n.dot(out) < 0.0 { -n } else { n };
+        (p, across, down, n)
+    }
+
+    /// The wings, `w` wide and `drop` tall.
+    fn wings(&self, w: f32, drop: f32, pl: Pl) -> MeshBuilder {
+        let mut m = MeshBuilder::new();
+        for end in [self.phi.0, self.phi.1] {
+            let (p, across, down, n) = self.wing_frame(end);
+            m.append(
+                &plate(6, 6, pl, p - n * 0.05, |u, v| {
+                    // Rounded outer corner, a gentle curl back.
+                    let h = drop * (1.0 - 0.35 * u * u);
+                    p + across * (u * w) + down * (v * h) - n * (u * u * 0.012)
+                }),
+                Mat4::IDENTITY,
+            );
+        }
+        m
+    }
+
+    /// A round crest badge on each wing, `off` out from its face.
+    fn crests(&self, w: f32, drop: f32, off: f32) -> MeshBuilder {
+        let mut m = MeshBuilder::new();
+        for end in [self.phi.0, self.phi.1] {
+            let (p, across, down, n) = self.wing_frame(end);
+            let c = p + across * (w * 0.5) + down * (drop * 0.45) - n * 0.003 + n * off;
+            m.append(&disk(0.012, 0.003, n, c, 16), Mat4::IDENTITY);
+        }
+        m
+    }
+}
+
 fn helmet(kit: &mut Kit, s: &Spec) {
     use Bone::Head;
     let style = s.style;
@@ -2887,15 +3000,15 @@ fn helmet(kit: &mut Kit, s: &Spec) {
     };
     // The under-helmet: a closed dome that hides every gap between plates.
     kit.bind(Head, inner, || {
-        surface(28, 12, |u, v| h.at(-u * TAU, lerp(0.001, 2.65, v), -0.006))
+        surface(36, 14, |u, v| h.at(-u * TAU, lerp(0.001, 2.65, v), -0.006))
     });
     // The skull: two halves meeting at a seam down the back and a crown/skirt seam at ear
     // level, open over the face below the brow. `ridge` raises a keel along the center
     // line (0 = none).
     let skull = move |pl: Pl, face: f32, low: f32, ridge: f32| {
         split_plate(
-            30,
-            12,
+            40,
+            16,
             pl,
             h.c,
             &[0.5],
@@ -2972,22 +3085,28 @@ fn helmet(kit: &mut Kit, s: &Spec) {
                     }),
                     Mat4::IDENTITY,
                 );
-                // Neck guard lames at the back.
-                for k in 0..2 {
-                    let th0 = 2.1 + k as f32 * 0.17;
-                    m.append(
-                        &plate(16, 3, s.a(0.003), h.c, |u, v| {
-                            let th = lerp(th0, th0 + 0.22, v);
-                            h.at(
-                                lerp(fr + 1.15, fr + TAU - 1.15, u),
-                                th,
-                                0.012 + 0.006 * k as f32 + 0.06 * (th - 2.1),
-                            )
-                        }),
-                        Mat4::IDENTITY,
-                    );
-                }
                 m
+            });
+            // The neck guard: laced lames flaring out around the back, their front ends
+            // turned back as wings.
+            let shikoro = Shikoro {
+                h,
+                rim: 1.74,
+                phi: (fr + 1.55, fr + TAU - 1.55),
+                slope: 0.62,
+                g: 0.024,
+                lh: 0.036,
+                lap: 0.009,
+                t: 0.0055,
+                n: 4,
+            };
+            kit.bind(Head, Mat::PaintA, || shikoro.plates(0.0015, s.edge_a));
+            kit.bind(Head, Mat::Wrap, || {
+                shikoro.lacing(&[-1.2, -0.6, 0.0, 0.6, 1.2])
+            });
+            kit.bind(Head, Mat::PaintB, || shikoro.wings(0.05, 0.062, s.b(0.002)));
+            kit.bind(Head, Mat::Trim, || {
+                shikoro.crests(0.05, 0.062, s.t * 0.85 + 0.002)
             });
             // Wide visor: dark glass with a glowing sight line.
             kit.bind(Head, Mat::Glass, || {
@@ -3159,6 +3278,20 @@ fn helmet(kit: &mut Kit, s: &Spec) {
             };
             kit.bind(Head, Mat::Glass, || eye(1.6, -0.0005, 0.002));
             kit.bind(Head, Mat::Lens, || eye(0.8, 0.0016, 0.0012));
+            // A steep, close neck guard laced in crimson.
+            let shikoro = Shikoro {
+                h,
+                rim: 1.8,
+                phi: (fr + 1.45, fr + TAU - 1.45),
+                slope: 0.36,
+                g: 0.016,
+                lh: 0.034,
+                lap: 0.008,
+                t: 0.005,
+                n: 3,
+            };
+            kit.bind(Head, Mat::PaintA, || shikoro.plates(0.001, s.edge_a));
+            kit.bind(Head, Mat::Sash, || shikoro.lacing(&[-1.0, 0.0, 1.0]));
             // Teeth: vertical slits across the jaw.
             kit.bind(Head, Mat::Glass, || {
                 let mut m = MeshBuilder::new();
