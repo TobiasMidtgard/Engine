@@ -58,6 +58,27 @@ pub struct Hang {
     pub normal: Vec3,
 }
 
+/// A grapple hook: flying out to where it was fired, or bitten in and reeling the character
+/// in (see [`crate::grapple`]).
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct Grapple {
+    /// Where the hook flies: the point it bites on a surface, or where it turns back at full
+    /// range after a miss.
+    pub anchor: DVec3,
+    /// Out of the surface at the anchor (zero after a miss).
+    pub normal: Vec3,
+    /// How far the hook has flown from the hand, m.
+    pub reach: f32,
+    /// The hook has bitten: the rope reels the character in.
+    pub attached: bool,
+    /// Missed: the hook flies out to full range and is reeled back in.
+    pub miss: bool,
+    /// The taut rope's length, m (it only ever gets shorter).
+    pub length: f32,
+    /// Own seconds since the hook bit.
+    pub secs: f32,
+}
+
 /// Ask the movement module to dash. Combat uses this for dash-strikes; gameplay can use it
 /// for scripted dashes. Consumed on the next fixed step.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -120,6 +141,8 @@ pub struct Mover {
     pub mantle: Option<Mantle>,
     /// The ledge being hung from (mode [`LocomotionMode::Climb`]).
     pub hang: Option<Hang>,
+    /// The grapple hook, while it flies or holds.
+    pub grapple: Option<Grapple>,
     /// The capsule is shrunk (crouching or sliding).
     pub crouched: bool,
     /// Remaining dodge invulnerability, s (own time).
@@ -130,6 +153,9 @@ pub struct Mover {
     pub knockback: Vec3,
     /// Dash requested by combat or gameplay, consumed next step.
     pub pending_dash: Option<DashRequest>,
+    /// Fire the grapple hook at this point (players aim with the camera, brains at a target),
+    /// consumed next step. Firing while the hook is out lets go instead.
+    pub pending_grapple: Option<DVec3>,
     /// The moving body under the character, if any (see [`crate::platform`]).
     #[serde(skip)]
     pub platform: Option<Platform>,
@@ -139,6 +165,8 @@ pub struct Mover {
     pub(crate) slide_cooldown: f32,
     /// No ledge grabs until this runs out (after letting go or kicking off), s.
     pub(crate) grab_cooldown: f32,
+    /// No grapple shots until this runs out, s.
+    pub(crate) grapple_cooldown: f32,
     pub(crate) last_wall: Option<WallContact>,
     pub(crate) stand_height: f32,
     pub(crate) stride: f32,
@@ -174,16 +202,19 @@ impl Default for Mover {
             dash: None,
             mantle: None,
             hang: None,
+            grapple: None,
             crouched: false,
             evade_secs: 0.0,
             disabled: false,
             knockback: Vec3::ZERO,
             pending_dash: None,
+            pending_grapple: None,
             platform: None,
             coyote: 0.0,
             jump_buffer: 0.0,
             slide_cooldown: 0.0,
             grab_cooldown: 0.0,
+            grapple_cooldown: 0.0,
             last_wall: None,
             stand_height: 0.0,
             stride: 0.0,
@@ -238,13 +269,22 @@ impl Mover {
         }
     }
 
-    /// Teleport bookkeeping: clear velocity and any dash, mantle, ledge hang or wall-run.
+    /// Seconds until the grapple can fire again (0 = ready).
+    pub fn grapple_cooldown(&self) -> f32 {
+        self.grapple_cooldown
+    }
+
+    /// Teleport bookkeeping: clear velocity and any dash, mantle, ledge hang, grapple or
+    /// wall-run.
     pub fn reset_motion(&mut self) {
         self.velocity = Vec3::ZERO;
         self.knockback = Vec3::ZERO;
         self.dash = None;
         self.mantle = None;
         self.hang = None;
+        self.grapple = None;
+        self.pending_grapple = None;
+        self.grapple_cooldown = 0.0;
         self.wall = None;
         self.last_wall = None;
         self.pending_dash = None;
