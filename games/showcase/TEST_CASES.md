@@ -2,7 +2,10 @@
 
 Every test case Tobias asked the engine to show, where it lives in the showcase, which thread
 owns it, and whether you can see it yet. Viewpoint keys work with `--tour <key>`, the
-`showcase.goto` API and the screenshot tour.
+`showcase.goto` API and the screenshot tour. A tour of one zone's stops (`--tour
+paddock_car,paddock_flex`) loads only that zone's demo, which a headless run in a 16 GB
+container needs: all the demos together take ~13.6 GB. `--zones a,b` picks the zones (`all`
+loads every one).
 
 The Beautiful showcase world thread keeps this list current. Module threads: your zone is one
 line in `zones::spawn_demos` (swap the `ph::…` placeholder for your demo) and one line in
@@ -44,7 +47,7 @@ are built, nothing simulates yet) · ⬜ not visible yet
 | 16 | Footsteps in mud, grass, snow, sand, gravel, puddles, wood, metal (sound) | `footsteps` | Audio and footsteps | ✅ trail loop with a hiker, a runner, a dog and a horse; sound rings show each step; the ground reports the trail's surfaces to everyone else |
 | 17 | Footprints and tracks pressed into mud and snow | `tracks` (footprint lab) | Planets and terrain | ✅ footprint lab: a hiker, a dog, a horse and a rover leave prints and tracks in strips of mud, snow, sand and grass; rain fills the prints, snowfall covers them; a blast crater, a dug trench and a raised mound |
 | 18 | Destructible walls and barricades (Rainbow Six Siege style) | `fortress` | Destructible terrain and buildings | ✅ breach range: shot drywall, kicked-in barricades, thermite through rebar concrete, blown brick, a watchtower and gate that collapse, a mined cliff that caves in (replays every 20 s) |
-| 19 | Voxel digging and building (Valheim style) | `voxel`, `voxel_build`, `voxel_build_reach` | Destructible terrain and buildings | ✅ a voxel hill you dig into, and a build mode: a roof piece's ghost snaps onto a cabin, and a deck built out to its support limit shows a red ghost where it can't hold |
+| 19 | Voxel digging and building (Valheim style) | `voxel`, `voxel_build`, `voxel_build_reach`, `voxel_shelter` | Destructible terrain and buildings | ✅ a voxel hill you dig into, and a build mode: a roof piece's ghost snaps onto a cabin, a deck built out to its support limit shows a red ghost where it can't hold, and a hoe levels a pad in the rock where a builder puts up a shelter |
 
 ## Living world
 
@@ -71,7 +74,7 @@ are built, nothing simulates yet) · ⬜ not visible yet
 | 33 | Smart NPC AI that uses the environment (cover, high ground) | `arena`, `arena_cover` | Smart NPC AI | ✅ two squads take cover, climb the platform, flank, suppress and shoot the explosive barrel (stand-in bodies) |
 | 34 | NPCs that space the player and block attacks | `arena`, `arena_duel` | Smart NPC AI | ✅ melee fighters take turns instead of ringing you, block, parry, dodge and feint; a master and a veteran duel |
 | 35 | NPC skill, reaction time and logic editable per enemy | `arena` | Smart NPC AI | ✅ every fighter's skills (reaction time, accuracy, logic, defense…) are tunable through `npc.set_skill`; head band color shows skill |
-| 36 | Titanfall-style movement: wall-run, slide, dash | `parkour`, `parkour_course`, `parkour_ledge`, `parkour_grapple`, `parkour_play` | Movement and slow motion | ✅ a runner loops sprint, slide under a bar, wall-run, wall-jump, mantle onto a tower, double jump; a climber catches a ledge too high to vault, shimmies along it and climbs up; a pilot grapples the top of a 9 m tower, is reeled up and climbs over; press P to play it yourself (third-person pilot, F to grapple, lock-on with the middle mouse) |
+| 36 | Titanfall-style movement: wall-run, slide, dash | `parkour`, `parkour_course`, `parkour_ledge`, `parkour_grapple`, `parkour_freight`, `parkour_play` | Movement and slow motion | ✅ a runner loops sprint, slide under a bar, wall-run, wall-jump, mantle onto a tower, double jump; a climber catches a ledge too high to vault, shimmies along it and climbs up; a pilot grapples the top of a 9 m tower, is reeled up and climbs over; at the freight station a pilot sprints down the platform, leaps onto a departing box car, wall-runs along its side, climbs onto the roof and rides it to the end of the track; press P to play it yourself (third-person pilot, F to grapple, lock-on with the middle mouse) |
 | 37 | Elite enemies dash in and slice in the blink of an eye | `parkour` duel ring, `parkour_blink` | Movement and slow motion | ✅ an elite dash-strikes a level 1 player in under 0.25 s |
 | 38 | Stat-based time perception: a leveled-up player sees enemies in slow motion | `parkour` duel ring, `parkour_focus`, `parkour_counter` | Movement and slow motion | ✅ at level 10 the same attack slows the world to 1/5.5; the player sidesteps and counters |
 | 39 | Slow motion when attacking or being attacked (Zoro / Sung Jin-Woo moments) | `parkour` duel ring, `parkour_pack` | Movement and slow motion | ✅ four grunts attack in turn; each attack and each kill plays in slow motion |

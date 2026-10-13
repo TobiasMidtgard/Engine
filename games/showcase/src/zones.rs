@@ -262,13 +262,73 @@ fn lake_water<'a>(z: &Zone, ground: &'a dyn Fn(f64, f64) -> f64) -> engine_water
     }
 }
 
+/// Where Physics' float test floats: out on the deep water south-east of the lake's middle,
+/// clear of the jetty and the dinghy's lane on the west side.
+fn float_test(lake: &Zone) -> DVec3 {
+    lake.center + DVec3::new(20.0, crate::landscape::LAKE_LEVEL, -20.0)
+}
+
 /// The runway's two ends (x, z): 1.2 km north–south through the airfield.
 pub const RUNWAY: ([f64; 2], [f64; 2]) = ([780.0, -750.0], [780.0, 450.0]);
 
+/// The zones whose demos are spawned, when not all of them (see [`demo_zones`]).
+#[derive(Resource, Debug, Clone, PartialEq)]
+pub struct DemoZones(pub Vec<String>);
+
+/// The zone a viewpoint belongs to: the zone with its key, or whose key and `_` start it
+/// (`paddock_car` is the paddock's).
+pub fn zone_of(place: &str) -> Option<&'static str> {
+    ZONES.iter().map(|z| z.key).find(|key| {
+        place == *key
+            || place
+                .strip_prefix(key)
+                .is_some_and(|rest| rest.starts_with('_'))
+    })
+}
+
+/// Which zones get their demos, from the `--zones` flag (`a,b`, `none` or `all`) or else from
+/// the tour's or film's stops: when every stop belongs to a zone, only those zones load. Each
+/// module's demo costs a few hundred MB to a GB, and all of them together nearly fill 16 GB
+/// under a software renderer, so checking one module's stops shouldn't load the others.
+/// `None` spawns every zone.
+pub fn demo_zones(flag: Option<&str>, stops: Option<&str>) -> Option<DemoZones> {
+    let list = |s: &str| -> Vec<String> {
+        s.split(',')
+            .map(str::trim)
+            .filter(|k| !k.is_empty() && *k != "none")
+            .map(String::from)
+            .collect()
+    };
+    match flag {
+        Some("all") => None,
+        Some(keys) => Some(DemoZones(list(keys))),
+        None => {
+            let mut zones: Vec<String> = Vec::new();
+            for stop in list(stops?) {
+                let key = zone_of(&stop)?.to_string();
+                if !zones.contains(&key) {
+                    zones.push(key);
+                }
+            }
+            (!zones.is_empty()).then_some(DemoZones(zones))
+        }
+    }
+}
+
 /// What each zone shows. Each zone is one line, owned by its module's thread: swap the
-/// placeholder (`ph::…`) for your demo and leave the other lines alone.
-pub fn spawn_demos(commands: &mut Commands, lib: &Library, land: &Landscape, rng: &mut Rng) {
+/// placeholder (`ph::…`) for your demo and leave the other lines alone. `only` limits it to
+/// some zones ([`demo_zones`]).
+pub fn spawn_demos(
+    commands: &mut Commands,
+    lib: &Library,
+    land: &Landscape,
+    rng: &mut Rng,
+    only: Option<&DemoZones>,
+) {
     for z in ZONES {
+        if only.is_some_and(|o| !o.0.iter().any(|k| k == z.key)) {
+            continue;
+        }
         match z.key {
             "plaza" => ph::plaza(commands, lib, z),
             "market" => engine_ui::demo::spawn_demo(commands, z.center),
@@ -289,10 +349,13 @@ pub fn spawn_demos(commands: &mut Commands, lib: &Library, land: &Landscape, rng
             "gallery2d" => ph::gallery2d(commands, lib, z),
             "forest" => engine_foliage::demo::spawn_demo(commands, z.center),
             "meadow" => engine_npc::demo::spawn_wildlife(commands, z.center, z.radius * 0.8),
-            "lake" => engine_water::demo::spawn_valley(
-                commands,
-                &lake_water(z, &|x, z| land.height(x, z)),
-            ),
+            "lake" => {
+                engine_water::demo::spawn_valley(
+                    commands,
+                    &lake_water(z, &|x, z| land.height(x, z)),
+                );
+                engine_physics::demo::spawn_floaters(commands, float_test(z));
+            }
             "water" => engine_water::demo::spawn_demo(commands, z.center),
             "footsteps" => engine_audio::demo::spawn_demo(commands, z.center),
             "tracks" => engine_terrain::demo::spawn_demo_with(
@@ -529,6 +592,19 @@ pub fn demo_views(z: &Zone) -> Vec<View> {
                 .on_arrive("movement.duel", &duel("Blink"))
                 .on_arrive("movement.grappler", "{}")
                 .on_leave("movement.duel", cycle),
+                // The freight station: the rider restarts its loop on arrival, with the car
+                // about to pull out, and is caught leaping onto the car's side.
+                View::new(
+                    "parkour_freight",
+                    "Ride a moving freight car: leap onto its side, wall-run along it, climb aboard",
+                    [-20.0, 3.6, 21.0],
+                    [-15.5, 3.0, 28.5],
+                    16.0,
+                )
+                .warmup(1.65)
+                .on_arrive("movement.duel", &duel("Blink"))
+                .on_arrive("movement.rider", "{}")
+                .on_leave("movement.duel", cycle),
                 // Play mode (P): a pilot in front of the camera, locked onto the elite.
                 View::new(
                     "parkour_play",
@@ -625,10 +701,27 @@ pub fn demo_views(z: &Zone) -> Vec<View> {
         }
         "lake" => {
             let land = crate::landscape::shared();
-            engine_water::demo::valley_views(&lake_water(z, &|x, z| land.height(x, z)))
-                .iter()
-                .map(|v| View::new(v.key, v.name, v.eye, v.target, v.hour).warmup(v.warmup_secs))
-                .collect()
+            let mut views: Vec<View> =
+                engine_water::demo::valley_views(&lake_water(z, &|x, z| land.height(x, z)))
+                    .iter()
+                    .map(|v| {
+                        View::new(v.key, v.name, v.eye, v.target, v.hour).warmup(v.warmup_secs)
+                    })
+                    .collect();
+            // The float test from the south, 8 m off and 3 m up, a few seconds after a drop
+            // (its cycle runs while the camera is near, so it drops as the camera arrives).
+            let at = (float_test(z) - z.center).to_array();
+            views.push(
+                View::new(
+                    "lake_floats",
+                    "Float test: eight things settle on the lake as the real ones do",
+                    [at[0] - 2.0, at[1] + 3.0, at[2] - 8.0],
+                    [at[0], at[1] + 0.3, at[2]],
+                    16.5,
+                )
+                .warmup(8.0),
+            );
+            views
         }
         "water" => engine_water::demo::VIEWS
             .iter()
@@ -1024,4 +1117,53 @@ pub fn moon(commands: &mut Commands) {
 /// The Moon's position (for camera bookmarks).
 pub fn moon_position() -> DVec3 {
     DVec3::new(-0.45, 0.35, -0.82).normalize() * 384_400_000.0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_float_test_has_open_deep_water() {
+        let lake = zone("lake");
+        let at = float_test(lake);
+        let land = crate::landscape::shared();
+        // 14 × 8 m at least 2 m deep, with a meter to spare.
+        for i in -8..=8 {
+            for k in -5..=5 {
+                let (x, z) = (at.x + i as f64, at.z + k as f64);
+                assert!(
+                    land.lake_depth(x, z) > 2.0,
+                    "{:.1} m deep at ({x}, {z})",
+                    land.lake_depth(x, z)
+                );
+            }
+        }
+        // Clear of the dinghy's mooring and its 22 m lane.
+        let dinghy = lake.center + DVec3::new(-30.0, 0.0, 30.0);
+        assert!((at - dinghy).length() > 22.0 + 10.0);
+    }
+
+    #[test]
+    fn tours_of_zone_stops_load_only_those_zones() {
+        assert_eq!(zone_of("paddock_car"), Some("paddock"));
+        assert_eq!(zone_of("track_cars"), Some("track"));
+        assert_eq!(zone_of("tracks"), Some("tracks"));
+        assert_eq!(zone_of("overview"), None);
+        let only = |keys: &[&str]| Some(DemoZones(keys.iter().map(|k| k.to_string()).collect()));
+        assert_eq!(
+            demo_zones(None, Some("paddock_car,yard,paddock")),
+            only(&["paddock", "yard"])
+        );
+        // A stop that sees more than one zone, or the whole tour, loads every zone.
+        assert_eq!(demo_zones(None, Some("paddock,overview")), None);
+        assert_eq!(demo_zones(None, None), None);
+        // The flag wins.
+        assert_eq!(demo_zones(Some("all"), Some("paddock")), None);
+        assert_eq!(demo_zones(Some("none"), Some("overview")), only(&[]));
+        assert_eq!(
+            demo_zones(Some("lake,water"), None),
+            only(&["lake", "water"])
+        );
+    }
 }

@@ -17,8 +17,8 @@
 //! With `use_input`, the builder reads the action map: `build_mode` (B, d-pad left) toggles,
 //! `build_place` (left mouse, right trigger) places, `build_remove` (X, north button) takes
 //! down the built piece aimed at, `build_rotate` (R, d-pad right) turns the ghost 22.5°,
-//! `build_next` (C, left bumper) and `build_piece_1` to `build_piece_10` (keys 1 to 9 and 0)
-//! pick the piece. Scripts send [`BuildRequest`]s; the AI bridge has `destruction.build`.
+//! `build_next` (C, left bumper) and `build_piece_1` to `build_piece_12` (keys 1 to 9, 0, −
+//! and =) pick the piece. Scripts send [`BuildRequest`]s; the AI bridge has `destruction.build`.
 
 use std::f32::consts::{FRAC_PI_2, FRAC_PI_4};
 
@@ -33,7 +33,7 @@ use crate::assets::DestructionAssets;
 use crate::burn::{TIMBER_MOISTURE, WOOD_IGNITION_C};
 use crate::dress::PropModel;
 use crate::material::{DestructibleMaterial, DestructionMaterials};
-use crate::props::PropKind;
+use crate::props::{PropKind, wall_opening};
 use crate::structure::{Obb, PieceState, ShowSupport, StructuralPiece};
 use crate::sync::solid_half;
 use crate::voxel::{VoxelState, rock_below};
@@ -82,10 +82,14 @@ pub enum BuildKind {
     /// Board gable, the right triangle under one side of a 26° roof: 2 m wide, rising 1 m
     /// toward +X (turn it half round for the other side of the ridge).
     WoodGable,
+    /// Board wall, 2 × 2 m, with a doorway (0.9 × 1.9 m) in its middle.
+    WoodDoorway,
+    /// Board wall, 2 × 2 m, with a window (0.9 × 0.75 m) in its middle at chest height.
+    WoodWindow,
 }
 
 impl BuildKind {
-    pub const ALL: [BuildKind; 10] = [
+    pub const ALL: [BuildKind; 12] = [
         BuildKind::WoodFloor,
         BuildKind::WoodWall,
         BuildKind::WoodPole,
@@ -96,6 +100,8 @@ impl BuildKind {
         BuildKind::StoneWall,
         BuildKind::StonePillar,
         BuildKind::WoodGable,
+        BuildKind::WoodDoorway,
+        BuildKind::WoodWindow,
     ];
 
     pub fn name(self) -> &'static str {
@@ -110,6 +116,8 @@ impl BuildKind {
             BuildKind::StoneWall => "stone_wall",
             BuildKind::StonePillar => "stone_pillar",
             BuildKind::WoodGable => "wood_gable",
+            BuildKind::WoodDoorway => "wood_doorway",
+            BuildKind::WoodWindow => "wood_window",
         }
     }
 
@@ -135,6 +143,8 @@ impl BuildKind {
             BuildKind::StoneWall => "Stone wall 2×1",
             BuildKind::StonePillar => "Stone pillar",
             BuildKind::WoodGable => "Wood gable 26°",
+            BuildKind::WoodDoorway => "Wood doorway 2×2",
+            BuildKind::WoodWindow => "Wood window 2×2",
         }
     }
 
@@ -151,7 +161,10 @@ impl BuildKind {
     /// a roof slopes down its X to the eave).
     pub fn size(self) -> Vec3 {
         match self {
-            BuildKind::WoodFloor | BuildKind::WoodWall => Vec3::new(2.0, 2.0, 0.1),
+            BuildKind::WoodFloor
+            | BuildKind::WoodWall
+            | BuildKind::WoodDoorway
+            | BuildKind::WoodWindow => Vec3::new(2.0, 2.0, 0.1),
             BuildKind::WoodPole => Vec3::new(0.2, 2.0, 0.2),
             BuildKind::WoodBeam => Vec3::new(2.0, 0.2, 0.2),
             BuildKind::WoodRoof => Vec3::new(ROOF_RUN / ROOF_PITCH.cos(), 0.12, 2.0),
@@ -193,6 +206,8 @@ impl BuildKind {
                 PropKind::StoneBlock { size }
             }
             BuildKind::WoodGable => PropKind::BoardGable { size },
+            BuildKind::WoodDoorway => PropKind::BoardDoorway { size },
+            BuildKind::WoodWindow => PropKind::BoardWindow { size },
         }
     }
 
@@ -203,15 +218,43 @@ impl BuildKind {
             BuildKind::WoodFloor | BuildKind::WoodWall => 0.5,
             // Half a board wall's box.
             BuildKind::WoodGable => 0.25,
+            // A board wall less its opening.
+            BuildKind::WoodDoorway => 0.4,
+            BuildKind::WoodWindow => 0.45,
             BuildKind::WoodRoof | BuildKind::WoodRoof45 => 0.3,
             _ => 1.0,
         }
     }
 
-    /// The solid part of a piece with box half size `half` (its own axes): the box, or the
-    /// triangle a gable fills (a box would stand up through the roof over its low end).
+    /// The solid part of a piece with box half size `half` (its own axes): the box, the
+    /// triangle a gable fills (a box would stand up through the roof over its low end), or the
+    /// wall around a doorway or window (so you walk through the one and see out of the other).
     pub fn solid(self, half: Vec3) -> ColliderShape {
         match self {
+            BuildKind::WoodDoorway | BuildKind::WoodWindow => {
+                let (lo, hi) = wall_opening(self.size(), self == BuildKind::WoodDoorway);
+                // The hole grows by the skin the outside shrank by.
+                let skin = (self.size() * 0.5 - half).truncate();
+                let (lo, hi) = (lo - skin, hi + skin);
+                let mut boxes = Vec::new();
+                for (x0, x1, y0, y1) in [
+                    (-half.x, lo.x, -half.y, half.y),
+                    (hi.x, half.x, -half.y, half.y),
+                    (lo.x, hi.x, hi.y, half.y),
+                    (lo.x, hi.x, -half.y, lo.y),
+                ] {
+                    if x1 - x0 > 1e-3 && y1 - y0 > 1e-3 {
+                        boxes.push((
+                            Vec3::new((x0 + x1) * 0.5, (y0 + y1) * 0.5, 0.0),
+                            Quat::IDENTITY,
+                            ColliderShape::Cuboid {
+                                half_extents: Vec3::new((x1 - x0) * 0.5, (y1 - y0) * 0.5, half.z),
+                            },
+                        ));
+                    }
+                }
+                ColliderShape::Compound(boxes)
+            }
             BuildKind::WoodGable => ColliderShape::ConvexHull {
                 points: [(-half.x, -half.y), (half.x, -half.y), (half.x, half.y)]
                     .into_iter()
@@ -807,6 +850,8 @@ pub fn bind_actions(map: Option<ResMut<InputMap>>) {
         KeyCode::Digit8,
         KeyCode::Digit9,
         KeyCode::Digit0,
+        KeyCode::Minus,
+        KeyCode::Equal,
     ];
     for (i, key) in digits.into_iter().enumerate() {
         bind(&format!("build_piece_{}", i + 1), &[Binding::Key(key)]);
@@ -1208,6 +1253,41 @@ pub fn plan_in_world(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn doorways_and_windows_are_solid_around_their_openings() {
+        let inside = |shape: &ColliderShape, p: Vec3| {
+            let ColliderShape::Compound(parts) = shape else {
+                panic!("{shape:?}");
+            };
+            parts.iter().any(|(at, _, s)| match s {
+                ColliderShape::Cuboid { half_extents } => {
+                    ((p - *at).abs() - *half_extents).max_element() <= 0.0
+                }
+                _ => false,
+            })
+        };
+        let solid = |kind: BuildKind| kind.solid(crate::sync::solid_half(kind.size() * 0.5));
+        // Through the doorway, from the foot to head height: free; beside and over it: wall.
+        let door = solid(BuildKind::WoodDoorway);
+        for y in [-0.98, 0.0, 0.85] {
+            assert!(!inside(&door, Vec3::new(0.0, y, 0.0)), "doorway at {y}");
+        }
+        assert!(inside(&door, Vec3::new(0.8, 0.0, 0.0)));
+        assert!(inside(&door, Vec3::new(0.0, 0.97, 0.0)));
+        // A character fits: 0.8 m wide and 1.85 m tall.
+        let (lo, hi) = wall_opening(BuildKind::WoodDoorway.size(), true);
+        assert!(hi.x - lo.x > 0.8 && hi.y - lo.y > 1.85, "{lo} .. {hi}");
+        // The window is open at chest height and wall under and over it.
+        let window = solid(BuildKind::WoodWindow);
+        assert!(!inside(&window, Vec3::new(0.0, 0.2, 0.0)));
+        for y in [-0.6, 0.8] {
+            assert!(
+                inside(&window, Vec3::new(0.0, y, 0.0)),
+                "window wall at {y}"
+            );
+        }
+    }
 
     fn piece(e: u32, kind: BuildKind, center: DVec3, yaw: f32, support: f32) -> ScenePiece {
         ScenePiece {

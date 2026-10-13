@@ -32,6 +32,24 @@ fn aircraft_sport_plane_front() {
     );
 }
 
+/// Run-up on the brakes: the propeller turns too fast to see, so its blur disc shows.
+#[test]
+fn aircraft_sport_plane_runup() {
+    gallery_shot(
+        "aircraft_sport_plane_runup",
+        0.8,
+        |app| {
+            floor(app, 200.0);
+            let e = parked(app, "sport_plane", DVec3::ZERO, 0.0);
+            support::controls(app, e, |c| {
+                c.throttle = 0.7;
+                c.brake = 1.0;
+            });
+        },
+        Transform::from_xyz(-5.0, 1.7, -7.0).looking_at(DVec3::new(0.0, 1.0, -2.6), Vec3::Y),
+    );
+}
+
 #[test]
 fn aircraft_sport_plane_rear() {
     sport(
