@@ -871,8 +871,11 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
         }
     }
     // Hand-made ground's tint (fields, roads): its color with each material's texture detail.
+    // Snow and mud lie on top of the ground and keep their own colors.
     if (in.tint.a > 0.001) {
-        for (var i = 0u; i < MAT_COUNT; i++) { col[i] = mix(col[i], in.tint.rgb, in.tint.a); }
+        for (var i = 0u; i < MAT_COUNT; i++) {
+            if (i != M_SNOW && i != M_MUD) { col[i] = mix(col[i], in.tint.rgb, in.tint.a); }
+        }
     }
 
     // ---- Sample the materials present and blend them by height.

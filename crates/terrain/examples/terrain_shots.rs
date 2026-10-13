@@ -130,6 +130,15 @@ fn views() -> Vec<View> {
             ..BASE
         },
         View {
+            name: "painted_snow",
+            eye: DVec3::new(-35.0, 38.0, 75.0),
+            target: DVec3::new(15.0, 0.0, -45.0),
+            sun: (230.0, 32.0),
+            painted: true,
+            ground: Ground::Snow,
+            ..BASE
+        },
+        View {
             name: "painted_patchwork",
             eye: DVec3::new(-60.0, 32.0, -150.0),
             target: DVec3::new(20.0, 0.0, -260.0),
