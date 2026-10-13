@@ -423,6 +423,22 @@ mod tests {
         assert!(errors.is_empty(), "{}", errors.join("\n\n"));
     }
 
+    /// Other crates' blended shaders (particles, smoke) take the fog apart with `surface_fog`:
+    /// its `SurfaceFog` keeps those names and per-channel types.
+    #[test]
+    fn surface_fog_splits_apply_fog() {
+        let src = "
+            @fragment
+            fn fs(@builtin(position) p: vec4<f32>) -> @location(0) vec4<f32> {
+                let rel = vec3<f32>(p.x, 0.0, -p.y);
+                let f: SurfaceFog = surface_fog(rel);
+                let t: vec3<f32> = f.transmittance;
+                let l: vec3<f32> = f.inscatter;
+                return vec4<f32>(vec3<f32>(0.2) * t + l + apply_fog(vec3<f32>(0.2), rel), 0.5);
+            }";
+        validate_wgsl("surface_fog caller", &compose_shader(src, true)).unwrap();
+    }
+
     #[test]
     fn mesh_renderer_round_trips_through_json() {
         let r = MeshRenderer::new(

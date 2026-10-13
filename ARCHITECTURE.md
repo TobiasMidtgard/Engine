@@ -251,7 +251,7 @@ Shared pipelines the core will provide for modules (planned): **strands** for ha
 muscles and skinned clothes and by `engine_softbody` for simulated cloth).
 
 Shader library: `lib_types.wgsl` (types, noise, BRDF, `henyey_greenstein`), `lib_frame.wgsl` (group 0 frame
-data, `shade_surface`, `shade_surface_shadowed`, `shadow_factor` (cascades, then `far_shadow_visibility`), `contact_shadow`, `screen_ao`, `sky_visibility`, `apply_fog`,
+data, `shade_surface`, `shade_surface_shadowed`, `shadow_factor` (cascades, then `far_shadow_visibility`), `contact_shadow`, `screen_ao`, `sky_visibility`, `apply_fog` (`color * transmittance + inscatter` of `surface_fog`, which returns a `SurfaceFog` for callers that need the two apart, such as blended particles),
 `apply_sky_fog`, `volumetric_fog_at`, `height_fog_density`, `fog_sky_light`,
 `sample_env`, `sample_env_rough`, `sky_ambient`, `wind_offset`, `prepass_output`) and `lib_atmosphere.wgsl` (`atmosphere` for aerial perspective,
 `sun_transmittance`, `sky_view_radiance`, `planet_height`, `ray_shell`).

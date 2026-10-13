@@ -769,13 +769,22 @@ fn limit_fog_opacity(fog: vec4<f32>) -> vec4<f32> {
     return vec4<f32>(fog.rgb * (frame.fog.w / max(1.0 - fog.a, 1e-4)), min_t);
 }
 
-// Applies fog and atmospheric haze to pre-exposed color seen at camera-relative `rel`.
-//
+// Fog and atmospheric haze between the camera and a surface at camera-relative `rel`, in two
+// parts: the light they scatter toward the camera (pre-exposed) and the share of the surface's
+// own light that gets through, per channel (the air dims blue more than red). What `apply_fog`
+// applies; use it directly where the two parts are needed apart (particles and smoke blended
+// over the scene: `color * transmittance` for what they let through, `inscatter` once).
+struct SurfaceFog {
+    inscatter: vec3<f32>,
+    transmittance: vec3<f32>,
+};
+
 // Within `RenderSettings::volumetric_fog_range` the fog comes from the volumetric fog (height
 // fog and fog volumes, with light shafts, sky occlusion and lamps); beyond it the height fog
 // continues analytically from the end of the range, so nothing is counted twice. With
-// volumetric fog off the analytic height fog starts at the camera.
-fn apply_fog(color: vec3<f32>, rel: vec3<f32>) -> vec3<f32> {
+// volumetric fog off the analytic height fog starts at the camera. The atmosphere's aerial
+// perspective comes on top.
+fn surface_fog(rel: vec3<f32>) -> SurfaceFog {
     let dist = length(rel);
     let dir = rel / max(dist, 1e-4);
     // In-scattered light (pre-exposed) and transmittance between the camera and the point.
@@ -798,14 +807,24 @@ fn apply_fog(color: vec3<f32>, rel: vec3<f32>) -> vec3<f32> {
         }
     }
     fog = limit_fog_opacity(fog);
-    var c = color * fog.a + fog.rgb;
+    var out: SurfaceFog;
+    out.inscatter = fog.rgb;
+    out.transmittance = vec3<f32>(fog.a);
     // Aerial perspective: the atmosphere between the camera and distant geometry (negligible
     // closer than a couple hundred meters).
     if (dist > 200.0) {
         let a = atmosphere(vec3(0.0), dir, dist, 8);
-        c = c * a.transmittance + pre_expose(a.radiance * frame.sun_color.rgb);
+        out.inscatter = out.inscatter * a.transmittance + pre_expose(a.radiance * frame.sun_color.rgb);
+        out.transmittance *= a.transmittance;
     }
-    return c;
+    return out;
+}
+
+// Applies fog and atmospheric haze (`surface_fog`) to pre-exposed color seen at camera-relative
+// `rel`.
+fn apply_fog(color: vec3<f32>, rel: vec3<f32>) -> vec3<f32> {
+    let f = surface_fog(rel);
+    return color * f.transmittance + f.inscatter;
 }
 
 // Volumetric fog in front of the sky (up to the volumetric range) for pre-exposed sky color
