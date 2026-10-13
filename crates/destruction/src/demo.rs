@@ -41,7 +41,7 @@ use crate::debris::{Debris, PendingDebris, settle};
 use crate::dress::{ArchKind, ArchModel, GravelPad, PropModel};
 use crate::hits::{Hit, HitQueue};
 use crate::material::{DestructibleMaterial, linear};
-use crate::props::PropKind;
+use crate::props::{self, PropKind};
 use crate::structure::{Fracturable, FractureShape, ShowSupport, StructuralPiece};
 use crate::voxel::VoxelVolume;
 use crate::wall::{DestructibleWall, WallAnchors, WallState};
@@ -1041,6 +1041,57 @@ fn spawn_breach_house(commands: &mut Commands, o: DVec3) -> House {
         5,
         at(0.0, deck_top * 0.5, -3.57),
         FRAC_PI_2,
+    );
+    // Guard railings round the roof, open at the stair's head, and up the stair's open side.
+    let rail = |length: f32, rise: f32, side_mount: bool| {
+        let kind = PropKind::PipeRailing {
+            length,
+            rise,
+            side_mount,
+        };
+        (
+            kind,
+            props::pipe_railing_foot(length, rise, side_mount) as f64,
+        )
+    };
+    let edge = 0.1;
+    let (px, pz) = (3.42 - edge, DECK_FRONT - edge);
+    let back = DECK_FRONT - DECK_LEN as f64 + edge;
+    let flange = 0.065;
+    let gap = 0.3;
+    let side_len = pz - gap - back;
+    let back_x0 = -1.75;
+    let back_x1 = px - gap;
+    for (k, (length, x, z, yaw)) in [
+        (2.0 * px, 0.0, pz, PI),
+        (side_len, px, back + side_len * 0.5, -FRAC_PI_2),
+        (side_len, -px, back + side_len * 0.5, FRAC_PI_2),
+        (back_x1 - back_x0, (back_x0 + back_x1) * 0.5, back, 0.0),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let (kind, foot) = rail(length as f32 + 2.0 * flange, 0.0, false);
+        model(
+            commands,
+            kind,
+            90 + k as u64,
+            at(x, deck_top - foot, z),
+            yaw,
+        );
+    }
+    // The stair's: palms bolted to its outer stringer, climbing west with it.
+    let (kind, foot) = rail(5.0, deck_top as f32, true);
+    model(
+        commands,
+        kind,
+        94,
+        at(
+            0.0,
+            deck_top * 0.5 - foot,
+            -4.07 - props::RAIL_PALM_BACK as f64,
+        ),
+        PI,
     );
     House {
         roof: vec![bays[2], bays[3]],
