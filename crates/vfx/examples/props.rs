@@ -68,6 +68,7 @@ fn entries() -> Vec<Entry> {
         e("patches", props::beds::footstep_patches, back, 0.25),
         e("plates", props::beds::impact_plates, back, 0.25),
         e("brazier", props::rim::brazier, front, 0.3),
+        e("mortar", props::launcher::mortar, front, 0.45),
         e("shrubs", || props::rim::shrubs(0), front, 0.45),
         e("golem", golem, back, 0.6),
         e("stone", || props::golem::dropped_stone(0), front, 0.6),

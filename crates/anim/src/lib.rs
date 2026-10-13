@@ -8,8 +8,10 @@ pub mod clip;
 pub mod demo;
 pub mod events;
 pub mod graph;
+pub mod horse_model;
 pub mod ik;
 pub mod import;
+pub mod model;
 pub mod muscle;
 pub mod procedural;
 pub mod retarget;
@@ -23,6 +25,7 @@ pub use attach::{BoneAttachment, Hang};
 pub use character::{HumanModel, HumanModels};
 pub use clip::AnimationClip;
 pub use graph::{AnimGraph, NodeDef};
+pub use horse_model::{HorseModel, HorseModels};
 pub use ik::{FootIk, IkShape, IkSurface, LegIk, LookAt, Reach, ReachIk};
 pub use muscle::{MorphWeights, Muscle, MuscleDriver, MuscleRig};
 pub use procedural::gait::{GaitLeg, GaitStage, LeggedGait};
@@ -101,8 +104,10 @@ impl Plugin for AnimationPlugin {
             (
                 (
                     character::load_human_models,
+                    horse_model::load_horse_models,
                     animator::build_animators,
                     animator::queue_triggers,
+                    (model::spawn_rig_models, model::despawn_orphan_parts),
                 )
                     .chain()
                     .in_set(AnimSet::Setup),

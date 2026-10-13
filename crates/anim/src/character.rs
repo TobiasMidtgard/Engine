@@ -1143,9 +1143,11 @@ pub(crate) fn load_human_models(world: &mut World) {
     update_models(world, false);
 }
 
-/// Wait until every requested [`HumanModel`] is loaded and worn (tests, offline renders).
+/// Wait until every requested [`HumanModel`] (and [`HorseModel`](crate::HorseModel)) is
+/// loaded and worn (tests, offline renders).
 pub fn finish_loading(world: &mut World) {
     update_models(world, true);
+    crate::horse_model::finish_loading(world);
 }
 
 #[cfg(test)]
