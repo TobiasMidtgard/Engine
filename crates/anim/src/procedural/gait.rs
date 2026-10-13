@@ -13,7 +13,7 @@ use engine_world::animation::AnimationParams;
 use engine_world::physics::PhysicsQueries;
 use engine_world::{ContactKind, Ground, SurfaceId, WorldShift};
 
-use crate::animator::Animator;
+use crate::animator::{Animator, PoseEdit};
 use crate::ik::{GroundProbe, IkSurfaces, to_model, to_world, two_bone};
 use crate::xform::{rotation_between, smoothing};
 
@@ -28,6 +28,10 @@ pub enum LegStyle {
     /// `[upper, lower, ankle, end]`: the ankle segment stays upright and flips back while
     /// swinging (horse cannon and hoof, dog paws).
     Hoofed,
+    /// `[scapula, upper, lower, ankle, end]`: a hoofed leg hung from a shoulder blade that
+    /// rocks fore and aft toward the foot (a dog's or cat's foreleg), which lengthens the
+    /// stride the way the real shoulder does.
+    Scapular,
 }
 
 /// What touches the ground, for footprints and sounds.
@@ -64,6 +68,10 @@ pub struct GaitLeg {
     pub foot_size: [f32; 2],
     /// Height of the end bone above the ground when planted, meters.
     pub sole: f32,
+    /// Where the stride centers, from the foot's rest spot (model space, meters): a hind leg
+    /// that stands behind its hip strides from under the hip, so it reaches as far back as
+    /// forward.
+    pub stance_offset: Vec3,
 }
 
 impl Default for GaitLeg {
@@ -76,6 +84,7 @@ impl Default for GaitLeg {
             kind: FootKind::Foot,
             foot_size: [0.1, 0.25],
             sole: 0.05,
+            stance_offset: Vec3::ZERO,
         }
     }
 }
@@ -351,7 +360,11 @@ pub fn step_gait(
                 Some(LegBones {
                     bones,
                     end,
-                    neutral: Vec3::new(rest.x, l.sole, rest.z),
+                    neutral: Vec3::new(
+                        rest.x + l.stance_offset.x,
+                        l.sole,
+                        rest.z + l.stance_offset.z,
+                    ),
                 })
             })
             .collect();
@@ -612,27 +625,54 @@ pub fn step_gait(
                 edit.rotate_model(root, rotation_between(flat(cur), flat(want)));
                 two_bone(&mut edit, a, b, c, target, def.pole, 1.0);
             }
-            (LegStyle::Hoofed, &[a, b, ankle, end, ..]) => {
-                // Keep the cannon as animated, flipped back during the swing, and reach the
-                // knee (hock) to where the flipped cannon puts the hoof on its path.
+            (LegStyle::Scapular, &[scap, a, b, ankle, end, ..]) => {
+                // Rock the shoulder blade toward the foot: its lower end (the shoulder joint)
+                // goes forward as the paw reaches ahead and back as it pushes off, carrying
+                // half the paw's offset, then the leg below reaches like a hoofed one.
                 let ankle_rot = edit.model[ankle].r;
-                let cannon = edit.position(end) - edit.position(ankle);
-                let fold = (std::f32::consts::PI * swing.clamp(0.0, 1.0)).sin() * 1.1;
-                let lateral = up_model.cross(def.pole).normalize_or(Vec3::X);
-                let flip = Quat::from_axis_angle(lateral, -fold);
-                two_bone(
-                    &mut edit,
-                    a,
-                    b,
-                    ankle,
-                    target - flip * cannon,
-                    def.pole,
-                    1.0,
-                );
-                edit.set_model_rotation(ankle, ankle_rot);
-                if fold > 0.0 {
-                    edit.rotate_model(ankle, flip);
+                let top = edit.position(scap);
+                let arm = edit.position(a) - top;
+                let ahead = (target - leg.neutral).dot(fwd_axis);
+                let want = (ahead * 0.5 / arm.length().max(1e-3)).clamp(-0.5, 0.5);
+                let lateral = up_model.cross(fwd_axis).normalize_or(Vec3::X);
+                let rock = |angle: f32| Quat::from_axis_angle(lateral, -angle);
+                // The leg below must still reach the foot: rocking a sloped blade forward also
+                // lifts the shoulder, so it rocks no further than the leg can reach from.
+                let span = |i: usize, j: usize| (edit.position(j) - edit.position(i)).length();
+                let leg_length = (span(a, b) + span(b, ankle) + span(ankle, end)) * 0.98;
+                let miss = |angle: f32| (target - (top + rock(angle) * arm)).length() - leg_length;
+                let mut angle = want;
+                if miss(want) > 0.0 {
+                    let candidates = (-12..=12).map(|k| k as f32 * 0.05);
+                    angle = candidates
+                        .clone()
+                        .filter(|&c| miss(c) <= 0.0)
+                        .min_by(|x, y| (x - want).abs().total_cmp(&(y - want).abs()))
+                        .or_else(|| candidates.min_by(|x, y| miss(*x).total_cmp(&miss(*y))))
+                        .unwrap_or(want);
                 }
+                edit.rotate_model(scap, rock(angle));
+                hoofed(
+                    &mut edit,
+                    [a, b, ankle, end],
+                    ankle_rot,
+                    target,
+                    def.pole,
+                    swing,
+                    up_model,
+                );
+            }
+            (LegStyle::Hoofed, &[a, b, ankle, end, ..]) => {
+                let ankle_rot = edit.model[ankle].r;
+                hoofed(
+                    &mut edit,
+                    [a, b, ankle, end],
+                    ankle_rot,
+                    target,
+                    def.pole,
+                    swing,
+                    up_model,
+                );
             }
             _ => {}
         }
@@ -645,12 +685,67 @@ pub fn step_gait(
             }
         }
     }
+    gait_outputs(gait, params, dt, legs);
+}
 
-    // Inputs for muscles and other systems.
+/// A hoofed leg `[upper, lower, ankle, end]`: keep the cannon as animated (`ankle_rot`),
+/// flipped back during the swing (and tipped on the toe when out of reach), and reach the
+/// knee (hock) to where that cannon puts the hoof on its path.
+fn hoofed(
+    edit: &mut PoseEdit,
+    [a, b, ankle, end]: [usize; 4],
+    ankle_rot: Quat,
+    target: Vec3,
+    pole: Vec3,
+    swing: f32,
+    up_model: Vec3,
+) {
+    let cannon = edit.position(end) - edit.position(ankle);
+    let fold = (std::f32::consts::PI * swing.clamp(0.0, 1.0)).sin() * 1.1;
+    let lateral = up_model.cross(pole).normalize_or(Vec3::X);
+    let flip = Quat::from_axis_angle(lateral, -fold);
+    // A foot the leg can't reach with the cannon as animated pivots on its toe: the cannon
+    // tips (the hock or fetlock rises toward the hip) as far as it takes, the way a dog's
+    // hock lifts as the paw pushes off far behind it, instead of the foot leaving the ground.
+    let hip = edit.position(a);
+    let reach = ((edit.position(b) - hip).length()
+        + (edit.position(ankle) - edit.position(b)).length())
+        * 0.995;
+    let hock = |q: Quat| target - q * flip * cannon;
+    let mut tip = Quat::IDENTITY;
+    if (hock(tip) - hip).length() > reach {
+        let mut best = f32::MAX;
+        'search: for step in 1..=24 {
+            for sign in [1.0, -1.0] {
+                let q = Quat::from_axis_angle(lateral, sign * step as f32 * 0.05);
+                let d = (hock(q) - hip).length();
+                if d < best {
+                    best = d;
+                    tip = q;
+                }
+                if d <= reach {
+                    break 'search;
+                }
+            }
+        }
+    }
+    two_bone(edit, a, b, ankle, hock(tip), pole, 1.0);
+    edit.set_model_rotation(ankle, ankle_rot);
+    if fold > 0.0 || tip != Quat::IDENTITY {
+        edit.rotate_model(ankle, tip * flip);
+    }
+}
+
+/// Inputs for muscles and other systems: speed, intensity, stage and each leg's load.
+fn gait_outputs(gait: &mut LeggedGait, params: &mut AnimationParams, dt: f32, legs: Vec<LegBones>) {
+    let speed = gait.speed();
     params.set("gait.speed", speed);
-    params.set("gait.intensity", intensity);
-    params.set("gait.stage", rt.stage as f32);
-    for (i, f) in rt.feet.iter().enumerate() {
+    params.set(
+        "gait.intensity",
+        (speed / gait.full_speed.max(0.1)).clamp(0.0, 1.0),
+    );
+    params.set("gait.stage", gait.rt.stage as f32);
+    for (i, f) in gait.rt.feet.iter().enumerate() {
         let load = if f.planted { 1.0 } else { 0.0 };
         let key = GAIT_LOAD_KEYS.get(i).copied().unwrap_or("gait.load.x");
         let prev = params.get(key);

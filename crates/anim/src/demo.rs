@@ -31,7 +31,7 @@ use serde_json::{Value, json};
 
 use crate::animator::{AnimationLibrary, Animator, AnimatorSettings};
 use crate::attach::{BoneAttachment, Hang};
-use crate::build::{car, horse, humanoid, spider};
+use crate::build::{car, dog, horse, humanoid, spider};
 use crate::character::HumanModel;
 use crate::horse_model::HorseModel;
 use crate::ik::{GroundProbe, IkShape, IkSurface, IkSurfaces, LookAt, Reach, ReachIk};
@@ -47,6 +47,20 @@ pub const RADIUS: f64 = 36.0;
 /// Where the hammer athlete stands (local x, z) and how far ahead of them the tire lies.
 const ATHLETE: DVec3 = DVec3::new(-2.6, 0.0, 5.4);
 const TIRE_AHEAD: f64 = 1.3;
+/// The dog's run ([x, z, speed], m and m/s from the paddock's center): it walks off at the
+/// west end, trots, canters out of the east turn and gallops down the far straight.
+const DOG_PATH: [[f32; 3]; 10] = [
+    [-12.0, 12.0, 1.1],
+    [-6.0, 12.0, 2.6],
+    [0.0, 12.0, 4.8],
+    [3.6, 14.2, 3.4],
+    [3.6, 17.8, 3.6],
+    [0.0, 20.0, 6.5],
+    [-6.0, 20.0, 9.0],
+    [-12.0, 20.0, 6.0],
+    [-15.6, 17.8, 3.0],
+    [-15.6, 14.2, 1.6],
+];
 /// The realistic horse (`assets/manifests/animation.toml`).
 const HORSE_FILE: &str = "anim/animals/horse/Horse.gltf";
 /// The hammer in the right hand's frame: the fist's center, and the handle's direction toward
@@ -63,6 +77,7 @@ pub struct DemoEntities {
     pub walker: Entity,
     pub horse: Entity,
     pub spider: Entity,
+    pub dog: Entity,
     pub car: Entity,
 }
 
@@ -222,6 +237,11 @@ pub(crate) fn register(app: &mut App) {
             lib.add_clip(clip);
         }
         lib.add_graph(horse::graph());
+        let d = lib.add_skeleton(dog::skeleton(1.0));
+        for clip in dog::clips(&d) {
+            lib.add_clip(clip);
+        }
+        lib.add_graph(dog::graph());
         lib.add_skeleton(spider::skeleton());
         lib.add_skeleton(car::skeleton());
         let concept = lib.add_skeleton(car::concept_skeleton());
@@ -240,13 +260,13 @@ pub(crate) fn register(app: &mut App) {
     )
     .register_api(
         "anim.spawn",
-        "Spawn a demo character: athlete, shirt, lifter, horse, spider or car.",
+        "Spawn a demo character: athlete, shirt, lifter, horse, dog, spider or car.",
         r#"{"kind": "horse", "at": [0, 0, 0], "yaw_deg": 0}"#,
         |world, args| {
             let kind = args
                 .get("kind")
                 .and_then(Value::as_str)
-                .ok_or("pass \"kind\": athlete, shirt, lifter, horse, spider or car")?;
+                .ok_or("pass \"kind\": athlete, shirt, lifter, horse, dog, spider or car")?;
             let at = args
                 .get("at")
                 .and_then(|v| serde_json::from_value::<[f64; 3]>(v.clone()).ok())
@@ -259,11 +279,12 @@ pub(crate) fn register(app: &mut App) {
                 "shirt" => spawn_humanoid(world, humanoid::Outfit::Shirt, t),
                 "lifter" => spawn_humanoid(world, humanoid::Outfit::Lifter, t),
                 "horse" => spawn_horse(world, t),
+                "dog" => spawn_dog(world, t, 1.0),
                 "spider" => spawn_spider(world, t),
                 "car" => spawn_car(world, t, [0.55, 0.04, 0.02]),
                 other => {
                     return Err(format!(
-                        "unknown kind {other}; use athlete, shirt, lifter, horse, spider or car"
+                        "unknown kind {other}; use athlete, shirt, lifter, horse, dog, spider or car"
                     ));
                 }
             };
@@ -294,6 +315,7 @@ pub(crate) fn register(app: &mut App) {
                 "walker": d.walker.to_bits(),
                 "horse": d.horse.to_bits(),
                 "spider": d.spider.to_bits(),
+                "dog": d.dog.to_bits(),
                 "car": d.car.to_bits(),
             }))
         },
@@ -584,6 +606,42 @@ pub fn horse_model() -> Option<HorseModel> {
     })
 }
 
+pub fn spawn_dog(world: &mut World, transform: Transform, scale: f32) -> Entity {
+    let dog = world
+        .spawn((
+            Name::new("Dog"),
+            transform,
+            GlobalTransform::from(transform),
+        ))
+        .id();
+    give_dog_body(world, dog, scale);
+    dog
+}
+
+/// Give an entity that already has its place a dog of `scale` (1 = 0.56 m at the withers):
+/// the furred coat, four paws on their gaits, ears and tail on springs, a panting idle.
+pub fn give_dog_body(world: &mut World, dog: Entity, scale: f32) {
+    let skeleton = dog::skeleton_name(scale);
+    {
+        let mut lib = world.resource_mut::<AnimationLibrary>();
+        if !lib.skeletons.contains_key(&skeleton) {
+            lib.add_skeleton(dog::skeleton(scale));
+        }
+    }
+    let handle = mesh_handle(world, &format!("anim/{skeleton}"), || dog::mesh(scale));
+    let anim = animator(world, &skeleton, dog::GRAPH);
+    let morphs = morphs(world, handle);
+    world.entity_mut(dog).insert((
+        AnimatorSettings::new(&skeleton, dog::GRAPH),
+        anim,
+        SkinnedMeshRenderer::new(handle, dog::material(scale)),
+        morphs,
+        MuscleRig::new(dog::muscles()),
+        dog::gait(scale),
+        SpringChains::new(dog::springs(scale)),
+    ));
+}
+
 pub fn spawn_spider(world: &mut World, transform: Transform) -> Entity {
     let spider = world
         .spawn((
@@ -839,6 +897,22 @@ pub const VIEWS: &[DemoView] = &[
         target: [7.24, 0.79, 10.16],
         hour: 15.0,
         at: 6.02,
+    },
+    DemoView {
+        key: "paddock_dog_trot",
+        name: "Dog trotting, its coat in the sun",
+        eye: [-4.6, 0.7, 10.0],
+        target: [-5.7, 0.4, 12.0],
+        hour: 15.0,
+        at: 3.5,
+    },
+    DemoView {
+        key: "paddock_dog",
+        name: "Dog at a full rotary gallop",
+        eye: [-5.44, 0.65, 22.6],
+        target: [-6.3, 0.32, 20.0],
+        hour: 15.0,
+        at: 9.0,
     },
     DemoView {
         key: "paddock_car",
@@ -1239,6 +1313,18 @@ fn build_paddock(world: &mut World, origin: DVec3) -> DemoEntities {
         Transform::from_translation(at(-4.0, 0.0, -22.0)).with_rotation(facing(-90.0)),
     );
 
+    // --- Dog run: a long loop in front of the muscle stage, walk and trot round the ends,
+    // canter out of the turns and a full gallop down the far straight.
+    let dog_e = spawn_dog(
+        world,
+        Transform::from_translation(at(-12.0, 0.0, 12.0)).with_rotation(facing(-90.0)),
+        1.0,
+    );
+    world.entity_mut(dog_e).insert(DemoPath {
+        effort_speed: 8.0,
+        ..DemoPath::new(origin, DOG_PATH.to_vec())
+    });
+
     DemoEntities {
         athlete,
         lifter,
@@ -1246,6 +1332,7 @@ fn build_paddock(world: &mut World, origin: DVec3) -> DemoEntities {
         walker,
         horse: horse_e,
         spider: spider_e,
+        dog: dog_e,
         car: car_e,
     }
 }
