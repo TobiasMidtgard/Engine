@@ -5,13 +5,17 @@
 //! on a skeleton whose knees and elbows bend. They walk and run with planted feet and swinging
 //! arms, breathe and shift their weight when idle, kneel behind low cover, raise their weapon
 //! during an attack's telegraph (it glows orange for a heavy guard breaker), raise the guard
-//! or shield to block (a white flash on a parry), lean into dodges, reel when staggered, flash
-//! when hit, and fall and drop their weapon when downed. Shooters shoulder their carbine (with
+//! or shield to block (on a parry the blade glints white and the shield lights up), lean into
+//! dodges, reel when staggered, light up for an instant when hit (tinted, never blown out to
+//! white), and fall and drop their weapon when downed. Shooters shoulder their carbine (with
 //! a muzzle flash and kick); archers draw to the jaw. Faces show under open helmets worn over
 //! mail coifs. The helmet's horsehair crest shows skill (grey rookie, bronze, silver, gold
 //! master) and a light in its brow band glows with alertness (yellow suspicious, orange
 //! searching, red fighting). Their painted armor shows skill too: a rookie's is nearly new, a
-//! veteran's or master's chipped to the steel, scratched, dented and dirty.
+//! veteran's or master's chipped to the steel, scratched, dented and dirty. The team's color
+//! covers the cuirass, helmet, pauldrons, knee-length tabards and arm bands, so squads tell
+//! apart across the arena; the gambesons and hose under it are undyed or earthy, and differ
+//! between fighters.
 //!
 //! Animals are sculpted procedural red deer, grey wolves, rabbits and starlings (see
 //! `art::animals`; cheap primitives without the renderer). They plant their feet as they walk,
@@ -120,7 +124,7 @@ fn faction_color(f: Option<&Faction>) -> u32 {
     match f.map(|f| f.0) {
         Some(0) => 0x3d8a4e,
         Some(1) => 0xb02f35,
-        Some(2) => 0x3272e6,
+        Some(2) => 0x2f7cf2,
         _ => 0x8a8a8a,
     }
 }

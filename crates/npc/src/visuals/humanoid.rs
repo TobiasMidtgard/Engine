@@ -84,10 +84,14 @@ const IRISES: [[u32; 2]; 4] = [
     [0x56626a, 0x8e989d],
 ];
 
-/// Gambeson colors (sRGB), picked per fighter: undyed linen, oatmeal, brown and grey wool.
-const GAMBESONS: [u32; 4] = [0xc6baa0, 0xad9a79, 0x765c46, 0x88857e];
-/// Hose colors (sRGB), picked per fighter: dark brown, charcoal and olive-brown wool.
-const HOSE: [u32; 3] = [0x5a4836, 0x4a4a4d, 0x585340];
+/// Gambeson colors (sRGB), picked per fighter: undyed linen and oatmeal, and wool in tan,
+/// grey, dark brown, olive drab and charcoal (mostly darker than the arena's sand, so the
+/// team's colors stand out on them).
+const GAMBESONS: [u32; 7] = [
+    0xbcb09a, 0x7f6449, 0x7c7a73, 0xa08c6c, 0x5f4a38, 0x6b6649, 0x5c5b56,
+];
+/// Hose colors (sRGB), picked per fighter: dark brown, charcoal, olive-brown and umber wool.
+const HOSE: [u32; 4] = [0x5a4836, 0x4a4a4d, 0x585340, 0x463a30];
 
 /// The part of a piece's painted plates.
 fn paint_of(part: Part) -> Option<Part> {
@@ -120,7 +124,7 @@ fn slot(part: Part) -> Option<usize> {
     (i < SLOTS).then_some(i)
 }
 
-/// Armor pieces that flash white when hit.
+/// Armor pieces that flash when hit.
 const ARMOR: [Part; 12] = [
     Part::Torso,
     Part::Head,
@@ -174,6 +178,24 @@ fn lit(hex: u32, nits: f32) -> StandardMaterial {
         .with_emissive(linear(hex).to_array(), nits)
         .with_roughness(0.4)
 }
+
+/// A part for an instant after a hit or a parry: lit up in a warm white over its own colors.
+/// It keeps the mesh's vertex colors (the cloth's, the leather's and the team's, and the
+/// baked occlusion) but not the textures, `k` times as bright, plus a faint glow that shows in
+/// shade but cannot blow it out to white in daylight. Painted plates (whose color is in their
+/// texture) flash a pale warm grey.
+fn flash(k: f32) -> StandardMaterial {
+    StandardMaterial {
+        base_color: [k, k * 0.96, k * 0.88, 1.0],
+        perceptual_roughness: 0.6,
+        ..Default::default()
+    }
+    .with_emissive([1.0, 0.94, 0.82], 500.0)
+}
+
+/// How much brighter a struck part's own colors get, and the albedo of its painted plates.
+const FLASH: f32 = 1.5;
+const FLASH_PAINT: f32 = 0.5;
 
 /// The string between a bow tip and the nock (constant: the limbs bend instead).
 const STRING_HALF: f32 = 0.6516;
@@ -283,10 +305,13 @@ pub(super) fn parts(
     let Some(paint) = paint_material(art, wear, team_hex) else {
         return plain_parts(kind, team_hex);
     };
-    // Under the armor: a gambeson and hose in undyed or earthy wool and linen.
+    // Under the armor: a gambeson and hose in undyed or earthy wool and linen. Golden-ratio
+    // steps spread neighboring seeds (a squad's) over the colors.
+    let pick =
+        |n: usize, offset: f64| ((seed as f64 * 0.618_034 + offset).fract() * n as f64) as usize;
     let cloth_hex = [
-        GAMBESONS[(seed * 3 + seed / 5) % GAMBESONS.len()],
-        HOSE[(seed + seed / 3) % HOSE.len()],
+        GAMBESONS[pick(GAMBESONS.len(), 0.0)],
+        HOSE[pick(HOSE.len(), 0.37)],
     ];
     let cloth = cloth_hex.map(linear);
     let mut out = Vec::with_capacity(list.len() + 2);
@@ -1330,23 +1355,21 @@ pub(super) fn humanoid(
             }
             _ => {}
         }
-        // White flash when hit.
+        // A flash when hit.
         if c.last_hurt > 0.0 && now - c.last_hurt < 0.12 {
-            for part in ARMOR
-                .into_iter()
-                .chain(ARMOR.into_iter().filter_map(paint_of))
-            {
-                materials.push((part, lit(0xffffff, 20_000.0)));
+            for part in ARMOR {
+                materials.push((part, flash(FLASH)));
+            }
+            for part in ARMOR.into_iter().filter_map(paint_of) {
+                materials.push((part, flash(FLASH_PAINT)));
             }
         }
     }
     if parry {
         blade_glow = Some(lit(0xffffff, 25_000.0));
-        for part in [Some(Part::Shield), paint_of(Part::Shield)]
-            .into_iter()
-            .flatten()
-        {
-            materials.push((part, lit(0xffffff, 25_000.0)));
+        materials.push((Part::Shield, flash(FLASH)));
+        if let Some(plates) = paint_of(Part::Shield) {
+            materials.push((plates, flash(FLASH_PAINT)));
         }
     }
     if let Some(m) = blade_glow {
