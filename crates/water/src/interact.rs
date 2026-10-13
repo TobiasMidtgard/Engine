@@ -14,6 +14,11 @@ use crate::body::{RainShower, WaterSettings};
 use crate::ripples::Disturbance;
 use crate::state::{SharedWater, WaterState};
 
+/// Faster than this between two steps, m/s, an interactor was moved, not carried by its own
+/// motion: spawned in place, teleported, or shifted with the world before its transform caught
+/// up. It throws no spray and digs no wake for that step.
+const TELEPORT_SPEED: f32 = 150.0;
+
 /// Something that pushes the water as it moves through it: a swimmer, a wading animal, a
 /// boat's hull, a dragging rope. Leaves wakes and rings, and splashes on entry.
 #[derive(Component, Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -129,6 +134,7 @@ pub fn disturbance_system(
                 || (submerged >= 1.0 && (water.surface_height - p.y) < r as f64 * 1.5);
             let v = last
                 .map(|l| ((p - l) / step as f64).as_vec3())
+                .filter(|v| v.length() < TELEPORT_SPEED)
                 .unwrap_or(Vec3::ZERO);
             if touching {
                 let speed = Vec3::new(v.x, 0.0, v.z).length();
@@ -168,10 +174,12 @@ pub fn disturbance_system(
                         let side = Vec3::new(-dir.z, 0.0, dir.x)
                             * if rng.f32() < 0.5 { -1.0 } else { 1.0 };
                         let at = p + (dir * r * 1.6 + side * r * 0.4).as_dvec3();
+                        // Bow spray flies out sideways, faster than the hull goes; thrown gently
+                        // up, readers would take it for a waterfall's mist.
                         splashes.push(WaterSplash {
                             position: DVec3::new(at.x, water.surface_height, at.z),
                             velocity: dir * speed * 0.5
-                                + side * speed * 0.35
+                                + side * (speed * 0.6 + 1.5)
                                 + Vec3::Y * (1.0 + speed * 0.3),
                             radius: r * 0.5,
                             mass_kg: std::mem::take(&mut it.spray),

@@ -1,7 +1,10 @@
 //! The flame flipbook: a small two-dimensional fire simulation, run once when the renderer
 //! starts and recorded into a looping 3D texture (across, up, time) that every flame sprite
 //! plays back at its own pace. Simulated flames neck in at the base, lick, curl and shed
-//! pockets of burning gas the way real ones do, which noise alone doesn't get right.
+//! pockets of burning gas the way real ones do, which noise alone doesn't get right. A little
+//! turbulence and a puffing burner (a real flame swells and pinches off a bubble of burning gas
+//! a couple of times a second) keep it breaking into tongues rather than settling into one
+//! smooth plume with a thin ribbon above it.
 //!
 //! Red is the flame (glowing gas, 0 cold .. 1 hottest), green the soot it leaves above its
 //! tips. Row 0 is the base of the flame. The last frames fade into the first, so it loops.
@@ -51,19 +54,31 @@ struct Params {
     burner: f32,
     /// Upward speed of the gas leaving the burner, cells/step.
     inflow: f32,
+    /// Turbulent buffeting of hot gas, cells/step².
+    turbulence: f32,
+    /// Size of the turbulent eddies, cells.
+    eddy: f32,
+    /// How strongly the burner puffs (the flame swells and pinches off a bubble of burning gas).
+    puff: f32,
+    /// Steps between puffs.
+    puff_period: f32,
 }
 
 const PARAMS: Params = Params {
-    buoyancy: 0.035,
+    buoyancy: 0.024,
     soot_weight: 0.01,
-    swirl: 0.12,
-    burn_rate: 0.018,
+    swirl: 0.3,
+    burn_rate: 0.009,
     heat: 1.7,
     soot_yield: 0.25,
-    cooling: 0.04,
+    cooling: 0.055,
     soot_fade: 0.03,
-    burner: 0.42,
-    inflow: 0.6,
+    burner: 0.34,
+    inflow: 0.7,
+    turbulence: 0.12,
+    eddy: 5.0,
+    puff: 0.6,
+    puff_period: 64.0,
 };
 
 struct Sim {
@@ -79,6 +94,8 @@ struct Sim {
     pressure: Vec<f32>,
     div: Vec<f32>,
     curl: Vec<f32>,
+    /// Turbulence stream function.
+    psi: Vec<f32>,
     /// Where each cell's gas was a step ago, and where it goes next.
     from: Vec<(f32, f32)>,
     to: Vec<(f32, f32)>,
@@ -101,6 +118,7 @@ impl Sim {
             pressure: vec![0.0; n],
             div: vec![0.0; n],
             curl: vec![0.0; n],
+            psi: vec![0.0; n],
             from: vec![(0.0, 0.0); n],
             to: vec![(0.0, 0.0); n],
             scratch: std::array::from_fn(|_| (vec![0.0; n], vec![0.0; n])),
@@ -141,7 +159,8 @@ impl Sim {
             let flicker = 0.55
                 + 0.45 * perlin2(x as f64 * 0.11, t as f64 * 0.045, s)
                 + 0.25 * perlin2(x as f64 * 0.31, t as f64 * 0.11, s + 1);
-            let amount = (shape * flicker).clamp(0.0, 1.0);
+            let beat = (t / p.puff_period * std::f32::consts::TAU).sin();
+            let amount = (shape * flicker * (1.0 + p.puff * beat)).clamp(0.0, 1.0);
             for y in 1..4 {
                 let i = self.at(x, y);
                 self.fuel[i] = self.fuel[i].max(amount);
@@ -165,10 +184,33 @@ impl Sim {
         }
     }
 
-    fn forces(&mut self) {
+    fn forces(&mut self, t: f32) {
         let (w, h, p) = (self.w, self.h, self.p);
         for i in 0..self.v.len() {
             self.v[i] += p.buoyancy * self.temp[i] - p.soot_weight * self.soot[i];
+        }
+        if p.turbulence > 0.0 {
+            // Eddies rise with the gas and churn as they go. The push is the curl of a noise
+            // stream function, so it stirs without squeezing (a squeezing push leaves a comb of
+            // stripes after the pressure solve).
+            let f = 1.0 / p.eddy as f64;
+            let (drift, rise) = (t as f64 * 0.01, t as f64 * 0.04);
+            for y in 0..h {
+                for x in 0..w {
+                    self.psi[y * w + x] =
+                        perlin2(x as f64 * f + drift, y as f64 * f - rise, self.seed + 11);
+                }
+            }
+            // Scaled to the eddy size, so the push is about ±1 across whatever their size.
+            let scale = 0.25 * p.eddy;
+            for y in 1..h - 1 {
+                for x in 1..w - 1 {
+                    let i = y * w + x;
+                    let k = p.turbulence * self.temp[i].min(1.0) * scale;
+                    self.u[i] += k * (self.psi[i + w] - self.psi[i - w]);
+                    self.v[i] -= k * (self.psi[i + 1] - self.psi[i - 1]);
+                }
+            }
         }
         // Vorticity confinement: spin small eddies back up after the grid smears them.
         for y in 1..h - 1 {
@@ -301,7 +343,7 @@ impl Sim {
     fn step(&mut self, t: f32) {
         self.feed(t);
         self.combust();
-        self.forces();
+        self.forces(t);
         self.velocity_bounds();
         self.project();
         self.velocity_bounds();

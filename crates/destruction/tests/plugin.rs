@@ -9,8 +9,8 @@ use engine_core::time::TimeSource;
 use engine_destruction::*;
 use engine_render::{Mesh, StandardMaterial};
 use engine_world::physics::{
-    CharacterController, Collider, ColliderShape, PhysicsBackend, PhysicsQueries, PhysicsQuery,
-    QueryFilter, RigidBody,
+    BodyKind, CharacterController, Collider, ColliderShape, PhysicsBackend, PhysicsQueries,
+    PhysicsQuery, QueryFilter, RigidBody,
 };
 use engine_world::{
     DamageEvent, DamageKind, EditOp, EditShape, ProjectileTrace, SurfaceMaterials, TerrainEdit,
@@ -966,8 +966,12 @@ fn doors_hang_in_doorways_swing_away_from_you_and_fall_with_them() {
         .get::<door::HungDoor>(frame)
         .expect("a door hangs in the doorway")
         .0;
-    // Shut, a box fills the opening; it has no body, so the backend moves it with the door.
-    assert!(app.world.get::<RigidBody>(door).is_none());
+    // Shut, a box fills the opening; the door is a kinematic body moved by its Transform, so
+    // it shoves what it swings into.
+    assert_eq!(
+        app.world.get::<RigidBody>(door).map(|b| b.kind),
+        Some(BodyKind::Kinematic)
+    );
     let Some(Collider {
         shape: ColliderShape::Cuboid { half_extents },
         ..
@@ -1037,8 +1041,9 @@ fn doors_hang_in_doorways_swing_away_from_you_and_fall_with_them() {
     let d = *app.world.get::<Door>(high_door).unwrap();
     assert!(d.loose && d.open == 0.0, "{d:?}");
     assert!(
-        app.world.get::<Collider>(high_door).is_none(),
-        "the door rides its doorway down, no collider of its own"
+        app.world.get::<Collider>(high_door).is_none()
+            && app.world.get::<RigidBody>(high_door).is_none(),
+        "the door rides its doorway down, no body of its own"
     );
     // Taken down, a doorway takes its door with it.
     app.world.despawn(frame);

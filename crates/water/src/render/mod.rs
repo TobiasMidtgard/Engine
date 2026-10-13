@@ -454,7 +454,11 @@ fn extent_range(b: &BodyState, p: DVec2) -> (f64, f64) {
 impl WaterFeature {
     fn build(gpu: &GpuShared) -> Gpu {
         let device = &gpu.device;
-        let shader = gpu.shader("water", SHADER, true);
+        // Shader work without a rebuild: `ENGINE_WATER_SHADER=<path to water.wgsl>` loads the
+        // shader from that file instead of the copy built in.
+        let source =
+            std::env::var_os("ENGINE_WATER_SHADER").and_then(|p| std::fs::read_to_string(p).ok());
+        let shader = gpu.shader("water", source.as_deref().unwrap_or(SHADER), true);
         let vf = wgpu::ShaderStages::VERTEX_FRAGMENT;
         let tex = |binding: u32, sample_type: wgpu::TextureSampleType| wgpu::BindGroupLayoutEntry {
             binding,

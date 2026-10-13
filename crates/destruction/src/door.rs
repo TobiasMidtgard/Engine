@@ -5,15 +5,17 @@
 //!
 //! The `interact` action (E, gamepad West) opens or shuts the door nearest a character (or an
 //! input-driven [`Builder`]) within [`REACH_M`]; scripts send [`DoorRequest`]s and AI agents
-//! call `destruction.door`. With a physics module a door has a collider that swings with it:
-//! shut, it closes the doorway; open, it stands where it swung to. When its doorway falls, the
-//! door swings shut and falls with it; when the doorway is taken down or broken up, the door
-//! goes too.
+//! call `destruction.door`. With a physics module a door is a kinematic body that swings with
+//! it: shut, it closes the doorway; open, it stands where it swung to; swinging, it shoves
+//! crates and bodies in its way. When its doorway falls, the door swings shut and falls with
+//! it; when the doorway is taken down or broken up, the door goes too.
 
 use engine_core::math::{DVec3, Quat, Vec3, smoothstep};
 use engine_core::prelude::*;
 use engine_input::{ActionState, Binding, GamepadButton, InputMap, KeyCode};
-use engine_world::physics::{CharacterController, Collider, ColliderShape, PhysicsBackend};
+use engine_world::physics::{
+    CharacterController, Collider, ColliderShape, PhysicsBackend, RigidBody,
+};
 use engine_world::{NoiseEvent, SurfaceMaterials};
 
 use crate::build::{BuildKind, Builder, BuiltPiece};
@@ -219,12 +221,11 @@ pub fn door_input_system(
     }
 }
 
-/// Apply [`DoorRequest`]s, swing doors, give them colliders with a physics module, and let
-/// doors whose doorway fell go with it (Update).
+/// Apply [`DoorRequest`]s, swing doors, make them kinematic bodies with a physics module, and
+/// let doors whose doorway fell go with it (Update).
 ///
-/// A door's collider has no body of its own: the backend moves a collider without a body
-/// with its `Transform` (Rapier's ignores `Transform` writes to a kinematic body that never
-/// moved by `Velocity`).
+/// A door is moved by its `Transform`, so the backend carries it there over each step and it
+/// pushes what it swings into.
 pub fn door_system(
     mut commands: Commands,
     time: Res<Time>,
@@ -280,7 +281,7 @@ pub fn door_system(
             // The doorway fell: the door swings shut and rides it down.
             door.loose = true;
             door.opening = false;
-            commands.entity(e).remove::<Collider>();
+            commands.entity(e).remove::<(RigidBody, Collider)>();
         }
         let PropKind::PlankDoor { size } = model.kind else {
             continue;
@@ -297,14 +298,17 @@ pub fn door_system(
             *t = swung;
         }
         if backend.is_some() && !door.loose && !has_collider {
-            commands.entity(e).insert(Collider {
-                shape: ColliderShape::Cuboid {
-                    half_extents: size * 0.5 - Vec3::splat(0.002),
+            commands.entity(e).insert((
+                RigidBody::kinematic(),
+                Collider {
+                    shape: ColliderShape::Cuboid {
+                        half_extents: size * 0.5 - Vec3::splat(0.002),
+                    },
+                    surface: surfaces.id_or_default(&wood.surface),
+                    density: wood.density,
+                    ..Collider::default()
                 },
-                surface: surfaces.id_or_default(&wood.surface),
-                density: wood.density,
-                ..Collider::default()
-            });
+            ));
         }
     }
 }
