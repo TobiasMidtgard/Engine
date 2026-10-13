@@ -416,10 +416,12 @@ pub fn spawn_demos(
             "field" => {
                 engine_fire::demo::spawn_demo(commands, z.center);
                 ph::field_edge(commands, lib, z, rng);
-                // Air over the meadow, so the fire's smoke rises as one simulated plume.
+                // Air over the meadow, so the fire's smoke rises as one simulated plume. It
+                // reaches farther downwind (the valley's wind blows west and a little north) so
+                // the plume drifts out of it well clear of the fire.
                 commands.spawn((
                     Name::new("Fire demo: smoke"),
-                    Transform::from_translation(z.center + DVec3::new(16.0, 0.0, 4.0)),
+                    Transform::from_translation(z.center + DVec3::new(-14.0, 0.0, 4.0)),
                     engine_smoke::SmokeVolume {
                         size: [100.0, 40.0, 60.0],
                         cell_m: 1.25,
