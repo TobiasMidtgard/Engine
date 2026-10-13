@@ -31,6 +31,10 @@ pub const TINTS: usize = 3;
 #[derive(Debug, Clone, Default)]
 pub struct VariantMeshes {
     pub base: Option<Handle<Mesh>>,
+    /// The stump (`base`) weathered, one per `tree::STUMP_WEATHER` step after the first.
+    pub base_weathered: Vec<Handle<Mesh>>,
+    /// The moss cushions on each of those.
+    pub base_moss: Vec<Option<Handle<Mesh>>>,
     pub wood: Option<Handle<Mesh>>,
     pub foliage: Option<Handle<Mesh>>,
     pub wood_lod: Option<Handle<Mesh>>,
@@ -292,6 +296,12 @@ fn build_species(
         let foliage_lod_thin = add_all(full.foliage_lod_thin);
         let sapling_foliage_thin = add_all(sapling_thin);
         let log_mossy = add_all(full.log_mossy);
+        let base_weathered = add_all(full.base_weathered);
+        let base_moss = full
+            .base_moss
+            .into_iter()
+            .map(|m| m.map(|m| meshes.add(m)))
+            .collect();
         let log_moss = full
             .log_moss
             .into_iter()
@@ -300,6 +310,8 @@ fn build_species(
         let mut add = |m: Option<Mesh>| m.map(|m| meshes.add(m));
         variants.push(VariantMeshes {
             base: add(full.base),
+            base_weathered,
+            base_moss,
             wood: add(full.wood),
             foliage: add(full.foliage),
             wood_lod: add(full.wood_lod),

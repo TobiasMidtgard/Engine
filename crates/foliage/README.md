@@ -58,8 +58,10 @@ engine_foliage::spawn_plant(world, "oak", DVec3::new(3.0, 0.0, 4.0), 0.2, None)?
   terrain, `DamageEvent`s for whatever it lands on), crushes saplings and settles as a
   `FelledLog` beside its stump. Logs lose their leaves, then their twigs, moss over in
   stages (cushions of moss on the bark, alpha-masked from the forest floor's moss), grey and
-  rot away, feeding the soil. Oak, birch and hazel stumps resprout. Explosions knock trees
-  over too.
+  rot away, feeding the soil; pale birch bark dirties and soil stains their undersides.
+  Stumps weather too: the cut silvers within a year or two, then rots soft and dark (into a
+  hollow from the heart, or round a heartwood that stands proud) under moss climbing from the
+  ground. Oak, birch and hazel stumps resprout. Explosions knock trees over too.
 - **Deadwood fungi** (`meshgen::fungi`): a few years after a tree dies, bracket fungi fruit
   on its snag, stump and log (drawn near the camera): tinder hooves on birch snags and birch
   polypores on its logs, red-belted conks on conifers, tiers of sulphur shelf on oak snags,

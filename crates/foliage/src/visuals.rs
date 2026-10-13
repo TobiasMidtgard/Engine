@@ -19,7 +19,7 @@ use crate::assets::{FoliageVisuals, GLOW_LEVELS, SpeciesVisual, TINTS, VARIANTS}
 use crate::ecology::InRegion;
 use crate::felling::{FallingTree, LOG_BARE_YEARS, LOG_GREEN_YEARS, LogPose};
 use crate::grass::RegionGrass;
-use crate::meshgen::tree::{LEAF_STEPS, LOG_MOSS};
+use crate::meshgen::tree::{LEAF_STEPS, LOG_MOSS, STUMP_WEATHER};
 use crate::plant::{EcologySettings, FelledLog, Plant, PlantStage};
 use crate::season::{FoliageSeason, Leafing, shift_days};
 use crate::species::{Layer, PlantForm, PlantLibrary, PlantSpecies};
@@ -143,7 +143,21 @@ pub fn desired_parts(
                 ]
             }
         }
-        PlantStage::Stump { .. } => [pair(&v.base, vis.bark_rigid), None, None],
+        PlantStage::Stump { years } => {
+            // The cut silvers, then rots and mosses over (cushions in the foliage's place).
+            let step = STUMP_WEATHER[1..]
+                .iter()
+                .take_while(|(from, _)| years >= *from)
+                .count();
+            let (base, moss) = match step {
+                0 => (v.base, None),
+                n => (
+                    v.base_weathered.get(n - 1).copied().or(v.base),
+                    v.base_moss.get(n - 1).copied().flatten(),
+                ),
+            };
+            [pair(&base, vis.bark_rigid), None, pair(&moss, vis.moss)]
+        }
         PlantStage::Dead { years } => {
             let wood = if plant.size < 0.22 {
                 &v.sapling_wood

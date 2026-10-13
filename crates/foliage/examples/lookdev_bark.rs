@@ -8,8 +8,9 @@
 //!
 //! `shots` picks shots by name (`oak`, `birch`, `pine`, `spruce`, `hazel`, `stump`, `log`,
 //! `old_logs` for logs that have lain for years, `log_ends` for their butts and broken tops,
-//! `fungi` for bracket fungi on snags, stumps and old logs, `row`, `close` for arm's-length
-//! oak, birch and pine); `--dump` saves the painted bark textures instead.
+//! `fungi` for bracket fungi on snags, stumps and old logs, `stumps` for stumps fresh,
+//! silvered and rotting, `row`, `close` for arm's-length oak, birch and pine); `--dump` saves
+//! the painted bark textures instead.
 //!
 //! The sun rakes across the trunks from the side, which is the light that shows (or betrays)
 //! bark relief. Every shot is a close-up a player could walk up to.
@@ -269,6 +270,25 @@ fn main() {
             plant.stage = stage;
         }
     }
+    // Stumps of each tree through the years: fresh, silvered and rotting.
+    let stumps = DVec3::new(0.0, 0.0, 50.0);
+    let stump_kinds = ["oak", "birch", "pine", "spruce"];
+    let stump_ages = [("fresh", 0.2), ("grey", 2.5), ("old", 7.0)];
+    for (j, (_, years)) in stump_ages.into_iter().enumerate() {
+        for (i, name) in stump_kinds.into_iter().enumerate() {
+            let e = spawn_plant(
+                &mut app.world,
+                name,
+                stumps + DVec3::new(i as f64 * 2.5, 0.0, j as f64 * 6.0),
+                0.9,
+                Some(genes(i as u8)),
+            )
+            .expect("species");
+            if let Some(mut plant) = app.world.get_mut::<Plant>(e) {
+                plant.stage = PlantStage::Stump { years };
+            }
+        }
+    }
     simulate(&mut app, 20);
 
     let trunk_eye = |x: f64, d: f64, h: f64| DVec3::new(x + d * 0.62, h, d * 0.78);
@@ -422,6 +442,28 @@ fn main() {
                 &format!("17_fungi_log_{}", library.get(species).name),
                 mid - side * 2.6 - axis * 1.2 + DVec3::Y * 1.3,
                 mid - axis * 0.4,
+            );
+        }
+    }
+    if want("stumps") {
+        for (j, (age, _)) in stump_ages.into_iter().enumerate() {
+            let row = stumps + DVec3::new(3.75, 0.0, j as f64 * 6.0);
+            shot(
+                &mut app,
+                &out,
+                &format!("19_stumps_{age}"),
+                row + DVec3::new(0.0, 2.2, -4.6),
+                row + DVec3::new(0.0, 0.2, 0.0),
+            );
+        }
+        for (i, name) in [(0, "oak"), (1, "birch")] {
+            let at = stumps + DVec3::new(i as f64 * 2.5, 0.0, 12.0);
+            shot(
+                &mut app,
+                &out,
+                &format!("19_stump_old_{name}_top"),
+                at + DVec3::new(0.4, 1.6, -1.1),
+                at + DVec3::new(0.0, 0.35, 0.0),
             );
         }
     }
