@@ -38,7 +38,7 @@ use engine_core::time::LocalTimeScale;
 use engine_render::{Camera, MeshRenderer, StandardMaterial};
 use engine_world::animation::AnimationParams;
 use engine_world::locomotion::{LocomotionMode, MoveIntent};
-use engine_world::physics::{CharacterController, Collider, RigidBody};
+use engine_world::physics::{CharacterController, Collider, PhysicsBackend, RigidBody, Velocity};
 use engine_world::{AttackEvent, AttackKind};
 
 use crate::afterimage::Afterimages;
@@ -992,9 +992,11 @@ pub(crate) fn restart_grapplers(world: &mut World) -> usize {
 
 // ------------------------------------------------------------------------ the freight station
 
-/// Shuttles a body back and forth along a straight track: out from `from` to `to`, a stand
-/// there, back, and a stand at `from`, easing in and out of each run. It moves the body's
-/// `Transform` on world time, so a kinematic body is driven like any scripted platform.
+/// Shuttles a kinematic body back and forth along a straight track: out from `from` to `to`, a
+/// stand there, back, and a stand at `from`, easing in and out of each run, on world time.
+/// With a physics backend it drives the body by its `Velocity` (the backend moves it and
+/// writes the `Transform` back, so what stands on it is carried); with only the stand-in
+/// physics it sets the `Transform`.
 #[derive(Component, Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct Shuttle {
     #[serde(skip)]
@@ -1007,6 +1009,10 @@ pub struct Shuttle {
     pub dwell_secs: f32,
     /// Seconds into the cycle (world time).
     pub secs: f32,
+    /// Stand still for a step after a teleport, so a physics backend places the body before
+    /// it moves by velocity again.
+    #[serde(skip)]
+    pub hold: bool,
 }
 
 /// Where a [`Shuttle`] is in its cycle.
@@ -1054,11 +1060,28 @@ impl Shuttle {
     }
 }
 
-fn drive_shuttles(time: Res<Time>, mut q: Query<(&mut Shuttle, &mut Transform)>) {
+fn drive_shuttles(
+    time: Res<Time>,
+    backend: Option<Res<PhysicsBackend>>,
+    mut q: Query<(&mut Shuttle, &mut Transform, &mut Velocity)>,
+) {
     let dt = time.delta_secs();
-    for (mut s, mut t) in &mut q {
+    if dt <= 0.0 {
+        return;
+    }
+    for (mut s, mut t, mut v) in &mut q {
+        if std::mem::take(&mut s.hold) {
+            v.linear = Vec3::ZERO;
+            continue;
+        }
         s.secs = (s.secs + dt).rem_euclid(s.cycle_secs());
-        t.translation = s.position();
+        let to = s.position();
+        if backend.is_some() {
+            // From where the backend put it, so it never drifts off the track.
+            v.linear = ((to - t.translation) / dt as f64).as_vec3();
+        } else {
+            t.translation = to;
+        }
     }
 }
 
@@ -1073,6 +1096,7 @@ fn spawn_freight_car(commands: &mut Commands, origin: DVec3) {
             Transform::from_translation(from),
             RigidBody::kinematic(),
             Collider::cuboid(Vec3::from(layout::FREIGHT_CAR_SIZE) * 0.5),
+            Velocity::default(),
             TransformInterpolation::default(),
             Shuttle {
                 from,
@@ -1081,6 +1105,7 @@ fn spawn_freight_car(commands: &mut Commands, origin: DVec3) {
                 dwell_secs: layout::FREIGHT_DWELL_SECS,
                 // Standing at the start, about to pull out.
                 secs: 2.0 * layout::FREIGHT_TRAVEL_SECS + 1.5 * layout::FREIGHT_DWELL_SECS,
+                hold: false,
             },
         ))
         .id();
@@ -1223,11 +1248,16 @@ pub(crate) fn restart_riders(world: &mut World) -> usize {
     let mut cars = world.query::<(
         &mut Shuttle,
         &mut Transform,
+        Option<&mut Velocity>,
         Option<&mut TransformInterpolation>,
     )>();
-    for (mut s, mut t, interp) in cars.iter_mut(world) {
+    for (mut s, mut t, v, interp) in cars.iter_mut(world) {
         s.secs = s.cycle_secs() - 0.5;
+        s.hold = true;
         t.translation = s.position();
+        if let Some(mut v) = v {
+            v.linear = Vec3::ZERO;
+        }
         if let Some(mut i) = interp {
             i.reset();
         }
