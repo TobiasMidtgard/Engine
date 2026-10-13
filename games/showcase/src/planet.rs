@@ -37,6 +37,10 @@ const TINT: f32 = 0.75;
 #[derive(Resource, Debug, Clone, Copy)]
 pub struct UsePlanet;
 
+/// The valley's and the weather's north is +Z: the planet turns half round to match (the
+/// space frame's `home_heading_deg` too, see `main`).
+pub const HEADING_DEG: f64 = 180.0;
+
 /// The planet's ground color seen from above, for the sky's light from below.
 const GROUND_COLOR: [f32; 3] = [0.07, 0.13, 0.04];
 
@@ -50,6 +54,7 @@ pub fn spawn(commands: &mut Commands, land: Arc<Landscape>, surfaces: Arc<Landsc
     let pad = FlatPad {
         mountains: 0.9,
         mountain_distance_m: 30_000.0,
+        heading_deg: HEADING_DEG,
         ..FlatPad::default()
     };
     let height = land.clone();
