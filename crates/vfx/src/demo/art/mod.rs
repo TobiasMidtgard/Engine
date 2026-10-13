@@ -19,7 +19,9 @@ use std::collections::HashMap;
 
 use engine_assets::{Assets, Handle};
 use engine_core::prelude::*;
-use engine_render::{Image, MaterialRef, Mesh, MeshRef, MeshRenderer, StandardMaterial};
+use engine_render::{
+    Image, MaterialRef, Mesh, MeshRef, MeshRenderer, RenderStats, StandardMaterial,
+};
 
 /// What a part of a prop is made of. Each surface maps to one shared material.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -101,10 +103,65 @@ impl Prop {
 }
 
 /// Meshes and materials already registered, so every copy of a prop shares them.
-#[derive(Resource, Default)]
+#[derive(Resource)]
 pub struct ArtCache {
     props: HashMap<String, Vec<(Handle<Mesh>, Surface)>>,
     materials: HashMap<Surface, Handle<StandardMaterial>>,
+    /// Glowing materials and the emission strength each was authored with (for dusk).
+    glowing: Vec<(Handle<StandardMaterial>, f32)>,
+    /// Factor on authored emission now in effect (see [`follow_exposure`]).
+    glow: f32,
+}
+
+impl Default for ArtCache {
+    fn default() -> Self {
+        Self {
+            props: HashMap::new(),
+            materials: HashMap::new(),
+            glowing: Vec::new(),
+            glow: 1.0,
+        }
+    }
+}
+
+/// Exposure that glowing art (rune inlays, crystals, burning coals) is authored for: dusk.
+pub const GLOW_AUTHORED_EV100: f32 = 5.5;
+
+/// How much brighter than authored glowing art is drawn at `ev100`: it follows the camera's
+/// exposure as particle glow does (`weight` is [`VfxSettings::glow_exposure`]), so it keeps its
+/// color at night and still reads by day.
+///
+/// [`VfxSettings::glow_exposure`]: crate::VfxSettings::glow_exposure
+pub fn glow_factor(ev100: f32, weight: f32) -> f32 {
+    use engine_render::frame::ev100_to_exposure;
+    let at = |ev: f32| crate::feature::glow_scale(ev100_to_exposure(ev), weight);
+    at(ev100) / at(GLOW_AUTHORED_EV100)
+}
+
+/// Each frame, scale the glowing materials' emission to the camera's exposure (last frame's,
+/// from [`RenderStats`]). Without a renderer nothing changes.
+pub fn follow_exposure(
+    stats: Option<Res<RenderStats>>,
+    settings: Res<crate::VfxSettings>,
+    cache: Option<ResMut<ArtCache>>,
+    materials: Option<ResMut<Assets<StandardMaterial>>>,
+) {
+    let (Some(stats), Some(mut cache), Some(mut materials)) = (stats, cache, materials) else {
+        return;
+    };
+    if stats.width == 0 {
+        return;
+    }
+    let k = glow_factor(stats.ev100, settings.glow_exposure);
+    if (k / cache.glow - 1.0).abs() < 0.02 {
+        return;
+    }
+    cache.glow = k;
+    for (handle, authored) in &cache.glowing {
+        if let Some(m) = materials.get_mut(*handle) {
+            m.emissive_strength = authored * k;
+        }
+    }
 }
 
 /// Spawn the prop registered as `key` at `at`, building it with `build` the first time the key
@@ -158,10 +215,18 @@ pub fn register(
                 let material = match cache.materials.get(&surface) {
                     Some(m) => *m,
                     None => {
-                        let m = world.resource_scope(|world, mut images: Mut<Assets<Image>>| {
-                            let made = materials::make(surface, &mut images);
-                            world.resource_mut::<Assets<StandardMaterial>>().add(made)
-                        });
+                        let glow = cache.glow;
+                        let (m, authored) =
+                            world.resource_scope(|world, mut images: Mut<Assets<Image>>| {
+                                let mut made = materials::make(surface, &mut images);
+                                let authored = made.emissive_strength;
+                                made.emissive_strength *= glow;
+                                let m = world.resource_mut::<Assets<StandardMaterial>>().add(made);
+                                (m, authored)
+                            });
+                        if authored > 0.0 {
+                            cache.glowing.push((m, authored));
+                        }
                         cache.materials.insert(surface, m);
                         m
                     }
