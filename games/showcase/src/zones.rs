@@ -451,6 +451,19 @@ pub fn demo_views(z: &Zone) -> Vec<View> {
                 .on_arrive("movement.duel", &duel("Blink"))
                 .on_arrive("movement.climber", "{}")
                 .on_leave("movement.duel", cycle),
+                // The grapple station: the grappler restarts its loop on arrival and is caught
+                // mid-reel, the cable taut from its fist to the anchor plate.
+                View::new(
+                    "parkour_grapple",
+                    "Grapple hook: fire at the top of a 9 m tower, reel in, climb over",
+                    [19.0, 3.2, 21.0],
+                    [8.0, 6.0, 26.5],
+                    16.0,
+                )
+                .warmup(1.75)
+                .on_arrive("movement.duel", &duel("Blink"))
+                .on_arrive("movement.grappler", "{}")
+                .on_leave("movement.duel", cycle),
                 // Play mode (P): a pilot in front of the camera, locked onto the elite.
                 View::new(
                     "parkour_play",
