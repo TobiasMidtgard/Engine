@@ -251,6 +251,20 @@ pub(crate) fn register(app: &mut App) {
         },
     );
     app.register_api(
+        "movement.rider",
+        "Restart the movement demo's freight rider from the start of its loop, with the freight \
+         car about to pull out: the rider sprints along the platform, leaps onto the car's side, \
+         wall-runs along it, climbs onto its roof and rides it to the end of the track.",
+        "{}",
+        |world, _args| {
+            let n = crate::demo::restart_riders(world);
+            if n == 0 {
+                return Err("no rider in this world (spawn it with demo::spawn_demo)".into());
+            }
+            Ok(json!({ "riders": n }))
+        },
+    );
+    app.register_api(
         "movement.play",
         "Play mode: \"on\" true puts a level 10 pilot on the ground in front of the active \
          camera (or with its feet at \"at\") and a third-person camera behind it; false ends \

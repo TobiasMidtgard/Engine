@@ -98,6 +98,17 @@ pub enum PropKind {
     BoardGable {
         size: [f32; 3],
     },
+    /// A board wall filling `size` with a doorway in its middle, from the foot up to a hand
+    /// under the top: boards cut around it, a lining in the reveal, a threshold, and a frame
+    /// of battens around it on the back (see [`wall_opening`] for the clear opening).
+    BoardDoorway {
+        size: [f32; 3],
+    },
+    /// A board wall filling `size` with a window in its middle at chest height: boards cut
+    /// around it, a lining in the reveal, a cross bar, and a batten frame on the back.
+    BoardWindow {
+        size: [f32; 3],
+    },
     RoofTiles {
         width: f32,
         depth: f32,
@@ -157,6 +168,12 @@ impl PropKind {
             PropKind::BoardGable {
                 size: [2.0, 1.0, 0.1],
             },
+            PropKind::BoardDoorway {
+                size: [2.0, 2.0, 0.1],
+            },
+            PropKind::BoardWindow {
+                size: [2.0, 2.0, 0.1],
+            },
             PropKind::RoofTiles {
                 width: 4.0,
                 depth: 3.4,
@@ -192,6 +209,8 @@ impl PropKind {
             PropKind::StoneBlock { size } => stone_block(Vec3::from(size), seed),
             PropKind::BoardWall { size } => board_wall(Vec3::from(size), seed),
             PropKind::BoardGable { size } => board_gable(Vec3::from(size), seed),
+            PropKind::BoardDoorway { size } => board_wall_opening(Vec3::from(size), true, seed),
+            PropKind::BoardWindow { size } => board_wall_opening(Vec3::from(size), false, seed),
             PropKind::RoofTiles {
                 width,
                 depth,
@@ -216,7 +235,9 @@ impl PropKind {
             | PropKind::Timber { size }
             | PropKind::StoneBlock { size }
             | PropKind::BoardWall { size }
-            | PropKind::BoardGable { size } => Vec3::from(size),
+            | PropKind::BoardGable { size }
+            | PropKind::BoardDoorway { size }
+            | PropKind::BoardWindow { size } => Vec3::from(size),
             PropKind::SteelDrum { .. } => Vec3::new(DRUM_DIAMETER, DRUM_HEIGHT, DRUM_DIAMETER),
             PropKind::Sandbag => Vec3::new(BAG_LEN, BAG_HEIGHT, BAG_WIDTH),
             PropKind::SandbagWall { length, courses } => sandbag_wall_size(length, courses),
@@ -3361,6 +3382,240 @@ pub fn board_wall(size: Vec3, seed: u64) -> Vec<PropPart> {
                 .tint(wood_tint(&mut rng))
                 .uv(rng_uv(&mut rng)),
         );
+    }
+    // A slight cup and warp, the same function of position for every board.
+    let s = seed;
+    deform(b, v0, |p| {
+        p + Vec3::Z * (0.0015 * n3(p, 1.5, s) + 0.0006 * n3(p, 7.0, s ^ 3))
+    });
+    auto_smooth(b, v0, t0, 30.0);
+    kit.finish(Ao {
+        reach: 0.15,
+        strength: 0.6,
+        ground: false,
+    })
+}
+
+/// The boards of a board wall `size` wide: how many, how wide, the gap between them.
+fn wall_boards(size: Vec3) -> (usize, f32, f32) {
+    let count = (size.x / 0.18).round().max(1.0) as usize;
+    let gap = 0.004;
+    (
+        count,
+        (size.x - gap * (count - 1) as f32) / count as f32,
+        gap,
+    )
+}
+
+/// Thickness of the lining boards in an opening's reveal, m.
+const LINING_M: f32 = 0.025;
+
+/// The opening cut in a board wall `size` big for a doorway (`door`) or a window, in the
+/// wall's own space: (rough opening, the boards cut for it, from the first to the last) and
+/// the clear opening inside its lining, each as (min, max) corners in X and Y. Its sides fall
+/// on the gaps between boards.
+fn rough_opening(size: Vec3, door: bool) -> ((Vec2, Vec2), (usize, usize)) {
+    let (count, bw, gap) = wall_boards(size);
+    let pitch = bw + gap;
+    let mut n = ((if door { 0.92 } else { 0.9 }) / pitch).round().max(1.0) as usize;
+    // The same number of boards left on both sides.
+    if (count - n.min(count)) % 2 == 1 {
+        n -= 1;
+    }
+    let n = n.clamp(1, count.saturating_sub(2).max(1));
+    let k0 = (count - n) / 2;
+    let k1 = k0 + n - 1;
+    let x0 = -size.x * 0.5 + k0 as f32 * pitch - gap * 0.5;
+    let x1 = -size.x * 0.5 + (k1 + 1) as f32 * pitch - gap * 0.5;
+    let foot = -size.y * 0.5;
+    let (y0, y1) = if door {
+        (foot, foot + (size.y - 0.1).min(1.9))
+    } else {
+        (foot + 0.42 * size.y, foot + 0.8 * size.y)
+    };
+    ((Vec2::new(x0, y0), Vec2::new(x1, y1)), (k0, k1))
+}
+
+/// The clear opening of a [`PropKind::BoardDoorway`] (`door`) or [`PropKind::BoardWindow`]
+/// `size` big, inside its lining: (min, max) corners in X and Y of the wall's own space. A
+/// doorway's runs down to the wall's foot.
+pub fn wall_opening(size: Vec3, door: bool) -> (Vec2, Vec2) {
+    let ((lo, hi), _) = rough_opening(size, door);
+    let bottom = if door { lo.y } else { lo.y + LINING_M };
+    (
+        Vec2::new(lo.x + LINING_M, bottom),
+        Vec2::new(hi.x - LINING_M, hi.y - LINING_M),
+    )
+}
+
+/// A board wall with a doorway or a window (see [`PropKind::BoardDoorway`] and
+/// [`PropKind::BoardWindow`]): the board wall's boards and battens cut around the opening,
+/// lining boards in the reveal (a threshold under a doorway, a cross bar in a window), and
+/// jamb and head battens framing it on the back.
+pub fn board_wall_opening(size: Vec3, door: bool, seed: u64) -> Vec<PropPart> {
+    let size = size.max(Vec3::new(0.6, 0.6, 0.03));
+    let mut rng = Rng::new(seed ^ if door { 0x00D0_0A2D } else { 0x0A1D_0A2D });
+    let mut kit = Kit::new();
+    let batten_t = (size.z * 0.45).clamp(0.015, 0.04);
+    let board_t = (size.z - batten_t).max(0.012);
+    let (count, bw, gap) = wall_boards(size);
+    let ((lo, hi), (k0, k1)) = rough_opening(size, door);
+    let foot = -size.y * 0.5;
+    let b = kit.mb(WOOD);
+    let v0 = b.vertices.len();
+    let t0 = b.indices.len();
+    let slab = |b: &mut MeshBuilder, rng: &mut Rng, frame: Frame, half: Vec3, step: f32| {
+        let along = stations(-half.x, half.x, &[], step);
+        bevel_box(
+            b,
+            &frame,
+            &BoxSpec::new(half, 0.003)
+                .chamfer()
+                .splits([&along, &[], &[]])
+                .tint(wood_tint(rng))
+                .uv(rng_uv(rng)),
+        );
+    };
+    // A board's piece from y `a` to `b` (its X runs up the board, so the grain does too).
+    let upright = Mat3::from_cols(Vec3::Y, Vec3::Z, Vec3::X);
+    for k in 0..count {
+        let x = -size.x * 0.5 + bw * 0.5 + k as f32 * (bw + gap);
+        let top = foot + size.y - rng.range(0.0, 0.03);
+        let z = size.z * 0.5 - board_t * 0.5 - rng.range(0.0, 0.003);
+        let lean = Mat3::from_rotation_z(rng.range(-0.004, 0.004));
+        let cut = (k0..=k1).contains(&k);
+        let spans: &[(f32, f32)] = if !cut {
+            &[(foot, top)]
+        } else if door {
+            &[(hi.y, top)]
+        } else {
+            &[(foot, lo.y), (hi.y, top)]
+        };
+        for &(a, c) in spans {
+            if c - a < 0.02 {
+                continue;
+            }
+            slab(
+                b,
+                &mut rng,
+                Frame {
+                    rot: lean * upright,
+                    pos: Vec3::new(x, (a + c) * 0.5, z),
+                },
+                Vec3::new((c - a) * 0.5, board_t * 0.5, bw * 0.5),
+                0.4,
+            );
+        }
+    }
+    // Battens across the back, cut where they cross the opening.
+    let back = -size.z * 0.5 + batten_t * 0.5;
+    let (bx0, bx1) = (-size.x * 0.5 + 0.01, size.x * 0.5 - 0.01);
+    let jamb = 0.08f32;
+    for y in [-0.32f32, 0.3] {
+        let y = y * size.y;
+        let hh = 0.05f32.min(size.y * 0.1);
+        let crosses = y + hh > lo.y && y - hh < hi.y;
+        let runs: Vec<(f32, f32)> = if crosses {
+            vec![(bx0, lo.x - jamb), (hi.x + jamb, bx1)]
+        } else {
+            vec![(bx0, bx1)]
+        };
+        for (a, c) in runs {
+            if c - a < 0.05 {
+                continue;
+            }
+            slab(
+                b,
+                &mut rng,
+                Frame::at(Vec3::new((a + c) * 0.5, y, back)),
+                Vec3::new((c - a) * 0.5, hh, batten_t * 0.5),
+                0.5,
+            );
+        }
+    }
+    // The frame on the back: jambs up both sides, a head over the opening (and a sill board
+    // under a window), all in the battens' layer.
+    let top_y = (hi.y + jamb).min(size.y * 0.5 - 0.01);
+    let bottom_y = if door { foot + 0.01 } else { lo.y - jamb };
+    for x in [lo.x - jamb * 0.5, hi.x + jamb * 0.5] {
+        slab(
+            b,
+            &mut rng,
+            Frame::new(Vec3::new(x, (bottom_y + top_y) * 0.5, back), upright),
+            Vec3::new((top_y - bottom_y) * 0.5, batten_t * 0.5, jamb * 0.5),
+            0.4,
+        );
+    }
+    let mut cross = vec![((hi.y + top_y) * 0.5, (top_y - hi.y) * 0.5)];
+    if !door {
+        cross.push(((bottom_y + lo.y) * 0.5, (lo.y - bottom_y) * 0.5));
+    }
+    for (y, hh) in cross {
+        if hh < 0.01 {
+            continue;
+        }
+        slab(
+            b,
+            &mut rng,
+            Frame::at(Vec3::new((lo.x + hi.x) * 0.5, y, back)),
+            Vec3::new((hi.x - lo.x) * 0.5, hh, batten_t * 0.5),
+            0.5,
+        );
+    }
+    // Lining in the reveal, the full thickness of the wall: sides, head, and a sill board or
+    // a threshold.
+    let lt = LINING_M;
+    let half_z = size.z * 0.5 - 0.002;
+    let bottom = if door { foot } else { lo.y };
+    for x in [lo.x + lt * 0.5, hi.x - lt * 0.5] {
+        slab(
+            b,
+            &mut rng,
+            Frame::new(Vec3::new(x, (bottom + hi.y - lt) * 0.5, 0.0), upright),
+            Vec3::new((hi.y - lt - bottom) * 0.5, half_z, lt * 0.5),
+            0.4,
+        );
+    }
+    let mut level = vec![(hi.y - lt * 0.5, lt * 0.5)];
+    level.push(if door {
+        (foot + 0.01, 0.01)
+    } else {
+        (lo.y + lt * 0.5, lt * 0.5)
+    });
+    for (y, hh) in level {
+        slab(
+            b,
+            &mut rng,
+            Frame::at(Vec3::new((lo.x + hi.x) * 0.5, y, 0.0)),
+            Vec3::new((hi.x - lo.x) * 0.5, hh, half_z),
+            0.5,
+        );
+    }
+    if !door {
+        // A cross bar in the window: an upright and a rail, set back in the reveal.
+        let (cx, cy) = ((lo.x + hi.x) * 0.5, (lo.y + hi.y) * 0.5);
+        let (w, d) = (0.035f32, size.z * 0.3);
+        slab(
+            b,
+            &mut rng,
+            Frame::new(Vec3::new(cx, cy, 0.0), upright),
+            Vec3::new((hi.y - lo.y) * 0.5 - lt, d, w * 0.5),
+            0.4,
+        );
+        for side in [-1.0f32, 1.0] {
+            let (a, c) = if side < 0.0 {
+                (lo.x + lt, cx - w * 0.5)
+            } else {
+                (cx + w * 0.5, hi.x - lt)
+            };
+            slab(
+                b,
+                &mut rng,
+                Frame::at(Vec3::new((a + c) * 0.5, cy, 0.0)),
+                Vec3::new((c - a) * 0.5, w * 0.5, d),
+                0.5,
+            );
+        }
     }
     // A slight cup and warp, the same function of position for every board.
     let s = seed;
