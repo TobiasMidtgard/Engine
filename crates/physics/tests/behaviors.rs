@@ -474,6 +474,77 @@ fn running_along_a_wall_reports_its_normal() {
 }
 
 #[test]
+fn characters_keep_sliding_along_moving_walls_they_press_into() {
+    // Movement's case: running along a wall while pressing into it a little. Against a
+    // kinematic wall the controller drops the into-the-wall part of the move, and the slide
+    // left over used to count as a hit at time 0 every other step (boxes) or nearly every step
+    // (hulls), so the character stopped dead along the wall.
+    let half = Vec3::new(0.5, 12.0, 6.0);
+    let corners: Vec<Vec3> = (0..8)
+        .map(|i| {
+            Vec3::new(
+                if i & 1 == 0 { -half.x } else { half.x },
+                if i & 2 == 0 { -half.y } else { half.y },
+                if i & 4 == 0 { -half.z } else { half.z },
+            )
+        })
+        .collect();
+    for (name, shape) in [
+        ("box", ColliderShape::Cuboid { half_extents: half }),
+        ("hull", ColliderShape::ConvexHull { points: corners }),
+    ] {
+        for wall_speed in [0.0, 3.0] {
+            for climb in [0.0, 6.5] {
+                let mut app = app();
+                // The wall's face is at x = 0, facing -x; it slides along z.
+                app.world.spawn((
+                    Transform::from_xyz(0.5, 0.0, 0.0),
+                    RigidBody::kinematic(),
+                    Collider {
+                        shape: shape.clone(),
+                        ..Default::default()
+                    },
+                    Velocity {
+                        linear: Vec3::new(0.0, 0.0, wall_speed),
+                        angular: Vec3::ZERO,
+                    },
+                ));
+                let desc = CharacterController::default();
+                let gap = 0.02;
+                let c = app
+                    .world
+                    .spawn((
+                        Transform::from_xyz(-(desc.radius as f64) - gap, 0.0, -4.0),
+                        desc,
+                        CharacterMove {
+                            velocity: Vec3::new(0.5, climb, 3.0),
+                        },
+                    ))
+                    .id();
+                // Parry's hull casts are a little noisy in the gap: a step can lose a few
+                // percent of its slide, never all of it.
+                let slack = if name == "box" { 0.01 } else { 0.15 };
+                let mut slid = 0.0;
+                for step in 0..90 {
+                    app.update();
+                    let v = app.world.get::<CharacterState>(c).unwrap().velocity;
+                    let what =
+                        format!("{name}, wall at {wall_speed} m/s, climb {climb}, step {step}");
+                    assert!((v.z - 3.0).abs() < slack, "{what}: velocity {v}");
+                    slid += v.z / 90.0;
+                    let x = pos(&app, c).x + desc.radius as f64;
+                    assert!((x + gap).abs() < 0.003, "{what}: gap {:.4}", -x);
+                }
+                assert!(
+                    slid > 2.99,
+                    "{name}, wall at {wall_speed} m/s: slid at {slid:.3} m/s"
+                );
+            }
+        }
+    }
+}
+
+#[test]
 fn running_on_flat_ground_finds_no_walls() {
     // Movement's setup: capsules spawned on a floor, running and falling. Wall runs, wall
     // jumps and mantles start from `wall_normal`, so a phantom wall in the middle of a field

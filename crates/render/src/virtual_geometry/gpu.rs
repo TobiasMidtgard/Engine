@@ -46,10 +46,14 @@ const CLUSTER_SHADOW: &str = include_str!("../shaders/cluster_shadow.wgsl");
 const MESH: &str = include_str!("../shaders/mesh.wgsl");
 const MESH_SHADOW: &str = include_str!("../shaders/mesh_shadow.wgsl");
 
-/// Views culled every frame: the camera (0), the shadow cascades (1..=MAX_CASCADES) and the
-/// sky occlusion map (`1 + SKY_OCCLUSION_VIEW`). `VIEWS` in `cluster_cull.wgsl`.
-const VIEWS: usize = 2 + MAX_CASCADES;
-const _: () = assert!(VIEWS == 6 && SKY_OCCLUSION_VIEW + 1 == VIEWS - 1);
+/// Views culled every frame: the camera (0), the shadow cascades (1..=MAX_CASCADES), the sky
+/// occlusion map (`1 + SKY_OCCLUSION_VIEW`) and the far shadow map
+/// (`1 + FAR_SHADOW_CLUSTERS`). `VIEWS` in `cluster_cull.wgsl`.
+const VIEWS: usize = 3 + MAX_CASCADES;
+/// Shadow view index of the far shadow map (after the cascades and the sky occlusion map), for
+/// [`ClusterRenderer::draw_shadow`].
+pub const FAR_SHADOW_CLUSTERS: usize = SKY_OCCLUSION_VIEW + 1;
+const _: () = assert!(VIEWS == 7 && FAR_SHADOW_CLUSTERS + 1 == VIEWS - 1);
 /// Clusters per chunk (`CHUNK` in `cluster_cull.wgsl`).
 const CHUNK: u32 = 64;
 const WORKGROUP: u32 = 64;
@@ -832,6 +836,17 @@ impl ClusterRenderer {
         }
     }
 
+    /// Mesh-space bounding sphere of a mesh [`ready`](Self::ready) to be drawn as clusters.
+    pub fn bounds(&self, mesh: u32) -> Option<Sphere> {
+        match self.meshes.get(&mesh) {
+            Some(Entry {
+                state: State::Ready(dag),
+                ..
+            }) => Some(dag.bounds),
+            _ => None,
+        }
+    }
+
     /// Draw an instance of a mesh [`ready`](Self::ready) said yes to this frame.
     pub fn push_instance(&mut self, instance: ClusterInstance) {
         self.pending.push(instance);
@@ -876,6 +891,7 @@ impl ClusterRenderer {
             }
         }
         shadow_views[SKY_OCCLUSION_VIEW] = view.sky_occlusion.enabled;
+        shadow_views[FAR_SHADOW_CLUSTERS] = view.sun_shadows && view.far_shadow.enabled;
         let shadow_count = shadow_views.iter().filter(|v| **v).count() as u64;
 
         let mut bucket_of: HashMap<(bool, u32), u32> = HashMap::new();
@@ -1025,16 +1041,30 @@ impl ClusterRenderer {
         for (v, slot) in self.shadow_slots.iter().enumerate() {
             let Some(slot) = *slot else { continue };
             let cull = &mut views[1 + v];
-            let (view_proj, texels_per_meter, near) = if v == SKY_OCCLUSION_VIEW {
+            // The far map keeps only casters big enough to show at its resolution.
+            let (view_proj, texels_per_meter, near, min_radius) = if v == SKY_OCCLUSION_VIEW {
                 let s = &view.sky_occlusion;
-                (s.view_proj, s.map_size as f32 / s.extent.max(1e-3), true)
+                (
+                    s.view_proj,
+                    s.map_size as f32 / s.extent.max(1e-3),
+                    true,
+                    0.0,
+                )
+            } else if v == FAR_SHADOW_CLUSTERS {
+                let f = &view.far_shadow;
+                (
+                    f.view_proj,
+                    1.0 / f.texel().max(1e-3),
+                    false,
+                    f.min_caster_radius,
+                )
             } else {
                 let c = &view.cascades;
                 let half = c.half_extent[v].max(1e-3);
-                (c.view_proj[v], c.map_size as f32 / (2.0 * half), false)
+                (c.view_proj[v], c.map_size as f32 / (2.0 * half), false, 0.0)
             };
             cull.planes = ortho_planes(&view_proj, near);
-            cull.lod = [texels_per_meter, shadow_threshold, 1.0, 0.0];
+            cull.lod = [texels_per_meter, shadow_threshold, 1.0, min_radius];
             cull.slots = [slot, 1, per_slot, 1];
         }
         let params = CullParams {
@@ -1184,8 +1214,9 @@ impl ClusterRenderer {
         self.draw_camera(pass, &self.scene, textures);
     }
 
-    /// Draw the clusters of shadow cascade `cascade`, or of the sky occlusion map when it is
-    /// `SKY_OCCLUSION_VIEW` (group 1 bound).
+    /// Draw the clusters of shadow cascade `cascade`, of the sky occlusion map when it is
+    /// `SKY_OCCLUSION_VIEW`, or of the far shadow map when it is [`FAR_SHADOW_CLUSTERS`] (group 1
+    /// bound).
     pub fn draw_shadow(&self, pass: &mut wgpu::RenderPass<'_>, cascade: usize) {
         let Some(group) = self.draw_group.as_ref().filter(|_| self.active) else {
             return;

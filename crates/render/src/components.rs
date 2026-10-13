@@ -192,6 +192,19 @@ pub struct MeshRenderer {
 #[derive(Component, Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
 pub struct NoVirtualGeometry;
 
+/// Farthest distance from the camera, in meters, at which this entity's [`MeshRenderer`] is
+/// drawn (with its shadow): small props, clutter and details nobody sees from afar. Measured to
+/// the mesh's bounding sphere, so a large mesh disappears when all of it is farther. The default
+/// (`f32::MAX`) draws it at any distance.
+#[derive(Component, Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct MaxDrawDistance(pub f32);
+
+impl Default for MaxDrawDistance {
+    fn default() -> Self {
+        Self(f32::MAX)
+    }
+}
+
 impl Default for MeshRenderer {
     fn default() -> Self {
         Self {

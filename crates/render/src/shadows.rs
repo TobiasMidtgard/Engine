@@ -135,6 +135,127 @@ impl SkyOcclusionView {
     }
 }
 
+/// Layer of the shadow map array that holds the far shadow map (after the cascades).
+pub const FAR_SHADOW_LAYER: usize = MAX_CASCADES;
+
+/// One coarse sun shadow map around the camera for what lies beyond the cascades
+/// (`RenderSettings::shadow_distance`), out to `RenderSettings::far_shadow_distance`: mountains
+/// shade the valley at low sun and ridges shade themselves kilometers away.
+///
+/// Only big casters draw into it (terrain, mountains, cliffs, large buildings; see
+/// [`FarShadowView::casts`]), from [`RenderFeature::draw_far_shadow`](crate::RenderFeature::draw_far_shadow).
+/// It covers a square around the camera whose size doesn't depend on where the camera looks,
+/// snapped to whole texels in world space, so it neither shimmers nor swims as the camera turns
+/// and moves. Shading blends into it over the last tenth of the cascades (`shadow_factor` in
+/// `lib_frame.wgsl`).
+#[derive(Debug, Clone, Copy)]
+pub struct FarShadowView {
+    pub enabled: bool,
+    pub map_size: u32,
+    /// Half the width of the covered square (and the reach from the camera), meters.
+    pub half_extent: f32,
+    /// Depth range from the light's eye, meters.
+    pub depth_range: f32,
+    /// Camera-relative → far shadow clip space (orthographic, standard Z).
+    pub view_proj: Mat4,
+    /// Camera-relative → light view space (looking down −Z), for culling.
+    pub light_view: Mat4,
+    /// Casters smaller than this bounding radius (meters, two texels) are left out.
+    pub min_caster_radius: f32,
+}
+
+impl Default for FarShadowView {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            map_size: 2048,
+            half_extent: 0.0,
+            depth_range: 0.0,
+            view_proj: Mat4::IDENTITY,
+            light_view: Mat4::IDENTITY,
+            min_caster_radius: f32::INFINITY,
+        }
+    }
+}
+
+impl FarShadowView {
+    /// The far view for a camera at world position `origin` with the sun toward `sun_dir`,
+    /// reaching `distance` meters, at `map_size`² texels. Disabled when `distance` doesn't reach
+    /// past `cascade_reach` (the cascades already cover it).
+    pub fn new(
+        origin: DVec3,
+        sun_dir: Vec3,
+        map_size: u32,
+        distance: f32,
+        cascade_reach: f32,
+    ) -> Self {
+        if !(distance > cascade_reach && distance > 0.0) || sun_dir.length_squared() < 0.5 {
+            return Self::default();
+        }
+        let map_size = map_size.max(256);
+        let radius = distance as f64;
+        let texel = 2.0 * radius / map_size as f64;
+        let light_rot = look_rotation_f64(-sun_dir.as_dvec3());
+        let mut ls = light_rot.inverse() * origin;
+        ls.x = (ls.x / texel).floor() * texel;
+        ls.y = (ls.y / texel).floor() * texel;
+        let center_rel = (light_rot * ls - origin).as_vec3();
+        // Casters up to two radii toward the sun (mountains across the valley) get their real
+        // depth; anything further is pancaked onto the near plane.
+        let back = 2.0 * distance + 2000.0;
+        let eye = center_rel + sun_dir * back;
+        let light_view =
+            Mat4::from_quat(light_rot.as_quat().inverse()) * Mat4::from_translation(-eye);
+        let depth_range = back + distance;
+        let proj = crate::frame::orthographic_standard(distance, 0.0, depth_range);
+        Self {
+            enabled: true,
+            map_size,
+            half_extent: distance,
+            depth_range,
+            view_proj: proj * light_view,
+            light_view,
+            min_caster_radius: 2.0 * texel as f32,
+        }
+    }
+
+    /// Size of one texel, meters.
+    pub fn texel(&self) -> f32 {
+        2.0 * self.half_extent / self.map_size.max(1) as f32
+    }
+
+    /// Whether a camera-relative bounding sphere touches the covered box (or lies toward the
+    /// sun from it, so it can shade it).
+    pub fn contains_sphere(&self, center: Vec3, radius: f32) -> bool {
+        if !self.enabled {
+            return false;
+        }
+        let p = self.light_view.transform_point3(center);
+        let e = self.half_extent + radius;
+        p.x.abs() <= e && p.y.abs() <= e && -p.z - radius <= self.depth_range
+    }
+
+    /// Whether a caster with this camera-relative bounding sphere belongs in the far map: big
+    /// enough to show at its resolution, and inside it.
+    pub fn casts(&self, center: Vec3, radius: f32) -> bool {
+        radius >= self.min_caster_radius && self.contains_sphere(center, radius)
+    }
+
+    /// `far_shadow_params` in the frame uniform: reach (m, 0 = off), texel size (m), clip depth
+    /// per meter, shadow map layer.
+    pub fn params(&self) -> [f32; 4] {
+        if !self.enabled {
+            return [0.0, 1.0, 0.0, FAR_SHADOW_LAYER as f32];
+        }
+        [
+            self.half_extent,
+            self.texel(),
+            1.0 / self.depth_range.max(1e-3),
+            FAR_SHADOW_LAYER as f32,
+        ]
+    }
+}
+
 /// GPU layout of `struct ShadowView` in `mesh_shadow.wgsl` (and any feature's shadow shader).
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Pod, Zeroable)]
@@ -305,6 +426,43 @@ mod tests {
         // Projecting a point near the camera lands inside clip space.
         let c = a.view_proj[0] * Vec4::new(0.0, 0.0, -1.0, 1.0);
         assert!(c.x.abs() <= 1.0 && c.y.abs() <= 1.0 && (0.0..=1.0).contains(&c.z));
+    }
+}
+
+#[cfg(test)]
+mod far_shadow_tests {
+    use super::*;
+
+    #[test]
+    fn far_view_covers_kilometers_and_keeps_casters_toward_the_sun() {
+        let sun = Vec3::new(0.0, 0.2, -1.0).normalize();
+        let v = FarShadowView::new(DVec3::new(1234.5, 30.0, -77.0), sun, 2048, 8000.0, 400.0);
+        assert!(v.enabled);
+        assert!((v.texel() - 16000.0 / 2048.0).abs() < 1e-3);
+        // Ground 2 km in front of the camera projects inside the map, with a valid depth.
+        let c = v.view_proj * Vec4::new(300.0, 0.0, 2000.0, 1.0);
+        assert!(c.x.abs() < 1.0 && c.y.abs() < 1.0 && (0.0..1.0).contains(&c.z));
+        // A mountain 6 km toward the sun is kept (it shades the valley), a pebble is not.
+        assert!(v.casts(Vec3::new(0.0, 800.0, -6000.0), 1500.0));
+        assert!(!v.casts(Vec3::new(0.0, 0.0, -100.0), 0.5));
+        // Far beside the map: not kept.
+        assert!(!v.casts(Vec3::new(30_000.0, 0.0, 0.0), 500.0));
+        // The cascades already reach far enough: off.
+        assert!(!FarShadowView::new(DVec3::ZERO, sun, 2048, 300.0, 400.0).enabled);
+    }
+
+    #[test]
+    fn far_view_is_snapped_to_texels() {
+        let sun = Vec3::new(0.3, 0.6, 0.2).normalize();
+        let a = FarShadowView::new(DVec3::new(100.0, 0.0, 0.0), sun, 1024, 6000.0, 400.0);
+        let b = FarShadowView::new(DVec3::new(100.3, 0.0, 0.1), sun, 1024, 6000.0, 400.0);
+        // The same world point lands on the same texel position (up to the camera's own move).
+        let world = DVec3::new(2500.0, 120.0, -900.0);
+        let pa = a.view_proj * (world - DVec3::new(100.0, 0.0, 0.0)).as_vec3().extend(1.0);
+        let pb = b.view_proj * (world - DVec3::new(100.3, 0.0, 0.1)).as_vec3().extend(1.0);
+        let texel_ndc = 2.0 / 1024.0;
+        let frac = |x: f32| ((x + 1.0) / texel_ndc).fract();
+        assert!((frac(pa.x) - frac(pb.x)).abs() < 0.02 || (frac(pa.x) - frac(pb.x)).abs() > 0.98);
     }
 }
 

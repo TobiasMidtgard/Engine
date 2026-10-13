@@ -898,14 +898,16 @@ fn birch(t: &Tile, x: f32, y: f32) -> Texel {
     let s = t.seed;
     let (u, v) = (x / t.wm, y / t.hm);
     let low = fbm(u, v, 2, 3, 4, 0.5, s + 1);
-    let mut c = srgb3(0xd2cec5).lerp(srgb3(0xe4ddd0), 0.5 + 0.5 * low);
+    // Chalky, but no whiter than real birch bark (an albedo of about a half): brighter paper
+    // clips to flat white in sunlight and hides the lenticels and the dark foot.
+    let mut c = srgb3(0xbab6ad).lerp(srgb3(0xcbc5b9), 0.5 + 0.5 * low);
     let band = smoothstep(0.15, 0.7, fbm(u, v, 1, 7, 3, 0.5, s + 2))
         * smoothstep(-0.3, 0.4, fbm(u, v, 3, 2, 2, 0.5, s + 3));
     c = c.lerp(srgb3(0xaba69c), band * 0.45);
     let smudge = smoothstep(0.2, 0.7, fbm(u, v, 4, 6, 4, 0.55, s + 4));
     c = c.lerp(srgb3(0x9c978d), smudge * 0.3);
     let warm = smoothstep(0.25, 0.7, fbm(u, v, 4, 3, 3, 0.5, s + 5));
-    c = c.lerp(srgb3(0xe0cbb8), warm * 0.35);
+    c = c.lerp(srgb3(0xc8b5a3), warm * 0.35);
     // Paper striations around the trunk.
     let stria = gnoise(u * 5.0, v * 150.0, 5, 150, s + 6);
     let mut h = 0.00012 * stria;
@@ -963,7 +965,7 @@ fn birch(t: &Tile, x: f32, y: f32) -> Texel {
         let d = peel.rel * Vec2::new(1.0, 0.25);
         let along = 1.0 - smoothstep(half_w * 0.6, half_w, d.x.abs() + 4.0 * wob);
         let inside = (1.0 - smoothstep(-0.0004, 0.0004, d.y.abs() + wob - half_h)) * along;
-        let inner = srgb3(0xe6c4a8).lerp(srgb3(0xd9a787), rnd(peel.id, 4));
+        let inner = srgb3(0xd0ae92).lerp(srgb3(0xc49478), rnd(peel.id, 4));
         c = c.lerp(inner, inside);
         h -= 0.0003 * inside;
         // The curled lip above the strip and its shadow.
@@ -974,10 +976,10 @@ fn birch(t: &Tile, x: f32, y: f32) -> Texel {
 
     // A few rough black patches.
     let blot = voronoi(Vec2::new(x, y), Vec2::new(t.wm, t.hm), (3, 4), 0.75, s + 13);
-    if rnd(blot.id, 1) < 0.18 {
+    if rnd(blot.id, 1) < 0.3 {
         let shape = fbm(u, v, 14, 14, 3, 0.55, s + 14);
-        let size = 0.014 + 0.014 * rnd(blot.id, 2);
-        let d = (blot.rel * Vec2::new(0.55, 1.7)).length() + 0.008 * shape;
+        let size = 0.016 + 0.026 * rnd(blot.id, 2);
+        let d = (blot.rel * Vec2::new(0.5, 1.8)).length() + 0.01 * shape;
         let m = 1.0 - smoothstep(size * 0.7, size, d);
         if m > 0.0 {
             let cracks = fbm(u, v, 40, 70, 3, 0.55, s + 15);
