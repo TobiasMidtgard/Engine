@@ -34,7 +34,10 @@ pub enum BodyKind {
     Moon,
 }
 
-/// Air around a body (drives the renderer's `Atmosphere` when it is the nearest one).
+/// Air around a body as it looks: the sky from its ground, the haze over it and the glow
+/// around its limb (drives the renderer's `Atmosphere` when it is the nearest one). The
+/// scattering coefficients are the renderer's (see `Atmosphere` there): [`Self::earth`] and
+/// [`Self::mars`] are its presets.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct BodyAtmosphere {
@@ -44,17 +47,68 @@ pub struct BodyAtmosphere {
     pub mie_g: f32,
     /// Surface albedo seen from above (linear RGB).
     pub ground_color: [f32; 3],
+    /// Rayleigh scattering by the gas at the surface, per meter, RGB.
+    pub rayleigh_scattering: [f32; 3],
+    /// Mie scattering by haze or dust at the surface, per meter, RGB.
+    pub mie_scattering: [f32; 3],
+    /// Light the haze or dust absorbs at the surface, per meter, RGB.
+    pub mie_absorption: [f32; 3],
+    /// Ozone absorption at its densest (25 km up), per meter, RGB; 0 without ozone.
+    pub ozone_absorption: [f32; 3],
+    /// Added to `mie_g` per channel (a blue glow around the sun where it is larger in blue).
+    pub mie_g_offset: [f32; 3],
+    /// Scales the density of the whole air (1 = as given).
+    pub density_scale: f32,
 }
 
 impl Default for BodyAtmosphere {
     fn default() -> Self {
+        Self::earth()
+    }
+}
+
+impl BodyAtmosphere {
+    /// Earth's air: a blue sky and red sunsets.
+    pub fn earth() -> Self {
+        Self::from_render(&Atmosphere::earth())
+    }
+
+    /// Mars' thin CO₂ under a veil of dust: a butterscotch sky by day, a blue glow around the
+    /// setting sun.
+    pub fn mars() -> Self {
+        Self::from_render(&Atmosphere::mars())
+    }
+
+    /// The air of one of the renderer's atmosphere presets.
+    pub fn from_render(a: &Atmosphere) -> Self {
         Self {
-            thickness_m: 100_000.0,
-            rayleigh_scale_height_m: 8_000.0,
-            mie_scale_height_m: 1_200.0,
-            mie_g: 0.8,
-            ground_color: [0.12, 0.15, 0.09],
+            thickness_m: a.thickness,
+            rayleigh_scale_height_m: a.rayleigh_scale_height,
+            mie_scale_height_m: a.mie_scale_height,
+            mie_g: a.mie_g,
+            ground_color: a.ground_color,
+            rayleigh_scattering: a.rayleigh_scattering,
+            mie_scattering: a.mie_scattering,
+            mie_absorption: a.mie_absorption,
+            ozone_absorption: a.ozone_absorption,
+            mie_g_offset: a.mie_g_offset,
+            density_scale: a.density_scale,
         }
+    }
+
+    /// Sets the renderer's air to this one (not where the planet is, nor whether it is on).
+    pub fn apply(&self, a: &mut Atmosphere) {
+        a.thickness = self.thickness_m;
+        a.rayleigh_scale_height = self.rayleigh_scale_height_m;
+        a.mie_scale_height = self.mie_scale_height_m;
+        a.mie_g = self.mie_g;
+        a.ground_color = self.ground_color;
+        a.rayleigh_scattering = self.rayleigh_scattering;
+        a.mie_scattering = self.mie_scattering;
+        a.mie_absorption = self.mie_absorption;
+        a.ozone_absorption = self.ozone_absorption;
+        a.mie_g_offset = self.mie_g_offset;
+        a.density_scale = self.density_scale;
     }
 }
 
@@ -1013,11 +1067,7 @@ pub fn update_space(world: &mut World) {
                 atmo.enabled = true;
                 atmo.planet_center = states[i].world_position;
                 atmo.planet_radius = states[i].radius_m;
-                atmo.thickness = a.thickness_m;
-                atmo.rayleigh_scale_height = a.rayleigh_scale_height_m;
-                atmo.mie_scale_height = a.mie_scale_height_m;
-                atmo.mie_g = a.mie_g;
-                atmo.ground_color = a.ground_color;
+                a.apply(&mut atmo);
             }
             None => atmo.enabled = false,
         }
