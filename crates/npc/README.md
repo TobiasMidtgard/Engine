@@ -66,7 +66,12 @@ give, hips, back and head land, limbs settle and the weapon drops beside it. A h
 met in a roof guard over the helmet, a cut to the head wrenches it away with a half step back,
 carbines kick and settle and change magazines between shots, archers draw to the mouth, hold,
 loose and nock the next arrow from the quiver, fighters turn on the spot by stepping round, and
-crests, tabards and pouches swing on after a stop or a blow. Animals plant their feet too (a
+crests, tabards and pouches swing on after a stop or a blow. Fighters look at their foe (eyes
+first, then the head), glance at flankers and noises, blink, set the jaw for a heavy blow and
+shout as it lands, grimace when hit and breathe hard when tired; badly hurt, they limp on the
+struck leg or hunch over a body wound and press a hand to it at ease. At ease the weapon rests
+on the shoulder or hangs low and comes to guard when a foe is spotted, and a revived fighter
+rolls over, kneels, takes up its weapon and stands into its guard. Animals plant their feet too (a
 test fails if a hoof or paw on the ground slides) in each species' footfalls: deer walk in
 lateral sequence, trot and gallop (rotary) and bound away when they bolt from a stand, wolves
 walk, trot, lope and gallop, rabbits hop and half-bound with the hind feet landing ahead of the

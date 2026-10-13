@@ -62,6 +62,61 @@ pub struct Hang {
     /// The body hung from: the ledge (and `normal`) move with it.
     #[serde(skip)]
     pub on: Option<Pin>,
+    /// Going around a corner onto the next face.
+    #[serde(default)]
+    pub corner: Option<Corner>,
+    /// After a corner: a stick still held the old way along the ledge (`.0`) shimmies the new
+    /// way (`.1`), so holding one direction carries on around.
+    #[serde(default)]
+    pub carry: Option<(Vec3, Vec3)>,
+}
+
+impl Hang {
+    pub fn new(top: DVec3, normal: Vec3, on: Option<Pin>) -> Self {
+        Self {
+            top,
+            normal,
+            on,
+            corner: None,
+            carry: None,
+        }
+    }
+}
+
+/// Going around a corner of a ledge: the body follows a curve from the hold on the face hung
+/// from to the hold on the next face, an outside corner (the next face turned toward the
+/// shimmy) or an inside one (a wall across the way).
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct Corner {
+    /// The curve of the body's center: start, bend, end (a quadratic Bézier).
+    pub from: DVec3,
+    pub via: DVec3,
+    pub to: DVec3,
+    /// The ledge and its normal before the corner.
+    pub from_top: DVec3,
+    pub from_normal: Vec3,
+    /// The ledge and its normal on the next face.
+    pub top: DVec3,
+    pub normal: Vec3,
+    /// Along the next face, away from the corner.
+    pub along: Vec3,
+    /// The way the shimmy came (for [`Hang::carry`]).
+    pub came: Vec3,
+    /// The next face's body.
+    #[serde(skip)]
+    pub wall: Option<Entity>,
+    /// Progress, 0..1.
+    pub t: f32,
+    /// How long the whole turn takes, s.
+    pub secs: f32,
+}
+
+impl Corner {
+    /// The body's center at progress `t`.
+    pub fn at(&self, t: f32) -> DVec3 {
+        let t = t.clamp(0.0, 1.0) as f64;
+        self.from * ((1.0 - t) * (1.0 - t)) + self.via * (2.0 * t * (1.0 - t)) + self.to * (t * t)
+    }
 }
 
 /// A grapple hook: flying out to where it was fired, or bitten in and reeling the character

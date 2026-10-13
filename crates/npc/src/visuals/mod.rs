@@ -41,6 +41,18 @@
 //! knee-length tabards and arm bands, so squads tell apart across the arena; the gambesons and
 //! hose under it are undyed or earthy, and differ between fighters.
 //!
+//! Fighters look at what they are after: the eyes flick to a new foe first and the head
+//! follows a beat behind (the shoulders taking what the neck can't); they glance at a flanker
+//! or toward a noise for a moment and sweep the ground ahead when searching. They blink (more
+//! often when alarmed), set the jaw or grimace on a heavy blow and when hit, and breathe hard
+//! through an open mouth after a sprint or when badly hurt. Badly hurt, they limp on the leg
+//! last struck, or hunch over a wound to the body, with shorter steps, and at ease press a
+//! free hand to it. At ease the weapon is carried (the longsword on the shoulder, the arming
+//! sword point down, the carbine hanging by its grip, the bow low); a foe brings it up to guard
+//! (an archer drawing an arrow from the quiver and nocking it on the way), and it goes down
+//! again after the fight. Revived, they get up from where they lay: roll onto the side, come
+//! up onto a knee taking up the weapon, push up and settle onto guard.
+//!
 //! Animals are sculpted procedural red deer, grey wolves, rabbits and starlings (see
 //! `art::animals`; cheap primitives without the renderer), posed by `animal.rs` from their
 //! state and what their body did the step before (kept on `StandInState`): planted feet in
@@ -66,6 +78,7 @@ use crate::art::ArtAssets;
 use crate::combat::Downed;
 use crate::faction::Faction;
 use crate::locomotion::MoverState;
+use crate::perception::NpcMemory;
 use crate::skills::NpcSkills;
 use crate::wildlife::{Animal, AnimalMind, BirdFlight, Species};
 
@@ -258,6 +271,7 @@ type PoseItem<'a> = (
         Option<&'a AnimalMind>,
         Option<&'a BirdFlight>,
         Option<&'a NpcMotor>,
+        Option<&'a NpcMemory>,
     ),
 );
 
@@ -318,7 +332,7 @@ pub(crate) fn pose_stand_ins(
     {
         let now = clock.map(|c| c.now).unwrap_or(0.0);
         let phase = mover.map(|m| m.phase).unwrap_or(0.0);
-        let (animal, mind, bird, motor) = animal;
+        let (animal, mind, bird, motor, memory) = animal;
         let mut materials: Vec<(Part, StandardMaterial)> = Vec::new();
         let placed: Box<dyn Fn(Part) -> Placed> = match animal.map(|a| a.species) {
             None => {
@@ -329,6 +343,7 @@ pub(crate) fn pose_stand_ins(
                     blows: &seen.blows,
                     dash_secs: motor.map_or(0.22, |m| m.dash_secs),
                     foe: &foe,
+                    memory,
                 };
                 let pose = humanoid::humanoid(
                     now,

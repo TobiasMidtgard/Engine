@@ -34,7 +34,8 @@ box, line), how particles move (`speed`, `velocity`, `orbit_speed`, `gravity`, `
 `turbulence`, `vortex`, `attract`, `collide` with the ground or water: bounce, die or stick) and
 how they look (`sprite`: glow, spark, smoke, flame, droplet, ring, star, rune, shard, dust;
 `facing`: camera, velocity or horizontal; `color` and `size_over_life`; `emissive` in cd/m²;
-`lit` by sun, sky and point lights; `additive`; `soft`). An effect can also carry a point
+`lit` by sun, sky and point lights; `additive`; `soft`), or `debris` to draw solid 3D pieces
+instead of sprites ([`Debris`]: rock, splinter, shard or scrap). An effect can also carry a point
 `light` with flicker and fade, a `trail`, and `prewarm` so loops look settled from the first
 frame.
 
@@ -110,6 +111,10 @@ and `VfxReactions`. Components: `ParticleEffect`, `Trail`, `Beam`.
   with an atomic cursor (up to 65 536 events a frame). Lit particles get sun (with shadows and forward scattering for smoke),
   sky and point lights, refreshed every fourth frame. Sprites are procedural, drawn as one
   instanced quad per slot, far to near, softened against the scene depth.
+- **Debris** ([`debris`]): a `debris` layer draws each particle as a small flat-shaded mesh
+  (four variants of each kind) tumbling about an axis of its own, in the depth prepass, the
+  opaque pass and the two nearest shadow cascades, so chips are lit, shadowed and motion
+  blurred like the rest of the scene. They rest on the ground plane and fade by dissolving.
 - **Precision**: world-space particles are stored relative to the camera and shifted when it
   moves, so effects stay sharp anywhere in a solar system.
 - **Time**: everything runs on world time. `TimeDilation` slows spawning and motion together,
@@ -141,7 +146,7 @@ whole court, each by day, at dusk and at night.
 
 ## Next
 
-Sorting within an emitter, mesh particles, LOD, and a 1M-particle benchmark on a real GPU.
+Sorting within an emitter, LOD, and a 1M-particle benchmark on a real GPU.
 
 ## Checklist
 
