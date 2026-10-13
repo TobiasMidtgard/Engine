@@ -17,8 +17,9 @@ struct PlanetGpu {
     params: vec4<f32>,              // snow below °C, rock slope, vegetation (0/1), ocean surface (0/1)
     params2: vec4<f32>,             // sphere (0/1), crater density, largest crater radius, crater seed
     motion: vec4<f32>,              // how far the terrain moved in the world since last frame
-    params3: vec4<f32>,             // regolith scattering (0..1), rayed craters, unused, unused
+    params3: vec4<f32>,             // regolith scattering (0..1), rayed craters, young areas, unused
     rays: array<vec4<f32>, 8>,      // rayed craters: center (planet-local unit direction), radius on the ground (m)
+    young: array<vec4<f32>, 12>,    // young ground: middle (planet-local direction) × youth, angular radius
 };
 
 // Must match `MapsGpu` in render.rs.
@@ -345,6 +346,22 @@ fn far_noise(p: PlanetGpu, rel: vec3<f32>, pixel: f32) -> vec2<f32> {
     return mix(vec2<f32>(0.5), vec2<f32>(a, b) / max(norm, 1e-4), saturate(norm * 4.0));
 }
 
+// How young the ground in planet-local direction `up` is (0 old .. 1 fresh lava): matches
+// `Landforms::youth` in landforms.rs.
+fn youth_at(p: PlanetGpu, up: vec3<f32>) -> f32 {
+    var y = 0.0;
+    let count = min(u32(p.params3.z), 12u);
+    for (var i = 0u; i < count; i++) {
+        let a = p.young[i];
+        let youth = length(a.xyz);
+        let d = dot(up, a.xyz / youth);
+        if (d > cos(a.w)) {
+            y = max(y, youth * (1.0 - smoothstep(0.75, 1.0, acos(min(d, 1.0)) / a.w)));
+        }
+    }
+    return y;
+}
+
 // Must match `noise::cell_random32` in noise.rs.
 fn crater_hash(c: vec3<i32>, seed: u32, salt: u32) -> f32 {
     var h = (bitcast<u32>(c.x) * 0x8da6b343u) ^ (bitcast<u32>(c.y) * 0xd8163841u)
@@ -459,11 +476,12 @@ fn crater_detail(p: PlanetGpu, rel: vec3<f32>, pixel: f32, spacing: f32) -> Crat
     var out: Craters;
     out.slope = vec3<f32>(0.0);
     out.bright = 0.0;
-    let density = p.params2.y;
     var radius = p.params2.z;
     let rot = planet_rot(p);
     let local = transpose(rot) * (rel - p.center.xyz);
     let up = normalize(local);
+    // Young lava keeps a tenth of the craters (the shape decides at each crater's center).
+    let density = p.params2.y * (1.0 - 0.9 * youth_at(p, up));
     let pos = up * p.center.w;
     let seed = u32(p.params2.w);
     let smallest = max(pixel * 0.7, 40.0);
@@ -1490,15 +1508,24 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     s.normal = n;
     s.occlusion = occlusion;
     s.subsurface = subsurface;
-    var color = shade_surface(s, in.rel);
+    // The planet's own shadow past the terminator. An atmosphere's sun transmittance does
+    // this already; on airless worlds relief on the night side that faces the sun would catch
+    // it. Peaks standing far above the land around them (taken as 3 km over the datum) still
+    // see the sun a little below their horizon.
+    let to_sun = frame.sun_dir.xyz;
+    var planet_lit = 1.0;
+    if (planet.params2.x > 0.5) {
+        let dip = sqrt(2.0 * max(altitude - 3000.0, 0.0) / planet.center.w);
+        planet_lit = smoothstep(-dip - 0.015, -dip + 0.01, dot(up, to_sun));
+    }
+    var color = shade_surface_shadowed(s, in.rel, planet_lit);
     // Snow glints: the sun mirrored in a crystal facet (a glossy GGX lobe; facets stacked in
     // the crystal reflect far more than one ice surface's 2 %).
-    let to_sun = frame.sun_dir.xyz;
-    if (glint > 0.0 && dot(n, to_sun) > 0.0) {
+    if (glint > 0.0 && dot(n, to_sun) > 0.0 && planet_lit > 0.0) {
         let v = normalize(-in.rel);
         let d = d_ggx(saturate(dot(glint_n, normalize(to_sun + v))), 0.08);
         let flash = d * 0.15 * 0.25 / max(dot(n, v), 0.2) * glint;
-        color += pre_expose(frame.sun_color.rgb * sun_transmittance(in.rel) * shadow_factor(in.rel, n) * flash);
+        color += pre_expose(frame.sun_color.rgb * sun_transmittance(in.rel) * shadow_factor(in.rel, n) * planet_lit * flash);
     }
     if (maps.flags.z > 0.5) {
         let level = in.lod.y;
