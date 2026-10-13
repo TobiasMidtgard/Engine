@@ -1,9 +1,12 @@
 //! Renders the fighters headless to PNGs: the four styles side by side (front and back),
-//! helmet, back and katana close-ups, and a sequence of poses from the procedural animation.
+//! helmet, back, whole-body and katana close-ups, and a sequence of poses from the
+//! procedural animation.
 //!
 //! ```text
-//! cargo run -p engine_movement --release --example fighter_preview -- [out_dir]
+//! cargo run -p engine_movement --release --example fighter_preview -- [out_dir] [quick]
 //! ```
+//!
+//! `quick` stops after the lineup, helmets, backs and whole bodies (for iterating on armor).
 //!
 //! Each pose comes from the real animator ([`Animator`]) fed a short scripted timeline of
 //! movement and combat state, exactly as the demo feeds it from `Mover` and `CombatState`.
@@ -182,6 +185,8 @@ fn main() {
         .nth(1)
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("target/fighter_preview"));
+    // `quick`: only the lineup, helmets, backs and whole bodies (for iterating on armor).
+    let quick = std::env::args().nth(2).is_some_and(|a| a == "quick");
     std::fs::create_dir_all(&out).expect("output directory");
     for style in Style::ALL {
         println!(
@@ -473,6 +478,19 @@ fn main() {
     let seq_duelist = spawn_actor(&mut app.world, Style::Duelist, seq_at, 0.0);
     let run_at = stage(3 + shots.len() as u32);
     let seq_pilot = spawn_actor(&mut app.world, Style::Pilot, run_at, 0.0);
+    // Whole bodies, one stage per style, standing as in the lineup.
+    let mut bodies = Vec::new();
+    for (k, style) in Style::ALL.into_iter().enumerate() {
+        let at = stage(4 + shots.len() as u32 + k as u32);
+        let a = spawn_actor(&mut app.world, style, at, 0.0);
+        let fighter = style != Style::Pilot;
+        set_pose(
+            &mut app.world,
+            &a,
+            &simulate(style, 1.5, |_| AnimInput { fighter, ..idle }),
+        );
+        bodies.push((style, at));
+    }
 
     // Draw.
     let l = stage(0);
@@ -532,6 +550,30 @@ fn main() {
     }
     if !backs.is_empty() {
         sheet(&backs, 2, WIDTH / 2, HEIGHT / 2, &out.join("02_backs.png"));
+    }
+    // Each style alone, from the front left and from behind right.
+    let mut views = Vec::new();
+    for (style, at) in &bodies {
+        for (side, eye) in [
+            ("front", v(-1.25, 1.25, -2.35)),
+            ("back", v(-1.95, 1.35, 1.75)),
+        ] {
+            let p = out.join(format!("02_body_{}_{side}.png", style.key()));
+            if shoot(
+                &mut app,
+                camera,
+                (*at + eye, *at + v(0.0, 0.92, 0.0), 36.0),
+                &p,
+            ) {
+                views.push(p);
+            }
+        }
+    }
+    if !views.is_empty() {
+        sheet(&views, 2, WIDTH / 2, HEIGHT / 2, &out.join("02_bodies.png"));
+    }
+    if quick {
+        return;
     }
     let k = katana_at;
     shoot(

@@ -132,9 +132,12 @@ starburst fireworks over the court, fireballs and frost bolts scorching and fros
 lightning between two obelisks, a healing aura, a fountain, an anvil throwing sparks that
 split as they skid, a pond with stones splashing in, a golem stomping over mud, snow, sand and
 water, shot impacts on six materials (chipping the rock), and braziers burning charcoal around
-the rim, with fireflies in the shrubs beyond.
+the rim, with fireflies in the shrubs beyond. Its glowing stone (runes, crystals, coals)
+follows the camera's exposure as particle glow does ([`VfxSettings::glow_exposure`]), so it
+keeps its color at night instead of turning white.
 `cargo run -p engine_vfx --release --example sub_emitters` renders the firework and the
-splitting sparks; `--example braziers` renders the brazier fires by day, at dusk and at night.
+splitting sparks; `--example braziers` renders the brazier fires and `--example court` the
+whole court, each by day, at dusk and at night.
 
 ## Next
 

@@ -1,10 +1,10 @@
 //! Runs the animation paddock without a renderer and checks that each test case does what
 //! it shows: the hammer lands on the tire with both hands on the handle, muscles tense and
-//! relax, the walker climbs the course, the horse gallops with working flanks, the spider
-//! and the car move.
+//! relax, the walker climbs the course, the horse gallops with working flanks, the dog runs
+//! through all its gaits with a flexing spine, the spider and the car move.
 
 use engine_anim::demo::{DemoEntities, hammer_head, spawn_demo_world, tire_strike_point};
-use engine_anim::{AnimationPlugin, Animator, MuscleRig};
+use engine_anim::{AnimationPlugin, Animator, LeggedGait, MuscleRig};
 use engine_core::prelude::*;
 use engine_core::time::TimeSource;
 use engine_world::WorldPlugin;
@@ -48,6 +48,12 @@ struct Seen {
     walker_foot_float: f64,
     horse_max_speed: f32,
     haunch_at_gallop: f32,
+    dog_gaits: Vec<String>,
+    dog_spine: (f32, f32),
+    /// Highest planted paw while walking, m.
+    dog_paw_lift: f64,
+    /// Planted paw samples at a walk or trot, and those over 1 cm above the sole.
+    dog_planted: (usize, usize),
     spider_moved: f64,
     car_moved: f64,
 }
@@ -60,6 +66,7 @@ fn every_test_case_does_what_it_shows() {
     let start_car = app.world.get::<Transform>(d.car).unwrap().translation;
     let mut seen = Seen {
         closest_strike: f64::MAX,
+        dog_spine: (f32::MAX, f32::MIN),
         ..Default::default()
     };
     let frames = (14.0 / STEP) as usize;
@@ -102,6 +109,34 @@ fn every_test_case_does_what_it_shows() {
         if horse_speed > 9.0 {
             let haunch = activation(w, d.horse, "haunch_l").max(activation(w, d.horse, "haunch_r"));
             seen.haunch_at_gallop = seen.haunch_at_gallop.max(haunch);
+        }
+        let gait = w.get::<LeggedGait>(d.dog).unwrap();
+        let stage = gait.stage_name().to_string();
+        if !seen.dog_gaits.contains(&stage) {
+            seen.dog_gaits.push(stage.clone());
+        }
+        if stage == "gallop" {
+            // The spine: the loin's pitch against the chest.
+            let a = w.get::<Animator>(d.dog).unwrap();
+            let (body, loin) = (a.skeleton.bone("body"), a.skeleton.bone("loin"));
+            let rel = a.model[body].r.inverse() * a.model[loin].r;
+            let pitch = (rel * Vec3::NEG_Z).y.asin().to_degrees();
+            seen.dog_spine = (seen.dog_spine.0.min(pitch), seen.dog_spine.1.max(pitch));
+        }
+        // On the flat, planted paws stay on the ground (the sole is 3.5 cm).
+        if (stage == "walk" || stage == "trot") && t > 1.0 {
+            let paws = ["front_paw_l", "front_paw_r", "hind_paw_l", "hind_paw_r"];
+            for (i, paw) in paws.iter().enumerate() {
+                if !gait.planted(i) {
+                    continue;
+                }
+                let y = bone_world(w, d.dog, paw).y;
+                if stage == "walk" {
+                    seen.dog_paw_lift = seen.dog_paw_lift.max(y);
+                }
+                seen.dog_planted.0 += 1;
+                seen.dog_planted.1 += usize::from(y > 0.045);
+            }
         }
     }
     let w = &app.world;
@@ -167,6 +202,28 @@ fn every_test_case_does_what_it_shows() {
         seen.haunch_at_gallop > 0.4,
         "haunches at the gallop {}",
         seen.haunch_at_gallop
+    );
+    for g in ["walk", "trot", "gallop"] {
+        assert!(
+            seen.dog_gaits.iter().any(|s| s == g),
+            "the dog never went to a {g}: {:?}",
+            seen.dog_gaits
+        );
+    }
+    assert!(
+        seen.dog_spine.1 - seen.dog_spine.0 > 4.0,
+        "the dog's spine is stiff at the gallop: {:?}",
+        seen.dog_spine
+    );
+    assert!(
+        seen.dog_paw_lift < 0.065,
+        "the walking dog's planted paws float up to {:.3} m",
+        seen.dog_paw_lift
+    );
+    let (planted, floating) = seen.dog_planted;
+    assert!(
+        planted > 200 && floating * 10 < planted,
+        "{floating} of {planted} planted paws float at a walk or trot"
     );
     assert!(
         seen.spider_moved > 1.0,
