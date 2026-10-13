@@ -491,7 +491,7 @@ pub fn demo_views(z: &Zone) -> Vec<View> {
                     [8.0, 6.0, 26.5],
                     16.0,
                 )
-                .warmup(2.1)
+                .warmup(1.9)
                 .on_arrive("movement.duel", &duel("Blink"))
                 .on_arrive("movement.grappler", "{}")
                 .on_leave("movement.duel", cycle),
