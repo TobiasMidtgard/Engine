@@ -169,6 +169,11 @@ pub struct RenderSettings {
     pub debug_view: DebugView,
     /// Re-render the sky environment map every N frames (1 = every frame).
     pub environment_interval: u32,
+    /// The sky's own flat cloud layer (a 2D deck 1.5 km up whose cover follows
+    /// `WeatherState::cloud_cover`), in the sky and in the environment map that lights the
+    /// scene. Turn it off when a feature draws its own clouds over the sky (volumetric clouds):
+    /// the sky behind them is then clear.
+    pub sky_cloud_layer: bool,
     /// Top-down sky occlusion map around the camera (caves and interiors lose sky light; rain
     /// stays off covered ground).
     pub sky_occlusion: bool,
@@ -236,6 +241,7 @@ impl Default for RenderSettings {
             max_point_lights: 256,
             debug_view: DebugView::None,
             environment_interval: 1,
+            sky_cloud_layer: true,
             sky_occlusion: true,
             sky_occlusion_extent: 256.0,
             sky_occlusion_size: 512,

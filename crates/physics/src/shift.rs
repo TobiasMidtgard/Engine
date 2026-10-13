@@ -168,6 +168,12 @@ impl Simulation {
             if j.desc.body_b.is_none() {
                 j.desc.anchor_b = s.point(j.desc.anchor_b);
             }
+            // A rest pose seen from the world (or a static body) turns with it.
+            if j.desc.body_b.is_none_or(|b| !self.bodies.contains_key(&b))
+                && let Some(rest) = &mut j.rest
+            {
+                *rest = (r * *rest).normalize();
+            }
         }
     }
 }

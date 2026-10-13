@@ -537,6 +537,11 @@ impl Field<'_> {
 
     /// Surface nets: one vertex per grid cell the surface crosses, one quad per crossed edge.
     fn surface_nets(&self, cell: f32) -> (Vec<Vec3>, Vec<u32>) {
+        self.surface_nets_sampled(cell, true)
+    }
+
+    /// Surface nets; `skip_empty` samples only near the surface (same mesh, much faster).
+    fn surface_nets_sampled(&self, cell: f32, skip_empty: bool) -> (Vec<Vec3>, Vec<u32>) {
         let mut lo = Vec3::splat(f32::MAX);
         let mut hi = Vec3::splat(f32::MIN);
         for part in &self.body.parts {
@@ -554,11 +559,32 @@ impl Field<'_> {
         let at = |x: usize, y: usize, z: usize| (z * ny + y) * nx + x;
         let corner =
             |x: usize, y: usize, z: usize| lo + Vec3::new(x as f32, y as f32, z as f32) * cell;
-        let mut field = vec![0.0f32; nx * ny * nz];
-        for z in 0..nz {
-            for y in 0..ny {
-                for x in 0..nx {
-                    field[at(x, y, z)] = self.distance(corner(x, y, z));
+        // Sample the field block by block: a block whose center is farther from the surface
+        // than its corners are from the center holds no surface, so its points only need the
+        // right sign (the center's value); blocks near the surface are sampled exactly. The
+        // margin covers shapes whose distance is only approximate (ellipsoids, blends).
+        const BLOCK: usize = 4;
+        let half_diagonal = (BLOCK as f32 * cell) * 3f32.sqrt() * 0.5;
+        let mut field = vec![f32::NAN; nx * ny * nz];
+        for bz in (0..nz).step_by(BLOCK) {
+            for by in (0..ny).step_by(BLOCK) {
+                for bx in (0..nx).step_by(BLOCK) {
+                    let center = lo
+                        + (Vec3::new(bx as f32, by as f32, bz as f32) + BLOCK as f32 * 0.5) * cell;
+                    let dc = self.distance(center);
+                    let empty = skip_empty && dc.abs() > half_diagonal * 1.5 + cell;
+                    for z in bz..(bz + BLOCK + 1).min(nz) {
+                        for y in by..(by + BLOCK + 1).min(ny) {
+                            for x in bx..(bx + BLOCK + 1).min(nx) {
+                                let i = at(x, y, z);
+                                if !empty {
+                                    field[i] = self.distance(corner(x, y, z));
+                                } else if field[i].is_nan() {
+                                    field[i] = dc;
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -798,6 +824,36 @@ mod tests {
             Vec3::new(0.0, -0.01, 0.0),
         );
         (s, body)
+    }
+
+    #[test]
+    fn sampling_only_near_the_surface_makes_the_same_mesh() {
+        let (_, mut body) = arm();
+        body.part(
+            "lower",
+            Shape::ellipsoid(Vec3::new(0.03, -0.45, 0.02), Vec3::new(0.05, 0.03, 0.04)),
+            Paint::hard([0.1; 3]),
+            0.01,
+        )
+        .cut(
+            "upper",
+            Shape::capsule(
+                Vec3::new(0.0, -0.1, -0.08),
+                Vec3::new(0.0, -0.2, -0.08),
+                0.04,
+                0.04,
+            ),
+            Paint::hard([0.1; 3]),
+            0.01,
+        );
+        let f = body.field();
+        for cell in [0.006, 0.011] {
+            assert_eq!(
+                f.surface_nets_sampled(cell, true),
+                f.surface_nets_sampled(cell, false),
+                "cell {cell}"
+            );
+        }
     }
 
     #[test]

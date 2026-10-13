@@ -8,7 +8,7 @@
 //!   by foot IK), then runs back on the flat, leaning into the turns.
 //! * **Horse track**: a horse walks, trots, canters and gallops around an oval; its haunches
 //!   and shoulders flex with every stride, its tail streams behind.
-//! * **Spider garden**: a giant spider picks its way over rocks with eight procedural legs.
+//! * **Spider garden**: a giant furred tarantula climbs over boulders on eight procedural legs.
 //! * **Car loop**: a car drives over speed bumps (springy suspension) and rolls in the corners
 //!   while its front wheels steer and every wheel spins.
 //!
@@ -23,7 +23,9 @@ use std::f32::consts::PI;
 
 use engine_assets::{AssetServer, Assets};
 use engine_core::prelude::*;
-use engine_render::{GltfScene, MeshRenderer, Shape as MeshShape, StandardMaterial};
+use engine_render::{
+    GltfScene, MaterialPreset, Mesh, MeshRenderer, Shape as MeshShape, StandardMaterial,
+};
 use engine_world::Ground;
 use engine_world::animation::AnimationParams;
 use engine_world::physics::PhysicsQueries;
@@ -31,7 +33,7 @@ use serde_json::{Value, json};
 
 use crate::animator::{AnimationLibrary, Animator, AnimatorSettings};
 use crate::attach::{BoneAttachment, Hang};
-use crate::build::{car, dog, horse, humanoid, spider};
+use crate::build::{car, dog, horse, humanoid, rock, spider};
 use crate::character::HumanModel;
 use crate::horse_model::HorseModel;
 use crate::ik::{GroundProbe, IkShape, IkSurface, IkSurfaces, LookAt, Reach, ReachIk};
@@ -242,7 +244,11 @@ pub(crate) fn register(app: &mut App) {
             lib.add_clip(clip);
         }
         lib.add_graph(dog::graph());
-        lib.add_skeleton(spider::skeleton());
+        let sp = lib.add_skeleton(spider::skeleton());
+        for clip in spider::clips(&sp) {
+            lib.add_clip(clip);
+        }
+        lib.add_graph(spider::graph());
         lib.add_skeleton(car::skeleton());
         let concept = lib.add_skeleton(car::concept_skeleton());
         lib.add_clip(car::concept_door_clip(&concept));
@@ -654,29 +660,17 @@ pub fn spawn_spider(world: &mut World, transform: Transform) -> Entity {
     spider
 }
 
-/// Give an entity that already has its place the spider: eight procedural legs.
+/// Give an entity that already has its place the spider: a furred tarantula on eight
+/// procedural legs.
 pub fn give_spider_body(world: &mut World, spider: Entity) {
     let handle = mesh_handle(world, "anim/spider", spider::mesh);
-    let skeleton = world
-        .resource::<AnimationLibrary>()
-        .skeletons
-        .get(spider::SKELETON)
-        .cloned()
-        .expect("spider skeleton");
+    let anim = animator(world, spider::SKELETON, spider::GRAPH);
     world.entity_mut(spider).insert((
-        AnimatorSettings::new(spider::SKELETON, ""),
-        Animator::procedural(skeleton),
-        SkinnedMeshRenderer::new(
-            handle,
-            SkinMaterial {
-                skin_roughness: 0.75,
-                subsurface: 0.05,
-                sheen: 0.9,
-                veins: 0.0,
-                ..Default::default()
-            },
-        ),
+        AnimatorSettings::new(spider::SKELETON, spider::GRAPH),
+        anim,
+        SkinnedMeshRenderer::new(handle, spider::material()),
         spider::gait(),
+        SpringChains::new(spider::springs()),
     ));
 }
 
@@ -892,9 +886,9 @@ pub const VIEWS: &[DemoView] = &[
     },
     DemoView {
         key: "paddock_spider",
-        name: "Eight procedural legs over rocks",
-        eye: [10.87, 1.82, 10.48],
-        target: [7.24, 0.79, 10.16],
+        name: "A furred tarantula climbing boulders",
+        eye: [9.99, 1.2, 10.66],
+        target: [7.24, 0.35, 10.16],
         hour: 15.0,
         at: 6.02,
     },
@@ -935,11 +929,21 @@ pub const VIEWS: &[DemoView] = &[
 fn build_paddock(world: &mut World, origin: DVec3) -> DemoEntities {
     let at = |x: f64, y: f64, z: f64| origin + DVec3::new(x, y, z);
     let facing = |yaw_deg: f32| Quat::from_rotation_y(yaw_deg.to_radians());
-    let wood = StandardMaterial::hex(0x8a6a48).with_roughness(0.8);
-    let dark_wood = StandardMaterial::hex(0x5b4330).with_roughness(0.85);
-    let stone = StandardMaterial::hex(0x8d8a84).with_roughness(0.9);
+    // The renderer's generated materials, mapped in world space so neighboring pieces line
+    // up: oiled planks for the stage, deck and ramp, darker planks for the fence posts, cast
+    // concrete steps, rock for the spider garden and raked sand underfoot.
+    let wood = StandardMaterial::preset(MaterialPreset::WoodPlanks).with_triplanar_world();
+    let dark_wood = StandardMaterial::preset(MaterialPreset::WoodPlanks)
+        .with_tint(0.55, 0.47, 0.4)
+        .with_triplanar_world();
+    let stone = StandardMaterial::preset(MaterialPreset::Concrete).with_triplanar_world();
+    let rock = StandardMaterial::preset(MaterialPreset::Rock)
+        .with_tint(0.95, 0.9, 0.84)
+        .with_triplanar_world();
     let paint_white = StandardMaterial::hex(0xe8e4dc).with_roughness(0.6);
-    let sand = StandardMaterial::hex(0xb59a72).with_roughness(0.97);
+    let sand = StandardMaterial::preset(MaterialPreset::Sand)
+        .with_tint(0.92, 0.8, 0.66)
+        .with_triplanar_world();
 
     let props = |world: &mut World, t: Transform, shape: MeshShape, material: StandardMaterial| {
         world.spawn((
@@ -1220,29 +1224,31 @@ fn build_paddock(world: &mut World, origin: DVec3) -> DemoEntities {
         ..DemoPath::new(origin, horse_path)
     });
 
-    // --- Spider garden: rocks to climb over.
-    for (x, z, hy, yaw) in [
+    // --- Spider garden: flat-topped boulders to climb over.
+    for (k, (x, z, hy, yaw)) in [
         (9.0, 13.0, 0.18, 10.0),
         (11.6, 11.2, 0.28, -25.0),
         (13.5, 14.0, 0.14, 40.0),
         (7.2, 10.8, 0.22, 70.0),
         (14.2, 10.6, 0.33, 15.0),
-    ] {
+    ]
+    .into_iter()
+    .enumerate()
+    {
         let t = Transform::from_translation(at(x, hy as f64, z)).with_rotation(facing(yaw));
+        let half = Vec3::new(0.7, hy, 0.55);
+        let mesh = world
+            .get_resource_or_init::<Assets<Mesh>>()
+            .get_or_insert_keyed(&format!("anim/rock_{k}"), || rock::mesh(half, k as u32));
         world.spawn((
             t,
             GlobalTransform::from(t),
             IkSurface {
                 shape: IkShape::Box,
-                half_extents: [0.7, hy, 0.55],
+                half_extents: half.to_array(),
                 surface: 2,
             },
-            MeshRenderer::new(
-                MeshShape::Cuboid {
-                    size: [1.4, hy * 2.0, 1.1],
-                },
-                stone,
-            ),
+            MeshRenderer::new(mesh, rock),
         ));
     }
     let spider_e = spawn_spider(world, Transform::from_translation(at(8.0, 0.0, 12.0)));
