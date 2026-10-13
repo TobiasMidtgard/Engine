@@ -334,19 +334,19 @@ pub fn body(scale: f32) -> Body {
         // Brows over the eyes, then dark-rimmed eyes at the stop, looking forward.
         .part(
             "head",
-            Shape::ellipsoid(r(0.034 * x, 0.729, -0.497), r(0.024, 0.012, 0.02)),
+            Shape::ellipsoid(r(0.034 * x, 0.735, -0.495), r(0.024, 0.0095, 0.019)),
             face,
             0.008 * s,
         )
         .part(
             "head",
-            Shape::ellipsoid(r(0.04 * x, 0.714, -0.506), Vec3::splat(0.0125 * s)),
+            Shape::ellipsoid(r(0.04 * x, 0.714, -0.506), Vec3::splat(0.0138 * s)),
             lip,
             0.002 * s,
         )
         .part(
             "head",
-            Shape::ellipsoid(r(0.042 * x, 0.714, -0.509), Vec3::splat(0.0105 * s)),
+            Shape::ellipsoid(r(0.042 * x, 0.714, -0.509), Vec3::splat(0.012 * s)),
             eye,
             0.001 * s,
         )
