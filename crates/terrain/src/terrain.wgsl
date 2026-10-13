@@ -918,6 +918,14 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     for (var i = 0u; i < MAT_COUNT; i++) {
         if (w[i] > 0.003) {
             ms[i] = sample_ground(i, tp, n_geo, dp1, dp2, tex_pixel);
+            // Natural woods from a distance are canopy, not leaf litter: no litter texture
+            // there (painted leaves are a level's forest floor and keep theirs).
+            if (i == M_FOREST) {
+                let c = canopy * (1.0 - saturate(pw[10] / max(w[M_FOREST], 1e-4)));
+                ms[i].detail = mix(ms[i].detail, vec3<f32>(1.0), c);
+                ms[i].normal = normalize(mix(ms[i].normal, n_geo, c));
+                ms[i].height = mix(ms[i].height, 0.5, c);
+            }
             // Barren worlds' bare ground is powdery regolith, not the cracked earth of the
             // soil texture: most of its relief and pattern is smoothed away (small craters
             // stand in for it).
