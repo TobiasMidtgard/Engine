@@ -3,7 +3,7 @@
 
 use engine_core::prelude::*;
 
-/// How a character moves: speeds, jumps, slides, wall-runs, mantles and dashes.
+/// How a character moves: speeds, jumps, slides, wall-runs, mantles, ledge hangs and dashes.
 ///
 /// All speeds are in meters per second of the character's **own** time (see
 /// [`Tempo`](crate::tempo::Tempo)): a character with `Tempo::speed = 2` does everything twice
@@ -100,6 +100,13 @@ pub struct MovementProfile {
     pub mantle_max_height: f32,
     /// Climbing speed, m/s.
     pub mantle_speed: f32,
+    /// Catch ledges too high to climb straight onto and hang from them: shimmy along, climb
+    /// up (jump, or hold toward the wall), kick off (jump away) or let go (crouch).
+    pub ledge_grab: bool,
+    /// Highest ledge above the feet the hands catch, m (from `mantle_max_height` up).
+    pub ledge_grab_max_height: f32,
+    /// Sideways speed while hanging, m/s.
+    pub shimmy_speed: f32,
 
     // ------------------------------------------------------------ dash
     /// Longest dash, m.
@@ -174,6 +181,9 @@ impl MovementProfile {
             mantle_min_height: 0.4,
             mantle_max_height: 2.1,
             mantle_speed: 6.5,
+            ledge_grab: true,
+            ledge_grab_max_height: 2.7,
+            shimmy_speed: 1.8,
             dash_distance: 6.0,
             dash_secs: 0.18,
             dash_charges: 2,
@@ -195,6 +205,8 @@ impl MovementProfile {
             air_jumps: 0,
             wallrun: false,
             mantle_max_height: 1.6,
+            ledge_grab_max_height: 2.2,
+            shimmy_speed: 1.2,
             dash_distance: 3.5,
             dash_charges: 1,
             dash_recharge_secs: 2.0,

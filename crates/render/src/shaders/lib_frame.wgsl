@@ -30,7 +30,10 @@
 // Screen-space reflections: reflected radiance (cd/m^2, not pre-exposed), coverage (see
 // `screen_reflection`). A stand-in while it is being drawn.
 @group(0) @binding(18) var ssr_map: texture_2d<f32>;
-// Binding 19 is reserved for the volumetric fog volume.
+// Volumetric fog (volumetrics.rs): light scattered toward the camera (pre-exposed) and
+// transmittance from the camera to the far edge of each depth slice of the froxel grid (see
+// `volumetric_fog_at`). A clear stand-in while it is being computed and when it is off.
+@group(0) @binding(19) var volumetric_fog: texture_3d<f32>;
 // Screen-space global illumination: light bounced onto each pixel from nearby surfaces
 // (cd/m^2, not pre-exposed; see `screen_gi`). A stand-in while it is being drawn.
 @group(0) @binding(20) var gi_map: texture_2d<f32>;
@@ -567,40 +570,189 @@ fn shade_surface_shadowed(s: Surface, rel: vec3<f32>, sun_visibility: f32) -> ve
 }
 
 // ---------------------------------------------------------------- fog / aerial perspective
-// Height used by fog: altitude above the planet surface, or world y without a planet.
+// Height used by fog: altitude above the planet surface, or world y without a planet. Exact to
+// millimeters near the camera (no r - R cancellation at planetary scale).
 fn fog_height(rel: vec3<f32>) -> f32 {
-    if (frame.planet.w > 0.0) { return planet_height(rel); }
+    if (frame.planet.w > 0.0) {
+        let r0 = frame.planet.w + frame.camera_world.w;
+        let q = 2.0 * r0 * dot(rel, normalize(-frame.planet.xyz)) + dot(rel, rel); // r^2 - r0^2
+        return frame.camera_world.w + q / (sqrt(max(r0 * r0 + q, 0.0)) + r0);
+    }
     return frame.camera_world.y + rel.y;
 }
 
-// Applies height fog and atmospheric haze to pre-exposed color seen at camera-relative `rel`.
+// Extinction of the height fog (1/m) at camera-relative `rel` (`FogSettings`: density at the
+// base height, falling off exponentially above it).
+fn height_fog_density(rel: vec3<f32>) -> f32 {
+    let h = fog_height(rel) - frame.fog.z;
+    return frame.fog.x * exp(-max(frame.fog.y, 1e-5) * max(h, -100.0));
+}
+
+// Optical depth of the height fog along `dir` from `t0` to `t1` meters from the camera: the
+// analytic integral of density * exp(-falloff * height) with height linear along the ray.
+// Stable for any distance and altitude (orbit, the Moon): both exponents are clamped.
+fn height_fog_optical_depth(dir: vec3<f32>, t0: f32, t1: f32) -> f32 {
+    let falloff = max(frame.fog.y, 1e-5);
+    let ha = fog_height(dir * t0) - frame.fog.z;
+    let hb = fog_height(dir * t1) - frame.fog.z;
+    let ea = exp(-falloff * max(ha, -100.0));
+    let eb = exp(-falloff * max(hb, -100.0));
+    let dh = hb - ha;
+    let len = t1 - t0;
+    if (abs(dh) > 0.01) {
+        return frame.fog.x * len * (ea - eb) / (falloff * dh);
+    }
+    return frame.fog.x * len * ea;
+}
+
+// Sky light reaching fog from every direction (cd/m^2, without the ambient fill): the sky's and
+// the ground's radiance averaged over the whole sphere, which fog scatters about evenly.
+fn fog_sky_light() -> vec3<f32> {
+    let up = textureSampleLevel(env_irradiance, env_sampler, vec2<f32>(0.5, 0.0), 0.0).rgb;
+    let down = textureSampleLevel(env_irradiance, env_sampler, vec2<f32>(0.5, 1.0), 0.0).rgb;
+    return 0.5 * (up + down);
+}
+
+// Radiance (cd/m^2, not pre-exposed) of height fog thick enough to hide everything behind it,
+// seen along `dir` with the fog at `at`: sunlight through the air with the fog's phase function
+// and sky light, both scaled by `lit` (the open sky the fog sees), plus the ambient fill. No
+// shadows: this is the fog beyond the volumetric range (or all of it with volumetrics off).
+fn height_fog_radiance(dir: vec3<f32>, at: vec3<f32>, lit: f32) -> vec3<f32> {
+    let sun = frame.sun_color.rgb * sun_transmittance(at) * henyey_greenstein(dot(dir, frame.sun_dir.xyz), frame.fog_color.w);
+    return frame.fog_color.rgb * ((sun + fog_sky_light()) * lit + frame.ambient.rgb);
+}
+
+// Volumetric fog between the camera and view depth `depth` (meters, up to the range) in the
+// direction of camera-relative `rel`: light scattered toward the camera (pre-exposed) and
+// transmittance. Depth slices are spaced exponentially (fine near the camera); texel z of the
+// volume holds the integral to the far edge of slice z.
+//
+// The four froxel columns around the pixel are read and blended by hand:
+// - Between the two edges of the slice the depth falls in, a column's fog is taken as uniform:
+//   transmittance falls exponentially and the light builds up as it does in `cs_integrate`.
+//   (Blending the edges linearly shows each slice as a band where fog is thick, such as a valley
+//   of ground fog seen from above.)
+// - The froxels hold the fog along their columns' center rays. Where the height fog changes fast
+//   from one column to the next (a thin layer of ground fog seen at a glance, where the rows' rays
+//   meet the layer meters apart), blending them misjudges how much fog this pixel's ray crosses,
+//   in bands one row of froxels apart. So the height fog's share of the transmittance is set
+//   right analytically: what the blended columns' rays cross is swapped for what this ray
+//   crosses.
+// - What is blended for the light is the fog's radiance (light per opacity), which changes
+//   smoothly from column to column (the sun's glow), not the light itself, which is mostly the
+//   foggiest column's.
+fn volumetric_fog_at(rel: vec3<f32>, depth: f32) -> vec4<f32> {
+    let v = frame.volumetrics;
+    let clip = frame.unjittered_view_proj * vec4<f32>(rel, 1.0);
+    let uv = clip.xy / max(clip.w, 1e-6) * vec2<f32>(0.5, -0.5) + 0.5;
+    let d = clamp(depth, 0.0, v.x);
+    let s = min(v.w * log2(1.0 + d * v.y) * v.z, v.w - 1e-3); // slice coordinate, 0..slices
+    let k = floor(s);
+    // How far into the slice `depth` is, in meters (the slices' depth mapping inverted).
+    let d0 = (exp2(k / (v.w * v.z)) - 1.0) / v.y;
+    let d1 = (exp2((k + 1.0) / (v.w * v.z)) - 1.0) / v.y;
+    let f = saturate((d - d0) / max(d1 - d0, 1e-6));
+
+    let grid = vec2<f32>(textureDimensions(volumetric_fog).xy);
+    let g = uv * grid - 0.5;
+    let i0 = floor(g);
+    let w = g - i0;
+    var t_froxels = 0.0; // the columns' transmittance, blended
+    var t_columns = 0.0; // the height fog's share of it, analytically
+    var light = vec3<f32>(0.0);
+    var radiance = vec3<f32>(0.0);
+    var radiance_weight = 0.0;
+    for (var j = 0u; j < 4u; j++) {
+        let o = vec2<f32>(f32(j & 1u), f32(j >> 1u));
+        let cell = clamp(i0 + o, vec2<f32>(0.0), grid - 1.0);
+        let weight = mix(1.0 - w.x, w.x, o.x) * mix(1.0 - w.y, w.y, o.y);
+        let fog = froxel_column_fog(vec2<i32>(cell), i32(k), f);
+        let height_fog = froxel_column_height_fog_t((cell + 0.5) / grid, d0, d1, f);
+        t_froxels += weight * fog.a;
+        t_columns += weight * height_fog;
+        light += weight * fog.rgb;
+        // Columns with next to no fog have no radiance to speak of (and an imprecise one).
+        let opacity = 1.0 - fog.a;
+        let r = weight * saturate(opacity * 50.0);
+        radiance += r * fog.rgb / max(opacity, 1e-4);
+        radiance_weight += r;
+    }
+    let dist = length(rel);
+    let t_ray = exp(-height_fog_optical_depth(rel / max(dist, 1e-6), 0.0, dist * d / max(view_depth(rel), 1e-6)));
+    let t = clamp(t_froxels * t_ray / max(t_columns, 1e-6), 0.0, 1.0);
+    if (radiance_weight > 1e-3) {
+        light = radiance / radiance_weight * (1.0 - t);
+    }
+    return vec4<f32>(light, t);
+}
+
+// Column `cell` of the volumetric fog up to fraction `f` of slice `k`: in-scattered light and
+// transmittance, the fog taken as uniform within the slice.
+fn froxel_column_fog(cell: vec2<i32>, k: i32, f: f32) -> vec4<f32> {
+    // The integral to the near edge of the slice (clear air at the camera for k = 0) and to its
+    // far edge.
+    var near = vec4<f32>(0.0, 0.0, 0.0, 1.0);
+    if (k >= 1) { near = textureLoad(volumetric_fog, vec3<i32>(cell, k - 1), 0); }
+    let far = textureLoad(volumetric_fog, vec3<i32>(cell, k), 0);
+    // Transmittance across the whole slice, then up to the depth.
+    let slice_t = clamp(far.a / max(near.a, 1e-6), 1e-6, 1.0);
+    let t = pow(slice_t, f);
+    var share = f; // of the slice's in-scattered light
+    if (slice_t < 0.999) { share = (1.0 - t) / (1.0 - slice_t); }
+    return vec4<f32>(near.rgb + (far.rgb - near.rgb) * share, near.a * t);
+}
+
+// The height fog's transmittance along the center ray of the froxel column at screen `uv`, to
+// fraction `f` of the slice from view depth `d0` to `d1`, taken as `froxel_column_fog` takes it.
+fn froxel_column_height_fog_t(uv: vec2<f32>, d0: f32, d1: f32, f: f32) -> f32 {
+    // The column's ray, per meter of view depth.
+    let view = vec3<f32>((uv.x * 2.0 - 1.0) / frame.proj[0][0], (1.0 - uv.y * 2.0) / frame.proj[1][1], -1.0);
+    let ray = (frame.inv_view * vec4<f32>(view, 0.0)).xyz;
+    let len = length(ray);
+    let dir = ray / len;
+    let near = exp(-height_fog_optical_depth(dir, 0.0, d0 * len));
+    let slice = exp(-height_fog_optical_depth(dir, d0 * len, d1 * len));
+    return near * pow(clamp(slice, 1e-6, 1.0), f);
+}
+
+// Keeps fog (in-scattered light, transmittance) from hiding more than
+// `FogSettings::max_opacity` of what is behind it.
+fn limit_fog_opacity(fog: vec4<f32>) -> vec4<f32> {
+    let min_t = 1.0 - frame.fog.w;
+    if (fog.a >= min_t) { return fog; }
+    return vec4<f32>(fog.rgb * (frame.fog.w / max(1.0 - fog.a, 1e-4)), min_t);
+}
+
+// Applies fog and atmospheric haze to pre-exposed color seen at camera-relative `rel`.
+//
+// Within `RenderSettings::volumetric_fog_range` the fog comes from the volumetric fog (height
+// fog and fog volumes, with light shafts, sky occlusion and lamps); beyond it the height fog
+// continues analytically from the end of the range, so nothing is counted twice. With
+// volumetric fog off the analytic height fog starts at the camera.
 fn apply_fog(color: vec3<f32>, rel: vec3<f32>) -> vec3<f32> {
     let dist = length(rel);
     let dir = rel / max(dist, 1e-4);
-    // Height fog: analytic integral of density * exp(-falloff * height) along the ray. Heights
-    // are altitudes above the planet surface (world y when there is no planet). Stable for
-    // any distance and altitude (orbit, the Moon): both exponents are clamped.
-    let density = frame.fog.x;
-    let falloff = max(frame.fog.y, 1e-5);
-    let h0 = fog_height(vec3(0.0)) - frame.fog.z;
-    let h1 = fog_height(rel) - frame.fog.z;
-    let e0 = exp(-falloff * max(h0, -100.0));
-    let e1 = exp(-falloff * max(h1, -100.0));
-    let dh = h1 - h0;
-    var amount = density * dist * e0;
-    if (abs(dh) > 0.01) {
-        amount = density * dist * (e0 - e1) / (falloff * dh);
+    // In-scattered light (pre-exposed) and transmittance between the camera and the point.
+    var fog = vec4<f32>(0.0, 0.0, 0.0, 1.0);
+    var start = 0.0;
+    if (frame.volumetrics.x > 0.0) {
+        let depth = view_depth(rel);
+        let range = frame.volumetrics.x;
+        fog = volumetric_fog_at(rel, min(depth, range));
+        start = select(dist, dist * range / depth, depth > range);
     }
-    let fog_t = min(1.0 - exp(-amount), frame.fog.w);
-    let sun_amt = pow(saturate(dot(dir, frame.sun_dir.xyz)), 8.0) * frame.fog_color.w;
-    // Fog is lit by the sky near the horizon and by forward-scattered sun; fog_color is its albedo.
-    // Haze inside caves and rooms gets neither (it still hides what's behind it).
-    let horizon = sample_env(normalize(vec3<f32>(dir.x, 0.05, dir.z) + vec3(0.0001)));
-    var lit = 1.0;
-    if (fog_t > 1e-4) { lit = fog_sky_visibility(rel); }
-    let outside = (horizon + frame.sun_camera.rgb * sun_amt * INV_PI * 0.05) * lit;
-    let fog_col = frame.fog_color.rgb * (outside + frame.ambient.rgb);
-    var c = mix(color, pre_expose(fog_col), fog_t);
+    if (start < dist) {
+        let tr = exp(-height_fog_optical_depth(dir, start, dist));
+        if (tr < 0.9999) {
+            // Haze inside caves and rooms is lit by neither the sky nor the sun (it still hides
+            // what's behind it).
+            let lit = fog_sky_visibility(rel);
+            let l = pre_expose(height_fog_radiance(dir, dir * start, lit)) * (1.0 - tr);
+            fog = vec4<f32>(fog.rgb + l * fog.a, fog.a * tr);
+        }
+    }
+    fog = limit_fog_opacity(fog);
+    var c = color * fog.a + fog.rgb;
     // Aerial perspective: the atmosphere between the camera and distant geometry (negligible
     // closer than a couple hundred meters).
     if (dist > 200.0) {
@@ -608,4 +760,12 @@ fn apply_fog(color: vec3<f32>, rel: vec3<f32>) -> vec3<f32> {
         c = c * a.transmittance + pre_expose(a.radiance * frame.sun_color.rgb);
     }
     return c;
+}
+
+// Volumetric fog in front of the sky (up to the volumetric range) for pre-exposed sky color
+// seen along `dir`. The sky pass calls this; geometry uses `apply_fog`.
+fn apply_sky_fog(color: vec3<f32>, dir: vec3<f32>) -> vec3<f32> {
+    if (frame.volumetrics.x <= 0.0) { return color; }
+    let fog = limit_fog_opacity(volumetric_fog_at(dir, frame.volumetrics.x));
+    return color * fog.a + fog.rgb;
 }

@@ -2,8 +2,9 @@
 //!
 //! ```text
 //! prepare (features read the world) → compute → environment map (+ filters) → shadow cascades
-//! → prepass → AO, reflections, bounce light → scene pass [opaque → sky] → (scene copies) → transparent pass
-//! → TAA → bloom → tonemap to LDR → overlays (UI) → screenshot readback → blit to window
+//! → prepass → volumetric fog → AO, reflections, bounce light → scene pass [opaque → sky]
+//! → (scene copies) → transparent pass → TAA → bloom → tonemap to LDR → overlays (UI)
+//! → screenshot readback → blit to window
 //! ```
 
 use std::path::{Path, PathBuf};
@@ -165,6 +166,7 @@ pub struct Renderer {
     atmosphere: AtmosphereLuts,
     exposure: ExposureState,
     meter: crate::exposure::ExposureMeter,
+    volumetrics: crate::volumetrics::Volumetrics,
     previous: Option<PreviousView>,
     /// How far the camera moved the frame before (camera cut detection).
     prev_step: f64,
@@ -177,27 +179,30 @@ pub struct Renderer {
     last_view: Option<ViewData>,
 }
 
-/// Views of the screen-space maps bound in the frame group (bindings 10–12, 18 and 20).
+/// Views of the maps computed each frame that the frame group binds (bindings 10–12 and
+/// 18–20): the screen-space maps and the volumetric fog.
 struct ScreenMaps {
     ao: wgpu::TextureView,
     normal: wgpu::TextureView,
     depth: wgpu::TextureView,
     ssr: wgpu::TextureView,
+    fog: wgpu::TextureView,
     gi: wgpu::TextureView,
 }
 
 impl ScreenMaps {
-    fn of(targets: &Targets) -> Self {
+    fn of(targets: &Targets, volumetrics: &crate::volumetrics::Volumetrics) -> Self {
         Self {
             ao: targets.ao.view.clone(),
             normal: targets.prepass_normal.view.clone(),
             depth: targets.prepass_depth.view.clone(),
             ssr: targets.ssr.view.clone(),
+            fog: volumetrics.view().clone(),
             gi: targets.gi.view.clone(),
         }
     }
 
-    fn stand_ins(shared: &GpuShared) -> Self {
+    fn stand_ins(shared: &GpuShared, volumetrics: &crate::volumetrics::Volumetrics) -> Self {
         let device = &shared.device;
         let tex = |label: &str, format: wgpu::TextureFormat| {
             Tex::new(
@@ -235,6 +240,7 @@ impl ScreenMaps {
             normal: normal.view,
             depth: depth.view,
             ssr: ssr.view,
+            fog: volumetrics.stand_in().clone(),
             gi: gi.view,
         }
     }
@@ -417,6 +423,16 @@ impl Renderer {
                 ),
                 // Screen-space reflections (a screen-space map like 10-12).
                 layout_entry(18, all, float_texture),
+                // Volumetric fog: in-scattered light and transmittance per froxel slice.
+                layout_entry(
+                    19,
+                    all,
+                    wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D3,
+                        multisampled: false,
+                    },
+                ),
                 layout_entry(20, all, float_texture),
             ],
         });
@@ -473,7 +489,8 @@ impl Renderer {
         let environment = EnvironmentMaps::new(&shared);
         let mut sky_camera = crate::sky_occlusion::SkyCamera::new(&shared);
         sky_camera.set_inputs(&shared, &frame_buffer, &shadow.occlusion);
-        let screen_stand_ins = ScreenMaps::stand_ins(&shared);
+        let volumetrics = crate::volumetrics::Volumetrics::new(&shared, &targets);
+        let screen_stand_ins = ScreenMaps::stand_ins(&shared, &volumetrics);
         let atmosphere = AtmosphereLuts::new(&shared, &frame_buffer);
         let groups = FrameGroups::new(
             &shared,
@@ -483,7 +500,7 @@ impl Renderer {
             &environment,
             &sky_camera,
             &atmosphere,
-            &ScreenMaps::of(&targets),
+            &ScreenMaps::of(&targets, &volumetrics),
             &screen_stand_ins,
         );
         let post = create_post(&shared, &targets, surface.as_ref().map(|s| s.view_format));
@@ -514,6 +531,7 @@ impl Renderer {
             effects,
             exposure: ExposureState::default(),
             meter,
+            volumetrics,
             previous: None,
             prev_step: 0.0,
             prev_aa: settings.anti_aliasing,
@@ -563,6 +581,7 @@ impl Renderer {
             self.surface.as_ref().map(|s| s.view_format),
         );
         self.effects.resize(&self.shared, &self.targets);
+        self.volumetrics.resize(&self.shared, &self.targets);
         self.rebuild_frame_groups();
         self.previous = None;
         self.meter
@@ -581,7 +600,7 @@ impl Renderer {
             &self.environment,
             &self.sky_camera,
             &self.atmosphere,
-            &ScreenMaps::of(&self.targets),
+            &ScreenMaps::of(&self.targets, &self.volumetrics),
             &self.screen_stand_ins,
         );
         self.frame_group = groups.scene;
@@ -691,7 +710,11 @@ impl Renderer {
             self.sky_camera
                 .set_inputs(&self.shared, &self.frame_buffer, &self.shadow.occlusion);
         }
-        if self.lights.write(&self.shared.device, queue, light_bytes) || occlusion_resized {
+        let lights_moved = self.lights.write(&self.shared.device, queue, light_bytes);
+        let fog_moved =
+            self.volumetrics
+                .prepare(world, &self.shared, &view, &settings, uniform.volumetrics);
+        if lights_moved || occlusion_resized || fog_moved {
             self.rebuild_frame_groups();
         }
         let queue = &self.shared.queue;
@@ -868,6 +891,10 @@ impl Renderer {
                 depth_or_array_layers: 1,
             },
         );
+        // Volumetric fog: needs the shadow cascades, the sky occlusion map, the sky light and
+        // the prepass depth; shading reads it from frame binding 19 (a stand-in in the prepass
+        // group).
+        self.volumetrics.encode(&mut encoder, &self.prepass_group);
         if settings.ambient_occlusion {
             self.effects
                 .encode_ao(&mut encoder, &self.targets, &self.prepass_group);
@@ -1484,6 +1511,10 @@ fn create_frame_group(
             wgpu::BindGroupEntry {
                 binding: 18,
                 resource: view(&maps.ssr),
+            },
+            wgpu::BindGroupEntry {
+                binding: 19,
+                resource: view(&maps.fog),
             },
             wgpu::BindGroupEntry {
                 binding: 20,
