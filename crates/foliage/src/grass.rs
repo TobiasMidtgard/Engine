@@ -8,8 +8,9 @@
 //! so grass is thick in the clear-cut and the burn scar, thin under the canopy and absent
 //! where nothing lets it grow: keep-clear circles (the trail, the pond), logs, rocks, water.
 //! Dryness follows the soil's water and the grass's own health, so a drought or a fire
-//! browns it. The maps are rebuilt every few seconds; heights come from `Ground` once and
-//! again after `TerrainChanged`. Grass plants under a field draw nothing themselves.
+//! browns it, and the season ([`crate::season::grass_dryness`]) turns it to straw in winter.
+//! The maps are rebuilt every few seconds; heights come from `Ground` once and again after
+//! `TerrainChanged`. Grass plants under a field draw nothing themselves.
 
 use engine_core::math::{noise::fbm2, smoothstep};
 use engine_core::prelude::*;
@@ -20,6 +21,7 @@ use crate::ecology::{InRegion, RegionState};
 use crate::felling::{LOG_BARE_YEARS, LogPlaced};
 use crate::plant::{EcologyRegion, EcologySettings, FelledLog, Plant};
 use crate::scenery::Rock;
+use crate::season::{FoliageSeason, grass_dryness};
 use crate::species::{PlantForm, PlantLibrary};
 
 /// Spacing of the field's map grid, meters.
@@ -185,6 +187,7 @@ pub fn sync_region_grass(
     mut timer: Local<f32>,
     time: Res<Time>,
     settings: Res<EcologySettings>,
+    season: Res<FoliageSeason>,
     library: Res<PlantLibrary>,
     ground: Option<Res<Ground>>,
     mut terrain: MessageReader<engine_world::TerrainChanged>,
@@ -197,7 +200,7 @@ pub fn sync_region_grass(
 ) {
     let relief = terrain.read().count() > 0;
     *timer -= time.real_delta_secs();
-    if *timer > 0.0 && !relief && !settings.is_changed() {
+    if *timer > 0.0 && !relief && !settings.is_changed() && !season.is_changed() {
         return;
     }
     *timer = REBUILD_SECS;
@@ -271,7 +274,12 @@ pub fn sync_region_grass(
                 radius: r,
             })
         }));
-        let (density, dryness) = grass_maps(region, state, res, &grass, &covers);
+        let (density, mut dryness) = grass_maps(region, state, res, &grass, &covers);
+        // Autumn browns the meadow and winter leaves it straw, wherever it grows.
+        let season_dry = grass_dryness(season.day_of_year);
+        for d in &mut dryness {
+            *d += (1.0 - *d) * season_dry;
+        }
         let field_at = Transform::from_translation(center);
         match linked.and_then(|g| fields.get_mut(g.0).ok()) {
             Some((mut field, mut t, _)) => {
