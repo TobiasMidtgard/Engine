@@ -221,7 +221,10 @@ pub(crate) fn step_movers(
         platform::ride(&mut m, deck, pos, dt);
         let (state, lift) = on_ground_surface(state, &ground, &body);
 
-        let v = step_one(&mut m, p, intent, &state, &body, &probe, &mut out, dt);
+        let mut v = step_one(&mut m, p, intent, &state, &body, &probe, &mut out, dt);
+        if m.grounded && m.settle > GROUND_STICK && v.dot(up) <= 0.0 {
+            v -= up * (m.settle - GROUND_STICK);
+        }
 
         // Facing: the wall hung from, the combat target, where the intent looks, the motion.
         let face = m.hang.map(|h| -h.normal).or_else(|| {
@@ -302,6 +305,18 @@ fn on_ground_surface(state: &CharacterState, ground: &Ground, b: &Body) -> (Char
     (on, (g.height - feet).max(0.0) as f32)
 }
 
+/// Physics backends may report the ground before the feet touch it (within their snap
+/// distance). On landing, keep coming down at the fall's speed until the backend stops the
+/// character, instead of hovering and sinking at [`GROUND_STICK`].
+fn settle(m: &mut Mover, state: &CharacterState, up: Vec3, landed: bool) {
+    if landed {
+        m.settle = m.fall_speed.max(0.0);
+    } else if -state.velocity.dot(up) < m.settle * 0.5 {
+        // Stopped by the ground (or never moved down): settled.
+        m.settle = 0.0;
+    }
+}
+
 /// One character, one step. Returns the velocity to move with (own time, m/s).
 #[allow(clippy::too_many_arguments)]
 fn step_one(
@@ -370,12 +385,14 @@ fn step_one(
     m.dash_charges =
         (m.dash_charges + dt / p.dash_recharge_secs.max(0.01)).min(p.dash_charges as f32);
     if grounded {
+        settle(m, state, up, landed);
         m.coyote = p.coyote_secs;
         m.air_secs = 0.0;
         m.fall_speed = 0.0;
         m.air_jumps_left = p.air_jumps;
         m.last_wall = None;
     } else {
+        m.settle = 0.0;
         m.coyote = (m.coyote - dt).max(0.0);
         m.air_secs += dt;
         m.fall_speed = m.fall_speed.max(-v.dot(up));
@@ -1308,6 +1325,31 @@ fn smooth01(x: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_landing_keeps_coming_down_until_the_ground_stops_it() {
+        let mut m = Mover {
+            fall_speed: 6.0,
+            ..Default::default()
+        };
+        let falling = CharacterState {
+            grounded: true,
+            velocity: Vec3::new(0.0, -6.0, 0.0),
+            ..Default::default()
+        };
+        settle(&mut m, &falling, Vec3::Y, true);
+        assert_eq!(m.settle, 6.0);
+        // Still coming down at that speed (the ground was reported early): keep it.
+        settle(&mut m, &falling, Vec3::Y, false);
+        assert_eq!(m.settle, 6.0);
+        // Stopped by the ground: settled.
+        let stopped = CharacterState {
+            velocity: Vec3::new(0.0, -0.4, 0.0),
+            ..falling
+        };
+        settle(&mut m, &stopped, Vec3::Y, false);
+        assert_eq!(m.settle, 0.0);
+    }
 
     #[test]
     fn feet_on_or_in_the_ground_surface_stand_on_it() {

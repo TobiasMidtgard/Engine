@@ -131,7 +131,9 @@ velocity when the character jumps or walks off (a jump from a moving train keeps
 speed), takes it off again when it lands from the air (a jump straight up comes down on the
 same spot), and turns the character with a turning deck (`platform`). Where physics reports no
 ground but the feet are on the [`Ground`](engine_world::Ground) surface (terrain that has no
-collider yet), the character stands on the surface instead of falling through.
+collider yet), the character stands on the surface instead of falling through. A backend
+that reports the ground before the feet touch it (within its snap distance) doesn't leave a
+landing character hovering: it keeps coming down at its fall speed until the backend stops it.
 
 ### World shifts
 

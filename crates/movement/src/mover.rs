@@ -144,6 +144,9 @@ pub struct Mover {
     pub(crate) stride: f32,
     pub(crate) left_foot: bool,
     pub(crate) fall_speed: f32,
+    /// Just landed and still coming down onto the ground at this speed, m/s (see
+    /// `locomotion::settle`).
+    pub(crate) settle: f32,
     pub(crate) prev_jump: bool,
     pub(crate) prev_crouch: bool,
     pub(crate) prev_dash: bool,
@@ -186,6 +189,7 @@ impl Default for Mover {
             stride: 0.0,
             left_foot: false,
             fall_speed: 0.0,
+            settle: 0.0,
             prev_jump: false,
             prev_crouch: false,
             prev_dash: false,

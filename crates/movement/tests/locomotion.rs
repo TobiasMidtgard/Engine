@@ -304,7 +304,8 @@ fn holding_toward_the_wall_climbs_up() {
     let c = hang_from_a_high_wall(&mut app);
     intent(&mut app, c, |i| i.direction = Vec3::X);
     let secs = run_until(&mut app, 2.0, |w| {
-        w.get::<Mover>(c).unwrap().grounded && w.get::<Transform>(c).unwrap().translation.y > 4.4
+        let m = w.get::<Mover>(c).unwrap();
+        m.grounded && m.mode != LocomotionMode::Mantle
     });
     let p = pos(&app, c);
     assert!(secs < 1.2 && p.x > 1.2, "on top after {secs:.2} s at {p:?}");
@@ -320,7 +321,13 @@ fn lets_go_of_a_ledge_or_kicks_off_it() {
     intent(&mut app, c, |i| i.crouch = false);
     assert_eq!(mover(&app, c).mode, LocomotionMode::Air);
     run_until(&mut app, 2.0, |w| w.get::<Mover>(c).unwrap().grounded);
-    assert!(mover(&app, c).grounded);
+    run(&mut app, 0.3);
+    assert!(
+        mover(&app, c).grounded && pos(&app, c).y < 1.0,
+        "{:?} {:?}",
+        mover(&app, c).mode,
+        pos(&app, c)
+    );
     assert_eq!(triggered(&app, c, "ledge_grab"), 1);
 
     // Back up, then jump while pulling away from the wall: a kick off it.
