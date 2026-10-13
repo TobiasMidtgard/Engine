@@ -67,6 +67,9 @@ pub struct ScreenEffects {
     gi_groups: GiGroups,
     /// GI history slot written this frame.
     gi_current: usize,
+    /// Whether the GI history holds last frame's bounce light. False after a frame without it
+    /// (a camera cut, GI off), when the history still holds an older view's.
+    gi_history_ready: bool,
     taa_layout: wgpu::BindGroupLayout,
     taa: wgpu::RenderPipeline,
     taa_params: wgpu::Buffer,
@@ -228,6 +231,7 @@ impl ScreenEffects {
             gi_blur,
             gi_groups,
             gi_current: 0,
+            gi_history_ready: false,
             taa_layout,
             taa,
             taa_params,
@@ -353,13 +357,21 @@ impl ScreenEffects {
         self.ssr_groups = Self::ssr_groups(shared, targets, &self.ssr_layout);
         self.gi_groups = GiGroups::new(shared, targets, &self.gi_layout);
         self.history_ready = false;
+        self.gi_history_ready = false;
         self.accumulated = 0;
     }
 
     /// Forget the history (camera cut, anti-aliasing turned off).
     pub fn reset_history(&mut self) {
         self.history_ready = false;
+        self.gi_history_ready = false;
         self.accumulated = 0;
+    }
+
+    /// Note a frame rendered without bounce light: the GI history now lags behind, so the next
+    /// `encode_gi` starts it over.
+    pub fn skip_gi(&mut self) {
+        self.gi_history_ready = false;
     }
 
     /// Record ambient occlusion: GTAO into `ao_raw`, blurred into `ao`. `prepass_group` is the
@@ -415,6 +427,17 @@ impl ScreenEffects {
         prepass_group: &wgpu::BindGroup,
     ) {
         let g = self.gi_current;
+        if !self.gi_history_ready {
+            // The history read this frame is from before a frame without bounce light, such as
+            // the view before a camera cut; where its depths happen to match it would ghost in
+            // (a daylit tree over a dark cave). Depth 0 in alpha disables the blend.
+            fullscreen_pass(
+                encoder,
+                "screen-space gi history reset",
+                &targets.gi_history[1 - g].view,
+                true,
+            );
+        }
         let passes = [
             (
                 "screen-space gi trace",
@@ -443,6 +466,7 @@ impl ScreenEffects {
             pass.draw(0..3, 0..1);
         }
         self.gi_current = 1 - g;
+        self.gi_history_ready = true;
     }
 
     /// Without TAA: keep the finished HDR image as the previous frame for next frame's

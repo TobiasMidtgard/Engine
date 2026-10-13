@@ -20,7 +20,9 @@
 //! Skins, animations and morph targets are not interpreted here (the animation module reads
 //! them from the file itself); each [`GltfNode`] records its glTF index and skin so they can
 //! be matched up. Texture samplers are not honored: every material texture uses the engine's
-//! trilinear, repeating, anisotropic sampler. Only `TEXCOORD_0` is used.
+//! trilinear, repeating, anisotropic sampler. Only `TEXCOORD_0` is used. A `KHR_texture_transform`
+//! scale applies to all of a material's textures (see [`StandardMaterial::uv_scale`]); offsets and
+//! rotations are ignored.
 
 use std::collections::HashSet;
 
@@ -376,13 +378,9 @@ fn convert_material(
         }
         image_keys.get(texture.source().index()).cloned().flatten()
     };
-    let mut uv_scale = [1.0, 1.0];
-    let base_tex = pbr.base_color_texture().and_then(|info| {
-        if let Some(t) = info.texture_transform() {
-            uv_scale = t.scale();
-        }
-        key_for(info.texture(), info.tex_coord(), "base color")
-    });
+    let base_tex = pbr
+        .base_color_texture()
+        .and_then(|info| key_for(info.texture(), info.tex_coord(), "base color"));
     let mr_tex = pbr
         .metallic_roughness_texture()
         .and_then(|info| key_for(info.texture(), info.tex_coord(), "metallic/roughness"));
@@ -400,6 +398,7 @@ fn convert_material(
     let emissive_tex = m
         .emissive_texture()
         .and_then(|info| key_for(info.texture(), info.tex_coord(), "emissive"));
+    let uv_scale = material_uv_scale(m);
     let material = StandardMaterial {
         base_color: pbr.base_color_factor(),
         metallic: pbr.metallic_factor(),
@@ -422,6 +421,51 @@ fn convert_material(
         material,
         [base_tex, normal_tex, mr_tex, emissive_tex, occlusion_tex],
     )
+}
+
+/// The `KHR_texture_transform` scale of a material's textures. The engine has one `uv_scale` for
+/// every texture slot, so it comes from the first slot with a transform, in the order base
+/// color, normal, metallic/roughness, occlusion, emissive: a car's paint may transform only its
+/// flake normal map (30x), and reading the base color's alone left that normal map stretched.
+/// Offsets and rotations are not supported.
+fn material_uv_scale(m: &gltf::Material) -> [f32; 2] {
+    let pbr = m.pbr_metallic_roughness();
+    let info_scale = |info: Option<gltf::texture::Info>| {
+        info.and_then(|i| i.texture_transform()).map(|t| t.scale())
+    };
+    // Normal and occlusion textures don't expose the extension, so it is read from the JSON.
+    let json_scale = |ext: Option<&gltf::json::Value>| {
+        ext.map(|t| match t.get("scale").and_then(|s| s.as_array()) {
+            Some(s) if s.len() == 2 => [0, 1].map(|i| s[i].as_f64().unwrap_or(1.0) as f32),
+            _ => [1.0, 1.0],
+        })
+    };
+    let scales = [
+        info_scale(pbr.base_color_texture()),
+        json_scale(
+            m.normal_texture()
+                .as_ref()
+                .and_then(|n| n.extension_value("KHR_texture_transform")),
+        ),
+        info_scale(pbr.metallic_roughness_texture()),
+        json_scale(
+            m.occlusion_texture()
+                .as_ref()
+                .and_then(|o| o.extension_value("KHR_texture_transform")),
+        ),
+        info_scale(m.emissive_texture()),
+    ];
+    let mut present = scales.iter().flatten();
+    let Some(&scale) = present.next() else {
+        return [1.0, 1.0];
+    };
+    if present.any(|&s| s != scale) {
+        tracing::debug!(
+            "material {:?} scales its textures differently; using {scale:?} for all of them",
+            m.name()
+        );
+    }
+    scale
 }
 
 /// Triangles of one primitive; `Ok(None)` for primitives without positions or with a
@@ -682,6 +726,39 @@ pub fn spawn_pending_gltf_scenes(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn uv_scale_from_any_transformed_texture() {
+        let json = br#"{
+            "asset": {"version": "2.0"},
+            "extensionsUsed": ["KHR_texture_transform"],
+            "images": [{"uri": "flake.png"}],
+            "textures": [{"source": 0}],
+            "materials": [
+                {"normalTexture": {"index": 0,
+                    "extensions": {"KHR_texture_transform": {"scale": [30, 30]}}}},
+                {"pbrMetallicRoughness": {"baseColorTexture": {"index": 0,
+                    "extensions": {"KHR_texture_transform": {"scale": [2, 3]}}}},
+                 "normalTexture": {"index": 0,
+                    "extensions": {"KHR_texture_transform": {"scale": [30, 30]}}}},
+                {"occlusionTexture": {"index": 0,
+                    "extensions": {"KHR_texture_transform": {"scale": [4, 5]}}}},
+                {"pbrMetallicRoughness": {"metallicRoughnessTexture": {"index": 0,
+                    "extensions": {"KHR_texture_transform": {"offset": [0.5, 0]}}}}},
+                {"pbrMetallicRoughness": {"baseColorTexture": {"index": 0}}}
+            ]
+        }"#;
+        let gltf = gltf::Gltf::from_slice(json).unwrap();
+        let keys = [Some("flake".to_string())];
+        let scales: Vec<[f32; 2]> = gltf
+            .materials()
+            .map(|m| convert_material(&m, &keys).0.uv_scale)
+            .collect();
+        assert_eq!(
+            scales,
+            [[30.0, 30.0], [2.0, 3.0], [4.0, 5.0], [1.0, 1.0], [1.0, 1.0]]
+        );
+    }
 
     #[test]
     fn base64_and_data_uris() {
