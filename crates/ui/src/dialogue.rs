@@ -218,7 +218,8 @@ fn portrait_el(sp: &Speaker, side: Side, active: bool, id: &str) -> El {
             .justify(crate::style::Justify::End)
             .pick(Pick::Ignore)
             .transition(0.25)
-            .opacity(if active { 1.0 } else { 0.5 })
+            // The listener steps back into shade rather than turning see-through.
+            .opacity(if active { 1.0 } else { 0.88 })
             .scale(if active { 1.0 } else { 0.95 })
             .translate([0.0, if active { 0.0 } else { 12.0 }]);
         match side {
@@ -243,6 +244,11 @@ fn portrait_el(sp: &Speaker, side: Side, active: bool, id: &str) -> El {
         El::icon(sp.portrait.clone())
             .id(id)
             .icon_flip(flip)
+            .icon_tint(if active {
+                Color::WHITE
+            } else {
+                Color::hex(0x8a92a4)
+            })
             .with_style(|s| s.width(440.0).height(550.0).pick(Pick::Ignore)),
     )
 }
