@@ -8,12 +8,14 @@ use std::collections::{HashMap, VecDeque};
 use engine_core::prelude::*;
 use engine_world::locomotion::{LocomotionMode, LocomotionState};
 use engine_world::physics::{CharacterController, PhysicsBackend, PhysicsQueries};
-use engine_world::{DamageEvent, FocusPoints, Ground, NoiseEvent, ProjectileTrace, WeatherState};
+use engine_world::{
+    DamageEvent, FocusPoints, Ground, NoiseEvent, Obscurance, ProjectileTrace, WeatherState,
+};
 
 use crate::agent::{NpcClock, NpcCombat, NpcMotor, NpcSettings, NpcVitals};
 use crate::faction::{Faction, Factions};
 use crate::skills::{NpcSkills, Perception};
-use crate::world_model::{Sight, TacticalWorld, physics_backend};
+use crate::world_model::{OPAQUE_SMOKE, Sight, TacticalWorld, physics_backend};
 
 /// What an NPC saw of something at one moment.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -338,6 +340,7 @@ pub(crate) fn perceive(
     backend: Option<Res<PhysicsBackend>>,
     ground: Res<Ground>,
     weather: Res<WeatherState>,
+    obscurance: Res<Obscurance>,
     focus: Res<FocusPoints>,
     settings: Res<NpcSettings>,
     mut noises: MessageReader<NoiseEvent>,
@@ -356,6 +359,7 @@ pub(crate) fn perceive(
         world: &world,
         physics: physics_backend(&backend, &physics),
         ground: &ground,
+        obscurance: Some(&obscurance),
     };
     let light = daylight(&weather);
     let fog = 1.0 - 0.65 * weather.fog.clamp(0.0, 1.0);
@@ -487,10 +491,15 @@ pub(crate) fn perceive(
             let head = other.position + DVec3::Y * (other.height as f64 * 0.9);
             let mid = other.position + DVec3::Y * (other.height as f64 * 0.55);
             let ignore = [me, other.entity];
-            let visible = sight.clear(eye, head, &ignore) || sight.clear(eye, mid, &ignore);
-            if !visible {
+            // Through smoke a body fades out; past `OPAQUE_SMOKE` it is gone.
+            let haze = sight
+                .visibility(eye, head, &ignore)
+                .max(sight.visibility(eye, mid, &ignore));
+            if haze < OPAQUE_SMOKE {
                 continue;
             }
+            // Contrast falls with the light that gets through, so spotting slows in step.
+            let haze = ((haze - OPAQUE_SMOKE) / (1.0 - OPAQUE_SMOKE)).clamp(0.0, 1.0);
             let close = 1.0 - smoothstep(range * 0.15, range, dist) * 0.85;
             let stance = match other.mode {
                 LocomotionMode::Crouch => 0.45,
@@ -499,9 +508,10 @@ pub(crate) fn perceive(
             };
             let moving = 1.0 + (other.velocity.length() / 5.0).min(1.0) * 0.6;
             let prev = memory.get(other.entity).map(|k| k.awareness).unwrap_or(0.0);
-            let rate = zone * close * light * stance * moving * (0.4 + 0.6 * awareness_skill)
-                / perception.detection_secs.max(0.05)
-                * if prev > 0.5 { 2.0 } else { 1.0 };
+            let rate =
+                zone * close * light * stance * moving * haze * (0.4 + 0.6 * awareness_skill)
+                    / perception.detection_secs.max(0.05)
+                    * if prev > 0.5 { 2.0 } else { 1.0 };
             let k = memory.entry(other.entity, other.faction, now, other.position);
             k.visible = true;
             k.reported = false;

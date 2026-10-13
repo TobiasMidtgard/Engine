@@ -1,6 +1,6 @@
-// Sky: physically based atmosphere (single scattering), sun disc, a simple cloud layer and
-// stars. Also renders the equirectangular environment map used for ambient light and
-// reflections. Requires lib_types + lib_frame.
+// Sky: physically based atmosphere (lib_atmosphere: multiple scattering from look-up tables),
+// sun disc, a simple cloud layer and stars. Also renders the equirectangular environment map
+// used for ambient light and reflections. Requires lib_types + lib_frame + lib_atmosphere.
 
 fn star_field(dir: vec3<f32>) -> vec3<f32> {
     let p = dir * 400.0;
@@ -61,16 +61,34 @@ fn planet_ground(dir: vec3<f32>, t: f32) -> vec3<f32> {
 }
 
 fn sky_radiance(dir: vec3<f32>, with_sun: bool) -> vec3<f32> {
-    let a = atmosphere(vec3(0.0), dir, 1e12, 16);
-    var c = a.radiance * frame.sun_color.rgb;
-    if (a.ground_t > 0.0) {
-        // Below the horizon: the planet.
-        return c + planet_ground(dir, a.ground_t) * a.transmittance;
+    var c = vec3<f32>(0.0);
+    // Transmittance toward space along `dir` (sun disc, stars).
+    var to_space = vec3<f32>(1.0);
+    if (frame.planet.w > 0.0) {
+        let h0 = frame.camera_world.w;
+        let mu = dot(dir, normalize(-frame.planet.xyz));
+        if (sky_view_valid()) {
+            c = sky_view_radiance(dir) * frame.sun_color.rgb;
+            let ground = ray_shell_mu(h0, mu, 0.0);
+            if (ground.x > 0.0) {
+                // Below the horizon: the planet, seen through the air.
+                return c + planet_ground(dir, ground.x) * ground_transmittance(h0, mu, ground.x);
+            }
+            to_space = transmittance_to_top(h0, mu);
+        } else {
+            // Above the atmosphere: integrate per pixel.
+            let a = atmosphere(vec3(0.0), dir, 1e12, 32);
+            c = a.radiance * frame.sun_color.rgb;
+            if (a.ground_t > 0.0) {
+                return c + planet_ground(dir, a.ground_t) * a.transmittance;
+            }
+            to_space = a.transmittance;
+        }
     }
     // Night sky floor and stars.
     let night = 1.0 - saturate(frame.sun_dir.y * 4.0 + 0.3);
     c += vec3(0.002, 0.003, 0.006) * night;
-    c += star_field(dir) * night * a.transmittance;
+    c += star_field(dir) * night * to_space;
     // Moon-ish glow opposite the sun at night.
     let moon_dir = -frame.sun_dir.xyz;
     let moon = smoothstep(0.9997, 0.99985, dot(dir, moon_dir)) * night * 0.5;
@@ -82,7 +100,7 @@ fn sky_radiance(dir: vec3<f32>, with_sun: bool) -> vec3<f32> {
             let solid_angle = PI * frame.sun_dir.w * frame.sun_dir.w;
             let mu = saturate((cd - cos_r) / (1.0 - cos_r));
             let limb = 0.4 + 0.6 * sqrt(mu);
-            c += frame.sun_color.rgb / solid_angle * a.transmittance * limb;
+            c += frame.sun_color.rgb / solid_angle * to_space * limb;
         }
     }
     let cl = cloud_layer(dir, c);
@@ -116,9 +134,15 @@ fn vs_env(@builtin(vertex_index) i: u32) -> FullscreenOut {
     return fullscreen_vertex(i, 0.5);
 }
 
-// Environment map: not pre-exposed, no sun disc (lit analytically).
+// Environment map: not pre-exposed, no sun disc (lit analytically). Without a planet the
+// ground below the horizon is a plane lit by the sky and sun, so reflections and diffuse light
+// from below aren't black.
 @fragment
 fn fs_env(in: FullscreenOut) -> @location(0) vec4<f32> {
     let dir = equirect_to_dir(in.uv);
-    return vec4<f32>(min(sky_radiance(dir, false), vec3(60000.0)), 1.0);
+    var c = sky_radiance(dir, false);
+    if (frame.planet.w <= 0.0) {
+        c = mix(c, ground_radiance(), smoothstep(0.0, -0.05, dir.y));
+    }
+    return vec4<f32>(min(c, vec3(60000.0)), 1.0);
 }

@@ -128,16 +128,25 @@ impl<T: Copy> Grid2<T> {
             .map(move |(i, v)| (IVec2::new((i as u32 % w) as i32, (i as u32 / w) as i32), v))
     }
 
-    /// Move the grid so it is centered on `center`, keeping overlapping values.
+    /// Move the grid by whole cells so it is centered on `center`, keeping overlapping values.
     /// Returns true if the grid moved.
     pub fn recenter(&mut self, center: DVec2) -> bool {
         let half = DVec2::new(self.width as f64, self.height as f64) * self.cell as f64 * 0.5;
-        let new_origin = snap(center - half, self.cell);
-        let shift = ((new_origin - self.origin) / self.cell as f64).round();
-        let (dx, dy) = (shift.x as i32, shift.y as i32);
-        if dx == 0 && dy == 0 {
+        // Whole cells from the current origin, so values stay where they were in the world
+        // even when the origin is off the global cell lattice (after a world shift).
+        let shift = ((center - half - self.origin) / self.cell as f64).round();
+        if shift == DVec2::ZERO {
             return false;
         }
+        let new_origin = self.origin + shift * self.cell as f64;
+        // A jump past the whole grid (a trip to another planet) keeps nothing, and its cell
+        // count may not even fit in an i32.
+        if shift.x.abs() >= self.width as f64 || shift.y.abs() >= self.height as f64 {
+            self.data.fill(self.default);
+            self.origin = new_origin;
+            return true;
+        }
+        let (dx, dy) = (shift.x as i32, shift.y as i32);
         let mut next = vec![self.default; self.data.len()];
         for y in 0..self.height as i32 {
             for x in 0..self.width as i32 {
@@ -156,6 +165,10 @@ impl<T: Blend> Grid2<T> {
     /// Bilinear sample at world X/Z (values are at cell centers).
     pub fn sample(&self, p: DVec3) -> T {
         let local = (DVec2::new(p.x, p.z) - self.origin) / self.cell as f64 - DVec2::splat(0.5);
+        // Far outside, every corner is the default; clamping keeps `base + 1` from
+        // overflowing i32 (a point on another planet is ~1e11 cells away).
+        let size = DVec2::new(self.width as f64, self.height as f64);
+        let local = local.clamp(DVec2::splat(-3.0), size + 3.0);
         let base = IVec2::new(local.x.floor() as i32, local.y.floor() as i32);
         let f = (local - base.as_dvec2()).as_vec2();
         let g = |dx, dy| {
@@ -236,6 +249,15 @@ impl<T: Blend> Grid3<T> {
     /// Trilinear sample (values at cell centers); default outside.
     pub fn sample(&self, p: DVec3) -> T {
         let l = (p - self.origin) / self.cell as f64 - DVec3::splat(0.5);
+        // As in `Grid2::sample`: far outside is the default, and `b + 1` must not overflow.
+        let l = l.clamp(
+            DVec3::splat(-3.0),
+            DVec3::new(
+                self.dims[0] as f64,
+                self.dims[1] as f64,
+                self.dims[2] as f64,
+            ) + 3.0,
+        );
         let b = IVec3::new(l.x.floor() as i32, l.y.floor() as i32, l.z.floor() as i32);
         let f = (l - b.as_dvec3()).as_vec3();
         let g = |dx, dy, dz| self.get(b + IVec3::new(dx, dy, dz)).unwrap_or(self.default);
@@ -273,5 +295,41 @@ mod tests {
         g.set(c, 7.0);
         assert!(g.recenter(DVec2::new(3.0, 0.0)));
         assert_eq!(g.sample_nearest(p), 7.0);
+    }
+
+    #[test]
+    fn recenter_across_planets_clears_without_overflow() {
+        let mut g = Grid2::centered(DVec2::ZERO, 10.0, 1.0, 0.0f32);
+        g.fill(5.0);
+        // Earth to Mars is ~1e11 m: more cells than an i32 holds.
+        let far = DVec2::new(7.8e10, -2.3e11);
+        assert!(g.recenter(far));
+        assert!(g.data.iter().all(|&v| v == 0.0));
+        let back = g.cell_center(IVec2::new(5, 5));
+        assert!((back - far).length() < 1.0, "{back} vs {far}");
+        // A jump just past the edge also clears; one just inside keeps the overlap.
+        let mut g = Grid2::centered(DVec2::ZERO, 10.0, 1.0, 0.0f32);
+        g.fill(1.0);
+        assert!(g.recenter(DVec2::new(10.0, 0.0)));
+        assert!(g.data.iter().all(|&v| v == 0.0));
+        g.fill(2.0);
+        assert!(g.recenter(DVec2::new(19.0, 0.0)));
+        assert_eq!(g.data.iter().filter(|&&v| v == 2.0).count(), 10);
+    }
+
+    #[test]
+    fn sampling_on_another_planet_is_the_default() {
+        let far = DVec3::new(2.3e11, 1e9, -7.8e10);
+        let mut g2 = Grid2::centered(DVec2::ZERO, 10.0, 1.0, 3.0f32);
+        g2.fill(1.0);
+        assert_eq!(g2.sample(far), 3.0);
+        assert_eq!(g2.sample(-far), 3.0);
+        let mut g3 = Grid3::new(DVec3::ZERO, 1.0, [4, 4, 4], 3.0f32);
+        g3.data.fill(1.0);
+        assert_eq!(g3.sample(far), 3.0);
+        assert_eq!(g3.sample(-far), 3.0);
+        // Clamping leaves nearby samples alone.
+        assert_eq!(g2.sample(DVec3::new(0.2, 0.0, 0.3)), 1.0);
+        assert_eq!(g3.sample(DVec3::splat(2.0)), 1.0);
     }
 }

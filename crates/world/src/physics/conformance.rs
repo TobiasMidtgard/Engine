@@ -15,15 +15,16 @@
 //! 60 Hz with deterministic time, and compares against physics with generous tolerances. The
 //! checks cover what other modules rely on: gravity, resting contact, impulses, contact
 //! events (one `Started` per touch carrying the impact impulse and a normal from `a` toward
-//! `b`, one `Ended` when it stops), raycasts, time dilation, precision far from the origin and
-//! the character controller (including its time scaling: a character moves in its own seconds,
+//! `b`, one `Ended` when it stops), raycasts, time dilation, precision far from the origin,
+//! following a [`WorldShift`](crate::WorldShift) (bodies keep their place relative to each
+//! other when the world is re-anchored and turned) and the character controller (including its time scaling: a character moves in its own seconds,
 //! so one that ignores world slow motion keeps full speed).
 
 use engine_core::math::{DVec3, Vec3};
 use engine_core::time::{LocalTimeScale, TimeSource};
 
 use super::*;
-use crate::WorldPlugin;
+use crate::{WorldPlugin, WorldShift, WorldShiftSet};
 
 /// Result of one check.
 #[derive(Debug, Clone)]
@@ -43,10 +44,16 @@ const CHECKS: &[(&str, CheckFn)] = &[
     ("rests_on_static_box", rests_on_static_box),
     ("raycast_hits_static_box", raycast_hits_static_box),
     ("impulse_changes_velocity", impulse_changes_velocity),
+    ("uses_mass_overrides", uses_mass_overrides),
     ("reports_contacts", reports_contacts),
     ("reports_contact_end", reports_contact_end),
     ("time_dilation_slows_bodies", time_dilation_slows_bodies),
+    (
+        "bodies_honor_local_time_scale",
+        bodies_honor_local_time_scale,
+    ),
     ("precise_far_from_origin", precise_far_from_origin),
+    ("follows_world_shifts", follows_world_shifts),
     ("character_walks_and_grounds", character_walks_and_grounds),
     (
         "character_honors_local_time_scale",
@@ -230,6 +237,152 @@ fn resting_at(install: &dyn Fn(&mut App), base: DVec3) -> Result<(), String> {
         velocity(&app, crate_e).length() as f64,
         0.0,
         0.05,
+    )
+}
+
+fn follows_world_shifts(install: &dyn Fn(&mut App)) -> Result<(), String> {
+    let mut app = app_with(install);
+    app.init_resource::<PendingShift>()
+        .add_systems(PostUpdate, write_pending_shift.in_set(WorldShiftSet::Write));
+    let g = ground(&mut app, DVec3::ZERO);
+    // Off the turn's axis, so a backend that moves bodies but doesn't turn them shows drift.
+    let start = DVec3::new(6.0, 3.0, -4.0);
+    let crate_e = app
+        .world
+        .spawn((
+            Transform::from_translation(start),
+            RigidBody::dynamic(),
+            Collider::cuboid(Vec3::splat(0.5)),
+            Velocity::default(),
+        ))
+        .id();
+    // Re-anchor and turn the world while the crate is falling, the way a game does it (in
+    // `WorldShiftSet::Write`). A turn about the vertical, so the check doesn't also demand
+    // tilted colliders; gravity turning with the world is `engine_world`'s job, tested there.
+    app.update_n(20);
+    let shift = WorldShift {
+        rotation: engine_core::math::DQuat::from_rotation_y(0.7),
+        translation: DVec3::new(5.0e4, -300.0, 1.0e4),
+        ..WorldShift::IDENTITY
+    };
+    app.world.resource_mut::<PendingShift>().0 = Some(shift);
+    app.update();
+    // Queries answer in the new frame right away, before the next step.
+    let q = app.world.resource::<PhysicsQueries>().clone();
+    let hit = q
+        .raycast(
+            shift.point(DVec3::new(0.0, 5.0, 0.0)),
+            -shift.direction(Vec3::Y),
+            20.0,
+            &QueryFilter::default(),
+        )
+        .ok_or("right after the shift, a raycast down onto the shifted ground missed")?;
+    if hit.entity != g {
+        return Err(format!(
+            "right after the shift, the raycast hit {:?}, expected the ground {g:?}",
+            hit.entity
+        ));
+    }
+    near(
+        "ground top hit right after the shift",
+        hit.point.y,
+        shift.point(DVec3::new(0.0, 0.5, 0.0)).y,
+        0.05,
+    )?;
+    app.update_n(160);
+    let ground_t = *app.world.get::<Transform>(g).ok_or("the ground is gone")?;
+    let local =
+        ground_t.rotation.as_dquat().inverse() * (position(&app, crate_e) - ground_t.translation);
+    near(
+        "crate resting height above the shifted ground, in the ground's frame",
+        local.y,
+        1.0,
+        0.05,
+    )?;
+    near(
+        "crate drift from where it fell, in the ground's frame",
+        (local.x - start.x).hypot(local.z - start.z),
+        0.0,
+        0.05,
+    )?;
+    near(
+        "crate speed at rest after the shift",
+        velocity(&app, crate_e).length() as f64,
+        0.0,
+        0.05,
+    )
+}
+
+/// A shift for `follows_world_shifts` to write in `WorldShiftSet::Write`.
+#[derive(Resource, Default)]
+struct PendingShift(Option<WorldShift>);
+
+fn write_pending_shift(mut pending: ResMut<PendingShift>, mut shifts: MessageWriter<WorldShift>) {
+    if let Some(s) = pending.0.take() {
+        shifts.write(s);
+    }
+}
+
+fn uses_mass_overrides(install: &dyn Fn(&mut App)) -> Result<(), String> {
+    let mut app = app_with(install);
+    // Off the box's middle, like a plane whose balance point isn't its volume center.
+    let com = Vec3::new(0.4, 0.0, -0.2);
+    let inertia = Vec3::new(2.0, 3.0, 4.0);
+    let start = DVec3::new(0.0, 10.0, 0.0);
+    let body = app
+        .world
+        .spawn((
+            Transform::from_translation(start),
+            RigidBody {
+                gravity_scale: 0.0,
+                ..RigidBody::dynamic().with_mass_properties(12.0, com, inertia)
+            },
+            Collider::cuboid(Vec3::splat(0.5)),
+            Velocity::default(),
+        ))
+        .id();
+    app.update_n(3);
+    let m = *app
+        .world
+        .get::<MassProperties>(body)
+        .ok_or("no MassProperties on a dynamic body: write them back")?;
+    near("reported mass", m.mass_kg as f64, 12.0, 1e-3)?;
+    near(
+        "reported center of mass offset from the override",
+        (m.center_of_mass - com).length() as f64,
+        0.0,
+        1e-3,
+    )?;
+    near(
+        "reported inertia offset from the override",
+        (m.inertia - inertia).length() as f64,
+        0.0,
+        1e-3,
+    )?;
+    // A push through the overridden center of mass moves the body without turning it.
+    let at = position(&app, body) + com.as_dvec3();
+    app.world.write_message(ApplyImpulse {
+        entity: body,
+        impulse: Vec3::new(0.0, 0.0, 12.0),
+        at: Some(at),
+        angular: Vec3::ZERO,
+    });
+    app.update_n(10);
+    let v = *app
+        .world
+        .get::<Velocity>(body)
+        .ok_or("the body lost its Velocity")?;
+    near(
+        "speed after 12 N·s on 12 kg",
+        v.linear.length() as f64,
+        1.0,
+        0.02,
+    )?;
+    near(
+        "spin after a push through the center of mass",
+        v.angular.length() as f64,
+        0.0,
+        0.01,
     )
 }
 
@@ -474,6 +627,54 @@ fn time_dilation_slows_bodies(install: &dyn Fn(&mut App)) -> Result<(), String> 
         -4.905,
         0.4,
     )
+}
+
+fn bodies_honor_local_time_scale(install: &dyn Fn(&mut App)) -> Result<(), String> {
+    let mut app = app_with(install);
+    app.world
+        .resource_mut::<TimeDilation>()
+        .hold("conformance", 0.5, 0.0);
+    let start = DVec3::new(0.0, 100.0, 0.0);
+    let ball = |app: &mut App, x: f64, local: LocalTimeScale| {
+        app.world
+            .spawn((
+                Transform::from_translation(start + DVec3::new(x, 0.0, 0.0)),
+                RigidBody::dynamic(),
+                Collider::sphere(0.5),
+                Velocity::default(),
+                local,
+            ))
+            .id()
+    };
+    // A hero who ignores the world's slow motion, and a box in a bubble at half of it.
+    let hero = ball(&mut app, -5.0, LocalTimeScale::unaffected_by_dilation(1.0));
+    let bubble = ball(
+        &mut app,
+        5.0,
+        LocalTimeScale {
+            factor: 0.5,
+            ignore_world_dilation: false,
+        },
+    );
+    app.update_n(60);
+    let fell = |app: &App, e: Entity| start.y - position(app, e).y;
+    near(
+        "fall speed of a body with LocalTimeScale::unaffected_by_dilation(1.0) after 1 real \
+         second while the world ran at 0.5 (advance each body by time.delta_for(its \
+         LocalTimeScale); Velocity is in its own seconds)",
+        velocity(&app, hero).y as f64,
+        -9.81,
+        0.4,
+    )?;
+    near("fall of that body", fell(&app, hero), 4.9, 0.4)?;
+    near(
+        "fall speed of a body with LocalTimeScale factor 0.5 after 1 real second while the \
+         world ran at 0.5 (a quarter second of its own time)",
+        velocity(&app, bubble).y as f64,
+        -2.45,
+        0.15,
+    )?;
+    near("fall of that body", fell(&app, bubble), 0.31, 0.06)
 }
 
 fn character_honors_local_time_scale(install: &dyn Fn(&mut App)) -> Result<(), String> {

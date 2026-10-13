@@ -1,0 +1,31 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <defs>
+    <filter id="blur" x="-50%" y="-50%" width="200%" height="200%"><feGaussianBlur stdDeviation="3"/></filter>
+    <linearGradient id="chev" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#ffffff"/>
+      <stop offset=".4" stop-color="#9fe9ff"/>
+      <stop offset="1" stop-color="#1f8ad0"/>
+    </linearGradient>
+    <linearGradient id="streak" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#5fd0ff" stop-opacity="0"/>
+      <stop offset="1" stop-color="#bff1ff"/>
+    </linearGradient>
+  </defs>
+  <g filter="url(#blur)" opacity=".85">
+    <path d="M30 12 L52 32 L30 52 L38 32 Z" fill="#5fd0ff"/>
+    <path d="M14 16 L32 32 L14 48 L20 32 Z" fill="#5fd0ff" opacity=".6"/>
+  </g>
+  <g stroke-linecap="round">
+    <path d="M2 24 L22 24" stroke="url(#streak)" stroke-width="3"/>
+    <path d="M6 32 L18 32" stroke="url(#streak)" stroke-width="3.4"/>
+    <path d="M2 40 L22 40" stroke="url(#streak)" stroke-width="3"/>
+    <path d="M8 17 L20 17 M8 47 L20 47" stroke="url(#streak)" stroke-width="2"/>
+  </g>
+  <g stroke="#0c0f16" stroke-width="3.6" stroke-linejoin="round" paint-order="stroke">
+    <path d="M14 15 L33 32 L14 49 L21 32 Z" fill="url(#chev)" opacity=".7"/>
+    <path d="M29 9 L54 32 L29 55 L38 32 Z" fill="url(#chev)"/>
+  </g>
+  <path d="M31.5 12.6 L50 29.6" stroke="#ffffff" stroke-width="1.4" stroke-linecap="round"/>
+  <path d="M16.5 18 L29.5 29.8" stroke="#ffffff" stroke-width="1.1" stroke-linecap="round" opacity=".8"/>
+  <g fill="#e6fbff"><circle cx="58" cy="20" r="1.2"/><circle cx="59" cy="44" r="1"/><circle cx="47" cy="10" r=".9"/></g>
+</svg>

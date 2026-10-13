@@ -1,0 +1,27 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <defs>
+    <linearGradient id="meat" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#f09a5a"/>
+      <stop offset=".45" stop-color="#b8521e"/>
+      <stop offset="1" stop-color="#5a1c08"/>
+    </linearGradient>
+    <linearGradient id="bone" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#ffffff"/>
+      <stop offset=".6" stop-color="#ece2cc"/>
+      <stop offset="1" stop-color="#a8987a"/>
+    </linearGradient>
+  </defs>
+  <g stroke="#0c0f16" stroke-width="4" stroke-linejoin="round" stroke-linecap="round" paint-order="stroke">
+    <path d="M38 27 L50 15" fill="none" stroke-width="10"/>
+    <path d="M38 27 L50 15" fill="none" stroke="url(#bone)" stroke-width="6"/>
+    <circle cx="49" cy="10" r="5" fill="url(#bone)"/>
+    <circle cx="54.5" cy="15.5" r="5" fill="url(#bone)"/>
+    <path d="M7 44 C4 31 12 18 25 15.5 C33 14 41 19 43 26 C45.5 35 41 45 33 51 C24 58 9.5 56 7 44 Z" fill="url(#meat)"/>
+  </g>
+  <path d="M51 10 L51.5 15.5 L56 16" stroke="#c8baa0" stroke-width="1" fill="none" opacity=".7"/>
+  <path d="M47 8 C48 6.5 50 6 51.5 6.6" stroke="#ffffff" stroke-width="1.2" fill="none" stroke-linecap="round"/>
+  <path d="M36 21.5 C40 24 42 28 41.5 32 C38 31 35 27 36 21.5 Z" fill="#f6c6a8" stroke="#0c0f16" stroke-width="1.2" stroke-linejoin="round"/>
+  <path d="M11 38 C11 28 17 21 25 19" stroke="#ffd0a0" stroke-width="2" fill="none" stroke-linecap="round" opacity=".85"/>
+  <path d="M15 46 C20 49 27 48 32 44 M20 36 C24 38 30 37 34 33" stroke="#4a1404" stroke-width="1.4" fill="none" stroke-linecap="round" opacity=".55"/>
+  <circle cx="17" cy="27" r="1.4" fill="#ffffff" opacity=".7"/>
+</svg>

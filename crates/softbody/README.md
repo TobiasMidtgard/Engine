@@ -1,45 +1,87 @@
 # engine_softbody — Cloth, ropes, soft bodies, hair and fur
 
-**Owner:** Cloth, soft bodies and hair. **Status:** stub. The owning workstream replaces this with the real module.
-Background research: `game-engine-research/physics.md` (cloth and soft-body sections: Chaos Cloth/Flesh, Jolt and Godot `SoftBody3D`, XPBD) in the project files.
+**Owner:** Cloth, soft bodies and hair. **Status:** first release: everything below runs, is tested and is in the showcase yard.
+Background research: `game-engine-research/physics.md` (cloth and soft-body sections) in the project files.
 
-Rigid bodies live in the physics module; this crate simulates everything that bends, stretches or squishes and couples it to those rigid bodies both ways, through the physics contract only (so either module can be replaced).
+Rigid bodies live in the physics module; this crate simulates everything that bends, stretches or squishes and couples it to rigid bodies both ways through the physics contract only, so either module can be replaced.
 
-## Scope
+```rust,ignore
+app.add_plugins(SoftBodyPlugin);
 
-- One XPBD particle/constraint solver with substeps, used for all of the below. CPU for gameplay-relevant pieces, GPU compute (`RenderFeature::compute`) for large purely visual cloth.
-- **Cloth:** capes, clothing on characters (pinned to bones from `engine_world::animation::SkeletonPose`), flags, sails, curtains, tents. Stretch, bend and shear constraints, self-collision, collision with physics colliders and characters, wind from `WindField`, tearing (bullets, blades, fire), wetness making cloth heavier.
-- **Ropes and cables:** grappling lines, rope bridges, power lines, tow cables between vehicles; attach to rigid bodies with two-way forces.
-- **Hair and fur:** a hair strand is a tiny rope, so it uses the same solver. Simulate a few hundred to a few thousand guide strands per character or animal (XPBD chains with bend/twist stiffness, inertia that follows the moving head or body, collision against body capsules placed on `SkeletonPose` bones, wind, wetness clumping) and interpolate the rendered strands from them. Styles as data: length, curl, clumping, stiffness, color/melanin. Fur on animals uses short guides and shell or strand rendering at distance.
-- **Soft bodies:** volumetric bodies (tetrahedral or shape-matching): jelly, slimes, creature flesh/bellies, soft tires and cushions, foliage that bends under weight. Plasticity for dents that stay.
-- Two-way coupling: soft bodies push rigid bodies and vice versa, through `PhysicsQueries::closest_point`/`overlap` and `ApplyImpulse` from the physics contract.
-- LOD and sleeping: full simulation near `SimulationFocus`, simplified or frozen far away; skinned fallback when off-screen.
-- Cloth writes per-vertex tension (stretch vs compression from the solver) so the material shows wrinkles where fabric bunches and smooths where it pulls tight, at no extra simulation cost.
-- Hair, fur and grass share the renderer's strand pipeline (`engine_render` strands: GPU-expanded camera-facing strands from guide curves, hair shading with two specular lobes, LOD from strands to cards to shells). `engine_foliage` uses the same pipeline for grass, with wind sway instead of full dynamics.
-- Renders deformed meshes through a `RenderFeature` (dynamic vertex buffers, normals recomputed) using `shade_surface`, with `subsurface` for flesh and thin translucent cloth.
-- Runs in `FixedUpdate` / `SimSet::Physics` (after rigid bodies), honors `TimeDilation` and `LocalTimeScale`.
+// A flag on a pole (left edge pinned), streaming in the world wind.
+commands.spawn((Transform::from_xyz(0.0, 8.8, 0.0), Cloth::flag([3.0, 2.0], SoftMaterial::hex(0xc0392b))));
+// A curtain gathered into folds on rings; bullets leave holes, fire burns it away.
+commands.spawn((Transform::from_xyz(0.0, 6.0, 0.0), Cloth::curtain([4.6, 5.6], SoftMaterial::hex(0x7b1e2b))));
+// A cape on a character (child of the entity with the SkeletonPose).
+commands.spawn((Transform::from_xyz(0.0, 1.46, 0.21), Cloth::cape([0.72, 1.2], red, &["chest"]), ChildOf(hero)));
+// Long hair and a body that cape and hair collide with.
+commands.entity(hero).insert(BoneColliders::humanoid());
+commands.spawn((HairGroom::long_hair("head", HairStyle::long()), ChildOf(hero)));
+// A rope from here to a crate (two-way: a dynamic crate gets pulled).
+commands.spawn((Transform::from_xyz(0.0, 4.0, 0.0), Rope { end_b: RopeEnd::Entity { entity: crate_, offset: [0.0; 3] }, ..default() }));
+// A walkable rope bridge along local +X, and a jelly cube.
+commands.spawn((Transform::from_xyz(0.0, 3.0, 0.0), RopeBridge { length: 19.0, ..default() }));
+commands.spawn((Transform::from_xyz(4.0, 1.0, 0.0), SoftVolume::jelly(0.8, SoftMaterial::hex(0x2ecc71))));
+```
+
+Every spec component is data (serde, registered with docs), so AI agents and the editor can create and tune them; changing a spec rebuilds the simulation.
+
+## What it does
+
+- **One XPBD solver** (`solver.rs`): particles and distance, tether, pin, goal and shape-matching constraints with small substeps (Macklin et al. 2019), one iteration per substep. Fewer substeps in slow motion, so slow motion is cheaper and moves proportionally less.
+- **Collision** with physics colliders (sphere, capsule, box, cylinder; convex hulls as boxes; compounds), character capsules, capsules on skeleton bones (`BoneColliders`) and the `Ground`. Collider poses are swept through the substeps, so fast colliders don't tunnel. Coulomb friction.
+- **Two-way coupling**: reaction impulses on dynamic colliders become `ApplyImpulse` (cloth pushes crates, jelly sits on them with its full weight); ropes tied to dynamic bodies pull them; characters and `SoftLoad`s weigh rope bridges down.
+- **Cloth** (`Cloth`): flags, curtains (gathered into folds), capes and clothing pinned to bones; per-triangle aerodynamics (pressure drag and skin friction in the world wind with gusts), tearing when overstretched, bullet holes (`ProjectileTrace`), fire that spreads upward and burns triangles away (`IgniteRequest`, `HeatField`, explosions with heat), rain soaking it heavier and darker. The drawn cloth shows fine wrinkles wherever the solver reports compression, printed patterns, fabric sheen, charring and glowing burn edges.
+- **Ropes** (`Rope`) and **rope bridges** (`RopeBridge`): ends tied to nothing, the entity, a world point or another entity; cuttable by bullets, `softbody.cut` or code. Bridge planks are kinematic colliders driven by the ropes, so walkers stand on the sagging deck.
+- **Soft volumes** (`SoftVolume`): a particle lattice with one shape-matching constraint (rotation extraction, Müller 2016) plus lattice springs; plasticity keeps dents. A smooth rounded mesh is embedded in the lattice.
+- **Hair and fur** (`HairGroom`): guide strands grow from a scalp ellipsoid, around bone capsules, or over a whole skinned body mesh (`HairEmitter::Surface`: roots spread evenly by area, each riding the bones that carry the skin under it (`MeshSkins`; blended like the skinning at the joints, so the coat stays on bending skin), combed along the skeleton, longer or shorter by `FurZone`), draped over the skin, and are simulated as tiny ropes with goals toward their combed shape (stiffer at the root), tethers, drag and wind, colliding with the body. The renderer grows 30–60 drawn strands around each guide in the vertex shader (Catmull-Rom, spread, clumping, curl, per-strand length) with two-lobe Kajiya-Kay shading; strands thin out with distance. Melanin and redness give natural colors.
+- **Time**: runs in `FixedUpdate` / `SimSet::PostPhysics` (after rigid bodies). Bodies on a character use that character's `LocalTimeScale`, so a slowed character's cape and hair move in slow motion too.
+- **LOD**: bodies farther than `SoftBodyConfig::lod_distance` from every `SimulationFocus` step every other fixed step; past `freeze_distance` they hold still. Bodies are culled for drawing and shadows separately.
+
+## Components, resources and API
+
+| Name | What |
+|---|---|
+| `Cloth`, `Rope`, `RopeBridge`, `SoftVolume`, `HairGroom` | Specs. The plugin adds a `SoftBodySim` next to each (or `SoftBodyFailed` with a readable reason). |
+| `BoneColliders` | Capsules on a character's bones for cloth and hair (`humanoid()` for the usual bone names). |
+| `SoftLoad` | Weight an entity puts on rope bridges without a physics character. |
+| `MeshSkins` | Skin weights of skinned meshes in `Assets<Mesh>`, by key, so `Surface` fur moves with the skin. |
+| `SoftBodySim` | Runtime state: particles, constraints, bounds, step time. Read it for positions. |
+| `SoftBodyConfig` | `enabled`, `lod_distance`, `freeze_distance`, `quality` (substep multiplier). |
+| `softbody.list` / `stats` | What exists and what it costs. |
+| `softbody.cut` / `shoot` / `ignite` / `push` / `unpin` / `reset` | Act on bodies by world position or entity. |
 
 ## Contracts
 
-Reads: `WindField`, `Gravity`, `WorldImpulse` (explosions push cloth), `ProjectileTrace` (bullets pierce/tear), `HeatField` / `IgniteRequest` (burning cloth), `SurfaceLayers` (rain wetness), `SimulationFocus`; physics contract (`PhysicsQueries`, `Velocity`, `MassProperties`); animation contract (`SkeletonPose`).
+Reads: `WindField`, `Gravity`, `Ground`, `WeatherState` (rain), `HeatField`, `FocusPoints`, `ProjectileTrace`, `WorldImpulse`, `IgniteRequest`, `WorldShift` (particles, collider history and world-anchored rope ends follow the world into its new frame in `WorldShiftSet::Apply`); physics contract (`Collider`, `RigidBody`, `MassProperties`, `CharacterController`, `CharacterState`); animation contract (`SkeletonPose`); `LocalTimeScale`.
 
-Writes: `ApplyImpulse` (pushing rigid bodies), `WorldImpulse` (soft bodies hitting things), `NoiseEvent` (flapping, impacts), `GroundContact` (soft bodies landing), its own components.
+Writes: `ApplyImpulse` (soft bodies pushing and pulling rigid bodies), `GroundContact` (landings), `NoiseEvent` (impacts), `SmokeEmission` (burning cloth), its own components, and draws through `SoftBodyFeature` (a `RenderFeature`).
 
-No dependencies on other module crates (see ARCHITECTURE.md). Everything goes through `engine_world`; if a contract is missing, ask the core owner to add it.
+No dependencies on other module crates (see ARCHITECTURE.md).
+
+### Strand data for the shared strand renderer
+
+Hair and fur are drawn by this crate until the shared strand renderer exists. The format it needs is in `src/shaders/strand_common.wgsl` and `render::Geometry::add_hair`: a point buffer (guide particles, camera-relative), one `GpuStrandGuide` per guide (first point, count, groom, seed, root normal and tangent, length) and one `GpuGroom` per groom (color and thickness, spread, clumping, curl, strands per guide, segments, length variation, root shading). Grass can use the same buffers with sway instead of simulation.
+
+## Demo
+
+`demo::spawn_demo(commands, origin)` builds the yard: five banners and a field of 56 pennants, a curtain shot full of holes and one that burns away and comes back, a long rope bridge with a walker and a short one that is cut and drops, a bead curtain a ball pushes through, a swing, jelly cubes a wrecking ball knocks around, clay a press dents, a caped mannequin with long hair, the same mannequin in slow motion, and a dog with fur. Until the physics and animation modules land, props are kinematic and the skeletons are animated procedurally here through the same `SkeletonPose` contract.
+
+The characters are seamless sculpted bodies (`demo::body`, `demo::sculpt`): a signed distance field of lofted limbs and torso, muscles, face and paws, blended smoothly, meshed once at 3.4–4 mm (surface nets, projection onto the surface, curvature-aware decimation to about 145k triangles for the mannequin and 120k for the dog, relaxation, baked ambient occlusion) on background threads and shared. `demo::skin` deforms each body on the CPU every frame with dual-quaternion skinning (up to four bones per vertex, no candy-wrapper twists) into a mesh asset in well under a millisecond. The mannequins are satin fiberglass (ivory, graphite); the dog's coat grows over its whole skinned body.
+
+```sh
+cargo run -p engine_softbody --example yard --release -- out_dir 1280x720   # close-ups of each piece
+cargo run -p showcase --release -- --headless --tour yard                  # the showcase viewpoint
+```
 
 ## Done when
 
-- A cape on a running, dashing character stays on the body without jitter or tunneling, and reacts to wind and to slow motion.
-- A flag field (50+ flags) costs under 1 ms on the GPU; a sail pushes a boat.
-- A rope bridge carries a player and swings; cutting a rope drops it.
-- A jelly cube wobbles, stacks on rigid crates and gets knocked over by them.
-- A bullet through a curtain leaves a hole; fire burns cloth away.
-- Long hair on a running, dashing character swings and settles without passing through the head or shoulders; a dog's fur ripples in wind; both hold up in slow motion.
+- [x] A cape on a running character stays on the body without jitter or tunneling, and reacts to wind and to slow motion.
+- [ ] A flag field (50+ flags) costs under 1 ms on the GPU: 56 pennants run on the CPU today; GPU compute is next.
+- [ ] A sail pushes a boat: needs the physics backend (cloth already sends `ApplyImpulse`).
+- [x] A rope bridge carries a walker and swings; cutting a rope drops it.
+- [x] A jelly cube wobbles, rests on crates and gets knocked over (by a kinematic wrecking ball until rigid crates can move).
+- [x] A bullet through a curtain leaves a hole; fire burns cloth away.
+- [x] Long hair on a dashing head swings and settles without passing through the head; a dog's fur moves with it; both hold up in slow motion.
 
-## Checklist
-
-- Plugin registers its tunable components/resources (with docs) and `softbody.*` API functions.
-- Fixed-step simulation in the right `SimSet`; honors `TimeDilation`/`LocalTimeScale`.
-- Rendering through `RenderFeature`; shaders validated in a unit test.
-- Unit tests plus a headless screenshot test.
-- A `demo` module with `pub fn spawn_demo(commands: &mut Commands, origin: DVec3)` that builds a small showcase of the feature around `origin`; `games/showcase` places it in its zone.
+Next: GPU compute for large visual cloth, self-collision, water (buoyancy and wet cloth from `Water`), trimesh colliders through `PhysicsQueries`, hair wetness clumping.

@@ -6,13 +6,19 @@ Architecture and module ownership: [`ARCHITECTURE.md`](ARCHITECTURE.md).
 ## Build & test
 
 ```sh
+git config core.hooksPath .githooks   # once per clone: refuses commits and pushes `cargo fmt` would change
 cargo build --workspace
 cargo test -p <crate>                 # every crate has unit tests that need no GPU
-cargo clippy --workspace --all-targets
+cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all
 cargo run -p hello                    # windowed
 cargo run -p hello -- --headless --frames 4   # offscreen, writes screenshots/hello.png
 ```
+
+Before every push, run `cargo fmt --all`, the clippy line above, and the tests of each crate
+you changed and of every crate that uses what you changed (shared shaders, contracts and
+assets reach other modules; `cargo test --workspace` covers all). CI runs all of it on every
+pull request, and each failed run emails the repository owner.
 
 Headless GPU tests and screenshots need a GPU or a software Vulkan driver. On Debian/Ubuntu
 containers: `apt-get install -y mesa-vulkan-drivers` (lavapipe). Tests that need a GPU must
@@ -76,8 +82,9 @@ A module is one crate (`crates/<name>`, package `engine_<name>`) with one `Plugi
    `app.register_api("fire.ignite", "Start a fire", r#"{"at": [0,0,0]}"#, |world, args| ...)`.
    The AI bridge, console and scripts call these; nothing else is needed to make a feature
    AI-controllable.
-4. **Render through `RenderFeature`.** Implement the trait (prepare/draw/draw_shadow/
-   draw_environment/overlay), add it with `app.add_render_feature(...)`. Compose shaders with
+4. **Render through `RenderFeature`.** Implement the trait (prepare/draw/draw_prepass/
+   draw_shadow/draw_environment/overlay), add it with `app.add_render_feature(...)`. Opaque
+   geometry also implements `draw_prepass` so ambient occlusion and anti-aliasing see it. Compose shaders with
    `GpuShared::shader(label, src, with_frame)`; use `shade_surface`, `apply_fog`,
    `shadow_factor`, `wind_offset` from `lib_frame.wgsl` so lighting matches everything else.
    Output **pre-exposed** radiance (`pre_expose`). Add a unit test that runs
@@ -86,6 +93,83 @@ A module is one crate (`crates/<name>`, package `engine_<name>`) with one `Plugi
    and cheaper (or frozen) far away. Grids (`Grid2`/`Grid3`) recenter on focus.
 6. **Tests.** Unit tests for logic (no GPU). For visuals, a headless test that renders and
    saves a PNG via `engine_render::capture_now` and checks something about the pixels.
+
+## Art and large files
+
+The bar is AAA: nothing in a screenshot or the showcase should look low poly or placeholder.
+Get detail from procedural generation first (noise-shaped terrain and rocks, grown trees,
+displaced and tessellated meshes, layered materials), and use CC0 scans (Poly Haven,
+ambientCG) where scans beat procedural: rock, ground, bark, skies.
+
+Storage (the first rule is a test, so CI enforces it):
+
+- **No file over 1 MiB goes into git, and no third-party art at any size.** No Git LFS either:
+  every clone and CI run of every thread would download it. `tools/fetch-assets`'s
+  `no_large_files_are_committed` test fails the build otherwise.
+- Large files are listed in `assets/manifests/<area>.toml` (one per thread, named after its
+  area, so threads never conflict) and downloaded into `assets/fetched/` (gitignored) by
+  `cargo run -p fetch-assets`. Code loads them with the asset key `fetched/<path>`.
+- Every entry is pinned by SHA-256, links the `source` page, and has an allowed `license`:
+  `CC0-1.0` preferred, CC-BY with an `author` to credit, MIT, Apache-2.0 or OFL-1.1 with the
+  `copyright` line from the origin's license file; nothing non-commercial or no-derivatives
+  (most motion-capture datasets, such as LAFAN1 and Bandai Namco's, are CC BY-NC-ND, so they
+  are out). Format and checks: `tools/fetch-assets` docs.
+- The repository and the mirror are public, so licenses travel with the files: fetching
+  writes `assets/fetched/THIRD_PARTY_NOTICES.md` (every file's license, author and source,
+  CC-BY credits, and the license texts), the Assets workflow puts the same file on the mirror,
+  and a build that ships fetched files ships it too.
+- Code must run when a fetched file is missing (CI and fresh checkouts don't fetch): fall back
+  to a procedural or plain version and log once. Tests never depend on fetched files.
+
+Adding a file:
+
+1. Put the entry, with `sha256 = ""`, on a fresh scratch branch from main and push it (no pull
+   request; CI doesn't run there, so nothing turns red):
+
+   ```sh
+   git fetch origin main
+   git switch -c assets/<area> origin/main    # from main, so it has the current workflow
+   # add the entry to assets/manifests/<area>.toml, then commit only that file
+   git push origin assets/<area>    # --force if an old assets/<area> branch is still there
+   ```
+
+   The Assets workflow downloads the file, copies it to the `asset-mirror` release, reports
+   `sha256 = "…"` as an annotation on its check run, and deletes the scratch branch.
+2. Read the pin (the run takes a few minutes; `status` turns `completed`):
+
+   ```sh
+   sha=$(git rev-parse HEAD)    # the commit you pushed
+   run=$(gh api repos/TobiasMidtgard/Engine/commits/$sha/check-runs \
+     --jq '.check_runs[] | select(.name == "Mirror fetched assets") | .id')
+   gh api repos/TobiasMidtgard/Engine/check-runs/$run/annotations \
+     --jq '.[] | select(.title | startswith("Asset")) | .message'    # pins, or what failed
+   ```
+
+   Paste the pin into the manifest on your working branch and push that. If the run failed
+   (a bad URL, say), fix the entry, commit and push the scratch branch again. Never push an
+   unpinned entry to a pull request: the test job fails until it is pinned.
+
+From then on `cargo run -p fetch-assets` gets the file from the mirror even where the original
+host is blocked (as it is in the project's cloud sessions). Where the host is reachable,
+`cargo run -p fetch-assets` fetches unpinned entries and prints the pin itself.
+
+Files made here (a model converted to GLB, a baked texture, an offline recording) have no
+download link:
+
+1. Give the entry `url = "mirror"`, a `source` linking what it was made from (or the code that
+   made it), and that origin's `license` (`MIT OR Apache-2.0`, the engine's own, for art made
+   from scratch). Put the file at `assets/fetched/<path>`.
+2. Run `cargo run -p fetch-assets -- publish`. It uploads the file to the mirror and prints the
+   pin. In the project's cloud sessions, where uploads are blocked, it pushes a short-lived
+   `asset-upload/…` branch instead; the Asset upload workflow copies the files to the mirror and
+   deletes the branch. Paste the pin and push once that workflow has run, which is when
+   `git ls-remote origin refs/heads/asset-upload/<id>` prints nothing.
+
+Only the mirror has these. Fetching them needs no login now that the repository is public (a
+`GITHUB_TOKEN` or `gh auth login` raises GitHub's rate limit).
+
+Sizes: 2K for most materials, 4K for hero assets and terrain close-ups, 2K–4K HDRIs for
+lighting (8K only for a visible backdrop). JPG or PNG for color, HDR or EXR only for HDR data.
 
 ## Performance rules
 

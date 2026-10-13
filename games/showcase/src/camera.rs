@@ -5,7 +5,6 @@
 //! - 1–9 jump to the zones, 0 to the overview, O to orbit, M to the Moon.
 //! - `[` and `]` change the hour, `T` starts or stops the clock.
 
-use crate::day_cycle::DayCycle;
 use crate::places::{self, Place};
 use engine::prelude::*;
 
@@ -36,6 +35,8 @@ pub fn spawn_camera(commands: &mut Commands) {
         },
         cam,
         t,
+        // Water, fire, smoke and weather grids follow the camera around the valley.
+        engine::world::SimulationFocus::default(),
     ));
 }
 
@@ -68,7 +69,7 @@ pub fn fly(
     mouse: Res<Mouse>,
     time: Res<Time>,
     atmosphere: Res<Atmosphere>,
-    mut cycle: ResMut<DayCycle>,
+    mut sky: ResMut<engine_weather::Sky>,
     mut window: ResMut<Window>,
     mut q: Query<(&mut Transform, &mut ShowcaseCamera)>,
 ) {
@@ -97,13 +98,13 @@ pub fn fly(
     .and_then(|(_, key)| places::find(key));
 
     if keys.just_pressed(KeyCode::BracketLeft) {
-        cycle.hour = (cycle.hour - 1.0).rem_euclid(24.0);
+        sky.hour = (sky.hour - 1.0).rem_euclid(24.0);
     }
     if keys.just_pressed(KeyCode::BracketRight) {
-        cycle.hour = (cycle.hour + 1.0).rem_euclid(24.0);
+        sky.hour = (sky.hour + 1.0).rem_euclid(24.0);
     }
     if keys.just_pressed(KeyCode::T) {
-        cycle.hours_per_second = if cycle.hours_per_second == 0.0 {
+        sky.hours_per_second = if sky.hours_per_second == 0.0 {
             0.25
         } else {
             0.0

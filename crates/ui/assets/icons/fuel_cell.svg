@@ -1,0 +1,39 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <defs>
+    <linearGradient id="metal" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#e8edf3"/>
+      <stop offset=".35" stop-color="#a3aebd"/>
+      <stop offset="1" stop-color="#3e4757"/>
+    </linearGradient>
+    <linearGradient id="dark" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#5a6476"/>
+      <stop offset="1" stop-color="#1c212c"/>
+    </linearGradient>
+    <linearGradient id="core" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#bff1ff"/>
+      <stop offset=".4" stop-color="#5fd0ff"/>
+      <stop offset="1" stop-color="#1468a8"/>
+    </linearGradient>
+    <radialGradient id="halo" cx=".5" cy=".5" r=".5">
+      <stop offset="0" stop-color="#5fd0ff" stop-opacity=".45"/>
+      <stop offset="1" stop-color="#5fd0ff" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+  <g transform="rotate(18 32 32)">
+    <ellipse cx="32" cy="32" rx="22" ry="28" fill="url(#halo)"/>
+    <g stroke="#0c0f16" stroke-width="4" stroke-linejoin="round" paint-order="stroke">
+      <rect x="27" y="2" width="10" height="6" rx="1.5" fill="url(#metal)"/>
+      <rect x="20" y="16" width="24" height="32" rx="2" fill="url(#core)"/>
+      <path d="M18 8 L46 8 L46 18 L18 18 Z" fill="url(#metal)"/>
+      <path d="M18 46 L46 46 L46 56 C46 58 44 60 42 60 L22 60 C20 60 18 58 18 56 Z" fill="url(#metal)"/>
+    </g>
+    <g stroke="#0c0f16" stroke-width="1.6"><path d="M20 23 L44 23 M20 32 L44 32 M20 41 L44 41" stroke="#1a5a8a" stroke-width="1" opacity=".7"/></g>
+    <path d="M23 18 L23 46" stroke="#ffffff" stroke-width="2.4" opacity=".75" stroke-linecap="round"/>
+    <path d="M32 20 L28 32 L33 32 L30 44 L37 29 L32 29 L35 20 Z" fill="#ffffff" opacity=".9"/>
+    <path d="M18 51 L46 51" stroke="#e8b65a" stroke-width="3"/>
+    <path d="M18 51 L46 51" stroke="#0c0f16" stroke-width="3" stroke-dasharray="3 3"/>
+    <path d="M20 10.6 L44 10.6" stroke="#ffffff" stroke-width="1.1" stroke-linecap="round"/>
+    <path d="M20 48.6 L44 48.6" stroke="#ffffff" stroke-width="1" stroke-linecap="round" opacity=".8"/>
+    <rect x="38" y="11" width="4" height="4" rx="1" fill="#5fd0ff" stroke="#0c0f16" stroke-width=".8"/>
+  </g>
+</svg>

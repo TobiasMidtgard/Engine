@@ -1,0 +1,27 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <defs>
+    <linearGradient id="gold" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#fff3c4"/>
+      <stop offset=".45" stop-color="#e8b65a"/>
+      <stop offset="1" stop-color="#7f4c14"/>
+    </linearGradient>
+    <radialGradient id="gem" cx=".38" cy=".32" r=".7">
+      <stop offset="0" stop-color="#ffd0d4"/>
+      <stop offset=".35" stop-color="#ff4a5e"/>
+      <stop offset="1" stop-color="#6a0818"/>
+    </radialGradient>
+  </defs>
+  <path d="M10 4 C10 16 18 26 28 31 M54 4 C54 16 46 26 36 31" stroke="#0c0f16" stroke-width="5" fill="none" stroke-linecap="round"/>
+  <path d="M10 4 C10 16 18 26 28 31 M54 4 C54 16 46 26 36 31" stroke="#e8b65a" stroke-width="2.4" fill="none" stroke-linecap="round" stroke-dasharray="2.2 1.6"/>
+  <g stroke="#0c0f16" stroke-width="4" stroke-linejoin="round" paint-order="stroke">
+    <rect x="28" y="27" width="8" height="8" rx="2.5" fill="url(#gold)"/>
+    <path d="M32 32 C38 34 46 38 47 46 C48 54 40 60 32 61 C24 60 16 54 17 46 C18 38 26 34 32 32 Z" fill="url(#gold)"/>
+  </g>
+  <path d="M32 37 C36.5 38.5 42 41.5 42.5 47 C43 52.5 37.5 56 32 56.5 C26.5 56 21 52.5 21.5 47 C22 41.5 27.5 38.5 32 37 Z" fill="url(#gem)" stroke="#0c0f16" stroke-width="1.6"/>
+  <path d="M25 43 C26.5 40.8 29 39.5 31.5 39" stroke="#ffffff" stroke-width="1.6" fill="none" stroke-linecap="round" opacity=".85"/>
+  <circle cx="36.5" cy="51" r="1.2" fill="#ffffff" opacity=".5"/>
+  <path d="M19.5 41.5 C21 37.6 25 35.4 30 34" stroke="#fffbe6" stroke-width="1.1" fill="none" stroke-linecap="round"/>
+  <g fill="#fff3c4" stroke="#0c0f16" stroke-width=".7">
+    <circle cx="32" cy="34.6" r="1.1"/><circle cx="19.3" cy="47" r="1"/><circle cx="44.7" cy="47" r="1"/><circle cx="32" cy="58.6" r="1"/>
+  </g>
+</svg>

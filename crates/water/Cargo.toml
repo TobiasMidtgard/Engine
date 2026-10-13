@@ -1,6 +1,6 @@
 [package]
 name = "engine_water"
-description = "Water (stub: scope and contracts in README.md)."
+description = "Water: wind-driven ocean and lake waves, interactive ripples, wakes and splashes, flowing streams and waterfalls (shallow-water simulation), buoyancy, rain rings and puddles, and a water renderer with refraction, reflections, depth color, foam, caustics and an underwater view."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -8,6 +8,14 @@ license.workspace = true
 [dependencies]
 engine_core.workspace = true
 engine_world.workspace = true
+engine_render.workspace = true
+engine_assets.workspace = true
 bevy_ecs.workspace = true
+wgpu.workspace = true
+bytemuck.workspace = true
+parking_lot.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+
+[dev-dependencies]
+image.workspace = true

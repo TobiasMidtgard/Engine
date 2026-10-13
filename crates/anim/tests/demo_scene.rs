@@ -1,0 +1,177 @@
+//! Runs the animation paddock without a renderer and checks that each test case does what
+//! it shows: the hammer lands on the tire with both hands on the handle, muscles tense and
+//! relax, the walker climbs the course, the horse gallops with working flanks, the spider
+//! and the car move.
+
+use engine_anim::demo::{DemoEntities, hammer_head, spawn_demo_world, tire_strike_point};
+use engine_anim::{AnimationPlugin, Animator, MuscleRig};
+use engine_core::prelude::*;
+use engine_core::time::TimeSource;
+use engine_world::WorldPlugin;
+use engine_world::animation::AnimationParams;
+
+const STEP: f64 = 1.0 / 60.0;
+
+fn app() -> (App, DemoEntities) {
+    let mut app = App::new();
+    app.world.resource_mut::<EngineConfig>().headless = true;
+    app.world
+        .resource_mut::<Time>()
+        .set_source(TimeSource::Manual { step_secs: STEP });
+    app.add_plugins((WorldPlugin, AnimationPlugin));
+    let demo = spawn_demo_world(&mut app.world, DVec3::ZERO);
+    engine_anim::character::finish_loading(&mut app.world);
+    (app, demo)
+}
+
+fn activation(world: &World, e: Entity, muscle: &str) -> f32 {
+    world
+        .get::<MuscleRig>(e)
+        .map_or(0.0, |m| m.activation(muscle))
+}
+
+fn bone_world(world: &World, e: Entity, bone: &str) -> DVec3 {
+    let a = world.get::<Animator>(e).unwrap();
+    let gt = world.get::<GlobalTransform>(e).unwrap();
+    engine_anim::ik::to_world(gt, a.model[a.skeleton.bone(bone)].t)
+}
+
+#[derive(Debug, Default)]
+struct Seen {
+    closest_strike: f64,
+    max_hand_gap_while_gripping: f64,
+    biceps_at_strike: f32,
+    biceps_relaxed: f32,
+    lifter_flex: f32,
+    walker_max_height: f64,
+    walker_max_speed: f32,
+    walker_foot_float: f64,
+    horse_max_speed: f32,
+    haunch_at_gallop: f32,
+    spider_moved: f64,
+    car_moved: f64,
+}
+
+#[test]
+fn every_test_case_does_what_it_shows() {
+    let (mut app, d) = app();
+    let strike = tire_strike_point(DVec3::ZERO);
+    let start_spider = app.world.get::<Transform>(d.spider).unwrap().translation;
+    let start_car = app.world.get::<Transform>(d.car).unwrap().translation;
+    let mut seen = Seen {
+        closest_strike: f64::MAX,
+        ..Default::default()
+    };
+    let frames = (14.0 / STEP) as usize;
+    for frame in 1..=frames {
+        app.update();
+        let t = frame as f64 * STEP;
+        let w = &app.world;
+        // Swing: triggered at 0.5 s, impact at 53% of 2 s.
+        if (1.45..1.7).contains(&t) {
+            let head = hammer_head(w, d.athlete).unwrap();
+            seen.closest_strike = seen.closest_strike.min(head.distance(strike));
+            seen.biceps_at_strike = seen
+                .biceps_at_strike
+                .max(activation(w, d.athlete, "biceps_r"));
+        }
+        if (1.0..1.4).contains(&t) {
+            let gap =
+                bone_world(w, d.athlete, "hand_l").distance(bone_world(w, d.athlete, "hand_r"));
+            seen.max_hand_gap_while_gripping = seen.max_hand_gap_while_gripping.max(gap);
+        }
+        if (3.4..3.5).contains(&t) {
+            seen.biceps_relaxed = activation(w, d.athlete, "biceps_r");
+        }
+        if (2.2..2.8).contains(&t) {
+            seen.lifter_flex = seen.lifter_flex.max(activation(w, d.lifter, "biceps_l"));
+        }
+        let walker = w.get::<GlobalTransform>(d.walker).unwrap().translation();
+        seen.walker_max_height = seen.walker_max_height.max(walker.y);
+        let params = w.get::<AnimationParams>(d.walker).unwrap();
+        seen.walker_max_speed = seen.walker_max_speed.max(params.get("speed"));
+        // On flat ground away from the course, the lower foot stays near the floor.
+        if walker.x < -15.5 && walker.z > -5.0 && walker.y.abs() < 0.01 {
+            let low = bone_world(w, d.walker, "foot_l")
+                .y
+                .min(bone_world(w, d.walker, "foot_r").y);
+            seen.walker_foot_float = seen.walker_foot_float.max(low);
+        }
+        let horse_speed = w.get::<AnimationParams>(d.horse).unwrap().get("speed");
+        seen.horse_max_speed = seen.horse_max_speed.max(horse_speed);
+        if horse_speed > 9.0 {
+            let haunch = activation(w, d.horse, "haunch_l").max(activation(w, d.horse, "haunch_r"));
+            seen.haunch_at_gallop = seen.haunch_at_gallop.max(haunch);
+        }
+    }
+    let w = &app.world;
+    seen.spider_moved = w
+        .get::<Transform>(d.spider)
+        .unwrap()
+        .translation
+        .distance(start_spider);
+    seen.car_moved = w
+        .get::<Transform>(d.car)
+        .unwrap()
+        .translation
+        .distance(start_car);
+
+    eprintln!("{seen:#?}");
+    assert!(
+        seen.closest_strike < 0.3,
+        "hammer missed the tire by {:.2} m",
+        seen.closest_strike
+    );
+    assert!(
+        seen.max_hand_gap_while_gripping < 0.25,
+        "hands {:.2} m apart on the handle",
+        seen.max_hand_gap_while_gripping
+    );
+    assert!(
+        seen.biceps_at_strike > 0.5,
+        "biceps at the strike {}",
+        seen.biceps_at_strike
+    );
+    assert!(
+        seen.biceps_relaxed < seen.biceps_at_strike * 0.5,
+        "biceps did not relax: {} after {}",
+        seen.biceps_relaxed,
+        seen.biceps_at_strike
+    );
+    assert!(
+        seen.lifter_flex > 0.6,
+        "flex activation {}",
+        seen.lifter_flex
+    );
+    assert!(
+        seen.walker_max_height > 0.6,
+        "walker never got up the ramp ({:.2} m)",
+        seen.walker_max_height
+    );
+    assert!(
+        seen.walker_max_speed > 3.0,
+        "walker never ran ({})",
+        seen.walker_max_speed
+    );
+    assert!(
+        seen.walker_foot_float < 0.2,
+        "walker's feet float {:.2} m",
+        seen.walker_foot_float
+    );
+    assert!(
+        seen.horse_max_speed > 9.0,
+        "horse never galloped ({})",
+        seen.horse_max_speed
+    );
+    assert!(
+        seen.haunch_at_gallop > 0.4,
+        "haunches at the gallop {}",
+        seen.haunch_at_gallop
+    );
+    assert!(
+        seen.spider_moved > 1.0,
+        "spider moved {:.2} m",
+        seen.spider_moved
+    );
+    assert!(seen.car_moved > 5.0, "car moved {:.2} m", seen.car_moved);
+}

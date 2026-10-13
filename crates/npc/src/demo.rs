@@ -1,8 +1,10 @@
 //! Showcase content.
 //!
-//! * [`spawn_demo`]: the combat arena, a sand floor ringed by stepped stone stands with team
-//!   banners, pillars and braziers. Two squads of mixed skill fight across low walls, crates,
-//!   explosive barrels and a raised platform: shooters take cover and climb for height, squads
+//! * [`spawn_demo`]: the combat arena, a sand floor ringed by sandstone stands (seats, an
+//!   arcade and four gates) with team banners, fluted columns and braziers; the art comes from
+//!   [`crate::art::arena`] and sits on unchanged gameplay colliders. Two squads of mixed skill
+//!   fight across ashlar walls and timber barricades, crates, explosive drums and a raised
+//!   platform: shooters take cover and climb for height, squads
 //!   suppress and flank, sword fighters close in and take turns. A master and a veteran duel
 //!   in a ring in front (block, parry, feint, punish). On the east side a sparring lane puts
 //!   five fighters from rookie to master in front of swinging posts, so you can see skill
@@ -16,10 +18,11 @@
 use std::f64::consts::TAU;
 
 use engine_core::prelude::*;
-use engine_render::{MeshRenderer, PointLight, Shape, StandardMaterial};
+use engine_render::PointLight;
 use engine_world::physics::{Collider, ColliderShape};
 
 use crate::agent::{Npc, NpcSettings, NpcWeapon};
+use crate::art::arena::{self, ArenaLayout, Piece, Team};
 use crate::faction::{Faction, Factions, Squad};
 use crate::features::ExplosiveProp;
 use crate::skills::NpcSkills;
@@ -28,7 +31,7 @@ use crate::visuals::StandIn;
 use crate::wildlife::{Animal, Herd, Species};
 
 /// How far the arena reaches from its origin, stands and banners included, meters. The fight
-/// stays within 40 m.
+/// stays on the floor inside the stands (41 m).
 pub const ARENA_RADIUS: f64 = 48.0;
 
 /// Where the duel ring is, relative to the arena origin (in front of the south camera).
@@ -45,244 +48,113 @@ pub const SPARRING: Faction = Faction(23);
 pub const DUEL_A: Faction = Faction(21);
 pub const DUEL_B: Faction = Faction(22);
 
-fn concrete() -> StandardMaterial {
-    StandardMaterial::hex(0xa39e94).with_roughness(0.85)
+/// A gameplay solid: a box collider resting on the floor (`arena::dress` adds its art).
+fn solid(commands: &mut Commands, at: DVec3, half: Vec3, yaw: f32) -> Entity {
+    commands
+        .spawn((
+            Transform::from_translation(at + DVec3::Y * half.y as f64)
+                .with_rotation(Quat::from_rotation_y(yaw)),
+            Collider::cuboid(half),
+        ))
+        .id()
 }
 
-fn wood() -> StandardMaterial {
-    StandardMaterial::hex(0x8a6a44).with_roughness(0.8)
-}
-
-fn stone() -> StandardMaterial {
-    StandardMaterial::hex(0x9a9184).with_roughness(0.92)
-}
-
-fn piece(commands: &mut Commands, at: DVec3, yaw: f32, shape: Shape, material: StandardMaterial) {
-    commands.spawn((
-        Transform::from_translation(at).with_rotation(Quat::from_rotation_y(yaw)),
-        MeshRenderer::new(shape, material),
-    ));
-}
-
-/// Sand floor, stepped stands with four entrances, team banners, pillars, braziers, and the
-/// ramp and wall-run wall the movement module uses.
-fn arena_shell(commands: &mut Commands, origin: DVec3) {
+/// Stands with four gates, team banners, pillars, braziers, and the ramp and wall-run wall the
+/// movement module uses: colliders where fighters can touch them, everything else only in
+/// `layout` for the art.
+fn arena_shell(commands: &mut Commands, origin: DVec3, layout: &mut ArenaLayout) {
     let o = |x: f64, y: f64, z: f64| origin + DVec3::new(x, y, z);
-    piece(
-        commands,
-        o(0.0, 0.02, 0.0),
-        0.0,
-        Shape::Cylinder {
-            radius: 40.0,
-            height: 0.04,
-            segments: 96,
-        },
-        StandardMaterial::hex(0xa48d66).with_roughness(0.97),
-    );
-    piece(
-        commands,
-        o(0.0, 0.06, 0.0),
-        0.0,
-        Shape::Torus {
-            radius: 40.4,
-            tube: 0.35,
-            segments: 96,
-        },
-        stone(),
-    );
-    // Stands: four tiers of stone blocks, open at the four entrances (east, north, west,
-    // south). The first tier has colliders and keeps fighters in.
+    // The podium wall of the stands keeps fighters in: one collider per 10° sector, open at
+    // the four gates (east, north, west, south).
     const SEGMENTS: usize = 36;
-    for k in 0..4 {
-        let r = 41.8 + k as f64 * 1.6;
-        let h = 0.8 * (k + 1) as f32;
-        let width = (TAU * r / SEGMENTS as f64) as f32 + 0.25;
-        let half = Vec3::new(width * 0.5, h * 0.5, 0.8);
-        for i in 0..SEGMENTS {
-            if i % (SEGMENTS / 4) == 0 {
-                continue;
-            }
-            let a = i as f64 / SEGMENTS as f64 * TAU;
-            let at = o(a.cos() * r, h as f64 * 0.5, a.sin() * r);
-            let yaw = -(a as f32) + std::f32::consts::FRAC_PI_2;
-            let mut e = commands.spawn((
-                Transform::from_translation(at).with_rotation(Quat::from_rotation_y(yaw)),
-                MeshRenderer::new(
-                    Shape::Cuboid {
-                        size: (half * 2.0).to_array(),
-                    },
-                    stone(),
-                ),
-            ));
-            if k == 0 {
-                e.insert(Collider::cuboid(half));
-            }
+    let r = 41.8;
+    let width = (TAU * r / SEGMENTS as f64) as f32 + 0.25;
+    let half = Vec3::new(width * 0.5, 0.4, 0.8);
+    for i in 0..SEGMENTS {
+        if i % (SEGMENTS / 4) == 0 {
+            continue;
         }
-    }
-    // Banners on the top tier: red behind the red squad (north), blue behind the blue (south).
-    for (deg, color) in [
-        (62.0, 0xa83232),
-        (76.0, 0xa83232),
-        (104.0, 0xa83232),
-        (118.0, 0xa83232),
-        (242.0, 0x2f5fa8),
-        (256.0, 0x2f5fa8),
-        (284.0, 0x2f5fa8),
-        (298.0, 0x2f5fa8),
-    ] {
-        let a = f64::to_radians(deg);
-        let (c, s) = (a.cos(), a.sin());
-        let base = 3.2;
-        let r = 47.0;
-        piece(
-            commands,
-            o(c * r, base + 3.5, s * r),
-            0.0,
-            Shape::Cylinder {
-                radius: 0.07,
-                height: 7.0,
-                segments: 8,
-            },
-            StandardMaterial::hex(0x3b2f25).with_roughness(0.7),
-        );
+        let a = i as f64 / SEGMENTS as f64 * TAU;
         let yaw = -(a as f32) + std::f32::consts::FRAC_PI_2;
-        let cloth = o(c * (r - 0.12), base + 4.7, s * (r - 0.12));
-        piece(
-            commands,
-            cloth,
-            yaw,
-            Shape::Cuboid {
-                size: [1.5, 3.4, 0.04],
-            },
-            StandardMaterial::hex(color)
-                .with_roughness(0.85)
-                .with_subsurface(0.4)
-                .with_wind_sway(0.12),
-        );
-        piece(
-            commands,
-            cloth + DVec3::Y * 1.75,
-            yaw,
-            Shape::Cuboid {
-                size: [1.7, 0.08, 0.08],
-            },
-            StandardMaterial::hex(0xc9a227)
-                .with_metallic(0.8)
-                .with_roughness(0.35),
-        );
+        let e = commands
+            .spawn((
+                Transform::from_translation(o(a.cos() * r, 0.4, a.sin() * r))
+                    .with_rotation(Quat::from_rotation_y(yaw)),
+                Collider::cuboid(half),
+            ))
+            .id();
+        layout.pieces.push((e, Piece::Podium));
+    }
+    // Banners on the top walkway: red behind the red squad (north), blue behind the blue (south).
+    for (deg, team) in [
+        (62.0, Team::Red),
+        (76.0, Team::Red),
+        (104.0, Team::Red),
+        (118.0, Team::Red),
+        (242.0, Team::Blue),
+        (256.0, Team::Blue),
+        (284.0, Team::Blue),
+        (298.0, Team::Blue),
+    ] {
+        layout.banners.push((f64::to_radians(deg), team));
     }
     // Pillars, turned half a step so none blocks the south camera's view of the center.
     for i in 0..8 {
         let a = (i as f64 + 0.5) / 8.0 * TAU;
-        let at = o(a.cos() * 18.0, 0.0, a.sin() * 18.0);
-        commands.spawn((
-            Transform::from_translation(at + DVec3::Y * 3.5),
-            MeshRenderer::new(
-                Shape::Cylinder {
-                    radius: 1.0,
-                    height: 7.0,
-                    segments: 24,
+        let e = commands
+            .spawn((
+                Transform::from_translation(o(a.cos() * 18.0, 3.5, a.sin() * 18.0)),
+                Collider {
+                    shape: ColliderShape::Cylinder {
+                        radius: 1.1,
+                        half_height: 3.5,
+                    },
+                    ..Default::default()
                 },
-                concrete(),
-            ),
-            Collider {
-                shape: ColliderShape::Cylinder {
-                    radius: 1.1,
-                    half_height: 3.5,
-                },
-                ..Default::default()
-            },
-        ));
-        for (y, size) in [(0.25, [2.4, 0.5, 2.4]), (7.15, [2.2, 0.3, 2.2])] {
-            piece(
-                commands,
-                at + DVec3::Y * y,
-                0.0,
-                Shape::Cuboid { size },
-                stone(),
-            );
-        }
+            ))
+            .id();
+        layout.pieces.push((e, Piece::Pillar(i % 2)));
     }
-    // Braziers flanking each entrance.
+    // Braziers flanking each entrance, each with the light of its fire.
     for side in 0..4 {
         for d in [-7.0f64, 7.0] {
             let a = f64::to_radians(side as f64 * 90.0 + d);
             let at = o(a.cos() * 38.6, 0.0, a.sin() * 38.6);
-            brazier(commands, at);
+            layout.braziers.push(at);
+            commands.spawn((
+                Transform::from_translation(at + DVec3::Y * 1.8),
+                PointLight {
+                    color: [1.0, 0.55, 0.25],
+                    intensity_lm: 2500.0,
+                    range: 16.0,
+                    radius: 0.3,
+                },
+                arena::Flicker {
+                    seed: arena::fire_seed(layout.braziers.len() - 1),
+                    lumens: 2500.0,
+                },
+            ));
         }
     }
     // A ramp and a wall-run wall for the movement module.
-    commands.spawn((
-        Transform::from_translation(o(12.0, 1.6, 8.0)).with_rotation(Quat::from_rotation_x(0.35)),
-        MeshRenderer::new(
-            Shape::Cuboid {
-                size: [4.0, 0.5, 10.0],
-            },
-            concrete(),
-        ),
-        Collider::cuboid(Vec3::new(2.0, 0.25, 5.0)),
-    ));
-    block(
-        commands,
-        o(-24.0, 0.0, 0.0),
-        Vec3::new(0.4, 3.0, 12.0),
-        0.0,
-        concrete(),
-    );
-}
-
-fn brazier(commands: &mut Commands, at: DVec3) {
-    piece(
-        commands,
-        at + DVec3::Y * 0.5,
-        0.0,
-        Shape::Cylinder {
-            radius: 0.28,
-            height: 1.0,
-            segments: 12,
-        },
-        stone(),
-    );
-    piece(
-        commands,
-        at + DVec3::Y * 1.12,
-        0.0,
-        Shape::Cylinder {
-            radius: 0.55,
-            height: 0.26,
-            segments: 16,
-        },
-        StandardMaterial::hex(0x2b2724)
-            .with_metallic(0.8)
-            .with_roughness(0.5),
-    );
-    piece(
-        commands,
-        at + DVec3::Y * 1.27,
-        0.0,
-        Shape::Cylinder {
-            radius: 0.46,
-            height: 0.06,
-            segments: 16,
-        },
-        StandardMaterial::hex(0xff6a1a)
-            .with_emissive([1.0, 0.38, 0.08], 8.0)
-            .with_roughness(0.6),
-    );
-    commands.spawn((
-        Transform::from_translation(at + DVec3::Y * 1.8),
-        PointLight {
-            color: [1.0, 0.55, 0.25],
-            intensity_lm: 2500.0,
-            range: 16.0,
-            radius: 0.3,
-        },
-    ));
+    let (ramp_at, tilt) = (o(12.0, 1.6, 8.0), 0.35);
+    let half = Vec3::new(2.0, 0.25, 5.0);
+    let e = commands
+        .spawn((
+            Transform::from_translation(ramp_at).with_rotation(Quat::from_rotation_x(tilt)),
+            Collider::cuboid(half),
+        ))
+        .id();
+    let ground = (origin.y - ramp_at.y) as f32;
+    layout.pieces.push((e, Piece::Ramp(half, tilt, ground)));
+    let half = Vec3::new(0.4, 3.0, 12.0);
+    let e = solid(commands, o(-24.0, 0.0, 0.0), half, 0.0);
+    layout.pieces.push((e, Piece::WallRun(half)));
 }
 
 /// Five sword-and-shield fighters, rookie to master, each facing a post that swings at them.
 /// They hold their ground (not `active`), so only their defense shows.
-fn sparring_lane(commands: &mut Commands, first: DVec3) {
+fn sparring_lane(commands: &mut Commands, first: DVec3, layout: &mut ArenaLayout) {
     for (i, skills) in NpcSkills::PRESETS.into_iter().enumerate() {
         let at = first + DVec3::Z * (i as f64 * 5.0);
         let post_at = at - DVec3::X * 1.7;
@@ -307,30 +179,11 @@ fn sparring_lane(commands: &mut Commands, first: DVec3) {
             SparringPost::new(npc),
         ));
         // A mat under each station.
-        piece(
-            commands,
-            at - DVec3::X * 0.85 + DVec3::Y * 0.05,
-            0.0,
-            Shape::Cuboid {
-                size: [3.6, 0.04, 2.6],
-            },
-            StandardMaterial::hex(0x5b4636).with_roughness(0.95),
-        );
+        let mat = at - DVec3::X * 0.85;
+        layout.mats.push(DVec3::new(mat.x, layout.origin.y, mat.z));
+        let rel = (mat - layout.origin).as_vec3();
+        layout.trample.push((Vec2::new(rel.x, rel.z), 2.2));
     }
-}
-
-fn block(commands: &mut Commands, at: DVec3, half: Vec3, yaw: f32, material: StandardMaterial) {
-    commands.spawn((
-        Transform::from_translation(at + DVec3::Y * half.y as f64)
-            .with_rotation(Quat::from_rotation_y(yaw)),
-        MeshRenderer::new(
-            Shape::Cuboid {
-                size: (half * 2.0).to_array(),
-            },
-            material,
-        ),
-        Collider::cuboid(half),
-    ));
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -367,8 +220,13 @@ fn fighter(
 /// The combat arena around `origin` (see the module docs). Fits in a 36 m radius and leaves
 /// the line from the arena's south side (−Z) to its center open for the camera.
 pub fn spawn_demo(commands: &mut Commands, origin: DVec3) {
-    arena_shell(commands, origin);
-    sparring_lane(commands, origin + SPARRING_LANE);
+    let mut layout = ArenaLayout {
+        origin,
+        duel_ring: origin + DUEL_RING,
+        ..Default::default()
+    };
+    arena_shell(commands, origin, &mut layout);
+    sparring_lane(commands, origin + SPARRING_LANE, &mut layout);
     commands.queue(|world: &mut World| {
         if let Some(mut s) = world.get_resource_mut::<NpcSettings>() {
             s.revive_secs = 6.0;
@@ -393,7 +251,7 @@ pub fn spawn_demo(commands: &mut Commands, origin: DVec3) {
     let o = |x: f64, z: f64| origin + DVec3::new(x, 0.0, z);
     // ------------------------------------------------------------------ cover
     let low = Vec3::new(1.6, 0.55, 0.25);
-    for (x, z, yaw) in [
+    for (k, (x, z, yaw)) in [
         (-6.0, 5.0, 0.0),
         (5.5, 6.5, 0.2),
         (0.0, 10.5, 0.0),
@@ -401,57 +259,61 @@ pub fn spawn_demo(commands: &mut Commands, origin: DVec3) {
         (8.5, -6.0, 0.25),
         (-1.0, -9.5, 0.0),
         (13.0, 1.0, 1.4),
-    ] {
-        block(commands, o(x, z), low, yaw, concrete());
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let e = solid(commands, o(x, z), low, yaw);
+        // Ashlar walls and timber barricades, mixed.
+        let piece = if matches!(k, 1 | 3 | 6) {
+            Piece::TimberWall
+        } else {
+            Piece::StoneWall(k as u32)
+        };
+        layout.pieces.push((e, piece));
+        layout.trample.push((Vec2::new(x as f32, z as f32), 2.6));
     }
     let crate_half = Vec3::new(0.8, 1.1, 0.8);
-    for (x, z) in [(3.0, 1.5), (-4.0, -1.5), (11.5, -11.0), (-11.0, 11.5)] {
-        block(commands, o(x, z), crate_half, 0.3, wood());
+    for (k, (x, z)) in [(3.0, 1.5), (-4.0, -1.5), (11.5, -11.0), (-11.0, 11.5)]
+        .into_iter()
+        .enumerate()
+    {
+        let e = solid(commands, o(x, z), crate_half, 0.3);
+        layout.pieces.push((e, Piece::Crates(k as u32)));
+        layout.trample.push((Vec2::new(x as f32, z as f32), 2.2));
     }
     // A raised platform with steps (high ground), on the west side.
-    block(
-        commands,
-        o(-17.0, 2.0),
-        Vec3::new(2.5, 0.8, 3.0),
-        0.0,
-        concrete(),
-    );
+    let half = Vec3::new(2.5, 0.8, 3.0);
+    let e = solid(commands, o(-17.0, 2.0), half, 0.0);
+    layout.pieces.push((e, Piece::Platform(half)));
     for k in 0..3 {
-        let h = 0.2 + k as f32 * 0.2;
-        block(
-            commands,
-            o(-14.15 + 0.7 * (2 - k) as f64, 2.0),
-            Vec3::new(0.35, h, 1.2),
-            0.0,
-            concrete(),
-        );
+        let half = Vec3::new(0.35, 0.2 + k as f32 * 0.2, 1.2);
+        let e = solid(commands, o(-14.15 + 0.7 * (2 - k) as f64, 2.0), half, 0.0);
+        layout.pieces.push((e, Piece::Step(k, half)));
     }
+    layout.trample.push((Vec2::new(-12.5, 2.0), 2.5));
     // Explosive barrels near where each side takes cover.
-    for (x, z) in [(1.8, 11.2), (-6.8, 5.8), (-1.5, -10.4), (9.2, -6.9)] {
-        commands.spawn((
-            Transform::from_translation(o(x, z) + DVec3::Y * 0.5),
-            MeshRenderer::new(
-                Shape::Cylinder {
-                    radius: 0.32,
-                    height: 1.0,
-                    segments: 16,
+    for (k, (x, z)) in [(1.8, 11.2), (-6.8, 5.8), (-1.5, -10.4), (9.2, -6.9)]
+        .into_iter()
+        .enumerate()
+    {
+        let e = commands
+            .spawn((
+                Transform::from_translation(o(x, z) + DVec3::Y * 0.5),
+                Collider {
+                    shape: ColliderShape::Cylinder {
+                        radius: 0.32,
+                        half_height: 0.5,
+                    },
+                    ..Default::default()
                 },
-                StandardMaterial::hex(0xc0281e)
-                    .with_roughness(0.45)
-                    .with_metallic(0.4),
-            ),
-            Collider {
-                shape: ColliderShape::Cylinder {
-                    radius: 0.32,
-                    half_height: 0.5,
+                ExplosiveProp {
+                    rearm_secs: 14.0,
+                    ..Default::default()
                 },
-                ..Default::default()
-            },
-            ExplosiveProp {
-                rearm_secs: 14.0,
-                ..Default::default()
-            },
-        ));
+            ))
+            .id();
+        layout.pieces.push((e, Piece::Barrel(k as u32)));
     }
     // ------------------------------------------------------------------ squads
     // Red (north) and blue (south), each with a spread of skill.
@@ -500,17 +362,6 @@ pub fn spawn_demo(commands: &mut Commands, origin: DVec3) {
     }
     // ------------------------------------------------------------------ duel ring (south)
     let ring = origin + DUEL_RING;
-    commands.spawn((
-        Transform::from_translation(ring + DVec3::Y * 0.02),
-        MeshRenderer::new(
-            Shape::Torus {
-                radius: 5.0,
-                tube: 0.12,
-                segments: 48,
-            },
-            StandardMaterial::hex(0x3a3530).with_roughness(0.9),
-        ),
-    ));
     let a = ring + DVec3::new(2.2, 0.0, 0.0);
     let b = ring - DVec3::new(2.2, 0.0, 0.0);
     let master = fighter(
@@ -539,6 +390,15 @@ pub fn spawn_demo(commands: &mut Commands, origin: DVec3) {
             ..Default::default()
         });
     }
+    // ------------------------------------------------------------------ art
+    let d = DUEL_RING.as_vec3();
+    layout.trample.extend([
+        (Vec2::new(d.x, d.z), 4.6),
+        (Vec2::ZERO, 7.0),
+        (Vec2::new(0.0, 17.0), 6.0),
+        (Vec2::new(0.0, -16.0), 6.0),
+    ]);
+    commands.queue(move |world: &mut World| arena::dress(world, &layout));
 }
 
 /// Animals around `center` within `radius` meters (see the module docs). Deer drink at water

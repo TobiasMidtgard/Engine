@@ -40,6 +40,11 @@ struct Frame {
     sky_occlusion: mat4x4<f32>,    // camera-relative -> top-down sky occlusion map clip space (standard Z, 0 = top)
     sky_occlusion_params: vec4<f32>, // enabled (1/0), covered width (m), texel size (m), depth range (m)
     sky_volumes: array<SkyVolume, 16>, // indoor volumes, nearest first (`counts.w` used)
+    unjittered_view_proj: mat4x4<f32>, // view_proj without the TAA jitter (motion vectors)
+    jitter: vec4<f32>,             // TAA jitter: NDC xy, pixels zw
+    camera_delta: vec4<f32>,       // camera origin - previous origin (m), w = 1 if the previous frame is valid history
+    effects: vec4<f32>,            // AO intensity (0 = off), contact shadow length (m), sun penumbra scale, AO radius (m)
+    reflections: vec4<f32>,        // screen-space reflections this frame (1/0), previous frame's pre-exposure (0 = none), max perceptual roughness, screen-space GI strength (0 = off)
 };
 
 // An indoor space (`SkyLightVolume`): sky light comes in only through its open faces.
@@ -70,6 +75,27 @@ fn hash13(p: vec3<f32>) -> f32 {
     var p3 = fract(p * 0.1031);
     p3 += dot(p3, p3.zyx + 31.32);
     return fract((p3.x + p3.y) * p3.z);
+}
+
+// Interleaved gradient noise (Jimenez 2014): cheap per-pixel noise that a 3x3 neighborhood
+// (or temporal anti-aliasing) averages out well. `pixel` in pixels.
+fn interleaved_gradient_noise(pixel: vec2<f32>) -> f32 {
+    return fract(52.9829189 * fract(dot(pixel, vec2<f32>(0.06711056, 0.00583715))));
+}
+
+// Octahedral encoding of a unit vector into [-1, 1]^2 (precise in 16-bit floats).
+fn oct_encode(n: vec3<f32>) -> vec2<f32> {
+    let p = n.xy / (abs(n.x) + abs(n.y) + abs(n.z));
+    if (n.z >= 0.0) { return p; }
+    return (1.0 - abs(p.yx)) * select(vec2<f32>(-1.0), vec2<f32>(1.0), p >= vec2<f32>(0.0));
+}
+
+fn oct_decode(e: vec2<f32>) -> vec3<f32> {
+    var n = vec3<f32>(e, 1.0 - abs(e.x) - abs(e.y));
+    let t = saturate(-n.z);
+    n.x += select(t, -t, n.x >= 0.0);
+    n.y += select(t, -t, n.y >= 0.0);
+    return normalize(n);
 }
 
 fn value_noise2(p: vec2<f32>) -> f32 {

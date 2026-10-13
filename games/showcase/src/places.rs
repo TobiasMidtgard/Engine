@@ -1,7 +1,8 @@
 //! Named viewpoints: camera bookmarks (number keys), the screenshot tour and the
 //! `showcase.goto` API all use this one list.
 
-use crate::zones::{moon_position, zone};
+use crate::landscape;
+use crate::zones::{ZONES, demo_views, moon_position, zone};
 use engine::prelude::*;
 
 /// A camera viewpoint with a time of day.
@@ -13,11 +14,105 @@ pub struct Place {
     pub target: DVec3,
     /// Hour to show it at (the tour sets it; bookmarks keep the current time).
     pub hour: f32,
+    /// Simulated seconds the tour waits here before the screenshot (a fight getting going).
+    pub warmup_secs: f32,
+    /// API calls (name, JSON args) made on arriving, e.g. `("ui.show", r#"{"screen":"shop"}"#)`.
+    pub on_arrive: Vec<(String, String)>,
+    /// API calls made when the camera moves on to another place.
+    pub on_leave: Vec<(String, String)>,
 }
 
+impl Place {
+    fn warmup(mut self, secs: f32) -> Self {
+        self.warmup_secs = secs;
+        self
+    }
+}
+
+/// Make `place` the current one: run the previous place's `on_leave` calls, then this one's
+/// `on_arrive` calls. A call that fails (say, its module isn't loaded) only logs a warning.
+pub fn visit(world: &mut World, place: &Place) {
+    let previous = world
+        .get_resource_mut::<CurrentPlace>()
+        .and_then(|mut c| c.0.take());
+    if let Some(prev) = previous {
+        run_calls(world, &prev.on_leave);
+    }
+    run_calls(world, &place.on_arrive);
+    world.insert_resource(CurrentPlace(Some(place.clone())));
+}
+
+/// Frames between moving the camera and running a place's calls: the focus points follow the
+/// camera a frame later and the fields that follow them (weather on the ground, smoke, the
+/// terrain's prints) recenter the frame after that, so calls made at once would write around
+/// the old spot and be dropped when the grids move.
+pub const ARRIVE_DELAY: u32 = 2;
+
+/// A [`visit`] waiting for the camera's move to reach the focus points.
+#[derive(Resource, Debug)]
+pub struct PendingVisit {
+    place: Place,
+    frames: u32,
+}
+
+/// [`visit`] `place` [`ARRIVE_DELAY`] frames from now (call it right after moving the camera
+/// there).
+pub fn visit_soon(world: &mut World, place: &Place) {
+    world.insert_resource(PendingVisit {
+        place: place.clone(),
+        frames: ARRIVE_DELAY,
+    });
+}
+
+/// Count down and run a pending [`visit_soon`].
+pub fn run_pending(world: &mut World) {
+    let Some(mut pending) = world.get_resource_mut::<PendingVisit>() else {
+        return;
+    };
+    if pending.frames > 0 {
+        pending.frames -= 1;
+        return;
+    }
+    if let Some(pending) = world.remove_resource::<PendingVisit>() {
+        visit(world, &pending.place);
+    }
+}
+
+/// Run the current place's `on_leave` calls and forget it.
+pub fn leave(world: &mut World) {
+    let previous = world
+        .get_resource_mut::<CurrentPlace>()
+        .and_then(|mut c| c.0.take());
+    if let Some(prev) = previous {
+        run_calls(world, &prev.on_leave);
+    }
+}
+
+/// The place the camera was last sent to with [`visit`].
+#[derive(Resource, Debug, Default)]
+pub struct CurrentPlace(pub Option<Place>);
+
+fn run_calls(world: &mut World, calls: &[(String, String)]) {
+    for (name, args) in calls {
+        let args = serde_json::from_str(args).unwrap_or(serde_json::Value::Null);
+        if let Err(e) = engine::core::registry::call_api(world, name, args) {
+            engine::core::log::warn!("{name}: {e}");
+        }
+    }
+}
+
+/// Eye and target relative to a zone's center. The eye never ends up below the ground.
 fn near(key: &str, eye: [f64; 3], look: [f64; 3]) -> (DVec3, DVec3) {
     let c = zone(key).center;
-    (c + DVec3::from_array(eye), c + DVec3::from_array(look))
+    (
+        above_ground(c + DVec3::from_array(eye), 1.7),
+        c + DVec3::from_array(look),
+    )
+}
+
+fn above_ground(p: DVec3, clearance: f64) -> DVec3 {
+    let ground = landscape::shared().height(p.x, p.z);
+    DVec3::new(p.x, p.y.max(ground + clearance), p.z)
 }
 
 /// Every viewpoint, in tour order.
@@ -28,27 +123,50 @@ pub fn places() -> Vec<Place> {
         position,
         target,
         hour,
+        warmup_secs: 0.0,
+        on_arrive: Vec::new(),
+        on_leave: Vec::new(),
     };
     let tower = zone("spaceport").center + DVec3::new(70.0, 0.0, 60.0);
     let moon = moon_position();
     let moon_dir = moon.normalize();
-    let sun = crate::day_cycle::sun_direction(10.0).as_dvec3();
+    let sun = engine_weather::Climate::default()
+        .sun_direction(10.0, engine_weather::Sky::default().day_of_year)
+        .as_dvec3();
     let moon_side = (sun * 0.7 - moon_dir * 0.7).normalize();
-    vec![
+    let mut list = vec![
         place(
             "overview",
-            "The whole map",
+            "The valley",
             (
-                DVec3::new(520.0, 260.0, 520.0),
-                DVec3::new(20.0, 0.0, -60.0),
+                DVec3::new(250.0, 330.0, -1050.0),
+                DVec3::new(-60.0, 0.0, 120.0),
             ),
-            10.0,
+            9.5,
         ),
         place(
             "plaza",
-            "Material plaza",
+            "Material plaza and the village",
             near("plaza", [10.0, 4.5, 16.0], [0.0, 1.8, -1.0]),
             11.0,
+        ),
+        place(
+            "market",
+            "Market street: shop, dialogue and maps",
+            near("market", [12.0, 3.2, -16.0], [0.0, 1.5, 3.0]),
+            10.5,
+        ),
+        place(
+            "paddock",
+            "Animation paddock",
+            near("paddock", [0.0, 16.0, 32.0], [0.0, 0.0, 0.0]),
+            15.0,
+        ),
+        place(
+            "physics",
+            "Physics playground",
+            near("physics", [0.0, 24.0, 44.0], [0.0, 2.0, -3.0]),
+            13.5,
         ),
         place(
             "yard",
@@ -57,16 +175,56 @@ pub fn places() -> Vec<Place> {
             15.5,
         ),
         place(
+            "magic",
+            "Magic circle at dusk",
+            near("magic", [22.0, 4.0, 20.0], [0.0, 2.0, 0.0]),
+            18.35,
+        ),
+        place(
+            "gallery2d",
+            "2D and 2.5D gallery",
+            near("gallery2d", [0.0, 5.0, 18.0], [0.0, 4.0, -3.0]),
+            12.5,
+        ),
+        place(
             "forest",
             "Living forest",
-            near("forest", [95.0, 6.0, 60.0], [0.0, 4.0, 0.0]),
+            near("forest", [14.0, 2.5, 12.0], [-10.0, 4.0, -6.0]),
             9.0,
+        ),
+        // Water's own test area: a tarn on a hill spilling over falls into a pond. The stream
+        // needs a few seconds to run and the pond to fill.
+        place(
+            "water",
+            "Water test area: tarn, falls, stream and pond",
+            near("water", [62.0, 18.0, 66.0], [0.0, 4.0, 0.0]),
+            16.5,
+        )
+        .warmup(8.0),
+        place(
+            "meadow",
+            "Wildlife meadow by the lake, in the morning",
+            near("meadow", [60.0, 3.0, 10.0], [-120.0, 0.0, 60.0]),
+            7.8,
         ),
         place(
             "lake",
             "Lake",
-            near("lake", [75.0, 8.0, 70.0], [-20.0, 0.0, -10.0]),
+            near("lake", [-80.0, 6.0, 60.0], [10.0, 0.0, -10.0]),
             16.5,
+        ),
+        place("falls", "Waterfall into the lake", falls_view(), 15.0),
+        place(
+            "footsteps",
+            "Footstep trail: grass, mud, snow, ice, gravel, boards, grate, underpass, sand",
+            near("footsteps", [-32.0, 7.0, -19.0], [2.0, 0.0, 1.0]),
+            14.0,
+        ),
+        place(
+            "tracks",
+            "Footprint lab: tracks in mud, snow and sand",
+            near("tracks", [14.0, 6.0, -30.0], [0.0, 0.0, 0.0]),
+            10.0,
         ),
         place(
             "cave",
@@ -75,28 +233,66 @@ pub fn places() -> Vec<Place> {
             14.0,
         ),
         place(
-            "fortress",
-            "Siege fortress",
-            near("fortress", [14.0, 6.0, -38.0], [0.0, 5.0, 0.0]),
-            15.0,
+            "cave_mouth",
+            "The cave in its hill",
+            near("cave", [30.0, 6.0, -60.0], [0.0, 6.0, 0.0]),
+            15.5,
         ),
+        // The fight needs a few seconds to get going.
         place(
             "arena",
             "Combat arena",
-            near("arena", [0.0, 14.0, -40.0], [0.0, 0.0, 0.0]),
+            near("arena", [0.0, 11.0, -27.0], [0.0, 0.0, 3.0]),
             12.0,
+        )
+        .warmup(10.0),
+        place(
+            "parkour",
+            "Movement course",
+            near("parkour", [32.0, 10.0, -32.0], [-5.0, 3.0, 0.0]),
+            11.5,
+        ),
+        place(
+            "fortress",
+            "Siege fortress on its hill",
+            near("fortress", [-34.0, 26.0, -62.0], [0.0, 3.0, 2.0]),
+            15.0,
+        ),
+        place(
+            "voxel",
+            "Voxel hill",
+            near("voxel", [30.0, 12.0, -32.0], [0.0, 4.0, 0.0]),
+            13.0,
         ),
         place(
             "field",
             "Grass field",
             near("field", [-40.0, 3.0, -45.0], [0.0, 1.0, 0.0]),
-            17.3,
+            16.0,
+        ),
+        place(
+            "range",
+            "Smoke range",
+            near("range", [0.0, 4.0, -34.0], [0.0, 1.5, 10.0]),
+            12.0,
+        ),
+        place(
+            "weather",
+            "From the weather station hill",
+            near("weather", [-8.0, 3.0, -14.0], [-215.0, -20.0, -370.0]),
+            16.2,
         ),
         place(
             "track",
             "Vehicle track",
             near("track", [60.0, 60.0, 160.0], [0.0, 0.0, 0.0]),
             10.0,
+        ),
+        place(
+            "airfield",
+            "Airfield",
+            near("airfield", [-160.0, 25.0, -70.0], [-40.0, 0.0, 0.0]),
+            10.5,
         ),
         place(
             "spaceport",
@@ -146,11 +342,60 @@ pub fn places() -> Vec<Place> {
         ),
         place(
             "night",
-            "Spaceport at night",
-            near("spaceport", [-50.0, 8.0, -50.0], [0.0, 2.0, 0.0]),
-            23.0,
+            "The village at night",
+            (DVec3::new(-26.0, 6.0, 30.0), DVec3::new(10.0, 2.0, -10.0)),
+            22.5,
         ),
-    ]
+    ];
+    // Each zone demo's own viewpoints, right after the zone's stop (or at the end).
+    for z in ZONES {
+        let views = demo_views(z);
+        if views.is_empty() {
+            continue;
+        }
+        let at = list
+            .iter()
+            .rposition(|p| p.key == z.key || p.key.starts_with(&format!("{}_", z.key)))
+            .map_or(list.len(), |i| i + 1);
+        for (k, v) in views.into_iter().enumerate() {
+            let position = above_ground(z.center + DVec3::from_array(v.eye), 0.3);
+            list.insert(
+                at + k,
+                Place {
+                    key: v.key,
+                    name: v.name,
+                    position,
+                    target: z.center + DVec3::from_array(v.target),
+                    hour: v.hour,
+                    warmup_secs: v.warmup_secs,
+                    on_arrive: v.on_arrive,
+                    on_leave: v.on_leave,
+                },
+            );
+        }
+    }
+    list
+}
+
+/// Below the waterfall, looking up at it across the plunge pool.
+fn falls_view() -> (DVec3, DVec3) {
+    let land = landscape::shared();
+    let Some(st) = land.streams.first() else {
+        return near("lake", [0.0, 20.0, 0.0], [0.0, 0.0, 0.0]);
+    };
+    let Some((top, bottom)) = st.falls() else {
+        return near("lake", [0.0, 20.0, 0.0], [0.0, 0.0, 0.0]);
+    };
+    let lip = st.path[top];
+    let foot = st.path[bottom];
+    let downstream = (foot - lip).normalize_or(DVec2::Y);
+    let side = DVec2::new(-downstream.y, downstream.x);
+    let eye = foot + downstream * 26.0 + side * 9.0;
+    let ground = land.height(eye.x, eye.y).max(crate::landscape::LAKE_LEVEL);
+    (
+        DVec3::new(eye.x, ground + 3.0, eye.y),
+        DVec3::new(lip.x, st.bed[top] - 1.5, lip.y),
+    )
 }
 
 pub fn find(key: &str) -> Option<Place> {

@@ -10,7 +10,8 @@ use engine_world::animation::{AnimationTrigger, Ragdoll};
 use engine_world::locomotion::{LocomotionMode, MoveIntent};
 use engine_world::physics::{PhysicsBackend, PhysicsQueries, QueryFilter};
 use engine_world::{
-    AttackEvent, AttackKind, DamageEvent, DamageKind, Ground, NoiseEvent, ProjectileTrace,
+    AttackEvent, AttackKind, DamageEvent, DamageKind, Ground, NoiseEvent, Obscurance,
+    ProjectileTrace,
 };
 
 use crate::agent::{
@@ -185,6 +186,10 @@ pub(crate) fn defend(
             if a.handled || now < a.react_at {
                 continue;
             }
+            // Still reeling: look again once the stagger is over (if it ends in time).
+            if staggered && now < a.lands_at {
+                continue;
+            }
             let left = (a.lands_at - now) as f32;
             // Skilled sword fighters often hold their guard for the last moment to parry.
             if !a.ranged
@@ -199,9 +204,6 @@ pub(crate) fn defend(
             a.handled = true;
             if now >= a.lands_at {
                 late += 1;
-                continue;
-            }
-            if staggered {
                 continue;
             }
             let r = roll(me, now, 11);
@@ -291,6 +293,8 @@ pub(crate) struct Strike {
     origin: DVec3,
     forward: Vec3,
     aim: DVec3,
+    /// The attacker's clock when it landed (seeds the shot's scatter).
+    at: f64,
 }
 
 type FighterItem<'a> = (
@@ -314,6 +318,7 @@ pub(crate) fn resolve_attacks(
     physics: Res<PhysicsQueries>,
     backend: Option<Res<PhysicsBackend>>,
     ground: Res<Ground>,
+    obscurance: Res<Obscurance>,
     settings: Res<NpcSettings>,
     mut models: ResMut<OpponentModels>,
     mut tokens: ResMut<AttackTokens>,
@@ -376,6 +381,7 @@ pub(crate) fn resolve_attacks(
             origin: t.translation,
             forward: Vec3::new(fwd.x, 0.0, fwd.z).normalize_or(Vec3::NEG_Z),
             aim,
+            at: now,
         });
     }
     if !settings.resolve_hits {
@@ -395,6 +401,7 @@ pub(crate) fn resolve_attacks(
                 &world,
                 phys,
                 &ground,
+                &obscurance,
                 &mut models,
                 &mut damage,
                 &mut traces,
@@ -526,6 +533,7 @@ fn resolve_shot(
     world: &TacticalWorld,
     physics: Option<&PhysicsQueries>,
     ground: &Ground,
+    obscurance: &Obscurance,
     models: &mut OpponentModels,
     damage: &mut MessageWriter<DamageEvent>,
     traces: &mut MessageWriter<ProjectileTrace>,
@@ -533,12 +541,16 @@ fn resolve_shot(
 ) {
     let eye = s.origin + DVec3::Y * 1.45 + (s.forward * 0.4).as_dvec3();
     let aim_dir = (s.aim - eye).as_vec3().normalize_or(s.forward);
+    // Shooting into smoke is mostly guessing.
+    let haze = obscurance.transmittance(eye, s.aim);
     let spread = (s.weapon.spread_deg * (1.0 - 0.9 * s.accuracy)).to_radians()
         * (1.0 + 1.5 * s.suppression)
-        * if s.moving { 1.6 } else { 1.0 };
-    // Random direction in a cone (deterministic per shot).
-    let r1 = roll(s.attacker, s.origin.x + s.aim.z, 3);
-    let r2 = roll(s.attacker, s.origin.z + s.aim.x, 5);
+        * if s.moving { 1.6 } else { 1.0 }
+        * (1.0 + 3.0 * (1.0 - haze));
+    // Random direction in a cone (deterministic per shot; seeded by when it is fired, so a
+    // shooter standing still doesn't send every shot to the same spot).
+    let r1 = roll(s.attacker, s.at, 3);
+    let r2 = roll(s.attacker, s.at, 5);
     let ang = spread * r1.sqrt();
     let rot = r2 * TAU;
     let side = aim_dir.any_orthonormal_vector();

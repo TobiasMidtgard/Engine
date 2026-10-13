@@ -13,7 +13,7 @@ use engine_core::prelude::*;
 use engine_world::animation::AnimationParams;
 use engine_world::locomotion::{LocomotionBackend, LocomotionMode, LocomotionState, MoveIntent};
 use engine_world::physics::CharacterController;
-use engine_world::{ContactKind, Ground, GroundContact, Water};
+use engine_world::{ContactKind, Ground, GroundContact, Water, WorldShift};
 
 use crate::agent::{NpcClock, NpcCombat, NpcMotor, NpcSettings, NpcVitals};
 use crate::skills::NpcSkills;
@@ -71,6 +71,16 @@ pub struct MoverState {
     left: bool,
     /// Gait phase in radians (stand-in bodies swing their legs with it).
     pub phase: f32,
+}
+
+impl MoverState {
+    /// Move a dash in progress into a new reference frame.
+    pub(crate) fn shift(&mut self, s: &WorldShift) {
+        if let Some(d) = &mut self.dash {
+            d.from = s.point(d.from);
+            d.to = s.point(d.to);
+        }
+    }
 }
 
 /// Bodies that move themselves (flying birds) and must be left alone by the fallback mover.

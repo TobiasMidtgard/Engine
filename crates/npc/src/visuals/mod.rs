@@ -13,9 +13,11 @@
 //! searching, red fighting). Their painted armor shows skill too: a rookie's is nearly new, a
 //! veteran's or master's chipped to the steel, scratched, dented and dirty.
 //!
-//! Animals graze head-down, raise their heads when alert, lie down to rest, gallop (deer and
-//! wolves), hop (rabbits), creep low when stalking, flap and bank in flight, and fall over
-//! when killed.
+//! Animals are sculpted procedural red deer, grey wolves, rabbits and starlings (see
+//! `art::animals`; cheap primitives without the renderer). They plant their feet as they walk,
+//! trot and gallop, graze head-down, raise their heads when alert, lie down to rest, hop
+//! (rabbits), creep low when stalking, peck, flap and bank in flight, and fall over when
+//! killed.
 //!
 //! With `NpcSettings::show_intent` on, a ring on the ground marks where each NPC decided to
 //! go and a line leads to it, colored by why: blue cover, orange flank, purple high ground,
@@ -201,11 +203,6 @@ const HIDDEN: Placed = Placed {
     rot: Quat::IDENTITY,
     visible: false,
 };
-
-/// A limb hanging from `pivot`, rotated by `rot`, `len` long: its mesh center.
-fn limb(pivot: Vec3, rot: Quat, len: f32) -> Placed {
-    at(pivot + rot * Vec3::new(0.0, -len * 0.5, 0.0), rot)
-}
 
 type PoseItem<'a> = (
     &'a StandIn,

@@ -18,7 +18,8 @@ struct Material {
     emissive: vec4<f32>,
     params: vec4<f32>,   // metallic, roughness, reflectance, alpha cutoff
     params2: vec4<f32>,  // subsurface, wind sway, normal scale, occlusion strength
-    uv: vec4<f32>,       // uv scale xy
+    uv: vec4<f32>,       // uv scale xy, detail strength, detail scale
+    mapping: vec4<f32>,  // tiles per meter, parallax depth (m), triplanar sharpness, unused
     flags: vec4<u32>,    // x: bits 0-3 alpha mode, 7 base color texture present
 };
 
@@ -26,7 +27,7 @@ struct Material {
 @group(1) @binding(0) var<storage, read> materials: array<Material>;
 // Same layout as the scene pass; only the base color texture and sampler are used here.
 @group(2) @binding(0) var base_color_texture: texture_2d<f32>;
-@group(2) @binding(5) var material_sampler: sampler;
+@group(2) @binding(6) var material_sampler: sampler;
 
 struct VertexIn {
     @location(0) position: vec3<f32>,
@@ -84,7 +85,8 @@ struct MaskedOut {
 fn vs_shadow_masked(in: VertexIn) -> MaskedOut {
     var out: MaskedOut;
     out.clip = shadow_clip(in);
-    out.uv = in.uv * materials[in.extra.x].uv.xy;
+    let mat = materials[in.extra.x];
+    out.uv = in.uv * mat.uv.xy * mat.mapping.x;
     out.alpha = in.color.a;
     out.material = in.extra.x;
     return out;

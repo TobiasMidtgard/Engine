@@ -1,8 +1,9 @@
 # engine_npc — NPC AI
 
 **Owner:** Smart NPC AI. **Status:** AI core (perception, memory, tactics, navigation, squads,
-melee and ranged combat, learning, explosives), wildlife, stand-in bodies, the showcase arena
-and the `npc.*` API are in. Next: smoke-aware sight, vehicles.
+melee and ranged combat, learning, explosives), wildlife, sculpted fighters and animals, the
+stone showcase arena, the `npc.*` API and smoke-aware sight are in. Next: lifelike faces,
+vehicles.
 
 Enemies that feel smarter than other games: they notice you gradually, remember where you went,
 use cover and high ground, flank and suppress as a squad, take turns in melee instead of
@@ -46,16 +47,33 @@ back away from people. Bird flocks peck on the ground and lift off together. Gun
 explosions, howls and fire scare everything. `WildlifeSettings` tunes respawn, thirst, hunger,
 skittishness and howling.
 
-## Stand-in bodies
+## Bodies and art
 
-`StandIn` gives an NPC or animal a primitive body posed every step from the AI state, so
-behavior reads before real models exist: gait, crouching in cover, the raised weapon of an
-attack's telegraph (glowing for a heavy guard breaker), blocks, white parry flashes, dodges,
-staggers, hit flashes, falling when downed, muzzle flashes; a head band in the skill color
-(grey, bronze, silver, gold) and an orb for alertness (yellow, orange, red). Animals graze
+`StandIn` gives an NPC or animal a body posed every step from the AI state, so behavior reads
+on screen: gait, crouching in cover, the raised weapon of an attack's telegraph (glowing for a
+heavy guard breaker), blocks, white parry flashes, dodges, staggers, hit flashes, falling when
+downed, muzzle flashes, a rank crest in the skill color and an alert light. Animals graze
 head-down, flag their tails when alarmed, lie down, gallop, hop, creep and flap. With
 `NpcSettings::show_intent`, rings and lines on the ground show where each NPC is going and why
 (blue cover, orange flank, purple high ground, grey fall back, yellow search).
+
+All art is generated in code (`src/art`), since no third-party art may go in the repository:
+
+- **Fighters** (`art/fighter.rs`): armored arena combatants with segmented plates, tabards in
+  the team color, open helmets with a brow light and a rank crest over mail coifs, sculpted
+  faces in six skin tones, gloves and boots, and a longsword, an arming sword with a
+  heater shield, a carbine or a recurve bow. A skeleton with two-bone IK for arms and legs
+  poses them for every combat state. One texture atlas; each team shares one mesh per piece.
+- **Wildlife** (`art/animals.rs`): sculpted red deer (stags with antlers and a neck mane),
+  grey wolves and European rabbits, with fur textures that follow the coat, baked ambient
+  occlusion, IK legs and planted feet, and starlings with iridescent spotted plumage and
+  feathered wings that fold, spread and beat.
+- **Arena** (`art/arena.rs`): a sandstone amphitheater with arched stands, gates with
+  portcullises, fluted columns, banners, braziers with flickering fire and light, rubble,
+  timber barricades, crates and drums, all with baked PBR textures. The art dresses the gameplay entities; colliders never change.
+
+Everything is built once per world and shared. Without a renderer (headless tests) the art
+falls back to primitive shapes so tests stay fast.
 
 ## API (`npc.*`, JSON)
 
@@ -117,27 +135,39 @@ punish window), cooldown, spread and shield.
    its own time scale; gather everything that can be seen.
 2. **Perceive**: sight cones with occlusion, hearing (`NoiseEvent`, gunfire, impacts), being
    hit (`DamageEvent`, `ProjectileTrace` near misses). Awareness grows over
-   `detection_secs`, faster when close, moving or loud. Memory keeps last-known positions with
-   timestamped snapshots that the reaction delay reads from.
+   `detection_secs`, faster when close, moving or loud, and slower through smoke and fog
+   (`Obscurance`) in step with the light that gets through; past 8 % nothing is seen at all.
+   Memory keeps last-known positions with timestamped snapshots that the reaction delay reads
+   from.
 3. **Decide**: squads share sightings, hand out roles (assault, suppress, flank, hold) and melee
    attack tokens. Each NPC scores its options (patrol, investigate, search, engage, take cover,
    flank, high ground, use explosive, retreat) with utility curves shaped by its skills, then
    picks a spot by scoring candidates for cover, line of fire, distance band, height, flanking
-   angle, danger (fire, explosives) and path length on the nav grid. Combat decides strikes,
+   angle, danger (fire, explosives) and path length on the nav grid. Thick smoke counts as
+   concealment when there is no solid cover (it hides but doesn't stop bullets, so solid cover
+   wins), and shots into smoke spread wider. Combat decides strikes,
    heavy guard breakers, feints, dash attacks, blocks, parries and dodges against the attacker's
-   telegraph.
+   telegraph. Elites and masters fight on the counter: they never swing into an attack they
+   can parry, they let it come, deflect it and punish the opening.
 4. **Act**: the built-in fallback mover, hit resolution, damage, explosive props, revive. Once
    a movement module has claimed `LocomotionBackend`, the fallback mover leaves bodies with a
    `CharacterController` to it: give an NPC the movement module's character components (in
    game code) and it wall-runs and slides like the player; NPCs without them keep the
    built-in mover.
 
+When the world is re-anchored (a floating-origin move or a new reference frame, `WorldShift`),
+everything NPCs and animals keep in world space moves with it in `WorldShiftSet::Apply`: homes,
+orders, destinations and candidate spots, paths, remembered positions, velocities and
+snapshots, disturbances, aim points, dashes, threats, noises heard, water and landing spots, and
+the tactical world. The navigation grid rebuilds its chunks where paths are next asked for, and
+a turned world also rebuilds the tactical world from the colliders.
+
 ## Contracts
 
 Reads: `Collider` / `RigidBody` (tactical world), `PhysicsQueries` when present, `Ground`,
-`Water`, `HeatField` (avoid fire), `NoiseEvent`, `DamageEvent`, `AttackEvent` (telegraphs to
+`Water`, `HeatField` (avoid fire), `Obscurance` (smoke, fog and dust), `NoiseEvent`, `DamageEvent`, `AttackEvent` (telegraphs to
 defend against), `ProjectileTrace` (near misses), `LocomotionState` of targets, `TerrainChanged`,
-`LocalTimeScale` / `TimeDilation`, `LocomotionBackend`.
+`LocalTimeScale` / `TimeDilation`, `LocomotionBackend`, `WorldShift`.
 
 Writes: `MoveIntent` (the same input a player produces), `LocomotionState` and
 `AnimationParams` (fallback mover only), `AttackEvent` (its own telegraphs), `DamageEvent`,
@@ -152,9 +182,9 @@ The crate depends only on core crates (`engine_core`, `engine_world`, `engine_re
   behavior tests in `tests/behavior.rs`, which run whole NPCs headless and check that they see
   what's in front and not through walls, that reaction time decides who blocks, that slow motion
   slows reactions, that shooters take cover when shot at, that melee fighters close in and hit,
-  that a master beats a veteran in a duel, that squad mates share sightings, that melee squads
-  take turns, that shooters detonate explosives next to enemies, and that a ranged squad sends a
-  flanker.
+  that a master beats a veteran in most of six duels and takes far fewer hits, that squad mates
+  share sightings, that melee squads take turns, that shooters detonate explosives next to
+  enemies, and that a ranged squad sends a flanker.
 - `tests/wildlife.rs`: deer bolt from a runner but let a sneaker much closer, panic spreads
   through a herd, a wolf pack stalks, charges, kills and feeds, birds take off together and
   land again.
@@ -163,8 +193,18 @@ The crate depends only on core crates (`engine_core`, `engine_world`, `engine_re
   hunting, fleeing) without animals leaving.
 - `tests/training.rs`: the same post swings at a rookie, soldier, veteran, elite and master;
   the share of swings defended climbs with skill (0 % to about 100 %) and the master parries.
+- `tests/smoke.rs`: thick smoke hides a player until it clears, thin smoke slows spotting,
+  shots into smoke miss more, and a shooter with no solid cover hides in a smoke bank.
 - `tests/api.rs`: spawn, tune, order, alert, inspect, list and despawn through `npc.*`, and
   bad arguments come back as errors.
+- `tests/world_shift.rs`: a far floating-origin move, and two shifts in one frame that turn the
+  world, mid-fight and while deer flee: memories, destinations, paths, aim, homes, threats and
+  the tactical world move exactly with the world, the rifleman keeps looking and shooting at
+  the player, the deer keep running from what scared them and stay around their home, and
+  paths go around a wall where it moved to, not where it was.
+- `tests/art_fighters.rs`, `tests/art_animals.rs`, `tests/art_arena.rs`: close-up renders of
+  the fighters, wildlife and arena in chosen poses and lights, plus triangle and build-time
+  budgets and a check that the arena art sits on every collider.
 - `tests/screenshots.rs`: renders the arena, its stands, a cover fight, the sparring lane, the
   duel and the meadow on a GPU or lavapipe and checks the fighters and deer show up.
   `NPC_SCREENSHOT_DIR=dir` keeps the PNGs.
@@ -173,4 +213,4 @@ The crate depends only on core crates (`engine_core`, `engine_world`, `engine_re
 
 - Enemies that feel smarter than other games: they take cover, flank, punish mistakes, and block.
 - Dynamic fauna roams, herds, drinks, rests and flees from threats, fire and explosions.
-- The showcase arena shows all of it with readable stand-in bodies and an intent overlay.
+- The showcase arena shows all of it with readable bodies and an intent overlay.

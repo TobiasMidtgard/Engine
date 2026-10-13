@@ -8,8 +8,8 @@ use std::sync::{Arc, RwLock};
 
 use engine_core::math::{DVec3, Quat, Vec3};
 use engine_core::prelude::*;
-use engine_world::Gravity;
 use engine_world::physics::*;
+use engine_world::{Gravity, WorldShift, WorldShiftSet};
 
 #[derive(Default)]
 struct MiniPhysics {
@@ -26,7 +26,18 @@ struct Bugs {
     zero_impulse: bool,
     /// Report contact normals from `b` toward `a`.
     flipped_normal: bool,
+    /// Cache static colliders the first time they are seen and never refresh the cache, so a
+    /// `WorldShift` leaves them behind (what a broadphase that ignores shifts does).
+    stale_statics: bool,
+    /// Report mass properties from the colliders even when the body overrides them.
+    ignores_mass_overrides: bool,
+    /// Step every body with the world's delta, ignoring its `LocalTimeScale`.
+    ignores_body_time_scale: bool,
 }
+
+/// The static colliders as first seen, for the `stale_statics` bug.
+#[derive(Resource, Default)]
+struct StaticCache(Option<Vec<Aabb>>);
 
 #[derive(Clone, Copy)]
 struct Aabb {
@@ -59,11 +70,21 @@ impl Plugin for MiniPhysics {
             .insert_resource(Shared(shared))
             .insert_resource(self.bugs)
             .init_resource::<Touching>()
+            .init_resource::<StaticCache>()
             .add_systems(
                 FixedUpdate,
-                (step_bodies, step_characters, publish_snapshot)
+                (
+                    write_mass_properties,
+                    step_bodies,
+                    step_characters,
+                    publish_snapshot,
+                )
                     .chain()
                     .in_set(SimSet::Physics),
+            )
+            .add_systems(
+                PostUpdate,
+                publish_after_shift.in_set(WorldShiftSet::Rebuild),
             );
     }
 }
@@ -127,25 +148,40 @@ fn step_bodies(
     mut impulses: MessageReader<ApplyImpulse>,
     mut contacts: MessageWriter<ContactEvent>,
     mut touching: ResMut<Touching>,
+    mut cache: ResMut<StaticCache>,
     statics: Query<(Entity, &Transform, &Collider, Option<&RigidBody>), Without<Velocity>>,
-    mut dynamics: Query<(Entity, &mut Transform, &mut Velocity, &RigidBody, &Collider)>,
+    mut dynamics: Query<(
+        Entity,
+        &mut Transform,
+        &mut Velocity,
+        &RigidBody,
+        &Collider,
+        Option<&LocalTimeScale>,
+    )>,
 ) {
-    let dt = time.delta_secs_f64();
-    let solid: Vec<Aabb> = statics
+    let mut solid: Vec<Aabb> = statics
         .iter()
         .filter(|(_, _, _, b)| b.is_none_or(|b| b.kind == BodyKind::Static))
         .map(|(e, t, c, _)| aabb(e, t, c))
         .collect();
+    if bugs.stale_statics {
+        solid = cache.0.get_or_insert(solid).clone();
+    }
     let pending: Vec<ApplyImpulse> = impulses.read().copied().collect();
     let mut now = HashSet::new();
-    for (e, mut t, mut v, body, collider) in &mut dynamics {
+    for (e, mut t, mut v, body, collider, local) in &mut dynamics {
         if body.kind != BodyKind::Dynamic {
             continue;
         }
+        // Each body in its own seconds.
+        let local = if bugs.ignores_body_time_scale {
+            None
+        } else {
+            local
+        };
+        let dt = time.delta_for(local) as f64;
         let h = half_extents(&collider.shape);
-        let mass = body
-            .mass_kg
-            .unwrap_or(collider.density * 8.0 * h.x * h.y * h.z);
+        let mass = body.mass_kg.unwrap_or(box_mass(collider));
         for imp in pending.iter().filter(|i| i.entity == e) {
             v.linear += imp.impulse / mass;
         }
@@ -232,6 +268,56 @@ fn step_characters(
 fn publish_snapshot(shared: Res<Shared>, q: Query<(Entity, &Transform, &Collider)>) {
     let mut snap = shared.0.write().unwrap();
     snap.boxes = q.iter().map(|(e, t, c)| aabb(e, t, c)).collect();
+}
+
+fn box_mass(collider: &Collider) -> f32 {
+    let h = half_extents(&collider.shape);
+    collider.density * 8.0 * h.x * h.y * h.z
+}
+
+/// Mass properties of each dynamic body: the overrides, or a solid box's.
+fn write_mass_properties(
+    mut commands: Commands,
+    bugs: Res<Bugs>,
+    bodies: Query<(Entity, &RigidBody, &Collider)>,
+) {
+    for (e, body, collider) in &bodies {
+        if body.kind != BodyKind::Dynamic {
+            continue;
+        }
+        let h = half_extents(&collider.shape);
+        let mass = body.mass_kg.unwrap_or(box_mass(collider));
+        let size = h * 2.0;
+        let box_inertia = Vec3::new(
+            size.y * size.y + size.z * size.z,
+            size.x * size.x + size.z * size.z,
+            size.x * size.x + size.y * size.y,
+        ) * (mass / 12.0);
+        let (center_of_mass, inertia) = if bugs.ignores_mass_overrides {
+            (Vec3::ZERO, box_inertia)
+        } else {
+            (
+                body.center_of_mass.unwrap_or(Vec3::ZERO),
+                body.inertia.unwrap_or(box_inertia),
+            )
+        };
+        commands.entity(e).insert(MassProperties {
+            mass_kg: mass,
+            center_of_mass,
+            inertia,
+        });
+    }
+}
+
+/// Queries answer in the new frame as soon as engine_world has moved the transforms.
+fn publish_after_shift(
+    mut shifts: MessageReader<WorldShift>,
+    shared: Res<Shared>,
+    q: Query<(Entity, &Transform, &Collider)>,
+) {
+    if shifts.read().count() > 0 {
+        publish_snapshot(shared, q);
+    }
 }
 
 impl PhysicsQuery for Queries {
@@ -341,6 +427,60 @@ fn a_minimal_backend_passes_the_conformance_suite() {
     engine_world::physics::conformance::assert_all(|app| {
         app.add_plugins(MiniPhysics::default());
     });
+}
+
+#[test]
+fn the_suite_catches_a_backend_that_ignores_world_shifts() {
+    let checks = engine_world::physics::conformance::run_all(|app| {
+        app.add_plugins(MiniPhysics {
+            bugs: Bugs {
+                stale_statics: true,
+                ..Bugs::default()
+            },
+        });
+    });
+    let failed: Vec<&str> = checks
+        .iter()
+        .filter(|c| c.result.is_err())
+        .map(|c| c.name)
+        .collect();
+    assert_eq!(failed, ["follows_world_shifts"], "{checks:?}");
+}
+
+#[test]
+fn the_suite_catches_a_backend_that_ignores_mass_overrides() {
+    let checks = engine_world::physics::conformance::run_all(|app| {
+        app.add_plugins(MiniPhysics {
+            bugs: Bugs {
+                ignores_mass_overrides: true,
+                ..Bugs::default()
+            },
+        });
+    });
+    let failed: Vec<&str> = checks
+        .iter()
+        .filter(|c| c.result.is_err())
+        .map(|c| c.name)
+        .collect();
+    assert_eq!(failed, ["uses_mass_overrides"], "{checks:?}");
+}
+
+#[test]
+fn the_suite_catches_a_backend_that_ignores_body_time_scales() {
+    let checks = engine_world::physics::conformance::run_all(|app| {
+        app.add_plugins(MiniPhysics {
+            bugs: Bugs {
+                ignores_body_time_scale: true,
+                ..Bugs::default()
+            },
+        });
+    });
+    let failed: Vec<&str> = checks
+        .iter()
+        .filter(|c| c.result.is_err())
+        .map(|c| c.name)
+        .collect();
+    assert_eq!(failed, ["bodies_honor_local_time_scale"], "{checks:?}");
 }
 
 #[test]

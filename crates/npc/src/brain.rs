@@ -10,7 +10,7 @@ use engine_core::prelude::*;
 use engine_world::animation::AnimationTrigger;
 use engine_world::locomotion::MoveIntent;
 use engine_world::physics::{PhysicsBackend, PhysicsQueries};
-use engine_world::{AttackEvent, FocusPoints, Ground, HeatField, Water};
+use engine_world::{AttackEvent, FocusPoints, Ground, HeatField, Obscurance, Water};
 
 use crate::agent::{
     AlertLevel, AttackPhase, Defense, Npc, NpcAction, NpcBrain, NpcClock, NpcCombat, NpcMotor,
@@ -36,6 +36,7 @@ pub(crate) struct BrainWorld<'w, 's> {
     ground: Res<'w, Ground>,
     water: Res<'w, Water>,
     heat: Res<'w, HeatField>,
+    obscurance: Res<'w, Obscurance>,
     physics: Res<'w, PhysicsQueries>,
     backend: Option<Res<'w, PhysicsBackend>>,
     settings: Res<'w, NpcSettings>,
@@ -258,6 +259,7 @@ fn think(
             world: &w.world,
             physics: physics_backend(&w.backend, &w.physics),
             ground: &w.ground,
+            obscurance: Some(&w.obscurance),
         };
         for (pe, pt, prop) in w.props.iter() {
             if prop.detonated {
@@ -451,6 +453,7 @@ fn pick_spot(
         ground,
         water,
         heat,
+        obscurance,
         physics,
         backend,
         ..
@@ -461,6 +464,7 @@ fn pick_spot(
             world,
             physics: physics_backend(backend, physics),
             ground,
+            obscurance: Some(obscurance),
         },
         nav: &mut navctx,
         heat,
@@ -525,6 +529,9 @@ fn pick_spot(
 
 const WALK: f32 = 0.36;
 const JOG: f32 = 0.7;
+/// `logic × defense` above which a melee fighter waits out an enemy's swing to counter it
+/// instead of trading blows (elites and masters; veterans still trade).
+const COUNTER_FIGHTER: f32 = 0.6;
 
 #[allow(clippy::too_many_arguments)]
 fn drive(
@@ -935,7 +942,13 @@ fn melee(
         brain.committed_until = now + 1.0;
     }
     let committed = has_turn && now < brain.committed_until;
-    if committed || (ready && opening) {
+    // Elites and masters fight on the counter: never swing into an attack they can parry.
+    // They let it come, parry or slip it, and punish the opening it leaves.
+    let counter = p.attacking
+        && !opening
+        && weapon.can_block
+        && skills.logic * skills.defense > COUNTER_FIGHTER;
+    if (committed && !counter) || (ready && opening) {
         if dist > reach + 0.15 {
             let gap = dist - reach * 0.7;
             if (opening || skills.agility >= 1.1)

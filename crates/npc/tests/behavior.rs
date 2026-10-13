@@ -254,38 +254,64 @@ fn melee_fighters_close_in_strike_and_hurt() {
 
 #[test]
 fn melee_fighters_parry_and_punish_each_other() {
-    let mut app = app();
-    let a = fighter(
-        &mut app,
-        DVec3::new(0.0, 0.0, 3.0),
-        Vec3::NEG_Z,
-        Faction::ENEMY,
-        NpcSkills::master(),
-        NpcWeapon::sword(),
-    );
-    let b = fighter(
-        &mut app,
-        DVec3::new(0.0, 0.0, -3.0),
-        Vec3::Z,
-        Faction::RIVAL,
-        NpcSkills::veteran(),
-        NpcWeapon::sword(),
-    );
-    run(&mut app, 20.0);
-    let sa = app.world.get::<NpcCombat>(a).unwrap().stats;
-    let sb = app.world.get::<NpcCombat>(b).unwrap().stats;
-    assert!(sa.attacks > 3 && sb.attacks > 3, "{sa:?} {sb:?}");
+    // One duel is a handful of exchanges, so fight several (each with different rolls) and
+    // judge the master over all of them.
+    let (mut wins, mut losses) = (0, 0);
+    let (mut master_hurt, mut veteran_hurt) = (0, 0);
+    for round in 0..6 {
+        let mut app = app();
+        for _ in 0..round {
+            app.world.spawn_empty();
+        }
+        let a = fighter(
+            &mut app,
+            DVec3::new(0.0, 0.0, 3.0),
+            Vec3::NEG_Z,
+            Faction::ENEMY,
+            NpcSkills::master(),
+            NpcWeapon::sword(),
+        );
+        let b = fighter(
+            &mut app,
+            DVec3::new(0.0, 0.0, -3.0),
+            Vec3::Z,
+            Faction::RIVAL,
+            NpcSkills::veteran(),
+            NpcWeapon::sword(),
+        );
+        run(&mut app, 20.0);
+        let sa = app.world.get::<NpcCombat>(a).unwrap().stats;
+        let sb = app.world.get::<NpcCombat>(b).unwrap().stats;
+        assert!(
+            sa.attacks > 3 && sb.attacks > 3,
+            "round {round}: {sa:?} {sb:?}"
+        );
+        assert!(
+            sa.blocks + sa.parries + sa.dodges > 2,
+            "round {round}: master defends: {sa:?}"
+        );
+        assert!(
+            sb.blocks + sb.parries + sb.dodges > 0,
+            "round {round}: veteran defends too: {sb:?}"
+        );
+        let ha = app.world.get::<NpcVitals>(a).unwrap().health;
+        let hb = app.world.get::<NpcVitals>(b).unwrap().health;
+        if ha > hb {
+            wins += 1;
+        } else if ha < hb {
+            losses += 1;
+        }
+        master_hurt += sa.hits_taken;
+        veteran_hurt += sb.hits_taken;
+    }
     assert!(
-        sa.blocks + sa.parries + sa.dodges > 2,
-        "master defends: {sa:?}"
+        wins >= 4 && losses <= 1,
+        "the master should win most duels: {wins} won, {losses} lost of 6"
     );
     assert!(
-        sb.blocks + sb.parries + sb.dodges > 0,
-        "veteran defends too: {sb:?}"
+        master_hurt * 2 < veteran_hurt,
+        "the master should take far fewer hits: {master_hurt} vs {veteran_hurt}"
     );
-    let ha = app.world.get::<NpcVitals>(a).unwrap().health;
-    let hb = app.world.get::<NpcVitals>(b).unwrap().health;
-    assert!(ha > hb, "the master should win the exchange: {ha} vs {hb}");
 }
 
 #[test]

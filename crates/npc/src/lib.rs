@@ -12,6 +12,7 @@ pub mod learning;
 pub mod locomotion;
 pub mod nav;
 pub mod perception;
+mod shift;
 pub mod skills;
 pub mod squad;
 pub mod tactics;
@@ -39,6 +40,7 @@ pub use wildlife::{Animal, AnimalMind, AnimalState, BirdFlight, Herd, Species, W
 pub use world_model::{CoverPoint, TacticalWorld, WorldModelSettings};
 
 use engine_core::prelude::*;
+use engine_world::WorldShiftSet;
 
 /// System sets of the NPC module, in `FixedUpdate` (all inside `SimSet::Input`, except the
 /// fallback mover and hit resolution in `SimSet::Gameplay`).
@@ -174,10 +176,21 @@ impl Plugin for NpcPlugin {
                         visuals::intent_markers,
                         training::build_posts,
                         training::pose_posts,
+                        art::arena::flicker_fires,
                     )
                         .chain()
                         .in_set(NpcSet::Show),
                 ),
+            )
+            // Re-anchoring: what NPCs and animals keep in world space follows the world.
+            .add_systems(
+                PostUpdate,
+                (
+                    shift::shift_agents,
+                    shift::shift_wildlife,
+                    shift::shift_world_model,
+                )
+                    .in_set(WorldShiftSet::Apply),
             );
         api::register(app);
     }

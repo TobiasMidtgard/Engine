@@ -14,7 +14,7 @@ use engine_world::physics::{
     BodyKind, CharacterController, Collider, ColliderShape, PhysicsBackend, PhysicsQueries,
     QueryFilter, RigidBody,
 };
-use engine_world::{Ground, TerrainChanged};
+use engine_world::{Ground, Obscurance, TerrainChanged, WorldShift};
 
 /// Spatial hash cell size, meters.
 const HASH_CELL: f64 = 8.0;
@@ -281,9 +281,11 @@ pub struct TacticalWorld {
     hash: HashMap<(i64, i64), Vec<u32>>,
     big: Vec<u32>,
     cover_hash: HashMap<(i64, i64), Vec<u32>>,
-    /// Bumped on every rebuild (navigation caches compare it).
+    /// Bumped on every rebuild and world shift (navigation caches compare it).
     pub generation: u64,
     fingerprint: u64,
+    /// Rebuild from the colliders on the next step even if they look unchanged.
+    rebuild: bool,
 }
 
 fn hash_key(x: f64, z: f64) -> (i64, i64) {
@@ -303,6 +305,33 @@ impl TacticalWorld {
         world.index();
         world.generate_cover(ground);
         world
+    }
+
+    /// Move the model into a new reference frame (see `WorldShift`): obstacles, cover points
+    /// and lookups move with the world, and the generation changes so navigation drops its
+    /// chunks. A move is exact; a turned world is also rebuilt from the colliders on the next
+    /// step, since cover and walkable tops depend on which way is up.
+    pub(crate) fn shift(&mut self, s: &WorldShift) {
+        if self.generation == 0 {
+            return; // not built yet: the first build happens in the new frame
+        }
+        for o in &mut self.obstacles {
+            *o = Obstacle::new(
+                o.entity,
+                s.point(o.center),
+                s.orientation(o.rotation),
+                o.shape,
+            );
+        }
+        for c in &mut self.cover {
+            c.position = s.point(c.position);
+            c.normal = flatten(s.direction(c.normal));
+        }
+        self.index();
+        self.index_cover();
+        self.generation += 1;
+        self.fingerprint = fingerprint(&self.obstacles);
+        self.rebuild |= !s.is_translation_only();
     }
 
     fn index(&mut self) {
@@ -553,6 +582,10 @@ impl TacticalWorld {
                 });
             }
         }
+        self.index_cover();
+    }
+
+    fn index_cover(&mut self) {
         self.cover_hash.clear();
         for (i, c) in self.cover.iter().enumerate() {
             self.cover_hash
@@ -649,9 +682,31 @@ pub struct Sight<'a> {
     pub world: &'a TacticalWorld,
     pub physics: Option<&'a PhysicsQueries>,
     pub ground: &'a Ground,
+    /// Smoke, fog and dust (`None` = clear air).
+    pub obscurance: Option<&'a Obscurance>,
 }
 
+/// Below this much light getting through, smoke hides a body completely.
+pub const OPAQUE_SMOKE: f32 = 0.08;
+
 impl Sight<'_> {
+    /// How well someone at `from` can see `to`: 0 when something solid is in the way,
+    /// otherwise the fraction of light that gets through smoke, fog and dust (1 = clear).
+    pub fn visibility(&self, from: DVec3, to: DVec3, ignore: &[Entity]) -> f32 {
+        if !self.clear(from, to, ignore) {
+            return 0.0;
+        }
+        self.haze(from, to)
+    }
+
+    /// Fraction of light that gets from `from` to `to` through smoke, fog and dust (solid
+    /// obstacles ignored).
+    pub fn haze(&self, from: DVec3, to: DVec3) -> f32 {
+        self.obscurance
+            .map(|o| o.transmittance(from, to))
+            .unwrap_or(1.0)
+    }
+
     /// Can someone at `from` see `to`? `ignore` lists the looker and the target (their own
     /// colliders shouldn't block).
     pub fn clear(&self, from: DVec3, to: DVec3, ignore: &[Entity]) -> bool {
@@ -875,7 +930,7 @@ pub(crate) fn rebuild_world_model(
     time: Res<Time>,
     mut since_poll: Local<f32>,
 ) {
-    let mut dirty = !changed.is_empty() || removed.read().count() > 0;
+    let mut dirty = !changed.is_empty() || removed.read().count() > 0 || model.rebuild;
     dirty |= terrain.read().count() > 0;
     *since_poll += time.real_delta_secs().max(time.delta_secs());
     if !dirty && *since_poll < settings.poll_secs && model.generation > 0 {
