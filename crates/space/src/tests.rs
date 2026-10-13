@@ -1,6 +1,7 @@
 use super::*;
 use engine_core::time::TimeSource;
 use engine_render::prelude::Camera;
+use engine_world::WeatherState;
 
 fn app() -> App {
     let mut app = App::new();
@@ -520,4 +521,115 @@ fn rocky_maps_carry_relief_and_full_mips() {
         .filter(|p| p[1].abs_diff(128) > 6)
         .count();
     assert!(tilted > 500, "{tilted}");
+}
+
+/// Where the weather's formula puts a sun at `hour` local solar time on weather day `day` over
+/// the home spot (40° N), in the planet's compass (east +X, north −Z).
+fn weather_sun_at_home(hour: f64, day: f64) -> DVec3 {
+    let tau = std::f64::consts::TAU;
+    let lat = 40f64.to_radians();
+    let decl = -23.44f64.to_radians() * (tau * (day + 10.0) / sun::YEAR_DAYS).cos();
+    let h = (hour - 12.0) / 24.0 * tau;
+    let up = lat.sin() * decl.sin() + lat.cos() * decl.cos() * h.cos();
+    let east = -decl.cos() * h.sin();
+    let north = lat.cos() * decl.sin() - lat.sin() * decl.cos() * h.cos();
+    DVec3::new(east, up, -north).normalize()
+}
+
+fn degrees_apart(a: DVec3, b: Vec3) -> f64 {
+    a.angle_between(b.as_dvec3().normalize()).to_degrees()
+}
+
+#[test]
+fn starlight_tells_the_weather_where_the_sun_is() {
+    let mut app = app();
+    // J2000 is 2000-01-01 12:00: the weather's day 0.5.
+    let day = app.world.resource::<WeatherState>().day_of_year as f64;
+    let off = (day - 0.5 + 182.625).rem_euclid(365.25) - 182.625;
+    assert!(off.abs() < 1.5, "epoch is day {day}");
+    // At noon at the home spot (0° E), give or take the equation of time.
+    let hour = app.world.resource::<WeatherState>().time_of_day_h;
+    assert!((hour - 12.0).abs() < 0.25, "epoch is {hour} h");
+    for (days, hours) in [(0.0, 3.3), (95.0, 7.0), (172.0, 15.5), (260.0, 11.0)] {
+        app.world.resource_mut::<SpaceClock>().seconds = days * DAY + hours * 3_600.0;
+        app.update();
+        let light = sun_dir(&mut app);
+        let w = app.world.resource::<WeatherState>().clone();
+        assert!(degrees_apart(light.as_dvec3(), w.sun_direction) < 0.01);
+        let formula = weather_sun_at_home(w.time_of_day_h as f64, w.day_of_year as f64);
+        let apart = degrees_apart(formula, light);
+        assert!(
+            apart < 2.0,
+            "day {days} +{hours} h: weather says {} h on day {}, {apart}° from the sun",
+            w.time_of_day_h,
+            w.day_of_year
+        );
+    }
+}
+
+#[test]
+fn the_space_clock_can_follow_the_weathers() {
+    let mut app = app();
+    app.world.resource_mut::<SpaceSettings>().follow_world_clock = true;
+    let set = |app: &mut App, hour: f32, day: f32| {
+        let mut w = app.world.resource_mut::<WeatherState>();
+        w.time_of_day_h = hour;
+        w.day_of_year = day;
+        w.sun_direction = Vec3::Y;
+        for _ in 0..4 {
+            app.update();
+        }
+        app.world.resource::<SpaceClock>().seconds
+    };
+    for (hour, day) in [(9.0, 172.0), (12.0, 355.0), (17.25, 80.0), (6.5, 300.0)] {
+        set(&mut app, hour, day);
+        let apart = degrees_apart(
+            weather_sun_at_home(hour as f64, day as f64),
+            sun_dir(&mut app),
+        );
+        assert!(apart < 2.0, "{hour} h on day {day}: {apart}° off");
+        // The weather lights the scene: its sun stays its own.
+        assert_eq!(app.world.resource::<WeatherState>().sun_direction, Vec3::Y);
+    }
+    // Midwinter noon: due south, 26.6° up.
+    set(&mut app, 12.0, 355.0);
+    let s = sun_dir(&mut app);
+    assert!(s.x.abs() < 0.03 && s.z > 0.0, "{s:?}");
+    assert!((s.y.asin().to_degrees() - 26.6).abs() < 1.0, "{s:?}");
+    // Half an hour of weather is half an hour of space; the date turns over at midnight.
+    let a = set(&mut app, 9.0, 40.0);
+    let b = set(&mut app, 9.5, 40.0);
+    assert!((b - a - 1_800.0).abs() < 5.0, "{}", b - a);
+    let a = set(&mut app, 23.75, 40.0);
+    let b = set(&mut app, 0.25, 41.0);
+    assert!((b - a - 1_800.0).abs() < 5.0, "{}", b - a);
+}
+
+#[test]
+fn a_turned_home_matches_the_weathers_compass() {
+    let mut app = app();
+    {
+        let mut frame = app.world.resource_mut::<SpaceFrame>();
+        frame.home_heading_deg = 180.0;
+    }
+    app.world.resource_mut::<SpaceSettings>().follow_world_clock = true;
+    {
+        let mut w = app.world.resource_mut::<WeatherState>();
+        w.time_of_day_h = 8.0;
+        w.day_of_year = 120.0;
+    }
+    for _ in 0..4 {
+        app.update();
+    }
+    let s = state(&app);
+    let home = s.surface_point("Earth", 40.0, 0.0, 60.0).unwrap();
+    assert!(home.length() < 1e-3, "{home:?}");
+    // North (toward the pole) is +Z now.
+    let north = s.surface_point("Earth", 40.01, 0.0, 60.0).unwrap();
+    assert!(north.z > 1_000.0 && north.x.abs() < 1.0, "{north:?}");
+    // The weather's morning sun (north +Z, east −X) is where the real one stands.
+    let ours = weather_sun_at_home(8.0, 120.0);
+    let weathers = DVec3::new(-ours.x, ours.y, -ours.z);
+    let apart = degrees_apart(weathers, sun_dir(&mut app));
+    assert!(apart < 2.0, "{apart}°");
 }
