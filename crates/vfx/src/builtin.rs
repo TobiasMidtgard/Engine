@@ -1361,15 +1361,19 @@ fn spells() -> Vec<EffectDesc> {
                 [0.3, 0.7],
                 g(&[(0.0, [1.0, 0.75, 0.4, 1.0]), (1.0, [1.0, 0.35, 0.08, 0.0])]),
             ),
-            tail(
-                "star_tail",
-                [0.5, 1.1],
-                g(&[
-                    (0.0, [0.95, 0.75, 1.0, 0.9]),
-                    (0.3, [1.0, 0.7, 0.5, 0.7]),
-                    (1.0, [1.0, 0.45, 0.2, 0.0]),
-                ]),
-            ),
+            // Gold glitter, dimmer than the stars so it stays gold rather than white at night.
+            EmitterDesc {
+                emissive: 12_000.0,
+                ..tail(
+                    "star_tail",
+                    [0.5, 1.1],
+                    g(&[
+                        (0.0, [1.0, 0.78, 0.9, 0.9]),
+                        (0.25, [1.0, 0.62, 0.3, 0.75]),
+                        (1.0, [1.0, 0.4, 0.12, 0.0]),
+                    ]),
+                )
+            },
             EmitterDesc {
                 shape: EmitShape::Sphere {
                     radius: 0.05,
