@@ -100,6 +100,8 @@ pub struct Cloth {
     pub aero_drag: f32,
     /// Skin friction along the cloth (makes flags stream out).
     pub aero_friction: f32,
+    /// Lift across the wind when the cloth meets it at an angle (sails ≈ 1). 0 = none.
+    pub aero_lift: f32,
     pub sim: SimSettings,
     pub material: SoftMaterial,
 }
@@ -123,6 +125,7 @@ impl Default for Cloth {
             flammable: true,
             aero_drag: 1.2,
             aero_friction: 0.04,
+            aero_lift: 0.0,
             sim: SimSettings::default(),
             material: SoftMaterial::default(),
         }
@@ -222,8 +225,9 @@ impl Cloth {
             shear_compliance: 4e-3,
             bend_compliance: 6e-4,
             tear_ratio: Some(1.8),
-            aero_drag: 1.6,
+            aero_drag: 1.3,
             aero_friction: 0.03,
+            aero_lift: 1.1,
             material,
             sim: SimSettings {
                 substeps: 12,
@@ -908,6 +912,7 @@ pub fn build(
     sim.params.aero = (spec.aero_drag > 0.0).then_some(Aero {
         drag: spec.aero_drag,
         friction: spec.aero_friction,
+        lift: spec.aero_lift,
     });
     if let Some(f) = follow
         && spec.sim.follow > 0.0

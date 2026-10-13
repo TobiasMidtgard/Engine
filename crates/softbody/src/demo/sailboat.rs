@@ -65,7 +65,7 @@ const AHEAD_DRAG: (f32, f32) = (8.0, 22.0);
 const RIGHTING: (f32, f32) = (2600.0, 520.0);
 const PITCH: (f32, f32) = (9000.0, 1500.0);
 /// Steering: yaw acceleration per radian off course and damping, at full rudder bite.
-const STEER: (f32, f32) = (1.1, 2.0);
+const STEER: (f32, f32) = (3.0, 3.5);
 /// Fastest the boom swings (a gybe), rad/s.
 const BOOM_RATE: f32 = 1.6;
 
@@ -147,11 +147,12 @@ fn sailcloth() -> SoftMaterial {
     }
 }
 
-/// The hull as the physics module floats it: a box as deep as the hull, narrow enough that
-/// it floats on its designed waterline (buoyancy grows with how much of the box is under).
+/// The hull as the physics module floats it: a box from the keel up, sized so it floats on
+/// its designed waterline (the module lifts a body by the fraction of its box under water,
+/// and drags it in proportion too, so a tall box drags less).
 fn hull_collider() -> engine_world::physics::Collider {
-    // Draft 0.20 of a 0.62 m deep box: lift = ρ g V (0.20 / 0.62) = m g.
-    let depth = 0.62f32;
+    // Draft 0.20 of a 1.4 m tall box: lift = ρ g V (0.20 / 1.4) = m g.
+    let depth = 1.4f32;
     let volume = dims::MASS_KG / (1000.0 * 0.20 / depth);
     let length = 3.0f32;
     let width = volume / (length * depth);
@@ -282,11 +283,11 @@ pub fn sail_boats(
         // Rudder: bites with speed through the water.
         let v = vel.linear;
         let ahead = v.dot(forward);
-        let bite = (ahead.abs() / 1.2).clamp(0.3, 1.4);
+        let bite = (ahead.abs() / 1.5).clamp(0.6, 1.4);
         let yaw_rate = vel.angular.dot(Vec3::Y);
         let inertia = Vec3::from_array(dims::INERTIA);
         let yaw = (STEER.0 * error - STEER.1 * yaw_rate) * inertia.y * bite;
-        let yaw = yaw.clamp(-450.0, 450.0);
+        let yaw = yaw.clamp(-900.0, 900.0);
         let rudder_target = (-error * 1.6).clamp(-0.6, 0.6);
         helm.rudder_angle += (rudder_target - helm.rudder_angle) * (dt * 4.0).min(1.0);
 
