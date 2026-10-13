@@ -122,10 +122,9 @@ pub fn make_wood_combustible_system(
     }
 }
 
-/// How much of its material's strength a burning wooden piece has left (1 = intact): the
-/// fraction of its fuel left, of what it started with ([`Charring`]) or else of what solid
-/// wood of its size holds.
-pub fn burn_strength(
+/// Fraction of a burning wooden piece's fuel left (1 = intact, 0 = burnt): of what it
+/// started with ([`Charring`]) or else of what solid wood of its size holds.
+pub fn fuel_left(
     piece: &StructuralPiece,
     props: &MaterialProps,
     fire: Option<&Combustible>,
@@ -145,6 +144,19 @@ pub fn burn_strength(
             (c.fuel_kg / full.max(1e-3)).clamp(0.0, 1.0)
         }
     }
+}
+
+/// How much of its material's strength a burning wooden piece has left (1 = intact): the
+/// square of its [`fuel_left`]. Strength goes faster than mass: the char layer carries
+/// nothing, the wood just under it is weakened by the heat, and a beam's bending strength
+/// falls with its shrinking core faster than the core's area does.
+pub fn burn_strength(
+    piece: &StructuralPiece,
+    props: &MaterialProps,
+    fire: Option<&Combustible>,
+    charring: Option<&Charring>,
+) -> f32 {
+    fuel_left(piece, props, fire, charring).powi(2)
 }
 
 /// Re-solve support when a burning piece has lost a noticeable part of its strength (fixed

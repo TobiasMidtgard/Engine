@@ -7,7 +7,7 @@ use engine_world::physics::{ContactEvent, ContactPhase};
 use engine_world::{Combustible, Env, WorldImpulse};
 
 use crate::DestructionSettings;
-use crate::burn::{Charring, burn_strength};
+use crate::burn::{Charring, burn_strength, fuel_left};
 use crate::debris::{
     Debris, DebrisBody, DebrisLook, DebrisMesh, DebrisSpawn, ShatterOnImpact, reduce_points,
 };
@@ -142,7 +142,7 @@ pub fn structure_system(
             * h.y
             * h.z
             * props.density
-            * (0.2 + 0.8 * burn_strength(piece, &props, fire, charring));
+            * (0.2 + 0.8 * fuel_left(piece, &props, fire, charring));
         let mut ec = commands.entity(e);
         ec.remove::<(StructuralPiece, PieceState)>();
         if parent.is_some() {

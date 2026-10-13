@@ -4,7 +4,7 @@
 //! The shed is ordinary [`StructuralPiece`]s with an `engine_world::Combustible` each; the
 //! fire module (when the game installs one) does the burning, [`crate::burn`] chars the wood
 //! and weakens each piece as its fuel goes, and the support solver drops what can no longer
-//! stand. Without a fire module the shed just stands. Its boards are old and dry (a third of
+//! stand. Without a fire module the shed just stands. Its wood is old and dry (a quarter of
 //! solid timber's fuel, little moisture), so it comes down within a loop.
 
 use std::f32::consts::{FRAC_PI_2, PI};
@@ -26,8 +26,8 @@ pub const CYCLE_SECS: f32 = 120.0;
 const IGNITE_AT: f32 = 2.0;
 /// When what is left starts sinking away.
 const CLEAR_AT: f32 = CYCLE_SECS - 8.0;
-/// Fraction of solid timber's fuel in the shed's old, thin boards.
-const FUEL_FRACTION: f32 = 0.35;
+/// Fraction of solid timber's fuel left in the shed's old, dry, worm-eaten wood.
+const FUEL_FRACTION: f32 = 0.25;
 /// Moisture of the shed's dry boards.
 const MOISTURE: f32 = 0.06;
 
@@ -36,7 +36,11 @@ pub const BARN: [f64; 3] = [31.0, 0.0, 20.0];
 
 /// A piece of the storehouse (kept out of the breach range's debris clean-up).
 #[derive(Component, Debug, Clone, Copy)]
-pub struct BarnPiece;
+pub struct BarnPiece {
+    /// Fraction of the piece's box that is wood (1 for a beam; less for boards with gaps
+    /// and shingles over battens), which sets its fuel.
+    pub fill: f32,
+}
 
 /// The storehouse's loop.
 #[derive(Component, Debug, Clone, Default)]
@@ -81,6 +85,11 @@ fn build(commands: &mut Commands, at: DVec3, yaw: f32) -> (Vec<Entity>, Vec<Enti
                    rotation: Quat,
                    size: Vec3,
                    look: PropKind| {
+        let fill = match look {
+            PropKind::BoardWall { .. } => 0.5,
+            PropKind::ShinglePanel { .. } => 0.3,
+            _ => 1.0,
+        };
         seed += 1;
         let t = Transform::from_translation(at + (frame * local).as_dvec3())
             .with_rotation(frame * rotation);
@@ -93,7 +102,7 @@ fn build(commands: &mut Commands, at: DVec3, yaw: f32) -> (Vec<Entity>, Vec<Enti
                 GlobalTransform::from(t),
                 piece,
                 PropModel::new(look, seed),
-                BarnPiece,
+                BarnPiece { fill },
             ))
             .id();
         pieces.push(e);
@@ -237,12 +246,12 @@ fn build(commands: &mut Commands, at: DVec3, yaw: f32) -> (Vec<Entity>, Vec<Enti
 pub fn barn_fuel_system(
     mut commands: Commands,
     table: Res<DestructionMaterials>,
-    pieces: Query<(Entity, &StructuralPiece), (Added<BarnPiece>, Without<Combustible>)>,
+    pieces: Query<(Entity, &StructuralPiece, &BarnPiece), (Added<BarnPiece>, Without<Combustible>)>,
 ) {
     let props = table.get(DestructibleMaterial::Wood);
-    for (e, piece) in &pieces {
+    for (e, piece, barn) in &pieces {
         let h = piece.half_extents;
-        let fuel = 8.0 * h.x * h.y * h.z * props.fuel_kg_m3 * FUEL_FRACTION;
+        let fuel = 8.0 * h.x * h.y * h.z * props.fuel_kg_m3 * FUEL_FRACTION * barn.fill;
         commands.entity(e).insert((
             Combustible {
                 fuel_kg: fuel,

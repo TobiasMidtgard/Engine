@@ -27,9 +27,10 @@ fracture and debris.
   build mode.
 - **Burning wood** (`burn`): wooden building pieces get an `engine_world::Combustible`
   holding their wood as fuel, so the fire module (when installed) can light and burn them.
-  As they burn they char (scorched, then black checked char with embers glowing in its
-  cracks, smoldering, cold) and lose strength with the fuel they have left, so a burning
-  building sags piece by piece and comes down; fallen pieces burn on where they land.
+  As they burn they char (scorched, then black alligator char with embers glowing in its
+  cracks, smoldering, cold) and lose strength faster than fuel (the square of the fuel left),
+  so a burning building sags piece by piece and comes down; fallen pieces burn on where they
+  land.
 - **Cracks** (`cracks`): hairline cracks run out from holes and craters across the intact
   faces of brittle walls (concrete, plaster, brick, stone), forking and tapering out.
 - **Voxel volumes** (`VoxelVolume`): cliffs, arches and boulders made of 0.25 m rock voxels
@@ -125,7 +126,9 @@ the Siege fortress zone). It is about 80 × 40 m and runs a 20 s loop, then rebu
 - **Rock arch** whose foot is blown out until it falls.
 - **Burning storehouse** (`barn`): a timber shed in the courtyard, lit from a woodpile inside,
   that chars, sags and burns down on its own 120 s loop (needs the fire module; the showcase
-  has it). `--example burn` renders it with a stand-in fire (char and collapse, no flames).
+  has it, and gives the shed a straw floor in a bare yard ringed by green grass so the fire
+  stays a house fire). `--example burn` renders it with a stand-in fire (char and collapse,
+  no flames).
 
 `cargo run -p engine_destruction --release --example fortress -- <out_dir>` renders all of it
 headless to 22 screenshots.
