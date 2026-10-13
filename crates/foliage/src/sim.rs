@@ -700,6 +700,22 @@ impl RegionSim {
                             plants[i].plant.crown_radius(sp).max(1.0),
                             0.15 * plants[i].plant.size,
                         );
+                        // Over a region's history most big snags came down whole and lie
+                        // rotting on the forest floor (in live play they just crumble); thinner
+                        // ones broke up as they fell.
+                        let size = plants[i].plant.size;
+                        if grow && sp.is_tree() && size > 0.5 && self.rng.chance(0.75) {
+                            logs.push(SimLog {
+                                entity: None,
+                                pos,
+                                yaw: self.rng.range(0.0, std::f32::consts::TAU),
+                                species,
+                                size,
+                                years: 0.0,
+                                rot_years: 8.0 + 10.0 * size,
+                                genes: plants[i].plant.genes,
+                            });
+                        }
                     }
                     plants[i].changed = true;
                 }
@@ -778,6 +794,12 @@ impl RegionSim {
                 continue;
             }
             if !self.soil.contains(q) || self.soil.blocked[self.soil.index(q)] {
+                continue;
+            }
+            if !ctx
+                .region
+                .may_root(layer, DVec2::new(q.x - ctx.center.x, q.z - ctx.center.z))
+            {
                 continue;
             }
             if !self.has_room(ctx, q, sp, &out.births[start..]) {
