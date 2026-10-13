@@ -7,7 +7,7 @@
 //! edge per pixel, so it tears like sand walked over instead of following the triangles. Dust
 //! banks against the curb (deepest on the windward walls, swept clear at the gates) and
 //! around the column plinths; carts have cut ruts at the gates and bodies were dragged toward
-//! them; water slopped from the troughs darkens the sand in soft decals, with a few puddles.
+//! them; water slopped from the troughs soaks the sand dark in soft-edged patches.
 //! Straw, broken arrows and splinters lie where they fell, and stone troughs, water casks and
 //! weapon racks stand along the walls (decoration only: no colliders, behind the fighting
 //! floor's edge).
@@ -186,10 +186,9 @@ pub struct Grounds {
     ruts: Vec<(Vec<Vec2>, f32)>,
     /// Body drag marks.
     drags: Vec<Vec<Vec2>>,
-    /// Damp sand: center, radius, strength.
-    damp: Vec<(Vec2, f32, f32)>,
-    /// Standing water: center, radius.
-    puddles: Vec<(Vec2, f32)>,
+    /// Wet sand: center, radius, strength (alpha in the middle) and the width of the edge it
+    /// fades to dry over, meters.
+    damp: Vec<(Vec2, f32, f32, f32)>,
     /// Straw: center, radius, stalks.
     straw: Vec<(Vec2, f32, u32)>,
     /// Identifies the plan (meshes built from it are cached per plan).
@@ -354,7 +353,7 @@ impl Grounds {
             g.drags.push(path);
         }
         // Troughs with a water cask at one end (away from the nearest gate), the sand dark
-        // and puddled where water slopped over, drips trailing off toward the middle.
+        // and soaked where water slopped over, drips trailing off toward the middle.
         let (rho_t, rho_c) = (39.25f32, 39.45f32);
         for (k, deg) in [38.0f32, 142.0, 218.0, 322.0].into_iter().enumerate() {
             let a = deg.to_radians();
@@ -389,18 +388,22 @@ impl Grounds {
                 0.9,
                 0.62,
             ));
-            g.damp.push((polar(a, rho_t - 1.0), 1.75, 0.7));
-            g.damp.push((polar(spill, rho_t - 0.75), 1.15, 0.85));
-            g.damp.push((polar(ca, rho_c - 0.5), 0.8, 0.65));
-            g.puddles.push((polar(spill, rho_t - 0.95), 0.5));
-            g.puddles
-                .push((polar(a + side * 0.012, rho_t - 1.45), 0.28));
+            // Soaked where the bucket spilled at the lip and again where it was set down, an
+            // older patch drying round them, and under the cask's tap. (Sand drains: no water
+            // stands on it.)
+            g.damp.push((polar(spill, rho_t - 0.82), 0.68, 0.96, 0.3));
+            g.damp
+                .push((polar(a + side * 0.014, rho_t - 1.65), 0.3, 0.85, 0.2));
+            g.damp
+                .push((polar(a - side * 0.02, rho_t - 1.2), 0.85, 0.5, 0.35));
+            g.damp.push((polar(ca, rho_c - 0.55), 0.5, 0.6, 0.28));
             // Drips from a carried bucket.
             let mut p = polar(a + side * 0.008, rho_t - 1.9);
             let mut dir = -polar(a + side * 0.1, 1.0);
             for i in 0..12 {
                 let r = 0.17 - 0.008 * i as f32;
-                g.damp.push((p, r * rng.range(0.7, 1.2), 0.75));
+                let r = r * rng.range(0.7, 1.2);
+                g.damp.push((p, r, 0.75, r * 0.5));
                 dir = Vec2::from_angle(rng.signed() * 0.25).rotate(dir);
                 p += dir * rng.range(0.35, 0.6);
             }
@@ -816,156 +819,67 @@ impl Grounds {
         m
     }
 
-    /// Wet sand and standing water, one blended film so it draws in order: damp sand (soft
-    /// decals, alpha in the vertex color), then soaked sand along each puddle's waterline, then
-    /// the puddles' water, its edge thinning over the soaked sand. u picks the wetness in
-    /// [`wet_set`].
+    /// Wet sand: patches blended over the floor in [`wet_set`]'s soaked sand, the vertex alpha
+    /// how wet. Each is darkest in its middle and fades to dry over its edge, the edge's
+    /// width and reach wandering round it and its alpha breaking up as it fades.
     pub fn wet_mesh(&self) -> Mesh {
         let mut m = Mesh::default();
-        fn vertex(m: &mut Mesh, p: Vec3, u: f32, a: f32) {
-            m.vertices.push(
-                Vertex::new(p, Vec3::Y, Vec2::new(u, 0.5)).with_color(Vec4::new(1.0, 1.0, 1.0, a)),
-            );
-        }
-        for (k, &(c, r, strength)) in self.damp.iter().enumerate() {
-            let (na, nr) = if r > 0.5 { (36usize, 6usize) } else { (12, 2) };
+        for (k, &(c, r, strength, edge)) in self.damp.iter().enumerate() {
+            let big = r > 0.3;
+            let na = if big { 64u32 } else { 16 };
+            // Through the soaked middle (fractions of the way to the edge), then across the
+            // edge (fractions of its width left to the rim).
+            let (core, fade): (&[f32], &[f32]) = if big {
+                (&[0.45, 0.8], &[1.0, 0.72, 0.48, 0.26, 0.1, 0.0])
+            } else {
+                (&[], &[1.0, 0.5, 0.0])
+            };
             let seed = 970 + k as u32;
             let base = m.vertices.len() as u32;
-            let at = |q: Vec2| v3(q, self.ground(q) + DECAL_LIFT);
-            vertex(&mut m, at(c), WET_DAMP, strength);
+            let mut push = |q: Vec2, a: f32, dark: f32| {
+                m.vertices.push(
+                    Vertex::new(v3(q, self.ground(q) + DECAL_LIFT), Vec3::Y, q)
+                        .with_color(Vec4::new(dark, dark, dark, a)),
+                );
+            };
+            push(c, strength, 0.88);
             for i in 0..na {
-                let th = i as f32 / na as f32 * TAU;
-                let dir = Vec2::from_angle(th);
-                let reach = r
-                    * (1.0
-                        + 0.28 * vn3(Vec3::new(dir.x * 1.2, 0.0, dir.y * 1.2), seed)
-                        + 0.1 * vn3(Vec3::new(dir.x * 3.5, 0.0, dir.y * 3.5), seed + 1));
-                for j in 1..=nr {
-                    let s = j as f32 / nr as f32;
-                    let q = c + dir * reach * s;
-                    let n = vn3(v3(q, 0.0) * 2.3, seed + 2);
-                    // Wettest in the middle, a slightly darker front where it is drying,
-                    // fading out softly.
-                    let front = (-((s - 0.8) / 0.12).powi(2)).exp();
-                    let a = strength
-                        * ((1.0 - s * s).powf(1.2) * 0.85 + 0.15 * front)
-                        * (0.8 + 0.2 * n);
-                    vertex(&mut m, at(q), WET_DAMP, a);
+                let dir = Vec2::from_angle(i as f32 / na as f32 * TAU);
+                let n = |f: f32, s: u32| vn3(Vec3::new(dir.x * f, 0.0, dir.y * f), seed + s);
+                // Lobes where the water ran (the noise sampled finely enough round the ring
+                // that the outline stays smooth).
+                let reach = if big {
+                    r * (1.0 + 0.22 * n(1.0, 0) + 0.1 * n(2.2, 1))
+                } else {
+                    r * (1.0 + 0.2 * n(0.8, 0))
+                };
+                let w = (edge * (1.0 + 0.4 * n(1.6, 3))).min(reach * 0.7);
+                for &f in core {
+                    let q = c + dir * (reach - w) * f;
+                    push(q, strength * (1.0 - 0.06 * f), 0.88 + 0.04 * f);
+                }
+                for &g in fade {
+                    let q = c + dir * (reach - w * g);
+                    // Ragged as it dries: the fade wanders a little either way.
+                    let jitter = 0.75 + 0.25 * vn3(v3(q, 0.0) * 6.0, seed + 4);
+                    let a =
+                        strength * 0.94 * smooth(0.0, 1.0, g) * if g < 1.0 { jitter } else { 1.0 };
+                    push(q, a, 1.0 - 0.08 * g);
                 }
             }
-            let ring = |i: usize, j: usize| base + 1 + ((i % na) * nr + j - 1) as u32;
+            let rings = (core.len() + fade.len()) as u32;
+            let at = |i: u32, j: u32| base + 1 + (i % na) * rings + j;
             for i in 0..na {
-                m.indices
-                    .extend_from_slice(&[base, ring(i + 1, 1), ring(i, 1)]);
-                for j in 1..nr {
-                    let (a, b) = (ring(i, j), ring(i, j + 1));
-                    let (c2, d) = (ring(i + 1, j + 1), ring(i + 1, j));
-                    m.indices.extend_from_slice(&[a, d, c2, a, c2, b]);
-                }
-            }
-        }
-        // Each puddle's middle, outline (directions and reaches) and level.
-        const N: u32 = 28;
-        type Puddle = (Vec2, Vec<(Vec2, f32)>, f32);
-        let puddles: Vec<Puddle> = self
-            .puddles
-            .iter()
-            .enumerate()
-            .map(|(k, &(c, r))| {
-                let seed = 990 + k as u32;
-                let outline: Vec<(Vec2, f32)> = (0..N)
-                    .map(|i| {
-                        let dir = Vec2::from_angle(i as f32 / N as f32 * TAU);
-                        let reach = r
-                            * (1.0
-                                + 0.3 * vn3(Vec3::new(dir.x * 1.4, 0.0, dir.y * 1.4), seed)
-                                + 0.12 * vn3(Vec3::new(dir.x * 4.0, 0.0, dir.y * 4.0), seed + 1));
-                        (dir, reach)
-                    })
-                    .collect();
-                // Water finds its level just over the highest sand along its edge (and over
-                // the damp sand decal round it).
-                let level = outline
-                    .iter()
-                    .map(|&(dir, reach)| self.ground(c + dir * reach))
-                    .fold(self.ground(c), f32::max)
-                    + DECAL_LIFT
-                    + 0.003;
-                (c, outline, level)
-            })
-            .collect();
-        // Rings round each outline (fractions of its reach, wetness, alpha), joined in strips.
-        let rings = |m: &mut Mesh,
-                     c: Vec2,
-                     outline: &[(Vec2, f32)],
-                     level: f32,
-                     rings: &[(f32, f32, f32)]| {
-            let base = m.vertices.len() as u32;
-            for &(dir, reach) in outline {
-                for &(s, u, a) in rings {
-                    let q = c + dir * (reach * s);
-                    // Inside the waterline on the water, outside it on the sand.
-                    let y = if s <= 1.0 {
-                        level
-                    } else {
-                        self.ground(q) + DECAL_LIFT + 0.001
-                    };
-                    vertex(m, v3(q, y), u, a);
-                }
-            }
-            let k = rings.len() as u32;
-            let at = |i: u32, j: u32| base + (i % N) * k + j;
-            for i in 0..N {
-                for j in 0..k - 1 {
+                m.indices.extend_from_slice(&[base, at(i + 1, 0), at(i, 0)]);
+                for j in 0..rings - 1 {
                     let (a, b) = (at(i, j), at(i, j + 1));
                     let (c2, d) = (at(i + 1, j + 1), at(i + 1, j));
                     m.indices.extend_from_slice(&[a, d, c2, a, c2, b]);
                 }
             }
-        };
-        // Soaked sand along the waterlines, from under the water's thinning edge out onto the
-        // damp sand.
-        for (c, outline, level) in &puddles {
-            rings(
-                &mut m,
-                *c,
-                outline,
-                *level,
-                &[
-                    (0.85, WET_SOAKED, 0.0),
-                    (1.0, WET_SOAKED, 0.6),
-                    (1.12, 0.3, 0.35),
-                    (1.3, WET_DAMP, 0.0),
-                ],
-            );
-        }
-        // The water: the dark bottom under a mirror, thinning over its last centimeters.
-        let water_from = m.vertices.len();
-        let water = [
-            (0.3, WET_WATER, 0.88),
-            (0.6, WET_WATER, 0.88),
-            (0.85, WET_WATER, 0.88),
-            (1.0, WET_WATER, 0.0),
-        ];
-        for (c, outline, level) in &puddles {
-            let base = m.vertices.len() as u32;
-            vertex(&mut m, v3(*c, *level), WET_WATER, 0.88);
-            rings(&mut m, *c, outline, *level, &water);
-            let k = water.len() as u32;
-            for i in 0..N {
-                let (a, b) = (base + 1 + k * i, base + 1 + k * ((i + 1) % N));
-                m.indices.extend_from_slice(&[base, b, a]);
-            }
         }
         fix_up(&mut m);
         smooth_normals(&mut m);
-        // A breath of wind on the water: its normals tilted a few degrees in slow swells, so
-        // the sky's reflection shifts across it.
-        for v in &mut m.vertices[water_from..] {
-            let p = Vec3::from(v.position) * 3.1;
-            let tilt = Vec3::new(vn3(p, 996), 0.0, vn3(p, 997)) * 0.07;
-            v.normal = (Vec3::Y + tilt).normalize().to_array();
-        }
         m
     }
 
@@ -1951,31 +1865,57 @@ pub fn water_set() -> TextureSet {
     })
 }
 
-/// Where on [`wet_set`] damp sand, soaked sand and standing water lie (u; the film's mesh
-/// sets it per vertex and the texture ramps between them).
-const WET_DAMP: f32 = 0.05;
-const WET_SOAKED: f32 = 0.5;
-const WET_WATER: f32 = 0.95;
-
-/// Damp sand to soaked sand to standing water along u (v unused). Damp sand is about a third
-/// of the dry sand's color (at the decal's ~60% alpha the sand below comes out some 40%
-/// darker, its grain still showing) and a little glossy; soaked sand is darker and glossier;
-/// water is the dark bottom under a mirror (the material's reflectance makes the sheet read
-/// in full sun, where the sky's reflection is faint next to the sunlit sand).
+/// Soaked sand (2 m repeat): dark and a little glossy, mottled where it is drying, a few
+/// clumps kicked up wet, and prints pressed in crisp (wet sand holds its edge), their floors
+/// wetter still. The alpha is how wet: the patches' vertex alpha fades it out to dry, and its
+/// mottle breaks up their edges.
 pub fn wet_set() -> TextureSet {
-    bake_par(64, 1.0, |uv| {
-        let soaked = smooth(WET_DAMP + 0.05, WET_SOAKED - 0.05, uv.x);
-        let water = smooth(WET_SOAKED + 0.05, WET_WATER - 0.05, uv.x);
-        let albedo = Vec3::new(0.17, 0.12, 0.066)
-            .lerp(Vec3::new(0.1, 0.07, 0.04), soaked)
-            .lerp(Vec3::new(0.075, 0.06, 0.042), water);
-        Texel {
-            albedo,
-            height: 0.0,
-            roughness: (0.5 + (0.25 - 0.5) * soaked) * (1.0 - water) + 0.05 * water,
-            metallic: 0.0,
-            occlusion: 1.0,
+    let size = span::WET;
+    let marks = marks(size, 707, 3, 0, 1);
+    let cs = size / MARK_CELLS as f32;
+    bake_par_alpha(512, size, |uv| {
+        let m = uv * size;
+        let mottle = fb(uv * 6.0, (6, 6), 3, 701) * 0.6 + fb(uv * 19.0, (19, 19), 2, 702) * 0.4;
+        let grain = fb(uv * 120.0, (120, 120), 2, 703);
+        // Prints.
+        let (gx, gy) = (
+            (m.x / cs).floor() as i32 % MARK_CELLS,
+            (m.y / cs).floor() as i32 % MARK_CELLS,
+        );
+        let (mut dig, mut raise, mut floor) = (0.0f32, 0.0f32, 0.0f32);
+        for &i in &marks.grid[(gy.max(0) * MARK_CELLS + gx.max(0)) as usize] {
+            let mk = &marks.marks[i as usize];
+            let (_, inside, rim) = mark_effect(mk, wrap_delta(m - mk.at, size));
+            let inside = smooth(0.3, 0.7, inside);
+            dig = dig.min(-mk.depth * 1.4 * inside);
+            raise = raise.max(mk.depth * 0.3 * rim * (1.0 - inside));
+            floor = floor.max(inside);
         }
+        // Clumps a few centimeters across.
+        let cc = cell(uv * 40.0, (40, 40), 704);
+        let clump = if cc.id < 0.05 {
+            let r = 0.26 + 0.2 * cc.id / 0.05;
+            (1.0 - (cc.d1 / r).powi(2)).max(0.0).sqrt()
+        } else {
+            0.0
+        };
+        let height = 0.0008 * mottle + 0.0002 * grain + dig + raise + 0.008 * clump;
+        let mut a = Vec3::new(0.16, 0.108, 0.058) * (1.0 + 0.1 * mottle) * (0.96 + 0.08 * grain);
+        // Print floors wetter still; the clumps' tops drying paler.
+        a *= 1.0 - 0.15 * floor + 0.35 * clump * clump;
+        let wet = (0.82 + 0.18 * smooth(-0.5, 0.6, mottle))
+            .max(floor)
+            .max(clump);
+        (
+            Texel {
+                albedo: a,
+                height,
+                roughness: 0.34 - 0.1 * floor + 0.2 * clump + 0.05 * mottle,
+                metallic: 0.0,
+                occlusion: 1.0 - 0.12 * floor,
+            },
+            wet,
+        )
     })
 }
 
@@ -2358,7 +2298,7 @@ mod tests {
             spots: vec![(Vec2::ZERO, 7.0, 1.0), (Vec2::new(12.0, -23.0), 4.6, 1.0)],
             paths: vec![(Vec2::new(0.0, 40.5), Vec2::new(0.0, 27.5), 2.8, 1.0)],
             columns: vec![Vec2::new(16.6, 6.9)],
-            puddles: vec![(Vec2::new(-30.0, 23.0), 0.5)],
+            damp: vec![(Vec2::new(-30.0, 23.0), 0.6, 0.95, 0.32)],
             tag: 1,
             ..Default::default()
         }
@@ -2451,6 +2391,23 @@ mod tests {
         assert!(!near(&raked, Vec2::ZERO) && near(&base, Vec2::ZERO));
         let open = Vec2::new(-25.0, -10.0);
         assert!(near(&raked, open) && !near(&base, open));
+    }
+
+    #[test]
+    fn wet_patches_lie_on_the_sand_soaked_in_the_middle_and_dry_at_the_rim() {
+        let g = plan();
+        let m = g.wet_mesh();
+        assert!(m.triangle_count() > 100);
+        for v in &m.vertices {
+            let q = Vec2::new(v.position[0], v.position[2]);
+            let dy = v.position[1] - g.ground(q);
+            assert!((dy - DECAL_LIFT).abs() < 1e-4, "{dy} m off the sand at {q}");
+            assert!((0.0..=1.0).contains(&v.color[3]));
+        }
+        let alpha = |v: &Vertex| v.color[3];
+        assert!(m.vertices.iter().map(alpha).fold(0.0, f32::max) > 0.9);
+        // One ring of the patch's rim, all of it dry (no hard edge).
+        assert_eq!(m.vertices.iter().filter(|v| alpha(v) == 0.0).count(), 64);
     }
 
     #[test]
