@@ -31,12 +31,15 @@
 use std::sync::Arc;
 
 use bevy_ecs::prelude::*;
+use engine_assets::{Assets, Handle};
 use engine_core::App;
 
 use crate::cloud_shadows::{CloudShadowRequest, CloudShadowTarget};
 use crate::frame::ViewData;
+use crate::image_cache::{ImageCache, ImageTexture};
 use crate::material_library::{MaterialLibrary, MaterialMaps, MaterialPreset, MaterialTextures};
 use crate::settings::RenderSettings;
+use crate::texture::Image;
 
 /// Shared types and pure functions (no bindings).
 pub const SHADER_LIB_TYPES: &str = include_str!("shaders/lib_types.wgsl");
@@ -92,6 +95,9 @@ pub struct GpuShared {
     pub features: wgpu::Features,
     /// Generated material textures (presets), built on first use and shared by every feature.
     pub materials: MaterialLibrary,
+    /// The renderer's uploaded [`Image`]s, shared by every feature (see
+    /// [`GpuShared::image_texture`] and [`crate::image_cache`]).
+    pub images: ImageCache,
 }
 
 impl GpuShared {
@@ -110,6 +116,27 @@ impl GpuShared {
     /// the views like any texture (base color is an sRGB view).
     pub fn material_textures(&self, preset: MaterialPreset, size: u32) -> Arc<MaterialTextures> {
         self.materials.get(self, preset, size)
+    }
+
+    /// The renderer's own GPU copy of an image asset, ready to bind: uploaded with its mip chain
+    /// the first time any feature asks for it and again when its asset gets new pixels, and
+    /// shared by every feature that asks (one upload per image and color space). `color`: the
+    /// slot holds color (base color, emissive), so an sRGB RGBA8 image is sampled through an sRGB
+    /// view; data slots (normal, metallic/roughness, occlusion, masks) pass false. `None` while
+    /// the image is still loading, or when it cannot be uploaded (invalid data, too large).
+    ///
+    /// Ask every frame the image is drawn (images nobody asks for in 600 frames leave the GPU),
+    /// and rebuild a bind group that binds [`ImageTexture::view`] when [`ImageTexture::id`]
+    /// changes. Use this rather than uploading `Image::data` yourself: with
+    /// `RenderSettings::release_image_pixels` the renderer frees the CPU pixels of images
+    /// uploaded here, and this keeps returning their texture.
+    pub fn image_texture(
+        &self,
+        images: &Assets<Image>,
+        handle: Handle<Image>,
+        color: bool,
+    ) -> Option<Arc<ImageTexture>> {
+        self.images.get(self, images, handle, color)
     }
 
     /// Copy a preset's maps back to the CPU (mip 0), generating them first if needed. Blocks

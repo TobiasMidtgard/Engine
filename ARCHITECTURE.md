@@ -405,6 +405,26 @@ blending, for rocks, spheres and terrain without UVs. The prepass evaluates the 
 (parallax, triplanar, normal maps), so ambient occlusion, reflections and TAA see the detailed
 normals.
 
+**Shared images and image memory** (built; `image_cache.rs`): the renderer keeps one GPU copy
+of each `Image` asset that is drawn, shared by every feature. `GpuShared::image_texture(&images,
+handle, color)` returns it (`Arc<ImageTexture>`: `view`, `srgb`, size, mip levels, and an `id`
+that changes only when new pixels are uploaded, so bind groups are rebuilt only then), uploading
+it with its mip chain on first use and again when the asset gets new pixels; images nobody asks
+for in 600 frames leave the GPU. The mesh feature (and with it the cluster path) binds its
+material textures this way; features that upload `Image::data` themselves (the skinning feature,
+today) should switch to it. With `RenderSettings::release_image_pixels` (off by default) the
+renderer frees an uploaded image's CPU pixels (`data` and `mips`; size, format and flags stay,
+and `Image::is_released()` turns true) once its asset version has stayed the same for
+`RELEASE_AFTER_FRAMES` (120) frames, counted in frames so that a texture written every frame or
+every few frames never qualifies at any frame rate. Releasing bumps the asset version; the cache
+recognizes the emptied image and keeps its texture (no upload, same `id`), keeps a released image
+on the GPU however long it goes unused, and uploads again when new `data` is assigned.
+`Image::keep_pixels` opts an image out: set it on images that code reads on the CPU, writes in
+place less often than every two seconds, or uploads itself (an image that both the mesh feature
+and a skin use, until the skinning feature uses `image_texture`). `Diagnostics` reports
+`render.images_released` and `render.image_bytes_released` (since startup),
+`render.image_uploads` and `render.gpu_images`; `render.stats` includes them.
+
 **Sky light** (built): every time the sky environment map is redrawn
 (`RenderSettings::environment_interval`), the GPU filters it twice: prefiltered for GGX
 reflections, one mip per roughness step (`sample_env_rough(dir, roughness)`), and convolved into
