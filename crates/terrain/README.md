@@ -23,8 +23,9 @@ everything else (streaming, LOD, colliders, ground queries, prints) follows the 
   `finest_spacing_m` (0.5 m by default).
 - **Flat pads and a view worth having.** `FlatPad` blends the planet into level ground for a
   level, town or spaceport. `PlanetTerrain::home_transform(pad)` places the planet so the pad
-  sits at the world origin with +Y up (north toward −Z). A pad also lays out the land around
-  it: rolling hills, a snow-capped range on one horizon (`mountains`,
+  sits at the world origin with +Y up (north toward −Z; `heading_deg` 180 turns north to +Z,
+  the weather module's compass, matched by `SpaceFrame::home_heading_deg`). A pad also lays
+  out the land around it: rolling hills, a snow-capped range on one horizon (`mountains`,
   `mountain_azimuth_deg`, `mountain_distance_m`; by default 3–4.5 km peaks 26 km north) and a
   ragged coast on another (`sea_azimuth_deg`, `sea_distance_m`; by default 16 km
   south-southwest, a gulf that opens into the ocean).
