@@ -4,9 +4,10 @@
 use engine_core::math::{DVec3, Rng, Vec3};
 use engine_core::prelude::*;
 use engine_world::physics::{ContactEvent, ContactPhase};
-use engine_world::{BurnState, Combustible, Env, WorldImpulse};
+use engine_world::{Combustible, Env, WorldImpulse};
 
 use crate::DestructionSettings;
+use crate::burn::{Charring, burn_strength, fuel_left};
 use crate::debris::{
     Debris, DebrisBody, DebrisLook, DebrisMesh, DebrisSpawn, ShatterOnImpact, reduce_points,
 };
@@ -17,26 +18,6 @@ use crate::structure::{
     solve_support,
 };
 use crate::voxel::{VoxelLook, VoxelState, VoxelVolume, mesh_all};
-
-/// How much of its material's strength a burning wooden piece has left (1 = intact).
-fn burn_strength(
-    piece: &StructuralPiece,
-    props: &MaterialProps,
-    fire: Option<&Combustible>,
-) -> f32 {
-    let Some(c) = fire else {
-        return 1.0;
-    };
-    match c.state {
-        BurnState::Intact => 1.0,
-        BurnState::Burnt => 0.0,
-        BurnState::Smoldering | BurnState::Burning => {
-            let v = 8.0 * piece.half_extents.x * piece.half_extents.y * piece.half_extents.z;
-            let full = (v * props.fuel_kg_m3).max(1e-3);
-            (c.fuel_kg / full).clamp(0.0, 1.0)
-        }
-    }
-}
 
 /// Keep the support graph of [`StructuralPiece`]s current, update every [`PieceState`], and
 /// drop pieces that lost support (after a short, slightly random delay so collapses cascade).
@@ -70,12 +51,12 @@ pub fn structure_system(
         &StructuralPiece,
         &mut PieceState,
         Option<&Combustible>,
+        Option<&Charring>,
     )>,
-    burning: Query<(), (With<StructuralPiece>, Changed<Combustible>)>,
     mut rng: Local<Option<Rng>>,
 ) {
     let rng = rng.get_or_insert_with(|| Rng::new(0xC011_A95E));
-    if !changed.is_empty() || removed.read().count() > 0 || !burning.is_empty() {
+    if !changed.is_empty() || removed.read().count() > 0 {
         graph.dirty = true;
     }
     let dt = time.delta_secs();
@@ -106,18 +87,18 @@ pub fn structure_system(
         let mut g = build_graph(&items, ground);
         let mut props: Vec<MaterialProps> = Vec::with_capacity(items.len());
         for (e, ..) in &items {
-            let Ok((_, _, _, _, piece, _, fire)) = pieces.get(*e) else {
+            let Ok((_, _, _, _, piece, _, fire, charring)) = pieces.get(*e) else {
                 props.push(table.get(DestructibleMaterial::Wood));
                 continue;
             };
             let mut p = table.get(piece.material);
-            let k = burn_strength(piece, &p, fire);
+            let k = burn_strength(piece, &p, fire, charring);
             p.max_support *= k;
             props.push(p);
         }
         let support = solve_support(&g, &props);
         for (i, (e, ..)) in items.iter().enumerate() {
-            if let Ok((.., mut state, _)) = pieces.get_mut(*e) {
+            if let Ok((.., mut state, _, _)) = pieces.get_mut(*e) {
                 state.support = support[i];
                 state.max_support = props[i].max_support;
                 let failing = support[i] < props[i].min_support || props[i].max_support <= 0.0;
@@ -135,7 +116,7 @@ pub fn structure_system(
     // Count down and drop.
     let mut fallen: Vec<(Entity, DVec3, f32)> = Vec::new();
     let mut dust_darkness = 0.0;
-    for (e, t, gt, parent, piece, mut state, _) in &mut pieces {
+    for (e, t, gt, parent, piece, mut state, fire, charring) in &mut pieces {
         let Some(left) = state.collapse_in.as_mut() else {
             continue;
         };
@@ -155,7 +136,13 @@ pub fn structure_system(
             gt.scale()
         };
         let h = piece.half_extents;
-        let mass = 8.0 * h.x * h.y * h.z * props.density;
+        // Burnt wood has lost most of its mass to the fire.
+        let mass = 8.0
+            * h.x
+            * h.y
+            * h.z
+            * props.density
+            * (0.2 + 0.8 * fuel_left(piece, &props, fire, charring));
         let mut ec = commands.entity(e);
         ec.remove::<(StructuralPiece, PieceState)>();
         if parent.is_some() {
@@ -267,8 +254,16 @@ pub fn voxel_support_system(
                 .collect();
             let seeds = spread_seeds(&centers, k, rng);
             let mut parts: Vec<Vec<(usize, u8, u8)>> = vec![Vec::new(); seeds.len()];
+            // Bend the boundaries between boulders with smooth noise rather than per-voxel
+            // jitter: per-voxel jitter interleaves stray voxels along every boundary, and the
+            // boulders come out with stringy, melted-looking spurs.
+            let noise_seed = rng.next_u64();
+            let wobble = |c: Vec3, k: u64| {
+                let q = c.as_dvec3() * 0.35;
+                engine_core::math::noise::perlin3(q.x, q.y, q.z, noise_seed.wrapping_add(k)) as f32
+            };
             for (v, c) in group.iter().zip(&centers) {
-                let jitter = rng.unit_vector() * state.size * 1.5;
+                let jitter = Vec3::new(wobble(*c, 1), wobble(*c, 2), wobble(*c, 3)) * 1.6;
                 let best = seeds
                     .iter()
                     .enumerate()

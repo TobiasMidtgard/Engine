@@ -57,6 +57,10 @@ pub struct FlatPad {
     pub sea_azimuth_deg: f64,
     /// Distance to the coast, meters (0 = no sea nearby, the pad is far inland).
     pub sea_distance_m: f64,
+    /// Turn of the planet about the world's up axis at the home spot, degrees (spheres):
+    /// north points toward −Z at 0 and toward +Z at 180 (east toward +X / −X), for a game
+    /// whose compass is the other way round. Match `SpaceFrame::home_heading_deg`.
+    pub heading_deg: f64,
 }
 
 impl Default for FlatPad {
@@ -73,6 +77,7 @@ impl Default for FlatPad {
             mountain_distance_m: 26_000.0,
             sea_azimuth_deg: 200.0,
             sea_distance_m: 16_000.0,
+            heading_deg: 0.0,
         }
     }
 }
@@ -81,6 +86,13 @@ impl FlatPad {
     /// Planet-local unit direction of the pad center.
     pub fn direction(&self) -> DVec3 {
         dir_from_lat_lon(self.lat_deg, self.lon_deg)
+    }
+
+    /// Planet-local to world rotation that puts the pad on top (+Y) with north toward −Z
+    /// turned by [`heading_deg`](Self::heading_deg) about +Y.
+    pub fn home_rotation(&self) -> DQuat {
+        let q = crate::cube::home_rotation(self.lat_deg, self.lon_deg);
+        (DQuat::from_rotation_y(self.heading_deg.to_radians()) * q).normalize()
     }
 }
 
@@ -106,7 +118,7 @@ pub fn lat_lon_from_dir(d: DVec3) -> (f64, f64) {
 #[derive(Clone)]
 pub struct HeightOverlay {
     /// Ground height (world y) at world `(x, z)`, meters, in the home frame (the home spot at
-    /// the origin, +Y up, north toward −Z). The ground passes exactly through these points:
+    /// the origin, +Y up, north toward −Z unless the pad's heading turns it). The ground passes exactly through these points:
     /// the terrain converts them to heights on the sphere itself, so don't subtract the
     /// planet's curvature unless the level is meant to follow it.
     pub height: Arc<dyn Fn(f64, f64) -> f64 + Send + Sync>,

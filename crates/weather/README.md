@@ -55,7 +55,8 @@ occlusion map).
 **The ground changes.** The weather writes the shared `SurfaceLayers` grid around the player:
 rain wets exposed ground within a millimeter; what the ground can't soak up collects in the low
 spots as puddles (asphalt pools, sand soaks it up, see `GroundPatch`; soft ground such as a
-meadow drains, so water stands only in its few hollows); snow piles up below
+meadow drains, so water stands only where the terrain itself dips: hollows, ruts, a dry stream
+bed); snow piles up below
 freezing and melts by degree-days; sun, wind and dry air evaporate it again. Covered ground
 stays dry (roofs with colliders are found by raycasts; `WeatherShelter` marks covers without
 one). A ground pass draws it: puddles that mirror the world (screen-space reflections, the sky
@@ -129,7 +130,7 @@ Components: `SunLight`, `MoonLight`, `WeatherShelter` (cover without a collider)
 | `weather.forecast` | Queue weather changes |
 | `weather.time` | Set the clock: hour, day of year, clock speed, moon phase |
 | `weather.advance` | Run the weather forward (rain falls, ground soaks, snow piles up) |
-| `weather.ground` | Set the ground directly: dry, wetness, puddle depth, snow depth |
+| `weather.ground` | Set the ground directly: dry, wetness, puddle depth, snow depth (covered ground stays as it is) |
 | `weather.lightning` | Strike at a position |
 | `weather.presets` | List presets and what they mean |
 

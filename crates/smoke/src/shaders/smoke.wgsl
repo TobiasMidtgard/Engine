@@ -6,7 +6,7 @@ struct SmokeParams {
     min_rel: vec4<f32>,   // box min (camera-relative), voxel size
     size: vec4<f32>,      // box size (m), blend previous -> current
     dims: vec4<f32>,      // voxels, firelight scale
-    look: vec4<f32>,      // detail, max steps, tunnel count, unused
+    look: vec4<f32>,      // detail, max steps, tunnel count, fog (1: soft, wide ground fog)
     tunnels: array<vec4<f32>, 32>, // per tunnel: from + radius, to + strength (camera-relative)
 };
 
@@ -158,10 +158,15 @@ fn fs_smoke(in: VsOut) -> @location(0) vec4<f32> {
     let amb_side = 0.5 * (sky_ambient(normalize(flat_dir)) + sky_ambient(normalize(-flat_dir)));
     // Billows finer than a pixel only shimmer: fade the detail out with distance (the size
     // of a pixel at the volume, against the detail noise's ~1 m scale).
+    // Fog is smoke's soft, wide cousin: its noise is a few times larger, it stays solid where
+    // it's thin (a fog bank's top is a soft surface, not wisps) and it doesn't rise.
+    let fog = smoke.look.w;
+    let grain = mix(1.0, 5.0, fog);
     let pixel_m = 2.0 / (frame.proj[1][1] * frame.viewport.y) * max(t0, 1.0);
-    let detail = smoke.look.x * saturate(1.5 - pixel_m / 0.05);
+    let detail = smoke.look.x * saturate(1.5 - pixel_m / (0.05 * grain));
     // Fine billows drift with the wind and rise a little.
-    let drift = (frame.wind.xyz * 0.8 + vec3<f32>(0.0, 0.35, 0.0)) * (frame.time.x % 1000.0);
+    let drift = (frame.wind.xyz * 0.8 + vec3<f32>(0.0, 0.35 * (1.0 - fog), 0.0)) * (frame.time.x % 1000.0);
+    let half_sigma = mix(2.0, 0.06, fog);
 
     var transmittance = 1.0;
     var color = vec3(0.0);
@@ -174,7 +179,7 @@ fn fs_smoke(in: VsOut) -> @location(0) vec4<f32> {
         var lumps = 0.5;
         if (detail > 0.0) {
             // Warp the lookup so the voxels' smooth shapes break up into billows.
-            let wn = textureSampleLevel(detail_tex, linear_repeat, (tiling_pos(p) - drift) / WARP_TILE, 0.0);
+            let wn = textureSampleLevel(detail_tex, linear_repeat, (tiling_pos(p) - drift) / (WARP_TILE * grain), 0.0);
             lumps = wn.r;
             q = p + (wn.gba - 0.5) * (cell * 2.4 * detail);
         }
@@ -196,12 +201,13 @@ fn fs_smoke(in: VsOut) -> @location(0) vec4<f32> {
             var k = saturate(edge / (cell * 2.5));
             if (detail > 0.0) {
                 // Erode: where the smoke is thin it breaks into round billows and wisps; dense
-                // cores keep their shape. `d` is how dense it is (σ = 2/m is halfway); `gaps`
+                // cores keep their shape. `d` is how dense it is (σ = 2/m is halfway; for fog
+                // 0.06/m); `gaps`
                 // is high between billows; big lumps (`lumps`) erode less.
-                let bn = textureSampleLevel(detail_tex, linear_repeat, (tiling_pos(p) - drift * 1.3) / BILLOW_TILE, 0.0);
+                let bn = textureSampleLevel(detail_tex, linear_repeat, (tiling_pos(p) - drift * 1.3) / (BILLOW_TILE * grain), 0.0);
                 let gaps = 1.0 - (bn.g * 0.5 + bn.b * 0.3 + bn.a * 0.2);
-                let d = s.x / (s.x + 2.0);
-                let e = saturate(gaps * 1.6 - 0.35) * mix(1.25, 0.7, lumps) * min(detail, 1.0) * 0.9;
+                let d = s.x / (s.x + half_sigma);
+                let e = saturate(gaps * 1.6 - 0.35) * mix(1.25, 0.7, lumps) * min(detail, 1.0) * mix(0.9, 0.55, fog);
                 k *= saturate((d - e) / max(1.0 - e, 1e-3)) / max(d, 1e-4);
                 crease = mix(1.0, mix(0.5, 1.15, 1.0 - gaps), min(detail, 1.0));
             }

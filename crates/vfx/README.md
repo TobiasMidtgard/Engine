@@ -47,7 +47,7 @@ rises on Mars, and dust kicked up on the Moon flies in clean ballistic arcs.
 
 | Family | Effects |
 |---|---|
-| Spells | `spell.fireball`, `spell.fireball_impact`, `spell.frost_bolt`, `spell.frost_impact`, `spell.arcane_portal`, `spell.heal_aura`, `spell.charge`, `spell.lightning_hit`, `magic.orb` |
+| Spells | `spell.fireball`, `spell.fireball_impact`, `spell.frost_bolt`, `spell.frost_impact`, `spell.arcane_portal`, `spell.portal_gate`, `spell.heal_aura`, `spell.charge`, `spell.lightning_hit`, `magic.orb` |
 | Water | `water.splash`, `water.splash_small`, `water.fountain` |
 | Impacts | `impact.<surface>` for every surface material (dirt, rock, concrete, wood, sand, grass, leaves, snow, mud, water, flesh, ice, glass, metal, default), `impact.sparks`, `impulse.dust`, `explosion.large` |
 | Footsteps | `step.dirt`, `step.sand`, `step.snow`, `step.mud`, `step.puddle`, `step.water`, `step.leaves`, `step.default` |
@@ -115,16 +115,17 @@ Writes: rendering only (plus the point lights of effects). The showcase demo wri
 ## Showcase: the Spell court
 
 `demo::spawn_demo` builds the test area in the showcase's `magic` zone, and `demo::VIEWS` lists
-its tour stops (`magic_spells` at dusk, `magic_splashes`, `magic_footsteps`, `magic_marks` and
-`magic_impacts`): an arcane portal with orbiting orbs, fireballs and frost bolts scorching and
+its tour stops (`magic_spells` at dusk, `magic_portal`, `magic_splashes`, `magic_footsteps`,
+`magic_marks` and `magic_impacts`): an arcane portal with orbiting orbs before a gate whose arch
+holds a standing portal swirling the valley seen through it, fireballs and frost bolts scorching and
 frosting a wall, lightning between two obelisks, a healing aura, a fountain, an anvil throwing
 sparks, a pond with stones splashing in, a golem stomping over mud, snow, sand and water, shot
 impacts on six materials (chipping the rock), torches and fireflies.
 
 ## Next
 
-GPU sub-emitters (spawn on collision or death), depth-buffer collision, sorting within an
-emitter, distortion (heat haze), tire tracks, mesh particles, LOD, and a 1M-particle benchmark.
+GPU sub-emitters (spawn on collision or death), sorting within an emitter, mesh particles, LOD,
+and a 1M-particle benchmark on a real GPU.
 
 ## Checklist
 

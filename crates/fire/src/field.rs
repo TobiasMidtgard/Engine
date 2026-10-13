@@ -16,7 +16,8 @@
 //! covers drying its water and raising it to its ignition temperature, and loses heat to the
 //! air meanwhile, so a weak fire stops at a gap instead of creeping across it. Wet fuel needs
 //! more heat and burns weaker (Rothermel's moisture damping); above the fuel's moisture of
-//! extinction it doesn't carry fire at all. Rain soaks fuel and puts fires out.
+//! extinction it doesn't carry fire at all. Rain soaks fuel and puts fires out; dry weather
+//! dries dead fuel toward the air's equilibrium, while green fuel keeps its own moisture.
 //!
 //! Calibrated against the CSIRO grassland fire spread model: cured grass spreads about
 //! 0.02–0.1 m/s in still air, about 0.5 m/s in a 3 m/s wind and 1.5–2.5 m/s in a 10 m/s
@@ -39,6 +40,11 @@ pub const REACH: i32 = 4;
 const KERNEL_W: i32 = 2 * REACH + 1;
 const KERNEL_LEN: usize = (KERNEL_W * KERNEL_W) as usize;
 const PADDED: i32 = TILE + 2 * REACH;
+
+/// Fuel placed at least this wet is green (live): the plant holds its water, so it doesn't dry
+/// below its own moisture the way dead fuel dries toward the air's. Damp air alone can't wet
+/// dead fuel past about this (fiber saturation).
+pub const LIVE_MOISTURE: f32 = 0.3;
 
 /// Heat of combustion of dry vegetation, J/kg.
 pub const HEAT_OF_COMBUSTION: f32 = 18.0e6;
@@ -99,6 +105,8 @@ pub struct Cell {
     pub fuel: f32,
     /// The fuel's own moisture, kg water per kg fuel.
     pub moisture: f32,
+    /// Green fuel's own moisture, which it dries back to after rain (0 for dead fuel).
+    pub green_moisture: f32,
     /// Ignition temperature, °C.
     pub ignition_c: f32,
     /// Heat absorbed toward ignition, J/m².
@@ -132,6 +140,7 @@ impl Default for Cell {
             load: 0.0,
             fuel: 0.0,
             moisture: 0.0,
+            green_moisture: 0.0,
             ignition_c: 900.0,
             heat: 0.0,
             burn: 0.0,
@@ -171,6 +180,11 @@ impl Cell {
             load: fuel.load_kg_m2,
             fuel: fuel.load_kg_m2,
             moisture: fuel.moisture,
+            green_moisture: if fuel.moisture >= LIVE_MOISTURE {
+                fuel.moisture
+            } else {
+                0.0
+            },
             ignition_c: fuel.ignition_c,
             regrow_secs: fuel.regrow_secs,
             ground_y,
@@ -199,6 +213,20 @@ impl Cell {
     /// Can still catch fire.
     pub fn is_intact(&self) -> bool {
         self.kind != FuelKind::None && self.burn <= 0.0 && self.fuel >= self.load * 0.5
+    }
+
+    /// Rain (mm/h) soaks the fuel; dry weather dries it toward `emc`, the moisture dead fuel
+    /// settles at in the air (green fuel keeps its own).
+    pub fn weather(&mut self, rain_mm_h: f32, emc: f32, dt: f32) {
+        if rain_mm_h > 0.0 {
+            self.moisture += rain_mm_h / 3600.0 * 0.15 / self.load.max(0.05) * dt;
+            self.moisture = self.moisture.min(3.0);
+            return;
+        }
+        let dry = emc.max(self.green_moisture);
+        if self.moisture > dry {
+            self.moisture += (dry - self.moisture) * (dt / 1800.0);
+        }
     }
 
     /// Fuel moisture including surface water.
@@ -1259,13 +1287,7 @@ fn update_tile(
             );
             c.wet = (input.wetness)(p).clamp(0.0, 1.0);
         }
-        // Rain soaks fuel; dry weather slowly dries it toward equilibrium.
-        if rain > 0.0 {
-            c.moisture += rain / 3600.0 * 0.15 / c.load.max(0.05) * dt;
-            c.moisture = c.moisture.min(3.0);
-        } else if c.moisture > emc {
-            c.moisture += (emc - c.moisture) * (dt / 1800.0);
-        }
+        c.weather(rain, emc, dt);
 
         if c.burn > 0.0 {
             any_active = true;
@@ -1614,6 +1636,41 @@ mod tests {
         assert!((g - Vec2::new(0.3, -0.1)).length() < 1e-3, "{g}");
         let flat = vec![Cell::from_fuel(CellFuel::NONE, 2.0); TILE_CELLS];
         assert_eq!(ground_slope(&flat, cell), Vec2::ZERO);
+    }
+
+    #[test]
+    fn green_grass_stays_green_and_dead_grass_dries() {
+        let cell = |moisture| {
+            Cell::from_fuel(
+                CellFuel {
+                    moisture,
+                    ..grass(DVec3::ZERO).0
+                },
+                0.0,
+            )
+        };
+        let (mut green, mut cured) = (cell(1.0), cell(0.06));
+        // An hour of rain soaks both...
+        for _ in 0..3600 {
+            green.weather(4.0, 0.08, 1.0);
+            cured.weather(4.0, 0.08, 1.0);
+        }
+        assert!(cured.moisture > 0.5 && green.moisture > 1.5);
+        // ... then three dry hours: the cured grass dries out and burns again; the green grass
+        // goes back to how green it was and still won't.
+        for _ in 0..3 * 3600 {
+            green.weather(0.0, 0.08, 1.0);
+            cured.weather(0.0, 0.08, 1.0);
+        }
+        assert!(cured.moisture < 0.12 && cured.moisture_damping() > 0.3);
+        assert!(
+            (green.moisture - 1.0).abs() < 0.05,
+            "green: {}",
+            green.moisture
+        );
+        assert!(green.moisture_damping() < 0.01);
+        let mut lit = green;
+        assert!(!lit.ignite());
     }
 
     #[test]

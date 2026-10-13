@@ -835,6 +835,106 @@ fn spells() -> Vec<EffectDesc> {
         )
     };
 
+    let gate = EffectDesc {
+        prewarm: 3.0,
+        light: Some(EffectLight {
+            offset: [0.0, 0.6, 0.0],
+            ..light(violet, 3_000.0, 12.0, 0.12, 0.8).unwrap()
+        }),
+        ..effect(
+            "spell.portal_gate",
+            "A standing portal 5 m across: the world behind it swirled into a violet vortex that \
+             darkens toward its eye, glowing arms turning inward, a burning rim crackling with \
+             sparks, motes drawn in and stars spilling out. Turn the effect so its up axis faces \
+             out of the portal.",
+            None,
+            vec![
+                EmitterDesc {
+                    bursts: every(30.0, 1),
+                    speed: [0.0, 0.0],
+                    lifetime: [30.0, 30.0],
+                    size: [4.9, 4.9],
+                    rotation_deg: [0.0, 0.0],
+                    spin_deg: [-14.0, -14.0],
+                    local_space: true,
+                    sprite: Sprite::Vortex,
+                    facing: Facing::Horizontal,
+                    color: fade(violet, 1.0, 0.03, 0.97),
+                    emissive: 2_500.0,
+                    additive: 0.0,
+                    soft: 0.0,
+                    wind: 0.0,
+                    ..em("vortex")
+                },
+                // Energy crackling around the rim.
+                EmitterDesc {
+                    rate: 260.0,
+                    shape: EmitShape::Ring {
+                        radius: 2.3,
+                        thickness: 0.08,
+                    },
+                    speed: [0.0, 0.0],
+                    velocity: [0.0, 0.15, 0.0],
+                    orbit_speed: 1.6,
+                    drag: 0.4,
+                    wind: 0.0,
+                    lifetime: [0.25, 0.6],
+                    size: [0.03, 0.07],
+                    sprite: Sprite::Spark,
+                    facing: Facing::Velocity,
+                    stretch: 0.06,
+                    color: g(&[(0.0, [1.0, 0.8, 1.0, 1.0]), (1.0, [0.8, 0.35, 1.0, 0.0])]),
+                    emissive: 40_000.0,
+                    additive: 1.0,
+                    ..em("rim_sparks")
+                },
+                // Motes drawn in, spiraling toward the eye.
+                EmitterDesc {
+                    rate: 220.0,
+                    shape: EmitShape::Ring {
+                        radius: 2.6,
+                        thickness: 0.7,
+                    },
+                    speed: [0.0, 0.1],
+                    velocity: [0.0, -0.1, 0.0],
+                    orbit_speed: 2.4,
+                    vortex: 2.0,
+                    attract: 1.7,
+                    drag: 0.5,
+                    wind: 0.0,
+                    lifetime: [1.4, 2.4],
+                    size: [0.04, 0.09],
+                    color: g(&[
+                        (0.0, [0.6, 0.35, 1.0, 0.0]),
+                        (0.2, [0.8, 0.5, 1.0, 1.0]),
+                        (1.0, [1.0, 0.55, 0.95, 0.0]),
+                    ]),
+                    emissive: 25_000.0,
+                    additive: 1.0,
+                    ..em("inflow")
+                },
+                // Stars spilling out toward whoever stands before it, drifting down.
+                EmitterDesc {
+                    rate: 14.0,
+                    shape: EmitShape::Disc { radius: 1.4 },
+                    speed: [0.0, 0.3],
+                    velocity: [0.0, 1.4, 0.0],
+                    gravity: 0.15,
+                    drag: 0.6,
+                    wind: 0.3,
+                    lifetime: [1.2, 2.2],
+                    size: [0.08, 0.16],
+                    spin_deg: [-90.0, 90.0],
+                    sprite: Sprite::Star,
+                    color: g(&[(0.0, [0.95, 0.8, 1.0, 1.0]), (1.0, [0.6, 0.3, 1.0, 0.0])]),
+                    emissive: 30_000.0,
+                    additive: 1.0,
+                    ..em("spill")
+                },
+            ],
+        )
+    };
+
     let heal = EffectDesc {
         prewarm: 2.0,
         light: light([0.55, 1.0, 0.55], 2500.0, 8.0, 0.1, 0.5),
@@ -1103,6 +1203,7 @@ fn spells() -> Vec<EffectDesc> {
         frost_bolt,
         frost_impact,
         portal,
+        gate,
         heal,
         charge,
         lightning_hit,

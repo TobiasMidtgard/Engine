@@ -3,6 +3,7 @@
 pub mod demo;
 pub mod look;
 pub mod orbit;
+pub mod sun;
 pub mod system;
 
 use std::collections::HashMap;
@@ -103,9 +104,11 @@ pub struct CelestialBody {
     pub orbit: Orbit,
     /// Sidereal rotation period, seconds (0 = does not spin).
     pub rotation_period_s: f64,
-    /// Tilt of the spin axis against the orbit plane, degrees.
+    /// Tilt of the spin axis against the orbit plane, degrees. The north pole leans toward
+    /// ecliptic longitude 90° (where the Sun stands at Earth's June solstice).
     pub axial_tilt_deg: f64,
-    /// Spin angle at the epoch, degrees.
+    /// Spin angle at the epoch, degrees: longitude 0 (body +Z) faces right ascension
+    /// (this − 90°) (Earth: Greenwich sidereal time + 90°).
     pub rotation_at_epoch_deg: f64,
     /// Always shows the same face to its parent (like the Moon).
     pub tidally_locked: bool,
@@ -188,6 +191,9 @@ pub struct SpaceFrame {
     /// Height of the home spot above the body's radius, meters. Match the terrain pad's
     /// `height_m` (60 m by default) so the ground is at y = 0.
     pub home_height_m: f64,
+    /// Turn of the world about +Y at the home spot, degrees: north points toward −Z at 0 and
+    /// toward +Z at 180 (east toward +X / −X). Match the terrain pad's `heading_deg`.
+    pub home_heading_deg: f64,
     /// Re-anchor on the body whose sphere of influence the focus enters or leaves, so that
     /// flying to another planet ends in that planet's frame, and stop/start turning with the
     /// anchor when the focus climbs out of / descends into its low space.
@@ -207,6 +213,7 @@ impl Default for SpaceFrame {
             home_lat_deg: 40.0,
             home_lon_deg: 0.0,
             home_height_m: 60.0,
+            home_heading_deg: 0.0,
             auto_switch: true,
             rotating: true,
             frozen_orientation: [0.0, 0.0, 0.0, 1.0],
@@ -225,7 +232,10 @@ pub struct SpaceSettings {
     /// Write engine_world's `Atmospheres::bodies` with every planet's and moon's air (airless
     /// ones too, so the Moon has none), for flight, drag, sound and weather.
     pub drive_air: bool,
-    /// Point lights marked [`StarLight`] at their star with the right illuminance.
+    /// Point lights marked [`StarLight`] at their star with the right illuminance. The space
+    /// module is then the day/night cycle: unless [`follow_world_clock`](Self::follow_world_clock)
+    /// is on, it also writes engine_world's `WeatherState` sun direction, local time and
+    /// season (see [`sun`]).
     pub drive_starlight: bool,
     /// Luminous efficacy of starlight, lumens per watt (sunlight ≈ 93).
     pub lumens_per_watt: f64,
@@ -242,6 +252,13 @@ pub struct SpaceSettings {
     /// are put back there, with their motion, when the world turns with that body again. See
     /// [`Parked`].
     pub keep_surfaces: bool,
+    /// Follow the world's day/night clock (engine_world `WeatherState::time_of_day_h` and
+    /// `day_of_year`, which the weather's sky runs) instead of the space clock's own time and
+    /// warp: the clock is set so that the real sun stands at that local solar time and season
+    /// over the home spot. For a game that keeps the weather's sun and its time controls;
+    /// the Moon's phase and the planets are then lit from where that sun is. The weather's
+    /// compass (north +Z) needs [`SpaceFrame::home_heading_deg`] 180 to match the planet's.
+    pub follow_world_clock: bool,
 }
 
 impl Default for SpaceSettings {
@@ -256,6 +273,7 @@ impl Default for SpaceSettings {
             draw_bodies: true,
             min_apparent_radius_rad: 7e-4,
             keep_surfaces: true,
+            follow_world_clock: false,
         }
     }
 }
@@ -404,10 +422,14 @@ pub fn home_rotation(lat_deg: f64, lon_deg: f64) -> DQuat {
     DQuat::from_mat3(&(world * local.transpose())).normalize()
 }
 
-/// The home rotation as a `Transform` stores it (f32), back in f64. Using exactly this keeps
-/// the home spot on the origin to the millimeter (see `PlanetTerrain::home_transform`).
-fn stored_home(lat_deg: f64, lon_deg: f64) -> (Quat, DQuat) {
-    let q = home_rotation(lat_deg, lon_deg).as_quat();
+/// The frame's home rotation (turned by its heading) as a `Transform` stores it (f32), back in
+/// f64. Using exactly this keeps the home spot on the origin to the millimeter (see
+/// `PlanetTerrain::home_transform` and `FlatPad::home_rotation`).
+fn stored_home(frame: &SpaceFrame) -> (Quat, DQuat) {
+    let q = home_rotation(frame.home_lat_deg, frame.home_lon_deg);
+    let q = (DQuat::from_rotation_y(frame.home_heading_deg.to_radians()) * q)
+        .normalize()
+        .as_quat();
     (q, q.as_dquat().normalize())
 }
 
@@ -439,7 +461,12 @@ impl Plugin for SpacePlugin {
             .register_resource::<SpaceSettings>(
                 "What the space module drives: gravity, atmosphere, starlight, far-view spheres.",
             )
-            .add_systems(FixedUpdate, advance_clock.in_set(SimSet::Environment))
+            .add_systems(
+                FixedUpdate,
+                (advance_clock, sun::follow_world_clock)
+                    .chain()
+                    .in_set(SimSet::Environment),
+            )
             .init_resource::<PendingTravel>()
             .add_systems(PostUpdate, reanchor.in_set(WorldShiftSet::Write))
             .add_systems(
@@ -454,8 +481,8 @@ impl Plugin for SpacePlugin {
     }
 }
 
-fn advance_clock(time: Res<Time>, mut clock: ResMut<SpaceClock>) {
-    if !clock.paused {
+fn advance_clock(time: Res<Time>, settings: Res<SpaceSettings>, mut clock: ResMut<SpaceClock>) {
+    if !clock.paused && !settings.follow_world_clock {
         clock.seconds += time.delta_secs_f64() * clock.warp;
     }
 }
@@ -500,7 +527,8 @@ fn propagate(bodies: &[(Entity, CelestialBody)], t: f64) -> Vec<BodyState> {
             }
             None => (DVec3::ZERO, DVec3::ZERO, f64::INFINITY),
         };
-        let tilt = DQuat::from_rotation_x(b.axial_tilt_deg.to_radians());
+        // Rx(−tilt) leans +Y toward −Z, ecliptic longitude 90° (see `orbit`).
+        let tilt = DQuat::from_rotation_x(-b.axial_tilt_deg.to_radians());
         let (angle, rate) = match (b.tidally_locked, parent) {
             (true, Some(p)) => {
                 let ps = states[p].as_ref().expect("parent state");
@@ -540,7 +568,7 @@ fn propagate(bodies: &[(Entity, CelestialBody)], t: f64) -> Vec<BodyState> {
 
 /// The world ↔ inertial mapping for an anchor and home spot.
 fn frame_for(anchor: &BodyState, frame: &SpaceFrame) -> (DQuat, DVec3) {
-    let (_, home) = stored_home(frame.home_lat_deg, frame.home_lon_deg);
+    let (_, home) = stored_home(frame);
     let rot = (home * frame_orientation(anchor, frame).inverse()).normalize();
     let pad = dir_from_lat_lon(frame.home_lat_deg, frame.home_lon_deg)
         * (anchor.radius_m + frame.home_height_m);
@@ -567,7 +595,7 @@ fn placement(
     map: (DQuat, DVec3),
 ) -> (DVec3, DQuat) {
     if turning_anchor {
-        let (_, home) = stored_home(frame.home_lat_deg, frame.home_lon_deg);
+        let (_, home) = stored_home(frame);
         let pad = dir_from_lat_lon(frame.home_lat_deg, frame.home_lon_deg)
             * (s.radius_m + frame.home_height_m);
         (-(home * pad), home)
@@ -866,7 +894,7 @@ pub fn update_space(world: &mut World) {
     let focus = focus_position(world);
 
     // World placement of every body.
-    let (home_q, _) = stored_home(frame.home_lat_deg, frame.home_lon_deg);
+    let (home_q, _) = stored_home(&frame);
     for (i, s) in states.iter_mut().enumerate() {
         (s.world_position, s.world_rotation) =
             placement(s, i == anchor && frame.rotating, &frame, current);
@@ -980,6 +1008,7 @@ pub fn update_space(world: &mut World) {
             .filter(|((_, b), _)| b.luminosity_w > 0.0)
             .map(|((_, b), s)| (b.name.clone(), s.world_position, b.luminosity_w))
             .collect();
+        let mut sun_dir = None;
         let mut lights = world.query::<(&StarLight, &mut Transform, &mut DirectionalLight)>();
         for (star, mut tf, mut light) in lights.iter_mut(world) {
             let lux = |p: DVec3, l: f64| {
@@ -995,7 +1024,14 @@ pub fn update_space(world: &mut World) {
                 let up = if dir.y.abs() > 0.99 { Vec3::Z } else { Vec3::Y };
                 *tf = Transform::default().looking_at(-dir, up);
                 light.illuminance = lux(*p, *l) as f32;
+                sun_dir.get_or_insert(dir);
             }
+        }
+        // This is the day/night cycle: tell the weather, wildlife and sound where the sun is.
+        if let Some(dir) = sun_dir
+            && !settings.follow_world_clock
+        {
+            sun::write_weather_sun(world, &states, anchor, dir);
         }
     }
 

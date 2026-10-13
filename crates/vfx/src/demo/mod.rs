@@ -54,6 +54,14 @@ pub const VIEWS: &[DemoView] = &[
         warmup: 0.0,
     },
     DemoView {
+        key: "magic_portal",
+        name: "A standing portal swirling the valley behind it",
+        eye: [3.2, 2.4, -7.5],
+        target: [0.0, 4.2, -17.4],
+        hour: 18.4,
+        warmup: 2.0,
+    },
+    DemoView {
         key: "magic_splashes",
         name: "Stones splashing into a pond",
         eye: [1.5, 1.9, 5.2],
@@ -311,6 +319,12 @@ pub fn spawn_demo(commands: &mut Commands, origin: DVec3) {
         props::portal::gate,
     );
     commands.spawn((at(portal), ParticleEffect::new("spell.arcane_portal")));
+    // A standing portal in the gate's arch, facing the court (+Z).
+    let arch = ground(GATE) + DVec3::new(0.0, props::portal::SPRING as f64, 0.0);
+    commands.spawn((
+        at(arch).with_rotation(Quat::from_rotation_arc(Vec3::Y, Vec3::Z)),
+        ParticleEffect::new("spell.portal_gate"),
+    ));
     for i in 0..3 {
         commands.spawn((
             at(portal + DVec3::new(0.0, 2.5, 0.0)),

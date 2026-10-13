@@ -439,12 +439,18 @@ fn material(mat: Mat, tex: &std::collections::HashMap<&str, TexHandles>) -> Stan
     }
 }
 
-/// Light the underpass and keep the sky out under its roof (see `structures`).
-pub(super) fn sky_volume(half_extents: [f32; 3], open: engine_render::BoxFace) -> SkyLightVolume {
+/// Light the underpass and keep the sky out under its roof (see `structures`): `sky_light`
+/// left deep inside, rising to full over `fade` meters toward its open side and ends.
+pub(super) fn sky_volume(
+    half_extents: [f32; 3],
+    open: engine_render::BoxFace,
+    sky_light: f32,
+    fade: f32,
+) -> SkyLightVolume {
     SkyLightVolume::new(half_extents)
         .open(open)
         .open(engine_render::BoxFace::PosZ)
         .open(engine_render::BoxFace::NegZ)
-        .with_sky_light(0.2)
-        .with_fade(2.5)
+        .with_sky_light(sky_light)
+        .with_fade(fade)
 }
