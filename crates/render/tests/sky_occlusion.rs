@@ -268,3 +268,78 @@ fn a_sky_light_volume_keeps_sky_light_out_except_at_its_open_face() {
     );
     assert!(open > 0.85, "outside the volume nothing changes ({open})");
 }
+
+/// Mean color (sRGB, 0..255) in a 5x5 block around where world point `p` lands on screen.
+fn color_at(app: &App, img: &RgbaImage, p: DVec3) -> Vec3 {
+    let view = app
+        .world
+        .resource::<Renderer>()
+        .last_view()
+        .unwrap()
+        .clone();
+    let clip = view.view_proj * (p - view.origin).as_vec3().extend(1.0);
+    let ndc = clip.truncate() / clip.w;
+    let (x, y) = (
+        ((ndc.x * 0.5 + 0.5) * W as f32) as i32,
+        ((0.5 - ndc.y * 0.5) * H as f32) as i32,
+    );
+    let mut sum = Vec3::ZERO;
+    for dy in -2..=2 {
+        for dx in -2..=2 {
+            let px = img.get_pixel(
+                (x + dx).clamp(0, W as i32 - 1) as u32,
+                (y + dy).clamp(0, H as i32 - 1) as u32,
+            );
+            sum += Vec3::new(px[0] as f32, px[1] as f32, px[2] as f32);
+        }
+    }
+    sum / 25.0
+}
+
+#[test]
+fn a_closed_room_isnt_lit_by_the_ground_outside() {
+    // A closed room (inside x -3..3, y 0..3, z -3..3) on a planet with a bright green ground,
+    // seen from inside. A little sky light gets in; it has bounced around on the way, so the
+    // ceiling must not take on the green of the sunlit ground outside, nor the floor the blue
+    // of the sky: both get light of the same color.
+    let room: [Block; 5] = [
+        (DVec3::new(0.0, 3.15, 0.0), [6.6, 0.3, 6.6]),
+        (DVec3::new(-3.15, 1.5, 0.0), [0.3, 3.0, 6.6]),
+        (DVec3::new(3.15, 1.5, 0.0), [0.3, 3.0, 6.6]),
+        (DVec3::new(0.0, 1.5, -3.15), [6.0, 3.0, 0.3]),
+        (DVec3::new(0.0, 1.5, 3.15), [6.0, 3.0, 0.3]),
+    ];
+    let mut app = scene_app(&room, DebugView::None, |s| {
+        s.tonemapper = Tonemapper::None;
+        s.bloom_intensity = 0.0;
+        s.vignette = 0.0;
+        s.film_grain = 0.0;
+        s.saturation = 1.0;
+        s.screen_space_gi = false;
+    });
+    app.world.resource_mut::<Atmosphere>().ground_color = [0.02, 0.4, 0.02];
+    app.world.spawn((
+        Transform::from_xyz(0.0, 1.5, 0.0),
+        SkyLightVolume::new([3.0, 1.5, 3.0]).with_sky_light(0.05),
+    ));
+    // Inside, looking at the far wall; exposed for the dim room.
+    let mut cameras = app.world.query::<(&mut Camera, &mut Transform)>();
+    let (mut camera, mut transform) = cameras.single_mut(&mut app.world).unwrap();
+    camera.exposure = Exposure::Manual { ev100: 9.0 };
+    *transform = Transform::from_xyz(0.0, 1.5, 2.5).looking_at(DVec3::new(0.0, 1.5, -3.0), Vec3::Y);
+    let Some(img) = render(&mut app, "closed_room") else {
+        return;
+    };
+    let ceiling = color_at(&app, &img, DVec3::new(0.0, 3.0, -1.0));
+    let floor = color_at(&app, &img, DVec3::new(0.0, 0.0, -1.0));
+    eprintln!("closed room: ceiling {ceiling:.1}, floor {floor:.1}");
+    let green = |c: Vec3| c.y / (c.x + c.y + c.z).max(1.0);
+    assert!(
+        ceiling.length() > 20.0 && floor.length() > 20.0,
+        "test scene too dark to judge: ceiling {ceiling:.1}, floor {floor:.1}"
+    );
+    assert!(
+        (green(ceiling) - green(floor)).abs() < 0.04,
+        "the ceiling and the floor should get the same light: ceiling {ceiling:.1}, floor {floor:.1}"
+    );
+}
