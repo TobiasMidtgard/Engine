@@ -1,5 +1,6 @@
 // ============================================================================
-// Particles: shared types and helpers. Composed after lib_types + lib_frame.
+// Particles: shared types and helpers. Composed after lib_types (no frame bindings, so shadow
+// passes can use them too).
 // The structs match `crates/vfx/src/gpu.rs`.
 // ============================================================================
 
@@ -28,7 +29,7 @@ struct Emitter {
     collide: vec4<f32>,    // mode, restitution, friction, plane valid
     shape: vec4<f32>,      // code, a, b, c
     offset: vec4<f32>,     // local offset, w spread cosine
-    direction: vec4<f32>,  // local direction
+    direction: vec4<f32>,  // local direction, w debris piece (0 = sprite)
     extra_vel: vec4<f32>,  // local extra birth velocity
     speed_life: vec4<f32>, // speed min/max, life min/max
     size_rot: vec4<f32>,   // size min/max, rotation min/max
@@ -75,21 +76,4 @@ fn sample_size(e: Emitter, t: f32) -> f32 {
 // Where a particle is relative to the camera.
 fn particle_rel(p: Particle, e: Emitter) -> vec3<f32> {
     return select(p.pos, p.pos + e.origin.xyz, is_local(e));
-}
-
-// The fog between the camera and a camera-relative point, as the scene gets it from `apply_fog`
-// (volumetric fog with its light shafts and lamps, height fog beyond, aerial perspective far
-// out): `through` is how much of the point's light reaches the camera, `inscatter` the light
-// the fog adds in front of it (pre-exposed).
-struct ParticleFog {
-    through: vec3<f32>,
-    inscatter: vec3<f32>,
-};
-
-fn particle_fog(rel: vec3<f32>) -> ParticleFog {
-    let f = surface_fog(rel);
-    var fog: ParticleFog;
-    fog.inscatter = f.inscatter;
-    fog.through = f.transmittance;
-    return fog;
 }

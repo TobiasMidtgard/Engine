@@ -749,7 +749,7 @@ impl Sim {
             }
             // Colliders.
             for (ci, c) in self.posed.iter().enumerate() {
-                let Some((d, n)) = c.query(x) else {
+                let Some((d, n)) = c.query(&colliders[ci].shape, x) else {
                     continue;
                 };
                 if d >= p.radius {
@@ -1225,7 +1225,7 @@ mod tests {
         c.id = 0;
         let dt = 1.0 / 60.0;
         for _ in 0..120 {
-            sim.step(dt, &[c]);
+            sim.step(dt, std::slice::from_ref(&c));
         }
         let j = sim.collider_impulses[0].linear;
         let expect = -9.81 * 1.0 * dt;

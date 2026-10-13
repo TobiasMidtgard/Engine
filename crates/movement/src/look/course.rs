@@ -2151,7 +2151,8 @@ fn build_walls() -> Kit {
 /// The slide bar: hazard-striped steel beam on bolted posts, beacons, a sign.
 /// The ledge station: a slab between the course and the ring with a precast block on it, too
 /// high to climb straight onto. Pilots catch its steel coping, shimmy along it (the chevrons
-/// under the coping point the way), climb up and walk off the far end onto the landing box.
+/// under the coping point the way) and around the corner onto its far end, climb up there and
+/// walk off onto the landing box.
 fn build_ledge() -> Kit {
     let l = course_layout();
     let mut kit = Kit::default();

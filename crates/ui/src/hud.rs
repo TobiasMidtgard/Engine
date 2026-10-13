@@ -106,6 +106,10 @@ pub struct Marker {
     /// Show it even while the HUD screen is closed. By default markers belong to the HUD and
     /// fade in and out with it.
     pub always: bool,
+    /// The marker stands for the map's waypoint: while the waypoint is on the player's planet
+    /// it shows the distance to it rather than to its anchor, so a beacon placed in the
+    /// direction of a far place reads the same as the compass and quest tracker.
+    pub waypoint: bool,
 }
 
 impl Default for Marker {
@@ -117,6 +121,7 @@ impl Default for Marker {
             color: Color::hex(0xe8b65a),
             show_distance: true,
             always: false,
+            waypoint: false,
         }
     }
 }
@@ -949,6 +954,10 @@ fn markers_update(world: &mut World) {
             .unwrap_or(1.0);
         presence * shown
     });
+    let nav = world
+        .get_resource::<MapData>()
+        .and_then(|m| m.waypoint_nav())
+        .map(|(d, _)| d);
     let mut q = world.query::<(Entity, &Marker, &WorldAnchor)>();
     let items: Vec<(Entity, bool, f32, bool, Vec2, f32)> = q
         .iter(world)
@@ -956,7 +965,10 @@ fn markers_update(world: &mut World) {
             (
                 e,
                 m.show_distance,
-                a.distance,
+                match nav {
+                    Some(d) if m.waypoint => d as f32,
+                    _ => a.distance,
+                },
                 !a.on_screen && a.clamp_to_edges,
                 a.edge_direction,
                 if m.always { 1.0 } else { hud },
@@ -1115,7 +1127,12 @@ fn paint_compass(world: &mut World, e: Entity, ctx: &mut DrawCtx) {
     if let Some(map) = world.get_resource::<MapData>() {
         let mut marks: Vec<(f32, String, Color, bool)> = Vec::new();
         if let Some(pl) = map.player_planet() {
-            for poi in pl.pois.iter().filter(|p| p.discovered) {
+            // The waypoint's own place shows as the waypoint.
+            for poi in pl
+                .pois
+                .iter()
+                .filter(|q| q.discovered && !map.is_waypoint(&pl.id, q))
+            {
                 let (dist, bearing) =
                     map::great_circle(map.player.lon, map.player.lat, poi.lon, poi.lat);
                 if dist.to_degrees() < 12.0 && dist > 1e-6 {
@@ -1129,7 +1146,7 @@ fn paint_compass(world: &mut World, e: Entity, ctx: &mut DrawCtx) {
             }
         }
         if let Some((_, bearing)) = map.waypoint_nav() {
-            marks.push((bearing as f32, "marker_quest".into(), p.accent, true));
+            marks.push((bearing as f32, "marker_waypoint".into(), p.accent, true));
         }
         for (bearing, icon, color, quest) in marks {
             let (mut x, d) = x_of(bearing);
@@ -1267,7 +1284,11 @@ fn paint_minimap(world: &mut World, e: Entity, ctx: &mut DrawCtx) {
             c.y - ((plat - lat) / span) as f32 * r.h,
         )
     };
-    for poi in planet.pois.iter().filter(|p| p.discovered) {
+    for poi in planet
+        .pois
+        .iter()
+        .filter(|q| q.discovered && !map.is_waypoint(&planet.id, q))
+    {
         let q = to_px(poi.lon, poi.lat);
         if (q - c).length() > rad - 16.0 * px {
             continue;
@@ -1290,13 +1311,10 @@ fn paint_minimap(world: &mut World, e: Entity, ctx: &mut DrawCtx) {
         if outside {
             q = c + d.normalize_or_zero() * edge;
         }
-        let s = 22.0 * px;
-        ctx.glow(q, 16.0 * px, p.accent.with_alpha(0.5), 1.4);
-        ctx.icon(
-            "marker_quest",
-            Rect::new(q.x - s * 0.5, q.y - s * 0.5, s, s),
-            Color::WHITE,
-        );
+        // The pin stands on the spot; off the map, its head sits on the rim the way to go.
+        let s = 24.0 * px;
+        let tip = if outside { q + Vec2::Y * (s * 0.6) } else { q };
+        map::waypoint_pin(ctx, tip, s, p.accent);
     }
     // The player: a view cone and the arrow.
     let cone = 22.0 * px;
@@ -1530,6 +1548,7 @@ pub fn spawn_world_markers(world: &mut World, origin: DVec3, trader: DVec3) {
                 color: p.accent,
                 show_distance: false,
                 always: false,
+                waypoint: false,
             },
             trader,
             false,
@@ -1543,6 +1562,7 @@ pub fn spawn_world_markers(world: &mut World, origin: DVec3, trader: DVec3) {
                 color: p.accent_light,
                 show_distance: true,
                 always: false,
+                waypoint: true,
             },
             DVec3::new(-140.0, 40.0, -900.0),
             true,
@@ -1556,6 +1576,7 @@ pub fn spawn_world_markers(world: &mut World, origin: DVec3, trader: DVec3) {
                 color: p.info,
                 show_distance: true,
                 always: false,
+                waypoint: false,
             },
             DVec3::new(60.0, 12.0, -180.0),
             false,
@@ -1612,7 +1633,7 @@ pub fn register_api(app: &mut App) {
     );
     app.register_api(
         "hud.marker",
-        "Pin a marker to the world: title, subtitle, icon, color, and position [x, y, z] or entity (a name) with offset [x, y, z]; clamp keeps it on the screen edge; fade [near, far] m; always shows it without the HUD.",
+        "Pin a marker to the world: title, subtitle, icon, color, and position [x, y, z] or entity (a name) with offset [x, y, z]; clamp keeps it on the screen edge; fade [near, far] m; always shows it without the HUD; waypoint shows the distance to the map waypoint.",
         r#"{"title": "Relay Tower", "icon": "marker_quest", "position": [120, 30, -800], "clamp": true}"#,
         |world, args| {
             let mut m = Marker {
@@ -1630,6 +1651,7 @@ pub fn register_api(app: &mut App) {
                 m.show_distance = b;
             }
             m.always = args.get("always").and_then(Value::as_bool).unwrap_or(false);
+            m.waypoint = args.get("waypoint").and_then(Value::as_bool).unwrap_or(false);
             let v3 = |v: Option<&Value>| -> Option<[f64; 3]> {
                 let a = v?.as_array()?;
                 Some([a.first()?.as_f64()?, a.get(1)?.as_f64()?, a.get(2)?.as_f64()?])

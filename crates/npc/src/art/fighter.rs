@@ -77,6 +77,14 @@ pub mod rig {
     pub const GRIP: Vec3 = Vec3::new(-0.028, -0.088, 0.0);
     /// The right eye (the one that sights along a shouldered carbine) from the neck joint.
     pub const EYES: Vec3 = Vec3::new(0.031, 0.166, -0.0795);
+    /// The middle of the helmet's dome (head frame): the crest swings about it.
+    pub const CREST_PIVOT: Vec3 = super::HELM_O;
+    /// Where the hip pouches hang from the belt (the top of each, pelvis frame), right then
+    /// left, and which way each is turned (yaw; a pouch's front faces its −Z).
+    pub const POUCHES: [(Vec3, f32); 2] = [
+        (Vec3::new(0.155, 0.11, -0.04), -1.2),
+        (Vec3::new(-0.155, 0.11, -0.04), 1.2),
+    ];
 }
 
 /// Where hands, string and muzzle sit on each weapon, in the weapon's own frame (the frame its
@@ -107,6 +115,13 @@ pub mod weapons {
     pub const RIFLE_LEFT_GRIP: Vec3 = Vec3::new(0.0, 0.1, -0.26);
     /// Where the shooter's eye goes, behind the optic.
     pub const RIFLE_EYE: Vec3 = Vec3::new(0.0, 0.16, 0.2);
+    /// Where the magazine seats in its well: the origin of the magazine's own frame (axes as
+    /// the carbine's when seated).
+    pub const RIFLE_MAG: Vec3 = Vec3::new(0.0, 0.035, -0.1335);
+    /// The left hand's grip center on the magazine (magazine frame).
+    pub const RIFLE_MAG_GRIP: Vec3 = Vec3::new(0.0, -0.075, 0.0);
+    /// The charging handle's knob, on the left of the upper receiver; it racks back along +Z.
+    pub const RIFLE_CHARGE: Vec3 = Vec3::new(-0.036, 0.11, -0.218);
     /// Bow: the left hand's grip is the origin, the bow stands along Y, the archer is toward
     /// +Z. The upper limb hinges here (the lower mirrors y).
     pub const BOW_LIMB_PIVOT: Vec3 = Vec3::new(0.0, 0.17, 0.025);
@@ -116,6 +131,11 @@ pub mod weapons {
     pub const BOW_HAND: Quat = Quat::from_xyzw(FRAC_1_SQRT_2, 0.0, 0.0, FRAC_1_SQRT_2);
     /// Arrow length, nock to point.
     pub const ARROW: f32 = 0.78;
+    /// The back quiver (chest frame): the middle of its bottom and of its mouth, over the
+    /// right shoulder; the arrows' nocks stand this far out of it.
+    pub const QUIVER_BOTTOM: Vec3 = Vec3::new(-0.09, 0.02, 0.19);
+    pub const QUIVER_MOUTH: Vec3 = Vec3::new(0.1, 0.47, 0.2);
+    pub const QUIVER_NOCKS: f32 = 0.1;
 
     /// The right hand on the pistol grip (raked 20°): fingers forward, palm left.
     pub fn rifle_hand() -> Quat {
@@ -128,6 +148,17 @@ pub mod weapons {
         let x = Vec3::new(0.5, 0.866, 0.0);
         let z = Vec3::Z;
         super::basis(x, z.cross(x), z)
+    }
+
+    /// The left hand round the magazine (magazine frame), from its left side: fingers
+    /// wrapped round its front, the index finger up by the well.
+    pub fn rifle_mag_hand() -> Quat {
+        super::basis(Vec3::Z, Vec3::NEG_X, Vec3::NEG_Y)
+    }
+
+    /// The left hand pinching the charging handle from the left, palm in toward the receiver.
+    pub fn rifle_charge_hand() -> Quat {
+        Quat::IDENTITY
     }
 }
 
@@ -3922,23 +3953,21 @@ fn pelvis() -> PieceMesh {
         v3(0.0, 0.1, front_z - 0.02),
     );
     b.add(plate_in, Zone::Metal, Tint::Rgb(lin(GUNMETAL)));
-    // Pouches on the hips and the back.
-    for (x, z, yaw, size) in [
-        (0.155, -0.04, -1.2f32, v3(0.04, 0.05, 0.022)),
-        (-0.155, -0.04, 1.2, v3(0.04, 0.05, 0.022)),
-        (0.09, 0.12, -2.6, v3(0.045, 0.045, 0.02)),
-    ] {
-        let rot = Quat::from_rotation_y(yaw);
-        let at = v3(x, 0.06, z);
-        let body = placed(slab(size, 0.012, 0.006), rot, at);
-        let flap = placed(
-            slab(v3(size.x + 0.003, size.y * 0.42, 0.004), 0.008, 0.002),
-            rot,
-            at + rot * v3(0.0, size.y * 0.6, -size.z - 0.002),
-        );
-        b.add(body, Zone::Leather, Tint::Rgb(lin(0x5a4330)));
-        b.add(flap, Zone::Leather, Tint::Rgb(lin(0x4a3628)));
-    }
+    // A pouch on the back (the hip pouches are pieces of their own, swinging as the body
+    // moves: see [`pouch`]).
+    let (size, rot, at) = (
+        v3(0.045, 0.045, 0.02),
+        Quat::from_rotation_y(-2.6),
+        v3(0.09, 0.06, 0.12),
+    );
+    let body = placed(slab(size, 0.012, 0.006), rot, at);
+    let flap = placed(
+        slab(v3(size.x + 0.003, size.y * 0.42, 0.004), 0.008, 0.002),
+        rot,
+        at + rot * v3(0.0, size.y * 0.6, -size.z - 0.002),
+    );
+    b.add(body, Zone::Leather, Tint::Rgb(lin(0x5a4330)));
+    b.add(flap, Zone::Leather, Tint::Rgb(lin(0x4a3628)));
     let field = |p: Vec3| pelvis_suit(p).min(belt.proxy(p));
     b.finish(&field, 1.0)
 }
@@ -4937,20 +4966,14 @@ fn rifle() -> PieceMesh {
         Zone::Polymer,
         Tint::Rgb(black),
     );
-    // Curved magazine.
-    let mag = side(
-        &[
-            p(-0.095, 0.03, 0.003),
-            p(-0.036, 0.03, 0.003),
-            p(-0.04, -0.05, 0.02),
-            p(-0.062, -0.122, 0.006),
-            p(-0.122, -0.11, 0.006),
-            p(-0.1, -0.04, 0.02),
-        ],
-        0.027,
-        0.004,
+    // The magazine is a piece of its own (see [`magazine`]). The charging handle's knob
+    // stands out on the left of the upper receiver.
+    let knob = placed(
+        slab(v3(0.0075, 0.006, 0.011), 0.004, 0.0015),
+        Quat::from_rotation_y(FRAC_PI_2),
+        v3(-0.03, 0.105, -0.15),
     );
-    b.add(mag, Zone::Polymer, Tint::Rgb(lin(0x26272a)));
+    b.add(knob, Zone::Metal, Tint::Rgb(lin(GUNMETAL)));
     // Handguard: a swept rounded octagon with slot inserts along the sides.
     let oct: Vec<Vec2> = rounded(
         &(0..8)
@@ -5129,6 +5152,79 @@ fn rifle() -> PieceMesh {
     out
 }
 
+/// The carbine's curved magazine, in its own frame: seated in the well at the origin (see
+/// [`weapons::RIFLE_MAG`]), hanging down along −Y and curving forward.
+fn magazine() -> PieceMesh {
+    let mut b = Builder::default();
+    // Drawn in the carbine's design coordinates (side profile in z, y), then moved so the
+    // middle of its top (where it seats) is the origin.
+    let outline: Vec<Vec2> = rounded(
+        &[
+            (v2(-0.095, 0.03), 0.003),
+            (v2(-0.036, 0.03), 0.003),
+            (v2(-0.04, -0.05), 0.02),
+            (v2(-0.062, -0.122), 0.006),
+            (v2(-0.122, -0.11), 0.006),
+            (v2(-0.1, -0.04), 0.02),
+        ],
+        2,
+    )
+    .into_iter()
+    .map(|p| v2(-p.x, p.y))
+    .collect();
+    let body = placed(
+        extrude(&outline, 0.027, 0.004),
+        Quat::from_rotation_y(FRAC_PI_2),
+        Vec3::ZERO,
+    );
+    b.add(body, Zone::Polymer, Tint::Rgb(lin(0x26272a)));
+    // A base plate.
+    let plate = placed(
+        slab(v3(0.0155, 0.004, 0.031), 0.003, 0.0012),
+        Quat::from_rotation_x(0.2),
+        v3(0.0, -0.118, -0.092),
+    );
+    b.add(plate, Zone::Polymer, Tint::Rgb(lin(0x1d1e20)));
+    let mut out = b.finish(&|_| 1.0, 0.0);
+    out.mesh
+        .transform(&Mat4::from_translation(v3(0.0, -0.03, 0.0655)));
+    out
+}
+
+/// A leather belt pouch with a flap, hanging from its top (the origin, on the belt), its
+/// front facing −Z; the hips carry one on each side (see [`rig::POUCHES`]).
+fn pouch() -> PieceMesh {
+    let mut b = Builder::default();
+    let size = v3(0.04, 0.05, 0.022);
+    let at = v3(0.0, -size.y, 0.0);
+    b.add(
+        placed(slab(size, 0.012, 0.006), Quat::IDENTITY, at),
+        Zone::Leather,
+        Tint::Rgb(lin(0x5a4330)),
+    );
+    b.add(
+        placed(
+            slab(v3(size.x + 0.003, size.y * 0.42, 0.004), 0.008, 0.002),
+            Quat::IDENTITY,
+            at + v3(0.0, size.y * 0.6, -size.z - 0.002),
+        ),
+        Zone::Leather,
+        Tint::Rgb(lin(0x4a3628)),
+    );
+    // The loop it hangs from, round the belt.
+    b.add(
+        placed(
+            slab(v3(0.013, 0.016, 0.003), 0.004, 0.001),
+            Quat::IDENTITY,
+            v3(0.0, -0.004, size.z + 0.003),
+        ),
+        Zone::Leather,
+        Tint::Rgb(lin(LEATHER_DARK)),
+    );
+    let field = move |p: Vec3| round_box(p - at, Vec3::ZERO, Quat::IDENTITY, size, 0.01);
+    b.finish(&field, 0.6)
+}
+
 /// Bow riser (handle) on the left-hand grip; limbs hinge at [`weapons::BOW_LIMB_PIVOT`].
 fn bow_riser() -> PieceMesh {
     let mut b = Builder::default();
@@ -5300,8 +5396,7 @@ fn arrow() -> PieceMesh {
 /// shoulder.
 fn quiver() -> PieceMesh {
     let mut b = Builder::default();
-    let a = v3(-0.09, 0.02, 0.19);
-    let c = v3(0.1, 0.47, 0.2);
+    let (a, c) = (weapons::QUIVER_BOTTOM, weapons::QUIVER_MOUTH);
     let dir = (c - a).normalize();
     let body = move |p: Vec3| round_cone(p, a, c, 0.036, 0.044);
     let open = move |p: Vec3| smax(body(p), (p - c).dot(dir), 0.004);
@@ -5394,10 +5489,12 @@ pub enum Piece {
     Arrow,
     Quiver,
     Muzzle,
+    Magazine,
+    Pouch,
 }
 
 impl Piece {
-    pub const ALL: [Piece; 31] = [
+    pub const ALL: [Piece; 33] = [
         Piece::Helmet,
         Piece::Face,
         Piece::Visor,
@@ -5429,6 +5526,8 @@ impl Piece {
         Piece::Arrow,
         Piece::Quiver,
         Piece::Muzzle,
+        Piece::Magazine,
+        Piece::Pouch,
     ];
 
     /// Asset key fragment.
@@ -5465,6 +5564,8 @@ impl Piece {
             Piece::Arrow => "arrow",
             Piece::Quiver => "quiver",
             Piece::Muzzle => "muzzle",
+            Piece::Magazine => "magazine",
+            Piece::Pouch => "pouch",
         }
     }
 
@@ -5636,6 +5737,8 @@ fn build_kit() -> Kit {
                 (Piece::Arrow, arrow()),
                 (Piece::Quiver, quiver()),
                 (Piece::Muzzle, muzzle_flash()),
+                (Piece::Magazine, magazine()),
+                (Piece::Pouch, pouch()),
             ]
         }),
     ]);
