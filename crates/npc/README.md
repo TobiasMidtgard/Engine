@@ -62,7 +62,11 @@ parries meet the line of the incoming blow (overhead for a heavy cut, low across
 left or right), a dash pushes off the rear foot, a feinted blow checks and returns to guard,
 hits throw the head, trunk or legs by where the cut lands (heavy cuts high, cuts on the run
 mid, other cuts mid or low), and a downed fighter falls from whatever pose it was in: knees
-give, hips, back and head land, limbs settle and the weapon drops beside it. Animals graze
+give, hips, back and head land, limbs settle and the weapon drops beside it. A heavy cut is
+met in a roof guard over the helmet, a cut to the head wrenches it away with a half step back,
+carbines kick and settle and change magazines between shots, archers draw to the mouth, hold,
+loose and nock the next arrow from the quiver, fighters turn on the spot by stepping round, and
+crests, tabards and pouches swing on after a stop or a blow. Animals graze
 head-down, flag their tails when alarmed, lie down, gallop, hop, creep and flap. With
 `NpcSettings::show_intent`, rings and lines on the ground show where each NPC is going and why
 (blue cover, orange flank, purple high ground, grey fall back, yellow search).
