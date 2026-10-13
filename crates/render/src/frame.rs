@@ -309,7 +309,7 @@ fn luminance(c: Vec3) -> f32 {
 /// reaches the camera through the air. A light brings day when it is up (night falls as it sinks
 /// from 10° above the horizon to 4° below) and brighter than a moon: more than 0.5 to 2 lux after
 /// the air. So a sun is day however dim (one under a storm deck at noon gives about 10 lux), a
-/// moon (0.3 lux at most) that is the brightest light keeps its stars out, and a sun at full
+/// moon (0.3 lux at most) that is the brightest light still shows the stars, and a sun at full
 /// illuminance below the horizon gives night even without an atmosphere to dim it.
 ///
 /// The stand-in moon belongs to a sun: it shows at night when the light is brighter than a moon.

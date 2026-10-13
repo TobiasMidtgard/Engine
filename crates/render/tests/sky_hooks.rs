@@ -1,6 +1,6 @@
 //! The sky's hooks for a weather module: its flat cloud layer can be turned off
 //! (`RenderSettings::sky_cloud_layer`), and night follows the main light's illuminance, so a
-//! moon that is the brightest light keeps the stars out. Needs a GPU or lavapipe; passes with
+//! moon that is the brightest light still shows the stars. Needs a GPU or lavapipe; passes with
 //! a note when neither is available.
 
 use engine_core::prelude::*;
@@ -162,7 +162,7 @@ fn starry_sky(lux: f32, elevation: f64, ev100: f32, name: &str) -> Option<RgbaIm
 }
 
 #[test]
-fn a_moon_overhead_keeps_the_stars_out_of_its_night() {
+fn a_moon_overhead_still_shows_the_stars() {
     // A full moon is the only (so the brightest) light.
     let Some(moonlit) = starry_sky(0.3, 50.0, -3.0, "night_moon_overhead") else {
         return;

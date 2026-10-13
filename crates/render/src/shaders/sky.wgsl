@@ -87,9 +87,9 @@ fn sky_radiance(dir: vec3<f32>, with_sun: bool) -> vec3<f32> {
             to_space = a.transmittance;
         }
     }
-    // Night sky floor and stars. Night follows the main light's illuminance at the camera
-    // (frame.sky.y, see `sky_night` in frame.rs): a moon that is the brightest light keeps the
-    // stars out as well as a sun below the horizon.
+    // Night sky floor and stars. Night follows the main light's elevation and its illuminance at
+    // the camera (frame.sky.y, see `sky_night` in frame.rs): under a moon that is the brightest light the
+    // stars show, as they do with the sun below the horizon.
     let night = frame.sky.y;
     c += vec3(0.002, 0.003, 0.006) * night;
     c += star_field(dir) * night * to_space;
