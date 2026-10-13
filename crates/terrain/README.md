@@ -26,7 +26,8 @@ everything else (streaming, LOD, colliders, ground queries, prints) follows the 
   `finest_spacing_m` (0.5 m by default). On the Moon the maria are big impact basins ringed by
   worn massifs and flooded with lava of different shades, plus lava that spilled across the
   lowlands, gathered on the face a tidally locked moon turns to its planet (planet-local +Z,
-  which engine_space turns to the parent). Craters age from crisp bowls into soft dishes, and
+  which engine_space turns to the parent; `PlanetShape::lava_basins` 0 leaves basins pale and
+  dusty, as on Mars). Craters age from crisp bowls into soft dishes, and
   on airless worlds hills and mountains are worn round (`PlanetShape::worn`).
 - **Flat pads and a view worth having.** `FlatPad` blends the planet into level ground for a
   level, town or spaceport. `PlanetTerrain::home_transform(pad)` places the planet so the pad

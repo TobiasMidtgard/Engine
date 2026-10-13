@@ -307,6 +307,9 @@ pub struct PlanetShape {
     pub crater_density: f64,
     /// 0..1 share of dark, flooded lowland plains (lunar maria).
     pub maria: f64,
+    /// 0..1 how readily the big impact basins of a world with maria filled with dark lava
+    /// (the Moon: 1); at 0 they stay pale, dusty depressions like Mars's Hellas and Argyre.
+    pub lava_basins: f64,
     pub climate: Climate,
     /// Flat areas for levels and bases.
     pub pads: Vec<FlatPad>,
@@ -347,6 +350,7 @@ impl PlanetShape {
             crater_min_radius_m: 0.0,
             crater_density: 0.0,
             maria: 0.0,
+            lava_basins: 0.0,
             climate: Climate::default(),
             pads: Vec::new(),
             overlay: None,
@@ -378,6 +382,7 @@ impl PlanetShape {
             crater_min_radius_m: 4.0,
             crater_density: 0.75,
             maria: 0.35,
+            lava_basins: 1.0,
             climate: Climate {
                 equator_c: 10.0,
                 pole_c: -150.0,
@@ -414,6 +419,7 @@ impl PlanetShape {
             crater_min_radius_m: 20.0,
             crater_density: 0.35,
             maria: 0.15,
+            lava_basins: 0.0,
             climate: Climate {
                 equator_c: -20.0,
                 pole_c: -110.0,
@@ -971,7 +977,8 @@ impl PlanetShape {
                 0.0
             };
             *h += floor + rings * depth * 0.7 * (1.0 - 0.5 * age) * (0.2 + 1.2 * massifs);
-            let flooded = rnd(7) < self.maria * if center.dot(near) > 0.0 { 2.6 } else { 0.3 };
+            let side = if center.dot(near) > 0.0 { 2.6 } else { 0.3 };
+            let flooded = rnd(7) < self.maria * self.lava_basins * side;
             if flooded {
                 let shore = 0.78 + 0.15 * rnd(8);
                 let t = 1.0 - smooth(shore - 0.06, shore + 0.02, x);
