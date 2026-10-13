@@ -170,16 +170,20 @@ pub fn forest_viewpoints(center: DVec3) -> Vec<Viewpoint> {
     ]
 }
 
-/// Room in front of the forest's ground-level viewpoints, so no trunk or bush grows right in
-/// front of the lens (ferns and grass still frame the view).
+/// A corridor of open ground ahead of the forest's ground-level viewpoints, so no trunk or bush
+/// grows into the lens and crowns only frame the view from its sides (ferns and grass still
+/// grow in it).
 fn lens_clearance() -> Vec<[f32; 3]> {
     forest_viewpoints(DVec3::ZERO)
         .iter()
         .filter(|v| v.eye.y < 5.0)
-        .map(|v| {
-            let ahead = DVec2::new(v.target.x - v.eye.x, v.target.z - v.eye.z).normalize();
-            let c = DVec2::new(v.eye.x, v.eye.z) + ahead * 3.0;
-            [c.x as f32, c.y as f32, 3.5]
+        .flat_map(|v| {
+            let eye = DVec2::new(v.eye.x, v.eye.z);
+            let ahead = (DVec2::new(v.target.x, v.target.z) - eye).normalize();
+            [(2.0, 2.5), (5.0, 3.5), (8.5, 4.0)].map(|(d, r)| {
+                let c = eye + ahead * d;
+                [c.x as f32, c.y as f32, r]
+            })
         })
         .collect()
 }
