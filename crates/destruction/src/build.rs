@@ -26,7 +26,7 @@ use engine_core::math::{DVec3, Quat, Vec3};
 use engine_core::prelude::*;
 use engine_input::{ActionState, Binding, GamepadButton, InputMap, KeyCode, MouseButton};
 use engine_render::{MaterialRef, MeshRenderer};
-use engine_world::physics::ColliderShape;
+use engine_world::physics::{CharacterController, ColliderShape, PhysicsQueries, QueryFilter};
 use engine_world::{Combustible, Ground, NoiseEvent};
 
 use crate::assets::DestructionAssets;
@@ -35,6 +35,7 @@ use crate::dress::PropModel;
 use crate::material::{DestructibleMaterial, DestructionMaterials};
 use crate::props::PropKind;
 use crate::structure::{Obb, PieceState, ShowSupport, StructuralPiece};
+use crate::sync::solid_half;
 use crate::voxel::{VoxelState, rock_below};
 
 /// Pitch of [`BuildKind::WoodRoof`]: one up in two across (26.6°).
@@ -334,6 +335,8 @@ pub enum BuildProblem {
     Floating,
     /// It reaches too far from support (the solver would drop it).
     TooWeak,
+    /// Someone stands where it would go (with a physics module, pieces are solid).
+    Occupied,
 }
 
 impl BuildProblem {
@@ -342,6 +345,7 @@ impl BuildProblem {
             BuildProblem::Blocked => "it would sit inside another piece",
             BuildProblem::Floating => "nothing would hold it up",
             BuildProblem::TooWeak => "it is too far from support and would fall",
+            BuildProblem::Occupied => "someone is in the way",
         }
     }
 }
@@ -956,8 +960,26 @@ pub fn build_system(
     volumes: Query<(&GlobalTransform, &VoxelState)>,
     mut ghosts: Query<(Entity, &mut BuildGhost, &mut Transform), Without<StructuralPiece>>,
     mut shown: Query<(&BuiltPiece, &mut ShowSupport)>,
+    queries: Option<Res<PhysicsQueries>>,
+    characters: Query<(), With<CharacterController>>,
 ) {
     let requests: Vec<BuildRequest> = requests.read().copied().collect();
+    // A piece can't go where a player or a creature stands: it would trap them in its collider.
+    let occupied = |p: &Placement| {
+        let Some(q) = queries.as_deref() else {
+            return false;
+        };
+        let mut inside = Vec::new();
+        let shape = p.kind.solid(solid_half(p.kind.size() * 0.5));
+        q.overlap(
+            &shape,
+            p.center,
+            p.rotation,
+            &QueryFilter::default(),
+            &mut inside,
+        );
+        inside.iter().any(|e| characters.contains(*e))
+    };
     let ground = ground.as_deref();
     // Pieces stand on the terrain or on voxel rock, as in the structure solver.
     let rock: Vec<(&GlobalTransform, &VoxelState)> = volumes.iter().collect();
@@ -986,10 +1008,11 @@ pub fn build_system(
             let target = hit
                 .piece
                 .filter(|p| scene.iter().any(|s| s.entity == *p && s.built));
-            (
-                Some(plan(b.kind, b.yaw, &hit, scene, &ground_height, &table)),
-                target,
-            )
+            let mut p = plan(b.kind, b.yaw, &hit, scene, &ground_height, &table);
+            if p.valid() && occupied(&p) {
+                p.problem = Some(BuildProblem::Occupied);
+            }
+            (Some(p), target)
         };
         for r in requests.iter().filter(|r| r.builder == e) {
             match r.action {

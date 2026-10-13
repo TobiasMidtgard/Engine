@@ -35,7 +35,8 @@ fracture and debris.
   nearest snap point meets a neighbor's (pole and beam ends, panel corners and edge midpoints,
   a floor's on its top face, block corners), skipping spots inside other pieces. The ghost
   shows the support it would get in the support colors, or a deep red where it would sit
-  inside something, touch nothing, or reach too far from support to stand; place it, turn it
+  inside something, touch nothing, reach too far from support to stand, or (with a physics
+  module) close around someone standing there; place it, turn it
   in 22.5° steps, or take built pieces down (what they held falls). Pieces stand on the
   terrain or on voxel rock alike (dig the rock out from under them and they fall). Built
   pieces show their support colors while their builder has the support view on. Keys (bound

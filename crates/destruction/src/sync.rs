@@ -137,6 +137,11 @@ pub fn init_voxels_system(
 /// face to face don't start a fall wedged into the neighbors that still stand.
 pub const PIECE_SKIN_M: f32 = 0.015;
 
+/// Half size of a standing piece's collider for a piece box of half size `half`.
+pub fn solid_half(half: Vec3) -> Vec3 {
+    (half - Vec3::splat(PIECE_SKIN_M)).max(half * 0.5)
+}
+
 /// Make standing [`StructuralPiece`]s solid when a physics module is installed: a static
 /// collider in the piece's box (a gable's triangle) with its material's surface. Players walk
 /// on floors and decks and are stopped by walls, vehicles crash into them, and debris lands on
@@ -168,8 +173,7 @@ pub fn piece_colliders_system(
             _ => t.scale,
         }
         .max(Vec3::splat(1e-3));
-        let h = piece.half_extents;
-        let half = (h - Vec3::splat(PIECE_SKIN_M)).max(h * 0.5) / scale;
+        let half = solid_half(piece.half_extents) / scale;
         let props = table.get(piece.material);
         commands.entity(e).insert(Collider {
             shape: built.map_or(ColliderShape::Cuboid { half_extents: half }, |b| {

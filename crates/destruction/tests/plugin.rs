@@ -8,7 +8,10 @@ use engine_core::registry::call_api;
 use engine_core::time::TimeSource;
 use engine_destruction::*;
 use engine_render::{Mesh, StandardMaterial};
-use engine_world::physics::{Collider, ColliderShape, PhysicsBackend, RigidBody};
+use engine_world::physics::{
+    CharacterController, Collider, ColliderShape, PhysicsBackend, PhysicsQueries, PhysicsQuery,
+    QueryFilter, RigidBody,
+};
 use engine_world::{
     DamageEvent, DamageKind, EditOp, EditShape, ProjectileTrace, SurfaceMaterials, TerrainEdit,
     WorldPlugin, WorldShift,
@@ -525,6 +528,117 @@ fn pieces_stand_on_voxel_rock_until_it_is_dug_out_from_under_them() {
         y > 0.45 && y < 2.0 && body.velocity.length() < 0.5,
         "the slab lies in the hole at y {y:.2}: {body:?}"
     );
+}
+
+/// Physics queries that see one character, a ball at a point (boxes only).
+struct OneCharacter(Entity, DVec3, f32);
+
+impl PhysicsQuery for OneCharacter {
+    fn raycast(
+        &self,
+        _: DVec3,
+        _: Vec3,
+        _: f32,
+        _: &QueryFilter,
+    ) -> Option<engine_world::physics::Hit> {
+        None
+    }
+    fn shapecast(
+        &self,
+        _: &ColliderShape,
+        _: DVec3,
+        _: engine_core::math::Quat,
+        _: Vec3,
+        _: f32,
+        _: &QueryFilter,
+    ) -> Option<engine_world::physics::Hit> {
+        None
+    }
+    fn overlap(
+        &self,
+        shape: &ColliderShape,
+        position: DVec3,
+        rotation: engine_core::math::Quat,
+        _: &QueryFilter,
+        out: &mut Vec<Entity>,
+    ) {
+        let ColliderShape::Cuboid { half_extents } = shape else {
+            return;
+        };
+        let local = rotation.inverse() * (self.1 - position).as_vec3();
+        if local.clamp(-*half_extents, *half_extents).distance(local) < self.2 {
+            out.push(self.0);
+        }
+    }
+    fn closest_point(
+        &self,
+        _: DVec3,
+        _: f32,
+        _: &QueryFilter,
+    ) -> Option<engine_world::physics::Hit> {
+        None
+    }
+}
+
+#[test]
+fn build_mode_does_not_put_a_piece_where_someone_stands() {
+    let mut app = app();
+    let player = app
+        .world
+        .spawn((
+            Transform::from_xyz(0.0, 0.9, 0.0),
+            CharacterController::default(),
+        ))
+        .id();
+    let stand_at = |app: &mut App, at: DVec3| {
+        app.insert_resource(PhysicsQueries(std::sync::Arc::new(OneCharacter(
+            player, at, 0.35,
+        ))));
+    };
+    stand_at(&mut app, DVec3::new(0.0, 0.9, 0.0));
+    let b = app
+        .world
+        .spawn((
+            Transform::default(),
+            Builder {
+                kind: BuildKind::WoodWall,
+                ..Builder::default()
+            },
+        ))
+        .id();
+    app.world
+        .get_mut::<Builder>(b)
+        .unwrap()
+        .aim_at(DVec3::new(0.3, 3.0, 2.0), DVec3::ZERO);
+    let place = |app: &mut App| {
+        app.update();
+        let p = app
+            .world
+            .get::<build::BuildPreview>(b)
+            .unwrap()
+            .placement
+            .unwrap();
+        app.world.write_message(BuildRequest {
+            builder: b,
+            action: BuildAction::Place,
+        });
+        app.update();
+        let built = app
+            .world
+            .query_filtered::<(), With<BuiltPiece>>()
+            .iter(&app.world)
+            .count();
+        (p, built)
+    };
+    // A wall through the player: red ghost, and placing does nothing.
+    let (p, built) = place(&mut app);
+    assert_eq!(p.problem, Some(build::BuildProblem::Occupied), "{p:?}");
+    assert_eq!(built, 0);
+    // Once they step aside it goes up.
+    stand_at(&mut app, DVec3::new(3.0, 0.9, 0.0));
+    let (p, built) = place(&mut app);
+    assert!(p.valid(), "{p:?}");
+    assert_eq!(built, 1);
 }
 
 #[test]
