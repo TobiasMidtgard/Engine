@@ -308,6 +308,9 @@ pub struct EcologySettings {
     pub collider_distance_m: f32,
     /// Most catch-up years a far region simulates when the player returns.
     pub max_catch_up_years: f32,
+    /// Draw each region's grass as GPU blades (`engine_render::GrassField`, fed from the
+    /// ecology) instead of one mesh per tuft.
+    pub gpu_grass: bool,
 }
 
 impl Default for EcologySettings {
@@ -320,6 +323,7 @@ impl Default for EcologySettings {
             tree_lod_distance_m: 70.0,
             collider_distance_m: 150.0,
             max_catch_up_years: 40.0,
+            gpu_grass: true,
         }
     }
 }

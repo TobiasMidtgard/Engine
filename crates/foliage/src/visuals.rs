@@ -14,7 +14,9 @@ use engine_core::prelude::*;
 use engine_render::{Camera, Mesh, MeshRenderer, PointLight, StandardMaterial};
 
 use crate::assets::{FoliageVisuals, GLOW_LEVELS, SpeciesVisual, TINTS, VARIANTS};
+use crate::ecology::InRegion;
 use crate::felling::{FallingTree, LogPose};
+use crate::grass::RegionGrass;
 use crate::plant::{EcologySettings, FelledLog, Plant, PlantStage};
 use crate::species::{Layer, PlantForm, PlantLibrary, PlantSpecies};
 
@@ -190,13 +192,15 @@ pub fn sync_plant_visuals(
         &mut Transform,
         Option<&mut PlantVisual>,
         Option<&PlantBase>,
+        Option<&InRegion>,
     )>,
     mut parts: Query<&mut MeshRenderer, With<PlantPart>>,
+    meadows: Query<(), With<RegionGrass>>,
 ) {
     *frame = frame.wrapping_add(1);
     let full_pass = *frame % 8 == 1 || visuals.is_changed() || settings.is_changed();
     let cam = camera_position(&cams);
-    for (entity, plant, mut transform, visual, base) in &mut plants {
+    for (entity, plant, mut transform, visual, base, region) in &mut plants {
         let fresh = visual.is_none();
         if !full_pass && !fresh && !plant.is_changed() {
             continue;
@@ -230,7 +234,16 @@ pub fn sync_plant_visuals(
         let distance = cam
             .map(|c| c.distance(transform.translation) as f32)
             .unwrap_or(0.0);
-        let want = desired_parts(&plant, sp, vis, distance, &settings);
+        // Grass under a region's GPU meadow is drawn as blades there.
+        let meadow = sp.form == PlantForm::Grass
+            && region
+                .and_then(|r| r.0)
+                .is_some_and(|r| meadows.contains(r));
+        let want = if meadow {
+            [None, None, None]
+        } else {
+            desired_parts(&plant, sp, vis, distance, &settings)
+        };
         let shadows = sp.layer != Layer::Ground && sp.form != PlantForm::Mushroom;
         match visual {
             Some(mut visual) => {

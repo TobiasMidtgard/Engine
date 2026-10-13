@@ -413,9 +413,22 @@ pub fn forest_rocks() -> Vec<PlacedRock> {
     out
 }
 
+/// Keep-clear circles under the rocks big enough to keep plants off them.
+fn rock_footprints(rocks: &[PlacedRock]) -> Vec<[f32; 3]> {
+    rocks
+        .iter()
+        .filter(|r| r.radius() > 0.25 && r.rock.bury_m < r.size.y * 0.9)
+        .map(|r| [r.pos.x, r.pos.y, r.radius() * 0.85])
+        .collect()
+}
+
 /// The living forest at `center` (flat ground or whatever `engine_world::Ground` says).
 pub fn spawn_demo(commands: &mut Commands, center: DVec3) {
-    commands.spawn((Transform::from_translation(center), forest_region()));
+    let rocks = forest_rocks();
+    let mut region = forest_region();
+    // Nothing grows through a rock.
+    region.keep_clear.extend(rock_footprints(&rocks));
+    commands.spawn((Transform::from_translation(center), region));
     for (at, source) in forest_sources() {
         commands.spawn((
             Transform::from_translation(local(center, at.x, at.y)),
@@ -440,7 +453,7 @@ pub fn spawn_demo(commands: &mut Commands, center: DVec3) {
             water,
         ),
     ));
-    spawn_rocks(commands, center, forest_rocks());
+    spawn_rocks(commands, center, rocks);
     // Leaf litter, needles, moss, ash and packed earth under the trees.
     commands.spawn((
         Transform::from_translation(center),
@@ -536,7 +549,10 @@ pub fn cave_sources() -> Vec<(Vec2, ResourceSource)> {
 /// The mushroom cave's living part at `center` (inside a cave of about 28 × 32 m whose mouth
 /// faces −Z): mineral pool, seep, cave floor and the fungi that grow where minerals reach.
 pub fn spawn_cave_demo(commands: &mut Commands, center: DVec3) {
-    commands.spawn((Transform::from_translation(center), cave_region()));
+    let rocks = cave_rocks();
+    let mut region = cave_region();
+    region.keep_clear.extend(rock_footprints(&rocks));
+    commands.spawn((Transform::from_translation(center), region));
     for (at, source) in cave_sources() {
         commands.spawn((
             Transform::from_translation(local(center, at.x, at.y)),
@@ -562,7 +578,7 @@ pub fn spawn_cave_demo(commands: &mut Commands, center: DVec3) {
             pool,
         ),
     ));
-    spawn_rocks(commands, center, cave_rocks());
+    spawn_rocks(commands, center, rocks);
     commands.spawn((
         Transform::from_translation(center),
         GroundCover {

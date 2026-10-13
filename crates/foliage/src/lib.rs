@@ -5,6 +5,7 @@ pub mod assets;
 pub mod demo;
 pub mod ecology;
 pub mod felling;
+pub mod grass;
 pub mod meshgen;
 pub mod plant;
 pub mod scenery;
@@ -127,6 +128,7 @@ impl Plugin for FoliagePlugin {
             Update,
             (
                 (felling::stream_tree_colliders, felling::sync_tree_colliders).chain(),
+                grass::sync_region_grass,
                 felling::remove_orphan_colliders,
                 (
                     scenery::build_scenery,
