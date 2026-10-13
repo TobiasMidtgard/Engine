@@ -1618,13 +1618,13 @@ fn rounded(pts: &[(Vec2, f32)], arc_segs: usize) -> Vec<Vec2> {
 
 // ====================================================================== piece builder
 
-/// How a sub-part is colored: a fixed linear color, or the team color times a brightness
-/// (`wear` lightens its rolled rims toward worn paint).
+/// How a sub-part is colored: a fixed linear color, the team's color, or the fighter's.
+/// (Painted plates take the team color from their own texture.)
 #[derive(Debug, Clone, Copy)]
 enum Tint {
     Rgb(Vec3),
-    Team(f32),
-    /// The team color scaled per channel, plus a fixed color (skin: warmer, redder, darker).
+    /// The team color scaled per channel, plus a fixed color (dyed wool: darker and duller;
+    /// skin, whose "team" color is its tone: warmer, redder, darker).
     Mix {
         team: Vec3,
         fixed: Vec3,
@@ -1646,6 +1646,12 @@ enum Tint {
 /// The gambeson's and the hose's share of [`Tint::Cloth`].
 const GAMBESON: Tint = Tint::Cloth { t: 0.0, k: 1.0 };
 const HOSE: Tint = Tint::Cloth { t: 1.0, k: 1.0 };
+/// Wool dyed in the team's color (tabards, arm bands): a little darker and duller than the
+/// paint, as vegetable dyes are.
+const DYED_WOOL: Tint = Tint::Mix {
+    team: Vec3::splat(0.74),
+    fixed: Vec3::splat(0.012),
+};
 
 /// sRGB hex to linear.
 fn lin(hex: u32) -> Vec3 {
@@ -1664,8 +1670,6 @@ const RUBBER: u32 = 0x1c1c1e;
 const GLASS: u32 = 0x0b0d10;
 const WOOD: u32 = 0x8a5a34;
 const CREAM: u32 = 0xe2d6bc;
-/// Worn paint at plate rims (mixed with the team color).
-const EDGE_WEAR: f32 = 0.3;
 
 /// A built piece: its mesh (vertex colors hold occlusion × fixed tints), the vertices that
 /// take the team color, with their weight per channel, and the vertices that take a pair of
@@ -1752,19 +1756,11 @@ impl Builder {
         for v in &m.vertices {
             let mut out = *v;
             out.uv = tile_uv(zone, Vec2::from(v.uv) - lo, span).to_array();
-            // Plate rims come marked with red = 0.
-            let rim = v.color[0] < 0.5;
             out.color = [1.0; 4];
             self.mesh.vertices.push(out);
             self.chart.push(None);
             self.tint.push(match tint(Vec3::from(v.position)) {
                 Tint::Rgb(c) => (Vec3::ZERO, c, None),
-                Tint::Team(k) if rim => (
-                    Vec3::splat(k * (1.0 - EDGE_WEAR)),
-                    Vec3::splat(0.55 * EDGE_WEAR),
-                    None,
-                ),
-                Tint::Team(k) => (Vec3::splat(k), Vec3::ZERO, None),
                 Tint::Mix { team, fixed } => (team, fixed, None),
                 Tint::Iris { t, k } | Tint::Cloth { t, k } => (Vec3::ZERO, Vec3::splat(k), Some(t)),
             });
@@ -2454,8 +2450,9 @@ fn worn(f: &Field, wl: f32, wear: &Wear, roll: f32, hits: [f32; 4]) -> (PaintTex
     } else {
         0.7 * (f.s / 0.0025).exp() + 0.3 * (f.s / 0.01).exp()
     };
-    // Some stretches of edge took more knocks than others.
+    // Some stretches of edge took more knocks than others, and grime lies in patches.
     let edge = rim.max(near).max(0.7 * f.ridge) * (0.15 + 0.85 * smooth(0.35, 0.75, f.deep));
+    let patchy = smooth(0.3, 0.7, 0.55 * f.dirt + 0.45 * f.scuff);
     // Chipped through to what is under the paint where the chip noise beats how knocked the
     // place is (edges first, then patches of the face, more with age); a pale band of primer
     // rings each chip.
@@ -2474,18 +2471,22 @@ fn worn(f: &Field, wl: f32, wear: &Wear, roll: f32, hits: [f32; 4]) -> (PaintTex
     let scuff = (smooth(
         0.55,
         0.9,
-        f.scuff + 0.2 * edge + 0.25 * f.ridge + 0.4 * impact,
+        f.scuff + 0.2 * edge + 0.25 * f.ridge * (0.3 + 0.7 * patchy) + 0.4 * impact,
     ) * (0.15 + 0.85 * wl)
         + scratch
         + 0.7 * halo)
         .min(1.0);
-    // Dirt: grime in hollows and along the rim's inner side, dust low on the plate and a thin
-    // film all over.
+    // Dirt: grime in hollows and along the rim's inner side (in patches, not an outline), dust
+    // low on the plate and a thin film all over.
     let age = 0.15 + 0.85 * wl;
     let grime = wear.dirt
         * age
-        * smooth(0.45, 0.95, 0.45 * f.dirt + 0.7 * f.hollow + 0.45 * near)
-            .max(0.6 * f.streak * (0.4 + 0.6 * f.low));
+        * smooth(
+            0.45,
+            0.95,
+            0.45 * f.dirt + (0.7 * f.hollow + 0.45 * near) * (0.2 + 0.8 * patchy),
+        )
+        .max(0.6 * f.streak * (0.4 + 0.6 * f.low));
     let dust = wear.dirt
         * age
         * (smooth(0.35, 0.95, 0.45 * f.dirt + 0.8 * f.low) + 0.2 * f.dirt)
@@ -2550,7 +2551,7 @@ fn worn(f: &Field, wl: f32, wear: &Wear, roll: f32, hits: [f32; 4]) -> (PaintTex
 /// team's paint, a little darker, warmer and less saturated than the team color.
 fn paint_color(team: Vec3) -> Vec3 {
     let l = team.dot(v3(0.2126, 0.7152, 0.0722));
-    mix(l * v3(1.0, 0.95, 0.88), team, 0.85) * 0.96
+    mix(l * v3(1.0, 0.93, 0.86), team, 0.74) * 0.86
 }
 
 /// Pack chart sizes into the paint texture, biggest first, each as low as it fits (skyline):
@@ -4018,7 +4019,7 @@ fn tabard(front: bool) -> PieceMesh {
         )
     };
     let mut b = Builder::default();
-    b.add(pl.mesh(), Zone::Cloth, Tint::Team(0.85));
+    b.add(pl.mesh(), Zone::Cloth, DYED_WOOL);
     b.add(trim.mesh(), Zone::Cloth, Tint::Rgb(lin(CREAM) * 0.8));
     if front {
         b.add(emblem.mesh(), Zone::Cloth, Tint::Rgb(lin(CREAM) * 0.85));
@@ -4385,7 +4386,7 @@ fn upper_arm() -> PieceMesh {
     b.add(
         wrap_band(&upper_arm_suit, Vec3::ZERO, -0.245, -0.205, 0.003, 24),
         Zone::Cloth,
-        Tint::Team(0.95),
+        DYED_WOOL,
     );
     // The cap's parameters run down the arm along +u.
     b.paint(&cap, 1.0, Wear::new(0.3, v2(1.0, 0.0), 9).hits(1, 1));
