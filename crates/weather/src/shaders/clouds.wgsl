@@ -147,6 +147,16 @@ fn ign(px: vec2<f32>) -> f32 {
     return fract(52.9829189 * fract(dot(px, vec2<f32>(0.06711056, 0.00583715))));
 }
 
+// Transmittance of the air above camera-relative `rel` toward the clouds' key light. Not
+// `sun_transmittance`: that follows the renderer's brightest light, which can be the other
+// one (the moon under a storm's dimmed sun at dusk).
+fn key_transmittance(rel: vec3<f32>) -> vec3<f32> {
+    if (frame.planet.w <= 0.0) { return vec3(1.0); }
+    let h = planet_height(rel);
+    let mu = dot(normalize(rel - frame.planet.xyz), clouds.light_dir.xyz);
+    return transmittance_to_space(h, mu) * sun_above_horizon(h, mu);
+}
+
 fn march_clouds(dir: vec3<f32>, steps: i32, light_steps: i32, jitter: f32) -> CloudResult {
     var r: CloudResult;
     r.radiance = vec3(0.0);
@@ -181,7 +191,7 @@ fn march_clouds(dir: vec3<f32>, steps: i32, light_steps: i32, jitter: f32) -> Cl
     let extinction = clouds.layer.z;
     // Light arriving at the clouds: the key light through the air above the entry point.
     let entry = dir * t0;
-    let key = clouds.light.rgb * sun_transmittance(entry + vec3(0.0, 50.0, 0.0));
+    let key = clouds.light.rgb * key_transmittance(entry + vec3(0.0, 50.0, 0.0));
     // Ambient: the clear sky above the clouds, the lit ground below.
     let sky = atmosphere(entry, vec3<f32>(0.0, 1.0, 0.0), 1e12, 6).radiance * clouds.light.rgb * 1.4;
     // Light bounced off the ground below. The ground's color only tints it (a meadow doesn't
@@ -228,11 +238,15 @@ fn march_clouds(dir: vec3<f32>, steps: i32, light_steps: i32, jitter: f32) -> Cl
         let d = cloud_density(p, h, w, true);
         if (d > 0.0) {
             let sigma = d * extinction;
-            // Optical depth toward the light over samples that double in length (~1.2 km).
+            // Optical depth toward the light over samples that double in length, 1.24 km in
+            // all however many there are (5 on screen: 40 m to 640 m), so the environment
+            // map's cheaper 2-sample march sees as much cloud toward the light as the screen
+            // does (it used to reach only 120 m).
+            let first = 1240.0 / (exp2(f32(light_steps)) - 1.0);
             var od = 0.0;
             var lt = 0.0;
             for (var j = 0; j < light_steps; j++) {
-                let ls = 40.0 * exp2(f32(j));
+                let ls = first * exp2(f32(j));
                 let q = p + ldir * (lt + ls * 0.5);
                 lt += ls;
                 od += cloud_density(q, planet_height(q), weather_at(q.xz), j < 2) * ls;
@@ -260,6 +274,11 @@ fn march_clouds(dir: vec3<f32>, steps: i32, light_steps: i32, jitter: f32) -> Cl
                 ob *= 0.6;
                 oc *= 0.5;
             }
+            // Deep in a thick cloud the octaves die out exponentially, but sunlight still
+            // diffuses down through it like through frosted glass, white and without direction:
+            // two-stream transmittance 1 / (1 + 0.75 (1 - g) τ), g ≈ 0.85. Without it a storm
+            // deck's base was lit only by the blue sky and turned navy.
+            light = max(light, saturate(ldir.y + 0.05) * INV_PI / (1.0 + 0.11 * od));
             // Dark edges facing the light ("powder"): fewer photons scattered back out.
             let powder = 1.0 - 0.45 * exp(-sigma * 150.0);
             let h01 = saturate((h - base) / type_thickness(w.g));
