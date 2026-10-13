@@ -93,8 +93,14 @@ pub struct RenderSettings {
     pub vsync: bool,
     /// Shadows are drawn up to this distance from the camera, meters.
     pub shadow_distance: f32,
-    /// Shadow map resolution per cascade (applied at startup).
+    /// Shadow map resolution per cascade and of the far shadow map (applied at startup).
     pub shadow_map_size: u32,
+    /// Far shadows: beyond `shadow_distance`, big casters (terrain, mountains, cliffs, large
+    /// buildings) still cast sun shadows out to this distance from the camera, meters, from one
+    /// coarse shadow map (`shadow_map_size`², so 8 km gives texels of about 8 m at 2048). Mountains
+    /// shade the valley at low sun and ridges shade themselves. 0 = off (no sun shadows beyond
+    /// `shadow_distance`).
+    pub far_shadow_distance: f32,
     /// 0 = uniform cascade splits, 1 = logarithmic.
     pub shadow_split_lambda: f32,
     pub shadow_depth_bias: f32,
@@ -147,6 +153,11 @@ pub struct RenderSettings {
     pub tonemapper: Tonemapper,
     /// 0..1 mix of the blurred image (0.04 is subtle and physical).
     pub bloom_intensity: f32,
+    /// The most a pixel brings into the bloom, in multiples of white at the current exposure
+    /// (pre-exposed). Above half of it brightness rolls off smoothly toward it, so lights far
+    /// brighter than the exposure (a neon ring at night, the sun) glow without swamping the
+    /// frame, while everything up to half of it blooms as before. 0 = no limit.
+    pub bloom_limit: f32,
     pub saturation: f32,
     pub contrast: f32,
     pub vignette: f32,
@@ -194,6 +205,7 @@ impl Default for RenderSettings {
             vsync: true,
             shadow_distance: 350.0,
             shadow_map_size: 2048,
+            far_shadow_distance: 8000.0,
             shadow_split_lambda: 0.8,
             shadow_depth_bias: 0.0,
             shadow_normal_bias: 1.5,
@@ -215,6 +227,7 @@ impl Default for RenderSettings {
             sharpness: 0.3,
             tonemapper: Tonemapper::AgXPunchy,
             bloom_intensity: 0.04,
+            bloom_limit: 64.0,
             saturation: 1.05,
             contrast: 1.0,
             vignette: 0.2,
@@ -250,8 +263,10 @@ impl Default for RenderSettings {
 #[derive(Resource, Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct FogSettings {
-    /// Extinction per meter at `base_height` (0.0005 light haze, 0.02 thick fog, 0.1 fog you
-    /// can barely see 30 m into).
+    /// Extinction per meter at `base_height`; the visibility there is about 3.9 / density
+    /// (0.00002 clear air, 200 km; 0.0001 light haze, 40 km; 0.0005 haze, 8 km; 0.02 thick fog,
+    /// 200 m; 0.1 fog you can barely see 30 m into). The atmosphere already gives distant
+    /// mountains their blue haze; this adds to it, mostly along the valley floor.
     pub density: f32,
     /// How fast fog thins with height, per meter (density halves every `0.69 / falloff` m).
     pub height_falloff: f32,

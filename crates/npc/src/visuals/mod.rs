@@ -2,13 +2,19 @@
 //! AI is doing, so behavior reads clearly before real character models exist.
 //!
 //! Fighters are armored combatants built from procedural meshes (see [`crate::art::fighter`])
-//! on a skeleton whose knees and elbows bend. They walk and run with planted feet and swinging
-//! arms, breathe and shift their weight when idle, kneel behind low cover, raise their weapon
-//! during an attack's telegraph (it glows orange for a heavy guard breaker), raise the guard
-//! or shield to block (on a parry the blade glints white and the shield lights up), lean into
-//! dodges, reel when staggered, light up for an instant when hit (tinted, never blown out to
-//! white: the plates light up in a pale tint of the team's color), and fall and drop their
-//! weapon when downed. Shooters shoulder their carbine (with a muzzle flash and kick); archers
+//! on a skeleton whose knees and elbows bend. Their feet stay where they are set on the ground
+//! while the body walks, runs or turns over them, the stride lengthening into a run with the
+//! heels kicking up and the arms pumping; on guard they shuffle without breaking their stance.
+//! Standing, they breathe and shift their weight from leg to leg (on guard, bob and rock on
+//! bent knees), and they kneel behind low cover. A swing coils back onto the rear foot during
+//! the attack's telegraph (the blade glows orange for a heavy guard breaker), then the hips
+//! lead the shoulders round into the cut, the weight goes onto the front foot and the blade
+//! follows through. They raise the guard or shield to block, bracing and rocking back as the
+//! blow lands (on a parry the blade beats the blow aside and glints white, and the shield
+//! lights up), hop aside to dodge and step back under themselves, are thrown back and stumble
+//! when staggered, light up for an instant when hit (tinted, never blown out to white: the
+//! plates light up in a pale tint of the team's color), and fall and drop their weapon when
+//! downed. Shooters shoulder their carbine (with a muzzle flash and kick); archers
 //! draw to the jaw. Faces show under open helmets worn over mail coifs. The helmet's horsehair
 //! crest shows skill (grey rookie, bronze, silver, gold master) and a light in its brow band
 //! glows with alertness (yellow suspicious, orange searching, red fighting). Their painted
@@ -97,12 +103,13 @@ pub struct IntentMarker {
     line: bool,
 }
 
-/// Per-body bookkeeping for effects.
+/// Per-body bookkeeping for effects, and a fighter's motion from one pose to the next.
 #[derive(Component, Debug, Clone, Copy, Default)]
 pub struct StandInState {
     was_winding: bool,
     flash_until: f64,
     markers: Option<[Entity; 2]>,
+    motion: humanoid::Motion,
 }
 
 fn mat(hex: u32) -> StandardMaterial {
@@ -212,6 +219,7 @@ type PoseItem<'a> = (
     &'a StandIn,
     &'a mut StandInState,
     &'a Children,
+    &'a Transform,
     &'a LocomotionState,
     Option<&'a MoverState>,
     Option<&'a MoveIntent>,
@@ -230,13 +238,14 @@ type PoseItem<'a> = (
 
 /// Pose every stand-in from its owner's state.
 pub(crate) fn pose_stand_ins(
-    mut owners: Query<PoseItem>,
+    mut owners: Query<PoseItem, Without<StandInPart>>,
     mut parts: Query<(&StandInPart, &mut Transform, &mut MeshRenderer)>,
 ) {
     for (
         stand_in,
         mut st,
         children,
+        owner,
         loco,
         mover,
         intent,
@@ -259,7 +268,7 @@ pub(crate) fn pose_stand_ins(
                 let pose = humanoid::humanoid(
                     now,
                     phase,
-                    speed,
+                    owner.rotation,
                     loco,
                     intent,
                     combat,

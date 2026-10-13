@@ -58,7 +58,8 @@ fn shadow_wind(rel: vec3<f32>, height01: f32, sway: f32) -> vec3<f32> {
 fn shadow_clip(in: VertexIn) -> vec4<f32> {
     let p = vec4<f32>(in.position, 1.0);
     var rel = vec3<f32>(dot(in.m0, p), dot(in.m1, p), dot(in.m2, p));
-    let sway = materials[in.extra.x].params2.y;
+    // Wind weight in the vertex color's alpha, as in `vertex_wind` (mesh.wgsl).
+    let sway = materials[in.extra.x].params2.y * saturate(in.color.a);
     if (sway > 0.0) {
         let h01 = saturate((in.position.y - bitcast<f32>(in.extra.z)) / max(bitcast<f32>(in.extra.w), 1e-3));
         rel += shadow_wind(rel, h01, sway);
@@ -87,7 +88,8 @@ fn vs_shadow_masked(in: VertexIn) -> MaskedOut {
     out.clip = shadow_clip(in);
     let mat = materials[in.extra.x];
     out.uv = in.uv * mat.uv.xy * mat.mapping.x;
-    out.alpha = in.color.a;
+    // On swaying materials the vertex alpha is the wind weight, not opacity.
+    out.alpha = select(in.color.a, 1.0, mat.params2.y > 0.0);
     out.material = in.extra.x;
     return out;
 }
