@@ -186,6 +186,101 @@ fn snow_drift(tp: vec3<f32>) -> f32 {
     return sum;
 }
 
+struct Crowns {
+    cover: f32,        // the pixel's share of crown
+    slope: vec2<f32>,  // the crown's slope there (x, z)
+    tone: f32,         // per tree, 0..1
+    shadow: f32,       // shade cast by the trees between it and the sun, 0..1
+    crevice: f32,      // the dark hollows between the crown's leaf clumps, 0..1
+};
+
+// Tree crowns seen from above, for woods seen from a few dozen meters out (the foliage module
+// draws the trees near the camera): one tree per 8 m cell, set off at random, with a crown of
+// random size and height, standing in groups. A tree stands with probability `density`, so
+// woods thin out tree by tree at their edges and close their canopy inside. Each crown casts
+// a shadow away from the sun (`to_sun`, world) onto the gaps and crowns beside it.
+fn crowns(tp: vec3<f32>, density: f32, pixel: f32, to_sun: vec3<f32>) -> Crowns {
+    let cell = 8.0;
+    let p = tp.xz / cell;
+    let base = floor(p);
+    // Shadows fall a crown's height (about half a cell above the gaps) away from the sun.
+    let sun_xz = to_sun.xz / max(length(to_sun.xz), 1e-4);
+    let reach = clamp(0.5 * length(to_sun.xz) / max(to_sun.y, 0.05), 0.0, 1.0);
+    let sun_up = smoothstep(0.0, 0.15, to_sun.y);
+    var top = -1.0;
+    var cr: Crowns;
+    cr.slope = vec2<f32>(0.0);
+    cr.tone = 0.5;
+    var shade: array<f32, 9>;
+    var win = 0;
+    var n = 0;
+    for (var j = -1; j <= 1; j++) {
+        for (var i = -1; i <= 1; i++) {
+            shade[n] = 0.0;
+            // Cells wrap with the 4096 m tile, so the trees stay put when the camera crosses one.
+            let c = base + vec2<f32>(f32(i), f32(j));
+            let k = c - floor(c / 512.0) * 512.0;
+            let h = vec3<f32>(hash13(vec3<f32>(k, 3.1)), hash13(vec3<f32>(k, 7.7)), hash13(vec3<f32>(k, 12.9)));
+            // Groups of trees a few dozen meters across, clearings between them.
+            let group = pnoise3(vec3<f32>(k.x * 0.25, 5.0, k.y * 0.25), 128.0) - 0.5;
+            if (h.z < density + group * 0.5 * density * (1.0 - density) * 4.0) {
+                let r = mix(0.32, 0.72, hash13(vec3<f32>(k, 19.3))) * mix(0.8, 1.0, density);
+                let center = c + 0.1 + h.xy * 0.8;
+                let o = (p - center) / r;
+                let d2 = dot(o, o);
+                // Taller trees hide the edges of the crowns next to them.
+                let t = (1.0 - d2) * mix(0.8, 1.0, hash13(vec3<f32>(k, 23.9)));
+                if (t > top) {
+                    top = t;
+                    win = n;
+                    cr.slope = o / sqrt(max(1.0 - d2, 0.09));
+                    cr.tone = hash13(vec3<f32>(k, 29.5));
+                }
+                let s = (p - (center - sun_xz * reach)) / r;
+                shade[n] = 1.0 - smoothstep(0.6, 1.0, dot(s, s));
+            }
+            n++;
+        }
+    }
+    var shadow = 0.0;
+    for (var m = 0; m < 9; m++) {
+        if (m != win) {
+            shadow = max(shadow, shade[m]);
+        }
+    }
+    // Up close a crown is a heap of leaf clumps (about 2 m across) with dark hollows between
+    // them, and its outline is lumpy.
+    cr.crevice = 0.0;
+    let fine = 1.0 - smoothstep(0.25, 1.0, pixel);
+    if (fine > 0.0 && top > -0.4) {
+        let q = tp.xz * 0.5;
+        let qb = floor(q);
+        var ct = -1.0;
+        var cs = vec2<f32>(0.0);
+        for (var j = -1; j <= 1; j++) {
+            for (var i = -1; i <= 1; i++) {
+                let c = qb + vec2<f32>(f32(i), f32(j));
+                let k = c - floor(c / 2048.0) * 2048.0;
+                let o = (q - (c + 0.15 + vec2<f32>(hash13(vec3<f32>(k, 41.1)), hash13(vec3<f32>(k, 43.7))) * 0.7)) / 0.8;
+                let t = 1.0 - dot(o, o);
+                if (t > ct) {
+                    ct = t;
+                    cs = o / sqrt(max(t, 0.09));
+                }
+            }
+        }
+        top += (ct - 0.3) * 0.35 * fine;
+        cr.slope += cs * 0.5 * fine;
+        cr.crevice = (1.0 - smoothstep(-0.2, 0.6, ct)) * fine;
+    }
+    // Anti-aliased crown edges; a crown's sunlit top stays out of its neighbors' shadow.
+    let edge = pixel / (cell * 0.5);
+    cr.cover = smoothstep(-edge, edge, top);
+    cr.slope *= cr.cover;
+    cr.shadow = shadow * sun_up * (1.0 - smoothstep(0.3, 0.9, top));
+    return cr;
+}
+
 // Fractal sum of `pnoise3` on tiling coordinates, starting at `freq` cycles per meter (a power
 // of two), doubling per octave. Returns about 0..1.
 fn tile_fbm(tp: vec3<f32>, freq: f32, octaves: i32) -> f32 {
@@ -853,7 +948,7 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     col[M_SOIL] = mix(planet.colors[C_SOIL].rgb, mare_col, mare_soft);
     // Woods: the forest floor up close, dark canopy from afar (the foliage module draws the
     // trees themselves).
-    let forest_edge = (mid_v - 0.5) * 0.08 * clump_fade + (patch_v - 0.5) * 0.06;
+    let forest_edge = (mid_v - 0.5) * 0.08 * clump_fade + (patch_v - 0.5) * 0.06 + (macro_v - 0.5) * 0.12 * macro_fade;
     let forest = vegetation
         * smoothstep(0.40 - 0.1 * far, 0.52 + 0.1 * far, moisture * 0.6 + (0.5 - patches) * 0.9 + (variety - 0.5) * 0.4 + forest_edge + gully * 0.12 - crest * 0.12 + (far_n.x - 0.5) * 0.9 * far)
         * smoothstep(-6.0, 4.0, temp_c)
@@ -862,11 +957,20 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     // and bare leaf litter there read as a brown hole in the land). Up close: ferns and grass
     // with patches of litter between them.
     let canopy = smoothstep(15.0, 90.0, dist);
+    // Until a pixel spans a few meters, the canopy shows its trees: crowns with shade between
+    // them inside the woods, and meadow between the last trees at their edges.
+    let crown_k = canopy * (1.0 - smoothstep(1.5, 6.0, pixel)) * step(0.003, forest);
+    var crown = Crowns(1.0, vec2<f32>(0.0), 0.5, 0.0, 0.0);
+    var woods = forest;
+    if (crown_k > 0.0) {
+        crown = crowns(tp, saturate(forest * 1.5 - 0.25), pixel, frame.sun_dir.xyz);
+        woods = mix(forest, max(crown.cover, smoothstep(0.8, 1.0, forest)), crown_k);
+    }
     let undergrowth = planet.colors[C_LUSH].rgb * vec3<f32>(0.6, 0.7, 0.55);
     let litter = mix(planet.colors[C_SOIL].rgb * vec3<f32>(0.75, 0.72, 0.65), undergrowth, 0.3);
     let forest_floor = mix(undergrowth, litter, smoothstep(0.6, 0.8, patch_v));
     // From high up, dark needle woods and lighter broadleaf ones.
-    let canopy_tone = mix(vec3<f32>(0.45, 0.55, 0.45), mix(vec3<f32>(0.34, 0.45, 0.42), vec3<f32>(0.56, 0.63, 0.42), saturate(far_n.y * 2.5 - 0.75)), far);
+    let canopy_tone = mix(vec3<f32>(0.5, 0.55, 0.7), mix(vec3<f32>(0.34, 0.45, 0.42), vec3<f32>(0.56, 0.63, 0.42), saturate(far_n.y * 2.5 - 0.75)), far);
     col[M_FOREST] = mix(forest_floor, planet.colors[C_LUSH].rgb * canopy_tone, canopy);
     // Beaches and deserts.
     // From afar the strip is far thinner than the vertices that carry it, so it fades (it
@@ -909,9 +1013,9 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     // so there they are drier grass.
     let bare_near = 1.0 - smoothstep(0.1, 0.5, pixel);
     let bare_patch = worn * 0.8 * bare_near;
-    w[M_GRASS] = max(veg - forest, 0.0) * (1.0 - bare_patch);
-    w[M_FOREST] = min(forest, veg);
-    w[M_SOIL] = 1.0 - veg + max(veg - forest, 0.0) * bare_patch;
+    w[M_GRASS] = max(veg - woods, 0.0) * (1.0 - bare_patch);
+    w[M_FOREST] = min(woods, veg);
+    w[M_SOIL] = 1.0 - veg + max(veg - woods, 0.0) * bare_patch;
     for (var i = 0u; i < MAT_COUNT; i++) { w[i] *= 1.0 - sandy; }
     w[M_SAND] = sandy;
     // Barren worlds: stony patches in the regolith.
@@ -969,9 +1073,27 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
             // there (painted leaves are a level's forest floor and keep theirs).
             if (i == M_FOREST) {
                 let c = canopy * (1.0 - saturate(pw[10] / max(w[M_FOREST], 1e-4)));
-                ms[i].detail = mix(ms[i].detail, vec3<f32>(1.0), c);
+                // (A canopy is darker than the crowns' sunlit tops: shade between and inside them.)
+                // Stands of trees lighter and darker over tens of meters, and once crowns are too
+                // small to draw, their speckle.
+                let k = crown_k * c / max(canopy, 1e-4);
+                let stand = 1.0 + (patch_v - 0.5) * 0.5 * macro_fade + (mid_v - 0.5) * 0.6 * clump_fade * (1.0 - k);
+                ms[i].detail = mix(ms[i].detail, vec3<f32>(0.8 * stand), c);
                 ms[i].normal = normalize(mix(ms[i].normal, n_geo, c));
                 ms[i].height = mix(ms[i].height, 0.5, c);
+                // Crowns: sunlit domes, each tree its own shade of green, over dark gaps.
+                if (k > 0.0) {
+                    let dome = normalize(n_geo + vec3<f32>(crown.slope.x, 0.0, crown.slope.y) * 0.5);
+                    // Mostly broadleaf greens; here and there a dark spruce or a pale birch.
+                    let t = crown.tone;
+                    let tree = select(select(mix(vec3<f32>(0.8, 0.86, 0.9), vec3<f32>(1.05, 1.03, 0.9), (t - 0.2) / 0.65),
+                        vec3<f32>(1.2, 1.15, 0.8), t > 0.85), vec3<f32>(0.6, 0.72, 0.8), t < 0.2);
+                    let lit = mix(vec3<f32>(0.3), tree * 0.7 * (1.0 - crown.crevice * 0.5), crown.cover) * (1.0 - crown.shadow * 0.55);
+                    ms[i].normal = normalize(mix(ms[i].normal, dome, k));
+                    ms[i].detail = mix(ms[i].detail, lit, k);
+                    ms[i].occlusion *= mix(1.0, mix(0.6, 1.0 - crown.crevice * 0.4, crown.cover), k);
+                    ms[i].height = mix(ms[i].height, 0.5 + 0.5 * crown.cover, k);
+                }
             }
             // Barren worlds' bare ground is powdery regolith, not the cracked earth of the
             // soil texture: most of its relief and pattern is smoothed away (small craters

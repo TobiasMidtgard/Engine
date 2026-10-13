@@ -52,7 +52,13 @@ everything else (streaming, LOD, colliders, ground queries, prints) follows the 
   `Ground`, which is the terrain itself).
 - **Ground cover from afar.** Climate colors (lush, dry, desert, snow by temperature and
   altitude), woods as dark canopy, meadows and fields in patches a few hundred meters
-  across, worn bare patches, beaches. Mountainsides are a patchwork: grass and woods hold
+  across, worn bare patches, beaches. Natural woods seen from the air (from a few dozen
+  meters out, until a pixel spans a few meters) show their trees: crowns of random size in
+  groups, heaped from leaf clumps, each tree its own green (now and then a dark spruce or a
+  pale birch), casting shadows away from the sun onto the gaps and crowns beside them, and
+  thinning out tree by tree into the meadow at the woods' edges. Further out, stands of
+  trees lighter and darker over tens of meters. (The foliage module draws the real trees
+  near the camera.) Mountainsides are a patchwork: grass and woods hold
   steep ground below the tree line, outcrops stand on spurs with grass and scree in the
   hollows, and weathered rock (iron-stained faces, dark wet gullies) takes over on cliffs
   and high up. From orbit, noise per pixel gives woods, snowfields and coasts natural
@@ -145,7 +151,7 @@ commands.entity(bodies["Moon"]).insert(PlanetTerrain::moon(7).with_radius(1_737_
 
 `examples/terrain_shots.rs` renders the test views headless (lab prints, rain, snow, painted
 ground and a patchwork of painted layers, a meadow tinted the way the showcase paints its
-valley and a natural one at eye height, snow at eye height and over the valley, the range, the coast, the Moon and Mars from orbit)
+valley and a natural one at eye height, snow at eye height and over the valley, woods from the air, the range, the coast, the Moon and Mars from orbit)
 with the game's auto exposure, and `examples/terrain_map.rs` draws a relief map around the
 home pad for tuning shapes.
 
