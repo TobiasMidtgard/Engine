@@ -145,6 +145,13 @@ pub struct MovementProfile {
     /// Riding speed on a level line, m/s (faster downhill, slower uphill).
     pub zip_speed: f32,
 
+    // ------------------------------------------------------------ ladders
+    /// Climb ladders (anything with a
+    /// [`Climbable`](engine_world::locomotion::Climbable)): walk or jump into one.
+    pub ladder: bool,
+    /// Climbing speed, m/s (half as fast again sprinting).
+    pub ladder_speed: f32,
+
     // ------------------------------------------------------------ feedback
     /// Body mass for footsteps and landings, kg.
     pub mass_kg: f32,
@@ -220,6 +227,8 @@ impl MovementProfile {
             grapple_cooldown_secs: 2.5,
             zipline: true,
             zip_speed: 12.0,
+            ladder: true,
+            ladder_speed: 2.6,
             mass_kg: 80.0,
             stride_footsteps: true,
         }
@@ -241,6 +250,7 @@ impl MovementProfile {
             dash_recharge_secs: 2.0,
             dash_exit_speed: 5.0,
             grapple: false,
+            ladder_speed: 1.8,
             ..Self::pilot()
         }
     }
