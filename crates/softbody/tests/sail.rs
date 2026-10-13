@@ -2,11 +2,14 @@
 //! body that carries it as `ApplyImpulse`, high up, so it also heels the boat. No physics
 //! backend runs here, so the boat stays put and the impulses can be summed.
 
+use std::sync::Arc;
+
 use engine_core::prelude::*;
+use engine_core::registry::call_api;
 use engine_core::time::{FixedTime, TimeSource};
 use engine_softbody::{Cloth, SoftBodyPlugin, SoftBodySim, SoftMaterial};
-use engine_world::WeatherState;
 use engine_world::physics::{ApplyImpulse, RigidBody};
+use engine_world::{Water, WaterQuery, WaterSample, WeatherState};
 
 /// Impulses each entity received, while `on`.
 #[derive(Resource, Default)]
@@ -81,4 +84,58 @@ fn a_sail_pushes_and_heels_the_boat_that_carries_it() {
     assert!(push.y < 0.0 && push.y > -60.0, "push {push}");
     // It pushes about 2.5 m above the boat's center: the boat heels to leeward (about −Z).
     assert!(heel.z < -1.5 * push.x, "heel {heel} for push {push}");
+}
+
+/// Still water 5 m deep everywhere.
+struct Pond;
+
+impl WaterQuery for Pond {
+    fn sample(&self, _p: DVec3) -> Option<WaterSample> {
+        Some(WaterSample {
+            surface_height: 0.0,
+            depth: 5.0,
+            velocity: Vec3::ZERO,
+            normal: Vec3::Y,
+        })
+    }
+}
+
+#[test]
+fn sailboat_home_sends_a_dinghy_back_to_its_mooring() {
+    let mut app = App::new();
+    app.add_plugins((engine_world::WorldPlugin, SoftBodyPlugin));
+    app.world
+        .resource_mut::<Time>()
+        .set_source(TimeSource::Manual {
+            step_secs: 1.0 / 60.0,
+        });
+    app.world.resource_mut::<FixedTime>().set_hz(60.0);
+    app.insert_resource(Water(Arc::new(Pond)));
+    let home = DVec3::new(10.0, 0.0, -5.0);
+    app.add_systems(Startup, move |mut commands: Commands| {
+        engine_softbody::demo::spawn_sailboat(&mut commands, home, 22.0);
+    });
+    app.update_n(3);
+    let mut boats = app
+        .world
+        .query_filtered::<Entity, With<engine_softbody::demo::sailboat::Helm>>();
+    let boat = boats.single(&app.world).expect("one dinghy");
+
+    // Out on its lane (afloat, not lost), it stays where it is...
+    let away = home + DVec3::new(8.0, 0.0, 3.0);
+    app.world.get_mut::<Transform>(boat).unwrap().translation = away;
+    app.update();
+    let at = app.world.get::<Transform>(boat).unwrap().translation;
+    assert!((at - away).length() < 1.0, "left its lane on its own: {at}");
+    // ...until it is sent home.
+    let reply = call_api(
+        &mut app.world,
+        "softbody.sailboat_home",
+        serde_json::json!({}),
+    )
+    .unwrap();
+    assert_eq!(reply["boats"], 1);
+    app.update();
+    let at = app.world.get::<Transform>(boat).unwrap().translation;
+    assert!((at - home).length() < 0.05, "not back at its mooring: {at}");
 }
