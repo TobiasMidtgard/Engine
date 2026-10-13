@@ -16,6 +16,13 @@
 //!
 //! Mipmaps are generated on the CPU (loaded files: on the loading thread; images made in code:
 //! when first uploaded), averaging in linear light for sRGB images.
+//!
+//! Releasing pixels: with `RenderSettings::release_image_pixels` the renderer frees an image's
+//! `data` and `mips` once it has uploaded the image and the image has stayed unchanged for
+//! [`RELEASE_AFTER_FRAMES`](crate::image_cache::RELEASE_AFTER_FRAMES) frames; the GPU copy is
+//! then the only one. Width, height, format and flags stay, [`Image::is_released`] turns true,
+//! and assigning new `data` uploads the image again. Set [`Image::keep_pixels`] on images that
+//! code reads on the CPU or uploads itself.
 
 use engine_assets::{Asset, AssetLoader, LoadContext};
 use serde::{Deserialize, Serialize};
@@ -42,6 +49,9 @@ impl PixelFormat {
 
 /// A 2D texture on the CPU. An asset (`Assets<Image>`); the renderer uploads it when a
 /// material uses it and re-uploads it when its version changes.
+///
+/// With `RenderSettings::release_image_pixels` the renderer may free `data` and `mips` after
+/// uploading the image (see the module docs); [`Image::keep_pixels`] opts an image out.
 #[derive(Clone, PartialEq)]
 pub struct Image {
     /// Width in pixels.
@@ -60,6 +70,12 @@ pub struct Image {
     /// Mip levels 1.. (each half the size of the previous, down to 1×1). Empty means "generate
     /// on upload" when `mipmaps` is set.
     pub mips: Vec<Vec<u8>>,
+    /// Never free this image's pixels after uploading it, even with
+    /// `RenderSettings::release_image_pixels` (default false). Set it on images that code reads
+    /// back on the CPU (`data`, [`Image::pixel`]), writes in place less often than every couple
+    /// of seconds, or uploads to the GPU itself from the pixels instead of through
+    /// `GpuShared::image_texture`.
+    pub keep_pixels: bool,
 }
 
 impl Asset for Image {}
@@ -73,6 +89,8 @@ impl std::fmt::Debug for Image {
             .field("srgb", &self.srgb)
             .field("mipmaps", &self.mipmaps)
             .field("mip_levels", &(self.mips.len() + 1))
+            .field("keep_pixels", &self.keep_pixels)
+            .field("released", &self.is_released())
             .finish()
     }
 }
@@ -102,6 +120,7 @@ impl Image {
             srgb,
             mipmaps: true,
             mips: Vec::new(),
+            keep_pixels: false,
         }
     }
 
@@ -127,6 +146,7 @@ impl Image {
             srgb: false,
             mipmaps: true,
             mips: Vec::new(),
+            keep_pixels: false,
         }
     }
 
@@ -199,11 +219,35 @@ impl Image {
         ((self.width >> level).max(1), (self.height >> level).max(1))
     }
 
+    /// True once the renderer has freed the pixels (`data` and `mips`) after uploading them
+    /// (`RenderSettings::release_image_pixels`): the GPU copy is the only one left. Assigning new
+    /// `data` makes the image whole again (and uploads it again).
+    pub fn is_released(&self) -> bool {
+        self.data.is_empty()
+    }
+
+    /// Bytes of pixels held on the CPU: level 0 plus the stored mips (0 once released).
+    pub fn pixel_bytes(&self) -> usize {
+        self.data.len() + self.mips.iter().map(Vec::len).sum::<usize>()
+    }
+
+    /// Free `data` and `mips` (keeping the size, format and flags); returns the bytes freed.
+    pub(crate) fn release_pixels(&mut self) -> usize {
+        let bytes = self.pixel_bytes();
+        self.data = Vec::new();
+        self.mips = Vec::new();
+        bytes
+    }
+
     /// RGBA8 pixel at (x, y) of level 0 (half-float images are converted, clamped to 0..1).
+    /// Transparent black once the pixels were released ([`Image::is_released`]).
     pub fn pixel(&self, x: u32, y: u32) -> [u8; 4] {
-        let i = (y.min(self.height - 1) as usize * self.width as usize
-            + x.min(self.width - 1) as usize)
+        let i = (y.min(self.height.max(1) - 1) as usize * self.width as usize
+            + x.min(self.width.max(1) - 1) as usize)
             * self.format.bytes_per_pixel();
+        if i + self.format.bytes_per_pixel() > self.data.len() {
+            return [0; 4];
+        }
         match self.format {
             PixelFormat::Rgba8 => [
                 self.data[i],
@@ -228,9 +272,14 @@ impl Image {
     }
 
     /// Compute mip levels 1.. without storing them. `srgb` chooses whether RGB is averaged in
-    /// linear light (sRGB-encoded data) or as-is (linear data).
+    /// linear light (sRGB-encoded data) or as-is (linear data). Empty when `data` is shorter
+    /// than level 0 (a released image, see [`Image::is_released`]).
     pub fn mip_chain(&self, srgb: bool) -> Vec<Vec<u8>> {
         let mut out: Vec<Vec<u8>> = Vec::new();
+        let level0 = self.width as usize * self.height as usize * self.format.bytes_per_pixel();
+        if self.data.len() < level0 {
+            return out;
+        }
         let (mut w, mut h) = (self.width, self.height);
         let mut prev: &[u8] = &self.data;
         let mut level = 1;
@@ -484,6 +533,32 @@ mod tests {
         let mut empty = Image::new(1, 1, vec![0; 4], false);
         empty.width = 0;
         assert!(!empty.is_valid());
+    }
+
+    #[test]
+    fn released_images_keep_their_shape_and_cope_with_reads() {
+        let mut img = Image::checker(8, 2, [255, 0, 0, 255], [0, 0, 255, 255]);
+        img.generate_mips();
+        let bytes = (64 + 16 + 4 + 1) * 4;
+        assert_eq!(img.pixel_bytes(), bytes);
+        assert!(!img.is_released());
+        assert_eq!(img.release_pixels(), bytes);
+        assert!(img.is_released());
+        assert_eq!(
+            (img.width, img.height, img.format),
+            (8, 8, PixelFormat::Rgba8)
+        );
+        assert!(img.srgb && img.mipmaps && !img.keep_pixels);
+        assert_eq!(img.pixel_bytes(), 0);
+        assert_eq!(img.pixel(1, 1), [0; 4]);
+        assert!(img.mip_chain(true).is_empty());
+        img.generate_mips();
+        assert!(img.mips.is_empty());
+        assert!(!img.is_valid());
+        assert!(format!("{img:?}").contains("released: true"));
+        // New pixels make it whole again.
+        img.data = vec![9; 8 * 8 * 4];
+        assert!(!img.is_released() && img.is_valid());
     }
 
     #[test]
