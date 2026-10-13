@@ -261,6 +261,13 @@ pub trait RenderFeature: Send + Sync + 'static {
         FeatureStats::default()
     }
 
+    /// Virtual geometry clusters the camera drew (their triangles are in `stats().triangles`).
+    /// Kept out of `FeatureStats` so features in other crates can keep building it field by
+    /// field.
+    fn clusters_drawn(&self) -> u32 {
+        0
+    }
+
     /// Optional JSON describing the feature's state (for `render.stats`).
     fn describe(&self) -> serde_json::Value {
         serde_json::Value::Null

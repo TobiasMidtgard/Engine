@@ -73,6 +73,9 @@ pub struct RenderStats {
     pub instances: u32,
     pub triangles: u64,
     pub culled: u32,
+    /// Virtual geometry clusters drawn by the camera (counted on the GPU a few frames ago).
+    #[serde(default)]
+    pub clusters: u32,
     pub point_lights: u32,
     pub ev100: f32,
     pub width: u32,
@@ -1099,6 +1102,7 @@ impl Renderer {
             d.set("render.draw_calls", stats.draw_calls as f64);
             d.set("render.instances", stats.instances as f64);
             d.set("render.triangles", stats.triangles as f64);
+            d.set("render.clusters", stats.clusters as f64);
             d.set("render.ev100", stats.ev100 as f64);
             if let Some(ev) = self.meter.measured_ev100 {
                 d.set("render.ev100_metered", ev as f64);
@@ -1157,12 +1161,14 @@ impl Renderer {
 
     fn collect_stats(&self, view: &ViewData, started: Instant) -> RenderStats {
         let mut total = FeatureStats::default();
+        let mut clusters = 0;
         for f in &self.features {
             let s = f.stats();
             total.draw_calls += s.draw_calls;
             total.instances += s.instances;
             total.triangles += s.triangles;
             total.culled += s.culled;
+            clusters += f.clusters_drawn();
         }
         RenderStats {
             cpu_ms: started.elapsed().as_secs_f32() * 1000.0,
@@ -1170,6 +1176,7 @@ impl Renderer {
             instances: total.instances,
             triangles: total.triangles,
             culled: total.culled,
+            clusters,
             point_lights: view.point_lights.len() as u32,
             ev100: view.ev100,
             width: self.targets.width,
@@ -1193,6 +1200,7 @@ impl Renderer {
                     "instances": s.instances,
                     "triangles": s.triangles,
                     "culled": s.culled,
+                    "clusters": f.clusters_drawn(),
                     "state": f.describe(),
                 })
             })

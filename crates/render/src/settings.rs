@@ -54,6 +54,11 @@ pub enum DebugView {
     /// Screen-space global illumination: the light bounced onto each surface from nearby
     /// surfaces (before it is multiplied by the surface's color).
     IndirectLight,
+    /// Virtual geometry: every cluster in its own color (other meshes gray).
+    Clusters,
+    /// Virtual geometry: each cluster's level of detail, from blue (full detail) through cyan,
+    /// green, yellow, orange, red and magenta to white (7 or more halvings).
+    ClusterLevels,
 }
 
 /// Renderer-wide quality and look settings.
@@ -129,6 +134,20 @@ pub struct RenderSettings {
     pub night_exposure_bias: f32,
     /// 0..1 loss of color in very dark areas (scotopic vision: moonlight looks blue-gray).
     pub night_desaturation: f32,
+    /// Virtual geometry: dense opaque meshes are drawn as clusters whose level of detail and
+    /// culling are picked on the GPU every frame (see `virtual_geometry`). Off = every mesh
+    /// takes the regular instanced path.
+    pub virtual_geometry: bool,
+    /// Meshes with at least this many triangles take the cluster path. Smaller ones (props,
+    /// debris, fragments) are cheaper instanced; `MeshRenderer::virtual_geometry = false` keeps
+    /// a dense mesh off it too.
+    pub virtual_geometry_min_triangles: u32,
+    /// Largest geometric error a cluster may show on screen, pixels (lower = more triangles).
+    pub cluster_error_px: f32,
+    /// The same for shadow maps, in shadow map texels (cascade texels are much larger than
+    /// screen pixels, so shadows use coarser clusters than the camera). The default of 2 halves
+    /// the shadow triangles of 1 with no visible change under the shadow filter.
+    pub cluster_shadow_error_texels: f32,
 }
 
 impl Default for RenderSettings {
@@ -168,6 +187,10 @@ impl Default for RenderSettings {
             sky_occlusion_size: 512,
             night_exposure_bias: 2.5,
             night_desaturation: 0.7,
+            virtual_geometry: true,
+            virtual_geometry_min_triangles: 50_000,
+            cluster_error_px: 1.0,
+            cluster_shadow_error_texels: 2.0,
         }
     }
 }

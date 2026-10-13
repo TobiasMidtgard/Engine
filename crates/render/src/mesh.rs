@@ -420,6 +420,81 @@ pub fn uv_sphere(radius: f32, segments: u32) -> Mesh {
     m
 }
 
+/// Sphere made by subdividing an icosahedron `subdivisions` times: evenly sized triangles
+/// everywhere (no poles), `20 · 4^subdivisions` of them, so it is a good base for dense
+/// procedural shapes such as rocks and asteroids (displace the vertices, then
+/// [`Mesh::compute_normals`]). Every vertex is shared by its triangles. Texture coordinates are
+/// spherical (u around +Y, v from the top) and wrap without a seam split, so a texture smears
+/// across one meridian: use [`uv_sphere`] for textured spheres.
+pub fn icosphere(radius: f32, subdivisions: u32) -> Mesh {
+    let t = (1.0 + 5f32.sqrt()) * 0.5;
+    let mut points: Vec<Vec3> = [
+        (-1.0, t, 0.0),
+        (1.0, t, 0.0),
+        (-1.0, -t, 0.0),
+        (1.0, -t, 0.0),
+        (0.0, -1.0, t),
+        (0.0, 1.0, t),
+        (0.0, -1.0, -t),
+        (0.0, 1.0, -t),
+        (t, 0.0, -1.0),
+        (t, 0.0, 1.0),
+        (-t, 0.0, -1.0),
+        (-t, 0.0, 1.0),
+    ]
+    .iter()
+    .map(|&(x, y, z)| Vec3::new(x, y, z).normalize())
+    .collect();
+    let mut faces: Vec<[u32; 3]> = vec![
+        [0, 11, 5],
+        [0, 5, 1],
+        [0, 1, 7],
+        [0, 7, 10],
+        [0, 10, 11],
+        [1, 5, 9],
+        [5, 11, 4],
+        [11, 10, 2],
+        [10, 7, 6],
+        [7, 1, 8],
+        [3, 9, 4],
+        [3, 4, 2],
+        [3, 2, 6],
+        [3, 6, 8],
+        [3, 8, 9],
+        [4, 9, 5],
+        [2, 4, 11],
+        [6, 2, 10],
+        [8, 6, 7],
+        [9, 8, 1],
+    ];
+    for _ in 0..subdivisions.min(10) {
+        let mut midpoints: std::collections::HashMap<(u32, u32), u32> =
+            std::collections::HashMap::with_capacity(faces.len() * 3 / 2);
+        let mut mid = |a: u32, b: u32, points: &mut Vec<Vec3>| {
+            *midpoints.entry((a.min(b), a.max(b))).or_insert_with(|| {
+                points.push((points[a as usize] + points[b as usize]).normalize());
+                points.len() as u32 - 1
+            })
+        };
+        let mut next = Vec::with_capacity(faces.len() * 4);
+        for [a, b, c] in faces {
+            let ab = mid(a, b, &mut points);
+            let bc = mid(b, c, &mut points);
+            let ca = mid(c, a, &mut points);
+            next.extend_from_slice(&[[a, ab, ca], [b, bc, ab], [c, ca, bc], [ab, bc, ca]]);
+        }
+        faces = next;
+    }
+    let vertices = points
+        .iter()
+        .map(|&n| {
+            let uv = Vec2::new(0.5 + n.z.atan2(n.x) / TAU, n.y.clamp(-1.0, 1.0).acos() / PI);
+            Vertex::new(n * radius, n, uv)
+        })
+        .collect();
+    Mesh::new(vertices, faces.into_iter().flatten().collect())
+}
+
 /// Cylinder (or cone when `top_radius` is 0) along +Y, centered on the origin, with caps.
 pub fn cylinder(bottom_radius: f32, top_radius: f32, height: f32, segments: u32) -> Mesh {
     let mut m = Mesh::default();
@@ -645,6 +720,19 @@ mod tests {
             m.vertices
                 .iter()
                 .all(|v| Vec3::from(v.position).distance(corner) > 0.03)
+        );
+    }
+
+    #[test]
+    fn icosphere_is_closed_and_counter_clockwise() {
+        let m = icosphere(2.0, 3);
+        assert_eq!(m.triangle_count(), 20 * 64);
+        assert_eq!(m.vertices.len(), 10 * 64 + 2);
+        check_winding(&m);
+        assert!(
+            m.vertices
+                .iter()
+                .all(|v| (Vec3::from(v.position).length() - 2.0).abs() < 1e-5)
         );
     }
 

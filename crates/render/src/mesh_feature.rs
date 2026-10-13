@@ -22,8 +22,12 @@
 //! Mirrored instances (a transform with a negative determinant, e.g. `scale.x = -1`, common in
 //! glTF files) flip their triangles' winding; they are drawn with clockwise-front pipelines so
 //! back-face culling keeps the outside, as glTF requires.
+//!
+//! Dense opaque meshes (at least `RenderSettings::virtual_geometry_min_triangles`) are drawn
+//! as clusters by [`ClusterRenderer`] once their cluster hierarchy is built, with the same
+//! materials, texture sets and shading (see [`crate::virtual_geometry`]).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use bevy_ecs::prelude::*;
 use bytemuck::{Pod, Zeroable};
@@ -31,7 +35,7 @@ use engine_assets::Assets;
 use engine_core::prelude::*;
 use wgpu::util::DeviceExt;
 
-use crate::components::{MeshRenderer, ResolvedMesh};
+use crate::components::{MeshRenderer, NoVirtualGeometry, ResolvedMesh};
 use crate::features::{
     FeatureStats, FrameContext, GpuShared, GrowBuffer, RenderFeature, RenderPhase,
 };
@@ -41,6 +45,7 @@ use crate::mesh::{Mesh, Vertex};
 use crate::settings::RenderSettings;
 use crate::shadows::{MAX_CASCADES, SKY_OCCLUSION_VIEW};
 use crate::texture::{Image, PixelFormat};
+use crate::virtual_geometry::{ClusterInstance, ClusterRenderer};
 
 /// Per-instance vertex data (locations 4–10 in `mesh.wgsl`, plus 11–13 for the previous
 /// matrix in the mesh feature's own pipelines).
@@ -145,6 +150,8 @@ struct GpuMesh {
     half_extents: Vec3,
     min_y: f32,
     height: f32,
+    /// Last frame the instanced path drew it.
+    last_used: u64,
 }
 
 struct GpuImage {
@@ -208,6 +215,7 @@ type MeshQuery = (
     &'static GlobalTransform,
     &'static MeshRenderer,
     &'static ResolvedMesh,
+    Has<NoVirtualGeometry>,
 );
 
 /// Draws [`MeshRenderer`] entities. Added by `RenderPlugin`.
@@ -255,6 +263,10 @@ pub struct MeshFeature {
     material_data: Vec<GpuMaterial>,
     /// Material handle index → (material buffer slot, texture set id), rebuilt every frame.
     material_index: HashMap<u32, (u32, u32)>,
+    /// Dense meshes drawn as clusters (virtual geometry).
+    clusters: Option<ClusterRenderer>,
+    /// Meshes drawn as clusters this frame.
+    clustered: HashSet<u32>,
     stats: FeatureStats,
 }
 
@@ -295,8 +307,36 @@ impl MeshFeature {
                 half_extents: aabb.half_extents(),
                 min_y: aabb.min.y,
                 height: (aabb.max.y - aabb.min.y).max(1e-3),
+                last_used: self.frame,
             },
         );
+    }
+
+    /// Material buffer slot and texture set id of a material, added to this frame's materials
+    /// on first use.
+    fn material_slot(
+        &mut self,
+        gpu: &GpuShared,
+        handle: u32,
+        material: &StandardMaterial,
+        images: Option<&Assets<Image>>,
+    ) -> (u32, u32) {
+        if let Some(v) = self.material_index.get(&handle) {
+            return *v;
+        }
+        let textures = self.texture_set_for(gpu, material, images);
+        let mut gpu_material = material.to_gpu();
+        // Only claim the slots that have a real image bound (others may still load).
+        let bound = self
+            .texture_sets
+            .get(textures as usize)
+            .and_then(Option::as_ref)
+            .map_or(0, TextureSet::flags);
+        gpu_material.flags[0] = (gpu_material.flags[0] & !TEXTURE_FLAGS) | bound;
+        let slot = self.material_data.len() as u32;
+        self.material_data.push(gpu_material);
+        self.material_index.insert(handle, (slot, textures));
+        (slot, textures)
     }
 
     fn batch(keys: &[BatchKey], first: u32, out: &mut Vec<Batch>) {
@@ -854,6 +894,7 @@ impl RenderFeature for MeshFeature {
         self.free_set_ids.clear();
         self.images.clear();
         self.failed_images.clear();
+        self.clusters = Some(ClusterRenderer::new(gpu, &material_layout, &texture_layout));
         self.material_layout = Some(material_layout);
         self.texture_layout = Some(texture_layout);
         self.sampler = Some(sampler);
@@ -865,12 +906,16 @@ impl RenderFeature for MeshFeature {
         world: &mut World,
         gpu: &GpuShared,
         view: &ViewData,
-        _settings: &RenderSettings,
+        settings: &RenderSettings,
     ) {
         if self.pipelines.is_empty() {
             return;
         }
         self.frame += 1;
+        if let Some(clusters) = &mut self.clusters {
+            clusters.begin_frame(gpu);
+        }
+        self.clustered.clear();
         let mut query = self
             .query
             .take()
@@ -892,7 +937,7 @@ impl RenderFeature for MeshFeature {
 
         let frame = self.frame;
         let prev_origin = self.prev_origin.unwrap_or(view.origin);
-        for (entity, gt, renderer, resolved) in query.iter(world_ref) {
+        for (entity, gt, renderer, resolved, instanced_only) in query.iter(world_ref) {
             if !renderer.visible {
                 continue;
             }
@@ -903,6 +948,45 @@ impl RenderFeature for MeshFeature {
             if version == 0 {
                 continue;
             }
+            let material_handle =
+                material_assets.map_or(resolved.material, |m| m.canonical(resolved.material));
+            let material = material_assets
+                .and_then(|m| m.get(material_handle))
+                .unwrap_or(&default_material);
+
+            // Dense opaque meshes: clusters, culled and picked on the GPU, once built (until
+            // then they are drawn below as usual).
+            let min_triangles = settings.virtual_geometry_min_triangles as usize;
+            if settings.virtual_geometry
+                && !instanced_only
+                && material.alpha_mode == AlphaMode::Opaque
+                && material.wind_sway <= 0.0
+                && let Some(mesh) = mesh_assets.get(mesh_handle)
+                && mesh.indices.len() / 3 >= min_triangles.max(1)
+                && let Some(clusters) = &mut self.clusters
+                && clusters.ready(mesh_index, version, mesh)
+            {
+                let (material_slot, textures) =
+                    self.material_slot(gpu, material_handle.index(), material, image_assets);
+                let prev_gt = match self.previous.insert(entity, (*gt, frame)) {
+                    Some((prev, seen)) if seen + 1 == frame => prev,
+                    _ => *gt,
+                };
+                if let Some(clusters) = &mut self.clusters {
+                    clusters.push_instance(ClusterInstance {
+                        mesh: mesh_index,
+                        model: gt.matrix_relative_to(view.origin),
+                        prev_model: prev_gt.matrix_relative_to(prev_origin),
+                        material: material_slot,
+                        textures,
+                        double_sided: material.double_sided,
+                        casts_shadows: shadows && renderer.cast_shadows,
+                    });
+                }
+                self.clustered.insert(mesh_index);
+                continue;
+            }
+
             if self
                 .meshes
                 .get(&mesh_index)
@@ -911,14 +995,10 @@ impl RenderFeature for MeshFeature {
             {
                 self.upload_mesh(&gpu.device, mesh_index, mesh, version);
             }
-            let Some(gpu_mesh) = self.meshes.get(&mesh_index) else {
+            let Some(gpu_mesh) = self.meshes.get_mut(&mesh_index) else {
                 continue;
             };
-            let material_handle =
-                material_assets.map_or(resolved.material, |m| m.canonical(resolved.material));
-            let material = material_assets
-                .and_then(|m| m.get(material_handle))
-                .unwrap_or(&default_material);
+            gpu_mesh.last_used = frame;
 
             let scale = gt.scale().abs().max_element();
             let center_world = gt.transform_point(gpu_mesh.center.as_dvec3());
@@ -933,26 +1013,8 @@ impl RenderFeature for MeshFeature {
                 culled += 1;
                 continue;
             }
-            let (material_slot, textures) = match self.material_index.get(&material_handle.index())
-            {
-                Some(v) => *v,
-                None => {
-                    let textures = self.texture_set_for(gpu, material, image_assets);
-                    let mut gpu_material = material.to_gpu();
-                    // Only claim the slots that have a real image bound (others may still load).
-                    let bound = self
-                        .texture_sets
-                        .get(textures as usize)
-                        .and_then(Option::as_ref)
-                        .map_or(0, TextureSet::flags);
-                    gpu_material.flags[0] = (gpu_material.flags[0] & !TEXTURE_FLAGS) | bound;
-                    let slot = self.material_data.len() as u32;
-                    self.material_data.push(gpu_material);
-                    self.material_index
-                        .insert(material_handle.index(), (slot, textures));
-                    (slot, textures)
-                }
-            };
+            let (material_slot, textures) =
+                self.material_slot(gpu, material_handle.index(), material, image_assets);
             let model = gt.matrix_relative_to(view.origin);
             let prev_gt = match self.previous.insert(entity, (*gt, frame)) {
                 Some((prev, seen)) if seen + 1 == frame => prev,
@@ -988,6 +1050,15 @@ impl RenderFeature for MeshFeature {
         self.prev_origin = Some(view.origin);
         if frame.is_multiple_of(60) {
             self.previous.retain(|_, (_, seen)| *seen + 1 >= frame);
+        }
+        // Meshes now drawn only as clusters don't need their instanced copy.
+        if !self.clustered.is_empty() {
+            let clustered = &self.clustered;
+            self.meshes
+                .retain(|m, g| g.last_used == frame || !clustered.contains(m));
+        }
+        if let Some(clusters) = &mut self.clusters {
+            clusters.end_prepare(gpu, view, settings);
         }
 
         // Order: opaque (by pipeline, texture set, mesh), transparent (back to front).
@@ -1130,7 +1201,19 @@ impl RenderFeature for MeshFeature {
             }
         }
         stats.draw_calls += self.shadow.iter().map(|s| s.len() as u32).sum::<u32>();
+        if let Some(clusters) = &self.clusters {
+            let c = clusters.stats();
+            stats.draw_calls += c.draw_calls;
+            stats.instances += c.instances;
+            stats.triangles += c.triangles;
+        }
         self.stats = stats;
+    }
+
+    fn compute(&mut self, encoder: &mut wgpu::CommandEncoder, _ctx: &FrameContext) {
+        if let Some(clusters) = &mut self.clusters {
+            clusters.encode_culling(encoder);
+        }
     }
 
     fn draw(&self, phase: RenderPhase, pass: &mut wgpu::RenderPass<'_>, _ctx: &FrameContext) {
@@ -1142,19 +1225,27 @@ impl RenderFeature for MeshFeature {
         let (Some(group), Some(instances)) = (&self.material_group, &self.instances) else {
             return;
         };
-        if batches.is_empty() {
+        let clusters = self
+            .clusters
+            .as_ref()
+            .filter(|c| phase == RenderPhase::Opaque && c.is_active());
+        if batches.is_empty() && clusters.is_none() {
             return;
         }
         pass.set_bind_group(1, group, &[]);
         pass.set_vertex_buffer(1, instances.buffer.slice(..));
         self.draw_batches(pass, batches, |p| self.pipelines.get(p as usize), |_| true);
+        if let Some(clusters) = clusters {
+            clusters.draw_scene(pass, |set| self.texture_group(set));
+        }
     }
 
     fn draw_prepass(&self, pass: &mut wgpu::RenderPass<'_>, _ctx: &FrameContext) {
         let (Some(group), Some(instances)) = (&self.material_group, &self.instances) else {
             return;
         };
-        if self.opaque.is_empty() {
+        let clusters = self.clusters.as_ref().filter(|c| c.is_active());
+        if self.opaque.is_empty() && clusters.is_none() {
             return;
         }
         pass.set_bind_group(1, group, &[]);
@@ -1165,6 +1256,9 @@ impl RenderFeature for MeshFeature {
             |p| self.prepass_pipelines.get(p as usize),
             |_| true,
         );
+        if let Some(clusters) = clusters {
+            clusters.draw_prepass(pass, |set| self.texture_group(set));
+        }
     }
 
     fn draw_shadow(&self, pass: &mut wgpu::RenderPass<'_>, cascade: usize, _ctx: &FrameContext) {
@@ -1172,7 +1266,8 @@ impl RenderFeature for MeshFeature {
             return;
         };
         let batches = &self.shadow[cascade];
-        if batches.is_empty() {
+        let clusters = self.clusters.as_ref().filter(|c| c.is_active());
+        if batches.is_empty() && clusters.is_none() {
             return;
         }
         pass.set_bind_group(1, group, &[]);
@@ -1182,10 +1277,17 @@ impl RenderFeature for MeshFeature {
             _ => self.shadow_pipeline.as_ref(),
         };
         self.draw_batches(pass, batches, pipeline_for, |p| p == SHADOW_MASKED);
+        if let Some(clusters) = clusters {
+            clusters.draw_shadow(pass, cascade);
+        }
     }
 
     fn stats(&self) -> FeatureStats {
         self.stats
+    }
+
+    fn clusters_drawn(&self) -> u32 {
+        self.clusters.as_ref().map_or(0, |c| c.stats().clusters)
     }
 
     fn describe(&self) -> serde_json::Value {
@@ -1197,6 +1299,7 @@ impl RenderFeature for MeshFeature {
             "opaque_batches": self.opaque.len(),
             "transparent_batches": self.transparent.len(),
             "shadow_batches": self.shadow.iter().map(|s| s.len()).collect::<Vec<_>>(),
+            "virtual_geometry": self.clusters.as_ref().map(ClusterRenderer::describe),
         })
     }
 }
