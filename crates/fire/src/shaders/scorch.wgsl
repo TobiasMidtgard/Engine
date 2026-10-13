@@ -59,11 +59,23 @@ fn fs_scorch(in: FullscreenOut) -> @location(0) vec4<f32> {
     // Burnt ground: black char with grey ash flecks.
     var alpha = scorch * mix(0.78, 0.95, mottle) * height_fade;
     var emission = vec3<f32>(0.0);
-    // Coals: a crackle pattern of glowing cracks that slowly breathes.
+    // Coals: the smoldering litter on the ground is a scatter of glowing specks and thin
+    // glowing threads (the creeping edges of the char) that slowly breathe. Only on the ground:
+    // the stalks standing in it are burnt out, not glowing.
     let t = params.ground.z;
-    let crack = fbm2(tp.xz * 2.3 + vec2<f32>(t * 0.05, -t * 0.03), 4);
-    let cracks = smoothstep(0.5, 0.75, crack) * (0.7 + 0.3 * sin(t * 1.7 + crack * 20.0));
-    let coal = glow * cracks * (1.0 - smoothstep(0.0, 0.6, h));
+    let drift = vec2<f32>(t * 0.05, -t * 0.03);
+    let thread_n = fbm2(tp.xz * 2.2 + drift, 3);
+    let threads = 1.0 - smoothstep(0.0, 0.03, abs(thread_n - 0.5));
+    let specks = smoothstep(0.8, 0.92, value_noise2(tp.xz * 18.0 + drift * 4.0));
+    // That detail is a few centimeters across: where a pixel covers more ground than that (far
+    // off, or the ground seen edge-on) it fades to its average glow instead of aliasing into
+    // long red streaks.
+    let ground_m = view_depth(rel) / (frame.proj[1].y * 0.5 * frame.viewport.y)
+        / max(abs(normalize(rel).y), 0.03);
+    let detail = 1.0 - smoothstep(0.012, 0.05, ground_m);
+    let pattern = mix(0.1, max(threads * 0.8, specks), detail);
+    let breathe = 0.7 + 0.3 * sin(t * 1.7 + thread_n * 20.0);
+    let coal = glow * pattern * breathe * (1.0 - smoothstep(0.1, 0.3, h));
     emission += ember_color(900.0 + 300.0 * coal) * glow_exposed(3500.0 * coal * coal, 0.5);
     // Flame base: the burning litter glows under the flames, patchy.
     let patchy = smoothstep(0.3, 0.7, fbm2(tp.xz * 1.7 + vec2<f32>(0.0, -t * 0.4), 3));

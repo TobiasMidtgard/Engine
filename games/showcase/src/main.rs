@@ -71,7 +71,8 @@ fn main() {
         .add_systems(
             Update,
             (camera::fly, places::run_pending, scenery::update_lods).chain(),
-        );
+        )
+        .add_systems(Update, report_assets);
     register_apis(&mut app);
 
     let args: Vec<String> = std::env::args().collect();
@@ -153,8 +154,9 @@ fn setup(
     atmosphere.ground_color = [0.07, 0.13, 0.04];
     // Mountains a few km away should still be in the shadow maps' reach for the valley.
     settings.shadow_distance = settings.shadow_distance.max(400.0);
-    // Clear mountain air: a light valley haze (the weather module drives this later).
-    fog.density = 0.00012;
+    // Clear mountain air: a faint valley haze, about 130 km visibility (3.9 / density), so the
+    // atmosphere gives the distant ranges their blue and the far shadow map their shade.
+    fog.density = 0.00003;
 
     let land = landscape::shared().clone();
     let ground = std::sync::Arc::new(landscape::LandscapeGround::new(land.clone(), &mut surfaces));
@@ -192,6 +194,61 @@ fn setup(
     engine::core::log::info!(
         "showcase world built in {:.1} s",
         t0.elapsed().as_secs_f32()
+    );
+}
+
+/// Log how much memory the meshes and images hold, by owner (the first part of each asset's
+/// key: `vehicles/cars/…` is the vehicles', `trail:planks` the trail's) and the biggest, at
+/// frames 2 and 10 (a tour stop's first and last) and every 600. The renderer keeps a GPU copy
+/// of each as well, in system memory under a software renderer.
+fn report_assets(meshes: Res<Assets<Mesh>>, images: Res<Assets<Image>>, mut frames: Local<u32>) {
+    *frames += 1;
+    if ![2, 10].contains(&*frames) && !frames.is_multiple_of(600) {
+        return;
+    }
+    let vertex = std::mem::size_of::<engine::render::Vertex>();
+    log_assets(&meshes, "meshes", |m| {
+        m.vertices.len() * vertex + m.indices.len() * 4
+    });
+    log_assets(&images, "images", |i| {
+        i.data.len() + i.mips.iter().map(Vec::len).sum::<usize>()
+    });
+}
+
+fn log_assets<T: Asset>(assets: &Assets<T>, what: &str, bytes: impl Fn(&T) -> usize) {
+    const MB: f64 = 1024.0 * 1024.0;
+    let mb = |b: usize| format!("{:.0} MB", b as f64 / MB);
+    let keys: std::collections::HashMap<u32, &str> =
+        assets.keys().map(|(k, h)| (h.index(), k)).collect();
+    let mut sizes: Vec<(usize, u32)> = assets.iter().map(|(h, a)| (bytes(a), h.index())).collect();
+    sizes.sort_unstable_by(|a, b| b.cmp(a));
+    let mut owners: std::collections::HashMap<&str, usize> = Default::default();
+    for (b, i) in &sizes {
+        let owner = keys
+            .get(i)
+            .map_or("unnamed", |k| k.split(['/', ':']).next().unwrap_or(k));
+        *owners.entry(owner).or_default() += b;
+    }
+    let mut owners: Vec<(&str, usize)> = owners.into_iter().filter(|o| o.1 as f64 >= MB).collect();
+    owners.sort_unstable_by_key(|o| std::cmp::Reverse(o.1));
+    let owners: Vec<String> = owners
+        .iter()
+        .map(|(o, b)| format!("{o} {}", mb(*b)))
+        .collect();
+    let biggest: Vec<String> = sizes
+        .iter()
+        .take(12)
+        .map(|(b, i)| match keys.get(i) {
+            Some(k) => format!("{k} {}", mb(*b)),
+            None => format!("#{i} {}", mb(*b)),
+        })
+        .collect();
+    engine::core::log::info!(
+        "memory: {} {what}, {}; by owner: {}; biggest: {}",
+        sizes.len(),
+        mb(sizes.iter().map(|s| s.0).sum()),
+        owners.join(", "),
+        biggest.join(", ")
     );
 }
 

@@ -62,6 +62,61 @@ pub struct Hang {
     /// The body hung from: the ledge (and `normal`) move with it.
     #[serde(skip)]
     pub on: Option<Pin>,
+    /// Going around a corner onto the next face.
+    #[serde(default)]
+    pub corner: Option<Corner>,
+    /// After a corner: a stick still held the old way along the ledge (`.0`) shimmies the new
+    /// way (`.1`), so holding one direction carries on around.
+    #[serde(default)]
+    pub carry: Option<(Vec3, Vec3)>,
+}
+
+impl Hang {
+    pub fn new(top: DVec3, normal: Vec3, on: Option<Pin>) -> Self {
+        Self {
+            top,
+            normal,
+            on,
+            corner: None,
+            carry: None,
+        }
+    }
+}
+
+/// Going around a corner of a ledge: the body follows a curve from the hold on the face hung
+/// from to the hold on the next face, an outside corner (the next face turned toward the
+/// shimmy) or an inside one (a wall across the way).
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct Corner {
+    /// The curve of the body's center: start, bend, end (a quadratic Bézier).
+    pub from: DVec3,
+    pub via: DVec3,
+    pub to: DVec3,
+    /// The ledge and its normal before the corner.
+    pub from_top: DVec3,
+    pub from_normal: Vec3,
+    /// The ledge and its normal on the next face.
+    pub top: DVec3,
+    pub normal: Vec3,
+    /// Along the next face, away from the corner.
+    pub along: Vec3,
+    /// The way the shimmy came (for [`Hang::carry`]).
+    pub came: Vec3,
+    /// The next face's body.
+    #[serde(skip)]
+    pub wall: Option<Entity>,
+    /// Progress, 0..1.
+    pub t: f32,
+    /// How long the whole turn takes, s.
+    pub secs: f32,
+}
+
+impl Corner {
+    /// The body's center at progress `t`.
+    pub fn at(&self, t: f32) -> DVec3 {
+        let t = t.clamp(0.0, 1.0) as f64;
+        self.from * ((1.0 - t) * (1.0 - t)) + self.via * (2.0 * t * (1.0 - t)) + self.to * (t * t)
+    }
 }
 
 /// A grapple hook: flying out to where it was fired, or bitten in and reeling the character
@@ -89,6 +144,24 @@ pub struct Grapple {
     /// How fast the anchor moves (with its body), m/s in the character's own seconds.
     #[serde(default)]
     pub anchor_velocity: Vec3,
+}
+
+/// A zip line being ridden (see [`crate::zipline`]).
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct Zip {
+    /// The line's entity (the one with the [`Zipline`](crate::zipline::Zipline)).
+    #[serde(skip)]
+    pub line: Option<Entity>,
+    /// Where along the line the hand is: 0 at its near anchor, 1 at the far one.
+    pub s: f32,
+    /// +1 riding toward the far anchor, −1 toward the near one.
+    pub dir: f32,
+    /// Speed along the cable, m/s (own time).
+    pub speed: f32,
+    /// The way the rider travels, unit (world, down or up the slope).
+    pub heading: Vec3,
+    /// Own seconds on the line.
+    pub secs: f32,
 }
 
 /// Ask the movement module to dash. Combat uses this for dash-strikes; gameplay can use it
@@ -155,6 +228,8 @@ pub struct Mover {
     pub hang: Option<Hang>,
     /// The grapple hook, while it flies or holds.
     pub grapple: Option<Grapple>,
+    /// The zip line ridden.
+    pub zip: Option<Zip>,
     /// The capsule is shrunk (crouching or sliding).
     pub crouched: bool,
     /// Remaining dodge invulnerability, s (own time).
@@ -179,6 +254,11 @@ pub struct Mover {
     pub(crate) grab_cooldown: f32,
     /// No grapple shots until this runs out, s.
     pub(crate) grapple_cooldown: f32,
+    /// No catching a zip line until this runs out, s.
+    pub(crate) zip_cooldown: f32,
+    /// The zip line last let go of: not caught again before touching the ground.
+    #[serde(skip)]
+    pub(crate) zip_last: Option<Entity>,
     pub(crate) last_wall: Option<WallContact>,
     pub(crate) stand_height: f32,
     pub(crate) stride: f32,
@@ -215,6 +295,7 @@ impl Default for Mover {
             mantle: None,
             hang: None,
             grapple: None,
+            zip: None,
             crouched: false,
             evade_secs: 0.0,
             disabled: false,
@@ -227,6 +308,8 @@ impl Default for Mover {
             slide_cooldown: 0.0,
             grab_cooldown: 0.0,
             grapple_cooldown: 0.0,
+            zip_cooldown: 0.0,
+            zip_last: None,
             last_wall: None,
             stand_height: 0.0,
             stride: 0.0,
@@ -286,8 +369,8 @@ impl Mover {
         self.grapple_cooldown
     }
 
-    /// Teleport bookkeeping: clear velocity and any dash, mantle, ledge hang, grapple or
-    /// wall-run.
+    /// Teleport bookkeeping: clear velocity and any dash, mantle, ledge hang, grapple, zip
+    /// line or wall-run.
     pub fn reset_motion(&mut self) {
         self.velocity = Vec3::ZERO;
         self.knockback = Vec3::ZERO;
@@ -297,6 +380,9 @@ impl Mover {
         self.grapple = None;
         self.pending_grapple = None;
         self.grapple_cooldown = 0.0;
+        self.zip = None;
+        self.zip_cooldown = 0.0;
+        self.zip_last = None;
         self.wall = None;
         self.last_wall = None;
         self.pending_dash = None;

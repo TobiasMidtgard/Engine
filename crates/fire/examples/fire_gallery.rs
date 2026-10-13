@@ -5,13 +5,14 @@
 //! cargo run --release -p engine_fire --example fire_gallery -- [out_dir] [views] [width] [height]
 //! ```
 //!
-//! The demo starts once and time only runs forward: each stop is taken a set number of seconds
-//! after the demo's first fire was lit (which is already `FireDemo::warmup_secs` along), with
-//! the sun and moon where the view's `hour` puts them (the showcase's day cycle: latitude 35°,
-//! midsummer). `views` is a comma-separated subset of the stop keys (default: every
+//! Like the showcase tour, each stop starts a fresh fire its view's `at_secs` along
+//! (`fire.demo`) and watches it for the view's `warmup_secs`, in the showcase's default wind
+//! (5 m/s from 250°), with the sun and moon where the view's `hour` puts them (the showcase's
+//! sky: latitude 35°, the March equinox). `views` is a comma-separated subset of the stop keys (default: every
 //! `demo::VIEWS` entry plus `fire_before`, the meadow before the fire reaches the trees);
-//! the close-ups `detail_*` are listed in `DETAILS`. Needs a GPU or a software Vulkan driver
-//! (lavapipe). Time runs in fixed 1/30 s steps, so the pictures are the same every run.
+//! the close-ups `detail_*` are listed in `DETAILS`; `key@secs` takes a view at another moment.
+//! Needs a GPU or a software Vulkan driver (lavapipe). Time runs in fixed 1/30 s steps, so the
+//! pictures are the same every run.
 
 use engine_core::prelude::*;
 use engine_core::time::TimeSource;
@@ -32,6 +33,8 @@ const DETAILS: &[DemoView] = &[
         eye: [24.0, 3.2, -16.0],
         target: [0.0, 2.0, 4.0],
         hour: 17.4,
+        at_secs: 10.0,
+        warmup_secs: 0.0,
     },
     DemoView {
         key: "detail_grass",
@@ -39,6 +42,8 @@ const DETAILS: &[DemoView] = &[
         eye: [-2.0, 0.9, -15.5],
         target: [-6.0, 0.4, -9.0],
         hour: 17.0,
+        at_secs: 1.0,
+        warmup_secs: 0.0,
     },
     DemoView {
         key: "detail_tree",
@@ -46,6 +51,8 @@ const DETAILS: &[DemoView] = &[
         eye: [9.5, 1.8, 1.5],
         target: [3.0, 3.6, 7.5],
         hour: 16.0,
+        at_secs: 1.0,
+        warmup_secs: 0.0,
     },
     DemoView {
         key: "detail_shed",
@@ -53,6 +60,8 @@ const DETAILS: &[DemoView] = &[
         eye: [9.0, 1.7, -9.0],
         target: [4.0, 1.3, -3.0],
         hour: 16.0,
+        at_secs: 1.0,
+        warmup_secs: 0.0,
     },
     DemoView {
         key: "detail_bales",
@@ -60,6 +69,8 @@ const DETAILS: &[DemoView] = &[
         eye: [17.0, 1.6, -0.5],
         target: [21.0, 0.6, 4.5],
         hour: 16.0,
+        at_secs: 1.0,
+        warmup_secs: 0.0,
     },
     DemoView {
         key: "detail_road",
@@ -67,6 +78,8 @@ const DETAILS: &[DemoView] = &[
         eye: [11.0, 1.7, -24.0],
         target: [15.0, 0.0, -17.0],
         hour: 16.0,
+        at_secs: 1.0,
+        warmup_secs: 0.0,
     },
     DemoView {
         key: "detail_campfire",
@@ -74,6 +87,8 @@ const DETAILS: &[DemoView] = &[
         eye: [-23.7, 1.05, -22.4],
         target: [-22.0, 0.2, -20.5],
         hour: 16.0,
+        at_secs: 1.0,
+        warmup_secs: 0.0,
     },
     DemoView {
         key: "detail_burnt",
@@ -81,24 +96,10 @@ const DETAILS: &[DemoView] = &[
         eye: [10.0, 2.2, -8.0],
         target: [1.0, 2.6, 6.0],
         hour: 16.5,
+        at_secs: 150.0,
+        warmup_secs: 0.0,
     },
 ];
-
-/// Seconds after the demo starts at which each stop is taken (stops run in this order).
-fn stop_time(key: &str) -> f32 {
-    match key {
-        "fire_before" => 1.0,
-        "detail_grass" | "detail_tree" | "detail_shed" | "detail_bales" | "detail_road"
-        | "detail_campfire" => 1.0,
-        "fire_front" => 4.0,
-        "fire_campfire" => 6.0,
-        "fire_trees" => 45.0,
-        "fire_plume" => 55.0,
-        "fire_night" => 25.0,
-        "detail_burnt" => 80.0,
-        _ => 10.0,
-    }
-}
 
 /// Unit vector toward a body on the sky at `hour` with declination `decl` (the showcase's
 /// climate: latitude 35°, east = −X, north = +Z).
@@ -147,6 +148,9 @@ fn main() {
             step_secs: 1.0 / 30.0,
         });
     app.add_plugins((RenderPlugin, WorldPlugin, FirePlugin));
+    // The showcase's default weather: 5 m/s from 250° (blowing toward −X, a little +Z).
+    let from = 250.0f32.to_radians();
+    app.world.resource_mut::<WeatherState>().wind = Vec3::new(from.sin(), 0.0, -from.cos()) * 5.0;
 
     let w = &mut app.world;
     // Stand-in for the showcase's land around the demo: dry pasture litter with a trodden
@@ -246,9 +250,9 @@ fn main() {
     app.update_n(4);
     eprintln!("built the demo in {:.1} s", started.elapsed().as_secs_f32());
 
-    // Stops: (view, seconds, file name). `key@secs` takes a view at another time.
+    // Stops: (view, seconds into the fire, file name).
     let all = || demo::VIEWS.iter().chain(DETAILS.iter());
-    let mut views: Vec<(&DemoView, f32, String)> = match &only {
+    let views: Vec<(&DemoView, f32, String)> = match &only {
         Some(keys) => keys
             .iter()
             .filter_map(|k| {
@@ -259,27 +263,28 @@ fn main() {
                 let view = all().find(|v| v.key == key)?;
                 Some(match at {
                     Some(t) => (view, t, format!("{key}_{t:.0}s")),
-                    None => (view, stop_time(key), key.to_string()),
+                    None => (view, view.at_secs, key.to_string()),
                 })
             })
             .collect(),
         None => all()
             .filter(|v| demo::VIEWS.iter().any(|d| d.key == v.key) || v.key == "fire_before")
-            .map(|v| (v, stop_time(v.key), v.key.to_string()))
+            .map(|v| (v, v.at_secs, v.key.to_string()))
             .collect(),
     };
-    views.sort_by(|a, b| a.1.total_cmp(&b.1));
-    let mut now = 0.0f32;
     for (view, at, file) in views {
         let t0 = std::time::Instant::now();
-        if at > now {
-            app.update_n(((at - now) * 30.0).round() as usize);
-            now = at;
-        }
+        engine_core::registry::call_api(
+            &mut app.world,
+            "fire.demo",
+            serde_json::json!({ "at_secs": at }),
+        )
+        .expect("fire.demo");
+        app.update_n(1 + (view.warmup_secs * 30.0).round() as usize);
         let sim_secs = t0.elapsed().as_secs_f32();
 
-        // Sun and moon for the hour (day 172, moon phase 0.42 as in the showcase's sky).
-        let decl = 23.44f32.to_radians();
+        // Sun and moon for the hour (day 80, moon phase 0.42 as in the showcase's sky).
+        let decl = 0.0f32;
         let sun_dir = celestial_direction(view.hour, decl);
         let elevation = sun_dir.y.asin().to_degrees();
         // The showcase's sky fades the sun out over nautical twilight and lets its planet's
@@ -321,13 +326,19 @@ fn main() {
             Transform::default().looking_at(-moon_dir.as_dvec3(), Vec3::Y);
         let eye = ORIGIN + DVec3::from_array(view.eye);
         let target = ORIGIN + DVec3::from_array(view.target);
+        // A cut the renderer sees as one: it keeps the last picture's history (anti-aliasing,
+        // fog) across a jump of less than 25 m, and the stops are closer together than that,
+        // so the camera looks from far off for a frame first. Without it, a stop smears
+        // ghosts of the one before over its sky.
+        *app.world.get_mut::<Transform>(camera).expect("camera") =
+            Transform::from_translation(eye + DVec3::Y * 1000.0).looking_at(target, Vec3::Y);
+        let empty = swap_render(&mut app, render.take().expect("render schedule"));
+        app.update();
         *app.world.get_mut::<Transform>(camera).expect("camera") =
             Transform::from_translation(eye).looking_at(target, Vec3::Y);
 
         // Draw a few frames for exposure, shadows and the environment map to settle.
-        let empty = swap_render(&mut app, render.take().expect("render schedule"));
         app.update_n(6);
-        now += 6.0 / 30.0;
         if let Some(d) = app.world.get_resource::<RenderDisabled>() {
             eprintln!("no GPU: {}", d.0);
             return;
@@ -353,8 +364,9 @@ fn main() {
         eprintln!("  at the target: {sample}");
         match capture_now(&mut app.world, &path) {
             Ok(_) => eprintln!(
-                "{path}: {} at +{at:.0} s, {status}, EV {:.1} (simulated in {sim_secs:.1} s, {:.1} s in all)",
+                "{path}: {} at +{:.0} s, {status}, EV {:.1} (simulated in {sim_secs:.1} s, {:.1} s in all)",
                 view.name,
+                at + view.warmup_secs,
                 app.world.resource::<engine_render::RenderStats>().ev100,
                 t0.elapsed().as_secs_f32()
             ),

@@ -3,7 +3,7 @@
 //! passes every check, and fails the right checks when one of its deliberate [`Bugs`] is
 //! switched on. It also shows the minimum a replacement physics module has to do.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, RwLock};
 
 use engine_core::math::{DVec3, Quat, Vec3};
@@ -33,6 +33,17 @@ struct Bugs {
     ignores_mass_overrides: bool,
     /// Step every body with the world's delta, ignoring its `LocalTimeScale`.
     ignores_body_time_scale: bool,
+    /// Leave a kinematic body without `Velocity` where it was first seen, whatever gameplay
+    /// sets its `Transform` to (what the Rapier backend did before PR #189).
+    ignores_kinematic_transforms: bool,
+}
+
+/// Kinematic bodies this step: where each was last step (for the velocity of its motion), and
+/// each one's box with that velocity, which bodies resting on it ride along with.
+#[derive(Resource, Default)]
+struct Kinematics {
+    last: HashMap<Entity, DVec3>,
+    solids: Vec<(Aabb, Vec3)>,
 }
 
 /// The static colliders as first seen, for the `stale_statics` bug.
@@ -71,10 +82,12 @@ impl Plugin for MiniPhysics {
             .insert_resource(self.bugs)
             .init_resource::<Touching>()
             .init_resource::<StaticCache>()
+            .init_resource::<Kinematics>()
             .add_systems(
                 FixedUpdate,
                 (
                     write_mass_properties,
+                    step_kinematics,
                     step_bodies,
                     step_characters,
                     publish_snapshot,
@@ -140,6 +153,47 @@ fn resolve(pos: &mut DVec3, h: DVec3, other: &Aabb) -> Option<DVec3> {
     Some(axis)
 }
 
+/// Moves kinematic bodies that have a `Velocity`, takes the others where gameplay set their
+/// `Transform`, and measures how each moved this step.
+#[allow(clippy::type_complexity)]
+fn step_kinematics(
+    time: Res<Time>,
+    bugs: Res<Bugs>,
+    mut kinematics: ResMut<Kinematics>,
+    mut bodies: Query<(
+        Entity,
+        &mut Transform,
+        Option<&Velocity>,
+        &RigidBody,
+        &Collider,
+        Option<&LocalTimeScale>,
+    )>,
+) {
+    let Kinematics { last, solids } = &mut *kinematics;
+    solids.clear();
+    for (e, mut t, v, body, collider, local) in &mut bodies {
+        if body.kind != BodyKind::Kinematic {
+            continue;
+        }
+        let dt = time.delta_for(local) as f64;
+        if let Some(v) = v {
+            t.translation += v.linear.as_dvec3() * dt;
+        }
+        let was = *last.entry(e).or_insert(t.translation);
+        let (pos, velocity) = if bugs.ignores_kinematic_transforms && v.is_none() {
+            (was, Vec3::ZERO)
+        } else {
+            last.insert(e, t.translation);
+            (
+                t.translation,
+                ((t.translation - was) / dt.max(1e-9)).as_vec3(),
+            )
+        };
+        let at = Transform::from_translation(pos);
+        solids.push((aabb(e, &at, collider), velocity));
+    }
+}
+
 #[allow(clippy::type_complexity, clippy::too_many_arguments)]
 fn step_bodies(
     time: Res<Time>,
@@ -149,6 +203,7 @@ fn step_bodies(
     mut contacts: MessageWriter<ContactEvent>,
     mut touching: ResMut<Touching>,
     mut cache: ResMut<StaticCache>,
+    kinematics: Res<Kinematics>,
     statics: Query<(Entity, &Transform, &Collider, Option<&RigidBody>), Without<Velocity>>,
     mut dynamics: Query<(
         Entity,
@@ -167,6 +222,12 @@ fn step_bodies(
     if bugs.stale_statics {
         solid = cache.0.get_or_insert(solid).clone();
     }
+    // Every solid with the velocity of its surface (zero for statics).
+    let solid: Vec<(Aabb, Vec3)> = solid
+        .into_iter()
+        .map(|s| (s, Vec3::ZERO))
+        .chain(kinematics.solids.iter().copied())
+        .collect();
     let pending: Vec<ApplyImpulse> = impulses.read().copied().collect();
     let mut now = HashSet::new();
     for (e, mut t, mut v, body, collider, local) in &mut dynamics {
@@ -187,15 +248,16 @@ fn step_bodies(
         }
         v.linear += gravity.at(t.translation) * body.gravity_scale * dt as f32;
         let mut pos = t.translation + v.linear.as_dvec3() * dt;
-        for s in &solid {
+        for (s, surface_v) in &solid {
             if let Some(axis) = resolve(&mut pos, h.as_dvec3(), s) {
                 let n = axis.as_vec3();
-                let into = v.linear.dot(n);
+                let into = (v.linear - *surface_v).dot(n);
                 if into < 0.0 {
                     v.linear -= n * into;
                 }
                 if axis.y > 0.0 {
-                    v.linear *= 0.5; // ground friction stand-in
+                    // Ground friction stand-in: half the slip to the surface goes each step.
+                    v.linear = *surface_v + (v.linear - *surface_v) * 0.5;
                 }
                 now.insert((s.entity, e));
                 if bugs.no_pair_tracking || !touching.0.contains(&(s.entity, e)) {
@@ -265,9 +327,21 @@ fn step_characters(
     }
 }
 
-fn publish_snapshot(shared: Res<Shared>, q: Query<(Entity, &Transform, &Collider)>) {
+fn publish_snapshot(
+    shared: Res<Shared>,
+    kinematics: Res<Kinematics>,
+    q: Query<(Entity, &Transform, &Collider)>,
+) {
+    let kinematic: HashMap<Entity, Aabb> = kinematics
+        .solids
+        .iter()
+        .map(|(b, _)| (b.entity, *b))
+        .collect();
     let mut snap = shared.0.write().unwrap();
-    snap.boxes = q.iter().map(|(e, t, c)| aabb(e, t, c)).collect();
+    snap.boxes = q
+        .iter()
+        .map(|(e, t, c)| kinematic.get(&e).copied().unwrap_or_else(|| aabb(e, t, c)))
+        .collect();
 }
 
 fn box_mass(collider: &Collider) -> f32 {
@@ -309,14 +383,25 @@ fn write_mass_properties(
     }
 }
 
-/// Queries answer in the new frame as soon as engine_world has moved the transforms.
+/// Queries answer in the new frame as soon as engine_world has moved the transforms. A shift
+/// moves kinematic bodies as a teleport, not motion: their last places move with it.
 fn publish_after_shift(
     mut shifts: MessageReader<WorldShift>,
     shared: Res<Shared>,
+    mut kinematics: ResMut<Kinematics>,
     q: Query<(Entity, &Transform, &Collider)>,
 ) {
-    if shifts.read().count() > 0 {
-        publish_snapshot(shared, q);
+    let mut shifted = false;
+    for shift in shifts.read() {
+        shifted = true;
+        for p in kinematics.last.values_mut() {
+            *p = shift.point(*p);
+        }
+    }
+    if shifted {
+        kinematics.solids.clear();
+        let kinematics = kinematics.into();
+        publish_snapshot(shared, kinematics, q);
     }
 }
 
@@ -481,6 +566,31 @@ fn the_suite_catches_a_backend_that_ignores_body_time_scales() {
         .map(|c| c.name)
         .collect();
     assert_eq!(failed, ["bodies_honor_local_time_scale"], "{checks:?}");
+}
+
+#[test]
+fn the_suite_catches_a_backend_that_ignores_kinematic_transforms() {
+    let checks = engine_world::physics::conformance::run_all(|app| {
+        app.add_plugins(MiniPhysics {
+            bugs: Bugs {
+                ignores_kinematic_transforms: true,
+                ..Bugs::default()
+            },
+        });
+    });
+    let failed: Vec<&str> = checks
+        .iter()
+        .filter(|c| c.result.is_err())
+        .map(|c| c.name)
+        .collect();
+    assert_eq!(
+        failed,
+        [
+            "kinematic_follows_its_transform",
+            "kinematic_carries_resting_bodies"
+        ],
+        "{checks:?}"
+    );
 }
 
 #[test]

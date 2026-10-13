@@ -182,9 +182,9 @@ pub fn rock_materials(
     images: &mut Assets<Image>,
     t: RockImages,
 ) -> RockMaterials {
-    let albedo = images.add(t.rock_albedo);
-    let normal = images.add(t.rock_normal);
-    let orm = images.add(t.rock_orm);
+    let albedo = images.insert_keyed("showcase/rock/albedo", t.rock_albedo);
+    let normal = images.insert_keyed("showcase/rock/normal", t.rock_normal);
+    let orm = images.insert_keyed("showcase/rock/orm", t.rock_orm);
     // Roughness comes from the texture (G, 0.45–1); the factor scales it.
     let mut rock = StandardMaterial::hex(0xffffff)
         .with_roughness(1.0)
@@ -202,8 +202,8 @@ pub fn rock_materials(
     let tiles = ROCK_TILE_M / MOSS_TILE_M;
     let mut moss = StandardMaterial::hex(0xffffff)
         .with_roughness(0.92)
-        .with_base_color_texture(images.add(t.moss_albedo))
-        .with_normal_texture(images.add(t.moss_normal))
+        .with_base_color_texture(images.insert_keyed("showcase/moss/albedo", t.moss_albedo))
+        .with_normal_texture(images.insert_keyed("showcase/moss/normal", t.moss_normal))
         .with_alpha_mask(0.5)
         .with_uv_scale(tiles, tiles)
         .with_subsurface(0.3);
@@ -843,6 +843,8 @@ impl Strata {
 struct Falls {
     /// Along the scarp at the lip (m).
     u: f32,
+    /// Half the stream's width (m).
+    half_width: f32,
     /// Water surface points (world) from above the lip to past the pool, for wetness.
     water: Vec<DVec3>,
     pool: Option<(DVec2, f64)>,
@@ -982,7 +984,10 @@ impl CliffField {
         // The stream that falls over this scarp, if any.
         let falls = land.streams.iter().find_map(|st| falls_over(land, sc, st));
         let u_falls = falls.as_ref().map_or(f32::MAX, |f| f.u);
-        let near_falls = |u: f32| smoothstep(14.0, 5.0, (u - u_falls).abs());
+        let near_falls = |u: f32| sc.notch_weight(u as f64) as f32;
+        let half_width = falls.as_ref().map_or(0.0, |f| f.half_width);
+        let in_channel =
+            |u: f32| smoothstep(half_width + 2.0, half_width + 0.5, (u - u_falls).abs());
 
         let mut me = Self {
             scarp: *sc,
@@ -1039,6 +1044,11 @@ impl CliffField {
                     }
                 }
             }
+            // The channel cuts the rock only where the stream or the pool has carved the
+            // ground; beside them the ground's own step stays inside the cliff (cut away, it
+            // showed through as a smooth slab beside the falls with a dark seam at the rock).
+            let carved = (hu - g).max(0.0);
+            c = c.max(g + 2.0 * (1.0 - smoothstep(0.05, 0.6, carved)));
             *out = [g, hu, c, funnel];
         });
         let coarse_at = |u: f32, s: f32, k: usize| {
@@ -1087,7 +1097,7 @@ impl CliffField {
                 let (i, k) = (idx / ny, idx % ny);
                 let u = u0 + i as f32 * h;
                 let y = me_ref.y0 + k as f32 * h;
-                *out = me_ref.face_at(i, u, y, &joints, near_falls(u));
+                *out = me_ref.face_at(i, u, y, &joints, near_falls(u), in_channel(u));
             });
         }
         me.foot = (0..nu)
@@ -1181,7 +1191,17 @@ impl CliffField {
     }
 
     /// Face position (s) at column `i` (u) and height `y`.
-    fn face_at(&self, i: usize, u: f32, y: f32, joints: &[(f32, f32)], falls: f32) -> f32 {
+    /// `falls` is how far into the falls' notch `u` is ([`Scarp::notch_weight`]), `channel`
+    /// how far into the water's channel.
+    fn face_at(
+        &self,
+        i: usize,
+        u: f32,
+        y: f32,
+        joints: &[(f32, f32)],
+        falls: f32,
+        channel: f32,
+    ) -> f32 {
         let seed = self.seed + 900;
         let (low, hgt) = (self.low[i], self.height[i].max(1.0));
         let t = (y - low) / hgt;
@@ -1229,9 +1249,13 @@ impl CliffField {
             .abs()
                 * 2.5;
         f -= 0.12 * hard * flute.max(0.0).powi(2);
-        // Never behind the terrain's own (coarsely meshed) slope, except at the falls.
-        let bound = -4.2 + 6.2 * t.clamp(0.0, 1.0) - 0.35;
-        f = f + (smin(f, bound, 0.4) - f) * (1.0 - falls);
+        // Never behind the terrain's own (coarsely meshed) step, which narrows and moves back
+        // in the falls' notch as the face does (or the ground shows through beside the water).
+        // Only the channel the water drops down stays open.
+        let (start, end) = Scarp::step_span(falls as f64);
+        let (start, width) = (start as f32, (end - start) as f32);
+        let bound = start + width * (6.2 * t.clamp(0.0, 1.0) - 2.7) / 3.5 - 0.35;
+        f = f + (smin(f, bound, 0.4) - f) * (1.0 - channel);
         f
     }
 
@@ -1667,6 +1691,7 @@ fn falls_over(land: &Landscape, sc: &Scarp, st: &Stream) -> Option<Falls> {
         .collect();
     Some(Falls {
         u: u as f32,
+        half_width: (st.width * 0.5) as f32,
         water,
         pool: st.pool,
         bottom_level: level(bottom),
@@ -1744,6 +1769,46 @@ mod tests {
         // Over the plunge pool the uncarved height is well above the carved bed.
         let (pool, _) = land.streams[0].pool.unwrap();
         assert!(uncarved_height(&land, pool.x, pool.y) > land.height(pool.x, pool.y) + 2.0);
+    }
+
+    #[test]
+    fn the_cliff_hides_the_ground_step_beside_the_falls() {
+        // The ground's step narrows into the falls' notch as the face is worn back, and the
+        // stream's channel cuts the rock; beside the water the rock must still cover the step
+        // the stream hasn't carved, or it shows through as a smooth slab with a dark seam where
+        // it meets the cliff.
+        let land = crate::zones::landscape(7);
+        let cliff = cliff_meshes(&land, CLIFF_VOXEL);
+        let f = &cliff.fields[0];
+        let falls = f.falls.as_ref().expect("the falls are on the first scarp");
+        let mut worst = (0.0f32, 0.0f32, 0.0f32);
+        for k in 0..=50 {
+            let du = (falls.half_width + 2.5) + k as f32 * 0.25;
+            for u in [falls.u - du, falls.u + du] {
+                let i = (((u - f.u0) / f.h).round() as usize).min(f.nu - 1);
+                let (low, height) = (f.low[i], f.height[i].max(1.0));
+                for j in 0..=130 {
+                    let s = -8.0 + j as f32 * 0.1;
+                    let w = f.world(u as f64, s as f64);
+                    let y = land.height(w.x, w.y);
+                    let t = (y as f32 - low) / height;
+                    let carved = uncarved_height(&land, w.x, w.y) - y > 0.05;
+                    if (0.1..0.98).contains(&t) && !carved {
+                        let air = f.sample(u, s, y as f32 + 0.05);
+                        if air > worst.0 {
+                            worst = (air, u - falls.u, t);
+                        }
+                    }
+                }
+            }
+        }
+        assert!(
+            worst.0 < 0.1,
+            "the ground stands {:.2} m in front of the rock {:.1} m along from the falls, {:.0}% up",
+            worst.0,
+            worst.1,
+            worst.2 * 100.0
+        );
     }
 
     #[test]

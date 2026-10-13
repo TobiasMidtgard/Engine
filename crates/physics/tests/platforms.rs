@@ -376,3 +376,124 @@ fn rays_find_bodies_moving_at_orbital_speed() {
         }
     }
 }
+
+/// A kinematic deck with no `Velocity`, moved only by writing its `Transform` (a train car, a
+/// lift driven by gameplay): it moves in the physics and carries what stands on it.
+#[test]
+fn a_deck_moved_by_its_transform_carries_crates_and_characters() {
+    let mut app = app();
+    let deck = app
+        .world
+        .spawn((
+            Transform::from_xyz(0.0, -0.5, 0.0),
+            RigidBody::kinematic(),
+            Collider::cuboid(Vec3::new(3.0, 0.5, 3.0)),
+        ))
+        .id();
+    let crate_box = app
+        .world
+        .spawn((
+            Transform::from_xyz(1.5, 0.5, 0.0),
+            RigidBody::dynamic(),
+            Collider::cuboid(Vec3::splat(0.5)),
+            Velocity::default(),
+        ))
+        .id();
+    let ch = character(&mut app, DVec3::new(-1.5, 0.92, 0.0), -Vec3::Y);
+    app.update_n(30);
+    let (crate0, ch0) = (pos(&app, crate_box), pos(&app, ch));
+    // Up to 3.8 m/s in a second (gently enough for the crate not to slip), then a second at
+    // that speed.
+    for frame in 1..=120 {
+        let speed = 3.8 * (frame as f64 / 60.0).min(1.0);
+        app.world.get_mut::<Transform>(deck).unwrap().translation.x += speed / 60.0;
+        app.update();
+    }
+    let moved = pos(&app, deck).x;
+    assert!(moved > 5.7, "the deck's Transform is at {moved}");
+    let carried = pos(&app, crate_box).x - crate0.x;
+    assert!(
+        (carried - moved).abs() < 0.1,
+        "the crate rode {carried:.3} m of the deck's {moved} m"
+    );
+    let walked = pos(&app, ch).x - ch0.x;
+    assert!(
+        (walked - moved).abs() < 0.1,
+        "the character rode {walked:.3} m of the deck's {moved} m"
+    );
+    assert!(state(&app, ch).grounded, "the character fell off");
+    let q = app.world.resource::<PhysicsQueries>().clone();
+    let down = |x: f64| {
+        q.raycast(
+            DVec3::new(x, 5.0, 2.5),
+            -Vec3::Y,
+            10.0,
+            &QueryFilter::default(),
+        )
+    };
+    assert_eq!(
+        down(moved).map(|h| h.entity),
+        Some(deck),
+        "rays miss the deck where it is"
+    );
+    assert_eq!(
+        down(0.0).map(|h| h.entity),
+        None,
+        "rays hit the deck where it was"
+    );
+}
+
+/// A kinematic door hung under a parent entity, swung by writing its `Transform`.
+#[test]
+fn a_door_swung_by_its_transform_turns_in_the_physics() {
+    let mut app = app();
+    let frame = app.world.spawn(Transform::from_xyz(4.0, 0.0, 0.0)).id();
+    let door = app
+        .world
+        .spawn((
+            Transform::from_xyz(0.0, 1.0, 0.0),
+            RigidBody::kinematic(),
+            Collider::cuboid(Vec3::new(1.0, 1.0, 0.05)),
+            ChildOf(frame),
+        ))
+        .id();
+    app.update_n(10);
+    let q = app.world.resource::<PhysicsQueries>().clone();
+    let ray = || {
+        q.raycast(
+            DVec3::new(4.0, 1.0, 5.0),
+            -Vec3::Z,
+            10.0,
+            &QueryFilter::default(),
+        )
+    };
+    let shut = ray().expect("the shut door stops the ray");
+    assert!((shut.distance - 4.95).abs() < 0.01, "{shut:?}");
+    app.world.get_mut::<Transform>(door).unwrap().rotation =
+        engine_core::math::Quat::from_rotation_y(std::f32::consts::FRAC_PI_2);
+    app.update();
+    let open = ray().expect("the open door, edge on, still stops the ray");
+    assert!((open.distance - 4.0).abs() < 0.01, "{open:?}");
+}
+
+/// Writing the `Transform` of a kinematic body that moves by `Velocity` puts it there, and it
+/// goes on moving from there.
+#[test]
+fn a_kinematic_body_moving_by_velocity_jumps_where_its_transform_is_put() {
+    let mut app = app();
+    let cart = app
+        .world
+        .spawn((
+            Transform::default(),
+            RigidBody::kinematic(),
+            Collider::cuboid(Vec3::splat(0.5)),
+            velocity(Vec3::new(2.0, 0.0, 0.0), Vec3::ZERO),
+        ))
+        .id();
+    app.update_n(30);
+    assert!((pos(&app, cart).x - 1.0).abs() < 1e-3);
+    app.world.get_mut::<Transform>(cart).unwrap().translation.x = 10.0;
+    app.update_n(30);
+    let x = pos(&app, cart).x;
+    assert!((x - 11.0).abs() < 1e-3, "the cart is at {x}");
+}
