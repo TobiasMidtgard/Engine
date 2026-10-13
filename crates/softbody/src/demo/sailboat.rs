@@ -18,13 +18,20 @@ use crate::{Cloth, SoftMaterial};
 /// The boat's frame: bow toward −Z, +X starboard, +Y up, origin on the designed waterline
 /// amidships. The rig turns about the mast; the rudder about its hinge.
 pub mod dims {
+    use super::super::props_boat::dims as boat;
+
     /// Mast axis (x = 0), meters along the boat.
-    pub const MAST_Z: f32 = -1.20;
+    pub const MAST_Z: f32 = boat::MAST_Z;
     /// Rudder hinge (x = 0, y = 0), meters along the boat.
-    pub const RUDDER_Z: f32 = 2.08;
+    pub const RUDDER_Z: f32 = boat::RUDDER_Z;
     /// Sail corners in rig space (the rig's ZY plane, x = 0), as `[z, y]`: throat, peak,
     /// clew and tack.
-    pub const SAIL: [[f32; 2]; 4] = [[0.10, 3.40], [1.90, 4.70], [2.85, 1.13], [0.10, 1.12]];
+    pub const SAIL: [[f32; 2]; 4] = [
+        [boat::SAIL_THROAT[2], boat::SAIL_THROAT[1]],
+        [boat::SAIL_PEAK[2], boat::SAIL_PEAK[1]],
+        [boat::SAIL_CLEW[2], boat::SAIL_CLEW[1]],
+        [boat::SAIL_TACK[2], boat::SAIL_TACK[1]],
+    ];
     /// Hull and crew, kg.
     pub const MASS_KG: f32 = 170.0;
     /// Center of mass (ballast and crew sit low), boat frame.
@@ -135,7 +142,12 @@ pub fn spawn_sailboat(commands: &mut Commands, home: DVec3, range: f32) -> Entit
 }
 
 /// The modeled hull, rig and rudder.
-fn dress(_commands: &mut Commands, _boat: Entity, _rig: Entity, _rudder: Entity) {}
+fn dress(commands: &mut Commands, boat: Entity, rig: Entity, rudder: Entity) {
+    let models = super::boat_models(commands);
+    models.hull.attach(commands, boat, Transform::default());
+    models.rig.attach(commands, rig, Transform::default());
+    models.rudder.attach(commands, rudder, Transform::default());
+}
 
 /// Cream sailcloth: smooth, a little sheen, glowing when the sun is behind it.
 fn sailcloth() -> SoftMaterial {
