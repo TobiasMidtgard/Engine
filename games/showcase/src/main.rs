@@ -73,6 +73,11 @@ fn main() {
     let args: Vec<String> = std::env::args().collect();
     if !args.iter().any(|a| a == "--no-planet") {
         app.insert_resource(planet::UsePlanet);
+        // Stay anchored on Earth, turning with it, even at the Moon: tour stops jump between
+        // the ground and space in valley coordinates.
+        app.world
+            .resource_mut::<engine_space::SpaceFrame>()
+            .auto_switch = false;
     }
     if let Some(i) = args.iter().position(|a| a == "--tour") {
         let only = args
@@ -128,13 +133,13 @@ fn setup(
     fog.density = 0.00012;
 
     let land = landscape::shared().clone();
-    commands.insert_resource(engine::world::Ground(std::sync::Arc::new(
-        landscape::LandscapeGround::new(land.clone(), &mut surfaces),
-    )));
+    let ground = std::sync::Arc::new(landscape::LandscapeGround::new(land.clone(), &mut surfaces));
+    // On the planet the terrain answers `Ground` (edits included) and asks this for surfaces.
+    commands.insert_resource(engine::world::Ground(ground.clone()));
     let lib = scenery::build_library(&mut meshes, &mut materials, &mut images);
     let mut rng = Rng::new(config.seed);
     if use_planet.is_some() {
-        planet::spawn(&mut commands, land.clone());
+        planet::spawn(&mut commands, land.clone(), ground);
     } else {
         scenery::spawn_terrain(&mut commands, &mut meshes, &lib, &land);
     }
@@ -146,9 +151,7 @@ fn setup(
     scenery::spawn_cliffs_and_stream(&mut commands, &mut meshes, &lib, &land, &mut rng);
     placeholders::cave_shell(&mut commands, &mut meshes, &lib, &land, &mut rng);
     zones::spawn_demos(&mut commands, &mut meshes, &lib, &land, &mut rng);
-    if use_planet.is_some() {
-        planet::spawn_moon(&mut commands, zones::moon_position());
-    } else {
+    if use_planet.is_none() {
         zones::moon(&mut commands);
     }
     camera::spawn_camera(&mut commands);
