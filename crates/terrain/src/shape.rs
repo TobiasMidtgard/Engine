@@ -244,6 +244,10 @@ pub struct Climate {
     pub lapse_c_per_m: f32,
     /// Overall wetness 0 (desert world) .. 1 (jungle world).
     pub wetness: f32,
+    /// 0..1 how strongly the general circulation shapes the wetness: rain along the equator
+    /// and the mid-latitude storm tracks, deserts under the subtropical highs (about 25°),
+    /// dry continental interiors and dry land in the lee of mountain belts (Earth 1).
+    pub circulation: f32,
 }
 
 impl Default for Climate {
@@ -253,6 +257,7 @@ impl Default for Climate {
             pole_c: -22.0,
             lapse_c_per_m: 0.0065,
             wetness: 0.58,
+            circulation: 1.0,
         }
     }
 }
@@ -394,6 +399,7 @@ impl PlanetShape {
                 pole_c: -150.0,
                 lapse_c_per_m: 0.0,
                 wetness: 0.0,
+                circulation: 0.0,
             },
             pads: Vec::new(),
             overlay: None,
@@ -437,6 +443,7 @@ impl PlanetShape {
                 pole_c: -85.0,
                 lapse_c_per_m: 0.0025,
                 wetness: 0.02,
+                circulation: 0.0,
             },
             pads: Vec::new(),
             overlay: None,
@@ -793,7 +800,13 @@ impl PlanetShape {
         let lat = dir.y.clamp(-1.0, 1.0).asin();
         let c = &self.climate;
         let t_lat = c.pole_c + (c.equator_c - c.pole_c) * (lat.cos() as f32).powf(1.6);
-        let temperature_c = t_lat - c.lapse_c_per_m * h.max(0.0) as f32;
+        let mut temperature_c = t_lat - c.lapse_c_per_m * h.max(0.0) as f32;
+        if self.ocean && c.circulation > 0.0 && h < 0.0 {
+            // Currents carry warm water poleward in some seas and cold water toward the
+            // equator in others, so the sea ice reaches far further south in some.
+            let currents = noise::fbm(p / 2_500_000.0, s ^ 0x74, 3, 0.5) as f32;
+            temperature_c += 9.0 * c.circulation * currents * smooth(0.0, 300.0, -h) as f32;
+        }
         // Polar caps hold their ice whatever the latitude says.
         let temperature_c = temperature_c + (POLAR_ICE_C - temperature_c) * marks.ice as f32;
         // Wet and dry regions, and woods and fields between them.
@@ -805,7 +818,12 @@ impl PlanetShape {
         } else {
             0.0
         };
-        let moisture = (c.wetness + wet_noise * 0.55 + coastal - 0.08).clamp(0.0, 1.0);
+        let belts = if c.circulation > 0.0 {
+            c.circulation * self.circulation(p, dir, lat, cl.v) as f32
+        } else {
+            0.0
+        };
+        let moisture = (c.wetness + wet_noise * 0.55 + coastal - 0.08 + belts).clamp(0.0, 1.0);
 
         ShapeSample {
             height: h,
@@ -813,6 +831,37 @@ impl PlanetShape {
             temperature_c,
             mare,
         }
+    }
+
+    /// Wetter or drier than the planet's mean (about −0.9..+0.3) by latitude and place: the
+    /// rains of the equator and of the mid-latitude storm tracks, the deserts under the
+    /// subtropical highs and in the polar cold, continental interiors far from the sea, and
+    /// the rain shadow of mountain belts upwind (westerlies poleward of 30°, trade winds from
+    /// the east nearer the equator). `cont` is the continent field (coast at 0).
+    fn circulation(&self, p: DVec3, dir: DVec3, lat: f64, cont: f64) -> f64 {
+        let lat_deg = lat.to_degrees().abs();
+        let bell = |c: f64, w: f64| (-((lat_deg - c) / w).powi(2)).exp();
+        let belts = 0.3 * bell(0.0, 12.0) - 0.55 * bell(25.0, 8.0) + 0.12 * bell(55.0, 10.0)
+            - 0.15 * smooth(65.0, 85.0, lat_deg);
+        if !self.ocean {
+            return belts;
+        }
+        let inland = smooth(0.1, 0.5, cont);
+        // Mountain belts upwind, 700 km away along the parallel.
+        let reach = 700_000.0 / (self.radius_m * lat.cos().max(0.2));
+        let easterly = 1.0 - smooth(25.0, 35.0, lat_deg);
+        let shift = reach * (2.0 * easterly - 1.0);
+        let upwind = DQuat::from_rotation_y(shift) * dir * self.radius_m;
+        let belt = |q: DVec3| {
+            let range = noise::fbm(q / (self.mountain_scale_m * 14.0), self.seed ^ 0x31, 4, 0.5);
+            smooth(0.0, 0.35, range + (self.mountain_coverage - 0.5) * 0.6)
+        };
+        let shadow = if self.mountain_height_m > 0.0 {
+            belt(upwind) * (1.0 - belt(p)) * smooth(0.0, 0.3, cont)
+        } else {
+            0.0
+        };
+        belts - 0.25 * inland - 0.3 * shadow
     }
 
     /// Height only (full detail).
@@ -1716,6 +1765,39 @@ mod tests {
             max = max.max(h);
         }
         assert!(max - min > 100.0, "relief {min}..{max}");
+    }
+
+    #[test]
+    fn earth_has_wet_and_dry_belts() {
+        let shape = PlanetShape::earthlike(7);
+        // Mean wetness of the land within 5° of a latitude (both hemispheres), and the
+        // spread of sea temperatures there.
+        let band = |lat0: f64| {
+            let (mut wet, mut land) = (0.0, 0);
+            let (mut cold, mut warm) = (f32::MAX, f32::MIN);
+            for i in 0..1_200 {
+                let lat = (lat0 - 5.0 + (i % 11) as f64) * if i % 2 == 0 { 1.0 } else { -1.0 };
+                let s = shape.sample(dir_from_lat_lon(lat, (i / 2) as f64 * 0.6), 20_000.0);
+                if s.height > 0.0 {
+                    wet += s.moisture as f64;
+                    land += 1;
+                } else {
+                    cold = cold.min(s.temperature_c);
+                    warm = warm.max(s.temperature_c);
+                }
+            }
+            (wet / land.max(1) as f64, warm - cold)
+        };
+        let (equator, _) = band(5.0);
+        let (subtropics, _) = band(25.0);
+        let (storm_tracks, spread) = band(55.0);
+        assert!(equator > subtropics + 0.3, "{equator} {subtropics}");
+        assert!(
+            storm_tracks > subtropics + 0.2,
+            "{storm_tracks} {subtropics}"
+        );
+        // Warm and cold currents: some seas at 55° freeze, others stay open.
+        assert!(spread > 8.0, "{spread}");
     }
 
     #[test]
