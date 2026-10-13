@@ -16,10 +16,14 @@
 //! - **Cascaded sun shadows** (4 × 2048², texel-snapped), point lights, wind sway, wetness,
 //!   snow and fire scorch on surfaces, per pixel from `engine_world`'s `SurfaceLayers`
 //!   (`surface_weather` in shaders). Alpha-masked materials (leaves, fences) cut out their
-//!   shadows too.
+//!   shadows too. Cloud shadows from whichever module draws the clouds (see
+//!   [`cloud_shadows`]) shade the sunlight on every surface and in the fog.
 //! - **Textured PBR materials**: [`StandardMaterial`] takes base color, normal,
 //!   metallic/roughness, emissive and occlusion [`Image`]s (glTF conventions, mipmapped,
-//!   anisotropic). Normal maps need no tangents. See [`material`] and [`texture`].
+//!   anisotropic). Normal maps need no tangents. See [`material`] and [`texture`]. Every feature
+//!   shares the renderer's uploaded images ([`GpuShared::image_texture`]), and
+//!   `RenderSettings::release_image_pixels` frees their CPU pixels once they are on the GPU (see
+//!   [`image_cache`]).
 //! - **Asset loading**: `RenderPlugin` registers loaders for images (`.png`, `.jpg`, `.hdr`)
 //!   and glTF models (`.gltf`, `.glb`) with the [`AssetServer`].
 //!   `MeshRenderer`s that name an asset key load it on first use; files hot reload. See
@@ -48,6 +52,7 @@
 //! ```
 
 mod atmosphere;
+pub mod cloud_shadows;
 pub mod components;
 pub mod effects;
 mod environment;
@@ -57,6 +62,7 @@ pub mod frame;
 pub mod gltf_loader;
 pub mod gpu;
 pub mod grass;
+pub mod image_cache;
 pub mod material;
 pub mod material_library;
 pub mod mesh;
@@ -77,6 +83,9 @@ use engine_assets::{AssetAppExt, AssetPlugin, AssetServer, Assets, Handle};
 use engine_core::prelude::*;
 use serde_json::json;
 
+pub use cloud_shadows::{
+    CLOUD_SHADOW_FORMAT, CloudShadowArea, CloudShadowRequest, CloudShadowTarget,
+};
 pub use components::{
     AmbientLight, BoxFace, Camera, DirectionalLight, Exposure, FogShape, FogVolume, MaterialRef,
     MaxDrawDistance, MeshRef, MeshRenderer, NoVirtualGeometry, PointLight, Projection,
@@ -92,6 +101,7 @@ pub use gltf_loader::{
     spawn_gltf_scene_deferred,
 };
 pub use grass::{GrassBender, GrassField, GrassStyle};
+pub use image_cache::{ImageMemoryStats, ImageTexture};
 pub use material::{AlphaMode, StandardMaterial, TextureMapping};
 pub use material_library::{MaterialMaps, MaterialPreset, MaterialTextures};
 pub use mesh::{Mesh, Shape, Vertex};
@@ -178,7 +188,7 @@ impl Plugin for RenderPlugin {
                 "Local fog (mist, dust, smoke, steam) lit by the volumetric fog: shape Box/Ellipsoid, half_extents (m, local axes, scaled with the entity), density (extinction 1/m: 0.02 mist, 0.5 smoke), albedo, emission (cd/m² per m), edge_falloff (m), noise 0..1 and noise_scale (m, drifts with the wind), anisotropy (-0.95..0.95, forward scattering).",
             )
             .register_resource::<RenderSettings>(
-                "Renderer quality and look: shadows (shadow_distance m, far_shadow_distance m: big casters such as mountains beyond the cascades, 0 = off; sun_penumbra_scale, contact_shadow_length m), ambient_occlusion (ao_radius m, ao_intensity), screen_space_reflections, volumetric_fog (bool), volumetric_fog_range (m), volumetric_fog_quality (Low/Medium/High), anti_aliasing (Taa/None) and sharpness, tonemapper (AgX/Aces/Reinhard/None), bloom (bloom_intensity, bloom_limit: the most a pixel brings into the bloom in multiples of white, 0 = no limit), grading, debug_view (None/Normals/Cascades/SkyVisibility/AmbientOcclusion/Reflections/Clusters/ClusterLevels), virtual_geometry (dense opaque meshes as GPU-culled clusters: virtual_geometry_min_triangles, cluster_error_px, cluster_shadow_error_texels).",
+                "Renderer quality and look: shadows (shadow_distance m, far_shadow_distance m: big casters such as mountains beyond the cascades, 0 = off; sun_penumbra_scale, contact_shadow_length m), ambient_occlusion (ao_radius m, ao_intensity), screen_space_reflections, volumetric_fog (bool), volumetric_fog_range (m), volumetric_fog_quality (Low/Medium/High), anti_aliasing (Taa/None) and sharpness, tonemapper (AgX/Aces/Reinhard/None), bloom (bloom_intensity, bloom_limit: the most a pixel brings into the bloom in multiples of white, 0 = no limit), grading, debug_view (None/Normals/Cascades/SkyVisibility/AmbientOcclusion/Reflections/Clusters/ClusterLevels), virtual_geometry (dense opaque meshes as GPU-culled clusters: virtual_geometry_min_triangles, cluster_error_px, cluster_shadow_error_texels), release_image_pixels (free each image's CPU pixels once uploaded and unchanged for 120 frames; Image keep_pixels opts one out).",
             )
             .register_resource::<FogSettings>("Height fog everywhere (volumetric within volumetric_fog_range, with light shafts): density (extinction 1/m at base_height, visibility about 3.9 / density: 0.00002 clear air, 0.0001 light haze, 0.0005 haze, 0.05 ground fog), height_falloff (1/m), base_height (m), max_opacity, color (albedo), sun_scattering (Henyey-Greenstein g, 0.6 = forward scattering, glow around the sun).")
             .register_resource::<Atmosphere>(

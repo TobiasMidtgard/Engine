@@ -180,6 +180,10 @@ pub struct RenderSettings {
     /// Width of the area it covers, meters (resolution is `sky_occlusion_size`²).
     pub sky_occlusion_extent: f32,
     pub sky_occlusion_size: u32,
+    /// Cloud shadows: when a module draws the cloud shadow map (the weather's clouds; see
+    /// `cloud_shadows`), the sunlight on every surface and in the fog is shaded by it. Off: the
+    /// map is not drawn and nothing is shaded by clouds.
+    pub cloud_shadows: bool,
     /// How many EV darker than "average gray" very dark scenes are shown (0 = a moonlit night
     /// is exposed like noon; 2.5 = night looks like night). Ramps in below EV100 ≈ 5.
     pub night_exposure_bias: f32,
@@ -202,6 +206,13 @@ pub struct RenderSettings {
     /// Texels per side of each map of a generated material preset (`StandardMaterial::preset`):
     /// a power of two, 64..4096. Each preset is generated once per size, on first use.
     pub material_texture_size: u32,
+    /// Free an image's CPU pixels (`Image::data` and `mips`) once the renderer has uploaded it
+    /// and it has stayed unchanged for 120 frames, keeping only the GPU copy (the size, format
+    /// and flags stay; see `image_cache`). Saves the CPU copy of every texture (gigabytes in
+    /// big worlds; under a software GPU the GPU copy is system memory too). Images that keep
+    /// changing are never released, and assigning new `data` uploads again. Images other code
+    /// reads on the CPU or uploads itself need `Image::keep_pixels`. Off by default.
+    pub release_image_pixels: bool,
 }
 
 impl Default for RenderSettings {
@@ -245,6 +256,7 @@ impl Default for RenderSettings {
             sky_occlusion: true,
             sky_occlusion_extent: 256.0,
             sky_occlusion_size: 512,
+            cloud_shadows: true,
             night_exposure_bias: 2.5,
             night_desaturation: 0.7,
             virtual_geometry: true,
@@ -252,6 +264,7 @@ impl Default for RenderSettings {
             cluster_error_px: 1.0,
             cluster_shadow_error_texels: 2.0,
             material_texture_size: 1024,
+            release_image_pixels: false,
         }
     }
 }
