@@ -78,6 +78,16 @@ impl ChunkSource {
         self.sample(base, up, dir, min_wavelength)
     }
 
+    /// The layer edits painted at a surface column (index and weight; weight 0 if none).
+    pub fn edit_paint(&self, base: DVec3, up: DVec3, dir: DVec3) -> (u8, f32) {
+        if self.edits.is_empty() {
+            return (0, 0.0);
+        }
+        let coarse = |wavelength: f64| self.shape.sample(dir, wavelength).height;
+        let height = self.shape.sample(dir, 0.0).height;
+        self.edits.apply(base, up, height, &coarse).1
+    }
+
     /// Sample at a surface column (`base` at height 0 with `up`; `dir` for the shape).
     pub fn sample(&self, base: DVec3, up: DVec3, dir: DVec3, min_wavelength: f64) -> Sample {
         let s = self.shape.sample(dir, min_wavelength);

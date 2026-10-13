@@ -410,9 +410,14 @@ fn main() {
         let mut eye = view.eye;
         if let Some(h) = view.above_ground {
             let ground = app.world.resource::<engine_world::Ground>().clone();
-            let y = ground
-                .height(DVec3::new(eye.x, 50_000.0, eye.z))
-                .unwrap_or(0.0);
+            // On a planet the ground is found along the local vertical, so ask again from
+            // just above it: from high up the answer lies a little to the side.
+            let mut y = 50_000.0;
+            for _ in 0..3 {
+                y = ground
+                    .height(DVec3::new(eye.x, y + 10.0, eye.z))
+                    .unwrap_or(0.0);
+            }
             eye.y = y + h;
         }
         app.world.spawn((

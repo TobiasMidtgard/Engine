@@ -87,6 +87,11 @@ pub enum PropKind {
     StoneBlock {
         size: [f32; 3],
     },
+    /// Boards nailed into a wall panel filling `size` (x wide, y tall, z thick): vertical
+    /// boards with thin gaps and two battens across the back (−Z).
+    BoardWall {
+        size: [f32; 3],
+    },
     RoofTiles {
         width: f32,
         depth: f32,
@@ -140,6 +145,9 @@ impl PropKind {
             PropKind::StoneBlock {
                 size: [1.2, 0.98, 1.2],
             },
+            PropKind::BoardWall {
+                size: [2.0, 2.4, 0.08],
+            },
             PropKind::RoofTiles {
                 width: 4.0,
                 depth: 3.4,
@@ -173,6 +181,7 @@ impl PropKind {
             PropKind::StoneColumn { height, radius } => stone_column(height, radius, seed),
             PropKind::Timber { size } => timber(Vec3::from(size), seed),
             PropKind::StoneBlock { size } => stone_block(Vec3::from(size), seed),
+            PropKind::BoardWall { size } => board_wall(Vec3::from(size), seed),
             PropKind::RoofTiles {
                 width,
                 depth,
@@ -195,7 +204,8 @@ impl PropKind {
             | PropKind::MilitaryCrate { size }
             | PropKind::ConcretePillar { size }
             | PropKind::Timber { size }
-            | PropKind::StoneBlock { size } => Vec3::from(size),
+            | PropKind::StoneBlock { size }
+            | PropKind::BoardWall { size } => Vec3::from(size),
             PropKind::SteelDrum { .. } => Vec3::new(DRUM_DIAMETER, DRUM_HEIGHT, DRUM_DIAMETER),
             PropKind::Sandbag => Vec3::new(BAG_LEN, BAG_HEIGHT, BAG_WIDTH),
             PropKind::SandbagWall { length, courses } => sandbag_wall_size(length, courses),
@@ -3287,6 +3297,73 @@ fn stone_column_size(height: f32, radius: f32) -> Vec3 {
 /// Classical stone column `height` meters tall with shaft radius `radius` at the foot: square
 /// plinth, Attic base (two tori around a scotia), a 20-flute shaft with entasis and rounded
 /// flute ends, Doric capital (astragal, annulets, echinus, abacus), weathered and chipped.
+/// A board wall filling `size` (centered): vertical boards about 0.18 m wide with gaps of a
+/// few millimeters, each a little different in length, tint and lean, set slightly in and
+/// out, and two horizontal battens across the back (−Z) holding them. Light enough to build
+/// whole sheds from (the wood texture carries the grain).
+pub fn board_wall(size: Vec3, seed: u64) -> Vec<PropPart> {
+    let size = size.max(Vec3::new(0.1, 0.1, 0.03));
+    let mut rng = Rng::new(seed ^ 0x00B0_A2D5);
+    let mut kit = Kit::new();
+    let batten_t = (size.z * 0.45).clamp(0.015, 0.04);
+    let board_t = (size.z - batten_t).max(0.012);
+    let count = (size.x / 0.18).round().max(1.0) as usize;
+    let gap = 0.004;
+    let bw = (size.x - gap * (count - 1) as f32) / count as f32;
+    let b = kit.mb(WOOD);
+    let v0 = b.vertices.len();
+    let t0 = b.indices.len();
+    for k in 0..count {
+        let x = -size.x * 0.5 + bw * 0.5 + k as f32 * (bw + gap);
+        // Boards differ a little in length and sit a little in or out.
+        let h = size.y - rng.range(0.0, 0.03);
+        let z = size.z * 0.5 - board_t * 0.5 - rng.range(0.0, 0.003);
+        let y = -size.y * 0.5 + h * 0.5;
+        // The box's X runs up the board, so the texture's grain does too.
+        let half = Vec3::new(h * 0.5, board_t * 0.5, bw * 0.5);
+        let along = stations(-half.x, half.x, &[], 0.4);
+        let lean = Mat3::from_rotation_z(rng.range(-0.004, 0.004));
+        bevel_box(
+            b,
+            &Frame {
+                rot: lean * Mat3::from_cols(Vec3::Y, Vec3::Z, Vec3::X),
+                pos: Vec3::new(x, y, z),
+            },
+            &BoxSpec::new(half, 0.003)
+                .chamfer()
+                .splits([&along, &[], &[]])
+                .tint(wood_tint(&mut rng))
+                .uv(rng_uv(&mut rng)),
+        );
+    }
+    for y in [-0.32f32, 0.3] {
+        let half = Vec3::new(
+            size.x * 0.5 - 0.01,
+            0.05f32.min(size.y * 0.1),
+            batten_t * 0.5,
+        );
+        bevel_box(
+            b,
+            &Frame::at(Vec3::new(0.0, y * size.y, -size.z * 0.5 + batten_t * 0.5)),
+            &BoxSpec::new(half, 0.004)
+                .chamfer()
+                .tint(wood_tint(&mut rng))
+                .uv(rng_uv(&mut rng)),
+        );
+    }
+    // A slight cup and warp, the same function of position for every board.
+    let s = seed;
+    deform(b, v0, |p| {
+        p + Vec3::Z * (0.0015 * n3(p, 1.5, s) + 0.0006 * n3(p, 7.0, s ^ 3))
+    });
+    auto_smooth(b, v0, t0, 30.0);
+    kit.finish(Ao {
+        reach: 0.15,
+        strength: 0.6,
+        ground: false,
+    })
+}
+
 /// A dressed ashlar block filling `size` (centered): chamfered arrises, faces tooled with
 /// shallow pitting, a few chipped corners and edges, and a per-block tint with darker pits.
 pub fn stone_block(size: Vec3, seed: u64) -> Vec<PropPart> {

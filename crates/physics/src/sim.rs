@@ -32,10 +32,10 @@ use engine_world::physics::{
 use parking_lot::Mutex;
 use rapier3d::prelude::{
     ActiveCollisionTypes, ActiveEvents, ActiveHooks, ColliderBuilder, ColliderHandle,
-    CollisionEvent, CollisionEventFlags, ContactPair, EventHandler, ImpulseJointHandle, LockedAxes,
-    MassProperties as RapierMassProperties, PairFilterContext, PhysicsHooks, PhysicsWorld, Pose,
-    RigidBodyBuilder, RigidBodyHandle, RigidBodySet, RigidBodyType, SharedShape, SoftBodySet,
-    SoftBodyTearEvent, SolverFlags,
+    CollisionEvent, CollisionEventFlags, ContactModificationContext, ContactPair, EventHandler,
+    ImpulseJointHandle, LockedAxes, MassProperties as RapierMassProperties, PairFilterContext,
+    PhysicsHooks, PhysicsWorld, Pose, RigidBodyBuilder, RigidBodyHandle, RigidBodySet,
+    RigidBodyType, SharedShape, SoftBodySet, SoftBodyTearEvent, SolverFlags,
 };
 
 use crate::convert;
@@ -315,17 +315,58 @@ pub struct Simulation {
     pub filtered_statics: EntityHashSet,
 }
 
-/// Rapier hook that drops contacts listed in [`Simulation::no_contact`].
-pub struct ContactFilter<'a>(pub &'a HashMap<(Entity, Entity), u32>);
+/// Rapier hooks: drop the contacts listed in [`Simulation::no_contact`], and keep round bodies
+/// spinning on their axis from bumping over edges they roll across (see `modify_solver_contacts`).
+pub struct ContactFilter<'a> {
+    pub no_contact: &'a HashMap<(Entity, Entity), u32>,
+    /// Length of the substep being solved, seconds (0 when only detecting collisions).
+    pub dt: f32,
+}
 
 impl PhysicsHooks for ContactFilter<'_> {
+    /// Rapier keeps contacts up to 2 cm before two shapes touch, and the solver acts on such a
+    /// contact when the gap would close within the substep, judged by the velocity of the
+    /// body's point at the contact. For a body spinning about its own axis of symmetry (a rolling
+    /// ball, barrel or wheel) that misleads: the point just ahead of the one it rests on dives
+    /// toward the ground at up to `ω·r`, yet the surface there doesn't move, the next point
+    /// takes its place. A rolling body meets such a contact at every new triangle of terrain or
+    /// a mesh, and the solver stops its "fall" with a kick: a barrel rolling at 8 m/s jumped
+    /// 20 cm. So each contact's gap is moved by the closing speed the symmetric spin alone
+    /// adds, which leaves the gap closing as fast as the shape itself moves. Only colliders
+    /// that spin fast get this hook (`step::refresh_contact_hooks`).
+    fn modify_solver_contacts(&self, ctx: &mut ContactModificationContext) {
+        let spin = |c: ColliderHandle, b: Option<RigidBodyHandle>| {
+            let (collider, body) = (ctx.colliders.get(c)?, ctx.bodies.get(b?)?);
+            crate::rolling::symmetric_spin(collider, body)
+        };
+        let (s1, s2) = (
+            spin(ctx.collider1, ctx.rigid_body1),
+            spin(ctx.collider2, ctx.rigid_body2),
+        );
+        if self.dt <= 0.0 || (s1.is_none() && s2.is_none()) {
+            return;
+        }
+        let Some(m) = ctx.rigid_mut() else {
+            return;
+        };
+        let n = *m.normal;
+        let surface = |s: Option<(Vec3, Vec3, f32)>, p: Vec3| {
+            s.map_or(Vec3::ZERO, |(w, on_axis, _)| w.cross(p - on_axis))
+        };
+        for c in m.solver_contacts.iter_mut() {
+            // The anchors are world points here; `n` points from collider 1 to collider 2.
+            let closing = (surface(s1, c.anchor1) - surface(s2, c.anchor2)).dot(n);
+            c.dist += closing * self.dt;
+        }
+    }
+
     fn filter_contact_pair(&self, ctx: &PairFilterContext) -> Option<SolverFlags> {
         let apart = |collider: ColliderHandle, body: Option<RigidBodyHandle>| {
             let (Some(c), Some(b)) = (ctx.colliders.get(collider), body) else {
                 return false;
             };
             let body = Entity::from_bits(ctx.bodies[b].user_data as u64);
-            self.0
+            self.no_contact
                 .contains_key(&(convert::entity_of(c.user_data), body))
         };
         if apart(ctx.collider1, ctx.rigid_body2) || apart(ctx.collider2, ctx.rigid_body1) {

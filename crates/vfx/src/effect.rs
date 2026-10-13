@@ -686,6 +686,9 @@ pub struct EffectDesc {
     pub light: Option<EffectLight>,
     /// A ribbon trail behind the effect while it moves.
     pub trail: Option<Trail>,
+    /// A mark left where the effect starts, facing along its up axis (scorch, frost, wet
+    /// stone, a chip), sized by its scale.
+    pub mark: Option<crate::marks::MarkDesc>,
 }
 
 impl Default for EffectDesc {
@@ -698,6 +701,7 @@ impl Default for EffectDesc {
             emitters: Vec::new(),
             light: None,
             trail: None,
+            mark: None,
         }
     }
 }
@@ -708,9 +712,13 @@ impl EffectDesc {
         if self.name.trim().is_empty() {
             return Err("The effect needs a \"name\", like \"spell.fireball\".".into());
         }
-        if self.emitters.is_empty() && self.light.is_none() && self.trail.is_none() {
+        if self.emitters.is_empty()
+            && self.light.is_none()
+            && self.trail.is_none()
+            && self.mark.is_none()
+        {
             return Err(format!(
-                "Effect \"{}\" has no emitters, light or trail, so it would show nothing.",
+                "Effect \"{}\" has no emitters, light, trail or mark, so it would show nothing.",
                 self.name
             ));
         }
