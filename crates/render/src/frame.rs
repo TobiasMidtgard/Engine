@@ -300,19 +300,28 @@ fn luminance(c: Vec3) -> f32 {
 ///
 /// Night is decided by the main light (the brightest directional light): `sun_dir` toward it,
 /// `up` the local vertical, `sun_color` its color times illuminance (lux) and `sun_camera` what
-/// reaches the camera through the air. A light brings day only when it is up (night falls as it
-/// sinks from 10° above the horizon to 4° below) and bright: between 1 and 50 lux after the air.
-/// So a moon (0.3 lux at most) that is the brightest light keeps its stars out, and a sun at
-/// full illuminance below the horizon gives night even without an atmosphere to dim it. The
-/// stand-in moon belongs to a sun below the horizon; when the light is the moon itself (dimmer
-/// than 1 lux), the sky draws it as the light's disc instead.
+/// reaches the camera through the air. A light brings day when it is up (night falls as it sinks
+/// from 10° above the horizon to 4° below) and brighter than a moon: more than 0.5 to 2 lux after
+/// the air. So a sun is day however dim (one under a storm deck at noon gives about 10 lux), a
+/// moon (0.3 lux at most) that is the brightest light keeps its stars out, and a sun at full
+/// illuminance below the horizon gives night even without an atmosphere to dim it.
+///
+/// The stand-in moon belongs to a sun: it shows at night when the light is brighter than a moon.
+/// When the light is moon-dim it is the moon itself (above the horizon, drawn as the light's
+/// disc) or a scene that drives a real moon (one that has set, or a sun dimmed below it), so no
+/// second, stand-in moon is drawn.
 pub fn sky_night(sun_dir: Vec3, up: Vec3, sun_color: Vec3, sun_camera: Vec3) -> (f32, f32) {
     let above = (sun_dir.dot(up) * 4.0 + 0.3).clamp(0.0, 1.0);
-    let daylight = above * smoothstep(1.0, 50.0, luminance(sun_camera));
+    let daylight = above * smoothstep(MOON_LUX, SUN_LUX, luminance(sun_camera));
     let night = 1.0 - daylight;
-    let stand_in_moon = night * smoothstep(1.0, 50.0, luminance(sun_color));
+    let stand_in_moon = night * smoothstep(MOON_LUX, SUN_LUX, luminance(sun_color));
     (night, stand_in_moon)
 }
+
+/// Main light illuminance (lux) up to which it is taken for a moon (a full moon gives 0.3) …
+const MOON_LUX: f32 = 0.5;
+/// … and from which on for a sun, however dim (a sun under a storm deck gives about 10).
+const SUN_LUX: f32 = 2.0;
 
 /// Build the view for the active camera (a default camera at the origin when there is none).
 ///
@@ -793,6 +802,10 @@ mod tests {
         assert_eq!(sky_night(high, up, sun, sun * 0.8), (0.0, 0.0));
         // A moon up and the brightest light: night, and its own disc is the moon.
         assert_eq!(sky_night(high, up, moon, moon * 0.8), (1.0, 0.0));
+        // A sun dimmed to 12 lux by a storm deck at noon, 60° up: still day.
+        let up60 = Vec3::new(0.0, 0.866, -0.5);
+        let storm = Vec3::splat(12.0);
+        assert_eq!(sky_night(up60, up, storm, storm * 0.85), (0.0, 0.0));
         // A sun at full illuminance below the horizon: night with the stand-in moon, whether
         // the air dims it to nothing or there is no atmosphere at all.
         assert_eq!(sky_night(low, up, sun, Vec3::ZERO), (1.0, 1.0));

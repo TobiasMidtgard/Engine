@@ -122,8 +122,9 @@ fn turning_the_cloud_layer_off_clears_the_sky_and_its_light() {
     );
 }
 
-/// Pixels clearly brighter than the sky two pixels around them (stars), in a view of the sky.
-fn stars(img: &RgbaImage) -> usize {
+/// Pixels at least `contrast` (luma, 0..255) brighter than the sky two pixels around them
+/// (stars), in a view of the sky.
+fn stars(img: &RgbaImage, contrast: f32) -> usize {
     let luma = |x: u32, y: u32| {
         let p = img.get_pixel(x, y);
         0.2126 * p[0] as f32 + 0.7152 * p[1] as f32 + 0.0722 * p[2] as f32
@@ -139,7 +140,7 @@ fn stars(img: &RgbaImage) -> usize {
             ]
             .into_iter()
             .fold(f32::MAX, f32::min);
-            if luma(x, y) > around + 10.0 {
+            if luma(x, y) > around + contrast {
                 n += 1;
             }
         }
@@ -147,10 +148,11 @@ fn stars(img: &RgbaImage) -> usize {
     n
 }
 
-/// A 24° view 60° up of a sky lit by one light of `lux` 50° up behind the camera (out of view),
-/// at 960x540: star cells are three pixels wide, and there are a few hundred of them.
-fn starry_sky(lux: f32, ev100: f32, name: &str) -> Option<RgbaImage> {
-    let mut app = sky_app(60.0, 24.0, 130.0, lux, ev100);
+/// A 24° view 60° up of a sky lit by one light of `lux` `elevation` degrees up behind the
+/// camera (out of view), at 960x540: star cells are three pixels wide, and there are a few
+/// hundred of them.
+fn starry_sky(lux: f32, elevation: f64, ev100: f32, name: &str) -> Option<RgbaImage> {
+    let mut app = sky_app(60.0, 24.0, 180.0 - elevation, lux, ev100);
     {
         let mut w = app.world.resource_mut::<Window>();
         w.width = 960;
@@ -162,20 +164,33 @@ fn starry_sky(lux: f32, ev100: f32, name: &str) -> Option<RgbaImage> {
 #[test]
 fn a_moon_overhead_keeps_the_stars_out_of_its_night() {
     // A full moon is the only (so the brightest) light.
-    let Some(moonlit) = starry_sky(0.3, -3.0, "night_moon_overhead") else {
+    let Some(moonlit) = starry_sky(0.3, 50.0, -3.0, "night_moon_overhead") else {
         return;
     };
-    let n = stars(&moonlit);
+    let n = stars(&moonlit, 10.0);
     eprintln!("stars under a moon overhead: {n}");
     assert!(
         n >= 10,
         "a moonlit sky is night: its stars should show ({n} star pixels)"
     );
     // The same light at a sun's illuminance is day: no stars.
-    let day = starry_sky(110_000.0, 14.5, "night_sun_overhead").unwrap();
-    let n = stars(&day);
+    let day = starry_sky(110_000.0, 50.0, 14.5, "night_sun_overhead").unwrap();
+    let n = stars(&day, 10.0);
     eprintln!("stars under a sun overhead: {n}");
     assert_eq!(n, 0, "a sunny sky has no stars");
+}
+
+#[test]
+fn a_sun_dimmed_by_a_storm_deck_is_still_day() {
+    // Under a full storm deck the weather dims the sun to about 12 lux at noon (the deck lights
+    // the ground through the environment map). It is brighter than any moon: no stars. Exposed
+    // for that dim sky, where stars at night strength stand out by several levels.
+    let Some(storm) = starry_sky(12.0, 60.0, -2.0, "night_storm_noon") else {
+        return;
+    };
+    let n = stars(&storm, 4.0);
+    eprintln!("stars under a storm-dimmed sun at noon: {n}");
+    assert_eq!(n, 0, "a storm at noon is day: no stars ({n} star pixels)");
 }
 
 /// Mean luma of the 9x9 pixels around (`cx`, `cy`) (0..255).
