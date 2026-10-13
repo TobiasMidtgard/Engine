@@ -17,7 +17,9 @@
 //! events (one `Started` per touch carrying the impact impulse and a normal from `a` toward
 //! `b`, one `Ended` when it stops), raycasts, time dilation, precision far from the origin,
 //! following a [`WorldShift`](crate::WorldShift) (bodies keep their place relative to each
-//! other when the world is re-anchored and turned) and the character controller (including its time scaling: a character moves in its own seconds,
+//! other when the world is re-anchored and turned), kinematic bodies moved by setting their
+//! `Transform` (collisions and queries follow, and bodies resting on them ride along) and the
+//! character controller (including its time scaling: a character moves in its own seconds,
 //! so one that ignores world slow motion keeps full speed).
 
 use engine_core::math::{DVec3, Vec3};
@@ -54,6 +56,14 @@ const CHECKS: &[(&str, CheckFn)] = &[
     ),
     ("precise_far_from_origin", precise_far_from_origin),
     ("follows_world_shifts", follows_world_shifts),
+    (
+        "kinematic_follows_its_transform",
+        kinematic_follows_its_transform,
+    ),
+    (
+        "kinematic_carries_resting_bodies",
+        kinematic_carries_resting_bodies,
+    ),
     ("character_walks_and_grounds", character_walks_and_grounds),
     (
         "character_honors_local_time_scale",
@@ -311,6 +321,104 @@ fn follows_world_shifts(install: &dyn Fn(&mut App)) -> Result<(), String> {
         0.0,
         0.05,
     )
+}
+
+/// A kinematic platform `half` in size at the origin, moved only by its `Transform` (no
+/// `Velocity`), the way gameplay moves lifts, doors and moving platforms.
+fn platform(app: &mut App, half: Vec3) -> Entity {
+    app.world
+        .spawn((
+            Transform::IDENTITY,
+            RigidBody::kinematic(),
+            Collider::cuboid(half),
+        ))
+        .id()
+}
+
+fn set_x(app: &mut App, e: Entity, x: f64) {
+    if let Some(mut t) = app.world.get_mut::<Transform>(e) {
+        t.translation.x = x;
+    }
+}
+
+fn kinematic_follows_its_transform(install: &dyn Fn(&mut App)) -> Result<(), String> {
+    let mut app = app_with(install);
+    let p = platform(&mut app, Vec3::new(1.0, 0.25, 1.0));
+    app.update();
+    // Slide it 2 m along +x over 1 s, one step at a time.
+    for step in 1..=60 {
+        set_x(&mut app, p, 2.0 * step as f64 * DT);
+        app.update();
+    }
+    app.update();
+    near(
+        "x of a kinematic platform whose Transform gameplay moved to 2 (the backend must not \
+         write its own pose back)",
+        position(&app, p).x,
+        2.0,
+        1e-3,
+    )?;
+    let q = app.world.resource::<PhysicsQueries>().clone();
+    let down = |x: f64| {
+        q.raycast(
+            DVec3::new(x, 5.0, 0.0),
+            Vec3::NEG_Y,
+            10.0,
+            &QueryFilter::default(),
+        )
+    };
+    let hit = down(2.5).ok_or(
+        "a ray down onto where gameplay moved a kinematic platform (by setting its Transform, no \
+         Velocity) missed it: move the backend's body and collider to the Transform every step",
+    )?;
+    if hit.entity != p {
+        return Err(format!(
+            "a ray down onto the moved platform hit {:?}, expected the platform {p:?}",
+            hit.entity
+        ));
+    }
+    near("platform top hit after the move", hit.point.y, 0.25, 0.01)?;
+    if down(-0.5).is_some_and(|h| h.entity == p) {
+        return Err("a ray down onto where the kinematic platform started still hits it".into());
+    }
+    Ok(())
+}
+
+fn kinematic_carries_resting_bodies(install: &dyn Fn(&mut App)) -> Result<(), String> {
+    let mut app = app_with(install);
+    let p = platform(&mut app, Vec3::new(2.0, 0.25, 2.0));
+    let crate_e = app
+        .world
+        .spawn((
+            Transform::from_xyz(0.0, 0.6, 0.0),
+            RigidBody::dynamic(),
+            Collider::cuboid(Vec3::splat(0.25)),
+            Velocity::default(),
+        ))
+        .id();
+    app.update_n(60);
+    let start = position(&app, crate_e);
+    near("crate resting on the platform (height)", start.y, 0.5, 0.05)?;
+    // Gentle start: 1 m/s² for 2 s, then 0.5 s at 2 m/s, so the platform travels 3 m.
+    let (mut x, mut v) = (0.0, 0.0);
+    for step in 0..150 {
+        if step < 120 {
+            v += DT;
+        }
+        x += v * DT;
+        set_x(&mut app, p, x);
+        app.update();
+    }
+    let end = position(&app, crate_e);
+    near(
+        "how far a crate resting on a kinematic platform rode along while gameplay moved the \
+         platform 3 m by its Transform (give the body the velocity of that motion, so contacts \
+         carry what rests on it)",
+        end.x - start.x,
+        x,
+        0.1,
+    )?;
+    near("crate still on the platform (height)", end.y, 0.5, 0.05)
 }
 
 /// A shift for `follows_world_shifts` to write in `WorldShiftSet::Write`.

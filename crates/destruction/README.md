@@ -16,6 +16,13 @@ fracture and debris.
 - **Reinforced walls** have a rebar mesh in their cells. Explosions strip the concrete off
   the bars but leave the mesh standing until the energy per square meter is enough to cut
   steel (2.5 MJ/m²), the way a reinforced wall in Siege needs a hard breacher.
+- **Floors, roofs and hatches** (Siege vertical play) are the same walls laid flat
+  (`DestructibleWall::flat()`): `floor` is 5 cm boards between joists, `hatch` a wooden hatch
+  cover, `steel_hatch` a steel plate over one. Bullets fired from below punch up through
+  boards, a charge on top blows a hole to drop through and what breaks loose falls into the
+  room below; a sledgehammer smashes a wooden hatch in, while a steel one only dents until
+  thermite cuts it out. Built openings (`with_opening`: doorways, windows, hatch holes) come
+  back every time a wall is rebuilt.
 - **Breach charges** (`BreachCharge`): an explosive charge blows a hole through soft walls; a
   thermite charge burns around its edge (sparks, smoke, glowing strip), cutting rebar too, and
   the panel inside drops out at the end.
@@ -25,16 +32,20 @@ fracture and debris.
   stone). Break a post and whatever depended on it falls after a short creak. `ShowSupport`
   paints pieces blue (grounded), green, yellow, orange and red (about to fall), like Valheim's
   build mode. With a physics module, standing pieces are solid: each gets a static collider
-  (its box a skin smaller, a gable's triangle) with its material's surface, so you walk on
-  floors and decks and walls stop you, debris lands on what still stands, and a car that hits
+  (its box a skin smaller, a gable's triangle, a stair's sloping slab whose top is a ramp
+  through its treads) with its material's surface, so you walk on floors and decks and up
+  stairs and walls stop you, debris lands on what still stands, and a car that hits
   a wall breaks it. A piece that falls becomes a debris body.
 - **Build mode** (`build`, Valheim's hammer): a `Builder` (the player's camera, a script)
-  picks one of twelve pieces (wood floor, wall, pole, beam, 26° and 45° shingle roofs, a
-  26° board gable to close a roof's end, a wall with a doorway and one with a window; stone
-  floor, wall and pillar) and aims. A translucent ghost of the piece sits on what the aim hits
+  picks one of thirteen pieces (wood floor, wall, pole, beam, 26° and 45° shingle roofs, a
+  26° board gable to close a roof's end, a wall with a doorway and one with a window, a
+  flight of stairs rising 1.2 m over 2 m in seven steps; stone floor, wall and pillar) and
+  aims. A translucent ghost of the piece sits on what the aim hits
   (on top of the ground or a floor, against a wall's side or a floor's edge) and snaps so its
   nearest snap point meets a neighbor's (pole and beam ends, panel corners and edge midpoints,
-  a floor's on its top face, block corners), skipping spots inside other pieces. The ghost
+  a floor's on its top face, block corners, a stair's foot and head, so flights meet head to
+  foot and a head meets a floor's edge: two flights climb from the ground to a floor over a
+  0.4 m stone plinth), skipping spots inside other pieces. The ghost
   shows the support it would get in the support colors, or a deep red where it would sit
   inside something, touch nothing, reach too far from support to stand, or (with a physics
   module) close around someone standing there; place it, turn it
@@ -42,7 +53,14 @@ fracture and debris.
   terrain or on voxel rock alike (dig the rock out from under them and they fall). Built
   pieces show their support colors while their builder has the support view on. Keys (bound
   unless the game binds them): B build mode, left mouse place, X remove, R rotate, C next
-  piece, 1 to 9, 0, − and = pick a piece.
+  piece, 1 to 9, 0, −, = and [ pick a piece.
+- **Stairs** (`BuildKind::WoodStair`, `props::wood_stair`): seven plank treads with rounded
+  nosings across the full width (open risers, each tread a little over the one below), nailed
+  down onto three cut stringers: a level seat sawn for each tread and a plumb riser under its
+  nosing, a hand's depth of wood left under the notches, grain up the pitch, level where they
+  sit and plumb at the head, so two flights built head to foot read as one stair. Boots have
+  dished and darkened the treads' middles. Real stair proportions: 171 mm rise, 286 mm
+  going.
 - **Doors** (`door`): a ledged and braced plank door (iron strap hinges, clenched nails, a
   ring pull on each face) hangs in every doorway built in build mode. `interact` (E, gamepad
   West) opens or shuts the door nearest a character within 2.2 m; it swings 95° away from
@@ -126,7 +144,7 @@ grenade writes `WorldImpulse`, a pickaxe writes `TerrainEdit`.
 
 | Function | Does |
 |---|---|
-| `destruction.spawn_wall` | `{preset: soft\|barricade\|reinforced\|brick\|stone\|concrete, at, yaw_deg, size, thickness, material}` |
+| `destruction.spawn_wall` | `{preset: soft\|barricade\|reinforced\|brick\|stone\|concrete\|floor\|hatch\|steel_hatch, at, yaw_deg, size, thickness, material}` (floors and hatches lie flat) |
 | `destruction.spawn_voxels` | `{preset: cliff\|arch\|boulder, at, yaw_deg, size, voxel_size, material}` |
 | `destruction.shoot` | A burst of bullets `{from, to, speed, count, spread}` |
 | `destruction.hit` | One impact `{at, dir, energy_j, melee}` |
@@ -162,6 +180,13 @@ the Siege fortress zone). It is about 80 × 40 m and runs a 20 s loop, then rebu
   wall with a thermite doorway; a reinforced wall after an explosive (concrete gone, rebar
   standing); a brick wall with a blast hole. Two run live: thermite burning through reinforced
   concrete, and a drywall shot up and then blown open by a charge.
+- **Breach house** (vertical play, north of the tower): a brick room with an open front and a
+  window in each side wall under a timber roof deck on joists, with a stair up its back wall
+  to the roof and a steel ladder under each of its two rimmed hatches. Its west roof bay was
+  shot up from below long ago, so sunlight comes through the holes; every loop the room fires
+  up through the east bay, a charge on the roof blows a hole and the boards rain in, thermite
+  cuts the steel hatch out and its plate drops onto the floor, and a sledgehammer smashes the
+  wooden hatch in.
 - **Valheim tower.** The support colors come on, then the posts break one by one and the tower
   comes down.
 - **Gate** of stone blocks blown apart.
@@ -174,7 +199,7 @@ the Siege fortress zone). It is about 80 × 40 m and runs a 20 s loop, then rebu
   no flames).
 
 `cargo run -p engine_destruction --release --example fortress -- <out_dir>` renders all of it
-headless to 22 screenshots.
+headless to 28 screenshots (`house` for the breach house's).
 
 `hill::spawn_voxel_hill(commands, origin)` builds the dig-and-build hill (the showcase's voxel
 hill zone) on a 28 s loop: a tunnel dug into the hill until its hall caves in, a terrace raised
@@ -184,14 +209,16 @@ place before the piece goes down: a stone plinth (blue), corner posts and board 
 window in each side, a loft floor, a shingle roof with board gables closing its ends, a
 framed doorway in the front whose plank door then swings open, and a deck reaching
 out from the +X gable whose second row is orange at the edge of support, then the red ghost
-of a third row that couldn't stand.
+of a third row that couldn't stand. Then the builder puts the support view away and builds
+**stairs** up to the deck's end: a flight on the ground, and one whose foot snaps onto its
+head and whose head snaps onto the deck's edge.
 Then the hoe levels a floor pad in the terrace and a second builder puts up a **shelter on the
 rock**: a stone floor laid on the bare rock (blue, because rock is ground), board walls at the
 ends, a shingle roof, and the back walls and their gable against the cut bank, open toward
 the valley. Then a pickaxe digs a pit under it: under one floor slab first (the other slab
 still holds it, red), then under both, and the shelter drops into the pit.
 `--example hill -- <out_dir> [WxH] [only]` renders it (`only`: `build` for the yard,
-`shelter` for the terrace).
+`stairs` for its stairs, `shelter` for the terrace).
 
 ## Tests
 
@@ -202,7 +229,10 @@ still holds it, red), then under both, and the shelter drops into the pit.
   a burning shed charring and coming down, build mode placing snapped pieces and taking them
   down, the hill's cabin going up with its red ghost and its door swung open and its shelter
   standing on the terrace's rock, pieces on voxel rock falling when it is dug out from under
-  them, doors opening away from whoever presses interact and falling with their doorway).
+  them, doors opening away from whoever presses interact and falling with their doorway,
+  stairs built up to the cabin's deck and their ramp-shaped colliders, a floor shot through
+  from below and blown open from above, hatches smashed in or cut out while steel stops
+  bullets and charges, built openings surviving a rebuild, and the breach house's loop).
 - `hill::tests::the_yard_cabin_snaps_together_as_planned` and
   `the_terrace_shelter_snaps_together_as_planned` aim every step of the cabin and the shelter
   and check each piece lands where it should with the support the solver gives it.
@@ -214,4 +244,5 @@ still holds it, red), then under both, and the shelter drops into the pit.
   voxel cliff. **Done** (tests above and the showcase).
 
 Next: debris resting on other debris without a physics module, cave-in boulders resting on
-rock ledges (they need side contacts, not just floors), doors and windows in walls.
+rock ledges (they need side contacts, not just floors), railings, and ladders you can climb
+(they need a climbing contract from movement).

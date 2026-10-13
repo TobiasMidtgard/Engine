@@ -95,8 +95,8 @@ pub fn build_library(
     let white = |r: f32| StandardMaterial::hex(0xffffff).with_roughness(r);
     let (detail, detail_normal) = meshgen::ground_detail(512);
     let mut terrain = white(0.95)
-        .with_base_color_texture(images.add(detail))
-        .with_normal_texture(images.add(detail_normal));
+        .with_base_color_texture(images.insert_keyed("showcase/ground/detail", detail))
+        .with_normal_texture(images.insert_keyed("showcase/ground/detail_normal", detail_normal));
     // The detail map averages about 0.85; lift the base so the vertex colors keep their value.
     terrain.base_color = [1.18, 1.18, 1.18, 1.0];
     terrain.normal_scale = 0.7;
@@ -846,10 +846,49 @@ pub fn spawn_cliffs_and_stream(
             ));
         }
     }
+    for st in &land.streams {
+        spawn_falls_mist(commands, st);
+    }
     engine::core::log::info!(
         "scenery: cliff {near_tris} triangles near, {far_tris} far, {talus_count} talus rocks, built in {:.2} s",
         t0.elapsed().as_secs_f32()
     );
+}
+
+/// Spray mist where the falls land: a dense, wispy cloud over the plunge pool and a faint haze
+/// drifting off downstream, lit by the volumetric fog (sunbeams catch it, the cliff shades it).
+fn spawn_falls_mist(commands: &mut Commands, st: &crate::landscape::Stream) {
+    let Some((top, bottom)) = st.falls() else {
+        return;
+    };
+    let drop = (st.bed[top] - st.bed[bottom]) as f32;
+    let land_at = (bottom + 1).min(st.path.len() - 1);
+    let downstream =
+        (st.path[(bottom + 12).min(st.path.len() - 1)] - st.path[land_at]).normalize_or(DVec2::Y);
+    let surface = st.bed[land_at] + st.depth * 0.55;
+    let at = |along: f64, up: f64| {
+        let p = st.path[land_at] + downstream * along;
+        Transform::from_translation(DVec3::new(p.x, surface + up, p.y))
+    };
+    let spray = [0.92, 0.94, 0.97];
+    commands.spawn((
+        at(1.5, 1.6),
+        FogVolume::ellipsoid([5.0, (0.3 * drop).clamp(2.0, 4.0), 5.0])
+            .with_density(0.06)
+            .with_albedo(spray)
+            .with_edge_falloff(2.0)
+            .with_noise(0.8, 1.4)
+            .with_anisotropy(0.6),
+    ));
+    commands.spawn((
+        at(9.0, 2.5),
+        FogVolume::ellipsoid([10.0, 4.0, 10.0])
+            .with_density(0.012)
+            .with_albedo(spray)
+            .with_edge_falloff(4.0)
+            .with_noise(0.7, 3.0)
+            .with_anisotropy(0.6),
+    ));
 }
 
 /// Street furniture hides beyond this distance (meters).

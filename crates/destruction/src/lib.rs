@@ -214,8 +214,8 @@ impl Plugin for DestructionPlugin {
             .register_component::<Builder>(
                 "Valheim-style build mode on this entity (the player's camera, a script): active, kind \
                  (wood_floor, wood_wall, wood_pole, wood_beam, wood_roof, wood_roof_45, wood_gable, \
-                 wood_doorway, wood_window, stone_floor, stone_wall, stone_pillar), yaw rad, reach_m, \
-                 use_input, aim ray, show_support.",
+                 wood_doorway, wood_window, wood_stair, stone_floor, stone_wall, stone_pillar), yaw \
+                 rad, reach_m, use_input, aim ray, show_support.",
             )
             .register_component::<BuiltPiece>("A building piece placed in build mode: kind.")
             .register_component::<Door>(
@@ -659,7 +659,9 @@ fn register_api(app: &mut App) {
     app.register_api(
         "destruction.spawn_wall",
         "Spawn a destructible wall: preset soft (drywall), barricade (planks), reinforced, brick, \
-         stone or concrete; size [w,h] m. Returns its id.",
+         stone or concrete; size [w,h] m. Presets floor (boards on joists), hatch (wooden cover) \
+         and steel_hatch lie flat, their top at `at`'s height plus half their thickness, size \
+         [w, length] running along -Z (turned by yaw_deg). Returns its id.",
         SPAWN_WALL,
         |world, args| {
             let a: SpawnWallArgs = parse(args, SPAWN_WALL)?;
@@ -671,22 +673,33 @@ fn register_api(app: &mut App) {
                 "brick" => DestructibleWall::masonry(DestructibleMaterial::Brick, w, h, 0.22),
                 "stone" => DestructibleWall::masonry(DestructibleMaterial::Stone, w, h, 0.4),
                 "concrete" => DestructibleWall::concrete(w, h, 0.2),
+                "floor" => DestructibleWall::floor(w, h),
+                "hatch" => DestructibleWall::hatch(w, h),
+                "steel_hatch" => DestructibleWall::steel_hatch(w, h),
                 other => {
                     return Err(format!(
-                        "Unknown preset \"{other}\". Use soft, barricade, reinforced, brick, stone or concrete."
+                        "Unknown preset \"{other}\". Use soft, barricade, reinforced, brick, stone, \
+                         concrete, floor, hatch or steel_hatch."
                     ));
                 }
             };
+            let flat = matches!(
+                a.preset.as_deref(),
+                Some("floor" | "hatch" | "steel_hatch")
+            );
             if let Some(t) = a.thickness {
                 wall.thickness = t.clamp(0.02, 2.0);
             }
             if let Some(m) = material_arg(a.material.as_deref())? {
                 wall.material = m;
             }
+            let mut rotation = Quat::from_rotation_y(a.yaw_deg.to_radians());
+            if flat {
+                rotation *= DestructibleWall::flat();
+            }
             let e = world
                 .spawn((
-                    Transform::from_translation(DVec3::from_array(a.at))
-                        .with_rotation(Quat::from_rotation_y(a.yaw_deg.to_radians())),
+                    Transform::from_translation(DVec3::from_array(a.at)).with_rotation(rotation),
                     wall,
                 ))
                 .id();
@@ -810,7 +823,8 @@ fn build_api(app: &mut App) {
          straight down at \"at\"), the piece snaps to the pieces around it and is placed if it is \
          free and supported. Kinds: wood_floor, wood_wall, wood_pole, wood_beam, wood_roof, \
          wood_roof_45, wood_gable, wood_doorway (a plank door hangs in it), wood_window, \
-         stone_floor, stone_wall, stone_pillar. \"preview\": true only says where it would go. \
+         wood_stair (1.2 m up over 2 m, climbing away from `from`; its head snaps to a floor's \
+         edge, its foot to another flight's head), stone_floor, stone_wall, stone_pillar. \"preview\": true only says where it would go. \
          Returns where, its support and the new piece's id.",
         BUILD,
         |world, args| {

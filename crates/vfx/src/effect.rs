@@ -318,6 +318,32 @@ impl Facing {
     }
 }
 
+/// A small solid piece a layer draws instead of sprites: a lit, faceted 3D mesh that tumbles
+/// with the particle's spin, casts a shadow and fades out by dissolving. Its `color` is the
+/// albedo, `size` the piece's length, `emissive` makes it glow (molten rock, hot shrapnel).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Debris {
+    /// A faceted lump: rock and concrete chips, gravel, clods of earth.
+    Rock,
+    /// A long sliver splintered at both ends: wood.
+    Splinter,
+    /// A thin flake with sharp edges: ice, glass, slate.
+    Shard,
+    /// A torn, bent scrap of sheet metal: shrapnel, wreckage.
+    Scrap,
+}
+
+impl Debris {
+    /// Every kind, in GPU order.
+    pub const ALL: [Debris; 4] = [Debris::Rock, Debris::Splinter, Debris::Shard, Debris::Scrap];
+
+    /// GPU code: 1 + the kind's index (0 is a sprite).
+    pub fn code(self) -> f32 {
+        (self as u32 + 1) as f32
+    }
+}
+
 /// What happens when a particle reaches the ground (or a water surface).
 #[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -559,6 +585,9 @@ pub struct EmitterDesc {
     // ---- look
     /// Procedural sprite.
     pub sprite: Sprite,
+    /// Draw solid 3D pieces instead of sprites (`sprite`, `facing`, `stretch`, `lit`,
+    /// `additive` and `soft` don't apply).
+    pub debris: Option<Debris>,
     /// Which way the quad faces.
     pub facing: Facing,
     /// Streak length per m/s of speed, seconds (velocity facing; 0.02 = a 20 m/s spark is 0.4 m).
@@ -614,6 +643,7 @@ impl Default for EmitterDesc {
             on_death: None,
             trailing: None,
             sprite: Sprite::Glow,
+            debris: None,
             facing: Facing::Camera,
             stretch: 0.0,
             color: Gradient::default(),

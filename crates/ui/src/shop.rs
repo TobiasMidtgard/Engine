@@ -4,7 +4,8 @@
 //! sells one at once.
 //!
 //! Open it with `ui.show {"screen": "shop", "vendor": "Merchant"}` (the name of an entity
-//! with a [`Vendor`]; `owner` names the buyer, default the Player).
+//! with a [`Vendor`]; `owner` names the buyer, default the Player). `mode: "sell"` opens the
+//! sell tab; `select` (a card index or an item id) opens with that card selected.
 
 use bevy_ecs::message::MessageCursor;
 use bevy_ecs::prelude::*;
@@ -496,6 +497,20 @@ pub fn build_screen(world: &mut World, args: &Value) -> Result<Entity, String> {
         quantity: 1,
         snapshot: None,
     };
+    st.selected = match args.get("select") {
+        Some(Value::String(id)) => {
+            let inv = world.get::<Inventory>(owner).cloned().unwrap_or_default();
+            let vendor = world.get::<Vendor>(vendor).cloned().unwrap_or_default();
+            let n = match st.mode {
+                ShopMode::Buy => vendor.stock.len(),
+                ShopMode::Sell => inv.slots.len(),
+            };
+            (0..n).find(|&i| card_stack(&st, &inv, &vendor, i).is_some_and(|s| s.item == *id))
+        }
+        Some(v) => v.as_u64().map(|i| i as usize),
+        None => None,
+    };
+    st.shown = st.selected;
     st.snapshot = snapshot(world, &st);
     let content = build(world, &st);
     let el = El::new()

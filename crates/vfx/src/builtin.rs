@@ -198,6 +198,8 @@ fn haze(name: &str, strength: f32) -> EmitterDesc {
     }
 }
 
+/// Solid stone chips that bounce, settle and crumble away. Set `debris` to another kind (or
+/// `None` for flat sprite flakes such as leaves and grains).
 fn chips(name: &str, count: u32, albedo: [f32; 3], speed: [f32; 2]) -> EmitterDesc {
     let [r, gg, b] = albedo;
     EmitterDesc {
@@ -210,14 +212,15 @@ fn chips(name: &str, count: u32, albedo: [f32; 3], speed: [f32; 2]) -> EmitterDe
             restitution: 0.3,
             friction: 0.6,
         },
-        lifetime: [0.7, 1.4],
-        size: [0.03, 0.08],
+        lifetime: [1.6, 3.2],
+        size: [0.03, 0.09],
         spin_deg: [-720.0, 720.0],
         sprite: Sprite::Shard,
+        debris: Some(Debris::Rock),
         lit: 1.0,
         color: g(&[
             (0.0, [r, gg, b, 1.0]),
-            (0.85, [r, gg, b, 1.0]),
+            (0.8, [r, gg, b, 1.0]),
             (1.0, [r, gg, b, 0.0]),
         ]),
         soft: 0.0,
@@ -610,13 +613,17 @@ fn spells() -> Vec<EffectDesc> {
                     speed: [0.5, 1.5],
                     gravity: 0.5,
                     lifetime: [0.4, 0.8],
-                    size: [0.06, 0.14],
+                    size: [0.05, 0.12],
                     spin_deg: [-360.0, 360.0],
                     sprite: Sprite::Shard,
-                    lit: 0.8,
-                    emissive: 2500.0,
-                    color: g(&[(0.0, [0.75, 0.9, 1.0, 1.0]), (1.0, [0.6, 0.85, 1.0, 0.0])]),
-                    additive: 0.2,
+                    debris: Some(Debris::Shard),
+                    lit: 1.0,
+                    emissive: 1500.0,
+                    color: g(&[
+                        (0.0, [0.75, 0.9, 1.0, 1.0]),
+                        (0.7, [0.65, 0.87, 1.0, 1.0]),
+                        (1.0, [0.6, 0.85, 1.0, 0.0]),
+                    ]),
                     ..em("shards")
                 },
                 EmitterDesc {
@@ -629,8 +636,8 @@ fn spells() -> Vec<EffectDesc> {
                     speed: [0.1, 0.3],
                     lifetime: [0.8, 1.4],
                     size: [0.3, 0.5],
-                    emissive: 900.0,
-                    color: fade([0.6, 0.82, 1.0], 0.35, 0.15, 0.4),
+                    emissive: 150.0,
+                    color: fade([0.4, 0.55, 0.7], 0.25, 0.15, 0.4),
                     ..smoke("mist", 0.85, 0.35)
                 },
             ],
@@ -667,12 +674,12 @@ fn spells() -> Vec<EffectDesc> {
                         restitution: 0.25,
                         friction: 0.5,
                     },
-                    emissive: 2500.0,
-                    additive: 0.25,
+                    debris: Some(Debris::Shard),
+                    emissive: 1200.0,
                     color: g(&[
-                        (0.0, [0.55, 0.8, 1.0, 0.95]),
-                        (0.85, [0.55, 0.8, 1.0, 0.9]),
-                        (1.0, [0.55, 0.8, 1.0, 0.0]),
+                        (0.0, [0.62, 0.85, 1.0, 1.0]),
+                        (0.8, [0.62, 0.85, 1.0, 1.0]),
+                        (1.0, [0.62, 0.85, 1.0, 0.0]),
                     ]),
                     ..chips("shards", 60, [0.8, 0.93, 1.0], [3.0, 8.0])
                 },
@@ -690,20 +697,22 @@ fn spells() -> Vec<EffectDesc> {
                     additive: 1.0,
                     ..em("glints")
                 },
+                // A thin cold mist rolling out low along the ground.
                 EmitterDesc {
-                    bursts: once(24),
+                    bursts: once(16),
                     shape: EmitShape::Ring {
                         radius: 0.3,
                         thickness: 0.2,
                     },
-                    speed: [1.5, 3.0],
-                    drag: 2.5,
+                    speed: [1.8, 3.5],
+                    drag: 2.0,
                     gravity: 0.02,
-                    lifetime: [1.5, 2.5],
-                    size: [0.8, 1.2],
-                    size_over_life: c(&[(0.0, 0.6), (1.0, 3.0)]),
-                    emissive: 600.0,
-                    ..smoke("mist", 0.85, 0.5)
+                    turbulence: 0.3,
+                    lifetime: [1.4, 2.4],
+                    size: [0.5, 0.8],
+                    size_over_life: c(&[(0.0, 0.6), (1.0, 2.6)]),
+                    emissive: 60.0,
+                    ..smoke("mist", 0.5, 0.3)
                 },
                 EmitterDesc {
                     bursts: once(1),
@@ -730,7 +739,7 @@ fn spells() -> Vec<EffectDesc> {
         prewarm: 3.0,
         light: Some(EffectLight {
             offset: [0.0, 1.0, 0.0],
-            ..light([0.7, 0.45, 1.0], 9000.0, 14.0, 0.15, 0.6).unwrap()
+            ..light([0.7, 0.45, 1.0], 5000.0, 14.0, 0.15, 0.6).unwrap()
         }),
         ..effect(
             "spell.arcane_portal",
@@ -826,7 +835,7 @@ fn spells() -> Vec<EffectDesc> {
                     size: [1.2, 1.8],
                     local_space: true,
                     color: g(&[(0.0, [0.8, 0.5, 1.0, 0.5]), (1.0, [0.5, 0.2, 1.0, 0.0])]),
-                    emissive: 20_000.0,
+                    emissive: 3_000.0,
                     additive: 1.0,
                     wind: 0.0,
                     ..em("core")
@@ -1053,48 +1062,53 @@ fn spells() -> Vec<EffectDesc> {
     };
 
     let charge = EffectDesc {
-        light: light([0.6, 0.8, 1.0], 6000.0, 10.0, 0.25, 0.2),
+        light: light([0.6, 0.8, 1.0], 2500.0, 10.0, 0.25, 0.2),
         ..effect(
             "spell.charge",
-            "Gathering energy before a cast: streaks pulled in from all around into a pulsing \
-             white-blue core.",
+            "Gathering energy before a cast: motes drawn in from all around on spiraling paths, \
+             brightening as they near a pulsing white-blue core.",
             None,
             vec![
+                // Motes appear faint and blue on a sphere around the core and spiral in on
+                // comet tails, so the pull reads at a glance instead of as scattered dashes.
                 EmitterDesc {
-                    rate: 220.0,
+                    rate: 70.0,
                     shape: EmitShape::Sphere {
                         radius: 2.2,
                         surface: true,
                     },
                     speed: [0.0, 0.0],
-                    attract: 18.0,
-                    drag: 0.5,
+                    attract: 16.0,
+                    vortex: 9.0,
+                    drag: 1.2,
                     wind: 0.0,
                     local_space: true,
-                    lifetime: [0.6, 0.9],
-                    size: [0.04, 0.08],
-                    sprite: Sprite::Spark,
+                    lifetime: [0.7, 1.0],
+                    size: [0.06, 0.1],
+                    size_over_life: c(&[(0.0, 0.6), (0.7, 1.0), (1.0, 0.5)]),
                     facing: Facing::Velocity,
-                    stretch: 0.08,
+                    stretch: 0.05,
                     color: g(&[
-                        (0.0, [0.6, 0.8, 1.0, 0.0]),
-                        (0.3, [0.7, 0.85, 1.0, 1.0]),
-                        (1.0, [1.0, 1.0, 1.0, 1.0]),
+                        (0.0, [0.35, 0.55, 1.0, 0.0]),
+                        (0.45, [0.45, 0.65, 1.0, 0.7]),
+                        (0.85, [0.75, 0.88, 1.0, 1.0]),
+                        (1.0, [0.9, 0.95, 1.0, 0.0]),
                     ]),
-                    emissive: 30_000.0,
+                    emissive: 10_000.0,
                     additive: 1.0,
                     soft: 0.0,
                     ..em("converge")
                 },
+                // Few enough overlapping puffs that the core stays blue around a white heart.
                 EmitterDesc {
-                    rate: 40.0,
+                    rate: 20.0,
                     speed: [0.0, 0.0],
                     local_space: true,
                     lifetime: [0.25, 0.4],
                     size: [0.6, 1.0],
                     size_over_life: c(&[(0.0, 0.4), (0.5, 1.0), (1.0, 0.7)]),
                     color: g(&[(0.0, [0.85, 0.92, 1.0, 1.0]), (1.0, [0.5, 0.7, 1.0, 0.0])]),
-                    emissive: 30_000.0,
+                    emissive: 9_000.0,
                     additive: 1.0,
                     wind: 0.0,
                     ..em("core")
@@ -1155,10 +1169,11 @@ fn spells() -> Vec<EffectDesc> {
     };
 
     let orb = EffectDesc {
-        light: light([1.0, 0.8, 0.5], 1500.0, 7.0, 0.15, 0.4),
+        light: light([1.0, 0.75, 0.45], 700.0, 6.0, 0.15, 0.4),
         ..effect(
             "magic.orb",
-            "A floating light orb (wisp, lantern spirit): soft core with orbiting sparkles.",
+            "A floating light orb (wisp, lantern spirit): a small white-hot heart in a soft amber \
+             halo, with orbiting sparkles.",
             None,
             vec![
                 EmitterDesc {
@@ -1166,12 +1181,29 @@ fn spells() -> Vec<EffectDesc> {
                     speed: [0.0, 0.0],
                     local_space: true,
                     lifetime: [0.2, 0.3],
-                    size: [0.35, 0.45],
-                    color: g(&[(0.0, [1.0, 0.85, 0.6, 0.9]), (1.0, [1.0, 0.6, 0.3, 0.0])]),
+                    size: [0.13, 0.17],
+                    color: g(&[(0.0, [1.0, 0.9, 0.7, 0.95]), (1.0, [1.0, 0.7, 0.4, 0.0])]),
                     emissive: 25_000.0,
                     additive: 1.0,
                     wind: 0.0,
                     ..em("core")
+                },
+                // A dim glow around the heart, so it reads as a ball of light rather than a dot.
+                EmitterDesc {
+                    rate: 12.0,
+                    speed: [0.0, 0.0],
+                    local_space: true,
+                    lifetime: [0.5, 0.7],
+                    size: [0.5, 0.65],
+                    color: g(&[
+                        (0.0, [1.0, 0.55, 0.2, 0.0]),
+                        (0.3, [1.0, 0.55, 0.2, 0.35]),
+                        (1.0, [1.0, 0.45, 0.15, 0.0]),
+                    ]),
+                    emissive: 3_000.0,
+                    additive: 1.0,
+                    wind: 0.0,
+                    ..em("halo")
                 },
                 EmitterDesc {
                     rate: 14.0,
@@ -1215,7 +1247,7 @@ fn spells() -> Vec<EffectDesc> {
             (0.8, [1.0, 0.62, 0.3, 1.0]),
             (1.0, [1.0, 0.9, 0.8, 1.0]),
         ]),
-        emissive: 80_000.0,
+        emissive: 30_000.0,
         additive: 1.0,
         soft: 0.0,
         ..em(name)
@@ -1237,7 +1269,7 @@ fn spells() -> Vec<EffectDesc> {
         facing: Facing::Velocity,
         stretch: 0.07,
         color: colors,
-        emissive: 120_000.0,
+        emissive: 35_000.0,
         additive: 1.0,
         soft: 0.0,
         ..em(name)
@@ -1257,7 +1289,7 @@ fn spells() -> Vec<EffectDesc> {
         size_over_life: c(&[(0.0, 1.0), (1.0, 0.3)]),
         sprite: Sprite::Glow,
         color: colors,
-        emissive: 70_000.0,
+        emissive: 20_000.0,
         additive: 1.0,
         soft: 0.0,
         ..em(name)
@@ -1338,15 +1370,19 @@ fn spells() -> Vec<EffectDesc> {
                 [0.3, 0.7],
                 g(&[(0.0, [1.0, 0.75, 0.4, 1.0]), (1.0, [1.0, 0.35, 0.08, 0.0])]),
             ),
-            tail(
-                "star_tail",
-                [0.5, 1.1],
-                g(&[
-                    (0.0, [0.95, 0.75, 1.0, 0.9]),
-                    (0.3, [1.0, 0.7, 0.5, 0.7]),
-                    (1.0, [1.0, 0.45, 0.2, 0.0]),
-                ]),
-            ),
+            // Gold glitter, dimmer than the stars so it stays gold rather than white at night.
+            EmitterDesc {
+                emissive: 12_000.0,
+                ..tail(
+                    "star_tail",
+                    [0.5, 1.1],
+                    g(&[
+                        (0.0, [1.0, 0.78, 0.9, 0.9]),
+                        (0.25, [1.0, 0.62, 0.3, 0.75]),
+                        (1.0, [1.0, 0.4, 0.12, 0.0]),
+                    ]),
+                )
+            },
             EmitterDesc {
                 shape: EmitShape::Sphere {
                     radius: 0.05,
@@ -1365,7 +1401,7 @@ fn spells() -> Vec<EffectDesc> {
                     (0.5, [1.0, 0.88, 0.62, 1.0]),
                     (1.0, [1.0, 0.7, 0.4, 0.0]),
                 ]),
-                emissive: 150_000.0,
+                emissive: 50_000.0,
                 additive: 1.0,
                 soft: 0.0,
                 ..em("crackle")
@@ -1849,15 +1885,22 @@ fn impacts() -> Vec<EffectDesc> {
             ],
         )
     };
-    let surface =
-        |name: &str, desc: &str, albedo: [f32; 3], chip: [f32; 3], extra: Vec<EmitterDesc>| {
-            let mut emitters = vec![
-                dust_puff("dust", 12, albedo, 0.55, [0.6, 1.8], [0.25, 0.45]),
-                chips("chips", 16, chip, [2.0, 5.0]),
-            ];
-            emitters.extend(extra);
-            effect(name, desc, Some(0.1), emitters)
-        };
+    // `kind`: solid chips, or `None` for flat flakes (torn grass, leaves).
+    let surface = |name: &str,
+                   desc: &str,
+                   albedo: [f32; 3],
+                   (chip, kind): ([f32; 3], Option<Debris>),
+                   extra: Vec<EmitterDesc>| {
+        let mut emitters = vec![
+            dust_puff("dust", 12, albedo, 0.55, [0.6, 1.8], [0.25, 0.45]),
+            EmitterDesc {
+                debris: kind,
+                ..chips("chips", 16, chip, [2.0, 5.0])
+            },
+        ];
+        emitters.extend(extra);
+        effect(name, desc, Some(0.1), emitters)
+    };
     let dirt = [0.42, 0.34, 0.26];
     let rock = [0.5, 0.49, 0.47];
     vec![
@@ -1867,14 +1910,14 @@ fn impacts() -> Vec<EffectDesc> {
             "impact.default",
             "A generic hit on the ground: a dust puff and chips.",
             dirt,
-            dirt,
+            ([0.24, 0.19, 0.14], Some(Debris::Rock)),
             vec![],
         ),
         surface(
             "impact.dirt",
             "A hit on dirt: a brown dust puff and clods.",
             dirt,
-            [0.32, 0.25, 0.18],
+            ([0.2, 0.15, 0.1], Some(Debris::Rock)),
             vec![],
         ),
         EffectDesc {
@@ -1883,7 +1926,7 @@ fn impacts() -> Vec<EffectDesc> {
                 "impact.rock",
                 "A hit on rock: grey dust, stone chips, a few sparks and a chipped pock.",
                 rock,
-                rock,
+                ([0.3, 0.29, 0.27], Some(Debris::Rock)),
                 vec![EmitterDesc {
                     lifetime: [0.2, 0.5],
                     ..sparks("sparks", 6, [3.0, 8.0])
@@ -1896,7 +1939,7 @@ fn impacts() -> Vec<EffectDesc> {
                 "impact.concrete",
                 "A hit on concrete: pale dust, chips, a few sparks and a chipped pock.",
                 [0.62, 0.6, 0.56],
-                [0.6, 0.58, 0.55],
+                ([0.4, 0.39, 0.37], Some(Debris::Rock)),
                 vec![EmitterDesc {
                     lifetime: [0.2, 0.5],
                     ..sparks("sparks", 5, [3.0, 8.0])
@@ -1907,22 +1950,24 @@ fn impacts() -> Vec<EffectDesc> {
             "impact.wood",
             "A hit on wood: splinters and light dust.",
             [0.55, 0.45, 0.32],
-            [0.62, 0.46, 0.28],
+            ([0.45, 0.31, 0.17], Some(Debris::Splinter)),
             vec![EmitterDesc {
-                facing: Facing::Velocity,
-                stretch: 0.03,
-                size: [0.02, 0.04],
-                ..chips("splinters", 14, [0.7, 0.55, 0.35], [2.5, 6.0])
+                size: [0.05, 0.13],
+                spin_deg: [-540.0, 540.0],
+                debris: Some(Debris::Splinter),
+                ..chips("splinters", 14, [0.55, 0.4, 0.24], [2.5, 6.0])
             }],
         ),
         surface(
             "impact.sand",
             "A hit on sand: a spray of grains and a tan cloud.",
             [0.72, 0.62, 0.45],
-            [0.72, 0.62, 0.45],
+            ([0.45, 0.38, 0.27], Some(Debris::Rock)),
             vec![EmitterDesc {
                 sprite: Sprite::Dust,
+                debris: None,
                 size: [0.02, 0.04],
+                lifetime: [0.7, 1.4],
                 collide: Collide::Die,
                 ..chips("grains", 40, [0.72, 0.62, 0.45], [1.5, 4.5])
             }],
@@ -1931,12 +1976,13 @@ fn impacts() -> Vec<EffectDesc> {
             "impact.grass",
             "A hit on grass: torn green bits fluttering down and a little dust.",
             [0.36, 0.38, 0.24],
-            [0.3, 0.5, 0.18],
+            ([0.3, 0.5, 0.18], None),
             vec![EmitterDesc {
                 drag: 2.5,
                 gravity: 0.4,
                 size: [0.04, 0.08],
                 lifetime: [1.0, 1.8],
+                debris: None,
                 ..chips("bits", 16, [0.3, 0.5, 0.18], [2.0, 4.0])
             }],
         ),
@@ -1944,13 +1990,14 @@ fn impacts() -> Vec<EffectDesc> {
             "impact.leaves",
             "A hit on leaf litter: leaves tossed up and fluttering down.",
             [0.4, 0.33, 0.2],
-            [0.55, 0.35, 0.12],
+            ([0.55, 0.35, 0.12], None),
             vec![EmitterDesc {
                 drag: 3.0,
                 gravity: 0.35,
                 size: [0.06, 0.1],
                 lifetime: [1.2, 2.2],
                 turbulence: 3.0,
+                debris: None,
                 ..chips("leaves", 14, [0.6, 0.38, 0.12], [2.0, 4.0])
             }],
         ),
@@ -2064,7 +2111,10 @@ fn impacts() -> Vec<EffectDesc> {
             "A hit on ice: glinting ice chips and a frosty puff.",
             Some(0.1),
             vec![
-                chips("chips", 20, [0.82, 0.92, 1.0], [2.0, 5.0]),
+                EmitterDesc {
+                    debris: Some(Debris::Shard),
+                    ..chips("chips", 20, [0.82, 0.92, 1.0], [2.0, 5.0])
+                },
                 dust_puff("frost", 6, [0.9, 0.95, 1.0], 0.4, [0.5, 1.5], [0.2, 0.35]),
                 EmitterDesc {
                     bursts: once(8),
@@ -2087,9 +2137,9 @@ fn impacts() -> Vec<EffectDesc> {
             Some(0.1),
             vec![
                 EmitterDesc {
-                    lit: 1.0,
-                    additive: 0.3,
-                    ..chips("shards", 40, [0.75, 0.85, 0.85], [2.0, 6.0])
+                    size: [0.03, 0.1],
+                    debris: Some(Debris::Shard),
+                    ..chips("shards", 40, [0.55, 0.66, 0.65], [2.0, 6.0])
                 },
                 EmitterDesc {
                     bursts: once(10),
@@ -2134,7 +2184,10 @@ fn impacts() -> Vec<EffectDesc> {
                     ]),
                     ..ripples("wave", &[0.0], 12.0, 0.6, 0.55)
                 },
-                chips("debris", 30, [0.4, 0.36, 0.32], [4.0, 9.0]),
+                EmitterDesc {
+                    size: [0.04, 0.14],
+                    ..chips("debris", 30, [0.27, 0.24, 0.21], [4.0, 9.0])
+                },
             ],
         ),
         EffectDesc {
@@ -2172,7 +2225,17 @@ fn impacts() -> Vec<EffectDesc> {
                         lifetime: [1.0, 2.5],
                         ..sparks("sparks", 200, [8.0, 22.0])
                     },
-                    chips("debris", 50, [0.3, 0.28, 0.26], [6.0, 16.0]),
+                    EmitterDesc {
+                        size: [0.06, 0.22],
+                        lifetime: [2.5, 4.5],
+                        ..chips("debris", 50, [0.2, 0.18, 0.16], [6.0, 16.0])
+                    },
+                    EmitterDesc {
+                        size: [0.08, 0.2],
+                        lifetime: [2.5, 4.5],
+                        debris: Some(Debris::Scrap),
+                        ..chips("scrap", 12, [0.32, 0.3, 0.28], [5.0, 13.0])
+                    },
                     EmitterDesc {
                         delay: 0.1,
                         duration: Some(2.4),
@@ -2261,7 +2324,9 @@ fn steps() -> Vec<EffectDesc> {
                 dust_puff("puff", 8, [0.72, 0.62, 0.45], 0.45, [0.4, 1.0], [0.2, 0.35]),
                 EmitterDesc {
                     sprite: Sprite::Dust,
+                    debris: None,
                     size: [0.02, 0.04],
+                    lifetime: [0.7, 1.4],
                     collide: Collide::Die,
                     shape: EmitShape::Cone {
                         angle_deg: 50.0,
@@ -2312,12 +2377,18 @@ fn steps() -> Vec<EffectDesc> {
                     radius: 0.12,
                     thickness: 0.05,
                 },
-                size: [0.03, 0.06],
-                lifetime: [0.6, 1.2],
+                size: [0.03, 0.07],
+                lifetime: [1.2, 2.2],
                 stretch: 0.0,
                 facing: Facing::Camera,
                 sprite: Sprite::Shard,
+                debris: Some(Debris::Rock),
                 spin_deg: [-360.0, 360.0],
+                color: g(&[
+                    (0.0, [0.2, 0.15, 0.09, 1.0]),
+                    (0.75, [0.2, 0.15, 0.09, 1.0]),
+                    (1.0, [0.2, 0.15, 0.09, 0.0]),
+                ]),
                 ..droplets(
                     "clumps",
                     20,
@@ -2354,6 +2425,7 @@ fn steps() -> Vec<EffectDesc> {
                 size: [0.05, 0.09],
                 lifetime: [0.8, 1.4],
                 turbulence: 2.0,
+                debris: None,
                 shape: EmitShape::Cone {
                     angle_deg: 40.0,
                     radius: 0.1,
@@ -2425,8 +2497,9 @@ fn misc() -> Vec<EffectDesc> {
                     drag: 0.3,
                     collide: Collide::Die,
                     lifetime: [0.8, 1.5],
-                    size: [0.04, 0.1],
+                    size: [0.04, 0.12],
                     sprite: Sprite::Shard,
+                    debris: Some(Debris::Rock),
                     spin_deg: [-400.0, 400.0],
                     lit: 1.0,
                     color: g(&[(0.0, [0.2, 0.15, 0.1, 1.0]), (1.0, [0.2, 0.15, 0.1, 1.0])]),

@@ -15,10 +15,11 @@ fn star_field(dir: vec3<f32>) -> vec3<f32> {
     return vec3(0.8, 0.85, 1.0) * smoothstep(0.25, 0.0, d) * brightness * twinkle * 0.05;
 }
 
-// Cheap 2D cloud layer on a spherical shell. Returns (radiance, coverage alpha).
+// Cheap 2D cloud layer on a spherical shell. Returns (radiance, coverage alpha). Off with
+// `RenderSettings::sky_cloud_layer` (frame.sky.x), for features that draw their own clouds.
 fn cloud_layer(dir: vec3<f32>, sky: vec3<f32>) -> vec4<f32> {
     let cover = frame.weather.z;
-    if (cover <= 0.01 || frame.planet.w <= 0.0) { return vec4(0.0); }
+    if (frame.sky.x < 0.5 || cover <= 0.01 || frame.planet.w <= 0.0) { return vec4(0.0); }
     let base_alt = 1500.0;
     let hit = ray_shell(vec3(0.0), frame.camera_world.w, dir, base_alt);
     var t = hit.y;
@@ -86,13 +87,16 @@ fn sky_radiance(dir: vec3<f32>, with_sun: bool) -> vec3<f32> {
             to_space = a.transmittance;
         }
     }
-    // Night sky floor and stars.
-    let night = 1.0 - saturate(frame.sun_dir.y * 4.0 + 0.3);
+    // Night sky floor and stars. Night follows the main light's elevation and its illuminance at
+    // the camera (frame.sky.y, see `sky_night` in frame.rs): under a moon that is the brightest light the
+    // stars show, as they do with the sun below the horizon.
+    let night = frame.sky.y;
     c += vec3(0.002, 0.003, 0.006) * night;
     c += star_field(dir) * night * to_space;
-    // Moon-ish glow opposite the sun at night.
+    // A stand-in moon's glow opposite a sun below the horizon (frame.sky.z). When the light is
+    // the moon itself, its disc is drawn below as the light's.
     let moon_dir = -frame.sun_dir.xyz;
-    let moon = smoothstep(0.9997, 0.99985, dot(dir, moon_dir)) * night * 0.5;
+    let moon = smoothstep(0.9997, 0.99985, dot(dir, moon_dir)) * frame.sky.z * 0.5;
     c += vec3(moon);
     if (with_sun) {
         let cos_r = cos(frame.sun_dir.w);

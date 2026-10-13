@@ -105,6 +105,44 @@ fn footsteps_from_ground_contacts_are_heard() {
 }
 
 #[test]
+fn a_footstep_without_a_speed_goes_at_its_walkers_pace() {
+    use engine_world::animation::AnimationParams;
+    let mut app = app();
+    app.world
+        .spawn((AudioListener::default(), Transform::from_xyz(0.0, 1.7, 0.0)));
+    app.update_n(3);
+    let grass = app.world.resource::<SurfaceMaterials>().id("grass");
+    let loudness = |app: &mut App, entity: Entity| {
+        app.world.write_message(GroundContact {
+            position: DVec3::new(0.5, 0.0, -1.0),
+            normal: Vec3::Y,
+            size: [0.1, 0.27],
+            yaw: 0.0,
+            load_kg: 75.0,
+            speed: 0.0,
+            kind: ContactKind::Foot,
+            surface: grass,
+            entity: Some(entity),
+        });
+        app.update();
+        let msgs = app.world.resource::<Messages<AudioCue>>();
+        msgs.iter_current_update_messages()
+            .filter(|c| c.name.starts_with("footstep"))
+            .map(|c| c.loudness)
+            .next()
+            .expect("the step plays")
+    };
+    // An animation clip's footstep carries no speed; the runner's animation says 4 m/s.
+    let mut params = AnimationParams::default();
+    params.set("speed", 4.0);
+    let runner = app.world.spawn(params).id();
+    let standing = app.world.spawn_empty().id();
+    let ran = loudness(&mut app, runner);
+    let stood = loudness(&mut app, standing);
+    assert!(ran > stood * 2.0, "running {ran} vs standing {stood}");
+}
+
+#[test]
 fn footsteps_out_of_earshot_are_skipped() {
     let mut app = app();
     app.world

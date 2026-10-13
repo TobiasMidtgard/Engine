@@ -425,6 +425,13 @@ impl MapData {
             .find_map(|p| p.pois.iter().find(|q| q.id == id).map(|q| (p, q)))
     }
 
+    /// Whether the waypoint is set on this place of planet `planet`.
+    pub fn is_waypoint(&self, planet: &str, poi: &Poi) -> bool {
+        self.waypoint.as_ref().is_some_and(|w| {
+            w.planet == planet && (w.lon - poi.lon).abs() < 1e-6 && (w.lat - poi.lat).abs() < 1e-6
+        })
+    }
+
     /// Meters and bearing (degrees) from the player to the waypoint when both are on the same
     /// planet.
     pub fn waypoint_nav(&self) -> Option<(f64, f64)> {
@@ -907,6 +914,8 @@ struct Painted<'a> {
     view: &'a MapView,
     selected: Option<&'a MapItem>,
     hovered: Option<&'a MapItem>,
+    /// The screen's panels over the map (layers, info card, tabs, hints): labels keep clear.
+    covered: Vec<Rect>,
 }
 
 impl Painted<'_> {
@@ -916,6 +925,81 @@ impl Painted<'_> {
     fn is_hot(&self, it: &MapItem) -> bool {
         self.hovered == Some(it) || self.selected == Some(it)
     }
+    /// A label placer that starts with the panels blocked.
+    fn placer(&self) -> Declutter {
+        Declutter(self.covered.clone())
+    }
+    /// Draw a text unless a panel would cut through it.
+    #[allow(clippy::too_many_arguments)]
+    fn text(
+        &self,
+        ctx: &mut DrawCtx,
+        text: &str,
+        size: f32,
+        weight: u16,
+        color: Color,
+        pos: Vec2,
+        anchor: Vec2,
+    ) {
+        let m = ctx.measure(&crate::text::TextSpec {
+            text: text.to_string(),
+            size: size * ctx.px,
+            weight,
+            wrap: false,
+            ..Default::default()
+        });
+        let tl = pos - m * anchor;
+        let rect = Rect::new(tl.x, tl.y, m.x, m.y);
+        if self.covered.iter().all(|c| c.intersect(&rect).is_empty()) {
+            ctx.text(text, size, weight, color, pos, anchor);
+        }
+    }
+}
+
+/// Ids of the map screen's panels that labels keep clear of.
+const PANELS: [&str; 5] = [
+    "map_layers",
+    "map_zoom",
+    "map_card",
+    "map_tabs",
+    "map_hints",
+];
+
+/// The waypoint pin, `s` tall, its tip at `tip`; returns the rectangle it covers.
+pub(crate) fn waypoint_pin(ctx: &mut DrawCtx, tip: Vec2, s: f32, glow: Color) -> Rect {
+    let icon = Rect::new(tip.x - s * 0.5, tip.y - s * (62.0 / 64.0), s, s);
+    ctx.glow(
+        Vec2::new(tip.x, icon.y + s * 0.36),
+        s * 0.75,
+        glow.with_alpha(0.5),
+        1.4,
+    );
+    ctx.icon("marker_waypoint", icon, Color::WHITE);
+    icon
+}
+
+/// The ring round a place the waypoint is set on, `r` out from its center.
+fn waypoint_ring(ctx: &mut DrawCtx, c: Vec2, r: f32, t: f32, color: Color) {
+    let px = ctx.px;
+    ctx.ring(
+        c,
+        Vec2::splat(r),
+        1.6 * px,
+        color.with_alpha(0.9),
+        0.0,
+        TAU,
+        0.0,
+    );
+    let pulse = (t * 0.8).fract();
+    ctx.ring(
+        c,
+        Vec2::splat(r + pulse * 10.0 * px),
+        1.2 * px,
+        color.with_alpha(0.6 * (1.0 - pulse)),
+        0.0,
+        TAU,
+        0.0,
+    );
 }
 
 /// A selection reticle: four corner brackets.
@@ -1067,11 +1151,22 @@ fn paint_map(world: &mut World, e: Entity, ctx: &mut DrawCtx) {
         + Vec2::new(z * 120.0, view.yaw * 60.0) * ctx.px;
     ctx.starfield(r, drift, 1.0, 7.0, 0.0);
 
+    let mut covered = Vec::new();
+    for id in PANELS {
+        if let Some(e) = crate::input::find_id(world, id)
+            && let Some(c) = world.get::<ComputedNode>(e)
+            && c.rect.w > 0.0
+            && c.rect.h > 0.0
+        {
+            covered.push(c.rect.inflate(4.0 * ctx.px));
+        }
+    }
     let mut out = Painted {
         hits: Vec::new(),
         view: &view,
         selected: view.selected.as_ref(),
         hovered: view.hovered.as_ref(),
+        covered,
     };
     for level in [3usize, 2, 1, 0] {
         let w = level_weight(z, level);
@@ -1217,12 +1312,7 @@ fn draw_galaxy(
             .as_ref()
             .is_some_and(|w| w.system == s.id && w.system != map.player.system)
         {
-            let d = 12.0 * px;
-            ctx.icon(
-                "marker_quest",
-                Rect::new(q.x - d * 0.5, q.y - size * 3.0 - d, d, d),
-                Color::WHITE,
-            );
+            waypoint_pin(ctx, q - Vec2::Y * (size * 2.4), 15.0 * px, p.accent);
         }
         if out.is_sel(&item) {
             reticle(ctx, q, size * 2.2, p.accent_light);
@@ -1240,7 +1330,8 @@ fn draw_galaxy(
             } else {
                 Color::WHITE.with_alpha(0.82)
             };
-            ctx.text(
+            out.text(
+                ctx,
                 name,
                 12.0,
                 700,
@@ -1249,7 +1340,8 @@ fn draw_galaxy(
                 Vec2::new(0.5, 0.0),
             );
             if hot && s.discovered && !s.faction.is_empty() {
-                ctx.text(
+                out.text(
+                    ctx,
                     &s.faction,
                     10.0,
                     600,
@@ -1393,7 +1485,8 @@ fn draw_system(
         }
         if layers.2 && pr < r.h * 0.25 {
             let hot = out.is_hot(&item);
-            ctx.text(
+            out.text(
+                ctx,
                 &pl.name,
                 13.0,
                 700,
@@ -1407,7 +1500,8 @@ fn draw_system(
                 q + Vec2::new(0.0, pr + 8.0 * px),
                 Vec2::new(0.5, 0.0),
             );
-            ctx.text(
+            out.text(
+                ctx,
                 pl.kind.label(),
                 10.0,
                 600,
@@ -1508,31 +1602,17 @@ fn draw_globe(
         (c + Vec2::new(v[0], -v[1]) * rad, v[2])
     };
     // Labels go on last, so none covers a marker or another label.
-    let mut placer = Declutter::default();
+    let mut placer = out.placer();
     let mut labels: Vec<(String, Vec2, f32, f32)> = Vec::new();
-    // The player and the waypoint first, so places merge around them.
-    if pl.id == map.player.planet {
-        let (q, depth) = project(map.player.lon, map.player.lat);
-        if depth > 0.05 {
-            let pulse = (t * 1.6).fract();
-            ctx.ring(
-                q,
-                Vec2::splat((5.0 + pulse * 14.0) * px),
-                1.5 * px,
-                p.info.with_alpha(1.0 - pulse),
-                0.0,
-                TAU,
-                0.0,
-            );
-            ctx.glow(q, 6.0 * px, p.info, 2.0);
-            placer.block(Rect::new(
-                q.x - 6.0 * px,
-                q.y - 6.0 * px,
-                12.0 * px,
-                12.0 * px,
-            ));
-        }
-    }
+    // Where the waypoint is: on a place, its pin stands on that place's marker.
+    let wp = map
+        .waypoint
+        .as_ref()
+        .filter(|w| w.planet == pl.id)
+        .map(|w| project(w.lon, w.lat))
+        .filter(|(_, depth)| *depth > 0.05)
+        .map(|(q, _)| q);
+    let mut pin_tip = wp;
     if layers.0 {
         // Places closer than a marker apart merge into the most important one, with a count.
         let rank = |poi: &Poi| {
@@ -1567,10 +1647,20 @@ fn draw_globe(
                 None => leaders.push((poi, q, a, 0)),
             }
         }
+        let mut pinned = false;
         for (poi, q, a, more) in leaders {
             let item = MapItem::Poi(poi.id.clone());
             let s = (18.0 + 6.0 * a) * px;
+            // The waypoint's place, or the group it merged into.
+            let waypoint = !pinned && wp.is_some_and(|w| w.distance(q) < merge);
+            if waypoint {
+                pinned = true;
+                pin_tip = Some(q - Vec2::Y * (s * 0.5 + 1.0 * px));
+            }
             ctx.faded(a, |ctx| {
+                if waypoint {
+                    waypoint_ring(ctx, q, s * 0.62, t, p.accent);
+                }
                 ctx.glow(q, s * 0.9, poi.kind.color().with_alpha(0.4), 1.6);
                 let icon = Rect::new(q.x - s * 0.5, q.y - s * 0.5, s, s);
                 ctx.icon(poi.kind.icon(), icon, Color::WHITE);
@@ -1605,16 +1695,41 @@ fn draw_globe(
             out.hits.push((q, s * 0.8, item));
         }
     }
-    if let Some(w) = &map.waypoint
-        && w.planet == pl.id
-    {
-        let (q, depth) = project(w.lon, w.lat);
+    if let Some(tip) = pin_tip {
+        let icon = waypoint_pin(ctx, tip, 24.0 * px, p.accent);
+        placer.block(icon.inflate(-2.0 * px));
+    }
+    // The player on top, so it reads over a crowded place.
+    if pl.id == map.player.planet {
+        let (q, depth) = project(map.player.lon, map.player.lat);
         if depth > 0.05 {
-            let s = 22.0 * px;
-            ctx.glow(q, s, p.accent.with_alpha(0.5), 1.4);
-            let icon = Rect::new(q.x - s * 0.5, q.y - s - 4.0 * px, s, s);
-            ctx.icon("marker_quest", icon, Color::WHITE);
-            placer.block(icon.inflate(-2.0 * px));
+            let pulse = (t * 1.6).fract();
+            ctx.ring(
+                q,
+                Vec2::splat((5.0 + pulse * 12.0) * px),
+                1.5 * px,
+                p.info.with_alpha(1.0 - pulse),
+                0.0,
+                TAU,
+                0.0,
+            );
+            ctx.glow(q, 7.0 * px, p.info, 2.0);
+            // A "you are here" dot: blue in a white rim.
+            for (r, color) in [(4.6 * px, Color::WHITE), (3.0 * px, p.info)] {
+                ctx.rect(
+                    Rect::new(q.x - r, q.y - r, r * 2.0, r * 2.0),
+                    color,
+                    r,
+                    0.0,
+                    Color::TRANSPARENT,
+                );
+            }
+            placer.block(Rect::new(
+                q.x - 6.0 * px,
+                q.y - 6.0 * px,
+                12.0 * px,
+                12.0 * px,
+            ));
         }
     }
     for (text, q, gap, a) in labels {
@@ -1710,7 +1825,7 @@ fn draw_surface(
     }
     ctx.with_clip(vis, |ctx| {
         // Labels go on last, around the markers, so none covers a marker or another label.
-        let mut placer = Declutter::default();
+        let mut placer = out.placer();
         let mut labels: Vec<(String, f32, Color, Vec2, f32, bool)> = Vec::new();
         // Route from the player to the waypoint.
         if let Some(w) = &map.waypoint
@@ -1721,12 +1836,12 @@ fn draw_surface(
             let b = to_px(w.lon, w.lat);
             ctx.line(a, b, 2.5 * px, Color::hexa(0x00000080), 0.0);
             ctx.line(a, b, 1.6 * px, p.accent.with_alpha(0.9), 9.0 * px);
-            let s = 26.0 * px;
-            ctx.glow(b, s, p.accent.with_alpha(0.5), 1.4);
-            let icon = Rect::new(b.x - s * 0.5, b.y - s - 2.0 * px, s, s);
-            ctx.icon("marker_quest", icon, Color::WHITE);
-            placer.block(icon.inflate(-3.0 * px));
         }
+        let mut pin_tip = map
+            .waypoint
+            .as_ref()
+            .filter(|w| w.planet == pl.id)
+            .map(|w| to_px(w.lon, w.lat));
         if layers.0 {
             for poi in pl.pois.iter().filter(|q| q.discovered) {
                 let q = to_px(poi.lon, poi.lat);
@@ -1737,6 +1852,10 @@ fn draw_surface(
                 let hot = out.is_hot(&item);
                 let sel = out.is_sel(&item);
                 let s = if hot { 30.0 } else { 24.0 } * px;
+                if map.is_waypoint(&pl.id, poi) {
+                    waypoint_ring(ctx, q, s * 0.62, t, p.accent);
+                    pin_tip = Some(q - Vec2::Y * (s * 0.5 + 1.0 * px));
+                }
                 ctx.glow(q, s * 0.9, poi.kind.color().with_alpha(0.45), 1.6);
                 let icon = Rect::new(q.x - s * 0.5, q.y - s * 0.5, s, s);
                 ctx.icon(poi.kind.icon(), icon, Color::WHITE);
@@ -1757,6 +1876,12 @@ fn draw_surface(
                 }
                 out.hits.push((q, s * 0.75, item));
             }
+        }
+        if let Some(tip) = pin_tip
+            && vis.inflate(30.0 * px).contains(tip)
+        {
+            let icon = waypoint_pin(ctx, tip, 28.0 * px, p.accent);
+            placer.block(icon.inflate(-3.0 * px));
         }
         if map.player.planet == pl.id {
             let q = to_px(map.player.lon, map.player.lat);
@@ -2098,7 +2223,7 @@ fn info_card(world: &World, item: Option<&MapItem>) -> Vec<El> {
                     El::new()
                         .class("row")
                         .with_style(|s| s.gap(10.0))
-                        .child(El::icon("marker_quest").with_style(|s| s.size(22.0, 22.0)))
+                        .child(El::icon("marker_waypoint").with_style(|s| s.size(22.0, 22.0)))
                         .child(
                             El::new()
                                 .class("col")
@@ -2191,7 +2316,7 @@ fn build(world: &World, view: &MapView) -> El {
                                 }),
                         ),
                 )
-                .child(widgets::tabs(&LEVELS, level, "map.level"))
+                .child(widgets::tabs(&LEVELS, level, "map.level").id("map_tabs"))
                 .child(
                     El::new()
                         .class("row")
@@ -2233,6 +2358,7 @@ fn build(world: &World, view: &MapView) -> El {
         .child(
             El::new()
                 .class("glass")
+                .id("map_zoom")
                 .with_style(|s| {
                     s.position(Position::Absolute)
                         .left(36.0)
@@ -2300,6 +2426,7 @@ fn build(world: &World, view: &MapView) -> El {
                     El::new()
                         .class("glass")
                         .class("row")
+                        .id("map_hints")
                         .with_style(|s| {
                             s.padding([8.0, 20.0])
                                 .gap(26.0)
@@ -2709,7 +2836,7 @@ fn toggle_waypoint(world: &mut World, poi_id: &str) {
         toast::notify(
             world,
             ToastKind::Info,
-            "marker_quest",
+            "marker_waypoint",
             "Waypoint cleared",
             "",
             2.0,
@@ -2725,7 +2852,7 @@ fn toggle_waypoint(world: &mut World, poi_id: &str) {
         toast::notify(
             world,
             ToastKind::Good,
-            "marker_quest",
+            "marker_waypoint",
             "Waypoint set",
             &poi.name,
             2.4,

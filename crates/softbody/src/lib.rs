@@ -6,6 +6,7 @@ pub mod character;
 pub mod cloth;
 pub mod collide;
 pub mod demo;
+pub mod field;
 pub mod gpu_cloth;
 pub mod hair;
 pub mod render;
