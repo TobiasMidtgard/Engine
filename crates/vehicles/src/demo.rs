@@ -452,6 +452,26 @@ impl DemoView {
     }
 }
 
+/// `entity.set` arguments that move the vehicle `name` to `at`, nose along `nose`, moving
+/// at `velocity` and yawing left at `yaw_rate` (rad/s). The physics backend treats the move
+/// as a teleport.
+fn on_mark(name: &str, at: DVec3, nose: Vec3, velocity: Vec3, yaw_rate: f32) -> serde_json::Value {
+    let rot = facing(nose);
+    serde_json::json!({
+        "entity": {"name": name},
+        "components": {
+            "Transform": {
+                "translation": [at.x, at.y, at.z],
+                "rotation": [rot.x, rot.y, rot.z, rot.w],
+            },
+            "Velocity": {
+                "linear": [velocity.x, velocity.y, velocity.z],
+                "angular": [0.0, yaw_rate, 0.0],
+            },
+        },
+    })
+}
+
 /// Viewpoints for the showcase tour by zone (`track`, `airfield`, `spaceport`), for a demo
 /// built at `center` (the zone's center). The airfield views assume the showcase runway:
 /// from 600 m south of the zone's center to 600 m north.
@@ -461,27 +481,51 @@ pub fn views(zone: &str, center: DVec3) -> Vec<DemoView> {
         [p.x, p.y, p.z]
     };
     match zone {
-        "track" => vec![
-            DemoView::new(
-                "track_cars",
-                "Sports cars racing round the oval",
-                [156.0, 2.6, 34.0],
-                [128.0, 0.6, -4.0],
-            ),
-            DemoView::new(
-                "track_drift",
-                "Rally car drifting on the dirt pad",
-                [-42.0, 3.5, 4.0],
-                [-70.0, 0.8, -20.0],
-            )
-            .at(16.0, 6.0),
-            DemoView::new(
-                "track_jump",
-                "The kicker jump",
-                [-26.0, 3.0, 96.0],
-                [0.0, 1.5, 80.0],
-            ),
-        ],
+        // The cars are wherever their laps have taken them when the tour arrives, so each
+        // shot first puts its car on a mark the camera covers (paint and autopilot stay).
+        "track" => {
+            let on_oval = |name: &str, angle: f64, speed: f32| {
+                let dir = oval_direction(angle);
+                let at = oval_point(center, angle) + DVec3::Y * presets::ride_height("sports_car");
+                on_mark(name, at, dir, dir * speed, 0.0)
+            };
+            // Rally car on its drift circle, sliding at 10 m/s with the nose 30° into the
+            // turn (it circles counter-clockwise seen from above).
+            let pad = center + DVec3::new(-70.0, 0.0, -20.0);
+            let (r, phi) = (15.0f64, 136.0f64.to_radians());
+            let out = DVec3::new(phi.cos(), 0.0, phi.sin());
+            let tangent = Vec3::Y.cross(out.as_vec3());
+            let nose = Quat::from_rotation_y(30f32.to_radians()) * tangent;
+            let at = pad + out * r + DVec3::Y * (TRACK_SURFACE + presets::ride_height("rally_car"));
+            let drift = on_mark("Rally car", at, nose, tangent * 10.0, 10.0 / r as f32);
+            vec![
+                DemoView::new(
+                    "track_cars",
+                    "Sports cars racing round the oval",
+                    [110.0, 2.2, 16.0],
+                    [138.0, 0.9, -6.0],
+                )
+                .at(15.5, 1.0)
+                .call("entity.set", on_oval("Red car", -0.5, 30.0))
+                .call("entity.set", on_oval("Blue car", -0.68, 30.0)),
+                DemoView::new(
+                    "track_drift",
+                    "Rally car drifting on the dirt pad",
+                    [-46.0, 2.0, -4.0],
+                    [-66.0, 0.8, -8.0],
+                )
+                .at(16.0, 1.2)
+                .call("entity.set", drift),
+                DemoView::new(
+                    "track_jump",
+                    "The kicker jump",
+                    [-44.0, 2.2, 98.0],
+                    [-12.0, 1.6, 80.0],
+                )
+                .at(15.5, 1.5)
+                .call("entity.set", on_oval("Red car", JUMP_ANGLE - 0.42, 40.0)),
+            ]
+        }
         "airfield" => {
             // A fresh plane lined up on the southern threshold for each shot, flying the
             // same circuit as the demo's planes once it is airborne.
@@ -588,6 +632,14 @@ mod tests {
                         "vehicles.spawn" => args.get("autopilot"),
                         "vehicles.autopilot" => args.get("mode"),
                         "entity.despawn" => None,
+                        "entity.set" => {
+                            let c = &args["components"];
+                            serde_json::from_value::<Transform>(c["Transform"].clone())
+                                .unwrap_or_else(|e| panic!("{}: {e}", v.key));
+                            serde_json::from_value::<Velocity>(c["Velocity"].clone())
+                                .unwrap_or_else(|e| panic!("{}: {e}", v.key));
+                            None
+                        }
                         other => panic!("{} calls unknown API {other}", v.key),
                     };
                     if let Some(mode) = mode {
