@@ -1453,46 +1453,35 @@ fn torso(kit: &mut Kit, s: &Spec) {
             });
         }
         Style::Duelist => {
-            let pec = v.shaped_panels(
-                (0.38, FRAC_PI_2 - 0.045),
-                |u| (1.235 + 0.04 * (1.0 - u), 1.445 - 0.015 * u),
-                |_, _| g,
-                s.a(0.009),
-                14,
-                10,
-                &[],
-                &[0.4],
-            );
-            kit.bind(Chest, Mat::PaintA, || mirrored(pec));
-            kit.bind(Chest, Mat::Trim, || {
-                mirrored(bolts(
-                    &v,
-                    &[(0.47, 1.43), (1.42, 1.43), (0.47, 1.33)],
-                    g + s.t + 0.001,
-                ))
+            // A laced dō: a breastplate under the gorget over three lames laced in blue,
+            // each lame overlapping the one below.
+            let phi = (0.34, PI - 0.34);
+            let lames = Lame::shingled(1.37, 3, 0.064, 0.014, g, 0.0005, 0.0045);
+            let top = lames[0].g.1 + lames[0].t + 0.0012;
+            let plate_y = |u: f32| (1.356, 1.452 - 0.014 * (2.0 * u - 1.0).powi(2));
+            kit.bind(Chest, Mat::PaintA, || {
+                let mut m = v.shaped(phi, plate_y, |_, _| top, s.a(0.004), 22, 6);
+                for l in &lames {
+                    m.append(&l.plate(&v, phi, 0.002, s.edge_a, 22, 4), Mat4::IDENTITY);
+                }
+                m
             });
-            kit.bind(Chest, Mat::PaintB, || {
-                v.plate(
-                    (FRAC_PI_2 - 0.06, FRAC_PI_2 + 0.06),
-                    (1.24, 1.44),
-                    g + 0.006,
-                    Pl::new(0.008, 0.002, 1.4),
-                    3,
-                    10,
-                )
+            kit.bind(Chest, Mat::Wrap, || {
+                let cols = [-0.75, -0.25, 0.25, 0.75].map(|c| FRAC_PI_2 + c);
+                Lame::lacing(&lames, &v, &cols, 0.0016)
+            });
+            kit.bind(Chest, Mat::Trim, || {
+                mirrored(bolts(&v, &[(0.55, 1.425)], top + s.t + 0.002))
             });
             kit.bind(Chest, Mat::Glow, || {
-                mirrored(v.shaped(
-                    (0.5, FRAC_PI_2 - 0.09),
-                    |u| {
-                        let b = 1.235 + 0.04 * (1.0 - u) + 0.01;
-                        (b, b + 0.005)
-                    },
-                    |_, _| g + s.t + 0.0015,
+                v.shaped(
+                    (0.52, PI - 0.52),
+                    |_| (1.3615, 1.3665),
+                    |_, _| top + s.t + 0.0014,
                     Pl::strip(),
-                    12,
+                    16,
                     1,
-                ))
+                )
             });
         }
     }
@@ -1608,6 +1597,29 @@ fn torso(kit: &mut Kit, s: &Spec) {
         }
         m
     });
+    // The samurai styles lace their abdomen lames like the shoulders.
+    let lacing = match style {
+        Style::Duelist => Some(Mat::Wrap),
+        Style::Elite => Some(Mat::PaintB),
+        _ => None,
+    };
+    if let Some(cord) = lacing {
+        kit.bind(Spine, cord, || {
+            let lames: Vec<Lame> = (0..3)
+                .map(|k| {
+                    let y0 = 1.06 + k as f32 * 0.054;
+                    let g = 0.008 + 0.0035 * k as f32;
+                    Lame {
+                        y: (y0, y0 + 0.062),
+                        g: (g, g),
+                        t: s.t * 0.8,
+                    }
+                })
+                .collect();
+            let cols = [-0.75, -0.25, 0.25, 0.75].map(|c| FRAC_PI_2 + c);
+            Lame::lacing(&lames, &v, &cols, 0.0024)
+        });
+    }
     if style == Style::Elite {
         kit.bind(Spine, Mat::Glow, || {
             v.plate(
@@ -1926,6 +1938,23 @@ impl Lame {
             .map(|k| {
                 let y1 = top - k as f32 * (h - lap);
                 let g1 = g0 + k as f32 * step;
+                Lame {
+                    y: (y1 - h, y1),
+                    g: (g1 + flare, g1),
+                    t,
+                }
+            })
+            .collect()
+    }
+
+    /// Like [`Lame::stack`], but each lame lies over the one below it (shingled downward):
+    /// the lowest starts `g0` off the volume.
+    fn shingled(top: f32, n: usize, h: f32, lap: f32, g0: f32, flare: f32, t: f32) -> Vec<Lame> {
+        let step = flare + t + 0.0012;
+        (0..n)
+            .map(|k| {
+                let y1 = top - k as f32 * (h - lap);
+                let g1 = g0 + (n - 1 - k) as f32 * step;
                 Lame {
                     y: (y1 - h, y1),
                     g: (g1 + flare, g1),
