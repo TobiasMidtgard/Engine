@@ -32,6 +32,10 @@ use engine_render::{
 };
 use engine_world::physics::{Collider, ColliderShape};
 
+mod grounds;
+
+use grounds::{Grounds, Prop};
+
 use super::ArtAssets;
 use super::mesh::{
     BoxOpts, NEG_Y, NEG_Z, POS_Z, SdfOpts, append, arc_points, bake_par, box_lid, deform,
@@ -240,6 +244,8 @@ fn wrap_delta(d: Vec2, size: f32) -> Vec2 {
 /// Meters one repeat of each arena texture covers (set `uv_scale` to the inverse).
 pub mod span {
     pub const SAND: f32 = 6.0;
+    pub const WET: f32 = 2.0;
+    pub const RAKED: f32 = 4.0;
     pub const STONE: f32 = 2.0;
     pub const WOOD: f32 = 2.0;
     pub const IRON: f32 = 1.0;
@@ -268,12 +274,13 @@ struct Marks {
 
 const MARK_CELLS: i32 = 12;
 
-fn sand_marks() -> Marks {
-    let mut rng = Rng::new(404);
-    let size = span::SAND;
+/// Footprints and scuffs in a `size` m tile: `tracks` walking tracks, `fights` spots of sand
+/// churned by pivoting feet and `scuffs` loose drags.
+fn marks(size: f32, seed: u64, tracks: u32, fights: u32, scuffs: u32) -> Marks {
+    let mut rng = Rng::new(seed);
     let mut marks = Vec::new();
     // Walking tracks: alternating feet along gently curving paths.
-    for _ in 0..11 {
+    for _ in 0..tracks {
         let mut p = Vec2::new(rng.range(0.0, size), rng.range(0.0, size));
         let mut heading = rng.range(0.0, TAU);
         let turn = rng.signed() * 0.12;
@@ -301,7 +308,7 @@ fn sand_marks() -> Marks {
         }
     }
     // Fighting spots: sand churned by pivoting feet, mostly smeared drags with a few prints.
-    for _ in 0..7 {
+    for _ in 0..fights {
         let c = Vec2::new(rng.range(0.0, size), rng.range(0.0, size));
         for _ in 0..rng.range(7.0, 13.0) as usize {
             let a = rng.range(0.0, TAU);
@@ -342,7 +349,7 @@ fn sand_marks() -> Marks {
         }
     }
     // Loose scuffs and drags.
-    for _ in 0..26 {
+    for _ in 0..scuffs {
         marks.push(Mark {
             at: Vec2::new(rng.range(0.0, size), rng.range(0.0, size)),
             dir: Vec2::from_angle(rng.range(0.0, TAU)),
@@ -447,10 +454,12 @@ fn mark_effect(m: &Mark, d: Vec2) -> (f32, f32, f32) {
     }
 }
 
-/// Arena sand: wind ripples, tracks of sandal prints, fighting spots, drag scuffs, pebbles,
-/// compacted and loose patches and a few old stains (6 m repeat).
+/// Trampled arena sand: overlapping tracks of sandal prints, fighting spots churned by
+/// pivoting feet, drag scuffs, clods kicked loose, pebbles, lumpy ground mottled pale where
+/// it lies loose and dry and darker where it was packed, and faint wind ripples (6 m
+/// repeat).
 pub fn sand_set() -> TextureSet {
-    let marks = sand_marks();
+    let marks = marks(span::SAND, 404, 34, 26, 70);
     let size = span::SAND;
     let cs = size / MARK_CELLS as f32;
     let px = 1024.0;
@@ -487,7 +496,18 @@ pub fn sand_set() -> TextureSet {
             loose = loose.max(rim);
         }
         let disturbed = packed.max(loose);
-        let ripple = 0.0028 * ripple_amt * ripple_shape * (1.0 - disturbed);
+        let ripple = 0.0008 * ripple_amt * ripple_shape * (1.0 - disturbed);
+        // Lumps of loose sand kicked up and left: clods a few centimeters across.
+        let lumps = fb(uv * 14.0, (14, 14), 3, 9);
+        let cc = cell(uv * 70.0, (70, 70), 10);
+        let clod = if cc.id < 0.3 {
+            let r = 0.2 + 0.25 * cc.id / 0.3;
+            (1.0 - smooth(r * 0.3, r, cc.d1)) * (0.5 + 0.5 * cc.id / 0.3)
+        } else {
+            0.0
+        };
+        // Pale where the sand lies loose and dry, darker where feet packed it.
+        let mottle = fb(uv * 5.0, (5, 5), 3, 11) * 0.6 + fb(uv * 17.0, (17, 17), 2, 12) * 0.4;
         // Pebbles.
         let pc = cell(uv * 140.0, (140, 140), 8);
         let peb_r = 0.22 + 0.25 * pc.id;
@@ -496,38 +516,32 @@ pub fn sand_set() -> TextureSet {
         } else {
             0.0
         };
-        // Old stains.
-        let sc = cell(uv * 4.0, (4, 4), 9);
-        let stain = if sc.id < 0.18 && sc.d1 < 0.3 {
-            let blot_edge = 0.16 + 0.08 * fb(uv * 40.0, (40, 40), 2, 10);
-            (1.0 - smooth(blot_edge * 0.6, blot_edge, sc.d1)) * 0.55
-        } else {
-            0.0
-        };
         let height = 0.004 * low
+            + 0.003 * lumps
             + 0.0012 * mid
             + 0.0004 * fine
             + 0.00025 * (speck - 0.5)
             + ripple
             + dig
             + raise
+            + 0.002 * clod
             + 0.0025 * pebble;
-        let warm = hex(0xc9a978);
-        let pale = hex(0xd8c29a);
-        let dark = hex(0xae8b5c);
+        let warm = hex(0xcdae80);
+        let pale = hex(0xddc7a2);
+        let dark = hex(0xb59468);
         let mut a = mix(warm, pale, smooth(-0.2, 0.7, low * 0.8 + mid * 0.4));
-        a = mix(a, dark, smooth(0.1, 0.8, -low * 0.7 + fine * 0.4) * 0.6);
-        a *= 0.94 + 0.12 * speck2 + 0.05 * ripple_shape * ripple_amt;
-        if speck > 0.985 {
-            a = mix(a, hex(0x6b5a48), 0.6);
-        } else if speck < 0.01 {
-            a = mix(a, hex(0xf2ead8), 0.6);
+        a = mix(a, dark, smooth(0.1, 0.8, -low * 0.7 + fine * 0.4) * 0.45);
+        a *= 0.94 + 0.12 * speck2 + 0.02 * ripple_shape * ripple_amt;
+        if speck > 0.993 {
+            a = mix(a, hex(0x7b6650), 0.45);
+        } else if speck < 0.006 {
+            a = mix(a, hex(0xf2ead8), 0.45);
         }
-        a *= 1.0 - 0.06 * packed + 0.03 * loose;
+        a *= 1.0 - 0.08 * packed + 0.07 * loose + 0.06 * clod;
+        a *= 1.0 + 0.09 * mottle + 0.03 * lumps;
         a = mix(a, hex(0x7a5d48) * (0.7 + speck * 0.6), pebble * 0.85);
-        a = mix(a, hex(0x5a2e1f), stain);
         let rough =
-            (0.95 - 0.08 * packed - 0.25 * pebble - 0.1 * stain + 0.03 * fine).clamp(0.5, 1.0);
+            (0.95 - 0.1 * packed - 0.25 * pebble + 0.03 * fine + 0.03 * clod).clamp(0.5, 1.0);
         let occ = (1.0 - 0.18 * packed + 0.05 * raise.min(0.0)).clamp(0.6, 1.0);
         Texel {
             albedo: a,
@@ -2330,7 +2344,7 @@ pub fn stone_wall_mesh(seed: u64) -> Mesh {
             let mut b = chipped_block(
                 half,
                 Chip {
-                    voxel: 0.036,
+                    voxel: 0.04,
                     depth: 0.045,
                     breaks: 2,
                     open_bottom: i == 0,
@@ -2356,7 +2370,7 @@ pub fn stone_wall_mesh(seed: u64) -> Mesh {
             half,
             Chip {
                 radius: 0.03,
-                voxel: 0.036,
+                voxel: 0.04,
                 depth: 0.04,
                 breaks: 2,
                 open_bottom: true,
@@ -3458,58 +3472,6 @@ pub fn ring_meshes(seed: u64) -> (Mesh, Mesh) {
 
 // ============================================================================== floor
 
-/// The sand floor inside the curb: a 36-sided disc whose edges meet the curb's inner face
-/// (40.25 m from the center), with a low berm drifted against the curb, a gentle undulation,
-/// and vertex-color variation: darker compacted sand where fighters trample (`spots`: center
-/// and radius in arena coordinates) and paler drifts. Texture coordinates are world meters
-/// relative to the arena origin.
-pub fn floor_mesh(spots: &[(Vec2, f32)]) -> Mesh {
-    let apothem = 40.25;
-    let sector = TAU / 36.0;
-    let edge = move |a: f32| {
-        let d = a - (a / sector).round() * sector;
-        apothem / d.cos()
-    };
-    let mut ds: Vec<f32> = steps(0.0, 38.4, 56);
-    ds.extend(steps(38.6, 40.25, 12));
-    let ts: Vec<f32> = ds.iter().map(|d| d / apothem).collect();
-    let angles = steps(0.0, TAU, 432);
-    let f = move |t: f32, a: f32| {
-        let big = edge(a);
-        let rho = t * big;
-        let (x, z) = (a.cos() * rho, -a.sin() * rho);
-        let p = Vec3::new(x, 0.0, z);
-        let berm = 0.032 * smooth(big - 1.6, big - 0.02, rho).powf(1.5);
-        let y = 0.017 + 0.004 * vn3(p * 0.3, 901) + 0.002 * vn3(p * 1.1, 902) + berm;
-        Vec3::new(x, y, z)
-    };
-    let mut m = surface(&ts, &angles, &f, &|_, _, p| Vec2::new(p.x, p.z));
-    let spots = spots.to_vec();
-    paint(&mut m, move |p, _| {
-        let q = Vec2::new(p.x, p.z);
-        let mut trample = 0.0f32;
-        for &(c, r) in &spots {
-            let d = q.distance(c) / r;
-            trample = trample.max((1.0 - d * d).max(0.0));
-        }
-        let macro_n = vn3(p * 0.12, 911) * 0.6 + vn3(p * 0.37, 912) * 0.4;
-        let drift = smooth(0.1, 0.6, vn3(p * 0.21 + Vec3::splat(7.0), 913));
-        let rho = q.length();
-        let edge_dark = smooth(36.0, 40.0, rho) * 0.08;
-        let k = (1.0 + 0.07 * macro_n)
-            * (1.0 - 0.16 * trample)
-            * (1.0 + 0.06 * drift)
-            * (1.0 - edge_dark);
-        Vec4::new(
-            k,
-            k * (0.995 - 0.01 * trample),
-            k * (0.99 - 0.03 * trample),
-            1.0,
-        )
-    });
-    m
-}
-
 // ============================================================================== sparring
 
 /// A sparring mat (origin on the floor at its center, 3.6 × 2.6 m): a woven rush mat that
@@ -3703,6 +3665,18 @@ pub enum Mat {
     Leather,
     /// Unlit, blended fire ([`flame_image`]).
     Flame,
+    /// Freshly raked sand, alpha-masked over the trampled sand.
+    Raked,
+    /// Wet sand: soaked sand blended over the floor ([`grounds::wet_set`]), the vertex alpha
+    /// how wet.
+    Damp,
+    /// Still water in the troughs and casks: murky, faintly rippled and mirror smooth
+    /// ([`grounds::water_set`]).
+    Water,
+    /// Straw and feathers: plain, colored per vertex, two-sided and a little translucent.
+    Fiber,
+    /// Tufts of straw lying on the sand: alpha-masked cards of [`grounds::straw_set`].
+    Straw,
 }
 
 /// Emission of the glowing coal seams (the emissive image scales it down elsewhere).
@@ -3711,20 +3685,30 @@ const COAL_GLOW_KEY: &str = "npc/arena/coal/emissive";
 
 impl Mat {
     /// Every material, the slowest to bake first.
-    pub const ALL: [Mat; 12] = [
+    pub const ALL: [Mat; 17] = [
         Mat::Sand,
         Mat::Stone,
         Mat::Wood,
+        Mat::Straw,
         Mat::Barrel,
         Mat::Banner(Team::Red),
         Mat::Banner(Team::Blue),
+        Mat::Raked,
         Mat::Iron,
         Mat::Weave,
         Mat::Coal,
         Mat::Brass,
         Mat::Leather,
         Mat::Flame,
+        Mat::Damp,
+        Mat::Water,
+        Mat::Fiber,
     ];
+
+    /// Whether the material has a texture set (plain ones and the flame don't).
+    fn textured(self) -> bool {
+        !matches!(self, Mat::Flame | Mat::Fiber)
+    }
 
     fn key(self) -> &'static str {
         match self {
@@ -3740,6 +3724,11 @@ impl Mat {
             Mat::Weave => "arena/mat",
             Mat::Leather => "arena/leather",
             Mat::Flame => "arena/flame",
+            Mat::Raked => "arena/raked",
+            Mat::Damp => "arena/damp",
+            Mat::Water => "arena/water",
+            Mat::Fiber => "arena/fiber",
+            Mat::Straw => "arena/straw_tufts",
         }
     }
 
@@ -3774,6 +3763,34 @@ impl Mat {
                 ..Default::default()
             }
             .with_emissive([1.0; 3], FLAME_GLOW),
+            Mat::Raked => StandardMaterial {
+                alpha_mode: AlphaMode::Mask(0.5),
+                ..tiled(span::RAKED)
+            },
+            Mat::Straw => StandardMaterial {
+                alpha_mode: AlphaMode::Mask(0.5),
+                ..tiled(1.0)
+            }
+            .with_subsurface(0.25),
+            Mat::Damp => StandardMaterial {
+                alpha_mode: AlphaMode::Blend,
+                receives_wetness: false,
+                ..tiled(span::WET)
+            },
+            Mat::Water => StandardMaterial {
+                receives_wetness: false,
+                ..tiled(1.0)
+            },
+            Mat::Fiber => {
+                let mut m = StandardMaterial {
+                    base_color: [1.0; 4],
+                    perceptual_roughness: 0.62,
+                    ..Default::default()
+                }
+                .with_subsurface(0.35);
+                m.double_sided = true;
+                m
+            }
         }
     }
 
@@ -3803,6 +3820,14 @@ impl Mat {
                 set: None,
                 glow: Some(flame_image()),
             },
+            Mat::Raked => set(grounds::raked_set()),
+            Mat::Straw => set(grounds::straw_set()),
+            Mat::Water => set(grounds::water_set()),
+            Mat::Damp => set(grounds::wet_set()),
+            Mat::Fiber => Baked {
+                set: None,
+                glow: None,
+            },
         }
     }
 
@@ -3819,7 +3844,7 @@ impl Mat {
         let Some(images) = art.images.as_ref() else {
             return false;
         };
-        (self == Mat::Flame
+        (!self.textured()
             || images
                 .loaded_by_key(&format!("npc/{}/orm", self.key()))
                 .is_some())
@@ -3837,7 +3862,7 @@ pub fn material(art: &mut ArtAssets, m: Mat) -> Option<MaterialRef> {
     }
     let images = art.images.as_mut()?;
     let mut s = m.base();
-    if m != Mat::Flame {
+    if m.textured() {
         let k = format!("npc/{}", m.key());
         let orm = images.loaded_by_key(&format!("{k}/orm"))?;
         s.base_color_texture = Some(images.loaded_by_key(&format!("{k}/albedo"))?);
@@ -3973,7 +3998,7 @@ impl Spec {
 
 const STAND_VARIANTS: u32 = 4;
 
-fn specs(layout: &ArenaLayout) -> Vec<Spec> {
+fn specs(layout: &ArenaLayout, g: &Arc<Grounds>) -> Vec<Spec> {
     let mut v = Vec::new();
     for k in 0..STAND_VARIANTS {
         v.push(spec([&format!("arena/stand{k}")], move || {
@@ -4017,8 +4042,74 @@ fn specs(layout: &ArenaLayout) -> Vec<Spec> {
             [flame_mesh(990 + k as u64)]
         }));
     }
-    let trample = layout.trample.clone();
-    v.push(spec(["arena/floor"], move || [floor_mesh(&trample)]).tagged(&layout.trample));
+    let gc = g.clone();
+    v.push(
+        spec(["arena/floor", "arena/floor_raked"], move || {
+            let (b, r) = gc.floor_meshes();
+            [b, r]
+        })
+        .tagged(g.tag),
+    );
+    let gc = g.clone();
+    v.push(
+        spec(["arena/drifts", "arena/tracks"], move || {
+            [gc.drift_mesh(), gc.track_mesh()]
+        })
+        .tagged(g.tag),
+    );
+    let gc = g.clone();
+    v.push(spec(["arena/wet"], move || [gc.wet_mesh()]).tagged(g.tag));
+    let gc = g.clone();
+    v.push(
+        spec(
+            [
+                "arena/straw",
+                "arena/fiber",
+                "arena/litter_wood",
+                "arena/litter_iron",
+            ],
+            move || {
+                let (s, f, w, i) = gc.litter_meshes();
+                [s, f, w, i]
+            },
+        )
+        .tagged(g.tag),
+    );
+    for k in 0..2u64 {
+        v.push(spec(
+            [
+                &format!("arena/trough{k}_stone"),
+                &format!("arena/trough{k}_iron"),
+                &format!("arena/trough{k}_water"),
+            ],
+            move || {
+                let (s, i, w) = grounds::trough_meshes(1100 + k);
+                [s, i, w]
+            },
+        ));
+        v.push(spec(
+            [
+                &format!("arena/cask{k}_wood"),
+                &format!("arena/cask{k}_iron"),
+                &format!("arena/cask{k}_water"),
+            ],
+            move || {
+                let (w, i, water) = grounds::cask_meshes(1110 + k);
+                [w, i, water]
+            },
+        ));
+        v.push(spec(
+            [
+                &format!("arena/rack{k}_wood"),
+                &format!("arena/rack{k}_iron"),
+                &format!("arena/rack{k}_leather"),
+            ],
+            move || {
+                let (w, i, l) = grounds::rack_meshes(1120 + k);
+                [w, i, l]
+            },
+        ));
+    }
     v.push(spec(
         ["arena/wall_timber_wood", "arena/wall_timber_iron"],
         || {
@@ -4095,9 +4186,9 @@ enum Done<'a> {
 impl Kit {
     /// Build whatever is missing on all cores (or take it from what this process built for
     /// another world), store it, and collect the handles.
-    fn load(art: &mut ArtAssets, layout: &ArenaLayout) -> Option<Kit> {
-        let specs = specs(layout);
-        let missing_mats: Vec<Mat> = Mat::ALL.into_iter().filter(|m| !m.loaded(art)).collect();
+    fn load(art: &mut ArtAssets, layout: &ArenaLayout, g: &Arc<Grounds>) -> Option<Kit> {
+        let specs = specs(layout, g);
+        let missing_mats: Vec<Mat> = Mat::ALL.into_iter().filter(|&m| !m.loaded(art)).collect();
         let missing_specs: Vec<&Spec> = {
             let store = art.meshes.as_ref()?;
             specs
@@ -4240,9 +4331,10 @@ fn yaw_at(a: f64) -> Quat {
 /// `npc.arena_build_ms` and `npc.arena_triangles` in [`Diagnostics`] when present.
 pub fn dress(world: &mut World, layout: &ArenaLayout) {
     let start = std::time::Instant::now();
+    let grounds = Arc::new(Grounds::plan(world, layout));
     let mut state = SystemState::<ArtAssets>::new(world);
     let kit = match state.get_mut(world) {
-        Ok(mut art) if art.available() => Kit::load(&mut art, layout),
+        Ok(mut art) if art.available() => Kit::load(&mut art, layout, &grounds),
         _ => None,
     };
     let Some(kit) = kit else {
@@ -4255,8 +4347,50 @@ pub fn dress(world: &mut World, layout: &ArenaLayout) {
     };
     let origin = layout.origin;
     let id = Transform::default();
-    let floor = world.spawn(Transform::from_translation(origin)).id();
-    let _ = d.part_ex(world, floor, id, "arena/floor", Mat::Sand, false);
+    // The floor: trampled sand, the raked layer, drifts, ruts and drag marks, wet sand and
+    // litter.
+    for (key, mat, shadows) in [
+        ("arena/floor", Mat::Sand, false),
+        ("arena/floor_raked", Mat::Raked, false),
+        ("arena/drifts", Mat::Sand, false),
+        ("arena/tracks", Mat::Sand, false),
+        ("arena/wet", Mat::Damp, false),
+        // Litter is too fine for the shadow maps (it would only shadow itself).
+        ("arena/straw", Mat::Straw, false),
+        ("arena/fiber", Mat::Fiber, false),
+        ("arena/litter_wood", Mat::Wood, false),
+        ("arena/litter_iron", Mat::Iron, false),
+    ] {
+        let root = world.spawn(Transform::from_translation(origin)).id();
+        let _ = d.part_ex(world, root, id, key, mat, shadows);
+    }
+    // Troughs, casks and racks along the walls: decoration with no colliders.
+    for p in &grounds.props {
+        let at = origin + DVec3::new(p.at.x as f64, grounds.ground(p.at) as f64, p.at.y as f64);
+        let root = world
+            .spawn(Transform::from_translation(at).with_rotation(yaw_at(p.facing as f64)))
+            .id();
+        let parts: [(String, Mat); 3] = match p.prop {
+            Prop::Trough(k) => [
+                (format!("arena/trough{k}_stone"), Mat::Stone),
+                (format!("arena/trough{k}_iron"), Mat::Iron),
+                (format!("arena/trough{k}_water"), Mat::Water),
+            ],
+            Prop::Cask(k) => [
+                (format!("arena/cask{k}_wood"), Mat::Wood),
+                (format!("arena/cask{k}_iron"), Mat::Iron),
+                (format!("arena/cask{k}_water"), Mat::Water),
+            ],
+            Prop::Rack(k) => [
+                (format!("arena/rack{k}_wood"), Mat::Wood),
+                (format!("arena/rack{k}_iron"), Mat::Iron),
+                (format!("arena/rack{k}_leather"), Mat::Leather),
+            ],
+        };
+        for (key, mat) in parts {
+            d.part(world, root, id, &key, mat);
+        }
+    }
     // Stands: 36 sectors of 10°, gates at 0°, 90°, 180° and 270°.
     for i in 0..36u32 {
         let a = i as f64 / 36.0 * std::f64::consts::TAU;

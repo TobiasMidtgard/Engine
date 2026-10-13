@@ -277,6 +277,48 @@ fn arena_art_close_ups() {
             v(0.0, 0.0, 0.0),
             50.0,
         ),
+        // The lived-in floor: the showcase's overview, raked and trampled sand, a trough with
+        // spilled water, a weapon rack, ruts at the north gate, litter by the barricade and
+        // dust drifted round a column.
+        (
+            "art_overview.png",
+            v(0.0, 16.0, -31.0),
+            v(0.0, 0.0, 4.0),
+            60.0,
+        ),
+        (
+            "art_floor.png",
+            v(-9.0, 1.7, 22.0),
+            v(-6.0, 0.0, 26.0),
+            60.0,
+        ),
+        (
+            "art_trough.png",
+            v(-29.8, 1.7, 19.3),
+            v(-30.7, 0.3, 24.0),
+            55.0,
+        ),
+        (
+            "art_rack.png",
+            v(-16.3, 1.6, 31.9),
+            v(-21.2, 0.8, 32.7),
+            55.0,
+        ),
+        ("art_ruts.png", v(5.5, 2.4, 27.0), v(0.0, 0.0, 36.0), 60.0),
+        ("art_litter.png", v(3.0, 1.6, 3.6), v(4.6, 0.0, 5.6), 60.0),
+        ("art_drift.png", v(3.5, 1.4, 13.0), v(6.6, 0.1, 16.0), 60.0),
+        (
+            "art_straw.png",
+            v(-19.0, 1.3, 30.7),
+            v(-21.0, 0.0, 32.4),
+            55.0,
+        ),
+        (
+            "art_water.png",
+            v(-29.7, 1.6, 23.2),
+            v(-30.9, 0.45, 24.2),
+            50.0,
+        ),
     ];
     app.update_n(3);
     if let Some(d) = app.world.get_resource::<RenderDisabled>() {

@@ -62,7 +62,11 @@ parries meet the line of the incoming blow (overhead for a heavy cut, low across
 left or right), a dash pushes off the rear foot, a feinted blow checks and returns to guard,
 hits throw the head, trunk or legs by where the cut lands (heavy cuts high, cuts on the run
 mid, other cuts mid or low), and a downed fighter falls from whatever pose it was in: knees
-give, hips, back and head land, limbs settle and the weapon drops beside it. Animals graze
+give, hips, back and head land, limbs settle and the weapon drops beside it. A heavy cut is
+met in a roof guard over the helmet, a cut to the head wrenches it away with a half step back,
+carbines kick and settle and change magazines between shots, archers draw to the mouth, hold,
+loose and nock the next arrow from the quiver, fighters turn on the spot by stepping round, and
+crests, tabards and pouches swing on after a stop or a blow. Animals graze
 head-down, flag their tails when alarmed, lie down, gallop, hop, creep and flap. With
 `NpcSettings::show_intent`, rings and lines on the ground show where each NPC is going and why
 (blue cover, orange flank, purple high ground, grey fall back, yellow search).
@@ -84,8 +88,12 @@ All art is generated in code (`src/art`), since no third-party art may go in the
   feathered wings that fold, spread and beat.
 - **Arena** (`art/arena.rs`): a sandstone amphitheater with arched stands, gates with
   portcullises, fluted columns, banners, braziers with flickering fire and light, rubble,
-  timber barricades, crates and drums, all with baked PBR textures. The art dresses the
-  gameplay entities; colliders never change.
+  timber barricades, crates and drums, all with baked PBR textures. The floor (`art/arena/
+  grounds.rs`) is lived in: raked sand in overlapping lanes, trampled tracks with footprints
+  between the gates, ring, lane and cover, cart ruts and drag marks at the gates, dust drifts
+  against the walls and columns, straw, broken arrows and splinters, and stone troughs, water
+  casks and weapon racks along the walls with soaked sand where water was spilled. The art
+  dresses the gameplay entities; colliders never change.
 
 Everything is built once per world and shared. Without a renderer (headless tests) the art
 falls back to primitive shapes so tests stay fast.
