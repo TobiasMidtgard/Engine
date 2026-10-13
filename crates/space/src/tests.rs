@@ -633,3 +633,269 @@ fn a_turned_home_matches_the_weathers_compass() {
     let apart = degrees_apart(weathers, sun_dir(&mut app));
     assert!(apart < 2.0, "{apart}°");
 }
+
+/// A free physics body `rel` meters from `body`'s center, moving `vel` m/s against it
+/// (inertial axes), placed in the world as it is now.
+fn launch(app: &mut App, body: &str, rel: DVec3, vel: DVec3) -> Entity {
+    let s = state(app).clone();
+    let b = s.body(body).unwrap();
+    let (inertial, moving) = (b.inertial_position + rel, b.inertial_velocity + vel);
+    let frame = app.world.resource::<SpaceFrame>().clone();
+    let here = FrameRef {
+        anchor: &s.bodies[s.anchor.unwrap()],
+        rotating: frame.rotating,
+        map: s.world_from_inertial,
+    };
+    let rot = s.world_from_inertial.0;
+    let v = rot * (moving - here.velocity_at(inertial));
+    app.world
+        .spawn((
+            Transform {
+                translation: s.to_world(inertial),
+                ..Default::default()
+            },
+            Velocity {
+                linear: v.as_vec3(),
+                angular: Vec3::ZERO,
+            },
+            engine_world::physics::RigidBody::dynamic(),
+        ))
+        .id()
+}
+
+/// Where a body is against `body`'s center now: distance and inertial velocity.
+fn against(app: &mut App, e: Entity, body: &str) -> (f64, DVec3) {
+    let s = state(app).clone();
+    let b = s.body(body).unwrap();
+    let p = app.world.get::<Transform>(e).unwrap().translation;
+    let v = app.world.get::<Velocity>(e).unwrap().linear.as_dvec3();
+    let frame = app.world.resource::<SpaceFrame>().clone();
+    let here = FrameRef {
+        anchor: &s.bodies[s.anchor.unwrap()],
+        rotating: frame.rotating,
+        map: s.world_from_inertial,
+    };
+    let inertial = s.to_inertial(p);
+    let moving = s.world_from_inertial.0.inverse() * v + here.velocity_at(inertial);
+    (
+        (inertial - b.inertial_position).length(),
+        moving - b.inertial_velocity,
+    )
+}
+
+fn rails_of(app: &App, e: Entity) -> Option<OnRails> {
+    app.world.get::<OnRails>(e).cloned()
+}
+
+#[test]
+fn a_ship_in_low_orbit_coasts_through_warp_and_keeps_its_motion() {
+    let mut app = app();
+    let r = 6_371_000.0 + 400_000.0;
+    let mu = state(&app).body("Earth").unwrap().mu;
+    let speed = (mu / r).sqrt();
+    let ship = launch(
+        &mut app,
+        "Earth",
+        DVec3::new(r, 0.0, 0.0),
+        DVec3::new(0.0, 0.0, -speed),
+    );
+    // Things on the ground, and things the game keeps off the rails, stay with physics.
+    let crate_on_ground = app
+        .world
+        .spawn((
+            Transform::from_xyz(3.0, 1.0, 0.0),
+            Velocity::default(),
+            engine_world::physics::RigidBody::dynamic(),
+        ))
+        .id();
+    let kept = launch(
+        &mut app,
+        "Earth",
+        DVec3::new(0.0, 0.0, r),
+        DVec3::new(speed, 0.0, 0.0),
+    );
+    app.world.entity_mut(kept).insert(NoRails);
+
+    app.world.resource_mut::<SpaceClock>().warp = 1_000.0;
+    let t0 = app.world.resource::<SpaceClock>().seconds;
+    for _ in 0..200 {
+        app.update();
+        let (d, _) = against(&mut app, ship, "Earth");
+        assert!((d - r).abs() < 5.0, "altitude drifted by {} m", d - r);
+    }
+    let rails = rails_of(&app, ship).expect("on rails");
+    assert_eq!(rails.around, "Earth");
+    assert!(rails_of(&app, crate_on_ground).is_none());
+    assert!(rails_of(&app, kept).is_none());
+    // It went round as far as the clock says (200 frames of 16.7 s: about 0.6 of a turn).
+    let elapsed = app.world.resource::<SpaceClock>().seconds - t0;
+    let (p, _) = rails.conic.state_at(rails.conic.epoch);
+    let turned = DVec3::new(r, 0.0, 0.0).angle_between(p);
+    let expected = (elapsed * speed / r).rem_euclid(std::f64::consts::TAU);
+    let expected = expected.min(std::f64::consts::TAU - expected);
+    assert!((turned - expected).abs() < 1e-3, "{turned} vs {expected}");
+
+    // Back to real time: physics takes it with the motion it had.
+    app.world.resource_mut::<SpaceClock>().warp = 1.0;
+    app.update();
+    assert!(rails_of(&app, ship).is_none());
+    let (d, v) = against(&mut app, ship, "Earth");
+    assert!((d - r).abs() < 5.0);
+    assert!(
+        (v.length() - speed).abs() < 0.05,
+        "{} vs {speed}",
+        v.length()
+    );
+    assert!(v.dot(p.normalize()).abs() < 0.5, "still circling");
+}
+
+#[test]
+fn a_ship_sent_past_the_moon_swings_by_it() {
+    let mut app = app();
+    let (moon_mu, moon_soi) = {
+        let m = state(&app).body("Moon").unwrap();
+        (m.mu, m.soi_m)
+    };
+    // Just outside the Moon's reach, falling toward it at 1 km/s, aimed 3,000 km off its center.
+    let out = DVec3::new(0.3, 0.1, 1.0).normalize();
+    let side = out.cross(DVec3::Y).normalize();
+    let start = moon_soi + 4_000_000.0;
+    let rp = 3_000_000.0;
+    let v_inf2 = 1_000.0f64.powi(2) - 2.0 * moon_mu / start;
+    let vp = (v_inf2 + 2.0 * moon_mu / rp).sqrt();
+    let across = rp * vp / start;
+    let moon = state(&app).body("Moon").unwrap().clone();
+    let earth = state(&app).body("Earth").unwrap().clone();
+    let rel = moon.inertial_position - earth.inertial_position + out * start;
+    let vel = moon.inertial_velocity - earth.inertial_velocity
+        + (-out * (1_000.0f64.powi(2) - across * across).sqrt() + side * across);
+    let ship = launch(&mut app, "Earth", rel, vel);
+
+    app.world.resource_mut::<SpaceClock>().warp = 5_000.0;
+    let mut closest = f64::INFINITY;
+    let mut around_moon = false;
+    for _ in 0..1_500 {
+        app.update();
+        let (d, _) = against(&mut app, ship, "Moon");
+        closest = closest.min(d);
+        around_moon |= rails_of(&app, ship).is_some_and(|r| r.around == "Moon");
+    }
+    assert!(around_moon, "never entered the Moon's sphere of influence");
+    assert!(app.world.resource::<RailsLog>().handoffs >= 1);
+    // Sampled every 83 s near 2 km/s, so the closest frame is within ~100 km of periapsis.
+    assert!(
+        (closest - rp).abs() < 150_000.0,
+        "closest {} km",
+        closest / 1000.0
+    );
+    assert_eq!(app.world.resource::<RailsLog>().warp_drops, 0);
+}
+
+#[test]
+fn a_ship_coasting_into_the_ground_drops_the_warp_above_it() {
+    let mut app = app();
+    let (moon_soi, moon_r) = {
+        let m = state(&app).body("Moon").unwrap();
+        (m.soi_m, m.radius_m)
+    };
+    let moon = state(&app).body("Moon").unwrap().clone();
+    let earth = state(&app).body("Earth").unwrap().clone();
+    let out = DVec3::new(-0.2, 0.3, 1.0).normalize();
+    let rel = moon.inertial_position - earth.inertial_position + out * (moon_soi * 0.8);
+    let vel = moon.inertial_velocity - earth.inertial_velocity - out * 1_500.0;
+    let ship = launch(&mut app, "Earth", rel, vel);
+    app.world.resource_mut::<SpaceClock>().warp = 5_000.0;
+    let mut frames = 0;
+    while app.world.resource::<SpaceClock>().warp > 1.0 && frames < 2_000 {
+        app.update();
+        frames += 1;
+    }
+    assert_eq!(
+        app.world.resource::<SpaceClock>().warp,
+        1.0,
+        "warp never dropped"
+    );
+    assert!(rails_of(&app, ship).is_none());
+    assert_eq!(app.world.resource::<RailsLog>().warp_drops, 1);
+    // Handed to physics at the floor of low space (0.8% of the radius up), falling fast.
+    let (d, v) = against(&mut app, ship, "Moon");
+    let floor = moon_r * 1.008;
+    assert!(
+        (d - floor).abs() < 2_000.0,
+        "{} km up",
+        (d - moon_r) / 1000.0
+    );
+    assert!(v.length() > 2_000.0, "{} m/s", v.length());
+}
+
+#[test]
+fn a_ship_past_escape_speed_leaves_for_the_sun() {
+    let mut app = app();
+    let r = 6_371_000.0 + 300_000.0;
+    // Straight out of the ecliptic, well clear of the Moon.
+    let ship = launch(
+        &mut app,
+        "Earth",
+        DVec3::new(r, 0.0, 0.0),
+        DVec3::new(0.0, 12_000.0, 0.0),
+    );
+    app.world.resource_mut::<SpaceClock>().warp = 100_000.0;
+    for _ in 0..300 {
+        app.update();
+    }
+    let rails = rails_of(&app, ship).expect("on rails");
+    assert_eq!(rails.around, "Sun");
+    let (d, _) = against(&mut app, ship, "Earth");
+    let soi = state(&app).body("Earth").unwrap().soi_m;
+    assert!(d > soi, "{} km from Earth", d / 1000.0);
+    let out = engine_core::registry::call_api(&mut app.world, "space.rails", serde_json::json!({}))
+        .unwrap();
+    assert_eq!(out["ships"][0]["around"], "Sun");
+}
+
+#[test]
+fn the_world_follows_a_coasting_ship_into_the_moons_frame() {
+    let mut app = app();
+    let (moon, earth) = {
+        let s = state(&app);
+        (
+            s.body("Moon").unwrap().clone(),
+            s.body("Earth").unwrap().clone(),
+        )
+    };
+    let out = DVec3::new(-0.4, 0.05, 1.0).normalize();
+    let side = out.cross(DVec3::Y).normalize();
+    let rel = moon.inertial_position - earth.inertial_position + out * (moon.soi_m * 1.05);
+    let vel = moon.inertial_velocity - earth.inertial_velocity - out * 900.0 + side * 60.0;
+    let ship = launch(&mut app, "Earth", rel, vel);
+    app.world
+        .entity_mut(ship)
+        .insert(SimulationFocus { priority: 10 });
+    app.world.resource_mut::<SpaceClock>().warp = 2_000.0;
+    let mut last: Option<f64> = None;
+    let mut anchored_on_moon = false;
+    for _ in 0..1_200 {
+        app.update();
+        let (d, v) = against(&mut app, ship, "Moon");
+        // Smooth through every re-anchoring: no jumps beyond a frame's flight.
+        if let Some(l) = last {
+            let step = v.length() * 2_000.0 / 60.0;
+            assert!(
+                (d - l).abs() <= step * 1.05 + 10.0,
+                "jumped {} km",
+                (d - l) / 1e3
+            );
+        }
+        last = Some(d);
+        anchored_on_moon |= state(&app)
+            .anchor
+            .map(|a| state(&app).bodies[a].name.as_str())
+            == Some("Moon");
+        assert!(d > moon.radius_m, "fell through the Moon");
+    }
+    assert!(anchored_on_moon, "the world never re-anchored on the Moon");
+    assert!(
+        rails_of(&app, ship).is_some_and(|r| r.around == "Moon")
+            || app.world.resource::<RailsLog>().warp_drops == 1
+    );
+}
