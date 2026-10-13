@@ -30,7 +30,7 @@ struct Emitter {
     shape: vec4<f32>,      // code, a, b, c
     offset: vec4<f32>,     // local offset, w spread cosine
     direction: vec4<f32>,  // local direction, w debris piece (0 = sprite)
-    extra_vel: vec4<f32>,  // local extra birth velocity
+    extra_vel: vec4<f32>,  // local extra birth velocity, w air thickness (1 sea level)
     speed_life: vec4<f32>, // speed min/max, life min/max
     size_rot: vec4<f32>,   // size min/max, rotation min/max
     spin_look: vec4<f32>,  // spin min/max, sprite, facing
