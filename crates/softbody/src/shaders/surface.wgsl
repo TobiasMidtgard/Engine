@@ -13,6 +13,7 @@ struct VertexIn {
     @location(3) tension: vec2<f32>,  // strain along u and v (negative = compressed)
     @location(4) burn: vec2<f32>,     // burn progress, burning
     @location(5) material: u32,
+    @location(6) wet: f32,
 };
 
 struct VertexOut {
@@ -23,6 +24,7 @@ struct VertexOut {
     @location(3) tension: vec2<f32>,
     @location(4) burn: vec2<f32>,
     @location(5) @interpolate(flat) material: u32,
+    @location(6) wet: f32,
 };
 
 @vertex
@@ -34,6 +36,7 @@ fn vs_main(in: VertexIn) -> VertexOut {
     out.tension = in.tension;
     out.burn = in.burn;
     out.material = in.material;
+    out.wet = in.wet;
     out.clip = frame.view_proj * vec4<f32>(in.position, 1.0);
     return out;
 }
@@ -59,6 +62,79 @@ fn bands(x: f32, n: u32, m: SoftMaterial) -> vec3<f32> {
     let c0 = pick3(k % colors, m.color.rgb, m.color2.rgb, m.color3.rgb);
     let c1 = pick3((k + 1u) % colors, m.color.rgb, m.color2.rgb, m.color3.rgb);
     return mix(c0, c1, saturate((f - 1.0) / max(w, 1e-5) + 0.5) * select(0.0, 1.0, k + 1u < n));
+}
+
+// Seigaiha ("blue sea waves"): rows of fans of concentric arcs, each row overlapping the one
+// above it. `p` in fan radii: fans are 2 apart along a row, rows 0.5 apart, every other row
+// shifted by 1. Returns how much line covers `p` (0..1).
+fn seigaiha(p: vec2<f32>) -> f32 {
+    let j0 = i32(floor(p.y * 2.0)) - 2;
+    var r = 0.0;
+    // The lowest row whose fan holds `p` is drawn over the others.
+    for (var j = j0; j <= j0 + 4; j++) {
+        let off = f32(j & 1);
+        let c = vec2(round((p.x - off) * 0.5) * 2.0 + off, f32(j) * 0.5);
+        let d = length(p - c);
+        if (d < 1.0) {
+            r = d;
+            break;
+        }
+    }
+    // Four arcs to a fan, and a solid dot at its heart. Antialiased by the pattern's own
+    // footprint (fwidth of `rings` jumps where fans meet), and faded to the share of line in
+    // the pattern where a pixel spans more than an arc.
+    let rings = r * 4.0;
+    let w = max(length(fwidth(p)) * 4.0, 1e-4);
+    let line = 1.0 - smoothstep(0.16 - w, 0.16 + w, abs(rings - round(rings)));
+    let ink = max(select(line, 0.0, rings < 0.5), 1.0 - smoothstep(0.42 - w, 0.42 + w, rings));
+    return mix(ink, 0.33, smoothstep(0.2, 0.6, w));
+}
+
+// Plum blossoms scattered over cells of `p` (one cell per blossom spacing), some cells bare:
+// five round petals around a heart. Returns (petal, heart) cover.
+fn blossoms(p: vec2<f32>) -> vec2<f32> {
+    var petal = 0.0;
+    var heart = 0.0;
+    let base = floor(p);
+    for (var y = -1; y <= 1; y++) {
+        for (var x = -1; x <= 1; x++) {
+            let cell = base + vec2(f32(x), f32(y));
+            let h = hash12(cell * 1.37 + 0.5);
+            if (h < 0.35) { continue; }
+            let c = cell + 0.5 + (vec2(hash12(cell + 7.1), hash12(cell + 3.3)) - 0.5) * 0.6;
+            let size = mix(0.16, 0.3, hash12(cell + 11.7));
+            let spin = hash12(cell + 5.9) * 6.2832;
+            let q = (p - c) / size;
+            let w = max(length(fwidth(p)) / size, 1e-4);
+            var d = length(q) - 0.45;
+            for (var k = 0; k < 5; k++) {
+                let a = spin + f32(k) * 1.2566;
+                d = min(d, length(q - vec2(cos(a), sin(a)) * 0.55) - 0.42);
+            }
+            // Each blossom covers the hearts of those behind it.
+            petal = max(petal, 1.0 - smoothstep(-w, w, d));
+            heart = max(heart * (1.0 - smoothstep(-w, w, d)), 1.0 - smoothstep(0.2 - w, 0.2 + w, length(q)));
+        }
+    }
+    // Where a pixel spans a good part of a blossom, its share of the cloth.
+    let far = smoothstep(0.1, 0.4, length(fwidth(p)));
+    return mix(vec2(petal, heart), vec2(0.1, 0.012), far);
+}
+
+// Kanoko shibori (tie-dye dots): rows of small squarish rings, every other row shifted, each
+// a little uneven where the cloth was bound. `p` in dot spacings. Returns ring cover.
+fn shibori(p: vec2<f32>) -> f32 {
+    let row = floor(p.y);
+    let q = vec2(p.x + 0.5 * (row - 2.0 * floor(row * 0.5)), p.y);
+    let cell = floor(q);
+    let f = fract(q) - 0.5 + (vec2(hash12(cell + 1.3), hash12(cell + 9.1)) - 0.5) * 0.08;
+    // Rounded square: the binding thread pinched the cloth into a little tent.
+    let d = pow(pow(abs(f.x), 3.0) + pow(abs(f.y), 3.0), 1.0 / 3.0);
+    let w = max(length(fwidth(p)), 1e-4);
+    let size = mix(0.2, 0.25, hash12(cell + 4.4));
+    let ring = smoothstep(size * 0.55 - w, size * 0.55 + w, d) * (1.0 - smoothstep(size - w, size + w * 3.0, d));
+    // Where a pixel spans a dot, the dots' share of the cloth.
+    return mix(ring, 0.11, smoothstep(0.08, 0.25, w));
 }
 
 // Printed pattern color at `uv` (0..1 over the cloth).
@@ -99,6 +175,18 @@ fn pattern_color(m: SoftMaterial, uv: vec2<f32>) -> vec3<f32> {
         let s = fract(uv.x * 3.0 + uv.y * 8.0);
         let groove = smoothstep(0.0, 0.18, s) * smoothstep(1.0, 0.82, s);
         return m.color.rgb * mix(0.55, 1.0, groove);
+    }
+    // Dyed patterns sized in millimeters (`n`) over the cloth in meters.
+    let pm = uv * m.scale.xy / (f32(n) * 0.001);
+    if (id == 9u) {
+        return mix(m.color.rgb, m.color2.rgb, seigaiha(pm * 2.0));
+    }
+    if (id == 10u) {
+        let b = blossoms(pm);
+        return mix(mix(m.color.rgb, m.color2.rgb, b.x), m.color3.rgb, b.y);
+    }
+    if (id == 11u) {
+        return mix(m.color.rgb, m.color2.rgb, shibori(pm));
     }
     return m.color.rgb;
 }
@@ -179,6 +267,7 @@ fn fs_main(in: VertexOut, @builtin(front_facing) front: bool) -> @location(0) ve
     if (dmg.cut > 0.0) { discard; }
     var n = safe_normalize(in.normal, safe_normalize(-in.rel, vec3(0.0, 1.0, 0.0)));
     if (!front) { n = -n; }
+    let n_geo = n;
 
     // Fine wrinkles where the cloth is compressed: ridges run across the squeeze direction.
     // Built from uv in meters so the wavelength (~3.5 cm) doesn't depend on the cloth size.
@@ -200,10 +289,12 @@ fn fs_main(in: VertexOut, @builtin(front_facing) front: bool) -> @location(0) ve
         albedo *= fabric.z;
         roughness = saturate(roughness + fabric.w);
     }
-    // Wet fabric darkens and turns a little glossy.
-    let wet = m.color3.w;
-    albedo *= mix(1.0, 0.55, wet);
-    roughness = mix(roughness, 0.35, wet * 0.7);
+    // Wet fabric darkens and deepens in color (water fills the gaps between the fibers, so
+    // less light scatters back out), turns glossy, and its weave and fuzz lie flat.
+    let wet = max(m.color3.w, in.wet);
+    albedo = mix(albedo, pow(albedo, vec3(1.35)) * 0.7, wet);
+    roughness = mix(roughness, 0.3, wet * 0.75);
+    n = normalize(mix(n, n_geo, wet * 0.5));
     // Scorch, then char toward a burn front or a bullet hole.
     albedo = mix(albedo, albedo * vec3<f32>(0.42, 0.3, 0.2), dmg.scorch * 0.8);
     albedo = mix(albedo, vec3<f32>(0.025, 0.02, 0.018), dmg.char);
@@ -236,7 +327,7 @@ fn fs_main(in: VertexOut, @builtin(front_facing) front: bool) -> @location(0) ve
     // brightens toward grazing angles instead of showing a sharp highlight ("Charlie" sheen,
     // Estevez & Kulla 2017, with Neubelt's visibility). Velvet pile is crushed in patches,
     // which shifts its sheen around.
-    let sheen = m.emissive.w;
+    let sheen = m.emissive.w * (1.0 - 0.8 * wet);
     if (sheen > 0.0) {
         let ndv = max(dot(n, v), 1e-3);
         let l = frame.sun_dir.xyz;

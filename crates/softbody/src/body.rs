@@ -113,6 +113,8 @@ pub struct SoftBodySim {
     pub out: StepOutput,
     /// Simulated time owed by skipped level-of-detail steps, seconds.
     pub lod_debt: f32,
+    /// How wet each particle is, 0 (dry) .. 1 (soaked through).
+    pub wet: Vec<f32>,
     pub(crate) scratch_colliders: Vec<LocalCollider>,
 }
 
@@ -130,6 +132,8 @@ impl SoftBodySim {
         p.friction = settings.friction;
         p.max_speed = settings.max_speed;
         p.gravity *= settings.gravity_scale;
+        p.buoyancy = settings.buoyancy;
+        p.water_drag = settings.water_drag;
         let pending_prewarm = (settings.prewarm_secs.max(0.0) * 60.0).round() as u32;
         let mut body = Self {
             kind,
@@ -154,6 +158,7 @@ impl SoftBodySim {
             step_ms: 0.0,
             out: StepOutput::default(),
             lod_debt: 0.0,
+            wet: Vec::new(),
             scratch_colliders: Vec::new(),
         };
         body.update_bounds();
