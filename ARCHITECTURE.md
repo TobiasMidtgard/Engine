@@ -178,7 +178,13 @@ reflections (`screen_space_reflections`, `ssr_max_roughness`; `screen_reflection
 shaders, used by `shade_surface`) trace the prepass depth and read the previous frame's finished
 image, so polished floors, wet streets, metal and glossy paint mirror what is on screen, blurred
 with roughness, and fall back to the prefiltered sky elsewhere. `DebugView::Reflections` shows
-them.
+them. Screen-space global illumination (`screen_space_gi`, `gi_intensity`; `screen_gi(rel)` in
+shaders, added by `shade_surface` times the diffuse color) traces short cosine-distributed rays
+through the prepass depth into the same previous image, so sunlit walls tint the ground beside
+them and lamps, fires and other emissive surfaces light their surroundings; light keeps bouncing
+over frames, and a temporal blend plus an edge-aware blur clean it up. Rays that leave the screen
+or find nothing bring no light (the sky's share is the AO-darkened sky light).
+`DebugView::IndirectLight` shows the bounced light.
 
 Shared pipelines the core will provide for modules (planned): **strands** for hair, fur and grass
 (guide curves in, GPU-expanded strands with hair shading and LOD out; `engine_softbody` drives

@@ -30,6 +30,10 @@
 // Screen-space reflections: reflected radiance (cd/m^2, not pre-exposed), coverage (see
 // `screen_reflection`). A stand-in while it is being drawn.
 @group(0) @binding(18) var ssr_map: texture_2d<f32>;
+// Binding 19 is reserved for the volumetric fog volume.
+// Screen-space global illumination: light bounced onto each pixel from nearby surfaces
+// (cd/m^2, not pre-exposed; see `screen_gi`). A stand-in while it is being drawn.
+@group(0) @binding(20) var gi_map: texture_2d<f32>;
 
 // Multiply final radiance by this before writing to the HDR target.
 fn pre_expose(c: vec3<f32>) -> vec3<f32> { return c * frame.exposure.x; }
@@ -99,6 +103,16 @@ fn screen_reflection(rel: vec3<f32>) -> vec4<f32> {
     let pixel = vec2<i32>(floor(pixel_of(rel)));
     if (!in_prepass(rel, pixel)) { return vec4<f32>(0.0); }
     return textureLoad(ssr_map, pixel, 0);
+}
+
+// Diffuse light bounced onto the surface at `rel` from nearby surfaces on screen, as radiance
+// (multiply by the diffuse color), or 0 where screen-space GI is off or `rel` isn't what the
+// prepass drew.
+fn screen_gi(rel: vec3<f32>) -> vec3<f32> {
+    if (frame.reflections.w <= 0.0) { return vec3<f32>(0.0); }
+    let pixel = vec2<i32>(floor(pixel_of(rel)));
+    if (!in_prepass(rel, pixel)) { return vec3<f32>(0.0); }
+    return textureLoad(gi_map, pixel, 0).rgb * frame.reflections.w;
 }
 
 // Ambient occlusion with interreflections (Jimenez et al. 2016, "Practical Real-Time Strategies
@@ -537,6 +551,8 @@ fn shade_surface(s: Surface, rel: vec3<f32>) -> vec3<f32> {
     let env_brdf = env_brdf_approx(f0, s.roughness, n_dot_v);
     let visibility = min(s.occlusion, screen_ao(rel));
     color += diffuse_color * irradiance * INV_PI * ao_multibounce(visibility, diffuse_color);
+    // Light bounced from nearby surfaces (its rays already stop at whatever occludes them).
+    color += diffuse_color * screen_gi(rel);
     color += spec_env * env_brdf * specular_occlusion(n_dot_v, visibility, roughness);
 
     color += s.emissive;

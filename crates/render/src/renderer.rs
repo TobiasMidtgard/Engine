@@ -2,7 +2,7 @@
 //!
 //! ```text
 //! prepare (features read the world) → compute → environment map (+ filters) → shadow cascades
-//! → prepass → AO, reflections → scene pass [opaque → sky] → (scene copies) → transparent pass
+//! → prepass → AO, reflections, bounce light → scene pass [opaque → sky] → (scene copies) → transparent pass
 //! → TAA → bloom → tonemap to LDR → overlays (UI) → screenshot readback → blit to window
 //! ```
 
@@ -174,12 +174,13 @@ pub struct Renderer {
     last_view: Option<ViewData>,
 }
 
-/// Views of the screen-space maps bound in the frame group (bindings 10–12).
+/// Views of the screen-space maps bound in the frame group (bindings 10–12, 18 and 20).
 struct ScreenMaps {
     ao: wgpu::TextureView,
     normal: wgpu::TextureView,
     depth: wgpu::TextureView,
     ssr: wgpu::TextureView,
+    gi: wgpu::TextureView,
 }
 
 impl ScreenMaps {
@@ -189,6 +190,7 @@ impl ScreenMaps {
             normal: targets.prepass_normal.view.clone(),
             depth: targets.prepass_depth.view.clone(),
             ssr: targets.ssr.view.clone(),
+            gi: targets.gi.view.clone(),
         }
     }
 
@@ -219,15 +221,18 @@ impl ScreenMaps {
                 depth_or_array_layers: 1,
             },
         );
-        // New textures start zeroed: no normal written, depth 0 (nothing), no reflections.
+        // New textures start zeroed: no normal written, depth 0 (nothing), no reflections, no
+        // bounce light.
         let normal = tex("no prepass normals", shared.formats.normal);
         let depth = tex("no prepass depth", shared.formats.depth);
         let ssr = tex("no screen-space reflections", shared.formats.hdr);
+        let gi = tex("no screen-space gi", shared.formats.hdr);
         Self {
             ao: ao.view,
             normal: normal.view,
             depth: depth.view,
             ssr: ssr.view,
+            gi: gi.view,
         }
     }
 }
@@ -409,6 +414,7 @@ impl Renderer {
                 ),
                 // Screen-space reflections (a screen-space map like 10-12).
                 layout_entry(18, all, float_texture),
+                layout_entry(20, all, float_texture),
             ],
         });
         let shadow_view_layout =
@@ -643,13 +649,17 @@ impl Renderer {
         }
         let mut uniform = frame_uniform(world, &view);
         uniform.shadow_params[3] = self.shadow.size as f32;
-        // Screen-space reflections need the previous frame's image of the same view.
-        let ssr = settings.screen_space_reflections
-            && self.effects.has_previous()
-            && view.history_valid
-            && self.prev_exposure > 0.0;
+        // Screen-space reflections and bounce light need the previous frame's image of the same
+        // view.
+        let previous =
+            self.effects.has_previous() && view.history_valid && self.prev_exposure > 0.0;
+        let ssr = settings.screen_space_reflections && previous;
+        let gi = uniform.reflections[3] > 0.0 && previous;
         uniform.reflections[0] = if ssr { 1.0 } else { 0.0 };
-        uniform.reflections[1] = if ssr { self.prev_exposure } else { 0.0 };
+        uniform.reflections[1] = if previous { self.prev_exposure } else { 0.0 };
+        if !gi {
+            uniform.reflections[3] = 0.0;
+        }
         let queue = &self.shared.queue;
         queue.write_buffer(&self.frame_buffer, 0, bytemuck::bytes_of(&uniform));
         let mut overlay_uniform = uniform;
@@ -862,6 +872,10 @@ impl Renderer {
             self.effects
                 .encode_ssr(&mut encoder, &self.targets, &self.prepass_group);
         }
+        if gi {
+            self.effects
+                .encode_gi(&mut encoder, &self.targets, &self.prepass_group);
+        }
 
         // Scene: opaque + sky (on the prepass depth).
         {
@@ -945,7 +959,7 @@ impl Renderer {
         }
 
         // Temporal anti-aliasing (writes the resolved image back into the HDR target). Either
-        // way the finished image is kept for next frame's reflections.
+        // way the finished image is kept for next frame's reflections and bounce light.
         if taa {
             self.effects.encode_taa(
                 &self.shared,
@@ -954,7 +968,7 @@ impl Renderer {
                 frame_group,
                 view.history_valid,
             );
-        } else if settings.screen_space_reflections {
+        } else if settings.screen_space_reflections || settings.screen_space_gi {
             self.effects.keep_frame(&mut encoder, &self.targets);
         }
         self.prev_exposure = view.exposure;
@@ -1461,6 +1475,10 @@ fn create_frame_group(
             wgpu::BindGroupEntry {
                 binding: 18,
                 resource: view(&maps.ssr),
+            },
+            wgpu::BindGroupEntry {
+                binding: 20,
+                resource: view(&maps.gi),
             },
         ],
     })

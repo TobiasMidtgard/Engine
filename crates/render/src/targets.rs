@@ -65,6 +65,11 @@ pub struct Targets {
     pub history: [Tex; 2],
     /// Screen-space reflections: radiance (not pre-exposed), coverage.
     pub ssr: Tex,
+    /// Screen-space global illumination: this frame's rays, the temporal results (ping-ponged,
+    /// view depth in alpha) and the blurred result the scene reads.
+    pub gi_raw: Tex,
+    pub gi_history: [Tex; 2],
+    pub gi: Tex,
     pub color_copy: Tex,
     pub depth_copy: Tex,
     /// Tonemapped display image (sRGB). Screenshots read this.
@@ -127,6 +132,10 @@ impl Targets {
             )
         });
         let ssr = screen("screen-space reflections", formats.hdr);
+        let gi_raw = screen("screen-space gi trace", formats.hdr);
+        let gi_history =
+            [0, 1].map(|i| screen(&format!("screen-space gi history {i}"), formats.hdr));
+        let gi = screen("screen-space gi", formats.hdr);
         let color_copy = Tex::new(
             device,
             "scene color copy",
@@ -178,6 +187,9 @@ impl Targets {
             ao,
             history,
             ssr,
+            gi_raw,
+            gi_history,
+            gi,
             color_copy,
             depth_copy,
             ldr,
