@@ -600,6 +600,21 @@ pub fn demo_views(z: &Zone) -> Vec<View> {
                 .on_arrive("movement.duel", &duel("Blink"))
                 .on_arrive("movement.grappler", "{}")
                 .on_leave("movement.duel", cycle),
+                // The zip line: the grappler restarts its loop on arrival and is caught past the
+                // middle of the line, coming at the camera with the cable running back up to
+                // the gantry on the tower.
+                View::new(
+                    "parkour_zip",
+                    "Zip line: jump into the cable off the tower roof and ride it down to the gate",
+                    [25.9, 4.4, 17.5],
+                    [20.5, 7.3, 26.8],
+                    16.0,
+                )
+                // Past the middle of the line about 7.75 s into the loop.
+                .warmup(7.3)
+                .on_arrive("movement.duel", &duel("Blink"))
+                .on_arrive("movement.grappler", "{}")
+                .on_leave("movement.duel", cycle),
                 // The freight station: the rider restarts its loop on arrival, with the car
                 // about to pull out, and is caught leaping onto the car's side.
                 View::new(

@@ -27,6 +27,7 @@ use crate::mover::{
 };
 use crate::platform::{self, Deck, Pin};
 use crate::profile::MovementProfile;
+use crate::zipline::{self, Cable, Zipline};
 
 /// Walls are surfaces whose normal is within this of horizontal (|n·up| below it).
 const WALL_MAX_UP: f32 = 0.35;
@@ -75,6 +76,9 @@ impl Outputs<'_> {
 pub(crate) type Bodies<'w, 's> =
     Query<'w, 's, (&'static Transform, Option<&'static Velocity>), Without<Mover>>;
 
+/// Zip lines.
+pub(crate) type Lines<'w, 's> = Query<'w, 's, (Entity, &'static Zipline)>;
+
 /// Scene probes for one character (walls, ledges, ground below).
 pub(crate) struct Probe<'a> {
     queries: &'a PhysicsQueries,
@@ -82,6 +86,7 @@ pub(crate) struct Probe<'a> {
     /// Character entities: never wall-run on or climb another character.
     movers: &'a Query<'a, 'a, (), With<Mover>>,
     bodies: &'a Bodies<'a, 'a>,
+    lines: &'a Lines<'a, 'a>,
     /// The character's seconds per world second (bodies move in world time).
     rate: f32,
 }
@@ -113,6 +118,21 @@ impl Probe<'_> {
                 point: hit.point,
                 entity: Some(hit.entity),
             }
+        })
+    }
+
+    /// The cable of the zip line `line`, sagging against `up`.
+    pub(crate) fn cable(&self, line: Entity, up: Vec3) -> Option<Cable> {
+        let (_, z) = self.lines.get(line).ok()?;
+        let (t, _) = self.bodies.get(line).ok()?;
+        Some(Cable::new(t, z, up))
+    }
+
+    /// Every zip line's cable.
+    pub(crate) fn cables(&self, up: Vec3) -> impl Iterator<Item = (Entity, Cable)> + '_ {
+        self.lines.iter().filter_map(move |(e, z)| {
+            let (t, _) = self.bodies.get(e).ok()?;
+            Some((e, Cable::new(t, z, up)))
         })
     }
 
@@ -166,6 +186,7 @@ pub(crate) fn step_movers(
     mut filter: Local<QueryFilter>,
     movers: Query<(), With<Mover>>,
     decks: Bodies,
+    lines: Lines,
     mut q: Query<(
         Entity,
         &mut Transform,
@@ -230,6 +251,7 @@ pub(crate) fn step_movers(
             filter: &filter,
             movers: &movers,
             bodies: &decks,
+            lines: &lines,
             rate,
         };
 
@@ -264,7 +286,8 @@ pub(crate) fn step_movers(
         let hook = m
             .grapple
             .and_then(|g| flat((g.anchor - pos).as_vec3(), up).try_normalize());
-        let face = m.hang.map(|h| -h.normal).or(hook).or_else(|| {
+        let zip = m.zip.and_then(|z| flat(z.heading, up).try_normalize());
+        let face = m.hang.map(|h| -h.normal).or(hook).or(zip).or_else(|| {
             m.influence
                 .face
                 .or(intent.look)
@@ -524,8 +547,10 @@ fn step_one(
     }
     wish *= m.influence.move_scale;
 
-    // Dashing, climbing or hanging lets go of the grapple.
-    if m.grapple.is_some() && (m.dash.is_some() || m.mantle.is_some() || m.hang.is_some()) {
+    // Dashing, climbing, hanging or riding a zip line lets go of the grapple.
+    if m.grapple.is_some()
+        && (m.dash.is_some() || m.mantle.is_some() || m.hang.is_some() || m.zip.is_some())
+    {
         grapple::release(m, p, b.entity, out);
     }
 
@@ -545,6 +570,9 @@ fn step_one(
         && m.hang.is_none()
         && m.dash_charges >= 1.0
     {
+        if m.zip.is_some() {
+            zipline::let_go(m, b, out, "zip_release");
+        }
         start_dash(m, p, req, b, v, out);
     }
     if let Some(mut d) = m.dash {
@@ -622,6 +650,27 @@ fn step_one(
             );
         }
         m.hang = None;
+    }
+
+    // ---- zip line: riding one, or catching one in reach
+    if m.dash.is_none()
+        && m.mantle.is_none()
+        && m.hang.is_none()
+        && let Some(v) = zipline::step(
+            m,
+            p,
+            b,
+            probe,
+            v,
+            wish,
+            jump_pressed,
+            crouch_pressed,
+            grounded,
+            dt,
+            out,
+        )
+    {
+        return v;
     }
 
     // ---- grapple hook
@@ -1603,6 +1652,7 @@ fn write_params(m: &Mover, params: &mut AnimationParams, up: Vec3) {
         "effort",
         match m.mode {
             _ if reeling => 0.9,
+            _ if m.zip.is_some() => 0.6,
             LocomotionMode::Dash | LocomotionMode::Mantle => 1.0,
             LocomotionMode::Climb => 0.7,
             LocomotionMode::Sprint | LocomotionMode::WallRun => 0.8,
@@ -1621,6 +1671,7 @@ fn write_params(m: &Mover, params: &mut AnimationParams, up: Vec3) {
         },
     );
     params.set("grapple", if reeling { 1.0 } else { 0.0 });
+    params.set("zipline", if m.zip.is_some() { 1.0 } else { 0.0 });
 }
 
 /// Rotate unit vector `from` toward `to` by at most `max_angle` radians.
