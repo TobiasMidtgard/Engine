@@ -21,7 +21,7 @@ use crate::cube::NodeKey;
 use crate::deform::DeformationMap;
 use crate::lod::{Lod, SelectInput};
 use crate::materials::{self, BakedMaterials, MATERIAL_COUNT};
-use crate::{TerrainSettings, Terrains};
+use crate::{TerrainRuntime, TerrainSettings, Terrains};
 
 const SHADER: &str = include_str!("terrain.wgsl");
 const SHADOW_SHADER: &str = include_str!("terrain_shadow.wgsl");
@@ -110,7 +110,15 @@ struct PlanetGpu {
     params2: [f32; 4],
     /// How far the terrain moved in the world since last frame (xyz, for motion vectors).
     motion: [f32; 4],
+    /// Regolith scattering (0..1), rayed craters in `rays`, unused, unused.
+    params3: [f32; 4],
+    /// Rayed craters: planet-local unit direction of the center (xyz), radius on the ground
+    /// (w, meters).
+    rays: [[f32; 4]; MAX_RAYED],
 }
+
+/// Rayed craters per planet the shader draws.
+const MAX_RAYED: usize = 8;
 
 /// Ground maps around the focus (uniform). Matches `Maps` in terrain.wgsl.
 #[repr(C)]
@@ -245,6 +253,32 @@ struct PlanetState {
     rebuild: Vec<NodeKey>,
     /// World position last frame (motion vectors for moving planets).
     last_position: Option<DVec3>,
+    /// The shape's rayed craters, packed for the shader.
+    rays: [[f32; 4]; MAX_RAYED],
+    rayed: usize,
+}
+
+impl PlanetState {
+    fn new(t: &TerrainRuntime, src: &ChunkSource) -> Self {
+        let mut rays = [[0.0; 4]; MAX_RAYED];
+        let mut rayed = 0;
+        if src.map.is_sphere() {
+            for ((dir, r), slot) in t.config.shape.rayed_craters().into_iter().zip(&mut rays) {
+                *slot = [dir.x as f32, dir.y as f32, dir.z as f32, r as f32];
+                rayed += 1;
+            }
+        }
+        Self {
+            lod: Lod::new(src.map, t.config.height_range(), t.config.finest_spacing_m),
+            version: t.version,
+            edits_seen: 0,
+            chunks: HashMap::new(),
+            rebuild: Vec::new(),
+            last_position: None,
+            rays,
+            rayed,
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -973,26 +1007,15 @@ impl RenderFeature for TerrainFeature {
         for (pi, e) in entities.iter().enumerate() {
             let t = &terrains.entries[e];
             let src = t.source.clone();
-            let state = self.planets.entry(*e).or_insert_with(|| PlanetState {
-                lod: Lod::new(src.map, t.config.height_range(), t.config.finest_spacing_m),
-                version: t.version,
-                edits_seen: 0,
-                chunks: HashMap::new(),
-                rebuild: Vec::new(),
-                last_position: None,
-            });
+            let state = self
+                .planets
+                .entry(*e)
+                .or_insert_with(|| PlanetState::new(t, &src));
             if state.version != t.version {
                 for c in state.chunks.values() {
                     self.pool.release(c.slot);
                 }
-                *state = PlanetState {
-                    lod: Lod::new(src.map, t.config.height_range(), t.config.finest_spacing_m),
-                    version: t.version,
-                    edits_seen: 0,
-                    chunks: HashMap::new(),
-                    rebuild: Vec::new(),
-                    last_position: None,
-                };
+                *state = PlanetState::new(t, &src);
             }
             // Edited areas: rebuild the patches that cover them, keeping the old ones drawn.
             if state.edits_seen < t.edit_log.len() {
@@ -1188,6 +1211,8 @@ impl RenderFeature for TerrainFeature {
                     t.config.shape.crater_seed() as f32,
                 ],
                 motion: motion.extend(0.0).to_array(),
+                params3: [p.regolith, state.rayed as f32, 0.0, 0.0],
+                rays: state.rays,
             });
         }
         self.built_last_frame = built_total;
@@ -1376,8 +1401,42 @@ mod tests {
     }
 
     #[test]
+    fn shader_structs_match_the_buffers() {
+        use wgpu::naga;
+        for (label, code, maps) in [
+            ("terrain", compose_shader(SHADER, true), true),
+            (
+                "terrain shadow",
+                compose_shader(SHADOW_SHADER, false),
+                false,
+            ),
+        ] {
+            let module = naga::front::wgsl::parse_str(&code).unwrap();
+            let size = |name: &str| {
+                module
+                    .types
+                    .iter()
+                    .find(|(_, t)| t.name.as_deref() == Some(name))
+                    .map(|(_, t)| t.inner.size(module.to_ctx()) as usize)
+            };
+            let planet = size("PlanetGpu");
+            assert_eq!(planet, Some(std::mem::size_of::<PlanetGpu>()), "{label}");
+            if maps {
+                assert_eq!(
+                    size("Maps"),
+                    Some(std::mem::size_of::<MapsGpu>()),
+                    "{label}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn gpu_structs_match_shader_sizes() {
-        assert_eq!(std::mem::size_of::<PlanetGpu>(), 16 * (3 + 1 + 10 + 3));
+        assert_eq!(
+            std::mem::size_of::<PlanetGpu>(),
+            16 * (3 + 1 + 10 + 4 + MAX_RAYED)
+        );
         assert_eq!(std::mem::size_of::<MapsGpu>(), 64);
         assert_eq!(std::mem::size_of::<TerrainVertex>(), 44);
     }

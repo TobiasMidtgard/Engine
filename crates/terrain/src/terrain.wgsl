@@ -17,6 +17,8 @@ struct PlanetGpu {
     params: vec4<f32>,              // snow below °C, rock slope, vegetation (0/1), ocean surface (0/1)
     params2: vec4<f32>,             // sphere (0/1), crater density, largest crater radius, crater seed
     motion: vec4<f32>,              // how far the terrain moved in the world since last frame
+    params3: vec4<f32>,             // regolith scattering (0..1), rayed craters, unused, unused
+    rays: array<vec4<f32>, 8>,      // rayed craters: center (planet-local unit direction), radius on the ground (m)
 };
 
 // Must match `MapsGpu` in render.rs.
@@ -359,6 +361,27 @@ fn smoothstep_d(e0: f32, e1: f32, x: f32) -> f32 {
     return 6.0 * t * (1.0 - t) / (e1 - e0);
 }
 
+// Slope (meters of height per crater radius) of `crater_profile` in shape.rs at `x` crater
+// radii from the center: a fresh bowl (flat-floored inside `fl`) with a sharp-crested rim,
+// turning into a shallow dish with a rounded rim as it wears.
+fn crater_slope(x: f32, depth: f32, rim: f32, fl: f32, worn: f32) -> f32 {
+    if (x >= 1.5) {
+        return 0.0;
+    }
+    var bowl = 0.0;
+    if (x < 1.0) {
+        if (x > fl) {
+            bowl = depth * 2.0 * (x - fl) / ((1.0 - fl) * (1.0 - fl));
+        }
+        bowl += rim * smoothstep_d(0.6, 1.0, x);
+    } else {
+        bowl = rim * 2.0 * (-smoothstep_d(1.0, 1.5, x) * (1.5 - x) - (1.0 - smoothstep(1.0, 1.5, x)));
+    }
+    let e = x - 1.05;
+    let dish = depth * smoothstep_d(fl * 0.8, 1.25, x) - rim * sign(e) * smoothstep_d(0.0, 0.4, abs(e));
+    return mix(bowl, dish, worn);
+}
+
 // Small craters on barren ground near the camera (none of them in the shape): slope along the
 // surface (xyz) and the albedo gain of fresh ones (w). Cells of 8 m down to 1 m divide the
 // 4096 m tiling period, so `tp` keeps them in place.
@@ -388,15 +411,11 @@ fn micro_craters(tp: vec3<f32>, up: vec3<f32>, pixel: f32) -> vec4<f32> {
                 continue;
             }
             let age = crater_hash(c, cs, 6u);
-            let wear = 1.0 - 0.7 * smoothstep(0.1, 0.9, age);
+            let worn = smoothstep(0.1, 0.9, age);
+            let wear = 1.0 - 0.7 * worn;
             let depth = rc * 0.2 * wear;
             let rim = rc * 0.05 * wear * wear;
-            var dh = 0.0;
-            if (x < 1.0) {
-                dh = depth * 2.0 * x + rim * smoothstep_d(0.6, 1.0, x);
-            } else {
-                dh = rim * 2.0 * (-smoothstep_d(1.0, 1.5, x) * (1.5 - x) - (1.0 - smoothstep(1.0, 1.5, x)));
-            }
+            let dh = crater_slope(x, depth, rim, 0.0, worn);
             grad += d * (dh / (rc * max(dist, 1e-4))) * seen;
             let fresh = 1.0 - smoothstep(0.1, 0.3, age);
             bright += fresh * seen * smoothstep(0.5, 0.9, x) * (1.0 - smoothstep(1.05, 1.5, x)) * 0.25;
@@ -404,6 +423,26 @@ fn micro_craters(tp: vec3<f32>, up: vec3<f32>, pixel: f32) -> vec4<f32> {
         cell *= 0.5;
     }
     return vec4<f32>(grad - up * dot(grad, up), bright);
+}
+
+// Slope (x/z) of low lumps and swales in the dust, 2 m and 50 cm across, a few centimeters
+// high. Lattice frequencies divide the 4096 m tiling period, so `tp` keeps them in place.
+fn dust_lumps(tp: vec3<f32>) -> vec2<f32> {
+    let e = 0.04;
+    var g = vec2<f32>(0.0);
+    var f = 0.5;
+    var amp = 0.06;
+    for (var o = 0; o < 2; o++) {
+        let q = vec3<f32>(tp.x * f, 3.0 + f32(o) * 7.0, tp.z * f);
+        let per = 4096.0 * f;
+        let h0 = pnoise3(q, per);
+        let hx = pnoise3(q + vec3<f32>(e * f, 0.0, 0.0), per);
+        let hz = pnoise3(q + vec3<f32>(0.0, 0.0, e * f), per);
+        g += vec2<f32>(hx - h0, hz - h0) / e * amp;
+        f *= 4.0;
+        amp *= 0.3;
+    }
+    return g;
 }
 
 struct Craters {
@@ -453,29 +492,61 @@ fn crater_detail(p: PlanetGpu, rel: vec3<f32>, pixel: f32, spacing: f32) -> Crat
             }
             let big = rc > 8000.0;
             let age = crater_hash(c, cs, 6u);
-            let wear = 1.0 - 0.65 * smoothstep(0.1, 0.9, age);
+            let worn = smoothstep(0.1, 0.9, age);
+            let wear = 1.0 - 0.65 * worn;
             let depth = rc * select(0.18, 0.06, big) * wear;
             let rim = rc * 0.045 * wear * wear;
-            var dh = 0.0;
-            if (x < 1.0) {
-                let fl = select(0.0, 0.55, big);
-                if (x > fl) {
-                    dh = depth * 2.0 * (x - fl) / ((1.0 - fl) * (1.0 - fl));
-                }
-                dh += rim * smoothstep_d(0.6, 1.0, x);
-            } else {
-                dh = rim * 2.0 * (-smoothstep_d(1.0, 1.5, x) * (1.5 - x) - (1.0 - smoothstep(1.0, 1.5, x)));
-            }
+            let dh = crater_slope(x, depth, rim, select(0.0, 0.55, big), worn);
             grad += d * (dh / (rc * max(dist, 1e-3))) * shade;
+            // Fresh craters are bright all over (new rock on the floor and walls, a blanket of
+            // ejecta thinning out past the rim), so from afar they are bright spots with halos,
+            // not rings.
             let fresh = 1.0 - smoothstep(0.08, 0.25, age);
-            let walls = smoothstep(0.45, 0.9, x) * (1.0 - smoothstep(1.05, 1.5, x));
-            out.bright += fresh * seen * (walls * 0.6 + (1.0 - smoothstep(0.0, 0.9, x)) * 0.2);
+            out.bright += fresh * seen * (1.0 - smoothstep(0.6, 1.5, x)) * 0.45;
         }
         radius *= 0.5;
         size_class += 1u;
     }
     out.slope = rot * (grad - up * dot(grad, up));
     return out;
+}
+
+// Rays of bright ejecta from the planet's youngest big craters (`PlanetShape::rayed_craters`):
+// streaks of fresh material thrown straight out along great circles, each reaching its own
+// distance (6 to 40 crater radii), broken into clumps where secondary craters landed, over a
+// bright blanket around the rim. Returns how much of the ground is ray material, 0..1.
+fn crater_rays(p: PlanetGpu, rel: vec3<f32>, pixel: f32) -> f32 {
+    let count = min(u32(p.params3.y), 8u);
+    if (count == 0u) {
+        return 0.0;
+    }
+    let dir = normalize(transpose(planet_rot(p)) * (rel - p.center.xyz));
+    var ray = 0.0;
+    for (var k = 0u; k < count; k++) {
+        let c = p.rays[k];
+        // Along the ground (2R asin(chord / 2) stays exact at small distances).
+        let d = 2.0 * asin(min(length(dir - c.xyz) * 0.5, 1.0)) * p.center.w;
+        let x = d / c.w;
+        if (x > 40.0 || x < 0.8) {
+            continue;
+        }
+        let t1 = normalize(cross(c.xyz, select(vec3<f32>(0.0, 1.0, 0.0), vec3<f32>(1.0, 0.0, 0.0), abs(c.y) > 0.9)));
+        let t2 = cross(c.xyz, t1);
+        let around = atan2(dot(dir, t2), dot(dir, t1)) * 0.15915494 + 0.5;
+        let salt = f32(k) * 17.0;
+        // Streaks narrower than a few pixels fade into their average instead of shimmering.
+        let lobe = 6.2831853 * d / pixel;
+        let broad = pnoise3(vec3<f32>(around * 24.0, salt, 0.5), 24.0);
+        let fine = mix(0.5, pnoise3(vec3<f32>(around * 96.0, salt + 5.0, 0.5), 96.0), smoothstep(96.0, 288.0, lobe));
+        let streak = smoothstep(0.4, 0.75, broad) * 0.8 + smoothstep(0.55, 0.8, fine) * 0.35;
+        // The broadest streaks reach farthest.
+        let reach = mix(8.0, 40.0, broad);
+        let clumps = mix(0.5, pnoise3(vec3<f32>(around * 96.0, log2(x) * 6.0, salt), 96.0), smoothstep(1.0, 3.0, 0.115 * d / pixel));
+        let along = (1.0 - smoothstep(0.4 * reach, reach, x)) * mix(0.3, 1.0, clumps) * pow(min(1.0, 4.0 / x), 0.6);
+        let blanket = (1.0 - smoothstep(1.1, 3.0, x)) * mix(0.7, 1.0, fine);
+        ray = max(ray, smoothstep(0.8, 1.1, x) * max(blanket, saturate(streak) * along));
+    }
+    return ray;
 }
 
 // Camera-relative position of a vertex: geomorphed toward its parent patch and lowered by
@@ -1058,9 +1129,10 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     w[M_SOIL] = 1.0 - veg + max(veg - woods, 0.0) * bare_patch;
     for (var i = 0u; i < MAT_COUNT; i++) { w[i] *= 1.0 - sandy; }
     w[M_SAND] = sandy;
-    // Barren worlds: stony patches in the regolith.
+    // Barren worlds: stones thrown out by impacts lie everywhere on the regolith, poking out
+    // of the dust, and gather in stony patches.
     let barren = 1.0 - vegetation;
-    let stony = w[M_SOIL] * barren * smoothstep(0.55, 0.8, patch_v + (detail_n - 0.5) * 0.3 * fine_fade) * 0.6;
+    let stony = w[M_SOIL] * barren * (0.3 + smoothstep(0.55, 0.8, patch_v + (detail_n - 0.5) * 0.3 * fine_fade) * 0.4);
     w[M_SOIL] -= stony;
     w[M_GRAVEL] += stony;
     for (var i = 0u; i < MAT_COUNT; i++) { w[i] *= 1.0 - scree; }
@@ -1151,7 +1223,7 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
             // soil texture: most of its relief and pattern is smoothed away (small craters
             // stand in for it).
             if (i == M_SOIL && barren > 0.0) {
-                let k = 0.75 * barren;
+                let k = 0.9 * barren;
                 ms[i].normal = normalize(mix(ms[i].normal, n_geo, k));
                 ms[i].detail = mix(ms[i].detail, vec3<f32>(1.0), k);
                 ms[i].height = mix(ms[i].height, 0.5, k);
@@ -1196,6 +1268,13 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
         let pock = micro_craters(tp, up, pixel);
         n = normalize(n - pock.xyz * barren * w[M_SOIL]);
         albedo *= 1.0 + pock.w * barren * w[M_SOIL];
+        // The dust is never quite flat: gentle lumps and swales a meter or two across.
+        let lump_k = (1.0 - smoothstep(0.05, 0.4, pixel)) * barren * w[M_SOIL];
+        if (lump_k > 0.0) {
+            let g = dust_lumps(tp) * lump_k;
+            let tilt = vec3<f32>(g.x, 0.0, g.y);
+            n = normalize(n - (tilt - up * dot(tilt, up)));
+        }
     }
     // Craters too small for the vertices, and fresh craters' bright ejecta.
     if (planet.params2.y > 0.0 && planet.params2.z > 0.0) {
@@ -1205,6 +1284,8 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
         let sun_up = smoothstep(-0.02, 0.2, dot(up, frame.sun_dir.xyz));
         n = normalize(n - crater.slope * sun_up);
         albedo *= 1.0 + crater.bright;
+        let ray = crater_rays(planet, in.rel, pixel) * (1.0 - vegetation);
+        albedo = mix(albedo, max(albedo, planet.colors[C_ROCK].rgb * 1.25), ray * 0.75);
     }
     var porosity = (1.0 - rock * 0.6) * (1.0 - paint_w);
     for (var l = 1u; l < 11u; l++) { porosity += pw[l] * paint_porosity(l); }
@@ -1371,6 +1452,22 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     }
     if (frame.counts.z == 4u) {
         return vec4<f32>(vec3(screen_ao(in.rel)), 1.0);
+    }
+
+    // Regolith on airless worlds scatters light back the way it came (Lommel–Seeliger, mixed
+    // with Lambert by phase angle as in the lunar-Lambert model): a full Moon is as bright at
+    // its limb as in its middle and its relief fades under a high sun, and dust lit from
+    // straight behind the viewer brightens (the opposition surge). The surface is lit as
+    // Lambertian, so the difference goes into the albedo where the sun is up.
+    let regolith = planet.params3.x * (1.0 - ocean);
+    if (regolith > 0.0) {
+        let v = normalize(-in.rel);
+        let l = frame.sun_dir.xyz;
+        let mu0 = dot(n, l);
+        let phase = acos(clamp(dot(l, v), -1.0, 1.0));
+        let share = regolith * mix(1.0, 0.5, smoothstep(0.0, 2.0, phase)) * smoothstep(0.0, 0.05, mu0);
+        let lommel = 2.0 / max(mu0 + max(dot(n, v), 0.0), 0.6);
+        albedo *= mix(1.0, lommel, share) * (1.0 + 0.3 * regolith * (1.0 - smoothstep(0.0, 0.2, phase)));
     }
 
     var s = default_surface();
