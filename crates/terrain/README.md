@@ -23,7 +23,11 @@ everything else (streaming, LOD, colliders, ground queries, prints) follows the 
   eroded mountains whose steep sides break into rock ledges, hills, climate bands), the
   Moon (craters, maria) and Mars (craters, plains, dry ice caps), all seeded and
   deterministic. Detail is generated down to
-  `finest_spacing_m` (0.5 m by default).
+  `finest_spacing_m` (0.5 m by default). On the Moon the maria are big impact basins ringed by
+  worn massifs and flooded with lava of different shades, plus lava that spilled across the
+  lowlands, gathered on the face a tidally locked moon turns to its planet (planet-local +Z,
+  which engine_space turns to the parent). Craters age from crisp bowls into soft dishes, and
+  on airless worlds hills and mountains are worn round (`PlanetShape::worn`).
 - **Flat pads and a view worth having.** `FlatPad` blends the planet into level ground for a
   level, town or spaceport. `PlanetTerrain::home_transform(pad)` places the planet so the pad
   sits at the world origin with +Y up (north toward −Z; `heading_deg` 180 turns north to +Z,
@@ -66,7 +70,11 @@ everything else (streaming, LOD, colliders, ground queries, prints) follows the 
   them: dark varnish and pale mineral stains. From orbit, noise per pixel gives woods, snowfields and coasts natural
   shapes instead of the vertices' blocky ones. On cratered worlds the shader shades the
   craters too small for the vertices, per pixel, from the same scatter as the shape (so
-  nothing pops on the way down), fresh ones with bright walls and ejecta.
+  nothing pops on the way down); fresh ones are bright spots with halos, and the youngest
+  big ones throw rays of bright ejecta across the globe, like Tycho and Copernicus. Moon
+  dust scatters light the way regolith does (`TerrainPalette::regolith`), so a full Moon is
+  as bright at its edge as in its middle and brightens toward full phase. Underfoot the
+  regolith is powdery and gently lumpy, with stones poking out of it everywhere.
 - **Detailed ground materials up close.** Nine PBR materials (turf in tufts over thatch,
   leaf litter with needles and twigs, soil, churned mud, rock, snow, rippled sand, gravel,
   concrete) are generated procedurally in `materials.rs` like a node-graph material: height
@@ -155,7 +163,8 @@ commands.entity(bodies["Moon"]).insert(PlanetTerrain::moon(7).with_radius(1_737_
 
 `examples/terrain_shots.rs` renders the test views headless (lab prints, rain, snow, painted
 ground and a patchwork of painted layers, a meadow tinted the way the showcase paints its
-valley and a natural one at eye height, snow at eye height and over the valley, woods from the air, the range, the coast, the Moon and Mars from orbit)
+valley and a natural one at eye height, snow at eye height and over the valley, woods from the air, the range, the coast, the Moon
+underfoot, from low orbit, half lit and full, and Mars from orbit)
 with the game's auto exposure, and `examples/terrain_map.rs` draws a relief map around the
 home pad for tuning shapes.
 

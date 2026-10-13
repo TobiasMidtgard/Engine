@@ -35,6 +35,8 @@ struct View {
     target: DVec3,
     /// Place `eye` this high above the ground below it instead of using `eye.y`.
     above_ground: Option<f64>,
+    /// Likewise for `target`.
+    target_above_ground: Option<f64>,
     /// Sun azimuth (degrees from north toward east) and elevation (degrees).
     sun: (f64, f64),
     /// The showcase's own auto exposure by default, so pictures look the way the game shows
@@ -60,6 +62,7 @@ const BASE: View = View {
     eye: DVec3::ZERO,
     target: DVec3::ZERO,
     above_ground: None,
+    target_above_ground: None,
     sun: (220.0, 35.0),
     exposure: AUTO,
     fov: 60.0,
@@ -297,6 +300,17 @@ fn views() -> Vec<View> {
             ..BASE
         },
         View {
+            name: "moon_feet",
+            world: World3::Moon,
+            eye: DVec3::new(3_500.0, 0.0, -2_500.0),
+            target: DVec3::new(3_503.0, 0.0, -2_504.0),
+            above_ground: Some(1.7),
+            target_above_ground: Some(0.0),
+            sun: (120.0, 15.0),
+            exposure: Exposure::Manual { ev100: 15.0 },
+            ..BASE
+        },
+        View {
             name: "moon_low_orbit",
             world: World3::Moon,
             eye: DVec3::new(0.0, 60_000.0, 120_000.0),
@@ -312,6 +326,16 @@ fn views() -> Vec<View> {
             eye: DVec3::new(0.0, 900_000.0, 3_200_000.0),
             target: DVec3::new(0.0, -1_737_400.0, 0.0),
             sun: (100.0, 20.0),
+            exposure: Exposure::Manual { ev100: 15.0 },
+            fov: 50.0,
+            ..BASE
+        },
+        View {
+            name: "moon_full",
+            world: World3::Moon,
+            eye: DVec3::new(0.0, 900_000.0, 3_200_000.0),
+            target: DVec3::new(0.0, -1_737_400.0, 0.0),
+            sun: (190.0, 36.0),
             exposure: Exposure::Manual { ev100: 15.0 },
             fov: 50.0,
             ..BASE
@@ -525,25 +549,27 @@ fn main() {
             eprintln!("no GPU: {}", d.0);
             return;
         }
-        let mut eye = view.eye;
-        if let Some(h) = view.above_ground {
-            let ground = app.world.resource::<engine_world::Ground>().clone();
-            // On a planet the ground is found along the local vertical, so ask again from
-            // just above it: from high up the answer lies a little to the side.
-            let mut y = 50_000.0;
-            for _ in 0..3 {
-                y = ground
-                    .height(DVec3::new(eye.x, y + 10.0, eye.z))
-                    .unwrap_or(0.0);
+        let ground = app.world.resource::<engine_world::Ground>().clone();
+        let place = |mut p: DVec3, above: Option<f64>| {
+            if let Some(h) = above {
+                // On a planet the ground is found along the local vertical, so ask again from
+                // just above it: from high up the answer lies a little to the side.
+                let mut y = 50_000.0;
+                for _ in 0..3 {
+                    y = ground.height(DVec3::new(p.x, y + 10.0, p.z)).unwrap_or(0.0);
+                }
+                p.y = y + h;
             }
-            eye.y = y + h;
-        }
+            p
+        };
+        let eye = place(view.eye, view.above_ground);
+        let target = place(view.target, view.target_above_ground);
         app.world.spawn((
             Camera {
                 exposure: view.exposure,
                 ..Camera::perspective(view.fov)
             },
-            Transform::from_translation(eye).looking_at(view.target, Vec3::Y),
+            Transform::from_translation(eye).looking_at(target, Vec3::Y),
         ));
         // Let the walkers lay their trails and the terrain finish streaming, with the ground
         // materials baked.
