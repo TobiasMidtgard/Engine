@@ -17,6 +17,9 @@ use engine_core::window::RawWindowHandle;
 use serde_json::json;
 
 use crate::atmosphere::AtmosphereLuts;
+use crate::cloud_shadows::{
+    CLOUD_SHADOW_FORMAT, CloudShadowArea, CloudShadowMap, CloudShadowTarget,
+};
 use crate::effects::ScreenEffects;
 use crate::environment::EnvironmentMaps;
 use crate::features::{
@@ -157,6 +160,10 @@ pub struct Renderer {
     sky_camera: crate::sky_occlusion::SkyCamera,
     /// `SurfaceLayers` around the camera for `surface_weather` (frame binding 21).
     surface_weather: crate::surface_weather::SurfaceWeatherMap,
+    /// The cloud shadow map (frame binding 22) and its stand-in for compute passes.
+    cloud_shadows: CloudShadowMap,
+    /// Whether the stand-in has been cleared to 1 yet (textures start at 0).
+    cloud_stand_in_ready: bool,
     environment: EnvironmentMaps,
     env_rendered: bool,
     /// 1x1 neutral stand-ins for the screen-space maps (no occlusion, nothing in the prepass),
@@ -164,6 +171,9 @@ pub struct Renderer {
     screen_stand_ins: ScreenMaps,
     /// Scene passes.
     frame_group: wgpu::BindGroup,
+    /// Features' `compute`: the scene group with a stand-in for the cloud shadow map, which a
+    /// feature may be drawing.
+    compute_group: wgpu::BindGroup,
     /// The prepass and the effects that write the screen-space maps.
     prepass_group: wgpu::BindGroup,
     /// Overlays: unjittered matrices.
@@ -440,9 +450,12 @@ impl Renderer {
                         multisampled: false,
                     },
                 ),
+                // Screen-space global illumination.
                 layout_entry(20, all, float_texture),
                 // The ground's weather around the camera (`surface_weather`).
                 layout_entry(21, all, float_texture),
+                // Cloud shadows (cloud_shadows.rs). The 15th sampled texture in group 0.
+                layout_entry(22, all, float_texture),
             ],
         });
         let shadow_view_layout =
@@ -502,6 +515,7 @@ impl Renderer {
         let screen_stand_ins = ScreenMaps::stand_ins(&shared, &volumetrics);
         let atmosphere = AtmosphereLuts::new(&shared, &frame_buffer);
         let surface_weather = crate::surface_weather::SurfaceWeatherMap::new(&shared);
+        let cloud_shadows = CloudShadowMap::new(&device);
         let groups = FrameGroups::new(
             &shared,
             [&frame_buffer, &overlay_frame_buffer],
@@ -513,6 +527,7 @@ impl Renderer {
             &surface_weather.view,
             &ScreenMaps::of(&targets, &volumetrics),
             &screen_stand_ins,
+            &cloud_shadows,
         );
         let post = create_post(&shared, &targets, surface.as_ref().map(|s| s.view_format));
         let effects = ScreenEffects::new(&shared, &targets);
@@ -532,11 +547,14 @@ impl Renderer {
             shadow,
             sky_camera,
             surface_weather,
+            cloud_shadows,
+            cloud_stand_in_ready: false,
             environment,
             env_rendered: false,
             screen_stand_ins,
             atmosphere,
             frame_group: groups.scene,
+            compute_group: groups.compute,
             prepass_group: groups.prepass,
             overlay_group: groups.overlay,
             post,
@@ -615,8 +633,10 @@ impl Renderer {
             &self.surface_weather.view,
             &ScreenMaps::of(&self.targets, &self.volumetrics),
             &self.screen_stand_ins,
+            &self.cloud_shadows,
         );
         self.frame_group = groups.scene;
+        self.compute_group = groups.compute;
         self.prepass_group = groups.prepass;
         self.overlay_group = groups.overlay;
     }
@@ -781,6 +801,36 @@ impl Renderer {
             f.prepare(world, &self.shared, &view, &settings);
         }
 
+        // Cloud shadows: the first feature that asks draws the map in `compute`. The frame
+        // uniform written above has them off; turn them on now that the area is known.
+        let cloud_writer = if settings.cloud_shadows {
+            self.features
+                .iter()
+                .enumerate()
+                .find_map(|(i, f)| f.cloud_shadows().map(|r| (i, r)))
+        } else {
+            None
+        };
+        let cloud_area = cloud_writer
+            .map(|(_, request)| CloudShadowArea::place(&request, view.origin, view.sun_dir));
+        if let Some(area) = cloud_area {
+            if self
+                .cloud_shadows
+                .ensure_size(&self.shared.device, area.size)
+            {
+                self.rebuild_frame_groups();
+            }
+            uniform.cloud_shadow = area.uniform(view.origin);
+            let offset = std::mem::offset_of!(crate::frame::FrameUniform, cloud_shadow) as u64;
+            let bytes = bytemuck::bytes_of(&uniform.cloud_shadow);
+            self.shared
+                .queue
+                .write_buffer(&self.frame_buffer, offset, bytes);
+            self.shared
+                .queue
+                .write_buffer(&self.overlay_frame_buffer, offset, bytes);
+        }
+
         let device = &self.shared.device;
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("frame"),
@@ -793,10 +843,31 @@ impl Renderer {
             scene_color_copy: &self.targets.color_copy.view,
             scene_depth_copy: &self.targets.depth_copy.view,
             ldr: &self.targets.ldr.view,
+            cloud_shadows: None,
         };
 
         self.atmosphere.encode(&mut encoder, &uniform);
-        for f in &mut self.features {
+        // Cleared to 1 every frame, so nothing is shaded where (or when) nobody draws it.
+        self.cloud_shadows
+            .clear(&mut encoder, !self.cloud_stand_in_ready);
+        self.cloud_stand_in_ready = true;
+        let compute_ctx = FrameContext {
+            frame_group: &self.compute_group,
+            ..ctx
+        };
+        let cloud_target = cloud_area.map(|area| CloudShadowTarget {
+            view: &self.cloud_shadows.view,
+            format: CLOUD_SHADOW_FORMAT,
+            area,
+        });
+        for (i, f) in self.features.iter_mut().enumerate() {
+            let ctx = match cloud_writer {
+                Some((writer, _)) if writer == i => FrameContext {
+                    cloud_shadows: cloud_target,
+                    ..compute_ctx
+                },
+                _ => compute_ctx,
+            };
             f.compute(&mut encoder, &ctx);
         }
 
@@ -1458,6 +1529,8 @@ fn create_occlusion_target(shared: &GpuShared, size: u32) -> wgpu::TextureView {
 struct FrameGroups {
     /// Scene passes.
     scene: wgpu::BindGroup,
+    /// Features' `compute`: a stand-in for the cloud shadow map.
+    compute: wgpu::BindGroup,
     /// Prepass and screen-space effects: stand-ins for the maps they write.
     prepass: wgpu::BindGroup,
     /// Overlays: the unjittered frame uniform.
@@ -1478,16 +1551,18 @@ impl FrameGroups {
         surface: &wgpu::TextureView,
         maps: &ScreenMaps,
         stand_ins: &ScreenMaps,
+        clouds: &CloudShadowMap,
     ) -> Self {
-        let group = |uniform: &wgpu::Buffer, maps: &ScreenMaps| {
+        let group = |uniform: &wgpu::Buffer, maps: &ScreenMaps, clouds: &wgpu::TextureView| {
             create_frame_group(
-                shared, uniform, lights, shadow, env, sky_camera, atmosphere, surface, maps,
+                shared, uniform, lights, shadow, env, sky_camera, atmosphere, surface, maps, clouds,
             )
         };
         Self {
-            scene: group(frame[0], maps),
-            prepass: group(frame[0], stand_ins),
-            overlay: group(frame[1], maps),
+            scene: group(frame[0], maps, &clouds.view),
+            compute: group(frame[0], maps, &clouds.stand_in),
+            prepass: group(frame[0], stand_ins, &clouds.view),
+            overlay: group(frame[1], maps, &clouds.view),
         }
     }
 }
@@ -1503,6 +1578,7 @@ fn create_frame_group(
     atmosphere: &AtmosphereLuts,
     surface: &wgpu::TextureView,
     maps: &ScreenMaps,
+    clouds: &wgpu::TextureView,
 ) -> wgpu::BindGroup {
     fn view(v: &wgpu::TextureView) -> wgpu::BindingResource<'_> {
         wgpu::BindingResource::TextureView(v)
@@ -1598,6 +1674,10 @@ fn create_frame_group(
             wgpu::BindGroupEntry {
                 binding: 21,
                 resource: view(surface),
+            },
+            wgpu::BindGroupEntry {
+                binding: 22,
+                resource: view(clouds),
             },
         ],
     })
