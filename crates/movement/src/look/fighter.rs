@@ -10,8 +10,8 @@
 //!
 //! Materials are baked PBR texture sets (painted armor with chipped edges and scratches,
 //! carbon fiber twill, rubberized undersuit with grip dots, woven cloth, leather, molded
-//! rubber, machined metal, polished and hardened steel, the handle's silk cord and ray
-//! skin), plus emissive accents in the style's color.
+//! rubber, iron mail, machined metal, polished and hardened steel, the handle's silk cord
+//! and ray skin), plus emissive accents in the style's color.
 
 use std::collections::{BTreeMap, HashMap};
 use std::f32::consts::{FRAC_PI_2, PI, TAU};
@@ -35,7 +35,8 @@ pub enum Style {
     /// The parkour runner: a tactical pilot in a plate carrier and cargo trousers, a close
     /// helmet with a narrow visor and a respirator, a jump kit, teal accents.
     Pilot,
-    /// The player: white and blue armored swordsman.
+    /// The player: a samurai in white and blue lacquer, a ribbed helmet with gilt horns over
+    /// a sculpted face mask.
     Duelist,
     /// Black and crimson blade master with a glowing red visor.
     Elite,
@@ -193,6 +194,8 @@ pub enum Mat {
     Rubber,
     /// Molded rubber: a gas mask's face.
     Mask,
+    /// Blackened iron mail sewn onto a cloth backing (the samurai's sleeves).
+    Mail,
     /// Emissive accent lines.
     Glow,
     /// Dark glossy visor glass.
@@ -214,7 +217,7 @@ pub enum Mat {
 }
 
 impl Mat {
-    pub const ALL: [Mat; 19] = [
+    pub const ALL: [Mat; 20] = [
         Mat::PaintA,
         Mat::PaintB,
         Mat::Suit,
@@ -225,6 +228,7 @@ impl Mat {
         Mat::Trim,
         Mat::Rubber,
         Mat::Mask,
+        Mat::Mail,
         Mat::Glow,
         Mat::Glass,
         Mat::Lens,
@@ -248,6 +252,7 @@ impl Mat {
             Mat::Trim => "trim",
             Mat::Rubber => "rubber",
             Mat::Mask => "mask",
+            Mat::Mail => "mail",
             Mat::Glow => "glow",
             Mat::Glass => "glass",
             Mat::Lens => "lens",
@@ -264,7 +269,7 @@ impl Mat {
     fn shared(self) -> bool {
         matches!(
             self,
-            Mat::Carbon | Mat::Rubber | Mat::Mask | Mat::Steel | Mat::Hamon
+            Mat::Carbon | Mat::Rubber | Mat::Mask | Mat::Mail | Mat::Steel | Mat::Hamon
         )
     }
 
@@ -2162,30 +2167,34 @@ fn arms(kit: &mut Kit, s: &Spec) {
             6,
         )
     });
-    // Vambrace with an accent line.
-    let vt = s.t * 0.8;
-    kit.pair(ForearmR, Mat::PaintA, || {
-        fore.shaped_panels(
-            (-1.45, 1.45),
-            |u| (0.915 + 0.015 * (1.0 - (u - 0.5).abs() * 2.0), 1.095),
-            |_, _| 0.007,
-            Pl::new(vt, 0.004, s.edge_a),
-            14,
-            8,
-            &[],
-            &[0.42],
-        )
-    });
-    kit.pair(ForearmR, Mat::Glow, || {
-        fore.plate(
-            (-0.07, 0.07),
-            (0.95, 1.07),
-            0.007 + vt + 0.0045,
-            Pl::strip(),
-            1,
-            8,
-        )
-    });
+    if matches!(style, Style::Duelist | Style::Elite) {
+        kote(kit, s, &fore);
+    } else {
+        // Vambrace with an accent line.
+        let vt = s.t * 0.8;
+        kit.pair(ForearmR, Mat::PaintA, || {
+            fore.shaped_panels(
+                (-1.45, 1.45),
+                |u| (0.915 + 0.015 * (1.0 - (u - 0.5).abs() * 2.0), 1.095),
+                |_, _| 0.007,
+                Pl::new(vt, 0.004, s.edge_a),
+                14,
+                8,
+                &[],
+                &[0.42],
+            )
+        });
+        kit.pair(ForearmR, Mat::Glow, || {
+            fore.plate(
+                (-0.07, 0.07),
+                (0.95, 1.07),
+                0.007 + vt + 0.0045,
+                Pl::strip(),
+                1,
+                8,
+            )
+        });
+    }
     // Pauldrons: a cap over the shoulder and a sode of overlapping lames hanging from it.
     match style {
         Style::Duelist => {
@@ -2330,6 +2339,93 @@ fn arms(kit: &mut Kit, s: &Spec) {
             block(v3(0.002, 0.044, 0.032), 0.0008, Vec3::X, Vec3::Y, p)
         });
     }
+}
+
+/// Kote: the samurai's armored sleeve below the elbow. The cloth sleeve is faced with mail
+/// over the back and sides of the forearm, and three lacquered splints are laced on over
+/// the mail, a glowing inlay down the middle one.
+fn kote(kit: &mut Kit, s: &Spec, fore: &Vol) {
+    use Bone::ForearmR;
+    kit.pair(ForearmR, Mat::Cloth, || {
+        hakama_leg(fore, (0.9, 1.165), 36, 8, |phi, y| {
+            let crease = 0.5 + 0.5 * (phi * 4.0 + y * 40.0).sin();
+            0.003 + 0.003 * crease * smooth(1.08, 1.16, y)
+        })
+    });
+    // Over the sleeve's cloth (its own 4 mm included).
+    let g_mail = 0.0105;
+    kit.pair(ForearmR, Mat::Mail, || {
+        fore.plate(
+            (-1.85, 1.75),
+            (0.912, 1.118),
+            g_mail,
+            Pl::new(0.0012, 0.0, 0.9),
+            24,
+            8,
+        )
+    });
+    // (center angle, half width, wrist end, elbow end); the back of the forearm faces
+    // out (+X) and a little back.
+    let splints = [
+        (-0.84, 0.25, 0.938, 1.082),
+        (-0.2, 0.3, 0.924, 1.098),
+        (0.44, 0.25, 0.938, 1.082),
+    ];
+    let g_splint = g_mail + 0.0016;
+    let pl = Pl::new(s.t * 0.75, 0.0016, s.edge_a);
+    kit.pair(ForearmR, Mat::PaintA, || {
+        let mut m = MeshBuilder::new();
+        for &(c, w, y0, y1) in &splints {
+            m.append(
+                &fore.shaped(
+                    (c - w, c + w),
+                    |u| {
+                        let e = (2.0 * u - 1.0).powi(2);
+                        (y0 + 0.01 * e, y1 - 0.014 * e)
+                    },
+                    |_, _| g_splint,
+                    pl,
+                    6,
+                    8,
+                ),
+                Mat4::IDENTITY,
+            );
+        }
+        m
+    });
+    // Each splint is lashed on at two places.
+    let top = g_splint + pl.t + pl.bulge + 0.0004;
+    let ties = [0.962, 1.058];
+    kit.pair(ForearmR, Mat::Wrap, || {
+        let mut m = MeshBuilder::new();
+        for &(c, w, _, _) in &splints {
+            for &y in &ties {
+                m.append(
+                    &fore.plate(
+                        (c - w - 0.04, c + w + 0.04),
+                        (y - 0.0035, y + 0.0035),
+                        top,
+                        Pl::new(0.0016, 0.0, 1.0),
+                        6,
+                        1,
+                    ),
+                    Mat4::IDENTITY,
+                );
+            }
+        }
+        m
+    });
+    kit.pair(ForearmR, Mat::Glow, || {
+        let c = splints[1].0;
+        fore.plate(
+            (c - 0.035, c + 0.035),
+            (ties[0] + 0.01, ties[1] - 0.01),
+            top - 0.0002,
+            Pl::strip(),
+            1,
+            6,
+        )
+    });
 }
 
 /// Knuckle positions (MCP joints) of the right hand along the grip, hand frame.
@@ -3209,52 +3305,212 @@ fn helmet(kit: &mut Kit, s: &Spec) {
     };
     match style {
         Style::Duelist => {
-            kit.bind(Head, Mat::PaintA, || skull(s.a(0.005), 0.72, 2.5, 0.0));
-            // A raised blue crest strip from the brow over the top, with a low fin.
-            kit.bind(Head, Mat::PaintB, || {
-                let mut m = plate(3, 24, Pl::new(0.006, 0.0, s.edge_b), h.c, |u, v| {
-                    let a = lerp(-0.98, 1.4, v);
-                    let w = lerp(0.017, 0.01, v);
-                    sagittal(&h, a, (u - 0.5) * 2.0 * w, 0.004)
-                });
-                let path: Vec<Vec3> = (0..14)
-                    .map(|i| sagittal(&h, lerp(-0.7, 1.2, i as f32 / 13.0), 0.0, 0.009))
-                    .collect();
+            // A ribbed bowl (suji-bachi): plain plates under raised ribs converging on a
+            // gilt rosette at the crown, the three down the front gilt; a brow band fills
+            // the bowl's front above the visor.
+            kit.bind(Head, Mat::PaintA, || {
+                let mut m = skull(s.a(0.0), 0.72, 2.5, 0.0);
                 m.append(
-                    &fin(
-                        &path,
-                        0.004,
-                        |t| 0.004 + 0.014 * (PI * t.powf(0.7)).sin(),
-                        Vec3::X,
+                    &h.plate((fr - 0.86, fr + 0.86), (0.84, 1.26), 0.0, s.a(0.0), 18, 5),
+                    Mat4::IDENTITY,
+                );
+                m
+            });
+            const RIBS: usize = 32;
+            let gilt = |k: usize| matches!(k, 0 | 1 | 31);
+            // A rib: a rounded bead 2 mm high, sinking into the bowl at both ends.
+            let rib = move |k: usize| {
+                let phi = fr + k as f32 * TAU / RIBS as f32;
+                let low = lerp(1.1, 1.48, smooth(0.7, 1.3, wrap_angle(phi - fr).abs()));
+                let mut m = surface(4, 10, move |u, v| {
+                    let rise = (PI * u).sin().max(0.0).sqrt()
+                        * smooth(0.0, 0.08, v)
+                        * smooth(1.0, 0.92, v);
+                    let g = s.t - 0.0004 + 0.0022 * rise;
+                    h.at(phi + (u - 0.5) * 0.045, lerp(0.17, low, v), g)
+                });
+                face_out(&mut m, h.c);
+                m
+            };
+            kit.bind(Head, Mat::PaintA, || {
+                let mut m = MeshBuilder::new();
+                for k in (0..RIBS).filter(|&k| !gilt(k)) {
+                    m.append(&rib(k), Mat4::IDENTITY);
+                }
+                m
+            });
+            // The peak (mabizashi) over the visor, its root riveted to the brow band.
+            let root = 1.16;
+            let peak = move |u: f32, v: f32| {
+                let c = 2.0 * u - 1.0;
+                let phi = fr + c * 1.05;
+                let len = 0.008 + 0.034 * (1.0 - c * c).sqrt();
+                let out = v3(phi.cos(), 0.0, -phi.sin());
+                h.at(phi, root, s.t - 0.001) + out * (len * v)
+                    - Vec3::Y * (0.16 * len * v - 0.004 * v * v)
+            };
+            let peak_up = move |u: f32, v: f32| {
+                let e = 1e-3;
+                let n = (peak(u + e, v) - peak(u - e, v)).cross(peak(u, v + e) - peak(u, v - e));
+                let n = n.normalize_or(Vec3::Y);
+                if n.y < 0.0 { -n } else { n }
+            };
+            let peak_t = 0.0045;
+            kit.bind(Head, Mat::PaintB, || {
+                let mut m = plate(20, 4, Pl::new(peak_t, 0.0, s.edge_b), h.c, peak);
+                // The crest's mount, centered over the peak.
+                m.append(
+                    &h.plate(
+                        (fr - 0.2, fr + 0.2),
+                        (0.9, 1.13),
+                        s.t - 0.0004,
+                        Pl::new(0.0035, 0.0015, s.edge_b),
+                        6,
+                        5,
                     ),
                     Mat4::IDENTITY,
                 );
                 m
             });
-            // Overhanging brow above the visor; faceplate with a keel down to the chin.
+            // Gilt fittings: the ribs down the front, the crown rosette, the peak's edge
+            // and rivets, a crest badge and the horns (kuwagata) rising off it.
+            kit.bind(Head, Mat::Trim, || {
+                let mut m = MeshBuilder::new();
+                for k in (0..RIBS).filter(|&k| gilt(k)) {
+                    m.append(&rib(k), Mat4::IDENTITY);
+                }
+                let crown = h.at(0.0, 0.0, s.t - 0.0006);
+                let rosette = [
+                    Vec2::new(0.024, -0.004),
+                    Vec2::new(0.02, -0.0015),
+                    Vec2::new(0.013, 0.0025),
+                    Vec2::new(0.008, 0.004),
+                    Vec2::new(0.0005, 0.004),
+                ];
+                m.append(&spun(&rosette, 24, Vec3::Y, crown), Mat4::IDENTITY);
+                m.append(
+                    &plate(20, 1, Pl::new(0.002, 0.0, 1.0), h.c, move |u, v| {
+                        peak(u, lerp(0.84, 0.97, v)) + peak_up(u, 0.9) * (peak_t + 0.0001)
+                    }),
+                    Mat4::IDENTITY,
+                );
+                for u in [0.12, 0.31, 0.5, 0.69, 0.88] {
+                    let n = peak_up(u, 0.16);
+                    m.append(
+                        &disk(0.003, 0.0022, n, peak(u, 0.16) + n * peak_t, 8),
+                        Mat4::IDENTITY,
+                    );
+                }
+                let (badge, _, _, out) = on_shell(&h, fr, 1.0, s.t + 0.0034);
+                m.append(&disk(0.014, 0.0035, out, badge, 20), Mat4::IDENTITY);
+                for side in [-1.0f32, 1.0] {
+                    let at = |t: f32| {
+                        badge
+                            + v3(side * (0.011 + 0.056 * t.powf(1.4)), 0.15 * t, 0.0)
+                            + out * (0.008 * t - 0.034 * t * t)
+                    };
+                    let sections: Vec<Section> = (0..=12)
+                        .map(|i| {
+                            let t = i as f32 / 12.0;
+                            let tangent = (at(t + 0.01) - at(t - 0.01)).normalize_or(Vec3::Y);
+                            let half = 0.0065 - 0.004 * t + 0.002 * (PI * t).sin();
+                            Section::rounded(at(t), Vec2::new(half, 0.0014))
+                                .with_exponent(2.6)
+                                .with_right(tangent.cross(out).normalize_or(Vec3::X))
+                        })
+                        .collect();
+                    m.append(
+                        &MeshBuilder::loft(&sections, 10, Cap::Round, Cap::Round),
+                        Mat4::IDENTITY,
+                    );
+                }
+                m
+            });
+            kit.bind(Head, Mat::Lens, || {
+                let (p, _, _, out) = on_shell(&h, fr, 1.0, s.t + 0.0034);
+                disk(0.0055, 0.0012, out, p + out * 0.0018, 14)
+            });
+            // The menpo: a sculpted half mask with a nose and high cheekbones, cut across at
+            // an open mouth; the jaw below has a jutting lower lip and chin.
+            let face_g = move |phi: f32, th: f32| {
+                let d = wrap_angle(phi - fr);
+                let nose = (-(d / 0.075).powi(2)).exp()
+                    * smooth(1.6, 1.84, th)
+                    * (1.0 - smooth(1.86, 1.94, th));
+                let cheek =
+                    (-((d.abs() - 0.42) / 0.16).powi(2) - ((th - 1.76) / 0.14).powi(2)).exp();
+                let chin = (-(d / 0.24).powi(2) - ((th - 2.3) / 0.12).powi(2)).exp();
+                0.004 + 0.013 * smooth(1.8, 2.44, th) + 0.02 * nose + 0.009 * cheek + 0.006 * chin
+            };
+            let face_pl = Pl::new(0.006, 0.0, s.edge_a);
+            // The upper lip and the lower lip at u across the face: the mouth is open in
+            // the middle and closes toward its corners.
+            let mouth = |u: f32| 1.96 + 0.12 * smooth(0.15, 0.4, (u - 0.5).abs());
+            let jaw_top =
+                move |u: f32| mouth(u) + lerp(0.1, 0.015, smooth(0.1, 0.4, (u - 0.5).abs()));
+            let lip = jaw_top(0.5);
+            let jaw_g = move |phi: f32, th: f32| {
+                face_g(phi, th) + 0.004 * (1.0 - smooth(lip, lip + 0.12, th))
+            };
             kit.bind(Head, Mat::PaintA, || {
-                let mut m = plate(14, 4, s.a(0.003), h.c, |u, v| {
-                    let phi = lerp(fr - 0.86, fr + 0.86, u);
-                    let c = 1.0 - (wrap_angle(phi - fr) / 0.86).abs();
-                    h.at(
-                        phi,
-                        lerp(0.96, 1.3 - 0.03 * c, v),
-                        0.004 + 0.012 * v + 0.004 * c,
-                    )
+                let mut m = plate(22, 12, face_pl, h.c, move |u, v| {
+                    let th = lerp(1.6, mouth(u), v);
+                    let w = lerp(0.84, 0.66, smooth(1.6, 2.1, th));
+                    let phi = lerp(fr - w, fr + w, u);
+                    h.at(phi, th, face_g(phi, th))
                 });
                 m.append(
-                    &split_plate(16, 8, s.a(0.004), h.c, &[0.5], &[], (0.03, 0.0), |u, v| {
-                        let th = lerp(1.6, 2.44, v);
-                        let w = lerp(0.82, 0.42, smooth(1.6, 2.44, th));
+                    &plate(18, 8, face_pl, h.c, move |u, v| {
+                        let th = lerp(jaw_top(u), 2.46, v);
+                        let w = lerp(0.64, 0.4, smooth(lip, 2.46, th));
                         let phi = lerp(fr - w, fr + w, u);
-                        let k = (1.0 - (wrap_angle(phi - fr) / w).abs()).max(0.0);
-                        let keel = 0.018 * k.powf(1.5) * smooth(1.6, 2.2, th);
-                        h.at(phi, th, 0.004 + 0.02 * smooth(1.8, 2.44, th) + keel)
+                        h.at(phi, th, jaw_g(phi, th))
                     }),
                     Mat4::IDENTITY,
                 );
                 m
             });
+            // In the mouth, a gilt grille; on the cheeks, the pegs a helmet cord ties to;
+            // under the chin, a drain.
+            kit.bind(Head, Mat::Trim, || {
+                let mut m = MeshBuilder::new();
+                for i in 0..9 {
+                    let phi = fr + (i as f32 - 4.0) * 0.045;
+                    let th = (mouth(0.5) + lip) * 0.5;
+                    let (p, across, down, _) = on_shell(&h, phi, th, face_g(phi, th) - 0.003);
+                    m.append(
+                        &block(v3(0.0022, 0.013, 0.004), 0.0007, across, -down, p),
+                        Mat4::IDENTITY,
+                    );
+                }
+                for side in [-1.0f32, 1.0] {
+                    let (phi, th) = (fr + side * 0.58, 2.0);
+                    let (p, _, _, out) = on_shell(&h, phi, th, face_g(phi, th) + face_pl.t);
+                    m.append(&disk(0.0045, 0.005, out, p, 10), Mat4::IDENTITY);
+                }
+                let th = 2.42;
+                let (p, _, down, out) = on_shell(&h, fr, th, jaw_g(fr, th) + face_pl.t);
+                m.append(
+                    &disk(0.0035, 0.007, (out + down).normalize(), p, 10),
+                    Mat4::IDENTITY,
+                );
+                m
+            });
+            // The throat guard (yodare-kake): laced lames hanging from under the jaw.
+            let throat = Shikoro {
+                h,
+                rim: 2.36,
+                phi: (fr - 0.62, fr + 0.62),
+                slope: 0.45,
+                g: 0.004,
+                lh: 0.022,
+                lap: 0.006,
+                t: 0.0045,
+                n: 3,
+            };
+            kit.bind(Head, Mat::PaintA, || throat.plates(0.0012, s.edge_a));
+            kit.bind(Head, Mat::Wrap, || throat.lacing(&[-0.36, 0.0, 0.36]));
+            kit.bind(Head, Mat::Glow, || throat.hem());
             // The neck guard: laced lames flaring out around the back, their front ends
             // turned back as wings.
             let shikoro = Shikoro {
@@ -3308,17 +3564,6 @@ fn helmet(kit: &mut Kit, s: &Spec) {
                             3,
                             2,
                         ),
-                        Mat4::IDENTITY,
-                    );
-                }
-                m
-            });
-            // Breathing vents either side of the keel.
-            kit.bind(Head, Mat::Rubber, || {
-                let mut m = MeshBuilder::new();
-                for side in [-1.0f32, 1.0] {
-                    m.append(
-                        &shell_vents(&h, fr + side * 0.24, 2.06, 0.026, 3, 0.07),
                         Mat4::IDENTITY,
                     );
                 }
@@ -4459,6 +4704,7 @@ fn materials(lib: &mut Library) {
     let carbon = Tex::upload(lib, bake(half, 0.2, 1.0, carbon_surface));
     let rubber = Tex::upload(lib, bake(half / 2, 0.15, 1.5, rubber_surface));
     let mask = Tex::upload(lib, bake(half / 2, 0.25, 1.0, mask_surface));
+    let mail = Tex::upload(lib, bake(half, 0.08, 1.4, mail_surface));
     let steel = Tex::upload(lib, bake(half, 0.3, 0.6, steel_surface));
     let hamon = Tex::upload(lib, bake(half, 0.3, 0.8, hamon_surface));
     let shared = |m: Mat| format!("fighter/{}", m.name());
@@ -4476,6 +4722,15 @@ fn materials(lib: &mut Library) {
             StandardMaterial::color(1.0, 1.0, 1.0)
                 .with_roughness(1.0)
                 .with_uv_scale(4.0, 4.0),
+        ),
+    );
+    lib.material(
+        &shared(Mat::Mail),
+        mail.apply(
+            StandardMaterial::color(1.0, 1.0, 1.0)
+                .with_metallic(1.0)
+                .with_roughness(1.0)
+                .with_uv_scale(12.5, 12.5),
         ),
     );
     lib.material(
@@ -4761,6 +5016,37 @@ fn mask_surface(uv: Vec2) -> Surface {
     }
 }
 
+/// Japanese mail (so-gusari): round rings, each linked to its four diagonal neighbors,
+/// 8 mm apart, in blackened iron rubbed bright on the raised wire; dark cloth shows
+/// through the gaps.
+fn mail_surface(uv: Vec2) -> Surface {
+    let p = uv * 10.0;
+    // How far up the wire of the nearest ring of a lattice (0 = off the wire, 1 = its crown).
+    let ring = |q: Vec2, r: f32, w: f32| {
+        let d = (q - q.round()).length();
+        let x = ((d - r) / w).abs();
+        (1.0 - x * x).max(0.0).sqrt()
+    };
+    let big = ring(p, 0.33, 0.085);
+    let small = ring(p + Vec2::splat(0.5), 0.2, 0.065);
+    // The small links pass over the big rings on one side and under on the other.
+    let side = ((p - p.round()).x * PI).sin();
+    let (h_big, h_small) = (big * (0.9 - 0.15 * side), small * (0.9 + 0.15 * side));
+    let h = h_big.max(h_small);
+    let wire = smoothstep(0.0, 0.25, h);
+    let rust = fbm(uv * 5.0, 5, 3, 0.5, 131) * 0.5 + 0.5;
+    let grit = perlin(uv * 160.0, 160, 133) * 0.5 + 0.5;
+    let iron = Vec3::new(0.2, 0.2, 0.21) * (0.7 + 0.5 * h) * (0.92 + 0.08 * grit)
+        + Vec3::new(0.06, 0.025, 0.0) * smoothstep(0.6, 0.85, rust) * (1.0 - h);
+    Surface {
+        albedo: Vec3::splat(0.025).lerp(iron, wire),
+        height: h * 0.0011,
+        roughness: lerp(0.9, 0.5 - 0.18 * h + 0.1 * rust, wire),
+        metallic: wire,
+        ao: lerp(0.35, 0.65 + 0.35 * h, wire),
+    }
+}
+
 /// Polished blade steel: fine polishing lines along the blade.
 fn steel_surface(uv: Vec2) -> Surface {
     let col = (uv.x * 1024.0) as i32;
@@ -4878,7 +5164,7 @@ mod tests {
                 }
             }
             assert!(
-                (30_000..=80_000).contains(&total),
+                (30_000..=100_000).contains(&total),
                 "{style:?}: {total} triangles"
             );
         }
