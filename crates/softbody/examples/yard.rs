@@ -141,6 +141,20 @@ const SHOTS: &[Shot] = &[
         follow: Some("Slow-motion mannequin"),
     },
     Shot {
+        name: "blanket",
+        secs: 7.5,
+        eye: [-2.6, 1.7, 5.8],
+        target: [-4.4, 0.4, 3.0],
+        follow: None,
+    },
+    Shot {
+        name: "blanket_falling",
+        secs: 9.35,
+        eye: [-1.6, 2.4, 7.2],
+        target: [-4.3, 1.0, 3.0],
+        follow: None,
+    },
+    Shot {
         name: "curtains",
         secs: 13.0,
         eye: [-12.0, 3.4, 15.0],

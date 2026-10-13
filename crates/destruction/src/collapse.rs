@@ -444,7 +444,7 @@ pub fn shatter_system(
         let mut ctx = ctx(&settings, &table, rng, &mut out);
         // `break_fracturable` despawns the entity; free its mesh first.
         if let (Some(m), Some(meshes)) = (mesh, meshes.as_deref_mut()) {
-            meshes.remove(m.0);
+            m.free(meshes);
         }
         let impact = Vec3::new(0.0, -half.y, 0.0);
         break_fracturable(

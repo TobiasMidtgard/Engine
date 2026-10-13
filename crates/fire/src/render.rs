@@ -1,6 +1,8 @@
 //! Drawing fire: flame sprites over burning cells and objects, embers, and a screen-space
 //! decal that chars the ground and shows glowing coals.
 
+use std::sync::{Arc, Mutex};
+
 use bytemuck::{Pod, Zeroable};
 use engine_core::math::{DVec2, DVec3, IVec2, Vec3};
 use engine_core::prelude::*;
@@ -48,6 +50,14 @@ struct FireMap {
 /// Largest fire map side, texels (at 0.5 m cells, 512 m).
 const MAX_MAP: u32 = 1024;
 
+/// What the heat haze draws this frame, handed from [`FireFeature`] to [`HazeFeature`].
+#[derive(Default)]
+struct HazeDraw {
+    pipeline: Option<wgpu::RenderPipeline>,
+    group: Option<wgpu::BindGroup>,
+    count: u32,
+}
+
 #[derive(Default)]
 pub struct FireFeature {
     flame_pipeline: Option<wgpu::RenderPipeline>,
@@ -74,9 +84,18 @@ pub struct FireFeature {
     map_valid: bool,
     count: u32,
     stats: FeatureStats,
+    haze: Arc<Mutex<HazeDraw>>,
 }
 
 impl FireFeature {
+    /// The heat haze over this feature's flames, as its own feature drawn first in the
+    /// transparent phase.
+    pub fn haze_feature(&self) -> HazeFeature {
+        HazeFeature {
+            draw: self.haze.clone(),
+        }
+    }
+
     fn build_instances(&mut self, world: &mut World, view: &ViewData) {
         self.scratch.clear();
         let mut q = world.query::<(
@@ -774,22 +793,22 @@ impl RenderFeature for FireFeature {
                 ],
             }));
         }
+        if let Ok(mut haze) = self.haze.lock() {
+            *haze = HazeDraw {
+                pipeline: self.haze_pipeline.clone(),
+                group: self.flame_group.clone(),
+                count: self.count,
+            };
+        }
     }
 
     fn draw(&self, phase: RenderPhase, pass: &mut wgpu::RenderPass<'_>, _ctx: &FrameContext) {
         if phase != RenderPhase::Transparent {
             return;
         }
-        // Heat haze first: it replaces pixels with the bent scene copy (taken before the
-        // transparent pass), so it must come before anything the fire draws on top, the scorch
-        // decal included.
-        let flames = match (&self.haze_pipeline, &self.flame_pipeline, &self.flame_group) {
-            (Some(haze), Some(p), Some(g)) if self.count > 0 => {
-                pass.set_pipeline(haze);
-                pass.set_bind_group(1, g, &[]);
-                pass.draw(0..FLAME_VERTICES, 0..self.count);
-                Some((p, g))
-            }
+        // The heat haze was drawn first in the transparent phase, by `HazeFeature`.
+        let flames = match (&self.flame_pipeline, &self.flame_group) {
+            (Some(p), Some(g)) if self.count > 0 => Some((p, g)),
             _ => None,
         };
         if self.map_valid
@@ -808,6 +827,47 @@ impl RenderFeature for FireFeature {
 
     fn stats(&self) -> FeatureStats {
         self.stats
+    }
+}
+
+/// Heat haze: the scene behind the flames' hot columns, bent. It replaces pixels with the bent
+/// scene copy, which is taken before the transparent phase, so anything drawn in that phase
+/// before it (water, clouds in front of the hills, rain, the fire's own scorch decal) would be
+/// erased where the air shimmers. So it draws first, and those draw over it unbent.
+pub struct HazeFeature {
+    draw: Arc<Mutex<HazeDraw>>,
+}
+
+impl RenderFeature for HazeFeature {
+    fn name(&self) -> &str {
+        "fire haze"
+    }
+
+    /// First in the transparent phase, even before the weather's wet and snowy ground (-1000),
+    /// which also rewrites pixels from the scene copy: wet ground behind a fire stays wet
+    /// rather than shimmering.
+    fn order(&self) -> i32 {
+        -1001
+    }
+
+    fn needs_scene_copy(&self) -> bool {
+        true
+    }
+
+    fn draw(&self, phase: RenderPhase, pass: &mut wgpu::RenderPass<'_>, _ctx: &FrameContext) {
+        if phase != RenderPhase::Transparent {
+            return;
+        }
+        let Ok(haze) = self.draw.lock() else {
+            return;
+        };
+        if let (Some(p), Some(g)) = (&haze.pipeline, &haze.group)
+            && haze.count > 0
+        {
+            pass.set_pipeline(p);
+            pass.set_bind_group(1, g, &[]);
+            pass.draw(0..FLAME_VERTICES, 0..haze.count);
+        }
     }
 }
 

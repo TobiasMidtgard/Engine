@@ -1005,7 +1005,7 @@ pub(super) fn bead_frame(
 /// The ball that rolls through the bead curtain: a carved sandstone sphere with two crossed
 /// grooves (so its rolling reads), slightly irregular like hand-dressed stone.
 pub(super) fn stone_ball(commands: &mut Commands, radius: f32) -> Model {
-    let mut mb = ModelBuilder::new("stone_ball");
+    let mut mb = ModelBuilder::new(format!("stone_ball_{}", (radius * 100.0).round()));
     let groove = |v: Vec3, n: Vec3| {
         let d = v.dot(n) / radius;
         let g = (-(d / 0.035).powi(2)).exp();

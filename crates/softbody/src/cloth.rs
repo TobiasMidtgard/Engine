@@ -139,6 +139,7 @@ impl Cloth {
                 wind_scale: 0.3,
                 damping: 0.2,
                 prewarm_secs: 2.0,
+                self_collide: true,
                 ..SimSettings::default()
             },
             ..Self::default()
@@ -166,6 +167,7 @@ impl Cloth {
                 friction: 0.3,
                 damping: 0.15,
                 prewarm_secs: 1.0,
+                self_collide: true,
                 ..SimSettings::default()
             },
             ..Self::default()
@@ -767,6 +769,9 @@ pub fn build(
 
     sim.aero_triangles = triangles.clone();
     sim.params.radius = spec.sim.thickness;
+    if spec.sim.self_collide {
+        sim.params.self_collide = (spec.sim.thickness * 1.5).max(0.006);
+    }
     sim.params.aero = (spec.aero_drag > 0.0).then_some(Aero {
         drag: spec.aero_drag,
         friction: spec.aero_friction,
@@ -845,6 +850,64 @@ mod tests {
         // Front faces +Z.
         let [a, b, c] = surface.triangles[0].map(|i| body.sim.pos[i as usize]);
         assert!((b - a).cross(c - a).z > 0.0);
+    }
+
+    /// A limp sheet folded in half and dropped onto the floor: how far each folded-over particle
+    /// ends up above the one it was folded onto.
+    fn folded_towel(self_collide: bool) -> Vec<f32> {
+        let spec = Cloth {
+            size: [1.0, 0.6],
+            resolution: [21, 13],
+            pins: ClothPins::None,
+            // Limp, so the crease holds and only self-collision keeps the layers apart.
+            bend_compliance: 10.0,
+            sim: SimSettings {
+                self_collide,
+                thickness: 0.01,
+                ..SimSettings::default()
+            },
+            ..Cloth::default()
+        };
+        // Lying flat, 0.3 m above the floor; the fold runs along x = 0.5.
+        let t = GlobalTransform::from(
+            Transform::from_xyz(0.0, 0.3, 0.0).with_rotation(Quat::from_rotation_x(-PI / 2.0)),
+        );
+        let mut body = build(&spec, Entity::PLACEHOLDER, &t, None).unwrap();
+        let sim = &mut body.sim;
+        sim.params.aero = None;
+        sim.ground = vec![[0.0, 1.0, 0.0, 0.3]];
+        for j in 0..13 {
+            let crease = sim.pos[j * 21 + 10].x;
+            for i in 11..21 {
+                let k = j * 21 + i;
+                let p = sim.pos[k];
+                sim.place(k as u32, Vec3::new(2.0 * crease - p.x, p.y + 0.03, p.z));
+            }
+        }
+        for _ in 0..120 {
+            sim.step(1.0 / 60.0, &[]);
+        }
+        let mut gaps = Vec::new();
+        for j in 1..12 {
+            for i in 12..20 {
+                let (top, under) = (j * 21 + i, j * 21 + 20 - i);
+                gaps.push(sim.pos[top].y - sim.pos[under].y);
+            }
+        }
+        gaps
+    }
+
+    #[test]
+    fn a_folded_towel_stays_two_layers() {
+        let apart =
+            |gaps: &[f32]| gaps.iter().filter(|g| **g > 0.008).count() as f32 / gaps.len() as f32;
+        let stacked = apart(&folded_towel(true));
+        let merged = apart(&folded_towel(false));
+        assert!(stacked > 0.95, "only {stacked} of the fold stays on top");
+        assert!(
+            merged < 0.5,
+            "without self-collision {merged} stayed on top anyway"
+        );
     }
 
     #[test]

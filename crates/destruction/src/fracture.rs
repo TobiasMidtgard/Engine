@@ -5,8 +5,13 @@
 //! pieces real stone, concrete and glass break into. Seeds cluster around the impact point, so
 //! pieces are small where the hit landed and large far from it.
 
-use engine_core::math::{Rng, Vec3};
+use std::collections::HashMap;
 
+use engine_core::math::noise::fbm3;
+use engine_core::math::{Rng, Vec3};
+use engine_render::Vertex;
+
+use crate::material::DestructibleMaterial;
 use crate::meshing::{MeshBuilder, mix, scale};
 
 const EPS: f32 = 1e-5;
@@ -272,6 +277,227 @@ impl ConvexPoly {
     }
 }
 
+/// How a broken piece is drawn: its outside faces flat, its fracture faces rough.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct BreakLook {
+    /// Vertex color of the original outside.
+    pub exterior: [f32; 3],
+    /// Vertex color of the fracture faces.
+    pub interior: [f32; 3],
+    /// Height of the bumps on fracture faces, as a fraction of the piece's size (0 = flat,
+    /// like glass; ~0.05 for stone).
+    pub roughness: f32,
+    /// Draw the outside with the fracture faces' material too (a monolithic stone block, whose
+    /// usual surface texture has mortar joints that don't belong on one block).
+    pub monolithic: bool,
+}
+
+impl BreakLook {
+    /// How `material` breaks: stone, concrete and rock into rough faces, wood into nearly flat
+    /// ones (its splinters are drawn separately), glass and metal clean. A stone piece is one
+    /// dressed block, drawn all in its joint-free broken-stone material.
+    pub fn of(material: DestructibleMaterial, exterior: [f32; 3], interior: [f32; 3]) -> Self {
+        use DestructibleMaterial as M;
+        let roughness = match material {
+            M::Rock => 0.06,
+            M::Stone | M::Concrete | M::ReinforcedConcrete | M::Dirt => 0.05,
+            M::Brick => 0.045,
+            M::Plaster | M::Ice => 0.03,
+            M::Wood => 0.012,
+            M::Glass | M::Metal => 0.0,
+        };
+        Self {
+            exterior,
+            interior,
+            roughness,
+            monolithic: material == M::Stone,
+        }
+    }
+}
+
+impl ConvexPoly {
+    /// Meshes for a broken piece, with vertices offset by `-center`: the outside faces (flat;
+    /// `None` when there are none, or when `look.monolithic` moves them into the second
+    /// mesh), and the fracture faces broken up into small triangles pushed in and out by
+    /// noise, tapering to nothing at their edges so neighboring faces still meet. Fracture
+    /// faces get planar UVs (meters), so a texture runs across the bumps without seams.
+    pub fn broken_meshes(
+        &self,
+        center: Vec3,
+        look: &BreakLook,
+        seed: u64,
+    ) -> (Option<MeshBuilder>, MeshBuilder) {
+        let (lo, hi) = self.bounds();
+        let size = (hi - lo).max_element().max(0.01);
+        let thin = (hi - lo).min_element().max(0.005);
+        let rough = (look.roughness * size).min(thin * 0.15);
+        let mut outside = MeshBuilder::new();
+        let mut inside = MeshBuilder::new();
+        for (k, f) in self.faces.iter().enumerate() {
+            let shade =
+                0.94 + 0.12 * (((k as u32).wrapping_mul(2654435761) >> 16) & 0xff) as f32 / 255.0;
+            let pts: Vec<Vec3> = f.points.iter().map(|&p| p - center).collect();
+            if !f.interior {
+                let color = scale(mix(look.exterior, look.interior, 0.03), shade);
+                if look.monolithic {
+                    planar_polygon(&mut inside, &pts, f.normal, color);
+                } else {
+                    outside.polygon(&pts, f.normal, color);
+                }
+                continue;
+            }
+            let color = scale(look.interior, shade);
+            if rough <= 1e-4 {
+                planar_polygon(&mut inside, &pts, f.normal, color);
+            } else {
+                rough_face(&mut inside, &pts, f.normal, color, rough, size, seed);
+            }
+        }
+        let outside = (!outside.is_empty()).then_some(outside);
+        (outside, inside)
+    }
+}
+
+/// A flat face with planar UVs (meters) along the face's own axes.
+fn planar_polygon(b: &mut MeshBuilder, pts: &[Vec3], normal: Vec3, color: [f32; 3]) {
+    if pts.len() < 3 {
+        return;
+    }
+    let (t, bt) = face_axes(normal);
+    let base = b.vertices.len() as u32;
+    for &p in pts {
+        b.vertices.push(Vertex {
+            position: p.to_array(),
+            normal: normal.to_array(),
+            uv: [p.dot(t), -p.dot(bt)],
+            color: [color[0], color[1], color[2], 1.0],
+        });
+    }
+    for i in 1..pts.len() as u32 - 1 {
+        b.triangle(base, base + i, base + i + 1);
+    }
+}
+
+/// Tangent axes of a face, chosen the same way for every face with that normal.
+fn face_axes(n: Vec3) -> (Vec3, Vec3) {
+    let up = if n.y.abs() < 0.9 { Vec3::Y } else { Vec3::Z };
+    let t = up.cross(n).normalize_or(n.any_orthonormal_vector());
+    (t, n.cross(t))
+}
+
+/// A fracture face as rough broken stone (see [`ConvexPoly::broken_meshes`]).
+fn rough_face(
+    b: &mut MeshBuilder,
+    pts: &[Vec3],
+    normal: Vec3,
+    color: [f32; 3],
+    rough: f32,
+    size: f32,
+    seed: u64,
+) {
+    let n = pts.len();
+    if n < 3 {
+        return;
+    }
+    let c = pts.iter().copied().sum::<Vec3>() / n as f32;
+    let longest = (0..n)
+        .map(|i| {
+            (pts[(i + 1) % n] - pts[i])
+                .length()
+                .max((pts[i] - c).length())
+        })
+        .fold(0.0f32, f32::max);
+    // About 5 cm triangles, at most 8 segments a side.
+    let segs = ((longest / 0.05).ceil() as usize).clamp(2, 8);
+    let band = (rough * 3.0).max(1e-3);
+    // Distance from a point on the face to its edge (the face is convex).
+    let edge_dist = |p: Vec3| {
+        (0..n)
+            .map(|i| {
+                let (a, e) = (pts[i], pts[(i + 1) % n]);
+                let ab = e - a;
+                let t = ((p - a).dot(ab) / ab.length_squared().max(1e-12)).clamp(0.0, 1.0);
+                (p - (a + ab * t)).length()
+            })
+            .fold(f32::MAX, f32::min)
+    };
+    let freq = 1.0 / (0.3 * size).max(0.05);
+    let bump = |p: Vec3| {
+        let q = p.as_dvec3() * freq as f64;
+        let h = fbm3(q.x, q.y, q.z, seed, 3, 2.0, 0.5);
+        let taper = (edge_dist(p) / band).min(1.0);
+        p + normal * (rough * h * taper * (3.0 - 2.0 * taper) * taper)
+    };
+    // Fan of triangles from the centroid, each split into a grid of `segs` per side; shared
+    // points are welded by position so the bumps shade smoothly.
+    let mut index: HashMap<[i32; 3], u32> = HashMap::new();
+    let mut verts: Vec<Vec3> = Vec::new();
+    let mut flat: Vec<Vec3> = Vec::new();
+    let mut tris: Vec<[u32; 3]> = Vec::new();
+    let mut id = |p: Vec3, verts: &mut Vec<Vec3>, flat: &mut Vec<Vec3>| {
+        let key = [
+            (p.x * 1e4).round() as i32,
+            (p.y * 1e4).round() as i32,
+            (p.z * 1e4).round() as i32,
+        ];
+        *index.entry(key).or_insert_with(|| {
+            verts.push(bump(p));
+            flat.push(p);
+            (verts.len() - 1) as u32
+        })
+    };
+    for i in 0..n {
+        let (a, e) = (pts[i], pts[(i + 1) % n]);
+        let at = |u: usize, v: usize| {
+            let (fu, fv) = (u as f32 / segs as f32, v as f32 / segs as f32);
+            c + (a - c) * fu + (e - c) * fv
+        };
+        for u in 0..segs {
+            for v in 0..segs - u {
+                let p0 = id(at(u, v), &mut verts, &mut flat);
+                let p1 = id(at(u + 1, v), &mut verts, &mut flat);
+                let p2 = id(at(u, v + 1), &mut verts, &mut flat);
+                tris.push([p0, p1, p2]);
+                if u + v + 1 < segs {
+                    let p3 = id(at(u + 1, v + 1), &mut verts, &mut flat);
+                    tris.push([p1, p3, p2]);
+                }
+            }
+        }
+    }
+    let mut normals = vec![Vec3::ZERO; verts.len()];
+    for t in &mut tris {
+        let [i, j, k] = *t;
+        let mut w =
+            (verts[j as usize] - verts[i as usize]).cross(verts[k as usize] - verts[i as usize]);
+        if w.dot(normal) < 0.0 {
+            t.swap(1, 2);
+            w = -w;
+        }
+        for v in *t {
+            normals[v as usize] += w;
+        }
+    }
+    let (tx, ty) = face_axes(normal);
+    let base = b.vertices.len() as u32;
+    for (k, p) in verts.iter().enumerate() {
+        let nn = normals[k].normalize_or(normal);
+        let uvp = flat[k];
+        // Darker in the hollows, a touch lighter on the knobs.
+        let depth = (*p - uvp).dot(normal) / rough.max(1e-4);
+        let tone = 1.0 + 0.08 * depth.clamp(-1.0, 1.0);
+        b.vertices.push(Vertex {
+            position: p.to_array(),
+            normal: nn.to_array(),
+            uv: [uvp.dot(tx), -uvp.dot(ty)],
+            color: [color[0] * tone, color[1] * tone, color[2] * tone, 1.0],
+        });
+    }
+    for t in tris {
+        b.triangle(base + t[0], base + t[1], base + t[2]);
+    }
+}
+
 /// Order `points` (all on one plane) counter-clockwise around `normal`.
 fn oriented(mut points: Vec<Vec3>, normal: Vec3, interior: bool) -> Face {
     let n = points.len() as f32;
@@ -416,6 +642,54 @@ mod tests {
         for p in &pieces {
             let m = p.to_mesh(p.volume_centroid().1, [1.0; 3], [0.5; 3]);
             assert!(!m.is_empty());
+        }
+    }
+
+    #[test]
+    fn broken_pieces_have_rough_fracture_faces_that_meet_at_the_edges() {
+        let b = ConvexPoly::cuboid(Vec3::new(0.4, 0.3, 0.25));
+        let mut rng = Rng::new(3);
+        let seeds = impact_seeds(&b, Vec3::new(0.3, 0.2, 0.2), 6, 0.6, &mut rng);
+        let look = BreakLook {
+            exterior: [1.0; 3],
+            interior: [0.8; 3],
+            roughness: 0.05,
+            monolithic: false,
+        };
+        for p in voronoi(&b, &seeds) {
+            let c = p.volume_centroid().1;
+            let (outside, inside) = p.broken_meshes(c, &look, 9);
+            let flat = p.to_mesh(c, [1.0; 3], [0.8; 3]);
+            let interior = p.faces.iter().filter(|f| f.interior).count();
+            if interior > 0 {
+                // Many more triangles than the flat faces, and bumps off the planes.
+                assert!(inside.indices.len() > 4 * flat.indices.len() / p.faces.len().max(1));
+                let off = p.faces.iter().filter(|f| f.interior).any(|f| {
+                    let d0 = (f.points[0] - c).dot(f.normal);
+                    inside.vertices.iter().any(|v| {
+                        let q = Vec3::from(v.position);
+                        (q.dot(f.normal) - d0).abs() > 1e-3 && (q.dot(f.normal) - d0).abs() < 0.05
+                    })
+                });
+                assert!(off, "fracture faces stayed flat");
+            }
+            // Every corner of the piece is still a vertex of one of the meshes: edges meet.
+            for v in p.vertices() {
+                let q = v - c;
+                let found = inside
+                    .vertices
+                    .iter()
+                    .chain(outside.iter().flat_map(|o| o.vertices.iter()))
+                    .any(|w| Vec3::from(w.position).distance(q) < 1e-4);
+                assert!(found, "corner {q} lost");
+            }
+            // Monolithic: everything in the second mesh.
+            let mono = BreakLook {
+                monolithic: true,
+                ..look
+            };
+            let (o, i) = p.broken_meshes(c, &mono, 9);
+            assert!(o.is_none() && !i.is_empty());
         }
     }
 
