@@ -1088,14 +1088,17 @@ pub fn emit_outputs(
             s.0 += imp.linear;
             s.1 += angular;
         }
+        // A burning triangle puffs about 1.5 times a second; a whole curtain alight gives
+        // a few hundredths of a kilogram of smoke a second (a dozen smoke grenades at the
+        // 2 g a puff it once had).
         for p in &body.out.smoke {
             smoke.write(SmokeEmission {
                 position: *p,
                 velocity: Vec3::Y * 0.8,
-                radius: 0.15,
-                mass_kg: 0.002,
+                radius: 0.12,
+                mass_kg: 0.000_12,
                 temperature_c: 300.0,
-                darkness: 0.6,
+                darkness: 0.55,
             });
         }
         if let Some((speed, at)) = body.out.impact {

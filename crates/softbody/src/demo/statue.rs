@@ -1,14 +1,17 @@
 //! The unveiling: a marble youth on a sandstone plinth under a crimson silk sheet, which a
 //! timber jib crane lifts off and lowers back on, again and again.
 //!
-//! The figure is the mannequin's sculpted body skinned once into [`statue_pose`] (after
-//! Michelangelo's David), with carved curls on its head; its posed surface becomes a
+//! The figure is the mannequin's body carved as a statue ([`super::body::statue_sculpt`]),
+//! skinned once into [`statue_pose`] (after Michelangelo's David), with carved curls on its
+//! head, in veined marble ([`super::kit::Mat::Marble`]); its posed surface becomes a
 //! triangle-mesh collider ([`cast_statues`]), which the cloth solver bakes into a distance
 //! grid, so the silk drapes over the curls, the raised hand and the shoulders rather than over
 //! stand-in capsules.
 
+use std::f32::consts::PI;
+
 use engine_assets::Assets;
-use engine_render::Mesh;
+use engine_render::{MaterialRef, Mesh};
 
 use super::body::{BodyPart, Human};
 use super::characters::statue_pose;
@@ -48,56 +51,85 @@ pub struct DemoCord {
     pub above: f32,
 }
 
-/// Polished white marble, a little translucent.
-fn marble() -> StandardMaterial {
-    StandardMaterial {
-        reflectance: 0.55,
-        ..StandardMaterial::hex(0xece7de)
-            .with_roughness(0.26)
-            .with_subsurface(0.2)
-    }
-}
-
 /// Short carved curls over the scalp, posed with the head (`head`, `head_rot`: the head
-/// bone in model space): flattened blobs packed over the cranium behind a hairline that runs
-/// over the brow, above the ears and down to the nape, darker where they meet the scalp.
+/// bone in model space), behind a hairline that runs over the brow, above the ears and down to
+/// the nape: a mass of low, rounded locks with snail-shell curls cut into it, each winding in
+/// from a thick lock to a fine tip, flowing down from the crown and forward over the brow,
+/// darker in the drilled hollows between them.
 fn curls(head: Vec3, head_rot: Quat) -> Mesh {
-    let mut out = Mesh::default();
-    let n = 560u32;
-    let golden = std::f32::consts::PI * (3.0 - 5f32.sqrt());
-    for i in 0..n {
-        let y = 1.0 - 2.0 * (i as f32 + 0.5) / n as f32;
-        let r = (1.0 - y * y).sqrt();
-        let a = golden * i as f32;
-        let d = Vec3::new(r * a.cos(), y, r * a.sin());
-        let forward = -d.z;
-        let hairline = if forward > 0.0 {
-            0.05 + 0.32 * smoothstep(0.0, 0.7, forward)
-        } else {
-            0.05 - 0.55 * smoothstep(0.0, 0.8, -forward)
-        };
-        let ear = d.x.abs() > 0.8 && d.y < 0.3 && d.z < 0.35;
-        if d.y < hairline || ear {
-            continue;
-        }
-        let k = super::hash01(i * 7 + 3);
-        let normal = (d / CRANIUM_RADII).normalize();
-        let at = CRANIUM + d * CRANIUM_RADII * 0.985;
-        let size = 0.016 + 0.007 * k;
-        let spin = Quat::from_rotation_y(TAU * super::hash01(i * 7 + 5));
-        let mut blob = xf(
-            &sphere(size, 10),
-            Mat4::from_scale_rotation_translation(
-                Vec3::new(1.0, 0.55 + 0.2 * k, 1.0),
-                Quat::from_rotation_arc(Vec3::Y, normal) * spin,
-                at,
-            ),
-        );
-        for v in &mut blob.vertices {
-            let ao = 0.62 + 0.38 * Vec3::from(v.normal).dot(normal).max(0.0);
+    let golden = PI * (3.0 - 5f32.sqrt());
+    // Directions from the cranium's center over the hair: a Fibonacci spiral of `n` points
+    // with the bare face, ears and neck left out.
+    let sites = |n: u32| {
+        (0..n).filter_map(move |i| {
+            let y = 1.0 - 2.0 * (i as f32 + 0.5) / n as f32;
+            let r = (1.0 - y * y).sqrt();
+            let a = golden * i as f32;
+            let d = Vec3::new(r * a.cos(), y, r * a.sin());
+            let forward = -d.z;
+            let hairline = if forward > 0.0 {
+                0.05 + 0.32 * smoothstep(0.0, 0.7, forward)
+            } else {
+                0.05 - 0.55 * smoothstep(0.0, 0.8, -forward)
+            };
+            let ear = d.x.abs() > 0.8 && d.y < 0.3 && d.z < 0.35;
+            (d.y >= hairline && !ear).then_some((i, d))
+        })
+    };
+    let shade = |mesh: &mut Mesh, up: Vec3, low: f32| {
+        for v in &mut mesh.vertices {
+            let ao = low + (1.0 - low) * Vec3::from(v.normal).dot(up).max(0.0);
             v.color = [ao, ao, ao, 1.0];
         }
-        out.merge(&blob);
+    };
+    let mut out = Mesh::default();
+    // The mass: flattened lumps packed over the scalp.
+    for (i, d) in sites(300) {
+        let k = super::hash01(i * 7 + 3);
+        let normal = (d / CRANIUM_RADII).normalize();
+        let size = 0.019 + 0.007 * k;
+        let spin = Quat::from_rotation_y(TAU * super::hash01(i * 7 + 5));
+        let mut lump = xf(
+            &sphere(size, 8),
+            Mat4::from_scale_rotation_translation(
+                Vec3::new(1.0, 0.42 + 0.12 * k, 1.0),
+                Quat::from_rotation_arc(Vec3::Y, normal) * spin,
+                CRANIUM + d * CRANIUM_RADII * 0.975,
+            ),
+        );
+        shade(&mut lump, normal, 0.5);
+        out.merge(&lump);
+    }
+    // The curls, flowing from a whorl at the back of the crown.
+    let whorl = Vec3::new(0.05, 0.75, 0.66).normalize();
+    for (i, d) in sites(190) {
+        let h = |j: u32| super::hash01(i * 13 + j);
+        let n = (d / CRANIUM_RADII).normalize();
+        let at = CRANIUM + d * CRANIUM_RADII * 1.02;
+        let away = d - whorl;
+        let flow = (away - n * away.dot(n))
+            .try_normalize()
+            .unwrap_or(n.any_orthonormal_vector());
+        let t = Quat::from_axis_angle(n, (h(1) - 0.5) * 1.4) * flow;
+        let b = n.cross(t);
+        let hand = if h(2) < 0.5 { -1.0 } else { 1.0 };
+        let r0 = 0.011 + 0.006 * h(3);
+        let turns = (1.35 + 0.4 * h(4)) * TAU;
+        let steps = 16;
+        let path: Vec<Vec3> = (0..=steps)
+            .map(|j| {
+                let f = j as f32 / steps as f32;
+                let a = f * turns;
+                let r = r0 * (1.0 - 0.72 * f);
+                let lift = 0.004 * (f * PI).sin();
+                // The lock comes in from behind the curl's center and winds inward.
+                at - t * r0 * 0.3 + (t * a.cos() + b * a.sin() * hand) * r + n * lift
+            })
+            .collect();
+        let thick = 0.0042 + 0.0016 * h(5);
+        let mut curl = tube(&path, |f| thick * (1.0 - 0.7 * f), 7, false, true, 50.0);
+        shade(&mut curl, n, 0.55);
+        out.merge(&curl);
     }
     out.transform(&Mat4::from_rotation_translation(
         head_rot,
@@ -129,17 +161,17 @@ pub fn spawn_unveiling(commands: &mut Commands, c: DVec3, facing: Vec3) {
     register_mesh(commands, key.clone(), hair.clone());
     commands.spawn((
         Transform::default(),
-        MeshRenderer::new(engine_render::MeshRef::Asset(key), marble()),
+        renderer(&key, Mat::Marble),
         ChildOf(statue),
     ));
     commands.spawn((
         Name::new("Marble statue body"),
         Transform::default(),
         SkinnedPart::new(
-            BodyPart::Mannequin,
+            BodyPart::Statue,
             statue,
             "softbody/yard/statue/body",
-            marble(),
+            MaterialRef::Asset(Mat::Marble.key()),
         ),
         DemoStatue { extra: hair },
         ChildOf(statue),
@@ -163,9 +195,9 @@ pub fn spawn_unveiling(commands: &mut Commands, c: DVec3, facing: Vec3) {
     let low = crown + DVec3::Y * 0.012;
     let silk = SoftMaterial::hex(0x8c1c2c)
         .with_pattern(Pattern::Border, 0xc9a227, 0xe8c547)
-        .with_roughness(0.42)
+        .with_roughness(0.5)
         .with_sheen(0.85)
-        .with_wrinkles(0.35);
+        .with_wrinkles(0.6);
     let mid = SHEET_RES / 2;
     let sheet = commands
         .spawn((
