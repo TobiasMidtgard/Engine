@@ -12,6 +12,7 @@ pub mod collapse;
 pub mod cracks;
 pub mod debris;
 pub mod demo;
+pub mod door;
 pub mod dress;
 pub mod fracture;
 pub mod hill;
@@ -39,6 +40,7 @@ use serde_json::{Value, json};
 pub use build::{BuildAction, BuildKind, BuildRequest, Builder, BuiltPiece};
 pub use charges::{BreachCharge, ChargeKind};
 pub use debris::Debris;
+pub use door::{Door, DoorRequest};
 pub use hits::{Hit, HitQueue};
 pub use material::{DestructibleMaterial, DestructionMaterials, MaterialProps};
 pub use structure::{Fracturable, FractureShape, PieceState, ShowSupport, StructuralPiece};
@@ -180,6 +182,7 @@ impl Plugin for DestructionPlugin {
             .add_message::<SmokeEmission>()
             .add_message::<GroundContact>()
             .add_message::<build::BuildRequest>()
+            .add_message::<door::DoorRequest>()
             .init_resource::<DestructionSettings>()
             .init_resource::<DestructionStats>()
             .init_resource::<DestructionMaterials>()
@@ -210,10 +213,15 @@ impl Plugin for DestructionPlugin {
             )
             .register_component::<Builder>(
                 "Valheim-style build mode on this entity (the player's camera, a script): active, kind \
-                 (wood_floor, wood_wall, wood_pole, wood_beam, wood_roof, wood_roof_45, stone_floor, \
-                 stone_wall, stone_pillar), yaw rad, reach_m, use_input, aim ray, show_support.",
+                 (wood_floor, wood_wall, wood_pole, wood_beam, wood_roof, wood_roof_45, wood_gable, \
+                 wood_doorway, wood_window, stone_floor, stone_wall, stone_pillar), yaw rad, reach_m, \
+                 use_input, aim ray, show_support.",
             )
             .register_component::<BuiltPiece>("A building piece placed in build mode: kind.")
+            .register_component::<Door>(
+                "A plank door hung in a doorway piece: hinge (doorway space), open 0 shut..1 open, \
+                 opening, toward (+1 out through the front, -1 in), swing_secs, loose (its doorway fell).",
+            )
             .register_component::<Fracturable>(
                 "Prop that shatters into Voronoi pieces: shape, material, break_energy_j, pieces, damage_j.",
             )
@@ -233,7 +241,7 @@ impl Plugin for DestructionPlugin {
             )
             .register_resource::<DestructionStats>("Destruction counters (read-only).")
             .add_systems(PreUpdate, assets::ensure_assets)
-            .add_systems(Startup, build::bind_actions)
+            .add_systems(Startup, (build::bind_actions, door::bind_actions))
             .add_systems(
                 FixedUpdate,
                 (
@@ -266,6 +274,10 @@ impl Plugin for DestructionPlugin {
                     charges::charge_visuals_system,
                     build::build_input_system,
                     build::build_system,
+                    door::hang_doors_system,
+                    door::door_input_system,
+                    door::door_system,
+                    sync::piece_colliders_system,
                     dress::build_prop_models_system,
                     build::ghost_look_system,
                     barn::barn_fuel_system,
@@ -780,6 +792,15 @@ fn placement_json(p: &build::Placement) -> Value {
     })
 }
 
+#[derive(Deserialize)]
+struct DoorArgs {
+    /// The door nearest this point, and who opens it.
+    #[serde(default)]
+    near: Option<[f64; 3]>,
+    #[serde(default)]
+    open: Option<bool>,
+}
+
 fn build_api(app: &mut App) {
     const BUILD: &str =
         r#"{"kind": "wood_wall", "from": [0, 3, -4], "to": [0, 0.4, -0.8], "yaw_deg": 0}"#;
@@ -788,8 +809,9 @@ fn build_api(app: &mut App) {
         "Place a building piece the way a player in build mode would: aim a ray (from → to, or \
          straight down at \"at\"), the piece snaps to the pieces around it and is placed if it is \
          free and supported. Kinds: wood_floor, wood_wall, wood_pole, wood_beam, wood_roof, \
-         wood_roof_45, stone_floor, stone_wall, stone_pillar. \"preview\": true only says where it \
-         would go. Returns where, its support and the new piece's id.",
+         wood_roof_45, wood_gable, wood_doorway (a plank door hangs in it), wood_window, \
+         stone_floor, stone_wall, stone_pillar. \"preview\": true only says where it would go. \
+         Returns where, its support and the new piece's id.",
         BUILD,
         |world, args| {
             let a: BuildArgs = parse(args, BUILD)?;
@@ -840,6 +862,49 @@ fn build_api(app: &mut App) {
             }
             world.despawn(target);
             Ok(json!({"removed": target.to_bits()}))
+        },
+    );
+    const DOOR: &str = r#"{"near": [1, 1, 4], "open": true}"#;
+    app.register_api(
+        "destruction.door",
+        "Open or shut a plank door hung in a doorway built in build mode: the one nearest \"near\" \
+         (within 3 m; it swings away from there), or {\"entity\": …} (the door or its doorway). \
+         \"open\": true opens it, false shuts it, left out toggles it. Returns the door's id and \
+         whether it is opening.",
+        DOOR,
+        |world, args| {
+            let a: DoorArgs = parse(args.clone(), DOOR)?;
+            let near = a.near.map(DVec3::from_array);
+            let door = if let Some(sel) = args.get("entity") {
+                let e = resolve_entity(world, sel)?;
+                door::door_of(world, e).unwrap_or(e)
+            } else {
+                let at = near.ok_or_else(|| {
+                    format!("Say which door: \"near\" or \"entity\". Example: {DOOR}")
+                })?;
+                world
+                    .query::<(Entity, &Door, &GlobalTransform)>()
+                    .iter(world)
+                    .filter(|(_, d, _)| !d.loose)
+                    .map(|(e, _, gt)| (e, gt.translation().distance(at)))
+                    .filter(|(_, d)| *d <= 3.0)
+                    .min_by(|a, b| a.1.total_cmp(&b.1))
+                    .map(|(e, _)| e)
+                    .ok_or("No door within 3 m of \"near\".")?
+            };
+            let Some(state) = world.get::<Door>(door) else {
+                return Err("That entity is not a door or a doorway with a door.".into());
+            };
+            if state.loose {
+                return Err("That door's doorway fell; it can't be opened.".into());
+            }
+            let opening = a.open.unwrap_or(!state.opening);
+            world.write_message(DoorRequest {
+                door,
+                open: Some(opening),
+                from: near,
+            });
+            Ok(json!({"door": door.to_bits(), "opening": opening}))
         },
     );
     app.register_api(

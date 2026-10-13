@@ -15,6 +15,9 @@
 //! | `concrete` | weathered cast concrete: pores, bug holes, hairline cracks, stains | 2.5 |
 //! | `concrete_panel` | architectural precast panel: form-tie holes with rust streaks, plywood seams, darker panel edges. Map U 0..1 across one panel (2.4 m nominal), V in meters | 2.4 × 2.5 |
 //! | `painted_steel`, `…_dark`, `…_yellow`, `…_orange`, `…_white`, `…_olive` | paint over steel with orange peel, chips and scratches | 1 |
+//! | `weathered_oxide`, `weathered_grey` | old paint on steel: faded, dirty, rust blooming through in spots and running down from them (V must run up) | 2 |
+//! | `rusted_steel` | bare steel gone to rust: mill scale, flaking oxide, pits | 1 |
+//! | `ballast` | track ballast: crushed angular stone with dark gaps | 1 |
 //! | `brushed_metal` | brushed aluminum | 0.5 |
 //! | `rubber` | anti-slip rubber with coin studs and scuffs | 0.5 |
 //! | `hazard` | worn yellow and black 45° hazard stripes | 0.5 |
@@ -43,6 +46,10 @@ pub const PAINTED_STEEL_YELLOW: &str = "painted_steel_yellow";
 pub const PAINTED_STEEL_ORANGE: &str = "painted_steel_orange";
 pub const PAINTED_STEEL_WHITE: &str = "painted_steel_white";
 pub const PAINTED_STEEL_OLIVE: &str = "painted_steel_olive";
+pub const WEATHERED_OXIDE: &str = "weathered_oxide";
+pub const WEATHERED_GREY: &str = "weathered_grey";
+pub const RUSTED_STEEL: &str = "rusted_steel";
+pub const BALLAST: &str = "ballast";
 pub const BRUSHED_METAL: &str = "brushed_metal";
 pub const RUBBER: &str = "rubber";
 pub const HAZARD: &str = "hazard";
@@ -73,6 +80,10 @@ pub const ALL: &[&str] = &[
     PAINTED_STEEL_ORANGE,
     PAINTED_STEEL_WHITE,
     PAINTED_STEEL_OLIVE,
+    WEATHERED_OXIDE,
+    WEATHERED_GREY,
+    RUSTED_STEEL,
+    BALLAST,
     BRUSHED_METAL,
     RUBBER,
     HAZARD,
@@ -167,6 +178,17 @@ pub fn generate(lib: &mut Library) {
     ] {
         put(lib, name, steel.material(tint, [1.0, 1.0]));
     }
+
+    let oxide = Baked::add(lib, bake(full, 2.0, 1.0, weathered_oxide));
+    put(lib, WEATHERED_OXIDE, oxide.material(Vec3::ONE, [2.0, 2.0]));
+    let grey = Baked::add(lib, bake(full, 2.0, 1.0, weathered_grey));
+    put(lib, WEATHERED_GREY, grey.material(Vec3::ONE, [2.0, 2.0]));
+
+    let rust = Baked::add(lib, bake(full, 1.0, 1.0, rusted_steel));
+    put(lib, RUSTED_STEEL, rust.material(Vec3::ONE, [1.0, 1.0]));
+
+    let ballast_set = Baked::add(lib, bake(full, 1.0, 1.0, ballast));
+    put(lib, BALLAST, ballast_set.material(Vec3::ONE, [1.0, 1.0]));
 
     let brushed = Baked::add(lib, bake(half, 0.5, 1.0, brushed_metal));
     put(lib, BRUSHED_METAL, brushed.material(Vec3::ONE, [0.5, 0.5]));
@@ -397,6 +419,120 @@ fn painted_steel(uv: Vec2) -> Surface {
         roughness: mixf(0.4 + 0.22 * dirt + 0.03 * peel, 0.5 + 0.3 * rust_n, bare),
         metallic: 0.35 * bare * (1.0 - rust_n * 0.6),
         ao: 1.0 - 0.15 * chip,
+    }
+}
+
+/// Old paint of `color` on steel (one tile is 2 m): faded and dirty, rougher than fresh paint,
+/// rust blooming through in spots (above `spots`, about −0.6..0.6) and chips and running down
+/// from them in streaks (V runs up).
+fn weathered_paint(uv: Vec2, color: Vec3, spots: f32, seed: u32) -> Surface {
+    let s = seed * 16;
+    let peel = fbm(uv * 96.0, 96, 2, 0.5, 31);
+    let fade = fbm(uv * 4.0, 4, 4, 0.5, 170 + s);
+    let dirt = smoothstep(-0.3, 0.7, fbm(uv * 8.0, 8, 5, 0.55, 171 + s));
+    let fine = fbm(uv * 128.0, 128, 3, 0.5, 172 + s);
+    let chip = smoothstep(
+        0.46,
+        0.52,
+        fbm(uv * 40.0, 40, 4, 0.5, 173 + s) * 0.7 + fine * 0.3,
+    );
+    let spot = |p: Vec2| {
+        let n = fbm(p * 11.0, 11, 4, 0.5, 174 + s) + 0.25 * fbm(p * 47.0, 47, 2, 0.5, 176 + s);
+        smoothstep(spots, spots + 0.14, n)
+    };
+    let bare = spot(uv).max(chip);
+    let col = smoothstep(
+        0.0,
+        0.5,
+        fbm(Vec2::new(uv.x * 56.0, 0.37), 56, 3, 0.5, 175 + s),
+    );
+    let mut run: f32 = 0.0;
+    for k in 1..9 {
+        let above = Vec2::new(uv.x, uv.y + k as f32 * 0.016);
+        run = run.max(spot(above) * (1.0 - k as f32 / 9.0));
+    }
+    let rust = mix3(
+        hex(0x33201a),
+        hex(0x5e3520),
+        (0.5 + 0.6 * fine).clamp(0.0, 1.0),
+    );
+    let grey = Vec3::splat(color.dot(Vec3::new(0.3, 0.55, 0.15)));
+    let faded = mix3(color, grey * 1.1, 0.18 + 0.12 * fade);
+    let paint = faded * (0.88 + 0.12 * fade) * (1.0 + 0.03 * peel) * (1.0 - 0.25 * dirt);
+    let stained = mix3(paint, mix3(paint, hex(0x3e2a20), 0.6), run * col * 0.6);
+    Surface {
+        albedo: mix3(stained, rust, bare),
+        height: 0.0002 * peel - 0.0004 * bare + 0.0002 * fine * bare,
+        roughness: mixf(0.55 + 0.25 * dirt, 0.85, bare).clamp(0.0, 1.0),
+        metallic: 0.0,
+        ao: 1.0 - 0.2 * bare,
+    }
+}
+
+/// Weathered oxide-red paint (box cars).
+fn weathered_oxide(uv: Vec2) -> Surface {
+    weathered_paint(uv, hex(0x643326), 0.3, 0)
+}
+
+/// Weathered grey paint (box car roofs).
+fn weathered_grey(uv: Vec2) -> Surface {
+    weathered_paint(uv, hex(0x7e817f), 0.42, 1)
+}
+
+/// Bare steel gone to rust: dark mill scale under blotches of brown and orange oxide that
+/// flakes, with pits.
+fn rusted_steel(uv: Vec2) -> Surface {
+    let blotch = fbm(uv * 4.0, 4, 5, 0.55, 141);
+    let fine = fbm(uv * 64.0, 64, 3, 0.5, 142);
+    let flake = smoothstep(0.2, 0.38, fbm(uv * 24.0, 24, 4, 0.5, 143));
+    let (d1, _, id) = worley(uv * 90.0, 90, 144);
+    let pit = if id < 0.2 {
+        smoothstep(0.28, 0.06, d1)
+    } else {
+        0.0
+    };
+    let rusty = smoothstep(-0.45, 0.4, blotch + 0.35 * fine);
+    let oxide = mix3(
+        hex(0x3e2216),
+        hex(0x7a3f1d),
+        (0.5 + 0.35 * fine + 0.3 * flake).clamp(0.0, 1.0),
+    );
+    let albedo = mix3(hex(0x2f2b28) * (1.0 + 0.1 * fine), oxide, rusty) * (1.0 - 0.35 * pit);
+    Surface {
+        albedo,
+        height: 0.0004 * fine + 0.0006 * flake * rusty - 0.0008 * pit,
+        roughness: mixf(0.55, 0.92, rusty).clamp(0.0, 1.0),
+        metallic: 0.45 * (1.0 - rusty),
+        ao: 1.0 - 0.3 * pit,
+    }
+}
+
+/// Track ballast: crushed angular granite about 5 cm across, grey with the odd warm stone,
+/// facets catching the light and dark gaps between the stones.
+fn ballast(uv: Vec2) -> Surface {
+    // Two sizes of stone heaped together: wherever one stands higher, it shows.
+    let (a1, a2, ia) = worley(uv * 15.0, 15, 151);
+    let (b1, b2, ib) = worley(uv * 29.0, 29, 154);
+    let ha = 0.03 * (a2 - a1).clamp(0.0, 0.6).sqrt() + 0.012 * ia;
+    let hb = 0.018 * (b2 - b1).clamp(0.0, 0.6).sqrt() + 0.008 * ib + 0.006;
+    let (h, id) = if ha >= hb { (ha, ia) } else { (hb, ib) };
+    let (_, _, facet) = worley(uv * 60.0, 60, 152);
+    let speck = fbm(uv * 320.0, 320, 2, 0.5, 153);
+    let grime = fbm(uv * 6.0, 6, 3, 0.5, 155);
+    let warm = smoothstep(0.86, 0.95, id);
+    let base = mix3(hex(0x8c8984), hex(0x98846e), warm) * (0.7 + 0.38 * id);
+    let lit = smoothstep(0.004, 0.022, h);
+    let albedo = base
+        * (0.82 + 0.26 * facet)
+        * (0.9 + 0.1 * speck)
+        * (0.88 + 0.12 * grime)
+        * (0.45 + 0.55 * lit);
+    Surface {
+        albedo: albedo.min(Vec3::ONE),
+        height: h + 0.0015 * facet,
+        roughness: 0.78 + 0.14 * (1.0 - lit),
+        metallic: 0.0,
+        ao: 0.35 + 0.65 * lit,
     }
 }
 
@@ -732,10 +868,14 @@ mod tests {
     #[test]
     fn surfaces_stay_in_range() {
         type SurfaceFn = fn(Vec2) -> Surface;
-        let fns: [(&str, SurfaceFn); 15] = [
+        let fns: [(&str, SurfaceFn); 19] = [
             ("concrete", concrete),
             ("concrete_panel", concrete_panel),
             ("painted_steel", painted_steel),
+            ("rusted_steel", rusted_steel),
+            ("ballast", ballast),
+            ("weathered_oxide", weathered_oxide),
+            ("weathered_grey", weathered_grey),
             ("brushed_metal", brushed_metal),
             ("rubber", rubber),
             ("hazard", hazard),

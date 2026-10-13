@@ -897,6 +897,54 @@ pub fn blades() -> Mesh {
     m
 }
 
+/// The spinning propeller as the eye sees it: a faint disc in the prop frame (about Z), as
+/// dense at each radius as the blades cover it, dark with a yellow ring where the tips run.
+/// Drawn alpha-blended in place of the blades at speed.
+pub fn prop_disc() -> Mesh {
+    let mut m = Mesh::default();
+    let (segs, rings) = (64u32, 24u32);
+    let inner = 0.19;
+    for i in 0..=rings {
+        let r = inner + (PROP_RADIUS - inner) * i as f32 / rings as f32;
+        // Fraction of the circle the three blades sweep through at this radius.
+        let chord = if r < 0.3 {
+            0.09
+        } else if r < 0.62 {
+            0.12
+        } else {
+            0.08
+        };
+        let covered = (3.0 * chord / (TAU * r)).min(1.0);
+        let tip = r > PROP_RADIUS - 0.08;
+        let (rgb, a) = if tip {
+            ([0.95, 0.72, 0.05], 0.32)
+        } else {
+            ([0.035; 3], (covered * 1.8).clamp(0.09, 0.4))
+        };
+        // Fade the outer edge so the disc has no hard rim.
+        let a = if i == rings { 0.0 } else { a };
+        for j in 0..=segs {
+            let t = j as f32 / segs as f32 * TAU;
+            let mut v = Vertex::new(
+                Vec3::new(t.cos() * r, t.sin() * r, 0.0),
+                Vec3::NEG_Z,
+                Vec2::new(j as f32 / segs as f32, i as f32 / rings as f32),
+            );
+            v.color = [rgb[0], rgb[1], rgb[2], a];
+            m.vertices.push(v);
+        }
+    }
+    let row = segs + 1;
+    for i in 0..rings {
+        for j in 0..segs {
+            let k = i * row + j;
+            m.indices
+                .extend_from_slice(&[k, k + row, k + 1, k + 1, k + row, k + row + 1]);
+        }
+    }
+    m
+}
+
 // ---------------------------------------------------------------- lights and antennas
 
 /// A lens: an ellipsoid with half sizes `half`, rotated by `rot`, at `c`.

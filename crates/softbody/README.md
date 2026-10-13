@@ -53,6 +53,7 @@ Every spec component is data (serde, registered with docs), so AI agents and the
 | `GpuClothProbe` | Name a GPU cloth and read its particles back each frame (stalls the frame: tests and tools only). |
 | `softbody.list` / `stats` | What exists and what it costs. |
 | `softbody.cut` / `shoot` / `ignite` / `push` / `unpin` / `reset` | Act on bodies by world position or entity. |
+| `softbody.sailboat_home` | Send the self-sailing dinghies back to their moorings to start their lanes over (tour stops use it). |
 
 ## Contracts
 

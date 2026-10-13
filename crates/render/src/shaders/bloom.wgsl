@@ -1,10 +1,15 @@
 // Physically based bloom (Jimenez 2014, "Next Generation Post Processing in Call of Duty"):
 // a chain of 13-tap downsamples followed by additive 3x3 tent upsamples. No threshold: the
 // whole image blooms a little, bright things (sun glints, spells, glowing mushrooms) a lot.
+// What a pixel brings in is limited (`RenderSettings::bloom_limit`, pre-exposed): above half
+// the limit it rolls off smoothly toward it, so a light thousands of times brighter than the
+// exposure (a neon ring at night, the sun's disc) glows without swamping the frame.
 // Requires lib_types only.
 
 struct BloomParams {
-    // xy: 1 / source size, z: 1 on the first downsample (firefly suppression), w: upsample radius (texels)
+    // xy: 1 / source size, z: 1 on the first downsample (firefly suppression, brightness
+    // limit), w: the brightness limit (pre-exposed, 0 = none) on the first downsample, the
+    // upsample radius (texels) on upsamples
     params: vec4<f32>,
 };
 
@@ -28,15 +33,63 @@ fn tap(uv: vec2<f32>) -> vec3<f32> {
     return finite_or_black(textureSampleLevel(src_tex, src_sampler, uv, 0.0).rgb);
 }
 
+// Scales `c` so its brightest channel stays below `limit`: unchanged up to half of it, then a
+// smooth roll-off (slope 1 at the knee) that approaches the limit. Hue is kept.
+fn bloom_limited(c: vec3<f32>, limit: f32) -> vec3<f32> {
+    let peak = max(c.r, max(c.g, c.b));
+    let knee = 0.5 * limit;
+    if (limit <= 0.0 || peak <= knee) { return c; }
+    let over = peak - knee;
+    return c * ((knee + over * knee / (over + knee)) / peak);
+}
+
+// A tap of the scene on the first downsample, its brightness limited.
+fn source_tap(uv: vec2<f32>) -> vec3<f32> {
+    return bloom_limited(tap(uv), bloom.params.w);
+}
+
 @vertex
 fn vs_bloom(@builtin(vertex_index) i: u32) -> FullscreenOut {
     return fullscreen_vertex(i, 0.0);
+}
+
+// The first downsample, from the scene: each tap's brightness limited, then a Karis average
+// per 2x2 block keeps single bright pixels from flickering.
+fn first_downsample(uv: vec2<f32>, t: vec2<f32>) -> vec4<f32> {
+    let a = source_tap(uv + t * vec2(-2.0, -2.0));
+    let b = source_tap(uv + t * vec2(0.0, -2.0));
+    let c = source_tap(uv + t * vec2(2.0, -2.0));
+    let d = source_tap(uv + t * vec2(-2.0, 0.0));
+    let e = source_tap(uv);
+    let f = source_tap(uv + t * vec2(2.0, 0.0));
+    let g = source_tap(uv + t * vec2(-2.0, 2.0));
+    let h = source_tap(uv + t * vec2(0.0, 2.0));
+    let i = source_tap(uv + t * vec2(2.0, 2.0));
+    let j = source_tap(uv + t * vec2(-1.0, -1.0));
+    let k = source_tap(uv + t * vec2(1.0, -1.0));
+    let l = source_tap(uv + t * vec2(-1.0, 1.0));
+    let m = source_tap(uv + t * vec2(1.0, 1.0));
+    let g0 = (a + b + d + e) * 0.25;
+    let g1 = (b + c + e + f) * 0.25;
+    let g2 = (d + e + g + h) * 0.25;
+    let g3 = (e + f + h + i) * 0.25;
+    let g4 = (j + k + l + m) * 0.25;
+    let w0 = karis_weight(g0) * 0.125;
+    let w1 = karis_weight(g1) * 0.125;
+    let w2 = karis_weight(g2) * 0.125;
+    let w3 = karis_weight(g3) * 0.125;
+    let w4 = karis_weight(g4) * 0.5;
+    let sum = g0 * w0 + g1 * w1 + g2 * w2 + g3 * w3 + g4 * w4;
+    return vec4<f32>(sum / max(w0 + w1 + w2 + w3 + w4, 1e-6), 1.0);
 }
 
 @fragment
 fn fs_down(in: FullscreenOut) -> @location(0) vec4<f32> {
     let t = bloom.params.xy;
     let uv = in.uv;
+    if (bloom.params.z > 0.5) {
+        return first_downsample(uv, t);
+    }
     let a = tap(uv + t * vec2(-2.0, -2.0));
     let b = tap(uv + t * vec2(0.0, -2.0));
     let c = tap(uv + t * vec2(2.0, -2.0));
@@ -50,21 +103,6 @@ fn fs_down(in: FullscreenOut) -> @location(0) vec4<f32> {
     let k = tap(uv + t * vec2(1.0, -1.0));
     let l = tap(uv + t * vec2(-1.0, 1.0));
     let m = tap(uv + t * vec2(1.0, 1.0));
-    if (bloom.params.z > 0.5) {
-        // Karis average per 2x2 block keeps single bright pixels from flickering.
-        let g0 = (a + b + d + e) * 0.25;
-        let g1 = (b + c + e + f) * 0.25;
-        let g2 = (d + e + g + h) * 0.25;
-        let g3 = (e + f + h + i) * 0.25;
-        let g4 = (j + k + l + m) * 0.25;
-        let w0 = karis_weight(g0) * 0.125;
-        let w1 = karis_weight(g1) * 0.125;
-        let w2 = karis_weight(g2) * 0.125;
-        let w3 = karis_weight(g3) * 0.125;
-        let w4 = karis_weight(g4) * 0.5;
-        let sum = g0 * w0 + g1 * w1 + g2 * w2 + g3 * w3 + g4 * w4;
-        return vec4<f32>(sum / max(w0 + w1 + w2 + w3 + w4, 1e-6), 1.0);
-    }
     var o = e * 0.125;
     o += (a + c + g + i) * 0.03125;
     o += (b + d + f + h) * 0.0625;

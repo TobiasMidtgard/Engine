@@ -8,9 +8,13 @@ use engine_core::registry::call_api;
 use engine_core::time::TimeSource;
 use engine_destruction::*;
 use engine_render::{Mesh, StandardMaterial};
+use engine_world::physics::{
+    CharacterController, Collider, ColliderShape, PhysicsBackend, PhysicsQueries, PhysicsQuery,
+    QueryFilter, RigidBody,
+};
 use engine_world::{
-    DamageEvent, DamageKind, EditOp, EditShape, ProjectileTrace, TerrainEdit, WorldPlugin,
-    WorldShift,
+    DamageEvent, DamageKind, EditOp, EditShape, ProjectileTrace, SurfaceMaterials, TerrainEdit,
+    WorldPlugin, WorldShift,
 };
 use serde_json::json;
 
@@ -367,7 +371,7 @@ fn the_hill_demo_tunnels_caves_in_builds_and_rebuilds() {
             .iter(&app.world)
             .count()
     };
-    assert_eq!(built(&mut app), 31, "the yard's cabin is up");
+    assert_eq!(built(&mut app), 32, "the yard's cabin is up");
     let ghosts: Vec<usize> = app
         .world
         .query::<&build::BuildGhost>()
@@ -375,6 +379,18 @@ fn the_hill_demo_tunnels_caves_in_builds_and_rebuilds() {
         .map(|g| g.level)
         .collect();
     assert_eq!(ghosts, vec![5], "the deck's third row is a red ghost");
+    let doors: Vec<(Door, Transform)> = app
+        .world
+        .query::<(&Door, &Transform)>()
+        .iter(&app.world)
+        .map(|(d, t)| (*d, *t))
+        .collect();
+    assert_eq!(doors.len(), 1, "a door hangs in the cabin's doorway");
+    let (door, t) = doors[0];
+    assert!(
+        door.is_open() && door.toward > 0.0 && t.translation.z > 0.3,
+        "the cabin's door swung open, out into the yard: {door:?} at {t:?}"
+    );
     let fallen: f32 = app
         .world
         .query::<&Debris>()
@@ -397,7 +413,7 @@ fn the_hill_demo_tunnels_caves_in_builds_and_rebuilds() {
         .iter(&app.world)
         .filter(|s| s.on)
         .count();
-    assert_eq!(showing, 31, "the finished cabin shows its support colors");
+    assert_eq!(showing, 32, "the finished cabin shows its support colors");
     run(&mut app, 4.0);
     let hut_down = app
         .world
@@ -524,6 +540,372 @@ fn pieces_stand_on_voxel_rock_until_it_is_dug_out_from_under_them() {
         y > 0.45 && y < 2.0 && body.velocity.length() < 0.5,
         "the slab lies in the hole at y {y:.2}: {body:?}"
     );
+}
+
+/// Physics queries that see one character, a ball at a point (boxes only).
+struct OneCharacter(Entity, DVec3, f32);
+
+impl PhysicsQuery for OneCharacter {
+    fn raycast(
+        &self,
+        _: DVec3,
+        _: Vec3,
+        _: f32,
+        _: &QueryFilter,
+    ) -> Option<engine_world::physics::Hit> {
+        None
+    }
+    fn shapecast(
+        &self,
+        _: &ColliderShape,
+        _: DVec3,
+        _: engine_core::math::Quat,
+        _: Vec3,
+        _: f32,
+        _: &QueryFilter,
+    ) -> Option<engine_world::physics::Hit> {
+        None
+    }
+    fn overlap(
+        &self,
+        shape: &ColliderShape,
+        position: DVec3,
+        rotation: engine_core::math::Quat,
+        _: &QueryFilter,
+        out: &mut Vec<Entity>,
+    ) {
+        let ColliderShape::Cuboid { half_extents } = shape else {
+            return;
+        };
+        let local = rotation.inverse() * (self.1 - position).as_vec3();
+        if local.clamp(-*half_extents, *half_extents).distance(local) < self.2 {
+            out.push(self.0);
+        }
+    }
+    fn closest_point(
+        &self,
+        _: DVec3,
+        _: f32,
+        _: &QueryFilter,
+    ) -> Option<engine_world::physics::Hit> {
+        None
+    }
+}
+
+#[test]
+fn build_mode_does_not_put_a_piece_where_someone_stands() {
+    let mut app = app();
+    let player = app
+        .world
+        .spawn((
+            Transform::from_xyz(0.0, 0.9, 0.0),
+            CharacterController::default(),
+        ))
+        .id();
+    let stand_at = |app: &mut App, at: DVec3| {
+        app.insert_resource(PhysicsQueries(std::sync::Arc::new(OneCharacter(
+            player, at, 0.35,
+        ))));
+    };
+    stand_at(&mut app, DVec3::new(0.0, 0.9, 0.0));
+    let b = app
+        .world
+        .spawn((
+            Transform::default(),
+            Builder {
+                kind: BuildKind::WoodWall,
+                ..Builder::default()
+            },
+        ))
+        .id();
+    app.world
+        .get_mut::<Builder>(b)
+        .unwrap()
+        .aim_at(DVec3::new(0.3, 3.0, 2.0), DVec3::ZERO);
+    let place = |app: &mut App| {
+        app.update();
+        let p = app
+            .world
+            .get::<build::BuildPreview>(b)
+            .unwrap()
+            .placement
+            .unwrap();
+        app.world.write_message(BuildRequest {
+            builder: b,
+            action: BuildAction::Place,
+        });
+        app.update();
+        let built = app
+            .world
+            .query_filtered::<(), With<BuiltPiece>>()
+            .iter(&app.world)
+            .count();
+        (p, built)
+    };
+    // A wall through the player: red ghost, and placing does nothing.
+    let (p, built) = place(&mut app);
+    assert_eq!(p.problem, Some(build::BuildProblem::Occupied), "{p:?}");
+    assert_eq!(built, 0);
+    // Once they step aside it goes up.
+    stand_at(&mut app, DVec3::new(3.0, 0.9, 0.0));
+    let (p, built) = place(&mut app);
+    assert!(p.valid(), "{p:?}");
+    assert_eq!(built, 1);
+}
+
+#[test]
+fn doors_hang_in_doorways_swing_away_from_you_and_fall_with_them() {
+    let mut app = app();
+    app.add_plugins(engine_input::InputPlugin);
+    app.insert_resource(PhysicsBackend {
+        name: "test".into(),
+    });
+    let table = app.world.resource::<DestructionMaterials>().clone();
+    let doorway = |app: &mut App, at: DVec3| {
+        let (piece, _) = build::built_piece(
+            BuildKind::WoodDoorway,
+            Transform::from_translation(at),
+            None,
+            false,
+            &table,
+        );
+        app.world.spawn(piece).id()
+    };
+    // A doorway standing on the ground, its front toward +Z.
+    let frame = doorway(&mut app, DVec3::new(0.0, 1.0, 0.0));
+    app.update();
+    let door = app
+        .world
+        .get::<door::HungDoor>(frame)
+        .expect("a door hangs in the doorway")
+        .0;
+    // Shut, a box fills the opening; it has no body, so the backend moves it with the door.
+    assert!(app.world.get::<RigidBody>(door).is_none());
+    let Some(Collider {
+        shape: ColliderShape::Cuboid { half_extents },
+        ..
+    }) = app.world.get::<Collider>(door)
+    else {
+        panic!("no box collider on the door");
+    };
+    assert!(
+        half_extents.x > 0.4 && half_extents.y > 0.9,
+        "{half_extents}"
+    );
+    let open_state = |app: &App| *app.world.get::<Door>(door).unwrap();
+    let leaf_z = |app: &App| app.world.get::<Transform>(door).unwrap().translation.z;
+    assert_eq!(open_state(&app).open, 0.0);
+    assert!(leaf_z(&app).abs() < 0.01, "shut, it sits in the wall");
+
+    // Someone in front presses interact: it swings in, away from them; again, it shuts.
+    let walker = app
+        .world
+        .spawn((
+            Transform::from_xyz(0.3, 1.0, 1.2),
+            CharacterController::default(),
+        ))
+        .id();
+    app.update();
+    let interact = |app: &mut App| {
+        app.world
+            .resource_mut::<engine_input::ActionState>()
+            .tap("interact", 1);
+        run_secs(app, 1.2);
+    };
+    interact(&mut app);
+    let d = open_state(&app);
+    assert!(d.is_open() && d.toward < 0.0, "{d:?}");
+    assert!(leaf_z(&app) < -0.3, "swung in to {}", leaf_z(&app));
+    interact(&mut app);
+    assert_eq!(open_state(&app).open, 0.0, "shut again");
+    // From behind it swings out through the front.
+    app.world.get_mut::<Transform>(walker).unwrap().translation = DVec3::new(0.3, 1.0, -1.2);
+    app.update();
+    interact(&mut app);
+    let d = open_state(&app);
+    assert!(d.is_open() && d.toward > 0.0, "{d:?}");
+    assert!(leaf_z(&app) > 0.3, "swung out to {}", leaf_z(&app));
+    // Out of reach, interact does nothing.
+    app.world.get_mut::<Transform>(walker).unwrap().translation = DVec3::new(0.3, 1.0, -6.0);
+    app.update();
+    interact(&mut app);
+    assert!(open_state(&app).is_open());
+    // AI agents open and shut it by where they stand.
+    let r = call_api(
+        &mut app.world,
+        "destruction.door",
+        json!({"near": [0.3, 1.0, 1.2], "open": false}),
+    )
+    .unwrap();
+    assert_eq!(r["opening"], json!(false));
+    run_secs(&mut app, 1.2);
+    assert_eq!(open_state(&app).open, 0.0);
+
+    // A doorway hanging in the air falls; its door swings shut and falls with it.
+    let high = doorway(&mut app, DVec3::new(6.0, 5.0, 0.0));
+    app.update();
+    let high_door = app.world.get::<door::HungDoor>(high).unwrap().0;
+    run_secs(&mut app, 1.0);
+    assert!(app.world.get::<Debris>(high).is_some(), "the doorway fell");
+    let d = *app.world.get::<Door>(high_door).unwrap();
+    assert!(d.loose && d.open == 0.0, "{d:?}");
+    assert!(
+        app.world.get::<Collider>(high_door).is_none(),
+        "the door rides its doorway down, no collider of its own"
+    );
+    // Taken down, a doorway takes its door with it.
+    app.world.despawn(frame);
+    app.update();
+    assert!(app.world.get_entity(door).is_err());
+}
+
+#[test]
+fn standing_pieces_are_solid_with_a_physics_module() {
+    // With no physics module, pieces get no colliders (nothing would read them).
+    let mut bare = app();
+    let floor = bare
+        .world
+        .spawn((
+            Transform::default(),
+            StructuralPiece::new(DestructibleMaterial::Wood, Vec3::new(2.0, 0.1, 2.0)),
+        ))
+        .id();
+    bare.update();
+    assert!(bare.world.get::<Collider>(floor).is_none());
+
+    let mut app = app();
+    app.insert_resource(PhysicsBackend {
+        name: "test".into(),
+    });
+    let b = app
+        .world
+        .spawn((Transform::default(), Builder::default()))
+        .id();
+    for (kind, at) in [
+        (BuildKind::WoodFloor, [0.0, 0.0, 0.0]),
+        (BuildKind::WoodGable, [5.0, 0.0, 0.0]),
+    ] {
+        {
+            let mut builder = app.world.get_mut::<Builder>(b).unwrap();
+            builder.kind = kind;
+            let to = DVec3::from_array(at);
+            builder.aim_at(to + DVec3::new(0.3, 3.0, 0.6), to);
+        }
+        app.update();
+        app.world.write_message(BuildRequest {
+            builder: b,
+            action: BuildAction::Place,
+        });
+        app.update();
+    }
+    // A beam hanging in the air: it falls as soon as the solver sees it.
+    let beam = app
+        .world
+        .spawn((
+            Transform::from_xyz(0.0, 6.0, 8.0),
+            StructuralPiece::new(DestructibleMaterial::Wood, Vec3::new(2.0, 0.2, 0.2)),
+        ))
+        .id();
+    app.update();
+    let wood = app.world.resource::<SurfaceMaterials>().id_or_default(
+        &app.world
+            .resource::<DestructionMaterials>()
+            .get(DestructibleMaterial::Wood)
+            .surface,
+    );
+    let built: Vec<(Entity, BuildKind)> = app
+        .world
+        .query::<(Entity, &BuiltPiece)>()
+        .iter(&app.world)
+        .map(|(e, p)| (e, p.kind))
+        .collect();
+    assert_eq!(built.len(), 2, "{built:?}");
+    for (e, kind) in built {
+        let c = app
+            .world
+            .get::<Collider>(e)
+            .expect("a standing piece is solid");
+        assert_eq!(c.surface, wood, "footsteps on it sound like wood");
+        let h = app.world.get::<StructuralPiece>(e).unwrap().half_extents;
+        match (kind, &c.shape) {
+            // Its box, a skin smaller so snapped neighbors don't overlap.
+            (BuildKind::WoodFloor, ColliderShape::Cuboid { half_extents }) => {
+                let skin = h - *half_extents;
+                assert!(
+                    skin.min_element() > 0.005 && skin.max_element() < 0.02,
+                    "{h} vs {half_extents}"
+                );
+            }
+            // The triangle under the roof, not the box (which would stick up through it).
+            (BuildKind::WoodGable, ColliderShape::ConvexHull { points }) => {
+                assert_eq!(points.len(), 6);
+                let low_end_top = points
+                    .iter()
+                    .filter(|p| p.x < 0.0)
+                    .map(|p| p.y)
+                    .fold(f32::MIN, f32::max);
+                assert!(low_end_top < -h.y * 0.9, "{points:?}");
+            }
+            other => panic!("unexpected shape {other:?}"),
+        }
+    }
+    // Once a piece gives way it is a debris body with its own hull, not a static box.
+    assert!(matches!(
+        app.world.get::<Collider>(beam).map(|c| &c.shape),
+        Some(ColliderShape::Cuboid { .. })
+    ));
+    run_secs(&mut app, 2.0);
+    assert!(
+        app.world.get::<StructuralPiece>(beam).is_none(),
+        "the beam fell"
+    );
+    assert!(app.world.get::<RigidBody>(beam).is_some());
+    assert!(matches!(
+        app.world.get::<Collider>(beam).map(|c| &c.shape),
+        Some(ColliderShape::ConvexHull { .. })
+    ));
+
+    // Props that break keep their simple shape until they do; set dressing is solid as
+    // drawn (a triangle mesh of its model).
+    let crate_e = app
+        .world
+        .spawn((
+            Transform::from_xyz(0.0, 0.4, -6.0),
+            Fracturable {
+                shape: FractureShape::Box {
+                    half_extents: Vec3::splat(0.4),
+                },
+                material: DestructibleMaterial::Wood,
+                ..Fracturable::default()
+            },
+        ))
+        .id();
+    let pillar = app
+        .world
+        .spawn((
+            Transform::from_xyz(4.0, 1.9, -6.0),
+            dress::PropModel::new(
+                props::PropKind::ConcretePillar {
+                    size: [0.7, 3.8, 0.7],
+                },
+                1,
+            ),
+        ))
+        .id();
+    app.update();
+    assert_eq!(
+        app.world.get::<Collider>(crate_e).map(|c| c.shape.clone()),
+        Some(ColliderShape::Cuboid {
+            half_extents: Vec3::splat(0.4)
+        })
+    );
+    let Some(ColliderShape::TriMesh { vertices, indices }) =
+        app.world.get::<Collider>(pillar).map(|c| c.shape.clone())
+    else {
+        panic!("the pillar is solid");
+    };
+    let top = vertices.iter().map(|v| v.y).fold(f32::MIN, f32::max);
+    assert!(!indices.is_empty() && (top - 1.9).abs() < 0.1, "top {top}");
 }
 
 #[test]

@@ -5,13 +5,16 @@
 //! cargo run -p showcase --release                       # fly around (see camera.rs for keys)
 //! cargo run -p showcase --release -- --headless --tour  # writes screenshots/tour/*.png
 //! cargo run -p showcase --release -- --headless --tour plaza,orbit
+//! cargo run -p showcase --release -- --headless --tour paddock_car,yard   # loads 2 zones
 //! cargo run -p showcase --release -- --headless --film overview,plaza,falls --secs 6
 //! cargo run -p showcase --release -- --headless --film footsteps --follow "Trail hiker" --secs 60
 //! ```
 //!
 //! `--film` saves frames and sound for a video (see `film.rs`); `--follow` films an entity, found
 //! by its `Name`, from behind. The valley lies on a real planet (`planet.rs`); `--no-planet`
-//! draws it as the landscape's own mesh on an empty ground instead.
+//! draws it as the landscape's own mesh on an empty ground instead. A tour or film whose stops
+//! all belong to zones spawns only those zones' demos; `--zones a,b` (or `none`, `all`) picks
+//! them (see `zones::demo_zones`).
 //!
 //! The map is a valley ringed by snowy mountains: a village around the material plaza, woods,
 //! a lake, and one zone per engine feature. Each zone shows placeholder content until its module
@@ -84,14 +87,27 @@ fn main() {
             .resource_mut::<engine_space::SpaceSettings>()
             .follow_world_clock = true;
     }
-    if let Some(i) = args.iter().position(|a| a == "--tour") {
-        let only = args
-            .get(i + 1)
+    let value = |flag: &str| {
+        args.iter()
+            .position(|a| a == flag)
+            .and_then(|i| args.get(i + 1))
             .filter(|a| !a.starts_with("--"))
-            .map(String::as_str);
-        tour::install(&mut app, only);
-    } else if let Some(i) = args.iter().position(|a| a == "--film") {
-        let keys = args.get(i + 1).map(String::as_str).unwrap_or("overview");
+            .map(String::as_str)
+    };
+    let film_keys = value("--film").unwrap_or("overview");
+    let stops = if args.iter().any(|a| a == "--tour") {
+        value("--tour")
+    } else if args.iter().any(|a| a == "--film") {
+        Some(film_keys)
+    } else {
+        None
+    };
+    if let Some(zones) = zones::demo_zones(value("--zones"), stops) {
+        app.insert_resource(zones);
+    }
+    if args.iter().any(|a| a == "--tour") {
+        tour::install(&mut app, value("--tour"));
+    } else if args.iter().any(|a| a == "--film") {
         let num = |flag: &str, default: f32| {
             args.iter()
                 .position(|a| a == flag)
@@ -106,7 +122,7 @@ fn main() {
             .cloned();
         film::install(
             &mut app,
-            keys,
+            film_keys,
             num("--secs", 8.0),
             num("--fps", 30.0),
             follow,
@@ -127,7 +143,10 @@ fn setup(
         ResMut<engine::world::SurfaceMaterials>,
     ),
     config: Res<EngineConfig>,
-    use_planet: Option<Res<planet::UsePlanet>>,
+    (use_planet, demo_zones): (
+        Option<Res<planet::UsePlanet>>,
+        Option<Res<zones::DemoZones>>,
+    ),
 ) {
     let t0 = std::time::Instant::now();
     // The planet beyond the terrain is grassland too, so the far edge blends into it.
@@ -155,7 +174,13 @@ fn setup(
     scenery::spawn_village(&mut commands, &lib, &land, &mut rng);
     scenery::spawn_cliffs_and_stream(&mut commands, &mut meshes, &lib, &land, &mut rng);
     placeholders::cave_shell(&mut commands, &mut meshes, &lib, &land, &mut rng);
-    zones::spawn_demos(&mut commands, &lib, &land, &mut rng);
+    if let Some(only) = &demo_zones {
+        engine::core::log::info!(
+            "only the zone demos of {:?} (`--zones all` spawns every one)",
+            only.0
+        );
+    }
+    zones::spawn_demos(&mut commands, &lib, &land, &mut rng, demo_zones.as_deref());
     if use_planet.is_none() {
         zones::moon(&mut commands);
     }

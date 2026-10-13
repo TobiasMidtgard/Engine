@@ -8,7 +8,7 @@ use engine_core::prelude::*;
 use engine_render::{AlphaMode, MaterialRef, Mesh, MeshRef, MeshRenderer, StandardMaterial};
 
 use crate::aero::Aircraft;
-use crate::visuals::{PropellerVisual, SurfaceVisual, WheelVisual};
+use crate::visuals::{PropellerPart, PropellerVisual, SurfaceVisual, WheelVisual};
 use crate::wheels::Wheels;
 
 use super::plane_paint::*;
@@ -371,6 +371,7 @@ pub fn build() -> ModelAssets {
     // ---- propeller
     out.mesh(&key("spinner"), spinner());
     out.mesh(&key("blades"), blades());
+    out.mesh(&key("prop_disc"), prop_disc());
 
     // ---- lights
     let (nav, strobe, white) = wingtip_lights();
@@ -437,6 +438,13 @@ pub fn build() -> ModelAssets {
     out.material(MaterialDef::plain(&k("hub"), mat(0xb9bdc3, 0.33, 0.9)));
     out.material(MaterialDef::plain(&k("spinner"), mat(NAVY, 0.18, 0.0)));
     out.material(MaterialDef::plain(&k("blades"), textured(0.45, 0.0)));
+    out.material(MaterialDef::plain(&k("prop_disc"), {
+        let mut m = textured(0.6, 0.0);
+        m.alpha_mode = AlphaMode::Blend;
+        m.double_sided = true;
+        m.receives_wetness = false;
+        m
+    }));
     out.material(MaterialDef::plain(
         &k("nav_green"),
         lamp(Vec3::new(0.05, 1.0, 0.25), 2500.0),
@@ -569,7 +577,7 @@ pub fn spawn(commands: &mut Commands, body: Entity, aircraft: &Aircraft, wheels:
         Transform::default(),
         true,
     );
-    spawn_part(
+    let blades = spawn_part(
         commands,
         prop,
         "blades",
@@ -577,6 +585,22 @@ pub fn spawn(commands: &mut Commands, body: Entity, aircraft: &Aircraft, wheels:
         Transform::default(),
         true,
     );
+    commands.entity(blades).insert(PropellerPart {
+        index: 0,
+        blur: false,
+    });
+    let disc = spawn_part(
+        commands,
+        prop,
+        "prop_disc",
+        "prop_disc",
+        Transform::from_scale(Vec3::splat(1e-3)),
+        false,
+    );
+    commands.entity(disc).insert(PropellerPart {
+        index: 0,
+        blur: true,
+    });
     // Wheels.
     for (i, w) in wheels.wheels.iter().enumerate() {
         let mount = w.mount - Vec3::Y * w.suspension.travel_m * 0.6;

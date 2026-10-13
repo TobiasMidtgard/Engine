@@ -2,13 +2,27 @@
 //! AI is doing, so behavior reads clearly before real character models exist.
 //!
 //! Fighters are armored combatants built from procedural meshes (see [`crate::art::fighter`])
-//! on a skeleton whose knees and elbows bend. They walk and run with planted feet and swinging
-//! arms, breathe and shift their weight when idle, kneel behind low cover, raise their weapon
-//! during an attack's telegraph (it glows orange for a heavy guard breaker), raise the guard
-//! or shield to block (on a parry the blade glints white and the shield lights up), lean into
-//! dodges, reel when staggered, light up for an instant when hit (tinted, never blown out to
-//! white: the plates light up in a pale tint of the team's color), and fall and drop their
-//! weapon when downed. Shooters shoulder their carbine (with a muzzle flash and kick); archers
+//! on a skeleton whose knees and elbows bend. Their feet stay where they are set on the ground
+//! while the body walks, runs or turns over them, the stride lengthening into a run with the
+//! heels kicking up and the arms pumping; on guard they shuffle without breaking their stance.
+//! Standing, they breathe and shift their weight from leg to leg (on guard, bob and rock on
+//! bent knees), and they kneel behind low cover. A swing coils back onto the rear foot during
+//! the attack's telegraph (the blade glows orange for a heavy guard breaker), then the hips
+//! lead the shoulders round into the cut, the weight goes onto the front foot and the blade
+//! follows through; a feint called off mid-telegraph lurches into the release, checks and
+//! rocks back onto its guard instead of snapping there. A dash pushes off the rear foot: the
+//! body is drawn low behind the owner and eases after it as the drive leg extends, the lead
+//! foot reaching ahead. They raise the guard or shield to the line the blow comes on (overhead
+//! against a heavy cut from above, on the side a cut comes from, low across a thrust or a
+//! dash), bracing and rocking back as it lands (on a parry the blade beats the blow aside and
+//! glints white, and the shield lights up), hop aside to dodge and step back under themselves,
+//! and are thrown back and stumble when staggered. A blow that lands throws them by where it
+//! struck (the head snaps along it, the trunk doubles over and turns away, the legs buckle on
+//! the struck side), and they light up for an instant (tinted, never blown out to white: the
+//! plates light up in a pale tint of the team's color). Downed, the knees give, the body
+//! topples back along the blow and lands hips, back, then head, the legs kick and settle (one
+//! straight, one folded out) and the arms flop out on the ground, the weapon dropped beside
+//! them. Shooters shoulder their carbine (with a muzzle flash and kick); archers
 //! draw to the jaw. Faces show under open helmets worn over mail coifs. The helmet's horsehair
 //! crest shows skill (grey rookie, bronze, silver, gold master) and a light in its brow band
 //! glows with alertness (yellow suspicious, orange searching, red fighting). Their painted
@@ -33,8 +47,9 @@ mod humanoid;
 use engine_core::prelude::*;
 use engine_render::{MaterialRef, MeshRenderer, Shape, StandardMaterial};
 use engine_world::locomotion::{LocomotionState, MoveIntent};
+use engine_world::{AttackEvent, AttackKind, DamageEvent};
 
-use crate::agent::{NpcBrain, NpcClock, NpcCombat, NpcSettings, NpcVitals, NpcWeapon};
+use crate::agent::{NpcBrain, NpcClock, NpcCombat, NpcMotor, NpcSettings, NpcVitals, NpcWeapon};
 use crate::art::ArtAssets;
 use crate::combat::Downed;
 use crate::faction::Faction;
@@ -97,12 +112,13 @@ pub struct IntentMarker {
     line: bool,
 }
 
-/// Per-body bookkeeping for effects.
+/// Per-body bookkeeping for effects, and a fighter's motion from one pose to the next.
 #[derive(Component, Debug, Clone, Copy, Default)]
 pub struct StandInState {
     was_winding: bool,
     flash_until: f64,
     markers: Option<[Entity; 2]>,
+    motion: humanoid::Motion,
 }
 
 fn mat(hex: u32) -> StandardMaterial {
@@ -209,9 +225,11 @@ const HIDDEN: Placed = Placed {
 };
 
 type PoseItem<'a> = (
+    Entity,
     &'a StandIn,
     &'a mut StandInState,
     &'a Children,
+    &'a Transform,
     &'a LocomotionState,
     Option<&'a MoverState>,
     Option<&'a MoveIntent>,
@@ -225,18 +243,53 @@ type PoseItem<'a> = (
         Option<&'a Animal>,
         Option<&'a AnimalMind>,
         Option<&'a BirdFlight>,
+        Option<&'a NpcMotor>,
     ),
 );
 
-/// Pose every stand-in from its owner's state.
+/// What a fighter's pose reads of another (the attacker whose blow it meets).
+type FoeItem<'a> = (
+    &'a Transform,
+    Option<&'a NpcCombat>,
+    Option<&'a LocomotionState>,
+    Option<&'a NpcWeapon>,
+);
+
+/// The attacks telegraphed and the blows landed this step (kept between steps to reuse the
+/// space).
+#[derive(Default)]
+pub(crate) struct Sightings {
+    attacks: Vec<(Entity, Option<Entity>, AttackKind)>,
+    blows: Vec<DamageEvent>,
+}
+
+/// Pose every stand-in from its owner's state (a fighter's also from the attacks telegraphed
+/// at it, the blows that land on it, and the attacker whose blow its guard meets).
 pub(crate) fn pose_stand_ins(
-    mut owners: Query<PoseItem>,
+    mut owners: Query<PoseItem, Without<StandInPart>>,
+    foes: Query<FoeItem, Without<StandInPart>>,
     mut parts: Query<(&StandInPart, &mut Transform, &mut MeshRenderer)>,
+    mut attacks: MessageReader<AttackEvent>,
+    mut blows: MessageReader<DamageEvent>,
+    mut seen: Local<Sightings>,
 ) {
+    let seen = &mut *seen;
+    seen.attacks.clear();
+    seen.attacks
+        .extend(attacks.read().map(|a| (a.attacker, a.target, a.kind)));
+    seen.blows.clear();
+    seen.blows.extend(blows.read().cloned());
+    let foe = |e: Entity| {
+        foes.get(e)
+            .ok()
+            .map(|(t, c, l, w)| humanoid::Foe::of(t, c, l, w))
+    };
     for (
+        me,
         stand_in,
         mut st,
         children,
+        owner,
         loco,
         mover,
         intent,
@@ -252,14 +305,22 @@ pub(crate) fn pose_stand_ins(
         let now = clock.map(|c| c.now).unwrap_or(0.0);
         let phase = mover.map(|m| m.phase).unwrap_or(0.0);
         let speed = Vec3::new(loco.velocity.x, 0.0, loco.velocity.z).length();
-        let (animal, mind, bird) = animal;
+        let (animal, mind, bird, motor) = animal;
         let mut materials: Vec<(Part, StandardMaterial)> = Vec::new();
         let placed: Box<dyn Fn(Part) -> Placed> = match animal.map(|a| a.species) {
             None => {
+                let view = humanoid::Seen {
+                    me,
+                    at: owner.translation,
+                    attacks: &seen.attacks,
+                    blows: &seen.blows,
+                    dash_secs: motor.map_or(0.22, |m| m.dash_secs),
+                    foe: &foe,
+                };
                 let pose = humanoid::humanoid(
                     now,
                     phase,
-                    speed,
+                    owner.rotation,
                     loco,
                     intent,
                     combat,
@@ -267,6 +328,7 @@ pub(crate) fn pose_stand_ins(
                     vitals,
                     downed,
                     weapon.copied().unwrap_or_default(),
+                    &view,
                     &mut st,
                     &mut materials,
                     stand_in,
