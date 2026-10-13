@@ -553,9 +553,12 @@ fn moss_log(mesh: &mut engine_render::Mesh, amount: f32, seed: u64) {
         let m = MossAt::new(v, amount, seed);
         let moss = moss.lerp(dry, smoothstep(-0.2, 0.4, m.tint));
         let c = Vec3::new(v.color[0], v.color[1], v.color[2]);
+        // Dead bark loses its color within a year or two: it greys and dulls (birch's white
+        // with it, pine's orange), greening with algae in places.
+        let lum = c.dot(Vec3::new(0.3, 0.55, 0.15));
         let algae = smoothstep(-0.3, 0.5, m.patch) * m.side;
-        let weathered = Vec3::new(0.8, 0.8, 0.72).lerp(Vec3::new(0.62, 0.68, 0.5), algae);
-        let c = c * Vec3::ONE.lerp(weathered, 0.7 * amount);
+        let grey = Vec3::new(0.84, 0.83, 0.78).lerp(Vec3::new(0.66, 0.74, 0.5), algae) * lum;
+        let c = c.lerp(grey, 0.35 + 0.45 * amount);
         let cover = m.cover * (0.6 + 0.3 * amount);
         let c = c.lerp(moss, cover) * (1.0 - (0.2 + 0.2 * amount) * m.under * m.side);
         v.color = [c.x, c.y, c.z, v.color[3]];
@@ -668,9 +671,11 @@ fn moss_shell(
                 let n = Vec3::from(v.normal).normalize_or_zero();
                 let (angle, r) = around(p);
                 let uv = Vec2::new(angle * r, p.y) / LOG_MOSS_TILE_M;
-                // Drier, yellower cushions in places; darker down the flanks.
+                // Darker and more olive than the moss on the forest floor (bright moss reads
+                // lime in sunlight), drier and browner in places, darker down the flanks.
                 let dry = smoothstep(-0.2, 0.4, m.tint);
-                let c = Vec3::ONE.lerp(Vec3::new(1.12, 1.02, 0.72), dry) * (1.0 - 0.3 * m.under);
+                let c = Vec3::new(0.58, 0.6, 0.42).lerp(Vec3::new(0.7, 0.64, 0.38), dry)
+                    * (1.0 - 0.3 * m.under);
                 let alpha = smoothstep(0.0, 0.8, m.cover);
                 let lift = 0.004 + 0.014 * m.cover;
                 remap[i] = b.vertex(p + n * lift, n, uv, c.extend(alpha));
