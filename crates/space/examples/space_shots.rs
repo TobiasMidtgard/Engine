@@ -28,6 +28,8 @@ struct View {
     elevation_deg: f64,
     ev100: f32,
     fov: f32,
+    /// Look out along the horizon, this many degrees below it, instead of at the body.
+    horizon_deg: Option<f64>,
 }
 
 fn views() -> Vec<View> {
@@ -39,6 +41,7 @@ fn views() -> Vec<View> {
         elevation_deg,
         ev100,
         fov: 40.0,
+        horizon_deg: None,
     };
     vec![
         v("jupiter", "Jupiter", 4.0, 35.0, 8.0, 11.0),
@@ -51,6 +54,17 @@ fn views() -> Vec<View> {
         View {
             fov: 60.0,
             ..v("moon_and_earth", "Moon", 3.5, 120.0, 5.0, 15.3)
+        },
+        // Low orbit and the edge of space over the far Earth, looking out to the horizon.
+        View {
+            fov: 60.0,
+            horizon_deg: Some(14.0),
+            ..v("earth_leo", "Earth", 1.0 + 400.0 / 6371.0, 20.0, 38.0, 14.6)
+        },
+        View {
+            fov: 60.0,
+            horizon_deg: Some(4.0),
+            ..v("earth_edge", "Earth", 1.0 + 35.0 / 6371.0, 20.0, 38.0, 14.6)
         },
     ]
 }
@@ -273,6 +287,12 @@ fn main() {
                 center - to_earth * radius * view.distance_radii + up * radius * 1.25,
                 earth,
             )
+        } else if let Some(down) = view.horizon_deg {
+            // Along the horizon, across the sunlight, tipped down a little.
+            let eye = center + dir * radius * view.distance_radii;
+            let across = (side - dir * side.dot(dir)).normalize();
+            let (sd, cd) = down.to_radians().sin_cos();
+            (eye, eye + (across * cd - dir * sd) * 1.0e5)
         } else {
             (center + dir * radius * view.distance_radii, center)
         };
@@ -287,7 +307,14 @@ fn main() {
                 exposure: Exposure::Manual { ev100: view.ev100 },
                 ..Camera::perspective(view.fov)
             },
-            Transform::from_translation(eye).looking_at(target, pole.as_vec3()),
+            Transform::from_translation(eye).looking_at(
+                target,
+                if view.horizon_deg.is_some() {
+                    (eye - center).normalize().as_vec3()
+                } else {
+                    pole.as_vec3()
+                },
+            ),
         ));
         app.update_n(4);
         // Full-detail maps bake in the background: wait for them.
