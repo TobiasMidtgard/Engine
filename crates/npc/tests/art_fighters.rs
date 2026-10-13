@@ -98,6 +98,11 @@ impl Pose {
     }
 }
 
+/// A shot aimed (or an arrow drawn) to go off at `hit_at`.
+fn windup_at(hit_at: f64) -> AttackPhase {
+    windup(hit_at, false)
+}
+
 fn windup(hit_at: f64, heavy: bool) -> AttackPhase {
     AttackPhase::Windup {
         target: None,
@@ -574,6 +579,13 @@ enum Scene {
     Fall,
     /// Moving at `vel` (m/s, in its own frame: −Z ahead) the whole time.
     Move { vel: Vec3 },
+    /// Moving at `vel` until the event, then stopping dead.
+    Stop { vel: Vec3 },
+    /// Turning on the spot as fast as a fighter turns (9 rad/s) from the event, by `angle`
+    /// (rad, to its left), to end facing its strip's way.
+    Turn { angle: f32 },
+    /// Shooting as fast as its weapon allows, the `shots`th shot going off at the event.
+    Shoot { shots: u32 },
 }
 
 /// A fighter acting out a scene; at its own time `cap` it stands at `at`.
@@ -616,7 +628,11 @@ fn run_scripts(
     for (me, mut s, clock, mut combat, mut loco, mut mover, mut t, vitals) in &mut q {
         let now = clock.now;
         let since = now - EVENT;
-        let rot = Quat::from_rotation_y(s.yaw);
+        let turned = match s.scene {
+            Scene::Turn { angle } => (9.0 * since.max(0.0) as f32).min(angle) - angle,
+            _ => 0.0,
+        };
+        let rot = Quat::from_rotation_y(s.yaw + turned);
         let ahead = rot * Vec3::NEG_Z;
         let mut at = s.at;
         let mut vel = Vec3::ZERO;
@@ -768,6 +784,39 @@ fn run_scripts(
                     });
                 }
             }
+            Scene::Turn { .. } => {}
+            Scene::Shoot { shots } => {
+                let w = &s.weapon;
+                let (windup, recovery, cooldown) = (
+                    f64::from(w.windup),
+                    f64::from(w.recovery),
+                    f64::from(w.cooldown),
+                );
+                let every = windup + cooldown;
+                let first = EVENT - f64::from(shots.max(1) - 1) * every;
+                let last = first + ((now - first) / every).floor() * every;
+                let next = if now < first { first } else { last + every };
+                combat.phase = if now >= first && now < last + recovery {
+                    AttackPhase::Recovery {
+                        until: last + recovery,
+                    }
+                } else if now >= next - windup {
+                    windup_at(next)
+                } else {
+                    AttackPhase::Ready
+                };
+                combat.ready_at = if now < first { 0.0 } else { last + cooldown };
+            }
+            Scene::Stop { vel: v } => {
+                if since < 0.0 {
+                    vel = rot * v;
+                    mode = LocomotionMode::Run;
+                }
+                let till = |t: f64| t.min(EVENT);
+                at += (rot * v * (till(now) - till(s.cap)) as f32).as_dvec3();
+                mover.phase = ((f64::from(v.length()) * till(now) / 0.75 * std::f64::consts::PI)
+                    % std::f64::consts::TAU) as f32;
+            }
             Scene::Move { vel: v } => {
                 vel = rot * v;
                 at += (vel * (now - s.cap) as f32).as_dvec3();
@@ -845,6 +894,7 @@ fn actor(
     alert: AlertLevel,
     scene: Scene,
     cap: f64,
+    warm: f64,
 ) -> Entity {
     let e = spawn(
         app,
@@ -892,7 +942,7 @@ fn actor(
     let mut ent = app.world.entity_mut(e);
     ent.insert((
         NpcClock {
-            now: cap - WARM,
+            now: cap - warm,
             dt: 0.0,
             rate: 1.0,
         },
@@ -931,6 +981,11 @@ fn strips_app(w: u32, h: u32) -> App {
 
 /// Set out the strips side by side along X, each with its camera: the shots to take.
 fn stage(app: &mut App, strips: &[Strip], w: u32, h: u32) -> Vec<(Entity, String)> {
+    stage_warm(app, strips, w, h, WARM)
+}
+
+/// [`stage`] with the fighters living `warm` s before the shots.
+fn stage_warm(app: &mut App, strips: &[Strip], w: u32, h: u32, warm: f64) -> Vec<(Entity, String)> {
     let center = |k: usize| (k as f64 - (strips.len() - 1) as f64 * 0.5) * 26.0;
     let mut shots = Vec::new();
     for (k, strip) in strips.iter().enumerate() {
@@ -953,6 +1008,7 @@ fn stage(app: &mut App, strips: &[Strip], w: u32, h: u32) -> Vec<(Entity, String
                 strip.alert,
                 scene,
                 EVENT + time,
+                warm,
             );
         }
         // Far off with a long lens: the frames side by side at nearly one scale.
@@ -974,6 +1030,11 @@ fn stage(app: &mut App, strips: &[Strip], w: u32, h: u32) -> Vec<(Entity, String
 /// Live through the moments before the frames looking at nothing (cheap frames), then stop
 /// the clocks and shoot.
 fn roll(app: &mut App, shots: Vec<(Entity, String)>) {
+    roll_warm(app, shots, WARM);
+}
+
+/// [`roll`] through `warm` s.
+fn roll_warm(app: &mut App, shots: Vec<(Entity, String)>, warm: f64) {
     let away = camera(
         app,
         DVec3::new(0.0, 2.0, 200.0),
@@ -987,7 +1048,7 @@ fn roll(app: &mut App, shots: Vec<(Entity, String)>) {
     app.world
         .resource_mut::<Time>()
         .set_source(TimeSource::Manual { step_secs: 0.1 });
-    app.update_n((WARM / 0.1).round() as usize);
+    app.update_n((warm / 0.1).round() as usize);
     if app.world.get_resource::<RenderDisabled>().is_some() {
         eprintln!("skipping: no GPU");
         return;
@@ -1155,6 +1216,7 @@ fn fighter_motion_strips() {
             AlertLevel::Combat,
             scene,
             EVENT + time,
+            WARM,
         );
     }
     let far = camera(
@@ -1249,4 +1311,152 @@ fn fighter_combat_strips() {
     ];
     let shots = stage(&mut app, &strips, w, h);
     roll(&mut app, shots);
+}
+
+/// Ranged motion, turning, follow-through and blows to the head as rows of frames: a carbine
+/// fired and its magazine changed in the cooldown, a bow drawn, held at the anchor, loosed and
+/// the next arrow nocked, a carbine carried at port arms on the run, an about-face on the spot,
+/// a stop from a run (the tabards, the pouches and the crest swinging on), a blow to the head
+/// seen from the front, and the roof guard from a low camera; and blows to the head, the body
+/// and the legs side by side as a player 10 m off sees them. The fighters live long enough
+/// before the shots for the carbine to have fired a magazine.
+#[test]
+fn fighter_ranged_turn_and_sway_strips() {
+    let (w, h) = (1920, 540);
+    let mut app = strips_app(w, h);
+    let frames = |dt: f64| (0..8).map(|i| f64::from(i) * dt).collect::<Vec<_>>();
+    let high = |parry: bool, times: [f64; 4]| {
+        times.map(|t| {
+            (
+                Scene::Defend {
+                    parry,
+                    from: Incoming::High,
+                },
+                t,
+            )
+        })
+    };
+    let strips = vec![
+        Strip {
+            skills: NpcSkills::soldier(),
+            yaw: -0.7,
+            ..Strip::new(
+                "rifle_reload",
+                Scene::Shoot { shots: 6 },
+                NpcWeapon::rifle(),
+                vec![-0.05, 0.03, 0.18, 0.3, 0.38, 0.5, 0.58, 0.68, 0.85],
+            )
+        },
+        Strip {
+            skills: NpcSkills::veteran(),
+            yaw: 1.1,
+            ..Strip::new(
+                "bow_cycle",
+                Scene::Shoot { shots: 1 },
+                NpcWeapon::bow(),
+                vec![-0.6, -0.3, -0.08, 0.03, 0.42, 0.62, 0.8, 1.0, 1.12],
+            )
+        },
+        Strip {
+            skills: NpcSkills::soldier(),
+            yaw: FRAC_PI_2,
+            ..Strip::new(
+                "rifle_run",
+                Scene::Move {
+                    vel: Vec3::new(0.0, 0.0, -4.5),
+                },
+                NpcWeapon::rifle(),
+                frames(0.075),
+            )
+        },
+        Strip {
+            yaw: 0.3,
+            gap: 1.5,
+            ..Strip::new(
+                "turn",
+                Scene::Turn { angle: PI },
+                NpcWeapon::sword(),
+                vec![0.0, 0.08, 0.16, 0.24, 0.32, 0.42, 0.55, 0.8],
+            )
+        },
+        Strip {
+            skills: NpcSkills::master(),
+            yaw: FRAC_PI_2,
+            gap: 1.5,
+            ..Strip::new(
+                "stop",
+                Scene::Stop {
+                    vel: Vec3::new(0.0, 0.0, -4.5),
+                },
+                NpcWeapon::sword_and_shield(),
+                vec![-0.1, 0.05, 0.12, 0.2, 0.3, 0.42, 0.6, 0.9],
+            )
+        },
+        Strip {
+            skills: NpcSkills::soldier(),
+            yaw: 0.0,
+            ..Strip::new(
+                "head_hit_front",
+                Scene::Hit {
+                    height: 1.62,
+                    side: -1.0,
+                    kind: DamageKind::Slash,
+                },
+                NpcWeapon::sword(),
+                vec![0.0, 0.04, 0.08, 0.14, 0.22, 0.35, 0.55, 0.9],
+            )
+        },
+        Strip {
+            skills: NpcSkills::master(),
+            yaw: 0.2,
+            eye: (0.9, 1.45),
+            ..Strip::mixed(
+                "roof_guard",
+                NpcWeapon::sword(),
+                [
+                    high(false, [0.06, 0.15, 0.27, 0.4]),
+                    high(true, [0.05, 0.12, 0.2, 0.26]),
+                ]
+                .concat(),
+            )
+        },
+    ];
+    let warm = 6.0;
+    let mut shots = stage_warm(&mut app, &strips, w, h, warm);
+    // Where the blows land, as a player 10 m off sees them: on guard, then 0.1 s after a blow
+    // to the head, the body and the legs.
+    let row = DVec3::new(0.0, 0.0, -80.0);
+    let blow = |height: f32| Scene::Hit {
+        height,
+        side: -1.0,
+        kind: DamageKind::Slash,
+    };
+    let zones = [
+        (Scene::Stand, 0.0),
+        (blow(1.62), 0.1),
+        (blow(1.08), 0.1),
+        (blow(0.5), 0.1),
+    ];
+    for (i, (scene, time)) in zones.into_iter().enumerate() {
+        actor(
+            &mut app,
+            row + DVec3::new(2.55 - 1.7 * i as f64, 0.0, 0.0),
+            0.0,
+            2,
+            NpcWeapon::sword(),
+            NpcSkills::soldier(),
+            AlertLevel::Combat,
+            scene,
+            EVENT + time,
+            warm,
+        );
+    }
+    let far = camera(
+        &mut app,
+        row + DVec3::new(0.0, 1.6, -10.0),
+        row + DVec3::new(0.0, 1.0, 0.0),
+        40.0,
+    );
+    shots.push((far, "npc_motion_hit_zones_at_10m.png".into()));
+    roll_warm(&mut app, shots, warm);
 }
