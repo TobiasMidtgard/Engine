@@ -90,9 +90,9 @@ The four people wear Microsoft Rocketbox characters (MIT licence, © Microsoft) 
 Rocketbox motion-capture idle, walk and run. The horse is the CC0 "Rigged Horse" (model and
 textures by Lyndon Daniels, rig by ChadM, glTF export from OloEngine), fitted with the horse
 rig by [`horse_model`](src/horse_model.rs): the procedural horse's skeleton is placed on the
-model's joints (with a fetlock and three neck vertebrae the file lacks), its skin weights are
-handed over, the mesh is smoothed with PN-triangle subdivision, and it grows a mane, forelock
-and tail of alpha-cut hair cards. The car is
+model's joints (adding the point of shoulder, stifle, fetlocks and two neck vertebrae the file
+lacks), its skin weights are handed over, the mesh is smoothed with PN-triangle subdivision,
+and it grows a mane, forelock and tail of alpha-cut hair cards. The car is
 [Car Concept](https://github.com/KhronosGroup/glTF-Sample-Assets/tree/main/Models/CarConcept)
 by Eric Chadwick and Darmstadt Graphics Group GmbH (CC BY 4.0; the Khronos logos are not
 shown), its body, wheels, calipers and doors driven by the vehicle rig through a
@@ -109,6 +109,7 @@ its generated people, horse and car, and every test still runs.
 | Horse oval | A textured horse walks, trots, canters and gallops by speed; fetlocks bend, haunches and shoulders flex with each stride; the mane rides the neck and the tail streams |
 | Spider garden | Eight procedural legs pick their way over rocks |
 | Car loop | A concept car: suspension over speed bumps, roll in corners, steering and spinning wheels with the brake calipers held still |
+| Parked car | A second concept car inside the loop swings its doors open on their front hinges, holds, and shuts them with a bounce on the latch |
 
 `cargo run -p engine_anim --example anim_gallery --release -- out_dir` renders close-ups of
 each test case (`GALLERY_SEQUENCE=horse:11:12:0.05` renders a strip of one subject).
@@ -130,5 +131,4 @@ paddocks, shifts one halfway, and checks every pose and place still matches.
 ## Not yet
 
 Ragdolls from the physics contract; an imported spider (it is still generated from code);
-doors that open on the parked car; gallop poses tuned for the imported horse's shorter
-hind legs.
+gallop poses tuned for the imported horse's shorter hind legs.
