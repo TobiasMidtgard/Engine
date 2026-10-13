@@ -47,6 +47,8 @@ impl Plugin for FirePlugin {
             .unwrap_or_default();
         let mut field = FireField::new(settings.cell_m);
         field.max_tiles = settings.max_tiles as usize;
+        let fire = render::FireFeature::default();
+        let haze = fire.haze_feature();
         app.insert_resource(settings)
             .insert_resource(field)
             .init_resource::<Embers>()
@@ -124,7 +126,8 @@ impl Plugin for FirePlugin {
                     .chain(),
             )
             .add_systems(PostUpdate, shift::shift_fire.in_set(WorldShiftSet::Apply))
-            .add_render_feature(render::FireFeature::default())
+            .add_render_feature(fire)
+            .add_render_feature(haze)
             .add_render_feature(grass::GrassFeature::default())
             .add_render_feature(ground::GroundFeature::default());
         register_apis(app);

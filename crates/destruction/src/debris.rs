@@ -48,9 +48,19 @@ impl Default for Debris {
     }
 }
 
-/// A mesh owned by one piece of debris (freed when it despawns).
+/// Meshes owned by one piece of debris (freed when it despawns): its own, and its fracture
+/// faces' when a child draws them in another material.
 #[derive(Component, Debug, Clone, Copy)]
-pub struct DebrisMesh(pub Handle<Mesh>);
+pub struct DebrisMesh(pub Handle<Mesh>, pub Option<Handle<Mesh>>);
+
+impl DebrisMesh {
+    pub fn free(&self, meshes: &mut Assets<Mesh>) {
+        meshes.remove(self.0);
+        if let Some(h) = self.1 {
+            meshes.remove(h);
+        }
+    }
+}
 
 /// State of a body moved by the built-in debris solver.
 #[derive(Component, Debug, Clone)]
@@ -128,6 +138,9 @@ pub struct DustPuff {
 pub enum DebrisLook {
     /// Its own mesh (vertex colored) drawn with the material's surface material.
     Mesh(Mesh),
+    /// A broken piece: its outside (if any) in the surface material, its fracture faces in
+    /// the material's broken-face material (see `fracture::ConvexPoly::broken_meshes`).
+    Broken { outside: Option<Mesh>, inside: Mesh },
     /// A shared chip mesh scaled to `size` meters.
     Chip { size: f32, variant: usize },
     /// A glowing spark of `size` meters.
@@ -305,6 +318,7 @@ pub fn spawn_debris_system(
         let props = table.get(item.material);
         let surface = surfaces.id_or_default(&props.surface);
         let friction = surfaces.get(surface).friction;
+        let mut inner = None;
         let (renderer, chip, owned, scale) = match &item.look {
             DebrisLook::Mesh(mesh) => {
                 let h = meshes.add(mesh.clone());
@@ -317,6 +331,29 @@ pub fn spawn_debris_system(
                     Some(h),
                     Vec3::ONE,
                 )
+            }
+            DebrisLook::Broken { outside, inside } => {
+                let hi = meshes.add(inside.clone());
+                let broken = MeshRenderer::new(
+                    MeshRef::Handle(hi),
+                    MaterialRef::Handle(assets.broken(item.material)),
+                );
+                match outside {
+                    Some(o) => {
+                        let ho = meshes.add(o.clone());
+                        inner = Some((hi, broken));
+                        (
+                            Some(MeshRenderer::new(
+                                MeshRef::Handle(ho),
+                                MaterialRef::Handle(assets.surface(item.material)),
+                            )),
+                            false,
+                            Some(ho),
+                            Vec3::ONE,
+                        )
+                    }
+                    None => (Some(broken), false, Some(hi), Vec3::ONE),
+                }
             }
             DebrisLook::Chip { size, variant } => (
                 Some(MeshRenderer::new(
@@ -386,7 +423,12 @@ pub fn spawn_debris_system(
             e.insert(r);
         }
         if let Some(h) = owned {
-            e.insert(DebrisMesh(h));
+            e.insert(DebrisMesh(h, inner.as_ref().map(|(hi, _)| *hi)));
+        }
+        if let Some((_, r)) = inner {
+            let parent = e.id();
+            e.commands()
+                .spawn((Transform::IDENTITY, r, ChildOf(parent)));
         }
         if matches!(item.look, DebrisLook::Spark { .. }) {
             e.insert(Spark);
@@ -734,7 +776,7 @@ pub fn age_debris_system(
         }
         if d.age >= d.lifetime + sink {
             if let (Some(m), Some(meshes)) = (mesh, meshes.as_deref_mut()) {
-                meshes.remove(m.0);
+                m.free(meshes);
             }
             commands.entity(e).despawn();
             stats.despawned += 1;

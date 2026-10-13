@@ -1,6 +1,6 @@
 //! Screen-space global illumination: a sunlit red wall bounces red light onto the white floor in
-//! front of it, and an emissive panel lights the dark floor below it. Needs a GPU or lavapipe;
-//! passes with a note when neither is available.
+//! front of it, an emissive panel lights the dark floor below it, and that light doesn't linger
+//! after a camera cut. Needs a GPU or lavapipe; passes with a note when neither is available.
 
 use engine_core::prelude::*;
 use engine_render::prelude::*;
@@ -34,8 +34,12 @@ fn base_app(configure: impl FnOnce(&mut RenderSettings)) -> App {
 }
 
 fn floor(w: &mut World, albedo: f32) {
+    floor_at(w, albedo, DVec3::ZERO);
+}
+
+fn floor_at(w: &mut World, albedo: f32, at: DVec3) {
     w.spawn((
-        Transform::default(),
+        Transform::from_translation(at),
         MeshRenderer::new(
             Shape::Plane {
                 size: [60.0, 60.0],
@@ -101,7 +105,11 @@ fn glowing_panel_app(configure: impl FnOnce(&mut RenderSettings)) -> App {
 
 fn render(app: &mut App, name: &str) -> Option<RgbaImage> {
     // GI builds up over frames.
-    app.update_n(24);
+    render_frames(app, name, 24)
+}
+
+fn render_frames(app: &mut App, name: &str, frames: usize) -> Option<RgbaImage> {
+    app.update_n(frames);
     if let Some(d) = app.world.get_resource::<RenderDisabled>() {
         eprintln!("skipping: no GPU ({})", d.0);
         return None;
@@ -183,5 +191,51 @@ fn a_glowing_panel_lights_the_floor_below_it() {
     assert!(
         luma(a) > luma(b) + 20.0,
         "the glowing panel doesn't light the floor: {a:?} with GI, {b:?} without"
+    );
+}
+
+/// The glowing panel's scene plus a bare dark floor far away, with nothing to light it.
+const ELSEWHERE: DVec3 = DVec3::new(400.0, 0.0, 0.0);
+
+#[test]
+fn bounce_light_does_not_linger_after_a_camera_cut() {
+    let mut cut = glowing_panel_app(|_| {});
+    floor_at(&mut cut.world, 0.5, ELSEWHERE);
+    if render(&mut cut, "gi_before_cut").is_none() {
+        return;
+    }
+    // Cut to the same view of the bare floor: the floor lands where the panel lit it, at the
+    // same depths, which is where the old bounce light could blend back in.
+    let camera = cut
+        .world
+        .query_filtered::<Entity, With<Camera>>()
+        .single(&cut.world)
+        .unwrap();
+    cut.world.get_mut::<Transform>(camera).unwrap().translation += ELSEWHERE;
+    let Some(after_cut) = render_frames(&mut cut, "gi_after_cut", 3) else {
+        return;
+    };
+
+    // The bare floor rendered from the start, panel nowhere.
+    let mut bare = base_app(|_| {});
+    bare.world.spawn((
+        Camera {
+            exposure: Exposure::Manual { ev100: 6.0 },
+            ..Camera::perspective(60.0)
+        },
+        Transform::from_xyz(0.0, 2.2, 4.0).looking_at(DVec3::new(0.0, 0.3, 0.0), Vec3::Y),
+    ));
+    floor(&mut bare.world, 0.5);
+    let Some(bare_img) = render(&mut bare, "gi_bare_floor") else {
+        return;
+    };
+
+    let luma = |c: [f32; 3]| 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2];
+    let a = color_at(&cut, &after_cut, ELSEWHERE + DVec3::new(0.0, 0.0, 0.3));
+    let b = color_at(&bare, &bare_img, DVec3::new(0.0, 0.0, 0.3));
+    eprintln!("bare floor three frames after the cut: {a:?}; never near the panel: {b:?}");
+    assert!(
+        luma(a) < luma(b) + 4.0,
+        "the panel's bounce light lingers after the cut: {a:?}, bare floor {b:?}"
     );
 }
