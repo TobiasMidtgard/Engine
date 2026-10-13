@@ -56,10 +56,27 @@ engine_foliage::spawn_plant(world, "oak", DVec3::new(3.0, 0.0, 4.0), 0.2, None)?
   toughness the tree falls away from the blow: it swings down around the stump, crashes
   (`WorldImpulse` for foliage and dust, `NoiseEvent` for AI, `GroundContact`s for audio and
   terrain, `DamageEvent`s for whatever it lands on), crushes saplings and settles as a
-  `FelledLog` beside its stump. Logs lose their leaves, then their twigs, grey and rot away,
-  feeding the soil. Oak, birch and hazel stumps resprout. Explosions knock trees over too.
+  `FelledLog` beside its stump. Logs lose their leaves, then their twigs, moss over in
+  stages (cushions of moss on the bark, alpha-masked from the forest floor's moss), grey and
+  rot away, feeding the soil; pale birch bark dirties and soil stains their undersides.
+  Stumps weather too: the cut silvers within a year or two, then rots soft and dark (into a
+  hollow from the heart, or round a heartwood that stands proud) under moss climbing from the
+  ground. Oak, birch and hazel stumps resprout. Explosions knock trees over too.
+- **Deadwood fungi** (`meshgen::fungi`): a few years after a tree dies, bracket fungi fruit
+  on its snag, stump and log (drawn near the camera): tinder hooves on birch snags and birch
+  polypores on its logs, red-belted conks on conifers, tiers of sulphur shelf on oak snags,
+  turkey tail rosettes on oak logs and stumps.
 - **Fire**: plants are `Combustible`; when the fire module burns them they become charred
   snags that collapse into ash, which enriches the soil for the next generation.
+- **Seasons** (`season`): plants show `FoliageSeason::day_of_year` (midsummer unless set,
+  or the weather's calendar with `follow_weather`). Deciduous species carry a calendar
+  (`PlantSpecies::seasons`): oak, birch and hazel leaf out in fresh yellow-green, turn their
+  own autumn colors (birch first and yellow, oak last and russet), thin out through leaf fall
+  (each crown has thinned copies; the same leaves go first) and stand bare in winter; bracken
+  rusts and dies back, flowers go to seed and vanish, meadow grass turns to straw, and the
+  leaf litter on the forest floor lies bright with fresh leaves in autumn and dark and sodden
+  through winter. Each leaf tint runs a week apart and every plant a few days of its own, so
+  a wood turns patchily.
 - **Glow**: glowing species pick a brighter material the healthier and better fed they are,
   breathe slowly, and light their surroundings through a pool of point lights (one per
   cluster, at most 40).
@@ -69,8 +86,15 @@ engine_foliage::spawn_plant(world, "oak", DVec3::new(3.0, 0.0, 4.0), 0.2, None)?
   Farther trees drop theirs and get it back when a focus comes near.
 - **Looks**: procedural, per species: bark texture sets (albedo, normal, occlusion and
   roughness), painted leaf and needle atlases with normal maps, crowns built from clumps of
-  shaded sprays, detailed grass, ferns, flowers and fungi with their own maps. Small plants
-  lean with the slope they grow on. `examples/lookdev_*` render each set close up.
+  shaded sprays, detailed grass, ferns, flowers and fungi with their own maps. Old pines lose
+  their leader and spread a broad, flat-topped crown of heavy crooked limbs over a long bare
+  bole, dark and plated low down and orange higher up; their needles grow in dense, ragged
+  pads of grey-green brushes. Spruces are dark tiered cones with a clad spire. Needle
+  atlases paint their mip levels as sharp single needles and dither the smallest, so a
+  distant brush lets the sky through instead of swelling into a leaf-shaped blob. Small
+  plants lean with the slope they grow on. `examples/lookdev_*` render each set close up.
+  Ground covers and rocks draw into the depth prepass, so ambient occlusion, contact
+  shadows, reflections and bounce light see them.
 - **World shifts**: forests follow `WorldShift` (floating origin, planet frames): soil grids,
   region centers, falling trees, which way logs lie and what plants are posed on move with
   the world (`shift`).
@@ -80,7 +104,7 @@ engine_foliage::spawn_plant(world, "oak", DVec3::new(3.0, 0.0, 4.0), 0.2, None)?
 `plant`, `chop`, `fell`, `clear` (fell, burn or remove an area), `species`, `define_species`,
 `stats`, `inspect` (why a plant thrives or struggles: what limits it, the soil under it),
 `set_speed` (world or per-region growth speed, pause), `add_source` (spring, mineral pool,
-dry ridge). Every component and resource above is registered for scenes and the AI bridge.
+dry ridge), `season` (time of year, or follow the weather's calendar). Every component and resource above is registered for scenes and the AI bridge.
 
 ## Showcase
 
@@ -90,8 +114,18 @@ rocky ridge) and `demo::spawn_cave_demo(commands, center)` the mushroom cave (mi
 seep feeding glowcaps and lantern caps, a cave floor with mineral crust). Both run 20–30× faster
 than the world default so regrowth is visible while you watch.
 
+`demo::spawn_cave_chamber(commands, center)` builds the rock around it: a `CaveChamber`
+(`cave`) is one sculpted vault (bulges, alcoves, ledges along bedding planes, wet flowstone
+folds) open at a mouth facing −Z, with stalactites hanging from the roof and stalagmites at the
+walls' foot, and a `SkyLightVolume` that keeps the sky out except through the mouth. It is drawn
+with the scenery rock shader: moss and lichen only where daylight reaches in from the mouth, wet
+dark rock deeper in. It roofs the sky occlusion map, so nothing under it sees or reflects the
+sky, and casts its shadow from a sheet pushed out beyond the rock, so no sunlight leaks onto
+the inside. A static triangle-mesh collider (`ChamberCollider`) follows it.
+
 `cargo run -p engine_foliage --example foliage_shots --release -- <dir>` renders both from
-several viewpoints (including a tree mid-fall and the clearing ten years later).
+several viewpoints (including a tree mid-fall, the clearing through the year and ten years
+later).
 
 ## Contracts
 
@@ -107,4 +141,5 @@ Writes: `Combustible` on plants and logs, static `RigidBody` + `Collider` entiti
 - Grass meadows through the renderer's shared strand pipeline (blades bend under feet).
 - Impostors for distant forests and planet-scale scattering on terrain.
 - A falling tree as a dynamic body when a physics backend is installed.
-- Seasons (autumn color, bare winter crowns, snow on branches).
+- Snow on branches and crowns in winter, from the weather's snow cover.
+- Seedlings on nurse logs, and logs collapsing as they rot.

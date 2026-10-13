@@ -5,13 +5,15 @@
 //! cargo run -p engine_foliage --example lookdev_trees --release -- /tmp/lookdev_trees [shot..]
 //! ```
 //!
-//! Renders (640×360): a lineup of every tree species at full size (also with every tree forced
+//! Renders (640×360, or `LOOKDEV_SIZE=1280x720`; `LOOKDEV_ONLY=pine` plants only that species
+//! of the lineup): a lineup of every tree species at full size (also with every tree forced
 //! to its far level of detail), the oak's root flares, an oak crown lit from the front and
 //! from behind (the sun shining through the leaves), single leaves up close, the conifers,
-//! birch and hazel, and a small mixed grove from 40 m and from 150 m. Name shots after the
-//! directory to render only those (`lineup`, `lineup_lod`, `roots`, `crown_front`,
-//! `leaves_close`, `crown_back`, `conifers`, `birch_hazel`, `grove`, `grove_far`), `textures`
-//! to save the leaf atlases and their normal maps instead, or `stats` to print triangle counts.
+//! birch and hazel, the pine's crown from below, and a small mixed grove from 40 m and from
+//! 150 m. Name shots after the directory to render only those (`lineup`, `lineup_lod`, `roots`,
+//! `crown_front`, `leaves_close`, `crown_back`, `conifers`, `pine_crown`, `birch_hazel`,
+//! `grove`, `grove_far`), `textures`
+//! to save the leaf atlases, their normal maps and three of their mip levels instead, or `stats` to print triangle counts.
 
 use engine_core::prelude::*;
 use engine_core::time::TimeSource;
@@ -78,6 +80,16 @@ fn save_textures(out: &str) {
                 .expect("png");
             println!("saved {path}");
         }
+        // The color's mip levels a crown 10-50 m away samples (256, 128 and 64 pixels).
+        for level in 1..4 {
+            let size = t.color.width >> (level + 1);
+            let path = format!("{out}/leaves_{name}_color_mip{}.png", level + 1);
+            image::RgbaImage::from_raw(size, size, t.color.mips[level].clone())
+                .expect("rgba")
+                .save(&path)
+                .expect("png");
+            println!("saved {path}");
+        }
     }
 }
 
@@ -131,9 +143,16 @@ fn main() {
     let mut app = App::new();
     app.world.resource_mut::<EngineConfig>().headless = true;
     {
+        // LOOKDEV_SIZE=1280x720 renders bigger shots.
+        let size = std::env::var("LOOKDEV_SIZE").ok();
+        let (width, height) = size
+            .as_deref()
+            .and_then(|s| s.split_once('x'))
+            .and_then(|(w, h)| Some((w.parse().ok()?, h.parse().ok()?)))
+            .unwrap_or((640, 360));
         let mut w = app.world.resource_mut::<Window>();
-        w.width = 640;
-        w.height = 360;
+        w.width = width;
+        w.height = height;
     }
     app.world
         .resource_mut::<Time>()
@@ -185,7 +204,11 @@ fn main() {
         ("pine", 7.0),
         ("spruce", 19.0),
     ];
+    let only_sp = std::env::var("LOOKDEV_ONLY").ok();
     for (name, x) in lineup {
+        if only_sp.as_deref().is_some_and(|o| o != name) {
+            continue;
+        }
         spawn_plant(
             &mut app.world,
             name,
@@ -312,6 +335,17 @@ fn main() {
             "conifers",
             DVec3::new(13.0, 5.0, 24.0),
             DVec3::new(13.0, 8.5, 0.0),
+            front_sun,
+        );
+    }
+    if wanted("pine_crown") {
+        // Up into the pine's crown: its limbs and the pads of needles on them.
+        shot(
+            &mut app,
+            &out,
+            "pine_crown",
+            DVec3::new(13.0, 11.0, 12.0),
+            DVec3::new(7.0, 16.5, 0.0),
             front_sun,
         );
     }
