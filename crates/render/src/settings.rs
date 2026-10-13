@@ -99,6 +99,8 @@ pub struct RenderSettings {
     pub screen_space_gi: bool,
     /// Strength of the bounced light (1 = physical).
     pub gi_intensity: f32,
+    /// Scales the number of blades in every `GrassField` (quality setting; 0 = no grass).
+    pub grass_density: f32,
     pub anti_aliasing: AntiAliasing,
     /// 0..1 sharpening after temporal anti-aliasing (restores texture detail).
     pub sharpness: f32,
@@ -148,6 +150,7 @@ impl Default for RenderSettings {
             ssr_max_roughness: 0.6,
             screen_space_gi: true,
             gi_intensity: 1.0,
+            grass_density: 1.0,
             anti_aliasing: AntiAliasing::Taa,
             sharpness: 0.3,
             tonemapper: Tonemapper::AgXPunchy,
