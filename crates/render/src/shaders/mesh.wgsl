@@ -470,6 +470,7 @@ struct MaterialSample {
     base: vec4<f32>,        // linear base color (before detail mottling) and alpha
     albedo: vec3<f32>,      // with detail mottling
     normal: vec3<f32>,      // shaded world normal, facing the camera
+    smooth_normal: vec3<f32>, // the interpolated vertex normal on the same side (no bumps)
     metallic: f32,
     roughness: f32,
     occlusion: f32,
@@ -614,6 +615,11 @@ fn evaluate_material(si: SurfaceIn, shadows: bool) -> MaterialSample {
     if (out.thin && into < 0.0) {
         out.normal = normalize(out.normal - 2.0 * into * face);
     }
+    out.smooth_normal = n;
+    let smooth_into = dot(n, face);
+    if (out.thin && smooth_into < 0.0) {
+        out.smooth_normal = normalize(n - 2.0 * smooth_into * face);
+    }
 
     // Weather: rain darkens porous surfaces and makes them glossy; snow settles on top faces.
     if ((flags & 64u) != 0u) {
@@ -654,6 +660,7 @@ fn fs_main(in: VertexOut, @builtin(front_facing) front: bool) -> @location(0) ve
     s.emissive = m.emissive;
     s.occlusion = m.occlusion;
     s.subsurface = m.subsurface;
+    s.smooth_normal = m.smooth_normal;
 
     // Debug views (RenderSettings.debug_view).
     let n = m.normal;
@@ -661,7 +668,7 @@ fn fs_main(in: VertexOut, @builtin(front_facing) front: bool) -> @location(0) ve
         return vec4<f32>(n * 0.5 + 0.5, 1.0);
     }
     if (frame.counts.z == 3u) {
-        return vec4<f32>(vec3(sky_visibility(in.rel, n)), 1.0);
+        return vec4<f32>(vec3(sky_visibility(in.rel, m.smooth_normal)), 1.0);
     }
     if (frame.counts.z == 4u) {
         return vec4<f32>(vec3(screen_ao(in.rel)), 1.0);

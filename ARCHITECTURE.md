@@ -204,7 +204,13 @@ walls around them. Sky light that does reach a covered point came in through ope
 bounced on the way, so it arrives more evenly from all around the less sky the point sees
 (`sky_ambient_covered(normal, sky_vis)`, used by `shade_surface`): a ceiling indoors isn't lit
 by the sunlit ground outside (olive by default), nor a cave's floor by the blue sky overhead.
-`RenderSettings::debug_view = SkyVisibility` shows the result.
+`shade_surface` looks the cover up with the surface's smooth normal (`Surface::smooth_normal`,
+the interpolated vertex normal; `StandardMaterial` meshes set it), not the normal-mapped one, so
+cover doesn't change wrinkle by wrinkle on a strong normal map; the shading normal still picks
+which part of the sky lights the point. Shaders in other crates that build a `Surface` with
+`default_surface()` and a normal map should set `smooth_normal` too (left at zero it falls back
+to `normal`; `surface_smooth_normal(s)` resolves it). `RenderSettings::debug_view =
+SkyVisibility` shows the result.
 
 **Screen-space effects** (built): every frame starts with a depth prepass that also writes
 normals, roughness and motion vectors. From it come ground-truth ambient occlusion (GTAO,
@@ -289,7 +295,7 @@ Shared pipelines the core will provide for modules (planned): **strands** for ha
 (a per-vertex tension value blends wrinkle/vein normal maps; written by `engine_anim` for skin,
 muscles and skinned clothes and by `engine_softbody` for simulated cloth).
 
-Shader library: `lib_types.wgsl` (types, noise, BRDF, `henyey_greenstein`), `lib_frame.wgsl` (group 0 frame
+Shader library: `lib_types.wgsl` (types, noise, BRDF, `henyey_greenstein`, `default_surface`, `surface_smooth_normal`), `lib_frame.wgsl` (group 0 frame
 data, `shade_surface`, `shade_surface_shadowed`, `shade_thin_surface`, `shadow_factor` (cascades, then `far_shadow_visibility`), `cloud_shadow` (and `cloud_shadow_plane_point` for writers), `contact_shadow`, `screen_ao`, `sky_visibility`, `apply_fog` (`color * transmittance + inscatter` of `surface_fog`, which returns a `SurfaceFog` for callers that need the two apart, such as blended particles),
 `apply_sky_fog`, `volumetric_fog_at`, `height_fog_density`, `fog_sky_light`,
 `sample_env`, `sample_env_rough`, `sky_ambient`, `sky_ambient_covered`, `wind_offset`, `prepass_output`) and `lib_atmosphere.wgsl` (`atmosphere` for aerial perspective,

@@ -735,8 +735,10 @@ fn shade_surface_sides(s: Surface, rel: vec3<f32>, sun_visibility: f32, face: ve
     }
 
     // Sky / ambient (occluded in caves and interiors; the constant fill stays), darkened in
-    // creases by the material's and the screen-space ambient occlusion.
-    let sky_vis = sky_visibility(rel, n);
+    // creases by the material's and the screen-space ambient occlusion. How much sky the
+    // surface sees comes from its smooth normal, so cover doesn't follow the normal map's
+    // wrinkles; the shading normal still picks which part of the sky lights it.
+    let sky_vis = sky_visibility(rel, surface_smooth_normal(s));
     let fill = frame.ambient.rgb;
     let irradiance = ((sky_ambient_covered(n, sky_vis) - fill) * sky_vis + fill) * PI;
     // Rough surfaces reflect around a direction between the mirror direction and the normal
