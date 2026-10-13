@@ -1,4 +1,4 @@
-//! Weathered wooden planks.
+//! Weathered wooden planks, and burning charcoal.
 
 use engine_core::math::{Vec2, Vec3, Vec4};
 use engine_render::StandardMaterial;
@@ -278,4 +278,74 @@ pub fn wood(shrink: u32) -> Generated {
     });
     let maps = Maps::new(tile, r.normal, &texels, false, false);
     Generated::new(maps, StandardMaterial::default())
+}
+
+/// Burning charcoal: black lumps crazed into small blocks (the alligator checking of charred
+/// wood), with hot orange-yellow fissures, dull red faces where the heat is deepest, and pale
+/// ash on the cooler blocks. The emissive texture carries the glow. 0.3 m per tile.
+pub fn coals(shrink: u32) -> Generated {
+    let tile = Tile::new(512 >> shrink, 512 >> shrink, 0.3);
+    let seed = 0x00d0_0c0a;
+    #[derive(Clone, Copy, Default)]
+    struct P {
+        h: f32,
+        crack: f32,
+        heat: f32,
+        ash: f32,
+        block: f32,
+    }
+    let px = tile.par(|p, _, _| {
+        let q = tile.warp(p, 0.08, 0.004, 2, sub(seed, 1));
+        // Blocks a few centimeters across, longer along the grain.
+        let v = tile.voronoi_edge(Vec2::new(q.x, q.y * 0.6), 0.03, 0.85, sub(seed, 2));
+        let fine = tile.voronoi_edge(q, 0.012, 0.9, sub(seed, 3));
+        let crack = smooth(0.045, 0.0, v.edge).max(smooth(0.03, 0.0, fine.edge) * 0.4);
+        // Each block domes a little and sits at its own height.
+        let dome = (1.0 - v.f1 * 1.6).max(0.0);
+        let h = 0.002 * dome + 0.0015 * rand(v.id, 4) - 0.004 * crack
+            + 0.0006 * tile.fbm(p, 0.01, 3, 0.5, sub(seed, 5));
+        // Heat comes in broad patches; ash settles on the cooler blocks.
+        let heat = tile.fbm(p, 0.12, 3, 0.5, sub(seed, 6)) * 0.8 + 0.5;
+        let ash = smooth(0.7, 0.9, rand(v.id, 7)) * smooth(0.45, 0.3, heat);
+        P {
+            h,
+            crack,
+            heat,
+            ash,
+            // Blocks glow unevenly.
+            block: mix(0.35, 1.0, rand(v.id, 8)),
+        }
+    });
+    let height: Vec<f32> = px.iter().map(|v| v.h).collect();
+    let r = relief(&tile, &height, &[0.002, 0.008], 1.5, 0.003);
+    let texels = tile.par_idx(|i| {
+        let v = px[i];
+        let ao = r.ao[i];
+        let charcoal = hex(0x141210) * mix(0.8, 1.2, white(i, 9));
+        let mut c = mix3(charcoal, hex(0x6e6963), v.ash * 0.7);
+        c *= mix(0.6, 1.0, ao);
+        // Glow: fissures burn yellow-orange, hot faces a dull red.
+        let hot = smooth(0.35, 0.65, v.heat);
+        let fissure = v.crack * mix(0.25, 1.0, hot);
+        let face = smooth(0.55, 0.75, v.heat) * (1.0 - v.ash) * 0.35 * v.block;
+        let glow = fissure + face;
+        let color = mix3(
+            Vec3::new(0.9, 0.12, 0.02),
+            Vec3::new(1.0, 0.5, 0.12),
+            fissure * hot,
+        );
+        Texel {
+            albedo: plausible(c),
+            rough: mix(0.85, 0.95, v.ash),
+            metal: 0.0,
+            ao,
+            emissive: color * glow,
+            alpha: 1.0,
+        }
+    });
+    let maps = Maps::new(tile, r.normal, &texels, true, false);
+    Generated::new(
+        maps,
+        StandardMaterial::default().with_emissive([1.0, 1.0, 1.0], 60.0),
+    )
 }
