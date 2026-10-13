@@ -87,10 +87,18 @@ API: `anim.list`, `anim.state` (graph state, curves, events, muscles, gait), `an
 ## The paddock (showcase test cases)
 
 The four people wear Microsoft Rocketbox characters (MIT licence, © Microsoft) with
-Rocketbox motion-capture idle, walk and run. They are listed in
-`assets/manifests/animation.toml` and are not in git; fetch them with
-`cargo run -p fetch-assets -- animation`. Without them the people keep their generated
-bodies and motion, and every test still runs.
+Rocketbox motion-capture idle, walk and run. The horse is the CC0 "Rigged Horse" (model and
+textures by Lyndon Daniels, rig by ChadM, glTF export from OloEngine), fitted with the horse
+rig by [`horse_model`](src/horse_model.rs): the procedural horse's skeleton is placed on the
+model's joints (with a fetlock and three neck vertebrae the file lacks), its skin weights are
+handed over, the mesh is smoothed with PN-triangle subdivision, and it grows a mane, forelock
+and tail of alpha-cut hair cards. The car is
+[Car Concept](https://github.com/KhronosGroup/glTF-Sample-Assets/tree/main/Models/CarConcept)
+by Eric Chadwick and Darmstadt Graphics Group GmbH (CC BY 4.0; the Khronos logos are not
+shown), its body, wheels, calipers and doors driven by the vehicle rig through a
+[`RigModel`](src/model.rs). All are listed in `assets/manifests/animation.toml` and are not in
+git; fetch them with `cargo run -p fetch-assets -- animation`. Without them the paddock keeps
+its generated people, horse and car, and every test still runs.
 
 | Test case | What to look for |
 |---|---|
@@ -98,9 +106,9 @@ bodies and motion, and every test still runs.
 | Lifter | Double-biceps flex: biceps, shoulders and chest bulge |
 | Shirt reach | Sleeves bunch at the elbows on the wind-up, the shirt stretches across the back on the reach |
 | Step course | A walker climbs a ramp, crosses a deck, walks down stairs with feet planted by IK, then runs back leaning into the turns |
-| Horse oval | Walk, trot, canter and gallop by speed; haunches and shoulders flex with each stride; the tail streams |
+| Horse oval | A textured horse walks, trots, canters and gallops by speed; fetlocks bend, haunches and shoulders flex with each stride; the mane rides the neck and the tail streams |
 | Spider garden | Eight procedural legs pick their way over rocks |
-| Car loop | Suspension over speed bumps, roll in corners, steering and spinning wheels |
+| Car loop | A concept car: suspension over speed bumps, roll in corners, steering and spinning wheels with the brake calipers held still |
 
 `cargo run -p engine_anim --example anim_gallery --release -- out_dir` renders close-ups of
 each test case (`GALLERY_SEQUENCE=horse:11:12:0.05` renders a strip of one subject).
@@ -121,5 +129,6 @@ paddocks, shifts one halfway, and checks every pose and place still matches.
 
 ## Not yet
 
-Ragdolls from the physics contract; imported animals and vehicles (the horse, spider and
-car are still generated from code).
+Ragdolls from the physics contract; an imported spider (it is still generated from code);
+doors that open on the parked car; gallop poses tuned for the imported horse's shorter
+hind legs.
