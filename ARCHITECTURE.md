@@ -163,7 +163,14 @@ roof 30 m up about 0.97 and an aircraft 100 m up next to nothing. The map sees c
 only, so walls don't keep the low sky out: caves, rooms, tunnels and ship interiors add a
 `SkyLightVolume` (a box fitted to the inside, with the faces light comes in through, such as a
 cave mouth; it follows its entity, so a ship's interior moves with the ship). Up to 16 volumes
-nearest the camera are used. `RenderSettings::debug_view = SkyVisibility` shows the result.
+nearest the camera are used. Walls and ceilings under cover read the map with a small bias (only
+upward-facing ground gets the large one), and a surface counts as inside a volume when it or the
+air just in front of it is, so corners, seams and rounded edges indoors stay as dark as the
+walls around them. Sky light that does reach a covered point came in through openings and
+bounced on the way, so it arrives more evenly from all around the less sky the point sees
+(`sky_ambient_covered(normal, sky_vis)`, used by `shade_surface`): a ceiling indoors isn't lit
+by the sunlit ground outside (olive by default), nor a cave's floor by the blue sky overhead.
+`RenderSettings::debug_view = SkyVisibility` shows the result.
 
 **Screen-space effects** (built): every frame starts with a depth prepass that also writes
 normals, roughness and motion vectors. From it come ground-truth ambient occlusion (GTAO,
@@ -242,7 +249,7 @@ muscles and skinned clothes and by `engine_softbody` for simulated cloth).
 Shader library: `lib_types.wgsl` (types, noise, BRDF, `henyey_greenstein`), `lib_frame.wgsl` (group 0 frame
 data, `shade_surface`, `shade_surface_shadowed`, `shade_thin_surface`, `shadow_factor`, `contact_shadow`, `screen_ao`, `sky_visibility`, `apply_fog`,
 `apply_sky_fog`, `volumetric_fog_at`, `height_fog_density`, `fog_sky_light`,
-`sample_env`, `sample_env_rough`, `sky_ambient`, `wind_offset`, `prepass_output`) and `lib_atmosphere.wgsl` (`atmosphere` for aerial perspective,
+`sample_env`, `sample_env_rough`, `sky_ambient`, `sky_ambient_covered`, `wind_offset`, `prepass_output`) and `lib_atmosphere.wgsl` (`atmosphere` for aerial perspective,
 `sun_transmittance`, `sky_view_radiance`, `planet_height`, `ray_shell`).
 
 **Shapes** (built): `Shape` builds procedural meshes. Round shapes given `segments: 0` get

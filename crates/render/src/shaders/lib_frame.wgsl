@@ -353,6 +353,18 @@ fn sky_ambient(n: vec3<f32>) -> vec3<f32> {
     return textureSampleLevel(env_irradiance, env_sampler, dir_to_equirect(n), 0.0).rgb + frame.ambient.rgb;
 }
 
+// `sky_ambient(n)` at a point that sees `sky_vis` of the open sky (`sky_visibility`; multiply
+// by it as usual): as in the open where nothing covers it, and arriving more and more evenly
+// from all around as cover closes in. Sky light reaching a covered point came in through
+// openings and bounced off the walls on the way, so a ceiling indoors isn't lit by the sunlit
+// ground outside, nor a cave's floor by the blue sky overhead.
+fn sky_ambient_covered(n: vec3<f32>, sky_vis: f32) -> vec3<f32> {
+    let around = (sky_ambient(vec3<f32>(0.0, 1.0, 0.0)) + sky_ambient(vec3<f32>(0.0, -1.0, 0.0))
+        + sky_ambient(vec3<f32>(1.0, 0.0, 0.0)) + sky_ambient(vec3<f32>(-1.0, 0.0, 0.0))
+        + sky_ambient(vec3<f32>(0.0, 0.0, 1.0)) + sky_ambient(vec3<f32>(0.0, 0.0, -1.0))) / 6.0;
+    return mix(around, sky_ambient(n), saturate(sky_vis));
+}
+
 // Fraction of the open sky seen from camera-relative `rel` with normal `n`: 1 outdoors, toward 0
 // in caves, rooms and under overhangs. Multiply sky/ambient light by it. Also the test for
 // "is this spot exposed to rain and snow". Uses the top-down sky occlusion map around the
@@ -379,19 +391,31 @@ fn sky_view_factor(a: f32, b: f32, h: f32) -> f32 {
 }
 
 fn sky_visibility(rel: vec3<f32>, n: vec3<f32>) -> f32 {
-    return sky_map_visibility(rel, n) * sky_volume_factor(rel + n * 0.2);
+    // The indoor volumes are read in the air in front of the surface (so walls just outside a
+    // loosely fitted volume still count as inside), and a surface on or inside a volume's box
+    // counts as inside even where that step along its normal crosses a face: a wall's edge
+    // where bumps tilt its normal into the ceiling, the rounded foot of a chair leg on the
+    // floor. (Those spots read the open sky through the volume's face otherwise.)
+    return sky_map_visibility(rel, n) * min(sky_volume_factor(rel + n * 0.2), sky_volume_factor_within(rel, 0.01));
 }
 
 // Sky light left at `rel` by the indoor volumes: `sky_light` deep inside, rising to 1 at open
 // faces over `fade` meters; 1 outside every volume.
 fn sky_volume_factor(rel: vec3<f32>) -> f32 {
+    return sky_volume_factor_within(rel, 0.0);
+}
+
+// `sky_volume_factor` with every volume's box grown by `margin` meters on each side (a point
+// on a face is inside).
+fn sky_volume_factor_within(rel: vec3<f32>, margin: f32) -> f32 {
     var f = 1.0;
     let p = vec4<f32>(rel, 1.0);
     for (var i = 0u; i < min(frame.counts.w, 16u); i++) {
         let v = frame.sky_volumes[i];
-        let q = vec3<f32>(dot(v.to_local[0], p), dot(v.to_local[1], p), dot(v.to_local[2], p));
         let half = v.half_fade.xyz;
-        if (any(abs(q) >= half)) { continue; }
+        let local = vec3<f32>(dot(v.to_local[0], p), dot(v.to_local[1], p), dot(v.to_local[2], p));
+        if (any(abs(local) >= half + margin)) { continue; }
+        let q = clamp(local, -half, half);
         // Distance to the nearest open face (+x, -x, +y, -y, +z, -z).
         let mask = u32(v.params.y);
         let to_pos = half - q;
@@ -419,8 +443,12 @@ fn sky_map_visibility(rel: vec3<f32>, n: vec3<f32>) -> f32 {
     let c = frame.sky_occlusion * vec4<f32>(p, 1.0);
     let edge = max(abs(c.x), abs(c.y));
     if (edge >= 1.0 || c.z <= 0.0 || c.z >= 1.0) { return 1.0; }
-    // Cover must be clearly above the point (bumps and the surface's own texel don't count).
-    let bias = 0.3 + texel;
+    // Cover must be clearly above the point. Over a surface facing up, its own texel and the
+    // bumps around it don't count. Walls have stepped out of their own texel above, and what is
+    // over the underside of something is cover (the roof over a ceiling, the ceiling over the
+    // top of a wall: with the full margin, the top of every wall under a roof less than
+    // 0.3 m + a texel thick, and the ceiling itself, saw open sky).
+    let bias = 0.05 + (0.25 + texel) * saturate(n.y);
     // Clip-space steps for one meter along world x and z (orientation-agnostic).
     let step_x = (frame.sky_occlusion * vec4<f32>(1.0, 0.0, 0.0, 0.0)).xy;
     let step_z = (frame.sky_occlusion * vec4<f32>(0.0, 0.0, 1.0, 0.0)).xy;
@@ -625,7 +653,7 @@ fn shade_surface_sides(s: Surface, rel: vec3<f32>, sun_visibility: f32, face: ve
     // creases by the material's and the screen-space ambient occlusion.
     let sky_vis = sky_visibility(rel, n);
     let fill = frame.ambient.rgb;
-    let irradiance = ((sky_ambient(n) - fill) * sky_vis + fill) * PI;
+    let irradiance = ((sky_ambient_covered(n, sky_vis) - fill) * sky_vis + fill) * PI;
     // Rough surfaces reflect around a direction between the mirror direction and the normal
     // (Lagarde and de Rousiers 2014).
     let r = reflect(-v, n);
@@ -637,7 +665,7 @@ fn shade_surface_sides(s: Surface, rel: vec3<f32>, sun_visibility: f32, face: ve
     color += diffuse_color * irradiance * INV_PI * ao_multibounce(visibility, diffuse_color);
     // Sky light shining through a thin sheet from behind.
     if (translucent) {
-        color += through_color * ((sky_ambient(-n) - fill) * sky_vis + fill) * visibility;
+        color += through_color * ((sky_ambient_covered(-n, sky_vis) - fill) * sky_vis + fill) * visibility;
     }
     // Light bounced from nearby surfaces (its rays already stop at whatever occludes them).
     color += diffuse_color * screen_gi(rel);
