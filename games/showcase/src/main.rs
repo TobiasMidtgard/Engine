@@ -30,6 +30,7 @@ mod rocks;
 mod scenery;
 mod texgen;
 mod tour;
+mod tower;
 mod village;
 mod zones;
 
@@ -157,6 +158,8 @@ fn setup(
     camera::spawn_camera(&mut commands);
     // The weather module drives the sun, the moon and the clock (`engine_weather::Sky`).
     engine_weather::spawn_sky_lights(&mut commands);
+    // The tower's textures baked on other threads while the world spawned.
+    lib.tower.finish_textures(&mut images);
     engine::core::log::info!(
         "showcase world built in {:.1} s",
         t0.elapsed().as_secs_f32()

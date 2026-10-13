@@ -45,6 +45,7 @@ struct Frame {
     camera_delta: vec4<f32>,       // camera origin - previous origin (m), w = 1 if the previous frame is valid history
     effects: vec4<f32>,            // AO intensity (0 = off), contact shadow length (m), sun penumbra scale, AO radius (m)
     reflections: vec4<f32>,        // screen-space reflections this frame (1/0), previous frame's pre-exposure (0 = none), max perceptual roughness, screen-space GI strength (0 = off)
+    volumetrics: vec4<f32>,        // volumetric fog range (m, 0 = off), 1 / depth scale (1/m), 1 / log2(1 + range / depth scale), depth slices
 };
 
 // An indoor space (`SkyLightVolume`): sky light comes in only through its open faces.
@@ -153,6 +154,14 @@ fn v_smith_ggx_correlated(n_dot_v: f32, n_dot_l: f32, roughness: f32) -> f32 {
     let gv = n_dot_l * sqrt(n_dot_v * n_dot_v * (1.0 - a2) + a2);
     let gl = n_dot_v * sqrt(n_dot_l * n_dot_l * (1.0 - a2) + a2);
     return 0.5 / max(gv + gl, 1e-5);
+}
+
+// Henyey-Greenstein phase function (1/sr): the share of light scattered by a medium at angle
+// acos(cos_t) from its direction of travel. g > 0 scatters forward (fog glows around the sun and
+// lamps you look toward), g = 0 evenly, g < 0 back.
+fn henyey_greenstein(cos_t: f32, g: f32) -> f32 {
+    let g2 = g * g;
+    return (1.0 - g2) / (4.0 * PI * pow(max(1.0 + g2 - 2.0 * g * cos_t, 1e-4), 1.5));
 }
 
 fn f_schlick(f0: vec3<f32>, v_dot_h: f32) -> vec3<f32> {

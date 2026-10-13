@@ -274,6 +274,11 @@ pub enum Sprite {
     /// A billow of fire: a dense puff glowing from within, hot cracks cooling to dark smoke over
     /// its life (explosions, fire impacts, dragon breath). Use `emissive` and a low `additive`.
     Billow,
+    /// A portal: the world behind it swirled into a vortex that sinks into the particle's color
+    /// toward its eye, with glowing arms turning inward and a burning rim (gates, rifts). Stand
+    /// it in a doorway with `facing: horizontal` and an effect turned so its up axis faces out;
+    /// give it a long life and `additive` 0. `emissive` lights the arms and rim.
+    Vortex,
 }
 
 impl Sprite {
@@ -287,7 +292,7 @@ impl Sprite {
         match self {
             Sprite::Smoke | Sprite::Dust => 1.0,
             Sprite::Droplet => 0.4,
-            Sprite::Shard | Sprite::Haze => 0.0,
+            Sprite::Shard | Sprite::Haze | Sprite::Vortex => 0.0,
             _ => 0.6,
         }
     }
@@ -686,6 +691,9 @@ pub struct EffectDesc {
     pub light: Option<EffectLight>,
     /// A ribbon trail behind the effect while it moves.
     pub trail: Option<Trail>,
+    /// A mark left where the effect starts, facing along its up axis (scorch, frost, wet
+    /// stone, a chip), sized by its scale.
+    pub mark: Option<crate::marks::MarkDesc>,
 }
 
 impl Default for EffectDesc {
@@ -698,6 +706,7 @@ impl Default for EffectDesc {
             emitters: Vec::new(),
             light: None,
             trail: None,
+            mark: None,
         }
     }
 }
@@ -708,9 +717,13 @@ impl EffectDesc {
         if self.name.trim().is_empty() {
             return Err("The effect needs a \"name\", like \"spell.fireball\".".into());
         }
-        if self.emitters.is_empty() && self.light.is_none() && self.trail.is_none() {
+        if self.emitters.is_empty()
+            && self.light.is_none()
+            && self.trail.is_none()
+            && self.mark.is_none()
+        {
             return Err(format!(
-                "Effect \"{}\" has no emitters, light or trail, so it would show nothing.",
+                "Effect \"{}\" has no emitters, light, trail or mark, so it would show nothing.",
                 self.name
             ));
         }

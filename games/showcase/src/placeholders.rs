@@ -77,45 +77,6 @@ fn rock_face(b: crate::meshgen::Builder) -> Mesh {
     mesh
 }
 
-/// A simple person: legs, body, head (1.8 m), facing `yaw`.
-fn person(commands: &mut Commands, base: DVec3, yaw: f32, shirt: u32) {
-    let skin = mat(0xc89878, 0.6).with_subsurface(0.4);
-    let cloth = mat(shirt, 0.85);
-    let pants = mat(0x2a2e3a, 0.85);
-    for side in [-0.12, 0.12] {
-        let off = Quat::from_rotation_y(yaw) * Vec3::new(side, 0.0, 0.0);
-        spawn(
-            commands,
-            Shape::Capsule {
-                radius: 0.09,
-                height: 0.85,
-                segments: 10,
-            },
-            pants,
-            at(base + off.as_dvec3() + DVec3::new(0.0, 0.45, 0.0)),
-        );
-    }
-    spawn(
-        commands,
-        Shape::Capsule {
-            radius: 0.2,
-            height: 0.7,
-            segments: 14,
-        },
-        cloth,
-        yawed(base + DVec3::new(0.0, 1.22, 0.0), yaw).with_scale(Vec3::new(1.0, 1.0, 0.65)),
-    );
-    spawn(
-        commands,
-        Shape::Sphere {
-            radius: 0.12,
-            segments: 16,
-        },
-        skin,
-        at(base + DVec3::new(0.0, 1.7, 0.0)),
-    );
-}
-
 /// Material plaza: a paved square with a roughness ladder (dielectric and metal), a glass orb
 /// inside an emissive ring and pedestals. The Rendering and lighting thread owns its content.
 pub fn plaza(commands: &mut Commands, lib: &Library, z: &Zone) {
@@ -260,109 +221,6 @@ pub fn plaza(commands: &mut Commands, lib: &Library, z: &Zone) {
             0.8,
         );
     }
-}
-
-/// Market street: stalls with awnings (shop UI), two villagers talking (dialogue UI), a map table
-/// with a globe (flat, globe and galaxy maps). The UI thread owns it.
-pub fn market(commands: &mut Commands, _lib: &Library, z: &Zone) {
-    let c = z.center;
-    let awnings = [0xb03a2e, 0x2e6fb0, 0xd9a93a, 0x3a8f4a, 0x8e44ad];
-    for (i, hex) in awnings.into_iter().enumerate() {
-        let a = i as f64 / awnings.len() as f64 * TAU64 * 0.75 + 0.6;
-        let p = c + DVec3::new(a.cos() * 15.0, 0.0, a.sin() * 15.0);
-        let yaw = (-(a.cos()) as f32).atan2(-(a.sin()) as f32);
-        let rot = Quat::from_rotation_y(yaw);
-        let off = |v: Vec3| p + (rot * v).as_dvec3();
-        for (x, zz) in [(-1.6, -1.0), (1.6, -1.0), (-1.6, 1.0), (1.6, 1.0)] {
-            spawn(
-                commands,
-                cuboid(0.12, 2.6, 0.12),
-                dark_wood(),
-                yawed(off(Vec3::new(x, 1.3, zz)), yaw),
-            );
-        }
-        spawn(
-            commands,
-            cuboid(3.4, 0.9, 1.2),
-            wood(),
-            yawed(off(Vec3::new(0.0, 0.45, 0.6)), yaw),
-        );
-        spawn(
-            commands,
-            cuboid(3.8, 0.06, 2.6),
-            mat(hex, 0.9).with_subsurface(0.3),
-            Transform::from_translation(off(Vec3::new(0.0, 2.75, 0.2)))
-                .with_rotation(rot * Quat::from_rotation_x(0.18)),
-        );
-        // Goods: crates and round produce.
-        for k in 0..4 {
-            let produce = [0xc0392b, 0xe67e22, 0x27ae60, 0xf1c40f][(k + i) % 4];
-            spawn(
-                commands,
-                Shape::Sphere {
-                    radius: 0.18,
-                    segments: 12,
-                },
-                mat(produce, 0.5).with_subsurface(0.3),
-                at(off(Vec3::new(-1.2 + k as f32 * 0.8, 1.05, 0.6))),
-            );
-        }
-        person(
-            commands,
-            off(Vec3::new(0.0, 0.0, -0.6)),
-            yaw + std::f32::consts::PI,
-            0x6b4f2a,
-        );
-    }
-    // Two villagers in conversation.
-    person(
-        commands,
-        c + DVec3::new(-1.0, 0.0, -2.0),
-        std::f32::consts::FRAC_PI_2,
-        0x2e86c1,
-    );
-    person(
-        commands,
-        c + DVec3::new(1.0, 0.0, -2.0),
-        -std::f32::consts::FRAC_PI_2,
-        0xa83232,
-    );
-    // Map table with a globe.
-    spawn(
-        commands,
-        cuboid(3.0, 0.1, 2.0),
-        dark_wood(),
-        at(c + DVec3::new(0.0, 1.0, 5.0)),
-    );
-    spawn(
-        commands,
-        cuboid(2.8, 0.02, 1.8),
-        mat(0xc9b88a, 0.9),
-        at(c + DVec3::new(0.0, 1.06, 5.0)),
-    );
-    for (x, zz) in [(-1.3, -0.8), (1.3, -0.8), (-1.3, 0.8), (1.3, 0.8)] {
-        spawn(
-            commands,
-            cuboid(0.1, 1.0, 0.1),
-            dark_wood(),
-            at(c + DVec3::new(x, 0.5, 5.0 + zz)),
-        );
-    }
-    spawn(
-        commands,
-        Shape::Sphere {
-            radius: 0.45,
-            segments: 32,
-        },
-        mat(0x2a6fa8, 0.4),
-        at(c + DVec3::new(0.9, 1.6, 5.0)),
-    );
-    spawn(
-        commands,
-        cyl(0.05, 0.4),
-        metal(),
-        at(c + DVec3::new(0.9, 1.25, 5.0)),
-    );
 }
 
 /// 2D and 2.5D gallery: a side-on diorama (platforms, coins, a hero) that the 2D cameras will
@@ -1059,47 +917,11 @@ pub fn field_edge(commands: &mut Commands, lib: &Library, z: &Zone, rng: &mut Rn
     }
 }
 
-/// Spaceport: a 600 m launch tower for scale (the pad, its lights, hangars and the ships
+/// Spaceport: a 600 m observation tower for scale (the pad, its lights, hangars and the ships
 /// come from `engine_vehicles::demo::spawn_spaceport`). The Planets and terrain (space) and
 /// Cars, planes and spaceships threads own it.
-pub fn spaceport(commands: &mut Commands, _lib: &Library, z: &Zone) {
+pub fn spaceport(commands: &mut Commands, lib: &Library, z: &Zone) {
     let c = z.center;
-    // The 600 m launch tower: a tapering spire with a lit band every 50 m.
-    let tower = c + DVec3::new(70.0, 0.0, 60.0);
-    let shell = mat(0xd8dce0, 0.4).with_metallic(0.3);
-    for i in 0..40 {
-        let y = i as f64 * 15.0;
-        let r0 = 14.0 - i as f32 * 0.3;
-        spawn(
-            commands,
-            Shape::Cylinder {
-                radius: r0,
-                height: 15.2,
-                segments: 48,
-            },
-            shell,
-            at(tower + DVec3::new(0.0, y + 7.5, 0.0)),
-        );
-        if i % 4 == 3 {
-            spawn(
-                commands,
-                Shape::Torus {
-                    radius: r0 + 0.3,
-                    tube: 0.35,
-                    segments: 64,
-                },
-                StandardMaterial::hex(0x101820).with_emissive([0.5, 0.8, 1.0], 3_000.0),
-                at(tower + DVec3::new(0.0, y + 14.0, 0.0)),
-            );
-        }
-    }
-    spawn(
-        commands,
-        Shape::Sphere {
-            radius: 2.0,
-            segments: 24,
-        },
-        StandardMaterial::hex(0x400000).with_emissive([1.0, 0.1, 0.05], 50_000.0),
-        at(tower + DVec3::new(0.0, 606.0, 0.0)),
-    );
+    // The 600 m telecom and observation tower (`tower.rs`).
+    crate::tower::spawn(commands, &lib.tower, c + DVec3::new(70.0, 0.0, 60.0));
 }

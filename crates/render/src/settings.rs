@@ -35,6 +35,30 @@ pub enum AntiAliasing {
     None,
 }
 
+/// Resolution of the volumetric fog grid (`RenderSettings::volumetric_fog_quality`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum VolumetricQuality {
+    /// 16-pixel tiles, 64 depth slices: soft shafts, cheapest.
+    Low,
+    /// 8-pixel tiles, 64 depth slices.
+    Medium,
+    /// 8-pixel tiles, 128 depth slices (default): crisp shafts between trunks and through
+    /// windows, thin ground fog.
+    #[default]
+    High,
+}
+
+impl VolumetricQuality {
+    /// Tile size in pixels and number of depth slices.
+    pub fn tile_and_slices(self) -> (u32, u32) {
+        match self {
+            VolumetricQuality::Low => (16, 64),
+            VolumetricQuality::Medium => (8, 64),
+            VolumetricQuality::High => (8, 128),
+        }
+    }
+}
+
 /// What the screen shows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum DebugView {
@@ -106,6 +130,17 @@ pub struct RenderSettings {
     pub gi_intensity: f32,
     /// Scales the number of blades in every `GrassField` (quality setting; 0 = no grass).
     pub grass_density: f32,
+    /// Volumetric fog: the height fog ([`FogSettings`]) and every
+    /// [`FogVolume`](crate::components::FogVolume) are lit per froxel (a cell of a grid
+    /// fitted to the view) by the sun with its shadows, the sky and point lights, so sunbeams
+    /// show through trees and windows, lamps glow in mist and caves stay dark. Off: the height
+    /// fog is an unshadowed analytic integral and fog volumes are not drawn.
+    pub volumetric_fog: bool,
+    /// How far from the camera the volumetric fog grid reaches, meters. Beyond it the height
+    /// fog continues analytically (without shadows or fog volumes).
+    pub volumetric_fog_range: f32,
+    /// Size of the volumetric fog grid (tile size and depth slices).
+    pub volumetric_fog_quality: VolumetricQuality,
     pub anti_aliasing: AntiAliasing,
     /// 0..1 sharpening after temporal anti-aliasing (restores texture detail).
     pub sharpness: f32,
@@ -173,6 +208,9 @@ impl Default for RenderSettings {
             screen_space_gi: true,
             gi_intensity: 1.0,
             grass_density: 1.0,
+            volumetric_fog: true,
+            volumetric_fog_range: 256.0,
+            volumetric_fog_quality: VolumetricQuality::High,
             anti_aliasing: AntiAliasing::Taa,
             sharpness: 0.3,
             tonemapper: Tonemapper::AgXPunchy,
@@ -199,22 +237,37 @@ impl Default for RenderSettings {
     }
 }
 
-/// Height fog. Weather drives `density`; artists tune the rest.
+/// Height fog everywhere: the global fog the weather drives. Its density falls off
+/// exponentially with height above `base_height`, so it pools in valleys and thins on hills.
+///
+/// With `RenderSettings::volumetric_fog` (the default) it is lit per froxel, with sun shadows
+/// (light shafts), sky light that caves and rooms keep out, and point lights; beyond
+/// `volumetric_fog_range` and with volumetric fog off it is integrated analytically. Local fog
+/// (a smoky room, a mist bank, a steam vent) is a [`FogVolume`](crate::components::FogVolume).
+///
+/// Weather sets `density` (it adds `WeatherState::fog * 0.02` per meter on top); artists tune
+/// the rest. Ground fog at dawn: `density` 0.03–0.08, `height_falloff` 0.15–0.3.
 #[derive(Resource, Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct FogSettings {
-    /// Extinction per meter at `base_height` (0.0005 light haze, 0.02 thick fog).
+    /// Extinction per meter at `base_height` (0.0005 light haze, 0.02 thick fog, 0.1 fog you
+    /// can barely see 30 m into).
     pub density: f32,
-    /// How fast fog thins with height, per meter.
+    /// How fast fog thins with height, per meter (density halves every `0.69 / falloff` m).
     pub height_falloff: f32,
     /// Altitude above the planet surface (world y when there is no planet) where `density`
     /// applies, meters.
     pub base_height: f32,
-    /// Fog never hides more than this fraction of an object (keeps silhouettes).
+    /// Fog never hides more than this fraction of an object (keeps silhouettes). Applies to
+    /// fog volumes too; 1 = physical.
     pub max_opacity: f32,
-    /// Fog albedo (it is lit by the sky and the sun).
+    /// Fog albedo, linear RGB: the share of the light it stops that it scatters (the rest it
+    /// absorbs). Lit by the sun, the sky and lamps.
     pub color: [f32; 3],
-    /// Forward scattering glow around the sun.
+    /// How strongly the fog scatters light forward: the Henyey-Greenstein anisotropy `g`
+    /// (-0.95..0.95). 0 scatters evenly in all directions, 0.6 (default) mostly forward, so fog
+    /// glows around the sun and lamps when you look toward them and sunbeams are brightest
+    /// against the light.
     pub sun_scattering: f32,
 }
 

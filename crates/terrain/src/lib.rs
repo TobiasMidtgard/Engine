@@ -251,7 +251,8 @@ impl PlanetTerrain {
     }
 
     /// The transform that puts `pad`'s center at the world origin with +Y up and north toward
-    /// −Z (planet center at about `(0, −radius − pad height, 0)`).
+    /// −Z, or as the pad's `heading_deg` turns it (planet center at about
+    /// `(0, −radius − pad height, 0)`).
     ///
     /// `Transform` holds an `f32` rotation, which is only good to ~0.4 m at Earth's radius, so
     /// the translation is computed for the rotation as stored: the pad lands on the origin
@@ -260,7 +261,7 @@ impl PlanetTerrain {
         if !matches!(self.domain, TerrainDomain::Sphere) {
             return Transform::from_translation(DVec3::new(0.0, -pad.height_m, 0.0));
         }
-        let rot = home_rotation(pad.lat_deg, pad.lon_deg).as_quat();
+        let rot = pad.home_rotation().as_quat();
         let stored = rot.as_dquat().normalize();
         let pad_point = pad.direction() * (self.shape.radius_m + pad.height_m);
         Transform::from_translation(-(stored * pad_point)).with_rotation(rot)
@@ -934,15 +935,34 @@ mod tests {
 
     #[test]
     fn overlay_ground_passes_through_its_points() {
+        // Also with the planet turned under the level (north toward +Z).
+        for heading_deg in [0.0, 180.0] {
+            overlay_passes_through_its_points(heading_deg);
+        }
+    }
+
+    fn overlay_passes_through_its_points(heading_deg: f64) {
         let valley = |x: f64, z: f64| 12.0 + 0.02 * x + (z / 150.0).sin() * 6.0;
         let mut app = App::new();
         app.add_plugins(engine_world::WorldPlugin)
             .add_plugins(TerrainPlugin);
-        let pad = FlatPad::default();
+        let pad = FlatPad {
+            heading_deg,
+            ..FlatPad::default()
+        };
         let t = PlanetTerrain::earthlike(3)
             .with_radius(6_371_000.0)
             .with_pad(pad)
             .with_overlay(8_000.0, 3_000.0, valley);
+        // North is where the heading turned it.
+        let rot = t.home_transform(pad).rotation.as_dquat();
+        let r = 6_371_060.0;
+        let to_pole = rot * (dir_from_lat_lon(40.01, 0.0) * r - dir_from_lat_lon(40.0, 0.0) * r);
+        let north_z = if heading_deg == 0.0 { -1.0 } else { 1.0 };
+        assert!(
+            to_pole.z * north_z > 1_000.0 && to_pole.x.abs() < 1.0,
+            "{to_pole:?}"
+        );
         let tf = t.home_transform(pad);
         app.world.spawn((tf, t));
         app.world.spawn((
@@ -961,7 +981,7 @@ mod tests {
             let h = g.height(DVec3::new(x, 500.0, z)).unwrap();
             assert!(
                 (h - valley(x, z)).abs() < 0.01,
-                "({x}, {z}): {h} vs {}",
+                "{heading_deg}°: ({x}, {z}): {h} vs {}",
                 valley(x, z)
             );
         }

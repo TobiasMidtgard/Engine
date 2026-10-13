@@ -353,8 +353,7 @@ pub struct Landscape {
     pub cave: CaveHill,
     /// Woodland centers on the hills (x, z, radius) beyond the forest zone.
     pub woods: Vec<(DVec2, f64)>,
-    /// Rectangles (min x/z, max x/z) with their own ground: the footprint lab's mud, snow and
-    /// sand.
+    /// Rectangles (min x/z, max x/z) with their own ground.
     pub patches: Vec<(DVec2, DVec2, Cover)>,
     /// Ground laid out by module demos (the footstep trail): the cover at (x, z), or `None`
     /// to leave the landscape's own. Checked before `patches`.
@@ -810,7 +809,7 @@ impl Landscape {
     }
 
     /// Distance from the lake's middle in shoreline units (1 = the shore).
-    fn lake_t(&self, x: f64, z: f64) -> f64 {
+    pub fn lake_t(&self, x: f64, z: f64) -> f64 {
         let d = (DVec2::new(x, z) - self.lake.center).length();
         d / (self.lake.radius * self.lake_wobble(x, z))
     }

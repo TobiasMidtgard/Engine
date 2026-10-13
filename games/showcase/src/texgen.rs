@@ -13,7 +13,7 @@ use engine::prelude::*;
 // ------------------------------------------------------------------------------------ noise
 
 #[inline]
-fn hash(x: i32, y: i32, seed: u32) -> u32 {
+pub(crate) fn hash(x: i32, y: i32, seed: u32) -> u32 {
     let mut h = seed.wrapping_mul(0x9E37_79B9)
         ^ (x as u32).wrapping_mul(0x85EB_CA6B)
         ^ (y as u32).wrapping_mul(0xC2B2_AE35);
@@ -26,7 +26,7 @@ fn hash(x: i32, y: i32, seed: u32) -> u32 {
 
 /// Bits of a hash to [0, 1).
 #[inline]
-fn bits01(h: u32, shift: u32) -> f32 {
+pub(crate) fn bits01(h: u32, shift: u32) -> f32 {
     ((h >> shift) & 0xff) as f32 / 255.0
 }
 
@@ -55,7 +55,7 @@ const GRAD: [(f32, f32); 16] = {
 
 /// Tileable gradient noise, about [-1, 1]. The lattice repeats every `px` × `py` cells.
 #[inline]
-fn noise(x: f32, y: f32, px: i32, py: i32, seed: u32) -> f32 {
+pub(crate) fn noise(x: f32, y: f32, px: i32, py: i32, seed: u32) -> f32 {
     let (x0, y0) = (x.floor(), y.floor());
     let (ix, iy) = (x0 as i32, y0 as i32);
     let (fx, fy) = (x - x0, y - y0);
@@ -76,7 +76,7 @@ fn noise(x: f32, y: f32, px: i32, py: i32, seed: u32) -> f32 {
 
 /// Tileable fractal noise over texture coordinates in [0, 1): `fx` × `fy` cells at the first
 /// octave, doubling per octave. About [-1, 1].
-fn fbm(u: f32, v: f32, fx: i32, fy: i32, octaves: u32, gain: f32, seed: u32) -> f32 {
+pub(crate) fn fbm(u: f32, v: f32, fx: i32, fy: i32, octaves: u32, gain: f32, seed: u32) -> f32 {
     let (mut sum, mut amp, mut norm) = (0.0, 1.0, 0.0);
     for o in 0..octaves {
         let (px, py) = (fx << o, fy << o);
@@ -96,18 +96,18 @@ fn fbm(u: f32, v: f32, fx: i32, fy: i32, octaves: u32, gain: f32, seed: u32) -> 
 
 /// Nearest feature points of a tileable cellular (Worley) pattern with `nx` × `ny` cells.
 #[derive(Clone, Copy)]
-struct Cell {
+pub(crate) struct Cell {
     /// Distance to the nearest point, in cell units.
-    f1: f32,
+    pub f1: f32,
     /// Distance to the second nearest point.
-    f2: f32,
+    pub f2: f32,
     /// Hash of the nearest point's cell (stable per cell).
-    id: u32,
+    pub id: u32,
     /// Offset from the sample to the nearest point, in cell units.
-    d: Vec2,
+    pub d: Vec2,
 }
 
-fn worley(u: f32, v: f32, nx: i32, ny: i32, jitter: f32, seed: u32) -> Cell {
+pub(crate) fn worley(u: f32, v: f32, nx: i32, ny: i32, jitter: f32, seed: u32) -> Cell {
     let (x, y) = (u * nx as f32, v * ny as f32);
     let (ix, iy) = (x.floor() as i32, y.floor() as i32);
     let mut best = Cell {
@@ -138,13 +138,13 @@ fn worley(u: f32, v: f32, nx: i32, ny: i32, jitter: f32, seed: u32) -> Cell {
 }
 
 #[inline]
-fn smooth(e0: f32, e1: f32, x: f32) -> f32 {
+pub(crate) fn smooth(e0: f32, e1: f32, x: f32) -> f32 {
     engine::core::math::smoothstep(e0, e1, x)
 }
 
 /// Linear → sRGB byte.
 #[inline]
-fn srgb8(c: f32) -> u8 {
+pub(crate) fn srgb8(c: f32) -> u8 {
     let c = c.clamp(0.0, 1.0);
     let s = if c <= 0.003_130_8 {
         12.92 * c
@@ -163,18 +163,18 @@ fn lin8(c: f32) -> u8 {
 
 /// One texel of a material, as a generator returns it.
 #[derive(Clone, Copy)]
-struct Px {
+pub(crate) struct Px {
     /// Linear albedo.
-    albedo: Vec3,
+    pub albedo: Vec3,
     /// Height in meters (only differences matter).
-    height: f32,
-    rough: f32,
-    ao: f32,
-    metal: f32,
+    pub height: f32,
+    pub rough: f32,
+    pub ao: f32,
+    pub metal: f32,
 }
 
 impl Px {
-    fn new(albedo: Vec3, height: f32, rough: f32, ao: f32) -> Self {
+    pub(crate) fn new(albedo: Vec3, height: f32, rough: f32, ao: f32) -> Self {
         Self {
             albedo,
             height,
@@ -196,7 +196,13 @@ pub struct TexSet {
 /// Evaluate `f` over a `w` × `h` texture covering `span` meters and pack the maps (with mips).
 /// `cavity` darkens the albedo by that share of the occlusion, so crevices read in sunlight
 /// too.
-fn bake(w: u32, h: u32, span: Vec2, cavity: f32, f: impl Fn(f32, f32) -> Px + Sync) -> TexSet {
+pub(crate) fn bake(
+    w: u32,
+    h: u32,
+    span: Vec2,
+    cavity: f32,
+    f: impl Fn(f32, f32) -> Px + Sync,
+) -> TexSet {
     let (nw, nh) = (w as usize, h as usize);
     // Bands of rows on their own threads, so one big texture doesn't hold up the whole set.
     let rows = nh.div_ceil(4);

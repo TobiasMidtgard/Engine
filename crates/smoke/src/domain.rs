@@ -1,9 +1,10 @@
 //! A smoke domain: a box of air on a regular grid, simulated as an incompressible gas.
 //!
-//! Each voxel holds air velocity, smoke density (kg/m³), heat (°C above the surrounding air)
-//! and tint (albedo × density, so colors mix by mass). A step:
+//! Each voxel holds air velocity, smoke density (kg/m³), heat (°C above the surrounding air;
+//! below zero for chilled, foggy air) and tint (albedo × density, so colors mix by mass). A
+//! step:
 //!
-//! 1. **Forces**: hot smoke rises (buoyancy ∝ ΔT / T), dense smoke sinks a little, and the
+//! 1. **Forces**: hot smoke rises (buoyancy ∝ ΔT / T), cold air and dense smoke sink, and the
 //!    air relaxes toward the wind (`WindField`, sampled on a coarse grid), so smoke drifts
 //!    and bends with wind currents and fire updrafts.
 //! 2. **Vorticity confinement** puts back the small swirls the coarse grid smears out.
@@ -28,7 +29,7 @@ pub struct Voxel {
     pub vel: Vec3,
     /// Smoke, kg/m³.
     pub density: f32,
-    /// Temperature above the surrounding air, °C.
+    /// Temperature above the surrounding air, °C (below zero: colder, so it sinks).
     pub heat: f32,
     /// Albedo × density (linear RGB): the smoke's color, weighted by mass so colors mix.
     pub tint: Vec3,
@@ -59,6 +60,29 @@ impl Voxel {
             density: self.density + o.density,
             heat: self.heat + o.heat,
             tint: self.tint + o.tint,
+        }
+    }
+}
+
+/// Shares of the difference [`Domain::settle_fog`] closes in one call (0..1 each).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct FogRates {
+    /// Fog forming where there is less than its share.
+    pub form: f32,
+    /// Fog burning off where there is more.
+    pub burn: f32,
+    /// Foggy air chilling toward its temperature.
+    pub chill: f32,
+}
+
+impl FogRates {
+    /// Rates for `dt` seconds with these 1/e times, seconds.
+    pub fn new(dt: f32, form_secs: f32, burn_secs: f32, chill_secs: f32) -> Self {
+        let k = |secs: f32| 1.0 - (-dt / secs.max(1e-3)).exp();
+        Self {
+            form: k(form_secs),
+            burn: k(burn_secs),
+            chill: k(chill_secs),
         }
     }
 }
@@ -161,6 +185,8 @@ pub struct Domain {
     pub time: f32,
     /// Voxels simulated last step (min, max exclusive): where there is smoke, plus a margin.
     pub active: (UVec3, UVec3),
+    /// Holds a fog bank: drawn as soft, wide fog rather than billowing smoke.
+    pub fog: bool,
 }
 
 impl Domain {
@@ -190,6 +216,7 @@ impl Domain {
             max_density: 0.0,
             time: 0.0,
             active: (UVec3::ZERO, UVec3::ZERO),
+            fog: false,
         }
     }
 
@@ -287,6 +314,64 @@ impl Domain {
             v.heat = v.heat.max(heat_c * w);
             v.vel += (vel - v.vel) * w;
         }
+    }
+
+    /// Fog forming and burning off. Every open voxel whose fog share `level(y)` (0..1, from
+    /// the voxel center's world height) calls for more than it holds gains `rate.form` of the
+    /// difference toward `level × density` kg/m³, colored `albedo`; its air is chilled toward
+    /// `level × chill_c` below the surroundings (`rate.chill` of the difference) so it sinks
+    /// and pools. Chilled (foggy) voxels holding more than their share lose `rate.burn` of the
+    /// excess. Smoke that isn't fog (warm or at air temperature) is left alone.
+    pub fn settle_fog(
+        &mut self,
+        level: impl Fn(f64) -> f32 + Sync,
+        density: f32,
+        chill_c: f32,
+        albedo: Vec3,
+        rate: FogRates,
+    ) {
+        let dims = self.dims;
+        let slice = (dims.x * dims.y) as usize;
+        let (origin_y, cell) = (self.origin.y, self.cell as f64);
+        let levels: Vec<f32> = (0..dims.y)
+            .map(|y| level(origin_y + (y as f64 + 0.5) * cell).clamp(0.0, 1.0))
+            .collect();
+        let floor = &self.floor;
+        let k = rate.form.clamp(0.0, 1.0);
+        let burn = rate.burn.clamp(0.0, 1.0);
+        let chill = rate.chill.clamp(0.0, 1.0);
+        par_chunks_mut(&mut self.voxels, slice, |z, chunk| {
+            let z = z as u32;
+            for x in 0..dims.x {
+                let f = floor[(x + z * dims.x) as usize] as u32;
+                for (y, &l) in levels.iter().enumerate().skip(f as usize) {
+                    let v = &mut chunk[(x + y as u32 * dims.x) as usize];
+                    let want = l * density;
+                    let cold = -chill_c * l;
+                    if l > 0.0 && v.heat > cold {
+                        v.heat += (cold - v.heat) * chill;
+                    }
+                    if want > v.density {
+                        let add = (want - v.density) * k;
+                        v.density += add;
+                        v.tint += albedo * add;
+                    } else if v.heat < -0.01 && v.density > 0.0 {
+                        let keep = 1.0 - (v.density - want) / v.density * burn;
+                        v.density *= keep;
+                        v.tint *= keep;
+                        if v.density < 1e-8 {
+                            *v = Voxel {
+                                vel: v.vel,
+                                ..Voxel::default()
+                            };
+                        }
+                    }
+                }
+            }
+        });
+        let total: f64 = self.voxels.iter().map(|v| v.density as f64).sum();
+        self.mass_kg = (total * cell.powi(3)) as f32;
+        self.max_density = self.voxels.iter().map(|v| v.density).fold(0.0, f32::max);
     }
 
     /// Gas released at a point (a grenade's smoke, a vent's steam): `volume_m3` of new gas
@@ -508,7 +593,7 @@ impl Domain {
                 let mut first = None;
                 let mut last = 0;
                 for (x, v) in self.voxels[row].iter().enumerate() {
-                    if v.density > 1e-7 || v.heat > 0.05 {
+                    if v.density > 1e-7 || v.heat.abs() > 0.05 {
                         first.get_or_insert(x as u32);
                         last = x as u32;
                     }
@@ -972,7 +1057,7 @@ impl Domain {
                     }
                     if n > 0.0 {
                         out.density = (here.density + k * sum_d).max(0.0);
-                        out.heat = (here.heat + k * sum_h).max(0.0);
+                        out.heat = here.heat + k * sum_h;
                         out.tint = (here.tint + k * sum_t).max(Vec3::ZERO);
                     }
                 }
