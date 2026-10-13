@@ -222,7 +222,7 @@ fn fs_sky(in: FullscreenOut) -> @location(0) vec4<f32> {
     var c = cl.rgb + bg * cl.a;
     // A rainbow on sunlit rain opposite a low sun.
     if (sky.params.y > 0.0) {
-        let rain = textureSampleLevel(cloud_depth, linear_clamp, in.uv, 0.0).z;
+        let rain = 1.0 - exp(-textureSampleLevel(cloud_depth, linear_clamp, in.uv, 0.0).z);
         c += pre_expose(rainbow(dir, sky.sun.xyz) * sky.params.y) * rain;
     }
     c = fog_over_sky(c, dir, in.position.xy);
@@ -235,7 +235,7 @@ fn fs_sky_over(in: FullscreenOut) -> @location(0) vec4<f32> {
     let cl = clouds_at(in.uv);
     var c = cl.rgb;
     if (sky.params.y > 0.0) {
-        let rain = textureSampleLevel(cloud_depth, linear_clamp, in.uv, 0.0).z;
+        let rain = 1.0 - exp(-textureSampleLevel(cloud_depth, linear_clamp, in.uv, 0.0).z);
         c += pre_expose(rainbow(camera_dir(in.uv), sky.sun.xyz) * sky.params.y) * rain;
     }
     return vec4<f32>(min(c, vec3(60000.0)), cl.a);
@@ -266,24 +266,23 @@ fn fs_geo(in: FullscreenOut) -> @location(0) vec4<f32> {
     let p = frame.inv_view_proj * ndc;
     let dist = length(p.xyz / p.w);
     let depth = textureSampleLevel(cloud_depth, linear_clamp, in.uv, 0.0);
-    let rain_front = depth.w * 1000.0;
-    if (dist <= min(depth.x * 1000.0, rain_front)) { discard; }
-    let cl = clouds_at(in.uv);
-    // The rain's share of its opacity reached at the surface, as optical depth (the march's
-    // rain is about even along the ray; showers beyond the hill don't veil it).
+    // The rain's optical depth reached at the surface. The march gives where 10% and 90% of
+    // it is reached; between them the rain is about even along the ray, and showers beyond
+    // the hill don't veil it.
     var veil = 0.0;
-    if (depth.z > 0.0 && dist > rain_front) {
-        let rain_back = textureSampleLevel(clear_sky, linear_clamp, in.uv, 0.0).a * 1000.0;
-        let span = max(rain_reach(rain_back) - rain_reach(rain_front), 1.0);
-        let share = saturate((rain_reach(dist) - rain_reach(rain_front)) / span);
-        veil = 1.0 - pow(max(1.0 - depth.z, 1e-4), share);
+    if (depth.z > 0.0 && dist > 400.0) {
+        let front = rain_reach(depth.w * 1000.0);
+        let back = rain_reach(textureSampleLevel(clear_sky, linear_clamp, in.uv, 0.0).a * 1000.0);
+        let share = saturate(0.1 + 0.8 * (rain_reach(dist) - front) / max(back - front, 1.0));
+        veil = 1.0 - exp(-depth.z * share);
     }
-    // Share of everything the sky shows in front of the surface: the rain's, then the part
-    // of the cloud between its front and back (mountains reaching into it).
-    let k_rain = saturate(veil / max(1.0 - cl.a, 1e-3));
+    // The part of the cloud between its front and back (mountains reaching into it).
     let in_cloud = saturate((dist - depth.x * 1000.0) / max((depth.y - depth.x) * 1000.0, 1.0));
+    if (veil <= 0.0 && in_cloud <= 0.0) { discard; }
+    let cl = clouds_at(in.uv);
+    // Share of everything the sky shows in front of the surface: the rain's, then the cloud's.
+    let k_rain = saturate(veil / max(1.0 - cl.a, 1e-3));
     let k = k_rain + (1.0 - k_rain) * in_cloud;
-    if (k <= 0.0) { discard; }
     // The surface already has the renderer's fog over it; what this pass puts in front lies
     // behind that fog too (as the sky's clouds do, `fog_over_sky`). Without it far hills in
     // night rain faded to the unfogged black deck under a glowing fogged sky.
