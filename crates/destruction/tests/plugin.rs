@@ -438,8 +438,17 @@ fn the_hill_demo_tunnels_caves_in_builds_and_rebuilds() {
             );
         }
     }
+    // Then a pit is dug under it and the whole shelter drops in.
+    run(&mut app, 4.3);
+    let fallen = app
+        .world
+        .query_filtered::<&BuiltPiece, With<Debris>>()
+        .iter(&app.world)
+        .filter(|b| b.builder == Some(terrace))
+        .count();
+    assert_eq!(fallen, 10, "the shelter fell into the pit dug under it");
 
-    run(&mut app, 6.5);
+    run(&mut app, 2.2);
     let rebuilt = volume(&mut app);
     assert!(
         (rebuilt - start).abs() < 1.0,
