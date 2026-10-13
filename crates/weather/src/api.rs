@@ -67,6 +67,7 @@ pub fn describe(world: &World) -> Value {
 
 /// Fast-forward the weather (fronts, air, ground) by `seconds` of game time.
 pub fn advance(world: &mut World, seconds: f32, with_clock: bool) {
+    surface::prepare(world, surface::PREPARE_RADIUS_M);
     let step_s = 5.0f32;
     let steps = (seconds / step_s).ceil().max(0.0) as usize;
     let focus = world.resource::<FocusPoints>().primary();
@@ -251,8 +252,8 @@ pub(crate) fn register(app: &mut App) {
     .register_api(
         "weather.ground",
         "Set the ground cover everywhere around the player at once: wetness (0..1), \
-         puddle_m (water depth in the dips), snow_m (snow depth). Omitted values are kept; \
-         {\"dry\": true} clears everything.",
+         puddle_m (water depth in the dips), snow_m (snow depth). Covered ground stays as it \
+         is. Omitted values are kept; {\"dry\": true} clears everything.",
         r#"{"wetness": 1.0, "puddle_m": 0.01, "snow_m": 0.0}"#,
         |world, args| {
             let dry = args.get("dry").and_then(Value::as_bool).unwrap_or(false);
@@ -262,49 +263,36 @@ pub(crate) fn register(app: &mut App) {
             if !dry && wetness.is_none() && puddle.is_none() && snow.is_none() {
                 return Err("Pass \"dry\": true, or any of wetness, puddle_m, snow_m.".into());
             }
-            let params = *world.resource::<GroundWeather>();
-            let (seed, frame) = {
-                let sim = world.resource::<WeatherSim>();
-                (sim.seed, sim.frame)
-            };
-            // The dips the ground simulation found (soft ground and paved patches differ), where
-            // it has looked already.
-            let dips: Option<Vec<Option<f32>>> = {
-                let cache = world.resource::<surface::GroundCache>();
-                let grid = &world.resource::<SurfaceLayers>().grid;
-                (cache.cells.origin == grid.origin && cache.cells.data.len() == grid.data.len())
-                    .then(|| {
-                        cache
-                            .cells
-                            .data
-                            .iter()
-                            .map(|c| c.known.then_some(c.dip))
-                            .collect()
+            let max_puddle_m = world.resource::<GroundWeather>().max_puddle_m;
+            // Look at the ground around the player first, so water lands in the dips the
+            // ground has (soft ground and paved patches differ) and covered ground stays dry.
+            surface::prepare(world, surface::PREPARE_RADIUS_M);
+            let cells: Vec<(f32, f32)> = {
+                let cache = world.resource::<GroundCache>();
+                (0..cache.cells.len())
+                    .map(|i| {
+                        let c = cache.cells.data[i];
+                        (if c.known { c.dip } else { 0.0 }, cache.exposure(i))
                     })
+                    .collect()
             };
             let mut surface = world.resource_mut::<SurfaceLayers>();
             let grid = &mut surface.grid;
-            let (origin, cell, width) = (grid.origin, grid.cell as f64, grid.width as usize);
-            for (i, c) in grid.data.iter_mut().enumerate() {
+            for (c, &(dip, exposure)) in grid.data.iter_mut().zip(&cells) {
                 if dry {
                     c.wetness = 0.0;
                     c.puddle_m = 0.0;
                     c.snow_m = 0.0;
+                }
+                if exposure < 0.5 {
+                    continue;
                 }
                 if let Some(w) = wetness {
                     c.wetness = w;
                 }
                 if let Some(p) = puddle {
                     // Water stands in the dips only.
-                    let xz = origin
-                        + engine_core::math::DVec2::new(
-                            (i % width) as f64 + 0.5,
-                            (i / width) as f64 + 0.5,
-                        ) * cell;
-                    let dip = dips.as_ref().and_then(|d| d[i]).unwrap_or_else(|| {
-                        surface::puddle_dip(frame.to_pattern(xz), params.puddle_share, seed)
-                    });
-                    c.puddle_m = (p * dip).min(params.max_puddle_m);
+                    c.puddle_m = (p * dip).min(max_puddle_m);
                 }
                 if let Some(s) = snow {
                     c.snow_m = s;
