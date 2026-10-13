@@ -41,6 +41,8 @@ everything else (streaming, LOD, colliders, ground queries, prints) follows the 
   `with_overlay_paint(|x, z| …)` paints it: an `OverlayPaint` layer (grass, leaves, dirt,
   mud, sand, gravel, rock, concrete, snow, ash) for roads, plazas and woods, and a tint for
   fields. Footsteps, rain and the `Ground` query follow the painted layer; edits paint over it.
+  Layers can cover everything at full weight and meet edge to edge: each vertex carries a
+  weight per layer, so borders blend along the textures' relief instead of in triangle steps.
   When the level already has its own material map, `with_ground_surface(Arc<dyn GroundQuery>)`
   lets that query name the material while the terrain answers height and normal, edits
   included (the sea and edit-painted layers stay the terrain's; never pass the world's
@@ -127,7 +129,7 @@ commands.entity(bodies["Moon"]).insert(PlanetTerrain::moon(7).with_radius(1_737_
 ```
 
 `examples/terrain_shots.rs` renders the test views headless (lab prints, rain, snow, painted
-ground, the range, the coast, the Moon and Mars from orbit) and `examples/terrain_map.rs` draws a relief
+ground and a patchwork of painted layers, the range, the coast, the Moon and Mars from orbit) and `examples/terrain_map.rs` draws a relief
 map around the home pad for tuning shapes.
 
 ## Test cases in the showcase
