@@ -14,7 +14,7 @@ wgpu.workspace = true
 bytemuck.workspace = true
 pollster.workspace = true
 image.workspace = true
-gltf = { workspace = true, features = ["KHR_materials_emissive_strength", "KHR_materials_unlit", "KHR_texture_transform"] }
+gltf = { workspace = true, features = ["KHR_materials_emissive_strength", "KHR_materials_unlit", "KHR_texture_transform", "extensions"] }
 serde.workspace = true
 serde_json.workspace = true
 tracing.workspace = true

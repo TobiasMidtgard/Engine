@@ -1,13 +1,15 @@
 //! Player input → [`MoveIntent`], so a character with [`PlayerControlled`] is playable with
 //! the default action map (`move`, `jump`, `sprint`, `crouch`, `dash`, `attack`, `block`, plus
-//! `lock_on` and `pilot`, which the module binds if the game hasn't). Movement is relative to
-//! the active camera.
+//! `lock_on`, `pilot` and `grapple`, which the module binds if the game hasn't). Movement is
+//! relative to the active camera, and the grapple fires at what the camera looks at.
 
+use engine_core::math::{DVec3, Vec3};
 use engine_core::prelude::*;
-use engine_input::{ActionState, Binding, GamepadButton, InputMap, MouseButton};
+use engine_input::{ActionState, Binding, GamepadButton, InputMap, KeyCode, MouseButton};
 use engine_render::Camera;
 use engine_world::AttackKind;
 use engine_world::locomotion::MoveIntent;
+use engine_world::physics::{PhysicsQueries, QueryFilter};
 
 use crate::lockon::LockOn;
 use crate::mover::{Mover, flat};
@@ -25,11 +27,13 @@ pub struct PlayerControlled {
 #[allow(clippy::type_complexity)]
 pub(crate) fn player_intent(
     actions: Option<Res<ActionState>>,
+    queries: Res<PhysicsQueries>,
     cameras: Query<(&Camera, &GlobalTransform)>,
     bodies: Query<&Transform>,
     mut q: Query<(
+        Entity,
         &Transform,
-        &Mover,
+        &mut Mover,
         &MovementProfile,
         &PlayerControlled,
         &mut MoveIntent,
@@ -39,13 +43,17 @@ pub(crate) fn player_intent(
     let Some(actions) = actions else {
         return;
     };
-    let camera = cameras
+    let view = cameras
         .iter()
         .filter(|(c, _)| c.active)
         .max_by_key(|(c, _)| c.order)
-        .map(|(_, t)| t.forward());
-    for (t, m, p, pc, mut intent, lock) in &mut q {
+        .map(|(_, t)| (t.translation(), t.forward()));
+    let camera = view.map(|(_, f)| f);
+    for (entity, t, mut m, p, pc, mut intent, lock) in &mut q {
         let up = m.up;
+        if actions.pressed_since_tick("grapple") {
+            m.pending_grapple = Some(grapple_aim(&queries, entity, t, &m, p, view));
+        }
         let fwd = camera
             .map(|f| flat(f, up))
             .and_then(|f| f.try_normalize())
@@ -82,8 +90,29 @@ pub(crate) fn player_intent(
     }
 }
 
-/// Bind `lock_on` (middle mouse, right stick click) and `pilot` (P, d-pad down) unless the
-/// game's action map already has them (`Startup`).
+/// Where a grapple shot goes: what the camera looks at (seen past the character), or straight
+/// ahead and up without a camera.
+fn grapple_aim(
+    queries: &PhysicsQueries,
+    me: Entity,
+    t: &Transform,
+    m: &Mover,
+    p: &MovementProfile,
+    view: Option<(DVec3, Vec3)>,
+) -> DVec3 {
+    let Some((eye, fwd)) = view else {
+        let dir = (m.facing + m.up * 0.6).normalize_or(m.facing);
+        return t.translation + (dir * p.grapple_range).as_dvec3();
+    };
+    let reach = p.grapple_range + (t.translation - eye).length() as f32;
+    queries
+        .0
+        .raycast(eye, fwd, reach, &QueryFilter::excluding(me))
+        .map_or(eye + (fwd * reach).as_dvec3(), |h| h.point)
+}
+
+/// Bind `lock_on` (middle mouse, right stick click), `pilot` (P, d-pad down) and `grapple`
+/// (F, left bumper) unless the game's action map already has them (`Startup`).
 pub(crate) fn bind_actions(map: Option<ResMut<InputMap>>) {
     let Some(mut map) = map else {
         return;
@@ -93,7 +122,11 @@ pub(crate) fn bind_actions(map: Option<ResMut<InputMap>>) {
             .bind("lock_on", Binding::Gamepad(GamepadButton::RightStick));
     }
     if !map.actions.contains_key("pilot") {
-        map.bind("pilot", Binding::Key(engine_input::KeyCode::P))
+        map.bind("pilot", Binding::Key(KeyCode::P))
             .bind("pilot", Binding::Gamepad(GamepadButton::DPadDown));
+    }
+    if !map.actions.contains_key("grapple") {
+        map.bind("grapple", Binding::Key(KeyCode::F))
+            .bind("grapple", Binding::Gamepad(GamepadButton::LeftBumper));
     }
 }

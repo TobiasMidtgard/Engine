@@ -27,6 +27,9 @@ struct VsOut {
     @location(11) pixels: f32,         // sprite width on screen in pixels
 };
 
+// Narrowest a sprite is drawn, pixels.
+const MIN_PIXELS: f32 = 1.5;
+
 fn hidden() -> VsOut {
     var out: VsOut;
     out.position = vec4<f32>(2.0, 2.0, 2.0, 1.0);
@@ -76,6 +79,22 @@ fn vs_particle(@builtin(vertex_index) vi: u32, @builtin(instance_index) slot: u3
         right = cx * cr + cy * sr;
         up = cy * cr - cx * sr;
     }
+    // Sprites thinner than MIN_PIXELS on screen grow to it and dim to match, so distant
+    // sparks, stars and drops still show (and don't shimmer) with the same total light.
+    let px_per_m = frame.proj[1][1] * frame.viewport.y * 0.5 / max(length(rel), 1e-3);
+    let width_px = 2.0 * half.x * px_per_m;
+    var dim = 1.0;
+    if (width_px < MIN_PIXELS && width_px > 0.0) {
+        let grow = MIN_PIXELS / width_px;
+        half.x *= grow;
+        if (facing == 1u && speed > 1e-3) {
+            // A streak keeps its length; only its width grows.
+            dim = 1.0 / grow;
+        } else {
+            half.y *= grow;
+            dim = 1.0 / (grow * grow);
+        }
+    }
     let pos = center + right * (corner.x * half.x) + up * (corner.y * half.y);
 
     var out: VsOut;
@@ -87,13 +106,13 @@ fn vs_particle(@builtin(vertex_index) vi: u32, @builtin(instance_index) slot: u3
     out.inscatter = fog.inscatter;
     // Fade particles that come very close to the camera instead of filling the screen.
     let near_fade = saturate((length(rel) - frame.exposure.z * 4.0) / max(size * 1.5, 0.1));
-    out.coverage = col.a * near_fade;
+    out.coverage = col.a * near_fade * dim;
     out.additive = e.shade.z;
     out.sprite = u32(e.spin_look.z);
     out.seed = p.seed;
     out.soft = e.shade.w;
     out.age = t;
-    out.pixels = 2.0 * half.x * frame.proj[1][1] * frame.viewport.y * 0.5 / max(length(rel), 1e-3);
+    out.pixels = 2.0 * half.x * px_per_m;
     if (e.shade.y > 0.0 && frame.sun_dir.y > -0.05) {
         // Smoke and dust read as volumes when their sun side is brighter (see `volume_shade`).
         let to_eye = -rel / max(length(rel), 1e-4);
@@ -189,10 +208,61 @@ fn haze(in: VsOut, c: vec2<f32>, r: f32) -> vec4<f32> {
     return vec4<f32>(delta, 0.0);
 }
 
+// A portal: the world behind it swirled into a vortex that sinks into the portal's color and
+// darkens toward its eye, glowing arms turning inward and a burning rim. `jx` and `jy` are how
+// the sprite coordinates change per pixel across and down the screen, to turn a shift within
+// the sprite into one on screen at any angle.
+fn vortex(in: VsOut, c: vec2<f32>, r: f32, jx: vec2<f32>, jy: vec2<f32>) -> vec4<f32> {
+    let a = smoothstep(1.0, 0.88, r) * in.coverage;
+    if (a <= 0.002) { discard; }
+    let t = (frame.time.x % 3600.0) + in.seed * 97.0;
+    // The world bends toward the eye: a twist that tightens inward and breathes, and a pull
+    // that shows a shrunken, far-off view in the middle.
+    let inner = 1.0 - r;
+    let twist = inner * inner * 2.8 + 0.3 * inner * sin(t * 0.8 + r * 7.0);
+    let cs = cos(twist);
+    let sn = sin(twist);
+    let seen = vec2<f32>(c.x * cs - c.y * sn, c.x * sn + c.y * cs) * mix(1.0, 0.55, inner * inner);
+    let d = seen - c;
+    let det = jx.x * jy.y - jy.x * jx.y;
+    var shift = vec2<f32>(0.0);
+    if (abs(det) > 1e-12) {
+        shift = vec2<f32>(jy.y * d.x - jy.x * d.y, jx.x * d.y - jx.y * d.x) / det;
+    }
+    // Seen edge-on the shift would run off the screen; keep it within the sprite's reach.
+    shift = shift * min(1.0, in.pixels / max(length(shift), 1e-4));
+    let size = vec2<i32>(textureDimensions(scene_color));
+    let here = vec2<i32>(in.position.xy);
+    var there = clamp(vec2<i32>(in.position.xy + shift), vec2<i32>(0), size - 1);
+    // Only the world behind the portal shows through it, never something in front (reverse Z).
+    if (textureLoad(scene_depth, there, 0) > in.position.z) { there = here; }
+    var world = textureLoad(scene_color, there, 0).rgb;
+    let peak = max(in.radiance.r, max(in.radiance.g, in.radiance.b));
+    let hue = in.radiance / max(peak, 1e-6);
+    let lum = dot(world, vec3<f32>(0.2126, 0.7152, 0.0722));
+    let sink = smoothstep(0.8, 0.05, r);
+    world = mix(world, hue * lum * 1.5, sink * 0.75) * mix(1.0, 0.2, sink * sink);
+    // Arms: a few log spirals turning inward, broken up by noise.
+    let ang = atan2(c.y, c.x);
+    let spiral = ang * 3.0 + log(max(r, 0.02)) * 4.5 + t * 2.2;
+    let streak = pow(0.5 + 0.5 * sin(spiral), 5.0);
+    let n = fbm2(vec2<f32>(spiral * 0.6, r * 5.0 - t * 0.9) + in.seed * 13.0, 3);
+    let arms = streak * (0.35 + n) * smoothstep(0.04, 0.45, r) * smoothstep(1.0, 0.55, r);
+    // The rim burns unevenly, flaring and fading as it turns.
+    let flare = 0.15 + 3.0 * sq(fbm2(vec2<f32>(ang * 5.0 + t * 1.3, t * 0.7) + in.seed * 7.0, 3));
+    let rim = exp(-sq((r - 0.935) / 0.022)) * flare + 0.06 * exp(-sq((r - 0.9) / 0.1));
+    let eye = exp(-r * r * 40.0) * 0.5;
+    let glow = in.radiance * (arms * 1.1 + rim * 1.5 + eye);
+    return vec4<f32>((world + glow) * a, a);
+}
+
 @fragment
 fn fs_particle(in: VsOut) -> @location(0) vec4<f32> {
     let c = in.uv * 2.0 - 1.0;
     let r = length(c);
+    // Taken here, in uniform control flow, for the sprites that need them.
+    let jx = dpdx(c);
+    let jy = dpdy(c);
     var a = 0.0;
     var rgb = in.radiance;
     switch in.sprite {
@@ -254,6 +324,9 @@ fn fs_particle(in: VsOut) -> @location(0) vec4<f32> {
         }
         case 10u: { // heat haze: bends the scene behind it, adds nothing of its own
             return haze(in, c, r);
+        }
+        case 12u: { // portal: the scene behind it swirled into a vortex
+            return vortex(in, c, r, jx, jy);
         }
         case 11u: { // fiery billow: glowing cracks in a dense puff, cooling to smoke
             let q = c * 2.2 + vec2<f32>(in.seed * 29.0, in.seed * 13.0) + vec2<f32>(0.0, in.age * 0.6);

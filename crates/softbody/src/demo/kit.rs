@@ -53,11 +53,25 @@ pub enum Mat {
     Rope,
     /// Black rubber (hoses, grips, feet).
     Rubber,
+    /// Varnished mahogany: warm red-brown, glossy, with grain (boat trim, transom, rudder).
+    Varnish,
+    /// Varnished spruce and oak: golden, glossy (spars, frames, oars, mast hoops).
+    VarnishLight,
+    /// Glossy deep-green topside enamel.
+    HullPaint,
+    /// Glossy white enamel (the boot-top stripe).
+    BootTop,
+    /// Cream semi-gloss interior paint.
+    InteriorPaint,
+    /// Matte red-brown antifouling below the waterline.
+    Antifoul,
+    /// Cast and polished bronze (boat fittings).
+    Bronze,
 }
 
 impl Mat {
     /// Every material, in declaration order.
-    pub const ALL: [Mat; 18] = [
+    pub const ALL: [Mat; 25] = [
         Mat::Timber,
         Mat::TimberDark,
         Mat::Pine,
@@ -76,6 +90,13 @@ impl Mat {
         Mat::Concrete,
         Mat::Rope,
         Mat::Rubber,
+        Mat::Varnish,
+        Mat::VarnishLight,
+        Mat::HullPaint,
+        Mat::BootTop,
+        Mat::InteriorPaint,
+        Mat::Antifoul,
+        Mat::Bronze,
     ];
 
     /// Asset key of this material in `Assets<StandardMaterial>`.
@@ -88,6 +109,10 @@ impl Mat {
 const WOOD_SIZE: u32 = 1024;
 const SIZE: u32 = 512;
 const ROPE_SIZE: u32 = 256;
+/// The boat's finishes: varnished wood (texels along × across the grain), enamel, antifouling.
+const VARNISH_SIZE: (u32, u32) = (1024, 512);
+const PAINT_SIZE: u32 = 512;
+const ANTIFOUL_SIZE: u32 = 256;
 
 /// Albedo, normal and ORM handles of one texture set.
 #[derive(Clone, Copy)]
@@ -159,10 +184,15 @@ pub fn ensure_materials(world: &mut World) {
     let stone = texgen::stone(SIZE);
     let concrete = texgen::concrete(SIZE);
     let rope = texgen::rope(ROPE_SIZE);
-    let mut bytes: usize = [&wood, &galv, &iron, &metal, &stone, &concrete, &rope]
-        .iter()
-        .map(|t| t.bytes())
-        .sum();
+    let varnish = texgen::varnished_wood(VARNISH_SIZE.0, VARNISH_SIZE.1);
+    let enamel = texgen::gloss_paint(PAINT_SIZE);
+    let antifoul = texgen::antifoul(ANTIFOUL_SIZE);
+    let mut bytes: usize = [
+        &wood, &galv, &iron, &metal, &stone, &concrete, &rope, &varnish, &enamel, &antifoul,
+    ]
+    .iter()
+    .map(|t| t.bytes())
+    .sum();
     bytes += (paint_albedos.len() + 2) * (SIZE * SIZE * 4) as usize * 4 / 3;
 
     let mut images = world.resource_mut::<Assets<Image>>();
@@ -183,6 +213,17 @@ pub fn ensure_materials(world: &mut World) {
     let stone = add_set(&mut images, stone);
     let concrete = add_set(&mut images, concrete);
     let rope = add_set(&mut images, rope);
+    let varnish = add_set(&mut images, varnish);
+    let enamel = add_set(&mut images, enamel);
+    let antifoul = add_set(&mut images, antifoul);
+    // Varnished wood tiles 1.6 m along the grain (u) and 0.3 m across it (v).
+    let varnished = |base: [f32; 3], rough: f32| StandardMaterial {
+        uv_scale: [
+            1.0 / texgen::VARNISH_TILE_M.0,
+            1.0 / texgen::VARNISH_TILE_M.1,
+        ],
+        ..textured(varnish, base, rough, 0.0, 1.0)
+    };
 
     let mut mats = world.resource_mut::<Assets<StandardMaterial>>();
     for m in Mat::ALL {
@@ -205,6 +246,13 @@ pub fn ensure_materials(world: &mut World) {
             Mat::Concrete => textured(concrete, [1.0; 3], 1.0, 0.0, 1.0 / 1.5),
             Mat::Rope => textured(rope, [1.0; 3], 1.0, 0.0, 1.0),
             Mat::Rubber => textured(metal, [0.035, 0.035, 0.035], 0.75, 0.0, 2.0),
+            Mat::Varnish => varnished([0.30, 0.12, 0.058], 0.26),
+            Mat::VarnishLight => varnished([0.95, 0.63, 0.33], 0.28),
+            Mat::HullPaint => textured(enamel, [0.011, 0.05, 0.03], 0.2, 0.0, 1.0),
+            Mat::BootTop => textured(enamel, [0.86, 0.86, 0.83], 0.22, 0.0, 1.0),
+            Mat::InteriorPaint => textured(enamel, [0.88, 0.74, 0.5], 0.55, 0.0, 1.0),
+            Mat::Antifoul => textured(antifoul, [0.24, 0.05, 0.03], 1.0, 0.0, 2.0),
+            Mat::Bronze => textured(metal, [0.74, 0.47, 0.24], 0.42, 1.0, 2.0),
         };
         mats.insert_keyed(&m.key(), material);
     }
@@ -272,12 +320,23 @@ impl ModelBuilder {
 
     /// Register the meshes (once per key) and return the model.
     pub fn build(self, commands: &mut Commands) -> Model {
+        let (model, meshes) = self.finish();
+        for (key, mesh) in meshes {
+            register_mesh(commands, key, mesh);
+        }
+        model
+    }
+
+    /// The model and its meshes under their asset keys, without registering them (for
+    /// callers that register later or only when a world lacks them).
+    pub fn finish(self) -> (Model, Vec<(String, Mesh)>) {
         let triangles: usize = self.parts.values().map(Mesh::triangle_count).sum();
         engine_core::log::debug!(
             "softbody yard: model {} has {triangles} triangles",
             self.name
         );
         let mut parts = Vec::new();
+        let mut meshes = Vec::new();
         for ((mat, shadows), mesh) in self.parts {
             if mesh.indices.is_empty() {
                 continue;
@@ -292,10 +351,10 @@ impl ModelBuilder {
             } else {
                 mesh
             };
-            register_mesh(commands, key.clone(), mesh);
+            meshes.push((key.clone(), mesh));
             parts.push((key, mat, shadows));
         }
-        Model { parts }
+        (Model { parts }, meshes)
     }
 }
 
@@ -306,6 +365,11 @@ pub struct Model {
 }
 
 impl Model {
+    /// Asset keys of the model's meshes.
+    pub fn keys(&self) -> impl Iterator<Item = &str> {
+        self.parts.iter().map(|(key, _, _)| key.as_str())
+    }
+
     /// Spawn the parts as children of `root` (at the root's origin, or at `local`).
     pub fn attach(&self, commands: &mut Commands, root: Entity, local: Transform) {
         for (key, mat, shadows) in &self.parts {

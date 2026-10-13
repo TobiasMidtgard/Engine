@@ -30,6 +30,7 @@ mod rocks;
 mod scenery;
 mod texgen;
 mod tour;
+mod tower;
 mod village;
 mod zones;
 
@@ -145,7 +146,7 @@ fn setup(
     scenery::spawn_village(&mut commands, &lib, &land, &mut rng);
     scenery::spawn_cliffs_and_stream(&mut commands, &mut meshes, &lib, &land, &mut rng);
     placeholders::cave_shell(&mut commands, &mut meshes, &lib, &land, &mut rng);
-    zones::spawn_demos(&mut commands, &mut meshes, &lib, &land, &mut rng);
+    zones::spawn_demos(&mut commands, &lib, &land, &mut rng);
     if use_planet.is_some() {
         planet::spawn_moon(&mut commands, zones::moon_position());
     } else {
@@ -154,6 +155,8 @@ fn setup(
     camera::spawn_camera(&mut commands);
     // The weather module drives the sun, the moon and the clock (`engine_weather::Sky`).
     engine_weather::spawn_sky_lights(&mut commands);
+    // The tower's textures baked on other threads while the world spawned.
+    lib.tower.finish_textures(&mut images);
     engine::core::log::info!(
         "showcase world built in {:.1} s",
         t0.elapsed().as_secs_f32()

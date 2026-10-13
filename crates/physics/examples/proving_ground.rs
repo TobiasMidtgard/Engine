@@ -44,6 +44,14 @@ const SHOTS: &[(f32, &str, [f64; 3], [f64; 3])] = &[
         [-1.0, 6.0, 25.0],
         [-4.0, 2.5, 9.0],
     ),
+    // The drums on the barrel run's ramp, then rolling abreast down the runway, then stopped in
+    // the sand.
+    (
+        2.2,
+        "11_barrel_run_ramp",
+        [-19.0, 2.4, 24.2],
+        [-30.0, 1.3, 19.5],
+    ),
     (
         2.6,
         "05_pile_and_tower",
@@ -53,11 +61,18 @@ const SHOTS: &[(f32, &str, [f64; 3], [f64; 3])] = &[
     (5.0, "06_dominoes", [8.0, 4.5, -4.0], [5.0, 0.4, -16.0]),
     (6.0, "07_bridge", [27.5, 4.0, 10.0], [18.0, 2.6, 10.0]),
     (6.5, "08_turntable", [37.0, 6.5, 20.0], [30.0, 0.5, 10.0]),
+    (7.9, "12_barrel_run", [0.0, 1.7, 23.2], [-9.0, 0.35, 18.9]),
     (
         12.0,
         "09_overview_after",
         [0.0, 24.0, 44.0],
         [0.0, 2.0, -3.0],
+    ),
+    (
+        20.0,
+        "13_barrel_run_sand",
+        [22.5, 1.6, 23.9],
+        [29.0, 0.4, 19.0],
     ),
     // The dominoes replay every 30 s: standing again, the first one tipping.
     (

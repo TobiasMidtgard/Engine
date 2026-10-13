@@ -429,3 +429,47 @@ fn a_car_in_a_slow_motion_bubble_drives_in_its_own_seconds() {
         "slow {slow_rpm:.0} rpm, normal {normal_rpm_after_2:.0} rpm"
     );
 }
+
+/// A parked car moved onto a mark at 30 m/s (`vehicles.place`) drives straight on in a
+/// fitting gear. Its wheels and gearbox would otherwise start still and in first: engine
+/// braking at the limiter locks the rear wheels and the car spins.
+#[test]
+fn a_car_placed_at_speed_drives_on_in_a_fitting_gear() {
+    let mut app = flat_app("concrete");
+    calm(&mut app);
+    let car = car_on(&mut app, DVec3::ZERO, Vec3::NEG_Z);
+    app.world.entity_mut(car).insert(Name::new("Placed car"));
+    run_for(&mut app, 1.0);
+    let placed = engine_core::registry::call_api(
+        &mut app.world,
+        "vehicles.place",
+        serde_json::json!({"vehicle": "Placed car", "at": [200.0, 0.0, 0.0], "yaw_deg": 90.0, "speed": 30.0}),
+    );
+    assert!(placed.is_ok(), "{placed:?}");
+    controls(&mut app, car, |c| c.throttle = 0.3);
+    let gear_after = |app: &App| {
+        app.world
+            .get::<engine_vehicles::drivetrain::Drivetrain>(car)
+            .expect("drivetrain")
+            .state
+            .gear
+    };
+    run_for(&mut app, 0.1);
+    let gear = gear_after(&app);
+    run_for(&mut app, 2.0);
+    let t = transform(&app, car);
+    let fwd = t.rotation * Vec3::NEG_Z;
+    let tel = telemetry(&app, car);
+    eprintln!(
+        "placed: gear {gear}, after 2 s at {:.1} m/s heading ({:.3}, {:.3}), x {:.1}, z {:.2}",
+        tel.speed, fwd.x, fwd.z, t.translation.x, t.translation.z
+    );
+    assert!(gear >= 3, "still in gear {gear}");
+    assert!(tel.speed > 27.0, "slowed to {:.1} m/s", tel.speed);
+    assert!(fwd.dot(Vec3::X) > 0.995, "turned to {fwd:?}");
+    assert!(
+        t.translation.z.abs() < 1.0,
+        "drifted sideways to z {:.2}",
+        t.translation.z
+    );
+}

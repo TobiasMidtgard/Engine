@@ -653,6 +653,8 @@ pub struct AnimInput {
     /// The top of the ledge being mantled or hung from (character space) and whether still
     /// rising.
     pub ledge: Option<(Vec3, bool)>,
+    /// The grapple hook (character space) and whether it has bitten.
+    pub grapple: Option<(Vec3, bool)>,
     /// Part of a dash-strike.
     pub dash_strike: bool,
     pub attack: Option<AttackAnim>,
@@ -676,6 +678,7 @@ impl Default for AnimInput {
             air_jumps_left: 1,
             wall: None,
             ledge: None,
+            grapple: None,
             dash_strike: false,
             attack: None,
             blocking: false,
@@ -872,6 +875,10 @@ struct Weights {
     wall: f32,
     mantle: f32,
     hang: f32,
+    /// The arm out toward the grapple hook.
+    aim: f32,
+    /// Reeled in on the grapple's rope.
+    reel: f32,
     dash: f32,
     attack: f32,
     block: f32,
@@ -907,6 +914,8 @@ pub struct Animator {
     /// Last cut angle reached (for the recovery hold).
     cut_u: f32,
     ledge: Option<(Vec3, bool)>,
+    /// Where the grapple hook was last (character space).
+    hook: Option<Vec3>,
     /// Hand-over-hand cycle while shimmying along a ledge, 0..1.
     shimmy: f32,
     secs: f32,
@@ -941,6 +950,7 @@ impl Animator {
             cut: None,
             cut_u: 0.0,
             ledge: None,
+            hook: None,
             shimmy: 0.0,
             secs: 0.0,
             last: None,
@@ -1027,6 +1037,9 @@ impl Animator {
         if input.ledge.is_some() {
             self.ledge = input.ledge;
         }
+        if let Some((hook, _)) = input.grapple {
+            self.hook = Some(hook);
+        }
         if input.mode == LocomotionMode::Climb {
             // One hand-over-hand cycle per 0.6 m along the ledge.
             self.shimmy = (self.shimmy + input.velocity.x * dt / 0.6).rem_euclid(1.0);
@@ -1108,6 +1121,9 @@ impl Animator {
         ease(&mut w.wall, on(mode == M::WallRun), 11.0);
         ease(&mut w.mantle, on(mode == M::Mantle), 16.0);
         ease(&mut w.hang, on(mode == M::Climb), 14.0);
+        ease(&mut w.aim, on(input.grapple.is_some()), 22.0);
+        let reeling = input.grapple.is_some_and(|(_, bit)| bit) && mode == M::Air;
+        ease(&mut w.reel, on(reeling), 10.0);
         ease(&mut w.dash, on(mode == M::Dash), 20.0);
         let attacking = input.attack.is_some();
         let attack_target = match input.attack {
@@ -1167,6 +1183,11 @@ impl Animator {
         {
             let sway = (self.shimmy * TAU).sin() * smooth(0.1, 0.8, input.velocity.x.abs());
             p.blend(&hang(top, sway), w.hang, Channels::Body);
+        }
+        if w.reel > 1e-3
+            && let Some(hook) = self.hook
+        {
+            p.blend(&reel(hook), w.reel, Channels::Body);
         }
         if w.dash > 1e-3 {
             p.blend(&dash(input.dash_strike), w.dash, Channels::Body);
@@ -1272,6 +1293,13 @@ impl Animator {
                 w.hang,
                 Channels::Arms,
             );
+        }
+        if w.aim > 1e-3
+            && let Some(hook) = self.hook
+        {
+            let mut a = to_ground(air_arms(0.0));
+            aim_arm(&mut a, hook, body);
+            p.blend(&a, w.aim, Channels::Arms);
         }
         if w.dash > 1e-3 {
             p.blend(&to_ground(dash_arms()), w.dash, Channels::Arms);
@@ -1652,6 +1680,56 @@ fn hang(top: Vec3, sway: f32) -> Pose {
 }
 
 /// Dashing: a low forward lunge through the air.
+/// The left shoulder, before the body rotation.
+const SHOULDER_L: Vec3 = Vec3::new(-0.19, 1.44, 0.0);
+
+/// Reeled in on the grapple toward `hook` (character space): the body leans along the rope,
+/// the head looks up it and the legs trail, knees bent.
+fn reel(hook: Vec3) -> Pose {
+    let mut p = Pose::BIND;
+    let a = ANKLE_HEIGHT;
+    let dir = (hook - SHOULDER_L).normalize_or(Vec3::NEG_Z);
+    let up = dir.y.clamp(-1.0, 1.0);
+    p.pelvis = v3(0.0, 0.99, 0.02);
+    p.pelvis_rot = ry(0.2);
+    p.spine = pitch(-0.08) * ry(0.12);
+    p.chest = pitch(-0.06) * ry(0.18);
+    p.neck = pitch(-0.1);
+    p.head = pitch(-0.2 - 0.35 * up.max(0.0));
+    p.ankle = [v3(-0.13, a + 0.3, 0.05), v3(0.12, a + 0.12, 0.34)];
+    p.foot = [pitch(0.55), pitch(0.85)];
+    p.knee = [v3(-0.15, 0.1, -1.0), v3(0.15, -0.2, -1.0)];
+    // Lean a third of the way along the rope.
+    let lean = Quat::from_rotation_arc(Vec3::Y, (dir + Vec3::Y * 0.4).normalize());
+    p.body = Quat::IDENTITY.slerp(lean, 0.35);
+    p.pivot = v3(0.0, 1.3, 0.0);
+    p
+}
+
+/// Reaches the left arm out along the rope toward `hook` (character space): the launcher on
+/// the wrist points at it, the fist closed around its grip.
+fn aim_arm(p: &mut Pose, hook: Vec3, body: &Pose) {
+    // Hands are placed before the body rotation is applied.
+    let hook = body.pivot + body.body.inverse() * (hook - body.pivot);
+    let shoulder = body
+        .chest_xf()
+        .point(Bone::UpperArmL.joint() - Bone::Chest.joint());
+    let dir = (hook - shoulder).normalize_or(Vec3::NEG_Z);
+    let palm = Vec3::X - dir * dir.x;
+    p.hand_l = Xf::new(
+        shoulder + dir * (UPPER_ARM + FOREARM - 0.04),
+        left_hand(palm, dir),
+    );
+    p.follow_l = 0.0;
+    p.grip_l = 0.0;
+    p.curl_l = 0.95;
+    let mut elbow = Vec3::NEG_Y - dir * dir.y;
+    if elbow.length_squared() < 1e-4 {
+        elbow = Vec3::Z;
+    }
+    p.elbow[0] = (elbow.normalize() + v3(-0.4, 0.0, 0.0)).normalize();
+}
+
 fn dash(strike: bool) -> Pose {
     let mut p = Pose::BIND;
     let a = ANKLE_HEIGHT;

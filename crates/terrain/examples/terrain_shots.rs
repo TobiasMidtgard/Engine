@@ -37,13 +37,22 @@ struct View {
     above_ground: Option<f64>,
     /// Sun azimuth (degrees from north toward east) and elevation (degrees).
     sun: (f64, f64),
-    ev100: f32,
+    /// The showcase's own auto exposure by default, so pictures look the way the game shows
+    /// them; fixed for views of space, where the black sky would brighten the planet.
+    exposure: Exposure,
     fov: f32,
     lab: bool,
     /// Hand-made, painted ground around home (roads, a plaza, fields, woods, a beach).
     painted: bool,
     ground: Ground,
 }
+
+const AUTO: Exposure = Exposure::Auto {
+    min_ev100: -3.0,
+    max_ev100: 18.0,
+    speed: 2.0,
+    compensation: 0.0,
+};
 
 const BASE: View = View {
     name: "",
@@ -52,7 +61,7 @@ const BASE: View = View {
     target: DVec3::ZERO,
     above_ground: None,
     sun: (220.0, 35.0),
-    ev100: 14.5,
+    exposure: AUTO,
     fov: 60.0,
     lab: false,
     painted: false,
@@ -98,7 +107,7 @@ fn views() -> Vec<View> {
             eye: DVec3::new(-21.0, 1.9, 9.0),
             target: DVec3::new(-13.0, 0.0, 1.0),
             sun: (250.0, 18.0),
-            ev100: 13.5,
+            exposure: Exposure::Manual { ev100: 13.5 },
             lab: true,
             ground: Ground::Rain,
             ..BASE
@@ -108,7 +117,7 @@ fn views() -> Vec<View> {
             eye: DVec3::new(-4.0, 22.0, 34.0),
             target: DVec3::new(0.0, 0.0, -6.0),
             sun: (230.0, 25.0),
-            ev100: 15.0,
+            exposure: Exposure::Manual { ev100: 15.0 },
             lab: true,
             ground: Ground::Snow,
             ..BASE
@@ -130,6 +139,56 @@ fn views() -> Vec<View> {
             ..BASE
         },
         View {
+            name: "painted_snow",
+            eye: DVec3::new(-35.0, 38.0, 75.0),
+            target: DVec3::new(15.0, 0.0, -45.0),
+            sun: (230.0, 32.0),
+            painted: true,
+            ground: Ground::Snow,
+            ..BASE
+        },
+        View {
+            name: "painted_patchwork",
+            eye: DVec3::new(-60.0, 32.0, -150.0),
+            target: DVec3::new(20.0, 0.0, -260.0),
+            sun: (230.0, 32.0),
+            painted: true,
+            ..BASE
+        },
+        View {
+            name: "painted_border",
+            eye: DVec3::new(-4.0, 2.2, -172.0),
+            target: DVec3::new(8.0, 0.0, -200.0),
+            sun: (235.0, 28.0),
+            painted: true,
+            ..BASE
+        },
+        View {
+            name: "tinted_meadow",
+            eye: DVec3::new(185.0, 0.0, 30.0),
+            target: DVec3::new(330.0, 0.0, -230.0),
+            above_ground: Some(1.7),
+            sun: (230.0, 32.0),
+            painted: true,
+            ..BASE
+        },
+        View {
+            name: "tinted_meadow_high",
+            eye: DVec3::new(175.0, 24.0, 35.0),
+            target: DVec3::new(300.0, 0.0, -150.0),
+            sun: (230.0, 32.0),
+            painted: true,
+            ..BASE
+        },
+        View {
+            name: "meadow_eye",
+            eye: DVec3::new(900.0, 0.0, 300.0),
+            target: DVec3::new(1_300.0, 0.0, -400.0),
+            above_ground: Some(1.7),
+            sun: (230.0, 32.0),
+            ..BASE
+        },
+        View {
             name: "earth_range",
             eye: DVec3::new(-600.0, 0.0, -1_500.0),
             target: DVec3::new(2_000.0, 1_200.0, -32_000.0),
@@ -143,7 +202,7 @@ fn views() -> Vec<View> {
             target: DVec3::new(-17_000.0, -400.0, 20_000.0),
             above_ground: Some(250.0),
             sun: (255.0, 12.0),
-            ev100: 14.8,
+            exposure: Exposure::Manual { ev100: 14.8 },
             ..BASE
         },
         View {
@@ -168,6 +227,7 @@ fn views() -> Vec<View> {
             target: DVec3::new(0.0, 0.0, -30_000.0),
             sun: (230.0, 28.0),
             fov: 65.0,
+            exposure: Exposure::Manual { ev100: 14.5 },
             ..BASE
         },
         View {
@@ -176,6 +236,7 @@ fn views() -> Vec<View> {
             target: DVec3::new(0.0, -300_000.0, -1_500_000.0),
             sun: (200.0, 35.0),
             fov: 60.0,
+            exposure: Exposure::Manual { ev100: 14.5 },
             ..BASE
         },
         View {
@@ -184,6 +245,7 @@ fn views() -> Vec<View> {
             target: DVec3::new(0.0, -6_371_000.0, 0.0),
             sun: (120.0, 40.0),
             fov: 50.0,
+            exposure: Exposure::Manual { ev100: 14.5 },
             ..BASE
         },
         View {
@@ -193,7 +255,7 @@ fn views() -> Vec<View> {
             target: DVec3::new(9_000.0, -200.0, -9_000.0),
             above_ground: Some(1.8),
             sun: (200.0, 12.0),
-            ev100: 15.0,
+            exposure: Exposure::Manual { ev100: 15.0 },
             ..BASE
         },
         View {
@@ -202,7 +264,7 @@ fn views() -> Vec<View> {
             eye: DVec3::new(0.0, 60_000.0, 120_000.0),
             target: DVec3::new(0.0, -40_000.0, -150_000.0),
             sun: (260.0, 15.0),
-            ev100: 15.0,
+            exposure: Exposure::Manual { ev100: 15.0 },
             fov: 70.0,
             ..BASE
         },
@@ -212,7 +274,7 @@ fn views() -> Vec<View> {
             eye: DVec3::new(0.0, 900_000.0, 3_200_000.0),
             target: DVec3::new(0.0, -1_737_400.0, 0.0),
             sun: (100.0, 20.0),
-            ev100: 15.0,
+            exposure: Exposure::Manual { ev100: 15.0 },
             fov: 50.0,
             ..BASE
         },
@@ -222,7 +284,7 @@ fn views() -> Vec<View> {
             eye: DVec3::new(0.0, 1_500_000.0, 6_000_000.0),
             target: DVec3::new(0.0, -3_389_500.0, 0.0),
             sun: (110.0, 30.0),
-            ev100: 14.5,
+            exposure: Exposure::Manual { ev100: 14.5 },
             fov: 50.0,
             ..BASE
         },
@@ -263,6 +325,24 @@ fn painted_ground(x: f64, z: f64) -> Option<OverlayPaint> {
             1 => OverlayPaint::tint([0.17, 0.11, 0.24], 0.8),
             _ => OverlayPaint::layer("dirt", 1.0).tinted([0.11, 0.075, 0.045], 0.6),
         });
+    }
+    // A patchwork of grounds at full weight meeting edge to edge, the way a level paints its
+    // valley cover by cover: their borders blend instead of stepping along triangles.
+    if (-170.0..170.0).contains(&x) && (-330.0..-170.0).contains(&z) {
+        let (wx, wz) = (x + 9.0 * (z / 23.0).sin(), z + 9.0 * (x / 31.0).sin());
+        let cell = ((wx / 40.0).floor() as i64 * 7 + (wz / 40.0).floor() as i64 * 3).rem_euclid(5);
+        let layer = ["grass", "sand", "dirt", "gravel", "leaves"][cell as usize];
+        return Some(OverlayPaint::layer(layer, 1.0));
+    }
+    // A meadow painted the way the showcase paints its valley: grass at full weight, tinted
+    // toward a lush-to-dry green that drifts over tens of meters.
+    if (170.0..420.0).contains(&x) && (-330.0..40.0).contains(&z) {
+        let dry =
+            ((x / 55.0).sin() * (z / 47.0).cos() * 0.5 + (x / 9.0 + z / 13.0).sin() * 0.2 + 0.45)
+                .clamp(0.0, 1.0) as f32;
+        let (lush, parched) = ([0.062, 0.15, 0.03], [0.16, 0.17, 0.055]);
+        let tint = std::array::from_fn(|i| lush[i] + (parched[i] - lush[i]) * dry);
+        return Some(OverlayPaint::layer("grass", 1.0).tinted(tint, 0.75));
     }
     // Woods: leaf litter.
     if (-170.0..-30.0).contains(&x) && (-150.0..-25.0).contains(&z) {
@@ -422,7 +502,7 @@ fn main() {
         }
         app.world.spawn((
             Camera {
-                exposure: Exposure::Manual { ev100: view.ev100 },
+                exposure: view.exposure,
                 ..Camera::perspective(view.fov)
             },
             Transform::from_translation(eye).looking_at(view.target, Vec3::Y),

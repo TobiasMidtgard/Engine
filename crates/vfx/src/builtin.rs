@@ -835,6 +835,106 @@ fn spells() -> Vec<EffectDesc> {
         )
     };
 
+    let gate = EffectDesc {
+        prewarm: 3.0,
+        light: Some(EffectLight {
+            offset: [0.0, 0.6, 0.0],
+            ..light(violet, 3_000.0, 12.0, 0.12, 0.8).unwrap()
+        }),
+        ..effect(
+            "spell.portal_gate",
+            "A standing portal 5 m across: the world behind it swirled into a violet vortex that \
+             darkens toward its eye, glowing arms turning inward, a burning rim crackling with \
+             sparks, motes drawn in and stars spilling out. Turn the effect so its up axis faces \
+             out of the portal.",
+            None,
+            vec![
+                EmitterDesc {
+                    bursts: every(30.0, 1),
+                    speed: [0.0, 0.0],
+                    lifetime: [30.0, 30.0],
+                    size: [4.9, 4.9],
+                    rotation_deg: [0.0, 0.0],
+                    spin_deg: [-14.0, -14.0],
+                    local_space: true,
+                    sprite: Sprite::Vortex,
+                    facing: Facing::Horizontal,
+                    color: fade(violet, 1.0, 0.03, 0.97),
+                    emissive: 2_500.0,
+                    additive: 0.0,
+                    soft: 0.0,
+                    wind: 0.0,
+                    ..em("vortex")
+                },
+                // Energy crackling around the rim.
+                EmitterDesc {
+                    rate: 260.0,
+                    shape: EmitShape::Ring {
+                        radius: 2.3,
+                        thickness: 0.08,
+                    },
+                    speed: [0.0, 0.0],
+                    velocity: [0.0, 0.15, 0.0],
+                    orbit_speed: 1.6,
+                    drag: 0.4,
+                    wind: 0.0,
+                    lifetime: [0.25, 0.6],
+                    size: [0.03, 0.07],
+                    sprite: Sprite::Spark,
+                    facing: Facing::Velocity,
+                    stretch: 0.06,
+                    color: g(&[(0.0, [1.0, 0.8, 1.0, 1.0]), (1.0, [0.8, 0.35, 1.0, 0.0])]),
+                    emissive: 40_000.0,
+                    additive: 1.0,
+                    ..em("rim_sparks")
+                },
+                // Motes drawn in, spiraling toward the eye.
+                EmitterDesc {
+                    rate: 220.0,
+                    shape: EmitShape::Ring {
+                        radius: 2.6,
+                        thickness: 0.7,
+                    },
+                    speed: [0.0, 0.1],
+                    velocity: [0.0, -0.1, 0.0],
+                    orbit_speed: 2.4,
+                    vortex: 2.0,
+                    attract: 1.7,
+                    drag: 0.5,
+                    wind: 0.0,
+                    lifetime: [1.4, 2.4],
+                    size: [0.04, 0.09],
+                    color: g(&[
+                        (0.0, [0.6, 0.35, 1.0, 0.0]),
+                        (0.2, [0.8, 0.5, 1.0, 1.0]),
+                        (1.0, [1.0, 0.55, 0.95, 0.0]),
+                    ]),
+                    emissive: 25_000.0,
+                    additive: 1.0,
+                    ..em("inflow")
+                },
+                // Stars spilling out toward whoever stands before it, drifting down.
+                EmitterDesc {
+                    rate: 14.0,
+                    shape: EmitShape::Disc { radius: 1.4 },
+                    speed: [0.0, 0.3],
+                    velocity: [0.0, 1.4, 0.0],
+                    gravity: 0.15,
+                    drag: 0.6,
+                    wind: 0.3,
+                    lifetime: [1.2, 2.2],
+                    size: [0.08, 0.16],
+                    spin_deg: [-90.0, 90.0],
+                    sprite: Sprite::Star,
+                    color: g(&[(0.0, [0.95, 0.8, 1.0, 1.0]), (1.0, [0.6, 0.3, 1.0, 0.0])]),
+                    emissive: 30_000.0,
+                    additive: 1.0,
+                    ..em("spill")
+                },
+            ],
+        )
+    };
+
     let heal = EffectDesc {
         prewarm: 2.0,
         light: light([0.55, 1.0, 0.55], 2500.0, 8.0, 0.1, 0.5),
@@ -1097,16 +1197,239 @@ fn spells() -> Vec<EffectDesc> {
         )
     };
 
+    // A shell climbing straight up: the same flight for every layer that rides it, so each can
+    // burst into its own kind of star.
+    let shell = |name: &str| EmitterDesc {
+        bursts: once(1),
+        speed: [26.0, 26.0],
+        gravity: 1.0,
+        drag: 0.15,
+        wind: 0.0,
+        lifetime: [1.75, 1.75],
+        size: [0.2, 0.2],
+        sprite: Sprite::Spark,
+        facing: Facing::Velocity,
+        stretch: 0.05,
+        color: g(&[
+            (0.0, [1.0, 0.8, 0.5, 1.0]),
+            (0.8, [1.0, 0.62, 0.3, 1.0]),
+            (1.0, [1.0, 0.9, 0.8, 1.0]),
+        ]),
+        emissive: 80_000.0,
+        additive: 1.0,
+        soft: 0.0,
+        ..em(name)
+    };
+    let unseen = || g(&[(0.0, [1.0, 1.0, 1.0, 0.0]), (1.0, [1.0, 1.0, 1.0, 0.0])]);
+    let stars = |name: &str, speed: [f32; 2], life: [f32; 2], colors: Gradient| EmitterDesc {
+        shape: EmitShape::Sphere {
+            radius: 0.3,
+            surface: true,
+        },
+        speed,
+        gravity: 0.5,
+        drag: 0.8,
+        wind: 0.3,
+        lifetime: life,
+        size: [0.2, 0.28],
+        size_over_life: c(&[(0.0, 1.0), (0.7, 0.85), (1.0, 0.4)]),
+        sprite: Sprite::Spark,
+        facing: Facing::Velocity,
+        stretch: 0.07,
+        color: colors,
+        emissive: 120_000.0,
+        additive: 1.0,
+        soft: 0.0,
+        ..em(name)
+    };
+    // Burning bits a star or shell drops behind it, hanging and falling as they fade.
+    let tail = |name: &str, life: [f32; 2], colors: Gradient| EmitterDesc {
+        shape: EmitShape::Sphere {
+            radius: 0.05,
+            surface: false,
+        },
+        speed: [0.1, 0.5],
+        gravity: 0.35,
+        drag: 2.5,
+        wind: 0.4,
+        lifetime: life,
+        size: [0.14, 0.22],
+        size_over_life: c(&[(0.0, 1.0), (1.0, 0.3)]),
+        sprite: Sprite::Glow,
+        color: colors,
+        emissive: 70_000.0,
+        additive: 1.0,
+        soft: 0.0,
+        ..em(name)
+    };
+    let starburst = effect(
+        "spell.starburst",
+        "A mage's firework: a shell streaks about 25 m up on a tail of sparks and bursts into a \
+         sphere of violet stars around a gold heart; each star trails glitter, droops, and \
+         crackles as it burns out, leaving a drifting smoke ball. Fire it from the ground, up \
+         axis to the sky.",
+        Some(0.1),
+        vec![
+            EmitterDesc {
+                on_death: Some(SubEmit {
+                    inherit_velocity: 0.2,
+                    ..SubEmit::new("stars", 160)
+                }),
+                trailing: Some(SubEmit {
+                    inherit_velocity: 0.1,
+                    ..SubEmit::new("shell_tail", 160)
+                }),
+                ..shell("shell")
+            },
+            // Rides the same flight unseen and bursts into the gold heart.
+            EmitterDesc {
+                color: unseen(),
+                emissive: 0.0,
+                on_death: Some(SubEmit {
+                    inherit_velocity: 0.2,
+                    ..SubEmit::new("heart", 70)
+                }),
+                ..shell("heart_shell")
+            },
+            // And into the flash and the smoke the burst leaves hanging.
+            EmitterDesc {
+                color: unseen(),
+                emissive: 0.0,
+                on_death: Some(SubEmit::new("flash", 1)),
+                ..shell("flash_shell")
+            },
+            EmitterDesc {
+                color: unseen(),
+                emissive: 0.0,
+                on_death: Some(SubEmit::new("burst_smoke", 12)),
+                ..shell("smoke_shell")
+            },
+            EmitterDesc {
+                on_death: Some(SubEmit {
+                    chance: 0.75,
+                    inherit_velocity: 0.3,
+                    ..SubEmit::new("crackle", 3)
+                }),
+                trailing: Some(SubEmit::new("star_tail", 30)),
+                ..stars(
+                    "stars",
+                    [14.0, 16.0],
+                    [2.0, 2.7],
+                    g(&[
+                        (0.0, [1.0, 0.95, 1.0, 1.0]),
+                        (0.08, [0.8, 0.52, 1.0, 1.0]),
+                        (0.6, [0.62, 0.3, 1.0, 1.0]),
+                        (1.0, [0.95, 0.4, 0.9, 0.0]),
+                    ]),
+                )
+            },
+            stars(
+                "heart",
+                [6.0, 7.5],
+                [1.5, 1.9],
+                g(&[
+                    (0.0, [1.0, 1.0, 0.9, 1.0]),
+                    (0.12, [1.0, 0.84, 0.45, 1.0]),
+                    (1.0, [1.0, 0.5, 0.15, 0.0]),
+                ]),
+            ),
+            tail(
+                "shell_tail",
+                [0.3, 0.7],
+                g(&[(0.0, [1.0, 0.75, 0.4, 1.0]), (1.0, [1.0, 0.35, 0.08, 0.0])]),
+            ),
+            tail(
+                "star_tail",
+                [0.5, 1.1],
+                g(&[
+                    (0.0, [0.95, 0.75, 1.0, 0.9]),
+                    (0.3, [1.0, 0.7, 0.5, 0.7]),
+                    (1.0, [1.0, 0.45, 0.2, 0.0]),
+                ]),
+            ),
+            EmitterDesc {
+                shape: EmitShape::Sphere {
+                    radius: 0.05,
+                    surface: false,
+                },
+                speed: [0.8, 2.5],
+                gravity: 0.3,
+                drag: 2.0,
+                wind: 0.3,
+                lifetime: [0.12, 0.4],
+                size: [0.3, 0.55],
+                sprite: Sprite::Star,
+                spin_deg: [-360.0, 360.0],
+                color: g(&[
+                    (0.0, [1.0, 0.97, 0.88, 1.0]),
+                    (0.5, [1.0, 0.88, 0.62, 1.0]),
+                    (1.0, [1.0, 0.7, 0.4, 0.0]),
+                ]),
+                emissive: 150_000.0,
+                additive: 1.0,
+                soft: 0.0,
+                ..em("crackle")
+            },
+            // The moment of the burst: a big soft flash.
+            EmitterDesc {
+                speed: [0.0, 0.0],
+                wind: 0.0,
+                lifetime: [0.25, 0.25],
+                size: [14.0, 14.0],
+                size_over_life: c(&[(0.0, 0.5), (1.0, 1.0)]),
+                sprite: Sprite::Glow,
+                color: g(&[(0.0, [0.85, 0.7, 1.0, 0.5]), (1.0, [0.7, 0.5, 1.0, 0.0])]),
+                emissive: 12_000.0,
+                additive: 1.0,
+                soft: 0.0,
+                ..em("flash")
+            },
+            EmitterDesc {
+                shape: EmitShape::Sphere {
+                    radius: 3.0,
+                    surface: false,
+                },
+                speed: [0.3, 1.5],
+                drag: 0.8,
+                wind: 1.0,
+                lifetime: [6.0, 8.0],
+                size: [4.0, 6.0],
+                size_over_life: c(&[(0.0, 0.6), (1.0, 1.6)]),
+                ..smoke("burst_smoke", 0.45, 0.14)
+            },
+            // The launch: a spurt of sparks and smoke from the ground.
+            EmitterDesc {
+                shape: EmitShape::Cone {
+                    angle_deg: 18.0,
+                    radius: 0.05,
+                },
+                collide: Collide::None,
+                lifetime: [0.25, 0.6],
+                ..sparks("launch_sparks", 40, [3.0, 9.0])
+            },
+            EmitterDesc {
+                bursts: once(6),
+                shape: EmitShape::Hemisphere { radius: 0.1 },
+                speed: [0.3, 1.0],
+                lifetime: [1.5, 2.5],
+                size: [0.3, 0.6],
+                ..smoke("launch_smoke", 0.4, 0.35)
+            },
+        ],
+    );
+
     vec![
         fireball,
         fireball_impact,
         frost_bolt,
         frost_impact,
         portal,
+        gate,
         heal,
         charge,
         lightning_hit,
         orb,
+        starburst,
     ]
 }
 
@@ -1474,11 +1797,36 @@ fn impacts() -> Vec<EffectDesc> {
         light: light([1.0, 0.7, 0.4], 8000.0, 6.0, 0.5, 0.15),
         ..effect(
             name,
-            "Metal struck hard: a shower of bouncing sparks with a bright glint and a wisp of \
-             smoke.",
+            "Metal struck hard: a shower of bouncing sparks that split as they skid and burst \
+             as they burn out, with a bright glint and a wisp of smoke.",
             Some(0.1),
             vec![
-                sparks("sparks", 70, [3.0, 10.0]),
+                EmitterDesc {
+                    on_hit: Some(SubEmit {
+                        chance: 0.3,
+                        inherit_velocity: 0.35,
+                        ..SubEmit::new("split", 3)
+                    }),
+                    on_death: Some(SubEmit {
+                        chance: 0.2,
+                        inherit_velocity: 0.5,
+                        ..SubEmit::new("split", 4)
+                    }),
+                    ..sparks("sparks", 70, [3.0, 10.0])
+                },
+                // Hot steel sparks fork: a skid throws off a few smaller ones, and some burst
+                // into a little star as they burn out.
+                EmitterDesc {
+                    bursts: Vec::new(),
+                    shape: EmitShape::Hemisphere { radius: 0.01 },
+                    speed: [1.0, 3.0],
+                    drag: 0.8,
+                    collide: Collide::None,
+                    lifetime: [0.12, 0.3],
+                    size: [0.008, 0.016],
+                    stretch: 0.025,
+                    ..sparks("split", 0, [1.0, 3.0])
+                },
                 EmitterDesc {
                     bursts: once(1),
                     speed: [0.0, 0.0],

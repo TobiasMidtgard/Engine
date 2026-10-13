@@ -5,6 +5,9 @@
 //!   trail every fast move, so a still frame shows the route.
 //! * **Ledge station** (between the two): a climber jumps at a block too high to climb
 //!   straight onto, catches its top, shimmies along it, climbs up and walks off the far end.
+//! * **Grapple tower** (behind the course): a grappler sprints at a 9 m tower, jumps, fires
+//!   its grapple hook at the top edge, is reeled up the wall, climbs over the top, runs across
+//!   and drops off the back.
 //! * **Duel ring** (−Z side), three rounds on a loop:
 //!   1. *Blink*: an elite (tempo speed 2.5) dash-strikes an untrained player (level 1).
 //!      The dash and three slashes land in well under a second; the player can't react.
@@ -37,7 +40,7 @@ use engine_world::{AttackEvent, AttackKind};
 use crate::afterimage::Afterimages;
 use crate::combat::{AttackPhase, CombatState, Fighter};
 use crate::look::fighter::{self, Style};
-use crate::look::rig::{self, AnimInput, Animator, AttackAnim, Bone};
+use crate::look::rig::{self, AnimInput, Animator, AttackAnim, Bone, Xf};
 use crate::mover::{Mover, flat};
 use crate::profile::MovementProfile;
 use crate::tempo::{Perceiver, Tempo};
@@ -121,6 +124,24 @@ pub mod layout {
     };
     /// Where the climber starts (feet), facing the ledge block.
     pub const CLIMB_START: [f64; 3] = [15.0, 0.1, 4.6];
+    /// The grapple tower's floor: a slab behind the course (+Z of the runway).
+    pub const GRAPPLE_PAD: Block = Block {
+        center: [8.0, 0.05, 29.0],
+        size: [10.0, 0.1, 22.0],
+    };
+    /// Top of the grapple tower: far too high to climb without the hook.
+    pub const GRAPPLE_TOP: f64 = 9.0;
+    /// The grapple tower. Its front face (z = 28) faces the course.
+    pub const GRAPPLE_TOWER: Block = Block {
+        center: [8.0, GRAPPLE_TOP * 0.5, 31.0],
+        size: [8.0, GRAPPLE_TOP as f32, 6.0],
+    };
+    /// The grapple target on the tower's front face, just under its top edge.
+    pub const GRAPPLE_TARGET: [f64; 3] = [8.0, GRAPPLE_TOP - 0.35, 28.0];
+    /// Where the grappler starts (feet), facing the tower.
+    pub const GRAPPLE_START: [f64; 3] = [8.0, 0.1, 19.0];
+    /// The grappler jumps (and fires once airborne) as it crosses this z.
+    pub const GRAPPLE_TAKEOFF_Z: f64 = 21.0;
     /// Center of the lowest level cell; the other nine stack [`LEVEL_STEP`] apart above it.
     pub const LEVEL_METER: [f64; 3] = [RING[0] + 9.5, RING[1] + 0.35, RING[2]];
     /// Spacing of the level cells, meters.
@@ -215,6 +236,13 @@ pub enum Brain {
         #[serde(skip)]
         origin: DVec3,
     },
+    /// Loops the grapple tower: run, jump, hook the top edge, reel up, climb over.
+    Grappler {
+        step: GrappleLoop,
+        secs: f32,
+        #[serde(skip)]
+        origin: DVec3,
+    },
     /// Reacts to attacks after a human reaction time: dodge dashes, then counter.
     Duelist(DuelistBrain),
     /// Attacks the duel player when cued: a dash-strike, then a short combo.
@@ -260,6 +288,19 @@ pub struct Puppet {
     bones: [Entity; Bone::ANIMATED],
     anim: Animator,
     was_defeated: bool,
+    /// The left hand as last posed (character space, feet at the capsule's bottom).
+    hand_l: Xf,
+}
+
+impl Puppet {
+    pub fn style(&self) -> Style {
+        self.anim.style
+    }
+
+    /// The left hand as last posed, relative to the character's transform.
+    pub fn hand_l(&self) -> Xf {
+        self.hand_l
+    }
 }
 
 #[derive(Component)]
@@ -325,6 +366,7 @@ pub(crate) fn spawn_character(
         bones,
         anim: Animator::new(style),
         was_defeated: false,
+        hand_l: Xf::IDENTITY,
     });
     id
 }
@@ -351,6 +393,8 @@ pub fn spawn_demo(commands: &mut Commands, origin: DVec3) {
     block(commands, origin, "Tower", layout::TOWER);
     block(commands, origin, "Ledge station", layout::LEDGE_PAD);
     block(commands, origin, "Ledge block", layout::LEDGE_WALL);
+    block(commands, origin, "Grapple pad", layout::GRAPPLE_PAD);
+    block(commands, origin, "Grapple tower", layout::GRAPPLE_TOWER);
     // The pilot training facility drawn around those boxes.
     crate::look::course::dress_course(commands, origin);
 
@@ -377,6 +421,20 @@ pub fn spawn_demo(commands: &mut Commands, origin: DVec3) {
         MovementProfile::pilot(),
         Brain::Climber {
             step: Climb::Start,
+            secs: 0.0,
+            origin,
+        },
+    );
+
+    spawn_character(
+        commands,
+        "Grappler",
+        origin + DVec3::from_array(layout::GRAPPLE_START) + DVec3::Y * 0.9,
+        Vec3::Z,
+        Style::Pilot,
+        MovementProfile::pilot(),
+        Brain::Grappler {
+            step: GrappleLoop::Start,
             secs: 0.0,
             origin,
         },
@@ -503,6 +561,7 @@ pub(crate) fn register(app: &mut App) {
             direct_duel,
             run_runner,
             run_climber,
+            run_grappler,
             think_duelists,
             think_attackers,
         )
@@ -510,7 +569,15 @@ pub(crate) fn register(app: &mut App) {
             .in_set(SimSet::Input)
             .before(crate::MovementSet::Intent),
     )
-    .add_systems(Update, animate_puppets);
+    .add_systems(
+        Update,
+        (
+            animate_puppets,
+            crate::look::rope::draw_ropes,
+            crate::look::rope::drop_orphan_ropes,
+        )
+            .chain(),
+    );
 }
 
 // ------------------------------------------------------------------------ the runner
@@ -743,6 +810,119 @@ pub(crate) fn restart_climbers(world: &mut World) -> usize {
     for mut b in q.iter_mut(world) {
         if let Brain::Climber { step, secs, .. } = &mut *b {
             *step = Climb::Start;
+            *secs = 0.0;
+            n += 1;
+        }
+    }
+    n
+}
+
+// ------------------------------------------------------------------------ the grappler
+
+/// The grappler's loop at the grapple tower.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum GrappleLoop {
+    /// Stand at the start (teleported there) facing the tower.
+    #[default]
+    Start,
+    /// Sprint at the tower.
+    Run,
+    /// Jump; fire the hook at the top edge on the way up.
+    Jump,
+    /// Reeled up the tower, then over the edge.
+    Reel,
+    /// Run across the top and off the back.
+    Cross,
+    /// Falling to the ground behind the tower.
+    Drop,
+    /// Wait before looping.
+    Rest,
+}
+
+#[allow(clippy::type_complexity)]
+fn run_grappler(
+    time: Res<Time>,
+    mut q: Query<(
+        &mut Brain,
+        &mut Transform,
+        &mut Mover,
+        &mut MoveIntent,
+        Option<&mut TransformInterpolation>,
+    )>,
+) {
+    let real = time.real_delta_secs();
+    for (mut brain, mut t, mut m, mut intent, interp) in &mut q {
+        let Brain::Grappler { step, secs, origin } = &mut *brain else {
+            continue;
+        };
+        *secs += real;
+        let rel = t.translation - *origin;
+        *intent = MoveIntent::default();
+        let next = match *step {
+            GrappleLoop::Start => {
+                if *secs < 0.02 {
+                    t.translation =
+                        *origin + DVec3::from_array(layout::GRAPPLE_START) + DVec3::Y * 0.9;
+                    t.rotation = Quat::from_rotation_y(std::f32::consts::PI);
+                    m.reset_motion();
+                    m.facing = Vec3::Z;
+                    if let Some(mut i) = interp {
+                        i.reset();
+                    }
+                }
+                intent.look = Some(Vec3::Z);
+                (*secs >= 1.0).then_some(GrappleLoop::Run)
+            }
+            GrappleLoop::Run => {
+                intent.direction = Vec3::Z;
+                intent.sprint = true;
+                (rel.z >= layout::GRAPPLE_TAKEOFF_Z).then_some(GrappleLoop::Jump)
+            }
+            GrappleLoop::Jump => {
+                intent.direction = Vec3::Z;
+                intent.jump = *secs < 0.1;
+                let fire = *secs >= 0.2 && !m.grounded;
+                if fire {
+                    m.pending_grapple = Some(*origin + DVec3::from_array(layout::GRAPPLE_TARGET));
+                }
+                fire.then_some(GrappleLoop::Reel)
+            }
+            GrappleLoop::Reel => {
+                intent.direction = Vec3::Z;
+                let on_top = rel.y > layout::GRAPPLE_TOP + 0.5;
+                (m.grounded && on_top && m.mode != LocomotionMode::Mantle)
+                    .then_some(GrappleLoop::Cross)
+            }
+            GrappleLoop::Cross => {
+                // A jog over the top, so the drop off the back lands on the pad.
+                intent.direction = Vec3::Z * 0.5;
+                (!m.grounded && rel.z > layout::GRAPPLE_TOWER.center[2] + 2.5)
+                    .then_some(GrappleLoop::Drop)
+            }
+            GrappleLoop::Drop => {
+                intent.direction = Vec3::Z * 0.3;
+                (m.grounded && rel.y < 2.0).then_some(GrappleLoop::Rest)
+            }
+            GrappleLoop::Rest => (*secs >= 1.0).then_some(GrappleLoop::Start),
+        };
+        // Stuck (missed the edge, say): start over.
+        if *secs > 6.0 {
+            *step = GrappleLoop::Start;
+            *secs = 0.0;
+        } else if let Some(n) = next {
+            *step = n;
+            *secs = 0.0;
+        }
+    }
+}
+
+/// Starts every grappler's loop over (for tour stops that time a capture).
+pub(crate) fn restart_grapplers(world: &mut World) -> usize {
+    let mut q = world.query::<&mut Brain>();
+    let mut n = 0;
+    for mut b in q.iter_mut(world) {
+        if let Brain::Grappler { step, secs, .. } = &mut *b {
+            *step = GrappleLoop::Start;
             *secs = 0.0;
             n += 1;
         }
@@ -1127,6 +1307,8 @@ fn animate_puppets(
                 *bt = fighter::bone_transform(solved[i], lift);
             }
         }
+        let hand = solved[Bone::HandL.index()];
+        p.hand_l = Xf::new(hand.pos + Vec3::Y * lift, hand.rot);
     }
 }
 
@@ -1177,6 +1359,11 @@ fn anim_input(
             .mantle
             .map(|mt| (inv * (mt.top - feet).as_vec3(), mt.rising))
             .or_else(|| m.hang.map(|h| (inv * (h.top - feet).as_vec3(), true))),
+        grapple: m.grapple.map(|g| {
+            let from = crate::grapple::shoulders(t.translation, m.up, cc.height);
+            let hook = crate::grapple::hook_position(&g, from);
+            (inv * (hook - feet).as_vec3(), g.attached)
+        }),
         dash_strike: m.dash.is_some_and(|d| d.strike),
         attack,
         blocking: cs.is_some_and(|c| c.blocking),

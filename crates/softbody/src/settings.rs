@@ -26,6 +26,9 @@ pub struct SimSettings {
     pub follow: f32,
     /// Collide with physics colliders, characters and bone capsules.
     pub collide: bool,
+    /// Cloth keeps from passing through itself (folds stack instead of merging), at
+    /// `thickness` × 1.5 between layers. Costs about as much as the rest of the step again.
+    pub self_collide: bool,
     /// Simulate this many seconds immediately when built, so it starts settled instead of
     /// falling into place on screen.
     pub prewarm_secs: f32,
@@ -44,6 +47,7 @@ impl Default for SimSettings {
             wind_scale: 1.0,
             follow: 0.0,
             collide: true,
+            self_collide: false,
             prewarm_secs: 0.0,
             max_speed: 60.0,
         }

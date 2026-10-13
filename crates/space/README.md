@@ -16,10 +16,11 @@ world re-anchors on the next body.
 - **Orbits on rails.** `Orbit` solves Kepler's equation for position and velocity at any time
   (no drift), converts a position and velocity back to elements (for predicted ship orbits),
   and gives sphere-of-influence radii.
-- **Time.** `SpaceClock` counts seconds since the epoch with a time warp (`space.warp`).
+- **Time.** `SpaceClock` counts seconds since the epoch (2000-01-01 12:00 UT, noon at 0° E)
+  with a time warp (`space.warp`). Earth's seasons fall on their real dates.
 - **The world frame.** `SpaceFrame` names the anchor body and the home spot (latitude,
-  longitude) that sits at the world origin with +Y up, north toward −Z and east toward +X,
-  matching `PlanetTerrain::home_transform`. The anchor's transform never changes, so walking,
+  longitude) that sits at the world origin with +Y up, north toward −Z and east toward +X
+  (`home_heading_deg` turns that), matching `PlanetTerrain::home_transform`. The anchor's transform never changes, so walking,
   driving and physics on it are as precise as on a flat level. Other bodies and the sun move
   around it: the sun rises and sets as the anchor turns.
 - **Turning and fixed frames.** Near a body (below 15 % of its radius above the top of its
@@ -44,14 +45,26 @@ world re-anchors on the next body.
   holds the focus), sets the renderer's `Atmosphere` to the nearest body with air (off when
   none), and points every `DirectionalLight` marked `StarLight` at its star with the right
   illuminance for the distance (≈127 000 lux at 1 AU).
+- **One sun with the weather.** Either module can run the day:
+  - With a `StarLight`, space is the day/night cycle: it writes engine_world's
+    `WeatherState::sun_direction`, `time_of_day_h` (local solar time at the world origin) and
+    `day_of_year` (the weather's calendar), so clouds, sky, wildlife and sound follow the real
+    sun.
+  - With the weather's sun (its `SunLight`) and `SpaceSettings::follow_world_clock`, the space
+    clock follows the weather's hour and day instead: the real sun stands where the weather's
+    does over the home spot, so the Moon's phase and the planets are lit from that sun and
+    the weather's time keys move them too. The weather's compass is north +Z, east −X, half a
+    turn from the planet's: set `SpaceFrame::home_heading_deg` and the terrain pad's
+    `heading_deg` to 180 so they agree.
 
 ## Contracts
 
-Reads: `SimulationFocus` / `FocusPoints`, `Time` (fixed steps, dilated).
+Reads: `SimulationFocus` / `FocusPoints`, `Time` (fixed steps, dilated), and with
+`follow_world_clock` the `WeatherState` time and day.
 
 Writes: body `Transform`s, `Gravity` (bodies, uniform = 0), `engine_render::Atmosphere`,
-`StarLight` lights, and the `Transform`/`Velocity` of free entities when the world
-re-anchors.
+`StarLight` lights and, with one, `WeatherState`'s sun direction, time and day, and the
+`Transform`/`Velocity` of free entities when the world re-anchors.
 
 API: `space.bodies`, `space.warp {warp, days}`, `space.travel {body, lat, lon, altitude}`.
 

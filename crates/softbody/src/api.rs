@@ -5,7 +5,7 @@ use engine_core::registry::resolve_entity;
 use engine_world::{IgniteRequest, ProjectileTrace};
 use serde_json::{Value, json};
 
-use crate::body::SoftBodySim;
+use crate::body::{SoftBodySim, SoftKind};
 use crate::rope::Lines;
 
 fn vec3_arg(args: &Value, key: &str) -> Result<DVec3, String> {
@@ -192,7 +192,13 @@ pub fn register(app: &mut App) {
                 let Some(mut b) = world.get_mut::<SoftBodySim>(e) else {
                     continue;
                 };
-                let pins: Vec<u32> = b.sim.pins.iter().map(|p| p.p).collect();
+                let mut pins: Vec<u32> = b.sim.pins.iter().map(|p| p.p).collect();
+                if b.kind == SoftKind::Cloth {
+                    // Cloth on a moving body is held by stiff goals instead of pins.
+                    pins.extend(b.sim.goals.iter().map(|g| g.p));
+                    pins.sort_unstable();
+                    pins.dedup();
+                }
                 for p in pins {
                     let close = near.is_none_or(|(at, r)| {
                         (b.world_position(p as usize) - at).length() < r as f64

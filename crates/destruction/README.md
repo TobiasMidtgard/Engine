@@ -25,6 +25,18 @@ fracture and debris.
   stone). Break a post and whatever depended on it falls after a short creak. `ShowSupport`
   paints pieces blue (grounded), green, yellow, orange and red (about to fall), like Valheim's
   build mode.
+- **Build mode** (`build`, Valheim's hammer): a `Builder` (the player's camera, a script)
+  picks one of nine pieces (wood floor, wall, pole, beam, 26° and 45° shingle roofs; stone
+  floor, wall and pillar) and aims. A translucent ghost of the piece sits on what the aim hits
+  (on top of the ground or a floor, against a wall's side or a floor's edge) and snaps so its
+  nearest snap point meets a neighbor's (pole and beam ends, panel corners and edge midpoints,
+  a floor's on its top face, block corners), skipping spots inside other pieces. The ghost
+  shows the support it would get in the support colors, or a deep red where it would sit
+  inside something, touch nothing, or reach too far from support to stand; place it, turn it
+  in 22.5° steps, or take built pieces down (what they held falls). Pieces stand on the
+  terrain or on voxel rock alike (dig the rock out from under them and they fall). Built
+  pieces show their support colors while their builder has the support view on. Keys (bound unless the game binds them): B build
+  mode, left mouse place, X remove, R rotate, C next piece, 1 to 9 pick a piece.
 - **Burning wood** (`burn`): wooden building pieces get an `engine_world::Combustible`
   holding their wood as fuel, so the fire module (when installed) can light and burn them.
   As they burn they char (scorched, then black alligator char with embers glowing in its
@@ -39,11 +51,16 @@ fracture and debris.
   its connection to the ground (dig under an overhang, blow out an arch's foot) breaks into a
   few big chunks and falls.
 - **Fracture** (`Fracturable`): props break into Voronoi pieces with real hulls on a big
-  enough hit, and debris that lands hard shatters again.
+  enough hit, and debris that lands hard shatters again. Fracture faces are rough (broken
+  into small bumpy triangles that meet the piece's edges, `BreakLook`) and drawn in a
+  joint-free broken material, so a shattered ashlar block shows broken stone, not mortar
+  lines; glass and metal break clean.
 - **Debris** uses the physics module when one is installed (physics-contract bodies) and a
   built-in solver otherwise: oriented boxes with friction, bounce and sleep that land on the
-  ground (not yet on each other). Chips and dust are cheap; the oldest debris sinks away past
-  the budget (`max_debris`, `max_chips`).
+  ground and on voxel rock (not yet on each other), and wake when the rock under them is dug.
+  Boulders cut from the rock itself (a cave-in, a blast's rubble) pass through rock onto the
+  ground so they don't catch on the rim of the hole they fall out of. Chips and dust are
+  cheap; the oldest debris sinks away past the budget (`max_debris`, `max_chips`).
 
 What this module does not do: the big terrain heightfield belongs to the planets and terrain
 module. Voxel volumes here are local destructible rock (cliffs, caves, arches) placed on it.
@@ -53,7 +70,8 @@ module. Voxel volumes here are local destructible rock (cliffs, caves, arches) p
 Reads: `DamageEvent` (bullets, melee, explosions; `target` picks the wall or piece),
 `WorldImpulse` (explosions: energy falls off with distance), `ProjectileTrace` (bullets pass
 through soft material and lose energy), `ContactEvent` (hard impacts, debris landing),
-`TerrainEdit` (dig and build rock), `Combustible` state.
+`TerrainEdit` (dig and build rock), `Combustible` state, the `build_*` input actions,
+`BuildRequest` (script a builder).
 
 Writes: `WorldImpulse` (falling structures, strength only), `NoiseEvent` (breaks, collapses),
 `SmokeEmission` (dust and thermite smoke for the smoke module), `GroundContact` (debris
@@ -78,6 +96,9 @@ commands.spawn((Transform::from_xyz(1.2, 3.1, 0.0),
 let mut cliff = VoxelVolume::cliff(26.0, 12.0, 9.0, 0.25);
 cliff.overhang = 2.4;
 commands.spawn((Transform::from_xyz(0.0, 0.0, 20.0), cliff));
+
+// Build mode on the player's camera: B toggles it, the mouse places and removes pieces.
+commands.entity(camera).insert(Builder::player());
 ```
 
 Anything else hits them through the world messages above: a gun writes `ProjectileTrace`, a
@@ -95,6 +116,9 @@ grenade writes `WorldImpulse`, a pickaxe writes `TerrainEdit`.
 | `destruction.breach` | Plant a charge `{wall, kind: explosive\|thermite, at, size, energy_j, fuse_secs, back}` |
 | `destruction.dig` | Edit rock `{at, radius, op: remove\|add\|smooth\|paint}` |
 | `destruction.repair` | Rebuild a wall or volume `{entity}` |
+| `destruction.build` | Place a piece like a player in build mode: `{kind, from, to}` or `{kind, at}`, `yaw_deg`, `preview` |
+| `destruction.unbuild` | Take down a built piece `{entity}` or the one aimed at `{from, to}` |
+| `destruction.build_pieces` | The pieces build mode can place, with sizes |
 | `destruction.inspect` | Integrity, cells, rebar, volume of one entity `{entity}` |
 | `destruction.stats`, `destruction.clear_debris` | Counters; remove all debris |
 
@@ -133,13 +157,31 @@ the Siege fortress zone). It is about 80 × 40 m and runs a 20 s loop, then rebu
 `cargo run -p engine_destruction --release --example fortress -- <out_dir>` renders all of it
 headless to 22 screenshots.
 
+`hill::spawn_voxel_hill(commands, origin)` builds the dig-and-build hill (the showcase's voxel
+hill zone) on a 28 s loop: a tunnel dug into the hill until its hall caves in, a terrace raised
+and leveled with the hoe, a timber hut in support colors losing two posts, and the **build
+yard**, where a builder in build mode puts up a cabin piece by piece, each ghost snapping into
+place before the piece goes down: a stone plinth (blue), corner posts and board walls with a
+doorway, a loft floor, a shingle roof, and a deck reaching out from the gable whose second
+row is orange at the edge of support, then the red ghost of a third row that couldn't stand.
+Then the hoe levels a floor pad in the terrace and a second builder puts up a **shelter on the
+rock**: a stone floor laid on the bare rock (blue, because rock is ground), board walls at the
+ends, a shingle roof and the back walls against the cut bank, open toward the valley.
+`--example hill -- <out_dir> [WxH] [only]` renders it (`only`: `build` for the yard,
+`shelter` for the terrace).
+
 ## Tests
 
 - Unit tests per module (cell grid, energy model, rebar, support graph, Voronoi, surface nets).
 - `tests/plugin.rs`: the done-when cases end to end through the plugin (bullets through a
   barricade, thermite through reinforced concrete, a charge on drywall vs reinforced, a tower
   falling when its post breaks, digging under an overhang drops it, the AI functions, the demo,
-  a burning shed charring and coming down).
+  a burning shed charring and coming down, build mode placing snapped pieces and taking them
+  down, the hill's cabin going up with its red ghost and its shelter standing on the terrace's
+  rock, pieces on voxel rock falling when it is dug out from under them).
+- `hill::tests::the_yard_cabin_snaps_together_as_planned` and
+  `the_terrace_shelter_snaps_together_as_planned` aim every step of the cabin and the shelter
+  and check each piece lands where it should with the support the solver gives it.
 - `tests/headless.rs`: renders a cut wall offscreen and checks the doorway shows.
 
 ## Done when
@@ -147,5 +189,5 @@ headless to 22 screenshots.
 - Breach a reinforced wall with a charge; shoot holes in a wooden barricade; dig and collapse a
   voxel cliff. **Done** (tests above and the showcase).
 
-Next: building pieces you can place in game, angular rock fracture for falling boulders,
-debris resting on debris without a physics module.
+Next: debris resting on other debris without a physics module, cave-in boulders resting on
+rock ledges (they need side contacts, not just floors), gable and triangle pieces.

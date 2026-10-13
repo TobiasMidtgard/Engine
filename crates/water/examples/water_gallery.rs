@@ -5,7 +5,7 @@
 //! ```
 //!
 //! `seconds` of simulation run before the first picture (default 12); `views` is a
-//! comma-separated subset of: overview, falls, shore, under, pond, wake, aerial.
+//! comma-separated subset of: overview, falls, shore, under, pond, wake, aerial, ditch.
 
 use engine_core::prelude::*;
 use engine_core::time::TimeSource;
@@ -24,6 +24,7 @@ const VIEWS: &[(&str, [f64; 3], [f64; 3])] = &[
     ("pond", [56.0, 2.0, 38.0], [46.7, 0.3, 46.7]),
     ("wake", [-3.0, 11.0, 26.0], [-5.0, 5.5, -3.0]),
     ("aerial", [0.0, 95.0, 70.0], [10.0, 0.0, 8.0]),
+    ("ditch", [52.0, 30.0, 52.0], [51.0, 0.0, 50.0]),
 ];
 
 fn main() {

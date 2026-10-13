@@ -118,3 +118,52 @@ license = "MIT"
 source = "https://github.com/microsoft/Microsoft-Rocketbox/tree/master/Assets/Animations/Male"
 author = "Microsoft"
 copyright = "Copyright (c) 2020 Microsoft"
+
+# Paddock horse: a realistic chestnut draft horse (3.7k vertices, 19 bones, 2K photo albedo and
+# normal map), body only; the paddock adds the mane and tail and drives the legs with its own
+# gaits. Upstream: "Rigged Horse" on OpenGameArt (riggedHorse.blend; model and textures by
+# Lyndon Daniels, rig by ChadM, both CC0), cleaned up and exported to glTF by OloEngine
+# (prepare_horse.py in the source folder). The four files sit side by side.
+[[file]]
+path = "anim/animals/horse/Horse.gltf"
+url = "https://raw.githubusercontent.com/drsnuggles8/OloEngineBase/master/OloEditor/SandboxProject/Assets/Models/Horse/Horse.gltf"
+sha256 = "2d9e3cecfca6326b5846465665f6163a4878cb9e6ff3d9a374d760da67c59bf6"
+license = "CC0-1.0"
+source = "https://opengameart.org/content/rigged-horse"
+author = "Lyndon Daniels (model, textures), ChadM (rig), OloEngine (glTF export)"
+
+[[file]]
+path = "anim/animals/horse/Horse.bin"
+url = "https://raw.githubusercontent.com/drsnuggles8/OloEngineBase/master/OloEditor/SandboxProject/Assets/Models/Horse/Horse.bin"
+sha256 = "68b865253bb8b7c078d1aee28c2cda65c4728b34be012fb77d5f4f954edb35b9"
+license = "CC0-1.0"
+source = "https://opengameart.org/content/rigged-horse"
+author = "Lyndon Daniels (model, textures), ChadM (rig), OloEngine (glTF export)"
+
+[[file]]
+path = "anim/animals/horse/HorseAlbedo.jpg"
+url = "https://raw.githubusercontent.com/drsnuggles8/OloEngineBase/master/OloEditor/SandboxProject/Assets/Models/Horse/HorseAlbedo.jpg"
+sha256 = "9a9b4ca3773e2ac71da0f55a4cb8d4916e04c847f7d96cea4c60721320d3c2bc"
+license = "CC0-1.0"
+source = "https://opengameart.org/content/rigged-horse"
+author = "Lyndon Daniels (model, textures), ChadM (rig), OloEngine (glTF export)"
+
+[[file]]
+path = "anim/animals/horse/HorseNormal.png"
+url = "https://raw.githubusercontent.com/drsnuggles8/OloEngineBase/master/OloEditor/SandboxProject/Assets/Models/Horse/HorseNormal.png"
+sha256 = "4ef00b3747dc14c463641e4d81dc05902655f9572385cf42bf557b666a3af66b"
+license = "CC0-1.0"
+source = "https://opengameart.org/content/rigged-horse"
+author = "Lyndon Daniels (model, textures), ChadM (rig), OloEngine (glTF export)"
+
+# Paddock car: Khronos glTF sample "CarConcept" (213k triangles; wheels, doors, hood and hatch
+# are separate nodes), made from Unity Fan's CC0 Concept Car 004. The paddock hides the Khronos
+# logos on the license plate and steering wheel (trademarks; the model license gives no right
+# to them).
+[[file]]
+path = "anim/vehicles/car_concept.glb"
+url = "https://raw.githubusercontent.com/KhronosGroup/glTF-Sample-Assets/main/Models/CarConcept/glTF-Binary/CarConcept.glb"
+sha256 = "c272098089d78c5cd9fd9f24ff50ee8acf8d932c55f2d55fc10adb6c8998966b"
+license = "CC-BY-4.0"
+source = "https://github.com/KhronosGroup/glTF-Sample-Assets/tree/main/Models/CarConcept"
+author = "Eric Chadwick, Darmstadt Graphics Group GmbH"

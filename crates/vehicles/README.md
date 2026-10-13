@@ -1,7 +1,8 @@
 # engine_vehicles — Vehicles
 
-**Owner:** Cars, planes and spaceships. **Status:** round 1 (simulation, autopilots, demos and
-end-to-end tests done; models being rebuilt at full detail).
+**Owner:** Cars, planes and spaceships. **Status:** simulation, autopilots, demos and
+end-to-end tests done and running on the Rapier backend in the showcase; detailed procedural
+models for every vehicle and for the track, airfield and spaceport.
 
 Cars, planes and spaceships for a game that travels between planets. Everything is built on the
 `engine_world` physics contract, so any physics backend that passes the conformance suite runs
@@ -18,7 +19,7 @@ these vehicles unchanged.
 | Spacecraft | `ship.rs` | Thrusters (main, hover, RCS) with a least-squares allocator that favors attitude, flight assist modes (off, rotation, full, hover), propellant mass, orbits (periapsis/apoapsis), Sutton–Graves re-entry heating with radiative cooling. |
 | Autopilots | `autopilot.rs` | Drive a path, drift a circle, take off and fly waypoints, stall and recover, launch to orbit, hold a point, hop off a pad and land. They write `VehicleControls` like a player or the NPC module would. |
 | Events | `events.rs` | Wheel tracks (`GroundContact`), engine `NoiseEvent`s, tire and exhaust `SmokeEmission`, rocket wash fanning out along the ground (`WindField`), crash `WorldImpulse` and `DamageEvent`, heat damage. |
-| Models | `models/`, `meshes.rs`, `visuals.rs`, `presets.rs` | Procedural meshes and materials; spinning, steering wheels; moving control surfaces; engine plumes; lights; hull glow when hot. |
+| Models | `models/cars`, `models/aircraft`, `models/scenery`, `visuals.rs` | Procedural meshes with baked PBR textures, built once per kind and shared: sports and rally cars (~145k triangles each: sculpted bodies, liveries, lights, interiors, wheels with discs and calipers), the sport plane (120k) and the spaceplane (165k), and the scenery of the three demo zones. `visuals.rs` spins and steers wheels, moves control surfaces and calipers, sizes plumes, lights brake lamps and makes hot hulls glow. |
 | Presets | `presets.rs` | `sports_car`, `rally_car`, `sport_plane`, `spaceplane` (by name through `presets::spawn`). |
 | AI tools | `api.rs` | `vehicles.presets`, `vehicles.spawn`, `vehicles.list`, `vehicles.control`, `vehicles.autopilot`, `vehicles.telemetry`. |
 | Demos | `demo.rs` | `spawn_track` (circuit, kicker, drift pad, two racing cars, a drifting rally car), `spawn_airfield` (a runway, a plane taking off and one flying circuits) and `spawn_spaceport` (a spaceplane hopping off the pad, one parked). `spawn_demo` builds all three; the showcase puts them in its `track`, `airfield` and `spaceport` zones. |
@@ -39,7 +40,8 @@ every vehicle each step (audio plays engines and tires from them), `GroundContac
 ## Tests
 
 Physics comes from a small stand-in solver in `tests/support` written only against the
-contract (until the physics module lands).
+contract (module crates don't depend on a backend); the showcase runs the same vehicles on
+`engine_physics`.
 
 - `tests/cars.rs`: settles on its springs; reports engine rpm, load and wheel contacts; 0–100 km/h in 4–6.5 s, shifts up through the
   gears and tops out at 250–310 km/h in a straight line; brakes from 100 km/h in 30–48 m
@@ -55,12 +57,17 @@ contract (until the physics module lands).
   circularize); re-entry from orbit heats the shield past 1 200 K without burning through.
 - `tests/screenshots.rs`: renders the cars, the aircraft and the track, airfield and spaceport
   demos (set `VEHICLE_SHOTS=<dir>` to keep the PNGs; helpers in `tests/support/shots.rs`).
+- `tests/shots_cars.rs`, `tests/shots_aircraft.rs`, `tests/shots_scenery.rs`: model budgets
+  (triangles; scenery build under 1 s per zone) always, and close-up galleries only with
+  `VEHICLE_SHOTS=<dir>` set (they take many minutes on a software GPU).
 
 ## Done when
 
 - A car drives, drifts and jumps convincingly; a plane takes off and stalls; a ship flies from a
-  planet surface into orbit. ✓ (on the stand-in solver; to re-check on the real backend)
-- The models hold up in close-up next to the rest of the showcase.
+  planet surface into orbit. ✓ (tests on the stand-in solver; in the showcase on Rapier the
+  cars race and drift, the plane takes off and the spaceplane hops)
+- The models hold up in close-up next to the rest of the showcase. ✓ (galleries in
+  `engine-screenshots/vehicles/` in the project files)
 - Vehicles honor `LocalTimeScale` (time dilation bubbles). ✓ Every subsystem steps by
   `VehicleFrame::dt` (`Time::delta_for` with the vehicle's `LocalTimeScale`), and the backend
   moves the body in the same seconds, so a car in a 0.5 bubble does in 4 world seconds what

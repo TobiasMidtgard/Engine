@@ -192,8 +192,11 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     let vein_p = in.pattern * 55.0 - a * (along * 55.0 * 0.8);
     let ridge = 1.0 - abs(value_noise3(vein_p) * 2.0 - 1.0);
     let ridge2 = 1.0 - abs(value_noise3(vein_p * 2.1 + 3.7) * 2.0 - 1.0);
+    // A vein is a few millimeters wide: once it is narrower than a pixel it fades out, so
+    // distant arms don't show aliased dark scribbles.
+    let vein_fade = 1.0 - smoothstep(0.15, 0.35, length(fwidth(vein_p)));
     let vein = smoothstep(0.86, 0.97, max(ridge, ridge2 * 0.96)) * in.mask.z * in.activation
-        * mat.detail.z;
+        * mat.detail.z * vein_fade;
 
     // Fade detail where the pattern gets finer than a pixel.
     let fade = saturate(1.5 - fwidth(fold_phase) * 2.0);
@@ -240,7 +243,7 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     albedo *= 1.0 + stretch * 0.06 * pull;
     // Working muscles flush; veins show through the skin.
     albedo *= mix(vec3<f32>(1.0), vec3<f32>(1.07, 0.93, 0.9), saturate(in.activation * skin * 0.6));
-    albedo = mix(albedo, mat.vein.rgb * albedo * 1.6, vein * 0.45);
+    albedo = mix(albedo, mat.vein.rgb * albedo * 1.6, vein * 0.3);
 
     var s = default_surface();
     s.albedo = saturate3(albedo);
