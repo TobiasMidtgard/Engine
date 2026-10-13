@@ -323,27 +323,47 @@ fn mud() -> TexSet {
     c.bake(1.6, 35.0)
 }
 
-/// Settled snow: soft drifts, crisp grains and sparkles; hollows a little blue.
+/// Settled snow: soft drifts and wind ripples, a granular crust of old crystals, and ice
+/// facets tilted every which way that glint in the sun; hollows a little blue. Albedo of a
+/// few days' old snow (about 0.8), so a sunlit field doesn't burn out to flat white.
 fn snow() -> TexSet {
     let mut c = Canvas::new(512, 512, Vec2::splat(2.0));
-    let (white, blue) = (Vec3::new(0.86, 0.89, 0.93), Vec3::new(0.62, 0.72, 0.88));
+    let (white, blue) = (Vec3::new(0.76, 0.79, 0.84), Vec3::new(0.52, 0.61, 0.77));
     c.fill(|u, v| {
         let n = fbm(u, v, 3, 5, 41);
         let ripple = fbm2(u, v, 2, 14, 3, 42);
         let grain = fbm(u, v, 64, 2, 43);
-        let h = n * 0.006 + ripple * 0.0015 + grain * 0.0004;
+        // Rounded old grains a few millimeters across.
+        let crust = worley(u * 160.0, v * 160.0, 160, 46, 1.0);
+        let bead = (1.0 - crust.f1 * 1.6).max(0.0);
+        let crusty = smooth(-0.2, 0.5, fbm(u, v, 6, 2, 47));
+        let h = n * 0.006 + ripple * 0.0016 + grain * 0.0004 + bead * 0.0007 * crusty;
         let hollow = smooth(0.0, -0.6, n + ripple * 0.3);
         let px = super::procgen::hash((u * 512.0) as i32, (v * 512.0) as i32, 44);
-        let sparkle = unit(px) > 0.9965;
+        let sparkle = unit(px) > 0.985;
+        let facet = if sparkle {
+            let a = unit(px >> 3) * TAU;
+            let tilt = 0.2 + 0.45 * unit(px >> 11);
+            Vec2::new(a.cos(), a.sin()) * tilt
+        } else {
+            Vec2::ZERO
+        };
         Texel {
             color: if sparkle {
-                Vec3::splat(1.0)
+                Vec3::splat(0.9)
             } else {
-                mix(white, blue, hollow * 0.55) * (0.97 + 0.04 * grain)
+                mix(white, blue, hollow * 0.6)
+                    * (0.96 + 0.05 * grain)
+                    * (1.0 - 0.04 * crusty * (1.0 - bead))
             },
             height: h,
-            rough: if sparkle { 0.08 } else { 0.62 + 0.1 * grain },
+            rough: if sparkle {
+                0.14
+            } else {
+                0.6 + 0.12 * grain + 0.06 * crusty
+            },
             alpha: coverage(u, v, 5, 45),
+            facet,
             ..Default::default()
         }
     });

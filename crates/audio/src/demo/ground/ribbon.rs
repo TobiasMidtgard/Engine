@@ -6,7 +6,10 @@
 //! 0.45 over a ragged band, and the ground textures carry a 0.5–1 blob pattern in their
 //! alpha, so with an alpha-mask cutoff of 0.5 the edge follows the blobs. A ribbon that
 //! starts with a tongue (`fade_in`) lies a few millimeters above the stretch before it, so
-//! one ground creeps over the other.
+//! one ground creeps over the other; where the tongue ends wanders back and forth across
+//! the path, so neighbouring grounds meet along a ragged, slanting line rather than a
+//! straight cut. Ground that dips under other ground (a snow blanket's edge) reports a
+//! negative coverage there, and triangles wholly under it are dropped.
 
 use engine_core::math::{Vec2, Vec3, Vec4};
 use engine_render::{Mesh, Vertex};
@@ -110,6 +113,23 @@ pub(super) fn fray(x: f32, solid: f32, ragged: f32) -> f32 {
     }
 }
 
+/// What a ribbon's ground is like at one point.
+pub(super) struct Surf {
+    /// Height above the origin, meters.
+    pub y: f32,
+    /// Coverage: 1 solid, down to 0.45 at a ragged edge. Negative where the surface lies
+    /// under other ground: triangles with every corner there are dropped.
+    pub cover: f32,
+    /// Vertex colour (multiplied with the texture).
+    pub tint: Vec3,
+}
+
+impl Surf {
+    pub fn new(y: f32, cover: f32, tint: Vec3) -> Self {
+        Self { y, cover, tint }
+    }
+}
+
 /// One ribbon of ground.
 pub(super) struct Ribbon<'a> {
     pub mat: Mat,
@@ -123,12 +143,8 @@ pub(super) struct Ribbon<'a> {
     pub ds: f64,
     /// Column positions across, meters, sorted.
     pub columns: Vec<f32>,
-    /// Coverage across (1 solid, down to 0.45 at a ragged edge).
-    pub cover: &'a (dyn Fn(f32) -> f32 + Sync),
-    /// Height above the origin at (s, x, world xz), meters.
-    pub height: &'a (dyn Fn(f64, f32, Vec2) -> f32 + Sync),
-    /// Vertex colour (multiplied with the texture) at (s, x, world xz).
-    pub tint: &'a (dyn Fn(f64, f32, Vec2) -> Vec3 + Sync),
+    /// The ground at (s, x, world xz): height, coverage and tint.
+    pub surface: &'a (dyn Fn(f64, f32, Vec2) -> Surf + Sync),
     /// Casts shadows (banks, ruts and drifts do; flat ground needn't).
     pub shadows: bool,
 }
@@ -171,6 +187,7 @@ fn chunk(r: &Ribbon, ka: i64, kb: i64) -> Option<Part> {
     let w = cols.len();
     let mut pos = vec![Vec3::ZERO; rows * w];
     let mut world = vec![Vec2::ZERO; rows * w];
+    let mut look = vec![(0.0f32, Vec3::ONE); rows * w];
     for i in 0..rows {
         let k = ka - 1 + i as i64;
         // Extra rows are sampled just outside the ribbon (unclamped) for smooth normals.
@@ -179,7 +196,9 @@ fn chunk(r: &Ribbon, ka: i64, kb: i64) -> Option<Part> {
         for (j, &x) in cols.iter().enumerate() {
             let flat = p + right * x;
             let wxz = Vec2::new(flat.x, flat.z);
-            let mut y = (r.height)(s, x, wxz);
+            let surf = (r.surface)(s, x, wxz);
+            look[i * w + j] = (surf.cover, surf.tint);
+            let mut y = surf.y;
             if r.fade_in > 0.0 {
                 y += TONGUE_LIFT * (1.0 - smooth(r.s0 as f32, r.s0 as f32 + 0.3, s as f32));
             }
@@ -190,14 +209,31 @@ fn chunk(r: &Ribbon, ka: i64, kb: i64) -> Option<Part> {
             world[i * w + j] = wxz;
         }
     }
-    let along_cover = |s: f64| -> f32 {
-        let a = if s < r.s0 && r.fade_in > 0.0 {
-            1.0 - 0.55 * ((r.s0 - s) / r.fade_in).min(1.0) as f32
+    // Where a tongue is solid wanders back and forth across the path and slants (by up to
+    // half the tongue), so neighbouring grounds meet along a ragged, slanting line. The
+    // coverage always reaches its fully ragged 0.45 at the tongue's tip.
+    let wander = |x: f32, at: f64| {
+        let slant = if (at * 0.37).fract() < 0.5 {
+            0.16
+        } else {
+            -0.16
+        };
+        (0.5 + 0.4 * fbm_world(x, at as f32 * 0.37, 0.7, 3, 0x3e) + slant * x).clamp(0.0, 1.0)
+    };
+    let along_cover = |s: f64, x: f32| -> f32 {
+        let a = if r.fade_in > 0.0 {
+            let tip = r.s0 - r.fade_in;
+            let solid = r.s0 - r.fade_in * 0.5 * wander(x, r.s0) as f64;
+            let t = ((solid - s) / (solid - tip)).clamp(0.0, 1.0);
+            1.0 - 0.55 * t as f32
         } else {
             1.0
         };
-        let b = if s > r.s1 && r.fade_out > 0.0 {
-            1.0 - 0.55 * ((s - r.s1) / r.fade_out).min(1.0) as f32
+        let b = if r.fade_out > 0.0 {
+            let tip = r.s1 + r.fade_out;
+            let solid = r.s1 + r.fade_out * 0.5 * wander(x, r.s1) as f64;
+            let t = ((s - solid) / (tip - solid)).clamp(0.0, 1.0);
+            1.0 - 0.55 * t as f32
         } else {
             1.0
         };
@@ -205,11 +241,11 @@ fn chunk(r: &Ribbon, ka: i64, kb: i64) -> Option<Part> {
     };
     let mut m = Mesh::default();
     let out_rows = (kb - ka + 1) as usize;
+    // Coverage per vertex; negative where the ground lies under other ground.
     let mut alpha = Vec::with_capacity(out_rows * nc);
     for i in 1..=out_rows {
         let k = ka - 1 + i as i64;
         let s = s_of(k);
-        let ac = along_cover(s);
         for j in 1..=nc {
             let at = |ii: usize, jj: usize| pos[ii * w + jj];
             let across = at(i, j + 1) - at(i, j - 1);
@@ -218,12 +254,15 @@ fn chunk(r: &Ribbon, ka: i64, kb: i64) -> Option<Part> {
             let n = if n.y < 0.0 { -n } else { n };
             let x = cols[j];
             let wxz = world[i * w + j];
-            let a = (r.cover)(x) * ac;
+            let (cover, c) = look[i * w + j];
+            let a = cover * along_cover(s, x);
             alpha.push(a);
-            let c = (r.tint)(s, x, wxz);
+            // Corners under other ground keep a solid alpha (no ragged edge leaks toward
+            // them); the depth test hides that part of the triangle.
+            let va = if a < 0.0 { 1.0 } else { a.min(1.0) };
             m.vertices.push(
                 Vertex::new(pos[i * w + j] - anchor, n, wxz)
-                    .with_color(Vec4::new(c.x, c.y, c.z, a)),
+                    .with_color(Vec4::new(c.x, c.y, c.z, va)),
             );
         }
     }

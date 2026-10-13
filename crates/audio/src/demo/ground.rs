@@ -26,6 +26,7 @@ use engine_render::{
 mod dress;
 pub(super) mod procgen;
 mod ribbon;
+mod snow;
 mod structures;
 mod textures;
 

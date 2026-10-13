@@ -6,7 +6,7 @@ use engine_core::prelude::*;
 use engine_render::{Mesh, PointLight};
 
 use super::procgen::{Rand, append, beveled_box, fbm_world, hex, smooth, tube, unit, vert};
-use super::ribbon::{self, PATH_Y, Ribbon, columns, frame, point};
+use super::ribbon::{self, PATH_Y, Ribbon, Surf, columns, frame, point};
 use super::{Batch, Mat, Out, Part, sky_volume};
 use crate::ReverbZone;
 use crate::demo::{STRETCHES, TRAIL_WIDTH, stretch_start, trail_point};
@@ -90,12 +90,13 @@ pub(super) fn boardwalk() -> Out {
     let mut rng = Rand::new(0xb0a2d);
 
     // Damp soil under the boards.
-    let cover = |_: f32| 1.0;
-    let h = |_: f64, x: f32, w: Vec2| {
-        0.006 + fbm_world(w.x, w.y, 0.4, 3, 0x81) * 0.004 + 0.03 * smooth(1.2, 1.45, x.abs())
+    let soil = |_: f64, x: f32, w: Vec2| {
+        Surf::new(
+            0.006 + fbm_world(w.x, w.y, 0.4, 3, 0x81) * 0.004 + 0.03 * smooth(1.2, 1.45, x.abs()),
+            1.0,
+            Vec3::splat(0.75 + 0.15 * fbm_world(w.x, w.y, 1.0, 2, 0x82)),
+        )
     };
-    let tint =
-        |_: f64, _: f32, w: Vec2| Vec3::splat(0.75 + 0.15 * fbm_world(w.x, w.y, 1.0, 2, 0x82));
     out.parts.extend(ribbon::ribbon(&Ribbon {
         mat: Mat::Soil,
         s0: s0 - 0.02,
@@ -104,9 +105,7 @@ pub(super) fn boardwalk() -> Out {
         fade_out: 0.0,
         ds: 0.1,
         columns: columns(1.45, 0.1, 2.0, 0.1, 2.0, 0.1),
-        cover: &cover,
-        height: &h,
-        tint: &tint,
+        surface: &soil,
         shadows: false,
     }));
 
@@ -292,11 +291,13 @@ pub(super) fn grating() -> Out {
     let pit_half = 1.27f32;
 
     // The pit floor and its puddles.
-    let cover = |_: f32| 1.0;
-    let floor = |_: f64, _: f32, w: Vec2| 0.0045 + fbm_world(w.x, w.y, 0.5, 3, 0x91) * 0.0045;
-    let tint = |_: f64, x: f32, w: Vec2| {
-        Vec3::splat(0.55 + 0.15 * fbm_world(w.x, w.y, 0.8, 2, 0x92))
-            * (1.0 - 0.3 * smooth(0.9, 1.27, x.abs()))
+    let floor = |_: f64, x: f32, w: Vec2| {
+        Surf::new(
+            0.0045 + fbm_world(w.x, w.y, 0.5, 3, 0x91) * 0.0045,
+            1.0,
+            Vec3::splat(0.55 + 0.15 * fbm_world(w.x, w.y, 0.8, 2, 0x92))
+                * (1.0 - 0.3 * smooth(0.9, 1.27, x.abs())),
+        )
     };
     out.parts.extend(ribbon::ribbon(&Ribbon {
         mat: Mat::PitFloor,
@@ -306,13 +307,10 @@ pub(super) fn grating() -> Out {
         fade_out: 0.0,
         ds: 0.05,
         columns: columns(pit_half, 0.05, 2.0, 0.05, 2.0, 0.05),
-        cover: &cover,
-        height: &floor,
-        tint: &tint,
+        surface: &floor,
         shadows: false,
     }));
-    let water = |_: f64, _: f32, _: Vec2| 0.0052;
-    let white = |_: f64, _: f32, _: Vec2| Vec3::ONE;
+    let water = |_: f64, _: f32, _: Vec2| Surf::new(0.0052, 1.0, Vec3::ONE);
     out.parts.extend(ribbon::ribbon(&Ribbon {
         mat: Mat::Water,
         s0: s0 + 0.15,
@@ -321,9 +319,7 @@ pub(super) fn grating() -> Out {
         fade_out: 0.0,
         ds: 0.25,
         columns: columns(pit_half - 0.02, 0.2, 2.0, 0.2, 2.0, 0.2),
-        cover: &cover,
-        height: &water,
-        tint: &white,
+        surface: &water,
         shadows: false,
     }));
     for _ in 0..90 {
