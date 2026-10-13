@@ -57,6 +57,12 @@ pub struct PhysicsSettings {
     /// there). Costs about 1 ms per tumbling ragdoll per frame. Off = every joint is a
     /// constraint the solver pulls together each step.
     pub articulated_joints: bool,
+    /// Most moving free-floating jointed groups (ragdolls, loose chains) solved as articulations
+    /// at once: the ones nearest a `SimulationFocus`. The rest use constraint joints until a
+    /// place frees up (a tumbling ragdoll costs about 0.9 ms per frame articulated, 0.15 ms on
+    /// constraint joints, where its joints may open a few centimeters for a frame on hard
+    /// landings). Sleeping groups keep their joints and don't count.
+    pub max_articulated: u32,
 }
 
 impl Default for PhysicsSettings {
@@ -78,6 +84,7 @@ impl Default for PhysicsSettings {
             blast_response: true,
             blast_scale: 1.0,
             articulated_joints: true,
+            max_articulated: 4,
         }
     }
 }
