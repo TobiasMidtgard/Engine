@@ -764,6 +764,15 @@ fn finish_wall_hit(
     }
 }
 
+/// Which way (wall-local) a blast at `origin` throws the piece of its wall at `at`: away from
+/// the blast and out of the far face, not along the wall, so a charge on a floor rains its
+/// hole into the room below and one on a wall blows it into the room behind.
+fn thrown(at: Vec3, origin: Vec3) -> Vec3 {
+    let away = (at - origin).normalize_or(Vec3::Z);
+    let through = if origin.z > 0.0 { Vec3::NEG_Z } else { Vec3::Z };
+    (away * 0.5 + through).normalize_or(through)
+}
+
 /// Group lost cells into irregular chunks (Voronoi around random seed cells) and spawn them.
 #[allow(clippy::too_many_arguments)]
 fn wall_chunks(
@@ -811,9 +820,7 @@ fn wall_chunks(
             let c = g.center(group[0].idx);
             let at = gt.transform_point(DVec3::new(c.x as f64, c.y as f64, 0.0));
             let v = push
-                .map(|(o, speed)| {
-                    rot * (Vec3::new(c.x, c.y, 0.0) - o).normalize_or(Vec3::Z) * speed * 0.6
-                })
+                .map(|(o, speed)| rot * thrown(Vec3::new(c.x, c.y, 0.0), o) * speed * 0.6)
                 .unwrap_or(Vec3::ZERO);
             ctx.chips(at, v, 1.5, 1, wall.material, g.cell.x.max(g.cell.y));
             continue;
@@ -850,7 +857,7 @@ fn wall_chunks(
         let size = half.max_element() * 2.0;
         let velocity = match push {
             Some((origin, speed)) => {
-                let d = (com - origin).normalize_or(Vec3::Z);
+                let d = thrown(com, origin);
                 let falloff = 1.0 / (1.0 + (com - origin).length());
                 rot * d * speed * falloff * ctx.rng.range(0.6, 1.25) + ctx.rng.unit_vector() * 0.8
             }

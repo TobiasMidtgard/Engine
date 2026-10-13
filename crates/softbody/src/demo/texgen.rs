@@ -1,7 +1,8 @@
 //! Procedural textures for the yard's props and ground: tileable noise (gradient, value,
 //! cellular), and generators for weathered wood (an atlas with long and end grain), painted
 //! steel, galvanized steel, painted cast iron, worn metal, stone, concrete, rope, the boat's
-//! finishes (varnished wood, enamel, antifouling), packed earth with gravel, and grass.
+//! finishes (varnished wood, enamel, antifouling), statuary marble, packed earth with gravel,
+//! and grass.
 //!
 //! Every generator returns a [`TexSet`]: an sRGB albedo, a tangent-space normal map (+Y up,
 //! derived from a height field in meters) and a half-resolution ORM map (R ambient
@@ -827,6 +828,52 @@ pub fn stone(size: u32) -> TexSet {
     });
     let t = 1.0 / size as f32;
     finish(size, size, &px, |_, _| (t, t), 0.12)
+}
+
+/// Tile size of [`marble`], m.
+pub const MARBLE_TILE_M: f32 = 0.9;
+
+/// Statuary marble (Carrara), tile [`MARBLE_TILE_M`]: a warm white with clouds of pale
+/// grey, soft grey veins that drift diagonally, fading in and out, each in a faint halo, a few
+/// hairline veins, and a sugary crystal grain that breaks up the polish. Nearly flat; the veins
+/// sit a hair lower, worn by the weather. Roughness is absolute (use the material's roughness
+/// factor 1): a honed, weathered polish.
+pub fn marble(size: u32) -> TexSet {
+    let px = par_texels(size, size, |x, y| {
+        let (u, v) = uv_of(x, y, size, size);
+        let cloud = fbm(u, v, (2, 2), 6, 0.55, 1601);
+        let mottle = fbm(u, v, (8, 8), 4, 0.5, 1602);
+        // Veins: soft zero-crossings of a diagonal wave, gently bent.
+        let warp = 3.5 * fbm(u, v, (2, 2), 5, 0.5, 1603);
+        let main = (TAU * (u + 2.0 * v) + warp).sin().abs();
+        let warp2 = 4.5 * fbm(u, v, (3, 3), 5, 0.5, 1604);
+        let fine = (TAU * (3.0 * u - 2.0 * v) + warp2).sin().abs();
+        let strength = smoothstep(-0.1, 0.4, fbm(u, v, (3, 3), 3, 0.5, 1605));
+        let vein = (1.0 - smoothstep(0.0, 0.07, main)) * strength;
+        let halo = (1.0 - smoothstep(0.0, 0.35, main)) * strength;
+        let hair = (1.0 - smoothstep(0.0, 0.015, fine))
+            * smoothstep(0.25, 0.55, fbm(u, v, (5, 5), 3, 0.5, 1606));
+        let grain = worley(u, v, 180, 1.0, 1607);
+        let grain_t = rand01(grain.id as i32, 0, 1608);
+        let edge = 1.0 - smoothstep(0.0, 0.08, grain.f2 - grain.f1);
+        let mut col = srgb(0.93, 0.92, 0.895);
+        col = col.lerp(srgb(0.86, 0.865, 0.87), smoothstep(0.0, 0.6, cloud) * 0.5);
+        col *= 0.99 + 0.02 * mottle + 0.01 * (grain_t - 0.5);
+        col = col.lerp(srgb(0.8, 0.805, 0.81), halo * 0.3);
+        col = col.lerp(srgb(0.6, 0.61, 0.63), vein * 0.5);
+        col = col.lerp(srgb(0.7, 0.71, 0.72), hair * 0.3);
+        Px {
+            albedo: col,
+            height: -0.00002 * (vein + 0.5 * hair) - 0.000005 * edge + 0.000003 * grain_t,
+            rough: (0.4 + 0.08 * grain_t + 0.05 * edge + 0.04 * vein + 0.04 * mottle)
+                .clamp(0.25, 0.65),
+            metal: 0.0,
+            ao: 1.0,
+            alpha: 1.0,
+        }
+    });
+    let t = MARBLE_TILE_M / size as f32;
+    finish(size, size, &px, |_, _| (t, t), 0.0)
 }
 
 /// Cast concrete, tile 1.5 m: aggregate, air pores, stains.
