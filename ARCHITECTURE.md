@@ -209,7 +209,18 @@ the interpolated vertex normal; `StandardMaterial` meshes set it), not the norma
 cover doesn't change wrinkle by wrinkle on a strong normal map; the shading normal still picks
 which part of the sky lights the point. Shaders in other crates that build a `Surface` with
 `default_surface()` and a normal map should set `smooth_normal` too (left at zero it falls back
-to `normal`; `surface_smooth_normal(s)` resolves it). `RenderSettings::debug_view =
+to `normal`; `surface_smooth_normal(s)` resolves it). Reflected sky is occluded along the
+reflection, not just by the cover overhead: `specular_sky_visibility(rel, dir, smooth_normal,
+roughness)` marches the map outward along the reflection's heading (18 taps from about 1 m to
+55 m, each a quarter farther, shifted per pixel so TAA averages walls thinner than the far gaps)
+and hides the sky where cover rises above the reflection, so a forest pond or a wet courtyard
+doesn't mirror the bright low sky that the trees or walls around it hide (with SSR off or off
+screen, the hidden part is left to the ambient fill). Cover at the surface's own level doesn't
+count, so open water stays bright to the horizon. `specular_horizon_fade(r, smooth_normal)`
+(Russell's horizon occlusion) fades reflections that a normal map tilts below the surface's own
+horizon. `shade_surface` takes the smaller of `sky_visibility` and the directional value for
+glossy surfaces (rough ones, whose lobe is wide, use the cover overhead alone; the march is
+skipped from perceptual roughness 0.71) and applies the fade to all. `RenderSettings::debug_view =
 SkyVisibility` shows the result.
 
 **Screen-space effects** (built): every frame starts with a depth prepass that also writes
@@ -298,7 +309,7 @@ muscles and skinned clothes and by `engine_softbody` for simulated cloth).
 Shader library: `lib_types.wgsl` (types, noise, BRDF, `henyey_greenstein`, `default_surface`, `surface_smooth_normal`), `lib_frame.wgsl` (group 0 frame
 data, `shade_surface`, `shade_surface_shadowed`, `shade_thin_surface`, `shadow_factor` (cascades, then `far_shadow_visibility`), `cloud_shadow` (and `cloud_shadow_plane_point` for writers), `contact_shadow`, `screen_ao`, `sky_visibility`, `apply_fog` (`color * transmittance + inscatter` of `surface_fog`, which returns a `SurfaceFog` for callers that need the two apart, such as blended particles),
 `apply_sky_fog`, `volumetric_fog_at`, `height_fog_density`, `fog_sky_light`,
-`sample_env`, `sample_env_rough`, `sky_ambient`, `sky_ambient_covered`, `wind_offset`, `prepass_output`) and `lib_atmosphere.wgsl` (`atmosphere` for aerial perspective,
+`sample_env`, `sample_env_rough`, `sky_ambient`, `sky_ambient_covered`, `specular_sky_visibility`, `specular_horizon_fade`, `wind_offset`, `prepass_output`) and `lib_atmosphere.wgsl` (`atmosphere` for aerial perspective,
 `sun_transmittance`, `sky_view_radiance`, `planet_height`, `ray_shell`).
 
 **Shapes** (built): `Shape` builds procedural meshes. Round shapes given `segments: 0` get
