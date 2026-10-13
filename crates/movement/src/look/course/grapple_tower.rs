@@ -477,7 +477,7 @@ fn tower(kit: &mut Kit, base: f32, t0: Vec3, t1: Vec3) {
     stencil(
         &mut paint,
         10,
-        v3(t1.x - 1.6, 3.2, fz),
+        v3(t0.x + 1.9, 3.2, fz),
         Vec3::NEG_X,
         Vec3::Y,
         1.6,
@@ -486,7 +486,7 @@ fn tower(kit: &mut Kit, base: f32, t0: Vec3, t1: Vec3) {
     stencil(
         &mut paint,
         11,
-        v3(t1.x - 1.6, 1.95, fz),
+        v3(t0.x + 1.9, 1.95, fz),
         Vec3::NEG_X,
         Vec3::Y,
         0.3,
@@ -495,12 +495,34 @@ fn tower(kit: &mut Kit, base: f32, t0: Vec3, t1: Vec3) {
     stencil(
         &mut paint,
         10,
-        v3(t1.x + 0.004, 3.2, t0.z + 1.65),
+        v3(t1.x + 0.004, 3.2, t1.z - 1.9),
         Vec3::NEG_Z,
         Vec3::Y,
         1.6,
         orange_paint,
     );
+    // Cyan guide lights in the front face's two upper panel joints frame the way up, and
+    // chevrons between them point at the target.
+    let mut lights = M::new();
+    let w = (t1.x - t0.x - 2.0 * inset) / 3.0;
+    for jx in [t0.x + inset + w, t1.x - inset - w] {
+        let (y0, y1) = (LIFT + 0.25, top - 0.2);
+        alu.append(
+            &bx(
+                v3(jx - 0.026, y0 - 0.04, t0.z - 0.012),
+                v3(jx + 0.026, y1 + 0.04, t0.z),
+            ),
+            Mat4::IDENTITY,
+        );
+        lights.append(
+            &bx(
+                v3(jx - 0.013, y0, t0.z - 0.016),
+                v3(jx + 0.013, y1, t0.z - 0.012),
+            ),
+            Mat4::IDENTITY,
+        );
+    }
+    kit.add(GLOW_CYAN, lights);
     // Chevrons up the front face to the target.
     for (y, c) in [(6.1, YELLOW_PAINT), (7.4, ORANGE_PAINT)] {
         let c = paint_color(c);

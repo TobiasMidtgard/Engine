@@ -456,11 +456,11 @@ pub fn demo_views(z: &Zone) -> Vec<View> {
                 View::new(
                     "parkour_grapple",
                     "Grapple hook: fire at the top of a 9 m tower, reel in, climb over",
-                    [19.0, 3.2, 21.0],
+                    [15.5, 2.4, 20.5],
                     [8.0, 6.0, 26.5],
                     16.0,
                 )
-                .warmup(1.75)
+                .warmup(2.1)
                 .on_arrive("movement.duel", &duel("Blink"))
                 .on_arrive("movement.grappler", "{}")
                 .on_leave("movement.duel", cycle),
