@@ -95,7 +95,7 @@ module's **contract** in `engine_world`:
 | Contract (`engine_world::…`) | Implemented by | Used by |
 |---|---|---|
 | `physics`: `RigidBody`, `Collider`, `Velocity`, `ExternalForce`, `Joint`, `CharacterController`/`CharacterMove`/`CharacterState`, `ApplyImpulse`, `ContactEvent`, `PhysicsQueries` (raycast, shapecast, overlap, closest point) | `engine_physics` | vehicles, softbody, destruction, movement, npc, anim (ragdolls), space, gameplay |
-| `animation`: `SkeletonPose`, `AnimationParams`, `AnimationTrigger`, `AnimationEvent`, `Ragdoll` | `engine_anim` | movement, npc, softbody (cloth/hair pinning), vfx, audio |
+| `animation`: `SkeletonPose`, `AnimationParams`, `AnimationTrigger`, `AnimationEvent`, `Ragdoll`, `BodyRequest` (a person or animal on an entity someone else moves) | `engine_anim` | movement, npc, softbody (cloth/hair pinning), vfx, audio (trail walkers) |
 | `locomotion`: `MoveIntent`, `LocomotionState`, `VehicleControls`, `LocomotionBackend` (`claim_backend`, so fallback movers can step aside) | `engine_movement`, `engine_vehicles` | npc, player input, cameras, UI |
 | `EngineState`, `WheelContacts`: what a vehicle's engine and wheels are doing | `engine_vehicles` | audio (engine and tyre sounds), ui (HUDs), npc (hearing), vfx (spray, exhaust) |
 | `air`: `Atmospheres` per planet and `Env::air(p)` (density, pressure, temperature, speed of sound, wind, altitude) | games and `engine_space` tune `Atmospheres`; weather drives sea-level conditions | vehicles, weather, audio, vfx, smoke, space |
@@ -151,8 +151,19 @@ Writes: `HeatField`, `WorldImpulse`, `IgniteRequest`, `DamageEvent`, `NoiseEvent
 | `draw_environment` | add to the sky environment map (clouds, nebulae); it is filtered afterwards, so what is drawn here lights every surface and shows in rough reflections |
 | `draw_prepass` | write depth, normal, roughness and motion for opaque geometry (`vs`/`fs` using `prepass_output` from `lib_frame.wgsl`, targets `GpuShared::prepass_targets()`); ambient occlusion, contact shadows and TAA motion work only on surfaces drawn here, and the scene pass must then write the same depth (mark clip positions `@invariant`) |
 | `draw_shadow(cascade)` | cast sun shadows; with `cascade == SKY_OCCLUSION_VIEW`, draw into the top-down sky occlusion map so whatever roofs over the ground (rock, buildings, canopies) keeps sky light and rain out |
+| `draw_far_shadow` | big casters only (terrain, mountains, cliffs, large buildings; cull with `ctx.view.far_shadow.casts(center, radius)`): the coarse far shadow map that shades the land beyond the cascades |
 | `draw(Opaque/Sky/Transparent)` | draw into the HDR scene; transparent can read scene color/depth copies |
 | `overlay` | draw onto the final LDR image (UI, debug) |
+
+**Sun shadows** (built): four cascades out to `RenderSettings::shadow_distance` (rotation-
+invariant spheres snapped to texels, PCSS filtering), then a **far shadow map** out to
+`far_shadow_distance` (8 km by default; 0 = off): one `shadow_map_size`² map around the camera
+(texels of about 8 m), snapped to world texels, in the shadow array's last layer
+(`FAR_SHADOW_LAYER`). Only casters at least two of its texels across draw into it
+(`draw_far_shadow`; the mesh feature, instanced and clustered, does), so it costs little, and
+mountains shade the valley at low sun and ridges shade themselves kilometers away.
+`shadow_factor` blends from the cascades into it over their last tenth; `DebugView::Cascades`
+shows its region in magenta.
 
 **Sky occlusion** (built): a 512² top-down depth map of the highest surface within 128 m of
 the camera. `sky_visibility(rel, normal)` in `lib_frame.wgsl` returns how much open sky a point
@@ -163,7 +174,14 @@ roof 30 m up about 0.97 and an aircraft 100 m up next to nothing. The map sees c
 only, so walls don't keep the low sky out: caves, rooms, tunnels and ship interiors add a
 `SkyLightVolume` (a box fitted to the inside, with the faces light comes in through, such as a
 cave mouth; it follows its entity, so a ship's interior moves with the ship). Up to 16 volumes
-nearest the camera are used. `RenderSettings::debug_view = SkyVisibility` shows the result.
+nearest the camera are used. Walls and ceilings under cover read the map with a small bias (only
+upward-facing ground gets the large one), and a surface counts as inside a volume when it or the
+air just in front of it is, so corners, seams and rounded edges indoors stay as dark as the
+walls around them. Sky light that does reach a covered point came in through openings and
+bounced on the way, so it arrives more evenly from all around the less sky the point sees
+(`sky_ambient_covered(normal, sky_vis)`, used by `shade_surface`): a ceiling indoors isn't lit
+by the sunlit ground outside (olive by default), nor a cave's floor by the blue sky overhead.
+`RenderSettings::debug_view = SkyVisibility` shows the result.
 
 **Screen-space effects** (built): every frame starts with a depth prepass that also writes
 normals, roughness and motion vectors. From it come ground-truth ambient occlusion (GTAO,
@@ -176,9 +194,13 @@ stable positions, and overlays get an unjittered frame group. Sun shadows use PC
 penumbra widens with distance from the caster like the real sun's (`sun_penumbra_scale`). Screen-space
 reflections (`screen_space_reflections`, `ssr_max_roughness`; `screen_reflection(rel)` in
 shaders, used by `shade_surface`) trace the prepass depth and read the previous frame's finished
-image, so polished floors, wet streets, metal and glossy paint mirror what is on screen, blurred
-with roughness, and fall back to the prefiltered sky elsewhere. `DebugView::Reflections` shows
-them. Screen-space global illumination (`screen_space_gi`, `gi_intensity`; `screen_gi(rel)` in
+image, so polished floors, wet streets, metal and glossy paint mirror what is on screen, and fall
+back to the prefiltered sky elsewhere. Glossy reflections gather over the GGX lobe's footprint at
+the hit from a blurred mip chain of that image, so a rough floor shows a soft glow of the window
+rather than a sharp image broken up by its bumps; they fade out over the upper half of
+`ssr_max_roughness`. A ray that passes over the sky before anything hides it (out through a
+window or a gap in the canopy) reflects what the camera sees there, or the sky in its exact
+direction for a mirror, even indoors. `DebugView::Reflections` shows them. Screen-space global illumination (`screen_space_gi`, `gi_intensity`; `screen_gi(rel)` in
 shaders, added by `shade_surface` times the diffuse color) traces short cosine-distributed rays
 through the prepass depth into the same previous image, so sunlit walls tint the ground beside
 them and lamps, fires and other emissive surfaces light their surroundings; light keeps bouncing
@@ -229,7 +251,10 @@ stay dark. Other modules feed it two inputs and need nothing else:
   are not drawn beyond it or with volumetric fog off.
 
 `apply_fog(color, rel)` reads the volume up to the range and continues the height fog
-analytically beyond it, so nothing is counted twice, then adds aerial perspective. With
+analytically beyond it, so nothing is counted twice, then adds aerial perspective. Beyond the
+range the far shadow map shades the haze's sunlight (`height_fog_sun_visibility`: eight taps
+spread over what the haze scatters), so haze in a mountain's shadow doesn't glow and a mountain
+with the sun behind it keeps its contrast. With
 volumetric fog off, the analytic fog starts at the camera. `apply_sky_fog(color, dir)` fogs the
 sky up to the range. The frame uniform's `volumetrics` field holds the range (0 = off) and the
 slice mapping. Passes that write the volume see a clear stand-in at binding 19.
@@ -240,9 +265,9 @@ Shared pipelines the core will provide for modules (planned): **strands** for ha
 muscles and skinned clothes and by `engine_softbody` for simulated cloth).
 
 Shader library: `lib_types.wgsl` (types, noise, BRDF, `henyey_greenstein`), `lib_frame.wgsl` (group 0 frame
-data, `shade_surface`, `shade_surface_shadowed`, `shadow_factor`, `contact_shadow`, `screen_ao`, `sky_visibility`, `apply_fog`,
+data, `shade_surface`, `shade_surface_shadowed`, `shade_thin_surface`, `shadow_factor` (cascades, then `far_shadow_visibility`), `contact_shadow`, `screen_ao`, `sky_visibility`, `apply_fog` (`color * transmittance + inscatter` of `surface_fog`, which returns a `SurfaceFog` for callers that need the two apart, such as blended particles),
 `apply_sky_fog`, `volumetric_fog_at`, `height_fog_density`, `fog_sky_light`,
-`sample_env`, `sample_env_rough`, `sky_ambient`, `wind_offset`, `prepass_output`) and `lib_atmosphere.wgsl` (`atmosphere` for aerial perspective,
+`sample_env`, `sample_env_rough`, `sky_ambient`, `sky_ambient_covered`, `wind_offset`, `prepass_output`) and `lib_atmosphere.wgsl` (`atmosphere` for aerial perspective,
 `sun_transmittance`, `sky_view_radiance`, `planet_height`, `ray_shell`).
 
 **Shapes** (built): `Shape` builds procedural meshes. Round shapes given `segments: 0` get
@@ -257,6 +282,30 @@ bumps, mottled color and roughness from 3D noise to any material, textured or no
 colors (stone, plaster, bark, soil, metal plates) don't look flat; it fades out with distance
 instead of sparkling. It sticks to the object; terrain and other meshes split into pieces use
 `with_detail_in_world()` so it lines up across seams.
+
+**Wind sway** (built): `StandardMaterial::wind_sway` (m) bends a mesh downwind, growing with height
+in the mesh, in the scene, depth and shadow passes alike. Each vertex scales it by its color's
+alpha, its wind weight (0 = still, such as a trunk's base or a branch's joint; 1 = full sway, the
+default of meshes without vertex colors); on swaying materials the vertex alpha is not opacity.
+
+**Draw distance** (built): a `MaxDrawDistance(m)` component next to a `MeshRenderer` stops drawing
+it, and its shadow, once its bounding sphere is wholly farther than that from the camera: small
+props and clutter. Instanced and cluster-drawn meshes alike; skipped entities count as `culled`.
+
+**Bloom** (built): a chain of 13-tap downsamples and tent upsamples (Jimenez 2014) without a
+threshold, mixed in by `RenderSettings::bloom_intensity` (0.04). What a pixel brings in is
+limited to `bloom_limit` times white at the current exposure (64; it rolls off smoothly from half
+of that), so a neon sign at night or the sun's disc glows instead of swamping the frame.
+
+**Thin sheets** (built): double-sided and alpha-masked materials (leaves, grass and fern cards,
+paper, cloth, fences) are shaded as sheets with no inside (`shade_thin_surface(s, rel,
+sun_visibility, face)`, `face` being the side of the geometry facing the camera): only that side
+reflects light, whatever the vertex normals say, so a crown's bent normals or a normal map never
+make the side away from the sun glint or light up. `StandardMaterial::subsurface` is how much
+light comes through from the other side (sun, point lights and sky), tinted by the color, spread
+like diffuse light with a forward glow toward the light, and shadowed like the lit side, so
+backlit leaves glow green; at 0 (fences, grates, hair cards) nothing comes through. Opaque
+single-sided materials keep the ordinary `shade_surface` (`subsurface` wraps light around them).
 
 **Virtual geometry** (built: cluster LOD and GPU-driven drawing; `crates/render/src/virtual_geometry`):
 dense opaque meshes (`RenderSettings::virtual_geometry_min_triangles`, 50 000 by default) are

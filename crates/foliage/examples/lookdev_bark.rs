@@ -7,8 +7,8 @@
 //! ```
 //!
 //! `shots` picks shots by name (`oak`, `birch`, `pine`, `spruce`, `hazel`, `stump`, `log`,
-//! `row`, `close` for arm's-length oak, birch and pine); `--dump` saves the painted bark
-//! textures instead.
+//! `old_logs` for logs that have lain for years, `row`, `close` for arm's-length oak, birch and
+//! pine); `--dump` saves the painted bark textures instead.
 //!
 //! The sun rakes across the trunks from the side, which is the light that shows (or betrays)
 //! bark relief. Every shot is a close-up a player could walk up to.
@@ -16,7 +16,9 @@
 use engine_core::prelude::*;
 use engine_core::time::TimeSource;
 use engine_foliage::meshgen::bark::{BarkKind, bark_textures};
-use engine_foliage::{FelledLog, FoliagePlugin, Genes, LogPose, Plant, fell_tree, spawn_plant};
+use engine_foliage::{
+    FelledLog, FoliagePlugin, Genes, LogPose, Plant, PlantLibrary, fell_tree, spawn_plant,
+};
 use engine_render::prelude::*;
 use engine_render::{Exposure, RenderDisabled, Screenshots};
 use engine_world::WeatherState;
@@ -197,6 +199,29 @@ fn main() {
         l.years = 2.0;
         *t
     });
+    // Logs that have lain for years, side by side: bare, mossy side up, sunk into the litter.
+    let old_logs = DVec3::new(30.0, 0.0, -30.0);
+    for (i, name) in ["oak", "birch", "pine", "spruce"].into_iter().enumerate() {
+        let species = app
+            .world
+            .resource::<PlantLibrary>()
+            .id(name)
+            .expect("species");
+        app.world.spawn((
+            Transform::from_translation(old_logs + DVec3::new(0.0, 0.0, i as f64 * 3.2)),
+            FelledLog {
+                species,
+                years: 3.0 + 3.0 * i as f32,
+                rot_years: 16.0,
+                size: 0.75,
+            },
+            LogPose {
+                yaw: 0.06 * i as f32,
+                genes: genes(i as u8),
+                charred: false,
+            },
+        ));
+    }
     simulate(&mut app, 20);
 
     let trunk_eye = |x: f64, d: f64, h: f64| DVec3::new(x + d * 0.62, h, d * 0.78);
@@ -266,6 +291,15 @@ fn main() {
             "07_log",
             butt - axis * 2.2 + side * 1.4 + DVec3::Y * 1.0,
             butt + axis * 0.9,
+        );
+    }
+    if want("old_logs") {
+        shot(
+            &mut app,
+            &out,
+            "12_old_logs",
+            old_logs + DVec3::new(-2.5, 1.8, -3.5),
+            old_logs + DVec3::new(5.0, 0.2, 4.0),
         );
     }
     if want("row") {

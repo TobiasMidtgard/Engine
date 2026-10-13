@@ -2,6 +2,7 @@
 
 pub mod animator;
 pub mod attach;
+pub mod body;
 pub mod build;
 pub mod character;
 pub mod clip;
@@ -22,6 +23,7 @@ pub mod xform;
 
 pub use animator::{AnimationLibrary, Animator, AnimatorSettings, PoseEdit};
 pub use attach::{BoneAttachment, Hang};
+pub use body::{Body, BodyKind, BodyMotion};
 pub use character::{HumanModel, HumanModels};
 pub use clip::AnimationClip;
 pub use graph::{AnimGraph, NodeDef};
@@ -103,11 +105,14 @@ impl Plugin for AnimationPlugin {
             Update,
             (
                 (
+                    body::remove_bodies,
+                    body::answer_requests,
                     character::load_human_models,
                     horse_model::load_horse_models,
                     animator::build_animators,
                     animator::queue_triggers,
                     (model::spawn_rig_models, model::despawn_orphan_parts),
+                    body::drive_bodies,
                 )
                     .chain()
                     .in_set(AnimSet::Setup),

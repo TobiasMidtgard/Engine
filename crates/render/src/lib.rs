@@ -77,7 +77,8 @@ use serde_json::json;
 
 pub use components::{
     AmbientLight, BoxFace, Camera, DirectionalLight, Exposure, FogShape, FogVolume, MaterialRef,
-    MeshRef, MeshRenderer, NoVirtualGeometry, PointLight, Projection, ResolvedMesh, SkyLightVolume,
+    MaxDrawDistance, MeshRef, MeshRenderer, NoVirtualGeometry, PointLight, Projection,
+    ResolvedMesh, SkyLightVolume,
 };
 pub use features::{
     FeatureStats, FrameContext, GpuShared, GrowBuffer, RenderAppExt, RenderFeature, RenderPhase,
@@ -105,10 +106,11 @@ pub mod prelude {
     pub use crate::{
         AlphaMode, AmbientLight, AntiAliasing, Atmosphere, BoxFace, Camera, DirectionalLight,
         Exposure, FogSettings, FogShape, FogVolume, GltfScene, GltfSceneSpawner, GrassBender,
-        GrassField, GrassStyle, Image, MaterialPreset, MaterialRef, Mesh, MeshRef, MeshRenderer,
-        NoVirtualGeometry, PointLight, Projection, RenderAppExt, RenderFeature, RenderPhase,
-        RenderPlugin, RenderSettings, Screenshots, Shape, SkyLightVolume, StandardMaterial,
-        TextureMapping, Tonemapper, VolumetricQuality, spawn_gltf_scene, spawn_gltf_scene_deferred,
+        GrassField, GrassStyle, Image, MaterialPreset, MaterialRef, MaxDrawDistance, Mesh, MeshRef,
+        MeshRenderer, NoVirtualGeometry, PointLight, Projection, RenderAppExt, RenderFeature,
+        RenderPhase, RenderPlugin, RenderSettings, Screenshots, Shape, SkyLightVolume,
+        StandardMaterial, TextureMapping, Tonemapper, VolumetricQuality, spawn_gltf_scene,
+        spawn_gltf_scene_deferred,
     };
 }
 
@@ -151,6 +153,9 @@ impl Plugin for RenderPlugin {
             .register_component::<NoVirtualGeometry>(
                 "Marker: keeps this entity's dense MeshRenderer off the virtual geometry cluster path (debris, fragments, meshes that change often).",
             )
+            .register_component::<MaxDrawDistance>(
+                "Meters from the camera beyond which this entity's MeshRenderer (and its shadow) is not drawn: small props and clutter. Measured to the mesh's bounding sphere.",
+            )
             .register_component::<DirectionalLight>(
                 "Sun/moon light along the entity's forward (-Z). illuminance in lux (noon sun 110000).",
             )
@@ -170,9 +175,9 @@ impl Plugin for RenderPlugin {
                 "Local fog (mist, dust, smoke, steam) lit by the volumetric fog: shape Box/Ellipsoid, half_extents (m, local axes, scaled with the entity), density (extinction 1/m: 0.02 mist, 0.5 smoke), albedo, emission (cd/m² per m), edge_falloff (m), noise 0..1 and noise_scale (m, drifts with the wind), anisotropy (-0.95..0.95, forward scattering).",
             )
             .register_resource::<RenderSettings>(
-                "Renderer quality and look: shadows (sun_penumbra_scale, contact_shadow_length m), ambient_occlusion (ao_radius m, ao_intensity), screen_space_reflections, volumetric_fog (bool), volumetric_fog_range (m), volumetric_fog_quality (Low/Medium/High), anti_aliasing (Taa/None) and sharpness, tonemapper (AgX/Aces/Reinhard/None), bloom, grading, debug_view (None/Normals/Cascades/SkyVisibility/AmbientOcclusion/Reflections/Clusters/ClusterLevels), virtual_geometry (dense opaque meshes as GPU-culled clusters: virtual_geometry_min_triangles, cluster_error_px, cluster_shadow_error_texels).",
+                "Renderer quality and look: shadows (shadow_distance m, far_shadow_distance m: big casters such as mountains beyond the cascades, 0 = off; sun_penumbra_scale, contact_shadow_length m), ambient_occlusion (ao_radius m, ao_intensity), screen_space_reflections, volumetric_fog (bool), volumetric_fog_range (m), volumetric_fog_quality (Low/Medium/High), anti_aliasing (Taa/None) and sharpness, tonemapper (AgX/Aces/Reinhard/None), bloom (bloom_intensity, bloom_limit: the most a pixel brings into the bloom in multiples of white, 0 = no limit), grading, debug_view (None/Normals/Cascades/SkyVisibility/AmbientOcclusion/Reflections/Clusters/ClusterLevels), virtual_geometry (dense opaque meshes as GPU-culled clusters: virtual_geometry_min_triangles, cluster_error_px, cluster_shadow_error_texels).",
             )
-            .register_resource::<FogSettings>("Height fog everywhere (volumetric within volumetric_fog_range, with light shafts): density (extinction 1/m at base_height: 0.0005 haze, 0.05 ground fog), height_falloff (1/m), base_height (m), max_opacity, color (albedo), sun_scattering (Henyey-Greenstein g, 0.6 = forward scattering, glow around the sun).")
+            .register_resource::<FogSettings>("Height fog everywhere (volumetric within volumetric_fog_range, with light shafts): density (extinction 1/m at base_height, visibility about 3.9 / density: 0.00002 clear air, 0.0001 light haze, 0.0005 haze, 0.05 ground fog), height_falloff (1/m), base_height (m), max_opacity, color (albedo), sun_scattering (Henyey-Greenstein g, 0.6 = forward scattering, glow around the sun).")
             .register_resource::<Atmosphere>(
                 "Planet atmosphere used for the sky and sunlight: planet_center (world), planet_radius, thickness, scale heights.",
             )
@@ -377,6 +382,11 @@ mod tests {
             ("gtao", include_str!("shaders/gtao.wgsl").into(), true),
             ("taa", include_str!("shaders/taa.wgsl").into(), true),
             ("ssr", include_str!("shaders/ssr.wgsl").into(), true),
+            (
+                "ssr_chain",
+                include_str!("shaders/ssr_chain.wgsl").into(),
+                false,
+            ),
             ("ssgi", include_str!("shaders/ssgi.wgsl").into(), true),
             (
                 "atmosphere_luts",
@@ -421,6 +431,22 @@ mod tests {
             }
         }
         assert!(errors.is_empty(), "{}", errors.join("\n\n"));
+    }
+
+    /// Other crates' blended shaders (particles, smoke) take the fog apart with `surface_fog`:
+    /// its `SurfaceFog` keeps those names and per-channel types.
+    #[test]
+    fn surface_fog_splits_apply_fog() {
+        let src = "
+            @fragment
+            fn fs(@builtin(position) p: vec4<f32>) -> @location(0) vec4<f32> {
+                let rel = vec3<f32>(p.x, 0.0, -p.y);
+                let f: SurfaceFog = surface_fog(rel);
+                let t: vec3<f32> = f.transmittance;
+                let l: vec3<f32> = f.inscatter;
+                return vec4<f32>(vec3<f32>(0.2) * t + l + apply_fog(vec3<f32>(0.2), rel), 0.5);
+            }";
+        validate_wgsl("surface_fog caller", &compose_shader(src, true)).unwrap();
     }
 
     #[test]

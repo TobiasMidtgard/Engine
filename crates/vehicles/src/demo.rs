@@ -55,11 +55,109 @@ pub fn oval_direction(angle: f64) -> Vec3 {
     .as_vec3()
 }
 
-/// The racing line: the oval's center line, `n` points.
+/// The oval's center line, `n` points.
 pub fn oval_path(center: DVec3, n: usize) -> Vec<DVec3> {
     (0..n)
         .map(|i| oval_point(center, i as f64 / n as f64 * std::f64::consts::TAU))
         .collect()
+}
+
+/// The race line, `n` points: the oval's center line, except over the jump, where it runs
+/// straight from 10 m before the kicker to 30 m past it, easing off the center line and back
+/// onto it over 100 m either side. A car that leaves the kicker while turning keeps turning
+/// in the air and lands sliding sideways, so it straightens up for the jump.
+pub fn race_line(center: DVec3, n: usize) -> Vec<DVec3> {
+    const STRAIGHT: (f64, f64) = (-10.0, 30.0);
+    const EASE: f64 = 100.0;
+    let (rx, rz) = TRACK_RADII;
+    let point = |a: f64| DVec3::new(a.cos() * rx, 0.0, a.sin() * rz);
+    // Toward the inside of the oval.
+    let inward = |a: f64| oval_direction(a).cross(Vec3::Y).as_dvec3();
+    // Meters along the center line from the kicker to `angle` (negative before it).
+    let arc = |angle: f64| {
+        let steps = 64;
+        let h = (angle - JUMP_ANGLE) / steps as f64;
+        (0..steps)
+            .map(|i| {
+                let a = JUMP_ANGLE + (i as f64 + 0.5) * h;
+                (rx * a.sin()).hypot(rz * a.cos())
+            })
+            .sum::<f64>()
+            * h
+    };
+    let angle_at = |s: f64| {
+        let (mut lo, mut hi) = (JUMP_ANGLE - 1.5, JUMP_ANGLE + 1.5);
+        for _ in 0..48 {
+            let mid = 0.5 * (lo + hi);
+            if arc(mid) < s {
+                lo = mid;
+            } else {
+                hi = mid;
+            }
+        }
+        0.5 * (lo + hi)
+    };
+    // How far inward the straight lies from the center line, `s` meters along it.
+    let (c1, c2) = (point(angle_at(STRAIGHT.0)), point(angle_at(STRAIGHT.1)));
+    let cross = |a: DVec3, b: DVec3| a.x * b.z - a.z * b.x;
+    let to_straight = |s: f64| {
+        let a = angle_at(s);
+        cross(c1 - point(a), c2 - c1) / cross(inward(a), c2 - c1)
+    };
+    // Ease in and out with quintics that meet the straight's offset, slope and bend, so the
+    // line's curvature never jumps.
+    let ease = |at: f64, outward: f64| {
+        let h = 0.5;
+        let (m, p) = (to_straight(at - h), to_straight(at + h));
+        let d0 = to_straight(at);
+        let d1 = (p - m) / (2.0 * h) * EASE * outward;
+        let d2 = (p - 2.0 * d0 + m) / (h * h) * EASE * EASE;
+        (
+            10.0 * d0 - 4.0 * d1 + 0.5 * d2,
+            -15.0 * d0 + 7.0 * d1 - d2,
+            6.0 * d0 - 3.0 * d1 + 0.5 * d2,
+        )
+    };
+    let (q_in, q_out) = (ease(STRAIGHT.0, 1.0), ease(STRAIGHT.1, -1.0));
+    let quintic = |q: (f64, f64, f64), t: f64| t * t * t * (q.0 + t * (q.1 + t * q.2));
+    oval_path(center, n)
+        .into_iter()
+        .enumerate()
+        .map(|(i, p)| {
+            let mut a = i as f64 / n as f64 * std::f64::consts::TAU;
+            if a - JUMP_ANGLE > std::f64::consts::PI {
+                a -= std::f64::consts::TAU;
+            }
+            if (a - JUMP_ANGLE).abs() > 1.5 {
+                return p;
+            }
+            let s = arc(a);
+            let offset = if (STRAIGHT.0..=STRAIGHT.1).contains(&s) {
+                to_straight(s)
+            } else if (STRAIGHT.0 - EASE..STRAIGHT.0).contains(&s) {
+                quintic(q_in, (s - (STRAIGHT.0 - EASE)) / EASE)
+            } else if (STRAIGHT.1..STRAIGHT.1 + EASE).contains(&s) {
+                quintic(q_out, (STRAIGHT.1 + EASE - s) / EASE)
+            } else {
+                0.0
+            };
+            p + inward(a) * offset
+        })
+        .collect()
+}
+
+/// The kicker across the track: a concrete ramp 7.5° up over 6 m, its full size and where
+/// it sits (the low end of its top face exactly on the asphalt).
+pub fn kicker(center: DVec3) -> (Vec3, Transform) {
+    let jump = oval_point(center, JUMP_ANGLE);
+    let dir = oval_direction(JUMP_ANGLE);
+    let (len, angle, thick) = (6.0f32, 7.5f32.to_radians(), 0.6f32);
+    let rot = facing(dir) * Quat::from_rotation_x(angle);
+    let middle = jump - (rot * Vec3::new(0.0, thick * 0.5, len * 0.5)).as_dvec3();
+    (
+        Vec3::new(TRACK_WIDTH, thick, len),
+        Transform::from_translation(middle).with_rotation(rot),
+    )
 }
 
 /// Rotation that points a vehicle's nose (−Z) along `dir` (horizontal).
@@ -226,20 +324,9 @@ pub fn spawn_track(commands: &mut Commands, center: DVec3) {
         }
     }
 
-    // The jump: a concrete kicker across the track, 7.5° up over 6 m.
-    let jump = oval_point(center, JUMP_ANGLE);
-    let dir = oval_direction(JUMP_ANGLE);
-    let (len, angle, thick) = (6.0f32, 7.5f32.to_radians(), 0.6f32);
-    let rot = facing(dir) * Quat::from_rotation_x(angle);
-    // Put the low end of the top face exactly on the asphalt.
-    let center_of_ramp = jump - (rot * Vec3::new(0.0, thick * 0.5, len * 0.5)).as_dvec3();
-    slab(
-        commands,
-        Vec3::new(TRACK_WIDTH, thick, len),
-        Transform::from_translation(center_of_ramp).with_rotation(rot),
-        None,
-        "concrete",
-    );
+    // The jump: a concrete kicker across the track.
+    let (size, at) = kicker(center);
+    slab(commands, size, at, None, "concrete");
 
     // Drift pad: packed dirt inside the oval.
     let pad = center + DVec3::new(-70.0, 0.0, -20.0);
@@ -254,7 +341,7 @@ pub fn spawn_track(commands: &mut Commands, center: DVec3) {
     scenery::track::spawn(commands, center);
 
     // Two sports cars racing round the oval, cornering at 85 % of what their tires hold.
-    let path = oval_path(center, SEGMENTS * 2);
+    let path = race_line(center, SEGMENTS * 2);
     let race = |max_speed: f32| AutopilotMode::Drive {
         path: path.clone(),
         looped: true,
@@ -263,8 +350,8 @@ pub fn spawn_track(commands: &mut Commands, center: DVec3) {
     };
     let lift = DVec3::Y * presets::ride_height("sports_car");
     for (angle, speed, name, paint) in [
-        (0.25f64, 34.0f32, "Red car", 0xc4161cu32),
-        (-0.35, 32.0, "Blue car", 0x1d4fb8),
+        (0.25f64, 21.0f32, "Red car", 0xc4161cu32),
+        (-0.35, 22.0, "Blue car", 0x1d4fb8),
     ] {
         let p = oval_point(center, angle) + lift;
         let dir = oval_direction(angle);
@@ -518,14 +605,15 @@ pub fn views(zone: &str, center: DVec3) -> Vec<DemoView> {
                 .at(16.0, 1.2)
                 .call("vehicles.place", drift),
                 // Behind the barrier just past the kicker, the car flying by in the morning sun
-                // with the kicker behind it.
+                // with the kicker behind it (placed at 40 m/s, it slows to about 33 for the
+                // straight over the kicker and is mid-air 2.2 s later).
                 DemoView::new(
                     "track_jump",
                     "The kicker jump",
                     [-20.0, 1.8, 93.0],
                     [-14.0, 2.0, 84.0],
                 )
-                .at(9.5, 1.4)
+                .at(9.5, 1.75)
                 .call(
                     "vehicles.place",
                     on_oval("Red car", JUMP_ANGLE - 0.42, 40.0),

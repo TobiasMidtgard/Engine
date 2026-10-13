@@ -350,21 +350,33 @@ fn shirt_detail() -> SkinMaterial {
 
 /// A person (athlete or shirt) with locomotion graph, muscles, foot IK (and a ponytail).
 pub fn spawn_humanoid(world: &mut World, outfit: humanoid::Outfit, transform: Transform) -> Entity {
-    let (key, name, material) = match outfit {
-        humanoid::Outfit::Athlete => ("anim/humanoid/athlete", "Athlete", SkinMaterial::default()),
-        humanoid::Outfit::Lifter => ("anim/humanoid/lifter", "Lifter", SkinMaterial::default()),
-        humanoid::Outfit::Shirt => ("anim/humanoid/shirt", "Shirt", shirt_detail()),
+    let name = match outfit {
+        humanoid::Outfit::Athlete => "Athlete",
+        humanoid::Outfit::Lifter => "Lifter",
+        humanoid::Outfit::Shirt => "Shirt",
+    };
+    let person = world
+        .spawn((Name::new(name), transform, GlobalTransform::from(transform)))
+        .id();
+    give_humanoid_body(world, person, outfit);
+    person
+}
+
+/// Give an entity that already has its place the generated body of a person: the humanoid
+/// rig with its locomotion graph, muscles and foot IK, and the athlete's ponytail.
+pub fn give_humanoid_body(world: &mut World, person: Entity, outfit: humanoid::Outfit) {
+    let (key, material) = match outfit {
+        humanoid::Outfit::Athlete => ("anim/humanoid/athlete", SkinMaterial::default()),
+        humanoid::Outfit::Lifter => ("anim/humanoid/lifter", SkinMaterial::default()),
+        humanoid::Outfit::Shirt => ("anim/humanoid/shirt", shirt_detail()),
     };
     let handle = mesh_handle(world, key, || humanoid::mesh(outfit));
     let anim = animator(world, humanoid::SKELETON, humanoid::GRAPH);
     let morphs = morphs(world, handle);
-    let mut e = world.spawn((
-        Name::new(name),
-        transform,
-        GlobalTransform::from(transform),
+    let mut e = world.entity_mut(person);
+    e.insert((
         AnimatorSettings::new(humanoid::SKELETON, humanoid::GRAPH),
         anim,
-        AnimationParams::default(),
         SkinnedMeshRenderer::new(handle, material),
         morphs,
         MuscleRig::new(humanoid::muscles()),
@@ -373,7 +385,6 @@ pub fn spawn_humanoid(world: &mut World, outfit: humanoid::Outfit, transform: Tr
     if outfit == humanoid::Outfit::Athlete {
         e.insert(SpringChains::new(vec![humanoid::ponytail()]));
     }
-    e.id()
 }
 
 /// A fetched file (`assets/fetched/<relative>`, see `assets/manifests/animation.toml`):
@@ -513,49 +524,55 @@ pub fn hammer_head(world: &World, person: Entity) -> Option<DVec3> {
 
 /// A horse; it wears the realistic horse model once that has loaded (when fetched).
 pub fn spawn_horse(world: &mut World, transform: Transform) -> Entity {
-    let handle = mesh_handle(world, "anim/horse", horse::mesh);
-    let anim = animator(world, horse::SKELETON, horse::GRAPH);
-    let morphs = morphs(world, handle);
     let horse = world
         .spawn((
             Name::new("Horse"),
             transform,
             GlobalTransform::from(transform),
-            AnimatorSettings::new(horse::SKELETON, horse::GRAPH),
-            anim,
-            AnimationParams::default(),
-            SkinnedMeshRenderer::new(
-                handle,
-                SkinMaterial {
-                    skin_roughness: 0.55,
-                    subsurface: 0.2,
-                    sheen: 0.55,
-                    veins: 0.9,
-                    vein_color: [0.12, 0.05, 0.03],
-                    ..Default::default()
-                },
-            ),
-            morphs,
-            MuscleRig::new(horse::muscles()),
-            horse::gait(),
-            SpringChains::new(vec![horse::tail()]),
         ))
         .id();
-    match horse_model() {
-        Some(model) => {
-            world.entity_mut(horse).insert(model);
-        }
-        None => {
-            static MISSING: std::sync::Once = std::sync::Once::new();
-            MISSING.call_once(|| {
-                tracing::info!(
-                    "animation paddock: horse model not fetched (cargo run -p fetch-assets -- \
-                     animation); using the generated horse"
-                )
-            });
-        }
+    give_horse_body(world, horse, horse_model());
+    if horse_model().is_none() {
+        static MISSING: std::sync::Once = std::sync::Once::new();
+        MISSING.call_once(|| {
+            tracing::info!(
+                "animation paddock: horse model not fetched (cargo run -p fetch-assets -- \
+                 animation); using the generated horse"
+            )
+        });
     }
     horse
+}
+
+/// Give an entity that already has its place a horse: the horse rig with its gaits, muscles
+/// and tail, wearing `model` once it has loaded (the generated horse until then).
+pub fn give_horse_body(world: &mut World, horse: Entity, model: Option<HorseModel>) {
+    let handle = mesh_handle(world, "anim/horse", horse::mesh);
+    let anim = animator(world, horse::SKELETON, horse::GRAPH);
+    let morphs = morphs(world, handle);
+    let mut e = world.entity_mut(horse);
+    e.insert((
+        AnimatorSettings::new(horse::SKELETON, horse::GRAPH),
+        anim,
+        SkinnedMeshRenderer::new(
+            handle,
+            SkinMaterial {
+                skin_roughness: 0.55,
+                subsurface: 0.2,
+                sheen: 0.55,
+                veins: 0.9,
+                vein_color: [0.12, 0.05, 0.03],
+                ..Default::default()
+            },
+        ),
+        morphs,
+        MuscleRig::new(horse::muscles()),
+        horse::gait(),
+        SpringChains::new(vec![horse::tail()]),
+    ));
+    if let Some(model) = model {
+        e.insert(model);
+    }
 }
 
 /// The paddock's realistic horse (see [`HorseModel`]), if it has been fetched.
@@ -568,6 +585,19 @@ pub fn horse_model() -> Option<HorseModel> {
 }
 
 pub fn spawn_spider(world: &mut World, transform: Transform) -> Entity {
+    let spider = world
+        .spawn((
+            Name::new("Spider"),
+            transform,
+            GlobalTransform::from(transform),
+        ))
+        .id();
+    give_spider_body(world, spider);
+    spider
+}
+
+/// Give an entity that already has its place the spider: eight procedural legs.
+pub fn give_spider_body(world: &mut World, spider: Entity) {
     let handle = mesh_handle(world, "anim/spider", spider::mesh);
     let skeleton = world
         .resource::<AnimationLibrary>()
@@ -575,27 +605,21 @@ pub fn spawn_spider(world: &mut World, transform: Transform) -> Entity {
         .get(spider::SKELETON)
         .cloned()
         .expect("spider skeleton");
-    world
-        .spawn((
-            Name::new("Spider"),
-            transform,
-            GlobalTransform::from(transform),
-            AnimatorSettings::new(spider::SKELETON, ""),
-            Animator::procedural(skeleton),
-            AnimationParams::default(),
-            SkinnedMeshRenderer::new(
-                handle,
-                SkinMaterial {
-                    skin_roughness: 0.75,
-                    subsurface: 0.05,
-                    sheen: 0.9,
-                    veins: 0.0,
-                    ..Default::default()
-                },
-            ),
-            spider::gait(),
-        ))
-        .id()
+    world.entity_mut(spider).insert((
+        AnimatorSettings::new(spider::SKELETON, ""),
+        Animator::procedural(skeleton),
+        SkinnedMeshRenderer::new(
+            handle,
+            SkinMaterial {
+                skin_roughness: 0.75,
+                subsurface: 0.05,
+                sheen: 0.9,
+                veins: 0.0,
+                ..Default::default()
+            },
+        ),
+        spider::gait(),
+    ));
 }
 
 /// The paddock car: the detailed concept car when it has been fetched (and the world loads
@@ -827,8 +851,8 @@ pub const VIEWS: &[DemoView] = &[
     DemoView {
         key: "paddock_doors",
         name: "Parked car opening its doors",
-        eye: [3.4, 1.5, -18.4],
-        target: [0.0, 0.75, -21.6],
+        eye: [-0.6, 1.5, -18.4],
+        target: [-4.0, 0.75, -21.6],
         hour: 15.0,
         at: 3.6,
     },
@@ -1208,10 +1232,11 @@ fn build_paddock(world: &mut World, origin: DVec3) -> DemoEntities {
         )
     });
 
-    // Inside the loop, a parked concept car opens and shuts its doors (when fetched).
+    // Inside the loop, a parked concept car opens and shuts its doors (when fetched). It stands
+    // left of center, behind the car loop's camera.
     spawn_parked_car(
         world,
-        Transform::from_translation(at(0.0, 0.0, -22.0)).with_rotation(facing(-90.0)),
+        Transform::from_translation(at(-4.0, 0.0, -22.0)).with_rotation(facing(-90.0)),
     );
 
     DemoEntities {

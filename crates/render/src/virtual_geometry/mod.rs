@@ -51,7 +51,9 @@ mod gpu;
 mod simplify;
 
 pub use build::build;
-pub use gpu::{ClusterInstance, ClusterRenderer, ClusterStats, shader_sources};
+pub use gpu::{
+    ClusterInstance, ClusterRenderer, ClusterStats, FAR_SHADOW_CLUSTERS, shader_sources,
+};
 
 use engine_core::math::Vec3;
 
