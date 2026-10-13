@@ -24,7 +24,7 @@
 //! The mushrooms glow brighter the better fed they are and light the cave around them.
 
 use engine_core::prelude::*;
-use engine_render::{MeshRenderer, Shape, StandardMaterial};
+use engine_render::{BoxFace, MeshRenderer, Shape, SkyLightVolume, StandardMaterial};
 
 use crate::felling::fell_tree;
 use crate::plant::{Disturbance, EcologyRegion, Plant, PlantStage, RegionHistory, ResourceSource};
@@ -452,6 +452,23 @@ pub fn spawn_demo(commands: &mut Commands, center: DVec3) {
             },
             water,
         ),
+    ));
+    // The trees round the pond hide the low sky its still water would otherwise mirror at a
+    // glance (the renderer's sky occlusion only sees cover from above): sky light dims toward
+    // the water, fading back in at the edges and overhead.
+    let reach = POND[2] + 2.5;
+    commands.spawn((
+        Transform::from_translation(
+            local(center, POND[0], POND[1]) + DVec3::Y * POND_WATER_M as f64,
+        ),
+        SkyLightVolume::new([reach, 2.5, reach])
+            .open(BoxFace::PosY)
+            .open(BoxFace::PosX)
+            .open(BoxFace::NegX)
+            .open(BoxFace::PosZ)
+            .open(BoxFace::NegZ)
+            .with_sky_light(0.35)
+            .with_fade(2.5),
     ));
     spawn_rocks(commands, center, rocks);
     // Leaf litter, needles, moss, ash and packed earth under the trees.

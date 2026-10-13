@@ -974,10 +974,10 @@ fn birch(t: &Tile, x: f32, y: f32) -> Texel {
 
     // A few rough black patches.
     let blot = voronoi(Vec2::new(x, y), Vec2::new(t.wm, t.hm), (3, 4), 0.75, s + 13);
-    if rnd(blot.id, 1) < 0.18 {
+    if rnd(blot.id, 1) < 0.3 {
         let shape = fbm(u, v, 14, 14, 3, 0.55, s + 14);
-        let size = 0.014 + 0.014 * rnd(blot.id, 2);
-        let d = (blot.rel * Vec2::new(0.55, 1.7)).length() + 0.008 * shape;
+        let size = 0.016 + 0.026 * rnd(blot.id, 2);
+        let d = (blot.rel * Vec2::new(0.5, 1.8)).length() + 0.01 * shape;
         let m = 1.0 - smoothstep(size * 0.7, size, d);
         if m > 0.0 {
             let cracks = fbm(u, v, 40, 70, 3, 0.55, s + 15);

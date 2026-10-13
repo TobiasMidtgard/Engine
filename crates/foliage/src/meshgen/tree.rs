@@ -519,8 +519,10 @@ fn bark_color(sp: &PlantSpecies, y: f32, h: f32, ring: usize, seed: u64) -> Vec4
     let base = Vec3::from(sp.bark_color);
     let c = match sp.shape.bark {
         BarkStyle::Birch => {
+            // Old birches go black and rough at the foot, fading up into the white over the
+            // first couple of meters, unevenly from ring to ring.
             let dark = Vec3::new(0.035, 0.03, 0.028);
-            let foot = (1.0 - (y / 1.4).min(1.0)).powi(2);
+            let foot = ((1.0 - (y / 2.3).min(1.0)).powf(1.5) * (0.8 + 0.4 * n)).min(1.0);
             // The bark texture carries the dark lenticel bands; rings only vary gently.
             let band = 0.85 + 0.15 * n;
             base.lerp(dark, foot) * band.max(foot)
@@ -564,6 +566,7 @@ fn add_branches(
     shade: &Shading,
 ) {
     let many = branches.iter().filter(|b| b.level == 1).count() > 30;
+    let spruce_like = sp.form == PlantForm::Conifer && sp.shape.bark != BarkStyle::Pine;
     for (bi, br) in branches.iter().enumerate() {
         // The trunk is drawn by the caller (split at the cut). Far away, twigs vanish and (on
         // trees with many limbs) every other limb too.
@@ -582,8 +585,17 @@ fn add_branches(
             _ => 3,
         };
         let path = &br.path;
+        // A spruce's limbs live in the shade of their own needle shelves and grey with age;
+        // its inner twigs are dead and silvery.
+        let (dim, grey) = match (spruce_like, br.level) {
+            (true, 1) => (0.62, 0.35),
+            (true, _) => (0.7, 0.65),
+            _ => (1.0, 0.0),
+        };
         let color = |i: usize, _a: f32| {
-            bark_color(sp, path[i].y, h, i + bi * 7, seed) * shade.wood_ao(path[i])
+            let c = bark_color(sp, path[i].y, h, i + bi * 7, seed) * shade.wood_ao(path[i]);
+            let luma = c.truncate().dot(Vec3::new(0.3, 0.55, 0.15));
+            (c.truncate().lerp(Vec3::splat(luma), grey) * dim).extend(1.0)
         };
         b.tube(path, &br.radius, sides, 0.5, &color, None, None);
     }
@@ -1158,13 +1170,17 @@ fn conifer(sp: &PlantSpecies, seed: u64, sapling: bool) -> PlantMeshes {
                 Vec3::Y * (sh.tip_bend * 0.3 * f + sag) + jitter(&mut rng, gnarl)
             });
             // Conifer limbs stay slender (a few centimeters), even low on an old trunk.
-            let r_start = (r_t * 0.3).min(0.03 + sp.trunk_radius_m * 0.06) * (0.5 + 0.5 * envelope);
+            let r_start =
+                (r_t * 0.3).min(0.022 + sp.trunk_radius_m * 0.05) * (0.5 + 0.5 * envelope);
             let br = taper(segs, r_start, 0.008);
             let tint = leaf_tint(sp, &mut rng);
             if pine {
                 pine_limb(&mut cr, &mut rng, &bp, &br, length, tint, sapling);
             } else {
                 spruce_limb(&mut cr, &mut rng, &bp, &br, length, tint, rel);
+                if !sapling && rel < 0.65 {
+                    dead_twigs(&mut cr, &mut rng, &bp, &br, length);
+                }
             }
             cr.branches.push(Branch {
                 path: bp,
@@ -1258,6 +1274,26 @@ fn pine_limb(
     }
     let (tp, td, _) = point_at(bp, br, 1.0);
     brush(cr, rng, tp, td, 1.0);
+}
+
+/// Dead twigs on the inner part of a spruce limb, where the shade has killed the needles:
+/// short, thin and pointing out and down.
+fn dead_twigs(cr: &mut Crowns, rng: &mut Rng, bp: &[Vec3], br: &[f32], length: f32) {
+    for _ in 0..rng.range_i32(1, 4) {
+        let s = rng.range(0.1, 0.45);
+        let (p, d, rp) = point_at(bp, br, s);
+        let side =
+            Vec3::Y.cross(d).normalize_or(Vec3::X) * if rng.chance(0.5) { 1.0 } else { -1.0 };
+        let dir =
+            (d * 0.7 + side * rng.range(0.4, 1.0) - Vec3::Y * rng.range(0.1, 0.7)).normalize();
+        let l = rng.range(0.12, 0.3) * (0.6 + 0.4 * (length / 3.0).min(1.0));
+        let kink = jitter(rng, 0.03);
+        cr.branches.push(Branch {
+            path: vec![p, p + dir * l * 0.5 + kink, p + dir * l + kink * 1.5],
+            radius: vec![(rp * 0.4).min(0.007), 0.0035, 0.0015],
+            level: 2,
+        });
+    }
 }
 
 /// Needles of a spruce limb: flat sprays fanning sideways along it and curtains of shoots
