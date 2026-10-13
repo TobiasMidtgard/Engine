@@ -64,7 +64,7 @@ fn camera(app: &mut App, eye: DVec3, target: DVec3) -> Entity {
         .spawn((
             Camera {
                 active: false,
-                ..Camera::perspective(60.0)
+                ..Camera::perspective(FOV_Y_DEG as f32)
             },
             Transform::from_translation(eye).looking_at(target, Vec3::Y),
         ))
@@ -94,30 +94,49 @@ fn shoot(app: &mut App, cam: Entity, name: &str) -> Option<image::RgbaImage> {
 
 /// Pixels that are clearly red (red fighters), blue (blue fighters) or brown (deer).
 fn count(img: &image::RgbaImage, f: impl Fn(f32, f32, f32) -> bool) -> usize {
-    img.pixels()
-        .filter(|p| f(p[0] as f32, p[1] as f32, p[2] as f32))
+    count_below(img, 0, f)
+}
+
+/// [`count`], skipping the rows above `top` (the sky, which is as blue as a blue tabard).
+fn count_below(img: &image::RgbaImage, top: u32, f: impl Fn(f32, f32, f32) -> bool) -> usize {
+    img.enumerate_pixels()
+        .filter(|(_, y, p)| *y >= top && f(p[0] as f32, p[1] as f32, p[2] as f32))
         .count()
 }
+
+/// The image row of the horizon for a level camera at `eye` looking at `target` (60° vertical
+/// field of view, as [`camera`] makes): rows above it can only show sky or the tops of the
+/// stands, never the arena floor.
+fn horizon_row(eye: DVec3, target: DVec3, height: u32) -> u32 {
+    let d = target - eye;
+    let down = (-d.y).atan2(d.x.hypot(d.z));
+    let half = (FOV_Y_DEG.to_radians() * 0.5).tan();
+    let ndc = (down.tan() / half).clamp(-1.0, 1.0);
+    ((1.0 - ndc) * 0.5 * height as f64).round() as u32
+}
+
+/// The screenshot cameras' vertical field of view.
+const FOV_Y_DEG: f64 = 60.0;
 
 #[test]
 fn arena_and_meadow_screenshots() {
     let mut app = app();
-    let overview = camera(
-        &mut app,
+    let overview_at = (
         ARENA + DVec3::new(0.0, 16.0, -31.0),
         ARENA + DVec3::new(0.0, 0.0, 4.0),
     );
+    let overview = camera(&mut app, overview_at.0, overview_at.1);
     let ring = ARENA + demo::DUEL_RING;
     let duel = camera(
         &mut app,
         ring + DVec3::new(-2.0, 2.4, -7.5),
         ring + DVec3::new(0.0, 1.0, 0.0),
     );
-    let cover = camera(
-        &mut app,
+    let cover_at = (
         ARENA + DVec3::new(-15.0, 4.5, -4.0),
         ARENA + DVec3::new(2.0, 0.8, 9.0),
     );
+    let cover = camera(&mut app, cover_at.0, cover_at.1);
     let lane = ARENA + demo::SPARRING_LANE;
     let sparring = camera(
         &mut app,
@@ -151,11 +170,18 @@ fn arena_and_meadow_screenshots() {
     };
     let cover_img = shoot(&mut app, cover, "npc_arena_cover.png").unwrap();
     // Both squads show up (counted over two views, so a column in front of one doesn't hide a
-    // whole squad).
-    let red = |img: &image::RgbaImage| count(img, |r, g, b| r > 70.0 && r > g * 1.7 && r > b * 1.7);
-    let blue =
-        |img: &image::RgbaImage| count(img, |r, g, b| b > 70.0 && b > r * 1.5 && b > g * 1.2);
-    let (red, blue) = (red(&img) + red(&cover_img), blue(&img) + blue(&cover_img));
+    // whole squad, and only below the horizon, so the sky doesn't count as the blue squad).
+    let red = |img: &image::RgbaImage, at: (DVec3, DVec3)| {
+        let top = horizon_row(at.0, at.1, img.height());
+        count_below(img, top, |r, g, b| r > 70.0 && r > g * 1.7 && r > b * 1.7)
+    };
+    let blue = |img: &image::RgbaImage, at: (DVec3, DVec3)| {
+        let top = horizon_row(at.0, at.1, img.height());
+        count_below(img, top, |r, g, b| b > 70.0 && b > r * 1.5 && b > g * 1.2)
+    };
+    let red = red(&img, overview_at) + red(&cover_img, cover_at);
+    let blue = blue(&img, overview_at) + blue(&cover_img, cover_at);
+    eprintln!("team pixels below the horizon: red {red}, blue {blue}");
     assert!(red > 150, "red fighters visible: {red} px");
     assert!(blue > 150, "blue fighters visible: {blue} px");
     shoot(&mut app, stands, "npc_arena_stands.png");
