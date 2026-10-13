@@ -1,6 +1,7 @@
 //! Renders particles offscreen and checks the pixels: glowing particles appear where their
 //! emitter is (also 30 000 km from the world origin), a spell's light brightens the ground
-//! around it, smoke lit by the sun covers what's behind it, and marks change the ground. Needs a GPU or a software
+//! around it, smoke lit by the sun covers what's behind it, nearer puffs cover farther ones,
+//! and marks change the ground. Needs a GPU or a software
 //! Vulkan driver (lavapipe); passes with a note when neither is available (`RenderDisabled`),
 //! unless `ENGINE_REQUIRE_GPU=1`.
 
@@ -253,6 +254,53 @@ fn sunlit_smoke_covers_what_is_behind_it() {
     assert!(
         a < b - 30.0,
         "dark smoke should hide the bright panel: {b} -> {a}"
+    );
+}
+
+#[test]
+fn nearer_puffs_cover_farther_ones() {
+    // Opaque puffs stream from the target straight at the camera, black when born and white
+    // as they age, so all of them stack on the same pixels. Drawn in spawn order the newest,
+    // farthest (black) one would cover the rest; sorted far to near, the oldest, nearest
+    // (whitest) one is on top.
+    let mut app = app(DVec3::ZERO, 200.0);
+    let center = project(TARGET);
+    let Some(before) = shot(&mut app, "vfx_sort_before.png") else {
+        return;
+    };
+    let toward_eye = (EYE - TARGET).normalize().as_vec3() * 2.0;
+    let stream = EffectDesc {
+        name: "test.stream".into(),
+        emitters: vec![EmitterDesc {
+            rate: 30.0,
+            speed: [0.0, 0.0],
+            velocity: toward_eye.to_array(),
+            lifetime: [1.5, 1.5],
+            size: [0.5, 0.5],
+            sprite: Sprite::Glow,
+            color: Gradient::new(&[(0.0, [0.0, 0.0, 0.0, 1.0]), (1.0, [1.0, 1.0, 1.0, 1.0])]),
+            emissive: 4_000.0,
+            additive: 0.0,
+            soft: 0.0,
+            wind: 0.0,
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    app.world
+        .resource_mut::<EffectLibrary>()
+        .insert(stream)
+        .unwrap();
+    app.world.spawn((
+        Transform::from_translation(TARGET),
+        ParticleEffect::new("test.stream"),
+    ));
+    app.update_n(26);
+    let after = shot(&mut app, "vfx_sort_after.png").unwrap();
+    let (b, a) = (luma(&before, center, 2), luma(&after, center, 2));
+    assert!(
+        a > b + 80.0,
+        "the nearest, whitest puff should be on top: {b} -> {a}"
     );
 }
 
