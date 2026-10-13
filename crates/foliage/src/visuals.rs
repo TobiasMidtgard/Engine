@@ -105,9 +105,9 @@ pub fn desired_parts(
         PlantStage::Dead { years } => {
             let wood = if plant.size < 0.22 {
                 &v.sapling_wood
-            } else if years > 1.5 && v.log.is_some() {
+            } else if years > 1.5 && v.snag.is_some() {
                 // Twigs drop off a dead tree within a couple of years.
-                &v.log
+                &v.snag
             } else {
                 &v.wood
             };
@@ -129,8 +129,8 @@ pub fn desired_parts(
             if sp.is_woody() {
                 let wood = if plant.size < 0.22 {
                     &v.sapling_wood
-                } else if v.log.is_some() {
-                    &v.log
+                } else if v.snag.is_some() {
+                    &v.snag
                 } else {
                     &v.wood
                 };

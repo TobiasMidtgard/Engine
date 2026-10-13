@@ -35,6 +35,8 @@ pub struct PlantMeshes {
     /// A felled log once its twigs have rotted off: the trunk above the cut with stubs of the
     /// big limbs (same model space as `wood`).
     pub log: Option<engine_render::Mesh>,
+    /// The same broken trunk standing as a snag: moss at its foot rather than along one side.
+    pub snag: Option<engine_render::Mesh>,
     /// Height of the mesh at full size, meters.
     pub height: f32,
     /// Height of the felling cut (top of the stump), meters.
@@ -548,6 +550,30 @@ fn moss_log(mesh: &mut engine_render::Mesh, seed: u64) {
     }
 }
 
+/// Moss around the foot of a standing snag, in patches, thinning out a meter or so up.
+fn moss_foot(mesh: &mut engine_render::Mesh, seed: u64) {
+    let moss = Vec3::new(0.052, 0.07, 0.026);
+    for v in &mut mesh.vertices {
+        let n = Vec3::from(v.normal).normalize_or_zero();
+        let side = 1.0 - n.y.abs();
+        let p = Vec3::from(v.position);
+        let patch = noise::fbm3(
+            p.x as f64 * 1.3,
+            p.y as f64 * 0.8,
+            p.z as f64 * 1.3,
+            seed ^ 0x6d055,
+            3,
+            2.0,
+            0.5,
+        );
+        let reach = 0.6 + 0.8 * (patch + 0.5).clamp(0.0, 1.0);
+        let foot = (1.0 - smoothstep(0.2, reach, p.y)) * smoothstep(-0.2, 0.2, patch);
+        let c = Vec3::new(v.color[0], v.color[1], v.color[2]);
+        let c = c.lerp(moss, foot * side * 0.75);
+        v.color = [c.x, c.y, c.z, v.color[3]];
+    }
+}
+
 /// Sides of the trunk near the camera. The stump and the wood above it use the same count so
 /// their rings meet at the cut without cracks (which would show the cut faces through them).
 const TRUNK_SIDES: u32 = 14;
@@ -822,6 +848,9 @@ fn assemble(
             b.tube(&stub, &r, 5, 0.5, &color, None, Some(&broken));
         }
         let mut log = b.finish();
+        let mut snag = log.clone();
+        moss_foot(&mut snag, seed);
+        out.snag = Some(snag);
         moss_log(&mut log, seed);
         out.log = Some(log);
     }
