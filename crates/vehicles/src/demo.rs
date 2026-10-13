@@ -155,6 +155,7 @@ fn moving(
         },
         Autopilot::new(mode),
     ));
+    commands.queue(move |world: &mut World| crate::wheels::set_rolling(world, e, speed));
     e
 }
 
@@ -277,6 +278,7 @@ pub fn spawn_track(commands: &mut Commands, center: DVec3) {
             },
             Autopilot::new(race(46.0)),
         ));
+        commands.queue(move |world: &mut World| crate::wheels::set_rolling(world, e, speed));
     }
 
     // Rally car sliding round the dirt pad.
@@ -452,23 +454,21 @@ impl DemoView {
     }
 }
 
-/// `entity.set` arguments that move the vehicle `name` to `at`, nose along `nose`, moving
-/// at `velocity` and yawing left at `yaw_rate` (rad/s). The physics backend treats the move
-/// as a teleport.
-fn on_mark(name: &str, at: DVec3, nose: Vec3, velocity: Vec3, yaw_rate: f32) -> serde_json::Value {
-    let rot = facing(nose);
+/// `vehicles.place` arguments that put the vehicle `name` on the ground at `at`, nose along
+/// `nose`, moving at `velocity` and turning left at `yaw_rate_deg`.
+fn on_mark(
+    name: &str,
+    at: DVec3,
+    nose: Vec3,
+    velocity: Vec3,
+    yaw_rate_deg: f32,
+) -> serde_json::Value {
     serde_json::json!({
-        "entity": {"name": name},
-        "components": {
-            "Transform": {
-                "translation": [at.x, at.y, at.z],
-                "rotation": [rot.x, rot.y, rot.z, rot.w],
-            },
-            "Velocity": {
-                "linear": [velocity.x, velocity.y, velocity.z],
-                "angular": [0.0, yaw_rate, 0.0],
-            },
-        },
+        "vehicle": name,
+        "at": [at.x, at.y, at.z],
+        "yaw_deg": nose.x.atan2(-nose.z).to_degrees(),
+        "velocity": [velocity.x, velocity.y, velocity.z],
+        "yaw_rate_deg": yaw_rate_deg,
     })
 }
 
@@ -486,44 +486,49 @@ pub fn views(zone: &str, center: DVec3) -> Vec<DemoView> {
         "track" => {
             let on_oval = |name: &str, angle: f64, speed: f32| {
                 let dir = oval_direction(angle);
-                let at = oval_point(center, angle) + DVec3::Y * presets::ride_height("sports_car");
-                on_mark(name, at, dir, dir * speed, 0.0)
+                on_mark(name, oval_point(center, angle), dir, dir * speed, 0.0)
             };
             // Rally car on its drift circle, sliding at 10 m/s with the nose 30° into the
             // turn (it circles counter-clockwise seen from above).
-            let pad = center + DVec3::new(-70.0, 0.0, -20.0);
+            let pad = center + DVec3::new(-70.0, TRACK_SURFACE, -20.0);
             let (r, phi) = (15.0f64, 136.0f64.to_radians());
             let out = DVec3::new(phi.cos(), 0.0, phi.sin());
             let tangent = Vec3::Y.cross(out.as_vec3());
             let nose = Quat::from_rotation_y(30f32.to_radians()) * tangent;
-            let at = pad + out * r + DVec3::Y * (TRACK_SURFACE + presets::ride_height("rally_car"));
-            let drift = on_mark("Rally car", at, nose, tangent * 10.0, 10.0 / r as f32);
+            let omega = (10.0 / r as f32).to_degrees();
+            let drift = on_mark("Rally car", pad + out * r, nose, tangent * 10.0, omega);
             vec![
+                // From the gravel trap at the east turn's exit, the two cars coming through
+                // the apex with the sponsor boards behind them.
                 DemoView::new(
                     "track_cars",
                     "Sports cars racing round the oval",
-                    [110.0, 2.2, 16.0],
-                    [138.0, 0.9, -6.0],
+                    [142.4, 1.3, 29.3],
+                    [136.5, 0.9, 6.0],
                 )
-                .at(15.5, 1.0)
-                .call("entity.set", on_oval("Red car", -0.5, 30.0))
-                .call("entity.set", on_oval("Blue car", -0.68, 30.0)),
+                .at(15.5, 2.5)
+                .call("vehicles.place", on_oval("Red car", -0.7, 30.0))
+                .call("vehicles.place", on_oval("Blue car", -0.95, 30.0)),
                 DemoView::new(
                     "track_drift",
                     "Rally car drifting on the dirt pad",
-                    [-46.0, 2.0, -4.0],
-                    [-66.0, 0.8, -8.0],
+                    [-53.0, 1.5, -1.0],
+                    [-64.0, 0.7, -6.5],
                 )
                 .at(16.0, 1.2)
-                .call("entity.set", drift),
+                .call("vehicles.place", drift),
+                // Low on the grass past the kicker, the car in the air coming at the camera.
                 DemoView::new(
                     "track_jump",
                     "The kicker jump",
-                    [-44.0, 2.2, 98.0],
-                    [-12.0, 1.6, 80.0],
+                    [-30.0, 1.0, 87.6],
+                    [-10.0, 1.8, 79.5],
                 )
                 .at(15.5, 1.5)
-                .call("entity.set", on_oval("Red car", JUMP_ANGLE - 0.42, 40.0)),
+                .call(
+                    "vehicles.place",
+                    on_oval("Red car", JUMP_ANGLE - 0.42, 40.0),
+                ),
             ]
         }
         "airfield" => {
@@ -632,12 +637,12 @@ mod tests {
                         "vehicles.spawn" => args.get("autopilot"),
                         "vehicles.autopilot" => args.get("mode"),
                         "entity.despawn" => None,
-                        "entity.set" => {
-                            let c = &args["components"];
-                            serde_json::from_value::<Transform>(c["Transform"].clone())
-                                .unwrap_or_else(|e| panic!("{}: {e}", v.key));
-                            serde_json::from_value::<Velocity>(c["Velocity"].clone())
-                                .unwrap_or_else(|e| panic!("{}: {e}", v.key));
+                        "vehicles.place" => {
+                            for key in ["at", "velocity"] {
+                                serde_json::from_value::<[f64; 3]>(args[key].clone())
+                                    .unwrap_or_else(|e| panic!("{} {key}: {e}", v.key));
+                            }
+                            assert!(args["yaw_deg"].is_f64(), "{}", v.key);
                             None
                         }
                         other => panic!("{} calls unknown API {other}", v.key),
