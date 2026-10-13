@@ -50,9 +50,12 @@ pub struct PhysicsSettings {
     /// Multiplies how hard explosions push. 1 = real blast wind (a grenade barely moves a
     /// tonne of stone); action games often use 3–10.
     pub blast_scale: f32,
-    /// Joints between two dynamic bodies (ragdolls, chains, robot arms) become articulations:
-    /// each body only moves along its joint's free axes, so joints never stretch however heavy
-    /// the load. Off = every joint is a constraint the solver pulls together each step.
+    /// The joints of a free-floating group of dynamic bodies (ragdolls, loose chains) become
+    /// articulations: each body only moves along its joint's free axes, so joints never open
+    /// however hard the landing. Groups pinned to the world or a kinematic body, or with a body
+    /// over 100× heavier than another, keep constraint joints (Rapier's articulations blow up
+    /// there). Costs about 1 ms per tumbling ragdoll per frame. Off = every joint is a
+    /// constraint the solver pulls together each step.
     pub articulated_joints: bool,
 }
 

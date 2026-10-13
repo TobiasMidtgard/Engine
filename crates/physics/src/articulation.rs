@@ -2,8 +2,10 @@
 //!
 //! A Rapier multibody keeps each link's pose as coordinates along its joint's free axes under
 //! its parent, so a ragdoll's elbow can only bend and a chain link can only swing: joints never
-//! stretch, however heavy the load or long the chain (constraint joints pulled together by an
-//! iterative solver open up under a wrecking ball or a hard landing).
+//! stretch, however hard the landing or long the chain (constraint joints pulled together by an
+//! iterative solver open up for a frame when a ragdoll hits the ground). Which groups of jointed
+//! bodies are articulated is decided in `Simulation::create_joint` (free-floating ones whose
+//! masses are close).
 //!
 //! The price is that the multibody owns its links' poses and velocities: anything written to a
 //! link body directly (a teleport, a new velocity, an impulse, a character's push, a world
@@ -344,9 +346,9 @@ fn match_poses(mb: &mut Multibody, poses: &[Pose]) {
         let locked = joint.data.locked_axes.bits();
         let coords = joint.coords();
         let mut k = link.assembly_id();
-        for axis in 0..3 {
+        for (axis, coord) in coords.iter().take(3).enumerate() {
             if locked & (1 << axis) == 0 {
-                disp[k] = target.translation[axis] - coords[axis];
+                disp[k] = target.translation[axis] - coord;
                 k += 1;
             }
         }
