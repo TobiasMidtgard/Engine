@@ -240,7 +240,7 @@ Shared pipelines the core will provide for modules (planned): **strands** for ha
 muscles and skinned clothes and by `engine_softbody` for simulated cloth).
 
 Shader library: `lib_types.wgsl` (types, noise, BRDF, `henyey_greenstein`), `lib_frame.wgsl` (group 0 frame
-data, `shade_surface`, `shade_surface_shadowed`, `shadow_factor`, `contact_shadow`, `screen_ao`, `sky_visibility`, `apply_fog`,
+data, `shade_surface`, `shade_surface_shadowed`, `shade_thin_surface`, `shadow_factor`, `contact_shadow`, `screen_ao`, `sky_visibility`, `apply_fog`,
 `apply_sky_fog`, `volumetric_fog_at`, `height_fog_density`, `fog_sky_light`,
 `sample_env`, `sample_env_rough`, `sky_ambient`, `wind_offset`, `prepass_output`) and `lib_atmosphere.wgsl` (`atmosphere` for aerial perspective,
 `sun_transmittance`, `sky_view_radiance`, `planet_height`, `ray_shell`).
@@ -257,6 +257,16 @@ bumps, mottled color and roughness from 3D noise to any material, textured or no
 colors (stone, plaster, bark, soil, metal plates) don't look flat; it fades out with distance
 instead of sparkling. It sticks to the object; terrain and other meshes split into pieces use
 `with_detail_in_world()` so it lines up across seams.
+
+**Thin sheets** (built): double-sided and alpha-masked materials (leaves, grass and fern cards,
+paper, cloth, fences) are shaded as sheets with no inside (`shade_thin_surface(s, rel,
+sun_visibility, face)`, `face` being the side of the geometry facing the camera): only that side
+reflects light, whatever the vertex normals say, so a crown's bent normals or a normal map never
+make the side away from the sun glint or light up. `StandardMaterial::subsurface` is how much
+light comes through from the other side (sun, point lights and sky), tinted by the color, spread
+like diffuse light with a forward glow toward the light, and shadowed like the lit side, so
+backlit leaves glow green; at 0 (fences, grates, hair cards) nothing comes through. Opaque
+single-sided materials keep the ordinary `shade_surface` (`subsurface` wraps light around them).
 
 **Virtual geometry** (built: cluster LOD and GPU-driven drawing; `crates/render/src/virtual_geometry`):
 dense opaque meshes (`RenderSettings::virtual_geometry_min_triangles`, 50 000 by default) are

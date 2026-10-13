@@ -494,12 +494,63 @@ fn shade_surface(s: Surface, rel: vec3<f32>) -> vec3<f32> {
 // such as parallax self-shadowing: deep mortar joints and the gaps between cobbles stay dark
 // in low sun.
 fn shade_surface_shadowed(s: Surface, rel: vec3<f32>, sun_visibility: f32) -> vec3<f32> {
+    return shade_surface_sides(s, rel, sun_visibility, s.normal, false);
+}
+
+// Shading for a thin sheet seen from one side: a leaf, a petal, a curtain, a paper lantern
+// (double-sided or alpha-masked cards). `face` is the geometric normal of the side the camera
+// sees (unit, toward the camera: the triangle's own normal, not the shading normal), and
+// `s.normal` the shading normal on that side.
+//
+// Light reaches the side in view only when it comes from that side of the sheet; then it
+// reflects as on any surface (diffuse and specular). Light from the far side never makes a
+// highlight: `s.subsurface` of it shines through instead, diffuse with a soft forward glow
+// (looking toward the light through the sheet), wrapped around the terminator, tinted by the
+// albedo (deeper, as light that crossed a leaf is) and shadowed by the shadow maps as seen from
+// the lit side. Sky light shines through from behind the same way. With `subsurface` 0 the sheet
+// is opaque and its far side stays dark. `sun_visibility` is as for `shade_surface_shadowed`.
+fn shade_thin_surface(s: Surface, rel: vec3<f32>, sun_visibility: f32, face: vec3<f32>) -> vec3<f32> {
+    return shade_surface_sides(s, rel, sun_visibility, face, true);
+}
+
+// The color light takes on crossing a thin sheet of diffuse color `c`: the same hue, deeper
+// (half way to the color squared over its brightest channel, which keeps that channel).
+fn thin_surface_tint(c: vec3<f32>) -> vec3<f32> {
+    let peak = max(max(c.r, c.g), max(c.b, 1e-4));
+    return mix(c, c * c / peak, 0.5);
+}
+
+// Light let through a thin sheet toward the camera (direction `v`) per unit of light arriving
+// along `l` on its far side (1/sr): diffuse, wrapped past the terminator of the shading normal
+// (`n_dot_l` < 0 is light from behind) and with a forward glow toward the light's direction of
+// travel; normalized like a Lambertian lobe.
+fn thin_surface_through(n_dot_l: f32, v: vec3<f32>, l: vec3<f32>) -> f32 {
+    let wrap = 0.5;
+    let reach = saturate((wrap - n_dot_l) / (1.0 + wrap));
+    let forward = pow(saturate(dot(v, -l)), 4.0);
+    return reach * (0.75 + 0.75 * forward) * INV_PI;
+}
+
+// How much of a light from direction `l` falls on the side of a thin sheet in view (x; `face`
+// points toward the camera) and on its far side (y). Both are 0 edge-on, so the switch from
+// reflected to transmitted light is smooth.
+fn thin_surface_sides(face: vec3<f32>, l: vec3<f32>) -> vec2<f32> {
+    let c = dot(face, l);
+    return vec2<f32>(smoothstep(0.0, 0.08, c), smoothstep(0.0, 0.08, -c));
+}
+
+// Surface shading. With `thin`, `s` is the side in view of a thin sheet facing `face`
+// (`shade_thin_surface`); otherwise `face` is unused.
+fn shade_surface_sides(s: Surface, rel: vec3<f32>, sun_visibility: f32, face: vec3<f32>, thin: bool) -> vec3<f32> {
     let v = normalize(-rel);
     let n = s.normal;
     let roughness = s.roughness * s.roughness;
     let n_dot_v = max(dot(n, v), 1e-4);
     let f0 = mix(vec3(0.16 * s.reflectance * s.reflectance), s.albedo, s.metallic);
     let diffuse_color = s.albedo * (1.0 - s.metallic);
+    // What a thin sheet lets through from its far side.
+    let translucent = thin && s.subsurface > 0.0;
+    let through_color = thin_surface_tint(diffuse_color) * select(0.0, saturate(s.subsurface), translucent);
     var color = vec3(0.0);
 
     // Sun.
@@ -507,7 +558,22 @@ fn shade_surface_shadowed(s: Surface, rel: vec3<f32>, sun_visibility: f32) -> ve
     let n_dot_l_raw = dot(n, l);
     let n_dot_l = saturate(n_dot_l_raw);
     let sun_light = frame.sun_color.rgb * sun_transmittance(rel);
-    if (dot(sun_light, sun_light) > 0.0) {
+    let sides = thin_surface_sides(face, l);
+    if (thin && dot(sun_light, sun_light) > 0.0 && (sides.x > 0.0 || (translucent && sides.y > 0.0))) {
+        // Shadowed as seen from the sheet's sunlit side, so the sheet doesn't shadow itself.
+        let lit_side = select(-face, face, sides.x > 0.0);
+        let shadow = shadow_factor(rel, lit_side) * sun_visibility;
+        if (shadow > 0.0 && sides.x > 0.0 && n_dot_l > 0.0) {
+            let h = normalize(l + v);
+            let spec = d_ggx(saturate(dot(n, h)), roughness) * v_smith_ggx_correlated(n_dot_v, n_dot_l, roughness)
+                * f_schlick(f0, saturate(dot(l, h)));
+            let contact = contact_shadow(rel, face);
+            color += (diffuse_color * INV_PI + spec) * (n_dot_l * sides.x * contact * shadow) * sun_light;
+        }
+        if (shadow > 0.0 && sides.y > 0.0) {
+            color += through_color * (thin_surface_through(n_dot_l_raw, v, l) * sides.y * shadow) * sun_light;
+        }
+    } else if (!thin && dot(sun_light, sun_light) > 0.0) {
         var shadow = shadow_factor(rel, n) * sun_visibility;
         if (shadow > 0.0 && n_dot_l_raw > 0.0) {
             shadow *= contact_shadow(rel, n);
@@ -543,6 +609,14 @@ fn shade_surface_shadowed(s: Surface, rel: vec3<f32>, sun_visibility: f32) -> ve
         let h = normalize(pl + v);
         let spec = d_ggx(saturate(dot(n, h)), max(roughness, 0.02)) *
             v_smith_ggx_correlated(n_dot_v, nl, roughness) * f_schlick(f0, saturate(dot(pl, h)));
+        if (thin) {
+            // Reflected from the side in view, let through from the far side.
+            let lit = thin_surface_sides(face, pl);
+            let reflected = (diffuse_color * INV_PI + spec) * (nl * lit.x);
+            let through = through_color * (thin_surface_through(dot(n, pl), v, pl) * lit.y);
+            color += (reflected + through) * light.color_radius.rgb * falloff;
+            continue;
+        }
         let wrap = saturate((dot(n, pl) + s.subsurface) / (1.0 + s.subsurface));
         color += (diffuse_color * INV_PI * max(nl, wrap * s.subsurface) + spec * nl) * light.color_radius.rgb * falloff;
     }
@@ -561,6 +635,10 @@ fn shade_surface_shadowed(s: Surface, rel: vec3<f32>, sun_visibility: f32) -> ve
     let env_brdf = env_brdf_approx(f0, s.roughness, n_dot_v);
     let visibility = min(s.occlusion, screen_ao(rel));
     color += diffuse_color * irradiance * INV_PI * ao_multibounce(visibility, diffuse_color);
+    // Sky light shining through a thin sheet from behind.
+    if (translucent) {
+        color += through_color * ((sky_ambient(-n) - fill) * sky_vis + fill) * visibility;
+    }
     // Light bounced from nearby surfaces (its rays already stop at whatever occludes them).
     color += diffuse_color * screen_gi(rel);
     color += spec_env * env_brdf * specular_occlusion(n_dot_v, visibility, roughness);
