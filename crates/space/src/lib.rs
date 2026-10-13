@@ -1,8 +1,10 @@
 #![doc = include_str!("../README.md")]
 
+pub mod conic;
 pub mod demo;
 pub mod look;
 pub mod orbit;
+pub mod rails;
 pub mod sun;
 pub mod system;
 
@@ -17,8 +19,10 @@ use engine_world::{
     Atmospheres, FocusPoints, Gravity, GravityBody, SimulationFocus, WorldShift, WorldShiftSet,
 };
 
+pub use conic::Conic;
 pub use look::{BodiesFeature, BodyHaze, BodyImpostor, BodyLook, BodyRings, LookBakes};
 pub use orbit::{AU, DAY, Orbit};
+pub use rails::{NoRails, OnRails, RailsLog};
 
 /// What kind of body (for maps and defaults).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -259,6 +263,9 @@ pub struct SpaceSettings {
     /// the Moon's phase and the planets are then lit from where that sun is. The weather's
     /// compass (north +Z) needs [`SpaceFrame::home_heading_deg`] 180 to match the planet's.
     pub follow_world_clock: bool,
+    /// Above this time warp, free physics bodies out in space coast on their exact orbits
+    /// instead of being simulated (see [`rails`]); physics takes them back below it.
+    pub rails_above_warp: f64,
 }
 
 impl Default for SpaceSettings {
@@ -274,6 +281,7 @@ impl Default for SpaceSettings {
             min_apparent_radius_rad: 7e-4,
             keep_surfaces: true,
             follow_world_clock: false,
+            rails_above_warp: 1.5,
         }
     }
 }
@@ -448,6 +456,11 @@ impl Plugin for SpacePlugin {
                 "A star, planet or moon on rails: mass (mu), radius, orbit around its parent, \
                  spin, atmosphere. Its Transform is driven by the space module.",
             )
+            .init_resource::<RailsLog>()
+            .register_component::<NoRails>(
+                "Keeps a physics body off the rails: it is not flown on its orbit through time \
+                 warp (for things the game moves itself).",
+            )
             .register_component::<StarLight>(
                 "Makes a DirectionalLight shine from a star (direction and lux follow it).",
             )
@@ -471,7 +484,12 @@ impl Plugin for SpacePlugin {
             .add_systems(PostUpdate, reanchor.in_set(WorldShiftSet::Write))
             .add_systems(
                 PostUpdate,
-                (look::spawn_impostors, update_space, look::scale_impostors)
+                (
+                    look::spawn_impostors,
+                    update_space,
+                    rails::fly,
+                    look::scale_impostors,
+                )
                     .chain()
                     .after(WorldShiftSet::Apply)
                     .before(WorldShiftSet::Rebuild),
@@ -812,6 +830,7 @@ fn park(world: &mut World, body: &BodyState, at: (DVec3, DQuat), reach: f64) {
         Without<CelestialBody>,
         Without<SimulationFocus>,
         Without<DirectionalLight>,
+        Without<OnRails>,
     )>();
     let left: Vec<ParkedEntity> = q
         .iter(world)
@@ -1185,6 +1204,46 @@ fn register_apis(app: &mut App) {
                 clock.seconds = d * DAY;
             }
             Ok(serde_json::json!({ "warp": clock.warp, "space_days": clock.seconds / DAY }))
+        },
+    )
+    .register_api(
+        "space.rails",
+        "Ships coasting on their orbits through time warp: the body each falls around, its \
+         altitude and speed over it, its lowest and highest points (null: it escapes) and \
+         period, and how often coasting ships changed body or dropped the warp near a surface.",
+        "{}",
+        |world, _| {
+            let names: Vec<(String, f64)> = world
+                .resource::<SpaceState>()
+                .bodies
+                .iter()
+                .map(|b| (b.name.clone(), b.radius_m))
+                .collect();
+            let radius = |n: &str| names.iter().find(|b| b.0 == n).map_or(0.0, |b| b.1);
+            let mut q = world.query::<(Entity, &OnRails)>();
+            let ships: Vec<_> = q
+                .iter(world)
+                .map(|(e, r)| {
+                    let rad = radius(&r.around);
+                    let apo = r.conic.apoapsis();
+                    serde_json::json!({
+                        "entity": e.to_bits(),
+                        "around": r.around,
+                        "altitude_m": r.conic.position.length() - rad,
+                        "speed_m_s": r.conic.velocity.length(),
+                        "periapsis_altitude_m": r.conic.periapsis() - rad,
+                        "apoapsis_altitude_m": apo.is_finite().then_some(apo - rad),
+                        "period_s": r.conic.period(),
+                    })
+                })
+                .collect();
+            let log = world.resource::<RailsLog>();
+            Ok(serde_json::json!({
+                "rate": log.rate,
+                "ships": ships,
+                "handoffs": log.handoffs,
+                "warp_drops": log.warp_drops,
+            }))
         },
     )
     .register_api(
