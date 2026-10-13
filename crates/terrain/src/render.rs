@@ -1112,9 +1112,9 @@ impl RenderFeature for TerrainFeature {
                 ],
                 params2: [
                     if t.source.map.is_sphere() { 1.0 } else { 0.0 },
-                    0.0,
-                    0.0,
-                    0.0,
+                    t.config.shape.crater_density as f32,
+                    t.config.shape.crater_max_radius_m as f32,
+                    t.config.shape.crater_seed() as f32,
                 ],
             });
         }

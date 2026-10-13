@@ -878,16 +878,24 @@ impl PlanetShape {
         (dh, (steer[LEVELS - 1] + cuts).length())
     }
 
+    /// Seed of the crater scatter (16 bits, so the shader gets it exactly as an `f32`).
+    pub fn crater_seed(&self) -> u32 {
+        (self.seed & 0xFFFF) as u32
+    }
+
     /// Sum of crater profiles at `p` (planet-local, meters), from the largest size class down
     /// to `finest`. Each class scatters at most one crater per cell of a 3D grid; the profile
     /// uses the 3D distance to the crater's center, so centers below or above the surface make
     /// smaller and shallower craters (natural size variety). A crater reaches at most half a
     /// cell, so the 2×2×2 cells around `p` find every crater that touches it.
+    ///
+    /// The terrain shader scatters the same craters (`crater_detail` in terrain.wgsl) to shade
+    /// the ones too small for the vertices; keep the two in step.
     fn craters(&self, p: DVec3, finest: f64, mare: &mut f32) -> f64 {
         let mut total = 0.0;
         let mut radius = self.crater_max_radius_m;
         let min_r = self.crater_min_radius_m.max(finest * 0.75);
-        let mut class = 0u64;
+        let mut class = 0u32;
         while radius >= min_r {
             let cell = radius * 3.2;
             let q = p / cell - 0.5;
@@ -896,24 +904,25 @@ impl PlanetShape {
                 for dy in 0..2 {
                     for dx in 0..2 {
                         let (cx, cy, cz) =
-                            (base.x as i64 + dx, base.y as i64 + dy, base.z as i64 + dz);
-                        let seed = self.seed ^ (class * 0x9E37);
-                        if noise::cell_random(cx, cy, cz, seed, 1) > self.crater_density {
+                            (base.x as i32 + dx, base.y as i32 + dy, base.z as i32 + dz);
+                        let seed = self.crater_seed() ^ class.wrapping_mul(0x9E37);
+                        let rnd = |salt| noise::cell_random32(cx, cy, cz, seed, salt);
+                        if rnd(1) > self.crater_density {
                             continue;
                         }
-                        let center = DVec3::new(
-                            cx as f64 + noise::cell_random(cx, cy, cz, seed, 2),
-                            cy as f64 + noise::cell_random(cx, cy, cz, seed, 3),
-                            cz as f64 + noise::cell_random(cx, cy, cz, seed, 4),
-                        ) * cell;
-                        let rc = radius * (0.55 + 0.45 * noise::cell_random(cx, cy, cz, seed, 5));
+                        let center =
+                            DVec3::new(cx as f64 + rnd(2), cy as f64 + rnd(3), cz as f64 + rnd(4))
+                                * cell;
+                        let rc = radius * (0.55 + 0.45 * rnd(5));
                         let x = (p - center).length() / rc;
                         if x >= 1.5 {
                             continue;
                         }
                         // Bigger craters are shallower relative to size, with flat floors.
-                        let depth = rc * if rc > 8_000.0 { 0.06 } else { 0.18 };
-                        let rim = rc * 0.045;
+                        // Old craters are worn down: shallower, with low rims.
+                        let wear = 1.0 - 0.65 * smooth(0.1, 0.9, rnd(6));
+                        let depth = rc * if rc > 8_000.0 { 0.06 } else { 0.18 } * wear;
+                        let rim = rc * 0.045 * wear * wear;
                         let bowl = if x < 1.0 {
                             let floor = if rc > 8_000.0 { 0.55 } else { 0.0 };
                             let xf = ((x - floor) / (1.0 - floor)).max(0.0);

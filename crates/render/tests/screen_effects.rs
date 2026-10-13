@@ -203,9 +203,9 @@ fn ambient_occlusion_darkens_the_lit_image_in_the_crease() {
 /// Pixels along the slab's slanted top edge whose luma lies strictly between the slab's and
 /// the sky's: partial coverage, which only anti-aliasing produces.
 fn edge_blend_pixels(img: &RgbaImage) -> usize {
-    // The slab covers the right part of the frame; scan its top edge column by column.
+    // The slab stands right of center; scan its top edge column by column.
     let mut blended = 0;
-    for x in (W * 3 / 4)..(W - 4) {
+    for x in (W / 2)..(W - 4) {
         let column: Vec<f32> = (0..H / 2).map(|y| luma(img, x, y)).collect();
         // The edge: the first big drop from sky to slab going down.
         let Some(edge) = (1..column.len()).find(|&y| column[y] < column[y - 1] - 20.0) else {

@@ -65,7 +65,7 @@ zone's entry; the rest of the showcase belongs to the Beautiful showcase world t
 | `engine_ai_bridge`, `tools/engine-mcp` | JSON-RPC/MCP bridge so AI agents can inspect, edit, step and screenshot a running game | Core (architecture and integration) |
 | `tools/fetch-assets`, `assets/manifests/core.toml` | Large art pipeline: manifests, download cache, release mirror, the no-large-files test (each thread owns its own `assets/manifests/<area>.toml`) | Core (architecture and integration) |
 | `engine_debug` | Debug drawing (lines, shapes, gizmos) for every module | Core (architecture and integration) |
-| `engine_render` | Renderer, lighting, shadows, sky and sky occlusion, materials; the planned strand renderer (hair, fur, grass), wrinkle maps, and 2D/2.5D rendering | Rendering and lighting |
+| `engine_render` | Renderer, lighting, shadows, sky and sky occlusion, materials, grass; the planned strand renderer (hair, fur), wrinkle maps, and 2D/2.5D rendering | Rendering and lighting |
 | `games/showcase` | The tech showcase world: environment, viewpoints, screenshot tour, and the list of every test case with its owner | Beautiful showcase world |
 | `engine_physics` | Rigid-body simulation, colliders, joints, ragdolls, queries, character controller, floating-origin physics islands | Physics and rigid bodies |
 | `engine_vehicles` | Cars (suspension, tires, drivetrain), planes (aero surfaces), spaceships (thrusters, RCS) | Cars, planes and spaceships |
@@ -148,7 +148,7 @@ Writes: `HeatField`, `WorldImpulse`, `IgniteRequest`, `DamageEvent`, `NoiseEvent
 |---|---|
 | `prepare(world, …)` | read the ECS, cull, upload buffers |
 | `compute(encoder, …)` | GPU simulation (particles, fluids, clouds) |
-| `draw_environment` | add to the sky environment map (clouds, nebulae) |
+| `draw_environment` | add to the sky environment map (clouds, nebulae); it is filtered afterwards, so what is drawn here lights every surface and shows in rough reflections |
 | `draw_prepass` | write depth, normal, roughness and motion for opaque geometry (`vs`/`fs` using `prepass_output` from `lib_frame.wgsl`, targets `GpuShared::prepass_targets()`); ambient occlusion, contact shadows and TAA motion work only on surfaces drawn here, and the scene pass must then write the same depth (mark clip positions `@invariant`) |
 | `draw_shadow(cascade)` | cast sun shadows; with `cascade == SKY_OCCLUSION_VIEW`, draw into the top-down sky occlusion map so whatever roofs over the ground (rock, buildings, canopies) keeps sky light and rain out |
 | `draw(Opaque/Sky/Transparent)` | draw into the HDR scene; transparent can read scene color/depth copies |
@@ -173,17 +173,105 @@ contact shadows toward the sun (`contact_shadow_length`), and temporal anti-alia
 (`anti_aliasing = Taa`, the default). Under TAA the projection is jittered by a sub-pixel
 offset every frame (`frame.jitter`); `frame.unjittered_view_proj` and `prev_view_proj` give
 stable positions, and overlays get an unjittered frame group. Sun shadows use PCSS: the
-penumbra widens with distance from the caster like the real sun's (`sun_penumbra_scale`).
+penumbra widens with distance from the caster like the real sun's (`sun_penumbra_scale`). Screen-space
+reflections (`screen_space_reflections`, `ssr_max_roughness`; `screen_reflection(rel)` in
+shaders, used by `shade_surface`) trace the prepass depth and read the previous frame's finished
+image, so polished floors, wet streets, metal and glossy paint mirror what is on screen, blurred
+with roughness, and fall back to the prefiltered sky elsewhere. `DebugView::Reflections` shows
+them. Screen-space global illumination (`screen_space_gi`, `gi_intensity`; `screen_gi(rel)` in
+shaders, added by `shade_surface` times the diffuse color) traces short cosine-distributed rays
+through the prepass depth into the same previous image, so sunlit walls tint the ground beside
+them and lamps, fires and other emissive surfaces light their surroundings; light keeps bouncing
+over frames, and a temporal blend plus an edge-aware blur clean it up. Rays that leave the screen
+or find nothing bring no light (the sky's share is the AO-darkened sky light).
+`DebugView::IndirectLight` shows the bounced light.
 
-Shared pipelines the core will provide for modules (planned): **strands** for hair, fur and grass
-(guide curves in, GPU-expanded strands with hair shading and LOD out; `engine_softbody` drives
-hair/fur, `engine_foliage` drives grass) and **tension-driven wrinkle maps** in `StandardMaterial`
+**Grass** (built): a `GrassField` component covers a rectangle of ground on its entity's local
+x/z plane with individually drawn blades, grown in the vertex shader from a map of ground
+height, density and dryness (`GrassField::sample` fills it from any function, such as a
+terrain's height and ground cover), so millions of blades cost one small texture. Blades sway
+with the wind (`WindField`/`WeatherState`), with gusts rolling across the field, lean and curl,
+thin out smoothly with distance (survivors widen to keep the cover; `style.draw_distance`), cast
+sun shadows near the camera, and go through the depth prepass, so AO, bounce light and TAA see
+them. Lit from behind, sunlight shines through the blades. Meadows grow in patches (taller,
+greener hollows, shorter, drier rises). `GrassBender { radius }` on feet, bodies or vehicles
+pushes blades aside (16 nearest the camera). `RenderSettings::grass_density` scales every field
+(quality). Give the ground under a field `style.ground_color()` so it reads as grass past the
+draw distance. `engine_foliage` drives grass by spawning fields from its soil grid; game code
+can spawn them directly.
+
+Shared pipelines the core will provide for modules (planned): **strands** for hair and fur
+(`engine_softbody` draws its own today) and **tension-driven wrinkle maps** in `StandardMaterial`
 (a per-vertex tension value blends wrinkle/vein normal maps; written by `engine_anim` for skin,
 muscles and skinned clothes and by `engine_softbody` for simulated cloth).
 
-Shader library: `lib_types.wgsl` (types, noise, BRDF) and `lib_frame.wgsl` (group 0 frame
-data, `shade_surface`, `shadow_factor`, `contact_shadow`, `screen_ao`, `sky_visibility`, `apply_fog`,
-atmosphere, `wind_offset`, `prepass_output`).
+Shader library: `lib_types.wgsl` (types, noise, BRDF), `lib_frame.wgsl` (group 0 frame
+data, `shade_surface`, `shade_surface_shadowed`, `shadow_factor`, `contact_shadow`, `screen_ao`, `sky_visibility`, `apply_fog`,
+`sample_env`, `sample_env_rough`, `sky_ambient`, `wind_offset`, `prepass_output`) and `lib_atmosphere.wgsl` (`atmosphere` for aerial perspective,
+`sun_transmittance`, `sky_view_radiance`, `planet_height`, `ray_shell`).
+
+**Shapes** (built): `Shape` builds procedural meshes. Round shapes given `segments: 0` get
+enough segments to keep their outlines smooth at any size. `RoundedCuboid` rounds a box's edges
+and corners, as real objects are, so edges catch the light. `Rock` makes a faceted, weathered
+boulder or stone, different for every seed: break faces with rounded edges, erosion, a flat
+base, and darkened cracks in the vertex color. Prefer these over plain cuboids and spheres for
+anything meant to look real.
+
+**Surface detail** (built): `StandardMaterial::with_detail(strength, scale)` adds procedural
+bumps, mottled color and roughness from 3D noise to any material, textured or not, so plain
+colors (stone, plaster, bark, soil, metal plates) don't look flat; it fades out with distance
+instead of sparkling. It sticks to the object; terrain and other meshes split into pieces use
+`with_detail_in_world()` so it lines up across seams.
+
+**Virtual geometry** (built: cluster LOD and GPU-driven drawing; `crates/render/src/virtual_geometry`):
+dense opaque meshes (`RenderSettings::virtual_geometry_min_triangles`, 50 000 by default) are
+split into 128-triangle clusters with a level-of-detail DAG (groups simplified with locked
+borders, so mixed levels never crack), built once per mesh version on a background thread. Every
+frame a compute pass culls instances and clusters for the camera, the shadow cascades and the sky
+occlusion map, picks each cluster's level by its projected error (`cluster_error_px` on screen,
+`cluster_shadow_error_texels` in shadow maps), culls clusters that face away, and writes indirect
+draws; the clusters then go through the depth prepass, the scene pass (the same
+`StandardMaterial` shading as `mesh.wgsl`) and the shadow maps. Only storage buffers, 32-bit
+atomics and indirect draws: every backend. Smaller meshes, alpha-masked or wind-animated
+materials and entities with the `NoVirtualGeometry` marker stay instanced; a changed mesh is drawn
+instanced until its own clusters are rebuilt. `DebugView::Clusters` and `ClusterLevels` show
+them; `render.stats` reports `clusters` (and their triangles). Next: occlusion culling (two-pass
+HZB), streaming, a compute rasterizer for tiny triangles, cached shadow pages.
+
+**Material presets** (built): `StandardMaterial::preset(MaterialPreset::Brick)` (and cobblestone,
+rock, concrete, plaster, wood planks, bark, rusty steel, painted metal, sand, forest soil,
+gravel, snow, marble, grass) is a ready-made PBR surface whose maps (sRGB base color, normal,
+occlusion/roughness/metalness, height) are generated on the GPU by compute shaders the first time
+it is drawn, once per process, at `RenderSettings::material_texture_size` (1024 by default),
+tileable and mipmapped. Each preset is a small WGSL program in `shaders/materials/` over a
+library of tileable noise, Voronoi, brick and scratch generators, slope blur, and maps derived
+from its height (normal, ambient occlusion, curvature for edge wear and dirt), so a new preset
+is one file. Presets work in meters: `with_texture_scale(m)` sets the size of one tile (the
+relief depth follows), `with_tint` recolors, `detail` adds large-scale variation. Generated maps
+fill the material's empty texture slots in the mesh feature's ordinary texture sets;
+`GpuShared::material_textures` hands them to other features, and `read_material_maps` reads them
+back. Any material with a height map (`with_height_texture`, every preset) gets parallax
+occlusion mapping, fading out with distance and at grazing angles, with soft self-shadowing
+toward the sun; `with_triplanar()` (object space) or `with_triplanar_world()` projects the
+textures along three axes in meters with sharpened blending and surface-gradient normal
+blending, for rocks, spheres and terrain without UVs. The prepass evaluates the same material
+(parallax, triplanar, normal maps), so ambient occlusion, reflections and TAA see the detailed
+normals.
+
+**Sky light** (built): every time the sky environment map is redrawn
+(`RenderSettings::environment_interval`), the GPU filters it twice: prefiltered for GGX
+reflections, one mip per roughness step (`sample_env_rough(dir, roughness)`), and convolved into
+a small irradiance map for diffuse light (`sky_ambient(normal)`). `shade_surface` uses both, so
+rough metal, plastic and wet stone reflect a blurred sky, and sky light follows the real sky:
+blue in shadows by day, warm from the sunset side. Without a planet, the ground below the horizon
+is a plane lit by the sun and sky.
+
+**Atmosphere** (built): Rayleigh, Mie and ozone scattering on a spherical planet with multiple
+scattering, after Hillaire 2020. Look-up tables (sunlight transmittance and multiple scattering,
+recomputed when the planet or its air changes; the sky seen from the camera, every frame) make the
+sky cheap and physically consistent from the ground, from orbit and from the Moon. Clouds,
+fog and anything else lit by the sun should use `sun_transmittance(rel)` for the sunlight
+reaching a point.
 
 ## AI integration
 

@@ -42,7 +42,9 @@ everything else (streaming, LOD, colliders, ground queries, prints) follows the 
   steep ground below the tree line, outcrops stand on spurs with grass and scree in the
   hollows, and weathered rock (iron-stained faces, dark wet gullies) takes over on cliffs
   and high up. From orbit, noise per pixel gives woods, snowfields and coasts natural
-  shapes instead of the vertices' blocky ones.
+  shapes instead of the vertices' blocky ones. On cratered worlds the shader shades the
+  craters too small for the vertices, per pixel, from the same scatter as the shape (so
+  nothing pops on the way down), fresh ones with bright walls and ejecta.
 - **Detailed ground materials up close.** Nine PBR materials (turf in tufts over thatch,
   leaf litter with needles and twigs, soil, churned mud, rock, snow, rippled sand, gravel,
   concrete) are generated procedurally in `materials.rs` like a node-graph material: height
