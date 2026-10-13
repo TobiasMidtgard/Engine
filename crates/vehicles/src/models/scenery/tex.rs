@@ -545,6 +545,7 @@ pub fn dirt(px: u32, tile_m: f32, seed: u32) -> Maps {
     let m2 = cells(tile_m, 0.2);
     let st = cells(tile_m, 0.014);
     let cr = cells(tile_m, 0.22);
+    let gp = cells(tile_m, 0.16);
     bake(Spec::square(px, tile_m), move |x, y| {
         let (u, v) = (x / tile_m, y / tile_m);
         let a = fbm(u * m1 as f32, v * m1 as f32, (m1, m1), 4, 0.5, seed);
@@ -566,9 +567,16 @@ pub fn dirt(px: u32, tile_m: f32, seed: u32) -> Maps {
             [stone_tone, stone_tone * 0.93, stone_tone * 0.85],
             stone * 0.8,
         );
+        // Dried cracks only in patches of the driest earth, and broken up so they never
+        // form a complete net of tiles.
         let k = worley(u * cr as f32, v * cr as f32, (cr, cr), 0.8, seed + 3);
-        let crack = smoothstep(0.05, 0.01, k.f2 - k.f1) * smoothstep(0.1, 0.6, dry);
-        rgb = scale3(rgb, 1.0 - 0.55 * crack);
+        let patch = fbm(u * m1 as f32, v * m1 as f32, (m1, m1), 3, 0.5, seed + 4);
+        let gaps = fbm(u * gp as f32, v * gp as f32, (gp, gp), 3, 0.5, seed + 5);
+        let crack = smoothstep(0.035, 0.008, k.f2 - k.f1)
+            * smoothstep(0.35, 0.8, dry)
+            * smoothstep(0.05, 0.45, patch)
+            * smoothstep(-0.1, 0.25, gaps);
+        rgb = scale3(rgb, 1.0 - 0.4 * crack);
         Texel {
             rgb,
             height: b * 0.004 + stone * 0.004 - crack * 0.004 + a * 0.003,

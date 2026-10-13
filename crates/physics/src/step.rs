@@ -15,6 +15,7 @@ use engine_world::{
 };
 use rapier3d::prelude::{ActiveHooks, PhysicsWorld, Pose, QueryFilter as RFilter, SharedShape};
 
+use crate::buoyancy::{Surface, WATER_DENSITY};
 use crate::character;
 use crate::convert;
 use crate::settings::PhysicsSettings;
@@ -493,14 +494,6 @@ pub(crate) fn physics_step(world: &mut World, mut q: Local<Option<StepQueries>>)
         let g = gravity.at(sim.region(rid).anchor);
         sim.region_mut(rid).world.gravity = g;
         refresh_contact_hooks(&mut sim.region_mut(rid).world);
-        prepare_forces(
-            &mut sim,
-            rid,
-            &gravity,
-            g,
-            water.as_ref(),
-            settings.buoyancy,
-        );
         if sim.characters.values().any(|c| c.region == rid) {
             let r = sim.region_mut(rid);
             if r.stale_all || !r.fresh.is_empty() {
@@ -509,6 +502,16 @@ pub(crate) fn physics_step(world: &mut World, mut q: Local<Option<StepQueries>>)
             character::find_platforms(&mut sim, rid, &gravity);
         }
         for _ in 0..substeps {
+            // Every substep: water pressure follows the pose (forces held over several
+            // substeps lag behind it and pump energy into a floating body's rocking).
+            prepare_forces(
+                &mut sim,
+                rid,
+                &gravity,
+                g,
+                water.as_ref(),
+                settings.buoyancy,
+            );
             drive_kinematics(&mut sim, rid, sub_dt);
             let scaled = scale_time(&mut sim, rid, true);
             {
@@ -805,6 +808,7 @@ fn prepare_forces(
             entry.forces_set,
         );
         let region = sim.regions[rid as usize].as_mut().unwrap();
+        let hulls = &mut sim.hulls;
         let anchor = region.anchor;
         let Some(rb) = region.world.bodies.get_mut(h) else {
             continue;
@@ -835,6 +839,7 @@ fn prepare_forces(
                 let colliders: Vec<_> = rb.colliders().to_vec();
                 let up = gravity.up_at(world_com);
                 let g = gravity.at(world_com).length();
+                let rho_g = WATER_DENSITY * g;
                 let v = rb.linvel();
                 let w_ang = rb.angvel();
                 for ch in colliders {
@@ -845,29 +850,60 @@ fn prepare_forces(
                         continue;
                     }
                     let aabb = c.compute_aabb();
-                    let bottom = anchor.y + aabb.mins.y as f64;
                     let height = (aabb.maxs.y - aabb.mins.y).max(1e-3);
-                    let depth = (s.surface_height - bottom) as f32;
-                    let frac = (depth / height).clamp(0.0, 1.0);
-                    if frac <= 0.0 {
-                        continue;
-                    }
+                    // Lift (and its torque) from the pressure on the real shape where there
+                    // is a mesh for it, else from the fraction of the box under water.
+                    let hull = hulls.get(c.shared_shape());
+                    let meshed = hull.is_some();
+                    let (frac, current) = if let Some(hull) = hull {
+                        let Some(surface) = Surface::sample(w, anchor, aabb.mins, aabb.maxs) else {
+                            continue;
+                        };
+                        if aabb.mins.y >= surface.top {
+                            continue;
+                        }
+                        let wetted = hull.immerse(
+                            c.position(),
+                            &surface,
+                            g,
+                            com,
+                            v - surface.current,
+                            w_ang,
+                        );
+                        if wetted.volume <= 0.0 {
+                            continue;
+                        }
+                        force += wetted.force;
+                        torque += wetted.torque;
+                        ((wetted.volume / hull.volume).min(1.0), surface.current)
+                    } else {
+                        let bottom = anchor.y + aabb.mins.y as f64;
+                        let depth = (s.surface_height - bottom) as f32;
+                        let frac = (depth / height).clamp(0.0, 1.0);
+                        if frac <= 0.0 {
+                            continue;
+                        }
+                        let lift = up * (rho_g * c.volume() * frac);
+                        let center = aabb.center();
+                        let point =
+                            Vec3::new(center.x, aabb.mins.y + height * frac * 0.5, center.z);
+                        force += lift;
+                        torque += (point - com).cross(lift);
+                        (frac, s.velocity)
+                    };
                     wet = true;
-                    let volume = c.volume();
-                    let lift = up * (1000.0 * g * volume * frac);
-                    let center = aabb.center();
-                    let point = Vec3::new(center.x, aabb.mins.y + height * frac * 0.5, center.z);
-                    force += lift;
-                    torque += (point - com).cross(lift);
                     // Water drag relative to the current, and rotational drag.
-                    let rel = v - s.velocity;
+                    let rel = v - current;
                     force -= rel * (mass * 0.8 * frac);
-                    torque -= w_ang * (mass * 0.3 * frac * height * height);
-                    // Bobbing dies out within a few periods (waves carry the energy away):
-                    // heave damping at about half the critical value.
-                    let area = (aabb.maxs.x - aabb.mins.x) * (aabb.maxs.z - aabb.mins.z);
-                    let critical = 2.0 * (1000.0 * g * area * mass).sqrt();
-                    force -= up * (rel.dot(up) * critical * 0.5 * (frac * 2.0).min(1.0));
+                    torque -= spin_drag(c, w_ang) * (mass * 0.3 * frac);
+                    if !meshed {
+                        // Bobbing dies out within a few periods (waves carry the energy
+                        // away): heave damping at about half the critical value. Meshes damp
+                        // heave, roll and pitch over their wetted bottom instead.
+                        let area = (aabb.maxs.x - aabb.mins.x) * (aabb.maxs.z - aabb.mins.z);
+                        let critical = 2.0 * (rho_g * area * mass).sqrt();
+                        force -= up * (rel.dot(up) * critical * 0.5 * (frac * 2.0).min(1.0));
+                    }
                 }
             }
         }
@@ -883,6 +919,20 @@ fn prepare_forces(
         }
         sim.bodies.get_mut(&e).unwrap().forces_set = needs || (wet && had_forces);
     }
+}
+
+/// Water's drag on a collider turning at `spin`, per unit of the body's mass and wetness: about
+/// each of the shape's own axes, as far as the shape reaches across that axis (a log rolls
+/// through the water easily, end over end it sweeps its whole length).
+fn spin_drag(c: &rapier3d::geometry::Collider, spin: Vec3) -> Vec3 {
+    let h = c.shape().compute_local_aabb().half_extents();
+    let reach = Vec3::new(
+        h.y * h.y + h.z * h.z,
+        h.x * h.x + h.z * h.z,
+        h.x * h.x + h.y * h.y,
+    );
+    let rot = c.position().rotation;
+    rot * (reach * 2.0 * (rot.inverse() * spin))
 }
 
 /// A body whose far edge moves faster than this from turning alone, m/s, gets its contacts

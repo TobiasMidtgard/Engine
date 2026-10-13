@@ -473,3 +473,88 @@ fn a_car_placed_at_speed_drives_on_in_a_fitting_gear() {
         t.translation.z
     );
 }
+
+/// One lap and more of the showcase oval under the sports car's autopilot: the worst slip
+/// angle (nose against the direction of travel), the worst distance off the center line and
+/// the slowest speed.
+fn lap_the_oval(lateral_g: f32) -> (f32, f64, f32, f32) {
+    use engine_vehicles::demo::{
+        JUMP_ANGLE, TRACK_SURFACE, kicker, oval_direction, oval_point, race_line,
+    };
+    let mut app = vehicle_app();
+    ground(&mut app, DVec3::Y * TRACK_SURFACE, 3_000.0, "concrete");
+    let (size, at) = kicker(DVec3::ZERO);
+    static_box(
+        &mut app,
+        at.translation,
+        size * 0.5,
+        at.rotation,
+        "concrete",
+    );
+    calm(&mut app);
+    let angle = 0.25f64;
+    let car = car_on(
+        &mut app,
+        oval_point(DVec3::ZERO, angle),
+        oval_direction(angle),
+    );
+    app.world
+        .entity_mut(car)
+        .insert(Autopilot::new(AutopilotMode::Drive {
+            path: race_line(DVec3::ZERO, 128),
+            looped: true,
+            max_speed: 46.0,
+            lateral_g,
+        }));
+    let line = race_line(DVec3::ZERO, 1440);
+    let jump = oval_point(DVec3::ZERO, JUMP_ANGLE);
+    run_for(&mut app, 10.0);
+    let (mut slip, mut off, mut slowest, mut flown) = (0.0f32, 0.0f64, f32::MAX, 0.0f32);
+    run_until(&mut app, 30.0, |app| {
+        let t = transform(app, car);
+        let v = velocity(app, car).linear.with_y(0.0);
+        let fwd = t.rotation * Vec3::NEG_Z;
+        if v.length() > 5.0 {
+            slip = slip.max(fwd.with_y(0.0).angle_between(v).to_degrees());
+        }
+        slowest = slowest.min(v.length());
+        if telemetry(app, car).wheels_grounded == 0 && (t.translation - jump).length() < 60.0 {
+            flown += DT as f32;
+        }
+        // Distance to the race line: the nearest of many points on it.
+        let p = t.translation.with_y(0.0);
+        let d = line
+            .iter()
+            .map(|q| (p - q.with_y(0.0)).length())
+            .fold(f64::MAX, f64::min);
+        off = off.max(d);
+        false
+    });
+    (slip, off, slowest, flown)
+}
+
+/// The showcase race: the sports car laps the oval on its line without sliding, through
+/// the tight turns and over the kicker, at the grip the demo uses and at the grip limit.
+/// Stability control catches the tail when braking into a turn unloads it, the path follower
+/// steers for the lock it has at speed, and the race line runs straight over the kicker so
+/// the car does not take off turning and land sideways.
+#[test]
+fn laps_the_demo_oval_on_its_line() {
+    for lateral_g in [0.85, 1.0] {
+        let (slip, off, slowest, flown) = lap_the_oval(lateral_g);
+        eprintln!(
+            "oval at {lateral_g} g: worst slip {slip:.1}°, worst off the line {off:.1} m, \
+             slowest {slowest:.1} m/s, {flown:.1} s in the air"
+        );
+        assert!(slip < 8.0, "slid at {slip:.1}° (target {lateral_g} g)");
+        assert!(
+            off < 3.0,
+            "ran {off:.1} m off the line (target {lateral_g} g)"
+        );
+        assert!(
+            slowest > 15.0,
+            "slowed to {slowest:.1} m/s (target {lateral_g} g)"
+        );
+        assert!(flown > 0.8, "flew {flown:.1} s off the kicker in 30 s");
+    }
+}

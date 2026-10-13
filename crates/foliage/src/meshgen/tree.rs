@@ -18,7 +18,7 @@
 //! hanging shoots in a tapering cone, pines brushes of long needles in cloud-like clumps at
 //! the ends of upturned limbs.
 
-use engine_core::math::{Quat, Rng, Vec2, Vec3, Vec4, smoothstep};
+use engine_core::math::{Quat, Rng, Vec2, Vec3, Vec4, noise, smoothstep};
 
 use super::textures::{CLUSTER_CELL, LeafKind, atlas_cell, kind_of};
 use super::{MeshBuilder, rgb};
@@ -35,6 +35,8 @@ pub struct PlantMeshes {
     /// A felled log once its twigs have rotted off: the trunk above the cut with stubs of the
     /// big limbs (same model space as `wood`).
     pub log: Option<engine_render::Mesh>,
+    /// The same broken trunk standing as a snag: moss at its foot rather than along one side.
+    pub snag: Option<engine_render::Mesh>,
     /// Height of the mesh at full size, meters.
     pub height: f32,
     /// Height of the felling cut (top of the stump), meters.
@@ -509,6 +511,69 @@ fn trunk(
     (path, radius)
 }
 
+/// Moss over the model's +X side of a log (the side `felling::log_rest_transform` turns up
+/// once the twigs have rotted off), patchy along it, and a darker, damp underside. The cut
+/// faces stay bare.
+fn moss_log(mesh: &mut engine_render::Mesh, seed: u64) {
+    // Olive, not lawn green: moss on deadwood is dark and dull, drier and yellower in places.
+    let moss = Vec3::new(0.052, 0.07, 0.026);
+    let dry = Vec3::new(0.075, 0.074, 0.036);
+    for v in &mut mesh.vertices {
+        let n = Vec3::from(v.normal).normalize_or_zero();
+        let side = 1.0 - n.y.abs();
+        let p = Vec3::from(v.position);
+        let patch = noise::fbm3(
+            p.x as f64 * 1.3,
+            p.y as f64 * 0.8,
+            p.z as f64 * 1.3,
+            seed ^ 0x6d055,
+            3,
+            2.0,
+            0.5,
+        );
+        let tint = noise::fbm3(
+            p.x as f64 * 2.1,
+            p.y as f64 * 1.7,
+            p.z as f64 * 2.1,
+            seed ^ 0x0d27,
+            2,
+            2.0,
+            0.5,
+        );
+        // Cushions with bark between them, mostly along the top.
+        let top = smoothstep(-0.15 - 0.3 * patch, 0.55, n.x) * smoothstep(-0.1, 0.25, patch);
+        let under = smoothstep(0.0, 0.7, -n.x);
+        let moss = moss.lerp(dry, smoothstep(-0.2, 0.4, tint));
+        let c = Vec3::new(v.color[0], v.color[1], v.color[2]);
+        let c = c.lerp(moss, top * side * 0.8) * (1.0 - 0.35 * under * side);
+        v.color = [c.x, c.y, c.z, v.color[3]];
+    }
+}
+
+/// Moss around the foot of a standing snag, in patches, thinning out a meter or so up.
+fn moss_foot(mesh: &mut engine_render::Mesh, seed: u64) {
+    let moss = Vec3::new(0.052, 0.07, 0.026);
+    for v in &mut mesh.vertices {
+        let n = Vec3::from(v.normal).normalize_or_zero();
+        let side = 1.0 - n.y.abs();
+        let p = Vec3::from(v.position);
+        let patch = noise::fbm3(
+            p.x as f64 * 1.3,
+            p.y as f64 * 0.8,
+            p.z as f64 * 1.3,
+            seed ^ 0x6d055,
+            3,
+            2.0,
+            0.5,
+        );
+        let reach = 0.6 + 0.8 * (patch + 0.5).clamp(0.0, 1.0);
+        let foot = (1.0 - smoothstep(0.2, reach, p.y)) * smoothstep(-0.2, 0.2, patch);
+        let c = Vec3::new(v.color[0], v.color[1], v.color[2]);
+        let c = c.lerp(moss, foot * side * 0.75);
+        v.color = [c.x, c.y, c.z, v.color[3]];
+    }
+}
+
 /// Sides of the trunk near the camera. The stump and the wood above it use the same count so
 /// their rings meet at the cut without cracks (which would show the cut faces through them).
 const TRUNK_SIDES: u32 = 14;
@@ -519,8 +584,11 @@ fn bark_color(sp: &PlantSpecies, y: f32, h: f32, ring: usize, seed: u64) -> Vec4
     let base = Vec3::from(sp.bark_color);
     let c = match sp.shape.bark {
         BarkStyle::Birch => {
+            // Old birches go black and rough at the foot, fading up into the white over the
+            // first meter or two, unevenly from ring to ring; young ones barely darken.
             let dark = Vec3::new(0.035, 0.03, 0.028);
-            let foot = (1.0 - (y / 1.4).min(1.0)).powi(2);
+            let reach = (h / 14.0).clamp(0.2, 1.0) * (1.3 + 0.9 * n);
+            let foot = 1.0 - smoothstep(0.2 * reach, reach, y);
             // The bark texture carries the dark lenticel bands; rings only vary gently.
             let band = 0.85 + 0.15 * n;
             base.lerp(dark, foot) * band.max(foot)
@@ -541,9 +609,9 @@ fn bark_color(sp: &PlantSpecies, y: f32, h: f32, ring: usize, seed: u64) -> Vec4
 }
 
 /// Cut wood with growth rings (r = 0 center .. 1 bark).
-fn cut_color(sp: &PlantSpecies, r: f32) -> Vec4 {
+fn cut_color(rim: Vec4, r: f32) -> Vec4 {
     if r > 0.92 {
-        rgb(sp.bark_color, 0.6)
+        rim
     } else {
         // Equal to the cut-wood color the end-grain texture is painted for.
         let wood = Vec3::new(0.62, 0.45, 0.26);
@@ -564,6 +632,7 @@ fn add_branches(
     shade: &Shading,
 ) {
     let many = branches.iter().filter(|b| b.level == 1).count() > 30;
+    let spruce_like = sp.form == PlantForm::Conifer && sp.shape.bark != BarkStyle::Pine;
     for (bi, br) in branches.iter().enumerate() {
         // The trunk is drawn by the caller (split at the cut). Far away, twigs vanish and (on
         // trees with many limbs) every other limb too.
@@ -582,8 +651,17 @@ fn add_branches(
             _ => 3,
         };
         let path = &br.path;
+        // A spruce's limbs live in the shade of their own needle shelves and grey with age;
+        // its inner twigs are dead and silvery.
+        let (dim, grey) = match (spruce_like, br.level) {
+            (true, 1) => (0.62, 0.35),
+            (true, _) => (0.7, 0.65),
+            _ => (1.0, 0.0),
+        };
         let color = |i: usize, _a: f32| {
-            bark_color(sp, path[i].y, h, i + bi * 7, seed) * shade.wood_ao(path[i])
+            let c = bark_color(sp, path[i].y, h, i + bi * 7, seed) * shade.wood_ao(path[i]);
+            let luma = c.truncate().dot(Vec3::new(0.3, 0.55, 0.15));
+            (c.truncate().lerp(Vec3::splat(luma), grey) * dim).extend(1.0)
         };
         b.tube(path, &br.radius, sides, 0.5, &color, None, None);
     }
@@ -699,13 +777,16 @@ fn assemble(
         ..Default::default()
     };
     let branches = &crowns.branches;
+    // The bark rim round the cut faces, as dark as the bark there (a pale rim would show as a
+    // hairline round a birch's black foot where the stump and the wood above it meet).
+    let rim = (bark_color(sp, cut, h, cut_i, seed).truncate() * 0.6).extend(1.0);
     // Base: roots + trunk up to the cut, growth rings on top.
     if !sapling {
         let mut b = MeshBuilder::new();
         let path = &trunk_path[..=cut_i];
         let rad = &trunk_r[..=cut_i];
         let color = |i: usize, _a: f32| bark_color(sp, path[i].y, h, i, seed);
-        let cap = |r: f32| cut_color(sp, r);
+        let cap = |r: f32| cut_color(rim, r);
         b.tube(path, rad, TRUNK_SIDES, 0.5, &color, None, Some(&cap));
         if sp.trunk_radius_m > 0.12 {
             // Root flares: broad, low ridges that leave the flared foot and sink into the
@@ -734,18 +815,27 @@ fn assemble(
         }
         out.base = Some(b.finish());
 
+        // A bare log: the top has broken off where the trunk thins and rotted away, leaving a
+        // dark, rotten end (about a third of the tree's height remains).
         let mut b = MeshBuilder::new();
-        let path = &trunk_path[cut_i..];
-        let rad = &trunk_r[cut_i..];
+        let snap = 0.55 + 0.15 * engine_core::math::hash01(7, 0, 0, seed);
+        let end = (cut_i..trunk_path.len())
+            .find(|&i| trunk_r[i] < sp.trunk_radius_m * snap)
+            .unwrap_or(trunk_path.len())
+            .max(cut_i + 2);
+        let top_y = trunk_path[end - 1].y;
+        let path = &trunk_path[cut_i..end];
+        let rad = &trunk_r[cut_i..end];
         let color = |i: usize, _a: f32| bark_color(sp, path[i].y, h, i + cut_i, seed);
-        let cap = |r: f32| cut_color(sp, r);
+        let cap = |r: f32| cut_color(rim, r);
+        let rotten = |_: f32| Vec4::new(0.09, 0.065, 0.045, 1.0);
         let broken = |_: f32| rgb(sp.bark_color, 0.55);
-        b.tube(path, rad, 10, 0.5, &color, Some(&cap), Some(&broken));
+        b.tube(path, rad, 10, 0.5, &color, Some(&cap), Some(&rotten));
         // Short broken stubs where the thickest limbs were (the thin ones snap off flush).
         let mut limbs: Vec<_> = branches
             .iter()
             .enumerate()
-            .filter(|(_, br)| br.level == 1)
+            .filter(|(_, br)| br.level == 1 && br.path[0].y < top_y)
             .collect();
         limbs.sort_by(|a, b| b.1.radius[0].total_cmp(&a.1.radius[0]));
         limbs.truncate((limbs.len() / 3).clamp(2, 9));
@@ -757,7 +847,12 @@ fn assemble(
             let color = |i: usize, _a: f32| bark_color(sp, stub[i].y, h, i + bi * 7, seed);
             b.tube(&stub, &r, 5, 0.5, &color, None, Some(&broken));
         }
-        out.log = Some(b.finish());
+        let mut log = b.finish();
+        let mut snag = log.clone();
+        moss_foot(&mut snag, seed);
+        out.snag = Some(snag);
+        moss_log(&mut log, seed);
+        out.log = Some(log);
     }
     let kind = kind_of(sp.shape.leaf);
     let shading = Shading {
@@ -781,7 +876,7 @@ fn assemble(
         let path = &path;
         let rad = &trunk_r[start..];
         let color = |i: usize, _a: f32| bark_color(sp, path[i].y, h, i + start, seed);
-        let cap = |r: f32| cut_color(sp, r);
+        let cap = |r: f32| cut_color(rim, r);
         let tip = |_: f32| rgb(sp.bark_color, 0.8);
         b.tube(
             path,
@@ -1158,13 +1253,17 @@ fn conifer(sp: &PlantSpecies, seed: u64, sapling: bool) -> PlantMeshes {
                 Vec3::Y * (sh.tip_bend * 0.3 * f + sag) + jitter(&mut rng, gnarl)
             });
             // Conifer limbs stay slender (a few centimeters), even low on an old trunk.
-            let r_start = (r_t * 0.3).min(0.03 + sp.trunk_radius_m * 0.06) * (0.5 + 0.5 * envelope);
+            let r_start =
+                (r_t * 0.3).min(0.022 + sp.trunk_radius_m * 0.05) * (0.5 + 0.5 * envelope);
             let br = taper(segs, r_start, 0.008);
             let tint = leaf_tint(sp, &mut rng);
             if pine {
                 pine_limb(&mut cr, &mut rng, &bp, &br, length, tint, sapling);
             } else {
                 spruce_limb(&mut cr, &mut rng, &bp, &br, length, tint, rel);
+                if !sapling && rel < 0.65 {
+                    dead_twigs(&mut cr, &mut rng, &bp, &br, length);
+                }
             }
             cr.branches.push(Branch {
                 path: bp,
@@ -1258,6 +1357,26 @@ fn pine_limb(
     }
     let (tp, td, _) = point_at(bp, br, 1.0);
     brush(cr, rng, tp, td, 1.0);
+}
+
+/// Dead twigs on the inner part of a spruce limb, where the shade has killed the needles:
+/// short, thin and pointing out and down.
+fn dead_twigs(cr: &mut Crowns, rng: &mut Rng, bp: &[Vec3], br: &[f32], length: f32) {
+    for _ in 0..rng.range_i32(1, 4) {
+        let s = rng.range(0.1, 0.45);
+        let (p, d, rp) = point_at(bp, br, s);
+        let side =
+            Vec3::Y.cross(d).normalize_or(Vec3::X) * if rng.chance(0.5) { 1.0 } else { -1.0 };
+        let dir =
+            (d * 0.7 + side * rng.range(0.4, 1.0) - Vec3::Y * rng.range(0.1, 0.7)).normalize();
+        let l = rng.range(0.12, 0.3) * (0.6 + 0.4 * (length / 3.0).min(1.0));
+        let kink = jitter(rng, 0.03);
+        cr.branches.push(Branch {
+            path: vec![p, p + dir * l * 0.5 + kink, p + dir * l + kink * 1.5],
+            radius: vec![(rp * 0.4).min(0.007), 0.0035, 0.0015],
+            level: 2,
+        });
+    }
 }
 
 /// Needles of a spruce limb: flat sprays fanning sideways along it and curtains of shoots

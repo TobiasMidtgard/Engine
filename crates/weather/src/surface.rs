@@ -185,8 +185,9 @@ impl GroundCache {
         }
     }
 
-    /// Follow the surface grid: same layout, keeping what overlaps when it moves.
-    fn align(&mut self, surface: &Grid2<engine_world::SurfaceCell>) {
+    /// Follow the surface grid: same layout, keeping what overlaps when it moves. Returns the
+    /// grid's previous origin when it moved.
+    fn align(&mut self, surface: &Grid2<engine_world::SurfaceCell>) -> Option<DVec2> {
         let same_dims = self.cells.width == surface.width
             && self.cells.height == surface.height
             && self.cells.cell == surface.cell;
@@ -202,14 +203,61 @@ impl GroundCache {
             self.cursor = 0;
             self.complete = false;
         } else if self.cells.origin != surface.origin {
+            let old = self.cells.origin;
             let half =
                 DVec2::new(surface.width as f64, surface.height as f64) * surface.cell as f64 * 0.5;
             self.cells.recenter(surface.origin + half);
             self.cells.origin = surface.origin;
             self.cursor = 0;
             self.complete = false;
+            self.sheltered.resize(self.cells.len(), false);
+            return Some(old);
         }
         self.sheltered.resize(self.cells.len(), false);
+        None
+    }
+}
+
+/// The cells a moving grid uncovers start out bare. Give them the wetness and snow of the
+/// open ground the grid kept (its upper quartile), so walking out of a snowfield doesn't leave
+/// a bare band along the far edge of the grid. A jump past the whole grid keeps nothing to go
+/// by, and the ground starts bare there.
+fn seed_uncovered(
+    surface: &mut Grid2<engine_world::SurfaceCell>,
+    cache: &GroundCache,
+    old_origin: DVec2,
+) {
+    let (origin, cell, width) = (surface.origin, surface.cell as f64, surface.width as usize);
+    let size = DVec2::new(width as f64, surface.height as f64) * cell;
+    let kept = |i: usize| {
+        let xz = origin + (DVec2::new((i % width) as f64, (i / width) as f64) + 0.5) * cell;
+        let rel = xz - old_origin;
+        rel.x >= 0.0 && rel.y >= 0.0 && rel.x < size.x && rel.y < size.y
+    };
+    let (mut wet, mut snow) = (Vec::new(), Vec::new());
+    for i in (0..surface.data.len()).step_by(7) {
+        if kept(i) && cache.exposure(i) >= 0.5 {
+            wet.push(surface.data[i].wetness);
+            snow.push(surface.data[i].snow_m);
+        }
+    }
+    if wet.is_empty() {
+        return;
+    }
+    let upper_quartile = |v: &mut Vec<f32>| {
+        let k = v.len() * 3 / 4;
+        *v.select_nth_unstable_by(k, f32::total_cmp).1
+    };
+    let (wetness, snow_m) = (upper_quartile(&mut wet), upper_quartile(&mut snow));
+    if wetness <= 0.0 && snow_m <= 0.0 {
+        return;
+    }
+    for i in 0..surface.data.len() {
+        if !kept(i) {
+            let c = &mut surface.data[i];
+            c.wetness = c.wetness.max(wetness);
+            c.snow_m = c.snow_m.max(snow_m);
+        }
     }
 }
 
@@ -429,7 +477,9 @@ pub(crate) fn prepare(world: &mut World, radius_m: f64) {
         .collect();
     world.resource_scope(|world, mut cache: Mut<GroundCache>| {
         let cache = &mut *cache;
-        cache.align(&world.resource::<SurfaceLayers>().grid);
+        if let Some(old) = cache.align(&world.resource::<SurfaceLayers>().grid) {
+            seed_uncovered(&mut world.resource_mut::<SurfaceLayers>().grid, cache, old);
+        }
         let sim = world.resource::<WeatherSim>();
         let look = LookUp {
             ground: world.resource::<Ground>(),
@@ -614,7 +664,9 @@ pub(crate) fn ground_system(
     let dt = cache.accumulated_s;
     cache.accumulated_s = 0.0;
 
-    cache.align(&surface.grid);
+    if let Some(old) = cache.align(&surface.grid) {
+        seed_uncovered(&mut surface.grid, &cache, old);
+    }
     refresh_cache(
         &mut cache,
         params.shelter_rays,
@@ -1017,6 +1069,31 @@ mod tests {
         assert!(snow < 0.005, "snow left {snow}");
         // The melt water leaves the ground wet for a while.
         assert!(wet > 0.2, "wet {wet}");
+    }
+
+    #[test]
+    fn ground_a_moving_grid_uncovers_starts_like_the_open_ground_it_kept() {
+        let (mut surface, mut cache, params) = setup();
+        run(&mut surface, &cache, &params, &rain(3.0, -5.0), 3600.0);
+        let lying = surface.sample(DVec3::ZERO).snow_m;
+        assert!(lying > 0.02, "snow {lying}");
+        // The player walks 16 m east: the grid drops its west strip and uncovers one east.
+        surface.grid.recenter(DVec2::new(16.0, 0.0));
+        let old = cache.align(&surface.grid).expect("the grid moved");
+        seed_uncovered(&mut surface.grid, &cache, old);
+        let strip = surface.sample(DVec3::new(44.0, 0.0, 5.0));
+        assert!(
+            (strip.snow_m - lying).abs() < 0.002,
+            "{} vs {lying}",
+            strip.snow_m
+        );
+        assert!(strip.wetness > 0.5, "wetness {}", strip.wetness);
+
+        // A jump past the whole grid has nothing to go by.
+        surface.grid.recenter(DVec2::new(5000.0, 0.0));
+        let old = cache.align(&surface.grid).expect("the grid moved");
+        seed_uncovered(&mut surface.grid, &cache, old);
+        assert_eq!(surface.sample(DVec3::new(5000.0, 0.0, 0.0)).snow_m, 0.0);
     }
 
     #[test]
