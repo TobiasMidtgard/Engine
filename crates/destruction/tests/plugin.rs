@@ -550,7 +550,8 @@ fn the_breach_house_roof_is_breached_from_below_and_above_every_cycle() {
         "the west bay starts shot up ({})",
         integrity(&app, old)
     );
-    run_secs(&mut app, 6.0);
+    // The roof charge goes off at 6.2 s.
+    run_secs(&mut app, 6.3);
     assert!(
         integrity(&app, shot) < 0.999,
         "shot up from below ({})",
@@ -572,7 +573,7 @@ fn the_breach_house_roof_is_breached_from_below_and_above_every_cycle() {
         "the steel hatch is cut out ({})",
         integrity(&app, steel)
     );
-    run_secs(&mut app, 7.2);
+    run_secs(&mut app, 7.0);
     for e in [roof, shot, hatch, steel] {
         assert!(integrity(&app, e) > 0.999, "rebuilt for the next cycle");
     }

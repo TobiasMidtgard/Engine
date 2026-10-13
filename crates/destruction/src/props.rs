@@ -4951,7 +4951,7 @@ fn ladder_size(height: f32) -> Vec3 {
 /// boots go.
 pub fn steel_ladder(height: f32, seed: u64) -> Vec<PropPart> {
     let h = height.max(1.0);
-    let mut rng = Rng::new(seed ^ 0x1ADD_E2);
+    let mut rng = Rng::new(seed ^ 0x001A_DDE2);
     let mut kit = Kit::new();
     let galv = [0.9, 0.91, 0.93];
     let dark = [0.62, 0.62, 0.63];
