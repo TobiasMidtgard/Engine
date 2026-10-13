@@ -8,6 +8,8 @@ pub mod events;
 pub mod feature;
 pub mod gpu;
 pub mod library;
+pub mod marks;
+pub mod marks_feature;
 pub mod shift;
 pub mod trail;
 
@@ -30,6 +32,8 @@ pub use emitter::{ParticleEffect, VfxLight, VfxRuntime, VfxSettings, VfxStats};
 pub use events::{VfxReactions, spawn_effect_at};
 pub use feature::ParticleFeature;
 pub use library::{EffectFile, EffectLibrary, EffectLoader};
+pub use marks::{Mark, MarkDesc, MarkKind, Marks};
+pub use marks_feature::MarksFeature;
 pub use trail::{Beam, RibbonStyle, Ribbons, Trail};
 
 /// Everything a game needs to play effects.
@@ -90,6 +94,7 @@ impl Plugin for VfxPlugin {
             .init_resource::<emitter::ParticleFrame>()
             .init_resource::<Ribbons>()
             .init_resource::<shift::PendingShift>()
+            .init_resource::<Marks>()
             .init_asset::<EffectFile>()
             .register_asset_loader(EffectLoader)
             .register_component::<ParticleEffect>(
@@ -122,6 +127,7 @@ impl Plugin for VfxPlugin {
                     events::react_to_world,
                     events::react_to_splashes,
                     events::react_to_lightning,
+                    marks::age_marks,
                     tick_lifetimes,
                     (
                         demo::run_casters,
@@ -149,7 +155,8 @@ impl Plugin for VfxPlugin {
                     .in_set(engine_world::WorldShiftSet::Apply)
                     .before(UpdateSet::Propagate),
             )
-            .add_render_feature(ParticleFeature::default());
+            .add_render_feature(ParticleFeature::default())
+            .add_render_feature(MarksFeature::default());
         register_apis(app);
     }
 }
@@ -324,6 +331,47 @@ fn register_apis(app: &mut App) {
         },
     )
     .register_api(
+        "vfx.mark",
+        "Leave a mark on the ground or a wall: scorch, frost, wet or chip. \"normal\" faces the \
+         surface (default up), \"radius\" (m) or \"size\" [width, length] with \"forward\" \
+         along its length, \"life\" (s), \"glow\" (s of embers, scorch). \"clear\": true \
+         removes every mark instead.",
+        r#"{"kind": "scorch", "position": [0, 0, 0], "normal": [0, 1, 0], "radius": 1.0, "life": 120, "glow": 6}"#,
+        |world, args| {
+            let mut marks = world.resource_mut::<Marks>();
+            if args.get("clear").and_then(Value::as_bool) == Some(true) {
+                let n = marks.len();
+                marks.clear();
+                return Ok(json!({ "cleared": n }));
+            }
+            let kind: MarkKind = args
+                .get("kind")
+                .map(|k| serde_json::from_value(k.clone()))
+                .transpose()
+                .map_err(|_| {
+                    "\"kind\" must be scorch, frost, wet or chip".to_string()
+                })?
+                .unwrap_or(MarkKind::Scorch);
+            let position = vec3_arg(&args, "position")?.ok_or("\"position\" is required")?;
+            let normal = vec3_arg(&args, "normal")?.map_or(Vec3::Y, |n| n.as_vec3());
+            let radius = f32_arg(&args, "radius", 0.5).max(0.01);
+            let mut mark = Mark::round(kind, position, normal, radius);
+            if let Some(f) = vec3_arg(&args, "forward")? {
+                mark.forward = marks::along_surface(f.as_vec3(), mark.normal);
+            }
+            if let Some(size) = args.get("size") {
+                let [w, l]: [f32; 2] = serde_json::from_value(size.clone())
+                    .map_err(|_| "\"size\" must be [width, length]".to_string())?;
+                mark.half_size = [w.max(0.02) * 0.5, l.max(0.02) * 0.5];
+            }
+            mark.life_secs = f32_arg(&args, "life", 60.0).max(0.1);
+            mark.glow_secs = f32_arg(&args, "glow", 0.0).max(0.0);
+            mark.strength = f32_arg(&args, "strength", 1.0).clamp(0.0, 1.0);
+            marks.add(mark);
+            Ok(json!({ "marks": marks.len() }))
+        },
+    )
+    .register_api(
         "vfx.stats",
         "Particle system counters: playing and fading effects, emitters, particles spawned \
          this frame, pool use, starved emitters, ribbons, and effects asked for but missing.",
@@ -342,6 +390,7 @@ fn register_apis(app: &mut App) {
                 "beams": beams,
                 "missing_effects": missing,
                 "library_size": world.resource::<EffectLibrary>().len(),
+                "marks": world.resource::<Marks>().len(),
             }))
         },
     );
@@ -391,6 +440,37 @@ mod tests {
         let stats = call_api(&mut app.world, "vfx.stats", json!({})).unwrap();
         assert_eq!(stats["stats"]["effects"], 1);
         assert!(stats["pool_used"].as_u64().unwrap() > 0);
+    }
+
+    #[test]
+    fn marks_api_leaves_and_clears_marks() {
+        let mut app = app();
+        let r = call_api(
+            &mut app.world,
+            "vfx.mark",
+            json!({"kind": "wet", "position": [1, 0, 2], "forward": [1, 0, 0],
+                   "size": [0.6, 1.4]}),
+        )
+        .unwrap();
+        assert_eq!(r["marks"], 1);
+        let mark = *app.world.resource::<Marks>().iter().next().unwrap();
+        assert_eq!(mark.kind, MarkKind::Wet);
+        assert!(mark.forward.abs_diff_eq(Vec3::X, 1e-5));
+        assert!((mark.half_size[1] - 0.7).abs() < 1e-5);
+        assert!(
+            call_api(
+                &mut app.world,
+                "vfx.mark",
+                json!({"kind": "glitter", "position": [0, 0, 0]})
+            )
+            .is_err()
+        );
+        assert!(call_api(&mut app.world, "vfx.mark", json!({"kind": "frost"})).is_err());
+        let stats = call_api(&mut app.world, "vfx.stats", json!({})).unwrap();
+        assert_eq!(stats["marks"], 1);
+        let r = call_api(&mut app.world, "vfx.mark", json!({"clear": true})).unwrap();
+        assert_eq!(r["cleared"], 1);
+        assert!(app.world.resource::<Marks>().is_empty());
     }
 
     #[test]

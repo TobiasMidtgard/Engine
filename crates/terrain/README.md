@@ -16,6 +16,9 @@ everything else (streaming, LOD, colliders, ground queries, prints) follows the 
   flying fast, and a teleport builds until the view is complete. Vertices geomorph toward the
   parent patch's shape before a split or merge, so detail never pops. Positions are `f64` and
   rendered camera-relative, so a 6,371 km Earth is exact to the centimeter at the surface.
+  Patches also draw the renderer's depth prepass (depth, normal, motion; moving planets
+  carry their own motion), so the ground gets ambient occlusion and contact shadows from
+  what stands on it and anti-aliasing reprojects it cleanly.
 - **Planet shapes.** `PlanetShape` presets for an Earth-like world (continents, oceans,
   eroded mountains whose steep sides break into rock ledges, hills, climate bands), the
   Moon (craters, maria) and Mars (craters, plains, dry ice caps), all seeded and
@@ -23,8 +26,9 @@ everything else (streaming, LOD, colliders, ground queries, prints) follows the 
   `finest_spacing_m` (0.5 m by default).
 - **Flat pads and a view worth having.** `FlatPad` blends the planet into level ground for a
   level, town or spaceport. `PlanetTerrain::home_transform(pad)` places the planet so the pad
-  sits at the world origin with +Y up (north toward −Z). A pad also lays out the land around
-  it: rolling hills, a snow-capped range on one horizon (`mountains`,
+  sits at the world origin with +Y up (north toward −Z; `heading_deg` 180 turns north to +Z,
+  the weather module's compass, matched by `SpaceFrame::home_heading_deg`). A pad also lays
+  out the land around it: rolling hills, a snow-capped range on one horizon (`mountains`,
   `mountain_azimuth_deg`, `mountain_distance_m`; by default 3–4.5 km peaks 26 km north) and a
   ragged coast on another (`sea_azimuth_deg`, `sea_distance_m`; by default 16 km
   south-southwest, a gulf that opens into the ocean).
@@ -38,6 +42,8 @@ everything else (streaming, LOD, colliders, ground queries, prints) follows the 
   `with_overlay_paint(|x, z| …)` paints it: an `OverlayPaint` layer (grass, leaves, dirt,
   mud, sand, gravel, rock, concrete, snow, ash) for roads, plazas and woods, and a tint for
   fields. Footsteps, rain and the `Ground` query follow the painted layer; edits paint over it.
+  Layers can cover everything at full weight and meet edge to edge: each vertex carries a
+  weight per layer, so borders blend along the textures' relief instead of in triangle steps.
   When the level already has its own material map, `with_ground_surface(Arc<dyn GroundQuery>)`
   lets that query name the material while the terrain answers height and normal, edits
   included (the sea and edit-painted layers stay the terrain's; never pass the world's
@@ -124,7 +130,7 @@ commands.entity(bodies["Moon"]).insert(PlanetTerrain::moon(7).with_radius(1_737_
 ```
 
 `examples/terrain_shots.rs` renders the test views headless (lab prints, rain, snow, painted
-ground, the range, the coast, the Moon and Mars from orbit) and `examples/terrain_map.rs` draws a relief
+ground and a patchwork of painted layers, the range, the coast, the Moon and Mars from orbit) and `examples/terrain_map.rs` draws a relief
 map around the home pad for tuning shapes.
 
 ## Test cases in the showcase

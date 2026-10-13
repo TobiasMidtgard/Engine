@@ -6,7 +6,7 @@ use std::path::PathBuf;
 
 use bytemuck::{Pod, Zeroable};
 use engine_core::diagnostics::Diagnostics;
-use engine_core::math::{DQuat, DVec3, Mat3};
+use engine_core::math::{DQuat, DVec3, Mat3, Vec3};
 use engine_core::prelude::*;
 use engine_core::tasks::ComputeTaskPool;
 use engine_render::features::{
@@ -106,8 +106,10 @@ struct PlanetGpu {
     colors: [[f32; 4]; 10],
     /// snow below °C, rock slope, vegetation (0/1), ocean surface (0/1).
     params: [f32; 4],
-    /// sphere (0/1), unused…
+    /// sphere (0/1), crater density, largest crater radius, crater seed.
     params2: [f32; 4],
+    /// How far the terrain moved in the world since last frame (xyz, for motion vectors).
+    motion: [f32; 4],
 }
 
 /// Ground maps around the focus (uniform). Matches `Maps` in terrain.wgsl.
@@ -124,6 +126,8 @@ struct MapsGpu {
 
 struct Gpu {
     pipeline: wgpu::RenderPipeline,
+    /// Depth, normals and motion for ambient occlusion, contact shadows and anti-aliasing.
+    prepass_pipeline: wgpu::RenderPipeline,
     shadow_pipeline: wgpu::RenderPipeline,
     layout: wgpu::BindGroupLayout,
     index: wgpu::Buffer,
@@ -237,6 +241,8 @@ struct PlanetState {
     chunks: HashMap<NodeKey, ChunkGpu>,
     /// Built patches to rebuild in place (edited), nearest first when drained.
     rebuild: Vec<NodeKey>,
+    /// World position last frame (motion vectors for moving planets).
+    last_position: Option<DVec3>,
 }
 
 #[derive(Clone, Copy)]
@@ -740,6 +746,32 @@ impl RenderFeature for TerrainFeature {
             multiview_mask: None,
             cache: None,
         });
+        // Same vertices as the scene pass (the clip position is invariant), so its depth test
+        // passes exactly where the prepass drew.
+        let prepass_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("terrain prepass"),
+            layout: Some(&pl),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_prepass"),
+                compilation_options: Default::default(),
+                buffers: &buffers,
+            },
+            primitive: wgpu::PrimitiveState {
+                cull_mode: Some(wgpu::Face::Back),
+                ..Default::default()
+            },
+            depth_stencil: Some(gpu.depth_state(true)),
+            multisample: Default::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_prepass"),
+                compilation_options: Default::default(),
+                targets: &gpu.prepass_targets(),
+            }),
+            multiview_mask: None,
+            cache: None,
+        });
         let shadow_shader = gpu.shader("terrain shadow", SHADOW_SHADER, false);
         let spl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("terrain shadow"),
@@ -813,6 +845,7 @@ impl RenderFeature for TerrainFeature {
         });
         self.gpu = Some(Gpu {
             pipeline,
+            prepass_pipeline,
             shadow_pipeline,
             layout,
             index,
@@ -914,6 +947,7 @@ impl RenderFeature for TerrainFeature {
                 edits_seen: 0,
                 chunks: HashMap::new(),
                 rebuild: Vec::new(),
+                last_position: None,
             });
             if state.version != t.version {
                 for c in state.chunks.values() {
@@ -925,6 +959,7 @@ impl RenderFeature for TerrainFeature {
                     edits_seen: 0,
                     chunks: HashMap::new(),
                     rebuild: Vec::new(),
+                    last_position: None,
                 };
             }
             // Edited areas: rebuild the patches that cover them, keeping the old ones drawn.
@@ -941,6 +976,10 @@ impl RenderFeature for TerrainFeature {
 
             let rot: DQuat = t.rotation;
             let pos = t.position;
+            let motion = state
+                .last_position
+                .map_or(Vec3::ZERO, |last| (pos - last).as_vec3());
+            state.last_position = Some(pos);
             let cam_local = rot.inverse() * (view.origin - pos);
             let frustum = view.frustum;
             let origin = view.origin;
@@ -1116,6 +1155,7 @@ impl RenderFeature for TerrainFeature {
                     t.config.shape.crater_max_radius_m as f32,
                     t.config.shape.crater_seed() as f32,
                 ],
+                motion: motion.extend(0.0).to_array(),
             });
         }
         self.built_last_frame = built_total;
@@ -1177,6 +1217,21 @@ impl RenderFeature for TerrainFeature {
             return;
         };
         pass.set_pipeline(&gpu.pipeline);
+        pass.set_bind_group(1, group, &[]);
+        self.draw_list(pass, gpu, &self.draws);
+    }
+
+    fn draw_prepass(&self, pass: &mut wgpu::RenderPass<'_>, _ctx: &FrameContext) {
+        if self.draws.is_empty() {
+            return;
+        }
+        let Some(gpu) = &self.gpu else {
+            return;
+        };
+        let Some(group) = &gpu.group else {
+            return;
+        };
+        pass.set_pipeline(&gpu.prepass_pipeline);
         pass.set_bind_group(1, group, &[]);
         self.draw_list(pass, gpu, &self.draws);
     }
@@ -1266,8 +1321,8 @@ mod tests {
 
     #[test]
     fn gpu_structs_match_shader_sizes() {
-        assert_eq!(std::mem::size_of::<PlanetGpu>(), 16 * (3 + 1 + 10 + 2));
+        assert_eq!(std::mem::size_of::<PlanetGpu>(), 16 * (3 + 1 + 10 + 3));
         assert_eq!(std::mem::size_of::<MapsGpu>(), 48);
-        assert_eq!(std::mem::size_of::<TerrainVertex>(), 36);
+        assert_eq!(std::mem::size_of::<TerrainVertex>(), 44);
     }
 }

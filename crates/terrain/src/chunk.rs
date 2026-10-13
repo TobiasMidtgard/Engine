@@ -28,7 +28,7 @@ pub const FLAG_OCEAN: u8 = 2;
 /// The flag byte's upper 6 bits hold the vertex's convexity (see [`encode_convexity`]).
 pub const CONVEXITY_SHIFT: u8 = 2;
 
-/// GPU vertex of a terrain patch (36 bytes).
+/// GPU vertex of a terrain patch (44 bytes).
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Pod, Zeroable, PartialEq)]
 pub struct TerrainVertex {
@@ -41,17 +41,19 @@ pub struct TerrainVertex {
     pub altitude: f32,
     /// Moisture, temperature (−60..+60 °C), mare darkness, flags (unorm8).
     pub climate: [u8; 4],
-    /// Painted layer index, paint weight, regional variety, local patches.
-    pub paint: [u8; 4],
+    /// Weights of the painted layers 1..=10 (unorm8, see `edits::PAINT_NAMES`), then regional
+    /// variety and local patches. One weight per layer, so they interpolate across triangles
+    /// and painted areas meet smoothly.
+    pub paint: [u8; 12],
     /// Tint of hand-made ground: color (square root of linear) and amount (unorm8).
     pub tint: [u8; 4],
 }
 
 impl TerrainVertex {
     pub fn layout() -> wgpu::VertexBufferLayout<'static> {
-        const ATTRS: [wgpu::VertexAttribute; 6] = wgpu::vertex_attr_array![
-            0 => Float32x3, 1 => Snorm16x4, 2 => Float32, 3 => Unorm8x4, 4 => Uint8x4,
-            8 => Unorm8x4
+        const ATTRS: [wgpu::VertexAttribute; 8] = wgpu::vertex_attr_array![
+            0 => Float32x3, 1 => Snorm16x4, 2 => Float32, 3 => Unorm8x4, 4 => Unorm8x4,
+            9 => Unorm8x4, 10 => Unorm8x4, 8 => Unorm8x4
         ];
         wgpu::VertexBufferLayout {
             array_stride: std::mem::size_of::<TerrainVertex>() as u64,
@@ -181,6 +183,19 @@ pub fn encode_convexity(spacings: f64) -> u8 {
 /// The shader's decoding of [`encode_convexity`], −1..1.
 pub fn decode_convexity(flags: u8) -> f32 {
     (flags >> CONVEXITY_SHIFT) as f32 / 63.0 * 2.0 - 1.0
+}
+
+/// A painted layer and its weight as one weight per layer (layers 1..=10), then regional
+/// variety and local patches (0..1).
+fn encode_paint((layer, weight): (u8, f32), variety: f32, patches: f32) -> [u8; 12] {
+    let q = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
+    let mut out = [0; 12];
+    if (1..=10).contains(&layer) {
+        out[layer as usize - 1] = q(weight);
+    }
+    out[10] = q(variety);
+    out[11] = q(patches);
+    out
 }
 
 /// Tint color stored as its square root (finer steps in the darks), amount linear.
@@ -322,44 +337,16 @@ pub fn build_chunk(src: &ChunkSource, key: NodeKey) -> ChunkMesh {
                     (s.mare.clamp(0.0, 1.0) * 255.0) as u8,
                     encode_convexity(convexity) | if ocean { FLAG_OCEAN } else { 0 },
                 ],
-                paint: [
-                    s.paint.0,
-                    (s.paint.1.clamp(0.0, 1.0) * 255.0) as u8,
-                    (variety(src, dirs[idx], spacing) * 255.0) as u8,
-                    (patches(src, dirs[idx], spacing) * 255.0) as u8,
-                ],
+                paint: encode_paint(
+                    s.paint,
+                    variety(src, dirs[idx], spacing),
+                    patches(src, dirs[idx], spacing),
+                ),
                 tint: encode_tint(s.tint),
             });
         }
     }
     let center = center_sum / (GRID * GRID) as f64;
-
-    // The layer index is not interpolated (the shader takes it from one vertex per
-    // triangle), so unpainted vertices next to painted ones take the neighbor's layer at
-    // weight 0: painted areas then fade out smoothly instead of in triangle steps.
-    for j in 0..GRID {
-        for i in 0..GRID {
-            let v = j * GRID + i;
-            if vertices[v].paint[1] != 0 {
-                continue;
-            }
-            let neighbors = [
-                (i > 0).then(|| v - 1),
-                (i + 1 < GRID).then(|| v + 1),
-                (j > 0).then(|| v - GRID),
-                (j + 1 < GRID).then(|| v + GRID),
-            ];
-            if let Some(layer) = neighbors
-                .into_iter()
-                .flatten()
-                .map(|n| vertices[n].paint)
-                .find(|p| p[1] != 0)
-                .map(|p| p[0])
-            {
-                vertices[v].paint[0] = layer;
-            }
-        }
-    }
 
     // Skirts: copies of the border vertices pushed down along `up`.
     let skirt = map.node_size(key.level) * 0.03 + 1.0;
@@ -498,6 +485,17 @@ mod tests {
             let p = DVec3::from(v.position.map(f64::from)) + c.origin;
             assert!(n.dot(p) > 0.0);
         }
+    }
+
+    #[test]
+    fn paint_is_one_weight_per_layer() {
+        let sand = crate::edits::paint_index("sand");
+        let p = encode_paint((sand, 0.5), 0.25, 1.0);
+        assert_eq!(p[sand as usize - 1], 128);
+        assert_eq!(p.iter().take(10).filter(|&&w| w != 0).count(), 1);
+        assert_eq!((p[10], p[11]), (64, 255));
+        // Unpainted: no layer has weight.
+        assert!(encode_paint((0, 1.0), 0.0, 0.0).iter().all(|&w| w == 0));
     }
 
     #[test]

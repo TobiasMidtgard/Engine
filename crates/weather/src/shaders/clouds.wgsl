@@ -304,11 +304,28 @@ fn march_clouds(dir: vec3<f32>, steps: i32, light_steps: i32, jitter: f32) -> Cl
     // Far clouds fade toward the layer's draw distance.
     let fade = 1.0 - smoothstep(clouds.layer.w * 0.75, clouds.layer.w, r.front);
     let vis = clouds.params.x * fade;
-    // Air between the camera and the cloud: dims it and adds haze in front of it.
+    // Air between the camera and the cloud: dims it and adds haze in front of it. Under a
+    // deck that haze lies in the clouds' shadow and takes their grey light instead of the
+    // sun's; lit by the sun over tens of kilometers it glowed tan along the horizon.
     let air = atmosphere(vec3(0.0), dir, r.front, 6);
-    r.radiance = (r.radiance * air.transmittance + air.radiance * frame.sun_color.rgb * (1.0 - r.transmittance)) * vis;
+    let sunlit = select(sun_under_clouds(dir, r.front), 1.0, h0 > top);
+    let deck = r.radiance / max(1.0 - r.transmittance, 1e-3);
+    let haze = air.radiance * frame.sun_color.rgb * sunlit
+        + (vec3(1.0) - air.transmittance) * deck * (1.0 - sunlit) * 0.8;
+    r.radiance = (r.radiance * air.transmittance + haze * (1.0 - r.transmittance)) * vis;
     r.transmittance = mix(1.0, r.transmittance, vis);
     return r;
+}
+
+// How much of the air along `dir` out to `t` (m) the sun reaches through the clouds above
+// it, 0..1.
+fn sun_under_clouds(dir: vec3<f32>, t: f32) -> f32 {
+    var lit = 0.0;
+    for (var i = 0; i < 4; i++) {
+        let p = dir * (t * (f32(i) + 0.5) * 0.25);
+        lit += 1.0 - 0.9 * saturate(weather_at(p.xz).r * 1.2);
+    }
+    return lit * 0.25;
 }
 
 // Rain hanging below the clouds (seen from a distance as grey curtains). Starts a little
@@ -457,10 +474,13 @@ fn fs_env(in: FullscreenOut) -> @location(0) vec4<f32> {
         let r = clouds_and_rain(up, steps, 2, 0.5);
         let sky_up = r.radiance + clear_sky(up) * r.transmittance;
         let a = atmosphere(vec3(0.0), dir, 1e12, 8);
-        // Under a deck the far ground lies in the clouds' shadow too.
+        // Under a deck the far ground, and the haze in front of it, lie in the clouds'
+        // shadow too.
         let shade = mix(0.2, 1.0, r.transmittance);
         let lit = planet_ground(dir, ground_t) * shade + frame.ground.rgb * sky_up * 0.8;
-        let c = a.radiance * frame.sun_color.rgb + lit * a.transmittance;
+        let haze = a.radiance * frame.sun_color.rgb * shade
+            + (vec3(1.0) - a.transmittance) * sky_up * (1.0 - shade) * 0.8;
+        let c = haze + lit * a.transmittance;
         return vec4<f32>(min(c, vec3(60000.0)), 1.0);
     }
     if (abs(dir.y) > 0.25) {
