@@ -433,7 +433,7 @@ pub fn exit(f: &dyn Fn(Vec3) -> f32, from: Vec3, dir: Vec3) -> Vec3 {
 }
 
 /// Run `f` over `0..n` on every core.
-pub(super) fn par_map<T: Send>(n: usize, f: impl Fn(usize) -> T + Sync) -> Vec<T> {
+fn par_map<T: Send>(n: usize, f: impl Fn(usize) -> T + Sync) -> Vec<T> {
     let threads = std::thread::available_parallelism().map_or(1, |t| t.get().min(8));
     let chunk = n.div_ceil(threads).max(256);
     let f = &f;

@@ -83,7 +83,7 @@ fn bay(p: Vec3, n: Vec3) -> Vec4 {
     c = c.lerp(light, (0.45 * under + 0.3 * flank).min(0.6));
     let body = smooth(0.25, 0.6, n.x.abs()) * smooth(-0.55, -0.3, p.z) * smooth(0.95, 1.1, p.y);
     let broad = noise(p, 3.0, 5) * 0.07 + noise(p, 9.0, 6) * 0.03;
-    c * (1.0 + broad + 0.06 * dapples(p) * body)
+    c * (1.0 + broad + 0.09 * dapples(p) * body)
 }
 
 /// The black points: `t` 0 is bay, 1 black.
@@ -230,8 +230,8 @@ fn build_sculpt() -> Sculpt {
 
     // Shoulder blade, flat and sloping from the withers down to the point of shoulder; the
     // triceps filling the angle behind it down to the elbow; the arm from the point of
-    // shoulder back to the elbow; the pectorals either side of the breastbone and down
-    // between the legs.
+    // shoulder back to the elbow; the pectorals either side of the breastbone, filling the
+    // inside of the elbow and running down between the legs.
     let arm = rest[leg(2)];
     let elbow = rest[leg(2) + 1].t;
     s.pair(
@@ -260,6 +260,10 @@ fn build_sculpt() -> Sculpt {
         0.07,
     );
     s.pair(blob(v(0.07, 1.05, -0.68), v(0.075, 0.13, 0.08)), 0.07);
+    s.pair(
+        blob(elbow + v(-0.035, 0.05, 0.0), v(0.04, 0.06, 0.06)),
+        0.06,
+    );
     s.pair(
         limb(
             v(0.06, 0.98, -0.62),
@@ -396,6 +400,8 @@ fn build_sculpt() -> Sculpt {
         ),
         0.015,
     );
+    // The front edge of the cheek muscle, from the end of the facial crest down to the jaw.
+    s.press_pair(v(0.075, -0.12, -0.29), v(0.058, -0.24, -0.22), 0.02, 0.003);
     // Nostrils, the eye's lids and the line of the mouth.
     s.carve_pair(
         blob_along(
@@ -750,23 +756,26 @@ fn forelock() -> Mesh {
         let from = head.point(Vec3::new(x, -0.07, z));
         to_head.point(s.exit(from, head.r * Vec3::Y))
     };
-    merged((0..5).map(|i| {
+    // Two layers of locks, the upper ones longer and standing off the lower ones, each
+    // puffed up along its middle, so the forelock is a tuft rather than a flat sheet.
+    merged((0..8).map(|i| {
         let r = |k: i64| hash01(i, k, 0, 93);
-        let x0 = (i as f32 - 2.0) * 0.013 + (r(1) - 0.5) * 0.008;
-        let len = 0.16 + 0.06 * r(2);
-        let lift = 0.006 + 0.004 * (i % 2) as f32;
+        let x0 = (i as f32 - 3.5) * 0.01 + (r(1) - 0.5) * 0.006;
+        let upper = (i % 2) as f32;
+        let len = 0.13 + 0.05 * upper + 0.05 * r(2);
+        let lift = 0.004 + 0.008 * upper;
         let phase = r(3);
         sheet(
             10,
             6,
             move |t, u| {
                 let z = lerp(0.03, 0.03 - len, t);
-                let x = (x0 + (u - 0.5) * 0.04 * (1.0 - 0.4 * t)) * (1.0 - 0.3 * t);
-                let p = skin(z, x);
-                p + Vec3::new(0.0, lift + 0.01 * t, 0.0)
+                let x = (x0 + (u - 0.5) * 0.034 * (1.0 - 0.4 * t)) * (1.0 - 0.3 * t);
+                let puff = 0.008 * (1.0 - (2.0 * u - 1.0).powi(2)) * (1.0 - 0.6 * t);
+                skin(z, x) + Vec3::new(0.0, lift + puff + 0.01 * t, 0.0)
             },
             move |t, u| Vec2::new(u * 0.5 + phase, t * 0.97),
-            hair_color,
+            |t, u| hair_color(u, t),
         )
     }))
 }
@@ -881,11 +890,11 @@ fn forearm() -> Grid {
     let l = HORSE.fore[1];
     leg_loft(
         &[
-            [0.11, 0.055, 0.06, 0.05],
-            [0.05, 0.068, 0.075, 0.072],
-            [-0.03, 0.07, 0.078, 0.066],
-            [-0.14, 0.062, 0.068, 0.056],
-            [-0.26, 0.05, 0.052, 0.044],
+            [0.13, 0.04, 0.045, 0.04],
+            [0.07, 0.062, 0.07, 0.066],
+            [0.0, 0.07, 0.078, 0.066],
+            [-0.1, 0.064, 0.07, 0.058],
+            [-0.22, 0.052, 0.055, 0.046],
             [-l + 0.1, 0.041, 0.04, 0.036],
             [-l + 0.04, 0.047, 0.04, 0.044],
             [-l - 0.01, 0.05, 0.042, 0.05],
