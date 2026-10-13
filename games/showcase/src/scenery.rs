@@ -557,7 +557,9 @@ pub fn spawn_rocks(commands: &mut Commands, lib: &Library, land: &Landscape, rng
         };
         let _ = rng.range_i32(0, 6);
         let yaw = rng.range(0.0, TAU);
-        if near_scarp(land, x, z) {
+        // Not on the zones' pads either (the runway runs past the airfield's circle). Checked
+        // after the draws, so the layout spawned after the rocks stays as it is.
+        if near_scarp(land, x, z) || land.pad_weight(x, z) > 0.0 {
             continue;
         }
         let (size, scale) = if big {

@@ -2,7 +2,10 @@
 
 Every test case Tobias asked the engine to show, where it lives in the showcase, which thread
 owns it, and whether you can see it yet. Viewpoint keys work with `--tour <key>`, the
-`showcase.goto` API and the screenshot tour.
+`showcase.goto` API and the screenshot tour. A tour of one zone's stops (`--tour
+paddock_car,paddock_flex`) loads only that zone's demo, which a headless run in a 16 GB
+container needs: all the demos together take ~13.6 GB. `--zones a,b` picks the zones (`all`
+loads every one).
 
 The Beautiful showcase world thread keeps this list current. Module threads: your zone is one
 line in `zones::spawn_demos` (swap the `ph::…` placeholder for your demo) and one line in
@@ -44,7 +47,7 @@ are built, nothing simulates yet) · ⬜ not visible yet
 | 16 | Footsteps in mud, grass, snow, sand, gravel, puddles, wood, metal (sound) | `footsteps` | Audio and footsteps | ✅ trail loop with a hiker, a runner, a dog and a horse; sound rings show each step; the ground reports the trail's surfaces to everyone else |
 | 17 | Footprints and tracks pressed into mud and snow | `tracks` (footprint lab) | Planets and terrain | ✅ footprint lab: a hiker, a dog, a horse and a rover leave prints and tracks in strips of mud, snow, sand and grass; rain fills the prints, snowfall covers them; a blast crater, a dug trench and a raised mound |
 | 18 | Destructible walls and barricades (Rainbow Six Siege style) | `fortress` | Destructible terrain and buildings | ✅ breach range: shot drywall, kicked-in barricades, thermite through rebar concrete, blown brick, a watchtower and gate that collapse, a mined cliff that caves in (replays every 20 s) |
-| 19 | Voxel digging and building (Valheim style) | `voxel`, `voxel_build`, `voxel_build_reach` | Destructible terrain and buildings | ✅ a voxel hill you dig into, and a build mode: a roof piece's ghost snaps onto a cabin, and a deck built out to its support limit shows a red ghost where it can't hold |
+| 19 | Voxel digging and building (Valheim style) | `voxel`, `voxel_build`, `voxel_build_reach`, `voxel_shelter` | Destructible terrain and buildings | ✅ a voxel hill you dig into, and a build mode: a roof piece's ghost snaps onto a cabin, a deck built out to its support limit shows a red ghost where it can't hold, and a hoe levels a pad in the rock where a builder puts up a shelter |
 
 ## Living world
 
