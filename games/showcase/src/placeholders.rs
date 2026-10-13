@@ -1059,47 +1059,11 @@ pub fn field_edge(commands: &mut Commands, lib: &Library, z: &Zone, rng: &mut Rn
     }
 }
 
-/// Spaceport: a 600 m launch tower for scale (the pad, its lights, hangars and the ships
+/// Spaceport: a 600 m observation tower for scale (the pad, its lights, hangars and the ships
 /// come from `engine_vehicles::demo::spawn_spaceport`). The Planets and terrain (space) and
 /// Cars, planes and spaceships threads own it.
-pub fn spaceport(commands: &mut Commands, _lib: &Library, z: &Zone) {
+pub fn spaceport(commands: &mut Commands, lib: &Library, z: &Zone) {
     let c = z.center;
-    // The 600 m launch tower: a tapering spire with a lit band every 50 m.
-    let tower = c + DVec3::new(70.0, 0.0, 60.0);
-    let shell = mat(0xd8dce0, 0.4).with_metallic(0.3);
-    for i in 0..40 {
-        let y = i as f64 * 15.0;
-        let r0 = 14.0 - i as f32 * 0.3;
-        spawn(
-            commands,
-            Shape::Cylinder {
-                radius: r0,
-                height: 15.2,
-                segments: 48,
-            },
-            shell,
-            at(tower + DVec3::new(0.0, y + 7.5, 0.0)),
-        );
-        if i % 4 == 3 {
-            spawn(
-                commands,
-                Shape::Torus {
-                    radius: r0 + 0.3,
-                    tube: 0.35,
-                    segments: 64,
-                },
-                StandardMaterial::hex(0x101820).with_emissive([0.5, 0.8, 1.0], 3_000.0),
-                at(tower + DVec3::new(0.0, y + 14.0, 0.0)),
-            );
-        }
-    }
-    spawn(
-        commands,
-        Shape::Sphere {
-            radius: 2.0,
-            segments: 24,
-        },
-        StandardMaterial::hex(0x400000).with_emissive([1.0, 0.1, 0.05], 50_000.0),
-        at(tower + DVec3::new(0.0, 606.0, 0.0)),
-    );
+    // The 600 m telecom and observation tower (`tower.rs`).
+    crate::tower::spawn(commands, &lib.tower, c + DVec3::new(70.0, 0.0, 60.0));
 }
