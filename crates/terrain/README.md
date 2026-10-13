@@ -109,6 +109,17 @@ everything else (streaming, LOD, colliders, ground queries, prints) follows the 
   to 9 °C, so sea ice reaches further toward the equator in some places than others; the
   ice breaks into floes at its edge. Shallow shelf seas glow teal (more so in warm water),
   cold deep seas are greener, and deserts mix sand with dark stony plains.
+- **Rivers and lakes.** Water drains across the whole planet (a priority flood on a 40 km
+  grid) and, finer, around the home pad (600 m cells, 240 km across): rivers start in wet
+  high ground, join into networks and run downhill to the sea, widening as they gather
+  water, so big rivers stay thin threads from orbit and small streams show up close. They
+  bend in meanders that flatten out in steep country, cut channels with low banks into
+  their valleys, and grow strips of woods along them in dry land. Deep, wet hollows hold
+  lakes with ragged shores; shallow ones are breached and drained. River water is a water
+  surface underfoot (`Ground` reports it), freezes in the cold, and the home pad and the
+  hand-made overlay stay dry. Turn it off with `PlanetShape::rivers = false` (the Moon and
+  Mars have none); `shape.river_network()` returns the solved network, and its
+  `segments()` give every river piece with its water level and width.
 - **Detailed ground materials up close.** Nine PBR materials (turf in tufts over thatch,
   leaf litter with needles and twigs, soil, churned mud, rock, snow, rippled sand, gravel,
   concrete) are generated procedurally in `materials.rs` like a node-graph material: height
@@ -200,11 +211,12 @@ ground and a patchwork of painted layers, a meadow tinted the way the showcase p
 valley and a natural one at eye height, snow at eye height and over the valley, woods from the air, the range, the range at dusk
 (`range_dusk`: ridges casting long shadows), the coast, the Moon
 underfoot, from low orbit, half lit and full, the Earth's climate belts from far out
-(`earth_globe`), and Mars: from orbit (`mars_orbit`,
+(`earth_globe`), a river at eye height (`earth_river`) and rivers from the air
+(`earth_rivers_air`), and Mars: from orbit (`mars_orbit`,
 `mars_valles`), Olympus Mons (`mars_olympus`), the north pole (`mars_pole`), and the floor and
 rim of Valles Marineris (`mars_canyon`, `mars_rim`))
-with the game's auto exposure, and `examples/terrain_map.rs` draws a relief map around the
-home pad for tuning shapes.
+with the game's auto exposure, and `examples/terrain_map.rs` draws a relief map with rivers and lakes around
+the home pad for tuning shapes.
 
 ## Test cases in the showcase
 
@@ -223,6 +235,8 @@ from `Ground` when they apply), so the lab works on uneven ground too.
 
 - Prints are recorded in world X/Z, which is right on level ground near the focus (the
   showcase map, or anywhere once the space module re-centers the world on the player).
+- River and lake water is drawn by the terrain and has no water query yet, so nothing floats
+  or swims in it. A water module can draw and simulate it from `river_network().segments()`.
 - No caves or overhangs yet (voxel volumes are next).
 - Mars has a black sky: the renderer's atmosphere scatters light with Earth's colors only, so
   the test views turn it off there. A thin, dusty, butterscotch sky needs per-planet
