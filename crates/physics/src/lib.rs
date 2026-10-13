@@ -1,6 +1,7 @@
 #![doc = include_str!("../README.md")]
 
 mod api;
+mod buoyancy;
 mod capsule_box;
 mod character;
 mod convert;

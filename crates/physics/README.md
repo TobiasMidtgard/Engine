@@ -63,6 +63,13 @@ changing that one plugin line.
   hearing) and, against static ground, `GroundContact` (dents, dust, impact sounds).
 - **World inputs**: `Gravity` (uniform or planets; each body gets the gravity at its own
   position), buoyancy and drag in `Water`, `WorldImpulse` blasts (blast wind drag), `ApplyImpulse`.
+  Buoyancy integrates water pressure over each collider's real shape (boxes, balls, capsules,
+  cylinders, cones, convex hulls and compounds of them; `src/buoyancy.rs`), clipped at the
+  waterline sampled every 2 m under the body, so floating bodies get the righting moments real
+  ones do: a log lies down, a half-density cube floats on its edge, a 0.9-density cube floats
+  flat, a barge pitches on a passing swell. Heave and rocking are damped across the wetted
+  bottom (half of critical), so floaters settle instead of bobbing forever. Other shapes
+  (meshes, heightfields) use the submerged share of their bounding box.
 - **Time**: runs in `FixedUpdate` / `SimSet::Physics` on world time, so `TimeDilation` slows it;
   each fixed step is split into substeps of at most `max_substep_secs`, so 10× fast-forward is
   as stable as 1×. `LocalTimeScale` speeds a single body up or down (its `Velocity` is in its
@@ -179,7 +186,8 @@ bodies, joint breaking and motors, hinges swinging through the fixed body they h
 platforms, stairs and steep slopes, dashing into thin walls, wall-running, no phantom walls on flat
 ground, running over heightfield hills, crouching, landing from a fall, standing exactly on boxes
 from 1 m to 10 km across, characters on their own clock, sensors and layers, local time, hovering,
-buoyancy, blasts, bodies crossing and merging regions); riding moving bodies (`tests/platforms.rs`:
+buoyancy, floating the way real bodies do (logs, planks, cubes on their edge, a ball's draft, a
+barge on a swell), blasts, bodies crossing and merging regions); riding moving bodies (`tests/platforms.rs`:
 crates and characters on a deck at up to 30 km/s, lifts, a turntable, a thrusting and turning ship,
 a seesaw tipped by a character's weight, crates landing on heads, rays hitting bodies at orbital
 speed); mass overrides (`tests/mass.rs`: a moved center of mass, dropping an override); following
