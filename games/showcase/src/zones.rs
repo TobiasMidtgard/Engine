@@ -259,7 +259,17 @@ pub fn spawn_demos(
             "market" => engine_ui::demo::spawn_demo(commands, z.center),
             "paddock" => engine_anim::demo::spawn_demo(commands, z.center),
             "physics" => engine_physics::demo::spawn_demo(commands, z.center),
-            "yard" => engine_softbody::demo::spawn_demo(commands, z.center),
+            "yard" => {
+                engine_softbody::demo::spawn_demo(commands, z.center);
+                // The sailing dinghy works the lake east of the jetty (it waits at its mooring
+                // until the lake is water the physics module floats it on).
+                let home =
+                    zone("lake").center + DVec3::new(-30.0, crate::landscape::LAKE_LEVEL, 30.0);
+                let boat = engine_softbody::demo::spawn_sailboat(commands, home, 22.0);
+                commands
+                    .entity(boat)
+                    .insert(engine_water::WaterInteractor::new(0.6).with_wake(0.35));
+            }
             "magic" => engine_vfx::demo::spawn_demo(commands, z.center),
             "gallery2d" => ph::gallery2d(commands, lib, z),
             "forest" => engine_foliage::demo::spawn_demo(commands, z.center),
@@ -617,6 +627,15 @@ pub fn demo_views(z: &Zone) -> Vec<View> {
                 14.5,
             )
             .warmup(7.0),
+            // On the lake: the dinghy's mooring is 85 m east and 110 m south of the yard.
+            View::new(
+                "yard_sailboat",
+                "A gaff dinghy sailing on the wind in its sail",
+                [70.0, 4.5, -95.0],
+                [85.0, 1.8, -110.0],
+                15.5,
+            )
+            .warmup(20.0),
         ],
         "fortress" => destruction_views(engine_destruction::demo::VIEWS),
         "voxel" => destruction_views(engine_destruction::hill::VIEWS),

@@ -1313,6 +1313,7 @@ mod tests {
             Entity::PLACEHOLDER,
             &GlobalTransform::default(),
             None,
+            false,
         )
         .unwrap()
     }

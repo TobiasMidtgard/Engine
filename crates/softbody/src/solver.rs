@@ -133,6 +133,9 @@ pub struct Aero {
     pub drag: f32,
     /// Skin friction along the cloth (streams flags out).
     pub friction: f32,
+    /// Lift at an angle to the wind, across it (a sail drawing on a reach, a kite): peaks
+    /// with the wind 45° to the cloth. 0 for flags and curtains.
+    pub lift: f32,
 }
 
 /// Per-step inputs and tuning.
@@ -322,9 +325,10 @@ impl Sim {
         self.inv_mass[i] = 0.0;
     }
 
-    /// Release particle `p`'s pin, if any.
+    /// Release particle `p`'s pin and the goals holding it, if any.
     pub fn unpin(&mut self, p: u32) {
         let i = p as usize;
+        self.goals.retain(|g| g.p != p);
         let slot = self.pin_of[i];
         if slot == u32::MAX {
             return;
@@ -583,8 +587,18 @@ impl Sim {
                 let v_rel = gust(center) - (self.vel[a] + self.vel[b] + self.vel[c]) * (1.0 / 3.0);
                 let vn = v_rel.dot(n);
                 let vt = v_rel - n * vn;
-                let force = (n * (aero.drag * vn * vn.abs()) + vt * (aero.friction * vt.length()))
-                    * (0.5 * AIR_DENSITY * area / 3.0);
+                let mut force =
+                    n * (aero.drag * vn * vn.abs()) + vt * (aero.friction * vt.length());
+                if aero.lift > 0.0 {
+                    // Across the wind, toward the side the wind presses: ½ρA·C·v²·sin 2α.
+                    let speed = v_rel.length();
+                    let pressed = n * vn.signum();
+                    let across = pressed - v_rel * (pressed.dot(v_rel) / (speed * speed).max(1e-9));
+                    if let Some(dir) = across.try_normalize() {
+                        force += dir * (aero.lift * 2.0 * vn.abs() * vt.length());
+                    }
+                }
+                let force = force * (0.5 * AIR_DENSITY * area / 3.0);
                 for i in [a, b, c] {
                     self.accel[i] += force * self.inv_mass[i];
                 }
@@ -634,7 +648,11 @@ impl Sim {
             let d = pos[i] - pos[a];
             let len = d.length();
             if len > c.max {
-                pos[i] -= d * ((len - c.max) / len);
+                // A pinned anchor doesn't move; one held by a goal (cloth on a moving body)
+                // takes its share, so the goal passes the pull on to the body.
+                let corr = d * ((len - c.max) / (len * (w[i] + w[a])));
+                pos[i] -= corr * w[i];
+                pos[a] += corr * w[a];
             }
         }
         for g in &self.goals {
@@ -1328,6 +1346,7 @@ mod tests {
         sim.params.aero = Some(Aero {
             drag: 1.2,
             friction: 0.05,
+            lift: 0.0,
         });
         sim.params.wind = Vec3::new(0.0, 0.0, 8.0);
         for _ in 0..300 {
