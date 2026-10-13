@@ -97,12 +97,13 @@ pub struct IntentMarker {
     line: bool,
 }
 
-/// Per-body bookkeeping for effects.
+/// Per-body bookkeeping for effects, and a fighter's motion from one pose to the next.
 #[derive(Component, Debug, Clone, Copy, Default)]
 pub struct StandInState {
     was_winding: bool,
     flash_until: f64,
     markers: Option<[Entity; 2]>,
+    motion: humanoid::Motion,
 }
 
 fn mat(hex: u32) -> StandardMaterial {
@@ -212,6 +213,7 @@ type PoseItem<'a> = (
     &'a StandIn,
     &'a mut StandInState,
     &'a Children,
+    &'a Transform,
     &'a LocomotionState,
     Option<&'a MoverState>,
     Option<&'a MoveIntent>,
@@ -230,13 +232,14 @@ type PoseItem<'a> = (
 
 /// Pose every stand-in from its owner's state.
 pub(crate) fn pose_stand_ins(
-    mut owners: Query<PoseItem>,
+    mut owners: Query<PoseItem, Without<StandInPart>>,
     mut parts: Query<(&StandInPart, &mut Transform, &mut MeshRenderer)>,
 ) {
     for (
         stand_in,
         mut st,
         children,
+        owner,
         loco,
         mover,
         intent,
@@ -259,7 +262,7 @@ pub(crate) fn pose_stand_ins(
                 let pose = humanoid::humanoid(
                     now,
                     phase,
-                    speed,
+                    owner.rotation,
                     loco,
                     intent,
                     combat,
