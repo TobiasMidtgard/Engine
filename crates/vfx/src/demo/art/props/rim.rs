@@ -6,7 +6,8 @@ use engine_render::Mesh;
 use super::super::meshes::metal::{band, bar, scroll_path};
 use super::super::meshes::nature::{RockShape, bush, grass_tuft, rock};
 use super::super::meshes::{
-    Outline, Profile, colored, icosphere, moved, noise1, paint, revolve, sweep, tube_loop,
+    Outline, Profile, colored, faceted, icosphere, moved, noise_warp, noise1, paint, revolve,
+    sweep, tube, tube_loop, uv_box,
 };
 use super::super::{Prop, Surface};
 use super::dress;
@@ -15,13 +16,12 @@ use super::dress;
 pub const COALS: f32 = 2.05;
 
 /// A brazier: an octagonal stone footing, a twisted iron post with collars, scrollwork, and a
-/// bowl of iron straps and rings holding glowing coals.
+/// bowl of iron straps and rings holding burning charcoal and charred sticks.
 pub fn brazier() -> Prop {
     let mut rng = Rng::new(0xB2A2);
     let mut stone = Mesh::default();
     let mut iron = Mesh::default();
-    let mut embers = Mesh::default();
-    let mut charcoal = Mesh::default();
+    let mut coals = Mesh::default();
 
     // Footing.
     let foot = Profile::new()
@@ -111,32 +111,55 @@ pub fn brazier() -> Prop {
     }
     iron.merge(&colored(revolve(&inner, 24), Vec3::splat(0.4)));
     iron.merge(&colored(revolve(&liner, 24), Vec3::splat(0.6)));
-    for i in 0..26 {
-        let r = 0.16 * (i as f32 / 26.0).sqrt();
+    // Fuel: angular charcoal chunks heaped in the bowl, and charred sticks leaning into the
+    // middle where the fire is hottest.
+    for i in 0..30 {
+        let r = 0.17 * (i as f32 / 30.0).sqrt();
         let a = i as f32 * 2.4;
-        let y = 1.97 + 0.07 * (1.0 - (r / 0.17).powi(2)) + rng.range(-0.01, 0.01);
+        let y = 1.97 + 0.07 * (1.0 - (r / 0.18).powi(2)) + rng.range(-0.01, 0.01);
         let size = rng.range(0.045, 0.075);
+        let stretch = Vec3::new(
+            rng.range(0.85, 1.4),
+            rng.range(0.55, 0.8),
+            rng.range(0.8, 1.15),
+        );
         let mut lump = icosphere(1);
         let seed = rng.next_u64();
         for v in &mut lump.vertices {
             let d = Vec3::from(v.position);
-            v.position = (d * size * 0.5 * (1.0 + 0.3 * noise1(d, 1.5, seed, 2))).to_array();
+            v.position =
+                (d * stretch * size * 0.5 * (1.0 + 0.35 * noise1(d, 1.5, seed, 2))).to_array();
         }
-        lump.compute_normals();
-        let at = Vec3::new(a.cos() * r, y, a.sin() * r);
-        let lump = moved(lump, at, Quat::from_rotation_y(a));
-        if i % 3 == 0 {
-            charcoal.merge(&lump);
-        } else {
-            embers.merge(&lump);
-        }
+        let turn = Quat::from_rotation_y(a + rng.range(-0.8, 0.8))
+            * Quat::from_rotation_x(rng.range(-0.35, 0.35));
+        let mut lump = moved(faceted(lump), Vec3::new(a.cos() * r, y, a.sin() * r), turn);
+        uv_box(
+            &mut lump,
+            Vec2::new(rng.range(0.0, 1.0), rng.range(0.0, 1.0)),
+        );
+        coals.merge(&lump);
+    }
+    for k in 0..5 {
+        let a = (k as f32 + rng.range(-0.3, 0.3)) / 5.0 * std::f32::consts::TAU;
+        let d = Vec3::new(a.cos(), 0.0, a.sin());
+        let foot = d * rng.range(0.13, 0.17) + Vec3::Y * 1.99;
+        let head = -d * rng.range(0.0, 0.04) + Vec3::Y * rng.range(2.12, 2.19);
+        let path: Vec<Vec3> = (0..=6).map(|j| foot.lerp(head, j as f32 / 6.0)).collect();
+        let radius = rng.range(0.017, 0.026);
+        let mut stick = tube(&path, |t| radius * (1.0 - 0.4 * t), 8, true);
+        noise_warp(&mut stick, 0.004, 35.0, rng.next_u64());
+        stick.compute_normals();
+        uv_box(
+            &mut stick,
+            Vec2::new(rng.range(0.0, 1.0), rng.range(0.0, 1.0)),
+        );
+        coals.merge(&stick);
     }
 
     let mut prop = Prop::new();
     prop.push(Surface::CarvedStone, stone);
     prop.push(Surface::Iron, iron);
-    prop.push(Surface::RuneEmber, embers);
-    prop.push(Surface::DarkStone, colored(charcoal, Vec3::splat(0.25)));
+    prop.push(Surface::Coals, coals);
     prop
 }
 

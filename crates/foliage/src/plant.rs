@@ -3,7 +3,7 @@
 
 use engine_core::prelude::*;
 
-use crate::species::{Need, SpeciesId};
+use crate::species::{Layer, Need, SpeciesId};
 
 /// Per-plant variation, inherited from the parent with small mutations. Two oaks never look or
 /// behave quite the same, and a population on dry ground drifts toward drought-tolerant genes.
@@ -186,6 +186,9 @@ pub struct EcologyRegion {
     /// Circles where nothing grows: ponds, paths, building plots. Local `[x, z, radius]` in
     /// meters from the region's center.
     pub keep_clear: Vec<[f32; 3]>,
+    /// Circles kept free of trees and shrubs, though ground plants still grow there: sight
+    /// lines, the view from a bench. Local `[x, z, radius]` like `keep_clear`.
+    pub sight_lines: Vec<[f32; 3]>,
     /// Soil grid cell size, meters.
     pub cell_m: f32,
     /// Species that can arrive from outside on the wind or with animals (names).
@@ -221,6 +224,7 @@ impl Default for EcologyRegion {
             half_extents: [40.0, 40.0],
             round: false,
             keep_clear: Vec::new(),
+            sight_lines: Vec::new(),
             cell_m: 2.0,
             species: Vec::new(),
             seed_rain: 2.0,
@@ -236,6 +240,18 @@ impl Default for EcologyRegion {
             history: RegionHistory::default(),
             seed: 1,
         }
+    }
+}
+
+impl EcologyRegion {
+    /// Whether a plant of `layer` may take root at `local` (meters from the region's center):
+    /// only ground plants grow in the sight lines.
+    pub fn may_root(&self, layer: Layer, local: DVec2) -> bool {
+        layer == Layer::Ground
+            || !self
+                .sight_lines
+                .iter()
+                .any(|c| local.distance(DVec2::new(c[0] as f64, c[1] as f64)) < c[2] as f64)
     }
 }
 
@@ -308,6 +324,9 @@ pub struct EcologySettings {
     pub collider_distance_m: f32,
     /// Most catch-up years a far region simulates when the player returns.
     pub max_catch_up_years: f32,
+    /// Draw each region's grass as GPU blades (`engine_render::GrassField`, fed from the
+    /// ecology) instead of one mesh per tuft.
+    pub gpu_grass: bool,
 }
 
 impl Default for EcologySettings {
@@ -320,6 +339,7 @@ impl Default for EcologySettings {
             tree_lod_distance_m: 70.0,
             collider_distance_m: 150.0,
             max_catch_up_years: 40.0,
+            gpu_grass: true,
         }
     }
 }

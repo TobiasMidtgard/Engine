@@ -103,7 +103,10 @@ pub struct StandardMaterial {
     pub subsurface: f32,
     /// Responds to world wetness (rain darkens and adds gloss).
     pub receives_wetness: bool,
-    /// Vertex sway amplitude in meters for foliage-like wind animation (0 = rigid).
+    /// Vertex sway amplitude in meters for foliage-like wind animation (0 = rigid), growing with
+    /// height in the mesh. Each vertex scales it by its color's alpha, its wind weight (0 = still,
+    /// such as a trunk's base; 1 = full sway, the default); on swaying materials the vertex
+    /// alpha is not opacity.
     pub wind_sway: f32,
     /// RGBA texture multiplied with `base_color` (sRGB when the image is sRGB).
     #[serde(skip_serializing_if = "Option::is_none")]

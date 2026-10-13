@@ -17,8 +17,8 @@
 //! With `use_input`, the builder reads the action map: `build_mode` (B, d-pad left) toggles,
 //! `build_place` (left mouse, right trigger) places, `build_remove` (X, north button) takes
 //! down the built piece aimed at, `build_rotate` (R, d-pad right) turns the ghost 22.5°,
-//! `build_next` (C, left bumper) and `build_piece_1` to `build_piece_9` (keys 1 to 9) pick the
-//! piece. Scripts send [`BuildRequest`]s; the AI bridge has `destruction.build`.
+//! `build_next` (C, left bumper) and `build_piece_1` to `build_piece_10` (keys 1 to 9 and 0)
+//! pick the piece. Scripts send [`BuildRequest`]s; the AI bridge has `destruction.build`.
 
 use std::f32::consts::{FRAC_PI_2, FRAC_PI_4};
 
@@ -77,10 +77,13 @@ pub enum BuildKind {
     StoneWall,
     /// Ashlar pillar, 2 m.
     StonePillar,
+    /// Board gable, the right triangle under one side of a 26° roof: 2 m wide, rising 1 m
+    /// toward +X (turn it half round for the other side of the ridge).
+    WoodGable,
 }
 
 impl BuildKind {
-    pub const ALL: [BuildKind; 9] = [
+    pub const ALL: [BuildKind; 10] = [
         BuildKind::WoodFloor,
         BuildKind::WoodWall,
         BuildKind::WoodPole,
@@ -90,6 +93,7 @@ impl BuildKind {
         BuildKind::StoneFloor,
         BuildKind::StoneWall,
         BuildKind::StonePillar,
+        BuildKind::WoodGable,
     ];
 
     pub fn name(self) -> &'static str {
@@ -103,6 +107,7 @@ impl BuildKind {
             BuildKind::StoneFloor => "stone_floor",
             BuildKind::StoneWall => "stone_wall",
             BuildKind::StonePillar => "stone_pillar",
+            BuildKind::WoodGable => "wood_gable",
         }
     }
 
@@ -127,6 +132,7 @@ impl BuildKind {
             BuildKind::StoneFloor => "Stone floor 2×2",
             BuildKind::StoneWall => "Stone wall 2×1",
             BuildKind::StonePillar => "Stone pillar",
+            BuildKind::WoodGable => "Wood gable 26°",
         }
     }
 
@@ -151,6 +157,7 @@ impl BuildKind {
             BuildKind::StoneFloor => Vec3::new(2.0, 0.4, 2.0),
             BuildKind::StoneWall => Vec3::new(2.0, 1.0, 0.8),
             BuildKind::StonePillar => Vec3::new(0.6, 2.0, 0.6),
+            BuildKind::WoodGable => Vec3::new(ROOF_RUN, ROOF_RUN * ROOF_PITCH.tan(), 0.1),
         }
     }
 
@@ -183,6 +190,7 @@ impl BuildKind {
             BuildKind::StoneFloor | BuildKind::StoneWall | BuildKind::StonePillar => {
                 PropKind::StoneBlock { size }
             }
+            BuildKind::WoodGable => PropKind::BoardGable { size },
         }
     }
 
@@ -191,6 +199,8 @@ impl BuildKind {
     pub fn fill(self) -> f32 {
         match self {
             BuildKind::WoodFloor | BuildKind::WoodWall => 0.5,
+            // Half a board wall's box.
+            BuildKind::WoodGable => 0.25,
             BuildKind::WoodRoof | BuildKind::WoodRoof45 => 0.3,
             _ => 1.0,
         }
@@ -777,6 +787,7 @@ pub fn bind_actions(map: Option<ResMut<InputMap>>) {
         KeyCode::Digit7,
         KeyCode::Digit8,
         KeyCode::Digit9,
+        KeyCode::Digit0,
     ];
     for (i, key) in digits.into_iter().enumerate() {
         bind(&format!("build_piece_{}", i + 1), &[Binding::Key(key)]);

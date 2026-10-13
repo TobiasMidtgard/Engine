@@ -23,7 +23,7 @@ use engine_world::{ContactKind, Gravity, Ground, GroundContact, NoiseEvent};
 
 use crate::grapple;
 use crate::mover::{Dash, DashRequest, Hang, Mantle, Mover, WallContact, flat, move_towards};
-use crate::platform::{self, Deck};
+use crate::platform::{self, Deck, Pin};
 use crate::profile::MovementProfile;
 
 /// Walls are surfaces whose normal is within this of horizontal (|n·up| below it).
@@ -68,12 +68,18 @@ impl Outputs<'_> {
     }
 }
 
+/// Everything but characters that a character can stand on, hold on to or hook: where it is
+/// and how fast it moves, if it says.
+pub(crate) type Bodies<'w, 's> =
+    Query<'w, 's, (&'static Transform, Option<&'static Velocity>), Without<Mover>>;
+
 /// Scene probes for one character (walls, ledges, ground below).
 pub(crate) struct Probe<'a> {
     queries: &'a PhysicsQueries,
     filter: &'a QueryFilter,
     /// Character entities: never wall-run on or climb another character.
     movers: &'a Query<'a, 'a, (), With<Mover>>,
+    bodies: &'a Bodies<'a, 'a>,
 }
 
 impl Probe<'_> {
@@ -96,6 +102,12 @@ impl Probe<'_> {
                 entity: Some(hit.entity),
             }
         })
+    }
+
+    /// Pins `point` and `dir` to the body `entity`, so they move with it.
+    pub(crate) fn pin(&self, entity: Entity, point: DVec3, dir: Vec3) -> Option<Pin> {
+        let (t, _) = self.bodies.get(entity).ok()?;
+        Some(Pin::new(entity, t, point, dir))
     }
 }
 
@@ -141,7 +153,7 @@ pub(crate) fn step_movers(
     mut out: Outputs,
     mut filter: Local<QueryFilter>,
     movers: Query<(), With<Mover>>,
-    decks: Query<(&Transform, Option<&Velocity>), Without<Mover>>,
+    decks: Bodies,
     mut q: Query<(
         Entity,
         &mut Transform,
@@ -204,20 +216,27 @@ pub(crate) fn step_movers(
             queries: &queries,
             filter: &filter,
             movers: &movers,
+            bodies: &decks,
         };
 
         let rate = if world_dt > 0.0 { dt / world_dt } else { 1.0 };
+        follow_pins(&mut m, p, &decks, entity, dt, &mut out);
+        // The deck: the ground under the feet (physics carries the character on it), else the
+        // wall run along or the ledge held (movement carries the character with those).
         let deck = state
             .ground_entity
             .filter(|_| state.grounded)
-            .and_then(|g| decks.get(g).ok().map(|(t, vel)| (g, t, vel)))
-            .map(|(g, t, vel)| Deck {
+            .map(|g| (g, true))
+            .or_else(|| held(&m).map(|e| (e, false)))
+            .and_then(|(g, carried)| decks.get(g).ok().map(|(t, vel)| (g, t, vel, carried)))
+            .map(|(g, t, vel, carried)| Deck {
                 entity: g,
                 transform: t,
                 // Per world second (decks run on world time); `rate` is this character's
                 // seconds per world second.
                 velocity: vel
                     .map(|v| (v.linear + v.angular.cross((pos - t.translation).as_vec3())) / rate),
+                carried,
             });
         platform::ride(&mut m, deck, pos, dt);
         let (state, lift) = on_ground_surface(state, &ground, &body);
@@ -271,14 +290,78 @@ pub(crate) fn step_movers(
         feedback(&mut m, p, &body, v, dt, animated, &mut out);
 
         m.velocity = v;
+        // The deck's motion: physics carries a character standing on it, movement one on a
+        // wall or a ledge.
+        let deck = m.platform.map_or(Vec3::ZERO, |d| d.velocity);
+        let carry = m
+            .platform
+            .filter(|d| !d.carried)
+            .map_or(Vec3::ZERO, |d| d.velocity);
         // Back up onto the ground surface if the step sank into it.
-        mv.velocity = v + up * (lift / dt);
+        mv.velocity = v + carry + up * (lift / dt);
         loco.mode = m.mode;
         // The world's frame: the deck's motion plus the character's own on it.
-        loco.velocity = (v + m.platform.map_or(Vec3::ZERO, |d| d.velocity)) * rate;
+        loco.velocity = (v + deck) * rate;
         loco.grounded = m.grounded;
         loco.stamina = (m.dash_charges / p.dash_charges.max(1) as f32).clamp(0.0, 1.0);
         write_params(&m, &mut params, up);
+    }
+}
+
+/// The body the character holds on to off the ground: the wall it runs along, the ledge it
+/// hangs from or climbs.
+fn held(m: &Mover) -> Option<Entity> {
+    let on = |pin: Option<Pin>| pin.map(|p| p.entity);
+    on(m.hang.and_then(|h| h.on))
+        .or_else(|| on(m.mantle.and_then(|mt| mt.on)))
+        .or_else(|| {
+            m.wall
+                .filter(|_| m.mode == LocomotionMode::WallRun)
+                .and_then(|w| w.entity)
+        })
+}
+
+/// Moves what is pinned to bodies along with them: the ledge hung from or climbed and the
+/// grapple's hook. A hook whose body is gone lets go.
+fn follow_pins(
+    m: &mut Mover,
+    p: &MovementProfile,
+    bodies: &Bodies,
+    entity: Entity,
+    dt: f32,
+    out: &mut Outputs,
+) {
+    let up = m.up;
+    let at = |pin: Option<Pin>| {
+        let pin = pin?;
+        bodies.get(pin.entity).ok().map(|(t, _)| pin.place(t))
+    };
+    if let Some(h) = &mut m.hang
+        && let Some((top, normal)) = at(h.on)
+    {
+        h.top = top;
+        h.normal = flat(normal, up).try_normalize().unwrap_or(h.normal);
+    }
+    if let Some(mt) = &mut m.mantle
+        && let Some((top, forward)) = at(mt.on)
+    {
+        mt.top = top;
+        mt.forward = flat(forward, up).try_normalize().unwrap_or(mt.forward);
+    }
+    let Some(g) = &mut m.grapple else {
+        return;
+    };
+    g.anchor_velocity = Vec3::ZERO;
+    if g.on.is_none() {
+        return;
+    }
+    match at(g.on) {
+        Some((anchor, normal)) => {
+            g.anchor_velocity = ((anchor - g.anchor) / dt as f64).as_vec3();
+            g.anchor = anchor;
+            g.normal = normal;
+        }
+        None => grapple::release(m, p, entity, out),
     }
 }
 
@@ -490,8 +573,15 @@ fn step_one(
         if !done {
             m.mantle = Some(mt);
             m.set_mode(LocomotionMode::Mantle);
+            // Rising, keep close to the wall, without pressing into its face once against it
+            // (a character pressing into a wall that slides past can lose its slide along it).
+            // Its top edge still needs the press to roll the capsule over it.
+            let against = state
+                .wall_normal
+                .is_some_and(|n| n.dot(mt.forward) < -0.7 && n.dot(up).abs() < 0.1);
+            let press = if against { 0.0 } else { 0.5 };
             return if mt.rising {
-                up * p.mantle_speed + mt.forward * 0.5
+                up * p.mantle_speed + mt.forward * press
             } else {
                 mt.forward * mt.exit_speed.max(3.5)
             };
@@ -539,7 +629,18 @@ fn step_one(
         // Reeled in to a ledge: climb onto it (the rope lifts the body as high as a hang
         // reaches).
         let pull = reel.velocity;
-        let toward = if wish.length() > 0.3 { wish } else { m.facing };
+        // Toward the stick, else into the wall the hook bit (its ledge is above the hook, even
+        // when the body swings in beside it), else the way the character faces.
+        let into = m
+            .grapple
+            .map(|g| flat(-g.normal, up))
+            .filter(|d| d.length() > 0.5)
+            .map(Vec3::normalize);
+        let toward = if wish.length() > 0.3 {
+            wish
+        } else {
+            into.unwrap_or(m.facing)
+        };
         let reach = MovementProfile {
             mantle_max_height: p.mantle_max_height.max(p.ledge_grab_max_height),
             ..*p
@@ -1033,6 +1134,7 @@ fn find_ledge(p: &MovementProfile, b: &Body, probe: &Probe, v: Vec3, wish: Vec3)
         forward: inward,
         rising: true,
         exit_speed: vh.length().max(p.run_speed * 0.8),
+        on: probe.pin(down.entity, edge, inward),
     })
 }
 
@@ -1074,14 +1176,19 @@ fn ledge_top(
         .then(|| face + upd * (down.point - face).dot(upd))
 }
 
-/// The wall in front of the chest along `dir`, if it is a wall (not a slope or a character).
-fn chest_wall(b: &Body, probe: &Probe, dir: Vec3) -> Option<(DVec3, Vec3)> {
+/// The wall in front of the chest along `dir`, if it is a wall (not a slope or a character):
+/// where it was hit, its horizontal normal and its body.
+fn chest_wall(b: &Body, probe: &Probe, dir: Vec3) -> Option<(DVec3, Vec3, Entity)> {
     let chest = b.pos + (b.up * (b.height * 0.25)).as_dvec3();
     let hit = probe.ray(chest, dir, b.radius + 0.45)?;
     if hit.normal.dot(b.up).abs() >= WALL_MAX_UP || hit.normal.dot(dir) > -0.5 {
         return None;
     }
-    Some((hit.point, flat(hit.normal, b.up).normalize_or_zero()))
+    Some((
+        hit.point,
+        flat(hit.normal, b.up).normalize_or_zero(),
+        hit.entity,
+    ))
 }
 
 /// A ledge too high to climb onto directly, in reach of the hands: near the top of a jump or
@@ -1096,10 +1203,14 @@ fn find_hang(p: &MovementProfile, b: &Body, probe: &Probe, v: Vec3, wish: Vec3) 
         .try_normalize()
         .filter(|_| wish.length() > 0.3)
         .or_else(|| vh.try_normalize().filter(|_| vh.length() > 0.5))?;
-    let (face, normal) = chest_wall(b, probe, dir)?;
+    let (face, normal, wall) = chest_wall(b, probe, dir)?;
     let low = p.mantle_max_height.min(p.ledge_grab_max_height);
     let top = ledge_top(b, probe, face, normal, low, p.ledge_grab_max_height)?;
-    Some(Hang { top, normal })
+    Some(Hang {
+        top,
+        normal,
+        on: probe.pin(wall, top, normal),
+    })
 }
 
 /// Velocity toward the hanging position under `top` (sideways is left free).
@@ -1136,8 +1247,8 @@ fn hang(
     };
     // Still there? (Shimmied off its end, or it broke.)
     let held = (h.top - feet).dot(up.as_dvec3()) as f32;
-    let Some((face, normal)) =
-        chest_wall(b, probe, -h.normal).filter(|(_, n)| n.dot(h.normal) > 0.8)
+    let Some((face, normal, wall)) =
+        chest_wall(b, probe, -h.normal).filter(|(_, n, _)| n.dot(h.normal) > 0.8)
     else {
         let_go(m, 0.3);
         return flat(v, up);
@@ -1146,7 +1257,11 @@ fn hang(
         let_go(m, 0.3);
         return flat(v, up);
     };
-    let h = Hang { top, normal };
+    let h = Hang {
+        top,
+        normal,
+        on: probe.pin(wall, top, normal),
+    };
     m.hang = Some(h);
     let right = up.cross(normal);
     let toward = wish.dot(-normal);
@@ -1177,6 +1292,7 @@ fn hang(
             forward: -normal,
             rising: true,
             exit_speed: p.run_speed * 0.5,
+            on: h.on.map(Pin::reversed),
         });
         m.set_mode(LocomotionMode::Mantle);
         out.trigger(b.entity, "mantle");
@@ -1192,8 +1308,8 @@ fn hang(
             ..*b
         };
         let continues = chest_wall(&ahead, probe, -normal)
-            .filter(|(_, n)| n.dot(normal) > 0.8)
-            .and_then(|(f, n)| ledge_top(&ahead, probe, f, n, ledge - 0.3, ledge + 0.3))
+            .filter(|(_, n, _)| n.dot(normal) > 0.8)
+            .and_then(|(f, n, _)| ledge_top(&ahead, probe, f, n, ledge - 0.3, ledge + 0.3))
             .is_some();
         if continues {
             along = right * (side * p.shimmy_speed);

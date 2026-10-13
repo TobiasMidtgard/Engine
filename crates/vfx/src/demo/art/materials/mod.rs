@@ -33,7 +33,7 @@ use self::textures::{Maps, TextureImages};
 use super::Surface;
 
 /// Every surface, in declaration order.
-pub const SURFACES: [Surface; 19] = [
+pub const SURFACES: [Surface; 20] = [
     Surface::Flagstone,
     Surface::CarvedStone,
     Surface::DarkStone,
@@ -53,6 +53,7 @@ pub const SURFACES: [Surface; 19] = [
     Surface::RuneLife,
     Surface::RuneEmber,
     Surface::Crystal,
+    Surface::Coals,
 ];
 
 /// The material for `surface`. Textures it needs are added to `images`.
@@ -128,5 +129,6 @@ pub fn generated(surface: Surface, shrink: u32) -> Generated {
         RuneLife => magic::rune(RuneKind::Life, shrink),
         RuneEmber => magic::rune(RuneKind::Ember, shrink),
         Crystal => magic::crystal(shrink),
+        Coals => wood::coals(shrink),
     }
 }

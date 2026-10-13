@@ -1,5 +1,5 @@
-//! Renders the fighters headless to PNGs: the four styles side by side, helmet and katana
-//! close-ups, and a sequence of poses from the procedural animation.
+//! Renders the fighters headless to PNGs: the four styles side by side (front and back),
+//! helmet, back and katana close-ups, and a sequence of poses from the procedural animation.
 //!
 //! ```text
 //! cargo run -p engine_movement --release --example fighter_preview -- [out_dir]
@@ -482,6 +482,12 @@ fn main() {
         (l + v(0.45, 1.3, -5.6), l + v(0.0, 0.93, 0.0), 34.0),
         &out.join("01_lineup.png"),
     );
+    shoot(
+        &mut app,
+        camera,
+        (l + v(-1.6, 1.5, 5.2), l + v(0.0, 0.93, 0.0), 34.0),
+        &out.join("01_lineup_back.png"),
+    );
     let mut heads = Vec::new();
     for (style, head) in &lineup {
         let p = out.join(format!("02_helmet_{}.png", style.key()));
@@ -506,6 +512,26 @@ fn main() {
             HEIGHT / 2,
             &out.join("02_helmets.png"),
         );
+    }
+    // From behind and to the side: neck guards, shoulder lames, the sash's knot.
+    let mut backs = Vec::new();
+    for (style, head) in &lineup {
+        let p = out.join(format!("02_back_{}.png", style.key()));
+        if shoot(
+            &mut app,
+            camera,
+            (
+                *head + v(0.62, 0.02, 0.62),
+                *head + v(0.0, -0.12, 0.0),
+                34.0,
+            ),
+            &p,
+        ) {
+            backs.push(p);
+        }
+    }
+    if !backs.is_empty() {
+        sheet(&backs, 2, WIDTH / 2, HEIGHT / 2, &out.join("02_backs.png"));
     }
     let k = katana_at;
     shoot(

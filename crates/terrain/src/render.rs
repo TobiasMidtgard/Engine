@@ -14,7 +14,7 @@ use engine_render::features::{
 };
 use engine_render::frame::ViewData;
 use engine_render::settings::RenderSettings;
-use engine_world::SurfaceLayers;
+use engine_world::{Grid2, SurfaceCell, SurfaceLayers};
 
 use crate::chunk::{ChunkSource, TerrainVertex, VERTS_PER_CHUNK, build_chunk, chunk_indices};
 use crate::cube::NodeKey;
@@ -122,6 +122,8 @@ struct MapsGpu {
     surface: [f32; 4],
     /// deformation on, surface layers on, LOD debug colors, unused.
     flags: [f32; 4],
+    /// Wetness, puddle depth, snow depth and scorch beyond the surface layers' grid.
+    far: [f32; 4],
 }
 
 struct Gpu {
@@ -315,9 +317,37 @@ pub struct TerrainFeature {
     shadow_draws: [Vec<Draw>; 4],
     deform_generation: u64,
     surface_frame: u64,
+    /// Wetness and snow depth beyond the surface layers' grid (see [`beyond_grid`]).
+    surface_far: [f32; 2],
     frame: u64,
     stats: FeatureStats,
     built_last_frame: usize,
+}
+
+/// How wet and snowy the ground is beyond the weather's grid around the player: like the open
+/// ground along the grid's rim. The upper quartile of its last few cells, so shelters, fires
+/// and the strip a move has just uncovered (empty until the weather fills it) don't count.
+fn beyond_grid(g: &Grid2<SurfaceCell>) -> [f32; 2] {
+    let ring = 4.min(g.width / 2).min(g.height / 2);
+    let (mut wet, mut snow) = (Vec::new(), Vec::new());
+    for y in 0..g.height {
+        let row = &g.data[(y * g.width) as usize..((y + 1) * g.width) as usize];
+        let edge_row = y < ring || y >= g.height - ring;
+        let (left, rest) = row.split_at(if edge_row { row.len() } else { ring as usize });
+        let right = &rest[rest.len() - if edge_row { 0 } else { ring as usize }..];
+        for c in left.iter().chain(right) {
+            wet.push(c.wetness);
+            snow.push(c.snow_m);
+        }
+    }
+    let upper_quartile = |v: &mut Vec<f32>| {
+        if v.is_empty() {
+            return 0.0;
+        }
+        let i = v.len() * 3 / 4;
+        *v.select_nth_unstable_by(i, f32::total_cmp).1
+    };
+    [upper_quartile(&mut wet), upper_quartile(&mut snow)]
 }
 
 /// IEEE half-precision bits for an `f32` (round to nearest, flush tiny values to zero).
@@ -535,6 +565,7 @@ impl TerrainFeature {
             }
             if fresh || self.frame >= self.surface_frame + 6 {
                 self.surface_frame = self.frame;
+                self.surface_far = beyond_grid(g);
                 let mut data = Vec::with_capacity(g.data.len() * 4);
                 for c in &g.data {
                     data.push(f16_bits(c.wetness));
@@ -570,6 +601,7 @@ impl TerrainFeature {
                 g.width as f32,
             ];
             maps.flags[1] = 1.0;
+            maps.far = [self.surface_far[0], 0.0, self.surface_far[1], 0.0];
         }
         // Placeholders so the bind group is always complete.
         for (label, slot) in [("deform", 0usize), ("surface", 1usize)] {
@@ -1320,9 +1352,33 @@ mod tests {
     }
 
     #[test]
+    fn ground_beyond_the_grid_is_like_its_open_rim() {
+        use engine_core::math::DVec2;
+        let snowy = SurfaceCell {
+            wetness: 0.4,
+            snow_m: 0.2,
+            ..Default::default()
+        };
+        let mut g = Grid2::new(DVec2::ZERO, 1.0, 64, 48, snowy);
+        // A move just uncovered a strip on one side, and a fire melted a corner.
+        for y in 0..48 {
+            for x in 0..64 {
+                if x < 8 || (x > 56 && y > 40) {
+                    g.data[(y * 64 + x) as usize] = SurfaceCell::default();
+                }
+            }
+        }
+        let [wet, snow] = beyond_grid(&g);
+        assert_eq!((wet, snow), (0.4, 0.2));
+        // An empty grid says nothing.
+        let empty = Grid2::new(DVec2::ZERO, 1.0, 1, 1, SurfaceCell::default());
+        assert_eq!(beyond_grid(&empty), [0.0, 0.0]);
+    }
+
+    #[test]
     fn gpu_structs_match_shader_sizes() {
         assert_eq!(std::mem::size_of::<PlanetGpu>(), 16 * (3 + 1 + 10 + 3));
-        assert_eq!(std::mem::size_of::<MapsGpu>(), 48);
+        assert_eq!(std::mem::size_of::<MapsGpu>(), 64);
         assert_eq!(std::mem::size_of::<TerrainVertex>(), 44);
     }
 }

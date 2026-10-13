@@ -241,7 +241,9 @@ pub fn play_history(
                     0.0,
                     sim.rng.range(-1.0, 1.0) as f64 * region.half_extents[1] as f64,
                 );
-            if sim.soil.blocked[sim.soil.index(p)] {
+            if sim.soil.blocked[sim.soil.index(p)]
+                || !region.may_root(layer, DVec2::new(p.x - center.x, p.z - center.z))
+            {
                 continue;
             }
             let y = env
@@ -292,11 +294,23 @@ pub fn play_history(
         h.years_since,
         region.step_years.max(0.5),
     );
-    // Paths, shores and plots stay passable: a trunk that came down across a keep-clear circle
-    // was dragged around to lie beside it, or hauled away when it fits nowhere.
+    // Paths, shores and plots stay passable, and no log runs through a standing trunk or
+    // another log: one that came down across any of them was dragged around to lie beside it,
+    // or hauled away (or long since rotted) when it fits nowhere.
+    let stems: Vec<(Vec2, f32)> = plants
+        .iter()
+        .filter(|p| !matches!(p.plant.stage, PlantStage::Stump { .. }))
+        .filter_map(|p| {
+            let sp = library.get(p.plant.species);
+            let local = Vec2::new((p.pos.x - center.x) as f32, (p.pos.z - center.z) as f32);
+            (sp.is_woody() && p.plant.size > 0.1)
+                .then(|| (local, (sp.trunk_radius_m * p.plant.size).max(0.05)))
+        })
+        .collect();
+    let mut lying: Vec<LogSpan> = Vec::new();
     logs.retain_mut(|l| {
         let yaw = l.yaw;
-        [
+        let fits = [
             0.0,
             PI,
             0.5,
@@ -309,8 +323,20 @@ pub fn play_history(
         .into_iter()
         .any(|turn| {
             l.yaw = (yaw + turn).rem_euclid(TAU);
-            !blocks_keep_clear(region, center, l, library)
-        })
+            let span = LogSpan::of(center, l, library);
+            span.within(region)
+                && !blocks_keep_clear(region, center, l, library)
+                && !stems
+                    .iter()
+                    .any(|&(p, r)| span.distance_to(p) < r + span.radius)
+                && !lying
+                    .iter()
+                    .any(|o| span.distance_to_span(o) < span.radius + o.radius)
+        });
+        if fits {
+            lying.push(LogSpan::of(center, l, library));
+        }
+        fits
     });
     (plants, logs)
 }
@@ -322,16 +348,70 @@ fn blocks_keep_clear(
     log: &SimLog,
     library: &PlantLibrary,
 ) -> bool {
-    let sp = library.get(log.species);
-    let length = sp.max_height_m * log.size * 0.85;
-    let a = Vec2::new((log.pos.x - center.x) as f32, (log.pos.z - center.z) as f32);
-    let b = a + Vec2::new(log.yaw.cos(), log.yaw.sin()) * length;
-    let reach = (sp.trunk_radius_m * log.size).max(0.1);
-    region.keep_clear.iter().any(|c| {
-        let p = Vec2::new(c[0], c[1]);
-        let t = ((p - a).dot(b - a) / (b - a).length_squared().max(1e-6)).clamp(0.0, 1.0);
-        p.distance(a + (b - a) * t) < c[2] + reach
-    })
+    let span = LogSpan::of(center, log, library);
+    region
+        .keep_clear
+        .iter()
+        .any(|c| span.distance_to(Vec2::new(c[0], c[1])) < c[2] + span.radius)
+}
+
+/// A log's footprint on the ground: butt to tip in region-local X/Z, and its thickness.
+struct LogSpan {
+    a: Vec2,
+    b: Vec2,
+    radius: f32,
+}
+
+impl LogSpan {
+    fn of(center: DVec3, log: &SimLog, library: &PlantLibrary) -> Self {
+        let sp = library.get(log.species);
+        // Bare old logs have lost their tops (`meshgen::tree`).
+        let reach = if log.years >= crate::felling::LOG_BARE_YEARS {
+            0.4
+        } else {
+            0.85
+        };
+        let length = sp.max_height_m * log.size * reach;
+        let a = Vec2::new((log.pos.x - center.x) as f32, (log.pos.z - center.z) as f32);
+        Self {
+            a,
+            b: a + Vec2::new(log.yaw.cos(), log.yaw.sin()) * length,
+            radius: (sp.trunk_radius_m * log.size).max(0.1),
+        }
+    }
+
+    /// Whether the tip stays inside the region (the butt always is, where the tree stood).
+    fn within(&self, region: &EcologyRegion) -> bool {
+        let [hx, hz] = region.half_extents.map(|h| h.max(0.1));
+        if region.round {
+            (self.b.x / hx).powi(2) + (self.b.y / hz).powi(2) < 0.9
+        } else {
+            self.b.x.abs() < hx - 1.0 && self.b.y.abs() < hz - 1.0
+        }
+    }
+
+    fn distance_to(&self, p: Vec2) -> f32 {
+        let ab = self.b - self.a;
+        let t = ((p - self.a).dot(ab) / ab.length_squared().max(1e-6)).clamp(0.0, 1.0);
+        p.distance(self.a + ab * t)
+    }
+
+    fn distance_to_span(&self, o: &LogSpan) -> f32 {
+        let cross = |u: Vec2, v: Vec2| u.x * v.y - u.y * v.x;
+        let (d1, d2) = (self.b - self.a, o.b - o.a);
+        let denom = cross(d1, d2);
+        if denom.abs() > 1e-6 {
+            let t = cross(o.a - self.a, d2) / denom;
+            let u = cross(o.a - self.a, d1) / denom;
+            if (0.0..=1.0).contains(&t) && (0.0..=1.0).contains(&u) {
+                return 0.0;
+            }
+        }
+        self.distance_to(o.a)
+            .min(self.distance_to(o.b))
+            .min(o.distance_to(self.a))
+            .min(o.distance_to(self.b))
+    }
 }
 
 fn disturb(
@@ -868,6 +948,74 @@ mod tests {
             &log(6.0, FRAC_PI_2),
             &lib
         ));
+    }
+
+    #[test]
+    fn old_snags_lie_as_logs_clear_of_trunks_and_each_other() {
+        let lib = PlantLibrary::default();
+        let region = EcologyRegion {
+            history: RegionHistory {
+                grow_years: 120.0,
+                initial_plants: [60, 0, 60],
+                ..Default::default()
+            },
+            ..forest()
+        };
+        let (plants, logs, _) = grow(&region, &[]);
+        assert!(logs.len() >= 3, "{} logs", logs.len());
+        let spans: Vec<LogSpan> = logs
+            .iter()
+            .map(|l| LogSpan::of(DVec3::ZERO, l, &lib))
+            .collect();
+        for (i, a) in spans.iter().enumerate() {
+            assert!(a.within(&region));
+            for b in &spans[i + 1..] {
+                assert!(a.distance_to_span(b) >= a.radius + b.radius);
+            }
+            for p in plants.iter().filter(|p| {
+                lib.get(p.plant.species).is_woody()
+                    && p.plant.size > 0.1
+                    && !matches!(p.plant.stage, PlantStage::Stump { .. })
+            }) {
+                let r = lib.get(p.plant.species).trunk_radius_m * p.plant.size;
+                assert!(a.distance_to(Vec2::new(p.pos.x as f32, p.pos.z as f32)) >= r + a.radius);
+            }
+        }
+    }
+
+    #[test]
+    fn only_ground_plants_grow_in_a_sight_line() {
+        let lib = PlantLibrary::default();
+        let region = EcologyRegion {
+            sight_lines: vec![[0.0, 0.0, 8.0]],
+            species: ["oak", "birch", "pine", "hazel", "fern", "grass"]
+                .map(String::from)
+                .to_vec(),
+            history: RegionHistory {
+                grow_years: 60.0,
+                initial_plants: [80, 60, 200],
+                ..Default::default()
+            },
+            ..forest()
+        };
+        let (plants, _, _) = grow(&region, &[]);
+        let inside = |p: &&SimPlant| p.pos.x.hypot(p.pos.z) < 8.0;
+        let layer = |p: &SimPlant| lib.get(p.plant.species).layer;
+        assert!(
+            !plants
+                .iter()
+                .filter(inside)
+                .any(|p| layer(p) != Layer::Ground)
+        );
+        // Ground plants still grow there; trees and shrubs grow outside it.
+        assert!(
+            plants
+                .iter()
+                .filter(inside)
+                .any(|p| layer(p) == Layer::Ground)
+        );
+        assert!(plants.iter().any(|p| layer(p) == Layer::Canopy));
+        assert!(plants.iter().any(|p| layer(p) == Layer::Understory));
     }
 
     #[test]

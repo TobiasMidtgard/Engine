@@ -208,17 +208,28 @@ fn vogel_disk(i: i32, n: i32, angle: f32) -> vec2<f32> {
     return vec2<f32>(cos(theta), sin(theta)) * r;
 }
 
-// Sun visibility (0 = in shadow, 1 = lit) at camera-relative `rel` with normal `n`.
+// Sun visibility (0 = in shadow, 1 = lit) at camera-relative `rel` with normal `n`: the shadow
+// cascades out to `RenderSettings::shadow_distance`, blending over their last tenth into the
+// far shadow map (big casters only, out to `far_shadow_distance`; `far_shadow_visibility`).
+fn shadow_factor(rel: vec3<f32>, n: vec3<f32>) -> f32 {
+    if (frame.sun_color.w < 0.5) { return 1.0; }
+    let depth = view_depth(rel);
+    let noise = frame_noise(pixel_of(rel));
+    let reach = frame.shadow_splits[3];
+    let near = saturate((reach - depth) / (reach * 0.1));
+    var s = 1.0;
+    if (near > 0.0) { s = cascade_visibility(rel, n, depth, noise); }
+    if (near >= 1.0) { return s; }
+    return mix(far_shadow_visibility(rel, n, noise), s, near);
+}
+
+// Sun visibility from the shadow cascades at view depth `depth` (within their reach).
 //
 // Percentage-closer soft shadows: a blocker search estimates how far the caster is from the
 // receiver, and the filter grows with that distance times the sun's angular size
 // (`RenderSettings::sun_penumbra_scale`): crisp where things touch the ground, soft at the end of
 // a tree's shadow. Filter taps are rotated per pixel, and cascades blend with a dithered band.
-fn shadow_factor(rel: vec3<f32>, n: vec3<f32>) -> f32 {
-    if (frame.sun_color.w < 0.5) { return 1.0; }
-    let depth = view_depth(rel);
-    if (depth > frame.shadow_splits[3]) { return 1.0; }
-    let noise = frame_noise(pixel_of(rel));
+fn cascade_visibility(rel: vec3<f32>, n: vec3<f32>, depth: f32, noise: f32) -> f32 {
     var cascade = 0u;
     for (var i = 0u; i < 3u; i++) {
         if (depth > frame.shadow_splits[i]) { cascade = i + 1u; }
@@ -271,10 +282,45 @@ fn shadow_factor(rel: vec3<f32>, n: vec3<f32>) -> f32 {
         let o = vogel_disk(i, SHADOW_PCF_TAPS, angle) * radius * texel;
         sum += textureSampleCompareLevel(shadow_map, shadow_sampler, uv + o, cascade, z_ref);
     }
-    let s = sum / f32(SHADOW_PCF_TAPS);
-    // Fade out at the end of the last cascade.
-    let fade = saturate((frame.shadow_splits[3] - depth) / (frame.shadow_splits[3] * 0.1));
-    return mix(1.0, s, fade);
+    return sum / f32(SHADOW_PCF_TAPS);
+}
+
+// Sun visibility from the far shadow map: one coarse map around the camera (texels of several
+// meters) holding only big casters, so mountains shade the valley and ridges shade themselves
+// kilometers away. 1 where it is off or doesn't reach; fades out over its outer tenth.
+const FAR_SHADOW_TAPS: i32 = 12;
+
+fn far_shadow_visibility(rel: vec3<f32>, n: vec3<f32>, noise: f32) -> f32 {
+    let params = frame.far_shadow_params;
+    let reach = params.x;
+    if (reach <= 0.0) { return 1.0; }
+    let dist = length(rel);
+    let fade = saturate((reach - dist) / (reach * 0.1));
+    if (fade <= 0.0) { return 1.0; }
+    let texel_world = params.y;
+    let z_per_meter = params.z;
+    let layer = i32(params.w);
+    let l = frame.sun_dir.xyz;
+    let n_dot_l = dot(n, l);
+    // Surfaces facing away from the sun are dark anyway; their own texels must not shade them.
+    let normal_bias = frame.shadow_params.y * texel_world * (1.0 - 0.5 * saturate(n_dot_l));
+    let lp = frame.far_shadow * vec4<f32>(rel + n * normal_bias, 1.0);
+    let uv = lp.xy * vec2<f32>(0.5, -0.5) + 0.5;
+    if (any(uv < vec2(0.0)) || any(uv > vec2(1.0)) || lp.z > 1.0) { return 1.0; }
+    // A fixed filter of a texel and a half: wider than the sun's penumbra of a ridge a few
+    // kilometers away, so edges stay smooth at this resolution. Biased with the slope like the
+    // cascades.
+    let radius = 1.5;
+    let slope = sqrt(max(1.0 - n_dot_l * n_dot_l, 0.0)) / max(abs(n_dot_l), 0.2);
+    let z_ref = lp.z - frame.shadow_params.x - (0.5 + radius * min(slope, 5.0) * 0.5) * texel_world * z_per_meter;
+    let texel = 1.0 / frame.shadow_params.w;
+    let angle = noise * TAU;
+    var sum = 0.0;
+    for (var i = 0; i < FAR_SHADOW_TAPS; i++) {
+        let o = vogel_disk(i, FAR_SHADOW_TAPS, angle) * radius * texel;
+        sum += textureSampleCompareLevel(shadow_map, shadow_sampler, uv + o, layer, z_ref);
+    }
+    return mix(1.0, sum / f32(FAR_SHADOW_TAPS), fade);
 }
 
 // Screen-space contact shadow toward the sun: marches `frame.effects.y` meters through the
@@ -353,6 +399,18 @@ fn sky_ambient(n: vec3<f32>) -> vec3<f32> {
     return textureSampleLevel(env_irradiance, env_sampler, dir_to_equirect(n), 0.0).rgb + frame.ambient.rgb;
 }
 
+// `sky_ambient(n)` at a point that sees `sky_vis` of the open sky (`sky_visibility`; multiply
+// by it as usual): as in the open where nothing covers it, and arriving more and more evenly
+// from all around as cover closes in. Sky light reaching a covered point came in through
+// openings and bounced off the walls on the way, so a ceiling indoors isn't lit by the sunlit
+// ground outside, nor a cave's floor by the blue sky overhead.
+fn sky_ambient_covered(n: vec3<f32>, sky_vis: f32) -> vec3<f32> {
+    let around = (sky_ambient(vec3<f32>(0.0, 1.0, 0.0)) + sky_ambient(vec3<f32>(0.0, -1.0, 0.0))
+        + sky_ambient(vec3<f32>(1.0, 0.0, 0.0)) + sky_ambient(vec3<f32>(-1.0, 0.0, 0.0))
+        + sky_ambient(vec3<f32>(0.0, 0.0, 1.0)) + sky_ambient(vec3<f32>(0.0, 0.0, -1.0))) / 6.0;
+    return mix(around, sky_ambient(n), saturate(sky_vis));
+}
+
 // Fraction of the open sky seen from camera-relative `rel` with normal `n`: 1 outdoors, toward 0
 // in caves, rooms and under overhangs. Multiply sky/ambient light by it. Also the test for
 // "is this spot exposed to rain and snow". Uses the top-down sky occlusion map around the
@@ -379,19 +437,31 @@ fn sky_view_factor(a: f32, b: f32, h: f32) -> f32 {
 }
 
 fn sky_visibility(rel: vec3<f32>, n: vec3<f32>) -> f32 {
-    return sky_map_visibility(rel, n) * sky_volume_factor(rel + n * 0.2);
+    // The indoor volumes are read in the air in front of the surface (so walls just outside a
+    // loosely fitted volume still count as inside), and a surface on or inside a volume's box
+    // counts as inside even where that step along its normal crosses a face: a wall's edge
+    // where bumps tilt its normal into the ceiling, the rounded foot of a chair leg on the
+    // floor. (Those spots read the open sky through the volume's face otherwise.)
+    return sky_map_visibility(rel, n) * min(sky_volume_factor(rel + n * 0.2), sky_volume_factor_within(rel, 0.01));
 }
 
 // Sky light left at `rel` by the indoor volumes: `sky_light` deep inside, rising to 1 at open
 // faces over `fade` meters; 1 outside every volume.
 fn sky_volume_factor(rel: vec3<f32>) -> f32 {
+    return sky_volume_factor_within(rel, 0.0);
+}
+
+// `sky_volume_factor` with every volume's box grown by `margin` meters on each side (a point
+// on a face is inside).
+fn sky_volume_factor_within(rel: vec3<f32>, margin: f32) -> f32 {
     var f = 1.0;
     let p = vec4<f32>(rel, 1.0);
     for (var i = 0u; i < min(frame.counts.w, 16u); i++) {
         let v = frame.sky_volumes[i];
-        let q = vec3<f32>(dot(v.to_local[0], p), dot(v.to_local[1], p), dot(v.to_local[2], p));
         let half = v.half_fade.xyz;
-        if (any(abs(q) >= half)) { continue; }
+        let local = vec3<f32>(dot(v.to_local[0], p), dot(v.to_local[1], p), dot(v.to_local[2], p));
+        if (any(abs(local) >= half + margin)) { continue; }
+        let q = clamp(local, -half, half);
         // Distance to the nearest open face (+x, -x, +y, -y, +z, -z).
         let mask = u32(v.params.y);
         let to_pos = half - q;
@@ -419,8 +489,12 @@ fn sky_map_visibility(rel: vec3<f32>, n: vec3<f32>) -> f32 {
     let c = frame.sky_occlusion * vec4<f32>(p, 1.0);
     let edge = max(abs(c.x), abs(c.y));
     if (edge >= 1.0 || c.z <= 0.0 || c.z >= 1.0) { return 1.0; }
-    // Cover must be clearly above the point (bumps and the surface's own texel don't count).
-    let bias = 0.3 + texel;
+    // Cover must be clearly above the point. Over a surface facing up, its own texel and the
+    // bumps around it don't count. Walls have stepped out of their own texel above, and what is
+    // over the underside of something is cover (the roof over a ceiling, the ceiling over the
+    // top of a wall: with the full margin, the top of every wall under a roof less than
+    // 0.3 m + a texel thick, and the ceiling itself, saw open sky).
+    let bias = 0.05 + (0.25 + texel) * saturate(n.y);
     // Clip-space steps for one meter along world x and z (orientation-agnostic).
     let step_x = (frame.sky_occlusion * vec4<f32>(1.0, 0.0, 0.0, 0.0)).xy;
     let step_z = (frame.sky_occlusion * vec4<f32>(0.0, 0.0, 1.0, 0.0)).xy;
@@ -494,12 +568,63 @@ fn shade_surface(s: Surface, rel: vec3<f32>) -> vec3<f32> {
 // such as parallax self-shadowing: deep mortar joints and the gaps between cobbles stay dark
 // in low sun.
 fn shade_surface_shadowed(s: Surface, rel: vec3<f32>, sun_visibility: f32) -> vec3<f32> {
+    return shade_surface_sides(s, rel, sun_visibility, s.normal, false);
+}
+
+// Shading for a thin sheet seen from one side: a leaf, a petal, a curtain, a paper lantern
+// (double-sided or alpha-masked cards). `face` is the geometric normal of the side the camera
+// sees (unit, toward the camera: the triangle's own normal, not the shading normal), and
+// `s.normal` the shading normal on that side.
+//
+// Light reaches the side in view only when it comes from that side of the sheet; then it
+// reflects as on any surface (diffuse and specular). Light from the far side never makes a
+// highlight: `s.subsurface` of it shines through instead, diffuse with a soft forward glow
+// (looking toward the light through the sheet), wrapped around the terminator, tinted by the
+// albedo (deeper, as light that crossed a leaf is) and shadowed by the shadow maps as seen from
+// the lit side. Sky light shines through from behind the same way. With `subsurface` 0 the sheet
+// is opaque and its far side stays dark. `sun_visibility` is as for `shade_surface_shadowed`.
+fn shade_thin_surface(s: Surface, rel: vec3<f32>, sun_visibility: f32, face: vec3<f32>) -> vec3<f32> {
+    return shade_surface_sides(s, rel, sun_visibility, face, true);
+}
+
+// The color light takes on crossing a thin sheet of diffuse color `c`: the same hue, deeper
+// (half way to the color squared over its brightest channel, which keeps that channel).
+fn thin_surface_tint(c: vec3<f32>) -> vec3<f32> {
+    let peak = max(max(c.r, c.g), max(c.b, 1e-4));
+    return mix(c, c * c / peak, 0.5);
+}
+
+// Light let through a thin sheet toward the camera (direction `v`) per unit of light arriving
+// along `l` on its far side (1/sr): diffuse, wrapped past the terminator of the shading normal
+// (`n_dot_l` < 0 is light from behind) and with a forward glow toward the light's direction of
+// travel; normalized like a Lambertian lobe.
+fn thin_surface_through(n_dot_l: f32, v: vec3<f32>, l: vec3<f32>) -> f32 {
+    let wrap = 0.5;
+    let reach = saturate((wrap - n_dot_l) / (1.0 + wrap));
+    let forward = pow(saturate(dot(v, -l)), 4.0);
+    return reach * (0.75 + 0.75 * forward) * INV_PI;
+}
+
+// How much of a light from direction `l` falls on the side of a thin sheet in view (x; `face`
+// points toward the camera) and on its far side (y). Both are 0 edge-on, so the switch from
+// reflected to transmitted light is smooth.
+fn thin_surface_sides(face: vec3<f32>, l: vec3<f32>) -> vec2<f32> {
+    let c = dot(face, l);
+    return vec2<f32>(smoothstep(0.0, 0.08, c), smoothstep(0.0, 0.08, -c));
+}
+
+// Surface shading. With `thin`, `s` is the side in view of a thin sheet facing `face`
+// (`shade_thin_surface`); otherwise `face` is unused.
+fn shade_surface_sides(s: Surface, rel: vec3<f32>, sun_visibility: f32, face: vec3<f32>, thin: bool) -> vec3<f32> {
     let v = normalize(-rel);
     let n = s.normal;
     let roughness = s.roughness * s.roughness;
     let n_dot_v = max(dot(n, v), 1e-4);
     let f0 = mix(vec3(0.16 * s.reflectance * s.reflectance), s.albedo, s.metallic);
     let diffuse_color = s.albedo * (1.0 - s.metallic);
+    // What a thin sheet lets through from its far side.
+    let translucent = thin && s.subsurface > 0.0;
+    let through_color = thin_surface_tint(diffuse_color) * select(0.0, saturate(s.subsurface), translucent);
     var color = vec3(0.0);
 
     // Sun.
@@ -507,7 +632,22 @@ fn shade_surface_shadowed(s: Surface, rel: vec3<f32>, sun_visibility: f32) -> ve
     let n_dot_l_raw = dot(n, l);
     let n_dot_l = saturate(n_dot_l_raw);
     let sun_light = frame.sun_color.rgb * sun_transmittance(rel);
-    if (dot(sun_light, sun_light) > 0.0) {
+    let sides = thin_surface_sides(face, l);
+    if (thin && dot(sun_light, sun_light) > 0.0 && (sides.x > 0.0 || (translucent && sides.y > 0.0))) {
+        // Shadowed as seen from the sheet's sunlit side, so the sheet doesn't shadow itself.
+        let lit_side = select(-face, face, sides.x > 0.0);
+        let shadow = shadow_factor(rel, lit_side) * sun_visibility;
+        if (shadow > 0.0 && sides.x > 0.0 && n_dot_l > 0.0) {
+            let h = normalize(l + v);
+            let spec = d_ggx(saturate(dot(n, h)), roughness) * v_smith_ggx_correlated(n_dot_v, n_dot_l, roughness)
+                * f_schlick(f0, saturate(dot(l, h)));
+            let contact = contact_shadow(rel, face);
+            color += (diffuse_color * INV_PI + spec) * (n_dot_l * sides.x * contact * shadow) * sun_light;
+        }
+        if (shadow > 0.0 && sides.y > 0.0) {
+            color += through_color * (thin_surface_through(n_dot_l_raw, v, l) * sides.y * shadow) * sun_light;
+        }
+    } else if (!thin && dot(sun_light, sun_light) > 0.0) {
         var shadow = shadow_factor(rel, n) * sun_visibility;
         if (shadow > 0.0 && n_dot_l_raw > 0.0) {
             shadow *= contact_shadow(rel, n);
@@ -543,6 +683,14 @@ fn shade_surface_shadowed(s: Surface, rel: vec3<f32>, sun_visibility: f32) -> ve
         let h = normalize(pl + v);
         let spec = d_ggx(saturate(dot(n, h)), max(roughness, 0.02)) *
             v_smith_ggx_correlated(n_dot_v, nl, roughness) * f_schlick(f0, saturate(dot(pl, h)));
+        if (thin) {
+            // Reflected from the side in view, let through from the far side.
+            let lit = thin_surface_sides(face, pl);
+            let reflected = (diffuse_color * INV_PI + spec) * (nl * lit.x);
+            let through = through_color * (thin_surface_through(dot(n, pl), v, pl) * lit.y);
+            color += (reflected + through) * light.color_radius.rgb * falloff;
+            continue;
+        }
         let wrap = saturate((dot(n, pl) + s.subsurface) / (1.0 + s.subsurface));
         color += (diffuse_color * INV_PI * max(nl, wrap * s.subsurface) + spec * nl) * light.color_radius.rgb * falloff;
     }
@@ -551,7 +699,7 @@ fn shade_surface_shadowed(s: Surface, rel: vec3<f32>, sun_visibility: f32) -> ve
     // creases by the material's and the screen-space ambient occlusion.
     let sky_vis = sky_visibility(rel, n);
     let fill = frame.ambient.rgb;
-    let irradiance = ((sky_ambient(n) - fill) * sky_vis + fill) * PI;
+    let irradiance = ((sky_ambient_covered(n, sky_vis) - fill) * sky_vis + fill) * PI;
     // Rough surfaces reflect around a direction between the mirror direction and the normal
     // (Lagarde and de Rousiers 2014).
     let r = reflect(-v, n);
@@ -561,6 +709,10 @@ fn shade_surface_shadowed(s: Surface, rel: vec3<f32>, sun_visibility: f32) -> ve
     let env_brdf = env_brdf_approx(f0, s.roughness, n_dot_v);
     let visibility = min(s.occlusion, screen_ao(rel));
     color += diffuse_color * irradiance * INV_PI * ao_multibounce(visibility, diffuse_color);
+    // Sky light shining through a thin sheet from behind.
+    if (translucent) {
+        color += through_color * ((sky_ambient_covered(-n, sky_vis) - fill) * sky_vis + fill) * visibility;
+    }
     // Light bounced from nearby surfaces (its rays already stop at whatever occludes them).
     color += diffuse_color * screen_gi(rel);
     color += spec_env * env_brdf * specular_occlusion(n_dot_v, visibility, roughness);
@@ -615,11 +767,60 @@ fn fog_sky_light() -> vec3<f32> {
 
 // Radiance (cd/m^2, not pre-exposed) of height fog thick enough to hide everything behind it,
 // seen along `dir` with the fog at `at`: sunlight through the air with the fog's phase function
-// and sky light, both scaled by `lit` (the open sky the fog sees), plus the ambient fill. No
-// shadows: this is the fog beyond the volumetric range (or all of it with volumetrics off).
-fn height_fog_radiance(dir: vec3<f32>, at: vec3<f32>, lit: f32) -> vec3<f32> {
-    let sun = frame.sun_color.rgb * sun_transmittance(at) * henyey_greenstein(dot(dir, frame.sun_dir.xyz), frame.fog_color.w);
-    return frame.fog_color.rgb * ((sun + fog_sky_light()) * lit + frame.ambient.rgb);
+// (`sun`: the share of the fog it reaches, `height_fog_sun_visibility`) and sky light, both
+// scaled by `lit` (the open sky the fog sees), plus the ambient fill. This is the fog beyond
+// the volumetric range (or all of it with volumetrics off).
+fn height_fog_radiance(dir: vec3<f32>, at: vec3<f32>, lit: f32, sun: f32) -> vec3<f32> {
+    let sunlight = frame.sun_color.rgb * sun_transmittance(at) * henyey_greenstein(dot(dir, frame.sun_dir.xyz), frame.fog_color.w);
+    return frame.fog_color.rgb * ((sunlight * sun + fog_sky_light()) * lit + frame.ambient.rgb);
+}
+
+// Whether sunlight reaches camera-relative point `rel` in the air past the far shadow map's
+// casters (mountains, terrain, big buildings): one filtered tap, 1 outside the map.
+fn far_shadow_sun(rel: vec3<f32>) -> f32 {
+    let params = frame.far_shadow_params;
+    let lp = frame.far_shadow * vec4<f32>(rel, 1.0);
+    let uv = lp.xy * vec2<f32>(0.5, -0.5) + 0.5;
+    if (any(uv < vec2(0.0)) || any(uv > vec2(1.0)) || lp.z > 1.0) { return 1.0; }
+    // Two texels toward the sun, so air just above the ground isn't shaded by the ground's own
+    // texels.
+    let z_ref = lp.z - 2.0 * params.y * params.z;
+    return textureSampleCompareLevel(shadow_map, shadow_sampler, uv, i32(params.w), z_ref);
+}
+
+// The sunlit share of the light the height fog between `t0` and `t1` meters along `dir` scatters
+// toward the camera, from the far shadow map: haze in the shadow of a mountain or a ridge doesn't
+// glow, so a mountain with the sun behind it keeps its contrast instead of hiding behind sunlit
+// haze, and low sun casts mountain shadows into the valley's haze. `tr` is the fog's
+// transmittance over the segment. The samples sit at equal steps of what the fog scatters
+// (1 - transmittance), so a thin layer of ground haze is sampled where the ray crosses it.
+// 1 without the far shadow map.
+const HAZE_SHADOW_SAMPLES: i32 = 8;
+
+fn height_fog_sun_visibility(dir: vec3<f32>, t0: f32, t1: f32, tr: f32, noise: f32) -> f32 {
+    if (frame.far_shadow_params.x <= 0.0 || frame.sun_color.w < 0.5 || tr >= 1.0) { return 1.0; }
+    let falloff = max(frame.fog.y, 1e-5);
+    let density = max(frame.fog.x, 1e-12);
+    let ha = max(fog_height(dir * t0) - frame.fog.z, -100.0);
+    let hb = max(fog_height(dir * t1) - frame.fog.z, -100.0);
+    let len = t1 - t0;
+    let dh = hb - ha;
+    let ea = exp(-falloff * ha);
+    var sum = 0.0;
+    for (var i = 0; i < HAZE_SHADOW_SAMPLES; i++) {
+        // Optical depth from t0 at which this share of the segment's scattering is reached,
+        // then where along the ray the fog adds up to it (the inverse of
+        // `height_fog_optical_depth`).
+        let tau = -log(1.0 - (f32(i) + noise) / f32(HAZE_SHADOW_SAMPLES) * (1.0 - tr));
+        var t = tau / (density * ea);
+        if (abs(dh) > 0.01) {
+            let slope = dh / len;
+            let e = max(ea - tau * falloff * slope / density, 1e-30);
+            t = (-log(e) / falloff - ha) / slope;
+        }
+        sum += far_shadow_sun(dir * (t0 + clamp(t, 0.0, len)));
+    }
+    return sum / f32(HAZE_SHADOW_SAMPLES);
 }
 
 // Volumetric fog between the camera and view depth `depth` (meters, up to the range) in the
@@ -723,13 +924,23 @@ fn limit_fog_opacity(fog: vec4<f32>) -> vec4<f32> {
     return vec4<f32>(fog.rgb * (frame.fog.w / max(1.0 - fog.a, 1e-4)), min_t);
 }
 
-// Applies fog and atmospheric haze to pre-exposed color seen at camera-relative `rel`.
-//
+// Fog and atmospheric haze between the camera and a surface at camera-relative `rel`, in two
+// parts: the light they scatter toward the camera (pre-exposed) and the share of the surface's
+// own light that gets through, per channel (the air dims blue more than red). What `apply_fog`
+// applies; use it directly where the two parts are needed apart (particles and smoke blended
+// over the scene: `color * transmittance` for what they let through, `inscatter` once).
+struct SurfaceFog {
+    inscatter: vec3<f32>,
+    transmittance: vec3<f32>,
+};
+
 // Within `RenderSettings::volumetric_fog_range` the fog comes from the volumetric fog (height
 // fog and fog volumes, with light shafts, sky occlusion and lamps); beyond it the height fog
-// continues analytically from the end of the range, so nothing is counted twice. With
-// volumetric fog off the analytic height fog starts at the camera.
-fn apply_fog(color: vec3<f32>, rel: vec3<f32>) -> vec3<f32> {
+// continues analytically from the end of the range, so nothing is counted twice, its sunlight
+// shaded by the far shadow map's mountains (`height_fog_sun_visibility`). With
+// volumetric fog off the analytic height fog starts at the camera. The atmosphere's aerial
+// perspective comes on top.
+fn surface_fog(rel: vec3<f32>) -> SurfaceFog {
     let dist = length(rel);
     let dir = rel / max(dist, 1e-4);
     // In-scattered light (pre-exposed) and transmittance between the camera and the point.
@@ -747,19 +958,30 @@ fn apply_fog(color: vec3<f32>, rel: vec3<f32>) -> vec3<f32> {
             // Haze inside caves and rooms is lit by neither the sky nor the sun (it still hides
             // what's behind it).
             let lit = fog_sky_visibility(rel);
-            let l = pre_expose(height_fog_radiance(dir, dir * start, lit)) * (1.0 - tr);
+            let sun = height_fog_sun_visibility(dir, start, dist, tr, frame_noise(pixel_of(rel)));
+            let l = pre_expose(height_fog_radiance(dir, dir * start, lit, sun)) * (1.0 - tr);
             fog = vec4<f32>(fog.rgb + l * fog.a, fog.a * tr);
         }
     }
     fog = limit_fog_opacity(fog);
-    var c = color * fog.a + fog.rgb;
+    var out: SurfaceFog;
+    out.inscatter = fog.rgb;
+    out.transmittance = vec3<f32>(fog.a);
     // Aerial perspective: the atmosphere between the camera and distant geometry (negligible
     // closer than a couple hundred meters).
     if (dist > 200.0) {
         let a = atmosphere(vec3(0.0), dir, dist, 8);
-        c = c * a.transmittance + pre_expose(a.radiance * frame.sun_color.rgb);
+        out.inscatter = out.inscatter * a.transmittance + pre_expose(a.radiance * frame.sun_color.rgb);
+        out.transmittance *= a.transmittance;
     }
-    return c;
+    return out;
+}
+
+// Applies fog and atmospheric haze (`surface_fog`) to pre-exposed color seen at camera-relative
+// `rel`.
+fn apply_fog(color: vec3<f32>, rel: vec3<f32>) -> vec3<f32> {
+    let f = surface_fog(rel);
+    return color * f.transmittance + f.inscatter;
 }
 
 // Volumetric fog in front of the sky (up to the volumetric range) for pre-exposed sky color
