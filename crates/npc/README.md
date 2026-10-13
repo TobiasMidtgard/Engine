@@ -75,14 +75,20 @@ rolls over, kneels, takes up its weapon and stands into its guard. Animals plant
 test fails if a hoof or paw on the ground slides) in each species' footfalls: deer walk in
 lateral sequence, trot and gallop (rotary) and bound away when they bolt from a stand, wolves
 walk, trot, lope and gallop, rabbits hop and half-bound with the hind feet landing ahead of the
-fore feet. Strides lengthen and quicken with speed; the spine flexes and extends through the
-gallop, the body flies an arc when no foot is down, sits back setting off and pitches forward
-stopping, leans into turns and breathes harder after a run, and heads steady against the bob.
-Ears swivel toward noises and threats and flick, tails swish (a deer's flags up when alarmed),
-grazing deer tear the grass and look up to chew and watch, an alert animal throws its head up
-toward what it heard and freezes, and states blend into each other. Starlings beat their
-wings (extended downstroke, folded upstroke), bound on folded wings between bursts, glide,
-bank into turns, push off with their legs to take off and flare to land. With
+fore feet. Strides lengthen and quicken with speed; deer and wolf backs bend at the loin,
+arching as the hind feet swing up past the fore feet and hollowing as the legs stretch out
+through the gallop, the body flies an arc when no foot is down, sits back setting off and
+pitches forward stopping, leans into turns and breathes harder after a run, and heads steady
+against the bob. Ears swivel toward noises and threats and flick, tails swish (a deer's flags
+up when alarmed), grazing deer tear the grass and look up to chew and watch, an alert animal
+turns its head toward what it heard before its neck follows and freezes, and states blend
+into each other. A hunting wolf stalks low with its head on its prey, rushes from the stalk
+crouched, reaches with jaws open as it closes and snaps, grips and shakes on the bite; a
+killed animal goes down forequarters first (onto its chest and knees on the run), then over
+onto its side away from the blow, and settles. Starlings beat their wings (extended
+downstroke, folded upstroke), bound on folded wings between bursts, glide, bank into turns,
+push off with their legs to take off and flare to land, and tumble out of the air when
+killed. With
 `NpcSettings::show_intent`, rings and lines on the ground show where each NPC is going and why
 (blue cover, orange flank, purple high ground, grey fall back, yellow search).
 
@@ -99,8 +105,9 @@ All art is generated in code (`src/art`), since no third-party art may go in the
   shares one mesh per piece.
 - **Wildlife** (`art/animals.rs`): sculpted red deer (stags with antlers and a neck mane),
   grey wolves and European rabbits, with fur textures that follow the coat, baked ambient
-  occlusion, IK legs and planted feet, and starlings with iridescent spotted plumage and
-  feathered wings that fold, spread and beat.
+  occlusion, IK legs and planted feet, deer and wolf torsos in two halves that bend at the
+  loin over a closed seam, and starlings with iridescent spotted plumage and feathered wings
+  that fold, spread and beat.
 - **Arena** (`art/arena.rs`): a sandstone amphitheater with arched stands, gates with
   portcullises, fluted columns, banners, braziers with flickering fire and light, rubble,
   timber barricades, crates and drums, all with baked PBR textures. The floor (`art/arena/
@@ -242,9 +249,10 @@ The crate depends only on core crates (`engine_core`, `engine_world`, `engine_re
   paths go around a wall where it moved to, not where it was.
 - `tests/art_fighters.rs`, `tests/art_animals.rs`, `tests/art_arena.rs`: close-up renders of
   the fighters, wildlife and arena in chosen poses and lights, flipbook strips of the wildlife
-  on the move (gaits, starts and stops, an alarm, a bend, a stalk, a starling's flight;
-  `NPC_STRIPS=deer-walk,...` shoots only some), plus triangle and build-time budgets and a
-  check that the arena art sits on every collider.
+  on the move (gaits, starts and stops, an alarm, a bend, a stalk, a wolf's hunt from stalk
+  to bite, a deer killed at a gallop, a starling's flight; `NPC_STRIPS=deer-walk,...` shoots
+  only some), plus triangle and build-time budgets and a check that the arena art sits on
+  every collider.
 - `tests/screenshots.rs`: renders the arena, its stands, a cover fight, the sparring lane, the
   duel and the meadow on a GPU or lavapipe and checks the fighters and deer show up.
   `NPC_SCREENSHOT_DIR=dir` keeps the PNGs.
