@@ -312,18 +312,21 @@ pub fn statue_pose(p: &mut [BonePose]) -> (Vec3, Quat) {
     set(p, Human::CHEST_I, chest, chest_rot);
     set(p, Human::NECK_I, neck, neck_rot);
     set(p, Human::HEAD_I, head, head_rot);
-    // Arms: upper arm and forearm directions (model space).
-    for (side, arm, upper, fore) in [
+    // Arms: upper arm, forearm and hand directions (model space). The raised hand bends back
+    // at the wrist, its fingers resting toward the shoulder.
+    for (side, arm, upper, fore, hand) in [
         (
             -1.0f32,
             Human::ARM_L,
             Vec3::new(-0.25, -0.9, -0.25),
             Vec3::new(0.3, 0.75, -0.45),
+            Vec3::new(0.1, 0.85, 0.5),
         ),
         (
             1.0,
             Human::ARM_R,
             Vec3::new(0.12, -0.99, 0.02),
+            Vec3::new(0.08, -0.95, -0.25),
             Vec3::new(0.08, -0.95, -0.25),
         ),
     ] {
@@ -332,7 +335,7 @@ pub fn statue_pose(p: &mut [BonePose]) -> (Vec3, Quat) {
         let wrist = elbow + fore.normalize() * Human::FOREARM;
         set(p, arm, shoulder, aim(shoulder, elbow));
         set(p, arm + 1, elbow, aim(elbow, wrist));
-        set(p, arm + 2, wrist, aim(elbow, wrist));
+        set(p, arm + 2, wrist, aim(wrist, wrist + hand));
     }
     // Legs: the standing one nearly straight, the free one forward and out on the ball of
     // its foot, toes turned out.
