@@ -276,8 +276,8 @@ pub fn spawn_demos(
                 engine_destruction::demo::spawn_demo(commands, z.center);
                 // The burning storehouse has straw on its floor (it goes up fast and grows back
                 // for the next loop) and stands in a bare earth yard ringed by green grass, so
-                // its fire stays a house fire: no grass fire runs off across the valley and
-                // its embers die where they land.
+                // its fire stays a house fire: no grass fire runs off across the valley, and
+                // embers on the wind die where they land (most come down well inside 60 m).
                 let barn = z.center + DVec3::from_array(engine_destruction::barn::BARN);
                 commands.spawn((
                     Name::new("Storehouse straw floor"),
@@ -300,7 +300,7 @@ pub fn spawn_demos(
                 commands.spawn((
                     Name::new("Storehouse green grass"),
                     Transform::from_translation(barn),
-                    engine_fire::FuelPatch::grass(engine_fire::PatchShape::Disc { radius: 35.0 })
+                    engine_fire::FuelPatch::grass(engine_fire::PatchShape::Disc { radius: 60.0 })
                         .with_moisture(1.0)
                         .with_priority(5),
                 ));
