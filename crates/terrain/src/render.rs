@@ -32,6 +32,8 @@ const SLOTS_PER_PAGE: u32 = 256;
 const STALE_FRAMES: u64 = 300;
 /// Detail of the patches drawn into the far shadow map, relative to the view's.
 const FAR_SHADOW_DETAIL: f64 = 0.5;
+/// Most [`TerrainSettings::patch_budget`] may raise the detail.
+const MAX_BOOST: f64 = 4.0;
 
 /// Per-draw data (instance vertex buffer).
 #[repr(C)]
@@ -258,6 +260,8 @@ struct PlanetState {
     /// The shape's rayed craters, packed for the shader.
     rays: [[f32; 4]; MAX_RAYED],
     rayed: usize,
+    /// Detail multiplier from [`TerrainSettings::patch_budget`] (1 = none).
+    boost: f64,
 }
 
 impl PlanetState {
@@ -279,6 +283,7 @@ impl PlanetState {
             last_position: None,
             rays,
             rayed,
+            boost: 1.0,
         }
     }
 }
@@ -1007,6 +1012,7 @@ impl RenderFeature for TerrainFeature {
         let mut planet_gpu = Vec::with_capacity(entities.len());
         let mut instances: Vec<ChunkInstance> = Vec::new();
         let mut built_total = 0usize;
+        let mut max_boost = 1.0f64;
         let max_slots = settings.max_patches as u32;
 
         for (pi, e) in entities.iter().enumerate() {
@@ -1047,7 +1053,7 @@ impl RenderFeature for TerrainFeature {
                 let rel = (pos + rot * c - origin).as_vec3();
                 frustum.intersects_sphere(rel, r as f32)
             };
-            let split = settings.split_factor * t.config.detail.max(0.05) as f64;
+            let split = settings.split_factor * t.config.detail.max(0.05) as f64 * state.boost;
 
             // Select; after a jump (many patches missing) build until the view is complete.
             let mut sel;
@@ -1092,6 +1098,29 @@ impl RenderFeature for TerrainFeature {
                     });
                     break;
                 }
+            }
+
+            // Few patches for the planet's share of the view (seen from orbit): split finer,
+            // easing toward the detail that fills the budget. The patch count grows with the
+            // square of the split factor.
+            if settings.patch_budget > 0 {
+                let dist = cam_local.length().max(1.0);
+                let angle = (src.map.radius / dist).min(1.0).asin();
+                let share = if view.fov_y > 0.0 {
+                    (angle / (0.5 * view.fov_y as f64)).min(1.0).powi(2)
+                } else {
+                    1.0
+                };
+                let budget = settings.patch_budget as f64 * share;
+                let needed = (sel.draw.len() + sel.missing.len()).max(1) as f64;
+                let base = needed / (state.boost * state.boost);
+                let want = (budget / base).sqrt().clamp(1.0, MAX_BOOST);
+                // While much of the view is still streaming in (after a jump), its count falls
+                // short of what it needs: then the detail only eases down.
+                if want < state.boost || sel.missing.len() * 10 <= sel.draw.len() {
+                    state.boost += (want - state.boost) * 0.2;
+                }
+                max_boost = max_boost.max(state.boost);
             }
 
             // The far shadow map: the same walk from the camera over the ground the map covers,
@@ -1298,6 +1327,7 @@ impl RenderFeature for TerrainFeature {
             );
             d.set("terrain.patches_resident", self.pool.used() as f64);
             d.set("terrain.patches_built", built_total as f64);
+            d.set("terrain.detail_boost", max_boost);
         }
     }
 

@@ -39,7 +39,8 @@ pub struct TerrainVertex {
     pub normal: [i16; 4],
     /// Height above sea level, meters (the sea floor depth under ocean vertices).
     pub altitude: f32,
-    /// Moisture, temperature (−60..+60 °C), mare darkness, flags (unorm8).
+    /// Moisture, temperature (−130..+60 °C, so the polar ice of Mars fits), mare darkness,
+    /// flags (unorm8).
     pub climate: [u8; 4],
     /// Weights of the painted layers 1..=10 (unorm8, see `edits::PAINT_NAMES`), then regional
     /// variety and local patches. One weight per layer, so they interpolate across triangles
@@ -333,7 +334,7 @@ pub fn build_chunk(src: &ChunkSource, key: NodeKey) -> ChunkMesh {
                 altitude: s.height as f32,
                 climate: [
                     (s.moisture.clamp(0.0, 1.0) * 255.0) as u8,
-                    (((s.temperature_c + 60.0) / 120.0).clamp(0.0, 1.0) * 255.0) as u8,
+                    (((s.temperature_c + 130.0) / 190.0).clamp(0.0, 1.0) * 255.0) as u8,
                     (s.mare.clamp(0.0, 1.0) * 255.0) as u8,
                     encode_convexity(convexity) | if ocean { FLAG_OCEAN } else { 0 },
                 ],
