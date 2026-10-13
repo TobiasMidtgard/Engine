@@ -241,6 +241,33 @@ mod tests {
     }
 
     #[test]
+    fn volumetric_clouds_switch_the_renderers_flat_cloud_layer_off_and_back() {
+        let mut app = app();
+        app.world
+            .insert_resource(engine_render::RenderSettings::default());
+        app.update();
+        let layer = |app: &App| {
+            app.world
+                .resource::<engine_render::RenderSettings>()
+                .sky_cloud_layer
+        };
+        assert!(!layer(&app), "flat layer drawn under the volumetric clouds");
+        app.world.resource_mut::<render::CloudSettings>().enabled = false;
+        app.update();
+        assert!(layer(&app), "flat layer not back with the clouds off");
+        // Someone else's choice stays: off before the clouds came on, off after they go.
+        app.world
+            .resource_mut::<engine_render::RenderSettings>()
+            .sky_cloud_layer = false;
+        app.update();
+        app.world.resource_mut::<render::CloudSettings>().enabled = true;
+        app.update();
+        app.world.resource_mut::<render::CloudSettings>().enabled = false;
+        app.update();
+        assert!(!layer(&app));
+    }
+
+    #[test]
     fn ground_api_finds_the_dips_right_after_the_player_moves() {
         // A teleport moves the ground grid, and a tour sets the ground before the ground
         // simulation has looked at the new place: water must still only go where it pools.
