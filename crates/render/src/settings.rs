@@ -6,9 +6,15 @@ use engine_core::prelude::*;
 /// Tonemapping curve.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum Tonemapper {
-    /// Filmic, hue-preserving; handles very bright colors gracefully (default).
+    /// AgX with Blender's "Punchy" look: AgX's graceful highlights with more contrast and
+    /// color, closer to a camera's picture (default).
     #[default]
+    AgXPunchy,
+    /// Filmic, hue-preserving; handles very bright colors gracefully. Flatter than `AgXPunchy`.
     AgX,
+    /// Khronos PBR Neutral: keeps base colors as authored up to bright highlights (product
+    /// shots, checking materials).
+    Neutral,
     /// The classic ACES filmic look (more contrast, saturated highlights).
     Aces,
     Reinhard,
@@ -42,6 +48,17 @@ pub enum DebugView {
     SkyVisibility,
     /// Screen-space ambient occlusion (white = open, black = crevices and contact).
     AmbientOcclusion,
+    /// Screen-space reflections: what each surface reflects from the screen, times how much of
+    /// its reflection that covers (black where only the sky is reflected).
+    Reflections,
+    /// Screen-space global illumination: the light bounced onto each surface from nearby
+    /// surfaces (before it is multiplied by the surface's color).
+    IndirectLight,
+    /// Virtual geometry: every cluster in its own color (other meshes gray).
+    Clusters,
+    /// Virtual geometry: each cluster's level of detail, from blue (full detail) through cyan,
+    /// green, yellow, orange, red and magenta to white (7 or more halvings).
+    ClusterLevels,
 }
 
 /// Renderer-wide quality and look settings.
@@ -75,6 +92,20 @@ pub struct RenderSettings {
     pub ao_radius: f32,
     /// 0..2 strength of the ambient occlusion (1 = physical).
     pub ao_intensity: f32,
+    /// Screen-space reflections: smooth and glossy surfaces reflect what is on screen (as of
+    /// the previous frame), blending into the prefiltered sky where the reflection leaves the
+    /// screen or is hidden.
+    pub screen_space_reflections: bool,
+    /// Surfaces rougher than this (perceptual roughness) reflect only the sky.
+    pub ssr_max_roughness: f32,
+    /// Screen-space global illumination: diffuse light bounced off nearby surfaces that are on
+    /// screen (sunlit walls tint the ground, lamps and emissive surfaces light their
+    /// surroundings). Builds up over a few frames.
+    pub screen_space_gi: bool,
+    /// Strength of the bounced light (1 = physical).
+    pub gi_intensity: f32,
+    /// Scales the number of blades in every `GrassField` (quality setting; 0 = no grass).
+    pub grass_density: f32,
     pub anti_aliasing: AntiAliasing,
     /// 0..1 sharpening after temporal anti-aliasing (restores texture detail).
     pub sharpness: f32,
@@ -103,6 +134,23 @@ pub struct RenderSettings {
     pub night_exposure_bias: f32,
     /// 0..1 loss of color in very dark areas (scotopic vision: moonlight looks blue-gray).
     pub night_desaturation: f32,
+    /// Virtual geometry: dense opaque meshes are drawn as clusters whose level of detail and
+    /// culling are picked on the GPU every frame (see `virtual_geometry`). Off = every mesh
+    /// takes the regular instanced path.
+    pub virtual_geometry: bool,
+    /// Meshes with at least this many triangles take the cluster path. Smaller ones (props,
+    /// debris, fragments) are cheaper instanced; `MeshRenderer::virtual_geometry = false` keeps
+    /// a dense mesh off it too.
+    pub virtual_geometry_min_triangles: u32,
+    /// Largest geometric error a cluster may show on screen, pixels (lower = more triangles).
+    pub cluster_error_px: f32,
+    /// The same for shadow maps, in shadow map texels (cascade texels are much larger than
+    /// screen pixels, so shadows use coarser clusters than the camera). The default of 2 halves
+    /// the shadow triangles of 1 with no visible change under the shadow filter.
+    pub cluster_shadow_error_texels: f32,
+    /// Texels per side of each map of a generated material preset (`StandardMaterial::preset`):
+    /// a power of two, 64..4096. Each preset is generated once per size, on first use.
+    pub material_texture_size: u32,
 }
 
 impl Default for RenderSettings {
@@ -120,9 +168,14 @@ impl Default for RenderSettings {
             ambient_occlusion: true,
             ao_radius: 1.5,
             ao_intensity: 1.0,
+            screen_space_reflections: true,
+            ssr_max_roughness: 0.6,
+            screen_space_gi: true,
+            gi_intensity: 1.0,
+            grass_density: 1.0,
             anti_aliasing: AntiAliasing::Taa,
             sharpness: 0.3,
-            tonemapper: Tonemapper::AgX,
+            tonemapper: Tonemapper::AgXPunchy,
             bloom_intensity: 0.04,
             saturation: 1.05,
             contrast: 1.0,
@@ -137,6 +190,11 @@ impl Default for RenderSettings {
             sky_occlusion_size: 512,
             night_exposure_bias: 2.5,
             night_desaturation: 0.7,
+            virtual_geometry: true,
+            virtual_geometry_min_triangles: 50_000,
+            cluster_error_px: 1.0,
+            cluster_shadow_error_texels: 2.0,
+            material_texture_size: 1024,
         }
     }
 }
