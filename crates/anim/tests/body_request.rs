@@ -183,6 +183,58 @@ fn a_horse_on_request_gallops_from_its_motion() {
 }
 
 #[test]
+fn a_dog_on_request_is_built_at_its_height_and_gallops() {
+    let mut app = app();
+    let dog = requester(
+        &mut app,
+        "Trail dog",
+        BodyRequest::new("dog").with_height(0.4).with_seed(4),
+    );
+    app.update();
+    let w = &app.world;
+    assert_eq!(w.get::<Body>(dog).map(|b| b.kind), Some(BodyKind::Dog));
+    assert_eq!(
+        w.get::<engine_anim::AnimatorSettings>(dog)
+            .map(|s| s.skeleton.as_str()),
+        Some("dog@40cm"),
+        "a skeleton of the asked size"
+    );
+    let paw = w
+        .get::<SkeletonPose>(dog)
+        .and_then(|p| Some(p.bones[p.index_of("front_paw_l")?].translation.y))
+        .expect("front paw in the pose");
+    assert!((paw - 0.035 * 0.4 / 0.56).abs() < 0.01, "paw at {paw}");
+    let fur = w
+        .get::<engine_anim::SkinnedMeshRenderer>(dog)
+        .map(|r| r.material.fur_length)
+        .unwrap_or(0.0);
+    assert!(fur > 0.005, "a furred coat ({fur} m)");
+
+    walk(&mut app, dog, 0.9, 3.0);
+    let walking = app
+        .world
+        .get::<LeggedGait>(dog)
+        .unwrap()
+        .stage_name()
+        .to_string();
+    footsteps(&mut app, dog);
+    walk(&mut app, dog, 8.0, 3.0);
+    let gait = app.world.get::<LeggedGait>(dog).unwrap();
+    assert_eq!(walking, "walk");
+    assert_eq!(gait.stage_name(), "gallop", "at {} m/s", gait.speed());
+    let heard = app.world.resource::<Heard>();
+    assert!(
+        heard
+            .contacts
+            .iter()
+            .any(|c| c.0 == dog && c.1 == ContactKind::Paw),
+        "paw falls reach the ground"
+    );
+    let (_, events) = footsteps(&mut app, dog);
+    assert!(events >= 12, "{events} paw-fall events in 3 s of galloping");
+}
+
+#[test]
 fn unknown_kinds_get_no_body_and_set_parameters_stay_with_the_requester() {
     let mut app = app();
     let dragon = requester(&mut app, "Dragon", BodyRequest::new("dragon"));
