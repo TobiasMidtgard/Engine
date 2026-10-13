@@ -139,6 +139,9 @@ pub struct BodyRequest {
     /// A particular model, as an asset path under the fetched assets
     /// (`anim/characters/walker.glb`). `None` lets the module choose (by `seed`).
     pub model: Option<String>,
+    /// Standing height of a person or shoulder height of an animal, m (children, a small
+    /// dog). `None` lets the module choose.
+    pub height: Option<f32>,
     /// Varies whatever the module varies (build, clothes, coat), the same way every run.
     pub seed: u64,
 }
@@ -154,6 +157,7 @@ impl BodyRequest {
         Self {
             kind: kind.into(),
             model: None,
+            height: None,
             seed: 0,
         }
     }
@@ -164,6 +168,11 @@ impl BodyRequest {
 
     pub fn with_model(mut self, model: impl Into<String>) -> Self {
         self.model = Some(model.into());
+        self
+    }
+
+    pub fn with_height(mut self, height: f32) -> Self {
+        self.height = Some(height);
         self
     }
 
@@ -182,7 +191,7 @@ pub(crate) fn register(app: &mut App) {
         .register_component::<Ragdoll>("0 = animated, 1 = limp ragdoll; between = physical animation.")
         .register_component::<BodyRequest>(
             "Ask the animation module for a body (kind: human, horse, dog, spider; optional model \
-             path; seed) animated from the entity's own motion.",
+             path and height in m; seed) animated from the entity's own motion.",
         );
 }
 
@@ -196,7 +205,9 @@ mod tests {
         assert_eq!(horse, BodyRequest::new("horse").with_seed(7));
         let anyone: BodyRequest = serde_json::from_str("{}").unwrap();
         assert_eq!(anyone, BodyRequest::human(0));
-        let walker = BodyRequest::human(3).with_model("anim/characters/walker.glb");
+        let walker = BodyRequest::human(3)
+            .with_model("anim/characters/walker.glb")
+            .with_height(1.78);
         let back: BodyRequest =
             serde_json::from_str(&serde_json::to_string(&walker).unwrap()).unwrap();
         assert_eq!(back, walker);
