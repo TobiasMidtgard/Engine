@@ -22,6 +22,7 @@
 
 use bevy_ecs::message::MessageCursor;
 use engine_core::prelude::*;
+use engine_render::GrassBender;
 use engine_world::physics::{Collider, ColliderShape, PhysicsQueries, QueryFilter, RigidBody};
 use engine_world::{
     BurnState, Combustible, ContactKind, DamageEvent, DamageKind, FocusPoints, Gravity, Ground,
@@ -66,6 +67,13 @@ pub struct FallingTree {
     pub years_dead: f32,
     /// After landing: blend from the impact pose to the resting pose (0..1).
     pub settle: Option<(f32, Transform)>,
+}
+
+/// On a child of a falling tree: presses the meadow grass under it ([`GrassBender`]) as the
+/// trunk and crown come down, and lets go `linger_secs` after the log has settled.
+#[derive(Component, Debug, Clone, Copy)]
+pub struct GrassPress {
+    pub linger_secs: f32,
 }
 
 /// A static collider owned by a plant or log (a separate entity, so the plant's non-uniform
@@ -285,6 +293,25 @@ pub fn fell_tree(world: &mut World, entity: Entity, dir: Vec3) -> Option<Entity>
             },
         ))
         .id();
+    // Grass parts under the trunk as it comes down and the crown presses it flat. Points on
+    // the model's axis, so they follow the falling transform.
+    let trunk_r = (sp.trunk_radius_m * plant.size * plant.genes.crown).max(0.15);
+    let crown_r = (sp.crown_radius_m * plant.size * plant.genes.crown).max(0.8);
+    let along = |s: f32| (cut + (height - cut) * s) as f64;
+    let presses = [
+        (along(0.12), trunk_r * 2.5),
+        (along(0.32), trunk_r * 2.5),
+        (along(0.52), trunk_r * 2.5),
+        (along(0.74), crown_r),
+    ];
+    world.spawn_batch(presses.map(|(y, radius)| {
+        (
+            Transform::from_xyz(0.0, y, 0.0),
+            GrassBender { radius },
+            GrassPress { linger_secs: 4.0 },
+            ChildOf(log),
+        )
+    }));
     world.write_message(NoiseEvent {
         position: hinge,
         radius: 30.0 + 40.0 * plant.size,
@@ -312,6 +339,14 @@ fn model_spin(genes: &Genes) -> Quat {
     plant_pose(&plant).0
 }
 
+/// Years a log keeps its twigs; after that it is drawn bare (the plant's `log` mesh).
+pub const LOG_BARE_YEARS: f32 = 1.2;
+
+/// Years a felled crown stays green before its leaves brown. Longer than one ecology step of
+/// a time-lapse region (a quarter year in the showcase forest), so a tree that just came down
+/// lies green for a while before the clock browns it.
+pub const LOG_GREEN_YEARS: f32 = 0.3;
+
 fn log_scale(genes: &Genes, size: f32) -> Vec3 {
     let s = size.max(0.02);
     Vec3::new(s * genes.crown, s * genes.height, s * genes.crown)
@@ -332,13 +367,17 @@ pub fn falling_transform(f: &FallingTree, pose: &LogPose, sp: &PlantSpecies) -> 
 }
 
 /// Where a log comes to rest beside its stump: the butt slides off the stump onto the ground,
-/// the crown props the top end up a little, and it lies along the slope.
+/// the crown props the top end up a little, and it lies along the slope. A log that has lain
+/// `years` (with `rot` of its rotting done, 0..1) has lost its crown, so its top end lies on
+/// the ground too, it has sunk into the litter, and its mossy side (the model's +X) is up.
 pub fn log_rest_transform(
     ground: Option<&Ground>,
     stump: DVec3,
     pose: &LogPose,
     size: f32,
     sp: &PlantSpecies,
+    years: f32,
+    rot: f32,
 ) -> Transform {
     let (height, cut) = model_heights(sp);
     let scale = log_scale(&pose.genes, size);
@@ -347,21 +386,53 @@ pub fn log_rest_transform(
     let r = (sp.trunk_radius_m * size * pose.genes.crown).max(0.04);
     let length = ((height - cut) * scale.y).max(0.5);
     let flip = if pose.genes.hue >= 0.0 { 1.0 } else { -1.0 };
+    let old = years >= LOG_BARE_YEARS;
+    let sink = 0.9 - 0.4 * rot.clamp(0.0, 1.0);
     let mut butt = stump + (side * r * 2.2 * flip + dir * r).as_dvec3();
-    butt.y = ground_y(ground, butt) + r as f64 * 0.9;
+    butt.y = ground_y(ground, butt) + (r * sink) as f64;
     let mut tip_p = butt + (dir * length).as_dvec3();
-    let crown_support = (sp.crown_radius_m * size * pose.genes.crown * 0.12).max(r);
+    let crown_support = if old {
+        r * 0.35 * sink
+    } else {
+        (sp.crown_radius_m * size * pose.genes.crown * 0.12).max(r)
+    };
     tip_p.y = ground_y(ground, tip_p) + crown_support as f64;
     let axis = (tip_p - butt).as_vec3().normalize_or(dir);
-    let roll = pose.genes.lean_dir * 3.1;
-    let rotation = Quat::from_axis_angle(axis, roll)
-        * Quat::from_rotation_arc(Vec3::Y, axis)
-        * model_spin(&pose.genes);
+    let lying = Quat::from_rotation_arc(Vec3::Y, axis) * model_spin(&pose.genes);
+    let roll = if old {
+        // Turn the model's +X side (where the log mesh carries its moss) up, give or take.
+        let x = lying * Vec3::X;
+        let up = (Vec3::Y - axis * axis.y).normalize_or(Vec3::Y);
+        axis.dot(x.cross(up)).atan2(x.dot(up)) + 0.4 * pose.genes.lean_dir.sin()
+    } else {
+        pose.genes.lean_dir * 3.1
+    };
+    let rotation = Quat::from_axis_angle(axis, roll) * lying;
     let cut_point = rotation * (scale * Vec3::Y * cut);
     Transform {
         translation: butt - cut_point.as_dvec3(),
         rotation,
         scale,
+    }
+}
+
+/// Let the grass pressed by a falling tree spring back a few seconds after the log has settled
+/// (by then the field no longer grows grass under the log).
+pub fn release_grass_presses(
+    mut commands: Commands,
+    time: Res<Time>,
+    mut presses: Query<(Entity, &ChildOf, &mut GrassPress)>,
+    falling: Query<(), With<FallingTree>>,
+) {
+    let dt = time.delta_secs();
+    for (e, parent, mut press) in &mut presses {
+        if falling.contains(parent.parent()) {
+            continue;
+        }
+        press.linger_secs -= dt;
+        if press.linger_secs <= 0.0 {
+            commands.entity(e).despawn();
+        }
     }
 }
 
@@ -451,7 +522,7 @@ pub fn update_falling_trees(
         let sp = library.get(f.species);
         if let Some((t, from)) = f.settle {
             let t = (t + dt / 0.45).min(1.0);
-            let rest = log_rest_transform(ground, f.stump, pose, f.size, sp);
+            let rest = log_rest_transform(ground, f.stump, pose, f.size, sp, f.years_dead, 0.0);
             let k = t * t * (3.0 - 2.0 * t);
             *transform = from.lerp(&rest, k);
             f.settle = Some((t, from));
@@ -468,7 +539,7 @@ pub fn update_falling_trees(
                         },
                         LogPlaced,
                     ));
-                spawn_log_collider(&mut commands, entity, &rest, sp, f.size, &pose.genes);
+                spawn_log_collider(&mut commands, entity, &rest, sp, f.size, &pose.genes, 0.7);
             }
             continue;
         }
@@ -587,13 +658,28 @@ pub fn place_logs(
 ) {
     for (e, log, pose, mut t) in &mut logs {
         let sp = library.get(log.species);
-        let rest = log_rest_transform(ground.as_deref(), t.translation, pose, log.size, sp);
+        let rot = log.years / log.rot_years.max(0.1);
+        let rest = log_rest_transform(
+            ground.as_deref(),
+            t.translation,
+            pose,
+            log.size,
+            sp,
+            log.years,
+            rot,
+        );
         *t = rest;
         commands.entity(e).insert(LogPlaced);
-        spawn_log_collider(&mut commands, e, &rest, sp, log.size, &pose.genes);
+        let reach = if log.years >= LOG_BARE_YEARS {
+            0.32
+        } else {
+            0.7
+        };
+        spawn_log_collider(&mut commands, e, &rest, sp, log.size, &pose.genes, reach);
     }
 }
 
+/// A capsule along the log from its butt, `reach` of the trunk above the cut long.
 fn spawn_log_collider(
     commands: &mut Commands,
     log: Entity,
@@ -601,11 +687,12 @@ fn spawn_log_collider(
     sp: &PlantSpecies,
     size: f32,
     genes: &Genes,
+    reach: f32,
 ) {
     let (height, cut) = model_heights(sp);
     let r = (sp.trunk_radius_m * size * genes.crown).max(0.04);
     let axis = rest.rotation * Vec3::Y;
-    let length = (height - cut) * rest.scale.y * 0.7;
+    let length = (height - cut) * rest.scale.y * reach;
     let butt = rest.translation + (rest.rotation * (rest.scale * Vec3::Y * cut)).as_dvec3();
     let collider = commands
         .spawn((
@@ -909,6 +996,71 @@ mod tests {
         assert_eq!(body.len(), 3);
         for c in body {
             assert!(c.forward().dot(fall) > 0.99, "{:?} vs {fall}", c.forward());
+        }
+    }
+
+    #[test]
+    fn a_falling_tree_presses_the_grass_until_it_has_settled() {
+        let (mut app, tree) = app_with_oak(0.8);
+        app.update();
+        let log = fell_tree(&mut app.world, tree, Vec3::X).expect("the oak falls");
+        let presses = |app: &mut App| -> Vec<(DVec3, f32)> {
+            app.world
+                .query::<(&GrassBender, &GlobalTransform, &ChildOf)>()
+                .iter(&app.world)
+                .filter(|(_, _, c)| c.parent() == log)
+                .map(|(b, g, _)| (g.translation(), b.radius))
+                .collect()
+        };
+        app.update_n(2);
+        let standing = presses(&mut app);
+        assert_eq!(standing.len(), 4);
+        // Upright: stacked up the trunk, the widest one in the crown.
+        assert!(standing.iter().all(|(p, _)| (p.x - 3.0).abs() < 0.5));
+        assert!(standing[3].1 > standing[0].1 * 2.0);
+        let mut frames = 0;
+        while app.world.get::<FelledLog>(log).is_none() {
+            frames += 1;
+            assert!(frames < 600, "the tree never landed");
+            app.update();
+        }
+        // Down: lying along +X near the ground, still pressing.
+        let down = presses(&mut app);
+        assert_eq!(down.len(), 4);
+        assert!(down.iter().all(|(p, _)| p.y < 3.0), "{down:?}");
+        assert!(down[3].0.x > down[0].0.x + 3.0, "{down:?}");
+        app.update_n(5 * 60);
+        assert!(presses(&mut app).is_empty());
+    }
+
+    #[test]
+    fn old_logs_lie_low_with_their_mossy_side_up() {
+        let lib = PlantLibrary::default();
+        let sp = lib.get(lib.id("oak").unwrap());
+        for k in 0..12 {
+            let pose = LogPose {
+                yaw: k as f32 * 0.7,
+                genes: Genes {
+                    lean_dir: k as f32 * 1.3,
+                    hue: if k % 2 == 0 { 0.4 } else { -0.4 },
+                    ..Default::default()
+                },
+                charred: false,
+            };
+            let fresh = log_rest_transform(None, DVec3::ZERO, &pose, 0.8, sp, 0.0, 0.0);
+            let old = log_rest_transform(None, DVec3::ZERO, &pose, 0.8, sp, 6.0, 0.4);
+            let rotten = log_rest_transform(None, DVec3::ZERO, &pose, 0.8, sp, 12.0, 0.9);
+            // Within half a radian of straight up.
+            assert!((old.rotation * Vec3::X).y > 0.4f32.cos() * 0.98, "{k}");
+            let tip = |t: &Transform| t.translation + (t.rotation * Vec3::Y * 10.0).as_dvec3();
+            assert!(
+                tip(&old).y < tip(&fresh).y,
+                "the crown no longer props it up"
+            );
+            assert!(
+                rotten.translation.y < old.translation.y,
+                "it sinks as it rots"
+            );
         }
     }
 

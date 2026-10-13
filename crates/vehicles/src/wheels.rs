@@ -187,7 +187,8 @@ pub struct Assists {
     /// Never steer more than the front tires can use at this speed (0 off .. 1 strong).
     pub steering_limit: f32,
     /// Stability control: take power away while the car slides sideways past this body
-    /// slip angle, degrees (0 = off; rally and drift cars turn it off).
+    /// slip angle, degrees, and brake the outside front wheel from half of it while the tail
+    /// swings out (0 = off; rally and drift cars turn it off).
     pub stability_deg: f32,
 }
 
@@ -234,6 +235,22 @@ impl Wheels {
     /// Wheels touching the ground.
     pub fn grounded(&self) -> usize {
         self.wheels.iter().filter(|w| w.state.grounded).count()
+    }
+
+    /// Steering lock of the steered wheels at `forward_speed` (m/s), radians: full lock
+    /// shrinks with speed (`steer_at_speed`), so a steering input of 1 turns the wheels this
+    /// far.
+    pub fn steer_lock(&self, forward_speed: f32) -> f32 {
+        let speed_factor =
+            1.0 - (1.0 - self.steer_at_speed) * (forward_speed.abs() / 40.0).min(1.0);
+        let max = self
+            .wheels
+            .iter()
+            .filter(|w| w.steer == SteerInput::Steer)
+            .map(|w| w.max_steer_deg)
+            .reduce(f32::max)
+            .unwrap_or(30.0);
+        max.to_radians() * speed_factor
     }
 
     /// Front-to-back distance between the steered and the fixed wheels, meters.
@@ -366,7 +383,7 @@ pub fn wheels_system(
             let forward_speed = frame.linear.dot(frame.forward());
             let wheelbase = wheels.wheelbase();
 
-            // ---- steering
+            // ---- steering (keep in step with `Wheels::steer_lock`)
             let speed_factor =
                 1.0 - (1.0 - wheels.steer_at_speed) * (forward_speed.abs() / 40.0).min(1.0);
             let mut center_target = [0.0f32; MAX_WHEELS];
@@ -562,9 +579,39 @@ pub fn wheels_system(
             let mut fx_sum = [0.0f32; MAX_WHEELS];
             let mut fy_sum = [0.0f32; MAX_WHEELS];
             let mut used_max = [0.0f32; MAX_WHEELS];
+            let mut esc = [0.0f32; MAX_WHEELS];
+            // ---- stability control: brake the outside front wheel while the tail swings
+            // out, turning the nose back toward the direction of travel (as a car's ESC
+            // does). Off with the handbrake pulled: that slide is wanted.
+            if wheels.assists.stability_deg > 0.0 && forward_speed > 8.0 && handbrake == 0.0 {
+                let v_local = frame.rotation.inverse() * frame.linear;
+                // Body slip angle: + = moving to the right of where the nose points.
+                let beta = v_local.x.atan2(-v_local.z);
+                let yaw_rate = frame.angular.dot(up); // + = turning left
+                let start = (wheels.assists.stability_deg * 0.5).to_radians();
+                // The tail is out when the car moves to the outside of the way it turns.
+                let tail_out = beta * yaw_rate > 0.0;
+                let over = ((beta.abs() - start) / start.max(1e-3)).clamp(0.0, 1.0);
+                if tail_out && over > 0.0 {
+                    // The outside of a left turn is the right side (+x).
+                    let outside = yaw_rate.signum();
+                    let front = wheels
+                        .wheels
+                        .iter()
+                        .take(n)
+                        .map(|w| w.mount.z)
+                        .fold(f32::MAX, f32::min);
+                    for (i, w) in wheels.wheels.iter().take(n).enumerate() {
+                        let is_front = (w.mount.z - front).abs() < 0.3;
+                        if is_front && w.mount.x * outside > 0.05 {
+                            esc[i] = 0.6 * over;
+                        }
+                    }
+                }
+            }
             let mut brake_torque = [0.0f32; MAX_WHEELS];
             for (i, w) in wheels.wheels.iter().take(n).enumerate() {
-                let mut b = brake * w.brake_nm;
+                let mut b = brake.max(esc[i]) * w.brake_nm;
                 // ABS: back off when the wheel slips past the tire's peak.
                 if wheels.assists.abs
                     && let Some(p) = &patches[i]

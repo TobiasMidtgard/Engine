@@ -129,7 +129,10 @@ Follows `WorldShift`: the ears, every playing sound and the trail's walkers move
 new frame, so a floating-origin move is silent.
 
 Writes: `AudioCue` (its own message, moved by world shifts like the shared ones), and the `gravel` surface material when the trail demo
-spawns (if nobody defined it).
+spawns (if nobody defined it). Every trail walker carries a `BodyRequest` (the hiker and runner a
+scanned person, the horse and dog the animation module's animals); once a `SkeletonPose`
+answers, that walker's stand-in body hides and stops writing `GroundContact`s, since the
+animated feet write their own. A kind the module doesn't know keeps its stand-in.
 
 ## Test cases
 

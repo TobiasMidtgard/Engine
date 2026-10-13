@@ -39,6 +39,8 @@ pub struct VariantMeshes {
     pub sapling_foliage: Option<Handle<Mesh>>,
     /// Limbed trunk for old logs.
     pub log: Option<Handle<Mesh>>,
+    /// The same trunk standing dead (snags and burnt trees).
+    pub snag: Option<Handle<Mesh>>,
     /// Height of the full mesh, meters.
     pub height: f32,
     pub cut_height: f32,
@@ -258,6 +260,7 @@ fn build_species(
             sapling_wood,
             sapling_foliage,
             log: add(full.log),
+            snag: add(full.snag),
             height: full.height,
             cut_height: full.cut_height,
         });

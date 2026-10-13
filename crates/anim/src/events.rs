@@ -4,7 +4,8 @@
 //! * Clip events become [`AnimationEvent`]s. Events named `footstep…` with a foot bone also
 //!   become a [`GroundContact`] (footprints in mud and snow, bent grass, footstep sounds) and
 //!   a quiet [`NoiseEvent`] (AI hearing); `impact…` events make a loud one.
-//! * Procedural gaits report every footfall the same way, with the creature's weight.
+//! * Procedural gaits report every footfall the same way (a `footstep` event on the foot's
+//!   bone and a contact with the creature's weight).
 //! * Vehicle rigs report each wheel's contact every frame (tire tracks).
 
 use engine_core::prelude::*;
@@ -87,8 +88,15 @@ pub(crate) fn emit_events(
                 .iter()
                 .map(|l| (l.kind.contact(), l.foot_size))
                 .collect();
+            let feet: Vec<Option<String>> =
+                gait.legs.iter().map(|l| l.bones.last().cloned()).collect();
             for f in gait.take_footfalls() {
                 let (kind, size) = kinds.get(f.leg).copied().unwrap_or_default();
+                anim_events.write(AnimationEvent {
+                    entity,
+                    name: "footstep".into(),
+                    bone: feet.get(f.leg).cloned().flatten(),
+                });
                 contacts.write(GroundContact {
                     position: f.position,
                     normal: f.normal,

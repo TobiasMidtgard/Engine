@@ -4,6 +4,11 @@
 //! so a jump straight up comes down on the same spot of the deck. The character also turns with
 //! a turning deck.
 //!
+//! Walls, ledges and hooks move too. A character running along a moving wall or hanging from
+//! a moving ledge rides that body the same way, except that physics only carries what stands
+//! on the ground, so movement carries the rest itself ([`Platform::carried`]). The ledge being
+//! hung from or climbed and the grapple's hook are [`Pin`]ned to their body and move with it.
+//!
 //! The deck's velocity under the character comes from how the body's `Transform` moved between
 //! steps, so it works however the platform is driven (`Velocity`, animation, scripts). Colliders
 //! should sit on the moving entity itself, not on a child of it.
@@ -14,12 +19,16 @@ use engine_world::WorldShift;
 
 use crate::mover::{Mover, flat};
 
-/// The body a character stands on, followed from step to step.
+/// The body a character stands on (or runs along, or hangs from), followed from step to step.
+/// While on it, [`Mover::velocity`] is relative to it.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Platform {
     pub entity: Entity,
     /// Velocity of the deck under the character, m/s in the character's own seconds.
     pub velocity: Vec3,
+    /// Physics carries the character along (it stands on the body); otherwise (a wall, a
+    /// ledge) movement adds the deck's velocity to the character's move itself.
+    pub carried: bool,
     translation: DVec3,
     rotation: Quat,
     /// `velocity` is known (from a second step on the deck, or from the body's `Velocity`).
@@ -37,12 +46,53 @@ impl Platform {
     }
 }
 
-/// What the character stands on this step: the body, its pose now, and its velocity at the
-/// character's feet if the body reports one (m/s, own seconds).
+/// What the character stands on (or holds on to) this step: the body, its pose now, its
+/// velocity at the character if the body reports one (m/s, own seconds), and whether physics
+/// carries the character with it.
 pub(crate) struct Deck<'a> {
     pub entity: Entity,
     pub transform: &'a Transform,
     pub velocity: Option<Vec3>,
+    pub carried: bool,
+}
+
+/// A point on a body, kept in the body's own frame so it moves with the body: the edge of a
+/// ledge on a moving ship, a grapple hook bitten into a turning wheel.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Pin {
+    pub entity: Entity,
+    /// The point, in the body's frame.
+    point: Vec3,
+    /// A direction that turns with the body (a normal, the way onto a ledge), body frame.
+    dir: Vec3,
+}
+
+impl Pin {
+    /// Pins `point` and `dir` (world) to `entity`, whose pose is `t` now.
+    pub(crate) fn new(entity: Entity, t: &Transform, point: DVec3, dir: Vec3) -> Self {
+        let inv = t.rotation.inverse();
+        Self {
+            entity,
+            point: inv * (point - t.translation).as_vec3(),
+            dir: inv * dir,
+        }
+    }
+
+    /// Where the point is and which way the direction points with the body at `t`.
+    pub(crate) fn place(&self, t: &Transform) -> (DVec3, Vec3) {
+        (
+            t.translation + (t.rotation * self.point).as_dvec3(),
+            t.rotation * self.dir,
+        )
+    }
+
+    /// The same point, the direction turned around.
+    pub(crate) fn reversed(self) -> Self {
+        Self {
+            dir: -self.dir,
+            ..self
+        }
+    }
 }
 
 /// Follow the deck under the character (before the step), moving `m.velocity` between the
@@ -79,6 +129,7 @@ pub(crate) fn ride(m: &mut Mover, deck: Option<Deck>, pos: DVec3, dt: f32) {
                 m.facing = f;
             }
             p.velocity = velocity;
+            p.carried = d.carried;
             p.translation = t.translation;
             p.rotation = t.rotation;
             p.known = true;
@@ -93,6 +144,7 @@ pub(crate) fn ride(m: &mut Mover, deck: Option<Deck>, pos: DVec3, dt: f32) {
             m.platform = Some(Platform {
                 entity: d.entity,
                 velocity: d.velocity.unwrap_or(Vec3::ZERO),
+                carried: d.carried,
                 translation: t.translation,
                 rotation: t.rotation,
                 known: d.velocity.is_some(),
@@ -113,6 +165,7 @@ mod tests {
             entity: e,
             transform: t,
             velocity: None,
+            carried: true,
         })
     }
 
@@ -192,9 +245,23 @@ mod tests {
             entity: e,
             transform: &t,
             velocity: Some(Vec3::new(8.0, 0.0, 0.0)),
+            carried: true,
         };
         ride(&mut m, Some(d), DVec3::ZERO, DT);
         assert!(m.velocity.distance(Vec3::new(0.0, -3.0, 0.0)) < 1e-5);
+    }
+
+    #[test]
+    fn a_pin_moves_and_turns_with_its_body() {
+        let e = Entity::from_raw_u32(5).unwrap();
+        let mut t = Transform::from_xyz(10.0, 0.0, 0.0);
+        let pin = Pin::new(e, &t, DVec3::new(10.0, 2.0, 1.0), Vec3::Z);
+        t.translation += DVec3::new(0.0, 1.0, 3.0);
+        t.rotation = Quat::from_rotation_y(std::f32::consts::FRAC_PI_2);
+        let (point, dir) = pin.place(&t);
+        assert!(point.distance(DVec3::new(11.0, 3.0, 3.0)) < 1e-5, "{point}");
+        assert!(dir.distance(Vec3::X) < 1e-5, "{dir}");
+        assert!(pin.reversed().place(&t).1.distance(Vec3::NEG_X) < 1e-5);
     }
 
     #[test]

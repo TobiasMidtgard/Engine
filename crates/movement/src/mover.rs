@@ -8,7 +8,7 @@ use engine_world::animation::AnimationParams;
 use engine_world::locomotion::{LocomotionState, MoveIntent};
 use engine_world::physics::{CharacterController, CharacterMove, CharacterState};
 
-use crate::platform::Platform;
+use crate::platform::{Pin, Platform};
 
 /// A wall the character touches or runs on.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -47,6 +47,9 @@ pub struct Mantle {
     pub rising: bool,
     /// Horizontal speed to leave with, m/s.
     pub exit_speed: f32,
+    /// The body being climbed: the ledge (and `forward`) move with it.
+    #[serde(skip)]
+    pub on: Option<Pin>,
 }
 
 /// Hanging from a ledge.
@@ -56,6 +59,9 @@ pub struct Hang {
     pub top: DVec3,
     /// Out of the wall, horizontal unit.
     pub normal: Vec3,
+    /// The body hung from: the ledge (and `normal`) move with it.
+    #[serde(skip)]
+    pub on: Option<Pin>,
 }
 
 /// A grapple hook: flying out to where it was fired, or bitten in and reeling the character
@@ -77,6 +83,12 @@ pub struct Grapple {
     pub length: f32,
     /// Own seconds since the hook bit.
     pub secs: f32,
+    /// The body the hook flies at or bit into: the anchor (and `normal`) move with it.
+    #[serde(skip)]
+    pub on: Option<Pin>,
+    /// How fast the anchor moves (with its body), m/s in the character's own seconds.
+    #[serde(default)]
+    pub anchor_velocity: Vec3,
 }
 
 /// Ask the movement module to dash. Combat uses this for dash-strikes; gameplay can use it

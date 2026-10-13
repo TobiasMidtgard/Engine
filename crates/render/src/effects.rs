@@ -3,8 +3,9 @@
 //! anti-aliasing (TAA).
 //!
 //! ```text
-//! prepass (depth, normals, motion) → copy depth → GTAO → edge-aware blur → SSR (traces the
-//! prepass depth, reads the previous frame's image) → SSGI trace (same inputs) → temporal blend
+//! prepass (depth, normals, motion) → copy depth → GTAO → edge-aware blur → mip chain of the
+//! previous frame's image → SSR (traces the prepass depth, gathers from the previous frame's
+//! image and its mips) → SSGI trace (same inputs) → temporal blend
 //! → blur → [scene shading reads the AO, SSR and GI] … transparent → TAA resolve into the
 //! history → copy back to the HDR target (without TAA, the HDR image is copied into the history
 //! for next frame's reflections and bounce light)
@@ -21,6 +22,8 @@ use crate::targets::{Targets, Tex};
 pub const JITTER_SAMPLES: u64 = 8;
 /// Smallest weight of the current frame once the history has converged.
 const TAA_MIN_ALPHA: f32 = 0.1;
+/// Levels of the blurred previous-frame chain for glossy reflections (half resolution and down).
+const SSR_CHAIN_LEVELS: u32 = 6;
 
 /// Sub-pixel jitter (pixels, in −0.5..0.5) for frame `index`: the Halton (2, 3) sequence.
 pub fn jitter(index: u64) -> Vec2 {
@@ -58,6 +61,10 @@ pub struct ScreenEffects {
     ssr: wgpu::RenderPipeline,
     /// SSR input groups, indexed by the history written this frame (they read the other one).
     ssr_groups: [wgpu::BindGroup; 2],
+    /// Downsampling into the blurred mip chain glossy reflections gather from.
+    chain_layout: wgpu::BindGroupLayout,
+    chain_pipeline: wgpu::RenderPipeline,
+    chain: ReflectionChain,
     gi_layout: wgpu::BindGroupLayout,
     gi_trace: wgpu::RenderPipeline,
     gi_temporal: wgpu::RenderPipeline,
@@ -115,7 +122,24 @@ impl ScreenEffects {
         });
         let ssr_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("screen-space reflection inputs"),
-            entries: &[float_tex(0), depth_tex(1), float_tex(2), float_tex(3)],
+            entries: &[
+                float_tex(0),
+                depth_tex(1),
+                float_tex(2),
+                float_tex(3),
+                float_tex(4),
+            ],
+        });
+        let chain_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("reflection chain input"),
+            entries: &[
+                float_tex(0),
+                layout_entry(
+                    1,
+                    S::FRAGMENT,
+                    wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                ),
+            ],
         });
         let gi_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("screen-space gi inputs"),
@@ -180,6 +204,18 @@ impl ScreenEffects {
             shared.formats.hdr,
             None,
         );
+        let chain_module =
+            shared.shader("ssr_chain", include_str!("shaders/ssr_chain.wgsl"), false);
+        let chain_pipeline = fullscreen_pipeline(
+            shared,
+            "reflection chain",
+            &chain_module,
+            "vs_chain",
+            "fs_chain",
+            &[&chain_layout],
+            shared.formats.hdr,
+            None,
+        );
         let gi_module = shared.shader("ssgi", include_str!("shaders/ssgi.wgsl"), true);
         let gi_pipeline = |label, entry| {
             fullscreen_pipeline(
@@ -214,7 +250,8 @@ impl ScreenEffects {
         });
         let (gtao_group, blur_group, taa_groups) =
             Self::groups(shared, targets, &ao_layout, &taa_layout, &taa_params);
-        let ssr_groups = Self::ssr_groups(shared, targets, &ssr_layout);
+        let chain = ReflectionChain::new(shared, targets, &chain_layout);
+        let ssr_groups = Self::ssr_groups(shared, targets, &ssr_layout, &chain.view);
         let gi_groups = GiGroups::new(shared, targets, &gi_layout);
         Self {
             ao_layout,
@@ -225,6 +262,9 @@ impl ScreenEffects {
             ssr_layout,
             ssr,
             ssr_groups,
+            chain_layout,
+            chain_pipeline,
+            chain,
             gi_layout,
             gi_trace,
             gi_temporal,
@@ -312,6 +352,7 @@ impl ScreenEffects {
         shared: &GpuShared,
         t: &Targets,
         layout: &wgpu::BindGroupLayout,
+        chain: &wgpu::TextureView,
     ) -> [wgpu::BindGroup; 2] {
         fn view(v: &wgpu::TextureView) -> wgpu::BindingResource<'_> {
             wgpu::BindingResource::TextureView(v)
@@ -337,6 +378,10 @@ impl ScreenEffects {
                         binding: 3,
                         resource: view(&t.history[1 - current].view),
                     },
+                    wgpu::BindGroupEntry {
+                        binding: 4,
+                        resource: view(chain),
+                    },
                 ],
             })
         })
@@ -354,7 +399,8 @@ impl ScreenEffects {
         self.gtao_group = gtao_group;
         self.blur_group = blur_group;
         self.taa_groups = taa_groups;
-        self.ssr_groups = Self::ssr_groups(shared, targets, &self.ssr_layout);
+        self.chain = ReflectionChain::new(shared, targets, &self.chain_layout);
+        self.ssr_groups = Self::ssr_groups(shared, targets, &self.ssr_layout, &self.chain.view);
         self.gi_groups = GiGroups::new(shared, targets, &self.gi_layout);
         self.history_ready = false;
         self.gi_history_ready = false;
@@ -402,13 +448,24 @@ impl ScreenEffects {
     }
 
     /// Record screen-space reflections into `targets.ssr` from the prepass and the previous
-    /// frame's image (`has_previous` must be true). `prepass_group` as for `encode_ao`.
+    /// frame's image (`has_previous` must be true), after blurring that image into a mip chain
+    /// for glossy reflections. `prepass_group` as for `encode_ao`.
     pub fn encode_ssr(
         &self,
         encoder: &mut wgpu::CommandEncoder,
         targets: &Targets,
         prepass_group: &wgpu::BindGroup,
     ) {
+        for (level, target) in self.chain.levels.iter().enumerate() {
+            let group = match level {
+                0 => &self.chain.first[self.current],
+                _ => &self.chain.rest[level - 1],
+            };
+            let mut pass = fullscreen_pass(encoder, "reflection chain", target, true);
+            pass.set_pipeline(&self.chain_pipeline);
+            pass.set_bind_group(0, group, &[]);
+            pass.draw(0..3, 0..1);
+        }
         let mut pass =
             fullscreen_pass(encoder, "screen-space reflections", &targets.ssr.view, true);
         pass.set_pipeline(&self.ssr);
@@ -534,6 +591,78 @@ impl ScreenEffects {
 }
 
 /// Bind groups of the screen-space GI passes.
+/// The previous frame's image at half resolution and blurred further down a mip chain, which
+/// glossy screen-space reflections gather from (see ssr_chain.wgsl).
+struct ReflectionChain {
+    _texture: wgpu::Texture,
+    /// All levels, for sampling.
+    view: wgpu::TextureView,
+    /// One view per level, for drawing into.
+    levels: Vec<wgpu::TextureView>,
+    /// Input of level 0, indexed by the history written this frame (they read the other one).
+    first: [wgpu::BindGroup; 2],
+    /// Input of level `i + 1`: level `i`.
+    rest: Vec<wgpu::BindGroup>,
+}
+
+impl ReflectionChain {
+    fn new(shared: &GpuShared, t: &Targets, layout: &wgpu::BindGroupLayout) -> Self {
+        let width = t.width.div_ceil(2).max(1);
+        let height = t.height.div_ceil(2).max(1);
+        let count = SSR_CHAIN_LEVELS.min(width.min(height).ilog2() + 1);
+        let texture = shared.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("reflection chain"),
+            size: wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: count,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: shared.formats.hdr,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let view = texture.create_view(&Default::default());
+        let levels: Vec<_> = (0..count)
+            .map(|level| {
+                texture.create_view(&wgpu::TextureViewDescriptor {
+                    label: Some("reflection chain level"),
+                    base_mip_level: level,
+                    mip_level_count: Some(1),
+                    ..Default::default()
+                })
+            })
+            .collect();
+        let group = |input: &wgpu::TextureView| {
+            shared.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("reflection chain input"),
+                layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(input),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::Sampler(&shared.linear_clamp),
+                    },
+                ],
+            })
+        };
+        let first = [0, 1].map(|current| group(&t.history[1 - current].view));
+        let rest = levels[..levels.len() - 1].iter().map(group).collect();
+        Self {
+            _texture: texture,
+            view,
+            levels,
+            first,
+            rest,
+        }
+    }
+}
+
 struct GiGroups {
     /// Indexed by the TAA history written this frame (they read the other one).
     trace: [wgpu::BindGroup; 2],

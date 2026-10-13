@@ -1,6 +1,6 @@
 //! Screen-space reflections: a polished floor mirrors the objects standing on it, and turning
-//! them off falls back to the sky. Needs a GPU or lavapipe; passes with a note when neither is
-//! available.
+//! them off falls back to the sky; indoors, it mirrors the sky seen through a window. Needs a
+//! GPU or lavapipe; passes with a note when neither is available.
 
 use engine_core::prelude::*;
 use engine_render::prelude::*;
@@ -141,5 +141,103 @@ fn reflections_work_without_temporal_anti_aliasing() {
     assert!(
         a[0] > a[2] * 1.5,
         "the floor doesn't mirror the red block: {a:?}"
+    );
+}
+
+/// A closed room (inside x -3..3, y 0..3, z -4..4) with a window in the far wall (x -1..1,
+/// y 1.2..2.6) and a polished metal floor, seen from near the back wall. The sun is behind the
+/// room, so the inside is lit only by the sky through the window.
+fn room_app() -> App {
+    engine_core::log::init("error");
+    let mut app = App::new();
+    app.world.resource_mut::<EngineConfig>().headless = true;
+    {
+        let mut w = app.world.resource_mut::<Window>();
+        w.width = W;
+        w.height = H;
+    }
+    app.add_plugins(RenderPlugin);
+    {
+        let mut s = app.world.resource_mut::<RenderSettings>();
+        s.tonemapper = Tonemapper::None;
+        s.bloom_intensity = 0.0;
+        s.vignette = 0.0;
+        s.film_grain = 0.0;
+        s.saturation = 1.0;
+        s.sharpness = 0.0;
+    }
+    let w = &mut app.world;
+    w.spawn((
+        Camera {
+            exposure: Exposure::Manual { ev100: 12.0 },
+            ..Camera::perspective(60.0)
+        },
+        Transform::from_xyz(0.0, 1.6, 3.4).looking_at(DVec3::new(0.0, 1.0, -4.0), Vec3::Y),
+    ));
+    w.spawn((
+        DirectionalLight::default(),
+        Transform::default().looking_at(DVec3::new(0.2, -0.8, -0.5), Vec3::Y),
+    ));
+    let plaster = StandardMaterial::color(0.5, 0.5, 0.5).with_roughness(0.9);
+    let floor = StandardMaterial::color(0.6, 0.6, 0.6)
+        .with_metallic(1.0)
+        .with_roughness(0.1);
+    let boxes = [
+        // Floor, ceiling, side walls, back wall.
+        ((-3.3, -0.3, -4.3), (3.3, 0.0, 4.3), floor),
+        ((-3.3, 3.0, -4.3), (3.3, 3.3, 4.3), plaster),
+        ((-3.3, 0.0, -4.3), (-3.0, 3.0, 4.3), plaster),
+        ((3.0, 0.0, -4.3), (3.3, 3.0, 4.3), plaster),
+        ((-3.0, 0.0, 4.0), (3.0, 3.0, 4.3), plaster),
+        // The far wall around the window.
+        ((-3.0, 0.0, -4.3), (-1.0, 3.0, -4.0), plaster),
+        ((1.0, 0.0, -4.3), (3.0, 3.0, -4.0), plaster),
+        ((-1.0, 0.0, -4.3), (1.0, 1.2, -4.0), plaster),
+        ((-1.0, 2.6, -4.3), (1.0, 3.0, -4.0), plaster),
+    ];
+    for (min, max, material) in boxes {
+        let (min, max) = (Vec3::from(min), Vec3::from(max));
+        w.spawn((
+            Transform::from_translation(((min + max) * 0.5).as_dvec3()),
+            MeshRenderer::new(
+                Shape::Cuboid {
+                    size: (max - min).to_array(),
+                },
+                material,
+            ),
+        ));
+    }
+    w.spawn((
+        Transform::from_xyz(0.0, 1.5, 0.0),
+        SkyLightVolume::new([3.0, 1.5, 4.0])
+            .with_sky_light(0.02)
+            .with_fade(2.0),
+    ));
+    app
+}
+
+fn luma(c: [f32; 3]) -> f32 {
+    0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2]
+}
+
+#[test]
+fn a_floor_indoors_mirrors_the_sky_through_the_window() {
+    let mut app = room_app();
+    let Some(img) = render(&mut app, "ssr_window") else {
+        return;
+    };
+    // Where the floor mirrors the middle of the window, and the wall beside it.
+    let window = color_at(&app, &img, DVec3::new(0.0, 0.0, -0.05));
+    let wall = color_at(&app, &img, DVec3::new(0.9, 0.0, 0.0));
+    eprintln!("floor mirroring the window: {window:?}, the wall beside it: {wall:?}");
+    // The reflected rays leave through the window: the floor shows the (blue) sky there, not
+    // the dim sky light left inside the room.
+    assert!(
+        luma(window) > luma(wall) * 3.0 + 20.0,
+        "the floor doesn't mirror the sky through the window: {window:?} vs {wall:?}"
+    );
+    assert!(
+        window[2] > window[0],
+        "the window's mirror image should be sky blue: {window:?}"
     );
 }

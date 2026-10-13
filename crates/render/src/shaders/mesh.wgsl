@@ -73,9 +73,11 @@ struct VertexOut {
     @location(9) @interpolate(flat) axis_z: vec3<f32>,
 };
 
-// Wind sway of a vertex (meters, camera-relative).
+// Wind sway of a vertex (meters, camera-relative): the material's `wind_sway` times the vertex
+// color's alpha, its wind weight (0 = still, such as a trunk's base; 1 = full sway, the default
+// of meshes without vertex colors), growing with height in the mesh.
 fn vertex_wind(in: VertexIn, rel: vec3<f32>) -> vec3<f32> {
-    let sway = materials[in.extra.x].params2.y;
+    let sway = materials[in.extra.x].params2.y * saturate(in.color.a);
     if (sway <= 0.0) { return vec3<f32>(0.0); }
     let h01 = saturate((in.position.y - bitcast<f32>(in.extra.z)) / max(bitcast<f32>(in.extra.w), 1e-3));
     return wind_offset(rel, h01, sway);
@@ -107,6 +109,13 @@ fn vertex_axis(in: VertexIn, i: u32) -> vec3<f32> {
     return c / max(length(c), 1e-12);
 }
 
+// The vertex color the surface sees. On swaying materials the alpha is the wind weight
+// (`vertex_wind`), not opacity.
+fn vertex_surface_color(in: VertexIn) -> vec4<f32> {
+    let swaying = materials[in.extra.x].params2.y > 0.0;
+    return select(in.color, vec4<f32>(in.color.rgb, 1.0), swaying);
+}
+
 fn vertex_rel(in: VertexIn) -> vec3<f32> {
     let p = vec4<f32>(in.position, 1.0);
     let rel = vec3<f32>(dot(in.m0, p), dot(in.m1, p), dot(in.m2, p));
@@ -125,7 +134,7 @@ fn standard_vertex(in: VertexIn) -> VertexOut {
     out.rel = rel;
     out.normal = normalize(mat3x3<f32>(in.n0.xyz, in.n1.xyz, in.n2.xyz) * in.normal);
     out.uv = in.uv;
-    out.color = in.color;
+    out.color = vertex_surface_color(in);
     out.material = in.extra.x;
     out.local = vertex_local(in);
     out.object_normal = vertex_object_normal(in);
@@ -467,7 +476,17 @@ struct MaterialSample {
     emissive: vec3<f32>,
     sun: f32,               // parallax self-shadowing toward the sun (1 = lit)
     subsurface: f32,
+    face: vec3<f32>,        // the triangle's geometric normal, toward the camera (the side in view)
+    thin: bool,             // a thin sheet (double-sided or alpha-masked): `shade_thin_surface`
 };
+
+const MATERIAL_DOUBLE_SIDED: u32 = 32u;
+
+// Whether a material is a thin sheet seen from either side (leaves, petals, cloth, cards):
+// double-sided, or alpha-masked (cutout cards, which are often drawn with a triangle per side).
+fn material_is_thin(flags: u32) -> bool {
+    return (flags & MATERIAL_DOUBLE_SIDED) != 0u || (flags & 15u) == 1u;
+}
 
 fn evaluate_material(si: SurfaceIn, shadows: bool) -> MaterialSample {
     let mat = materials[si.material];
@@ -495,6 +514,12 @@ fn evaluate_material(si: SurfaceIn, shadows: bool) -> MaterialSample {
     if (!si.front) { n = -n; }
     let v = normalize(-si.rel);
     let footprint = max(max(length(dp1), length(dp2)), 1e-6);
+    // The side of the triangle in view: its own plane's normal, turned toward the camera
+    // (whatever the winding and the vertex normals say).
+    let g = cross(dp1, dp2);
+    let g_len = length(g);
+    var face = select(n, g / g_len, g_len > 1e-24);
+    if (dot(face, v) < 0.0) { face = -face; }
 
     var base = vec4<f32>(1.0);
     var mr = vec4<f32>(1.0);
@@ -580,6 +605,15 @@ fn evaluate_material(si: SurfaceIn, shadows: bool) -> MaterialSample {
     out.emissive = mat.emissive.rgb * emissive;
     out.sun = sun;
     out.subsurface = mat.params2.x;
+    out.face = face;
+    out.thin = material_is_thin(flags);
+    // A thin sheet is shaded on the side in view: a shading normal that points into the sheet
+    // (vertex normals that disagree with the winding, a normal map tilting past the plane) is
+    // mirrored out of it, so the side away from a light never lights up or catches its glare.
+    let into = dot(out.normal, face);
+    if (out.thin && into < 0.0) {
+        out.normal = normalize(out.normal - 2.0 * into * face);
+    }
 
     // Weather: rain darkens porous surfaces and makes them glossy; snow settles on top faces.
     if ((flags & 64u) != 0u) {
@@ -648,6 +682,9 @@ fn fs_main(in: VertexOut, @builtin(front_facing) front: bool) -> @location(0) ve
     var color: vec3<f32>;
     if ((flags & 16u) != 0u) {
         color = s.albedo + pre_expose(s.emissive);
+    } else if (m.thin) {
+        // Leaves, petals, cloth: lit from behind they glow by `subsurface`, never shine.
+        color = shade_thin_surface(s, in.rel, m.sun, m.face);
     } else {
         color = shade_surface_shadowed(s, in.rel, m.sun);
     }
@@ -658,7 +695,10 @@ fn fs_main(in: VertexOut, @builtin(front_facing) front: bool) -> @location(0) ve
         if (depth > frame.shadow_splits[0]) { tint = vec3(0.4, 1.0, 0.4); }
         if (depth > frame.shadow_splits[1]) { tint = vec3(0.4, 0.4, 1.0); }
         if (depth > frame.shadow_splits[2]) { tint = vec3(1.0, 1.0, 0.4); }
-        if (depth > frame.shadow_splits[3]) { tint = vec3(1.0); }
+        if (depth > frame.shadow_splits[3]) {
+            // Magenta where only the far shadow map reaches.
+            tint = select(vec3(1.0), vec3(1.0, 0.4, 1.0), length(in.rel) < frame.far_shadow_params.x);
+        }
         color *= tint;
     }
     return vec4<f32>(color, m.base.a);
@@ -699,7 +739,7 @@ fn standard_prepass_vertex(in: VertexIn) -> PrepassVertexOut {
     out.rel = rel;
     out.normal = normalize(mat3x3<f32>(in.n0.xyz, in.n1.xyz, in.n2.xyz) * in.normal);
     out.uv = in.uv;
-    out.color = in.color;
+    out.color = vertex_surface_color(in);
     out.material = in.extra.x;
     out.clip = frame.view_proj * vec4<f32>(rel, 1.0);
     out.motion_now = motion_clip(rel);

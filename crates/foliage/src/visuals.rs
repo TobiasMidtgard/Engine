@@ -14,7 +14,9 @@ use engine_core::prelude::*;
 use engine_render::{Camera, Mesh, MeshRenderer, PointLight, StandardMaterial};
 
 use crate::assets::{FoliageVisuals, GLOW_LEVELS, SpeciesVisual, TINTS, VARIANTS};
-use crate::felling::{FallingTree, LogPose};
+use crate::ecology::InRegion;
+use crate::felling::{FallingTree, LOG_BARE_YEARS, LOG_GREEN_YEARS, LogPose};
+use crate::grass::RegionGrass;
 use crate::plant::{EcologySettings, FelledLog, Plant, PlantStage};
 use crate::species::{Layer, PlantForm, PlantLibrary, PlantSpecies};
 
@@ -103,9 +105,9 @@ pub fn desired_parts(
         PlantStage::Dead { years } => {
             let wood = if plant.size < 0.22 {
                 &v.sapling_wood
-            } else if years > 1.5 && v.log.is_some() {
+            } else if years > 1.5 && v.snag.is_some() {
                 // Twigs drop off a dead tree within a couple of years.
-                &v.log
+                &v.snag
             } else {
                 &v.wood
             };
@@ -127,8 +129,8 @@ pub fn desired_parts(
             if sp.is_woody() {
                 let wood = if plant.size < 0.22 {
                     &v.sapling_wood
-                } else if v.log.is_some() {
-                    &v.log
+                } else if v.snag.is_some() {
+                    &v.snag
                 } else {
                     &v.wood
                 };
@@ -190,13 +192,15 @@ pub fn sync_plant_visuals(
         &mut Transform,
         Option<&mut PlantVisual>,
         Option<&PlantBase>,
+        Option<&InRegion>,
     )>,
     mut parts: Query<&mut MeshRenderer, With<PlantPart>>,
+    meadows: Query<(), With<RegionGrass>>,
 ) {
     *frame = frame.wrapping_add(1);
     let full_pass = *frame % 8 == 1 || visuals.is_changed() || settings.is_changed();
     let cam = camera_position(&cams);
-    for (entity, plant, mut transform, visual, base) in &mut plants {
+    for (entity, plant, mut transform, visual, base, region) in &mut plants {
         let fresh = visual.is_none();
         if !full_pass && !fresh && !plant.is_changed() {
             continue;
@@ -230,7 +234,16 @@ pub fn sync_plant_visuals(
         let distance = cam
             .map(|c| c.distance(transform.translation) as f32)
             .unwrap_or(0.0);
-        let want = desired_parts(&plant, sp, vis, distance, &settings);
+        // Grass under a region's GPU meadow is drawn as blades there.
+        let meadow = sp.form == PlantForm::Grass
+            && region
+                .and_then(|r| r.0)
+                .is_some_and(|r| meadows.contains(r));
+        let want = if meadow {
+            [None, None, None]
+        } else {
+            desired_parts(&plant, sp, vis, distance, &settings)
+        };
         let shadows = sp.layer != Layer::Ground && sp.form != PlantForm::Mushroom;
         match visual {
             Some(mut visual) => {
@@ -302,7 +315,7 @@ pub fn desired_log_parts(
     let lod = distance > settings.tree_lod_distance_m * (0.5 + size) && v.wood_lod.is_some();
     let (wood, foliage) = if size < 0.22 && v.sapling_wood.is_some() {
         (v.sapling_wood, v.sapling_foliage)
-    } else if (years >= 1.2 || pose.charred) && v.log.is_some() {
+    } else if (years >= LOG_BARE_YEARS || pose.charred) && v.log.is_some() {
         // The twigs have rotted (or burnt) off.
         (v.log, None)
     } else if lod {
@@ -317,9 +330,9 @@ pub fn desired_log_parts(
     } else {
         vis.bark_rigid
     };
-    let leaves = if pose.charred || years >= 1.2 {
+    let leaves = if pose.charred || years >= LOG_BARE_YEARS {
         None
-    } else if years < 0.15 {
+    } else if years < LOG_GREEN_YEARS {
         Some(vis.leaves_still[tint])
     } else {
         Some(vis.dead_leaves_still)

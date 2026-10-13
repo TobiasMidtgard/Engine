@@ -24,7 +24,7 @@
 //! The mushrooms glow brighter the better fed they are and light the cave around them.
 
 use engine_core::prelude::*;
-use engine_render::{MeshRenderer, Shape, StandardMaterial};
+use engine_render::{BoxFace, MeshRenderer, Shape, SkyLightVolume, StandardMaterial};
 
 use crate::felling::fell_tree;
 use crate::plant::{Disturbance, EcologyRegion, Plant, PlantStage, RegionHistory, ResourceSource};
@@ -170,6 +170,24 @@ pub fn forest_viewpoints(center: DVec3) -> Vec<Viewpoint> {
     ]
 }
 
+/// A corridor of open ground ahead of the forest's ground-level viewpoints, so no trunk or bush
+/// grows into the lens and crowns only frame the view from its sides (ferns and grass still
+/// grow in it).
+fn lens_clearance() -> Vec<[f32; 3]> {
+    forest_viewpoints(DVec3::ZERO)
+        .iter()
+        .filter(|v| v.eye.y < 5.0)
+        .flat_map(|v| {
+            let eye = DVec2::new(v.eye.x, v.eye.z);
+            let ahead = (DVec2::new(v.target.x, v.target.z) - eye).normalize();
+            [(2.0, 2.5), (5.0, 3.5), (8.5, 4.0)].map(|(d, r)| {
+                let c = eye + ahead * d;
+                [c.x as f32, c.y as f32, r]
+            })
+        })
+        .collect()
+}
+
 /// Where to look at the mushroom cave from.
 pub fn cave_viewpoints(center: DVec3) -> Vec<Viewpoint> {
     vec![
@@ -222,6 +240,7 @@ pub fn forest_region() -> EcologyRegion {
         step_years: 0.25,
         time_scale: 30.0,
         keep_clear: [vec![POND], trail_clearance()].concat(),
+        sight_lines: lens_clearance(),
         history: RegionHistory {
             grow_years: 110.0,
             initial_plants: [260, 120, 1500],
@@ -357,16 +376,13 @@ pub fn forest_rocks() -> Vec<PlacedRock> {
         let a = rng.range(0.0, TAU);
         let p = pond + Vec2::from_angle(a) * (POND[2] + rng.range(-0.5, 1.4));
         let w = rng.range(0.14, 0.5);
-        let rounded = rng.chance(0.7);
+        let rounded = rng.chance(0.6);
         if off_trail(p, w) {
-            out.push(random_rock(
-                &mut rng,
-                p,
-                w,
-                rounded,
-                0.6,
-                [0.95, 0.95, 0.92],
-            ));
+            // Water-worn cobbles lie low and flat, pale where they dry above the water line.
+            let mut stone = random_rock(&mut rng, p, w, rounded, 0.3, [1.08, 1.05, 0.99]);
+            stone.size.y *= 0.6;
+            stone.rock.bury_m *= 0.6;
+            out.push(stone);
         }
     }
     for a in [0.6f32, 3.9] {
@@ -413,9 +429,22 @@ pub fn forest_rocks() -> Vec<PlacedRock> {
     out
 }
 
+/// Keep-clear circles under the rocks big enough to keep plants off them.
+fn rock_footprints(rocks: &[PlacedRock]) -> Vec<[f32; 3]> {
+    rocks
+        .iter()
+        .filter(|r| r.radius() > 0.25 && r.rock.bury_m < r.size.y * 0.9)
+        .map(|r| [r.pos.x, r.pos.y, r.radius() * 0.85])
+        .collect()
+}
+
 /// The living forest at `center` (flat ground or whatever `engine_world::Ground` says).
 pub fn spawn_demo(commands: &mut Commands, center: DVec3) {
-    commands.spawn((Transform::from_translation(center), forest_region()));
+    let rocks = forest_rocks();
+    let mut region = forest_region();
+    // Nothing grows through a rock.
+    region.keep_clear.extend(rock_footprints(&rocks));
+    commands.spawn((Transform::from_translation(center), region));
     for (at, source) in forest_sources() {
         commands.spawn((
             Transform::from_translation(local(center, at.x, at.y)),
@@ -425,7 +454,7 @@ pub fn spawn_demo(commands: &mut Commands, center: DVec3) {
     // The pond: dark still water sunk below a shore of wet mud and gravel (the ground
     // cover), stones and reeds round it.
     let mut water = StandardMaterial::hex(0x0b1a18).with_roughness(0.015);
-    water.reflectance = 0.6;
+    water.reflectance = 0.45;
     water.receives_wetness = false;
     commands.spawn((
         Transform::from_translation(
@@ -440,7 +469,24 @@ pub fn spawn_demo(commands: &mut Commands, center: DVec3) {
             water,
         ),
     ));
-    spawn_rocks(commands, center, forest_rocks());
+    // The trees round the pond hide the low sky its still water would otherwise mirror at a
+    // glance (the renderer's sky occlusion only sees cover from above): sky light dims toward
+    // the water, fading back in at the edges and overhead.
+    let reach = POND[2] + 2.5;
+    commands.spawn((
+        Transform::from_translation(
+            local(center, POND[0], POND[1]) + DVec3::Y * POND_WATER_M as f64,
+        ),
+        SkyLightVolume::new([reach, 2.5, reach])
+            .open(BoxFace::PosY)
+            .open(BoxFace::PosX)
+            .open(BoxFace::NegX)
+            .open(BoxFace::PosZ)
+            .open(BoxFace::NegZ)
+            .with_sky_light(0.2)
+            .with_fade(2.5),
+    ));
+    spawn_rocks(commands, center, rocks);
     // Leaf litter, needles, moss, ash and packed earth under the trees.
     commands.spawn((
         Transform::from_translation(center),
@@ -536,7 +582,10 @@ pub fn cave_sources() -> Vec<(Vec2, ResourceSource)> {
 /// The mushroom cave's living part at `center` (inside a cave of about 28 × 32 m whose mouth
 /// faces −Z): mineral pool, seep, cave floor and the fungi that grow where minerals reach.
 pub fn spawn_cave_demo(commands: &mut Commands, center: DVec3) {
-    commands.spawn((Transform::from_translation(center), cave_region()));
+    let rocks = cave_rocks();
+    let mut region = cave_region();
+    region.keep_clear.extend(rock_footprints(&rocks));
+    commands.spawn((Transform::from_translation(center), region));
     for (at, source) in cave_sources() {
         commands.spawn((
             Transform::from_translation(local(center, at.x, at.y)),
@@ -562,7 +611,7 @@ pub fn spawn_cave_demo(commands: &mut Commands, center: DVec3) {
             pool,
         ),
     ));
-    spawn_rocks(commands, center, cave_rocks());
+    spawn_rocks(commands, center, rocks);
     commands.spawn((
         Transform::from_translation(center),
         GroundCover {
