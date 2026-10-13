@@ -77,45 +77,6 @@ fn rock_face(b: crate::meshgen::Builder) -> Mesh {
     mesh
 }
 
-/// A simple person: legs, body, head (1.8 m), facing `yaw`.
-fn person(commands: &mut Commands, base: DVec3, yaw: f32, shirt: u32) {
-    let skin = mat(0xc89878, 0.6).with_subsurface(0.4);
-    let cloth = mat(shirt, 0.85);
-    let pants = mat(0x2a2e3a, 0.85);
-    for side in [-0.12, 0.12] {
-        let off = Quat::from_rotation_y(yaw) * Vec3::new(side, 0.0, 0.0);
-        spawn(
-            commands,
-            Shape::Capsule {
-                radius: 0.09,
-                height: 0.85,
-                segments: 10,
-            },
-            pants,
-            at(base + off.as_dvec3() + DVec3::new(0.0, 0.45, 0.0)),
-        );
-    }
-    spawn(
-        commands,
-        Shape::Capsule {
-            radius: 0.2,
-            height: 0.7,
-            segments: 14,
-        },
-        cloth,
-        yawed(base + DVec3::new(0.0, 1.22, 0.0), yaw).with_scale(Vec3::new(1.0, 1.0, 0.65)),
-    );
-    spawn(
-        commands,
-        Shape::Sphere {
-            radius: 0.12,
-            segments: 16,
-        },
-        skin,
-        at(base + DVec3::new(0.0, 1.7, 0.0)),
-    );
-}
-
 /// Material plaza: a paved square with a roughness ladder (dielectric and metal), a glass orb
 /// inside an emissive ring and pedestals. The Rendering and lighting thread owns its content.
 pub fn plaza(commands: &mut Commands, lib: &Library, z: &Zone) {
