@@ -746,6 +746,48 @@ fn standing_pieces_are_solid_with_a_physics_module() {
         app.world.get::<Collider>(beam).map(|c| &c.shape),
         Some(ColliderShape::ConvexHull { .. })
     ));
+
+    // Props that break keep their simple shape until they do; set dressing is solid as
+    // drawn (a triangle mesh of its model).
+    let crate_e = app
+        .world
+        .spawn((
+            Transform::from_xyz(0.0, 0.4, -6.0),
+            Fracturable {
+                shape: FractureShape::Box {
+                    half_extents: Vec3::splat(0.4),
+                },
+                material: DestructibleMaterial::Wood,
+                ..Fracturable::default()
+            },
+        ))
+        .id();
+    let pillar = app
+        .world
+        .spawn((
+            Transform::from_xyz(4.0, 1.9, -6.0),
+            dress::PropModel::new(
+                props::PropKind::ConcretePillar {
+                    size: [0.7, 3.8, 0.7],
+                },
+                1,
+            ),
+        ))
+        .id();
+    app.update();
+    assert_eq!(
+        app.world.get::<Collider>(crate_e).map(|c| c.shape.clone()),
+        Some(ColliderShape::Cuboid {
+            half_extents: Vec3::splat(0.4)
+        })
+    );
+    let Some(ColliderShape::TriMesh { vertices, indices }) =
+        app.world.get::<Collider>(pillar).map(|c| c.shape.clone())
+    else {
+        panic!("the pillar is solid");
+    };
+    let top = vertices.iter().map(|v| v.y).fold(f32::MIN, f32::max);
+    assert!(!indices.is_empty() && (top - 1.9).abs() < 0.1, "top {top}");
 }
 
 #[test]

@@ -59,7 +59,10 @@ fracture and debris.
   enough hit, and debris that lands hard shatters again. Fracture faces are rough (broken
   into small bumpy triangles that meet the piece's edges, `BreakLook`) and drawn in a
   joint-free broken material, so a shattered ashlar block shows broken stone, not mortar
-  lines; glass and metal break clean.
+  lines; glass and metal break clean. With a physics module they stand solid (their box or
+  column) until they break, and set dressing (`ArchModel` masonry, a `PropModel` on nothing
+  that breaks) is solid as drawn, a static triangle mesh of its model: the fortress's walls
+  stop you and you can walk along their wall walks.
 - **Debris** uses the physics module when one is installed (physics-contract bodies) and a
   built-in solver otherwise: oriented boxes with friction, bounce and sleep that land on the
   ground and on voxel rock (not yet on each other), and wake when the rock under them is dug.
@@ -81,7 +84,7 @@ through soft material and lose energy), `ContactEvent` (hard impacts, debris lan
 Writes: `WorldImpulse` (falling structures, strength only), `NoiseEvent` (breaks, collapses),
 `SmokeEmission` (dust and thermite smoke for the smoke module), `GroundContact` (debris
 landing on a surface, for footstep-style impact sounds), physics-contract bodies for debris
-and static colliders for standing building pieces.
+and static colliders for standing building pieces, breakable props and set dressing.
 
 ## Using it
 

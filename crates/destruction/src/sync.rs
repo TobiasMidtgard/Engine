@@ -18,7 +18,7 @@ use crate::build::BuiltPiece;
 use crate::debris::Debris;
 use crate::material::DestructionMaterials;
 use crate::meshing::MeshBuilder;
-use crate::structure::StructuralPiece;
+use crate::structure::{Fracturable, FractureShape, StructuralPiece};
 use crate::voxel::{VoxelLook, VoxelState, VoxelVolume, mesh_chunk_layers};
 use crate::wall::{DestructibleWall, TILE, WallLook, WallState, greedy_rects, mesh_cells};
 
@@ -145,12 +145,14 @@ pub fn solid_half(half: Vec3) -> Vec3 {
 /// Make standing [`StructuralPiece`]s solid when a physics module is installed: a static
 /// collider in the piece's box (a gable's triangle) with its material's surface. Players walk
 /// on floors and decks and are stopped by walls, vehicles crash into them, and debris lands on
-/// them. A piece that gives way becomes a debris body with its own hull.
+/// them. A piece that gives way becomes a debris body with its own hull. [`Fracturable`]
+/// props (crates, columns) get their box or column until they break.
 pub fn piece_colliders_system(
     mut commands: Commands,
     backend: Option<Res<PhysicsBackend>>,
     table: Res<DestructionMaterials>,
     surfaces: Res<SurfaceMaterials>,
+    props: Query<(Entity, &Fracturable), (Without<Collider>, Without<Debris>)>,
     pieces: Query<
         (
             Entity,
@@ -165,6 +167,25 @@ pub fn piece_colliders_system(
 ) {
     if backend.is_none() {
         return;
+    }
+    for (e, prop) in &props {
+        let props = table.get(prop.material);
+        commands.entity(e).insert(Collider {
+            shape: match prop.shape {
+                FractureShape::Box { half_extents } => ColliderShape::Cuboid { half_extents },
+                FractureShape::Column {
+                    radius,
+                    half_height,
+                    ..
+                } => ColliderShape::Cylinder {
+                    radius,
+                    half_height,
+                },
+            },
+            surface: surfaces.id_or_default(&props.surface),
+            density: props.density,
+            ..Collider::default()
+        });
     }
     for (e, piece, t, gt, child, built) in &pieces {
         // The backend scales shapes by the entity's world scale; the piece's box is in meters.

@@ -11,12 +11,16 @@ use engine_assets::{Assets, Handle};
 use engine_core::math::noise::perlin2;
 use engine_core::prelude::*;
 use engine_render::{MaterialRef, Mesh, MeshRef, MeshRenderer};
+use engine_world::SurfaceMaterials;
+use engine_world::physics::{Collider, ColliderShape, PhysicsBackend};
 
 use crate::architecture::{self, TowerTop};
 use crate::assets::DestructionAssets;
+use crate::debris::Debris;
 use crate::material::{DestructibleMaterial, DestructionMaterials};
 use crate::meshing::MeshBuilder;
 use crate::props::PropKind;
+use crate::structure::{Fracturable, StructuralPiece};
 
 /// Draw this entity as a detailed prop (centered on the entity, like the prop's own origin).
 #[derive(Component, Debug, Clone, Copy, PartialEq)]
@@ -118,78 +122,156 @@ pub struct PropMesh;
 #[derive(Component, Debug, Clone, Copy)]
 pub struct PropBuilt;
 
-/// Prop meshes built so far, by kind and seed.
+/// Prop meshes built so far, by kind and seed, and (with a physics module) the collision
+/// meshes of set dressing.
 #[derive(Resource, Debug, Default)]
-pub struct PropMeshes(HashMap<String, Vec<(Handle<Mesh>, DestructibleMaterial)>>);
+pub struct PropMeshes {
+    meshes: HashMap<String, Vec<(Handle<Mesh>, DestructibleMaterial)>>,
+    solids: HashMap<String, (ColliderShape, DestructibleMaterial)>,
+}
+
+/// One triangle mesh of all `parts` (in the model's own space), and the material most of it
+/// is made of.
+fn solid_of(
+    parts: &[(DestructibleMaterial, MeshBuilder)],
+) -> (ColliderShape, DestructibleMaterial) {
+    let mut vertices = Vec::new();
+    let mut indices = Vec::new();
+    for (_, mb) in parts {
+        let base = vertices.len() as u32;
+        vertices.extend(mb.vertices.iter().map(|v| Vec3::from(v.position)));
+        indices.extend(
+            mb.indices
+                .as_chunks::<3>()
+                .0
+                .iter()
+                .map(|t| [base + t[0], base + t[1], base + t[2]]),
+        );
+    }
+    let material = parts
+        .iter()
+        .max_by_key(|(_, mb)| mb.indices.len())
+        .map_or(DestructibleMaterial::Stone, |(m, _)| *m);
+    (ColliderShape::TriMesh { vertices, indices }, material)
+}
 
 /// Give each new [`PropModel`], [`ArchModel`] and [`GravelPad`] its mesh children (Update).
+/// With a physics module, fortress masonry and set-dressing props (a [`PropModel`] on nothing
+/// that breaks or has a collider of its own) are solid too: a static triangle mesh of the
+/// model, so the walls stop players and they can walk along the wall walks.
 #[allow(clippy::too_many_arguments)]
 pub fn build_prop_models_system(
     mut commands: Commands,
     assets: Option<Res<DestructionAssets>>,
     table: Res<DestructionMaterials>,
+    surfaces: Res<SurfaceMaterials>,
+    backend: Option<Res<PhysicsBackend>>,
     meshes: Option<ResMut<Assets<Mesh>>>,
     mut cache: ResMut<PropMeshes>,
     props: Query<(Entity, &PropModel), Without<PropBuilt>>,
     arches: Query<(Entity, &ArchModel), Without<PropBuilt>>,
     pads: Query<(Entity, &GravelPad), Without<PropBuilt>>,
+    gameplay: Query<
+        (),
+        Or<(
+            With<StructuralPiece>,
+            With<Fracturable>,
+            With<Debris>,
+            With<Collider>,
+        )>,
+    >,
 ) {
     let (Some(assets), Some(mut meshes)) = (assets, meshes) else {
         return;
     };
+    let physics = backend.is_some();
     let mut dress =
-        |e: Entity, key: String, parts: &dyn Fn() -> Vec<(DestructibleMaterial, MeshBuilder)>| {
-            let parts = cache.0.entry(key).or_insert_with(|| {
-                parts()
-                    .into_iter()
-                    .map(|(material, mut mb)| {
-                        // Vertex colors are near white (the texture brings the color); without
-                        // textures they take the material's own color.
-                        if !assets.textured {
-                            let c = table.get(material).exterior;
-                            for v in &mut mb.vertices {
-                                for (k, ch) in c.iter().enumerate() {
-                                    v.color[k] *= ch;
+        |e: Entity,
+         key: String,
+         solid: bool,
+         parts: &dyn Fn() -> Vec<(DestructibleMaterial, MeshBuilder)>| {
+            let solid = solid && physics;
+            let need_meshes = !cache.meshes.contains_key(&key);
+            if need_meshes || (solid && !cache.solids.contains_key(&key)) {
+                let fresh = parts();
+                if solid {
+                    cache.solids.insert(key.clone(), solid_of(&fresh));
+                }
+                if need_meshes {
+                    let built = fresh
+                        .into_iter()
+                        .map(|(material, mut mb)| {
+                            // Vertex colors are near white (the texture brings the color); without
+                            // textures they take the material's own color.
+                            if !assets.textured {
+                                let c = table.get(material).exterior;
+                                for v in &mut mb.vertices {
+                                    for (k, ch) in c.iter().enumerate() {
+                                        v.color[k] *= ch;
+                                    }
                                 }
                             }
-                        }
-                        (meshes.add(mb.build()), material)
-                    })
-                    .collect()
-            });
-            for (mesh, material) in parts.iter() {
+                            (meshes.add(mb.build()), material)
+                        })
+                        .collect();
+                    cache.meshes.insert(key.clone(), built);
+                }
+            }
+            for (mesh, material) in &cache.meshes[&key] {
                 spawn_part(&mut commands, e, *mesh, assets.surface(*material));
             }
-            commands.entity(e).insert(PropBuilt);
+            let mut ec = commands.entity(e);
+            if solid && let Some((shape, material)) = cache.solids.get(&key) {
+                let props = table.get(*material);
+                ec.insert(Collider {
+                    shape: shape.clone(),
+                    surface: surfaces.id_or_default(&props.surface),
+                    density: props.density,
+                    ..Collider::default()
+                });
+            }
+            ec.insert(PropBuilt);
         };
     for (e, model) in &props {
-        dress(e, format!("{:?}#{}", model.kind, model.seed), &|| {
-            model
-                .kind
-                .build(model.seed)
-                .into_iter()
-                .map(|p| (p.material, p.mesh))
-                .collect()
-        });
+        let solid = !gameplay.contains(e);
+        dress(
+            e,
+            format!("{:?}#{}", model.kind, model.seed),
+            solid,
+            &|| {
+                model
+                    .kind
+                    .build(model.seed)
+                    .into_iter()
+                    .map(|p| (p.material, p.mesh))
+                    .collect()
+            },
+        );
     }
     for (e, model) in &arches {
-        dress(e, format!("{:?}#{}", model.kind, model.seed), &|| {
-            model
-                .kind
-                .build(model.seed)
-                .into_iter()
-                .map(|p| (p.material, p.mesh))
-                .collect()
-        });
+        let solid = !gameplay.contains(e);
+        dress(
+            e,
+            format!("{:?}#{}", model.kind, model.seed),
+            solid,
+            &|| {
+                model
+                    .kind
+                    .build(model.seed)
+                    .into_iter()
+                    .map(|p| (p.material, p.mesh))
+                    .collect()
+            },
+        );
     }
     for (e, pad) in &pads {
         let key = format!("{pad:?}");
-        let mesh = match cache.0.get(&key) {
+        let mesh = match cache.meshes.get(&key) {
             Some(parts) => parts[0].0,
             None => {
                 let mesh = meshes.add(gravel_pad(pad.size).build());
                 cache
-                    .0
+                    .meshes
                     .insert(key, vec![(mesh, DestructibleMaterial::Dirt)]);
                 mesh
             }
