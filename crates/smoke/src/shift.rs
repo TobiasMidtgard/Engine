@@ -11,6 +11,8 @@
 //!   A `SmokeVolume`'s box stays where its entity's `Transform` puts it, so it is kept.
 //! * Explosions and released gas still expanding, bullet tunnels, queued API puffs, obstacles'
 //!   last positions and the demo cart's track move with the world.
+//! * A `SmokeSource`'s release velocity (world axes) turns with the world, so a chimney tilted
+//!   with it still blows along its flue.
 
 use std::sync::Arc;
 
@@ -21,14 +23,17 @@ use engine_world::{Obscurance, WorldShift};
 use crate::demo::DemoCart;
 use crate::obscurance::{SOURCE, SmokeSnapshot};
 use crate::settings::SmokeSettings;
-use crate::sim::{SmokeCommand, SmokeCommands, SmokeDomains, SmokeObstacleTrack, SmokeTunnels};
+use crate::sim::{
+    SmokeCommand, SmokeCommands, SmokeDomains, SmokeObstacleTrack, SmokeSource, SmokeTunnels,
+};
 
 /// All shifts written this frame, combined (they apply in order).
 fn combined(shifts: &mut MessageReader<WorldShift>) -> Option<WorldShift> {
     shifts.read().copied().reduce(|acc, next| acc.then(&next))
 }
 
-/// Move the volumes, tunnels, queued puffs, obstacle tracks and demo carts.
+/// Move the volumes, tunnels, queued puffs, obstacle tracks and demo carts, and turn release
+/// velocities.
 pub(crate) fn shift_smoke(
     mut shifts: MessageReader<WorldShift>,
     mut domains: ResMut<SmokeDomains>,
@@ -36,6 +41,7 @@ pub(crate) fn shift_smoke(
     mut queued: ResMut<SmokeCommands>,
     mut tracks: Query<&mut SmokeObstacleTrack>,
     mut carts: Query<&mut DemoCart>,
+    mut sources: Query<&mut SmokeSource>,
 ) {
     let Some(s) = combined(&mut shifts) else {
         return;
@@ -67,6 +73,12 @@ pub(crate) fn shift_smoke(
     for mut cart in &mut carts {
         cart.from = s.point(cart.from);
         cart.to = s.point(cart.to);
+    }
+    for mut source in &mut sources {
+        let velocity = s.direction(Vec3::from(source.velocity)).to_array();
+        if velocity != source.velocity {
+            source.velocity = velocity;
+        }
     }
 }
 
@@ -337,6 +349,37 @@ mod tests {
             "{c1} vs {}",
             s.point(c0)
         );
+    }
+
+    #[test]
+    fn a_tilt_turns_release_velocities() {
+        let mut app = app();
+        let chimney = app
+            .world
+            .spawn((
+                Transform::from_xyz(5.0, 0.0, 5.0),
+                crate::SmokeSource {
+                    velocity: [0.0, 3.0, 0.5],
+                    active: false,
+                    ..Default::default()
+                },
+            ))
+            .id();
+        app.update();
+        let s = WorldShift {
+            rotation: DQuat::from_rotation_x(0.3) * DQuat::from_rotation_y(1.1),
+            translation: DVec3::new(40.0, -3.0, 12.0),
+            ..WorldShift::IDENTITY
+        };
+        shift(&mut app, s);
+        let v = Vec3::from(
+            app.world
+                .get::<crate::SmokeSource>(chimney)
+                .unwrap()
+                .velocity,
+        );
+        let want = s.direction(Vec3::new(0.0, 3.0, 0.5));
+        assert!((v - want).length() < 1e-5, "{v} vs {want}");
     }
 
     /// Center of mass of a volume's smoke.
