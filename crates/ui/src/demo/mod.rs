@@ -13,6 +13,9 @@ use serde_json::json;
 use crate::data::UiData;
 use crate::items::*;
 
+pub mod art;
+pub mod market;
+
 /// Name of the demo player entity (owner of the demo inventory).
 pub const PLAYER: &str = "Player";
 /// Name of the demo merchant entity.
@@ -182,14 +185,17 @@ pub fn setup_data(world: &mut World) {
 #[derive(Component, Debug, Clone, Copy, Default)]
 pub struct UiDemo;
 
-/// Place the UI test area at `origin`: the demo data, plus world-anchored markers and
-/// nameplates over the area (a merchant's stall, a quest beacon, a vista point). The
-/// screens themselves open through `ui.show` (the showcase tour does this at each stop).
+/// Place the UI test area at `origin`: the demo data, the market street ([`market`]), and
+/// world-anchored markers and nameplates over the area (a merchant's stall, a quest beacon, a
+/// vista point). The screens themselves open through `ui.show` (the showcase tour does this
+/// at each stop).
 pub fn spawn_demo(commands: &mut Commands, origin: DVec3) {
     commands.queue(move |world: &mut World| {
         setup_data(world);
-        // Over the showcase market's middle stall, in view of the tour's UI stops.
-        crate::hud::spawn_world_markers(world, origin, DVec3::new(-11.8, 3.4, 9.2));
+        market::spawn_market(world, origin);
+        // Over Old Brannoc's stall, the middle one, in view of the tour's UI stops.
+        let (stall, _) = market::stall_place(2);
+        crate::hud::spawn_world_markers(world, origin, stall + DVec3::Y * 3.4);
         world.spawn((UiDemo, Transform::from_translation(origin)));
     });
 }

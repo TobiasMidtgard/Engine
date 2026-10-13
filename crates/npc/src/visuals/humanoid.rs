@@ -15,7 +15,7 @@ use crate::agent::{
     AlertLevel, AttackPhase, Defense, NpcBrain, NpcCombat, NpcVitals, NpcWeapon, WeaponStyle,
 };
 use crate::art::ArtAssets;
-use crate::art::fighter::{FACE_SHAPES, Piece, basis, kit, rig, weapons};
+use crate::art::fighter::{FACE_SHAPES, Piece, WEARS, basis, kit, rig, weapons};
 use crate::combat::Downed;
 use crate::faction::Faction;
 use crate::skills::NpcSkills;
@@ -52,6 +52,23 @@ const PLAIN_WEAPON: Part = Part::Fighter(28);
 const PLAIN_SHIELD: Part = Part::Fighter(29);
 /// The face under the helmet.
 const FACE: Part = Part::Fighter(30);
+/// Pieces with painted plates. Those are a mesh of their own (textured by the paint texture
+/// in the team color, as worn as the fighter's skill says), a part from `PAINT0` on (in this
+/// order) posed with its piece.
+const PAINTED: [Part; 11] = [
+    Part::Torso,
+    Part::Head,
+    Part::LegL,
+    Part::LegR,
+    SHIN_L,
+    SHIN_R,
+    Part::ArmL,
+    Part::ArmR,
+    FOREARM_L,
+    FOREARM_R,
+    Part::Shield,
+];
+const PAINT0: u8 = 31;
 
 const SLOTS: usize = 42;
 
@@ -67,8 +84,19 @@ const IRISES: [[u32; 2]; 4] = [
     [0x56626a, 0x8e989d],
 ];
 
-/// Where a part's pose is kept.
+/// The part of a piece's painted plates.
+fn paint_of(part: Part) -> Option<Part> {
+    let i = PAINTED.iter().position(|&p| p == part)?;
+    Some(Part::Fighter(PAINT0 + i as u8))
+}
+
+/// Where a part's pose is kept (painted plates: their piece's).
 fn slot(part: Part) -> Option<usize> {
+    if let Part::Fighter(n) = part
+        && let Some(&piece) = PAINTED.get(n.wrapping_sub(PAINT0) as usize)
+    {
+        return slot(piece);
+    }
     let i = match part {
         Part::Torso => 0,
         Part::Head => 1,
@@ -221,9 +249,11 @@ pub(super) fn parts(
     }
     // The face differs between fighters of a squad: its skin tone, shape and eye color all
     // come from one seed. Seeds closer than 24 never share both skin tone and shape.
-    let (skin_hex, shape, iris_hex) = {
+    let seed = {
         let f = faction.map_or(0, |f| f.0);
-        let seed = (f.wrapping_mul(7) + kind as u32 * 3 + (level * 10.0) as u32) as usize;
+        (f.wrapping_mul(7) + kind as u32 * 3 + (level * 10.0) as u32) as usize
+    };
+    let (skin_hex, shape, iris_hex) = {
         let skin = seed % SKIN_TONES.len();
         let shape = seed / SKIN_TONES.len() % FACE_SHAPES;
         let mut iris = (seed + seed / 4) % IRISES.len();
@@ -231,6 +261,22 @@ pub(super) fn parts(
             iris %= 2;
         }
         (SKIN_TONES[skin], shape, IRISES[iris])
+    };
+    // The paint wears with skill: fresh on rookies, battle-worn on veterans and masters; the
+    // same seed tips fighters near a boundary either way.
+    let wear = {
+        let tip = (seed * 5 % 7) as f32 / 6.0 - 0.5;
+        let w = level + 0.24 * tip;
+        if w < 0.35 {
+            0
+        } else if w < 0.72 {
+            1
+        } else {
+            WEARS - 1
+        }
+    };
+    let Some(paint) = paint_material(art, wear, team_hex) else {
+        return plain_parts(kind, team_hex);
     };
     let mut out = Vec::with_capacity(list.len() + 2);
     for (part, piece) in list {
@@ -259,6 +305,13 @@ pub(super) fn parts(
             _ => MeshRenderer::new(mesh, atlas),
         };
         out.push((part, r, Vec3::ONE));
+        if let Some(plates) = paint_of(part).filter(|_| kit.painted(piece)) {
+            let key = format!("fighter/{}/paint", piece.name());
+            let Some(mesh) = art.mesh(&key, || kit.paint_mesh(piece).unwrap_or_default()) else {
+                return plain_parts(kind, team_hex);
+            };
+            out.push((plates, MeshRenderer::new(mesh, paint), Vec3::ONE));
+        }
     }
     if kind == Kind::Bow {
         for part in [STRING_UPPER, STRING_LOWER] {
@@ -271,6 +324,27 @@ pub(super) fn parts(
         }
     }
     out
+}
+
+/// The painted plates' material: the paint texture at a wear level in the team color.
+fn paint_material(art: &mut ArtAssets, wear: usize, team_hex: u32) -> Option<StandardMaterial> {
+    let kit = kit();
+    let team = linear(team_hex);
+    let key = format!("fighter/paint{wear}/{team_hex:06x}");
+    let (albedo, ..) = art.textures(&key, || kit.paint_albedo(wear, team))?;
+    let (_, normal, orm) =
+        art.textures(&format!("fighter/paint{wear}"), || kit.paint_maps(wear))?;
+    Some(StandardMaterial {
+        base_color: [1.0; 4],
+        base_color_texture: Some(albedo),
+        normal_texture: Some(normal),
+        metallic_roughness_texture: Some(orm),
+        occlusion_texture: Some(orm),
+        // The ORM map carries roughness and metalness; the factors scale it.
+        perceptual_roughness: 1.0,
+        metallic: 1.0,
+        ..Default::default()
+    })
 }
 
 /// Capsules on the same skeleton, for apps without a renderer (nothing is drawn).
@@ -1240,14 +1314,22 @@ pub(super) fn humanoid(
         }
         // White flash when hit.
         if c.last_hurt > 0.0 && now - c.last_hurt < 0.12 {
-            for part in ARMOR {
+            for part in ARMOR
+                .into_iter()
+                .chain(ARMOR.into_iter().filter_map(paint_of))
+            {
                 materials.push((part, lit(0xffffff, 20_000.0)));
             }
         }
     }
     if parry {
         blade_glow = Some(lit(0xffffff, 25_000.0));
-        materials.push((Part::Shield, lit(0xffffff, 25_000.0)));
+        for part in [Some(Part::Shield), paint_of(Part::Shield)]
+            .into_iter()
+            .flatten()
+        {
+            materials.push((part, lit(0xffffff, 25_000.0)));
+        }
     }
     if let Some(m) = blade_glow {
         materials.push((Part::Weapon, m));

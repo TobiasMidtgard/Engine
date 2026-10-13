@@ -6,14 +6,15 @@
 //! ```text
 //! cargo run -p engine_audio --release --example trail_stills -- [out_dir]
 //!     [--only grass,mud,wide] [--size 1280x720] [--walkers] [--panels]
-//!     [--wide eye_x,eye_y,eye_z,at_x,at_y,at_z]
+//!     [--wide eye_x,eye_y,eye_z,at_x,at_y,at_z] [--sun x,y,z] [--ev ev100]
 //! cargo run -p engine_audio --example trail_stills -- --measure
 //! ```
 //!
 //! Writes `ground_<surface>.png` (the two views stacked) and `ground_wide.png`. `--panels`
 //! also keeps each view as its own file. `--measure` builds the trail twice (a cold and a
 //! warm spawn) and prints how long `spawn_demo` and the first frame take, and how many
-//! entities and triangles the trail adds; it renders nothing.
+//! entities and triangles the trail adds; it renders nothing. `--sun` sets the direction the
+//! sunlight travels (default a low afternoon sun) and `--ev` a fixed exposure for every view.
 //! Headless rendering needs a GPU or lavapipe (`mesa-vulkan-drivers`).
 
 use std::path::{Path, PathBuf};
@@ -38,6 +39,10 @@ struct Options {
     measure: bool,
     /// Wide view: eye and target, meters from the trail's origin.
     wide: [f64; 6],
+    /// Direction the sunlight travels.
+    sun: DVec3,
+    /// Exposure for every view (otherwise one per stretch).
+    ev100: Option<f32>,
 }
 
 fn options() -> Options {
@@ -49,6 +54,8 @@ fn options() -> Options {
         panels: false,
         measure: false,
         wide: [-2.0, 22.0, -29.0, 0.0, 0.0, 1.5],
+        sun: DVec3::new(-0.55, -0.42, -0.62),
+        ev100: None,
     };
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut i = 0;
@@ -75,6 +82,18 @@ fn options() -> Options {
                 o.wide.copy_from_slice(&v);
                 i += 1;
             }
+            "--sun" => {
+                let v: Vec<f64> = next
+                    .split(',')
+                    .map(|x| x.parse().expect("number"))
+                    .collect();
+                o.sun = DVec3::new(v[0], v[1], v[2]);
+                i += 1;
+            }
+            "--ev" => {
+                o.ev100 = Some(next.parse().expect("--ev takes an EV100"));
+                i += 1;
+            }
             a if !a.starts_with("--") => o.out = PathBuf::from(a),
             a => panic!("unknown option {a}"),
         }
@@ -97,6 +116,12 @@ fn main() {
 
     let mut app = scene_app(o.size, true);
     app.update();
+    let mut suns = app
+        .world
+        .query_filtered::<&mut Transform, With<DirectionalLight>>();
+    for mut t in suns.iter_mut(&mut app.world) {
+        *t = Transform::default().looking_at(o.sun, Vec3::Y);
+    }
     if !o.walkers {
         let walkers: Vec<Entity> = app
             .world
@@ -164,7 +189,9 @@ fn main() {
                         near: 0.05,
                     };
                     cam.exposure = Exposure::Manual {
-                        ev100: if name == "concrete" { 13.6 } else { 14.6 },
+                        ev100: o
+                            .ev100
+                            .unwrap_or(if name == "concrete" { 13.6 } else { 14.6 }),
                     };
                 }
             }

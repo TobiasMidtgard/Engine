@@ -1,5 +1,6 @@
 //! Procedural PBR texture sets for destructible surfaces: painted plaster, cast concrete,
-//! brick, ashlar stone, wood, natural rock, dirt, gravel, painted steel, glass and ice.
+//! brick, ashlar stone, wood, natural rock, dirt, gravel, painted steel, glass, ice, grass and
+//! charred timber (with [`ember_glow`] for the embers in its cracks).
 //!
 //! [`generate`] builds a [`TextureSet`] (albedo, tangent-space normal and ORM images) for one
 //! [`SurfaceKind`]. Everything is computed from seeded, tile-periodic noise, so every set tiles
@@ -69,11 +70,15 @@ pub enum SurfaceKind {
     /// Short grass seen from above or at a slant: dense blades in tufts with soil and dead
     /// straw between them. Sits beside [`SurfaceKind::Dirt`] on grassy hill tops.
     Grass,
+    /// Charred timber: the char layer checks into "alligator" blocks, longer along the grain,
+    /// split by deep fissures; satin-black block tops with grain streaks and pale ash. Grain
+    /// along u, like [`SurfaceKind::Wood`]. [`ember_glow`] makes the matching emission mask.
+    Charcoal,
 }
 
 impl SurfaceKind {
     /// Every kind, in declaration order.
-    pub const ALL: [SurfaceKind; 12] = [
+    pub const ALL: [SurfaceKind; 13] = [
         SurfaceKind::Plaster,
         SurfaceKind::Concrete,
         SurfaceKind::Brick,
@@ -86,6 +91,7 @@ impl SurfaceKind {
         SurfaceKind::Glass,
         SurfaceKind::Ice,
         SurfaceKind::Grass,
+        SurfaceKind::Charcoal,
     ];
 
     /// Lowercase name (`"brick"`), the same as the serde name.
@@ -103,6 +109,7 @@ impl SurfaceKind {
             SurfaceKind::Glass => "glass",
             SurfaceKind::Ice => "ice",
             SurfaceKind::Grass => "grass",
+            SurfaceKind::Charcoal => "charcoal",
         }
     }
 
@@ -128,6 +135,7 @@ impl SurfaceKind {
             SurfaceKind::Glass => [1.0, 1.0],
             SurfaceKind::Ice => [2.0, 2.0],
             SurfaceKind::Grass => [1.5, 1.5],
+            SurfaceKind::Charcoal => [0.5, 0.5],
         }
     }
 
@@ -167,6 +175,7 @@ impl SurfaceKind {
             SurfaceKind::Glass => 0.08,
             SurfaceKind::Ice => 0.2,
             SurfaceKind::Grass => 0.85,
+            SurfaceKind::Charcoal => 0.6,
         }
     }
 }
@@ -294,6 +303,7 @@ fn surface(kind: SurfaceKind) -> (SurfaceFn, Finish) {
         SurfaceKind::Glass => (glass, f(0.002, 0.3, 0.0)),
         SurfaceKind::Ice => (ice, f(0.02, 0.6, 0.15)),
         SurfaceKind::Grass => (grass, f(0.015, 0.9, 0.5)),
+        SurfaceKind::Charcoal => (charcoal, f(0.008, 1.0, 0.6)),
     }
 }
 
@@ -308,7 +318,7 @@ fn render(kind: SurfaceKind, w: u32, h: u32, seed: u64, shift: [u32; 2]) -> Text
         texel: (tu / w as f32).max(tv / h as f32),
     };
     let (sample, finish) = surface(kind);
-    let s = hash_u64(seed ^ (kind as u64 + 1).wrapping_mul(0x5851_F42D_4C95_7F2D));
+    let s = kind_seed(kind, seed);
 
     let mut texels = vec![Texel::default(); wu * hu];
     par_rows(&mut texels, wu, |r, row| {
@@ -410,6 +420,53 @@ fn render(kind: SurfaceKind, w: u32, h: u32, seed: u64, shift: [u32; 2]) -> Text
         orm: Image::new(w, h, orm, false),
         tile_m: [tu, tv],
     }
+}
+
+/// The seed a kind's surface function sees for the user's `seed`.
+fn kind_seed(kind: SurfaceKind, seed: u64) -> u64 {
+    hash_u64(seed ^ (kind as u64 + 1).wrapping_mul(0x5851_F42D_4C95_7F2D))
+}
+
+/// Emission mask for the embers in [`SurfaceKind::Charcoal`]'s fissures, for the same `size`
+/// and `seed` (so the cracks line up): sRGB, black on the char blocks, orange deep in the
+/// fissures and yellow-white where they glow hottest. Use it as `emissive_texture` with a
+/// white `emissive` and `emissive_strength` for how hot the fire is.
+pub fn ember_glow(size: u32, seed: u64) -> Image {
+    let kind = SurfaceKind::Charcoal;
+    let [tu, tv] = kind.tile_m();
+    let w = size.max(8);
+    let h = ((w as f32 * tv / tu).round() as u32).max(4);
+    let tile = Tile {
+        w: tu,
+        h: tv,
+        texel: (tu / w as f32).max(tv / h as f32),
+    };
+    let s = kind_seed(kind, seed);
+    let mut px = vec![[0u8; 4]; (w * h) as usize];
+    par_rows(&mut px, w as usize, |r, row| {
+        let y = tv * (1.0 - (r as f32 + 0.5) / h as f32);
+        for (c, p) in row.iter_mut().enumerate() {
+            let x = tu * (c as f32 + 0.5) / w as f32;
+            let k = char_cracks(&tile, s, x, y);
+            // The embers glow in patches (where the flames lick hottest), not evenly over
+            // the whole net of fissures.
+            let patch = smooth(0.0, 0.5, tile.fbm(x, y, 3.0, 3, 0.5, sd(s, 10)));
+            let g = k.glow * (0.1 + 0.9 * patch);
+            // Blackbody-ish: dull red at the rims, orange, yellow-white at the hottest.
+            let col = [
+                g.min(1.0),
+                (0.28 * g + 0.5 * smooth(0.6, 1.0, g)).min(1.0),
+                (0.05 * g + 0.25 * smooth(0.85, 1.0, g)).min(1.0),
+            ];
+            *p = [
+                linear_to_srgb8(col[0]),
+                linear_to_srgb8(col[1]),
+                linear_to_srgb8(col[2]),
+                255,
+            ];
+        }
+    });
+    Image::new(w, h, px.into_iter().flatten().collect(), true)
 }
 
 const SQRT_HALF: f32 = std::f32::consts::FRAC_1_SQRT_2;
@@ -1998,6 +2055,122 @@ fn glass(t: &Tile, s: u64, x: f32, y: f32) -> Texel {
         r,
         m: 0.0,
         ao: 1.0,
+    }
+}
+
+/// The checked char layer of [`SurfaceKind::Charcoal`]: one value per point, shared by the
+/// surface and [`ember_glow`].
+struct CharCracks {
+    /// 1 inside a fissure, 0 on a block.
+    crack: f32,
+    /// Distance to the nearest fissure center, meters.
+    edge: f32,
+    /// The block's hash.
+    id: u64,
+    /// Ember glow 0..1 (deep, wide fissures glow; some blocks are already dark).
+    glow: f32,
+}
+
+fn char_cracks(t: &Tile, s: u64, x: f32, y: f32) -> CharCracks {
+    // Charred wood checks into "alligator" blocks: rows along the grain (u) split by thin,
+    // wandering along-grain fissures, each row cut across by deeper cross-grain fissures at
+    // irregular spacing, each cut tilted and curved a little. Rows and cuts come in whole
+    // numbers per tile, so the pattern wraps.
+    const ROW_M: f32 = 0.025;
+    const CUT_M: f32 = 0.04;
+    let rows = ((t.h / ROW_M).round() as i32).max(1);
+    let row_h = t.h / rows as f32;
+    // Row boundaries wander along the grain.
+    let yy = y + 0.0035 * t.n2(x, y, 5.0, 2.0, sd(s, 1)) + 0.0012 * t.n2(x, y, 22.0, 6.0, sd(s, 2));
+    let border = |k: i32| (k as f32 + 0.5 * (u01(hash2(wrap(k, rows), 0, sd(s, 3))) - 0.5)) * row_h;
+    let mut j = floor_i(yy / row_h);
+    if yy < border(j) {
+        j -= 1;
+    } else if yy >= border(j + 1) {
+        j += 1;
+    }
+    let (lo, hi) = (border(j), border(j + 1));
+    let jw = wrap(j, rows);
+    let row = hash2(jw, 1, sd(s, 4));
+    // Which boundary is nearer, and its fissure: thin, fading in and out along the grain.
+    let (d_row, k_row) = if yy - lo < hi - yy {
+        (yy - lo, j)
+    } else {
+        (hi - yy, j + 1)
+    };
+    let k_hash = hash2(wrap(k_row, rows), 2, sd(s, 3));
+    // Where it fades out, the rows on either side are one block.
+    let fade = smooth(
+        -0.05,
+        0.55,
+        t.n2(x, k_row as f32 * row_h, 7.0, 1.0, sd(k_hash, 5)),
+    );
+    let w_row = (0.0003 + 0.0005 * rnd(k_hash, 1)) * fade;
+    // Cross-grain cuts in this row.
+    let cuts = ((t.w / (CUT_M * (0.65 + 0.7 * rnd(row, 1)))).round() as i32).max(1);
+    let cut_w = t.w / cuts as f32;
+    let mid = 0.5 * (lo + hi);
+    let xw = x + 0.0025 * t.n2(x, y, 3.0, 40.0, sd(s, 6));
+    let cut_at = |i: i32| {
+        let h = hash2(jw, wrap(i, cuts), sd(s, 7));
+        let tilt = 0.45 * (rnd(h, 1) - 0.5);
+        (i as f32 + 0.5 + 0.55 * (rnd(h, 2) - 0.5)) * cut_w + tilt * (yy - mid)
+    };
+    let i0 = floor_i(xw / cut_w);
+    let (mut d_cut, mut cell, mut cut_id) = (f32::MAX, i0, 0u64);
+    for i in i0 - 1..=i0 + 1 {
+        let d = xw - cut_at(i);
+        if d.abs() < d_cut {
+            d_cut = d.abs();
+            cell = if d >= 0.0 { i } else { i - 1 };
+            cut_id = hash2(jw, wrap(i, cuts), sd(s, 8));
+        }
+    }
+    let w_cut = 0.0007 + 0.0013 * rnd(cut_id, 1) + 0.0003 * t.n(x, y, 25.0, sd(s, 9));
+    let crack_cut = 1.0 - smooth(w_cut * 0.35, w_cut, d_cut);
+    let crack_row = (1.0 - smooth(w_row * 0.35, w_row.max(1e-4), d_row)) * smooth(0.1, 0.4, fade);
+    let crack = crack_cut.max(crack_row);
+    let id = hash2(jw, wrap(cell, cuts), sd(s, 10));
+    let hot = smooth(0.2, 0.8, rnd(id, 2)) * (0.6 + 0.4 * t.n(x, y, 7.0, sd(s, 11)).abs());
+    // Deep cross-grain fissures hold the embers; the thin ones along the grain barely glow.
+    let deep_cut = (1.0 - smooth(0.0, w_cut * 0.8, d_cut)).powf(1.3);
+    let deep_row = 0.35 * (1.0 - smooth(0.0, w_row.max(1e-4) * 0.8, d_row)).powf(1.3);
+    CharCracks {
+        crack,
+        edge: d_cut.min(d_row + (1.0 - fade) * 0.012),
+        id,
+        glow: (deep_cut.max(deep_row) * (0.2 + 0.8 * hot)).clamp(0.0, 1.0),
+    }
+}
+
+fn charcoal(t: &Tile, s: u64, x: f32, y: f32) -> Texel {
+    let k = char_cracks(t, s, x, y);
+    // Each block is pillowed (its rim rounds down into the fissures) and slightly tilted.
+    let pillow = (k.edge / 0.008).min(1.0).sqrt();
+    let tilt = 0.0012 * (rnd(k.id, 3) - 0.5);
+    let fiber = t.fbm2(x, y, 8.0, 160.0, 3, 0.6, sd(s, 6));
+    let pits = t.ridged(x, y, 90.0, 3, 0.5, sd(s, 7));
+    let h = 0.0025 * pillow - 0.005 * k.crack + tilt + 0.00015 * fiber - 0.0003 * pits;
+    // Satin black block tops with grain streaks; matte dark-brown fissure walls; pale ash
+    // settles in patches.
+    let streak = 0.5 + 0.5 * t.fbm2(x, y, 3.0, 60.0, 3, 0.6, sd(s, 8));
+    let top = mul(
+        [0.034, 0.031, 0.029],
+        0.75 + 0.5 * streak + 0.15 * (rnd(k.id, 4) - 0.5),
+    );
+    let wall = [0.045, 0.03, 0.022];
+    let mut c = mix(top, wall, k.crack);
+    // Some block tops have gone grey with a fine dusting of ash.
+    let dust = 0.5 + 0.5 * t.fbm(x, y, 70.0, 2, 0.5, sd(s, 9));
+    let ash = smooth(0.82, 0.98, rnd(k.id, 5)) * dust * pillow;
+    c = mix(c, [0.3, 0.29, 0.27], ash * 0.3);
+    let rough = lerp(lerp(0.5, 0.62, streak), 0.95, k.crack.max(ash));
+    Texel {
+        h,
+        c,
+        r: rough,
+        m: 0.0,
+        ao: 1.0 - 0.6 * k.crack,
     }
 }
 

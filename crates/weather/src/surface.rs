@@ -121,8 +121,11 @@ pub struct CellInfo {
     pub height: f32,
     /// How much the surface soaks up, 0 rock .. 1 soil.
     pub absorbency: f32,
-    /// Where water collects, 0 (high spot) .. 1 (dip).
+    /// Where water collects, 0 (high spot) .. 1 (dip): the larger of `spots` and a real
+    /// hollow in the ground around the cell.
     pub dip: f32,
+    /// Where small unevenness the terrain doesn't model collects water (hard ground), 0..1.
+    pub spots: f32,
     /// Raycast done.
     pub known: bool,
 }
@@ -134,6 +137,7 @@ impl Default for CellInfo {
             height: 0.0,
             absorbency: 0.5,
             dip: 0.0,
+            spots: 0.0,
             known: false,
         }
     }
@@ -171,6 +175,16 @@ impl Default for GroundCache {
 }
 
 impl GroundCache {
+    /// 1 open sky .. 0 covered (a roof or a [`WeatherShelter`]) for cell `index`; ground not
+    /// looked at yet counts as open.
+    pub fn exposure(&self, index: usize) -> f32 {
+        if self.sheltered.get(index).copied().unwrap_or(false) {
+            0.0
+        } else {
+            self.cells.data.get(index).map_or(1.0, |c| c.exposure)
+        }
+    }
+
     /// Follow the surface grid: same layout, keeping what overlaps when it moves.
     fn align(&mut self, surface: &Grid2<engine_world::SurfaceCell>) {
         let same_dims = self.cells.width == surface.width
@@ -314,8 +328,7 @@ pub fn update_cells(
             let excess_mm = (water_mm - soak_mm).max(0.0);
             // Water runs off high spots into dips (volume roughly conserved over the area).
             let pooled_mm = excess_mm * info.dip / share;
-            cell.puddle_m =
-                (cell.puddle_m + pooled_mm / 1000.0).min(max_puddle * (0.3 + 0.7 * info.dip));
+            cell.puddle_m = (cell.puddle_m + pooled_mm / 1000.0).min(max_puddle * info.dip);
 
             // Drying: puddles evaporate and drain; damp ground dries once puddles are gone.
             let dry_mm = evap * dt_h * exposure.max(0.25);
@@ -335,6 +348,18 @@ pub fn update_cells(
 
 /// Roofs higher than this above the ground don't keep rain off it (m).
 const ROOF_SEARCH_M: f32 = 120.0;
+/// Colliders this close above the ground's height are the ground itself (m): the physics
+/// terrain is built separately and can sit a little off it.
+const GROUND_SLACK_M: f32 = 1.0;
+
+/// How far around the player API calls look at the ground before changing it (m).
+pub(crate) const PREPARE_RADIUS_M: f64 = 64.0;
+
+/// Ring sizes that find hollows in the ground, small and large (m).
+const HOLLOW_RADII_M: [f64; 2] = [2.0, 4.5];
+/// How far below the ground around it a spot starts holding water, and where it is a full
+/// puddle (m).
+const HOLLOW_M: [f32; 2] = [0.02, 0.07];
 
 /// Look up roofs and ground facts for up to `rays` cells: first the cells not looked at yet
 /// (nearest the player first), then a slow sweep over known cells that notices roofs built
@@ -362,6 +387,7 @@ pub fn refresh_cache(
         filter: QueryFilter::default(),
     };
     let mut budget = rays.min(n as u32);
+    let mut looked = Vec::new();
     if !cache.complete {
         let mut scanned = 0;
         while budget > 0 && scanned < n {
@@ -370,6 +396,7 @@ pub fn refresh_cache(
             scanned += 1;
             if !cache.cells.data[index].known {
                 look.cell(cache, index);
+                looked.push(index);
                 budget -= 1;
             }
         }
@@ -379,7 +406,73 @@ pub fn refresh_cache(
         let index = cache.order[cache.sweep] as usize;
         cache.sweep = (cache.sweep + 1) % n;
         look.cell(cache, index);
+        looked.push(index);
     }
+    for index in looked {
+        update_dips_around(cache, index, sim);
+    }
+}
+
+/// Look at the ground within `radius_m` of the player now, for changes that apply at once
+/// (`weather.ground`, `weather.advance`) right after the grid moved: the cache follows the
+/// surface grid, every cell in reach is known, and shelters and patches are stamped in.
+pub(crate) fn prepare(world: &mut World, radius_m: f64) {
+    let shelters: Vec<(DVec3, WeatherShelter)> = world
+        .query::<(&GlobalTransform, &WeatherShelter)>()
+        .iter(world)
+        .map(|(gt, s)| (gt.translation(), *s))
+        .collect();
+    let patches: Vec<(DVec3, GroundPatch)> = world
+        .query::<(&GlobalTransform, &GroundPatch)>()
+        .iter(world)
+        .map(|(gt, p)| (gt.translation(), *p))
+        .collect();
+    world.resource_scope(|world, mut cache: Mut<GroundCache>| {
+        let cache = &mut *cache;
+        cache.align(&world.resource::<SurfaceLayers>().grid);
+        let sim = world.resource::<WeatherSim>();
+        let look = LookUp {
+            ground: world.resource::<Ground>(),
+            physics: world.get_resource::<PhysicsQueries>(),
+            materials: world.resource::<SurfaceMaterials>(),
+            share: world.resource::<GroundWeather>().puddle_share,
+            sim,
+            filter: QueryFilter::default(),
+        };
+        let (w, h) = (cache.cells.width, cache.cells.height);
+        let reach = radius_m / cache.cells.cell as f64;
+        let mut found: Vec<(usize, CellInfo)> = Vec::new();
+        for &index in &cache.order {
+            let x = (index % w) as f64 + 0.5 - w as f64 * 0.5;
+            let y = (index / w) as f64 + 0.5 - h as f64 * 0.5;
+            if x * x + y * y > reach * reach {
+                // Nearest first: everything after this is farther.
+                break;
+            }
+            if !cache.cells.data[index as usize].known {
+                found.push((index as usize, CellInfo::default()));
+            }
+        }
+        // Tens of thousands of cells after a teleport: look at them on all cores.
+        let cells = &cache.cells;
+        engine_core::tasks::par_chunks_mut(&mut found, 512, |_, chunk| {
+            for (index, info) in chunk {
+                *info = look.facts(cells, *index);
+            }
+        });
+        for &(index, info) in &found {
+            cache.cells.data[index] = info;
+        }
+        for &(index, _) in &found {
+            update_dips_around(cache, index, sim);
+        }
+        stamp(
+            cache,
+            shelters.iter().map(|(p, s)| (*p, s)),
+            patches.iter().map(|(p, g)| (*p, g)),
+            sim,
+        );
+    });
 }
 
 struct LookUp<'a> {
@@ -393,9 +486,14 @@ struct LookUp<'a> {
 
 impl LookUp<'_> {
     fn cell(&self, cache: &mut GroundCache, index: usize) {
-        let w = cache.cells.width;
+        cache.cells.data[index] = self.facts(&cache.cells, index);
+    }
+
+    /// What the ground at cell `index` of `cells` is like.
+    fn facts(&self, cells: &Grid2<CellInfo>, index: usize) -> CellInfo {
+        let w = cells.width;
         let c = IVec2::new((index as u32 % w) as i32, (index as u32 / w) as i32);
-        let xz = cache.cells.cell_center(c);
+        let xz = cells.cell_center(c);
         let sample = self.ground.sample(DVec3::new(xz.x, 0.0, xz.y));
         let height = sample.map(|s| s.height).unwrap_or(0.0);
         // Unknown ground soaks like the world's default material.
@@ -404,12 +502,14 @@ impl LookUp<'_> {
             .get(sample.map(|s| s.surface).unwrap_or(SurfaceId::DEFAULT))
             .absorbency;
         let flat = sample.map(|s| s.normal.y).unwrap_or(1.0);
+        // Look down from the sky for the first thing above the ground. Looking up from the
+        // ground instead started under the physics terrain wherever it sits a little above
+        // the height the ground reports, and took the terrain for a roof.
         let exposure = match self.physics {
             Some(q) => {
-                let from = DVec3::new(xz.x, height + 0.3, xz.y);
-                if q.raycast(from, Vec3::Y, ROOF_SEARCH_M, &self.filter)
-                    .is_some()
-                {
+                let from = DVec3::new(xz.x, height + ROOF_SEARCH_M as f64, xz.y);
+                let reach = ROOF_SEARCH_M - GROUND_SLACK_M;
+                if q.raycast(from, -Vec3::Y, reach, &self.filter).is_some() {
                     0.0
                 } else {
                     1.0
@@ -417,20 +517,77 @@ impl LookUp<'_> {
             }
             None => 1.0,
         };
-        // Puddles keep their spots on the ground when the world shifts. Soft ground (a grass
-        // meadow, soil) drains: water stands only in its few real hollows, not in a third of
-        // the field.
+        // Hard ground pools in small unevenness the terrain doesn't model (a spot pattern that
+        // keeps its place when the world shifts). Soft ground (a grass meadow, soil) drains:
+        // water stands only where the ground itself dips (see `hollow_dip`).
         let share_here = self.share * (1.0 - smoothstep(0.2, 0.65, absorbency));
-        let dip = puddle_dip(self.sim.frame.to_pattern(xz), share_here, self.sim.seed)
-            * smoothstep(0.9, 0.98, flat);
-        cache.cells.data[index] = CellInfo {
+        let spots = puddle_dip(self.sim.frame.to_pattern(xz), share_here, self.sim.seed)
+            * smoothstep(0.88, 0.97, flat);
+        CellInfo {
             exposure,
             height: height as f32,
             absorbency,
-            dip,
+            dip: spots,
+            spots,
             known: true,
-        };
+        }
     }
+}
+
+/// Recompute the dips of the cells whose hollow rings reach cell `index` (its height is new).
+fn update_dips_around(cache: &mut GroundCache, index: usize, sim: &WeatherSim) {
+    let (axis, diagonal) = hollow_rings(cache.cells.cell);
+    let reach = axis.max(diagonal);
+    let w = cache.cells.width;
+    let c = IVec2::new((index as u32 % w) as i32, (index as u32 / w) as i32);
+    for y in -reach..=reach {
+        for x in -reach..=reach {
+            let n = c + IVec2::new(x, y);
+            if let Some(i) = cache.cells.index(n)
+                && cache.cells.data[i].known
+            {
+                let dip = hollow_dip(&cache.cells, n, sim);
+                cache.cells.data[i].dip = dip;
+            }
+        }
+    }
+}
+
+/// Cell offsets of the two rings that find hollows: along the axes and along the diagonals.
+fn hollow_rings(cell: f32) -> (i32, i32) {
+    let cells = |m: f64| ((m / cell as f64).round() as i32).max(1);
+    (
+        cells(HOLLOW_RADII_M[0]),
+        cells(HOLLOW_RADII_M[1] * std::f64::consts::FRAC_1_SQRT_2),
+    )
+}
+
+/// Where water collects in cell `c`: its spots, or a real hollow, where the ground lies lower
+/// than the ground around it (ruts, dips in a meadow, a dry stream bed). A steady slope
+/// cancels out; ground not looked at yet counts as level with the cell.
+fn hollow_dip(cells: &Grid2<CellInfo>, c: IVec2, sim: &WeatherSim) -> f32 {
+    let Some(info) = cells.index(c).map(|i| cells.data[i]) else {
+        return 0.0;
+    };
+    let h = info.height;
+    let at = |x: i32, y: i32| {
+        cells
+            .index(c + IVec2::new(x, y))
+            .map(|i| cells.data[i])
+            .filter(|n| n.known)
+            .map_or(h, |n| n.height)
+    };
+    let (a, d) = hollow_rings(cells.cell);
+    let along = (at(a, 0) + at(-a, 0) + at(0, a) + at(0, -a)) * 0.25 - h;
+    let across = (at(d, d) + at(-d, d) + at(d, -d) + at(-d, -d)) * 0.25 - h;
+    // Water doesn't stand on a hillside, even in a gully.
+    let slope = (at(1, 0) - at(-1, 0)).hypot(at(0, 1) - at(0, -1)) / (2.0 * cells.cell);
+    let level = 1.0 - smoothstep(0.25, 0.54, slope);
+    // Ragged shores: the water doesn't fill a hollow's rim evenly.
+    let pattern = sim.frame.to_pattern(cells.cell_center(c));
+    let shore = 0.75 + 0.25 * perlin2(pattern.x / 1.3, pattern.y / 1.3, sim.seed ^ 5);
+    let hollow = smoothstep(HOLLOW_M[0], HOLLOW_M[1], along.max(across)) * shore * level;
+    info.spots.max(hollow.min(1.0))
 }
 
 /// FixedUpdate: rain, snow, melting and drying on the ground around the player.
@@ -467,10 +624,12 @@ pub(crate) fn ground_system(
         params.puddle_share,
         &sim,
     );
-    rasterize_shelters(&mut cache, &shelters);
-    for (gt, patch) in &patches {
-        apply_patch(&mut cache, gt.translation(), patch, &sim);
-    }
+    stamp(
+        &mut cache,
+        shelters.iter().map(|(gt, s)| (gt.translation(), s)),
+        patches.iter().map(|(gt, p)| (gt.translation(), p)),
+        &sim,
+    );
     update_cells(
         &mut surface,
         &cache,
@@ -483,14 +642,16 @@ pub(crate) fn ground_system(
     );
 }
 
-fn rasterize_shelters(
+/// Mark the ground under shelters and stamp the ground patches into the cache.
+fn stamp<'a>(
     cache: &mut GroundCache,
-    shelters: &Query<(&GlobalTransform, &WeatherShelter)>,
+    shelters: impl Iterator<Item = (DVec3, &'a WeatherShelter)>,
+    patches: impl Iterator<Item = (DVec3, &'a GroundPatch)>,
+    sim: &WeatherSim,
 ) {
     cache.sheltered.fill(false);
-    let grid = &cache.cells;
-    for (gt, shelter) in shelters.iter() {
-        let p = gt.translation();
+    for (p, shelter) in shelters {
+        let grid = &cache.cells;
         let h = DVec2::new(
             shelter.half_extents[0] as f64,
             shelter.half_extents[1] as f64,
@@ -507,6 +668,9 @@ fn rasterize_shelters(
             }
         }
     }
+    for (p, patch) in patches {
+        apply_patch(cache, p, patch, sim);
+    }
 }
 
 /// Stamp a [`GroundPatch`] centered on `at` into the cache.
@@ -519,6 +683,11 @@ pub fn apply_patch(cache: &mut GroundCache, at: DVec3, patch: &GroundPatch, sim:
         for x in lo.x.max(0)..=hi.x.min(grid.width as i32 - 1) {
             let c = IVec2::new(x, y);
             let xz = grid.cell_center(c);
+            // Only cells whose middle is on the patch: the grass around a yard stays grass.
+            let off = (xz - DVec2::new(at.x, at.z)).abs();
+            if off.x > h.x || off.y > h.y {
+                continue;
+            }
             if let Some(i) = grid.index(c) {
                 let info = &mut grid.data[i];
                 info.absorbency = patch.absorbency.clamp(0.0, 1.0);
@@ -689,6 +858,143 @@ mod tests {
             puddled[1],
             puddled[0]
         );
+    }
+
+    /// A grass meadow, flat but for a bowl 20 cm deep at (10, -8) and a hump at (-10, 10).
+    struct Meadow;
+    impl engine_world::GroundQuery for Meadow {
+        fn sample(&self, p: DVec3) -> Option<engine_world::GroundSample> {
+            let shape = |c: DVec2, r: f64, h: f64| {
+                let d = (DVec2::new(p.x, p.z) - c).length() / r;
+                h * (1.0 - d * d).max(0.0)
+            };
+            let height =
+                shape(DVec2::new(10.0, -8.0), 3.0, -0.2) + shape(DVec2::new(-10.0, 10.0), 3.0, 0.3);
+            Some(engine_world::GroundSample {
+                height,
+                normal: Vec3::Y,
+                surface: Ground::default().sample(p)?.surface,
+            })
+        }
+    }
+
+    #[test]
+    fn water_stands_in_a_meadows_real_hollows() {
+        let (mut surface, _, params) = setup();
+        let mut cache = GroundCache::default();
+        cache.align(&surface.grid);
+        refresh_cache(
+            &mut cache,
+            100_000,
+            &Ground(std::sync::Arc::new(Meadow)),
+            None,
+            &SurfaceMaterials::default(),
+            0.3,
+            &WeatherSim::default(),
+        );
+        run(&mut surface, &cache, &params, &rain(40.0, 12.0), 1800.0);
+        let puddle = |x: f64, z: f64| surface.sample(DVec3::new(x, 0.0, z)).puddle_m;
+        assert!(puddle(10.0, -8.0) > 0.01, "bowl {}", puddle(10.0, -8.0));
+        assert_eq!(puddle(-10.0, 10.0), 0.0, "hump");
+        let open_meadow = surface
+            .grid
+            .data
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| {
+                let xz = surface.grid.cell_center(IVec2::new(
+                    (*i as u32 % surface.grid.width) as i32,
+                    (*i as u32 / surface.grid.width) as i32,
+                ));
+                (xz - DVec2::new(10.0, -8.0)).length() > 5.0
+            })
+            .map(|(_, c)| c)
+            .collect::<Vec<_>>();
+        let puddled = open_meadow.iter().filter(|c| c.puddle_m > 0.002).count();
+        assert!(
+            (puddled as f32) < open_meadow.len() as f32 * 0.03,
+            "{puddled} of {} cells of open meadow hold water",
+            open_meadow.len()
+        );
+    }
+
+    /// Physics with a terrain 40 cm above the height the ground reports (they are built
+    /// separately) and a roof 2.5 m up over 6 × 6 m around the origin. Rays hit both from
+    /// either side, like a heightfield does from below.
+    struct RoofOverTerrain;
+    impl engine_world::physics::PhysicsQuery for RoofOverTerrain {
+        fn raycast(
+            &self,
+            origin: DVec3,
+            dir: Vec3,
+            max_distance: f32,
+            _: &QueryFilter,
+        ) -> Option<engine_world::physics::Hit> {
+            let under_roof = origin.x.abs() < 3.0 && origin.z.abs() < 3.0;
+            let planes: &[f64] = if under_roof { &[0.4, 2.5, 2.7] } else { &[0.4] };
+            planes
+                .iter()
+                .map(|&y| ((y - origin.y) / dir.y as f64) as f32)
+                .filter(|t| (0.0..=max_distance).contains(t))
+                .min_by(f32::total_cmp)
+                .map(|t| engine_world::physics::Hit {
+                    entity: Entity::PLACEHOLDER,
+                    point: origin + dir.as_dvec3() * t as f64,
+                    normal: -dir,
+                    distance: t,
+                    surface: SurfaceId::DEFAULT,
+                })
+        }
+        fn shapecast(
+            &self,
+            _: &engine_world::physics::ColliderShape,
+            _: DVec3,
+            _: engine_core::math::Quat,
+            _: Vec3,
+            _: f32,
+            _: &QueryFilter,
+        ) -> Option<engine_world::physics::Hit> {
+            None
+        }
+        fn overlap(
+            &self,
+            _: &engine_world::physics::ColliderShape,
+            _: DVec3,
+            _: engine_core::math::Quat,
+            _: &QueryFilter,
+            _: &mut Vec<Entity>,
+        ) {
+        }
+        fn closest_point(
+            &self,
+            _: DVec3,
+            _: f32,
+            _: &QueryFilter,
+        ) -> Option<engine_world::physics::Hit> {
+            None
+        }
+    }
+
+    #[test]
+    fn roofs_keep_rain_off_but_the_terrain_is_no_roof() {
+        let (surface, _, _) = setup();
+        let mut cache = GroundCache::default();
+        cache.align(&surface.grid);
+        refresh_cache(
+            &mut cache,
+            100_000,
+            &Ground::default(),
+            Some(&PhysicsQueries(std::sync::Arc::new(RoofOverTerrain))),
+            &SurfaceMaterials::default(),
+            0.3,
+            &WeatherSim::default(),
+        );
+        let exposure = |x: f64, z: f64| {
+            let c = cache.cells.cell_at(DVec3::new(x, 0.0, z));
+            cache.cells.data[cache.cells.index(c).unwrap()].exposure
+        };
+        assert_eq!(exposure(0.5, -1.5), 0.0, "under the roof");
+        assert_eq!(exposure(10.5, -6.5), 1.0, "open meadow");
     }
 
     #[test]

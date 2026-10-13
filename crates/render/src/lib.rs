@@ -10,6 +10,9 @@
 //! - **Atmosphere**: multiple-scattering sky that works from the ground and from orbit, aerial
 //!   perspective, height fog, a cloud layer, stars; the sky lights every surface (prefiltered
 //!   for rough reflections, convolved for diffuse light).
+//! - **Volumetric fog**: height fog and [`FogVolume`]s in a froxel grid lit by the shadowed
+//!   sun, the sky and lamps: sunbeams through trees and windows, lamps glowing in mist, dark
+//!   caves. See [`volumetrics`].
 //! - **Cascaded sun shadows** (4 × 2048², texel-snapped), point lights, wind sway, wetness
 //!   and snow on surfaces driven by `engine_world` weather. Alpha-masked materials (leaves,
 //!   fences) cut out their shadows too.
@@ -66,14 +69,15 @@ mod sky_occlusion;
 pub mod targets;
 pub mod texture;
 pub mod virtual_geometry;
+pub mod volumetrics;
 
 use engine_assets::{AssetAppExt, AssetPlugin, AssetServer, Assets, Handle};
 use engine_core::prelude::*;
 use serde_json::json;
 
 pub use components::{
-    AmbientLight, BoxFace, Camera, DirectionalLight, Exposure, MaterialRef, MeshRef, MeshRenderer,
-    NoVirtualGeometry, PointLight, Projection, ResolvedMesh, SkyLightVolume,
+    AmbientLight, BoxFace, Camera, DirectionalLight, Exposure, FogShape, FogVolume, MaterialRef,
+    MeshRef, MeshRenderer, NoVirtualGeometry, PointLight, Projection, ResolvedMesh, SkyLightVolume,
 };
 pub use features::{
     FeatureStats, FrameContext, GpuShared, GrowBuffer, RenderAppExt, RenderFeature, RenderPhase,
@@ -91,18 +95,20 @@ pub use mesh::{Mesh, Shape, Vertex};
 pub use renderer::{
     RenderDisabled, RenderStats, Renderer, ScreenshotInfo, Screenshots, capture_now,
 };
-pub use settings::{AntiAliasing, Atmosphere, DebugView, FogSettings, RenderSettings, Tonemapper};
+pub use settings::{
+    AntiAliasing, Atmosphere, DebugView, FogSettings, RenderSettings, Tonemapper, VolumetricQuality,
+};
 pub use texture::{Image, ImageLoader, PixelFormat};
 pub use wgpu;
 
 pub mod prelude {
     pub use crate::{
         AlphaMode, AmbientLight, AntiAliasing, Atmosphere, BoxFace, Camera, DirectionalLight,
-        Exposure, FogSettings, GltfScene, GltfSceneSpawner, GrassBender, GrassField, GrassStyle,
-        Image, MaterialPreset, MaterialRef, Mesh, MeshRef, MeshRenderer, NoVirtualGeometry,
-        PointLight, Projection, RenderAppExt, RenderFeature, RenderPhase, RenderPlugin,
-        RenderSettings, Screenshots, Shape, SkyLightVolume, StandardMaterial, TextureMapping,
-        Tonemapper, spawn_gltf_scene, spawn_gltf_scene_deferred,
+        Exposure, FogSettings, FogShape, FogVolume, GltfScene, GltfSceneSpawner, GrassBender,
+        GrassField, GrassStyle, Image, MaterialPreset, MaterialRef, Mesh, MeshRef, MeshRenderer,
+        NoVirtualGeometry, PointLight, Projection, RenderAppExt, RenderFeature, RenderPhase,
+        RenderPlugin, RenderSettings, Screenshots, Shape, SkyLightVolume, StandardMaterial,
+        TextureMapping, Tonemapper, VolumetricQuality, spawn_gltf_scene, spawn_gltf_scene_deferred,
     };
 }
 
@@ -160,10 +166,13 @@ impl Plugin for RenderPlugin {
             .register_component::<GrassBender>(
                 "Pushes grass aside and flattens it within radius (m) of the entity: feet, bodies, boulders, landing ships. The 16 nearest the camera act.",
             )
-            .register_resource::<RenderSettings>(
-                "Renderer quality and look: shadows (sun_penumbra_scale, contact_shadow_length m), ambient_occlusion (ao_radius m, ao_intensity), anti_aliasing (Taa/None) and sharpness, tonemapper (AgX/Aces/Reinhard/None), bloom, grading, debug_view (None/Normals/Cascades/SkyVisibility/AmbientOcclusion/Reflections/Clusters/ClusterLevels), virtual_geometry (dense opaque meshes as GPU-culled clusters: virtual_geometry_min_triangles, cluster_error_px, cluster_shadow_error_texels).",
+            .register_component::<FogVolume>(
+                "Local fog (mist, dust, smoke, steam) lit by the volumetric fog: shape Box/Ellipsoid, half_extents (m, local axes, scaled with the entity), density (extinction 1/m: 0.02 mist, 0.5 smoke), albedo, emission (cd/m² per m), edge_falloff (m), noise 0..1 and noise_scale (m, drifts with the wind), anisotropy (-0.95..0.95, forward scattering).",
             )
-            .register_resource::<FogSettings>("Height fog: density per meter, height_falloff, base_height, color (albedo).")
+            .register_resource::<RenderSettings>(
+                "Renderer quality and look: shadows (sun_penumbra_scale, contact_shadow_length m), ambient_occlusion (ao_radius m, ao_intensity), screen_space_reflections, volumetric_fog (bool), volumetric_fog_range (m), volumetric_fog_quality (Low/Medium/High), anti_aliasing (Taa/None) and sharpness, tonemapper (AgX/Aces/Reinhard/None), bloom, grading, debug_view (None/Normals/Cascades/SkyVisibility/AmbientOcclusion/Reflections/Clusters/ClusterLevels), virtual_geometry (dense opaque meshes as GPU-culled clusters: virtual_geometry_min_triangles, cluster_error_px, cluster_shadow_error_texels).",
+            )
+            .register_resource::<FogSettings>("Height fog everywhere (volumetric within volumetric_fog_range, with light shafts): density (extinction 1/m at base_height: 0.0005 haze, 0.05 ground fog), height_falloff (1/m), base_height (m), max_opacity, color (albedo), sun_scattering (Henyey-Greenstein g, 0.6 = forward scattering, glow around the sun).")
             .register_resource::<Atmosphere>(
                 "Planet atmosphere used for the sky and sunlight: planet_center (world), planet_radius, thickness, scale heights.",
             )
@@ -377,6 +386,11 @@ mod tests {
             (
                 "sky_camera",
                 include_str!("shaders/sky_camera.wgsl").into(),
+                true,
+            ),
+            (
+                "volumetric_fog",
+                include_str!("shaders/volumetric_fog.wgsl").into(),
                 true,
             ),
             (

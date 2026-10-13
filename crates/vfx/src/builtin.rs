@@ -9,6 +9,7 @@
 //! 40 000–100 000 read as white-hot by day and bloom at night.
 
 use crate::effect::*;
+use crate::marks::{MarkDesc, MarkKind};
 use crate::trail::{RibbonStyle, Trail};
 
 fn em(name: &str) -> EmitterDesc {
@@ -63,6 +64,18 @@ fn effect(
         emitters,
         ..Default::default()
     }
+}
+
+/// The mark an effect leaves where it starts: `radius` m at scale 1, lasting `life` s, with
+/// embers glowing for `glow` s (scorches).
+fn mark(kind: MarkKind, radius: f32, life: f32, glow: f32) -> Option<MarkDesc> {
+    Some(MarkDesc {
+        kind,
+        radius,
+        life_secs: life,
+        strength: 1.0,
+        glow_secs: glow,
+    })
 }
 
 fn light(color: [f32; 3], lumens: f32, range: f32, flicker: f32, fade: f32) -> Option<EffectLight> {
@@ -422,6 +435,7 @@ fn spells() -> Vec<EffectDesc> {
 
     let fireball_impact = EffectDesc {
         light: light([1.0, 0.55, 0.25], 45_000.0, 18.0, 0.2, 0.7),
+        mark: mark(MarkKind::Scorch, 1.1, 120.0, 8.0),
         ..effect(
             "spell.fireball_impact",
             "A fireball exploding: flash, fire burst, bouncing sparks, a smoke cloud, a ground \
@@ -625,6 +639,7 @@ fn spells() -> Vec<EffectDesc> {
 
     let frost_impact = EffectDesc {
         light: light([0.55, 0.8, 1.0], 20_000.0, 14.0, 0.1, 0.5),
+        mark: mark(MarkKind::Frost, 1.3, 30.0, 0.0),
         ..effect(
             "spell.frost_impact",
             "An ice bolt shattering: flash, a spray of bouncing ice shards, glints, a frost ring \
@@ -1514,26 +1529,32 @@ fn impacts() -> Vec<EffectDesc> {
             [0.32, 0.25, 0.18],
             vec![],
         ),
-        surface(
-            "impact.rock",
-            "A hit on rock: grey dust, stone chips and a few sparks.",
-            rock,
-            rock,
-            vec![EmitterDesc {
-                lifetime: [0.2, 0.5],
-                ..sparks("sparks", 6, [3.0, 8.0])
-            }],
-        ),
-        surface(
-            "impact.concrete",
-            "A hit on concrete: pale dust, chips and a few sparks.",
-            [0.62, 0.6, 0.56],
-            [0.6, 0.58, 0.55],
-            vec![EmitterDesc {
-                lifetime: [0.2, 0.5],
-                ..sparks("sparks", 5, [3.0, 8.0])
-            }],
-        ),
+        EffectDesc {
+            mark: mark(MarkKind::Chip, 0.07, 120.0, 0.0),
+            ..surface(
+                "impact.rock",
+                "A hit on rock: grey dust, stone chips, a few sparks and a chipped pock.",
+                rock,
+                rock,
+                vec![EmitterDesc {
+                    lifetime: [0.2, 0.5],
+                    ..sparks("sparks", 6, [3.0, 8.0])
+                }],
+            )
+        },
+        EffectDesc {
+            mark: mark(MarkKind::Chip, 0.07, 120.0, 0.0),
+            ..surface(
+                "impact.concrete",
+                "A hit on concrete: pale dust, chips, a few sparks and a chipped pock.",
+                [0.62, 0.6, 0.56],
+                [0.6, 0.58, 0.55],
+                vec![EmitterDesc {
+                    lifetime: [0.2, 0.5],
+                    ..sparks("sparks", 5, [3.0, 8.0])
+                }],
+            )
+        },
         surface(
             "impact.wood",
             "A hit on wood: splinters and light dust.",

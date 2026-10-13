@@ -28,7 +28,8 @@ pub fn jitter(index: u64) -> Vec2 {
     Vec2::new(halton(i, 2) - 0.5, halton(i, 3) - 0.5)
 }
 
-fn halton(mut i: u64, base: u64) -> f32 {
+/// Element `i` of the Halton low-discrepancy sequence in `base` (0..1).
+pub(crate) fn halton(mut i: u64, base: u64) -> f32 {
     let mut f = 1.0f32;
     let mut r = 0.0f32;
     while i > 0 {
