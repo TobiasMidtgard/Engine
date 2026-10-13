@@ -141,6 +141,20 @@ const SHOTS: &[Shot] = &[
         follow: Some("Slow-motion mannequin"),
     },
     Shot {
+        name: "blanket",
+        secs: 7.5,
+        eye: [-2.6, 1.7, 5.8],
+        target: [-4.4, 0.4, 3.0],
+        follow: None,
+    },
+    Shot {
+        name: "blanket_falling",
+        secs: 9.35,
+        eye: [-1.6, 2.4, 7.2],
+        target: [-4.3, 1.0, 3.0],
+        follow: None,
+    },
+    Shot {
         name: "curtains",
         secs: 13.0,
         eye: [-12.0, 3.4, 15.0],
@@ -278,4 +292,16 @@ fn main() {
         d.get("softbody.particles"),
         d.get("softbody.step_ms"),
     );
+    if let Some(r) = app.world.get_resource::<engine_render::Renderer>() {
+        let r = r.describe();
+        let state = r["features"]
+            .as_array()
+            .and_then(|f| f.iter().find(|f| f["name"] == "softbody"))
+            .map(|f| f["state"].clone())
+            .unwrap_or_default();
+        println!(
+            "GPU cloths: {}, simulation pass: {} ms on {}",
+            state["gpu_cloths"], state["gpu_cloth_ms"], r["adapter"]
+        );
+    }
 }

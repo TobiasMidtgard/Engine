@@ -204,6 +204,11 @@ pub fn zone(key: &str) -> &'static Zone {
     ZONES.iter().find(|z| z.key == key).expect("zone")
 }
 
+/// Zones whose demo stops short of the pad's edge, with the radius it fills (m). The valley's
+/// woods grow on the rest of the pad, right up to the demo, so it sits inside a forest instead
+/// of on a bare disc. The foliage demo's forest reaches about 90 m.
+pub const WOODED_RIMS: &[(&str, f64)] = &[("forest", 94.0)];
+
 /// Zones with natural ground, where the valley's grass and flowers grow too.
 pub const GRASSY_ZONES: &[&str] = &[
     "market",
@@ -225,6 +230,8 @@ pub const BARE_FOOTPRINTS: &[(&str, [f64; 2], [f64; 2])] = &[
     ("weather", [-13.5, 13.0], [-8.0, 9.0]),
     // The siege fortress's gravel breach range.
     ("fortress", [-26.5, 26.5], [-14.0, -4.0]),
+    // The market's cobbled square (grass still grows where its edge frays out).
+    ("market", [-11.0, 11.0], [-11.0, 11.0]),
 ];
 
 /// The stream's course (x, z), spring first: through the southern woods, over the cliff south
@@ -239,40 +246,98 @@ pub const STREAM: [[f64; 2]; 7] = [
     [236.0, -235.0],
 ];
 
+/// The lake zone's water: the lake over its basin, the stream from its spring over the falls,
+/// and a jetty on the west shore facing the waterfall across the lake.
+fn lake_water<'a>(z: &Zone, ground: &'a dyn Fn(f64, f64) -> f64) -> engine_water::demo::Valley<'a> {
+    engine_water::demo::Valley {
+        lake_center: z.center,
+        lake_radius: z.radius as f32 * 1.3,
+        streams: &[engine_water::demo::ValleyStream {
+            path: &STREAM,
+            width_m: 5.0,
+            flow_m3_s: 1.0,
+        }],
+        ground,
+        jetty_bearing: Some(std::f64::consts::PI * 0.9),
+    }
+}
+
 /// The runway's two ends (x, z): 1.2 km north–south through the airfield.
 pub const RUNWAY: ([f64; 2], [f64; 2]) = ([780.0, -750.0], [780.0, 450.0]);
 
 /// What each zone shows. Each zone is one line, owned by its module's thread: swap the
 /// placeholder (`ph::…`) for your demo and leave the other lines alone.
-pub fn spawn_demos(
-    commands: &mut Commands,
-    meshes: &mut Assets<Mesh>,
-    lib: &Library,
-    land: &Landscape,
-    rng: &mut Rng,
-) {
+pub fn spawn_demos(commands: &mut Commands, lib: &Library, land: &Landscape, rng: &mut Rng) {
     for z in ZONES {
         match z.key {
             "plaza" => ph::plaza(commands, lib, z),
-            "market" => {
-                ph::market(commands, lib, z);
-                engine_ui::demo::spawn_demo(commands, z.center);
-            }
+            "market" => engine_ui::demo::spawn_demo(commands, z.center),
             "paddock" => engine_anim::demo::spawn_demo(commands, z.center),
             "physics" => engine_physics::demo::spawn_demo(commands, z.center),
-            "yard" => engine_softbody::demo::spawn_demo(commands, z.center),
+            "yard" => {
+                engine_softbody::demo::spawn_demo(commands, z.center);
+                // The sailing dinghy works the lake east of the jetty (it waits at its mooring
+                // until the lake is water the physics module floats it on).
+                let home =
+                    zone("lake").center + DVec3::new(-30.0, crate::landscape::LAKE_LEVEL, 30.0);
+                let boat = engine_softbody::demo::spawn_sailboat(commands, home, 22.0);
+                commands
+                    .entity(boat)
+                    .insert(engine_water::WaterInteractor::new(0.6).with_wake(0.35));
+            }
             "magic" => engine_vfx::demo::spawn_demo(commands, z.center),
             "gallery2d" => ph::gallery2d(commands, lib, z),
             "forest" => engine_foliage::demo::spawn_demo(commands, z.center),
             "meadow" => engine_npc::demo::spawn_wildlife(commands, z.center, z.radius * 0.8),
-            "lake" => ph::lake(commands, meshes, lib, land, z),
+            "lake" => engine_water::demo::spawn_valley(
+                commands,
+                &lake_water(z, &|x, z| land.height(x, z)),
+            ),
             "water" => engine_water::demo::spawn_demo(commands, z.center),
             "footsteps" => engine_audio::demo::spawn_demo(commands, z.center),
-            "tracks" => ph::tracks(commands, z),
+            "tracks" => engine_terrain::demo::spawn_demo_with(
+                commands,
+                z.center,
+                engine_terrain::demo::LabOptions {
+                    stand_in_bodies: true,
+                },
+            ),
             "cave" => engine_foliage::demo::spawn_cave_demo(commands, z.center),
             "arena" => engine_npc::demo::spawn_demo(commands, z.center),
             "parkour" => engine_movement::demo::spawn_demo(commands, z.center),
-            "fortress" => engine_destruction::demo::spawn_demo(commands, z.center),
+            "fortress" => {
+                engine_destruction::demo::spawn_demo(commands, z.center);
+                // The burning storehouse has straw on its floor (it goes up fast and grows back
+                // for the next loop) and stands in a bare earth yard ringed by green grass, so
+                // its fire stays a house fire: no grass fire runs off across the valley, and
+                // embers on the wind die where they land (most come down well inside 60 m).
+                let barn = z.center + DVec3::from_array(engine_destruction::barn::BARN);
+                commands.spawn((
+                    Name::new("Storehouse straw floor"),
+                    Transform::from_translation(barn),
+                    engine_fire::FuelPatch::grass(engine_fire::PatchShape::Rect {
+                        half_extents: [2.3, 1.8],
+                    })
+                    .with_load(0.6)
+                    .with_moisture(0.05)
+                    .with_regrow(90.0)
+                    .with_priority(20),
+                ));
+                commands.spawn((
+                    Name::new("Storehouse yard (firebreak)"),
+                    Transform::from_translation(barn),
+                    engine_fire::FuelPatch::firebreak(engine_fire::PatchShape::Disc {
+                        radius: 8.0,
+                    }),
+                ));
+                commands.spawn((
+                    Name::new("Storehouse green grass"),
+                    Transform::from_translation(barn),
+                    engine_fire::FuelPatch::grass(engine_fire::PatchShape::Disc { radius: 60.0 })
+                        .with_moisture(1.0)
+                        .with_priority(5),
+                ));
+            }
             "voxel" => engine_destruction::hill::spawn_voxel_hill(commands, z.center),
             "field" => {
                 engine_fire::demo::spawn_demo(commands, z.center);
@@ -437,6 +502,33 @@ pub fn demo_views(z: &Zone) -> Vec<View> {
                 .warmup(1.75)
                 .on_arrive("movement.duel", &duel("Pack"))
                 .on_leave("movement.duel", cycle),
+                // The ledge station: the climber restarts its loop on arrival and is caught
+                // shimmying along the block's top. The Blink round has no slow motion, so the
+                // climber keeps its pace.
+                View::new(
+                    "parkour_ledge",
+                    "Ledge hang: catch a ledge too high to climb, shimmy along it, climb up",
+                    [11.4, 3.0, 8.4],
+                    [17.0, 2.3, 1.6],
+                    16.0,
+                )
+                .warmup(2.6)
+                .on_arrive("movement.duel", &duel("Blink"))
+                .on_arrive("movement.climber", "{}")
+                .on_leave("movement.duel", cycle),
+                // The grapple station: the grappler restarts its loop on arrival and is caught
+                // mid-reel, the cable taut from its fist to the anchor plate.
+                View::new(
+                    "parkour_grapple",
+                    "Grapple hook: fire at the top of a 9 m tower, reel in, climb over",
+                    [15.5, 2.4, 20.5],
+                    [8.0, 6.0, 26.5],
+                    16.0,
+                )
+                .warmup(1.9)
+                .on_arrive("movement.duel", &duel("Blink"))
+                .on_arrive("movement.grappler", "{}")
+                .on_leave("movement.duel", cycle),
                 // Play mode (P): a pilot in front of the camera, locked onto the elite.
                 View::new(
                     "parkour_play",
@@ -478,8 +570,9 @@ pub fn demo_views(z: &Zone) -> Vec<View> {
             })
             .collect(),
         "market" => {
+            let (eye, target) = engine_ui::demo::market::ui_view();
             let ui = |key, name, screen: &'static str| {
-                View::new(key, name, [-1.5, 1.8, -5.5], [-11.8, 1.8, 9.2], 15.0)
+                View::new(key, name, eye.to_array(), target.to_array(), 15.0)
                     .warmup(1.5)
                     .on_arrive("ui.show", screen)
                     .on_leave("ui.hide_all", "{}")
@@ -530,6 +623,17 @@ pub fn demo_views(z: &Zone) -> Vec<View> {
                 ),
             ]
         }
+        "lake" => {
+            let land = crate::landscape::shared();
+            engine_water::demo::valley_views(&lake_water(z, &|x, z| land.height(x, z)))
+                .iter()
+                .map(|v| View::new(v.key, v.name, v.eye, v.target, v.hour).warmup(v.warmup_secs))
+                .collect()
+        }
+        "water" => engine_water::demo::VIEWS
+            .iter()
+            .map(|v| View::new(v.key, v.name, v.eye, v.target, v.hour).warmup(v.warmup_secs))
+            .collect(),
         "yard" => vec![
             View::new(
                 "yard_banners",
@@ -571,6 +675,15 @@ pub fn demo_views(z: &Zone) -> Vec<View> {
                 14.5,
             )
             .warmup(7.0),
+            // On the lake: the dinghy's mooring is 85 m east and 110 m south of the yard.
+            View::new(
+                "yard_sailboat",
+                "A gaff dinghy sailing on the wind in its sail",
+                [70.0, 4.5, -95.0],
+                [85.0, 1.8, -110.0],
+                15.5,
+            )
+            .warmup(20.0),
         ],
         "fortress" => destruction_views(engine_destruction::demo::VIEWS),
         "voxel" => destruction_views(engine_destruction::hill::VIEWS),
@@ -815,8 +928,8 @@ pub fn landscape(seed: u64) -> Landscape {
             (DVec2::new(-900.0, -100.0), 300.0),
             (DVec2::new(1050.0, 300.0), 300.0),
         ],
-        patches: ground_patches(),
-        painters: vec![footstep_trail],
+        patches: Vec::new(),
+        painters: vec![footstep_trail, footprint_lab],
         fields: Vec::new(),
         // A cliff south of the lake, with the land behind it raised 9 m.
         scarps: vec![Scarp {
@@ -824,6 +937,7 @@ pub fn landscape(seed: u64) -> Landscape {
             b: DVec2::new(150.0, -300.0),
             height: 9.0,
             reach: 400.0,
+            notch: None,
         }],
         // From a spring in the southern woods, over the cliff as a waterfall, into the lake.
         streams: vec![Stream::new(&STREAM, 5.0, 1.4)],
@@ -833,22 +947,27 @@ pub fn landscape(seed: u64) -> Landscape {
     land
 }
 
-/// The footprint lab's ground: 10 m wide strips running 32 m north–south.
-pub const TRACK_STRIPS: [Cover; 4] = [Cover::Mud, Cover::Snow, Cover::Sand, Cover::Grass];
+/// The footprint lab's strips from −X to +X (the last is the valley's own grass).
+pub const TRACK_STRIPS: [Option<Cover>; 4] =
+    [Some(Cover::Mud), Some(Cover::Snow), Some(Cover::Sand), None];
 
-/// Ground patches: the footprint lab's strips.
-pub fn ground_patches() -> Vec<(DVec2, DVec2, Cover)> {
-    let mut out = Vec::new();
-    let t = zone("tracks").center;
-    for (i, cover) in TRACK_STRIPS.iter().enumerate() {
-        let x0 = t.x - 20.0 + i as f64 * 10.0;
-        out.push((
-            DVec2::new(x0, t.z - 16.0),
-            DVec2::new(x0 + 10.0, t.z + 16.0),
-            *cover,
-        ));
+/// The footprint lab's ground, the same shape the terrain module's lab paints: each strip a
+/// row of seven 5.2 m circles 5 m apart along Z, 10 m between strips. Footsteps and the
+/// ground paint then agree with the terrain's own strips.
+fn footprint_lab(x: f64, z: f64) -> Option<Cover> {
+    let c = zone("tracks").center;
+    let (dx, dz) = (x - c.x, z - c.z);
+    if dx.abs() > 21.0 || dz.abs() > 21.0 {
+        return None;
     }
-    out
+    TRACK_STRIPS.iter().enumerate().find_map(|(i, cover)| {
+        let sx = dx + 15.0 - i as f64 * 10.0;
+        let inside = (0..7).any(|k| {
+            let sz = dz + 15.0 - k as f64 * 5.0;
+            sx * sx + sz * sz < 5.2 * 5.2
+        });
+        cover.filter(|_| inside)
+    })
 }
 
 /// The audio module's footstep trail, painted into the ground so the player, NPCs and rain find

@@ -87,6 +87,17 @@ pub enum PropKind {
     StoneBlock {
         size: [f32; 3],
     },
+    /// Boards nailed into a wall panel filling `size` (x wide, y tall, z thick): vertical
+    /// boards with thin gaps and two battens across the back (−Z).
+    BoardWall {
+        size: [f32; 3],
+    },
+    /// A board gable filling the right triangle under a roof slope in `size` (x wide, y tall,
+    /// z thick): full height at +X down to nothing at −X, vertical boards cut along the slope,
+    /// a barge board under the slope and a sill along the foot on both faces.
+    BoardGable {
+        size: [f32; 3],
+    },
     RoofTiles {
         width: f32,
         depth: f32,
@@ -140,6 +151,12 @@ impl PropKind {
             PropKind::StoneBlock {
                 size: [1.2, 0.98, 1.2],
             },
+            PropKind::BoardWall {
+                size: [2.0, 2.4, 0.08],
+            },
+            PropKind::BoardGable {
+                size: [2.0, 1.0, 0.1],
+            },
             PropKind::RoofTiles {
                 width: 4.0,
                 depth: 3.4,
@@ -173,6 +190,8 @@ impl PropKind {
             PropKind::StoneColumn { height, radius } => stone_column(height, radius, seed),
             PropKind::Timber { size } => timber(Vec3::from(size), seed),
             PropKind::StoneBlock { size } => stone_block(Vec3::from(size), seed),
+            PropKind::BoardWall { size } => board_wall(Vec3::from(size), seed),
+            PropKind::BoardGable { size } => board_gable(Vec3::from(size), seed),
             PropKind::RoofTiles {
                 width,
                 depth,
@@ -195,7 +214,9 @@ impl PropKind {
             | PropKind::MilitaryCrate { size }
             | PropKind::ConcretePillar { size }
             | PropKind::Timber { size }
-            | PropKind::StoneBlock { size } => Vec3::from(size),
+            | PropKind::StoneBlock { size }
+            | PropKind::BoardWall { size }
+            | PropKind::BoardGable { size } => Vec3::from(size),
             PropKind::SteelDrum { .. } => Vec3::new(DRUM_DIAMETER, DRUM_HEIGHT, DRUM_DIAMETER),
             PropKind::Sandbag => Vec3::new(BAG_LEN, BAG_HEIGHT, BAG_WIDTH),
             PropKind::SandbagWall { length, courses } => sandbag_wall_size(length, courses),
@@ -3287,6 +3308,172 @@ fn stone_column_size(height: f32, radius: f32) -> Vec3 {
 /// Classical stone column `height` meters tall with shaft radius `radius` at the foot: square
 /// plinth, Attic base (two tori around a scotia), a 20-flute shaft with entasis and rounded
 /// flute ends, Doric capital (astragal, annulets, echinus, abacus), weathered and chipped.
+/// A board wall filling `size` (centered): vertical boards about 0.18 m wide with gaps of a
+/// few millimeters, each a little different in length, tint and lean, set slightly in and
+/// out, and two horizontal battens across the back (−Z) holding them. Light enough to build
+/// whole sheds from (the wood texture carries the grain).
+pub fn board_wall(size: Vec3, seed: u64) -> Vec<PropPart> {
+    let size = size.max(Vec3::new(0.1, 0.1, 0.03));
+    let mut rng = Rng::new(seed ^ 0x00B0_A2D5);
+    let mut kit = Kit::new();
+    let batten_t = (size.z * 0.45).clamp(0.015, 0.04);
+    let board_t = (size.z - batten_t).max(0.012);
+    let count = (size.x / 0.18).round().max(1.0) as usize;
+    let gap = 0.004;
+    let bw = (size.x - gap * (count - 1) as f32) / count as f32;
+    let b = kit.mb(WOOD);
+    let v0 = b.vertices.len();
+    let t0 = b.indices.len();
+    for k in 0..count {
+        let x = -size.x * 0.5 + bw * 0.5 + k as f32 * (bw + gap);
+        // Boards differ a little in length and sit a little in or out.
+        let h = size.y - rng.range(0.0, 0.03);
+        let z = size.z * 0.5 - board_t * 0.5 - rng.range(0.0, 0.003);
+        let y = -size.y * 0.5 + h * 0.5;
+        // The box's X runs up the board, so the texture's grain does too.
+        let half = Vec3::new(h * 0.5, board_t * 0.5, bw * 0.5);
+        let along = stations(-half.x, half.x, &[], 0.4);
+        let lean = Mat3::from_rotation_z(rng.range(-0.004, 0.004));
+        bevel_box(
+            b,
+            &Frame {
+                rot: lean * Mat3::from_cols(Vec3::Y, Vec3::Z, Vec3::X),
+                pos: Vec3::new(x, y, z),
+            },
+            &BoxSpec::new(half, 0.003)
+                .chamfer()
+                .splits([&along, &[], &[]])
+                .tint(wood_tint(&mut rng))
+                .uv(rng_uv(&mut rng)),
+        );
+    }
+    for y in [-0.32f32, 0.3] {
+        let half = Vec3::new(
+            size.x * 0.5 - 0.01,
+            0.05f32.min(size.y * 0.1),
+            batten_t * 0.5,
+        );
+        bevel_box(
+            b,
+            &Frame::at(Vec3::new(0.0, y * size.y, -size.z * 0.5 + batten_t * 0.5)),
+            &BoxSpec::new(half, 0.004)
+                .chamfer()
+                .tint(wood_tint(&mut rng))
+                .uv(rng_uv(&mut rng)),
+        );
+    }
+    // A slight cup and warp, the same function of position for every board.
+    let s = seed;
+    deform(b, v0, |p| {
+        p + Vec3::Z * (0.0015 * n3(p, 1.5, s) + 0.0006 * n3(p, 7.0, s ^ 3))
+    });
+    auto_smooth(b, v0, t0, 30.0);
+    kit.finish(Ao {
+        reach: 0.15,
+        strength: 0.6,
+        ground: false,
+    })
+}
+
+/// A board gable (see [`PropKind::BoardGable`]): vertical boards whose tops follow the slope
+/// from the foot at −X to full height at +X, a barge board under the slope and a sill along
+/// the foot on both faces (so it reads the same turned half round, for the other side of a
+/// ridge).
+pub fn board_gable(size: Vec3, seed: u64) -> Vec<PropPart> {
+    let size = size.max(Vec3::new(0.2, 0.1, 0.03));
+    let mut rng = Rng::new(seed ^ 0x6AB1_E5D0);
+    let mut kit = Kit::new();
+    let trim_t = (size.z * 0.25).clamp(0.01, 0.025);
+    let board_t = (size.z - 2.0 * trim_t).max(0.012);
+    let foot = -size.y * 0.5;
+    // Height of the slope above the foot at x.
+    let rise = move |x: f32| (size.y * (x / size.x + 0.5)).clamp(0.0, size.y);
+    let count = (size.x / 0.18).round().max(1.0) as usize;
+    let gap = 0.004;
+    let bw = (size.x - gap * (count - 1) as f32) / count as f32;
+    let b = kit.mb(WOOD);
+    let v0 = b.vertices.len();
+    let t0 = b.indices.len();
+    for k in 0..count {
+        let x = -size.x * 0.5 + bw * 0.5 + k as f32 * (bw + gap);
+        let h = rise(x + bw * 0.5);
+        if h < 0.04 {
+            continue;
+        }
+        let vb = b.vertices.len();
+        let z = rng.range(-0.002, 0.002);
+        let half = Vec3::new(h * 0.5, board_t * 0.5, bw * 0.5);
+        let along = stations(-half.x, half.x, &[], 0.4);
+        bevel_box(
+            b,
+            &Frame {
+                rot: Mat3::from_cols(Vec3::Y, Vec3::Z, Vec3::X),
+                pos: Vec3::new(x, foot + h * 0.5, z),
+            },
+            &BoxSpec::new(half, 0.003)
+                .chamfer()
+                .splits([&along, &[], &[]])
+                .tint(wood_tint(&mut rng))
+                .uv(rng_uv(&mut rng)),
+        );
+        // Cut the board's top along the slope: squeeze each vertex's height above the foot
+        // from the board's full height to the slope's height where it is.
+        deform(b, vb, |p| {
+            let up = (p.y - foot) / h;
+            Vec3::new(p.x, foot + up * rise(p.x).max(0.02), p.z)
+        });
+    }
+    // Barge boards under the slope and sills along the foot, on both faces. A barge board's
+    // ends stop where its lower edge would leave the triangle (past the foot at the low end,
+    // past the end at the high one).
+    let slope = size.y.atan2(size.x);
+    let len = size.x.hypot(size.y);
+    let trim_h = 0.11f32.min(size.y * 0.3);
+    let sill_h = 0.07f32.min(size.y * 0.2);
+    let (from, to) = (
+        trim_h / slope.tan() + 0.01,
+        len - trim_h * slope.tan() - 0.01,
+    );
+    let dir = Vec3::new(slope.cos(), slope.sin(), 0.0);
+    let mid = Vec3::new(-size.x * 0.5, foot, 0.0) + dir * ((from + to) * 0.5);
+    for side in [-1.0f32, 1.0] {
+        let z = side * (board_t * 0.5 + trim_t * 0.5);
+        let down = Vec3::new(slope.sin(), -slope.cos(), 0.0) * (trim_h * 0.5);
+        bevel_box(
+            b,
+            &Frame::new(mid + Vec3::Z * z + down, Mat3::from_rotation_z(slope)),
+            &BoxSpec::new(
+                Vec3::new((to - from) * 0.5, trim_h * 0.5, trim_t * 0.5),
+                0.004,
+            )
+            .chamfer()
+            .tint(wood_tint(&mut rng))
+            .uv(rng_uv(&mut rng)),
+        );
+        bevel_box(
+            b,
+            &Frame::at(Vec3::new(0.0, foot + sill_h * 0.5, z)),
+            &BoxSpec::new(
+                Vec3::new(size.x * 0.5 - 0.02, sill_h * 0.5, trim_t * 0.5),
+                0.004,
+            )
+            .chamfer()
+            .tint(wood_tint(&mut rng))
+            .uv(rng_uv(&mut rng)),
+        );
+    }
+    let s = seed;
+    deform(b, v0, |p| {
+        p + Vec3::Z * (0.0015 * n3(p, 1.5, s) + 0.0006 * n3(p, 7.0, s ^ 3))
+    });
+    auto_smooth(b, v0, t0, 30.0);
+    kit.finish(Ao {
+        reach: 0.15,
+        strength: 0.6,
+        ground: false,
+    })
+}
+
 /// A dressed ashlar block filling `size` (centered): chamfered arrises, faces tooled with
 /// shallow pitting, a few chipped corners and edges, and a per-block tint with darker pits.
 pub fn stone_block(size: Vec3, seed: u64) -> Vec<PropPart> {

@@ -901,6 +901,8 @@ pub struct WallLook {
     pub straight_border: bool,
     /// The material's own exterior color (what its texture already shows).
     pub reference: [f32; 3],
+    /// How readily cracks run out from damage ([`crate::cracks::brittleness`]).
+    pub cracks: f32,
 }
 
 impl WallLook {
@@ -917,6 +919,7 @@ impl WallLook {
             seed: wall.seed,
             straight_border: true,
             reference: props.exterior,
+            cracks: crate::cracks::brittleness(wall.material),
         }
     }
 
@@ -1184,6 +1187,41 @@ pub fn mesh_cells(
                 mb.quad_facing([fa, ma, mbv, fb], out + Vec3::Z * 0.3, lit);
                 mb.quad_facing([ma, ba, bb, mbv], out - Vec3::Z * 0.3, color);
             }
+        }
+    }
+
+    // Hairline cracks out from holes and craters across the intact faces.
+    for front in [true, false] {
+        let z = if front {
+            t * 0.5 + 0.0012
+        } else {
+            -t * 0.5 - 0.0012
+        };
+        let n = if front { Vec3::Z } else { Vec3::NEG_Z };
+        let segments =
+            crate::cracks::face_cracks(grid, look.cracks, look.seed, front, (i0, j0, i1, j1));
+        for s in segments {
+            let d = (s.b - s.a).normalize_or(Vec2::X);
+            let side = Vec2::new(-d.y, d.x);
+            let (gx, gy) = (
+                grid.global.0 + ((s.a.x - grid.origin.x) / grid.cell.x) as i64,
+                grid.global.1 + ((s.a.y - grid.origin.y) / grid.cell.y) as i64,
+            );
+            let color = scale(look.outside_color(s.a, gx, gy), 0.18);
+            let at = |p: Vec2, w: f32, k: f32| {
+                let q = p + side * (w * 0.5 * k);
+                Vec3::new(q.x, q.y, z)
+            };
+            mb.quad_facing(
+                [
+                    at(s.a, s.width_a, -1.0),
+                    at(s.b, s.width_b, -1.0),
+                    at(s.b, s.width_b, 1.0),
+                    at(s.a, s.width_a, 1.0),
+                ],
+                n,
+                color,
+            );
         }
     }
 

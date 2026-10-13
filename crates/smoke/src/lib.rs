@@ -2,6 +2,7 @@
 
 pub mod demo;
 pub mod domain;
+pub mod fog;
 pub mod noise;
 pub mod obscurance;
 pub mod render;
@@ -16,7 +17,8 @@ use engine_world::{SmokeEmission, WorldPlugin, WorldShiftSet};
 use serde_json::{Value, json};
 
 pub use demo::SmokeDemo;
-pub use domain::{Domain, Voxel};
+pub use domain::{Domain, FogRates, Voxel};
+pub use fog::FogBank;
 pub use obscurance::SmokeSnapshot;
 pub use settings::SmokeSettings;
 pub use sim::{
@@ -66,6 +68,12 @@ impl Plugin for SmokePlugin {
                 "A fan, vent or rotor downwash blowing along the entity's forward (-Z): speed \
                  m/s, radius m, reach m, on. Also stirs the shared WindField.",
             )
+            .register_component::<FogBank>(
+                "Ground fog over the floor of the SmokeVolume on the same entity: amount 0..1 \
+                 (negative follows WeatherState.fog), visibility_m inside full fog, depth_m of \
+                 its top above the lowest ground, top_fade_m, chill_c (cold fog pools in \
+                 hollows), form_secs, burn_secs, color.",
+            )
             .register_component::<SmokeDemo>(
                 "The smoke-range demo: cycle_secs, warmup_secs, fire_rate, shooting [from, to], \
                  blast_at, fans [from, to] (seconds into each round).",
@@ -76,6 +84,7 @@ impl Plugin for SmokePlugin {
                     sim::sync_volumes,
                     sim::track_obstacles,
                     sim::release,
+                    fog::settle_fog,
                     sim::disturb,
                     sim::step,
                     obscurance::publish,

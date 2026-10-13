@@ -4,8 +4,12 @@
 
 pub mod architecture;
 pub mod assets;
+pub mod barn;
+pub mod build;
+pub mod burn;
 pub mod charges;
 pub mod collapse;
+pub mod cracks;
 pub mod debris;
 pub mod demo;
 pub mod dress;
@@ -32,6 +36,7 @@ use engine_world::{
 };
 use serde_json::{Value, json};
 
+pub use build::{BuildAction, BuildKind, BuildRequest, Builder, BuiltPiece};
 pub use charges::{BreachCharge, ChargeKind};
 pub use debris::Debris;
 pub use hits::{Hit, HitQueue};
@@ -109,6 +114,9 @@ pub struct DestructionSettings {
     pub cells_per_chunk: usize,
     /// Seconds an unsupported building piece hangs before it falls.
     pub collapse_delay_secs: f32,
+    /// Wooden building pieces get an `engine_world::Combustible`, so a fire module burns
+    /// them: they char, weaken and come down.
+    pub wood_burns: bool,
 }
 
 impl Default for DestructionSettings {
@@ -132,6 +140,7 @@ impl Default for DestructionSettings {
             max_chunks_per_hit: 14,
             cells_per_chunk: 6,
             collapse_delay_secs: 0.3,
+            wood_burns: true,
         }
     }
 }
@@ -170,6 +179,7 @@ impl Plugin for DestructionPlugin {
             .add_message::<NoiseEvent>()
             .add_message::<SmokeEmission>()
             .add_message::<GroundContact>()
+            .add_message::<build::BuildRequest>()
             .init_resource::<DestructionSettings>()
             .init_resource::<DestructionStats>()
             .init_resource::<DestructionMaterials>()
@@ -198,6 +208,12 @@ impl Plugin for DestructionPlugin {
             .register_component::<ShowSupport>(
                 "Paint a StructuralPiece in Valheim build-mode support colors (blue grounded → red failing).",
             )
+            .register_component::<Builder>(
+                "Valheim-style build mode on this entity (the player's camera, a script): active, kind \
+                 (wood_floor, wood_wall, wood_pole, wood_beam, wood_roof, wood_roof_45, stone_floor, \
+                 stone_wall, stone_pillar), yaw rad, reach_m, use_input, aim ray, show_support.",
+            )
+            .register_component::<BuiltPiece>("A building piece placed in build mode: kind.")
             .register_component::<Fracturable>(
                 "Prop that shatters into Voronoi pieces: shape, material, break_energy_j, pieces, damage_j.",
             )
@@ -217,17 +233,19 @@ impl Plugin for DestructionPlugin {
             )
             .register_resource::<DestructionStats>("Destruction counters (read-only).")
             .add_systems(PreUpdate, assets::ensure_assets)
+            .add_systems(Startup, build::bind_actions)
             .add_systems(
                 FixedUpdate,
                 (
                     (demo::demo_script_system,
-                hill::hill_script_system, charges::charges_system)
+                hill::hill_script_system, barn::barn_script_system, charges::charges_system)
                         .chain()
                         .in_set(SimSet::Gameplay),
                     debris::simulate_debris_system.in_set(SimSet::Physics),
                     (
                         hits::collect_hits_system,
                         hits::apply_hits_system,
+                        burn::burn_weaken_system,
                         collapse::structure_system,
                         collapse::voxel_support_system,
                         collapse::shatter_system,
@@ -246,8 +264,14 @@ impl Plugin for DestructionPlugin {
                     sync::rebuild_voxels_system,
                     debris::age_debris_system,
                     charges::charge_visuals_system,
+                    build::build_input_system,
+                    build::build_system,
                     dress::build_prop_models_system,
+                    build::ghost_look_system,
+                    barn::barn_fuel_system,
+                    burn::make_wood_combustible_system,
                     structure::support_tint_system,
+                    burn::char_system,
                 )
                     .chain()
                     .in_set(UpdateSet::Logic),
@@ -380,6 +404,7 @@ fn material_arg(name: Option<&str>) -> Result<Option<DestructibleMaterial>, Stri
 }
 
 fn register_api(app: &mut App) {
+    build_api(app);
     const BLAST: &str = r#"{"at": [0, 1, 0], "energy_j": 1000000}"#;
     app.register_api(
         "destruction.blast",
@@ -574,13 +599,15 @@ fn register_api(app: &mut App) {
     );
     app.register_api(
         "destruction.demo_restart",
-        "Start the destruction demos (the breach range and the dig-and-build hill) over from the \
-         beginning of their loops, so a camera arriving now sees every step.",
+        "Start the destruction demos (the breach range, the burning storehouse and the \
+         dig-and-build hill) over from the beginning of their loops, so a camera arriving now \
+         sees every step.",
         "{}",
         |world, _| {
             let range = demo::restart_demos(world);
             let hills = hill::restart_hills(world);
-            Ok(json!({"range": range, "hills": hills}))
+            let barns = barn::restart_barns(world);
+            Ok(json!({"range": range, "hills": hills, "barns": barns}))
         },
     );
     app.register_api(
@@ -689,6 +716,150 @@ fn register_api(app: &mut App) {
                 ))
                 .id();
             Ok(json!({"id": e.to_bits()}))
+        },
+    );
+}
+
+#[derive(Deserialize)]
+struct BuildArgs {
+    #[serde(default)]
+    kind: Option<String>,
+    /// Aim from here …
+    #[serde(default)]
+    from: Option<[f64; 3]>,
+    /// … toward here.
+    #[serde(default)]
+    to: Option<[f64; 3]>,
+    /// Or aim straight down at this point.
+    #[serde(default)]
+    at: Option<[f64; 3]>,
+    #[serde(default)]
+    yaw_deg: f32,
+    /// Only show where it would go.
+    #[serde(default)]
+    preview: bool,
+}
+
+impl BuildArgs {
+    fn ray(&self, example: &str) -> Result<(DVec3, Vec3, f32), String> {
+        let (from, to) = match (self.from, self.to, self.at) {
+            (Some(f), Some(t), _) => (DVec3::from_array(f), DVec3::from_array(t)),
+            (_, _, Some(a)) => {
+                let a = DVec3::from_array(a);
+                (a + DVec3::new(0.0, 3.0, 0.0), a)
+            }
+            _ => {
+                return Err(format!(
+                    "Say where to aim: \"from\" and \"to\", or \"at\". Example: {example}"
+                ));
+            }
+        };
+        let d = (to - from).as_vec3();
+        if d.length() < 1e-3 {
+            return Err(format!(
+                "\"from\" and \"to\" are the same point. Example: {example}"
+            ));
+        }
+        Ok((from, d.normalize(), d.length() + 2.0))
+    }
+}
+
+fn placement_json(p: &build::Placement) -> Value {
+    let x = p.rotation * p.kind.base_rotation().inverse() * Vec3::X;
+    let yaw = (-x.z).atan2(x.x);
+    json!({
+        "kind": p.kind.name(),
+        "valid": p.valid(),
+        "problem": p.problem.map(|x| x.describe()),
+        "center": p.center.to_array(),
+        "yaw_deg": yaw.to_degrees(),
+        "snapped": p.snapped,
+        "grounded": p.grounded,
+        "support": p.support,
+        "support_fraction": p.support_fraction(),
+    })
+}
+
+fn build_api(app: &mut App) {
+    const BUILD: &str =
+        r#"{"kind": "wood_wall", "from": [0, 3, -4], "to": [0, 0.4, -0.8], "yaw_deg": 0}"#;
+    app.register_api(
+        "destruction.build",
+        "Place a building piece the way a player in build mode would: aim a ray (from → to, or \
+         straight down at \"at\"), the piece snaps to the pieces around it and is placed if it is \
+         free and supported. Kinds: wood_floor, wood_wall, wood_pole, wood_beam, wood_roof, \
+         wood_roof_45, stone_floor, stone_wall, stone_pillar. \"preview\": true only says where it \
+         would go. Returns where, its support and the new piece's id.",
+        BUILD,
+        |world, args| {
+            let a: BuildArgs = parse(args, BUILD)?;
+            let kind = match a.kind.as_deref() {
+                None => BuildKind::WoodFloor,
+                Some(n) => BuildKind::from_name(n).ok_or_else(|| {
+                    format!("Unknown piece \"{n}\". Use one of: {}.", BuildKind::names())
+                })?,
+            };
+            let (origin, dir, reach) = a.ray(BUILD)?;
+            let (p, _) = build::plan_in_world(world, kind, a.yaw_deg.to_radians(), origin, dir, reach)
+                .ok_or_else(|| {
+                    format!("The aim hits nothing (no piece, rock or ground within {reach:.1} m). Example: {BUILD}")
+                })?;
+            let mut out = placement_json(&p);
+            if !a.preview && p.valid() {
+                let table = world.resource::<DestructionMaterials>().clone();
+                let (bundle, fuel) = build::built_piece(p.kind, p.transform(), None, true, &table);
+                let mut e = world.spawn(bundle);
+                if let Some(fuel) = fuel {
+                    e.insert(fuel);
+                }
+                out["id"] = json!(e.id().to_bits());
+            }
+            Ok(out)
+        },
+    );
+    const UNBUILD: &str = r#"{"from": [0, 3, -4], "to": [0, 1.4, -1]}"#;
+    app.register_api(
+        "destruction.unbuild",
+        "Take down a piece placed in build mode: the one an aim ray (from → to, or down at \"at\") \
+         hits, or {\"entity\": …}. What it held up falls.",
+        UNBUILD,
+        |world, args| {
+            let target = if let Some(sel) = args.get("entity") {
+                resolve_entity(world, sel)?
+            } else {
+                let a: BuildArgs = parse(args, UNBUILD)?;
+                let (origin, dir, reach) = a.ray(UNBUILD)?;
+                build::plan_in_world(world, BuildKind::WoodPole, 0.0, origin, dir, reach)
+                    .and_then(|(_, t)| t)
+                    .ok_or("The aim hits no piece placed in build mode.")?
+            };
+            if world.get::<BuiltPiece>(target).is_none()
+                || world.get::<StructuralPiece>(target).is_none()
+            {
+                return Err("That entity is not a standing piece placed in build mode.".into());
+            }
+            world.despawn(target);
+            Ok(json!({"removed": target.to_bits()}))
+        },
+    );
+    app.register_api(
+        "destruction.build_pieces",
+        "The pieces build mode can place: name, label, material and size in meters.",
+        "{}",
+        |_, _| {
+            Ok(Value::Array(
+                BuildKind::ALL
+                    .iter()
+                    .map(|k| {
+                        json!({
+                            "name": k.name(),
+                            "label": k.label(),
+                            "material": k.material().name(),
+                            "size": k.size().to_array(),
+                        })
+                    })
+                    .collect(),
+            ))
         },
     );
 }

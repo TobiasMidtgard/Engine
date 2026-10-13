@@ -10,6 +10,7 @@
 //! | north | Arcane portal: rune circles, spiraling motes, orbiting orbs with trails |
 //! | middle lane | Fireballs and frost bolts flying into a target wall, with impacts and shockwaves |
 //! | west | Lightning arcing between two obelisks, striking with sparks |
+//! | north-west | A mortar firing starburst fireworks: stars that trail glitter and crackle |
 //! | center | Healing aura on a dais |
 //! | east | Fountain (water jets landing in a basin) and an anvil throwing sparks |
 //! | south | Pond with stones splashing in, footsteps on mud, snow, sand and water, impacts on six materials |
@@ -54,6 +55,22 @@ pub const VIEWS: &[DemoView] = &[
         warmup: 0.0,
     },
     DemoView {
+        key: "magic_portal",
+        name: "A standing portal swirling the valley behind it",
+        eye: [3.2, 2.4, -7.5],
+        target: [0.0, 4.2, -17.4],
+        hour: 18.4,
+        warmup: 2.0,
+    },
+    DemoView {
+        key: "magic_starburst",
+        name: "Starburst fireworks over the court",
+        eye: [6.0, 1.7, 12.0],
+        target: [-11.5, 21.0, -11.5],
+        hour: 18.9,
+        warmup: 3.0,
+    },
+    DemoView {
         key: "magic_splashes",
         name: "Stones splashing into a pond",
         eye: [1.5, 1.9, 5.2],
@@ -68,6 +85,14 @@ pub const VIEWS: &[DemoView] = &[
         target: [-5.5, 0.4, 14.0],
         hour: 16.5,
         warmup: 0.0,
+    },
+    DemoView {
+        key: "magic_marks",
+        name: "Scorch and frost marks on the target wall",
+        eye: [5.4, 1.9, -0.9],
+        target: [9.0, 1.5, -3.4],
+        hour: 18.1,
+        warmup: 7.4,
     },
     DemoView {
         key: "magic_impacts",
@@ -85,6 +110,8 @@ pub struct DemoCaster {
     pub target: DVec3,
     /// (projectile effect, impact effect) pairs, cast in turn.
     pub spells: Vec<(String, String)>,
+    /// Spells land this far to either side of `target` in turn, so their marks sit side by side.
+    pub spread: DVec3,
     pub period: f32,
     pub speed: f32,
     pub timer: f32,
@@ -110,6 +137,9 @@ pub struct DemoRepeater {
     /// Up axis of the effect.
     pub up: Vec3,
     pub scale: f32,
+    /// Each shot lands somewhere within this many meters of here, across `up`.
+    pub spread: f32,
+    pub shots: u32,
 }
 
 /// Circles around `center`, bobbing up and down.
@@ -234,6 +264,8 @@ mod layout {
     pub const DAIS: (f64, f64) = (-2.5, 4.0);
     pub const FOUNTAIN: (f64, f64) = (7.0, 5.5);
     pub const ANVIL: (f64, f64) = (12.0, 0.5);
+    /// The firework mortar, between two braziers.
+    pub const LAUNCHER: (f64, f64) = (-11.5, -11.5);
     pub const POND: (f64, f64) = (1.5, 11.5);
     /// Start of the footstep strip (it runs 8 m toward +X).
     pub const STRIP: (f64, f64) = (-9.5, 14.0);
@@ -262,6 +294,7 @@ pub fn clearings() -> Vec<props::court::Clearing> {
         rect((CASTER_X, LANE_Z), 0.55, 0.55),
         rect((WALL_X + 0.4, LANE_Z), 0.45, 2.4),
         circle(DAIS, 2.2),
+        circle(LAUNCHER, 0.85),
         circle(FOUNTAIN, 2.6),
         circle(POND, 3.75),
         rect((STRIP.0 + 4.0, STRIP.1), 4.15, 0.95),
@@ -298,6 +331,12 @@ pub fn spawn_demo(commands: &mut Commands, origin: DVec3) {
         props::portal::gate,
     );
     commands.spawn((at(portal), ParticleEffect::new("spell.arcane_portal")));
+    // A standing portal in the gate's arch, facing the court (+Z).
+    let arch = ground(GATE) + DVec3::new(0.0, props::portal::SPRING as f64, 0.0);
+    commands.spawn((
+        at(arch).with_rotation(Quat::from_rotation_arc(Vec3::Y, Vec3::Z)),
+        ParticleEffect::new("spell.portal_gate"),
+    ));
     for i in 0..3 {
         commands.spawn((
             at(portal + DVec3::new(0.0, 2.5, 0.0)),
@@ -348,6 +387,8 @@ pub fn spawn_demo(commands: &mut Commands, origin: DVec3) {
                 ("spell.fireball".into(), "spell.fireball_impact".into()),
                 ("spell.frost_bolt".into(), "spell.frost_impact".into()),
             ],
+            // Scorches to the left, frost to the right.
+            spread: DVec3::new(0.0, 0.0, 0.75),
             period: 1.9,
             speed: 15.0,
             timer: 1.0,
@@ -432,6 +473,29 @@ pub fn spawn_demo(commands: &mut Commands, origin: DVec3) {
             timer: 0.3,
             up: Vec3::Y,
             scale: 1.0,
+            spread: 0.0,
+            shots: 0,
+        },
+    ));
+
+    // North-west: a mortar firing starburst fireworks over the court.
+    let launcher = ground(LAUNCHER);
+    art::spawn_prop(
+        commands,
+        "court.mortar",
+        at(launcher),
+        props::launcher::mortar,
+    );
+    commands.spawn((
+        at(launcher + DVec3::new(0.0, props::launcher::MUZZLE as f64, 0.0)),
+        DemoRepeater {
+            effect: "spell.starburst".into(),
+            period: 3.2,
+            timer: 1.0,
+            up: Vec3::Y,
+            scale: 1.0,
+            spread: 0.0,
+            shots: 0,
         },
     ));
 
@@ -555,6 +619,9 @@ pub fn spawn_demo(commands: &mut Commands, origin: DVec3) {
                 timer: i as f32 * 0.25,
                 up: Vec3::Y,
                 scale: 1.5,
+                // Shots scatter over the plate, so rock gathers a cluster of chips.
+                spread: 0.35,
+                shots: 0,
             },
         ));
     }
@@ -644,6 +711,12 @@ pub fn run_casters(
         }
         caster.timer += caster.period.max(0.2);
         let (projectile, impact) = caster.spells[caster.next % caster.spells.len()].clone();
+        let side = if caster.next.is_multiple_of(2) {
+            -1.0
+        } else {
+            1.0
+        };
+        let to = caster.target + caster.spread * side;
         caster.next += 1;
         let from = gt.translation();
         commands.spawn((
@@ -651,7 +724,7 @@ pub fn run_casters(
             ParticleEffect::new(projectile),
             DemoProjectile {
                 from,
-                to: caster.target,
+                to,
                 speed: caster.speed,
                 impact,
                 traveled: 0.0,
@@ -709,7 +782,14 @@ pub fn run_repeaters(
             continue;
         }
         r.timer += r.period.max(0.1);
-        spawn_effect_at(&mut commands, &r.effect, gt.translation(), r.up, r.scale);
+        // Scatter shots evenly over a disc across `up` (a golden-angle spiral).
+        let k = r.shots as f32;
+        r.shots = r.shots.wrapping_add(1);
+        let (a, b) = r.up.normalize_or(Vec3::Y).any_orthonormal_pair();
+        let radius = r.spread * (k * 0.618_034).fract().sqrt();
+        let (sin, cos) = (k * 2.399_963).sin_cos();
+        let at = gt.translation() + ((a * cos + b * sin) * radius).as_dvec3();
+        spawn_effect_at(&mut commands, &r.effect, at, r.up, r.scale);
     }
 }
 
@@ -812,7 +892,7 @@ pub fn run_walkers(
                 normal: Vec3::Y,
                 // A heavy stone golem, so its footprints kick up enough to see from afar.
                 size: [0.18, 0.4],
-                yaw: heading.x.atan2(heading.z) as f32,
+                yaw: GroundContact::yaw_of(heading.as_vec3()),
                 load_kg: 250.0,
                 speed: w.speed as f32,
                 kind: ContactKind::Foot,

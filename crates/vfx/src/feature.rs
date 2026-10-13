@@ -7,7 +7,8 @@
 //!    every emitter's ring of slots, and spawn jobs for the new particles. Trails and beams
 //!    become camera-facing ribbon triangles.
 //! 2. `compute` clears freshly allocated rings, then runs `cs_update` (move, collide and
-//!    relight every live particle) and `cs_spawn` (write the new ones) from
+//!    relight every live particle), `cs_spawn` (write the new ones) and `cs_sub_spawn`
+//!    (particles that hit something or died feeding other layers) from
 //!    `shaders/particles_sim.wgsl`. World-space particles are stored camera-relative and
 //!    shifted by the camera's movement, so they stay precise anywhere in a solar system.
 //! 3. `draw` (transparent phase) draws ribbons, then each visible emitter far to near as one
@@ -27,8 +28,11 @@ use engine_render::{
 };
 
 use crate::effect::Sprite;
-use crate::emitter::{ParticleFrame, PoolRange, VfxSettings};
-use crate::gpu::{CHUNK, GpuEmitter, GpuParticle, GpuSim, GpuSpawn, GpuUpdate, RibbonVertex};
+use crate::emitter::{MAX_CURSORS, ParticleFrame, PoolRange, VfxSettings};
+use crate::gpu::{
+    CHUNK, GpuEmitter, GpuParticle, GpuSim, GpuSpawn, GpuSubEvent, GpuUpdate, NO_CURSOR,
+    RibbonVertex,
+};
 use crate::shift::PendingShift;
 use crate::trail::{Ribbons, build_ribbon};
 
@@ -51,6 +55,11 @@ const PARTICLE_BYTES: u64 = std::mem::size_of::<GpuParticle>() as u64;
 const INITIAL_SLOTS: u32 = 1 << 16;
 /// Workgroups per dispatch dimension.
 const MAX_GROUPS: u32 = 65_535;
+/// Most sub-emitter events (hits, deaths and flights feeding other layers) in one frame; the
+/// rest are dropped.
+const MAX_SUB_EVENTS: u32 = 1 << 16;
+/// Events per `cs_sub_spawn` workgroup.
+const SUB_GROUP: u32 = 64;
 /// Exposure that glow values are authored for (EV100 14, a bright overcast day).
 const GLOW_REFERENCE_EV100: f32 = 14.0;
 
@@ -67,6 +76,7 @@ pub fn glow_scale(exposure: f32, weight: f32) -> f32 {
 struct Gpu {
     update: wgpu::ComputePipeline,
     spawn: wgpu::ComputePipeline,
+    sub_spawn: wgpu::ComputePipeline,
     draw: wgpu::RenderPipeline,
     ribbon: wgpu::RenderPipeline,
     sim_layout: wgpu::BindGroupLayout,
@@ -79,6 +89,10 @@ struct Gpu {
     spawns: GrowBuffer,
     updates: GrowBuffer,
     sim: wgpu::Buffer,
+    /// Sub-emitter events: a count, then the events (cleared each frame).
+    events: wgpu::Buffer,
+    /// Spawn cursors of layers fed by sub-emitters (kept from frame to frame).
+    cursors: wgpu::Buffer,
     ribbons: GrowBuffer,
     sim_group: Option<wgpu::BindGroup>,
     draw_group: Option<wgpu::BindGroup>,
@@ -98,6 +112,8 @@ pub struct ParticleFeature {
     cleared: Vec<PoolRange>,
     /// Visible emitters: view depth, first slot, slot count (drawn far to near).
     draws: Vec<(f32, u32, u32)>,
+    /// Most sub-emitter events this frame (bounds the `cs_sub_spawn` dispatch).
+    sub_events: u32,
     ribbon_vertices: Vec<RibbonVertex>,
     ribbon_count: u32,
     last_frame: Option<u64>,
@@ -105,7 +121,7 @@ pub struct ParticleFeature {
     /// Run the simulation in this frame's `compute` (false when re-rendering a frame).
     simulate: bool,
     soft: bool,
-    /// Some emitter this frame draws heat haze (needs the scene color copy).
+    /// Some emitter this frame draws heat haze or a portal (needs the scene color copy).
     haze: bool,
     /// Colliding particles also hit last frame's scene depth (needs the scene depth copy).
     scene_collision: bool,
@@ -219,6 +235,8 @@ impl RenderFeature for ParticleFeature {
                     },
                     count: None,
                 },
+                storage(6, false, compute),
+                storage(7, false, compute),
             ],
         });
         let draw_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -267,6 +285,7 @@ impl RenderFeature for ParticleFeature {
         };
         let update = kernel("cs_update");
         let spawn = kernel("cs_spawn");
+        let sub_spawn = kernel("cs_sub_spawn");
 
         let target = [Some(wgpu::ColorTargetState {
             format: gpu.formats.hdr,
@@ -344,9 +363,22 @@ impl RenderFeature for ParticleFeature {
 
         let storage_usage = wgpu::BufferUsages::STORAGE;
         let slots = INITIAL_SLOTS.min(self.device_slots.max(1024));
+        let events = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("vfx sub events"),
+            size: 16 + MAX_SUB_EVENTS as u64 * std::mem::size_of::<GpuSubEvent>() as u64,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let cursors = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("vfx sub cursors"),
+            size: MAX_CURSORS as u64 * 4,
+            usage: wgpu::BufferUsages::STORAGE,
+            mapped_at_creation: false,
+        });
         self.gpu = Some(Gpu {
             update,
             spawn,
+            sub_spawn,
             draw,
             ribbon,
             sim_layout,
@@ -368,6 +400,8 @@ impl RenderFeature for ParticleFeature {
                 usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
                 mapped_at_creation: false,
             }),
+            events,
+            cursors,
             ribbons: GrowBuffer::new(
                 device,
                 "vfx ribbons",
@@ -493,7 +527,19 @@ impl RenderFeature for ParticleFeature {
         self.spawns.clear();
         self.draws.clear();
         self.skipped = 0;
+        self.sub_events = 0;
         let max_draw = settings.draw_distance.max(1.0);
+        // Table index + 1 of each frame emitter (0 when skipped), for sub-emitter targets.
+        let mut table = Vec::with_capacity(frame.emitters.len());
+        let mut next = 0;
+        for fe in &frame.emitters {
+            if fe.range.end() > g.slots {
+                table.push(0);
+            } else {
+                next += 1;
+                table.push(next);
+            }
+        }
         for fe in &frame.emitters {
             if fe.range.end() > g.slots {
                 self.skipped += 1;
@@ -524,9 +570,23 @@ impl RenderFeature for ParticleFeature {
                     e.look[3] = 0.0;
                 }
             }
+            // A portal shows the scene behind it, swirled.
+            if e.spin_look[2] == Sprite::Vortex.code() {
+                self.haze = true;
+            }
+            let PoolRange { base, len } = fe.range;
+            e.ring = [base, len, fe.cursor.unwrap_or(NO_CURSOR), 0];
+            for k in 0..3 {
+                e.sub_target[k] = match e.sub_target[k] {
+                    0 => 0,
+                    t => table.get(t as usize - 1).copied().unwrap_or(0),
+                };
+                if e.sub_target[k] != 0 {
+                    self.sub_events = self.sub_events.saturating_add(len);
+                }
+            }
             self.emitters.push(e);
 
-            let PoolRange { base, len } = fe.range;
             let mut k = 0;
             while k < len {
                 self.updates.push(GpuUpdate {
@@ -599,7 +659,7 @@ impl RenderFeature for ParticleFeature {
                 self.updates.len() as u32,
                 self.spawns.len() as u32,
                 (view.frame_index & 0xFFFF_FFFF) as u32,
-                0,
+                self.sub_events.min(MAX_SUB_EVENTS),
             ],
             // Last frame's depth is in the old frame's axes after a turn: skip it for a frame.
             depth: [
@@ -678,6 +738,14 @@ impl RenderFeature for ParticleFeature {
                         binding: 5,
                         resource: wgpu::BindingResource::TextureView(ctx.scene_depth_copy),
                     },
+                    wgpu::BindGroupEntry {
+                        binding: 6,
+                        resource: g.events.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 7,
+                        resource: g.cursors.as_entire_binding(),
+                    },
                 ],
             }));
         }
@@ -718,9 +786,18 @@ impl RenderFeature for ParticleFeature {
         let Some(group) = &g.sim_group else {
             return;
         };
+        let sub_events = self.sub_events.min(MAX_SUB_EVENTS);
+        if sub_events > 0 {
+            encoder.clear_buffer(&g.events, 0, Some(16));
+        }
         for (pipeline, jobs, label) in [
             (&g.update, self.updates.len() as u32, "vfx update"),
             (&g.spawn, self.spawns.len() as u32, "vfx spawn"),
+            (
+                &g.sub_spawn,
+                sub_events.div_ceil(SUB_GROUP),
+                "vfx sub spawn",
+            ),
         ] {
             if jobs == 0 {
                 continue;
@@ -773,6 +850,7 @@ impl RenderFeature for ParticleFeature {
             "drawn_emitters": self.draws.len(),
             "update_jobs": self.updates.len(),
             "spawn_jobs": self.spawns.len(),
+            "sub_event_budget": self.sub_events.min(MAX_SUB_EVENTS),
             "ribbon_vertices": self.ribbon_count,
             "skipped_emitters": self.skipped,
         })
@@ -844,10 +922,10 @@ mod tests {
 
     #[test]
     fn shader_structs_match_rust_sizes() {
-        // The WGSL Emitter has 18 vec4s, 16 colors and 4 size vec4s.
+        // The WGSL Emitter has 23 vec4s, 16 colors and 4 size vec4s.
         assert!(SHADER_COMMON.contains("color: array<vec4<f32>, 16>"));
         assert!(SHADER_COMMON.contains("size_curve: array<vec4<f32>, 4>"));
-        assert_eq!(std::mem::size_of::<GpuEmitter>(), 38 * 16);
+        assert_eq!(std::mem::size_of::<GpuEmitter>(), 43 * 16);
         assert!(dead_particle().age >= dead_particle().life);
     }
 }

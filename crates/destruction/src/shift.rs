@@ -1,12 +1,13 @@
 //! Following a [`WorldShift`] (a floating-origin move or a new reference frame). The shared
 //! contracts already move root transforms and physics velocities; this moves the world-space
 //! state destruction keeps itself: the built-in solver's debris motion, dust, debris queued for
-//! the next step and the demo scripts' anchors.
+//! the next step, scripted builders' aim and the demo scripts' anchors.
 
-use engine_core::math::DVec3;
+use engine_core::math::{DVec3, Vec3};
 use engine_core::prelude::*;
 use engine_world::WorldShift;
 
+use crate::build::Builder;
 use crate::debris::{DebrisBody, DustPuff, PendingDebris};
 use crate::demo::DestructionDemo;
 use crate::hill::HillDemo;
@@ -19,6 +20,7 @@ pub fn shift_system(
     mut pending: ResMut<PendingDebris>,
     mut demos: Query<&mut DestructionDemo>,
     mut hills: Query<&mut HillDemo>,
+    mut builders: Query<&mut Builder>,
 ) {
     let Some(s) = shifts.read().copied().reduce(|a, b| a.then(&b)) else {
         return;
@@ -53,5 +55,12 @@ pub fn shift_system(
     }
     for mut h in &mut hills {
         h.origin = s.point(h.origin);
+    }
+    for mut b in &mut builders {
+        if let Some((o, d)) = b.aim {
+            let o = s.point(DVec3::from_array(o)).to_array();
+            let d = s.direction(Vec3::from_array(d)).to_array();
+            b.aim = Some((o, d));
+        }
     }
 }

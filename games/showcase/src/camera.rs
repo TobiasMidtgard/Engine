@@ -4,6 +4,8 @@
 //! - Mouse wheel scales speed. Speed also grows with altitude, so orbit is reachable.
 //! - 1–9 jump to the zones, 0 to the overview, O to orbit, M to the Moon.
 //! - `[` and `]` change the hour, `T` starts or stops the clock.
+//! - While play mode (P) is on, the pilot's camera has the controls; this one picks up from
+//!   there when play ends.
 
 use crate::places::{self, Place};
 use engine::prelude::*;
@@ -50,6 +52,7 @@ pub fn look(t: &mut Transform, cam: &mut ShowcaseCamera, position: DVec3, target
 }
 
 pub fn go_to(world: &mut World, place: &Place) {
+    let place = crate::planet::aim(world, place);
     let mut q = world.query::<(&mut Transform, &mut ShowcaseCamera)>();
     for (mut t, mut cam) in q.iter_mut(world) {
         look(&mut t, &mut cam, place.position, place.target);
@@ -72,7 +75,24 @@ pub fn fly(
     mut sky: ResMut<engine_weather::Sky>,
     mut window: ResMut<Window>,
     mut q: Query<(&mut Transform, &mut ShowcaseCamera)>,
+    play: Option<Res<engine_movement::Play>>,
+    views: Query<&GlobalTransform, Without<ShowcaseCamera>>,
+    mut play_view: Local<Option<(DVec3, Vec3)>>,
+    bodies: Query<(&engine_space::CelestialBody, &Transform), Without<ShowcaseCamera>>,
 ) {
+    // While someone plays (P), the pilot's camera renders and owns the keys, mouse and cursor.
+    // This one waits, then carries on from where the pilot's camera was when play ends.
+    if let Some(view) = play.as_ref().and_then(|p| p.camera) {
+        if let Ok(g) = views.get(view) {
+            *play_view = Some((g.translation(), g.forward()));
+        }
+        return;
+    }
+    if let Some((position, forward)) = play_view.take() {
+        for (mut t, mut cam) in &mut q {
+            look(&mut t, &mut cam, position, position + forward.as_dvec3());
+        }
+    }
     if mouse_buttons.just_pressed(MouseButton::Right) {
         window.cursor_mode = CursorMode::Locked;
     }
@@ -95,7 +115,14 @@ pub fn fly(
     ]
     .into_iter()
     .find(|(k, _)| keys.just_pressed(*k))
-    .and_then(|(_, key)| places::find(key));
+    .and_then(|(_, key)| places::find(key))
+    .map(|p| match bodies.iter().find(|(b, _)| b.name == "Moon") {
+        // The Moon moves: aim at it where it is now.
+        Some((_, moon)) if p.key == "moon" => {
+            crate::planet::at_moon(&p, moon.translation, sky.day_of_year)
+        }
+        _ => p,
+    });
 
     if keys.just_pressed(KeyCode::BracketLeft) {
         sky.hour = (sky.hour - 1.0).rem_euclid(24.0);

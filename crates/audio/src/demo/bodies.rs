@@ -21,9 +21,11 @@ use super::{TrailWalker, yaw};
 use rig::Xf;
 
 pub(super) mod gait;
+mod horse;
 mod human;
 mod quadruped;
 mod rig;
+mod sdf;
 mod shape;
 mod textures;
 
@@ -318,7 +320,7 @@ pub(super) fn horse(commands: &mut Commands, walker: TrailWalker) {
         walker,
         None,
         Rig::Horse,
-        quadruped::horse_parts,
+        horse::parts,
     );
 }
 
@@ -416,7 +418,7 @@ mod tests {
             human::parts(&human::HIKER, 0xb3362c, &tex),
             human::parts(&human::RUNNER, 0x2c5fb3, &tex),
             quadruped::dog_parts(&tex),
-            quadruped::horse_parts(&tex),
+            horse::parts(&tex),
         ];
         for parts in all {
             for p in parts {

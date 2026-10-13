@@ -1,6 +1,6 @@
 //! Renders particles offscreen and checks the pixels: glowing particles appear where their
 //! emitter is (also 30 000 km from the world origin), a spell's light brightens the ground
-//! around it, and smoke lit by the sun covers what's behind it. Needs a GPU or a software
+//! around it, smoke lit by the sun covers what's behind it, and marks change the ground. Needs a GPU or a software
 //! Vulkan driver (lavapipe); passes with a note when neither is available (`RenderDisabled`),
 //! unless `ENGINE_REQUIRE_GPU=1`.
 
@@ -10,7 +10,7 @@ use engine_core::time::TimeSource;
 use engine_render::prelude::*;
 use engine_render::{RenderDisabled, capture_now};
 use engine_vfx::prelude::*;
-use engine_vfx::{EffectDesc, Gradient, Sprite};
+use engine_vfx::{EffectDesc, Gradient, Mark, MarkKind, Marks, Sprite};
 
 const W: u32 = 320;
 const H: u32 = 180;
@@ -324,6 +324,115 @@ fn sparks_stick_to_a_wall_the_camera_sees() {
 }
 
 #[test]
+fn hits_and_deaths_feed_other_layers_on_the_gpu() {
+    // Invisible drops fall onto the ground on the right and invisible seeds expire in the air
+    // on the left. Only their sub-emitters make anything glow: glints where the drops land,
+    // stars where the seeds die. With the chance at 0 nothing appears.
+    use engine_vfx::{Burst, Collide, EmitShape, SubEmit};
+    let landed = project(DVec3::new(1.2, 0.05, 0.0));
+    let burst = project(DVec3::new(-1.2, 1.6, 0.0));
+    let unseen = Gradient::constant([1.0, 1.0, 1.0, 0.0]);
+    let glow = |name: &str, rgb: [f32; 3], shape: EmitShape| EmitterDesc {
+        name: name.into(),
+        shape,
+        speed: [0.0, 0.0],
+        lifetime: [20.0, 20.0],
+        size: [0.12, 0.18],
+        sprite: Sprite::Glow,
+        color: Gradient::constant([rgb[0], rgb[1], rgb[2], 1.0]),
+        emissive: 4_000.0,
+        additive: 1.0,
+        wind: 0.0,
+        ..Default::default()
+    };
+    let effect = |chance: f32| EffectDesc {
+        name: "test.subs".into(),
+        duration: Some(0.1),
+        emitters: vec![
+            EmitterDesc {
+                name: "drops".into(),
+                bursts: vec![Burst {
+                    count: 60,
+                    ..Default::default()
+                }],
+                shape: EmitShape::Disc { radius: 0.15 },
+                offset: [1.2, 1.0, 0.0],
+                speed: [0.0, 0.0],
+                gravity: 1.0,
+                lifetime: [3.0, 3.0],
+                collide: Collide::Bounce {
+                    restitution: 0.2,
+                    friction: 0.5,
+                },
+                color: unseen.clone(),
+                wind: 0.0,
+                on_hit: Some(SubEmit {
+                    chance,
+                    ..SubEmit::new("glints", 3)
+                }),
+                ..Default::default()
+            },
+            EmitterDesc {
+                name: "seeds".into(),
+                bursts: vec![Burst {
+                    count: 60,
+                    ..Default::default()
+                }],
+                shape: EmitShape::Point,
+                offset: [-1.2, 1.6, 0.0],
+                speed: [0.0, 0.0],
+                lifetime: [0.3, 0.3],
+                color: unseen.clone(),
+                wind: 0.0,
+                on_death: Some(SubEmit {
+                    chance,
+                    ..SubEmit::new("stars", 3)
+                }),
+                ..Default::default()
+            },
+            glow("glints", [1.0, 0.6, 0.2], EmitShape::Point),
+            glow(
+                "stars",
+                [0.4, 0.6, 1.0],
+                EmitShape::Sphere {
+                    radius: 0.3,
+                    surface: false,
+                },
+            ),
+        ],
+        ..Default::default()
+    };
+    let mut lumas = Vec::new();
+    for chance in [1.0, 0.0] {
+        let mut app = app(DVec3::ZERO, 200.0);
+        let Some(before) = shot(&mut app, "vfx_subs_before.png") else {
+            return;
+        };
+        let desc = effect(chance);
+        desc.validate().unwrap();
+        app.world
+            .resource_mut::<EffectLibrary>()
+            .insert(desc)
+            .unwrap();
+        app.world
+            .spawn((Transform::default(), ParticleEffect::new("test.subs")));
+        app.update_n(36);
+        let after = shot(&mut app, &format!("vfx_subs_{chance}.png")).unwrap();
+        lumas.push([
+            luma(&after, landed, 3) - luma(&before, landed, 3),
+            luma(&after, burst, 3) - luma(&before, burst, 3),
+        ]);
+    }
+    let [[land_on, burst_on], [land_off, burst_off]] = [lumas[0], lumas[1]];
+    assert!(land_on > 40.0, "glints where the drops landed: +{land_on}");
+    assert!(burst_on > 40.0, "stars where the seeds died: +{burst_on}");
+    assert!(
+        land_off.abs() < 6.0 && burst_off.abs() < 6.0,
+        "nothing without sub-emitters: {land_off} {burst_off}"
+    );
+}
+
+#[test]
 fn particles_stay_put_when_the_world_re_anchors() {
     // A still cloud in front of the camera; then the world moves to a new origin (a plain
     // floating-origin shift), then to a turned frame (as when entering another planet's
@@ -364,4 +473,38 @@ fn particles_stay_put_when_the_world_re_anchors() {
             i + 1
         );
     }
+}
+
+#[test]
+fn marks_char_frost_and_wet_the_ground() {
+    let mut app = app(DVec3::ZERO, 3000.0);
+    let spots = [
+        DVec3::new(-1.6, 0.0, 1.5),
+        DVec3::new(0.0, 0.0, 1.5),
+        DVec3::new(1.6, 0.0, 1.5),
+    ];
+    let Some(before) = shot(&mut app, "vfx_marks_before.png") else {
+        return;
+    };
+    {
+        let mut marks = app.world.resource_mut::<Marks>();
+        let mark = |kind, at, r| Mark {
+            life_secs: 600.0,
+            ..Mark::round(kind, at, Vec3::Y, r)
+        };
+        marks.add(mark(MarkKind::Scorch, spots[0], 0.6));
+        marks.add(mark(MarkKind::Frost, spots[1], 0.6));
+        marks.add(mark(MarkKind::Wet, spots[2], 0.6));
+    }
+    let after = shot(&mut app, "vfx_marks_after.png").unwrap();
+    let at = |img: &image::RgbaImage, p: DVec3| luma(img, project(p), 2);
+    let (b, a) = (at(&before, spots[0]), at(&after, spots[0]));
+    assert!(a < b * 0.6, "scorch: {b} -> {a}");
+    let (b, a) = (at(&before, spots[1]), at(&after, spots[1]));
+    assert!(a > b + 15.0, "frost: {b} -> {a}");
+    let (b, a) = (at(&before, spots[2]), at(&after, spots[2]));
+    assert!(a < b * 0.85, "wet: {b} -> {a}");
+    // Away from the marks nothing changed.
+    let aside = DVec3::new(0.0, 0.0, -2.5);
+    assert!((at(&after, aside) - at(&before, aside)).abs() < 2.0);
 }

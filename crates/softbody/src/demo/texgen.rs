@@ -1,7 +1,7 @@
 //! Procedural textures for the yard's props and ground: tileable noise (gradient, value,
 //! cellular), and generators for weathered wood (an atlas with long and end grain), painted
-//! steel, galvanized steel, painted cast iron, worn metal, stone, concrete, rope, packed
-//! earth with gravel, and grass.
+//! steel, galvanized steel, painted cast iron, worn metal, stone, concrete, rope, the boat's
+//! finishes (varnished wood, enamel, antifouling), packed earth with gravel, and grass.
 //!
 //! Every generator returns a [`TexSet`]: an sRGB albedo, a tangent-space normal map (+Y up,
 //! derived from a height field in meters) and a half-resolution ORM map (R ambient
@@ -894,6 +894,125 @@ pub fn rope(size: u32) -> TexSet {
 }
 
 // ---------------------------------------------------------------------------------------
+// Boat finishes
+
+/// Size of one tile of [`varnished_wood`]: meters along the grain (u), meters across (v).
+pub const VARNISH_TILE_M: (f32, f32) = (1.6, 0.3);
+
+/// Varnished hardwood, one tile [`VARNISH_TILE_M`] (1.6 m along the grain, u; 0.3 m across,
+/// v): fine quarter-sawn growth lines that meander a little, the ribbon figure of interlocked
+/// grain (bands that catch the light differently and drift along the board), elongated pores
+/// and fibers under the varnish, and a few fine scratches in the gloss. The albedo is a light
+/// warm neutral to tint with the material's base color (mahogany, spruce); roughness is a
+/// modulation around 0.8 to multiply with the material's.
+pub fn varnished_wood(w: u32, h: u32) -> TexSet {
+    // Growth lines and ribbon bands per tile across the grain: integers, so the tile wraps.
+    const LINES: f32 = 36.0;
+    const RIBBONS: f32 = 9.0;
+    let lines = scratches(36, (0.01, 0.04), (0.0004, 0.0009), 1401);
+    let px = par_texels(w, h, |x, y| {
+        let (u, v) = uv_of(x, y, w, h);
+        // Lines meander slowly along the board and bunch where the tree grew slowly.
+        let warp = 0.9 * fbm(u, v, (3, 2), 3, 0.5, 1402) + 0.2 * fbm(u, v, (12, 4), 2, 0.5, 1403);
+        let phase = v * LINES + warp + 0.35 * (TAU * (v * 3.0 + 0.3 * u)).sin();
+        let t = phase.rem_euclid(1.0);
+        let late = smoothstep(0.5, 0.85, t) * (1.0 - smoothstep(0.93, 1.0, t));
+        let ring = rand01((phase.floor() as i32).rem_euclid(LINES as i32), 7, 1404);
+        let ribbon = (TAU * (v * RIBBONS + 0.8 * fbm(u, v, (2, 3), 2, 0.5, 1405))).sin();
+        let ribbon = smoothstep(-0.7, 0.7, ribbon);
+        // Pores: short dashes along the grain (4 mm × 0.4 mm cells).
+        let pores = smoothstep(0.5, 0.85, gnoise(u * 400.0, v * 700.0, 400, 700, 1406));
+        let fibers = fbm(u, v, (24, 320), 2, 0.6, 1407);
+        let tone = fbm(u, v, (2, 2), 3, 0.5, 1408);
+        let s = scratch_mask(Vec2::new(u, v), &lines);
+        let light = srgb(0.86, 0.75, 0.63);
+        let dark = srgb(0.66, 0.51, 0.39);
+        let mut col = light.lerp(dark, late * (0.45 + 0.55 * ring));
+        col *= 0.9 + 0.14 * ribbon;
+        col *= 1.0 - 0.32 * pores;
+        col *= 0.95 + 0.07 * fibers;
+        col *= 0.9 + 0.14 * tone;
+        col = col.lerp(Vec3::splat(0.7), s * 0.25);
+        Px {
+            albedo: col,
+            // Varnish fills the grain: only pores and the brush ripple show in the gloss.
+            height: -pores * 0.00002
+                + late * 0.000004
+                + fibers * 0.000003
+                + 0.000004 * gnoise(u * 6.0, v * 90.0, 6, 90, 1409)
+                - s * 0.00001,
+            rough: (0.78 + 0.05 * fibers + 0.12 * pores + 0.25 * s - 0.04 * ribbon).clamp(0.5, 1.0),
+            metal: 0.0,
+            ao: 1.0 - 0.15 * pores,
+            alpha: 1.0,
+        }
+    });
+    let (du, dv) = (VARNISH_TILE_M.0 / w as f32, VARNISH_TILE_M.1 / h as f32);
+    finish(w, h, &px, |_, _| (du, dv), 0.0)
+}
+
+/// Brushed enamel, tile 1 m: a near-white albedo to tint (topside green, boot-top white,
+/// cream interior) with faint mottling and grime, brush marks along u, orange peel, rare
+/// dings with the paint chipped dark, and fine scratches that dull the gloss. Roughness is a
+/// modulation around 0.8 to multiply with the material's.
+pub fn gloss_paint(size: u32) -> TexSet {
+    let lines = scratches(90, (0.01, 0.06), (0.0003, 0.0008), 1501);
+    let px = par_texels(size, size, |x, y| {
+        let (u, v) = uv_of(x, y, size, size);
+        let mottle = fbm(u, v, (4, 4), 4, 0.5, 1502);
+        let brush = gnoise(u * 8.0, v * 220.0, 8, 220, 1503)
+            + 0.5 * gnoise(u * 16.0, v * 440.0, 16, 440, 1504);
+        let peel = gnoise(u * 260.0, v * 260.0, 260, 260, 1505);
+        let ding = worley(u, v, 30, 1.0, 1506);
+        let dent = if rand01(ding.id as i32, 0, 1507) < 0.06 {
+            1.0 - smoothstep(0.0, 0.2, ding.f1)
+        } else {
+            0.0
+        };
+        let chip = smoothstep(0.5, 0.65, dent);
+        let s = scratch_mask(Vec2::new(u, v), &lines);
+        let grime = smoothstep(0.0, 0.6, fbm(u, v, (3, 6), 4, 0.5, 1508));
+        let mut col = Vec3::splat(0.84 * (0.96 + 0.05 * mottle) * (1.0 - 0.12 * grime));
+        col = col * (1.0 - 0.5 * chip) + Vec3::splat(0.06 * s);
+        Px {
+            albedo: col,
+            height: brush * 0.000006 + peel * 0.000003 - dent * 0.00025 - s * 0.00002,
+            rough: (0.78 + 0.06 * brush + 0.12 * grime + 0.2 * s + 0.2 * chip).clamp(0.5, 1.0),
+            metal: 0.0,
+            ao: 1.0,
+            alpha: 1.0,
+        }
+    });
+    let t = 1.0 / size as f32;
+    finish(size, size, &px, |_, _| (t, t), 0.05)
+}
+
+/// Rolled antifouling, tile 0.5 m: a matte, chalky coat with roller stipple, blotches where
+/// it dried unevenly and paler bloom. Near-white albedo to tint red-brown.
+pub fn antifoul(size: u32) -> TexSet {
+    let px = par_texels(size, size, |x, y| {
+        let (u, v) = uv_of(x, y, size, size);
+        let blotch = fbm(u, v, (3, 3), 4, 0.55, 1601);
+        let stipple = gnoise(u * 160.0, v * 160.0, 160, 160, 1602)
+            + 0.5 * gnoise(u * 320.0, v * 320.0, 320, 320, 1603);
+        let bloom = smoothstep(0.1, 0.5, fbm(u, v, (5, 5), 3, 0.5, 1604));
+        let roller = 0.5 + 0.5 * fbm(u, v, (2, 12), 2, 0.5, 1605);
+        let col = Vec3::splat(0.6 + 0.1 * blotch + 0.04 * stipple + 0.08 * roller)
+            .lerp(Vec3::splat(0.85), bloom * 0.3);
+        Px {
+            albedo: col,
+            height: stipple * 0.00004 + blotch * 0.0001,
+            rough: (0.92 + 0.05 * stipple).clamp(0.5, 1.0),
+            metal: 0.0,
+            ao: 1.0,
+            alpha: 1.0,
+        }
+    });
+    let t = 0.5 / size as f32;
+    finish(size, size, &px, |_, _| (t, t), 0.1)
+}
+
+// ---------------------------------------------------------------------------------------
 // Ground
 
 /// Packed earth with gravel, tile 3 m. Alpha holds a coverage noise (0.55..1) so a masked
@@ -1102,6 +1221,9 @@ mod tests {
         check("rope", &rope(n), n);
         check("earth", &earth(n), n);
         check("grass", &grass(n), n);
+        check("varnish", &varnished_wood(n, n), n);
+        check("enamel", &gloss_paint(n), n);
+        check("antifoul", &antifoul(n), n);
         let (albedos, normal, orm) =
             painted_steel(n, &[Vec3::new(0.6, 0.4, 0.02), Vec3::splat(0.1)]);
         assert_eq!(albedos.len(), 2);

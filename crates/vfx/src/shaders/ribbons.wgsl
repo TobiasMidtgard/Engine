@@ -31,8 +31,8 @@ fn vs_ribbon(v: RibbonIn) -> RibbonOut {
     var out: RibbonOut;
     out.position = frame.view_proj * vec4<f32>(v.pos, 1.0);
     let fog = particle_fog(v.pos);
-    out.radiance = pre_expose(v.color.rgb) * (1.0 - fog.a);
-    out.inscatter = fog.rgb * fog.a;
+    out.radiance = pre_expose(v.color.rgb) * fog.through;
+    out.inscatter = fog.inscatter;
     out.coverage = v.color.a;
     out.across = v.across;
     out.dist = v.dist;

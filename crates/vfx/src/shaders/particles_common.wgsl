@@ -35,6 +35,11 @@ struct Emitter {
     spin_look: vec4<f32>,  // spin min/max, sprite, facing
     shade: vec4<f32>,      // emissive (cd/m^2), lit, additive, soft (m)
     look: vec4<f32>,       // stretch, translucency, size mult, opacity mult
+    sub_target: vec4<u32>, // layer fed on hit, death, flight (table index + 1, 0 none)
+    sub_count: vec4<f32>,  // particles per hit, per death, per second of flight
+    sub_chance: vec4<f32>, // chance per hit, death, trail
+    sub_keep: vec4<f32>,   // velocity kept per hit, death, trail
+    ring: vec4<u32>,       // first slot, size, GPU spawn cursor (0xffffffff none), unused
     color: array<vec4<f32>, 16>,
     size_curve: array<vec4<f32>, 4>,
 };
@@ -72,27 +77,19 @@ fn particle_rel(p: Particle, e: Emitter) -> vec3<f32> {
     return select(p.pos, p.pos + e.origin.xyz, is_local(e));
 }
 
-// Height fog for a camera-relative point, like `apply_fog` without the far aerial perspective:
-// rgb = fog radiance (pre-exposed), a = fog opacity.
-fn particle_fog(rel: vec3<f32>) -> vec4<f32> {
-    let dist = length(rel);
-    let dir = rel / max(dist, 1e-4);
-    let density = frame.fog.x;
-    if (density <= 0.0) { return vec4<f32>(0.0); }
-    let falloff = max(frame.fog.y, 1e-5);
-    let h0 = fog_height(vec3(0.0)) - frame.fog.z;
-    let h1 = fog_height(rel) - frame.fog.z;
-    let e0 = exp(-falloff * max(h0, -100.0));
-    let e1 = exp(-falloff * max(h1, -100.0));
-    let dh = h1 - h0;
-    var amount = density * dist * e0;
-    if (abs(dh) > 0.01) {
-        amount = density * dist * (e0 - e1) / (falloff * dh);
-    }
-    let fog_t = min(1.0 - exp(-amount), frame.fog.w);
-    let sun_amt = pow(saturate(dot(dir, frame.sun_dir.xyz)), 8.0) * frame.fog_color.w;
-    let horizon = sample_env(normalize(vec3<f32>(dir.x, 0.05, dir.z) + vec3(0.0001)));
-    let outside = horizon + frame.sun_camera.rgb * sun_amt * INV_PI * 0.05;
-    let fog_col = frame.fog_color.rgb * (outside + frame.ambient.rgb);
-    return vec4<f32>(pre_expose(fog_col), fog_t);
+// The fog between the camera and a camera-relative point, as the scene gets it from `apply_fog`
+// (volumetric fog with its light shafts and lamps, height fog beyond, aerial perspective far
+// out): `through` is how much of the point's light reaches the camera, `inscatter` the light
+// the fog adds in front of it (pre-exposed).
+struct ParticleFog {
+    through: vec3<f32>,
+    inscatter: vec3<f32>,
+};
+
+fn particle_fog(rel: vec3<f32>) -> ParticleFog {
+    // `apply_fog` is linear in the color, so a black and a white point split it.
+    var fog: ParticleFog;
+    fog.inscatter = apply_fog(vec3<f32>(0.0), rel);
+    fog.through = max(apply_fog(vec3<f32>(1.0), rel) - fog.inscatter, vec3<f32>(0.0));
+    return fog;
 }

@@ -30,6 +30,7 @@ mod rocks;
 mod scenery;
 mod texgen;
 mod tour;
+mod tower;
 mod village;
 mod zones;
 
@@ -73,6 +74,15 @@ fn main() {
     let args: Vec<String> = std::env::args().collect();
     if !args.iter().any(|a| a == "--no-planet") {
         app.insert_resource(planet::UsePlanet);
+        // Stay anchored on Earth, turning with it, even at the Moon: tour stops jump between
+        // the ground and space in valley coordinates. North is +Z, as for the weather.
+        let mut frame = app.world.resource_mut::<engine_space::SpaceFrame>();
+        frame.auto_switch = false;
+        frame.home_heading_deg = planet::HEADING_DEG;
+        // The weather runs the day; the Sun, the Moon and the planets keep to its clock.
+        app.world
+            .resource_mut::<engine_space::SpaceSettings>()
+            .follow_world_clock = true;
     }
     if let Some(i) = args.iter().position(|a| a == "--tour") {
         let only = args
@@ -128,13 +138,13 @@ fn setup(
     fog.density = 0.00012;
 
     let land = landscape::shared().clone();
-    commands.insert_resource(engine::world::Ground(std::sync::Arc::new(
-        landscape::LandscapeGround::new(land.clone(), &mut surfaces),
-    )));
+    let ground = std::sync::Arc::new(landscape::LandscapeGround::new(land.clone(), &mut surfaces));
+    // On the planet the terrain answers `Ground` (edits included) and asks this for surfaces.
+    commands.insert_resource(engine::world::Ground(ground.clone()));
     let lib = scenery::build_library(&mut meshes, &mut materials, &mut images);
     let mut rng = Rng::new(config.seed);
     if use_planet.is_some() {
-        planet::spawn(&mut commands, land.clone());
+        planet::spawn(&mut commands, land.clone(), ground);
     } else {
         scenery::spawn_terrain(&mut commands, &mut meshes, &lib, &land);
     }
@@ -145,15 +155,15 @@ fn setup(
     scenery::spawn_village(&mut commands, &lib, &land, &mut rng);
     scenery::spawn_cliffs_and_stream(&mut commands, &mut meshes, &lib, &land, &mut rng);
     placeholders::cave_shell(&mut commands, &mut meshes, &lib, &land, &mut rng);
-    zones::spawn_demos(&mut commands, &mut meshes, &lib, &land, &mut rng);
-    if use_planet.is_some() {
-        planet::spawn_moon(&mut commands, zones::moon_position());
-    } else {
+    zones::spawn_demos(&mut commands, &lib, &land, &mut rng);
+    if use_planet.is_none() {
         zones::moon(&mut commands);
     }
     camera::spawn_camera(&mut commands);
     // The weather module drives the sun, the moon and the clock (`engine_weather::Sky`).
     engine_weather::spawn_sky_lights(&mut commands);
+    // The tower's textures baked on other threads while the world spawned.
+    lib.tower.finish_textures(&mut images);
     engine::core::log::info!(
         "showcase world built in {:.1} s",
         t0.elapsed().as_secs_f32()

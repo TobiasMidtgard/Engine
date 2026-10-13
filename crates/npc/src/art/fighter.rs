@@ -1,20 +1,30 @@
-//! Procedural fighters: near-future arena combatants. Padded undersuits under segmented,
-//! painted armor plates with rolled rims, leather belts and straps, team tabards, open helmets
-//! with a horsehair crest and a brow light over leather-bound mail coifs, sculpted faces (four
-//! face shapes; skin tone and eye color vary between fighters), gloved fists, boots, and their
-//! weapons (a two-handed longsword,
-//! an arming sword with a steel-rimmed heater shield, a carbine with an optic, and a composite
-//! recurve bow).
+//! Procedural fighters: near-future arena combatants. Quilted gambesons with a standing collar
+//! and wool hose (undyed or earthy, chosen per fighter) under segmented, painted armor plates
+//! with rolled rims (the cuirass wraps round the flanks), leather belts and straps, the team's
+//! colors on the plates, broad arm bands and knee-length tabards (large enough to tell the
+//! squads apart across the arena), open helmets with a horsehair crest and a brow light over
+//! leather-bound mail coifs, sculpted faces (four face shapes; skin tone and eye color vary
+//! between fighters), gloved fists, boots, and their weapons (a two-handed longsword, an arming
+//! sword with a steel-rimmed heater shield, a carbine with an optic, and a composite recurve
+//! bow).
 //!
 //! Every mesh is built from one of three tools: signed-distance sculpting meshed with surface
-//! nets for the soft, organic parts (undersuit, gloves, boots, face, coif, crest), [`Plate`]s
-//! for hard armor (a thick panel laid over a body surface, outlined by a 2D distance field,
-//! with a rolled rim and relief), and lathes, sweeps and extrusions for weapons. All pieces
-//! share one texture atlas ([`Zone`] tiles: paint, padded suit, cloth, leather, metal, polymer,
-//! glass, wood, mail with four times the texels, skin, hair); vertex colors carry the tint of
-//! each sub-part and baked ambient occlusion, and team colors are applied to a copy of a mesh
-//! ([`Kit::mesh`]), so all fighters of a team share one mesh per piece (faces: one per shape,
-//! skin tone and eye color, [`Kit::face`]).
+//! nets for the soft, organic parts (gambeson, hose, gloves, boots, face, coif, crest),
+//! [`Plate`]s for hard armor (a thick panel laid over a body surface, outlined by a 2D distance
+//! field, with a rolled rim and relief), and lathes, sweeps and extrusions for weapons. All
+//! pieces share one texture atlas ([`Zone`] tiles: quilted linen, cloth, leather, metal,
+//! polymer, glass, wood, mail with four times the texels, skin, hair); vertex colors carry the
+//! tint of each sub-part and baked ambient occlusion, and the team's and the cloth's colors are
+//! applied to a copy of a mesh ([`Kit::mesh`]), so fighters of a team dressed alike share one
+//! mesh per piece (faces: one per shape, skin tone and eye color, [`Kit::face`]).
+//!
+//! The painted plates are meshes of their own ([`Kit::paint_mesh`]), each with its own chart
+//! of a paint texture, baked at [`WEARS`] levels of wear: fresh paint over steel (the shield's
+//! over wood, its emblem painted on) that with use chips through primer to the metal along
+//! rims and raised edges and where dents and blade gouges hit, gets scratched and scuffed,
+//! collects grime in recesses and along the rims and dust low down, and streaks. The team's
+//! paint is mixed in per wear level ([`Kit::paint_albedo`]); fighters wear the level of their
+//! skill.
 //!
 //! Each piece is modeled in its joint's frame (see [`rig`]): limbs hang along −Y from the
 //! joint at the origin, the body faces −Z, the right side is +X; left limbs mirror the right.
@@ -22,6 +32,7 @@
 
 use std::collections::HashMap;
 use std::f32::consts::{FRAC_PI_2, PI, TAU};
+use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -130,11 +141,10 @@ pub fn basis(x: Vec3, y: Vec3, z: Vec3) -> Quat {
 /// Material tiles of the fighter atlas.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Zone {
-    /// Satin-painted composite armor (white; tinted per vertex).
-    Paint,
-    /// Padded, quilted technical fabric of the undersuit.
+    /// The gambeson's quilted linen: padded channels stitched lengthwise (white; tinted per
+    /// fighter).
     Suit,
-    /// Heavy woven tabard cloth.
+    /// Heavy woven cloth: the tabard's and the hose's wool.
     Cloth,
     Leather,
     /// Brushed and scratched steel (metallic).
@@ -153,8 +163,7 @@ pub enum Zone {
 }
 
 impl Zone {
-    pub const ALL: [Zone; 11] = [
-        Zone::Paint,
+    pub const ALL: [Zone; 10] = [
         Zone::Suit,
         Zone::Cloth,
         Zone::Leather,
@@ -229,45 +238,24 @@ fn scratches(p: Vec2, density: f32, seed: u32) -> f32 {
 
 fn texel(zone: Zone, p: Vec2) -> Texel {
     match zone {
-        Zone::Paint => {
-            let mottle = fbm2(p * 5.0, 0, 3, 0.5, 11) * 0.5 + 0.5;
-            let peel = perlin2(p * 160.0, 0, 12);
-            let scratch = scratches(p, 0.45, 13);
-            let chip_n = fbm2(p * 18.0, 0, 3, 0.55, 16) * 0.5 + 0.5;
-            let chip = smooth(0.79, 0.81, chip_n * (0.8 + 0.4 * mottle));
-            let rim = smooth(0.76, 0.79, chip_n * (0.8 + 0.4 * mottle)) - chip;
-            let albedo = mix(lum(0.8 + 0.06 * (mottle - 0.5)), lum(0.95), scratch * 0.5);
-            let albedo = mix(albedo, lum(0.95), rim * 0.6);
-            Texel {
-                albedo: mix(albedo, lum(0.1), chip),
-                height: peel * 0.000_012 - chip * 0.000_12 - scratch * 0.000_03,
-                roughness: 0.34 + 0.14 * mottle + 0.18 * scratch + 0.35 * chip,
-                metallic: 0.0,
-                occlusion: 1.0 - chip * 0.25,
-            }
-        }
         Zone::Suit => {
-            // Diamond quilting (4.5 cm), ripstop grid (6 mm) and wear.
-            let q = p / 0.045;
-            let a = (q.x + q.y).rem_euclid(1.0) - 0.5;
-            let b = (q.x - q.y).rem_euclid(1.0) - 0.5;
-            let seam = a.abs().max(b.abs()) * 2.0; // 1 at seams, 0 in pad centers
-            let puff = 1.0 - seam * seam;
-            let stitch = smooth(0.9, 1.0, seam);
-            let r = p / 0.006;
-            let rip = smooth(0.85, 1.0, (r.x.rem_euclid(1.0) - 0.5).abs() * 2.0).max(smooth(
-                0.85,
-                1.0,
-                (r.y.rem_euclid(1.0) - 0.5).abs() * 2.0,
-            ));
-            let n = fbm2(p * 9.0, 0, 3, 0.5, 21) * 0.5 + 0.5;
+            // Channels 3 cm wide stitched lengthwise, each padded round and bunched a little
+            // across; plain-woven linen with slubs; grubby here and there.
+            let c = p.x / 0.03 + 0.15 * perlin2(p * 6.0, 0, 23);
+            let d = ((c.rem_euclid(1.0)) - 0.5).abs() * 2.0; // 0 mid-channel, 1 at a seam
+            let seam = smooth(0.8, 1.0, d);
+            let bunch = perlin2(v2(p.x * 9.0, p.y * 38.0), 0, 24);
+            let slub =
+                fbm2(p * v2(9.0, 140.0), 0, 2, 0.5, 25) + fbm2(p * v2(140.0, 9.0), 0, 2, 0.5, 26);
+            let soil = smooth(0.35, 0.85, fbm2(p * 5.0, 0, 3, 0.55, 21) * 0.5 + 0.5);
             let fuzz = perlin2(p * 300.0, 0, 22);
             Texel {
-                albedo: lum(0.62 + 0.1 * n - 0.18 * stitch + 0.03 * fuzz),
-                height: puff * 0.0018 + rip * 0.000_08 + fuzz * 0.000_02,
-                roughness: 0.82 + 0.1 * n,
+                albedo: lum(0.8 + 0.035 * slub + 0.02 * fuzz - 0.22 * soil - 0.08 * seam),
+                height: (1.0 + (d * PI).cos()) * 0.0011 + bunch * 0.0006 + slub * 0.000_04
+                    - seam * 0.0004,
+                roughness: 0.86 + 0.06 * soil + 0.04 * fuzz,
                 metallic: 0.0,
-                occlusion: 1.0 - 0.45 * stitch,
+                occlusion: 1.0 - 0.15 * seam - 0.12 * d * d,
             }
         }
         Zone::Cloth => {
@@ -308,7 +296,7 @@ fn texel(zone: Zone, p: Vec2) -> Texel {
             Texel {
                 albedo: lum(0.88 + 0.05 * brush + 0.06 * scratch - 0.3 * patina - 0.2 * pit),
                 height: brush * 0.000_01 - scratch * 0.000_02 - pit * 0.000_05,
-                roughness: 0.24 + 0.06 * brush - 0.08 * scratch + 0.28 * patina + 0.2 * pit,
+                roughness: 0.36 + 0.06 * brush - 0.08 * scratch + 0.3 * patina + 0.2 * pit,
                 metallic: 1.0 - 0.3 * pit,
                 occlusion: 1.0 - 0.3 * pit,
             }
@@ -1038,13 +1026,13 @@ fn cast(f: &dyn Fn(Vec3) -> f32, inside: Vec3, dir: Vec3, reach: f32) -> (Vec3, 
 struct Plate<'a> {
     param: Param,
     /// The surface it lies on (meters, negative inside).
-    base: &'a dyn Fn(Vec3) -> f32,
+    base: &'a (dyn Fn(Vec3) -> f32 + Sync),
     /// Clearance between the base surface and the plate's back.
     gap: f32,
     /// Outline in parameter space (negative inside).
-    outline: &'a dyn Fn(Vec2) -> f32,
+    outline: &'a (dyn Fn(Vec2) -> f32 + Sync),
     /// Thickness plus relief: f(parameter, outline distance).
-    height: &'a dyn Fn(Vec2, f32) -> f32,
+    height: &'a (dyn Fn(Vec2, f32) -> f32 + Sync),
     min: Vec2,
     max: Vec2,
     /// Grid spacing in parameter space, meters.
@@ -1136,8 +1124,10 @@ impl Plate<'_> {
         };
         let mut verts: Vec<Vertex> = Vec::new();
         let mut index: HashMap<(usize, u8), u32> = HashMap::new();
-        // Crossing info for rims: front vertex, back point, outward direction, uv.
-        let mut crossings: HashMap<usize, (u32, Vec3, Vec3, Vec3, Vec2)> = HashMap::new();
+        // Crossing info for rims: front vertex, back point, normal, outward direction, uv and
+        // the outward direction in parameter space.
+        type Crossing = (u32, Vec3, Vec3, Vec3, Vec2, Vec2);
+        let mut crossings: HashMap<usize, Crossing> = HashMap::new();
         let mut tris: Vec<[u32; 3]> = Vec::new();
         let mut boundary: Vec<(usize, usize)> = Vec::new();
         let mut back_tris: Vec<[usize; 3]> = Vec::new();
@@ -1210,7 +1200,7 @@ impl Plate<'_> {
                                 verts.push(Vertex::new(front, n, uv - self.min));
                                 let id = verts.len() as u32 - 1;
                                 index.insert(key, id);
-                                crossings.insert(ek, (id, back, n, o, uv));
+                                crossings.insert(ek, (id, back, n, o, uv, og));
                                 id
                             }
                         };
@@ -1273,7 +1263,7 @@ impl Plate<'_> {
         // Rolled rim around the outline.
         let mut rings: HashMap<usize, Vec<u32>> = HashMap::new();
         for (ek, c) in &crossings {
-            let (front_id, back, n, o, uv) = *c;
+            let (front_id, back, n, o, uv, og) = *c;
             let front = Vec3::from(verts[front_id as usize].position);
             let mid = (front + back) * 0.5;
             let a = (front - back) * 0.5;
@@ -1288,7 +1278,9 @@ impl Plate<'_> {
                 let phi = PI * k as f32 / self.rim as f32;
                 let p = mid + a * phi.cos() + o * self.roll * phi.sin();
                 let nn = (an * self.roll * phi.cos() + o * ha * phi.sin()).normalize_or(n);
-                let ruv = uv - self.min + Vec2::splat(self.roll * phi.sin());
+                // Texture coordinates run on across the edge: a rim texel lies as far
+                // outside the outline as twice the roll times how far round the rim it is.
+                let ruv = uv - self.min + og * (2.0 * self.roll * k as f32 / self.rim as f32);
                 verts.push(Vertex::new(p, nn, ruv).with_color(Vec4::new(0.0, 1.0, 1.0, 1.0)));
                 ring.push(verts.len() as u32 - 1);
             }
@@ -1628,15 +1620,13 @@ fn rounded(pts: &[(Vec2, f32)], arc_segs: usize) -> Vec<Vec2> {
 
 // ====================================================================== piece builder
 
-/// How a sub-part is colored: a fixed linear color, or the team color times a brightness
-/// (`wear` lightens its rolled rims toward worn paint).
+/// How a sub-part is colored: a fixed linear color, the team's color, or the fighter's.
+/// (Painted plates take the team color from their own texture.)
 #[derive(Debug, Clone, Copy)]
 enum Tint {
     Rgb(Vec3),
-    Team(f32),
-    /// A fixed color dyed toward the team color by the weight.
-    Dyed(Vec3, f32),
-    /// The team color scaled per channel, plus a fixed color (skin: warmer, redder, darker).
+    /// The team color scaled per channel, plus a fixed color (dyed wool: darker and duller;
+    /// skin, whose "team" color is its tone: warmer, redder, darker).
     Mix {
         team: Vec3,
         fixed: Vec3,
@@ -1647,19 +1637,33 @@ enum Tint {
         t: f32,
         k: f32,
     },
+    /// The fighter's cloth, chosen per fighter: `t` of the way from the gambeson's color to the
+    /// hose's, times a brightness.
+    Cloth {
+        t: f32,
+        k: f32,
+    },
 }
 
-/// The padded undersuit, dyed a little toward the team color so teams read from afar.
-const SUIT_DYE: f32 = 0.45;
+/// The gambeson's and the hose's share of [`Tint::Cloth`].
+const GAMBESON: Tint = Tint::Cloth { t: 0.0, k: 1.0 };
+const HOSE: Tint = Tint::Cloth { t: 1.0, k: 1.0 };
+/// Wool dyed in the team's color (tabards, arm bands): a little darker and duller than the
+/// paint, as vegetable dyes are.
+const DYED_WOOL: Tint = Tint::Mix {
+    team: Vec3::splat(0.74),
+    fixed: Vec3::splat(0.012),
+};
 
 /// sRGB hex to linear.
 fn lin(hex: u32) -> Vec3 {
     super::tex::hex(hex)
 }
 
-const SUIT: u32 = 0x34363b;
 const LEATHER: u32 = 0x4a3324;
 const LEATHER_DARK: u32 = 0x2b2420;
+/// Leather's rolled, rubbed edges.
+const LEATHER_EDGE: u32 = 0x8f6e4b;
 const STEEL: u32 = 0xc4c8cf;
 const GUNMETAL: u32 = 0x4a4d53;
 const BRASS: u32 = 0xc89a55;
@@ -1668,17 +1672,21 @@ const RUBBER: u32 = 0x1c1c1e;
 const GLASS: u32 = 0x0b0d10;
 const WOOD: u32 = 0x8a5a34;
 const CREAM: u32 = 0xe2d6bc;
-/// Worn paint at plate rims (mixed with the team color).
-const EDGE_WEAR: f32 = 0.3;
 
 /// A built piece: its mesh (vertex colors hold occlusion × fixed tints), the vertices that
-/// take the team color, with their weight per channel, and the irises' vertices, with how far
-/// toward the pupil they are and their weight.
+/// take the team color, with their weight per channel, and the vertices that take a pair of
+/// colors chosen per fighter (a face's irises, rim to pupil; the body's gambeson and hose),
+/// with how far from the first to the second and their weight. Its painted plates are a mesh
+/// of their own,
+/// textured by the paint texture (vertex colors: occlusion × brightness); until the kit packs
+/// their charts, its texture coordinates are chart texels, with each vertex's chart.
 #[derive(Clone, Default)]
 pub struct PieceMesh {
     mesh: Mesh,
     team: Vec<(u32, Vec3)>,
-    iris: Vec<(u32, f32, Vec3)>,
+    pair: Vec<(u32, f32, Vec3)>,
+    paint: Option<Mesh>,
+    charts: Option<(Vec<u8>, Arc<Vec<Chart>>)>,
 }
 
 impl PieceMesh {
@@ -1686,12 +1694,14 @@ impl PieceMesh {
         Self {
             mesh: mirrored(&self.mesh),
             team: self.team.clone(),
-            iris: self.iris.clone(),
+            pair: self.pair.clone(),
+            paint: self.paint.as_ref().map(mirrored),
+            charts: self.charts.clone(),
         }
     }
 
-    /// The mesh with its team and iris colors (linear RGB; the iris's at its rim and center).
-    fn paint(&self, team: Vec3, iris: [Vec3; 2]) -> Mesh {
+    /// The mesh with its team color and its pair of colors (linear RGB).
+    fn paint(&self, team: Vec3, pair: [Vec3; 2]) -> Mesh {
         let mut m = self.mesh.clone();
         let mut add = |i: u32, c: Vec3| {
             let v = &mut m.vertices[i as usize].color;
@@ -1702,26 +1712,29 @@ impl PieceMesh {
         for &(i, k) in &self.team {
             add(i, team * k);
         }
-        for &(i, t, k) in &self.iris {
-            add(i, iris[0].lerp(iris[1], t) * k);
+        for &(i, t, k) in &self.pair {
+            add(i, pair[0].lerp(pair[1], t) * k);
         }
         m
     }
 
     pub fn triangles(&self) -> usize {
-        self.mesh.triangle_count()
+        self.mesh.triangle_count() + self.paint.as_ref().map_or(0, |m| m.triangle_count())
     }
 }
 
 #[derive(Default)]
 struct Builder {
     mesh: Mesh,
-    /// Per vertex: team weight per channel (0 = fixed color only), the fixed color (for an
-    /// iris, its brightness) and, for an iris, how far toward the pupil.
+    /// Per vertex: team weight per channel (0 = fixed color only), the fixed color (for the
+    /// pair of colors, its brightness) and, for the pair, how far toward the second.
     tint: Vec<(Vec3, Vec3, Option<f32>)>,
     /// Occlusion for skin: probes closer to the surface (pores of the face: lids, nostrils,
     /// folds) and shadows that turn warm, as light scattered under the skin does.
     skin: bool,
+    /// Per vertex: the chart of a painted plate's vertex (an index into `charts`).
+    chart: Vec<Option<u8>>,
+    charts: Vec<Chart>,
 }
 
 impl Builder {
@@ -1745,30 +1758,46 @@ impl Builder {
         for v in &m.vertices {
             let mut out = *v;
             out.uv = tile_uv(zone, Vec2::from(v.uv) - lo, span).to_array();
-            // Plate rims come marked with red = 0.
-            let rim = v.color[0] < 0.5;
             out.color = [1.0; 4];
             self.mesh.vertices.push(out);
+            self.chart.push(None);
             self.tint.push(match tint(Vec3::from(v.position)) {
                 Tint::Rgb(c) => (Vec3::ZERO, c, None),
-                Tint::Team(k) if rim => (
-                    Vec3::splat(k * (1.0 - EDGE_WEAR)),
-                    Vec3::splat(0.55 * EDGE_WEAR),
-                    None,
-                ),
-                Tint::Team(k) => (Vec3::splat(k), Vec3::ZERO, None),
-                Tint::Dyed(c, k) => (Vec3::splat(k), c * (1.0 - k), None),
                 Tint::Mix { team, fixed } => (team, fixed, None),
-                Tint::Iris { t, k } => (Vec3::ZERO, Vec3::splat(k), Some(t)),
+                Tint::Iris { t, k } | Tint::Cloth { t, k } => (Vec3::ZERO, Vec3::splat(k), Some(t)),
             });
         }
         self.mesh.indices.extend(m.indices.iter().map(|i| i + base));
     }
 
+    /// Add a painted plate, `k` bright, with its own chart of the paint texture (which holds
+    /// the team's paint, worn as `wear` says). Returns the chart.
+    fn paint(&mut self, pl: &Plate, k: f32, wear: Wear) -> usize {
+        self.charts.push(bake_chart(pl, &wear));
+        let i = self.charts.len() - 1;
+        self.paint_on(i, pl.mesh(), pl.min, k);
+        i
+    }
+
+    /// Add a mesh made in a painted plate's parameters (from `min`, as [`Plate::mesh`] makes
+    /// them) onto chart `i`.
+    fn paint_on(&mut self, i: usize, m: Mesh, min: Vec2, k: f32) {
+        let base = self.mesh.vertices.len() as u32;
+        for v in &m.vertices {
+            let mut out = *v;
+            out.uv = self.charts[i].texel_of(Vec2::from(v.uv) + min).to_array();
+            out.color = [1.0; 4];
+            self.mesh.vertices.push(out);
+            self.tint.push((Vec3::ZERO, Vec3::splat(k), None));
+            self.chart.push(Some(i as u8));
+        }
+        self.mesh.indices.extend(m.indices.iter().map(|j| j + base));
+    }
+
     /// Bake occlusion from `field` (the whole piece) and fix the colors.
     fn finish(mut self, field: &dyn Fn(Vec3) -> f32, ao: f32) -> PieceMesh {
         let mut team = Vec::new();
-        let mut iris = Vec::new();
+        let mut pair = Vec::new();
         let probes = if self.skin {
             [0.002f32, 0.005, 0.011, 0.024]
         } else {
@@ -1792,7 +1821,7 @@ impl Builder {
             let (k, c, t) = self.tint[i];
             let c = c * o;
             if let Some(t) = t {
-                iris.push((i as u32, t, c));
+                pair.push((i as u32, t, c));
                 v.color = [0.0, 0.0, 0.0, 1.0];
             } else {
                 v.color = [c.x, c.y, c.z, 1.0];
@@ -1801,10 +1830,48 @@ impl Builder {
                 team.push((i as u32, k * o));
             }
         }
+        if self.charts.is_empty() {
+            return PieceMesh {
+                mesh: self.mesh,
+                team,
+                pair,
+                ..Default::default()
+            };
+        }
+        // The painted plates' triangles into a mesh of their own.
+        let mut new = vec![u32::MAX; self.mesh.vertices.len()];
+        let mut parts = [Mesh::default(), Mesh::default()];
+        let mut chart = Vec::new();
+        for t in self.mesh.indices.chunks(3) {
+            let painted = self.chart[t[0] as usize].is_some();
+            let m = &mut parts[painted as usize];
+            for &i in t {
+                let r = &mut new[i as usize];
+                if *r == u32::MAX {
+                    *r = m.vertices.len() as u32;
+                    m.vertices.push(self.mesh.vertices[i as usize]);
+                    if let Some(c) = self.chart[i as usize] {
+                        chart.push(c);
+                    }
+                }
+                m.indices.push(*r);
+            }
+        }
+        let [mesh, paint] = parts;
         PieceMesh {
-            mesh: self.mesh,
-            team,
-            iris,
+            mesh,
+            team: team
+                .into_iter()
+                .filter(|&(i, _)| new[i as usize] != u32::MAX)
+                .map(|(i, k)| (new[i as usize], k))
+                .collect(),
+            pair: pair
+                .into_iter()
+                .filter(|&(i, ..)| new[i as usize] != u32::MAX)
+                .map(|(i, t, c)| (new[i as usize], t, c))
+                .collect(),
+            paint: Some(paint),
+            charts: Some((chart, Arc::new(self.charts))),
         }
     }
 }
@@ -1813,10 +1880,10 @@ impl Builder {
 #[allow(clippy::too_many_arguments)]
 fn plate<'a>(
     param: Param,
-    base: &'a dyn Fn(Vec3) -> f32,
+    base: &'a (dyn Fn(Vec3) -> f32 + Sync),
     gap: f32,
-    outline: &'a dyn Fn(Vec2) -> f32,
-    height: &'a dyn Fn(Vec2, f32) -> f32,
+    outline: &'a (dyn Fn(Vec2) -> f32 + Sync),
+    height: &'a (dyn Fn(Vec2, f32) -> f32 + Sync),
     min: Vec2,
     max: Vec2,
     step: f32,
@@ -1840,6 +1907,718 @@ fn plate<'a>(
 /// A raised lip along a plate's rim: 0 inside, `h` at the edge, over `w` meters.
 fn lip(s: f32, w: f32, h: f32) -> f32 {
     h * smooth(-w, 0.0, s)
+}
+
+// ====================================================================== painted armor
+
+/// Wear levels of the painted armor, fresh to battle-worn (see [`Kit::paint_albedo`]).
+pub const WEARS: usize = 3;
+/// How worn each level is (0 new .. 1 battered).
+const WEAR: [f32; WEARS] = [0.2, 0.55, 1.0];
+/// Side of the paint texture, texels.
+const PAINT_SIZE: u32 = 1024;
+/// Texel size of the painted plates' charts, meters (the shield's and the back plate's are
+/// coarser).
+const PAINT_TEXEL: f32 = 0.001;
+/// Texels left free between charts.
+const CHART_GAP: u32 = 2;
+
+/// One texel of the paint texture at one wear level, apart from the team color: the albedo is
+/// the paint color times `paint` / 128 plus `fixed` (sRGB: steel, primer, dirt, emblem).
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct PaintTexel {
+    paint: u8,
+    fixed: [u8; 3],
+    /// Occlusion, roughness, metalness.
+    orm: [u8; 3],
+    normal: [u8; 3],
+}
+
+/// Paint texels outside every chart: plain paint.
+const BLANK: PaintTexel = PaintTexel {
+    paint: 128,
+    fixed: [0; 3],
+    orm: [255, 110, 0],
+    normal: [128, 128, 255],
+};
+
+/// A painted plate's own rectangle of the paint texture (its unique texture coordinates): its
+/// parameters laid flat ([`flat`]) from `lo`, `texel` meters apart, `w` × `h` texels, at
+/// every wear level.
+struct Chart {
+    lo: Vec2,
+    texel: f32,
+    /// The radius of spherical parameters (laid flat), if they are.
+    bend: Option<f32>,
+    w: u32,
+    h: u32,
+    texels: [Vec<PaintTexel>; WEARS],
+}
+
+impl Chart {
+    /// Texel coordinates of a parameter point.
+    fn texel_of(&self, uv: Vec2) -> Vec2 {
+        (flat(self.bend, uv) - self.lo) / self.texel
+    }
+}
+
+/// Plate parameters laid flat with even texel density: spherical ones (radius `bend`) shrink
+/// toward their poles as the surface does (a sinusoidal projection).
+fn flat(bend: Option<f32>, uv: Vec2) -> Vec2 {
+    match bend {
+        Some(r) => v2(uv.x * (uv.y / r).cos(), uv.y),
+        None => uv,
+    }
+}
+
+/// The parameters of a flat chart point (inverse of [`flat`]).
+fn unflat(bend: Option<f32>, p: Vec2) -> Vec2 {
+    match bend {
+        Some(r) => v2(p.x / (p.y / r).cos().max(0.05), p.y),
+        None => p,
+    }
+}
+
+/// What a plate is made of under its paint.
+#[derive(Clone, Copy, PartialEq)]
+enum Under {
+    Steel,
+    /// Wood under gesso (the shield).
+    Wood,
+}
+
+/// How a painted plate wears.
+#[derive(Clone, Copy)]
+struct Wear<'a> {
+    /// How dirty it gets: most near the ground (greaves), least on the helmet.
+    dirt: f32,
+    /// Direction in parameter space toward the ground (zero: none): its low part gathers dirt.
+    down: Vec2,
+    /// Dents and weapon gouges at the most worn level.
+    dents: u32,
+    gouges: u32,
+    under: Under,
+    /// A painted emblem on it (its outline in the plate's parameters) and its color.
+    emblem: Option<(&'a (dyn Fn(Vec2) -> f32 + Sync), Vec3)>,
+    texel: f32,
+    seed: u32,
+}
+
+impl Wear<'_> {
+    fn new(dirt: f32, down: Vec2, seed: u32) -> Self {
+        Self {
+            dirt,
+            down,
+            dents: 0,
+            gouges: 0,
+            under: Under::Steel,
+            emblem: None,
+            texel: PAINT_TEXEL,
+            seed,
+        }
+    }
+
+    fn hits(self, dents: u32, gouges: u32) -> Self {
+        Self {
+            dents,
+            gouges,
+            ..self
+        }
+    }
+}
+
+/// The wear-independent fields of a chart texel.
+#[derive(Clone, Copy, Default)]
+struct Field {
+    /// Distance from the outline (meters, negative inside; the rim lies outside).
+    s: f32,
+    /// Raised (convex) and sunken (concave) relief, 0..1.
+    ridge: f32,
+    hollow: f32,
+    /// How low on the plate, 0 top .. 1 bottom.
+    low: f32,
+    /// Noise: chip shapes, broad scuffs, fine scratches, which scratches go to the metal,
+    /// paint mottling, fine grain, dirt, roughness, rust, orange peel and dirt streaks running
+    /// down.
+    chip: f32,
+    scuff: f32,
+    scratch: f32,
+    deep: f32,
+    mottle: f32,
+    grain: f32,
+    dirt: f32,
+    rough: f32,
+    rust: f32,
+    peel: f32,
+    streak: f32,
+    /// Distance from the emblem's outline (negative inside).
+    emblem: f32,
+}
+
+/// A dent: center (parameters), radius, depth, and the wear from which it shows.
+struct Dent {
+    c: Vec2,
+    r: f32,
+    depth: f32,
+    from: f32,
+}
+
+/// A gouge from a blade: its ends, width, and the wear from which it shows.
+struct Gouge {
+    a: Vec2,
+    b: Vec2,
+    w: f32,
+    from: f32,
+}
+
+/// Bake a painted plate's chart: its parameter rectangle (the outline, the rolled rim and a
+/// margin) sampled every `wear.texel` meters, at every wear level.
+fn bake_chart(pl: &Plate, wear: &Wear) -> Chart {
+    let t = wear.texel;
+    let bend = pl.param.sphere.then_some(pl.param.r);
+    // The outline's bounds (in parameters), and those of all its texels (laid flat): the
+    // rim's lie up to two rolls out.
+    let reach = 2.0 * pl.roll + 2.0 * t;
+    let step = 0.002;
+    let from = pl.min - Vec2::splat(reach);
+    let n = ((pl.max - pl.min + Vec2::splat(2.0 * reach)) / step).ceil();
+    let (mut lo, mut hi) = (Vec2::splat(f32::MAX), Vec2::splat(f32::MIN));
+    let (mut ilo, mut ihi) = (lo, hi);
+    for j in 0..=n.y as i32 {
+        for i in 0..=n.x as i32 {
+            let uv = from + v2(i as f32, j as f32) * step;
+            let s = (pl.outline)(uv);
+            if s < reach + step {
+                lo = lo.min(flat(bend, uv));
+                hi = hi.max(flat(bend, uv));
+            }
+            if s < 0.0 {
+                ilo = ilo.min(uv);
+                ihi = ihi.max(uv);
+            }
+        }
+    }
+    let lo = lo - Vec2::splat(t);
+    let size = ((hi - lo) / t).ceil() + Vec2::ONE;
+    let (w, h) = (size.x as usize, size.y as usize);
+    let at = |i: usize, j: usize| unflat(bend, lo + v2(i as f32 + 0.5, j as f32 + 0.5) * t);
+    // Outline distance and relief, then convexity from the relief's Laplacian 3 mm across.
+    let mut sr = vec![(0.0f32, 0.0f32); w * h];
+    par_rows(&mut sr, w, |j, row| {
+        for (i, c) in row.iter_mut().enumerate() {
+            let uv = at(i, j);
+            let s = (pl.outline)(uv);
+            *c = (s, (pl.height)(uv, s.min(0.0)));
+        }
+    });
+    let k = (0.003 / t).round().max(1.0) as usize;
+    let rel = |i: usize, j: usize| sr[j.min(h - 1) * w + i.min(w - 1)].1;
+    // Low parts: along `down` across the outline's bounds.
+    let mid = (ilo + ihi) * 0.5;
+    let down = wear.down.normalize_or_zero();
+    let half = (0.5 * (ihi - ilo).abs().dot(down.abs())).max(1e-3);
+    // Noise lives on the flat chart (as on the surface), offset per plate so plates differ.
+    let shift = v2(
+        (wear.seed % 97) as f32 * 1.37,
+        (wear.seed % 89) as f32 * 2.11,
+    );
+    let seed = wear.seed;
+    let flat_at = |i: usize, j: usize| lo + v2(i as f32 + 0.5, j as f32 + 0.5) * t + shift;
+    // The smooth noises every few texels, interpolated between.
+    const C: usize = 4;
+    let (cw, ch) = (w / C + 2, h / C + 2);
+    let mut coarse = vec![[0.0f32; 10]; cw * ch];
+    par_rows(&mut coarse, cw, |cj, row| {
+        for (ci, c) in row.iter_mut().enumerate() {
+            let q = flat_at(ci * C, cj * C);
+            *c = [
+                gfbm(q * 35.0, 2, 0.5, seed + 1),
+                gfbm(q * 35.0, 2, 0.5, seed + 2),
+                gfbm(q * 22.0, 3, 0.5, seed + 5) * 0.5 + 0.5,
+                gfbm(q * 9.0, 2, 0.5, seed + 7) * 0.5 + 0.5,
+                gfbm(q * 4.0, 3, 0.5, seed + 8),
+                gfbm(q * 9.0, 4, 0.55, seed + 10) * 0.5 + 0.5,
+                gfbm(q * 16.0, 3, 0.5, seed + 11),
+                gfbm(q * 40.0, 3, 0.5, seed + 12) * 0.5 + 0.5,
+                smooth(0.35, 0.9, gfbm(q * 14.0, 2, 0.5, seed + 14) * 0.5 + 0.5),
+                if down == Vec2::ZERO {
+                    0.0
+                } else {
+                    let p = v2(q.perp_dot(down) * 45.0, q.dot(down) * 4.0);
+                    smooth(0.55, 0.85, gfbm(p, 2, 0.5, seed + 15) * 0.5 + 0.5)
+                },
+            ];
+        }
+    });
+    let smooth_at = |i: usize, j: usize| {
+        let (fx, fy) = ((i % C) as f32 / C as f32, (j % C) as f32 / C as f32);
+        let (ci, cj) = (i / C, j / C);
+        let c = |a: usize, b: usize| coarse[(cj + b) * cw + ci + a];
+        let mut out = [0.0f32; 10];
+        for (k, o) in out.iter_mut().enumerate() {
+            let top = c(0, 0)[k] + (c(1, 0)[k] - c(0, 0)[k]) * fx;
+            let bottom = c(0, 1)[k] + (c(1, 1)[k] - c(0, 1)[k]) * fx;
+            *o = top + (bottom - top) * fy;
+        }
+        out
+    };
+    let mut fields = vec![Field::default(); w * h];
+    par_rows(&mut fields, w, |j, row| {
+        for (i, field) in row.iter_mut().enumerate() {
+            let uv = at(i, j);
+            let lap = (rel(i + k, j)
+                + rel(i.saturating_sub(k), j)
+                + rel(i, j + k)
+                + rel(i, j.saturating_sub(k))
+                - 4.0 * rel(i, j))
+                / (k as f32 * t).powi(2);
+            let q = flat_at(i, j);
+            let [
+                wx,
+                wy,
+                scuff,
+                deep,
+                mottle,
+                dirt,
+                rough,
+                rust,
+                lines,
+                streak,
+            ] = smooth_at(i, j);
+            let qc = q + v2(wx, wy) * 0.005;
+            // Chips: ragged blobs with flaky, angular borders.
+            let blob = gfbm(qc * 95.0, 4, 0.55, seed + 3) * 0.5 + 0.5;
+            let (d1, d2, _) = cells(qc * 170.0, seed + 4);
+            let flake = smooth(0.0, 0.35, d2 - d1);
+            *field = Field {
+                s: sr[j * w + i].0,
+                ridge: smooth(3.0, 25.0, -lap),
+                hollow: smooth(3.0, 25.0, lap),
+                low: if down == Vec2::ZERO {
+                    0.3
+                } else {
+                    ((uv - mid).dot(down) / half * 0.5 + 0.5).clamp(0.0, 1.0)
+                },
+                chip: blob * 0.85 + 0.15 * flake - 0.075,
+                scuff,
+                scratch: scratch_lines(q * 1.3, lines, seed + 6),
+                deep,
+                mottle,
+                grain: gfbm(q * 140.0, 2, 0.5, seed + 9),
+                dirt,
+                rough,
+                rust,
+                peel: gnoise(q * 450.0, seed + 13),
+                streak,
+                emblem: wear.emblem.map_or(1.0, |(e, _)| e(uv)),
+            };
+        }
+    });
+    // Dents and gouges, inside the outline.
+    let mut state = wear.seed.wrapping_mul(0x9e37_79b9) | 1;
+    let mut rand = move || {
+        state ^= state << 13;
+        state ^= state >> 17;
+        state ^= state << 5;
+        (state >> 8) as f32 / (1u32 << 24) as f32
+    };
+    let inside = |margin: f32, rand: &mut dyn FnMut() -> f32| {
+        for _ in 0..200 {
+            let uv = ilo + (ihi - ilo) * v2(rand(), rand());
+            if (pl.outline)(uv) < -margin {
+                return Some(uv);
+            }
+        }
+        None
+    };
+    let mut dents = Vec::new();
+    for d in 0..wear.dents {
+        let r = 0.013 + 0.017 * rand();
+        if let Some(c) = inside(r * 0.5, &mut rand) {
+            let from = 0.3 + 0.6 * d as f32 / wear.dents as f32;
+            dents.push(Dent {
+                c,
+                r,
+                depth: (0.0018 + 0.0022 * rand()) * r / 0.03,
+                from,
+            });
+        }
+    }
+    let mut gouges = Vec::new();
+    for g in 0..wear.gouges {
+        if let Some(c) = inside(0.01, &mut rand) {
+            let a = (0.25 + 0.5 * rand()) * PI * if rand() < 0.5 { 1.0 } else { -1.0 };
+            let len = 0.03 + 0.06 * rand();
+            let dir = v2(a.cos(), a.sin()) * len * 0.5;
+            gouges.push(Gouge {
+                a: c - dir,
+                b: c + dir,
+                w: 0.0009 + 0.0009 * rand(),
+                from: 0.45 + 0.5 * g as f32 / wear.gouges as f32,
+            });
+        }
+    }
+    let texels = WEAR.map(|wl| {
+        let mut shaded = vec![(BLANK, 0.0f32); w * h];
+        par_rows(&mut shaded, w, |j, row| {
+            for (i, cell) in row.iter_mut().enumerate() {
+                let uv = at(i, j);
+                let mut dent = 0.0;
+                let mut impact = 0.0f32;
+                for d in dents.iter().filter(|d| wl >= d.from) {
+                    let x = (uv.distance(d.c) / d.r).min(1.0);
+                    dent -= d.depth * (1.0 - x * x).powi(2);
+                    impact = impact.max(smooth(0.55, 0.0, x));
+                }
+                let (mut gouge, mut halo) = (0.0f32, 0.0f32);
+                for g in gouges.iter().filter(|g| wl >= g.from) {
+                    let ab = g.b - g.a;
+                    let f = ((uv - g.a).dot(ab) / ab.length_squared()).clamp(0.0, 1.0);
+                    let taper = 1.0 - (2.0 * f - 1.0).powi(4);
+                    let d = uv.distance(g.a + ab * f);
+                    let core = g.w * taper;
+                    if d < core {
+                        gouge = gouge.max(smooth(core, core * 0.4, d));
+                    }
+                    halo = halo.max(smooth(3.5 * g.w, g.w, d) * taper);
+                }
+                *cell = worn(
+                    &fields[j * w + i],
+                    wl,
+                    wear,
+                    pl.roll,
+                    [dent, impact, gouge, halo],
+                );
+            }
+        });
+        // Normals from the heights (Sobel; +Y in the image goes down the texture).
+        let z = |x: i64, y: i64| {
+            shaded[(y.clamp(0, h as i64 - 1) * w as i64 + x.clamp(0, w as i64 - 1)) as usize].1
+        };
+        let mut out: Vec<PaintTexel> = shaded.iter().map(|c| c.0).collect();
+        par_rows(&mut out, w, |y, row| {
+            let y = y as i64;
+            for (x, texel) in row.iter_mut().enumerate() {
+                let x = x as i64;
+                let dx = (z(x + 1, y - 1) + 2.0 * z(x + 1, y) + z(x + 1, y + 1)
+                    - z(x - 1, y - 1)
+                    - 2.0 * z(x - 1, y)
+                    - z(x - 1, y + 1))
+                    / (8.0 * t);
+                let dy = (z(x - 1, y + 1) + 2.0 * z(x, y + 1) + z(x + 1, y + 1)
+                    - z(x - 1, y - 1)
+                    - 2.0 * z(x, y - 1)
+                    - z(x + 1, y - 1))
+                    / (8.0 * t);
+                let nrm = v3(-dx, dy, 1.0).normalize();
+                texel.normal = [
+                    unorm8(nrm.x * 0.5 + 0.5),
+                    unorm8(nrm.y * 0.5 + 0.5),
+                    unorm8(nrm.z * 0.5 + 0.5),
+                ];
+            }
+        });
+        out
+    });
+    Chart {
+        lo,
+        texel: t,
+        bend,
+        w: w as u32,
+        h: h as u32,
+        texels,
+    }
+}
+
+/// A 32-bit hash of a lattice point.
+fn hash2(x: i32, y: i32, seed: u32) -> u32 {
+    let mut k = (x as u32).wrapping_mul(0x8da6_b343)
+        ^ (y as u32).wrapping_mul(0xd816_3841)
+        ^ seed.wrapping_mul(0xcb1a_b31f);
+    k ^= k >> 15;
+    k = k.wrapping_mul(0x2c1b_3c6d);
+    k ^= k >> 12;
+    k = k.wrapping_mul(0x297a_2d39);
+    k ^ (k >> 15)
+}
+
+/// Gradient noise like [`perlin2`] (about −0.7..0.7, no tiling), cheaper: gradients from a
+/// table of eight. For the paint texture, sampled per texel.
+fn gnoise(p: Vec2, seed: u32) -> f32 {
+    const D: f32 = std::f32::consts::FRAC_1_SQRT_2;
+    const G: [Vec2; 8] = [
+        Vec2::new(1.0, 0.0),
+        Vec2::new(-1.0, 0.0),
+        Vec2::new(0.0, 1.0),
+        Vec2::new(0.0, -1.0),
+        Vec2::new(D, D),
+        Vec2::new(-D, D),
+        Vec2::new(D, -D),
+        Vec2::new(-D, -D),
+    ];
+    let i = p.floor();
+    let f = p - i;
+    let (x, y) = (i.x as i32, i.y as i32);
+    let g = |dx: i32, dy: i32| {
+        G[(hash2(x + dx, y + dy, seed) >> 29) as usize].dot(f - v2(dx as f32, dy as f32))
+    };
+    let fade = |t: f32| t * t * t * (t * (t * 6.0 - 15.0) + 10.0);
+    let (u, v) = (fade(f.x), fade(f.y));
+    let a = g(0, 0) + (g(1, 0) - g(0, 0)) * u;
+    let b = g(0, 1) + (g(1, 1) - g(0, 1)) * u;
+    a + (b - a) * v
+}
+
+/// Fractal sum of [`gnoise`], roughly −1..1 (as [`fbm2`]).
+fn gfbm(p: Vec2, octaves: u32, gain: f32, seed: u32) -> f32 {
+    let (mut sum, mut amp, mut freq, mut norm) = (0.0, 1.0, 1.0, 0.0);
+    for o in 0..octaves {
+        sum += amp * gnoise(p * freq, seed.wrapping_add(o * 101));
+        norm += amp;
+        amp *= gain;
+        freq *= 2.0;
+    }
+    sum / norm * 1.4
+}
+
+/// Cellular noise like [`worley2`] (no tiling), cheaper: distances to the nearest and second
+/// nearest feature points and the nearest one's random 0..1 id.
+fn cells(p: Vec2, seed: u32) -> (f32, f32, f32) {
+    let i = p.floor();
+    let (x0, y0) = (i.x as i32, i.y as i32);
+    let (mut d1, mut d2, mut id) = (f32::MAX, f32::MAX, 0.0);
+    for dy in -1..=1 {
+        for dx in -1..=1 {
+            let k = hash2(x0 + dx, y0 + dy, seed);
+            let jitter = v2((k & 0xffff) as f32, (k >> 16) as f32) / 65536.0;
+            let d = (i + v2(dx as f32, dy as f32) + jitter - p).length_squared();
+            if d < d1 {
+                d2 = d1;
+                d1 = d;
+                id = (hash2(x0 + dx, y0 + dy, seed ^ 0x5bd1) >> 8) as f32 / (1u32 << 24) as f32;
+            } else if d < d2 {
+                d2 = d;
+            }
+        }
+    }
+    (d1.sqrt(), d2.sqrt(), id)
+}
+
+/// Fine scratches running in random directions per patch, 0..1, where `mask` (0..1) lets
+/// them (as [`scratches`], with cheaper noise).
+fn scratch_lines(p: Vec2, mask: f32, seed: u32) -> f32 {
+    let (_, _, cell) = cells(p * 7.0, seed);
+    let a = cell * TAU;
+    let dir = v2(a.cos(), a.sin());
+    let q = v2(p.dot(dir), p.perp_dot(dir)) * v2(14.0, 210.0);
+    let ridge = |q: Vec2, s: u32| {
+        let n = 1.0 - (gnoise(q, s) * 1.4).abs();
+        n * n
+    };
+    let r = (ridge(q, seed + 1) + 0.5 * ridge(q * 2.0, seed + 2)) / 1.5;
+    smooth(0.9, 0.985, r) * mask
+}
+
+/// Run `f` over the rows of a grid `w` cells wide (it gets the row index and the row's cells),
+/// on a few threads.
+fn par_rows<T: Send>(cells: &mut [T], w: usize, f: impl Fn(usize, &mut [T]) + Sync) {
+    let threads = std::thread::available_parallelism().map_or(1, |n| n.get().min(4));
+    let rows = cells.len() / w.max(1);
+    let band = rows.div_ceil(threads).max(1);
+    std::thread::scope(|sc| {
+        for (b, chunk) in cells.chunks_mut(band * w.max(1)).enumerate() {
+            let f = &f;
+            sc.spawn(move || {
+                for (r, row) in chunk.chunks_mut(w.max(1)).enumerate() {
+                    f(b * band + r, row);
+                }
+            });
+        }
+    });
+}
+
+/// A chart texel at wear `wl` (0..1), apart from the team color, and its height (meters).
+/// `hits`: the depth of dents here, how near a dent's middle, a gouge's core and its halo.
+fn worn(f: &Field, wl: f32, wear: &Wear, roll: f32, hits: [f32; 4]) -> (PaintTexel, f32) {
+    let [dent, impact, gouge, halo] = hits;
+    // Exposure to knocks: the rolled rim (most at its crest), the last few millimeters of the
+    // face, raised ridges.
+    let rim = if f.s > 0.0 {
+        0.72 - 0.4 * smooth(1.1, 2.0, f.s / roll)
+    } else {
+        0.0
+    };
+    let near = if f.s > 0.0 {
+        0.0
+    } else {
+        0.7 * (f.s / 0.0025).exp() + 0.3 * (f.s / 0.01).exp()
+    };
+    // Some stretches of edge took more knocks than others, and grime lies in patches.
+    let edge = rim.max(near).max(0.7 * f.ridge) * (0.15 + 0.85 * smooth(0.35, 0.75, f.deep));
+    let patchy = smooth(0.3, 0.7, 0.55 * f.dirt + 0.45 * f.scuff);
+    // Chipped through to what is under the paint where the chip noise beats how knocked the
+    // place is (edges first, then patches of the face, more with age); a pale band of primer
+    // rings each chip.
+    let knock = wl.sqrt() * (0.05 + 0.95 * edge)
+        + wl * wl * (0.04 + 0.42 * smooth(0.45, 0.85, f.scuff))
+        + 0.8 * impact * wl;
+    let cut = 1.0 - 0.75 * knock;
+    let scratch = f.scratch * smooth(0.0, 0.7, wl);
+    let deep = scratch * smooth(0.45, 1.0, wl) * smooth(0.62, 0.72, f.deep);
+    let bare = smooth(cut - 0.012, cut + 0.012, f.chip)
+        .max(gouge)
+        .max(deep);
+    let primer = (smooth(cut - 0.04, cut - 0.012, f.chip) - bare).max(0.0);
+    // Abraded paint: lighter and matte, at edges and ridges, round dents and gouges, along
+    // scratches.
+    let scuff = (smooth(
+        0.55,
+        0.9,
+        f.scuff + 0.2 * edge + 0.25 * f.ridge * (0.3 + 0.7 * patchy) + 0.4 * impact,
+    ) * (0.15 + 0.85 * wl)
+        + scratch
+        + 0.7 * halo)
+        .min(1.0);
+    // Dirt: grime in hollows and along the rim's inner side (in patches, not an outline), dust
+    // low on the plate and a thin film all over.
+    let age = 0.15 + 0.85 * wl;
+    let grime = wear.dirt
+        * age
+        * smooth(
+            0.45,
+            0.95,
+            0.45 * f.dirt + (0.7 * f.hollow + 0.45 * near) * (0.2 + 0.8 * patchy),
+        )
+        .max(0.6 * f.streak * (0.4 + 0.6 * f.low));
+    let dust = wear.dirt
+        * age
+        * (smooth(0.35, 0.95, 0.45 * f.dirt + 0.8 * f.low) + 0.2 * f.dirt)
+        * (1.0 - rim);
+    let dirt = (0.9 * grime + 0.6 * dust).min(0.8);
+    let dirt_c =
+        (v3(0.055, 0.047, 0.037) * grime + v3(0.34, 0.29, 0.22) * dust) / (grime + dust).max(1e-4);
+    // The paint (or an emblem's): mottled (more with age), darker with age, lighter where
+    // scuffed.
+    let shade = (0.8 + (0.07 + 0.08 * wl) * f.mottle + 0.04 * f.grain) * (1.0 - 0.15 * wl * f.dirt);
+    let mut paint = shade * (1.0 - 0.15 * scuff);
+    let mut fixed = lum(0.04 * scuff + 0.08 * scratch);
+    if let Some((_, c)) = wear.emblem {
+        let k = smooth(0.0005, -0.0005, f.emblem);
+        fixed = mix(fixed, c * paint + lum(0.03 * scuff), k);
+        paint *= 1.0 - k;
+    }
+    // Under the paint, with grime packed into the older chips (more near the rims).
+    let rust = smooth(0.82, 0.97, f.chip) * smooth(0.5, 1.0, wl) * smooth(0.45, 0.8, f.rust);
+    let caked = smooth(0.3, 0.7, f.dirt + 0.35 * near + 0.3 * rim) * age;
+    let (under, under_r, under_m) = match wear.under {
+        Under::Steel => (
+            mix(
+                mix(
+                    lum(0.46 + 0.12 * f.grain),
+                    v3(0.2, 0.105, 0.05),
+                    rust * 0.85,
+                ),
+                v3(0.06, 0.052, 0.044),
+                0.75 * caked,
+            ),
+            0.5 + 0.15 * f.rough + 0.35 * rust + 0.3 * caked,
+            (1.0 - 0.85 * rust) * (1.0 - 0.75 * caked),
+        ),
+        Under::Wood => (v3(0.36, 0.25, 0.15) * (0.85 + 0.25 * f.grain), 0.75, 0.0),
+    };
+    let primer_c = v3(0.19, 0.18, 0.17);
+    let painted = (1.0 - bare - primer).max(0.0);
+    paint *= painted;
+    fixed = fixed * painted + under * bare + primer_c * primer;
+    paint *= 1.0 - dirt;
+    fixed = fixed * (1.0 - dirt) + dirt_c * dirt;
+    // Satin paint: duller with age and where scuffed, rubbed glossy on worn ridges.
+    let paint_r =
+        0.46 + 0.16 * wl + 0.14 * f.rough + 0.1 * f.mottle + 0.3 * scuff - 0.15 * f.ridge * wl;
+    let rough = paint_r * painted + under_r * bare + 0.65 * primer;
+    let rough = mix(lum(rough), lum(0.92), dirt).x;
+    let metal = under_m * bare * (1.0 - dirt);
+    let occ = 1.0 - 0.3 * f.hollow * (0.4 + 0.6 * dirt) - 0.15 * primer;
+    let z = dent + 4e-6 * f.peel - 1.2e-4 * bare - 6e-5 * primer - 2.5e-4 * gouge - 2e-5 * scratch
+        + 6e-5 * dirt * smooth(0.6, 1.0, f.dirt);
+    let texel = PaintTexel {
+        paint: (paint * 128.0).round().clamp(0.0, 255.0) as u8,
+        fixed: [srgb8(fixed.x), srgb8(fixed.y), srgb8(fixed.z)],
+        orm: [unorm8(occ), unorm8(rough), unorm8(metal)],
+        normal: [128, 128, 255],
+    };
+    (texel, z)
+}
+
+/// A painted plate's look apart from the team color: the color multiplier is applied to the
+/// team's paint, a little darker, warmer and less saturated than the team color.
+fn paint_color(team: Vec3) -> Vec3 {
+    let l = team.dot(v3(0.2126, 0.7152, 0.0722));
+    mix(l * v3(1.0, 0.93, 0.86), team, 0.74) * 0.86
+}
+
+/// Pack chart sizes into the paint texture, longest side first, each as low as it fits
+/// (skyline): their corners, or `None` when they do not fit.
+fn pack(sizes: &[(u32, u32)]) -> Option<Vec<(u32, u32)>> {
+    let n = PAINT_SIZE as usize;
+    let mut order: Vec<usize> = (0..sizes.len()).collect();
+    order.sort_by_key(|&i| std::cmp::Reverse((sizes[i].0.max(sizes[i].1), i)));
+    let mut sky = vec![0u32; n];
+    let mut out = vec![(0, 0); sizes.len()];
+    for i in order {
+        let (w, h) = ((sizes[i].0 + CHART_GAP) as usize, sizes[i].1 + CHART_GAP);
+        let mut best: Option<(usize, u32)> = None;
+        for x in 0..=n.checked_sub(w)? {
+            let y = sky[x..x + w].iter().copied().max().unwrap_or(0);
+            if best.is_none_or(|(_, b)| y < b) {
+                best = Some((x, y));
+            }
+        }
+        let (x, y) = best?;
+        if y + h > PAINT_SIZE + CHART_GAP {
+            return None;
+        }
+        sky[x..x + w].fill(y + h);
+        out[i] = (x as u32, y);
+    }
+    Some(out)
+}
+
+/// The paint texture at one wear level: per texel the team-independent albedo (paint
+/// multiplier and fixed sRGB color), and the normal and ORM maps.
+struct PaintMaps {
+    layer: Vec<[u8; 4]>,
+    normal: Image,
+    orm: Image,
+}
+
+/// Assemble the charts (each with its corner in the texture) into the paint texture's maps.
+fn assemble_paint(charts: &[(&Chart, (u32, u32))]) -> [PaintMaps; WEARS] {
+    let n = PAINT_SIZE as usize;
+    std::array::from_fn(|wi| {
+        let mut texels = vec![BLANK; n * n];
+        for (c, (x0, y0)) in charts {
+            let (w, x0, y0) = (c.w as usize, *x0 as usize, *y0 as usize);
+            for y in 0..c.h as usize {
+                let dst = (y0 + y) * n + x0;
+                texels[dst..dst + w].copy_from_slice(&c.texels[wi][y * w..(y + 1) * w]);
+            }
+        }
+        let mut normal = Vec::with_capacity(n * n * 4);
+        let mut orm = Vec::with_capacity(n * n * 4);
+        for t in &texels {
+            normal.extend_from_slice(&[t.normal[0], t.normal[1], t.normal[2], 255]);
+            orm.extend_from_slice(&[t.orm[0], t.orm[1], t.orm[2], 255]);
+        }
+        PaintMaps {
+            layer: texels
+                .iter()
+                .map(|t| [t.paint, t.fixed[0], t.fixed[1], t.fixed[2]])
+                .collect(),
+            normal: Image::new(PAINT_SIZE, PAINT_SIZE, normal, false),
+            orm: Image::new(PAINT_SIZE, PAINT_SIZE, orm, false),
+        }
+    })
 }
 
 // ====================================================================== body pieces
@@ -1879,6 +2658,50 @@ fn slab(half: Vec3, r: f32, b: f32) -> Mesh {
         3,
     );
     extrude(&pts, half.z * 2.0, b)
+}
+
+/// A band (an arm band) wrapped round a limb `f` hanging along −Y from `axis`, from
+/// height `lo` to `hi`, standing `t` proud with its edges eased down: `n` steps round.
+/// Texture coordinates in meters, round it and across.
+fn wrap_band(f: &dyn Fn(Vec3) -> f32, axis: Vec3, lo: f32, hi: f32, t: f32, n: usize) -> Mesh {
+    let e = (0.25 * (hi - lo)).min(0.004);
+    let rows = [(hi, 0.25), (hi - e, 1.0), (lo + e, 1.0), (lo, 0.25)];
+    let r = rows.len();
+    let mut verts = Vec::with_capacity((n + 1) * r);
+    for i in 0..=n {
+        let a = TAU * i as f32 / n as f32;
+        let dir = v3(a.sin(), 0.0, -a.cos());
+        for &(y, k) in &rows {
+            let (p, nrm) = cast(f, v3(axis.x, y, axis.z), dir, 0.15);
+            verts.push(Vertex::new(p + nrm * t * k, nrm, v2(a * 0.05, hi - y)));
+        }
+    }
+    let mut idx = Vec::with_capacity(n * (r - 1) * 6);
+    for i in 0..n {
+        for j in 0..r - 1 {
+            let [a, b, c, d] = [
+                i * r + j,
+                (i + 1) * r + j,
+                (i + 1) * r + j + 1,
+                i * r + j + 1,
+            ]
+            .map(|v| v as u32);
+            idx.extend_from_slice(&[a, b, c, a, c, d]);
+        }
+    }
+    let mut m = Mesh::new(verts, idx);
+    fix_winding(&mut m);
+    m.compute_normals();
+    // One normal either side of the texture seam.
+    for j in 0..r {
+        let (a, b) = (j, n * r + j);
+        let nrm = (Vec3::from(m.vertices[a].normal) + Vec3::from(m.vertices[b].normal))
+            .normalize_or(Vec3::Y)
+            .to_array();
+        m.vertices[a].normal = nrm;
+        m.vertices[b].normal = nrm;
+    }
+    m
 }
 
 // ---------------------------------------------------------------------- head
@@ -2206,8 +3029,8 @@ fn depth(f: &dyn Fn(Vec3) -> f32, q: Vec2) -> Option<f32> {
 
 /// The rolled leather binding around the coif's face opening. It lines the opening's wall,
 /// from just proud of the mail back to the deepest face, so the cut edges of mail and skin
-/// both end under it.
-fn face_binding() -> Mesh {
+/// both end under it. Also returns the linen stitches down the middle of its front.
+fn face_binding() -> (Mesh, Mesh) {
     // The opening's outline, finely by angle around its middle, then evenly along its length.
     let mid = v2(0.0, -0.0265);
     let fine: Vec<Vec2> = (0..480)
@@ -2325,11 +3148,54 @@ fn face_binding() -> Mesh {
             tri.swap(1, 2);
         }
     }
+    // A stitch per section along the front's middle line (vertex 0 of each section): a thin
+    // raised diamond lying on the facets either side (the front tilts with the mail's slope).
+    let (mut sv, mut si) = (Vec::with_capacity(n * 5), Vec::with_capacity(n * 12));
+    for i in 0..n {
+        let i1 = (i + 1) % n;
+        let at = |j: usize, f: f32| {
+            Vec3::from(verts[i * k + j].position).lerp(Vec3::from(verts[i1 * k + j].position), f)
+        };
+        let out = Vec3::from(verts[i * k].normal);
+        let (from, to, mid) = (at(0, 0.2), at(0, 0.75), at(0, 0.475));
+        // Toward a neighboring vertex of the section, on the facet between: the point and the
+        // facet's normal.
+        let side = |j: usize| {
+            let across = (at(j, 0.475) - mid).normalize_or_zero();
+            let nrm = (to - from).cross(across).normalize_or(out);
+            (
+                mid + across * 0.0006,
+                if nrm.dot(out) < 0.0 { -nrm } else { nrm },
+            )
+        };
+        let ((p1, n1), (p9, n9)) = (side(1), side(k - 1));
+        let up = (n1 + n9).normalize_or(out);
+        let base = sv.len() as u32;
+        for (p, nrm, uv) in [
+            (mid + up * 0.00035, up, v2(0.0, 0.0)),
+            (from + up * 0.0001, up, v2(0.0, -0.0017)),
+            (p1 + n1 * 0.0001, n1, v2(0.0006, 0.0)),
+            (to + up * 0.0001, up, v2(0.0, 0.0017)),
+            (p9 + n9 * 0.0001, n9, v2(-0.0006, 0.0)),
+        ] {
+            sv.push(Vertex::new(p, nrm, uv + v2(0.0, 0.006 * i as f32)));
+        }
+        for e in 1..=4u32 {
+            let (a, b) = (base + e, base + e % 4 + 1);
+            let [pc, pa, pb] = [base, a, b].map(|v| Vec3::from(sv[v as usize].position));
+            if (pa - pc).cross(pb - pc).dot(up) >= 0.0 {
+                si.extend_from_slice(&[base, a, b]);
+            } else {
+                si.extend_from_slice(&[base, b, a]);
+            }
+        }
+    }
+    let stitches = Mesh::new(sv, si);
     let mut m = Mesh::new(verts, idx);
     m.compute_normals();
     fix_winding(&mut m);
     m.compute_normals();
-    m
+    (m, stitches)
 }
 
 /// The coif before the face opening is cut.
@@ -2489,7 +3355,7 @@ fn helmet() -> PieceMesh {
             0.0095,
         )
     };
-    b.add(shell.mesh(), Zone::Paint, Tint::Team(1.0));
+    b.paint(&shell, 1.0, Wear::new(0.25, Vec2::ZERO, 1).hits(2, 1));
     let band_out = |uv: Vec2| band_outline(param, uv);
     let band_h = |_: Vec2, s: f32| BAND_T + lip(s, 0.004, 0.0008);
     let band = Plate {
@@ -2558,9 +3424,22 @@ fn helmet() -> PieceMesh {
     b.add(mail, Zone::Mail, Tint::Rgb(lin(STEEL) * 0.85));
     // Only its front and inner side show: the rest is under the helmet, in the mail or behind
     // every face.
-    let binding = cull(face_binding(), &helmet_base, 0.002);
-    let binding = cull(cull(binding, &coif, 0.0008), &faces, 0.0008);
-    b.add(binding, Zone::Leather, Tint::Rgb(lin(LEATHER)));
+    let (binding, stitches) = face_binding();
+    let shown = |m: Mesh| {
+        cull(
+            cull(cull(m, &helmet_base, 0.002), &coif, 0.0008),
+            &faces,
+            0.0008,
+        )
+    };
+    // Rubbed lighter along the inner edge, where it meets the face.
+    let edge = |p: Vec3| {
+        let r = p - HEAD_C;
+        let k = smooth(-0.0012, -0.0028, face_oval(v2(r.x, r.y)));
+        Tint::Rgb(mix(lin(LEATHER), lin(LEATHER_EDGE), k))
+    };
+    b.add_fn(shown(binding), Zone::Leather, &edge);
+    b.add(shown(stitches), Zone::Cloth, Tint::Rgb(lin(CREAM) * 0.85));
     let field = |p: Vec3| shell.proxy(p).min(band.proxy(p)).min(coif(p));
     b.finish(&field, 1.0)
 }
@@ -2779,6 +3658,13 @@ fn torso_base(p: Vec3) -> f32 {
     smin(smin(rib, pec, 0.04), abd, 0.06)
 }
 
+/// Under the cuirass: the chest with the broad back muscles under the arms, so its plates wrap
+/// round the sides.
+fn cuirass_base(p: Vec3) -> f32 {
+    let lat = ellipsoid(ax(p), v3(0.1, 0.22, 0.04), v3(0.07, 0.14, 0.08));
+    smin(torso_base(p), lat, 0.04)
+}
+
 fn chest_suit(p: Vec3) -> f32 {
     let body = torso_base(p) + 0.006;
     let a = ax(p);
@@ -2797,15 +3683,19 @@ fn chest_suit(p: Vec3) -> f32 {
 
 fn chest() -> PieceMesh {
     let mut b = Builder::default();
-    let base = |p: Vec3| torso_base(p);
-    // Breastplate with a center crease, scooped neck and arm holes.
+    let base = |p: Vec3| cuirass_base(p);
+    // Breastplate with a center crease, scooped neck and arm holes, wrapping round the sides
+    // to meet the back plate under the arms.
     let front = Param::cyl(Vec3::ZERO, Quat::IDENTITY, 0.15);
     let breast_out = |uv: Vec2| {
-        let bottom = 0.17 + 0.06 * (uv.x / 0.17).powi(2) - uv.y;
-        let d = box2(uv, v2(0.0, 0.29), v2(0.175, 0.12), 0.03).max(bottom);
+        // Curving up over the belly, down again over the flanks.
+        let a = uv.x.abs();
+        let bottom =
+            0.17 + 0.05 * (a.min(0.13) / 0.17).powi(2) - 0.06 * smooth(0.12, 0.24, a) - uv.y;
+        let d = box2(uv, v2(0.0, 0.29), v2(0.215, 0.12), 0.03).max(bottom);
         let d = d.max(-circle2(uv, v2(0.0, 0.47), 0.085));
-        d.max(-circle2(uv, v2(0.205, 0.415), 0.07))
-            .max(-circle2(uv, v2(-0.205, 0.415), 0.07))
+        d.max(-circle2(uv, v2(0.235, 0.41), 0.075))
+            .max(-circle2(uv, v2(-0.235, 0.41), 0.075))
     };
     let breast_h = |uv: Vec2, s: f32| {
         0.011
@@ -2818,17 +3708,17 @@ fn chest() -> PieceMesh {
         0.006,
         &breast_out,
         &breast_h,
-        v2(-0.23, 0.13),
-        v2(0.23, 0.45),
+        v2(-0.25, 0.13),
+        v2(0.25, 0.45),
         0.013,
     );
     // Back plate.
     let back = Param::cyl(Vec3::ZERO, Quat::from_rotation_y(PI), 0.15);
     let back_out = |uv: Vec2| {
-        let d = box2(uv, v2(0.0, 0.27), v2(0.165, 0.13), 0.03);
+        let d = box2(uv, v2(0.0, 0.26), v2(0.2, 0.14), 0.03);
         let d = d.max(-circle2(uv, v2(0.0, 0.47), 0.08));
-        d.max(-circle2(uv, v2(0.2, 0.43), 0.07))
-            .max(-circle2(uv, v2(-0.2, 0.43), 0.07))
+        d.max(-circle2(uv, v2(0.23, 0.42), 0.075))
+            .max(-circle2(uv, v2(-0.23, 0.42), 0.075))
     };
     let back_h =
         |uv: Vec2, s: f32| 0.01 + 0.004 * (-(uv.x / 0.02).powi(2)).exp() + lip(s, 0.012, 0.0025);
@@ -2838,8 +3728,8 @@ fn chest() -> PieceMesh {
         0.006,
         &back_out,
         &back_h,
-        v2(-0.22, 0.12),
-        v2(0.22, 0.45),
+        v2(-0.25, 0.1),
+        v2(0.25, 0.45),
         0.015,
     );
     // Two abdominal lames, the upper one over the lower.
@@ -2877,11 +3767,13 @@ fn chest() -> PieceMesh {
         v2(0.17, 0.13),
         0.013,
     );
-    // Collar: a standing gorget open at the back.
+    // Collar: the gambeson's quilted standing collar, open at the back.
     let neck_base = |p: Vec3| capsule(p, v3(0.0, 0.3, 0.02), v3(0.0, 0.5, 0.01), 0.062);
     let collar_param = Param::cyl(Vec3::ZERO, Quat::IDENTITY, 0.065);
     let collar_out = |uv: Vec2| box2(uv, v2(0.0, 0.43), v2(0.155, 0.032), 0.012);
-    let collar_h = |_: Vec2, s: f32| 0.008 + lip(s, 0.008, 0.002);
+    let collar_h = |uv: Vec2, s: f32| {
+        0.008 + 0.004 * (1.0 - ((uv.y - 0.43) / 0.032).powi(2)).max(0.0) + lip(s, 0.006, 0.001)
+    };
     let collar = Plate {
         back: true,
         ..plate(
@@ -2892,7 +3784,7 @@ fn chest() -> PieceMesh {
             &collar_h,
             v2(-0.2, 0.38),
             v2(0.2, 0.48),
-            0.012,
+            0.014,
         )
     };
     // Leather straps over the shoulders joining breast and back plates.
@@ -2918,12 +3810,20 @@ fn chest() -> PieceMesh {
         &plates,
         0.008,
     );
-    b.add(suit, Zone::Suit, Tint::Dyed(lin(SUIT), SUIT_DYE));
-    b.add(breast.mesh(), Zone::Paint, Tint::Team(1.0));
-    b.add(backplate.mesh(), Zone::Paint, Tint::Team(0.9));
-    b.add(lame1.mesh(), Zone::Paint, Tint::Team(0.95));
-    b.add(lame2.mesh(), Zone::Paint, Tint::Team(0.9));
-    b.add(collar.mesh(), Zone::Metal, Tint::Rgb(lin(GUNMETAL)));
+    b.add(suit, Zone::Suit, GAMBESON);
+    b.paint(&breast, 1.0, Wear::new(0.4, v2(0.0, -1.0), 2).hits(3, 3));
+    // The back plate is seen less closely: coarser texels leave the paint texture room.
+    b.paint(
+        &backplate,
+        0.9,
+        Wear {
+            texel: 0.0013,
+            ..Wear::new(0.45, v2(0.0, -1.0), 3).hits(1, 1)
+        },
+    );
+    b.paint(&lame1, 0.95, Wear::new(0.55, v2(0.0, -1.0), 4));
+    b.paint(&lame2, 0.9, Wear::new(0.6, v2(0.0, -1.0), 5));
+    b.add(collar.mesh(), Zone::Suit, Tint::Cloth { t: 0.0, k: 0.92 });
     for side in [-1.0f32, 1.0] {
         let st = Plate {
             roll: 0.002,
@@ -2993,7 +3893,11 @@ fn pelvis() -> PieceMesh {
         &|p| belt.proxy(p),
         0.006,
     );
-    b.add(suit, Zone::Suit, Tint::Dyed(lin(SUIT), SUIT_DYE));
+    // The gambeson ends under the belt; the hose below.
+    b.add_fn(suit, Zone::Cloth, &|p| Tint::Cloth {
+        t: smooth(0.1, 0.07, p.y),
+        k: 1.0,
+    });
     b.add(belt.mesh(), Zone::Leather, Tint::Rgb(lin(LEATHER_DARK)));
     // Buckle: a brass frame over the belt's ends.
     let front_z = -0.118;
@@ -3039,13 +3943,14 @@ fn pelvis() -> PieceMesh {
     b.finish(&field, 1.0)
 }
 
-/// Tabard flap hanging from the belt; origin at its hinge, hanging along −Y, facing −Z
-/// (`front`) or +Z.
+/// Tabard flap hanging from the belt to the knee, flaring to the hips' width; origin at its
+/// hinge, hanging along −Y, facing −Z (`front`) or +Z. A broad field of the team's color,
+/// front and back, that still reads at a distance.
 fn tabard(front: bool) -> PieceMesh {
-    let len = if front { 0.43 } else { 0.4 };
+    let len = if front { 0.5 } else { 0.47 };
     let base = |p: Vec3| (Vec2::new(p.x, p.z) - Vec2::new(0.0, 0.32)).length() - 0.32;
     let param = Param::cyl(v3(0.0, 0.0, 0.32), Quat::IDENTITY, 0.32);
-    let (w0, w1) = (0.12, 0.145);
+    let (w0, w1) = (0.135, 0.175);
     let outline = move |uv: Vec2| {
         let t = (-uv.y / len).clamp(0.0, 1.0);
         let w = w0 + (w1 - w0) * t;
@@ -3069,9 +3974,9 @@ fn tabard(front: bool) -> PieceMesh {
             0.0,
             &outline,
             &folds,
-            v2(-0.16, -len - 0.01),
-            v2(0.16, 0.01),
-            0.015,
+            v2(-0.19, -len - 0.01),
+            v2(0.19, 0.01),
+            0.017,
         )
     };
     // Trim band at the hem and the team emblem (front only).
@@ -3089,13 +3994,13 @@ fn tabard(front: bool) -> PieceMesh {
             0.0,
             &trim_out,
             &trim_h,
-            v2(-0.16, -len - 0.01),
-            v2(0.16, -len + 0.11),
-            0.01,
+            v2(-0.19, -len - 0.01),
+            v2(0.19, -len + 0.11),
+            0.011,
         )
     };
     let emblem_out = |uv: Vec2| {
-        let q = uv - v2(0.0, -0.15);
+        let q = uv - v2(0.0, -0.17);
         // A chevron over a diamond.
         let diamond = (q.x.abs() + (q.y + 0.025).abs()) - 0.035;
         let chev = (q.x.abs() * 0.75 - (q.y - 0.04)).abs() - 0.012;
@@ -3112,13 +4017,13 @@ fn tabard(front: bool) -> PieceMesh {
             0.0,
             &emblem_out,
             &emblem_h,
-            v2(-0.09, -0.25),
-            v2(0.09, -0.06),
+            v2(-0.09, -0.27),
+            v2(0.09, -0.08),
             0.007,
         )
     };
     let mut b = Builder::default();
-    b.add(pl.mesh(), Zone::Cloth, Tint::Team(0.85));
+    b.add(pl.mesh(), Zone::Cloth, DYED_WOOL);
     b.add(trim.mesh(), Zone::Cloth, Tint::Rgb(lin(CREAM) * 0.8));
     if front {
         b.add(emblem.mesh(), Zone::Cloth, Tint::Rgb(lin(CREAM) * 0.85));
@@ -3219,9 +4124,9 @@ fn thigh() -> PieceMesh {
         &plates,
         0.008,
     );
-    b.add(suit, Zone::Suit, Tint::Dyed(lin(SUIT), SUIT_DYE));
-    b.add(cuisse.mesh(), Zone::Paint, Tint::Team(1.0));
-    b.add(lame.mesh(), Zone::Paint, Tint::Team(0.9));
+    b.add(suit, Zone::Cloth, HOSE);
+    b.paint(&cuisse, 1.0, Wear::new(0.6, v2(0.0, -1.0), 6).hits(1, 1));
+    b.paint(&lame, 0.9, Wear::new(0.75, v2(0.0, -1.0), 7));
     b.add(strap.mesh(), Zone::Leather, Tint::Rgb(lin(LEATHER)));
     let field = |p: Vec3| thigh_suit(p).min(plates(p));
     b.finish(&field, 1.0)
@@ -3301,7 +4206,7 @@ fn shin() -> PieceMesh {
         &|p| plates(p).min(boot_shaft(p)),
         0.006,
     );
-    b.add(suit, Zone::Suit, Tint::Dyed(lin(SUIT), SUIT_DYE));
+    b.add(suit, Zone::Cloth, HOSE);
     let shaft = cull(
         sdf_mesh(
             &boot_shaft,
@@ -3313,7 +4218,7 @@ fn shin() -> PieceMesh {
         0.006,
     );
     b.add(shaft, Zone::Leather, Tint::Rgb(lin(LEATHER_DARK)));
-    b.add(greave.mesh(), Zone::Paint, Tint::Team(0.95));
+    b.paint(&greave, 0.95, Wear::new(0.8, v2(0.0, -1.0), 8).hits(1, 1));
     b.add(kcop.mesh(), Zone::Metal, Tint::Rgb(lin(GUNMETAL)));
     let field = |p: Vec3| base(p).min(plates(p));
     b.finish(&field, 1.0)
@@ -3425,7 +4330,7 @@ fn upper_arm() -> PieceMesh {
             &cap_h,
             v2(-0.06, -0.11),
             v2(0.17, 0.11),
-            0.012,
+            0.0135,
         )
     };
     let arm_param = Param::cyl(Vec3::ZERO, Quat::from_rotation_y(-FRAC_PI_2), 0.06);
@@ -3470,20 +4375,33 @@ fn upper_arm() -> PieceMesh {
         )
     };
     let plates = |p: Vec3| cap.proxy(p).min(l1.proxy(p)).min(l2.proxy(p));
+    // A broad band of the team's cloth round the arm above the elbow (a brassard).
+    let (band_lo, band_hi) = (-0.25, -0.178);
+    let under_band = |p: Vec3| (p.y - (band_lo + band_hi) * 0.5).abs() - (band_hi - band_lo) * 0.5;
     let suit = cull(
-        sdf_mesh(
-            &upper_arm_suit,
-            v3(-0.09, -0.36, -0.09),
-            v3(0.1, 0.08, 0.09),
-            0.0125,
+        cull(
+            sdf_mesh(
+                &upper_arm_suit,
+                v3(-0.09, -0.36, -0.09),
+                v3(0.1, 0.08, 0.09),
+                0.0125,
+            ),
+            &plates,
+            0.008,
         ),
-        &plates,
-        0.008,
+        &under_band,
+        0.006,
     );
-    b.add(suit, Zone::Suit, Tint::Dyed(lin(SUIT), SUIT_DYE));
-    b.add(cap.mesh(), Zone::Paint, Tint::Team(1.0));
-    b.add(l1.mesh(), Zone::Paint, Tint::Team(0.92));
-    b.add(l2.mesh(), Zone::Paint, Tint::Team(0.86));
+    b.add(suit, Zone::Suit, GAMBESON);
+    b.add(
+        wrap_band(&upper_arm_suit, Vec3::ZERO, band_lo, band_hi, 0.003, 24),
+        Zone::Cloth,
+        DYED_WOOL,
+    );
+    // The cap's parameters run down the arm along +u.
+    b.paint(&cap, 1.0, Wear::new(0.3, v2(1.0, 0.0), 9).hits(1, 1));
+    b.paint(&l1, 0.92, Wear::new(0.4, v2(0.0, -1.0), 10));
+    b.paint(&l2, 0.86, Wear::new(0.45, v2(0.0, -1.0), 11));
     let field = |p: Vec3| upper_arm_suit(p).min(plates(p));
     b.finish(&field, 1.0)
 }
@@ -3542,8 +4460,8 @@ fn forearm() -> PieceMesh {
         &plates,
         0.006,
     );
-    b.add(suit, Zone::Suit, Tint::Dyed(lin(SUIT), SUIT_DYE));
-    b.add(vam.mesh(), Zone::Paint, Tint::Team(0.9));
+    b.add(suit, Zone::Suit, GAMBESON);
+    b.paint(&vam, 0.9, Wear::new(0.45, v2(0.0, -1.0), 12).hits(0, 1));
     b.add(ecop.mesh(), Zone::Metal, Tint::Rgb(lin(GUNMETAL)));
     let field = |p: Vec3| forearm_suit(p).min(plates(p));
     b.finish(&field, 1.0)
@@ -3858,33 +4776,23 @@ fn shield() -> PieceMesh {
             0.0125,
         )
     };
-    // Emblem: a cream chevron under a bar.
-    let emblem_out = |uv: Vec2| {
+    // Emblem, painted on: a cream chevron under a bar.
+    let emblem = |uv: Vec2| {
         let q = uv - v2(0.0, 0.02);
         let chev = (q.x.abs() * 0.85 - (q.y + 0.07)).abs() - 0.032;
         let chev = chev.max(q.x.abs() - 0.25).max(q.y - 0.16);
         let bar = box2(uv, v2(0.0, 0.235), v2(0.25, 0.022), 0.006);
         chev.min(bar).max(heater(uv) + 0.04)
     };
-    let emblem_h = |_: Vec2, _: f32| 0.0118;
-    let emblem = Plate {
-        roll: 0.0012,
-        rim: 2,
-        reach: 1.0,
-        ..plate(
-            param,
-            &base,
-            0.0,
-            &emblem_out,
-            &emblem_h,
-            v2(-0.3, -0.3),
-            v2(0.3, 0.32),
-            0.012,
-        )
+    // Painted wood: it chips to the wood under its gesso.
+    let wear = Wear {
+        under: Under::Wood,
+        emblem: Some((&emblem, lin(CREAM) * 0.9)),
+        texel: 0.0016,
+        ..Wear::new(0.6, v2(0.0, -1.0), 13).hits(4, 5)
     };
-    b.add(face.mesh(), Zone::Paint, Tint::Team(1.0));
-    b.add(rim.mesh(), Zone::Metal, Tint::Rgb(lin(STEEL) * 0.8));
-    b.add(emblem.mesh(), Zone::Paint, Tint::Rgb(lin(CREAM) * 0.9));
+    b.paint(&face, 1.0, wear);
+    b.add(rim.mesh(), Zone::Metal, Tint::Rgb(lin(STEEL) * 0.6));
     // Boss.
     let boss = lathe(
         &[
@@ -3904,7 +4812,7 @@ fn shield() -> PieceMesh {
             v3(0.0, -0.035, face_z - 0.011),
         ),
         Zone::Metal,
-        Tint::Rgb(lin(STEEL)),
+        Tint::Rgb(lin(STEEL) * 0.65),
     );
     // Back: a leather-wrapped handle on two posts.
     let handle = |p: Vec3| {
@@ -4564,13 +5472,24 @@ impl Piece {
     pub fn team_colored(self) -> bool {
         !kit().pieces[self as usize].team.is_empty()
     }
+
+    /// Which of the cloth colors (gambeson, hose) part of the mesh takes.
+    pub fn cloth_colored(self) -> [bool; 2] {
+        let pair = &kit().pieces[self as usize].pair;
+        [
+            pair.iter().any(|&(_, t, _)| t < 1.0),
+            pair.iter().any(|&(_, t, _)| t > 0.0),
+        ]
+    }
 }
 
-/// The built kit: the atlas, every piece's mesh and the faces.
+/// The built kit: the atlas, every piece's mesh and the faces, and the paint texture of the
+/// painted plates at each wear level.
 pub struct Kit {
     atlas: TextureSet,
     pieces: Vec<PieceMesh>,
     faces: Vec<PieceMesh>,
+    paint: [PaintMaps; WEARS],
     /// Seconds it took to build (wall clock, all threads).
     pub build_secs: f32,
 }
@@ -4585,10 +5504,11 @@ impl Kit {
         }
     }
 
-    /// A piece's mesh painted with `team` (linear RGB; for [`Piece::Face`], the skin tone of
-    /// the first face shape, with brown eyes).
-    pub fn mesh(&self, piece: Piece, team: Vec3) -> Mesh {
-        self.pieces[piece as usize].paint(team, [lin(0x3b2617), lin(0x5e3b1f)])
+    /// A piece's mesh painted with `team` and `cloth`, the gambeson's and the hose's colors
+    /// (linear RGB; for [`Piece::Face`], the skin tone of the first face shape, and the cloth
+    /// colors for its irises).
+    pub fn mesh(&self, piece: Piece, team: Vec3, cloth: [Vec3; 2]) -> Mesh {
+        self.pieces[piece as usize].paint(team, cloth)
     }
 
     /// A face of one of the [`FACE_SHAPES`] shapes (wrapping around) with a skin tone and its
@@ -4597,9 +5517,62 @@ impl Kit {
         self.faces[shape % self.faces.len()].paint(skin, iris)
     }
 
-    /// Triangles in a piece.
+    /// Triangles in a piece (with its painted plates).
     pub fn triangles(&self, piece: Piece) -> usize {
         self.pieces[piece as usize].triangles()
+    }
+
+    /// Whether a piece has painted plates.
+    pub fn painted(&self, piece: Piece) -> bool {
+        self.pieces[piece as usize].paint.is_some()
+    }
+
+    /// A piece's painted plates (textured by [`Kit::paint_albedo`] and [`Kit::paint_maps`]),
+    /// if it has any. The same for every team and wear level.
+    pub fn paint_mesh(&self, piece: Piece) -> Option<Mesh> {
+        self.pieces[piece as usize].paint.clone()
+    }
+
+    /// The paint texture's albedo at a wear level (`0..WEARS`, fresh to battered) in a team
+    /// color (linear RGB); its normal and ORM slots are blank.
+    pub fn paint_albedo(&self, wear: usize, team: Vec3) -> TextureSet {
+        let paint = paint_color(team);
+        let to_linear: [f32; 256] = std::array::from_fn(|i| {
+            let s = i as f32 / 255.0;
+            if s <= 0.04045 {
+                s / 12.92
+            } else {
+                ((s + 0.055) / 1.055).powf(2.4)
+            }
+        });
+        let to_srgb: Vec<u8> = (0..4096).map(|i| srgb8(i as f32 / 4095.0)).collect();
+        let enc = |v: f32| to_srgb[(v.clamp(0.0, 1.0) * 4095.0 + 0.5) as usize];
+        let mut data = Vec::with_capacity((PAINT_SIZE * PAINT_SIZE * 4) as usize);
+        for t in &self.paint[wear.min(WEARS - 1)].layer {
+            let k = t[0] as f32 / 128.0;
+            let c = paint * k
+                + v3(
+                    to_linear[t[1] as usize],
+                    to_linear[t[2] as usize],
+                    to_linear[t[3] as usize],
+                );
+            data.extend_from_slice(&[enc(c.x), enc(c.y), enc(c.z), 255]);
+        }
+        TextureSet {
+            albedo: Image::new(PAINT_SIZE, PAINT_SIZE, data, true),
+            normal: Image::solid([128, 128, 255, 255], false),
+            orm: Image::solid([255, 128, 0, 255], false),
+        }
+    }
+
+    /// The paint texture's normal and ORM maps at a wear level; its albedo slot is blank.
+    pub fn paint_maps(&self, wear: usize) -> TextureSet {
+        let m = &self.paint[wear.min(WEARS - 1)];
+        TextureSet {
+            albedo: Image::solid([255; 4], true),
+            normal: m.normal.clone(),
+            orm: m.orm.clone(),
+        }
     }
 }
 
@@ -4623,18 +5596,23 @@ fn pair(right: Piece, left: Piece, make: fn() -> PieceMesh) -> Vec<(Piece, Piece
 
 fn build_kit() -> Kit {
     let start = std::time::Instant::now();
+    // Longest first, so no long job starts last.
     let mut jobs: Vec<Job> = vec![
         Job::Pieces(|| vec![(Piece::Helmet, helmet())]),
-        Job::Pieces(|| vec![(Piece::Crest, crest())]),
         Job::Pieces(|| vec![(Piece::Chest, chest())]),
-        Job::Pieces(|| vec![(Piece::Pelvis, pelvis())]),
-        Job::Pieces(|| pair(Piece::HandR, Piece::HandL, hand)),
-        Job::Pieces(|| pair(Piece::FootR, Piece::FootL, foot)),
+        Job::Pieces(|| vec![(Piece::Shield, shield())]),
+    ];
+    jobs.extend((0..SHAPES.len()).map(Job::Face));
+    jobs.push(Job::Tile(Zone::Mail));
+    jobs.extend([
         Job::Pieces(|| pair(Piece::ThighR, Piece::ThighL, thigh)),
         Job::Pieces(|| pair(Piece::ShinR, Piece::ShinL, shin)),
         Job::Pieces(|| pair(Piece::UpperArmR, Piece::UpperArmL, upper_arm)),
+        Job::Pieces(|| vec![(Piece::Crest, crest())]),
         Job::Pieces(|| pair(Piece::ForearmR, Piece::ForearmL, forearm)),
-        Job::Pieces(|| vec![(Piece::Shield, shield())]),
+        Job::Pieces(|| vec![(Piece::Pelvis, pelvis())]),
+        Job::Pieces(|| pair(Piece::HandR, Piece::HandL, hand)),
+        Job::Pieces(|| pair(Piece::FootR, Piece::FootL, foot)),
         Job::Pieces(|| vec![(Piece::Rifle, rifle())]),
         Job::Pieces(|| {
             vec![
@@ -4660,9 +5638,13 @@ fn build_kit() -> Kit {
                 (Piece::Muzzle, muzzle_flash()),
             ]
         }),
-    ];
-    jobs.extend((0..SHAPES.len()).map(Job::Face));
-    jobs.extend(Zone::ALL.into_iter().map(Job::Tile));
+    ]);
+    jobs.extend(
+        Zone::ALL
+            .into_iter()
+            .filter(|&z| z != Zone::Mail)
+            .map(Job::Tile),
+    );
     let next = AtomicUsize::new(0);
     let results: Mutex<Vec<Output>> = Mutex::new(Vec::new());
     let threads = std::thread::available_parallelism()
@@ -4701,10 +5683,51 @@ fn build_kit() -> Kit {
     }
     pieces[Piece::Face as usize] = faces[0].clone();
     let atlas = assemble_atlas(&tiles);
+    // Pack the painted plates' charts (a left piece shares its right twin's) into the paint
+    // texture, and move their texture coordinates there.
+    let mut sets: Vec<Arc<Vec<Chart>>> = Vec::new();
+    for p in &pieces {
+        if let Some((_, set)) = &p.charts
+            && !sets.iter().any(|s| Arc::ptr_eq(s, set))
+        {
+            sets.push(set.clone());
+        }
+    }
+    let sizes: Vec<(u32, u32)> = sets
+        .iter()
+        .flat_map(|s| s.iter().map(|c| (c.w, c.h)))
+        .collect();
+    let Some(corners) = pack(&sizes) else {
+        panic!("the painted plates' charts {sizes:?} do not fit the paint texture");
+    };
+    let mut first = Vec::with_capacity(sets.len());
+    let mut n = 0;
+    for s in &sets {
+        first.push(n);
+        n += s.len();
+    }
+    for p in &mut pieces {
+        let (Some(mesh), Some((chart, set))) = (&mut p.paint, p.charts.take()) else {
+            continue;
+        };
+        let k = sets.iter().position(|s| Arc::ptr_eq(s, &set)).unwrap_or(0);
+        for (v, &c) in mesh.vertices.iter_mut().zip(&chart) {
+            let (x, y) = corners[first[k] + c as usize];
+            let uv = (Vec2::from(v.uv) + v2(x as f32, y as f32)) / PAINT_SIZE as f32;
+            v.uv = uv.to_array();
+        }
+    }
+    let placed: Vec<(&Chart, (u32, u32))> = sets
+        .iter()
+        .flat_map(|s| s.iter())
+        .zip(corners.iter().copied())
+        .collect();
+    let paint = assemble_paint(&placed);
     Kit {
         atlas,
         pieces,
         faces,
+        paint,
         build_secs: start.elapsed().as_secs_f32(),
     }
 }
@@ -4728,15 +5751,22 @@ mod tests {
         let kit = kit();
         let named = Piece::ALL
             .iter()
-            .map(|&p| (p.name().to_string(), &kit.pieces[p as usize]))
+            .flat_map(|&p| {
+                let piece = &kit.pieces[p as usize];
+                [(p.name().to_string(), &piece.mesh)].into_iter().chain(
+                    piece
+                        .paint
+                        .iter()
+                        .map(move |m| (format!("{} paint", p.name()), m)),
+                )
+            })
             .chain(
                 kit.faces
                     .iter()
                     .enumerate()
-                    .map(|(i, f)| (format!("face {i}"), f)),
+                    .map(|(i, f)| (format!("face {i}"), &f.mesh)),
             );
-        for (name, piece) in named {
-            let m = &piece.mesh;
+        for (name, m) in named {
             let turned = m
                 .indices
                 .chunks(3)
@@ -4749,6 +5779,49 @@ mod tests {
                 })
                 .count();
             assert_eq!(turned, 0, "{name}: {turned} triangles turned around");
+        }
+    }
+
+    /// The painted plates' texture coordinates land in the paint texture, and its wear levels
+    /// wear in order: the fresh one is nearly all paint, each next one shows more bare metal
+    /// and less paint.
+    #[test]
+    fn paint_wears_in_order() {
+        let kit = kit();
+        for p in Piece::ALL {
+            for v in kit.pieces[p as usize]
+                .paint
+                .iter()
+                .flat_map(|m| &m.vertices)
+            {
+                let uv = Vec2::from(v.uv);
+                assert!(
+                    uv.cmpge(Vec2::ZERO).all() && uv.cmple(Vec2::ONE).all(),
+                    "{}: paint uv {uv} outside the texture",
+                    p.name()
+                );
+            }
+        }
+        let texels = (PAINT_SIZE * PAINT_SIZE) as usize;
+        let (bare, paint): (Vec<f32>, Vec<f32>) = kit
+            .paint
+            .iter()
+            .map(|maps| {
+                let metal = maps.orm.data[..texels * 4]
+                    .chunks(4)
+                    .filter(|orm| orm[2] > 128)
+                    .count();
+                let paint: u64 = maps.layer.iter().map(|t| t[0] as u64).sum();
+                (
+                    metal as f32 / texels as f32,
+                    paint as f32 / texels as f32 / 128.0,
+                )
+            })
+            .unzip();
+        assert!(bare[0] < 0.005, "fresh paint is {:.4} bare metal", bare[0]);
+        for w in 1..WEARS {
+            assert!(bare[w] > bare[w - 1], "bare metal by wear: {bare:?}");
+            assert!(paint[w] < paint[w - 1], "paint by wear: {paint:?}");
         }
     }
 

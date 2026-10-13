@@ -15,7 +15,7 @@ use crate::agent::{
     AlertLevel, AttackPhase, Defense, NpcBrain, NpcCombat, NpcVitals, NpcWeapon, WeaponStyle,
 };
 use crate::art::ArtAssets;
-use crate::art::fighter::{FACE_SHAPES, Piece, basis, kit, rig, weapons};
+use crate::art::fighter::{FACE_SHAPES, Piece, WEARS, basis, kit, rig, weapons};
 use crate::combat::Downed;
 use crate::faction::Faction;
 use crate::skills::NpcSkills;
@@ -52,6 +52,25 @@ const PLAIN_WEAPON: Part = Part::Fighter(28);
 const PLAIN_SHIELD: Part = Part::Fighter(29);
 /// The face under the helmet.
 const FACE: Part = Part::Fighter(30);
+/// Pieces with painted plates. Those are a mesh of their own (textured by the paint texture
+/// in the team color, as worn as the fighter's skill says), a part posed with its piece: the
+/// `i`th piece's is `Part::Fighter(PAINT0 + hue * PAINTED.len() + i)`, where `hue` is the
+/// team color's (see [`hue_of`]), which the plates flash in when hit (the pose doesn't know
+/// the team, and the flash can't reach the paint texture).
+const PAINTED: [Part; 11] = [
+    Part::Torso,
+    Part::Head,
+    Part::LegL,
+    Part::LegR,
+    SHIN_L,
+    SHIN_R,
+    Part::ArmL,
+    Part::ArmR,
+    FOREARM_L,
+    FOREARM_R,
+    Part::Shield,
+];
+const PAINT0: u8 = 31;
 
 const SLOTS: usize = 42;
 
@@ -67,8 +86,51 @@ const IRISES: [[u32; 2]; 4] = [
     [0x56626a, 0x8e989d],
 ];
 
-/// Where a part's pose is kept.
+/// Gambeson colors (sRGB), picked per fighter: undyed linen and oatmeal, and wool in tan,
+/// grey, dark brown, olive drab and charcoal (mostly darker than the arena's sand, so the
+/// team's colors stand out on them).
+const GAMBESONS: [u32; 7] = [
+    0xbcb09a, 0x7f6449, 0x7c7a73, 0xa08c6c, 0x5f4a38, 0x6b6649, 0x5c5b56,
+];
+/// Hose colors (sRGB), picked per fighter: dark brown, charcoal, olive-brown and umber wool.
+const HOSE: [u32; 4] = [0x5a4836, 0x4a4a4d, 0x585340, 0x463a30];
+
+/// The hues painted plates flash in: grey, then twelve round the color circle.
+const HUES: u8 = 13;
+
+/// A team color's hue, for its plates' flash: 0 for a grey, else 1 plus the nearest of twelve
+/// hues round the circle, in steps of 30° from red (so 5 is green, 8 azure).
+fn hue_of(team_hex: u32) -> u8 {
+    let [r, g, b] = [16, 8, 0].map(|s| ((team_hex >> s) & 0xff) as f32);
+    let (max, min) = (r.max(g).max(b), r.min(g).min(b));
+    if max - min < 0.25 * max || max == 0.0 {
+        return 0;
+    }
+    // In sixths of the circle.
+    let h = if max == r {
+        (g - b) / (max - min)
+    } else if max == g {
+        2.0 + (b - r) / (max - min)
+    } else {
+        4.0 + (r - g) / (max - min)
+    };
+    1 + ((h * 2.0).round() as i32).rem_euclid(12) as u8
+}
+
+/// The part of a piece's painted plates, for a team of hue `hue`.
+fn paint_of(part: Part, hue: u8) -> Option<Part> {
+    let i = PAINTED.iter().position(|&p| p == part)?;
+    Some(Part::Fighter(PAINT0 + hue * PAINTED.len() as u8 + i as u8))
+}
+
+/// Where a part's pose is kept (painted plates: their piece's).
 fn slot(part: Part) -> Option<usize> {
+    let plates = PAINT0..PAINT0 + HUES * PAINTED.len() as u8;
+    if let Part::Fighter(n) = part
+        && plates.contains(&n)
+    {
+        return slot(PAINTED[(n - PAINT0) as usize % PAINTED.len()]);
+    }
     let i = match part {
         Part::Torso => 0,
         Part::Head => 1,
@@ -87,7 +149,7 @@ fn slot(part: Part) -> Option<usize> {
     (i < SLOTS).then_some(i)
 }
 
-/// Armor pieces that flash white when hit.
+/// Armor pieces that flash when hit.
 const ARMOR: [Part; 12] = [
     Part::Torso,
     Part::Head,
@@ -140,6 +202,52 @@ fn lit(hex: u32, nits: f32) -> StandardMaterial {
     StandardMaterial::hex(hex)
         .with_emissive(linear(hex).to_array(), nits)
         .with_roughness(0.4)
+}
+
+/// A part for an instant after a hit or a parry: lit up in a warm white over its own colors.
+/// It keeps the mesh's vertex colors (the cloth's, the leather's and the team's, and the
+/// baked occlusion) but not the textures, `FLASH` times as bright, plus a faint glow that
+/// shows in shade but cannot blow it out to white in daylight.
+fn flash() -> StandardMaterial {
+    tinted_flash(Vec3::new(FLASH, FLASH * 0.96, FLASH * 0.88))
+}
+
+/// How much brighter a struck part's own colors get.
+const FLASH: f32 = 1.5;
+
+/// The flash of painted plates (whose color is in the texture the flash can't keep), for a
+/// team of hue `hue` (see [`hue_of`]): a light tint of the team's hue, so a struck fighter
+/// lights up without losing its team.
+fn plate_flash(hue: u8) -> StandardMaterial {
+    let tint = if hue == 0 {
+        Vec3::new(1.0, 0.96, 0.88)
+    } else {
+        // The hue at full value and saturation `PLATE_FLASH.1` (sRGB), in linear.
+        let h = (hue - 1) as f32 * 0.5;
+        let c = [5.0, 3.0, 1.0].map(|n: f32| {
+            let k = (n + h) % 6.0;
+            1.0 - PLATE_FLASH.1 * k.min(4.0 - k).clamp(0.0, 1.0)
+        });
+        let hex = c
+            .iter()
+            .fold(0, |hex, c| hex << 8 | (c * 255.0).round() as u32);
+        linear(hex)
+    };
+    tinted_flash(tint * PLATE_FLASH.0)
+}
+
+/// The albedo of struck painted plates, and how saturated their tint is.
+const PLATE_FLASH: (f32, f32) = (0.75, 0.35);
+
+/// A flash material: untextured, the vertex colors times `albedo`, with a faint glow.
+fn tinted_flash(albedo: Vec3) -> StandardMaterial {
+    let glow = albedo / albedo.max_element();
+    StandardMaterial {
+        base_color: [albedo.x, albedo.y, albedo.z, 1.0],
+        perceptual_roughness: 0.6,
+        ..Default::default()
+    }
+    .with_emissive(glow.to_array(), 500.0)
 }
 
 /// The string between a bow tip and the nock (constant: the limbs bend instead).
@@ -221,9 +329,11 @@ pub(super) fn parts(
     }
     // The face differs between fighters of a squad: its skin tone, shape and eye color all
     // come from one seed. Seeds closer than 24 never share both skin tone and shape.
-    let (skin_hex, shape, iris_hex) = {
+    let seed = {
         let f = faction.map_or(0, |f| f.0);
-        let seed = (f.wrapping_mul(7) + kind as u32 * 3 + (level * 10.0) as u32) as usize;
+        (f.wrapping_mul(7) + kind as u32 * 3 + (level * 10.0) as u32) as usize
+    };
+    let (skin_hex, shape, iris_hex) = {
         let skin = seed % SKIN_TONES.len();
         let shape = seed / SKIN_TONES.len() % FACE_SHAPES;
         let mut iris = (seed + seed / 4) % IRISES.len();
@@ -232,6 +342,31 @@ pub(super) fn parts(
         }
         (SKIN_TONES[skin], shape, IRISES[iris])
     };
+    // The paint wears with skill: fresh on rookies, battle-worn on veterans and masters; the
+    // same seed tips fighters near a boundary either way.
+    let wear = {
+        let tip = (seed * 5 % 7) as f32 / 6.0 - 0.5;
+        let w = level + 0.24 * tip;
+        if w < 0.35 {
+            0
+        } else if w < 0.72 {
+            1
+        } else {
+            WEARS - 1
+        }
+    };
+    let Some(paint) = paint_material(art, wear, team_hex) else {
+        return plain_parts(kind, team_hex);
+    };
+    // Under the armor: a gambeson and hose in undyed or earthy wool and linen. Golden-ratio
+    // steps spread neighboring seeds (a squad's) over the colors.
+    let pick =
+        |n: usize, offset: f64| ((seed as f64 * 0.618_034 + offset).fract() * n as f64) as usize;
+    let cloth_hex = [
+        GAMBESONS[pick(GAMBESONS.len(), 0.0)],
+        HOSE[pick(HOSE.len(), 0.37)],
+    ];
+    let cloth = cloth_hex.map(linear);
     let mut out = Vec::with_capacity(list.len() + 2);
     for (part, piece) in list {
         let mesh = if piece == Piece::Face {
@@ -241,13 +376,18 @@ pub(super) fn parts(
             );
             let iris = iris_hex.map(linear);
             art.mesh(&key, || kit.face(shape, linear(skin_hex), iris))
-        } else if piece.team_colored() {
-            let key = format!("fighter/{}/{team_hex:06x}", piece.name());
-            art.mesh(&key, || kit.mesh(piece, team))
         } else {
-            art.mesh(&format!("fighter/{}", piece.name()), || {
-                kit.mesh(piece, team)
-            })
+            // Keyed by the colors it takes.
+            let mut key = format!("fighter/{}", piece.name());
+            if piece.team_colored() {
+                key += &format!("/{team_hex:06x}");
+            }
+            for (used, hex) in piece.cloth_colored().into_iter().zip(cloth_hex) {
+                if used {
+                    key += &format!("/{hex:06x}");
+                }
+            }
+            art.mesh(&key, || kit.mesh(piece, team, cloth))
         };
         let Some(mesh) = mesh else {
             return plain_parts(kind, team_hex);
@@ -259,6 +399,13 @@ pub(super) fn parts(
             _ => MeshRenderer::new(mesh, atlas),
         };
         out.push((part, r, Vec3::ONE));
+        if let Some(plates) = paint_of(part, hue_of(team_hex)).filter(|_| kit.painted(piece)) {
+            let key = format!("fighter/{}/paint", piece.name());
+            let Some(mesh) = art.mesh(&key, || kit.paint_mesh(piece).unwrap_or_default()) else {
+                return plain_parts(kind, team_hex);
+            };
+            out.push((plates, MeshRenderer::new(mesh, paint), Vec3::ONE));
+        }
     }
     if kind == Kind::Bow {
         for part in [STRING_UPPER, STRING_LOWER] {
@@ -271,6 +418,29 @@ pub(super) fn parts(
         }
     }
     out
+}
+
+/// The painted plates' material: the paint texture at a wear level in the team color.
+fn paint_material(art: &mut ArtAssets, wear: usize, team_hex: u32) -> Option<StandardMaterial> {
+    let kit = kit();
+    let team = linear(team_hex);
+    let key = format!("fighter/paint{wear}/{team_hex:06x}");
+    let (albedo, ..) = art.textures(&key, || kit.paint_albedo(wear, team))?;
+    let (_, normal, orm) =
+        art.textures(&format!("fighter/paint{wear}"), || kit.paint_maps(wear))?;
+    Some(StandardMaterial {
+        base_color: [1.0; 4],
+        base_color_texture: Some(albedo),
+        normal_texture: Some(normal),
+        metallic_roughness_texture: Some(orm),
+        occlusion_texture: Some(orm),
+        // The ORM map carries roughness and metalness; the factors scale it.
+        perceptual_roughness: 1.0,
+        metallic: 1.0,
+        // Satin paint mirrors less of the sky than the default (which would wash it pale).
+        reflectance: 0.3,
+        ..Default::default()
+    })
 }
 
 /// Capsules on the same skeleton, for apps without a renderer (nothing is drawn).
@@ -1238,16 +1408,27 @@ pub(super) fn humanoid(
             }
             _ => {}
         }
-        // White flash when hit.
+        // A flash when hit (the plates in their team's hue, whichever that is).
         if c.last_hurt > 0.0 && now - c.last_hurt < 0.12 {
             for part in ARMOR {
-                materials.push((part, lit(0xffffff, 20_000.0)));
+                materials.push((part, flash()));
+            }
+            for hue in 0..HUES {
+                let m = plate_flash(hue);
+                for part in ARMOR.into_iter().filter_map(|p| paint_of(p, hue)) {
+                    materials.push((part, m));
+                }
             }
         }
     }
     if parry {
         blade_glow = Some(lit(0xffffff, 25_000.0));
-        materials.push((Part::Shield, lit(0xffffff, 25_000.0)));
+        materials.push((Part::Shield, flash()));
+        for hue in 0..HUES {
+            if let Some(plates) = paint_of(Part::Shield, hue) {
+                materials.push((plates, plate_flash(hue)));
+            }
+        }
     }
     if let Some(m) = blade_glow {
         materials.push((Part::Weapon, m));
@@ -1495,6 +1676,26 @@ mod tests {
             let nock = weapons::BOW_TIP.z + draw;
             let len = Vec2::new(tip.y, nock - tip.z).length();
             assert!((len - STRING_HALF).abs() < 1e-3);
+        }
+    }
+
+    #[test]
+    fn plates_flash_in_their_teams_hue() {
+        // Crimson, green, azure, grey.
+        assert_eq!(hue_of(0xb02f35), 1);
+        assert_eq!(hue_of(0x3d8a4e), 5);
+        assert_eq!(hue_of(0x2f7cf2), 8);
+        assert_eq!(hue_of(0x8a8a8a), 0);
+        let [red, blue] = [1, 8].map(|hue| plate_flash(hue).base_color);
+        assert!(red[0] > 2.0 * red[2] && blue[2] > 2.0 * blue[0]);
+        // Every hue's plates are posed with their piece, and no two share a part.
+        let mut seen = std::collections::HashSet::new();
+        for hue in 0..HUES {
+            for &piece in &PAINTED {
+                let plates = paint_of(piece, hue).unwrap();
+                assert!(seen.insert(plates));
+                assert_eq!(slot(plates), slot(piece));
+            }
         }
     }
 }

@@ -3,9 +3,11 @@
 //! [`spawn_demo`] builds it around a center point (the showcase calls it at the yard zone):
 //!
 //! - **Flags** on tall poles with printed patterns, streaming in the world wind, and a field
-//!   of 56 pennants (cheap enough to have many).
+//!   of 56 pennants simulated on the GPU (`SimSettings::gpu`).
 //! - **Curtains**: one shot full of holes by a turret, one set on fire that burns away and
 //!   comes back.
+//! - **Self-collision**: a wool blanket dropped over a stone ball every few seconds, heaping
+//!   up in layers around its foot.
 //! - **Rope bridges**: a long one that sags under a walker crossing it, and a short one whose
 //!   ropes are cut so it drops, then rebuilt.
 //! - **Ropes**: a bead curtain a ball pushes through, a swing, and the cable of a wrecking
@@ -23,6 +25,9 @@
 //! generated once per world at startup (`texgen`, about 36 MB), shared as keyed assets so
 //! repeated props draw instanced (`kit`). [`spawn_review_ground`] adds a cheap textured
 //! ground (earth and gravel fraying into grass) for screenshots.
+//!
+//! [`boat_models`] builds a gaff-rigged clinker dinghy (hull, swinging rig, rudder; its
+//! dimensions in [`boat_dims`]) for the sailing cloth, with [`boat_stand`] to show it on.
 
 use std::f32::consts::{FRAC_PI_2, TAU};
 use std::sync::Arc;
@@ -48,9 +53,11 @@ mod kit;
 mod meshkit;
 mod props;
 mod props_anim;
+mod props_boat;
 mod props_bridge;
 mod props_machines;
 mod props_stage;
+pub mod sailboat;
 pub mod sculpt;
 pub mod skin;
 mod texgen;
@@ -63,9 +70,11 @@ pub use characters::{
 };
 use characters::{dog, graphite, ivory, mannequin};
 pub use ground::spawn_review_ground;
+pub use kit::Model;
 use kit::{Mat, register_mesh};
 use props::*;
 pub use props_anim::{AimAxis, DemoAim, DemoRoll, DemoScrewWheel};
+pub use props_boat::{BoatModels, boat_models, boat_stand, dims as boat_dims, hull_points};
 use props_bridge::{bridge_plank, plank_size, stone_pier, timber_tower};
 use props_machines::{
     GANTRY_PIVOT, PRESS_SCREW, gantry, plank_crate, press_frame, press_ram, press_wheel,
@@ -75,6 +84,7 @@ use props_stage::{
     GUN_PIVOT, GUN_TURNTABLE, bead_frame, burner, curtain_ring_xs, curtain_stage, gun_body,
     gun_pedestal, gun_yoke, stone_ball, swing_frame, swing_seat,
 };
+pub use sailboat::spawn_sailboat;
 
 /// How a demo prop moves (kinematic until the physics module lands).
 #[derive(Component, Debug, Clone, PartialEq)]
@@ -144,7 +154,8 @@ pub struct DemoCutter {
     pub period: f32,
 }
 
-/// Rebuilds a soft volume (jelly knocked off its crate, dented clay) every `period` seconds.
+/// Rebuilds a soft volume (jelly knocked off its crate, dented clay) or a cloth (the
+/// dropped blanket) every `period` seconds.
 #[derive(Component, Debug, Clone, Copy, PartialEq)]
 pub struct DemoRespawn {
     pub period: f32,
@@ -171,6 +182,7 @@ pub fn register(app: &mut App) {
             burn_and_restore,
             cut_and_restore,
             respawn_volumes,
+            sailboat::sail_boats,
         )
             .chain()
             .in_set(SimSet::Gameplay),
@@ -189,6 +201,7 @@ pub fn spawn_demo(commands: &mut Commands, origin: DVec3) {
     flags(commands, c);
     flag_field(commands, c + DVec3::new(19.0, 0.0, -16.0));
     curtains(commands, c + DVec3::new(-12.0, 0.0, 6.0));
+    blanket_drop(commands, c + DVec3::new(-4.5, 0.0, 3.0));
     bridges(commands, c);
     bead_curtain(commands, c + DVec3::new(-3.0, 0.0, 9.0));
     swing(commands, c + DVec3::new(15.0, 0.0, 4.0));
@@ -269,10 +282,12 @@ fn flag_field(commands: &mut Commands, corner: DVec3) {
                     0,
                 )
                 .with_sheen(0.2);
+            // Simulated on the GPU: one dispatch for the whole field, at twice the CPU
+            // pennants' detail.
             let mut spec = Cloth::flag([1.0, 0.6], material);
-            spec.resolution = [10, 6];
+            spec.resolution = [20, 12];
             spec.sim.wind_scale = 2.4;
-            spec.sim.substeps = 8;
+            spec.sim.gpu = true;
             commands.spawn((
                 Name::new(format!("Pennant {}", row * 7 + col + 1)),
                 at(base + DVec3::new(0.03, 2.35, 0.0)),
@@ -378,6 +393,53 @@ fn curtains(commands: &mut Commands, c: DVec3) {
         Vec3::new(nozzle.x + 0.85, 0.0, nozzle.z + 0.95),
     )
     .spawn(commands, at(c));
+}
+
+fn blanket_drop(commands: &mut Commands, c: DVec3) {
+    // A stone ball on the gravel and a wool blanket dropped over it. What doesn't fit over
+    // the ball heaps up around its foot; self-collision keeps the heap in layers instead of
+    // one sheet.
+    let radius = 0.4;
+    stone_ball(commands, radius).spawn_solid(
+        commands,
+        at(c + DVec3::Y * f64::from(radius)),
+        ColliderShape::Sphere { radius },
+    );
+    // Buffalo check: red and charcoal wool.
+    let wool = SoftMaterial::hex(0x8f2722)
+        .with_pattern(Pattern::Checker(18), 0x221e1c, 0x221e1c)
+        .with_roughness(0.95)
+        .with_sheen(0.7);
+    let blanket = Cloth {
+        size: [2.7, 2.7],
+        resolution: [40, 40],
+        anchor: [0.5, 0.5],
+        pins: ClothPins::None,
+        mass_per_m2: 0.45,
+        shear_compliance: 5e-3,
+        bend_compliance: 0.3,
+        aero_drag: 0.6,
+        material: wool,
+        sim: SimSettings {
+            self_collide: true,
+            thickness: 0.012,
+            friction: 0.45,
+            damping: 0.15,
+            ..SimSettings::default()
+        },
+        ..Cloth::default()
+    };
+    // Flat, turned a little and tipped, so one corner lands first.
+    let rot = Quat::from_rotation_y(0.6)
+        * Quat::from_rotation_z(0.15)
+        * Quat::from_rotation_x(-FRAC_PI_2);
+    commands.spawn((
+        Name::new("Wool blanket"),
+        at(c + DVec3::new(0.18, 1.9, 0.1)).with_rotation(rot),
+        blanket,
+        DemoRespawn { period: 9.0 },
+        DemoClock::default(),
+    ));
 }
 
 fn bridges(commands: &mut Commands, c: DVec3) {
@@ -939,9 +1001,18 @@ pub fn cut_and_restore(
 pub fn respawn_volumes(
     time: Res<Time>,
     mut volumes: Query<(&mut SoftVolume, &DemoRespawn, &mut DemoClock)>,
+    mut cloths: Query<(&mut Cloth, &DemoRespawn, &mut DemoClock), Without<SoftVolume>>,
 ) {
+    let dt = time.delta_for(None);
     for (mut spec, r, mut clock) in &mut volumes {
-        clock.0 += time.delta_for(None);
+        clock.0 += dt;
+        if clock.0 >= r.period {
+            clock.0 = 0.0;
+            spec.set_changed();
+        }
+    }
+    for (mut spec, r, mut clock) in &mut cloths {
+        clock.0 += dt;
         if clock.0 >= r.period {
             clock.0 = 0.0;
             spec.set_changed();

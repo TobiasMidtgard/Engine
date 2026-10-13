@@ -233,6 +233,10 @@ pub struct Scarp {
     pub b: DVec2,
     pub height: f64,
     pub reach: f64,
+    /// Distance along the line where a stream falls over it (set by
+    /// [`Landscape::lay_streams`]). There the step is sharp, just behind the worn rock face,
+    /// so the water leaves the lip and falls clear instead of sliding down a slope.
+    pub notch: Option<f64>,
 }
 
 impl Scarp {
@@ -247,14 +251,19 @@ impl Scarp {
     }
 
     /// How much the land rises at `p` (m).
-    fn rise(&self, p: DVec2, seed: u64) -> f64 {
+    pub fn rise(&self, p: DVec2, seed: u64) -> f64 {
         let (along, side) = self.frame(p, seed);
         let len = (self.b - self.a).length();
         let ends = smooth(-5.0, 40.0, along) * smooth(-5.0, 40.0, len - along);
         if ends <= 0.0 || side < -2.0 {
             return 0.0;
         }
-        let face = smooth(-1.5, 2.0, side);
+        // The cliff's rock stands in front of a 3.5 m wide step; at the falls its face is worn
+        // back (`rocks::face_at`), and the step narrows to sit just behind it.
+        let notch = self
+            .notch
+            .map_or(0.0, |u| smooth(14.0, 5.0, (along - u).abs()));
+        let face = smooth(-1.5 + 1.1 * notch, 2.0 - 0.9 * notch, side);
         let back = 1.0 - smooth(self.reach * 0.6, self.reach * 1.4, side);
         self.height * face * back * ends
     }
@@ -344,8 +353,7 @@ pub struct Landscape {
     pub cave: CaveHill,
     /// Woodland centers on the hills (x, z, radius) beyond the forest zone.
     pub woods: Vec<(DVec2, f64)>,
-    /// Rectangles (min x/z, max x/z) with their own ground: the footprint lab's mud, snow and
-    /// sand.
+    /// Rectangles (min x/z, max x/z) with their own ground.
     pub patches: Vec<(DVec2, DVec2, Cover)>,
     /// Ground laid out by module demos (the footstep trail): the cover at (x, z), or `None`
     /// to leave the landscape's own. Checked before `patches`.
@@ -579,7 +587,13 @@ impl Landscape {
             if let Some((c, bed)) = st.pool {
                 let d = (p - c).length();
                 if d < 25.0 {
-                    h = h.min(bed + (d - 4.5).max(0.0) * 0.8);
+                    // Only in front of the cliff: the pool doesn't eat back into the lip.
+                    let behind = self
+                        .scarps
+                        .iter()
+                        .map(|sc| smooth(-0.6, 0.4, sc.frame(p, self.seed).1))
+                        .fold(0.0, f64::max);
+                    h = h.min(bed + (d - 4.5).max(0.0) * 0.8 + behind * 40.0);
                 }
             }
         }
@@ -590,13 +604,30 @@ impl Landscape {
     /// climbing, and dig a plunge pool under the falls.
     pub fn lay_streams(&mut self) {
         let mut streams = std::mem::take(&mut self.streams);
-        for st in &mut streams {
+        let lay = |land: &Self, st: &mut Stream| {
             let mut low = f64::MAX;
             for (i, p) in st.path.iter().enumerate() {
                 let dig = st.depth * (0.2 + 0.8 * smooth(0.0, 30.0, i as f64));
-                low = low.min(self.uncarved_height(p.x, p.y) - dig);
+                low = low.min(land.uncarved_height(p.x, p.y) - dig);
                 st.bed[i] = low;
             }
+        };
+        // Find where each stream falls over a scarp, notch the scarp there, and lay the bed
+        // again over the sharper step.
+        for st in &mut streams {
+            lay(self, st);
+            let Some((top, _)) = st.falls() else {
+                continue;
+            };
+            for sc in &mut self.scarps {
+                let (u, s) = sc.frame(st.path[top], self.seed);
+                if (0.0..=(sc.b - sc.a).length()).contains(&u) && s.abs() < 8.0 {
+                    sc.notch = Some(u);
+                }
+            }
+        }
+        for st in &mut streams {
+            lay(self, st);
             if let Some((_, bottom)) = st.falls() {
                 // A few metres downstream of the drop, where the water lands.
                 let j = (bottom + 3).min(st.path.len() - 1);
@@ -778,7 +809,7 @@ impl Landscape {
     }
 
     /// Distance from the lake's middle in shoreline units (1 = the shore).
-    fn lake_t(&self, x: f64, z: f64) -> f64 {
+    pub fn lake_t(&self, x: f64, z: f64) -> f64 {
         let d = (DVec2::new(x, z) - self.lake.center).length();
         d / (self.lake.radius * self.lake_wobble(x, z))
     }
@@ -1135,6 +1166,35 @@ mod tests {
                         "terrain triangles must wind counter-clockwise from above"
                     );
                 }
+            }
+        }
+    }
+
+    #[test]
+    fn the_falls_drop_at_the_cliff_face() {
+        // The ground keeps the lip's height right up to the rock's worn face and drops there,
+        // so the water module's flow falls clear of the rock instead of sliding down a slope
+        // inside it; the plunge pool stays in front of the cliff.
+        let land = shared();
+        let st = &land.streams[0];
+        let sc = &land.scarps[0];
+        let (top, bottom) = st.falls().expect("the stream falls over the cliff");
+        assert!(sc.notch.is_some());
+        let lip = land.height(st.path[top - 12].x, st.path[top - 12].y);
+        for p in &st.path[top - 20..bottom + 8] {
+            let (_, side) = sc.frame(*p, land.seed);
+            let h = land.height(p.x, p.y);
+            if side > 1.3 {
+                assert!(
+                    h > lip - 0.3,
+                    "lip cut back at side {side:.2}: {h:.2} < {lip:.2}"
+                );
+            }
+            if side < -1.0 {
+                assert!(
+                    h < lip - 0.75 * sc.height,
+                    "no drop at side {side:.2}: {h:.2}"
+                );
             }
         }
     }

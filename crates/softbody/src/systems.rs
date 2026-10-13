@@ -92,17 +92,42 @@ impl ColliderWorld {
 #[derive(Resource, Default)]
 pub struct LoadList(pub Vec<(DVec3, f32, Option<Entity>)>);
 
-/// World transform from `Transform` for root entities (fresh this step, even before
-/// propagation) or `GlobalTransform` for children.
+/// World transform from `Transform`s, fresh this step even before propagation: a root's own,
+/// a child's composed onto its parent's (so cloth on a boat's mast keeps up with the boat
+/// physics just moved). Falls back to `GlobalTransform` past a few levels.
 fn world_transform(
     e: Entity,
     q: &Query<(&GlobalTransform, Option<&Transform>, Option<&ChildOf>)>,
 ) -> Option<GlobalTransform> {
+    fresh_transform(e, q, 0)
+}
+
+fn fresh_transform(
+    e: Entity,
+    q: &Query<(&GlobalTransform, Option<&Transform>, Option<&ChildOf>)>,
+    depth: u32,
+) -> Option<GlobalTransform> {
     let (g, t, parent) = q.get(e).ok()?;
     Some(match (t, parent) {
         (Some(t), None) => GlobalTransform::from(*t),
+        (Some(t), Some(parent)) if depth < 6 => fresh_transform(parent.0, q, depth + 1)
+            .map(|p| p.mul_transform(t))
+            .unwrap_or(*g),
         _ => *g,
     })
+}
+
+/// The dynamic rigid body that carries `e`: `e` itself or its nearest ancestor with one.
+fn find_carrier(e: Entity, parents: &Query<&ChildOf>, rigid: &Query<&RigidBody>) -> Option<Entity> {
+    let mut cursor = Some(e);
+    for _ in 0..8 {
+        let c = cursor?;
+        if let Ok(rb) = rigid.get(c) {
+            return (rb.kind == BodyKind::Dynamic).then_some(c);
+        }
+        cursor = parents.get(c).ok().map(|p| p.0);
+    }
+    None
 }
 
 fn convert_shape(
@@ -410,12 +435,16 @@ pub fn build_bodies(
     volumes: Query<(Entity, &SoftVolume, &GlobalTransform), Unbuilt>,
     grooms: Query<(Entity, &HairGroom), Unbuilt>,
     parents: Query<&ChildOf>,
+    rigid: Query<&RigidBody>,
     skeletons: Query<(&GlobalTransform, &SkeletonPose)>,
     all_transforms: Query<&GlobalTransform>,
     meshes: Option<Res<engine_assets::Assets<engine_render::Mesh>>>,
     skins: Option<Res<hair::MeshSkins>>,
 ) {
     for (e, spec, t) in &cloths {
+        if crate::gpu_cloth::runs_on_gpu(spec) {
+            continue; // simulated and drawn by the render feature
+        }
         let skeleton = find_skeleton(e, &parents, &skeletons);
         if matches!(spec.pins, cloth::ClothPins::Bones { .. })
             && skeleton.is_some_and(|s| s.2.bones.is_empty())
@@ -426,7 +455,13 @@ pub fn build_bodies(
             &mut commands,
             e,
             "Cloth",
-            cloth::build(spec, e, t, skeleton),
+            cloth::build(
+                spec,
+                e,
+                t,
+                skeleton,
+                find_carrier(e, &parents, &rigid).is_some(),
+            ),
         );
     }
     for (e, spec, t) in &ropes {
@@ -962,7 +997,10 @@ fn ground_plane(env: &Env, at: DVec3, origin: DVec3) -> [f32; 4] {
 pub fn emit_outputs(
     bodies: Query<&SoftBodySim>,
     colliders: Res<ColliderWorld>,
-    rigid: Query<(&RigidBody, &GlobalTransform)>,
+    rigid: Query<&RigidBody>,
+    parents: Query<&ChildOf>,
+    poses: Query<(&GlobalTransform, Option<&Transform>, Option<&ChildOf>)>,
+    mass: Query<&MassProperties>,
     mut apply: MessageWriter<ApplyImpulse>,
     mut smoke: MessageWriter<SmokeEmission>,
     mut contacts: MessageWriter<GroundContact>,
@@ -982,12 +1020,18 @@ pub fn emit_outputs(
             s.1 += angular;
         }
         for (e, imp, frame_pos) in &body.out.pulls {
-            let Ok((rb, t)) = rigid.get(*e) else { continue };
-            if rb.kind != BodyKind::Dynamic {
+            // The frame may be a child of the body (a sail on a boat's rig).
+            let Some(carrier) = find_carrier(*e, &parents, &rigid) else {
                 continue;
-            }
-            let angular = imp.angular + (*frame_pos - t.translation()).as_vec3().cross(imp.linear);
-            let s = sums.entry(*e).or_default();
+            };
+            let Some(t) = world_transform(carrier, &poses) else {
+                continue;
+            };
+            let com = mass.get(carrier).map_or(t.translation(), |m| {
+                t.transform_point(m.center_of_mass.as_dvec3())
+            });
+            let angular = imp.angular + (*frame_pos - com).as_vec3().cross(imp.linear);
+            let s = sums.entry(carrier).or_default();
             s.0 += imp.linear;
             s.1 += angular;
         }

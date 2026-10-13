@@ -361,6 +361,20 @@ fn the_hill_demo_tunnels_caves_in_builds_and_rebuilds() {
     assert!(pieces >= 11, "the hut is up ({pieces} pieces)");
 
     run(&mut app, 6.0);
+    let built = |app: &mut App| {
+        app.world
+            .query_filtered::<&BuiltPiece, With<StructuralPiece>>()
+            .iter(&app.world)
+            .count()
+    };
+    assert_eq!(built(&mut app), 31, "the yard's cabin is up");
+    let ghosts: Vec<usize> = app
+        .world
+        .query::<&build::BuildGhost>()
+        .iter(&app.world)
+        .map(|g| g.level)
+        .collect();
+    assert_eq!(ghosts, vec![5], "the deck's third row is a red ghost");
     let fallen: f32 = app
         .world
         .query::<&Debris>()
@@ -377,6 +391,13 @@ fn the_hill_demo_tunnels_caves_in_builds_and_rebuilds() {
 
     run(&mut app, 4.0);
     let raised = volume(&mut app);
+    let showing = app
+        .world
+        .query_filtered::<&ShowSupport, With<BuiltPiece>>()
+        .iter(&app.world)
+        .filter(|s| s.on)
+        .count();
+    assert_eq!(showing, 31, "the finished cabin shows its support colors");
     run(&mut app, 4.0);
     let hut_down = app
         .world
@@ -388,6 +409,35 @@ fn the_hill_demo_tunnels_caves_in_builds_and_rebuilds() {
         hut_down >= 2,
         "the front of the hut fell ({hut_down} pieces)"
     );
+    // The terrace's shelter stands on the leveled rock: its stone floor is grounded (blue).
+    let hill = app
+        .world
+        .query::<&hill::HillDemo>()
+        .iter(&app.world)
+        .next()
+        .unwrap()
+        .clone();
+    let terrace = hill.builders[hill::Site::Terrace as usize].unwrap();
+    let shelter: Vec<(BuildKind, PieceState, bool)> = app
+        .world
+        .query_filtered::<(&BuiltPiece, &PieceState, &ShowSupport), Without<Debris>>()
+        .iter(&app.world)
+        .filter(|(b, ..)| b.builder == Some(terrace))
+        .map(|(b, s, show)| (b.kind, *s, show.on))
+        .collect();
+    assert_eq!(shelter.len(), 10, "the terrace shelter is up: {shelter:?}");
+    for (kind, state, shown) in &shelter {
+        assert!(shown, "the shelter shows its support");
+        assert!(state.collapse_in.is_none(), "{kind:?} stands: {state:?}");
+        if *kind == BuildKind::StoneFloor {
+            assert_eq!(state.support, state.max_support, "on the rock: {state:?}");
+        } else {
+            assert!(
+                state.support >= 0.7 * state.max_support,
+                "{kind:?} is green: {state:?}"
+            );
+        }
+    }
 
     run(&mut app, 6.5);
     let rebuilt = volume(&mut app);
@@ -395,6 +445,224 @@ fn the_hill_demo_tunnels_caves_in_builds_and_rebuilds() {
         (rebuilt - start).abs() < 1.0,
         "the loop rebuilt the hill ({start} -> {raised} -> {rebuilt})"
     );
+    assert!(built(&mut app) <= 1, "the cabin starts over");
+}
+
+#[test]
+fn pieces_stand_on_voxel_rock_until_it_is_dug_out_from_under_them() {
+    let mut app = app();
+    let rock = VoxelVolume {
+        dims: [16, 8, 16],
+        voxel_size: 0.25,
+        shape: VoxelShape::Solid,
+        topsoil: None,
+        ..VoxelVolume::default()
+    };
+    app.world.spawn((Transform::default(), rock));
+    app.update();
+    // A builder lays a stone slab on the rock's top (2 m up, far above the flat ground).
+    let b = app
+        .world
+        .spawn((Transform::default(), Builder::default()))
+        .id();
+    {
+        let mut builder = app.world.get_mut::<Builder>(b).unwrap();
+        builder.kind = BuildKind::StoneFloor;
+        builder.aim_at(DVec3::new(0.3, 5.0, 0.6), DVec3::new(0.0, 1.0, 0.0));
+    }
+    app.update();
+    let p = app
+        .world
+        .get::<build::BuildPreview>(b)
+        .unwrap()
+        .placement
+        .unwrap();
+    assert!(p.valid() && p.grounded, "rock is ground: {p:?}");
+    app.world.write_message(BuildRequest {
+        builder: b,
+        action: BuildAction::Place,
+    });
+    run_secs(&mut app, 0.3);
+    let slab = app
+        .world
+        .query_filtered::<Entity, With<BuiltPiece>>()
+        .single(&app.world)
+        .unwrap();
+    let state = *app.world.get::<PieceState>(slab).unwrap();
+    assert_eq!(state.support, state.max_support, "{state:?}");
+    // Dig the rock out from under it: it falls.
+    for x in [-0.6, 0.6] {
+        for z in [-0.6, 0.6] {
+            app.world.write_message(TerrainEdit {
+                center: DVec3::new(x, 1.4, z),
+                shape: EditShape::Sphere { radius: 0.9 },
+                op: EditOp::Remove,
+                surface: None,
+                source: None,
+            });
+        }
+    }
+    run_secs(&mut app, 1.0);
+    assert!(
+        app.world.get::<StructuralPiece>(slab).is_none(),
+        "the slab fell into the hole"
+    );
+    // It comes to rest in the hole, on the rock (not through it, on the flat ground under it).
+    run_secs(&mut app, 4.0);
+    let y = app.world.get::<Transform>(slab).unwrap().translation.y;
+    let body = app.world.get::<debris::DebrisBody>(slab).unwrap();
+    assert!(
+        y > 0.45 && y < 2.0 && body.velocity.length() < 0.5,
+        "the slab lies in the hole at y {y:.2}: {body:?}"
+    );
+}
+
+#[test]
+fn build_mode_places_snapped_pieces_and_takes_them_down() {
+    let mut app = app();
+    let b = app
+        .world
+        .spawn((
+            Transform::default(),
+            Builder {
+                kind: BuildKind::StoneFloor,
+                ..Builder::default()
+            },
+        ))
+        .id();
+    let aim = |app: &mut App, kind: BuildKind, from: [f64; 3], to: [f64; 3]| {
+        let mut builder = app.world.get_mut::<Builder>(b).unwrap();
+        builder.kind = kind;
+        builder.aim_at(DVec3::from_array(from), DVec3::from_array(to));
+    };
+    let send = |app: &mut App, action: BuildAction| {
+        app.world.write_message(BuildRequest { builder: b, action });
+        app.update();
+    };
+    let standing = |app: &mut App| -> Vec<(Entity, DVec3)> {
+        app.world
+            .query_filtered::<(Entity, &Transform), (With<BuiltPiece>, With<StructuralPiece>)>()
+            .iter(&app.world)
+            .map(|(e, t)| (e, t.translation))
+            .collect()
+    };
+    // A stone slab on the ground.
+    aim(
+        &mut app,
+        BuildKind::StoneFloor,
+        [0.4, 3.0, 0.8],
+        [0.0, 0.0, 0.0],
+    );
+    app.update();
+    let p = app
+        .world
+        .get::<build::BuildPreview>(b)
+        .unwrap()
+        .placement
+        .unwrap();
+    assert!(p.valid() && p.grounded, "{p:?}");
+    send(&mut app, BuildAction::Place);
+    assert_eq!(standing(&mut app).len(), 1);
+    // A board wall aimed near the slab's back edge snaps onto it.
+    aim(
+        &mut app,
+        BuildKind::WoodWall,
+        [0.3, 3.0, 0.1],
+        [0.1, 0.4, -0.85],
+    );
+    send(&mut app, BuildAction::Place);
+    let pieces = standing(&mut app);
+    assert_eq!(pieces.len(), 2);
+    let wall = pieces
+        .iter()
+        .find(|(_, at)| at.y > 1.0)
+        .copied()
+        .expect("a wall");
+    assert!(
+        wall.1.distance(DVec3::new(0.0, 1.4, -1.0)) < 1e-3,
+        "on the slab's back edge: {:?}",
+        wall.1
+    );
+    let fuel = app
+        .world
+        .get::<engine_world::Combustible>(wall.0)
+        .unwrap()
+        .fuel_kg;
+    assert!(
+        (fuel - 90.0).abs() < 1.0,
+        "boards hold half a solid box's wood ({fuel} kg)"
+    );
+    // Aimed at the same spot again, the ghost moves on to the next free snap.
+    send(&mut app, BuildAction::Place);
+    let pieces = standing(&mut app);
+    assert_eq!(pieces.len(), 3);
+    assert!(
+        pieces
+            .iter()
+            .all(|(e, at)| *e == wall.0 || at.distance(wall.1) > 0.5),
+        "not inside the first wall: {pieces:?}"
+    );
+    // A wall floating in the air can't be placed either.
+    aim(
+        &mut app,
+        BuildKind::WoodWall,
+        [10.0, 5.0, 0.0],
+        [10.0, 0.0, 0.0],
+    );
+    app.update();
+    let p = app
+        .world
+        .get::<build::BuildPreview>(b)
+        .unwrap()
+        .placement
+        .unwrap();
+    assert!(p.valid() && p.grounded, "on the ground it can: {p:?}");
+    // Take the slab down: the wall it carried loses its support and falls.
+    aim(
+        &mut app,
+        BuildKind::WoodWall,
+        [0.4, 3.0, 0.8],
+        [0.3, 0.4, 0.3],
+    );
+    send(&mut app, BuildAction::Remove);
+    run_secs(&mut app, 1.5);
+    assert!(standing(&mut app).is_empty(), "the wall fell with the slab");
+    assert!(app.world.get::<Debris>(wall.0).is_some());
+
+    // The AI's way: aim and place in one call, or just look.
+    let out = call_api(
+        &mut app.world,
+        "destruction.build",
+        json!({"kind": "stone_wall", "at": [5, 0, 5], "yaw_deg": 90}),
+    )
+    .unwrap();
+    assert_eq!(out["valid"], true, "{out}");
+    assert!(out["id"].is_u64(), "{out}");
+    assert!(
+        (out["yaw_deg"].as_f64().unwrap() - 90.0).abs() < 1e-3,
+        "{out}"
+    );
+    let preview = call_api(
+        &mut app.world,
+        "destruction.build",
+        json!({"kind": "wood_floor", "from": [5, 4, 9], "to": [5, 1.0, 5.2], "preview": true}),
+    )
+    .unwrap();
+    assert!(preview.get("id").is_none(), "{preview}");
+    assert_eq!(preview["snapped"], true, "{preview}");
+    let err = call_api(
+        &mut app.world,
+        "destruction.build",
+        json!({"kind": "castle"}),
+    )
+    .unwrap_err();
+    assert!(err.contains("wood_floor"), "{err}");
+    let gone = call_api(
+        &mut app.world,
+        "destruction.unbuild",
+        json!({"entity": out["id"]}),
+    );
+    assert!(gone.is_ok(), "{gone:?}");
 }
 
 #[test]
@@ -440,4 +708,94 @@ fn a_world_shift_carries_the_demos_and_falling_debris_along() {
         "falling debris keeps its motion and picks up the frame's ({:?})",
         b.velocity
     );
+}
+
+/// Stand-in for a fire module: everything hotter than its ignition temperature burns
+/// through its fuel in `burn_secs`, then is burnt.
+fn burn_everything_lit(app: &mut App, burn_secs: f32) {
+    use engine_world::{BurnState, Combustible};
+    let dt = STEP as f32;
+    let mut q = app.world.query::<&mut Combustible>();
+    for mut c in q.iter_mut(&mut app.world) {
+        if c.state == BurnState::Intact && c.temperature_c >= c.ignition_c {
+            c.state = BurnState::Burning;
+        }
+        if c.state == BurnState::Burning {
+            c.fuel_kg -= c.fuel_kg.max(0.5) * dt / burn_secs;
+            if c.fuel_kg <= 0.0 {
+                c.fuel_kg = 0.0;
+                c.state = BurnState::Burnt;
+            }
+        }
+    }
+}
+
+#[test]
+fn a_burning_shed_chars_and_comes_down() {
+    use engine_destruction::barn::{BarnFire, BarnPiece, spawn_barn};
+    use engine_destruction::burn::Charring;
+    use engine_world::{BurnState, Combustible};
+    let mut app = app();
+    let barn = {
+        let mut queue = bevy_ecs::world::CommandQueue::default();
+        let mut commands = Commands::new(&mut queue, &app.world);
+        let e = spawn_barn(&mut commands, DVec3::ZERO, 0.0);
+        queue.apply(&mut app.world);
+        e
+    };
+    run_secs(&mut app, 0.5);
+    let standing = |app: &mut App| {
+        app.world
+            .query_filtered::<(), (With<BarnPiece>, With<StructuralPiece>)>()
+            .iter(&app.world)
+            .count()
+    };
+    let total = standing(&mut app);
+    let fallen: Vec<String> = app
+        .world
+        .query_filtered::<(&Name, &Transform), (With<BarnPiece>, Without<StructuralPiece>)>()
+        .iter(&app.world)
+        .map(|(n, t)| format!("{} at {:?}", n.as_str(), t.translation))
+        .collect();
+    assert!(total == 22, "{total} pieces standing; fell: {fallen:?}");
+    // Every piece is fuel, and nothing burns before the woodpile is lit.
+    let fuel = app
+        .world
+        .query_filtered::<&Combustible, With<BarnPiece>>()
+        .iter(&app.world)
+        .count();
+    assert_eq!(fuel, total);
+    // Lit at 2 s; the stand-in fire spreads by lighting everything once the woodpile burns.
+    for k in 0..(40.0 / STEP) as usize {
+        burn_everything_lit(&mut app, 12.0);
+        if k as f64 * STEP > 4.0 {
+            let mut q = app.world.query::<&mut Combustible>();
+            for mut c in q.iter_mut(&mut app.world) {
+                c.temperature_c = c.temperature_c.max(400.0);
+            }
+        }
+        app.update();
+    }
+    let charred = app
+        .world
+        .query::<&Charring>()
+        .iter(&app.world)
+        .filter(|c| c.level.is_some())
+        .count();
+    assert!(charred >= total / 2, "{charred} of {total} charred");
+    let left = standing(&mut app);
+    assert!(left < total / 2, "{left} of {total} pieces still standing");
+    let burnt = app
+        .world
+        .query::<&Combustible>()
+        .iter(&app.world)
+        .filter(|c| c.state == BurnState::Burnt)
+        .count();
+    assert!(burnt > 0);
+    // The loop rebuilds it whole.
+    let cycle = app.world.get::<BarnFire>(barn).unwrap().cycle;
+    call_api(&mut app.world, RESTART_API, json!({})).unwrap();
+    run_secs(&mut app, 0.5);
+    assert_eq!(app.world.get::<BarnFire>(barn).unwrap().cycle, cycle + 1);
+    assert_eq!(standing(&mut app), total);
 }

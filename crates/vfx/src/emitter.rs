@@ -21,6 +21,7 @@ use engine_world::Env;
 use crate::effect::{EffectDesc, EmitterDesc};
 use crate::gpu::GpuEmitter;
 use crate::library::EffectLibrary;
+use crate::marks::{Mark, Marks};
 use crate::trail::Trail;
 
 /// Plays an effect from the [`EffectLibrary`] at this entity (it follows the entity).
@@ -158,12 +159,19 @@ impl PoolRange {
     }
 }
 
+/// Most layers fed by sub-emitters at once (each needs a GPU spawn cursor).
+pub const MAX_CURSORS: u32 = 4096;
+
 /// First-fit allocator of particle slots. The GPU buffer grows to `high_water`.
 #[derive(Debug, Clone, Default)]
 pub struct ParticlePool {
     /// Free ranges below `high_water`, sorted by base, never adjacent.
     free: Vec<PoolRange>,
     high_water: u32,
+    /// GPU spawn cursors for layers fed by sub-emitters: returned ones, and how many were
+    /// ever handed out.
+    free_cursors: Vec<u32>,
+    cursors: u32,
 }
 
 impl ParticlePool {
@@ -233,6 +241,24 @@ impl ParticlePool {
     pub fn used(&self) -> u32 {
         self.high_water - self.free.iter().map(|r| r.len).sum::<u32>()
     }
+
+    /// A GPU spawn cursor for a layer fed by sub-emitters, or `None` if all
+    /// [`MAX_CURSORS`] are taken. Its value carries over from its last user: rings are
+    /// cleared when allocated, so starting anywhere in one is fine.
+    pub fn alloc_cursor(&mut self) -> Option<u32> {
+        if let Some(c) = self.free_cursors.pop() {
+            return Some(c);
+        }
+        (self.cursors < MAX_CURSORS).then(|| {
+            self.cursors += 1;
+            self.cursors - 1
+        })
+    }
+
+    /// Return a cursor.
+    pub fn free_cursor(&mut self, cursor: u32) {
+        self.free_cursors.push(cursor);
+    }
 }
 
 /// New particles for one emitter in one step.
@@ -262,6 +288,9 @@ pub struct FrameEmitter {
     pub plane: Option<(DVec3, Vec3)>,
     pub range: PoolRange,
     pub runs: Vec<SpawnRun>,
+    /// GPU spawn cursor of a layer fed by sub-emitters. `gpu.sub_target` names the layers this
+    /// one feeds by their index in [`ParticleFrame::emitters`] + 1.
+    pub cursor: Option<u32>,
     /// Bounding radius around `origin` for culling, meters.
     pub reach: f32,
 }
@@ -293,6 +322,8 @@ pub struct VfxStats {
 
 struct EmitterRun {
     range: Option<PoolRange>,
+    /// GPU spawn cursor, for a layer fed by sub-emitters.
+    cursor: Option<u32>,
     head: u32,
     rate_acc: f32,
     dist_acc: f32,
@@ -318,6 +349,8 @@ struct Instance {
     playing: bool,
     /// Age when emission ended (stopped or ran out of duration).
     stopped_at: Option<f32>,
+    /// Stopped before its duration ran out (or it loops): long-lived particles fade out.
+    cut: bool,
     emitters: Vec<EmitterRun>,
     seed: u32,
     light: Option<Entity>,
@@ -400,6 +433,7 @@ impl Instance {
             vel: Vec3::ZERO,
             playing: effect.playing,
             stopped_at: None,
+            cut: false,
             emitters: Vec::new(),
             seed: if effect.seed != 0 { effect.seed } else { seed },
             light: None,
@@ -424,6 +458,7 @@ impl Instance {
             .iter()
             .map(|e| EmitterRun {
                 range: None,
+                cursor: None,
                 head: 0,
                 rate_acc: 0.0,
                 dist_acc: 0.0,
@@ -439,6 +474,9 @@ impl Instance {
             if let Some(r) = e.range.take() {
                 pool.free(r);
             }
+            if let Some(c) = e.cursor.take() {
+                pool.free_cursor(c);
+            }
         }
     }
 
@@ -447,6 +485,7 @@ impl Instance {
         self.free_ranges(pool);
         self.age = 0.0;
         self.stopped_at = None;
+        self.cut = false;
         self.started = false;
         self.finished = false;
         self.rebake();
@@ -516,8 +555,20 @@ impl Instance {
             // Stopping takes effect from the start of the step that saw it.
             if !self.playing {
                 self.stopped_at = Some(a0);
+                self.cut = true;
             } else if a1 >= effect_end {
                 self.stopped_at = Some(effect_end);
+            }
+        }
+        // Layers fed by sub-emitters get particles for as long as their feeders have any.
+        for i in 0..self.emitters.len() {
+            let fed = self.emitters[i].range.is_some()
+                && self
+                    .desc
+                    .feeders(i)
+                    .any(|(j, ..)| !self.emitters[j].runs.is_empty() || self.has_particles(j));
+            if fed {
+                self.emitters[i].last_emit = Some(a1);
             }
         }
     }
@@ -534,25 +585,28 @@ impl Instance {
         light_done && (0..self.emitters.len()).all(|i| !self.has_particles(i))
     }
 
-    /// Whether emitter `i` may still have live particles.
+    /// Whether emitter `i` may still have live particles, or particles that die in this
+    /// step's update (born late in their step, they outlive `last_emit` + life by up to a
+    /// step, and a death can feed another layer).
     fn has_particles(&self, i: usize) -> bool {
         let Some(t) = self.emitters[i].last_emit else {
             return false;
         };
         let life = self.desc.emitters[i].max_lifetime();
-        if self.age - t >= life {
+        if self.age - t >= life + self.frame_dt {
             return false;
         }
         match self.stopped_at {
-            Some(s) if life > STOP_FADE_SECS * 1.5 => self.age - s < STOP_FADE_SECS,
+            Some(s) if self.cut && life > STOP_FADE_SECS * 1.5 => self.age - s < STOP_FADE_SECS,
             _ => true,
         }
     }
 
-    /// Opacity of emitter `i`'s particles: long-lived ones fade out once the effect stops.
+    /// Opacity of emitter `i`'s particles: long-lived ones fade out once the effect is stopped
+    /// (a one-shot effect that ran its course lets them live out their lives).
     fn stop_fade(&self, i: usize) -> f32 {
         match self.stopped_at {
-            Some(s) if self.desc.emitters[i].max_lifetime() > STOP_FADE_SECS * 1.5 => {
+            Some(s) if self.cut && self.desc.emitters[i].max_lifetime() > STOP_FADE_SECS * 1.5 => {
                 (1.0 - (self.age - s) / STOP_FADE_SECS).clamp(0.0, 1.0)
             }
             _ => 1.0,
@@ -649,6 +703,7 @@ pub fn tick_effects(
     mut frame: ResMut<ParticleFrame>,
     effects: EffectQuery,
     mut lights: Query<(&mut Transform, &mut GlobalTransform, &mut PointLight), With<VfxLight>>,
+    mut marks: Option<ResMut<Marks>>,
     mut diagnostics: Option<ResMut<Diagnostics>>,
 ) {
     let runtime = &mut *runtime;
@@ -716,6 +771,9 @@ pub fn tick_effects(
                 && !has_trail
             {
                 commands.entity(entity).insert(trail.clone());
+            }
+            if let (Some(mark), Some(marks)) = (&inst.desc.mark, marks.as_deref_mut()) {
+                marks.add(Mark::from_effect(mark, pos, inst.rot, inst.scale));
             }
         } else {
             inst.prev_pos = inst.pos;
@@ -853,13 +911,25 @@ fn tick_instance(
         // Room in the pool for every layer.
         let rate_mul = inst.rate.max(0.0) * rate_scale;
         for (i, run) in inst.emitters.iter_mut().enumerate() {
-            let cap = inst.desc.emitters[i].capacity(rate_mul.max(0.01));
+            let cap = inst.desc.layer_capacity(i, rate_mul.max(0.01));
+            let fed = inst.desc.is_fed(i);
+            let cursor = if fed { pool.alloc_cursor() } else { None };
             match pool.alloc(cap, limit) {
-                Some(r) => {
+                Some(r) if cursor.is_some() || !fed => {
                     cleared.push(r);
                     run.range = Some(r);
+                    run.cursor = cursor;
                 }
-                None => stats.starved += 1,
+                Some(r) => {
+                    pool.free(r);
+                    stats.starved += 1;
+                }
+                None => {
+                    if let Some(c) = cursor {
+                        pool.free_cursor(c);
+                    }
+                    stats.starved += 1;
+                }
             }
         }
         // Prewarm: simulate the effect as if it started `prewarm` seconds ago.
@@ -881,9 +951,22 @@ fn tick_instance(
 }
 
 fn push_frame_emitters(inst: &Instance, out: &mut Vec<FrameEmitter>) {
+    // Where each live layer lands in the frame's table, for the sub-emitters feeding them.
+    let mut at = vec![0u32; inst.emitters.len()];
+    for (k, (i, _)) in inst.live_emitters().enumerate() {
+        at[i] = (out.len() + k + 1) as u32;
+    }
+    let target = |sub: &Option<crate::effect::SubEmit>| {
+        sub.as_ref()
+            .and_then(|s| inst.desc.layer(&s.layer))
+            .map_or(0, |j| at[j])
+    };
     for (i, run) in inst.live_emitters() {
         let desc = &inst.desc.emitters[i];
         let mut gpu = *run.baked;
+        gpu.sub_target[0] = target(&desc.on_hit);
+        gpu.sub_target[1] = target(&desc.on_death);
+        gpu.sub_target[2] = target(&desc.trailing);
         gpu.origin[3] = inst.frame_dt;
         let r = inst.rot;
         gpu.rot = [r.x, r.y, r.z, r.w];
@@ -898,7 +981,8 @@ fn push_frame_emitters(inst: &Instance, out: &mut Vec<FrameEmitter>) {
         gpu.shade[0] = desc.emissive.max(0.0) * inst.intensity.max(0.0);
         gpu.look[2] = 1.0;
         gpu.look[3] = inst.stop_fade(i);
-        let reach = desc.reach() * inst.scale.max(0.01) + inst.vel.length() * desc.max_lifetime();
+        let reach = inst.desc.layer_reach(i) * inst.scale.max(0.01)
+            + inst.vel.length() * desc.max_lifetime();
         out.push(FrameEmitter {
             gpu,
             origin: inst.pos,
@@ -906,6 +990,7 @@ fn push_frame_emitters(inst: &Instance, out: &mut Vec<FrameEmitter>) {
             plane: inst.plane,
             range: run.range.expect("live emitters have a range"),
             runs: run.runs.clone(),
+            cursor: run.cursor,
             reach,
         });
     }
@@ -1273,6 +1358,147 @@ mod tests {
             inst.all_dead(),
             "gone a second after stopping, not after 30 s"
         );
+    }
+
+    #[test]
+    fn one_shot_effects_let_long_lived_particles_live_out() {
+        let d = desc(
+            EmitterDesc {
+                bursts: vec![Burst {
+                    count: 1,
+                    ..Default::default()
+                }],
+                lifetime: [3.0, 3.0],
+                ..Default::default()
+            },
+            Some(0.1),
+        );
+        let (mut inst, mut pool) = instance(d);
+        let mut stats = VfxStats::default();
+        for _ in 0..20 {
+            tick_instance(
+                &mut inst,
+                0.1,
+                &mut pool,
+                1 << 20,
+                1.0,
+                &mut Vec::new(),
+                &mut stats,
+            );
+        }
+        assert_eq!(
+            inst.stop_fade(0),
+            1.0,
+            "not cut short 1 s after the effect ended"
+        );
+        assert!(!inst.all_dead());
+        for _ in 0..13 {
+            tick_instance(
+                &mut inst,
+                0.1,
+                &mut pool,
+                1 << 20,
+                1.0,
+                &mut Vec::new(),
+                &mut stats,
+            );
+        }
+        assert!(inst.all_dead());
+    }
+
+    #[test]
+    fn fed_layers_live_while_their_feeders_do_and_point_at_their_table_slots() {
+        use crate::effect::SubEmit;
+        let d = Arc::new(EffectDesc {
+            name: "t".into(),
+            duration: Some(0.05),
+            emitters: vec![
+                EmitterDesc {
+                    name: "shell".into(),
+                    bursts: vec![Burst {
+                        count: 3,
+                        ..Default::default()
+                    }],
+                    lifetime: [0.5, 0.5],
+                    on_death: Some(SubEmit::new("stars", 20)),
+                    ..Default::default()
+                },
+                EmitterDesc {
+                    name: "stars".into(),
+                    lifetime: [1.0, 1.0],
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        });
+        d.validate().unwrap();
+        let mut pool = ParticlePool::default();
+        let mut inst = Instance::new(
+            Entity::from_raw_u32(1).unwrap(),
+            &ParticleEffect::new("t"),
+            d,
+            0,
+            1,
+        );
+        let mut stats = VfxStats::default();
+        let mut cleared = Vec::new();
+        let mut tick = |inst: &mut Instance, pool: &mut ParticlePool| {
+            tick_instance(inst, 0.1, pool, 1 << 20, 1.0, &mut cleared, &mut stats);
+        };
+        tick(&mut inst, &mut pool);
+        assert!(
+            inst.emitters[0].cursor.is_none(),
+            "the shell spawns from the CPU"
+        );
+        assert!(
+            inst.emitters[1].cursor.is_some(),
+            "the stars spawn on the GPU"
+        );
+        assert!(inst.emitters[1].range.unwrap().len >= 60);
+        let mut frame = vec![];
+        push_frame_emitters(&inst, &mut frame);
+        assert_eq!(frame.len(), 2, "the stars are ready while shells fly");
+        assert_eq!(
+            frame[0].gpu.sub_target,
+            [0, 2, 0, 0],
+            "shells feed table slot 1 on death"
+        );
+        assert_eq!(frame[0].gpu.sub_count[1], 20.0);
+        assert_eq!(frame[1].cursor, inst.emitters[1].cursor);
+        assert!(frame[1].runs.is_empty());
+
+        // Shells die at 0.6 s; the last stars born then live until 1.6 s.
+        for _ in 0..9 {
+            tick(&mut inst, &mut pool);
+        }
+        assert!(!inst.has_particles(0) && inst.has_particles(1));
+        frame.clear();
+        push_frame_emitters(&inst, &mut frame);
+        assert_eq!(frame.len(), 1);
+        for _ in 0..7 {
+            tick(&mut inst, &mut pool);
+        }
+        assert!(inst.all_dead());
+        let stars_cursor = inst.emitters[1].cursor;
+        inst.free_ranges(&mut pool);
+        assert_eq!(pool.used(), 0);
+        assert_eq!(
+            pool.alloc_cursor(),
+            stars_cursor,
+            "the cursor is handed back"
+        );
+    }
+
+    #[test]
+    fn spawn_cursors_run_out_and_come_back() {
+        let mut pool = ParticlePool::default();
+        let all: Vec<u32> = (0..MAX_CURSORS)
+            .map_while(|_| pool.alloc_cursor())
+            .collect();
+        assert_eq!(all.len() as u32, MAX_CURSORS);
+        assert!(pool.alloc_cursor().is_none());
+        pool.free_cursor(7);
+        assert_eq!(pool.alloc_cursor(), Some(7));
     }
 
     #[test]

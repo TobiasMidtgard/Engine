@@ -944,6 +944,8 @@ impl Renderer {
         if gi {
             self.effects
                 .encode_gi(&mut encoder, &self.targets, &self.prepass_group);
+        } else {
+            self.effects.skip_gi();
         }
 
         // Scene: opaque + sky (on the prepass depth).

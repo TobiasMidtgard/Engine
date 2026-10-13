@@ -89,6 +89,44 @@ pub fn install(app: &mut App, keys: &str, secs: f32, fps: f32, follow: Option<St
     app.add_systems(Update, run.after(camera::fly));
 }
 
+/// Which glide `t` seconds into the film is in, and how far along it (0..1). The camera eases
+/// out of the first place and into the last one and keeps moving through the places between.
+fn leg_at(legs: usize, secs: f32, t: f32) -> (usize, f64) {
+    let u = (t / secs).clamp(0.0, legs as f32);
+    let eased = if legs == 1 {
+        smootherstep(u)
+    } else if u < 1.0 {
+        // Speeds up to one glide per `secs` by the end of the first glide...
+        u * u * (2.0 - u)
+    } else if u > legs as f32 - 1.0 {
+        // ...and slows to a stop over the last one.
+        let r = legs as f32 - u;
+        legs as f32 - r * r * (2.0 - r)
+    } else {
+        u
+    };
+    let leg = (eased as usize).min(legs - 1);
+    (leg, (eased - leg as f32).clamp(0.0, 1.0) as f64)
+}
+
+/// A point `s` (0..1) of the way from `p1` to `p2` on a centripetal Catmull-Rom spline through
+/// `p0`, `p1`, `p2`, `p3`: smooth through every place, without the loops a uniform spline makes
+/// when places are unevenly spaced (a valley overview 1 km off, then a street 50 m long).
+fn catmull_rom(p0: DVec3, p1: DVec3, p2: DVec3, p3: DVec3, s: f64) -> DVec3 {
+    let knot = |a: DVec3, b: DVec3| (a - b).length().max(1e-3).sqrt();
+    let t1 = knot(p1, p0);
+    let t2 = t1 + knot(p2, p1);
+    let t3 = t2 + knot(p3, p2);
+    let t = t1 + (t2 - t1) * s;
+    let lerp = |a: DVec3, b: DVec3, ta: f64, tb: f64| a + (b - a) * ((t - ta) / (tb - ta));
+    let a1 = lerp(p0, p1, 0.0, t1);
+    let a2 = lerp(p1, p2, t1, t2);
+    let a3 = lerp(p2, p3, t2, t3);
+    let b1 = lerp(a1, a2, 0.0, t2);
+    let b2 = lerp(a2, a3, t1, t3);
+    lerp(b1, b2, t1, t2)
+}
+
 /// Where the camera is `t` seconds into the film: eye, target and hour.
 fn pose(places: &[Place], secs: f32, t: f32) -> (DVec3, DVec3, f32) {
     let first = &places[0];
@@ -101,18 +139,28 @@ fn pose(places: &[Place], secs: f32, t: f32) -> (DVec3, DVec3, f32) {
             first.hour,
         );
     }
-    let legs = places.len() - 1;
-    let leg = ((t / secs) as usize).min(legs - 1);
+    let (leg, s) = leg_at(places.len() - 1, secs, t);
+    let at = |i: isize, f: fn(&Place) -> DVec3| -> DVec3 {
+        let last = places.len() as isize - 1;
+        match i {
+            // Past either end: carry on in a straight line.
+            i if i < 0 => 2.0 * f(&places[0]) - f(&places[1]),
+            i if i > last => 2.0 * f(&places[last as usize]) - f(&places[last as usize - 1]),
+            i => f(&places[i as usize]),
+        }
+    };
+    let i = leg as isize;
+    let spline =
+        |f: fn(&Place) -> DVec3| catmull_rom(at(i - 1, f), at(i, f), at(i + 1, f), at(i + 2, f), s);
     let (a, b) = (&places[leg], &places[leg + 1]);
-    let s = smootherstep((t / secs - leg as f32).clamp(0.0, 1.0)) as f64;
     // Arc up between far-apart places (raising the aim point as much, so the camera keeps its
     // pitch instead of staring at the ground), and never dip into a hill on the way.
     let span = (b.position - a.position).length();
     let lift = DVec3::Y * (std::f64::consts::PI * s).sin() * (span * 0.12).min(250.0);
-    let mut eye = a.position.lerp(b.position, s) + lift;
+    let mut eye = spline(|p| p.position) + lift;
     let ground = landscape::shared().height(eye.x, eye.z);
     eye.y = eye.y.max(ground + 2.0);
-    let target = a.target.lerp(b.target, s) + lift;
+    let target = spline(|p| p.target) + lift;
     let hour = a.hour + (b.hour - a.hour) * s as f32;
     (eye, target, hour)
 }
@@ -185,6 +233,11 @@ fn run(world: &mut World) {
         world.write_message(AppExit::Success);
         return;
     }
+    // The Moon moves, so its views follow it.
+    let places: Vec<Place> = places
+        .iter()
+        .map(|p| crate::planet::aim(world, p))
+        .collect();
     if frame == 0 {
         if let Err(e) = std::fs::create_dir_all(OUT_DIR) {
             engine::core::log::warn!("film: can't create {OUT_DIR}: {e}");
@@ -207,9 +260,9 @@ fn run(world: &mut World) {
     }
 
     let t = recorded as f32 / fps;
-    // Each glide runs its destination's arrival calls (weather, demo restarts) as it leaves.
+    // Each place's arrival calls (weather, demo restarts) run as the camera passes through it.
     if places.len() > 1 && frame >= SETTLE_FRAMES && recorded > 0 {
-        let leg = |f: u32| ((f as f32 / fps / secs) as usize).min(places.len() - 2);
+        let leg = |f: u32| leg_at(places.len() - 1, secs, f as f32 / fps).0;
         if leg(recorded) != leg(recorded - 1) {
             places::visit(world, &places[leg(recorded)]);
         }
@@ -251,4 +304,52 @@ fn run(world: &mut World) {
         }
     }
     world.resource_mut::<Film>().frame += 1;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn glides_start_and_end_at_rest_and_never_jump() {
+        for legs in 1..5 {
+            let secs = 4.0;
+            let total = legs as f32 * secs;
+            let at = |t: f32| {
+                let (leg, s) = leg_at(legs, secs, t);
+                leg as f64 + s
+            };
+            assert!(at(0.0).abs() < 1e-9);
+            assert!((at(total) - legs as f64).abs() < 1e-6);
+            let dt = 0.01;
+            // Slow at both ends, and never faster than a single glide's smootherstep peak (15/8
+            // of a glide per `secs`); several glides peak at 4/3 while easing in and out.
+            assert!(at(dt) < 0.01);
+            assert!((legs as f64 - at(total - dt)) < 0.01);
+            let mut t = 0.0;
+            while t < total {
+                let step = at(t + dt) - at(t);
+                assert!(
+                    (0.0..=1.9 * dt as f64 / secs as f64).contains(&step),
+                    "{legs} {t}"
+                );
+                t += dt;
+            }
+        }
+    }
+
+    #[test]
+    fn the_spline_passes_through_every_place() {
+        let p = [
+            DVec3::new(0.0, 300.0, -1000.0),
+            DVec3::new(10.0, 4.0, 16.0),
+            DVec3::new(60.0, 3.0, 40.0),
+            DVec3::new(-200.0, 6.0, -300.0),
+        ];
+        assert!((catmull_rom(p[0], p[1], p[2], p[3], 0.0) - p[1]).length() < 1e-6);
+        assert!((catmull_rom(p[0], p[1], p[2], p[3], 1.0) - p[2]).length() < 1e-6);
+        // Between two close places it stays near them, however far the neighbors are.
+        let mid = catmull_rom(p[0], p[1], p[2], p[3], 0.5);
+        assert!((mid - (p[1] + p[2]) * 0.5).length() < 30.0, "{mid}");
+    }
 }

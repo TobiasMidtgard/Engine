@@ -38,6 +38,14 @@ how they look (`sprite`: glow, spark, smoke, flame, droplet, ring, star, rune, s
 `light` with flicker and fade, a `trail`, and `prewarm` so loops look settled from the first
 frame.
 
+Layers can feed each other on the GPU (sub-emitters, [`SubEmit`]): `on_hit` spawns particles
+in another layer where a particle hits the ground, water or something on screen (turned out
+of the surface), `on_death` where it dies, and `trailing` drops `count` a second along each
+particle's path. The fed layer has no spawning of its own; give `count`, `chance` and
+`inherit_velocity`. Metal sparks split as they skid this way, and `spell.starburst` is a shell
+that bursts into stars, each trailing glitter and crackling as it burns out. Sprites narrower
+than 1.5 pixels are drawn 1.5 pixels wide and dimmed to match, so distant sparks still show.
+
 Effects are authored for flat ground in sea-level air and adapt to where they play: gravity
 comes from `Env::gravity`, buoyancy (`acceleration`) turns to the local up on a planet, and
 buoyancy, `drag` and `turbulence` scale with the air's density from `Env::air`. Smoke barely
@@ -47,7 +55,7 @@ rises on Mars, and dust kicked up on the Moon flies in clean ballistic arcs.
 
 | Family | Effects |
 |---|---|
-| Spells | `spell.fireball`, `spell.fireball_impact`, `spell.frost_bolt`, `spell.frost_impact`, `spell.arcane_portal`, `spell.heal_aura`, `spell.charge`, `spell.lightning_hit`, `magic.orb` |
+| Spells | `spell.fireball`, `spell.fireball_impact`, `spell.frost_bolt`, `spell.frost_impact`, `spell.arcane_portal`, `spell.portal_gate`, `spell.heal_aura`, `spell.charge`, `spell.lightning_hit`, `spell.starburst`, `magic.orb` |
 | Water | `water.splash`, `water.splash_small`, `water.fountain` |
 | Impacts | `impact.<surface>` for every surface material (dirt, rock, concrete, wood, sand, grass, leaves, snow, mud, water, flesh, ice, glass, metal, default), `impact.sparks`, `impulse.dust`, `explosion.large` |
 | Footsteps | `step.dirt`, `step.sand`, `step.snow`, `step.mud`, `step.puddle`, `step.water`, `step.leaves`, `step.default` |
@@ -65,10 +73,29 @@ The module reads `engine_world` messages and plays effects without any game code
 - `WorldImpulse`: a dust ring on the ground or a burst on water.
 - `WaterSplash`: spray sized by the water displaced.
 
+## Marks
+
+[`Marks`] holds what effects leave behind, drawn by [`MarksFeature`] as boxes projected onto
+whatever is under them (terrain, walls, props), so nothing needs UVs:
+
+- **Scorch**: a charred blast mark with ash flecks where a spell hit; embers glow in its cracks
+  and cool over `glow_secs`.
+- **Frost**: a pale film with crystal feathers over the surface, melting back from its edges.
+- **Wet**: splashed stone that darkens and dries from the edges.
+- **Chip**: a pock with cracks and a dust ring where a shot hit stone or concrete.
+
+An effect leaves one with `mark` in its [`EffectDesc`] (`spell.fireball_impact`,
+`spell.frost_impact`, `impact.rock`, `impact.concrete`); games and scripts add their own with
+[`Marks::add`] or `vfx.mark`. Marks fade with age and distance and follow world shifts; the
+newest 2048 are kept, and a mark landing on top of one of its kind replaces it. Footprints
+are not marks: the terrain module presses every `GroundContact` into its ground, and burning
+leaves the fire module's own scorch. `cargo run -p engine_vfx --release --example marks`
+renders every kind.
+
 ## APIs
 
 `vfx.effects`, `vfx.describe`, `vfx.define`, `vfx.spawn`, `vfx.stop`, `vfx.clear`, `vfx.beam`,
-`vfx.stats`. Tunables: `VfxSettings` (particle budget, density, draw distance, soft particles)
+`vfx.mark`, `vfx.stats`. Tunables: `VfxSettings` (particle budget, density, draw distance, soft particles)
 and `VfxReactions`. Components: `ParticleEffect`, `Trail`, `Beam`.
 
 ## How it works
@@ -78,7 +105,9 @@ and `VfxReactions`. Components: `ParticleEffect`, `Trail`, `Beam`.
   pool; new particles overwrite the oldest. Nothing is read back from the GPU.
 - **GPU** ([`feature`], `shaders/`): a compute pass moves, collides and relights every live
   particle, a second writes the new ones (spread along the emitter's path so fast spells leave
-  a continuous stream). Lit particles get sun (with shadows and forward scattering for smoke),
+  a continuous stream). Particles that hit, die or fly on for a sub-emitter append events,
+  and a third pass turns them into particles of the fed layer, claiming slots in its ring
+  with an atomic cursor (up to 65 536 events a frame). Lit particles get sun (with shadows and forward scattering for smoke),
   sky and point lights, refreshed every fourth frame. Sprites are procedural, drawn as one
   instanced quad per slot, far to near, softened against the scene depth.
 - **Precision**: world-space particles are stored relative to the camera and shifted when it
@@ -96,16 +125,19 @@ Writes: rendering only (plus the point lights of effects). The showcase demo wri
 ## Showcase: the Spell court
 
 `demo::spawn_demo` builds the test area in the showcase's `magic` zone, and `demo::VIEWS` lists
-its tour stops (`magic_spells` at dusk, `magic_splashes`, `magic_footsteps` and
-`magic_impacts`): an arcane portal with orbiting orbs, fireballs and frost bolts hitting a
-wall, lightning between two obelisks, a healing aura, a fountain, an anvil throwing sparks, a
-pond with stones splashing in, footsteps over mud, snow, sand and water, shot impacts on six
-materials, torches and fireflies.
+its tour stops (`magic_spells` at dusk, `magic_portal`, `magic_starburst`, `magic_splashes`,
+`magic_footsteps`, `magic_marks` and `magic_impacts`): an arcane portal with orbiting orbs before
+a gate whose arch holds a standing portal swirling the valley seen through it, a mortar firing
+starburst fireworks over the court, fireballs and frost bolts scorching and frosting a wall,
+lightning between two obelisks, a healing aura, a fountain, an anvil throwing sparks that
+split as they skid, a pond with stones splashing in, a golem stomping over mud, snow, sand and
+water, shot impacts on six materials (chipping the rock), torches and fireflies.
+`cargo run -p engine_vfx --release --example sub_emitters` renders the firework and the
+splitting sparks.
 
 ## Next
 
-GPU sub-emitters (spawn on collision or death), depth-buffer collision, sorting within an
-emitter, distortion (heat haze), decals, mesh particles, LOD, and a 1M-particle benchmark.
+Sorting within an emitter, mesh particles, LOD, and a 1M-particle benchmark on a real GPU.
 
 ## Checklist
 

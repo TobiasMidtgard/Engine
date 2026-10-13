@@ -11,6 +11,11 @@ use crate::material::{DestructibleMaterial, DestructionMaterials};
 use crate::meshing::MeshBuilder;
 use crate::textures::{self, SurfaceKind};
 
+/// Emission strength of embers glowing in the cracks of flaming char.
+pub const EMBER_GLOW: f32 = 40_000.0;
+/// Emission strength of smoldering char.
+pub const SMOLDER_GLOW: f32 = 8_000.0;
+
 /// Alpha levels of the dust materials.
 pub const DUST_LEVELS: usize = 6;
 
@@ -23,6 +28,11 @@ pub struct DestructionAssets {
     pub chips: Vec<Handle<Mesh>>,
     /// Chip material per [`DestructibleMaterial`] (the broken interior color).
     pub chip_material: Vec<Handle<StandardMaterial>>,
+    /// Fresh fracture faces per [`DestructibleMaterial`]: the surface material, except where
+    /// the surface texture has mortar joints (stone, brick), which a broken face shows as
+    /// plain broken stone or fired clay instead. Shared with the surface until
+    /// [`Self::texture`].
+    pub broken: Vec<Handle<StandardMaterial>>,
     /// Glowing spark material (thermite, metal grinding).
     pub spark: Handle<StandardMaterial>,
     /// Dust puff sphere.
@@ -38,10 +48,18 @@ pub struct DestructionAssets {
     /// The support colors per surface, keeping the surface's relief (normal and roughness
     /// maps), so tinted wood still shows its grain. Empty until [`Self::texture`].
     pub support_surface: Vec<[Handle<StandardMaterial>; 5]>,
+    /// Build-mode ghosts ([`crate::build`]): the support colors, translucent, then a deep red
+    /// where the piece can't go.
+    pub ghost: [Handle<StandardMaterial>; 6],
+    /// The ghost colors per surface, keeping the surface's grain and joints. Empty until
+    /// [`Self::texture`].
+    pub ghost_surface: Vec<[Handle<StandardMaterial>; 6]>,
     /// Grassy topsoil on voxel hills ([`crate::voxel::GRASS_LAYER`]).
     pub grass: Handle<StandardMaterial>,
     /// Gravel ground ([`crate::dress::GravelPad`]).
     pub gravel: Handle<StandardMaterial>,
+    /// Burnt wood by [`crate::burn::CharLevel`]: scorched, glowing char, smoldering, cold.
+    pub char: [Handle<StandardMaterial>; 4],
     /// Surfaces carry procedural PBR textures (needs an image store); voxel meshes then split
     /// into one layer per surface.
     pub textured: bool,
@@ -147,10 +165,34 @@ impl DestructionAssets {
             let c = crate::material::linear(hex);
             materials.add(m.with_emissive(c, SUPPORT_GLOW))
         });
+        let ghost = GHOST_COLORS.map(|hex| {
+            let c = crate::material::linear(hex);
+            materials.add(
+                StandardMaterial::hex(hex)
+                    .with_roughness(0.6)
+                    .with_alpha(GHOST_ALPHA)
+                    .with_emissive(c, SUPPORT_GLOW),
+            )
+        });
         let gravel = materials.add(StandardMaterial::hex(0x6d695f).with_roughness(0.95));
+        // Untextured char: flat colors (the props' vertex colors carry the wood's color, so
+        // scorch multiplies it down), the embers a faint glow over the whole surface.
+        let char = [
+            StandardMaterial::color(0.3, 0.24, 0.2).with_roughness(0.8),
+            StandardMaterial::color(0.05, 0.045, 0.04)
+                .with_roughness(0.6)
+                .with_emissive([1.0, 0.3, 0.06], EMBER_GLOW * 0.08),
+            StandardMaterial::color(0.05, 0.045, 0.04)
+                .with_roughness(0.6)
+                .with_emissive([1.0, 0.25, 0.05], SMOLDER_GLOW * 0.08),
+            StandardMaterial::color(0.09, 0.088, 0.085).with_roughness(0.75),
+        ]
+        .map(|m| materials.add(m));
         Self {
             grass: surface[DestructibleMaterial::Dirt.index()],
+            broken: surface.clone(),
             gravel,
+            char,
             surface,
             chips,
             chip_material,
@@ -161,6 +203,8 @@ impl DestructionAssets {
             thermite_glow,
             support,
             support_surface: Vec::new(),
+            ghost,
+            ghost_surface: Vec::new(),
             textured: false,
         }
     }
@@ -189,6 +233,16 @@ impl DestructionAssets {
                 materials.add(t)
             });
             self.support_surface.push(tints);
+            let ghosts = GHOST_COLORS.map(|hex| {
+                let c = crate::material::linear(hex);
+                let mut t = mat
+                    .with_emissive(c, SUPPORT_GLOW * 0.6)
+                    .with_alpha(GHOST_ALPHA);
+                t.base_color = [c[0] * 2.4, c[1] * 2.4, c[2] * 2.4, GHOST_ALPHA];
+                t.receives_wetness = false;
+                materials.add(t)
+            });
+            self.ghost_surface.push(ghosts);
             materials.set(self.surface[i], mat);
         }
         let mut grass = textured(SurfaceKind::Grass, 0xDE57_06A5, images);
@@ -197,7 +251,69 @@ impl DestructionAssets {
         let mut gravel = textured(SurfaceKind::Gravel, 0xDE57_06A6, images);
         gravel.receives_wetness = true;
         materials.set(self.gravel, gravel);
+        self.texture_char(materials, images);
+        self.texture_broken(materials, images);
         self.textured = true;
+    }
+
+    /// Joint-free fracture materials for masonry: the rock texture tinted so that, under the
+    /// same vertex colors as the surface, it averages the material's own color.
+    fn texture_broken(
+        &mut self,
+        materials: &mut Assets<StandardMaterial>,
+        images: &mut Assets<Image>,
+    ) {
+        let table = DestructionMaterials::default();
+        let rock = table.get(DestructibleMaterial::Rock).exterior;
+        for m in [DestructibleMaterial::Stone, DestructibleMaterial::Brick] {
+            let own = table.get(m).exterior;
+            let mut mat = textured(SurfaceKind::Rock, 0xB40C + m.index() as u64, images);
+            // Half as saturated as the ratio: the masonry textures average greyer than their
+            // nominal colors, and a broken face beside them shouldn't look orange.
+            let tint: [f32; 3] = std::array::from_fn(|k| own[k] / rock[k].max(1e-3));
+            let grey = (tint[0] + tint[1] + tint[2]) / 3.0;
+            mat.base_color = [
+                (tint[0] + grey) * 0.5,
+                (tint[1] + grey) * 0.5,
+                (tint[2] + grey) * 0.5,
+                1.0,
+            ];
+            mat.receives_wetness = true;
+            self.broken[m.index()] = materials.add(mat);
+        }
+    }
+
+    /// Char materials from the charred-timber texture, the embers glowing in its cracks.
+    fn texture_char(
+        &mut self,
+        materials: &mut Assets<StandardMaterial>,
+        images: &mut Assets<Image>,
+    ) {
+        let wood = DestructibleMaterial::Wood.index();
+        if let Some(mut scorched) = materials.get(self.surface[wood]).cloned() {
+            scorched.base_color = [0.3, 0.23, 0.19, 1.0];
+            scorched.perceptual_roughness = 0.85;
+            materials.set(self.char[0], scorched);
+        }
+        let kind = SurfaceKind::Charcoal;
+        let size = texture_size(kind);
+        let seed = 0xC4A2;
+        let charcoal = textured(kind, seed, images);
+        let glow = images.add(textures::ember_glow(size, seed));
+        let ember = |strength: f32| {
+            let mut m = charcoal;
+            m.emissive = [1.0; 3];
+            m.emissive_strength = strength;
+            m.emissive_texture = Some(glow);
+            m
+        };
+        materials.set(self.char[1], ember(EMBER_GLOW));
+        materials.set(self.char[2], ember(SMOLDER_GLOW));
+        let mut cold = charcoal;
+        // Cooled char greys over with ash.
+        cold.base_color = [1.35, 1.32, 1.28, 1.0];
+        cold.receives_wetness = true;
+        materials.set(self.char[3], cold);
     }
 
     /// Material of a voxel mesh layer (a material index or the grass layer).
@@ -211,6 +327,18 @@ impl DestructionAssets {
 
     pub fn surface(&self, m: DestructibleMaterial) -> Handle<StandardMaterial> {
         self.surface[m.index()]
+    }
+
+    /// Build-mode ghost material for a piece of `m` at a [`crate::build::Placement::level`].
+    pub fn ghost(&self, m: DestructibleMaterial, level: usize) -> Handle<StandardMaterial> {
+        let level = level.min(GHOST_COLORS.len() - 1);
+        self.ghost_surface
+            .get(m.index())
+            .map_or(self.ghost[level], |g| g[level])
+    }
+
+    pub fn broken(&self, m: DestructibleMaterial) -> Handle<StandardMaterial> {
+        self.broken[m.index()]
     }
 
     pub fn chip_material(&self, m: DestructibleMaterial) -> Handle<StandardMaterial> {
@@ -258,9 +386,13 @@ impl DestructionAssets {
 const SUPPORT_COLORS: [u32; 5] = [0x2f6bff, 0x34b84a, 0xe6cf2e, 0xf08a24, 0xe0352a];
 /// Glow of the support colors, so they read in shade too.
 const SUPPORT_GLOW: f32 = 1500.0;
+/// Build-mode ghost colors: the support colors, then the deep red of a piece that can't go.
+const GHOST_COLORS: [u32; 6] = [0x2f6bff, 0x34b84a, 0xe6cf2e, 0xf08a24, 0xe0352a, 0xff1010];
+/// Ghost opacity.
+const GHOST_ALPHA: f32 = 0.55;
 
 /// Index into [`SUPPORT_COLORS`]: on the ground, then by the fraction of support left.
-fn support_level(grounded: bool, fraction: f32) -> usize {
+pub fn support_level(grounded: bool, fraction: f32) -> usize {
     if grounded {
         0
     } else if fraction >= 0.7 {

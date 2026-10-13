@@ -49,15 +49,27 @@ pub(crate) fn follow_world_shifts(
             mantle.top = s.point(mantle.top);
             mantle.forward = s.direction(mantle.forward);
         }
+        if let Some(hang) = &mut m.hang {
+            hang.top = s.point(hang.top);
+            hang.normal = s.direction(hang.normal);
+        }
         if let Some(req) = &mut m.pending_dash {
             req.to = s.point(req.to);
         }
+        if let Some(g) = &mut m.grapple {
+            g.anchor = s.point(g.anchor);
+            g.normal = s.direction(g.normal);
+        }
+        m.pending_grapple = m.pending_grapple.map(|at| s.point(at));
         if let Some(platform) = &mut m.platform {
             platform.shift(&s);
         }
     }
     for mut b in &mut brains {
-        if let Brain::Runner { origin, .. } = &mut *b {
+        if let Brain::Runner { origin, .. }
+        | Brain::Climber { origin, .. }
+        | Brain::Grappler { origin, .. } = &mut *b
+        {
             *origin = s.point(*origin);
         }
     }
