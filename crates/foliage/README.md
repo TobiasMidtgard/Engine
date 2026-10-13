@@ -86,8 +86,10 @@ engine_foliage::spawn_plant(world, "oak", DVec3::new(3.0, 0.0, 4.0), 0.2, None)?
   Farther trees drop theirs and get it back when a focus comes near.
 - **Looks**: procedural, per species: bark texture sets (albedo, normal, occlusion and
   roughness), painted leaf and needle atlases with normal maps, crowns built from clumps of
-  shaded sprays, detailed grass, ferns, flowers and fungi with their own maps. Small plants
-  lean with the slope they grow on. `examples/lookdev_*` render each set close up. Ground
+  shaded sprays, detailed grass, ferns, flowers and fungi with their own maps. Old pines lose
+  their leader and spread a broad, flat-topped crown of heavy crooked limbs over a long bare
+  bole, dark and plated low down and orange higher up. Small plants lean with the slope they
+  grow on. `examples/lookdev_*` render each set close up. Ground
   covers and rocks draw into the depth prepass, so ambient occlusion, contact shadows,
   reflections and bounce light see them.
 - **World shifts**: forests follow `WorldShift` (floating origin, planet frames): soil grids,

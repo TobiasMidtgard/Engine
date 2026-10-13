@@ -597,7 +597,7 @@ pub fn builtin_species() -> Vec<PlantSpecies> {
             form: PlantForm::Conifer,
             layer: Layer::Canopy,
             max_height_m: 20.0,
-            crown_radius_m: 3.0,
+            crown_radius_m: 3.8,
             trunk_radius_m: 0.32,
             years_to_mature: 28.0,
             lifespan_years: 250.0,
@@ -616,7 +616,7 @@ pub fn builtin_species() -> Vec<PlantSpecies> {
             accent_color: srgb(0x4b6a2e),
             wind_sway_m: 0.3,
             shape: PlantShape {
-                crown_base: 0.55,
+                crown_base: 0.58,
                 branches: 6,
                 angle_low_deg: 84.0,
                 angle_high_deg: 62.0,

@@ -1072,7 +1072,7 @@ fn bark_color(sp: &PlantSpecies, y: f32, h: f32, ring: usize, seed: u64) -> Vec4
             // The pine bark texture is painted for this foot color (× the mean ring
             // variation); keep the two equal.
             let foot = Vec3::new(0.12, 0.09, 0.07);
-            foot.lerp(base, smoothstep(0.2 * h, 0.5 * h, y)) * (0.85 + 0.25 * n)
+            foot.lerp(base, smoothstep(0.3 * h, 0.6 * h, y)) * (0.85 + 0.25 * n)
         }
         BarkStyle::Plain => {
             let moss = Vec3::new(0.06, 0.09, 0.025);
@@ -1705,15 +1705,31 @@ fn conifer(sp: &PlantSpecies, seed: u64, sapling: bool) -> PlantMeshes {
     let sh = sp.shape;
     let h = sp.max_height_m;
     let cut = cut_height(sp);
-    let (path, radius) = trunk(sp, &mut rng, h * 0.99, cut, !sapling);
+    // Pines: a rounded crown high on a bare trunk, needles in brushes at the shoot tips. An
+    // old pine's leader gives out below the top, which its upper limbs then make.
+    let pine = sh.leaf == LeafStyle::LongNeedles || (!sapling && sh.crown_base > 0.3);
+    let old_pine = pine && !sapling;
+    let top = h * if old_pine { PINE_TRUNK_TOP } else { 0.99 };
+    let (path, mut radius) = trunk(sp, &mut rng, top, cut, !sapling);
+    if old_pine {
+        // Its limbs fork off a trunk that is still stout at the top.
+        for (p, r) in path.iter().zip(radius.iter_mut()) {
+            *r = r.max(sp.trunk_radius_m * (0.42 - 0.12 * p.y / top));
+        }
+    }
     let crown_base = if sapling { 0.15 } else { sh.crown_base };
     let y0 = h * crown_base;
-    // Pines: a rounded crown high on a bare trunk, needles in brushes at the shoot tips.
-    let pine = sh.leaf == LeafStyle::LongNeedles || crown_base > 0.3;
     let leaf = sh.leaf_size_m * if sapling { 0.8 } else { 1.0 };
     let spacing = if pine { 0.75 } else { 0.62 } * if sapling { 1.8 } else { 1.0 };
     let whorls = (((h - y0) / spacing).floor() as usize).max(2);
-    let crown = if pine {
+    let crown = if old_pine {
+        // A broad dome, flattening as the tree ages.
+        Crown {
+            center: Vec3::new(0.0, (y0 + h) * 0.5 + 0.3, 0.0),
+            radii: Vec3::new(sp.crown_radius_m, (h - y0) * 0.5 + 0.5, sp.crown_radius_m),
+            cone: false,
+        }
+    } else if pine {
         Crown {
             center: Vec3::new(0.0, (y0 + h) * 0.5, 0.0),
             radii: Vec3::new(sp.crown_radius_m, (h - y0) * 0.5 + 0.4, sp.crown_radius_m),
@@ -1736,10 +1752,10 @@ fn conifer(sp: &PlantSpecies, seed: u64, sapling: bool) -> PlantMeshes {
         level: 0,
     });
     // Old pines shed their lower limbs: a few dead stubs on the bare trunk.
-    if pine && !sapling {
+    if old_pine {
         for _ in 0..rng.range_i32(5, 9) {
             let y = rng.range(h * 0.18, y0);
-            let (p, _, r_t) = point_at(&path, &radius, y / (h * 0.99));
+            let (p, _, r_t) = point_at(&path, &radius, y / top);
             let az = rng.range(0.0, std::f32::consts::TAU);
             let d = Vec3::new(az.cos(), rng.range(-0.3, 0.2), az.sin()).normalize();
             let l = rng.range(0.15, 0.5);
@@ -1750,7 +1766,10 @@ fn conifer(sp: &PlantSpecies, seed: u64, sapling: bool) -> PlantMeshes {
             });
         }
     }
-    for w in 0..whorls {
+    if old_pine {
+        pine_scaffold(&mut cr, &mut rng, sp, &path, &radius, y0, h);
+    }
+    for w in 0..if old_pine { 0 } else { whorls } {
         let y = y0 + (h - y0 - 0.3) * (w as f32 + rng.range(0.0, 0.35)) / whorls as f32;
         let rel = ((y - y0) / (h - y0)).clamp(0.0, 1.0);
         let envelope = if pine {
@@ -1823,14 +1842,16 @@ fn conifer(sp: &PlantSpecies, seed: u64, sapling: bool) -> PlantMeshes {
             });
         }
     }
-    // The leader at the top.
-    let tc = cr.clump(Vec3::new(0.0, h - leaf * 0.6, 0.0), leaf);
+    // The leader at the top (an old pine's ends among its upper limbs).
+    let tip = *path.last().unwrap();
+    let crest = if old_pine { tip.y + leaf * 0.5 } else { h };
+    let tc = cr.clump(Vec3::new(tip.x, crest - leaf * 0.6, tip.z), leaf);
     let tint = leaf_tint(sp, &mut rng);
     for k in 0..4 {
         let a = k as f32 * 1.6 + rng.range(0.0, 0.5);
         let out = Vec3::new(a.cos(), 0.0, a.sin());
         let size = leaf * if pine { 0.8 } else { 0.7 };
-        let base = Vec3::new(0.0, h - size * 1.05, 0.0);
+        let base = Vec3::new(tip.x, crest - size * 1.05, tip.z);
         let dir = (Vec3::Y * 2.5 + out).normalize();
         cr.spray(&mut rng, base, dir, out, size, tc, tint, -0.05);
     }
@@ -1842,6 +1863,112 @@ fn conifer(sp: &PlantSpecies, seed: u64, sapling: bool) -> PlantMeshes {
     assemble(sp, seed, &path, &radius, cr, shading, h, cut, sapling)
 }
 
+/// Where an old pine's trunk ends, as a share of its height: its upper limbs make the top.
+const PINE_TRUNK_TOP: f32 = 0.84;
+
+/// An old pine's crown: a few heavy limbs climbing out of the top of a long bare bole, each
+/// rising steeply and then leveling out under a pad of needles, with side branches spreading
+/// the pad sideways. Together they make the broad, flat-topped, uneven dome of a Scots pine
+/// rather than a narrow cone of whorls.
+fn pine_scaffold(
+    cr: &mut Crowns,
+    rng: &mut Rng,
+    sp: &PlantSpecies,
+    path: &[Vec3],
+    radius: &[f32],
+    y0: f32,
+    h: f32,
+) {
+    let sh = sp.shape;
+    let top = h * PINE_TRUNK_TOP;
+    let crown_r = sp.crown_radius_m;
+    let n = (sh.branches as i32 + rng.range_i32(2, 6)).max(4);
+    let az0 = rng.range(0.0, std::f32::consts::TAU);
+    let gnarl = 0.05 + 0.1 * sh.gnarl;
+    for k in 0..n {
+        // Lowest first; the top ones fork off the end of the trunk.
+        let rel = (k as f32 + rng.range(0.1, 0.9)) / n as f32;
+        let y = y0 + (top - y0) * rel.powf(0.8);
+        let (attach, _, r_t) = point_at(path, radius, (y / top).min(0.995));
+        let az = az0 + k as f32 * 2.399_963 + rng.range(-0.4, 0.4);
+        let out = Vec3::new(az.cos(), 0.0, az.sin());
+        // How far out it reaches: widest a third of the way up, the top ones shorter.
+        let reach = crown_r
+            * (0.62 + 0.4 * (1.0 - ((rel - 0.35) / 0.65).abs().powi(2)))
+            * rng.range(0.75, 1.05);
+        // It climbs, then levels out a little under the crown's flat top.
+        let end_y = (y + 1.2 + 2.6 * (1.0 - rel)).min(h - 0.6 - 0.8 * rng.range(0.0, 1.0));
+        let end = attach + out * reach + Vec3::Y * (end_y - y);
+        let rise = Vec3::Y * (end_y - y).max(0.5) * 0.85 + out * reach * 0.2;
+        let ctrl = attach + rise;
+        let segs = 8;
+        let mut limb: Vec<Vec3> = (0..=segs)
+            .map(|i| {
+                let t = i as f32 / segs as f32;
+                let a = attach.lerp(ctrl, t);
+                let b = ctrl.lerp(end, t);
+                a.lerp(b, t)
+            })
+            .collect();
+        // Crooked, as pine limbs are.
+        for p in limb.iter_mut().skip(1) {
+            *p += jitter(rng, gnarl * 1.6);
+        }
+        limb[0] = attach - out * r_t * 0.4;
+        let length: f32 = limb.windows(2).map(|w| w[0].distance(w[1])).sum();
+        let r_start =
+            (r_t * 0.8).min(0.035 + sp.trunk_radius_m * 0.22) * (0.65 + 0.35 * reach / crown_r);
+        let limb_r = taper(segs, r_start, 0.02);
+        let tint = leaf_tint(sp, rng);
+        // Side branches spread the pad sideways from the limb's outer half.
+        let sides = rng.range_i32(2, 5);
+        for j in 0..sides {
+            let s = 0.45 + 0.45 * (j as f32 + rng.range(0.0, 0.8)) / sides as f32;
+            let (p, dp, rp) = point_at(&limb, &limb_r, s);
+            let flat = Vec3::new(dp.x, 0.0, dp.z).normalize_or(out);
+            let side = Vec3::Y.cross(flat) * if j % 2 == 0 { 1.0 } else { -1.0 };
+            let d2 = (flat * 0.6 + side * rng.range(0.7, 1.1) + Vec3::Y * rng.range(0.05, 0.3))
+                .normalize();
+            let l2 = rng.range(0.9, 1.8) * (0.6 + 0.4 * reach / crown_r);
+            let segs2 = 4;
+            let bp = grow(p, d2, l2, segs2, |f, _| {
+                Vec3::Y * sh.tip_bend * 0.25 * f + jitter(rng, gnarl)
+            });
+            let br = taper(segs2, (rp * 0.55).min(0.045), 0.01);
+            let clump = pine_limb(cr, rng, &bp, &br, l2, tint, false);
+            cr.anchor_along(&bp, &br, 0.3, clump, tint);
+            cr.branches.push(Branch {
+                path: bp,
+                radius: br,
+                level: 2,
+            });
+        }
+        // The limb's own end carries the densest pad.
+        let s_end = (1.0 - 1.8 / length.max(1.9)).max(0.5);
+        let (p_end, _, _) = point_at(&limb, &limb_r, s_end);
+        let tail: Vec<Vec3> = std::iter::once(p_end)
+            .chain(
+                limb.iter()
+                    .copied()
+                    .filter(|q| q.distance(attach) > p_end.distance(attach)),
+            )
+            .collect();
+        if tail.len() >= 2 {
+            let tail_r = taper(tail.len() - 1, limb_r[segs] * 1.8, 0.015);
+            let clump = pine_limb(cr, rng, &tail, &tail_r, length * (1.0 - s_end), tint, false);
+            cr.anchor_along(&tail, &tail_r, 0.0, clump, tint);
+        }
+        cr.branches.push(Branch {
+            path: limb,
+            radius: limb_r,
+            level: 1,
+        });
+    }
+    // Shoots fill out each limb's pad into the lumpy dome, leaving sky between the pads.
+    let per_m2 = 1.5 * sh.leaf_density * sp.canopy_density.clamp(0.4, 1.5) / (cr.leaf * cr.leaf);
+    cr.fill_shell(rng, per_m2, false);
+}
+
 /// Needles of a pine limb: side shoots ending in brushes, gathered into a cloud-like clump.
 fn pine_limb(
     cr: &mut Crowns,
@@ -1851,7 +1978,7 @@ fn pine_limb(
     length: f32,
     tint: Vec3,
     sapling: bool,
-) {
+) -> usize {
     let leaf = cr.leaf;
     let crown = cr.crown;
     let (kc, _, _) = point_at(bp, br, 0.72);
@@ -1908,6 +2035,7 @@ fn pine_limb(
     }
     let (tp, td, _) = point_at(bp, br, 1.0);
     brush(cr, rng, tp, td, 1.0);
+    clump
 }
 
 /// Dead twigs on the inner part of a spruce limb, where the shade has killed the needles:
@@ -2161,6 +2289,50 @@ mod tests {
         let hazel = lib.get(lib.id("hazel").unwrap());
         let m = woody(hazel, 3, false);
         assert!(m.base.is_none() && m.foliage.unwrap().triangle_count() > 50);
+    }
+
+    #[test]
+    fn old_pines_carry_a_broad_crown_on_a_bare_bole() {
+        let lib = PlantLibrary::default();
+        let sp = lib.get(lib.id("pine").unwrap());
+        for seed in 0..3 {
+            let m = woody(sp, seed, false);
+            let wood = m.wood.as_ref().unwrap();
+            let h = wood.aabb().max.y;
+            // Only drawn needles (the shared bounds add two loose vertices on the axis).
+            let foliage = m.foliage.as_ref().unwrap();
+            let leaves: Vec<_> = foliage
+                .indices
+                .iter()
+                .map(|&i| foliage.vertices[i as usize])
+                .collect();
+            let ys = || leaves.iter().map(|v| v.position[1]);
+            let (low, high) = (ys().fold(f32::MAX, f32::min), ys().fold(f32::MIN, f32::max));
+            // Needles start well up the bole, not down by the ground like a spruce's.
+            assert!(low > 0.55 * h, "seed {seed}: needles from {low} of {h}");
+            // The crown is a broad, flat-topped umbrella: wider than it is tall.
+            let reach = |axis: usize| {
+                let xs = || leaves.iter().map(|v| v.position[axis]);
+                xs().fold(f32::MIN, f32::max) - xs().fold(f32::MAX, f32::min)
+            };
+            let width = reach(0).min(reach(2));
+            assert!(
+                width > high - low,
+                "seed {seed}: {width} wide, {} tall",
+                high - low
+            );
+            // Dark plated bark at the foot, the warm orange only up in the crown.
+            let bark = |from: f32, to: f32| {
+                let (sum, n) = wood
+                    .vertices
+                    .iter()
+                    .filter(|v| on_cut(v).is_none() && (from..to).contains(&v.position[1]))
+                    .fold((0.0, 0), |(s, n), v| (s + v.color[0] - v.color[2], n + 1));
+                sum / n.max(1) as f32
+            };
+            let (foot, top) = (bark(0.5, 0.2 * h), bark(0.75 * h, h));
+            assert!(top > foot + 0.05, "seed {seed}: foot {foot}, top {top}");
+        }
     }
 
     #[test]
