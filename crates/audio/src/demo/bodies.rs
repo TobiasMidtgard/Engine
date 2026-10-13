@@ -314,27 +314,27 @@ pub(super) fn person(
     );
 }
 
-/// A brown retriever.
+/// A brown retriever, standing in until the animation module has a dog.
 pub(super) fn dog(commands: &mut Commands, walker: TrailWalker) {
     spawn(
         commands,
         "Trail dog",
         walker,
         None,
-        None,
+        Some(BodyRequest::new("dog").with_height(0.56).with_seed(4)),
         Rig::Dog,
         quadruped::dog_parts,
     );
 }
 
-/// A bay horse.
+/// A bay horse, standing in until the animation module's horse arrives.
 pub(super) fn horse(commands: &mut Commands, walker: TrailWalker) {
     spawn(
         commands,
         "Trail horse",
         walker,
         None,
-        None,
+        Some(BodyRequest::new("horse").with_height(1.52).with_seed(3)),
         Rig::Horse,
         horse::parts,
     );

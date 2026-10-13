@@ -7,9 +7,10 @@
 //! whole path: contact → surface → ground state (wet, snowy, burnt) → synthesis → 3D mix.
 //! Coloured rings on the ground show each sound as it plays.
 //!
-//! The hiker and the runner ask the animation module for a body
+//! Every walker asks the animation module for a body
 //! ([`BodyRequest`](engine_world::animation::BodyRequest)); once it answers with a
-//! `SkeletonPose` their own stand-in bodies hide and the animated feet write the contacts.
+//! `SkeletonPose` that walker's own stand-in body hides and the animated feet write the
+//! contacts.
 //!
 //! ```ignore
 //! engine_audio::demo::spawn_demo(&mut commands, zone.center);

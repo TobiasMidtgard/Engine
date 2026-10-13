@@ -196,10 +196,11 @@ fn trail_people_ask_for_bodies_and_step_aside_for_them() {
             .map(|(e, _)| e)
             .unwrap_or_else(|| panic!("no {name}"))
     };
-    let (hiker, runner, horse) = (
+    let (hiker, runner, horse, dog) = (
         named("Trail hiker"),
         named("Trail runner"),
         named("Trail horse"),
+        named("Trail dog"),
     );
     for e in [hiker, runner] {
         let body = app
@@ -208,6 +209,14 @@ fn trail_people_ask_for_bodies_and_step_aside_for_them() {
             .expect("a person asks for a body");
         assert_eq!(body.kind, "human");
         assert!(body.model.is_some());
+    }
+    for (e, kind) in [(horse, "horse"), (dog, "dog")] {
+        let body = app
+            .world
+            .get::<BodyRequest>(e)
+            .expect("an animal asks for a body");
+        assert_eq!(body.kind, kind);
+        assert!(body.height.is_some_and(|h| h > 0.3));
     }
 
     // Until a body arrives the stand-ins walk and step.
