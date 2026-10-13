@@ -37,6 +37,9 @@
 // Screen-space global illumination: light bounced onto each pixel from nearby surfaces
 // (cd/m^2, not pre-exposed; see `screen_gi`). A stand-in while it is being drawn.
 @group(0) @binding(20) var gi_map: texture_2d<f32>;
+// The ground's weather around the camera (`SurfaceLayers` on 1 m cells, Rgba8; read it with
+// `surface_weather`). A 1x1 stand-in until the layers are uploaded.
+@group(0) @binding(21) var surface_weather_map: texture_2d<f32>;
 
 // Multiply final radiance by this before writing to the HDR target.
 fn pre_expose(c: vec3<f32>) -> vec3<f32> { return c * frame.exposure.x; }
@@ -558,6 +561,54 @@ fn fog_sky_visibility(rel: vec3<f32>) -> f32 {
     return map * volumes;
 }
 
+// ---------------------------------------------------------------- ground weather
+// What 1.0 in `surface_weather`'s y and z stands for: standing water and snow depth (m).
+const SURFACE_PUDDLE_SCALE_M: f32 = 0.04;
+const SURFACE_SNOW_SCALE_M: f32 = 0.3;
+
+// The weather on the ground at camera-relative `rel`, from the `SurfaceLayers` grid the weather
+// keeps around the player (1 m cells, filtered), in the weather module's own encoding:
+// x wetness (0 dry .. 1 soaked), y standing water depth / SURFACE_PUDDLE_SCALE_M, z snow depth /
+// SURFACE_SNOW_SCALE_M (both at most 1), w scorch (0 .. 1 charred). Beyond the grid (fading in
+// over its outer tenth, as on the terrain) and without one it is the open ground's state along
+// the grid's rim (`frame.surface_open`). Any stage.
+//
+// The grid describes the ground: under a roof it stays dry. A surface that has nothing above it
+// (in the sky occlusion map) yet stands on ground much drier than the open ground is the cover
+// itself (a roof, a vehicle's top, a canopy), so it gets the open ground's wetness and snow, and
+// the puddles and scorch stay on the ground below. Walls: pass a point half a meter in front of
+// them, so they read the ground there rather than the roof over their own footprint.
+fn surface_weather(rel: vec3<f32>) -> vec4<f32> {
+    let open = frame.surface_open;
+    let size = frame.surface_map.zw;
+    if (size.x <= 0.0 || size.y <= 0.0) { return open; }
+    let uv = (rel.xz - frame.surface_map.xy) / size;
+    let edge = min(min(uv.x, uv.y), min(1.0 - uv.x, 1.0 - uv.y));
+    if (edge <= 0.0) { return open; }
+    var w = mix(open, textureSampleLevel(surface_weather_map, linear_clamp, uv, 0.0), smoothstep(0.0, 0.1, edge));
+    // How much drier than the open ground: what a shelter leaves under it.
+    let sheltered = saturate((open.x - w.x) / max(open.x, 0.05));
+    let params = frame.sky_occlusion_params;
+    if (sheltered <= 0.0 || params.x < 0.5) { return w; }
+    let c = frame.sky_occlusion * vec4<f32>(rel, 1.0);
+    let map_edge = max(abs(c.x), abs(c.y));
+    if (map_edge >= 1.0 || c.z <= 0.0 || c.z >= 1.0) { return w; }
+    // Cover at least half a meter above the point, blended over the 2x2 texels around it
+    // (gather order: (0,1), (1,1), (1,0), (0,0)).
+    let tuv = c.xy * vec2<f32>(0.5, -0.5) + 0.5;
+    let tops = textureGather(sky_occlusion_map, sky_occlusion_sampler, tuv);
+    let covered = step(vec4<f32>(0.5), (vec4<f32>(c.z) - tops) * params.w);
+    let f = fract(tuv * vec2<f32>(textureDimensions(sky_occlusion_map)) - 0.5);
+    let cover = mix(mix(covered.w, covered.z, f.x), mix(covered.x, covered.y, f.x), f.y);
+    // Fade out over the outer eighth of the map, like `sky_visibility`.
+    let k = sheltered * (1.0 - cover) * (1.0 - saturate((map_edge - 0.875) * 8.0));
+    w.x = mix(w.x, open.x, k);
+    w.z = mix(w.z, max(w.z, open.z), k);
+    w.y *= 1.0 - k;
+    w.w *= 1.0 - k;
+    return w;
+}
+
 // ---------------------------------------------------------------- surface shading
 // Returns pre-exposed radiance for a lit surface at camera-relative position `rel`.
 fn shade_surface(s: Surface, rel: vec3<f32>) -> vec3<f32> {
@@ -576,13 +627,15 @@ fn shade_surface_shadowed(s: Surface, rel: vec3<f32>, sun_visibility: f32) -> ve
 // sees (unit, toward the camera: the triangle's own normal, not the shading normal), and
 // `s.normal` the shading normal on that side.
 //
-// Light reaches the side in view only when it comes from that side of the sheet; then it
-// reflects as on any surface (diffuse and specular). Light from the far side never makes a
-// highlight: `s.subsurface` of it shines through instead, diffuse with a soft forward glow
-// (looking toward the light through the sheet), wrapped around the terminator, tinted by the
-// albedo (deeper, as light that crossed a leaf is) and shadowed by the shadow maps as seen from
-// the lit side. Sky light shines through from behind the same way. With `subsurface` 0 the sheet
-// is opaque and its far side stays dark. `sun_visibility` is as for `shade_surface_shadowed`.
+// Diffuse light follows the shading normal, so cards with bent normals (a crown or a grass tuft
+// shaded as one rounded volume) stay lit whichever way each card faces; a flat sheet's normal
+// is on the side in view, so its far side stays dark. Highlights come only from light on the
+// side in view. Light from the far side never makes a highlight: `s.subsurface` of it shines
+// through instead, diffuse with a soft forward glow (looking toward the light through the
+// sheet), wrapped around the terminator, tinted by the albedo (deeper, as light that crossed a
+// leaf is) and shadowed by the shadow maps as seen from the lit side. Sky light shines through
+// from behind the same way. With `subsurface` 0 nothing comes through. `sun_visibility` is as
+// for `shade_surface_shadowed`.
 fn shade_thin_surface(s: Surface, rel: vec3<f32>, sun_visibility: f32, face: vec3<f32>) -> vec3<f32> {
     return shade_surface_sides(s, rel, sun_visibility, face, true);
 }
@@ -633,16 +686,24 @@ fn shade_surface_sides(s: Surface, rel: vec3<f32>, sun_visibility: f32, face: ve
     let n_dot_l = saturate(n_dot_l_raw);
     let sun_light = frame.sun_color.rgb * sun_transmittance(rel);
     let sides = thin_surface_sides(face, l);
-    if (thin && dot(sun_light, sun_light) > 0.0 && (sides.x > 0.0 || (translucent && sides.y > 0.0))) {
+    if (thin && dot(sun_light, sun_light) > 0.0 && (n_dot_l > 0.0 || (translucent && sides.y > 0.0))) {
         // Shadowed as seen from the sheet's sunlit side, so the sheet doesn't shadow itself.
         let lit_side = select(-face, face, sides.x > 0.0);
         let shadow = shadow_factor(rel, lit_side) * sun_visibility;
-        if (shadow > 0.0 && sides.x > 0.0 && n_dot_l > 0.0) {
-            let h = normalize(l + v);
-            let spec = d_ggx(saturate(dot(n, h)), roughness) * v_smith_ggx_correlated(n_dot_v, n_dot_l, roughness)
-                * f_schlick(f0, saturate(dot(l, h)));
-            let contact = contact_shadow(rel, face);
-            color += (diffuse_color * INV_PI + spec) * (n_dot_l * sides.x * contact * shadow) * sun_light;
+        if (shadow > 0.0 && n_dot_l > 0.0) {
+            // Diffuse light follows the shading normal, whichever way the sheet faces: foliage
+            // bends its normals so a crown or a tuft of cards shades as one rounded volume.
+            // Highlights and contact shadows only come with the sun on the side in view.
+            var reflected = diffuse_color * INV_PI;
+            var contact = 1.0;
+            if (sides.x > 0.0) {
+                let h = normalize(l + v);
+                let spec = d_ggx(saturate(dot(n, h)), roughness) * v_smith_ggx_correlated(n_dot_v, n_dot_l, roughness)
+                    * f_schlick(f0, saturate(dot(l, h)));
+                reflected += spec * sides.x;
+                contact = mix(1.0, contact_shadow(rel, face), sides.x);
+            }
+            color += reflected * (n_dot_l * contact * shadow) * sun_light;
         }
         if (shadow > 0.0 && sides.y > 0.0) {
             color += through_color * (thin_surface_through(n_dot_l_raw, v, l) * sides.y * shadow) * sun_light;
@@ -684,9 +745,9 @@ fn shade_surface_sides(s: Surface, rel: vec3<f32>, sun_visibility: f32, face: ve
         let spec = d_ggx(saturate(dot(n, h)), max(roughness, 0.02)) *
             v_smith_ggx_correlated(n_dot_v, nl, roughness) * f_schlick(f0, saturate(dot(pl, h)));
         if (thin) {
-            // Reflected from the side in view, let through from the far side.
+            // Reflected (highlights only from the side in view), let through from the far side.
             let lit = thin_surface_sides(face, pl);
-            let reflected = (diffuse_color * INV_PI + spec) * (nl * lit.x);
+            let reflected = (diffuse_color * INV_PI + spec * lit.x) * nl;
             let through = through_color * (thin_surface_through(dot(n, pl), v, pl) * lit.y);
             color += (reflected + through) * light.color_radius.rgb * falloff;
             continue;

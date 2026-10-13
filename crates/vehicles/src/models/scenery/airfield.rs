@@ -20,6 +20,7 @@ use engine_core::prelude::*;
 use super::buildings::{self, Hangar, Place, dashed, flat, line, rect, text};
 use super::kit::{Builder, gray, hex};
 use super::noise::{mix, rand1, smoothstep, world_fbm};
+use super::solid::Solid;
 use super::{BuildStats, Parts, Scene, Surface};
 use crate::demo::facing;
 
@@ -113,6 +114,59 @@ pub fn build(world: &mut World, start: DVec3, end: DVec3) -> Option<BuildStats> 
         );
     }
     Some(scene.finish("airfield", started))
+}
+
+/// The airfield's static collision shapes in its local frame (runway along z, `length`
+/// long): the hangar, fire station, tower, terminal, fuel station, masts, windsocks and the
+/// ground equipment. The runway's collider comes from `demo::spawn_airfield`.
+pub fn solids(length: f32) -> Vec<Solid> {
+    let mut out = buildings::hangar_solids(hangar_at(), &maintenance_hangar());
+    out.extend(buildings::fire_station_solids(station_at()));
+    let (tower, cab_floor) = tower_at();
+    out.extend(buildings::tower_solids(tower, cab_floor));
+    let (terminal, w, d) = terminal_at();
+    out.extend(buildings::terminal_solids(terminal, w, d));
+    for (base, h, _) in MASTS {
+        out.push(buildings::floodlight_mast_solid(base, h));
+    }
+    for sign in [1.0f32, -1.0] {
+        let end = End {
+            sign,
+            h: length * 0.5,
+            number: String::new(),
+        };
+        out.push(buildings::windsock_solid(end.at(150.0, -38.0, 0.0)));
+    }
+    out.push(Solid::cuboid(
+        FUEL + Vec3::Y * 0.25,
+        Vec3::new(3.6, 0.25, 1.3),
+        Quat::IDENTITY,
+        "concrete",
+    ));
+    out.push(Solid {
+        center: FUEL + Vec3::Y * 1.5,
+        rotation: Quat::from_rotation_z(FRAC_PI_2),
+        shape: engine_world::physics::ColliderShape::Cylinder {
+            radius: 1.0,
+            half_height: 3.0,
+        },
+        surface: "metal",
+    });
+    out.push(Solid::cuboid(
+        FUEL + Vec3::new(0.0, 0.6, 2.4),
+        Vec3::new(0.5, 0.75, 0.35),
+        Quat::IDENTITY,
+        "metal",
+    ));
+    let mut equipment = |at: Place, half: Vec3| {
+        out.push(Solid::cuboid(at.p(0.0, half.y, 0.0), half, at.r, "metal"));
+    };
+    equipment(tug_at(), Vec3::new(0.74, 0.6, 1.4));
+    for at in carts_at() {
+        equipment(at, Vec3::new(0.75, 0.5, 1.4));
+    }
+    equipment(gpu_at(), Vec3::new(0.62, 0.78, 1.05));
+    out
 }
 
 /// Runway designator (two digits) for a heading in degrees.
@@ -1035,9 +1089,57 @@ fn signs(f: &Field, parts: &mut Parts) {
 
 // ---------------------------------------------------------------- buildings
 
-fn buildings(parts: &mut Parts) -> Vec<Vec3> {
-    // Maintenance hangar on the east apron, doors facing the runway (+x).
-    let hangar = Hangar {
+/// Maintenance hangar on the east apron, doors facing the runway (+x), and the fire station
+/// north of it, bays facing the runway.
+fn hangar_at() -> Place {
+    Place::new(Vec3::new(APRON_E.0.0, 0.0, -8.0), -FRAC_PI_2)
+}
+fn station_at() -> Place {
+    Place::new(Vec3::new(APRON_E.0.0, 0.0, 29.0), -FRAC_PI_2)
+}
+/// Control tower at the back of the west apron (cab floor height), the terminal south of it
+/// (width, depth).
+fn tower_at() -> (Place, f32) {
+    (Place::new(Vec3::new(79.0, 0.0, 24.0), FRAC_PI_2), 15.5)
+}
+fn terminal_at() -> (Place, f32, f32) {
+    (
+        Place::new(Vec3::new(77.0, 0.0, -11.0), FRAC_PI_2),
+        28.0,
+        9.0,
+    )
+}
+/// Floodlight masts over both aprons: base, height, aim.
+const MASTS: [(Vec3, f32, Vec3); 2] = [
+    (
+        Vec3::new(76.5, 0.0, -38.0),
+        18.0,
+        Vec3::new(58.0, 0.0, -5.0),
+    ),
+    (
+        Vec3::new(-47.0, 0.0, 22.0),
+        16.0,
+        Vec3::new(-54.0, 0.0, -10.0),
+    ),
+];
+/// The fuel station's bund center on the west apron.
+const FUEL: Vec3 = Vec3::new(70.0, APRON_Y, -38.5);
+/// Ground equipment on the west apron: the tug, its two carts and the ground power unit.
+fn tug_at() -> Place {
+    Place::new(Vec3::new(72.0, APRON_Y, -3.0), PI)
+}
+fn carts_at() -> [Place; 2] {
+    [
+        Place::new(Vec3::new(72.0, APRON_Y, -6.6), PI),
+        Place::new(Vec3::new(72.0, APRON_Y, -10.3), PI + 0.04),
+    ]
+}
+fn gpu_at() -> Place {
+    Place::new(Vec3::new(66.5, APRON_Y, -24.5), 0.3)
+}
+
+fn maintenance_hangar() -> Hangar {
+    Hangar {
         w: 30.0,
         d: 22.0,
         eave: 9.0,
@@ -1049,50 +1151,25 @@ fn buildings(parts: &mut Parts) -> Vec<Vec3> {
         trim: hex(0x24384f),
         board: super::tex::board_index("AURORA"),
         floor: APRON_Y + 0.06,
-    };
-    let lights = buildings::hangar(
-        parts,
-        Place::new(Vec3::new(APRON_E.0.0, 0.0, -8.0), -FRAC_PI_2),
-        &hangar,
-    );
-    // Fire station north of the hangar, bays facing the runway, and its forecourt.
-    let station = Place::new(Vec3::new(APRON_E.0.0, 0.0, 29.0), -FRAC_PI_2);
-    buildings::fire_station(parts, station);
-    fire_forecourt(parts, station);
-    // Control tower at the back of the west apron, base building along the apron edge, the
-    // terminal south of it.
-    buildings::tower(
-        parts,
-        Place::new(Vec3::new(79.0, 0.0, 24.0), FRAC_PI_2),
-        15.5,
-    );
-    buildings::terminal(
-        parts,
-        Place::new(Vec3::new(77.0, 0.0, -11.0), FRAC_PI_2),
-        28.0,
-        9.0,
-        "AURORA JET CENTER",
-    );
+    }
+}
+
+fn buildings(parts: &mut Parts) -> Vec<Vec3> {
+    let lights = buildings::hangar(parts, hangar_at(), &maintenance_hangar());
+    buildings::fire_station(parts, station_at());
+    fire_forecourt(parts, station_at());
+    let (tower, cab_floor) = tower_at();
+    buildings::tower(parts, tower, cab_floor);
+    let (terminal, w, d) = terminal_at();
+    buildings::terminal(parts, terminal, w, d, "AURORA JET CENTER");
     ground_equipment(parts);
-    // Floodlight masts over both aprons.
-    buildings::floodlight_mast(
-        parts,
-        Vec3::new(76.5, 0.0, -38.0),
-        18.0,
-        Vec3::new(58.0, 0.0, -5.0),
-        4,
-    );
-    buildings::floodlight_mast(
-        parts,
-        Vec3::new(-47.0, 0.0, 22.0),
-        16.0,
-        Vec3::new(-54.0, 0.0, -10.0),
-        4,
-    );
+    for (base, h, aim) in MASTS {
+        buildings::floodlight_mast(parts, base, h, aim, 4);
+    }
     // Fuel station on the west apron: a bunded double-skin tank and a dispenser.
     let c = parts.get(Surface::Concrete);
     c.color(gray(0.92));
-    let fuel = Vec3::new(70.0, APRON_Y, -38.5);
+    let fuel = FUEL;
     c.chamfer_box(
         fuel + Vec3::Y * 0.25,
         Vec3::new(3.6, 0.25, 1.3),
@@ -1173,14 +1250,11 @@ fn fire_forecourt(parts: &mut Parts, at: Place) {
 /// ground power unit and cones at the stands, chocks waiting on the stop bars.
 fn ground_equipment(parts: &mut Parts) {
     let y = APRON_Y;
-    tug(parts, Place::new(Vec3::new(72.0, y, -3.0), PI));
-    for (k, z) in [-6.6f32, -10.3].into_iter().enumerate() {
-        cart(
-            parts,
-            Place::new(Vec3::new(72.0, y, z), PI + 0.04 * k as f32),
-        );
+    tug(parts, tug_at());
+    for at in carts_at() {
+        cart(parts, at);
     }
-    gpu(parts, Place::new(Vec3::new(66.5, y, -24.5), 0.3));
+    gpu(parts, gpu_at());
     for (x, z) in [
         (63.5f32, -24.0f32),
         (63.5, -12.0),

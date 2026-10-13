@@ -450,7 +450,8 @@ fn ragdoll_is_stable_in_slow_motion_and_fast_forward() {
             .map(|p| speed(&app, *p))
             .fold(0.0, f32::max);
         println!("ragdoll {label}: worst joint gap {gap:.4} m, fastest part {fastest:.3}");
-        assert!(gap < 0.03, "{label}: joints pulled apart by {gap} m");
+        // A free ragdoll is an articulation: its joints can't open at all.
+        assert!(gap < 1e-4, "{label}: joints pulled apart by {gap} m");
         assert!(lowest > -0.05, "{label}: ragdoll fell through the ground");
         if scale >= 1.0 {
             assert!(
@@ -471,6 +472,7 @@ fn jointed_chain_is_stable_in_slow_motion_and_fast_forward() {
         let gap = run_rig(&mut app, &rig, frames, label);
         let tip = pos(&app, *rig.parts.last().unwrap());
         println!("chain {label}: worst joint gap {gap:.4} m, tip at {tip:?}");
+        // Hung from the world, so constraint joints (see `PhysicsSettings::articulated_joints`).
         assert!(gap < 0.03, "{label}: links pulled apart by {gap} m");
         // It swung down: the tip is below the anchor.
         assert!(

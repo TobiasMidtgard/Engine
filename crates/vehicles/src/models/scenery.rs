@@ -11,13 +11,16 @@
 //!
 //! The demos in `demo.rs` call [`track::spawn`], [`airfield::spawn`] and
 //! [`spaceport::spawn`]; each queues the build to run once the world is available, and
-//! skips it when there is no renderer (no `Assets<Mesh>`).
+//! skips it when there is no renderer (no `Assets<Mesh>`). Their colliders
+//! ([`track::solids`], [`airfield::solids`], [`spaceport::solids`], spawned by
+//! [`solid::spawn`]) don't need a renderer.
 
 pub mod airfield;
 pub mod buildings;
 pub mod font;
 pub mod kit;
 pub mod noise;
+pub mod solid;
 pub mod spaceport;
 pub mod tex;
 pub mod track;
