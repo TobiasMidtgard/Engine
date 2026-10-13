@@ -15,7 +15,7 @@
 //!
 //! Then the hill, the hut and the cabin are rebuilt and it starts again.
 
-use std::f32::consts::FRAC_PI_2;
+use std::f32::consts::{FRAC_PI_2, PI};
 
 use engine_core::math::{DVec3, Quat, Vec3};
 use engine_core::prelude::*;
@@ -300,12 +300,13 @@ pub fn yard_plan() -> Vec<YardStep> {
             v(x, 1.4, z),
         );
     }
-    // Walls, aimed at the plinth just inside its edge: back, sides, the front's left half.
+    // Walls, aimed at the plinth just inside its edge: back, sides, the front's left half,
+    // each turned so its battens are inside.
     for x in [-1.0, 1.0] {
         let at = v(x, 0.4, -1.85);
         add(
             BuildKind::WoodWall,
-            0.0,
+            PI,
             at + v(0.3, 2.6, 0.95),
             at,
             v(x, 1.4, -2.0),
@@ -316,7 +317,7 @@ pub fn yard_plan() -> Vec<YardStep> {
             let at = v(side * 1.85, 0.4, z);
             add(
                 BuildKind::WoodWall,
-                FRAC_PI_2,
+                side as f32 * FRAC_PI_2,
                 at + v(-side * 0.95, 2.6, 0.3),
                 at,
                 v(side * 2.0, 1.4, z),
