@@ -21,7 +21,7 @@
 //! * **Module contracts** for the systems other modules build on, so each module can be ripped
 //!   out and replaced: [`physics`] (bodies, colliders, joints, character controller, queries,
 //!   plus a [`physics::conformance`] suite every backend must pass), [`animation`] (pose,
-//!   parameters, triggers, events, ragdoll), [`locomotion`] (move intent and state, vehicle
+//!   parameters, triggers, events, ragdoll, body requests), [`locomotion`] (move intent and state, vehicle
 //!   controls) and [`terrain`] (edits and change notifications).
 //!
 //! Units everywhere: meters, kilograms, seconds, °C, m/s.
@@ -380,6 +380,7 @@ mod tests {
             "CharacterController",
             "MoveIntent",
             "AnimationParams",
+            "BodyRequest",
         ] {
             assert!(
                 registry.component(name).is_some(),
