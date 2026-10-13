@@ -296,8 +296,8 @@ pub fn coals(shrink: u32) -> Generated {
     }
     let px = tile.par(|p, _, _| {
         let q = tile.warp(p, 0.08, 0.004, 2, sub(seed, 1));
-        // Blocks a few centimeters across, longer along the grain.
-        let v = tile.voronoi_edge(Vec2::new(q.x, q.y * 0.6), 0.03, 0.85, sub(seed, 2));
+        // Blocks a few centimeters across.
+        let v = tile.voronoi_edge(q, 0.03, 0.85, sub(seed, 2));
         let fine = tile.voronoi_edge(q, 0.012, 0.9, sub(seed, 3));
         let crack = smooth(0.045, 0.0, v.edge).max(smooth(0.03, 0.0, fine.edge) * 0.4);
         // Each block domes a little and sits at its own height.
