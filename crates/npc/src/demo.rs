@@ -8,9 +8,10 @@
 //!   suppress and flank, sword fighters close in and take turns. A master and a veteran duel
 //!   in a ring in front (block, parry, feint, punish). On the east side a sparring lane puts
 //!   five fighters from rookie to master in front of swinging posts, so you can see skill
-//!   decide who gets hit, who blocks and who parries. Downed fighters get up after a few
-//!   seconds and barrels come back, so the fight never ends. Rings on the ground show where
-//!   each fighter decided to go and why.
+//!   decide who gets hit, who blocks and who parries. A squad mate often runs to a downed
+//!   fighter, kneels and gets it up where it lies; one nobody reaches gets up by itself after
+//!   six seconds, and barrels come back, so the fight never ends. Rings on the ground show
+//!   where each fighter decided to go and why.
 //! * [`spawn_wildlife`]: a living meadow. A deer herd grazes and wanders, rabbits nibble near
 //!   cover, bird flocks peck in the open, and a wolf pack roams the far edge and hunts when
 //!   hungry.

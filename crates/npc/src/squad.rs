@@ -1,13 +1,14 @@
 //! Squads: NPCs that share a [`Squad`](crate::faction::Squad) tell each other what they see
 //! (a shouted callout, which enemies can hear too), take turns attacking in melee so they don't
-//! crowd one opponent, and split into suppressors and a flanker against the same target.
+//! crowd one opponent, and split into suppressors and a flanker against the same target. When
+//! one of them kneels to revive a downed squad mate, the other shooters cover it.
 
 use std::collections::HashMap;
 
 use engine_core::prelude::*;
 use engine_world::NoiseEvent;
 
-use crate::agent::{NpcBrain, NpcClock, NpcVitals, NpcWeapon, WeaponStyle};
+use crate::agent::{NpcAction, NpcBrain, NpcClock, NpcVitals, NpcWeapon, WeaponStyle};
 use crate::faction::{Faction, Squad};
 use crate::perception::NpcMemory;
 use crate::skills::NpcSkills;
@@ -84,6 +85,90 @@ impl AttackTokens {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+struct ReviveClaim {
+    reviver: Entity,
+    /// How much the reviver wants it (its utility score).
+    score: f32,
+    /// World time the claim lapses unless renewed.
+    until: f64,
+    /// The reviver is there (or nearly): nobody takes it over now.
+    locked: bool,
+}
+
+/// Who is going to revive which downed squad mate, so that one goes, the best placed: each
+/// squad mate that wants to bids its revive score every time it thinks, the highest bid holds
+/// the claim, and a reviver that is there keeps it. A claim lapses a second after its holder
+/// stops bidding (it was downed, gave up, or found something better to do).
+#[derive(Resource, Debug, Default)]
+pub struct ReviveClaims {
+    claims: HashMap<Entity, ReviveClaim>,
+}
+
+impl ReviveClaims {
+    /// How long a claim lasts without being renewed (world seconds).
+    const SECS: f64 = 1.0;
+
+    /// `me` bids `score` to revive `downed` at world time `now` (`locked`: it is there and
+    /// nobody should take over). Returns true if `me` holds the claim now.
+    pub fn bid(&mut self, downed: Entity, me: Entity, score: f32, now: f64, locked: bool) -> bool {
+        let mine = ReviveClaim {
+            reviver: me,
+            score,
+            until: now + Self::SECS,
+            locked,
+        };
+        let c = self.claims.entry(downed).or_insert(mine);
+        let free = c.until <= now || c.reviver == me || (!c.locked && score > c.score + 0.05);
+        if free {
+            *c = mine;
+        }
+        c.reviver == me
+    }
+
+    /// `me`, on its way or kneeling, keeps its claim on `downed` alive (between its thinks).
+    /// Returns false if someone else holds it.
+    pub fn renew(&mut self, downed: Entity, me: Entity, now: f64) -> bool {
+        match self.claims.get_mut(&downed) {
+            Some(c) if c.reviver == me => {
+                c.until = c.until.max(now + Self::SECS);
+                true
+            }
+            Some(c) if c.until > now => false,
+            _ => {
+                self.claims.insert(
+                    downed,
+                    ReviveClaim {
+                        reviver: me,
+                        score: 0.0,
+                        until: now + Self::SECS,
+                        locked: false,
+                    },
+                );
+                true
+            }
+        }
+    }
+
+    /// Give up every claim `me` holds.
+    pub fn release(&mut self, me: Entity) {
+        self.claims.retain(|_, c| c.reviver != me);
+    }
+
+    /// Who holds the claim on `downed` at world time `now`.
+    pub fn reviver(&self, downed: Entity, now: f64) -> Option<Entity> {
+        self.claims
+            .get(&downed)
+            .filter(|c| c.until > now)
+            .map(|c| c.reviver)
+    }
+
+    /// Forget lapsed claims.
+    pub(crate) fn expire(&mut self, now: f64) {
+        self.claims.retain(|_, c| c.until > now);
+    }
+}
+
 type MemberItem<'a> = (
     Entity,
     &'a Squad,
@@ -121,9 +206,14 @@ pub(crate) fn plan_squads(
     let mut members: Vec<Member> = Vec::new();
     // Sightings: (squad, spotter, enemy, faction, position, velocity).
     let mut sightings: Vec<(Squad, Entity, Entity, Faction, DVec3, Vec3, DVec3)> = Vec::new();
+    // Squads with a member kneeling over (or on its way to) a downed mate.
+    let mut reviving: Vec<Squad> = Vec::new();
     for (e, squad, _, t, skills, weapon, _, vitals, brain, memory) in q.iter() {
         if vitals.downed {
             continue;
+        }
+        if brain.action == NpcAction::Revive && !reviving.contains(squad) {
+            reviving.push(*squad);
         }
         members.push(Member {
             e,
@@ -206,8 +296,20 @@ pub(crate) fn plan_squads(
             }
         }
     }
+    // While a mate revives someone, the other shooters cover it: they hold where they are and
+    // keep the enemy's heads down (fire at where it was last seen), instead of flanking.
+    for m in &members {
+        if m.ranged && m.skills.teamwork >= 0.3 && reviving.contains(&m.squad) {
+            roles.insert(m.e, "cover");
+        }
+    }
     for (e, _, _, _, _, _, _, _, mut brain, _) in q.iter_mut() {
-        brain.role = roles.get(&e).copied().unwrap_or("");
+        let role = roles.get(&e).copied().unwrap_or("");
+        brain.role = if brain.action == NpcAction::Revive {
+            ""
+        } else {
+            role
+        };
     }
 }
 
@@ -229,5 +331,33 @@ mod tests {
         t.release(a);
         assert!(t.request(target, c, 0.6, 2, 2.0));
         assert!(t.request(target, a, 3.0, 2, 2.0), "turns expire");
+    }
+
+    #[test]
+    fn the_best_placed_squad_mate_holds_a_revive() {
+        let mut c = ReviveClaims::default();
+        let downed = Entity::from_raw_u32(1).unwrap();
+        let far = Entity::from_raw_u32(2).unwrap();
+        let near = Entity::from_raw_u32(3).unwrap();
+        let late = Entity::from_raw_u32(4).unwrap();
+        assert!(c.bid(downed, far, 0.5, 0.0, false));
+        assert!(
+            c.bid(downed, near, 0.8, 0.1, false),
+            "a better bid takes it over"
+        );
+        assert!(!c.bid(downed, far, 0.5, 0.2, false));
+        assert_eq!(c.reviver(downed, 0.2), Some(near));
+        // There now: kept against a better bid.
+        assert!(c.bid(downed, near, 0.8, 0.3, true));
+        assert!(!c.bid(downed, late, 0.95, 0.4, false));
+        // Kept alive between thinks while it is at it; nobody else can renew it.
+        assert!(c.renew(downed, near, 1.2));
+        assert!(!c.renew(downed, far, 1.2));
+        assert_eq!(c.reviver(downed, 2.0), Some(near));
+        // Lapsed once its holder stops.
+        assert_eq!(c.reviver(downed, 2.3), None);
+        assert!(c.bid(downed, late, 0.3, 2.3, false));
+        c.release(late);
+        assert_eq!(c.reviver(downed, 2.4), None);
     }
 }

@@ -486,6 +486,7 @@ pub(crate) fn intent_markers(
             "fall back" => 0x9a9a9a,
             "investigate" | "search" => 0xf2d24c,
             "patrol" => 0x7fd37f,
+            "revive" => 0x3fe0c8,
             _ => 0xffffff,
         };
         let m = engine_render::MaterialRef::Inline(glow(color, 4.0));
