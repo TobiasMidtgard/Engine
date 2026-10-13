@@ -18,6 +18,7 @@ use engine_core::prelude::*;
 use crate::edits::OverlayPaint;
 use crate::landforms::{Broken, Canyon, DarkRegion, IceCap, Landforms, ShieldVolcano, Spot};
 use crate::noise;
+use crate::rivers::{RiverCache, Rivers};
 
 /// What a planet looks like at one point.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
@@ -30,6 +31,13 @@ pub struct ShapeSample {
     pub temperature_c: f32,
     /// 0 .. 1 dark lowland (lunar maria, basalt plains).
     pub mare: f32,
+    /// 0 .. 1 river and lake water (a share of it where a channel is narrower than the detail
+    /// asked for).
+    pub water: f32,
+    /// 0 .. 1 the part of `water` that is a lake.
+    pub lake: f32,
+    /// 0 .. 1 nearness to a river's banks (gallery woods line them).
+    pub banks: f32,
 }
 
 /// A flat area for a level, a base or a spaceport: inside `radius_m` the ground is exactly at
@@ -320,6 +328,12 @@ pub struct PlanetShape {
     /// Marineris, the polar caps, ...).
     pub landforms: Landforms,
     pub climate: Climate,
+    /// Rivers run from the hills to the sea (worlds with a sea and erosion; see
+    /// [`crate::rivers`]). Their drainage is solved the first time the shape is sampled.
+    pub rivers: bool,
+    /// The solved rivers (not saved).
+    #[serde(skip)]
+    pub(crate) river_cache: RiverCache,
     /// Flat areas for levels and bases.
     pub pads: Vec<FlatPad>,
     /// Hand-made ground around the home spot (not saved; set it in code).
@@ -362,6 +376,8 @@ impl PlanetShape {
             lava_basins: 0.0,
             landforms: Landforms::default(),
             climate: Climate::default(),
+            rivers: true,
+            river_cache: RiverCache::default(),
             pads: Vec::new(),
             overlay: None,
         }
@@ -401,6 +417,8 @@ impl PlanetShape {
                 wetness: 0.0,
                 circulation: 0.0,
             },
+            rivers: false,
+            river_cache: RiverCache::default(),
             pads: Vec::new(),
             overlay: None,
         }
@@ -445,6 +463,8 @@ impl PlanetShape {
                 wetness: 0.02,
                 circulation: 0.0,
             },
+            rivers: false,
+            river_cache: RiverCache::default(),
             pads: Vec::new(),
             overlay: None,
         }
@@ -460,6 +480,75 @@ impl PlanetShape {
     /// (the renderer passes twice the vertex spacing; physics and gameplay pass 0 for full
     /// detail).
     pub fn sample(&self, dir: DVec3, min_wavelength_m: f64) -> ShapeSample {
+        let rivers = self.river_network();
+        self.sample_with(dir, min_wavelength_m, rivers.as_deref())
+    }
+
+    /// The rivers of this shape, solved the first time they are asked for (`None` on worlds
+    /// without them).
+    pub fn river_network(&self) -> Option<Arc<Rivers>> {
+        if !self.rivers || !self.ocean || self.erosion <= 0.0 {
+            return None;
+        }
+        Some(
+            self.river_cache
+                .get(self.river_key(), || Rivers::build(self)),
+        )
+    }
+
+    /// What the rivers depend on: the shape's large landforms, climate, pads and overlay.
+    pub(crate) fn river_key(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        (self.seed, self.ocean, self.rivers, self.pads.len()).hash(&mut h);
+        let mut values = vec![
+            self.radius_m,
+            self.ocean_fraction,
+            self.continent_scale_m,
+            self.ocean_depth_m,
+            self.plateau_height_m,
+            self.mountain_height_m,
+            self.mountain_scale_m,
+            self.mountain_coverage,
+            self.hill_height_m,
+            self.hill_scale_m,
+            self.erosion,
+            self.climate.equator_c as f64,
+            self.climate.pole_c as f64,
+            self.climate.wetness as f64,
+            self.climate.circulation as f64,
+        ];
+        for p in &self.pads {
+            values.extend([
+                p.lat_deg,
+                p.lon_deg,
+                p.radius_m,
+                p.blend_m,
+                p.height_m,
+                p.mountains,
+                p.mountain_azimuth_deg,
+                p.mountain_distance_m,
+                p.sea_azimuth_deg,
+                p.sea_distance_m,
+            ]);
+        }
+        if let Some(o) = &self.overlay {
+            let q = o.rotation;
+            values.extend([o.radius_m, o.blend_m, q.x, q.y, q.z, q.w]);
+        }
+        for v in values {
+            v.to_bits().hash(&mut h);
+        }
+        h.finish()
+    }
+
+    /// [`Self::sample`] with the given rivers (none while solving them).
+    pub(crate) fn sample_with(
+        &self,
+        dir: DVec3,
+        min_wavelength_m: f64,
+        rivers: Option<&Rivers>,
+    ) -> ShapeSample {
         let dir = dir.normalize();
         let r = self.radius_m;
         let p = dir * r;
@@ -785,15 +874,29 @@ impl PlanetShape {
             h += self.craters(p, finest, &mut mare);
         }
 
+        // Rivers in their valleys.
+        let (mut water, mut lake, mut banks) = (0.0, 0.0, 0.0);
+        if let Some(rivers) = rivers {
+            let here = rivers.at(p, dir, h, finest, r, s);
+            h += here.fill - here.carve;
+            (water, lake, banks) = (here.water, here.lake, here.banks);
+        }
+
         // Pads: exactly flat inside, blended outside.
         for pad in &self.pads {
             let d = great_circle(dir, pad.direction(), r);
             let w = 1.0 - smooth(pad.radius_m, pad.radius_m + pad.blend_m, d);
             h = lerp(h, pad.height_m, w);
+            water *= 1.0 - w;
+            lake *= 1.0 - w;
+            banks *= 1.0 - w;
         }
         // A hand-made ground replaces all of the above around the home spot.
         if let Some((t, ground)) = self.overlay.as_ref().and_then(|o| o.sample(dir, r)) {
             h = lerp(h, ground, t);
+            water *= 1.0 - t;
+            lake *= 1.0 - t;
+            banks *= 1.0 - t;
         }
 
         // Climate.
@@ -824,12 +927,17 @@ impl PlanetShape {
             0.0
         };
         let moisture = (c.wetness + wet_noise * 0.55 + coastal - 0.08 + belts).clamp(0.0, 1.0);
+        // River banks are green even in deserts.
+        let moisture = moisture + (1.0 - moisture) * 0.4 * banks as f32;
 
         ShapeSample {
             height: h,
             moisture,
             temperature_c,
             mare,
+            water: water as f32,
+            lake: lake as f32,
+            banks: banks as f32,
         }
     }
 

@@ -1594,6 +1594,6 @@ mod tests {
             16 * (3 + 1 + 10 + 4 + MAX_RAYED + MAX_YOUNG)
         );
         assert_eq!(std::mem::size_of::<MapsGpu>(), 64);
-        assert_eq!(std::mem::size_of::<TerrainVertex>(), 44);
+        assert_eq!(std::mem::size_of::<TerrainVertex>(), 48);
     }
 }
