@@ -2,8 +2,9 @@
 //!
 //! What to look for:
 //!
-//! - The flame front runs across the grass with the wind, slower on its flanks and barely
-//!   creeping back upwind, leaving black stubble and glowing coals behind it.
+//! - The flame front runs across the grass with the wind (it is lit on the upwind edge, whichever
+//!   way the weather blows), slower on its flanks and barely creeping back upwind, leaving
+//!   black stubble and glowing coals behind it.
 //! - The gravel road stops it (unless an ember jumps across), and so does the soaked patch.
 //! - Trees catch from the grass: trunk first, then the crown goes up, chars and shrinks.
 //! - The wooden shed and the hay bales in its path burn down; the bales across the road don't.
@@ -15,12 +16,14 @@
 //! The fire is already a little way across the meadow when the demo starts
 //! (`FireDemo::warmup_secs`) so there is something to see straight away. Fires that escape
 //! the mown border are put out (`FireDemo::bounds`), so the rest of the map is safe.
+//! `fire.demo {"at_secs": 54}` starts a fresh fire that far along, which is how a camera tour
+//! catches each view's moment (`DemoView::at_secs`).
 
 use engine_assets::Assets;
 use engine_core::math::{DQuat, DVec2, DVec3, Mat4, Quat, Rng, Vec2, Vec3};
 use engine_core::prelude::*;
 use engine_render::{Image, Mesh, MeshRenderer};
-use engine_world::{Combustible, FocusPoints, Ground, SurfaceMaterials, Water};
+use engine_world::{Combustible, FocusPoints, Ground, SurfaceMaterials, Water, WeatherState};
 
 use crate::field::FireField;
 use crate::fuel::{FuelPatch, PatchShape};
@@ -36,13 +39,17 @@ use crate::sim::{self, CharBase, FireClock, FirePatches, WorldFuel};
 
 /// Half extents of the meadow (m).
 const MEADOW: [f32; 2] = [28.0, 18.0];
+/// Where the gravel road crosses the meadow (X, m) and its half width.
+const ROAD_X: f32 = 14.0;
+const ROAD_HALF: f32 = 1.5;
 /// Width of the mown border around it (m).
 const BORDER: f32 = 4.0;
 /// Half extents of the ground the demo covers (m).
 pub const FOOTPRINT: [f32; 2] = [MEADOW[0] + BORDER, MEADOW[1] + BORDER];
 
-/// A camera spot for looking at the demo: eye and target relative to the demo's origin, and
-/// the hour of day it looks best at.
+/// A camera spot for looking at the demo: eye and target relative to the demo's origin, the
+/// hour of day it looks best at (the showcase's sky: latitude 35°, the March equinox), and how
+/// far into a fire it shows.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct DemoView {
     pub key: &'static str,
@@ -50,6 +57,11 @@ pub struct DemoView {
     pub eye: [f64; 3],
     pub target: [f64; 3],
     pub hour: f32,
+    /// Seconds since the fire was lit; `fire.demo {"at_secs": ..}` jumps there.
+    pub at_secs: f32,
+    /// Seconds to watch after the jump before the picture (smoke needs time to rise: the jump
+    /// fast-forwards only the fire).
+    pub warmup_secs: f32,
 }
 
 /// Suggested viewpoints (camera bookmarks and screenshot-tour stops).
@@ -59,21 +71,27 @@ pub const VIEWS: &[DemoView] = &[
         name: "Grass fire front",
         eye: [6.0, 2.4, -20.0],
         target: [-4.0, 1.2, -4.0],
-        hour: 18.6,
+        hour: 17.5,
+        at_secs: 35.0,
+        warmup_secs: 0.0,
     },
     DemoView {
         key: "fire_trees",
         name: "Trees and shed burning",
         eye: [22.0, 4.0, -14.0],
         target: [2.0, 3.0, 4.0],
-        hour: 18.9,
+        hour: 17.85,
+        at_secs: 80.0,
+        warmup_secs: 0.0,
     },
     DemoView {
         key: "fire_campfire",
         name: "Campfire at dusk",
         eye: [-19.4, 1.3, -18.0],
         target: [-22.5, 0.35, -21.1],
-        hour: 19.15,
+        hour: 17.95,
+        at_secs: 30.0,
+        warmup_secs: 0.0,
     },
     DemoView {
         key: "fire_plume",
@@ -81,6 +99,8 @@ pub const VIEWS: &[DemoView] = &[
         eye: [-58.0, 9.0, -52.0],
         target: [12.0, 12.0, 6.0],
         hour: 15.5,
+        at_secs: 80.0,
+        warmup_secs: 4.0,
     },
     DemoView {
         key: "fire_night",
@@ -88,6 +108,8 @@ pub const VIEWS: &[DemoView] = &[
         eye: [17.0, 2.0, -12.0],
         target: [0.0, 2.0, 4.0],
         hour: 22.5,
+        at_secs: 55.0,
+        warmup_secs: 0.0,
     },
 ];
 
@@ -103,6 +125,10 @@ pub struct FireDemo {
     pub bounds: [f32; 2],
     /// Where each fire starts: a line between two points (m, relative to the demo).
     pub line: [[f32; 2]; 2],
+    /// Light each fire along the edge of the meadow (west of the road) that faces the wind
+    /// blowing at the time, so it runs across the meadow whichever way the weather blows;
+    /// `line` is used in still air or when this is off.
+    pub upwind: bool,
 }
 
 impl Default for FireDemo {
@@ -115,6 +141,7 @@ impl Default for FireDemo {
                 [-MEADOW[0] + 2.0, -MEADOW[1] + 3.0],
                 [-MEADOW[0] + 2.0, MEADOW[1] - 3.0],
             ],
+            upwind: true,
         }
     }
 }
@@ -128,6 +155,8 @@ pub struct FireDemoState {
     pub since: f32,
     /// Fires lit so far.
     pub cycles: u32,
+    /// Start a fresh fire this many seconds along at the next update (`fire.demo`).
+    pub jump_to: Option<f32>,
 }
 
 /// An object the demo puts back as it was when the meadow resets.
@@ -171,12 +200,12 @@ pub fn spawn_demo(commands: &mut Commands, origin: DVec3) {
         })
         .with_priority(10),
     ));
-    let road_x = 14.0;
+    let road_x = ROAD_X as f64;
     commands.spawn((
         Name::new("Fire demo: gravel road"),
         place(road_x, 0.0),
         FuelPatch::firebreak(PatchShape::Rect {
-            half_extents: [1.5, MEADOW[1] + BORDER],
+            half_extents: [ROAD_HALF, MEADOW[1] + BORDER],
         })
         .with_priority(30),
     ));
@@ -612,7 +641,24 @@ pub fn run_demos(world: &mut World) {
             world.entity_mut(entity).insert(state);
             continue;
         }
-        if !state.started {
+        if let Some(at) = state.jump_to.take() {
+            if state.started {
+                reset(world, entity, place, &demo);
+            }
+            state.started = true;
+            state.cycles += 1;
+            light(world, place, &demo);
+            if at > 0.0 {
+                fast_forward(world, place.origin, at);
+            }
+            state.since = at;
+            let field = world.resource::<FireField>();
+            let wind = world.get_resource::<WeatherState>().map(|w| w.wind);
+            tracing::info!(
+                "fire demo: a fresh fire {at:.0} s along, {:.0} m² burning, wind {wind:?}",
+                field.stats.burning_m2
+            );
+        } else if !state.started {
             state.started = true;
             state.cycles = 1;
             light(world, place, &demo);
@@ -634,8 +680,31 @@ pub fn run_demos(world: &mut World) {
     }
 }
 
+/// Where a fire starts (demo-relative X/Z): `demo.line`, or with `demo.upwind` the edge of the
+/// meadow west of the road that faces the prevailing wind.
+fn ignition_line(world: &World, place: Place, demo: &FireDemo) -> [[f32; 2]; 2] {
+    let wind = world
+        .get_resource::<WeatherState>()
+        .map_or(Vec3::ZERO, |w| w.wind);
+    let w = (place.rotation.inverse() * wind.as_dvec3()).as_vec3();
+    if !demo.upwind || w.x.hypot(w.z) < 0.5 {
+        return demo.line;
+    }
+    // The meadow's burnable part, a little in from its edges.
+    let (west, east) = (-MEADOW[0] + 2.0, ROAD_X - ROAD_HALF - 2.0);
+    let (south, north) = (-MEADOW[1] + 3.0, MEADOW[1] - 3.0);
+    if w.x.abs() >= w.z.abs() {
+        let x = if w.x > 0.0 { west } else { east };
+        [[x, south], [x, north]]
+    } else {
+        let z = if w.z > 0.0 { south } else { north };
+        [[west, z], [east, z]]
+    }
+}
+
 fn light(world: &mut World, place: Place, demo: &FireDemo) {
-    let [a, b] = demo.line.map(|p| place.world(p[0] as f64, p[1] as f64));
+    let line = ignition_line(world, place, demo);
+    let [a, b] = line.map(|p| place.world(p[0] as f64, p[1] as f64));
     let n = (a.distance(b) / 1.0).ceil().max(1.0) as usize;
     let mut commands = world.resource_mut::<sim::FireCommands>();
     for i in 0..=n {
@@ -645,6 +714,18 @@ fn light(world: &mut World, place: Place, demo: &FireDemo) {
             temperature_c: 900.0,
         });
     }
+}
+
+/// Have every demo start a fresh fire `at_secs` along (clamped to its cycle) at the next
+/// update; returns how many demos there are.
+pub fn jump_to(world: &mut World, at_secs: f32) -> usize {
+    let mut q = world.query::<(&FireDemo, &mut FireDemoState)>();
+    let mut n = 0;
+    for (demo, mut state) in q.iter_mut(world) {
+        state.jump_to = Some(at_secs.clamp(0.0, (demo.cycle_secs - 1.0).max(0.0)));
+        n += 1;
+    }
+    n
 }
 
 /// Run the fire alone for `secs` of simulated time, right now.
@@ -769,6 +850,88 @@ mod tests {
     use super::*;
     use crate::FirePlugin;
     use engine_world::BurnState;
+
+    /// The demo in a `wind` after `fire.demo` started a fresh fire `at` seconds along.
+    fn jumped(at: f32, wind: Vec3) -> (App, DVec3) {
+        let mut app = App::new();
+        app.world
+            .resource_mut::<Time>()
+            .set_source(engine_core::time::TimeSource::Manual {
+                step_secs: 1.0 / 30.0,
+            });
+        app.add_plugins(FirePlugin);
+        app.world.resource_mut::<engine_world::WeatherState>().wind = wind;
+        let origin = DVec3::new(100.0, 0.0, -50.0);
+        {
+            let mut commands = app.world.commands();
+            spawn_demo(&mut commands, origin);
+        }
+        app.world.flush();
+        app.update_n(5);
+        let r = engine_core::registry::call_api(
+            &mut app.world,
+            "fire.demo",
+            serde_json::json!({ "at_secs": at }),
+        )
+        .unwrap();
+        assert_eq!(r["demos"], 1);
+        app.update_n(2);
+        (app, origin)
+    }
+
+    #[test]
+    fn fire_demo_starts_a_fresh_fire_that_far_along() {
+        use crate::field::CellState::*;
+        // Just lit: the meadow ahead of the line is untouched.
+        let (mut app, origin) = jumped(0.0, Vec3::new(3.0, 0.0, 1.0));
+        let state = |app: &mut App, x: f64| {
+            app.world
+                .resource::<FireField>()
+                .cell_at(origin + DVec3::new(x, 0.0, 0.0))
+                .map(|c| c.state())
+        };
+        assert_eq!(state(&mut app, -8.0), Some(Intact));
+        let mut q = app.world.query::<&FireDemoState>();
+        let s = *q.single(&app.world).unwrap();
+        assert!(s.since < 0.2 && s.cycles == 2, "{s:?}");
+        // A minute along, the front has crossed it.
+        let (mut app, _) = jumped(60.0, Vec3::new(3.0, 0.0, 1.0));
+        assert!(
+            matches!(state(&mut app, -8.0), Some(Burning | Smoldering | Burnt)),
+            "{:?}",
+            state(&mut app, -8.0)
+        );
+        // Jumping back resets the meadow: burnt ground is grass again.
+        engine_core::registry::call_api(
+            &mut app.world,
+            "fire.demo",
+            serde_json::json!({ "at_secs": 0 }),
+        )
+        .unwrap();
+        app.update_n(2);
+        assert_eq!(state(&mut app, -8.0), Some(Intact));
+    }
+
+    #[test]
+    fn the_fire_runs_across_the_meadow_whichever_way_the_wind_blows() {
+        use crate::field::CellState::*;
+        for wind in [
+            Vec3::new(-3.0, 0.0, 0.8),
+            Vec3::new(0.8, 0.0, 3.0),
+            Vec3::new(-0.5, 0.0, -3.0),
+        ] {
+            let (app, origin) = jumped(60.0, wind);
+            let mid = app
+                .world
+                .resource::<FireField>()
+                .cell_at(origin + DVec3::new(0.0, 0.0, 0.0))
+                .map(|c| c.state());
+            assert!(
+                matches!(mid, Some(Burning | Smoldering | Burnt)),
+                "wind {wind}: mid-meadow {mid:?}"
+            );
+        }
+    }
 
     #[test]
     fn demo_burns_the_meadow_but_not_past_the_road() {
