@@ -263,7 +263,8 @@ impl FireFeature {
                 self.scratch.push(FlameInstance {
                     pos_height: [rel.x, rel.y, rel.z, 0.0],
                     shape: [
-                        e.size.max(0.01) * 1.5,
+                        // The glowing core: a few millimeters of a flake that's mostly ash.
+                        e.size * 0.3,
                         1.0,
                         e.age * 3.1 + e.size * 1000.0,
                         1.0,

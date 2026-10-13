@@ -8,6 +8,10 @@
 //! * **Grapple tower** (behind the course): a grappler sprints at a 9 m tower, jumps, fires
 //!   its grapple hook at the top edge, is reeled up the wall, climbs over the top, runs across
 //!   and drops off the back.
+//! * **Freight station** (beside the grapple tower): a freight car shuttles along a short
+//!   track past a loading platform. As it pulls out, a rider sprints along the platform,
+//!   leaps onto the car's side and wall-runs along it, climbs over onto its roof, rides it to
+//!   the end of the track and drops back onto the platform.
 //! * **Duel ring** (−Z side), three rounds on a loop:
 //!   1. *Blink*: an elite (tempo speed 2.5) dash-strikes an untrained player (level 1).
 //!      The dash and three slashes land in well under a second; the player can't react.
@@ -34,7 +38,7 @@ use engine_core::time::LocalTimeScale;
 use engine_render::{Camera, MeshRenderer, StandardMaterial};
 use engine_world::animation::AnimationParams;
 use engine_world::locomotion::{LocomotionMode, MoveIntent};
-use engine_world::physics::{CharacterController, Collider, RigidBody};
+use engine_world::physics::{CharacterController, Collider, PhysicsBackend, RigidBody, Velocity};
 use engine_world::{AttackEvent, AttackKind};
 
 use crate::afterimage::Afterimages;
@@ -142,6 +146,26 @@ pub mod layout {
     pub const GRAPPLE_START: [f64; 3] = [8.0, 0.1, 19.0];
     /// The grappler jumps (and fires once airborne) as it crosses this z.
     pub const GRAPPLE_TAKEOFF_Z: f64 = 21.0;
+    /// The freight station's loading platform, beside the track (−Z side). Its +Z edge is at
+    /// z = 27.3, 1.2 m short of the car's side.
+    pub const FREIGHT_PLATFORM: Block = Block {
+        center: [-14.0, 0.5, 25.4],
+        size: [24.0, 1.0, 3.8],
+    };
+    /// The track's center line.
+    pub const FREIGHT_TRACK_Z: f64 = 30.0;
+    /// Where the car's center stands at each end of the track.
+    pub const FREIGHT_FROM_X: f64 = -20.0;
+    pub const FREIGHT_TO_X: f64 = -7.5;
+    /// The freight car's collider (full size): a box from just above the rails to its roof.
+    pub const FREIGHT_CAR_SIZE: [f32; 3] = [12.0, 3.6, 3.0];
+    /// Top of the car's roof.
+    pub const FREIGHT_ROOF: f64 = 4.0;
+    /// Seconds rolling from one end of the track to the other, and standing at each end.
+    pub const FREIGHT_TRAVEL_SECS: f32 = 5.0;
+    pub const FREIGHT_DWELL_SECS: f32 = 3.5;
+    /// Where the rider starts (feet), on the platform beside the waiting car.
+    pub const RIDE_START: [f64; 3] = [-24.0, 1.0, 25.4];
     /// Center of the lowest level cell; the other nine stack [`LEVEL_STEP`] apart above it.
     pub const LEVEL_METER: [f64; 3] = [RING[0] + 9.5, RING[1] + 0.35, RING[2]];
     /// Spacing of the level cells, meters.
@@ -239,6 +263,14 @@ pub enum Brain {
     /// Loops the grapple tower: run, jump, hook the top edge, reel up, climb over.
     Grappler {
         step: GrappleLoop,
+        secs: f32,
+        #[serde(skip)]
+        origin: DVec3,
+    },
+    /// Loops the freight station: leap onto the departing car, wall-run along it, climb
+    /// aboard, ride it, drop off.
+    Rider {
+        step: Ride,
         secs: f32,
         #[serde(skip)]
         origin: DVec3,
@@ -395,6 +427,13 @@ pub fn spawn_demo(commands: &mut Commands, origin: DVec3) {
     block(commands, origin, "Ledge block", layout::LEDGE_WALL);
     block(commands, origin, "Grapple pad", layout::GRAPPLE_PAD);
     block(commands, origin, "Grapple tower", layout::GRAPPLE_TOWER);
+    block(
+        commands,
+        origin,
+        "Freight platform",
+        layout::FREIGHT_PLATFORM,
+    );
+    spawn_freight_car(commands, origin);
     // The pilot training facility drawn around those boxes.
     crate::look::course::dress_course(commands, origin);
 
@@ -435,6 +474,20 @@ pub fn spawn_demo(commands: &mut Commands, origin: DVec3) {
         MovementProfile::pilot(),
         Brain::Grappler {
             step: GrappleLoop::Start,
+            secs: 0.0,
+            origin,
+        },
+    );
+
+    spawn_character(
+        commands,
+        "Rider",
+        origin + DVec3::from_array(layout::RIDE_START) + DVec3::Y * 0.9,
+        Vec3::X,
+        Style::Pilot,
+        MovementProfile::pilot(),
+        Brain::Rider {
+            step: Ride::Start,
             secs: 0.0,
             origin,
         },
@@ -555,19 +608,26 @@ pub(crate) fn register(app: &mut App) {
         "Movement demo duel: round (Blink, Focus, Pack), seconds into it, rounds played; set \
          `only` to repeat one round.",
     )
+    .register_component::<Shuttle>(
+        "Shuttles a body back and forth along a straight track (the movement demo's freight \
+         car): seconds into its cycle, travel and dwell seconds.",
+    )
     .add_systems(
         FixedUpdate,
         (
+            drive_shuttles,
             direct_duel,
             run_runner,
             run_climber,
             run_grappler,
+            run_rider,
             think_duelists,
             think_attackers,
         )
             .chain()
             .in_set(SimSet::Input)
-            .before(crate::MovementSet::Intent),
+            .before(crate::MovementSet::Intent)
+            .before(crate::fallback::publish),
     )
     .add_systems(
         Update,
@@ -925,6 +985,281 @@ pub(crate) fn restart_grapplers(world: &mut World) -> usize {
             *step = GrappleLoop::Start;
             *secs = 0.0;
             n += 1;
+        }
+    }
+    n
+}
+
+// ------------------------------------------------------------------------ the freight station
+
+/// Shuttles a kinematic body back and forth along a straight track: out from `from` to `to`, a
+/// stand there, back, and a stand at `from`, easing in and out of each run, on world time.
+/// With a physics backend it drives the body by its `Velocity` (the backend moves it and
+/// writes the `Transform` back, so what stands on it is carried); with only the stand-in
+/// physics it sets the `Transform`.
+#[derive(Component, Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct Shuttle {
+    #[serde(skip)]
+    pub from: DVec3,
+    #[serde(skip)]
+    pub to: DVec3,
+    /// Seconds a run from one end to the other takes.
+    pub travel_secs: f32,
+    /// Seconds standing at each end.
+    pub dwell_secs: f32,
+    /// Seconds into the cycle (world time).
+    pub secs: f32,
+    /// Stand still for a step after a teleport, so a physics backend places the body before
+    /// it moves by velocity again.
+    #[serde(skip)]
+    pub hold: bool,
+}
+
+/// Where a [`Shuttle`] is in its cycle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Leg {
+    /// Running from `from` to `to`.
+    Out,
+    /// Standing at `to`.
+    AtEnd,
+    /// Running back.
+    Back,
+    /// Standing at `from` (the cycle starts with the run out).
+    AtStart,
+}
+
+impl Shuttle {
+    pub fn cycle_secs(&self) -> f32 {
+        2.0 * (self.travel_secs + self.dwell_secs)
+    }
+
+    /// The leg it is on and the seconds into it.
+    pub fn leg(&self) -> (Leg, f32) {
+        let (run, stand) = (self.travel_secs, self.dwell_secs);
+        let t = self.secs.rem_euclid(self.cycle_secs());
+        if t < run {
+            (Leg::Out, t)
+        } else if t < run + stand {
+            (Leg::AtEnd, t - run)
+        } else if t < 2.0 * run + stand {
+            (Leg::Back, t - run - stand)
+        } else {
+            (Leg::AtStart, t - 2.0 * run - stand)
+        }
+    }
+
+    /// Where it is now.
+    pub fn position(&self) -> DVec3 {
+        let ease = |t: f32| 0.5 - 0.5 * (std::f32::consts::PI * t / self.travel_secs).cos();
+        match self.leg() {
+            (Leg::Out, t) => self.from.lerp(self.to, ease(t) as f64),
+            (Leg::AtEnd, _) => self.to,
+            (Leg::Back, t) => self.to.lerp(self.from, ease(t) as f64),
+            (Leg::AtStart, _) => self.from,
+        }
+    }
+}
+
+fn drive_shuttles(
+    time: Res<Time>,
+    backend: Option<Res<PhysicsBackend>>,
+    mut q: Query<(&mut Shuttle, &mut Transform, &mut Velocity)>,
+) {
+    let dt = time.delta_secs();
+    if dt <= 0.0 {
+        return;
+    }
+    for (mut s, mut t, mut v) in &mut q {
+        if std::mem::take(&mut s.hold) {
+            v.linear = Vec3::ZERO;
+            continue;
+        }
+        s.secs = (s.secs + dt).rem_euclid(s.cycle_secs());
+        let to = s.position();
+        if backend.is_some() {
+            // From where the backend put it, so it never drifts off the track.
+            v.linear = ((to - t.translation) / dt as f64).as_vec3();
+        } else {
+            t.translation = to;
+        }
+    }
+}
+
+/// The freight car: a kinematic box shuttling along the track, dressed as a box car.
+fn spawn_freight_car(commands: &mut Commands, origin: DVec3) {
+    let y = layout::FREIGHT_ROOF - layout::FREIGHT_CAR_SIZE[1] as f64 * 0.5;
+    let from = at(origin, layout::FREIGHT_FROM_X, y, layout::FREIGHT_TRACK_Z);
+    let to = at(origin, layout::FREIGHT_TO_X, y, layout::FREIGHT_TRACK_Z);
+    let car = commands
+        .spawn((
+            Name::new("Freight car"),
+            Transform::from_translation(from),
+            RigidBody::kinematic(),
+            Collider::cuboid(Vec3::from(layout::FREIGHT_CAR_SIZE) * 0.5),
+            Velocity::default(),
+            TransformInterpolation::default(),
+            Shuttle {
+                from,
+                to,
+                travel_secs: layout::FREIGHT_TRAVEL_SECS,
+                dwell_secs: layout::FREIGHT_DWELL_SECS,
+                // Standing at the start, about to pull out.
+                secs: 2.0 * layout::FREIGHT_TRAVEL_SECS + 1.5 * layout::FREIGHT_DWELL_SECS,
+                hold: false,
+            },
+        ))
+        .id();
+    crate::look::course::dress_freight_car(commands, car);
+}
+
+/// The rider's loop at the freight station.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum Ride {
+    /// Stand at the start (teleported there) on the platform.
+    #[default]
+    Start,
+    /// Wait for the car to pull out.
+    Wait,
+    /// Sprint along the platform, catching up with the car.
+    Sprint,
+    /// Cut toward the platform's edge, at the car's side.
+    Cut,
+    /// Jump and steer at the car's side.
+    Leap,
+    /// Run along the car's side.
+    WallRun,
+    /// Steer into the car near its roof: climb over onto it.
+    Climb,
+    /// Ride the car to the end of the track.
+    Aboard,
+    /// Step off its side onto the platform.
+    Off,
+    /// Wait before looping.
+    Rest,
+}
+
+#[allow(clippy::type_complexity)]
+fn run_rider(
+    time: Res<Time>,
+    cars: Query<(&Shuttle, &Transform), Without<Brain>>,
+    mut q: Query<(
+        &mut Brain,
+        &mut Transform,
+        &mut Mover,
+        &mut MoveIntent,
+        Option<&mut TransformInterpolation>,
+    )>,
+) {
+    let real = time.real_delta_secs();
+    let Some((car, car_t)) = cars.iter().next() else {
+        return;
+    };
+    let (leg, leg_secs) = car.leg();
+    for (mut brain, mut t, mut m, mut intent, interp) in &mut q {
+        let Brain::Rider { step, secs, origin } = &mut *brain else {
+            continue;
+        };
+        *secs += real;
+        let rel = t.translation - *origin;
+        let car_x = (car_t.translation - *origin).x;
+        *intent = MoveIntent::default();
+        let toward_car = |along: f32, into: f32| Vec3::new(along, 0.0, into).normalize();
+        let platform_edge =
+            layout::FREIGHT_PLATFORM.center[2] + layout::FREIGHT_PLATFORM.size[2] as f64 * 0.5;
+        let next = match *step {
+            Ride::Start => {
+                if *secs < 0.02 {
+                    t.translation =
+                        *origin + DVec3::from_array(layout::RIDE_START) + DVec3::Y * 0.9;
+                    t.rotation = Quat::from_rotation_y(-FRAC_PI_2);
+                    m.reset_motion();
+                    m.facing = Vec3::X;
+                    if let Some(mut i) = interp {
+                        i.reset();
+                    }
+                }
+                intent.look = Some(Vec3::X);
+                (*secs >= 0.3).then_some(Ride::Wait)
+            }
+            Ride::Wait => {
+                intent.look = Some(Vec3::X);
+                (leg == Leg::Out && leg_secs >= 0.6).then_some(Ride::Sprint)
+            }
+            Ride::Sprint => {
+                intent.direction = Vec3::X;
+                intent.sprint = true;
+                (rel.x >= car_x - 4.0).then_some(Ride::Cut)
+            }
+            Ride::Cut => {
+                intent.direction = toward_car(1.0, 0.45);
+                intent.sprint = true;
+                (rel.z >= platform_edge - 0.35).then_some(Ride::Leap)
+            }
+            Ride::Leap => {
+                intent.direction = toward_car(0.35, 1.0);
+                intent.sprint = true;
+                intent.jump = *secs < 0.1;
+                (m.mode == LocomotionMode::WallRun).then_some(Ride::WallRun)
+            }
+            Ride::WallRun => {
+                intent.direction = Vec3::X;
+                (m.mode != LocomotionMode::WallRun || m.mode_secs >= 0.15).then_some(Ride::Climb)
+            }
+            Ride::Climb => {
+                intent.direction = toward_car(0.45, 1.0);
+                let on_roof = rel.y > layout::FREIGHT_ROOF + 0.7;
+                (m.grounded && on_roof && m.mode != LocomotionMode::Mantle).then_some(Ride::Aboard)
+            }
+            Ride::Aboard => {
+                intent.look = Some(Vec3::X);
+                (leg == Leg::AtEnd && leg_secs >= 0.4).then_some(Ride::Off)
+            }
+            Ride::Off => {
+                intent.direction = Vec3::NEG_Z * 0.6;
+                (m.grounded && rel.y < layout::FREIGHT_ROOF - 1.0).then_some(Ride::Rest)
+            }
+            Ride::Rest => (*secs >= 1.0).then_some(Ride::Start),
+        };
+        // Stuck (missed the car, say): start over. Waiting for the car and riding it take as
+        // long as the car does.
+        let patient = matches!(*step, Ride::Wait | Ride::Aboard);
+        if !patient && *secs > 6.0 {
+            *step = Ride::Start;
+            *secs = 0.0;
+        } else if let Some(n) = next {
+            *step = n;
+            *secs = 0.0;
+        }
+    }
+}
+
+/// Starts every rider's loop over, with the freight car about to pull out (for tour stops
+/// that time a capture).
+pub(crate) fn restart_riders(world: &mut World) -> usize {
+    let mut n = 0;
+    let mut q = world.query::<&mut Brain>();
+    for mut b in q.iter_mut(world) {
+        if let Brain::Rider { step, secs, .. } = &mut *b {
+            *step = Ride::Start;
+            *secs = 0.0;
+            n += 1;
+        }
+    }
+    let mut cars = world.query::<(
+        &mut Shuttle,
+        &mut Transform,
+        Option<&mut Velocity>,
+        Option<&mut TransformInterpolation>,
+    )>();
+    for (mut s, mut t, v, interp) in cars.iter_mut(world) {
+        s.secs = s.cycle_secs() - 0.5;
+        s.hold = true;
+        t.translation = s.position();
+        if let Some(mut v) = v {
+            v.linear = Vec3::ZERO;
+        }
+        if let Some(mut i) = interp {
+            i.reset();
         }
     }
     n

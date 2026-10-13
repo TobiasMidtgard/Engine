@@ -257,3 +257,60 @@ fn reentry_heats_the_shield_without_burning_through() {
         "dived into the air"
     );
 }
+
+/// A steady wind pushes on the hovering ship; it still hovers over the pad's center and lands
+/// back on it hop after hop instead of walking off the pad.
+#[test]
+fn hops_in_a_steady_wind_and_lands_on_its_spot() {
+    let mut app = vehicle_app();
+    let wind = Vec3::new(6.0, 0.0, 0.0);
+    {
+        let mut weather = app.world.resource_mut::<engine_world::WeatherState>();
+        weather.wind = wind;
+        weather.gustiness = 0.0;
+        let mut w = app.world.resource_mut::<engine_world::WindField>();
+        w.prevailing = wind;
+        w.gustiness = 0.0;
+    }
+    ground(&mut app, DVec3::ZERO, 500.0, "concrete");
+    let t = Transform::from_translation(DVec3::new(0.0, presets::ride_height("spaceplane"), 0.0));
+    let ship = spawn_with(&mut app, |c| presets::spaceplane(c, t));
+    app.world
+        .entity_mut(ship)
+        .insert(Autopilot::new(AutopilotMode::Hop {
+            pad: DVec3::ZERO,
+            height_m: 18.0,
+            hover_s: 14.0,
+            rest_s: 2.0,
+        }));
+    let (mut landings, mut worst_landing, mut worst_hover) = (0, 0.0f64, 0.0f64);
+    let mut was_on_pad = true;
+    run_until(&mut app, 120.0, |app| {
+        let p = transform(app, ship).translation;
+        let off = (p.x * p.x + p.z * p.z).sqrt();
+        let on_pad = phase(app, ship) == "on the pad";
+        if phase(app, ship) == "hover" && app.world.get::<Autopilot>(ship).unwrap().timer > 8.0 {
+            worst_hover = worst_hover.max(off);
+        }
+        if on_pad && !was_on_pad {
+            landings += 1;
+            worst_landing = worst_landing.max(off);
+        }
+        was_on_pad = on_pad;
+        landings == 3
+    })
+    .expect("didn't land three times");
+    assert!(
+        telemetry(&app, ship).airspeed > 4.0,
+        "the wind blew ({:.1} m/s of air)",
+        telemetry(&app, ship).airspeed
+    );
+    assert!(
+        worst_hover < 0.5,
+        "hovered {worst_hover:.1} m off the pad's center"
+    );
+    assert!(
+        worst_landing < 0.3,
+        "landed {worst_landing:.1} m off the pad's center"
+    );
+}

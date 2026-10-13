@@ -408,8 +408,14 @@ pub fn yard_plan() -> Vec<BuildStep> {
     for side in [-1.0, 1.0] {
         for z in [-1.0, 1.0] {
             let at = v(side * 1.85, 0.4, z);
+            // A window in each side, toward the front on −X and the back on +X.
+            let kind = if side * z < 0.0 {
+                BuildKind::WoodWindow
+            } else {
+                BuildKind::WoodWall
+            };
             add(
-                BuildKind::WoodWall,
+                kind,
                 side as f32 * FRAC_PI_2,
                 at + v(-side * 0.95, 2.6, 0.3),
                 at,
@@ -460,6 +466,16 @@ pub fn yard_plan() -> Vec<BuildStep> {
     // The gables over the side walls, aimed from under the roof at the loft floor's edge on
     // the wall: each half rises toward the ridge.
     add_gables(&mut add, &[-2.0, 2.0], 2.4);
+    // A doorway in the front's right half, aimed from outside at the plinth under it (from
+    // above, the loft and roof are in the way now).
+    let at = v(1.0, 0.4, 1.85);
+    add(
+        BuildKind::WoodDoorway,
+        0.0,
+        at + v(0.3, 1.2, 1.55),
+        at,
+        v(1.0, 1.4, 2.0),
+    );
     // The deck: off the outside of the +X walls under their tops, then off the deck's edge.
     for z in [-1.0, 1.0] {
         add(
@@ -968,7 +984,7 @@ mod tests {
         // Blue plinth, the deck's second row orange at the edge of support.
         assert!(levels[..4].iter().all(|l| *l == 0), "{levels:?}");
         assert_eq!(levels[levels.len() - 1], 3, "{levels:?}");
-        assert_eq!(levels.len(), 31);
+        assert_eq!(levels.len(), 32);
     }
 
     #[test]
