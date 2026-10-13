@@ -137,6 +137,7 @@ impl Plugin for VfxPlugin {
                         demo::run_lightning,
                         demo::run_walkers,
                         demo::run_droppers,
+                        demo::art::follow_exposure,
                     ),
                 ),
             )

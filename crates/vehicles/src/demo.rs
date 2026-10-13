@@ -339,6 +339,13 @@ pub fn spawn_track(commands: &mut Commands, center: DVec3) {
         "dirt",
     );
     scenery::track::spawn(commands, center);
+    scenery::solid::spawn(
+        commands,
+        center,
+        Quat::IDENTITY,
+        "track",
+        scenery::track::solids(),
+    );
 
     // Two sports cars racing round the oval, cornering at 85 % of what their tires hold.
     let path = race_line(center, SEGMENTS * 2);
@@ -411,6 +418,15 @@ pub fn spawn_airfield(commands: &mut Commands, start: DVec3, end: DVec3) {
         "concrete",
     );
     scenery::airfield::spawn(commands, start, end);
+    if length >= 400.0 {
+        scenery::solid::spawn(
+            commands,
+            mid,
+            yaw,
+            "airfield",
+            scenery::airfield::solids(length as f32),
+        );
+    }
 
     // Planes: one flying circuits over the runway, one taking off to join it.
     let alt = 140.0;
@@ -477,6 +493,13 @@ pub fn spawn_spaceport(commands: &mut Commands, pad: DVec3, pad_radius: f32) {
         "concrete",
     );
     scenery::spaceport::spawn(commands, pad, pad_radius);
+    scenery::solid::spawn(
+        commands,
+        pad - DVec3::Y * thick as f64,
+        Quat::IDENTITY,
+        "spaceport",
+        scenery::spaceport::solids(),
+    );
     let hover = 18.0;
     let rest = presets::ride_height("spaceplane");
     let ship_at = pad + DVec3::Y * (rest + hover as f64);

@@ -8,6 +8,8 @@
 //!   same outfit when they aren't fetched. Speed blends idle, walk and run; turning leans.
 //! * `horse`: the imported horse when fetched (scaled to the requested shoulder height), else
 //!   the generated one; its gait picks walk, trot, canter and gallop from the motion.
+//! * `dog`: a furred Labrador-type dog built at the requested withers height (0.56 m when
+//!   none is given); its gait picks walk, trot, canter and rotary gallop from the motion.
 //! * `spider`: eight procedural legs.
 //!
 //! Other kinds get no body (one warning per kind), so the requester's stand-in stays.
@@ -20,11 +22,12 @@ use engine_world::LocomotionState;
 use engine_world::animation::{AnimationParams, BodyRequest, SkeletonPose};
 
 use crate::animator::{Animator, AnimatorSettings};
+use crate::build::dog;
 use crate::build::humanoid::Outfit;
 use crate::character::{AppliedHumanModel, HumanModel};
 use crate::demo::{
-    character_model, fetched_path, give_horse_body, give_humanoid_body, give_spider_body,
-    horse_model,
+    character_model, fetched_path, give_dog_body, give_horse_body, give_humanoid_body,
+    give_spider_body, horse_model,
 };
 use crate::horse_model::{AppliedHorseModel, HorseModel};
 use crate::ik::FootIk;
@@ -66,6 +69,7 @@ pub struct Body {
 pub enum BodyKind {
     Human,
     Horse,
+    Dog,
     Spider,
 }
 
@@ -195,14 +199,15 @@ fn build(world: &mut World, entity: Entity, request: BodyRequest) {
     let kind = match request.kind.as_str() {
         "human" | "person" => BodyKind::Human,
         "horse" => BodyKind::Horse,
+        "dog" => BodyKind::Dog,
         "spider" => BodyKind::Spider,
         other => {
             static WARNED: Mutex<Option<HashSet<String>>> = Mutex::new(None);
             let mut warned = WARNED.lock().unwrap_or_else(|e| e.into_inner());
             if warned.get_or_insert_default().insert(other.to_string()) {
                 tracing::warn!(
-                    "body request: no {other:?} body yet (human, horse and spider are built); \
-                     the stand-in stays"
+                    "body request: no {other:?} body yet (human, horse, dog and spider are \
+                     built); the stand-in stays"
                 );
             }
             return;
@@ -225,6 +230,11 @@ fn build(world: &mut World, entity: Entity, request: BodyRequest) {
             let model = horse(&request);
             give_horse_body(world, entity, model.clone());
             model.map(|m| m.path)
+        }
+        BodyKind::Dog => {
+            let height = request.height.unwrap_or(dog::WITHERS);
+            give_dog_body(world, entity, dog::scale_for_height(height));
+            None
         }
         BodyKind::Spider => {
             give_spider_body(world, entity);

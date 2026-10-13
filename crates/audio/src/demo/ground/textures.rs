@@ -28,6 +28,7 @@ pub(super) const RECIPES: &[(&str, Recipe)] = &[
     ("forest", forest_floor),
     ("planks", planks),
     ("zinc", galvanized),
+    ("tread", tread),
     ("leaf", leaf_atlas),
     ("stone", stone),
 ];
@@ -242,33 +243,38 @@ fn dirt() -> TexSet {
     c.bake(1.3, 30.0)
 }
 
-/// Wet, glossy mud: puddled hollows, crusty drier ridges, straw and grit.
+/// Wet mud: damp hollows with a sheen and films of water in the lowest, matte lumpy clods
+/// and drier ridges, straw and grit.
 fn mud() -> TexSet {
     let mut c = Canvas::new(512, 512, Vec2::splat(2.0));
-    let (wet, dry, brown) = (hex(0x2b1e14), hex(0x5a4532), hex(0x45321f));
+    let (wet, dry, brown) = (hex(0x2a1f17), hex(0x574536), hex(0x433326));
     c.fill(|u, v| {
         let n = fbm(u, v, 4, 5, 31);
         let d = fbm(u, v, 12, 3, 32);
         let s = fbm2(u, v, 9, 3, 3, 33);
         let h = n * 0.008 + d * 0.0025 + s * 0.0015;
-        // Low places hold water: darker and glossy.
-        let wetness = smooth(0.0, -0.4, n + d * 0.3);
-        let col = mix(brown, dry, smooth(-0.2, 0.6, n + d * 0.5)).lerp(wet, wetness * 0.85);
+        // Low places are damp and darker, a soft sheen rather than a gloss; the lowest
+        // hold a film of water, flat and glassy, that lies over the mud's bumps.
+        let low = n + d * 0.3;
+        let wetness = smooth(0.0, -0.4, low);
+        let film = smooth(-0.42, -0.5, low);
+        let col = mix(brown, dry, smooth(-0.2, 0.6, n + d * 0.5)).lerp(wet, wetness * 0.8);
         Texel {
-            color: col,
-            height: h - wetness * 0.002,
-            rough: lerp(0.68, 0.24, wetness),
+            color: col * (1.0 - 0.2 * film),
+            height: (h - wetness * 0.002).max(-0.0056),
+            rough: lerp(lerp(0.86, 0.45, wetness), 0.06, film),
             alpha: coverage(u, v, 5, 34),
             ..Default::default()
         }
     });
     let mut rng = Rand::new(3);
-    // Squelched clods and grit.
-    for _ in 0..700 {
+    // Squelched clods, lumpy and drier on top, and grit.
+    for _ in 0..450 {
         let (u, v) = (rng.f(), rng.f());
         let r = rng.range(2.0, 7.0);
-        let col = hex(0x4a3828) * rng.range(0.8, 1.25);
-        let lift = rng.range(0.001, 0.004);
+        let col = hex(0x4f3c2a) * rng.range(0.85, 1.3);
+        let lift = rng.range(0.0008, 0.0028);
+        let (k1, k2) = (rng.range(0.0, TAU), rng.range(0.0, TAU));
         ellipse(
             &mut c,
             u,
@@ -276,11 +282,14 @@ fn mud() -> TexSet {
             r,
             r * rng.range(0.5, 1.0),
             rng.range(0.0, TAU),
-            |cov, q, _, t| {
-                let dome = 1.0 - q * q;
+            |cov, q, p, t| {
+                let a = p.y.atan2(p.x);
+                let lobes = 1.0 + 0.22 * (3.0 * a + k1).sin() + 0.12 * (5.0 * a + k2).sin();
+                let cov = cov * smooth(1.0, 0.8, q * lobes);
+                let dome = (1.0 - q * q).max(0.0);
                 t.height += lift * dome * cov;
-                t.color = mix(t.color, col, cov * 0.6);
-                t.rough = lerp(t.rough, 0.45, cov * 0.5);
+                t.color = mix(t.color, col, cov * 0.55);
+                t.rough = lerp(t.rough, 0.88, cov * 0.7);
             },
         );
     }
@@ -320,43 +329,66 @@ fn mud() -> TexSet {
             },
         );
     }
-    c.bake(1.6, 35.0)
+    c.bake(1.5, 26.0)
 }
 
-/// Settled snow: soft drifts, crisp grains and sparkles; hollows a little blue.
+/// Settled snow: soft drifts and wind ripples, a granular crust of old crystals, and ice
+/// facets tilted every which way that glint in the sun; hollows a little blue. Albedo of a
+/// few days' old snow (about 0.8), so a sunlit field doesn't burn out to flat white.
 fn snow() -> TexSet {
     let mut c = Canvas::new(512, 512, Vec2::splat(2.0));
-    let (white, blue) = (Vec3::new(0.86, 0.89, 0.93), Vec3::new(0.62, 0.72, 0.88));
+    let (white, blue) = (Vec3::new(0.76, 0.79, 0.84), Vec3::new(0.52, 0.61, 0.77));
     c.fill(|u, v| {
         let n = fbm(u, v, 3, 5, 41);
         let ripple = fbm2(u, v, 2, 14, 3, 42);
         let grain = fbm(u, v, 64, 2, 43);
-        let h = n * 0.006 + ripple * 0.0015 + grain * 0.0004;
+        // Rounded old grains a few millimeters across.
+        let crust = worley(u * 160.0, v * 160.0, 160, 46, 1.0);
+        let bead = (1.0 - crust.f1 * 1.6).max(0.0);
+        let crusty = smooth(-0.2, 0.5, fbm(u, v, 6, 2, 47));
+        let h = n * 0.006 + ripple * 0.0016 + grain * 0.0004 + bead * 0.0007 * crusty;
         let hollow = smooth(0.0, -0.6, n + ripple * 0.3);
         let px = super::procgen::hash((u * 512.0) as i32, (v * 512.0) as i32, 44);
-        let sparkle = unit(px) > 0.9965;
+        let sparkle = unit(px) > 0.985;
+        let facet = if sparkle {
+            let a = unit(px >> 3) * TAU;
+            let tilt = 0.2 + 0.45 * unit(px >> 11);
+            Vec2::new(a.cos(), a.sin()) * tilt
+        } else {
+            Vec2::ZERO
+        };
         Texel {
             color: if sparkle {
-                Vec3::splat(1.0)
+                Vec3::splat(0.9)
             } else {
-                mix(white, blue, hollow * 0.55) * (0.97 + 0.04 * grain)
+                mix(white, blue, hollow * 0.6)
+                    * (0.96 + 0.05 * grain)
+                    * (1.0 - 0.04 * crusty * (1.0 - bead))
             },
             height: h,
-            rough: if sparkle { 0.08 } else { 0.62 + 0.1 * grain },
+            rough: if sparkle {
+                0.14
+            } else {
+                0.6 + 0.12 * grain + 0.06 * crusty
+            },
             alpha: coverage(u, v, 5, 45),
+            facet,
             ..Default::default()
         }
     });
     c.bake(1.0, 6.0)
 }
 
-/// Clear dark ice: crack networks, trapped bubbles, milky frozen patches.
+/// Trodden path ice: grey and milky where puddles froze over the path, clear and dark in
+/// black-ice pools that show the ground under them, frosted and dusted with blown snow in
+/// patches, scuffed white by boots, with cracks, trapped bubbles and grit.
 fn ice() -> TexSet {
     let mut c = Canvas::new(512, 512, Vec2::splat(2.5));
-    let (deep, milky, crack) = (
-        Vec3::new(0.05, 0.1, 0.14),
-        Vec3::new(0.32, 0.42, 0.48),
-        Vec3::new(0.62, 0.72, 0.78),
+    let (clear, milky, frost, crack) = (
+        Vec3::new(0.075, 0.095, 0.105),
+        Vec3::new(0.38, 0.45, 0.5),
+        Vec3::new(0.76, 0.8, 0.85),
+        Vec3::new(0.64, 0.72, 0.78),
     );
     c.fill(|u, v| {
         let n = fbm(u, v, 3, 4, 51);
@@ -364,36 +396,99 @@ fn ice() -> TexSet {
         let small = worley(u * 13.0 + 0.2 * n, v * 13.0, 13, 53, 1.0);
         // Cracks fade in and out along their length; the fine net only in places.
         let fade = smooth(-0.3, 0.3, fbm(u, v, 9, 2, 56));
-        let c1 = (1.0 - smooth(0.0, 0.016, big.f2 - big.f1)) * (0.35 + 0.65 * fade);
-        let c2 = (1.0 - smooth(0.0, 0.02, small.f2 - small.f1)) * smooth(0.0, 0.45, n) * fade;
+        let c1 = (1.0 - smooth(0.0, 0.014, big.f2 - big.f1)) * (0.25 + 0.75 * fade);
+        let c2 = (1.0 - smooth(0.0, 0.018, small.f2 - small.f1)) * smooth(0.0, 0.45, n) * fade;
         let cracks = c1.max(c2 * 0.5);
-        let milk = smooth(0.1, 0.7, fbm(u, v, 6, 4, 54)) * 0.7;
-        let col = mix(deep, milky, milk + 0.15 * (0.5 + 0.5 * n)).lerp(crack, cracks * 0.6);
+        // Clear black ice in pools; elsewhere milky layers, cloudier in places.
+        let pool = smooth(0.1, 0.4, fbm(u, v, 4, 4, 57));
+        let milk = 0.5 + 0.5 * fbm(u, v, 6, 4, 54);
+        // Frost and blown snow in drifts away from the pools, grainy at their edges.
+        let grain = fbm(u, v, 48, 2, 59);
+        let dust = smooth(0.18, 0.6, fbm(u, v, 7, 4, 58) + 0.12 * grain) * (1.0 - pool);
+        let body = (milky * (0.8 + 0.3 * milk)).lerp(clear, pool * 0.9);
+        let col = body
+            .lerp(crack, cracks * 0.5 * (1.0 - pool * 0.4))
+            .lerp(frost * (0.96 + 0.06 * grain), dust * 0.9);
         Texel {
             color: col,
-            height: n * 0.0012 - cracks * 0.0008,
-            rough: lerp(lerp(0.04, 0.22, milk), 0.5, cracks),
+            height: n * 0.0012 - cracks * 0.0008 + dust * (0.0005 + 0.0003 * grain),
+            rough: lerp(
+                lerp(lerp(0.16, 0.3, milk), 0.05, pool).max(cracks * 0.45),
+                0.72,
+                dust,
+            ),
             alpha: coverage(u, v, 5, 55),
             ..Default::default()
         }
     });
     let mut rng = Rand::new(5);
     // Hairline cracks.
-    for _ in 0..70 {
+    for _ in 0..40 {
         let (u, v) = (rng.f(), rng.f());
-        let len = rng.range(20.0, 120.0);
+        let len = rng.range(20.0, 100.0);
         line(
             &mut c,
             u,
             v,
             rng.range(0.0, TAU),
             len,
-            1.1,
+            1.0,
             0.0,
             |cov, _, t| {
-                t.color = mix(t.color, crack * 0.9, cov * 0.7);
-                t.height -= 0.0004 * cov;
+                t.color = mix(t.color, crack * 0.9, cov * 0.45);
+                t.height -= 0.0003 * cov;
                 t.rough = lerp(t.rough, 0.35, cov);
+            },
+        );
+    }
+    // Boot scuffs: bundles of short parallel scratches, white and matte.
+    for _ in 0..110 {
+        let (cu, cv) = (rng.f(), rng.f());
+        let a = rng.range(0.0, TAU);
+        let side = Vec2::new(-a.sin(), a.cos()) / 512.0;
+        let len = rng.range(14.0, 55.0);
+        let k = rng.below(6) + 3;
+        let spread = rng.range(0.8, 2.2);
+        let white = rng.range(0.45, 0.8);
+        for i in 0..k {
+            let off = side * (i as f32 - k as f32 * 0.5) * spread;
+            let shift = rng.range(-0.25, 0.25) * len / 512.0;
+            let dir = Vec2::new(a.cos(), a.sin()) * shift;
+            let l = len * rng.range(0.5, 1.0);
+            let w = rng.range(0.7, 1.5);
+            line(
+                &mut c,
+                cu + off.x + dir.x,
+                cv + off.y + dir.y,
+                a + rng.normal(0.04),
+                l,
+                w,
+                0.6,
+                |cov, _, t| {
+                    t.color = mix(t.color, frost, cov * white);
+                    t.height -= 0.00015 * cov;
+                    t.rough = lerp(t.rough, 0.62, cov * 0.9);
+                },
+            );
+        }
+    }
+    // Grit and bits of the path frozen in or blown on.
+    for _ in 0..1500 {
+        let (u, v) = (rng.f(), rng.f());
+        let r = rng.range(0.5, 1.6);
+        let col = [hex(0x3b3128), hex(0x5a4e42), hex(0x6e6a64)][rng.below(3)];
+        let lift = rng.range(0.0, 0.0004);
+        ellipse(
+            &mut c,
+            u,
+            v,
+            r,
+            r * rng.range(0.6, 1.0),
+            rng.range(0.0, TAU),
+            |cov, q, _, t| {
+                t.color = mix(t.color, col, cov * 0.85);
+                t.height += lift * (1.0 - q * q) * cov;
+                t.rough = lerp(t.rough, 0.8, cov);
             },
         );
     }
@@ -427,7 +522,7 @@ fn ice() -> TexSet {
     c.bake(1.0, 10.0)
 }
 
-/// A bed of fine gravel: packed pebbles with dark gaps.
+/// A bed of fine gravel: rounded pebbles of mixed sizes packed in dusty fines.
 fn gravel() -> TexSet {
     let mut c = Canvas::new(512, 512, Vec2::splat(1.0));
     let palette = [
@@ -440,7 +535,7 @@ fn gravel() -> TexSet {
         hex(0x8a7f78),
         hex(0xb3aa9a),
     ];
-    let gap = hex(0x3a3229);
+    let gap = hex(0x4a4036);
     c.fill(|u, v| {
         let warp = fbm(u, v, 8, 2, 61) * 0.4;
         let a = worley(u * 38.0 + warp, v * 38.0 - warp, 38, 62, 0.95);
@@ -452,14 +547,18 @@ fn gravel() -> TexSet {
         let speck = fbm(u, v, 160, 1, 64);
         let stone = base * (0.92 + 0.16 * speck);
         let small = palette[(b.id >> 5) as usize % palette.len()] * 0.8;
-        let dome = edge_a.sqrt();
+        // Rounded pebbles of their own size, packed against their neighbours, with fines
+        // showing between.
+        let r = 0.34 + 0.3 * unit(id >> 12);
+        let round = (1.0 - (a.f1 / r).powi(2)).max(0.0).sqrt();
+        let dome = round.min(edge_a.sqrt() * 1.5).min(1.0);
         let fine = edge_b.sqrt() * 0.4;
         let col = if dome > 0.15 {
             mix(small, stone, smooth(0.15, 0.45, dome))
         } else {
             mix(gap, small, fine * 1.6)
         };
-        let h = 0.007 * dome * (0.7 + 0.5 * unit(id >> 4)) + 0.002 * fine;
+        let h = 0.008 * dome * (0.7 + 0.5 * unit(id >> 4)) + 0.002 * fine;
         Texel {
             color: col,
             height: h,
@@ -736,7 +835,7 @@ fn forest_floor() -> TexSet {
 /// half silvered. Planks pick their own window of it.
 fn planks() -> TexSet {
     let mut c = Canvas::new(1024, 256, Vec2::new(2.0, 0.5));
-    let (early, late, silver) = (hex(0xa0805a), hex(0x5c4430), hex(0x8f8b83));
+    let (early, late, silver) = (hex(0x98806a), hex(0x564434), hex(0x8e8c86));
     let mut rng = Rand::new(13);
     let knots: Vec<(Vec2, f32)> = (0..5)
         .map(|_| (Vec2::new(rng.f(), rng.f()), rng.range(0.006, 0.014)))
@@ -760,13 +859,13 @@ fn planks() -> TexSet {
         let latewood = smooth(0.62, 0.8, f) * (1.0 - smooth(0.9, 1.0, f));
         let fiber = perlin_p(u * 8.0, v * 220.0, 8, 220, 113) * 0.5
             + perlin_p(u * 30.0, v * 600.0, 30, 600, 114) * 0.5;
-        let weather = smooth(-0.3, 0.5, fbm2(u, v, 4, 2, 4, 115));
+        let weather = smooth(-0.5, 0.35, fbm2(u, v, 4, 2, 4, 115));
         let mut col = mix(early, late, latewood * 0.8) * (0.92 + 0.12 * fiber);
-        col = mix(col, silver * (0.9 + 0.15 * latewood), weather * 0.75);
+        col = mix(col, silver * (0.86 + 0.2 * latewood), weather * 0.8);
         col = mix(col, hex(0x3a2a1c), knot_core * 0.85);
         Texel {
             color: col,
-            height: latewood * 0.0005 + fiber * 0.00015 + knot_core * 0.0004,
+            height: latewood * 0.0003 + fiber * 0.0002 + knot_core * 0.0004,
             rough: 0.7 + 0.15 * weather,
             ..Default::default()
         }
@@ -789,7 +888,7 @@ fn planks() -> TexSet {
             },
         );
     }
-    c.bake(1.8, 40.0)
+    c.bake(1.5, 40.0)
 }
 
 /// Hot-dip galvanized steel: spangles of slightly different sheen, dirt and white rust.
@@ -814,6 +913,48 @@ fn galvanized() -> TexSet {
         }
     });
     c.bake(1.0, 5.0)
+}
+
+/// The tops of the grating's bearing bars over a 2.56 × 1.92 m patch (u across the
+/// walkway from its left edge, v along it; it repeats along only): dull spangled zinc,
+/// polished to bright steel down the middle where feet go, rust where the zinc has worn
+/// through but feet don't polish it, and grime toward the sides and in patches.
+fn tread() -> TexSet {
+    let mut c = Canvas::new(512, 384, Vec2::new(2.56, 1.92));
+    c.fill(|u, v| {
+        let x = u * 2.56 - 1.28;
+        // Features `f` per 0.64 m, round in meters (the patch is 4 × 3 of them).
+        let n = |f: i32, octaves: u32, seed: u32| fbm2(u, v, f * 4, f * 3, octaves, seed);
+        let band = (x - 0.1 * n(1, 2, 141)).abs() + 0.16 * n(3, 3, 142);
+        let wear = 1.0 - smooth(0.25, 0.85, band);
+        let polish = smooth(0.15, 0.75, wear + 0.25 * n(6, 2, 143));
+        let spangle = n(20, 2, 144);
+        let zinc = Vec3::new(0.46, 0.46, 0.45) * (1.0 + 0.12 * spangle);
+        let bright = Vec3::new(0.84, 0.84, 0.82);
+        let grime = ((0.85 * smooth(0.8, 1.22, x.abs()) + 0.6 * smooth(0.15, 0.6, n(4, 3, 145)))
+            * (1.0 - 0.8 * polish))
+            .min(1.0);
+        let rust = smooth(
+            0.3,
+            0.6,
+            n(8, 3, 146) + 0.35 * wear * (1.0 - polish) + 0.25 * smooth(0.9, 1.25, x.abs()),
+        );
+        let rust_col =
+            Vec3::new(0.3, 0.13, 0.06).lerp(Vec3::new(0.5, 0.27, 0.11), 0.5 + 0.5 * n(16, 2, 147));
+        let col = zinc
+            .lerp(bright, polish)
+            .lerp(rust_col, rust * 0.85)
+            .lerp(Vec3::new(0.14, 0.12, 0.1), grime * 0.7);
+        Texel {
+            color: col,
+            rough: lerp(0.58 + 0.08 * spangle, 0.36, polish)
+                .max(0.85 * rust)
+                .max(0.9 * grime),
+            metal: lerp(0.8, 1.0, polish) * (1.0 - rust * 0.9) * (1.0 - 0.8 * grime),
+            ..Default::default()
+        }
+    });
+    c.bake(1.0, 0.0)
 }
 
 /// Four leaves in a 2×2 atlas (maple, oak, beech, chestnut), pale so vertex colours tint

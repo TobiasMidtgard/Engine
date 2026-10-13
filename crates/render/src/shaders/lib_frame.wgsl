@@ -576,13 +576,15 @@ fn shade_surface_shadowed(s: Surface, rel: vec3<f32>, sun_visibility: f32) -> ve
 // sees (unit, toward the camera: the triangle's own normal, not the shading normal), and
 // `s.normal` the shading normal on that side.
 //
-// Light reaches the side in view only when it comes from that side of the sheet; then it
-// reflects as on any surface (diffuse and specular). Light from the far side never makes a
-// highlight: `s.subsurface` of it shines through instead, diffuse with a soft forward glow
-// (looking toward the light through the sheet), wrapped around the terminator, tinted by the
-// albedo (deeper, as light that crossed a leaf is) and shadowed by the shadow maps as seen from
-// the lit side. Sky light shines through from behind the same way. With `subsurface` 0 the sheet
-// is opaque and its far side stays dark. `sun_visibility` is as for `shade_surface_shadowed`.
+// Diffuse light follows the shading normal, so cards with bent normals (a crown or a grass tuft
+// shaded as one rounded volume) stay lit whichever way each card faces; a flat sheet's normal
+// is on the side in view, so its far side stays dark. Highlights come only from light on the
+// side in view. Light from the far side never makes a highlight: `s.subsurface` of it shines
+// through instead, diffuse with a soft forward glow (looking toward the light through the
+// sheet), wrapped around the terminator, tinted by the albedo (deeper, as light that crossed a
+// leaf is) and shadowed by the shadow maps as seen from the lit side. Sky light shines through
+// from behind the same way. With `subsurface` 0 nothing comes through. `sun_visibility` is as
+// for `shade_surface_shadowed`.
 fn shade_thin_surface(s: Surface, rel: vec3<f32>, sun_visibility: f32, face: vec3<f32>) -> vec3<f32> {
     return shade_surface_sides(s, rel, sun_visibility, face, true);
 }
@@ -633,16 +635,24 @@ fn shade_surface_sides(s: Surface, rel: vec3<f32>, sun_visibility: f32, face: ve
     let n_dot_l = saturate(n_dot_l_raw);
     let sun_light = frame.sun_color.rgb * sun_transmittance(rel);
     let sides = thin_surface_sides(face, l);
-    if (thin && dot(sun_light, sun_light) > 0.0 && (sides.x > 0.0 || (translucent && sides.y > 0.0))) {
+    if (thin && dot(sun_light, sun_light) > 0.0 && (n_dot_l > 0.0 || (translucent && sides.y > 0.0))) {
         // Shadowed as seen from the sheet's sunlit side, so the sheet doesn't shadow itself.
         let lit_side = select(-face, face, sides.x > 0.0);
         let shadow = shadow_factor(rel, lit_side) * sun_visibility;
-        if (shadow > 0.0 && sides.x > 0.0 && n_dot_l > 0.0) {
-            let h = normalize(l + v);
-            let spec = d_ggx(saturate(dot(n, h)), roughness) * v_smith_ggx_correlated(n_dot_v, n_dot_l, roughness)
-                * f_schlick(f0, saturate(dot(l, h)));
-            let contact = contact_shadow(rel, face);
-            color += (diffuse_color * INV_PI + spec) * (n_dot_l * sides.x * contact * shadow) * sun_light;
+        if (shadow > 0.0 && n_dot_l > 0.0) {
+            // Diffuse light follows the shading normal, whichever way the sheet faces: foliage
+            // bends its normals so a crown or a tuft of cards shades as one rounded volume.
+            // Highlights and contact shadows only come with the sun on the side in view.
+            var reflected = diffuse_color * INV_PI;
+            var contact = 1.0;
+            if (sides.x > 0.0) {
+                let h = normalize(l + v);
+                let spec = d_ggx(saturate(dot(n, h)), roughness) * v_smith_ggx_correlated(n_dot_v, n_dot_l, roughness)
+                    * f_schlick(f0, saturate(dot(l, h)));
+                reflected += spec * sides.x;
+                contact = mix(1.0, contact_shadow(rel, face), sides.x);
+            }
+            color += reflected * (n_dot_l * contact * shadow) * sun_light;
         }
         if (shadow > 0.0 && sides.y > 0.0) {
             color += through_color * (thin_surface_through(n_dot_l_raw, v, l) * sides.y * shadow) * sun_light;
@@ -684,9 +694,9 @@ fn shade_surface_sides(s: Surface, rel: vec3<f32>, sun_visibility: f32, face: ve
         let spec = d_ggx(saturate(dot(n, h)), max(roughness, 0.02)) *
             v_smith_ggx_correlated(n_dot_v, nl, roughness) * f_schlick(f0, saturate(dot(pl, h)));
         if (thin) {
-            // Reflected from the side in view, let through from the far side.
+            // Reflected (highlights only from the side in view), let through from the far side.
             let lit = thin_surface_sides(face, pl);
-            let reflected = (diffuse_color * INV_PI + spec) * (nl * lit.x);
+            let reflected = (diffuse_color * INV_PI + spec * lit.x) * nl;
             let through = through_color * (thin_surface_through(dot(n, pl), v, pl) * lit.y);
             color += (reflected + through) * light.color_radius.rgb * falloff;
             continue;
