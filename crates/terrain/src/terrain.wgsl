@@ -911,9 +911,15 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     var grass_col = mix(col[M_GRASS], straw, saturate(clump) * 0.45 + saturate(sward - 0.2) * 0.25);
     grass_col *= (1.0 - saturate(-clump) * 0.35) * mix(vec3<f32>(1.0), vec3<f32>(0.88, 0.96, 1.05), saturate(-sward) * 0.5);
     col[M_GRASS] = grass_col;
+    // Bare ground in patches too: damper, darker earth next to dry, pale stretches.
+    let bare_v = 1.0 + (mid_v - 0.5) * 0.3 * clump_fade + (patch_v - 0.5) * 0.2 * macro_fade;
+    col[M_SOIL] *= bare_v;
+    col[M_SAND] *= bare_v;
+    col[M_GRAVEL] *= bare_v;
 
     // ---- Sample the materials present and blend them by height.
     var ms: array<MatSample, 9>;
+    var bh: array<f32, 9>;
     var hmax = -10.0;
     for (var i = 0u; i < MAT_COUNT; i++) {
         if (w[i] > 0.003) {
@@ -935,7 +941,12 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
                 ms[i].detail = mix(ms[i].detail, vec3<f32>(1.0), k);
                 ms[i].height = mix(ms[i].height, 0.5, k);
             }
-            hmax = max(hmax, ms[i].height + w[i]);
+            // Plants creep over the edges of roads, plazas and beds and bare ground bites
+            // into the turf: where growing and bare ground meet, the border wanders instead
+            // of following the paint.
+            let creep = select(-1.0, 1.0, i == M_GRASS || i == M_FOREST);
+            bh[i] = ms[i].height + w[i] + creep * (detail_n - 0.5) * 1.2 * fine_fade;
+            hmax = max(hmax, bh[i]);
         }
     }
     var albedo = vec3<f32>(0.0);
@@ -947,7 +958,7 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     for (var i = 0u; i < MAT_COUNT; i++) {
         if (w[i] > 0.003) {
             // From afar a pixel covers a mix of grounds in proportion to their weights.
-            let b = mix(max(ms[i].height + w[i] - hmax + 0.3, 0.0), w[i], far);
+            let b = mix(max(bh[i] - hmax + 0.3, 0.0), w[i], far);
             albedo += col[i] * ms[i].detail * b;
             nsum += ms[i].normal * b;
             roughness += ms[i].roughness * b;
