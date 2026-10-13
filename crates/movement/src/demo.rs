@@ -4,7 +4,8 @@
 //!   wall-jump → wall-run → mantle onto a tower → jump and double jump off it. Afterimages
 //!   trail every fast move, so a still frame shows the route.
 //! * **Ledge station** (between the two): a climber jumps at a block too high to climb
-//!   straight onto, catches its top, shimmies along it, climbs up and walks off the far end.
+//!   straight onto, catches its top, shimmies along it and around the corner at its end,
+//!   climbs up and walks off.
 //! * **Grapple tower** (behind the course): a grappler sprints at a 9 m tower, jumps, fires
 //!   its grapple hook at the top edge, is reeled up the wall, climbs over the top, runs across
 //!   and drops off the back.
@@ -121,7 +122,8 @@ pub mod layout {
     /// Top of the ledge block: too high to climb straight onto, in reach of a jump and a grab.
     pub const LEDGE_TOP: f64 = 3.7;
     /// The ledge block on the station's floor. The climber catches its top from the face at
-    /// z = 2.0 (toward the course), shimmies toward +X, climbs up and walks off the +X end.
+    /// z = 2.0 (toward the course), shimmies toward +X and around the corner onto the +X end,
+    /// climbs up there and walks off it.
     pub const LEDGE_WALL: Block = Block {
         center: [17.0, (LEDGE_TOP + 0.1) * 0.5, 1.2],
         size: [6.0, (LEDGE_TOP - 0.1) as f32, 1.6],
@@ -784,7 +786,8 @@ pub enum Climb {
     Approach,
     /// Hang for a moment.
     Hang,
-    /// Shimmy along the top toward +X.
+    /// Shimmy along the top toward +X, around the corner and on along the end (the stick held
+    /// toward +X all the way).
     Shimmy,
     /// Hold toward the block: climb up onto it.
     ClimbUp,
@@ -794,8 +797,9 @@ pub enum Climb {
     Rest,
 }
 
-/// Where the climber stops shimmying and climbs, x relative to the origin.
-const CLIMB_AT_X: f64 = 18.4;
+/// Where the climber stops shimmying along the block's end and climbs, z relative to the
+/// origin.
+const CLIMB_AT_Z: f64 = 1.25;
 
 #[allow(clippy::type_complexity)]
 fn run_climber(
@@ -840,14 +844,17 @@ fn run_climber(
             Climb::Hang => (*secs >= 0.7).then_some(Climb::Shimmy),
             Climb::Shimmy => {
                 intent.direction = Vec3::X;
-                (rel.x >= CLIMB_AT_X).then_some(Climb::ClimbUp)
+                let on_end = m
+                    .hang
+                    .is_some_and(|h| h.corner.is_none() && h.normal.dot(Vec3::X) > 0.9);
+                (on_end && rel.z <= CLIMB_AT_Z).then_some(Climb::ClimbUp)
             }
             Climb::ClimbUp => {
-                intent.direction = Vec3::NEG_Z;
+                intent.direction = m.hang.map_or(Vec3::NEG_X, |h| -h.normal);
                 (m.grounded && rel.y > layout::LEDGE_TOP).then_some(Climb::WalkOff)
             }
             Climb::WalkOff => {
-                intent.direction = Vec3::X * 0.5;
+                intent.direction = Vec3::X * 0.8;
                 (*secs > 0.3 && m.grounded && rel.y < 1.5).then_some(Climb::Rest)
             }
             Climb::Rest => (*secs >= 1.0).then_some(Climb::Start),

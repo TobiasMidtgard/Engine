@@ -22,7 +22,9 @@ use engine_world::physics::{
 use engine_world::{ContactKind, Gravity, Ground, GroundContact, NoiseEvent};
 
 use crate::grapple;
-use crate::mover::{Dash, DashRequest, Hang, Mantle, Mover, WallContact, flat, move_towards};
+use crate::mover::{
+    Corner, Dash, DashRequest, Hang, Mantle, Mover, WallContact, flat, move_towards,
+};
 use crate::platform::{self, Deck, Pin};
 use crate::profile::MovementProfile;
 
@@ -1216,11 +1218,7 @@ fn find_hang(p: &MovementProfile, b: &Body, probe: &Probe, v: Vec3, wish: Vec3) 
     let (face, normal, wall) = chest_wall(b, probe, dir)?;
     let low = p.mantle_max_height.min(p.ledge_grab_max_height);
     let top = ledge_top(b, probe, face, normal, low, p.ledge_grab_max_height)?;
-    Some(Hang {
-        top,
-        normal,
-        on: probe.pin(wall, top, normal),
-    })
+    Some(Hang::new(top, normal, probe.pin(wall, top, normal)))
 }
 
 /// Velocity toward the hanging position under `top` (sideways is left free).
@@ -1233,7 +1231,96 @@ fn hang_pull(b: &Body, h: &Hang, top: DVec3, dt: f32) -> Vec3 {
     (gap / dt.max(1e-4)).clamp_length_max(HANG_PULL)
 }
 
-/// One step hanging from a ledge: shimmy along it, climb up, kick off or let go.
+/// The ledge going on around a corner where the face hung from ends, shimmying `dir`: onto a
+/// wall across the way (an inside corner) or onto the end of the wall, turned toward `dir`
+/// (an outside corner), its top at the same height (`ledge` above the feet).
+fn find_corner(
+    p: &MovementProfile,
+    b: &Body,
+    probe: &Probe,
+    h: &Hang,
+    dir: Vec3,
+    ledge: f32,
+) -> Option<Corner> {
+    let up = b.up;
+    let n0 = h.normal;
+    let chest = b.pos + (up * (b.height * 0.25)).as_dvec3();
+    let reach = b.radius + HANG_GAP;
+    let is_wall = |hit: &Hit| hit.normal.dot(up).abs() < WALL_MAX_UP;
+    let inside = probe
+        .ray(chest, dir, b.radius + 0.2)
+        .filter(|hit| is_wall(hit) && hit.normal.dot(-dir) > 0.8);
+    let hit = inside.or_else(|| {
+        // Look back from past the end, behind the face, at the wall's end.
+        let from = chest + (dir * (b.radius + 0.45) - n0 * (reach + 0.2)).as_dvec3();
+        probe
+            .ray(from, -dir, b.radius + 0.6)
+            .filter(|hit| hit.distance > 0.0 && is_wall(hit) && hit.normal.dot(dir) > 0.8)
+    })?;
+    let normal = flat(hit.normal, up).normalize_or_zero();
+    let top = ledge_top(b, probe, hit.point, normal, ledge - 0.3, ledge + 0.3)?;
+    // The corner's edge at the top: the next face's ledge moved onto the old face's plane.
+    let edge = top + (n0 * (h.top - top).dot(n0.as_dvec3()) as f32).as_dvec3();
+    let hold = edge - (up * (b.height * 0.5 + HANG_REACH)).as_dvec3();
+    let (along, clear) = if inside.is_some() {
+        (n0, reach + 0.1)
+    } else {
+        (-n0, 0.12)
+    };
+    let from = b.pos;
+    let via = hold + ((n0 + normal) * reach).as_dvec3();
+    let to = hold + (normal * reach + along * clear).as_dvec3();
+    let length = (via.distance(from) + to.distance(via)) as f32;
+    Some(Corner {
+        from,
+        via,
+        to,
+        from_top: h.top,
+        from_normal: n0,
+        top: edge + (along * clear).as_dvec3(),
+        normal,
+        along,
+        came: dir,
+        wall: Some(hit.entity),
+        t: 0.0,
+        secs: (length / p.shimmy_speed.max(0.1)).max(0.25),
+    })
+}
+
+/// One step around a corner of the ledge: along the curve, turning to face the next face.
+fn round_corner(
+    m: &mut Mover,
+    b: &Body,
+    probe: &Probe,
+    mut h: Hang,
+    mut c: Corner,
+    dt: f32,
+) -> Vec3 {
+    c.t = (c.t + dt / c.secs).min(1.0);
+    let turn = smooth01(c.t);
+    h.normal = c
+        .from_normal
+        .lerp(c.normal, turn)
+        .try_normalize()
+        .unwrap_or(c.normal);
+    h.top = c.from_top.lerp(c.top, turn as f64);
+    h.on = None;
+    if c.t >= 1.0 {
+        h.top = c.top;
+        h.normal = c.normal;
+        h.on = c.wall.and_then(|w| probe.pin(w, c.top, c.normal));
+        h.corner = None;
+        h.carry = Some((c.came, c.along));
+    } else {
+        h.corner = Some(c);
+    }
+    m.hang = Some(h);
+    m.set_mode(LocomotionMode::Climb);
+    ((c.at(c.t) - b.pos).as_vec3() / dt.max(1e-4)).clamp_length_max(HANG_PULL * 1.5)
+}
+
+/// One step hanging from a ledge: shimmy along it (and around its corners), climb up, kick
+/// off or let go.
 #[allow(clippy::too_many_arguments)]
 fn hang(
     m: &mut Mover,
@@ -1255,6 +1342,17 @@ fn hang(
         m.grab_cooldown = cooldown;
         m.set_mode(LocomotionMode::Air);
     };
+    if let Some(c) = h.corner {
+        if crouch_pressed {
+            let_go(m, 0.5);
+            out.trigger(b.entity, "let_go");
+            return h.normal * 1.0;
+        }
+        return round_corner(m, b, probe, h, c, dt);
+    }
+    // Just around a corner, the stick held the old way along the ledge goes on the new way.
+    let carry = h.carry.filter(|(came, _)| wish.dot(*came) > 0.3);
+    let wish = carry.map_or(wish, |(_, along)| along * wish.length());
     // Still there? (Shimmied off its end, or it broke.)
     let held = (h.top - feet).dot(up.as_dvec3()) as f32;
     let Some((face, normal, wall)) =
@@ -1268,9 +1366,8 @@ fn hang(
         return flat(v, up);
     };
     let h = Hang {
-        top,
-        normal,
-        on: probe.pin(wall, top, normal),
+        carry,
+        ..Hang::new(top, normal, probe.pin(wall, top, normal))
     };
     m.hang = Some(h);
     let right = up.cross(normal);
@@ -1321,8 +1418,25 @@ fn hang(
             .filter(|(_, n, _)| n.dot(normal) > 0.8)
             .and_then(|(f, n, _)| ledge_top(&ahead, probe, f, n, ledge - 0.3, ledge + 0.3))
             .is_some();
+        // Corners only on ledges that stand still.
+        let still = m
+            .platform
+            .is_none_or(|d| d.velocity.length_squared() < 1e-4);
         if continues {
             along = right * (side * p.shimmy_speed);
+        } else if let Some(c) = find_corner(p, b, probe, &h, dir, ledge).filter(|_| still) {
+            out.trigger(b.entity, "ledge_corner");
+            return round_corner(
+                m,
+                b,
+                probe,
+                Hang {
+                    corner: Some(c),
+                    ..h
+                },
+                c,
+                dt,
+            );
         }
     }
     m.set_mode(LocomotionMode::Climb);

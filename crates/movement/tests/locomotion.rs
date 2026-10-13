@@ -362,11 +362,22 @@ fn catches_a_ledge_too_high_to_mantle_and_shimmies_along_it() {
     assert_eq!(mover(&app, c).mode, LocomotionMode::Climb);
     assert!(q.z - p.z > 1.5, "shimmied {:.2} m", q.z - p.z);
     assert!((q.y - p.y).abs() < 0.05, "{q:?}");
-    // ...and stops at the end of the wall instead of falling off it.
-    run(&mut app, 3.0);
-    let end = pos(&app, c);
-    assert_eq!(mover(&app, c).mode, LocomotionMode::Climb);
-    assert!(end.z > 3.0 && end.z < 4.0, "{end:?}");
+    // ...and at the end of the wall goes on around the corner onto its end face, still
+    // holding +Z, at the same height.
+    run(&mut app, 2.5);
+    let around = pos(&app, c);
+    let m = mover(&app, c);
+    assert_eq!(m.mode, LocomotionMode::Climb);
+    assert_eq!(triggered(&app, c, "ledge_corner"), 1);
+    let h = m.hang.unwrap();
+    assert!(
+        h.corner.is_none() && h.normal.distance(Vec3::Z) < 0.05,
+        "{h:?}"
+    );
+    assert!(m.facing.distance(Vec3::NEG_Z) < 0.1, "{}", m.facing);
+    assert!((around.z - (4.0 + 0.35 + 0.04)).abs() < 0.05, "{around:?}");
+    assert!(around.x > 1.3, "{around:?}");
+    assert!((around.y - p.y).abs() < 0.05, "{around:?}");
 
     // Jump: climbs up and stands on top.
     intent(&mut app, c, |i| i.direction = Vec3::ZERO);
@@ -377,6 +388,57 @@ fn catches_a_ledge_too_high_to_mantle_and_shimmies_along_it() {
     let m = mover(&app, c);
     assert!(m.grounded && top.x > 1.2, "{top:?}");
     assert!((top.y - (3.6 + 0.9)).abs() < 0.05, "{top:?}");
+}
+
+#[test]
+fn shimmies_into_an_inside_corner_and_on_along_the_other_wall() {
+    let mut app = app();
+    let c = hang_from_a_high_wall(&mut app);
+    // A wall across the way: its face at z = 2 runs out in front of the first one.
+    block(
+        &mut app,
+        DVec3::new(1.0, 1.8, 3.0),
+        Vec3::new(4.0, 3.6, 2.0),
+    );
+    let p = pos(&app, c);
+    intent(&mut app, c, |i| i.direction = Vec3::Z);
+    let secs = run_until(&mut app, 3.0, |w| {
+        let m = w.get::<Mover>(c).unwrap();
+        m.hang
+            .is_some_and(|h| h.corner.is_none() && h.normal.dot(Vec3::NEG_Z) > 0.99)
+    });
+    let m = mover(&app, c);
+    assert!(secs < 2.5, "{:?}", m.hang);
+    assert_eq!(triggered(&app, c, "ledge_corner"), 1);
+    // Hanging from the second wall, clear of the first, and still going (the stick still
+    // held toward +Z): along the second wall, away from the corner.
+    let q = pos(&app, c);
+    assert!((q.z - (2.0 - 0.35 - 0.04)).abs() < 0.06, "{q:?}");
+    assert!(q.x < 1.0 - 0.35, "{q:?}");
+    run(&mut app, 0.3);
+    let r = pos(&app, c);
+    assert_eq!(mover(&app, c).mode, LocomotionMode::Climb);
+    assert!(r.x < q.x - 0.2, "{q:?} → {r:?}");
+    assert!((r.y - p.y).abs() < 0.05, "{r:?}");
+}
+
+#[test]
+fn stops_in_a_corner_whose_other_wall_is_too_high() {
+    let mut app = app();
+    let c = hang_from_a_high_wall(&mut app);
+    block(
+        &mut app,
+        DVec3::new(1.0, 3.0, 3.0),
+        Vec3::new(4.0, 6.0, 2.0),
+    );
+    intent(&mut app, c, |i| i.direction = Vec3::Z);
+    run(&mut app, 2.0);
+    let m = mover(&app, c);
+    let q = pos(&app, c);
+    assert_eq!(m.mode, LocomotionMode::Climb);
+    assert_eq!(triggered(&app, c, "ledge_corner"), 0);
+    assert!(m.hang.unwrap().normal.distance(Vec3::NEG_X) < 0.05);
+    assert!(q.z > 1.4 && q.z < 1.7, "{q:?}");
 }
 
 #[test]

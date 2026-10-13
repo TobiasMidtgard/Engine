@@ -39,6 +39,7 @@ struct Cast {
     director: Entity,
     rider: Entity,
     car: Entity,
+    climber: Entity,
 }
 
 struct Shot {
@@ -251,6 +252,23 @@ const SHOTS: &[Shot] = &[
             )
         },
     },
+    Shot {
+        file: "13_shimmy_around_the_ledge_corner.png",
+        when: |w, c| {
+            mover(w, c.climber)
+                .hang
+                .and_then(|h| h.corner)
+                .is_some_and(|k| k.t > 0.5)
+        },
+        camera: |w, c| {
+            let p = pos(w, c.climber);
+            (
+                p + DVec3::new(3.6, 0.4, 3.4),
+                p + DVec3::new(-0.4, 0.3, -0.4),
+                50.0,
+            )
+        },
+    },
 ];
 
 fn build_app() -> (App, Cast, Entity) {
@@ -364,6 +382,7 @@ fn build_app() -> (App, Cast, Entity) {
         director,
         rider: named(&mut app, "Rider"),
         car: named(&mut app, "Freight car"),
+        climber: named(&mut app, "Climber"),
     };
     (app, cast, camera)
 }

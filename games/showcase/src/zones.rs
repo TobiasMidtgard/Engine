@@ -566,16 +566,17 @@ pub fn demo_views(z: &Zone) -> Vec<View> {
                 .on_arrive("movement.duel", &duel("Pack"))
                 .on_leave("movement.duel", cycle),
                 // The ledge station: the climber restarts its loop on arrival and is caught
-                // shimmying along the block's top. The Blink round has no slow motion, so the
-                // climber keeps its pace.
+                // going around the corner at the end of the block's top. The Blink round has
+                // no slow motion, so the climber keeps its pace.
                 View::new(
                     "parkour_ledge",
-                    "Ledge hang: catch a ledge too high to climb, shimmy along it, climb up",
-                    [11.4, 3.0, 8.4],
-                    [17.0, 2.3, 1.6],
+                    "Ledge hang: catch a ledge too high to climb, shimmy along it and around \
+                     its corner, climb up",
+                    [24.6, 3.3, 6.2],
+                    [19.7, 2.6, 1.7],
                     16.0,
                 )
-                .warmup(2.6)
+                .warmup(4.4)
                 .on_arrive("movement.duel", &duel("Blink"))
                 .on_arrive("movement.climber", "{}")
                 .on_leave("movement.duel", cycle),
