@@ -22,7 +22,7 @@ use super::kit::{MeshBuilder, round_corner};
 // ---------------------------------------------------------------------------------------
 
 /// Deterministic hash of an integer to 0..1.
-fn hash(mut x: u32) -> f32 {
+pub(super) fn hash(mut x: u32) -> f32 {
     x ^= x >> 16;
     x = x.wrapping_mul(0x7feb_352d);
     x ^= x >> 15;
@@ -36,7 +36,7 @@ fn hash2(a: u32, b: u32) -> f32 {
 }
 
 /// Smooth 1D value noise in 0..1.
-fn noise1(x: f32, seed: u32) -> f32 {
+pub(super) fn noise1(x: f32, seed: u32) -> f32 {
     let i = x.floor();
     let f = x - i;
     let t = f * f * (3.0 - 2.0 * f);
@@ -46,25 +46,25 @@ fn noise1(x: f32, seed: u32) -> f32 {
 }
 
 /// A grey vertex tint (multiplies the material color).
-fn grey(v: f32) -> Vec4 {
+pub(super) fn grey(v: f32) -> Vec4 {
     Vec4::new(v, v, v, 1.0)
 }
 
 /// A colored vertex tint.
-fn tint(r: f32, g: f32, b: f32) -> Vec4 {
+pub(super) fn tint(r: f32, g: f32, b: f32) -> Vec4 {
     Vec4::new(r, g, b, 1.0)
 }
 
-fn at(t: Vec3) -> Mat4 {
+pub(super) fn at(t: Vec3) -> Mat4 {
     Mat4::from_translation(t)
 }
 
-fn rot_at(q: Quat, t: Vec3) -> Mat4 {
+pub(super) fn rot_at(q: Quat, t: Vec3) -> Mat4 {
     Mat4::from_rotation_translation(q, t)
 }
 
 /// A grid of `rows × cols` points with a color per point, joined into quads.
-fn grid_colored(
+pub(super) fn grid_colored(
     b: &mut MeshBuilder,
     rows: usize,
     cols: usize,
@@ -89,7 +89,7 @@ fn grid_colored(
 }
 
 /// A polygon with each corner rounded by its own radius (`steps` segments per corner).
-fn rounded_polygon(pts: &[Vec2], radii: &[f32], steps: u32) -> Vec<Vec2> {
+pub(super) fn rounded_polygon(pts: &[Vec2], radii: &[f32], steps: u32) -> Vec<Vec2> {
     let n = pts.len();
     let mut out = Vec::new();
     for i in 0..n {
@@ -109,7 +109,7 @@ fn rounded_polygon(pts: &[Vec2], radii: &[f32], steps: u32) -> Vec<Vec2> {
 }
 
 /// A polyline with its inner corners rounded (`radius` per corner, clamped to fit).
-fn fillet_path(pts: &[Vec3], radii: &[f32], steps: u32) -> Vec<Vec3> {
+pub(super) fn fillet_path(pts: &[Vec3], radii: &[f32], steps: u32) -> Vec<Vec3> {
     let n = pts.len();
     if n < 3 {
         return pts.to_vec();
@@ -151,7 +151,7 @@ fn fillet_path(pts: &[Vec3], radii: &[f32], steps: u32) -> Vec<Vec3> {
 /// is two entries at the same point with different normals. `up` sets the frame's up at the
 /// path's start. U runs along the path in meters, V around the section. Open sweeps get
 /// flat end caps (convex sections only).
-fn sweep(
+pub(super) fn sweep(
     b: &mut MeshBuilder,
     path: &[Vec3],
     closed: bool,
@@ -293,7 +293,7 @@ fn hex_body(b: &mut MeshBuilder, m: Mat4, af: f32, h: f32) {
 
 /// A hex nut sitting on the XZ plane around +Y at the origin, `af` across flats, `h` tall,
 /// with the bolt's end poking out of it, placed by `m`.
-fn hex_nut(b: &mut MeshBuilder, m: Mat4, af: f32, h: f32) {
+pub(super) fn hex_nut(b: &mut MeshBuilder, m: Mat4, af: f32, h: f32) {
     hex_body(b, m, af, h);
     // The threaded end of the bolt, rounded off.
     let rb = af * 0.32;
@@ -307,7 +307,7 @@ fn hex_nut(b: &mut MeshBuilder, m: Mat4, af: f32, h: f32) {
 }
 
 /// A domed bolt head (carriage bolt or rivet) on the XZ plane around +Y, placed by `m`.
-fn dome_head(b: &mut MeshBuilder, m: Mat4, r: f32, h: f32, sides: u32) {
+pub(super) fn dome_head(b: &mut MeshBuilder, m: Mat4, r: f32, h: f32, sides: u32) {
     let mut p = vec![Vec2::new(r, -0.002)];
     p.extend((0..=3).map(|k| {
         let a = k as f32 / 3.0 * FRAC_PI_2;
@@ -332,7 +332,7 @@ fn knuckle(b: &mut MeshBuilder, m: Mat4, r: f32, hh: f32, sides: u32) {
 
 /// A flat washer on the XZ plane around +Y, placed by `m` (top and rim only: it sits on
 /// something and a nut covers its hole).
-fn washer(b: &mut MeshBuilder, m: Mat4, r_in: f32, r_out: f32, t: f32, sides: u32) {
+pub(super) fn washer(b: &mut MeshBuilder, m: Mat4, r_in: f32, r_out: f32, t: f32, sides: u32) {
     let p = [
         Vec2::new(r_out, -0.001),
         Vec2::new(r_out, t),
@@ -343,14 +343,14 @@ fn washer(b: &mut MeshBuilder, m: Mat4, r_in: f32, r_out: f32, t: f32, sides: u3
 }
 
 /// A weld bead: a thin rounded seam from `a` to `c`.
-fn weld(b: &mut MeshBuilder, a: Vec3, c: Vec3, r: f32) {
+pub(super) fn weld(b: &mut MeshBuilder, a: Vec3, c: Vec3, r: f32) {
     b.tube(&[a, c], r, 5, false, true);
 }
 
 /// An I-beam (or H column) along Z from `-len/2` to `len/2`: `depth` along Y, `width`
 /// along X, flange thickness `tf`, web thickness `tw`, with rolled root fillets and
 /// slightly rounded flange edges.
-fn i_beam(b: &mut MeshBuilder, len: f32, depth: f32, width: f32, tf: f32, tw: f32) {
+pub(super) fn i_beam(b: &mut MeshBuilder, len: f32, depth: f32, width: f32, tf: f32, tw: f32) {
     let (w, h, t) = (width * 0.5, depth * 0.5, tw * 0.5);
     let pts = [
         Vec2::new(-w, -h),
@@ -376,12 +376,12 @@ fn i_beam(b: &mut MeshBuilder, len: f32, depth: f32, width: f32, tf: f32, tw: f3
 }
 
 /// A plate: a box with softly rounded edges, `half` extents.
-fn plate(b: &mut MeshBuilder, m: Mat4, half: Vec3, r: f32) {
+pub(super) fn plate(b: &mut MeshBuilder, m: Mat4, half: Vec3, r: f32) {
     b.placed(m, |b| b.rounded_box(half, r, 1));
 }
 
 /// A straight round bar between two points.
-fn bar(b: &mut MeshBuilder, a: Vec3, c: Vec3, r: f32, sides: u32) {
+pub(super) fn bar(b: &mut MeshBuilder, a: Vec3, c: Vec3, r: f32, sides: u32) {
     b.tube(&[a, c], r, sides, false, true);
 }
 
@@ -1084,12 +1084,12 @@ fn hex_head(b: &mut MeshBuilder, m: Mat4, af: f32, h: f32) {
 }
 
 /// A rotation taking +Y to `dir`.
-fn y_to(dir: Vec3) -> Quat {
+pub(super) fn y_to(dir: Vec3) -> Quat {
     Quat::from_rotation_arc(Vec3::Y, dir.normalize())
 }
 
 /// A frame (as a matrix) with its columns `x`, `y` and `z = x × y` at `t`.
-fn frame(y: Vec3, z: Vec3, t: Vec3) -> Mat4 {
+pub(super) fn frame(y: Vec3, z: Vec3, t: Vec3) -> Mat4 {
     let (y, z) = (y.normalize(), z.normalize());
     let x = y.cross(z);
     Mat4::from_cols(x.extend(0.0), y.extend(0.0), z.extend(0.0), t.extend(1.0))

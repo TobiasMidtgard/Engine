@@ -68,7 +68,12 @@ everything else (streaming, LOD, colliders, ground queries, prints) follows the 
   and the ground looks the same near and far; materials blend by height (stones and blades
   poke through their neighbors), tiles never visibly repeat (two offset lookups switched by
   noise), and rock is projected on three axes at three scales so cliffs read as rock from
-  kilometers away. `examples/material_swatches.rs` saves a lit preview of each.
+  kilometers away. Past a few dozen meters, where a texture is squeezed into a pixel or two
+  along the view, each ground hands over to a copy four times larger, so meadows, fields and
+  roads keep their grain out to a kilometer; anisotropic filtering keeps textures sharp
+  across the view at glancing angles. Grass grows in clumps whatever its color, painted and
+  tinted grass included: straw-colored tufts beside dark, dense ones, and sunburnt and lush
+  stretches tens of meters across. `examples/material_swatches.rs` saves a lit preview of each.
 - **Photo-scanned ground where fetched.** Seven materials (grass, forest floor, soil, mud,
   rock, sand, gravel) have CC0 Poly Haven scans listed in `assets/manifests/terrain.toml`.
   After `cargo run -p fetch-assets -- terrain` they replace the procedural versions
@@ -130,8 +135,10 @@ commands.entity(bodies["Moon"]).insert(PlanetTerrain::moon(7).with_radius(1_737_
 ```
 
 `examples/terrain_shots.rs` renders the test views headless (lab prints, rain, snow, painted
-ground and a patchwork of painted layers, the range, the coast, the Moon and Mars from orbit) and `examples/terrain_map.rs` draws a relief
-map around the home pad for tuning shapes.
+ground and a patchwork of painted layers, a meadow tinted the way the showcase paints its
+valley and a natural one at eye height, the range, the coast, the Moon and Mars from orbit)
+with the game's auto exposure, and `examples/terrain_map.rs` draws a relief map around the
+home pad for tuning shapes.
 
 ## Test cases in the showcase
 

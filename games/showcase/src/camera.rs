@@ -4,6 +4,8 @@
 //! - Mouse wheel scales speed. Speed also grows with altitude, so orbit is reachable.
 //! - 1–9 jump to the zones, 0 to the overview, O to orbit, M to the Moon.
 //! - `[` and `]` change the hour, `T` starts or stops the clock.
+//! - While play mode (P) is on, the pilot's camera has the controls; this one picks up from
+//!   there when play ends.
 
 use crate::places::{self, Place};
 use engine::prelude::*;
@@ -72,7 +74,23 @@ pub fn fly(
     mut sky: ResMut<engine_weather::Sky>,
     mut window: ResMut<Window>,
     mut q: Query<(&mut Transform, &mut ShowcaseCamera)>,
+    play: Option<Res<engine_movement::Play>>,
+    views: Query<&GlobalTransform, Without<ShowcaseCamera>>,
+    mut play_view: Local<Option<(DVec3, Vec3)>>,
 ) {
+    // While someone plays (P), the pilot's camera renders and owns the keys, mouse and cursor.
+    // This one waits, then carries on from where the pilot's camera was when play ends.
+    if let Some(view) = play.as_ref().and_then(|p| p.camera) {
+        if let Ok(g) = views.get(view) {
+            *play_view = Some((g.translation(), g.forward()));
+        }
+        return;
+    }
+    if let Some((position, forward)) = play_view.take() {
+        for (mut t, mut cam) in &mut q {
+            look(&mut t, &mut cam, position, position + forward.as_dvec3());
+        }
+    }
     if mouse_buttons.just_pressed(MouseButton::Right) {
         window.cursor_mode = CursorMode::Locked;
     }

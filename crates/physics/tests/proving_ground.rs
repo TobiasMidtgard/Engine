@@ -7,7 +7,7 @@ use engine_core::registry::call_api;
 use engine_core::time::TimeSource;
 use engine_physics::PhysicsPlugin;
 use engine_physics::demo::{self, Station};
-use engine_world::physics::RigidBody;
+use engine_world::physics::{RigidBody, Velocity};
 use engine_world::{SimulationFocus, WorldPlugin};
 use serde_json::json;
 
@@ -124,4 +124,48 @@ fn the_api_replays_a_station_now() {
         err.as_ref().is_err_and(|e| e.contains("dominoes")),
         "{err:?}"
     );
+}
+
+/// The barrel run's drums roll down the ramp and the whole runway (one triangle mesh, an edge
+/// every 2 m) flat and in their lanes, then stop in the sand pit.
+#[test]
+fn drums_roll_down_the_barrel_run_into_the_sand() {
+    let mut app = app();
+    app.update();
+    let drums: Vec<Entity> = (1..=3)
+        .map(|k| named(&mut app, &format!("Run drum {k}"))[0])
+        .collect();
+    let base = Station::BarrelRun.base();
+    let local = |app: &App, e: Entity| app.world.get::<Transform>(e).unwrap().translation - base;
+    // The runway's flat part (station x), its top, and the pit.
+    let (flat, deck_y, pit) = ((-19.0, 24.0), 0.04, (25.0, 31.4));
+    let (mut hop, mut drift, mut fastest) = (0.0f64, 0.0f64, 0.0f32);
+    // Until just before the station replays.
+    let secs = Station::BarrelRun.cycle_secs().unwrap() - 0.5;
+    for _ in 0..(secs * 60.0) as usize {
+        app.update();
+        for (k, &d) in drums.iter().enumerate() {
+            let p = local(&app, d);
+            if p.x > flat.0 && p.x < flat.1 {
+                hop = hop.max((p.y - demo::SLAB_RISE - (deck_y + 0.3)).abs());
+                drift = drift.max((p.z - (k as f64 - 1.0) * 1.8).abs());
+            }
+            let v = app.world.get::<Velocity>(d).unwrap().linear.length();
+            fastest = fastest.max(v);
+        }
+    }
+    assert!(fastest > 4.0, "the drums never got going: {fastest} m/s");
+    assert!(hop < 0.01, "the drums hopped {hop} m on the runway");
+    assert!(
+        drift < 0.3,
+        "the drums wandered {drift} m out of their lanes"
+    );
+    for &d in &drums {
+        let p = local(&app, d);
+        let v = app.world.get::<Velocity>(d).unwrap().linear.length();
+        assert!(
+            p.x > pit.0 && p.x < pit.1 && v < 0.05,
+            "a drum isn't resting in the sand: at {p}, {v} m/s"
+        );
+    }
 }
