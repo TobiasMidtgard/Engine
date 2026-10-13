@@ -397,6 +397,80 @@ impl Burst {
     }
 }
 
+/// Most particles one hit or death can spawn ([`SubEmit::count`]).
+pub const MAX_SUB_COUNT: u32 = 256;
+
+/// New particles in another layer of the same effect, born where one of this layer's particles
+/// hits something, dies, or flies: sparks that split as they skid, drops that splash where they
+/// land, firework shells bursting into stars, glitter trailing behind each star, smoke behind
+/// flying debris. It all happens on the GPU, with no readback.
+///
+/// On a hit, the new layer's local up points out of the surface that was hit; otherwise it is
+/// the effect's own up. The new particles start from the layer's own shape around that point.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SubEmit {
+    /// Name of the layer that gets the new particles. It spawns only this way, so it has no
+    /// `rate`, `rate_per_meter` or `bursts` of its own.
+    pub layer: String,
+    /// New particles per hit or death, or per second of each particle's flight for
+    /// `trailing` (at most [`MAX_SUB_COUNT`]).
+    pub count: u32,
+    /// Chance that a hit or death spawns anything, 0..1.
+    pub chance: f32,
+    /// Fraction of the particle's velocity the new ones keep (0..1).
+    pub inherit_velocity: f32,
+}
+
+impl Default for SubEmit {
+    fn default() -> Self {
+        Self {
+            layer: String::new(),
+            count: 4,
+            chance: 1.0,
+            inherit_velocity: 0.0,
+        }
+    }
+}
+
+impl SubEmit {
+    /// `count` particles in `layer` every time.
+    pub fn new(layer: &str, count: u32) -> Self {
+        Self {
+            layer: layer.into(),
+            count,
+            ..Default::default()
+        }
+    }
+
+    /// Particles spawned per event (per second for `trailing`) on average.
+    fn yield_per_event(&self) -> f32 {
+        self.count.min(MAX_SUB_COUNT) as f32 * self.chance.clamp(0.0, 1.0)
+    }
+}
+
+/// When a [`SubEmit`] spawns.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SubKind {
+    /// [`EmitterDesc::on_hit`].
+    Hit,
+    /// [`EmitterDesc::on_death`].
+    Death,
+    /// [`EmitterDesc::trailing`].
+    Trail,
+}
+
+impl SubKind {
+    /// The field's name, for messages.
+    pub fn field(self) -> &'static str {
+        match self {
+            SubKind::Hit => "on_hit",
+            SubKind::Death => "on_death",
+            SubKind::Trail => "trailing",
+        }
+    }
+}
+
 /// One layer of an effect: a population of particles with its own spawning, motion and look.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -471,6 +545,17 @@ pub struct EmitterDesc {
     /// Particles move with the emitter instead of being left behind (auras, orbiting runes).
     pub local_space: bool,
 
+    // ---- sub-emitters
+    /// New particles in another layer wherever this layer's particles hit the ground, water or
+    /// something on screen (needs `collide`; a bouncing particle spawns on every bounce).
+    pub on_hit: Option<SubEmit>,
+    /// New particles in another layer wherever this layer's particles die (their life runs out,
+    /// or `Collide::Die` ends it).
+    pub on_death: Option<SubEmit>,
+    /// New particles in another layer dropped along this layer's particles' paths, `count` per
+    /// second of flight each (glitter behind firework stars, smoke behind flying debris).
+    pub trailing: Option<SubEmit>,
+
     // ---- look
     /// Procedural sprite.
     pub sprite: Sprite,
@@ -525,6 +610,9 @@ impl Default for EmitterDesc {
             attract: 0.0,
             collide: Collide::None,
             local_space: false,
+            on_hit: None,
+            on_death: None,
+            trailing: None,
             sprite: Sprite::Glow,
             facing: Facing::Camera,
             stretch: 0.0,
@@ -581,9 +669,25 @@ impl EmitterDesc {
         self.shape.extent() + len3(self.offset) + travel + size
     }
 
-    /// Check values that would make the layer invisible or broken. Returns a sentence saying
-    /// what to fix.
+    /// This layer's sub-emitters and when each spawns.
+    pub fn subs(&self) -> impl Iterator<Item = (&SubEmit, SubKind)> {
+        [
+            (&self.on_hit, SubKind::Hit),
+            (&self.on_death, SubKind::Death),
+            (&self.trailing, SubKind::Trail),
+        ]
+        .into_iter()
+        .filter_map(|(s, kind)| s.as_ref().map(|s| (s, kind)))
+    }
+
+    /// Check values that would make the layer invisible or broken, as a layer nothing feeds
+    /// (see [`EffectDesc::validate`]). Returns a sentence saying what to fix.
     pub fn validate(&self) -> Result<(), String> {
+        self.validate_layer(false)
+    }
+
+    /// [`Self::validate`], for a layer that another layer's sub-emitter feeds or not.
+    fn validate_layer(&self, fed: bool) -> Result<(), String> {
         let label = if self.name.is_empty() {
             "an emitter".to_string()
         } else {
@@ -604,9 +708,36 @@ impl EmitterDesc {
         if self.rate < 0.0 || self.rate_per_meter < 0.0 {
             return Err(format!("{label} has a negative spawn rate."));
         }
-        if self.rate == 0.0 && self.rate_per_meter == 0.0 && self.bursts.is_empty() {
+        let spawns = self.rate != 0.0 || self.rate_per_meter != 0.0 || !self.bursts.is_empty();
+        if fed && spawns {
             return Err(format!(
-                "{label} never spawns anything; give it a rate, rate_per_meter or bursts."
+                "{label} gets its particles from another layer's on_hit or on_death, so it \
+                 can't have a rate, rate_per_meter or bursts of its own."
+            ));
+        }
+        if !fed && !spawns {
+            return Err(format!(
+                "{label} never spawns anything; give it a rate, rate_per_meter or bursts, or \
+                 feed it from another layer's on_hit or on_death."
+            ));
+        }
+        for (sub, kind) in self.subs() {
+            let which = kind.field();
+            if !(1..=MAX_SUB_COUNT).contains(&sub.count) {
+                return Err(format!(
+                    "{label}'s {which} has count {}; use 1 to {MAX_SUB_COUNT}.",
+                    sub.count
+                ));
+            }
+            if !(0.0..=1.0).contains(&sub.chance) || !(0.0..=1.0).contains(&sub.inherit_velocity) {
+                return Err(format!(
+                    "{label}'s {which} needs chance and inherit_velocity between 0 and 1."
+                ));
+            }
+        }
+        if self.on_hit.is_some() && self.collide == Collide::None {
+            return Err(format!(
+                "{label} has on_hit but never hits anything; give it a collide."
             ));
         }
         if self.color.0.is_empty() {
@@ -741,11 +872,113 @@ impl EffectDesc {
                 self.name, self.prewarm
             ));
         }
-        for e in &self.emitters {
-            e.validate()
+        for (i, e) in self.emitters.iter().enumerate() {
+            e.validate_layer(self.is_fed(i))
                 .map_err(|err| format!("Effect \"{}\": {err}", self.name))?;
+            for (sub, _) in e.subs() {
+                match self.layer(&sub.layer) {
+                    Some(j) if j != i => {}
+                    Some(_) => {
+                        return Err(format!(
+                            "Effect \"{}\": layer \"{}\" feeds itself; feed another layer.",
+                            self.name, sub.layer
+                        ));
+                    }
+                    None => {
+                        return Err(format!(
+                            "Effect \"{}\": no layer named \"{}\" to feed; name one of its \
+                             emitters.",
+                            self.name, sub.layer
+                        ));
+                    }
+                }
+            }
         }
         Ok(())
+    }
+
+    /// Index of the first layer named `name`.
+    pub fn layer(&self, name: &str) -> Option<usize> {
+        if name.is_empty() {
+            return None;
+        }
+        self.emitters.iter().position(|e| e.name == name)
+    }
+
+    /// The layers feeding layer `i` through a sub-emitter: `(feeder, sub, kind)`.
+    pub fn feeders(&self, i: usize) -> impl Iterator<Item = (usize, &SubEmit, SubKind)> {
+        self.emitters.iter().enumerate().flat_map(move |(j, e)| {
+            e.subs()
+                .filter(move |(sub, _)| j != i && self.layer(&sub.layer) == Some(i))
+                .map(move |(sub, kind)| (j, sub, kind))
+        })
+    }
+
+    /// True if another layer's sub-emitter feeds layer `i`.
+    pub fn is_fed(&self, i: usize) -> bool {
+        self.feeders(i).next().is_some()
+    }
+
+    /// Particles layer `i` needs room for at once. A fed layer's room comes from the particles
+    /// its feeders lose each second (and all at once, for bursts).
+    pub fn layer_capacity(&self, i: usize, rate_scale: f32) -> u32 {
+        self.layer_capacity_at(i, rate_scale, 0)
+    }
+
+    fn layer_capacity_at(&self, i: usize, rate_scale: f32, depth: u32) -> u32 {
+        let e = &self.emitters[i];
+        if e.max_particles > 0 || depth > 4 || !self.is_fed(i) {
+            return e.capacity(rate_scale);
+        }
+        let (mut steady, mut bursts) = (0.0f32, 0.0f32);
+        for (j, sub, kind) in self.feeders(i) {
+            let f = &self.emitters[j];
+            if kind == SubKind::Trail {
+                // Every particle of the feeder alive drops `count` a second.
+                let alive = self.layer_capacity_at(j, rate_scale, depth + 1) as f32;
+                steady += alive * sub.yield_per_event();
+                continue;
+            }
+            // A bouncing particle can hit several times.
+            let per = sub.yield_per_event() * if kind == SubKind::Hit { 2.0 } else { 1.0 };
+            if self.is_fed(j) {
+                // Treat a fed feeder's whole population as dying at once (firework stars).
+                bursts += self.layer_capacity_at(j, rate_scale, depth + 1) as f32 * per;
+                continue;
+            }
+            let mut rate = f.rate + f.rate_per_meter * ASSUMED_EMITTER_SPEED;
+            let mut burst = 0.0;
+            for b in &f.bursts {
+                if b.repeat > 0.0 {
+                    rate += b.count as f32 / b.repeat;
+                    burst += b.count as f32;
+                } else {
+                    burst += b.total() as f32;
+                }
+            }
+            steady += rate * rate_scale * per;
+            bursts += burst * rate_scale * per;
+        }
+        let n = (steady * e.max_lifetime() * 1.15).ceil() + bursts.ceil();
+        (n as u32).clamp(16, 1 << 22).next_multiple_of(64)
+    }
+
+    /// How far layer `i`'s particles get from the effect, meters (for culling): a fed layer's
+    /// start wherever its feeders' particles get to.
+    pub fn layer_reach(&self, i: usize) -> f32 {
+        self.layer_reach_at(i, 0)
+    }
+
+    fn layer_reach_at(&self, i: usize, depth: u32) -> f32 {
+        let own = self.emitters[i].reach();
+        if depth > 4 {
+            return own;
+        }
+        let from = self
+            .feeders(i)
+            .map(|(j, ..)| self.layer_reach_at(j, depth + 1))
+            .fold(0.0, f32::max);
+        own + from
     }
 
     /// True if the effect stops by itself (has a duration).
@@ -756,12 +989,24 @@ impl EffectDesc {
     /// Seconds from start until the last particle can still be alive (none = loops).
     pub fn total_secs(&self) -> Option<f32> {
         let d = self.duration?;
-        let tail = self
-            .emitters
-            .iter()
-            .map(|e| e.delay + e.duration.unwrap_or(d).min(d) + e.max_lifetime())
+        let tail = (0..self.emitters.len())
+            .map(|i| self.layer_tail(i, d, 0))
             .fold(0.0, f32::max);
         Some(tail.max(d))
+    }
+
+    /// Seconds from start until layer `i`'s last particle can still be alive, for an effect
+    /// lasting `d` seconds: a fed layer spawns until its feeders' last particle dies.
+    fn layer_tail(&self, i: usize, d: f32, depth: u32) -> f32 {
+        let e = &self.emitters[i];
+        if !self.is_fed(i) || depth > 4 {
+            return e.delay + e.duration.unwrap_or(d).min(d) + e.max_lifetime();
+        }
+        let fed_until = self
+            .feeders(i)
+            .map(|(j, ..)| self.layer_tail(j, d, depth + 1))
+            .fold(0.0, f32::max);
+        fed_until + e.max_lifetime()
     }
 }
 
@@ -876,6 +1121,125 @@ mod tests {
             ..e
         };
         assert_eq!(fixed.capacity(1.0), 77);
+    }
+
+    /// A shell that bursts into stars when it dies, and stars that crackle when they die.
+    fn shell_and_stars() -> EffectDesc {
+        EffectDesc {
+            name: "t.shell".into(),
+            duration: Some(0.1),
+            emitters: vec![
+                EmitterDesc {
+                    bursts: vec![Burst {
+                        count: 2,
+                        ..Default::default()
+                    }],
+                    lifetime: [1.5, 1.5],
+                    on_death: Some(SubEmit::new("stars", 50)),
+                    ..em("shell")
+                },
+                EmitterDesc {
+                    lifetime: [1.0, 2.0],
+                    on_death: Some(SubEmit {
+                        chance: 0.5,
+                        ..SubEmit::new("crackle", 4)
+                    }),
+                    ..em("stars")
+                },
+                EmitterDesc {
+                    lifetime: [0.2, 0.3],
+                    ..em("crackle")
+                },
+            ],
+            ..Default::default()
+        }
+    }
+
+    fn em(name: &str) -> EmitterDesc {
+        EmitterDesc {
+            name: name.into(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn sub_emitters_feed_named_layers_that_spawn_only_from_them() {
+        let e = shell_and_stars();
+        e.validate().unwrap();
+        assert_eq!(e.layer("stars"), Some(1));
+        assert!(!e.is_fed(0) && e.is_fed(1) && e.is_fed(2));
+        let (j, sub, kind) = e.feeders(1).next().unwrap();
+        assert_eq!((j, sub.count, kind), (0, 50, SubKind::Death));
+
+        let broken = |f: &dyn Fn(&mut EffectDesc)| {
+            let mut e = shell_and_stars();
+            f(&mut e);
+            e.validate().unwrap_err()
+        };
+        assert!(broken(&|e| e.emitters[1].rate = 5.0).contains("of its own"));
+        assert!(
+            broken(&|e| e.emitters[0].on_death.as_mut().unwrap().layer = "x".into())
+                .contains("no layer named \"x\"")
+        );
+        assert!(
+            broken(&|e| e.emitters[0].on_death.as_mut().unwrap().layer = "shell".into())
+                .contains("feeds itself")
+        );
+        assert!(
+            broken(&|e| e.emitters[0].on_death.as_mut().unwrap().count = 0).contains("count 0")
+        );
+        assert!(
+            broken(&|e| e.emitters[0].on_hit = Some(SubEmit::new("stars", 1)))
+                .contains("give it a collide")
+        );
+        // Unfed and without spawning of its own, a layer still never spawns.
+        assert!(broken(&|e| e.emitters[0].on_death = None).contains("never spawns"));
+    }
+
+    #[test]
+    fn fed_layers_get_room_for_what_their_feeders_lose() {
+        let e = shell_and_stars();
+        // Two shells burst into 50 stars each.
+        let stars = e.layer_capacity(1, 1.0);
+        assert!((100..=192).contains(&stars), "{stars}");
+        // Half of those stars crackle into 4 each, all at once at worst.
+        let crackle = e.layer_capacity(2, 1.0);
+        assert!(crackle >= stars * 2, "{crackle} for {stars} stars");
+        // A steady stream of drops splashing on every bounce.
+        let rain = EffectDesc {
+            name: "t.rain".into(),
+            emitters: vec![
+                EmitterDesc {
+                    rate: 100.0,
+                    collide: Collide::Bounce {
+                        restitution: 0.2,
+                        friction: 0.5,
+                    },
+                    on_hit: Some(SubEmit::new("splash", 3)),
+                    ..em("drops")
+                },
+                EmitterDesc {
+                    lifetime: [0.5, 0.5],
+                    ..em("splash")
+                },
+            ],
+            ..Default::default()
+        };
+        rain.validate().unwrap();
+        // 100 drops/s x 3 x 2 hits each, living 0.5 s.
+        let c = rain.layer_capacity(1, 1.0);
+        assert!((300..=448).contains(&c), "{c}");
+        assert_eq!(rain.layer_capacity(0, 1.0), rain.emitters[0].capacity(1.0));
+        // Stars reach as far as the shells fly plus their own spread.
+        assert!(e.layer_reach(1) > e.emitters[1].reach());
+    }
+
+    #[test]
+    fn total_secs_waits_for_fed_layers() {
+        // Shells (emitted over 0.1 s) die by 1.6 s, stars live up to 2 s more, then the
+        // crackle 0.3 s.
+        let t = shell_and_stars().total_secs().unwrap();
+        assert!((t - 3.9).abs() < 1e-4, "{t}");
     }
 
     #[test]
