@@ -9,6 +9,7 @@ use engine_core::math::Frustum;
 use engine_core::prelude::*;
 use engine_world::{SurfaceLayers, WeatherState, WindField};
 
+use crate::cloud_shadows::GpuCloudShadow;
 use crate::components::{
     AmbientLight, Camera, DirectionalLight, Exposure, PointLight, Projection, SkyLightVolume,
 };
@@ -80,6 +81,20 @@ pub struct FrameUniform {
     /// The open ground's weather in the map's encoding (wetness, standing water / 0.04 m, snow /
     /// 0.3 m, scorch): beyond the map, and for roofs over ground they keep dry.
     pub surface_open: [f32; 4],
+    /// The cloud shadow map (see [`crate::cloud_shadows`]); all zero (off) until a feature asks
+    /// for it, which the renderer fills in after `prepare`.
+    pub cloud_shadow: GpuCloudShadow,
+    /// The air ([`Atmosphere`], times its `density_scale`): Rayleigh scattering at the surface
+    /// (1/m) RGB, w unused.
+    pub air_rayleigh: [f32; 4],
+    /// Mie scattering at the surface (1/m) RGB, w unused.
+    pub air_mie: [f32; 4],
+    /// Mie extinction (scattering + absorption) at the surface (1/m) RGB, w unused.
+    pub air_mie_extinction: [f32; 4],
+    /// Ozone absorption at the layer's densest (1/m) RGB, w unused.
+    pub air_ozone: [f32; 4],
+    /// Mie anisotropy per channel RGB, w unused.
+    pub air_mie_g: [f32; 4],
 }
 
 /// Most [`SkyLightVolume`]s shaded per frame (nearest the camera first).
@@ -605,6 +620,8 @@ pub fn frame_uniform(world: &World, v: &ViewData) -> FrameUniform {
         v.origin.z.rem_euclid(4096.0),
     );
     let ambient_rgb = Vec3::from(ambient.color) * ambient.brightness;
+    let air = atmosphere.optics();
+    let rgb0 = |v: Vec3| [v.x, v.y, v.z, 0.0];
     let mut cascades = [[[0.0; 4]; 4]; 4];
     for (i, c) in v.cascades.view_proj.iter().enumerate() {
         cascades[i] = mat(*c);
@@ -767,6 +784,12 @@ pub fn frame_uniform(world: &World, v: &ViewData) -> FrameUniform {
         ],
         surface_map: [0.0; 4],
         surface_open: [0.0; 4],
+        cloud_shadow: GpuCloudShadow::default(),
+        air_rayleigh: rgb0(air.rayleigh),
+        air_mie: rgb0(air.mie_scattering),
+        air_mie_extinction: rgb0(air.mie_extinction),
+        air_ozone: rgb0(air.ozone),
+        air_mie_g: rgb0(air.mie_g),
     }
 }
 
@@ -778,7 +801,7 @@ mod tests {
     fn frame_uniform_matches_wgsl_size() {
         // 7 mat4 + 15 vec4 + 4 mat4 + 3 vec4 + ground, sky occlusion, volumes, then the
         // screen-space block (mat4 + 4 vec4), volumetric fog (vec4), far shadow (mat4 + vec4),
-        // sky (vec4), surface weather (2 vec4).
+        // sky (vec4), surface weather (2 vec4), cloud shadows (mat4 + 2 vec4), the air (5 vec4).
         assert_eq!(
             std::mem::size_of::<FrameUniform>(),
             7 * 64
@@ -795,6 +818,9 @@ mod tests {
                 + 16
                 + 16
                 + 2 * 16
+                + 64
+                + 2 * 16
+                + 5 * 16
         );
         assert_eq!(std::mem::size_of::<GpuSkyVolume>(), 80);
         assert_eq!(std::mem::size_of::<GpuPointLight>(), 32);
