@@ -142,6 +142,35 @@ fn pnoise3(p: vec3<f32>, period: f32) -> f32 {
     return mix(a, b, u.z);
 }
 
+// `pnoise3` with its own lattice period per axis, for patterns stretched along one axis.
+fn pnoise3v(p: vec3<f32>, period: vec3<f32>) -> f32 {
+    let i = floor(p);
+    let f = fract(p);
+    let u = f * f * (3.0 - 2.0 * f);
+    let i0 = i - period * floor(i / period);
+    let i1 = (i0 + 1.0) - period * floor((i0 + 1.0) / period);
+    let a = mix(mix(hash13(vec3(i0.x, i0.y, i0.z)), hash13(vec3(i1.x, i0.y, i0.z)), u.x),
+                mix(hash13(vec3(i0.x, i1.y, i0.z)), hash13(vec3(i1.x, i1.y, i0.z)), u.x), u.y);
+    let b = mix(mix(hash13(vec3(i0.x, i0.y, i1.z)), hash13(vec3(i1.x, i0.y, i1.z)), u.x),
+                mix(hash13(vec3(i0.x, i1.y, i1.z)), hash13(vec3(i1.x, i1.y, i1.z)), u.x), u.y);
+    return mix(a, b, u.z);
+}
+
+// Wind-packed snow: low drifts and ridges stretched along the prevailing east-west wind,
+// 16 m long and 4 m across down to a quarter of that. Height in meters (about ±10 cm).
+fn snow_drift(tp: vec3<f32>) -> f32 {
+    var sum = 0.0;
+    var amp = 0.06;
+    var f = vec2<f32>(1.0 / 16.0, 1.0 / 4.0);
+    for (var i = 0; i < 3; i++) {
+        let q = vec3<f32>(tp.x * f.x, f32(i) * 17.0, tp.z * f.y);
+        sum += amp * (pnoise3v(q, vec3<f32>(4096.0 * f.x, 4096.0, 4096.0 * f.y)) * 2.0 - 1.0);
+        f *= 2.0;
+        amp *= 0.5;
+    }
+    return sum;
+}
+
 // Fractal sum of `pnoise3` on tiling coordinates, starting at `freq` cycles per meter (a power
 // of two), doubling per octave. Returns about 0..1.
 fn tile_fbm(tp: vec3<f32>, freq: f32, octaves: i32) -> f32 {
@@ -1033,15 +1062,35 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
         // Deep prints in thin snow show the ground below.
         let snow_depth = max(fallen, painted_snow * 0.25 + climate_snow * 0.5);
         snow *= 1.0 - smoothstep(0.7, 1.0, depth / max(snow_depth, 1e-3)) * print_fade;
-        // A blanket of snow softens the shapes under it.
-        let soft = normalize(mix(n, n_geo, 0.6 * snow));
+        // A blanket of snow softens the shapes under it, and the wind lays it in drifts.
+        var soft = normalize(mix(n, n_geo, 0.6 * snow));
+        let drift_fade = 1.0 - smoothstep(0.5, 6.0, pixel);
+        var drift = 0.0;
+        if (drift_fade > 0.0) {
+            drift = snow_drift(tp);
+            let e = 0.25;
+            let dh = vec2<f32>(snow_drift(tp + vec3<f32>(e, 0.0, 0.0)), snow_drift(tp + vec3<f32>(0.0, 0.0, e))) - drift;
+            soft = normalize(soft - vec3<f32>(dh.x, 0.0, dh.y) / e * drift_fade);
+        }
         let sm = sample_planar(M_SNOW, tp, soft, dp1, dp2, tex_pixel);
         let packed = saturate(depth * 12.0) * print_fade;
+        // Drift crests a touch whiter, the hollows between them a touch grayer.
         let snow_col = col[M_SNOW] * sm.detail * mix(1.0, 0.82, packed) * mix(vec3(1.0), vec3(0.93, 0.96, 1.0), packed)
-            * mix(1.0, 0.86 + 0.18 * far_n.x, far);
+            * mix(1.0, 0.86 + 0.18 * far_n.x, far) * (1.0 + drift * 0.6 * drift_fade);
         albedo = mix(albedo, snow_col, snow);
         n = normalize(mix(n, sm.normal, snow));
         roughness = mix(roughness, mix(sm.roughness, 0.45, packed), snow);
+        // Glints: here and there an ice crystal faces just right and flashes in the sun. In
+        // cells at least a pixel across, one in thirty gets a tilted, glossy facet.
+        if (pixel < 0.03) {
+            let cell = exp2(ceil(log2(max(pixel * 1.5, 0.002))));
+            let gp = floor(tp / cell);
+            let glint = step(0.967, hash13(gp + vec3<f32>(0.0, 71.3, 0.0))) * (1.0 - smoothstep(0.012, 0.03, pixel))
+                * snow * (1.0 - packed);
+            let tilt = vec3<f32>(hash13(gp + 1.7), hash13(gp + 5.3), hash13(gp + 9.1)) * 2.0 - 1.0;
+            n = normalize(mix(n, normalize(n + tilt * 0.5), glint));
+            roughness = mix(roughness, 0.18, glint);
+        }
         occlusion = mix(occlusion, sm.occlusion, snow);
         subsurface = mix(subsurface, 0.35, snow);
         ground_h = mix(ground_h, 1.0, snow);
