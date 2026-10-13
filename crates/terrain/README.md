@@ -16,6 +16,9 @@ everything else (streaming, LOD, colliders, ground queries, prints) follows the 
   flying fast, and a teleport builds until the view is complete. Vertices geomorph toward the
   parent patch's shape before a split or merge, so detail never pops. Positions are `f64` and
   rendered camera-relative, so a 6,371 km Earth is exact to the centimeter at the surface.
+  Patches also draw the renderer's depth prepass (depth, normal, motion; moving planets
+  carry their own motion), so the ground gets ambient occlusion and contact shadows from
+  what stands on it and anti-aliasing reprojects it cleanly.
 - **Planet shapes.** `PlanetShape` presets for an Earth-like world (continents, oceans,
   eroded mountains whose steep sides break into rock ledges, hills, climate bands), the
   Moon (craters, maria) and Mars (craters, plains, dry ice caps), all seeded and

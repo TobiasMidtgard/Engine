@@ -16,6 +16,7 @@ struct PlanetGpu {
     colors: array<vec4<f32>, 10>,   // lush, dry, soil, rock, sand, snow, dark, ocean, mud, concrete
     params: vec4<f32>,              // snow below °C, rock slope, vegetation (0/1), ocean surface (0/1)
     params2: vec4<f32>,             // sphere (0/1), crater density, largest crater radius, crater seed
+    motion: vec4<f32>,              // how far the terrain moved in the world since last frame
 };
 
 // Must match `MapsGpu` in render.rs.
@@ -76,8 +77,9 @@ struct VertexIn {
     @location(8) tint: vec4<f32>,      // hand-made ground tint: sqrt(color), amount
 };
 
+// `@invariant` keeps the prepass and the scene pass depths bit-identical.
 struct VertexOut {
-    @builtin(position) clip: vec4<f32>,
+    @builtin(position) @invariant clip: vec4<f32>,
     @location(0) rel: vec3<f32>,
     @location(1) normal: vec3<f32>,
     @location(2) up: vec3<f32>,
@@ -304,11 +306,10 @@ fn crater_detail(p: PlanetGpu, rel: vec3<f32>, pixel: f32, spacing: f32) -> Crat
     return out;
 }
 
-@vertex
-fn vs_main(in: VertexIn) -> VertexOut {
-    let planet = planets[in.planet];
-    let rot = planet_rot(planet);
-    var rel = in.origin + rot * in.position;
+// Camera-relative position of a vertex: geomorphed toward its parent patch and lowered by
+// prints. Shared by the scene pass and the prepass so both rasterize the same depth.
+fn place_vertex(in: VertexIn, planet: PlanetGpu) -> vec3<f32> {
+    var rel = in.origin + planet_rot(planet) * in.position;
     let up = planet_up(planet, rel);
     // Geomorph toward the parent patch's shape as it nears the distance where it takes over.
     if (in.lod.w > 0.0) {
@@ -316,11 +317,8 @@ fn vs_main(in: VertexIn) -> VertexOut {
         rel += up * (in.normal.w * in.lod.x * MORPH_RANGE * k);
     }
     let flags = u32(round(in.climate.w * 255.0));
-    let ocean = select(0.0, 1.0, (flags & 2u) != 0u);
-    let convex = f32(flags >> 2u) / 63.0 * 2.0 - 1.0;
-
     // Prints and tracks lower fine patches a little (shading carries the detail).
-    if (maps.flags.x > 0.5 && in.lod.x < 1.5 && ocean < 0.5) {
+    if (maps.flags.x > 0.5 && in.lod.x < 1.5 && (flags & 2u) == 0u) {
         let uv = deform_uv(rel);
         let o = 0.35 * in.lod.x / (maps.deform.z * maps.deform.w);
         var d = textureSampleLevel(deform_tex, map_sampler, uv, 0.0).r * 0.4;
@@ -330,6 +328,18 @@ fn vs_main(in: VertexIn) -> VertexOut {
         d += textureSampleLevel(deform_tex, map_sampler, uv - vec2(0.0, o), 0.0).r * 0.15;
         rel -= up * d * inside01(uv);
     }
+    return rel;
+}
+
+@vertex
+fn vs_main(in: VertexIn) -> VertexOut {
+    let planet = planets[in.planet];
+    let rot = planet_rot(planet);
+    let rel = place_vertex(in, planet);
+    let up = planet_up(planet, rel);
+    let flags = u32(round(in.climate.w * 255.0));
+    let ocean = select(0.0, 1.0, (flags & 2u) != 0u);
+    let convex = f32(flags >> 2u) / 63.0 * 2.0 - 1.0;
 
     var out: VertexOut;
     out.rel = rel;
@@ -344,6 +354,40 @@ fn vs_main(in: VertexIn) -> VertexOut {
     return out;
 }
 
+
+// ---------------------------------------------------------------- depth prepass
+// Depth, normals and motion for ambient occlusion, contact shadows and temporal anti-aliasing.
+// The patch normal is enough for those; material detail is left to the scene pass.
+
+struct PrepassOut {
+    @builtin(position) @invariant clip: vec4<f32>,
+    @location(0) normal: vec3<f32>,
+    @location(1) motion_now: vec4<f32>,
+    @location(2) motion_prev: vec4<f32>,
+    @location(3) ocean: f32,
+};
+
+@vertex
+fn vs_prepass(in: VertexIn) -> PrepassOut {
+    let planet = planets[in.planet];
+    let rel = place_vertex(in, planet);
+    let flags = u32(round(in.climate.w * 255.0));
+    var out: PrepassOut;
+    out.clip = frame.view_proj * vec4<f32>(rel, 1.0);
+    out.normal = normalize(planet_rot(planet) * in.normal.xyz);
+    out.motion_now = motion_clip(rel);
+    out.motion_prev = prev_motion_clip(static_prev_rel(rel) - planet.motion.xyz);
+    out.ocean = select(0.0, 1.0, (flags & 2u) != 0u) * planet.params.w;
+    return out;
+}
+
+@fragment
+fn fs_prepass(in: PrepassOut) -> PrepassOutput {
+    // Open sea is glossy water; ground is rough, a little less so in the rain.
+    let wet = frame.weather.x * 0.25;
+    let roughness = mix(0.85 - wet, 0.08, in.ocean);
+    return prepass_output(normalize(in.normal), roughness, in.motion_now, in.motion_prev);
+}
 
 // Bump the normal by a scalar height field `h` using screen-space derivatives
 // (Mikkelsen, "Bump Mapping Unparametrized Surfaces on the GPU", 2010).
@@ -983,6 +1027,9 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     }
     if (frame.counts.z == 3u) {
         return vec4<f32>(vec3(sky_visibility(in.rel, n)), 1.0);
+    }
+    if (frame.counts.z == 4u) {
+        return vec4<f32>(vec3(screen_ao(in.rel)), 1.0);
     }
 
     var s = default_surface();
