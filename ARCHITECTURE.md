@@ -183,6 +183,22 @@ bounced on the way, so it arrives more evenly from all around the less sky the p
 by the sunlit ground outside (olive by default), nor a cave's floor by the blue sky overhead.
 `RenderSettings::debug_view = SkyVisibility` shows the result.
 
+**Ground weather** (built): `SurfaceLayers` (the weather's 512 m grid of 1 m cells around the
+focus: wetness, standing water, snow, scorch) is uploaded as a texture (frame binding 21,
+`Rgba8Unorm` in the weather module's encoding: wetness, standing water / 0.04 m, snow / 0.3 m,
+scorch) whenever it changes (change detection, at most 10 times a second while it keeps changing)
+or moves, and drawn where the uploaded grid lay. `surface_weather(rel)` in `lib_frame.wgsl` returns
+that vec4 at a camera-relative point, filtered, in any stage (`SURFACE_PUDDLE_SCALE_M`,
+`SURFACE_SNOW_SCALE_M` decode it); terrain and foliage shaders use it to match the meshes. Beyond
+the grid (fading in over its outer tenth) it is the open ground's state, the upper quartile of the
+grid's rim (`frame.surface_open`), as the terrain uses there. The grid describes the ground, so
+under a roof it is dry; a surface with nothing above it in the sky occlusion map that stands on
+ground much drier than the open ground is the cover itself (a roof, a vehicle's top, a canopy) and
+gets the open ground's wetness and snow instead, leaving puddles and scorch to the ground below.
+Materials with `receives_wetness` (the default) read it per pixel (walls half a meter in front of
+them): scorch singes and then chars them to matte soot, rain darkens and glosses them, snow settles
+on top faces. `render.surface_weather_uploads` in `Diagnostics` counts the uploads.
+
 **Screen-space effects** (built): every frame starts with a depth prepass that also writes
 normals, roughness and motion vectors. From it come ground-truth ambient occlusion (GTAO,
 `RenderSettings::ambient_occlusion`, `ao_radius`, `ao_intensity`; `screen_ao(rel)` in shaders,
@@ -267,7 +283,7 @@ muscles and skinned clothes and by `engine_softbody` for simulated cloth).
 Shader library: `lib_types.wgsl` (types, noise, BRDF, `henyey_greenstein`), `lib_frame.wgsl` (group 0 frame
 data, `shade_surface`, `shade_surface_shadowed`, `shade_thin_surface`, `shadow_factor` (cascades, then `far_shadow_visibility`), `contact_shadow`, `screen_ao`, `sky_visibility`, `apply_fog` (`color * transmittance + inscatter` of `surface_fog`, which returns a `SurfaceFog` for callers that need the two apart, such as blended particles),
 `apply_sky_fog`, `volumetric_fog_at`, `height_fog_density`, `fog_sky_light`,
-`sample_env`, `sample_env_rough`, `sky_ambient`, `sky_ambient_covered`, `wind_offset`, `prepass_output`) and `lib_atmosphere.wgsl` (`atmosphere` for aerial perspective,
+`sample_env`, `sample_env_rough`, `sky_ambient`, `sky_ambient_covered`, `surface_weather`, `wind_offset`, `prepass_output`) and `lib_atmosphere.wgsl` (`atmosphere` for aerial perspective,
 `sun_transmittance`, `sky_view_radiance`, `planet_height`, `ray_shell`).
 
 **Shapes** (built): `Shape` builds procedural meshes. Round shapes given `segments: 0` get

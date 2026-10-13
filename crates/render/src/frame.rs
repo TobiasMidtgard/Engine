@@ -74,6 +74,12 @@ pub struct FrameUniform {
     /// 1 night: stars and the night sky's floor; see [`sky_night`]), the stand-in moon's glow
     /// opposite a sun below the horizon (0..1), unused.
     pub sky: [f32; 4],
+    /// The ground's weather map (`surface_weather`, set by the renderer): its minimum corner
+    /// relative to the camera (x, z, m) and its size along x and z (m; 0 = no map).
+    pub surface_map: [f32; 4],
+    /// The open ground's weather in the map's encoding (wetness, standing water / 0.04 m, snow /
+    /// 0.3 m, scorch): beyond the map, and for roofs over ground they keep dry.
+    pub surface_open: [f32; 4],
 }
 
 /// Most [`SkyLightVolume`]s shaded per frame (nearest the camera first).
@@ -759,6 +765,8 @@ pub fn frame_uniform(world: &World, v: &ViewData) -> FrameUniform {
             stand_in_moon,
             0.0,
         ],
+        surface_map: [0.0; 4],
+        surface_open: [0.0; 4],
     }
 }
 
@@ -770,7 +778,7 @@ mod tests {
     fn frame_uniform_matches_wgsl_size() {
         // 7 mat4 + 15 vec4 + 4 mat4 + 3 vec4 + ground, sky occlusion, volumes, then the
         // screen-space block (mat4 + 4 vec4), volumetric fog (vec4), far shadow (mat4 + vec4),
-        // sky (vec4).
+        // sky (vec4), surface weather (2 vec4).
         assert_eq!(
             std::mem::size_of::<FrameUniform>(),
             7 * 64
@@ -786,6 +794,7 @@ mod tests {
                 + 64
                 + 16
                 + 16
+                + 2 * 16
         );
         assert_eq!(std::mem::size_of::<GpuSkyVolume>(), 80);
         assert_eq!(std::mem::size_of::<GpuPointLight>(), 32);
