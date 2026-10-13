@@ -22,7 +22,7 @@ these vehicles unchanged.
 | Models | `models/cars`, `models/aircraft`, `models/scenery`, `visuals.rs` | Procedural meshes with baked PBR textures, built once per kind and shared: sports and rally cars (~145k triangles each: sculpted bodies, liveries, lights, interiors, wheels with discs and calipers), the sport plane (120k) and the spaceplane (165k), and the scenery of the three demo zones. `visuals.rs` spins and steers wheels, moves control surfaces and calipers, sizes plumes, lights brake lamps and makes hot hulls glow. |
 | Presets | `presets.rs` | `sports_car`, `rally_car`, `sport_plane`, `spaceplane` (by name through `presets::spawn`). |
 | AI tools | `api.rs` | `vehicles.presets`, `vehicles.spawn`, `vehicles.list`, `vehicles.control`, `vehicles.autopilot`, `vehicles.telemetry`. |
-| Demos | `demo.rs` | `spawn_track` (circuit, kicker, drift pad, two racing cars, a drifting rally car), `spawn_airfield` (a runway, a plane taking off and one flying circuits) and `spawn_spaceport` (a spaceplane hopping off the pad, one parked). `spawn_demo` builds all three; the showcase puts them in its `track`, `airfield` and `spaceport` zones. |
+| Demos | `demo.rs` | `spawn_track` (circuit, kicker, drift pad, two racing cars, a drifting rally car), `spawn_airfield` (a runway, a plane taking off and one flying circuits) and `spawn_spaceport` (a spaceplane hopping off the pad, one parked). `spawn_demo` builds all three; the showcase puts them in its `track`, `airfield` and `spaceport` zones. Their scenery is solid with or without a renderer (`models/scenery/solid.rs`): Armco, walls and catch fences, tire walls, gravel traps that bury a car's tires, the grandstand, pits, transporters, gantry and footbridge; the hangars (open doors stay open), fire station, tower, terminal and ground equipment; the spaceport's hangars, blast walls, tank farm and towers. |
 
 ## Contracts
 
@@ -31,6 +31,9 @@ Reads: `VehicleControls`, the physics contract (`RigidBody`, `Collider`, `Veloci
 `Atmospheres` (the shared air: weather-driven standard atmosphere or per-planet air),
 `SurfaceMaterials`, `SurfaceLayers` (mud, snow, wetness), `Ground` (flat worlds without
 colliders), `WeatherState` and `WindField`.
+
+Adds to `SurfaceMaterials` when missing: `gravel_trap` (loose pea gravel, rolling resistance
+0.6) and `tire_wall` (soft, barely bounces).
 
 Writes: `ExternalForce`, `RigidBody` mass, center of mass and inertia (each preset sets real
 values; mass and inertia follow propellant as it burns), `EngineState` and `WheelContacts` on
@@ -55,6 +58,11 @@ contract (module crates don't depend on a backend); the showcase runs the same v
 - `tests/spacecraft.rs`: hops off a pad, hovers and lands softly; climbs from the ground into a
   stable orbit around a small planet (vertical lift, pitch up, gravity turn, coast,
   circularize); re-entry from orbit heats the shield past 1 200 K without burning through.
+- `tests/scenery_solids.rs`: nothing solid within 2 m of the racing line or 3 m of the drift
+  circle (the gantry truss and footbridge span the track above 5.5 m), the airfield's
+  buildings stay 30 m off the runway's center line and below the circuit, the spaceport's 31 m
+  from the pad; a car running wide at 11 m/s stops in the gravel before the tire wall, and
+  one hitting the outer wall at 30° stays on the track side of it.
 - `tests/screenshots.rs`: renders the cars, the aircraft and the track, airfield and spaceport
   demos (set `VEHICLE_SHOTS=<dir>` to keep the PNGs; helpers in `tests/support/shots.rs`).
 - `tests/shots_cars.rs`, `tests/shots_aircraft.rs`, `tests/shots_scenery.rs`: model budgets

@@ -11,6 +11,12 @@
 // - skin (mask.y): subsurface wrap, and a slight flush where muscles work.
 // - veins (mask.z): raised branching lines along the limb that appear with muscle activation.
 // - sheen (mask.w): soft grazing-angle glow for fabric and short fur.
+//
+// Fur: where a vertex grows fur (pattern.w, 0..1 of the material's fur length) the same mesh is
+// drawn again as shells (instance extra.z = shell 1..=N, extra.w = N). Each shell sits further
+// out along the normal, its tips sagging and combed back, and keeps only the pixels inside a
+// tapering strand of a jittered grid in bind-pose space, so strands run straight through the
+// shells and stay put on the skin. The skin under the shells is the coat's dark root.
 
 struct SkinMaterial {
     tint: vec4<f32>,
@@ -18,6 +24,8 @@ struct SkinMaterial {
     detail: vec4<f32>,    // wrinkle depth, wrinkle frequency (folds/m), veins, bunch (m)
     vein: vec4<f32>,      // vein rgb, sheen
     emissive: vec4<f32>,  // rgb (cd/m^2)
+    fur: vec4<f32>,       // length (m), strands per meter, droop, comb
+    fur_tip: vec4<f32>,   // tip color multiplier rgb, root brightness
 };
 
 // Must match `GpuSurface` in feature.rs and `struct SkinSurface` in skin_shadow.wgsl.
@@ -67,12 +75,13 @@ struct VertexOut {
     @location(1) normal: vec3<f32>,
     @location(2) uv: vec2<f32>,
     @location(3) color: vec4<f32>,
-    @location(4) pattern: vec3<f32>,
+    @location(4) pattern: vec4<f32>,  // bind-pose position, fur amount
     @location(5) axis: vec3<f32>,
     @location(6) mask: vec4<f32>,
     @location(7) tension: f32,
     @location(8) activation: f32,
     @location(9) @interpolate(flat) material: u32,
+    @location(10) shell: vec2<f32>,  // shell height (0 = the skin), shells drawn over it (0/1)
 };
 
 @vertex
@@ -83,14 +92,31 @@ fn vs_main(in: VertexIn) -> VertexOut {
     let n = in.normal_activation.xyz;
     // Compressed cloth gathers outward (sleeves bunching at the elbow).
     p += n * (mat.detail.w * saturate(-tension * 4.0) * in.mask.x);
+    // Fur shells stand out along the normal.
+    let fur_len = mat.fur.x * in.pattern.w;
+    var h = 0.0;
+    if (in.extra.z > 0u) {
+        h = f32(in.extra.z) / f32(max(in.extra.w, 1u));
+        p += n * (fur_len * h);
+    }
     let ph = vec4<f32>(p, 1.0);
-    let rel = vec3<f32>(dot(in.m0, ph), dot(in.m1, ph), dot(in.m2, ph));
+    var rel = vec3<f32>(dot(in.m0, ph), dot(in.m1, ph), dot(in.m2, ph));
+    let nw = normalize(mat3x3<f32>(in.n0.xyz, in.n1.xyz, in.n2.xyz) * n);
+    if (h > 0.0) {
+        // The strands bend more toward their tips: down under their weight and back along the
+        // body (model +Z), within the skin's tangent plane so the coat lies flatter.
+        let back = normalize(vec3<f32>(in.m0.z, in.m1.z, in.m2.z) + vec3<f32>(0.0, 0.0, 1e-6));
+        var lean = vec3<f32>(0.0, -1.0, 0.0) * mat.fur.z + back * mat.fur.w;
+        lean -= nw * dot(lean, nw);
+        rel += lean * (fur_len * h * h);
+    }
     var out: VertexOut;
     out.rel = rel;
-    out.normal = normalize(mat3x3<f32>(in.n0.xyz, in.n1.xyz, in.n2.xyz) * n);
+    out.normal = nw;
     out.uv = in.uv;
     out.color = in.color;
-    out.pattern = in.pattern.xyz;
+    out.pattern = in.pattern;
+    out.shell = vec2<f32>(h, select(0.0, 1.0, in.extra.w > 0u));
     out.axis = in.axis.xyz;
     out.mask = in.mask;
     out.tension = tension;
@@ -171,17 +197,17 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
 
     // Coordinates along and around the limb axis (bind pose, so the pattern sticks to the body).
     let a = normalize(in.axis + vec3<f32>(1e-5, 0.0, 0.0));
-    let along = dot(in.pattern, a);
+    let along = dot(in.pattern.xyz, a);
     let side_ref = select(vec3<f32>(0.0, 1.0, 0.0), vec3<f32>(1.0, 0.0, 0.0), abs(a.y) > 0.8);
     let b = normalize(cross(a, side_ref));
     let c = cross(a, b);
-    let perp = in.pattern - a * along;
+    let perp = in.pattern.xyz - a * along;
     let around = atan2(dot(perp, c), dot(perp, b));
-    let warp = value_noise3(in.pattern * 7.0) * 2.0 - 1.0;
+    let warp = value_noise3(in.pattern.xyz * 7.0) * 2.0 - 1.0;
     let freq = mat.detail.y;
 
     // Compression folds: rings across the axis, wobbly and uneven like real fabric.
-    let fold_phase = along * freq + warp * 0.9 + value_noise3(in.pattern * 23.0) * 0.4;
+    let fold_phase = along * freq + warp * 0.9 + value_noise3(in.pattern.xyz * 23.0) * 0.4;
     let fold = sin(fold_phase * TAU);
     let fold_shape = 1.0 - abs(fold);  // sharp ridges
     // Stretch: diagonal pull lines.
@@ -189,7 +215,7 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     let pull = 0.5 + 0.5 * sin(pull_phase * TAU);
 
     // Veins: branching ridges stretched along the axis, only on veined skin, only when working.
-    let vein_p = in.pattern * 55.0 - a * (along * 55.0 * 0.8);
+    let vein_p = in.pattern.xyz * 55.0 - a * (along * 55.0 * 0.8);
     let ridge = 1.0 - abs(value_noise3(vein_p) * 2.0 - 1.0);
     let ridge2 = 1.0 - abs(value_noise3(vein_p * 2.1 + 3.7) * 2.0 - 1.0);
     // A vein is a few millimeters wide: once it is narrower than a pixel it fades out, so
@@ -216,6 +242,8 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     let duv2 = dpdy(uv);
     let dh1 = dpdx(height);
     let dh2 = dpdy(height);
+    // The bind-pose face normal, for the strands' cross-section.
+    let bind_n = cross(dpdx(in.pattern.xyz), dpdy(in.pattern.xyz));
 
     var base = surf.base_color * in.color;
     if ((flags & SURFACE_BASE_COLOR) != 0u) {
@@ -224,6 +252,29 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     // Alpha cutout (hair cards, lashes); the shadow pass cuts the same pixels.
     if (base.a < surf.params.w) {
         discard;
+    }
+    // Fur shells: keep the pixels inside a strand. One strand per grid cell, jittered, of
+    // random length, tapering to its tip; the cross-section is measured across the strand
+    // (in the skin's plane), so every cell the skin passes through can grow one.
+    let shell_h = in.shell.x;
+    let fur_amount = in.pattern.w;
+    var strand = 1.0;
+    if (shell_h > 0.0) {
+        if (fur_amount < 0.05) {
+            discard;
+        }
+        let q = in.pattern.xyz * mat.fur.y;
+        let cell = floor(q);
+        let r = vec3<f32>(hash13(cell), hash13(cell + 17.31), hash13(cell + 43.7));
+        let f = fract(q) - 0.5 - (r - 0.5) * 0.6;
+        let bn = bind_n / max(length(bind_n), 1e-12);
+        let across = length(f - bn * dot(f, bn));
+        let reach = 0.55 + 0.45 * r.x;  // this strand's length, of the coat's
+        let t = shell_h / reach;
+        if (t > 1.0 || across > 0.5 * pow(1.0 - t, 0.7)) {
+            discard;
+        }
+        strand = t;
     }
 
     var n = normalize(in.normal);
@@ -244,6 +295,15 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     // Working muscles flush; veins show through the skin.
     albedo *= mix(vec3<f32>(1.0), vec3<f32>(1.07, 0.93, 0.9), saturate(in.activation * skin * 0.6));
     albedo = mix(albedo, mat.vein.rgb * albedo * 1.6, vein * 0.3);
+    // Fur: dark at the roots (the skin, when shells cover it), lighter and tinted at the tips.
+    if (mat.fur.x > 0.0 && fur_amount > 0.0) {
+        let root = mat.fur_tip.w;
+        if (shell_h > 0.0) {
+            albedo *= mix(root, 1.0, strand) * mix(vec3<f32>(1.0), mat.fur_tip.rgb, strand * strand);
+        } else if (in.shell.y > 0.0) {
+            albedo *= mix(1.0, root, saturate(fur_amount * 2.0));
+        }
+    }
 
     var s = default_surface();
     s.albedo = saturate3(albedo);
@@ -264,6 +324,11 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     s.normal = n;
     s.subsurface = max(surf.extra.z, mat.params.z * skin);
     s.occlusion = 1.0 - compress * 0.25;
+    if (shell_h > 0.0) {
+        // Light scatters through the coat; strands deep in it see less sky.
+        s.subsurface = max(s.subsurface, 0.35);
+        s.occlusion = mix(0.55, 1.0, strand);
+    }
     s.emissive = mat.emissive.rgb;
 
     if (frame.counts.z == 1u) {

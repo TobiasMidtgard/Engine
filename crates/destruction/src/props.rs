@@ -109,6 +109,12 @@ pub enum PropKind {
     BoardWindow {
         size: [f32; 3],
     },
+    /// A ledged and braced plank door filling `size` (x wide, y tall, z thick), hinged at −X:
+    /// vertical planks on the front (+Z) with strap hinges and a ring pull, three ledges and
+    /// two braces rising from the hinge side on the back, nailed through.
+    PlankDoor {
+        size: [f32; 3],
+    },
     RoofTiles {
         width: f32,
         depth: f32,
@@ -174,6 +180,9 @@ impl PropKind {
             PropKind::BoardWindow {
                 size: [2.0, 2.0, 0.1],
             },
+            PropKind::PlankDoor {
+                size: [0.85, 1.85, 0.05],
+            },
             PropKind::RoofTiles {
                 width: 4.0,
                 depth: 3.4,
@@ -211,6 +220,7 @@ impl PropKind {
             PropKind::BoardGable { size } => board_gable(Vec3::from(size), seed),
             PropKind::BoardDoorway { size } => board_wall_opening(Vec3::from(size), true, seed),
             PropKind::BoardWindow { size } => board_wall_opening(Vec3::from(size), false, seed),
+            PropKind::PlankDoor { size } => plank_door(Vec3::from(size), seed),
             PropKind::RoofTiles {
                 width,
                 depth,
@@ -237,7 +247,8 @@ impl PropKind {
             | PropKind::BoardWall { size }
             | PropKind::BoardGable { size }
             | PropKind::BoardDoorway { size }
-            | PropKind::BoardWindow { size } => Vec3::from(size),
+            | PropKind::BoardWindow { size }
+            | PropKind::PlankDoor { size } => Vec3::from(size),
             PropKind::SteelDrum { .. } => Vec3::new(DRUM_DIAMETER, DRUM_HEIGHT, DRUM_DIAMETER),
             PropKind::Sandbag => Vec3::new(BAG_LEN, BAG_HEIGHT, BAG_WIDTH),
             PropKind::SandbagWall { length, courses } => sandbag_wall_size(length, courses),
@@ -3625,6 +3636,244 @@ pub fn board_wall_opening(size: Vec3, door: bool, seed: u64) -> Vec<PropPart> {
     auto_smooth(b, v0, t0, 30.0);
     kit.finish(Ao {
         reach: 0.15,
+        strength: 0.6,
+        ground: false,
+    })
+}
+
+/// A ledged and braced plank door (see [`PropKind::PlankDoor`]): vertical planks on the front
+/// (+Z), three ledges across the back with two braces rising from the hinge side (−X) between
+/// them, iron strap hinges over the top and bottom ledges with a rolled eye at the hinge edge,
+/// clenched nails showing on the front where ledges and braces are behind, and a ring pull on
+/// both faces at the latch side.
+pub fn plank_door(size: Vec3, seed: u64) -> Vec<PropPart> {
+    let size = size.max(Vec3::new(0.4, 0.8, 0.03));
+    let mut rng = Rng::new(seed ^ 0x0D00_2B0A);
+    let mut kit = Kit::new();
+    let (w, h, t) = (size.x, size.y, size.z);
+    let plank_t = t * 0.56;
+    let ledge_t = t - plank_t;
+    let (front, back) = (t * 0.5, -t * 0.5);
+    let iron = [0.34, 0.32, 0.3];
+    let count = (w / 0.17).round().max(2.0) as usize;
+    let gap = 0.003;
+    let pw = (w - gap * (count - 1) as f32) / count as f32;
+    let plank_x = |k: usize| -w * 0.5 + pw * 0.5 + k as f32 * (pw + gap);
+    // The ledges' middles, top to bottom, and their half height.
+    let ledges = [h * 0.5 - 0.1, -0.08, -h * 0.5 + 0.11];
+    let lh = 0.065f32.min(h * 0.04);
+    // Each brace runs from just inside a ledge at the hinge side up to the ledge above at the
+    // latch side, so it holds the latch side up.
+    let braces: Vec<(Vec2, Vec2)> = ledges
+        .windows(2)
+        .map(|l| {
+            (
+                Vec2::new(-w * 0.5 + 0.11, l[1] + lh * 0.6),
+                Vec2::new(w * 0.5 - 0.11, l[0] - lh * 0.6),
+            )
+        })
+        .collect();
+    let handle = Vec2::new(w * 0.5 - 0.13, 0.1);
+    let upright = Mat3::from_cols(Vec3::Y, Vec3::Z, Vec3::X);
+    // Oiled darker and warmer than the walls' boards, so the door reads from across the yard.
+    let stain = |rng: &mut Rng| {
+        let c = wood_tint(rng);
+        [c[0] * 0.8, c[1] * 0.66, c[2] * 0.55]
+    };
+    let b = kit.mb(WOOD);
+    let v0 = b.vertices.len();
+    let t0 = b.indices.len();
+    for k in 0..count {
+        // The box's X runs up the plank, so the grain does too.
+        let half = Vec3::new(h * 0.5 - rng.range(0.0, 0.004), plank_t * 0.5, pw * 0.5);
+        let along = stations(-half.x, half.x, &[], 0.35);
+        bevel_box(
+            b,
+            &Frame {
+                rot: Mat3::from_rotation_z(rng.range(-0.002, 0.002)) * upright,
+                pos: Vec3::new(
+                    plank_x(k),
+                    0.0,
+                    front - plank_t * 0.5 - rng.range(0.0, 0.0015),
+                ),
+            },
+            &BoxSpec::new(half, 0.004)
+                .chamfer()
+                .splits([&along, &[], &[]])
+                .tint(stain(&mut rng))
+                .uv(rng_uv(&mut rng)),
+        );
+    }
+    let lz = back + ledge_t * 0.5;
+    for y in ledges {
+        let half = Vec3::new(w * 0.5 - 0.02, lh, ledge_t * 0.5);
+        let along = stations(-half.x, half.x, &[], 0.3);
+        bevel_box(
+            b,
+            &Frame::at(Vec3::new(0.0, y, lz)),
+            &BoxSpec::new(half, 0.005)
+                .chamfer()
+                .splits([&along, &[], &[]])
+                .tint(stain(&mut rng))
+                .uv(rng_uv(&mut rng)),
+        );
+    }
+    for &(a, c) in &braces {
+        let d = c - a;
+        let dir = d.normalize().extend(0.0);
+        // A hair thinner than the ledges, so the ledges' faces show where they overlap.
+        let half = Vec3::new(d.length() * 0.5, 0.05, ledge_t * 0.5 - 0.001);
+        let along = stations(-half.x, half.x, &[], 0.3);
+        bevel_box(
+            b,
+            &Frame::new(
+                ((a + c) * 0.5).extend(lz),
+                Mat3::from_cols(dir, Vec3::Z.cross(dir), Vec3::Z),
+            ),
+            &BoxSpec::new(half, 0.005)
+                .chamfer()
+                .splits([&along, &[], &[]])
+                .tint(stain(&mut rng))
+                .uv(rng_uv(&mut rng)),
+        );
+    }
+    // A slight cup and warp; weathered darker toward the foot (splash, scuffs) and where
+    // hands push it open.
+    let s = seed;
+    deform(b, v0, |p| {
+        p + Vec3::Z * (0.001 * n3(p, 1.7, s) + 0.0005 * n3(p, 6.0, s ^ 5))
+    });
+    let foot = -h * 0.5;
+    shade(b, v0, |p, _| {
+        let low = 1.0 - 0.22 * (1.0 - smoothstep(foot, foot + 0.35, p.y));
+        let hand = 1.0 - 0.12 * (1.0 - smoothstep(0.0, 0.16, Vec2::new(p.x, p.y).distance(handle)));
+        let k = low * hand;
+        [k, k * 0.98, k * 0.95]
+    });
+    auto_smooth(b, v0, t0, 30.0);
+
+    let m = kit.mb(METAL);
+    // Strap hinges over the top and bottom ledges: tapering from the hinge edge, a spade
+    // at the end, nailed through.
+    let strap_t = 0.005;
+    let x0 = -w * 0.5 - 0.004;
+    let len = w * 0.68;
+    for y in [ledges[0], ledges[2]] {
+        let profiles: Vec<(f32, Vec<Vec2>)> = [
+            (0.0, 0.026),
+            (0.12, 0.024),
+            (0.72, 0.017),
+            (0.84, 0.013),
+            (0.9, 0.024),
+            (0.95, 0.02),
+            (1.0, 0.006),
+        ]
+        .iter()
+        .map(|&(u, hw)| {
+            (
+                x0 + u * len,
+                rounded_rect(Vec2::new(strap_t * 0.5, hw), [0.0015; 4], 1),
+            )
+        })
+        .collect();
+        let rings: Vec<(f32, &[Vec2])> = profiles.iter().map(|(x, p)| (*x, p.as_slice())).collect();
+        loft(
+            m,
+            &Frame::at(Vec3::new(0.0, y, front + strap_t * 0.5)),
+            &rings,
+            35.0,
+            [true, true],
+            iron,
+            Vec2::ZERO,
+        );
+        for u in [0.07, 0.3, 0.52, 0.74, 0.92] {
+            nail(
+                m,
+                Vec3::new(x0 + u * len, y, front + strap_t),
+                Vec3::Z,
+                0.0065,
+                iron,
+            );
+        }
+        // The strap's rolled eye around the pin at the hinge edge.
+        tube(
+            m,
+            &[
+                Vec3::new(x0, y - 0.03, front + 0.004),
+                Vec3::new(x0, y + 0.03, front + 0.004),
+            ],
+            0.008,
+            10,
+            true,
+            iron,
+        );
+    }
+    // Clenched nails through the middle ledge and the braces.
+    for k in 0..count {
+        let x = plank_x(k);
+        for dx in [-0.25f32, 0.25] {
+            let y = ledges[1] + rng.range(-0.012, 0.012);
+            nail(m, Vec3::new(x + dx * pw, y, front), Vec3::Z, 0.005, iron);
+        }
+        for &(a, c) in &braces {
+            let u = (x - a.x) / (c.x - a.x);
+            if (0.08..=0.92).contains(&u) {
+                nail(
+                    m,
+                    Vec3::new(x, a.y + (c.y - a.y) * u, front),
+                    Vec3::Z,
+                    0.005,
+                    iron,
+                );
+            }
+        }
+    }
+    // A ring pull on each face: a round plate, a staple, and the ring hanging from it.
+    for (z, n) in [(front, Vec3::Z), (front - plank_t, Vec3::NEG_Z)] {
+        let c = handle.extend(z);
+        lathe(
+            m,
+            &Frame::up_along(c, n),
+            &[
+                Vec2::new(0.0, -0.0005),
+                Vec2::new(0.034, -0.0005),
+                Vec2::new(0.034, 0.002),
+                Vec2::new(0.026, 0.0045),
+                Vec2::new(0.0, 0.0045),
+            ],
+            16,
+            40.0,
+            LatheUv::Planar,
+            iron,
+        );
+        tube(
+            m,
+            &arc_path(c + n * 0.004, Vec3::Y, n, 0.008, 0.0, PI, 6),
+            0.003,
+            6,
+            false,
+            iron,
+        );
+        let r = 0.042;
+        tube(
+            m,
+            &arc_path(
+                c + n * 0.009 - Vec3::Y * (r - 0.004),
+                Vec3::X,
+                Vec3::Y,
+                r,
+                0.0,
+                TAU,
+                24,
+            ),
+            0.0055,
+            8,
+            false,
+            iron,
+        );
+    }
+    kit.finish(Ao {
+        reach: 0.12,
         strength: 0.6,
         ground: false,
     })

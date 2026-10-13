@@ -11,6 +11,7 @@ use engine_core::math::{Quat, Vec2, Vec3, Vec4};
 
 use super::kit::{Builder, gray, hex};
 use super::noise::rand1;
+use super::solid::Solid;
 use super::{Parts, Surface, font, tex};
 
 /// Where a structure stands: zone-local origin and yaw about +Y.
@@ -2319,4 +2320,196 @@ pub fn facing_z(dir: Vec3) -> Quat {
 
 fn mix(a: f32, b: f32, t: f32) -> f32 {
     a + (b - a) * t
+}
+
+// ---------------------------------------------------------------- colliders
+
+/// A box spanning `x`, `y` and `z` ranges of a structure's frame.
+fn block(at: Place, x: (f32, f32), y: (f32, f32), z: (f32, f32), surface: &'static str) -> Solid {
+    let c = Vec3::new(x.0 + x.1, y.0 + y.1, z.0 + z.1) * 0.5;
+    let h = Vec3::new(x.1 - x.0, y.1 - y.0, z.1 - z.0).abs() * 0.5;
+    Solid::cuboid(at.p(c.x, c.y, c.z), h, at.r, surface)
+}
+
+/// The colliders of a [`hangar`]: walls, the jambs and header round the door opening, the
+/// pitched roof and each door leaf where it stands, so the open part is open.
+pub fn hangar_solids(at: Place, h: &Hangar) -> Vec<Solid> {
+    let hw = h.w * 0.5;
+    let (d, eave, ridge) = (h.d, h.eave, h.eave + h.rise);
+    let jamb = 0.8f32;
+    let t = 0.15f32;
+    let mut out = vec![
+        block(at, (-hw - t, -hw + t), (0.0, eave), (0.0, d), "metal"),
+        block(at, (hw - t, hw + t), (0.0, eave), (0.0, d), "metal"),
+        block(at, (-hw, hw), (0.0, eave), (d - t, d + t), "metal"),
+        block(at, (-hw, -hw + jamb), (0.0, eave), (-t, t), "metal"),
+        block(at, (hw - jamb, hw), (0.0, eave), (-t, t), "metal"),
+        block(at, (-hw, hw), (h.door_h, eave), (-t, t), "metal"),
+    ];
+    let roof: Vec<Vec3> = [0.0, d]
+        .iter()
+        .flat_map(|&z| {
+            [
+                at.p(-hw - 0.3, eave, z),
+                at.p(hw + 0.3, eave, z),
+                at.p(0.0, ridge, z),
+            ]
+        })
+        .collect();
+    out.push(Solid::hull(&roof, "metal"));
+    let opening = h.w - 2.0 * jamb;
+    let leaves = 6usize;
+    let lw = opening / leaves as f32 + 0.12;
+    let dh = h.door_h - h.floor;
+    for i in 0..leaves {
+        let left = i < leaves / 2;
+        let closed_x = -hw + jamb + (i as f32 + 0.5) * (opening / leaves as f32);
+        let k = if left { i } else { leaves - 1 - i };
+        let track = [-0.18f32, -0.36, -0.54][k.min(2)];
+        let sx = if left { -1.0 } else { 1.0 };
+        let stack_x = sx * (hw + lw * 0.5 + 0.2);
+        let f = if left { h.open.0 } else { h.open.1 };
+        let x = closed_x + (stack_x - closed_x) * f.clamp(0.0, 1.0);
+        out.push(block(
+            at,
+            (x - lw * 0.5, x + lw * 0.5),
+            (h.floor, h.floor + dh),
+            (track - 0.07, track + 0.07),
+            "metal",
+        ));
+    }
+    out
+}
+
+/// The colliders of a [`fire_station`]: the hall's walls, piers and lintels, its closed
+/// shutters (the open left bay stays open, the crash tender inside it), roof, the crew wing
+/// and the hose tower.
+pub fn fire_station_solids(at: Place) -> Vec<Solid> {
+    let bay = 7.0f32;
+    let hw = bay * 1.5;
+    let d = 17.0f32;
+    let hall_h = 7.6f32;
+    let (door_w, door_h) = (5.2f32, 5.4f32);
+    let floor = 0.15f32;
+    let (wing_w, wing_d, wing_h) = (9.0f32, 12.0f32, 7.2f32);
+    let t = 0.15f32;
+    let mut out = vec![
+        block(at, (-hw - t, -hw + t), (0.0, hall_h), (0.0, d), "concrete"),
+        block(at, (hw - t, hw + t), (0.0, hall_h), (0.0, d), "concrete"),
+        block(at, (-hw, hw), (0.0, hall_h), (d - t, d + t), "concrete"),
+        block(
+            at,
+            (-hw, hw),
+            (hall_h - 0.3, hall_h + 0.3),
+            (0.0, d),
+            "concrete",
+        ),
+        block(
+            at,
+            (-hw, hw),
+            (floor + door_h, hall_h),
+            (-0.12, 0.35),
+            "concrete",
+        ),
+        block(
+            at,
+            (hw, hw + wing_w),
+            (0.0, wing_h),
+            (0.0, wing_d),
+            "concrete",
+        ),
+        block(at, (-hw - 4.0, -hw), (0.0, 14.5), (d - 4.2, d), "concrete"),
+    ];
+    let mut edges = vec![-hw];
+    for k in 0..3 {
+        let xc = -hw + (k as f32 + 0.5) * bay;
+        edges.push(xc - door_w * 0.5);
+        edges.push(xc + door_w * 0.5);
+        if k > 0 {
+            out.push(block(
+                at,
+                (xc - door_w * 0.5, xc + door_w * 0.5),
+                (floor, floor + door_h),
+                (0.3, 0.45),
+                "metal",
+            ));
+        }
+    }
+    edges.push(hw);
+    for pair in edges.chunks(2) {
+        out.push(block(
+            at,
+            (pair[0], pair[1]),
+            (0.0, hall_h),
+            (-0.12, 0.35),
+            "concrete",
+        ));
+    }
+    // The crash tender in the open bay.
+    let tender = Place {
+        o: at.p(-hw + 0.5 * bay, floor, 1.2),
+        r: at.r,
+    };
+    out.push(block(
+        tender,
+        (-1.27, 1.27),
+        (0.0, 3.4),
+        (0.0, 10.4),
+        "metal",
+    ));
+    out
+}
+
+/// The colliders of a [`tower`] whose cab floor is at `cab_floor`: base building, shaft,
+/// equipment floor and cab.
+pub fn tower_solids(at: Place, cab_floor: f32) -> Vec<Solid> {
+    let h = cab_floor;
+    let (sh, e) = (2.3f32, 3.2f32);
+    let cab_top = h + 1.0 + 3.0 + 0.55;
+    vec![
+        block(at, (-1.0, 11.0), (0.0, 7.4), (-4.5, 4.5), "concrete"),
+        block(at, (-sh, sh), (0.0, h - 3.0), (-sh, sh), "concrete"),
+        block(at, (-e, e), (h - 3.0, h), (-e, e), "concrete"),
+        Solid {
+            center: at.p(0.0, (h + cab_top) * 0.5, 0.0),
+            rotation: at.r,
+            shape: engine_world::physics::ColliderShape::Cylinder {
+                radius: 4.9,
+                half_height: (cab_top - h) * 0.5,
+            },
+            surface: "glass",
+        },
+    ]
+}
+
+/// The colliders of a [`terminal`] `w` wide and `d` deep: the building and the canopy on
+/// its columns.
+pub fn terminal_solids(at: Place, w: f32, d: f32) -> Vec<Solid> {
+    let hw = w * 0.5;
+    let (cd, cy, cw) = (2.6f32, 4.0f32, hw * 0.7);
+    let mut out = vec![
+        block(at, (-hw, hw), (0.0, 8.6), (0.0, d), "concrete"),
+        block(
+            at,
+            (-cw, cw),
+            (cy, cy + 0.62),
+            (-cd - 0.06, 0.0),
+            "concrete",
+        ),
+    ];
+    for k in 0..5 {
+        let x = -cw + 0.6 + (2.0 * cw - 1.2) * k as f32 / 4.0;
+        out.push(Solid::post(at.p(x, 0.0, -cd + 0.4), 0.12, cy, "metal"));
+    }
+    out
+}
+
+/// The collider of a [`floodlight_mast`] `h` tall at `base`.
+pub fn floodlight_mast_solid(base: Vec3, h: f32) -> Solid {
+    Solid::post(base, 0.75, h, "metal")
+}
+
+/// The collider of a [`windsock`]'s mast at `base`.
+pub fn windsock_solid(base: Vec3) -> Solid {
+    Solid::post(base, 0.6, 6.0, "metal")
 }
