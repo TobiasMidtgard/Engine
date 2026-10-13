@@ -74,7 +74,8 @@ pub enum AssistMode {
     Off,
     /// Inputs are rotation rates; releasing the stick stops the rotation.
     Rotation,
-    /// Rotation, and drift without input is killed ("inertia dampening"); `brake` stops.
+    /// Rotation, and drift without input is killed ("inertia dampening"); `brake` stops, and
+    /// held on at a stop backs the ship up.
     #[default]
     Full,
     /// Full, plus thrust that cancels gravity so the ship hangs in the air; `lift` climbs
@@ -235,7 +236,7 @@ pub fn allocate(
 }
 
 /// Largest force each thruster set can make along ±x, ±y, ±z (body axes), N.
-fn axis_capacity(thrusters: &[Thruster]) -> [f32; 6] {
+pub(crate) fn axis_capacity(thrusters: &[Thruster]) -> [f32; 6] {
     let mut cap = [0.0f32; 6];
     for t in thrusters {
         let d = t.direction.normalize_or_zero() * t.max_thrust_n;
@@ -321,8 +322,9 @@ pub fn spacecraft_system(
                 if controls.lift.abs() < 0.01 {
                     force.y = (-v_local.y * damp).clamp(-cap[3], cap[2]);
                 }
-                if controls.brake > 0.01 && controls.throttle < 0.01 {
-                    // Brake: thrust against the forward motion until stopped.
+                if controls.brake > 0.01 && controls.throttle < 0.01 && v_local.z < -0.5 {
+                    // Brake: thrust against the forward motion until stopped; held on once
+                    // stopped, it backs the ship up (as a car's brake pedal engages reverse).
                     force.z = (-v_local.z * damp * 2.0).clamp(-cap[5], cap[4]) * controls.brake;
                 }
             }
