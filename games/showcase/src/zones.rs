@@ -225,6 +225,8 @@ pub const BARE_FOOTPRINTS: &[(&str, [f64; 2], [f64; 2])] = &[
     ("weather", [-13.5, 13.0], [-8.0, 9.0]),
     // The siege fortress's gravel breach range.
     ("fortress", [-26.5, 26.5], [-14.0, -4.0]),
+    // The market's cobbled square (grass still grows where its edge frays out).
+    ("market", [-11.0, 11.0], [-11.0, 11.0]),
 ];
 
 /// The stream's course (x, z), spring first: through the southern woods, over the cliff south
@@ -254,10 +256,7 @@ pub fn spawn_demos(
     for z in ZONES {
         match z.key {
             "plaza" => ph::plaza(commands, lib, z),
-            "market" => {
-                ph::market(commands, lib, z);
-                engine_ui::demo::spawn_demo(commands, z.center);
-            }
+            "market" => engine_ui::demo::spawn_demo(commands, z.center),
             "paddock" => engine_anim::demo::spawn_demo(commands, z.center),
             "physics" => engine_physics::demo::spawn_demo(commands, z.center),
             "yard" => engine_softbody::demo::spawn_demo(commands, z.center),
@@ -492,8 +491,9 @@ pub fn demo_views(z: &Zone) -> Vec<View> {
             })
             .collect(),
         "market" => {
+            let (eye, target) = engine_ui::demo::market::ui_view();
             let ui = |key, name, screen: &'static str| {
-                View::new(key, name, [-1.5, 1.8, -5.5], [-11.8, 1.8, 9.2], 15.0)
+                View::new(key, name, eye.to_array(), target.to_array(), 15.0)
                     .warmup(1.5)
                     .on_arrive("ui.show", screen)
                     .on_leave("ui.hide_all", "{}")
