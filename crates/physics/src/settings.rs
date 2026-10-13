@@ -50,6 +50,10 @@ pub struct PhysicsSettings {
     /// Multiplies how hard explosions push. 1 = real blast wind (a grenade barely moves a
     /// tonne of stone); action games often use 3–10.
     pub blast_scale: f32,
+    /// Joints between two dynamic bodies (ragdolls, chains, robot arms) become articulations:
+    /// each body only moves along its joint's free axes, so joints never stretch however heavy
+    /// the load. Off = every joint is a constraint the solver pulls together each step.
+    pub articulated_joints: bool,
 }
 
 impl Default for PhysicsSettings {
@@ -70,6 +74,7 @@ impl Default for PhysicsSettings {
             buoyancy: true,
             blast_response: true,
             blast_scale: 1.0,
+            articulated_joints: true,
         }
     }
 }
