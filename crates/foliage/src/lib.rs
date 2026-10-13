@@ -2,6 +2,7 @@
 
 pub mod api;
 pub mod assets;
+pub mod cave;
 pub mod demo;
 pub mod ecology;
 pub mod felling;
@@ -9,6 +10,8 @@ pub mod grass;
 pub mod meshgen;
 pub mod plant;
 pub mod scenery;
+pub mod scenery_tree;
+pub mod season;
 pub mod shift;
 pub mod sim;
 pub mod species;
@@ -25,6 +28,8 @@ pub use plant::{
     Disturbance, EcologyRegion, EcologySettings, FelledLog, Genes, Plant, PlantStage,
     RegionHistory, ResourceSource,
 };
+pub use scenery_tree::SceneryTree;
+pub use season::FoliageSeason;
 pub use species::{Glow, Layer, Need, PlantForm, PlantLibrary, PlantSpecies, SpeciesId, Tolerance};
 
 /// Foliage & ecology: procedural trees, bushes, grass, flowers and glowing mushrooms that grow,
@@ -36,6 +41,7 @@ impl Plugin for FoliagePlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<PlantLibrary>()
             .init_resource::<EcologySettings>()
+            .init_resource::<FoliageSeason>()
             .init_resource::<ecology::GrowthClock>()
             .init_resource::<assets::FoliageVisuals>()
             .init_resource::<visuals::GlowLights>()
@@ -51,7 +57,13 @@ impl Plugin for FoliagePlugin {
             )
             .register_resource::<EcologySettings>(
                 "Ecology speed (simulated years per second), pause, and draw distances for small \
-                 plants and simplified trees (meters).",
+                 plants, simplified and distant trees, and scenery trees (meters).",
+            )
+            .register_resource::<FoliageSeason>(
+                "The time of year plants show (day_of_year, 100 ≈ 10 April, 290 ≈ 17 October; \
+                 midsummer by default), or follow_weather to take the weather's calendar: \
+                 deciduous trees leaf out, turn and drop their leaves, ferns and flowers die back, \
+                 grass turns to straw.",
             )
             .register_component::<Plant>(
                 "A plant: species, size 0..1, age (years), health, vigor, what limits it, stage \
@@ -78,6 +90,16 @@ impl Plugin for FoliagePlugin {
             .register_component::<scenery::Rock>(
                 "A procedural boulder, stone or pebble (scale = size in meters), sunk bury_m into the \
                  ground cover, with moss on top, lichen and a wet line below water_m.",
+            )
+            .register_component::<cave::CaveChamber>(
+                "A cave's rock chamber seen from inside (origin = floor center): sculpted walls and \
+                 a vaulted roof with stalactites and stalagmites, open at the floor and at a mouth \
+                 in the -Z wall; moss and lichen only in the mouth's daylight.",
+            )
+            .register_component::<SceneryTree>(
+                "A static tree with a species' looks for painted landscapes (whole valleys of \
+                 them): no growth, seeding, fire or felling and no collider; it draws near, far \
+                 or distant detail by camera distance and follows the season.",
             )
             .register_component::<scenery::Debris>(
                 "Scattered twig, branch, cone, leaves or reeds; hidden beyond draw_distance_m.",
@@ -129,13 +151,18 @@ impl Plugin for FoliagePlugin {
             Update,
             (
                 (felling::stream_tree_colliders, felling::sync_tree_colliders).chain(),
+                season::follow_weather_calendar,
                 grass::sync_region_grass,
                 felling::remove_orphan_colliders,
+                cave::sync_chamber_colliders,
                 (
                     scenery::build_scenery,
                     scenery::cull_debris,
                     assets::ensure_species_visuals,
+                    season::apply_season_colors,
+                    season::apply_litter_color,
                     visuals::sync_plant_visuals,
+                    scenery_tree::sync_scenery_trees,
                     visuals::sync_log_visuals,
                     visuals::update_glow_lights,
                     visuals::pulse_glow,

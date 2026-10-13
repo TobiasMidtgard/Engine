@@ -4,6 +4,8 @@
 //! - Saplings use a slender young mesh; grown trees the full mesh; far trees a cheaper one.
 //! - Small plants (grass, flowers, ferns, mushrooms) disappear beyond a distance.
 //! - Stumps show only the base, dead trees stand as grey snags, burnt ones as charcoal.
+//! - A few years on, bracket fungi fruit on snags, stumps and logs (near the camera), and
+//!   logs grow mossier as they rot.
 //! - Glowing species pick a brighter material the healthier and better fed they are, breathe
 //!   slowly, and light their surroundings through a pool of point lights (one per cluster).
 
@@ -17,7 +19,9 @@ use crate::assets::{FoliageVisuals, GLOW_LEVELS, SpeciesVisual, TINTS, VARIANTS}
 use crate::ecology::InRegion;
 use crate::felling::{FallingTree, LOG_BARE_YEARS, LOG_GREEN_YEARS, LogPose};
 use crate::grass::RegionGrass;
+use crate::meshgen::tree::{LEAF_STEPS, LOG_MOSS, STUMP_WEATHER};
 use crate::plant::{EcologySettings, FelledLog, Plant, PlantStage};
+use crate::season::{FoliageSeason, Leafing, shift_days};
 use crate::species::{Layer, PlantForm, PlantLibrary, PlantSpecies};
 
 /// The drawn parts of a plant (child entities) and what they currently show.
@@ -31,7 +35,26 @@ pub struct PlantVisual {
 #[derive(Component, Debug, Clone, Copy)]
 pub struct PlantPart;
 
-type Part = Option<(Handle<Mesh>, Handle<StandardMaterial>)>;
+/// The bracket fungi drawn on a dead tree or a stump (a child entity, added the first time
+/// the plant has some) and what they currently show.
+#[derive(Component, Debug, Clone)]
+pub struct PlantFungi {
+    pub part: Entity,
+    shown: Part,
+}
+
+/// What a drawn part shows: a mesh and its material, or nothing.
+pub(crate) type Part = Option<(Handle<Mesh>, Handle<StandardMaterial>)>;
+
+/// Bracket fungi are drawn this close to the camera.
+pub const FUNGI_DISTANCE_M: f32 = 45.0;
+/// Years after a tree dies (or is felled) before brackets fruit on it.
+pub const FUNGI_YEARS: f32 = 2.5;
+/// Share of a log's life after which it is too far gone to fruit.
+pub const LOG_FUNGI_ROT_END: f32 = 0.85;
+/// Moss cushions on logs are drawn this close to the camera (beyond it the moss stain on the
+/// bark stands in for them).
+pub const LOG_MOSS_DISTANCE_M: f32 = 90.0;
 
 fn tint_of(plant: &Plant) -> usize {
     (((plant.genes.hue + 1.0) * 0.5 * TINTS as f32) as usize).min(TINTS - 1)
@@ -50,20 +73,38 @@ fn is_small(sp: &PlantSpecies) -> bool {
     )
 }
 
-/// What each part should draw.
+/// The crown to draw for a share of leaves (`amount`, 0..1): the full crown, the nearest of
+/// its thinned copies (`thin`, one per [`LEAF_STEPS`] step), or none once it is all but bare.
+fn leafy(full: Option<Handle<Mesh>>, thin: &[Handle<Mesh>], amount: f32) -> Option<Handle<Mesh>> {
+    let (mut shown, mut share) = (full, 1.0);
+    for (&step, mesh) in LEAF_STEPS.iter().zip(thin) {
+        if amount >= 0.5 * (share + step) {
+            return shown;
+        }
+        (shown, share) = (Some(*mesh), step);
+    }
+    if amount >= 0.5 * share { shown } else { None }
+}
+
+/// What each part should draw on `day` of the year ([`FoliageSeason`]).
 pub fn desired_parts(
     plant: &Plant,
     sp: &PlantSpecies,
     vis: &SpeciesVisual,
     distance: f32,
     settings: &EcologySettings,
+    day: f32,
 ) -> [Part; 3] {
     let v = &vis.variants[plant.genes.variant as usize % VARIANTS];
     let tint = tint_of(plant);
     let pair = |m: &Option<Handle<Mesh>>, mat: Handle<StandardMaterial>| m.map(|m| (m, mat));
     let height = plant.height(sp).max(0.1);
+    let leafing = sp.seasons.map_or(Leafing::SUMMER, |s| {
+        s.leafing(day, shift_days(&plant.genes))
+    });
     if is_small(sp)
-        && distance > settings.small_plant_distance_m * (0.6 + 0.4 * (height / 1.0).min(2.5))
+        && (distance > settings.small_plant_distance_m * (0.6 + 0.4 * (height / 1.0).min(2.5))
+            || !leafing.shows(&plant.genes))
     {
         return [None, None, None];
     }
@@ -75,33 +116,57 @@ pub fn desired_parts(
             } else {
                 distance > settings.tree_lod_distance_m * (0.5 + plant.size)
             };
+            let distant = !is_small(sp)
+                && distance > settings.tree_distant_distance_m * (0.5 + plant.size)
+                && v.foliage_distant.is_some();
             let leaves = if vis.glow.is_empty() {
                 vis.leaves[tint]
             } else {
                 vis.glow[tint % vis.glow.len()][glow_level(plant)]
             };
+            let amount = if is_small(sp) { 1.0 } else { leafing.amount };
             if sapling {
-                [
-                    None,
-                    pair(&v.sapling_wood, vis.bark),
-                    pair(&v.sapling_foliage, leaves),
-                ]
+                let crown = leafy(v.sapling_foliage, &v.sapling_foliage_thin, amount);
+                [None, pair(&v.sapling_wood, vis.bark), pair(&crown, leaves)]
+            } else if distant {
+                // The whole trunk stands in for the base too (swaying with the crown; it
+                // barely moves near the ground).
+                let crown = leafy(v.foliage_distant, &v.foliage_distant_thin, amount);
+                [None, pair(&v.wood_distant, vis.bark), pair(&crown, leaves)]
             } else if lod && (v.wood_lod.is_some() || v.foliage_lod.is_some()) {
                 let or = |a: &Option<Handle<Mesh>>, b: &Option<Handle<Mesh>>| a.or(*b);
+                let crown = match v.foliage_lod {
+                    Some(_) => leafy(v.foliage_lod, &v.foliage_lod_thin, amount),
+                    None => leafy(v.foliage, &v.foliage_thin, amount),
+                };
                 [
                     pair(&v.base, vis.bark_rigid),
                     pair(&or(&v.wood_lod, &v.wood), vis.bark),
-                    pair(&or(&v.foliage_lod, &v.foliage), leaves),
+                    pair(&crown, leaves),
                 ]
             } else {
                 [
                     pair(&v.base, vis.bark_rigid),
                     pair(&v.wood, vis.bark),
-                    pair(&v.foliage, leaves),
+                    pair(&leafy(v.foliage, &v.foliage_thin, amount), leaves),
                 ]
             }
         }
-        PlantStage::Stump { .. } => [pair(&v.base, vis.bark_rigid), None, None],
+        PlantStage::Stump { years } => {
+            // The cut silvers, then rots and mosses over (cushions in the foliage's place).
+            let step = STUMP_WEATHER[1..]
+                .iter()
+                .take_while(|(from, _)| years >= *from)
+                .count();
+            let (base, moss) = match step {
+                0 => (v.base, None),
+                n => (
+                    v.base_weathered.get(n - 1).copied().or(v.base),
+                    v.base_moss.get(n - 1).copied().flatten(),
+                ),
+            };
+            [pair(&base, vis.bark_rigid), None, pair(&moss, vis.moss)]
+        }
         PlantStage::Dead { years } => {
             let wood = if plant.size < 0.22 {
                 &v.sapling_wood
@@ -142,6 +207,21 @@ pub fn desired_parts(
     }
 }
 
+/// The bracket fungi a plant shows: on a snag or an old stump of a grown tree, near the camera.
+pub fn desired_fungi(plant: &Plant, vis: &SpeciesVisual, distance: f32) -> Part {
+    if distance > FUNGI_DISTANCE_M || plant.size < 0.22 {
+        return None;
+    }
+    let v = &vis.variants[plant.genes.variant as usize % VARIANTS];
+    let mesh = match plant.stage {
+        PlantStage::Stump { years } if years >= FUNGI_YEARS + 1.0 => v.stump_fungi,
+        // The snag mesh shows once the twigs have dropped.
+        PlantStage::Dead { years } if years >= FUNGI_YEARS && v.snag.is_some() => v.snag_fungi,
+        _ => None,
+    };
+    mesh.map(|m| (m, vis.fungi))
+}
+
 /// Turns a plant's pose ([`plant_pose`]) sits on: small plants lean with the slope they grow
 /// on (trees grow straight up), and a world shift that turns the world turns this too.
 /// Missing means none.
@@ -176,7 +256,7 @@ pub fn camera_position(world_cams: &Query<(&Camera, &GlobalTransform)>) -> Optio
         .map(|(_, t)| t.translation())
 }
 
-/// Keep every plant's parts in sync with its stage, size and distance.
+/// Keep every plant's parts in sync with its stage, size, distance and the season.
 #[allow(clippy::type_complexity, clippy::too_many_arguments)]
 pub fn sync_plant_visuals(
     mut commands: Commands,
@@ -184,6 +264,7 @@ pub fn sync_plant_visuals(
     library: Res<PlantLibrary>,
     visuals: Res<FoliageVisuals>,
     settings: Res<EcologySettings>,
+    season: Res<FoliageSeason>,
     ground: Option<Res<engine_world::Ground>>,
     cams: Query<(&Camera, &GlobalTransform)>,
     mut plants: Query<(
@@ -191,6 +272,7 @@ pub fn sync_plant_visuals(
         Ref<Plant>,
         &mut Transform,
         Option<&mut PlantVisual>,
+        Option<&mut PlantFungi>,
         Option<&PlantBase>,
         Option<&InRegion>,
     )>,
@@ -198,9 +280,10 @@ pub fn sync_plant_visuals(
     meadows: Query<(), With<RegionGrass>>,
 ) {
     *frame = frame.wrapping_add(1);
-    let full_pass = *frame % 8 == 1 || visuals.is_changed() || settings.is_changed();
+    let full_pass =
+        *frame % 8 == 1 || visuals.is_changed() || settings.is_changed() || season.is_changed();
     let cam = camera_position(&cams);
-    for (entity, plant, mut transform, visual, base, region) in &mut plants {
+    for (entity, plant, mut transform, visual, fungi, base, region) in &mut plants {
         let fresh = visual.is_none();
         if !full_pass && !fresh && !plant.is_changed() {
             continue;
@@ -242,9 +325,30 @@ pub fn sync_plant_visuals(
         let want = if meadow {
             [None, None, None]
         } else {
-            desired_parts(&plant, sp, vis, distance, &settings)
+            desired_parts(&plant, sp, vis, distance, &settings, season.day_of_year)
         };
         let shadows = sp.layer != Layer::Ground && sp.form != PlantForm::Mushroom;
+        let want_fungi = if sp.is_tree() {
+            desired_fungi(&plant, vis, distance)
+        } else {
+            None
+        };
+        match fungi {
+            Some(mut fungi) if fungi.shown != want_fungi => {
+                if let Ok(mut r) = parts.get_mut(fungi.part) {
+                    apply(&mut r, want_fungi);
+                }
+                fungi.shown = want_fungi;
+            }
+            None if want_fungi.is_some() => {
+                let part = spawn_part(&mut commands, entity, want_fungi, true);
+                commands.entity(entity).insert(PlantFungi {
+                    part,
+                    shown: want_fungi,
+                });
+            }
+            _ => {}
+        }
         match visual {
             Some(mut visual) => {
                 if visual.shown == want {
@@ -261,17 +365,8 @@ pub fn sync_plant_visuals(
                 visual.shown = want;
             }
             None => {
-                let parts = std::array::from_fn(|i| {
-                    let mut r = MeshRenderer::new(
-                        engine_render::Shape::Cuboid { size: [0.01; 3] },
-                        StandardMaterial::default(),
-                    );
-                    r.cast_shadows = shadows;
-                    apply(&mut r, want[i]);
-                    commands
-                        .spawn((Transform::default(), ChildOf(entity), r, PlantPart))
-                        .id()
-                });
+                let parts =
+                    std::array::from_fn(|i| spawn_part(&mut commands, entity, want[i], shadows));
                 commands
                     .entity(entity)
                     .insert(PlantVisual { parts, shown: want });
@@ -280,7 +375,20 @@ pub fn sync_plant_visuals(
     }
 }
 
-fn apply(r: &mut MeshRenderer, part: Part) {
+/// A child entity of `parent` drawing `part`.
+fn spawn_part(commands: &mut Commands, parent: Entity, part: Part, shadows: bool) -> Entity {
+    let mut r = MeshRenderer::new(
+        engine_render::Shape::Cuboid { size: [0.01; 3] },
+        StandardMaterial::default(),
+    );
+    r.cast_shadows = shadows;
+    apply(&mut r, part);
+    commands
+        .spawn((Transform::default(), ChildOf(parent), r, PlantPart))
+        .id()
+}
+
+pub(crate) fn apply(r: &mut MeshRenderer, part: Part) {
     match part {
         Some((mesh, material)) => {
             r.mesh = engine_render::MeshRef::Handle(mesh);
@@ -291,15 +399,17 @@ fn apply(r: &mut MeshRenderer, part: Part) {
     }
 }
 
-/// The drawn parts of a falling tree or a log (wood, foliage) and what they show.
+/// The drawn parts of a falling tree or a log (wood, foliage, fungi, moss) and what they show.
 #[derive(Component, Debug, Clone)]
 pub struct LogVisual {
-    pub parts: [Entity; 2],
-    shown: [Part; 2],
+    pub parts: [Entity; 4],
+    shown: [Part; 4],
 }
 
 /// What a falling tree or log draws: fresh logs keep their green crown for a few weeks, then
-/// brown leaves for a year, then bare wood that greys as it rots.
+/// brown leaves for a year, then bare wood that mosses over and greys as it rots, with bracket
+/// fungi on it (near the camera) through the middle of its decay. A deciduous tree that came
+/// down out of leaf (`day` of the year) lies bare.
 #[allow(clippy::too_many_arguments)]
 pub fn desired_log_parts(
     vis: &SpeciesVisual,
@@ -309,19 +419,34 @@ pub fn desired_log_parts(
     rot: f32,
     distance: f32,
     settings: &EcologySettings,
-) -> [Part; 2] {
+    day: f32,
+) -> [Part; 4] {
     let v = &vis.variants[pose.genes.variant as usize % VARIANTS];
     let tint = (((pose.genes.hue + 1.0) * 0.5 * TINTS as f32) as usize).min(TINTS - 1);
     let lod = distance > settings.tree_lod_distance_m * (0.5 + size) && v.wood_lod.is_some();
+    let amount = vis
+        .built_from
+        .seasons
+        .map_or(1.0, |s| s.leafing(day, shift_days(&pose.genes)).amount);
     let (wood, foliage) = if size < 0.22 && v.sapling_wood.is_some() {
-        (v.sapling_wood, v.sapling_foliage)
+        (
+            v.sapling_wood,
+            leafy(v.sapling_foliage, &v.sapling_foliage_thin, amount),
+        )
     } else if (years >= LOG_BARE_YEARS || pose.charred) && v.log.is_some() {
         // The twigs have rotted (or burnt) off.
-        (v.log, None)
+        let log = match moss_stage(pose, rot) {
+            0 => v.log,
+            n => v.log_mossy.get(n - 1).copied().or(v.log),
+        };
+        (log, None)
     } else if lod {
-        (v.wood_lod, v.foliage_lod)
+        (
+            v.wood_lod,
+            leafy(v.foliage_lod, &v.foliage_lod_thin, amount),
+        )
     } else {
-        (v.wood, v.foliage)
+        (v.wood, leafy(v.foliage, &v.foliage_thin, amount))
     };
     let bark = if pose.charred {
         vis.burnt
@@ -337,16 +462,46 @@ pub fn desired_log_parts(
     } else {
         Some(vis.dead_leaves_still)
     };
-    [wood.map(|m| (m, bark)), foliage.zip(leaves)]
+    let bare = (years >= LOG_BARE_YEARS || pose.charred) && v.log.is_some();
+    let fungi = (bare
+        && !pose.charred
+        && years >= FUNGI_YEARS
+        && rot < LOG_FUNGI_ROT_END
+        && distance <= FUNGI_DISTANCE_M
+        && size >= 0.22)
+        .then_some(v.log_fungi)
+        .flatten();
+    let moss = (bare && !pose.charred && distance <= LOG_MOSS_DISTANCE_M)
+        .then(|| v.log_moss.get(moss_stage(pose, rot)).copied().flatten())
+        .flatten();
+    [
+        wood.map(|m| (m, bark)),
+        foliage.zip(leaves),
+        fungi.map(|m| (m, vis.fungi)),
+        moss.map(|m| (m, vis.moss)),
+    ]
 }
 
-/// Keep the parts of falling trees and logs in sync with their age and distance.
-#[allow(clippy::type_complexity)]
+/// How far a log has mossed over: the [`LOG_MOSS`] step it has reached (charred logs stay
+/// at the first).
+fn moss_stage(pose: &LogPose, rot: f32) -> usize {
+    if pose.charred {
+        return 0;
+    }
+    LOG_MOSS[1..]
+        .iter()
+        .take_while(|(from, _)| rot >= *from)
+        .count()
+}
+
+/// Keep the parts of falling trees and logs in sync with their age, distance and the season.
+#[allow(clippy::type_complexity, clippy::too_many_arguments)]
 pub fn sync_log_visuals(
     mut commands: Commands,
     mut frame: Local<u32>,
     visuals: Res<FoliageVisuals>,
     settings: Res<EcologySettings>,
+    season: Res<FoliageSeason>,
     cams: Query<(&Camera, &GlobalTransform)>,
     mut logs: Query<
         (
@@ -362,7 +517,7 @@ pub fn sync_log_visuals(
     mut parts: Query<&mut MeshRenderer, With<PlantPart>>,
 ) {
     *frame = frame.wrapping_add(1);
-    let full_pass = *frame % 16 == 3 || visuals.is_changed();
+    let full_pass = *frame % 16 == 3 || visuals.is_changed() || season.is_changed();
     let cam = camera_position(&cams);
     for (entity, transform, pose, log, falling, visual) in &mut logs {
         if !full_pass && visual.is_some() {
@@ -379,7 +534,8 @@ pub fn sync_log_visuals(
         let distance = cam
             .map(|c| c.distance(transform.translation) as f32)
             .unwrap_or(0.0);
-        let want = desired_log_parts(vis, pose, size, years, rot, distance, &settings);
+        let day = season.day_of_year;
+        let want = desired_log_parts(vis, pose, size, years, rot, distance, &settings, day);
         match visual {
             Some(mut visual) => {
                 for (i, part) in want.iter().enumerate() {
@@ -392,16 +548,8 @@ pub fn sync_log_visuals(
                 visual.shown = want;
             }
             None => {
-                let parts = std::array::from_fn(|i| {
-                    let mut r = MeshRenderer::new(
-                        engine_render::Shape::Cuboid { size: [0.01; 3] },
-                        StandardMaterial::default(),
-                    );
-                    apply(&mut r, want[i]);
-                    commands
-                        .spawn((Transform::default(), ChildOf(entity), r, PlantPart))
-                        .id()
-                });
+                let parts =
+                    std::array::from_fn(|i| spawn_part(&mut commands, entity, want[i], true));
                 commands
                     .entity(entity)
                     .insert(LogVisual { parts, shown: want });
@@ -572,6 +720,21 @@ pub fn pulse_glow(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn crowns_thin_step_by_step_as_leaves_fall() {
+        let h = |i: u32| Handle::<Mesh>::from_index(i);
+        let (full, thin) = (Some(h(0)), [h(1), h(2), h(3)]);
+        assert_eq!(leafy(full, &thin, 1.0), full);
+        assert_eq!(leafy(full, &thin, 0.85), full);
+        assert_eq!(leafy(full, &thin, 0.55), Some(h(1)));
+        assert_eq!(leafy(full, &thin, 0.25), Some(h(2)));
+        assert_eq!(leafy(full, &thin, 0.08), Some(h(3)));
+        assert_eq!(leafy(full, &thin, 0.02), None);
+        // No thinned copies: full crown or nothing.
+        assert_eq!(leafy(full, &[], 0.6), full);
+        assert_eq!(leafy(full, &[], 0.3), None);
+    }
 
     #[test]
     fn small_plants_lean_partly_with_the_slope() {
