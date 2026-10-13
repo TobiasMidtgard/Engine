@@ -511,7 +511,12 @@ pub fn demo_views(z: &Zone) -> Vec<View> {
             .collect(),
         "field" => engine_fire::demo::VIEWS
             .iter()
-            .map(|v| View::new(v.key, v.name, v.eye, v.target, v.hour))
+            .map(|v| {
+                // Each stop starts a fresh fire its own way along, so it catches its moment.
+                View::new(v.key, v.name, v.eye, v.target, v.hour)
+                    .on_arrive("fire.demo", &format!(r#"{{"at_secs": {}}}"#, v.at_secs))
+                    .warmup(v.warmup_secs)
+            })
             .collect(),
         "parkour" => {
             // The duel runs from its setup when the camera arrives (movement.duel), so each

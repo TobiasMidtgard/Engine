@@ -82,9 +82,19 @@ pub(crate) struct Probe<'a> {
     /// Character entities: never wall-run on or climb another character.
     movers: &'a Query<'a, 'a, (), With<Mover>>,
     bodies: &'a Bodies<'a, 'a>,
+    /// The character's seconds per world second (bodies move in world time).
+    rate: f32,
 }
 
 impl Probe<'_> {
+    /// How fast the point `at` of `entity` moves, if the body says (m/s in the character's
+    /// own seconds).
+    pub(crate) fn velocity_at(&self, entity: Entity, at: DVec3) -> Option<Vec3> {
+        let (t, v) = self.bodies.get(entity).ok()?;
+        let v = v?;
+        Some((v.linear + v.angular.cross((at - t.translation).as_vec3())) / self.rate)
+    }
+
     pub(crate) fn ray(&self, origin: DVec3, dir: Vec3, max: f32) -> Option<Hit> {
         if max <= 0.0 {
             return None;
@@ -214,14 +224,15 @@ pub(crate) fn step_movers(
         }
         filter.exclude.clear();
         filter.exclude.push(entity);
+        let rate = if world_dt > 0.0 { dt / world_dt } else { 1.0 };
         let probe = Probe {
             queries: &queries,
             filter: &filter,
             movers: &movers,
             bodies: &decks,
+            rate,
         };
 
-        let rate = if world_dt > 0.0 { dt / world_dt } else { 1.0 };
         follow_pins(&mut m, p, &decks, entity, dt, &mut out);
         // The deck: the ground under the feet (physics carries the character on it), else the
         // wall run along or the ledge held (movement carries the character with those).
@@ -1051,16 +1062,20 @@ fn find_wall_to_run(
     wish: Vec3,
 ) -> Option<WallContact> {
     let up = b.up;
-    let vh = flat(v, up);
-    let speed = vh.length();
-    if speed < p.wallrun_min_speed || v.dot(up) < -10.0 {
+    if v.dot(up) < -10.0 {
         return None;
     }
     // High enough above the ground?
     if probe.ray(b.feet(), -up, p.wallrun_min_height).is_some() {
         return None;
     }
-    let fwd = vh / speed;
+    // Speed is judged against the wall once it is found (a wall can move), so look for walls
+    // around the way the character moves, or faces when it barely moves.
+    let vh = flat(v, up);
+    let fwd = vh
+        .try_normalize()
+        .filter(|_| vh.length() > 1.0)
+        .unwrap_or(m.facing);
     let right = fwd.cross(up);
     let reach = b.radius + p.wall_reach;
     let mut best: Option<(f64, WallContact)> = None;
@@ -1100,8 +1115,19 @@ fn find_wall_to_run(
     {
         return None; // the wall we just jumped off
     }
-    let along = (vh - wall.normal * vh.dot(wall.normal)).length();
-    if along < p.wallrun_min_speed * 0.8 || wish.dot(wall.normal) > 0.5 {
+    // Fast enough along the wall, relative to it: a train car's side is run along at the
+    // speed past it, so running beside a car as fast as it goes is no wall-run, and a jump at
+    // a car sliding past is.
+    let moving = wall
+        .entity
+        .and_then(|e| probe.velocity_at(e, wall.point))
+        .unwrap_or(Vec3::ZERO);
+    let rel = flat(v - moving, up);
+    let along = (rel - wall.normal * rel.dot(wall.normal)).length();
+    if rel.length() < p.wallrun_min_speed
+        || along < p.wallrun_min_speed * 0.8
+        || wish.dot(wall.normal) > 0.5
+    {
         return None;
     }
     Some(wall)
