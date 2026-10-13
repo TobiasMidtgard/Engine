@@ -52,6 +52,11 @@ changing that one plugin line.
   walls it only touches (running along a wall). Its normals come from exact point projections
   between the capsule's core and the surface, not from the sweeps: those point sideways about
   one step in a hundred while the capsule sits in its 2 cm gap, a wall in the middle of a field.
+  A falling character reads `grounded` only once it is on the ground (within 5 cm), not while
+  ground is merely within snapping reach below it.
+  Keep box floors under characters to 100 m across: Rapier's sweeps against a box hundreds of
+  meters wide go wrong by decimeters (a character standing on a 500 m box sinks into it), and
+  building one logs a warning. Use several boxes, a heightfield or a mesh for big ground.
 - **Events**: one `ContactEvent::Started` per touch with the impact impulse and a normal from
   `a` to `b`, one `Ended` when it stops; sensors too. Hard impacts also send `NoiseEvent` (AI
   hearing) and, against static ground, `GroundContact` (dents, dust, impact sounds).
@@ -165,7 +170,7 @@ renderer get colliders only. `cargo run -p engine_physics --release --example ar
 Tests (`cargo test -p engine_physics`): the conformance suite; the "done when" scenarios below
 (`tests/scenarios.rs`); behaviors other modules rely on (`tests/behaviors.rs`: removal, compound
 bodies, joint breaking and motors, hinges swinging through the fixed body they hang on, kinematic platforms, stairs and steep slopes, dashing into
-thin walls, wall-running, no phantom walls on flat ground, running over heightfield hills, crouching, characters on their own clock, sensors and layers, local
+thin walls, wall-running, no phantom walls on flat ground, running over heightfield hills, crouching, landing from a fall, characters on their own clock, sensors and layers, local
 time, hovering, buoyancy, blasts, bodies crossing and merging regions); riding moving bodies
 (`tests/platforms.rs`: crates and characters on a deck at up to 30 km/s, lifts, a turntable, a
 thrusting and turning ship, a seesaw tipped by a character's weight, crates landing on heads,
