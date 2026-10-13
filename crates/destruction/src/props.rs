@@ -141,6 +141,17 @@ pub enum PropKind {
         rise: f32,
         side_mount: bool,
     },
+    /// The steel frame on the back of a reinforcement panel `size` [w, h] meters (see
+    /// [`reinforcement_frame`]).
+    ReinforcementFrame {
+        size: [f32; 2],
+    },
+    /// A reinforcement panel's hydraulic brace, `length` m from its pivot eye to its foot pad,
+    /// the pad tilted `foot_tilt` radians to sit flat once braced (see [`hydraulic_strut`]).
+    HydraulicStrut {
+        length: f32,
+        foot_tilt: f32,
+    },
     RoofTiles {
         width: f32,
         depth: f32,
@@ -222,6 +233,11 @@ impl PropKind {
                 rise: 0.0,
                 side_mount: false,
             },
+            PropKind::ReinforcementFrame { size: [2.7, 3.2] },
+            PropKind::HydraulicStrut {
+                length: 1.66,
+                foot_tilt: 0.65,
+            },
             PropKind::RoofTiles {
                 width: 4.0,
                 depth: 3.4,
@@ -269,6 +285,12 @@ impl PropKind {
                 rise,
                 side_mount,
             } => pipe_railing(length, rise, side_mount, seed),
+            PropKind::ReinforcementFrame { size } => {
+                reinforcement_frame(Vec2::from(size), crate::reinforce::FRAME_D, seed)
+            }
+            PropKind::HydraulicStrut { length, foot_tilt } => {
+                hydraulic_strut(length, foot_tilt, seed)
+            }
             PropKind::RoofTiles {
                 width,
                 depth,
@@ -306,6 +328,11 @@ impl PropKind {
                 rise,
                 side_mount,
             } => pipe_railing_size(length, rise, side_mount),
+            PropKind::ReinforcementFrame { size } => {
+                let s = Vec2::from(size).max(Vec2::new(0.6, 0.6));
+                Vec3::new(s.x, s.y, crate::reinforce::FRAME_D)
+            }
+            PropKind::HydraulicStrut { length, .. } => hydraulic_strut_size(length),
             PropKind::SteelDrum { .. } => Vec3::new(DRUM_DIAMETER, DRUM_HEIGHT, DRUM_DIAMETER),
             PropKind::Sandbag => Vec3::new(BAG_LEN, BAG_HEIGHT, BAG_WIDTH),
             PropKind::SandbagWall { length, courses } => sandbag_wall_size(length, courses),
@@ -5461,6 +5488,253 @@ pub fn pipe_railing(length: f32, rise: f32, side_mount: bool, seed: u64) -> Vec<
         strength: 0.6,
         ground: !side_mount,
     })
+}
+
+/// Width of a reinforcement frame's members (rectangular hollow section), m.
+pub const FRAME_W: f32 = 0.08;
+/// How far in from a reinforcement panel's side its struts hang, m (inside the side members,
+/// on a pin through a lug).
+pub const FRAME_STRUT_INSET: f32 = FRAME_W + 0.055;
+/// Height of a frame's strut pivots over its foot, m (see `reinforce::STRUT_PIVOT_Y`).
+const FRAME_PIVOT_Y: f32 = 1.35;
+
+/// Steel frame bolted to the back of a reinforcement panel `size` [w, h] (X, Y; Z is its
+/// depth, the plate's back at +Z): hollow-section members round the edge with bolts through
+/// to the plate, a yellow kick member along the foot, lugs and pins for the two struts, and
+/// carrying handles on the side members.
+pub fn reinforcement_frame(size: Vec2, depth: f32, seed: u64) -> Vec<PropPart> {
+    let s = size.max(Vec2::new(0.6, 0.6));
+    let (hw, hh, hd) = (s.x * 0.5, s.y * 0.5, depth.max(0.04) * 0.5);
+    let fw = FRAME_W;
+    let mut kit = Kit::new();
+    let paint = [0.2, 0.22, 0.23];
+    let yellow = [0.82, 0.6, 0.1];
+    let bolt = [0.45, 0.45, 0.46];
+    let m = kit.mb(METAL);
+    let v0 = m.vertices.len();
+    let members = [
+        (
+            Vec3::new(0.0, hh - fw * 0.5, 0.0),
+            Vec3::new(hw, fw * 0.5, hd),
+            paint,
+        ),
+        (
+            Vec3::new(0.0, -hh + fw * 0.5, 0.0),
+            Vec3::new(hw, fw * 0.5, hd),
+            yellow,
+        ),
+        (
+            Vec3::new(-hw + fw * 0.5, 0.0, 0.0),
+            Vec3::new(fw * 0.5, hh - fw, hd),
+            paint,
+        ),
+        (
+            Vec3::new(hw - fw * 0.5, 0.0, 0.0),
+            Vec3::new(fw * 0.5, hh - fw, hd),
+            paint,
+        ),
+    ];
+    for (c, half, tint) in members {
+        let along = if half.x > half.y { 0 } else { 1 };
+        let st = stations(-half[along], half[along], &[], 0.4);
+        let mut splits: [&[f32]; 3] = [&[], &[], &[]];
+        splits[along] = &st;
+        bevel_box(
+            m,
+            &Frame::at(c),
+            &BoxSpec::new(half, 0.006).splits(splits).tint(tint),
+        );
+        // Bolts through to the plate every 0.4 m along the member's back.
+        let n = ((half[along] * 2.0) / 0.4).floor().max(1.0) as usize;
+        for k in 0..n {
+            let mut p = c;
+            p[along] += -half[along] + (k as f32 + 0.5) * half[along] * 2.0 / n as f32;
+            p.z = -hd;
+            hex_head(m, p, Vec3::NEG_Z, 0.011, 0.008, bolt);
+        }
+    }
+    // Paint worn to bare steel on the outer edges, scuffed low where boots kick it.
+    let steel = [0.5, 0.51, 0.53];
+    for v in &mut m.vertices[v0..] {
+        let (q, n) = (Vec3::from(v.position), Vec3::from(v.normal));
+        let edge = ((hw - q.x.abs()).min(hh - q.y.abs()) / 0.02).clamp(0.0, 1.0);
+        let scuff = fbm(q, 6.0, seed, 3).max(0.0) * 0.25;
+        let low = (1.0 - (q.y + hh) / 0.4).clamp(0.0, 1.0) * 0.15;
+        let bare = (1.0 - edge) * 0.6 * (1.0 - n.z.abs() * 0.5);
+        let k = 1.0 - scuff * 0.5 - low;
+        let c = mix3([v.color[0], v.color[1], v.color[2]], steel, bare);
+        for (dst, src) in v.color.iter_mut().zip(c) {
+            *dst = src * k;
+        }
+    }
+    // Strut lugs and pins on the side members' inner faces.
+    let yp = FRAME_PIVOT_Y - hh;
+    for side in [-1.0f32, 1.0] {
+        let inner = side * (hw - fw);
+        let sx = side * (hw - FRAME_STRUT_INSET);
+        bevel_box(
+            m,
+            &Frame::at(Vec3::new(inner - side * 0.012, yp, 0.0)),
+            &BoxSpec::new(Vec3::new(0.012, 0.07, hd * 0.9), 0.003).tint(paint),
+        );
+        let x_end = sx - side * 0.04;
+        let path: Vec<Vec3> = [inner - side * 0.02, x_end]
+            .iter()
+            .map(|&x| Vec3::new(x, yp, 0.0))
+            .collect();
+        tube(m, &path, 0.012, 10, true, [0.7, 0.7, 0.72]);
+        hex_head(
+            m,
+            Vec3::new(x_end, yp, 0.0),
+            Vec3::X * -side,
+            0.018,
+            0.012,
+            bolt,
+        );
+        // A carrying handle above the lug and one low down.
+        for y0 in [yp + 0.45, -hh + 0.35] {
+            let r = 0.06;
+            let path = vec![
+                Vec3::new(inner, y0, 0.0),
+                Vec3::new(inner - side * r * 0.8, y0 + 0.01, 0.0),
+                Vec3::new(inner - side * r, y0 + 0.05, 0.0),
+                Vec3::new(inner - side * r, y0 + 0.12, 0.0),
+                Vec3::new(inner - side * r * 0.8, y0 + 0.16, 0.0),
+                Vec3::new(inner, y0 + 0.17, 0.0),
+            ];
+            tube(m, &path, 0.011, 8, true, mul(paint, 0.9));
+        }
+    }
+    kit.finish(Ao {
+        reach: 0.12,
+        strength: 0.6,
+        ground: false,
+    })
+}
+
+/// Radius of a hydraulic strut's foot pad, m.
+const STRUT_PAD_R: f32 = 0.07;
+
+/// Hydraulic brace for a reinforcement panel, `length` m from its pivot eye (+Y) to the middle
+/// of its foot pad (−Y), the mesh centered between them: a clevis eye, a chrome rod, a yellow
+/// cylinder with a gland nut, and a swivel foot pad tilted `foot_tilt` radians (about X) so it
+/// sits flat on the floor once braced.
+pub fn hydraulic_strut(length: f32, foot_tilt: f32, seed: u64) -> Vec<PropPart> {
+    let l = length.max(0.5);
+    let (top, foot) = (l * 0.5, -l * 0.5);
+    let mut kit = Kit::new();
+    let mut rng = Rng::new(seed ^ 0x57A7);
+    let yellow = mul([0.9, 0.66, 0.1], rng.range(0.94, 1.0));
+    let chrome = [0.95, 0.95, 0.96];
+    let dark = [0.25, 0.25, 0.26];
+    let m = kit.mb(METAL);
+    // Eye: a short barrel across X around the pivot, on a neck down to the rod.
+    lathe(
+        m,
+        &Frame::up_along(Vec3::new(-0.026, top, 0.0), Vec3::X),
+        &[
+            Vec2::new(0.0, 0.0),
+            Vec2::new(0.036, 0.0),
+            Vec2::new(0.04, 0.004),
+            Vec2::new(0.04, 0.048),
+            Vec2::new(0.036, 0.052),
+            Vec2::new(0.0, 0.052),
+        ],
+        14,
+        40.0,
+        LatheUv::Wrap(0.03),
+        dark,
+    );
+    let rod_top = top - 0.025;
+    let body_top = top - 0.05 - l * 0.4;
+    tube(
+        m,
+        &[
+            Vec3::new(0.0, rod_top, 0.0),
+            Vec3::new(0.0, body_top - 0.02, 0.0),
+        ],
+        0.024,
+        12,
+        false,
+        chrome,
+    );
+    // Cylinder with a gland nut at its top and a cap at its foot.
+    let body_foot = foot + 0.075;
+    let n = ((body_top - body_foot) / 0.2).ceil().max(1.0) as usize;
+    let path: Vec<Vec3> = (0..=n)
+        .map(|k| Vec3::new(0.0, lerp(body_top, body_foot, k as f32 / n as f32), 0.0))
+        .collect();
+    let v0 = m.vertices.len();
+    tube(m, &path, 0.046, 16, false, yellow);
+    for (y, h) in [(body_top - 0.01, 0.035), (body_foot - 0.02, 0.03)] {
+        lathe(
+            m,
+            &Frame::at(Vec3::new(0.0, y, 0.0)),
+            &[
+                Vec2::new(0.0, 0.0),
+                Vec2::new(0.048, 0.0),
+                Vec2::new(0.052, 0.004),
+                Vec2::new(0.052, h - 0.004),
+                Vec2::new(0.048, h),
+                Vec2::new(0.0, h),
+            ],
+            6,
+            40.0,
+            LatheUv::Planar,
+            dark,
+        );
+    }
+    // Oil streaks down from the gland, dirt kicked up the foot.
+    shade(m, v0, move |q, _| {
+        let oil = (1.0 - (body_top - q.y) / 0.3).clamp(0.0, 1.0) * 0.25;
+        let dirt = (1.0 - (q.y - body_foot) / 0.25).clamp(0.0, 1.0) * 0.2;
+        let k = 1.0 - oil - dirt + fbm(q, 8.0, seed, 2) * 0.05;
+        [k, k * 0.97, k * 0.93]
+    });
+    // Swivel ball and the pad, level once braced.
+    let ball = Vec3::new(0.0, foot + 0.035, 0.0);
+    lathe(
+        m,
+        &Frame::at(ball - Vec3::Y * 0.022),
+        &[
+            Vec2::new(0.0, 0.0),
+            Vec2::new(0.02, 0.006),
+            Vec2::new(0.026, 0.022),
+            Vec2::new(0.02, 0.038),
+            Vec2::new(0.0, 0.044),
+        ],
+        10,
+        60.0,
+        LatheUv::Wrap(0.02),
+        chrome,
+    );
+    let up = Vec3::new(0.0, foot_tilt.cos(), -foot_tilt.sin());
+    lathe(
+        m,
+        &Frame::up_along(Vec3::new(0.0, foot, 0.0) - up * 0.0125, up),
+        &[
+            Vec2::new(0.0, 0.0),
+            Vec2::new(STRUT_PAD_R, 0.0),
+            Vec2::new(STRUT_PAD_R, 0.016),
+            Vec2::new(STRUT_PAD_R - 0.008, 0.025),
+            Vec2::new(0.03, 0.03),
+            Vec2::new(0.0, 0.032),
+        ],
+        16,
+        40.0,
+        LatheUv::Planar,
+        dark,
+    );
+    kit.finish(Ao {
+        reach: 0.08,
+        strength: 0.5,
+        ground: false,
+    })
+}
+
+fn hydraulic_strut_size(length: f32) -> Vec3 {
+    let l = length.max(0.5);
+    Vec3::new(2.0 * STRUT_PAD_R, l + 0.11, 2.0 * STRUT_PAD_R)
 }
 
 // ============================================================================================
