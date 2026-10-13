@@ -94,7 +94,8 @@ everything else (streaming, LOD, colliders, ground queries, prints) follows the 
   (written by the weather module) darken and gloss the ground, turn soil to mud, fill
   footprints, ruts and the hollows of the mud texture with water (with rain ripples), and
   cover the ground in snow that settles in hollows and on ledges first and that footprints
-  cut through. Without `SurfaceLayers`, the global weather in the frame is used.
+  cut through. The wind lays snow in low drifts and ridges along the prevailing east-west
+  wind, and up close ice crystals here and there glint in the sun. Without `SurfaceLayers`, the global weather in the frame is used.
 - **Ocean.** Optional sea surface at sea level (`PlanetTerrain::ocean_surface`) with depth
   tint and waves; turn it off when a water module draws the sea.
 - **Ground query and colliders.** Installs the `Ground` provider (height, normal, surface
@@ -136,7 +137,7 @@ commands.entity(bodies["Moon"]).insert(PlanetTerrain::moon(7).with_radius(1_737_
 
 `examples/terrain_shots.rs` renders the test views headless (lab prints, rain, snow, painted
 ground and a patchwork of painted layers, a meadow tinted the way the showcase paints its
-valley and a natural one at eye height, the range, the coast, the Moon and Mars from orbit)
+valley and a natural one at eye height, snow at eye height, the range, the coast, the Moon and Mars from orbit)
 with the game's auto exposure, and `examples/terrain_map.rs` draws a relief map around the
 home pad for tuning shapes.
 
