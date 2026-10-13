@@ -37,9 +37,6 @@ fn mat(hex: u32, roughness: f32) -> StandardMaterial {
     StandardMaterial::hex(hex).with_roughness(roughness)
 }
 
-fn concrete() -> StandardMaterial {
-    mat(0xa8a49c, 0.8)
-}
 fn stone() -> StandardMaterial {
     mat(0x8a857c, 0.85)
 }
@@ -297,109 +294,6 @@ pub fn plaza(commands: &mut Commands, lib: &Library, z: &Zone) {
             0.8,
         );
     }
-}
-
-/// Market street: stalls with awnings (shop UI), two villagers talking (dialogue UI), a map table
-/// with a globe (flat, globe and galaxy maps). The UI thread owns it.
-pub fn market(commands: &mut Commands, _lib: &Library, z: &Zone) {
-    let c = z.center;
-    let awnings = [0xb03a2e, 0x2e6fb0, 0xd9a93a, 0x3a8f4a, 0x8e44ad];
-    for (i, hex) in awnings.into_iter().enumerate() {
-        let a = i as f64 / awnings.len() as f64 * TAU64 * 0.75 + 0.6;
-        let p = c + DVec3::new(a.cos() * 15.0, 0.0, a.sin() * 15.0);
-        let yaw = (-(a.cos()) as f32).atan2(-(a.sin()) as f32);
-        let rot = Quat::from_rotation_y(yaw);
-        let off = |v: Vec3| p + (rot * v).as_dvec3();
-        for (x, zz) in [(-1.6, -1.0), (1.6, -1.0), (-1.6, 1.0), (1.6, 1.0)] {
-            spawn(
-                commands,
-                cuboid(0.12, 2.6, 0.12),
-                dark_wood(),
-                yawed(off(Vec3::new(x, 1.3, zz)), yaw),
-            );
-        }
-        spawn(
-            commands,
-            cuboid(3.4, 0.9, 1.2),
-            wood(),
-            yawed(off(Vec3::new(0.0, 0.45, 0.6)), yaw),
-        );
-        spawn(
-            commands,
-            cuboid(3.8, 0.06, 2.6),
-            mat(hex, 0.9).with_subsurface(0.3),
-            Transform::from_translation(off(Vec3::new(0.0, 2.75, 0.2)))
-                .with_rotation(rot * Quat::from_rotation_x(0.18)),
-        );
-        // Goods: crates and round produce.
-        for k in 0..4 {
-            let produce = [0xc0392b, 0xe67e22, 0x27ae60, 0xf1c40f][(k + i) % 4];
-            spawn(
-                commands,
-                Shape::Sphere {
-                    radius: 0.18,
-                    segments: 12,
-                },
-                mat(produce, 0.5).with_subsurface(0.3),
-                at(off(Vec3::new(-1.2 + k as f32 * 0.8, 1.05, 0.6))),
-            );
-        }
-        person(
-            commands,
-            off(Vec3::new(0.0, 0.0, -0.6)),
-            yaw + std::f32::consts::PI,
-            0x6b4f2a,
-        );
-    }
-    // Two villagers in conversation.
-    person(
-        commands,
-        c + DVec3::new(-1.0, 0.0, -2.0),
-        std::f32::consts::FRAC_PI_2,
-        0x2e86c1,
-    );
-    person(
-        commands,
-        c + DVec3::new(1.0, 0.0, -2.0),
-        -std::f32::consts::FRAC_PI_2,
-        0xa83232,
-    );
-    // Map table with a globe.
-    spawn(
-        commands,
-        cuboid(3.0, 0.1, 2.0),
-        dark_wood(),
-        at(c + DVec3::new(0.0, 1.0, 5.0)),
-    );
-    spawn(
-        commands,
-        cuboid(2.8, 0.02, 1.8),
-        mat(0xc9b88a, 0.9),
-        at(c + DVec3::new(0.0, 1.06, 5.0)),
-    );
-    for (x, zz) in [(-1.3, -0.8), (1.3, -0.8), (-1.3, 0.8), (1.3, 0.8)] {
-        spawn(
-            commands,
-            cuboid(0.1, 1.0, 0.1),
-            dark_wood(),
-            at(c + DVec3::new(x, 0.5, 5.0 + zz)),
-        );
-    }
-    spawn(
-        commands,
-        Shape::Sphere {
-            radius: 0.45,
-            segments: 32,
-        },
-        mat(0x2a6fa8, 0.4),
-        at(c + DVec3::new(0.9, 1.6, 5.0)),
-    );
-    spawn(
-        commands,
-        cyl(0.05, 0.4),
-        metal(),
-        at(c + DVec3::new(0.9, 1.25, 5.0)),
-    );
 }
 
 /// 2D and 2.5D gallery: a side-on diorama (platforms, coins, a hero) that the 2D cameras will
@@ -1136,110 +1030,11 @@ pub fn field_edge(commands: &mut Commands, lib: &Library, z: &Zone, rng: &mut Rn
     }
 }
 
-/// Airfield buildings: an apron, a control tower and a hangar beside the runway (the runway
-/// and the planes come from `engine_vehicles::demo::spawn_airfield`). The Cars, planes and
-/// spaceships thread owns it.
-pub fn airfield_buildings(commands: &mut Commands, _lib: &Library, z: &Zone) {
-    let c = z.center + DVec3::new(-90.0, 0.0, 0.0);
-    spawn(
-        commands,
-        cuboid(60.0, 0.1, 120.0),
-        concrete(),
-        at(c + DVec3::new(15.0, 0.03, 0.0)),
-    );
-    // Control tower.
-    spawn(
-        commands,
-        cyl(3.0, 22.0),
-        concrete(),
-        at(c + DVec3::new(-10.0, 11.0, -50.0)),
-    );
-    let mut glass = StandardMaterial::hex(0x2a4050)
-        .with_roughness(0.05)
-        .with_alpha(0.6);
-    glass.reflectance = 0.7;
-    spawn(
-        commands,
-        cyl(5.0, 4.0),
-        glass,
-        at(c + DVec3::new(-10.0, 24.0, -50.0)),
-    );
-    spawn(
-        commands,
-        cyl(5.6, 0.6),
-        concrete(),
-        at(c + DVec3::new(-10.0, 26.3, -50.0)),
-    );
-    // Hangar.
-    spawn(
-        commands,
-        Shape::Cylinder {
-            radius: 16.0,
-            height: 50.0,
-            segments: 32,
-        },
-        mat(0x9aa2a8, 0.5).with_metallic(0.6),
-        Transform::from_translation(c + DVec3::new(-12.0, 0.0, 20.0))
-            .with_rotation(Quat::from_rotation_x(std::f32::consts::FRAC_PI_2)),
-    );
-}
-
-/// Spaceport: landing pad with lights, hangars and a 600 m launch tower for scale (the ships
-/// come from `engine_vehicles::demo::spawn_spaceport`). The Planets
-/// and terrain (space) and Cars, planes and spaceships threads own it.
+/// Spaceport: a 600 m launch tower for scale (the pad, its lights, hangars and the ships
+/// come from `engine_vehicles::demo::spawn_spaceport`). The Planets and terrain (space) and
+/// Cars, planes and spaceships threads own it.
 pub fn spaceport(commands: &mut Commands, _lib: &Library, z: &Zone) {
     let c = z.center;
-    spawn(
-        commands,
-        cyl(30.0, 0.4),
-        concrete(),
-        at(c + DVec3::new(0.0, 0.2, 0.0)),
-    );
-    spawn(
-        commands,
-        Shape::Torus {
-            radius: 22.0,
-            tube: 0.3,
-            segments: 96,
-        },
-        mat(0xf1c40f, 0.5),
-        at(c + DVec3::new(0.0, 0.42, 0.0)),
-    );
-    for i in 0..12 {
-        let a = i as f64 / 12.0 * TAU64;
-        commands.spawn((
-            at(c + DVec3::new(a.cos() * 28.0, 0.6, a.sin() * 28.0)),
-            PointLight {
-                color: [1.0, 0.5, 0.2],
-                intensity_lm: 1500.0,
-                range: 12.0,
-                radius: 0.1,
-            },
-        ));
-        spawn(
-            commands,
-            Shape::Sphere {
-                radius: 0.2,
-                segments: 8,
-            },
-            StandardMaterial::hex(0x331100).with_emissive([1.0, 0.5, 0.2], 800.0),
-            at(c + DVec3::new(a.cos() * 28.0, 0.5, a.sin() * 28.0)),
-        );
-    }
-    // Hangars along the side.
-    for k in 0..3 {
-        spawn(
-            commands,
-            Shape::Cylinder {
-                radius: 12.0,
-                height: 30.0,
-                segments: 32,
-            },
-            mat(0x9aa2a8, 0.45).with_metallic(0.6),
-            Transform::from_translation(c + DVec3::new(-70.0, 0.0, -40.0 + k as f64 * 40.0))
-                .with_rotation(Quat::from_rotation_z(std::f32::consts::FRAC_PI_2)),
-        );
-    }
     // The 600 m launch tower: a tapering spire with a lit band every 50 m.
     let tower = c + DVec3::new(70.0, 0.0, 60.0);
     let shell = mat(0xd8dce0, 0.4).with_metallic(0.3);

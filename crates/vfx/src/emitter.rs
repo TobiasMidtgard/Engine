@@ -21,6 +21,7 @@ use engine_world::Env;
 use crate::effect::{EffectDesc, EmitterDesc};
 use crate::gpu::GpuEmitter;
 use crate::library::EffectLibrary;
+use crate::marks::{Mark, Marks};
 use crate::trail::Trail;
 
 /// Plays an effect from the [`EffectLibrary`] at this entity (it follows the entity).
@@ -649,6 +650,7 @@ pub fn tick_effects(
     mut frame: ResMut<ParticleFrame>,
     effects: EffectQuery,
     mut lights: Query<(&mut Transform, &mut GlobalTransform, &mut PointLight), With<VfxLight>>,
+    mut marks: Option<ResMut<Marks>>,
     mut diagnostics: Option<ResMut<Diagnostics>>,
 ) {
     let runtime = &mut *runtime;
@@ -716,6 +718,9 @@ pub fn tick_effects(
                 && !has_trail
             {
                 commands.entity(entity).insert(trail.clone());
+            }
+            if let (Some(mark), Some(marks)) = (&inst.desc.mark, marks.as_deref_mut()) {
+                marks.add(Mark::from_effect(mark, pos, inst.rot, inst.scale));
             }
         } else {
             inst.prev_pos = inst.pos;

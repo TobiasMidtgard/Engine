@@ -24,12 +24,12 @@ use bevy_ecs::message::MessageCursor;
 use engine_core::prelude::*;
 use engine_world::physics::{Collider, ColliderShape, PhysicsQueries, QueryFilter, RigidBody};
 use engine_world::{
-    BurnState, Combustible, ContactKind, DamageEvent, DamageKind, Gravity, Ground, GroundContact,
-    NoiseEvent, WorldImpulse,
+    BurnState, Combustible, ContactKind, DamageEvent, DamageKind, FocusPoints, Gravity, Ground,
+    GroundContact, NoiseEvent, WorldImpulse,
 };
 
 use crate::meshgen::tree::cut_height;
-use crate::plant::{FelledLog, Genes, Plant, PlantStage};
+use crate::plant::{EcologySettings, FelledLog, Genes, Plant, PlantStage};
 use crate::species::{PlantLibrary, PlantSpecies, SpeciesId};
 use crate::visuals::{PlantPart, plant_pose};
 
@@ -78,6 +78,11 @@ pub struct FoliageCollider {
 /// Link from a plant or log to its collider entity.
 #[derive(Component, Debug, Clone, Copy)]
 pub struct HasCollider(pub Entity);
+
+/// A tree too far from every focus to need a trunk collider
+/// ([`EcologySettings::collider_distance_m`]); it gets one again when a focus comes near.
+#[derive(Component, Debug, Clone, Copy)]
+pub struct ColliderStreamedOut;
 
 /// Marks a log whose resting pose has been worked out.
 #[derive(Component, Debug, Clone, Copy)]
@@ -511,7 +516,7 @@ pub fn update_falling_trees(
                 position: along(s),
                 normal: Vec3::Y,
                 size: [crown_r.min(3.0), f.length / 3.0],
-                yaw: pose.yaw,
+                yaw: GroundContact::yaw_of(dir),
                 load_kg: f.mass_kg / 3.0,
                 speed: speed * s,
                 kind: ContactKind::Body,
@@ -621,7 +626,10 @@ pub fn sync_tree_colliders(
     library: Res<PlantLibrary>,
     plants: Query<
         (Entity, &Plant, &Transform, Option<&HasCollider>),
-        Or<(Changed<Plant>, Without<HasCollider>)>,
+        (
+            Or<(Changed<Plant>, Without<HasCollider>)>,
+            Without<ColliderStreamedOut>,
+        ),
     >,
     mut colliders: Query<(&mut Collider, &mut Transform), (With<FoliageCollider>, Without<Plant>)>,
 ) {
@@ -660,6 +668,46 @@ pub fn sync_tree_colliders(
                     .id();
                 commands.entity(e).insert(HasCollider(c));
             }
+        }
+    }
+}
+
+/// Stream trunk colliders: trees far from every focus drop theirs, and get one back when a
+/// focus comes within [`EcologySettings::collider_distance_m`] (a valley of thousands of trees
+/// keeps only the nearby few hundred in the physics world).
+#[allow(clippy::type_complexity)]
+pub fn stream_tree_colliders(
+    mut commands: Commands,
+    mut timer: Local<f32>,
+    time: Res<Time>,
+    library: Res<PlantLibrary>,
+    settings: Res<EcologySettings>,
+    focus: Option<Res<FocusPoints>>,
+    plants: Query<(
+        Entity,
+        &Plant,
+        &Transform,
+        Option<&HasCollider>,
+        Has<ColliderStreamedOut>,
+    )>,
+) {
+    *timer -= time.real_delta_secs();
+    if *timer > 0.0 {
+        return;
+    }
+    *timer = 0.5;
+    let focus = focus.filter(|f| !f.points.is_empty());
+    let r = settings.collider_distance_m as f64;
+    for (e, plant, t, has, out) in &plants {
+        let d = focus.as_ref().map_or(0.0, |f| f.distance(t.translation));
+        if !out && d > r + 20.0 && library.get(plant.species).is_tree() {
+            if let Some(h) = has {
+                commands.entity(h.0).despawn();
+                commands.entity(e).remove::<HasCollider>();
+            }
+            commands.entity(e).insert(ColliderStreamedOut);
+        } else if out && d < r {
+            commands.entity(e).remove::<ColliderStreamedOut>();
         }
     }
 }
@@ -832,6 +880,68 @@ mod tests {
             PlantStage::Stump { .. }
         ));
         let mut q = app.world.query::<&FallingTree>();
+        assert_eq!(q.iter(&app.world).count(), 1);
+    }
+
+    #[derive(Resource, Default)]
+    struct Contacts(Vec<GroundContact>);
+
+    fn collect_contacts(mut seen: ResMut<Contacts>, mut contacts: MessageReader<GroundContact>) {
+        seen.0.extend(contacts.read().copied());
+    }
+
+    #[test]
+    fn a_fallen_trunk_presses_the_ground_along_its_length() {
+        let (mut app, tree) = app_with_oak(0.8);
+        app.init_resource::<Contacts>()
+            .add_systems(Update, collect_contacts);
+        app.update();
+        let dir = Vec3::new(0.6, 0.0, 0.8);
+        let log = fell_tree(&mut app.world, tree, dir).expect("the oak falls");
+        app.update_n(400);
+        let pose = *app.world.get::<LogPose>(log).unwrap();
+        let fall = Vec3::new(pose.yaw.cos(), 0.0, pose.yaw.sin());
+        let seen = &app.world.resource::<Contacts>().0;
+        let body: Vec<_> = seen
+            .iter()
+            .filter(|c| c.entity == Some(log) && c.kind == ContactKind::Body)
+            .collect();
+        assert_eq!(body.len(), 3);
+        for c in body {
+            assert!(c.forward().dot(fall) > 0.99, "{:?} vs {fall}", c.forward());
+        }
+    }
+
+    #[test]
+    fn trunk_colliders_stream_with_the_focus() {
+        let (mut app, near) = app_with_oak(0.7);
+        let lib = PlantLibrary::default();
+        let far = app
+            .world
+            .spawn((
+                Transform::from_xyz(400.0, 0.0, 0.0),
+                Plant::new(lib.id("oak").unwrap(), 0.7, Genes::default()),
+            ))
+            .id();
+        app.world
+            .resource_mut::<EcologySettings>()
+            .collider_distance_m = 100.0;
+        let focus = app
+            .world
+            .spawn((
+                Transform::from_xyz(0.0, 0.0, 0.0),
+                engine_world::SimulationFocus::default(),
+            ))
+            .id();
+        app.update_n(40);
+        assert!(app.world.get::<HasCollider>(near).is_some());
+        assert!(app.world.get::<HasCollider>(far).is_none());
+        // The focus walks over to the far tree: the colliders swap.
+        *app.world.get_mut::<Transform>(focus).unwrap() = Transform::from_xyz(390.0, 0.0, 0.0);
+        app.update_n(40);
+        assert!(app.world.get::<HasCollider>(near).is_none());
+        assert!(app.world.get::<HasCollider>(far).is_some());
+        let mut q = app.world.query::<&FoliageCollider>();
         assert_eq!(q.iter(&app.world).count(), 1);
     }
 }

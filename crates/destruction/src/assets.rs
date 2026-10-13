@@ -11,6 +11,11 @@ use crate::material::{DestructibleMaterial, DestructionMaterials};
 use crate::meshing::MeshBuilder;
 use crate::textures::{self, SurfaceKind};
 
+/// Emission strength of embers glowing in the cracks of flaming char.
+pub const EMBER_GLOW: f32 = 40_000.0;
+/// Emission strength of smoldering char.
+pub const SMOLDER_GLOW: f32 = 8_000.0;
+
 /// Alpha levels of the dust materials.
 pub const DUST_LEVELS: usize = 6;
 
@@ -42,6 +47,8 @@ pub struct DestructionAssets {
     pub grass: Handle<StandardMaterial>,
     /// Gravel ground ([`crate::dress::GravelPad`]).
     pub gravel: Handle<StandardMaterial>,
+    /// Burnt wood by [`crate::burn::CharLevel`]: scorched, glowing char, smoldering, cold.
+    pub char: [Handle<StandardMaterial>; 4],
     /// Surfaces carry procedural PBR textures (needs an image store); voxel meshes then split
     /// into one layer per surface.
     pub textured: bool,
@@ -148,9 +155,23 @@ impl DestructionAssets {
             materials.add(m.with_emissive(c, SUPPORT_GLOW))
         });
         let gravel = materials.add(StandardMaterial::hex(0x6d695f).with_roughness(0.95));
+        // Untextured char: flat colors (the props' vertex colors carry the wood's color, so
+        // scorch multiplies it down), the embers a faint glow over the whole surface.
+        let char = [
+            StandardMaterial::color(0.3, 0.24, 0.2).with_roughness(0.8),
+            StandardMaterial::color(0.05, 0.045, 0.04)
+                .with_roughness(0.6)
+                .with_emissive([1.0, 0.3, 0.06], EMBER_GLOW * 0.08),
+            StandardMaterial::color(0.05, 0.045, 0.04)
+                .with_roughness(0.6)
+                .with_emissive([1.0, 0.25, 0.05], SMOLDER_GLOW * 0.08),
+            StandardMaterial::color(0.09, 0.088, 0.085).with_roughness(0.75),
+        ]
+        .map(|m| materials.add(m));
         Self {
             grass: surface[DestructibleMaterial::Dirt.index()],
             gravel,
+            char,
             surface,
             chips,
             chip_material,
@@ -197,7 +218,41 @@ impl DestructionAssets {
         let mut gravel = textured(SurfaceKind::Gravel, 0xDE57_06A6, images);
         gravel.receives_wetness = true;
         materials.set(self.gravel, gravel);
+        self.texture_char(materials, images);
         self.textured = true;
+    }
+
+    /// Char materials from the charred-timber texture, the embers glowing in its cracks.
+    fn texture_char(
+        &mut self,
+        materials: &mut Assets<StandardMaterial>,
+        images: &mut Assets<Image>,
+    ) {
+        let wood = DestructibleMaterial::Wood.index();
+        if let Some(mut scorched) = materials.get(self.surface[wood]).cloned() {
+            scorched.base_color = [0.3, 0.23, 0.19, 1.0];
+            scorched.perceptual_roughness = 0.85;
+            materials.set(self.char[0], scorched);
+        }
+        let kind = SurfaceKind::Charcoal;
+        let size = texture_size(kind);
+        let seed = 0xC4A2;
+        let charcoal = textured(kind, seed, images);
+        let glow = images.add(textures::ember_glow(size, seed));
+        let ember = |strength: f32| {
+            let mut m = charcoal;
+            m.emissive = [1.0; 3];
+            m.emissive_strength = strength;
+            m.emissive_texture = Some(glow);
+            m
+        };
+        materials.set(self.char[1], ember(EMBER_GLOW));
+        materials.set(self.char[2], ember(SMOLDER_GLOW));
+        let mut cold = charcoal;
+        // Cooled char greys over with ash.
+        cold.base_color = [1.35, 1.32, 1.28, 1.0];
+        cold.receives_wetness = true;
+        materials.set(self.char[3], cold);
     }
 
     /// Material of a voxel mesh layer (a material index or the grass layer).

@@ -6,7 +6,7 @@
 use engine_core::prelude::*;
 use engine_world::locomotion::VehicleControls;
 use engine_world::physics::PhysicsQueries;
-use engine_world::{ContactKind, Ground, SurfaceId};
+use engine_world::{ContactKind, Ground, GroundContact, SurfaceId, WorldShift};
 
 use crate::animator::Animator;
 use crate::ik::{GroundProbe, IkSurfaces, to_world};
@@ -102,6 +102,7 @@ pub struct WheelContact {
     pub position: DVec3,
     pub normal: Vec3,
     pub surface: SurfaceId,
+    /// Heading of travel in [`GroundContact::yaw`]'s convention (yaw 0 faces −Z).
     pub yaw: f32,
     pub speed: f32,
     pub load_kg: f32,
@@ -119,6 +120,22 @@ pub(crate) struct VehicleRuntime {
     roll: f32,
     pitch: f32,
     pub(crate) contacts: Vec<WheelContact>,
+}
+
+impl VehicleRuntime {
+    /// Carry motion history and pending tire contacts into a shifted world frame.
+    pub(crate) fn follow_shift(&mut self, s: &WorldShift) {
+        self.prev_origin = self.prev_origin.map(|o| s.point(o));
+        self.prev_forward = self.prev_forward.map(|f| s.direction(f));
+        self.velocity = s.direction(self.velocity);
+        self.accel = s.direction(self.accel);
+        for c in &mut self.contacts {
+            c.position = s.point(c.position);
+            c.normal = s.direction(c.normal);
+            // A turn about +Y by a raises a heading by a (GroundContact's convention).
+            c.yaw += s.yaw();
+        }
+    }
 }
 
 impl VehicleRig {
@@ -263,7 +280,7 @@ pub fn step_vehicle(
                         position: DVec3::new(center_world.x, h.height, center_world.z),
                         normal: h.normal,
                         surface: h.surface,
-                        yaw: forward.x.atan2(-forward.z),
+                        yaw: GroundContact::yaw_of(forward),
                         speed: v_fwd.abs(),
                         load_kg: rig.mass_kg / wheel_count,
                         width: w.radius * 0.6,
@@ -344,8 +361,8 @@ pub fn step_vehicle(
 }
 
 /// Vehicle wheels as ground contacts.
-pub(crate) fn wheel_contact(c: &WheelContact, entity: Entity) -> engine_world::GroundContact {
-    engine_world::GroundContact {
+pub(crate) fn wheel_contact(c: &WheelContact, entity: Entity) -> GroundContact {
+    GroundContact {
         position: c.position,
         normal: c.normal,
         size: [c.width, 0.3],
@@ -355,5 +372,53 @@ pub(crate) fn wheel_contact(c: &WheelContact, entity: Entity) -> engine_world::G
         kind: ContactKind::Wheel,
         surface: Some(c.surface),
         entity: Some(entity),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tire_tracks_keep_their_heading_through_a_turning_world_shift() {
+        let forward = Vec3::new(0.6, 0.0, -0.8);
+        let mut rt = VehicleRuntime {
+            contacts: vec![WheelContact {
+                position: DVec3::new(3.0, 0.0, -2.0),
+                normal: Vec3::Y,
+                surface: SurfaceId::default(),
+                yaw: GroundContact::yaw_of(forward),
+                speed: 8.0,
+                load_kg: 300.0,
+                width: 0.2,
+            }],
+            ..Default::default()
+        };
+        let contact = wheel_contact(&rt.contacts[0], Entity::PLACEHOLDER);
+        assert!(
+            contact.forward().distance(forward) < 1e-5,
+            "{}",
+            contact.forward()
+        );
+
+        let shift = WorldShift {
+            rotation: DQuat::from_rotation_y(0.7),
+            translation: DVec3::new(10.0, 0.0, 5.0),
+            ..WorldShift::IDENTITY
+        };
+        rt.follow_shift(&shift);
+        let moved = wheel_contact(&rt.contacts[0], Entity::PLACEHOLDER);
+        let want = shift.direction(forward);
+        assert!(
+            moved.forward().distance(want) < 1e-5,
+            "{} vs {want}",
+            moved.forward()
+        );
+        assert!(
+            moved
+                .position
+                .distance(shift.point(DVec3::new(3.0, 0.0, -2.0)))
+                < 1e-9
+        );
     }
 }

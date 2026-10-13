@@ -51,6 +51,25 @@ pub struct Targets {
     pub hdr: Tex,
     /// Reverse-Z depth.
     pub depth: Tex,
+    /// Prepass normals: octahedral world normal xy, perceptual roughness, 1 where written.
+    pub prepass_normal: Tex,
+    /// Prepass motion vectors: uv movement since the previous frame (current − previous).
+    pub motion: Tex,
+    /// Depth right after the prepass (shaders read it while the main depth is attached).
+    pub prepass_depth: Tex,
+    /// Raw ambient occlusion (noisy), then the blurred result shading reads.
+    pub ao_raw: Tex,
+    pub ao: Tex,
+    /// Temporal anti-aliasing history, ping-ponged every frame. Without TAA, the finished HDR
+    /// image is kept here for screen-space reflections.
+    pub history: [Tex; 2],
+    /// Screen-space reflections: radiance (not pre-exposed), coverage.
+    pub ssr: Tex,
+    /// Screen-space global illumination: this frame's rays, the temporal results (ping-ponged,
+    /// view depth in alpha) and the blurred result the scene reads.
+    pub gi_raw: Tex,
+    pub gi_history: [Tex; 2],
+    pub gi: Tex,
     pub color_copy: Tex,
     pub depth_copy: Tex,
     /// Tonemapped display image (sRGB). Screenshots read this.
@@ -70,7 +89,7 @@ impl Targets {
             width,
             height,
             formats.hdr,
-            U::RENDER_ATTACHMENT | U::TEXTURE_BINDING | U::COPY_SRC,
+            U::RENDER_ATTACHMENT | U::TEXTURE_BINDING | U::COPY_SRC | U::COPY_DST,
         );
         let depth = Tex::new(
             device,
@@ -80,6 +99,43 @@ impl Targets {
             formats.depth,
             U::RENDER_ATTACHMENT | U::TEXTURE_BINDING | U::COPY_SRC,
         );
+        let screen = |label: &str, format: wgpu::TextureFormat| {
+            Tex::new(
+                device,
+                label,
+                width,
+                height,
+                format,
+                U::RENDER_ATTACHMENT | U::TEXTURE_BINDING,
+            )
+        };
+        let prepass_normal = screen("prepass normals", formats.normal);
+        let motion = screen("motion vectors", formats.motion);
+        let prepass_depth = Tex::new(
+            device,
+            "prepass depth",
+            width,
+            height,
+            formats.depth,
+            U::TEXTURE_BINDING | U::COPY_DST,
+        );
+        let ao_raw = screen("ambient occlusion raw", formats.ao);
+        let ao = screen("ambient occlusion", formats.ao);
+        let history = [0, 1].map(|i| {
+            Tex::new(
+                device,
+                &format!("taa history {i}"),
+                width,
+                height,
+                formats.hdr,
+                U::RENDER_ATTACHMENT | U::TEXTURE_BINDING | U::COPY_SRC | U::COPY_DST,
+            )
+        });
+        let ssr = screen("screen-space reflections", formats.hdr);
+        let gi_raw = screen("screen-space gi trace", formats.hdr);
+        let gi_history =
+            [0, 1].map(|i| screen(&format!("screen-space gi history {i}"), formats.hdr));
+        let gi = screen("screen-space gi", formats.hdr);
         let color_copy = Tex::new(
             device,
             "scene color copy",
@@ -124,6 +180,16 @@ impl Targets {
             height,
             hdr,
             depth,
+            prepass_normal,
+            motion,
+            prepass_depth,
+            ao_raw,
+            ao,
+            history,
+            ssr,
+            gi_raw,
+            gi_history,
+            gi,
             color_copy,
             depth_copy,
             ldr,

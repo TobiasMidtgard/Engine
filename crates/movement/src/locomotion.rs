@@ -3,7 +3,7 @@
 //! Runs in `FixedUpdate` / `SimSet::Gameplay`, before physics. It reads what the physics
 //! backend reported last step ([`CharacterState`]: ground, walls, ceiling), probes the world
 //! with [`PhysicsQueries`] (walls to run on, ledges to climb), picks a mode (run, sprint,
-//! slide, air, wall-run, mantle, dash) and writes the velocity the character controller should
+//! slide, air, wall-run, mantle, ledge hang, dash) and writes the velocity the character controller should
 //! move with ([`CharacterMove`]). Gravity is applied here, as the physics contract asks.
 //!
 //! Every character runs on its own clock: `dt = time.delta_for(LocalTimeScale)`, so slow
@@ -17,11 +17,12 @@ use engine_core::transform::look_rotation;
 use engine_world::animation::{AnimationParams, AnimationTrigger, SkeletonPose};
 use engine_world::locomotion::{LocomotionMode, LocomotionState, MoveIntent};
 use engine_world::physics::{
-    CharacterController, CharacterMove, CharacterState, Hit, PhysicsQueries, QueryFilter,
+    CharacterController, CharacterMove, CharacterState, Hit, PhysicsQueries, QueryFilter, Velocity,
 };
-use engine_world::{ContactKind, Gravity, GroundContact, NoiseEvent};
+use engine_world::{ContactKind, Gravity, Ground, GroundContact, NoiseEvent};
 
-use crate::mover::{Dash, DashRequest, Mantle, Mover, WallContact, flat, move_towards};
+use crate::mover::{Dash, DashRequest, Hang, Mantle, Mover, WallContact, flat, move_towards};
+use crate::platform::{self, Deck};
 use crate::profile::MovementProfile;
 
 /// Walls are surfaces whose normal is within this of horizontal (|n·up| below it).
@@ -32,6 +33,14 @@ const GROUND_STICK: f32 = 0.5;
 const WALL_STICK: f32 = 1.5;
 /// Safety limit on a mantle, s.
 const MANTLE_MAX_SECS: f32 = 1.2;
+/// Hanging, the ledge's top is this far above the top of the capsule (arms stretched), m.
+const HANG_REACH: f32 = 0.3;
+/// Gap between the capsule and the wall while hanging, m.
+const HANG_GAP: f32 = 0.04;
+/// Fastest pull toward the hanging position after a catch, m/s.
+const HANG_PULL: f32 = 5.0;
+/// Holding toward the wall this long while hanging climbs up, s.
+const HANG_CLIMB_HOLD: f32 = 0.3;
 
 /// Messages written by the step.
 #[derive(SystemParam)]
@@ -90,6 +99,7 @@ impl Probe<'_> {
 }
 
 /// Everything about one character the step needs, gathered once.
+#[derive(Clone, Copy)]
 struct Body {
     entity: Entity,
     pos: DVec3,
@@ -121,14 +131,16 @@ pub(crate) fn adopt_characters(mut commands: Commands, q: Query<Entity, Unadopte
     }
 }
 
-#[allow(clippy::type_complexity)]
+#[allow(clippy::type_complexity, clippy::too_many_arguments)]
 pub(crate) fn step_movers(
     time: Res<Time>,
     gravity: Res<Gravity>,
+    ground: Res<Ground>,
     queries: Res<PhysicsQueries>,
     mut out: Outputs,
     mut filter: Local<QueryFilter>,
     movers: Query<(), With<Mover>>,
+    decks: Query<(&Transform, Option<&Velocity>), Without<Mover>>,
     mut q: Query<(
         Entity,
         &mut Transform,
@@ -193,23 +205,43 @@ pub(crate) fn step_movers(
             movers: &movers,
         };
 
-        let v = step_one(&mut m, p, intent, state, &body, &probe, &mut out, dt);
-
-        // Facing: combat target, then where the intent looks, then the motion.
-        let face = m
-            .influence
-            .face
-            .or(intent.look)
-            .map(|l| flat(l, up))
-            .filter(|l| l.length() > 0.1)
-            .or_else(|| match m.mode {
-                LocomotionMode::Dash => m.dash.map(|d| flat(d.dir, up)),
-                LocomotionMode::Mantle => m.mantle.map(|mt| mt.forward),
-                _ => {
-                    let h = flat(v, up);
-                    (h.length() > 0.5).then_some(h)
-                }
+        let rate = if world_dt > 0.0 { dt / world_dt } else { 1.0 };
+        let deck = state
+            .ground_entity
+            .filter(|_| state.grounded)
+            .and_then(|g| decks.get(g).ok().map(|(t, vel)| (g, t, vel)))
+            .map(|(g, t, vel)| Deck {
+                entity: g,
+                transform: t,
+                // Per world second (decks run on world time); `rate` is this character's
+                // seconds per world second.
+                velocity: vel
+                    .map(|v| (v.linear + v.angular.cross((pos - t.translation).as_vec3())) / rate),
             });
+        platform::ride(&mut m, deck, pos, dt);
+        let (state, lift) = on_ground_surface(state, &ground, &body);
+
+        let mut v = step_one(&mut m, p, intent, &state, &body, &probe, &mut out, dt);
+        if m.grounded && m.settle > GROUND_STICK && v.dot(up) <= 0.0 {
+            v -= up * (m.settle - GROUND_STICK);
+        }
+
+        // Facing: the wall hung from, the combat target, where the intent looks, the motion.
+        let face = m.hang.map(|h| -h.normal).or_else(|| {
+            m.influence
+                .face
+                .or(intent.look)
+                .map(|l| flat(l, up))
+                .filter(|l| l.length() > 0.1)
+                .or_else(|| match m.mode {
+                    LocomotionMode::Dash => m.dash.map(|d| flat(d.dir, up)),
+                    LocomotionMode::Mantle => m.mantle.map(|mt| mt.forward),
+                    _ => {
+                        let h = flat(v, up);
+                        (h.length() > 0.5).then_some(h)
+                    }
+                })
+        });
         if let Some(f) = face.and_then(|f| f.try_normalize()) {
             let snap = matches!(m.mode, LocomotionMode::Dash) || m.influence.face.is_some();
             m.facing = if snap {
@@ -234,13 +266,54 @@ pub(crate) fn step_movers(
         feedback(&mut m, p, &body, v, dt, animated, &mut out);
 
         m.velocity = v;
-        mv.velocity = v;
-        let rate = if world_dt > 0.0 { dt / world_dt } else { 1.0 };
+        // Back up onto the ground surface if the step sank into it.
+        mv.velocity = v + up * (lift / dt);
         loco.mode = m.mode;
-        loco.velocity = v * rate;
+        // The world's frame: the deck's motion plus the character's own on it.
+        loco.velocity = (v + m.platform.map_or(Vec3::ZERO, |d| d.velocity)) * rate;
         loco.grounded = m.grounded;
         loco.stamina = (m.dash_charges / p.dash_charges.max(1) as f32).clamp(0.0, 1.0);
         write_params(&m, &mut params, up);
+    }
+}
+
+/// How far above the [`Ground`] surface the feet still count as standing on it, m.
+const GROUND_SNAP: f64 = 0.05;
+
+/// Terrain without colliders: physics reports no ground, but the feet are on (or sank into)
+/// the [`Ground`] surface, so the character stands on it. Returns the state to step with and
+/// how far to lift the character back up, m. Physics backends that collide with the terrain
+/// report the ground themselves and this never applies.
+fn on_ground_surface(state: &CharacterState, ground: &Ground, b: &Body) -> (CharacterState, f32) {
+    if state.grounded || b.up.y < 0.9 {
+        return (*state, 0.0);
+    }
+    let feet = b.pos.y - (b.height * 0.5) as f64;
+    let Some(g) = ground.sample(b.pos) else {
+        return (*state, 0.0);
+    };
+    if feet > g.height + GROUND_SNAP {
+        return (*state, 0.0);
+    }
+    let on = CharacterState {
+        grounded: true,
+        ground_normal: g.normal,
+        ground_entity: None,
+        ground_surface: Some(g.surface),
+        ..*state
+    };
+    (on, (g.height - feet).max(0.0) as f32)
+}
+
+/// Physics backends may report the ground before the feet touch it (within their snap
+/// distance). On landing, keep coming down at the fall's speed until the backend stops the
+/// character, instead of hovering and sinking at [`GROUND_STICK`].
+fn settle(m: &mut Mover, state: &CharacterState, up: Vec3, landed: bool) {
+    if landed {
+        m.settle = m.fall_speed.max(0.0);
+    } else if -state.velocity.dot(up) < m.settle * 0.5 {
+        // Stopped by the ground (or never moved down): settled.
+        m.settle = 0.0;
     }
 }
 
@@ -307,16 +380,19 @@ fn step_one(
     let dash_pressed = intent.dash_to.is_some() && !m.prev_dash;
     m.prev_dash = intent.dash_to.is_some();
     m.slide_cooldown = (m.slide_cooldown - dt).max(0.0);
+    m.grab_cooldown = (m.grab_cooldown - dt).max(0.0);
     m.evade_secs = (m.evade_secs - dt).max(0.0);
     m.dash_charges =
         (m.dash_charges + dt / p.dash_recharge_secs.max(0.01)).min(p.dash_charges as f32);
     if grounded {
+        settle(m, state, up, landed);
         m.coyote = p.coyote_secs;
         m.air_secs = 0.0;
         m.fall_speed = 0.0;
         m.air_jumps_left = p.air_jumps;
         m.last_wall = None;
     } else {
+        m.settle = 0.0;
         m.coyote = (m.coyote - dt).max(0.0);
         m.air_secs += dt;
         m.fall_speed = m.fall_speed.max(-v.dot(up));
@@ -325,6 +401,7 @@ fn step_one(
     if m.disabled {
         m.dash = None;
         m.mantle = None;
+        m.hang = None;
         m.wall = None;
         let vh = flat(v, up);
         let vv = v.dot(up);
@@ -356,6 +433,7 @@ fn step_one(
     });
     if let Some(req) = request
         && m.mantle.is_none()
+        && m.hang.is_none()
         && m.dash_charges >= 1.0
     {
         start_dash(m, p, req, b, v, out);
@@ -408,6 +486,26 @@ fn step_one(
         m.mantle = None;
         m.set_mode(LocomotionMode::Run);
         return mt.forward * mt.exit_speed - up * GROUND_STICK;
+    }
+
+    // ---- hanging from a ledge
+    if let Some(h) = m.hang {
+        if !grounded {
+            return hang(
+                m,
+                p,
+                b,
+                probe,
+                h,
+                v,
+                wish,
+                jump_pressed,
+                crouch_pressed,
+                dt,
+                out,
+            );
+        }
+        m.hang = None;
     }
 
     if grounded {
@@ -514,6 +612,18 @@ fn step_one(
         let lift = v.dot(up).clamp(0.0, 3.0).max(p.wallrun_lift);
         return along + up * lift - wall.normal * WALL_STICK;
     }
+    // Too slow along the wall to run on it, or straight at it: catch its top.
+    if p.ledge_grab
+        && m.grab_cooldown <= 0.0
+        && let Some(h) = find_hang(p, b, probe, v, wish)
+    {
+        m.hang = Some(h);
+        m.set_mode(LocomotionMode::Climb);
+        m.air_jumps_left = p.air_jumps;
+        out.trigger(b.entity, "ledge_grab");
+        out.noise(b.entity, b.pos, 3.0);
+        return hang_pull(b, &h, h.top, dt);
+    }
 
     // Air control (accelerates only up to `air_speed` along the stick: momentum is never lost).
     let mut vh = flat(v, up);
@@ -569,6 +679,7 @@ fn start_dash(
     m.evade_secs = if req.strike { 0.0 } else { p.dash_iframe_secs };
     m.wall = None;
     m.mantle = None;
+    m.hang = None;
     m.set_mode(LocomotionMode::Dash);
     m.mode_secs = 0.0;
     out.trigger(b.entity, "dash");
@@ -582,7 +693,7 @@ fn land(m: &mut Mover, p: &MovementProfile, b: &Body, out: &mut Outputs) {
     }
     let feet = b.feet();
     let right = m.facing.cross(b.up).as_dvec3() * 0.12;
-    let yaw = m.facing.x.atan2(m.facing.z);
+    let yaw = GroundContact::yaw_of(m.facing);
     for side in [-1.0, 1.0] {
         out.contacts.write(GroundContact {
             position: feet + right * side,
@@ -859,15 +970,7 @@ fn find_ledge(p: &MovementProfile, b: &Body, probe: &Probe, v: Vec3, wish: Vec3)
     if ledge < p.mantle_min_height || ledge > p.mantle_max_height {
         return None;
     }
-    // Room to rise (head) and to stand on the ledge.
-    if probe
-        .ray(b.pos, up, b.height * 0.5 + ledge + 0.05)
-        .is_some()
-    {
-        return None;
-    }
-    let stand = feet + upd * (ledge as f64 + b.radius as f64 + 0.3);
-    if probe.ray(stand, inward, b.radius + 0.9).is_some() {
+    if !room_to_climb(b, probe, ledge, inward) {
         return None;
     }
     let edge = hit.point + upd * (down.point - hit.point).dot(upd);
@@ -877,6 +980,173 @@ fn find_ledge(p: &MovementProfile, b: &Body, probe: &Probe, v: Vec3, wish: Vec3)
         rising: true,
         exit_speed: vh.length().max(p.run_speed * 0.8),
     })
+}
+
+/// Room to rise `ledge` meters (head) and then to stand on the ledge, going `inward`.
+fn room_to_climb(b: &Body, probe: &Probe, ledge: f32, inward: Vec3) -> bool {
+    let up = b.up;
+    if probe
+        .ray(b.pos, up, b.height * 0.5 + ledge + 0.05)
+        .is_some()
+    {
+        return false;
+    }
+    let stand = b.feet() + (up * (ledge + b.radius + 0.3)).as_dvec3();
+    probe.ray(stand, inward, b.radius + 0.9).is_none()
+}
+
+/// The top of a wall whose face is at `face` (normal `normal`, out of the wall): where the
+/// face meets the top, if the top is walkable, clear above, and between `low` and `high`
+/// meters above the feet.
+fn ledge_top(
+    b: &Body,
+    probe: &Probe,
+    face: DVec3,
+    normal: Vec3,
+    low: f32,
+    high: f32,
+) -> Option<DVec3> {
+    let upd = b.up.as_dvec3();
+    let feet = b.feet();
+    let over = face - (normal * 0.25).as_dvec3();
+    let from = over + upd * ((feet - over).dot(upd) + high as f64 + 0.15);
+    let down = probe.ray(from, -b.up, high - low + 0.15)?;
+    if down.normal.dot(b.up) < 0.7 || down.distance < 0.01 {
+        return None;
+    }
+    let height = (down.point - feet).dot(upd) as f32;
+    (low..=high)
+        .contains(&height)
+        .then(|| face + upd * (down.point - face).dot(upd))
+}
+
+/// The wall in front of the chest along `dir`, if it is a wall (not a slope or a character).
+fn chest_wall(b: &Body, probe: &Probe, dir: Vec3) -> Option<(DVec3, Vec3)> {
+    let chest = b.pos + (b.up * (b.height * 0.25)).as_dvec3();
+    let hit = probe.ray(chest, dir, b.radius + 0.45)?;
+    if hit.normal.dot(b.up).abs() >= WALL_MAX_UP || hit.normal.dot(dir) > -0.5 {
+        return None;
+    }
+    Some((hit.point, flat(hit.normal, b.up).normalize_or_zero()))
+}
+
+/// A ledge too high to climb onto directly, in reach of the hands: near the top of a jump or
+/// falling, moving or pushing toward the wall.
+fn find_hang(p: &MovementProfile, b: &Body, probe: &Probe, v: Vec3, wish: Vec3) -> Option<Hang> {
+    let up = b.up;
+    if v.dot(up) > 1.5 {
+        return None;
+    }
+    let vh = flat(v, up);
+    let dir = wish
+        .try_normalize()
+        .filter(|_| wish.length() > 0.3)
+        .or_else(|| vh.try_normalize().filter(|_| vh.length() > 0.5))?;
+    let (face, normal) = chest_wall(b, probe, dir)?;
+    let low = p.mantle_max_height.min(p.ledge_grab_max_height);
+    let top = ledge_top(b, probe, face, normal, low, p.ledge_grab_max_height)?;
+    Some(Hang { top, normal })
+}
+
+/// Velocity toward the hanging position under `top` (sideways is left free).
+fn hang_pull(b: &Body, h: &Hang, top: DVec3, dt: f32) -> Vec3 {
+    let hold = top - (b.up * (b.height * 0.5 + HANG_REACH)).as_dvec3()
+        + (h.normal * (b.radius + HANG_GAP)).as_dvec3();
+    let side = b.up.cross(h.normal);
+    let gap = (hold - b.pos).as_vec3();
+    let gap = gap - side * gap.dot(side);
+    (gap / dt.max(1e-4)).clamp_length_max(HANG_PULL)
+}
+
+/// One step hanging from a ledge: shimmy along it, climb up, kick off or let go.
+#[allow(clippy::too_many_arguments)]
+fn hang(
+    m: &mut Mover,
+    p: &MovementProfile,
+    b: &Body,
+    probe: &Probe,
+    h: Hang,
+    v: Vec3,
+    wish: Vec3,
+    jump_pressed: bool,
+    crouch_pressed: bool,
+    dt: f32,
+    out: &mut Outputs,
+) -> Vec3 {
+    let up = b.up;
+    let feet = b.feet();
+    let let_go = |m: &mut Mover, cooldown: f32| {
+        m.hang = None;
+        m.grab_cooldown = cooldown;
+        m.set_mode(LocomotionMode::Air);
+    };
+    // Still there? (Shimmied off its end, or it broke.)
+    let held = (h.top - feet).dot(up.as_dvec3()) as f32;
+    let Some((face, normal)) =
+        chest_wall(b, probe, -h.normal).filter(|(_, n)| n.dot(h.normal) > 0.8)
+    else {
+        let_go(m, 0.3);
+        return flat(v, up);
+    };
+    let Some(top) = ledge_top(b, probe, face, normal, held - 0.35, held + 0.35) else {
+        let_go(m, 0.3);
+        return flat(v, up);
+    };
+    let h = Hang { top, normal };
+    m.hang = Some(h);
+    let right = up.cross(normal);
+    let toward = wish.dot(-normal);
+    let side = wish.dot(right);
+
+    if crouch_pressed {
+        let_go(m, 0.5);
+        out.trigger(b.entity, "let_go");
+        return normal * 1.0;
+    }
+    if jump_pressed && toward < -0.3 {
+        // Kick off the wall, steered by the stick.
+        let_go(m, 0.4);
+        m.jump_buffer = 0.0;
+        out.trigger(b.entity, "wall_jump");
+        out.noise(b.entity, b.pos, 6.0);
+        let away = normal * p.wall_jump_push + right * (side * p.run_speed * 0.6);
+        return away + up * MovementProfile::launch_speed(p.wall_jump_height, b.g);
+    }
+    let ledge = (top - feet).dot(up.as_dvec3()) as f32;
+    let climb = (jump_pressed || (toward > 0.5 && m.mode_secs >= HANG_CLIMB_HOLD))
+        && room_to_climb(b, probe, ledge, -normal);
+    if climb {
+        m.hang = None;
+        m.jump_buffer = 0.0;
+        m.mantle = Some(Mantle {
+            top,
+            forward: -normal,
+            rising: true,
+            exit_speed: p.run_speed * 0.5,
+        });
+        m.set_mode(LocomotionMode::Mantle);
+        out.trigger(b.entity, "mantle");
+        return up * p.mantle_speed;
+    }
+
+    // Shimmy, as long as the ledge goes on that way.
+    let mut along = Vec3::ZERO;
+    if side.abs() > 0.2 {
+        let dir = right * side.signum();
+        let ahead = Body {
+            pos: b.pos + (dir * (b.radius + 0.15)).as_dvec3(),
+            ..*b
+        };
+        let continues = chest_wall(&ahead, probe, -normal)
+            .filter(|(_, n)| n.dot(normal) > 0.8)
+            .and_then(|(f, n)| ledge_top(&ahead, probe, f, n, ledge - 0.3, ledge + 0.3))
+            .is_some();
+        if continues {
+            along = right * (side * p.shimmy_speed);
+        }
+    }
+    m.set_mode(LocomotionMode::Climb);
+    hang_pull(b, &h, top, dt) + along
 }
 
 fn resize_capsule(
@@ -972,7 +1242,7 @@ fn feedback(
         position,
         normal,
         size,
-        yaw: m.facing.x.atan2(m.facing.z),
+        yaw: GroundContact::yaw_of(m.facing),
         load_kg: p.mass_kg,
         speed,
         kind,
@@ -1012,6 +1282,7 @@ fn write_params(m: &Mover, params: &mut AnimationParams, up: Vec3) {
         "effort",
         match m.mode {
             LocomotionMode::Dash | LocomotionMode::Mantle => 1.0,
+            LocomotionMode::Climb => 0.7,
             LocomotionMode::Sprint | LocomotionMode::WallRun => 0.8,
             LocomotionMode::Run => 0.5,
             _ => 0.2,
@@ -1054,6 +1325,62 @@ fn smooth01(x: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_landing_keeps_coming_down_until_the_ground_stops_it() {
+        let mut m = Mover {
+            fall_speed: 6.0,
+            ..Default::default()
+        };
+        let falling = CharacterState {
+            grounded: true,
+            velocity: Vec3::new(0.0, -6.0, 0.0),
+            ..Default::default()
+        };
+        settle(&mut m, &falling, Vec3::Y, true);
+        assert_eq!(m.settle, 6.0);
+        // Still coming down at that speed (the ground was reported early): keep it.
+        settle(&mut m, &falling, Vec3::Y, false);
+        assert_eq!(m.settle, 6.0);
+        // Stopped by the ground: settled.
+        let stopped = CharacterState {
+            velocity: Vec3::new(0.0, -0.4, 0.0),
+            ..falling
+        };
+        settle(&mut m, &stopped, Vec3::Y, false);
+        assert_eq!(m.settle, 0.0);
+    }
+
+    #[test]
+    fn feet_on_or_in_the_ground_surface_stand_on_it() {
+        let ground = Ground::default(); // flat at y = 0
+        let body = |y: f64| Body {
+            entity: Entity::PLACEHOLDER,
+            pos: DVec3::new(3.0, y, 4.0),
+            up: Vec3::Y,
+            g: 9.81,
+            radius: 0.35,
+            height: 1.8,
+        };
+        let air = CharacterState::default();
+        // Sank 0.3 m in: standing, and lifted back out.
+        let (s, lift) = on_ground_surface(&air, &ground, &body(0.6));
+        assert!(s.grounded && s.ground_normal == Vec3::Y && s.ground_entity.is_none());
+        assert!((lift - 0.3).abs() < 1e-5);
+        // Just above: standing, nothing to lift.
+        let (s, lift) = on_ground_surface(&air, &ground, &body(0.93));
+        assert!(s.grounded && lift == 0.0);
+        // In the air: unchanged.
+        let (s, _) = on_ground_surface(&air, &ground, &body(1.5));
+        assert!(!s.grounded);
+        // Physics found ground (a collider): its report wins.
+        let on_box = CharacterState {
+            grounded: true,
+            ground_normal: Vec3::new(0.0, 0.8, 0.6),
+            ..Default::default()
+        };
+        assert_eq!(on_ground_surface(&on_box, &ground, &body(0.6)).0, on_box);
+    }
 
     #[test]
     fn turning_is_rate_limited() {

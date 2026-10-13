@@ -106,8 +106,9 @@ pub fn lat_lon_from_dir(d: DVec3) -> (f64, f64) {
 #[derive(Clone)]
 pub struct HeightOverlay {
     /// Ground height (world y) at world `(x, z)`, meters, in the home frame (the home spot at
-    /// the origin, +Y up, north toward −Z) as if the world were flat. The terrain adds the
-    /// planet's curvature, so the ground passes exactly through these points.
+    /// the origin, +Y up, north toward −Z). The ground passes exactly through these points:
+    /// the terrain converts them to heights on the sphere itself, so don't subtract the
+    /// planet's curvature unless the level is meant to follow it.
     pub height: Arc<dyn Fn(f64, f64) -> f64 + Send + Sync>,
     /// Full strength within this distance of the home spot, meters.
     pub radius_m: f64,
@@ -279,6 +280,9 @@ pub struct PlanetShape {
     /// 0..1 strength of water and ice erosion: valleys, spurs, gullies and couloirs cut down
     /// the slopes of mountains and hills, flat valley floors (0 = none, as on the Moon).
     pub erosion: f64,
+    /// Height of the rock ledges that steep eroded mountainsides break into, meters (a
+    /// second set a third as high sits on top; 0 = none).
+    pub ledge_height_m: f64,
     /// Impact craters: radius of the largest, meters (0 = none).
     pub crater_max_radius_m: f64,
     /// Smallest crater radius, meters.
@@ -321,6 +325,7 @@ impl PlanetShape {
             detail_scale_m: 400.0,
             min_detail_m: 1.0,
             erosion: 1.0,
+            ledge_height_m: 60.0,
             crater_max_radius_m: 0.0,
             crater_min_radius_m: 0.0,
             crater_density: 0.0,
@@ -350,6 +355,7 @@ impl PlanetShape {
             detail_scale_m: 900.0,
             min_detail_m: 0.8,
             erosion: 0.0,
+            ledge_height_m: 0.0,
             crater_max_radius_m: 60_000.0,
             crater_min_radius_m: 4.0,
             crater_density: 0.75,
@@ -384,6 +390,7 @@ impl PlanetShape {
             detail_scale_m: 1_500.0,
             min_detail_m: 1.0,
             erosion: 0.0,
+            ledge_height_m: 0.0,
             crater_max_radius_m: 40_000.0,
             crater_min_radius_m: 20.0,
             crater_density: 0.35,
@@ -652,6 +659,29 @@ impl PlanetShape {
             }
         }
 
+        // Rock ledges: steep mountainsides break into steps along the bedding planes, so
+        // cliffs read as layered rock and the ledges hold snow, scree and grass. The layers
+        // tilt and wander across the range; each set fades out where the vertices are too
+        // far apart to draw its steps.
+        if eroding && self.ledge_height_m > 0.0 {
+            let steep = smooth(0.7, 1.4, slope);
+            if steep > 0.0 {
+                let tilt = noise::fbm(p / 3_000.0, s ^ 0x1ED6, 2, 0.5);
+                let mut step = self.ledge_height_m;
+                for k in 0..2 {
+                    let lod = 1.0 - smooth(step * 0.15, step * 0.4, finest);
+                    if lod <= 0.0 {
+                        break;
+                    }
+                    let t = (h + tilt * step * 3.0) / step + k as f64 * 0.37;
+                    let f = t - t.floor();
+                    // Nearly flat for the lower part of each step, then a steep riser.
+                    h += (smooth(0.45, 1.0, f) - f) * step * 0.85 * steep * lod;
+                    step *= 0.3;
+                }
+            }
+        }
+
         // Small eroded relief: rough on steep rock, smooth on meadows and valley floors.
         let roughness = if eroding {
             0.3 + 2.4 * smooth(0.35, 1.2, slope)
@@ -849,16 +879,24 @@ impl PlanetShape {
         (dh, (steer[LEVELS - 1] + cuts).length())
     }
 
+    /// Seed of the crater scatter (16 bits, so the shader gets it exactly as an `f32`).
+    pub fn crater_seed(&self) -> u32 {
+        (self.seed & 0xFFFF) as u32
+    }
+
     /// Sum of crater profiles at `p` (planet-local, meters), from the largest size class down
     /// to `finest`. Each class scatters at most one crater per cell of a 3D grid; the profile
     /// uses the 3D distance to the crater's center, so centers below or above the surface make
     /// smaller and shallower craters (natural size variety). A crater reaches at most half a
     /// cell, so the 2×2×2 cells around `p` find every crater that touches it.
+    ///
+    /// The terrain shader scatters the same craters (`crater_detail` in terrain.wgsl) to shade
+    /// the ones too small for the vertices; keep the two in step.
     fn craters(&self, p: DVec3, finest: f64, mare: &mut f32) -> f64 {
         let mut total = 0.0;
         let mut radius = self.crater_max_radius_m;
         let min_r = self.crater_min_radius_m.max(finest * 0.75);
-        let mut class = 0u64;
+        let mut class = 0u32;
         while radius >= min_r {
             let cell = radius * 3.2;
             let q = p / cell - 0.5;
@@ -867,24 +905,25 @@ impl PlanetShape {
                 for dy in 0..2 {
                     for dx in 0..2 {
                         let (cx, cy, cz) =
-                            (base.x as i64 + dx, base.y as i64 + dy, base.z as i64 + dz);
-                        let seed = self.seed ^ (class * 0x9E37);
-                        if noise::cell_random(cx, cy, cz, seed, 1) > self.crater_density {
+                            (base.x as i32 + dx, base.y as i32 + dy, base.z as i32 + dz);
+                        let seed = self.crater_seed() ^ class.wrapping_mul(0x9E37);
+                        let rnd = |salt| noise::cell_random32(cx, cy, cz, seed, salt);
+                        if rnd(1) > self.crater_density {
                             continue;
                         }
-                        let center = DVec3::new(
-                            cx as f64 + noise::cell_random(cx, cy, cz, seed, 2),
-                            cy as f64 + noise::cell_random(cx, cy, cz, seed, 3),
-                            cz as f64 + noise::cell_random(cx, cy, cz, seed, 4),
-                        ) * cell;
-                        let rc = radius * (0.55 + 0.45 * noise::cell_random(cx, cy, cz, seed, 5));
+                        let center =
+                            DVec3::new(cx as f64 + rnd(2), cy as f64 + rnd(3), cz as f64 + rnd(4))
+                                * cell;
+                        let rc = radius * (0.55 + 0.45 * rnd(5));
                         let x = (p - center).length() / rc;
                         if x >= 1.5 {
                             continue;
                         }
                         // Bigger craters are shallower relative to size, with flat floors.
-                        let depth = rc * if rc > 8_000.0 { 0.06 } else { 0.18 };
-                        let rim = rc * 0.045;
+                        // Old craters are worn down: shallower, with low rims.
+                        let wear = 1.0 - 0.65 * smooth(0.1, 0.9, rnd(6));
+                        let depth = rc * if rc > 8_000.0 { 0.06 } else { 0.18 } * wear;
+                        let rim = rc * 0.045 * wear * wear;
                         let bowl = if x < 1.0 {
                             let floor = if rc > 8_000.0 { 0.55 } else { 0.0 };
                             let xf = ((x - floor) / (1.0 - floor)).max(0.0);

@@ -302,6 +302,107 @@ fn climbing_to_orbit_stops_the_world_turning() {
 }
 
 #[test]
+fn the_valley_waits_on_earth_while_you_visit_the_moon() {
+    for keep in [true, false] {
+        let mut app = app();
+        app.world.resource_mut::<SpaceSettings>().keep_surfaces = keep;
+        // A house in the valley and a cart rolling down the street.
+        let house = app
+            .world
+            .spawn(Transform::from_xyz(120.0, 0.0, -340.0))
+            .id();
+        let turned = Quat::from_rotation_y(0.7);
+        let cart = app
+            .world
+            .spawn((
+                Transform::from_xyz(-50.0, 0.5, 20.0).with_rotation(turned),
+                Velocity {
+                    linear: Vec3::new(3.0, 0.0, 0.0),
+                    angular: Vec3::new(0.0, 0.2, 0.0),
+                },
+            ))
+            .id();
+        travel_to(&mut app.world, "Moon", 0.0, 0.0, 2.0).unwrap();
+        app.update();
+        // Earth turns for an hour while we are away.
+        app.world.resource_mut::<SpaceClock>().seconds += 3_600.0;
+        app.update_n(2);
+        travel_home(&mut app.world, 2.0);
+        app.update();
+
+        let house_at = app.world.get::<Transform>(house).unwrap().translation;
+        let off = (house_at - DVec3::new(120.0, 0.0, -340.0)).length();
+        if !keep {
+            // Without it the house stays where the Moon's frame mapped it, kilometers off.
+            assert!(off > 1_000.0, "{off}");
+            continue;
+        }
+        assert!(off < 1e-3, "house {house_at:?}");
+        let c = *app.world.get::<Transform>(cart).unwrap();
+        assert!((c.translation - DVec3::new(-50.0, 0.5, 20.0)).length() < 1e-3);
+        assert!(c.rotation.angle_between(turned) < 1e-5);
+        let v = app.world.get::<Velocity>(cart).unwrap();
+        assert!(
+            (v.linear - Vec3::new(3.0, 0.0, 0.0)).length() < 1e-4,
+            "{v:?}"
+        );
+        assert!((v.angular - Vec3::new(0.0, 0.2, 0.0)).length() < 1e-5);
+        // Home is the frame the world started in, with the focus above the home spot.
+        assert!((focus(&mut app) - DVec3::new(0.0, 2.0, 0.0)).length() < 1e-6);
+        assert_eq!(
+            *app.world.resource::<SpaceFrame>(),
+            SpaceFrame {
+                anchor: "Earth".into(),
+                ..SpaceFrame::default()
+            }
+        );
+        assert!(app.world.resource::<Parked>().bodies.is_empty());
+    }
+}
+
+#[test]
+fn orbit_and_landing_elsewhere_keep_the_valley_in_place() {
+    let mut app = app();
+    let house = app
+        .world
+        .spawn(Transform::from_xyz(120.0, 0.0, -340.0))
+        .id();
+    // A satellite far above stays in space with the world.
+    let satellite = app.world.spawn(Transform::from_xyz(0.0, 3.0e6, 0.0)).id();
+    let on_earth = |app: &App| {
+        let p = app.world.get::<Transform>(house).unwrap().translation;
+        state(app).lat_lon_height("Earth", p).unwrap()
+    };
+    let before = on_earth(&app);
+    let set_focus = |app: &mut App, p: DVec3| {
+        let mut q = app
+            .world
+            .query_filtered::<&mut Transform, With<SimulationFocus>>();
+        q.single_mut(&mut app.world).unwrap().translation = p;
+    };
+    set_focus(&mut app, DVec3::new(0.0, 1_500_000.0, 0.0));
+    app.update();
+    assert!(!app.world.resource::<SpaceFrame>().rotating);
+    let parked = &app.world.resource::<Parked>().bodies["Earth"];
+    assert!(parked.iter().any(|p| p.entity == house));
+    assert!(!parked.iter().any(|p| p.entity == satellite));
+    // Two hours of Earth turning under the fixed world, then land wherever the focus is.
+    app.world.resource_mut::<SpaceClock>().seconds += 7_200.0;
+    app.update();
+    let earth = state(&app).body("Earth").unwrap().world_position;
+    let p = focus(&mut app);
+    set_focus(&mut app, earth + (p - earth).normalize() * 6_372_000.0);
+    app.update();
+    assert!(app.world.resource::<SpaceFrame>().rotating);
+    let after = on_earth(&app);
+    assert!(
+        (after.0 - before.0).abs() < 1e-7 && (after.1 - before.1).abs() < 1e-7,
+        "{before:?} → {after:?}"
+    );
+    assert!((after.2 - before.2).abs() < 1e-3, "{before:?} → {after:?}");
+}
+
+#[test]
 fn far_bodies_get_spheres_rings_and_stay_visible() {
     let mut app = app();
     app.world.spawn((Camera::default(), Transform::default()));

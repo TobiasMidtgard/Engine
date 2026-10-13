@@ -186,6 +186,12 @@ pub struct MeshRenderer {
     pub visible: bool,
 }
 
+/// Keeps a dense [`MeshRenderer`] off the virtual geometry cluster path, so it is always drawn
+/// instanced: for debris, fragments and other meshes that change often. Without it, meshes of
+/// at least `RenderSettings::virtual_geometry_min_triangles` are drawn as clusters.
+#[derive(Component, Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
+pub struct NoVirtualGeometry;
+
 impl Default for MeshRenderer {
     fn default() -> Self {
         Self {
@@ -202,8 +208,7 @@ impl MeshRenderer {
         Self {
             mesh: mesh.into(),
             material: material.into(),
-            cast_shadows: true,
-            visible: true,
+            ..Default::default()
         }
     }
 
@@ -347,6 +352,128 @@ impl SkyLightVolume {
 
     pub fn with_fade(mut self, fade: f32) -> Self {
         self.fade = fade;
+        self
+    }
+}
+
+/// Shape of a [`FogVolume`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum FogShape {
+    /// A box: rooms, corridors, a bank of mist over a river.
+    #[default]
+    Box,
+    /// An ellipsoid inscribed in the box: puffs of smoke, steam, a cloud of spores.
+    Ellipsoid,
+}
+
+/// Local fog: a box or ellipsoid of mist, dust, smoke or steam, drawn by the volumetric fog
+/// (`RenderSettings::volumetric_fog`).
+///
+/// It is lit like the height fog ([`FogSettings`](crate::settings::FogSettings)): sunbeams
+/// through windows and leaves, sky light where the sky is visible, lamps glowing in it. It
+/// follows its entity's transform, scale included (`half_extents` are in the entity's local
+/// units). Up to 64 volumes within `volumetric_fog_range` of the camera are drawn, nearest
+/// first; they fade out over the last 15% of the range. Fire, smoke and weather modules spawn
+/// and animate these; everything is plain data.
+///
+/// ```ignore
+/// // Dusty air filling a 10 x 4 x 8 m room, with drifting wisps.
+/// commands.spawn((
+///     Transform::from_xyz(0.0, 2.0, 0.0),
+///     FogVolume::new([5.0, 2.0, 4.0]).with_density(0.08).with_noise(0.7, 1.5),
+/// ));
+/// ```
+#[derive(Component, Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[require(Transform)]
+#[serde(default)]
+pub struct FogVolume {
+    pub shape: FogShape,
+    /// Half the size along the local x, y and z axes (before the entity's scale), meters.
+    pub half_extents: [f32; 3],
+    /// Extinction per meter where the fog is full (0.02 light mist, 0.1 thick fog, 0.5 smoke
+    /// you can't see a hand through). Adds to the height fog.
+    pub density: f32,
+    /// Albedo, linear RGB: the share of stopped light that is scattered (0.9 mist, 0.3 soot).
+    pub albedo: [f32; 3],
+    /// Light the fog gives off itself, linear RGB radiance per meter of fog (cd/m² per m;
+    /// glowing embers in smoke, spores, magic). Scaled by the edge fade and noise like the
+    /// density, and visible even where `density` is 0.
+    pub emission: [f32; 3],
+    /// Distance over which the fog fades in from the surface of the shape, meters (0 = a hard
+    /// edge).
+    pub edge_falloff: f32,
+    /// 0..1 how much animated 3D noise breaks the fog into wisps and holes (0 = uniform). The
+    /// noise drifts with the wind.
+    pub noise: f32,
+    /// Size of the noise's wisps, meters.
+    pub noise_scale: f32,
+    /// Henyey-Greenstein anisotropy `g` (-0.95..0.95), as `FogSettings::sun_scattering`.
+    pub anisotropy: f32,
+}
+
+impl Default for FogVolume {
+    fn default() -> Self {
+        Self {
+            shape: FogShape::Box,
+            half_extents: [5.0, 2.5, 5.0],
+            density: 0.05,
+            albedo: [0.9, 0.9, 0.9],
+            emission: [0.0; 3],
+            edge_falloff: 1.0,
+            noise: 0.0,
+            noise_scale: 2.0,
+            anisotropy: 0.5,
+        }
+    }
+}
+
+impl FogVolume {
+    /// A box of fog of the given half size (meters).
+    pub fn new(half_extents: [f32; 3]) -> Self {
+        Self {
+            half_extents,
+            ..Default::default()
+        }
+    }
+
+    /// An ellipsoid of fog with the given radii (meters).
+    pub fn ellipsoid(radii: [f32; 3]) -> Self {
+        Self {
+            shape: FogShape::Ellipsoid,
+            half_extents: radii,
+            ..Default::default()
+        }
+    }
+
+    pub fn with_density(mut self, density: f32) -> Self {
+        self.density = density;
+        self
+    }
+
+    pub fn with_albedo(mut self, albedo: [f32; 3]) -> Self {
+        self.albedo = albedo;
+        self
+    }
+
+    pub fn with_emission(mut self, emission: [f32; 3]) -> Self {
+        self.emission = emission;
+        self
+    }
+
+    pub fn with_edge_falloff(mut self, meters: f32) -> Self {
+        self.edge_falloff = meters;
+        self
+    }
+
+    /// Break the fog up with drifting noise: `strength` 0..1, wisps `scale` meters across.
+    pub fn with_noise(mut self, strength: f32, scale: f32) -> Self {
+        self.noise = strength;
+        self.noise_scale = scale;
+        self
+    }
+
+    pub fn with_anisotropy(mut self, g: f32) -> Self {
+        self.anisotropy = g;
         self
     }
 }

@@ -4,6 +4,14 @@
 //! (not sRGB). Emissive is in nits-ish units scaled by `emissive_strength`, so glowing
 //! mushrooms or magic runes can bloom.
 //!
+//! ## Presets
+//!
+//! [`StandardMaterial::preset`] gives a ready-made surface whose textures the GPU generates on
+//! first use (see [`material_library`](crate::material_library)): brick, cobblestone, rock,
+//! concrete, plaster, wood planks, bark, rusty steel, painted metal, sand, forest soil, gravel,
+//! snow, marble and grass. Tune it with `with_texture_scale` (meters per tile), `with_tint`
+//! and `with_detail`, and map it without UVs with `with_triplanar` / `with_triplanar_world`.
+//!
 //! ## Textures
 //!
 //! Every factor can be modulated by an optional [`Image`] (glTF conventions):
@@ -15,17 +23,34 @@
 //! | `metallic_roughness_texture` | G = roughness, B = metallic | linear | × `perceptual_roughness`, × `metallic` |
 //! | `emissive_texture` | RGB | sRGB (per `Image::srgb`) | × `emissive` × `emissive_strength` |
 //! | `occlusion_texture` | R = ambient occlusion | linear | mixed by `occlusion_strength` |
+//! | `height_texture` | R = height, 0 deepest .. 1 top | linear | relief of `parallax_depth` meters |
 //!
-//! Texture coordinates are multiplied by `uv_scale` (tiling). Normal maps need no vertex
-//! tangents: the shader builds the tangent frame from screen-space derivatives. In JSON a
-//! texture is its handle index (`"base_color_texture": 3`); `assets.load` lists the handles
-//! a file produced. Materials without textures render exactly as before and share one GPU
-//! texture binding, so untextured scenes batch as well as ever.
+//! A preset fills every slot left `None` with its generated map, so a custom normal map can
+//! replace just the preset's.
+//!
+//! Plain or textured, a material can add procedural surface detail (`with_detail`): bumps,
+//! mottled color and roughness from 3D noise, anchored to the object (or the world).
+//!
+//! ## Mapping, parallax
+//!
+//! With [`TextureMapping::Uv`] (the default) texture coordinates are multiplied by `uv_scale`
+//! and divided by `texture_scale`, reading UV units as meters (as `Shape::Plane`,
+//! `Shape::RoundedCuboid` and most architecture exports lay them out). Triplanar mapping projects
+//! the textures along three axes in meters instead, blending the projections by the normal and
+//! reorienting the normal maps (Mikkelsen's surface gradients), so spheres, rocks and terrain
+//! show no stretching and no seams. A height map adds parallax occlusion mapping: texels shift
+//! with the view as if the relief were really there, and the relief shadows itself in low sun.
+//!
+//! Normal maps need no vertex tangents: the shader builds the tangent frame from screen-space
+//! derivatives. In JSON a texture is its handle index (`"base_color_texture": 3`);
+//! `assets.load` lists the handles a file produced. Materials without textures render exactly as
+//! before and share one GPU texture binding, so untextured scenes batch as well as ever.
 
 use bytemuck::{Pod, Zeroable};
 use engine_assets::{Asset, Handle};
 use serde::{Deserialize, Serialize};
 
+use crate::material_library::MaterialPreset;
 use crate::texture::Image;
 
 /// How a material handles transparency.
@@ -37,6 +62,21 @@ pub enum AlphaMode {
     Mask(f32),
     /// Alpha-blended, drawn after opaque geometry, sorted back to front (glass, water, ghosts).
     Blend,
+}
+
+/// How textures are laid onto a surface.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum TextureMapping {
+    /// The mesh's texture coordinates, x `uv_scale` / `texture_scale` (UV units read as meters).
+    #[default]
+    Uv,
+    /// Triplanar in object space: projected along the object's three axes in meters (its scale
+    /// included) and blended by the normal. Needs no UVs, never stretches, and moves with the
+    /// object (rocks, props, spheres, primitives).
+    Triplanar,
+    /// Triplanar in world space: seamless across meshes split into pieces (terrain, cliffs
+    /// built from several rocks, walls of many blocks), but stays put when the object moves.
+    TriplanarWorld,
 }
 
 /// Physically based material (metallic/roughness workflow).
@@ -81,6 +121,25 @@ pub struct StandardMaterial {
     /// `metallic_roughness_texture`). Linear.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub occlusion_texture: Option<Handle<Image>>,
+    /// Height map in the R channel (0 = deepest, 1 = top) for parallax occlusion mapping: the
+    /// surface looks `parallax_depth` meters deep. Linear.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub height_texture: Option<Handle<Image>>,
+    /// A generated material whose maps fill every texture slot left `None`
+    /// ([`StandardMaterial::preset`] also sets the fitting scale, relief and detail).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub preset: Option<MaterialPreset>,
+    /// How textures are mapped onto the surface (mesh UVs or triplanar projection).
+    pub mapping: TextureMapping,
+    /// Meters covered by one texture tile (UV mapping reads UV units as meters). Presets start
+    /// at their real-world tile size (`MaterialPreset::tile_size`).
+    pub texture_scale: f32,
+    /// Depth of the height map's relief, meters (0 = no parallax). Presets start at
+    /// `MaterialPreset::relief_depth`.
+    pub parallax_depth: f32,
+    /// With a height map, the relief casts shadows onto itself toward the sun (deep mortar
+    /// joints and the gaps between cobbles stay dark in low sun).
+    pub parallax_shadows: bool,
     /// Texture coordinate scale: `[4, 4]` tiles every texture four times.
     pub uv_scale: [f32; 2],
     /// Strength of the normal map's X/Y (glTF `normalTexture.scale`). 1 = as authored.
@@ -88,6 +147,16 @@ pub struct StandardMaterial {
     /// How strongly the occlusion texture darkens ambient light (glTF
     /// `occlusionTexture.strength`), 0..1.
     pub occlusion_strength: f32,
+    /// Procedural surface detail, 0 (off) .. 1: fine bumps, mottled color and roughness from
+    /// 3D noise, so plain-colored surfaces (stone, plaster, bark, soil, metal plates) don't look
+    /// flat. Works without textures and on top of them.
+    pub detail: f32,
+    /// Size of the detail's bumps in meters (its mottling is about 8 times larger).
+    pub detail_scale: f32,
+    /// Anchor the detail to the world instead of the object: for terrain and other meshes split
+    /// into pieces whose detail must line up across the seams. Object-anchored detail (the
+    /// default) moves with the object.
+    pub detail_in_world: bool,
 }
 
 impl Default for StandardMaterial {
@@ -110,9 +179,18 @@ impl Default for StandardMaterial {
             metallic_roughness_texture: None,
             emissive_texture: None,
             occlusion_texture: None,
+            height_texture: None,
+            preset: None,
+            mapping: TextureMapping::Uv,
+            texture_scale: 1.0,
+            parallax_depth: 0.0,
+            parallax_shadows: true,
             uv_scale: [1.0, 1.0],
             normal_scale: 1.0,
             occlusion_strength: 1.0,
+            detail: 0.0,
+            detail_scale: 0.25,
+            detail_in_world: false,
         }
     }
 }
@@ -120,6 +198,39 @@ impl Default for StandardMaterial {
 impl Asset for StandardMaterial {}
 
 impl StandardMaterial {
+    /// A ready-made surface whose textures (base color, normal, roughness/metalness, ambient
+    /// occlusion and height) are generated on the GPU the first time it is drawn: see
+    /// [`MaterialPreset`]. It starts at the preset's real-world tile size with parallax and a
+    /// touch of large-scale variation against visible tiling:
+    ///
+    /// ```ignore
+    /// let wall = StandardMaterial::preset(MaterialPreset::Brick);
+    /// let boulder = StandardMaterial::preset(MaterialPreset::Rock).with_triplanar();
+    /// let floor = StandardMaterial::preset(MaterialPreset::WoodPlanks).with_tint(1.0, 0.85, 0.7);
+    /// ```
+    pub fn preset(preset: MaterialPreset) -> Self {
+        let tile = preset.tile_size();
+        let (detail, subsurface) = match preset {
+            MaterialPreset::Marble | MaterialPreset::PaintedMetal => (0.12, 0.0),
+            MaterialPreset::Snow => (0.3, 0.25),
+            MaterialPreset::Grass => (0.35, 0.15),
+            _ => (0.3, 0.0),
+        };
+        Self {
+            base_color: [1.0; 4],
+            metallic: 1.0,
+            perceptual_roughness: 1.0,
+            subsurface,
+            preset: Some(preset),
+            texture_scale: tile,
+            parallax_depth: preset.relief_depth(),
+            parallax_shadows: true,
+            detail,
+            detail_scale: tile * 0.4,
+            ..Default::default()
+        }
+    }
+
     /// Opaque material with a linear RGB color.
     pub fn color(r: f32, g: f32, b: f32) -> Self {
         Self {
@@ -202,6 +313,78 @@ impl StandardMaterial {
         self
     }
 
+    /// Make one texture tile cover `meters`. The relief scales with it (`parallax_depth`), so
+    /// bricks twice as large have joints twice as deep.
+    pub fn with_texture_scale(mut self, meters: f32) -> Self {
+        let meters = meters.max(1e-4);
+        if self.texture_scale > 0.0 {
+            self.parallax_depth *= meters / self.texture_scale;
+        }
+        self.texture_scale = meters;
+        self
+    }
+
+    /// Multiply the base color by a linear RGB tint (keeps alpha): tint a preset's brick redder
+    /// or its wood darker. 1, 1, 1 leaves it as generated.
+    pub fn with_tint(mut self, r: f32, g: f32, b: f32) -> Self {
+        self.base_color = [r, g, b, self.base_color[3]];
+        self
+    }
+
+    /// Tint with an sRGB hex color (`0xffffff` leaves the color as is).
+    pub fn with_tint_hex(self, rgb: u32) -> Self {
+        let c = srgb_hex_to_linear(rgb);
+        self.with_tint(c[0], c[1], c[2])
+    }
+
+    /// Choose how textures are mapped (see [`TextureMapping`]).
+    pub fn with_mapping(mut self, mapping: TextureMapping) -> Self {
+        self.mapping = mapping;
+        self
+    }
+
+    /// Triplanar mapping in object space: no UVs needed, no stretching, moves with the object.
+    pub fn with_triplanar(self) -> Self {
+        self.with_mapping(TextureMapping::Triplanar)
+    }
+
+    /// Triplanar mapping in world space: seamless across neighboring meshes (terrain).
+    pub fn with_triplanar_world(self) -> Self {
+        self.with_mapping(TextureMapping::TriplanarWorld)
+    }
+
+    /// Add a height map (R channel) for parallax occlusion mapping, `depth` meters deep.
+    pub fn with_height_texture(mut self, image: Handle<Image>, depth: f32) -> Self {
+        self.height_texture = Some(image);
+        self.parallax_depth = depth;
+        self
+    }
+
+    /// Set the parallax relief depth in meters (0 turns parallax off).
+    pub fn with_parallax(mut self, depth: f32) -> Self {
+        self.parallax_depth = depth.max(0.0);
+        self
+    }
+
+    /// Turn off the relief's self-shadowing toward the sun.
+    pub fn without_parallax_shadows(mut self) -> Self {
+        self.parallax_shadows = false;
+        self
+    }
+
+    /// Add procedural surface detail: `strength` 0..1, bumps about `scale` meters across.
+    pub fn with_detail(mut self, strength: f32, scale: f32) -> Self {
+        self.detail = strength;
+        self.detail_scale = scale;
+        self
+    }
+
+    /// Anchor the surface detail to the world (seamless across meshes split into pieces).
+    pub fn with_detail_in_world(mut self) -> Self {
+        self.detail_in_world = true;
+        self
+    }
+
     /// Cut out pixels whose alpha is below `cutoff` (in the scene and in shadows).
     pub fn with_alpha_mask(mut self, cutoff: f32) -> Self {
         self.alpha_mode = AlphaMode::Mask(cutoff);
@@ -209,20 +392,21 @@ impl StandardMaterial {
     }
 
     /// Texture slots in GPU binding order: base color, normal, metallic/roughness, emissive,
-    /// occlusion.
-    pub fn textures(&self) -> [Option<Handle<Image>>; 5] {
+    /// occlusion, height.
+    pub fn textures(&self) -> [Option<Handle<Image>>; 6] {
         [
             self.base_color_texture,
             self.normal_texture,
             self.metallic_roughness_texture,
             self.emissive_texture,
             self.occlusion_texture,
+            self.height_texture,
         ]
     }
 
-    /// True if any texture slot is set.
+    /// True if any texture slot is set or a preset provides the textures.
     pub fn has_textures(&self) -> bool {
-        self.textures().iter().any(Option::is_some)
+        self.preset.is_some() || self.textures().iter().any(Option::is_some)
     }
 
     /// Stable key for sharing identical inline materials.
@@ -245,6 +429,17 @@ impl StandardMaterial {
         }
         if self.receives_wetness {
             flags |= 1 << 6;
+        }
+        if self.detail_in_world {
+            flags |= DETAIL_IN_WORLD_FLAG;
+        }
+        flags |= match self.mapping {
+            TextureMapping::Uv => 0,
+            TextureMapping::Triplanar => 1,
+            TextureMapping::TriplanarWorld => 2,
+        } << MAPPING_SHIFT;
+        if self.parallax_shadows {
+            flags |= PARALLAX_SHADOWS_FLAG;
         }
         for (i, t) in self.textures().iter().enumerate() {
             if t.is_some() {
@@ -271,7 +466,18 @@ impl StandardMaterial {
                 self.normal_scale,
                 self.occlusion_strength.clamp(0.0, 1.0),
             ],
-            uv: [self.uv_scale[0], self.uv_scale[1], 0.0, 0.0],
+            uv: [
+                self.uv_scale[0],
+                self.uv_scale[1],
+                self.detail.clamp(0.0, 1.0),
+                self.detail_scale.max(1e-3),
+            ],
+            mapping: [
+                1.0 / self.texture_scale.max(1e-4),
+                self.parallax_depth.max(0.0),
+                TRIPLANAR_SHARPNESS,
+                0.0,
+            ],
             flags: [flags, 0, 0, 0],
         }
     }
@@ -291,13 +497,21 @@ pub fn srgb_hex_to_linear(rgb: u32) -> [f32; 3] {
 }
 
 /// `GpuMaterial::flags[0]` bit for a bound base color texture; the normal, metallic/roughness,
-/// emissive and occlusion bits follow (`<< 1` … `<< 4`).
+/// emissive, occlusion and height bits follow (`<< 1` … `<< 5`).
 pub const TEXTURE_FLAG_BASE: u32 = 1 << 7;
 /// Mask of all texture-present bits in `GpuMaterial::flags[0]`.
-pub const TEXTURE_FLAGS: u32 = 0b11111 << 7;
+pub const TEXTURE_FLAGS: u32 = 0b111111 << 7;
+/// `GpuMaterial::flags[0]` bit: surface detail anchored to the world.
+pub const DETAIL_IN_WORLD_FLAG: u32 = 1 << 13;
+/// `GpuMaterial::flags[0]` bits 14-15: texture mapping (0 UV, 1 triplanar, 2 triplanar world).
+pub const MAPPING_SHIFT: u32 = 14;
+/// `GpuMaterial::flags[0]` bit: parallax self-shadowing toward the sun.
+pub const PARALLAX_SHADOWS_FLAG: u32 = 1 << 16;
+/// Exponent sharpening the triplanar blend weights (higher = narrower transitions).
+const TRIPLANAR_SHARPNESS: f32 = 6.0;
 
 /// GPU layout of a material (one entry of the material storage buffer, `struct Material` in
-/// `mesh.wgsl` / `mesh_shadow.wgsl`). 96 bytes.
+/// `mesh.wgsl` / `mesh_shadow.wgsl`). 112 bytes.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Pod, Zeroable)]
 pub struct GpuMaterial {
@@ -307,10 +521,13 @@ pub struct GpuMaterial {
     pub params: [f32; 4],
     /// subsurface, wind sway, normal scale, occlusion strength
     pub params2: [f32; 4],
-    /// uv scale xy, unused zw
+    /// uv scale xy, detail strength, detail scale (m)
     pub uv: [f32; 4],
-    /// x: bits 0-3 alpha mode, 4 unlit, 5 double sided, 6 receives wetness, 7-11 texture
-    /// present (base color, normal, metallic/roughness, emissive, occlusion)
+    /// tiles per meter (1 / texture scale), parallax depth (m), triplanar sharpness, unused
+    pub mapping: [f32; 4],
+    /// x: bits 0-3 alpha mode, 4 unlit, 5 double sided, 6 receives wetness, 7-12 texture
+    /// present (base color, normal, metallic/roughness, emissive, occlusion, height), 13 detail
+    /// in world, 14-15 mapping, 16 parallax shadows
     pub flags: [u32; 4],
 }
 
@@ -331,7 +548,9 @@ mod tests {
         // Untextured materials serialize without texture fields.
         let v = serde_json::to_value(StandardMaterial::default()).unwrap();
         assert!(v.get("base_color_texture").is_none(), "{v}");
-        assert_eq!(std::mem::size_of::<GpuMaterial>(), 96);
+        assert!(v.get("preset").is_none(), "{v}");
+        assert_eq!(std::mem::size_of::<GpuMaterial>(), 112);
+        assert_eq!(gpu.mapping, [1.0, 0.0, TRIPLANAR_SHARPNESS, 0.0]);
     }
 
     #[test]
@@ -347,10 +566,34 @@ mod tests {
             gpu.flags[0] & TEXTURE_FLAGS,
             TEXTURE_FLAG_BASE | (TEXTURE_FLAG_BASE << 1)
         );
-        assert_eq!(gpu.uv, [2.0, 3.0, 0.0, 0.0]);
+        assert_eq!(gpu.uv, [2.0, 3.0, 0.0, 0.25]);
         let json = serde_json::to_value(textured).unwrap();
         assert_eq!(json["base_color_texture"], 3);
         let back: StandardMaterial = serde_json::from_value(json).unwrap();
         assert_eq!(back, textured);
+    }
+
+    #[test]
+    fn presets_scale_their_relief_and_round_trip() {
+        let brick = StandardMaterial::preset(MaterialPreset::Brick);
+        assert!(brick.has_textures());
+        assert_eq!(brick.texture_scale, MaterialPreset::Brick.tile_size());
+        assert_eq!(brick.parallax_depth, MaterialPreset::Brick.relief_depth());
+        let big = brick.with_texture_scale(brick.texture_scale * 2.0);
+        assert!((big.parallax_depth - 2.0 * brick.parallax_depth).abs() < 1e-6);
+        let gpu = big.with_triplanar_world().to_gpu();
+        assert_eq!((gpu.flags[0] >> MAPPING_SHIFT) & 3, 2);
+        assert_ne!(gpu.flags[0] & PARALLAX_SHADOWS_FLAG, 0);
+        assert!((gpu.mapping[0] * big.texture_scale - 1.0).abs() < 1e-6);
+        // Presets are data: JSON names them, and a tint is the base color.
+        let json = serde_json::to_value(brick.with_tint(1.0, 0.5, 0.5)).unwrap();
+        assert_eq!(json["preset"], "Brick");
+        assert_eq!(json["base_color"][1], 0.5);
+        let back: StandardMaterial = serde_json::from_value(json).unwrap();
+        assert_eq!(back.preset, Some(MaterialPreset::Brick));
+        assert_ne!(
+            brick.key(),
+            StandardMaterial::preset(MaterialPreset::Rock).key()
+        );
     }
 }

@@ -19,6 +19,7 @@ use engine_core::prelude::*;
 use engine_world::{AttackEvent, DamageEvent};
 
 use crate::combat::CombatState;
+use crate::player::PlayerControlled;
 
 /// `TimeDilation` key used by focus (reflex slow motion).
 pub const FOCUS_KEY: &str = "perception";
@@ -201,7 +202,7 @@ pub(crate) fn apply_tempo(
 }
 
 /// React to attacks on the perceiver (focus) and to hits (cinematic beats).
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
 pub(crate) fn perceive(
     time: Res<Time>,
     settings: Res<TimePerception>,
@@ -210,10 +211,15 @@ pub(crate) fn perceive(
     mut diagnostics: Option<ResMut<Diagnostics>>,
     mut attacks: MessageReader<AttackEvent>,
     mut damage: MessageReader<DamageEvent>,
-    perceivers: Query<(Entity, &Transform, Option<&Tempo>), With<Perceiver>>,
+    perceivers: Query<(Entity, &Transform, Option<&Tempo>, Has<PlayerControlled>), With<Perceiver>>,
     others: Query<(&Transform, Option<&Tempo>, Option<&CombatState>)>,
 ) {
-    let Some((me, my_t, my_tempo)) = perceivers.iter().next() else {
+    // A player-controlled perceiver (play mode) comes first.
+    let me = perceivers
+        .iter()
+        .find(|p| p.3)
+        .or_else(|| perceivers.iter().next());
+    let Some((me, my_t, my_tempo, _)) = me else {
         attacks.clear();
         damage.clear();
         if status.focused {

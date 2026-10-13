@@ -6,14 +6,57 @@ use engine_core::prelude::*;
 /// Tonemapping curve.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum Tonemapper {
-    /// Filmic, hue-preserving; handles very bright colors gracefully (default).
+    /// AgX with Blender's "Punchy" look: AgX's graceful highlights with more contrast and
+    /// color, closer to a camera's picture (default).
     #[default]
+    AgXPunchy,
+    /// Filmic, hue-preserving; handles very bright colors gracefully. Flatter than `AgXPunchy`.
     AgX,
+    /// Khronos PBR Neutral: keeps base colors as authored up to bright highlights (product
+    /// shots, checking materials).
+    Neutral,
     /// The classic ACES filmic look (more contrast, saturated highlights).
     Aces,
     Reinhard,
     /// No curve: clamps. For debugging.
     None,
+}
+
+/// How edges are smoothed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum AntiAliasing {
+    /// Temporal anti-aliasing (default): the camera shifts by a fraction of a pixel every
+    /// frame and the results are blended along motion vectors. Smooth edges, stable thin
+    /// geometry (grass, wires), and it also cleans up the noise of ambient occlusion and soft
+    /// shadows. Needs a few frames after a camera cut to converge.
+    #[default]
+    Taa,
+    /// No anti-aliasing (sharpest, jagged edges).
+    None,
+}
+
+/// Resolution of the volumetric fog grid (`RenderSettings::volumetric_fog_quality`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum VolumetricQuality {
+    /// 16-pixel tiles, 64 depth slices: soft shafts, cheapest.
+    Low,
+    /// 8-pixel tiles, 64 depth slices.
+    Medium,
+    /// 8-pixel tiles, 128 depth slices (default): crisp shafts between trunks and through
+    /// windows, thin ground fog.
+    #[default]
+    High,
+}
+
+impl VolumetricQuality {
+    /// Tile size in pixels and number of depth slices.
+    pub fn tile_and_slices(self) -> (u32, u32) {
+        match self {
+            VolumetricQuality::Low => (16, 64),
+            VolumetricQuality::Medium => (8, 64),
+            VolumetricQuality::High => (8, 128),
+        }
+    }
 }
 
 /// What the screen shows.
@@ -27,6 +70,19 @@ pub enum DebugView {
     Cascades,
     /// How much open sky each surface sees (white = outdoors, black = cave or interior).
     SkyVisibility,
+    /// Screen-space ambient occlusion (white = open, black = crevices and contact).
+    AmbientOcclusion,
+    /// Screen-space reflections: what each surface reflects from the screen, times how much of
+    /// its reflection that covers (black where only the sky is reflected).
+    Reflections,
+    /// Screen-space global illumination: the light bounced onto each surface from nearby
+    /// surfaces (before it is multiplied by the surface's color).
+    IndirectLight,
+    /// Virtual geometry: every cluster in its own color (other meshes gray).
+    Clusters,
+    /// Virtual geometry: each cluster's level of detail, from blue (full detail) through cyan,
+    /// green, yellow, orange, red and magenta to white (7 or more halvings).
+    ClusterLevels,
 }
 
 /// Renderer-wide quality and look settings.
@@ -44,8 +100,50 @@ pub struct RenderSettings {
     pub shadow_depth_bias: f32,
     /// Normal offset in shadow texels.
     pub shadow_normal_bias: f32,
-    /// PCF filter radius in texels.
+    /// Smallest shadow filter radius in texels (the edge is never sharper than this).
     pub shadow_softness: f32,
+    /// Scale of the sun's physical penumbra (1 = the real sun's size: shadows are crisp at
+    /// contact and soften with distance from the caster; 2 = twice as soft).
+    pub sun_penumbra_scale: f32,
+    /// Screen-space contact shadows: each lit pixel marches this far (meters) toward the sun
+    /// through the depth buffer, catching small shadows the shadow map is too coarse for
+    /// (pebbles, grass, feet on the ground). 0 = off.
+    pub contact_shadow_length: f32,
+    /// Ground-truth ambient occlusion (GTAO) from the depth prepass: darkens ambient light in
+    /// creases, under objects and where things touch.
+    pub ambient_occlusion: bool,
+    /// How far (meters) occluders are searched for around each pixel.
+    pub ao_radius: f32,
+    /// 0..2 strength of the ambient occlusion (1 = physical).
+    pub ao_intensity: f32,
+    /// Screen-space reflections: smooth and glossy surfaces reflect what is on screen (as of
+    /// the previous frame), blending into the prefiltered sky where the reflection leaves the
+    /// screen or is hidden.
+    pub screen_space_reflections: bool,
+    /// Surfaces rougher than this (perceptual roughness) reflect only the sky.
+    pub ssr_max_roughness: f32,
+    /// Screen-space global illumination: diffuse light bounced off nearby surfaces that are on
+    /// screen (sunlit walls tint the ground, lamps and emissive surfaces light their
+    /// surroundings). Builds up over a few frames.
+    pub screen_space_gi: bool,
+    /// Strength of the bounced light (1 = physical).
+    pub gi_intensity: f32,
+    /// Scales the number of blades in every `GrassField` (quality setting; 0 = no grass).
+    pub grass_density: f32,
+    /// Volumetric fog: the height fog ([`FogSettings`]) and every
+    /// [`FogVolume`](crate::components::FogVolume) are lit per froxel (a cell of a grid
+    /// fitted to the view) by the sun with its shadows, the sky and point lights, so sunbeams
+    /// show through trees and windows, lamps glow in mist and caves stay dark. Off: the height
+    /// fog is an unshadowed analytic integral and fog volumes are not drawn.
+    pub volumetric_fog: bool,
+    /// How far from the camera the volumetric fog grid reaches, meters. Beyond it the height
+    /// fog continues analytically (without shadows or fog volumes).
+    pub volumetric_fog_range: f32,
+    /// Size of the volumetric fog grid (tile size and depth slices).
+    pub volumetric_fog_quality: VolumetricQuality,
+    pub anti_aliasing: AntiAliasing,
+    /// 0..1 sharpening after temporal anti-aliasing (restores texture detail).
+    pub sharpness: f32,
     pub tonemapper: Tonemapper,
     /// 0..1 mix of the blurred image (0.04 is subtle and physical).
     pub bloom_intensity: f32,
@@ -71,6 +169,23 @@ pub struct RenderSettings {
     pub night_exposure_bias: f32,
     /// 0..1 loss of color in very dark areas (scotopic vision: moonlight looks blue-gray).
     pub night_desaturation: f32,
+    /// Virtual geometry: dense opaque meshes are drawn as clusters whose level of detail and
+    /// culling are picked on the GPU every frame (see `virtual_geometry`). Off = every mesh
+    /// takes the regular instanced path.
+    pub virtual_geometry: bool,
+    /// Meshes with at least this many triangles take the cluster path. Smaller ones (props,
+    /// debris, fragments) are cheaper instanced; `MeshRenderer::virtual_geometry = false` keeps
+    /// a dense mesh off it too.
+    pub virtual_geometry_min_triangles: u32,
+    /// Largest geometric error a cluster may show on screen, pixels (lower = more triangles).
+    pub cluster_error_px: f32,
+    /// The same for shadow maps, in shadow map texels (cascade texels are much larger than
+    /// screen pixels, so shadows use coarser clusters than the camera). The default of 2 halves
+    /// the shadow triangles of 1 with no visible change under the shadow filter.
+    pub cluster_shadow_error_texels: f32,
+    /// Texels per side of each map of a generated material preset (`StandardMaterial::preset`):
+    /// a power of two, 64..4096. Each preset is generated once per size, on first use.
+    pub material_texture_size: u32,
 }
 
 impl Default for RenderSettings {
@@ -83,7 +198,22 @@ impl Default for RenderSettings {
             shadow_depth_bias: 0.0,
             shadow_normal_bias: 1.5,
             shadow_softness: 1.0,
-            tonemapper: Tonemapper::AgX,
+            sun_penumbra_scale: 1.0,
+            contact_shadow_length: 0.4,
+            ambient_occlusion: true,
+            ao_radius: 1.5,
+            ao_intensity: 1.0,
+            screen_space_reflections: true,
+            ssr_max_roughness: 0.6,
+            screen_space_gi: true,
+            gi_intensity: 1.0,
+            grass_density: 1.0,
+            volumetric_fog: true,
+            volumetric_fog_range: 256.0,
+            volumetric_fog_quality: VolumetricQuality::High,
+            anti_aliasing: AntiAliasing::Taa,
+            sharpness: 0.3,
+            tonemapper: Tonemapper::AgXPunchy,
             bloom_intensity: 0.04,
             saturation: 1.05,
             contrast: 1.0,
@@ -98,26 +228,46 @@ impl Default for RenderSettings {
             sky_occlusion_size: 512,
             night_exposure_bias: 2.5,
             night_desaturation: 0.7,
+            virtual_geometry: true,
+            virtual_geometry_min_triangles: 50_000,
+            cluster_error_px: 1.0,
+            cluster_shadow_error_texels: 2.0,
+            material_texture_size: 1024,
         }
     }
 }
 
-/// Height fog. Weather drives `density`; artists tune the rest.
+/// Height fog everywhere: the global fog the weather drives. Its density falls off
+/// exponentially with height above `base_height`, so it pools in valleys and thins on hills.
+///
+/// With `RenderSettings::volumetric_fog` (the default) it is lit per froxel, with sun shadows
+/// (light shafts), sky light that caves and rooms keep out, and point lights; beyond
+/// `volumetric_fog_range` and with volumetric fog off it is integrated analytically. Local fog
+/// (a smoky room, a mist bank, a steam vent) is a [`FogVolume`](crate::components::FogVolume).
+///
+/// Weather sets `density` (it adds `WeatherState::fog * 0.02` per meter on top); artists tune
+/// the rest. Ground fog at dawn: `density` 0.03–0.08, `height_falloff` 0.15–0.3.
 #[derive(Resource, Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct FogSettings {
-    /// Extinction per meter at `base_height` (0.0005 light haze, 0.02 thick fog).
+    /// Extinction per meter at `base_height` (0.0005 light haze, 0.02 thick fog, 0.1 fog you
+    /// can barely see 30 m into).
     pub density: f32,
-    /// How fast fog thins with height, per meter.
+    /// How fast fog thins with height, per meter (density halves every `0.69 / falloff` m).
     pub height_falloff: f32,
     /// Altitude above the planet surface (world y when there is no planet) where `density`
     /// applies, meters.
     pub base_height: f32,
-    /// Fog never hides more than this fraction of an object (keeps silhouettes).
+    /// Fog never hides more than this fraction of an object (keeps silhouettes). Applies to
+    /// fog volumes too; 1 = physical.
     pub max_opacity: f32,
-    /// Fog albedo (it is lit by the sky and the sun).
+    /// Fog albedo, linear RGB: the share of the light it stops that it scatters (the rest it
+    /// absorbs). Lit by the sun, the sky and lamps.
     pub color: [f32; 3],
-    /// Forward scattering glow around the sun.
+    /// How strongly the fog scatters light forward: the Henyey-Greenstein anisotropy `g`
+    /// (-0.95..0.95). 0 scatters evenly in all directions, 0.6 (default) mostly forward, so fog
+    /// glows around the sun and lamps when you look toward them and sunbeams are brightest
+    /// against the light.
     pub sun_scattering: f32,
 }
 

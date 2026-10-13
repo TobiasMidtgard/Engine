@@ -60,18 +60,18 @@ are built, nothing simulates yet) · ⬜ not visible yet
 
 | # | Test case | Zone / viewpoint | Owner | Status |
 |---|---|---|---|---|
-| 25 | Robust animation for humanoids | `paddock`, `arena` | Animation system | ✅ paddock: a hammer athlete, a lifter, a shirt reach, and a walker that climbs a ramp, crosses a deck, takes the stairs with IK-planted feet and runs back |
-| 26 | Animation for animals | `paddock`, `meadow` | Animation system | ✅ paddock: a horse that walks, trots, canters and gallops round an oval, and a spider picking its way over rocks |
-| 27 | Animation for vehicles (wheels, gear, doors) | `paddock` car loop, `track`, `airfield` | Animation system | ✅ paddock: a car with suspension over speed bumps, body roll, steering and spinning wheels |
-| 28 | Muscles that flex and jiggle with movement | `paddock` | Animation system | ✅ the hammer athlete's arms, shoulders and back tense on the strike and relax after; the lifter's double-biceps flex |
-| 29 | Clothing tension and wrinkles during movement | `paddock`, `yard` | Animation system, Cloth, soft bodies and hair | ✅ paddock: sleeves bunch at the elbows and the shirt stretches across the back on a reach |
+| 25 | Robust animation for humanoids | `paddock`, `paddock_hammer`, `paddock_stairs`, `arena` | Animation system | ✅ paddock: a hammer athlete, a lifter, a shirt reach, and a walker that climbs a ramp, crosses a deck, takes the stairs with IK-planted feet and runs back |
+| 26 | Animation for animals | `paddock`, `paddock_gallop`, `paddock_spider`, `meadow` | Animation system | ✅ paddock: a horse that walks, trots, canters and gallops round an oval, and a spider picking its way over rocks |
+| 27 | Animation for vehicles (wheels, gear, doors) | `paddock` car loop, `paddock_car`, `track`, `airfield` | Animation system | ✅ paddock: a car with suspension over speed bumps, body roll, steering and spinning wheels |
+| 28 | Muscles that flex and jiggle with movement | `paddock`, `paddock_hammer`, `paddock_flex`, `paddock_block` | Animation system | ✅ the hammer athlete's arms, shoulders and back tense on the strike and relax after; the lifter's double-biceps flex |
+| 29 | Clothing tension and wrinkles during movement | `paddock`, `paddock_reach`, `yard` | Animation system, Cloth, soft bodies and hair | ✅ paddock: sleeves bunch at the elbows and the shirt stretches across the back on a reach |
 | 30 | Cloth: flags, sails, curtains, clothes | `yard` | Cloth, soft bodies and hair | ✅ flags and pennants in the wind, a curtain shot full of holes, one that burns, a cape |
 | 31 | Soft bodies (jelly, flesh) and ropes (rope bridge) | `yard` | Cloth, soft bodies and hair | ✅ jelly cubes, a clay block that dents, rope bridges, a swing, a bead curtain, a wrecking ball |
 | 32 | Hair and fur for humans and animals | `yard` | Cloth, soft bodies and hair | ✅ a walking mannequin with long hair and a dog with fur |
 | 33 | Smart NPC AI that uses the environment (cover, high ground) | `arena`, `arena_cover` | Smart NPC AI | ✅ two squads take cover, climb the platform, flank, suppress and shoot the explosive barrel (stand-in bodies) |
 | 34 | NPCs that space the player and block attacks | `arena`, `arena_duel` | Smart NPC AI | ✅ melee fighters take turns instead of ringing you, block, parry, dodge and feint; a master and a veteran duel |
 | 35 | NPC skill, reaction time and logic editable per enemy | `arena` | Smart NPC AI | ✅ every fighter's skills (reaction time, accuracy, logic, defense…) are tunable through `npc.set_skill`; head band color shows skill |
-| 36 | Titanfall-style movement: wall-run, slide, dash | `parkour`, `parkour_course` | Movement and slow motion | ✅ a runner loops sprint, slide under a bar, wall-run, wall-jump, mantle onto a tower, double jump |
+| 36 | Titanfall-style movement: wall-run, slide, dash | `parkour`, `parkour_course`, `parkour_ledge`, `parkour_play` | Movement and slow motion | ✅ a runner loops sprint, slide under a bar, wall-run, wall-jump, mantle onto a tower, double jump; a climber catches a ledge too high to vault, shimmies along it and climbs up; press P to play it yourself (third-person pilot, lock-on with the middle mouse) |
 | 37 | Elite enemies dash in and slice in the blink of an eye | `parkour` duel ring, `parkour_blink` | Movement and slow motion | ✅ an elite dash-strikes a level 1 player in under 0.25 s |
 | 38 | Stat-based time perception: a leveled-up player sees enemies in slow motion | `parkour` duel ring, `parkour_focus`, `parkour_counter` | Movement and slow motion | ✅ at level 10 the same attack slows the world to 1/5.5; the player sidesteps and counters |
 | 39 | Slow motion when attacking or being attacked (Zoro / Sung Jin-Woo moments) | `parkour` duel ring, `parkour_pack` | Movement and slow motion | ✅ four grunts attack in turn; each attack and each kill plays in slow motion |

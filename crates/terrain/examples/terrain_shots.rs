@@ -155,6 +155,14 @@ fn views() -> Vec<View> {
             ..BASE
         },
         View {
+            name: "earth_cliffs",
+            eye: DVec3::new(-11_500.0, 0.0, -22_400.0),
+            target: DVec3::new(-13_000.0, 1_900.0, -21_700.0),
+            above_ground: Some(350.0),
+            sun: (175.0, 28.0),
+            ..BASE
+        },
+        View {
             name: "earth_high",
             eye: DVec3::new(-10_000.0, 45_000.0, 90_000.0),
             target: DVec3::new(0.0, 0.0, -30_000.0),
@@ -402,9 +410,14 @@ fn main() {
         let mut eye = view.eye;
         if let Some(h) = view.above_ground {
             let ground = app.world.resource::<engine_world::Ground>().clone();
-            let y = ground
-                .height(DVec3::new(eye.x, 50_000.0, eye.z))
-                .unwrap_or(0.0);
+            // On a planet the ground is found along the local vertical, so ask again from
+            // just above it: from high up the answer lies a little to the side.
+            let mut y = 50_000.0;
+            for _ in 0..3 {
+                y = ground
+                    .height(DVec3::new(eye.x, y + 10.0, eye.z))
+                    .unwrap_or(0.0);
+            }
             eye.y = y + h;
         }
         app.world.spawn((

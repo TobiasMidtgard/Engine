@@ -237,6 +237,11 @@ pub struct SpaceSettings {
     pub draw_bodies: bool,
     /// Far bodies stay at least this wide (half-angle, radians) so they show as dots.
     pub min_apparent_radius_rad: f64,
+    /// Things on or near a body (below half the height where the world stops turning with it)
+    /// stay where they are on it while the world is anchored elsewhere or stops turning, and
+    /// are put back there, with their motion, when the world turns with that body again. See
+    /// [`Parked`].
+    pub keep_surfaces: bool,
 }
 
 impl Default for SpaceSettings {
@@ -250,6 +255,7 @@ impl Default for SpaceSettings {
             rotating_altitude_fraction: 0.15,
             draw_bodies: true,
             min_apparent_radius_rad: 7e-4,
+            keep_surfaces: true,
         }
     }
 }
@@ -260,6 +266,32 @@ impl Default for SpaceSettings {
 pub struct StarLight {
     pub star: String,
 }
+
+/// What the world left behind on each body when it stopped turning with it (by body name):
+/// put back where it was on that body when the world turns with it again. Trees, houses,
+/// props, parked cars and NPCs of a valley would otherwise stay where the old frame mapped
+/// them while the planet turns away beneath (the shift can't give things without a velocity
+/// the body's spin), and come back kilometers off.
+#[derive(Resource, Debug, Clone, Default)]
+pub struct Parked {
+    pub bodies: HashMap<String, Vec<ParkedEntity>>,
+    /// The body whose things go back once the world has shifted into its turning frame.
+    restore: Option<String>,
+}
+
+/// One thing left on a body: pose and motion in body-local coordinates (+Y north).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ParkedEntity {
+    pub entity: Entity,
+    pub position: DVec3,
+    pub rotation: DQuat,
+    pub velocity: DVec3,
+    pub angular_velocity: DVec3,
+}
+
+/// The frame the world started in, for [`travel_home`].
+#[derive(Resource, Debug, Clone, PartialEq)]
+pub struct HomeFrame(pub SpaceFrame);
 
 /// Where a body is right now (computed every frame).
 #[derive(Debug, Clone)]
@@ -389,6 +421,7 @@ impl Plugin for SpacePlugin {
             .init_resource::<SpaceFrame>()
             .init_resource::<SpaceSettings>()
             .init_resource::<SpaceState>()
+            .init_resource::<Parked>()
             .register_component::<CelestialBody>(
                 "A star, planet or moon on rails: mass (mu), radius, orbit around its parent, \
                  spin, atmosphere. Its Transform is driven by the space module.",
@@ -524,6 +557,28 @@ fn frame_orientation(anchor: &BodyState, frame: &SpaceFrame) -> DQuat {
     }
 }
 
+/// Where a body sits in the world (position, body-local to world rotation): the turning
+/// anchor exactly as its `Transform` holds it (home spot on the origin, the stored f32
+/// rotation), every other body through the world ← inertial `map`.
+fn placement(
+    s: &BodyState,
+    turning_anchor: bool,
+    frame: &SpaceFrame,
+    map: (DQuat, DVec3),
+) -> (DVec3, DQuat) {
+    if turning_anchor {
+        let (_, home) = stored_home(frame.home_lat_deg, frame.home_lon_deg);
+        let pad = dir_from_lat_lon(frame.home_lat_deg, frame.home_lon_deg)
+            * (s.radius_m + frame.home_height_m);
+        (-(home * pad), home)
+    } else {
+        (
+            map.0 * s.inertial_position + map.1,
+            (map.0 * s.orientation).normalize(),
+        )
+    }
+}
+
 /// A frame: anchor state, whether it turns, and the world ← inertial mapping.
 struct FrameRef<'a> {
     anchor: &'a BodyState,
@@ -585,7 +640,8 @@ fn collect_bodies(world: &mut World) -> Vec<(Entity, CelestialBody)> {
 /// A trip asked for with [`travel_to`], made at the next re-anchoring step.
 #[derive(Resource, Debug, Clone, Default)]
 struct PendingTravel {
-    trip: Option<(String, f64, f64)>,
+    /// The frame to switch to (a turning frame on the destination).
+    trip: Option<SpaceFrame>,
     /// Where the focus lands (world, new frame) once the world has shifted.
     land: Option<DVec3>,
 }
@@ -606,6 +662,13 @@ pub fn reanchor(world: &mut World) {
     let settings = world.resource::<SpaceSettings>().clone();
     let anchor = anchor_index(&states, &frame);
     let current = frame_for(&states[anchor], &frame);
+    if !world.contains_resource::<HomeFrame>() {
+        world.insert_resource(HomeFrame(SpaceFrame {
+            anchor: states[anchor].name.clone(),
+            rotating: true,
+            ..frame.clone()
+        }));
+    }
     let find = |name: &str| {
         states
             .iter()
@@ -616,15 +679,12 @@ pub fn reanchor(world: &mut World) {
         .get_resource_mut::<PendingTravel>()
         .and_then(|mut p| p.trip.take());
     let mut next_frame = None;
-    if let Some((name, lat, lon)) = trip {
-        if let Some(target) = find(&name) {
+    if let Some(trip) = trip {
+        if let Some(target) = find(&trip.anchor) {
             next_frame = Some(SpaceFrame {
                 anchor: states[target].name.clone(),
-                home_lat_deg: lat,
-                home_lon_deg: lon,
-                home_height_m: 0.0,
                 rotating: true,
-                ..frame.clone()
+                ..trip
             });
         }
     } else if frame.auto_switch
@@ -646,11 +706,7 @@ pub fn reanchor(world: &mut World) {
         {
             target = d;
         }
-        let air = bodies[target]
-            .1
-            .atmosphere
-            .map_or(0.0, |a| a.thickness_m as f64);
-        let limit = states[target].radius_m * settings.rotating_altitude_fraction + air;
+        let limit = turning_limit(&states[target], &bodies[target].1, &settings);
         let altitude = dist(target) - states[target].radius_m;
         let rotating = if target != anchor || !frame.rotating {
             altitude < limit * 0.95
@@ -683,6 +739,16 @@ pub fn reanchor(world: &mut World) {
         return;
     };
     let target = anchor_index(&states, &next_frame);
+    if settings.keep_surfaces {
+        if frame.rotating && !(next_frame.rotating && target == anchor) {
+            let limit = turning_limit(&states[anchor], &bodies[anchor].1, &settings);
+            let at = placement(&states[anchor], true, &frame, current);
+            park(world, &states[anchor], at, limit * 0.5);
+        }
+        if next_frame.rotating {
+            world.resource_mut::<Parked>().restore = Some(states[target].name.clone());
+        }
+    }
     let shift = frame_shift(
         &FrameRef {
             anchor: &states[anchor],
@@ -698,6 +764,73 @@ pub fn reanchor(world: &mut World) {
     world.write_message(shift);
     *world.resource_mut::<SpaceFrame>() = next_frame;
     world.resource_mut::<SpaceState>().switches += 1;
+}
+
+/// Altitude below which the world turns with a body.
+fn turning_limit(s: &BodyState, body: &CelestialBody, settings: &SpaceSettings) -> f64 {
+    let air = body.atmosphere.map_or(0.0, |a| a.thickness_m as f64);
+    s.radius_m * settings.rotating_altitude_fraction + air
+}
+
+/// Leave everything within `reach` (altitude, meters) of `body` on it: its body-local pose
+/// and motion go into [`Parked`]. `at` is where the body sits in the world now (turning with
+/// it, so motion relative to the world is motion relative to the body). Children follow
+/// their parents; the focus, bodies and lights travel with the world.
+fn park(world: &mut World, body: &BodyState, at: (DVec3, DQuat), reach: f64) {
+    let (pos, rot) = at;
+    let inv = rot.inverse();
+    let mut q = world.query_filtered::<(Entity, &Transform, Option<&Velocity>), (
+        Without<ChildOf>,
+        Without<CelestialBody>,
+        Without<SimulationFocus>,
+        Without<DirectionalLight>,
+    )>();
+    let left: Vec<ParkedEntity> = q
+        .iter(world)
+        .filter(|(_, tf, _)| (tf.translation - pos).length() - body.radius_m < reach)
+        .map(|(entity, tf, v)| {
+            let (lin, ang) = v.map_or((Vec3::ZERO, Vec3::ZERO), |v| (v.linear, v.angular));
+            ParkedEntity {
+                entity,
+                position: inv * (tf.translation - pos),
+                rotation: (inv * tf.rotation.as_dquat()).normalize(),
+                velocity: inv * lin.as_dvec3(),
+                angular_velocity: inv * ang.as_dvec3(),
+            }
+        })
+        .collect();
+    if left.is_empty() {
+        return;
+    }
+    let mut parked = world.resource_mut::<Parked>();
+    let list = parked.bodies.entry(body.name.clone()).or_default();
+    list.retain(|p| !left.iter().any(|l| l.entity == p.entity));
+    list.extend(left);
+}
+
+/// Put what was left on `body` back where it was on it (`at`: where the body sits in the
+/// world now, turning with it).
+fn unpark(world: &mut World, body: &str, at: (DVec3, DQuat)) {
+    let Some(list) = world.resource_mut::<Parked>().bodies.remove(body) else {
+        return;
+    };
+    let (pos, rot) = at;
+    for p in list {
+        let Ok(mut e) = world.get_entity_mut(p.entity) else {
+            continue;
+        };
+        if let Some(mut tf) = e.get_mut::<Transform>() {
+            tf.translation = pos + rot * p.position;
+            tf.rotation = (rot * p.rotation).normalize().as_quat();
+        }
+        if let Some(mut v) = e.get_mut::<Velocity>() {
+            v.linear = (rot * p.velocity).as_vec3();
+            v.angular = (rot * p.angular_velocity).as_vec3();
+        }
+        if let Some(mut i) = e.get_mut::<TransformInterpolation>() {
+            i.reset();
+        }
+    }
 }
 
 /// Once the world has shifted (after [`WorldShiftSet::Apply`]): move bodies along their orbits
@@ -735,16 +868,17 @@ pub fn update_space(world: &mut World) {
     // World placement of every body.
     let (home_q, _) = stored_home(frame.home_lat_deg, frame.home_lon_deg);
     for (i, s) in states.iter_mut().enumerate() {
-        if i == anchor && frame.rotating {
-            let pad = dir_from_lat_lon(frame.home_lat_deg, frame.home_lon_deg)
-                * (s.radius_m + frame.home_height_m);
-            let home = home_q.as_dquat().normalize();
-            s.world_rotation = home;
-            s.world_position = -(home * pad);
-        } else {
-            s.world_position = current.0 * s.inertial_position + current.1;
-            s.world_rotation = (current.0 * s.orientation).normalize();
-        }
+        (s.world_position, s.world_rotation) =
+            placement(s, i == anchor && frame.rotating, &frame, current);
+    }
+    // Back on a body the world left: its things go back where they were on it.
+    let restore = world.resource_mut::<Parked>().restore.take();
+    if let Some(name) = restore
+        && frame.rotating
+        && states[anchor].name == name
+    {
+        let s = &states[anchor];
+        unpark(world, &name, (s.world_position, s.world_rotation));
     }
     for (i, s) in states.iter().enumerate() {
         if let Some(mut tf) = world.get_mut::<Transform>(s.entity) {
@@ -894,7 +1028,8 @@ fn focus_position(world: &mut World) -> Option<DVec3> {
 
 /// Put the space module's anchor on `body` with `lat`/`lon` at the world origin, and move every
 /// `SimulationFocus` entity to `altitude_m` above that spot (a quick trip, for tours and
-/// tools). Other entities keep their true positions. The trip is made in the next
+/// tools). Other entities keep their true positions, and what is on the body left behind
+/// stays there (see [`Parked`]). The trip is made in the next
 /// `PostUpdate`, through a [`WorldShift`] like any re-anchoring; the focus's new position is
 /// returned.
 pub fn travel_to(
@@ -914,11 +1049,36 @@ pub fn travel_to(
             names.join(", ")
         ));
     };
+    let trip = SpaceFrame {
+        anchor: name.clone(),
+        home_lat_deg: lat_deg,
+        home_lon_deg: lon_deg,
+        home_height_m: 0.0,
+        ..world.resource::<SpaceFrame>().clone()
+    };
+    Ok(travel(world, trip, altitude_m))
+}
+
+/// Go back to the frame the world started in (its anchor and home spot, so the home level is
+/// where it was), with the focus `altitude_m` above the home spot. Like [`travel_to`].
+pub fn travel_home(world: &mut World, altitude_m: f64) -> DVec3 {
+    let home = world
+        .get_resource::<HomeFrame>()
+        .map(|h| h.0.clone())
+        .unwrap_or_else(|| world.resource::<SpaceFrame>().clone());
+    let trip = SpaceFrame {
+        auto_switch: world.resource::<SpaceFrame>().auto_switch,
+        ..home
+    };
+    travel(world, trip, altitude_m)
+}
+
+fn travel(world: &mut World, trip: SpaceFrame, altitude_m: f64) -> DVec3 {
     let spot = DVec3::new(0.0, altitude_m, 0.0);
     let mut pending = world.get_resource_or_insert_with(PendingTravel::default);
-    pending.trip = Some((name.clone(), lat_deg, lon_deg));
+    pending.trip = Some(trip);
     pending.land = Some(spot);
-    Ok(spot)
+    spot
 }
 
 fn parse_vec3(v: Option<&serde_json::Value>) -> Option<DVec3> {
@@ -994,9 +1154,15 @@ fn register_apis(app: &mut App) {
     .register_api(
         "space.travel",
         "Go to a body: it becomes the world's anchor with lat/lon (degrees) at the world origin, \
-         and the focus (camera/player) is placed `altitude` meters above that spot.",
+         and the focus (camera/player) is placed `altitude` meters above that spot. \
+         {\"home\": true} goes back to where the world started.",
         r#"{"body": "Moon", "lat": 0.0, "lon": 0.0, "altitude": 2.0}"#,
         |world, args| {
+            let alt = args.get("altitude").and_then(|v| v.as_f64()).unwrap_or(2.0);
+            if args.get("home").and_then(|v| v.as_bool()) == Some(true) {
+                let at = travel_home(world, alt);
+                return Ok(serde_json::json!({ "anchor": "home", "focus_at": at.to_array() }));
+            }
             let body = args
                 .get("body")
                 .and_then(|v| v.as_str())
@@ -1004,7 +1170,6 @@ fn register_apis(app: &mut App) {
                 .to_string();
             let lat = args.get("lat").and_then(|v| v.as_f64()).unwrap_or(0.0);
             let lon = args.get("lon").and_then(|v| v.as_f64()).unwrap_or(0.0);
-            let alt = args.get("altitude").and_then(|v| v.as_f64()).unwrap_or(2.0);
             let at = travel_to(world, &body, lat, lon, alt)?;
             Ok(serde_json::json!({ "anchor": body, "focus_at": at.to_array() }))
         },

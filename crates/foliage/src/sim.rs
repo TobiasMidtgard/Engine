@@ -16,6 +16,7 @@
 
 use engine_core::math::{DVec2, DVec3, Rng, Vec2, Vec3};
 use engine_core::prelude::Entity;
+use engine_world::WorldShift;
 
 use crate::plant::{EcologyRegion, Genes, Plant, PlantStage};
 use crate::species::{Layer, Need, PlantLibrary, PlantSpecies, ResourceLevels, SpeciesId};
@@ -236,6 +237,37 @@ impl Soil {
         x >= 0.0 && y >= 0.0 && x < self.width as f64 && y < self.height as f64
     }
 
+    /// Move the grid into a new reference frame ([`crate::shift`]). A translation moves the
+    /// origin; a rotation resamples the grid around where its center went, each new cell taking
+    /// the old cell under it (at height `center_y`, old frame). Cells the old grid didn't cover
+    /// copy its nearest edge and are blocked, so nothing new seeds there.
+    pub fn shift(&mut self, s: &WorldShift, center_y: f64) {
+        if s.is_translation_only() {
+            self.origin += DVec2::new(s.translation.x, s.translation.z);
+            return;
+        }
+        let old = self.clone();
+        let half = DVec2::new(self.width as f64, self.height as f64) * (self.cell as f64 * 0.5);
+        let mid = old.origin + half;
+        let c = s.point(DVec3::new(mid.x, center_y, mid.y));
+        self.origin = DVec2::new(c.x, c.z) - half;
+        for y in 0..self.height {
+            for x in 0..self.width {
+                let i = (y * self.width + x) as usize;
+                let wx = self.origin.x + (x as f64 + 0.5) * self.cell as f64;
+                let wz = self.origin.y + (y as f64 + 0.5) * self.cell as f64;
+                let back = s.inverse_point(DVec3::new(wx, c.y, wz));
+                let j = old.index(back);
+                self.water[i] = old.water[j];
+                self.nutrients[i] = old.nutrients[j];
+                self.minerals[i] = old.minerals[j];
+                self.bonus[i] = old.bonus[j];
+                self.trample[i] = old.trample[j];
+                self.blocked[i] = old.blocked[j] || !old.contains(back);
+            }
+        }
+    }
+
     /// Add nutrients around `p` (ash, a rotting log), spread over `radius` meters.
     pub fn enrich(&mut self, p: DVec3, radius: f32, amount: f32) {
         let r = (radius / self.cell).ceil() as i64;
@@ -426,6 +458,18 @@ impl RegionSim {
             species_of: Vec::new(),
             sizes: Vec::new(),
             crown_reach: [0.0; 3],
+        }
+    }
+
+    /// Move the soil and the neighbor grids into a new reference frame ([`crate::shift`]);
+    /// `center` is the region's center in the old frame.
+    pub fn shift(&mut self, s: &WorldShift, center: DVec3) {
+        self.soil.shift(s, center.y);
+        for b in &mut self.by_layer {
+            b.origin = self.soil.origin;
+        }
+        for p in &mut self.positions {
+            *p = s.point(*p);
         }
     }
 

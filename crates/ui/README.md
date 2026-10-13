@@ -1,7 +1,7 @@
 # engine_ui — UI
 
-**Owner:** UI system and maps. **Status:** round 1: every screen below works and has a test
-and a gallery screenshot; planet and galaxy rendering is being upgraded next.
+**Owner:** UI system and maps. **Status:** round 2: every screen below works and has a test
+and a gallery screenshot; the showcase's market street is rebuilt as detailed procedural art.
 Background research: `game-engine-research/ui.md` in the project files.
 
 ## What it is
@@ -67,9 +67,26 @@ Cross-module interaction goes through `engine_world` (see AGENTS.md).
 ## Showcase
 
 `demo::spawn_demo(commands, origin)` fills the demo data (player, merchant, conversations, the
-Veil galaxy) and pins world markers. The showcase's market street calls it, and its tour opens
-each screen in turn (`market_hud`, `market_dialogue`, `market_shop`, `market_inventory`,
-`market_map_*`, `market_pause`, `market_settings`).
+Veil galaxy), builds the market street and pins world markers over Old Brannoc's stall. The
+showcase's `market` zone calls it, and its tour opens each screen in turn in front of the
+trader (`market_hud`, `market_dialogue`, `market_shop`, `market_inventory`, `market_map_*`,
+`market_pause`, `market_settings`; the camera is `demo::market::ui_view()`).
+
+The market street (`demo::market`): five stalls around a cobbled square (produce, cloth, Old
+Brannoc the trader, potter, smith), each with its own striped awning, lantern light and goods;
+a mast with bunting to every stall, lamp posts, a well, benches, a handcart, a map table with
+a parchment map of Veyra drawn from the map's own terrain, and clutter between the stalls.
+Everything is generated in code from `demo::art`, which the gallery's backdrop shares:
+
+- `art::bake_set`: PBR texture sets (albedo, normal from height, occlusion/roughness/metal)
+  from per-texel functions in `art::textures` (wood, canvas awnings, metal, dirt, rock,
+  cobbles, wicker, linen, the parchment map). Tiled ones repeat without seams (unit test).
+- `art::mesh`: rounded boxes and beams, lathes, tubes, crystals, icospheres, all with metric
+  UVs. `art::props`: crates, barrels, sacks. `art::stall`: a stall of any trade.
+
+`cargo run -p engine_ui --example market -- <dir> [width] [height] [view ...]` renders the
+market alone on a meadow (views: overview, brannoc, produce, cloth, potter, smith, table,
+square).
 
 ## Tests and screenshots
 

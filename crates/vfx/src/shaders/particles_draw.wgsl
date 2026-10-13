@@ -83,8 +83,8 @@ fn vs_particle(@builtin(vertex_index) vi: u32, @builtin(instance_index) slot: u3
     out.uv = corner * 0.5 + 0.5;
     let light = p.light * e.shade.y + vec3<f32>(e.shade.x);
     let fog = particle_fog(rel);
-    out.radiance = pre_expose(col.rgb * light) * (1.0 - fog.a);
-    out.inscatter = fog.rgb * fog.a;
+    out.radiance = pre_expose(col.rgb * light) * fog.through;
+    out.inscatter = fog.inscatter;
     // Fade particles that come very close to the camera instead of filling the screen.
     let near_fade = saturate((length(rel) - frame.exposure.z * 4.0) / max(size * 1.5, 0.1));
     out.coverage = col.a * near_fade;
@@ -104,7 +104,7 @@ fn vs_particle(@builtin(vertex_index) vi: u32, @builtin(instance_index) slot: u3
         // Clear water mirrors the sky beyond it, just above the horizon.
         let ahead = normalize(vec3<f32>(rel.x, 0.0, rel.z) + vec3<f32>(1e-4, 0.0, 0.0));
         let sky = sample_env(normalize(ahead + vec3<f32>(0.0, 0.4, 0.0)));
-        out.glint = pre_expose(sky) * (1.0 - fog.a) * min(e.shade.y, 1.0);
+        out.glint = pre_expose(sky) * fog.through * min(e.shade.y, 1.0);
     }
     return out;
 }

@@ -36,12 +36,18 @@ use engine_world::physics::{
 };
 use engine_world::{FocusPoints, SurfaceId, SurfaceMaterial, SurfaceMaterials};
 
-/// Size of the concrete yard (x, z), meters. Its top is at `origin.y`.
+/// Size of the concrete yard (x, z), meters.
 pub const YARD_SIZE: [f64; 2] = [70.0, 50.0];
 
-/// Build the proving ground around `origin` (the center of the yard's top surface).
+/// How far the yard's top stands above the ground it is poured on (m). A slab flush with the
+/// ground fights it for depth, and the planet terrain's grass shows through in streaks.
+pub const SLAB_RISE: f64 = 0.1;
+
+/// Build the proving ground on the ground at `origin` (the center of the yard's footprint);
+/// its top surface is [`SLAB_RISE`] above it.
 pub fn spawn_demo(commands: &mut Commands, origin: DVec3) {
-    commands.queue(move |world: &mut World| build(world, origin));
+    let top = origin + DVec3::Y * SLAB_RISE;
+    commands.queue(move |world: &mut World| build(world, top));
 }
 
 /// A suggested camera stop (showcase tour, screenshots): eye and target relative to the
@@ -83,7 +89,9 @@ pub const VIEWS: &[DemoView] = &[
         target: [-4.0, 2.5, 9.0],
         hour: 16.0,
         station: Some(Station::Seesaw),
-        warmup_secs: 2.0,
+        // The ball lands at 1.25 s and throws the crate 13 m up; the tour's capture (warm-up
+        // plus 0.4 s of exposure settling) catches it about 5 m up, still in frame.
+        warmup_secs: 1.1,
     },
     DemoView {
         key: "physics_pile",

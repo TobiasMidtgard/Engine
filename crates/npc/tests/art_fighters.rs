@@ -346,3 +346,44 @@ fn fighter_faces() {
     }
     shoot(&mut app, cam, "npc_fighters_squad_faces.png");
 }
+
+/// Fresh, worn and battered paint side by side: a rookie, a soldier and a master. Their plates
+/// chip to bare metal along the rims and ridges, scratch, dent and gather dirt with skill.
+#[test]
+fn fighter_armor_wear() {
+    let mut app = app();
+    let squad = [
+        (NpcWeapon::sword_and_shield(), NpcSkills::rookie()),
+        (NpcWeapon::sword(), NpcSkills::soldier()),
+        (NpcWeapon::sword_and_shield(), NpcSkills::master()),
+    ];
+    for (i, (weapon, skills)) in squad.into_iter().enumerate() {
+        spawn(
+            &mut app,
+            Pose {
+                skills,
+                alert: AlertLevel::Relaxed,
+                ..Pose::new(-0.7 + 0.7 * i as f64, 1, weapon)
+            },
+        );
+    }
+    let squad = camera(
+        &mut app,
+        DVec3::new(0.0, 1.45, -2.6),
+        DVec3::new(0.0, 1.2, 0.0),
+        30.0,
+    );
+    let close = camera(
+        &mut app,
+        DVec3::new(0.95, 1.45, -0.85),
+        DVec3::new(0.7, 1.3, 0.0),
+        32.0,
+    );
+    app.update_n(2);
+    if app.world.get_resource::<RenderDisabled>().is_some() {
+        eprintln!("skipping: no GPU");
+        return;
+    }
+    shoot(&mut app, squad, "npc_fighters_armor_wear.png");
+    shoot(&mut app, close, "npc_fighters_armor_closeup.png");
+}

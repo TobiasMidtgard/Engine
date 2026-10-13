@@ -29,7 +29,13 @@ changing that one plugin line.
   `Crr · N · r`: `rolling_resistance` on hard ground, more on mud, sand, snow and grass (from the
   surface's deformation, the same amounts the vehicle tires use), alike on boxes, terrain and
   meshes. Boxes tipping over an edge are left alone. The contract's default `angular_damping`
-  (0.05) slows rolling a little too.
+  (0.05) slows rolling a little too. Fast-rolling balls, barrels and wheels roll flat and
+  straight over terrain and meshes: Rapier judges an early ("speculative") contact by how fast
+  the point of the body there moves, and on a body spinning about its own axis the point just
+  ahead of the one it rests on dives at the ground although the surface doesn't move. Every
+  new triangle brought such a contact and a kick (a barrel at 8 m/s jumped 20 cm and veered
+  meters off its line). A contact hook takes the spin's share out of each contact's closing
+  speed, for colliders spinning that fast only, so piles keep Rapier's contact reuse.
 - **Joints**: fixed, spherical (cone limit), revolute and prismatic (limits, motors), distance
   (rope), spring. `break_force` breaks a joint: the joint entity is despawned (or the `Joint`
   removed from a body entity). With `collide_connected: false` the two never touch, also when
@@ -135,8 +141,8 @@ touching pairs, step time, substeps.
 yard (with a curb, so nothing rolls off) with a 30-crate tower, a bin filling with 250
 crates/barrels/balls, a domino snake, crash test dummy ragdolls tumbling down a steep staircase,
 a wrecking ball smashing a crate wall, a seesaw catapult, a motor-driven paddle wheel, a sagging
-plank bridge, a kinematic turntable and bouncing rubber balls. Its top surface is at `origin`; the
-showcase's physics zone places it. Render it alone with
+plank bridge, a kinematic turntable and bouncing rubber balls. It sits on the ground at `origin`,
+its top `demo::SLAB_RISE` (10 cm) above it; the showcase's physics zone places it. Render it alone with
 `cargo run -p engine_physics --release --example proving_ground -- out_dir`.
 
 The stations replay on their own cycles (`demo::Station::cycle_secs`, world time: ragdolls,
@@ -169,7 +175,8 @@ sleeping pile stays asleep through floating-origin moves, a stack stands through
 world-pinned hinges turn with the world, a moving or spinning frame adds its motion at each body,
 characters keep their footing, queries see the new frame at once); rolling resistance
 (`tests/rolling.rs`: balls and logs slow at `Crr·g/(1 + I/mr²)` on concrete, faster on grass and
-sand, the same on terrain and meshes, barrels stop on sand); the debug view
+sand, the same on terrain and meshes, barrels stop on sand, barrels at 4 and 8 m/s roll over
+terrain and meshes within 5 mm of flat and 25 cm of straight); the debug view
 (`tests/debug_draw.rs`, contacts on terrain included); a headless screenshot of
 the proving ground.
 
@@ -186,11 +193,6 @@ the proving ground.
 ## Next
 
 - Articulated (reduced-coordinate) joints for ragdolls and robot arms: zero joint gap.
-- Smoother rolling barrels on terrain and meshes: a barrel rolling over triangles hops up to
-  1.5 cm and drifts sideways (on a box it rolls flat; balls and capsules roll flat on both).
-  The contacts themselves are exact; Rapier's merged contact clusters match last step's
-  impulses by position in the bodies' frames, which a rolling body leaves every step, so its
-  two end contacts start cold and push unevenly. More solver iterations don't help.
 - A `rolling_resistance` field on `SurfaceMaterial`, so games can tune it per surface (today
   it comes from the surface's deformation).
 - Co-moving region frames, so cargo resting in a ship at 7 km/s can sleep (today bodies moving
