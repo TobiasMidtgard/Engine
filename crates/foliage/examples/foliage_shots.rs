@@ -1,8 +1,10 @@
 //! Render the foliage showcase from several viewpoints into PNGs, headless:
 //!
 //! ```sh
-//! cargo run -p engine_foliage --example foliage_shots --release -- screenshots/foliage
+//! cargo run -p engine_foliage --example foliage_shots --release -- screenshots/foliage [shot..]
 //! ```
+//!
+//! Name shots after the directory (by number or name: `06`, `burn_scar`) to take only those.
 //!
 //! Grows the showcase forest and mushroom cave, then photographs them from the demo's
 //! viewpoints: the old forest, the trail, the clear-cut, a tree mid-fall and after it lands, the
@@ -114,6 +116,8 @@ fn main() {
         .nth(1)
         .unwrap_or_else(|| "screenshots/foliage".into());
     std::fs::create_dir_all(&out).expect("output directory");
+    let only: Vec<String> = std::env::args().skip(2).collect();
+    let wanted = |file: &str| only.is_empty() || only.iter().any(|o| file.contains(o.as_str()));
 
     let mut app = App::new();
     app.world.resource_mut::<EngineConfig>().headless = true;
@@ -188,7 +192,9 @@ fn main() {
     let forest = demo::forest_viewpoints(FOREST);
     let cave = demo::cave_viewpoints(CAVE);
     let take = |app: &mut App, file: &str, v: &demo::Viewpoint| {
-        shot(app, &out, file, v.eye, v.target, v.hour)
+        if wanted(file) {
+            shot(app, &out, file, v.eye, v.target, v.hour)
+        }
     };
     let by_name = |name: &str| *forest.iter().find(|v| v.name == name).expect("viewpoint");
     take(&mut app, "01_forest", &by_name("forest_overview"));
@@ -240,7 +246,7 @@ fn main() {
             score(a.1, a.2).total_cmp(&score(b.1, b.2))
         })
         .map(|(e, _, t)| (e, t.translation));
-    if let Some((tree, base)) = tree {
+    if let Some((tree, base)) = tree.filter(|_| wanted("04_falling") || wanted("05_fallen")) {
         // It falls sideways, toward the middle of the view.
         let to = (base - view.eye).with_y(0.0);
         let side = DVec3::Y.cross(fwd);
@@ -252,9 +258,11 @@ fn main() {
         // A 20 m tree takes about 3 s to fall.
         simulate(&mut app, 22);
         app.update_n(4);
-        app.world
-            .resource_mut::<Screenshots>()
-            .request(format!("{out}/04_falling.png"));
+        if wanted("04_falling") {
+            app.world
+                .resource_mut::<Screenshots>()
+                .request(format!("{out}/04_falling.png"));
+        }
         app.update();
         simulate(&mut app, 30);
         shot(
@@ -271,25 +279,34 @@ fn main() {
     take(&mut app, "08_dry_ridge", &by_name("forest_dry_ridge"));
 
     // Ten more years in the clearing.
-    let years = 10.0;
-    let frames = 24;
-    let region_scale = 30.0;
-    app.world
-        .resource_mut::<engine_foliage::EcologySettings>()
-        .years_per_second = years / (frames as f32 * STEP as f32) / region_scale;
-    simulate(&mut app, frames);
-    app.world
-        .resource_mut::<engine_foliage::EcologySettings>()
-        .years_per_second = 0.0;
-    take(
-        &mut app,
-        "09_clearing_10_years_later",
-        &by_name("forest_clearing"),
-    );
+    if wanted("09_clearing_10_years_later") {
+        ten_years_later(&mut app, &out, &by_name("forest_clearing"));
+    }
 
     take(&mut app, "10_cave", &cave[0]);
     take(&mut app, "11_cave_pool", &cave[1]);
     let stats =
         engine_core::registry::call_api(&mut app.world, "foliage.stats", serde_json::json!({}));
     println!("{}", serde_json::to_string_pretty(&stats.unwrap()).unwrap());
+}
+
+fn ten_years_later(app: &mut App, out: &str, v: &demo::Viewpoint) {
+    let years = 10.0;
+    let frames = 24;
+    let region_scale = 30.0;
+    app.world
+        .resource_mut::<engine_foliage::EcologySettings>()
+        .years_per_second = years / (frames as f32 * STEP as f32) / region_scale;
+    simulate(app, frames);
+    app.world
+        .resource_mut::<engine_foliage::EcologySettings>()
+        .years_per_second = 0.0;
+    shot(
+        app,
+        out,
+        "09_clearing_10_years_later",
+        v.eye,
+        v.target,
+        v.hour,
+    );
 }

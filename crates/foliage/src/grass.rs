@@ -11,6 +11,7 @@
 //! browns it. The maps are rebuilt every few seconds; heights come from `Ground` once and
 //! again after `TerrainChanged`. Grass plants under a field draw nothing themselves.
 
+use engine_core::math::{noise::fbm2, smoothstep};
 use engine_core::prelude::*;
 use engine_render::{GrassField, GrassStyle};
 use engine_world::Ground;
@@ -142,11 +143,20 @@ pub fn grass_maps(
                 let t = ((q - c.a).dot(ab) / ab.length_squared().max(1e-6)).clamp(0.0, 1.0);
                 q.distance(c.a + ab * t) < c.radius
             });
+            // Meadows are patchy even where the tufts are thick: dense swards, thin rises and
+            // bare gaps a few meters across, so the ground shows through here and there.
+            let (x, z) = (q.x as f64, q.y as f64);
+            let patch = fbm2(x * 0.15, z * 0.15, region.seed ^ 0x6a55, 3, 2.0, 0.5);
+            let gaps = fbm2(x * 0.45, z * 0.45, region.seed ^ 0x9a9, 2, 2.0, 0.5);
             let d = if blocked || clear || covered {
                 0.0
             } else {
                 // Tufts overlap: 1.2 of cover is a closed sward.
-                (cover[k] / 1.2).min(1.0).powf(0.8)
+                let sward = (cover[k] / 1.2).min(1.0).powf(0.8);
+                let d = sward
+                    * (0.3 + 0.75 * smoothstep(-0.6, 0.35, patch))
+                    * (1.0 - 0.6 * smoothstep(0.15, 0.45, gaps));
+                if d < 0.06 { 0.0 } else { d.min(1.0) }
             };
             density.push(d);
             let water = if soil.contains(world) {
@@ -160,7 +170,9 @@ pub fn grass_maps(
             } else {
                 0.0
             };
-            dryness.push((0.12 + 0.6 * thirst + 0.8 * ill).min(1.0));
+            // Drier, paler grass on the thin patches.
+            let parched = 0.12 * (1.0 - smoothstep(-0.6, 0.35, patch));
+            dryness.push((0.1 + parched + 0.6 * thirst + 0.8 * ill).min(1.0));
         }
     }
     (density, dryness)
@@ -374,7 +386,15 @@ mod tests {
             let j = ((z / field.size[1] + 0.5) * (rz - 1) as f32).round() as u32;
             field.density[(j * rx + i) as usize]
         };
-        assert!(at(-10.0, 0.0) > 0.7, "lawn {}", at(-10.0, 0.0));
+        // The lawn is thick on the whole but patchy, with the odd gap.
+        let lawn: Vec<f32> = (0..15)
+            .flat_map(|i| (0..30).map(move |j| (-17.0 + i as f32, -15.0 + j as f32)))
+            .map(|(x, z)| at(x, z))
+            .collect();
+        let mean = lawn.iter().sum::<f32>() / lawn.len() as f32;
+        assert!(mean > 0.55, "lawn {mean}");
+        assert!(lawn.iter().any(|&d| d > 0.9), "no dense sward");
+        assert!(lawn.iter().any(|&d| d < 0.5), "no thin patch");
         assert!(at(14.0, 5.0) < 0.05, "bare {}", at(14.0, 5.0));
         assert_eq!(at(10.0, 0.0), 0.0, "keep-clear");
 
@@ -411,7 +431,10 @@ mod tests {
         for s in [0.1, 0.4, 0.7] {
             assert_eq!(at(x, z + length * s), 0.0, "under the log at {s}");
         }
-        assert!(at(x, z - 2.0) > 0.7, "behind the butt");
+        assert!(
+            (1..4).any(|k| at(x, z - k as f32) > 0.3),
+            "no grass behind the butt"
+        );
 
         // Turned off: the field goes, and the tufts draw again.
         app.world.resource_mut::<EcologySettings>().gpu_grass = false;
