@@ -51,26 +51,32 @@ skittishness and howling.
 
 `StandIn` gives an NPC or animal a body posed every step from the AI state, so behavior reads
 on screen: gait, crouching in cover, the raised weapon of an attack's telegraph (glowing for a
-heavy guard breaker), blocks, white parry flashes, dodges, staggers, hit flashes, falling when
-downed, muzzle flashes, a rank crest in the skill color and an alert light. Animals graze
+heavy guard breaker), blocks, parry flashes (the blade glints white, the shield lights in a
+pale tint of the team color), dodges, staggers, hit flashes (struck plates go a pale tint of
+the team color), falling when downed, muzzle flashes, a rank crest in the skill color and an alert light. Animals graze
 head-down, flag their tails when alarmed, lie down, gallop, hop, creep and flap. With
 `NpcSettings::show_intent`, rings and lines on the ground show where each NPC is going and why
 (blue cover, orange flank, purple high ground, grey fall back, yellow search).
 
 All art is generated in code (`src/art`), since no third-party art may go in the repository:
 
-- **Fighters** (`art/fighter.rs`): armored arena combatants with segmented plates, tabards in
-  the team color, open helmets with a brow light and a rank crest over mail coifs, sculpted
-  faces in six skin tones, gloves and boots, and a longsword, an arming sword with a
-  heater shield, a carbine or a recurve bow. A skeleton with two-bone IK for arms and legs
-  poses them for every combat state. One texture atlas; each team shares one mesh per piece.
+- **Fighters** (`art/fighter.rs`): armored arena combatants in quilted linen gambesons, wool
+  hose and leather, with painted plates (a cuirass that wraps the flanks, pauldrons, helmet),
+  knee-length tabards front and back and team-dyed brassards, so squads tell apart at 30 m.
+  Paint wears with skill: rookies are clean, veterans and masters chipped, dented and dirty.
+  Open helmets with a brow light and a rank crest sit over mail coifs; faces come in four
+  shapes, six skin tones and four eye colors, and gambeson and hose shades vary per fighter.
+  Weapons are a longsword, an arming sword with a heater shield, a carbine or a recurve bow. A
+  skeleton with two-bone IK for arms and legs poses them for every combat state. Each team
+  shares one mesh per piece.
 - **Wildlife** (`art/animals.rs`): sculpted red deer (stags with antlers and a neck mane),
   grey wolves and European rabbits, with fur textures that follow the coat, baked ambient
   occlusion, IK legs and planted feet, and starlings with iridescent spotted plumage and
   feathered wings that fold, spread and beat.
 - **Arena** (`art/arena.rs`): a sandstone amphitheater with arched stands, gates with
   portcullises, fluted columns, banners, braziers with flickering fire and light, rubble,
-  timber barricades, crates and drums, all with baked PBR textures. The art dresses the gameplay entities; colliders never change.
+  timber barricades, crates and drums, all with baked PBR textures. The art dresses the
+  gameplay entities; colliders never change.
 
 Everything is built once per world and shared. Without a renderer (headless tests) the art
 falls back to primitive shapes so tests stay fast.
