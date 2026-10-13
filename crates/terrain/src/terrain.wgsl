@@ -24,6 +24,7 @@ struct Maps {
     deform: vec4<f32>,   // origin x/z relative to the camera, cell size, cells per side
     surface: vec4<f32>,  // origin x/z relative to the camera, cell size, cells per side
     flags: vec4<f32>,    // deformation on, surface layers on, LOD debug colors
+    far: vec4<f32>,      // wetness, puddles, snow depth, scorch beyond the surface layers' grid
 };
 
 const C_LUSH: u32 = 0u;
@@ -124,6 +125,20 @@ fn surface_uv(rel: vec3<f32>) -> vec2<f32> {
 
 fn inside01(uv: vec2<f32>) -> f32 {
     return select(0.0, 1.0, all(uv > vec2(0.002)) && all(uv < vec2(0.998)));
+}
+
+// Wetness, puddle depth, snow depth and scorch. The weather keeps them on a grid around the
+// player; beyond it the ground is as wet and snowy as the open ground along the grid's rim
+// (fading in over the grid's outer tenth), so rain and snow don't end at a square around the
+// player.
+fn surface_layers(rel: vec3<f32>) -> vec4<f32> {
+    if (maps.flags.y < 0.5) {
+        return vec4<f32>(frame.weather.x, 0.0, frame.weather.y * 0.1, 0.0);
+    }
+    let uv = surface_uv(rel);
+    let edge = min(min(uv.x, uv.y), min(1.0 - uv.x, 1.0 - uv.y));
+    let grid = textureSampleLevel(surface_tex, map_sampler, uv, 0.0);
+    return mix(maps.far, grid, smoothstep(0.0, 0.1, edge));
 }
 
 // Value noise whose lattice repeats every `period` cells. Detail patterns are built on
@@ -432,9 +447,8 @@ fn vs_prepass(in: VertexIn) -> PrepassOut {
 fn fs_prepass(in: PrepassOut) -> PrepassOutput {
     // Rain from the surface layers (or the weather where they don't reach), standing water and
     // prints, pooled the way the scene pass pools them (without the material detail).
-    let suv = surface_uv(in.rel);
-    let layers = textureSampleLevel(surface_tex, map_sampler, suv, 0.0) * inside01(suv) * maps.flags.y;
-    let rain_wet = saturate(max(layers.x, select(0.0, frame.weather.x, maps.flags.y < 0.5)));
+    let layers = surface_layers(in.rel);
+    let rain_wet = saturate(layers.x);
     let duv = deform_uv(in.rel);
     let depth = textureSampleLevel(deform_tex, map_sampler, duv, 0.0).r * inside01(duv) * maps.flags.x;
     let snow = smoothstep(0.005, 0.03, layers.z);
@@ -794,9 +808,7 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     let dxn = textureSampleLevel(deform_tex, map_sampler, duv - vec2(texel, 0.0), 0.0).r;
     let dzp = textureSampleLevel(deform_tex, map_sampler, duv + vec2(0.0, texel), 0.0).r;
     let dzn = textureSampleLevel(deform_tex, map_sampler, duv - vec2(0.0, texel), 0.0).r;
-    let suv = surface_uv(in.rel);
-    let in_surface = inside01(suv) * maps.flags.y;
-    let layers = textureSampleLevel(surface_tex, map_sampler, suv, 0.0) * in_surface;
+    let layers = surface_layers(in.rel);
 
     let print_fade = in_deform * (1.0 - smoothstep(maps.deform.z * 1.5, maps.deform.z * 8.0, pixel));
     let depth = d0.r * in_deform;
@@ -1062,7 +1074,7 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     // gradually instead of ending at a line.
     let climate_snow = smoothstep(snow_line + 2.0 + 1.5 * far, snow_line - 3.0 - 1.5 * far, temp_c + (detail_n - 0.5) * 4.0 * fine_fade + (variety - 0.5) * 3.0 + (patches - 0.5) * 2.0 + crest * 2.0 - gully * 3.0 + (far_n.x - 0.5) * 8.0 * far)
         * (1.0 - smoothstep(rock_slope - 0.02, rock_slope + 0.14, snow_slope + (detail_n - 0.5) * 0.1 * fine_fade));
-    let fallen = max(layers.z, select(0.0, frame.weather.y * 0.1, maps.flags.y < 0.5));
+    let fallen = layers.z;
     let weather_snow = smoothstep(0.004, 0.04, fallen + (detail_f - 0.5) * 0.01 * fine_fade)
         * (1.0 - smoothstep(0.55, 0.8, snow_slope));
     let painted_snow = pw[2];
@@ -1075,8 +1087,11 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
         // Deep prints in thin snow show the ground below.
         let snow_depth = max(fallen, painted_snow * 0.25 + climate_snow * 0.5);
         snow *= 1.0 - smoothstep(0.7, 1.0, depth / max(snow_depth, 1e-3)) * print_fade;
-        // A blanket of snow softens the shapes under it, and the wind lays it in drifts.
-        var soft = normalize(mix(n, n_geo, 0.6 * snow));
+        // A blanket of snow softens the shapes under it: a dusting shows the ground's relief,
+        // a deeper cover buries litter, grass and pebbles (rock keeps more of its shape). The
+        // wind lays it in drifts.
+        let bury = mix(0.6, 1.0, smoothstep(0.02, 0.12, snow_depth) * (1.0 - rock * 0.5));
+        var soft = normalize(mix(n, n_geo, bury * snow));
         let drift_fade = 1.0 - smoothstep(0.5, 6.0, pixel);
         var drift = 0.0;
         if (drift_fade > 0.0) {
@@ -1111,7 +1126,7 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     porosity *= 1.0 - snow;
 
     // ---- Rain: wet ground darkens and gets glossy, soil turns to mud, water pools.
-    let rain_wet = max(layers.x, select(0.0, frame.weather.x, maps.flags.y < 0.5));
+    let rain_wet = layers.x;
     let wet = saturate(rain_wet) * porosity;
     // Bare soil turns to mud; grass stays grass (darker, with a sheen) unless it is trodden.
     let natural_bare = 1.0 - veg;
