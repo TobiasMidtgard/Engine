@@ -266,6 +266,7 @@ impl Plugin for DestructionPlugin {
                     charges::charge_visuals_system,
                     build::build_input_system,
                     build::build_system,
+                    sync::piece_colliders_system,
                     dress::build_prop_models_system,
                     build::ghost_look_system,
                     barn::barn_fuel_system,
