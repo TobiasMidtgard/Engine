@@ -14,6 +14,7 @@
 //! rounded surface, which gives soft, volumetric canopies instead of a mess of flat planes.
 
 pub mod bark;
+pub mod fungi;
 pub mod small;
 pub mod small_textures;
 pub mod textures;

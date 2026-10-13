@@ -20,6 +20,8 @@
 
 use engine_core::math::{Quat, Rng, Vec2, Vec3, Vec4, noise, smoothstep};
 
+use super::bark::layout;
+use super::fungi::{self, Host, host_fungus};
 use super::textures::{CLUSTER_CELL, LeafKind, atlas_cell, kind_of};
 use super::{MeshBuilder, rgb};
 use crate::species::{BarkStyle, LeafStyle, PlantForm, PlantSpecies};
@@ -32,11 +34,26 @@ pub struct PlantMeshes {
     pub foliage: Option<engine_render::Mesh>,
     pub wood_lod: Option<engine_render::Mesh>,
     pub foliage_lod: Option<engine_render::Mesh>,
+    /// Thinned copies of `foliage` for leaf fall and leaf-out ([`LEAF_STEPS`]); deciduous
+    /// species only.
+    pub foliage_thin: Vec<engine_render::Mesh>,
+    /// The same for `foliage_lod`.
+    pub foliage_lod_thin: Vec<engine_render::Mesh>,
     /// A felled log once its twigs have rotted off: the trunk above the cut with stubs of the
     /// big limbs (same model space as `wood`).
     pub log: Option<engine_render::Mesh>,
+    /// The same log further on in its decay, one per [`LOG_MOSS`] step after the first:
+    /// mossier and greyer.
+    pub log_mossy: Vec<engine_render::Mesh>,
+    /// The moss cushions on the log at each [`LOG_MOSS`] step (same model space).
+    pub log_moss: Vec<Option<engine_render::Mesh>>,
     /// The same broken trunk standing as a snag: moss at its foot rather than along one side.
     pub snag: Option<engine_render::Mesh>,
+    /// Bracket fungi on the log, the snag and the stump (same model space as `log`, `snag`
+    /// and `base`).
+    pub log_fungi: Option<engine_render::Mesh>,
+    pub snag_fungi: Option<engine_render::Mesh>,
+    pub stump_fungi: Option<engine_render::Mesh>,
     /// Height of the mesh at full size, meters.
     pub height: f32,
     /// Height of the felling cut (top of the stump), meters.
@@ -428,6 +445,11 @@ impl PlantMeshes {
             lo = lo.min(b.min.y);
             hi = hi.max(b.max.y);
         }
+        // Thinned crowns lie within the full one, and must sway with it.
+        let thin = self
+            .foliage_thin
+            .iter_mut()
+            .chain(&mut self.foliage_lod_thin);
         for m in [
             &mut self.wood,
             &mut self.foliage,
@@ -436,6 +458,7 @@ impl PlantMeshes {
         ]
         .into_iter()
         .flatten()
+        .chain(thin)
         {
             for y in [lo, hi] {
                 m.vertices.push(engine_render::Vertex::new(
@@ -454,7 +477,8 @@ pub fn cut_height(sp: &PlantSpecies) -> f32 {
     (0.35 + sp.trunk_radius_m * 0.5).clamp(0.3, 0.75)
 }
 
-fn point_at(path: &[Vec3], radius: &[f32], s: f32) -> (Vec3, Vec3, f32) {
+/// A point on a path at fraction `s` of its points: position, direction and radius.
+pub(super) fn point_at(path: &[Vec3], radius: &[f32], s: f32) -> (Vec3, Vec3, f32) {
     let n = path.len() - 1;
     let f = (s.clamp(0.0, 1.0) * n as f32).min(n as f32 - 1e-4);
     let i = f as usize;
@@ -511,14 +535,51 @@ fn trunk(
     (path, radius)
 }
 
+/// How a log mosses over as it rots: from each share of its life ([`crate::FelledLog`]'s
+/// `years / rot_years`) on, how far the moss has spread (`moss_log`).
+pub const LOG_MOSS: [(f32, f32); 3] = [(0.0, 0.15), (0.25, 0.55), (0.5, 1.0)];
+
 /// Moss over the model's +X side of a log (the side `felling::log_rest_transform` turns up
 /// once the twigs have rotted off), patchy along it, and a darker, damp underside. The cut
-/// faces stay bare.
-fn moss_log(mesh: &mut engine_render::Mesh, seed: u64) {
+/// faces stay bare. `amount` (0..1) is how far it has spread: a few cushions along the top of
+/// a log down a few years, a thick coat over the top and down the flanks of an old one. The
+/// bark between the cushions dulls and greys with it, green with algae in places. The
+/// cushions themselves stand on the bark as a separate shell ([`moss_shell`]).
+fn moss_log(mesh: &mut engine_render::Mesh, amount: f32, seed: u64) {
     // Olive, not lawn green: moss on deadwood is dark and dull, drier and yellower in places.
     let moss = Vec3::new(0.052, 0.07, 0.026);
     let dry = Vec3::new(0.075, 0.074, 0.036);
     for v in &mut mesh.vertices {
+        let m = MossAt::new(v, amount, seed);
+        let moss = moss.lerp(dry, smoothstep(-0.2, 0.4, m.tint));
+        let c = Vec3::new(v.color[0], v.color[1], v.color[2]);
+        // Dead bark loses its color within a year or two: it greys and dulls (birch's white
+        // with it, pine's orange), greening with algae in places.
+        let lum = c.dot(Vec3::new(0.3, 0.55, 0.15));
+        let algae = smoothstep(-0.3, 0.5, m.patch) * m.side;
+        let grey = Vec3::new(0.84, 0.83, 0.78).lerp(Vec3::new(0.66, 0.74, 0.5), algae) * lum;
+        let c = c.lerp(grey, 0.35 + 0.45 * amount);
+        let cover = m.cover * (0.6 + 0.3 * amount);
+        let c = c.lerp(moss, cover) * (1.0 - (0.2 + 0.2 * amount) * m.under * m.side);
+        v.color = [c.x, c.y, c.z, v.color[3]];
+    }
+}
+
+/// How mossy a log's surface is at a vertex (see [`moss_log`]).
+struct MossAt {
+    /// Moss cover, 0..1.
+    cover: f32,
+    /// Facing the ground (the model's −X), 0..1.
+    under: f32,
+    /// Facing sideways rather than along the trunk (cut faces are 0).
+    side: f32,
+    /// Patch and tint noise, about −1..1.
+    patch: f32,
+    tint: f32,
+}
+
+impl MossAt {
+    fn new(v: &engine_render::Vertex, amount: f32, seed: u64) -> Self {
         let n = Vec3::from(v.normal).normalize_or_zero();
         let side = 1.0 - n.y.abs();
         let p = Vec3::from(v.position);
@@ -540,13 +601,192 @@ fn moss_log(mesh: &mut engine_render::Mesh, seed: u64) {
             2.0,
             0.5,
         );
-        // Cushions with bark between them, mostly along the top.
-        let top = smoothstep(-0.15 - 0.3 * patch, 0.55, n.x) * smoothstep(-0.1, 0.25, patch);
-        let under = smoothstep(0.0, 0.7, -n.x);
-        let moss = moss.lerp(dry, smoothstep(-0.2, 0.4, tint));
-        let c = Vec3::new(v.color[0], v.color[1], v.color[2]);
-        let c = c.lerp(moss, top * side * 0.8) * (1.0 - 0.35 * under * side);
-        v.color = [c.x, c.y, c.z, v.color[3]];
+        // Cushions with bark between them, mostly along the top, spreading down the flanks
+        // and closing up as the years go by.
+        let reach = -0.15 - 0.3 * patch - 0.6 * (amount - 0.5);
+        let top = smoothstep(reach, reach + 0.7, n.x)
+            * smoothstep(0.15 - 0.5 * amount, 0.4 - 0.3 * amount, patch);
+        Self {
+            cover: top * side,
+            under: smoothstep(0.0, 0.7, -n.x),
+            side,
+            patch,
+            tint,
+        }
+    }
+}
+
+/// Size of the moss texture's tile on deadwood, meters.
+pub const LOG_MOSS_TILE_M: f32 = 1.2;
+
+/// The moss cushions on a log ([`moss_log`] with the same `amount` and `seed`): the log's own
+/// surface lifted a centimeter or two wherever moss covers it, to be drawn with the forest
+/// floor's moss texture, alpha-masked. Its vertex alpha is the cover, so thin cover shows only
+/// the tallest cushions and patches end raggedly; texture coordinates wrap round the trunk
+/// (`path` with radii `rad`) at [`LOG_MOSS_TILE_M`]. `None` if nothing is mossy.
+fn moss_shell(
+    log: &engine_render::Mesh,
+    path: &[Vec3],
+    rad: &[f32],
+    amount: f32,
+    seed: u64,
+) -> Option<engine_render::Mesh> {
+    let moss: Vec<MossAt> = log
+        .vertices
+        .iter()
+        .map(|v| MossAt::new(v, amount, seed))
+        .collect();
+    // Where round the trunk each vertex is: the angle and the trunk's radius there.
+    let around = |p: Vec3| {
+        let i = path
+            .windows(2)
+            .position(|w| p.y < w[1].y)
+            .unwrap_or(path.len() - 2);
+        let t = ((p.y - path[i].y) / (path[i + 1].y - path[i].y).max(1e-4)).clamp(0.0, 1.0);
+        let c = path[i].lerp(path[i + 1], t);
+        let r = rad[i] + (rad[i + 1] - rad[i]) * t;
+        ((p.z - c.z).atan2(p.x - c.x), r)
+    };
+    let mut b = MeshBuilder::new();
+    let mut remap = vec![u32::MAX; log.vertices.len()];
+    for tri in log.indices.as_chunks::<3>().0 {
+        let ids = tri.map(|i| i as usize);
+        if ids.iter().all(|&i| moss[i].cover < 0.03) {
+            continue;
+        }
+        // Skip the seam on the underside where the angle wraps round.
+        let angles = ids.map(|i| around(Vec3::from(log.vertices[i].position)).0);
+        let spread = angles
+            .iter()
+            .fold(0.0f32, |m, a| m.max((a - angles[0]).abs()));
+        if spread > std::f32::consts::PI {
+            continue;
+        }
+        let mut out = [0u32; 3];
+        for (k, &i) in ids.iter().enumerate() {
+            if remap[i] == u32::MAX {
+                let v = &log.vertices[i];
+                let m = &moss[i];
+                let p = Vec3::from(v.position);
+                let n = Vec3::from(v.normal).normalize_or_zero();
+                let (angle, r) = around(p);
+                let uv = Vec2::new(angle * r, p.y) / LOG_MOSS_TILE_M;
+                // Darker and more olive than the moss on the forest floor (bright moss reads
+                // lime in sunlight), drier and browner in places, darker down the flanks.
+                let dry = smoothstep(-0.2, 0.4, m.tint);
+                let c = Vec3::new(0.58, 0.6, 0.42).lerp(Vec3::new(0.7, 0.64, 0.38), dry)
+                    * (1.0 - 0.3 * m.under);
+                let alpha = smoothstep(0.0, 0.8, m.cover);
+                let lift = 0.004 + 0.014 * m.cover;
+                remap[i] = b.vertex(p + n * lift, n, uv, c.extend(alpha));
+            }
+            out[k] = remap[i];
+        }
+        b.tri(out[0], out[1], out[2]);
+    }
+    (!b.is_empty()).then(|| b.finish())
+}
+
+/// Break the end of a trunk at `top` (radius `r`, pointing along `axis`) off jaggedly: the
+/// rotten heart sinks into a hollow and the sound wood around it stands in uneven teeth. Their
+/// outsides keep the `bark`; their torn faces show weathered grey wood, its fibers running up
+/// the teeth. Call it right after the tube whose end cap is the heart.
+fn break_top(b: &mut MeshBuilder, top: Vec3, axis: Vec3, r: f32, bark: Vec4, seed: u64) {
+    use std::f32::consts::TAU;
+    // Sink the heart: the cap's inner rings drop below the rim.
+    for v in &mut b.vertices {
+        let p = Vec3::from(v.position) - top;
+        let rel = (p - axis * p.dot(axis)).length() / r;
+        if p.dot(axis).abs() < 0.1 * r && rel < 0.97 {
+            let sink = 0.55 * r * (1.0 - rel).powf(0.7);
+            v.position = (Vec3::from(v.position) - axis * sink).into();
+        }
+    }
+    let (n, m) = axis.any_orthonormal_pair();
+    let dir = |a: f32| n * a.cos() + m * a.sin();
+    let tangent = |a: f32| m * a.cos() - n * a.sin();
+    let rnd = |k: u32, salt: i64| engine_core::math::hash01(k as i64, salt, 0, seed);
+    let wood = Vec4::new(0.3, 0.29, 0.27, 1.0);
+    let rot = Vec4::new(0.025, 0.018, 0.013, 1.0);
+    let [cu, cv] = layout::CUT_CENTER;
+    let [ru, rv] = layout::CUT_RADIUS;
+    // Torn wood samples the end-grain disc sideways: across a face runs across the growth
+    // rings, up it runs along them, so the rings read as fibers running up the tooth.
+    let grain = |across: f32, up: f32, k: u32| {
+        let rho = 0.5 + 0.4 * across;
+        let th = TAU * rnd(k, 9) + 0.35 * up / r;
+        Vec2::new(cu + ru * rho * th.cos(), cv + rv * rho * th.sin())
+    };
+    let tile_u = layout::BARK_U1 - layout::BARK_U0;
+    let tile_v = layout::TILE_WIDTH_M * layout::TILE_ASPECT;
+    let count = 11;
+    for k in 0..count {
+        // Now and then a tooth has broken away entirely.
+        if rnd(k, 1) < 0.15 {
+            continue;
+        }
+        let step = TAU / count as f32;
+        let a0 = (k as f32 + 0.2 * rnd(k, 2)) * step;
+        let a1 = a0 + step * (0.6 + 0.4 * rnd(k, 3));
+        let mid = 0.5 * (a0 + a1) + 0.3 * (a1 - a0) * (rnd(k, 4) - 0.5);
+        let half = 0.12 * (a1 - a0);
+        // Mostly short stubs, a few long slivers.
+        let tall = r * (0.2 + 1.9 * rnd(k, 5).powi(2));
+        let inner = r * (0.6 + 0.25 * rnd(k, 6));
+        let tip_r = r * (0.82 + 0.12 * rnd(k, 7));
+        let base = -0.01 * r;
+        let at = |a: f32, radius: f32, s: f32| top + dir(a) * radius + axis * s;
+        let o0 = at(a0, r, base);
+        let o1 = at(a1, r, base);
+        let i0 = at(a0, inner, base);
+        let i1 = at(a1, inner, base);
+        let t0 = at(mid - half, tip_r, tall * (0.75 + 0.2 * rnd(k, 8)));
+        let t1 = at(mid + half, tip_r, tall);
+        let up = |p: Vec3| (p - top).dot(axis);
+        let fade = |p: Vec3| rot.lerp(wood, (up(p) / (0.3 * r)).clamp(0.0, 1.0));
+        // The bark side: the tube's bark tile carried on up.
+        let u = |a: f32| layout::BARK_U0 + tile_u * (0.1 + (a - a0) * r / layout::TILE_WIDTH_M);
+        let outer = [o0, o1, t1, t0].map(|p| {
+            let a = (p - top).dot(m).atan2((p - top).dot(n));
+            let a = a0 + (a - a0).rem_euclid(TAU);
+            (
+                p,
+                Vec2::new(u(a).min(layout::BARK_U1), 0.5 - up(p) / tile_v),
+                bark,
+            )
+        });
+        flat_face(b, &outer, dir(mid));
+        let torn = |p: Vec3, across: f32| (p, grain(across, up(p), k), fade(p));
+        flat_face(
+            b,
+            &[torn(i1, 1.0), torn(i0, 0.0), torn(t0, 0.3), torn(t1, 0.7)],
+            -dir(mid),
+        );
+        flat_face(
+            b,
+            &[torn(i0, 0.0), torn(o0, 1.0), torn(t0, 0.6)],
+            -tangent(a0),
+        );
+        flat_face(
+            b,
+            &[torn(o1, 1.0), torn(i1, 0.0), torn(t1, 0.6)],
+            tangent(a1),
+        );
+    }
+}
+
+/// A flat polygon (a fan, convex) with its own vertices, wound to face `out`.
+fn flat_face(b: &mut MeshBuilder, corners: &[(Vec3, Vec2, Vec4)], out: Vec3) {
+    let normal = (corners[1].0 - corners[0].0).cross(corners[2].0 - corners[0].0);
+    let flip = normal.dot(out) < 0.0;
+    let normal = if flip { -normal } else { normal };
+    let ids: Vec<u32> = corners
+        .iter()
+        .map(|&(p, uv, c)| b.vertex(p, normal, uv, c))
+        .collect();
+    for i in 1..ids.len() as u32 - 1 {
+        let (x, y) = if flip { (i + 1, i) } else { (i, i + 1) };
+        b.tri(ids[0], ids[x as usize], ids[y as usize]);
     }
 }
 
@@ -746,6 +986,47 @@ fn emit_card(
 }
 
 /// Leaf tint: brightness and a shift toward the accent color.
+/// Share of a deciduous crown's leaf cards kept at each step of leaf fall (and, the other way,
+/// of leaf-out in spring). The same cards go first at every step, so a crown thins out rather
+/// than reshuffling.
+pub const LEAF_STEPS: [f32; 3] = [0.6, 0.3, 0.1];
+
+/// The thinning steps a species' crown needs: deciduous ones only.
+fn leaf_steps(sp: &PlantSpecies) -> &'static [f32] {
+    if sp.seasons.is_some() {
+        &LEAF_STEPS
+    } else {
+        &[]
+    }
+}
+
+/// A crown's leaf cards as one mesh (`lod`: only the far cards, drawn larger), and thinned
+/// copies of it keeping each share in `steps`.
+fn crown_meshes(
+    cards: &[Card],
+    shading: &Shading,
+    kind: LeafKind,
+    lod: bool,
+    grid: (u32, u32),
+    steps: &[f32],
+) -> (engine_render::Mesh, Vec<engine_render::Mesh>) {
+    let mut full = MeshBuilder::new();
+    let mut thin: Vec<MeshBuilder> = steps.iter().map(|_| MeshBuilder::new()).collect();
+    for (i, c) in cards.iter().enumerate().filter(|(_, c)| !lod || c.far) {
+        emit_card(&mut full, c, shading, kind, lod, grid);
+        let keep = engine_core::math::hash01(i as i64, 0, 0, 0x1eaf_fa11);
+        for (b, &share) in thin.iter_mut().zip(steps) {
+            if keep < share {
+                emit_card(b, c, shading, kind, lod, grid);
+            }
+        }
+    }
+    (
+        full.finish(),
+        thin.into_iter().map(MeshBuilder::finish).collect(),
+    )
+}
+
 fn leaf_tint(sp: &PlantSpecies, rng: &mut Rng) -> Vec3 {
     let leaf = Vec3::from(sp.leaf_color).max(Vec3::splat(0.01));
     let accent = Vec3::from(sp.accent_color);
@@ -828,14 +1109,19 @@ fn assemble(
         let rad = &trunk_r[cut_i..end];
         let color = |i: usize, _a: f32| bark_color(sp, path[i].y, h, i + cut_i, seed);
         let cap = |r: f32| cut_color(rim, r);
-        let rotten = |_: f32| Vec4::new(0.09, 0.065, 0.045, 1.0);
+        let rotten = |r: f32| (Vec3::new(0.018, 0.013, 0.009) * (0.6 + 0.4 * r)).extend(1.0);
         let broken = |_: f32| rgb(sp.bark_color, 0.55);
         b.tube(path, rad, 10, 0.5, &color, Some(&cap), Some(&rotten));
-        // Short broken stubs where the thickest limbs were (the thin ones snap off flush).
+        let last = path.len() - 1;
+        let axis = (path[last] - path[last - 1]).normalize_or(Vec3::Y);
+        break_top(&mut b, path[last], axis, rad[last], color(last, 0.0), seed);
+        // Short broken stubs where the thickest limbs were (the thin ones snap off flush). Limbs
+        // forking right at the break went with the top.
+        let below = top_y - 2.0 * rad[last];
         let mut limbs: Vec<_> = branches
             .iter()
             .enumerate()
-            .filter(|(_, br)| br.level == 1 && br.path[0].y < top_y)
+            .filter(|(_, br)| br.level == 1 && br.path[0].y < below)
             .collect();
         limbs.sort_by(|a, b| b.1.radius[0].total_cmp(&a.1.radius[0]));
         limbs.truncate((limbs.len() / 3).clamp(2, 9));
@@ -851,10 +1137,37 @@ fn assemble(
         let mut snag = log.clone();
         moss_foot(&mut snag, seed);
         out.snag = Some(snag);
-        moss_log(&mut log, seed);
+        out.log_moss = LOG_MOSS
+            .iter()
+            .map(|&(_, amount)| moss_shell(&log, path, rad, amount, seed))
+            .collect();
+        out.log_mossy = LOG_MOSS[1..]
+            .iter()
+            .map(|&(_, amount)| {
+                let mut m = log.clone();
+                moss_log(&mut m, amount, seed);
+                m
+            })
+            .collect();
+        moss_log(&mut log, LOG_MOSS[0].1, seed);
         out.log = Some(log);
+        let grow = |host: Host, path: &[Vec3], rad: &[f32], along: (f32, f32)| {
+            host_fungus(sp, host).and_then(|f| fungi::on_trunk(path, rad, host, f, along, seed))
+        };
+        // Snags fruit in reach of a walker's eye: from just above the cut to 4 m or so.
+        let length = top_y - cut;
+        let low = (0.2 / length).min(0.3);
+        out.snag_fungi = grow(Host::Snag, path, rad, (low, (4.0 / length).clamp(low, 0.7)));
+        out.log_fungi = grow(Host::Log, path, rad, (0.05, 0.9));
+        out.stump_fungi = grow(
+            Host::Stump,
+            &trunk_path[..=cut_i],
+            &trunk_r[..=cut_i],
+            (0.55, 0.85),
+        );
     }
     let kind = kind_of(sp.shape.leaf);
+    let steps = leaf_steps(sp);
     let shading = Shading {
         crown: crowns.crown,
         clumps: crowns.clumps,
@@ -888,18 +1201,15 @@ fn assemble(
             Some(&tip),
         );
         add_branches(&mut b, sp, branches, h, lod, seed, &shading);
-        let mut f = MeshBuilder::new();
-        for c in &crowns.cards {
-            if !lod || c.far {
-                emit_card(&mut f, c, &shading, kind, lod, crowns.grid);
-            }
-        }
+        let (f, thin) = crown_meshes(&crowns.cards, &shading, kind, lod, crowns.grid, steps);
         if lod {
             out.wood_lod = Some(b.finish());
-            out.foliage_lod = Some(f.finish());
+            out.foliage_lod = Some(f);
+            out.foliage_lod_thin = thin;
         } else {
             out.wood = Some(b.finish());
-            out.foliage = Some(f.finish());
+            out.foliage = Some(f);
+            out.foliage_thin = thin;
         }
     }
     out
@@ -1549,21 +1859,19 @@ fn shrub(sp: &PlantSpecies, seed: u64) -> PlantMeshes {
         up: 0.3,
         deep: 0.38,
     };
+    let steps = leaf_steps(sp);
     for lod in [false, true] {
         let mut b = MeshBuilder::new();
         add_branches(&mut b, sp, &cr.branches, h, lod, seed, &shading);
-        let mut f = MeshBuilder::new();
-        for c in &cr.cards {
-            if !lod || c.far {
-                emit_card(&mut f, c, &shading, kind, lod, cr.grid);
-            }
-        }
+        let (f, thin) = crown_meshes(&cr.cards, &shading, kind, lod, cr.grid, steps);
         if lod {
             out.wood_lod = Some(b.finish());
-            out.foliage_lod = Some(f.finish());
+            out.foliage_lod = Some(f);
+            out.foliage_lod_thin = thin;
         } else {
             out.wood = Some(b.finish());
-            out.foliage = Some(f.finish());
+            out.foliage = Some(f);
+            out.foliage_thin = thin;
         }
     }
     out
@@ -1612,6 +1920,54 @@ mod tests {
         let hazel = lib.get(lib.id("hazel").unwrap());
         let m = woody(hazel, 3, false);
         assert!(m.base.is_none() && m.foliage.unwrap().triangle_count() > 50);
+    }
+
+    #[test]
+    fn logs_moss_over_as_they_rot() {
+        let lib = PlantLibrary::default();
+        let sp = lib.get(lib.id("oak").unwrap());
+        let m = woody(sp, 3, false);
+        assert_eq!(m.log_mossy.len(), LOG_MOSS.len() - 1);
+        assert_eq!(m.log_moss.len(), LOG_MOSS.len());
+        let shells: Vec<_> = m.log_moss.iter().map(|s| s.as_ref().unwrap()).collect();
+        // More cushions, and more solid ones, at each step.
+        let solid = |s: &engine_render::Mesh| {
+            s.vertices.iter().map(|v| v.color[3]).sum::<f32>() / s.vertices.len() as f32
+        };
+        for w in shells.windows(2) {
+            assert!(w[1].vertices.len() > w[0].vertices.len());
+            assert!(solid(w[1]) > solid(w[0]));
+        }
+        // The cushions sit on the log's top (the model's +X), outside its bark.
+        let log = m.log.as_ref().unwrap();
+        let mean_x = |s: &engine_render::Mesh| {
+            s.vertices.iter().map(|v| v.position[0]).sum::<f32>() / s.vertices.len() as f32
+        };
+        assert!(mean_x(shells[2]) > mean_x(log) + 0.05);
+    }
+
+    #[test]
+    fn deciduous_crowns_come_in_thinner_copies_for_leaf_fall() {
+        let lib = PlantLibrary::default();
+        for name in ["oak", "birch", "hazel"] {
+            let m = woody(lib.get(lib.id(name).unwrap()), 2, false);
+            let full = m.foliage.as_ref().unwrap().triangle_count() as f32;
+            assert_eq!(m.foliage_thin.len(), LEAF_STEPS.len(), "{name}");
+            for (thin, share) in m.foliage_thin.iter().zip(LEAF_STEPS) {
+                let kept = thin.triangle_count() as f32 / full;
+                assert!(
+                    (kept - share).abs() < 0.12,
+                    "{name}: kept {kept} of {share}"
+                );
+            }
+            // They sway with the full crown, so they share its bounds.
+            let b = m.foliage.as_ref().unwrap().aabb();
+            for thin in &m.foliage_thin {
+                assert_eq!((thin.aabb().min.y, thin.aabb().max.y), (b.min.y, b.max.y));
+            }
+        }
+        let pine = woody(lib.get(lib.id("pine").unwrap()), 2, false);
+        assert!(pine.foliage_thin.is_empty() && pine.foliage_lod_thin.is_empty());
     }
 
     #[test]
