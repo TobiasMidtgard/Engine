@@ -23,6 +23,9 @@
 //! generated once per world at startup (`texgen`, about 36 MB), shared as keyed assets so
 //! repeated props draw instanced (`kit`). [`spawn_review_ground`] adds a cheap textured
 //! ground (earth and gravel fraying into grass) for screenshots.
+//!
+//! [`boat_models`] builds a gaff-rigged clinker dinghy (hull, swinging rig, rudder; its
+//! dimensions in [`boat_dims`]) for the sailing cloth, with [`boat_stand`] to show it on.
 
 use std::f32::consts::{FRAC_PI_2, TAU};
 use std::sync::Arc;
@@ -48,6 +51,7 @@ mod kit;
 mod meshkit;
 mod props;
 mod props_anim;
+mod props_boat;
 mod props_bridge;
 mod props_machines;
 mod props_stage;
@@ -64,9 +68,11 @@ pub use characters::{
 };
 use characters::{dog, graphite, ivory, mannequin};
 pub use ground::spawn_review_ground;
+pub use kit::Model;
 use kit::{Mat, register_mesh};
 use props::*;
 pub use props_anim::{AimAxis, DemoAim, DemoRoll, DemoScrewWheel};
+pub use props_boat::{BoatModels, boat_models, boat_stand, dims as boat_dims, hull_points};
 use props_bridge::{bridge_plank, plank_size, stone_pier, timber_tower};
 use props_machines::{
     GANTRY_PIVOT, PRESS_SCREW, gantry, plank_crate, press_frame, press_ram, press_wheel,
