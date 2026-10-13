@@ -9,7 +9,7 @@ use engine_core::math::{DVec3, Vec3};
 use engine_core::prelude::*;
 use engine_movement::prelude::*;
 use engine_world::locomotion::{LocomotionState, MoveIntent};
-use engine_world::physics::CharacterController;
+use engine_world::physics::{CharacterController, Velocity};
 use engine_world::{GroundContact, LocomotionMode};
 use support::*;
 
@@ -811,6 +811,84 @@ fn wall_runs_on_a_moving_wall_and_jumps_off_with_its_speed() {
         "{}",
         m.velocity
     );
+}
+
+/// The wall from the wall-run test moving along its length at `speed` (m/s along +X), with
+/// a `Velocity` that says so.
+fn sliding_wall(app: &mut App, speed: f32) -> Entity {
+    drifting(app);
+    let wall = block(app, DVec3::new(15.0, 2.5, 1.5), Vec3::new(30.0, 5.0, 0.6));
+    app.world.entity_mut(wall).insert((
+        Drift(Vec3::X * speed),
+        Velocity {
+            linear: Vec3::X * speed,
+            angular: Vec3::ZERO,
+        },
+    ));
+    wall
+}
+
+fn wall_ran(app: &mut App, c: Entity, secs: f64) -> f64 {
+    let mut wallrun_secs = 0.0;
+    run_until(app, secs, |w| {
+        if w.get::<Mover>(c).unwrap().mode == LocomotionMode::WallRun {
+            wallrun_secs += DT;
+        }
+        false
+    });
+    wallrun_secs
+}
+
+#[test]
+fn running_beside_a_wall_as_fast_as_it_moves_is_no_wall_run() {
+    let mut app = app();
+    sliding_wall(&mut app, 7.0);
+    let c = character(
+        &mut app,
+        DVec3::new(0.0, 0.9, 0.0),
+        MovementProfile::pilot(),
+    );
+    // Sprint beside it and jump at it, as in the wall-run test: 1.5 m/s past it is too slow.
+    intent(&mut app, c, |i| {
+        i.direction = Vec3::X;
+        i.sprint = true;
+    });
+    run(&mut app, 1.0);
+    tap_jump(&mut app, c);
+    intent(&mut app, c, |i| {
+        i.direction = Vec3::new(0.2, 0.0, 1.0).normalize()
+    });
+    let secs = wall_ran(&mut app, c, 1.2);
+    assert_eq!(secs, 0.0, "wall-ran for {secs:.2} s");
+    assert_eq!(triggered(&app, c, "wallrun"), 0);
+}
+
+#[test]
+fn a_jump_at_a_wall_sliding_past_runs_along_it() {
+    let mut app = app();
+    sliding_wall(&mut app, -9.0);
+    let c = character(
+        &mut app,
+        DVec3::new(0.0, 0.9, 0.0),
+        MovementProfile::pilot(),
+    );
+    // Walk up to it and jump: barely moving along it, but it slides past at 9 m/s.
+    intent(&mut app, c, |i| i.direction = Vec3::new(0.0, 0.0, 0.4));
+    run(&mut app, 0.3);
+    tap_jump(&mut app, c);
+    intent(&mut app, c, |i| {
+        i.direction = Vec3::new(0.2, 0.0, 1.0).normalize()
+    });
+    run_until(&mut app, 1.0, |w| {
+        w.get::<Mover>(c).unwrap().mode == LocomotionMode::WallRun
+    });
+    assert_eq!(triggered(&app, c, "wallrun"), 1);
+    // It runs along the wall the way the wall passes it (+X relative to the wall).
+    intent(&mut app, c, |i| i.direction = Vec3::X);
+    let secs = wall_ran(&mut app, c, 0.6);
+    assert!(secs > 0.5, "wall-ran for {secs:.2} s");
+    let m = mover(&app, c);
+    assert!(m.velocity.x > 6.0, "along the wall: {}", m.velocity);
 }
 
 #[test]

@@ -1003,7 +1003,7 @@ pub(crate) fn restart_grapplers(world: &mut World) -> usize {
 /// stand there, back, and a stand at `from`, easing in and out of each run, on world time.
 /// With a physics backend it drives the body by its `Velocity` (the backend moves it and
 /// writes the `Transform` back, so what stands on it is carried); with only the stand-in
-/// physics it sets the `Transform`.
+/// physics it sets the `Transform` and keeps the `Velocity` true to how it moved.
 #[derive(Component, Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct Shuttle {
     #[serde(skip)]
@@ -1083,10 +1083,11 @@ fn drive_shuttles(
         }
         s.secs = (s.secs + dt).rem_euclid(s.cycle_secs());
         let to = s.position();
-        if backend.is_some() {
-            // From where the backend put it, so it never drifts off the track.
-            v.linear = ((to - t.translation) / dt as f64).as_vec3();
-        } else {
+        // From where it is, so it never drifts off the track. A backend moves it by its
+        // velocity; without one it is placed, and the velocity still says how fast it moves
+        // (characters judge a wall-run along it by that).
+        v.linear = ((to - t.translation) / dt as f64).as_vec3();
+        if backend.is_none() {
             t.translation = to;
         }
     }
