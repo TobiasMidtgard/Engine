@@ -809,7 +809,7 @@ impl Landscape {
     }
 
     /// Distance from the lake's middle in shoreline units (1 = the shore).
-    fn lake_t(&self, x: f64, z: f64) -> f64 {
+    pub fn lake_t(&self, x: f64, z: f64) -> f64 {
         let d = (DVec2::new(x, z) - self.lake.center).length();
         d / (self.lake.radius * self.lake_wobble(x, z))
     }

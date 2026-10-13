@@ -357,8 +357,8 @@ fn in_zone(x: f64, z: f64, margin: f64) -> bool {
 /// of the forest trail's way in: the valley's trees may grow here.
 fn on_wooded_rim(x: f64, z: f64) -> bool {
     let rim = crate::zones::WOODED_RIMS.iter().any(|&(key, inner)| {
-        let c = crate::zones::zone(key).center;
-        let p = DVec2::new(x - c.x, z - c.z);
+        let zn = crate::zones::zone(key);
+        let p = DVec2::new(x - zn.center.x, z - zn.center.z);
         // The trail comes in from beyond the +X edge.
         let t = engine_foliage::demo::TRAIL;
         let (a, b) = (
@@ -369,7 +369,7 @@ fn on_wooded_rim(x: f64, z: f64) -> bool {
         let along = (p - b).dot(way_in);
         let off = (p - b - way_in * along).length();
         let on_trail = key == "forest" && along > -25.0 && off < 4.0;
-        p.length() > inner && !on_trail
+        (inner..zn.radius + 20.0).contains(&p.length()) && !on_trail
     });
     rim && !ZONES.iter().any(|zn| {
         let d = DVec2::new(x - zn.center.x, z - zn.center.z).length();
@@ -415,7 +415,9 @@ pub fn spawn_woods(commands: &mut Commands, lib: &Library, land: &Landscape, rng
             }
             let h = land.height(x, z);
             let n = land.normal(x, z, 2.0);
-            if n.y < 0.8 || land.lake_depth(x, z) > -1.5 || h > 700.0 {
+            // Off the lake's shore (the valley floor elsewhere is about as low as the water).
+            let shore = land.lake_t(x, z) < 1.3 && land.lake_depth(x, z) > -1.5;
+            if n.y < 0.8 || shore || h > 700.0 {
                 continue;
             }
             // Conifers higher up and deep in the woods, broadleaves and birches lower down.
