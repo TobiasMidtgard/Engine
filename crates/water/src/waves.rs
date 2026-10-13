@@ -141,9 +141,13 @@ pub fn build_waves(settings: &WaveSettings, wind: Vec2, depth: f32) -> Vec<Wave>
             } else {
                 0.0
             };
-            // Short waves spread wider around the wind (cos² spreading, wider at high f).
-            let spread = 0.3 + 0.75 * (i as f32 / wind_count as f32);
-            let u = hash01(seed, i as u64 * 3 + 2) * 2.0 - 1.0;
+            // Wind seas spread about ±30° around the wind at the peak, wider for short waves
+            // (cos²ˢ spreading). Neighboring frequencies step through the spread by the golden
+            // ratio, so the few waves near the peak, which carry most of the height, cross at
+            // different angles: short crests, not long rows of parallel ripples.
+            let spread = 0.55 + 0.6 * (i as f32 / wind_count as f32);
+            let u =
+                (i as f32 * 0.618_034 + hash01(seed, i as u64 * 3 + 2) * 0.2).fract() * 2.0 - 1.0;
             let angle = base_angle + u * spread;
             let w = omegas[i];
             out.push(Wave {

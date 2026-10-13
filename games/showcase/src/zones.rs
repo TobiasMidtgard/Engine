@@ -257,7 +257,8 @@ fn lake_water<'a>(z: &Zone, ground: &'a dyn Fn(f64, f64) -> f64) -> engine_water
         streams: &[engine_water::demo::ValleyStream {
             path: &STREAM,
             width_m: 5.0,
-            flow_m3_s: 1.0,
+            // Enough to fill the brink across: at 1 m³/s the falls split into two thin strands.
+            flow_m3_s: 2.0,
         }],
         ground,
         jetty_bearing: Some(std::f64::consts::PI * 0.9),
