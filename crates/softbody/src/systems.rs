@@ -442,6 +442,9 @@ pub fn build_bodies(
     skins: Option<Res<hair::MeshSkins>>,
 ) {
     for (e, spec, t) in &cloths {
+        if crate::gpu_cloth::runs_on_gpu(spec) {
+            continue; // simulated and drawn by the render feature
+        }
         let skeleton = find_skeleton(e, &parents, &skeletons);
         if matches!(spec.pins, cloth::ClothPins::Bones { .. })
             && skeleton.is_some_and(|s| s.2.bones.is_empty())

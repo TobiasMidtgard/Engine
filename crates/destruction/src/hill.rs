@@ -47,15 +47,15 @@ const HUT: [f64; 3] = [15.0, 0.0, -10.0];
 pub const YARD: [f64; 3] = [-14.0, 0.0, -24.0];
 /// When the yard's builder aims at its first piece, and the seconds per piece.
 const YARD_START: f32 = 0.5;
-const YARD_STEP: f32 = 0.5;
+const YARD_STEP: f32 = 0.42;
 /// When the finished cabin shows its support colors (with the red ghost of the last step).
 const YARD_SUPPORT_AT: f32 = 14.2;
 /// Where the terrace's shelter stands, relative to the origin: the middle of the leveled
 /// terrace, on its rock.
 pub const TERRACE: [f64; 3] = [8.8, TERRACE_Y, 2.1];
 /// When the terrace's builder starts (the hoe is done at 17.8 s), and the seconds per piece.
-const TERRACE_START: f32 = 18.3;
-const TERRACE_STEP: f32 = 0.45;
+const TERRACE_START: f32 = 18.2;
+const TERRACE_STEP: f32 = 0.38;
 /// When the finished shelter shows its support colors (its floor blue on the rock).
 const TERRACE_SUPPORT_AT: f32 = 22.0;
 
@@ -102,7 +102,7 @@ pub const VIEWS: &[DemoView] = &[
         eye: [-20.0, 5.5, -17.0],
         target: [-14.0, 2.0, -24.5],
         hour: 10.5,
-        warmup_secs: 10.2,
+        warmup_secs: 9.9,
     },
     DemoView {
         key: "voxel_build_reach",
@@ -335,8 +335,9 @@ pub struct BuildStep {
 }
 
 /// The yard's cabin in build order: a 4 × 4 m stone plinth, corner posts, board walls (a
-/// doorway left in the front), a loft floor on the walls, a 1-in-2 shingle roof, and a deck
-/// reaching out from the +X gable two rows deep, then the ghost of a third row.
+/// doorway left in the front), a loft floor on the walls, a 1-in-2 shingle roof, board gables
+/// under it at both ends, and a deck reaching out from the +X gable two rows deep, then the
+/// ghost of a third row.
 pub fn yard_plan() -> Vec<BuildStep> {
     let v = |x: f64, y: f64, z: f64| DVec3::new(x, y, z);
     let mut steps = Vec::new();
@@ -437,6 +438,9 @@ pub fn yard_plan() -> Vec<BuildStep> {
             );
         }
     }
+    // The gables over the side walls, aimed from under the roof at the loft floor's edge on
+    // the wall: each half rises toward the ridge.
+    add_gables(&mut add, &[-2.0, 2.0], 2.4);
     // The deck: off the outside of the +X walls under their tops, then off the deck's edge.
     for z in [-1.0, 1.0] {
         add(
@@ -520,7 +524,8 @@ pub fn terrace_plan() -> Vec<BuildStep> {
             top_mid - (rotation * Vec3::Y * half.y).as_dvec3(),
         );
     }
-    // Then the back walls under the roof's gable, against the cut bank, aimed from inside.
+    // Then the back walls under the roof's gable, against the cut bank, aimed from inside,
+    // and the gable over them.
     for z in [-1.0, 1.0] {
         let at = v(-0.85, 0.4, z);
         add(
@@ -531,7 +536,27 @@ pub fn terrace_plan() -> Vec<BuildStep> {
             v(-1.0, 1.4, z),
         );
     }
+    add_gables(&mut add, &[-1.0], 2.4);
     steps
+}
+
+/// Board gables at each of `xs`, the ends of a 4 m wide roof whose ridge runs along X over
+/// z 0, standing on a wall or floor edge at height `y`: two halves each, rising toward the
+/// ridge, aimed from under the roof at the edge just inside the end's line.
+fn add_gables(add: &mut impl FnMut(BuildKind, f32, DVec3, DVec3, DVec3), xs: &[f64], y: f64) {
+    for &x in xs {
+        let inward = -x.signum();
+        for (z, yaw) in [(-1.0, -FRAC_PI_2), (1.0, FRAC_PI_2)] {
+            let at = DVec3::new(x + inward * 0.03, y, z);
+            add(
+                BuildKind::WoodGable,
+                yaw,
+                at + DVec3::new(inward * 0.97, 0.35, 0.0),
+                at,
+                DVec3::new(x, y + 0.5, z),
+            );
+        }
+    }
 }
 
 fn hill_volume() -> VoxelVolume {
@@ -902,14 +927,14 @@ mod tests {
         // Blue plinth, the deck's second row orange at the edge of support.
         assert!(levels[..4].iter().all(|l| *l == 0), "{levels:?}");
         assert_eq!(levels[levels.len() - 1], 3, "{levels:?}");
-        assert_eq!(levels.len(), 27);
+        assert_eq!(levels.len(), 31);
     }
 
     #[test]
     fn the_terrace_shelter_snaps_together_as_planned() {
         let levels = build_levels(&terrace_plan());
-        // A blue floor on the rock, green walls and roof.
-        assert_eq!(levels, vec![0, 0, 1, 1, 1, 1, 1, 1]);
+        // A blue floor on the rock, green walls, roof and gables.
+        assert_eq!(levels, vec![0, 0, 1, 1, 1, 1, 1, 1, 1, 1]);
     }
 
     #[test]

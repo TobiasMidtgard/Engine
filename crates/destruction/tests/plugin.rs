@@ -367,7 +367,7 @@ fn the_hill_demo_tunnels_caves_in_builds_and_rebuilds() {
             .iter(&app.world)
             .count()
     };
-    assert_eq!(built(&mut app), 27, "the yard's cabin is up");
+    assert_eq!(built(&mut app), 31, "the yard's cabin is up");
     let ghosts: Vec<usize> = app
         .world
         .query::<&build::BuildGhost>()
@@ -397,7 +397,7 @@ fn the_hill_demo_tunnels_caves_in_builds_and_rebuilds() {
         .iter(&app.world)
         .filter(|s| s.on)
         .count();
-    assert_eq!(showing, 27, "the finished cabin shows its support colors");
+    assert_eq!(showing, 31, "the finished cabin shows its support colors");
     run(&mut app, 4.0);
     let hut_down = app
         .world
@@ -425,7 +425,7 @@ fn the_hill_demo_tunnels_caves_in_builds_and_rebuilds() {
         .filter(|(b, ..)| b.builder == Some(terrace))
         .map(|(b, s, show)| (b.kind, *s, show.on))
         .collect();
-    assert_eq!(shelter.len(), 8, "the terrace shelter is up: {shelter:?}");
+    assert_eq!(shelter.len(), 10, "the terrace shelter is up: {shelter:?}");
     for (kind, state, shown) in &shelter {
         assert!(shown, "the shelter shows its support");
         assert!(state.collapse_in.is_none(), "{kind:?} stands: {state:?}");
