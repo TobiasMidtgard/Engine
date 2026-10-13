@@ -16,7 +16,8 @@
 //! - **Cascaded sun shadows** (4 × 2048², texel-snapped), point lights, wind sway, wetness,
 //!   snow and fire scorch on surfaces, per pixel from `engine_world`'s `SurfaceLayers`
 //!   (`surface_weather` in shaders). Alpha-masked materials (leaves, fences) cut out their
-//!   shadows too.
+//!   shadows too. Cloud shadows from whichever module draws the clouds (see
+//!   [`cloud_shadows`]) shade the sunlight on every surface and in the fog.
 //! - **Textured PBR materials**: [`StandardMaterial`] takes base color, normal,
 //!   metallic/roughness, emissive and occlusion [`Image`]s (glTF conventions, mipmapped,
 //!   anisotropic). Normal maps need no tangents. See [`material`] and [`texture`].
@@ -48,6 +49,7 @@
 //! ```
 
 mod atmosphere;
+pub mod cloud_shadows;
 pub mod components;
 pub mod effects;
 mod environment;
@@ -77,6 +79,9 @@ use engine_assets::{AssetAppExt, AssetPlugin, AssetServer, Assets, Handle};
 use engine_core::prelude::*;
 use serde_json::json;
 
+pub use cloud_shadows::{
+    CLOUD_SHADOW_FORMAT, CloudShadowArea, CloudShadowRequest, CloudShadowTarget,
+};
 pub use components::{
     AmbientLight, BoxFace, Camera, DirectionalLight, Exposure, FogShape, FogVolume, MaterialRef,
     MaxDrawDistance, MeshRef, MeshRenderer, NoVirtualGeometry, PointLight, Projection,
