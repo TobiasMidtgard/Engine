@@ -9,6 +9,8 @@
 //! * Embers move with `WorldShift::point` and pick up the old frame's motion with
 //!   `WorldShift::velocity_at`; hot landings waiting for the step move too.
 //! * Placed fuel patches, light targets and queued API commands move with the world.
+//! * A `FlameShape`'s offset (world axes) turns with the world, so a canopy's flames stay on
+//!   the canopy of a tree that was tilted with it.
 //! * Nothing else needs it: objects, the demo and the renderer read positions from transforms or
 //!   the field every time.
 
@@ -17,6 +19,7 @@ use engine_world::{SimulationFocus, WorldShift};
 
 use crate::embers::Embers;
 use crate::field::FireField;
+use crate::objects::FlameShape;
 use crate::sim::{FireCommand, FireCommands, FireLights, FirePatches};
 
 /// All shifts written this frame, combined (they apply in order).
@@ -24,7 +27,9 @@ fn combined(shifts: &mut MessageReader<WorldShift>) -> Option<WorldShift> {
     shifts.read().copied().reduce(|acc, next| acc.then(&next))
 }
 
-/// Move the fire field, embers, placed patches, light targets and queued commands.
+/// Move the fire field, embers, placed patches, light targets and queued commands, and turn
+/// flame offsets.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn shift_fire(
     mut shifts: MessageReader<WorldShift>,
     mut field: ResMut<FireField>,
@@ -33,6 +38,7 @@ pub(crate) fn shift_fire(
     mut lights: ResMut<FireLights>,
     mut queued: ResMut<FireCommands>,
     foci: Query<(&GlobalTransform, &SimulationFocus)>,
+    mut shapes: Query<&mut FlameShape>,
 ) {
     let Some(s) = combined(&mut shifts) else {
         return;
@@ -66,6 +72,12 @@ pub(crate) fn shift_fire(
             FireCommand::Clear => {}
         }
     }
+    for mut shape in &mut shapes {
+        let offset = s.direction(Vec3::from(shape.offset)).to_array();
+        if offset != shape.offset {
+            shape.offset = offset;
+        }
+    }
 }
 
 #[cfg(test)]
@@ -76,8 +88,8 @@ mod tests {
 
     use crate::field::CellState;
     use crate::{
-        Ember, Embers, FireCommand, FireCommands, FireField, FirePlugin, FuelKind, FuelPatch,
-        PatchShape,
+        Ember, Embers, FireCommand, FireCommands, FireField, FirePlugin, FlameShape, FuelKind,
+        FuelPatch, PatchShape,
     };
 
     /// Shifts to write in the next `WorldShiftSet::Write`, and the fire as it was right then
@@ -277,6 +289,39 @@ mod tests {
             "{} vs {v}",
             new.velocity
         );
+    }
+
+    #[test]
+    fn a_tilt_turns_flame_offsets() {
+        let mut app = app();
+        let canopy = app
+            .world
+            .spawn((
+                Transform::from_xyz(5.0, 0.0, 5.0),
+                FlameShape {
+                    radius: 2.0,
+                    height: 4.0,
+                    offset: [0.5, 2.0, 0.0],
+                },
+            ))
+            .id();
+        app.update();
+        let s = WorldShift {
+            rotation: DQuat::from_rotation_x(0.3) * DQuat::from_rotation_y(1.1),
+            translation: DVec3::new(40.0, -3.0, 12.0),
+            ..WorldShift::IDENTITY
+        };
+        shift(&mut app, s);
+        let offset = Vec3::from(app.world.get::<FlameShape>(canopy).unwrap().offset);
+        let want = s.direction(Vec3::new(0.5, 2.0, 0.0));
+        assert!((offset - want).length() < 1e-5, "{offset} vs {want}");
+        // A move alone leaves it be.
+        shift(
+            &mut app,
+            WorldShift::translate(DVec3::new(1000.3, 2.0, -500.7)),
+        );
+        let moved = Vec3::from(app.world.get::<FlameShape>(canopy).unwrap().offset);
+        assert_eq!(moved, offset);
     }
 
     #[test]

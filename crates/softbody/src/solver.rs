@@ -422,6 +422,27 @@ impl Sim {
         }
     }
 
+    /// A teleport: `frame` jumps to `pos`, `rot`, and every particle (with its history and
+    /// velocity) goes along rigidly, so nothing is dragged across the jump and torn. Snap the
+    /// other frames to their new poses afterwards.
+    pub fn carry(&mut self, frame: u16, pos: Vec3, rot: Quat) {
+        let f = self.frames[frame as usize];
+        let turn = (rot * f.to_rot.conjugate()).normalize();
+        let moved = |x: Vec3| pos + turn * (x - f.to_pos);
+        for v in self
+            .pos
+            .iter_mut()
+            .chain(self.step_start.iter_mut())
+            .chain(self.prev.iter_mut())
+        {
+            *v = moved(*v);
+        }
+        for v in &mut self.vel {
+            *v = turn * *v;
+        }
+        self.snap_frame(frame, pos, rot);
+    }
+
     /// Translate every particle (and its history) by `delta`, keeping velocities.
     pub fn translate(&mut self, delta: Vec3) {
         for v in self

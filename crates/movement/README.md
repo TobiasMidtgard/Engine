@@ -88,6 +88,10 @@ course zone.
 - **Grapple station** (behind the course): a pilot sprints at a 9 m tower, jumps, fires the
   hook at an anchor plate under its top edge, is reeled up the face, climbs over the edge,
   crosses the roof and drops off the back onto the pad.
+- **Freight station** (west of the grapple station): a box car shuttles along a short track
+  beside a loading platform. A pilot waits for it to pull out, sprints down the platform,
+  leaps onto the car's side, wall-runs along it, climbs onto the roof, rides it to the end of
+  the track and steps off.
 - **Duel ring**, three rounds on a loop (only while a camera is within
   `DuelDirector::watch_radius`, because slow motion is world-wide):
   1. *Blink*: an elite (speed 2.5) dash-strikes a level 1 player, who is hit before a human
@@ -146,13 +150,19 @@ collider yet), the character stands on the surface instead of falling through. A
 that reports the ground before the feet touch it (within its snap distance) doesn't leave a
 landing character hovering: it keeps coming down at its fall speed until the backend stops it.
 
+The demo's freight car is a kinematic body moved by `demo::Shuttle`. With a physics backend
+the shuttle sets the body's `Velocity` and the backend moves it (a kinematic body whose
+`Transform` is written each frame doesn't move on Rapier, so nothing standing on it would be
+carried); with only the stand-in it writes the `Transform`. After a teleport (a tour stop
+restarting the loop) it stands still for a step so the backend places it first.
+
 ### World shifts
 
 When the world re-anchors (floating origin, or a new planet's frame), `engine_world` moves
 root transforms and the shared character state. Movement moves its own world-space state in
 `WorldShiftSet::Apply`: velocities, facing, wall contacts, ledge targets, grapple anchors and
-aims, dash directions, knockback, the course runner's, climber's, grappler's and duel's anchor
-points, afterimage ghosts, and effects in
+aims, dash directions, knockback, the course runner's, climber's, grappler's, rider's and
+duel's anchor points, the freight car's track ends, afterimage ghosts, and effects in
 flight (blade trails, sparks and their floors, slashes, dust, lights), so a wall-run, a dash
 or a spray of sparks carries on through the shift.
 
@@ -170,7 +180,10 @@ sets the bake size). Nothing in it is third-party art.
   granite, raked gravel, cloth, lacquer).
 - `look::fighter`: armored sword fighters in four `Style`s (Pilot for the runner, Duelist for
   the player, Elite, Grunt), each a set of rigid armor parts with baked materials and a
-  katana. The demo puts one on every character it spawns.
+  katana. The duelist and elite are armored samurai (laced lames, pleated hakama); the pilot
+  and grunt are soldiers in plate carriers with magazine pouches and cargo trousers, the
+  pilot in a close helmet with a narrow visor and a respirator, the grunt in a gas mask
+  under a brimmed helmet. The demo puts one on every character it spawns.
 - `look::rig`: the fighters' skeleton and procedural animation. `Animator` turns the
   movement and combat state (on the character's own clock) into a pose: run cycles, slides,
   wall-runs, jumps, ledge hangs, grapple shots and reels, dashes, windups, strikes, blocks,
@@ -180,7 +193,10 @@ sets the bake size). Nothing in it is third-party art.
   when it bites, claws spread.
 - `look::course`: the course as a pilot training facility (precast wall panels with guide
   lights, a hazard-striped slide bar, a tower with a caged ladder, a start gantry, masts,
-  numbered signs, and the grapple station's nine-meter tower with its glowing anchor plate)
+  numbered signs, the grapple station's nine-meter tower with its glowing anchor plate, and
+  the freight station: ballast, concrete sleepers and rails between buffer stops, a loading
+  platform with granite coping and painted warnings, lamp posts, and a weathered box car on
+  two bogies with sprung wheelsets, sliding doors, ladders, buffers and couplings)
   and the ring as a samurai duel arena (board floor in a carved stone band,
   lanterns, a torii, banners, a drum, a roofed stand), plus the level column. It adds no
   colliders: the demo's boxes stay the same and every surface a character touches is drawn
@@ -201,7 +217,8 @@ API functions: `movement.status`, `movement.set_tempo` (`{"entity": "Player", "l
 (`{"round": "Blink" | "Focus" | "Pack" | null}`: restart the duel on that round and keep
 replaying it, or `null` to go back to cycling; tour stops use it to catch a chosen moment),
 `movement.climber` (restart the ledge climber's loop), `movement.grappler` (restart the
-grappler's loop).
+grappler's loop), `movement.rider` (restart the freight rider's loop with the car about to
+pull out).
 
 ## Tests
 
@@ -215,7 +232,9 @@ dash, characters on their own clocks in slow motion, the stand-in stepping aside
 other modules being moved);
 `tests/demo.rs` (each duel round plays out as described, the rounds cycle, the runner
 finishes the course, the climber catches the ledge, shimmies, climbs up and drops off, the
-grappler hooks the anchor plate, is reeled up, climbs over and lands on the pad, the duel
+grappler hooks the anchor plate, is reeled up, climbs over and lands on the pad, the rider
+leaps onto the moving freight car, wall-runs along it, climbs aboard and steps off at the end
+of the track, the duel
 waits without a camera, `movement.duel` restarts a chosen round,
 the demo's collider boxes stay the same under the new art);
 `tests/play.rs` (play mode puts a pilot in front of the camera and follows it, a locked-on

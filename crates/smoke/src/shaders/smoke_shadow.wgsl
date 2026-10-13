@@ -125,7 +125,7 @@ fn fs_shadow(in: VsOut) -> @location(0) vec4<f32> {
     let e_sky = luminance(sky_ambient(vec3<f32>(0.0, 1.0, 0.0)));
     let share = e_sun / max(e_sun + e_sky, 1e-6) * sun_visible(p);
     // Fog between the camera and the point isn't shaded by the smoke.
-    let fog_t = luminance(apply_fog(vec3(1.0), p) - apply_fog(vec3(0.0), p));
+    let fog_t = luminance(surface_fog(p).transmittance);
     let k = 1.0 - blocked * share * saturate(fog_t);
     return vec4<f32>(vec3<f32>(k), 1.0);
 }

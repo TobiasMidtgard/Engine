@@ -23,6 +23,9 @@ use crate::settings::SoftBodyConfig;
 use crate::solver::ColliderImpulse;
 use crate::{Cloth, HairGroom, Rope, RopeBridge, SoftVolume, cloth, hair, rope, volume};
 
+/// A frame turning further than this in one step (radians) has been teleported, not turned.
+const TELEPORT_TURN: f32 = 0.8;
+
 /// A spec that couldn't be built, and why. Removed (and the build retried) when the spec
 /// changes.
 #[derive(Component, Debug, Clone)]
@@ -801,25 +804,47 @@ fn step_one(entity: Entity, body: &mut SoftBodySim, ctx: &StepContext) {
     let origin = b.sim.origin;
 
     // Frames.
-    for (i, src) in b.frames.iter().enumerate() {
-        let pose = match *src {
-            FrameSource::World => None,
-            FrameSource::Entity(e) => {
-                world_transform(e, ctx.transforms).map(|t| (t.translation(), t.rotation()))
-            }
-            FrameSource::Bone { owner, bone } => world_transform(owner, ctx.transforms)
-                .zip(ctx.poses.get(owner).ok())
-                .and_then(|(t, p)| p.bone_world(&t, bone)),
-            FrameSource::Blend(blend) => world_transform(blend.owner, ctx.transforms)
-                .zip(ctx.poses.get(blend.owner).ok())
-                .and_then(|(t, p)| blend.world(&t, p)),
-        };
-        if let Some((p, r)) = pose {
-            let local = (p - origin).as_vec3();
-            if b.steps == 0 {
-                b.sim.snap_frame(i as u16, local, r);
+    let poses: Vec<Option<(Vec3, Quat)>> = b
+        .frames
+        .iter()
+        .map(|src| {
+            let pose = match *src {
+                FrameSource::World => None,
+                FrameSource::Entity(e) => {
+                    world_transform(e, ctx.transforms).map(|t| (t.translation(), t.rotation()))
+                }
+                FrameSource::Bone { owner, bone } => world_transform(owner, ctx.transforms)
+                    .zip(ctx.poses.get(owner).ok())
+                    .and_then(|(t, p)| p.bone_world(&t, bone)),
+                FrameSource::Blend(blend) => world_transform(blend.owner, ctx.transforms)
+                    .zip(ctx.poses.get(blend.owner).ok())
+                    .and_then(|(t, p)| blend.world(&t, p)),
+            };
+            pose.map(|(p, r)| ((p - origin).as_vec3(), r))
+        })
+        .collect();
+    // A frame that jumps further in one step than anything moves (a respawn, a boat sent
+    // back to its mooring) carries the whole body with it instead of dragging it across.
+    let jump = (5.0f32).max(2.0 * b.radius);
+    let teleport = (b.steps > 0)
+        .then(|| {
+            poses.iter().enumerate().find_map(|(i, pose)| {
+                let (p, r) = (*pose)?;
+                let f = &b.sim.frames[i];
+                ((p - f.to_pos).length() > jump || r.angle_between(f.to_rot) > TELEPORT_TURN)
+                    .then_some((i as u16, p, r))
+            })
+        })
+        .flatten();
+    if let Some((i, p, r)) = teleport {
+        b.sim.carry(i, p, r);
+    }
+    for (i, pose) in poses.iter().enumerate() {
+        if let Some((p, r)) = *pose {
+            if b.steps == 0 || teleport.is_some() {
+                b.sim.snap_frame(i as u16, p, r);
             } else {
-                b.sim.set_frame(i as u16, local, r);
+                b.sim.set_frame(i as u16, p, r);
             }
         }
     }

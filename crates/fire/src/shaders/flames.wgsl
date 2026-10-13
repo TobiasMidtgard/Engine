@@ -115,7 +115,11 @@ fn vs_flame(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) ->
     }
     // Ember: a short streak along its screen-space velocity (motion blur).
     let base = inst.pos_height.xyz;
-    let w = inst.shape.x;
+    // Its glowing core, meters across, drawn at least ~1.5 pixels wide (thinner, it would
+    // flicker in and out between pixels) and dimmed to match.
+    let core = inst.shape.x;
+    let pixels_per_m = frame.proj[1].y * 0.5 * frame.viewport.y / max(view_depth(base), 0.05);
+    let w = max(core, 1.5 / pixels_per_m);
     let cam_up = vec3<f32>(frame.view[0].y, frame.view[1].y, frame.view[2].y);
     let vel = inst.extra.xyz;
     let speed = length(vel);
@@ -126,12 +130,17 @@ fn vs_flame(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) ->
         if (length(vs) > 1e-3) { dir = normalize(vs); }
     }
     let side = normalize(cross(dir, normalize(-base)));
-    let len = w + speed * 0.025;
+    // How far it flies while the shutter is open.
+    let flown = speed * 0.025;
+    let len = w + flown;
     let p = base + side * (c.x * w) + dir * ((c.y - 0.5) * 2.0 * len);
     var out: VsOut;
     out.clip = frame.view_proj * vec4<f32>(p, 1.0);
     out.uv = c;
-    out.params = vec4<f32>(inst.shape.y, inst.shape.z, inst.shape.w, inst.extra.w);
+    // Its light spread over the streak: each point of it is lit only while the ember passes
+    // (core / (core + flown) of the exposure), and a widened ember fills only part of it.
+    let spread = core / w * core / (core + flown);
+    out.params = vec4<f32>(spread, inst.shape.z, inst.shape.w, inst.extra.w);
     out.size = vec2<f32>(w, len);
     out.rel = p;
     out.pixels_per_m = 0.0;
@@ -196,9 +205,13 @@ fn fs_flame(in: VsOut) -> @location(0) vec4<f32> {
         if (core < 0.01) { discard; }
         let heat = in.params.w;
         let flick = 0.75 + 0.25 * sin(t * 23.0 + seed * 40.0);
-        // Bright against the night, faint against a daylit sky.
-        let v = 40000.0 * heat * flick * core * frame.exposure.x;
-        let col = blackbody(1100.0 + 700.0 * heat) * 0.8 * (1.0 - exp(-v / 0.8));
+        // Glowing coal (cd/m²) spread over its streak: bright against the night, faint
+        // against a daylit sky.
+        let v = 40000.0 * heat * flick * core * intensity * frame.exposure.x;
+        // One right by the lens would be a blur out of focus: it fades out within a meter or so
+        // instead of glaring across the frame.
+        let near = smoothstep(0.4, 1.6, view_depth(in.rel));
+        let col = blackbody(1100.0 + 700.0 * heat) * 0.8 * (1.0 - exp(-v / 0.8)) * near;
         return vec4<f32>(col, 0.0);
     }
 
