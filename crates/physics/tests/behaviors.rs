@@ -837,6 +837,160 @@ fn light_bodies_float_heavy_ones_sink() {
     assert!(pos(&app, steel).y < -10.0, "steel should sink");
 }
 
+/// Water with a swell `amp` meters high running along +x, `len` meters from crest to crest;
+/// `clock` is the time in seconds.
+struct Swell {
+    amp: f64,
+    len: f64,
+    clock: Arc<std::sync::Mutex<f64>>,
+}
+
+impl WaterQuery for Swell {
+    fn sample(&self, p: DVec3) -> Option<WaterSample> {
+        let k = std::f64::consts::TAU / self.len;
+        let t = *self.clock.lock().unwrap();
+        Some(WaterSample {
+            surface_height: self.amp * (k * p.x - (9.81 * k).sqrt() * t).sin(),
+            depth: 20.0,
+            velocity: Vec3::ZERO,
+            normal: Vec3::Y,
+        })
+    }
+}
+
+fn floater(app: &mut App, at: DVec3, rotation: Quat, collider: Collider) -> Entity {
+    app.world
+        .spawn((
+            Transform::from_translation(at).with_rotation(rotation),
+            RigidBody::dynamic(),
+            collider,
+            Velocity::default(),
+        ))
+        .id()
+}
+
+#[test]
+fn floating_bodies_settle_the_way_real_ones_do() {
+    let mut app = app();
+    app.world.insert_resource(Water(Arc::new(Lake)));
+    // A 2.4 m log dropped in standing up lies down.
+    let log = floater(
+        &mut app,
+        DVec3::new(0.0, 0.5, 0.0),
+        Quat::from_rotation_z(0.05),
+        Collider::capsule(0.2, 1.0).with_density(600.0),
+    );
+    // A plank thrown in on its edge lands flat.
+    let plank = floater(
+        &mut app,
+        DVec3::new(5.0, 0.5, 0.0),
+        Quat::from_rotation_x(1.0),
+        Collider::cuboid(Vec3::new(1.0, 0.05, 0.3)).with_density(500.0),
+    );
+    // A cube of half-density wood rolls onto an edge, 45° over (floating flat is unstable
+    // for densities between 0.21 and 0.79 of the water's); at 0.9 it floats flat.
+    let light_cube = floater(
+        &mut app,
+        DVec3::new(10.0, 0.3, 0.0),
+        Quat::from_rotation_z(0.05),
+        Collider::cuboid(Vec3::splat(0.5)).with_density(500.0),
+    );
+    let heavy_cube = floater(
+        &mut app,
+        DVec3::new(15.0, 0.3, 0.0),
+        Quat::from_rotation_z(0.05),
+        Collider::cuboid(Vec3::splat(0.5)).with_density(900.0),
+    );
+    // A quarter-density ball floats with its center 0.347 radii above the water.
+    let ball = floater(
+        &mut app,
+        DVec3::new(20.0, 1.0, 0.0),
+        Quat::IDENTITY,
+        Collider::sphere(0.5).with_density(250.0),
+    );
+    app.update_n(600);
+    let up = |app: &App, e: Entity| app.world.get::<Transform>(e).unwrap().rotation * Vec3::Y;
+    let tilt = |app: &App, e: Entity| up(app, e).y.clamp(-1.0, 1.0).acos().to_degrees();
+    assert!(
+        up(&app, log).y.abs() < 0.1,
+        "log not lying down: {}",
+        up(&app, log)
+    );
+    assert!(
+        tilt(&app, plank) < 5.0,
+        "plank tilted {}°",
+        tilt(&app, plank)
+    );
+    assert!(
+        (tilt(&app, light_cube) - 45.0).abs() < 3.0,
+        "half-density cube at {}°",
+        tilt(&app, light_cube)
+    );
+    assert!(
+        tilt(&app, heavy_cube) < 3.0,
+        "0.9 cube at {}°",
+        tilt(&app, heavy_cube)
+    );
+    assert!(
+        (pos(&app, heavy_cube).y - (0.5 - 0.9)).abs() < 0.01,
+        "0.9 cube's center at {}",
+        pos(&app, heavy_cube).y
+    );
+    assert!(
+        (pos(&app, ball).y - 0.347 * 0.5).abs() < 0.01,
+        "ball's center at {}",
+        pos(&app, ball).y
+    );
+    for e in [log, plank, light_cube, heavy_cube, ball] {
+        let v = *app.world.get::<Velocity>(e).unwrap();
+        assert!(
+            v.linear.length() < 0.02 && v.angular.length() < 0.05,
+            "still moving: {v:?}"
+        );
+    }
+}
+
+#[test]
+fn barges_pitch_with_a_passing_swell() {
+    // A 4 m barge on a 30 cm swell 8 m long (slopes up to 13°) rides it bow up, bow down.
+    let pitch_range = |amp: f64| {
+        let mut app = app();
+        let clock = Arc::new(std::sync::Mutex::new(0.0));
+        app.world.insert_resource(Water(Arc::new(Swell {
+            amp,
+            len: 8.0,
+            clock: clock.clone(),
+        })));
+        let barge = floater(
+            &mut app,
+            DVec3::ZERO,
+            Quat::IDENTITY,
+            Collider::cuboid(Vec3::new(2.0, 0.4, 0.8)).with_density(400.0),
+        );
+        let (mut low, mut high) = (0.0f32, 0.0f32);
+        for step in 0..600 {
+            *clock.lock().unwrap() = step as f64 * DT;
+            app.update();
+            let bow = app.world.get::<Transform>(barge).unwrap().rotation * Vec3::X;
+            if step > 240 {
+                low = low.min(bow.y.asin().to_degrees());
+                high = high.max(bow.y.asin().to_degrees());
+            }
+        }
+        (low, high)
+    };
+    let (low, high) = pitch_range(0.3);
+    assert!(
+        low < -5.0 && high > 5.0,
+        "pitched only {low:.1}°..{high:.1}°"
+    );
+    let (low, high) = pitch_range(0.0);
+    assert!(
+        low > -0.5 && high < 0.5,
+        "pitched {low:.1}°..{high:.1}° in still water"
+    );
+}
+
 #[test]
 fn blasts_throw_nearby_bodies_away() {
     let mut app = app();
