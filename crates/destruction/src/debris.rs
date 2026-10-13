@@ -17,6 +17,7 @@ use engine_world::{ContactKind, Env, GroundContact, NoiseEvent, SurfaceMaterials
 
 use crate::assets::DestructionAssets;
 use crate::material::{DestructibleMaterial, DestructionMaterials};
+use crate::voxel::{VoxelState, rock_contact, rock_depth};
 use crate::{DebrisMode, DestructionSettings, DestructionStats};
 
 /// A piece of debris. Registered so tools and AI agents can see and tune it.
@@ -81,7 +82,32 @@ pub struct DebrisBody {
     pub sinking: bool,
     /// Normal speed of the most recent landing, m/s (read by impact fracture).
     pub last_impact: f32,
+    /// Whether it lands on voxel rock.
+    pub rock: RockContact,
 }
+
+/// Whether debris lands on voxel rock as on the ground.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum RockContact {
+    /// Not looked at yet: decided on its first step.
+    #[default]
+    Unknown,
+    /// Lands on rock.
+    Lands,
+    /// Started out buried in rock deeper than [`BURIED_M`]: lands on it once it has fallen
+    /// clear.
+    Buried,
+    /// Cut from the rock (a cave-in's boulders, a blast's rubble): passes through rock onto
+    /// the ground, so it doesn't catch on the rims of the hole it falls out of.
+    Ignores,
+}
+
+/// How deep debris may start out inside voxel rock and still land on it (a building piece
+/// resting on rock sits up to the ground tolerance in it), m.
+pub const BURIED_M: f32 = 0.15;
+/// How far rock pushes a point inside it up to its top; deeper, the point is inside a rock
+/// wall's side or under a ceiling, not on a floor, m.
+const ROCK_REACH_M: f32 = 0.6;
 
 impl DebrisBody {
     /// Box-shaped body of `mass_kg` with half extents `half`, touching the ground at `points`.
@@ -105,6 +131,7 @@ impl DebrisBody {
             still: 0.0,
             sinking: false,
             last_impact: 0.0,
+            rock: RockContact::Unknown,
         }
     }
 
@@ -174,6 +201,9 @@ pub struct DebrisSpawn {
     pub scale: Option<Vec3>,
     /// Spawn already lying still on the ground (see [`settle`]).
     pub resting: bool,
+    /// Cut from voxel rock (a cave-in's boulders, a blast's rubble): it passes through rock
+    /// (see [`RockContact::Ignores`]).
+    pub from_rock: bool,
 }
 
 impl Default for DebrisSpawn {
@@ -196,6 +226,7 @@ impl Default for DebrisSpawn {
             reuse: None,
             scale: None,
             resting: false,
+            from_rock: false,
         }
     }
 }
@@ -480,6 +511,9 @@ pub fn spawn_debris_system(
             body.velocity = item.velocity;
             body.angular = item.angular;
             body.asleep = item.resting;
+            if item.from_rock {
+                body.rock = RockContact::Ignores;
+            }
             e.insert(body);
         }
         if chip {
@@ -566,12 +600,16 @@ pub fn reduce_points(hull: &[Vec3], n: usize) -> Vec<Vec3> {
     out
 }
 
-/// The built-in debris solver: gravity, ground contacts with friction and restitution, sleep.
-/// Runs in `FixedUpdate` (`SimSet::Physics`), so it slows down with time dilation.
+/// The built-in debris solver: gravity, ground and voxel rock contacts with friction and
+/// restitution, sleep. Runs in `FixedUpdate` (`SimSet::Physics`), so it slows down with time
+/// dilation.
+#[allow(clippy::too_many_arguments)]
 pub fn simulate_debris_system(
     time: Res<Time>,
     env: Env,
     mut q: Query<(Entity, &mut Transform, &mut DebrisBody, &mut Debris)>,
+    volumes: Query<(&GlobalTransform, &VoxelState)>,
+    rock_changed: Query<(&GlobalTransform, &VoxelState), Changed<VoxelState>>,
     mut contacts: MessageWriter<GroundContact>,
     mut noise: MessageWriter<NoiseEvent>,
 ) {
@@ -579,11 +617,25 @@ pub fn simulate_debris_system(
     if dt <= 0.0 {
         return;
     }
+    let rock: Vec<(&GlobalTransform, &VoxelState)> = volumes.iter().collect();
+    // Rock dug or blasted: whatever rests on or by it looks again.
+    let changed: Vec<(DVec3, DVec3)> = rock_changed
+        .iter()
+        .map(|(gt, state)| state.world_bounds(gt, 1.0))
+        .collect();
     for (entity, mut t, mut body, mut debris) in &mut q {
         let (t, body) = (&mut *t, &mut *body);
         if body.sinking {
             t.translation -= env.up(t.translation).as_dvec3() * (0.35 * dt) as f64;
             continue;
+        }
+        if body.asleep
+            && changed
+                .iter()
+                .any(|(lo, hi)| t.translation.cmpge(*lo).all() && t.translation.cmple(*hi).all())
+        {
+            body.asleep = false;
+            body.still = 0.0;
         }
         if body.asleep {
             continue;
@@ -612,6 +664,24 @@ pub fn simulate_debris_system(
         let scale = t.scale;
         let rot = t.rotation;
         let center = t.translation;
+        if !rock.is_empty() && matches!(body.rock, RockContact::Unknown | RockContact::Buried) {
+            let buried = body
+                .points
+                .iter()
+                .map(|p| rock_depth(&rock, center + (rot * (*p * scale)).as_dvec3()))
+                .fold(0.0, f32::max);
+            let limit = if body.rock == RockContact::Unknown {
+                BURIED_M
+            } else {
+                0.0
+            };
+            body.rock = if buried <= limit {
+                RockContact::Lands
+            } else {
+                RockContact::Buried
+            };
+        }
+        let on_rock = body.rock == RockContact::Lands && !rock.is_empty();
         // Collect penetrating points.
         let mut touching: [(Vec3, f32); 16] = [(Vec3::ZERO, 0.0); 16];
         let mut count = 0;
@@ -619,7 +689,10 @@ pub fn simulate_debris_system(
         for p in &body.points {
             let r = rot * (*p * scale);
             let wp = center + r.as_dvec3();
-            let h = env.ground_query.height(wp).unwrap_or(ground.height);
+            let mut h = env.ground_query.height(wp).unwrap_or(ground.height);
+            if on_rock && let Some(r) = rock_contact(&rock, wp, ROCK_REACH_M) {
+                h = h.max(r);
+            }
             let depth = ((h - wp.y) as f32) * n.y.max(0.2);
             if depth > 0.0 && count < touching.len() {
                 touching[count] = (r, depth);

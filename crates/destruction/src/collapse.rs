@@ -180,6 +180,7 @@ pub fn structure_system(
             reuse: Some(e),
             scale: Some(scale),
             resting: false,
+            from_rock: false,
         });
         fallen.push((e, translation, mass));
         dust_darkness = props.dust_darkness;
@@ -325,6 +326,7 @@ pub fn voxel_support_system(
                     reuse: None,
                     scale: None,
                     resting: false,
+                    from_rock: true,
                 });
             }
             let at = affine

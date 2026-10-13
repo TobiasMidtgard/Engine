@@ -507,6 +507,14 @@ fn pieces_stand_on_voxel_rock_until_it_is_dug_out_from_under_them() {
         app.world.get::<StructuralPiece>(slab).is_none(),
         "the slab fell into the hole"
     );
+    // It comes to rest in the hole, on the rock (not through it, on the flat ground under it).
+    run_secs(&mut app, 4.0);
+    let y = app.world.get::<Transform>(slab).unwrap().translation.y;
+    let body = app.world.get::<debris::DebrisBody>(slab).unwrap();
+    assert!(
+        y > 0.45 && y < 2.0 && body.velocity.length() < 0.5,
+        "the slab lies in the hole at y {y:.2}: {body:?}"
+    );
 }
 
 #[test]

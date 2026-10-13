@@ -13,8 +13,9 @@
 //!   shingle roof and a deck reaching out from the gable. Then the cabin shows its support
 //!   colors: the deck's second row orange at the edge of support, and the ghost of a third row
 //!   red because nothing could hold it;
-//! - on the leveled terrace a second builder lays a stone floor on the bare rock (blue: the
-//!   rock is ground), stands board walls against the cut bank and puts a roof over them.
+//! - on the leveled terrace a second builder lays a stone floor on the bare rock, stands board
+//!   walls at its ends, roofs them and walls in the back against the cut bank; then the
+//!   shelter shows its support colors, the floor blue because the rock is ground.
 //!
 //! Then the hill, the hut and the cabin are rebuilt and it starts again.
 
@@ -55,6 +56,8 @@ pub const TERRACE: [f64; 3] = [8.8, TERRACE_Y, 2.1];
 /// When the terrace's builder starts (the hoe is done at 17.8 s), and the seconds per piece.
 const TERRACE_START: f32 = 18.3;
 const TERRACE_STEP: f32 = 0.45;
+/// When the finished shelter shows its support colors (its floor blue on the rock).
+const TERRACE_SUPPORT_AT: f32 = 22.0;
 
 const TUNNEL_DIGS: u32 = 15;
 const CHAMBER_DIGS: u32 = 15;
@@ -199,8 +202,8 @@ enum Step {
     /// A site's builder picks a piece and aims; then places it.
     Aim(Site, usize),
     Place(Site),
-    /// The finished cabin shows its support colors.
-    ShowSupport,
+    /// A site's finished building shows its support colors.
+    ShowSupport(Site),
     Reset,
 }
 
@@ -233,7 +236,8 @@ fn timeline() -> Vec<(f32, Step)> {
             }
         }
     }
-    t.push((YARD_SUPPORT_AT, Step::ShowSupport));
+    t.push((YARD_SUPPORT_AT, Step::ShowSupport(Site::Yard)));
+    t.push((TERRACE_SUPPORT_AT, Step::ShowSupport(Site::Terrace)));
     t.push((18.5, Step::KnockPost(0)));
     t.push((19.6, Step::KnockPost(1)));
     t.push((HILL_CYCLE_SECS - 0.01, Step::Reset));
@@ -552,7 +556,7 @@ pub fn spawn_voxel_hill(commands: &mut Commands, origin: DVec3) {
                 .spawn((
                     Name::new(site.builder_name()),
                     Transform::from_translation(at),
-                    idle_builder(site, at),
+                    idle_builder(at),
                 ))
                 .id(),
         )
@@ -568,13 +572,12 @@ pub fn spawn_voxel_hill(commands: &mut Commands, origin: DVec3) {
     ));
 }
 
-/// A site's builder between loops: in build mode, aiming at the sky (no ghost). The yard's
-/// pieces keep their own colors until the cabin is done; the terrace's show their support
-/// from the first slab, blue on the rock.
-fn idle_builder(site: Site, at: DVec3) -> Builder {
+/// A site's builder between loops: in build mode, aiming at the sky (no ghost), the pieces in
+/// their own colors until the building is done.
+fn idle_builder(at: DVec3) -> Builder {
     let mut b = Builder {
         reach_m: 6.0,
-        show_support: site == Site::Terrace,
+        show_support: false,
         ..Builder::default()
     };
     // From high above, so the terrace's builder is not inside the hill before it is dug.
@@ -786,9 +789,9 @@ fn run_step(world: &mut World, demo: &mut HillDemo, step: Step) {
                 builder.aim_at(at + step.from, at + step.target);
             }
         }
-        Step::ShowSupport => {
+        Step::ShowSupport(site) => {
             if let Some(mut builder) =
-                demo.builders[Site::Yard as usize].and_then(|b| world.get_mut::<Builder>(b))
+                demo.builders[site as usize].and_then(|b| world.get_mut::<Builder>(b))
             {
                 builder.show_support = true;
             }
@@ -816,7 +819,7 @@ fn run_step(world: &mut World, demo: &mut HillDemo, step: Step) {
                     world.despawn(e);
                 }
                 if let Some(mut builder) = world.get_mut::<Builder>(b) {
-                    *builder = idle_builder(site, o + site.offset());
+                    *builder = idle_builder(o + site.offset());
                 }
             }
             if let Some(h) = demo.hill

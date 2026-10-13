@@ -57,8 +57,10 @@ fracture and debris.
   lines; glass and metal break clean.
 - **Debris** uses the physics module when one is installed (physics-contract bodies) and a
   built-in solver otherwise: oriented boxes with friction, bounce and sleep that land on the
-  ground (not yet on each other). Chips and dust are cheap; the oldest debris sinks away past
-  the budget (`max_debris`, `max_chips`).
+  ground and on voxel rock (not yet on each other), and wake when the rock under them is dug.
+  Boulders cut from the rock itself (a cave-in, a blast's rubble) pass through rock onto the
+  ground so they don't catch on the rim of the hole they fall out of. Chips and dust are
+  cheap; the oldest debris sinks away past the budget (`max_debris`, `max_chips`).
 
 What this module does not do: the big terrain heightfield belongs to the planets and terrain
 module. Voxel volumes here are local destructible rock (cliffs, caves, arches) placed on it.
@@ -187,5 +189,5 @@ ends, a shingle roof and the back walls against the cut bank, open toward the va
 - Breach a reinforced wall with a charge; shoot holes in a wooden barricade; dig and collapse a
   voxel cliff. **Done** (tests above and the showcase).
 
-Next: debris resting on voxel rock and on other debris without a physics module (with one,
-large debris already lands on the rock's colliders), gable and triangle pieces.
+Next: debris resting on other debris without a physics module, cave-in boulders resting on
+rock ledges (they need side contacts, not just floors), gable and triangle pieces.
