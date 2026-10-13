@@ -73,6 +73,8 @@ pub struct Library {
     pub houses: Vec<HouseHandles>,
     pub lamp: LampHandles,
     pub props: Props,
+    /// The spaceport's 600 m tower.
+    pub tower: crate::tower::TowerKit,
 }
 
 impl Library {
@@ -88,6 +90,8 @@ pub fn build_library(
 ) -> Library {
     // Rock textures, boulders and the cliffs build on other threads meanwhile.
     let rock_job = crate::rocks::start_kit();
+    // So does the tower.
+    let tower_job = crate::tower::start();
     let white = |r: f32| StandardMaterial::hex(0xffffff).with_roughness(r);
     let (detail, detail_normal) = meshgen::ground_detail(512);
     let mut terrain = white(0.95)
@@ -215,6 +219,7 @@ pub fn build_library(
         houses,
         lamp,
         props,
+        tower: tower_job.finish(meshes, materials, images),
     }
 }
 
