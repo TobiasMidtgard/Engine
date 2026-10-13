@@ -700,32 +700,27 @@ fn elevated(parts: &mut Parts, p: Vec3, lens: Surface) {
     l.cylinder(p + Vec3::Y * 0.32, p + Vec3::Y * 0.42, 0.08, 0.07, 10, true);
 }
 
-/// A light that shows `front` toward `face` and `back` the other way (threshold / end).
+/// A light that shows `front` toward `face` and `back` the other way (threshold / end):
+/// frangible stem on a yellow base can, a drum-shaped head tipped up 3° with a domed lens in
+/// each lit end.
 fn directional(parts: &mut Parts, p: Vec3, face: Vec3, front: Surface, back: Option<Surface>) {
     let c = parts.get(Surface::Painted);
     c.color(hex(0xd8a40a));
-    c.cylinder(p, p + Vec3::Y * 0.12, 0.12, 0.12, 10, true);
-    let rot = buildings::facing_z(face);
-    let body = p + Vec3::Y * 0.28;
-    let g = parts.get(Surface::Painted);
-    g.color(gray(0.2));
-    g.chamfer_box(body, Vec3::new(0.16, 0.1, 0.1), 0.02, rot);
-    let side = Vec3::new(-face.z, 0.0, face.x);
-    for (dir, s) in [(face, Some(front)), (-face, back)] {
+    c.cylinder(p, p + Vec3::Y * 0.12, 0.12, 0.12, 14, true);
+    let g = parts.get(Surface::Galvanized);
+    g.color(Vec4::ONE);
+    g.cylinder(p + Vec3::Y * 0.12, p + Vec3::Y * 0.22, 0.03, 0.03, 8, false);
+    let center = p + Vec3::Y * 0.3;
+    let axis = (face + Vec3::Y * 0.05).normalize();
+    let (rear, front_end) = (center - axis * 0.1, center + axis * 0.1);
+    let h = parts.get(Surface::Painted);
+    h.color(gray(0.2));
+    h.cylinder(rear, front_end, 0.1, 0.1, 16, true);
+    for (end, dir, s) in [(front_end, axis, Some(front)), (rear, -axis, back)] {
         let Some(s) = s else { continue };
         let l = parts.get(s);
         l.color(Vec4::ONE);
-        let c = body + dir * 0.102;
-        l.quad_n(
-            [
-                c - side * 0.13 - Vec3::Y * 0.07,
-                c + side * 0.13 - Vec3::Y * 0.07,
-                c + side * 0.13 + Vec3::Y * 0.07,
-                c - side * 0.13 + Vec3::Y * 0.07,
-            ],
-            [Vec2::ZERO, Vec2::X, Vec2::ONE, Vec2::Y],
-            dir,
-        );
+        l.cylinder(end, end + dir * 0.02, 0.085, 0.06, 16, true);
     }
 }
 

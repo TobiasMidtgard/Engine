@@ -99,6 +99,9 @@ pub struct Autopilot {
     /// Altitude when the autopilot was engaged (runway height), m.
     #[serde(skip)]
     pub start_altitude: Option<f64>,
+    /// Integrator for holding a spot (spacecraft): sideways error over time, m·s.
+    #[serde(skip)]
+    pub hold_integral: Vec3,
 }
 
 impl Autopilot {
@@ -275,7 +278,16 @@ pub fn autopilot_system(
                 }
                 AutopilotMode::Hold { position } => {
                     if let Some(mut ship) = ship {
-                        hold(&mut controls, forces, &mut ship, *position, up, 15.0);
+                        hold(
+                            &mut controls,
+                            forces,
+                            &mut ship,
+                            &mut ap.hold_integral,
+                            *position,
+                            up,
+                            15.0,
+                            dt,
+                        );
                     }
                 }
                 AutopilotMode::Hop {
@@ -880,24 +892,37 @@ fn ascend(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn hold(
     c: &mut VehicleControls,
     forces: &VehicleForces,
     ship: &mut Spacecraft,
+    integral: &mut Vec3,
     target: DVec3,
     up: Vec3,
     max_speed: f32,
+    dt: f32,
 ) {
     let f = &forces.frame;
     ship.assist.mode = AssistMode::Hover;
     let err = (target - f.com).as_vec3();
-    let v_want = (err * 0.4).clamp_length_max(max_speed);
-    let dv = f.rotation.inverse() * (v_want - f.linear);
-    c.strafe = (dv.x * 0.3).clamp(-1.0, 1.0);
-    c.lift = (dv.y * 0.3).clamp(-1.0, 1.0);
-    let fwd = -dv.z;
-    c.throttle = (fwd * 0.3).clamp(0.0, 1.0);
-    c.brake = (-fwd * 0.3).clamp(0.0, 1.0);
+    // Integrate the sideways error, so a steady wind can't hold the ship off its spot.
+    let sideways = err - up * err.dot(up);
+    *integral = (*integral + sideways * dt).clamp_length_max(60.0);
+    let v_want = (err * 0.4 + *integral * 0.05).clamp_length_max(max_speed);
+    // Close the velocity gap in about 0.8 s with whatever thrust each direction has.
+    let accel = f.rotation.inverse() * (v_want - f.linear) / 0.8;
+    let cap = crate::ship::axis_capacity(&ship.thrusters);
+    let input = |a: f32, pos: usize| {
+        let most = if a >= 0.0 { cap[pos] } else { cap[pos + 1] };
+        (a * f.mass / most.max(1.0)).clamp(-1.0, 1.0)
+    };
+    c.strafe = input(accel.x, 0);
+    c.lift = input(accel.y, 2);
+    // + backward (brake), − forward (throttle).
+    let back = input(accel.z, 4);
+    c.throttle = (-back).max(0.0);
+    c.brake = back.max(0.0);
     // Keep level, nose where it points.
     let nose = (f.forward() - up * f.forward().dot(up)).normalize_or_zero();
     let (p, y, r) = point_at(forces, nose, up, ship.assist.max_rate_deg_s, 1.0);
@@ -921,6 +946,7 @@ fn hop(
     up: Vec3,
 ) {
     let f = &forces.frame;
+    let dt = f.dt;
     let on_ground = wheels.is_some_and(|w| w.grounded() > 0);
     if ap.phase.is_empty() && ap.timer < 0.1 {
         // Wheel contacts aren't known until the wheels have run once.
@@ -935,6 +961,10 @@ fn hop(
         }
     });
     let above = (f.com - pad).dot(up.as_dvec3());
+    // Where the center of mass sits with the ship's origin on the pad, so it always comes
+    // back down where it stood.
+    let lean = f.com - f.position;
+    let spot = pad + lean - up.as_dvec3() * lean.dot(up.as_dvec3());
     if ap.phase.is_empty() {
         ap.set_phase(if on_ground { "on the pad" } else { "hover" });
     }
@@ -956,8 +986,8 @@ fn hop(
             }
         }
         "lift off" | "hover" => {
-            let target = pad + (up * (height + rest_height as f32)).as_dvec3();
-            hold(c, forces, ship, target, up, 12.0);
+            let target = spot + (up * (height + rest_height as f32)).as_dvec3();
+            hold(c, forces, ship, &mut ap.hold_integral, target, up, 12.0, dt);
             if ap.phase == "lift off" && (above - rest_height) > (height * 0.8) as f64 {
                 ap.set_phase("hover");
             }
@@ -966,8 +996,17 @@ fn hop(
             }
         }
         "landing" => {
-            let over_pad = pad + up.as_dvec3() * above;
-            hold(c, forces, ship, over_pad, up, 12.0);
+            let over_pad = spot + up.as_dvec3() * above;
+            hold(
+                c,
+                forces,
+                ship,
+                &mut ap.hold_integral,
+                over_pad,
+                up,
+                12.0,
+                dt,
+            );
             // Come down fast high up, gently near the pad.
             let h = (above - rest_height) as f32;
             let sink = (h * 0.35).clamp(0.6, 8.0);
