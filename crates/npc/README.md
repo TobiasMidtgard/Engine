@@ -53,7 +53,11 @@ skittishness and howling.
 on screen: gait, crouching in cover, the raised weapon of an attack's telegraph (glowing for a
 heavy guard breaker), blocks, parry flashes (the blade glints white, the shield lights in a
 pale tint of the team color), dodges, staggers, hit flashes (struck plates go a pale tint of
-the team color), falling when downed, muzzle flashes, a rank crest in the skill color and an alert light. Animals graze
+the team color), falling when downed, muzzle flashes, a rank crest in the skill color and an
+alert light. Fighters plant their feet (a planted foot keeps its spot while the body moves over
+it; a test fails if a grounded foot slides), stride longer as they speed up, shuffle and
+side-step on guard, coil onto the rear foot in a telegraph and drive onto the front foot in the
+swing, brace into blocks, hop wide in a dodge and stumble back when staggered. Animals graze
 head-down, flag their tails when alarmed, lie down, gallop, hop, creep and flap. With
 `NpcSettings::show_intent`, rings and lines on the ground show where each NPC is going and why
 (blue cover, orange flank, purple high ground, grey fall back, yellow search).
