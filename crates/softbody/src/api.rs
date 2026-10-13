@@ -248,6 +248,24 @@ pub fn register(app: &mut App) {
         },
     )
     .register_api(
+        "softbody.unveil",
+        "Start every unveiling over: a fresh sheet hanging high on the crane, lowered over the statue in a few seconds and lifted off again later. Returns how many.",
+        "{}",
+        |world, _| {
+            use crate::demo::{DemoClock, DemoMotion};
+            let mut q = world.query::<(&mut crate::Cloth, &DemoMotion, &mut DemoClock)>();
+            let mut n = 0;
+            for (mut cloth, motion, mut clock) in q.iter_mut(world) {
+                if matches!(motion, DemoMotion::Hoist { .. }) {
+                    clock.0 = 0.0;
+                    cloth.set_changed();
+                    n += 1;
+                }
+            }
+            Ok(json!({ "sheets": n }))
+        },
+    )
+    .register_api(
         "softbody.stats",
         "Soft-body totals: bodies, particles, frozen bodies, last step time (ms).",
         "{}",

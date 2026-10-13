@@ -279,6 +279,95 @@ fn human_walk(u: f32, stride: f32, p: &mut [BonePose]) {
 }
 
 // ---------------------------------------------------------------------------------------
+// The statue
+
+/// The crown of the mannequin's head in its head bone's bind frame: where a cover hung over
+/// the head rests.
+const CROWN: Vec3 = Vec3::new(0.0, 1.838, 0.012);
+
+/// A standing orator in marble, written into a humanoid pose: weight on the right leg, the
+/// left knee eased forward on a raised heel, hips and shoulders tilted against each other,
+/// the right arm raised ahead in address and the head turned after it, the left forearm
+/// held forward. Returns the crown of the head (model space).
+pub fn statue_pose(p: &mut [BonePose]) -> Vec3 {
+    // The standing hip rides up and the pelvis sways over the standing foot.
+    let pelvis_rot =
+        Quat::from_rotation_y(-0.08) * Quat::from_rotation_z(0.07) * Quat::from_rotation_x(-0.03);
+    let sway = 0.035;
+    let reach = 0.995 * (Human::THIGH + Human::SHIN);
+    let stand = Vec3::new(0.075, Human::ANKLE_HEIGHT, 0.01);
+    let hip_off = pelvis_rot * (body::side_v(Human::HIP, 1.0) - Human::PELVIS);
+    let (dx, dz) = (stand.x - (sway + hip_off.x), stand.z - hip_off.z);
+    let flat = (reach * reach - dx * dx - dz * dz).max(0.0).sqrt();
+    let pelvis = Vec3::new(sway, stand.y + flat - hip_off.y, 0.0);
+    // The shoulders tilt against the hips and turn the right one forward, after the arm.
+    let spine_rot = Quat::from_rotation_z(-0.03) * Quat::from_rotation_y(0.04);
+    let chest_rot =
+        Quat::from_rotation_y(0.12) * Quat::from_rotation_z(-0.08) * Quat::from_rotation_x(-0.02);
+    let neck_rot = Quat::from_rotation_y(-0.05) * Quat::from_rotation_z(0.03);
+    let head_rot =
+        Quat::from_rotation_y(-0.3) * Quat::from_rotation_x(0.06) * Quat::from_rotation_z(0.04);
+    let spine = pelvis + pelvis_rot * (Human::SPINE - Human::PELVIS);
+    let chest = spine + spine_rot * (Human::CHEST - Human::SPINE);
+    let neck = chest + chest_rot * (Human::NECK - Human::CHEST);
+    let head = neck + neck_rot * (Human::HEAD - Human::NECK);
+    set(p, Human::PELVIS_I, pelvis, pelvis_rot);
+    set(p, Human::SPINE_I, spine, spine_rot);
+    set(p, Human::CHEST_I, chest, chest_rot);
+    set(p, Human::NECK_I, neck, neck_rot);
+    set(p, Human::HEAD_I, head, head_rot);
+    // Arms: upper arm and forearm directions (model space).
+    for (side, arm, upper, fore) in [
+        (
+            -1.0f32,
+            Human::ARM_L,
+            Vec3::new(-0.16, -0.97, 0.06),
+            Vec3::new(-0.08, -0.55, -0.83),
+        ),
+        (
+            1.0,
+            Human::ARM_R,
+            Vec3::new(0.22, 0.32, -0.92),
+            Vec3::new(0.12, 0.62, -0.78),
+        ),
+    ] {
+        let shoulder = chest + chest_rot * (body::side_v(Human::SHOULDER, side) - Human::CHEST);
+        let elbow = shoulder + upper.normalize() * Human::UPPER_ARM;
+        let wrist = elbow + fore.normalize() * Human::FOREARM;
+        set(p, arm, shoulder, aim(shoulder, elbow));
+        set(p, arm + 1, elbow, aim(elbow, wrist));
+        set(p, arm + 2, wrist, aim(elbow, wrist));
+    }
+    // Legs: the standing one nearly straight, the free one forward and out on the ball of
+    // its foot, toes turned out.
+    let pitch = -0.3f32;
+    let (sin, cos) = pitch.sin_cos();
+    let free_y = Human::ANKLE_HEIGHT * cos - Human::BALL_FORWARD * sin;
+    for (side, leg, target, foot) in [
+        (
+            -1.0f32,
+            Human::LEG_L,
+            Vec3::new(-0.15, free_y, -0.15),
+            Quat::from_rotation_y(0.2) * Quat::from_rotation_x(pitch),
+        ),
+        (1.0, Human::LEG_R, stand, Quat::from_rotation_y(-0.12)),
+    ] {
+        let hip = pelvis + pelvis_rot * (body::side_v(Human::HIP, side) - Human::PELVIS);
+        let (knee, ankle) = two_bone_ik(
+            hip,
+            target,
+            Human::THIGH,
+            Human::SHIN,
+            Vec3::new(side * 0.1, 0.0, -1.0),
+        );
+        set(p, leg, hip, aim(hip, knee));
+        set(p, leg + 1, knee, aim(knee, ankle));
+        set(p, leg + 2, ankle, foot);
+    }
+    head + head_rot * (CROWN - Human::HEAD)
+}
+
+// ---------------------------------------------------------------------------------------
 // The trot
 
 const DOG_STANCE: f32 = 0.42;

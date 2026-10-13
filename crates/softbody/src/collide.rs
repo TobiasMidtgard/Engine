@@ -6,10 +6,14 @@
 //! the step to where it is at the end, substep by substep, so a body that dashes at 30 m/s
 //! sweeps through the cape instead of teleporting past it.
 
+use std::sync::Arc;
+
 use engine_core::math::{Quat, Vec3};
 
+use crate::field::{DistanceField, HeightGrid};
+
 /// Shape of a [`LocalCollider`], in the collider's own space (meters).
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone)]
 pub enum LocalShape {
     Sphere {
         radius: f32,
@@ -28,6 +32,10 @@ pub enum LocalShape {
         half_height: f32,
         radius: f32,
     },
+    /// A triangle mesh baked into a distance grid.
+    Field(Arc<DistanceField>),
+    /// A terrain height grid.
+    Height(Arc<HeightGrid>),
 }
 
 impl LocalShape {
@@ -44,11 +52,13 @@ impl LocalShape {
                 half_height,
                 radius,
             } => (half_height * half_height + radius * radius).sqrt(),
+            LocalShape::Field(ref f) => f.bounding_radius(),
+            LocalShape::Height(ref g) => g.bounding_radius(),
         }
     }
 
     /// Signed distance from `p` (shape space) to the surface, and the outward normal there.
-    /// Negative inside.
+    /// Negative inside. Grids answer infinity where they know nothing (far from the surface).
     pub fn sdf(&self, p: Vec3) -> (f32, Vec3) {
         match *self {
             LocalShape::Sphere { radius } => {
@@ -107,12 +117,14 @@ impl LocalShape {
                     (dy, up)
                 }
             }
+            LocalShape::Field(ref f) => f.sample(p).unwrap_or((f32::INFINITY, Vec3::ZERO)),
+            LocalShape::Height(ref g) => g.sample(p).unwrap_or((f32::INFINITY, Vec3::ZERO)),
         }
     }
 }
 
 /// One collider in a soft body's coordinates for one fixed step.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone)]
 pub struct LocalCollider {
     pub shape: LocalShape,
     /// Pose at the start of the step (body-local position, world rotation).
@@ -152,10 +164,10 @@ impl LocalCollider {
     }
 }
 
-/// A collider posed at one instant of a substep, ready for particle tests.
+/// A collider posed at one instant of a substep, ready for particle tests against its
+/// [`LocalCollider`]'s shape.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct PosedCollider {
-    pub shape: LocalShape,
     pub pos: Vec3,
     pub rot: Quat,
     pub inv_rot: Quat,
@@ -179,7 +191,6 @@ impl PosedCollider {
         }
         let r = c.shape.bounding_radius() + margin;
         Self {
-            shape: c.shape,
             pos,
             rot,
             inv_rot: rot.conjugate(),
@@ -194,15 +205,15 @@ impl PosedCollider {
         }
     }
 
-    /// Signed distance and world normal at body-local point `p`, or `None` when the point is
-    /// clearly outside the bounding sphere.
+    /// Signed distance from `shape` posed here and world normal at body-local point `p`, or
+    /// `None` when the point is clearly outside the bounding sphere.
     #[inline]
-    pub(crate) fn query(&self, p: Vec3) -> Option<(f32, Vec3)> {
+    pub(crate) fn query(&self, shape: &LocalShape, p: Vec3) -> Option<(f32, Vec3)> {
         let rel = p - self.pos;
         if rel.length_squared() > self.bound2 {
             return None;
         }
-        let (d, n) = self.shape.sdf(self.inv_rot * rel);
+        let (d, n) = shape.sdf(self.inv_rot * rel);
         Some((d, self.rot * n))
     }
 
@@ -217,7 +228,7 @@ impl PosedCollider {
 mod tests {
     use super::*;
 
-    fn check_outward(shape: LocalShape, p: Vec3, expect_d: f32, expect_n: Vec3) {
+    fn check_outward(shape: &LocalShape, p: Vec3, expect_d: f32, expect_n: Vec3) {
         let (d, n) = shape.sdf(p);
         assert!(
             (d - expect_d).abs() < 1e-4,
@@ -232,22 +243,22 @@ mod tests {
     #[test]
     fn signed_distances_are_correct() {
         let s = LocalShape::Sphere { radius: 1.0 };
-        check_outward(s, Vec3::new(0.0, 2.0, 0.0), 1.0, Vec3::Y);
-        check_outward(s, Vec3::new(0.5, 0.0, 0.0), -0.5, Vec3::X);
+        check_outward(&s, Vec3::new(0.0, 2.0, 0.0), 1.0, Vec3::Y);
+        check_outward(&s, Vec3::new(0.5, 0.0, 0.0), -0.5, Vec3::X);
 
         let c = LocalShape::Capsule {
             half_height: 1.0,
             radius: 0.5,
         };
-        check_outward(c, Vec3::new(1.0, 0.5, 0.0), 0.5, Vec3::X);
-        check_outward(c, Vec3::new(0.0, 2.0, 0.0), 0.5, Vec3::Y);
+        check_outward(&c, Vec3::new(1.0, 0.5, 0.0), 0.5, Vec3::X);
+        check_outward(&c, Vec3::new(0.0, 2.0, 0.0), 0.5, Vec3::Y);
 
         let b = LocalShape::Cuboid {
             half: Vec3::new(1.0, 2.0, 3.0),
         };
-        check_outward(b, Vec3::new(0.0, 3.0, 0.0), 1.0, Vec3::Y);
-        check_outward(b, Vec3::new(0.9, 0.0, 0.0), -0.1, Vec3::X);
-        check_outward(b, Vec3::new(0.0, 0.0, -2.5), -0.5, Vec3::NEG_Z);
+        check_outward(&b, Vec3::new(0.0, 3.0, 0.0), 1.0, Vec3::Y);
+        check_outward(&b, Vec3::new(0.9, 0.0, 0.0), -0.1, Vec3::X);
+        check_outward(&b, Vec3::new(0.0, 0.0, -2.5), -0.5, Vec3::NEG_Z);
         let (d, _) = b.sdf(Vec3::new(2.0, 3.0, 0.0));
         assert!((d - 2f32.sqrt()).abs() < 1e-4);
 
@@ -255,9 +266,9 @@ mod tests {
             half_height: 1.0,
             radius: 1.0,
         };
-        check_outward(y, Vec3::new(2.0, 0.0, 0.0), 1.0, Vec3::X);
-        check_outward(y, Vec3::new(0.0, -1.5, 0.0), 0.5, Vec3::NEG_Y);
-        check_outward(y, Vec3::new(0.0, 0.8, 0.0), -0.2, Vec3::Y);
+        check_outward(&y, Vec3::new(2.0, 0.0, 0.0), 1.0, Vec3::X);
+        check_outward(&y, Vec3::new(0.0, -1.5, 0.0), 0.5, Vec3::NEG_Y);
+        check_outward(&y, Vec3::new(0.0, 0.8, 0.0), -0.2, Vec3::Y);
     }
 
     #[test]
