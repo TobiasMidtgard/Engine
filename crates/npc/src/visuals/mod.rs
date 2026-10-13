@@ -118,7 +118,7 @@ fn faction_color(f: Option<&Faction>) -> u32 {
     match f.map(|f| f.0) {
         Some(0) => 0x3d8a4e,
         Some(1) => 0xb93c2e,
-        Some(2) => 0x2f6ad8,
+        Some(2) => 0x3272e6,
         _ => 0x8a8a8a,
     }
 }
