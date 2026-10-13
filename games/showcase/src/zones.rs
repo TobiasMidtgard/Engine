@@ -665,31 +665,36 @@ pub fn demo_views(z: &Zone) -> Vec<View> {
                     r#"{"screen": "dialogue", "tree": "merchant_intro", "node": "offer"}"#,
                 )
                 .warmup(6.0),
-                ui("market_shop", "The trader's shop", r#"{"screen": "shop"}"#),
+                // Each screen opens with something picked, so its details panel is filled.
+                ui(
+                    "market_shop",
+                    "The trader's shop",
+                    r#"{"screen": "shop", "select": "rifle"}"#,
+                ),
                 ui(
                     "market_inventory",
                     "Inventory and equipment",
-                    r#"{"screen": "inventory"}"#,
+                    r#"{"screen": "inventory", "select": "greatsword"}"#,
                 ),
                 ui(
                     "market_map_galaxy",
                     "Galaxy map",
-                    r#"{"screen": "map", "zoom": 3.6}"#,
+                    r#"{"screen": "map", "zoom": 3.6, "select": {"type": "system", "id": "veyra_system"}}"#,
                 ),
                 ui(
                     "market_map_system",
                     "Star system map",
-                    r#"{"screen": "map", "zoom": 2.6}"#,
+                    r#"{"screen": "map", "zoom": 2.6, "select": {"type": "planet", "id": "veyra"}}"#,
                 ),
                 ui(
                     "market_map_globe",
                     "Planet globe",
-                    r#"{"screen": "map", "zoom": 1.4}"#,
+                    r#"{"screen": "map", "zoom": 1.4, "select": {"type": "poi", "id": "relay_tower"}}"#,
                 ),
                 ui(
                     "market_map_surface",
                     "Surface map",
-                    r#"{"screen": "map", "zoom": 0.5}"#,
+                    r#"{"screen": "map", "zoom": 0.5, "select": {"type": "poi", "id": "hollow_reach"}}"#,
                 ),
                 ui("market_pause", "Pause menu", r#"{"screen": "pause"}"#),
                 ui(
