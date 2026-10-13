@@ -356,15 +356,18 @@ fn vs_main(in: VertexIn) -> VertexOut {
 
 
 // ---------------------------------------------------------------- depth prepass
-// Depth, normals and motion for ambient occlusion, contact shadows and temporal anti-aliasing.
-// The patch normal is enough for those; material detail is left to the scene pass.
+// Depth, normals, roughness and motion for ambient occlusion, contact shadows, reflections and
+// temporal anti-aliasing. The patch normal is enough for those, except where water lies still
+// (open sea, puddles, flooded prints): that is flat and glossy so it mirrors the scene.
 
 struct PrepassOut {
     @builtin(position) @invariant clip: vec4<f32>,
     @location(0) normal: vec3<f32>,
     @location(1) motion_now: vec4<f32>,
     @location(2) motion_prev: vec4<f32>,
-    @location(3) ocean: f32,
+    @location(3) up: vec3<f32>,
+    @location(4) ocean: f32,
+    @location(5) rel: vec3<f32>,
 };
 
 @vertex
@@ -375,6 +378,8 @@ fn vs_prepass(in: VertexIn) -> PrepassOut {
     var out: PrepassOut;
     out.clip = frame.view_proj * vec4<f32>(rel, 1.0);
     out.normal = normalize(planet_rot(planet) * in.normal.xyz);
+    out.up = planet_up(planet, rel);
+    out.rel = rel;
     out.motion_now = motion_clip(rel);
     out.motion_prev = prev_motion_clip(static_prev_rel(rel) - planet.motion.xyz);
     out.ocean = select(0.0, 1.0, (flags & 2u) != 0u) * planet.params.w;
@@ -383,10 +388,23 @@ fn vs_prepass(in: VertexIn) -> PrepassOut {
 
 @fragment
 fn fs_prepass(in: PrepassOut) -> PrepassOutput {
-    // Open sea is glossy water; ground is rough, a little less so in the rain.
-    let wet = frame.weather.x * 0.25;
-    let roughness = mix(0.85 - wet, 0.08, in.ocean);
-    return prepass_output(normalize(in.normal), roughness, in.motion_now, in.motion_prev);
+    // Rain from the surface layers (or the weather where they don't reach), standing water and
+    // prints, pooled the way the scene pass pools them (without the material detail).
+    let suv = surface_uv(in.rel);
+    let layers = textureSampleLevel(surface_tex, map_sampler, suv, 0.0) * inside01(suv) * maps.flags.y;
+    let rain_wet = saturate(max(layers.x, select(0.0, frame.weather.x, maps.flags.y < 0.5)));
+    let duv = deform_uv(in.rel);
+    let depth = textureSampleLevel(deform_tex, map_sampler, duv, 0.0).r * inside01(duv) * maps.flags.x;
+    let snow = smoothstep(0.005, 0.03, layers.z);
+    let pool = max(
+        smoothstep(0.0005, 0.015, layers.y),
+        smoothstep(0.015, 0.04, depth) * smoothstep(0.5, 0.85, rain_wet),
+    );
+    let water = max(pool * (1.0 - snow) * (1.0 - in.ocean), in.ocean);
+    let n = normalize(mix(normalize(in.normal), in.up, water));
+    let ground = 0.85 - 0.35 * rain_wet * (1.0 - snow);
+    let roughness = mix(ground, mix(0.04, 0.08, in.ocean), water);
+    return prepass_output(n, roughness, in.motion_now, in.motion_prev);
 }
 
 // Bump the normal by a scalar height field `h` using screen-space derivatives
