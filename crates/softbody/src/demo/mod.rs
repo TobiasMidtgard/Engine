@@ -210,6 +210,11 @@ pub fn register(app: &mut App) {
 // ---------------------------------------------------------------------------------------
 // Spawning
 
+/// Where the propane burner under the burning curtain stands, from the yard's origin. Its
+/// flame is an `IgniteRequest`, which a fire module may also carry into fuel on the ground
+/// (grass): a world that has one should keep the ground there bare.
+pub const CURTAIN_BURNER: DVec3 = DVec3::new(-9.1, 0.0, 6.25);
+
 /// Build the whole yard around `origin` (ground level at `origin.y`).
 pub fn spawn_demo(commands: &mut Commands, origin: DVec3) {
     let c = origin;
