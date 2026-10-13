@@ -38,7 +38,8 @@ pub enum Style {
     /// The player: a samurai in white and blue lacquer, a ribbed helmet with gilt horns over
     /// a sculpted face mask.
     Duelist,
-    /// Black and crimson blade master with a glowing red visor.
+    /// The elite: a samurai in black and crimson lacquer, a riveted helmet with a crimson
+    /// crescent over a snarling demon mask with glowing eyes and fangs.
     Elite,
     /// A bulkier soldier: burnt-orange plates over a khaki carrier and trousers, a brimmed
     /// helmet over a rubber gas mask.
@@ -3571,45 +3572,89 @@ fn helmet(kit: &mut Kit, s: &Spec) {
             });
         }
         Style::Elite => {
-            kit.bind(Head, Mat::PaintA, || skull(s.a(0.004), 0.82, 2.45, 0.012));
-            // The mask: a sharp keel, high cheekbones and a jutting chin.
-            let mask_pl = s.a(0.003);
-            let mask_w = |th: f32| lerp(0.9, 0.36, smooth(1.3, 2.46, th));
-            let mask = move |phi: f32, th: f32| {
-                let w = mask_w(th);
-                let d = (wrap_angle(phi - fr) / w).abs();
-                let crease = (1.0 - d).max(0.0);
-                let cheek = (-((d - 0.55) / 0.2).powi(2) - ((th - 1.78) / 0.22).powi(2)).exp();
-                0.006 + 0.026 * crease.powf(1.6) + 0.012 * cheek + 0.016 * smooth(1.95, 2.46, th)
+            // A black-lacquered riveted bowl (hoshi-bachi) over a demon's face (an oni
+            // somen): heavy brows over slanted glowing eyes, a short broad nose, snarl folds and
+            // an open mouth with fangs and embers inside, lips lacquered crimson.
+            kit.bind(Head, Mat::PaintA, || skull(s.a(0.0), 0.82, 2.45, 0.012));
+            // The bowl's plates meet at flanged seams, each under a row of domed rivets
+            // shrinking toward the crown; the seams over the face stop at the brow plate.
+            const SEAMS: usize = 20;
+            let seam = |k: usize| fr + (k as f32 + 0.5) * TAU / SEAMS as f32;
+            let seam_low = |phi: f32| {
+                if wrap_angle(phi - fr).abs() < 1.0 {
+                    0.78
+                } else {
+                    1.72
+                }
             };
-            // The mask's outer surface (plate thickness and pillow included).
-            let mask_top = move |phi: f32, th: f32| {
-                let w = mask_w(th);
-                let u = (wrap_angle(phi - fr) / w * 0.5 + 0.5).clamp(0.0, 1.0);
-                let v = ((th - 1.14) / (2.46 - 1.14)).clamp(0.0, 1.0);
-                mask(phi, th) + mask_pl.t + mask_pl.bulge * (PI * u).sin() * (PI * v).sin()
-            };
+            let flange_g = s.t - 0.0004;
             kit.bind(Head, Mat::PaintA, || {
-                plate(18, 12, mask_pl, h.c, move |u, v| {
-                    let th = lerp(1.14, 2.46, v);
-                    let w = mask_w(th);
-                    let phi = lerp(fr - w, fr + w, u);
-                    h.at(phi, th, mask(phi, th))
-                })
+                let mut m = MeshBuilder::new();
+                for k in 0..SEAMS {
+                    let phi = seam(k);
+                    let low = seam_low(phi);
+                    let mut f = surface(3, 12, move |u, v| {
+                        let rise = (PI * u).sin().max(0.0).sqrt()
+                            * smooth(0.0, 0.06, v)
+                            * smooth(1.0, 0.94, v);
+                        h.at(
+                            phi + (u - 0.5) * 0.036,
+                            lerp(0.16, low, v),
+                            flange_g + 0.0012 * rise,
+                        )
+                    });
+                    face_out(&mut f, h.c);
+                    m.append(&f, Mat4::IDENTITY);
+                }
+                m
             });
-            // Scowling crimson brow, dipping between the eyes.
+            kit.bind(Head, Mat::Trim, || {
+                let mut m = MeshBuilder::new();
+                for k in 0..SEAMS {
+                    let phi = seam(k);
+                    let low = seam_low(phi) - 0.05;
+                    let n = ((low - 0.3) / 0.16).round().max(1.0) as usize;
+                    for i in 0..=n {
+                        let th = lerp(0.3, low, i as f32 / n as f32);
+                        let r = lerp(0.0021, 0.0037, smooth(0.25, 1.4, th));
+                        let (p, _, _, out) = on_shell(&h, phi, th, flange_g + 0.0009);
+                        let dome = [
+                            Vec2::new(r, -0.0006),
+                            Vec2::new(r * 0.72, r * 0.42),
+                            Vec2::new(0.0004, r * 0.62),
+                        ];
+                        m.append(&spun(&dome, 6, out, p), Mat4::IDENTITY);
+                    }
+                }
+                // The crown's rosette (tehen kanamono).
+                let crown = h.at(0.0, 0.0, s.t - 0.0006);
+                let rosette = [
+                    Vec2::new(0.021, -0.004),
+                    Vec2::new(0.018, -0.0012),
+                    Vec2::new(0.011, 0.0024),
+                    Vec2::new(0.006, 0.0036),
+                    Vec2::new(0.0005, 0.0036),
+                ];
+                m.append(&spun(&rosette, 20, Vec3::Y, crown), Mat4::IDENTITY);
+                // The crest's mount on the brow.
+                let (badge, _, _, out) = on_shell(&h, fr, 0.9, 0.031);
+                m.append(&disk(0.011, 0.004, out, badge, 18), Mat4::IDENTITY);
+                m
+            });
+            // Scowling crimson brow plate, dipping between the eyes, with a crescent crest
+            // (maedate) rising off it and swept blades off the back of the bowl.
             kit.bind(Head, Mat::PaintB, || {
                 let mut m = plate(16, 6, s.b(0.003), h.c, |u, v| {
-                    let phi = lerp(fr - 0.9, fr + 0.9, u);
-                    let dip = 1.0 - (wrap_angle(phi - fr) / 0.9).abs();
+                    let phi = lerp(fr - 0.95, fr + 0.95, u);
+                    let dip = 1.0 - (wrap_angle(phi - fr) / 0.95).abs();
                     h.at(
                         phi,
-                        lerp(0.62, 1.2 + 0.11 * dip, v),
+                        lerp(0.8, 1.16 + 0.1 * dip, v),
                         0.006 + 0.012 * dip + 0.01 * v,
                     )
                 });
-                // A crescent crest (maedate) rising off the brow.
-                let base = h.at(fr, 0.8, 0.012);
+                let (badge, _, _, out) = on_shell(&h, fr, 0.9, 0.031);
+                let base = badge + out * 0.003;
                 let sections: Vec<Section> = (0..=20)
                     .map(|i| {
                         let x = lerp(-1.0, 1.0, i as f32 / 20.0);
@@ -3626,7 +3671,6 @@ fn helmet(kit: &mut Kit, s: &Spec) {
                     &MeshBuilder::loft(&sections, 10, Cap::Round, Cap::Round),
                     Mat4::IDENTITY,
                 );
-                // Swept blades off the back of the skull.
                 for side in [-1.0f32, 1.0] {
                     let path: Vec<Vec3> = (0..12)
                         .map(|i| {
@@ -3647,59 +3691,218 @@ fn helmet(kit: &mut Kit, s: &Spec) {
                 }
                 m
             });
-            // Slanted eye slits on the mask: dark recesses with a red glow.
+            // The demon's face: its height off the shell at (phi, th).
+            let eye_th = |a: f32| lerp(1.47, 1.33, ((a - 0.09) / 0.41).clamp(0.0, 1.0));
+            let bump = |x: f32, w: f32| (-(x / w).powi(2)).exp();
+            let face_g = move |phi: f32, th: f32| {
+                let d = wrap_angle(phi - fr);
+                let a = d.abs();
+                // Heavy brows with a hard lower edge, meeting low between the eyes.
+                let tb = 1.39 - (a - 0.09) * 0.34;
+                let brow = smooth(tb - 0.1, tb - 0.01, th)
+                    * (1.0 - smooth(tb, tb + 0.05, th))
+                    * (1.0 - smooth(0.5, 0.64, a));
+                // Deep-set eyes.
+                let socket = bump(a - 0.3, 0.16) * bump(th - eye_th(a) - 0.01, 0.05);
+                // A short, broad nose swelling to a heavy tip between flared wings.
+                let nose = bump(d, lerp(0.06, 0.11, smooth(1.6, 1.82, th)))
+                    * (0.003 + 0.02 * smooth(1.58, 1.81, th))
+                    * (1.0 - smooth(1.84, 1.91, th))
+                    + 0.006 * bump(d, 0.08) * bump(th - 1.8, 0.045);
+                let wings = bump(a - 0.12, 0.045) * bump(th - 1.84, 0.04);
+                // Snarl folds from the nose's wings down to the mouth's corners.
+                let fold = bump(th - (1.77 + (a - 0.15) * 1.33), 0.04)
+                    * smooth(0.11, 0.16, a)
+                    * (1.0 - smooth(0.36, 0.44, a));
+                let cheek = bump(a - 0.52, 0.16) * bump(th - 1.68, 0.14);
+                let chin = bump(d, 0.2) * bump(th - 2.33, 0.1);
+                0.006 + 0.016 * smooth(1.95, 2.46, th) + 0.012 * brow - 0.005 * socket
+                    + nose
+                    + 0.013 * wings
+                    + 0.008 * fold
+                    + 0.012 * cheek
+                    + 0.008 * chin
+            };
+            let face_pl = Pl::new(0.006, 0.0, s.edge_a);
+            let mask_w = |th: f32| lerp(0.9, 0.36, smooth(1.3, 2.46, th));
+            let face_phi = move |u: f32, th: f32| fr + (2.0 * u - 1.0) * mask_w(th);
+            // The upper lip and the lower lip at u across the face: a wide snarl, open in
+            // the middle; toward the corners the jaw overlaps the cheeks.
+            let mouth = |u: f32| 1.92 + 0.1 * smooth(0.1, 0.34, (u - 0.5).abs());
+            let jaw_top =
+                move |u: f32| mouth(u) + lerp(0.17, -0.012, smooth(0.06, 0.34, (u - 0.5).abs()));
+            let lip = jaw_top(0.5);
+            let jaw_g = move |phi: f32, th: f32| {
+                face_g(phi, th) + 0.004 * (1.0 - smooth(lip, lip + 0.12, th))
+            };
+            kit.bind(Head, Mat::PaintA, || {
+                let mut m = plate(36, 30, face_pl, h.c, move |u, v| {
+                    let th = lerp(1.14, mouth(u), v);
+                    let phi = face_phi(u, th);
+                    h.at(phi, th, face_g(phi, th))
+                });
+                m.append(
+                    &plate(28, 10, face_pl, h.c, move |u, v| {
+                        let th = lerp(jaw_top(u), 2.46, v);
+                        let phi = face_phi(u, th);
+                        h.at(phi, th, jaw_g(phi, th))
+                    }),
+                    Mat4::IDENTITY,
+                );
+                m
+            });
+            // Crimson lacquered lips.
+            kit.bind(Head, Mat::PaintB, || {
+                let mut m = plate(24, 1, Pl::new(0.0018, 0.0, 1.0), h.c, move |u, v| {
+                    let uu = lerp(0.16, 0.84, u);
+                    let th = mouth(uu) - lerp(0.03, 0.001, v);
+                    let phi = face_phi(uu, th);
+                    h.at(phi, th, face_g(phi, th) + face_pl.t - 0.0006)
+                });
+                m.append(
+                    &plate(20, 1, Pl::new(0.0018, 0.0, 1.0), h.c, move |u, v| {
+                        let uu = lerp(0.22, 0.78, u);
+                        let th = jaw_top(uu) + lerp(0.001, 0.032, v);
+                        let phi = face_phi(uu, th);
+                        h.at(phi, th, jaw_g(phi, th) + face_pl.t - 0.0006)
+                    }),
+                    Mat4::IDENTITY,
+                );
+                m
+            });
+            // Inside the mouth: crimson lacquer with embers at the back; nostrils.
+            kit.bind(Head, Mat::PaintB, || {
+                h.plate(
+                    (fr - 0.44, fr + 0.44),
+                    (1.86, 2.16),
+                    0.0,
+                    Pl::new(0.002, 0.0, 1.0),
+                    14,
+                    4,
+                )
+            });
+            kit.bind(Head, Mat::Glass, || {
+                let mut m = MeshBuilder::new();
+                for side in [-1.0f32, 1.0] {
+                    let (phi, th) = (fr + side * 0.055, 1.875);
+                    let (p, _, down, out) =
+                        on_shell(&h, phi, th, face_g(phi, th) + face_pl.t - 0.0008);
+                    m.append(
+                        &disk(0.0032, 0.0014, (out * 0.6 + down).normalize(), p, 10),
+                        Mat4::IDENTITY,
+                    );
+                }
+                m
+            });
+            kit.bind(Head, Mat::Lens, || {
+                h.plate(
+                    (fr - 0.26, fr + 0.26),
+                    (1.98, 2.03),
+                    0.0021,
+                    Pl::new(0.0012, 0.0, 1.0),
+                    10,
+                    1,
+                )
+            });
+            // Fangs: canines hanging over the lower lip, small teeth between, tusks
+            // rising from the jaw in front of the upper lip.
+            let tooth = move |u: f32, upper: bool, len: f32, half: f32, splay: f32| {
+                let th = if upper {
+                    mouth(u) - 0.006
+                } else {
+                    jaw_top(u) + 0.006
+                };
+                let phi = face_phi(u, th);
+                let g = if upper {
+                    face_g(phi, th) + 0.004
+                } else {
+                    jaw_g(phi, th) + 0.004
+                };
+                let (p, across, down, out) = on_shell(&h, phi, th, g);
+                let dir = if upper { down } else { -down };
+                let sections: Vec<Section> = (0..=5)
+                    .map(|i| {
+                        let t = i as f32 / 5.0;
+                        let c = p + dir * (len * t) + out * (splay * t * t);
+                        let w = lerp(half, 0.0004, t.powf(0.9));
+                        Section::rounded(c, Vec2::new(w, w * 0.75))
+                            .with_exponent(2.2)
+                            .with_right(across)
+                    })
+                    .collect();
+                MeshBuilder::loft(&sections, 6, Cap::Flat, Cap::Round)
+            };
+            kit.bind(Head, Mat::Hamon, || {
+                let mut m = MeshBuilder::new();
+                for (du, upper, len, half, splay) in [
+                    (0.17, true, 0.024, 0.0038, 0.008),
+                    (0.1, true, 0.011, 0.0027, 0.002),
+                    (0.035, true, 0.01, 0.0026, 0.001),
+                    (0.23, false, 0.026, 0.004, 0.009),
+                    (0.12, false, 0.008, 0.0022, 0.001),
+                    (0.045, false, 0.008, 0.0022, 0.001),
+                ] {
+                    for side in [-1.0f32, 1.0] {
+                        m.append(
+                            &tooth(0.5 + side * du, upper, len, half, splay),
+                            Mat4::IDENTITY,
+                        );
+                    }
+                }
+                m
+            });
+            // Slanted eye slits under the brows: dark recesses with a red glow.
+            let face_top = move |phi: f32, th: f32| face_g(phi, th) + face_pl.t;
             let eye = move |grow: f32, g: f32, t: f32| {
                 mirrored(plate(10, 2, Pl::new(t, 0.0, 1.0), h.c, move |u, v| {
                     let phi = lerp(fr - 0.09, fr - 0.5, u);
                     let th = lerp(1.47, 1.33, u) + (v - 0.5) * lerp(0.075, 0.04, u) * grow;
-                    h.at(phi, th, mask_top(phi, th) + g)
+                    h.at(phi, th, face_top(phi, th) + g)
                 }))
             };
             kit.bind(Head, Mat::Glass, || eye(1.6, -0.0005, 0.002));
             kit.bind(Head, Mat::Lens, || eye(0.8, 0.0016, 0.0012));
-            // A steep, close neck guard laced in crimson.
+            // The throat guard (yodare-kake): laced lames hanging from under the jaw.
+            let throat = Shikoro {
+                h,
+                rim: 2.38,
+                phi: (fr - 0.52, fr + 0.52),
+                slope: 0.42,
+                g: 0.004,
+                lh: 0.022,
+                lap: 0.006,
+                t: 0.0045,
+                n: 3,
+            };
+            kit.bind(Head, Mat::PaintA, || throat.plates(0.0012, s.edge_a));
+            kit.bind(Head, Mat::PaintB, || throat.lacing(&[-0.3, 0.0, 0.3]));
+            // A steep, close neck guard laced in crimson, its front ends turned back as
+            // crimson wings (fukigaeshi) with crests.
             let shikoro = Shikoro {
                 h,
-                rim: 1.8,
-                phi: (fr + 1.45, fr + TAU - 1.45),
-                slope: 0.36,
+                rim: 1.78,
+                phi: (fr + 1.25, fr + TAU - 1.25),
+                slope: 0.38,
                 g: 0.016,
                 lh: 0.034,
                 lap: 0.008,
                 t: 0.005,
                 n: 3,
             };
+            let (span, drop) = (0.42, 0.066);
             kit.bind(Head, Mat::PaintA, || shikoro.plates(0.001, s.edge_a));
-            kit.bind(Head, Mat::PaintB, || shikoro.lacing(&[-1.0, 0.0, 1.0]));
-            // Teeth: vertical slits across the jaw.
-            kit.bind(Head, Mat::Glass, || {
-                let mut m = MeshBuilder::new();
-                for k in [-2.5f32, -1.5, -0.5, 0.5, 1.5, 2.5] {
-                    let phi = fr + k * 0.075;
-                    let (p, across, down, _) = on_shell(&h, phi, 2.12, mask_top(phi, 2.12) - 0.001);
-                    m.append(
-                        &MeshBuilder::chamfer_box(v3(0.005, 0.03, 0.004), 0.001)
-                            .transformed(basis(across, -down, across.cross(-down), p)),
-                        Mat4::IDENTITY,
-                    );
-                }
+            kit.bind(Head, Mat::PaintB, || {
+                let mut m = shikoro.lacing(&[-1.5, -0.75, 0.0, 0.75, 1.5]);
+                m.append(&shikoro.wings(span, drop, s.b(0.002)), Mat4::IDENTITY);
                 m
             });
+            kit.bind(Head, Mat::Trim, || {
+                shikoro.crests(span, drop, s.t * 0.85 + 0.0015)
+            });
             kit.bind(Head, Mat::Glow, || {
-                // Cheek vents.
-                let mut m = MeshBuilder::new();
-                for k in 0..3 {
-                    let th = 1.86 + k as f32 * 0.07;
-                    m.append(
-                        &plate(4, 1, Pl::strip(), h.c, |u, v| {
-                            let phi = lerp(fr - 0.66, fr - 0.44, u);
-                            let t = th + v * 0.016 - u * 0.03;
-                            h.at(phi, t, mask_top(phi, t) + 0.0004)
-                        }),
-                        Mat4::IDENTITY,
-                    );
-                }
-                mirrored(m)
+                let mut m = shikoro.hem();
+                m.append(&throat.hem(), Mat4::IDENTITY);
+                m
             });
         }
         Style::Grunt => {
@@ -4771,13 +4974,16 @@ fn materials(lib: &mut Library) {
         let (ito, same) = (hex(p.ito), hex(p.same));
         let wrap = Tex::upload(lib, bake(256, 0.012, 2.0, move |uv| cord_surface(uv, ito)));
         let skin = Tex::upload(lib, bake(256, 0.03, 1.5, move |uv| same_surface(uv, same)));
-        // The baked roughness is absolute (the material's factor multiplies it).
+        // The baked roughness is absolute (the material's factor multiplies it). Plates are
+        // open underneath, and the insides of lames, guards and wings show at their ends.
         let painted = |t: Tex| {
-            t.apply(
+            let mut m = t.apply(
                 StandardMaterial::color(1.0, 1.0, 1.0)
                     .with_roughness(1.0)
                     .with_uv_scale(1.67, 1.67),
-            )
+            );
+            m.double_sided = true;
+            m
         };
         lib.material(&key(Mat::PaintA), painted(paint_a));
         lib.material(&key(Mat::PaintB), painted(paint_b));

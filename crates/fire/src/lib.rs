@@ -206,6 +206,22 @@ fn register_apis(app: &mut App) {
         },
     )
     .register_api(
+        "fire.demo",
+        "Start the fire demo's next fire now, already `at_secs` along (0 = just lit); each of \
+         its views (demo::VIEWS) lists its moment, like the front at 35.",
+        r#"{"at_secs": 54}"#,
+        |world, args| {
+            let at = f32_arg(&args, "at_secs", 0.0);
+            if !at.is_finite() || at < 0.0 {
+                return Err("'at_secs' must be 0 or more seconds".into());
+            }
+            match demo::jump_to(world, at) {
+                0 => Err("there is no fire demo".into()),
+                n => Ok(json!({"demos": n, "at_secs": at})),
+            }
+        },
+    )
+    .register_api(
         "fire.status",
         "What is burning: area in flames (m²), heat release (MW), tiles, embers, burning objects.",
         "{}",

@@ -16,6 +16,8 @@
 //!   block a press dents for good (plasticity).
 //! - **Characters**: a mannequin with a cape and long hair walking in a circle, the same
 //!   mannequin in slow motion (its own `LocalTimeScale`), and a dog with fur.
+//! - **Mesh colliders**: a crane lowers a silk sheet over a marble statue (the mannequin's body
+//!   posed once, its surface a triangle-mesh collider) and lifts it off again (`statue`).
 //!
 //! Until the physics and animation modules land, the moving props are kinematic and the
 //! skeletons are animated procedurally here (the same `SkeletonPose` contract the animation
@@ -60,6 +62,7 @@ mod props_stage;
 pub mod sailboat;
 pub mod sculpt;
 pub mod skin;
+pub mod statue;
 mod texgen;
 
 #[cfg(test)]
@@ -107,6 +110,13 @@ pub enum DemoMotion {
         center: DVec3,
         radius: f32,
         /// Seconds per lap.
+        period: f32,
+    },
+    /// Hang from a crane: held at `high`, lowered slowly to `low`, left there, lifted
+    /// briskly back (the unveiling sheet's hook).
+    Hoist {
+        low: DVec3,
+        high: DVec3,
         period: f32,
     },
 }
@@ -171,6 +181,12 @@ pub fn register(app: &mut App) {
                 .chain()
                 .before(UpdateSet::Propagate),
         )
+        .add_systems(
+            PostUpdate,
+            statue::cast_statues
+                .after(skin::skin_bodies)
+                .before(UpdateSet::Propagate),
+        )
         .add_systems(FixedPreUpdate, skin::snapshot_poses);
     app.add_systems(
         FixedUpdate,
@@ -183,6 +199,7 @@ pub fn register(app: &mut App) {
             cut_and_restore,
             respawn_volumes,
             sailboat::sail_boats,
+            statue::hang_cords,
         )
             .chain()
             .in_set(SimSet::Gameplay),
@@ -224,6 +241,11 @@ pub fn spawn_demo(commands: &mut Commands, origin: DVec3) {
         graphite(),
     );
     dog(commands, c + DVec3::new(-8.0, 0.0, -4.0));
+    statue::spawn_unveiling(
+        commands,
+        c + DVec3::new(-14.0, 0.0, -4.0),
+        Vec3::new(0.5, 0.0, -0.87),
+    );
 }
 
 fn flags(commands: &mut Commands, c: DVec3) {
@@ -815,6 +837,22 @@ fn smooth_shuttle(t: f32) -> f32 {
     0.5 - 0.5 * (t * TAU).cos()
 }
 
+/// How far down a hoist is (0 = up, 1 = down) at fraction `f` of its cycle: up, lowered over
+/// a quarter of the cycle, down for a third, lifted in a tenth, up again.
+fn hoist_drop(f: f32) -> f32 {
+    if f < 0.15 {
+        0.0
+    } else if f < 0.4 {
+        smoothstep(0.15, 0.4, f)
+    } else if f < 0.75 {
+        1.0
+    } else if f < 0.85 {
+        1.0 - smoothstep(0.75, 0.85, f)
+    } else {
+        0.0
+    }
+}
+
 /// Move kinematic props and walkers.
 pub fn drive_motion(
     time: Res<Time>,
@@ -869,6 +907,10 @@ pub fn drive_motion(
                 // Facing along the way it walks (counter-clockwise seen from above).
                 let forward = Vec3::new(-a.sin(), 0.0, -a.cos());
                 t.rotation = Quat::from_rotation_arc(Vec3::NEG_Z, forward);
+            }
+            DemoMotion::Hoist { low, high, period } => {
+                let k = hoist_drop((s / period).fract());
+                t.translation = high.lerp(low, f64::from(k));
             }
         }
     }

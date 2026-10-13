@@ -5,16 +5,16 @@
 //! the water's motion, at its own position, so a boat pitches over a swell and a log rolls in
 //! a current.
 //!
-//! * On a physics body (`engine_world::physics::RigidBody`, dynamic) the forces go to the physics
-//!   backend as `ApplyImpulse` messages (one per probe per step), which add up with thrusters,
-//!   engines and collisions.
-//! * Without one, the water module moves the entity itself with a small rigid-body integrator
+//! * Physics bodies (`engine_world::physics::RigidBody`) are left to the physics module, which
+//!   floats them from their real collider shapes through the same `Water` query. A `Buoyancy`
+//!   on one does nothing (it would count the lift twice).
+//! * Everything else the water module moves itself with a small rigid-body integrator
 //!   ([`Floating`]): cheap floating props (buoys, crates, ducks, debris), and floating that
-//!   works before or without a physics module.
+//!   works without a physics module.
 
 use engine_core::math::{DVec3, Mat3, Quat, Vec3};
 use engine_core::prelude::*;
-use engine_world::physics::{ApplyImpulse, BodyKind, RigidBody, Velocity};
+use engine_world::physics::RigidBody;
 use engine_world::{Gravity, WaterSample, WaterSplash, WorldImpulse};
 
 use crate::interact::splash;
@@ -33,9 +33,8 @@ pub struct Buoyancy {
     /// How much of the box is solid, 0..1 (a hull or a sphere fills less than its box: a
     /// sphere ≈ 0.52, a rowboat hull ≈ 0.45). Displaced volume = box volume × fill.
     pub fill: f32,
-    /// Average density of the object, kg/m³, when water moves it itself (no `RigidBody`):
-    /// below 1000 floats (wood 600, ice 917), above sinks (steel 7800). Physics bodies use
-    /// their own mass.
+    /// Average density of the object, kg/m³: below 1000 floats (wood 600, ice 917), above
+    /// sinks (steel 7800).
     pub density: f32,
     /// Probes along local x and z. More probes = smoother rocking.
     pub probes: [u32; 2],
@@ -212,23 +211,23 @@ pub fn compute_forces(
     submerged
 }
 
-/// Apply buoyancy: impulses to physics bodies, or integrate [`Floating`] entities.
+/// Integrate [`Floating`] entities (physics bodies float in the physics module).
 #[allow(clippy::type_complexity, clippy::too_many_arguments)]
 pub fn buoyancy_system(
     time: Res<Time>,
     shared: Res<SharedWater>,
     gravity: Res<Gravity>,
-    mut floats: Query<(
-        Entity,
-        &mut Transform,
-        &Buoyancy,
-        Option<&mut Floating>,
-        Option<&RigidBody>,
-        Option<&Velocity>,
-        Option<&Tether>,
-        Option<&LocalTimeScale>,
-    )>,
-    mut impulses: MessageWriter<ApplyImpulse>,
+    mut floats: Query<
+        (
+            Entity,
+            &mut Transform,
+            &Buoyancy,
+            Option<&mut Floating>,
+            Option<&Tether>,
+            Option<&LocalTimeScale>,
+        ),
+        Without<RigidBody>,
+    >,
     mut blasts: MessageReader<WorldImpulse>,
     mut splash_out: MessageWriter<WaterSplash>,
     mut commands: Commands,
@@ -237,7 +236,7 @@ pub fn buoyancy_system(
     let blasts: Vec<WorldImpulse> = blasts.read().copied().collect();
     let mut hits = Vec::new();
     let state = shared.0.read();
-    for (entity, mut transform, b, floating, body, velocity, tether, local) in &mut floats {
+    for (entity, mut transform, b, floating, tether, local) in &mut floats {
         let dt = time.delta_for(local);
         if dt <= 0.0 {
             continue;
@@ -246,34 +245,6 @@ pub fn buoyancy_system(
         let gvec = gravity.at(pos);
         let g = gvec.length();
         let up = if g > 1e-6 { -gvec / g } else { Vec3::Y };
-
-        // Physics bodies: hand the forces to the backend.
-        if let Some(rb) = body {
-            if rb.kind != BodyKind::Dynamic {
-                continue;
-            }
-            let v = velocity.copied().unwrap_or_default();
-            compute_forces(
-                &state,
-                b,
-                pos,
-                transform.rotation,
-                v.linear,
-                v.angular,
-                up,
-                g,
-                &mut scratch,
-            );
-            for (f, at) in scratch.iter() {
-                impulses.write(ApplyImpulse {
-                    entity,
-                    impulse: *f * dt,
-                    at: Some(*at),
-                    angular: Vec3::ZERO,
-                });
-            }
-            continue;
-        }
 
         // Everything else: water floats it.
         let Some(mut fl) = floating else {

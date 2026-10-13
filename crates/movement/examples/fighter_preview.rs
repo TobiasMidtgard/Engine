@@ -1,12 +1,13 @@
 //! Renders the fighters headless to PNGs: the four styles side by side (front and back),
-//! helmet, back, whole-body and katana close-ups, and a sequence of poses from the
+//! helmet, face, back, whole-body and katana close-ups, and a sequence of poses from the
 //! procedural animation.
 //!
 //! ```text
 //! cargo run -p engine_movement --release --example fighter_preview -- [out_dir] [quick]
 //! ```
 //!
-//! `quick` stops after the lineup, helmets, backs and whole bodies (for iterating on armor).
+//! `quick` stops after the lineup, helmets, faces, backs and whole bodies (for iterating on
+//! armor).
 //!
 //! Each pose comes from the real animator ([`Animator`]) fed a short scripted timeline of
 //! movement and combat state, exactly as the demo feeds it from `Mover` and `CombatState`.
@@ -530,6 +531,26 @@ fn main() {
             HEIGHT / 2,
             &out.join("02_helmets.png"),
         );
+    }
+    // Face on, a little from the right: masks and visors.
+    let mut faces = Vec::new();
+    for (style, head) in &lineup {
+        let p = out.join(format!("02_face_{}.png", style.key()));
+        if shoot(
+            &mut app,
+            camera,
+            (
+                *head + v(0.16, -0.08, -0.6),
+                *head + v(0.0, -0.04, 0.0),
+                28.0,
+            ),
+            &p,
+        ) {
+            faces.push(p);
+        }
+    }
+    if !faces.is_empty() {
+        sheet(&faces, 2, WIDTH / 2, HEIGHT / 2, &out.join("02_faces.png"));
     }
     // From behind and to the side: neck guards, shoulder lames, the sash's knot.
     let mut backs = Vec::new();
