@@ -133,6 +133,7 @@ impl Plugin for WeatherPlugin {
 mod tests {
     use super::*;
     use engine_core::registry::call_api;
+    use engine_render::DirectionalLight;
     use serde_json::json;
 
     fn app() -> App {
@@ -152,6 +153,39 @@ mod tests {
         // A world without lights gets a sun and a moon.
         let mut q = app.world.query::<&SunLight>();
         assert_eq!(q.iter(&app.world).count(), 1);
+    }
+
+    #[test]
+    fn a_storm_dims_the_sun_but_by_day_it_outshines_the_moon() {
+        // The renderer lights the sky, haze and fog with its brightest directional light; a
+        // storm at nine in the morning must not hand that to the third-quarter moon.
+        let mut app = app();
+        app.update_n(2);
+        let w = &mut app.world;
+        call_api(w, "weather.time", json!({"hour": 9.0, "moon_phase": 0.75})).unwrap();
+        call_api(
+            w,
+            "weather.set",
+            json!({"preset": "storm", "transition_s": 0}),
+        )
+        .unwrap();
+        call_api(w, "weather.advance", json!({"seconds": 900})).unwrap();
+        app.update_n(2);
+        let lux = |app: &mut App, sun: bool| {
+            let mut q = app.world.query::<(&DirectionalLight, Has<SunLight>)>();
+            q.iter(&app.world)
+                .find(|(_, is_sun)| *is_sun == sun)
+                .map(|(l, _)| l.illuminance)
+                .unwrap()
+        };
+        let (sun, moon) = (lux(&mut app, true), lux(&mut app, false));
+        let lights = *app.world.resource::<SkyLights>();
+        assert!(lights.moon_lux > 0.0, "the moon is up: {lights:?}");
+        assert!(
+            sun < lights.sun_lux * 0.02,
+            "a storm deck lets almost no direct sun through: {sun} lux, {lights:?}"
+        );
+        assert!(sun > moon, "sun {sun} lux, moon {moon} lux");
     }
 
     #[test]

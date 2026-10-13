@@ -139,12 +139,25 @@ struct CloudResult {
     transmittance: f32,
     front: f32,             // distance where the cloud starts (m)
     back: f32,              // distance where it has become nearly opaque (m)
-    rain: f32,              // opacity of the rain shafts along the ray (for rainbows)
+    rain: f32,              // optical depth of the rain shafts along the ray (rainbows, veiling
+                            // hills; opacity would saturate long before a far hill does)
+    rain_front: f32,        // where the rain shafts' optical depth reaches 10% and 90% of
+    rain_back: f32,         // its total along the ray (m)
 };
 
 // Interleaved gradient noise: a stable per-pixel start offset that hides banding.
 fn ign(px: vec2<f32>) -> f32 {
     return fract(52.9829189 * fract(dot(px, vec2<f32>(0.06711056, 0.00583715))));
+}
+
+// Transmittance of the air above camera-relative `rel` toward the clouds' key light. Not
+// `sun_transmittance`: that follows the renderer's brightest light, which can be the other
+// one (the moon under a storm's dimmed sun at dusk).
+fn key_transmittance(rel: vec3<f32>) -> vec3<f32> {
+    if (frame.planet.w <= 0.0) { return vec3(1.0); }
+    let h = planet_height(rel);
+    let mu = dot(normalize(rel - frame.planet.xyz), clouds.light_dir.xyz);
+    return transmittance_to_space(h, mu) * sun_above_horizon(h, mu);
 }
 
 fn march_clouds(dir: vec3<f32>, steps: i32, light_steps: i32, jitter: f32) -> CloudResult {
@@ -181,13 +194,13 @@ fn march_clouds(dir: vec3<f32>, steps: i32, light_steps: i32, jitter: f32) -> Cl
     let extinction = clouds.layer.z;
     // Light arriving at the clouds: the key light through the air above the entry point.
     let entry = dir * t0;
-    let key = clouds.light.rgb * sun_transmittance(entry + vec3(0.0, 50.0, 0.0));
+    let key = clouds.light.rgb * key_transmittance(entry + vec3(0.0, 50.0, 0.0));
     // Ambient: the clear sky above the clouds, the lit ground below.
     let sky = atmosphere(entry, vec3<f32>(0.0, 1.0, 0.0), 1e12, 6).radiance * clouds.light.rgb * 1.4;
     // Light bounced off the ground below. The ground's color only tints it (a meadow doesn't
     // turn the cloud base green), and under the deck itself the ground is in the cloud's
     // shadow (scaled per sample by the cover there).
-    let albedo = frame.ground.rgb;
+    let albedo = weathered_ground();
     let ground_tint = mix(vec3(dot(albedo, vec3<f32>(0.2126, 0.7152, 0.0722))), albedo, 0.4);
     let ground_sun = ground_tint * key * saturate(ldir.y) * INV_PI;
     let ground_sky = ground_tint * sky * 0.4;
@@ -228,11 +241,15 @@ fn march_clouds(dir: vec3<f32>, steps: i32, light_steps: i32, jitter: f32) -> Cl
         let d = cloud_density(p, h, w, true);
         if (d > 0.0) {
             let sigma = d * extinction;
-            // Optical depth toward the light over samples that double in length (~1.2 km).
+            // Optical depth toward the light over samples that double in length, 1.24 km in
+            // all however many there are (5 on screen: 40 m to 640 m), so the environment
+            // map's cheaper 2-sample march sees as much cloud toward the light as the screen
+            // does (it used to reach only 120 m).
+            let first = 1240.0 / (exp2(f32(light_steps)) - 1.0);
             var od = 0.0;
             var lt = 0.0;
             for (var j = 0; j < light_steps; j++) {
-                let ls = 40.0 * exp2(f32(j));
+                let ls = first * exp2(f32(j));
                 let q = p + ldir * (lt + ls * 0.5);
                 lt += ls;
                 od += cloud_density(q, planet_height(q), weather_at(q.xz), j < 2) * ls;
@@ -260,6 +277,11 @@ fn march_clouds(dir: vec3<f32>, steps: i32, light_steps: i32, jitter: f32) -> Cl
                 ob *= 0.6;
                 oc *= 0.5;
             }
+            // Deep in a thick cloud the octaves die out exponentially, but sunlight still
+            // diffuses down through it like through frosted glass, white and without direction:
+            // two-stream transmittance 1 / (1 + 0.75 (1 - g) τ), g ≈ 0.85. Without it a storm
+            // deck's base was lit only by the blue sky and turned navy.
+            light = max(light, saturate(ldir.y + 0.05) * INV_PI / (1.0 + 0.11 * od));
             // Dark edges facing the light ("powder"): fewer photons scattered back out.
             let powder = 1.0 - 0.45 * exp(-sigma * 150.0);
             let h01 = saturate((h - base) / type_thickness(w.g));
@@ -267,8 +289,11 @@ fn march_clouds(dir: vec3<f32>, steps: i32, light_steps: i32, jitter: f32) -> Cl
             let belly = 1.0 - 0.55 * saturate(w.b * 6.0) * (1.0 - h01);
             let cover = saturate(w.r * 1.2);
             let ground_below = ground_sun * (1.0 - 0.85 * cover) + ground_sky * (1.0 - 0.5 * cover);
+            // The ambient fill is light from all around: a cloud scattering nearly all it gets
+            // shines with it as fog does (darkening it made night decks several times darker
+            // than the fog under them).
             var s = key * light * powder * mix(belly, 1.0, 0.4)
-                + (mix(ground_below, sky, sqrt(h01)) + fill) * belly * (0.5 + 0.5 * h01);
+                + mix(ground_below, sky, sqrt(h01)) * belly * (0.5 + 0.5 * h01) + fill;
             // Lightning lights the cloud from inside: the light diffuses through kilometers of
             // droplets, so the whole cloud base around the channel glows.
             if (clouds.flash.w > 0.0) {
@@ -357,46 +382,85 @@ fn rain_shafts(dir: vec3<f32>, max_t: f32, deck: vec4<f32>) -> CloudResult {
     // darker than the deck's underside.
     let lit = mix(open_sky, deck.rgb * 0.7 + frame.ambient.rgb, deck.a);
     var t = t0 + dt * 0.5;
-    var hit = false;
+    var od: array<f32, 12>;
+    var total = 0.0;
     for (var i = 0; i < steps; i++) {
         let p = dir * t;
         let w = weather_at(p.xz);
         let mm_h = w.b * 50.0;
-        if (mm_h > 0.05) {
-            // Visibility in rain: ~10 km at 1 mm/h, ~1 km at 50 mm/h.
+        od[i] = 0.0;
+        if (mm_h > 0.0) {
+            // Visibility in rain: ~10 km at 1 mm/h, ~1 km at 50 mm/h; drizzle thins to nothing.
             // Fades in with distance: the rain right around the player is particles.
-            let sigma = 0.00025 * pow(mm_h, 0.65) * smoothstep(400.0, 2500.0, t);
+            let fade = saturate(mm_h * 10.0) * smoothstep(400.0, 2500.0, t);
+            let sigma = 0.00025 * pow(mm_h, 0.65) * fade;
             let tr = exp(-sigma * dt);
             r.radiance += r.transmittance * (1.0 - tr) * lit;
-            if (!hit) {
-                hit = true;
-                r.front = t - dt * 0.5;
-            }
             r.transmittance *= tr;
+            od[i] = sigma * dt;
+            total += sigma * dt;
         }
         t += dt;
     }
-    if (!hit) { return r; }
-    r.back = t1;
+    if (total < 1e-5) {
+        r.radiance = vec3(0.0);
+        r.transmittance = 1.0;
+        return r;
+    }
+    // Where the rain's optical depth reaches 10% and 90% of its total, each step's share spread
+    // over the step. Unlike the first and last wet sample these slide smoothly as the samples
+    // move along the ray from pixel to pixel, so far hills don't get bands of veil.
+    let lo = total * 0.1;
+    let hi = total * 0.9;
+    var sum = 0.0;
+    var found = false;
+    for (var i = 0; i < steps; i++) {
+        let next = sum + od[i];
+        let start = t0 + dt * f32(i);
+        if (!found && next >= lo) {
+            r.front = start + dt * (lo - sum) / max(od[i], 1e-12);
+            found = true;
+        }
+        if (next >= hi) {
+            r.back = start + dt * (hi - sum) / max(od[i], 1e-12);
+            break;
+        }
+        sum = next;
+    }
     let air = atmosphere(vec3(0.0), dir, r.front, 4);
     r.radiance = r.radiance * air.transmittance * clouds.params.x;
     r.transmittance = mix(1.0, r.transmittance, clouds.params.x);
+    r.rain = select(-log(max(r.transmittance, 1e-30)), total, clouds.params.x >= 1.0);
     return r;
 }
 
-// Clouds plus rain shafts in front of them.
+// Clouds plus rain shafts in front of them. `front` and `back` stay the clouds' own; the
+// rain's span is kept apart so hills inside the rain are veiled by the rain in front of them.
 fn clouds_and_rain(dir: vec3<f32>, steps: i32, light_steps: i32, jitter: f32) -> CloudResult {
     var c = march_clouds(dir, steps, light_steps, jitter);
+    c.rain_front = clouds.layer.w;
+    c.rain_back = clouds.layer.w;
     let cover = 1.0 - c.transmittance;
     let deck = vec4<f32>(c.radiance / max(cover, 1e-3), smoothstep(0.05, 0.6, cover));
     let s = rain_shafts(dir, c.front, deck);
     if (s.transmittance >= 1.0) { return c; }
     c.radiance = s.radiance + c.radiance * s.transmittance;
-    c.front = min(c.front, s.front);
-    c.back = select(s.back, c.back, c.transmittance < 0.999);
     c.transmittance *= s.transmittance;
-    c.rain = 1.0 - s.transmittance;
+    c.rain = s.rain;
+    c.rain_front = s.front;
+    c.rain_back = s.back;
     return c;
+}
+
+// The open ground's color as the weather leaves it (`frame.surface_open`): snow whitens it
+// and rain darkens it. The cloud bases and the far ground in the environment map (which lights
+// the fog and everything from below) see this, so in a snowfall the valley is lit from below by
+// white snow rather than a green planet, and the falling snow hazes white instead of tan.
+fn weathered_ground() -> vec3<f32> {
+    let open = frame.surface_open;
+    let snow = saturate(open.z * SURFACE_SNOW_SCALE_M * 10.0);
+    let wet = mix(1.0, 0.6, saturate(open.x));
+    return mix(frame.ground.rgb * wet, vec3<f32>(0.8), snow);
 }
 
 // The planet's surface far away (as in sky.wgsl).
@@ -407,7 +471,7 @@ fn planet_ground(dir: vec3<f32>, t: f32) -> vec3<f32> {
     let n_dot_l = dot(n, sun);
     let sun_light = frame.sun_color.rgb * sun_transmittance(p + n * 10.0) * saturate(n_dot_l);
     let sky_light = frame.sun_color.rgb * 0.12 * smoothstep(-0.15, 0.3, n_dot_l);
-    let albedo = frame.ground.rgb;
+    let albedo = weathered_ground();
     return albedo * (sun_light + sky_light) * INV_PI + frame.ambient.rgb * albedo;
 }
 
@@ -438,8 +502,8 @@ fn vs_full(@builtin(vertex_index) i: u32) -> FullscreenOut {
 
 struct MarchOut {
     @location(0) color: vec4<f32>,   // pre-exposed radiance, transmittance
-    @location(1) depth: vec4<f32>,   // front, back (km), rain opacity
-    @location(2) sky: vec4<f32>,     // pre-exposed clear sky
+    @location(1) depth: vec4<f32>,   // cloud front, back (km), rain optical depth, rain 10% (km)
+    @location(2) sky: vec4<f32>,     // pre-exposed clear sky, rain 90% (km)
 };
 
 // Low-resolution march of the whole view (no scene depth; composited per pixel later).
@@ -449,8 +513,8 @@ fn fs_march(in: FullscreenOut) -> MarchOut {
     let r = clouds_and_rain(dir, i32(clouds.light.w), i32(clouds.light_dir.w), ign(in.position.xy));
     var out: MarchOut;
     out.color = vec4<f32>(min(pre_expose(r.radiance), vec3(60000.0)), r.transmittance);
-    out.depth = vec4<f32>(r.front * 0.001, r.back * 0.001, r.rain, 1.0);
-    out.sky = vec4<f32>(min(pre_expose(clear_sky(dir)), vec3(60000.0)), 1.0);
+    out.depth = vec4<f32>(r.front * 0.001, r.back * 0.001, r.rain, r.rain_front * 0.001);
+    out.sky = vec4<f32>(min(pre_expose(clear_sky(dir)), vec3(60000.0)), r.rain_back * 0.001);
     return out;
 }
 
@@ -477,7 +541,7 @@ fn fs_env(in: FullscreenOut) -> @location(0) vec4<f32> {
         // Under a deck the far ground, and the haze in front of it, lie in the clouds'
         // shadow too.
         let shade = mix(0.2, 1.0, r.transmittance);
-        let lit = planet_ground(dir, ground_t) * shade + frame.ground.rgb * sky_up * 0.8;
+        let lit = planet_ground(dir, ground_t) * shade + weathered_ground() * sky_up * 0.8;
         let haze = a.radiance * frame.sun_color.rgb * shade
             + (vec3(1.0) - a.transmittance) * sky_up * (1.0 - shade) * 0.8;
         let c = haze + lit * a.transmittance;
