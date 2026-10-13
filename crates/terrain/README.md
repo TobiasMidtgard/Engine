@@ -43,7 +43,9 @@ everything else (streaming, LOD, colliders, ground queries, prints) follows the 
   mud, sand, gravel, rock, concrete, snow, ash) for roads, plazas and woods, and a tint for
   fields. Footsteps, rain and the `Ground` query follow the painted layer; edits paint over it.
   Layers can cover everything at full weight and meet edge to edge: each vertex carries a
-  weight per layer, so borders blend along the textures' relief instead of in triangle steps.
+  weight per layer, so borders blend along the textures' relief instead of in triangle steps,
+  and where grass or leaves meet bare ground (a road, a plaza, a bed) the border wanders the
+  way turf creeps over a verge instead of following the paint exactly.
   When the level already has its own material map, `with_ground_surface(Arc<dyn GroundQuery>)`
   lets that query name the material while the terrain answers height and normal, edits
   included (the sea and edit-painted layers stay the terrain's; never pass the world's
@@ -73,7 +75,8 @@ everything else (streaming, LOD, colliders, ground queries, prints) follows the 
   roads keep their grain out to a kilometer; anisotropic filtering keeps textures sharp
   across the view at glancing angles. Grass grows in clumps whatever its color, painted and
   tinted grass included: straw-colored tufts beside dark, dense ones, and sunburnt and lush
-  stretches tens of meters across. `examples/material_swatches.rs` saves a lit preview of each.
+  stretches tens of meters across; dirt, sand and gravel lie in damp, darker and dry, paler
+  patches. `examples/material_swatches.rs` saves a lit preview of each.
 - **Photo-scanned ground where fetched.** Seven materials (grass, forest floor, soil, mud,
   rock, sand, gravel) have CC0 Poly Haven scans listed in `assets/manifests/terrain.toml`.
   After `cargo run -p fetch-assets -- terrain` they replace the procedural versions
