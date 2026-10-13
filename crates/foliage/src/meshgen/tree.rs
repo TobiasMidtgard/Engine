@@ -544,9 +544,9 @@ fn bark_color(sp: &PlantSpecies, y: f32, h: f32, ring: usize, seed: u64) -> Vec4
 }
 
 /// Cut wood with growth rings (r = 0 center .. 1 bark).
-fn cut_color(sp: &PlantSpecies, r: f32) -> Vec4 {
+fn cut_color(rim: Vec4, r: f32) -> Vec4 {
     if r > 0.92 {
-        rgb(sp.bark_color, 0.6)
+        rim
     } else {
         // Equal to the cut-wood color the end-grain texture is painted for.
         let wood = Vec3::new(0.62, 0.45, 0.26);
@@ -712,13 +712,16 @@ fn assemble(
         ..Default::default()
     };
     let branches = &crowns.branches;
+    // The bark rim round the cut faces, as dark as the bark there (a pale rim would show as a
+    // hairline round a birch's black foot where the stump and the wood above it meet).
+    let rim = (bark_color(sp, cut, h, cut_i, seed).truncate() * 0.6).extend(1.0);
     // Base: roots + trunk up to the cut, growth rings on top.
     if !sapling {
         let mut b = MeshBuilder::new();
         let path = &trunk_path[..=cut_i];
         let rad = &trunk_r[..=cut_i];
         let color = |i: usize, _a: f32| bark_color(sp, path[i].y, h, i, seed);
-        let cap = |r: f32| cut_color(sp, r);
+        let cap = |r: f32| cut_color(rim, r);
         b.tube(path, rad, TRUNK_SIDES, 0.5, &color, None, Some(&cap));
         if sp.trunk_radius_m > 0.12 {
             // Root flares: broad, low ridges that leave the flared foot and sink into the
@@ -751,7 +754,7 @@ fn assemble(
         let path = &trunk_path[cut_i..];
         let rad = &trunk_r[cut_i..];
         let color = |i: usize, _a: f32| bark_color(sp, path[i].y, h, i + cut_i, seed);
-        let cap = |r: f32| cut_color(sp, r);
+        let cap = |r: f32| cut_color(rim, r);
         let broken = |_: f32| rgb(sp.bark_color, 0.55);
         b.tube(path, rad, 10, 0.5, &color, Some(&cap), Some(&broken));
         // Short broken stubs where the thickest limbs were (the thin ones snap off flush).
@@ -794,7 +797,7 @@ fn assemble(
         let path = &path;
         let rad = &trunk_r[start..];
         let color = |i: usize, _a: f32| bark_color(sp, path[i].y, h, i + start, seed);
-        let cap = |r: f32| cut_color(sp, r);
+        let cap = |r: f32| cut_color(rim, r);
         let tip = |_: f32| rgb(sp.bark_color, 0.8);
         b.tube(
             path,

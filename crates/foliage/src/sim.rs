@@ -701,9 +701,10 @@ impl RegionSim {
                             0.15 * plants[i].plant.size,
                         );
                         // Over a region's history most big snags came down whole and lie
-                        // rotting on the forest floor (in live play they just crumble).
+                        // rotting on the forest floor (in live play they just crumble); thinner
+                        // ones broke up as they fell.
                         let size = plants[i].plant.size;
-                        if grow && sp.is_tree() && size > 0.3 && self.rng.chance(0.7) {
+                        if grow && sp.is_tree() && size > 0.5 && self.rng.chance(0.75) {
                             logs.push(SimLog {
                                 entity: None,
                                 pos,

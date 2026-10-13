@@ -325,7 +325,8 @@ pub fn play_history(
         .any(|turn| {
             l.yaw = (yaw + turn).rem_euclid(TAU);
             let span = LogSpan::of(center, l, library);
-            !blocks_keep_clear(region, center, l, library)
+            span.within(region)
+                && !blocks_keep_clear(region, center, l, library)
                 && !stems
                     .iter()
                     .any(|&(p, r)| span.distance_to(p) < r + span.radius)
@@ -371,6 +372,16 @@ impl LogSpan {
             a,
             b: a + Vec2::new(log.yaw.cos(), log.yaw.sin()) * length,
             radius: (sp.trunk_radius_m * log.size).max(0.1),
+        }
+    }
+
+    /// Whether the tip stays inside the region (the butt always is, where the tree stood).
+    fn within(&self, region: &EcologyRegion) -> bool {
+        let [hx, hz] = region.half_extents.map(|h| h.max(0.1));
+        if region.round {
+            (self.b.x / hx).powi(2) + (self.b.y / hz).powi(2) < 0.9
+        } else {
+            self.b.x.abs() < hx - 1.0 && self.b.y.abs() < hz - 1.0
         }
     }
 
@@ -952,6 +963,7 @@ mod tests {
             .map(|l| LogSpan::of(DVec3::ZERO, l, &lib))
             .collect();
         for (i, a) in spans.iter().enumerate() {
+            assert!(a.within(&region));
             for b in &spans[i + 1..] {
                 assert!(a.distance_to_span(b) >= a.radius + b.radius);
             }

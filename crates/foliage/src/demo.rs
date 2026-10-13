@@ -178,8 +178,8 @@ fn lens_clearance() -> Vec<[f32; 3]> {
         .filter(|v| v.eye.y < 5.0)
         .map(|v| {
             let ahead = DVec2::new(v.target.x - v.eye.x, v.target.z - v.eye.z).normalize();
-            let c = DVec2::new(v.eye.x, v.eye.z) + ahead * 2.0;
-            [c.x as f32, c.y as f32, 2.5]
+            let c = DVec2::new(v.eye.x, v.eye.z) + ahead * 3.0;
+            [c.x as f32, c.y as f32, 3.5]
         })
         .collect()
 }
