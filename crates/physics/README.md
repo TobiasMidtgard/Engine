@@ -57,7 +57,10 @@ changing that one plugin line.
   Capsules against boxes are solved exactly (`src/capsule_box.rs`) for characters and
   `physics.shapecast`: Parry's GJK let a character sink 20 cm into a 25 m box when it stood
   within a few millimeters of the box's center, and meters into a 500 m one. Characters now
-  keep their 2 cm gap on boxes from 1 m to 10 km across.
+  keep their 2 cm gap on boxes from 1 m to 10 km across. A character running along a wall it
+  presses into keeps its whole slide, also when the wall moves: a cast that starts touching a
+  surface and moves along it is not a hit (it used to stop the slide every other step on a
+  kinematic wall).
 - **Events**: one `ContactEvent::Started` per touch with the impact impulse and a normal from
   `a` to `b`, one `Ended` when it stops; sensors too. Hard impacts also send `NoiseEvent` (AI
   hearing) and, against static ground, `GroundContact` (dents, dust, impact sounds).
