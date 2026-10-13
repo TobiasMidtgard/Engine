@@ -186,6 +186,30 @@ fn snow_drift(tp: vec3<f32>) -> f32 {
     return sum;
 }
 
+// Cliff faces eroded into ribs and runnels along the fall line, 8 m and 32 m across and 16
+// times as long (world y is up near the camera): the slope (world xyz) to tilt a rock face's
+// normal by, so cliffs read as fluted, broken faces, not smooth clay.
+fn rock_ribs(tp: vec3<f32>, pixel: f32) -> vec3<f32> {
+    var g = vec3<f32>(0.0);
+    var f = 1.0 / 8.0;
+    var amp = 0.6;
+    for (var o = 0; o < 2; o++) {
+        let fade = 1.0 - smoothstep(0.15 / f, 0.4 / f, pixel);
+        if (fade > 0.0) {
+            let per = vec3<f32>(4096.0 * f, 256.0 * f, 4096.0 * f);
+            let q = vec3<f32>(tp.x * f, tp.y * f / 16.0 + f32(o) * 5.0, tp.z * f);
+            let e = 0.1;
+            let h0 = pnoise3v(q, per);
+            let hx = pnoise3v(q + vec3<f32>(e, 0.0, 0.0), per);
+            let hz = pnoise3v(q + vec3<f32>(0.0, 0.0, e), per);
+            g += vec3<f32>(hx - h0, 0.0, hz - h0) / e * amp * fade;
+        }
+        f *= 0.25;
+        amp *= 1.6;
+    }
+    return g;
+}
+
 struct Crowns {
     cover: f32,        // the pixel's share of crown
     slope: vec2<f32>,  // the crown's slope there (x, z)
@@ -1007,6 +1031,18 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     let strata = sin(strata_h * 0.17) * 0.6 * (1.0 - smoothstep(4.0, 16.0, pixel))
         + sin(strata_h * 0.61 + 1.3) * 0.4 * (1.0 - smoothstep(1.0, 4.0, pixel));
     col[M_ROCK] = rock_col * (1.0 + strata * 0.1);
+    // Where water runs down cliffs it leaves streaks along the fall line, a few meters wide and
+    // tens of meters long: dark varnish, and here and there a pale mineral stain. (World y is
+    // up near the camera; elsewhere on a globe the streaks fade out.)
+    let steep = smoothstep(0.35, 0.7, slope) * smoothstep(0.7, 0.9, abs(up.y)) * vegetation
+        * (1.0 - smoothstep(8.0, 40.0, pixel));
+    if (steep > 0.0) {
+        let s1 = pnoise3v(vec3<f32>(tp.x * 0.25, tp.y * 0.015625, tp.z * 0.25), vec3<f32>(1024.0, 64.0, 1024.0));
+        let s2 = pnoise3v(vec3<f32>(tp.x * 0.0625, tp.y * 0.00390625 + 7.0, tp.z * 0.0625), vec3<f32>(256.0, 16.0, 256.0));
+        let streak = ((s1 - 0.5) * (1.0 - smoothstep(1.0, 8.0, pixel)) + (s2 - 0.5) * 1.4) * steep;
+        col[M_ROCK] *= mix(vec3<f32>(1.0), vec3<f32>(0.6, 0.58, 0.56), saturate(streak * 3.0 - 0.25))
+            * mix(1.0, 1.15, saturate(-streak * 3.0 - 0.6));
+    }
     let scree = (1.0 - rock) * saturate(smoothstep(rock_slope - 0.14, rock_slope - 0.04, slope) * 0.7 + alpine * 0.6 + stony_crest * 0.9);
     col[M_GRAVEL] = mix(mix(rock_col, planet.colors[C_SOIL].rgb, 0.35), mix(rock_col, col[M_SOIL], 0.6), 1.0 - vegetation);
     col[M_CONCRETE] = planet.colors[C_CONCRETE].rgb;
@@ -1098,6 +1134,12 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
                     ms[i].occlusion *= mix(1.0, mix(0.6, 1.0 - crown.crevice * 0.4, crown.cover), k);
                     ms[i].height = mix(ms[i].height, 0.5 + 0.5 * crown.cover, k);
                 }
+            }
+            // Cliff faces: ribs and runnels down the fall line.
+            if (i == M_ROCK && steep > 0.0) {
+                let g = rock_ribs(tp, pixel) * steep;
+                let nr = ms[i].normal;
+                ms[i].normal = normalize(nr - (g - nr * dot(g, nr)) * 0.5);
             }
             // Barren worlds' bare ground is powdery regolith, not the cracked earth of the
             // soil texture: most of its relief and pattern is smoothed away (small craters
