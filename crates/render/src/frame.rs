@@ -70,6 +70,9 @@ pub struct FrameUniform {
     pub far_shadow: [[f32; 4]; 4],
     /// Far shadow map: reach (m, 0 = off), texel size (m), clip depth per meter, array layer.
     pub far_shadow_params: [f32; 4],
+    /// Sky: the flat cloud layer on (1/0, `RenderSettings::sky_cloud_layer`), then two unused
+    /// slots and an unused w.
+    pub sky: [f32; 4],
 }
 
 /// Most [`SkyLightVolume`]s shaded per frame (nearest the camera first).
@@ -715,6 +718,12 @@ pub fn frame_uniform(world: &World, v: &ViewData) -> FrameUniform {
         volumetrics: crate::volumetrics::frame_params(settings, v),
         far_shadow: mat(v.far_shadow.view_proj),
         far_shadow_params: v.far_shadow.params(),
+        sky: [
+            if settings.sky_cloud_layer { 1.0 } else { 0.0 },
+            0.0,
+            0.0,
+            0.0,
+        ],
     }
 }
 
@@ -725,7 +734,8 @@ mod tests {
     #[test]
     fn frame_uniform_matches_wgsl_size() {
         // 7 mat4 + 15 vec4 + 4 mat4 + 3 vec4 + ground, sky occlusion, volumes, then the
-        // screen-space block (mat4 + 4 vec4), volumetric fog (vec4), far shadow (mat4 + vec4).
+        // screen-space block (mat4 + 4 vec4), volumetric fog (vec4), far shadow (mat4 + vec4),
+        // sky (vec4).
         assert_eq!(
             std::mem::size_of::<FrameUniform>(),
             7 * 64
@@ -739,6 +749,7 @@ mod tests {
                 + 64
                 + 5 * 16
                 + 64
+                + 16
                 + 16
         );
         assert_eq!(std::mem::size_of::<GpuSkyVolume>(), 80);

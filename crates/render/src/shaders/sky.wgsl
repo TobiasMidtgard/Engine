@@ -15,10 +15,11 @@ fn star_field(dir: vec3<f32>) -> vec3<f32> {
     return vec3(0.8, 0.85, 1.0) * smoothstep(0.25, 0.0, d) * brightness * twinkle * 0.05;
 }
 
-// Cheap 2D cloud layer on a spherical shell. Returns (radiance, coverage alpha).
+// Cheap 2D cloud layer on a spherical shell. Returns (radiance, coverage alpha). Off with
+// `RenderSettings::sky_cloud_layer` (frame.sky.x), for features that draw their own clouds.
 fn cloud_layer(dir: vec3<f32>, sky: vec3<f32>) -> vec4<f32> {
     let cover = frame.weather.z;
-    if (cover <= 0.01 || frame.planet.w <= 0.0) { return vec4(0.0); }
+    if (frame.sky.x < 0.5 || cover <= 0.01 || frame.planet.w <= 0.0) { return vec4(0.0); }
     let base_alt = 1500.0;
     let hit = ray_shell(vec3(0.0), frame.camera_world.w, dir, base_alt);
     var t = hit.y;

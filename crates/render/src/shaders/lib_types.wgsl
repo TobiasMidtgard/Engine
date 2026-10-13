@@ -48,6 +48,7 @@ struct Frame {
     volumetrics: vec4<f32>,        // volumetric fog range (m, 0 = off), 1 / depth scale (1/m), 1 / log2(1 + range / depth scale), depth slices
     far_shadow: mat4x4<f32>,       // camera-relative -> far shadow map clip space (big casters beyond the cascades)
     far_shadow_params: vec4<f32>,  // reach (m, 0 = off), texel size (m), clip depth per meter, shadow map layer
+    sky: vec4<f32>,                // the sky's flat cloud layer on (1/0), unused, unused, unused
 };
 
 // An indoor space (`SkyLightVolume`): sky light comes in only through its open faces.

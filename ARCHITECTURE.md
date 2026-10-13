@@ -355,7 +355,9 @@ scattering, after Hillaire 2020. Look-up tables (sunlight transmittance and mult
 recomputed when the planet or its air changes; the sky seen from the camera, every frame) make the
 sky cheap and physically consistent from the ground, from orbit and from the Moon. Clouds,
 fog and anything else lit by the sun should use `sun_transmittance(rel)` for the sunlight
-reaching a point.
+reaching a point. The sky draws its own flat cloud layer (a 2D deck 1.5 km up whose cover follows
+`WeatherState::cloud_cover`) in the sky and in the environment map; a feature that draws its own
+clouds turns it off with `RenderSettings::sky_cloud_layer = false` and blends over a clear sky.
 
 ## AI integration
 
