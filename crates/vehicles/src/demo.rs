@@ -155,6 +155,7 @@ fn moving(
         },
         Autopilot::new(mode),
     ));
+    commands.queue(move |world: &mut World| crate::wheels::set_rolling(world, e, speed));
     e
 }
 
@@ -252,13 +253,13 @@ pub fn spawn_track(commands: &mut Commands, center: DVec3) {
     );
     scenery::track::spawn(commands, center);
 
-    // Two sports cars racing round the oval.
+    // Two sports cars racing round the oval, cornering at 85 % of what their tires hold.
     let path = oval_path(center, SEGMENTS * 2);
     let race = |max_speed: f32| AutopilotMode::Drive {
         path: path.clone(),
         looped: true,
         max_speed,
-        lateral_g: 0.95,
+        lateral_g: 0.85,
     };
     let lift = DVec3::Y * presets::ride_height("sports_car");
     for (angle, speed, name, paint) in [
@@ -277,6 +278,7 @@ pub fn spawn_track(commands: &mut Commands, center: DVec3) {
             },
             Autopilot::new(race(46.0)),
         ));
+        commands.queue(move |world: &mut World| crate::wheels::set_rolling(world, e, speed));
     }
 
     // Rally car sliding round the dirt pad.
@@ -452,6 +454,24 @@ impl DemoView {
     }
 }
 
+/// `vehicles.place` arguments that put the vehicle `name` on the ground at `at`, nose along
+/// `nose`, moving at `velocity` and turning left at `yaw_rate_deg`.
+fn on_mark(
+    name: &str,
+    at: DVec3,
+    nose: Vec3,
+    velocity: Vec3,
+    yaw_rate_deg: f32,
+) -> serde_json::Value {
+    serde_json::json!({
+        "vehicle": name,
+        "at": [at.x, at.y, at.z],
+        "yaw_deg": nose.x.atan2(-nose.z).to_degrees(),
+        "velocity": [velocity.x, velocity.y, velocity.z],
+        "yaw_rate_deg": yaw_rate_deg,
+    })
+}
+
 /// Viewpoints for the showcase tour by zone (`track`, `airfield`, `spaceport`), for a demo
 /// built at `center` (the zone's center). The airfield views assume the showcase runway:
 /// from 600 m south of the zone's center to 600 m north.
@@ -461,27 +481,57 @@ pub fn views(zone: &str, center: DVec3) -> Vec<DemoView> {
         [p.x, p.y, p.z]
     };
     match zone {
-        "track" => vec![
-            DemoView::new(
-                "track_cars",
-                "Sports cars racing round the oval",
-                [156.0, 2.6, 34.0],
-                [128.0, 0.6, -4.0],
-            ),
-            DemoView::new(
-                "track_drift",
-                "Rally car drifting on the dirt pad",
-                [-42.0, 3.5, 4.0],
-                [-70.0, 0.8, -20.0],
-            )
-            .at(16.0, 6.0),
-            DemoView::new(
-                "track_jump",
-                "The kicker jump",
-                [-26.0, 3.0, 96.0],
-                [0.0, 1.5, 80.0],
-            ),
-        ],
+        // The cars are wherever their laps have taken them when the tour arrives, so each
+        // shot first puts its car on a mark the camera covers (paint and autopilot stay).
+        "track" => {
+            let on_oval = |name: &str, angle: f64, speed: f32| {
+                let dir = oval_direction(angle);
+                on_mark(name, oval_point(center, angle), dir, dir * speed, 0.0)
+            };
+            // Rally car on its drift circle, sliding at 10 m/s with the nose 30° into the
+            // turn (it circles counter-clockwise seen from above).
+            let pad = center + DVec3::new(-70.0, TRACK_SURFACE, -20.0);
+            let (r, phi) = (15.0f64, 136.0f64.to_radians());
+            let out = DVec3::new(phi.cos(), 0.0, phi.sin());
+            let tangent = Vec3::Y.cross(out.as_vec3());
+            let nose = Quat::from_rotation_y(30f32.to_radians()) * tangent;
+            let omega = (10.0 / r as f32).to_degrees();
+            let drift = on_mark("Rally car", pad + out * r, nose, tangent * 10.0, omega);
+            vec![
+                // From the gravel trap at the east turn's exit, the two cars coming through
+                // the apex with the sponsor boards behind them.
+                DemoView::new(
+                    "track_cars",
+                    "Sports cars racing round the oval",
+                    [142.4, 1.3, 29.3],
+                    [135.8, 0.9, 10.5],
+                )
+                .at(15.5, 3.2)
+                .call("vehicles.place", on_oval("Red car", -0.7, 30.0))
+                .call("vehicles.place", on_oval("Blue car", -0.95, 30.0)),
+                DemoView::new(
+                    "track_drift",
+                    "Rally car drifting on the dirt pad",
+                    [-53.0, 1.5, -1.0],
+                    [-64.0, 0.7, -6.5],
+                )
+                .at(16.0, 1.2)
+                .call("vehicles.place", drift),
+                // Behind the barrier just past the kicker, the car flying by in the morning sun
+                // with the kicker behind it.
+                DemoView::new(
+                    "track_jump",
+                    "The kicker jump",
+                    [-20.0, 1.8, 93.0],
+                    [-14.0, 2.0, 84.0],
+                )
+                .at(9.5, 1.4)
+                .call(
+                    "vehicles.place",
+                    on_oval("Red car", JUMP_ANGLE - 0.42, 40.0),
+                ),
+            ]
+        }
         "airfield" => {
             // A fresh plane lined up on the southern threshold for each shot, flying the
             // same circuit as the demo's planes once it is airborne.
@@ -588,6 +638,14 @@ mod tests {
                         "vehicles.spawn" => args.get("autopilot"),
                         "vehicles.autopilot" => args.get("mode"),
                         "entity.despawn" => None,
+                        "vehicles.place" => {
+                            for key in ["at", "velocity"] {
+                                serde_json::from_value::<[f64; 3]>(args[key].clone())
+                                    .unwrap_or_else(|e| panic!("{} {key}: {e}", v.key));
+                            }
+                            assert!(args["yaw_deg"].is_f64(), "{}", v.key);
+                            None
+                        }
                         other => panic!("{} calls unknown API {other}", v.key),
                     };
                     if let Some(mode) = mode {

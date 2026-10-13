@@ -17,19 +17,29 @@
 //! [`spawn_demo`] builds it around a point on the ground and [`demo_system`] (added by
 //! [`crate::WaterPlugin`]) drives it.
 
+pub mod materials;
+pub mod props;
+pub mod scenery;
+pub mod valley;
+
+pub use valley::{Valley, ValleyStream, spawn_valley, valley_views};
+
 use std::f32::consts::{FRAC_1_SQRT_2, PI, TAU};
 
-use engine_assets::Assets;
 use engine_core::math::noise;
 use engine_core::prelude::*;
-use engine_render::{Mesh, MeshRenderer, Shape, StandardMaterial, Vertex};
-use engine_world::{ContactKind, GroundContact, ProjectileTrace, WorldImpulse};
+use engine_core::tasks::{ComputeTaskPool, par_chunks_mut};
+use engine_render::{Mesh, Vertex};
+use engine_world::{ContactKind, GroundContact, ProjectileTrace, WorldImpulse, WorldShift};
 
 use crate::body::{RainShower, WaterBed, WaterBody, WaterOptics};
-use crate::buoyancy::{Buoyancy, Floating, Tether};
+use crate::buoyancy::{Buoyancy, Floating};
 use crate::flow::{FlowBed, FlowFill, FlowRegion, FlowSource};
 use crate::interact::WaterInteractor;
 use crate::state::SharedWater;
+use materials::Surface;
+use props::Part;
+use scenery::{Jetty, merged, spawn_buoy, spawn_jetty, spawn_motorboat, spawn_prop, spawn_rowboat};
 
 /// Still level of the tarn above the ground, meters.
 pub const LAKE_LEVEL: f32 = 5.5;
@@ -53,6 +63,8 @@ const FLOW_CELLS: u32 = 104;
 const FLOW_CELL: f32 = 0.5;
 /// Jetty direction from the lake center, radians.
 const JETTY_ANGLE: f32 = 1.31;
+/// Height of the wader's hips above its soles: where the entity rides.
+const WADER_HIP: f64 = 0.9;
 
 fn smooth(e0: f32, e1: f32, x: f32) -> f32 {
     let t = ((x - e0) / (e1 - e0)).clamp(0.0, 1.0);
@@ -128,11 +140,9 @@ pub fn tarn_height(x: f32, z: f32) -> f32 {
     let rp = pond_radius(to_pond.y.atan2(to_pond.x));
     let dp = to_pond.length();
     if dp < rp {
-        h = mix(
-            h,
-            0.06 + 0.9 * smooth(0.3 * rp, rp, dp),
-            1.0 - smooth(rp - 1.0, rp, dp),
-        );
+        // The basin meets the bank's crest (0.96) at the shore, so there is no step there.
+        let basin = 0.06 + 0.9 * smooth(0.3 * rp, rp, dp);
+        h = mix(h.max(0.96), basin, 1.0 - smooth(rp - 1.0, rp, dp));
     } else {
         h = h.max(0.96 * (1.0 - smooth(rp, rp + 4.0 + n * 1.5, dp)));
     }
@@ -235,38 +245,6 @@ fn ground_color(x: f32, z: f32, h: f32, normal: Vec3) -> Vec3 {
     c
 }
 
-/// A boulder about `size` meters across: a lumpy, flattened sphere, vertex-colored gray.
-fn rock_mesh(seed: u64, size: f32) -> Mesh {
-    let mut m = Shape::Sphere {
-        radius: size * 0.5,
-        segments: 14,
-    }
-    .mesh();
-    let s = seed as f64 * 17.3;
-    for v in &mut m.vertices {
-        let p = Vec3::from(v.position);
-        let d = p.normalize_or_zero();
-        let bump = noise::fbm2(
-            d.x as f64 * 1.7 + s,
-            (d.z as f64 + d.y as f64 * 0.7) * 1.7,
-            seed,
-            3,
-            2.0,
-            0.5,
-        );
-        let mut q = p * (1.0 + 0.3 * bump);
-        q.y *= 0.65;
-        if q.y < -size * 0.15 {
-            q.y = -size * 0.15 + (q.y + size * 0.15) * 0.3;
-        }
-        v.position = q.to_array();
-        let g = 0.85 + 0.3 * bump;
-        v.color = (srgb(0x86807a) * g).extend(1.0).to_array();
-    }
-    m.compute_normals();
-    m
-}
-
 /// The hill with the tarn, falls, stream and pond: a vertex-colored height mesh. Triangles
 /// that would lie on the ground plane are left out.
 pub fn tarn_mesh(spacing: f32) -> Mesh {
@@ -298,7 +276,7 @@ pub fn tarn_mesh(spacing: f32) -> Mesh {
             // Where the hill meets the plain it sinks smoothly under the ground plane.
             let y = h - 0.04 * (1.0 - smooth(0.0, 0.12, h));
             vertices.push(
-                Vertex::new(Vec3::new(x, y, z), normal, Vec2::new(x, z) * 0.25)
+                Vertex::new(Vec3::new(x, y, z), normal, Vec2::new(x, z))
                     .with_color(color.extend(1.0)),
             );
         }
@@ -324,89 +302,6 @@ pub fn tarn_mesh(spacing: f32) -> Mesh {
     Mesh::new(vertices, indices)
 }
 
-/// A boat hull along +x: `length`, `beam` and `depth` in meters, centered on the origin,
-/// open on top (draw it double-sided).
-pub fn hull_mesh(length: f32, beam: f32, depth: f32) -> Mesh {
-    const SECTIONS: u32 = 18;
-    const AROUND: u32 = 12;
-    let mut vertices = Vec::new();
-    let mut indices = Vec::new();
-    for s in 0..=SECTIONS {
-        let t = s as f32 / SECTIONS as f32;
-        let x = (t - 0.5) * length;
-        // Full beam a bit aft of the middle, a transom at the stern, a point at the bow.
-        let width = if t < 0.4 {
-            0.8 + 0.2 * (t / 0.4 * PI * 0.5).sin()
-        } else {
-            ((t - 0.4) / 0.6 * PI * 0.5).cos().max(0.0).powf(0.8)
-        } * beam
-            * 0.5;
-        let keel = -depth * 0.5 + depth * 0.55 * smooth(0.65, 1.0, t).powf(1.5);
-        let top = depth * 0.5 + depth * 0.25 * smooth(0.6, 1.0, t);
-        for k in 0..=AROUND {
-            let phi = (k as f32 / AROUND as f32 - 0.5) * PI;
-            let z = width * phi.sin();
-            let y = keel + (top - keel) * (1.0 - phi.cos().max(0.0).powf(0.35));
-            vertices.push(Vertex::new(
-                Vec3::new(x, y, z),
-                Vec3::Y,
-                Vec2::new(t, k as f32 / AROUND as f32),
-            ));
-        }
-    }
-    let row = AROUND + 1;
-    for s in 0..SECTIONS {
-        for k in 0..AROUND {
-            let a = s * row + k;
-            let (b, c, d) = (a + 1, a + row, a + row + 1);
-            indices.extend_from_slice(&[a, b, c, b, d, c]);
-        }
-    }
-    // Transom.
-    let center = vertices.len() as u32;
-    let stern_top = vertices[0].position[1];
-    vertices.push(Vertex::new(
-        Vec3::new(-length * 0.5, stern_top * 0.2, 0.0),
-        -Vec3::X,
-        Vec2::ZERO,
-    ));
-    for k in 0..AROUND {
-        indices.extend_from_slice(&[center, k + 1, k]);
-    }
-    let mut mesh = Mesh::new(vertices, indices);
-    mesh.compute_normals();
-    mesh
-}
-
-/// `shape`'s mesh moved by `transform` and tinted `color` (linear).
-fn part(shape: Shape, transform: Transform, color: Vec3) -> Mesh {
-    let mut m = shape.mesh().with_vertex_color(color.extend(1.0));
-    m.transform(&Mat4::from_scale_rotation_translation(
-        transform.scale,
-        transform.rotation,
-        transform.translation.as_vec3(),
-    ));
-    m
-}
-
-fn tinted(mut mesh: Mesh, color: Vec3) -> Mesh {
-    mesh = mesh.with_vertex_color(color.extend(1.0));
-    mesh
-}
-
-/// Attach a mesh to `entity` once the world has a mesh store (it may not, in tests).
-fn add_mesh(commands: &mut Commands, entity: Entity, mesh: Mesh, material: StandardMaterial) {
-    commands.queue(move |world: &mut World| {
-        let Some(mut meshes) = world.get_resource_mut::<Assets<Mesh>>() else {
-            return;
-        };
-        let handle = meshes.add(mesh);
-        if let Ok(mut e) = world.get_entity_mut(entity) {
-            e.insert(MeshRenderer::new(handle, material));
-        }
-    });
-}
-
 /// What a demo entity does.
 #[derive(Component, Debug, Clone, Copy)]
 pub enum DemoRole {
@@ -430,6 +325,23 @@ pub enum DemoRole {
     Log { start: DVec3 },
 }
 
+impl DemoRole {
+    /// Move the places this role keeps into the frame after a world shift.
+    pub fn shift(&mut self, s: &WorldShift) {
+        match self {
+            Self::Motorboat { center, .. } | Self::Swimmer { center, .. } => {
+                *center = s.point(*center)
+            }
+            Self::Wader { from, to, .. } => {
+                *from = s.point(*from);
+                *to = s.point(*to);
+            }
+            Self::DropBlock { home } => *home = s.point(*home),
+            Self::Log { start } => *start = s.point(*start),
+        }
+    }
+}
+
 /// The demo's clock and timers.
 #[derive(Resource, Debug)]
 pub struct DemoState {
@@ -445,19 +357,199 @@ pub struct DemoState {
     rng: Rng,
 }
 
+/// A view of the test area for tours and galleries: eye and target relative to its center.
+#[derive(Debug, Clone, Copy)]
+pub struct DemoView {
+    pub key: &'static str,
+    pub name: &'static str,
+    pub eye: [f64; 3],
+    pub target: [f64; 3],
+    pub hour: f32,
+    /// Simulated seconds to wait on arriving before the shot.
+    pub warmup_secs: f32,
+}
+
+/// The test area's close-ups, one per thing it tests that the overview can't show.
+pub const VIEWS: &[DemoView] = &[
+    DemoView {
+        key: "water_shore",
+        name: "Tarn shore: waves, refraction and the moored rowboat",
+        eye: [-1.5, 7.3, 30.5],
+        target: [-2.0, 5.0, 0.0],
+        hour: 16.5,
+        warmup_secs: 3.0,
+    },
+    DemoView {
+        key: "water_falls",
+        name: "Water spilling from the tarn over the falls",
+        eye: [34.5, 3.6, 33.0],
+        target: [27.0, 4.2, 27.4],
+        hour: 16.5,
+        warmup_secs: 3.0,
+    },
+    DemoView {
+        key: "water_wake",
+        name: "Motorboat wake, swimmer and floating blocks",
+        eye: [-3.0, 11.0, 26.0],
+        target: [-5.0, 5.5, -3.0],
+        hour: 16.5,
+        warmup_secs: 3.0,
+    },
+    DemoView {
+        key: "water_under",
+        name: "Under the tarn: caustics and light shafts",
+        eye: [-2.0, 3.6, 7.0],
+        target: [5.0, 4.6, 17.5],
+        hour: 16.5,
+        warmup_secs: 3.0,
+    },
+    DemoView {
+        key: "water_pond",
+        name: "The stream filling the pond below the falls",
+        eye: [56.0, 2.0, 38.0],
+        target: [46.7, 0.3, 46.7],
+        hour: 16.5,
+        warmup_secs: 3.0,
+    },
+];
+
 /// Build the water test area with its center at `origin` (on the ground).
 pub fn spawn_demo(commands: &mut Commands, origin: DVec3) {
+    spawn_demo_with(commands, origin, DemoOptions::default());
+}
+
+/// How [`spawn_demo_with`] builds the area.
+#[derive(Debug, Clone, Copy)]
+pub struct DemoOptions {
+    /// Build the hill as the area's own mesh. Turn off when the world's terrain already has
+    /// it (from [`area_height`]), so footsteps, physics and foliage see the real ground.
+    pub ground_mesh: bool,
+}
+
+impl Default for DemoOptions {
+    fn default() -> Self {
+        Self { ground_mesh: true }
+    }
+}
+
+/// Half the side of the square the area's hill covers, meters from its center. Outside it the
+/// ground is the plain at the center's height.
+pub const AREA_HALF_SIZE: f32 = 66.0;
+
+/// Ground height of the area at `x`, `z` (meters from its center) above the center's height:
+/// the hill, the tarn's bed, the ravine and the pond; 0 on the plain around it. A world's
+/// terrain can add this to its own ground at the zone (and pass `ground_mesh: false`).
+pub fn area_height(x: f32, z: f32) -> f32 {
+    if x.abs() > AREA_HALF_SIZE || z.abs() > AREA_HALF_SIZE {
+        return 0.0;
+    }
+    // The hill fades out over the last few meters of the square.
+    let edge = 1.0 - smooth(AREA_HALF_SIZE - 6.0, AREA_HALF_SIZE, x.abs().max(z.abs()));
+    let h = tarn_height(x, z);
+    (h * smooth(0.0, 0.12, h)).max(0.0) * edge
+}
+
+/// What the area's ground is at `x`, `z` (meters from its center), for footstep sounds,
+/// grip and where plants may grow.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AreaSurface {
+    Grass,
+    Dirt,
+    Rock,
+    Sand,
+    Gravel,
+    Mud,
+    /// Under the tarn, the stream or the pond.
+    Underwater,
+}
+
+/// The ground type at `x`, `z` (meters from the area's center).
+pub fn area_surface(x: f32, z: f32) -> AreaSurface {
+    let h = tarn_height(x, z);
+    let e = 0.5;
+    let normal = Vec3::new(
+        tarn_height(x - e, z) - tarn_height(x + e, z),
+        2.0 * e,
+        tarn_height(x, z - e) - tarn_height(x, z + e),
+    )
+    .normalize();
+    let r = (x * x + z * z).sqrt();
+    let rs = shore_radius(z.atan2(x));
+    let along = x * OUTLET.x + z * OUTLET.y;
+    let across = (x * OUTLET.y - z * OUTLET.x).abs();
+    let to_pond = Vec2::new(x, z) - OUTLET * POND_AT;
+    let near_pond = to_pond.length() < pond_radius(to_pond.y.atan2(to_pond.x)) + 1.5;
+    if (r < rs && h < LAKE_LEVEL) || (near_pond && h < POND_LEVEL) {
+        return AreaSurface::Underwater;
+    }
+    if along > 30.0 && along < POND_AT && across < 3.0 && h - channel_bed(along) < 0.4 {
+        return if h - channel_bed(along) < 0.08 {
+            AreaSurface::Underwater
+        } else {
+            AreaSurface::Gravel
+        };
+    }
+    if near_pond && h < POND_LEVEL + 0.3 {
+        return AreaSurface::Mud;
+    }
+    if r < rs + 3.5 && h < LAKE_LEVEL + 0.7 {
+        return AreaSurface::Sand;
+    }
+    let steep = 1.0 - normal.y;
+    if steep > 0.42 {
+        AreaSurface::Rock
+    } else if steep > 0.22 {
+        AreaSurface::Dirt
+    } else {
+        AreaSurface::Grass
+    }
+}
+
+/// The test area's rock shapes (seed, size built at): small ones first, then
+/// [`SMALL_ROCKS`].. large ones. Each boulder reuses one, scaled and turned.
+const ROCKS: [(u64, f32); 8] = [
+    (7, 1.0),
+    (8, 1.0),
+    (9, 1.0),
+    (10, 1.0),
+    (11, 1.0),
+    (12, 2.0),
+    (13, 2.0),
+    (14, 2.0),
+];
+const SMALL_ROCKS: usize = 5;
+
+/// Build [`ROCKS`] (a few seconds of work on one core), on the compute pool when there is one.
+fn rock_shapes() -> Vec<Vec<Part>> {
+    let mut built: Vec<Option<Vec<Part>>> = ROCKS.iter().map(|_| None).collect();
+    let build = |i: usize, slot: &mut [Option<Vec<Part>>]| {
+        let (seed, size) = ROCKS[i];
+        slot[0] = Some(props::boulder(seed, size));
+    };
+    if ComputeTaskPool::try_get().is_some() {
+        par_chunks_mut(&mut built, 1, build);
+    } else {
+        for (i, slot) in built.chunks_mut(1).enumerate() {
+            build(i, slot);
+        }
+    }
+    built.into_iter().flatten().collect()
+}
+
+/// [`spawn_demo`] with options.
+pub fn spawn_demo_with(commands: &mut Commands, origin: DVec3, options: DemoOptions) {
     let at = |x: f32, y: f32, z: f32| origin + DVec3::new(x as f64, y as f64, z as f64);
     let polar = |angle: f32, r: f32| Vec2::new(angle.cos(), angle.sin()) * r;
-    let mat = |hex: u32, rough: f32| StandardMaterial::hex(hex).with_roughness(rough);
 
     // The hill, tarn bed, falls, stream and pond.
-    let mut ground = StandardMaterial::color(1.0, 1.0, 1.0).with_roughness(0.92);
-    ground.reflectance = 0.35;
-    let hill = commands
-        .spawn((Name::new("Tarn hill"), Transform::from_translation(origin)))
-        .id();
-    add_mesh(commands, hill, tarn_mesh(0.5), ground);
+    if options.ground_mesh {
+        spawn_prop(
+            commands,
+            "Tarn hill",
+            Transform::from_translation(origin),
+            vec![Part::new(tarn_mesh(0.5), Surface::Ground)],
+        );
+    }
 
     // The tarn.
     commands.spawn((
@@ -498,53 +590,27 @@ pub fn spawn_demo(commands: &mut Commands, origin: DVec3) {
             fills: vec![FlowFill {
                 at: (pond - FLOW_CORNER).to_array(),
                 level: POND_LEVEL + 0.02,
+                ..Default::default()
             }],
             prewarm_s: 40.0,
             ..Default::default()
         },
     ));
 
-    // The culvert the pond's spill ditch drains into.
-    let culvert = OUTLET * (DITCH_TO - 0.2);
-    let culvert_y = tarn_height(culvert.x, culvert.y);
-    commands.spawn((
-        Name::new("Culvert"),
-        Transform::from_translation(at(culvert.x, culvert_y + 0.25, culvert.y))
-            .with_rotation(Quat::from_rotation_y(-PI * 0.25) * Quat::from_rotation_z(PI * 0.5)),
-        MeshRenderer::new(
-            Shape::Torus {
-                radius: 0.38,
-                tube: 0.09,
-                segments: 20,
-            },
-            mat(0x9a968e, 0.8),
-        ),
-    ));
-    commands.spawn((
-        Transform::from_translation(at(culvert.x, culvert_y + 0.25, culvert.y))
-            .with_rotation(Quat::from_rotation_y(-PI * 0.25) * Quat::from_rotation_z(PI * 0.5)),
-        MeshRenderer::new(
-            Shape::Cylinder {
-                radius: 0.36,
-                height: 0.12,
-                segments: 20,
-            },
-            mat(0x0e0d0c, 1.0),
-        ),
-    ));
-    let wall = OUTLET * (DITCH_TO + 0.15);
-    commands.spawn((
-        Transform::from_translation(at(wall.x, culvert_y + 0.2, wall.y))
-            .with_rotation(Quat::from_rotation_y(-PI * 0.25)),
-        MeshRenderer::new(
-            Shape::Cuboid {
-                size: [0.3, 1.0, 3.2],
-            },
-            mat(0x8e8a82, 0.85),
-        ),
-    ));
+    // The culvert the pond's spill ditch drains into: its mouth faces back up the ditch and
+    // the pipe runs on into the bank.
+    let culvert = OUTLET * (DITCH_TO - 0.1);
+    let invert = tarn_height(culvert.x, culvert.y) - 0.05;
+    spawn_prop(
+        commands,
+        "Culvert",
+        Transform::from_translation(at(culvert.x, invert + 0.38, culvert.y))
+            .with_rotation(Quat::from_rotation_y(PI * 0.75)),
+        props::culvert(),
+    );
 
     // Boulders: by the falls and down the ravine, on the rim, and in the shallows.
+    let rocks = rock_shapes();
     let mut rng = Rng::new(0xB01D);
     let side_of = Vec2::new(OUTLET.y, -OUTLET.x);
     let mut boulders = 0;
@@ -574,211 +640,106 @@ pub fn spawn_demo(commands: &mut Commands, origin: DVec3) {
             }
         };
         boulders += 1;
-        let e = commands
-            .spawn((
-                Name::new("Boulder"),
-                Transform::from_translation(at(p.x, tarn_height(p.x, p.y) + size * 0.08, p.y))
-                    .with_rotation(Quat::from_rotation_y(rng.range(0.0, TAU))),
-            ))
-            .id();
-        add_mesh(
+        // One of the shapes for its size class, stretched a little so no two look alike.
+        let (shape, built) = if size < 1.5 {
+            (k % SMALL_ROCKS, 1.0)
+        } else {
+            (SMALL_ROCKS + k % (ROCKS.len() - SMALL_ROCKS), 2.0)
+        };
+        let stretch = Vec3::new(
+            rng.range(0.85, 1.15),
+            rng.range(0.8, 1.1),
+            rng.range(0.85, 1.15),
+        ) * (size / built);
+        let parts = rocks[shape]
+            .iter()
+            .map(|p| Part {
+                mesh: p.mesh.clone(),
+                surface: p.surface,
+                double_sided: p.double_sided,
+            })
+            .collect();
+        // Half buried: the flat bed goes into the ground.
+        spawn_prop(
             commands,
-            e,
-            rock_mesh(k as u64 + 7, size),
-            mat(0xffffff, 0.85),
+            "Boulder",
+            Transform::from_translation(at(p.x, tarn_height(p.x, p.y) - size * 0.05, p.y))
+                .with_rotation(Quat::from_rotation_y(rng.range(0.0, TAU))),
+            merged([(parts, Mat4::from_scale(stretch))]),
         );
     }
 
-    // The jetty: planks on posts, from the shore out over the deep water.
+    // The jetty: decking on piles, from the bank out over the deep water.
     let jdir = polar(JETTY_ANGLE, 1.0);
     let jside = Vec2::new(-jdir.y, jdir.x);
     let shore = shore_radius(JETTY_ANGLE);
-    let deck = LAKE_LEVEL + 0.45;
-    let wood = mat(0x7a5634, 0.85);
-    let jetty_len = 12.0;
-    let yaw = -JETTY_ANGLE;
-    for k in 0..24 {
-        let r = shore + 1.0 - k as f32 * 0.55;
-        let p = jdir * r;
-        commands.spawn((
-            Transform::from_translation(at(p.x, deck, p.y))
-                .with_rotation(Quat::from_rotation_y(yaw)),
-            MeshRenderer::new(
-                Shape::Cuboid {
-                    size: [0.48, 0.07, 2.0],
-                },
-                if k % 3 == 1 { mat(0x6e4c2e, 0.9) } else { wood },
-            ),
-        ));
-    }
-    for k in 0..5 {
-        let r = shore + 0.5 - k as f32 * (jetty_len / 4.0);
-        for side in [-0.95f32, 0.95] {
-            let p = jdir * r + jside * side;
-            let bottom = tarn_height(p.x, p.y);
-            let height = deck - bottom + 0.2;
-            commands.spawn((
-                Transform::from_translation(at(p.x, bottom + height * 0.5 - 0.1, p.y)),
-                MeshRenderer::new(
-                    Shape::Cylinder {
-                        radius: 0.11,
-                        height,
-                        segments: 10,
-                    },
-                    mat(0x4a3a2a, 0.9),
-                ),
-            ));
-        }
-    }
-    let jetty_end = jdir * (shore + 0.5 - jetty_len);
+    let deck = LAKE_LEVEL + 0.5;
+    let jetty_len = 13.0;
+    let bed = move |x: f64, z: f64| {
+        origin.y + tarn_height((x - origin.x) as f32, (z - origin.z) as f32) as f64
+    };
+    let land = jdir * (shore + 1.0);
+    spawn_jetty(
+        commands,
+        &Jetty {
+            shore: at(land.x, deck, land.y),
+            dir: -jdir.as_dvec2(),
+            length: jetty_len,
+            water_level: origin.y + LAKE_LEVEL as f64,
+            bed: &bed,
+            seed: 0x1E77,
+        },
+    );
+    let jetty_end = jdir * (shore + 1.0 - jetty_len);
 
     // A rowboat moored at the end of the jetty.
     let row_at = jetty_end + jside * 2.6;
-    let rowboat = {
-        let mut m = tinted(hull_mesh(3.6, 1.35, 0.6), Vec3::ONE);
-        for x in [-0.7f32, 0.5] {
-            m.merge(&part(
-                Shape::Cuboid {
-                    size: [0.28, 0.05, 1.15],
-                },
-                Transform::from_xyz(x as f64, 0.12, 0.0),
-                srgb(0xc9b28a),
-            ));
-        }
-        m
-    };
-    let e = commands
-        .spawn((
-            Name::new("Rowboat"),
-            Transform::from_translation(at(row_at.x, LAKE_LEVEL + 0.1, row_at.y))
-                .with_rotation(Quat::from_rotation_y(-JETTY_ANGLE + PI * 0.5)),
-            Buoyancy::new(Vec3::new(1.7, 0.3, 0.6), 420.0)
-                .with_fill(0.45)
-                .with_probes(3, 2),
-            Floating::default(),
-            Tether {
-                anchor: at(jetty_end.x, deck, jetty_end.y),
-                length_m: 2.8,
-                stiffness: 900.0,
-            },
-            WaterInteractor::new(0.6).with_wake(0.6),
-        ))
-        .id();
-    let mut hull = mat(0x8c5a32, 0.7);
-    hull.double_sided = true;
-    add_mesh(commands, e, rowboat, hull);
+    spawn_rowboat(
+        commands,
+        at(row_at.x, LAKE_LEVEL, row_at.y),
+        -JETTY_ANGLE + PI * 0.5,
+        at(jetty_end.x, deck, jetty_end.y),
+    );
 
     // A motorboat doing laps.
     let lap_center = Vec2::new(-5.0, -3.0);
     let lap_radius = 12.0;
     let start = lap_center + Vec2::new(lap_radius, 0.0);
-    let motorboat = {
-        let mut m = tinted(hull_mesh(5.2, 2.0, 0.9), srgb(0xf2f2ee));
-        m.merge(&part(
-            Shape::Cuboid {
-                size: [2.4, 0.06, 1.75],
-            },
-            Transform::from_xyz(0.9, 0.42, 0.0),
-            srgb(0xa0703e),
-        ));
-        m.merge(&part(
-            Shape::Cuboid {
-                size: [0.1, 0.45, 1.5],
-            },
-            Transform::from_xyz(-0.15, 0.62, 0.0).with_rotation(Quat::from_rotation_z(-0.5)),
-            srgb(0x1c2a33),
-        ));
-        m.merge(&part(
-            Shape::Cuboid {
-                size: [0.45, 0.6, 0.35],
-            },
-            Transform::from_xyz(-2.65, 0.0, 0.0),
-            srgb(0x222222),
-        ));
-        m
-    };
-    let e = commands
-        .spawn((
-            Name::new("Motorboat"),
-            Transform::from_translation(at(start.x, LAKE_LEVEL + 0.1, start.y))
-                .with_rotation(Quat::from_rotation_y(-PI * 0.5)),
-            Buoyancy {
-                drag: 0.12,
-                angular_drag: 0.8,
-                ..Buoyancy::new(Vec3::new(2.4, 0.45, 0.9), 380.0)
-                    .with_fill(0.5)
-                    .with_probes(3, 2)
-            },
-            Floating::default(),
-            WaterInteractor::new(0.9).with_wake(2.5),
-            DemoRole::Motorboat {
-                center: at(lap_center.x, LAKE_LEVEL, lap_center.y),
-                radius: lap_radius,
-                thrust: 5200.0,
-            },
-        ))
-        .id();
-    let mut hull = mat(0xffffff, 0.35);
-    hull.double_sided = true;
-    add_mesh(commands, e, motorboat, hull);
+    let motorboat = spawn_motorboat(commands, at(start.x, LAKE_LEVEL, start.y), -PI * 0.5);
+    commands.entity(motorboat).insert(DemoRole::Motorboat {
+        center: at(lap_center.x, LAKE_LEVEL, lap_center.y),
+        radius: lap_radius,
+        thrust: 5200.0,
+    });
 
     // Buoys marking a swimming area, on ropes to the bottom.
     for k in 0..5 {
         let p = polar(0.55 + k as f32 * 0.2, 14.0);
-        let buoy = {
-            let mut m = part(
-                Shape::Sphere {
-                    radius: 0.32,
-                    segments: 14,
-                },
-                Transform::IDENTITY,
-                srgb(if k % 2 == 0 { 0xd8361e } else { 0xf0f0ea }),
-            );
-            m.merge(&part(
-                Shape::Cone {
-                    radius: 0.12,
-                    height: 0.5,
-                    segments: 10,
-                },
-                Transform::from_xyz(0.0, 0.45, 0.0),
-                srgb(0xd8361e),
-            ));
-            m
-        };
-        let e = commands
-            .spawn((
-                Name::new("Buoy"),
-                Transform::from_translation(at(p.x, LAKE_LEVEL + 0.3, p.y)),
-                Buoyancy::sphere(0.32, 220.0),
-                Floating::default(),
-                Tether {
-                    anchor: at(p.x, tarn_height(p.x, p.y), p.y),
-                    length_m: 0.6,
-                    stiffness: 300.0,
-                },
-            ))
-            .id();
-        add_mesh(commands, e, buoy, mat(0xffffff, 0.45));
+        spawn_buoy(
+            commands,
+            at(p.x, LAKE_LEVEL, p.y),
+            at(p.x, tarn_height(p.x, p.y), p.y),
+            k,
+        );
     }
 
     // Density blocks: cork, pine, ice and concrete, dropped side by side off the jetty.
     let blocks = [
-        ("Cork block", 240.0, 0xc49a6c, 0.8),
-        ("Pine block", 520.0, 0xd9b77e, 0.7),
-        ("Ice block", 917.0, 0xd6eef5, 0.08),
-        ("Concrete block", 2400.0, 0x8f8b85, 0.9),
+        ("Cork block", 240.0, Surface::Cork),
+        ("Pine block", 520.0, Surface::Pine),
+        ("Ice block", 917.0, Surface::Ice),
+        ("Concrete block", 2400.0, Surface::BlockConcrete),
     ];
-    for (k, (name, density, color, rough)) in blocks.into_iter().enumerate() {
+    for (k, (name, density, surface)) in blocks.into_iter().enumerate() {
         let p = jetty_end + jdir * 1.5 - jside * 2.4 + jdir * (k as f32 * 1.1 - 1.6);
         let home = at(p.x, LAKE_LEVEL + 2.5, p.y);
-        let mut m = mat(color, rough);
-        if density == 917.0 {
-            m = m.with_alpha(0.75);
-        }
-        commands.spawn((
-            Name::new(name),
+        let e = spawn_prop(
+            commands,
+            name,
             Transform::from_translation(home),
-            MeshRenderer::new(Shape::Cuboid { size: [0.5; 3] }, m),
+            vec![Part::new(props::block(0.5), surface)],
+        );
+        commands.entity(e).insert((
             Buoyancy::new(Vec3::splat(0.25), density),
             Floating::default(),
             DemoRole::DropBlock { home },
@@ -786,39 +747,21 @@ pub fn spawn_demo(commands: &mut Commands, origin: DVec3) {
     }
 
     // A swimmer doing lengths of the buoyed area, and a wader in the shallows.
-    let swimmer = {
-        let mut m = part(
-            Shape::Capsule {
-                radius: 0.17,
-                height: 1.25,
-                segments: 12,
-            },
-            Transform::from_rotation(Quat::from_rotation_z(PI * 0.5)),
-            srgb(0x1f4fa8),
-        );
-        m.merge(&part(
-            Shape::Sphere {
-                radius: 0.12,
-                segments: 12,
-            },
-            Transform::from_xyz(0.78, 0.04, 0.0),
-            srgb(0xc68e6a),
-        ));
-        m
-    };
-    let e = commands
-        .spawn((
-            Name::new("Swimmer"),
-            Transform::from_translation(at(10.0, LAKE_LEVEL, 12.0)),
-            WaterInteractor::new(0.35).with_wake(1.2),
-            DemoRole::Swimmer {
-                center: at(8.0, LAKE_LEVEL, 10.0),
-                radius: 5.5,
-                speed: 1.1,
-            },
-        ))
-        .id();
-    add_mesh(commands, e, swimmer, mat(0xffffff, 0.5));
+    let e = spawn_prop(
+        commands,
+        "Swimmer",
+        Transform::from_translation(at(10.0, LAKE_LEVEL, 12.0)),
+        // The water line runs along the swimmer's back, 0.15 m above the model's middle.
+        merged([(props::swimmer(), Mat4::from_translation(Vec3::Y * -0.09))]),
+    );
+    commands.entity(e).insert((
+        WaterInteractor::new(0.35).with_wake(1.2),
+        DemoRole::Swimmer {
+            center: at(8.0, LAKE_LEVEL, 10.0),
+            radius: 5.5,
+            speed: 1.1,
+        },
+    ));
 
     let wade_angle = 0.25f32;
     let (a, b) = (wade_angle - 0.12, wade_angle + 0.12);
@@ -826,78 +769,46 @@ pub fn spawn_demo(commands: &mut Commands, origin: DVec3) {
         let p = polar(angle, shore_radius(angle) - 2.6);
         at(p.x, tarn_height(p.x, p.y), p.y)
     };
-    let wader = {
-        let mut m = part(
-            Shape::Capsule {
-                radius: 0.2,
-                height: 1.0,
-                segments: 12,
-            },
-            Transform::from_xyz(0.0, 0.25, 0.0),
-            srgb(0xe2b31c),
-        );
-        m.merge(&part(
-            Shape::Cylinder {
-                radius: 0.17,
-                height: 0.85,
-                segments: 12,
-            },
-            Transform::from_xyz(0.0, -0.45, 0.0),
-            srgb(0x2f3a2a),
-        ));
-        m.merge(&part(
-            Shape::Sphere {
-                radius: 0.12,
-                segments: 12,
-            },
-            Transform::from_xyz(0.0, 0.88, 0.0),
-            srgb(0xc68e6a),
-        ));
-        m
-    };
-    let e = commands
-        .spawn((
-            Name::new("Wader"),
-            Transform::from_translation(wade(a) + DVec3::Y * 0.9),
-            WaterInteractor::new(0.25).with_wake(0.8),
-            DemoRole::Wader {
-                from: wade(a),
-                to: wade(b),
-                speed: 0.9,
-            },
-        ))
-        .id();
-    add_mesh(commands, e, wader, mat(0xffffff, 0.6));
+    let e = spawn_prop(
+        commands,
+        "Wader",
+        Transform::from_translation(wade(a) + DVec3::Y * WADER_HIP),
+        // The entity rides at the hips (where it meets the water); the soles are below.
+        merged([(
+            props::wader(),
+            Mat4::from_translation(Vec3::Y * -WADER_HIP as f32),
+        )]),
+    );
+    commands.entity(e).insert((
+        WaterInteractor::new(0.25).with_wake(0.8),
+        DemoRole::Wader {
+            from: wade(a),
+            to: wade(b),
+            speed: 0.9,
+        },
+    ));
 
     // Logs that ride the stream over the falls into the pond.
     for k in 0..3 {
         let s = 31.0 + k as f32 * 2.5;
         let p = OUTLET * s + Vec2::new(OUTLET.y, -OUTLET.x) * (k as f32 - 1.0) * 0.6;
         let start = at(p.x, channel_bed(s) + 0.5, p.y);
-        let log = part(
-            Shape::Cylinder {
-                radius: 0.17,
-                height: 1.7,
-                segments: 10,
-            },
-            Transform::from_rotation(Quat::from_rotation_z(PI * 0.5)),
-            srgb(0x6b4a2e),
+        let e = spawn_prop(
+            commands,
+            "Log",
+            Transform::from_translation(start)
+                .with_rotation(Quat::from_rotation_y(-PI * 0.25 + 0.3 * k as f32)),
+            props::log(1.7, 0.17, k as u64),
         );
-        let e = commands
-            .spawn((
-                Name::new("Log"),
-                Transform::from_translation(start)
-                    .with_rotation(Quat::from_rotation_y(-PI * 0.25 + 0.3 * k as f32)),
-                Buoyancy {
-                    fill: PI / 4.0,
-                    ..Buoyancy::new(Vec3::new(0.85, 0.17, 0.17), 560.0).with_probes(3, 1)
-                },
-                Floating::default(),
-                WaterInteractor::new(0.25).with_wake(0.4),
-                DemoRole::Log { start },
-            ))
-            .id();
-        add_mesh(commands, e, log, mat(0xffffff, 0.85));
+        commands.entity(e).insert((
+            Buoyancy {
+                fill: PI / 4.0,
+                ..Buoyancy::new(Vec3::new(0.85, 0.17, 0.17), 560.0).with_probes(3, 1)
+            },
+            Floating::default(),
+            WaterInteractor::new(0.25).with_wake(0.4),
+            DemoRole::Log { start },
+        ));
     }
 
     // Rain over the far half of the tarn and over the pond and the grass around it.
@@ -1036,7 +947,7 @@ pub fn demo_system(
                 let local = feet - origin;
                 let ground = tarn_height(local.x as f32, local.z as f32) as f64;
                 let feet = DVec3::new(feet.x, ground, feet.z);
-                tf.translation = feet + DVec3::Y * 0.9;
+                tf.translation = feet + DVec3::Y * WADER_HIP;
                 let dir = ((to - from) * if phase < 1.0 { 1.0 } else { -1.0 }).as_vec3();
                 tf.rotation = Quat::from_rotation_y(yaw_between(Vec3::X, dir));
                 if let Some(left) = step {
@@ -1154,6 +1065,21 @@ mod tests {
         let pond = OUTLET * POND_AT;
         assert!(tarn_height(pond.x, pond.y) > 0.02);
         assert!(tarn_height(pond.x, pond.y) < POND_LEVEL - 0.3);
+    }
+
+    #[test]
+    fn the_exported_ground_matches_the_area() {
+        // Flat plain outside, the hill and its features inside.
+        assert_eq!(area_height(80.0, 0.0), 0.0);
+        assert!(area_height(0.0, -45.0) > 2.0);
+        assert!((area_height(0.0, 0.0) - tarn_height(0.0, 0.0)).abs() < 1e-3);
+        assert_eq!(area_surface(0.0, 0.0), AreaSurface::Underwater);
+        let pond = OUTLET * POND_AT;
+        assert_eq!(area_surface(pond.x, pond.y), AreaSurface::Underwater);
+        let rs = shore_radius(-1.0);
+        let shore = Vec2::new((-1.0f32).cos(), (-1.0f32).sin()) * (rs + 0.8);
+        assert_eq!(area_surface(shore.x, shore.y), AreaSurface::Sand);
+        assert_eq!(area_surface(-40.0, -40.0), AreaSurface::Grass);
     }
 
     #[test]
