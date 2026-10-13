@@ -1,5 +1,5 @@
-// Virtual geometry culling for every view at once: the camera, the shadow cascades and the sky
-// occlusion map. Requires lib_types and cluster_types. Run as four dispatches:
+// Virtual geometry culling for every view at once: the camera, the shadow cascades, the sky
+// occlusion map and the far shadow map. Requires lib_types and cluster_types. Run as four dispatches:
 //
 // 1. `cs_instances`, one thread per (view, instance): cull the instance against the view, skip
 //    whole levels whose clusters can't be picked from this distance, and append the rest as
@@ -12,20 +12,20 @@
 //
 // Only 32-bit atomics: works on every backend.
 
-const VIEWS: u32 = 6u;
+const VIEWS: u32 = 7u;
 const CHUNK: u32 = 64u;
 
 struct CullView {
     planes: array<vec4<f32>, 6>,  // camera-relative, inside where dot(xyz, p) + w >= 0
     eye: vec4<f32>,               // camera-relative eye, w = 1 perspective / 0 orthographic
     forward: vec4<f32>,           // view direction, w = 1 to cull clusters facing away
-    lod: vec4<f32>,               // pixels per meter (at 1 m when perspective), threshold (px), nearest distance (m), unused
+    lod: vec4<f32>,               // pixels per meter (at 1 m when perspective), threshold (px), nearest distance (m), smallest instance radius drawn (m)
     slots: vec4<u32>,             // first draw slot, 1 = one slot for all buckets, entries per slot, 1 = enabled
 };
 
 struct CullParams {
     counts: vec4<u32>,            // instances, chunk capacity, draw slots, buckets in the camera view
-    views: array<CullView, 6>,
+    views: array<CullView, 7>,
 };
 
 // `wgpu::util::DrawIndirectArgs`, filled by the culling.
@@ -40,9 +40,9 @@ struct Draws {
     chunk_count: atomic<u32>,
     overflow: atomic<u32>,        // chunks and clusters dropped because a list was full
     unused: vec2<u32>,
-    triangles: array<atomic<u32>, 6>,  // drawn per view
-    clusters: array<atomic<u32>, 6>,   // drawn per view
-    pad: array<u32, 16>,          // the header is 128 bytes
+    triangles: array<atomic<u32>, 7>,  // drawn per view
+    clusters: array<atomic<u32>, 7>,   // drawn per view
+    pad: array<u32, 14>,          // the header is 128 bytes
     slots: array<DrawArgs>,
 };
 
@@ -117,7 +117,7 @@ fn cs_instances(@builtin(global_invocation_id) id: vec3<u32>) {
     let inst = instances[i];
     if (v != 0u && (inst.extra.y & INSTANCE_CASTS_SHADOWS) == 0u) { return; }
     let sphere = inst.sphere;
-    if (!in_view(view, sphere.xyz, sphere.w)) { return; }
+    if (sphere.w < view.lod.w || !in_view(view, sphere.xyz, sphere.w)) { return; }
 
     // Every error sphere lies inside the instance's sphere, so over a whole level the projected
     // errors are at most (largest error) / (nearest distance) and at least (smallest error) /
