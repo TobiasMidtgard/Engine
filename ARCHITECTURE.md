@@ -274,6 +274,10 @@ in the mesh, in the scene, depth and shadow passes alike. Each vertex scales it 
 alpha, its wind weight (0 = still, such as a trunk's base or a branch's joint; 1 = full sway, the
 default of meshes without vertex colors); on swaying materials the vertex alpha is not opacity.
 
+**Draw distance** (built): a `MaxDrawDistance(m)` component next to a `MeshRenderer` stops drawing
+it, and its shadow, once its bounding sphere is wholly farther than that from the camera: small
+props and clutter. Instanced and cluster-drawn meshes alike; skipped entities count as `culled`.
+
 **Virtual geometry** (built: cluster LOD and GPU-driven drawing; `crates/render/src/virtual_geometry`):
 dense opaque meshes (`RenderSettings::virtual_geometry_min_triangles`, 50 000 by default) are
 split into 128-triangle clusters with a level-of-detail DAG (groups simplified with locked

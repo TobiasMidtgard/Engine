@@ -77,7 +77,8 @@ use serde_json::json;
 
 pub use components::{
     AmbientLight, BoxFace, Camera, DirectionalLight, Exposure, FogShape, FogVolume, MaterialRef,
-    MeshRef, MeshRenderer, NoVirtualGeometry, PointLight, Projection, ResolvedMesh, SkyLightVolume,
+    MaxDrawDistance, MeshRef, MeshRenderer, NoVirtualGeometry, PointLight, Projection,
+    ResolvedMesh, SkyLightVolume,
 };
 pub use features::{
     FeatureStats, FrameContext, GpuShared, GrowBuffer, RenderAppExt, RenderFeature, RenderPhase,
@@ -105,10 +106,11 @@ pub mod prelude {
     pub use crate::{
         AlphaMode, AmbientLight, AntiAliasing, Atmosphere, BoxFace, Camera, DirectionalLight,
         Exposure, FogSettings, FogShape, FogVolume, GltfScene, GltfSceneSpawner, GrassBender,
-        GrassField, GrassStyle, Image, MaterialPreset, MaterialRef, Mesh, MeshRef, MeshRenderer,
-        NoVirtualGeometry, PointLight, Projection, RenderAppExt, RenderFeature, RenderPhase,
-        RenderPlugin, RenderSettings, Screenshots, Shape, SkyLightVolume, StandardMaterial,
-        TextureMapping, Tonemapper, VolumetricQuality, spawn_gltf_scene, spawn_gltf_scene_deferred,
+        GrassField, GrassStyle, Image, MaterialPreset, MaterialRef, MaxDrawDistance, Mesh, MeshRef,
+        MeshRenderer, NoVirtualGeometry, PointLight, Projection, RenderAppExt, RenderFeature,
+        RenderPhase, RenderPlugin, RenderSettings, Screenshots, Shape, SkyLightVolume,
+        StandardMaterial, TextureMapping, Tonemapper, VolumetricQuality, spawn_gltf_scene,
+        spawn_gltf_scene_deferred,
     };
 }
 
@@ -150,6 +152,9 @@ impl Plugin for RenderPlugin {
             )
             .register_component::<NoVirtualGeometry>(
                 "Marker: keeps this entity's dense MeshRenderer off the virtual geometry cluster path (debris, fragments, meshes that change often).",
+            )
+            .register_component::<MaxDrawDistance>(
+                "Meters from the camera beyond which this entity's MeshRenderer (and its shadow) is not drawn: small props and clutter. Measured to the mesh's bounding sphere.",
             )
             .register_component::<DirectionalLight>(
                 "Sun/moon light along the entity's forward (-Z). illuminance in lux (noon sun 110000).",

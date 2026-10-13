@@ -836,6 +836,17 @@ impl ClusterRenderer {
         }
     }
 
+    /// Mesh-space bounding sphere of a mesh [`ready`](Self::ready) to be drawn as clusters.
+    pub fn bounds(&self, mesh: u32) -> Option<Sphere> {
+        match self.meshes.get(&mesh) {
+            Some(Entry {
+                state: State::Ready(dag),
+                ..
+            }) => Some(dag.bounds),
+            _ => None,
+        }
+    }
+
     /// Draw an instance of a mesh [`ready`](Self::ready) said yes to this frame.
     pub fn push_instance(&mut self, instance: ClusterInstance) {
         self.pending.push(instance);

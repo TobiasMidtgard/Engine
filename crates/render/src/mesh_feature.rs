@@ -37,7 +37,7 @@ use engine_assets::Assets;
 use engine_core::prelude::*;
 use wgpu::util::DeviceExt;
 
-use crate::components::{MeshRenderer, NoVirtualGeometry, ResolvedMesh};
+use crate::components::{MaxDrawDistance, MeshRenderer, NoVirtualGeometry, ResolvedMesh};
 use crate::features::{
     FeatureStats, FrameContext, GpuShared, GrowBuffer, RenderFeature, RenderPhase,
 };
@@ -242,7 +242,14 @@ type MeshQuery = (
     &'static MeshRenderer,
     &'static ResolvedMesh,
     Has<NoVirtualGeometry>,
+    Option<&'static MaxDrawDistance>,
 );
+
+/// Whether a bounding sphere at camera-relative `center` lies wholly beyond the entity's
+/// [`MaxDrawDistance`].
+fn beyond_draw_distance(max: Option<&MaxDrawDistance>, center: Vec3, radius: f32) -> bool {
+    max.is_some_and(|m| center.length() - radius > m.0)
+}
 
 /// Draws [`MeshRenderer`] entities. Added by `RenderPlugin`.
 #[derive(Default)]
@@ -1012,7 +1019,8 @@ impl RenderFeature for MeshFeature {
 
         let frame = self.frame;
         let prev_origin = self.prev_origin.unwrap_or(view.origin);
-        for (entity, gt, renderer, resolved, instanced_only) in query.iter(world_ref) {
+        for (entity, gt, renderer, resolved, instanced_only, max_distance) in query.iter(world_ref)
+        {
             if !renderer.visible {
                 continue;
             }
@@ -1041,6 +1049,18 @@ impl RenderFeature for MeshFeature {
                 && let Some(clusters) = &mut self.clusters
                 && clusters.ready(mesh_index, version, mesh)
             {
+                self.clustered.insert(mesh_index);
+                if let Some(bounds) = clusters.bounds(mesh_index)
+                    && max_distance.is_some()
+                {
+                    let center =
+                        (gt.transform_point(bounds.center.as_dvec3()) - view.origin).as_vec3();
+                    let radius = bounds.radius * gt.scale().abs().max_element();
+                    if beyond_draw_distance(max_distance, center, radius) {
+                        culled += 1;
+                        continue;
+                    }
+                }
                 let (material_slot, textures) = self.material_slot(
                     gpu,
                     material_handle.index(),
@@ -1063,7 +1083,6 @@ impl RenderFeature for MeshFeature {
                         casts_shadows: shadows && renderer.cast_shadows,
                     });
                 }
-                self.clustered.insert(mesh_index);
                 continue;
             }
 
@@ -1085,6 +1104,10 @@ impl RenderFeature for MeshFeature {
             let center = (center_world - view.origin).as_vec3();
             let radius = gpu_mesh.half_extents.length() * scale;
             let (min_y, height) = (gpu_mesh.min_y, gpu_mesh.height);
+            if beyond_draw_distance(max_distance, center, radius) {
+                culled += 1;
+                continue;
+            }
             let visible = view.frustum.intersects_sphere(center, radius);
             let blend = material.alpha_mode == AlphaMode::Blend;
             let masked = matches!(material.alpha_mode, AlphaMode::Mask(_));
