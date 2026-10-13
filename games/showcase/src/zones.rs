@@ -271,11 +271,11 @@ fn float_test(lake: &Zone) -> DVec3 {
     lake.center + DVec3::new(20.0, crate::landscape::LAKE_LEVEL, -20.0)
 }
 
-/// Water over the stream's bed at the silk rinse, m (the water sim runs it 0.43 m deep there).
-const RINSE_DEPTH: f64 = 0.43;
+/// Water over the stream's bed at the silk rinse, m (as the water sim runs it).
+const RINSE_DEPTH: f64 = 0.47;
 
 /// The yard's silk rinse: across the stream in the southern woods, 30 m above the falls, where
-/// it runs about 0.45 m deep at 0.8 m/s between steep banks. Returns the middle of the pole's
+/// it runs about half a meter deep at 1.3 m/s between steep banks 5.7 m apart. Returns the middle of the pole's
 /// span at the water's height (as the bed suggests), the way the stream runs, and the width
 /// from bank to bank at the water.
 fn rinse_site(land: &Landscape) -> (DVec3, DVec2, f64) {
@@ -892,7 +892,8 @@ pub fn demo_views(z: &Zone) -> Vec<View> {
                 15.0,
             )
             .on_arrive("softbody.unveil", "{}")
-            .warmup(18.4),
+            .warmup(18.4)
+            .quick_warmup(),
             // On the lake: the dinghy's mooring is 85 m east and 110 m south of the yard. It
             // starts its lane over on arrival, so it is out on the water in view.
             View::new(
@@ -922,6 +923,7 @@ pub fn demo_views(z: &Zone) -> Vec<View> {
                     15.0,
                 )
                 .warmup(6.0)
+                .quick_warmup()
             },
         ],
         "fortress" => destruction_views(engine_destruction::demo::VIEWS),
