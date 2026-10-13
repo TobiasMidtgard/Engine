@@ -263,8 +263,10 @@ impl Default for RenderSettings {
 #[derive(Resource, Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct FogSettings {
-    /// Extinction per meter at `base_height` (0.0005 light haze, 0.02 thick fog, 0.1 fog you
-    /// can barely see 30 m into).
+    /// Extinction per meter at `base_height`; the visibility there is about 3.9 / density
+    /// (0.00002 clear air, 200 km; 0.0001 light haze, 40 km; 0.0005 haze, 8 km; 0.02 thick fog,
+    /// 200 m; 0.1 fog you can barely see 30 m into). The atmosphere already gives distant
+    /// mountains their blue haze; this adds to it, mostly along the valley floor.
     pub density: f32,
     /// How fast fog thins with height, per meter (density halves every `0.69 / falloff` m).
     pub height_falloff: f32,

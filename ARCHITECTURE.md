@@ -240,7 +240,10 @@ stay dark. Other modules feed it two inputs and need nothing else:
   are not drawn beyond it or with volumetric fog off.
 
 `apply_fog(color, rel)` reads the volume up to the range and continues the height fog
-analytically beyond it, so nothing is counted twice, then adds aerial perspective. With
+analytically beyond it, so nothing is counted twice, then adds aerial perspective. Beyond the
+range the far shadow map shades the haze's sunlight (`height_fog_sun_visibility`: eight taps
+spread over what the haze scatters), so haze in a mountain's shadow doesn't glow and a mountain
+with the sun behind it keeps its contrast. With
 volumetric fog off, the analytic fog starts at the camera. `apply_sky_fog(color, dir)` fogs the
 sky up to the range. The frame uniform's `volumetrics` field holds the range (0 = off) and the
 slice mapping. Passes that write the volume see a clear stand-in at binding 19.
