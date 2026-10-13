@@ -186,6 +186,9 @@ pub struct EcologyRegion {
     /// Circles where nothing grows: ponds, paths, building plots. Local `[x, z, radius]` in
     /// meters from the region's center.
     pub keep_clear: Vec<[f32; 3]>,
+    /// Circles where no tree takes root, though shrubs and ground plants still grow: sight
+    /// lines, the view from a bench. Local `[x, z, radius]` like `keep_clear`.
+    pub no_trees: Vec<[f32; 3]>,
     /// Soil grid cell size, meters.
     pub cell_m: f32,
     /// Species that can arrive from outside on the wind or with animals (names).
@@ -221,6 +224,7 @@ impl Default for EcologyRegion {
             half_extents: [40.0, 40.0],
             round: false,
             keep_clear: Vec::new(),
+            no_trees: Vec::new(),
             cell_m: 2.0,
             species: Vec::new(),
             seed_rain: 2.0,
@@ -236,6 +240,16 @@ impl Default for EcologyRegion {
             history: RegionHistory::default(),
             seed: 1,
         }
+    }
+}
+
+impl EcologyRegion {
+    /// Whether a tree may take root at `local` (meters from the region's center).
+    pub fn tree_allowed(&self, local: DVec2) -> bool {
+        !self
+            .no_trees
+            .iter()
+            .any(|c| local.distance(DVec2::new(c[0] as f64, c[1] as f64)) < c[2] as f64)
     }
 }
 

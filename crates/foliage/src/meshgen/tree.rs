@@ -520,9 +520,10 @@ fn bark_color(sp: &PlantSpecies, y: f32, h: f32, ring: usize, seed: u64) -> Vec4
     let c = match sp.shape.bark {
         BarkStyle::Birch => {
             // Old birches go black and rough at the foot, fading up into the white over the
-            // first couple of meters, unevenly from ring to ring.
+            // first meter or two, unevenly from ring to ring; young ones barely darken.
             let dark = Vec3::new(0.035, 0.03, 0.028);
-            let foot = ((1.0 - (y / 2.3).min(1.0)).powf(1.5) * (0.8 + 0.4 * n)).min(1.0);
+            let reach = (h / 14.0).clamp(0.2, 1.0) * (1.3 + 0.9 * n);
+            let foot = 1.0 - smoothstep(0.2 * reach, reach, y);
             // The bark texture carries the dark lenticel bands; rings only vary gently.
             let band = 0.85 + 0.15 * n;
             base.lerp(dark, foot) * band.max(foot)
