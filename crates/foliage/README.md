@@ -47,10 +47,19 @@ engine_foliage::spawn_plant(world, "oak", DVec3::new(3.0, 0.0, 4.0), 0.2, None)?
 - **History**: a region can prewarm (grow 110 years, then clear-cut or burn part of it, then
   regrow) the first time it runs, so a game starts in an old forest with a recovering clearing.
 - **Scale**: regions far from every `SimulationFocus` stop and catch up in coarse steps when
-  the player returns. Trees use a cheaper mesh far away; grass, ferns and flowers switch to a
+  the player returns. Trees use a cheaper mesh far away (past `tree_lod_distance_m`) and a
+  cheapest one beyond `tree_distant_distance_m` (a trunk and a few big crown cards, 150 to 1,000
+  triangles, for whole wooded hillsides); grass, ferns and flowers switch to a
   far mesh (about a tenth of the triangles) past `EcologySettings::small_plant_lod_distance_m`
   and vanish beyond `small_plant_distance_m`. Each species has four mesh variants shared by all
   its plants, so a forest draws in a few instanced batches.
+- **Scenery trees** (`scenery_tree`): a `SceneryTree` on an entity with a `Transform` is a
+  static tree with a species' looks, for painted landscapes (a valley's woods, the hills seen
+  from a tower): it never grows, seeds, burns or falls, and gets no collider, but it draws
+  its near, far or distant level by its distance to the camera, follows the season, and is
+  hidden beyond `scenery_tree_draw_distance_m` (6 km). Only an eighth of them are looked at
+  each frame, so tens of thousands cost little.
+  `SceneryTree::new(&library, "pine", seed)` picks its genes from the seed.
 - **Chopping** (`felling`): `DamageEvent`s on a plant, its drawn parts or its trunk collider
   add chop damage (axes count fully, bullets a little, fire not at all). Past the species'
   toughness the tree falls away from the blow: it swings down around the stump, crashes

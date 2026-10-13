@@ -39,6 +39,10 @@ pub struct VariantMeshes {
     pub foliage: Option<Handle<Mesh>>,
     pub wood_lod: Option<Handle<Mesh>>,
     pub foliage_lod: Option<Handle<Mesh>>,
+    /// The cheapest level, hundreds of meters off (trees and shrubs): the whole trunk (no
+    /// base with it) and a few big crown cards.
+    pub wood_distant: Option<Handle<Mesh>>,
+    pub foliage_distant: Option<Handle<Mesh>>,
     pub sapling_wood: Option<Handle<Mesh>>,
     pub sapling_foliage: Option<Handle<Mesh>>,
     /// Thinned crowns for leaf fall and leaf-out, one per [`crate::meshgen::tree::LEAF_STEPS`]
@@ -46,6 +50,7 @@ pub struct VariantMeshes {
     /// `sapling_foliage`.
     pub foliage_thin: Vec<Handle<Mesh>>,
     pub foliage_lod_thin: Vec<Handle<Mesh>>,
+    pub foliage_distant_thin: Vec<Handle<Mesh>>,
     pub sapling_foliage_thin: Vec<Handle<Mesh>>,
     /// Limbed trunk for old logs.
     pub log: Option<Handle<Mesh>>,
@@ -294,6 +299,7 @@ fn build_species(
             |v: Vec<Mesh>| -> Vec<Handle<Mesh>> { v.into_iter().map(|m| meshes.add(m)).collect() };
         let foliage_thin = add_all(full.foliage_thin);
         let foliage_lod_thin = add_all(full.foliage_lod_thin);
+        let foliage_distant_thin = add_all(full.foliage_distant_thin);
         let sapling_foliage_thin = add_all(sapling_thin);
         let log_mossy = add_all(full.log_mossy);
         let base_weathered = add_all(full.base_weathered);
@@ -316,10 +322,13 @@ fn build_species(
             foliage: add(full.foliage),
             wood_lod: add(full.wood_lod),
             foliage_lod: add(full.foliage_lod),
+            wood_distant: add(full.wood_distant),
+            foliage_distant: add(full.foliage_distant),
             sapling_wood,
             sapling_foliage,
             foliage_thin,
             foliage_lod_thin,
+            foliage_distant_thin,
             sapling_foliage_thin,
             log: add(full.log),
             log_mossy,

@@ -43,7 +43,8 @@ pub struct PlantFungi {
     shown: Part,
 }
 
-type Part = Option<(Handle<Mesh>, Handle<StandardMaterial>)>;
+/// What a drawn part shows: a mesh and its material, or nothing.
+pub(crate) type Part = Option<(Handle<Mesh>, Handle<StandardMaterial>)>;
 
 /// Bracket fungi are drawn this close to the camera.
 pub const FUNGI_DISTANCE_M: f32 = 45.0;
@@ -115,6 +116,9 @@ pub fn desired_parts(
             } else {
                 distance > settings.tree_lod_distance_m * (0.5 + plant.size)
             };
+            let distant = !is_small(sp)
+                && distance > settings.tree_distant_distance_m * (0.5 + plant.size)
+                && v.foliage_distant.is_some();
             let leaves = if vis.glow.is_empty() {
                 vis.leaves[tint]
             } else {
@@ -124,6 +128,11 @@ pub fn desired_parts(
             if sapling {
                 let crown = leafy(v.sapling_foliage, &v.sapling_foliage_thin, amount);
                 [None, pair(&v.sapling_wood, vis.bark), pair(&crown, leaves)]
+            } else if distant {
+                // The whole trunk stands in for the base too (swaying with the crown; it
+                // barely moves near the ground).
+                let crown = leafy(v.foliage_distant, &v.foliage_distant_thin, amount);
+                [None, pair(&v.wood_distant, vis.bark), pair(&crown, leaves)]
             } else if lod && (v.wood_lod.is_some() || v.foliage_lod.is_some()) {
                 let or = |a: &Option<Handle<Mesh>>, b: &Option<Handle<Mesh>>| a.or(*b);
                 let crown = match v.foliage_lod {
@@ -379,7 +388,7 @@ fn spawn_part(commands: &mut Commands, parent: Entity, part: Part, shadows: bool
         .id()
 }
 
-fn apply(r: &mut MeshRenderer, part: Part) {
+pub(crate) fn apply(r: &mut MeshRenderer, part: Part) {
     match part {
         Some((mesh, material)) => {
             r.mesh = engine_render::MeshRef::Handle(mesh);

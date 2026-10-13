@@ -44,6 +44,13 @@ pub struct PlantMeshes {
     pub foliage_thin: Vec<engine_render::Mesh>,
     /// The same for `foliage_lod`.
     pub foliage_lod_thin: Vec<engine_render::Mesh>,
+    /// The cheapest level, for trees hundreds of meters off (whole valleys of scenery trees):
+    /// the trunk from the ground up on a few four-sided rings with sticks for the big limbs,
+    /// and about a tenth of the crown's cards, flat and much bigger. No base goes with it.
+    pub wood_distant: Option<engine_render::Mesh>,
+    pub foliage_distant: Option<engine_render::Mesh>,
+    /// Thinned copies of `foliage_distant` (deciduous species only, as `foliage_thin`).
+    pub foliage_distant_thin: Vec<engine_render::Mesh>,
     /// A felled log once its twigs have rotted off: the trunk above the cut with stubs of the
     /// big limbs (same model space as `wood`).
     pub log: Option<engine_render::Mesh>,
@@ -443,7 +450,14 @@ impl PlantMeshes {
     /// sway in the wind exactly together: the renderer's sway uses the height within the mesh
     /// bounds. Also records the plant's height.
     pub fn share_bounds(&mut self) {
-        let parts = [&self.wood, &self.foliage, &self.wood_lod, &self.foliage_lod];
+        let parts = [
+            &self.wood,
+            &self.foliage,
+            &self.wood_lod,
+            &self.foliage_lod,
+            &self.wood_distant,
+            &self.foliage_distant,
+        ];
         let (mut lo, mut hi) = (0.0f32, 0.0f32);
         for m in parts.into_iter().flatten() {
             let b = m.aabb();
@@ -454,12 +468,15 @@ impl PlantMeshes {
         let thin = self
             .foliage_thin
             .iter_mut()
-            .chain(&mut self.foliage_lod_thin);
+            .chain(&mut self.foliage_lod_thin)
+            .chain(&mut self.foliage_distant_thin);
         for m in [
             &mut self.wood,
             &mut self.foliage,
             &mut self.wood_lod,
             &mut self.foliage_lod,
+            &mut self.wood_distant,
+            &mut self.foliage_distant,
         ]
         .into_iter()
         .flatten()
@@ -1142,6 +1159,23 @@ fn add_branches(
     }
 }
 
+/// Which level of detail a crown mesh is for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Detail {
+    /// Every card, folded and drooping.
+    Near,
+    /// The cards marked `far` (about a third), flat and 1.65× larger.
+    Far,
+    /// A share ([`DISTANT_KEEP`]) of the far cards, flat and [`DISTANT_CARD_SCALE`]× larger.
+    Distant,
+}
+
+/// Share of the far cards the distant level keeps.
+const DISTANT_KEEP: f32 = 0.3;
+/// How much bigger the distant level's cards are, so its crown covers about what the full
+/// one does with a tenth of the cards.
+const DISTANT_CARD_SCALE: f32 = 2.8;
+
 /// Emit one card: near cards are a 3×3 grid, folded along the twig and drooping toward the
 /// tip; far ones a flat quad. Both faces share the bent crown normals.
 fn emit_card(
@@ -1149,10 +1183,15 @@ fn emit_card(
     c: &Card,
     shading: &Shading,
     kind: LeafKind,
-    far: bool,
+    detail: Detail,
     grid: (u32, u32),
 ) {
-    let scale = if far { 1.65 } else { 1.0 };
+    let far = detail != Detail::Near;
+    let scale = match detail {
+        Detail::Near => 1.0,
+        Detail::Far => 1.65,
+        Detail::Distant => DISTANT_CARD_SCALE,
+    };
     let g = c.dir.normalize_or(Vec3::Y);
     let n = (c.face - g * c.face.dot(g)).normalize_or(g.any_orthonormal_vector());
     let u = g.cross(n);
@@ -1244,18 +1283,25 @@ fn crown_meshes(
     cards: &[Card],
     shading: &Shading,
     kind: LeafKind,
-    lod: bool,
+    detail: Detail,
     grid: (u32, u32),
     steps: &[f32],
 ) -> (engine_render::Mesh, Vec<engine_render::Mesh>) {
     let mut full = MeshBuilder::new();
     let mut thin: Vec<MeshBuilder> = steps.iter().map(|_| MeshBuilder::new()).collect();
-    for (i, c) in cards.iter().enumerate().filter(|(_, c)| !lod || c.far) {
-        emit_card(&mut full, c, shading, kind, lod, grid);
+    let shown = |i: usize, c: &Card| match detail {
+        Detail::Near => true,
+        Detail::Far => c.far,
+        Detail::Distant => {
+            c.far && engine_core::math::hash01(i as i64, 0, 0, 0xd157_a4ce) < DISTANT_KEEP
+        }
+    };
+    for (i, c) in cards.iter().enumerate().filter(|(i, c)| shown(*i, c)) {
+        emit_card(&mut full, c, shading, kind, detail, grid);
         let keep = engine_core::math::hash01(i as i64, 0, 0, 0x1eaf_fa11);
         for (b, &share) in thin.iter_mut().zip(steps) {
             if keep < share {
-                emit_card(b, c, shading, kind, lod, grid);
+                emit_card(b, c, shading, kind, detail, grid);
             }
         }
     }
@@ -1445,7 +1491,8 @@ fn assemble(
             Some(&tip),
         );
         add_branches(&mut b, sp, branches, h, lod, seed, &shading);
-        let (f, thin) = crown_meshes(&crowns.cards, &shading, kind, lod, crowns.grid, steps);
+        let detail = if lod { Detail::Far } else { Detail::Near };
+        let (f, thin) = crown_meshes(&crowns.cards, &shading, kind, detail, crowns.grid, steps);
         if lod {
             out.wood_lod = Some(b.finish());
             out.foliage_lod = Some(f);
@@ -1456,7 +1503,54 @@ fn assemble(
             out.foliage_thin = thin;
         }
     }
+    out.wood_distant = Some(distant_wood(sp, trunk_path, trunk_r, branches, h, seed));
+    let (f, thin) = crown_meshes(
+        &crowns.cards,
+        &shading,
+        kind,
+        Detail::Distant,
+        crowns.grid,
+        steps,
+    );
+    out.foliage_distant = Some(f);
+    out.foliage_distant_thin = thin;
     out
+}
+
+/// The distant level's wood: the trunk from the ground up as a four-sided tube on a few
+/// rings, and the thick limbs as three-sided sticks (an old pine's or an oak's bare limbs
+/// still show from afar; a spruce's thin ones never do).
+fn distant_wood(
+    sp: &PlantSpecies,
+    path: &[Vec3],
+    radius: &[f32],
+    branches: &[Branch],
+    h: f32,
+    seed: u64,
+) -> engine_render::Mesh {
+    let mut b = MeshBuilder::new();
+    let n = path.len();
+    let mut pick: Vec<usize> = (0..n).step_by(((n - 1) / 4).max(1)).collect();
+    if pick.last() != Some(&(n - 1)) {
+        pick.push(n - 1);
+    }
+    let p: Vec<Vec3> = pick.iter().map(|&i| path[i]).collect();
+    let r: Vec<f32> = pick.iter().map(|&i| radius[i]).collect();
+    let color = |i: usize, _a: f32| bark_color(sp, p[i].y, h, pick[i], seed);
+    let tip = |_: f32| rgb(sp.bark_color, 0.8);
+    b.tube(&p, &r, 4, 0.5, &color, None, Some(&tip));
+    for (k, br) in branches
+        .iter()
+        .filter(|br| br.level == 1 && br.radius[0] > 0.045)
+        .enumerate()
+    {
+        let m = br.path.len() / 2;
+        let pts = [br.path[0], br.path[m], *br.path.last().unwrap()];
+        let rr = [br.radius[0], br.radius[m], *br.radius.last().unwrap()];
+        let color = |i: usize, _a: f32| bark_color(sp, pts[i].y, h, k + 50, seed);
+        b.tube(&pts, &rr, 3, 0.5, &color, None, None);
+    }
+    b.finish()
 }
 
 /// A curving path of `segs` segments from `start` along `dir`; `steer(f, d)` returns the
@@ -2257,7 +2351,8 @@ fn shrub(sp: &PlantSpecies, seed: u64) -> PlantMeshes {
     for lod in [false, true] {
         let mut b = MeshBuilder::new();
         add_branches(&mut b, sp, &cr.branches, h, lod, seed, &shading);
-        let (f, thin) = crown_meshes(&cr.cards, &shading, kind, lod, cr.grid, steps);
+        let detail = if lod { Detail::Far } else { Detail::Near };
+        let (f, thin) = crown_meshes(&cr.cards, &shading, kind, detail, cr.grid, steps);
         if lod {
             out.wood_lod = Some(b.finish());
             out.foliage_lod = Some(f);
@@ -2268,6 +2363,10 @@ fn shrub(sp: &PlantSpecies, seed: u64) -> PlantMeshes {
             out.foliage_thin = thin;
         }
     }
+    // Far off a shrub is its leaves alone.
+    let (f, thin) = crown_meshes(&cr.cards, &shading, kind, Detail::Distant, cr.grid, steps);
+    out.foliage_distant = Some(f);
+    out.foliage_distant_thin = thin;
     out
 }
 
