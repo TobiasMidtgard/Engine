@@ -1301,10 +1301,10 @@ enum Detail {
 }
 
 /// Share of the far cards the distant level keeps.
-const DISTANT_KEEP: f32 = 0.3;
+const DISTANT_KEEP: f32 = 0.45;
 /// How much bigger the distant level's cards are, so its crown covers about what the full
-/// one does with a tenth of the cards.
-const DISTANT_CARD_SCALE: f32 = 2.8;
+/// one does with about a seventh of the cards.
+const DISTANT_CARD_SCALE: f32 = 2.4;
 
 /// Emit one card: near cards are a 3×3 grid, folded along the twig and drooping toward the
 /// tip; far ones a flat quad. Both faces share the bent crown normals.
