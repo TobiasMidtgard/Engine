@@ -43,7 +43,10 @@ const FALL_SLOPE: f32 = 1.0;
 /// Least drop drawn as a falling curtain, meters.
 const FALL_LEAST_DROP: f32 = 0.5;
 /// Segments down each falling curtain.
-const FALL_SEGMENTS: usize = 12;
+const FALL_SEGMENTS: usize = 16;
+/// `FallVertex::uv_speed.w` on a curtain where it slides down rock (0 where it falls free, 1
+/// on a spray cloud): `fs_falls` reads anything under a half as how much it touches rock.
+const ROCK_KIND: f32 = 0.45;
 /// Most lips drawn (nearest first).
 const MAX_LIPS: usize = 1024;
 /// Lips further than this from the camera aren't drawn, meters.
@@ -65,38 +68,53 @@ struct FallVertex {
     uv_speed: [f32; 4],
 }
 
-/// The falling curtain under `lip` as triangles, relative to the camera (`top` is the lip's
-/// camera-relative position).
-fn fall_strip(lip: &crate::flow::Lip, top: Vec3, out: &mut Vec<FallVertex>) {
-    const G: f32 = 9.81;
-    let dir = Vec3::new(lip.dir.x, 0.0, lip.dir.y);
+/// The curtain of water over `lip` as triangles down its `path` (see
+/// [`FlowSim::fall_path`](crate::flow::FlowSim::fall_path)), relative to the camera via `rel`.
+/// Where it slides down rock it lies on it, spreading wider.
+fn fall_strip(
+    lip: &crate::flow::Lip,
+    path: &[crate::flow::FallPoint],
+    rel: impl Fn(DVec3) -> Vec3,
+    out: &mut Vec<FallVertex>,
+) {
     let across = Vec3::new(-lip.dir.y, 0.0, lip.dir.x);
     // Across coordinate from world x/z, so strips side by side share one pattern.
     let u0 = (lip.top.x * across.x as f64 + lip.top.z * across.z as f64).rem_euclid(4096.0) as f32;
-    // Carry on a little under the surface it lands in.
-    let fall = lip.drop + 0.4;
-    let t_end = (2.0 * fall / G).sqrt();
-    let ring = |k: usize| {
-        let frac = k as f32 / FALL_SEGMENTS as f32;
-        let t = t_end * frac;
-        let p = top + dir * lip.speed * t - Vec3::Y * (0.5 * G * t * t);
-        let vel = dir * lip.speed - Vec3::Y * (G * t);
-        let normal = across.cross(vel.normalize());
-        // The sheet spreads and frays as it falls.
-        let half = lip.width * (0.66 + 0.3 * frac);
-        [-1.0f32, 1.0].map(|side| FallVertex {
+    let last = path.len().saturating_sub(1).max(1);
+    let mut spread = 0.0f32;
+    let mut prev: Option<[FallVertex; 2]> = None;
+    for (k, point) in path.iter().enumerate() {
+        let frac = k as f32 / last as f32;
+        let on_rock = point.rock != Vec3::ZERO;
+        let normal = if on_rock {
+            point.rock
+        } else {
+            across
+                .cross(point.vel.normalize_or(Vec3::NEG_Y))
+                .normalize_or(Vec3::Y)
+        };
+        // The sheet spreads and frays as it falls, and fans out over the rock it runs down.
+        if on_rock {
+            spread += 0.12;
+        }
+        let half = lip.width * (0.66 + 0.3 * frac + spread.min(0.8));
+        let p = rel(point.pos);
+        let ring = [-1.0f32, 1.0].map(|side| FallVertex {
             rel_q: (p + across * (half * side)).extend(lip.q).to_array(),
             normal_frac: normal.extend(frac).to_array(),
             across_side: across.extend(side).to_array(),
-            uv_speed: [u0 + half * side, t, lip.speed, 0.0],
-        })
-    };
-    let mut prev = ring(0);
-    for k in 1..=FALL_SEGMENTS {
-        let next = ring(k);
-        // Wound so the front face is the one `normal` points out of.
-        out.extend_from_slice(&[prev[0], prev[1], next[0], prev[1], next[1], next[0]]);
-        prev = next;
+            uv_speed: [
+                u0 + half * side,
+                point.t,
+                lip.speed,
+                if on_rock { ROCK_KIND } else { 0.0 },
+            ],
+        });
+        if let Some(prev) = prev {
+            // Wound so the front face is the one `normal` points out of.
+            out.extend_from_slice(&[prev[0], prev[1], ring[0], prev[1], ring[1], ring[0]]);
+        }
+        prev = Some(ring);
     }
 }
 
@@ -232,6 +250,8 @@ struct Gpu {
     grid_index: wgpu::Buffer,
     puddle_index: wgpu::Buffer,
     ripple: wgpu::Texture,
+    /// The currents in the ripple grid: x, z (m/s), how fast the water turns (1/s).
+    currents: wgpu::Texture,
     ripple_n: u32,
     ripple_version: u64,
     puddle_tex: wgpu::Texture,
@@ -488,6 +508,7 @@ impl WaterFeature {
                 tex(2, wgpu::TextureSampleType::Float { filterable: true }),
                 tex(3, wgpu::TextureSampleType::Depth),
                 tex(4, wgpu::TextureSampleType::Float { filterable: false }),
+                tex(5, wgpu::TextureSampleType::Float { filterable: true }),
             ],
         });
         let group2_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -635,6 +656,13 @@ impl WaterFeature {
             8,
             wgpu::TextureFormat::Rgba16Float,
         );
+        let currents = create_texture(
+            device,
+            "water currents",
+            8,
+            8,
+            wgpu::TextureFormat::Rgba16Float,
+        );
         let puddle_tex = create_texture(
             device,
             "puddles",
@@ -653,6 +681,7 @@ impl WaterFeature {
             grid_index,
             puddle_index,
             ripple,
+            currents,
             ripple_n: 8,
             ripple_version: u64::MAX,
             puddle_tex,
@@ -676,19 +705,23 @@ impl WaterFeature {
 
     /// Curtains of water falling free over the flowing regions' lips.
     fn upload_falls(gpu: &mut Gpu, shared: &GpuShared, state: &WaterState, view: &ViewData) {
-        let mut lips: Vec<(f64, crate::flow::Lip)> = state
+        let mut lips: Vec<(f64, &crate::flow::FlowSim, crate::flow::Lip)> = state
             .flows
             .iter()
             .filter(|sim| sim.visible)
-            .flat_map(|sim| sim.lips((sim.cell * FALL_SLOPE).max(FALL_LEAST_DROP)))
-            .map(|lip| (lip.top.distance(view.origin), lip))
-            .filter(|(d, _)| *d < FALLS_REACH)
+            .flat_map(|sim| {
+                sim.lips((sim.cell * FALL_SLOPE).max(FALL_LEAST_DROP))
+                    .into_iter()
+                    .map(move |lip| (lip.top.distance(view.origin), sim, lip))
+            })
+            .filter(|(d, _, _)| *d < FALLS_REACH)
             .collect();
         lips.sort_by(|a, b| a.0.total_cmp(&b.0));
         lips.truncate(MAX_LIPS);
         let mut vertices = Vec::with_capacity(lips.len() * FALL_SEGMENTS * 6);
-        for (_, lip) in &lips {
-            fall_strip(lip, view.relative(lip.top), &mut vertices);
+        for (_, sim, lip) in &lips {
+            let path = sim.fall_path(lip, FALL_SEGMENTS);
+            fall_strip(lip, &path, |p| view.relative(p), &mut vertices);
         }
         // Spray clouds last, so they draw over the curtains' feet.
         if !lips.is_empty() {
@@ -809,6 +842,13 @@ impl WaterFeature {
                 n,
                 wgpu::TextureFormat::Rgba16Float,
             );
+            gpu.currents = create_texture(
+                &shared.device,
+                "water currents",
+                n,
+                n,
+                wgpu::TextureFormat::Rgba16Float,
+            );
             gpu.ripple_n = n;
             gpu.ripple_version = u64::MAX;
             gpu.group1 = None;
@@ -820,6 +860,7 @@ impl WaterFeature {
         let n = r.n;
         let inv = 0.5 / r.cell;
         let mut data = vec![0u16; n * n * 4];
+        let mut currents = vec![0u16; n * n * 4];
         for j in 0..n {
             for i in 0..n {
                 let idx = j * n + i;
@@ -831,6 +872,12 @@ impl WaterFeature {
                 data[o + 1] = f32_to_f16(r.foam[idx]);
                 data[o + 2] = f32_to_f16(gx);
                 data[o + 3] = f32_to_f16(gz);
+                let v = r.cell_current(i, j);
+                if v != Vec2::ZERO {
+                    currents[o] = f32_to_f16(v.x);
+                    currents[o + 1] = f32_to_f16(v.y);
+                    currents[o + 2] = f32_to_f16(r.vorticity(i, j));
+                }
             }
         }
         write_texture(
@@ -840,6 +887,14 @@ impl WaterFeature {
             n as u32,
             8,
             bytemuck::cast_slice(&data),
+        );
+        write_texture(
+            &shared.queue,
+            &gpu.currents,
+            n as u32,
+            n as u32,
+            8,
+            bytemuck::cast_slice(&currents),
         );
     }
 
@@ -1202,6 +1257,7 @@ impl RenderFeature for WaterFeature {
         };
         // The scene copies are recreated on resize; rebuilding one bind group is cheap.
         let ripple = gpu.ripple.create_view(&Default::default());
+        let currents = gpu.currents.create_view(&Default::default());
         let puddle = gpu.puddle_tex.create_view(&Default::default());
         gpu.group1 = Some(
             ctx.gpu
@@ -1229,6 +1285,10 @@ impl RenderFeature for WaterFeature {
                         wgpu::BindGroupEntry {
                             binding: 4,
                             resource: wgpu::BindingResource::TextureView(&puddle),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 5,
+                            resource: wgpu::BindingResource::TextureView(&currents),
                         },
                     ],
                 }),
@@ -1349,15 +1409,29 @@ mod tests {
             drop: 8.0,
             width: 0.75,
         };
+        // Its free-fall arc down 8.4 m (as `FlowSim::fall_path` gives it, evenly in time here).
+        let t_end = (2.0 * 8.4f32 / 9.81).sqrt();
+        let path: Vec<crate::flow::FallPoint> = (0..=FALL_SEGMENTS)
+            .map(|k| {
+                let t = t_end * k as f32 / FALL_SEGMENTS as f32;
+                crate::flow::FallPoint {
+                    pos: lip.top + DVec3::new(2.0 * t as f64, -0.5 * 9.81 * (t * t) as f64, 0.0),
+                    vel: Vec3::new(2.0, -9.81 * t, 0.0),
+                    t,
+                    rock: Vec3::ZERO,
+                }
+            })
+            .collect();
         let mut v = Vec::new();
-        fall_strip(&lip, Vec3::new(1.0, 2.0, 3.0), &mut v);
+        let camera = DVec3::new(9.0, 7.0, -3.0);
+        fall_strip(&lip, &path, |p| (p - camera).as_vec3(), &mut v);
         assert_eq!(v.len(), FALL_SEGMENTS * 6);
         let pos = |f: &FallVertex| Vec3::from_slice(&f.rel_q[..3]);
         // Starts at the lip, a strip as wide as the lip (a little more, to overlap).
         let first = &v[0];
         assert!(first.normal_frac[3] == 0.0 && first.normal_frac[1] > 0.99);
         assert!((pos(first) - Vec3::new(1.0, 2.0, 3.0 - 0.75 * 0.66)).length() < 1e-4);
-        // Ends a little under where it lands, having carried on outward on its arc.
+        // Ends where it lands, having carried on outward on its arc.
         let last = v
             .iter()
             .max_by(|a, b| a.normal_frac[3].total_cmp(&b.normal_frac[3]));
