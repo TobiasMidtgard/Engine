@@ -201,7 +201,7 @@ fn crown_sdf(p: vec3<f32>, s: CrownShape, seed: f32) -> vec2<f32> {
     let jit = hash12(vec2<f32>(kk, seed * 13.0 + 1.0));
     let wave = value_noise2(vec2<f32>(cos(ang), sin(ang)) * 2.3 + seed * 17.0);
     let finger = pow(saturate(1.0 - abs(f) * 3.4), 2.0) * (0.4 + jit);
-    let top = s.h * (0.78 + 0.25 * wave + 0.5 * finger);
+    let top = s.h * (0.84 + 0.16 * wave + 0.24 * finger);
     let u = saturate(p.y / max(top, 1e-3));
     let r = s.r0 + s.flare * pow(u, 1.6);
     let w = mix(0.016, 0.005, u) + 0.008 * finger * u;
@@ -209,7 +209,7 @@ fn crown_sdf(p: vec3<f32>, s: CrownShape, seed: f32) -> vec2<f32> {
     d = max(d, -p.y);
     if (s.bead > 0.001) {
         let ac = (k - seed * 7.0) / CROWN_FINGERS * TAU;
-        let ht = s.h * (0.78 + 0.25 * wave + 0.5 * (0.4 + jit));
+        let ht = s.h * (0.84 + 0.16 * wave + 0.24 * (0.4 + jit));
         let tip = vec3<f32>(cos(ac) * (s.r0 + s.flare), ht + s.bead * 0.5, sin(ac) * (s.r0 + s.flare));
         d = min(d, length(p - tip) - s.bead * (0.7 + 0.6 * jit));
     }
@@ -256,8 +256,8 @@ fn crown_surface(in: VsOut, p: vec3<f32>, rd: vec3<f32>, part: f32, s: CrownShap
     let lit = shadow_factor(rel, nw) * saturate(dot(nw, l) * 4.0);
     let glint = pre_expose(frame.sun_color.rgb) * (pow(saturate(dot(nw, hv)), 900.0) * 36.0 * fres * lit);
     let u = saturate(p.y / max(s.h, 1e-3));
-    let froth = select(smoothstep(0.55, 1.05, u) * 0.55 + smoothstep(0.08, 0.0, p.y) * 0.4, smoothstep(s.jet * 0.75, s.jet, p.y) * 0.5 + 0.12, part > 0.5);
-    let body = select(0.07, 0.2, part > 0.5) + froth * 0.75;
+    let froth = select(smoothstep(0.7, 1.05, u) * 0.5 + smoothstep(0.04, 0.0, p.y) * 0.25, smoothstep(s.jet * 0.8, s.jet, p.y) * 0.4 + 0.05, part > 0.5);
+    let body = select(0.025, 0.1, part > 0.5) + froth * 0.6;
     let a = saturate(fres + (1.0 - fres) * body);
     let rgb = sky * fres + glint + in.radiance * ((1.0 - fres) * body);
     return vec4<f32>(rgb, a);
@@ -355,7 +355,7 @@ fn ripple(in: VsOut, c: vec2<f32>, r: f32, jx: vec2<f32>, jy: vec2<f32>) -> vec4
     let delta = textureLoad(scene_color, there, 0).rgb - textureLoad(scene_color, here, 0).rgb;
     // Crests tilted toward the eye catch more of the sky.
     let crest = saturate(sin(phase)) * env * settle;
-    return vec4<f32>(delta + in.radiance * crest * 0.35, 0.0);
+    return vec4<f32>(delta + in.radiance * crest * 0.1, 0.0);
 }
 
 // Distance to the nearest and second nearest of a jittered grid of cell centers.
@@ -376,15 +376,18 @@ fn cells(p: vec2<f32>, seed: f32) -> vec2<f32> {
 }
 
 // Foam: bubble walls (where two cells meet) in a patchy lace that breaks up as it ages.
-fn foam(c: vec2<f32>, r: f32, seed: f32, age: f32) -> f32 {
+fn foam(c: vec2<f32>, r: f32, seed: f32, age: f32, pixels: f32) -> f32 {
     let s = seed * 37.0;
     let big = cells(c * 3.2 + s, s);
     let small = cells(c * 9.0 + s * 1.7, s + 3.0);
-    let walls = smoothstep(0.16, 0.02, big.y - big.x) + 0.6 * smoothstep(0.12, 0.02, small.y - small.x);
+    let vary = value_noise2(c * 5.0 + s * 3.0);
+    let walls = (smoothstep(0.12, 0.0, big.y - big.x) + 0.35 * smoothstep(0.1, 0.0, small.y - small.x)) * (0.4 + 0.8 * vary);
     let clumps = fbm2(c * 2.2 + s, 3);
-    let keep = smoothstep(0.25 + age * 0.55, 0.45 + age * 0.55, clumps + 0.35 * (1.0 - r));
-    let fill = 0.25 * smoothstep(0.5, 0.9, clumps) * (1.0 - age);
-    return saturate((walls + fill) * keep) * smoothstep(1.0, 0.7, r);
+    let keep = smoothstep(0.15 + age * 0.3, 0.35 + age * 0.3, clumps + 0.3 * (1.0 - r));
+    let fill = 0.35 * smoothstep(0.45, 0.9, clumps) * (1.0 - age * 0.6);
+    // Too small on screen to show its bubbles, it shows as their average whiteness.
+    let lace = mix(0.5 * (0.6 + 0.8 * vary), walls, smoothstep(40.0, 160.0, pixels));
+    return saturate((lace + fill) * keep) * smoothstep(1.0, 0.45, r);
 }
 
 // ---------------------------------------------------------------- sprites
@@ -636,7 +639,7 @@ fn fs_particle(in: VsOut) -> @location(0) vec4<f32> {
             return ripple(in, c, r, jx, jy);
         }
         case 16u: { // foam: a lace of bubbles on the water
-            a = foam(c, r, in.seed, in.age);
+            a = foam(c, r, in.seed, in.age, in.pixels);
             rgb *= 0.9 + 0.2 * a;
         }
         case 13u: { // plume: an exhaust flame from the nozzle (uv.y 0) out
