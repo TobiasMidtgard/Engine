@@ -653,14 +653,16 @@ pub fn ui_layout_system(world: &mut World) {
             counter += 1;
             order.nodes.push(e);
 
-            // Shape text at its final content width.
+            // Shape text at its final content width, plus a pixel: the layout rounds box
+            // edges to whole pixels, which can leave a scaled UI's text a hair narrower than
+            // it measured and wrap its last letter ("Weapo" / "n").
             if let Some(entry) = texts.entries.get_mut(&e) {
                 let w = l.size.width
                     - l.padding.left
                     - l.padding.right
                     - l.border.left
                     - l.border.right;
-                entry.shape(&mut fonts.system, Some(w.max(1.0)));
+                entry.shape(&mut fonts.system, Some((w + 1.0).max(1.0)));
             }
 
             let children = node_children(world, e);
