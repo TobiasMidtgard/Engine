@@ -111,9 +111,11 @@ impl Body {
         h - line
     }
 
-    /// Negative inside carved openings (more than 4 mm below the plain skin).
+    /// Negative inside carved openings (more than 4 mm below the plain skin). Continuous
+    /// across each opening's rounded lip: the skin is only skipped (1.0) well clear of every
+    /// opening, where it is never below the plain surface anyway.
     pub fn pocket_field(&self, p: Vec3) -> f32 {
-        if self.features.at(p).is_none() {
+        if self.features.near(p, LIP).is_none() {
             return 1.0;
         }
         self.shell_plain(p) + 0.004
@@ -397,7 +399,7 @@ impl Body {
         if plain > 0.05 {
             return plain;
         }
-        self.features.carve(p, plain)
+        self.features.carve(p, plain, &|q| self.shell_plain(q))
     }
 
     /// The shell before the openings are carved (where lamp lenses and grilles sit).
@@ -523,6 +525,10 @@ impl Body {
     }
 }
 
+/// How far past an opening's outline its rounded lip can still sit below the plain skin
+/// (the outline offset plus the rounding, with room for grazing angles), m.
+pub const LIP: f32 = 0.05;
+
 /// What a recessed surface point is part of.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Feature {
@@ -603,31 +609,45 @@ impl Features {
 
     /// Which opening a point (already known to lie below the plain surface) belongs to.
     pub fn at(&self, p: Vec3) -> Option<Feature> {
+        self.near(p, 0.0)
+    }
+
+    /// The opening nearest `p` whose outline, grown by `margin` (m), contains it.
+    pub fn near(&self, p: Vec3, margin: f32) -> Option<Feature> {
         let ax = p.x.abs();
         let h = p.y + GROUND;
         let fx = Vec2::new(ax, h);
+        let mut best: Option<(f32, Feature)> = None;
+        let mut consider = |d: f32, f: Feature| {
+            if d < margin && best.is_none_or(|(b, _)| d < b) {
+                best = Some((d, f));
+            }
+        };
         if p.z < -1.5 {
-            if sd_polygon(fx, &self.headlight) < 0.012 {
-                return Some(Feature::Headlight);
-            }
-            if sd_polygon(Vec2::new(p.x, h), &self.grille) < 0.03 {
-                return Some(Feature::Grille);
-            }
-            if sd_polygon(fx, &self.intake) < 0.02 {
-                return Some(Feature::Intake);
-            }
+            consider(sd_polygon(fx, &self.headlight) - 0.012, Feature::Headlight);
+            consider(
+                sd_polygon(Vec2::new(p.x, h), &self.grille) - 0.03,
+                Feature::Grille,
+            );
+            consider(sd_polygon(fx, &self.intake) - 0.02, Feature::Intake);
         }
-        if p.z > 1.7 && (fx - self.exhaust.0).length() < self.exhaust.1 + 0.02 {
-            return Some(Feature::Exhaust);
+        if p.z > 1.7 {
+            consider(
+                (fx - self.exhaust.0).length() - self.exhaust.1 - 0.02,
+                Feature::Exhaust,
+            );
         }
-        if ax > 0.6 && sd_polygon(Vec2::new(p.z, h), &self.vent) < 0.015 {
-            return Some(Feature::Vent);
+        if ax > 0.6 {
+            consider(
+                sd_polygon(Vec2::new(p.z, h), &self.vent) - 0.015,
+                Feature::Vent,
+            );
         }
-        None
+        best.map(|(_, f)| f)
     }
 
     /// Carve the openings into `d` (the shell field) given the plain shell value `plain`.
-    pub fn carve(&self, p: Vec3, plain: f32) -> f32 {
+    pub fn carve(&self, p: Vec3, plain: f32, skin: &(dyn Fn(Vec3) -> f32 + Sync)) -> f32 {
         let ax = p.x.abs();
         let h = p.y + GROUND;
         let mut d = plain;
@@ -636,14 +656,19 @@ impl Features {
             rmax(d, -region, r)
         };
         if p.z < -1.55 {
-            let fx = Vec2::new(ax, h);
-            d = pocket(d, sd_polygon(fx, &self.headlight) - 0.004, 0.075, 0.01);
-            d = pocket(
-                d,
-                sd_polygon(Vec2::new(p.x, h), &self.grille) - 0.025,
-                0.11,
-                0.014,
+            // The nose openings are read on the skin under `p`, so their walls stand square to
+            // the raked panels round them (not inside a wheel well, whose wall is skin too).
+            let q = if plain > -0.15 && self.near(p, 0.2).is_some() && !in_wheel_well(p, 0.1) {
+                on_surface(skin, p, plain)
+            } else {
+                p
+            };
+            let (fx, front) = (
+                Vec2::new(q.x.abs(), q.y + GROUND),
+                Vec2::new(q.x, q.y + GROUND),
             );
+            d = pocket(d, sd_polygon(fx, &self.headlight) - 0.004, 0.075, 0.01);
+            d = pocket(d, sd_polygon(front, &self.grille) - 0.025, 0.11, 0.014);
             d = pocket(d, sd_polygon(fx, &self.intake) - 0.015, 0.08, 0.012);
         }
         if p.z > 1.75 {

@@ -1,17 +1,18 @@
 //! Renders the float test (`demo::spawn_floaters`) in a concrete pool, headless, and saves
-//! screenshots as the things dropped in settle.
+//! screenshots as the things dropped in settle, then as they ride the water down and up again
+//! when the pool is drained 1 m and filled again (asleep by then: the water wakes them).
 //!
 //! ```sh
 //! cargo run -p engine_physics --release --example float_test -- [out_dir] [width]x[height]
 //! ```
 //!
-//! The pool's water is a plain `Water` provider (still, surface at y = 0) drawn as a clear
+//! The pool's water is a plain `Water` provider (still, surface at y = 0 but for the drain) drawn as a clear
 //! sheet, so what floats under the surface shows; in the showcase the float test sits on the
 //! water module's lake instead. `PHYSICS_DEBUG=1` draws the physics debug view too.
 //!
 //! Needs a GPU or a software Vulkan driver (lavapipe: `apt-get install mesa-vulkan-drivers`).
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use engine_core::math::{DVec3, Vec3};
 use engine_core::prelude::*;
@@ -29,19 +30,28 @@ const DEPTH: f64 = 2.5;
 const COPING: f64 = 0.35;
 const WALL: f64 = 0.4;
 
-/// Still water filling the pool.
-struct Pool;
+/// Still water filling the pool, its surface at `level` meters.
+struct Pool(Arc<Mutex<f64>>);
 
 impl WaterQuery for Pool {
     fn sample(&self, p: DVec3) -> Option<WaterSample> {
+        let level = *self.0.lock().unwrap();
         (p.x.abs() < POOL[0] && p.z.abs() < POOL[1]).then_some(WaterSample {
-            surface_height: 0.0,
-            depth: DEPTH as f32,
+            surface_height: level,
+            depth: (DEPTH + level) as f32,
             velocity: Vec3::ZERO,
             normal: Vec3::Y,
         })
     }
 }
+
+/// The pool's water level at world time `t`: full until everything has settled (and fallen
+/// asleep), then drained 1 m and filled again, which the sleeping floaters ride down and up.
+fn level_at(t: f32) -> f64 {
+    let ramp = |from: f32, to: f32| ((t - from) / (to - from)).clamp(0.0, 1.0) as f64;
+    -DRAIN * (ramp(27.0, 32.0) - ramp(40.0, 45.0))
+}
+const DRAIN: f64 = 1.0;
 
 /// (world seconds, file name, camera position, look-at target).
 const SHOTS: &[(f32, &str, [f64; 3], [f64; 3])] = &[
@@ -67,6 +77,8 @@ const SHOTS: &[(f32, &str, [f64; 3], [f64; 3])] = &[
         [-3.0, 1.5, 5.2],
         [1.2, -0.5, 1.6],
     ),
+    (36.0, "37_float_drained", OVERVIEW.0, OVERVIEW.1),
+    (50.0, "38_float_refilled", OVERVIEW.0, OVERVIEW.1),
 ];
 
 /// Where the overview shots look from and at.
@@ -107,7 +119,9 @@ fn main() {
         .set_source(TimeSource::Manual {
             step_secs: 1.0 / 60.0,
         });
-    app.world.insert_resource(Water(Arc::new(Pool)));
+    let level = Arc::new(Mutex::new(0.0));
+    app.world
+        .insert_resource(Water(Arc::new(Pool(level.clone()))));
     app.world.resource_mut::<AmbientLight>().brightness = 400.0;
     let camera = app
         .world
@@ -120,7 +134,7 @@ fn main() {
         DirectionalLight::default(),
         Transform::default().looking_at(DVec3::new(-0.4, -0.7, -0.6), Vec3::Y),
     ));
-    pool(&mut app.world);
+    let sheets = pool(&mut app.world);
     app.add_systems(Startup, |mut commands: Commands| {
         demo::spawn_floaters(&mut commands, DVec3::ZERO);
     });
@@ -128,19 +142,21 @@ fn main() {
     let mut t = 0.0f32;
     for (at, name, eye, target) in SHOTS {
         let mut frames = 0;
-        while t < at - 4.0 / 60.0 {
+        let mut until = t;
+        while until < at - 4.0 / 60.0 {
             frames += 1;
-            t += 1.0 / 60.0;
+            until += 1.0 / 60.0;
         }
-        simulate(&mut app, frames);
+        for _ in 0..frames {
+            frame(&mut app, &level, &sheets, &mut t, false);
+        }
         {
             let mut tr = app.world.get_mut::<Transform>(camera).unwrap();
             *tr = Transform::from_translation(DVec3::from_array(*eye))
                 .looking_at(DVec3::from_array(*target), Vec3::Y);
         }
         for _ in 0..4 {
-            app.update();
-            t += 1.0 / 60.0;
+            frame(&mut app, &level, &sheets, &mut t, true);
         }
         if let Some(d) = app.world.get_resource::<RenderDisabled>() {
             eprintln!("no GPU: {}", d.0);
@@ -155,9 +171,26 @@ fn main() {
     }
 }
 
+/// One frame at world time `t`: the water at its level (its sheets with it), then a step,
+/// drawn or not.
+fn frame(app: &mut App, level: &Mutex<f64>, sheets: &[(Entity, f64)], t: &mut f32, draw: bool) {
+    let y = level_at(*t);
+    *level.lock().unwrap() = y;
+    for &(e, depth) in sheets {
+        app.world.get_mut::<Transform>(e).unwrap().translation.y = y + depth;
+    }
+    if draw {
+        app.update();
+    } else {
+        simulate(app, 1);
+    }
+    *t += 1.0 / 60.0;
+}
+
 /// A concrete pool sunk in a paved apron: floor, four walls (colliders and drawn), the apron
-/// around it, and the water as a clear sheet at y = 0.
-fn pool(world: &mut World) {
+/// around it, and the water as a clear sheet at y = 0. Returns the water's sheets, each with
+/// its depth below the surface.
+fn pool(world: &mut World) -> Vec<(Entity, f64)> {
     let concrete = StandardMaterial::preset(MaterialPreset::Concrete).with_triplanar_world();
     let [px, pz] = POOL;
     let slab = |world: &mut World, center: DVec3, half: Vec3| {
@@ -240,7 +273,7 @@ fn pool(world: &mut World) {
     // The water: a clear sheet at the surface, and two fainter ones deeper down, so the
     // deeper something is the bluer it looks (as light is absorbed).
     let sheet = |world: &mut World, y: f64, color: u32, alpha: f32, roughness: f32| {
-        world.spawn((
+        let e = world.spawn((
             Transform::from_xyz(0.0, y, 0.0),
             MeshRenderer::new(
                 Shape::Plane {
@@ -252,10 +285,13 @@ fn pool(world: &mut World) {
                     .with_roughness(roughness),
             ),
         ));
+        (e.id(), y)
     };
-    sheet(world, 0.0, 0x1f6573, 0.32, 0.02);
-    sheet(world, -0.9, 0x0f4b58, 0.22, 0.6);
-    sheet(world, -1.8, 0x0b3f4c, 0.28, 0.6);
+    vec![
+        sheet(world, 0.0, 0x1f6573, 0.32, 0.02),
+        sheet(world, -0.9, 0x0f4b58, 0.22, 0.6),
+        sheet(world, -1.8, 0x0b3f4c, 0.28, 0.6),
+    ]
 }
 
 /// Run `frames` frames without drawing them (see the proving ground example).

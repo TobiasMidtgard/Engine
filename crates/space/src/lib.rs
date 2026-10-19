@@ -1,8 +1,10 @@
 #![doc = include_str!("../README.md")]
 
+pub mod conic;
 pub mod demo;
 pub mod look;
 pub mod orbit;
+pub mod rails;
 pub mod sun;
 pub mod system;
 
@@ -17,8 +19,10 @@ use engine_world::{
     Atmospheres, FocusPoints, Gravity, GravityBody, SimulationFocus, WorldShift, WorldShiftSet,
 };
 
+pub use conic::Conic;
 pub use look::{BodiesFeature, BodyHaze, BodyImpostor, BodyLook, BodyRings, LookBakes};
 pub use orbit::{AU, DAY, Orbit};
+pub use rails::{NoRails, OnRails, RailsLog};
 
 /// What kind of body (for maps and defaults).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -30,7 +34,10 @@ pub enum BodyKind {
     Moon,
 }
 
-/// Air around a body (drives the renderer's `Atmosphere` when it is the nearest one).
+/// Air around a body as it looks: the sky from its ground, the haze over it and the glow
+/// around its limb (drives the renderer's `Atmosphere` when it is the nearest one). The
+/// scattering coefficients are the renderer's (see `Atmosphere` there): [`Self::earth`] and
+/// [`Self::mars`] are its presets.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct BodyAtmosphere {
@@ -40,17 +47,68 @@ pub struct BodyAtmosphere {
     pub mie_g: f32,
     /// Surface albedo seen from above (linear RGB).
     pub ground_color: [f32; 3],
+    /// Rayleigh scattering by the gas at the surface, per meter, RGB.
+    pub rayleigh_scattering: [f32; 3],
+    /// Mie scattering by haze or dust at the surface, per meter, RGB.
+    pub mie_scattering: [f32; 3],
+    /// Light the haze or dust absorbs at the surface, per meter, RGB.
+    pub mie_absorption: [f32; 3],
+    /// Ozone absorption at its densest (25 km up), per meter, RGB; 0 without ozone.
+    pub ozone_absorption: [f32; 3],
+    /// Added to `mie_g` per channel (a blue glow around the sun where it is larger in blue).
+    pub mie_g_offset: [f32; 3],
+    /// Scales the density of the whole air (1 = as given).
+    pub density_scale: f32,
 }
 
 impl Default for BodyAtmosphere {
     fn default() -> Self {
+        Self::earth()
+    }
+}
+
+impl BodyAtmosphere {
+    /// Earth's air: a blue sky and red sunsets.
+    pub fn earth() -> Self {
+        Self::from_render(&Atmosphere::earth())
+    }
+
+    /// Mars' thin CO₂ under a veil of dust: a butterscotch sky by day, a blue glow around the
+    /// setting sun.
+    pub fn mars() -> Self {
+        Self::from_render(&Atmosphere::mars())
+    }
+
+    /// The air of one of the renderer's atmosphere presets.
+    pub fn from_render(a: &Atmosphere) -> Self {
         Self {
-            thickness_m: 100_000.0,
-            rayleigh_scale_height_m: 8_000.0,
-            mie_scale_height_m: 1_200.0,
-            mie_g: 0.8,
-            ground_color: [0.12, 0.15, 0.09],
+            thickness_m: a.thickness,
+            rayleigh_scale_height_m: a.rayleigh_scale_height,
+            mie_scale_height_m: a.mie_scale_height,
+            mie_g: a.mie_g,
+            ground_color: a.ground_color,
+            rayleigh_scattering: a.rayleigh_scattering,
+            mie_scattering: a.mie_scattering,
+            mie_absorption: a.mie_absorption,
+            ozone_absorption: a.ozone_absorption,
+            mie_g_offset: a.mie_g_offset,
+            density_scale: a.density_scale,
         }
+    }
+
+    /// Sets the renderer's air to this one (not where the planet is, nor whether it is on).
+    pub fn apply(&self, a: &mut Atmosphere) {
+        a.thickness = self.thickness_m;
+        a.rayleigh_scale_height = self.rayleigh_scale_height_m;
+        a.mie_scale_height = self.mie_scale_height_m;
+        a.mie_g = self.mie_g;
+        a.ground_color = self.ground_color;
+        a.rayleigh_scattering = self.rayleigh_scattering;
+        a.mie_scattering = self.mie_scattering;
+        a.mie_absorption = self.mie_absorption;
+        a.ozone_absorption = self.ozone_absorption;
+        a.mie_g_offset = self.mie_g_offset;
+        a.density_scale = self.density_scale;
     }
 }
 
@@ -259,6 +317,13 @@ pub struct SpaceSettings {
     /// the Moon's phase and the planets are then lit from where that sun is. The weather's
     /// compass (north +Z) needs [`SpaceFrame::home_heading_deg`] 180 to match the planet's.
     pub follow_world_clock: bool,
+    /// Above this time warp, free physics bodies out in space coast on their exact orbits
+    /// instead of being simulated (see [`rails`]); physics takes them back below it.
+    pub rails_above_warp: f64,
+    /// From high up, a body's cloud tops are drawn as a layer over its terrain, except within
+    /// this distance (meters along the ground) of the camera, where the weather draws its own
+    /// clouds (0: everywhere).
+    pub cloud_hole_m: f64,
 }
 
 impl Default for SpaceSettings {
@@ -274,6 +339,8 @@ impl Default for SpaceSettings {
             min_apparent_radius_rad: 7e-4,
             keep_surfaces: true,
             follow_world_clock: false,
+            rails_above_warp: 1.5,
+            cloud_hole_m: 60_000.0,
         }
     }
 }
@@ -448,6 +515,11 @@ impl Plugin for SpacePlugin {
                 "A star, planet or moon on rails: mass (mu), radius, orbit around its parent, \
                  spin, atmosphere. Its Transform is driven by the space module.",
             )
+            .init_resource::<RailsLog>()
+            .register_component::<NoRails>(
+                "Keeps a physics body off the rails: it is not flown on its orbit through time \
+                 warp (for things the game moves itself).",
+            )
             .register_component::<StarLight>(
                 "Makes a DirectionalLight shine from a star (direction and lux follow it).",
             )
@@ -471,7 +543,12 @@ impl Plugin for SpacePlugin {
             .add_systems(PostUpdate, reanchor.in_set(WorldShiftSet::Write))
             .add_systems(
                 PostUpdate,
-                (look::spawn_impostors, update_space, look::scale_impostors)
+                (
+                    look::spawn_impostors,
+                    update_space,
+                    rails::fly,
+                    look::scale_impostors,
+                )
                     .chain()
                     .after(WorldShiftSet::Apply)
                     .before(WorldShiftSet::Rebuild),
@@ -812,6 +889,7 @@ fn park(world: &mut World, body: &BodyState, at: (DVec3, DQuat), reach: f64) {
         Without<CelestialBody>,
         Without<SimulationFocus>,
         Without<DirectionalLight>,
+        Without<OnRails>,
     )>();
     let left: Vec<ParkedEntity> = q
         .iter(world)
@@ -989,11 +1067,7 @@ pub fn update_space(world: &mut World) {
                 atmo.enabled = true;
                 atmo.planet_center = states[i].world_position;
                 atmo.planet_radius = states[i].radius_m;
-                atmo.thickness = a.thickness_m;
-                atmo.rayleigh_scale_height = a.rayleigh_scale_height_m;
-                atmo.mie_scale_height = a.mie_scale_height_m;
-                atmo.mie_g = a.mie_g;
-                atmo.ground_color = a.ground_color;
+                a.apply(&mut atmo);
             }
             None => atmo.enabled = false,
         }
@@ -1185,6 +1259,46 @@ fn register_apis(app: &mut App) {
                 clock.seconds = d * DAY;
             }
             Ok(serde_json::json!({ "warp": clock.warp, "space_days": clock.seconds / DAY }))
+        },
+    )
+    .register_api(
+        "space.rails",
+        "Ships coasting on their orbits through time warp: the body each falls around, its \
+         altitude and speed over it, its lowest and highest points (null: it escapes) and \
+         period, and how often coasting ships changed body or dropped the warp near a surface.",
+        "{}",
+        |world, _| {
+            let names: Vec<(String, f64)> = world
+                .resource::<SpaceState>()
+                .bodies
+                .iter()
+                .map(|b| (b.name.clone(), b.radius_m))
+                .collect();
+            let radius = |n: &str| names.iter().find(|b| b.0 == n).map_or(0.0, |b| b.1);
+            let mut q = world.query::<(Entity, &OnRails)>();
+            let ships: Vec<_> = q
+                .iter(world)
+                .map(|(e, r)| {
+                    let rad = radius(&r.around);
+                    let apo = r.conic.apoapsis();
+                    serde_json::json!({
+                        "entity": e.to_bits(),
+                        "around": r.around,
+                        "altitude_m": r.conic.position.length() - rad,
+                        "speed_m_s": r.conic.velocity.length(),
+                        "periapsis_altitude_m": r.conic.periapsis() - rad,
+                        "apoapsis_altitude_m": apo.is_finite().then_some(apo - rad),
+                        "period_s": r.conic.period(),
+                    })
+                })
+                .collect();
+            let log = world.resource::<RailsLog>();
+            Ok(serde_json::json!({
+                "rate": log.rate,
+                "ships": ships,
+                "handoffs": log.handoffs,
+                "warp_drops": log.warp_drops,
+            }))
         },
     )
     .register_api(

@@ -13,7 +13,10 @@ character's own speed and reactions.
   jump, crouch or firing again lets go with the momentum), and zip lines (jump into a
   `Zipline` cable to catch it one-handed and slide down it, faster downhill and slower uphill;
   near the far anchor the rider lets go with a small hop, and jump, crouch or a dash lets go
-  earlier, with the double jump back).
+  earlier, with the double jump back), and ladders (anything with the world's `Climbable`:
+  walk or jump into one to grab it, climb with forward and back, faster sprinting, slide down
+  holding crouch, step off over the top onto its exit or off the bottom, kick off with jump;
+  a moving ladder carries its climber, and the rungs ring under each step).
 - **Combat movement**: attacks with windup, strike and recovery; dash-strikes that close
   several meters in a blink; blocks, dodges (i-frames), counters on a recovering attacker,
   stagger and knockback. Every strike is logged (`CombatLog`).
@@ -85,7 +88,9 @@ and attack are edge-triggered, so hold them for one step. Because movement is th
 course zone.
 
 - **Parkour course**: a runner loops sprint → slide under a bar → wall-run → wall-jump →
-  wall-run → mantle onto a tower → jump and double jump off it.
+  wall-run → mantle onto a tower → jump and double jump off it. Behind the tower a pilot
+  climbs its caged ladder, steps off onto the roof, looks out over the course, then climbs
+  back down a few rungs and slides the rest of the way.
 - **Ledge station** (between the course and the ring): a climber jumps at a 3.6 m block, too
   high to vault, catches its top, shimmies along it, climbs up and walks off the far end.
 - **Grapple station** (behind the course): a pilot sprints at a 9 m tower, jumps, fires the
@@ -116,7 +121,8 @@ poses, and `course_preview` renders the course and the ring from fixed cameras.
 ## Contracts
 
 Reads: `MoveIntent`; the physics contract (`CharacterState` after each step, `PhysicsQueries`
-raycasts for walls and ledges); `Gravity` (up and strength at the character); `Time`,
+raycasts for walls and ledges); `Climbable` (ladders); `Gravity` (up and strength at the
+character); `Time`,
 `TimeDilation`, `LocalTimeScale`; `ActionState` (player input; `PhysicsQueries` also aims the
 player's grapple along the camera); `DamageEvent` (to the
 characters it moves); `SkeletonPose` (when present, the animation module emits footsteps).
@@ -125,12 +131,13 @@ Writes: `CharacterMove` (velocity in the character's own seconds) and the capsul
 (`CharacterController::height` shrinks while sliding or crouching); `LocomotionState` (mode,
 velocity in world seconds, blocking, attacking, vulnerable, dash stamina);
 `AnimationParams` (`speed`, `direction`, `lean`, `crouch`, `effort`, `airborne`,
-`vertical_speed`, `wallrun`, `grapple`, `zipline`) and `AnimationTrigger` (`jump`,
-`double_jump`, `land`, `slide`, `wallrun`, `wall_jump`, `mantle`, `ledge_grab`, `let_go`,
-`dash`, `grapple_fire`, `grapple_hit`, `grapple_release`, `zip_grab`, `zip_release`, `attack_light`, `attack_heavy`, `block`, `hit_react`,
-`death`); `AttackEvent` (when an attack starts, with the world seconds until it lands);
+`vertical_speed`, `wallrun`, `grapple`, `zipline`, `ladder`, `climb_speed`) and
+`AnimationTrigger` (`jump`, `double_jump`, `land`, `slide`, `wallrun`, `wall_jump`, `mantle`,
+`ledge_grab`, `let_go`, `dash`, `grapple_fire`, `grapple_hit`, `grapple_release`, `zip_grab`,
+`zip_release`, `ladder_grab`, `ladder_exit`, `attack_light`, `attack_heavy`, `block`,
+`hit_react`, `death`); `AttackEvent` (when an attack starts, with the world seconds until it lands);
 `DamageEvent` (strikes); `Ragdoll::weight` on defeat; `GroundContact` (landings, footsteps,
-slides, wall-run steps); `NoiseEvent`; `LocalTimeScale` (from `Tempo`); `TimeDilation`
+slides, wall-run steps, rungs climbed, on the ladder collider's surface or metal); `NoiseEvent`; `LocalTimeScale` (from `Tempo`); `TimeDilation`
 requests `"perception"` (focus) and `"cinematic"` (beats). Claims the `LocomotionBackend`.
 
 ### Without a physics module
@@ -193,8 +200,10 @@ sets the bake size). Nothing in it is third-party art.
   character it spawns.
 - `look::rig`: the fighters' skeleton and procedural animation. `Animator` turns the
   movement and combat state (on the character's own clock) into a pose: run cycles, slides,
-  wall-runs, jumps, ledge hangs, grapple shots and reels, dashes, windups, strikes, blocks,
-  hit reactions and falls, with two-bone IK for arms and legs.
+  wall-runs, jumps, ledge hangs, grapple shots and reels, zip line rides, ladder climbs (the
+  sword sheathed, hands and feet taking turns on the rungs, or clamping the rails on a
+  slide), dashes, windups, strikes, blocks, hit reactions and falls, with two-bone IK for
+  arms and legs.
 - `look::rope`: the grapple's braided steel cable and three-clawed hook, laid each frame from
   the pilot's left fist (as drawn) to the hook: snaking behind it in flight, snapping taut
   when it bites, claws spread.
@@ -227,7 +236,8 @@ API functions: `movement.status`, `movement.set_tempo` (`{"entity": "Player", "l
 `movement.duel`
 (`{"round": "Blink" | "Focus" | "Pack" | null}`: restart the duel on that round and keep
 replaying it, or `null` to go back to cycling; tour stops use it to catch a chosen moment),
-`movement.climber` (restart the ledge climber's loop), `movement.grappler` (restart the
+`movement.climber` (restart the ledge climber's loop), `movement.ladder` (restart the
+ladder climber's loop), `movement.grappler` (restart the
 grappler's loop), `movement.rider` (restart the freight rider's loop with the car about to
 pull out).
 
@@ -239,14 +249,17 @@ catching a ledge too high to vault, shimmying to its end, climbing up, letting g
 off, grappling up onto a roof, a shot at nothing coming back, a jump letting go of the rope,
 humans having no hook, jumping into a zip line, riding it down and letting go at the end, a
 jump letting go of it with the double jump back, zip lines being faster downhill than
-uphill, a rider moving with its line, wall-running on a wall that slides away and jumping off it with its
+uphill, a rider moving with its line, climbing a ladder onto a roof and grabbing it again
+from the top to climb down, rungs ringing on metal, sliding down it and kicking off it,
+catching it out of a jump, a moving ladder carrying its climber and one that goes dropping
+it, wall-running on a wall that slides away and jumping off it with its
 speed, hanging from a rising, sliding ledge and climbing onto it, a hook riding a moving roof,
 dash, characters on their own clocks in slow motion, the stand-in stepping aside, bodies from
 other modules being moved);
 `tests/demo.rs` (each duel round plays out as described, the rounds cycle, the runner
 finishes the course, the climber catches the ledge, shimmies, climbs up and drops off, the
 grappler hooks the anchor plate, is reeled up, climbs over, rides the zip line down and lands
-on its pad, the rider
+on its pad, the ladder climber climbs onto the tower and slides back down, the rider
 leaps onto the moving freight car, wall-runs along it, climbs aboard and steps off at the end
 of the track, the duel
 waits without a camera, `movement.duel` restarts a chosen round,

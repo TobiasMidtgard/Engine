@@ -27,6 +27,11 @@ Background research: `game-engine-research/graphics.md` in the project files.
   water splashes. `Tether` moors boats and buoys.
 - **Rain**: weather rain and local `RainShower`s draw rings on water and fill puddles in hollows
   (`SurfaceLayers::puddle_m`), which soak in and evaporate by material, temperature and wind.
+- **Wet shores**: water wets the ground it reaches (`SurfaceLayers::wetness`): a band of dark
+  sand above a lake's or sea's waterline, wider when the waves are bigger, stream banks, and the
+  ground and rock round a waterfall's foot, soaked by its spray. The weather dries them as it
+  dries rain. A `ShoreCover` (the jetty's deck) keeps the ground under it out of it, since
+  surfaces read the wetness of the ground they stand on.
 - **Rendering** (`WaterFeature`): refraction of the scene behind, depth absorption and
   scattering, caustics on the bed, screen-space and sky reflections, sun glitter, light through
   thin crests, foam (whitecaps, wakes, rapids, shorelines), soft waterlines, ripples that fade
@@ -69,15 +74,18 @@ Screenshots from several viewpoints, without a window:
 cargo run -p engine_water --example water_gallery --release -- <out_dir> [seconds] [views]
 ```
 
-Views: overview, falls, shore, under, pond, wake, aerial.
+Views: overview, falls, shore, under, pond, wake, aerial, ditch.
+
+To try shader changes without rebuilding, point `ENGINE_WATER_SHADER` at a copy of
+`src/render/water.wgsl`; the gallery and the showcase then load the shader from that file.
 
 ## Contracts
 
 Reads: `WindField`, `WeatherState` (rain, temperature, wind), `Ground` and `SurfaceMaterials`,
 `FocusPoints`, `GroundContact`, `ProjectileTrace`, `WorldImpulse`.
 
-Writes: the `Water` query (surface height, depth, velocity, normal), `SurfaceLayers` puddles,
-`WaterSplash`, `NoiseEvent`.
+Writes: the `Water` query (surface height, depth, velocity, normal), `SurfaceLayers` puddles
+and wetness by the water, `WaterSplash`, `NoiseEvent`.
 
 Cross-module interaction goes through `engine_world` (see AGENTS.md). If a contract is missing,
 ask the core owner to add it rather than depending on another module's crate.

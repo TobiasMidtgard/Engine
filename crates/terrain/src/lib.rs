@@ -7,11 +7,13 @@ pub mod deform;
 pub mod demo;
 pub mod edits;
 pub mod ground;
+pub mod landforms;
 pub mod lod;
 pub mod materials;
 pub mod noise;
 pub mod palette;
 pub mod render;
+pub mod rivers;
 pub mod shape;
 
 use std::collections::HashMap;
@@ -285,7 +287,9 @@ impl PlanetTerrain {
             + s.crater_max_radius_m * 0.05
             + pad_range
             + 50.0;
-        let mut low = low;
+        let (forms_low, forms_high) = s.landforms.height_range();
+        high += forms_high;
+        let mut low = low + forms_low;
         if let Some(o) = &s.overlay {
             let base = if o.flat {
                 -o.translation.y
@@ -307,6 +311,11 @@ pub struct TerrainSettings {
     /// Split a patch when the camera is closer than this many patch sizes (× each terrain's
     /// `detail`).
     pub split_factor: f64,
+    /// Patches a planet that fills the view may draw before detail stops growing: a view
+    /// that needs fewer (a planet seen from orbit) splits them finer until it reaches this,
+    /// up to four times the detail, so mountains, canyons and craters stay sharp from space.
+    /// Planets covering less of the view get a share of it (0 = never boost).
+    pub patch_budget: usize,
     /// Patches built per frame while moving (they build in parallel).
     pub builds_per_frame: usize,
     /// When more patches than this are missing (after a teleport), build them all at once.
@@ -347,6 +356,7 @@ impl Default for TerrainSettings {
     fn default() -> Self {
         Self {
             split_factor: 3.2,
+            patch_budget: 700,
             builds_per_frame: 24,
             catch_up_threshold: 48,
             max_patches: 6144,

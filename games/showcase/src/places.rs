@@ -16,6 +16,8 @@ pub struct Place {
     pub hour: f32,
     /// Simulated seconds the tour waits here before the screenshot (a fight getting going).
     pub warmup_secs: f32,
+    /// The tour runs the warm-up without drawing ([`crate::zones::View::quick_warmup`]).
+    pub quick_warmup: bool,
     /// API calls (name, JSON args) made on arriving, e.g. `("ui.show", r#"{"screen":"shop"}"#)`.
     pub on_arrive: Vec<(String, String)>,
     /// API calls made when the camera moves on to another place.
@@ -25,6 +27,12 @@ pub struct Place {
 impl Place {
     fn warmup(mut self, secs: f32) -> Self {
         self.warmup_secs = secs;
+        self
+    }
+
+    /// Warm up without drawing (only for stops whose warm-up runs on the CPU).
+    fn quick(mut self) -> Self {
+        self.quick_warmup = true;
         self
     }
 }
@@ -124,6 +132,7 @@ pub fn places() -> Vec<Place> {
         target,
         hour,
         warmup_secs: 0.0,
+        quick_warmup: false,
         on_arrive: Vec::new(),
         on_leave: Vec::new(),
     };
@@ -201,7 +210,9 @@ pub fn places() -> Vec<Place> {
             near("water", [62.0, 18.0, 66.0], [0.0, 4.0, 0.0]),
             16.5,
         )
-        .warmup(8.0),
+        // The water runs on the CPU (only the mist puffs at the falls' foot stand still).
+        .warmup(8.0)
+        .quick(),
         place(
             "meadow",
             "Wildlife meadow by the lake, in the morning",
@@ -246,7 +257,9 @@ pub fn places() -> Vec<Place> {
             near("arena", [0.0, 11.0, -27.0], [0.0, 0.0, 3.0]),
             12.0,
         )
-        .warmup(10.0),
+        // The fighters think and move on the CPU (physics raycasts, no renderer reads).
+        .warmup(10.0)
+        .quick(),
         place(
             "parkour",
             "Movement course",
@@ -369,6 +382,7 @@ pub fn places() -> Vec<Place> {
                     target: z.center + DVec3::from_array(v.target),
                     hour: v.hour,
                     warmup_secs: v.warmup_secs,
+                    quick_warmup: v.quick_warmup,
                     on_arrive: v.on_arrive,
                     on_leave: v.on_leave,
                 },

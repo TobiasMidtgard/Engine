@@ -10,7 +10,7 @@
 //! * a 30-crate tower that stands perfectly still,
 //! * a bin that 250 crates, barrels and balls rain into,
 //! * a snake of dominoes that knocks itself over,
-//! * three ragdolls stumbling down a steep staircase,
+//! * ten ragdolls stumbling down a steep staircase together,
 //! * a wrecking ball on a chain swinging into a crate wall,
 //! * a seesaw catapult: a steel ball lands on one end and throws a crate,
 //! * a motor-driven paddle wheel churning a bin of balls and blocks,
@@ -72,7 +72,7 @@ pub struct DemoView {
 pub const VIEWS: &[DemoView] = &[
     DemoView {
         key: "physics_ragdolls",
-        name: "Crash test dummies tumbling down a staircase",
+        name: "Ten crash test dummies tumbling down a staircase together",
         eye: [33.0, 4.5, -4.0],
         target: [24.0, 1.3, -12.0],
         hour: 16.0,
@@ -805,9 +805,9 @@ fn dominoes(y: &mut Yard, start: DVec3) {
     }
 }
 
-/// A 10-part crash test dummy ragdoll (Hybrid III 50th-percentile proportions) with feet at
-/// `feet`, stumbling forward (+z). Returns its chest.
-fn ragdoll(y: &mut Yard, feet: DVec3, shirt: u32) -> Entity {
+/// A 10-part crash test dummy ragdoll (Hybrid III 50th-percentile proportions) facing +z with
+/// feet at `feet`, stumbling along `push` (horizontal, m/s). Returns its chest.
+fn ragdoll(y: &mut Yard, feet: DVec3, shirt: u32, push: Vec3) -> Entity {
     let l = dummy::RagdollLayout::HYBRID_III_50TH;
     // Each part's vinyl and steel meshes, in `RagdollMeshes::all` order.
     let meshes = y.parts::<22>(
@@ -877,21 +877,39 @@ fn ragdoll(y: &mut Yard, feet: DVec3, shirt: u32) -> Entity {
         y.joint(hinge([0.0, 2.2]), thigh, Some(shin), m(l.knee));
         parts.extend([upper, fore, thigh, shin]);
     }
-    // Stumbling forward: the whole body moves, the upper body a little faster so it pitches.
+    // Stumbling: the whole body moves, the upper body a little faster so it pitches.
+    let lean = push.normalize_or_zero();
     for p in parts {
         let v = if p == chest || p == head {
-            RAGDOLL_PUSH + 1.0
+            push + lean
         } else {
-            RAGDOLL_PUSH
+            push
         };
-        y.world.get_mut::<Velocity>(p).unwrap().linear = Vec3::new(0.0, 0.5, v);
+        y.world.get_mut::<Velocity>(p).unwrap().linear = v + Vec3::Y * 0.5;
     }
     chest
 }
 
+/// How fast the dummies stumble off the landing (m/s), give or take 15%.
 const RAGDOLL_PUSH: f32 = 3.5;
 
-/// Fourteen steep steps up toward -z with a landing, and three ragdolls stumbling down them.
+/// The dummies on the stairs' landing: across (m from the middle), back from its front edge
+/// (m), jacket (sRGB hex) and name. Four in front, three and three staggered behind them.
+const DUMMIES: [(f64, f64, u32, &str); 10] = [
+    (-1.8, 0.45, 0x3a6ea5, "blue"),
+    (-0.6, 0.45, 0xb4413a, "red"),
+    (0.6, 0.45, 0x4e8a3e, "green"),
+    (1.8, 0.45, 0xd9822b, "orange"),
+    (-1.2, 1.25, 0x6b4c9a, "purple"),
+    (0.0, 1.25, 0x2a8c8c, "teal"),
+    (1.2, 1.25, 0xd8d6cc, "white"),
+    (-1.8, 2.05, 0x3b3d42, "charcoal"),
+    (0.0, 2.05, 0x7a2e3b, "maroon"),
+    (1.8, 2.05, 0x6b6b2a, "olive"),
+];
+
+/// Fourteen steep steps up toward -z with a landing, and ten ragdolls stumbling down them
+/// together, coming to rest strewn down the flight and at its foot, and falling asleep.
 fn ragdoll_stairs(y: &mut Yard, foot: DVec3) {
     let (rise, run, steps, width, deep) = (0.22, 0.32, 14, 6.0, 3.5);
     for i in 0..steps {
@@ -912,12 +930,15 @@ fn ragdoll_stairs(y: &mut Yard, foot: DVec3) {
         [s.concrete, s.steel]
     });
     y.scenery(foot, Quat::IDENTITY, flight);
-    for (dx, shirt, color) in [
-        (-1.6, 0x3a6ea5, "blue"),
-        (0.0, 0xb4413a, "red"),
-        (1.6, 0x4e8a3e, "green"),
-    ] {
-        let chest = ragdoll(y, DVec3::new(foot.x + dx, top, landing + 1.3), shirt);
+    let front = landing + deep as f64 * 0.5;
+    let mut rng = Rng(0xd0_11ed);
+    for (dx, back, shirt, color) in DUMMIES {
+        // Each stumbles a little faster or slower, and a little to one side.
+        let speed = RAGDOLL_PUSH * (0.85 + 0.3 * rng.next());
+        let heading = (rng.next() - 0.5) * 0.25;
+        let push = Vec3::new(heading.sin(), 0.0, heading.cos()) * speed;
+        let feet = DVec3::new(foot.x + dx, top, front - back);
+        let chest = ragdoll(y, feet, shirt, push);
         y.name(chest, &format!("Ragdoll ({color})"));
     }
 }
@@ -1049,7 +1070,7 @@ fn paddle_wheel(y: &mut Yard, center: DVec3) {
     for (dx, dz, hx, hz) in [
         (3.15, 0.0, 0.15, 2.8),
         (-3.15, 0.0, 0.15, 2.8),
-        (0.0, 2.65, 3.0, 0.15),
+        (0.0, 2.05, 3.0, 0.15),
         (0.0, -2.65, 3.0, 0.15),
     ] {
         y.block(center + DVec3::new(dx, 0.7, dz), Vec3::new(hx, 0.7, hz));

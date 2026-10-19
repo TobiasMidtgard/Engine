@@ -71,7 +71,8 @@ pub struct GpuEmitter {
     /// Main direction (local, unit), w the debris piece drawn instead of a sprite
     /// ([`Debris::code`](crate::Debris::code), 0 for sprites).
     pub direction: [f32; 4],
-    /// Extra birth velocity (local, m/s), w unused.
+    /// Extra birth velocity (local, m/s), w the air's thickness around the emitter (1 at sea
+    /// level, 0 in a vacuum; set each frame by `set_forces`).
     pub extra_vel: [f32; 4],
     /// Speed min/max (m/s), lifetime min/max (s).
     pub speed_life: [f32; 4],
@@ -166,7 +167,7 @@ impl GpuEmitter {
                 desc.velocity[0] * s,
                 desc.velocity[1] * s,
                 desc.velocity[2] * s,
-                0.0,
+                1.0,
             ],
             speed_life: [
                 desc.speed[0] * s,
@@ -226,6 +227,7 @@ impl GpuEmitter {
         let f = gravity * held + lift;
         self.forces = [f.x, f.y, f.z, self.forces[3] * thickness];
         self.wind[3] *= thickness;
+        self.extra_vel[3] = thickness;
     }
 }
 

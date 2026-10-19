@@ -319,6 +319,14 @@ pub fn gradient(f: &(dyn Fn(Vec3) -> f32 + Sync), p: Vec3, e: f32) -> Vec3 {
     g / (4.0 * e)
 }
 
+/// The point on the zero surface of `f` under `p` (one Newton step from `p`, where `f` is `fp`).
+/// Reading a view-plane outline there instead of at `p` stands an opening's walls square to the
+/// skin, so they meet a raked panel at a right angle instead of grazing it in a ragged shelf.
+pub fn on_surface(f: &(dyn Fn(Vec3) -> f32 + Sync), p: Vec3, fp: f32) -> Vec3 {
+    let g = gradient(f, p, 0.002);
+    p - g * (fp / g.length_squared().max(0.25))
+}
+
 /// March from `from` along `dir` (unit) until the field crosses zero; the hit point, or
 /// `None` within `max_t` meters. The field may be approximate: steps are damped.
 pub fn raycast(
