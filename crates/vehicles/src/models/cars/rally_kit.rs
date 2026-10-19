@@ -22,7 +22,7 @@ use super::rally::{ARCH, Body, FRONT_AXLE, GROUND, REAR_AXLE, WHEEL_H, Windows, 
 use super::sdf::{
     self, Curve, Table, bump, raycast, rmax, sd_capsule, sd_round_box, sd_round_rect, smin, sstep,
 };
-use super::sports::Feature;
+use super::sports::{Feature, LIP};
 use super::sports_kit::{
     badges_at, lamp_module, mirror_at, pts, screen_texture, steering_wheel_at, tail_texture, tint,
 };
@@ -117,7 +117,9 @@ fn skin(body: &Body, win: &Windows, atlas: &Atlas) -> Kit {
         let (w, l, c) = (window(p), liner(p), pocket(p));
         if w.abs() < 0.015 || l.abs() < 0.015 || c.abs() < 0.012 {
             0.0
-        } else if l < 0.0 || (c < 0.0 && body.features.at(body, p) != Some(Feature::Headlight)) {
+        } else if l < 0.0
+            || (c < 0.0 && body.features.near(body, p, LIP) != Some(Feature::Headlight))
+        {
             // Wheel-well liners and pocket floors: mostly hidden (not the headlight housings,
             // seen through their lenses).
             8.0
@@ -134,7 +136,7 @@ fn skin(body: &Body, win: &Windows, atlas: &Atlas) -> Kit {
                 return None;
             }
             if cm.side(1, t) < 0.0 {
-                let mesh = match body.features.at(body, c) {
+                let mesh = match body.features.near(body, c, LIP) {
                     Some(Feature::Headlight) => 2,
                     _ => 3,
                 };
@@ -283,6 +285,8 @@ fn exterior_parts(body: &Body, atlas: &Atlas) -> Kit {
     kit.images.push((k("brushed_color"), color));
     kit.images.push((k("brushed_normal"), normal));
     kit.meshes.push((k("exhaust"), exhaust(body, &plain)));
+    kit.meshes.push((k("number_plate"), number_plate(&plain)));
+    kit.images.push((k("number_tex"), number_texture()));
 
     // --- Mirrors, wiper, handles, pins, straps, antenna, badges -----------------------------
     let blank = atlas.uv(View::Side, Vec3::new(1.0, 1.45 - GROUND, -1.6));
@@ -622,16 +626,6 @@ fn livery(body: &Body, win: &Windows, atlas: &Atlas) -> [Image; 3] {
             0.6,
         );
         text(
-            View::Front,
-            false,
-            "27",
-            Vec2::new(0.0, 0.5525),
-            0.04,
-            (Vec2::NEG_X, Vec2::Y),
-            black,
-            0.75,
-        );
-        text(
             View::Back,
             false,
             "27",
@@ -713,11 +707,8 @@ fn livery(body: &Body, win: &Windows, atlas: &Atlas) -> [Image; 3] {
             View::Front => {
                 let (x, h) = (q.x, q.y);
                 // Meets the side's sweep line at the flare seams.
-                let mut c = sweep(blue, h, 0.505 + 0.061 * (x / 0.85).powi(2));
-                c = panel(
-                    c,
-                    sd_round_rect(q - Vec2::new(0.0, 0.5525), Vec2::new(0.15, 0.03), 0.01),
-                );
+                // The number plate is its own part (`number_plate`).
+                let c = sweep(blue, h, 0.505 + 0.061 * (x / 0.85).powi(2));
                 c.mix(plastic, fill(trim_line(-2.05, h), px_m))
             }
             _ => {
@@ -1363,6 +1354,64 @@ fn plate_texture() -> Image {
     })
 }
 
+/// The front number plate: a 30 × 6 cm plate standing 7 mm proud of the bumper bar between
+/// the grille and the intake (painted on, its edges would wrap into their rims).
+fn number_plate(plain: Field) -> Mesh {
+    const HALF: Vec2 = Vec2::new(0.15, 0.03);
+    const MID: f32 = 0.5525;
+    let cols = 10;
+    // Rows top to bottom, so the grid's normal (and the textured face) points forward.
+    let grid: Vec<Vec<Vec3>> = [MID + HALF.y, MID - HALF.y]
+        .iter()
+        .map(|&h| {
+            (0..=cols)
+                .map(|j| {
+                    let x = -HALF.x + 2.0 * HALF.x * j as f32 / cols as f32;
+                    surface_point(plain, Proj::Front, Vec2::new(x, MID), GROUND)
+                        .map(|(p, n)| {
+                            let up = Vec3::X.cross(n).normalize_or(Vec3::Y);
+                            p + n * 0.007 + up * (h - MID)
+                        })
+                        .unwrap_or(Vec3::new(x, h - GROUND, -2.05))
+                })
+                .collect()
+        })
+        .collect();
+    slab(&grid, 0.003, &|i, j, back| {
+        if back {
+            return Vec2::new(0.5, 0.5);
+        }
+        // Seen from the front, the car's +x is on the left of the plate.
+        Vec2::new(1.0 - j as f32 / cols as f32, i as f32)
+    })
+}
+
+/// The number plate's face: white with an orange border and the black 27.
+fn number_texture() -> Image {
+    let (w, h) = (512u32, 102u32);
+    let mut cv = Canvas::new(w, h);
+    // Small enough that the strokes stay clear of the border.
+    let size = 58.0;
+    let text = "27";
+    let tw = tex::text_width(text, size);
+    let origin = Vec2::new((w as f32 - tw) * 0.5, (h as f32 + size) * 0.5);
+    let hw = 0.75 * size / 6.0;
+    for (a, b) in tex::text_segments(text, origin, size, Vec2::X, Vec2::NEG_Y) {
+        cv.segment(a, b, hw + 1.5, 1);
+    }
+    let white = lin(0xf2f2ef);
+    let orange = lin(0xff5a1f);
+    let black = lin(0x101012);
+    tex::par_image(w, h, true, |x, y| {
+        let (fx, fy) = (x as f32 + 0.5, y as f32 + 0.5);
+        let edge = fx.min(w as f32 - fx).min(fy).min(h as f32 - fy);
+        let ink = (hw + 0.5 - cv.at(x as i32, y as i32)).clamp(0.0, 1.0);
+        let border = (edge > 5.0 && edge < 12.0) as u8 as f32;
+        let c = white.lerp(orange, border).lerp(black, ink);
+        [tex::srgb(c.x), tex::srgb(c.y), tex::srgb(c.z), 255]
+    })
+}
+
 /// A thin plate through a grid of points (rows × columns), `t` thick, both faces offset along
 /// the grid normal, with border walls. `uv(row, col, back)` per face.
 fn slab(grid: &[Vec<Vec3>], t: f32, uv: &dyn Fn(usize, usize, bool) -> Vec2) -> Mesh {
@@ -1591,13 +1640,27 @@ fn brushed_texture() -> (Image, Image) {
     })
 }
 
+/// The tail surface around the exhaust hole's rim (z, m).
+fn tip_rim(plain: Field, c: Vec2, r: f32) -> f32 {
+    surface_point(plain, Proj::Back, c + Vec2::new(0.0, r + 0.01), GROUND)
+        .map(|(p, _)| p.z)
+        .unwrap_or(2.0)
+}
+
+/// The exhaust tip's open end (center, the way the gas leaves, bore radius): the lip stands
+/// 2.2 cm behind the valance.
+pub fn exhaust_exits(body: &Body) -> Vec<(Vec3, Vec3, f32)> {
+    let plain = |p: Vec3| body.shell_plain(p);
+    let (c, r) = body.features.exhaust;
+    let z = tip_rim(&plain, c, r) + 0.022;
+    vec![(Vec3::new(c.x, c.y - GROUND, z), Vec3::Z, r - 0.01)]
+}
+
 /// The big single exhaust tip in the rear valance (heat-tinted).
 fn exhaust(body: &Body, plain: Field) -> Mesh {
     let (c, r) = body.features.exhaust;
     let ro = r - 0.006;
-    let rim = surface_point(plain, Proj::Back, c + Vec2::new(0.0, r + 0.01), GROUND)
-        .map(|(p, _)| p.z)
-        .unwrap_or(2.0);
+    let rim = tip_rim(plain, c, r);
     let prof = [
         Vec2::new(-0.16, ro - 0.004),
         Vec2::new(0.008, ro - 0.004),
@@ -1975,12 +2038,13 @@ fn bucket_seat() -> Mesh {
         &|p, n| {
             let insert_cushion = p.x.abs() < 0.15 && n.y > 0.6 && p.z < 0.12 && p.y > 0.1;
             let insert_back = p.x.abs() < 0.15 && n.z < -0.6 && p.y > 0.22 && p.y < 0.8;
+            // Charcoal fabric shell (albedo ~0.05) with blue inserts on a gray frame.
             if p.y < 0.06 {
-                Vec4::new(0.05, 0.05, 0.055, 1.0)
+                Vec4::new(0.09, 0.09, 0.095, 1.0)
             } else if insert_cushion || insert_back {
-                Vec4::new(0.03, 0.04, 0.075, 1.0)
+                Vec4::new(0.045, 0.07, 0.16, 1.0)
             } else {
-                Vec4::new(0.018, 0.018, 0.02, 1.0)
+                Vec4::new(0.048, 0.048, 0.052, 1.0)
             }
         },
     );

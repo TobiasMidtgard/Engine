@@ -8,8 +8,9 @@
 //!
 //! `shots` picks shots by name (`oak`, `birch`, `pine`, `spruce`, `hazel`, `stump`, `log`,
 //! `old_logs` for logs that have lain for years, `log_ends` for their butts and broken tops,
-//! `row`, `close` for arm's-length oak, birch and pine); `--dump` saves the painted bark
-//! textures instead.
+//! `fungi` for bracket fungi on snags, stumps and old logs, `stumps` for stumps fresh,
+//! silvered and rotting, `row`, `close` for arm's-length oak, birch and pine); `--dump` saves
+//! the painted bark textures instead.
 //!
 //! The sun rakes across the trunks from the side, which is the light that shows (or betrays)
 //! bark relief. Every shot is a close-up a player could walk up to.
@@ -18,7 +19,8 @@ use engine_core::prelude::*;
 use engine_core::time::TimeSource;
 use engine_foliage::meshgen::bark::{BarkKind, bark_textures};
 use engine_foliage::{
-    FelledLog, FoliagePlugin, Genes, LogPose, Plant, PlantLibrary, fell_tree, spawn_plant,
+    FelledLog, FoliagePlugin, Genes, LogPose, Plant, PlantLibrary, PlantStage, fell_tree,
+    spawn_plant,
 };
 use engine_render::prelude::*;
 use engine_render::{Exposure, RenderDisabled, Screenshots};
@@ -40,6 +42,9 @@ fn aim(world: &mut World, eye: DVec3, target: DVec3) {
 
 fn shot(app: &mut App, out: &str, name: &str, eye: DVec3, target: DVec3) {
     aim(&mut app.world, eye, target);
+    // Let the plants and logs catch up with the camera (details near it, such as fungi, show
+    // on their next full visual pass) before drawing.
+    simulate(app, 16);
     app.update_n(5);
     let path = format!("{out}/{name}.png");
     app.world
@@ -59,6 +64,24 @@ fn simulate(app: &mut App, frames: usize) {
     if let Some(r) = renderer {
         app.world.insert_resource(r);
     }
+}
+
+/// How long a bare log is: its mesh's height along the trunk, scaled.
+fn log_length(
+    app: &App,
+    species: engine_foliage::SpeciesId,
+    variant: u8,
+    scale: f32,
+) -> Option<f32> {
+    let vis = app
+        .world
+        .resource::<engine_foliage::assets::FoliageVisuals>();
+    let sv = vis.species.get(species.0 as usize)?.as_ref()?;
+    let v = &sv.variants[variant as usize % sv.variants.len()];
+    let meshes = app
+        .world
+        .resource::<engine_assets::Assets<engine_render::Mesh>>();
+    Some(meshes.get(v.log?)?.aabb().max.y * scale)
 }
 
 fn genes(variant: u8) -> Genes {
@@ -223,6 +246,49 @@ fn main() {
             },
         ));
     }
+    // Dead wood a few years on: snags (birch, oak, spruce) and stumps (oak, birch, pine), where
+    // bracket fungi fruit.
+    let deadwood = DVec3::new(0.0, 0.0, 30.0);
+    let dead = [
+        ("birch", 0.0, PlantStage::Dead { years: 5.0 }),
+        ("oak", 5.0, PlantStage::Dead { years: 5.0 }),
+        ("spruce", 10.0, PlantStage::Dead { years: 5.0 }),
+        ("oak", 14.0, PlantStage::Stump { years: 6.0 }),
+        ("birch", 16.0, PlantStage::Stump { years: 6.0 }),
+        ("pine", 18.0, PlantStage::Stump { years: 6.0 }),
+    ];
+    for (i, (name, x, stage)) in dead.into_iter().enumerate() {
+        let e = spawn_plant(
+            &mut app.world,
+            name,
+            deadwood + DVec3::X * x,
+            0.9,
+            Some(genes(i as u8)),
+        )
+        .expect("species");
+        if let Some(mut plant) = app.world.get_mut::<Plant>(e) {
+            plant.stage = stage;
+        }
+    }
+    // Stumps of each tree through the years: fresh, silvered and rotting.
+    let stumps = DVec3::new(0.0, 0.0, 50.0);
+    let stump_kinds = ["oak", "birch", "pine", "spruce"];
+    let stump_ages = [("fresh", 0.2), ("grey", 2.5), ("old", 7.0)];
+    for (j, (_, years)) in stump_ages.into_iter().enumerate() {
+        for (i, name) in stump_kinds.into_iter().enumerate() {
+            let e = spawn_plant(
+                &mut app.world,
+                name,
+                stumps + DVec3::new(i as f64 * 2.5, 0.0, j as f64 * 6.0),
+                0.9,
+                Some(genes(i as u8)),
+            )
+            .expect("species");
+            if let Some(mut plant) = app.world.get_mut::<Plant>(e) {
+                plant.stage = PlantStage::Stump { years };
+            }
+        }
+    }
     simulate(&mut app, 20);
 
     let trunk_eye = |x: f64, d: f64, h: f64| DVec3::new(x + d * 0.62, h, d * 0.78);
@@ -311,20 +377,8 @@ fn main() {
             .iter(&app.world)
             .find(|(l, _, _)| library.get(l.species).name == "oak")
             .map(|(l, p, t)| (l.species, p.genes.variant, *t));
-        // How long the bare log is: its mesh's height along the trunk, scaled.
-        let length = |species: engine_foliage::SpeciesId, variant: u8, scale: f32| {
-            let vis = app
-                .world
-                .resource::<engine_foliage::assets::FoliageVisuals>();
-            let sv = vis.species.get(species.0 as usize)?.as_ref()?;
-            let v = &sv.variants[variant as usize % sv.variants.len()];
-            let meshes = app
-                .world
-                .resource::<engine_assets::Assets<engine_render::Mesh>>();
-            Some(meshes.get(v.log?)?.aabb().max.y * scale)
-        };
         if let Some((species, variant, t)) = oak
-            && let Some(len) = length(species, variant, t.scale.y)
+            && let Some(len) = log_length(&app, species, variant, t.scale.y)
         {
             let axis = (t.rotation * Vec3::Y).as_dvec3();
             let side = DVec3::Y.cross(axis).normalize();
@@ -344,6 +398,129 @@ fn main() {
                 top + axis * 0.9 - side * 0.7 + DVec3::Y * 0.6,
                 top - axis * 0.25,
             );
+        }
+    }
+    if want("fungi") {
+        // Each snag from both sides (fungi favour one side of a trunk), the stumps, and each old
+        // log from its flank.
+        for (i, name) in ["birch", "oak", "spruce"].into_iter().enumerate() {
+            let at = deadwood + DVec3::new(i as f64 * 5.0, 0.0, 0.0);
+            for (side, z) in [("s", -3.2), ("n", 3.2)] {
+                shot(
+                    &mut app,
+                    &out,
+                    &format!("15_fungi_snag_{name}_{side}"),
+                    at + DVec3::new(0.5, 1.8, z * 0.75),
+                    at + DVec3::new(0.0, 1.7, 0.0),
+                );
+            }
+        }
+        shot(
+            &mut app,
+            &out,
+            "16_fungi_stumps",
+            deadwood + DVec3::new(16.0, 1.3, -2.4),
+            deadwood + DVec3::new(16.0, 0.3, 0.0),
+        );
+        let library = app.world.resource::<PlantLibrary>().clone();
+        let mut logs = app.world.query::<(&FelledLog, &LogPose, &Transform)>();
+        let old: Vec<_> = logs
+            .iter(&app.world)
+            .filter(|(l, _, _)| l.years >= 3.0)
+            .map(|(l, p, t)| (l.species, p.genes.variant, *t))
+            .collect();
+        for (species, variant, t) in old {
+            let Some(len) = log_length(&app, species, variant, t.scale.y) else {
+                continue;
+            };
+            let axis = (t.rotation * Vec3::Y).as_dvec3();
+            let side = DVec3::Y.cross(axis).normalize();
+            let mid = t.translation + axis * (0.45 * len) as f64;
+            shot(
+                &mut app,
+                &out,
+                &format!("17_fungi_log_{}", library.get(species).name),
+                mid - side * 2.6 - axis * 1.2 + DVec3::Y * 1.3,
+                mid - axis * 0.4,
+            );
+        }
+    }
+    if want("stumps") {
+        for (j, (age, _)) in stump_ages.into_iter().enumerate() {
+            let row = stumps + DVec3::new(3.75, 0.0, j as f64 * 6.0);
+            shot(
+                &mut app,
+                &out,
+                &format!("19_stumps_{age}"),
+                row + DVec3::new(0.0, 2.2, -4.6),
+                row + DVec3::new(0.0, 0.2, 0.0),
+            );
+        }
+        for (i, name) in [(0, "oak"), (1, "birch")] {
+            let at = stumps + DVec3::new(i as f64 * 2.5, 0.0, 12.0);
+            shot(
+                &mut app,
+                &out,
+                &format!("19_stump_old_{name}_top"),
+                at + DVec3::new(0.4, 1.6, -1.1),
+                at + DVec3::new(0.0, 0.35, 0.0),
+            );
+        }
+    }
+    if want("fungi_close") {
+        // Each bracket fungus on a plain post at arm's length, to judge shapes and colors.
+        use engine_foliage::meshgen::fungi::{Fungus, Host, on_trunk};
+        let kinds = [
+            ("tinder_hoof", Fungus::TinderHoof),
+            ("birch_polypore", Fungus::BirchPolypore),
+            ("red_belt", Fungus::RedBelt),
+            ("sulphur_shelf", Fungus::SulphurShelf),
+            ("turkey_tail", Fungus::TurkeyTail),
+        ];
+        let path: Vec<Vec3> = (0..7).map(|k| Vec3::Y * (k as f32 * 0.5)).collect();
+        let radius = vec![0.2; path.len()];
+        let mut views = Vec::new();
+        for (i, (name, kind)) in kinds.into_iter().enumerate() {
+            let base = DVec3::new(60.0 + i as f64 * 5.0, 0.0, 40.0);
+            let Some(mesh) = on_trunk(&path, &radius, Host::Snag, kind, (0.3, 0.45), 5) else {
+                continue;
+            };
+            let center = mesh.aabb().center();
+            let mesh = app
+                .world
+                .resource_mut::<engine_assets::Assets<engine_render::Mesh>>()
+                .add(mesh);
+            app.world.spawn((
+                Transform::from_translation(base + DVec3::Y * 1.5),
+                MeshRenderer::new(
+                    Shape::Cylinder {
+                        radius: 0.2,
+                        height: 3.0,
+                        segments: 32,
+                    },
+                    StandardMaterial::hex(0x5e574f).with_roughness(0.95),
+                ),
+            ));
+            app.world.spawn((
+                Transform::from_translation(base),
+                MeshRenderer::new(
+                    engine_render::MeshRef::Handle(mesh),
+                    StandardMaterial::color(1.0, 1.0, 1.0)
+                        .with_roughness(0.82)
+                        .with_subsurface(0.15),
+                ),
+            ));
+            let out = Vec3::new(center.x, 0.0, center.z).normalize_or(Vec3::X);
+            let at = base + center.as_dvec3();
+            let across = Vec3::Y.cross(out).as_dvec3();
+            views.push((
+                name,
+                at + (out * 0.75).as_dvec3() + across * 0.35 + DVec3::Y * 0.3,
+                at,
+            ));
+        }
+        for (name, eye, target) in views {
+            shot(&mut app, &out, &format!("18_fungus_{name}"), eye, target);
         }
     }
     if want("row") {

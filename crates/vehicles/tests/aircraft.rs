@@ -88,6 +88,71 @@ fn takes_off_from_a_short_runway_and_climbs() {
     );
 }
 
+/// Put down a little above a runway on high ground in a crosswind (as the showcase tour
+/// does), the plane still starts a take-off roll, holds the centerline into the air, and
+/// rotates and climbs away. Before, its height above the runway was measured from 0 m, so it
+/// counted as flying: cruise logic turned it into the wind, and a take-off went straight to
+/// cruise.
+#[test]
+fn holds_the_centerline_in_a_crosswind_from_a_bouncy_start() {
+    let mut app = vehicle_app();
+    calm(&mut app);
+    {
+        let mut weather = app.world.resource_mut::<engine_world::WeatherState>();
+        weather.wind = Vec3::new(-7.0, 0.0, 0.0);
+        weather.gustiness = 0.3;
+    }
+    let runway = 80.0;
+    ground(
+        &mut app,
+        DVec3::new(0.0, runway, -1500.0),
+        3_000.0,
+        "concrete",
+    );
+    let t = Transform::from_translation(DVec3::new(
+        0.0,
+        runway + presets::ride_height("sport_plane") + 0.4,
+        0.0,
+    ))
+    .with_rotation(engine_vehicles::demo::facing(Vec3::NEG_Z));
+    let plane = spawn_with(&mut app, |c| presets::sport_plane(c, t));
+    app.world
+        .entity_mut(plane)
+        .insert(Autopilot::new(AutopilotMode::Fly {
+            waypoints: circuit(),
+            looped: true,
+            cruise_speed: 60.0,
+            rotate_speed: 32.0,
+        }));
+    run_for(&mut app, 1.0);
+    let phase = |app: &App| app.world.get::<Autopilot>(plane).unwrap().phase.clone();
+    assert_eq!(phase(&app), "takeoff roll");
+
+    let mut off_line = 0.0f64;
+    let mut airborne = false;
+    let mut phases = vec![phase(&app)];
+    run_until(&mut app, 30.0, |app| {
+        let tel = telemetry(app, plane);
+        let p = transform(app, plane).translation;
+        // Off the ground at flying speed (not the bounce at the start).
+        airborne |= tel.wheels_grounded == 0 && tel.speed > 20.0;
+        if !airborne {
+            off_line = off_line.max(p.x.abs());
+        }
+        let now = phase(app);
+        if phases.last() != Some(&now) {
+            phases.push(now);
+        }
+        airborne && p.y > runway + 30.0
+    });
+    assert!(airborne, "never left the ground ({phases:?})");
+    assert_eq!(phases, ["takeoff roll", "rotate", "climb"]);
+    assert!(
+        off_line < 1.5,
+        "{off_line:.1} m off the centerline on the roll"
+    );
+}
+
 #[test]
 fn flies_a_circuit_holding_height_and_speed() {
     let mut app = vehicle_app();

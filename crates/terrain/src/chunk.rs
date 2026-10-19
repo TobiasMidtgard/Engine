@@ -28,7 +28,7 @@ pub const FLAG_OCEAN: u8 = 2;
 /// The flag byte's upper 6 bits hold the vertex's convexity (see [`encode_convexity`]).
 pub const CONVEXITY_SHIFT: u8 = 2;
 
-/// GPU vertex of a terrain patch (44 bytes).
+/// GPU vertex of a terrain patch (48 bytes).
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Pod, Zeroable, PartialEq)]
 pub struct TerrainVertex {
@@ -39,7 +39,8 @@ pub struct TerrainVertex {
     pub normal: [i16; 4],
     /// Height above sea level, meters (the sea floor depth under ocean vertices).
     pub altitude: f32,
-    /// Moisture, temperature (−60..+60 °C), mare darkness, flags (unorm8).
+    /// Moisture, temperature (−130..+60 °C, so the polar ice of Mars fits), mare darkness,
+    /// flags (unorm8).
     pub climate: [u8; 4],
     /// Weights of the painted layers 1..=10 (unorm8, see `edits::PAINT_NAMES`), then regional
     /// variety and local patches. One weight per layer, so they interpolate across triangles
@@ -47,13 +48,16 @@ pub struct TerrainVertex {
     pub paint: [u8; 12],
     /// Tint of hand-made ground: color (square root of linear) and amount (unorm8).
     pub tint: [u8; 4],
+    /// River and lake water, the lake's part of it and nearness to river banks (unorm8; see
+    /// [`ShapeSample::water`](crate::ShapeSample)), then a spare byte.
+    pub river: [u8; 4],
 }
 
 impl TerrainVertex {
     pub fn layout() -> wgpu::VertexBufferLayout<'static> {
-        const ATTRS: [wgpu::VertexAttribute; 8] = wgpu::vertex_attr_array![
+        const ATTRS: [wgpu::VertexAttribute; 9] = wgpu::vertex_attr_array![
             0 => Float32x3, 1 => Snorm16x4, 2 => Float32, 3 => Unorm8x4, 4 => Unorm8x4,
-            9 => Unorm8x4, 10 => Unorm8x4, 8 => Unorm8x4
+            9 => Unorm8x4, 10 => Unorm8x4, 8 => Unorm8x4, 11 => Unorm8x4
         ];
         wgpu::VertexBufferLayout {
             array_stride: std::mem::size_of::<TerrainVertex>() as u64,
@@ -122,6 +126,9 @@ impl ChunkSource {
             moisture: s.moisture,
             temperature_c: s.temperature_c,
             mare: s.mare,
+            water: s.water,
+            lake: s.lake,
+            banks: s.banks,
             paint,
             tint,
         }
@@ -135,6 +142,10 @@ pub struct Sample {
     pub moisture: f32,
     pub temperature_c: f32,
     pub mare: f32,
+    /// River and lake water, 0..1, the lake's share of it, and nearness to river banks.
+    pub water: f32,
+    pub lake: f32,
+    pub banks: f32,
     pub paint: (u8, f32),
     /// Tint of hand-made ground: linear color and amount (0 = none).
     pub tint: [f32; 4],
@@ -231,6 +242,9 @@ pub fn build_chunk(src: &ChunkSource, key: NodeKey) -> ChunkMesh {
             moisture: 0.0,
             temperature_c: 0.0,
             mare: 0.0,
+            water: 0.0,
+            lake: 0.0,
+            banks: 0.0,
             paint: (0, 0.0),
             tint: [0.0; 4],
         };
@@ -333,7 +347,7 @@ pub fn build_chunk(src: &ChunkSource, key: NodeKey) -> ChunkMesh {
                 altitude: s.height as f32,
                 climate: [
                     (s.moisture.clamp(0.0, 1.0) * 255.0) as u8,
-                    (((s.temperature_c + 60.0) / 120.0).clamp(0.0, 1.0) * 255.0) as u8,
+                    (((s.temperature_c + 130.0) / 190.0).clamp(0.0, 1.0) * 255.0) as u8,
                     (s.mare.clamp(0.0, 1.0) * 255.0) as u8,
                     encode_convexity(convexity) | if ocean { FLAG_OCEAN } else { 0 },
                 ],
@@ -343,6 +357,12 @@ pub fn build_chunk(src: &ChunkSource, key: NodeKey) -> ChunkMesh {
                     patches(src, dirs[idx], spacing),
                 ),
                 tint: encode_tint(s.tint),
+                river: [
+                    (s.water.clamp(0.0, 1.0) * 255.0).round() as u8,
+                    (s.lake.clamp(0.0, 1.0) * 255.0).round() as u8,
+                    (s.banks.clamp(0.0, 1.0) * 255.0).round() as u8,
+                    0,
+                ],
             });
         }
     }

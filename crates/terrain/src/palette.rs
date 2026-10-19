@@ -31,6 +31,10 @@ pub struct TerrainPalette {
     pub mud: [f32; 3],
     /// Whether `lush`/`dry` are plants (grass translucency, softer).
     pub vegetation: bool,
+    /// 0..1 how much the ground scatters light like lunar dust rather than a matte surface:
+    /// a full moon is as bright at its edge as in its middle (Lommel–Seeliger), and dust
+    /// lit from straight behind the viewer brightens (the opposition surge). 0 on Earth.
+    pub regolith: f32,
     /// Snow lies where the mean temperature is below this, °C.
     pub snow_below_c: f32,
     /// Steepness (1 − cos of the slope angle) where rock shows through. 0.3 ≈ 45°.
@@ -60,6 +64,7 @@ impl TerrainPalette {
             ocean: [0.006, 0.03, 0.065],
             mud: [0.075, 0.055, 0.036],
             vegetation: true,
+            regolith: 0.0,
             snow_below_c: -2.0,
             rock_slope: 0.22,
             ground_material: "grass".into(),
@@ -79,6 +84,7 @@ impl TerrainPalette {
             ocean: [0.0, 0.0, 0.0],
             mud: [0.1, 0.1, 0.1],
             vegetation: false,
+            regolith: 1.0,
             snow_below_c: -200.0,
             rock_slope: 0.35,
             ground_material: "regolith".into(),
@@ -98,6 +104,7 @@ impl TerrainPalette {
             ocean: [0.0, 0.0, 0.0],
             mud: [0.15, 0.07, 0.04],
             vegetation: false,
+            regolith: 0.3,
             snow_below_c: -95.0,
             rock_slope: 0.3,
             ground_material: "sand".into(),
@@ -107,7 +114,8 @@ impl TerrainPalette {
 
     /// The surface material at a sampled point (`slope` = 1 − cos of the slope angle).
     pub fn classify(&self, s: &Sample, slope: f64, under_sea: bool, ids: &SurfaceIds) -> SurfaceId {
-        if under_sea {
+        // The sea, and rivers (splashing footsteps).
+        if under_sea || s.water > 0.5 {
             return ids.water;
         }
         if s.paint.1 > 0.5 && (s.paint.0 as usize) < PAINT_NAMES.len() && s.paint.0 > 0 {
@@ -205,6 +213,9 @@ mod tests {
             moisture: m,
             temperature_c: t,
             mare: 0.0,
+            water: 0.0,
+            lake: 0.0,
+            banks: 0.0,
             paint: (0, 0.0),
             tint: [0.0; 4],
         }

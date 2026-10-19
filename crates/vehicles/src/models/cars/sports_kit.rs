@@ -91,7 +91,9 @@ fn skin(body: &Body, win: &Windows, atlas: &Atlas) -> Kit {
         let (w, l, t, k) = (window(p), liner(p), trim(p), pocket(p));
         if w.abs() < 0.015 || l.abs() < 0.015 || t.abs() < 0.012 || k.abs() < 0.012 {
             0.0
-        } else if l < 0.0 || (k < 0.0 && body.features.at(p) != Some(sports::Feature::Headlight)) {
+        } else if l < 0.0
+            || (k < 0.0 && body.features.near(p, sports::LIP) != Some(sports::Feature::Headlight))
+        {
             // Wheel-well liners and pocket floors: mostly hidden (not the headlight housings,
             // seen through their lenses).
             8.0
@@ -109,7 +111,7 @@ fn skin(body: &Body, win: &Windows, atlas: &Atlas) -> Kit {
             }
             let mode = View::of(n) as u8;
             if cm.side(1, t) < 0.0 {
-                let mesh = match body.features.at(c) {
+                let mesh = match body.features.near(c, sports::LIP) {
                     Some(sports::Feature::Headlight) => 2,
                     _ => 3,
                 };
@@ -733,6 +735,28 @@ fn aero(plain: &(dyn Fn(Vec3) -> f32 + Sync)) -> Mesh {
     splitter
 }
 
+/// The tail surface around an exhaust hole's rim (z, m).
+fn tip_rim(plain: &(dyn Fn(Vec3) -> f32 + Sync), q: Vec2, r: f32) -> f32 {
+    surface_point(plain, Proj::Back, q + Vec2::new(0.0, r + 0.01), GROUND)
+        .map(|(p, _)| p.z)
+        .unwrap_or(2.0)
+}
+
+/// Each exhaust tip's open end (center, the way the gas leaves, bore radius), right side
+/// first: the lip stands 2 cm behind the valance.
+pub fn exhaust_exits(body: &Body) -> Vec<(Vec3, Vec3, f32)> {
+    let plain = |p: Vec3| body.shell_plain(p);
+    let (c, r) = body.features.exhaust;
+    [1.0f32, -1.0]
+        .into_iter()
+        .map(|side| {
+            let q = Vec2::new(side * c.x, c.y);
+            let z = tip_rim(&plain, q, r) + 0.02;
+            (Vec3::new(q.x, q.y - GROUND, z), Vec3::Z, r - 0.01)
+        })
+        .collect()
+}
+
 /// Twin exhaust tips set into the rear valance.
 fn exhausts(body: &Body, plain: &(dyn Fn(Vec3) -> f32 + Sync)) -> Mesh {
     let (c, r) = body.features.exhaust;
@@ -740,10 +764,7 @@ fn exhausts(body: &Body, plain: &(dyn Fn(Vec3) -> f32 + Sync)) -> Mesh {
     let mut parts = Vec::new();
     for side in [-1.0f32, 1.0] {
         let q = Vec2::new(side * c.x, c.y);
-        // Find the tail surface around the hole's rim.
-        let rim = surface_point(plain, Proj::Back, q + Vec2::new(0.0, r + 0.01), GROUND)
-            .map(|(p, _)| p.z)
-            .unwrap_or(2.0);
+        let rim = tip_rim(plain, q, r);
         let prof = [
             Vec2::new(-0.12, ro - 0.004),
             Vec2::new(0.006, ro - 0.004),
@@ -950,17 +971,18 @@ pub(super) fn badges_at(
         };
         let at = trs(p, Quat::from_rotation_arc(Vec3::X, n), Vec3::ONE);
         let r = 0.032;
+        // Profiles run so their normals face out (lathe normals point right of travel).
         let ring = lathe_x(
             &[
-                Vec2::new(-0.001, r + 0.004),
-                Vec2::new(0.004, r + 0.003),
-                Vec2::new(0.006, r),
                 Vec2::new(0.004, r - 0.004),
+                Vec2::new(0.006, r),
+                Vec2::new(0.004, r + 0.003),
+                Vec2::new(-0.001, r + 0.004),
             ],
             40,
             &[],
         );
-        let disc = flipped(lathe_x(
+        let disc = lathe_x(
             &[
                 Vec2::new(0.0045, 0.0),
                 Vec2::new(0.004, r * 0.7),
@@ -968,7 +990,7 @@ pub(super) fn badges_at(
             ],
             40,
             &[],
-        ));
+        );
         // Emblem: the maker's winged V (a V crossed by a wing bar), raised chrome. Outline
         // points are (up, across) in the badge plane.
         let bar = |a: Vec2, b: Vec2, w: f32| -> Mesh {

@@ -1,19 +1,22 @@
 //! The paddock's stunt yard, its ragdoll test case: a stuntman climbs the stairs of a raised
 //! deck, sprints across it and goes limp at the edge, falls onto a crash mat with the momentum
-//! of his run, lies still, gets up where he landed and walks back round to go again. The deck,
-//! stairs and mat are physics colliders (and IK surfaces for his feet); without a physics
-//! module he stops at the edge, stays on his feet and walks back.
+//! of his run (braced, arms out and knees bent, until he hits it: `fall_brace` and
+//! [`RagdollTone`]), lies still, gets up off the mat (face up or face down, whichever way he
+//! landed) and walks back round to go again. The deck, stairs and mat are physics colliders
+//! (and IK surfaces for his feet); without a physics module he stops at the edge, stays on
+//! his feet and walks back.
 
 use std::f32::consts::PI;
 
 use engine_core::prelude::*;
 use engine_render::{MaterialPreset, MeshRenderer, Shape as MeshShape, StandardMaterial};
 use engine_world::Ground;
-use engine_world::animation::{BodyRequest, Ragdoll, SkeletonPose};
+use engine_world::animation::{AnimationTrigger, BodyRequest, Ragdoll, SkeletonPose};
 use engine_world::physics::{Collider, PhysicsQueries, RigidBody};
 
+use crate::animator::Animator;
 use crate::ik::{GroundProbe, IkShape, IkSurface, IkSurfaces};
-use crate::ragdoll::BLEND_OUT_SECS;
+use crate::ragdoll::{RagdollRig, RagdollTone, get_up_placement};
 use crate::xform::smoothing;
 
 /// Where the stunt yard is in the paddock: x, z from its center, m.
@@ -24,6 +27,8 @@ pub const DECK_HEIGHT: f32 = 1.2;
 const MAT: Vec3 = Vec3::new(2.3, 0.18, 1.5);
 /// How fast the stuntman changes speed, m/s².
 const ACCELERATION: f32 = 5.0;
+/// Longest he takes to get up before walking off anyway, s.
+const RISE_SECS: f32 = 5.0;
 
 /// What the stuntman is doing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -32,7 +37,7 @@ pub enum StuntPhase {
     Run,
     /// Limp, falling and lying on the mat.
     Fall,
-    /// Getting up (the pose blends back to standing).
+    /// Getting up off the mat.
     Rise,
     /// Walking back round to the start.
     Back,
@@ -220,6 +225,7 @@ pub fn spawn_yard(world: &mut World, origin: DVec3) -> Entity {
 #[allow(clippy::type_complexity)]
 pub(crate) fn stunt_system(
     mut commands: Commands,
+    mut triggers: MessageWriter<AnimationTrigger>,
     time: Res<Time>,
     ground: Res<Ground>,
     physics: Option<Res<PhysicsQueries>>,
@@ -231,13 +237,14 @@ pub(crate) fn stunt_system(
         Option<&mut Ragdoll>,
         Option<&SkeletonPose>,
         &GlobalTransform,
+        Option<(&Animator, &RagdollRig)>,
     )>,
 ) {
     let dt = time.delta_secs();
     if dt <= 0.0 {
         return;
     }
-    for (entity, mut stunt, mut t, ragdoll, pose, gt) in &mut q {
+    for (entity, mut stunt, mut t, ragdoll, pose, gt, rig) in &mut q {
         stunt.time += dt;
         let probe = GroundProbe {
             ground: &ground,
@@ -279,8 +286,14 @@ pub(crate) fn stunt_system(
                         stunt.next = 1;
                         stunt.time = 0.0;
                         if stunt.phase == StuntPhase::Run {
-                            // Off the edge: limp, with the run's momentum.
+                            // Off the edge: limp, with the run's momentum, braced for the
+                            // landing until he hits the mat.
                             stunt.phase = StuntPhase::Fall;
+                            triggers.write(AnimationTrigger {
+                                entity,
+                                name: "fall_brace".into(),
+                            });
+                            commands.entity(entity).insert(RagdollTone::default());
                             match ragdoll {
                                 Some(mut r) => r.weight = 1.0,
                                 None => {
@@ -298,15 +311,19 @@ pub(crate) fn stunt_system(
                     continue;
                 }
                 if !stunt.moved {
-                    // Stand the entity where he lies, facing the way he fell, so he rises
-                    // there.
+                    // Stand the entity where his get-up starts from the way he lies, so he
+                    // rises there without sliding; or under his hips, facing the way he fell.
+                    let placed = pose.zip(rig).and_then(|(pose, (animator, _))| {
+                        get_up_placement(&animator.skeleton, pose, gt)
+                    });
                     let hips =
                         pose.and_then(|p| p.index_of("hips").and_then(|i| p.bone_world(gt, i)));
-                    if let Some((p, _)) = hips {
+                    if let Some((at, rotation)) = placed {
+                        t.translation = DVec3::new(at.x, ground_at(at), at.z);
+                        t.rotation = rotation;
+                    } else if let Some((p, _)) = hips {
                         let fell = (p - t.translation).as_vec3();
-                        let mut spot = DVec3::new(p.x, t.translation.y, p.z);
-                        spot.y = ground_at(DVec3::new(p.x, p.y, p.z));
-                        t.translation = spot;
+                        t.translation = DVec3::new(p.x, ground_at(p), p.z);
                         if fell.x.hypot(fell.z) > 0.2 {
                             t.rotation = Quat::from_rotation_y((-fell.x).atan2(-fell.z));
                         }
@@ -322,7 +339,8 @@ pub(crate) fn stunt_system(
                 }
             }
             StuntPhase::Rise => {
-                if stunt.time > BLEND_OUT_SECS + 0.5 {
+                let rising = rig.is_some_and(|(_, r)| r.is_blending_back());
+                if (stunt.time > 0.5 && !rising) || stunt.time > RISE_SECS {
                     stunt.phase = StuntPhase::Back;
                     stunt.time = 0.0;
                     stunt.next = 0;

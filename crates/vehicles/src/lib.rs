@@ -7,6 +7,7 @@ pub mod chassis;
 pub mod demo;
 pub mod drivetrain;
 pub mod events;
+pub mod exhaust;
 pub mod models;
 pub mod presets;
 pub mod ship;
@@ -89,6 +90,7 @@ impl Plugin for VehiclesPlugin {
                         events::engine_events_system,
                         events::heat_damage_system,
                         events::engine_and_wheel_state_system,
+                        exhaust::exhausts_system,
                         ship::propellant_mass_system,
                     )
                         .chain()
@@ -104,6 +106,7 @@ impl Plugin for VehiclesPlugin {
                 Update,
                 (
                     visuals::wheel_visuals,
+                    visuals::gear_visuals,
                     visuals::aircraft_visuals,
                     visuals::plume_visuals,
                     visuals::light_visuals,
