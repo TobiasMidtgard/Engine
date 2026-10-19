@@ -130,9 +130,9 @@ fn vs_sky(@builtin(vertex_index) i: u32) -> FullscreenOut {
 @fragment
 fn fs_sky(in: FullscreenOut) -> @location(0) vec4<f32> {
     let dir = view_dir(in.uv);
-    // Fog in front of the sky, up to the volumetric fog's range: sunbeams against the sky and
-    // the sun's disc dimmed by mist.
-    let c = apply_sky_fog(pre_expose(sky_radiance(dir, true)), dir);
+    // Fog in front of the sky: sunbeams against the sky, the sun's disc dimmed by mist, and the
+    // height fog out to the horizon, as over distant ground.
+    let c = apply_full_sky_fog(pre_expose(sky_radiance(dir, true)), dir, in.position.xy);
     return vec4<f32>(min(c, vec3(60000.0)), 1.0);
 }
 
