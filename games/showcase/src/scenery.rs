@@ -75,7 +75,7 @@ pub struct Library {
     pub props: Props,
     /// Dry-stone wall segment variants and the heads that end a run.
     pub walls: Vec<WallHandles>,
-    pub wall_heads: Vec<(Handle<Mesh>, Handle<Mesh>)>,
+    pub wall_heads: Vec<Handle<Mesh>>,
     /// The spaceport's 600 m tower.
     pub tower: crate::tower::TowerKit,
 }
@@ -83,10 +83,8 @@ pub struct Library {
 /// One dry-stone wall segment variant (see [`crate::walls`]).
 pub struct WallHandles {
     pub near: Handle<Mesh>,
-    pub mid: Handle<Mesh>,
-    /// For the last segment of a run (its coping leaves room for the head).
+    /// For the last segment of a run (its stones leave room for the head).
     pub near_end: Handle<Mesh>,
-    pub mid_end: Handle<Mesh>,
     /// The core: dark behind the stones (the run's last segment's stops inside the head),
     /// stone-colored from afar.
     pub core: Handle<Mesh>,
@@ -217,26 +215,36 @@ pub fn build_library(
         near: (meshes.add(lamp.0.0), meshes.add(lamp.0.1)),
         far: (meshes.add(lamp.1.0), meshes.add(lamp.1.1)),
     };
-    let walls = (0..4)
-        .map(|i| {
-            let w = crate::walls::segment(900 + i);
-            WallHandles {
-                near: meshes.add(w.near),
-                mid: meshes.add(w.mid),
-                near_end: meshes.add(w.near_end),
-                mid_end: meshes.add(w.mid_end),
-                core: meshes.add(w.core),
-                core_end: meshes.add(w.core_end),
-                core_far: meshes.add(w.core_far),
-            }
+    // Hundreds of sculpted stones a variant: built side by side.
+    let (segments, heads) = std::thread::scope(|scope| {
+        let segments: Vec<_> = (0..4)
+            .map(|i| scope.spawn(move || crate::walls::segment(900 + i)))
+            .collect();
+        let heads: Vec<_> = (0..3)
+            .map(|i| scope.spawn(move || crate::walls::head(950 + i)))
+            .collect();
+        (
+            segments
+                .into_iter()
+                .map(|h| h.join().expect("wall builder"))
+                .collect::<Vec<_>>(),
+            heads
+                .into_iter()
+                .map(|h| h.join().expect("wall builder"))
+                .collect::<Vec<_>>(),
+        )
+    });
+    let walls = segments
+        .into_iter()
+        .map(|w| WallHandles {
+            near: meshes.add(w.near),
+            near_end: meshes.add(w.near_end),
+            core: meshes.add(w.core),
+            core_end: meshes.add(w.core_end),
+            core_far: meshes.add(w.core_far),
         })
         .collect();
-    let wall_heads = (0..3)
-        .map(|i| {
-            let h = crate::walls::head(950 + i);
-            (meshes.add(h.near), meshes.add(h.mid))
-        })
-        .collect();
+    let wall_heads = heads.into_iter().map(|h| meshes.add(h.near)).collect();
     engine::core::log::info!(
         "village: {} house types ({} triangles near, {} far), built in {:.2} s",
         houses.len(),
@@ -1482,8 +1490,10 @@ pub fn spawn_farms(
 const WALL_CELLS: i32 = 17;
 /// Walls end here, m from the middle of the valley.
 const WALL_RADIUS: f64 = 700.0;
-/// Stones up close within this distance, m; only their fronts out to the second.
-const WALL_NEAR: f32 = 30.0;
+/// The stones show within this distance, m (virtual geometry thins them out on the way).
+const WALL_STONES: f32 = 260.0;
+/// The core turns stone-colored beyond this distance, m, where the chinks no longer show; past
+/// [`WALL_STONES`] it stands for the whole wall.
 const WALL_MID: f32 = 160.0;
 /// Shorter runs of wall than this many segments are left out: stubs read as rubble.
 const WALL_MIN_RUN: usize = 3;
@@ -1695,22 +1705,23 @@ pub fn spawn_walls(
 ) {
     use crate::walls::{HALF_FOOT, HEIGHT, SEGMENT, SINK};
     let plan = plan_walls(land, hedged, lib.walls.len(), lib.wall_heads.len());
-    let stone = lib.mats.village.stone;
+    // The boulders' rock: albedo, normal and occlusion maps under each stone's own tint.
+    let stone = lib.rocks.mats.rock;
     for seg in &plan.segments {
         let w = &lib.walls[seg.variant];
         let flip = if seg.mirrored { -1.0 } else { 1.0 };
         let tf = Transform::from_translation(seg.pos)
             .with_rotation(seg.rot)
             .with_scale(Vec3::new(flip * seg.len / SEGMENT, 1.0, 1.0));
-        let (near, mid, core) = if seg.end {
-            (w.near_end, w.mid_end, w.core_end)
+        let (near, core) = if seg.end {
+            (w.near_end, w.core_end)
         } else {
-            (w.near, w.mid, w.core)
+            (w.near, w.core)
         };
         commands.spawn((
             tf,
             MeshRenderer::new(near, stone),
-            Lod::swap_then_hide(near, mid, WALL_NEAR, WALL_MID),
+            Lod::hide_beyond(near, WALL_STONES),
         ));
         commands.spawn((
             tf,
@@ -1727,11 +1738,11 @@ pub fn spawn_walls(
         ));
     }
     for head in &plan.heads {
-        let (near, mid) = lib.wall_heads[head.variant];
+        let near = lib.wall_heads[head.variant];
         commands.spawn((
             Transform::from_translation(head.pos).with_rotation(head.rot),
             MeshRenderer::new(near, stone),
-            Lod::swap_then_hide(near, mid, WALL_NEAR, WALL_MID),
+            Lod::hide_beyond(near, WALL_STONES),
         ));
     }
     let nearest = plan
