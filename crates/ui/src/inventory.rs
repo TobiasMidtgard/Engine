@@ -234,7 +234,7 @@ pub fn item_details(
             .child(
                 El::new()
                     .class("row")
-                    .with_style(|s| s.gap(6.0))
+                    .with_style(|s| s.gap(6.0).wrap(true))
                     .child(
                         El::text(rarity_name(def.rarity))
                             .class("chip")

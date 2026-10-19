@@ -153,11 +153,14 @@ fn fs_ground(in: FullscreenOut) -> @location(0) vec4<f32> {
     // Water stands on the ground itself, not on grass blades, benches or tabletops.
     let on_ground = 1.0 - smoothstep(0.04, 0.08, ground.x);
     let water = smoothstep(0.0, 0.1, level) * flat_ground * (1.0 - snowed) * on_ground;
-    // A dark rim of soaked ground around the water.
+    // A dark rim of soaked ground around the water, also once the ground around it dries.
     let damp = smoothstep(-1.2, 0.0, level);
-    // Wetness the renderer didn't already apply (it uses the value at the camera).
-    let extra_wet = saturate(max(cov.r, damp * cov.r) - frame.weather.x);
-    let lying = saturate(saturate(snow_m * 10.0) - saturate(frame.weather.y * 10.0)) * smoothstep(0.75, 0.9, n.y);
+    // Wetness and snow the renderer didn't already give the surface: it shades materials that
+    // take weather from the same ground state, per pixel (`surface_weather`).
+    let applied = surface_weather(rel);
+    let extra_wet = saturate(max(cov.r, damp) - applied.x);
+    let applied_snow = saturate(applied.z * SURFACE_SNOW_SCALE_M * 10.0);
+    let lying = saturate(saturate(snow_m * 10.0) - applied_snow) * smoothstep(0.75, 0.9, n.y);
     let extra_snow = max(lying, buried);
     if (water < 0.003 && extra_wet < 0.01 && extra_snow < 0.01) { discard; }
 

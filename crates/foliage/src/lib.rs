@@ -9,6 +9,7 @@ pub mod grass;
 pub mod meshgen;
 pub mod plant;
 pub mod scenery;
+pub mod season;
 pub mod shift;
 pub mod sim;
 pub mod species;
@@ -25,6 +26,7 @@ pub use plant::{
     Disturbance, EcologyRegion, EcologySettings, FelledLog, Genes, Plant, PlantStage,
     RegionHistory, ResourceSource,
 };
+pub use season::FoliageSeason;
 pub use species::{Glow, Layer, Need, PlantForm, PlantLibrary, PlantSpecies, SpeciesId, Tolerance};
 
 /// Foliage & ecology: procedural trees, bushes, grass, flowers and glowing mushrooms that grow,
@@ -36,6 +38,7 @@ impl Plugin for FoliagePlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<PlantLibrary>()
             .init_resource::<EcologySettings>()
+            .init_resource::<FoliageSeason>()
             .init_resource::<ecology::GrowthClock>()
             .init_resource::<assets::FoliageVisuals>()
             .init_resource::<visuals::GlowLights>()
@@ -52,6 +55,12 @@ impl Plugin for FoliagePlugin {
             .register_resource::<EcologySettings>(
                 "Ecology speed (simulated years per second), pause, and draw distances for small \
                  plants and simplified trees (meters).",
+            )
+            .register_resource::<FoliageSeason>(
+                "The time of year plants show (day_of_year, 100 ≈ 10 April, 290 ≈ 17 October; \
+                 midsummer by default), or follow_weather to take the weather's calendar: \
+                 deciduous trees leaf out, turn and drop their leaves, ferns and flowers die back, \
+                 grass turns to straw.",
             )
             .register_component::<Plant>(
                 "A plant: species, size 0..1, age (years), health, vigor, what limits it, stage \
@@ -129,12 +138,14 @@ impl Plugin for FoliagePlugin {
             Update,
             (
                 (felling::stream_tree_colliders, felling::sync_tree_colliders).chain(),
+                season::follow_weather_calendar,
                 grass::sync_region_grass,
                 felling::remove_orphan_colliders,
                 (
                     scenery::build_scenery,
                     scenery::cull_debris,
                     assets::ensure_species_visuals,
+                    season::apply_season_colors,
                     visuals::sync_plant_visuals,
                     visuals::sync_log_visuals,
                     visuals::update_glow_lights,

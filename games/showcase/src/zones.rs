@@ -229,7 +229,7 @@ pub const BARE_FOOTPRINTS: &[(&str, [f64; 2], [f64; 2])] = &[
     // The weather station's asphalt yard, sand pit and stone patio.
     ("weather", [-13.5, 13.0], [-8.0, 9.0]),
     // The siege fortress's gravel breach range.
-    ("fortress", [-26.5, 26.5], [-14.0, -4.0]),
+    ("fortress", [-33.5, 26.5], [-14.0, -4.0]),
     // The siege fortress's breach house and the stair up its back wall.
     ("fortress", [11.2, 18.8], [17.7, 25.4]),
     // The market's cobbled square (grass still grows where its edge frays out).
@@ -478,10 +478,12 @@ pub fn spawn_demos(
             "field" => {
                 engine_fire::demo::spawn_demo(commands, z.center);
                 ph::field_edge(commands, lib, z, rng);
-                // Air over the meadow, so the fire's smoke rises as one simulated plume.
+                // Air over the meadow, so the fire's smoke rises as one simulated plume. It
+                // reaches farther downwind (the valley's wind blows west and a little north) so
+                // the plume drifts out of it well clear of the fire.
                 commands.spawn((
                     Name::new("Fire demo: smoke"),
-                    Transform::from_translation(z.center + DVec3::new(16.0, 0.0, 4.0)),
+                    Transform::from_translation(z.center + DVec3::new(-14.0, 0.0, 4.0)),
                     engine_smoke::SmokeVolume {
                         size: [100.0, 40.0, 60.0],
                         cell_m: 1.25,
@@ -776,7 +778,7 @@ pub fn demo_views(z: &Zone) -> Vec<View> {
                 ui(
                     "market_shop",
                     "The trader's shop",
-                    r#"{"screen": "shop", "select": "rifle"}"#,
+                    r#"{"screen": "shop", "select": "staff"}"#,
                 ),
                 ui(
                     "market_inventory",
