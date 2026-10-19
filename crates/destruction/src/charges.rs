@@ -1,6 +1,7 @@
 //! Breaching charges (Rainbow Six Siege style): an explosive charge blows a hole through soft
 //! walls and barricades; a thermite charge burns a clean opening around its edge, cutting rebar
-//! too, so it gets through reinforced walls.
+//! too, so it gets through reinforced walls, and through any reinforcement panels set behind
+//! the wall it is on ([`crate::reinforce`]).
 
 use engine_core::math::{DVec3, Quat, Rng, Vec2, Vec3};
 use engine_core::prelude::*;
@@ -11,6 +12,7 @@ use crate::assets::DestructionAssets;
 use crate::debris::{DebrisLook, DebrisSpawn, PendingDebris};
 use crate::hits::{Hit, HitQueue};
 use crate::material::DestructibleMaterial;
+use crate::reinforce::{ReinforcedBy, Reinforcement, to_panel};
 use crate::wall::{DestructibleWall, WallState};
 
 /// What a [`BreachCharge`] does when it goes off.
@@ -130,9 +132,16 @@ pub fn charges_system(
     time: Res<Time>,
     mut charges: Query<(Entity, &mut BreachCharge, &mut Transform), Without<DestructibleWall>>,
     walls: Query<
-        (&Transform, &GlobalTransform, Option<&ChildOf>, &WallState),
+        (
+            &Transform,
+            &GlobalTransform,
+            Option<&ChildOf>,
+            &WallState,
+            Option<&ReinforcedBy>,
+        ),
         With<DestructibleWall>,
     >,
+    panels: Query<&Reinforcement>,
     mut queue: ResMut<HitQueue>,
     mut pending: ResMut<PendingDebris>,
     mut impulses: MessageWriter<WorldImpulse>,
@@ -141,7 +150,7 @@ pub fn charges_system(
     let dt = time.delta_secs();
     let rng = rng.get_or_insert_with(|| Rng::new(0x07E4_317E));
     for (e, mut charge, mut t) in &mut charges {
-        let Some((wt, wgt, parent, state)) = charge.wall.and_then(|w| walls.get(w).ok()) else {
+        let Some((wt, wgt, parent, state, by)) = charge.wall.and_then(|w| walls.get(w).ok()) else {
             // The wall is gone: so is the charge.
             commands.entity(e).despawn();
             continue;
@@ -184,6 +193,36 @@ pub fn charges_system(
                 commands.entity(e).despawn();
             }
             ChargeKind::Thermite { size, burn_secs } => {
+                // It burns through the wall and any reinforcement panels set behind it.
+                let wall = charge.wall.unwrap_or(e);
+                let front = !charge.back;
+                let behind: Vec<(Entity, f32)> = match by {
+                    Some(by) if front => {
+                        by.0.iter()
+                            .filter_map(|&p| panels.get(p).ok().map(|r| (p, r.offset)))
+                            .collect()
+                    }
+                    _ => Vec::new(),
+                };
+                let mut cut = |min: Vec2, max: Vec2, melt: bool| {
+                    queue.hits.push(Hit::Cut {
+                        wall,
+                        min,
+                        max,
+                        front,
+                        melt,
+                    });
+                    for &(panel, offset) in &behind {
+                        let (min, max) = to_panel(min, max, offset);
+                        queue.hits.push(Hit::Cut {
+                            wall: panel,
+                            min,
+                            max,
+                            front: true,
+                            melt,
+                        });
+                    }
+                };
                 let half = Vec2::from_array(size) * 0.5;
                 let (min, max) = (charge.at - half, charge.at + half);
                 let before = charge.progress;
@@ -194,13 +233,11 @@ pub fn charges_system(
                 for k in 0..steps {
                     let s = before + (charge.progress - before) * (k + 1) as f32 / steps as f32;
                     let p = perimeter_point(min, max, s);
-                    queue.hits.push(Hit::Cut {
-                        wall: charge.wall.unwrap_or(e),
-                        min: p - Vec2::splat(width * 0.5),
-                        max: p + Vec2::splat(width * 0.5),
-                        front: !charge.back,
-                        melt: true,
-                    });
+                    cut(
+                        p - Vec2::splat(width * 0.5),
+                        p + Vec2::splat(width * 0.5),
+                        true,
+                    );
                 }
                 // Sparks spray off the burning point.
                 let p = perimeter_point(min, max, charge.progress);
@@ -212,13 +249,11 @@ pub fn charges_system(
                 }
                 if charge.progress >= 1.0 {
                     // Finish: the panel inside drops out.
-                    queue.hits.push(Hit::Cut {
-                        wall: charge.wall.unwrap_or(e),
-                        min: min + Vec2::splat(width * 0.4),
-                        max: max - Vec2::splat(width * 0.4),
-                        front: !charge.back,
-                        melt: false,
-                    });
+                    cut(
+                        min + Vec2::splat(width * 0.4),
+                        max - Vec2::splat(width * 0.4),
+                        false,
+                    );
                     commands.entity(e).despawn();
                 }
             }

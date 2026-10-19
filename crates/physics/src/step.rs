@@ -498,7 +498,11 @@ pub(crate) fn physics_step(world: &mut World, mut q: Local<Option<StepQueries>>)
             };
             let r = s.regions[rid as usize].as_mut().expect("live region");
             if r.needs_refresh {
-                r.world.detect_collisions(&filter, &());
+                // A zero-length step: Rapier applies the removals and updates the contacts and
+                // its islands together (its collision-only pass leaves the islands a link
+                // behind the contact graph, and a later contact gets mislinked).
+                r.world.integration_parameters.dt = 0.0;
+                r.world.step_with_events(&filter, &());
                 r.needs_refresh = false;
                 r.queries_refreshed();
                 r.update_bounds();
@@ -527,6 +531,7 @@ pub(crate) fn physics_step(world: &mut World, mut q: Local<Option<StepQueries>>)
                 settings.buoyancy,
             );
             drive_kinematics(&mut sim, rid, sub_dt, substeps - sub);
+            crate::cones::orient(&mut sim, rid);
             let scaled = scale_time(&mut sim, rid, true);
             {
                 let s = &mut *sim;
@@ -547,6 +552,7 @@ pub(crate) fn physics_step(world: &mut World, mut q: Local<Option<StepQueries>>)
                 scale_time(&mut sim, rid, false);
             }
             crate::rolling::resist_rolling(&mut sim, rid);
+            crate::cones::rub(&mut sim, rid);
             if settings.contact_events {
                 sim.process_contacts(rid, sub_dt);
             } else {

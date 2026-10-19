@@ -730,6 +730,10 @@ impl GiGroups {
 /// Whether the camera jumped so far between two frames that the previous image is useless (a
 /// teleport or a cut to another camera), as opposed to fast but continuous motion such as a
 /// spaceship at 10 km/s. `prev_step` is the camera's movement the frame before.
+///
+/// A camera that stood still or crept along cuts once it jumps [`CUT_STEP_M`]: tour stops and
+/// gallery shots are often only 10 to 20 m apart and face nearly the same way, and keeping the
+/// last stop's history there smears a ghost of it over the new view.
 pub fn is_camera_cut(
     prev_origin: DVec3,
     prev_rotation: Quat,
@@ -739,8 +743,11 @@ pub fn is_camera_cut(
 ) -> bool {
     let step = (origin - prev_origin).length();
     let turned = prev_rotation.angle_between(rotation);
-    turned > 45f32.to_radians() || (step > 25.0 && step > 4.0 * prev_step.max(1.0))
+    turned > 45f32.to_radians() || step > CUT_STEP_M.max(4.0 * prev_step)
 }
+
+/// Smallest jump [`is_camera_cut`] calls a cut (meters in one frame).
+pub const CUT_STEP_M: f64 = 5.0;
 
 #[cfg(test)]
 mod tests {
@@ -771,8 +778,15 @@ mod tests {
         // Walking, driving, a spaceship cruising at 10 km/s (167 m per frame).
         assert!(!is_camera_cut(a, q, DVec3::new(0.1, 0.0, 0.0), q, 0.1));
         assert!(!is_camera_cut(a, q, DVec3::new(167.0, 0.0, 0.0), q, 166.0));
+        // A sprint at a few frames per second, a car's camera speeding up.
+        assert!(!is_camera_cut(a, q, DVec3::new(4.0, 0.0, 0.0), q, 0.0));
+        assert!(!is_camera_cut(a, q, DVec3::new(11.0, 0.0, 0.0), q, 3.0));
         // Teleport and a cut to a camera facing the other way.
         assert!(is_camera_cut(a, q, DVec3::new(500.0, 0.0, 0.0), q, 0.0));
         assert!(is_camera_cut(a, q, a, Quat::from_rotation_y(3.0), 0.0));
+        // The next tour stop, 15 m along and turned 30 degrees, from a still camera.
+        let turn = Quat::from_rotation_y(30f32.to_radians());
+        assert!(is_camera_cut(a, q, DVec3::new(15.0, 0.0, 0.0), turn, 0.0));
+        assert!(is_camera_cut(a, q, DVec3::new(6.0, 0.0, 0.0), q, 0.02));
     }
 }

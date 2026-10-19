@@ -201,11 +201,11 @@ pub fn articulates(kind: &JointKind) -> bool {
     )
 }
 
-/// A ball joint's cone limit on its own: frees every axis, limits the two swing axes.
+/// A ball joint's cone limit on its own: frees every axis and limits the swing about Z
+/// (`crate::cones` turns the frames to the swing plane before every substep).
 pub fn cone_limit(limit: f32, frames: JointFrames, collide_connected: bool) -> GenericJoint {
     let l = limit.abs();
     let mut joint = GenericJointBuilder::new(JointAxesMask::empty())
-        .limits(JointAxis::AngY, [-l, l])
         .limits(JointAxis::AngZ, [-l, l])
         .contacts_enabled(collide_connected)
         .build();
@@ -279,11 +279,10 @@ fn build(
         JointKind::Spherical { cone_limit } => {
             let mut b = SphericalJointBuilder::new();
             if let Some(limit) = cone_limit.filter(|_| cone) {
+                // The swing about Z: `crate::cones` turns the frames to the swing plane
+                // before every substep, which makes the cone round.
                 let l = limit.abs();
-                // Rapier limits each swing axis separately: a square cone of half-angle `l`.
-                b = b
-                    .limits(JointAxis::AngY, [-l, l])
-                    .limits(JointAxis::AngZ, [-l, l]);
+                b = b.limits(JointAxis::AngZ, [-l, l]);
             }
             b.build().into()
         }
@@ -330,6 +329,32 @@ fn build(
     joint.set_contacts_enabled(collide_connected);
     joint
 }
+
+/// Dry friction on a constraint joint's free axes that no motor drives: up to `torque` (N·m)
+/// about its turning axes and `force` (N) along a slide, holding the bodies still against each
+/// other below that (a velocity motor toward rest that can't push harder).
+pub fn add_friction(data: &mut GenericJoint, kind: &JointKind, torque: f32, force: f32) {
+    let axes: &[JointAxis] = match kind {
+        JointKind::Spherical { .. } => &[JointAxis::AngX, JointAxis::AngY, JointAxis::AngZ],
+        JointKind::Revolute { motor: None, .. } => &[JointAxis::AngX],
+        JointKind::Prismatic { motor: None, .. } => &[JointAxis::LinX],
+        _ => &[],
+    };
+    for &axis in axes {
+        let most = if axis == JointAxis::LinX {
+            force
+        } else {
+            torque
+        };
+        data.set_motor_model(axis, MotorModel::ForceBased);
+        data.set_motor_velocity(axis, 0.0, FRICTION_GRIP);
+        data.set_motor_max_force(axis, most);
+    }
+}
+
+/// How hard [`add_friction`]'s motors hold toward rest below their limit (N·m·s/rad): far
+/// stiffer than any limb, so it acts like dry friction.
+const FRICTION_GRIP: f32 = 1.0e4;
 
 fn apply_motor(data: &mut GenericJoint, axis: JointAxis, m: &JointMotor) {
     data.set_motor_model(axis, MotorModel::ForceBased);

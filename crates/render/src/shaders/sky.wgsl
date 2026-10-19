@@ -56,7 +56,7 @@ fn planet_ground(dir: vec3<f32>, t: f32) -> vec3<f32> {
     let n = normalize(p - frame.planet.xyz);
     let sun = frame.sun_dir.xyz;
     let n_dot_l = dot(n, sun);
-    let sun_light = frame.sun_color.rgb * sun_transmittance(p + n * 10.0) * saturate(n_dot_l);
+    let sun_light = frame.sun_color.rgb * sun_transmittance(p + n * 10.0) * cloud_shadow(p) * saturate(n_dot_l);
     let sky_light = frame.sun_color.rgb * 0.12 * smoothstep(-0.15, 0.3, n_dot_l);
     let albedo = frame.ground.rgb;
     return albedo * (sun_light + sky_light) * INV_PI + frame.ambient.rgb * albedo;
@@ -130,9 +130,9 @@ fn vs_sky(@builtin(vertex_index) i: u32) -> FullscreenOut {
 @fragment
 fn fs_sky(in: FullscreenOut) -> @location(0) vec4<f32> {
     let dir = view_dir(in.uv);
-    // Fog in front of the sky, up to the volumetric fog's range: sunbeams against the sky and
-    // the sun's disc dimmed by mist.
-    let c = apply_sky_fog(pre_expose(sky_radiance(dir, true)), dir);
+    // Fog in front of the sky: sunbeams against the sky, the sun's disc dimmed by mist, and the
+    // height fog out to the horizon, as over distant ground.
+    let c = apply_full_sky_fog(pre_expose(sky_radiance(dir, true)), dir, in.position.xy);
     return vec4<f32>(min(c, vec3(60000.0)), 1.0);
 }
 

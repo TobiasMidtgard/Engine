@@ -39,12 +39,29 @@ changing that one plugin line.
   new triangle brought such a contact and a kick (a barrel at 8 m/s jumped 20 cm and veered
   meters off its line). A contact hook takes the spin's share out of each contact's closing
   speed, for colliders spinning that fast only, so piles keep Rapier's contact reuse.
+- **Spin friction**: a ball spinning on its spot, or a ragdoll's head, slows and stops (Rapier
+  only resists spin for flat contacts with several points, and never for articulation links).
+  Each such contact takes up to `μ · N · 1 cm` of torque out of the spin about its normal; spin
+  under 5% of the roll is left alone, since a normal a little off on terrain shows that much of
+  a fast roll as spin (it steered rolling barrels).
 - **Joints**: fixed, spherical (cone limit), revolute and prismatic (limits, motors), distance
   (rope), spring. `break_force` breaks a joint: the joint entity is despawned (or the `Joint`
   removed from a body entity). With `collide_connected: false` the two never touch, also when
   one side is a fixed body (a door hinged inside its frame, a lid on a static box). Angles count
   from the pose the bodies had when the joint was first made: a fixed joint welds them as they
   were, a hinge's limits and motor targets are relative to it.
+- **Cone limits** (`src/cones.rs`) are round, around the direction body B's center lay from the
+  joint when it was made (an arm may swing `cone_limit` away from where it hung), and leave
+  twist free. Rapier limits each angle on its own, a square cone that mixes swing and twist; so
+  before every substep the joint frames turn to the plane the limb swings in, and only that
+  angle is limited. A limb pressed against its cone's rim rubs there, with friction in
+  proportion to how hard the limit pushes back (half of it).
+- **Joint friction** in free-floating groups (ragdolls, loose chains): up to 10% of the torque
+  the lighter body's weight puts on the joint from its center (its weight, on a slider), like a
+  real joint's. Without it a bent arm sways about its free twist for minutes; with it, 288 drops
+  of a ragdoll all came to rest and fell asleep (about one in eight never did before), in about
+  2.5 s. Axes a motor drives get none; joints pinned to the world or a kinematic body (doors,
+  bridges, wrecking balls, lamps) get none either, so they swing on.
 - **Articulations** (`src/articulation.rs`): the fixed, spherical, revolute and prismatic joints
   of a group of dynamic bodies jointed together are solved in reduced coordinates (Rapier
   multibodies): each body only moves along its joint's free axes under its parent, so a ragdoll
@@ -64,8 +81,8 @@ changing that one plugin line.
   plank pressed against its tower), and groups whose heaviest body is over 100× its lightest
   (a 17 t wrecking ball on 12 kg links hitting a wall). Pinning or unpinning a group, or joining
   or dropping a heavy body, switches it over on the spot. Cost: Rapier rebuilds each
-  articulation's dense mass matrix every internal substep, about 1 ms per tumbling 11-part
-  ragdoll per frame on the build machine (constraint joints: 0.2 ms); asleep they cost nothing.
+  articulation's dense mass matrix every internal substep, about 0.9 ms per tumbling 10-part
+  ragdoll per frame on the build machine (constraint joints: 0.15 ms); asleep they cost nothing.
   `articulated_joints: false` turns it off.
 - **Characters**: `CharacterController` capsules moved by sweeps, so even an 800 m/s dash stops
   at a thin wall: steps (also while gravity pulls), slopes, ground snapping, crouching (change
@@ -230,8 +247,9 @@ pool; `tests/floaters.rs` checks each result.
 
 Tests (`cargo test -p engine_physics`): the conformance suite; the "done when" scenarios below
 (`tests/scenarios.rs`); articulations (`tests/articulation.rs`: an impulse on one link moves the
-whole by its momentum, written velocities and poses come through, cone limits, hinge motors and
-limits match constraint joints, fixed joints weld bodies as they were, world shifts, a chain
+whole by its momentum, written velocities and poses come through, cone limits hold and are
+round, a limb twisted half a turn stays twisted, a limb swung along its cone's rim stops, hinge
+motors and limits match constraint joints, fixed joints weld bodies as they were, world shifts, a chain
 flying into another region stays whole, removing a joint splits it, switching the setting
 rebuilds joints, pinned chains and far heavier bodies keep constraint joints until let go); behaviors other modules rely on (`tests/behaviors.rs`: removal, compound
 bodies, joint breaking and motors, hinges swinging through the fixed body they hang on, kinematic
@@ -249,7 +267,8 @@ stack stands through a tilting turn, world-pinned hinges turn with the world, a 
 frame adds its motion at each body, characters keep their footing, queries see the new frame at
 once); rolling resistance (`tests/rolling.rs`: balls and logs slow at `Crr·g/(1 + I/mr²)` on
 concrete, faster on grass and sand, the same on terrain and meshes, barrels stop on sand, barrels at
-4 and 8 m/s roll over terrain and meshes within 5 mm of flat and 25 cm of straight); the debug view
+4 and 8 m/s roll over terrain and meshes within 5 mm of flat and 25 cm of straight, a ball spun
+on its spot slows at `μ·g·1 cm/(⅖r²)` and stops where it is); the debug view
 (`tests/debug_draw.rs`, contacts on terrain included); a headless screenshot of the proving ground.
 
 ## Done when
@@ -258,7 +277,8 @@ concrete, faster on grass and sand, the same on terrain and meshes, barrels stop
   a 30-box tower stands still.
 - [x] A ragdoll and a chain of jointed bodies stay stable under slow motion and at 10× time
   scale (the ragdoll's joints hold exactly, the chain hung from the world within 2 cm; the
-  solver adds no energy).
+  solver adds no energy). Ragdolls knocked over every which way all fall asleep, articulated
+  or not (`ragdolls_knocked_over_every_which_way_fall_asleep`).
 - [x] A body 1e8 m from the origin behaves exactly like one at the origin.
 - [x] `engine_world::physics::conformance::assert_all` passes in this crate's tests.
 - [x] Raycasts/shapecasts available as API functions (`physics.raycast`).
@@ -266,9 +286,14 @@ concrete, faster on grass and sand, the same on terrain and meshes, barrels stop
 ## Next
 
 - Cheaper articulations: Rapier rebuilds the whole dense mass matrix every internal substep
-  (63% of a tumbling ragdoll's step). An O(n) articulated-body solve would make many ragdolls at
-  once affordable, and with contacts that soften where the coordinates can't give way, chains
-  hung from the world (bridges, wrecking balls, lamps) could be articulated too.
+  (63% of a tumbling ragdoll's step). Skipping the zero columns of each link's Jacobian (a
+  prototype patch of Rapier) saved only 30%, the rest being its dense LU factorization and
+  constraint setup, so not worth a fork; an O(n) articulated-body solve would make many ragdolls
+  at once affordable, and with contacts that soften where the coordinates can't give way, chains
+  hung from the world (bridges, wrecking balls, lamps) could be articulated too. Meanwhile, a
+  budget: articulate only the few tumbling groups nearest a `SimulationFocus`.
+- Joint friction and twist limits as `Joint` fields, so a game can make a stiff old door or a
+  loose ragdoll (today every free-floating group's joints get the same 10%).
 - A `rolling_resistance` field on `SurfaceMaterial`, so games can tune it per surface (today
   it comes from the surface's deformation).
 - Co-moving region frames, so cargo resting in a ship at 7 km/s can sleep (today bodies moving

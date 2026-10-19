@@ -17,7 +17,9 @@ use crate::assets::{FoliageVisuals, GLOW_LEVELS, SpeciesVisual, TINTS, VARIANTS}
 use crate::ecology::InRegion;
 use crate::felling::{FallingTree, LOG_BARE_YEARS, LOG_GREEN_YEARS, LogPose};
 use crate::grass::RegionGrass;
+use crate::meshgen::tree::LEAF_STEPS;
 use crate::plant::{EcologySettings, FelledLog, Plant, PlantStage};
+use crate::season::{FoliageSeason, Leafing, shift_days};
 use crate::species::{Layer, PlantForm, PlantLibrary, PlantSpecies};
 
 /// The drawn parts of a plant (child entities) and what they currently show.
@@ -50,20 +52,38 @@ fn is_small(sp: &PlantSpecies) -> bool {
     )
 }
 
-/// What each part should draw.
+/// The crown to draw for a share of leaves (`amount`, 0..1): the full crown, the nearest of
+/// its thinned copies (`thin`, one per [`LEAF_STEPS`] step), or none once it is all but bare.
+fn leafy(full: Option<Handle<Mesh>>, thin: &[Handle<Mesh>], amount: f32) -> Option<Handle<Mesh>> {
+    let (mut shown, mut share) = (full, 1.0);
+    for (&step, mesh) in LEAF_STEPS.iter().zip(thin) {
+        if amount >= 0.5 * (share + step) {
+            return shown;
+        }
+        (shown, share) = (Some(*mesh), step);
+    }
+    if amount >= 0.5 * share { shown } else { None }
+}
+
+/// What each part should draw on `day` of the year ([`FoliageSeason`]).
 pub fn desired_parts(
     plant: &Plant,
     sp: &PlantSpecies,
     vis: &SpeciesVisual,
     distance: f32,
     settings: &EcologySettings,
+    day: f32,
 ) -> [Part; 3] {
     let v = &vis.variants[plant.genes.variant as usize % VARIANTS];
     let tint = tint_of(plant);
     let pair = |m: &Option<Handle<Mesh>>, mat: Handle<StandardMaterial>| m.map(|m| (m, mat));
     let height = plant.height(sp).max(0.1);
+    let leafing = sp.seasons.map_or(Leafing::SUMMER, |s| {
+        s.leafing(day, shift_days(&plant.genes))
+    });
     if is_small(sp)
-        && distance > settings.small_plant_distance_m * (0.6 + 0.4 * (height / 1.0).min(2.5))
+        && (distance > settings.small_plant_distance_m * (0.6 + 0.4 * (height / 1.0).min(2.5))
+            || !leafing.shows(&plant.genes))
     {
         return [None, None, None];
     }
@@ -80,24 +100,26 @@ pub fn desired_parts(
             } else {
                 vis.glow[tint % vis.glow.len()][glow_level(plant)]
             };
+            let amount = if is_small(sp) { 1.0 } else { leafing.amount };
             if sapling {
-                [
-                    None,
-                    pair(&v.sapling_wood, vis.bark),
-                    pair(&v.sapling_foliage, leaves),
-                ]
+                let crown = leafy(v.sapling_foliage, &v.sapling_foliage_thin, amount);
+                [None, pair(&v.sapling_wood, vis.bark), pair(&crown, leaves)]
             } else if lod && (v.wood_lod.is_some() || v.foliage_lod.is_some()) {
                 let or = |a: &Option<Handle<Mesh>>, b: &Option<Handle<Mesh>>| a.or(*b);
+                let crown = match v.foliage_lod {
+                    Some(_) => leafy(v.foliage_lod, &v.foliage_lod_thin, amount),
+                    None => leafy(v.foliage, &v.foliage_thin, amount),
+                };
                 [
                     pair(&v.base, vis.bark_rigid),
                     pair(&or(&v.wood_lod, &v.wood), vis.bark),
-                    pair(&or(&v.foliage_lod, &v.foliage), leaves),
+                    pair(&crown, leaves),
                 ]
             } else {
                 [
                     pair(&v.base, vis.bark_rigid),
                     pair(&v.wood, vis.bark),
-                    pair(&v.foliage, leaves),
+                    pair(&leafy(v.foliage, &v.foliage_thin, amount), leaves),
                 ]
             }
         }
@@ -176,7 +198,7 @@ pub fn camera_position(world_cams: &Query<(&Camera, &GlobalTransform)>) -> Optio
         .map(|(_, t)| t.translation())
 }
 
-/// Keep every plant's parts in sync with its stage, size and distance.
+/// Keep every plant's parts in sync with its stage, size, distance and the season.
 #[allow(clippy::type_complexity, clippy::too_many_arguments)]
 pub fn sync_plant_visuals(
     mut commands: Commands,
@@ -184,6 +206,7 @@ pub fn sync_plant_visuals(
     library: Res<PlantLibrary>,
     visuals: Res<FoliageVisuals>,
     settings: Res<EcologySettings>,
+    season: Res<FoliageSeason>,
     ground: Option<Res<engine_world::Ground>>,
     cams: Query<(&Camera, &GlobalTransform)>,
     mut plants: Query<(
@@ -198,7 +221,8 @@ pub fn sync_plant_visuals(
     meadows: Query<(), With<RegionGrass>>,
 ) {
     *frame = frame.wrapping_add(1);
-    let full_pass = *frame % 8 == 1 || visuals.is_changed() || settings.is_changed();
+    let full_pass =
+        *frame % 8 == 1 || visuals.is_changed() || settings.is_changed() || season.is_changed();
     let cam = camera_position(&cams);
     for (entity, plant, mut transform, visual, base, region) in &mut plants {
         let fresh = visual.is_none();
@@ -242,7 +266,7 @@ pub fn sync_plant_visuals(
         let want = if meadow {
             [None, None, None]
         } else {
-            desired_parts(&plant, sp, vis, distance, &settings)
+            desired_parts(&plant, sp, vis, distance, &settings, season.day_of_year)
         };
         let shadows = sp.layer != Layer::Ground && sp.form != PlantForm::Mushroom;
         match visual {
@@ -299,7 +323,8 @@ pub struct LogVisual {
 }
 
 /// What a falling tree or log draws: fresh logs keep their green crown for a few weeks, then
-/// brown leaves for a year, then bare wood that greys as it rots.
+/// brown leaves for a year, then bare wood that greys as it rots. A deciduous tree that came
+/// down out of leaf (`day` of the year) lies bare.
 #[allow(clippy::too_many_arguments)]
 pub fn desired_log_parts(
     vis: &SpeciesVisual,
@@ -309,19 +334,30 @@ pub fn desired_log_parts(
     rot: f32,
     distance: f32,
     settings: &EcologySettings,
+    day: f32,
 ) -> [Part; 2] {
     let v = &vis.variants[pose.genes.variant as usize % VARIANTS];
     let tint = (((pose.genes.hue + 1.0) * 0.5 * TINTS as f32) as usize).min(TINTS - 1);
     let lod = distance > settings.tree_lod_distance_m * (0.5 + size) && v.wood_lod.is_some();
+    let amount = vis
+        .built_from
+        .seasons
+        .map_or(1.0, |s| s.leafing(day, shift_days(&pose.genes)).amount);
     let (wood, foliage) = if size < 0.22 && v.sapling_wood.is_some() {
-        (v.sapling_wood, v.sapling_foliage)
+        (
+            v.sapling_wood,
+            leafy(v.sapling_foliage, &v.sapling_foliage_thin, amount),
+        )
     } else if (years >= LOG_BARE_YEARS || pose.charred) && v.log.is_some() {
         // The twigs have rotted (or burnt) off.
         (v.log, None)
     } else if lod {
-        (v.wood_lod, v.foliage_lod)
+        (
+            v.wood_lod,
+            leafy(v.foliage_lod, &v.foliage_lod_thin, amount),
+        )
     } else {
-        (v.wood, v.foliage)
+        (v.wood, leafy(v.foliage, &v.foliage_thin, amount))
     };
     let bark = if pose.charred {
         vis.burnt
@@ -340,13 +376,14 @@ pub fn desired_log_parts(
     [wood.map(|m| (m, bark)), foliage.zip(leaves)]
 }
 
-/// Keep the parts of falling trees and logs in sync with their age and distance.
-#[allow(clippy::type_complexity)]
+/// Keep the parts of falling trees and logs in sync with their age, distance and the season.
+#[allow(clippy::type_complexity, clippy::too_many_arguments)]
 pub fn sync_log_visuals(
     mut commands: Commands,
     mut frame: Local<u32>,
     visuals: Res<FoliageVisuals>,
     settings: Res<EcologySettings>,
+    season: Res<FoliageSeason>,
     cams: Query<(&Camera, &GlobalTransform)>,
     mut logs: Query<
         (
@@ -362,7 +399,7 @@ pub fn sync_log_visuals(
     mut parts: Query<&mut MeshRenderer, With<PlantPart>>,
 ) {
     *frame = frame.wrapping_add(1);
-    let full_pass = *frame % 16 == 3 || visuals.is_changed();
+    let full_pass = *frame % 16 == 3 || visuals.is_changed() || season.is_changed();
     let cam = camera_position(&cams);
     for (entity, transform, pose, log, falling, visual) in &mut logs {
         if !full_pass && visual.is_some() {
@@ -379,7 +416,8 @@ pub fn sync_log_visuals(
         let distance = cam
             .map(|c| c.distance(transform.translation) as f32)
             .unwrap_or(0.0);
-        let want = desired_log_parts(vis, pose, size, years, rot, distance, &settings);
+        let day = season.day_of_year;
+        let want = desired_log_parts(vis, pose, size, years, rot, distance, &settings, day);
         match visual {
             Some(mut visual) => {
                 for (i, part) in want.iter().enumerate() {
@@ -572,6 +610,21 @@ pub fn pulse_glow(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn crowns_thin_step_by_step_as_leaves_fall() {
+        let h = |i: u32| Handle::<Mesh>::from_index(i);
+        let (full, thin) = (Some(h(0)), [h(1), h(2), h(3)]);
+        assert_eq!(leafy(full, &thin, 1.0), full);
+        assert_eq!(leafy(full, &thin, 0.85), full);
+        assert_eq!(leafy(full, &thin, 0.55), Some(h(1)));
+        assert_eq!(leafy(full, &thin, 0.25), Some(h(2)));
+        assert_eq!(leafy(full, &thin, 0.08), Some(h(3)));
+        assert_eq!(leafy(full, &thin, 0.02), None);
+        // No thinned copies: full crown or nothing.
+        assert_eq!(leafy(full, &[], 0.6), full);
+        assert_eq!(leafy(full, &[], 0.3), None);
+    }
 
     #[test]
     fn small_plants_lean_partly_with_the_slope() {
