@@ -345,8 +345,17 @@ fn boars_root_about_and_wander_with_the_sounder() {
     // How far each went while rooting (shuffling on with its snout down).
     let mut rooted = vec![0.0; sounder.len()];
     let mut last: Vec<DVec3> = sounder.iter().map(|&e| pos(&app, e)).collect();
+    // How far the boars spread from the middle of the sounder: the most, and on average.
+    let (mut widest, mut spread, mut n) = (0.0f64, 0.0f64, 0.0f64);
     for _ in 0..60 * 90 {
         app.update();
+        let mid = sounder.iter().map(|&e| pos(&app, e)).sum::<DVec3>() / sounder.len() as f64;
+        for &e in &sounder {
+            let d = pos(&app, e).distance(mid);
+            widest = widest.max(d);
+            spread += d;
+            n += 1.0;
+        }
         for (k, &e) in sounder.iter().enumerate() {
             let s = state(&app, e);
             seen.insert(s);
@@ -371,6 +380,14 @@ fn boars_root_about_and_wander_with_the_sounder() {
     for (k, r) in rooted.iter().enumerate() {
         assert!(*r > 1.0, "boar {k} rooted in one spot ({r:.2} m)");
     }
+    // And they keep together as a sounder.
+    let spread = spread / n;
+    eprintln!("the sounder spread {spread:.1} m on average, {widest:.1} m at most");
+    assert!(
+        widest < 15.0,
+        "a boar strayed {widest:.1} m from the sounder"
+    );
+    assert!(spread < 8.0, "the sounder spread {spread:.1} m on average");
 }
 
 #[test]
@@ -482,9 +499,128 @@ fn a_wounded_boar_turns_on_whoever_hurt_it() {
     assert_ne!(state(&app, tusker), AnimalState::Charge);
 }
 
+/// Hurt `on` from `by` (a gunshot).
+fn shoot(app: &mut App, by: Entity, on: Entity) {
+    let point = pos(app, on);
+    app.world.write_message(DamageEvent {
+        target: on,
+        amount: 20.0,
+        kind: DamageKind::Ballistic,
+        point,
+        impulse: Vec3::ZERO,
+        source: Some(by),
+    });
+}
+
+#[test]
+fn a_wounded_boar_turns_on_the_shooter_not_on_what_it_was_watching() {
+    let mut app = app();
+    let tusker = boar(&mut app, DVec3::ZERO, 40, true, false);
+    app.update_n(60);
+    // Someone crouched 10 m off on one side (it watches them), and a hunter crouched further
+    // off on the other, who shoots it.
+    let watched = player(
+        &mut app,
+        DVec3::new(-10.0, 0.0, 0.0),
+        LocomotionMode::Crouch,
+    );
+    let hunter = player(&mut app, DVec3::new(14.0, 0.0, 0.0), LocomotionMode::Crouch);
+    app.update_n(60);
+    let mind = app.world.get::<AnimalMind>(tusker).unwrap();
+    assert_eq!(mind.threat, Some(watched), "it watches the nearer one");
+    assert_ne!(mind.state, AnimalState::Charge);
+    shoot(&mut app, hunter, tusker);
+    let (mut charged, mut slashed, mut wrong) = (false, false, false);
+    for _ in 0..60 * 5 {
+        app.update();
+        charged |= state(&app, tusker) == AnimalState::Charge;
+        slashed |= struck(&app, tusker, hunter);
+        wrong |= struck(&app, tusker, watched);
+    }
+    assert!(charged, "the wounded boar charges");
+    assert!(slashed, "the shooter");
+    assert!(!wrong, "not the one it was watching");
+}
+
+#[test]
+fn a_wounded_boar_runs_from_fire_rather_than_charge_into_it() {
+    let mut app = app();
+    let tusker = boar(&mut app, DVec3::ZERO, 40, true, false);
+    app.update_n(60);
+    // Shot from far off, so it runs; and it runs into burning grass.
+    let hunter = player(&mut app, DVec3::new(0.0, 0.0, 60.0), LocomotionMode::Idle);
+    app.update_n(30);
+    shoot(&mut app, hunter, tusker);
+    app.update_n(20);
+    let at = pos(&app, tusker);
+    {
+        let mut heat = app.world.resource_mut::<engine_world::HeatField>();
+        for x in -6..=6 {
+            for z in -6..=6 {
+                let c = heat
+                    .grid
+                    .cell_at(at + DVec3::new(f64::from(x), 0.0, f64::from(z)));
+                heat.grid.set(c, 300.0);
+            }
+        }
+    }
+    let mut fled = false;
+    for _ in 0..60 * 6 {
+        app.update();
+        let s = state(&app, tusker);
+        assert_ne!(s, AnimalState::Charge, "it charged into the fire");
+        fled |= s == AnimalState::Flee;
+    }
+    assert!(fled, "it runs from the fire");
+}
+
+#[test]
+fn wolves_give_room_to_a_boar_charging_at_them_only() {
+    let mut app = app();
+    let tusker = boar(&mut app, DVec3::ZERO, 40, true, false);
+    app.update_n(60);
+    // Shot from one side, it charges the hunter; a wolf turns up 5 m behind it as it sets
+    // off, and stays put: the boar is not charging at it.
+    let hunter = player(&mut app, DVec3::new(14.0, 0.0, 0.0), LocomotionMode::Crouch);
+    app.update_n(10);
+    shoot(&mut app, hunter, tusker);
+    let mut wolf = None;
+    for _ in 0..90 {
+        app.update();
+        if wolf.is_none() && state(&app, tusker) == AnimalState::Charge {
+            let at = pos(&app, tusker) - DVec3::new(5.0, 0.0, 0.0);
+            wolf = Some(animal(&mut app, Species::Wolf, at, 2));
+        }
+        if let Some(w) = wolf {
+            assert_ne!(
+                state(&app, w),
+                AnimalState::Flee,
+                "the wolf ran from a boar charging away from it"
+            );
+        }
+    }
+    wolf.expect("the boar charges the hunter");
+
+    // Bitten by a wolf 15 m off, it charges the wolf, which gives it room.
+    let mut app = self::app();
+    let tusker = boar(&mut app, DVec3::ZERO, 40, true, false);
+    let wolf = animal(&mut app, Species::Wolf, DVec3::new(-15.0, 0.0, 0.0), 2);
+    app.update_n(60);
+    shoot(&mut app, wolf, tusker);
+    let (mut charged, mut gave_way) = (false, false);
+    for _ in 0..60 * 6 {
+        app.update();
+        charged |= state(&app, tusker) == AnimalState::Charge;
+        gave_way |= charged && state(&app, wolf) == AnimalState::Flee;
+    }
+    assert!(charged, "the boar charges the wolf");
+    assert!(gave_way, "and the wolf gives it room");
+}
+
 /// A sow with `piglets` about her, and someone stepping out of cover 10 m away and walking
-/// at her: whether she charged, whether she struck, and whether all her piglets ran.
-fn surprise(piglets: usize) -> (bool, bool, bool) {
+/// at her: whether she charged, whether she struck, whether all her piglets ran, and whether
+/// she ran.
+fn surprise(piglets: usize) -> (bool, bool, bool, bool) {
     let mut app = app();
     let sow = boar(&mut app, DVec3::ZERO, 40, false, false);
     let young: Vec<Entity> = (0..piglets)
@@ -501,12 +637,13 @@ fn surprise(piglets: usize) -> (bool, bool, bool) {
         .collect();
     app.update_n(60);
     let man = player(&mut app, DVec3::new(10.0, 0.0, 0.0), LocomotionMode::Walk);
-    let (mut charged, mut slashed) = (false, false);
+    let (mut charged, mut slashed, mut fled) = (false, false, false);
     let mut scattered = vec![false; young.len()];
     for _ in 0..60 * 5 {
         step_toward(&mut app, man, DVec3::ZERO, 1.0);
         app.update();
         charged |= state(&app, sow) == AnimalState::Charge;
+        fled |= state(&app, sow) == AnimalState::Flee;
         slashed |= struck(&app, sow, man);
         for (k, &p) in young.iter().enumerate() {
             let s = state(&app, p);
@@ -514,18 +651,19 @@ fn surprise(piglets: usize) -> (bool, bool, bool) {
             scattered[k] |= s == AnimalState::Flee;
         }
     }
-    (charged, slashed, scattered.iter().all(|&s| s))
+    (charged, slashed, scattered.iter().all(|&s| s), fled)
 }
 
 #[test]
 fn a_sow_charges_to_defend_her_piglets() {
-    let (charged, slashed, scattered) = surprise(3);
+    let (charged, slashed, scattered, _) = surprise(3);
     assert!(charged, "the sow charges");
     assert!(slashed, "and strikes");
     assert!(scattered, "her piglets run");
     // Without young about her, she runs too.
-    let (charged, _, _) = surprise(0);
-    assert!(!charged, "a sow on her own runs");
+    let (charged, _, _, fled) = surprise(0);
+    assert!(!charged, "a sow on her own doesn't charge");
+    assert!(fled, "a sow on her own runs");
 }
 
 #[test]

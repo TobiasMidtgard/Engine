@@ -379,8 +379,9 @@ pub struct AnimalMind {
     pub state: AnimalState,
     /// Animal clock time the state started.
     pub since: f64,
-    /// What it is watching or running from.
+    /// What it is watching or running from, and when it last sensed it (animal clock).
     pub threat: Option<Entity>,
+    pub threat_seen: f64,
     pub threat_pos: Option<DVec3>,
     /// How dangerous the threat is: ≥ 1 means inside its flight distance.
     pub danger: f32,
@@ -408,9 +409,9 @@ pub struct AnimalMind {
     pub heard: Option<(DVec3, f32)>,
     /// Hurt since the last think, by something at this position.
     pub hurt_from: Option<DVec3>,
-    /// When it was last hurt (animal clock) and where the blow came from (kept after the
-    /// think that reacts to it).
-    pub wounded: Option<(f64, DVec3)>,
+    /// When it was last hurt (animal clock), where the blow came from and who struck it, if
+    /// anyone (kept after the think that reacts to it).
+    pub wounded: Option<(f64, DVec3, Option<Entity>)>,
     /// Wolves: bite this animal this tick.
     pub bite: Option<Entity>,
     pub bite_ready: f64,
@@ -611,7 +612,7 @@ pub(crate) fn animal_senses(
             from
         };
         mind.hurt_from = Some(from);
-        mind.wounded = Some((clock.now, from));
+        mind.wounded = Some((clock.now, from, h.source));
         if vitals.health <= 0.0 {
             vitals.health = 0.0;
             vitals.downed = true;
@@ -829,9 +830,17 @@ pub(crate) fn animal_think(
                 }
                 let other = snaps.get(&p.entity);
                 let d = DVec2::new(p.position.x - pos.x, p.position.z - pos.z).length() as f32;
-                // Wolves give a boar charging at them room.
+                // Wolves give a boar charging at them room (not one charging past them at
+                // something else).
                 let charging = other.is_some_and(|o| {
-                    o.species == Species::Boar && o.state == AnimalState::Charge && d < 8.0
+                    let to_me = Vec3::new((pos.x - o.pos.x) as f32, 0.0, (pos.z - o.pos.z) as f32)
+                        .normalize_or_zero();
+                    let going = Vec3::new(o.vel.x, 0.0, o.vel.z);
+                    o.species == Species::Boar
+                        && o.state == AnimalState::Charge
+                        && d < 8.0
+                        && going.length() > 1.0
+                        && going.normalize().dot(to_me) > 0.5
                 });
                 let threat = match species {
                     Species::Wolf => {
@@ -904,6 +913,7 @@ pub(crate) fn animal_think(
                 danger = dg;
                 danger_at = Some(tp);
                 mind.threat = Some(te);
+                mind.threat_seen = now;
                 mind.threat_pos = Some(tp);
             }
             // Being hurt: run, whatever it is.
@@ -1658,8 +1668,13 @@ fn boar_fights(
     now: f64,
     w: &AnimalWorld,
 ) -> bool {
-    let live = mind.threat.and_then(|t| w.seen.get(t)).map(|p| p.position);
-    let target = live.or(mind.threat_pos);
+    // Fire always means flight: a boar does not turn to fight in the flames (and leaves off
+    // a charge that runs into them).
+    if w.heat.sample(pos + DVec3::Y * 0.5) > 40.0 {
+        return false;
+    }
+    let foe = boar_foe(mind, now, w);
+    let target = foe.map(|f| f.1);
     let flat = |p: DVec3| DVec2::new(p.x - pos.x, p.z - pos.z).length() as f32;
     if mind.state == AnimalState::Charge {
         let struck = mind
@@ -1672,7 +1687,7 @@ fn boar_fights(
         mind.set(AnimalState::Flee, now);
         mind.flee_until = now + 2.0 + mind.random() as f64;
         mind.rally_at = now + 2.5 + 1.5 * mind.random() as f64;
-        if let Some(p) = target {
+        if let Some(p) = target.or(mind.threat_pos) {
             let away = Vec3::new((pos.x - p.x) as f32, 0.0, (pos.z - p.z) as f32);
             if away.length() > 0.1 {
                 mind.flee_dir = away.normalize();
@@ -1683,9 +1698,9 @@ fn boar_fights(
     if mind.danger < 0.5 || now < mind.rally_at {
         return false;
     }
-    // Something real to turn on: a threat it senses now, or what just hurt it.
-    let wounded = mind.wounded.is_some_and(|(at, _)| now - at < 15.0);
-    let Some(at) = target.filter(|_| live.is_some() || wounded) else {
+    // Something real to turn on: what just hurt it, or a threat it senses now.
+    let wounded = mind.wounded.is_some_and(|(at, _, _)| now - at < WOUND_SECS);
+    let Some(at) = target else {
         return false;
     };
     let d = flat(at);
@@ -1704,6 +1719,24 @@ fn boar_fights(
     false
 }
 
+/// How long a boar remembers who hurt it, and turns on them (s).
+const WOUND_SECS: f64 = 15.0;
+
+/// What a boar turns on: whoever hurt it in the last [`WOUND_SECS`] (where they are now, or
+/// failing that where the blow came from), else a threat it sensed in the last second (where
+/// it is now). The entity to strike (if it is one), where it is and how it is moving.
+fn boar_foe(mind: &AnimalMind, now: f64, w: &AnimalWorld) -> Option<(Option<Entity>, DVec3, Vec3)> {
+    let live = |e: Entity| w.seen.get(e).map(|p| (Some(e), p.position, p.velocity));
+    if let Some((at, from, source)) = mind.wounded
+        && now - at < WOUND_SECS
+    {
+        return source.and_then(live).or(Some((None, from, Vec3::ZERO)));
+    }
+    mind.threat
+        .filter(|_| now - mind.threat_seen < 1.0)
+        .and_then(live)
+}
+
 /// Boars: run at the threat, head down, and slash it with the tusks when close.
 fn charge(
     mind: &mut AnimalMind,
@@ -1713,11 +1746,7 @@ fn charge(
     out: &mut MoveIntent,
     traits: Traits,
 ) {
-    let live = mind
-        .threat
-        .and_then(|t| w.seen.get(t))
-        .map(|p| (p.position, p.velocity));
-    let Some((at, vel)) = live.or(mind.threat_pos.map(|p| (p, Vec3::ZERO))) else {
+    let Some((foe, at, vel)) = boar_foe(mind, now, w) else {
         return;
     };
     let to = Vec3::new((at.x - pos.x) as f32, 0.0, (at.z - pos.z) as f32);
@@ -1729,9 +1758,7 @@ fn charge(
     out.look = Some(dir);
     out.sprint = mind.stamina > 0.1;
     if d < 1.5 && now >= mind.bite_ready && traits.bite > 0.0 {
-        if live.is_some() {
-            mind.bite = mind.threat;
-        }
+        mind.bite = foe;
         mind.slashed_at = Some(now);
         mind.bite_ready = now + 1.0 + 0.3 * mind.random() as f64;
     }

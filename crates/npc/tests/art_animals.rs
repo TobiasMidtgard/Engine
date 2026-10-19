@@ -20,7 +20,8 @@ use engine_world::locomotion::{LocomotionMode, LocomotionState, MoveIntent};
 const W: u32 = 960;
 const H: u32 = 540;
 
-/// One frozen animal.
+/// One animal for a close-up: in `state` for `t` s at `speed` (m/s, straight ahead) when it
+/// is shot. Walkers run there at the real rate; birds are held in the pose.
 #[derive(Clone, Copy)]
 struct Pose {
     species: Species,
@@ -31,8 +32,8 @@ struct Pose {
     t: f64,
     speed: f32,
     mode: LocomotionMode,
+    /// Birds: mover phase and animal clock (pecks and flaps are timed by it).
     phase: f32,
-    /// Animal clock (gallops and flaps are timed by it).
     clock: f64,
     flap: f32,
     bite: bool,
@@ -93,7 +94,7 @@ fn app() -> App {
         Transform::default(),
         MeshRenderer::new(
             Shape::Plane {
-                size: [2000.0, 2000.0],
+                size: [4000.0, 4000.0],
                 subdivisions: 1,
             },
             StandardMaterial::hex(0x55703a).with_roughness(0.95),
@@ -220,7 +221,70 @@ fn busy(img: &image::RgbaImage) -> usize {
 /// animal's side toward its front).
 type Shot<'a> = (&'a str, Pose, f64, f64);
 
-fn render(shots: &[Shot]) {
+/// Where the camera stands and looks for close-up `shot` of an animal standing at `at`,
+/// facing +X.
+fn framing(shot: &Shot, at: DVec3) -> (DVec3, DVec3) {
+    let (name, pose, dist, azimuth) = *shot;
+    // A boar's size: piglets are a lot smaller, old boars a size up.
+    let boar = if pose.young {
+        f64::from(animals::PIGLET_SCALE)
+    } else if pose.male {
+        f64::from(animals::BOAR_SCALE)
+    } else {
+        1.0
+    };
+    let (h, ahead) = match pose.species {
+        Species::Deer if pose.male => (0.95, 0.4),
+        Species::Deer => (0.85, 0.35),
+        Species::Wolf => (0.45, 0.25),
+        Species::Boar => (0.5 * boar, 0.2 * boar),
+        Species::Rabbit => (0.1, 0.03),
+        Species::Bird => (0.06, 0.0),
+    };
+    let h = match pose.state {
+        AnimalState::Rest | AnimalState::Dead => h * 0.5,
+        AnimalState::Graze | AnimalState::Feed => h * 0.75,
+        _ => h,
+    };
+    // Portraits (names ending in "_head") look at the head, "_feet" at the forefeet.
+    let (h, ahead) = if name.ends_with("_head") {
+        match pose.species {
+            Species::Deer if pose.state == AnimalState::Alert => (1.5, 1.0),
+            Species::Deer => (1.22, 1.08),
+            Species::Wolf => (0.72, 0.62),
+            Species::Boar => (0.48 * boar, 0.7 * boar),
+            Species::Rabbit => (0.16, 0.1),
+            Species::Bird => (0.1, 0.06),
+        }
+    } else if name.ends_with("_feet") {
+        match pose.species {
+            Species::Deer => (0.12, 0.42),
+            Species::Wolf => (0.06, 0.36),
+            Species::Boar => (0.06 * boar, 0.36 * boar),
+            _ => (0.02, 0.08),
+        }
+    } else {
+        (h, ahead)
+    };
+    let az = azimuth.to_radians();
+    // The animal faces +X: look at its middle, a little toward the head.
+    let target = at + DVec3::new(ahead, h, 0.0);
+    // Names ending in "_top" look down from high above.
+    let rise = if name.ends_with("_top") { 2.5 } else { 0.22 };
+    let eye = target + DVec3::new(dist * az.sin(), dist * rise, dist * az.cos());
+    (eye, target)
+}
+
+fn check(name: &str, img: &image::RgbaImage) {
+    assert!(
+        busy(img) > 400,
+        "{name}: the animal should show up ({} px)",
+        busy(img)
+    );
+}
+
+/// Close-ups of birds, held in their poses (flight is posed, not flown).
+fn render_held(shots: &[Shot]) {
     let mut app = app();
     app.update_n(2);
     if app.world.get_resource::<RenderDisabled>().is_some() {
@@ -231,67 +295,128 @@ fn render(shots: &[Shot]) {
     let animals = spawn(&mut app, &list);
     let dir = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("npc_art_animals");
     std::fs::create_dir_all(&dir).expect("dir");
-    for (i, (name, pose, dist, azimuth)) in shots.iter().enumerate() {
-        let at = animals[i].1;
-        // A boar's size: piglets are a lot smaller, old boars a size up.
-        let boar = if pose.young {
-            0.45
-        } else if pose.male {
-            1.12
-        } else {
-            1.0
-        };
-        let (h, ahead) = match pose.species {
-            Species::Deer if pose.male => (0.95, 0.4),
-            Species::Deer => (0.85, 0.35),
-            Species::Wolf => (0.45, 0.25),
-            Species::Boar => (0.5 * boar, 0.2 * boar),
-            Species::Rabbit => (0.1, 0.03),
-            Species::Bird => (0.06, 0.0),
-        };
-        let h = match pose.state {
-            AnimalState::Rest | AnimalState::Dead => h * 0.5,
-            AnimalState::Graze | AnimalState::Feed => h * 0.75,
-            _ => h,
-        };
-        // Portraits (names ending in "_head") look at the head, "_feet" at the forefeet.
-        let (h, ahead) = if name.ends_with("_head") {
-            match pose.species {
-                Species::Deer if pose.state == AnimalState::Alert => (1.5, 1.0),
-                Species::Deer => (1.22, 1.08),
-                Species::Wolf => (0.72, 0.62),
-                Species::Boar => (0.48 * boar, 0.7 * boar),
-                Species::Rabbit => (0.16, 0.1),
-                Species::Bird => (0.1, 0.06),
-            }
-        } else if name.ends_with("_feet") {
-            match pose.species {
-                Species::Deer => (0.12, 0.42),
-                Species::Wolf => (0.06, 0.36),
-                Species::Boar => (0.06 * boar, 0.36 * boar),
-                _ => (0.02, 0.08),
-            }
-        } else {
-            (h, ahead)
-        };
-        let az = azimuth.to_radians();
-        // The animal faces +X: look at its middle, a little toward the head.
-        let target = at + DVec3::new(ahead, h, 0.0);
-        // Names ending in "_top" look down from high above.
-        let rise = if name.ends_with("_top") { 2.5 } else { 0.22 };
-        let eye = target + DVec3::new(dist * az.sin(), dist * rise, dist * az.cos());
+    for (i, shot) in shots.iter().enumerate() {
+        let (eye, target) = framing(shot, animals[i].1);
         let cam = camera(&mut app, eye, target, 28.0);
         hold(&mut app, &animals, &list);
         app.update();
         hold(&mut app, &animals, &list);
-        let Some(img) = shoot(&mut app, cam, &dir, &format!("animal_{name}.png")) else {
+        let Some(img) = shoot(&mut app, cam, &dir, &format!("animal_{}.png", shot.0)) else {
             return;
         };
-        assert!(
-            busy(&img) > 400,
-            "{name}: the animal should show up ({} px)",
-            busy(&img)
-        );
+        check(shot.0, &img);
+    }
+}
+
+/// Moves a close-up animal as the wildlife code would, with the fallback mover at the real
+/// rate: it stands until its state begins `pose.t` s before the shot, then keeps to that state
+/// and goes straight on (+X) at the pose's speed, so the shot is a still from the run.
+#[derive(Component, Clone, Copy)]
+struct Steady {
+    pose: Pose,
+    /// When the shot is taken (animal clock, s).
+    shot: f64,
+}
+
+/// A biting animal bites this long (s) before it is shot.
+const BITE_LEAD: f64 = 0.12;
+
+type SteadyItem<'a> = (
+    &'a Steady,
+    &'a NpcClock,
+    &'a NpcMotor,
+    &'a mut MoveIntent,
+    &'a mut AnimalMind,
+);
+
+fn steady(mut q: Query<SteadyItem>) {
+    for (s, clock, motor, mut intent, mut mind) in &mut q {
+        let p = s.pose;
+        let start = s.shot - p.t;
+        let on = clock.now >= start;
+        let state = if on { p.state } else { AnimalState::Wander };
+        if mind.state != state {
+            mind.state = state;
+            mind.since = if on { start } else { clock.now };
+        }
+        let sprint = p.mode == LocomotionMode::Sprint;
+        let crouch = p.mode == LocomotionMode::Crouch;
+        let full = if sprint {
+            motor.sprint_speed
+        } else {
+            motor.run_speed
+        } * if crouch { 0.45 } else { 1.0 };
+        let share = if on { p.speed / full.max(0.1) } else { 0.0 };
+        intent.direction = Vec3::X * share;
+        intent.sprint = sprint;
+        intent.crouch = crouch;
+        // As the wildlife code bites: ready again 1.1 s on.
+        if p.bite && clock.now >= s.shot - BITE_LEAD && clock.now >= mind.bite_ready {
+            mind.bite_ready = clock.now + 1.1;
+        }
+    }
+}
+
+/// Close-ups of walking animals: every one runs at the real rate (60 Hz) into its pose, all
+/// reaching their moments together, and is shot where it then is, time standing still.
+fn render(shots: &[Shot]) {
+    let mut app = app();
+    app.world
+        .resource_mut::<Time>()
+        .set_source(TimeSource::Manual { step_secs: 0.0 });
+    app.add_systems(FixedUpdate, steady.in_set(NpcSet::Decide));
+    app.update_n(2);
+    if app.world.get_resource::<RenderDisabled>().is_some() {
+        eprintln!("skipping: no GPU");
+        return;
+    }
+    // Far apart along X (a gallop covers some 50 m), facing +X.
+    let n = shots.len() as f64;
+    let animals: Vec<Entity> = shots
+        .iter()
+        .enumerate()
+        .map(|(i, (_, p, _, _))| {
+            let at = DVec3::new((i as f64 - 0.5 * n) * 120.0, 0.0, 0.0);
+            let mut animal = Animal::new(p.species);
+            animal.male = p.male;
+            animal.young = p.young;
+            app.world
+                .spawn((
+                    Transform::from_translation(at)
+                        .with_rotation(Quat::from_rotation_y(-std::f32::consts::FRAC_PI_2)),
+                    animal,
+                    StandIn::default(),
+                ))
+                .id()
+        })
+        .collect();
+    app.world.flush();
+    let step = |app: &mut App, secs: f64| {
+        app.world
+            .resource_mut::<Time>()
+            .set_source(TimeSource::Manual { step_secs: secs });
+        app.update();
+    };
+    step(&mut app, 1.0 / 60.0 + 1e-6);
+    let now = app.world.get::<NpcClock>(animals[0]).map_or(0.0, |c| c.now);
+    // Everyone stands a moment before the longest state begins.
+    let shot = now + 0.5 + shots.iter().map(|s| s.1.t).fold(0.0, f64::max);
+    for (e, (_, pose, _, _)) in animals.iter().zip(shots) {
+        app.world
+            .entity_mut(*e)
+            .insert(Steady { pose: *pose, shot });
+    }
+    live_until(&mut app, animals[0], shot);
+    let dir = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("npc_art_animals");
+    std::fs::create_dir_all(&dir).expect("dir");
+    for (e, s) in animals.iter().zip(shots) {
+        let at = app.world.get::<Transform>(*e).expect("animal").translation;
+        let (eye, target) = framing(s, DVec3::new(at.x, 0.0, at.z));
+        let cam = camera(&mut app, eye, target, 28.0);
+        let Some(img) = shoot(&mut app, cam, &dir, &format!("animal_{}.png", s.0)) else {
+            return;
+        };
+        check(s.0, &img);
     }
 }
 
@@ -326,23 +451,30 @@ fn deer_closeups() {
         (
             "deer_hind_gallop",
             Pose {
-                clock: 100.15,
+                t: 5.18,
                 ..p(AnimalState::Flee).moving(10.0, 0.0, LocomotionMode::Sprint)
             },
             5.0,
             10.0,
         ),
         // The spine through the gallop: gathered (croup tucked, back arched, hind feet
-        // reaching under) and extended (croup raised, back hollowed, legs stretched out).
+        // reaching under) and extended (croup raised, back hollowed, legs stretched out), at
+        // those moments of a run at the real rate (the gallop's moment is when its state began).
         (
             "deer_hind_gathered",
-            p(AnimalState::Flee).moving(10.0, 2.51, LocomotionMode::Sprint),
+            Pose {
+                t: 5.09,
+                ..p(AnimalState::Flee).moving(10.0, 0.0, LocomotionMode::Sprint)
+            },
             4.2,
             0.0,
         ),
         (
             "deer_hind_extended",
-            p(AnimalState::Flee).moving(10.0, 5.65, LocomotionMode::Sprint),
+            Pose {
+                t: 5.27,
+                ..p(AnimalState::Flee).moving(10.0, 0.0, LocomotionMode::Sprint)
+            },
             4.2,
             0.0,
         ),
@@ -367,22 +499,25 @@ fn wolf_closeups() {
         ),
         (
             "wolf_gallop",
-            Pose {
-                clock: 100.2,
-                ..w(AnimalState::Chase).moving(11.0, 0.0, LocomotionMode::Sprint)
-            },
+            w(AnimalState::Chase).moving(11.0, 0.0, LocomotionMode::Sprint),
             3.8,
             10.0,
         ),
         (
             "wolf_gathered",
-            w(AnimalState::Chase).moving(11.0, 1.88, LocomotionMode::Sprint),
+            Pose {
+                t: 5.16,
+                ..w(AnimalState::Chase).moving(11.0, 0.0, LocomotionMode::Sprint)
+            },
             3.2,
             0.0,
         ),
         (
             "wolf_extended",
-            w(AnimalState::Chase).moving(11.0, 5.03, LocomotionMode::Sprint),
+            Pose {
+                t: 5.04,
+                ..w(AnimalState::Chase).moving(11.0, 0.0, LocomotionMode::Sprint)
+            },
             3.2,
             0.0,
         ),
@@ -396,7 +531,6 @@ fn wolf_closeups() {
             "wolf_bite",
             Pose {
                 bite: true,
-                clock: 100.1,
                 ..w(AnimalState::Chase)
             },
             1.8,
@@ -429,6 +563,12 @@ fn boar_closeups() {
         ("boar_piglet", piglet(AnimalState::Wander), 1.5, 25.0),
         ("boar_piglet_head", piglet(AnimalState::Wander), 0.6, 45.0),
         (
+            "boar_piglet_gallop",
+            piglet(AnimalState::Flee).moving(4.2, 0.0, LocomotionMode::Sprint),
+            1.6,
+            10.0,
+        ),
+        (
             "boar_sow_rooting",
             Pose {
                 t: 3.0,
@@ -446,10 +586,7 @@ fn boar_closeups() {
         ),
         (
             "boar_sow_gallop",
-            Pose {
-                clock: 100.2,
-                ..sow(AnimalState::Flee).moving(9.0, 0.0, LocomotionMode::Sprint)
-            },
+            sow(AnimalState::Flee).moving(9.0, 0.0, LocomotionMode::Sprint),
             3.6,
             10.0,
         ),
@@ -482,10 +619,7 @@ fn rabbit_closeups() {
         ),
         (
             "rabbit_run",
-            Pose {
-                clock: 100.1,
-                ..r(AnimalState::Flee).moving(6.0, 0.0, LocomotionMode::Sprint)
-            },
+            r(AnimalState::Flee).moving(6.0, 0.0, LocomotionMode::Sprint),
             1.2,
             -30.0,
         ),
@@ -503,7 +637,7 @@ fn starling_closeups() {
         t: 3.0,
         ..b(AnimalState::Flying).moving(7.0, 0.0, LocomotionMode::Air)
     };
-    render(&[
+    render_held(&[
         ("bird_profile", b(AnimalState::Perched), 0.6, 0.0),
         ("bird_head", b(AnimalState::Perched), 0.3, 40.0),
         (
@@ -698,7 +832,7 @@ fn drive(
             && mind.wounded.is_none()
         {
             let at = d.origin + DVec3::new(f64::from(p.x), 0.0, f64::from(p.y));
-            mind.wounded = Some((clock.now, at));
+            mind.wounded = Some((clock.now, at, None));
         }
         mind.prey = cue.prey.map(|ahead| {
             if let Ok(mut q) = quarry.get_mut(d.prey) {
@@ -1155,16 +1289,6 @@ fn wildlife_motion_strips() {
         },
         Transform::default().looking_at(DVec3::new(0.45, -0.55, -0.7), Vec3::Y),
     ));
-    app.world.spawn((
-        Transform::default(),
-        MeshRenderer::new(
-            Shape::Plane {
-                size: [4000.0, 4000.0],
-                subdivisions: 1,
-            },
-            StandardMaterial::hex(0x55703a).with_roughness(0.95),
-        ),
-    ));
     let away = camera(
         &mut app,
         DVec3::new(0.0, 2.0, -600.0),
@@ -1313,6 +1437,20 @@ fn wildlife_motion_strips() {
         })
         .collect();
     assert!(!strips.is_empty(), "NPC_STRIPS names no strip");
+    // The ground, out past the last row of strips (each row 100 m on from the last).
+    app.world.spawn((
+        Transform::default(),
+        MeshRenderer::new(
+            Shape::Plane {
+                size: [
+                    4000.0,
+                    2.0 * (100.0 * strips.len() as f32 + 200.0).max(2000.0),
+                ],
+                subdivisions: 1,
+            },
+            StandardMaterial::hex(0x55703a).with_roughness(0.95),
+        ),
+    ));
     // Moments on the 60 Hz grid.
     let grid = |t: f32| (f64::from(t) * 60.0).round() / 60.0;
     // A first run of each course finds where the animal is at each moment.
