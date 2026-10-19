@@ -736,6 +736,9 @@ pub(crate) fn physics_step(world: &mut World, mut q: Local<Option<StepQueries>>)
         d.set("physics.regions", stats.regions as f64);
         d.set("physics.contacts", stats.touching as f64);
         d.set("physics.step_ms", stats.step_ms);
+        d.set("physics.substeps", stats.substeps as f64);
+        d.set("physics.articulated", stats.articulated as f64);
+        d.set("physics.static_copies", stats.static_copies as f64);
     }
     world.insert_resource(stats);
 }

@@ -70,6 +70,55 @@ fn stats(app: &App) -> PhysicsStats {
     *app.world.resource::<PhysicsStats>()
 }
 
+/// A region following a fast body across a field of posts keeps copies of the posts near it
+/// only: it drops the ones it leaves behind instead of collecting every static it passes.
+#[test]
+fn a_travelling_region_drops_the_statics_it_leaves_behind() {
+    let mut app = app();
+    // A post every 250 m along 30 km, 20 m to the side of the shot's path.
+    let posts = 121;
+    for i in 0..posts {
+        app.world.spawn((
+            Transform::from_xyz(i as f64 * 250.0, 0.0, 20.0),
+            Collider::cuboid(Vec3::new(0.2, 2.0, 0.2)),
+        ));
+    }
+    app.world.spawn((
+        Transform::from_xyz(0.0, 1.0, 0.0),
+        RigidBody {
+            gravity_scale: 0.0,
+            ..RigidBody::dynamic()
+        },
+        Collider::sphere(0.5),
+        Velocity {
+            linear: Vec3::new(3000.0, 0.0, 0.0),
+            angular: Vec3::ZERO,
+        },
+    ));
+    app.update_n(1);
+    let start = stats(&app).static_copies;
+    let mut most = start;
+    for _ in 0..600 {
+        app.update();
+        most = most.max(stats(&app).static_copies);
+    }
+    println!("static copies: {start} at the start, at most {most} on the way");
+    // The posts' own regions hold their copies from the start; the shot's region adds the
+    // ones within its reach (about 1.3 km each way: a dozen posts), not all of them.
+    assert!(
+        most < start + 30,
+        "{most} static copies, {start} at the start: the travelling region kept the posts it passed"
+    );
+    let diagnostics = app
+        .world
+        .resource::<engine_core::diagnostics::Diagnostics>();
+    assert_eq!(
+        diagnostics.get("physics.static_copies"),
+        Some(stats(&app).static_copies as f64)
+    );
+    assert_eq!(diagnostics.get("physics.substeps"), Some(2.0));
+}
+
 fn zero_g(app: &mut App) {
     app.world.resource_mut::<Gravity>().uniform = Vec3::ZERO;
 }
