@@ -24,7 +24,7 @@ struct VsOut {
     @location(6) seed: f32,
     @location(7) soft: f32,
     @location(8) age: f32,             // 0..1 of its life
-    @location(9) glint: vec3<f32>,     // sky mirrored by water droplets (pre-exposed)
+    @location(9) glint: vec3<f32>,     // sky mirrored by water droplets (pre-exposed); plumes: x the air's thickness
     @location(10) sun: vec3<f32>,      // toward the sun in sprite space (x right, y up, z to eye); 0 if unlit
     @location(11) pixels: f32,         // sprite width on screen in pixels
 };
@@ -69,6 +69,15 @@ fn vs_particle(@builtin(vertex_index) vi: u32, @builtin(instance_index) instance
         let len = size + speed * e.look.x;
         half = vec2<f32>(size * 0.5, len * 0.5);
         center = rel - axis * ((len - size) * 0.5);
+    } else if (facing == 3u) {
+        // Standing on the particle along the emitter's direction, turned to face the camera.
+        let axis = normalize(quat_rotate(e.rot, e.direction.xyz) + vec3<f32>(0.0, 1e-6, 0.0));
+        let side = cross(axis, -rel);
+        let sl = length(side);
+        right = select(frame.inv_view[0].xyz, side / max(sl, 1e-6), sl > 1e-5 * length(rel));
+        up = axis;
+        half = vec2<f32>(size * e.look.x * 0.5, size * 0.5);
+        center = rel + axis * (size * 0.5);
     } else if (facing == 2u) {
         // Flat, perpendicular to the emitter's up axis.
         let ax = quat_rotate(e.rot, vec3<f32>(1.0, 0.0, 0.0));
@@ -89,7 +98,7 @@ fn vs_particle(@builtin(vertex_index) vi: u32, @builtin(instance_index) instance
     if (width_px < MIN_PIXELS && width_px > 0.0) {
         let grow = MIN_PIXELS / width_px;
         half.x *= grow;
-        if (facing == 1u && speed > 1e-3) {
+        if ((facing == 1u && speed > 1e-3) || facing == 3u) {
             // A streak keeps its length; only its width grows.
             dim = 1.0 / grow;
         } else {
@@ -126,6 +135,8 @@ fn vs_particle(@builtin(vertex_index) vi: u32, @builtin(instance_index) instance
         let ahead = normalize(vec3<f32>(rel.x, 0.0, rel.z) + vec3<f32>(1e-4, 0.0, 0.0));
         let sky = sample_env(normalize(ahead + vec3<f32>(0.0, 0.4, 0.0)));
         out.glint = pre_expose(sky) * fog.through * min(e.shade.y, 1.0);
+    } else if (out.sprite == 13u) {
+        out.glint = vec3<f32>(e.extra_vel.w, 0.0, 0.0);
     }
     return out;
 }
@@ -208,6 +219,36 @@ fn haze(in: VsOut, c: vec2<f32>, r: f32) -> vec4<f32> {
     if (textureLoad(scene_depth, there, 0) > in.position.z) { discard; }
     let delta = textureLoad(scene_color, there, 0).rgb - textureLoad(scene_color, here, 0).rgb;
     return vec4<f32>(delta, 0.0);
+}
+
+// An engine's exhaust flame, `t` from the nozzle (0) out (1) and `c.x` across: a white-hot core,
+// a train of shock diamonds down its axis and a turbulent tail that flickers and tears away.
+// The diamonds are where the jet meets the air's pressure, so in thin air they fade and the
+// jet balloons out sooner. Returns the brightness for color 1, how much it whitens toward the
+// core, and the coverage.
+fn plume(c: vec2<f32>, t: f32, seed: f32, air: f32) -> vec3<f32> {
+    let time = (frame.time.x % 3600.0) + seed * 61.0;
+    let x = abs(c.x);
+    // Eddies streaming out of the nozzle, and a flicker of the whole flame.
+    let n = fbm2(vec2<f32>(c.x * 2.2 + seed * 17.0, t * 7.0 - time * 16.0), 3);
+    let pulse = value_noise2(vec2<f32>(seed * 5.0, time * 11.0));
+    // The jet leaves at the nozzle's width and spreads, its edge rippling.
+    let spread = pow(max(t, 0.0), mix(0.35, 0.6, saturate(air)));
+    let rp = mix(0.3, 0.95, spread) * (0.85 + 0.3 * n);
+    let reach = 0.72 + 0.22 * pulse;
+    let tail = 1.0 - smoothstep(reach - 0.3, reach + 0.1, t + (n - 0.5) * 0.4);
+    let body = smoothstep(rp, rp * 0.55, x) * tail;
+    let core = smoothstep(0.32, 0.0, x) * exp(-t * 7.0);
+    // Bright knots down the axis about a nozzle's width apart, dimmer downstream; the gas
+    // glows brighter around each and darker where it expands between them.
+    let k = fract(t * 6.5 - 0.35);
+    let d = x / 0.2 + abs(k - 0.5) * 2.0;
+    let train = smoothstep(0.08, 0.12, t) * smoothstep(0.72, 0.1, t) * smoothstep(0.05, 0.5, air);
+    let diamonds = smoothstep(1.0, 0.25, d) * train;
+    let banding = mix(1.0, 0.55 + 0.7 * smoothstep(1.8, 0.4, d), train);
+    let glow = body * (0.5 + 0.9 * n) * banding + core * 1.2 + diamonds * 1.5;
+    let a = saturate(body * (0.4 + 0.5 * n) + core + diamonds);
+    return vec3<f32>(glow / max(a, 1e-3), saturate(core * 1.2 + diamonds), a);
 }
 
 // A portal: the world behind it swirled into a vortex that sinks into the portal's color and
@@ -341,6 +382,12 @@ fn fs_particle(in: VsOut) -> @location(0) vec4<f32> {
         }
         case 12u: { // portal: the scene behind it swirled into a vortex
             return vortex(in, c, r, jx, jy);
+        }
+        case 13u: { // plume: an exhaust flame from the nozzle (uv.y 0) out
+            let p = plume(c, in.uv.y, in.seed, in.glint.x);
+            a = p.z;
+            let lum = dot(rgb, vec3<f32>(0.2126, 0.7152, 0.0722));
+            rgb = mix(rgb, vec3<f32>(lum), p.y) * p.x;
         }
         case 11u: { // fiery billow: glowing cracks in a dense puff, cooling to smoke
             let q = c * 2.2 + vec2<f32>(in.seed * 29.0, in.seed * 13.0) + vec2<f32>(0.0, in.age * 0.6);

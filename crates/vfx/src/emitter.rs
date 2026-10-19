@@ -508,6 +508,10 @@ impl Instance {
             let Some(range) = run.range else {
                 continue;
             };
+            let rate_mul = match desc.steady {
+                true if rate_mul > 0.0 => 1.0,
+                _ => rate_mul,
+            };
             let start = desc.delay.max(0.0);
             let end = desc
                 .duration
@@ -909,7 +913,8 @@ fn tick_instance(
     if !inst.started {
         inst.started = true;
         // Room in the pool for every layer.
-        let rate_mul = inst.rate.max(0.0) * rate_scale;
+        // Sized for at least rate 1, so an effect started thin can still be turned up.
+        let rate_mul = inst.rate.max(1.0) * rate_scale;
         for (i, run) in inst.emitters.iter_mut().enumerate() {
             let cap = inst.desc.layer_capacity(i, rate_mul.max(0.01));
             let fed = inst.desc.is_fed(i);
