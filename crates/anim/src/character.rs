@@ -242,6 +242,8 @@ pub fn add_locomotion(
                 }
             }
             if role == "walk" {
+                // The generated slow walk wouldn't match the captured one.
+                motion.slow_walk.clear();
                 motion.walk = name;
                 motion.walk_speed = info.speed.max(0.3);
             } else {
