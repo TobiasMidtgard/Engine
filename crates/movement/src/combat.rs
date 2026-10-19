@@ -372,6 +372,7 @@ pub(crate) fn begin_attacks(
         if cs.attack.is_none()
             && cs.stagger_secs <= 0.0
             && m.mantle.is_none()
+            && m.vault.is_none()
             && m.hang.is_none()
             && m.initialized
             && let Some((kind, _)) = cs.buffered.take()

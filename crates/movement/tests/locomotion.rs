@@ -1442,3 +1442,189 @@ fn a_moving_ladder_carries_its_climber_and_one_that_goes_drops_it() {
     run_until(&mut app, 2.0, |w| w.get::<Mover>(c).unwrap().grounded);
     assert!(mover(&app, c).grounded);
 }
+
+// ------------------------------------------------------------------------ vaults
+
+/// A barrier `height` high and `depth` deep across the +X run, its face at x = 6, 6 m wide.
+fn barrier(app: &mut App, height: f32, depth: f32) -> Entity {
+    block(
+        app,
+        DVec3::new(6.0 + depth as f64 * 0.5, height as f64 * 0.5, 0.0),
+        Vec3::new(depth, height, 6.0),
+    )
+}
+
+/// A pilot at x = 0 running +X (sprinting or not).
+fn runner(app: &mut App, sprint: bool) -> Entity {
+    let c = character(app, DVec3::new(0.0, 0.9, 0.0), MovementProfile::pilot());
+    intent(app, c, |i| {
+        i.direction = Vec3::X;
+        i.sprint = sprint;
+    });
+    c
+}
+
+#[test]
+fn sprints_over_a_low_barrier_without_slowing_down() {
+    let mut app = app();
+    #[derive(Resource, Default)]
+    struct Hands(Vec<GroundContact>);
+    app.init_resource::<Hands>();
+    app.add_systems(
+        Last,
+        |mut seen: ResMut<Hands>, mut contacts: MessageReader<GroundContact>| {
+            seen.0.extend(
+                contacts
+                    .read()
+                    .filter(|c| c.kind == engine_world::ContactKind::Body)
+                    .cloned(),
+            );
+        },
+    );
+    barrier(&mut app, 1.0, 0.5);
+    let c = runner(&mut app, true);
+    run_until(&mut app, 2.0, |w| {
+        w.get::<Mover>(c).unwrap().vault.is_some()
+    });
+    assert_eq!(triggered(&app, c, "vault"), 1);
+    let before = mover(&app, c).velocity.x;
+    assert!(before > 8.0, "{before:.1} m/s at the take-off");
+    // Took off late: the rise just clears the top as the body reaches the face.
+    let gap = 6.0 - (pos(&app, c).x + 0.35);
+    assert!(
+        gap > 0.5 && gap < 1.6,
+        "took off {gap:.2} m before the face"
+    );
+
+    // Over the top without touching it, the hand planted on it, then down the far side.
+    let mut lowest = f64::MAX;
+    run_until(&mut app, 1.5, |w| {
+        let x = w.get::<Transform>(c).unwrap().translation;
+        if (x.x - 6.25).abs() < 0.6 {
+            lowest = lowest.min(x.y - 0.9);
+        }
+        w.get::<Mover>(c).unwrap().grounded
+    });
+    assert!(lowest > 0.98, "feet {lowest:.2} m over the 1 m top");
+    let p = pos(&app, c);
+    let m = mover(&app, c);
+    assert!(m.grounded && p.x > 7.0 && p.x < 10.0, "landed at {p:?}");
+    assert!(m.vault.is_none());
+    assert!(
+        m.velocity.x > 0.85 * before,
+        "{:.1} m/s after, {before:.1} before",
+        m.velocity.x
+    );
+    let hands = &app.world.resource::<Hands>().0;
+    assert_eq!(hands.len(), 1, "{hands:?}");
+    let h = hands[0].position;
+    assert!((h.y - 1.0).abs() < 0.02 && h.x > 5.9 && h.x < 6.2, "{h:?}");
+    assert!(h.z < -0.1, "planted with the left hand: {h:?}");
+}
+
+#[test]
+fn a_running_jump_vaults_and_a_run_into_it_does_not() {
+    // Running (not sprinting) into a railing stops at it.
+    let mut app = app();
+    barrier(&mut app, 1.1, 0.06);
+    let c = runner(&mut app, false);
+    run(&mut app, 2.0);
+    assert_eq!(triggered(&app, c, "vault"), 0);
+    let p = pos(&app, c);
+    assert!(p.x < 6.0 && p.x > 5.4, "{p:?}");
+
+    // Jumping into it from a run vaults it.
+    let mut app = self::app();
+    barrier(&mut app, 1.1, 0.06);
+    let c = runner(&mut app, false);
+    run_until(&mut app, 2.0, |w| {
+        w.get::<Transform>(c).unwrap().translation.x > 4.3
+    });
+    tap_jump(&mut app, c);
+    run_until(&mut app, 0.2, |w| {
+        w.get::<Mover>(c).unwrap().vault.is_some()
+    });
+    assert_eq!(triggered(&app, c, "vault"), 1);
+    assert_eq!(triggered(&app, c, "jump"), 0, "the vault took the jump");
+    assert_eq!(
+        mover(&app, c).air_jumps_left,
+        1,
+        "the double jump is still there"
+    );
+    run(&mut app, 1.2);
+    let p = pos(&app, c);
+    assert!(p.x > 7.5 && mover(&app, c).grounded, "{p:?}");
+}
+
+#[test]
+fn a_jump_too_early_for_the_vault_vaults_out_of_the_air() {
+    let mut app = app();
+    barrier(&mut app, 1.3, 0.6);
+    let c = runner(&mut app, true);
+    run_until(&mut app, 2.0, |w| {
+        w.get::<Transform>(c).unwrap().translation.x > 0.5
+    });
+    tap_jump(&mut app, c);
+    run(&mut app, 1.5);
+    assert_eq!(triggered(&app, c, "jump"), 1);
+    assert_eq!(triggered(&app, c, "vault"), 1);
+    let p = pos(&app, c);
+    assert!(p.x > 8.0 && mover(&app, c).grounded, "{p:?}");
+}
+
+#[test]
+fn deep_or_tall_obstacles_or_a_drop_beyond_are_not_vaulted() {
+    // Deeper than the profile vaults: a sprint stops at it and a jump climbs onto it.
+    let mut app = app();
+    barrier(&mut app, 1.0, 3.0);
+    let c = runner(&mut app, true);
+    run(&mut app, 1.5);
+    assert_eq!(triggered(&app, c, "vault"), 0);
+    assert!(pos(&app, c).x < 6.0);
+    tap_jump(&mut app, c);
+    run_until(&mut app, 1.0, |w| {
+        let m = w.get::<Mover>(c).unwrap();
+        m.mantle.is_none() && m.grounded && m.mode_secs > 0.1
+    });
+    assert_eq!(triggered(&app, c, "vault"), 0);
+    assert_eq!(triggered(&app, c, "mantle"), 1);
+    let p = pos(&app, c);
+    assert!((p.y - 1.9).abs() < 0.05 && p.x < 9.0, "on top: {p:?}");
+
+    // Too tall: a top the probe finds, above the profile's limit (1.3 m), and one above
+    // where the probe starts.
+    for height in [1.4, 1.5] {
+        let mut app = self::app();
+        barrier(&mut app, height, 0.3);
+        let c = runner(&mut app, true);
+        run(&mut app, 1.5);
+        assert_eq!(triggered(&app, c, "vault"), 0, "{height}");
+        assert_eq!(triggered(&app, c, "mantle"), 0, "{height}");
+    }
+
+    // A parapet at a roof's edge: a 6 m drop beyond.
+    let mut app = self::app();
+    block(
+        &mut app,
+        DVec3::new(0.0, 3.0, 0.0),
+        Vec3::new(12.15, 6.0, 12.0),
+    );
+    block(
+        &mut app,
+        DVec3::new(6.075, 6.5, 0.0),
+        Vec3::new(0.15, 1.0, 6.0),
+    );
+    let c = character(
+        &mut app,
+        DVec3::new(0.0, 6.9, 0.0),
+        MovementProfile::pilot(),
+    );
+    intent(&mut app, c, |i| {
+        i.direction = Vec3::X;
+        i.sprint = true;
+    });
+    run(&mut app, 1.5);
+    assert_eq!(triggered(&app, c, "vault"), 0);
+    let p = pos(&app, c);
+    assert!(p.x < 6.0 && p.y > 6.5, "{p:?}");
+}
