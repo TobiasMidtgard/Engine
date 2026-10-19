@@ -1,7 +1,7 @@
 //! Locomotion against the physics contract (run here by the stand-in character physics):
 //! sprint, jump, double jump, slide under a bar, wall-run and wall-jump, mantle, ledge hang,
-//! grapple, riding moving walls, ledges and hooks, dash, and characters running on their own
-//! clocks in slow motion.
+//! grapple, riding moving walls, ledges and hooks, zip lines, ladders, dash, and characters
+//! running on their own clocks in slow motion.
 
 mod support;
 
@@ -9,7 +9,7 @@ use engine_core::math::{DVec3, Vec3};
 use engine_core::prelude::*;
 use engine_movement::prelude::*;
 use engine_movement::zipline::Zipline;
-use engine_world::locomotion::{LocomotionState, MoveIntent};
+use engine_world::locomotion::{Climbable, LocomotionState, MoveIntent};
 use engine_world::physics::{CharacterController, Velocity};
 use engine_world::{GroundContact, LocomotionMode};
 use support::*;
@@ -1168,6 +1168,32 @@ fn zip_lines_are_faster_downhill_than_uphill() {
 }
 
 #[test]
+fn a_zip_line_rider_s_camera_widens_like_a_sprinter_s() {
+    let mut app = app();
+    zip_line(&mut app, 4.0);
+    let c = jump_into_the_line(&mut app);
+    let cam = app
+        .world
+        .spawn((
+            engine_render::Camera::default(),
+            Transform::default(),
+            CameraFx {
+                target: Some(c),
+                ..CameraFx::default()
+            },
+        ))
+        .id();
+    run(&mut app, 1.0);
+    assert!(mover(&app, c).zip.is_some());
+    let fx = app.world.get::<CameraFx>(cam).unwrap();
+    assert!(
+        fx.fov_offset_deg > 0.9 * fx.sprint_fov_deg,
+        "{:.1}°",
+        fx.fov_offset_deg
+    );
+}
+
+#[test]
 fn a_rider_moves_with_its_zip_line() {
     let mut app = app();
     let line = zip_line(&mut app, 4.0);
@@ -1180,4 +1206,239 @@ fn a_rider_moves_with_its_zip_line() {
     let m = mover(&app, c);
     assert!(m.zip.is_some(), "still on the line");
     assert!((pos(&app, c).z - 0.8).abs() < 0.05, "{:?}", pos(&app, c));
+}
+
+// ------------------------------------------------------------------------ ladders
+
+/// A 6 m wall whose north face is at z = 0 (x from −3 to 3) with a ladder up it at x = 0:
+/// climbed facing −Z 0.45 m out from the face, feet on the lowest rung 0.3 m up and on the top
+/// one at the top, stepped off 1.5 m in onto the roof.
+fn ladder_wall(app: &mut App) -> Entity {
+    block(app, DVec3::new(0.0, 3.0, -2.0), Vec3::new(6.0, 6.0, 4.0));
+    app.world
+        .spawn((
+            Transform::from_translation(DVec3::new(0.0, 0.0, 0.45)),
+            Climbable::ladder(Vec3::Y * 0.3, Vec3::Y * 6.0, Vec3::NEG_Z)
+                .with_exit(Vec3::new(0.0, 6.0, -1.5)),
+        ))
+        .id()
+}
+
+/// A pilot 4 m out from the ladder walking at it until it grabs it.
+fn walk_onto_the_ladder(app: &mut App) -> Entity {
+    let c = character(app, DVec3::new(0.0, 0.9, 4.0), MovementProfile::pilot());
+    intent(app, c, |i| i.direction = Vec3::NEG_Z);
+    run_until(app, 3.0, |w| w.get::<Mover>(c).unwrap().ladder.is_some());
+    c
+}
+
+#[test]
+fn climbs_a_ladder_onto_the_roof_and_back_down() {
+    let mut app = app();
+    ladder_wall(&mut app);
+    let c = walk_onto_the_ladder(&mut app);
+    assert_eq!(triggered(&app, c, "ladder_grab"), 1);
+    let m = mover(&app, c);
+    assert_eq!(m.mode, LocomotionMode::Climb);
+    assert_eq!(m.air_jumps_left, 1);
+
+    // Holding forward climbs at the profile's speed, on the line, facing the ladder.
+    run(&mut app, 1.0);
+    let m = mover(&app, c);
+    let l = m.ladder.expect("on the ladder");
+    assert!((l.speed - 2.6).abs() < 0.05, "{:.2} m/s", l.speed);
+    let p = pos(&app, c);
+    assert!(
+        p.x.abs() < 0.02 && (p.z - 0.45).abs() < 0.02,
+        "on the line: {p:?}"
+    );
+    assert!(
+        (p.y - 0.9 - 0.3 - l.climbed as f64).abs() < 0.03,
+        "{p:?} {}",
+        l.climbed
+    );
+    assert!(m.facing.dot(Vec3::NEG_Z) > 0.99, "{}", m.facing);
+    assert!(!m.grounded);
+
+    // Over the top and onto the roof.
+    let secs = run_until(&mut app, 4.0, |w| {
+        let m = w.get::<Mover>(c).unwrap();
+        m.grounded && m.mode != LocomotionMode::Mantle
+    });
+    assert!(secs < 2.6, "took {secs:.2} s");
+    let p = pos(&app, c);
+    assert!((p.y - 6.9).abs() < 0.05 && p.z < -0.3, "on the roof: {p:?}");
+    assert_eq!(triggered(&app, c, "ladder_exit"), 1);
+
+    // Walk back to the ladder: it's grabbed at the top, and holding the same way climbs down.
+    intent(&mut app, c, |i| i.direction = Vec3::Z);
+    run_until(&mut app, 2.0, |w| {
+        w.get::<Mover>(c).unwrap().ladder.is_some()
+    });
+    let l = mover(&app, c).ladder.expect("grabbed it from the top");
+    assert!(l.t > 0.95, "{}", l.t);
+    assert_eq!(triggered(&app, c, "ladder_grab"), 2);
+    run(&mut app, 0.6);
+    let m = mover(&app, c);
+    assert!(
+        m.facing.dot(Vec3::NEG_Z) > 0.99,
+        "turned to face it: {}",
+        m.facing
+    );
+    assert!(m.ladder.expect("climbing down").speed < -2.0);
+    run_until(&mut app, 4.0, |w| {
+        w.get::<Mover>(c).unwrap().ladder.is_none()
+    });
+    run(&mut app, 0.5);
+    let m = mover(&app, c);
+    assert!(m.grounded && m.ladder.is_none());
+    assert_eq!(triggered(&app, c, "ladder_exit"), 2);
+    let p = pos(&app, c);
+    assert!((p.y - 0.9).abs() < 0.05 && p.z > 0.6, "stepped off: {p:?}");
+}
+
+#[test]
+fn rungs_ring_under_a_climber() {
+    let mut app = app();
+    #[derive(Resource, Default)]
+    struct Rungs(Vec<GroundContact>);
+    app.init_resource::<Rungs>();
+    app.add_systems(
+        Last,
+        |mut seen: ResMut<Rungs>, mut contacts: MessageReader<GroundContact>| {
+            seen.0
+                .extend(contacts.read().filter(|c| c.position.y > 0.5).cloned());
+        },
+    );
+    ladder_wall(&mut app);
+    walk_onto_the_ladder(&mut app);
+    run(&mut app, 1.5);
+    let rungs = &app.world.resource::<Rungs>().0;
+    // About one rung every 0.3 m climbed, in front of the line, on metal.
+    assert!(rungs.len() >= 8, "{} rungs", rungs.len());
+    let metal = app
+        .world
+        .resource::<engine_world::SurfaceMaterials>()
+        .id("metal");
+    for r in rungs {
+        assert!((r.position.z - 0.25).abs() < 1e-3, "{:?}", r.position);
+        assert_eq!(r.surface, metal);
+    }
+    assert!(rungs.windows(2).all(|w| w[1].position.y > w[0].position.y));
+}
+
+#[test]
+fn crouch_slides_down_and_jump_kicks_off() {
+    let mut app = app();
+    ladder_wall(&mut app);
+    let c = walk_onto_the_ladder(&mut app);
+    run(&mut app, 1.5);
+    let high = pos(&app, c).y;
+    intent(&mut app, c, |i| {
+        i.direction = Vec3::ZERO;
+        i.crouch = true;
+    });
+    run(&mut app, 0.6);
+    let l = mover(&app, c).ladder.expect("still on");
+    assert!(l.sliding && l.speed < -6.0, "{l:?}");
+    assert!(pos(&app, c).y < high - 1.5);
+    run_until(&mut app, 2.0, |w| {
+        w.get::<Mover>(c).unwrap().ladder.is_none()
+    });
+    run(&mut app, 0.3);
+    assert!(mover(&app, c).grounded);
+
+    // Climb again, then jump: kicked off backward, not grabbed again on the way down.
+    intent(&mut app, c, |i| {
+        i.crouch = false;
+        i.direction = Vec3::NEG_Z;
+    });
+    run_until(&mut app, 2.0, |w| {
+        w.get::<Mover>(c).unwrap().ladder.is_some()
+    });
+    run(&mut app, 1.0);
+    intent(&mut app, c, |i| i.direction = Vec3::ZERO);
+    tap_jump(&mut app, c);
+    let m = mover(&app, c);
+    assert!(m.ladder.is_none());
+    assert!(m.velocity.z > 3.5 && m.velocity.y > 3.0, "{}", m.velocity);
+    let grabs = triggered(&app, c, "ladder_grab");
+    run_until(&mut app, 3.0, |w| w.get::<Mover>(c).unwrap().grounded);
+    assert_eq!(triggered(&app, c, "ladder_grab"), grabs);
+    assert!(pos(&app, c).z > 1.5, "{:?}", pos(&app, c));
+}
+
+#[test]
+fn a_jump_into_a_ladder_catches_it() {
+    let mut app = app();
+    ladder_wall(&mut app);
+    let c = character(
+        &mut app,
+        DVec3::new(0.0, 0.9, 5.0),
+        MovementProfile::pilot(),
+    );
+    intent(&mut app, c, |i| {
+        i.direction = Vec3::NEG_Z;
+        i.sprint = true;
+    });
+    run_until(&mut app, 2.0, |w| {
+        w.get::<Transform>(c).unwrap().translation.z < 3.2
+    });
+    tap_jump(&mut app, c);
+    intent(&mut app, c, |i| i.direction = Vec3::ZERO);
+    run_until(&mut app, 1.5, |w| {
+        w.get::<Mover>(c).unwrap().ladder.is_some()
+    });
+    let l = mover(&app, c).ladder.expect("caught it");
+    assert!(l.climbed > 0.4, "caught {:.2} m up", l.climbed);
+    // Let go of the stick: it hangs on.
+    run(&mut app, 0.5);
+    let m = mover(&app, c);
+    assert!(m.ladder.is_some_and(|l| l.speed.abs() < 0.01));
+    assert!(!m.grounded);
+}
+
+#[test]
+fn a_moving_ladder_carries_its_climber_and_one_that_goes_drops_it() {
+    let mut app = app();
+    drifting(&mut app);
+    // A free-standing ladder (no wall), sliding along +X at 1.5 m/s.
+    let ladder = app
+        .world
+        .spawn((
+            Transform::from_translation(DVec3::new(0.0, 0.0, 0.45)),
+            Climbable::ladder(Vec3::Y * 0.3, Vec3::Y * 8.0, Vec3::NEG_Z),
+            Drift(Vec3::X * 1.5),
+        ))
+        .id();
+    let c = character(
+        &mut app,
+        DVec3::new(0.0, 0.9, 1.6),
+        MovementProfile::pilot(),
+    );
+    intent(&mut app, c, |i| i.direction = Vec3::NEG_Z);
+    run_until(&mut app, 2.0, |w| {
+        w.get::<Mover>(c).unwrap().ladder.is_some()
+    });
+    intent(&mut app, c, |i| i.direction = Vec3::ZERO);
+    run(&mut app, 1.0);
+    run(&mut app, 1.0);
+    let lx = app.world.get::<Transform>(ladder).unwrap().translation.x;
+    let p = pos(&app, c);
+    assert!(mover(&app, c).ladder.is_some());
+    assert!(
+        (p.x - lx).abs() < 0.05,
+        "{:.2} vs the ladder at {lx:.2}",
+        p.x
+    );
+    // Loco reports the world's motion: the ladder's.
+    let loco = app.world.get::<LocomotionState>(c).unwrap();
+    assert!((loco.velocity.x - 1.5).abs() < 0.1, "{}", loco.velocity);
+
+    app.world.entity_mut(ladder).remove::<Climbable>();
+    app.update();
+    assert!(mover(&app, c).ladder.is_none());
+    assert_eq!(triggered(&app, c, "ladder_exit"), 1);
+    run_until(&mut app, 2.0, |w| w.get::<Mover>(c).unwrap().grounded);
+    assert!(mover(&app, c).grounded);
 }

@@ -654,6 +654,20 @@ pub fn demo_views(z: &Zone) -> Vec<View> {
                 .on_arrive("movement.duel", &duel("Blink"))
                 .on_arrive("movement.grappler", "{}")
                 .on_leave("movement.duel", cycle),
+                // The tower ladder: the climber restarts its loop on arrival and is caught
+                // halfway up the caged ladder, hand over hand, the roof railing above it.
+                View::new(
+                    "parkour_ladder",
+                    "Ladder: climb the tower's caged ladder hand over hand, slide back down",
+                    [26.6, 2.0, 19.4],
+                    [23.0, 3.6, 14.6],
+                    16.0,
+                )
+                // Halfway up about 2.9 s into the loop.
+                .warmup(2.45)
+                .on_arrive("movement.duel", &duel("Blink"))
+                .on_arrive("movement.ladder", "{}")
+                .on_leave("movement.duel", cycle),
                 // The freight station: the rider restarts its loop on arrival, with the car
                 // about to pull out, and is caught leaping onto the car's side.
                 View::new(
