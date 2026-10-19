@@ -1,6 +1,7 @@
 //! Cloth, rope and hair in water: dry cloth floats until it soaks through and sinks, the part
 //! under the surface gets wet and the wet creeps a little way above it, currents carry what
-//! is in the water along, rain soaks cloth and wind dries it.
+//! is in the water along, rain soaks cloth and wind dries it, and cloth crossing the surface
+//! pushes the water (`WaterDisturbance`).
 
 use std::f32::consts::FRAC_PI_2;
 use std::sync::Arc;
@@ -11,7 +12,9 @@ use engine_softbody::{
     Cloth, ClothPins, HairGroom, HairStyle, SimSettings, SoftBodyPlugin, SoftBodySim,
 };
 use engine_world::animation::{BonePose, SkeletonPose};
-use engine_world::{PrecipitationKind, Water, WaterQuery, WaterSample, WeatherState};
+use engine_world::{
+    PrecipitationKind, Water, WaterDisturbance, WaterQuery, WaterSample, WeatherState,
+};
 
 /// The surface of the test pool, 3 m above its floor (the ground).
 const LEVEL: f64 = 3.0;
@@ -375,4 +378,53 @@ fn a_silk_strip_streams_out_in_a_current_and_ripples() {
         "the tip should ripple in the current: {wander:.3} m"
     );
     assert!(wander < 1.5, "but not thrash: {wander:.3} m");
+}
+
+/// Water pushes sent since the last look: count, and the total mass × speed.
+#[derive(Resource, Default)]
+struct Pushes(usize, f32);
+
+fn count_pushes(mut seen: ResMut<Pushes>, mut pushes: MessageReader<WaterDisturbance>) {
+    for p in pushes.read() {
+        assert!(p.position.is_finite() && p.velocity.is_finite() && p.mass_kg > 0.0);
+        assert!(
+            (p.position.y - LEVEL).abs() < 1e-3,
+            "pushes are on the surface: {p:?}"
+        );
+        seen.0 += 1;
+        seen.1 += p.mass_kg * p.velocity.length();
+    }
+}
+
+#[test]
+fn cloth_dropped_on_water_pushes_it_and_a_still_one_does_not() {
+    let mut app = app(Some(Vec3::ZERO));
+    app.init_resource::<Pushes>()
+        .add_systems(Update, count_pushes);
+    // Dropped from half a meter onto still water.
+    sheet(&mut app, DVec3::new(0.0, LEVEL + 0.5, 0.0));
+    app.update_n(60);
+    let landing = std::mem::take(&mut *app.world.resource_mut::<Pushes>());
+    eprintln!("landing: {} pushes, {:.3} kg·m/s", landing.0, landing.1);
+    assert!(
+        landing.0 >= 6,
+        "landing on the water pushes it: {} pushes",
+        landing.0
+    );
+    assert!(
+        landing.0 <= 6 * 60,
+        "a few pushes per step, not one per particle"
+    );
+    // Floating still, it leaves the surface alone.
+    app.update_n(60 * 4);
+    *app.world.resource_mut::<Pushes>() = Pushes::default();
+    app.update_n(60);
+    let resting = app.world.resource::<Pushes>();
+    eprintln!("resting: {} pushes, {:.3} kg·m/s", resting.0, resting.1);
+    assert!(
+        resting.1 < 0.05 * landing.1,
+        "a cloth lying still on still water barely pushes it: {:.3} vs {:.3}",
+        resting.1,
+        landing.1
+    );
 }
