@@ -8,6 +8,7 @@ mod support;
 use engine_core::math::{DVec3, Vec3};
 use engine_core::prelude::*;
 use engine_movement::prelude::*;
+use engine_movement::zipline::Zipline;
 use engine_world::locomotion::{LocomotionState, MoveIntent};
 use engine_world::physics::{CharacterController, Velocity};
 use engine_world::{GroundContact, LocomotionMode};
@@ -1018,4 +1019,165 @@ fn the_stand_in_carries_a_character_on_a_moving_box_and_a_jump_lands_on_the_same
     let after = rel(&app);
     assert!(flew > 0.3, "never left the box");
     assert!((after - before).length() < 0.15, "{before:?} -> {after:?}");
+}
+
+// ------------------------------------------------------------------------ zip lines
+
+/// A 30 m zip line along +X from x = −3, dropping `drop` meters, with 0.3 m of sag and its
+/// cable 5.35 m up at x = 1.5, and a 2 m high deck to jump into it from (its edge at x = −0.5).
+fn zip_line(app: &mut App, drop: f32) -> Entity {
+    block(app, DVec3::new(-6.0, 1.0, 0.0), Vec3::new(11.0, 2.0, 4.0));
+    app.world
+        .spawn((
+            Transform::from_translation(DVec3::new(-3.0, 5.5 + 0.15 * drop as f64, 0.0)),
+            Zipline {
+                to: Vec3::new(30.0, -drop, 0.0),
+                sag: 0.3,
+                end_clear: 1.5,
+                exit_hop: 2.0,
+            },
+        ))
+        .id()
+}
+
+/// A pilot sprinting +X along the deck that jumps into the line at its edge.
+fn jump_into_the_line(app: &mut App) -> Entity {
+    let c = character(app, DVec3::new(-9.0, 2.9, 0.0), MovementProfile::pilot());
+    intent(app, c, |i| {
+        i.direction = Vec3::X;
+        i.sprint = true;
+    });
+    run_until(app, 2.0, |w| {
+        w.get::<Transform>(c).unwrap().translation.x > -1.2
+    });
+    tap_jump(app, c);
+    intent(app, c, |i| i.direction = Vec3::ZERO);
+    run_until(app, 1.0, |w| w.get::<Mover>(c).unwrap().zip.is_some());
+    c
+}
+
+fn cable_y(app: &App, line: Entity, x: f64) -> f64 {
+    let t = app.world.get::<Transform>(line).unwrap();
+    let z = app.world.get::<Zipline>(line).unwrap();
+    let s = ((x - t.translation.x) / z.to.x as f64) as f32;
+    let c = engine_movement::zipline::Cable::new(t, z, Vec3::Y);
+    c.grip(s).y
+}
+
+#[test]
+fn jumps_into_a_zip_line_rides_it_down_and_lets_go_at_the_end() {
+    let mut app = app();
+    let line = zip_line(&mut app, 4.0);
+    let c = jump_into_the_line(&mut app);
+    assert_eq!(triggered(&app, c, "zip_grab"), 1);
+    let m = mover(&app, c);
+    let z = m.zip.expect("caught the line");
+    assert_eq!(z.dir, 1.0, "rides the way it ran");
+    assert_eq!(m.air_jumps_left, 1);
+
+    // Hanging under the cable, feet 1.95 m below it, facing down the line, at speed.
+    run(&mut app, 1.0);
+    let p = pos(&app, c);
+    let m = mover(&app, c);
+    assert!(m.zip.is_some());
+    let below = cable_y(&app, line, p.x) - p.y;
+    assert!(
+        (below - 1.8 * 0.58).abs() < 0.08,
+        "hangs {below:.2} m below"
+    );
+    assert!(m.facing.dot(Vec3::X) > 0.98, "{}", m.facing);
+    let speed = m.velocity.x;
+    assert!(speed > 11.0 && speed < 14.5, "{speed:.1} m/s");
+    assert!(!m.grounded);
+
+    // Lets go 1.5 m before the far anchor with a hop, flies on and lands running.
+    let end_x = -3.0 + 30.0;
+    run_until(&mut app, 3.0, |w| w.get::<Mover>(c).unwrap().zip.is_none());
+    let p = pos(&app, c);
+    assert!(
+        (p.x - (end_x - 1.5)).abs() < 0.6,
+        "let go at x = {:.2}",
+        p.x
+    );
+    assert_eq!(triggered(&app, c, "zip_release"), 1);
+    assert!(mover(&app, c).velocity.y > 0.0, "a hop off the end");
+    run_until(&mut app, 2.0, |w| w.get::<Mover>(c).unwrap().grounded);
+    assert!(mover(&app, c).horizontal_speed() > 6.0);
+}
+
+#[test]
+fn a_jump_lets_go_of_a_zip_line_and_the_double_jump_is_back() {
+    let mut app = app();
+    zip_line(&mut app, 4.0);
+    let c = jump_into_the_line(&mut app);
+    // The jump into the line used no air jump; spend it, then catch nothing for a moment.
+    run(&mut app, 0.6);
+    let before = mover(&app, c).velocity;
+    tap_jump(&mut app, c);
+    let m = mover(&app, c);
+    assert!(m.zip.is_none());
+    assert_eq!(triggered(&app, c, "jump"), 2);
+    assert!(m.velocity.y > 4.0, "{}", m.velocity);
+    assert!(
+        (m.velocity.x - before.x).abs() < 0.5,
+        "keeps its speed: {}",
+        m.velocity
+    );
+    // Up and away from the cable, the air jump still works.
+    run(&mut app, 0.3);
+    tap_jump(&mut app, c);
+    assert_eq!(triggered(&app, c, "double_jump"), 1);
+    // It doesn't catch the line again on the way down past it.
+    run_until(&mut app, 3.0, |w| w.get::<Mover>(c).unwrap().grounded);
+    assert_eq!(triggered(&app, c, "zip_grab"), 1);
+
+    // Crouch drops off without a jump.
+    let mut app2 = app_with_line(4.0);
+    let c2 = jump_into_the_line(&mut app2);
+    run(&mut app2, 0.3);
+    intent(&mut app2, c2, |i| i.crouch = true);
+    app2.update();
+    let m = mover(&app2, c2);
+    assert!(m.zip.is_none());
+    assert_eq!(triggered(&app2, c2, "zip_release"), 1);
+    assert!(m.velocity.y < 0.5, "drops: {}", m.velocity);
+}
+
+fn app_with_line(drop: f32) -> App {
+    let mut app = app();
+    zip_line(&mut app, drop);
+    app
+}
+
+#[test]
+fn zip_lines_are_faster_downhill_than_uphill() {
+    let speed_after = |drop: f32| {
+        let mut app = app_with_line(drop);
+        let c = jump_into_the_line(&mut app);
+        run(&mut app, 1.2);
+        mover(&app, c).zip.expect("still riding").speed
+    };
+    let down = speed_after(5.0);
+    let level = speed_after(0.0);
+    let up = speed_after(-5.0);
+    assert!(
+        down > level + 0.6 && level > up + 0.6,
+        "{down:.1} {level:.1} {up:.1}"
+    );
+    assert!(up > 7.0, "still climbs at {up:.1} m/s");
+}
+
+#[test]
+fn a_rider_moves_with_its_zip_line() {
+    let mut app = app();
+    let line = zip_line(&mut app, 4.0);
+    let c = jump_into_the_line(&mut app);
+    run(&mut app, 0.3);
+    // The line moves 0.8 m sideways at once: the rider is pulled after it and hangs under it
+    // again.
+    app.world.get_mut::<Transform>(line).unwrap().translation.z += 0.8;
+    run(&mut app, 0.4);
+    let m = mover(&app, c);
+    assert!(m.zip.is_some(), "still on the line");
+    assert!((pos(&app, c).z - 0.8).abs() < 0.05, "{:?}", pos(&app, c));
 }

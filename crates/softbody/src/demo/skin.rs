@@ -17,7 +17,7 @@ use engine_assets::{Assets, Handle};
 use engine_core::prelude::*;
 use engine_core::tasks::ComputeTaskPool;
 use engine_core::time::FixedTime;
-use engine_render::{Mesh, MeshRenderer, StandardMaterial, Vertex};
+use engine_render::{MaterialRef, Mesh, MeshRenderer, Vertex};
 use engine_world::animation::{BonePose, SkeletonPose};
 
 use super::body::{self, BodyPart, BodyQuality, SkinTemplate};
@@ -31,19 +31,19 @@ pub struct SkinnedPart {
     pub owner: Entity,
     /// Key of the deformed mesh in `Assets<Mesh>`.
     pub key: String,
-    pub material: StandardMaterial,
+    pub material: MaterialRef,
     pub mesh: Option<Handle<Mesh>>,
     /// The owner's pose at the start of the latest fixed step.
     previous: Vec<BonePose>,
 }
 
 impl SkinnedPart {
-    pub fn new(part: BodyPart, owner: Entity, key: &str, material: StandardMaterial) -> Self {
+    pub fn new(part: BodyPart, owner: Entity, key: &str, material: impl Into<MaterialRef>) -> Self {
         Self {
             part,
             owner,
             key: key.to_string(),
-            material,
+            material: material.into(),
             mesh: None,
             previous: Vec::new(),
         }
@@ -175,7 +175,7 @@ pub fn skin_bodies(
                 part.mesh = Some(h);
                 commands
                     .entity(e)
-                    .insert(MeshRenderer::new(h, part.material));
+                    .insert(MeshRenderer::new(h, part.material.clone()));
                 h
             }
         };

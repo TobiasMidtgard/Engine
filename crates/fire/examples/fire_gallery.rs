@@ -326,11 +326,18 @@ fn main() {
             Transform::default().looking_at(-moon_dir.as_dvec3(), Vec3::Y);
         let eye = ORIGIN + DVec3::from_array(view.eye);
         let target = ORIGIN + DVec3::from_array(view.target);
+        // A cut the renderer sees as one: it keeps the last picture's history (anti-aliasing,
+        // fog) across a jump of less than 25 m, and the stops are closer together than that,
+        // so the camera looks from far off for a frame first. Without it, a stop smears
+        // ghosts of the one before over its sky.
+        *app.world.get_mut::<Transform>(camera).expect("camera") =
+            Transform::from_translation(eye + DVec3::Y * 1000.0).looking_at(target, Vec3::Y);
+        let empty = swap_render(&mut app, render.take().expect("render schedule"));
+        app.update();
         *app.world.get_mut::<Transform>(camera).expect("camera") =
             Transform::from_translation(eye).looking_at(target, Vec3::Y);
 
         // Draw a few frames for exposure, shadows and the environment map to settle.
-        let empty = swap_render(&mut app, render.take().expect("render schedule"));
         app.update_n(6);
         if let Some(d) = app.world.get_resource::<RenderDisabled>() {
             eprintln!("no GPU: {}", d.0);

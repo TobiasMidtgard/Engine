@@ -10,7 +10,10 @@ character's own speed and reactions.
   jump or by holding toward the wall, kick off it, or let go with crouch), dashes with
   charges and a dodge window, and a grapple hook (pilots only: fire at a surface up to 40 m
   away, the rope reels the pilot in at up to 20 m/s and climbs them over the edge at the top;
-  jump, crouch or firing again lets go with the momentum).
+  jump, crouch or firing again lets go with the momentum), and zip lines (jump into a
+  `Zipline` cable to catch it one-handed and slide down it, faster downhill and slower uphill;
+  near the far anchor the rider lets go with a small hop, and jump, crouch or a dash lets go
+  earlier, with the double jump back).
 - **Combat movement**: attacks with windup, strike and recovery; dash-strikes that close
   several meters in a blink; blocks, dodges (i-frames), counters on a recovering attacker,
   stagger and knockback. Every strike is logged (`CombatLog`).
@@ -87,7 +90,8 @@ course zone.
   high to vault, catches its top, shimmies along it, climbs up and walks off the far end.
 - **Grapple station** (behind the course): a pilot sprints at a 9 m tower, jumps, fires the
   hook at an anchor plate under its top edge, is reeled up the face, climbs over the edge,
-  crosses the roof and drops off the back onto the pad.
+  walks to the zip line gantry on the roof, runs and jumps into the line and rides it 26 m
+  down to a landing gate, letting go over the pad.
 - **Freight station** (west of the grapple station): a box car shuttles along a short track
   beside a loading platform. A pilot waits for it to pull out, sprints down the platform,
   leaps onto the car's side, wall-runs along it, climbs onto the roof, rides it to the end of
@@ -121,9 +125,9 @@ Writes: `CharacterMove` (velocity in the character's own seconds) and the capsul
 (`CharacterController::height` shrinks while sliding or crouching); `LocomotionState` (mode,
 velocity in world seconds, blocking, attacking, vulnerable, dash stamina);
 `AnimationParams` (`speed`, `direction`, `lean`, `crouch`, `effort`, `airborne`,
-`vertical_speed`, `wallrun`, `grapple`) and `AnimationTrigger` (`jump`, `double_jump`, `land`,
-`slide`, `wallrun`, `wall_jump`, `mantle`, `ledge_grab`, `let_go`, `dash`, `grapple_fire`,
-`grapple_hit`, `grapple_release`, `attack_light`, `attack_heavy`, `block`, `hit_react`,
+`vertical_speed`, `wallrun`, `grapple`, `zipline`) and `AnimationTrigger` (`jump`,
+`double_jump`, `land`, `slide`, `wallrun`, `wall_jump`, `mantle`, `ledge_grab`, `let_go`,
+`dash`, `grapple_fire`, `grapple_hit`, `grapple_release`, `zip_grab`, `zip_release`, `attack_light`, `attack_heavy`, `block`, `hit_react`,
 `death`); `AttackEvent` (when an attack starts, with the world seconds until it lands);
 `DamageEvent` (strikes); `Ragdoll::weight` on defeat; `GroundContact` (landings, footsteps,
 slides, wall-run steps); `NoiseEvent`; `LocalTimeScale` (from `Tempo`); `TimeDilation`
@@ -194,9 +198,13 @@ sets the bake size). Nothing in it is third-party art.
 - `look::rope`: the grapple's braided steel cable and three-clawed hook, laid each frame from
   the pilot's left fist (as drawn) to the hook: snaking behind it in flight, snapping taut
   when it bites, claws spread.
+- `look::zipline`: zip line cables (a galvanized wire rope sagging between its anchors) for
+  every `Zipline`, pulled into a shallow V through each rider's fist as drawn, with sparks
+  streaming off a fast rider's glove.
 - `look::course`: the course as a pilot training facility (precast wall panels with guide
   lights, a hazard-striped slide bar, a tower with a caged ladder, a start gantry, masts,
-  numbered signs, the grapple station's nine-meter tower with its glowing anchor plate, and
+  numbered signs, the grapple station's nine-meter tower with its glowing anchor plate, the
+  zip line's launch gantry on its roof and its landing gate over a rubber-matted pad, and
   the freight station: ballast, concrete sleepers and rails between buffer stops, a loading
   platform with granite coping and painted warnings, lamp posts, and a weathered box car on
   two bogies with sprung wheelsets, sliding doors, ladders, buffers and couplings)
@@ -208,7 +216,7 @@ sets the bake size). Nothing in it is third-party art.
 ## Tuning and AI access
 
 Registered components: `MovementProfile` (presets `pilot`, `human`, `elite`), `Mover`,
-`Fighter`, `CombatState`, `Tempo`, `Perceiver`, `Afterimages`, `CameraFx`, `PlayerControlled`,
+`Fighter`, `CombatState`, `Tempo`, `Zipline`, `Perceiver`, `Afterimages`, `CameraFx`, `PlayerControlled`,
 `LockOn`, `PilotCamera`, `DuelDirector`. Resources: `TimePerception` (focus and cinematic settings),
 `PerceptionStatus`, `SlowMotionFx`.
 
@@ -229,13 +237,16 @@ pull out).
 pointing toe-first, jump and double jump heights, slide under a bar that blocks running, wall-run and wall-jump, mantle,
 catching a ledge too high to vault, shimmying to its end, climbing up, letting go and kicking
 off, grappling up onto a roof, a shot at nothing coming back, a jump letting go of the rope,
-humans having no hook, wall-running on a wall that slides away and jumping off it with its
+humans having no hook, jumping into a zip line, riding it down and letting go at the end, a
+jump letting go of it with the double jump back, zip lines being faster downhill than
+uphill, a rider moving with its line, wall-running on a wall that slides away and jumping off it with its
 speed, hanging from a rising, sliding ledge and climbing onto it, a hook riding a moving roof,
 dash, characters on their own clocks in slow motion, the stand-in stepping aside, bodies from
 other modules being moved);
 `tests/demo.rs` (each duel round plays out as described, the rounds cycle, the runner
 finishes the course, the climber catches the ledge, shimmies, climbs up and drops off, the
-grappler hooks the anchor plate, is reeled up, climbs over and lands on the pad, the rider
+grappler hooks the anchor plate, is reeled up, climbs over, rides the zip line down and lands
+on its pad, the rider
 leaps onto the moving freight car, wall-runs along it, climbs aboard and steps off at the end
 of the track, the duel
 waits without a camera, `movement.duel` restarts a chosen round,
