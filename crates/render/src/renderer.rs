@@ -12,6 +12,7 @@ use std::time::Instant;
 
 use bevy_ecs::prelude::*;
 use bytemuck::{Pod, Zeroable};
+use engine_assets::Assets;
 use engine_core::prelude::*;
 use engine_core::window::RawWindowHandle;
 use serde_json::json;
@@ -32,6 +33,7 @@ use crate::frame::{
 use crate::gpu::{self, SurfaceState};
 use crate::settings::{AntiAliasing, RenderSettings, Tonemapper};
 use crate::shadows::{FAR_SHADOW_LAYER, MAX_CASCADES, SKY_OCCLUSION_VIEW, ShadowViewUniform};
+use crate::texture::Image;
 
 /// Index of the far shadow map's view buffer and bind group (after the sky occlusion map's).
 const FAR_SHADOW_VIEW: usize = SKY_OCCLUSION_VIEW + 1;
@@ -90,6 +92,13 @@ pub struct RenderStats {
     pub adapter: String,
     pub backend: String,
     pub features: Vec<String>,
+    /// Images whose CPU pixels the renderer freed after uploading them, since startup
+    /// (`RenderSettings::release_image_pixels`).
+    #[serde(default)]
+    pub images_released: u64,
+    /// CPU bytes (level 0 and stored mips) those releases freed.
+    #[serde(default)]
+    pub image_bytes_released: u64,
 }
 
 #[repr(C)]
@@ -484,6 +493,7 @@ impl Renderer {
             adapter_info: gpu.info.clone(),
             features: device.features(),
             materials: Default::default(),
+            images: Default::default(),
         };
 
         let targets = Targets::new(&device, &formats, width, height);
@@ -657,6 +667,9 @@ impl Renderer {
         if let Some(s) = &mut self.surface {
             s.set_vsync(&self.shared.device, settings.vsync);
         }
+        self.shared
+            .images
+            .begin_frame(self.frame_index, settings.release_image_pixels);
 
         // New features.
         if let Some(mut pending) = world.get_resource_mut::<PendingRenderFeatures>()
@@ -1222,7 +1235,7 @@ impl Renderer {
             }
         }
 
-        let stats = self.collect_stats(&view, started);
+        let mut stats = self.collect_stats(&view, started);
         self.shared.queue.submit([encoder.finish()]);
         self.meter.after_submit();
         if let Some(t) = surface_texture {
@@ -1250,6 +1263,21 @@ impl Renderer {
             }
         }
 
+        // Free the CPU pixels of images that have been on the GPU unchanged for a while (when
+        // `release_image_pixels` is on), and drop images nobody draws any more.
+        if let Some(mut images) = world.get_resource_mut::<Assets<Image>>()
+            && self
+                .shared
+                .images
+                .end_frame(images.bypass_change_detection())
+                > 0
+        {
+            images.set_changed();
+        }
+        let image_stats = self.shared.images.stats();
+        stats.images_released = image_stats.released;
+        stats.image_bytes_released = image_stats.bytes_released;
+
         if let Some(mut d) = world.get_resource_mut::<Diagnostics>() {
             d.set("render.cpu_ms", stats.cpu_ms as f64);
             d.set("render.draw_calls", stats.draw_calls as f64);
@@ -1260,6 +1288,13 @@ impl Renderer {
             d.set(
                 "render.surface_weather_uploads",
                 self.surface_weather.uploads as f64,
+            );
+            d.set("render.gpu_images", image_stats.gpu_images as f64);
+            d.set("render.image_uploads", image_stats.uploads as f64);
+            d.set("render.images_released", image_stats.released as f64);
+            d.set(
+                "render.image_bytes_released",
+                image_stats.bytes_released as f64,
             );
             if let Some(ev) = self.meter.measured_ev100 {
                 d.set("render.ev100_metered", ev as f64);
@@ -1356,6 +1391,8 @@ impl Renderer {
             adapter: self.shared.adapter_info.name.clone(),
             backend: format!("{:?}", self.shared.adapter_info.backend),
             features: self.feature_names(),
+            images_released: 0,
+            image_bytes_released: 0,
         }
     }
 
@@ -1377,6 +1414,7 @@ impl Renderer {
                 })
             })
             .collect();
+        let images = self.shared.images.stats();
         json!({
             "adapter": self.shared.adapter_info.name,
             "backend": format!("{:?}", self.shared.adapter_info.backend),
@@ -1385,6 +1423,13 @@ impl Renderer {
             "frame": self.frame_index,
             "ev100": self.last_view.as_ref().map(|v| v.ev100),
             "features": features,
+            "images": {
+                "gpu": images.gpu_images,
+                "uploads": images.uploads,
+                "released_now": images.released_now,
+                "released": images.released,
+                "bytes_released": images.bytes_released,
+            },
         })
     }
 }
