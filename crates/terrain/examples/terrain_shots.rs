@@ -194,6 +194,16 @@ fn views() -> Vec<View> {
             painted: true,
             ..BASE
         },
+        // The same patchwork after rain: wet sand darkens and shines, soil turns to mud.
+        View {
+            name: "painted_wet",
+            eye: DVec3::new(-60.0, 32.0, -150.0),
+            target: DVec3::new(20.0, 0.0, -260.0),
+            sun: (230.0, 32.0),
+            painted: true,
+            ground: Ground::Rain,
+            ..BASE
+        },
         View {
             name: "painted_border",
             eye: DVec3::new(-4.0, 2.2, -172.0),
