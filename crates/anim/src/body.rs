@@ -82,7 +82,7 @@ pub struct BodyMotion {
     pub speed: f32,
     /// Turn rate, rad/s (smoothed; positive turns left).
     pub yaw_rate: f32,
-    owners: [Owner; 3],
+    owners: [Owner; 4],
 }
 
 /// Who sets one of a person's animation parameters.
@@ -97,7 +97,7 @@ enum Owner {
     Others,
 }
 
-const PARAMS: [&str; 3] = ["speed", "turn", "move_effort"];
+const PARAMS: [&str; 4] = ["speed", "turn", "move_effort", "blocking"];
 
 /// Build bodies for new or changed requests.
 pub(crate) fn answer_requests(world: &mut World) {
@@ -165,11 +165,16 @@ pub(crate) fn drive_bodies(
             continue;
         }
         let values = [
-            motion.speed,
-            (motion.yaw_rate / 1.2).clamp(-1.0, 1.0),
-            (motion.speed / EFFORT_SPEED).clamp(0.0, 1.0),
+            Some(motion.speed),
+            Some((motion.yaw_rate / 1.2).clamp(-1.0, 1.0)),
+            Some((motion.speed / EFFORT_SPEED).clamp(0.0, 1.0)),
+            // Holds the graph's block pose while the mover says it blocks.
+            locomotion.map(|l| if l.blocking { 1.0 } else { 0.0 }),
         ];
         for (i, (name, value)) in PARAMS.iter().zip(values).enumerate() {
+            let Some(value) = value else {
+                continue;
+            };
             let current = params.values.get(*name).copied();
             motion.owners[i] = match motion.owners[i] {
                 Owner::Wrote(w) if current != Some(w) => Owner::Others,

@@ -1911,8 +1911,9 @@ pub fn clips(s: &Skeleton) -> Vec<AnimationClip> {
     ]
 }
 
-/// Locomotion (idle/walk/run by `speed`, leaning by `turn`), plus `heavy_swing`, `block`
-/// (held while `blocking` > 0.5), `reach` and `flex` actions, and getting up off the floor
+/// Locomotion (idle/walk/run by `speed`, leaning by `turn`), plus `heavy_swing` (also on
+/// the contract's `attack_heavy`), `block` (on its trigger or while `blocking` > 0.5, held
+/// while it stays there), `reach` and `flex` actions, and getting up off the floor
 /// (`get_up_back`, `get_up_front`: triggered by the ragdoll when a limp body comes round).
 pub fn graph() -> AnimGraph {
     graph_with(GRAPH, &Locomotion::default())
@@ -2010,9 +2011,24 @@ pub fn graph_with(name: &str, motion: &Locomotion) -> AnimGraph {
                     Condition::trigger("heavy_swing"),
                     0.2,
                 ),
+                // The contract's name for it.
+                TransitionDef::new(
+                    "move",
+                    "heavy_swing",
+                    Condition::trigger("attack_heavy"),
+                    0.2,
+                ),
                 TransitionDef::new("heavy_swing", "move", Condition::Finished, 0.35).inertialize(),
                 TransitionDef::new("move", "block", Condition::trigger("block"), 0.15)
                     .inertialize(),
+                // Blocking without a trigger (a mover's `LocomotionState.blocking`).
+                TransitionDef::new(
+                    "move",
+                    "block",
+                    Condition::param("blocking", Cmp::Gt, 0.5),
+                    0.15,
+                )
+                .inertialize(),
                 TransitionDef::new(
                     "block",
                     "move",
