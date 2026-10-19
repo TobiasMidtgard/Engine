@@ -989,6 +989,11 @@ fn markers_update(world: &mut World) {
             .unwrap_or(1.0);
         presence * shown
     });
+    // Markers step aside while the quick-select wheel covers the middle of the screen.
+    let wheel = screens::find_screen(world, "wheel").map_or(1.0, |e| {
+        1.0 - world.get::<Screen>(e).map_or(1.0, |s| s.presence)
+    });
+    let hud = hud * wheel;
     let nav = world
         .get_resource::<MapData>()
         .and_then(|m| m.waypoint_nav())
