@@ -105,9 +105,10 @@ snow and a storm.
 station through a day of changing weather (clear morning, fair-weather clouds, a storm rolling
 in, a downpour, puddles after the rain, night rain under lamps, lightning, a foggy morning,
 sunset, above the clouds, snow, a moonlit night, a rainbow in the showers), then close-ups of
-the station, and saves a screenshot of each. Around the station the tour builds its own
-landscape: a meadow with grass, wooded hills, rocks, a farm track and a mountain range. Puddles
-only form within a few centimeters of the ground, so grass blades and tabletops stay dry.
+the station (the last from under the bus shelter in the rain), and saves a screenshot of each.
+Around the station the tour builds its own landscape: a meadow with grass, wooded hills, rocks,
+a farm track and a mountain range. Puddles only form within a few centimeters of the ground, so
+grass blades and tabletops stay dry.
 
 ## Tuning
 
@@ -158,8 +159,11 @@ environment map), `weather precipitation` (rain, snow, splashes, bolts) and `wea
 
 ## Known gaps
 
-- The renderer's sky still draws its own flat cloud layer when there are clouds; the clouds
-  feature paints over it (`CloudSettings::replace_sky`). A renderer toggle is requested.
-- Wetness and snow in the mesh shader use the value at the camera; the ground pass adds the
-  local difference. Wet grass looks too glossy (renderer material response).
-- Clouds don't yet cast shadows on the ground.
+- Clouds don't yet cast shadows on the ground (the renderer's hook is on its way).
+
+While the clouds are on, the renderer's own flat cloud layer is switched off
+(`RenderSettings::sky_cloud_layer`), so with `replace_sky` off the clouds blend over a clear
+sky. The renderer shades wetness and snow on weather-taking materials per pixel from the same
+ground state (`surface_weather`); the ground pass adds only what that leaves out (puddles, the
+soaked rim around them, snow burying grass), so wet ground seen from under a roof isn't
+darkened twice.
