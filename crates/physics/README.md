@@ -128,8 +128,10 @@ changing that one plugin line.
   heightfields) use the submerged share of their bounding box.
 - **Time**: runs in `FixedUpdate` / `SimSet::Physics` on world time, so `TimeDilation` slows it;
   each fixed step is split into substeps of at most `max_substep_secs`, so 10× fast-forward is
-  as stable as 1×. `LocalTimeScale` speeds a single body up or down (its `Velocity` is in its
-  own seconds, like `CharacterMove`).
+  as stable as 1×. `LocalTimeScale` speeds a single body up or down, in everything: its
+  `Velocity` is in its own seconds (like `CharacterMove`), and gravity, `ExternalForce`, water
+  and damping act per second of its own time, so a car on thrusters in a slow-motion bubble
+  hovers just as it did outside, and a lift driven by `Velocity` moves at the bubble's pace.
 - **Queries**: `PhysicsQueries` raycast, shapecast, overlap and closest point, from any system
   or thread; they see the state after the last step.
 - **Deterministic**: the same scene gives the same result every run.
@@ -265,7 +267,8 @@ budget articulates the groups nearest the focus and follows it); behaviors other
 bodies, joint breaking and motors, hinges swinging through the fixed body they hang on, kinematic
 platforms, stairs and steep slopes, dashing into thin walls, wall-running, no phantom walls on flat
 ground, running over heightfield hills, crouching, landing from a fall, standing exactly on boxes
-from 1 m to 10 km across, characters on their own clock, sensors and layers, local time, hovering,
+from 1 m to 10 km across, characters on their own clock, sensors and layers, local time (forces, damping and lifts
+on a slow clock too), hovering,
 buoyancy, floating the way real bodies do (logs, planks, cubes on their edge, a ball's draft, a
 barge on a swell), blasts, bodies crossing and merging regions); the float test
 (`tests/floaters.rs`); riding moving bodies (`tests/platforms.rs`:
