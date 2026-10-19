@@ -28,6 +28,7 @@ pub const GRAPH: &str = "humanoid";
 
 /// Walk and run speeds the clips are authored for, m/s.
 pub const WALK_SPEED: f32 = 1.4;
+pub const SLOW_WALK_SPEED: f32 = 0.65;
 pub const RUN_SPEED: f32 = 3.8;
 /// Height of the hips at rest, m (the clips' positions are for this size of body and scale
 /// with the hips of a fitted skeleton).
@@ -881,12 +882,28 @@ fn idle(s: &Skeleton) -> AnimationClip {
 }
 
 fn walk(s: &Skeleton) -> AnimationClip {
-    AnimationClip::from_fn("walk", 1.1, 45, true, |ph| {
+    walk_with(s, "walk", 1.0, 1.0)
+}
+
+/// A shorter, slower walk for strolling: whole steps with the feet clear of the ground,
+/// rather than a walk faded into standing.
+fn walk_slow(s: &Skeleton) -> AnimationClip {
+    walk_with(s, "walk_slow", 1.15, 0.6)
+}
+
+/// A walk taking `secs` per stride, its steps `stride` times as long as the full walk's.
+fn walk_with(s: &Skeleton, name: &str, secs: f32, stride: f32) -> AnimationClip {
+    let swing = 0.5 + 0.5 * stride;
+    AnimationClip::from_fn(name, secs, 45, true, |ph| {
         let mut p = PoseBuilder::new(s);
-        let c = cycle(ph);
+        let c = cycle(ph) * swing;
         p.rot_move(
             "hips",
-            Vec3::new(0.018 * cycle_sin(ph), -0.025 - 0.022 * cycle(ph * 2.0), 0.0),
+            Vec3::new(
+                0.018 * cycle_sin(ph),
+                -0.025 - 0.022 * stride * stride * cycle((ph - 0.05) * 2.0),
+                0.0,
+            ),
             3.0,
             5.0 * c,
             3.0 * cycle_sin(ph),
@@ -906,8 +923,8 @@ fn walk(s: &Skeleton) -> AnimationClip {
             // Right foot strikes at phase 0, left at 0.5.
             let q = (ph + if side == 1 { 0.0 } else { 0.5 }).rem_euclid(1.0);
             let cq = cycle(q);
-            let hip = 18.0 * cq + 4.0;
-            let knee = 4.0 + 14.0 * bump(q, 0.12, 0.09) + 58.0 * bump(q, 0.73, 0.14);
+            let hip = 23.0 * stride * cq + 4.0;
+            let knee = 4.0 + 14.0 * bump(q, 0.12, 0.09) + 60.0 * bump(q, 0.78, 0.14);
             let ankle =
                 4.0 * bump(q, 0.0, 0.06) - 14.0 * bump(q, 0.55, 0.08) + 6.0 * bump(q, 0.8, 0.1);
             let toe = 24.0 * bump(q, 0.53, 0.07);
@@ -916,9 +933,9 @@ fn walk(s: &Skeleton) -> AnimationClip {
                 &mut p,
                 side,
                 Arm {
-                    flex: -16.0 * cq + 2.0,
-                    elbow: 20.0 - 6.0 * cq,
-                    protract: -3.0 * cq,
+                    flex: -16.0 * swing * cq + 2.0,
+                    elbow: 20.0 - 6.0 * swing * cq,
+                    protract: -3.0 * swing * cq,
                     ..Arm::HANG
                 },
             );
@@ -930,7 +947,7 @@ fn walk(s: &Skeleton) -> AnimationClip {
 }
 
 fn run(s: &Skeleton) -> AnimationClip {
-    AnimationClip::from_fn("run", 0.7, 41, true, |ph| {
+    AnimationClip::from_fn("run", 0.66, 41, true, |ph| {
         let mut p = PoseBuilder::new(s);
         let c = cycle(ph);
         p.rot_move(
@@ -957,7 +974,7 @@ fn run(s: &Skeleton) -> AnimationClip {
         );
         for side in 0..2 {
             let q = (ph + if side == 1 { 0.0 } else { 0.5 }).rem_euclid(1.0);
-            let hip = 30.0 * cycle(q - 0.05) + 12.0;
+            let hip = 36.0 * cycle(q - 0.05) + 12.0;
             let knee = 22.0 + 18.0 * bump(q, 0.15, 0.1) + 85.0 * bump(q, 0.68, 0.15);
             let ankle = -18.0 * bump(q, 0.35, 0.08) + 10.0 * bump(q, 0.85, 0.12) + 4.0;
             let toe = 20.0 * bump(q, 0.33, 0.07);
@@ -1944,6 +1961,7 @@ fn get_up_front(s: &Skeleton) -> AnimationClip {
 pub fn clips(s: &Skeleton) -> Vec<AnimationClip> {
     vec![
         idle(s),
+        walk_slow(s),
         walk(s),
         run(s),
         lean(s, "lean_left", 1.0),
@@ -1971,6 +1989,10 @@ pub fn graph() -> AnimGraph {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Locomotion {
     pub idle: String,
+    /// A slower walk between standing and walking; empty for none (then the walk fades into
+    /// standing).
+    pub slow_walk: String,
+    pub slow_walk_speed: f32,
     pub walk: String,
     pub walk_speed: f32,
     pub run: String,
@@ -1981,6 +2003,8 @@ impl Default for Locomotion {
     fn default() -> Self {
         Self {
             idle: "idle".into(),
+            slow_walk: "walk_slow".into(),
+            slow_walk_speed: SLOW_WALK_SPEED,
             walk: "walk".into(),
             walk_speed: WALK_SPEED,
             run: "run".into(),
@@ -1995,20 +2019,19 @@ impl Default for Locomotion {
 pub fn graph_with(name: &str, motion: &Locomotion) -> AnimGraph {
     let locomotion = NodeDef::Blend1d {
         param: "speed".into(),
-        children: vec![
-            Blend1dChild {
-                at: 0.0,
-                node: NodeDef::clip(&motion.idle),
-            },
-            Blend1dChild {
-                at: motion.walk_speed,
-                node: NodeDef::clip(&motion.walk),
-            },
-            Blend1dChild {
-                at: motion.run_speed,
-                node: NodeDef::clip(&motion.run),
-            },
-        ],
+        children: [
+            (0.0, &motion.idle),
+            (motion.slow_walk_speed, &motion.slow_walk),
+            (motion.walk_speed, &motion.walk),
+            (motion.run_speed, &motion.run),
+        ]
+        .into_iter()
+        .filter(|(_, clip)| !clip.is_empty())
+        .map(|(at, clip)| Blend1dChild {
+            at,
+            node: NodeDef::clip(clip),
+        })
+        .collect(),
         sync: true,
         match_speed: true,
     };

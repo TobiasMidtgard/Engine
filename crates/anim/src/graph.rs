@@ -728,10 +728,24 @@ impl GraphInstance {
                 {
                     rate *= x / top;
                 }
+                // With `match_speed` the points are speeds, and a child standing still (at 0)
+                // has no step cycle: the cycle is the moving children's, whose stride shrinks
+                // with their weight, so planted feet keep pace with the body at slow speeds
+                // instead of the idle's long loop slowing every step.
+                let mut cycle = weights.clone();
+                if b.match_speed {
+                    cycle.retain(|(c, _)| b.points.iter().any(|p| p.1 == *c && p.0.abs() > 1e-3));
+                    let total: f32 = cycle.iter().map(|w| w.1).sum();
+                    if total > 1e-3 {
+                        cycle.iter_mut().for_each(|w| w.1 /= total);
+                    } else {
+                        cycle = weights.clone();
+                    }
+                }
                 let phase = if b.sync {
                     // Put the nodes back temporarily so `duration` can read them.
                     self.nodes[i] = node;
-                    let d: f32 = weights
+                    let d: f32 = cycle
                         .iter()
                         .map(|&(c, w)| w * self.duration(c, ctx.params))
                         .sum::<f32>()
