@@ -9,7 +9,7 @@ use engine_physics::{PhysicsPlugin, PhysicsSettings, PhysicsStats};
 use engine_world::physics::{
     ApplyImpulse, Collider, Joint, JointKind, JointMotor, MassProperties, RigidBody, Velocity,
 };
-use engine_world::{Gravity, WorldPlugin, WorldShift};
+use engine_world::{Gravity, SimulationFocus, WorldPlugin, WorldShift};
 
 fn app(articulated: bool) -> App {
     let mut app = App::new();
@@ -687,4 +687,42 @@ fn a_far_heavier_body_keeps_its_group_on_constraint_joints() {
     assert_eq!(articulated(&app), 3);
     app.update_n(60);
     assert!(worst_gap(&app, &joints) < 1e-4);
+}
+
+/// Only the `max_articulated` moving groups nearest the focus are articulations; the rest use
+/// constraint joints. The budget follows the focus, and a group that falls asleep keeps its
+/// joints but gives its place to the next nearest.
+#[test]
+fn the_budget_articulates_the_groups_nearest_the_focus() {
+    let mut app = app(true);
+    zero_g(&mut app);
+    app.world.resource_mut::<PhysicsSettings>().max_articulated = 2;
+    let focus = app
+        .world
+        .spawn((
+            Transform::from_xyz(0.0, 5.0, -2.0),
+            SimulationFocus::default(),
+        ))
+        .id();
+    // Chain `i` has `i + 1` joints, so the count of articulated joints tells which are.
+    let chains: Vec<Vec<Entity>> = (0..6)
+        .map(|i| {
+            let (parts, _) = chain(&mut app, DVec3::new(0.0, 5.0, 4.0 * i as f64), i + 2);
+            for p in &parts {
+                app.world.get_mut::<Velocity>(*p).unwrap().linear = Vec3::Y;
+            }
+            parts
+        })
+        .collect();
+    app.update_n(2);
+    assert_eq!(articulated(&app), 1 + 2, "the two chains nearest the focus");
+    app.world.get_mut::<Transform>(focus).unwrap().translation = DVec3::new(0.0, 5.0, 22.0);
+    app.update_n(10);
+    assert_eq!(articulated(&app), 5 + 6, "the two nearest the moved focus");
+    // Those two stop and fall asleep: the next two nearest take their places.
+    for p in chains[4].iter().chain(&chains[5]) {
+        *app.world.get_mut::<Velocity>(*p).unwrap() = Velocity::default();
+    }
+    app.update_n(240);
+    assert_eq!(articulated(&app), 5 + 6 + 3 + 4);
 }

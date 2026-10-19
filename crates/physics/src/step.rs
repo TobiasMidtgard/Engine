@@ -321,16 +321,30 @@ pub(crate) fn physics_step(world: &mut World, mut q: Local<Option<StepQueries>>)
         let graph = sim.joint_graph();
         sim.rearticulate(&graph);
     }
+    // The articulation budget looks every few steps, and whenever joints are being made (so a
+    // new ragdoll past the budget starts on constraint joints).
+    sim.budget_clock += 1;
+    let mut graph = None;
+    if sim.settings.articulated_joints
+        && (sim.budget_clock >= crate::sim::BUDGET_EVERY
+            || sim.joints.values().any(|j| j.created.is_none()))
+    {
+        sim.budget_clock = 0;
+        let g = sim.joint_graph();
+        let lookup = |x: Entity| world_pose(world, x).map(|t| (t.translation, t.rotation));
+        sim.budget_articulations(&g, &foci, &lookup);
+        graph = Some(g);
+    }
     let waiting: Vec<Entity> = sim
         .joints
         .iter()
         .filter(|(_, j)| j.created.is_none())
         .map(|(e, _)| *e)
         .collect();
-    let graph = if waiting.is_empty() {
-        Default::default()
-    } else {
-        sim.joint_graph()
+    let graph = match graph {
+        Some(g) => g,
+        None if waiting.is_empty() => Default::default(),
+        None => sim.joint_graph(),
     };
     for e in waiting {
         let lookup = |x: Entity| world_pose(world, x).map(|t| (t.translation, t.rotation));

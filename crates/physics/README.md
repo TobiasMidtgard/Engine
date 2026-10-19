@@ -83,7 +83,12 @@ changing that one plugin line.
   or dropping a heavy body, switches it over on the spot. Cost: Rapier rebuilds each
   articulation's dense mass matrix every internal substep, about 0.9 ms per tumbling 10-part
   ragdoll per frame on the build machine (constraint joints: 0.15 ms); asleep they cost nothing.
-  `articulated_joints: false` turns it off.
+  So only the `max_articulated` (4) moving groups nearest a `SimulationFocus` are articulated;
+  the others use constraint joints, and switch over when they rank among the nearest (a group
+  already articulated counts as a fifth nearer, so groups at about the same distance don't
+  trade places back and forth; sleeping groups keep their joints and don't count). Ten
+  ragdolls tumbling at once cost 4.8 ms per frame instead of 8.3. `articulated_joints: false`
+  turns it all off.
 - **Characters**: `CharacterController` capsules moved by sweeps, so even an 800 m/s dash stops
   at a thin wall: steps (also while gravity pulls), slopes, ground snapping, crouching (change
   `height` between steps). They move after the bodies have stepped: whatever a character stood
@@ -169,6 +174,7 @@ proving ground with the overlay.
 | `solver_iterations` | 4 | Iterations per substep; tall stacks and long chains like 6–8. |
 | `max_substep_secs` | 1/120 | Longest substep. With constraint joints, 1/60 lets ragdoll joints gap ~5 cm on impact; 1/120 ~1.5 cm. |
 | `articulated_joints` | on | Solve free-floating jointed groups as articulations (no joint gap; see Articulations). |
+| `max_articulated` | 4 | Most moving groups articulated at once, nearest the focus first; the rest use constraint joints. |
 | `max_substeps` | 24 | Cap per fixed step (10× speed needs 20). |
 | `allowed_penetration_m` | 0.001 | How far contacts may sink before being pushed apart. |
 | `contact_stiffness_hz` | 60 | Contact spring frequency (static contacts 2×). 30 Hz lets a 30-box tower sag 24 cm, 60 Hz ~6 cm. |
@@ -251,7 +257,8 @@ whole by its momentum, written velocities and poses come through, cone limits ho
 round, a limb twisted half a turn stays twisted, a limb swung along its cone's rim stops, hinge
 motors and limits match constraint joints, fixed joints weld bodies as they were, world shifts, a chain
 flying into another region stays whole, removing a joint splits it, switching the setting
-rebuilds joints, pinned chains and far heavier bodies keep constraint joints until let go); behaviors other modules rely on (`tests/behaviors.rs`: removal, compound
+rebuilds joints, pinned chains and far heavier bodies keep constraint joints until let go, the
+budget articulates the groups nearest the focus and follows it); behaviors other modules rely on (`tests/behaviors.rs`: removal, compound
 bodies, joint breaking and motors, hinges swinging through the fixed body they hang on, kinematic
 platforms, stairs and steep slopes, dashing into thin walls, wall-running, no phantom walls on flat
 ground, running over heightfield hills, crouching, landing from a fall, standing exactly on boxes
@@ -290,8 +297,7 @@ on its spot slows at `μ·g·1 cm/(⅖r²)` and stops where it is); the debug vi
   prototype patch of Rapier) saved only 30%, the rest being its dense LU factorization and
   constraint setup, so not worth a fork; an O(n) articulated-body solve would make many ragdolls
   at once affordable, and with contacts that soften where the coordinates can't give way, chains
-  hung from the world (bridges, wrecking balls, lamps) could be articulated too. Meanwhile, a
-  budget: articulate only the few tumbling groups nearest a `SimulationFocus`.
+  hung from the world (bridges, wrecking balls, lamps) could be articulated too.
 - Joint friction and twist limits as `Joint` fields, so a game can make a stiff old door or a
   loose ragdoll (today every free-floating group's joints get the same 10%).
 - A `rolling_resistance` field on `SurfaceMaterial`, so games can tune it per surface (today
