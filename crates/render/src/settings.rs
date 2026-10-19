@@ -197,6 +197,9 @@ pub struct RenderSettings {
     /// debris, fragments) are cheaper instanced; the `NoVirtualGeometry` marker keeps a dense
     /// mesh off it too. Meshes with a `Displacement` take it whatever their triangle count.
     pub virtual_geometry_min_triangles: u32,
+    /// Occlusion culling of virtual geometry: clusters hidden behind what the depth prepass
+    /// drew (tested against last frame's depth, then this frame's) are not drawn.
+    pub virtual_geometry_occlusion: bool,
     /// Keep built cluster hierarchies (and displaced tessellations) on disk, keyed by a hash of
     /// the mesh and its displacement, so the next start loads them instead of building again.
     pub virtual_geometry_cache: bool,
@@ -269,6 +272,7 @@ impl Default for RenderSettings {
             night_desaturation: 0.7,
             virtual_geometry: true,
             virtual_geometry_min_triangles: 50_000,
+            virtual_geometry_occlusion: true,
             virtual_geometry_cache: true,
             virtual_geometry_cache_dir: String::new(),
             virtual_geometry_cache_mb: 2048,

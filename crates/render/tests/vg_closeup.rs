@@ -508,3 +508,77 @@ fn distant_walls_cost_few_triangles() {
         "a distant stone draws {per_far_stone} of its {source_per_stone} triangles"
     );
 }
+
+#[test]
+fn occlusion_culling_skips_hidden_stones_and_keeps_the_picture() {
+    // A row of stones, most of them behind a wall (an ordinary instanced box): with occlusion
+    // culling the hidden ones cost nothing, and the picture is the same as without it.
+    let mut app = test_app(
+        Camera::perspective(50.0),
+        DVec3::new(0.0, 0.6, 3.0),
+        DVec3::new(0.0, 0.4, 0.0),
+        None,
+    );
+    sun(&mut app);
+    let stones: Vec<(WallStone, Handle<Mesh>)> = (0..3)
+        .map(|k| {
+            let s = WallStone::new(StoneKind::RoughHewn, Vec3::new(0.4, 0.22, 0.26), k + 30)
+                .with_edge(0.006);
+            let mesh = app.world.resource_mut::<Assets<Mesh>>().add(s.base_mesh());
+            (s, mesh)
+        })
+        .collect();
+    let material = StandardMaterial::color(0.8, 0.8, 0.8);
+    for i in 0..21 {
+        let (stone, mesh) = &stones[i % 3];
+        let x = (i % 7) as f64 * 0.5 - 1.5;
+        let z = -((i / 7) as f64) * 0.5;
+        app.world.spawn((
+            Transform::from_xyz(x, 0.11, z),
+            MeshRenderer::new(*mesh, material),
+            stone.displacement(),
+        ));
+    }
+    // The wall hides all but the ends of the rows.
+    let wall = app
+        .world
+        .resource_mut::<Assets<Mesh>>()
+        .add(engine_render::mesh::cuboid(Vec3::new(2.2, 1.0, 0.1)));
+    app.world.spawn((
+        Transform::from_xyz(0.0, 0.5, 0.5),
+        MeshRenderer::new(wall, StandardMaterial::color(0.3, 0.25, 0.2)),
+    ));
+    if !wait_for_clusters(&mut app, 3) {
+        return;
+    }
+    let shot = |app: &mut App, occlusion: bool, name: &str| {
+        app.world
+            .resource_mut::<RenderSettings>()
+            .virtual_geometry_occlusion = occlusion;
+        app.update_n(6);
+        let img = capture(app, name);
+        let triangles = app.world.resource::<RenderStats>().triangles;
+        let state = cluster_state(app);
+        (img, triangles, state)
+    };
+    let (with, culled, state) = shot(&mut app, true, "vgc_occlusion_on");
+    let (without, all, _) = shot(&mut app, false, "vgc_occlusion_off");
+    let differ = differing_pixels(&with, &without);
+    eprintln!(
+        "occlusion culling: {culled} triangles instead of {all}; {differ} pixels differ; {}",
+        state["occlusion"]
+    );
+    assert_eq!(state["occlusion"]["on"], true);
+    assert!(
+        state["occlusion"]["occluded"].as_u64().unwrap_or(0) > 0,
+        "nothing was found hidden"
+    );
+    assert!(
+        culled * 2 < all,
+        "{culled} triangles with occlusion culling, {all} without"
+    );
+    assert!(
+        differ < 30,
+        "{differ} pixels changed with occlusion culling"
+    );
+}

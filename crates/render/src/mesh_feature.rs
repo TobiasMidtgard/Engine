@@ -1451,6 +1451,28 @@ impl RenderFeature for MeshFeature {
         }
     }
 
+    fn after_prepass(
+        &mut self,
+        encoder: &mut wgpu::CommandEncoder,
+        depth: &wgpu::TextureView,
+        ctx: &FrameContext,
+    ) -> bool {
+        self.clusters
+            .as_mut()
+            .is_some_and(|c| c.encode_late(ctx.gpu, encoder, depth))
+    }
+
+    fn draw_prepass_late(&self, pass: &mut wgpu::RenderPass<'_>, _ctx: &FrameContext) {
+        let Some(group) = &self.material_group else {
+            return;
+        };
+        let Some(clusters) = self.clusters.as_ref().filter(|c| c.is_active()) else {
+            return;
+        };
+        pass.set_bind_group(1, group, &[]);
+        clusters.draw_prepass_late(pass, |set| self.texture_group(set));
+    }
+
     fn draw_shadow(&self, pass: &mut wgpu::RenderPass<'_>, cascade: usize, _ctx: &FrameContext) {
         self.draw_shadow_view(pass, &self.shadow[cascade], cascade);
     }

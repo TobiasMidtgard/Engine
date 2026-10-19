@@ -284,6 +284,19 @@ fn mesh_state(app: &App) -> serde_json::Value {
         .unwrap_or_default()
 }
 
+/// Triangles the camera draws with occlusion culling off (for comparison), then back on.
+fn without_occlusion(app: &mut App) -> u64 {
+    app.world
+        .resource_mut::<RenderSettings>()
+        .virtual_geometry_occlusion = false;
+    app.update_n(3);
+    let triangles = app.world.resource::<RenderStats>().triangles;
+    app.world
+        .resource_mut::<RenderSettings>()
+        .virtual_geometry_occlusion = true;
+    triangles
+}
+
 fn set_visible(app: &mut App, entities: &[Entity], visible: bool) {
     for &e in entities {
         if let Some(mut r) = app.world.get_mut::<MeshRenderer>(e) {
@@ -522,9 +535,17 @@ fn main() {
         capture_now(&mut app.world, &path).expect("screenshot");
         let stats = app.world.resource::<RenderStats>().clone();
         let vg = mesh_state(&app)["stats"].clone();
+        let unculled = if new && debug == DebugView::None {
+            format!(
+                ", {} without occlusion culling",
+                without_occlusion(&mut app)
+            )
+        } else {
+            String::new()
+        };
         eprintln!(
-            "{name}: {} triangles on screen ({} clusters, {} in clusters), shadows {} \
-             triangles, {frame_ms:.0} ms per frame",
+            "{name}: {} triangles on screen ({} clusters, {} in clusters{unculled}), shadows \
+             {} triangles, {frame_ms:.0} ms per frame",
             stats.triangles, stats.clusters, vg["triangles"], vg["shadow_triangles"]
         );
     }
@@ -561,9 +582,10 @@ fn main() {
             capture_now(&mut app.world, out.join(format!("{name}.png"))).expect("screenshot");
             let stats = app.world.resource::<RenderStats>().clone();
             let vg = mesh_state(&app)["stats"].clone();
+            let unculled = without_occlusion(&mut app);
             eprintln!(
-                "{name}: {} stones, {} triangles on screen ({} clusters), shadows {} triangles, \
-                 {frame_ms:.0} ms per frame",
+                "{name}: {} stones, {} triangles on screen ({} clusters, {unculled} without \
+                 occlusion culling), shadows {} triangles, {frame_ms:.0} ms per frame",
                 vg["instances"], stats.triangles, stats.clusters, vg["shadow_triangles"]
             );
         }
