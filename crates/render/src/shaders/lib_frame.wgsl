@@ -40,6 +40,10 @@
 // The ground's weather around the camera (`SurfaceLayers` on 1 m cells, Rgba8; read it with
 // `surface_weather`). A 1x1 stand-in until the layers are uploaded.
 @group(0) @binding(21) var surface_weather_map: texture_2d<f32>;
+// Cloud shadows (cloud_shadows.rs): r = sunlight let through by the clouds to the cloud base,
+// top-down around the camera (see `cloud_shadow`); g, b, a are free for the module that draws
+// it. 1 where nobody draws it, and a white stand-in during `RenderFeature::compute`.
+@group(0) @binding(22) var cloud_shadow_map: texture_2d<f32>;
 
 // Multiply final radiance by this before writing to the HDR target.
 fn pre_expose(c: vec3<f32>) -> vec3<f32> { return c * frame.exposure.x; }
@@ -370,6 +374,41 @@ fn contact_shadow(rel: vec3<f32>, n: vec3<f32>) -> f32 {
     return shadow;
 }
 
+// ---------------------------------------------------------------- cloud shadows
+// Share of the sunlight (0..1) the clouds let through to camera-relative `rel`: multiply
+// sunlight by it, with the shadow maps and `sun_transmittance`. `shade_surface`,
+// `shade_thin_surface`, the fog's sunlight and the grass already do; shaders that light with
+// the sun themselves (terrain, water, foliage) call it. 1 when no module draws cloud shadows.
+//
+// The map lies on the cloud base, top-down and anchored to the world (cloud_shadows.rs): it is
+// read where the sun ray through `rel` crosses the base, so shadows fall away from the sun and
+// are right at any height below the clouds. Inside the cloud layer the shadow fades out toward
+// its top; beyond the map's square the sunlight is the writer's `outside` value, which the map
+// fades into over its outer tenth.
+fn cloud_shadow(rel: vec3<f32>) -> f32 {
+    let params = frame.cloud_shadow_params;
+    if (params.x < 0.5) { return 1.0; }
+    let c = frame.cloud_shadow * vec4<f32>(rel, 1.0);
+    let edge = max(abs(c.x), abs(c.y));
+    var t = params.w;
+    if (edge < 1.0) {
+        let uv = c.xy * vec2<f32>(0.5, -0.5) + 0.5;
+        let map = textureSampleLevel(cloud_shadow_map, linear_clamp, uv, 0.0).r;
+        t = mix(map, params.w, saturate((edge - 0.9) * 10.0));
+    }
+    let in_layer = saturate((rel.y - params.y) / max(params.z, 1.0));
+    return mix(saturate(t), 1.0, in_layer);
+}
+
+// For modules that draw the cloud shadow map: the camera-relative point on the cloud base at
+// map coordinates `uv` (u along world x, v along world z, as `fullscreen_vertex` gives them).
+// The texel there holds the sunlight that reaches this point down the sun direction
+// (`frame.sun_dir`).
+fn cloud_shadow_plane_point(uv: vec2<f32>) -> vec3<f32> {
+    let area = frame.cloud_shadow_area;
+    return vec3<f32>(area.x + uv.x * area.z, frame.cloud_shadow_params.y, area.y + uv.y * area.z);
+}
+
 // ---------------------------------------------------------------- atmosphere
 // The sky, sunlight through the air and aerial perspective live in lib_atmosphere.wgsl
 // (`atmosphere`, `sun_transmittance`, `sky_view_radiance`, `planet_height`, `ray_shell`).
@@ -540,6 +579,63 @@ fn sky_map_visibility(rel: vec3<f32>, n: vec3<f32>) -> f32 {
     return mix(vis, 1.0, saturate((edge - 0.875) * 8.0));
 }
 
+// Share of the sky a reflection sees, from camera-relative `rel` toward `dir` (unit; the
+// reflection's dominant direction) on a surface with smooth normal `n` and squared (alpha)
+// roughness `roughness`: 1 in the open, toward 0 where cover in the top-down sky occlusion map
+// rises above the reflection, such as the trees around a forest pond, the far side of a gully or
+// the buildings around a square. It marches the map outward along the reflection's heading
+// (SPECULAR_SKY_TAPS taps from about 1 m to 55 m, each a quarter farther than the last, the
+// sequence shifted per pixel by `frame_noise` so that walls thinner than the gaps between far
+// taps still count once temporal anti-aliasing averages it) and compares the steepest cover with
+// the reflection's elevation, softened over the lobe's width. Straight-up reflections and points
+// off the map see the sky. The map sees cover from above only, so combine this with
+// `sky_visibility` (`shade_surface` takes the smaller of the two).
+const SPECULAR_SKY_TAPS: u32 = 18u;
+
+fn specular_sky_visibility(rel: vec3<f32>, dir: vec3<f32>, n: vec3<f32>, roughness: f32) -> f32 {
+    let params = frame.sky_occlusion_params;
+    let flat_len = length(dir.xz);
+    if (params.x < 0.5 || flat_len < 1e-3) { return 1.0; }
+    let p = rel + n * 0.2;
+    let c = frame.sky_occlusion * vec4<f32>(p, 1.0);
+    let edge = max(abs(c.x), abs(c.y));
+    if (edge >= 1.0 || c.z <= 0.0 || c.z >= 1.0) { return 1.0; }
+    // Clip-space step for one meter along the heading (orientation-agnostic).
+    let heading = dir.xz / flat_len;
+    let step = (frame.sky_occlusion * vec4<f32>(heading.x, 0.0, heading.y, 0.0)).xy;
+    // Cover must be clearly above the point, as for `sky_map_visibility`: the ground the surface
+    // lies on and its bumps don't count (a reflection below the surface's own horizon is
+    // `specular_horizon_fade`'s), so open water stays bright out to the horizon.
+    let bias = 0.05 + (0.25 + params.z) * saturate(n.y);
+    // Sine of the elevation of the highest cover seen so far.
+    var steepest = -1.0;
+    var t = pow(1.25, frame_noise(pixel_of(rel).yx + 41.0));
+    for (var i = 0u; i < SPECULAR_SKY_TAPS; i++) {
+        let uv = (c.xy + step * t) * vec2<f32>(0.5, -0.5) + 0.5;
+        if (any(uv < vec2(0.0)) || any(uv >= vec2(1.0))) { break; }
+        // The highest of the 2x2 texels around the tap (smaller depth is higher).
+        let tops = textureGather(sky_occlusion_map, sky_occlusion_sampler, uv);
+        let h = (c.z - min(min(tops.x, tops.y), min(tops.z, tops.w))) * params.w;
+        if (h > bias) {
+            steepest = max(steepest, h * inverseSqrt(h * h + t * t));
+        }
+        t *= 1.25;
+    }
+    // Half the lobe is hidden when the cover is level with the reflection.
+    let width = 0.04 + roughness;
+    let vis = 1.0 - smoothstep(-width, width, steepest - dir.y);
+    return mix(vis, 1.0, saturate((edge - 0.875) * 8.0));
+}
+
+// Fade for reflected light whose mirror direction `r` points below the surface's own horizon
+// (smooth normal `n`), as a strong normal map's bumps make it do at grazing angles: such a
+// reflection would hit the surface itself (Russell 2015, "Horizon occlusion for normal mapped
+// reflections"). 1 for a reflection above the horizon.
+fn specular_horizon_fade(r: vec3<f32>, n: vec3<f32>) -> f32 {
+    let h = saturate(1.0 + 1.3 * dot(r, n));
+    return h * h;
+}
+
 // How much the haze along a view ray is lit by the sky. From the map: 1 when either end is
 // outdoors (the ray then runs mostly through open air), low when looking around under cover;
 // the camera's value is computed once per frame (`sky_camera`). Indoor volumes are sampled at
@@ -684,7 +780,7 @@ fn shade_surface_sides(s: Surface, rel: vec3<f32>, sun_visibility: f32, face: ve
     let l = frame.sun_dir.xyz;
     let n_dot_l_raw = dot(n, l);
     let n_dot_l = saturate(n_dot_l_raw);
-    let sun_light = frame.sun_color.rgb * sun_transmittance(rel);
+    let sun_light = frame.sun_color.rgb * sun_transmittance(rel) * cloud_shadow(rel);
     let sides = thin_surface_sides(face, l);
     if (thin && dot(sun_light, sun_light) > 0.0 && (n_dot_l > 0.0 || (translucent && sides.y > 0.0))) {
         // Shadowed as seen from the sheet's sunlit side, so the sheet doesn't shadow itself.
@@ -757,16 +853,29 @@ fn shade_surface_sides(s: Surface, rel: vec3<f32>, sun_visibility: f32, face: ve
     }
 
     // Sky / ambient (occluded in caves and interiors; the constant fill stays), darkened in
-    // creases by the material's and the screen-space ambient occlusion.
-    let sky_vis = sky_visibility(rel, n);
+    // creases by the material's and the screen-space ambient occlusion. How much sky the
+    // surface sees comes from its smooth normal, so cover doesn't follow the normal map's
+    // wrinkles; the shading normal still picks which part of the sky lights it.
+    let smooth_n = surface_smooth_normal(s);
+    let sky_vis = sky_visibility(rel, smooth_n);
     let fill = frame.ambient.rgb;
     let irradiance = ((sky_ambient_covered(n, sky_vis) - fill) * sky_vis + fill) * PI;
     // Rough surfaces reflect around a direction between the mirror direction and the normal
     // (Lagarde and de Rousiers 2014).
     let r = reflect(-v, n);
     let dominant = normalize(mix(n, r, (1.0 - roughness) * (sqrt(1.0 - roughness) + roughness)));
+    // Reflected sky: what the cover overhead leaves, less the low sky that cover around hides
+    // along the reflection (trees around a pond; rough surfaces, whose lobe is wide, rely on
+    // the cover overhead alone), faded where bumps reflect from below the surface's horizon.
+    var spec_sky = sky_vis;
+    let lobe_wide = saturate(roughness * 2.0);
+    if (lobe_wide < 1.0) {
+        let around = specular_sky_visibility(rel, dominant, smooth_n, roughness);
+        spec_sky = min(spec_sky, mix(around, 1.0, lobe_wide));
+    }
+    spec_sky *= specular_horizon_fade(r, smooth_n);
     let ssr = screen_reflection(rel);
-    let spec_env = mix(sample_env_rough(dominant, s.roughness) * sky_vis + fill, ssr.rgb, ssr.a);
+    let spec_env = mix(sample_env_rough(dominant, s.roughness) * spec_sky + fill, ssr.rgb, ssr.a);
     let env_brdf = env_brdf_approx(f0, s.roughness, n_dot_v);
     let visibility = min(s.occlusion, screen_ao(rel));
     color += diffuse_color * irradiance * INV_PI * ao_multibounce(visibility, diffuse_color);
@@ -828,7 +937,8 @@ fn fog_sky_light() -> vec3<f32> {
 
 // Radiance (cd/m^2, not pre-exposed) of height fog thick enough to hide everything behind it,
 // seen along `dir` with the fog at `at`: sunlight through the air with the fog's phase function
-// (`sun`: the share of the fog it reaches, `height_fog_sun_visibility`) and sky light, both
+// (`sun`: the share of the fog it reaches past mountains and clouds,
+// `height_fog_sun_visibility`) and sky light, both
 // scaled by `lit` (the open sky the fog sees), plus the ambient fill. This is the fog beyond
 // the volumetric range (or all of it with volumetrics off).
 fn height_fog_radiance(dir: vec3<f32>, at: vec3<f32>, lit: f32, sun: f32) -> vec3<f32> {
@@ -850,16 +960,19 @@ fn far_shadow_sun(rel: vec3<f32>) -> f32 {
 }
 
 // The sunlit share of the light the height fog between `t0` and `t1` meters along `dir` scatters
-// toward the camera, from the far shadow map: haze in the shadow of a mountain or a ridge doesn't
-// glow, so a mountain with the sun behind it keeps its contrast instead of hiding behind sunlit
-// haze, and low sun casts mountain shadows into the valley's haze. `tr` is the fog's
+// toward the camera, from the far shadow map and the cloud shadows: haze in the shadow of a
+// mountain or a ridge doesn't glow, so a mountain with the sun behind it keeps its contrast
+// instead of hiding behind sunlit haze, low sun casts mountain shadows into the valley's haze,
+// and haze under a cloud is as dim as the ground there (its sun glow too). `tr` is the fog's
 // transmittance over the segment. The samples sit at equal steps of what the fog scatters
 // (1 - transmittance), so a thin layer of ground haze is sampled where the ray crosses it.
-// 1 without the far shadow map.
+// 1 without either.
 const HAZE_SHADOW_SAMPLES: i32 = 8;
 
 fn height_fog_sun_visibility(dir: vec3<f32>, t0: f32, t1: f32, tr: f32, noise: f32) -> f32 {
-    if (frame.far_shadow_params.x <= 0.0 || frame.sun_color.w < 0.5 || tr >= 1.0) { return 1.0; }
+    let mountains = frame.far_shadow_params.x > 0.0 && frame.sun_color.w > 0.5;
+    let clouds = frame.cloud_shadow_params.x > 0.5;
+    if ((!mountains && !clouds) || tr >= 1.0) { return 1.0; }
     let falloff = max(frame.fog.y, 1e-5);
     let density = max(frame.fog.x, 1e-12);
     let ha = max(fog_height(dir * t0) - frame.fog.z, -100.0);
@@ -879,7 +992,11 @@ fn height_fog_sun_visibility(dir: vec3<f32>, t0: f32, t1: f32, tr: f32, noise: f
             let e = max(ea - tau * falloff * slope / density, 1e-30);
             t = (-log(e) / falloff - ha) / slope;
         }
-        sum += far_shadow_sun(dir * (t0 + clamp(t, 0.0, len)));
+        let q = dir * (t0 + clamp(t, 0.0, len));
+        var lit = 1.0;
+        if (mountains) { lit = far_shadow_sun(q); }
+        if (clouds) { lit *= cloud_shadow(q); }
+        sum += lit;
     }
     return sum / f32(HAZE_SHADOW_SAMPLES);
 }
