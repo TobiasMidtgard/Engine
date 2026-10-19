@@ -266,6 +266,10 @@ pub struct SpaceSettings {
     /// Above this time warp, free physics bodies out in space coast on their exact orbits
     /// instead of being simulated (see [`rails`]); physics takes them back below it.
     pub rails_above_warp: f64,
+    /// From high up, a body's cloud tops are drawn as a layer over its terrain, except within
+    /// this distance (meters along the ground) of the camera, where the weather draws its own
+    /// clouds (0: everywhere).
+    pub cloud_hole_m: f64,
 }
 
 impl Default for SpaceSettings {
@@ -282,6 +286,7 @@ impl Default for SpaceSettings {
             keep_surfaces: true,
             follow_world_clock: false,
             rails_above_warp: 1.5,
+            cloud_hole_m: 60_000.0,
         }
     }
 }
