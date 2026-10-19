@@ -41,10 +41,12 @@ gusts and a gust front ahead of storms. Fires warm the ground around them throug
 density) with Perlin-Worley shape noise and Worley detail noise: flat stratus sheets, heaped
 cumulus with cauliflower tops, and towering storm clouds that narrow as they climb and spread
 into an anvil. Lit by the sun or the moon with self-shadowing, a strong forward glow (silver
-linings), multiple-scattering diffusion, dark rain bellies, sky and ground ambient light, and
-lightning lighting them from inside. They sit in the atmosphere (aerial perspective, distance
-haze), cast grey rain shafts under distant showers, wrap around mountains and the camera when it
-flies through them, and are visible from above (a sea of clouds from a plane or a mountain).
+linings), multiple scattering, light that diffuses down through thick decks (a storm's base is
+grey, not navy), dark rain bellies, sky and ground ambient light, and lightning lighting them
+from inside. They sit in the atmosphere (aerial perspective, distance haze, and the renderer's
+fog in front of them out to any distance, so fogged hills fade into the sky instead of ending in
+a wall), cast grey rain shafts under distant showers, wrap around mountains and the camera when
+it flies through them, and are visible from above (a sea of clouds from a plane or a mountain).
 They also feed the environment map, so reflections and ambient light change with the sky.
 
 **Rain and snow.** Rain streaks with motion blur that catch the light of lamps behind them,
@@ -73,12 +75,14 @@ spot, send `NoiseEvent` (thunder for AI), `WorldImpulse` and, where the ground i
 drawn main channel is `LightningStrike::path`, so thunder rolls along the bolt you see.
 
 **Day and night.** A clock and calendar (`Sky`) for a place on a planet (`Climate`: latitude,
-axial tilt, year length) drive the sun and moon `DirectionalLight`s: real sun paths through
-the seasons, twilight, a moon with phases that rises and sets, and a turning star field with the
-Milky Way. Thick cloud dims the sun. With the sun low behind you and a shower ahead, a
-rainbow stands on the rain: the primary bow, the fainter reversed secondary and the dark band
-between them. A world without a directional light gets a sun and moon
-spawned; a game with its own untagged light keeps control (tag it `SunLight` to hand it over).
+axial tilt, year length) drive the sun and moon `DirectionalLight`s: real sun paths through the
+seasons, twilight, a moon with phases that rises and sets, and a turning star field with the
+Milky Way. Thick cloud dims the sun until under a full deck the ground is lit by the deck
+itself; by day the sun stays brighter than the moon so the renderer keeps it as its sun. With
+the sun low behind you and a shower ahead, a rainbow stands on the rain: the primary bow, the
+fainter reversed secondary and the dark band between them. A world without a directional light
+gets a sun and moon spawned; a game with its own untagged light keeps control (tag it `SunLight`
+to hand it over).
 
 ## Showcase
 
@@ -101,9 +105,10 @@ snow and a storm.
 station through a day of changing weather (clear morning, fair-weather clouds, a storm rolling
 in, a downpour, puddles after the rain, night rain under lamps, lightning, a foggy morning,
 sunset, above the clouds, snow, a moonlit night, a rainbow in the showers), then close-ups of
-the station, and saves a screenshot of each. Around the station the tour builds its own
-landscape: a meadow with grass, wooded hills, rocks, a farm track and a mountain range. Puddles
-only form within a few centimeters of the ground, so grass blades and tabletops stay dry.
+the station (the last from under the bus shelter in the rain), and saves a screenshot of each.
+Around the station the tour builds its own landscape: a meadow with grass, wooded hills, rocks,
+a farm track and a mountain range. Puddles only form within a few centimeters of the ground, so
+grass blades and tabletops stay dry.
 
 ## Tuning
 
@@ -154,8 +159,11 @@ environment map), `weather precipitation` (rain, snow, splashes, bolts) and `wea
 
 ## Known gaps
 
-- The renderer's sky still draws its own flat cloud layer when there are clouds; the clouds
-  feature paints over it (`CloudSettings::replace_sky`). A renderer toggle is requested.
-- Wetness and snow in the mesh shader use the value at the camera; the ground pass adds the
-  local difference. Wet grass looks too glossy (renderer material response).
-- Clouds don't yet cast shadows on the ground.
+- Clouds don't yet cast shadows on the ground (the renderer's hook is on its way).
+
+While the clouds are on, the renderer's own flat cloud layer is switched off
+(`RenderSettings::sky_cloud_layer`), so with `replace_sky` off the clouds blend over a clear
+sky. The renderer shades wetness and snow on weather-taking materials per pixel from the same
+ground state (`surface_weather`); the ground pass adds only what that leaves out (puddles, the
+soaked rim around them, snow burying grass), so wet ground seen from under a roof isn't
+darkened twice.
