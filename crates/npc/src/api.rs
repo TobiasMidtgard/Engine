@@ -31,8 +31,9 @@ pub(crate) fn register(app: &mut App) {
     )
     .register_api(
         "npc.spawn_animal",
-        "Spawn an animal: species deer, rabbit, wolf or bird; herd groups them; range (m) they \
-         roam from home; male (antlers); name. Returns {id}.",
+        "Spawn an animal: species deer, rabbit, wolf, boar or bird; herd groups them; range (m) \
+         they roam from home; male (a stag's antlers, a boar's tusks); young (a boar's striped \
+         piglet); name. Returns {id}.",
         r#"{"species": "deer", "position": [10, 0, 5], "herd": 1, "male": false}"#,
         spawn_animal,
     )
@@ -264,6 +265,7 @@ fn spawn_animal(world: &mut World, args: Value) -> Result<Value, String> {
     let species = Species::parse(name).ok_or_else(|| format!("unknown species {name:?}"))?;
     let mut animal = Animal::new(species);
     animal.male = args.get("male").and_then(|v| v.as_bool()).unwrap_or(false);
+    animal.young = args.get("young").and_then(|v| v.as_bool()).unwrap_or(false);
     if let Some(r) = args.get("range").and_then(|v| v.as_f64()) {
         animal.range = r as f32;
     }

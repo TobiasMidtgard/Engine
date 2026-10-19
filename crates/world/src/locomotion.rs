@@ -6,7 +6,8 @@
 //! * [`LocomotionState`]: what the character is actually doing (written by the movement
 //!   module), read by AI (is the target dashing? blocking? in the air?), cameras and UI.
 //! * [`VehicleControls`]: the same idea for cars, planes and ships; the vehicles module
-//!   reports back [`EngineState`] and [`WheelContacts`] (engine and tyre sounds, HUDs, AI).
+//!   reports back [`EngineState`] and [`WheelContacts`] (engine and tyre sounds, HUDs, AI) and
+//!   [`Exhausts`], where each nozzle is and how hard it fires (flames, plumes, smoke).
 //! * [`Climbable`]: a ladder (or rungs, a climbing net) any module can place; the movement
 //!   module climbs it in [`LocomotionMode::Climb`] and NPC navigation can use it as a link.
 //! * [`LocomotionBackend`]: which module turns `MoveIntent` into motion. The movement module
@@ -159,6 +160,102 @@ pub struct WheelContact {
     pub radius_m: f32,
 }
 
+/// The engine exhausts an entity has (ships, planes, cars, jump kits), and how hard each fires
+/// now, for flames, plumes, heat haze and smoke. The owner (vehicles, movement's jump kit)
+/// writes it every frame and keeps the nozzles in the same order, since readers match their
+/// effects to nozzles by index; a nozzle at level 0 is idle.
+///
+/// An effects module that draws exhausts (vfx) calls [`draws_exhausts`]; owners that draw
+/// simple stand-in plumes of their own hide them while [`ExhaustEffects`] exists, so nothing
+/// burns twice.
+#[derive(Component, Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Exhausts(pub Vec<Exhaust>);
+
+/// One nozzle, in the entity's own space (so it moves, turns and follows world shifts with it).
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Exhaust {
+    /// Center of the nozzle exit, m.
+    pub position: Vec3,
+    /// The way the gas leaves (unit).
+    pub direction: Vec3,
+    /// Radius of the nozzle exit, m.
+    pub radius: f32,
+    /// How hard it fires now, 0 (idle) .. 1 (full thrust; a car at full throttle).
+    pub level: f32,
+    pub kind: ExhaustKind,
+}
+
+impl Default for Exhaust {
+    /// An idle 0.5 m rocket nozzle at the origin, blowing out the back (+Z, as entities face −Z).
+    fn default() -> Self {
+        Self::new(ExhaustKind::Rocket, Vec3::ZERO, Vec3::Z, 0.5)
+    }
+}
+
+impl Exhaust {
+    pub fn new(kind: ExhaustKind, position: Vec3, direction: Vec3, radius: f32) -> Self {
+        Self {
+            position,
+            direction: direction.normalize_or(Vec3::Z),
+            radius,
+            level: 0.0,
+            kind,
+        }
+    }
+
+    pub fn at_level(mut self, level: f32) -> Self {
+        self.level = level;
+        self
+    }
+
+    /// Nozzle position and gas direction in world space for an entity at `at`.
+    pub fn in_world(&self, at: &GlobalTransform) -> (DVec3, Vec3) {
+        (
+            at.transform_point(self.position.as_dvec3()),
+            at.transform_vector(self.direction)
+                .normalize_or(self.direction),
+        )
+    }
+}
+
+/// What comes out of a nozzle, so it looks and sounds right.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum ExhaustKind {
+    /// Rocket engine: long bright plume, shock diamonds at low altitude.
+    #[default]
+    Rocket,
+    /// Jet engine (dry): heat haze, faint flame at high power.
+    Jet,
+    /// Jet with afterburner lit: long flame with shock diamonds.
+    Afterburner,
+    /// Small control thruster (RCS): short puffs.
+    Thruster,
+    /// Combustion engine tailpipe: smoke and heat, a pop of flame on overrun.
+    Tailpipe,
+    /// Jump kit or jet pack on a character.
+    JumpJet,
+}
+
+/// Present while an effects module draws [`Exhausts`] (see [`draws_exhausts`]); owners with
+/// stand-in plumes of their own hide them while it exists. Check for it when systems run (for
+/// example with `resource_exists::<ExhaustEffects>`), not in `Plugin::build`, since the effects
+/// plugin may be added later.
+#[derive(Resource, Debug, Clone, Serialize, Deserialize)]
+pub struct ExhaustEffects {
+    pub drawn_by: String,
+}
+
+/// Call from an effects plugin's `build` when it draws every [`Exhausts`] nozzle.
+pub fn draws_exhausts(app: &mut App, name: &str) {
+    if app.world.get_resource::<ExhaustEffects>().is_none() {
+        app.insert_resource(ExhaustEffects {
+            drawn_by: name.to_string(),
+        });
+    }
+}
+
 /// Something a character can climb, such as a ladder through a roof hatch or up a scaffold. Any
 /// module places it on the ladder's entity (destruction's ladders, a game's level); the
 /// movement module climbs it, and NPC navigation can treat bottom → [`exit`](Self::exit) as a
@@ -276,6 +373,11 @@ pub(crate) fn register(app: &mut App) {
         "Wheels on the ground this frame (written by vehicles): position, surface, rolling \
          speed, slip, load.",
     )
+    .register_component::<Exhausts>(
+        "Engine exhausts firing now (written by their owner every frame, nozzles in a fixed \
+         order): position and direction in the entity's space, radius (m), level 0..1, kind \
+         (rocket, jet, afterburner, thruster, tailpipe, jump jet).",
+    )
     .register_component::<Climbable>(
         "A ladder characters can climb, in the entity's space: bottom and top (feet on the \
          lowest and top rung), half width, facing (toward the ladder), exit (where you step off \
@@ -336,6 +438,43 @@ mod tests {
         assert!((line.along(halfway_beside) - 0.5).abs() < 1e-9);
         assert!((line.distance(halfway_beside) - 0.3).abs() < 1e-9);
         assert_eq!(line.along(DVec3::new(10.0, -3.0, 5.0)), 0.0);
+    }
+
+    #[test]
+    fn an_exhaust_points_out_of_its_turned_entity() {
+        // A nozzle under the tail, blowing backward; the ship turned a quarter to the left.
+        let jet = Exhaust::new(
+            ExhaustKind::Jet,
+            Vec3::new(0.0, -1.0, 6.0),
+            Vec3::Z * 2.0,
+            0.6,
+        )
+        .at_level(0.8);
+        assert_eq!(jet.direction, Vec3::Z);
+        let at = GlobalTransform::from(Transform {
+            translation: DVec3::new(100.0, 50.0, 0.0),
+            rotation: Quat::from_rotation_y(std::f32::consts::FRAC_PI_2),
+            ..Transform::IDENTITY
+        });
+        let (nozzle, out) = jet.in_world(&at);
+        assert!(
+            nozzle.distance(DVec3::new(106.0, 49.0, 0.0)) < 1e-5,
+            "{nozzle}"
+        );
+        assert!(out.distance(Vec3::X) < 1e-6, "{out}");
+        let from_data: Exhausts =
+            serde_json::from_str(r#"[{"kind": "Tailpipe", "radius": 0.04}]"#).unwrap();
+        assert_eq!(from_data.0[0].direction, Vec3::Z);
+        assert_eq!(from_data.0[0].level, 0.0);
+    }
+
+    #[test]
+    fn the_first_effects_module_to_draw_exhausts_is_recorded() {
+        let mut app = App::new();
+        assert!(app.world.get_resource::<ExhaustEffects>().is_none());
+        draws_exhausts(&mut app, "vfx");
+        draws_exhausts(&mut app, "heat haze");
+        assert_eq!(app.world.resource::<ExhaustEffects>().drawn_by, "vfx");
     }
 
     #[test]

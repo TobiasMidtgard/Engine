@@ -1,8 +1,9 @@
-//! Close-up renders of the procedural wildlife frozen in chosen states (grazing, alert,
-//! walking, trotting, galloping, the back gathered and extended, lying, dead, stalking,
-//! biting, hopping, sitting up, pecking, flying), flipbook strips of them on the move (gaits,
-//! an alarm, a wolf's hunt from stalk to bite, a deer killed at a gallop), plus budget checks
-//! on the generated meshes.
+//! Close-up renders of the procedural wildlife frozen in chosen states (grazing, rooting,
+//! alert, walking, trotting, galloping, the back gathered and extended, lying, dead,
+//! stalking, biting, charging, hopping, sitting up, pecking, flying), flipbook strips of them
+//! on the move (gaits, an alarm, a wolf's hunt from stalk to bite, a boar's charge and slash,
+//! a deer killed at a gallop, animals flinching from a blow), plus budget checks on the
+//! generated meshes.
 //! Rendering needs a GPU or lavapipe and passes with a note without one. Set
 //! `NPC_SCREENSHOT_DIR` to keep the PNGs, and `NPC_STRIPS` (names, comma separated) to shoot
 //! only some strips.
@@ -24,6 +25,7 @@ const H: u32 = 540;
 struct Pose {
     species: Species,
     male: bool,
+    young: bool,
     state: AnimalState,
     /// Seconds since the state began.
     t: f64,
@@ -44,6 +46,7 @@ impl Pose {
         Self {
             species,
             male: false,
+            young: false,
             state,
             t: 5.0,
             speed: 0.0,
@@ -112,6 +115,7 @@ fn spawn(app: &mut App, poses: &[Pose]) -> Vec<(Entity, DVec3)> {
         let at = DVec3::new(i as f64 * 40.0, up, 0.0);
         let mut animal = Animal::new(p.species);
         animal.male = p.male;
+        animal.young = p.young;
         let e = app
             .world
             .spawn((
@@ -229,10 +233,19 @@ fn render(shots: &[Shot]) {
     std::fs::create_dir_all(&dir).expect("dir");
     for (i, (name, pose, dist, azimuth)) in shots.iter().enumerate() {
         let at = animals[i].1;
+        // A boar's size: piglets are a lot smaller, old boars a size up.
+        let boar = if pose.young {
+            0.45
+        } else if pose.male {
+            1.12
+        } else {
+            1.0
+        };
         let (h, ahead) = match pose.species {
             Species::Deer if pose.male => (0.95, 0.4),
             Species::Deer => (0.85, 0.35),
             Species::Wolf => (0.45, 0.25),
+            Species::Boar => (0.5 * boar, 0.2 * boar),
             Species::Rabbit => (0.1, 0.03),
             Species::Bird => (0.06, 0.0),
         };
@@ -247,6 +260,7 @@ fn render(shots: &[Shot]) {
                 Species::Deer if pose.state == AnimalState::Alert => (1.5, 1.0),
                 Species::Deer => (1.22, 1.08),
                 Species::Wolf => (0.72, 0.62),
+                Species::Boar => (0.48 * boar, 0.7 * boar),
                 Species::Rabbit => (0.16, 0.1),
                 Species::Bird => (0.1, 0.06),
             }
@@ -254,6 +268,7 @@ fn render(shots: &[Shot]) {
             match pose.species {
                 Species::Deer => (0.12, 0.42),
                 Species::Wolf => (0.06, 0.36),
+                Species::Boar => (0.06 * boar, 0.36 * boar),
                 _ => (0.02, 0.08),
             }
         } else {
@@ -396,6 +411,62 @@ fn wolf_closeups() {
 }
 
 #[test]
+fn boar_closeups() {
+    let sow = |state| Pose::new(Species::Boar, state);
+    let tusker = |state| Pose {
+        male: true,
+        ..Pose::new(Species::Boar, state)
+    };
+    let piglet = |state| Pose {
+        young: true,
+        ..Pose::new(Species::Boar, state)
+    };
+    render(&[
+        ("boar_tusker_profile", tusker(AnimalState::Wander), 3.4, 0.0),
+        ("boar_sow_profile", sow(AnimalState::Wander), 3.2, 0.0),
+        ("boar_tusker_head", tusker(AnimalState::Wander), 1.4, 40.0),
+        ("boar_sow_head", sow(AnimalState::Alert), 1.2, 55.0),
+        ("boar_piglet", piglet(AnimalState::Wander), 1.5, 25.0),
+        ("boar_piglet_head", piglet(AnimalState::Wander), 0.6, 45.0),
+        (
+            "boar_sow_rooting",
+            Pose {
+                t: 3.0,
+                ..sow(AnimalState::Graze)
+            },
+            3.0,
+            35.0,
+        ),
+        ("boar_tusker_alert", tusker(AnimalState::Alert), 3.4, 35.0),
+        (
+            "boar_tusker_trot",
+            tusker(AnimalState::Wander).moving(3.0, 0.6, LocomotionMode::Run),
+            3.6,
+            15.0,
+        ),
+        (
+            "boar_sow_gallop",
+            Pose {
+                clock: 100.2,
+                ..sow(AnimalState::Flee).moving(9.0, 0.0, LocomotionMode::Sprint)
+            },
+            3.6,
+            10.0,
+        ),
+        (
+            "boar_tusker_charge",
+            tusker(AnimalState::Charge).moving(9.5, 1.0, LocomotionMode::Sprint),
+            3.4,
+            30.0,
+        ),
+        ("boar_sow_rest", sow(AnimalState::Rest), 3.2, 40.0),
+        ("boar_sow_dead", sow(AnimalState::Dead), 3.2, 60.0),
+        ("boar_tusker_rear", tusker(AnimalState::Wander), 3.0, -140.0),
+        ("boar_sow_feet", sow(AnimalState::Wander), 0.8, 25.0),
+    ]);
+}
+
+#[test]
 fn rabbit_closeups() {
     let r = |state| Pose::new(Species::Rabbit, state);
     render(&[
@@ -497,10 +568,12 @@ fn meshes_fit_their_budgets() {
     for species in Species::ALL {
         let (meshes, secs) = animals::build_all(species);
         total += secs;
-        for male in [false, true] {
-            let tris = animals::triangles_per_animal(species, male, &meshes);
-            let parts = animals::piece_count(species, male);
-            eprintln!("{species:?} male={male}: {tris} triangles in {parts} parts ({secs:.2} s)");
+        for (male, young) in [(false, false), (true, false), (false, true)] {
+            let tris = animals::triangles_of(species, male, young, &meshes);
+            let parts = animals::piece_names(species, male, young).len();
+            eprintln!(
+                "{species:?} male={male} young={young}: {tris} triangles in {parts} parts ({secs:.2} s)"
+            );
             assert!(tris <= 42_000, "{species:?}: {tris} triangles");
             assert!(parts <= 30, "{species:?}: {parts} parts");
         }
@@ -535,6 +608,8 @@ struct Cue {
     bite: bool,
     /// Hurt (killed) by something here (world x, z from where the course starts).
     shot: Option<Vec2>,
+    /// Hurt (not killed) by something here, the first moment it is set.
+    hit: Option<Vec2>,
 }
 
 impl Cue {
@@ -550,6 +625,7 @@ impl Cue {
             prey: None,
             bite: false,
             shot: None,
+            hit: None,
         }
     }
 }
@@ -618,6 +694,12 @@ fn drive(
         mind.hurt_from = cue
             .shot
             .map(|p| d.origin + DVec3::new(f64::from(p.x), 0.0, f64::from(p.y)));
+        if let Some(p) = cue.hit
+            && mind.wounded.is_none()
+        {
+            let at = d.origin + DVec3::new(f64::from(p.x), 0.0, f64::from(p.y));
+            mind.wounded = Some((clock.now, at));
+        }
         mind.prey = cue.prey.map(|ahead| {
             if let Ok(mut q) = quarry.get_mut(d.prey) {
                 q.translation = tf.translation + (tf.rotation * Vec3::NEG_Z * ahead).as_dvec3();
@@ -765,6 +847,7 @@ struct Strip {
     name: &'static str,
     species: Species,
     male: bool,
+    young: bool,
     /// The course, or `None` for the starling's scripted flight.
     course: Option<Course>,
     times: [f32; FRAMES],
@@ -873,6 +956,77 @@ fn wolf_hunt(t: f32) -> Cue {
         }
     }
 }
+/// Walking at `walk` (a share of its run), struck from its right at 1 s and not killed: it
+/// flinches away from the blow and staggers, ears pinned, and bolts off away from it.
+fn hurt(t: f32, walk: f32) -> Cue {
+    let at = Vec2::new(1.2, 6.0);
+    if t < 1.0 {
+        Cue::new(AnimalState::Wander, walk, 0.0)
+    } else if t < 1.22 {
+        Cue {
+            hit: Some(at),
+            ..Cue::new(AnimalState::Wander, 0.0, 0.0)
+        }
+    } else {
+        Cue {
+            sprint: true,
+            hit: Some(at),
+            threat: Some((at, 1.2)),
+            ..Cue::new(AnimalState::Flee, 0.8, -0.6)
+        }
+    }
+}
+fn deer_hurt(t: f32) -> Cue {
+    hurt(t, 0.2)
+}
+fn wolf_hurt(t: f32) -> Cue {
+    hurt(t, 0.2)
+}
+fn boar_hurt(t: f32) -> Cue {
+    hurt(t, 0.2)
+}
+fn boar_walk(_: f32) -> Cue {
+    Cue::new(AnimalState::Wander, 0.2, 0.0)
+}
+fn boar_trot(_: f32) -> Cue {
+    Cue::new(AnimalState::Wander, 0.55, 0.0)
+}
+fn boar_gallop(_: f32) -> Cue {
+    Cue {
+        sprint: true,
+        ..Cue::new(AnimalState::Flee, 1.0, 0.0)
+    }
+}
+/// Rooting along slowly.
+fn boar_rooting(_: f32) -> Cue {
+    Cue::new(AnimalState::Graze, 0.05, 0.0)
+}
+/// When the charging boar reaches the threat (s).
+const SLASH: f32 = 2.2;
+/// Standing its ground champing at a threat 10 m ahead, then the charge: head down, it runs
+/// at it, slashes it with its tusks as it reaches it and peels away.
+fn boar_charge(t: f32) -> Cue {
+    let at = Vec2::new(10.0, 0.0);
+    if t < 1.0 {
+        Cue {
+            threat: Some((at, 0.9)),
+            ..Cue::new(AnimalState::Alert, 0.0, 0.0)
+        }
+    } else if t < SLASH + 0.4 {
+        Cue {
+            sprint: true,
+            threat: Some((at, 1.2)),
+            bite: t >= SLASH,
+            ..Cue::new(AnimalState::Charge, 1.0, 0.0)
+        }
+    } else {
+        Cue {
+            sprint: true,
+            threat: Some((at, 1.2)),
+            ..Cue::new(AnimalState::Flee, 0.7, -0.7)
+        }
+    }
+}
 fn rabbit_hop(_: f32) -> Cue {
     Cue::new(AnimalState::Wander, 0.3, 0.0)
 }
@@ -888,6 +1042,7 @@ fn strip(name: &'static str, species: Species, course: Course, times: [f32; FRAM
         name,
         species,
         male: false,
+        young: false,
         course: Some(course),
         times,
         track: true,
@@ -912,6 +1067,7 @@ fn held(mut s: Strip) -> Strip {
 fn course_animal(app: &mut App, s: &Strip, origin: DVec3, delay: f64) -> Entity {
     let mut animal = Animal::new(s.species);
     animal.male = s.male;
+    animal.young = s.young;
     let prey = app
         .world
         .spawn((Transform::from_translation(origin), Quarry))
@@ -1093,7 +1249,60 @@ fn wildlife_motion_strips() {
             "starling-flight",
             [0.5, 0.65, 0.73, 1.4, 2.6, 3.2, 4.4, 4.8],
         ),
+        held(strip(
+            "boar-walk",
+            Species::Boar,
+            boar_walk,
+            every(2.0, 0.066),
+        )),
+        held(stag(strip(
+            "boar-trot",
+            Species::Boar,
+            boar_trot,
+            every(2.0, 0.05),
+        ))),
+        strip("boar-gallop", Species::Boar, boar_gallop, every(2.0, 0.033)),
+        held(strip(
+            "boar-rooting",
+            Species::Boar,
+            boar_rooting,
+            every(2.0, 0.2),
+        )),
+        stag(strip(
+            "boar-charge",
+            Species::Boar,
+            boar_charge,
+            [0.6, 1.15, 1.5, 2.1, 2.24, 2.33, 2.45, 2.8],
+        )),
+        strip(
+            "piglet-gallop",
+            Species::Boar,
+            boar_gallop,
+            every(2.0, 0.025),
+        ),
+        strip(
+            "deer-hurt",
+            Species::Deer,
+            deer_hurt,
+            [0.9, 1.04, 1.08, 1.14, 1.22, 1.34, 1.5, 1.8],
+        ),
+        strip(
+            "wolf-hurt",
+            Species::Wolf,
+            wolf_hurt,
+            [0.9, 1.04, 1.08, 1.14, 1.22, 1.34, 1.5, 1.8],
+        ),
+        strip(
+            "boar-hurt",
+            Species::Boar,
+            boar_hurt,
+            [0.9, 1.04, 1.08, 1.14, 1.22, 1.34, 1.5, 1.8],
+        ),
     ];
+    let strips = strips.map(|mut s| {
+        s.young = s.name.starts_with("piglet");
+        s
+    });
     // `NPC_STRIPS=deer-walk,rabbit-hop` shoots only those.
     let only = std::env::var("NPC_STRIPS").ok();
     let strips: Vec<Strip> = strips
@@ -1154,6 +1363,8 @@ fn wildlife_motion_strips() {
         let (gap, h) = match s.species {
             Species::Deer => (3.2, 0.9),
             Species::Wolf => (2.6, 0.5),
+            Species::Boar if s.young => (1.3, 0.24),
+            Species::Boar => (2.6, 0.5),
             Species::Rabbit => (0.8, 0.12),
             Species::Bird => (0.55, 0.12),
         };

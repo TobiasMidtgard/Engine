@@ -1,6 +1,7 @@
-//! Animal bodies: red deer, wolves, rabbits and starlings built from the sculpted pieces in
-//! [`crate::art::animals`] (cheap primitives without the renderer) and posed every step from
-//! what the animal is doing and what its body did the step before ([`Motion`]).
+//! Animal bodies: red deer, wolves, wild boar, rabbits and starlings built from the sculpted
+//! pieces in
+//! [`crate::art::animals`] (cheap primitives without the renderer) and posed every step
+//! from what the animal is doing and what its body did the step before ([`Motion`]).
 //!
 //! Feet are planted: a hoof or paw on the ground keeps its spot while the body moves over it,
 //! and each leg is solved with inverse kinematics from the shoulder (riding on the shoulder
@@ -8,15 +9,16 @@
 //! at the carpus or hock and stance legs straighten as they reach. The feet follow a footfall
 //! pattern per gait, blended as the gait changes: deer walk in lateral sequence, trot and
 //! gallop (rotary), and bound off when bolting from a stand; wolves walk, trot, lope and
-//! gallop; rabbits hop and half-bound, the hind feet landing ahead of where the fore feet
-//! were. Strides lengthen and quicken with speed, and a foot pushed further than its leg
+//! gallop; boars walk, trot and gallop (transverse) on short legs; rabbits hop and
+//! half-bound, the hind feet landing ahead of where the fore feet were. Strides lengthen and quicken with speed, and a foot pushed further than its leg
 //! reaches steps early. Standing, feet left out of place step back under the body one at a
 //! time.
 //!
 //! The body rides on the feet: it sinks into each stance in the running gaits and flies a
 //! ballistic arc whenever no foot is down, pitches over the front or hind pair carrying the
 //! weight, rears back as it sets off and pitches forward as it stops, then settles back, and
-//! leans into turns. Deer and wolves bend their backs: the torso is a fore half and a croup
+//! leans into turns. Deer, wolves and boars bend their backs: the torso is a fore half and a
+//! croup
 //! hinged at the loin, and through the gallop, in step with the feet, the croup tucks under as
 //! the back arches in the gathered flight (hind feet swinging up past the fore feet) and
 //! lifts as it hollows in the extended one. Heads and necks steady themselves against the bob
@@ -30,7 +32,12 @@
 //! Wolves stalk with head and body low and rush from the stalk crouched through the first
 //! bounds; a hunting wolf keeps its head on its prey, reaches for it with the jaws open as it
 //! closes, and on a bite thrusts in at full gape, snaps shut, grips, shakes and tugs, then
-//! lets go. Animals lie down with folded legs. Killed, the legs give: the forequarters first
+//! lets go. A boar roots with its snout in the soil, shoving and sweeping it, the jaw
+//! working, lifts it now and then to scent the air, champs when alarmed, runs with its tail
+//! up, and charges head down to hook its tusks up and sideways into what it strikes. Hurt but
+//! not killed, an animal flinches: it jolts away from the blow, hunched and ducking, head
+//! jerking away, ears pinned flat and tail clamped, and staggers a step or two before it runs.
+//! Animals lie down with folded legs. Killed, the legs give: the forequarters first
 //! (pitching onto the chest and knees on the run, the feet skidding on under the body), then
 //! the hindquarters; it goes over onto its side, away from the blow when that came from one
 //! side, lands, rocks back off the ground, the limp legs and head flopping after the body,
@@ -56,7 +63,10 @@ use engine_world::locomotion::LocomotionState;
 
 use super::*;
 use crate::art::ArtAssets;
-use crate::art::animals::{self as art, BIRD, DEER, Piece, QuadRig, RABBIT, STAG_SCALE, WOLF};
+use crate::art::animals::{
+    self as art, BIRD, BOAR, BOAR_SCALE, DEER, PIGLET_SCALE, Piece, QuadRig, RABBIT, STAG_SCALE,
+    WOLF,
+};
 use crate::wildlife::{Animal, AnimalMind, AnimalState, BirdFlight, Species};
 
 // `Part::Beast` indices.
@@ -76,8 +86,10 @@ const TAIL2: u8 = 18;
 const TAIL_FAN: u8 = 19;
 /// A bird's wings folded on its back (left, right).
 const WING_FOLDED: u8 = 20;
-/// The hind half of a deer's or wolf's torso.
+/// The hind half of a deer's, wolf's or boar's torso.
 const CROUP: u8 = 22;
+/// A boar's tusks.
+const TUSKS: u8 = 23;
 
 fn part_of(piece: Piece) -> Part {
     match piece {
@@ -92,6 +104,7 @@ fn part_of(piece: Piece) -> Part {
         Piece::Tail => Part::Tail,
         Piece::Tail2 => Part::Beast(TAIL2),
         Piece::Antlers => Part::Antler(0),
+        Piece::Tusks => Part::Beast(TUSKS),
         Piece::Leg(k, 0) => Part::Leg(k),
         Piece::Leg(k, 1) => Part::Beast(LEG_MID + k),
         Piece::Leg(k, 2) => Part::Beast(LEG_LOW + k),
@@ -104,11 +117,12 @@ fn part_of(piece: Piece) -> Part {
     }
 }
 
-fn body_scale(species: Species, male: bool) -> f32 {
-    if species == Species::Deer && male {
-        STAG_SCALE
-    } else {
-        1.0
+fn body_scale(species: Species, male: bool, young: bool) -> f32 {
+    match species {
+        Species::Deer if male => STAG_SCALE,
+        Species::Boar if young => PIGLET_SCALE,
+        Species::Boar if male => BOAR_SCALE,
+        _ => 1.0,
     }
 }
 
@@ -120,7 +134,8 @@ pub(super) fn parts(
     art: &mut ArtAssets,
 ) -> Vec<(Part, MeshRenderer, Vec3)> {
     let male = animal.is_some_and(|a| a.male);
-    let scale = Vec3::splat(body_scale(species, male));
+    let young = animal.is_some_and(|a| a.young);
+    let scale = Vec3::splat(body_scale(species, male, young));
     let tint = stand_in.color.map(|c| {
         let want = StandardMaterial::hex(c).base_color;
         let have = StandardMaterial::hex(species_color(species)).base_color;
@@ -131,7 +146,7 @@ pub(super) fn parts(
         )
         .min(Vec3::splat(2.0))
     });
-    if let Some(pieces) = art::pieces(species, male, tint, art) {
+    if let Some(pieces) = art::pieces(species, male, young, tint, art) {
         return pieces
             .into_iter()
             .map(|(piece, mesh, material)| {
@@ -149,10 +164,11 @@ pub(super) fn parts(
             Species::Wolf => 0.06,
             Species::Rabbit => 0.03,
             Species::Bird => 0.015,
+            Species::Boar => 0.07,
         },
         segments: 6,
     };
-    art::piece_names(species, male)
+    art::piece_names(species, male, young)
         .into_iter()
         .map(|piece| (part_of(piece), MeshRenderer::new(blob, color), scale))
         .collect()
@@ -164,6 +180,7 @@ pub(super) fn parts(
 pub(super) struct Input {
     pub species: Species,
     pub male: bool,
+    pub young: bool,
     pub state: AnimalState,
     /// When the state began and the time now (NPC clock, s).
     pub since: f64,
@@ -198,6 +215,8 @@ pub(super) struct Senses {
     pub prey: Option<DVec3>,
     /// What last hurt it (killed, what killed it).
     pub hurt: Option<DVec3>,
+    /// Its last wound: how long ago (s), and where the blow came from.
+    pub wound: Option<(f32, DVec3)>,
 }
 
 impl Default for Senses {
@@ -210,6 +229,7 @@ impl Default for Senses {
             stamina: 1.0,
             prey: None,
             hurt: None,
+            wound: None,
         }
     }
 }
@@ -224,11 +244,14 @@ impl Senses {
             stamina: m.stamina,
             prey: None,
             hurt: m.hurt_from,
+            wound: m
+                .wounded
+                .map(|(at, from)| ((now - at).max(0.0) as f32, from)),
         }
     }
 }
 
-const SLOTS: usize = 39;
+const SLOTS: usize = 40;
 
 fn slot(part: Part) -> Option<usize> {
     Some(match part {
@@ -241,7 +264,7 @@ fn slot(part: Part) -> Option<usize> {
         Part::Antler(_) => 7,
         Part::Leg(k) if k < 4 => 8 + k as usize,
         Part::Wing(w) if w < 4 => 12 + w as usize,
-        Part::Beast(b) if b <= CROUP => 16 + b as usize,
+        Part::Beast(b) if b <= TUSKS => 16 + b as usize,
         _ => return None,
     })
 }
@@ -268,12 +291,13 @@ impl Pose {
 
 /// Pose an animal for this step, carrying its motion on.
 pub(super) fn animal(i: &Input, m: &mut Motion) -> Pose {
-    let scale = body_scale(i.species, i.male);
+    let scale = body_scale(i.species, i.male, i.young);
     let k = tick(i, m, scale);
     let mut out = Pose::new();
     match i.species {
-        Species::Deer => quad(&DEER, &DEER_BUILD, true, i, m, &k, &mut out),
-        Species::Wolf => quad(&WOLF, &WOLF_BUILD, false, i, m, &k, &mut out),
+        Species::Deer => quad(&DEER, &DEER_BUILD, Beast::Deer, i, m, &k, &mut out),
+        Species::Wolf => quad(&WOLF, &WOLF_BUILD, Beast::Wolf, i, m, &k, &mut out),
+        Species::Boar => quad(&BOAR, &BOAR_BUILD, Beast::Boar, i, m, &k, &mut out),
         Species::Rabbit => rabbit(i, m, &k, &mut out),
         Species::Bird => bird(i, m, &k, &mut out),
     }
@@ -307,6 +331,7 @@ pub(super) fn animal_pose(
     let input = Input {
         species,
         male,
+        young: false,
         state,
         since,
         now,
@@ -570,6 +595,8 @@ pub(super) struct Motion {
     struck: f32,
     /// The last noise heard: when, and where (bearing from ahead, rad, right positive).
     noise: Option<(f64, f32)>,
+    /// The last wound: when, and where the blow came from (bearing, as for a noise).
+    flinch: Option<(f64, f32)>,
     /// Head and neck turned toward what it watches (rad, left positive), and the ears'
     /// swivels (rad, forward positive).
     look: f32,
@@ -616,6 +643,8 @@ struct Tick {
     prey: Option<(f32, f32)>,
     /// Killed: the side it falls onto (+1 its left side, right side up).
     side: f32,
+    /// Hurt (alive): seconds since, and the bearing of the blow.
+    flinch: Option<(f32, f32)>,
 }
 
 fn tick(i: &Input, m: &mut Motion, scale: f32) -> Tick {
@@ -670,6 +699,20 @@ fn tick(i: &Input, m: &mut Motion, scale: f32) -> Tick {
     if let Some((_, b)) = &mut m.noise {
         *b = wrap_pi(*b + turned);
     }
+    // A new wound: where the blow came from, kept as it turns.
+    if let Some((ago, from)) = i.wound {
+        let at = i.now - f64::from(ago);
+        if m.flinch.is_none_or(|(t, _)| (t - at).abs() > 1e-3) {
+            m.flinch = Some((at, bearing(from)));
+        }
+    }
+    if let Some((_, b)) = &mut m.flinch {
+        *b = wrap_pi(*b + turned);
+    }
+    let flinch = m
+        .flinch
+        .map(|(at, b)| ((i.now - at) as f32, b))
+        .filter(|&(t, _)| (0.0..2.0).contains(&t) && i.state != AnimalState::Dead);
     Tick {
         now: i.now,
         dt,
@@ -692,6 +735,7 @@ fn tick(i: &Input, m: &mut Motion, scale: f32) -> Tick {
             (bearing(p), Vec2::new(d.x, d.z).length())
         }),
         side: m.side,
+        flinch,
     }
 }
 
@@ -1072,7 +1116,26 @@ fn solve_quad_leg(
     }
 }
 
-// ======================================================================= deer and wolves
+// ======================================================================= deer, wolves, boars
+
+/// Which four-legged body a pose is for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Beast {
+    Deer,
+    Wolf,
+    Boar,
+}
+
+impl Beast {
+    /// A value by beast.
+    fn by(self, deer: f32, wolf: f32, boar: f32) -> f32 {
+        match self {
+            Beast::Deer => deer,
+            Beast::Wolf => wolf,
+            Beast::Boar => boar,
+        }
+    }
+}
 
 /// How a four-legged species moves (rig meters and seconds).
 struct Build {
@@ -1120,6 +1183,8 @@ const LOPE: [f32; 4] = [0.2, 1.0, 0.0, 0.8];
 /// other).
 const ROTARY_DEER: [f32; 4] = [0.55, 1.45, 0.0, 0.1];
 const ROTARY_WOLF: [f32; 4] = [0.35, 1.45, 0.0, 0.9];
+/// Transverse gallop: the footfalls cross the body the same way front and back (a pig's).
+const TRANSVERSE: [f32; 4] = [0.45, 0.55, 0.0, 0.1];
 /// A bounding leap: the hind feet push off together, the fore feet land together.
 const BOUND: [f32; 4] = [0.42, 0.45, 0.0, 0.02];
 
@@ -1157,6 +1222,25 @@ const WOLF_BUILD: Build = Build {
     gather: 0.85,
     tuck: (0.13, 0.03),
     nod: -0.35,
+};
+
+/// Short-legged and stiff-backed: quick, short strides.
+const BOAR_BUILD: Build = Build {
+    gaits: &[WALK, TROT, TRANSVERSE],
+    shifts: &[(1.6, 0.3), (4.4, 0.6)],
+    gallop: 2.0,
+    stride: (0.52, 0.9),
+    duty: (0.2, 0.55, 2.0),
+    lift: [0.05, 0.045],
+    lift_fast: [0.11, 0.1],
+    reach: [0.3, 0.33],
+    blade: 0.04,
+    low: 0.05,
+    bounce: (0.02, 0.024),
+    flex: 0.14,
+    gather: 0.9,
+    tuck: (0.06, 0.015),
+    nod: 0.2,
 };
 
 impl Build {
@@ -1285,11 +1369,11 @@ fn attention(k: &Tick, m: &Motion, i: &Input) -> Option<(f32, f32)> {
     }
 }
 
-/// A posed deer or wolf.
+/// A posed deer, wolf or boar.
 struct Quad<'a> {
     rig: &'a QuadRig,
     b: &'a Build,
-    deer: bool,
+    beast: Beast,
     seed: f32,
     body: Frame,
     look: Look,
@@ -1306,9 +1390,17 @@ struct Quad<'a> {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn quad(rig: &QuadRig, b: &Build, deer: bool, i: &Input, m: &mut Motion, k: &Tick, out: &mut Pose) {
+fn quad(
+    rig: &QuadRig,
+    b: &Build,
+    beast: Beast,
+    i: &Input,
+    m: &mut Motion,
+    k: &Tick,
+    out: &mut Pose,
+) {
     let st = i.state;
-    let scale = body_scale(i.species, i.male);
+    let scale = body_scale(i.species, i.male, i.young);
     // Killed: how long ago, and how limp it has gone.
     let fall = (st == AnimalState::Dead).then_some(k.t);
     let dead = fall.map_or(0.0, |t| smooth(0.1, 0.7, t));
@@ -1324,7 +1416,7 @@ fn quad(rig: &QuadRig, b: &Build, deer: bool, i: &Input, m: &mut Motion, k: &Tic
         0.0
     };
     // A wolf rushing from its stalk stays low through its first bounds.
-    let rush = m.startle && !deer && st == AnimalState::Chase;
+    let rush = m.startle && beast == Beast::Wolf && st == AnimalState::Chase;
     if k.fresh {
         m.crouch = crouching;
     } else {
@@ -1349,10 +1441,10 @@ fn quad(rig: &QuadRig, b: &Build, deer: bool, i: &Input, m: &mut Motion, k: &Tic
         // Bolting from a stand, or rushing from a stalk: the first bounds are leaps.
         let from_stalk = m.state == Some(AnimalState::Stalk);
         m.startle = m.vel.length() < 2.5
-            && if deer {
-                st == AnimalState::Flee
-            } else {
-                st == AnimalState::Chase && from_stalk
+            && match beast {
+                Beast::Deer => st == AnimalState::Flee,
+                Beast::Wolf => st == AnimalState::Chase && from_stalk,
+                Beast::Boar => false,
             };
         m.state = Some(st);
         // The head and tail go from where they were to the new state's.
@@ -1371,6 +1463,15 @@ fn quad(rig: &QuadRig, b: &Build, deer: bool, i: &Input, m: &mut Motion, k: &Tic
         p.reach = [f32::MAX; 4];
         p.tidy = f32::MAX;
     }
+    // Hurt: shoved away from the blow, it staggers a step or two that way.
+    let size = rig.half_width / 0.2;
+    if let Some((t, from)) = k.flinch {
+        let shove = 0.09 * size * smooth(0.0, 0.08, t) * (1.0 - smooth(0.5, 0.9, t));
+        let away = Vec2::new(-from.sin(), from.cos());
+        for h in &mut p.home {
+            *h += away * shove;
+        }
+    }
     if k.fresh {
         m.cycles = f64::from(i.phase / TAU);
         m.reset_feet(k.now, k.v, &p);
@@ -1385,7 +1486,7 @@ fn quad(rig: &QuadRig, b: &Build, deer: bool, i: &Input, m: &mut Motion, k: &Tic
     let run = smooth(0.4, 1.0, m.gait);
     let fast = smooth(b.gallop - 0.8, b.gallop, m.gait).max(bound);
 
-    let look = quad_look(deer, i, k, m, crouch, fast, run, plants, stepping);
+    let look = quad_look(beast, i, k, m, crouch, fast, run, plants, stepping);
 
     // The body rides on the feet: it sinks into each stance in the running gaits (front and
     // hind apart, so it pitches over the pair carrying it), vaults gently over the walk and
@@ -1413,7 +1514,7 @@ fn quad(rig: &QuadRig, b: &Build, deer: bool, i: &Input, m: &mut Motion, k: &Tic
         k.dt,
     );
     // Leaning into turns.
-    let roll = (0.028 * -m.vel.y * m.spin).clamp(-0.16, 0.16) * upright;
+    let mut roll = (0.028 * -m.vel.y * m.spin).clamp(-0.16, 0.16) * upright;
     // Breathing, quicker and deeper after a hard run.
     let exert = ((1.0 - i.stamina) * 1.6).clamp(0.0, 1.0);
     if k.fresh {
@@ -1425,21 +1526,42 @@ fn quad(rig: &QuadRig, b: &Build, deer: bool, i: &Input, m: &mut Motion, k: &Tic
     // the chest, hind feet swinging up past them to land) and extends through the extended
     // one (hind feet pushed off behind, fore feet reaching out).
     let cycle = m.cycles.rem_euclid(1.0) as f32;
-    let flex = b.flex * fast * stepping * (TAU * (cycle - b.gather)).cos();
+    let mut flex = b.flex * fast * stepping * (TAU * (cycle - b.gather)).cos();
 
     let lz = rig.hind.joints[0].z - rig.front.joints[0].z;
     let mut pitch = (dy_f - dy_h) / lz + m.lean.x - look.stoop;
     let mut pos = rig.body + Vec3::new(0.0, (dy_f + dy_h) * 0.5 + arc - low + breath, m.surge.x);
-    let sink = if deer { 0.12 } else { 0.13 } * crouch;
+    let sink = beast.by(0.12, 0.13, 0.1) * crouch;
     pos.y -= sink;
     pitch -= 0.04 * crouch;
     if rush {
         // Coiled for an instant, then away.
         pos.y -= 0.04 * (1.0 - smooth(0.05, 0.25, k.t));
     }
+    if let Some((t, from)) = k.flinch {
+        // Hurt: jolted away from the blow, rolling off it, hunched (the croup tucked under)
+        // and ducking as the legs give a little, then gathering itself.
+        use Ease::{Both, Out};
+        let jolt = track(
+            t,
+            &[
+                (0.0, 0.0, Both),
+                (0.05, 1.0, Out),
+                (0.14, 0.75, Both),
+                (0.6, 0.0, Both),
+            ],
+        );
+        let duck = track(t, &[(0.0, 0.0, Both), (0.07, 1.0, Out), (0.35, 0.0, Both)]);
+        pos += Vec3::new(-from.sin(), 0.0, from.cos()) * 0.08 * size * jolt;
+        pos.y -= 0.035 * size * duck;
+        roll += from.sin() * 0.15 * jolt;
+        // From behind, the rump jumps up.
+        pitch -= 0.06 * jolt * (-from.cos()).max(0.0);
+        flex += 0.14 * duck;
+    }
     let mut rot = Quat::from_rotation_z(roll) * Quat::from_rotation_x(pitch);
     if lie > 0.0 {
-        pos.y -= (rig.belly - if deer { 0.1 } else { 0.06 }) * lie;
+        pos.y -= (rig.belly - beast.by(0.1, 0.06, 0.04)) * lie;
         rot = Quat::from_rotation_x(pitch * (1.0 - lie) + 0.03 * lie);
     }
     if let Some(t) = fall {
@@ -1522,7 +1644,7 @@ fn quad(rig: &QuadRig, b: &Build, deer: bool, i: &Input, m: &mut Motion, k: &Tic
     let mut q = Quad {
         rig,
         b,
-        deer,
+        beast,
         seed: k.seed,
         body,
         look,
@@ -1555,10 +1677,10 @@ fn quad(rig: &QuadRig, b: &Build, deer: bool, i: &Input, m: &mut Motion, k: &Tic
     q.place(out);
 }
 
-/// How a deer's or wolf's head, ears and tail look this step.
+/// How a deer's, wolf's or boar's head, ears and tail look this step.
 #[allow(clippy::too_many_arguments)]
 fn quad_look(
-    deer: bool,
+    beast: Beast,
     i: &Input,
     k: &Tick,
     m: &mut Motion,
@@ -1569,18 +1691,22 @@ fn quad_look(
     stepping: f32,
 ) -> Look {
     let st = i.state;
+    let deer = beast == Beast::Deer;
+    let wolf = beast == Beast::Wolf;
+    let boar = beast == Beast::Boar;
     let moving = smooth(0.25, 0.8, k.speed);
     let ease = |secs: f32| smooth(0.0, secs, k.t);
     let alarmed = i.alarmed < 3.0 && i.danger >= 0.5;
-    // Deer swish their tails at flies in bouts; wolves hold theirs still.
+    // Deer swish their tails at flies in bouts, and a boar's tail twitches on and on; wolves
+    // hold theirs still.
     let bout = {
         let x = (k.clock * 0.19 + k.vary * 5.0).fract() * 5.3;
         smooth(0.0, 0.15, x) * (1.0 - smooth(1.1, 1.4, x))
     };
-    let swish = if deer {
-        0.35 * bout * (k.clock * TAU * 2.3).sin()
-    } else {
-        0.0
+    let swish = match beast {
+        Beast::Deer => 0.35 * bout * (k.clock * TAU * 2.3).sin(),
+        Beast::Wolf => 0.0,
+        Beast::Boar => 0.4 * (0.4 + 0.6 * bout) * (k.clock * TAU * 1.7).sin(),
     };
     let calm = Look {
         yaw: 0.25 * drift(k.clock, 0.23, k.seed),
@@ -1595,7 +1721,7 @@ fn quad_look(
         + plants[1].down as u8 as f32 * (PI * plants[1].u).sin();
     let nod = (0.05 * (1.0 - run) + 0.03 * gallop) * (fore - 0.6) * stepping;
     let walk = Look {
-        neck: if deer { -0.12 } else { -0.15 } - nod,
+        neck: beast.by(-0.12, -0.15, -0.06) - nod,
         head: 0.08 + 0.6 * nod,
         yaw: 0.0,
         ..calm
@@ -1614,8 +1740,47 @@ fn quad_look(
     } else {
         0.0
     };
-    let chew = (k.clock * if deer { 9.0 } else { 7.0 }).sin();
+    let chew = (k.clock * beast.by(9.0, 7.0, 6.0)).sin();
     let target = match st {
+        AnimalState::Graze | AnimalState::Drink if boar => {
+            // Rooting: the snout shoved into the soil and levered up out of it, over and over,
+            // sweeping from side to side, the jaw working on what it turns up; every so often
+            // the head comes up to scent the air.
+            let c = (k.clock / 1.3 + k.seed * 3.1).fract();
+            let shove = smooth(0.0, 0.55, c) * (1.0 - smooth(0.6, 0.75, c));
+            let flick = smooth(0.6, 0.72, c) * (1.0 - smooth(0.75, 1.0, c));
+            let sniff = {
+                let x = k.t - 4.0 - 3.0 * k.vary;
+                if x > 0.0 {
+                    let w = x % (7.0 + 3.0 * k.vary);
+                    smooth(0.0, 0.35, w) * (1.0 - smooth(1.4, 1.9, w))
+                } else {
+                    0.0
+                }
+            };
+            let down = Look {
+                neck: ROOT.0 - 0.14 * shove + 0.04 * flick,
+                head: ROOT.1 + 0.04 * shove + 0.2 * flick,
+                stoop: ROOT.2,
+                yaw: 0.25 * drift(k.clock, 0.9, k.seed),
+                ear_up: -0.1,
+                jaw: -0.05 - 0.05 * chew,
+                tail_swish: calm.tail_swish,
+                ..Look::default()
+            }
+            .ear_fwd(0.25);
+            let up = Look {
+                neck: -0.1,
+                // The nose working at the air.
+                head: 0.25 + 0.05 * (k.clock * 11.0).sin().max(0.0),
+                yaw: 0.3 * drift(k.clock, 0.35, k.seed),
+                ear_up: 0.15,
+                tail_swish: calm.tail_swish,
+                ..Look::default()
+            }
+            .ear_fwd(0.5);
+            Some((down.mix(up, sniff).mix(l, smooth(0.5, 1.0, k.speed)), 0.8))
+        }
         AnimalState::Graze | AnimalState::Drink | AnimalState::Feed => {
             // Head down biting; deer tear the grass with a short pull now and then.
             let pull = if deer && st == AnimalState::Graze {
@@ -1657,7 +1822,8 @@ fn quad_look(
             Some((down.mix(up, watch).mix(l, smooth(0.5, 1.0, k.speed)), 0.7))
         }
         AnimalState::Alert => {
-            // Head thrown up toward it and frozen, then scanning.
+            // Head thrown up toward it and frozen, then scanning; an alarmed boar champs its
+            // jaws.
             let frozen = 1.0 - smooth(2.0 + 1.5 * k.vary, 3.0 + 1.5 * k.vary, k.t);
             let scan = 0.35 * drift(k.clock, 0.6, k.seed) * (1.0 - frozen);
             let flag = if deer {
@@ -1665,20 +1831,55 @@ fn quad_look(
             } else {
                 0.7
             };
+            let champ = if boar && alarmed {
+                -0.08 * (k.clock * 7.0).sin().abs()
+            } else {
+                0.0
+            };
             Some((
                 Look {
-                    neck: if deer { 0.3 } else { 0.12 },
+                    neck: beast.by(0.3, 0.12, 0.2),
                     neck2: if deer { 0.18 } else { 0.0 },
-                    head: if deer { 0.5 } else { 0.02 },
+                    head: beast.by(0.5, 0.02, 0.15),
                     yaw: scan,
-                    ear_up: 0.35,
-                    tail: if alarmed || !deer { flag } else { 0.3 },
+                    ear_up: if boar { 0.4 } else { 0.35 },
+                    tail: match beast {
+                        Beast::Deer if !alarmed => 0.3,
+                        Beast::Boar => 0.5,
+                        _ => flag,
+                    },
+                    jaw: champ,
+                    tail_swish: if boar { 0.5 * calm.tail_swish } else { 0.0 },
                     ..Look::default()
                 }
-                .ear_fwd(0.7),
+                .ear_fwd(if boar { 0.8 } else { 0.7 }),
                 0.25,
             ))
         }
+        AnimalState::Flee if boar => Some((
+            // A running boar carries its head level and its tail up, flicking.
+            Look {
+                neck: -0.05,
+                head: 0.05,
+                ear_up: -0.1,
+                tail: 0.7,
+                tail_swish: 0.25 * (k.clock * TAU * 2.6).sin(),
+                ..Look::default()
+            }
+            .ear_fwd(-0.5),
+            0.2,
+        )),
+        AnimalState::Charge => Some((
+            // Charging: head down, the tusks leading, tail up.
+            Look {
+                neck: -0.14,
+                head: 0.06,
+                tail: 0.9,
+                ..Look::default()
+            }
+            .ear_fwd(0.35),
+            0.15,
+        )),
         AnimalState::Flee | AnimalState::Chase => Some((
             Look {
                 // A running wolf carries its head low and level, in line with its back.
@@ -1718,15 +1919,15 @@ fn quad_look(
         )),
         AnimalState::Rest => Some((
             Look {
-                neck: if deer { 0.1 } else { -0.1 },
+                neck: beast.by(0.1, -0.1, -0.12),
                 neck2: if deer { 0.12 } else { 0.0 },
-                // Deer chew the cud lying down.
-                head: if deer { 0.2 + 0.01 * chew } else { 0.25 },
+                // Deer chew the cud lying down; a boar lies with its chin on the ground.
+                head: beast.by(0.2 + 0.01 * chew, 0.25, 0.12),
                 yaw: 0.4 * drift(k.clock, 0.15, k.seed),
                 // Wolves lie with the tail curled round to the side.
-                tail: if deer { 0.0 } else { 0.8 },
-                tail2: if deer { 0.0 } else { 0.35 },
-                tail_swish: if deer { 0.0 } else { 0.75 },
+                tail: if wolf { 0.8 } else { 0.0 },
+                tail2: if wolf { 0.35 } else { 0.0 },
+                tail_swish: beast.by(0.0, 0.75, 0.3 * calm.tail_swish),
                 ..Look::default()
             }
             .ear_fwd(0.2 * drift(k.clock, 0.3, k.seed)),
@@ -1791,15 +1992,16 @@ fn quad_look(
         l.neck -= 0.25 * crouch;
         l.head += 0.2 * crouch;
     }
-    if !deer {
+    // Its last bite or slash: when it began, and whether it was at it last step.
+    if i.biting && !m.biting {
+        m.bit = Some(k.now);
+    }
+    m.biting = i.biting;
+    let since = m.bit.map_or(f32::MAX, |t| (k.now - t) as f32);
+    if wolf {
         // Closing on its prey a wolf reaches for it, jaws open and ears back; on the bite the
         // head thrusts in at full gape and the jaws snap shut, grip and shake, the head
         // tugging back, then let go.
-        if i.biting && !m.biting {
-            m.bit = Some(k.now);
-        }
-        m.biting = i.biting;
-        let since = m.bit.map_or(f32::MAX, |t| (k.now - t) as f32);
         let gripping = smooth(0.0, 0.04, since) * (1.0 - smooth(0.55, 0.8, since));
         let reach = match (st, k.prey) {
             (AnimalState::Chase, Some((_, d))) => smooth(3.0, 1.8, d),
@@ -1834,14 +2036,41 @@ fn quad_look(
             l.head -= 0.1 * thrust + 0.12 * tug;
             l.ears = [-0.8; 2];
         }
+    } else if boar && since < 0.6 {
+        // The slash: the head dips under what it strikes and hooks up and sideways through
+        // it, mouth open and ears back, then comes back down.
+        use Ease::{Both, Out};
+        let hook = track(
+            since,
+            &[
+                (0.0, 0.0, Both),
+                (0.06, -0.35, Out),
+                (0.16, 1.0, Out),
+                (0.45, 0.0, Both),
+            ],
+        );
+        // Toward the side it is on.
+        let side = k.threat.map_or(1.0, |b| if b > 0.0 { -1.0 } else { 1.0 });
+        let open = smooth(0.0, 0.06, since) * (1.0 - smooth(0.3, 0.5, since));
+        l.head += 0.55 * hook;
+        l.neck += 0.25 * hook;
+        l.gaze += side * 0.35 * hook.max(0.0);
+        l.jaw = l.jaw.min(-0.2 * open);
+        for e in &mut l.ears {
+            *e = lerp(*e, -0.8, open);
+        }
     }
     // Head round toward what it watches (the body turns on after it); a hunting wolf keeps
-    // its eyes on its prey.
+    // its eyes on its prey, and a charging boar on what it charges.
     let dead = st == AnimalState::Dead;
     let att = attention(k, m, i).filter(|_| !dead && st != AnimalState::Flee);
     let prey_to = k
         .prey
-        .filter(|_| !deer && matches!(st, AnimalState::Stalk | AnimalState::Chase))
+        .filter(|_| wolf && matches!(st, AnimalState::Stalk | AnimalState::Chase))
+        .or(k
+            .threat
+            .map(|b| (b, 0.0))
+            .filter(|_| st == AnimalState::Charge))
         .map(|(b, _)| -b.clamp(-0.9, 0.9));
     let head_to = prey_to.unwrap_or(match att {
         Some((b, w))
@@ -1879,7 +2108,7 @@ fn quad_look(
         l.head += 0.8 * k.threat_up;
     }
     // Ears: each swivels on its own, toward a noise or the threat, and flicks.
-    let cup = if deer { 0.37 } else { 0.3 };
+    let cup = beast.by(0.37, 0.3, 0.32);
     for s in 0..2 {
         let side = if s == 0 { -1.0 } else { 1.0 };
         let scan = 0.45 * glance(k.clock, 1.7 + 0.6 * s as f32, k.vary + s as f32 * 0.31);
@@ -1911,9 +2140,37 @@ fn quad_look(
             m.fade = None;
         }
     }
+    if let Some((t, from)) = k.flinch {
+        // Hurt: the head jerks up and away from the blow, the mouth gapes, the ears go flat
+        // back and stay pinned while it gets away, and the tail clamps down.
+        use Ease::{Both, Out};
+        let jolt = track(
+            t,
+            &[
+                (0.0, 0.0, Both),
+                (0.06, 1.0, Out),
+                (0.18, 0.6, Both),
+                (0.6, 0.0, Both),
+            ],
+        );
+        let pin = smooth(0.0, 0.06, t) * (1.0 - smooth(1.2, 1.8, t));
+        let clamp = smooth(0.0, 0.06, t) * (1.0 - smooth(0.4, 0.8, t));
+        l.neck += 0.3 * jolt;
+        l.head -= 0.16 * jolt;
+        l.yaw += from.sin() * 0.4 * jolt;
+        for e in &mut l.ears {
+            *e = lerp(*e, -1.6, pin);
+        }
+        l.ear_up = lerp(l.ear_up, -0.6, pin);
+        l.tail = lerp(l.tail, -0.3, clamp);
+        l.jaw = l.jaw.min(-0.15 * jolt);
+    }
     m.was = l;
     l
 }
+
+/// A rooting boar's neck, head and stoop (rad) with its snout in the soil.
+const ROOT: (f32, f32, f32) = (-0.68, 0.34, 0.1);
 
 impl Quad<'_> {
     fn place(&self, out: &mut Pose) {
@@ -1932,11 +2189,12 @@ impl Quad<'_> {
         for p in [Piece::Head, Piece::Gloss, Piece::Antlers] {
             out.set(p, head.placed());
         }
-        out.set(
-            Piece::Jaw,
-            head.child(self.rig.jaw, Quat::from_rotation_x(self.look.jaw))
-                .placed(),
-        );
+        // A boar's tusks are its lower jaw's.
+        let jaw = head
+            .child(self.rig.jaw, Quat::from_rotation_x(self.look.jaw))
+            .placed();
+        out.set(Piece::Jaw, jaw);
+        out.set(Piece::Tusks, jaw);
         for s in 0..2 {
             out.set(Piece::Ear(s), self.ear(s).placed());
         }
@@ -1975,10 +2233,10 @@ impl Quad<'_> {
 
     fn ear(&self, s: u8) -> Frame {
         let l = &self.look;
-        let (up, fwd) = if self.deer {
-            (art::DEER_HEAD_UP, art::DEER_HEAD_FWD)
-        } else {
-            (Vec3::Y, Vec3::NEG_Z)
+        let (up, fwd) = match self.beast {
+            Beast::Deer => (art::DEER_HEAD_UP, art::DEER_HEAD_FWD),
+            Beast::Wolf => (Vec3::Y, Vec3::NEG_Z),
+            Beast::Boar => (art::BOAR_HEAD_UP, art::BOAR_HEAD_FWD),
         };
         let side = if s == 0 { -1.0 } else { 1.0 };
         let swivel = l.ears[s as usize];
@@ -2010,10 +2268,10 @@ impl Quad<'_> {
         if seg == 0 {
             return t1;
         }
-        let sway = if self.deer {
-            0.0
-        } else {
+        let sway = if self.beast == Beast::Wolf {
             0.12 * (self.plants[2].u * TAU).sin() * self.upright * self.b.flex
+        } else {
+            0.0
         };
         t1.child(
             self.rig.tail2,
@@ -2110,10 +2368,11 @@ impl Quad<'_> {
             }
         }
         let side = if k.is_multiple_of(2) { -1.0 } else { 1.0 };
-        let splay = match (front, self.deer) {
+        let splay = match (front, self.beast) {
             (true, _) => 0.08,
-            (false, true) => 0.5,
-            (false, false) => 0.32,
+            (false, Beast::Deer) => 0.5,
+            (false, Beast::Wolf) => 0.32,
+            (false, Beast::Boar) => 0.3,
         } * w_fold;
         // Dead, the limp legs flop toward the ground as the body lands (the upper ones over
         // the lower), kicked up off it as it hits, and settle.
@@ -2152,21 +2411,22 @@ impl Quad<'_> {
         })
     }
 
-    /// Leg angles lying down: forelegs folded under the chest, hind legs tucked to the side.
+    /// Leg angles lying down: forelegs folded under the chest (a wolf's stretched out in
+    /// front), hind legs tucked to the side.
     fn fold(&self, front: bool) -> [f32; 4] {
-        if self.deer {
-            if front {
-                [2.6, -1.35, 1.75, 2.6]
-            } else {
-                [-2.4, 1.9, -1.65, -1.3]
-            }
-        } else if front {
-            [2.75, -1.45, -1.6, -1.55]
-        } else {
-            [-2.0, 1.5, -1.5, -1.5]
+        match (self.beast, front) {
+            (Beast::Deer, true) => [2.6, -1.35, 1.75, 2.6],
+            (Beast::Deer, false) => [-2.4, 1.9, -1.65, -1.3],
+            (Beast::Wolf, true) => [2.75, -1.45, -1.6, -1.55],
+            (Beast::Wolf, false) => [-2.0, 1.5, -1.5, -1.5],
+            (Beast::Boar, true) => FOLD_BOAR.0,
+            (Beast::Boar, false) => FOLD_BOAR.1,
         }
     }
 }
+
+/// A boar's leg angles lying down (fore, hind).
+const FOLD_BOAR: ([f32; 4], [f32; 4]) = ([2.6, -1.35, 1.75, 2.6], [-2.4, 1.9, -1.65, -1.3]);
 
 // ======================================================================= rabbits
 
@@ -2297,6 +2557,24 @@ fn rabbit(i: &Input, m: &mut Motion, k: &Tick, out: &mut Pose) {
     m.breath = (m.breath + lerp(0.7, 2.6, exert) * k.dt).fract();
     pos.y += (0.0015 + 0.002 * exert) * (TAU * m.breath).sin();
     let mut rot = Quat::from_rotation_x(pitch);
+    // Hurt: jolted away from the blow, rolling off it, ears flat.
+    let pin = k.flinch.map_or(0.0, |(t, _)| {
+        smooth(0.0, 0.05, t) * (1.0 - smooth(1.0, 1.5, t))
+    });
+    if let Some((t, from)) = k.flinch {
+        use Ease::{Both, Out};
+        let jolt = track(
+            t,
+            &[
+                (0.0, 0.0, Both),
+                (0.05, 1.0, Out),
+                (0.14, 0.7, Both),
+                (0.5, 0.0, Both),
+            ],
+        );
+        pos += Vec3::new(-from.sin(), 0.0, from.cos()) * 0.03 * jolt;
+        rot = Quat::from_rotation_z(from.sin() * 0.15 * jolt) * rot;
+    }
     if let Some(t) = fall {
         // Killed: it slumps, rolls onto its side, bounces once and lies still.
         use Ease::{Both, In, Out};
@@ -2419,7 +2697,7 @@ fn rabbit(i: &Input, m: &mut Motion, k: &Tick, out: &mut Pose) {
     out.set(Piece::Gloss, head.placed());
     for s in 0..2u8 {
         let side = if s == 0 { -1.0 } else { 1.0 };
-        let flat = rest.max(fast * 0.8).max(dead);
+        let flat = rest.max(fast * 0.8).max(dead).max(pin);
         let back =
             0.25 + 0.9 * flat - 0.2 * sit_up + 0.15 * twitch(k.clock, 1.9, k.seed + s as f32 * 0.4);
         let spread = 0.12 + 0.15 * graze - 0.08 * sit_up;
@@ -2851,10 +3129,10 @@ mod tests {
     }
 
     fn rig(species: Species) -> &'static QuadRig {
-        if species == Species::Deer {
-            &DEER
-        } else {
-            &WOLF
+        match species {
+            Species::Deer => &DEER,
+            Species::Boar => &BOAR,
+            _ => &WOLF,
         }
     }
 
@@ -2867,7 +3145,7 @@ mod tests {
 
     #[test]
     fn standing_animals_stand_on_their_feet() {
-        for species in [Species::Deer, Species::Wolf] {
+        for species in [Species::Deer, Species::Wolf, Species::Boar] {
             for k in 0..4 {
                 let t = toe(species, k, AnimalState::Wander, 0.0, 0.0, 100.0);
                 assert!(t.y.abs() < 0.01, "{species:?} leg {k}: toe at {t}");
@@ -2877,7 +3155,7 @@ mod tests {
 
     #[test]
     fn moving_feet_touch_the_ground_and_never_sink() {
-        for species in [Species::Deer, Species::Wolf] {
+        for species in [Species::Deer, Species::Wolf, Species::Boar] {
             for (speed, label) in [(1.2, "walk"), (3.2, "trot"), (9.0, "gallop")] {
                 for i in 0..40 {
                     let phase = i as f32 / 40.0 * TAU;
@@ -2900,7 +3178,7 @@ mod tests {
 
     #[test]
     fn leg_segments_stay_joined() {
-        for species in [Species::Deer, Species::Wolf] {
+        for species in [Species::Deer, Species::Wolf, Species::Boar] {
             let j = rig(species).leg(1);
             for (state, speed) in [
                 (AnimalState::Wander, 1.2),
@@ -3058,8 +3336,8 @@ mod tests {
     }
 
     /// The toe of every leg (owner frame).
-    fn toes(species: Species, male: bool, pose: &Pose) -> [Vec3; 4] {
-        let scale = body_scale(species, male);
+    fn toes(species: Species, (male, young): (bool, bool), pose: &Pose) -> [Vec3; 4] {
+        let scale = body_scale(species, male, young);
         std::array::from_fn(|k| {
             if species == Species::Rabbit {
                 let j = rabbit_leg(k);
@@ -3077,7 +3355,7 @@ mod tests {
     /// x and z) and how fast it turns (rad/s), and watch its toes in the world.
     fn run(
         species: Species,
-        male: bool,
+        (male, young): (bool, bool),
         state: AnimalState,
         crouch: bool,
         secs: f32,
@@ -3113,6 +3391,7 @@ mod tests {
             let input = Input {
                 species,
                 male,
+                young,
                 state,
                 since: 0.0,
                 now: 1.0 + f64::from(t),
@@ -3127,7 +3406,7 @@ mod tests {
                 bird: None,
             };
             let pose = animal(&input, &mut m);
-            let pts = toes(species, male, &pose).map(|p| pos + facing * p);
+            let pts = toes(species, (male, young), &pose).map(|p| pos + facing * p);
             for k in 0..4 {
                 out.sink = out.sink.min(pts[k].y);
                 let on = pts[k].y < GROUND;
@@ -3162,12 +3441,12 @@ mod tests {
 
     #[test]
     fn feet_do_not_slide() {
-        use AnimalState::{Flee, Stalk, Wander};
+        use AnimalState::{Charge, Flee, Graze, Stalk, Wander};
         type Course = fn(f32) -> (Vec2, f32);
         fn ahead(v: f32) -> Vec2 {
             Vec2::new(0.0, -v)
         }
-        let cases: [(&str, Species, AnimalState, f32, Course); 28] = [
+        let cases: [(&str, Species, AnimalState, f32, Course); 40] = [
             ("deer walk", Species::Deer, Wander, 4.0, |_| {
                 (ahead(1.3), 0.0)
             }),
@@ -3261,11 +3540,55 @@ mod tests {
             ("wolf creep round", Species::Wolf, Stalk, 4.0, |_| {
                 (ahead(1.0), -0.7)
             }),
+            ("boar walk", Species::Boar, Wander, 4.0, |_| {
+                (ahead(1.1), 0.0)
+            }),
+            ("boar trot", Species::Boar, Wander, 3.0, |_| {
+                (ahead(3.0), 0.0)
+            }),
+            ("boar gallop", Species::Boar, Flee, 3.0, |_| {
+                (ahead(9.0), 0.0)
+            }),
+            ("boar start and stop", Species::Boar, Wander, 4.5, |t| {
+                (ahead(ramp(t, 0.3, 3.2, 3.0, 6.0)), 0.0)
+            }),
+            ("boar gallop and stop", Species::Boar, Flee, 4.0, |t| {
+                (ahead(ramp(t, 0.0, 2.2, 9.0, 14.0)), 0.0)
+            }),
+            ("boar trot round a bend", Species::Boar, Wander, 3.0, |_| {
+                (ahead(3.0), 1.2)
+            }),
+            ("boar turn on the spot", Species::Boar, Wander, 3.0, |t| {
+                (Vec2::ZERO, if t < 1.5 { 1.8 } else { 0.0 })
+            }),
+            ("boar roots along", Species::Boar, Graze, 4.0, |_| {
+                (ahead(0.3), 0.0)
+            }),
+            ("boar charges", Species::Boar, Charge, 3.0, |t| {
+                (ahead(ramp(t, 0.2, 99.0, 9.5, 14.0)), 0.0)
+            }),
+            // Old boars are a size up, piglets a lot smaller.
+            (
+                "tusker gallop round a bend",
+                Species::Boar,
+                Flee,
+                3.0,
+                |_| (ahead(9.0), 0.6),
+            ),
+            ("piglet trot", Species::Boar, Wander, 3.0, |_| {
+                (ahead(2.2), 0.0)
+            }),
+            ("piglet gallop", Species::Boar, Flee, 3.0, |_| {
+                (ahead(7.0), 0.0)
+            }),
         ];
         for (name, species, state, secs, course) in cases {
             let s = run(
                 species,
-                name.starts_with("stag"),
+                (
+                    name.starts_with("stag") || name.starts_with("tusker"),
+                    name.starts_with("piglet"),
+                ),
                 state,
                 state == Stalk,
                 secs,
@@ -3317,6 +3640,7 @@ mod tests {
         let input = Input {
             species,
             male: false,
+            young: false,
             state,
             since,
             now,
@@ -3461,6 +3785,102 @@ mod tests {
                 "{species:?}: neck round only {:.2} rad",
                 late.2
             );
+        }
+    }
+
+    #[test]
+    fn rooting_boars_put_their_snouts_in_the_soil() {
+        // Over a few shoves of the snout, its disc goes into the soil and comes up out of it,
+        // staying down at the ground, while the feet stay planted.
+        let (mut low, mut high) = (f32::MAX, f32::MIN);
+        for i in 0..160 {
+            let now = 100.0 + i as f64 * 0.025;
+            let p = pose(Species::Boar, Part::Head, AnimalState::Graze, 0.0, 0.0, now);
+            let disc = p.pos + p.rot * (art::BOAR_HEAD_FWD * 0.43 - art::BOAR_HEAD_UP * 0.014);
+            low = low.min(disc.y);
+            high = high.max(disc.y);
+            assert!(disc.z < -0.6, "rooting snout in front of the chest: {disc}");
+        }
+        eprintln!("rooting snout from {low:.3} m to {high:.3} m");
+        assert!((-0.03..0.02).contains(&low), "snout down to {low}");
+        assert!(high > low + 0.02 && high < 0.12, "snout up to {high}");
+        for k in 0..4 {
+            let t = toe(Species::Boar, k, AnimalState::Graze, 0.0, 0.0, 100.0);
+            assert!(t.y.abs() < 0.01, "rooting boar leg {k}: toe at {t}");
+        }
+    }
+
+    #[test]
+    fn hurt_animals_flinch_away_from_the_blow() {
+        for species in [Species::Deer, Species::Wolf, Species::Boar] {
+            // Standing, then struck from its right at 1 s and not killed: the body jolts away
+            // from the blow, rolling off it, the ears go flat back, a foot steps to catch it,
+            // and it gathers itself.
+            let dt = 1.0 / 60.0;
+            let mut m = Motion::default();
+            let mut after = Vec::new();
+            let mut rest = None;
+            for f in 0..180 {
+                let t = f as f32 * dt;
+                let now = 1.0 + f64::from(t);
+                let hit = f >= 60;
+                let senses = Senses {
+                    wound: hit.then(|| ((t - 1.0).max(0.0), DVec3::new(10.0, 0.0, 0.0))),
+                    ..Senses::default()
+                };
+                let pose = step(
+                    species,
+                    (AnimalState::Wander, 0.0),
+                    now,
+                    (Vec3::ZERO, 0.0),
+                    senses,
+                    &mut m,
+                );
+                let body = pose.place(Part::Body);
+                let up = body.rot * Vec3::Y;
+                let ear = pose.place(Part::Ear(1)).rot;
+                let ear = pose.place(Part::Head).rot.inverse() * ear;
+                let lift = toes(species, (false, false), &pose)
+                    .iter()
+                    .map(|p| p.y)
+                    .fold(0.0, f32::max);
+                let now = (body.pos, (-up.x).atan2(up.y), ear, lift);
+                if hit {
+                    after.push((t - 1.0, now));
+                } else {
+                    rest = Some(now);
+                }
+            }
+            let rest = rest.expect("stood");
+            let (mut away, mut roll, mut pinned, mut stepped) = (0.0f32, 0.0f32, 0.0f32, 0.0f32);
+            for (t, (pos, r, ear, lift)) in &after {
+                if *t < 0.3 {
+                    away = away.max(rest.0.x - pos.x);
+                    roll = roll.max(*r - rest.1);
+                }
+                if (0.2..0.8).contains(t) {
+                    pinned = pinned.max(ear.angle_between(rest.2));
+                }
+                if *t < 0.9 {
+                    stepped = stepped.max(*lift);
+                }
+            }
+            eprintln!(
+                "{species:?}: jolted {away:.3} m away, rolled {roll:.2} rad, ears turned {pinned:.2} rad, a foot up {stepped:.3} m"
+            );
+            assert!(away > 0.025, "{species:?}: jolted only {away:.3} m");
+            assert!(roll > 0.05, "{species:?}: rolled only {roll:.2} rad");
+            assert!(
+                pinned > 0.8,
+                "{species:?}: ears turned only {pinned:.2} rad"
+            );
+            assert!(stepped > 0.01, "{species:?}: no foot stepped");
+            for (t, (pos, r, _, _)) in after.iter().filter(|a| a.0 > 1.3) {
+                assert!(
+                    (pos.x - rest.0.x).abs() < 0.01 && (r - rest.1).abs() < 0.02,
+                    "{species:?}: still flinching at {t:.2} s"
+                );
+            }
         }
     }
 }

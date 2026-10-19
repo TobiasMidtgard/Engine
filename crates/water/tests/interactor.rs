@@ -1,11 +1,12 @@
 //! A boat floats on the water around it, not in the trough its own wake digs under it: the
 //! `Water` query under a moving interactor stays at the lake's level while the wake spreads
-//! behind it.
+//! behind it. A boat moved without sailing (respawned, or shifted with the world) throws no
+//! spray.
 
 use engine_core::prelude::*;
 use engine_core::time::TimeSource;
 use engine_water::{WaterBody, WaterInteractor, WaterPlugin};
-use engine_world::{Water, WorldPlugin};
+use engine_world::{Water, WaterSplash, WorldPlugin};
 
 const SPEED: f64 = 1.8;
 
@@ -68,4 +69,53 @@ fn a_moving_hull_floats_at_the_lakes_level() {
         "the hull sits {lowest:.3} m in its own trough"
     );
     assert!(wake > 0.01, "no wake behind the hull ({wake:.4} m)");
+}
+
+#[derive(Resource, Default)]
+struct Splashes(Vec<WaterSplash>);
+
+fn collect(mut splashes: MessageReader<WaterSplash>, mut out: ResMut<Splashes>) {
+    out.0.extend(splashes.read().copied());
+}
+
+#[test]
+fn a_teleported_boat_throws_no_spray() {
+    let mut app = App::new();
+    app.world.resource_mut::<EngineConfig>().headless = true;
+    app.world
+        .resource_mut::<Time>()
+        .set_source(TimeSource::Manual {
+            step_secs: 1.0 / 30.0,
+        });
+    app.add_plugins((WorldPlugin, WaterPlugin));
+    app.init_resource::<Splashes>();
+    app.add_systems(Update, collect);
+    let mut lake = WaterBody::lake(600.0);
+    lake.waves.wind_waves = false;
+    lake.bed = engine_water::WaterBed::Flat { depth_m: 4.0 };
+    app.world
+        .spawn((Transform::from_translation(DVec3::ZERO), lake));
+    // A motorboat-sized hull moored at rest, then moved across the lake in one step (a respawn,
+    // or the world shifting before its transform catches up).
+    let hull = app
+        .world
+        .spawn((
+            Transform::from_translation(DVec3::new(-200.0, 0.0, 0.0)),
+            WaterInteractor::new(0.9).with_wake(2.5),
+        ))
+        .id();
+    for _ in 0..30 {
+        app.update();
+    }
+    app.world.get_mut::<Transform>(hull).unwrap().translation.x = 200.0;
+    for _ in 0..30 {
+        app.update();
+    }
+    let thrown = &app.world.resource::<Splashes>().0;
+    assert!(
+        thrown.is_empty(),
+        "a hull that never moved through the water threw {} splashes: {:?}",
+        thrown.len(),
+        thrown.first()
+    );
 }

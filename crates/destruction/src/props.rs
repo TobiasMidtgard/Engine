@@ -133,6 +133,14 @@ pub enum PropKind {
     HatchRim {
         size: [f32; 2],
     },
+    /// A galvanized tube-and-clamp guard railing `length` m along X whose foot climbs `rise`
+    /// m toward +X; posts on base flanges, or with `side_mount` on palms bolted to a face
+    /// on their −Z side (see [`pipe_railing`]).
+    PipeRailing {
+        length: f32,
+        rise: f32,
+        side_mount: bool,
+    },
     RoofTiles {
         width: f32,
         depth: f32,
@@ -209,6 +217,11 @@ impl PropKind {
                 size: [3.0, 0.15, 2.0],
             },
             PropKind::HatchRim { size: [1.0, 1.0] },
+            PropKind::PipeRailing {
+                length: 4.0,
+                rise: 0.0,
+                side_mount: false,
+            },
             PropKind::RoofTiles {
                 width: 4.0,
                 depth: 3.4,
@@ -251,6 +264,11 @@ impl PropKind {
             PropKind::SteelLadder { height } => steel_ladder(height, seed),
             PropKind::ConcreteSlab { size } => concrete_slab(Vec3::from(size), seed),
             PropKind::HatchRim { size } => hatch_rim(Vec2::from(size)),
+            PropKind::PipeRailing {
+                length,
+                rise,
+                side_mount,
+            } => pipe_railing(length, rise, side_mount, seed),
             PropKind::RoofTiles {
                 width,
                 depth,
@@ -283,6 +301,11 @@ impl PropKind {
             | PropKind::ConcreteSlab { size } => Vec3::from(size),
             PropKind::SteelLadder { height } => ladder_size(height),
             PropKind::HatchRim { size } => hatch_rim_size(Vec2::from(size)),
+            PropKind::PipeRailing {
+                length,
+                rise,
+                side_mount,
+            } => pipe_railing_size(length, rise, side_mount),
             PropKind::SteelDrum { .. } => Vec3::new(DRUM_DIAMETER, DRUM_HEIGHT, DRUM_DIAMETER),
             PropKind::Sandbag => Vec3::new(BAG_LEN, BAG_HEIGHT, BAG_WIDTH),
             PropKind::SandbagWall { length, courses } => sandbag_wall_size(length, courses),
@@ -4940,6 +4963,19 @@ const LADDER_HALF_W: f32 = 0.236;
 const LADDER_DEPTH: f32 = 0.24;
 /// Where a centered ladder's stiles stand along Z (its top brackets reach back to −Z).
 pub const LADDER_STILE_Z: f32 = 0.06;
+/// Height of a steel ladder's lowest rung over its foot, and the rise from rung to rung, m.
+const LADDER_FIRST_RUNG: f32 = 0.25;
+const LADDER_RUNG_PITCH: f32 = 0.28;
+
+/// Heights of a `height` m steel ladder's lowest and top rungs over its foot, m.
+pub fn ladder_rungs(height: f32) -> (f32, f32) {
+    let h = height.max(1.0);
+    let n = ((h - 0.1 - LADDER_FIRST_RUNG) / LADDER_RUNG_PITCH)
+        .ceil()
+        .max(1.0)
+        - 1.0;
+    (LADDER_FIRST_RUNG, LADDER_FIRST_RUNG + n * LADDER_RUNG_PITCH)
+}
 
 fn ladder_size(height: f32) -> Vec3 {
     Vec3::new(2.0 * (LADDER_HALF_W + 0.03), height.max(1.0), LADDER_DEPTH)
@@ -5012,7 +5048,7 @@ pub fn steel_ladder(height: f32, seed: u64) -> Vec<PropPart> {
         }
     }
     // Rungs: knurled bars through both stiles, worn bright in the middle.
-    let mut y = 0.25;
+    let mut y = LADDER_FIRST_RUNG;
     while y < h - 0.1 {
         let v0 = m.vertices.len();
         let path: Vec<Vec3> = (0..=6)
@@ -5034,7 +5070,7 @@ pub fn steel_ladder(height: f32, seed: u64) -> Vec<PropPart> {
                 dark,
             );
         }
-        y += 0.28;
+        y += LADDER_RUNG_PITCH;
     }
     // Stiles at z = 0 sit LADDER_STILE_Z in front of the middle once centered.
     kit.translate(Vec3::new(0.0, -h * 0.5, LADDER_STILE_Z));
@@ -5142,6 +5178,301 @@ pub fn hatch_rim(opening: Vec2) -> Vec<PropPart> {
         reach: 0.05,
         strength: 0.5,
         ground: true,
+    })
+}
+
+/// Outside radius of a guard railing's pipe (42.4 mm, 1¼ in), m.
+const RAIL_R: f32 = 0.0212;
+/// How far a railing's end posts sit in from its ends, m: a base flange's or wall palm's
+/// half width, so the railing fills its length exactly.
+const RAIL_FLANGE_R: f32 = 0.065;
+const RAIL_PALM_HW: f32 = 0.05;
+/// How far a wall-mounted railing's posts reach down past its foot line, m.
+const RAIL_DROP: f32 = 0.3;
+/// How far behind a wall-mounted railing's post axis its palms' backs are (−Z), m: set the
+/// railing this far off the face it is bolted to.
+pub const RAIL_PALM_BACK: f32 = RAIL_R + 0.026;
+
+/// Top rail height above the foot line, m: guard height on a level edge, handrail height on a
+/// slope.
+fn rail_height(rise: f32) -> f32 {
+    if rise.abs() > 0.05 { 0.95 } else { 1.1 }
+}
+
+fn rail_inset(side_mount: bool) -> f32 {
+    if side_mount {
+        RAIL_PALM_HW
+    } else {
+        RAIL_FLANGE_R
+    }
+}
+
+/// (lowest, highest) point of a railing over its own foot line, m.
+fn rail_span_y(length: f32, rise: f32, side_mount: bool) -> (f32, f32) {
+    let len = length.max(0.6);
+    let inset = rail_inset(side_mount);
+    let a = rise * inset / len;
+    let b = rise * (len - inset) / len;
+    let drop = if side_mount { RAIL_DROP } else { 0.0 };
+    (
+        a.min(b) - drop,
+        a.max(b) + rail_height(rise) + RAIL_R + 0.008,
+    )
+}
+
+/// Height of a railing's foot line at its middle over the middle of the box it fills, m: place
+/// a railing whose foot runs through `p` at `p - Y * pipe_railing_foot(..)`.
+pub fn pipe_railing_foot(length: f32, rise: f32, side_mount: bool) -> f32 {
+    let (lo, hi) = rail_span_y(length, rise, side_mount);
+    rise * 0.5 - (lo + hi) * 0.5
+}
+
+fn pipe_railing_size(length: f32, rise: f32, side_mount: bool) -> Vec3 {
+    let (lo, hi) = rail_span_y(length, rise, side_mount);
+    let depth = if side_mount {
+        RAIL_PALM_BACK
+    } else {
+        RAIL_FLANGE_R
+    };
+    Vec3::new(length.max(0.6), hi - lo, 2.0 * depth)
+}
+
+/// Galvanized tube-and-clamp guard railing `length` m along X whose foot line climbs `rise` m
+/// from −X to +X (0 along a roof edge, a stair's rise beside a flight): posts every 1.6 m or
+/// less, a top and a knee rail held by cast clamp fittings with set screws, domed post caps.
+/// Posts stand on bolted base flanges, or with `side_mount` reach down past the foot line to
+/// palms bolted to a face on their −Z side (a stair's stringer, a wall's top). A level
+/// railing on flanges has a timber toe board on its +Z (walkway) side.
+pub fn pipe_railing(length: f32, rise: f32, side_mount: bool, seed: u64) -> Vec<PropPart> {
+    let len = length.max(0.6);
+    let mut rng = Rng::new(seed ^ 0x0047_A2D5);
+    let mut kit = Kit::new();
+    let r = RAIL_R;
+    let height = rail_height(rise);
+    let inset = rail_inset(side_mount);
+    let foot = |x: f32| rise * (x + len * 0.5) / len;
+    let galv = [0.86, 0.87, 0.88];
+    let cast = [0.74, 0.75, 0.76];
+    let bolt = [0.6, 0.6, 0.61];
+    let (x0, x1) = (-len * 0.5 + inset, len * 0.5 - inset);
+    let spans = ((x1 - x0) / 1.6).ceil().max(1.0) as usize;
+    let posts: Vec<f32> = (0..=spans)
+        .map(|i| lerp(x0, x1, i as f32 / spans as f32))
+        .collect();
+    let dir = Vec3::new(x1 - x0, foot(x1) - foot(x0), 0.0).normalize();
+    let m = kit.mb(METAL);
+    let v_pipe = m.vertices.len();
+    // Posts.
+    for &x in &posts {
+        let top = foot(x) + height;
+        let bottom = foot(x) - if side_mount { RAIL_DROP } else { 0.004 };
+        let n = ((top - bottom) / 0.25).ceil() as usize;
+        let path: Vec<Vec3> = (0..=n)
+            .map(|k| Vec3::new(x, lerp(bottom, top, k as f32 / n as f32), 0.0))
+            .collect();
+        tube(m, &path, r, 12, side_mount, galv);
+    }
+    // Top and knee rails, split so weathering can follow them.
+    for frac in [1.0f32, 0.5] {
+        let n = ((x1 - x0) / 0.3).ceil() as usize;
+        let path: Vec<Vec3> = (0..=n)
+            .map(|k| {
+                let x = lerp(x0, x1, k as f32 / n as f32);
+                Vec3::new(x, foot(x) + height * frac, 0.0)
+            })
+            .collect();
+        tube(m, &path, r, 12, false, galv);
+    }
+    // Zinc spangle and bloom, white rust low down, hands worn smooth along the top rail.
+    let wear = rng.range(0.6, 1.0);
+    shade(m, v_pipe, move |q, nrm| {
+        let above = q.y - foot(q.x);
+        let bloom = 0.9 + 0.1 * fbm(q * Vec3::new(1.0, 2.5, 1.0), 4.0, seed, 3);
+        let spangle = 0.97 + 0.03 * n3(q, 90.0, seed ^ 7);
+        let low = (1.0 - above / 0.25).clamp(0.0, 1.0);
+        let white = low * (0.5 + 0.5 * fbm(q, 12.0, seed ^ 3, 2)).max(0.0) * 0.12;
+        let grime = low * 0.1;
+        let hands = ((above - height + 0.03) / 0.03).clamp(0.0, 1.0) * nrm.y.max(0.0) * 0.08 * wear;
+        let k = bloom * spangle - grime + hands;
+        [k + white, k + white, k + white * 0.9]
+    });
+    let v_cast = m.vertices.len();
+    let sleeve = |rr: f32, half: f32| {
+        [
+            Vec2::new(rr + 0.0008, -half),
+            Vec2::new(rr + 0.006, -half + 0.004),
+            Vec2::new(rr + 0.006, half - 0.004),
+            Vec2::new(rr + 0.0008, half),
+        ]
+    };
+    for (i, &x) in posts.iter().enumerate() {
+        let end = i == 0 || i == posts.len() - 1;
+        let inward = if i == 0 { 1.0 } else { -1.0 };
+        for frac in [1.0f32, 0.5] {
+            let y = foot(x) + height * frac;
+            let p = Vec3::new(x, y, 0.0);
+            // On the post: a socket capped with a dome at the top, a sleeve at the knee rail.
+            if frac == 1.0 {
+                lathe(
+                    m,
+                    &Frame::at(p),
+                    &[
+                        Vec2::new(r + 0.0008, -0.06),
+                        Vec2::new(r + 0.006, -0.056),
+                        Vec2::new(r + 0.006, 0.0),
+                        Vec2::new((r + 0.006) * 0.8, r * 0.75),
+                        Vec2::new((r + 0.006) * 0.4, r + 0.006),
+                        Vec2::new(0.0, r + 0.008),
+                    ],
+                    14,
+                    50.0,
+                    LatheUv::Wrap(r),
+                    cast,
+                );
+            } else {
+                lathe(
+                    m,
+                    &Frame::at(p),
+                    &sleeve(r, 0.045),
+                    14,
+                    50.0,
+                    LatheUv::Wrap(r),
+                    cast,
+                );
+            }
+            // Along the rail: both ways at a middle post, inward at an end one.
+            let (c, half) = if end {
+                (p + dir * inward * 0.03, 0.03)
+            } else {
+                (p, 0.05)
+            };
+            lathe(
+                m,
+                &Frame::up_along(c, dir),
+                &sleeve(r, half),
+                14,
+                50.0,
+                LatheUv::Wrap(r),
+                cast,
+            );
+            // Set screws on the walkway side.
+            for (at, axis) in [(p - Vec3::Y * 0.025 * frac, Vec3::Z), (c, Vec3::Z)] {
+                hex_head(m, at + axis * (r + 0.005), axis, 0.007, 0.008, bolt);
+            }
+        }
+        let fy = foot(x);
+        if side_mount {
+            // Palm: a socket on the post low down with a plate bolted to the face behind.
+            let y = fy - RAIL_DROP + 0.09;
+            lathe(
+                m,
+                &Frame::at(Vec3::new(x, y, 0.0)),
+                &sleeve(r, 0.06),
+                14,
+                50.0,
+                LatheUv::Wrap(r),
+                cast,
+            );
+            let zp = -(RAIL_PALM_BACK - 0.008);
+            bevel_box(
+                m,
+                &Frame::at(Vec3::new(x, y, zp * 0.5 - 0.002)),
+                &BoxSpec::new(Vec3::new(0.012, 0.05, -zp * 0.5 - 0.002), 0.002).tint(cast),
+            );
+            bevel_box(
+                m,
+                &Frame::at(Vec3::new(x, y, zp - 0.004)),
+                &BoxSpec::new(Vec3::new(RAIL_PALM_HW, 0.07, 0.004), 0.002).tint(cast),
+            );
+            for dy in [-0.045f32, 0.045] {
+                hex_head(m, Vec3::new(x, y + dy, zp), Vec3::Z, 0.009, 0.008, bolt);
+            }
+        } else {
+            // Base flange with a raised socket, four anchor bolts.
+            lathe(
+                m,
+                &Frame::at(Vec3::new(x, fy, 0.0)),
+                &[
+                    Vec2::new(0.0, 0.0),
+                    Vec2::new(RAIL_FLANGE_R, 0.0),
+                    Vec2::new(RAIL_FLANGE_R, 0.007),
+                    Vec2::new(RAIL_FLANGE_R - 0.004, 0.009),
+                    Vec2::new(r + 0.012, 0.014),
+                    Vec2::new(r + 0.006, 0.022),
+                    Vec2::new(r + 0.006, 0.07),
+                    Vec2::new(r + 0.0008, 0.074),
+                ],
+                16,
+                40.0,
+                LatheUv::Planar,
+                cast,
+            );
+            for k in 0..4 {
+                let a = (k as f32 + 0.5) * FRAC_PI_2;
+                let at = Vec3::new(x + 0.048 * a.cos(), fy + 0.008, 0.048 * a.sin());
+                hex_head(m, at, Vec3::Y, 0.008, 0.007, bolt);
+            }
+        }
+    }
+    // Cast iron: rougher, a shade darker in the hollows, rust bleeding from the screws.
+    shade(m, v_cast, move |q, _| {
+        let k = 0.92 + 0.08 * fbm(q, 40.0, seed ^ 11, 2);
+        let rust = fbm(q, 25.0, seed ^ 5, 2).max(0.0) * 0.12;
+        [k, k - rust * 0.4, k - rust]
+    });
+    // A timber toe board along the walkway side of a level railing, clipped to each post.
+    if !side_mount && rise.abs() <= 0.05 {
+        let (tb_h, tb_t) = (0.15f32, 0.025f32);
+        let zc = r + 0.008 + tb_t * 0.5;
+        let w = kit.mb(WOOD);
+        let v0 = w.vertices.len();
+        let half_len = (x1 - x0) * 0.5 + r;
+        bevel_box(
+            w,
+            &Frame::at(Vec3::new((x0 + x1) * 0.5, 0.016 + tb_h * 0.5, zc)),
+            &BoxSpec::new(Vec3::new(half_len, tb_h * 0.5, tb_t * 0.5), 0.003)
+                .splits([&stations(-half_len, half_len, &[], 0.3), &[], &[]])
+                .uv(rng_uv(&mut rng))
+                .tint(mul(wood_tint(&mut rng), 0.82)),
+        );
+        // Weathered grey on top, dirt splashed up from the deck.
+        shade(w, v0, move |q, nrm| {
+            let splash = (1.0 - (q.y - 0.016) / 0.08).clamp(0.0, 1.0) * 0.18;
+            let grey = 0.1 * nrm.y.max(0.0);
+            let k = 1.0 - splash;
+            [
+                k * (1.0 - grey * 0.3),
+                k * (1.0 - grey * 0.1),
+                k * (1.0 + grey * 0.2),
+            ]
+        });
+        let m = kit.mb(METAL);
+        for &x in &posts {
+            bevel_box(
+                m,
+                &Frame::at(Vec3::new(x, 0.11, zc + tb_t * 0.5 + 0.0015)),
+                &BoxSpec::new(Vec3::new(0.02, 0.025, 0.0015), 0.001).tint(galv),
+            );
+            bevel_box(
+                m,
+                &Frame::at(Vec3::new(x, 0.11, (r + zc) * 0.5)),
+                &BoxSpec::new(Vec3::new(0.008, 0.025, (zc - r) * 0.5 + 0.004), 0.001).tint(galv),
+            );
+            nail(
+                m,
+                Vec3::new(x, 0.11, zc + tb_t * 0.5 + 0.003),
+                Vec3::Z,
+                0.006,
+                bolt,
+            );
+        }
+    }
+    let (lo, hi) = rail_span_y(len, rise, side_mount);
+    kit.translate(Vec3::new(0.0, -(lo + hi) * 0.5, 0.0));
+    kit.finish(Ao {
+        reach: 0.12,
+        strength: 0.6,
+        ground: !side_mount,
     })
 }
 
@@ -5671,7 +6002,17 @@ mod tests {
 
     #[test]
     fn props_build_clean_and_fit() {
-        for (n, kind) in PropKind::catalog().into_iter().enumerate() {
+        // A stair's railing too: sloping, its posts on wall palms.
+        let stair_rail = PropKind::PipeRailing {
+            length: 5.0,
+            rise: 3.3,
+            side_mount: true,
+        };
+        for (n, kind) in PropKind::catalog()
+            .into_iter()
+            .chain([stair_rail])
+            .enumerate()
+        {
             let parts = kind.build(7 + n as u64);
             assert!(!parts.is_empty(), "{kind:?} built nothing");
             let (lo, hi) = prop_bounds(&parts);

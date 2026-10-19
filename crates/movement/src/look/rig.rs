@@ -655,6 +655,9 @@ pub struct AnimInput {
     pub ledge: Option<(Vec3, bool)>,
     /// The grapple hook (character space) and whether it has bitten.
     pub grapple: Option<(Vec3, bool)>,
+    /// Riding a zip line: where the hand holds the cable and the way the line runs (unit),
+    /// character space.
+    pub zip: Option<(Vec3, Vec3)>,
     /// Part of a dash-strike.
     pub dash_strike: bool,
     pub attack: Option<AttackAnim>,
@@ -679,6 +682,7 @@ impl Default for AnimInput {
             wall: None,
             ledge: None,
             grapple: None,
+            zip: None,
             dash_strike: false,
             attack: None,
             blocking: false,
@@ -879,6 +883,8 @@ struct Weights {
     aim: f32,
     /// Reeled in on the grapple's rope.
     reel: f32,
+    /// Hanging from a zip line.
+    zip: f32,
     dash: f32,
     attack: f32,
     block: f32,
@@ -918,6 +924,12 @@ pub struct Animator {
     hook: Option<Vec3>,
     /// Hand-over-hand cycle while shimmying along a ledge, 0..1.
     shimmy: f32,
+    /// The zip line last held (grip and direction, character space) and whether it still is.
+    zip: Option<(Vec3, Vec3)>,
+    zip_on: bool,
+    /// Swing about the zip line's grip (rad, legs forward when positive) and its rate.
+    swing: f32,
+    swing_rate: f32,
     secs: f32,
     last: Option<Pose>,
 }
@@ -952,6 +964,10 @@ impl Animator {
             ledge: None,
             hook: None,
             shimmy: 0.0,
+            zip: None,
+            zip_on: false,
+            swing: 0.0,
+            swing_rate: 0.0,
             secs: 0.0,
             last: None,
         }
@@ -998,6 +1014,26 @@ impl Animator {
             let d = horizontal / speed;
             self.dir = (self.dir + (d - self.dir) * approach(dt, 10.0)).normalize_or(d);
         }
+        // Hanging from a zip line, the body swings about the hand like a pendulum: back when
+        // the line speeds it up, forward when it slows.
+        if let Some((_, along)) = input.zip {
+            let ahead = Vec3::new(along.x, 0.0, along.z).normalize_or(Vec3::NEG_Z);
+            let acc = if dt > 0.0 && self.zip_on {
+                ((input.velocity - self.prev_velocity) / dt).dot(ahead)
+            } else {
+                0.0
+            };
+            let pull = -ZIP_SWING_W2 * self.swing
+                - ZIP_SWING_DAMP * self.swing_rate
+                - acc.clamp(-30.0, 30.0) / ZIP_SWING_LENGTH;
+            self.swing_rate += pull * dt;
+            self.swing = (self.swing + self.swing_rate * dt).clamp(-0.6, 0.6);
+            self.zip = input.zip;
+        } else {
+            self.swing *= 1.0 - approach(dt, 6.0);
+            self.swing_rate = 0.0;
+        }
+        self.zip_on = input.zip.is_some();
         // Body lean from acceleration (m/s² → radians, capped).
         if dt > 0.0 {
             let acc = (input.velocity - self.prev_velocity) / dt;
@@ -1115,7 +1151,9 @@ impl Animator {
         ease(&mut w.slide, on(mode == M::Slide), 13.0);
         ease(
             &mut w.air,
-            on(!input.grounded && matches!(mode, M::Air | M::Idle | M::Walk | M::Run | M::Sprint)),
+            on(!input.grounded
+                && input.zip.is_none()
+                && matches!(mode, M::Air | M::Idle | M::Walk | M::Run | M::Sprint)),
             9.0,
         );
         ease(&mut w.wall, on(mode == M::WallRun), 11.0);
@@ -1124,6 +1162,7 @@ impl Animator {
         ease(&mut w.aim, on(input.grapple.is_some()), 22.0);
         let reeling = input.grapple.is_some_and(|(_, bit)| bit) && mode == M::Air;
         ease(&mut w.reel, on(reeling), 10.0);
+        ease(&mut w.zip, on(input.zip.is_some()), 14.0);
         ease(&mut w.dash, on(mode == M::Dash), 20.0);
         let attacking = input.attack.is_some();
         let attack_target = match input.attack {
@@ -1188,6 +1227,11 @@ impl Animator {
             && let Some(hook) = self.hook
         {
             p.blend(&reel(hook), w.reel, Channels::Body);
+        }
+        if w.zip > 1e-3
+            && let Some((grip, _)) = self.zip
+        {
+            p.blend(&zip_ride(grip, self.swing), w.zip, Channels::Body);
         }
         if w.dash > 1e-3 {
             p.blend(&dash(input.dash_strike), w.dash, Channels::Body);
@@ -1300,6 +1344,13 @@ impl Animator {
             let mut a = to_ground(air_arms(0.0));
             aim_arm(&mut a, hook, body);
             p.blend(&a, w.aim, Channels::Arms);
+        }
+        if w.zip > 1e-3
+            && let Some((grip, _)) = self.zip
+        {
+            let mut a = to_ground(zip_arms());
+            zip_hand(&mut a, grip);
+            p.blend(&a, w.zip, Channels::Arms);
         }
         if w.dash > 1e-3 {
             p.blend(&to_ground(dash_arms()), w.dash, Channels::Arms);
@@ -1677,6 +1728,63 @@ fn hang(top: Vec3, sway: f32) -> Pose {
     p.body = rz(-sway * 0.04);
     p.pivot = top - v3(0.0, 0.05, 0.0);
     p
+}
+
+/// The zip line pendulum: grip to the body's center of mass (m), its natural frequency
+/// squared (g / length, 1/s²) and damping (1/s).
+const ZIP_SWING_LENGTH: f32 = 1.0;
+const ZIP_SWING_W2: f32 = 9.81 / ZIP_SWING_LENGTH;
+const ZIP_SWING_DAMP: f32 = 2.6;
+
+/// Hanging one-handed from a zip line at `grip` (character space): the body hangs under the
+/// left shoulder, rolled a little to lift it, legs together with the knees up and the toes
+/// pointed, looking down the line. `swing` (rad) swings it about the hand, legs forward when
+/// positive.
+fn zip_ride(grip: Vec3, swing: f32) -> Pose {
+    let mut p = Pose::BIND;
+    p.pelvis = v3(grip.x + 0.13, grip.y - 1.03, grip.z + 0.03);
+    p.pelvis_rot = rz(-0.1) * ry(0.14);
+    p.spine = pitch(-0.05) * rz(-0.06);
+    p.chest = pitch(-0.03) * rz(-0.08) * ry(0.1);
+    p.neck = pitch(0.06);
+    p.head = pitch(0.22) * ry(-0.18);
+    let (x, y, z) = (p.pelvis.x, p.pelvis.y, p.pelvis.z);
+    p.ankle = [
+        v3(x - 0.08, y - 0.66, z - 0.3),
+        v3(x + 0.09, y - 0.73, z - 0.15),
+    ];
+    p.foot = [pitch(0.8), pitch(0.65)];
+    p.knee = [v3(-0.12, 0.25, -1.0), v3(0.15, 0.15, -1.0)];
+    p.body = pitch(-swing);
+    p.pivot = grip;
+    p
+}
+
+/// On a zip line the sword arm reaches out low to the side for balance, the blade trailing
+/// behind.
+fn zip_arms() -> Pose {
+    let mut p = Pose::BIND;
+    p.sword = sword(
+        v3(0.42, 1.06, 0.12),
+        v3(0.35, -0.3, 1.0),
+        v3(0.0, -1.0, 0.15),
+    );
+    p.elbow = [v3(-1.0, -0.2, 0.3), v3(0.8, -0.5, 0.4)];
+    p
+}
+
+/// The left fist closed around the cable at `grip` (character space, before the body
+/// rotation, which turns about the grip): the wrist under it, the fingers over the top.
+fn zip_hand(p: &mut Pose, grip: Vec3) {
+    let fingers = v3(0.15, 1.0, 0.0).normalize();
+    p.hand_l = Xf::new(
+        grip - fingers * (-KNUCKLE_L.y * 0.7),
+        left_hand(Vec3::X, fingers),
+    );
+    p.follow_l = 0.0;
+    p.grip_l = 0.0;
+    p.curl_l = 0.95;
+    p.elbow[0] = v3(-1.0, -0.15, 0.25).normalize();
 }
 
 /// Dashing: a low forward lunge through the air.

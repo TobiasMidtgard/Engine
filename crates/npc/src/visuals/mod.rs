@@ -192,6 +192,7 @@ fn species_color(s: Species) -> u32 {
         Species::Rabbit => 0x9a8166,
         Species::Wolf => 0x77787a,
         Species::Bird => 0x3f4558,
+        Species::Boar => 0x4a4037,
     }
 }
 
@@ -394,6 +395,7 @@ pub(crate) fn pose_stand_ins(
                 let input = animal::Input {
                     species,
                     male: animal.is_some_and(|a| a.male),
+                    young: animal.is_some_and(|a| a.young),
                     state: mind.map(|m| m.state).unwrap_or_default(),
                     since: mind.map(|m| m.since).unwrap_or(0.0),
                     now,
