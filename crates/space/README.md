@@ -133,8 +133,8 @@ the sky to the weather's own volumetric clouds. Views `earth_leo` (400 km) and `
   close. A shared continent field (or terrain baking the far map) needs a contract.
 - Full-size bakes cost 0.4-1.5 s of CPU per body; a few looks (Mars albedo regions, Moon
   maria outlines, Neptune's cloud streaks) still read as procedural up close.
-- The cloud layer from high up casts no shadows on the terrain yet, and its pattern is the
-  far look's own, not the weather's (they meet at the edge of `cloud_hole_m`).
+- The cloud layer's pattern from high up is the far look's own, not the weather's (they meet
+  at the edge of `cloud_hole_m`).
 - Coasting ships feel one body at a time (patched conics): no Lagrange points or slow
   three-body drifts, and a sphere of influence grazed by less than ~1 % of its radius in one
   sampled step can be missed at extreme warps. Engines can't fire on rails: drop the warp to
