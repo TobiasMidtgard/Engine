@@ -72,10 +72,12 @@ shout as it lands, grimace when hit and breathe hard when tired; badly hurt, the
 struck leg or hunch over a body wound and press a hand to it at ease. At ease the weapon rests
 on the shoulder or hangs low and comes to guard when a foe is spotted, and a revived fighter
 rolls over, kneels, takes up its weapon and stands into its guard where it lay. A fighter
-reviving a mate goes down on both knees beside it. It sets its sword or carbine down on the
-ground; an archer or a shield bearer holds the bow or shield aside. It puts its hands on the
-chest and presses, and looks up at the enemy now and then. Then it takes its weapon up and
-stands. Animals plant their feet too (a
+reviving a mate goes down on both knees beside it, on the side of the arm along the body
+(clear of the arm flung out and of what the mate let go of). It sets its sword or carbine down
+on the ground; an archer or a shield bearer holds the bow or shield aside. It puts its hands on
+the chest and presses, and looks up at the enemy now and then. Then it takes its weapon up and
+stands. Shot down on its knees, it falls from there, its weapon left where it set it. Animals
+plant their feet too (a
 test fails if a hoof or paw on the ground slides) in each species' footfalls: deer walk in
 lateral sequence, trot and gallop (rotary) and bound away when they bolt from a stand, wolves
 walk, trot, lope and gallop, rabbits hop and half-bound with the hind feet landing ahead of the
@@ -215,10 +217,19 @@ placed mate of the squad goes. Ranged mates with some teamwork cover it with sup
 
 Skill changes the choice. A rookie notices late, then runs straight in. A skilled fighter waits
 while the spot is watched or it is under fire, and goes once things calm down. The reviver runs
-over, kneels beside the chest and works on it. After `ally_revive_secs` the ally gets up where
-it lies with `ally_revive_health` of its health. Teamwork 1 makes it a fifth quicker, teamwork
-0 a fifth slower. A reviver that is hit, staggered or stuck, or that finds it too hot, lets go.
-It waits a moment before it tries again.
+over and kneels beside the chest, on the side of the arm along the body (the other side if
+that one is blocked). Getting down, setting its weapon down and putting its hands on takes
+1.2 s (`NpcBrain::REVIVE_KNEEL_SECS`). The revive counts only once the hands are on. After
+`ally_revive_secs` of that, the ally gets up where it lies with `ally_revive_health` of its
+health. Teamwork 1 makes it a fifth quicker, teamwork 0 a fifth slower. A mate weighs every
+downed squad mate in range and goes for the one it most wants to, so an ally in the open does
+not keep it from one behind a wall. A kneeling reviver can neither block nor dodge. A reviver
+that is hit, staggered or stuck (its way along the path stops getting shorter), or that finds
+it too hot, lets go. It gets up off its knees where it is before it moves (0.85 s), and waits a
+moment before it tries again. A fighter just revived revives nobody until it is up. One handed
+to game code (`Npc::active = false`) gives its revive up, and one stopped in time revives
+nobody, so neither holds up the showcase timer. `npc.inspect` shows `kneeling_secs` and
+`hands_on_secs`.
 
 | Setting | Default | Does |
 | --- | --- | --- |
@@ -267,15 +278,19 @@ The crate depends only on core crates (`engine_core`, `engine_world`, `engine_re
 - `tests/demo.rs`: the arena fight keeps going for a minute (shots, attacks, blocks, cover,
   downed and revived, squad mates reviving at least twice) inside the arena; the meadow lives for two minutes (grazing, wandering,
   hunting, fleeing) without animals leaving.
-- `tests/revive.rs`: a squad mate kneels beside a downed ally and gets it up where it lies.
-  Skilled fighters don't go in the enemy's view or under fire; a rookie does. A reviver that is
-  hit lets go and tries again later. Nobody revives when it is off. The showcase timer waits
-  for a revive, gets a fighter with a mate near up in place, and sends home only one that is
-  alone.
+- `tests/revive.rs`: a squad mate kneels beside a downed ally and gets it up where it lies,
+  its hands on the chest for as long as the revive takes. Skilled fighters don't go in the
+  enemy's view or under fire; a rookie does. A mate revives an ally behind a wall rather than
+  the nearer one in the open. A reviver that is hit lets go, stays put while it gets up and
+  tries again only later. Nobody revives when it is off, or once it is turned off midway. A
+  mate handed to game code does not hold up the showcase timer. The timer waits for a revive,
+  gets a fighter with a mate near up in place, and sends home only one that is alone.
 - `tests/art_revive.rs`: a captioned strip, before and after. Before, a lone fighter lies six
   seconds and is sent home. After, a squad mate runs in, kneels, sets its carbine down, puts
   its hands on the chest and looks up at the enemy, and the ally gets up where it lay. It
-  writes `fighters-revive-before-after.png`.
+  writes `fighters-revive-before-after.png`. A close-up from two sides
+  (`fighters-revive-kneel-closeup.png`) shows the reviver getting down, its hands on the chest
+  with its carbine set down clear of the mate's, and looking up.
 - `tests/training.rs`: the same post swings at a rookie, soldier, veteran, elite and master;
   the share of swings defended climbs with skill (0 % to about 100 %) and the master parries.
 - `tests/smoke.rs`: thick smoke hides a player until it clears, thin smoke slows spotting,

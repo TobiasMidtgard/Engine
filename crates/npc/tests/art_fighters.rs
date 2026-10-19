@@ -145,7 +145,10 @@ fn spawn(app: &mut App, p: Pose) -> Entity {
                 downed: true,
                 ..Default::default()
             },
-            Downed { since: -2.0 },
+            Downed {
+                since: -2.0,
+                push: None,
+            },
         ));
     }
     e.id()
@@ -1027,7 +1030,13 @@ fn actor(
     ));
     match scene {
         Scene::Fall => {
-            ent.insert((NpcVitals::default(), Downed { since: EVENT }));
+            ent.insert((
+                NpcVitals::default(),
+                Downed {
+                    since: EVENT,
+                    push: None,
+                },
+            ));
         }
         Scene::Revive => {
             ent.insert((
@@ -1035,7 +1044,10 @@ fn actor(
                     downed: true,
                     ..Default::default()
                 },
-                Downed { since: EVENT - 5.0 },
+                Downed {
+                    since: EVENT - 5.0,
+                    push: None,
+                },
             ));
         }
         Scene::Wounded { .. } => {

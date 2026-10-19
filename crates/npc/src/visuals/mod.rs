@@ -286,12 +286,13 @@ type FoeItem<'a> = (
 );
 
 /// The attacks telegraphed and the blows landed this step, and where the downed fighters'
-/// chests lie (kept between steps to reuse the space).
+/// chests lie and a mate's knees go beside them, from either side (kept between steps to
+/// reuse the space).
 #[derive(Default)]
 pub(crate) struct Sightings {
     attacks: Vec<(Entity, Option<Entity>, AttackKind)>,
     blows: Vec<DamageEvent>,
-    lying: Vec<(Entity, DVec3)>,
+    lying: Vec<(Entity, DVec3, [DVec3; 2])>,
 }
 
 /// Pose every stand-in from its owner's state (a fighter's also from the attacks telegraphed
@@ -311,13 +312,14 @@ pub(crate) fn pose_stand_ins(
         .extend(attacks.read().map(|a| (a.attacker, a.target, a.kind)));
     seen.blows.clear();
     seen.blows.extend(blows.read().cloned());
-    // Where each downed fighter's chest lay as last posed (a mate reviving it puts its hands
-    // there).
+    // How each downed fighter lay as last posed (a mate reviving it kneels there and puts its
+    // hands on the chest).
     seen.lying.clear();
     seen.lying.extend(owners.iter().filter_map(|item| {
         let (me, _, st, _, owner, ..) = item;
-        let chest = st.motion.lying_chest()?;
-        Some((me, owner.translation + (owner.rotation * chest).as_dvec3()))
+        let l = st.motion.lying()?;
+        let world = |p: Vec3| owner.translation + (owner.rotation * p).as_dvec3();
+        Some((me, world(l.chest), l.knees.map(world)))
     }));
     let foe = |e: Entity| {
         foes.get(e)
@@ -348,11 +350,18 @@ pub(crate) fn pose_stand_ins(
         let mut materials: Vec<(Part, StandardMaterial)> = Vec::new();
         let placed: Box<dyn Fn(Part) -> Placed> = match animal.map(|a| a.species) {
             None => {
+                // The mate it revives: its chest, and where the knees go on the side it kneels
+                // (the brain's spot is there).
                 let patient = brain
                     .filter(|b| b.action == NpcAction::Revive)
-                    .and_then(|b| b.revive)
-                    .and_then(|ally| seen.lying.iter().find(|(e, _)| *e == ally))
-                    .map(|&(_, at)| at);
+                    .and_then(|b| {
+                        let &(_, chest, knees) =
+                            seen.lying.iter().find(|l| Some(l.0) == b.revive)?;
+                        let spot = b.destination.unwrap_or(owner.translation);
+                        let near = |p: DVec3| DVec2::new(p.x - spot.x, p.z - spot.z).length();
+                        let side = usize::from(near(knees[1]) < near(knees[0]));
+                        Some((chest, knees[side]))
+                    });
                 let view = humanoid::Seen {
                     me,
                     at: owner.translation,

@@ -17,7 +17,7 @@ use crate::agent::{
     AlertLevel, AttackPhase, Defense, Npc, NpcAction, NpcBrain, NpcClock, NpcCombat, NpcMotor,
     NpcOrder, NpcSettings, NpcVitals, NpcWeapon, WeaponStyle,
 };
-use crate::combat::{Downed, begin_attack};
+use crate::combat::{Downed, Lie, begin_attack};
 use crate::faction::{Faction, Squad};
 use crate::features::ExplosiveProp;
 use crate::learning::OpponentModels;
@@ -83,18 +83,23 @@ struct Fallen {
     e: Entity,
     squad: Squad,
     faction: Faction,
-    /// Where it lies (its feet: it falls on its back).
+    /// Where it stood as it fell, and the turn of the frame it fell in (see [`Lie`]).
     pos: DVec3,
-    /// Its back (flat, unit): the chest lies that way from the feet.
-    back: Vec3,
+    frame: Quat,
+    lie: Lie,
     /// How long it has been down (its own clock, s).
     down_for: f32,
 }
 
 impl Fallen {
-    /// About where its chest lies (the hands go there).
+    /// A point of the frame it fell in, in the world.
+    fn at(&self, p: Vec3) -> DVec3 {
+        self.pos + (self.frame * p).as_dvec3()
+    }
+
+    /// About where its breastbone lies (the hands go there).
     fn chest(&self) -> DVec3 {
-        self.pos + (self.back * 0.7).as_dvec3()
+        self.at(self.lie.sternum())
     }
 }
 
@@ -131,12 +136,14 @@ pub(crate) fn think_and_act(
             });
         } else if let Some(&squad) = squad {
             let f = t.forward();
+            let lie = Lie::of(e, downed.and_then(|d| d.push));
             s.fallen.push(Fallen {
                 e,
                 squad,
                 faction: *faction,
                 pos: t.translation,
-                back: -Vec3::new(f.x, 0.0, f.z).normalize_or(Vec3::NEG_Z),
+                frame: Quat::from_rotation_y((-f.x).atan2(-f.z) + lie.yaw),
+                lie,
                 down_for: downed.map_or(0.0, |d| (clock.now - d.since) as f32),
             });
         }
@@ -160,9 +167,21 @@ pub(crate) fn think_and_act(
     {
         let now = clock.now;
         if !npc.active || vitals.downed || clock.dt <= 0.0 {
-            // Inactive NPCs leave `MoveIntent` to game code (cutscenes, scripted moves).
+            // Inactive NPCs leave `MoveIntent` to game code (cutscenes, scripted moves), and
+            // the revive they were going for to their mates.
             if vitals.downed {
                 *intent = MoveIntent::default();
+            } else if !npc.active && brain.revive.is_some() {
+                stop_revive(
+                    me,
+                    now,
+                    skills,
+                    &mut brain,
+                    &mut combat,
+                    &mut revives,
+                    false,
+                );
+                brain.switch(NpcAction::Idle, now);
             }
             continue;
         }
@@ -389,7 +408,20 @@ fn think(
     // A downed squad mate: bid for the revive; only the best placed of the squad scores it.
     let plan = squad.and_then(|&sq| {
         consider_revive(
-            me, pos, sq, faction, skills, vitals, combat, now, brain, memory, w, claims, fallen,
+            me,
+            pos,
+            sq,
+            faction,
+            skills,
+            vitals,
+            combat,
+            (now, world_now),
+            brain,
+            memory,
+            w,
+            claims,
+            fallen,
+            revives,
         )
     });
     let mut bid = None;
@@ -398,10 +430,18 @@ fn think(
         && now >= brain.revive_retry
     {
         let mine = brain.action == NpcAction::Revive && brain.revive == Some(p.ally);
-        let kneeling = mine && brain.revive_progress > 0.0;
+        let kneeling = mine && brain.revive_kneel > 0.0;
         let locked = kneeling || (mine && pos.distance(p.spot) < 3.0);
-        // Once it is at it, it sees it through unless things get bad.
-        let score = p.score + if kneeling { 0.2 } else { 0.0 };
+        // Once on its way it keeps to it, and once at it, it sees it through unless things get
+        // bad.
+        let score = p.score
+            + if kneeling {
+                0.2
+            } else if mine {
+                0.1
+            } else {
+                0.0
+            };
         if revives.bid(p.ally, me, score, world_now, locked) {
             add(NpcAction::Revive, score);
             bid = Some(p);
@@ -428,12 +468,13 @@ fn think(
         Some(p) if brain.action == NpcAction::Revive => {
             if brain.revive != Some(p.ally) {
                 brain.revive = Some(p.ally);
+                brain.revive_kneel = 0.0;
                 brain.revive_progress = 0.0;
                 brain.revive_closest = f32::MAX;
                 brain.revive_stalled = 0.0;
             }
             // The spot stays put once it kneels there.
-            if brain.revive_progress <= 0.0 || brain.destination.is_none() {
+            if brain.revive_kneel <= 0.0 || brain.destination.is_none() {
                 brain.destination = Some(p.spot);
             }
             brain.destination_reason = "revive";
@@ -463,11 +504,9 @@ struct RevivePlan {
     spot: DVec3,
 }
 
-/// Weigh reviving the nearest downed mate of its squad (the one it is already after, if still
-/// down): how far it is, how exposed its spot is to the enemies it knows (by line of sight
-/// from where they were last seen to a body kneeling there, through smoke; less for an enemy
-/// looking elsewhere, and less for one its mates are shooting at, as far as it trusts them),
-/// how much fire it is under itself, its health, and whether the squad is winning.
+/// Weigh reviving each downed mate of its squad in range (see [`weigh_revive`]) that no
+/// better placed mate is seeing to, and pick the one it most wants to (keeping to the one it
+/// is already after unless another is clearly better).
 #[allow(clippy::too_many_arguments)]
 fn consider_revive(
     me: Entity,
@@ -477,32 +516,66 @@ fn consider_revive(
     skills: &NpcSkills,
     vitals: &NpcVitals,
     combat: &NpcCombat,
-    now: f64,
+    (now, world_now): (f64, f64),
     brain: &NpcBrain,
     memory: &NpcMemory,
     w: &BrainWorld,
     claims: &[Claim],
     fallen: &[Fallen],
+    revives: &ReviveClaims,
 ) -> Option<RevivePlan> {
     if w.settings.ally_revive_secs <= 0.0 || fallen.is_empty() {
         return None;
     }
-    let mates = || {
-        fallen
-            .iter()
-            .filter(|f| f.squad == squad && f.faction == *faction)
-    };
-    let f = brain
-        .revive
-        .and_then(|a| mates().find(|f| f.e == a))
-        .or_else(|| {
-            mates().min_by(|a, b| a.chest().distance(pos).total_cmp(&b.chest().distance(pos)))
-        })?;
+    let range = w.settings.ally_revive_range;
+    let mut best: Option<(f32, RevivePlan)> = None;
+    for f in fallen.iter().filter(|f| {
+        f.squad == squad && f.faction == *faction && f.chest().distance(pos) as f32 <= range
+    }) {
+        let score = weigh_revive(
+            me, pos, f, faction, skills, vitals, combat, now, brain, memory, w, claims,
+        );
+        if score <= 0.0 || !revives.open_to(f.e, me, score, world_now) {
+            continue;
+        }
+        let keep = if brain.revive == Some(f.e) { 0.1 } else { 0.0 };
+        if best.is_none_or(|(b, _)| score + keep > b) {
+            let spot = revive_spot(f, &w.world, &w.ground);
+            best = Some((
+                score + keep,
+                RevivePlan {
+                    ally: f.e,
+                    score,
+                    spot,
+                },
+            ));
+        }
+    }
+    best.map(|(_, p)| p)
+}
+
+/// How much it wants to revive downed mate `f` (see [`revive_score`]): how far it is, how
+/// exposed its spot is to the enemies it knows (by line of sight from where they were last
+/// seen to a body kneeling there, through smoke; less for an enemy looking elsewhere, and less
+/// for one its mates are shooting at, as far as it trusts them), how much fire it is under
+/// itself, its health, and whether the squad is winning.
+#[allow(clippy::too_many_arguments)]
+fn weigh_revive(
+    me: Entity,
+    pos: DVec3,
+    f: &Fallen,
+    faction: &Faction,
+    skills: &NpcSkills,
+    vitals: &NpcVitals,
+    combat: &NpcCombat,
+    now: f64,
+    brain: &NpcBrain,
+    memory: &NpcMemory,
+    w: &BrainWorld,
+    claims: &[Claim],
+) -> f32 {
     let chest = f.chest();
     let dist = chest.distance(pos) as f32;
-    if dist > w.settings.ally_revive_range {
-        return None;
-    }
     let sight = Sight {
         world: &w.world,
         physics: physics_backend(&w.backend, &w.physics),
@@ -518,7 +591,6 @@ fn consider_revive(
     // lets go only for one closer still.
     let going = brain.action == NpcAction::Revive && brain.revive == Some(f.e);
     let (strike_me, strike_ally) = if going { (3.0, 3.0) } else { (4.5, 4.0) };
-    let mut nearest: Option<(f64, DVec3)> = None;
     for k in &memory.known {
         let ago = now - k.last_seen;
         if k.awareness < 0.5 || ago > 6.0 {
@@ -535,9 +607,6 @@ fn consider_revive(
             continue;
         }
         enemies += 1;
-        if nearest.is_none_or(|n| to_ally < n.0) {
-            nearest = Some((to_ally, k.last_position));
-        }
         // In sight now counts fully, seen a moment ago half (it may have ducked).
         let fresh = if k.visible {
             1.0
@@ -590,13 +659,7 @@ fn consider_revive(
             0.0
         },
     };
-    let (score, _) = revive_score(&case, skills);
-    let spot = revive_spot(f, pos, nearest.map(|n| n.1), &w.world);
-    Some(RevivePlan {
-        ally: f.e,
-        score,
-        spot,
-    })
+    revive_score(&case, skills).0
 }
 
 /// What a squad mate weighs before going to revive a downed ally (see [`revive_score`]).
@@ -656,21 +719,40 @@ pub(crate) fn revive_score(c: &ReviveCase, s: &NpcSkills) -> (f32, f32) {
     ((desire * near * (1.0 - risk) - hurt).max(0.0), risk)
 }
 
-/// Where to kneel to revive `f`: beside its chest, on the side away from the nearest enemy (so
-/// it faces the enemy across the body), else on the side nearer `from`; not inside an obstacle.
-fn revive_spot(f: &Fallen, from: DVec3, threat: Option<DVec3>, world: &TacticalWorld) -> DVec3 {
-    let chest = f.chest();
-    let side = Vec3::new(-f.back.z, 0.0, f.back.x) * 0.65;
-    let (a, b) = (chest + side.as_dvec3(), chest - side.as_dvec3());
-    let worse = |p: DVec3| match threat {
-        Some(t) => -p.distance(t),
-        None => p.distance(from),
+/// Where to kneel to revive `f`: where its knees go beside its chest (see [`Lie::kneel_by`]),
+/// on the side of the arm along its body (clear of the arm flung out wide and of what it
+/// flung), unless that is inside an obstacle or off an edge and the other side isn't.
+fn revive_spot(f: &Fallen, world: &TacticalWorld, ground: &Ground) -> DVec3 {
+    let feet = f.pos.y;
+    let spot = |side: usize| {
+        let p = f.at(f.lie.sternum() * Vec3::new(1.0, 0.0, 1.0) + f.lie.kneel_by(side));
+        let h = world.surface_height(p, feet, 0.5, ground);
+        let ok = (h - feet).abs() < 0.3 && !world.blocked_at(p, 0.35, 1.0, None);
+        (DVec3::new(p.x, h, p.z), ok)
     };
-    let (first, second) = if worse(a) <= worse(b) { (a, b) } else { (b, a) };
-    [first, second]
-        .into_iter()
-        .find(|p| !world.blocked_at(*p, 0.35, 1.0, None))
-        .unwrap_or(first)
+    match (spot(f.lie.along()), spot(f.lie.flung)) {
+        ((_, false), (p, true)) | ((p, _), _) => p,
+    }
+}
+
+/// How far from where its knees go a reviver may kneel down (m, flat): as close as it gets
+/// with someone standing on the spot (the body kneels over to it). Once down, it stays down
+/// as long as it is within [`REVIVE_STAY`] of it.
+pub(crate) const REVIVE_ARRIVE: f64 = 0.9;
+
+/// How far from where its knees go a kneeling reviver may be pushed and stay down (m, flat;
+/// the body kneels over to the spot from as far). Pushed farther, it gets up and goes back.
+pub(crate) const REVIVE_STAY: f64 = 1.0;
+
+/// How far it has left to go to `dest` along its path (m, flat).
+fn way_left(pos: DVec3, dest: DVec3, nav: &NavAgent) -> f32 {
+    let flat = |a: DVec3, b: DVec3| DVec2::new(b.x - a.x, b.z - a.z).length();
+    let (mut at, mut left) = (pos, 0.0);
+    for &p in &nav.path {
+        left += flat(at, p);
+        at = p;
+    }
+    (left + flat(at, dest)) as f32
 }
 
 /// How long a fighter with `skills` takes to revive a downed mate (s): `ally_revive_secs`, a
@@ -693,6 +775,11 @@ pub(crate) fn stop_revive(
 ) {
     revives.release(me);
     brain.revive = None;
+    if brain.revive_kneel > 0.0 {
+        // Off its knees first, its weapon taken up again.
+        brain.revive_rise_until = now + NpcBrain::REVIVE_STAND_SECS;
+    }
+    brain.revive_kneel = 0.0;
     brain.revive_progress = 0.0;
     if brain.destination_reason == "revive" {
         brain.destination = None;
@@ -1110,28 +1197,40 @@ fn drive(
                     let to_chest =
                         Vec3::new((chest.x - pos.x) as f32, 0.0, (chest.z - pos.z) as f32);
                     let gap = DVec2::new(spot.x - pos.x, spot.z - pos.z).length();
-                    // Kneeling already: it stays down (it doesn't shuffle after the spot).
-                    let arrived = if brain.revive_progress > 0.0 && gap < 1.2 {
+                    // (Not from a floor above or below it.)
+                    let level = (spot.y - pos.y).abs() < 1.2;
+                    // Kneeling already: it stays down (it doesn't shuffle after the spot)
+                    // unless pushed off it; then it gets up and goes back (getting down again
+                    // before its hands go back on).
+                    let arrived = if brain.revive_kneel > 0.0 && gap < REVIVE_STAY && level {
                         nav.clear();
-                        brain.revive_closest = gap as f32;
+                        brain.revive_closest = 0.0;
                         brain.revive_stalled = 0.0;
                         true
                     } else {
+                        brain.revive_kneel = 0.0;
                         if gap > 2.5 {
                             // Running to it, facing the way it goes.
                             out.look = None;
                         }
-                        if (gap as f32) + 0.3 < brain.revive_closest {
-                            brain.revive_closest = gap as f32;
+                        // Getting there along its path (round a wall, or down a ramp and back
+                        // up, is getting there too): one whose way stops getting shorter is
+                        // stuck. A longer way found counts from where it is.
+                        let left = way_left(pos, spot, nav);
+                        if left + 0.3 < brain.revive_closest {
+                            brain.revive_closest = left;
                             brain.revive_stalled = 0.0;
                         } else {
+                            if left > brain.revive_closest + 1.0 {
+                                brain.revive_closest = left;
+                            }
                             brain.revive_stalled += clock.dt;
                             stuck = brain.revive_stalled > 2.5;
                         }
-                        // Close enough to reach the chest counts (someone may stand on the
-                        // exact spot).
+                        // It kneels where it gets to (the body kneels over to the spot);
+                        // close enough counts when it gets no closer (someone stands there).
                         let arrived = follow(pos, spot, 1.0, nav, now, w, s, &mut out)
-                            || (gap < 0.9 && to_chest.length() < 1.1);
+                            || (gap < REVIVE_ARRIVE && level && brain.revive_stalled > 0.4);
                         // Every second counts: it sprints unless nearly there.
                         out.sprint = gap > 3.5;
                         arrived
@@ -1141,7 +1240,11 @@ fn drive(
                         out.sprint = false;
                         out.crouch = true;
                         out.look = Some(to_chest.normalize_or(fwd));
-                        brain.revive_progress += clock.dt;
+                        // Down on its knees, the hands on the chest; the revive counts from
+                        // then.
+                        brain.revive_kneel += clock.dt;
+                        brain.revive_progress +=
+                            (brain.revive_kneel - NpcBrain::REVIVE_KNEEL_SECS).clamp(0.0, clock.dt);
                     } else if gap < 2.5 {
                         out.look = Some(to_chest.normalize_or(fwd));
                     }
@@ -1236,7 +1339,7 @@ fn drive(
         brain.next_think = now;
     }
     // Keep a little distance from allies (don't stack); one kneeling over a mate stays put.
-    let kneeling = brain.action == NpcAction::Revive && brain.revive_progress > 0.0;
+    let kneeling = brain.action == NpcAction::Revive && brain.revive_kneel > 0.0;
     let mut push = Vec3::ZERO;
     for c in &s.claims {
         if c.e == me {
@@ -1250,6 +1353,13 @@ fn drive(
     }
     if push != Vec3::ZERO && out.dash_to.is_none() && !kneeling {
         out.direction = (out.direction + push).clamp_length_max(1.0);
+    }
+    if now < brain.revive_rise_until {
+        // Getting up off its knees: it moves once it is up.
+        out.direction = Vec3::ZERO;
+        out.sprint = false;
+        out.crouch = false;
+        out.dash_to = None;
     }
     *intent = out;
 }

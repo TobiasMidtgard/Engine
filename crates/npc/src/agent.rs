@@ -424,19 +424,43 @@ pub struct NpcBrain {
     pub low_cover: bool,
     /// The downed squad mate it is going to revive (with [`NpcAction::Revive`]).
     pub revive: Option<Entity>,
-    /// Seconds it has knelt over that squad mate so far (its own clock); the squad mate gets
-    /// up when this reaches its revive time. Lost if the revive is broken off.
+    /// Seconds it has knelt beside that squad mate so far (its own clock): the first
+    /// [`NpcBrain::REVIVE_KNEEL_SECS`] it gets down on its knees, its weapon set down, and puts
+    /// its hands on the chest. Lost if the revive is broken off.
+    pub revive_kneel: f32,
+    /// Seconds its hands have been on that squad mate's chest so far (its own clock): the
+    /// squad mate gets up when this reaches its revive time. Lost if the revive is broken off.
     pub revive_progress: f32,
     /// After breaking off a revive, it doesn't try one again before this time (NPC clock).
     pub revive_retry: f64,
-    /// On the way to revive: the closest it has come to its kneeling spot (m), and how long it
-    /// has been on its way since it last got closer (s; not counting time spent defending).
-    /// One that stops getting closer gives up.
+    /// On the way to revive: the shortest way it has had left to its kneeling spot (m, along
+    /// its path), and how long it has been on its way since that last got shorter (s). One
+    /// that stops getting closer gives up.
     pub revive_closest: f32,
     pub revive_stalled: f32,
+    /// Getting up from kneeling by a mate (done, or broken off), it stays where it is until
+    /// this time, taking its weapon up again (NPC clock; see [`NpcBrain::REVIVE_STAND_SECS`]).
+    pub revive_rise_until: f64,
 }
 
 impl NpcBrain {
+    /// How long a reviver takes to get down beside a downed squad mate, set its weapon down
+    /// and put its hands on the chest (s); the revive counts from then.
+    pub const REVIVE_KNEEL_SECS: f32 = 1.2;
+
+    /// How long a reviver takes to get up off its knees and take its weapon up again before it
+    /// moves (s).
+    pub const REVIVE_STAND_SECS: f64 = 0.85;
+
+    /// How long a revived fighter takes to get up off the ground (s, the slowest: a bow
+    /// fighter); it revives nobody before then.
+    pub const GET_UP_SECS: f64 = 2.3;
+
+    /// Down on its knees by a downed squad mate (getting down, or its hands on the chest).
+    pub fn kneeling(&self) -> bool {
+        self.action == NpcAction::Revive && self.revive_kneel > 0.0
+    }
+
     /// Deterministic per-NPC random number in 0..1.
     pub fn random(&mut self) -> f32 {
         self.rng_state = hash_u64(self.rng_state.wrapping_add(0x9e37_79b9_7f4a_7c15));

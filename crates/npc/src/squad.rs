@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use engine_core::prelude::*;
 use engine_world::NoiseEvent;
 
-use crate::agent::{NpcAction, NpcBrain, NpcClock, NpcVitals, NpcWeapon, WeaponStyle};
+use crate::agent::{Npc, NpcAction, NpcBrain, NpcClock, NpcVitals, NpcWeapon, WeaponStyle};
 use crate::faction::{Faction, Squad};
 use crate::perception::NpcMemory;
 use crate::skills::NpcSkills;
@@ -109,6 +109,18 @@ impl ReviveClaims {
     /// How long a claim lasts without being renewed (world seconds).
     const SECS: f64 = 1.0;
 
+    /// How much better placed a mate must be to take a claim over (revive score).
+    const MARGIN: f32 = 0.05;
+
+    /// Whether `me` bidding `score` to revive `downed` at world time `now` would hold the
+    /// claim (see [`ReviveClaims::bid`]): nobody else holds it, or they are not there yet
+    /// and `me` is clearly better placed.
+    pub fn open_to(&self, downed: Entity, me: Entity, score: f32, now: f64) -> bool {
+        self.claims.get(&downed).is_none_or(|c| {
+            c.until <= now || c.reviver == me || (!c.locked && score > c.score + 0.05)
+        })
+    }
+
     /// `me` bids `score` to revive `downed` at world time `now` (`locked`: it is there and
     /// nobody should take over). Returns true if `me` holds the claim now.
     pub fn bid(&mut self, downed: Entity, me: Entity, score: f32, now: f64, locked: bool) -> bool {
@@ -119,8 +131,7 @@ impl ReviveClaims {
             locked,
         };
         let c = self.claims.entry(downed).or_insert(mine);
-        let free = c.until <= now || c.reviver == me || (!c.locked && score > c.score + 0.05);
-        if free {
+        if c.until <= now || c.reviver == me || (!c.locked && score > c.score + Self::MARGIN) {
             *c = mine;
         }
         c.reviver == me
@@ -176,7 +187,7 @@ type MemberItem<'a> = (
     &'a Transform,
     &'a NpcSkills,
     &'a NpcWeapon,
-    &'a NpcClock,
+    (&'a NpcClock, &'a Npc),
     &'a NpcVitals,
     &'a mut NpcBrain,
     &'a mut NpcMemory,
@@ -208,11 +219,13 @@ pub(crate) fn plan_squads(
     let mut sightings: Vec<(Squad, Entity, Entity, Faction, DVec3, Vec3, DVec3)> = Vec::new();
     // Squads with a member kneeling over (or on its way to) a downed mate.
     let mut reviving: Vec<Squad> = Vec::new();
-    for (e, squad, _, t, skills, weapon, _, vitals, brain, memory) in q.iter() {
+    for (e, squad, _, t, skills, weapon, (clock, npc), vitals, brain, memory) in q.iter() {
         if vitals.downed {
             continue;
         }
-        if brain.action == NpcAction::Revive && !reviving.contains(squad) {
+        // (One handed to game code or stopped in time revives nobody.)
+        let acting = npc.active && clock.dt > 0.0;
+        if brain.action == NpcAction::Revive && acting && !reviving.contains(squad) {
             reviving.push(*squad);
         }
         members.push(Member {
@@ -238,7 +251,7 @@ pub(crate) fn plan_squads(
     }
     // Callouts.
     let mut shouted: Vec<Entity> = Vec::new();
-    for (e, squad, _, t, skills, _, clock, vitals, mut brain, mut memory) in q.iter_mut() {
+    for (e, squad, _, t, skills, _, (clock, _), vitals, mut brain, mut memory) in q.iter_mut() {
         if vitals.downed {
             continue;
         }

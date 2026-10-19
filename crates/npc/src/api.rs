@@ -345,7 +345,8 @@ fn inspect(world: &mut World, args: Value) -> Result<Value, String> {
         "revive".into(),
         json!(brain.revive.map(|a| json!({
             "ally": a.to_bits(),
-            "kneeling_secs": round(brain.revive_progress as f64),
+            "kneeling_secs": round(brain.revive_kneel as f64),
+            "hands_on_secs": round(brain.revive_progress as f64),
         }))),
     );
     let mut scores: Vec<_> = brain.scores.clone();
