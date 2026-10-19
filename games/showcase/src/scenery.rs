@@ -73,8 +73,25 @@ pub struct Library {
     pub houses: Vec<HouseHandles>,
     pub lamp: LampHandles,
     pub props: Props,
+    /// Dry-stone wall segment variants and the heads that end a run.
+    pub walls: Vec<WallHandles>,
+    pub wall_heads: Vec<(Handle<Mesh>, Handle<Mesh>)>,
     /// The spaceport's 600 m tower.
     pub tower: crate::tower::TowerKit,
+}
+
+/// One dry-stone wall segment variant (see [`crate::walls`]).
+pub struct WallHandles {
+    pub near: Handle<Mesh>,
+    pub mid: Handle<Mesh>,
+    /// For the last segment of a run (its coping leaves room for the head).
+    pub near_end: Handle<Mesh>,
+    pub mid_end: Handle<Mesh>,
+    /// The core: dark behind the stones (the run's last segment's stops inside the head),
+    /// stone-colored from afar.
+    pub core: Handle<Mesh>,
+    pub core_end: Handle<Mesh>,
+    pub core_far: Handle<Mesh>,
 }
 
 impl Library {
@@ -200,6 +217,26 @@ pub fn build_library(
         near: (meshes.add(lamp.0.0), meshes.add(lamp.0.1)),
         far: (meshes.add(lamp.1.0), meshes.add(lamp.1.1)),
     };
+    let walls = (0..4)
+        .map(|i| {
+            let w = crate::walls::segment(900 + i);
+            WallHandles {
+                near: meshes.add(w.near),
+                mid: meshes.add(w.mid),
+                near_end: meshes.add(w.near_end),
+                mid_end: meshes.add(w.mid_end),
+                core: meshes.add(w.core),
+                core_end: meshes.add(w.core_end),
+                core_far: meshes.add(w.core_far),
+            }
+        })
+        .collect();
+    let wall_heads = (0..3)
+        .map(|i| {
+            let h = crate::walls::head(950 + i);
+            (meshes.add(h.near), meshes.add(h.mid))
+        })
+        .collect();
     engine::core::log::info!(
         "village: {} house types ({} triangles near, {} far), built in {:.2} s",
         houses.len(),
@@ -219,6 +256,8 @@ pub fn build_library(
         houses,
         lamp,
         props,
+        walls,
+        wall_heads,
         tower: tower_job.finish(meshes, materials, images),
     }
 }
@@ -1255,8 +1294,14 @@ pub fn spawn_village(commands: &mut Commands, lib: &Library, land: &Landscape, r
 }
 
 /// Hedgerows along the farm fields and ripe grain in the wheat and barley fields near the
-/// village.
-pub fn spawn_farms(commands: &mut Commands, lib: &Library, land: &Landscape, rng: &mut Rng) {
+/// village. Returns the hedged edges (corner to corner), which get no wall.
+pub fn spawn_farms(
+    commands: &mut Commands,
+    lib: &Library,
+    land: &Landscape,
+    rng: &mut Rng,
+) -> Vec<(DVec2, DVec2)> {
+    let mut hedged = Vec::new();
     for (cell, crop) in &land.fields {
         let corners = field_corners(*cell);
         // Hedges on some edges.
@@ -1265,6 +1310,7 @@ pub fn spawn_farms(commands: &mut Commands, lib: &Library, land: &Landscape, rng
                 continue;
             }
             let (a, b) = (corners[k], corners[(k + 1) % 4]);
+            hedged.push((a, b));
             let len = (b - a).length();
             let steps = (len / 4.0) as i32;
             for i in 0..steps {
@@ -1326,6 +1372,355 @@ pub fn spawn_farms(commands: &mut Commands, lib: &Library, land: &Landscape, rng
                     ),
                 ));
             }
+        }
+    }
+    hedged
+}
+
+/// Field grid cells within this many cells of the middle can be walled.
+const WALL_CELLS: i32 = 17;
+/// Walls end here, m from the middle of the valley.
+const WALL_RADIUS: f64 = 700.0;
+/// Stones up close within this distance, m; only their fronts out to the second.
+const WALL_NEAR: f32 = 30.0;
+const WALL_MID: f32 = 160.0;
+/// Shorter runs of wall than this many segments are left out: stubs read as rubble.
+const WALL_MIN_RUN: usize = 3;
+/// Wall colliders exist within this distance of a focus point, m (and go beyond it plus
+/// [`WALL_COLLIDER_SLACK`]): there are well over a thousand segments in the valley, and every
+/// collider added or removed anywhere has the NPC tactical world rebuilt.
+const WALL_COLLIDER_DISTANCE: f64 = 150.0;
+const WALL_COLLIDER_SLACK: f64 = 20.0;
+
+/// One straight dry-stone wall segment, laid on the ground.
+#[derive(Debug, Clone, Copy)]
+pub struct WallSegment {
+    /// Middle of the segment's foot, on the ground.
+    pub pos: DVec3,
+    /// Turns the segment's build frame (along X) onto the ground, following its slope.
+    pub rot: Quat,
+    /// Length along the slope, m.
+    pub len: f32,
+    /// Which segment variant, and whether it is mirrored.
+    pub variant: usize,
+    pub mirrored: bool,
+    /// The first or last of its run: built with room for the head at its +X end (mirrored
+    /// for the first, so that end is the run's start).
+    pub end: bool,
+}
+
+/// The head ending a run of wall: its outer face at `pos`, facing along `rot`'s X.
+#[derive(Debug, Clone, Copy)]
+pub struct WallHeadPlace {
+    pub pos: DVec3,
+    pub rot: Quat,
+    pub variant: usize,
+}
+
+/// Where the dry-stone walls go.
+#[derive(Debug, Default)]
+pub struct WallPlan {
+    pub segments: Vec<WallSegment>,
+    pub heads: Vec<WallHeadPlace>,
+}
+
+/// Where the dry-stone walls go: along the field grid, on most edges of the farm fields that
+/// have no hedge and on many between the open pastures around them, so the valley floor reads
+/// as an old enclosed patchwork. Gateways here and there; none across roads, streams, zones,
+/// the lake or steep ground. Every run is at least [`WALL_MIN_RUN`] segments long and ends in
+/// a head at both ends.
+pub fn plan_walls(
+    land: &Landscape,
+    hedged: &[(DVec2, DVec2)],
+    variants: usize,
+    head_variants: usize,
+) -> WallPlan {
+    use crate::walls::SEGMENT;
+    // Its own stream, so the scenery spawned after the walls keeps its layout.
+    let mut rng = Rng::new(land.seed ^ 0x5707_e3a1);
+    let is_field = |cell: (i32, i32)| land.fields.iter().any(|f| f.0 == cell);
+    // Gentle, open ground a pasture could be on.
+    let open = |cell: (i32, i32)| {
+        let c = field_corners(cell);
+        let center = (c[0] + c[2]) * 0.5;
+        let r = center.length();
+        let heights = c.map(|p| land.height(p.x, p.y));
+        let relief = heights.iter().cloned().fold(f64::MIN, f64::max)
+            - heights.iter().cloned().fold(f64::MAX, f64::min);
+        (110.0..WALL_RADIUS).contains(&r)
+            && relief < 9.0
+            && land.woodland(center.x, center.y) < 0.3
+            && !in_zone(center.x, center.y, 10.0)
+            && (center - land.lake.center).length() > land.lake.radius * 1.6
+            && (center - land.cave.center).length() > land.cave.hill_radius
+    };
+    let is_hedged = |a: DVec2, b: DVec2| {
+        hedged.iter().any(|&(p, q)| {
+            (p.distance(a) < 0.5 && q.distance(b) < 0.5)
+                || (p.distance(b) < 0.5 && q.distance(a) < 0.5)
+        })
+    };
+    let blocked = |p: DVec2| {
+        land.road_weight(p.x, p.y) > 0.0
+            || in_zone(p.x, p.y, 6.0)
+            || land.pad_weight(p.x, p.y) > 0.5
+            || land.lake_depth(p.x, p.y) > -0.6
+            || p.length() > WALL_RADIUS + 40.0
+    };
+    let pick = |run: u64, i: u64, salt: u64, n: usize| {
+        ((crate::walls::segment_hash(run * 4 + salt, i) * n as f32) as usize).min(n.max(1) - 1)
+    };
+    let mut plan = WallPlan::default();
+    for iu in -WALL_CELLS..=WALL_CELLS {
+        for iv in -WALL_CELLS..=WALL_CELLS {
+            let cell = (iu, iv);
+            let c = field_corners(cell);
+            // The cell's edges on its low-v and low-u sides: each grid edge once.
+            for (a, b, other) in [(c[0], c[1], (iu, iv - 1)), (c[3], c[0], (iu - 1, iv))] {
+                let fields = is_field(cell) as u8 + is_field(other) as u8;
+                let keep = match fields {
+                    0 if open(cell) && open(other) => 0.6,
+                    0 => 0.0,
+                    _ if open(cell) || open(other) || fields == 2 => 0.85,
+                    _ => 0.5,
+                };
+                // Draw first, so the stream doesn't depend on the checks.
+                let roll = rng.f32();
+                let gate = rng.chance(0.4);
+                let gate_at = rng.f32();
+                if roll >= keep || is_hedged(a, b) {
+                    continue;
+                }
+                let len = (b - a).length();
+                let n = (len / SEGMENT as f64).ceil() as i32;
+                let step = len / n as f64;
+                let dir = (b - a) / len;
+                let gate = gate.then(|| 1 + (gate_at * (n - 2) as f32) as i32);
+                let yaw = Quat::from_rotation_y((-dir.y).atan2(dir.x) as f32);
+                let run_id = ((iu + 100) * 1000 + iv + 100) as u64 * 2 + (other.0 != iu) as u64;
+                // Each segment that can stand, then the runs of them long enough to keep.
+                let laid: Vec<Option<(DVec3, Quat, f32)>> = (0..n)
+                    .map(|i| {
+                        let p0 = a + dir * (i as f64 * step);
+                        let p1 = p0 + dir * step;
+                        let pm = (p0 + p1) * 0.5;
+                        if gate == Some(i)
+                            || [p0, pm, p1].into_iter().any(blocked)
+                            || near_scarp(land, pm.x, pm.y)
+                        {
+                            return None;
+                        }
+                        let (h0, h1) = (land.height(p0.x, p0.y), land.height(p1.x, p1.y));
+                        if (h1 - h0).abs() > step * 0.4 {
+                            return None;
+                        }
+                        let hm = land.height(pm.x, pm.y);
+                        let pitch = Quat::from_rotation_z(((h1 - h0) / step).atan() as f32);
+                        let y = ((h0 + h1) * 0.5).min(hm + 0.05);
+                        // Pitched along the slope, it must be as long as the slope is, or
+                        // neighbors part on a grade.
+                        let len = (step * step + (h1 - h0) * (h1 - h0)).sqrt() as f32;
+                        Some((DVec3::new(pm.x, y, pm.y), yaw * pitch, len))
+                    })
+                    .collect();
+                let mut i = 0;
+                while i < laid.len() {
+                    let start = i;
+                    while i < laid.len() && laid[i].is_some() {
+                        i += 1;
+                    }
+                    let run = &laid[start..i];
+                    i += 1;
+                    if run.len() < WALL_MIN_RUN {
+                        continue;
+                    }
+                    let last = run.len() - 1;
+                    for (k, &(pos, rot, len)) in run.iter().flatten().enumerate() {
+                        let idx = (start + k) as u64;
+                        let variant = pick(run_id, idx, 0, variants);
+                        let (end, mirrored) = match k {
+                            0 => (true, true),
+                            k if k == last => (true, false),
+                            // Mirrored half the time, for more variety from a few variants.
+                            _ => (false, (variant + idx as usize) % 2 == 1),
+                        };
+                        plan.segments.push(WallSegment {
+                            pos,
+                            rot,
+                            len,
+                            variant,
+                            mirrored,
+                            end,
+                        });
+                    }
+                    let (p_first, r_first, l_first) = run[0].expect("a run is laid segments");
+                    let (p_last, r_last, l_last) = run[last].expect("a run is laid segments");
+                    for (pos, rot, len, salt) in [
+                        (
+                            p_first,
+                            r_first * Quat::from_rotation_y(std::f32::consts::PI),
+                            l_first,
+                            1,
+                        ),
+                        (p_last, r_last, l_last, 2),
+                    ] {
+                        let x = (rot * Vec3::X * len * 0.5).as_dvec3();
+                        plan.heads.push(WallHeadPlace {
+                            pos: pos + x,
+                            rot,
+                            variant: pick(run_id, start as u64, salt, head_variants),
+                        });
+                    }
+                }
+            }
+        }
+    }
+    plan
+}
+
+/// A wall segment's box collider, there while a focus point is near ([`stream_wall_colliders`]).
+#[derive(Component, Clone, Copy)]
+pub struct WallCollider {
+    pub half: Vec3,
+}
+
+/// The dry-stone walls ([`plan_walls`]): the stones, the core, a box collider per segment
+/// (streamed in near the action) and the heads that end the runs.
+pub fn spawn_walls(
+    commands: &mut Commands,
+    lib: &Library,
+    land: &Landscape,
+    hedged: &[(DVec2, DVec2)],
+) {
+    use crate::walls::{HALF_FOOT, HEIGHT, SEGMENT, SINK};
+    let plan = plan_walls(land, hedged, lib.walls.len(), lib.wall_heads.len());
+    let stone = lib.mats.village.stone;
+    for seg in &plan.segments {
+        let w = &lib.walls[seg.variant];
+        let flip = if seg.mirrored { -1.0 } else { 1.0 };
+        let tf = Transform::from_translation(seg.pos)
+            .with_rotation(seg.rot)
+            .with_scale(Vec3::new(flip * seg.len / SEGMENT, 1.0, 1.0));
+        let (near, mid, core) = if seg.end {
+            (w.near_end, w.mid_end, w.core_end)
+        } else {
+            (w.near, w.mid, w.core)
+        };
+        commands.spawn((
+            tf,
+            MeshRenderer::new(near, stone),
+            Lod::swap_then_hide(near, mid, WALL_NEAR, WALL_MID),
+        ));
+        commands.spawn((
+            tf,
+            MeshRenderer::new(core, stone),
+            Lod::swap_then_hide(core, w.core_far, WALL_MID, f32::INFINITY),
+        ));
+        let mid_y = (HEIGHT - SINK) * 0.5;
+        commands.spawn((
+            Transform::from_translation(seg.pos + (seg.rot * Vec3::Y * mid_y).as_dvec3())
+                .with_rotation(seg.rot),
+            WallCollider {
+                half: Vec3::new(seg.len * 0.5, (HEIGHT + SINK) * 0.5, HALF_FOOT * 0.75),
+            },
+        ));
+    }
+    for head in &plan.heads {
+        let (near, mid) = lib.wall_heads[head.variant];
+        commands.spawn((
+            Transform::from_translation(head.pos).with_rotation(head.rot),
+            MeshRenderer::new(near, stone),
+            Lod::swap_then_hide(near, mid, WALL_NEAR, WALL_MID),
+        ));
+    }
+    let nearest = plan
+        .segments
+        .iter()
+        .map(|s| s.pos)
+        .min_by(|a, b| a.length_squared().total_cmp(&b.length_squared()))
+        .unwrap_or_default();
+    engine::core::log::info!(
+        "scenery: {} dry-stone wall segments in {} runs, the nearest to the plaza at ({:.0}, {:.0})",
+        plan.segments.len(),
+        plan.heads.len() / 2,
+        nearest.x,
+        nearest.z
+    );
+}
+
+/// Gives wall segments near a focus point their colliders and takes them from those far off,
+/// twice a second.
+pub fn stream_wall_colliders(
+    mut commands: Commands,
+    mut timer: Local<f32>,
+    time: Res<Time>,
+    focus: Option<Res<engine::world::FocusPoints>>,
+    walls: Query<(
+        Entity,
+        &WallCollider,
+        &Transform,
+        Has<engine::world::physics::Collider>,
+    )>,
+) {
+    *timer -= time.real_delta_secs();
+    if *timer > 0.0 {
+        return;
+    }
+    *timer = 0.5;
+    let Some(focus) = focus.filter(|f| !f.points.is_empty()) else {
+        return;
+    };
+    for (e, wall, t, has) in &walls {
+        let d = focus.distance(t.translation);
+        if !has && d < WALL_COLLIDER_DISTANCE {
+            commands
+                .entity(e)
+                .insert(engine::world::physics::Collider::cuboid(wall.half));
+        } else if has && d > WALL_COLLIDER_DISTANCE + WALL_COLLIDER_SLACK {
+            commands
+                .entity(e)
+                .remove::<engine::world::physics::Collider>();
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn walls_enclose_the_valley_floor_but_keep_off_roads_zones_and_water() {
+        let land = crate::landscape::shared();
+        let plan = plan_walls(land, &[], 4, 3);
+        assert!(
+            plan.segments.len() > 1000,
+            "only {} segments",
+            plan.segments.len()
+        );
+        // Two heads a run, and no run shorter than the minimum.
+        assert_eq!(plan.heads.len() % 2, 0);
+        assert!(plan.segments.len() >= plan.heads.len() / 2 * WALL_MIN_RUN);
+        for h in &plan.heads {
+            assert!(h.variant < 3);
+            assert!(
+                !in_zone(h.pos.x, h.pos.z, 3.0),
+                "head in a zone at {:?}",
+                h.pos
+            );
+        }
+        for s in &plan.segments {
+            let (x, z) = (s.pos.x, s.pos.z);
+            assert_eq!(land.road_weight(x, z), 0.0, "on a road at {x:.0}, {z:.0}");
+            assert!(!in_zone(x, z, 6.0), "in a zone at {x:.0}, {z:.0}");
+            assert!(
+                land.lake_depth(x, z) < -0.6,
+                "in the lake at {x:.0}, {z:.0}"
+            );
+            assert!(s.variant < 4);
+            assert!(
+                (s.pos.y - land.height(x, z)).abs() < 0.5,
+                "off the ground at {x:.0}, {z:.0}"
+            );
         }
     }
 }
