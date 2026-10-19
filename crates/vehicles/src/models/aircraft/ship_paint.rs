@@ -6,6 +6,7 @@
 use engine_core::math::{Vec2, Vec3};
 use engine_render::Image;
 
+use super::ship_build::{MAIN_WELL, NOSE_WELL};
 use super::ship_parts::{HATCH, HATCH_R, HOVER_FLANGE, WINDOWS};
 use super::spaceplane::*;
 use super::toolkit::*;
@@ -355,11 +356,8 @@ pub fn paint_hull(atlas: &Atlas, h: &Hull, lay: &Layout) -> Baked {
                 paint.height -= 0.002 * s;
                 paint.color = mix(paint.color, Vec3::splat(0.003), s);
             }
-            let wells = [
-                (Vec2::new(0.0, -7.5), Vec2::new(0.40, 0.78)),
-                (Vec2::new(2.12, 4.0), Vec2::new(0.36, 0.92)),
-                (Vec2::new(-2.12, 4.0), Vec2::new(0.36, 0.92)),
-            ];
+            let mirror = Vec2::new(-1.0, 1.0);
+            let wells = [NOSE_WELL, MAIN_WELL, (MAIN_WELL.0 * mirror, MAIN_WELL.1)];
             for (c, half) in wells {
                 let d = rounded_rect(Vec2::new(p.x, z) - c, half, 0.06);
                 if d < texel {
@@ -374,7 +372,8 @@ pub fn paint_hull(atlas: &Atlas, h: &Hull, lay: &Layout) -> Baked {
             }
             // Nose gear stencil on the belly ahead of the well.
             let unit = 0.05 / 6.0;
-            let tq = Vec2::new(-p.x / unit + nose_gear.width() * 0.5, (-(z + 8.42)) / unit);
+            let ahead = NOSE_WELL.0.y - NOSE_WELL.1.y - 0.12;
+            let tq = Vec2::new(-p.x / unit + nose_gear.width() * 0.5, (-(z - ahead)) / unit);
             let k = text(&nose_gear, tq, unit, texel);
             paint.color = mix(paint.color, Vec3::splat(0.6), k);
         }
@@ -447,10 +446,11 @@ pub fn paint_wing(atlas: &Atlas, lay: &Layout) -> Baked {
                     paint.color = mix(paint.color, Vec3::splat(0.008), tee);
                 } else if lower {
                     black_tile(&mut paint, Vec2::new(s, p.z), 0.152, texel, 8);
-                    // Main gear well and door outline at the root.
+                    // The main gear well's outboard edge at the root.
+                    let (c, half) = MAIN_WELL;
                     let d = rounded_rect(
-                        Vec2::new(s, p.z) - Vec2::new(2.45, 4.0),
-                        Vec2::new(0.30, 0.92),
+                        Vec2::new(s, p.z) - Vec2::new(c.x + half.x - 0.15, c.y),
+                        Vec2::new(0.15, half.y),
                         0.06,
                     );
                     let k = band(-d, 0.0, 9.0, texel);

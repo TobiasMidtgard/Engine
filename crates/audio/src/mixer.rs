@@ -463,7 +463,8 @@ impl Mixer {
             reverb_wet: 0.15,
             reverb_target: (0.35, 0.5, 0.15),
             send_buf: [0.0; BLOCK * 2],
-            limiter: Limiter::new(fs, db(-1.0)),
+            // Under -1 dBFS with room to spare: the peaks between samples run higher.
+            limiter: Limiter::new(fs, db(-1.5)),
             listener: Listener {
                 position: DVec3::ZERO,
                 right: Vec3::X,

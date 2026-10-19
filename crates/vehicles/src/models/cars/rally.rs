@@ -11,7 +11,7 @@ use engine_core::math::{Vec2, Vec3};
 use super::details::Proj;
 use super::glass::Pane;
 use super::sdf::*;
-use super::sports::Feature;
+use super::sports::{Feature, LIP};
 
 pub const GROUND: f32 = 0.45;
 pub const FRONT_AXLE: f32 = -1.25;
@@ -334,9 +334,11 @@ impl Body {
         f
     }
 
-    /// Negative inside carved openings (more than 4 mm below the plain skin).
+    /// Negative inside carved openings (more than 4 mm below the plain skin). Continuous
+    /// across each opening's rounded lip: the skin is only skipped (1.0) well clear of every
+    /// opening, where it is never below the plain surface anyway.
     pub fn pocket_field(&self, p: Vec3) -> f32 {
-        if self.features.at(self, p).is_none() {
+        if self.features.near(self, p, LIP).is_none() {
             return 1.0;
         }
         self.shell_plain(p) + 0.004
@@ -512,35 +514,44 @@ impl Features {
 
     /// Which opening a point (below the plain surface) belongs to.
     pub fn at(&self, body: &Body, p: Vec3) -> Option<Feature> {
+        self.near(body, p, 0.0)
+    }
+
+    /// The opening nearest `p` whose outline, grown by `margin` (m), contains it.
+    pub fn near(&self, body: &Body, p: Vec3, margin: f32) -> Option<Feature> {
         let ax = p.x.abs();
         let h = p.y + GROUND;
+        let mut best: Option<(f32, Feature)> = None;
+        let mut consider = |d: f32, f: Feature| {
+            if d < margin && best.is_none_or(|(b, _)| d < b) {
+                best = Some((d, f));
+            }
+        };
         if p.z < -1.6 {
             let fx = Vec2::new(ax, h);
-            if sd_polygon(fx, &self.headlight) < 0.012 {
-                return Some(Feature::Headlight);
-            }
-            if sd_polygon(Vec2::new(p.x, h), &self.grille) < 0.025
-                || sd_polygon(Vec2::new(p.x, h), &self.intake) < 0.025
-            {
-                return Some(Feature::Grille);
-            }
-            if sd_polygon(fx, &self.corner) < 0.02 {
-                return Some(Feature::Intake);
-            }
+            let front = Vec2::new(p.x, h);
+            consider(sd_polygon(fx, &self.headlight) - 0.012, Feature::Headlight);
+            consider(sd_polygon(front, &self.grille) - 0.025, Feature::Grille);
+            consider(sd_polygon(front, &self.intake) - 0.025, Feature::Grille);
+            consider(sd_polygon(fx, &self.corner) - 0.02, Feature::Intake);
         }
-        if h > 0.8 && sd_polygon(Vec2::new(ax, p.z), &self.louvre) < 0.02 {
-            return Some(Feature::Vent);
+        if h > 0.8 {
+            consider(
+                sd_polygon(Vec2::new(ax, p.z), &self.louvre) - 0.02,
+                Feature::Vent,
+            );
         }
-        if h > 1.3 && self.roof_vent_sd(p) < 0.015 {
-            return Some(Feature::Vent);
+        if h > 1.3 {
+            consider(self.roof_vent_sd(p) - 0.015, Feature::Vent);
+            consider(Self::scoop_mouth(body, p) - 0.02, Feature::Vent);
         }
-        if h > 1.3 && Self::scoop_mouth(body, p) < 0.02 {
-            return Some(Feature::Vent);
+        if p.z > 1.7 {
+            consider(
+                (Vec2::new(p.x, h) - self.exhaust.0).length() - self.exhaust.1 - 0.02,
+                Feature::Exhaust,
+            );
         }
-        if p.z > 1.7 && (Vec2::new(p.x, h) - self.exhaust.0).length() < self.exhaust.1 + 0.02 {
-            return Some(Feature::Exhaust);
-        }
-        None
+        best.map(|(_, f)| f)
     }
 
     /// Carve the openings into the shell field given the plain value.
@@ -553,20 +564,20 @@ impl Features {
             rmax(d, -region, r)
         };
         if p.z < -1.7 {
-            let fx = Vec2::new(ax, h);
+            // The nose openings are read on the skin under `p`, so their walls stand square to
+            // the raked panels round them.
+            let q = if plain > -0.15 && self.near(body, p, 0.2).is_some() {
+                on_surface(&|q| body.shell_plain(q), p, plain)
+            } else {
+                p
+            };
+            let (fx, front) = (
+                Vec2::new(q.x.abs(), q.y + GROUND),
+                Vec2::new(q.x, q.y + GROUND),
+            );
             d = pocket(d, sd_polygon(fx, &self.headlight) - 0.004, 0.07, 0.01);
-            d = pocket(
-                d,
-                sd_polygon(Vec2::new(p.x, h), &self.grille) - 0.02,
-                0.10,
-                0.012,
-            );
-            d = pocket(
-                d,
-                sd_polygon(Vec2::new(p.x, h), &self.intake) - 0.02,
-                0.10,
-                0.014,
-            );
+            d = pocket(d, sd_polygon(front, &self.grille) - 0.02, 0.10, 0.012);
+            d = pocket(d, sd_polygon(front, &self.intake) - 0.02, 0.10, 0.014);
             d = pocket(d, sd_polygon(fx, &self.corner) - 0.012, 0.08, 0.01);
         }
         if h > 0.8 && (-1.7..-1.1).contains(&p.z) {

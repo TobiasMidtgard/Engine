@@ -15,10 +15,12 @@ pub mod import;
 pub mod model;
 pub mod muscle;
 pub mod procedural;
+pub mod ragdoll;
 pub mod retarget;
 mod shift;
 pub mod skeleton;
 pub mod skin;
+pub mod stunt;
 pub mod xform;
 
 pub use animator::{AnimationLibrary, Animator, AnimatorSettings, PoseEdit};
@@ -33,6 +35,7 @@ pub use muscle::{MorphWeights, Muscle, MuscleDriver, MuscleRig};
 pub use procedural::gait::{GaitLeg, GaitStage, LeggedGait};
 pub use procedural::spring::{SpringChainDef, SpringChains};
 pub use procedural::vehicle::{VehicleRig, WheelRig};
+pub use ragdoll::{RagdollDef, RagdollPart, RagdollRig};
 pub use retarget::{HandGrip, HandRig, Retarget, RetargetMap, Retargeter};
 pub use skeleton::Skeleton;
 pub use skin::feature::SkinningFeature;
@@ -52,14 +55,16 @@ use serde_json::{Value, json};
 /// and queues triggers, [`AnimSet::Graph`] advances clips and graphs (and applies root
 /// motion). In `PostUpdate`, once world transforms are final: [`AnimSet::Procedural`] (gaits,
 /// vehicle suspension, spring chains), [`AnimSet::Ik`] (feet, look-at, reach),
-/// [`AnimSet::Muscles`], then [`AnimSet::Output`] publishes `SkeletonPose`, skinning
-/// matrices, bone attachments and events.
+/// [`AnimSet::Ragdoll`] (physical bodies take over the pose), [`AnimSet::Muscles`], then
+/// [`AnimSet::Output`] publishes `SkeletonPose`, skinning matrices, bone attachments and
+/// events.
 #[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum AnimSet {
     Setup,
     Graph,
     Procedural,
     Ik,
+    Ragdoll,
     Muscles,
     Output,
 }
@@ -72,12 +77,14 @@ impl Plugin for AnimationPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<AnimationLibrary>()
             .init_resource::<ik::IkSurfaces>()
+            .init_resource::<ragdoll::RagdollDefs>()
             .init_asset::<SkinnedMesh>()
             // Written and read here; registering them again is a no-op with WorldPlugin.
             .add_message::<AnimationTrigger>()
             .add_message::<AnimationEvent>()
             .add_message::<GroundContact>()
             .add_message::<NoiseEvent>()
+            .add_message::<engine_world::physics::ContactEvent>()
             .add_render_feature(SkinningFeature::default());
         register_types(app);
         register_api(app);
@@ -95,6 +102,7 @@ impl Plugin for AnimationPlugin {
             (
                 AnimSet::Procedural,
                 AnimSet::Ik,
+                AnimSet::Ragdoll,
                 AnimSet::Muscles,
                 AnimSet::Output,
             )
@@ -135,6 +143,13 @@ impl Plugin for AnimationPlugin {
                 (ik::foot_ik_system, ik::look_at_system, ik::reach_ik_system)
                     .chain()
                     .in_set(AnimSet::Ik),
+                (
+                    ragdoll::add_rigs,
+                    ragdoll::ragdoll_system,
+                    (ragdoll::despawn_orphan_parts, ragdoll::ragdoll_impacts),
+                )
+                    .chain()
+                    .in_set(AnimSet::Ragdoll),
                 muscle::muscle_system.in_set(AnimSet::Muscles),
                 (
                     animator::publish_pose,

@@ -43,7 +43,8 @@ changing that one plugin line.
   only resists spin for flat contacts with several points, and never for articulation links).
   Each such contact takes up to `μ · N · 1 cm` of torque out of the spin about its normal; spin
   under 5% of the roll is left alone, since a normal a little off on terrain shows that much of
-  a fast roll as spin (it steered rolling barrels).
+  a fast roll as spin (it steered rolling barrels). Only awake bodies' contacts are walked, so a
+  settled pile costs nothing here.
 - **Joints**: fixed, spherical (cone limit), revolute and prismatic (limits, motors), distance
   (rope), spring. `break_force` breaks a joint: the joint entity is despawned (or the `Joint`
   removed from a body entity). With `collide_connected: false` the two never touch, also when
@@ -82,8 +83,14 @@ changing that one plugin line.
   (a 17 t wrecking ball on 12 kg links hitting a wall). Pinning or unpinning a group, or joining
   or dropping a heavy body, switches it over on the spot. Cost: Rapier rebuilds each
   articulation's dense mass matrix every internal substep, about 0.9 ms per tumbling 10-part
-  ragdoll per frame on the build machine (constraint joints: 0.15 ms); asleep they cost nothing.
-  `articulated_joints: false` turns it off.
+  ragdoll per frame on the build machine (constraint joints: 0.15 ms). Asleep they cost next to
+  nothing: the engine leaves an untouched sleeping articulation alone (Rapier still redoes its
+  forward kinematics every step, about a microsecond each). So only the `max_articulated` (4)
+  moving groups nearest a `SimulationFocus` are articulated; the others use constraint joints,
+  and switch over when they rank among the nearest (a group already articulated counts as a
+  fifth nearer, so groups at about the same distance don't trade places back and forth;
+  sleeping groups keep their joints and don't count). Ten ragdolls tumbling at once cost 4.8 ms
+  per frame instead of 8.3. `articulated_joints: false` turns it all off.
 - **Characters**: `CharacterController` capsules moved by sweeps, so even an 800 m/s dash stops
   at a thin wall: steps (also while gravity pulls), slopes, ground snapping, crouching (change
   `height` between steps). They move after the bodies have stepped: whatever a character stood
@@ -121,8 +128,10 @@ changing that one plugin line.
   heightfields) use the submerged share of their bounding box.
 - **Time**: runs in `FixedUpdate` / `SimSet::Physics` on world time, so `TimeDilation` slows it;
   each fixed step is split into substeps of at most `max_substep_secs`, so 10× fast-forward is
-  as stable as 1×. `LocalTimeScale` speeds a single body up or down (its `Velocity` is in its
-  own seconds, like `CharacterMove`).
+  as stable as 1×. `LocalTimeScale` speeds a single body up or down, in everything: its
+  `Velocity` is in its own seconds (like `CharacterMove`), and gravity, `ExternalForce`, water
+  and damping act per second of its own time, so a car on thrusters in a slow-motion bubble
+  hovers just as it did outside, and a lift driven by `Velocity` moves at the bubble's pace.
 - **Queries**: `PhysicsQueries` raycast, shapecast, overlap and closest point, from any system
   or thread; they see the state after the last step.
 - **Deterministic**: the same scene gives the same result every run.
@@ -140,7 +149,8 @@ under a micrometer).
   that leaves its region's radius moves to another region; two regions whose bodies come close
   merge so they can collide.
 - Static colliders are copied into every region that could touch them (the shape data is
-  shared). Regions far from every `SimulationFocus` pause (`freeze_distance_m`).
+  shared); a region travelling with its bodies drops the copies it leaves behind, so a ship
+  crossing a continent holds only the statics near it. Regions far from every `SimulationFocus` pause (`freeze_distance_m`).
 - A `WorldShift` (the space module re-anchoring the world) moves the simulation in the same
   frame. A floating-origin move only moves region anchors: sleeping bodies stay asleep and
   contacts carry on. A turn into another planet's frame rotates each region's contents about
@@ -169,6 +179,7 @@ proving ground with the overlay.
 | `solver_iterations` | 4 | Iterations per substep; tall stacks and long chains like 6–8. |
 | `max_substep_secs` | 1/120 | Longest substep. With constraint joints, 1/60 lets ragdoll joints gap ~5 cm on impact; 1/120 ~1.5 cm. |
 | `articulated_joints` | on | Solve free-floating jointed groups as articulations (no joint gap; see Articulations). |
+| `max_articulated` | 4 | Most moving groups articulated at once, nearest the focus first; the rest use constraint joints. |
 | `max_substeps` | 24 | Cap per fixed step (10× speed needs 20). |
 | `allowed_penetration_m` | 0.001 | How far contacts may sink before being pushed apart. |
 | `contact_stiffness_hz` | 60 | Contact spring frequency (static contacts 2×). 30 Hz lets a 30-box tower sag 24 cm, 60 Hz ~6 cm. |
@@ -182,7 +193,7 @@ proving ground with the overlay.
 | `blast_response`, `blast_scale` | on, 1 | Explosions push bodies; 1 = real blast wind, action games use 3–10. |
 
 `PhysicsStats` (resource, also `physics.*` in `Diagnostics`): bodies, awake bodies, regions,
-touching pairs, step time, substeps, articulated joints.
+touching pairs, step time, substeps, articulated joints, static copies.
 
 ## API functions
 
@@ -207,7 +218,7 @@ touching pairs, step time, substeps, articulated joints.
 
 `demo::spawn_demo(commands, origin)` builds the **physics proving ground**: a 70 × 50 m concrete
 yard (with a curb, so nothing rolls off) with a 30-crate tower, a bin filling with 250
-crates/barrels/balls, a domino snake, crash test dummy ragdolls tumbling down a steep staircase,
+crates/barrels/balls, a domino snake, ten crash test dummy ragdolls tumbling down a steep staircase together,
 a wrecking ball smashing a crate wall, a seesaw catapult, a motor-driven paddle wheel, a sagging
 plank bridge, a kinematic turntable, bouncing rubber balls and, along the front, a **barrel run**:
 three oil drums roll off a 2 m ramp and 47 m down an asphalt runway (one triangle mesh, an edge
@@ -224,8 +235,9 @@ They pause while no focus point is within 250 m.
 `physics.proving_ground.replay {"station": "dominoes"}` restarts one now (`{}` restarts all).
 `demo::VIEWS` are tour stops for the action stations: arriving restarts the station, and the
 warm-up lands on its best moment. `tests/proving_ground.rs` checks that stations replay without
-piling up bodies, and that the barrel run's drums stay within 1 cm of the deck and 30 cm of their
-lanes and stop in the sand.
+piling up bodies, that the barrel run's drums stay within 1 cm of the deck and 30 cm of their
+lanes and stop in the sand, and that the ten dummies all leave the landing and are asleep well
+before their replay (about 6.6 s; four tumble articulated, six on constraint joints).
 
 Everything in it is drawn with detailed procedural art (`src/demo/art/`): beveled meshes sized to
 their colliders (shipping crates with brackets and bolts, 200 l drums, chain links, a cast
@@ -251,13 +263,15 @@ whole by its momentum, written velocities and poses come through, cone limits ho
 round, a limb twisted half a turn stays twisted, a limb swung along its cone's rim stops, hinge
 motors and limits match constraint joints, fixed joints weld bodies as they were, world shifts, a chain
 flying into another region stays whole, removing a joint splits it, switching the setting
-rebuilds joints, pinned chains and far heavier bodies keep constraint joints until let go); behaviors other modules rely on (`tests/behaviors.rs`: removal, compound
+rebuilds joints, pinned chains and far heavier bodies keep constraint joints until let go, the
+budget articulates the groups nearest the focus and follows it); behaviors other modules rely on (`tests/behaviors.rs`: removal, compound
 bodies, joint breaking and motors, hinges swinging through the fixed body they hang on, kinematic
 platforms, stairs and steep slopes, dashing into thin walls, wall-running, no phantom walls on flat
 ground, running over heightfield hills, crouching, landing from a fall, standing exactly on boxes
-from 1 m to 10 km across, characters on their own clock, sensors and layers, local time, hovering,
+from 1 m to 10 km across, characters on their own clock, sensors and layers, local time (forces, damping and lifts
+on a slow clock too), hovering,
 buoyancy, floating the way real bodies do (logs, planks, cubes on their edge, a ball's draft, a
-barge on a swell), blasts, bodies crossing and merging regions); the float test
+barge on a swell), blasts, bodies crossing and merging regions, a region dropping the statics it travels past); the float test
 (`tests/floaters.rs`); riding moving bodies (`tests/platforms.rs`:
 crates and characters on a deck at up to 30 km/s, lifts, a turntable, a thrusting and turning ship,
 a seesaw tipped by a character's weight, crates landing on heads, rays hitting bodies at orbital
@@ -290,8 +304,7 @@ on its spot slows at `μ·g·1 cm/(⅖r²)` and stops where it is); the debug vi
   prototype patch of Rapier) saved only 30%, the rest being its dense LU factorization and
   constraint setup, so not worth a fork; an O(n) articulated-body solve would make many ragdolls
   at once affordable, and with contacts that soften where the coordinates can't give way, chains
-  hung from the world (bridges, wrecking balls, lamps) could be articulated too. Meanwhile, a
-  budget: articulate only the few tumbling groups nearest a `SimulationFocus`.
+  hung from the world (bridges, wrecking balls, lamps) could be articulated too.
 - Joint friction and twist limits as `Joint` fields, so a game can make a stiff old door or a
   loose ragdoll (today every free-floating group's joints get the same 10%).
 - A `rolling_resistance` field on `SurfaceMaterial`, so games can tune it per surface (today

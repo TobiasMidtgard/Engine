@@ -321,16 +321,30 @@ pub(crate) fn physics_step(world: &mut World, mut q: Local<Option<StepQueries>>)
         let graph = sim.joint_graph();
         sim.rearticulate(&graph);
     }
+    // The articulation budget looks every few steps, and whenever joints are being made (so a
+    // new ragdoll past the budget starts on constraint joints).
+    sim.budget_clock += 1;
+    let mut graph = None;
+    if sim.settings.articulated_joints
+        && (sim.budget_clock >= crate::sim::BUDGET_EVERY
+            || sim.joints.values().any(|j| j.created.is_none()))
+    {
+        sim.budget_clock = 0;
+        let g = sim.joint_graph();
+        let lookup = |x: Entity| world_pose(world, x).map(|t| (t.translation, t.rotation));
+        sim.budget_articulations(&g, &foci, &lookup);
+        graph = Some(g);
+    }
     let waiting: Vec<Entity> = sim
         .joints
         .iter()
         .filter(|(_, j)| j.created.is_none())
         .map(|(e, _)| *e)
         .collect();
-    let graph = if waiting.is_empty() {
-        Default::default()
-    } else {
-        sim.joint_graph()
+    let graph = match graph {
+        Some(g) => g,
+        None if waiting.is_empty() => Default::default(),
+        None => sim.joint_graph(),
     };
     for e in waiting {
         let lookup = |x: Entity| world_pose(world, x).map(|t| (t.translation, t.rotation));
@@ -722,6 +736,9 @@ pub(crate) fn physics_step(world: &mut World, mut q: Local<Option<StepQueries>>)
         d.set("physics.regions", stats.regions as f64);
         d.set("physics.contacts", stats.touching as f64);
         d.set("physics.step_ms", stats.step_ms);
+        d.set("physics.substeps", stats.substeps as f64);
+        d.set("physics.articulated", stats.articulated as f64);
+        d.set("physics.static_copies", stats.static_copies as f64);
     }
     world.insert_resource(stats);
 }
@@ -823,11 +840,12 @@ fn prepare_forces(
         .collect();
     for e in entities {
         let entry = sim.bodies.get_mut(&e).unwrap();
-        let (h, external, gravity_scale, had_forces) = (
+        let (h, external, gravity_scale, had_forces, k) = (
             entry.handle,
             entry.external,
             entry.desc.gravity_scale,
             entry.forces_set,
+            entry.time_factor,
         );
         let region = sim.regions[rid as usize].as_mut().unwrap();
         let hulls = &mut sim.hulls;
@@ -928,6 +946,13 @@ fn prepare_forces(
                     }
                 }
             }
+        }
+        // All of these are pushes in the body's own seconds (water drag from its own-time
+        // velocity, before `scale_time`): in world seconds they are `k²` as strong, like its
+        // gravity.
+        if (k - 1.0).abs() > 1e-3 {
+            force *= k * k;
+            torque *= k * k;
         }
         let rb = region.world.bodies.get_mut(h).unwrap();
         let needs = force != Vec3::ZERO || torque != Vec3::ZERO;
@@ -1047,11 +1072,22 @@ fn refresh_contact_hooks(world: &mut PhysicsWorld) {
 /// those put somewhere through their `Transform` go 1/`left` of the rest of the way there
 /// (`left` substeps of this step remain, this one included).
 fn drive_kinematics(sim: &mut Simulation, rid: RegionId, sub_dt: f32, left: u32) {
+    // `Velocity` is in the body's own seconds: `time_factor` of it per world second.
     let moving: Vec<(rapier3d::prelude::RigidBodyHandle, Velocity)> = sim
         .bodies
         .values()
         .filter(|b| b.region == rid && b.kinematic_by_velocity)
-        .map(|b| (b.handle, b.written_velocity.unwrap_or_default()))
+        .map(|b| {
+            let v = b.written_velocity.unwrap_or_default();
+            let k = b.time_factor;
+            (
+                b.handle,
+                Velocity {
+                    linear: v.linear * k,
+                    angular: v.angular * k,
+                },
+            )
+        })
         .collect();
     let gliding: Vec<(rapier3d::prelude::RigidBodyHandle, Pose)> = sim
         .bodies
@@ -1118,32 +1154,41 @@ fn place_kinematics(sim: &mut Simulation, rid: RegionId) {
 /// Bodies with their own time rate (`LocalTimeScale`): scale velocity and gravity so they move
 /// `factor`× as fast as the world for one substep (`apply = true`), then undo it.
 fn scale_time(sim: &mut Simulation, rid: RegionId, apply: bool) -> bool {
-    let scaled: Vec<(rapier3d::prelude::RigidBodyHandle, f32, f32)> = sim
+    let scaled: Vec<(rapier3d::prelude::RigidBodyHandle, f32, f32, [f32; 2])> = sim
         .bodies
         .values()
         .filter(|b| {
             b.region == rid && b.kind == BodyKind::Dynamic && (b.time_factor - 1.0).abs() > 1e-3
         })
-        .map(|b| (b.handle, b.time_factor, b.desc.gravity_scale))
+        .map(|b| {
+            let damping = [
+                convert::damping(b.desc.linear_damping),
+                convert::damping(b.desc.angular_damping),
+            ];
+            (b.handle, b.time_factor, b.desc.gravity_scale, damping)
+        })
         .collect();
     if scaled.is_empty() {
         return false;
     }
     let region = sim.region_mut(rid);
-    for (h, k, gs) in scaled {
+    for (h, k, gs, [lin, ang]) in scaled {
         let Some(rb) = region.world.bodies.get_mut(h) else {
             continue;
         };
         let k = k.max(1e-3);
-        let (m, gscale) = if apply {
-            (k, gs * k * k)
+        // Damping is per second of the body's own time: `k` times as fast per world second.
+        let (m, gscale, d) = if apply {
+            (k, gs * k * k, k)
         } else {
-            (1.0 / k, gs)
+            (1.0 / k, gs, 1.0)
         };
         let (v, w) = (rb.linvel(), rb.angvel());
         rb.set_linvel(v * m, false);
         rb.set_angvel(w * m, false);
         rb.set_gravity_scale(gscale, false);
+        rb.set_linear_damping(lin * d);
+        rb.set_angular_damping(ang * d);
     }
     true
 }

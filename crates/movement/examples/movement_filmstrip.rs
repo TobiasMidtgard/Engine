@@ -41,6 +41,7 @@ struct Cast {
     car: Entity,
     climber: Entity,
     grappler: Entity,
+    ladder: Entity,
 }
 
 struct Shot {
@@ -286,6 +287,24 @@ const SHOTS: &[Shot] = &[
             )
         },
     },
+    // Halfway up the tower's caged ladder, from behind and to the side, looking up past the
+    // climber at the roof.
+    Shot {
+        file: "15_climb_the_tower_ladder.png",
+        when: |w, c| {
+            mover(w, c.ladder)
+                .ladder
+                .is_some_and(|l| l.climbed > 2.4 && l.speed > 2.0)
+        },
+        camera: |w, c| {
+            let p = pos(w, c.ladder);
+            (
+                p + DVec3::new(2.4, -0.6, 3.0),
+                p + DVec3::new(-0.15, 0.5, -0.3),
+                50.0,
+            )
+        },
+    },
 ];
 
 fn build_app() -> (App, Cast, Entity) {
@@ -401,6 +420,7 @@ fn build_app() -> (App, Cast, Entity) {
         car: named(&mut app, "Freight car"),
         climber: named(&mut app, "Climber"),
         grappler: named(&mut app, "Grappler"),
+        ladder: named(&mut app, "Ladder climber"),
     };
     (app, cast, camera)
 }

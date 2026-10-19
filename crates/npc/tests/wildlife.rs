@@ -1,11 +1,13 @@
 //! Wildlife behavior tests: herds bolt from a runner but let a sneaker come closer, panic
 //! spreads through a herd, wolf packs run prey down and feed, birds take off together and
-//! land again.
+//! land again, boars root about and run from a runner but turn and charge when cornered or
+//! wounded, a sow charges to defend her piglets, and wolves pick a piglet over its elders.
 
 use engine_core::prelude::*;
 use engine_core::time::TimeSource;
 use engine_npc::*;
 use engine_world::locomotion::{LocomotionMode, LocomotionState};
+use engine_world::physics::Collider;
 use engine_world::{DamageEvent, DamageKind, WorldPlugin};
 
 fn app() -> App {
@@ -270,4 +272,288 @@ fn birds_settle_when_the_coast_is_clear() {
     for &b in &flock {
         assert!(pos(&app, b).distance(DVec3::ZERO) < 20.0);
     }
+}
+
+/// A boar (`male` a tusker, `young` a piglet) of sounder `herd`.
+fn boar(app: &mut App, at: DVec3, herd: u32, male: bool, young: bool) -> Entity {
+    app.world
+        .spawn((
+            Transform::from_translation(at),
+            Animal {
+                male,
+                young,
+                ..Animal::new(Species::Boar)
+            },
+            Herd(herd),
+        ))
+        .id()
+}
+
+/// A stand-in player at `at`, moving in `mode`.
+fn player(app: &mut App, at: DVec3, mode: LocomotionMode) -> Entity {
+    app.world
+        .spawn((
+            Transform::from_translation(at),
+            Faction::PLAYER,
+            LocomotionState {
+                mode,
+                ..Default::default()
+            },
+        ))
+        .id()
+}
+
+/// Walk the stand-in player one step (1/60 s) toward `to` at `speed`, stopping 1 m short.
+fn step_toward(app: &mut App, who: Entity, to: DVec3, speed: f64) {
+    let at = pos(app, who);
+    let d = DVec3::new(to.x - at.x, 0.0, to.z - at.z);
+    let v = if d.length() > 1.0 {
+        d.normalize() * speed
+    } else {
+        DVec3::ZERO
+    };
+    app.world.get_mut::<Transform>(who).unwrap().translation += v / 60.0;
+    app.world.get_mut::<LocomotionState>(who).unwrap().velocity = v.as_vec3();
+}
+
+/// Whether a tusk (or a bite) from `from` landed on `on` lately.
+fn struck(app: &App, from: Entity, on: Entity) -> bool {
+    let msgs = app.world.resource::<Messages<DamageEvent>>();
+    let mut cursor = msgs.get_cursor();
+    cursor
+        .read(msgs)
+        .any(|d| d.target == on && d.source == Some(from))
+}
+
+#[test]
+fn boars_root_about_and_wander_with_the_sounder() {
+    let mut app = app();
+    let home = DVec3::ZERO;
+    let sounder: Vec<Entity> = (0..3)
+        .map(|k| {
+            let a = k as f64 * 2.1;
+            boar(
+                &mut app,
+                DVec3::new(a.cos() * 2.0, 0.0, a.sin() * 2.0),
+                40,
+                false,
+                false,
+            )
+        })
+        .collect();
+    let mut seen = std::collections::HashSet::new();
+    // How far each went while rooting (shuffling on with its snout down).
+    let mut rooted = vec![0.0; sounder.len()];
+    let mut last: Vec<DVec3> = sounder.iter().map(|&e| pos(&app, e)).collect();
+    for _ in 0..60 * 90 {
+        app.update();
+        for (k, &e) in sounder.iter().enumerate() {
+            let s = state(&app, e);
+            seen.insert(s);
+            let p = pos(&app, e);
+            if s == AnimalState::Graze {
+                rooted[k] += p.distance(last[k]);
+            }
+            last[k] = p;
+            assert!(
+                p.distance(home) < 45.0,
+                "{e:?} strayed from its range to {p}"
+            );
+        }
+    }
+    for s in [AnimalState::Graze, AnimalState::Wander] {
+        assert!(seen.contains(&s), "{s:?} never seen: {seen:?}");
+    }
+    assert!(
+        !seen.contains(&AnimalState::Flee) && !seen.contains(&AnimalState::Charge),
+        "nothing to run from or fight: {seen:?}"
+    );
+    for (k, r) in rooted.iter().enumerate() {
+        assert!(*r > 1.0, "boar {k} rooted in one spot ({r:.2} m)");
+    }
+}
+
+#[test]
+fn boars_run_from_a_sprinter_in_the_open() {
+    let mut app = app();
+    let sounder: Vec<Entity> = (0..3)
+        .map(|k| {
+            boar(
+                &mut app,
+                DVec3::new(k as f64 * 2.0, 0.0, 0.0),
+                40,
+                k == 0,
+                false,
+            )
+        })
+        .collect();
+    app.update_n(60);
+    let runner = player(
+        &mut app,
+        DVec3::new(0.0, 0.0, -60.0),
+        LocomotionMode::Sprint,
+    );
+    let mut fled_at = None;
+    for _ in 0..60 * 14 {
+        step_toward(&mut app, runner, DVec3::ZERO, 7.0);
+        app.update();
+        for &e in &sounder {
+            let s = state(&app, e);
+            assert_ne!(s, AnimalState::Charge, "{e:?} charged in the open");
+            if s == AnimalState::Flee && fled_at.is_none() {
+                fled_at = Some(pos(&app, runner).distance(pos(&app, e)));
+            }
+        }
+    }
+    let d = fled_at.expect("the sounder runs");
+    assert!(d > 18.0, "a sprinter should spook them early: {d:.1} m");
+    // And they got away.
+    for &e in &sounder {
+        let d = pos(&app, e).distance(pos(&app, runner));
+        assert!(d > 15.0, "{e:?} only {d:.1} m from the runner");
+    }
+}
+
+#[test]
+fn a_cornered_boar_charges_and_slashes() {
+    let mut app = app();
+    // A closed pen 6 m across, the boar in one corner of it.
+    for (c, half) in [
+        (DVec3::new(0.0, 1.0, 3.5), Vec3::new(4.0, 1.0, 0.5)),
+        (DVec3::new(0.0, 1.0, -3.5), Vec3::new(4.0, 1.0, 0.5)),
+        (DVec3::new(3.5, 1.0, 0.0), Vec3::new(0.5, 1.0, 4.0)),
+        (DVec3::new(-3.5, 1.0, 0.0), Vec3::new(0.5, 1.0, 4.0)),
+    ] {
+        app.world
+            .spawn((Transform::from_translation(c), Collider::cuboid(half)));
+    }
+    let tusker = boar(&mut app, DVec3::new(-1.6, 0.0, -1.6), 40, true, false);
+    app.update_n(30);
+    // Someone walks in at it from the far corner.
+    let man = player(&mut app, DVec3::new(2.0, 0.0, 2.0), LocomotionMode::Walk);
+    let mut charged_from = None;
+    let mut slashed = false;
+    for _ in 0..60 * 6 {
+        let at = pos(&app, tusker);
+        step_toward(&mut app, man, at, 1.2);
+        app.update();
+        if state(&app, tusker) == AnimalState::Charge && charged_from.is_none() {
+            charged_from = Some(pos(&app, man).distance(pos(&app, tusker)));
+        }
+        slashed |= struck(&app, tusker, man);
+        if slashed {
+            break;
+        }
+    }
+    let d = charged_from.expect("a cornered boar charges");
+    assert!(
+        d > 3.0,
+        "it turns when it finds no way out, not only when trodden on: {d:.1} m"
+    );
+    assert!(slashed, "and its tusks strike");
+}
+
+#[test]
+fn a_wounded_boar_turns_on_whoever_hurt_it() {
+    let mut app = app();
+    let tusker = boar(&mut app, DVec3::ZERO, 40, true, false);
+    app.update_n(60);
+    let hunter = player(&mut app, DVec3::new(14.0, 0.0, 0.0), LocomotionMode::Idle);
+    app.update_n(30);
+    app.world.write_message(DamageEvent {
+        target: tusker,
+        amount: 20.0,
+        kind: DamageKind::Ballistic,
+        point: pos(&app, tusker),
+        impulse: Vec3::ZERO,
+        source: Some(hunter),
+    });
+    let mut charged = false;
+    let mut slashed = false;
+    for _ in 0..60 * 5 {
+        app.update();
+        charged |= state(&app, tusker) == AnimalState::Charge;
+        slashed |= struck(&app, tusker, hunter);
+    }
+    assert!(charged, "the wounded boar charges");
+    assert!(slashed, "and reaches the hunter");
+    // Then it breaks off and runs before it may turn again.
+    app.update_n(30);
+    assert_ne!(state(&app, tusker), AnimalState::Charge);
+}
+
+/// A sow with `piglets` about her, and someone stepping out of cover 10 m away and walking
+/// at her: whether she charged, whether she struck, and whether all her piglets ran.
+fn surprise(piglets: usize) -> (bool, bool, bool) {
+    let mut app = app();
+    let sow = boar(&mut app, DVec3::ZERO, 40, false, false);
+    let young: Vec<Entity> = (0..piglets)
+        .map(|k| {
+            let a = k as f64 * 2.0;
+            boar(
+                &mut app,
+                DVec3::new(a.cos() * 2.0, 0.0, a.sin() * 2.0),
+                40,
+                false,
+                true,
+            )
+        })
+        .collect();
+    app.update_n(60);
+    let man = player(&mut app, DVec3::new(10.0, 0.0, 0.0), LocomotionMode::Walk);
+    let (mut charged, mut slashed) = (false, false);
+    let mut scattered = vec![false; young.len()];
+    for _ in 0..60 * 5 {
+        step_toward(&mut app, man, DVec3::ZERO, 1.0);
+        app.update();
+        charged |= state(&app, sow) == AnimalState::Charge;
+        slashed |= struck(&app, sow, man);
+        for (k, &p) in young.iter().enumerate() {
+            let s = state(&app, p);
+            assert_ne!(s, AnimalState::Charge, "piglets don't fight");
+            scattered[k] |= s == AnimalState::Flee;
+        }
+    }
+    (charged, slashed, scattered.iter().all(|&s| s))
+}
+
+#[test]
+fn a_sow_charges_to_defend_her_piglets() {
+    let (charged, slashed, scattered) = surprise(3);
+    assert!(charged, "the sow charges");
+    assert!(slashed, "and strikes");
+    assert!(scattered, "her piglets run");
+    // Without young about her, she runs too.
+    let (charged, _, _) = surprise(0);
+    assert!(!charged, "a sow on her own runs");
+}
+
+#[test]
+fn wolves_pick_a_piglet_over_its_elders() {
+    let mut app = app();
+    let sounder = [
+        boar(&mut app, DVec3::new(0.0, 0.0, 0.0), 40, true, false),
+        boar(&mut app, DVec3::new(2.0, 0.0, 1.0), 40, false, false),
+        boar(&mut app, DVec3::new(1.0, 0.0, 3.0), 40, false, true),
+    ];
+    let wolves = herd(&mut app, Species::Wolf, DVec3::new(0.0, 0.0, -45.0), 3, 2);
+    app.update();
+    for &w in &wolves {
+        app.world.get_mut::<AnimalMind>(w).unwrap().hunger = 1.0;
+    }
+    for _ in 0..60 * 10 {
+        app.update();
+        if let Some(prey) = wolves
+            .iter()
+            .find_map(|&w| app.world.get::<AnimalMind>(w).unwrap().prey)
+        {
+            assert!(sounder.contains(&prey));
+            assert!(
+                app.world.get::<Animal>(prey).unwrap().young,
+                "the pack goes for the piglet"
+            );
+            return;
+        }
+    }
+    panic!("the pack never picked a quarry");
 }

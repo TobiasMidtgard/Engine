@@ -73,7 +73,9 @@ use engine_render::{MaterialRef, MeshRenderer, Shape, StandardMaterial};
 use engine_world::locomotion::{LocomotionMode, LocomotionState, MoveIntent};
 use engine_world::{AttackEvent, AttackKind, DamageEvent};
 
-use crate::agent::{NpcBrain, NpcClock, NpcCombat, NpcMotor, NpcSettings, NpcVitals, NpcWeapon};
+use crate::agent::{
+    NpcAction, NpcBrain, NpcClock, NpcCombat, NpcMotor, NpcSettings, NpcVitals, NpcWeapon,
+};
 use crate::art::ArtAssets;
 use crate::combat::Downed;
 use crate::faction::Faction;
@@ -190,6 +192,7 @@ fn species_color(s: Species) -> u32 {
         Species::Rabbit => 0x9a8166,
         Species::Wolf => 0x77787a,
         Species::Bird => 0x3f4558,
+        Species::Boar => 0x4a4037,
     }
 }
 
@@ -283,16 +286,18 @@ type FoeItem<'a> = (
     Option<&'a NpcWeapon>,
 );
 
-/// The attacks telegraphed and the blows landed this step (kept between steps to reuse the
-/// space).
+/// The attacks telegraphed and the blows landed this step, and where the downed fighters'
+/// chests lie (kept between steps to reuse the space).
 #[derive(Default)]
 pub(crate) struct Sightings {
     attacks: Vec<(Entity, Option<Entity>, AttackKind)>,
     blows: Vec<DamageEvent>,
+    lying: Vec<(Entity, DVec3)>,
 }
 
 /// Pose every stand-in from its owner's state (a fighter's also from the attacks telegraphed
-/// at it, the blows that land on it, and the attacker whose blow its guard meets).
+/// at it, the blows that land on it, the attacker whose blow its guard meets, and the downed
+/// mate it revives).
 pub(crate) fn pose_stand_ins(
     mut owners: Query<PoseItem, Without<StandInPart>>,
     foes: Query<FoeItem, Without<StandInPart>>,
@@ -307,6 +312,14 @@ pub(crate) fn pose_stand_ins(
         .extend(attacks.read().map(|a| (a.attacker, a.target, a.kind)));
     seen.blows.clear();
     seen.blows.extend(blows.read().cloned());
+    // Where each downed fighter's chest lay as last posed (a mate reviving it puts its hands
+    // there).
+    seen.lying.clear();
+    seen.lying.extend(owners.iter().filter_map(|item| {
+        let (me, _, st, _, owner, ..) = item;
+        let chest = st.motion.lying_chest()?;
+        Some((me, owner.translation + (owner.rotation * chest).as_dvec3()))
+    }));
     let foe = |e: Entity| {
         foes.get(e)
             .ok()
@@ -336,6 +349,11 @@ pub(crate) fn pose_stand_ins(
         let mut materials: Vec<(Part, StandardMaterial)> = Vec::new();
         let placed: Box<dyn Fn(Part) -> Placed> = match animal.map(|a| a.species) {
             None => {
+                let patient = brain
+                    .filter(|b| b.action == NpcAction::Revive)
+                    .and_then(|b| b.revive)
+                    .and_then(|ally| seen.lying.iter().find(|(e, _)| *e == ally))
+                    .map(|&(_, at)| at);
                 let view = humanoid::Seen {
                     me,
                     at: owner.translation,
@@ -344,6 +362,7 @@ pub(crate) fn pose_stand_ins(
                     dash_secs: motor.map_or(0.22, |m| m.dash_secs),
                     foe: &foe,
                     memory,
+                    patient,
                 };
                 let pose = humanoid::humanoid(
                     now,
@@ -367,6 +386,7 @@ pub(crate) fn pose_stand_ins(
                 let input = animal::Input {
                     species,
                     male: animal.is_some_and(|a| a.male),
+                    young: animal.is_some_and(|a| a.young),
                     state: mind.map(|m| m.state).unwrap_or_default(),
                     since: mind.map(|m| m.since).unwrap_or(0.0),
                     now,
@@ -377,7 +397,15 @@ pub(crate) fn pose_stand_ins(
                     crouch: loco.mode == LocomotionMode::Crouch,
                     biting: mind.is_some_and(|m| now < m.bite_ready - 0.55),
                     vary: ((me.to_bits() as u32) as f32 * 0.618_034).fract(),
-                    senses: mind.map(|m| animal::Senses::of(m, now)).unwrap_or_default(),
+                    senses: mind
+                        .map(|m| animal::Senses {
+                            prey: m
+                                .prey
+                                .and_then(|e| foes.get(e).ok())
+                                .map(|f| f.0.translation),
+                            ..animal::Senses::of(m, now)
+                        })
+                        .unwrap_or_default(),
                     bird: bird.copied(),
                 };
                 let pose = animal::animal(&input, &mut st.beast);
@@ -486,6 +514,7 @@ pub(crate) fn intent_markers(
             "fall back" => 0x9a9a9a,
             "investigate" | "search" => 0xf2d24c,
             "patrol" => 0x7fd37f,
+            "revive" => 0x3fe0c8,
             _ => 0xffffff,
         };
         let m = engine_render::MaterialRef::Inline(glow(color, 4.0));
