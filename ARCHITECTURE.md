@@ -434,11 +434,15 @@ blue in shadows by day, warm from the sunset side. Without a planet, the ground 
 is a plane lit by the sun and sky.
 
 **Atmosphere** (built): Rayleigh, Mie and ozone scattering on a spherical planet with multiple
-scattering, after Hillaire 2020. Look-up tables (sunlight transmittance and multiple scattering,
-recomputed when the planet or its air changes; the sky seen from the camera, every frame) make the
-sky cheap and physically consistent from the ground, from orbit and from the Moon. Clouds,
-fog and anything else lit by the sun should use `sun_transmittance(rel)` for the sunlight
-reaching a point. The sky draws its own flat cloud layer (a 2D deck 1.5 km up whose cover follows
+scattering, after Hillaire 2020. Each planet's air is data on `Atmosphere`: Rayleigh and Mie
+scattering, Mie and ozone absorption (per meter at the surface, RGB), scale heights, a Mie
+anisotropy per color channel and a density scale, which a planet module fills in per body;
+`Atmosphere::earth()` (the default) and `Atmosphere::mars()` (thin CO₂ under dust: a butterscotch
+sky by day, a blue glow around the setting sun) are presets. Look-up tables (sunlight
+transmittance and multiple scattering, recomputed when the planet or its air changes; the sky
+seen from the camera, every frame) make the sky cheap and physically consistent from the
+ground, from orbit and from the Moon. Clouds, fog and anything else lit by the sun should use
+`sun_transmittance(rel)` for the sunlight reaching a point. The sky draws its own flat cloud layer (a 2D deck 1.5 km up whose cover follows
 `WeatherState::cloud_cover`) in the sky and in the environment map; a feature that draws its own
 clouds turns it off with `RenderSettings::sky_cloud_layer = false` and blends over a clear sky.
 The sun is the brightest `DirectionalLight`, so a moon becomes the sky's light once it outshines

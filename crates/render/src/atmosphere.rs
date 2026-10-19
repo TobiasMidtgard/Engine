@@ -1,7 +1,8 @@
 //! Atmosphere look-up tables (Hillaire 2020), computed on the GPU:
 //!
 //! - transmittance to the top of the atmosphere (256×64) and multiple scattering (32×32),
-//!   recomputed only when the planet or its air changes;
+//!   recomputed only when the planet or its air changes (its size, scale heights, ground,
+//!   or any scattering or absorption coefficient: Earth's air to Mars' rebuilds them);
 //! - the sky seen from the camera (192×108), every frame while the camera is inside the
 //!   atmosphere (from above it, shaders integrate the sky per pixel with the first two).
 //!
@@ -21,8 +22,11 @@ pub(crate) struct AtmosphereLuts {
     /// Transmittance, multiple scattering, sky view.
     passes: [LutPass; 3],
     /// Parameters the transmittance and multiple scattering tables were computed for.
-    key: Option<[f32; 8]>,
+    key: Option<[f32; KEY_LEN]>,
 }
+
+/// The planet's size, scale heights, ground, sun size and the air's four coefficients (RGB).
+const KEY_LEN: usize = 8 + 4 * 3;
 
 struct LutPass {
     pipeline: wgpu::ComputePipeline,
@@ -171,16 +175,7 @@ impl AtmosphereLuts {
         if radius <= 0.0 {
             return;
         }
-        let key = [
-            radius,
-            uniform.atmosphere[0],
-            uniform.atmosphere[1],
-            uniform.atmosphere[2],
-            uniform.ground[0],
-            uniform.ground[1],
-            uniform.ground[2],
-            uniform.sun_dir[3],
-        ];
+        let key = table_key(uniform);
         let rebuild = self.key != Some(key);
         let inside = uniform.camera_world[3] < uniform.atmosphere[0] - 1.0;
         if !rebuild && !inside {
@@ -204,5 +199,60 @@ impl AtmosphereLuts {
         if inside {
             run(&self.passes[2]);
         }
+    }
+}
+
+/// What the transmittance and multiple scattering tables depend on. The Mie anisotropy is not
+/// in it: those tables scatter isotropically, and the sky view (which uses it) is redrawn
+/// every frame.
+fn table_key(uniform: &FrameUniform) -> [f32; KEY_LEN] {
+    let mut key = [0.0; KEY_LEN];
+    key[..8].copy_from_slice(&[
+        uniform.planet[3],
+        uniform.atmosphere[0],
+        uniform.atmosphere[1],
+        uniform.atmosphere[2],
+        uniform.ground[0],
+        uniform.ground[1],
+        uniform.ground[2],
+        uniform.sun_dir[3],
+    ]);
+    let air = [
+        uniform.air_rayleigh,
+        uniform.air_mie,
+        uniform.air_mie_extinction,
+        uniform.air_ozone,
+    ];
+    for (i, c) in air.iter().enumerate() {
+        key[8 + 3 * i..11 + 3 * i].copy_from_slice(&c[..3]);
+    }
+    key
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bytemuck::Zeroable;
+
+    #[test]
+    fn the_tables_follow_every_coefficient_of_the_air() {
+        let base = FrameUniform::zeroed();
+        let fields: [fn(&mut FrameUniform) -> &mut [f32; 4]; 4] = [
+            |u| &mut u.air_rayleigh,
+            |u| &mut u.air_mie,
+            |u| &mut u.air_mie_extinction,
+            |u| &mut u.air_ozone,
+        ];
+        for field in fields {
+            for c in 0..3 {
+                let mut changed = base;
+                field(&mut changed)[c] = 1e-6;
+                assert_ne!(table_key(&changed), table_key(&base));
+            }
+        }
+        // Only the sky view (redrawn every frame) uses the anisotropy.
+        let mut g = base;
+        g.air_mie_g = [0.7, 0.7, 0.8, 0.0];
+        assert_eq!(table_key(&g), table_key(&base));
     }
 }
