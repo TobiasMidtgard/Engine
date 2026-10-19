@@ -25,7 +25,8 @@ use engine_assets::{Assets, Handle};
 use engine_core::math::{Quat, Vec3};
 use engine_core::prelude::*;
 use engine_render::{
-    AlphaMode, Image, MaterialRef, Mesh, MeshRef, MeshRenderer, SkyLightVolume, StandardMaterial,
+    AlphaMode, BoxFace, Image, MaterialRef, Mesh, MeshRef, MeshRenderer, SkyLightVolume,
+    StandardMaterial,
 };
 
 use crate::visuals::{BrakeLight, WheelVisual};
@@ -218,6 +219,7 @@ fn spawn_wheels(
                 WheelVisual {
                     index: i,
                     retracts: false,
+                    max_travel: f32::MAX,
                 },
                 ChildOf(body),
             ))
@@ -555,7 +557,12 @@ pub fn sports_car_visuals(commands: &mut Commands, body: Entity, wheels: &Wheels
         }
         world.spawn((
             Transform::from_xyz(0.0, 0.25, 0.75),
-            SkyLightVolume::new([0.74, 0.47, 0.88]).with_sky_light(0.3),
+            // Sky light comes in through the side glass (the doors below it are dark).
+            SkyLightVolume::new([0.74, 0.47, 0.88])
+                .with_sky_light(0.45)
+                .open(BoxFace::PosX)
+                .open(BoxFace::NegX)
+                .with_fade(0.8),
             ChildOf(body),
         ));
         let rim = StandardMaterial::color(1.0, 1.0, 1.0)
@@ -617,6 +624,10 @@ pub fn rally_car_visuals(commands: &mut Commands, body: Entity, wheels: &Wheels)
             "plate_tex",
             StandardMaterial::color(1.0, 1.0, 1.0).with_roughness(0.3),
         );
+        let number = textured(
+            "number_tex",
+            StandardMaterial::color(1.0, 1.0, 1.0).with_roughness(0.35),
+        );
         let flaps = textured(
             "flap_tex",
             StandardMaterial::color(1.0, 1.0, 1.0).with_roughness(0.78),
@@ -657,6 +668,7 @@ pub fn rally_car_visuals(commands: &mut Commands, body: Entity, wheels: &Wheels)
             ("grille", f.satin_black),
             ("wing", f.carbon),
             ("wing_plate", plate),
+            ("number_plate", number),
             ("flaps", flaps),
             ("skid", skid),
             ("exhaust", f.exhaust),
@@ -695,7 +707,11 @@ pub fn rally_car_visuals(commands: &mut Commands, body: Entity, wheels: &Wheels)
         }
         world.spawn((
             Transform::from_xyz(0.0, 0.38, 0.52),
-            SkyLightVolume::new([0.78, 0.57, 1.38]).with_sky_light(0.5),
+            SkyLightVolume::new([0.78, 0.57, 1.38])
+                .with_sky_light(0.6)
+                .open(BoxFace::PosX)
+                .open(BoxFace::NegX)
+                .with_fade(0.9),
             ChildOf(body),
         ));
         let rim = StandardMaterial::hex(0xefefec).with_roughness(0.38);

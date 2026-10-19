@@ -404,7 +404,9 @@ pub fn spawn_demo(commands: &mut Commands, origin: DVec3) {
 
     ground::spawn(commands, origin);
 
-    // The walkers, spread round the loop.
+    // The walkers, spread round the loop so they bunch up within the first minute: the runner
+    // passes the dog and the hiker, the horse passes the hiker, and the dog draws level with
+    // the hiker at about 60 s, so a film following any of them shows the others.
     bodies::person(
         commands,
         TrailWalker::new(origin, 0.0, ContactKind::Foot, 75.0, 1.4),
@@ -421,11 +423,11 @@ pub fn spawn_demo(commands: &mut Commands, origin: DVec3) {
     );
     bodies::dog(
         commands,
-        TrailWalker::new(origin, 60.0, ContactKind::Paw, 22.0, 1.8),
+        TrailWalker::new(origin, 92.0, ContactKind::Paw, 22.0, 1.8),
     );
     bodies::horse(
         commands,
-        TrailWalker::new(origin, 86.0, ContactKind::Hoof, 500.0, 1.7),
+        TrailWalker::new(origin, 108.0, ContactKind::Hoof, 500.0, 1.7),
     );
 }
 
