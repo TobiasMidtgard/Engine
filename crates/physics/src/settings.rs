@@ -63,6 +63,11 @@ pub struct PhysicsSettings {
     /// constraint joints, where its joints may open a few centimeters for a frame on hard
     /// landings). Sleeping groups keep their joints and don't count.
     pub max_articulated: u32,
+    /// Only jointed groups this close to a `SimulationFocus` are articulated, meters (one
+    /// already articulated keeps it until a quarter farther). Past 20 m the few centimeters a
+    /// constraint joint opens on a hard landing are about a pixel at 1080p, so the cost buys
+    /// nothing anyone sees. Infinite = only `max_articulated` limits it.
+    pub articulate_within_m: f32,
 }
 
 impl Default for PhysicsSettings {
@@ -85,6 +90,7 @@ impl Default for PhysicsSettings {
             blast_scale: 1.0,
             articulated_joints: true,
             max_articulated: 4,
+            articulate_within_m: 20.0,
         }
     }
 }

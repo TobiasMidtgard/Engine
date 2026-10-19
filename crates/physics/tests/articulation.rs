@@ -727,6 +727,48 @@ fn the_budget_articulates_the_groups_nearest_the_focus() {
     assert_eq!(articulated(&app), 5 + 6 + 3 + 4);
 }
 
+/// Only groups near the focus are articulated: farther away the few centimeters a constraint
+/// joint opens on a hard landing can't be seen, so the cost buys nothing.
+#[test]
+fn groups_far_from_the_focus_stay_on_constraint_joints() {
+    let mut app = app(true);
+    zero_g(&mut app);
+    let focus = app
+        .world
+        .spawn((
+            Transform::from_xyz(0.0, 5.0, 0.0),
+            SimulationFocus::default(),
+        ))
+        .id();
+    // Chain `i` has `i + 1` joints: 5, 15 and 35 m from the focus.
+    for (i, z) in [5.0, 15.0, 35.0].into_iter().enumerate() {
+        let (parts, _) = chain(&mut app, DVec3::new(0.0, 5.0, z), i + 2);
+        for p in &parts {
+            app.world.get_mut::<Velocity>(*p).unwrap().linear = Vec3::Y * 0.5;
+        }
+    }
+    app.update_n(10);
+    assert_eq!(articulated(&app), 1 + 2, "the two chains within 20 m");
+    // Walk up to the far one: it takes its place among the near ones.
+    app.world.get_mut::<Transform>(focus).unwrap().translation = DVec3::new(0.0, 5.0, 30.0);
+    app.update_n(10);
+    assert_eq!(
+        articulated(&app),
+        2 + 3,
+        "the two within 20 m of the moved focus"
+    );
+    // A quarter farther before an articulated group lets go: 22 m from the middle one.
+    app.world.get_mut::<Transform>(focus).unwrap().translation = DVec3::new(0.0, 5.0, 37.0);
+    app.update_n(10);
+    assert_eq!(articulated(&app), 2 + 3);
+    app.world.get_mut::<Transform>(focus).unwrap().translation = DVec3::new(0.0, 5.0, 57.0);
+    app.update_n(10);
+    assert_eq!(articulated(&app), 3, "only the far one, 22 m away");
+    app.world.get_mut::<Transform>(focus).unwrap().translation = DVec3::new(0.0, 5.0, 70.0);
+    app.update_n(10);
+    assert_eq!(articulated(&app), 0, "none within 25 m");
+}
+
 /// A light chain hung from the world holding a far heavier ball (a wrecking ball, which can't
 /// be articulated) would hang with its links tens of centimeters apart, since the solver can't
 /// carry the load in its few passes: the ball also hangs on a hidden rope from the pin, so the
