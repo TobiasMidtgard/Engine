@@ -25,9 +25,25 @@ env:
 
 jobs:
   check:
-    name: Format, lint and test
+    # The tests run in two halves side by side. In one job `cargo test --workspace` took 45 to
+    # 60 minutes on 2026-10-19 (8 minutes building, the rest running ~130 test binaries one
+    # after another, most of them rendering on lavapipe), so a slow runner hit the timeout.
+    # `heavy` holds the crates with the longest-running tests (NPC art renders alone took 20
+    # minutes); `rest` is every other crate plus format and lint. Move a crate across when one
+    # half grows much longer than the other.
+    name: Tests (${{ matrix.shard }})
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 75
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - shard: heavy
+            packages: -p engine_npc -p engine_softbody -p engine_vehicles
+            lint: false
+          - shard: rest
+            packages: --workspace --exclude engine_npc --exclude engine_softbody --exclude engine_vehicles
+            lint: true
     steps:
       - name: Free disk space
         # Preinstalled SDKs this workspace never uses (Android, .NET, Haskell, CodeQL) take
@@ -45,14 +61,29 @@ jobs:
       - name: Install Rust (from rust-toolchain.toml)
         run: rustup show active-toolchain || rustup toolchain install
       - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.shard }}
       - name: Format
+        if: matrix.lint
         run: cargo fmt --all --check
       - name: Lint
+        if: matrix.lint
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: Test
-        run: cargo test --workspace
+        run: cargo test ${{ matrix.packages }}
       - name: Disk left
         if: always()
         run: |
           df -h /
           du -sh target 2>/dev/null || true
+
+  result:
+    # One check under the name pull requests and merge scripts wait for: green only when both
+    # halves passed.
+    name: Format, lint and test
+    needs: check
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Both halves passed
+        run: test "${{ needs.check.result }}" = success

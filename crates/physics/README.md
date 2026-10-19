@@ -94,6 +94,18 @@ changing that one plugin line.
   fifth nearer, so groups at about the same distance don't trade places back and forth;
   sleeping groups keep their joints and don't count). Ten ragdolls tumbling at once cost 4.8 ms
   per frame instead of 8.3. `articulated_joints: false` turns it all off.
+- **Heavy loads on light chains** (`Simulation::hang_loads`): a chain pinned at one place holding
+  a body over 100× heavier than one of its links (a 17 t wrecking ball on 11 kg links, which
+  can't be an articulation) hung with its links up to 22 cm apart on constraint joints: the
+  solver's few passes can't carry such a load, so it rests stretched. Extra passes close it but
+  cost the whole island (40 ms a frame while the ball plows through the crate wall), and moving
+  the links back onto their joints after each step (PhysX's projection) left the ball swinging
+  half again too fast. So the heavy body also hangs from the pin on a hidden rope as long as the
+  chain pulled straight: one exact constraint carries it, the links carry only their own weight
+  and stay within 6 mm, and the ball swings as a pendulum should (7.8 m/s at the bottom of a
+  3.1 m drop, back to within 2 cm of where it was let go). A slack chain leaves the rope slack;
+  unpinning the chain, or a loop or a second pin, takes the rope away. Ropes, springs and
+  sliders in the chain end its rigid part.
 - **Characters**: `CharacterController` capsules moved by sweeps, so even an 800 m/s dash stops
   at a thin wall: steps (also while gravity pulls), slopes, ground snapping, crouching (change
   `height` between steps). They move after the bodies have stepped: whatever a character stood

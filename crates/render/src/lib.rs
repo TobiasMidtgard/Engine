@@ -25,10 +25,20 @@
 //!   shares the renderer's uploaded images ([`GpuShared::image_texture`]), and
 //!   `RenderSettings::release_image_pixels` frees their CPU pixels once they are on the GPU (see
 //!   [`image_cache`]).
+//! - **Lens effects** per camera: [`DepthOfField`] (a physical thin lens from the field of view,
+//!   sensor height and f-stop, with autofocus and a gather-based bokeh with near and far
+//!   fields) and [`MotionBlur`] (a 180° shutter by default, from camera and object motion, a
+//!   reconstruction filter that blurs moving silhouettes over what is behind them). See
+//!   [`depth_of_field`] and [`motion_blur`].
 //! - **Asset loading**: `RenderPlugin` registers loaders for images (`.png`, `.jpg`, `.hdr`)
 //!   and glTF models (`.gltf`, `.glb`) with the [`AssetServer`].
 //!   `MeshRenderer`s that name an asset key load it on first use; files hot reload. See
 //!   [`gltf_loader`].
+//! - **2D and 2.5D**: [`Sprite`]s (sprite sheets, [`SpriteAnimation`], billboards, lit or unlit,
+//!   cut-out sprites that write depth and cast shadows), [`TileMap`]s drawn in one or a few
+//!   draw calls, [`Parallax`] layers and [`PixelPerfect`] orthographic cameras for crisp pixel
+//!   art.
+//!   See [`sprites`].
 //! - **Extensible**: everything is a [`RenderFeature`]; water, terrain, particles, volumetric
 //!   clouds, foliage and UI plug in without touching the core.
 //! - **Headless**: renders offscreen without a window and saves PNG screenshots, so tools and
@@ -55,6 +65,7 @@
 mod atmosphere;
 pub mod cloud_shadows;
 pub mod components;
+pub mod depth_of_field;
 pub mod effects;
 mod environment;
 pub mod exposure;
@@ -64,16 +75,19 @@ pub mod gltf_loader;
 pub mod gpu;
 pub mod grass;
 pub mod image_cache;
+mod lens;
 pub mod material;
 pub mod material_library;
 pub mod mesh;
 pub mod mesh_feature;
+pub mod motion_blur;
 pub mod renderer;
 pub mod rock;
 pub mod settings;
 pub mod shadows;
 pub mod sky_feature;
 mod sky_occlusion;
+pub mod sprites;
 mod surface_weather;
 pub mod targets;
 pub mod texture;
@@ -92,6 +106,7 @@ pub use components::{
     MaxDrawDistance, MeshRef, MeshRenderer, NoVirtualGeometry, PointLight, Projection,
     ResolvedMesh, SkyLightVolume,
 };
+pub use depth_of_field::DepthOfField;
 pub use features::{
     FeatureStats, FrameContext, GpuShared, GrowBuffer, RenderAppExt, RenderFeature, RenderPhase,
     SHADER_LIB_ATMOSPHERE, SHADER_LIB_FRAME, SHADER_LIB_TYPES, compose_shader, validate_wgsl,
@@ -106,11 +121,17 @@ pub use image_cache::{ImageMemoryStats, ImageTexture};
 pub use material::{AlphaMode, StandardMaterial, TextureMapping};
 pub use material_library::{MaterialMaps, MaterialPreset, MaterialTextures};
 pub use mesh::{Mesh, Shape, Vertex};
+pub use motion_blur::MotionBlur;
 pub use renderer::{
     RenderDisabled, RenderStats, Renderer, ScreenshotInfo, Screenshots, capture_now,
 };
 pub use settings::{
     AntiAliasing, Atmosphere, DebugView, FogSettings, RenderSettings, Tonemapper, VolumetricQuality,
+};
+pub use sprites::{
+    Billboard, Parallax, PixelGrid, PixelPerfect, PixelSnap, Sprite, SpriteAlpha, SpriteAnimation,
+    SpriteAnimationMode, SpriteAtlas, SpriteFeature, SpriteFilter, TILE_FLIP_DIAGONAL, TILE_FLIP_X,
+    TILE_FLIP_Y, TILE_FRAME_MASK, TileMap,
 };
 pub use surface_weather::{SURFACE_PUDDLE_SCALE_M, SURFACE_SNOW_SCALE_M};
 pub use texture::{Image, ImageLoader, PixelFormat};
@@ -118,12 +139,14 @@ pub use wgpu;
 
 pub mod prelude {
     pub use crate::{
-        AlphaMode, AmbientLight, AntiAliasing, Atmosphere, BoxFace, Camera, DirectionalLight,
-        Exposure, FogSettings, FogShape, FogVolume, GltfScene, GltfSceneSpawner, GrassBender,
-        GrassField, GrassStyle, Image, MaterialPreset, MaterialRef, MaxDrawDistance, Mesh, MeshRef,
-        MeshRenderer, NoVirtualGeometry, PointLight, Projection, RenderAppExt, RenderFeature,
-        RenderPhase, RenderPlugin, RenderSettings, Screenshots, Shape, SkyLightVolume,
-        StandardMaterial, TextureMapping, Tonemapper, VolumetricQuality, spawn_gltf_scene,
+        AlphaMode, AmbientLight, AntiAliasing, Atmosphere, Billboard, BoxFace, Camera,
+        DepthOfField, DirectionalLight, Exposure, FogSettings, FogShape, FogVolume, GltfScene,
+        GltfSceneSpawner, GrassBender, GrassField, GrassStyle, Image, MaterialPreset, MaterialRef,
+        MaxDrawDistance, Mesh, MeshRef, MeshRenderer, MotionBlur, NoVirtualGeometry, Parallax,
+        PixelPerfect, PixelSnap, PointLight, Projection, RenderAppExt, RenderFeature, RenderPhase,
+        RenderPlugin, RenderSettings, Screenshots, Shape, SkyLightVolume, Sprite, SpriteAlpha,
+        SpriteAnimation, SpriteAnimationMode, SpriteAtlas, SpriteFilter, StandardMaterial,
+        TextureMapping, TileMap, Tonemapper, VolumetricQuality, spawn_gltf_scene,
         spawn_gltf_scene_deferred,
     };
 }
@@ -161,6 +184,12 @@ impl Plugin for RenderPlugin {
             .register_component::<Camera>(
                 "Renders the scene. Perspective (fov_y_deg, near) or Orthographic (height). Exposure Auto or Manual{ev100}. Highest `order` among active cameras wins.",
             )
+            .register_component::<DepthOfField>(
+                "Physically based depth of field for the camera on this entity (off without it): thin lens from the camera's vertical fov and sensor_height_mm (24 = full frame; fov 27 deg is then a 50 mm lens), f_stop (1.4 shallow .. 16 deep), focus_distance_m (m along the view), or autofocus (true: on what is at the screen center, sky ignored, following at autofocus_speed 1/s, snapping on camera cuts; autofocus_area = size of the center square, fraction of the image height). max_radius_px caps the blur (output pixels, up to 96). Out-of-focus foreground bleeds over what is behind it; bright lights become bokeh discs. Diagnostics: render.dof_focus_m.",
+            )
+            .register_component::<MotionBlur>(
+                "Camera motion blur for the camera on this entity (off without it), from camera motion and moving objects: shutter_fraction (0.5 = 180 deg shutter) at reference_fps (Hz; exposure = shutter_fraction / reference_fps s, so blur length doesn't change with frame rate; 0 = the actual frame interval), max_radius_px (longest streak from a pixel to either end, output pixels, up to 96), samples (4..64). Follows on-screen motion, so slow motion blurs less; none on camera cuts or for a still image.",
+            )
             .register_component::<MeshRenderer>(
                 "Draws a mesh with a material. mesh: {\"shape\": {\"Sphere\": {\"radius\": 1, \"segments\": 32}}} | {\"handle\": n} | {\"asset\": \"models/rock.glb#Mesh0\"} (loads on first use); material: {\"inline\": {base_color, metallic, perceptual_roughness, emissive, emissive_strength, alpha_mode, base_color_texture: <image handle>, normal_texture, metallic_roughness_texture (G=roughness, B=metallic), emissive_texture, occlusion_texture, uv_scale, normal_scale}} | {\"asset\": \"models/rock.glb#Material0\"}.",
             )
@@ -188,6 +217,21 @@ impl Plugin for RenderPlugin {
             .register_component::<FogVolume>(
                 "Local fog (mist, dust, smoke, steam) lit by the volumetric fog: shape Box/Ellipsoid, half_extents (m, local axes, scaled with the entity), density (extinction 1/m: 0.02 mist, 0.5 smoke), albedo, emission (cd/m² per m), edge_falloff (m), noise 0..1 and noise_scale (m, drifts with the wind), anisotropy (-0.95..0.95, forward scattering).",
             )
+            .register_component::<Sprite>(
+                "2D image on a quad at the entity (sprites/2.5D): image (handle), normal_map, atlas (Whole | {Grid: {columns, rows, cell: [w, h] px (0 = fit), margin, spacing}} | {Rects: [[x, y, w, h] px]}), frame, size [w, h] m, anchor [0..1, 0..1] from bottom-left, color (linear RGBA tint), flip_x, flip_y, layer (draw order at equal depth), billboard Fixed/FaceCamera/Upright, filter Linear/Nearest/PixelArt, alpha Blend | Additive | {Cutout: threshold} (cut-out writes depth and casts shadows), lit (sun, lamps, sky, shadows), roughness, roundness (0 flat .. 1 rounded shading), translucency (light through from behind), emissive (cd/m²), cast_shadows, visible.",
+            )
+            .register_component::<SpriteAnimation>(
+                "Plays frames of the entity's Sprite atlas on game time (slow motion slows it): frames (atlas frame list; empty = all), fps, mode Loop/Once/PingPong, speed (multiplier, negative = backward), playing, time (s into the animation).",
+            )
+            .register_component::<TileMap>(
+                "Grid of tiles drawn in a few draw calls (2D levels, parallax layers, diorama floors) on the entity's local x/y plane: image (tileset handle), normal_map, atlas (as Sprite), size [columns, rows], tile_size [w, h] m, tiles (row by row from the top; value = atlas frame + 1, 0 = empty, flags 1<<31 flip x, 1<<30 flip y, 1<<29 diagonal), anchor, color, layer, filter, alpha, lit, roughness, translucency, emissive, cast_shadows, visible.",
+            )
+            .register_component::<Parallax>(
+                "Draws the entity's Sprite or TileMap offset with the camera: factor [x, y] of camera movement kept (1 = world, 0.5 = far hills, 0 = fixed sky), repeat_x (m between copies for an endless layer, 0 = one copy).",
+            )
+            .register_component::<PixelPerfect>(
+                "On an orthographic Camera: pixel-perfect pixel art. pixels_per_unit (art texels per meter), scale (screen pixels per texel, 0 = largest that shows the camera's height), snap Texel/ScreenPixel (camera and sprites move in whole steps). Turns temporal anti-aliasing off for this camera.",
+            )
             .register_resource::<RenderSettings>(
                 "Renderer quality and look: shadows (shadow_distance m, far_shadow_distance m: big casters such as mountains beyond the cascades, 0 = off; sun_penumbra_scale, contact_shadow_length m), ambient_occlusion (ao_radius m, ao_intensity), screen_space_reflections, volumetric_fog (bool), volumetric_fog_range (m), volumetric_fog_quality (Low/Medium/High), anti_aliasing (Taa/None) and sharpness, tonemapper (AgX/Aces/Reinhard/None), bloom (bloom_intensity, bloom_limit: the most a pixel brings into the bloom in multiples of white, 0 = no limit), grading, debug_view (None/Normals/Cascades/SkyVisibility/AmbientOcclusion/Reflections/Clusters/ClusterLevels), virtual_geometry (dense opaque meshes as GPU-culled clusters: virtual_geometry_min_triangles, cluster_error_px, cluster_shadow_error_texels), release_image_pixels (free each image's CPU pixels once uploaded and unchanged for 120 frames; Image keep_pixels opts one out).",
             )
@@ -200,11 +244,13 @@ impl Plugin for RenderPlugin {
                 PostUpdate,
                 gltf_loader::spawn_pending_gltf_scenes.before(UpdateSet::Propagate),
             )
+            .add_systems(Update, sprites::animate_sprites)
             .add_systems(Extract, resolve_mesh_renderers)
             .add_systems(Render, renderer::render_system)
             .add_render_feature(sky_feature::SkyFeature::default())
             .add_render_feature(mesh_feature::MeshFeature::default())
-            .add_render_feature(grass::GrassFeature::default());
+            .add_render_feature(grass::GrassFeature::default())
+            .add_render_feature(sprites::SpriteFeature::default());
 
         app.register_api(
             "render.screenshot",
@@ -434,6 +480,12 @@ mod tests {
         }
         let mut errors = Vec::new();
         for (name, src, frame) in shaders {
+            if let Err(e) = validate_wgsl(name, &compose_shader(&src, frame)) {
+                errors.push(e);
+            }
+        }
+        // Sprites: a shared part plus the scene and shadow shaders.
+        for (name, src, frame) in sprites::shader_sources() {
             if let Err(e) = validate_wgsl(name, &compose_shader(&src, frame)) {
                 errors.push(e);
             }
