@@ -109,8 +109,10 @@ and `VfxReactions`. Components: `ParticleEffect`, `Trail`, `Beam`.
   a continuous stream). Particles that hit, die or fly on for a sub-emitter append events,
   and a third pass turns them into particles of the fed layer, claiming slots in its ring
   with an atomic cursor (up to 65 536 events a frame). Lit particles get sun (with shadows and forward scattering for smoke),
-  sky and point lights, refreshed every fourth frame. Sprites are procedural, drawn as one
-  instanced quad per slot, far to near, softened against the scene depth.
+  sky and point lights, refreshed every fourth frame. A last pass sorts each visible layer's
+  particles by distance (a bitonic sort per run of 2048 slots), so nearer puffs of smoke
+  cover farther ones. Sprites are procedural, drawn as one instanced quad per particle, layers
+  and particles far to near, softened against the scene depth.
 - **Debris** ([`debris`]): a `debris` layer draws each particle as a small flat-shaded mesh
   (four variants of each kind) tumbling about an axis of its own, in the depth prepass, the
   opaque pass and the two nearest shadow cascades, so chips are lit, shadowed and motion
@@ -146,7 +148,7 @@ whole court, each by day, at dusk and at night.
 
 ## Next
 
-Sorting within an emitter, LOD, and a 1M-particle benchmark on a real GPU.
+LOD, and a 1M-particle benchmark on a real GPU.
 
 ## Checklist
 

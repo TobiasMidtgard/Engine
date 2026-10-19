@@ -14,6 +14,7 @@
 //! - [`fighter`]: the armored sword fighters (four styles) and their parts.
 //! - [`rig`]: the fighters' skeleton, poses, two-bone IK and the procedural animator.
 //! - [`rope`]: the grapple's cable and hook.
+//! - [`zipline`]: zip line cables, dipping under their riders.
 //! - [`effects`]: blade trails, parry sparks, slash flashes, impact lights, dust and the
 //!   render feature that draws them and the afterimage ghosts.
 
@@ -25,6 +26,7 @@ pub mod meshgen;
 pub mod rig;
 pub mod rope;
 pub mod texgen;
+pub mod zipline;
 
 use engine_assets::Assets;
 use engine_core::prelude::*;
@@ -79,6 +81,7 @@ pub const LIBRARY: &[Generator] = &[
     course::generate,
     fighter::generate,
     rope::generate,
+    zipline::generate,
     crate::lockon::generate,
 ];
 

@@ -493,10 +493,12 @@ fn spells() -> Vec<EffectDesc> {
                     lifetime: [2.5, 4.5],
                     size: [1.0, 1.6],
                     size_over_life: c(&[(0.0, 0.7), (1.0, 2.8)]),
+                    // Soot: dark enough that moonlight scattered through it from behind
+                    // doesn't turn it into a pale cloud at night.
                     color: g(&[
-                        (0.0, [0.12, 0.1, 0.09, 0.0]),
-                        (0.08, [0.13, 0.11, 0.1, 0.75]),
-                        (1.0, [0.3, 0.29, 0.28, 0.0]),
+                        (0.0, [0.1, 0.085, 0.075, 0.0]),
+                        (0.08, [0.1, 0.09, 0.08, 0.7]),
+                        (1.0, [0.2, 0.19, 0.18, 0.0]),
                     ]),
                     ..smoke("smoke", 0.15, 0.7)
                 },
@@ -626,18 +628,20 @@ fn spells() -> Vec<EffectDesc> {
                     ]),
                     ..em("shards")
                 },
+                // Many faint overlapping puffs, so the cold mist trails as one wisp rather
+                // than a string of separate balls.
                 EmitterDesc {
-                    rate: 20.0,
-                    rate_per_meter: 6.0,
+                    rate: 30.0,
+                    rate_per_meter: 16.0,
                     shape: EmitShape::Sphere {
-                        radius: 0.15,
+                        radius: 0.12,
                         surface: false,
                     },
                     speed: [0.1, 0.3],
                     lifetime: [0.8, 1.4],
-                    size: [0.3, 0.5],
+                    size: [0.25, 0.4],
                     emissive: 150.0,
-                    color: fade([0.4, 0.55, 0.7], 0.25, 0.15, 0.4),
+                    color: fade([0.4, 0.55, 0.7], 0.12, 0.15, 0.35),
                     ..smoke("mist", 0.85, 0.35)
                 },
             ],

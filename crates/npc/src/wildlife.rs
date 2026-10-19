@@ -1767,8 +1767,10 @@ fn fly(
             if v.length() > 0.5 {
                 let yaw = (-v.x).atan2(-v.z);
                 let pitch = (v.y / v.length()).asin() * 0.6;
-                let bank = (-acc.dot(Vec3::new(v.z, 0.0, -v.x).normalize_or_zero()) * 0.06)
-                    .clamp(-0.8, 0.8);
+                // Roll into the turn: the wing on the inside of the turn goes down (+z is
+                // backward, so a positive roll lifts the right wing, for a turn to the left).
+                let left = Vec3::new(v.z, 0.0, -v.x).normalize_or_zero();
+                let bank = (acc.dot(left) * 0.06).clamp(-0.8, 0.8);
                 t.rotation = Quat::from_rotation_y(yaw)
                     * Quat::from_rotation_x(pitch)
                     * Quat::from_rotation_z(bank);
