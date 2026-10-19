@@ -445,11 +445,24 @@ impl Atmosphere {
     ///   Atmospheres using Mie Theory" (Computer Graphics Forum 43(2), Table 1: refractive
     ///   index n − 1 = 3.37e-6, depolarization 0.09), at 680, 550 and 440 nm: about 1.8 % of
     ///   Earth's.
-    /// - Dust: scattering and absorption at the surface from the same table (Mie theory for
-    ///   ~1.4 µm feldspar grains with 3 % hematite, which absorbs blue): albedo 0.96 red,
-    ///   0.83 green, 0.69 blue. Mixed through the gas's 11.1 km scale height, as Costa et al.
-    ///   2021 ("Interactive Visualization of Atmospheric Effects for Celestial Bodies", IEEE
-    ///   TVCG) do, it gives a vertical optical depth of 0.34: Mars' clear season.
+    /// - Dust: single-scattering albedo from the same table (Mie theory for ~1.4 µm feldspar
+    ///   grains with 3 % hematite, which absorbs blue): 0.96 red, 0.83 green, 0.69 blue. A
+    ///   vertical optical depth of 0.34 above datum: Mars' clear season (Gale's 880 nm record,
+    ///   taken 4.5 km below datum, runs from about 0.3 in the clear season to 1.5 in storms;
+    ///   Spirit's fell below 0.3, Lemmon et al. 2015, "Dust aerosol, clouds, and the atmospheric
+    ///   optical depth record over 5 Mars years of the Mars Exploration Rover mission", Icarus
+    ///   251).
+    /// - The dust thins over a 16 km scale height, not the gas's 11.1 km (which Costa et al.
+    ///   2021 assumed): the same column with less of it near the ground. Lemmon et al. fit 11.9
+    ///   km to Spirit's sky and 19.2 km to Opportunity's, which needed more dust up high; in the
+    ///   clear season the dust's mixing ratio peaks in layers 15–25 km up (Heavens et al. 2011,
+    ///   JGR 116, Mars Climate Sounder); and from inside Gale crater Curiosity measured less
+    ///   extinction along its line of sight to the rim, about 30 km away, than the column
+    ///   would give if well mixed, for most of the year (Moore et al. 2016, Icarus 264). Near
+    ///   the ground that is 0.022 per km (red): the rim of a crater 30 km away is seen through
+    ///   an optical depth of about 0.66. Below datum (canyon and crater floors) the air keeps
+    ///   datum's density: those deep floors hold no more dust than the plains (Moore et al.
+    ///   found Gale's floor a dust sink).
     /// - Anisotropy 0.7, rising toward blue (0.64, 0.7, 0.8): a single forward lobe can't hold
     ///   the diffraction peak, which for these grains is narrower and stronger in blue (and
     ///   stronger still where hematite absorbs blue, which Schneegans et al. name as a cause of
@@ -466,12 +479,12 @@ impl Atmosphere {
             planet_radius: radius,
             thickness: 100_000.0,
             rayleigh_scale_height: 11_100.0,
-            mie_scale_height: 11_100.0,
+            mie_scale_height: 16_000.0,
             mie_g: 0.7,
             ground_color: [0.3, 0.16, 0.08],
             rayleigh_scattering: [0.102e-6, 0.238e-6, 0.580e-6],
-            mie_scattering: [30.67e-6, 25.39e-6, 20.93e-6],
-            mie_absorption: [1.26e-6, 5.25e-6, 9.33e-6],
+            mie_scattering: [21.28e-6, 17.61e-6, 14.52e-6],
+            mie_absorption: [0.874e-6, 3.642e-6, 6.473e-6],
             ozone_absorption: [0.0; 3],
             mie_g_offset: [-0.06, 0.0, 0.1],
             density_scale: 1.0,
