@@ -1471,6 +1471,91 @@ fn tumbling_bodies_report_every_hard_landing() {
     }
 }
 
+/// Fires a 5 cm steel ball at `speed` m/s along +x at a wall 10 m away and returns where the
+/// ball and the wall's near face (`x`) end up 0.5 s later.
+fn fire_at(wall: &str, speed: f32, ccd: bool) -> (f64, f64) {
+    let mut app = app();
+    let wall_x = 10.0;
+    let face = match wall {
+        // 2 cm of static board.
+        "board" => {
+            app.world.spawn((
+                Transform::from_xyz(wall_x + 0.01, 1.0, 0.0),
+                Collider::cuboid(Vec3::new(0.01, 2.0, 2.0)),
+            ));
+            None
+        }
+        // A static mesh wall: two triangles, no thickness at all.
+        "mesh" => {
+            let v = |y: f32, z: f32| Vec3::new(0.0, y, z);
+            app.world.spawn((
+                Transform::from_xyz(wall_x, 1.0, 0.0),
+                Collider {
+                    shape: ColliderShape::TriMesh {
+                        vertices: vec![v(-2.0, -2.0), v(-2.0, 2.0), v(2.0, 2.0), v(2.0, -2.0)],
+                        indices: vec![[0, 1, 2], [0, 2, 3]],
+                    },
+                    ..Default::default()
+                },
+            ));
+            None
+        }
+        // A free-floating 5 cm plank, 50 kg (a door blown off its hinges).
+        _ => Some(
+            app.world
+                .spawn((
+                    Transform::from_xyz(wall_x + 0.025, 1.0, 0.0),
+                    RigidBody {
+                        gravity_scale: 0.0,
+                        ..RigidBody::dynamic()
+                    },
+                    Collider::cuboid(Vec3::new(0.025, 1.0, 0.5)).with_density(500.0),
+                    Velocity::default(),
+                ))
+                .id(),
+        ),
+    };
+    let ball = app
+        .world
+        .spawn((
+            Transform::from_xyz(0.0, 1.0, 0.0),
+            RigidBody {
+                ccd,
+                gravity_scale: 0.0,
+                ..RigidBody::dynamic()
+            },
+            Collider::sphere(0.025).with_density(7800.0),
+            Velocity {
+                linear: Vec3::new(speed, 0.0, 0.0),
+                angular: Vec3::ZERO,
+            },
+        ))
+        .id();
+    app.update_n(30);
+    let near_face = face.map_or(wall_x, |p| pos(&app, p).x - 0.025);
+    (pos(&app, ball).x, near_face)
+}
+
+#[test]
+fn fast_bodies_with_ccd_never_pass_through_thin_walls() {
+    for wall in ["board", "mesh", "plank"] {
+        for speed in [100.0, 300.0, 1000.0] {
+            let (ball, face) = fire_at(wall, speed, true);
+            assert!(
+                ball < face,
+                "a ball at {speed} m/s went through the {wall}: ball at x = {ball:.2}, face at {face:.2}"
+            );
+        }
+    }
+    // Without CCD a bullet-fast ball crosses the free plank within one substep and misses it
+    // (in this test the static walls stopped it even without CCD).
+    let (ball, face) = fire_at("plank", 1000.0, false);
+    assert!(
+        ball > face,
+        "a 1000 m/s ball without CCD stopped at {ball:.2}"
+    );
+}
+
 #[test]
 fn blasts_throw_nearby_bodies_away() {
     let mut app = app();

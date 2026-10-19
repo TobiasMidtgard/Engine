@@ -22,6 +22,9 @@ changing that one plugin line.
   collider densities or `RigidBody::mass_kg`; a designed `center_of_mass` and `inertia` (a car's
   low balance point, a plane's trim) override what the shapes imply, and a moved center of mass
   keeps the shapes' inertia about it. Damping, gravity scale, CCD, sleeping, rotation locks.
+  With `ccd` a 5 cm ball at 100 to 1000 m/s never passes through a 2 cm board, a mesh wall with
+  no thickness, or a free-floating 5 cm plank; without it, a 1000 m/s ball flies through the
+  plank.
   `MassProperties` is written back.
 - **Colliders**: sphere, cuboid, capsule, cylinder, convex hull, triangle mesh, heightfield,
   compound; on the body entity or on its children (one compound body). Shapes scale with the
