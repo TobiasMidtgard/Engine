@@ -551,10 +551,14 @@ pub fn demo_views(z: &Zone) -> Vec<View> {
         "field" => engine_fire::demo::VIEWS
             .iter()
             .map(|v| {
-                // Each stop starts a fresh fire its own way along, so it catches its moment.
+                // Each stop starts a fresh fire its own way along in clear air, so it catches
+                // its moment whichever stop came before. Fire, smoke and embers are CPU
+                // simulations, so the warm-up runs undrawn.
                 View::new(v.key, v.name, v.eye, v.target, v.hour)
+                    .on_arrive("smoke.clear", "{}")
                     .on_arrive("fire.demo", &format!(r#"{{"at_secs": {}}}"#, v.at_secs))
                     .warmup(v.warmup_secs)
+                    .quick_warmup()
             })
             .collect(),
         "parkour" => {
