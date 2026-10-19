@@ -9,8 +9,8 @@ use engine_core::time::TimeSource;
 use engine_destruction::*;
 use engine_render::{Mesh, StandardMaterial};
 use engine_world::physics::{
-    CharacterController, Collider, ColliderShape, PhysicsBackend, PhysicsQueries, PhysicsQuery,
-    QueryFilter, RigidBody,
+    BodyKind, CharacterController, Collider, ColliderShape, PhysicsBackend, PhysicsQueries,
+    PhysicsQuery, QueryFilter, RigidBody,
 };
 use engine_world::{
     DamageEvent, DamageKind, EditOp, EditShape, ProjectileTrace, SurfaceMaterials, TerrainEdit,
@@ -146,6 +146,155 @@ fn a_breach_charge_opens_drywall_but_only_scars_reinforced_concrete() {
         bars > 100,
         "the rebar mesh survives ({bars} cells with bars)"
     );
+}
+
+#[test]
+fn reinforcement_stops_bullets_and_charges_but_thermite_burns_through() {
+    let mut app = app();
+    // A 3 m drywall facing +Z: two 1.5 m panels go up behind it, at x = −0.75 and +0.75.
+    let wall = spawn_wall(&mut app, DestructibleWall::soft(3.0, 3.0), DVec3::ZERO);
+    // The floor behind it is a gravel pad, a few centimeters up: the struts stand on that.
+    let pad = Transform::from_xyz(0.0, 0.0, -1.5);
+    app.world.spawn((
+        pad,
+        GlobalTransform::from(pad),
+        dress::GravelPad { size: [6.0, 3.0] },
+    ));
+    app.update();
+    app.world.write_message(ReinforceRequest { wall });
+    app.world.write_message(ReinforceRequest { wall });
+    run_secs(&mut app, 0.3);
+    let panels = app
+        .world
+        .get::<ReinforcedBy>(wall)
+        .expect("reinforced")
+        .0
+        .clone();
+    assert_eq!(panels.len(), 2, "one set of two panels for a 3 m wall");
+    let (a, b) = (panels[0], panels[1]);
+    let z = |app: &App, e: Entity| app.world.get::<Transform>(e).unwrap().translation.z;
+    assert!(z(&app, a) < -0.4, "still being carried in: {}", z(&app, a));
+    run_secs(&mut app, 2.0);
+    for p in [a, b] {
+        assert!(app.world.get::<Reinforcement>(p).unwrap().is_set());
+        assert!((-0.15..-0.06).contains(&z(&app, p)), "home: {}", z(&app, p));
+    }
+    let feet: Vec<DVec3> = app
+        .world
+        .query::<(&reinforce::Strut, &GlobalTransform)>()
+        .iter(&app.world)
+        .map(|(s, gt)| gt.transform_point(DVec3::new(0.0, -s.length as f64 * 0.5, 0.0)))
+        .collect();
+    assert_eq!(feet.len(), 4, "two struts a panel");
+    for f in &feet {
+        let floor = dress::GRAVEL_TOP as f64;
+        assert!(
+            (f.y - floor).abs() < 0.03,
+            "a strut foot on the gravel: {f}"
+        );
+        assert!(f.z < -0.9, "planted well behind: {f}");
+    }
+    // Bullets through the drywall stop on the steel.
+    for k in 0..6 {
+        let x = -0.95 + k as f64 * 0.08;
+        app.world.write_message(ProjectileTrace {
+            from: DVec3::new(x, 1.1, 6.0),
+            to: DVec3::new(x, 1.1, -6.0),
+            radius: 0.01,
+            speed: 850.0,
+            shooter: None,
+        });
+    }
+    run_secs(&mut app, 0.3);
+    let integrity = |app: &App, e: Entity| app.world.get::<WallState>(e).unwrap().integrity();
+    assert!(integrity(&app, wall) < 1.0, "the drywall is holed");
+    assert!(solid_at(&app, a, Vec2::new(0.0, 1.1)), "the panel is not");
+    assert!(integrity(&app, a) > 0.99, "{}", integrity(&app, a));
+    // A breach charge strips the drywall and only scars the panel behind.
+    let mut c = BreachCharge::explosive(wall, Vec2::new(-0.75, 1.6), 4.0e5);
+    c.fuse_secs = 0.1;
+    app.world.spawn(c);
+    run_secs(&mut app, 0.6);
+    assert!(
+        !solid_at(&app, wall, Vec2::new(-0.75, 1.6)),
+        "a hole in the drywall"
+    );
+    assert!(solid_at(&app, a, Vec2::new(0.0, 1.6)), "the panel holds");
+    assert!(integrity(&app, a) > 0.95, "{}", integrity(&app, a));
+    // Thermite on the drywall burns through the panel behind it, and only that one.
+    let mut charge = BreachCharge::thermite(wall, Vec2::new(0.75, 1.1), [1.0, 1.6]);
+    charge.fuse_secs = 0.2;
+    app.world.spawn(charge);
+    run_secs(&mut app, 5.5);
+    assert!(!solid_at(&app, wall, Vec2::new(0.75, 1.1)));
+    assert!(
+        !solid_at(&app, b, Vec2::new(0.0, 1.1)),
+        "cut through the panel"
+    );
+    assert!(!solid_at(&app, b, Vec2::new(0.3, 0.5)));
+    assert!(
+        solid_at(&app, b, Vec2::new(0.0, 2.6)),
+        "above the cut stays"
+    );
+    assert!(
+        solid_at(&app, a, Vec2::new(0.6, 1.1)),
+        "the other panel is untouched"
+    );
+    // Panels go with their wall.
+    app.world.despawn(wall);
+    run_secs(&mut app, 0.1);
+    assert!(app.world.get_entity(a).is_err() && app.world.get_entity(b).is_err());
+}
+
+#[test]
+fn ai_reinforces_the_wall_nearest_a_point() {
+    let mut app = app();
+    let wall = spawn_wall(
+        &mut app,
+        DestructibleWall::soft(5.4, 3.0),
+        DVec3::new(20.0, 0.0, 0.0),
+    );
+    app.update();
+    let out = call_api(
+        &mut app.world,
+        "destruction.reinforce",
+        json!({"near": [21, 1.5, -0.8]}),
+    )
+    .unwrap();
+    assert_eq!(out["wall"].as_u64().unwrap(), wall.to_bits(), "{out}");
+    assert_eq!(out["panels"].as_u64().unwrap(), 2, "{out}");
+    run_secs(&mut app, 2.0);
+    let panels = app.world.get::<ReinforcedBy>(wall).unwrap().0.clone();
+    assert_eq!(panels.len(), 2);
+    let again = call_api(
+        &mut app.world,
+        "destruction.reinforce",
+        json!({"entity": wall.to_bits()}),
+    )
+    .unwrap_err();
+    assert!(again.contains("already reinforced"), "{again}");
+    let panel = call_api(
+        &mut app.world,
+        "destruction.reinforce",
+        json!({"entity": panels[0].to_bits()}),
+    )
+    .unwrap_err();
+    assert!(panel.contains("reinforcement panel"), "{panel}");
+    let none = call_api(
+        &mut app.world,
+        "destruction.reinforce",
+        json!({"near": [60, 1.5, 0]}),
+    )
+    .unwrap_err();
+    assert!(none.contains("No wall"), "{none}");
+    reinforce::remove_reinforcement(&mut app.world, wall);
+    assert!(app.world.get_entity(panels[0]).is_err());
+    call_api(
+        &mut app.world,
+        "destruction.reinforce",
+        json!({"entity": wall.to_bits()}),
+    )
+    .unwrap();
 }
 
 fn spawn_flat(app: &mut App, wall: DestructibleWall, at: DVec3) -> Entity {
@@ -521,6 +670,17 @@ fn the_demo_starts_wrecked_and_keeps_going() {
     run_secs(&mut app, 2.5);
     let charges = app.world.query::<&BreachCharge>().iter(&app.world).count();
     assert!(charges >= 1, "the live charges are on their walls");
+    let reinforced: Vec<usize> = app
+        .world
+        .query::<&ReinforcedBy>()
+        .iter(&app.world)
+        .map(|b| b.0.len())
+        .collect();
+    assert_eq!(
+        reinforced,
+        [2],
+        "bay 8's drywall has two panels up behind it"
+    );
 }
 
 #[test]
@@ -545,6 +705,21 @@ fn the_breach_house_roof_is_breached_from_below_and_above_every_cycle() {
     let hatch = wall(&mut app, "Wooden hatch");
     let steel = wall(&mut app, "Steel hatch");
     let bay2 = wall(&mut app, "Breach house roof bay 2");
+    // Both hatch ladders can be climbed, from a step off the floor up to the deck behind them.
+    let ladders: Vec<_> = app
+        .world
+        .query::<(&engine_world::Climbable, &GlobalTransform)>()
+        .iter(&app.world)
+        .map(|(c, gt)| c.in_world(gt))
+        .collect();
+    assert_eq!(ladders.len(), 2);
+    for l in &ladders {
+        assert!((l.bottom.y - 0.27).abs() < 0.02, "{l:?}");
+        assert!(l.top.y > 2.9 && l.top.y < l.exit.y, "{l:?}");
+        assert!((l.exit.y - 3.29).abs() < 0.02, "onto the deck: {l:?}");
+        assert!(l.exit.z < l.top.z - 0.4, "over the header behind it: {l:?}");
+        assert!(l.facing.distance(Vec3::NEG_Z) < 1e-4, "{l:?}");
+    }
     assert!(
         integrity(&app, old) < 0.995,
         "the west bay starts shot up ({})",
@@ -966,8 +1141,12 @@ fn doors_hang_in_doorways_swing_away_from_you_and_fall_with_them() {
         .get::<door::HungDoor>(frame)
         .expect("a door hangs in the doorway")
         .0;
-    // Shut, a box fills the opening; it has no body, so the backend moves it with the door.
-    assert!(app.world.get::<RigidBody>(door).is_none());
+    // Shut, a box fills the opening; the door is a kinematic body moved by its Transform, so
+    // it shoves what it swings into.
+    assert_eq!(
+        app.world.get::<RigidBody>(door).map(|b| b.kind),
+        Some(BodyKind::Kinematic)
+    );
     let Some(Collider {
         shape: ColliderShape::Cuboid { half_extents },
         ..
@@ -1037,8 +1216,9 @@ fn doors_hang_in_doorways_swing_away_from_you_and_fall_with_them() {
     let d = *app.world.get::<Door>(high_door).unwrap();
     assert!(d.loose && d.open == 0.0, "{d:?}");
     assert!(
-        app.world.get::<Collider>(high_door).is_none(),
-        "the door rides its doorway down, no collider of its own"
+        app.world.get::<Collider>(high_door).is_none()
+            && app.world.get::<RigidBody>(high_door).is_none(),
+        "the door rides its doorway down, no body of its own"
     );
     // Taken down, a doorway takes its door with it.
     app.world.despawn(frame);

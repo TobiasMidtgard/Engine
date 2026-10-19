@@ -51,6 +51,14 @@ struct Frame {
     sky: vec4<f32>,                // the sky's flat cloud layer on (1/0), night (0 day .. 1 night, from the main light's illuminance at the camera), stand-in moon glow opposite a sun below the horizon (0..1), unused
     surface_map: vec4<f32>,        // ground weather map (`surface_weather`): min corner relative to the camera (x, z, m), size along x and z (m, 0 = none)
     surface_open: vec4<f32>,       // the open ground's weather in the map's encoding: beyond the map and on roofs over ground they keep dry
+    cloud_shadow: mat4x4<f32>,     // camera-relative -> cloud shadow map clip space, projected along the sun onto the cloud base (`cloud_shadow`)
+    cloud_shadow_params: vec4<f32>, // drawn this frame (1/0), cloud base height relative to the camera (m), cloud layer thickness (m), sun transmittance beyond the map
+    cloud_shadow_area: vec4<f32>,  // camera-relative x and z of the map corner at uv (0, 0) (m), side (m), texels per side
+    air_rayleigh: vec4<f32>,       // the air (`Atmosphere`, times its density scale): Rayleigh scattering at the surface (1/m) RGB, w unused
+    air_mie: vec4<f32>,            // Mie scattering at the surface (1/m) RGB, w unused
+    air_mie_extinction: vec4<f32>, // Mie extinction (scattering + absorption) at the surface (1/m) RGB, w unused
+    air_ozone: vec4<f32>,          // ozone absorption at the layer's peak (1/m) RGB, w unused
+    air_mie_g: vec4<f32>,          // Mie anisotropy per channel RGB, w unused
 };
 
 // An indoor space (`SkyLightVolume`): sky light comes in only through its open faces.
@@ -194,10 +202,21 @@ struct Surface {
     emissive: vec3<f32>, // radiance (cd/m^2), not yet pre-exposed
     occlusion: f32,
     subsurface: f32,     // 0..1 light wrap for foliage/skin
+    // The normal without normal-map or detail bumps (the interpolated vertex normal, on the
+    // same side as `normal`), for large-scale lookups such as how much sky the surface sees:
+    // cover doesn't change wrinkle by wrinkle. Zero (the default) means `normal`.
+    smooth_normal: vec3<f32>,
 };
 
 fn default_surface() -> Surface {
-    return Surface(vec3(0.8), 0.0, 0.6, 0.5, vec3(0.0, 1.0, 0.0), vec3(0.0), 1.0, 0.0);
+    return Surface(vec3(0.8), 0.0, 0.6, 0.5, vec3(0.0, 1.0, 0.0), vec3(0.0), 1.0, 0.0, vec3(0.0));
+}
+
+// `s.smooth_normal` as a unit vector, or `s.normal` when it is unset.
+fn surface_smooth_normal(s: Surface) -> vec3<f32> {
+    let m = s.smooth_normal;
+    let len2 = dot(m, m);
+    return select(s.normal, m * inverseSqrt(max(len2, 1e-12)), len2 > 1e-8);
 }
 
 // Direction <-> equirectangular UV (u around +Y starting at -Z, v from +Y down).

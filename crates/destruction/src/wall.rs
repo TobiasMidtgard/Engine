@@ -286,8 +286,8 @@ pub struct CellGrid {
     pub kind: Vec<CellKind>,
     /// Toughness multiplier (material variation, studs).
     pub tough: Vec<f32>,
-    /// Blast scorch 0..1.
-    pub scorch: Vec<f32>,
+    /// Blast scorch 0..1 on the front and back faces.
+    pub scorch: Vec<[f32; 2]>,
     /// Intact rebar through this cell (`VBAR`, `HBAR`).
     pub rebar: Vec<u8>,
     /// Index of cell (0, 0) in the wall this grid came from (stable noise and jitter).
@@ -454,7 +454,7 @@ impl WallState {
             solid: vec![true; n],
             kind: vec![CellKind::Main; n],
             tough: vec![1.0; n],
-            scorch: vec![0.0; n],
+            scorch: vec![[0.0; 2]; n],
             rebar: vec![0; n],
             global: (0, 0),
         };
@@ -692,7 +692,9 @@ impl WallState {
                 if !g.solid[idx] {
                     continue;
                 }
-                g.scorch[idx] = (g.scorch[idx] + flux / 3.0e5).min(1.0);
+                // Soot on the face toward the blast; the far face only where it spalls.
+                let (near, far) = if front { (0, 1) } else { (1, 0) };
+                g.scorch[idx][near] = (g.scorch[idx][near] + flux / 3.0e5).min(1.0);
                 let depth = flux * facing / (props.toughness_j_m3 * g.tough[idx].max(0.1));
                 if depth < 1e-4 {
                     out.touch(i, j);
@@ -704,6 +706,7 @@ impl WallState {
                 // The shock spalls the far face of cells it nearly went through.
                 if !gone && depth > before * 0.55 {
                     gone = g.erode(idx, depth * 0.35, !front);
+                    g.scorch[idx][far] = g.scorch[idx][far].max(g.scorch[idx][near] * 0.5);
                 }
                 out.volume += (before - g.remaining(idx)) * area;
                 out.touch(i, j);
@@ -759,7 +762,8 @@ impl WallState {
                     && c.y <= max.y + g.cell.y * 2.0)
                     && !inside;
                 if ring {
-                    g.scorch[idx] = 1.0;
+                    // Thermite melts right through: both faces blacken round the cut.
+                    g.scorch[idx] = [1.0; 2];
                     out.touch(i, j);
                 }
                 if !inside {
@@ -933,7 +937,7 @@ impl WallState {
             solid: vec![false; n],
             kind: vec![CellKind::Main; n],
             tough: vec![1.0; n],
-            scorch: vec![0.0; n],
+            scorch: vec![[0.0; 2]; n],
             rebar: vec![0; n],
             global: (g.global.0 + i0 as i64, g.global.1 + j0 as i64),
         };
@@ -1049,7 +1053,7 @@ struct GridVertex {
     zb: f32,
     removed_front: f32,
     removed_back: f32,
-    scorch: f32,
+    scorch: [f32; 2],
     stud: bool,
 }
 
@@ -1072,7 +1076,7 @@ pub fn mesh_cells(
         for vi in i0..=i1 {
             let mut f = 0.0;
             let mut b = 0.0;
-            let mut sc = 0.0;
+            let mut sc = [0.0f32; 2];
             let mut count = 0.0;
             let mut any_solid = false;
             let mut damaged = false;
@@ -1099,7 +1103,8 @@ pub fn mesh_cells(
                     f += grid.front[c].min(t);
                     b += grid.back[c].min(t);
                 }
-                sc += grid.scorch[c];
+                sc[0] += grid.scorch[c][0];
+                sc[1] += grid.scorch[c][1];
                 stud |= grid.kind[c] == CellKind::Stud;
             }
             if !any_solid {
@@ -1107,7 +1112,7 @@ pub fn mesh_cells(
             }
             f /= count;
             b /= count;
-            sc /= count;
+            sc = sc.map(|x| x / count);
             let max_sum = t * 0.92;
             if f + b > max_sum {
                 let s = max_sum / (f + b);
@@ -1144,10 +1149,11 @@ pub fn mesh_cells(
             look.interior
         }
     };
-    let surface_color = |v: &GridVertex, removed: f32, gx: i64, gy: i64| {
-        let base = scale(look.outside_color(v.xy, gx, gy), 1.0 - 0.8 * v.scorch);
+    let surface_color = |v: &GridVertex, front: bool, removed: f32, gx: i64, gy: i64| {
+        let scorch = v.scorch[usize::from(!front)];
+        let base = scale(look.outside_color(v.xy, gx, gy), 1.0 - 0.8 * scorch);
         let k = ((removed - 0.002) / 0.02).clamp(0.0, 1.0);
-        let inner = scale(interior_of(v.stud), 1.0 - 0.5 * v.scorch);
+        let inner = scale(interior_of(v.stud), 1.0 - 0.5 * scorch);
         mix(base, scale(inner, 0.93), k)
     };
 
@@ -1176,7 +1182,7 @@ pub fn mesh_cells(
                         };
                         let gx = grid.global.0 + vi as i64;
                         let gy = grid.global.1 + vj as i64;
-                        let color = surface_color(&v, removed, gx, gy);
+                        let color = surface_color(&v, front, removed, gx, gy);
                         let n = if front { Vec3::Z } else { Vec3::NEG_Z };
                         index[slot] = mb.vertex(Vec3::new(v.xy.x, v.xy.y, z), n, color);
                     }

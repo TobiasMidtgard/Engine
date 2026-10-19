@@ -142,7 +142,31 @@ pub(crate) fn register(app: &mut App) {
         )
         .add_render_feature(CloudFeature::default())
         .add_render_feature(GroundFeature::default())
-        .add_render_feature(PrecipitationFeature::default());
+        .add_render_feature(PrecipitationFeature::default())
+        .add_systems(Update, sky_cloud_layer_system);
+}
+
+/// While the volumetric clouds are on, the renderer's own flat cloud layer is off: where the
+/// clouds blend over the sky (`replace_sky` off) it showed as a second deck under them, and
+/// elsewhere it was drawn only to be painted over. It comes back when the clouds are switched
+/// off, unless something else had turned it off.
+fn sky_cloud_layer_system(
+    clouds: Res<CloudSettings>,
+    settings: Option<ResMut<engine_render::RenderSettings>>,
+    mut turned_off: Local<bool>,
+) {
+    let Some(mut settings) = settings else {
+        return;
+    };
+    if clouds.enabled {
+        if settings.sky_cloud_layer {
+            settings.sky_cloud_layer = false;
+            *turned_off = true;
+        }
+    } else if *turned_off {
+        settings.sky_cloud_layer = true;
+        *turned_off = false;
+    }
 }
 
 /// Standard alpha blending for premultiplied color where alpha is how much of the background

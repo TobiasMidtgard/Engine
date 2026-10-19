@@ -21,8 +21,8 @@
 //! * **Module contracts** for the systems other modules build on, so each module can be ripped
 //!   out and replaced: [`physics`] (bodies, colliders, joints, character controller, queries,
 //!   plus a [`physics::conformance`] suite every backend must pass), [`animation`] (pose,
-//!   parameters, triggers, events, ragdoll, body requests), [`locomotion`] (move intent and state, vehicle
-//!   controls) and [`terrain`] (edits and change notifications).
+//!   parameters, triggers, events, ragdoll, body requests), [`locomotion`] (move intent and
+//!   state, vehicle controls, ladders) and [`terrain`] (edits and change notifications).
 //!
 //! Units everywhere: meters, kilograms, seconds, °C, m/s.
 
@@ -42,8 +42,8 @@ pub use environment::*;
 pub use events::*;
 pub use grid::{Blend, Grid2, Grid3};
 pub use locomotion::{
-    EngineKind, EngineState, LocomotionMode, LocomotionState, MoveIntent, VehicleControls,
-    WheelContact, WheelContacts,
+    ClimbLine, Climbable, EngineKind, EngineState, Exhaust, ExhaustEffects, ExhaustKind, Exhausts,
+    LocomotionMode, LocomotionState, MoveIntent, VehicleControls, WheelContact, WheelContacts,
 };
 pub use physical::*;
 pub use shift::{FollowsWorldShift, WorldShift, WorldShiftAppExt, WorldShiftSet};
@@ -381,6 +381,8 @@ mod tests {
             "MoveIntent",
             "AnimationParams",
             "BodyRequest",
+            "Climbable",
+            "Exhausts",
         ] {
             assert!(
                 registry.component(name).is_some(),
