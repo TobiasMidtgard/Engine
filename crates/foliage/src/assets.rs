@@ -172,8 +172,12 @@ struct LeafImages {
     normal: Option<Handle<Image>>,
 }
 
-/// Paint the leaf images of a style: a 1024² atlas of sprays with a normal map for trees and
-/// shrubs, a single 256² image for fern fronds.
+/// Texels per side of a tree or shrub leaf atlas (sharp single leaves up close; mips keep
+/// the cut-out coverage far off).
+const LEAF_ATLAS_SIZE: u32 = 2048;
+
+/// Paint the leaf images of a style: a [`LEAF_ATLAS_SIZE`]² atlas of sprays with a normal map
+/// for trees and shrubs, a single 256² image for fern fronds.
 fn paint_leaves(style: LeafStyle, images: &mut Assets<Image>) -> LeafImages {
     let kind = kind_of(style);
     let seed = 0x1eaf ^ style as u64;
@@ -184,7 +188,7 @@ fn paint_leaves(style: LeafStyle, images: &mut Assets<Image>) -> LeafImages {
             normal: None,
         };
     }
-    let t = leaf_textures(kind, 1024, seed);
+    let t = leaf_textures(kind, LEAF_ATLAS_SIZE, seed);
     LeafImages {
         color: images.add(t.color),
         normal: Some(images.add(t.normal)),
@@ -553,7 +557,8 @@ fn bark_materials(sp: &PlantSpecies, images: Option<BarkImages>) -> [StandardMat
             let [r, g, b] = [0, 1, 2].map(|c| gain[c] / reference[c].max(1e-3));
             m.base_color = [r, g, b, 1.0];
             m.normal_scale = img.kind.normal_scale();
-            m
+            let (strength, scale) = img.kind.detail();
+            m.with_detail(strength, scale)
         };
         bark = textured(bark, [1.0; 3], 1.0);
         // Dead bark on the damp forest floor weathers to a dull grey-brown (only sun-dried wood

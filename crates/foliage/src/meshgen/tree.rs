@@ -829,7 +829,7 @@ fn weather_stump(
     (m, (!b.is_empty()).then(|| b.finish()))
 }
 
-/// The irregular cross-section of a felled trunk: shallow flutes round it, bulges where old
+/// The irregular cross-section of a trunk, standing or felled: shallow flutes round it, bulges where old
 /// knots were and a slow wander of its girth along it, as a radial scale about the trunk's axis
 /// (`path` with radii `rad`) that depends only on the angle round it and the height along it.
 /// Everything built on the trunk's surface (stubs, cut faces, fungi) moves with it, so nothing
@@ -893,8 +893,12 @@ impl<'a> TrunkShape<'a> {
     /// Reshape `mesh` (built on this trunk) by [`Self::scale`], bending its normals with the
     /// surface.
     fn roughen(&self, mesh: &mut engine_render::Mesh) {
+        self.roughen_vertices(&mut mesh.vertices);
+    }
+
+    fn roughen_vertices(&self, vertices: &mut [engine_render::Vertex]) {
         let da = 0.02;
-        for v in &mut mesh.vertices {
+        for v in vertices {
             let p = Vec3::from(v.position);
             let (c, _) = self.axis_at(p.y);
             let rel = Vec3::new(p.x - c.x, 0.0, p.z - c.z);
@@ -1475,9 +1479,13 @@ fn assemble(
     // The bark rim round the cut faces, as dark as the bark there (a pale rim would show as a
     // hairline round a birch's black foot where the stump and the wood above it meet).
     let rim = (bark_color(sp, cut, h, cut_i, seed).truncate() * 0.6).extend(1.0);
+    // No trunk is a true cylinder: fluted, bulging at old knots (the near level only).
+    let trunk_shape = TrunkShape::new(trunk_path, trunk_r, seed);
+    let bark_v_shift = engine_core::math::hash01(11, 0, 0, seed);
     // Base: roots + trunk up to the cut, growth rings on top.
     if !sapling {
         let mut b = MeshBuilder::new();
+        b.bark_v_shift = bark_v_shift;
         let path = &trunk_path[..=cut_i];
         let rad = &trunk_r[..=cut_i];
         let color = |i: usize, _a: f32| bark_color(sp, path[i].y, h, i, seed);
@@ -1508,7 +1516,10 @@ fn assemble(
                 b.tube(&root, &radius, 8, 0.5, &color, None, None);
             }
         }
-        let base = b.finish();
+        let mut base = b.finish();
+        // The same flutes and burls as the trunk above (and the log it becomes), so the rings
+        // still meet at the cut.
+        trunk_shape.roughen(&mut base);
         let wood = CutWood::of(sp);
         (out.base_weathered, out.base_moss) = STUMP_WEATHER[1..]
             .iter()
@@ -1519,6 +1530,7 @@ fn assemble(
         // A bare log: the top has broken off where the trunk thins and rotted away, leaving a
         // dark, rotten end (about a third of the tree's height remains).
         let mut b = MeshBuilder::new();
+        b.bark_v_shift = bark_v_shift;
         let snap = 0.55 + 0.15 * engine_core::math::hash01(7, 0, 0, seed);
         let end = (cut_i..trunk_path.len())
             .find(|&i| trunk_r[i] < sp.trunk_radius_m * snap)
@@ -1554,7 +1566,7 @@ fn assemble(
             b.tube(&stub, &r, 5, 0.5, &color, None, Some(&broken));
         }
         let mut log = b.finish();
-        // No trunk is a true cylinder: fluted, bulging at old knots.
+        // Its flutes and burls carry on from the standing trunk's.
         let shape = TrunkShape::new(path, rad, seed);
         shape.roughen(&mut log);
         let mut snag = log.clone();
@@ -1596,7 +1608,11 @@ fn assemble(
             &trunk_path[..=cut_i],
             &trunk_r[..=cut_i],
             (0.55, 0.85),
-        );
+        )
+        .map(|mut f| {
+            trunk_shape.roughen(&mut f);
+            f
+        });
     }
     let kind = kind_of(sp.shape.leaf);
     let steps = leaf_steps(sp);
@@ -1610,6 +1626,7 @@ fn assemble(
     for lod in [false, true] {
         // Wood above the cut (with a cut face on its bottom, seen once it falls).
         let mut b = MeshBuilder::new();
+        b.bark_v_shift = bark_v_shift;
         let start = if sapling { 0 } else { cut_i };
         let mut path = trunk_path[start..].to_vec();
         if !sapling {
@@ -1632,6 +1649,9 @@ fn assemble(
             if sapling { None } else { Some(&cap) },
             Some(&tip),
         );
+        if !lod && !sapling {
+            trunk_shape.roughen_vertices(&mut b.vertices);
+        }
         add_branches(&mut b, sp, branches, h, lod, seed, &shading);
         let detail = if lod { Detail::Far } else { Detail::Near };
         let (f, thin) = crown_meshes(&crowns.cards, &shading, kind, detail, crowns.grid, steps);
