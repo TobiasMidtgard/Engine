@@ -149,7 +149,8 @@ under a micrometer).
   that leaves its region's radius moves to another region; two regions whose bodies come close
   merge so they can collide.
 - Static colliders are copied into every region that could touch them (the shape data is
-  shared). Regions far from every `SimulationFocus` pause (`freeze_distance_m`).
+  shared); a region travelling with its bodies drops the copies it leaves behind, so a ship
+  crossing a continent holds only the statics near it. Regions far from every `SimulationFocus` pause (`freeze_distance_m`).
 - A `WorldShift` (the space module re-anchoring the world) moves the simulation in the same
   frame. A floating-origin move only moves region anchors: sleeping bodies stay asleep and
   contacts carry on. A turn into another planet's frame rotates each region's contents about
@@ -192,7 +193,7 @@ proving ground with the overlay.
 | `blast_response`, `blast_scale` | on, 1 | Explosions push bodies; 1 = real blast wind, action games use 3–10. |
 
 `PhysicsStats` (resource, also `physics.*` in `Diagnostics`): bodies, awake bodies, regions,
-touching pairs, step time, substeps, articulated joints.
+touching pairs, step time, substeps, articulated joints, static copies.
 
 ## API functions
 
@@ -270,7 +271,7 @@ ground, running over heightfield hills, crouching, landing from a fall, standing
 from 1 m to 10 km across, characters on their own clock, sensors and layers, local time (forces, damping and lifts
 on a slow clock too), hovering,
 buoyancy, floating the way real bodies do (logs, planks, cubes on their edge, a ball's draft, a
-barge on a swell), blasts, bodies crossing and merging regions); the float test
+barge on a swell), blasts, bodies crossing and merging regions, a region dropping the statics it travels past); the float test
 (`tests/floaters.rs`); riding moving bodies (`tests/platforms.rs`:
 crates and characters on a deck at up to 30 km/s, lifts, a turntable, a thrusting and turning ship,
 a seesaw tipped by a character's weight, crates landing on heads, rays hitting bodies at orbital

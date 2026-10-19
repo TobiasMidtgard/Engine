@@ -492,6 +492,9 @@ impl MaterialCache {
 /// Contact distance under which a close pair counts as touching, meters.
 const TOUCH_DISTANCE: f32 = 0.01;
 
+/// A region keeps a static's copy until the static is this many times its reach away.
+const STATIC_KEEP: f64 = 1.2;
+
 impl Simulation {
     // ------------------------------------------------------------------ regions
 
@@ -558,6 +561,8 @@ impl Simulation {
         id
     }
 
+    /// How far a region reaches for static colliders: copies of the ones whose bounding
+    /// sphere comes this close to its anchor.
     fn static_reach(&self) -> f64 {
         self.settings.region_radius_m * 1.25 + 50.0
     }
@@ -1766,8 +1771,32 @@ impl Simulation {
             delta
         };
         let _ = delta;
-        // Static copies: re-place the ones in this region (some may now be out of reach, new
-        // ones in reach).
+        // Static copies: drop the ones left out of reach (a region following a car or a ship
+        // would otherwise collect every static it passed), re-place the rest, and copy in
+        // the ones now in reach. A copy stays a little past the reach it came in at, so one at
+        // the edge doesn't come and go as the region re-centers; a static's home copy stays.
+        let reach = self.static_reach();
+        let anchor = self.region(id).anchor;
+        let left: Vec<(Entity, ColliderHandle)> = self
+            .region(id)
+            .statics
+            .iter()
+            .filter_map(|e| {
+                let c = self.colliders.get(e)?;
+                let far = c.world_pose.0.distance(anchor) > c.radius + reach * STATIC_KEEP;
+                let h = c.handles.iter().find(|(r, _)| *r == id)?.1;
+                (far && c.home != Some(id)).then_some((*e, h))
+            })
+            .collect();
+        for (e, h) in left {
+            let region = self.region_mut(id);
+            region.world.remove_collider(h);
+            region.statics.remove(&e);
+            region.needs_refresh = true;
+            if let Some(c) = self.colliders.get_mut(&e) {
+                c.handles.retain(|(r, _)| *r != id);
+            }
+        }
         let statics: Vec<Entity> = self.region(id).statics.iter().copied().collect();
         for e in statics {
             let Some(c) = self.colliders.get(&e) else {
@@ -1783,8 +1812,6 @@ impl Simulation {
                 col.set_position(Pose::from_parts(local, pose.1));
             }
         }
-        let reach = self.static_reach();
-        let anchor = self.region(id).anchor;
         let add: Vec<Entity> = self
             .colliders
             .iter()
