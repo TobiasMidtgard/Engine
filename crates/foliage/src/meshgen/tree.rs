@@ -46,11 +46,16 @@ pub struct PlantMeshes {
     pub foliage_lod_thin: Vec<engine_render::Mesh>,
     /// The cheapest level, for trees hundreds of meters off (whole valleys of scenery trees):
     /// the trunk from the ground up on a few four-sided rings with sticks for the big limbs,
-    /// and about a tenth of the crown's cards, flat and much bigger. No base goes with it.
+    /// and about a seventh of the crown's cards, flat and much bigger. No base goes with it.
     pub wood_distant: Option<engine_render::Mesh>,
     pub foliage_distant: Option<engine_render::Mesh>,
     /// Thinned copies of `foliage_distant` (deciduous species only, as `foliage_thin`).
     pub foliage_distant_thin: Vec<engine_render::Mesh>,
+    /// The crown leaf by leaf, for broadleaf trees and shrubs seen up close: every leaf of
+    /// every near card's spray as its own small folded quad, turned its own way out of the
+    /// spray's plane, with the twigs as narrow strips. Drawn with the single-leaf atlas
+    /// ([`super::textures::hero_leaf_textures`]) and a double-sided material.
+    pub foliage_hero: Option<engine_render::Mesh>,
     /// A felled log once its twigs have rotted off: the trunk above the cut with stubs of the
     /// big limbs (same model space as `wood`).
     pub log: Option<engine_render::Mesh>,
@@ -474,15 +479,22 @@ impl PlantMeshes {
             }
         }
         let (lo, hi) = bounds(
-            [&self.wood, &self.foliage, &self.wood_lod, &self.foliage_lod]
-                .into_iter()
-                .flatten(),
+            [
+                &self.wood,
+                &self.foliage,
+                &self.foliage_hero,
+                &self.wood_lod,
+                &self.foliage_lod,
+            ]
+            .into_iter()
+            .flatten(),
         );
         // Thinned crowns lie within the full one, and must sway with it.
         widen(
             [
                 &mut self.wood,
                 &mut self.foliage,
+                &mut self.foliage_hero,
                 &mut self.wood_lod,
                 &mut self.foliage_lod,
             ]
@@ -607,10 +619,10 @@ fn moss_log(mesh: &mut engine_render::Mesh, amount: f32, wood: CutWood, seed: u6
         // blotches, so a birch log doesn't lie on the floor like a white pipe.
         let lum = c.dot(Vec3::new(0.3, 0.55, 0.15));
         let algae = smoothstep(-0.3, 0.5, m.patch) * m.side;
-        let grey = Vec3::new(0.84, 0.83, 0.78).lerp(Vec3::new(0.66, 0.74, 0.5), algae) * lum;
+        let grey = Vec3::new(0.74, 0.69, 0.62).lerp(Vec3::new(0.62, 0.66, 0.5), 0.5 * algae) * lum;
         let pale = smoothstep(0.2, 0.55, lum);
         let grime = 1.0 - pale * (0.25 + 0.2 * amount + 0.25 * smoothstep(-0.1, 0.5, m.tint));
-        let c = c.lerp(grey, 0.35 + 0.45 * amount) * grime;
+        let c = c.lerp(grey, 0.25 + 0.35 * amount) * grime;
         let c = c.lerp(soil, (0.3 + 0.3 * pale) * m.under * m.side);
         let cover = m.cover * (0.6 + 0.3 * amount);
         let c = c.lerp(moss, cover) * (1.0 - (0.2 + 0.2 * amount) * m.under * m.side);
@@ -829,6 +841,124 @@ fn weather_stump(
     (m, (!b.is_empty()).then(|| b.finish()))
 }
 
+/// The irregular cross-section of a trunk, standing or felled: shallow flutes round it, bulges where old
+/// knots were and a slow wander of its girth along it, as a radial scale about the trunk's axis
+/// (`path` with radii `rad`) that depends only on the angle round it and the height along it.
+/// Everything built on the trunk's surface (stubs, cut faces, fungi) moves with it, so nothing
+/// opens up or floats.
+struct TrunkShape<'a> {
+    path: &'a [Vec3],
+    rad: &'a [f32],
+    seed: u64,
+    phase: [f32; 3],
+}
+
+impl<'a> TrunkShape<'a> {
+    fn new(path: &'a [Vec3], rad: &'a [f32], seed: u64) -> Self {
+        let h = |k: i64| engine_core::math::hash01(k, 3, 9, seed) * std::f32::consts::TAU;
+        Self {
+            path,
+            rad,
+            seed,
+            phase: [h(1), h(2), h(3)],
+        }
+    }
+
+    /// The trunk's axis point and radius at height `y` (model space, the trunk along +Y).
+    /// Points past either end take the end's.
+    fn axis_at(&self, y: f32) -> (Vec3, f32) {
+        let (path, rad) = (self.path, self.rad);
+        let i = path
+            .windows(2)
+            .position(|w| y < w[1].y)
+            .unwrap_or(path.len() - 2);
+        let t = ((y - path[i].y) / (path[i + 1].y - path[i].y).max(1e-4)).clamp(0.0, 1.0);
+        (
+            path[i].lerp(path[i + 1], t),
+            rad[i] + (rad[i + 1] - rad[i]) * t,
+        )
+    }
+
+    /// Radial scale at angle `a` round the axis and height `y`: 1 ± about a tenth.
+    fn scale(&self, a: f32, y: f32) -> f32 {
+        let [p1, p2, p3] = self.phase;
+        // Flutes: a few broad lobes, twisting slowly along the trunk.
+        let twist = 0.12 * y;
+        let flutes = 0.05 * (3.0 * (a + twist) + p1).sin() + 0.03 * (5.0 * (a - twist) + p2).sin();
+        // Knots and burls: a few rounded swellings.
+        let (c, s) = (a.cos() as f64, a.sin() as f64);
+        let knot = noise::fbm3(
+            c * 1.4,
+            y as f64 * 1.1,
+            s * 1.4,
+            self.seed ^ 0x6b_0075,
+            2,
+            2.0,
+            0.5,
+        );
+        let burls = 0.11 * smoothstep(0.2, 0.7, knot);
+        // Girth wandering along the trunk.
+        let girth = 0.03 * (0.7 * y + p3).sin();
+        1.0 + flutes + burls + girth
+    }
+
+    /// Reshape `mesh` (built on this trunk) by [`Self::scale`], bending its normals with the
+    /// surface.
+    fn roughen(&self, mesh: &mut engine_render::Mesh) {
+        self.roughen_vertices(&mut mesh.vertices);
+    }
+
+    fn roughen_vertices(&self, vertices: &mut [engine_render::Vertex]) {
+        let da = 0.02;
+        for v in vertices {
+            let p = Vec3::from(v.position);
+            let (c, _) = self.axis_at(p.y);
+            let rel = Vec3::new(p.x - c.x, 0.0, p.z - c.z);
+            let a = rel.z.atan2(rel.x);
+            let k = self.scale(a, p.y);
+            // The slope of the surface round the trunk tips the normal sideways.
+            let dk = (self.scale(a + da, p.y) - self.scale(a - da, p.y)) / (2.0 * da);
+            let along = Vec3::new(-a.sin(), 0.0, a.cos());
+            let n = Vec3::from(v.normal);
+            let radial = n.dot(Vec3::new(a.cos(), 0.0, a.sin())).max(0.0);
+            let n = (n - along * (dk / k) * radial).normalize_or(n);
+            let q = c + rel * k + Vec3::Y * (p.y - c.y);
+            v.position = q.to_array();
+            v.normal = n.to_array();
+        }
+    }
+
+    /// Slump `mesh` by `amount` (0..1): an old log's rotten heart gives way, so it settles
+    /// lower and wider, flattening most on its top (the model's +X side, turned up).
+    fn slump(&self, mesh: &mut engine_render::Mesh, amount: f32) {
+        if amount <= 0.0 {
+            return;
+        }
+        // It sags along its length too, its middle settling into the litter.
+        let (y0, y1) = (self.path[0].y, self.path[self.path.len() - 1].y);
+        let r0 = self.rad[0];
+        for v in &mut mesh.vertices {
+            let p = Vec3::from(v.position);
+            let (c, _) = self.axis_at(p.y);
+            let (mut q, n) = Self::flatten(p, Vec3::from(v.normal), c, amount);
+            let t = ((p.y - y0) / (y1 - y0).max(1e-3)).clamp(0.0, 1.0);
+            q.x -= 0.3 * r0 * amount * (std::f32::consts::PI * t).sin();
+            v.position = q.to_array();
+            v.normal = n.to_array();
+        }
+    }
+
+    fn flatten(p: Vec3, n: Vec3, c: Vec3, amount: f32) -> (Vec3, Vec3) {
+        // Only the top sinks: the underside stays on the ground.
+        let x = p.x - c.x;
+        let sx = 1.0 - if x > 0.0 { 0.2 * amount } else { 0.0 };
+        let sz = 1.0 + 0.07 * amount;
+        let q = Vec3::new(c.x + x * sx, p.y, c.z + (p.z - c.z) * sz);
+        let n = Vec3::new(n.x / sx, n.y, n.z / sz).normalize_or(n);
+        (q, n)
+    }
+}
+
 /// How mossy a log's surface is at a vertex (see [`moss_log`]).
 struct MossAt {
     /// Moss cover, 0..1.
@@ -884,7 +1014,7 @@ impl MossAt {
 /// `dry` 0..1: darker and more olive than the moss on the floor (bright moss reads lime in
 /// sunlight), drier and browner in places.
 fn cushion_color(dry: f32) -> Vec3 {
-    Vec3::new(0.46, 0.48, 0.33).lerp(Vec3::new(0.58, 0.53, 0.33), dry)
+    Vec3::new(0.27, 0.24, 0.15).lerp(Vec3::new(0.36, 0.29, 0.17), dry)
 }
 
 /// Size of the moss texture's tile on deadwood, meters.
@@ -1187,10 +1317,10 @@ enum Detail {
 }
 
 /// Share of the far cards the distant level keeps.
-const DISTANT_KEEP: f32 = 0.3;
+const DISTANT_KEEP: f32 = 0.45;
 /// How much bigger the distant level's cards are, so its crown covers about what the full
-/// one does with a tenth of the cards.
-const DISTANT_CARD_SCALE: f32 = 2.8;
+/// one does with about a seventh of the cards.
+const DISTANT_CARD_SCALE: f32 = 2.4;
 
 /// Emit one card: near cards are a 3×3 grid, folded along the twig and drooping toward the
 /// tip; far ones a flat quad. Both faces share the bent crown normals.
@@ -1327,6 +1457,138 @@ fn crown_meshes(
     )
 }
 
+/// How much larger a crown drawn leaf by leaf draws each leaf than its spray card paints it.
+const HERO_LEAF_SCALE: f32 = 1.12;
+
+/// The crown leaf by leaf ([`PlantMeshes::foliage_hero`]): each card's spray (its atlas cell's
+/// layout) rebuilt from single leaves where the card would have drawn them. `None` for
+/// needles and fronds.
+fn hero_crown(
+    cards: &[Card],
+    shading: &Shading,
+    kind: LeafKind,
+    style: LeafStyle,
+    seed: u64,
+) -> Option<engine_render::Mesh> {
+    use super::textures::{
+        ATLAS_CELLS, HERO_CELLS, HERO_PETIOLE_Y, HERO_TWIG_CELL, atlas_seed, hero_cell,
+        hero_leaf_frame, hero_leaf_rect, spray_layout,
+    };
+    let atlas = atlas_seed(style);
+    let layouts: Vec<_> = (0..(ATLAS_CELLS * ATLAS_CELLS) as usize)
+        .map(|c| spray_layout(kind, c, atlas))
+        .collect::<Option<_>>()?;
+    let (_, blade) = hero_leaf_frame(kind);
+    let (rect0, rect1) = hero_leaf_rect(kind);
+    let leaf_cells = (HERO_CELLS * HERO_CELLS) as u64 - 1;
+    let (twig0, twig1) = hero_cell(HERO_TWIG_CELL);
+    let twig_u = 0.5 * (twig0.x + twig1.x);
+    let mut b = MeshBuilder::new();
+    for (ci, c) in cards.iter().enumerate() {
+        let layout = &layouts[c.cell % layouts.len()];
+        // The card's frame, as `emit_card` lays it out.
+        let g = c.dir.normalize_or(Vec3::Y);
+        let n = (c.face - g * c.face.dot(g)).normalize_or(g.any_orthonormal_vector());
+        let u = g.cross(n);
+        let (w, l) = (c.width, c.length);
+        let start = if c.centered {
+            c.base - g * l * 0.5
+        } else {
+            c.base - g * l * 0.06
+        };
+        let sx = if c.mirror { -1.0 } else { 1.0 };
+        // A point of the cell (x across, y down) on the drooping, folded card.
+        let on_card = |q: Vec2| {
+            let (s, t) = (sx * (q.x - 0.5), 1.0 - q.y);
+            let bend = c.droop * l * t * t + c.fold * w * s.abs();
+            start + g * (l * t) + u * (w * s) - n * bend
+        };
+        // A direction in the cell, in the card's plane.
+        let in_plane = |d: Vec2| u * (w * sx * d.x) - g * (l * d.y);
+        // The twig end of a spray sits deeper in the foliage than its tip.
+        let inner = |q: Vec2| {
+            if c.centered {
+                1.0
+            } else {
+                0.84 + 0.2 * (1.0 - q.y)
+            }
+        };
+        let mut rng = Rng::new(seed ^ (ci as u64).wrapping_mul(0x2545_f491_4f6c_dd1d));
+        for leaf in &layout.leaves {
+            let d3 = in_plane(leaf.dir);
+            let len = d3.length() * leaf.length;
+            if len < 1e-4 {
+                continue;
+            }
+            let a = d3 / d3.length();
+            let side = a.cross(n).normalize_or(u);
+            // Each leaf turns its own way on its petiole: tip lifted or dropped, rolled about
+            // the midrib.
+            let pitch = rng.range(-0.55, 0.55);
+            let roll = rng.range(-0.75, 0.75);
+            let (a, face) = (rotate(a, side, pitch), rotate(n, side, pitch));
+            let (side, face) = (rotate(side, a, roll), rotate(face, a, roll));
+            // A little larger than painted: turned every which way, single leaves show less
+            // of themselves than a flat spray does.
+            let k = HERO_LEAF_SCALE * len / blade;
+            let bottom = on_card(leaf.at) - a * (k * (1.0 - HERO_PETIOLE_Y));
+            let (uv0, uv1) = hero_cell(((leaf.seed ^ ci as u64) % leaf_cells) as usize);
+            let flip = rng.chance(0.5);
+            let tint = c.tint * rng.range(0.9, 1.08);
+            let first = b.vertices.len() as u32;
+            // A flat quad: the fold along the midrib is in the leaf's normal map.
+            for y in [rect1.y, rect0.y] {
+                for x in [rect0.x, rect1.x] {
+                    let p = bottom + a * (k * (1.0 - y)) + side * (k * (x - 0.5));
+                    let tx = if flip { 1.0 - x } else { x };
+                    let uv = Vec2::new(uv0.x + (uv1.x - uv0.x) * tx, uv0.y + (uv1.y - uv0.y) * y);
+                    let (crown_n, ao) = shading.at(p, c.clump);
+                    // The crown's rounded shading broken up by each leaf's own facing, kept on
+                    // the leaf's front so a face is never lit from behind.
+                    let mut normal = (crown_n + face).normalize_or(face);
+                    let dn = normal.dot(face);
+                    if dn < 0.25 {
+                        normal = (normal + face * (0.25 - dn)).normalize_or(face);
+                    }
+                    let shade = ao * inner(leaf.base);
+                    b.vertex(p, normal, uv, (tint * shade).extend(1.0));
+                }
+            }
+            b.tri(first, first + 1, first + 3);
+            b.tri(first, first + 3, first + 2);
+        }
+        // Twigs: narrow strips in the card's plane.
+        for (path, width) in &layout.twigs {
+            let first = b.vertices.len() as u32;
+            let m = path.len();
+            for (i, &q) in path.iter().enumerate() {
+                let f = i as f32 / (m - 1).max(1) as f32;
+                let dir = if i + 1 < m {
+                    path[i + 1] - q
+                } else {
+                    q - path[i - 1]
+                };
+                let along = in_plane(dir).normalize_or(g);
+                let half = 0.5 * width * (1.0 - 0.55 * f) * w;
+                let wide = along.cross(n).normalize_or(u) * half;
+                let p = on_card(q);
+                let (crown_n, ao) = shading.at(p, c.clump);
+                let normal = (crown_n + n).normalize_or(n);
+                let v = twig0.y + (twig1.y - twig0.y) * (1.0 - f);
+                let color = Vec3::splat(ao * inner(q)).extend(1.0);
+                b.vertex(p - wide, normal, Vec2::new(twig_u - 0.05, v), color);
+                b.vertex(p + wide, normal, Vec2::new(twig_u + 0.05, v), color);
+            }
+            for i in 0..m.saturating_sub(1) as u32 {
+                let a = first + 2 * i;
+                b.tri(a, a + 1, a + 3);
+                b.tri(a, a + 3, a + 2);
+            }
+        }
+    }
+    Some(b.finish())
+}
+
 fn leaf_tint(sp: &PlantSpecies, rng: &mut Rng) -> Vec3 {
     let leaf = Vec3::from(sp.leaf_color).max(Vec3::splat(0.01));
     let accent = Vec3::from(sp.accent_color);
@@ -1361,9 +1623,13 @@ fn assemble(
     // The bark rim round the cut faces, as dark as the bark there (a pale rim would show as a
     // hairline round a birch's black foot where the stump and the wood above it meet).
     let rim = (bark_color(sp, cut, h, cut_i, seed).truncate() * 0.6).extend(1.0);
+    // No trunk is a true cylinder: fluted, bulging at old knots (the near level only).
+    let trunk_shape = TrunkShape::new(trunk_path, trunk_r, seed);
+    let bark_v_shift = engine_core::math::hash01(11, 0, 0, seed);
     // Base: roots + trunk up to the cut, growth rings on top.
     if !sapling {
         let mut b = MeshBuilder::new();
+        b.bark_v_shift = bark_v_shift;
         let path = &trunk_path[..=cut_i];
         let rad = &trunk_r[..=cut_i];
         let color = |i: usize, _a: f32| bark_color(sp, path[i].y, h, i, seed);
@@ -1394,7 +1660,10 @@ fn assemble(
                 b.tube(&root, &radius, 8, 0.5, &color, None, None);
             }
         }
-        let base = b.finish();
+        let mut base = b.finish();
+        // The same flutes and burls as the trunk above (and the log it becomes), so the rings
+        // still meet at the cut.
+        trunk_shape.roughen(&mut base);
         let wood = CutWood::of(sp);
         (out.base_weathered, out.base_moss) = STUMP_WEATHER[1..]
             .iter()
@@ -1405,6 +1674,7 @@ fn assemble(
         // A bare log: the top has broken off where the trunk thins and rotted away, leaving a
         // dark, rotten end (about a third of the tree's height remains).
         let mut b = MeshBuilder::new();
+        b.bark_v_shift = bark_v_shift;
         let snap = 0.55 + 0.15 * engine_core::math::hash01(7, 0, 0, seed);
         let end = (cut_i..trunk_path.len())
             .find(|&i| trunk_r[i] < sp.trunk_radius_m * snap)
@@ -1440,37 +1710,53 @@ fn assemble(
             b.tube(&stub, &r, 5, 0.5, &color, None, Some(&broken));
         }
         let mut log = b.finish();
+        // Its flutes and burls carry on from the standing trunk's.
+        let shape = TrunkShape::new(path, rad, seed);
+        shape.roughen(&mut log);
         let mut snag = log.clone();
         moss_foot(&mut snag, seed);
         out.snag = Some(snag);
-        out.log_moss = LOG_MOSS
-            .iter()
-            .map(|&(_, amount)| moss_shell(&log, path, rad, amount, seed))
-            .collect();
-        out.log_mossy = LOG_MOSS[1..]
+        // Each step of decay slumps the log a little further as its heart rots soft, and the
+        // moss grows on the slumped shape.
+        let stages: Vec<_> = LOG_MOSS
             .iter()
             .map(|&(_, amount)| {
                 let mut m = log.clone();
+                shape.slump(&mut m, amount);
+                let shell = moss_shell(&m, path, rad, amount, seed);
                 moss_log(&mut m, amount, wood, seed);
-                m
+                (m, shell)
             })
             .collect();
-        moss_log(&mut log, LOG_MOSS[0].1, wood, seed);
-        out.log = Some(log);
+        let (mut logs, shells): (Vec<_>, Vec<_>) = stages.into_iter().unzip();
+        out.log_moss = shells;
+        out.log = Some(logs.remove(0));
+        out.log_mossy = logs;
         let grow = |host: Host, path: &[Vec3], rad: &[f32], along: (f32, f32)| {
             host_fungus(sp, host).and_then(|f| fungi::on_trunk(path, rad, host, f, along, seed))
         };
         // Snags fruit in reach of a walker's eye: from just above the cut to 4 m or so.
         let length = top_y - cut;
         let low = (0.2 / length).min(0.3);
-        out.snag_fungi = grow(Host::Snag, path, rad, (low, (4.0 / length).clamp(low, 0.7)));
-        out.log_fungi = grow(Host::Log, path, rad, (0.05, 0.9));
+        out.snag_fungi =
+            grow(Host::Snag, path, rad, (low, (4.0 / length).clamp(low, 0.7))).map(|mut f| {
+                shape.roughen(&mut f);
+                f
+            });
+        out.log_fungi = grow(Host::Log, path, rad, (0.05, 0.9)).map(|mut f| {
+            shape.roughen(&mut f);
+            f
+        });
         out.stump_fungi = grow(
             Host::Stump,
             &trunk_path[..=cut_i],
             &trunk_r[..=cut_i],
             (0.55, 0.85),
-        );
+        )
+        .map(|mut f| {
+            trunk_shape.roughen(&mut f);
+            f
+        });
     }
     let kind = kind_of(sp.shape.leaf);
     let steps = leaf_steps(sp);
@@ -1484,6 +1770,7 @@ fn assemble(
     for lod in [false, true] {
         // Wood above the cut (with a cut face on its bottom, seen once it falls).
         let mut b = MeshBuilder::new();
+        b.bark_v_shift = bark_v_shift;
         let start = if sapling { 0 } else { cut_i };
         let mut path = trunk_path[start..].to_vec();
         if !sapling {
@@ -1506,6 +1793,9 @@ fn assemble(
             if sapling { None } else { Some(&cap) },
             Some(&tip),
         );
+        if !lod && !sapling {
+            trunk_shape.roughen_vertices(&mut b.vertices);
+        }
         add_branches(&mut b, sp, branches, h, lod, seed, &shading);
         let detail = if lod { Detail::Far } else { Detail::Near };
         let (f, thin) = crown_meshes(&crowns.cards, &shading, kind, detail, crowns.grid, steps);
@@ -1517,6 +1807,7 @@ fn assemble(
             out.wood = Some(b.finish());
             out.foliage = Some(f);
             out.foliage_thin = thin;
+            out.foliage_hero = hero_crown(&crowns.cards, &shading, kind, sp.shape.leaf, seed);
         }
     }
     out.wood_distant = Some(distant_wood(sp, trunk_path, trunk_r, branches, h, seed));
@@ -2377,6 +2668,7 @@ fn shrub(sp: &PlantSpecies, seed: u64) -> PlantMeshes {
             out.wood = Some(b.finish());
             out.foliage = Some(f);
             out.foliage_thin = thin;
+            out.foliage_hero = hero_crown(&cr.cards, &shading, kind, sh.leaf, seed);
         }
     }
     // Far off a shrub is its leaves alone.
@@ -2420,6 +2712,32 @@ mod tests {
                 // Parts share vertical bounds, so they sway together.
                 let (a, b) = (wood.aabb(), foliage.aabb());
                 assert!((a.min.y - b.min.y).abs() < 1e-4 && (a.max.y - b.max.y).abs() < 1e-4);
+                // Broadleaves also come leaf by leaf, within the same bounds; needles don't.
+                match &m.foliage_hero {
+                    Some(hero) => {
+                        assert!(!matches!(name, "pine" | "spruce"));
+                        let h = hero.aabb();
+                        assert!(
+                            (h.min.y - b.min.y).abs() < 1e-4 && (h.max.y - b.max.y).abs() < 1e-4
+                        );
+                        let wide = h.max.x.max(-h.min.x).max(h.max.z).max(-h.min.z);
+                        assert!(
+                            wide < sp.crown_radius_m * 1.8,
+                            "{name} hero too wide: {wide}"
+                        );
+                        // Several leaves per card, and few enough for the trees nearest the
+                        // camera.
+                        let tris = hero.triangle_count();
+                        assert!(
+                            tris > foliage.triangle_count() && tris < 300_000,
+                            "{name}: {tris}"
+                        );
+                    }
+                    None => assert!(
+                        matches!(name, "pine" | "spruce"),
+                        "{name} has no hero crown"
+                    ),
+                }
                 // The crown stays roughly within the species' size.
                 assert!(
                     b.max.y <= sp.max_height_m * 1.15,
@@ -2598,11 +2916,19 @@ mod tests {
             assert!(solid(w[1]) > solid(w[0]));
         }
         // The cushions sit on the log's top (the model's +X), outside its bark.
-        let log = m.log.as_ref().unwrap();
         let mean_x = |s: &engine_render::Mesh| {
             s.vertices.iter().map(|v| v.position[0]).sum::<f32>() / s.vertices.len() as f32
         };
-        assert!(mean_x(shells[2]) > mean_x(log) + 0.05);
+        let oldest = &m.log_mossy[LOG_MOSS.len() - 2];
+        assert!(mean_x(shells[2]) > mean_x(oldest) + 0.05);
+        // An old log has slumped: its top lies lower than a fresh one's.
+        let top = |s: &engine_render::Mesh| {
+            s.vertices
+                .iter()
+                .map(|v| v.position[0])
+                .fold(f32::MIN, f32::max)
+        };
+        assert!(top(oldest) < top(m.log.as_ref().unwrap()) - 0.02);
     }
 
     #[test]

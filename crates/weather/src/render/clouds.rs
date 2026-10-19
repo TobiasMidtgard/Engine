@@ -7,9 +7,10 @@ use bytemuck::{Pod, Zeroable};
 use engine_core::math::{DVec2, Vec3, smoothstep};
 use engine_core::prelude::*;
 use engine_render::{
-    FrameContext, GpuShared, RenderFeature, RenderPhase, RenderSettings, ViewData, wgpu,
+    Atmosphere, CLOUD_SHADOW_FORMAT, CloudShadowRequest, FrameContext, GpuShared, RenderFeature,
+    RenderPhase, RenderSettings, ViewData, wgpu,
 };
-use engine_world::WeatherState;
+use engine_world::{FarCloudLayer, WeatherState};
 use serde_json::json;
 
 use super::{CloudSettings, depth_always, transmittance_blend};
@@ -43,6 +44,33 @@ fn precipitation_veil(temperature_c: f32) -> [f32; 4] {
     [at(0), at(1), snow, 0.0]
 }
 
+/// How much the weather already dimmed the light the renderer shades with (its brightest, the
+/// sun or the moon) for thick cloud at the player ([`SkyLights::cloud_dimming`], with the
+/// same floors). The cloud shadow map holds the sunlight the clouds let through relative to
+/// that, so the ground under the deck isn't dimmed twice; gaps in it stay at the dimmed sun.
+fn shadow_dimming(lights: &SkyLights) -> f32 {
+    if !lights.in_charge {
+        return 1.0;
+    }
+    let sun = lights.cloud_dimming.max(crate::sky::SUN_DIMMING_FLOOR);
+    let moon = lights.cloud_dimming.max(crate::sky::MOON_DIMMING_FLOOR);
+    if lights.sun_lux * sun >= lights.moon_lux * moon {
+        sun
+    } else {
+        moon
+    }
+}
+
+/// The march's `far`: where the clouds hand over to a far cloud layer another module draws
+/// (`FarCloudLayer`: inner and outer ground distance, m, and how much of it is drawn). Without
+/// one the weight is 0 and every cloud is drawn.
+fn far_handover(layer: Option<&FarCloudLayer>) -> [f32; 4] {
+    layer
+        .filter(|l| l.weight > 0.0 && l.outer_m.is_finite() && l.inner_m.is_finite())
+        .map(|l| [l.inner_m, l.outer_m.max(l.inner_m), l.weight.min(1.0), 0.0])
+        .unwrap_or([0.0; 4])
+}
+
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable, Default)]
 struct CloudUniform {
@@ -56,6 +84,8 @@ struct CloudUniform {
     params: [f32; 4],
     detail: [f32; 4],
     veil: [f32; 4],
+    shadow: [f32; 4],
+    far: [f32; 4],
 }
 
 #[repr(C)]
@@ -119,6 +149,7 @@ struct Gpu {
     sky_replace: wgpu::RenderPipeline,
     sky_over: wgpu::RenderPipeline,
     geo: wgpu::RenderPipeline,
+    shadow: wgpu::RenderPipeline,
     composite_layout: wgpu::BindGroupLayout,
 }
 
@@ -133,6 +164,7 @@ pub struct CloudFeature {
     active: bool,
     replace_sky: bool,
     top_m: f32,
+    shadow_request: Option<CloudShadowRequest>,
 }
 
 fn noise_texture(device: &wgpu::Device, label: &str, size: u32) -> wgpu::Texture {
@@ -411,6 +443,16 @@ impl RenderFeature for CloudFeature {
             &[Some(target(gpu.formats.env, None))],
             None,
         );
+        let shadow = fullscreen_pipeline(
+            gpu,
+            "cloud shadows",
+            &pipeline_layout,
+            &shader,
+            "vs_full",
+            "fs_cloud_shadow",
+            &[Some(target(CLOUD_SHADOW_FORMAT, None))],
+            None,
+        );
 
         // Composites.
         let composite_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -482,6 +524,7 @@ impl RenderFeature for CloudFeature {
             sky_replace,
             sky_over,
             geo,
+            shadow,
             composite_layout,
         });
         self.noise_ready = false;
@@ -499,6 +542,7 @@ impl RenderFeature for CloudFeature {
             .get_resource::<CloudSettings>()
             .copied()
             .unwrap_or_default();
+        self.shadow_request = None;
         self.active = settings.enabled
             && !view.orthographic
             && self.gpu.is_some()
@@ -607,6 +651,24 @@ impl RenderFeature for CloudFeature {
         let stars = smoothstep(-0.02, -0.25, sun_dir.y);
         let visibility = 1.0 - smoothstep(30_000.0, 120_000.0, view.origin.y as f32);
         let veil = precipitation_veil(state.temperature_c);
+        let shadow_dimming = shadow_dimming(lights);
+        self.shadow_request = world
+            .get_resource::<Atmosphere>()
+            .filter(|a| a.enabled && settings.cloud_shadows)
+            .map(|a| {
+                // The map lies in the world's y; the cloud base is an altitude.
+                let camera_altitude = (origin - a.planet_center).length() - a.planet_radius;
+                let base_height = origin.y + (altitude as f64 - camera_altitude);
+                // Beyond the map: about the sunlight the region's cover lets through.
+                let outside = (1.0 - 0.8 * sim.regional_cover.clamp(0.0, 1.0)) / shadow_dimming;
+                CloudShadowRequest {
+                    size: settings.cloud_shadow_size,
+                    extent: settings.cloud_shadow_extent_m,
+                    base_height,
+                    top_height: base_height + self.top_m as f64,
+                    outside: outside.min(1.0),
+                }
+            });
 
         let flash = world
             .get_resource::<ActiveBolts>()
@@ -665,6 +727,13 @@ impl RenderFeature for CloudFeature {
                 if settings.rain_shafts { 1.0 } else { 0.0 },
             ],
             veil,
+            shadow: [
+                shadow_dimming,
+                settings.cloud_shadow_steps.clamp(4, 64) as f32,
+                0.0,
+                0.0,
+            ],
+            far: far_handover(world.get_resource::<FarCloudLayer>()),
         };
         gpu.queue
             .write_buffer(&g.uniform, 0, bytemuck::bytes_of(&u));
@@ -710,6 +779,10 @@ impl RenderFeature for CloudFeature {
             .write_buffer(&g.celestial, 0, bytemuck::bytes_of(&c));
     }
 
+    fn cloud_shadows(&self) -> Option<CloudShadowRequest> {
+        self.shadow_request.filter(|_| self.active)
+    }
+
     fn compute(&mut self, encoder: &mut wgpu::CommandEncoder, ctx: &FrameContext) {
         if !self.active {
             return;
@@ -730,6 +803,25 @@ impl RenderFeature for CloudFeature {
             let n = DETAIL_SIZE.div_ceil(4);
             pass.dispatch_workgroups(n, n, n);
             self.noise_ready = true;
+        }
+        if let Some(target) = &ctx.cloud_shadows {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("cloud shadows"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: target.view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::WHITE),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                ..Default::default()
+            });
+            pass.set_pipeline(&g.shadow);
+            pass.set_bind_group(0, ctx.frame_group, &[]);
+            pass.set_bind_group(1, &g.group, &[]);
+            pass.draw(0..3, 0..1);
         }
         {
             let attachment = |view| {
@@ -836,6 +928,39 @@ impl RenderFeature for CloudFeature {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn clouds_hand_over_to_a_far_layer_only_while_one_is_drawn() {
+        assert_eq!(far_handover(None), [0.0; 4]);
+        let mut layer = FarCloudLayer {
+            inner_m: 42_000.0,
+            outer_m: 60_000.0,
+            weight: 0.0,
+        };
+        assert_eq!(far_handover(Some(&layer)), [0.0; 4]);
+        layer.weight = 1.5;
+        assert_eq!(far_handover(Some(&layer)), [42_000.0, 60_000.0, 1.0, 0.0]);
+    }
+
+    #[test]
+    fn cloud_shadows_are_relative_to_the_light_the_deck_already_dimmed() {
+        let mut lights = SkyLights {
+            in_charge: false,
+            cloud_dimming: 0.2,
+            ..Default::default()
+        };
+        // Lights the weather doesn't drive aren't dimmed by it.
+        assert_eq!(shadow_dimming(&lights), 1.0);
+        lights.in_charge = true;
+        assert!((shadow_dimming(&lights) - 0.2).abs() < 1e-6);
+        // A storm at noon: the sun keeps its tiny floor and stays the brighter light.
+        lights.cloud_dimming = 0.0;
+        assert_eq!(shadow_dimming(&lights), crate::sky::SUN_DIMMING_FLOOR);
+        // At night the moon lights the land, with its own floor.
+        lights.sun_lux = 0.0;
+        lights.moon_lux = 0.3;
+        assert_eq!(shadow_dimming(&lights), crate::sky::MOON_DIMMING_FLOOR);
+    }
 
     #[test]
     fn snow_veils_the_view_from_just_past_the_flakes() {

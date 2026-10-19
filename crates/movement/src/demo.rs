@@ -5,6 +5,9 @@
 //!   trail every fast move, so a still frame shows the route. Round the back of the tower a
 //!   second pilot climbs the caged ladder, steps off onto the roof, looks out over the course,
 //!   then climbs back down a few rungs and slides the rest of the way.
+//! * **Vault lane** (south of the runway): a pilot sprints down a lane and vaults a steel
+//!   railing, a concrete barrier and a stack of equipment cases without breaking stride,
+//!   a hand planted on each.
 //! * **Ledge station** (between the two): a climber jumps at a block too high to climb
 //!   straight onto, catches its top, shimmies along it and around the corner at its end,
 //!   climbs up and walks off.
@@ -118,6 +121,44 @@ pub mod layout {
     pub const LADDER_START: [f64; 3] = [23.2, 0.1, 16.8];
     /// The ladder climber climbs down this far from the top, then slides, m.
     pub const LADDER_SLIDE_FROM: f32 = 1.5;
+    /// The vault lane (south of the runway, west of the ring): a 26 m pad run along +X at
+    /// z = 2, across it a railing, a concrete barrier and a stack of cases, each low and
+    /// shallow enough to vault at a sprint.
+    pub const VAULT_PAD: Block = Block {
+        center: [-15.5, 0.05, 2.0],
+        size: [26.0, 0.1, 5.0],
+    };
+    /// Where the vaulter starts (feet), facing +X, and where it stops running (x).
+    pub const VAULT_START: [f64; 3] = [-27.0, 0.1, 2.0];
+    pub const VAULT_END_X: f64 = -8.0;
+    /// A steel railing, 1.1 m high, 4 m wide (its collider a solid panel).
+    pub const VAULT_RAIL: Block = Block {
+        center: [-22.0, 0.65, 2.0],
+        size: [0.08, 1.1, 4.0],
+    };
+    /// A precast concrete barrier, 0.81 m high and 2.96 m long: its colliders step in with the
+    /// drawn profile and stay inside it, the lower body (the first, from the ground), the
+    /// sloped foot and the upright top, flush with the drawn top.
+    pub const VAULT_BARRIER: [Block; 3] = [
+        Block {
+            center: [-16.0, 0.305, 2.0],
+            size: [0.25, 0.41, 2.96],
+        },
+        Block {
+            center: [-16.0, 0.175, 2.0],
+            size: [0.5, 0.15, 2.96],
+        },
+        Block {
+            center: [-16.0, 0.71, 2.0],
+            size: [0.2, 0.4, 2.96],
+        },
+    ];
+    /// Two equipment cases on a pallet, 1 m high and 1.2 m deep.
+    pub const VAULT_CASES: Block = Block {
+        center: [-10.0, 0.6, 2.0],
+        size: [1.2, 1.0, 2.4],
+    };
+
     /// The ring platform (a 16 m square, 0.1 m high).
     pub const RING_PLATFORM: Block = Block {
         center: [RING[0], RING[1] + 0.05, RING[2]],
@@ -337,6 +378,13 @@ pub enum Brain {
         #[serde(skip)]
         origin: DVec3,
     },
+    /// Loops the vault lane: sprint over the railing, the barrier and the cases.
+    Vaulter {
+        step: Vaults,
+        secs: f32,
+        #[serde(skip)]
+        origin: DVec3,
+    },
     /// Loops the grapple tower: run, jump, hook the top edge, reel up, climb over, ride the zip
     /// line down.
     Grappler {
@@ -504,6 +552,12 @@ pub fn spawn_demo(commands: &mut Commands, origin: DVec3) {
     spawn_ladder(commands, origin);
     block(commands, origin, "Ledge station", layout::LEDGE_PAD);
     block(commands, origin, "Ledge block", layout::LEDGE_WALL);
+    block(commands, origin, "Vault lane", layout::VAULT_PAD);
+    block(commands, origin, "Vault railing", layout::VAULT_RAIL);
+    for part in layout::VAULT_BARRIER {
+        block(commands, origin, "Vault barrier", part);
+    }
+    block(commands, origin, "Vault cases", layout::VAULT_CASES);
     block(commands, origin, "Grapple pad", layout::GRAPPLE_PAD);
     block(commands, origin, "Grapple tower", layout::GRAPPLE_TOWER);
     spawn_zipline(commands, origin);
@@ -554,6 +608,20 @@ pub fn spawn_demo(commands: &mut Commands, origin: DVec3) {
         MovementProfile::pilot(),
         Brain::LadderClimber {
             step: Rungs::Start,
+            secs: 0.0,
+            origin,
+        },
+    );
+
+    spawn_character(
+        commands,
+        "Vaulter",
+        origin + DVec3::from_array(layout::VAULT_START) + DVec3::Y * 0.9,
+        Vec3::X,
+        Style::Pilot,
+        MovementProfile::pilot(),
+        Brain::Vaulter {
+            step: Vaults::Start,
             secs: 0.0,
             origin,
         },
@@ -714,6 +782,7 @@ pub(crate) fn register(app: &mut App) {
             run_runner,
             run_climber,
             run_ladder_climber,
+            run_vaulter,
             run_grappler,
             run_rider,
             think_duelists,
@@ -1099,6 +1168,91 @@ pub(crate) fn restart_ladder_climbers(world: &mut World) -> usize {
     for mut b in q.iter_mut(world) {
         if let Brain::LadderClimber { step, secs, .. } = &mut *b {
             *step = Rungs::Start;
+            *secs = 0.0;
+            n += 1;
+        }
+    }
+    n
+}
+
+// ------------------------------------------------------------------------ the vaulter
+
+/// The vaulter's loop along the vault lane.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum Vaults {
+    /// Stand at the start (teleported there) facing down the lane.
+    #[default]
+    Start,
+    /// Sprint down the lane: the railing, the barrier and the cases are vaulted on the way.
+    Run,
+    /// Pull up at the end of the lane.
+    Stop,
+}
+
+#[allow(clippy::type_complexity)]
+fn run_vaulter(
+    time: Res<Time>,
+    mut q: Query<(
+        &mut Brain,
+        &mut Transform,
+        &mut Mover,
+        &mut MoveIntent,
+        Option<&mut TransformInterpolation>,
+    )>,
+) {
+    let real = time.real_delta_secs();
+    for (mut brain, mut t, mut m, mut intent, interp) in &mut q {
+        let Brain::Vaulter { step, secs, origin } = &mut *brain else {
+            continue;
+        };
+        *secs += real;
+        let rel = t.translation - *origin;
+        *intent = MoveIntent::default();
+        let next = match *step {
+            Vaults::Start => {
+                if *secs < 0.02 {
+                    t.translation =
+                        *origin + DVec3::from_array(layout::VAULT_START) + DVec3::Y * 0.9;
+                    t.rotation = Quat::from_rotation_y(-FRAC_PI_2);
+                    m.reset_motion();
+                    m.facing = Vec3::X;
+                    if let Some(mut i) = interp {
+                        i.reset();
+                    }
+                }
+                intent.look = Some(Vec3::X);
+                (*secs >= 0.6).then_some(Vaults::Run)
+            }
+            Vaults::Run => {
+                // Down the middle of the lane.
+                let back = (layout::VAULT_START[2] - rel.z) as f32;
+                intent.direction = Vec3::new(1.0, 0.0, back.clamp(-0.3, 0.3)).normalize();
+                intent.sprint = true;
+                (rel.x > layout::VAULT_END_X && m.vault.is_none()).then_some(Vaults::Stop)
+            }
+            Vaults::Stop => {
+                intent.look = Some(Vec3::X);
+                (*secs >= 1.2).then_some(Vaults::Start)
+            }
+        };
+        // Stuck: start over.
+        if *secs > 8.0 {
+            *step = Vaults::Start;
+            *secs = 0.0;
+        } else if let Some(n) = next {
+            *step = n;
+            *secs = 0.0;
+        }
+    }
+}
+
+/// Starts every vaulter's loop over (for tour stops that time a capture).
+pub(crate) fn restart_vaulters(world: &mut World) -> usize {
+    let mut q = world.query::<&mut Brain>();
+    let mut n = 0;
+    for mut b in q.iter_mut(world) {
+        if let Brain::Vaulter { step, secs, .. } = &mut *b {
+            *step = Vaults::Start;
             *secs = 0.0;
             n += 1;
         }
@@ -1984,6 +2138,15 @@ fn anim_input(
             climbed: l.climbed,
             speed: l.speed,
             sliding: l.sliding,
+        }),
+        vault: m.vault.map(|v| {
+            let left = m.up.cross(v.forward).normalize_or_zero();
+            let hand = v.plant + (left * crate::vault::HAND_LEFT).as_dvec3();
+            rig::VaultAnim {
+                plant: inv * (hand - feet).as_vec3(),
+                along: (feet - v.plant).as_vec3().dot(v.forward),
+                depth: v.depth,
+            }
         }),
         dash_strike: m.dash.is_some_and(|d| d.strike),
         attack,

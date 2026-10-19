@@ -6,6 +6,7 @@
 //! | [`WindField`]     | `engine_weather` (+ anyone via [`WindField::add_gust`]) | smoke, fire, particles, foliage sway, cloth, vehicles (aero) |
 //! | [`SurfaceLayers`] | weather (rain/snow), water, fire (scorch) | render (wet/snow shading), footsteps, fire, foliage, vehicles (grip) |
 //! | [`HeatField`]     | `engine_fire` (and explosions) | weather (convection), foliage, NPC AI, smoke |
+//! | [`FarCloudLayer`] | `engine_space` (cloud tops seen from high up) | weather (fades its volumetric clouds where the far layer takes over) |
 //!
 //! Fields cover a window around the [`crate::FocusPoints`] (the player/camera) and
 //! re-center as it moves. Outside the window, sampling falls back to the global
@@ -268,5 +269,63 @@ impl Default for HeatField {
 impl HeatField {
     pub fn sample(&self, p: DVec3) -> f32 {
         self.grid.sample(p)
+    }
+}
+
+/// A far cloud layer drawn by another module, such as space's cloud tops on a planet seen from
+/// high up. The weather's volumetric clouds hand over to it between `inner_m` and `outer_m` of
+/// ground distance from the camera, so the two meet without a seam or a doubled layer.
+///
+/// `weight` (0..1) is how much of the far layer is drawn now (space fades its shell in with
+/// altitude). The writer removes the resource when it draws no far layer; without it the
+/// weather's clouds draw as they always did. Readers use [`FarCloudLayer::near_share`].
+#[derive(Resource, Debug, Clone, Copy, PartialEq, Default)]
+pub struct FarCloudLayer {
+    /// Ground distance from the camera (m) where the near clouds start to fade.
+    pub inner_m: f32,
+    /// Ground distance (m) where the far layer has fully taken over.
+    pub outer_m: f32,
+    /// How much of the far layer is drawn, 0..1.
+    pub weight: f32,
+}
+
+impl FarCloudLayer {
+    /// How much of the near (volumetric) clouds to keep at `ground_distance_m` from the camera:
+    /// 1 inside `inner_m`, falling smoothly to `1 - weight` at `outer_m` and beyond.
+    pub fn near_share(&self, ground_distance_m: f32) -> f32 {
+        let span = (self.outer_m - self.inner_m).max(1e-3);
+        let t = ((ground_distance_m - self.inner_m) / span).clamp(0.0, 1.0);
+        let handed_over = t * t * (3.0 - 2.0 * t);
+        1.0 - self.weight.clamp(0.0, 1.0) * handed_over
+    }
+}
+
+#[cfg(test)]
+mod far_cloud_tests {
+    use super::FarCloudLayer;
+
+    #[test]
+    fn near_clouds_hand_over_to_the_far_layer_by_its_weight() {
+        let layer = FarCloudLayer {
+            inner_m: 42_000.0,
+            outer_m: 60_000.0,
+            weight: 1.0,
+        };
+        assert_eq!(layer.near_share(10_000.0), 1.0);
+        assert_eq!(layer.near_share(42_000.0), 1.0);
+        assert!((layer.near_share(51_000.0) - 0.5).abs() < 1e-4);
+        assert_eq!(layer.near_share(60_000.0), 0.0);
+        assert_eq!(layer.near_share(120_000.0), 0.0);
+
+        let half = FarCloudLayer {
+            weight: 0.5,
+            ..layer
+        };
+        assert!((half.near_share(90_000.0) - 0.5).abs() < 1e-6);
+        let none = FarCloudLayer {
+            weight: 0.0,
+            ..layer
+        };
+        assert_eq!(none.near_share(90_000.0), 1.0);
     }
 }

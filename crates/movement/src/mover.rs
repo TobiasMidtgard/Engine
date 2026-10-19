@@ -4,6 +4,7 @@
 use engine_core::math::{DVec3, Quat, Vec3};
 use engine_core::prelude::*;
 use engine_world::LocomotionMode;
+use engine_world::SurfaceId;
 use engine_world::animation::AnimationParams;
 use engine_world::locomotion::{LocomotionState, MoveIntent};
 use engine_world::physics::{CharacterController, CharacterMove, CharacterState};
@@ -189,6 +190,43 @@ pub struct Ladder {
     pub(crate) rung: i32,
 }
 
+/// Vaulting over a low obstacle (see [`crate::vault`]).
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct Vault {
+    /// Where the hand plants: the near edge of the obstacle's top, in line with the body.
+    pub plant: DVec3,
+    /// The way over, horizontal unit.
+    pub forward: Vec3,
+    /// How deep the obstacle's top is along `forward`, m.
+    pub depth: f32,
+    /// Where the vault started, m along `forward` from the plant (negative: before it).
+    pub from: f32,
+    /// Horizontal speed over it, m/s (own time).
+    pub speed: f32,
+    /// Rising speed until the feet clear the top, m/s.
+    pub lift: f32,
+    /// Still rising (false = going over).
+    pub rising: bool,
+    /// Own seconds into the vault.
+    pub secs: f32,
+    /// What the obstacle's top is made of (the hand plant's contact).
+    #[serde(skip)]
+    pub(crate) surface: Option<SurfaceId>,
+    /// The body vaulted: the plant (and `forward`) move with it.
+    #[serde(skip)]
+    pub on: Option<Pin>,
+}
+
+impl Vault {
+    /// 0..1 through the vault for a body at `pos` with capsule `radius`: from where it
+    /// started to clear of the far side.
+    pub fn progress(&self, pos: DVec3, radius: f32) -> f32 {
+        let along = (pos - self.plant).dot(self.forward.as_dvec3()) as f32;
+        let end = self.depth + radius;
+        ((along - self.from) / (end - self.from).max(0.1)).clamp(0.0, 1.0)
+    }
+}
+
 /// Ask the movement module to dash. Combat uses this for dash-strikes; gameplay can use it
 /// for scripted dashes. Consumed on the next fixed step.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -257,6 +295,8 @@ pub struct Mover {
     pub zip: Option<Zip>,
     /// The ladder climbed (mode [`LocomotionMode::Climb`]).
     pub ladder: Option<Ladder>,
+    /// The obstacle vaulted (mode [`LocomotionMode::Mantle`]).
+    pub vault: Option<Vault>,
     /// The capsule is shrunk (crouching or sliding).
     pub crouched: bool,
     /// Remaining dodge invulnerability, s (own time).
@@ -329,6 +369,7 @@ impl Default for Mover {
             grapple: None,
             zip: None,
             ladder: None,
+            vault: None,
             crouched: false,
             evade_secs: 0.0,
             disabled: false,
@@ -404,8 +445,8 @@ impl Mover {
         self.grapple_cooldown
     }
 
-    /// Teleport bookkeeping: clear velocity and any dash, mantle, ledge hang, grapple, zip
-    /// line, ladder or wall-run.
+    /// Teleport bookkeeping: clear velocity and any dash, mantle, vault, ledge hang, grapple,
+    /// zip line, ladder or wall-run.
     pub fn reset_motion(&mut self) {
         self.velocity = Vec3::ZERO;
         self.knockback = Vec3::ZERO;
@@ -420,6 +461,7 @@ impl Mover {
         self.zip_last = None;
         self.ladder = None;
         self.ladder_cooldown = 0.0;
+        self.vault = None;
         self.ladder_last = None;
         self.wall = None;
         self.last_wall = None;
