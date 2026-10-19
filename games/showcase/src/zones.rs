@@ -731,7 +731,7 @@ pub fn demo_views(z: &Zone) -> Vec<View> {
                 ui(
                     "market_shop",
                     "The trader's shop",
-                    r#"{"screen": "shop", "select": "rifle"}"#,
+                    r#"{"screen": "shop", "select": "staff"}"#,
                 ),
                 ui(
                     "market_inventory",
