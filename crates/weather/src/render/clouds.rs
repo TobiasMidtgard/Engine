@@ -10,7 +10,7 @@ use engine_render::{
     Atmosphere, CLOUD_SHADOW_FORMAT, CloudShadowRequest, FrameContext, GpuShared, RenderFeature,
     RenderPhase, RenderSettings, ViewData, wgpu,
 };
-use engine_world::WeatherState;
+use engine_world::{FarCloudLayer, WeatherState};
 use serde_json::json;
 
 use super::{CloudSettings, depth_always, transmittance_blend};
@@ -61,6 +61,16 @@ fn shadow_dimming(lights: &SkyLights) -> f32 {
     }
 }
 
+/// The march's `far`: where the clouds hand over to a far cloud layer another module draws
+/// (`FarCloudLayer`: inner and outer ground distance, m, and how much of it is drawn). Without
+/// one the weight is 0 and every cloud is drawn.
+fn far_handover(layer: Option<&FarCloudLayer>) -> [f32; 4] {
+    layer
+        .filter(|l| l.weight > 0.0 && l.outer_m.is_finite() && l.inner_m.is_finite())
+        .map(|l| [l.inner_m, l.outer_m.max(l.inner_m), l.weight.min(1.0), 0.0])
+        .unwrap_or([0.0; 4])
+}
+
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable, Default)]
 struct CloudUniform {
@@ -75,6 +85,7 @@ struct CloudUniform {
     detail: [f32; 4],
     veil: [f32; 4],
     shadow: [f32; 4],
+    far: [f32; 4],
 }
 
 #[repr(C)]
@@ -722,6 +733,7 @@ impl RenderFeature for CloudFeature {
                 0.0,
                 0.0,
             ],
+            far: far_handover(world.get_resource::<FarCloudLayer>()),
         };
         gpu.queue
             .write_buffer(&g.uniform, 0, bytemuck::bytes_of(&u));
@@ -916,6 +928,19 @@ impl RenderFeature for CloudFeature {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn clouds_hand_over_to_a_far_layer_only_while_one_is_drawn() {
+        assert_eq!(far_handover(None), [0.0; 4]);
+        let mut layer = FarCloudLayer {
+            inner_m: 42_000.0,
+            outer_m: 60_000.0,
+            weight: 0.0,
+        };
+        assert_eq!(far_handover(Some(&layer)), [0.0; 4]);
+        layer.weight = 1.5;
+        assert_eq!(far_handover(Some(&layer)), [42_000.0, 60_000.0, 1.0, 0.0]);
+    }
 
     #[test]
     fn cloud_shadows_are_relative_to_the_light_the_deck_already_dimmed() {
