@@ -519,7 +519,7 @@ fn deadwood_moss(
         .with_metallic_roughness_texture(orm)
         .with_occlusion_texture(orm)
         .with_roughness(1.0)
-        .with_subsurface(0.3);
+        .with_subsurface(0.15);
     m.alpha_mode = AlphaMode::Mask(0.45);
     materials.add(m)
 }
@@ -556,9 +556,10 @@ fn bark_materials(sp: &PlantSpecies, images: Option<BarkImages>) -> [StandardMat
             m
         };
         bark = textured(bark, [1.0; 3], 1.0);
-        // Dead wood weathers to silvery grey, keeping a hint of the bark's own color.
-        let grey = srgb(0x7a756d);
-        let dead_color = [0, 1, 2].map(|c| (0.25 * mean[c] + 0.75 * grey[c]) / mean[c].max(1e-3));
+        // Dead bark on the damp forest floor weathers to a dull grey-brown (only sun-dried wood
+        // silvers), keeping some of the bark's own color.
+        let grey = srgb(0x5e564c);
+        let dead_color = [0, 1, 2].map(|c| (0.4 * mean[c] + 0.6 * grey[c]) / mean[c].max(1e-3));
         dead = textured(dead, dead_color, 1.0);
         // Charcoal: near black, a dull sheen on the ridges.
         let char_color = [0.014, 0.012, 0.011];

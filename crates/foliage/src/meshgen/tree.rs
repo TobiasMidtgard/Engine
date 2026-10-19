@@ -607,10 +607,10 @@ fn moss_log(mesh: &mut engine_render::Mesh, amount: f32, wood: CutWood, seed: u6
         // blotches, so a birch log doesn't lie on the floor like a white pipe.
         let lum = c.dot(Vec3::new(0.3, 0.55, 0.15));
         let algae = smoothstep(-0.3, 0.5, m.patch) * m.side;
-        let grey = Vec3::new(0.84, 0.83, 0.78).lerp(Vec3::new(0.66, 0.74, 0.5), algae) * lum;
+        let grey = Vec3::new(0.74, 0.69, 0.62).lerp(Vec3::new(0.62, 0.66, 0.5), 0.5 * algae) * lum;
         let pale = smoothstep(0.2, 0.55, lum);
         let grime = 1.0 - pale * (0.25 + 0.2 * amount + 0.25 * smoothstep(-0.1, 0.5, m.tint));
-        let c = c.lerp(grey, 0.35 + 0.45 * amount) * grime;
+        let c = c.lerp(grey, 0.25 + 0.35 * amount) * grime;
         let c = c.lerp(soil, (0.3 + 0.3 * pale) * m.under * m.side);
         let cover = m.cover * (0.6 + 0.3 * amount);
         let c = c.lerp(moss, cover) * (1.0 - (0.2 + 0.2 * amount) * m.under * m.side);
@@ -829,6 +829,120 @@ fn weather_stump(
     (m, (!b.is_empty()).then(|| b.finish()))
 }
 
+/// The irregular cross-section of a felled trunk: shallow flutes round it, bulges where old
+/// knots were and a slow wander of its girth along it, as a radial scale about the trunk's axis
+/// (`path` with radii `rad`) that depends only on the angle round it and the height along it.
+/// Everything built on the trunk's surface (stubs, cut faces, fungi) moves with it, so nothing
+/// opens up or floats.
+struct TrunkShape<'a> {
+    path: &'a [Vec3],
+    rad: &'a [f32],
+    seed: u64,
+    phase: [f32; 3],
+}
+
+impl<'a> TrunkShape<'a> {
+    fn new(path: &'a [Vec3], rad: &'a [f32], seed: u64) -> Self {
+        let h = |k: i64| engine_core::math::hash01(k, 3, 9, seed) * std::f32::consts::TAU;
+        Self {
+            path,
+            rad,
+            seed,
+            phase: [h(1), h(2), h(3)],
+        }
+    }
+
+    /// The trunk's axis point and radius at height `y` (model space, the trunk along +Y).
+    /// Points past either end take the end's.
+    fn axis_at(&self, y: f32) -> (Vec3, f32) {
+        let (path, rad) = (self.path, self.rad);
+        let i = path
+            .windows(2)
+            .position(|w| y < w[1].y)
+            .unwrap_or(path.len() - 2);
+        let t = ((y - path[i].y) / (path[i + 1].y - path[i].y).max(1e-4)).clamp(0.0, 1.0);
+        (
+            path[i].lerp(path[i + 1], t),
+            rad[i] + (rad[i + 1] - rad[i]) * t,
+        )
+    }
+
+    /// Radial scale at angle `a` round the axis and height `y`: 1 ± about a tenth.
+    fn scale(&self, a: f32, y: f32) -> f32 {
+        let [p1, p2, p3] = self.phase;
+        // Flutes: a few broad lobes, twisting slowly along the trunk.
+        let twist = 0.12 * y;
+        let flutes = 0.05 * (3.0 * (a + twist) + p1).sin() + 0.03 * (5.0 * (a - twist) + p2).sin();
+        // Knots and burls: a few rounded swellings.
+        let (c, s) = (a.cos() as f64, a.sin() as f64);
+        let knot = noise::fbm3(
+            c * 1.4,
+            y as f64 * 1.1,
+            s * 1.4,
+            self.seed ^ 0x6b_0075,
+            2,
+            2.0,
+            0.5,
+        );
+        let burls = 0.11 * smoothstep(0.2, 0.7, knot);
+        // Girth wandering along the trunk.
+        let girth = 0.03 * (0.7 * y + p3).sin();
+        1.0 + flutes + burls + girth
+    }
+
+    /// Reshape `mesh` (built on this trunk) by [`Self::scale`], bending its normals with the
+    /// surface.
+    fn roughen(&self, mesh: &mut engine_render::Mesh) {
+        let da = 0.02;
+        for v in &mut mesh.vertices {
+            let p = Vec3::from(v.position);
+            let (c, _) = self.axis_at(p.y);
+            let rel = Vec3::new(p.x - c.x, 0.0, p.z - c.z);
+            let a = rel.z.atan2(rel.x);
+            let k = self.scale(a, p.y);
+            // The slope of the surface round the trunk tips the normal sideways.
+            let dk = (self.scale(a + da, p.y) - self.scale(a - da, p.y)) / (2.0 * da);
+            let along = Vec3::new(-a.sin(), 0.0, a.cos());
+            let n = Vec3::from(v.normal);
+            let radial = n.dot(Vec3::new(a.cos(), 0.0, a.sin())).max(0.0);
+            let n = (n - along * (dk / k) * radial).normalize_or(n);
+            let q = c + rel * k + Vec3::Y * (p.y - c.y);
+            v.position = q.to_array();
+            v.normal = n.to_array();
+        }
+    }
+
+    /// Slump `mesh` by `amount` (0..1): an old log's rotten heart gives way, so it settles
+    /// lower and wider, flattening most on its top (the model's +X side, turned up).
+    fn slump(&self, mesh: &mut engine_render::Mesh, amount: f32) {
+        if amount <= 0.0 {
+            return;
+        }
+        // It sags along its length too, its middle settling into the litter.
+        let (y0, y1) = (self.path[0].y, self.path[self.path.len() - 1].y);
+        let r0 = self.rad[0];
+        for v in &mut mesh.vertices {
+            let p = Vec3::from(v.position);
+            let (c, _) = self.axis_at(p.y);
+            let (mut q, n) = Self::flatten(p, Vec3::from(v.normal), c, amount);
+            let t = ((p.y - y0) / (y1 - y0).max(1e-3)).clamp(0.0, 1.0);
+            q.x -= 0.3 * r0 * amount * (std::f32::consts::PI * t).sin();
+            v.position = q.to_array();
+            v.normal = n.to_array();
+        }
+    }
+
+    fn flatten(p: Vec3, n: Vec3, c: Vec3, amount: f32) -> (Vec3, Vec3) {
+        // Only the top sinks: the underside stays on the ground.
+        let x = p.x - c.x;
+        let sx = 1.0 - if x > 0.0 { 0.2 * amount } else { 0.0 };
+        let sz = 1.0 + 0.07 * amount;
+        let q = Vec3::new(c.x + x * sx, p.y, c.z + (p.z - c.z) * sz);
+        let n = Vec3::new(n.x / sx, n.y, n.z / sz).normalize_or(n);
+        (q, n)
+    }
+}
+
 /// How mossy a log's surface is at a vertex (see [`moss_log`]).
 struct MossAt {
     /// Moss cover, 0..1.
@@ -884,7 +998,7 @@ impl MossAt {
 /// `dry` 0..1: darker and more olive than the moss on the floor (bright moss reads lime in
 /// sunlight), drier and browner in places.
 fn cushion_color(dry: f32) -> Vec3 {
-    Vec3::new(0.46, 0.48, 0.33).lerp(Vec3::new(0.58, 0.53, 0.33), dry)
+    Vec3::new(0.27, 0.24, 0.15).lerp(Vec3::new(0.36, 0.29, 0.17), dry)
 }
 
 /// Size of the moss texture's tile on deadwood, meters.
@@ -1440,31 +1554,43 @@ fn assemble(
             b.tube(&stub, &r, 5, 0.5, &color, None, Some(&broken));
         }
         let mut log = b.finish();
+        // No trunk is a true cylinder: fluted, bulging at old knots.
+        let shape = TrunkShape::new(path, rad, seed);
+        shape.roughen(&mut log);
         let mut snag = log.clone();
         moss_foot(&mut snag, seed);
         out.snag = Some(snag);
-        out.log_moss = LOG_MOSS
-            .iter()
-            .map(|&(_, amount)| moss_shell(&log, path, rad, amount, seed))
-            .collect();
-        out.log_mossy = LOG_MOSS[1..]
+        // Each step of decay slumps the log a little further as its heart rots soft, and the
+        // moss grows on the slumped shape.
+        let stages: Vec<_> = LOG_MOSS
             .iter()
             .map(|&(_, amount)| {
                 let mut m = log.clone();
+                shape.slump(&mut m, amount);
+                let shell = moss_shell(&m, path, rad, amount, seed);
                 moss_log(&mut m, amount, wood, seed);
-                m
+                (m, shell)
             })
             .collect();
-        moss_log(&mut log, LOG_MOSS[0].1, wood, seed);
-        out.log = Some(log);
+        let (mut logs, shells): (Vec<_>, Vec<_>) = stages.into_iter().unzip();
+        out.log_moss = shells;
+        out.log = Some(logs.remove(0));
+        out.log_mossy = logs;
         let grow = |host: Host, path: &[Vec3], rad: &[f32], along: (f32, f32)| {
             host_fungus(sp, host).and_then(|f| fungi::on_trunk(path, rad, host, f, along, seed))
         };
         // Snags fruit in reach of a walker's eye: from just above the cut to 4 m or so.
         let length = top_y - cut;
         let low = (0.2 / length).min(0.3);
-        out.snag_fungi = grow(Host::Snag, path, rad, (low, (4.0 / length).clamp(low, 0.7)));
-        out.log_fungi = grow(Host::Log, path, rad, (0.05, 0.9));
+        out.snag_fungi =
+            grow(Host::Snag, path, rad, (low, (4.0 / length).clamp(low, 0.7))).map(|mut f| {
+                shape.roughen(&mut f);
+                f
+            });
+        out.log_fungi = grow(Host::Log, path, rad, (0.05, 0.9)).map(|mut f| {
+            shape.roughen(&mut f);
+            f
+        });
         out.stump_fungi = grow(
             Host::Stump,
             &trunk_path[..=cut_i],
@@ -2598,11 +2724,19 @@ mod tests {
             assert!(solid(w[1]) > solid(w[0]));
         }
         // The cushions sit on the log's top (the model's +X), outside its bark.
-        let log = m.log.as_ref().unwrap();
         let mean_x = |s: &engine_render::Mesh| {
             s.vertices.iter().map(|v| v.position[0]).sum::<f32>() / s.vertices.len() as f32
         };
-        assert!(mean_x(shells[2]) > mean_x(log) + 0.05);
+        let oldest = &m.log_mossy[LOG_MOSS.len() - 2];
+        assert!(mean_x(shells[2]) > mean_x(oldest) + 0.05);
+        // An old log has slumped: its top lies lower than a fresh one's.
+        let top = |s: &engine_render::Mesh| {
+            s.vertices
+                .iter()
+                .map(|v| v.position[0])
+                .fold(f32::MIN, f32::max)
+        };
+        assert!(top(oldest) < top(m.log.as_ref().unwrap()) - 0.02);
     }
 
     #[test]
