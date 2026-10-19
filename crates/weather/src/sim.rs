@@ -240,6 +240,9 @@ pub struct WeatherSim {
     pub rng: Rng,
     pub seed: u64,
     initialized: bool,
+    /// The next step sets the air (temperature, humidity, pressure, cloud base) straight to
+    /// the regime's instead of easing toward it: the weather was switched everywhere at once.
+    snap_air: bool,
 }
 
 impl Default for WeatherSim {
@@ -269,6 +272,7 @@ impl WeatherSim {
             rng: Rng::new(weather.seed),
             seed: weather.seed,
             initialized: false,
+            snap_air: false,
         }
     }
 
@@ -316,6 +320,8 @@ impl WeatherSim {
             self.base = preset.regime();
             self.base_preset = preset;
             self.fronts.clear();
+            // Snow switched on at once falls as snow now, not as rain while the air cools.
+            self.snap_air = true;
             return;
         }
         let dir = self.air.wind_dir.normalize_or(Vec2::X);
@@ -492,8 +498,10 @@ pub fn step(
         .min(regime.temperature_cap_c);
     let target_dew = climate::dew_point_c(daily_mean, rh_target);
     let rate = 1.0 / 1500.0;
+    let snap = std::mem::take(&mut sim.snap_air);
+    let ease = sim.time_s > dt_w as f64 * 1.5 && !snap;
     let air = &mut sim.air;
-    if dt_w > 0.0 && air.temperature_c.is_finite() && sim.time_s > dt_w as f64 * 1.5 {
+    if dt_w > 0.0 && air.temperature_c.is_finite() && ease {
         air.temperature_c = damp(air.temperature_c, target_t, rate, dt_w);
         air.dew_point_c = damp(air.dew_point_c, target_dew, rate, dt_w);
         air.pressure_hpa = damp(
@@ -537,15 +545,17 @@ pub fn step(
     let lcl = climate::cloud_base_m(air.temperature_c, air.dew_point_c);
     let base_target =
         lcl.clamp(300.0, 2800.0) * (1.0 - 0.35 * smoothstep(0.5, 8.0, cell.precipitation_mm_h));
-    air.cloud_base_m = if sim.time_s <= dt_w as f64 * 1.5 {
+    air.cloud_base_m = if !ease {
         base_target
     } else {
         damp(air.cloud_base_m, base_target, 1.0 / 600.0, dt_w)
     };
     let radiation = climate::radiation_fog(rh, air.wind_speed) * 0.8;
-    // Rain and snow cut visibility too (heavy rain ≈ 1 km, snow ≈ 400 m).
+    // Rain and snow haze the air a little too. The veil the clouds draw over the distance does
+    // most of it (heavy rain ≈ 1 km, snow ≈ 500 m), so snow adds only a light haze here:
+    // the renderer's fog on top of the veil hid the near ground twice over.
     let precip_haze = match kind_for(air.temperature_c) {
-        PrecipitationKind::Snow => (cell.precipitation_mm_h * 0.12).min(0.6),
+        PrecipitationKind::Snow => (cell.precipitation_mm_h * 0.02).min(0.15),
         _ => (cell.precipitation_mm_h * 0.006).min(0.15),
     };
     air.fog = regime.fog.max(radiation) + precip_haze;
@@ -796,6 +806,34 @@ mod tests {
         assert!(state.temperature_c < 0.0);
         assert!(state.is_snowing(), "{state:?}");
         assert!(state.fog > 0.1, "snow cuts visibility");
+    }
+
+    #[test]
+    fn snow_switched_on_at_once_on_a_summer_afternoon_falls_as_snow_now() {
+        let mut weather = Weather {
+            preset: WeatherPreset::PartlyCloudy,
+            transition_s: 0.0,
+            ..Default::default()
+        };
+        let mut sim = WeatherSim::new(&weather);
+        let mut state = WeatherState::default();
+        run(&mut sim, &mut weather, 600.0);
+        write_state(&sim, &mut state);
+        assert!(state.temperature_c > 10.0, "{state:?}");
+        let cloud_base = state.cloud_base_m;
+
+        weather.preset = WeatherPreset::Snow;
+        run(&mut sim, &mut weather, 2.0);
+        write_state(&sim, &mut state);
+        assert!(state.is_snowing(), "{state:?}");
+        assert!(state.cloud_base_m < cloud_base, "{state:?}");
+
+        // A front carrying the weather in still lets the air cool slowly.
+        weather.transition_s = 600.0;
+        weather.preset = WeatherPreset::Clear;
+        run(&mut sim, &mut weather, 2.0);
+        write_state(&sim, &mut state);
+        assert!(state.temperature_c < 2.0, "{state:?}");
     }
 
     #[test]

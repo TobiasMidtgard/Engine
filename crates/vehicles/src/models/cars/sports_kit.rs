@@ -735,6 +735,28 @@ fn aero(plain: &(dyn Fn(Vec3) -> f32 + Sync)) -> Mesh {
     splitter
 }
 
+/// The tail surface around an exhaust hole's rim (z, m).
+fn tip_rim(plain: &(dyn Fn(Vec3) -> f32 + Sync), q: Vec2, r: f32) -> f32 {
+    surface_point(plain, Proj::Back, q + Vec2::new(0.0, r + 0.01), GROUND)
+        .map(|(p, _)| p.z)
+        .unwrap_or(2.0)
+}
+
+/// Each exhaust tip's open end (center, the way the gas leaves, bore radius), right side
+/// first: the lip stands 2 cm behind the valance.
+pub fn exhaust_exits(body: &Body) -> Vec<(Vec3, Vec3, f32)> {
+    let plain = |p: Vec3| body.shell_plain(p);
+    let (c, r) = body.features.exhaust;
+    [1.0f32, -1.0]
+        .into_iter()
+        .map(|side| {
+            let q = Vec2::new(side * c.x, c.y);
+            let z = tip_rim(&plain, q, r) + 0.02;
+            (Vec3::new(q.x, q.y - GROUND, z), Vec3::Z, r - 0.01)
+        })
+        .collect()
+}
+
 /// Twin exhaust tips set into the rear valance.
 fn exhausts(body: &Body, plain: &(dyn Fn(Vec3) -> f32 + Sync)) -> Mesh {
     let (c, r) = body.features.exhaust;
@@ -742,10 +764,7 @@ fn exhausts(body: &Body, plain: &(dyn Fn(Vec3) -> f32 + Sync)) -> Mesh {
     let mut parts = Vec::new();
     for side in [-1.0f32, 1.0] {
         let q = Vec2::new(side * c.x, c.y);
-        // Find the tail surface around the hole's rim.
-        let rim = surface_point(plain, Proj::Back, q + Vec2::new(0.0, r + 0.01), GROUND)
-            .map(|(p, _)| p.z)
-            .unwrap_or(2.0);
+        let rim = tip_rim(plain, q, r);
         let prof = [
             Vec2::new(-0.12, ro - 0.004),
             Vec2::new(0.006, ro - 0.004),

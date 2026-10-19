@@ -7,7 +7,8 @@ use bytemuck::{Pod, Zeroable};
 use engine_core::math::{DVec2, Vec3, smoothstep};
 use engine_core::prelude::*;
 use engine_render::{
-    FrameContext, GpuShared, RenderFeature, RenderPhase, RenderSettings, ViewData, wgpu,
+    Atmosphere, CLOUD_SHADOW_FORMAT, CloudShadowRequest, FrameContext, GpuShared, RenderFeature,
+    RenderPhase, RenderSettings, ViewData, wgpu,
 };
 use engine_world::WeatherState;
 use serde_json::json;
@@ -28,6 +29,37 @@ const NOISE_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 const MOON_RADIUS: f32 = 0.0045;
 const MOON_COLOR: [f32; 3] = [0.95, 0.93, 0.88];
 const KEY_MOON_COLOR: [f32; 3] = [0.78, 0.84, 1.0];
+/// Where falling rain starts to veil the view and where it does so fully, m: up close rain is
+/// streaks, and even a downpour leaves a kilometer or more of visibility.
+const RAIN_VEIL_M: [f32; 2] = [400.0, 2500.0];
+/// The same for snow, which hides the distance a few hundred meters out: just past the flakes
+/// drawn around the camera.
+const SNOW_VEIL_M: [f32; 2] = [10.0, 40.0];
+
+/// The march's `veil`: where falling rain or snow starts to veil the view and where fully (m),
+/// and how much of it is snow (0..1; from the temperature as `kind_for` decides, sleet half).
+fn precipitation_veil(temperature_c: f32) -> [f32; 4] {
+    let snow = smoothstep(2.0, 0.5, temperature_c);
+    let at = |i: usize| RAIN_VEIL_M[i] + (SNOW_VEIL_M[i] - RAIN_VEIL_M[i]) * snow;
+    [at(0), at(1), snow, 0.0]
+}
+
+/// How much the weather already dimmed the light the renderer shades with (its brightest, the
+/// sun or the moon) for thick cloud at the player ([`SkyLights::cloud_dimming`], with the
+/// same floors). The cloud shadow map holds the sunlight the clouds let through relative to
+/// that, so the ground under the deck isn't dimmed twice; gaps in it stay at the dimmed sun.
+fn shadow_dimming(lights: &SkyLights) -> f32 {
+    if !lights.in_charge {
+        return 1.0;
+    }
+    let sun = lights.cloud_dimming.max(crate::sky::SUN_DIMMING_FLOOR);
+    let moon = lights.cloud_dimming.max(crate::sky::MOON_DIMMING_FLOOR);
+    if lights.sun_lux * sun >= lights.moon_lux * moon {
+        sun
+    } else {
+        moon
+    }
+}
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable, Default)]
@@ -41,6 +73,8 @@ struct CloudUniform {
     flash: [f32; 4],
     params: [f32; 4],
     detail: [f32; 4],
+    veil: [f32; 4],
+    shadow: [f32; 4],
 }
 
 #[repr(C)]
@@ -52,6 +86,7 @@ struct CelestialUniform {
     moon_color: [f32; 4],
     pole: [f32; 4],
     params: [f32; 4],
+    veil: [f32; 4],
 }
 
 struct Target {
@@ -103,6 +138,7 @@ struct Gpu {
     sky_replace: wgpu::RenderPipeline,
     sky_over: wgpu::RenderPipeline,
     geo: wgpu::RenderPipeline,
+    shadow: wgpu::RenderPipeline,
     composite_layout: wgpu::BindGroupLayout,
 }
 
@@ -117,6 +153,7 @@ pub struct CloudFeature {
     active: bool,
     replace_sky: bool,
     top_m: f32,
+    shadow_request: Option<CloudShadowRequest>,
 }
 
 fn noise_texture(device: &wgpu::Device, label: &str, size: u32) -> wgpu::Texture {
@@ -395,6 +432,16 @@ impl RenderFeature for CloudFeature {
             &[Some(target(gpu.formats.env, None))],
             None,
         );
+        let shadow = fullscreen_pipeline(
+            gpu,
+            "cloud shadows",
+            &pipeline_layout,
+            &shader,
+            "vs_full",
+            "fs_cloud_shadow",
+            &[Some(target(CLOUD_SHADOW_FORMAT, None))],
+            None,
+        );
 
         // Composites.
         let composite_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -466,6 +513,7 @@ impl RenderFeature for CloudFeature {
             sky_replace,
             sky_over,
             geo,
+            shadow,
             composite_layout,
         });
         self.noise_ready = false;
@@ -483,6 +531,7 @@ impl RenderFeature for CloudFeature {
             .get_resource::<CloudSettings>()
             .copied()
             .unwrap_or_default();
+        self.shadow_request = None;
         self.active = settings.enabled
             && !view.orthographic
             && self.gpu.is_some()
@@ -590,6 +639,25 @@ impl RenderFeature for CloudFeature {
         let night = smoothstep(0.05, -0.25, sun_dir.y);
         let stars = smoothstep(-0.02, -0.25, sun_dir.y);
         let visibility = 1.0 - smoothstep(30_000.0, 120_000.0, view.origin.y as f32);
+        let veil = precipitation_veil(state.temperature_c);
+        let shadow_dimming = shadow_dimming(lights);
+        self.shadow_request = world
+            .get_resource::<Atmosphere>()
+            .filter(|a| a.enabled && settings.cloud_shadows)
+            .map(|a| {
+                // The map lies in the world's y; the cloud base is an altitude.
+                let camera_altitude = (origin - a.planet_center).length() - a.planet_radius;
+                let base_height = origin.y + (altitude as f64 - camera_altitude);
+                // Beyond the map: about the sunlight the region's cover lets through.
+                let outside = (1.0 - 0.8 * sim.regional_cover.clamp(0.0, 1.0)) / shadow_dimming;
+                CloudShadowRequest {
+                    size: settings.cloud_shadow_size,
+                    extent: settings.cloud_shadow_extent_m,
+                    base_height,
+                    top_height: base_height + self.top_m as f64,
+                    outside: outside.min(1.0),
+                }
+            });
 
         let flash = world
             .get_resource::<ActiveBolts>()
@@ -647,6 +715,13 @@ impl RenderFeature for CloudFeature {
                 wrap(noise_z, settings.detail_scale_m),
                 if settings.rain_shafts { 1.0 } else { 0.0 },
             ],
+            veil,
+            shadow: [
+                shadow_dimming,
+                settings.cloud_shadow_steps.clamp(4, 64) as f32,
+                0.0,
+                0.0,
+            ],
         };
         gpu.queue
             .write_buffer(&g.uniform, 0, bytemuck::bytes_of(&u));
@@ -659,6 +734,7 @@ impl RenderFeature for CloudFeature {
                 * smoothstep(0.4, 0.9, lights.cloud_dimming)
                 * smoothstep(42.0, 32.0, sun_elevation)
                 * smoothstep(0.0, 3.0, sun_elevation)
+                * (1.0 - veil[2])
         } else {
             0.0
         };
@@ -685,9 +761,14 @@ impl RenderFeature for CloudFeature {
                 1.0 / size.0 as f32,
                 1.0 / size.1 as f32,
             ],
+            veil,
         };
         gpu.queue
             .write_buffer(&g.celestial, 0, bytemuck::bytes_of(&c));
+    }
+
+    fn cloud_shadows(&self) -> Option<CloudShadowRequest> {
+        self.shadow_request.filter(|_| self.active)
     }
 
     fn compute(&mut self, encoder: &mut wgpu::CommandEncoder, ctx: &FrameContext) {
@@ -710,6 +791,25 @@ impl RenderFeature for CloudFeature {
             let n = DETAIL_SIZE.div_ceil(4);
             pass.dispatch_workgroups(n, n, n);
             self.noise_ready = true;
+        }
+        if let Some(target) = &ctx.cloud_shadows {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("cloud shadows"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: target.view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::WHITE),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                ..Default::default()
+            });
+            pass.set_pipeline(&g.shadow);
+            pass.set_bind_group(0, ctx.frame_group, &[]);
+            pass.set_bind_group(1, &g.group, &[]);
+            pass.draw(0..3, 0..1);
         }
         {
             let attachment = |view| {
@@ -810,5 +910,41 @@ impl RenderFeature for CloudFeature {
             "march_size": self.targets.as_ref().map(|t| [t.size.0, t.size.1]),
             "layer_thickness_m": self.top_m,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cloud_shadows_are_relative_to_the_light_the_deck_already_dimmed() {
+        let mut lights = SkyLights {
+            in_charge: false,
+            cloud_dimming: 0.2,
+            ..Default::default()
+        };
+        // Lights the weather doesn't drive aren't dimmed by it.
+        assert_eq!(shadow_dimming(&lights), 1.0);
+        lights.in_charge = true;
+        assert!((shadow_dimming(&lights) - 0.2).abs() < 1e-6);
+        // A storm at noon: the sun keeps its tiny floor and stays the brighter light.
+        lights.cloud_dimming = 0.0;
+        assert_eq!(shadow_dimming(&lights), crate::sky::SUN_DIMMING_FLOOR);
+        // At night the moon lights the land, with its own floor.
+        lights.sun_lux = 0.0;
+        lights.moon_lux = 0.3;
+        assert_eq!(shadow_dimming(&lights), crate::sky::MOON_DIMMING_FLOOR);
+    }
+
+    #[test]
+    fn snow_veils_the_view_from_just_past_the_flakes() {
+        let close = |a: [f32; 4], b: [f32; 4]| a.iter().zip(b).all(|(x, y)| (x - y).abs() < 1e-3);
+        assert!(close(precipitation_veil(10.0), [400.0, 2500.0, 0.0, 0.0]));
+        assert!(close(precipitation_veil(-5.0), [10.0, 40.0, 1.0, 0.0]));
+        // Sleet is half rain, half snow.
+        let sleet = precipitation_veil(1.25);
+        assert!((sleet[2] - 0.5).abs() < 1e-3);
+        assert!(sleet[0] > 10.0 && sleet[0] < 400.0, "{sleet:?}");
     }
 }

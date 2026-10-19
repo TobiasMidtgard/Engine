@@ -3,8 +3,8 @@
 
 use engine_core::prelude::*;
 
-/// How a character moves: speeds, jumps, slides, wall-runs, mantles, ledge hangs, dashes and
-/// the grapple hook.
+/// How a character moves: speeds, jumps, slides, wall-runs, mantles, vaults, ledge hangs,
+/// dashes and the grapple hook.
 ///
 /// All speeds are in meters per second of the character's **own** time (see
 /// [`Tempo`](crate::tempo::Tempo)): a character with `Tempo::speed = 2` does everything twice
@@ -108,6 +108,15 @@ pub struct MovementProfile {
     pub ledge_grab_max_height: f32,
     /// Sideways speed while hanging, m/s.
     pub shimmy_speed: f32,
+
+    // ------------------------------------------------------------ vaults
+    /// Vault over low, shallow obstacles (a railing, a barrier, a crate) without slowing
+    /// down: jump into one, or sprint into it. Deeper ones are climbed onto.
+    pub vault: bool,
+    /// Tallest obstacle vaulted, m above the feet.
+    pub vault_max_height: f32,
+    /// Deepest obstacle vaulted, m.
+    pub vault_max_depth: f32,
 
     // ------------------------------------------------------------ dash
     /// Longest dash, m.
@@ -213,6 +222,9 @@ impl MovementProfile {
             ledge_grab: true,
             ledge_grab_max_height: 2.7,
             shimmy_speed: 1.8,
+            vault: true,
+            vault_max_height: 1.3,
+            vault_max_depth: 1.4,
             dash_distance: 6.0,
             dash_secs: 0.18,
             dash_charges: 2,
@@ -245,6 +257,8 @@ impl MovementProfile {
             mantle_max_height: 1.6,
             ledge_grab_max_height: 2.2,
             shimmy_speed: 1.2,
+            vault_max_height: 1.1,
+            vault_max_depth: 1.0,
             dash_distance: 3.5,
             dash_charges: 1,
             dash_recharge_secs: 2.0,

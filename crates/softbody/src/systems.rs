@@ -21,7 +21,7 @@ use crate::collide::{LocalCollider, LocalShape};
 use crate::field::{BAKE_REACH, FieldCache};
 use crate::rope::{BridgePlank, SoftLoad};
 use crate::settings::SoftBodyConfig;
-use crate::solver::ColliderImpulse;
+use crate::solver::{ColliderImpulse, WaterSurface};
 use crate::{Cloth, HairGroom, Rope, RopeBridge, SoftVolume, cloth, hair, rope, volume};
 
 /// A frame turning further than this in one step (radians) has been teleported, not turned.
@@ -888,6 +888,8 @@ fn step_one(entity: Entity, body: &mut SoftBodySim, ctx: &StepContext) {
     p.damping = s.damping;
     p.friction = s.friction;
     p.max_speed = s.max_speed;
+    p.buoyancy = s.buoyancy;
+    p.water_drag = s.water_drag;
     let up = env.up(b.center);
     b.sim.ground.clear();
     if b.radius > 6.0 {
@@ -939,16 +941,15 @@ fn step_one(entity: Entity, body: &mut SoftBodySim, ctx: &StepContext) {
         }
     }
 
-    // Wetness (cloth soaks up rain and dries slowly).
-    if let Some(c) = b.cloth.as_mut() {
-        let rain = if env.weather.is_raining() {
-            env.weather.precipitation_mm_h
-        } else {
-            0.0
-        };
-        c.wetness = (c.wetness + dt * (rain * 0.004 - 0.003)).clamp(0.0, 1.0);
-        b.sim.set_mass_scale(1.0 + 2.0 * c.wetness);
-    }
+    // Water around the body, and how wet it gets.
+    b.sim.water = water_surface(env, b.center, b.radius, origin);
+    let rain = if env.weather.is_raining() {
+        env.weather.precipitation_mm_h
+    } else {
+        0.0
+    };
+    let warmth = ((env.temperature(b.center) + 5.0) / 20.0).clamp(0.3, 2.0);
+    soak(b, dt, rain, warmth);
 
     // Step (plus prewarm on the first update).
     let runs = 1 + std::mem::take(&mut b.pending_prewarm);
@@ -1031,6 +1032,111 @@ fn step_one(entity: Entity, body: &mut SoftBodySim, ctx: &StepContext) {
     b.update_bounds();
     b.scratch_colliders = local;
     b.step_ms = started.elapsed().as_secs_f32() * 1000.0;
+}
+
+/// Seconds for a particle fully under water to soak through.
+const SOAK_SECS: f32 = 4.0;
+/// How fast wetness spreads along the fabric or strand (wicking), m²/s: a few centimeters past
+/// the waterline in the first seconds.
+const WICK: f32 = 5e-4;
+/// How fast water runs down a hanging wet body, per second, on a vertical link.
+const DRAIN: f32 = 0.02;
+/// Wetness lost per second in still air at 15 °C.
+const DRY: f32 = 0.003;
+
+/// Water shallower than this (m) doesn't count: a film running down a stream's wall reports
+/// a surface as high as the wall, and the surface over a body would slope up to meet it.
+const MIN_WATER_DEPTH: f32 = 0.05;
+
+/// The water surface over a body (3 × 3 samples across its bounds) in its local frame, or
+/// `None` when no water is near. Where a sample falls on dry land (past a stream's bank), the
+/// surface carries on level with the water's mean height there: what is on the bank stands
+/// above it anyway.
+fn water_surface(env: &Env, center: DVec3, radius: f32, origin: DVec3) -> Option<WaterSurface> {
+    let sample = |p: DVec3| {
+        env.water_query
+            .sample(p)
+            .filter(|w| w.depth >= MIN_WATER_DEPTH)
+    };
+    let mid = sample(center)?;
+    if mid.surface_height < center.y - f64::from(radius) - 0.25 {
+        return None;
+    }
+    let r = f64::from(radius.max(0.25));
+    let mut heights = [None; 9];
+    let mut current = Vec3::ZERO;
+    let (mut sum, mut wet) = (0.0, 0);
+    for (k, h) in heights.iter_mut().enumerate() {
+        let p = center + DVec3::new((k % 3) as f64 - 1.0, 0.0, (k / 3) as f64 - 1.0) * r;
+        if let Some(w) = sample(p) {
+            let y = (w.surface_height - origin.y) as f32;
+            *h = Some(y);
+            sum += y;
+            current += w.velocity;
+            wet += 1;
+        }
+    }
+    let level = sum / wet.max(1) as f32;
+    let min = (center - origin).as_vec3() - Vec3::new(r as f32, 0.0, r as f32);
+    Some(WaterSurface {
+        min: Vec2::new(min.x, min.z),
+        cell: Vec2::splat(r as f32),
+        heights: heights.map(|h| h.unwrap_or(level)),
+        current: current / wet.max(1) as f32,
+    })
+}
+
+/// Wet what is under water or out in the rain, wick it along the body and dry the rest
+/// (faster in wind and warmth); soaked particles weigh more.
+fn soak(b: &mut SoftBodySim, dt: f32, rain_mm_h: f32, warmth: f32) {
+    let n = b.sim.len();
+    b.wet.resize(n, 0.0);
+    let soak = b.settings.soak;
+    if soak <= 0.0 {
+        b.wet.iter_mut().for_each(|w| *w = 0.0);
+        return;
+    }
+    let gain = rain_mm_h * 0.004;
+    let loss = DRY * (1.0 + b.wind.length() / 4.0) * warmth;
+    let r = b.sim.params.radius.max(0.005);
+    for i in 0..n {
+        // As far as it is in the water (across its thickness, as the solver's lift).
+        let under = b.sim.water.map_or(0.0, |w| {
+            ((w.depth(b.sim.pos[i]) + r) / (2.0 * r)).clamp(0.0, 1.0)
+        });
+        let w = &mut b.wet[i];
+        *w = if under > 0.0 {
+            *w + dt * under / SOAK_SECS
+        } else {
+            *w + dt * (gain - loss)
+        }
+        .clamp(0.0, 1.0);
+    }
+    if b.wet.iter().any(|&w| w > 0.0) {
+        let up = -b.sim.params.gravity.normalize_or(Vec3::NEG_Y);
+        for d in &b.sim.distances {
+            let (a, c) = (d.a as usize, d.b as usize);
+            let rest = d.rest.max(1e-3);
+            // Wicking evens it out; water runs down toward the lower end.
+            let mut flow = (b.wet[a] - b.wet[c]) * (WICK * dt / (rest * rest)).min(0.1);
+            let slope = ((b.sim.pos[a] - b.sim.pos[c]).dot(up) / rest).clamp(-1.0, 1.0);
+            flow += DRAIN
+                * dt
+                * slope
+                * if slope > 0.0 {
+                    b.wet[a] * (1.0 - b.wet[c])
+                } else {
+                    b.wet[c] * (1.0 - b.wet[a])
+                };
+            b.wet[a] -= flow;
+            b.wet[c] += flow;
+        }
+    }
+    let wet = &b.wet;
+    b.sim.set_mass_scales(|i| 1.0 + soak * wet[i]);
+    if let Some(c) = b.cloth.as_mut() {
+        c.wetness = wet.iter().sum::<f32>() / n.max(1) as f32;
+    }
 }
 
 fn ground_plane(env: &Env, at: DVec3, origin: DVec3) -> [f32; 4] {

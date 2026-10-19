@@ -6,8 +6,10 @@ use std::f32::consts::{FRAC_PI_2, PI};
 use engine_core::math::{Mat4, Quat, Vec2, Vec3};
 use engine_core::prelude::*;
 use engine_render::{AlphaMode, MaterialRef, Mesh, MeshRef, MeshRenderer, StandardMaterial};
+use engine_world::ExhaustKind;
 
 use crate::aero::Aircraft;
+use crate::exhaust::nozzles;
 use crate::visuals::{PropellerPart, PropellerVisual, SurfaceVisual, WheelVisual};
 use crate::wheels::Wheels;
 
@@ -509,6 +511,10 @@ fn spawn_part(
 /// `wheels`); the model's assets are built the first time.
 pub fn spawn(commands: &mut Commands, body: Entity, aircraft: &Aircraft, wheels: &Wheels) {
     commands.queue(|world: &mut World| ensure(world, &key("body"), build));
+    // The four exhaust stubs under the cowl, for the effects modules.
+    commands
+        .entity(body)
+        .insert(nozzles(ExhaustKind::Tailpipe, &exhaust_exits()));
     for &(mesh, material, shadows) in FIXED {
         spawn_part(
             commands,
