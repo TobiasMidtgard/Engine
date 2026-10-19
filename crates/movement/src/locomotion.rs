@@ -31,6 +31,7 @@ use crate::mover::{
 };
 use crate::platform::{self, Deck, Pin};
 use crate::profile::MovementProfile;
+use crate::vault;
 use crate::zipline::{self, Cable, Zipline};
 
 /// Walls are surfaces whose normal is within this of horizontal (|n·up| below it).
@@ -355,17 +356,19 @@ pub(crate) fn step_movers(
             v -= up * (m.settle - GROUND_STICK);
         }
 
-        // Facing: the wall hung from, the grapple's hook, the combat target, where the intent
-        // looks, the motion.
+        // Facing: the wall hung from, the ladder, the way over a vaulted obstacle, the
+        // grapple's hook, the zip line, the combat target, where the intent looks, the motion.
         let hook = m
             .grapple
             .and_then(|g| flat((g.anchor - pos).as_vec3(), up).try_normalize());
         let zip = m.zip.and_then(|z| flat(z.heading, up).try_normalize());
         let ladder = m.ladder.map(|l| l.facing);
+        let vaulting = m.vault.map(|vt| vt.forward);
         let face = m
             .hang
             .map(|h| -h.normal)
             .or(ladder)
+            .or(vaulting)
             .or(hook)
             .or(zip)
             .or_else(|| {
@@ -426,11 +429,12 @@ pub(crate) fn step_movers(
 }
 
 /// The body the character holds on to off the ground: the wall it runs along, the ledge it
-/// hangs from or climbs, the ladder it climbs.
+/// hangs from or climbs, the obstacle it vaults, the ladder it climbs.
 fn held(m: &Mover) -> Option<Entity> {
     let on = |pin: Option<Pin>| pin.map(|p| p.entity);
     on(m.hang.and_then(|h| h.on))
         .or_else(|| on(m.mantle.and_then(|mt| mt.on)))
+        .or_else(|| on(m.vault.and_then(|vt| vt.on)))
         .or_else(|| m.ladder.and_then(|l| l.entity))
         .or_else(|| {
             m.wall
@@ -439,8 +443,8 @@ fn held(m: &Mover) -> Option<Entity> {
         })
 }
 
-/// Moves what is pinned to bodies along with them: the ledge hung from or climbed and the
-/// grapple's hook. A hook whose body is gone lets go.
+/// Moves what is pinned to bodies along with them: the ledge hung from or climbed, the top
+/// of the obstacle vaulted and the grapple's hook. A hook whose body is gone lets go.
 fn follow_pins(
     m: &mut Mover,
     p: &MovementProfile,
@@ -465,6 +469,12 @@ fn follow_pins(
     {
         mt.top = top;
         mt.forward = flat(forward, up).try_normalize().unwrap_or(mt.forward);
+    }
+    if let Some(vt) = &mut m.vault
+        && let Some((plant, forward)) = at(vt.on)
+    {
+        vt.plant = plant;
+        vt.forward = flat(forward, up).try_normalize().unwrap_or(vt.forward);
     }
     let Some(g) = &mut m.grapple else {
         return;
@@ -612,6 +622,7 @@ fn step_one(
         m.mantle = None;
         m.hang = None;
         m.ladder = None;
+        m.vault = None;
         m.grapple = None;
         m.wall = None;
         let vh = flat(v, up);
@@ -631,10 +642,12 @@ fn step_one(
     }
     wish *= m.influence.move_scale;
 
-    // Dashing, climbing, hanging, on a ladder or riding a zip line lets go of the grapple.
+    // Dashing, climbing, vaulting, hanging, on a ladder or riding a zip line lets go of the
+    // grapple.
     if m.grapple.is_some()
         && (m.dash.is_some()
             || m.mantle.is_some()
+            || m.vault.is_some()
             || m.hang.is_some()
             || m.ladder.is_some()
             || m.zip.is_some())
@@ -655,6 +668,7 @@ fn step_one(
     });
     if let Some(req) = request
         && m.mantle.is_none()
+        && m.vault.is_none()
         && m.hang.is_none()
         && m.dash_charges >= 1.0
     {
@@ -723,6 +737,11 @@ fn step_one(
         return mt.forward * mt.exit_speed - up * GROUND_STICK;
     }
 
+    // ---- vault in progress
+    if let Some(v) = vault::over(m, p, b, knocked, dt, out) {
+        return v;
+    }
+
     // ---- hanging from a ledge
     if let Some(h) = m.hang {
         if !grounded {
@@ -746,6 +765,7 @@ fn step_one(
     // ---- ladder: climbing one, or grabbing one in reach
     if m.dash.is_none()
         && m.mantle.is_none()
+        && m.vault.is_none()
         && m.hang.is_none()
         && m.zip.is_none()
         && let Some(v) = ladder::step(
@@ -772,6 +792,7 @@ fn step_one(
     // ---- zip line: riding one, or catching one in reach
     if m.dash.is_none()
         && m.mantle.is_none()
+        && m.vault.is_none()
         && m.hang.is_none()
         && let Some(v) = zipline::step(
             m,
@@ -841,6 +862,17 @@ fn step_one(
         // All the way in: let go and fly on.
         grapple::release(m, p, b.entity, out);
     }
+
+    // ---- vault: taking off for an obstacle in reach
+    let held = vault::Held {
+        jump: m.jump_buffer > 0.0,
+        sprint: intent.sprint,
+    };
+    let vault_ahead = match vault::take_off(m, p, b, probe, v, wish, held, grounded, out) {
+        vault::TakeOff::Go(v) => return v,
+        vault::TakeOff::Ahead => true,
+        vault::TakeOff::No => false,
+    };
 
     if grounded {
         if m.mode == LocomotionMode::WallRun {
@@ -926,7 +958,9 @@ fn step_one(
         out.noise(b.entity, b.pos, 5.0);
         return vh + up * launch.max(v.dot(up));
     }
+    // (An obstacle about to be vaulted isn't climbed onto or caught.)
     if p.mantle
+        && !vault_ahead
         && let Some(mt) = find_ledge(p, b, probe, v, wish)
     {
         m.mantle = Some(mt);
@@ -948,6 +982,7 @@ fn step_one(
     }
     // Too slow along the wall to run on it, or straight at it: catch its top.
     if p.ledge_grab
+        && !vault_ahead
         && m.grab_cooldown <= 0.0
         && let Some(h) = find_hang(p, b, probe, v, wish)
     {

@@ -668,6 +668,20 @@ pub fn demo_views(z: &Zone) -> Vec<View> {
                 .on_arrive("movement.duel", &duel("Blink"))
                 .on_arrive("movement.ladder", "{}")
                 .on_leave("movement.duel", cycle),
+                // The vault lane: the vaulter restarts its run on arrival and is caught going
+                // over the concrete barrier at a sprint, its left hand planted on the top.
+                View::new(
+                    "parkour_vault",
+                    "Vault: sprint over a railing, a concrete barrier and strapped cases without slowing",
+                    [-14.0, 1.3, 5.4],
+                    [-16.2, 1.15, 2.0],
+                    16.0,
+                )
+                // Over the barrier about 2.57 s into the run.
+                .warmup(1.92)
+                .on_arrive("movement.duel", &duel("Blink"))
+                .on_arrive("movement.vaulter", "{}")
+                .on_leave("movement.duel", cycle),
                 // The freight station: the rider restarts its loop on arrival, with the car
                 // about to pull out, and is caught leaping onto the car's side.
                 View::new(
