@@ -1089,10 +1089,10 @@ pub(crate) fn ragdoll_system(
                 &gravity,
                 &mut parts,
             );
-        } else if let Some(blend) = &mut rig.blend {
-            if blend_back(blend, &mut animator, dt) {
-                rig.blend = None;
-            }
+        } else if let Some(blend) = &mut rig.blend
+            && blend_back(blend, &mut animator, dt)
+        {
+            rig.blend = None;
         }
         // How the animated parts move (teleports don't count).
         let a = crate::xform::smoothing(dt, MOMENTUM_SECS);

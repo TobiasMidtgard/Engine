@@ -2208,13 +2208,13 @@ mod tests {
                 let ph = i as f32 / 60.0;
                 let m = model_at(&s, &clip, ph);
                 // Joint centers sit at least 4 cm inside the skin: nothing sinks deeper.
-                for b in 1..s.len() {
+                for (b, x) in m.iter().enumerate().skip(1) {
                     assert!(
-                        m[b].t.y > -0.04,
+                        x.t.y > -0.04,
                         "{} at {ph:.2}: {} at {}",
                         clip.name,
                         s.names[b],
-                        m[b].t
+                        x.t
                     );
                 }
                 if ph >= 0.7 {

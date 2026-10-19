@@ -611,9 +611,9 @@ mod tests {
         assert!((rig.scale - 1.0).abs() < 1e-4);
         // Neutral controls leave the pose as it was.
         let m = posed(&s, &rig, &FaceControls::default());
-        for b in 0..s.len() {
-            assert!(m[b].t.distance(s.rest_model[b].t) < 1e-6);
-            assert!(m[b].r.angle_between(s.rest_model[b].r) < 1e-5);
+        for (x, rest) in m.iter().zip(&s.rest_model) {
+            assert!(x.t.distance(rest.t) < 1e-6);
+            assert!(x.r.angle_between(rest.r) < 1e-5);
         }
         // Without face joints there is no rig, and nothing to change.
         assert!(FaceRig::new(&crate::build::humanoid::skeleton()).is_none());
