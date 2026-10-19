@@ -33,7 +33,7 @@ An effect has emitters (layers). Each emitter says when it spawns (`rate`, `rate
 box, line), how particles move (`speed`, `velocity`, `orbit_speed`, `gravity`, `drag`, `wind`,
 `turbulence`, `vortex`, `attract`, `collide` with the ground or water: bounce, die or stick) and
 how they look (`sprite`: glow, spark, smoke, flame, droplet, ring, star, rune, shard, dust,
-haze, billow, vortex, plume; `facing`: camera, velocity, horizontal or axis (standing along the
+haze, billow, vortex, plume, crown, ripple, foam; `facing`: camera, velocity, horizontal or axis (standing along the
 emitter's direction); `color` and `size_over_life`; `emissive` in cd/m²;
 `lit` by sun, sky and point lights; `additive`; `soft`), or `debris` to draw solid 3D pieces
 instead of sprites ([`Debris`]: rock, splinter, shard or scrap). An effect can also carry a point
@@ -66,12 +66,21 @@ sprite draws the flame procedurally: a white-hot core, a train of shock diamonds
 nozzle's width apart with the gas banded bright and dark around them, and a turbulent tail
 that flickers and tears away.
 
+Splashes are water, not white puffs. The `crown` sprite ray traces the splash's crown inside
+its square: a wall of water thrown up in a ring that flares out, its rim drawn into fingers
+with a bead on each tip, then tears open and slumps while the jet shoots up from the middle. It
+mirrors the sky at a glance, glints in the sun and whitens only where it froths. `ripple`
+bends the water behind it in a train of wavelets and catches the sky on their crests, and
+`foam` floats a lace of bubbles that breaks up over a few seconds (an even whiteness when too
+far away to show its bubbles). Both ride the surface in the effect's own space, so the air
+neither holds them up nor lets them sink.
+
 ## Built-in effects
 
 | Family | Effects |
 |---|---|
 | Spells | `spell.fireball`, `spell.fireball_impact`, `spell.frost_bolt`, `spell.frost_impact`, `spell.arcane_portal`, `spell.portal_gate`, `spell.heal_aura`, `spell.charge`, `spell.lightning_hit`, `spell.starburst`, `magic.orb` |
-| Water | `water.splash`, `water.splash_small`, `water.fountain` |
+| Water | `water.splash`, `water.splash_small`, `water.fountain`, `water.column`, `water.bow_spray`, `water.mist` |
 | Impacts | `impact.<surface>` for every surface material (dirt, rock, concrete, wood, sand, grass, leaves, snow, mud, water, flesh, ice, glass, metal, default), `impact.sparks`, `impulse.dust`, `explosion.large` |
 | Footsteps | `step.dirt`, `step.sand`, `step.snow`, `step.mud`, `step.puddle`, `step.water`, `step.leaves`, `step.default` |
 | Engines | `exhaust.rocket`, `exhaust.afterburner`, `exhaust.jet`, `exhaust.thruster`, `exhaust.tailpipe`, `exhaust.backfire`, `exhaust.jumpjet` |
@@ -164,8 +173,8 @@ follows the camera's exposure as particle glow does ([`VfxSettings::glow_exposur
 keeps its color at night instead of turning white.
 `cargo run -p engine_vfx --release --example sub_emitters` renders the firework and the
 splitting sparks; `--example braziers` renders the brazier fires, `--example engines` every
-exhaust side on (add `vacuum` to take the air away) and `--example court` the whole court, each
-by day, at dusk and at night.
+exhaust side on (add `vacuum` to take the air away), `--example splashes` the splashes close up
+as they unfold, and `--example court` the whole court, each by day, at dusk and at night.
 
 ## Next
 
