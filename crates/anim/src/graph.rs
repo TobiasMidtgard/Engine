@@ -362,6 +362,36 @@ struct Blend1dNode {
     phase: f32,
 }
 
+impl Blend1dNode {
+    /// How much faster than authored the children play at `x`: with `match_speed`, beyond
+    /// the last point so strides keep up.
+    fn speed_up(&self, x: f32) -> f32 {
+        match self.points.last() {
+            Some(&(top, _)) if self.match_speed && top > 1e-3 && x > top => x / top,
+            _ => 1.0,
+        }
+    }
+
+    /// The children whose cycles make this blend's step cycle, weighted. With `match_speed`
+    /// the points are speeds, and a child standing still (at 0) has no step cycle: the cycle
+    /// is the moving children's, whose stride shrinks with their weight, so planted feet
+    /// keep pace with the body at slow speeds instead of the idle's long loop slowing every
+    /// step.
+    fn cycle(&self, weights: &[(usize, f32)]) -> Vec<(usize, f32)> {
+        let mut cycle = weights.to_vec();
+        if self.match_speed {
+            cycle.retain(|(c, _)| self.points.iter().any(|p| p.1 == *c && p.0.abs() > 1e-3));
+            let total: f32 = cycle.iter().map(|w| w.1).sum();
+            if total > 1e-3 {
+                cycle.iter_mut().for_each(|w| w.1 /= total);
+            } else {
+                cycle = weights.to_vec();
+            }
+        }
+        cycle
+    }
+}
+
 struct Blend2dNode {
     x: String,
     y: String,
@@ -647,11 +677,12 @@ impl GraphInstance {
             Node::Clip(c) => c.clip.duration / c.speed.max(1e-3),
             Node::Blend1d(b) => {
                 let x = params.get(&b.param);
-                blend1d_weights(&b.points, x)
+                let d: f32 = b
+                    .cycle(&blend1d_weights(&b.points, x))
                     .into_iter()
                     .map(|(child, w)| w * self.duration(child, params))
-                    .sum::<f32>()
-                    .max(1e-3)
+                    .sum();
+                (d / b.speed_up(x)).max(1e-3)
             }
             Node::Blend2d(b) => {
                 let p = Vec2::new(params.get(&b.x), params.get(&b.y));
@@ -720,28 +751,8 @@ impl GraphInstance {
             Node::Blend1d(b) => {
                 let x = ctx.params.get(&b.param);
                 let weights = blend1d_weights(&b.points, x);
-                let mut rate = args.rate;
-                if b.match_speed
-                    && let Some(&(top, _)) = b.points.last()
-                    && top > 1e-3
-                    && x > top
-                {
-                    rate *= x / top;
-                }
-                // With `match_speed` the points are speeds, and a child standing still (at 0)
-                // has no step cycle: the cycle is the moving children's, whose stride shrinks
-                // with their weight, so planted feet keep pace with the body at slow speeds
-                // instead of the idle's long loop slowing every step.
-                let mut cycle = weights.clone();
-                if b.match_speed {
-                    cycle.retain(|(c, _)| b.points.iter().any(|p| p.1 == *c && p.0.abs() > 1e-3));
-                    let total: f32 = cycle.iter().map(|w| w.1).sum();
-                    if total > 1e-3 {
-                        cycle.iter_mut().for_each(|w| w.1 /= total);
-                    } else {
-                        cycle = weights.clone();
-                    }
-                }
+                let rate = args.rate * b.speed_up(x);
+                let cycle = b.cycle(&weights);
                 let phase = if b.sync {
                     // Put the nodes back temporarily so `duration` can read them.
                     self.nodes[i] = node;

@@ -22,6 +22,11 @@ struct Stances {
 /// Move a person ahead at `speed` (m/s) while turning at `turn` (rad/s) for a few seconds,
 /// and measure its planted feet.
 fn stances(speed: f64, turn: f32) -> Stances {
+    stances_toward(speed, turn, 0.0)
+}
+
+/// [`stances`] moving at `heading` (radians, positive left) from where it faces.
+fn stances_toward(speed: f64, turn: f32, heading: f32) -> Stances {
     let mut app = App::new();
     app.world.resource_mut::<EngineConfig>().headless = true;
     app.world
@@ -41,7 +46,7 @@ fn stances(speed: f64, turn: f32) -> Stances {
         {
             let mut t = app.world.get_mut::<Transform>(e).unwrap();
             t.rotate_y(turn * STEP as f32);
-            let ahead = (t.rotation * Vec3::NEG_Z).as_dvec3();
+            let ahead = (t.rotation * Vec3::new(-heading.sin(), 0.0, -heading.cos())).as_dvec3();
             t.translation += ahead * speed * STEP;
         }
         app.update();
@@ -120,4 +125,29 @@ fn turned_on_the_spot_a_person_steps_round() {
     );
     // Standing still, nothing moves.
     assert_eq!(stances(0.0, 0.0).count, 0);
+}
+
+#[test]
+fn sidestepping_and_backpedalling_feet_do_not_slide() {
+    let pi = std::f32::consts::PI;
+    for (speed, heading) in [
+        (0.6, pi / 2.0),
+        (0.6, -pi / 2.0),
+        (1.0, pi),
+        (1.0, pi / 4.0),
+        (1.0, -3.0 * pi / 4.0),
+    ] {
+        let s = stances_toward(speed, 0.0, heading);
+        assert!(
+            s.count >= 4,
+            "{speed} m/s at {heading}: only {} steps",
+            s.count
+        );
+        assert!(
+            s.worst < 0.01,
+            "{speed} m/s at {heading}: feet slid {:.3} m on average, {:.3} at worst",
+            s.mean,
+            s.worst
+        );
+    }
 }
