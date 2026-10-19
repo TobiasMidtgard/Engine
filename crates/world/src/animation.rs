@@ -13,9 +13,9 @@
 //! Parameter and trigger names are plain strings so data files and AI agents can drive any
 //! character. Conventional names: `speed` (m/s), `direction` (rad, the way the character moves
 //! relative to its facing: 0 ahead, positive toward its left, counter-clockwise seen from above
-//! like yaw and `turn`, ±π backwards), `lean` (−1..1), `aim_pitch`/`aim_yaw` (rad), `effort` (0..1, drives muscle flex),
-//! `crouch` (0..1); triggers `jump`, `dash`, `block`, `attack_light`, `attack_heavy`,
-//! `hit_react`, `land`.
+//! like yaw and `turn`, ±π backwards), `lean` (−1..1), `aim_pitch`/`aim_yaw` (rad), `effort`
+//! (0..1, drives muscle flex), `crouch` (0..1); triggers `jump`, `dash`, `block`,
+//! `attack_light`, `attack_heavy`, `hit_react`, `land`.
 
 use std::collections::HashMap;
 use std::sync::Arc;
