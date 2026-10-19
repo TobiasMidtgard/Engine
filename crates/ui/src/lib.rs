@@ -19,6 +19,7 @@ pub mod map;
 pub mod menus;
 pub mod node;
 pub mod planet_noise;
+pub mod quests;
 pub mod screens;
 pub mod shop;
 pub mod style;
@@ -103,6 +104,7 @@ impl Plugin for UiPlugin {
         app.init_resource::<items::ItemDatabase>()
             .init_resource::<dialogue::DialogueLibrary>()
             .init_resource::<map::MapData>()
+            .init_resource::<quests::QuestLog>()
             .init_resource::<menus::PauseState>();
         {
             let mut screens = app.world.resource_mut::<ScreenRegistry>();
@@ -132,13 +134,19 @@ impl Plugin for UiPlugin {
             );
             screens.add(
                 "map",
-                "The star map: zoom 0-1 surface, 1-2 planet globe, 2-3 star system, 3-4 galaxy. `system`/`planet` pick what the inner levels show; `select` an item ({\"type\": \"poi\", \"id\": ...}).",
+                "The star map: zoom 0-1 surface, 1-2 planet globe, 2-3 star system, 3-4 galaxy. `system`/`planet` pick what the inner levels show; `select` an item ({\"type\": \"poi\", \"id\": ...}); `focus: true` opens looking at it.",
                 r#"{"zoom": 1.4}"#,
                 map::build_screen,
             );
             screens.add(
+                "journal",
+                "The quest journal: active and finished quests by kind, with objectives, rewards, who gave them and a live map of where they lead. Track a quest here. `select` a quest id, `tab` \"active\" or \"finished\".",
+                r#"{"select": "silent_relay"}"#,
+                quests::build_screen,
+            );
+            screens.add(
                 "pause",
-                "The pause menu (stops game time while open): resume, inventory, map, settings, save, quit.",
+                "The pause menu (stops game time while open): resume, inventory, journal, map, settings, save, quit.",
                 "{}",
                 menus::build_pause,
             );
@@ -168,6 +176,7 @@ impl Plugin for UiPlugin {
                 dialogue::dialogue_system,
                 hud::hud_system,
                 map::map_system,
+                quests::quests_system,
                 menus::menus_system,
             ),
         )
@@ -201,6 +210,7 @@ impl Plugin for UiPlugin {
         dialogue::register_api(app);
         hud::register_api(app);
         map::register_api(app);
+        quests::register_api(app);
     }
 }
 
@@ -279,6 +289,9 @@ fn register_types(app: &mut App) {
     )
     .register_resource::<map::MapData>(
         "The universe the map shows: galaxy, systems [{id, name, x, y, star_color, star_class, faction, discovered, planets [{id, name, kind, seed, radius_km, orbit_au, rings, moons, pois}]}], lanes, player {system, planet, lon, lat}, waypoint.",
+    )
+    .register_resource::<quests::QuestLog>(
+        "Quests: {quests [{id, title, kind (main, side, contract), state (offered, active, completed, failed), level, giver, giver_title, giver_portrait, region, summary, objectives [{text, count, progress, optional, place}], rewards {xp, gold, items}}], tracked}. The tracked quest drives the HUD tracker and the waypoint.",
     )
     .register_resource::<UiSettings>(
         "UI scale (multiplier), reference_height (px the layouts are designed for), min_scale, enabled, debug_outlines, tooltip_delay (real s), block_game_input (while a modal screen is open).",

@@ -114,7 +114,12 @@ changing that one plugin line.
   kinematic wall).
 - **Events**: one `ContactEvent::Started` per touch with the impact impulse and a normal from
   `a` to `b`, one `Ended` when it stops; sensors too. Hard impacts also send `NoiseEvent` (AI
-  hearing) and, against static ground, `GroundContact` (dents, dust, impact sounds).
+  hearing) and, against static ground, `GroundContact` (dents, dust, impact sounds). That
+  includes hits on pairs that never stop touching: a crate tumbling face over face, a post
+  slapping down flat while its foot stays on the ground, a drum bouncing down the runway. Each
+  substep whose impulse changes the lighter body's speed by `impact_min_speed` (beyond holding
+  it up) counts, once per hit. A `GroundContact`'s `yaw` follows the slide, or for a body landing
+  still, its longest axis lying flat.
 - **World inputs**: `Gravity` (uniform or planets; each body gets the gravity at its own
   position), buoyancy and drag in `Water`, `WorldImpulse` blasts (blast wind drag), `ApplyImpulse`.
   Buoyancy integrates water pressure over each collider's real shape (boxes, balls, capsules,
@@ -125,7 +130,13 @@ changing that one plugin line.
   bottom (half of critical), so floaters settle instead of bobbing forever; water forces are
   recomputed every substep. Turning drag is per axis, by how far the shape reaches across it
   (a log rolls easily, end over end it drags its whole length). Other shapes (meshes,
-  heightfields) use the submerged share of their bounding box.
+  heightfields) use the submerged share of their bounding box. Sleeping bodies notice the water
+  changing: every 6 steps the water under each one is compared with what it was when the body fell
+  asleep, and a body the water reaches wakes once its level moved 2 cm or its current 0.1 m/s, so
+  a plank rides a slow tide up, a crate floats off a flooded quay and a floater drops with the
+  water when a sluice opens. A body afloat in a current is kept awake while it touches nothing
+  fixed, so it keeps drifting even below Rapier's sleep speed; a stone on the bed sleeps on, and a
+  body the water stays clear of, or stays well over, is never woken by waves.
 - **Time**: runs in `FixedUpdate` / `SimSet::Physics` on world time, so `TimeDilation` slows it;
   each fixed step is split into substeps of at most `max_substep_secs`, so 10× fast-forward is
   as stable as 1×. `LocalTimeScale` speeds a single body up or down, in everything: its
@@ -149,7 +160,8 @@ under a micrometer).
   that leaves its region's radius moves to another region; two regions whose bodies come close
   merge so they can collide.
 - Static colliders are copied into every region that could touch them (the shape data is
-  shared). Regions far from every `SimulationFocus` pause (`freeze_distance_m`).
+  shared); a region travelling with its bodies drops the copies it leaves behind, so a ship
+  crossing a continent holds only the statics near it. Regions far from every `SimulationFocus` pause (`freeze_distance_m`).
 - A `WorldShift` (the space module re-anchoring the world) moves the simulation in the same
   frame. A floating-origin move only moves region anchors: sleeping bodies stay asleep and
   contacts carry on. A turn into another planet's frame rotates each region's contents about
@@ -192,7 +204,7 @@ proving ground with the overlay.
 | `blast_response`, `blast_scale` | on, 1 | Explosions push bodies; 1 = real blast wind, action games use 3–10. |
 
 `PhysicsStats` (resource, also `physics.*` in `Diagnostics`): bodies, awake bodies, regions,
-touching pairs, step time, substeps, articulated joints.
+touching pairs, step time, substeps, articulated joints, static copies.
 
 ## API functions
 
@@ -270,7 +282,7 @@ ground, running over heightfield hills, crouching, landing from a fall, standing
 from 1 m to 10 km across, characters on their own clock, sensors and layers, local time (forces, damping and lifts
 on a slow clock too), hovering,
 buoyancy, floating the way real bodies do (logs, planks, cubes on their edge, a ball's draft, a
-barge on a swell), blasts, bodies crossing and merging regions); the float test
+barge on a swell), blasts, bodies crossing and merging regions, a region dropping the statics it travels past); the float test
 (`tests/floaters.rs`); riding moving bodies (`tests/platforms.rs`:
 crates and characters on a deck at up to 30 km/s, lifts, a turntable, a thrusting and turning ship,
 a seesaw tipped by a character's weight, crates landing on heads, rays hitting bodies at orbital

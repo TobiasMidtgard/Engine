@@ -104,6 +104,7 @@ impl Plugin for VehiclesPlugin {
                 Update,
                 (
                     visuals::wheel_visuals,
+                    visuals::gear_visuals,
                     visuals::aircraft_visuals,
                     visuals::plume_visuals,
                     visuals::light_visuals,

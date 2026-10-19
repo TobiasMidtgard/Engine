@@ -44,6 +44,9 @@ pub struct Bar {
     pub color2: Color,
     /// Tick marks dividing the bar (e.g. 10 for 10 HP chunks), 0 = none.
     pub segments: u32,
+    /// A tick at every whole unit of the bound max instead (step counters: 2 / 4 shows four
+    /// chunks), when the max is 2 to 24.
+    pub unit_ticks: bool,
     /// Pulse when at or below this fraction (0 = never).
     pub low: f32,
     /// Show "current / max" text on the bar.
@@ -73,6 +76,7 @@ impl Default for Bar {
             color: Color::hex(0xe0503c),
             color2: Color::hex(0xff8a5c),
             segments: 0,
+            unit_ticks: false,
             low: 0.0,
             label: false,
             shown: 1.0,
@@ -220,9 +224,14 @@ fn paint_bar(world: &mut World, e: Entity, ctx: &mut DrawCtx) {
             );
         }
     }
-    if b.segments > 1 {
-        for i in 1..b.segments {
-            let x = inner.x + w * i as f32 / b.segments as f32;
+    let segments = if b.unit_ticks && (2.0..=24.0).contains(&b.max.round()) {
+        b.max.round() as u32
+    } else {
+        b.segments
+    };
+    if segments > 1 {
+        for i in 1..segments {
+            let x = inner.x + w * i as f32 / segments as f32;
             ctx.line(
                 Vec2::new(x, inner.y + 1.0),
                 Vec2::new(x, inner.y + inner.h - 1.0),

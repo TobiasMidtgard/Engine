@@ -13,7 +13,9 @@ use engine_world::physics::{
     CollisionLayers, ContactEvent, ContactPhase, ExternalForce, Joint, JointKind, PhysicsQueries,
     QueryFilter, RigidBody, Velocity,
 };
-use engine_world::{Gravity, Water, WaterQuery, WaterSample, WorldImpulse, WorldPlugin};
+use engine_world::{
+    Gravity, GroundContact, NoiseEvent, Water, WaterQuery, WaterSample, WorldImpulse, WorldPlugin,
+};
 
 const DT: f64 = 1.0 / 60.0;
 
@@ -68,6 +70,55 @@ fn vel(app: &App, e: Entity) -> Vec3 {
 
 fn stats(app: &App) -> PhysicsStats {
     *app.world.resource::<PhysicsStats>()
+}
+
+/// A region following a fast body across a field of posts keeps copies of the posts near it
+/// only: it drops the ones it leaves behind instead of collecting every static it passes.
+#[test]
+fn a_travelling_region_drops_the_statics_it_leaves_behind() {
+    let mut app = app();
+    // A post every 250 m along 30 km, 20 m to the side of the shot's path.
+    let posts = 121;
+    for i in 0..posts {
+        app.world.spawn((
+            Transform::from_xyz(i as f64 * 250.0, 0.0, 20.0),
+            Collider::cuboid(Vec3::new(0.2, 2.0, 0.2)),
+        ));
+    }
+    app.world.spawn((
+        Transform::from_xyz(0.0, 1.0, 0.0),
+        RigidBody {
+            gravity_scale: 0.0,
+            ..RigidBody::dynamic()
+        },
+        Collider::sphere(0.5),
+        Velocity {
+            linear: Vec3::new(3000.0, 0.0, 0.0),
+            angular: Vec3::ZERO,
+        },
+    ));
+    app.update_n(1);
+    let start = stats(&app).static_copies;
+    let mut most = start;
+    for _ in 0..600 {
+        app.update();
+        most = most.max(stats(&app).static_copies);
+    }
+    println!("static copies: {start} at the start, at most {most} on the way");
+    // The posts' own regions hold their copies from the start; the shot's region adds the
+    // ones within its reach (about 1.3 km each way: a dozen posts), not all of them.
+    assert!(
+        most < start + 30,
+        "{most} static copies, {start} at the start: the travelling region kept the posts it passed"
+    );
+    let diagnostics = app
+        .world
+        .resource::<engine_core::diagnostics::Diagnostics>();
+    assert_eq!(
+        diagnostics.get("physics.static_copies"),
+        Some(stats(&app).static_copies as f64)
+    );
+    assert_eq!(diagnostics.get("physics.substeps"), Some(2.0));
 }
 
 fn zero_g(app: &mut App) {
@@ -1183,6 +1234,241 @@ fn barges_pitch_with_a_passing_swell() {
         low > -0.5 && high < 0.5,
         "pitched {low:.1}°..{high:.1}° in still water"
     );
+}
+
+/// Water whose level (m) and current (m/s) can change: a tide, a sluice, a flood.
+struct Tide(Arc<std::sync::Mutex<(f64, Vec3)>>);
+
+impl WaterQuery for Tide {
+    fn sample(&self, _p: DVec3) -> Option<WaterSample> {
+        let (level, current) = *self.0.lock().unwrap();
+        Some(WaterSample {
+            surface_height: level,
+            depth: 20.0,
+            velocity: current,
+            normal: Vec3::Y,
+        })
+    }
+}
+
+fn asleep(app: &App, e: Entity) -> bool {
+    *app.world.get::<Velocity>(e).unwrap() == Velocity::default()
+}
+
+#[test]
+fn sleeping_bodies_wake_when_the_water_rises_falls_or_flows() {
+    let mut app = app();
+    let tide = Arc::new(std::sync::Mutex::new((0.0, Vec3::ZERO)));
+    app.world
+        .insert_resource(Water(Arc::new(Tide(tide.clone()))));
+    // A wooden plank floating, and a light crate on a quay 1 m above the water.
+    let plank = floater(
+        &mut app,
+        DVec3::new(0.0, 0.1, 0.0),
+        Quat::IDENTITY,
+        Collider::cuboid(Vec3::new(1.0, 0.1, 0.5)).with_density(500.0),
+    );
+    ground(&mut app, DVec3::new(10.0, 1.0, 0.0), 3.0);
+    let crate_ = floater(
+        &mut app,
+        DVec3::new(10.0, 1.4, 0.0),
+        Quat::IDENTITY,
+        Collider::cuboid(Vec3::splat(0.4)).with_density(200.0),
+    );
+    // Left alone by the water: a stone on the bed 3 m down, and a crate on a high quay.
+    ground(&mut app, DVec3::new(-10.0, -3.0, 0.0), 3.0);
+    let stone = floater(
+        &mut app,
+        DVec3::new(-10.0, -2.7, 0.0),
+        Quat::IDENTITY,
+        Collider::cuboid(Vec3::splat(0.3)).with_density(2600.0),
+    );
+    ground(&mut app, DVec3::new(0.0, 3.0, 10.0), 3.0);
+    let dry = floater(
+        &mut app,
+        DVec3::new(0.0, 3.4, 10.0),
+        Quat::IDENTITY,
+        Collider::cuboid(Vec3::splat(0.4)).with_density(200.0),
+    );
+    app.update_n(20 * 60);
+    let all = [plank, crate_, stone, dry];
+    assert!(all.iter().all(|&e| asleep(&app, e)), "nothing fell asleep");
+    let rest = pos(&app, plank).y;
+    // Steps the app, noting whether the stone or the dry crate ever woke.
+    let stirred = std::cell::RefCell::new(Vec::new());
+    let run = |app: &mut App, frames: usize| {
+        for _ in 0..frames {
+            app.update();
+            for (name, e) in [("stone", stone), ("dry crate", dry)] {
+                let mut s = stirred.borrow_mut();
+                if !asleep(app, e) && !s.contains(&name) {
+                    s.push(name);
+                }
+            }
+        }
+    };
+
+    // The tide comes in: 1.5 m over 6 s. The plank rides up, the crate floats off the quay.
+    for i in 1..=360 {
+        tide.lock().unwrap().0 = 1.5 * i as f64 / 360.0;
+        run(&mut app, 1);
+    }
+    run(&mut app, 180);
+    let rose = pos(&app, plank).y - rest;
+    assert!(
+        (rose - 1.5).abs() < 0.05,
+        "the plank rose {rose} m with a 1.5 m tide"
+    );
+    // 200 kg/m³ draws 0.16 m: the crate's center 0.24 m above the water.
+    let c = pos(&app, crate_).y;
+    assert!(
+        (c - 1.74).abs() < 0.05,
+        "the crate's center at {c} m on 1.5 m of water"
+    );
+
+    // Calm again: both fall asleep and stay asleep.
+    run(&mut app, 20 * 60);
+    assert!(
+        asleep(&app, plank) && asleep(&app, crate_),
+        "still awake in calm water"
+    );
+
+    // A sluice opens: the water drops 1 m at once and the plank drops with it.
+    tide.lock().unwrap().0 = 0.5;
+    run(&mut app, 5 * 60);
+    let fell = rest + 1.5 - pos(&app, plank).y;
+    assert!(
+        (fell - 1.0).abs() < 0.05,
+        "the plank fell {fell} m with the water"
+    );
+
+    // A current starts: 0.5 m/s along x carries the sleeping plank off, slowly at first (below
+    // the speed at which bodies fall asleep), but the stone on the bed stays where it is.
+    run(&mut app, 20 * 60);
+    assert!(asleep(&app, plank), "plank still awake before the current");
+    assert!(stirred.borrow().is_empty(), "the tide woke the {stirred:?}");
+    let x = pos(&app, plank).x;
+    let bed = pos(&app, stone);
+    tide.lock().unwrap().1 = Vec3::new(0.5, 0.0, 0.0);
+    run(&mut app, 5 * 60);
+    let drift = pos(&app, plank).x - x;
+    assert!(
+        drift > 1.0,
+        "the current carried the plank only {drift} m in 5 s"
+    );
+    // The stone may wake to feel the new current, but sleeps again where it lay.
+    assert!(
+        asleep(&app, stone),
+        "the stone is still awake in the current"
+    );
+    let moved = pos(&app, stone).distance(bed);
+    assert!(moved < 0.01, "the current moved the stone {moved} m");
+    assert!(
+        !stirred.borrow().contains(&"dry crate"),
+        "the water woke the dry crate"
+    );
+}
+
+#[derive(Resource, Default)]
+struct Landings(Vec<GroundContact>, Vec<NoiseEvent>);
+
+fn landings(
+    mut seen: ResMut<Landings>,
+    mut ground: MessageReader<GroundContact>,
+    mut noise: MessageReader<NoiseEvent>,
+) {
+    seen.0.extend(ground.read().copied());
+    seen.1.extend(noise.read().copied());
+}
+
+#[test]
+fn tumbling_bodies_report_every_hard_landing() {
+    let mut app = app();
+    app.init_resource::<Landings>();
+    app.add_systems(Last, landings);
+    ground(&mut app, DVec3::ZERO, 40.0);
+    // A crate thrown along +x, spinning forward: it lands on face after face.
+    let tumbler = cube(&mut app, DVec3::new(0.0, 2.0, 0.0), 0.4);
+    // A post standing on one edge, leaning 20° toward +x: it slaps down flat without ever
+    // leaving the ground (its foot stays in contact, so only its impulse tells the landing).
+    let lean = 20f32.to_radians();
+    let post = app
+        .world
+        .spawn((
+            Transform::from_xyz(0.0, (0.6 * lean.cos() + 0.15 * lean.sin()) as f64, 20.0)
+                .with_rotation(Quat::from_rotation_z(-lean)),
+            RigidBody::dynamic(),
+            Collider::cuboid(Vec3::new(0.15, 0.6, 0.15)),
+            Velocity::default(),
+        ))
+        .id();
+    // One resting where it was put, one sliding flat: neither ever lands hard.
+    let resting = cube(&mut app, DVec3::new(0.0, 0.4, 10.0), 0.4);
+    let sliding = cube(&mut app, DVec3::new(0.0, 0.4, -10.0), 0.4);
+    app.world.entity_mut(tumbler).insert(Velocity {
+        linear: Vec3::new(6.0, 4.0, 0.0),
+        angular: Vec3::new(0.0, 0.0, -20.0),
+    });
+    app.world.entity_mut(sliding).insert(Velocity {
+        linear: Vec3::new(5.0, 0.0, 0.0),
+        angular: Vec3::ZERO,
+    });
+    app.update_n(1);
+    let mass = app
+        .world
+        .get::<engine_world::physics::MassProperties>(tumbler)
+        .unwrap()
+        .mass_kg;
+    app.update_n(4 * 60);
+    let seen = app.world.resource::<Landings>();
+    let of = |e: Entity| -> Vec<GroundContact> {
+        seen.0
+            .iter()
+            .filter(|c| c.entity == Some(e))
+            .copied()
+            .collect()
+    };
+    let hits = of(tumbler);
+    assert!(
+        hits.len() >= 3,
+        "the tumbling crate landed {} times",
+        hits.len()
+    );
+    for h in &hits {
+        assert!(h.load_kg > mass, "a landing carried {} kg", h.load_kg);
+        if h.speed > 0.5 {
+            // Thrown along +x (its corners kick it a little sideways).
+            let f = h.forward();
+            assert!(
+                f.x > 0.6,
+                "a landing travelling along +x faces {f:?} (yaw {})",
+                h.yaw
+            );
+        }
+    }
+    let slap = of(post);
+    assert_eq!(
+        slap.len(),
+        1,
+        "the toppled post landed {} times",
+        slap.len()
+    );
+    let f = slap[0].forward();
+    assert!(
+        f.x.abs() > 0.9,
+        "the post lies along x, its landing along {f:?}"
+    );
+    assert!(
+        (slap[0].size[1] - 1.2).abs() < 0.1,
+        "the post's landing is {:?} m",
+        slap[0].size
+    );
+    let heard = seen.1.iter().filter(|n| n.source == Some(tumbler)).count();
+    assert_eq!(heard, hits.len(), "every landing is heard");
+    for (name, e) in [("resting", resting), ("sliding", sliding)] {
+        let n = of(e).len();
+        assert!(n <= 1, "the {name} crate reported {n} landings");
+    }
 }
 
 #[test]

@@ -1,7 +1,8 @@
-//! Moving parts: wheels that steer, spin and ride the suspension, control surfaces that
-//! deflect, propellers that spin, exhaust plumes that grow with thrust, brake lights, and hulls
-//! that glow with re-entry heat. All are child entities of the vehicle, updated in `Update`
-//! from the simulation state, so they work with any physics backend.
+//! Moving parts: wheels that steer, spin and ride the suspension, landing gear that folds
+//! away, control surfaces that deflect, propellers that spin, exhaust plumes that grow with
+//! thrust, brake lights, and hulls that glow with re-entry heat. All are child entities of the
+//! vehicle, updated in `Update` from the simulation state, so they work with any physics
+//! backend.
 
 use engine_core::math::{Quat, Vec3};
 use engine_core::prelude::*;
@@ -17,8 +18,53 @@ use crate::wheels::Wheels;
 #[derive(Component, Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct WheelVisual {
     pub index: usize,
-    /// Hide when the aircraft retracts its gear.
+    /// Hide when the aircraft retracts its gear (gear that folds away carries a [`GearFold`]
+    /// instead).
     pub retracts: bool,
+    /// Farthest the wheel is drawn below its mount, m: the end of a landing-gear leg, so a
+    /// wheel hanging free in flight stays on its axle. `f32::MAX` follows the suspension.
+    pub max_travel: f32,
+}
+
+/// A landing-gear part (leg, door or wheel) that folds with the parent [`Aircraft`]'s gear:
+/// turned about `axis` through `pivot` (the vehicle's frame) by `angles.0` radians when
+/// stowed and `angles.1` when down, moving while the gear position crosses `span`. Doors
+/// take the first part of the travel and legs the rest, so the doors open before the legs
+/// swing down and close after they are in.
+#[derive(Component, Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct GearFold {
+    pub pivot: Vec3,
+    pub axis: Vec3,
+    pub angles: (f32, f32),
+    pub span: (f32, f32),
+}
+
+impl GearFold {
+    /// The part's turn at gear position `gear` (0 stowed .. 1 down).
+    pub fn rotation(&self, gear: f32) -> Quat {
+        let (a, b) = self.span;
+        let t = ((gear - a) / (b - a).max(1e-6)).clamp(0.0, 1.0);
+        let t = t * t * (3.0 - 2.0 * t);
+        Quat::from_axis_angle(
+            self.axis,
+            self.angles.0 + (self.angles.1 - self.angles.0) * t,
+        )
+    }
+
+    /// Where point `p` of the part as built moves at gear position `gear`.
+    pub fn apply(&self, gear: f32, p: Vec3) -> Vec3 {
+        self.pivot + self.rotation(gear) * (p - self.pivot)
+    }
+
+    /// The same part on the other side (mirrored across x = 0).
+    pub fn mirrored(&self) -> Self {
+        Self {
+            pivot: self.pivot * Vec3::new(-1.0, 1.0, 1.0),
+            axis: self.axis * Vec3::new(-1.0, 1.0, 1.0),
+            angles: (-self.angles.0, -self.angles.1),
+            span: self.span,
+        }
+    }
 }
 
 /// Rotates with control surface `index` of the parent [`Aircraft`] about local `hinge`.
@@ -76,9 +122,9 @@ pub struct HeatGlow {
 /// Wheels: position along the suspension, steering, spin; retract with aircraft gear.
 pub fn wheel_visuals(
     vehicles: Query<(&Wheels, Option<&Aircraft>)>,
-    mut q: Query<(&ChildOf, &WheelVisual, &mut Transform)>,
+    mut q: Query<(&ChildOf, &WheelVisual, Option<&GearFold>, &mut Transform)>,
 ) {
-    for (parent, vis, mut t) in &mut q {
+    for (parent, vis, fold, mut t) in &mut q {
         let Ok((wheels, aircraft)) = vehicles.get(parent.parent()) else {
             continue;
         };
@@ -86,20 +132,55 @@ pub fn wheel_visuals(
             continue;
         };
         let st = &w.state;
+        // On the ground the wheel sits where the spring puts it; in the air it hangs at full
+        // travel, which the model's leg may not reach.
         let travel = if st.grounded {
             st.spring_length
         } else {
-            w.suspension.travel_m
+            w.suspension.travel_m.min(vis.max_travel)
         };
-        // Retracted gear folds away (scaled down with everything attached to it).
+        // Gear that doesn't fold retracts by shrinking away (with everything attached to it).
         let shown = !vis.retracts || aircraft.is_none_or(|a| a.gear_down);
+        let gear = aircraft.map_or(1.0, |a| a.gear);
+        // Folding gear steers only when fully down.
+        let steer = if fold.is_some() && gear < 1.0 {
+            0.0
+        } else {
+            st.steer
+        };
+        let mut at = w.mount - Vec3::Y * travel;
+        let mut rotation = Quat::from_rotation_y(-steer) * Quat::from_rotation_x(-st.angle);
+        if let Some(fold) = fold {
+            let turn = fold.rotation(gear);
+            at = fold.pivot + turn * (at - fold.pivot);
+            rotation = turn * rotation;
+        }
         let new = Transform {
-            translation: (w.mount - Vec3::Y * travel).as_dvec3(),
-            rotation: Quat::from_rotation_y(-st.steer) * Quat::from_rotation_x(-st.angle),
+            translation: at.as_dvec3(),
+            rotation,
             scale: if shown { Vec3::ONE } else { Vec3::splat(1e-3) },
         };
         if *t != new {
             *t = new;
+        }
+    }
+}
+
+/// Landing-gear legs and doors: turn with the aircraft's gear position (wheels follow in
+/// [`wheel_visuals`]).
+pub fn gear_visuals(
+    aircraft: Query<&Aircraft>,
+    mut q: Query<(&ChildOf, &GearFold, &mut Transform), Without<WheelVisual>>,
+) {
+    for (parent, fold, mut t) in &mut q {
+        let Ok(a) = aircraft.get(parent.parent()) else {
+            continue;
+        };
+        let rotation = fold.rotation(a.gear);
+        let translation = (fold.pivot - rotation * fold.pivot).as_dvec3();
+        if t.rotation != rotation || t.translation != translation {
+            t.rotation = rotation;
+            t.translation = translation;
         }
     }
 }

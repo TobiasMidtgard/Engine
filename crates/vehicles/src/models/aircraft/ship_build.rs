@@ -11,9 +11,10 @@ use engine_assets::Assets;
 
 use crate::aero::Aircraft;
 use crate::ship::{Thruster, ThrusterRole};
-use crate::visuals::{HeatGlow, PlumeVisual, SurfaceVisual, WheelVisual};
+use crate::visuals::{GearFold, HeatGlow, PlumeVisual, SurfaceVisual, WheelVisual};
 use crate::wheels::Wheels;
 
+use super::ship_gear::{self, Underside};
 use super::ship_paint::*;
 use super::ship_parts::*;
 use super::ship_surfaces as ss;
@@ -27,8 +28,9 @@ pub const MAIN_AXLE: Vec3 = Vec3::new(2.2, -2.22, 4.0);
 const NOSE_TIRES: (f32, f32, f32) = (0.5, 0.2, 0.14);
 const MAIN_TIRES: (f32, f32, f32) = (0.6, 0.24, 0.16);
 /// Gear wells in the belly (center x, z and half sizes), also painted by the hull painter.
-pub const NOSE_WELL: (Vec2, Vec2) = (Vec2::new(0.0, -7.5), Vec2::new(0.40, 0.78));
-pub const MAIN_WELL: (Vec2, Vec2) = (Vec2::new(2.12, 4.0), Vec2::new(0.36, 0.92));
+/// The legs swing forward into them ([`super::ship_gear`]), so they run ahead of the axles.
+pub const NOSE_WELL: (Vec2, Vec2) = (Vec2::new(0.0, -7.98), Vec2::new(0.40, 0.84));
+pub const MAIN_WELL: (Vec2, Vec2) = (Vec2::new(2.10, 3.50), Vec2::new(0.385, 0.96));
 
 // ---------------------------------------------------------------- control surfaces
 
@@ -442,10 +444,6 @@ const FIXED: &[(&str, &str, bool, bool)] = &[
     ("dock", "gear", true, false),
     ("dock_hatch", "frame", true, false),
     ("dock_metal", "metal", true, false),
-    ("gear", "gear", true, false),
-    ("gear_chrome", "chrome", true, false),
-    ("doors", "door", true, false),
-    ("door_inner", "gear", true, false),
 ];
 
 /// Every mesh, texture and material of the spaceplane.
@@ -534,52 +532,17 @@ pub fn build() -> ModelAssets {
     out.mesh(&key("dock_hatch"), dock_hatch);
     out.mesh(&key("dock_metal"), dock_metal);
 
-    // ---- landing gear: legs and doors (fixed), tires and hubs (turning)
-    let belly = |x: f32, z: f32| h.exit(Vec3::new(x, -1.0, z), Vec3::NEG_Y).0;
-    let (nose_leg, nose_chrome) = gear_leg(
-        belly(0.0, NOSE_AXLE.z) + Vec3::Y * 0.1,
-        NOSE_AXLE,
-        0.07,
-        belly(0.0, NOSE_AXLE.z - 0.6) + Vec3::Y * 0.05,
-    );
-    let (main_leg, main_chrome) = gear_leg(
-        belly(MAIN_AXLE.x, MAIN_AXLE.z) + Vec3::Y * 0.1,
-        MAIN_AXLE,
-        0.09,
-        belly(MAIN_AXLE.x, MAIN_AXLE.z - 0.8) + Vec3::Y * 0.05,
-    );
-    let mut doors = Mesh::default();
-    let mut door_inner = Mesh::default();
-    {
-        let (c, half) = NOSE_WELL;
-        for sx in [-1.0f32, 1.0] {
-            let x = c.x + sx * half.x;
-            let a = belly(x, c.y - half.y);
-            let b = belly(x, c.y + half.y);
-            let (o, i) = gear_door(a, b, half.x * 0.95, Vec3::X * sx);
-            doors.merge(&o);
-            door_inner.merge(&i);
-        }
-        let (c, half) = MAIN_WELL;
-        let x = c.x - half.x;
-        let a = belly(x, c.y - half.y);
-        let b = belly(x, c.y + half.y);
-        let (o, i) = gear_door(a, b, 0.62, Vec3::NEG_X);
-        doors.merge(&mirrored_x(&o));
-        doors.merge(&o);
-        door_inner.merge(&mirrored_x(&i));
-        door_inner.merge(&i);
+    // ---- landing gear: legs and doors (folding), tires and hubs (turning)
+    let skins: Vec<&Mesh> = out
+        .meshes
+        .iter()
+        .filter(|(k, _)| *k == key("hull") || *k == key("wing"))
+        .map(|(_, m)| m)
+        .collect();
+    let underside = Underside::new(&skins, Vec2::new(-2.6, -9.0), Vec2::new(2.6, 5.0));
+    for (name, mesh) in super::ship_gear::meshes(&|x, z| underside.at(x, z)) {
+        out.mesh(&key(name), mesh);
     }
-    out.mesh(
-        &key("gear"),
-        merged([nose_leg, mirrored_x(&main_leg), main_leg]),
-    );
-    out.mesh(
-        &key("gear_chrome"),
-        merged([nose_chrome, mirrored_x(&main_chrome), main_chrome]),
-    );
-    out.mesh(&key("doors"), doors);
-    out.mesh(&key("door_inner"), door_inner);
     for (name, (r, w, gap)) in [("nose", NOSE_TIRES), ("main", MAIN_TIRES)] {
         let (tires, hubs) = twin_tires(r, w, gap);
         out.mesh(&key(&format!("tires_{name}")), tires);
@@ -740,8 +703,28 @@ pub fn spawn(
             .id();
         glowing.push((e, "wing"));
     }
-    // Wheels: twin tires on each leg.
+    // Landing gear: legs and doors fold with the gear position.
+    let h = Hull::new();
+    for (mesh, material, fold) in ship_gear::parts(&h) {
+        let turn = fold.rotation(aircraft.gear);
+        commands.spawn((
+            Transform::from_translation((fold.pivot - turn * fold.pivot).as_dvec3())
+                .with_rotation(turn),
+            renderer(mesh, material, true),
+            fold,
+            ChildOf(body),
+        ));
+    }
+    // Wheels: twin tires on each leg, folding with it, never hanging below its axle.
+    let (nose_fold, main_fold) = ship_gear::leg_folds();
     for (i, w) in wheels.wheels.iter().enumerate() {
+        let (fold, axle): (GearFold, Vec3) = if w.mount.x.abs() < 0.1 {
+            (nose_fold, NOSE_AXLE)
+        } else if w.mount.x > 0.0 {
+            (main_fold, MAIN_AXLE)
+        } else {
+            (main_fold.mirrored(), MAIN_AXLE * Vec3::new(-1.0, 1.0, 1.0))
+        };
         let mount = w.mount - Vec3::Y * w.suspension.travel_m * 0.6;
         let wheel = commands
             .spawn((
@@ -749,7 +732,9 @@ pub fn spawn(
                 WheelVisual {
                     index: i,
                     retracts: false,
+                    max_travel: (w.mount.y - axle.y).max(0.0),
                 },
+                fold,
                 ChildOf(body),
             ))
             .id();
@@ -772,7 +757,6 @@ pub fn spawn(
         );
     }
     // Plumes at every thruster's nozzle exit.
-    let h = Hull::new();
     for (i, t) in thrusters.iter().enumerate() {
         let exhaust = -t.direction.normalize_or(Vec3::Z);
         let (at, dir, radius, length, kind) = match t.role {
