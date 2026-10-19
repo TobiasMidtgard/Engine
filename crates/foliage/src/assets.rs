@@ -16,7 +16,9 @@ use crate::meshgen::small::small;
 use crate::meshgen::small_textures::{
     Fungus, SMALL_ALPHA_CUTOFF, TextureSet, fern_pinna, fungus, meadow_atlas,
 };
-use crate::meshgen::textures::{ALPHA_CUTOFF, LeafKind, kind_of, leaf_textures};
+use crate::meshgen::textures::{
+    ALPHA_CUTOFF, HERO_ATLAS_SIZE, LeafKind, atlas_seed, hero_leaf_textures, kind_of, leaf_textures,
+};
 use crate::meshgen::tree::{PlantMeshes, woody};
 use crate::species::{LeafStyle, PlantForm, PlantLibrary, PlantSpecies, srgb};
 
@@ -37,6 +39,9 @@ pub struct VariantMeshes {
     pub base_moss: Vec<Option<Handle<Mesh>>>,
     pub wood: Option<Handle<Mesh>>,
     pub foliage: Option<Handle<Mesh>>,
+    /// The crown leaf by leaf, up close (broadleaves; `tree::PlantMeshes::foliage_hero`),
+    /// drawn with `SpeciesVisual::leaves_hero`.
+    pub foliage_hero: Option<Handle<Mesh>>,
     pub wood_lod: Option<Handle<Mesh>>,
     pub foliage_lod: Option<Handle<Mesh>>,
     /// The cheapest level, hundreds of meters off (trees and shrubs): the whole trunk (no
@@ -81,6 +86,8 @@ pub struct SpeciesVisual {
     /// The stump and roots (rigid).
     pub bark_rigid: Handle<StandardMaterial>,
     pub leaves: [Handle<StandardMaterial>; TINTS],
+    /// `leaves` with the single-leaf atlas, double-sided, for crowns drawn leaf by leaf.
+    pub leaves_hero: Option<[Handle<StandardMaterial>; TINTS]>,
     /// The summer color of each tint of `leaves` (linear RGB); the season recolors from it.
     pub leaf_colors: [[f32; 3]; TINTS],
     pub dead_leaves: Handle<StandardMaterial>,
@@ -170,24 +177,36 @@ impl FoliageVisuals {
 struct LeafImages {
     color: Handle<Image>,
     normal: Option<Handle<Image>>,
+    /// The single-leaf atlas (color, normal) for crowns drawn leaf by leaf (broadleaves).
+    hero: Option<(Handle<Image>, Handle<Image>)>,
 }
 
-/// Paint the leaf images of a style: a 1024² atlas of sprays with a normal map for trees and
-/// shrubs, a single 256² image for fern fronds.
+/// Texels per side of a tree or shrub leaf atlas (up close, broadleaf crowns are drawn leaf by
+/// leaf with the single-leaf atlas instead).
+const LEAF_ATLAS_SIZE: u32 = 1024;
+
+/// Paint the leaf images of a style: a [`LEAF_ATLAS_SIZE`]² atlas of sprays with a normal map
+/// for trees and shrubs, a single 256² image for fern fronds.
 fn paint_leaves(style: LeafStyle, images: &mut Assets<Image>) -> LeafImages {
     let kind = kind_of(style);
-    let seed = 0x1eaf ^ style as u64;
+    let seed = atlas_seed(style);
     if kind == LeafKind::Frond {
         let t = leaf_textures(kind, 256, seed);
         return LeafImages {
             color: images.add(t.color),
             normal: None,
+            hero: None,
         };
     }
-    let t = leaf_textures(kind, 1024, seed);
+    let t = leaf_textures(kind, LEAF_ATLAS_SIZE, seed);
+    let hero = (!kind.is_needles()).then(|| {
+        let h = hero_leaf_textures(kind, HERO_ATLAS_SIZE, seed);
+        (images.add(h.color), images.add(h.normal))
+    });
     LeafImages {
         color: images.add(t.color),
         normal: Some(images.add(t.normal)),
+        hero,
     }
 }
 
@@ -320,6 +339,7 @@ fn build_species(
             base_moss,
             wood: add(full.wood),
             foliage: add(full.foliage),
+            foliage_hero: add(full.foliage_hero),
             wood_lod: add(full.wood_lod),
             foliage_lod: add(full.foliage_lod),
             wood_distant: add(full.wood_distant),
@@ -411,6 +431,16 @@ fn build_species(
     let mix = |a: [f32; 3], b: [f32; 3], t: f32| [0, 1, 2].map(|i| a[i] + (b[i] - a[i]) * t);
     let tint_colors = [0.0, 0.35, 0.7].map(|t| mix(sp.leaf_color, sp.accent_color, t));
     let leaves = tint_colors.map(|c| materials.add(leaf_material(c)));
+    let leaves_hero = texture.and_then(|t| t.hero).map(|(color, normal)| {
+        tint_colors.map(|c| {
+            let mut m = leaf_material(c);
+            m.base_color_texture = Some(color);
+            m.normal_texture = Some(normal);
+            // One quad per leaf, seen from either side.
+            m.double_sided = true;
+            materials.add(m)
+        })
+    });
     // What the season recolors from (flowers keep white: their petals are in the texture).
     let leaf_colors = tint_colors.map(|c| {
         let [r, g, b, _] = leaf_material(c).base_color;
@@ -471,6 +501,7 @@ fn build_species(
         bark: materials.add(bark),
         bark_rigid: materials.add(bark_rigid),
         leaves,
+        leaves_hero,
         leaf_colors,
         dead_leaves,
         leaves_still,
@@ -519,7 +550,7 @@ fn deadwood_moss(
         .with_metallic_roughness_texture(orm)
         .with_occlusion_texture(orm)
         .with_roughness(1.0)
-        .with_subsurface(0.3);
+        .with_subsurface(0.15);
     m.alpha_mode = AlphaMode::Mask(0.45);
     materials.add(m)
 }
@@ -553,12 +584,14 @@ fn bark_materials(sp: &PlantSpecies, images: Option<BarkImages>) -> [StandardMat
             let [r, g, b] = [0, 1, 2].map(|c| gain[c] / reference[c].max(1e-3));
             m.base_color = [r, g, b, 1.0];
             m.normal_scale = img.kind.normal_scale();
-            m
+            let (strength, scale) = img.kind.detail();
+            m.with_detail(strength, scale)
         };
         bark = textured(bark, [1.0; 3], 1.0);
-        // Dead wood weathers to silvery grey, keeping a hint of the bark's own color.
-        let grey = srgb(0x7a756d);
-        let dead_color = [0, 1, 2].map(|c| (0.25 * mean[c] + 0.75 * grey[c]) / mean[c].max(1e-3));
+        // Dead bark on the damp forest floor weathers to a dull grey-brown (only sun-dried wood
+        // silvers), keeping some of the bark's own color.
+        let grey = srgb(0x5e564c);
+        let dead_color = [0, 1, 2].map(|c| (0.4 * mean[c] + 0.6 * grey[c]) / mean[c].max(1e-3));
         dead = textured(dead, dead_color, 1.0);
         // Charcoal: near black, a dull sheen on the ridges.
         let char_color = [0.014, 0.012, 0.011];

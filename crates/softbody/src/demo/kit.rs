@@ -70,11 +70,13 @@ pub enum Mat {
     /// Polished statuary marble with grey veins, mapped without UVs (triplanar, in the
     /// object's space, so the veins stay put on a posed figure).
     Marble,
+    /// Dried bamboo (lathed culms with meter UVs: u around, v along).
+    Bamboo,
 }
 
 impl Mat {
     /// Every material, in declaration order.
-    pub const ALL: [Mat; 26] = [
+    pub const ALL: [Mat; 27] = [
         Mat::Timber,
         Mat::TimberDark,
         Mat::Pine,
@@ -101,6 +103,7 @@ impl Mat {
         Mat::Antifoul,
         Mat::Bronze,
         Mat::Marble,
+        Mat::Bamboo,
     ];
 
     /// Asset key of this material in `Assets<StandardMaterial>`.
@@ -119,6 +122,8 @@ const PAINT_SIZE: u32 = 512;
 const ANTIFOUL_SIZE: u32 = 256;
 /// Marble is seen close up (the statue).
 const MARBLE_SIZE: u32 = 1024;
+/// Bamboo: texels around × along the culm.
+const BAMBOO_SIZE: (u32, u32) = (256, 1024);
 
 /// Albedo, normal and ORM handles of one texture set.
 #[derive(Clone, Copy)]
@@ -194,9 +199,10 @@ pub fn ensure_materials(world: &mut World) {
     let enamel = texgen::gloss_paint(PAINT_SIZE);
     let antifoul = texgen::antifoul(ANTIFOUL_SIZE);
     let marble = texgen::marble(MARBLE_SIZE);
+    let bamboo = texgen::bamboo(BAMBOO_SIZE.0, BAMBOO_SIZE.1);
     let mut bytes: usize = [
         &wood, &galv, &iron, &metal, &stone, &concrete, &rope, &varnish, &enamel, &antifoul,
-        &marble,
+        &marble, &bamboo,
     ]
     .iter()
     .map(|t| t.bytes())
@@ -225,6 +231,7 @@ pub fn ensure_materials(world: &mut World) {
     let enamel = add_set(&mut images, enamel);
     let antifoul = add_set(&mut images, antifoul);
     let marble = add_set(&mut images, marble);
+    let bamboo = add_set(&mut images, bamboo);
     // Varnished wood tiles 1.6 m along the grain (u) and 0.3 m across it (v).
     let varnished = |base: [f32; 3], rough: f32| StandardMaterial {
         uv_scale: [
@@ -268,6 +275,10 @@ pub fn ensure_materials(world: &mut World) {
                 ..textured(marble, [1.0; 3], 1.0, 0.0, 1.0)
                     .with_subsurface(0.35)
                     .with_triplanar()
+            },
+            Mat::Bamboo => StandardMaterial {
+                uv_scale: [1.0 / texgen::BAMBOO_TILE_M.0, 1.0 / texgen::BAMBOO_TILE_M.1],
+                ..textured(bamboo, [1.0; 3], 1.0, 0.0, 1.0)
             },
         };
         mats.insert_keyed(&m.key(), material);

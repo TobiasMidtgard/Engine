@@ -148,6 +148,10 @@ impl TubeUv {
 pub struct MeshBuilder {
     pub vertices: Vec<Vertex>,
     pub indices: Vec<u32>,
+    /// Shift of the bark tile along every tube (in tiles), so trees and logs of one kind don't
+    /// show the same bark at the same height. Tubes that continue each other (a stump and the
+    /// trunk above it) must share it.
+    pub bark_v_shift: f32,
 }
 
 impl MeshBuilder {
@@ -194,7 +198,11 @@ impl MeshBuilder {
         let frames = frames(path);
         let map = TubeUv::new(path, radius);
         let columns = map.columns(map.sides(sides.max(3)));
-        let vs = map.v_along(path, radius);
+        let vs: Vec<f32> = map
+            .v_along(path, radius)
+            .into_iter()
+            .map(|v| v + self.bark_v_shift)
+            .collect();
         let first = self.vertices.len() as u32;
         let along = |i: usize| vs[i] * map.tile_length_m;
         for (i, &p) in path.iter().enumerate() {
@@ -487,8 +495,8 @@ mod tests {
             }
             // v falls up the trunk (the image's top is up).
             assert!(v_whole.windows(2).all(|w| w[1] < w[0]));
-            // An oak-sized trunk repeats the half-meter tile several times around.
-            assert!((4..=8).contains(&wood.repeats), "{}", wood.repeats);
+            // An oak-sized trunk repeats the one-meter tile a few times around.
+            assert!((2..=4).contains(&wood.repeats), "{}", wood.repeats);
         }
     }
 
