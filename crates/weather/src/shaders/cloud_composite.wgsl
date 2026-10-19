@@ -10,6 +10,7 @@ struct Celestial {
     moon_color: vec4<f32>, // color × luminance of the full disc (cd/m²), earthshine
     pole: vec4<f32>,       // celestial north pole direction, sidereal angle (rad)
     params: vec4<f32>,     // star brightness (0 by day), rainbow sunlight (lux), march texel size (uv)
+    veil: vec4<f32>,       // falling rain or snow veils from x (m), fully from y (m) (as the march)
 };
 
 @group(1) @binding(0) var<uniform> sky: Celestial;
@@ -195,13 +196,20 @@ fn clouds_at(uv: vec2<f32>) -> vec4<f32> {
 // to any distance, so without the far part a fogged hillside ended in a hard bright wall under
 // a dark sky; with it the fog thins upward into the sky as it does outside.
 fn fog_over_sky(color: vec3<f32>, dir: vec3<f32>, pixel: vec2<f32>) -> vec3<f32> {
+    return fog_over(color, dir, pixel, 100000.0);
+}
+
+// The same with the height fog out to `far` meters only (what lies in front of rain or snow
+// thick enough to hide the rest).
+fn fog_over(color: vec3<f32>, dir: vec3<f32>, pixel: vec2<f32>, far: f32) -> vec3<f32> {
     var c = color;
     let start = max(frame.volumetrics.x, 0.0);
-    let far = 100000.0;
-    let tr = exp(-height_fog_optical_depth(dir, start, far));
-    if (tr < 0.9999) {
-        let sun = height_fog_sun_visibility(dir, start, far, tr, frame_noise(pixel));
-        c = c * tr + pre_expose(height_fog_radiance(dir, dir * start, 1.0, sun)) * (1.0 - tr);
+    if (far > start) {
+        let tr = exp(-height_fog_optical_depth(dir, start, far));
+        if (tr < 0.9999) {
+            let sun = height_fog_sun_visibility(dir, start, far, tr, frame_noise(pixel));
+            c = c * tr + pre_expose(height_fog_radiance(dir, dir * start, 1.0, sun)) * (1.0 - tr);
+        }
     }
     return apply_sky_fog(c, dir);
 }
@@ -225,8 +233,18 @@ fn fs_sky(in: FullscreenOut) -> @location(0) vec4<f32> {
         let rain = 1.0 - exp(-textureSampleLevel(cloud_depth, linear_clamp, in.uv, 0.0).z);
         c += pre_expose(rainbow(dir, sky.sun.xyz) * sky.params.y) * rain;
     }
-    c = fog_over_sky(c, dir, in.position.xy);
-    return vec4<f32>(min(c, vec3(60000.0)), 1.0);
+    // Rain or snow thick enough to hide the distance hides the fog beyond it too: in front of
+    // the veil lies the fog out to where it is half opaque. Without it a snowfall's grey sky
+    // took the far fog's color and the hills, veiled by the snow, stood out against it.
+    let depth = textureSampleLevel(cloud_depth, linear_clamp, in.uv, 0.0);
+    let veil = 1.0 - exp(-depth.z);
+    var fogged = fog_over_sky(c, dir, in.position.xy);
+    if (veil > 0.01) {
+        let back_km = textureSampleLevel(clear_sky, linear_clamp, in.uv, 0.0).a;
+        let mid = rain_distance(half_opacity_depth(depth.z), depth, back_km);
+        fogged = mix(fogged, fog_over(c, dir, in.position.xy, mid), veil);
+    }
+    return vec4<f32>(min(fogged, vec3(60000.0)), 1.0);
 }
 
 // Sky pixels when the sky draws no clouds of its own: blend the clouds over it.
@@ -246,11 +264,42 @@ fn vs_geo(@builtin(vertex_index) i: u32) -> FullscreenOut {
     return fullscreen_vertex(i, 1.0);
 }
 
-// How much rain the march counts out to `t` meters: it fades the rain in from 400 m to 2.5 km
-// (up close the rain is particles), so this is the integral of that fade from 400 m.
+// How much rain the march counts out to `t` meters: it fades the rain in from `veil.x` to
+// `veil.y` (400 m to 2.5 km for rain; up close the rain is particles), so this is the
+// integral of that fade.
 fn rain_reach(t: f32) -> f32 {
-    let x = saturate((t - 400.0) / 2100.0);
-    return 2100.0 * (x * x * x - 0.5 * x * x * x * x) + max(t - 2500.0, 0.0);
+    let span = max(sky.veil.y - sky.veil.x, 1.0);
+    let x = saturate((t - sky.veil.x) / span);
+    return span * (x * x * x - 0.5 * x * x * x * x) + max(t - sky.veil.y, 0.0);
+}
+
+// The distance `rain_reach` counts `reach` meters of rain out to.
+fn rain_reach_inverse(reach: f32) -> f32 {
+    let span = max(sky.veil.y - sky.veil.x, 1.0);
+    if (reach >= 0.5 * span) { return sky.veil.y + reach - 0.5 * span; }
+    // Inside the fade x³ - x⁴/2 rises steadily over 0..1.
+    var lo = 0.0;
+    var hi = 1.0;
+    for (var i = 0; i < 10; i++) {
+        let m = 0.5 * (lo + hi);
+        if (span * (m * m * m - 0.5 * m * m * m * m) < reach) { lo = m; } else { hi = m; }
+    }
+    return sky.veil.x + span * 0.5 * (lo + hi);
+}
+
+// Where the rain along this pixel's ray reaches optical depth `tau` (m): `depth` and `back_km`
+// are the march's outputs (total optical depth, 10% and 90% points). Inverts `fs_geo`'s share.
+fn rain_distance(tau: f32, depth: vec4<f32>, back_km: f32) -> f32 {
+    let front = rain_reach(depth.w * 1000.0);
+    let back = rain_reach(back_km * 1000.0);
+    let reach = front + (tau / max(depth.z, 1e-6) - 0.1) / 0.8 * max(back - front, 1.0);
+    return rain_reach_inverse(max(reach, 0.0));
+}
+
+// The optical depth at which a veil of optical depth `tau` has reached half its opacity: most
+// of its light comes from in front of that (ln 2 once it is opaque).
+fn half_opacity_depth(tau: f32) -> f32 {
+    return -log(0.5 * (1.0 + exp(-tau)));
 }
 
 // Geometry pixels: only the part of the rain and cloud in front of the surface. A hill inside
@@ -270,11 +319,15 @@ fn fs_geo(in: FullscreenOut) -> @location(0) vec4<f32> {
     // it is reached; between them the rain is about even along the ray, and showers beyond
     // the hill don't veil it.
     var veil = 0.0;
-    if (depth.z > 0.0 && dist > 400.0) {
+    var veil_mid = dist;
+    if (depth.z > 0.0 && dist > sky.veil.x) {
+        let back_km = textureSampleLevel(clear_sky, linear_clamp, in.uv, 0.0).a;
         let front = rain_reach(depth.w * 1000.0);
-        let back = rain_reach(textureSampleLevel(clear_sky, linear_clamp, in.uv, 0.0).a * 1000.0);
+        let back = rain_reach(back_km * 1000.0);
         let share = saturate(0.1 + 0.8 * (rain_reach(dist) - front) / max(back - front, 1.0));
-        veil = 1.0 - exp(-depth.z * share);
+        let tau = depth.z * share;
+        veil = 1.0 - exp(-tau);
+        veil_mid = min(dist, rain_distance(half_opacity_depth(tau), depth, back_km));
     }
     // The part of the cloud between its front and back (mountains reaching into it).
     let in_cloud = saturate((dist - depth.x * 1000.0) / max((depth.y - depth.x) * 1000.0, 1.0));
@@ -285,8 +338,11 @@ fn fs_geo(in: FullscreenOut) -> @location(0) vec4<f32> {
     let k = k_rain + (1.0 - k_rain) * in_cloud;
     // The surface already has the renderer's fog over it; what this pass puts in front lies
     // behind that fog too (as the sky's clouds do, `fog_over_sky`). Without it far hills in
-    // night rain faded to the unfogged black deck under a glowing fogged sky.
-    let fog = surface_fog(p.xyz / p.w);
+    // night rain faded to the unfogged black deck under a glowing fogged sky. The rain's light
+    // only lies behind the fog out to where the rain is half opaque, as over the sky: fogged
+    // and dimmed by the air all the way to a hill kilometers away, snow hid the hill in tan.
+    let rel = p.xyz / p.w;
+    let fog = surface_fog(rel * (mix(dist, veil_mid, k_rain / max(k, 1e-4)) / dist));
     let alpha = 1.0 - (1.0 - cl.a) * k;
     let rgb = cl.rgb * k * fog.transmittance + fog.inscatter * (1.0 - alpha);
     return vec4<f32>(min(rgb, vec3(60000.0)), alpha);

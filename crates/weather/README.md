@@ -52,7 +52,11 @@ They also feed the environment map, so reflections and ambient light change with
 **Rain and snow.** Rain streaks with motion blur that catch the light of lamps behind them,
 splashes on the ground and on roofs, snowflakes that flutter; all generated on the GPU (no CPU
 cost per drop) in a box that follows the camera, blown by the wind, stopped by roofs (the sky
-occlusion map).
+occlusion map). Past the particles both veil the view as real precipitation does: rain leaves
+kilometers of visibility (about 10 km at 1 mm/h, 1 km in a cloudburst), snow hides the valley a
+few hundred meters out (about 500 m in steady snow, under 300 m in a blizzard), up to the
+cloud base, so mountains in a snowfall fade into the grey instead of standing out above the
+valley fog.
 
 **The ground changes.** The weather writes the shared `SurfaceLayers` grid around the player:
 rain wets exposed ground within a millimeter; what the ground can't soak up collects in the low
