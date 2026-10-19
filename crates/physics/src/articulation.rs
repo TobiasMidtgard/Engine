@@ -223,7 +223,8 @@ fn sync(mb: &mut Multibody, bodies: &mut RigidBodySet, last: &Links) {
         .speeds
         .get(&root)
         .is_none_or(|q| q.len() != mb.ndofs() || *q != mb.generalized_velocity());
-    if root_body.is_sleeping() {
+    let asleep = root_body.is_sleeping();
+    if asleep {
         // Asleep: the bodies are still, so are the coordinates (Rapier only zeroes the bodies).
         mb.generalized_velocity_mut().fill(0.0);
     }
@@ -242,6 +243,19 @@ fn sync(mb: &mut Multibody, bodies: &mut RigidBodySet, last: &Links) {
         written.push(state.is_none_or(|s| !same_pose(&s.pose, &pose)));
         known.push(state);
         poses.push(pose);
+    }
+    // Asleep and untouched since the last step (no pose or velocity written): nothing to fold
+    // in, and its damping and friction can wait until it wakes. A heap of sleeping ragdolls
+    // then costs next to nothing here.
+    if asleep
+        && !written.contains(&true)
+        && mb.links().zip(&known).all(|(link, s)| {
+            let rb = bodies.get(link.rigid_body_handle());
+            s.zip(rb)
+                .is_some_and(|(s, rb)| rb.linvel() == s.linvel && rb.angvel() == s.angvel)
+        })
+    {
+        return;
     }
 
     // Poses written since the last step. A written root, or a written link torn from its

@@ -221,6 +221,7 @@ pub const GRASSY_ZONES: &[&str] = &[
     "parkour",
     "fortress",
     "weather",
+    "footsteps",
 ];
 
 /// Rectangles inside grassy zones where a module's demo lays its own ground, so no grass grows
@@ -234,6 +235,9 @@ pub const BARE_FOOTPRINTS: &[(&str, [f64; 2], [f64; 2])] = &[
     ("fortress", [11.2, 18.8], [17.7, 25.4]),
     // The market's cobbled square (grass still grows where its edge frays out).
     ("market", [-11.0, 11.0], [-11.0, 11.0]),
+    // The footstep trail and its own meadow, which thins out about 7 m from the path, where
+    // the valley's grass patches (reaching 2 m past this) take over.
+    ("footsteps", [-30.0, 30.0], [-12.0, 12.0]),
 ];
 
 /// The stream's course (x, z), spring first: through the southern woods, over the cliff south
@@ -262,6 +266,17 @@ fn lake_water<'a>(z: &Zone, ground: &'a dyn Fn(f64, f64) -> f64) -> engine_water
         }],
         ground,
         jetty_bearing: Some(std::f64::consts::PI * 0.9),
+    }
+}
+
+/// A tour stop for one of the water module's views; those it marks as pure CPU simulation warm
+/// up without drawing.
+fn water_view(v: &engine_water::demo::DemoView) -> View {
+    let view = View::new(v.key, v.name, v.eye, v.target, v.hour).warmup(v.warmup_secs);
+    if v.quick_warmup {
+        view.quick_warmup()
+    } else {
+        view
     }
 }
 
@@ -654,6 +669,20 @@ pub fn demo_views(z: &Zone) -> Vec<View> {
                 .on_arrive("movement.duel", &duel("Blink"))
                 .on_arrive("movement.grappler", "{}")
                 .on_leave("movement.duel", cycle),
+                // The tower ladder: the climber restarts its loop on arrival and is caught
+                // halfway up the caged ladder, hand over hand, the roof railing above it.
+                View::new(
+                    "parkour_ladder",
+                    "Ladder: climb the tower's caged ladder hand over hand, slide back down",
+                    [26.6, 2.0, 19.4],
+                    [23.0, 3.6, 14.6],
+                    16.0,
+                )
+                // Halfway up about 2.9 s into the loop.
+                .warmup(2.45)
+                .on_arrive("movement.duel", &duel("Blink"))
+                .on_arrive("movement.ladder", "{}")
+                .on_leave("movement.duel", cycle),
                 // The freight station: the rider restarts its loop on arrival, with the car
                 // about to pull out, and is caught leaping onto the car's side.
                 View::new(
@@ -731,12 +760,17 @@ pub fn demo_views(z: &Zone) -> Vec<View> {
                 ui(
                     "market_shop",
                     "The trader's shop",
-                    r#"{"screen": "shop", "select": "rifle"}"#,
+                    r#"{"screen": "shop", "select": "staff"}"#,
                 ),
                 ui(
                     "market_inventory",
                     "Inventory and equipment",
                     r#"{"screen": "inventory", "select": "greatsword"}"#,
+                ),
+                ui(
+                    "market_journal",
+                    "Quest journal",
+                    r#"{"screen": "journal", "select": "silent_relay"}"#,
                 ),
                 ui(
                     "market_map_galaxy",
@@ -771,9 +805,7 @@ pub fn demo_views(z: &Zone) -> Vec<View> {
             let mut views: Vec<View> =
                 engine_water::demo::valley_views(&lake_water(z, &|x, z| land.height(x, z)))
                     .iter()
-                    .map(|v| {
-                        View::new(v.key, v.name, v.eye, v.target, v.hour).warmup(v.warmup_secs)
-                    })
+                    .map(water_view)
                     .collect();
             // The float test from the south, 8 m off and 3 m up, a few seconds after a drop
             // (its cycle runs while the camera is near, so it drops as the camera arrives).
@@ -790,10 +822,7 @@ pub fn demo_views(z: &Zone) -> Vec<View> {
             );
             views
         }
-        "water" => engine_water::demo::VIEWS
-            .iter()
-            .map(|v| View::new(v.key, v.name, v.eye, v.target, v.hour).warmup(v.warmup_secs))
-            .collect(),
+        "water" => engine_water::demo::VIEWS.iter().map(water_view).collect(),
         "yard" => vec![
             View::new(
                 "yard_banners",

@@ -29,8 +29,9 @@ impl Tour {
     pub fn new(only: Option<&str>) -> Self {
         let mut list = places();
         if let Some(only) = only {
-            let keys: Vec<&str> = only.split(',').collect();
+            let keys: Vec<&str> = only.split(',').map(str::trim).collect();
             list.retain(|p| keys.contains(&p.key));
+            list.extend(keys.iter().copied().filter_map(at));
         }
         Self {
             places: list,
@@ -39,6 +40,34 @@ impl Tour {
             out_dir: "screenshots/tour".into(),
         }
     }
+}
+
+/// An ad-hoc stop, `at:x:y:z:tx:ty:tz:hour` (eye, target and hour; the eye stays above the
+/// ground), for looking at any spot without adding a place. These come after the named stops
+/// and are saved as `NN_at.png`. Pair them with `--zones none` (or the zones they show): they
+/// belong to no zone.
+fn at(key: &str) -> Option<Place> {
+    let nums: Vec<f64> = key
+        .strip_prefix("at:")?
+        .split(':')
+        .map(str::parse)
+        .collect::<Result<_, _>>()
+        .ok()?;
+    let [x, y, z, tx, ty, tz, hour] = nums[..] else {
+        return None;
+    };
+    let ground = crate::landscape::shared().height(x, z);
+    Some(Place {
+        key: "at",
+        name: "A spot given on the command line",
+        position: DVec3::new(x, y.max(ground + 0.5), z),
+        target: DVec3::new(tx, ty, tz),
+        hour: hour as f32,
+        warmup_secs: 0.0,
+        quick_warmup: false,
+        on_arrive: Vec::new(),
+        on_leave: Vec::new(),
+    })
 }
 
 /// Install the tour: deterministic time steps and fast-adapting exposure.

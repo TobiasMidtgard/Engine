@@ -29,6 +29,12 @@ impl Place {
         self.warmup_secs = secs;
         self
     }
+
+    /// Warm up without drawing (only for stops whose warm-up runs on the CPU).
+    fn quick(mut self) -> Self {
+        self.quick_warmup = true;
+        self
+    }
 }
 
 /// Make `place` the current one: run the previous place's `on_leave` calls, then this one's
@@ -204,7 +210,9 @@ pub fn places() -> Vec<Place> {
             near("water", [62.0, 18.0, 66.0], [0.0, 4.0, 0.0]),
             16.5,
         )
-        .warmup(8.0),
+        // The water runs on the CPU (only the mist puffs at the falls' foot stand still).
+        .warmup(8.0)
+        .quick(),
         place(
             "meadow",
             "Wildlife meadow by the lake, in the morning",
@@ -249,7 +257,9 @@ pub fn places() -> Vec<Place> {
             near("arena", [0.0, 11.0, -27.0], [0.0, 0.0, 3.0]),
             12.0,
         )
-        .warmup(10.0),
+        // The fighters think and move on the CPU (physics raycasts, no renderer reads).
+        .warmup(10.0)
+        .quick(),
         place(
             "parkour",
             "Movement course",

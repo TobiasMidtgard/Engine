@@ -6,8 +6,9 @@
 //!
 //! Ground under a foot comes from three places, highest surface wins: the `Ground` query
 //! (terrain), a downward ray through the physics contract (`PhysicsQueries`, when a physics
-//! backend is installed), and [`IkSurface`] boxes, ramps and stairs, which let scenes without
-//! physics colliders (and animation test stages) still plant feet correctly.
+//! backend is installed; ragdoll parts don't count), and [`IkSurface`] boxes, ramps and
+//! stairs, which let scenes without physics colliders (and animation test stages) still plant
+//! feet correctly.
 
 use engine_core::prelude::*;
 use engine_world::physics::{PhysicsQueries, QueryFilter};
@@ -288,9 +289,11 @@ impl GroundProbe<'_> {
             });
         }
         if let Some(phys) = self.physics {
-            let filter = match self.exclude {
-                Some(e) => QueryFilter::excluding(e),
-                None => QueryFilter::default(),
+            // Ragdoll parts aren't ground: a body's own limbs would lift its feet.
+            let filter = QueryFilter {
+                layers: !crate::ragdoll::RAGDOLL_LAYER,
+                exclude: self.exclude.into_iter().collect(),
+                include_sensors: false,
             };
             if let Some(hit) = phys.raycast(
                 DVec3::new(p.x, top, p.z),

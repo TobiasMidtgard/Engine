@@ -516,12 +516,22 @@ pub fn refine(raw: &RawMesh, f: Field, levels: usize, angle_deg: f32, min_err: f
                 let len = (pb - pa).length();
                 let mut p = (pa + pb) * 0.5;
                 let eps = (len * 0.1).clamp(0.0005, 0.003);
+                // A midpoint on a mirror seam (x = 0) stays on it, so a mirrored mesh's
+                // halves still meet there.
+                let on_seam = pa.x == 0.0 && pb.x == 0.0;
+                let keep = |g: Vec3| {
+                    if on_seam {
+                        g * Vec3::new(0.0, 1.0, 1.0)
+                    } else {
+                        g
+                    }
+                };
                 for _ in 0..3 {
                     let d = f(p);
                     if d.abs() < 2e-5 {
                         break;
                     }
-                    let g = gradient(f, p, eps);
+                    let g = keep(gradient(f, p, eps));
                     let gl = g.length_squared();
                     if gl < 1e-8 {
                         break;
@@ -530,7 +540,7 @@ pub fn refine(raw: &RawMesh, f: Field, levels: usize, angle_deg: f32, min_err: f
                     // Never move farther than the edge is long (stay near the edge).
                     p -= step.clamp_length_max(len * 0.6);
                 }
-                let n = gradient(f, p, eps)
+                let n = keep(gradient(f, p, eps))
                     .normalize_or((nrm[a as usize] + nrm[b as usize]).normalize_or(Vec3::Y));
                 *out = (p, n);
             });
@@ -1212,5 +1222,35 @@ mod tests {
                 "mirror {mirror}: open edges"
             );
         }
+    }
+
+    #[test]
+    fn a_mirrored_mesh_stays_closed_on_its_seam_through_refine_and_decimate() {
+        // A box with a rounded groove across the seam: refine splits edges along x = 0.
+        let shape = |p: Vec3| {
+            let b = (p.abs() - Vec3::new(0.4, 0.2, 0.3))
+                .max(Vec3::ZERO)
+                .length()
+                - 0.08;
+            let groove = Vec2::new(p.y - 0.28, p.z).length() - 0.06;
+            b.max(-groove)
+        };
+        let m = surface_nets(&shape, Vec3::splat(-0.7), Vec3::splat(0.7), 0.04, true, 1.0);
+        let m = refine(&m, &shape, 2, 6.0, 0.0001);
+        let m = decimate(&m, 0.0005, 8.0, 0.25, true, |_| 1.0);
+        let mut edges = HashMap::new();
+        for t in m.indices.as_chunks::<3>().0.iter() {
+            let x = [0, 1, 2].map(|i| m.positions[t[i] as usize].x);
+            assert!(
+                x.iter().all(|&x| x >= 0.0) || x.iter().all(|&x| x <= 0.0),
+                "a triangle crosses the seam: {x:?}"
+            );
+            for e in 0..3 {
+                let (a, b) = (t[e], t[(e + 1) % 3]);
+                *edges.entry((a.min(b), a.max(b))).or_insert(0) += 1;
+            }
+        }
+        let open = edges.values().filter(|&&c| c != 2).count();
+        assert_eq!(open, 0, "{open} open edges");
     }
 }

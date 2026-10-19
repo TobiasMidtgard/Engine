@@ -8,6 +8,7 @@ pub mod demo;
 mod fallback;
 pub mod fx;
 pub mod grapple;
+pub mod ladder;
 pub mod lockon;
 mod locomotion;
 pub mod look;
@@ -31,7 +32,9 @@ pub use combat::{
 pub use fx::{CameraFx, SlowMotionFx};
 pub use lockon::LockOn;
 pub use look::effects::{EffectSettings, Effects};
-pub use mover::{Corner, Dash, DashRequest, Grapple, Hang, Mantle, Mover, WallContact, Zip};
+pub use mover::{
+    Corner, Dash, DashRequest, Grapple, Hang, Ladder, Mantle, Mover, WallContact, Zip,
+};
 pub use play::{Play, PlayToggle};
 pub use player::PlayerControlled;
 pub use profile::MovementProfile;

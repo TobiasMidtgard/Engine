@@ -277,7 +277,7 @@ pub struct CameraFx {
     pub target: Option<Entity>,
     /// Field of view with no effect, degrees (0 = read it from the camera once).
     pub base_fov_deg: f32,
-    /// Added while sprinting, sliding or wall-running, degrees.
+    /// Added while sprinting, sliding, wall-running or riding a zip line, degrees.
     pub sprint_fov_deg: f32,
     /// Added while dashing, degrees.
     pub dash_fov_deg: f32,
@@ -340,6 +340,7 @@ pub(crate) fn camera_fx(
                     LocomotionMode::Sprint | LocomotionMode::Slide | LocomotionMode::WallRun => {
                         fx.sprint_fov_deg
                     }
+                    _ if m.zip.is_some() => fx.sprint_fov_deg,
                     _ => 0.0,
                 } + fx.focus_fov_deg * focus,
                 -m.wall_side() * fx.wallrun_roll_deg,

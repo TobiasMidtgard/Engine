@@ -198,6 +198,51 @@ fn aircraft_spaceplane_gear() {
     );
 }
 
+/// The ship a few meters up with its gear at `gear` (0 stowed, 1 down) and retracting, seen
+/// from below. The shot is short, so the ship barely drops before it renders.
+fn ship_in_flight(name: &str, gear: f32, eye: [f64; 3], target: [f64; 3]) {
+    gallery_shot(
+        name,
+        0.05,
+        |app| {
+            floor(app, 300.0);
+            let e = parked(app, "spaceplane", DVec3::new(0.0, 4.0, 0.0), 0.0);
+            if let Some(mut a) = app.world.get_mut::<engine_vehicles::Aircraft>(e) {
+                a.gear_down = false;
+                a.gear = gear;
+            }
+            // No assist, so the hover engines don't light up to hold it there.
+            if let Some(mut s) = app.world.get_mut::<engine_vehicles::Spacecraft>(e) {
+                s.assist.mode = engine_vehicles::AssistMode::Off;
+            }
+        },
+        Transform::from_xyz(eye[0], eye[1], eye[2])
+            .looking_at(DVec3::new(target[0], target[1], target[2]), Vec3::Y),
+    );
+}
+
+/// Gear stowed: the doors shut flush with the belly.
+#[test]
+fn aircraft_spaceplane_gear_up() {
+    ship_in_flight(
+        "aircraft_spaceplane_gear_up",
+        0.0,
+        [6.5, 3.4, -2.5],
+        [1.6, 5.6, 2.8],
+    );
+}
+
+/// Gear halfway up: doors open, legs swinging into their wells.
+#[test]
+fn aircraft_spaceplane_gear_folding() {
+    ship_in_flight(
+        "aircraft_spaceplane_gear_folding",
+        0.55,
+        [6.5, 3.4, -2.5],
+        [1.6, 5.6, 2.8],
+    );
+}
+
 /// Main and hover engines firing with the ship hanging a few meters up, for the plumes.
 #[test]
 fn aircraft_spaceplane_firing() {

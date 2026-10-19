@@ -146,12 +146,18 @@ fn card(
                 ),
         )
         .child(
-            widgets::currency(&group(price), 17.0)
-                .with_style(|s| if ok { s } else { s.color(p.bad) })
-                .pick_ignore(),
+            if ok {
+                widgets::currency(&group(price), 17.0)
+            } else {
+                widgets::currency_tinted(&group(price), 17.0, p.bad)
+            }
+            .pick_ignore(),
         );
     if !ok {
-        el = el.with_style(|s| s.opacity(0.62));
+        // A price out of reach shows in red and the card stays readable; what can't be
+        // sold at all steps further back.
+        let o = if st.mode == ShopMode::Buy { 0.85 } else { 0.62 };
+        el = el.with_style(|s| s.opacity(o));
     }
     el
 }

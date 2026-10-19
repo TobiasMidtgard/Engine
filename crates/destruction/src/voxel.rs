@@ -1509,13 +1509,14 @@ fn mesh_region_tagged(state: &VoxelState, look: &VoxelLook, lo: [i64; 3], hi: [i
                     if !ok {
                         continue;
                     }
-                    let mut out = Vec3::ZERO;
-                    out[axis] = if f0 >= 0.0 { 1.0 } else { -1.0 };
-                    let pos = |id: u32| Vec3::from(mb.vertices[id as usize].position);
-                    let n = (pos(ids[1]) - pos(ids[0])).cross(pos(ids[2]) - pos(ids[0]));
-                    if n.dot(out) < 0.0 {
+                    // The cubes go round the edge counterclockwise seen from +axis, so the
+                    // quad faces +axis; flip it when the open side is -axis. (Winding from
+                    // the vertex positions instead flips quads the relief folds over, which
+                    // then vanish as see-through holes.)
+                    if f0 < 0.0 {
                         ids.reverse();
                     }
+                    let pos = |id: u32| Vec3::from(mb.vertices[id as usize].position);
                     // Split along the shorter diagonal.
                     if pos(ids[0]).distance_squared(pos(ids[2]))
                         <= pos(ids[1]).distance_squared(pos(ids[3]))
@@ -1803,6 +1804,38 @@ mod tests {
         assert!(
             seen.contains(&(DestructibleMaterial::Dirt.index() as u8)),
             "bare soil on the flanks ({seen:?})"
+        );
+    }
+
+    #[test]
+    fn every_hill_face_looks_out_of_the_rock() {
+        // The showcase hill: its relief folded some quads over, and those faced into the
+        // rock, so the renderer culled them and the ground showed small dark holes.
+        let v = VoxelVolume::hill(34.0, 8.0, 30.0, 0.3).with_seed(23);
+        let s = VoxelState::new(&v, &mats());
+        let look = VoxelLook::new(&v, &mats()).with_layers(true);
+        let mut inward = Vec::new();
+        for ci in 0..s.chunk_dirty.len() {
+            let c = [
+                ci % s.chunks[0],
+                (ci / s.chunks[0]) % s.chunks[1],
+                ci / (s.chunks[0] * s.chunks[1]),
+            ];
+            for (_, m) in mesh_chunk_layers(&s, &look, c) {
+                let p = |i: u32| Vec3::from(m.vertices[i as usize].position);
+                let n = |i: u32| Vec3::from(m.vertices[i as usize].normal);
+                for t in m.indices.as_chunks::<3>().0 {
+                    let face = (p(t[1]) - p(t[0])).cross(p(t[2]) - p(t[0]));
+                    // A sliver can fold over without showing; a quad-sized face can't.
+                    if face.length() * 0.5 > 0.005 && face.dot(n(t[0]) + n(t[1]) + n(t[2])) < 0.0 {
+                        inward.push(p(t[0]));
+                    }
+                }
+            }
+        }
+        assert!(
+            inward.is_empty(),
+            "faces looking into the rock at {inward:?}"
         );
     }
 

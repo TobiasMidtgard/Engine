@@ -10,6 +10,7 @@
 //! - [`beds`]: footstep patches and impact plates.
 //! - [`rim`]: braziers and shrubs.
 //! - [`launcher`]: the firework mortar.
+//! - [`stand`]: the rocket motor test stand outside the north-east rim.
 //! - [`golem`]: the walking stone golem and the dropped stones.
 
 pub mod beds;
@@ -20,6 +21,7 @@ pub mod lane;
 pub mod launcher;
 pub mod portal;
 pub mod rim;
+pub mod stand;
 pub mod storm;
 pub mod water;
 
@@ -88,6 +90,7 @@ mod tests {
             ("golem arm", golem::golem_arm(), 2),
             ("golem leg", golem::golem_leg(), 2),
             ("stone", golem::dropped_stone(0), 6),
+            ("stand", stand::engine_stand(), 1),
         ]
     }
 

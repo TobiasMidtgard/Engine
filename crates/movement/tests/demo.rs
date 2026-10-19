@@ -337,6 +337,52 @@ fn the_grappler_hooks_the_tower_climbs_over_and_rides_the_zip_line_down() {
 }
 
 #[test]
+fn the_ladder_climber_climbs_onto_the_tower_and_slides_back_down() {
+    let (mut app, _) = demo_app(None);
+    let mut q = app.world.query::<(Entity, &Name)>();
+    let climber = q
+        .iter(&app.world)
+        .find(|(_, n)| n.as_str() == "Ladder climber")
+        .unwrap()
+        .0;
+    let top = demo::layout::TOWER_TOP;
+    let (mut on_roof, mut fastest_up, mut fastest_down) = (None, 0.0f32, 0.0f32);
+    let (mut slid, mut back_down) = (false, None);
+    let secs = run_until(&mut app, 14.0, |w| {
+        let m = w.get::<Mover>(climber).unwrap();
+        let p = w.get::<Transform>(climber).unwrap().translation;
+        if let Some(l) = m.ladder {
+            fastest_up = fastest_up.max(l.speed);
+            fastest_down = fastest_down.min(l.speed);
+            slid |= l.sliding;
+        }
+        if m.grounded && p.y > top + 0.5 {
+            on_roof.get_or_insert(p);
+        }
+        if on_roof.is_some() && m.grounded && p.y < 1.5 {
+            back_down.get_or_insert(p);
+        }
+        back_down.is_some()
+    });
+    let summary = format!(
+        "after {secs:.1} s: on the roof at {on_roof:?}, up at {fastest_up:.1} m/s, down at \
+         {fastest_down:.1} m/s, slid {slid}, back down at {back_down:?}"
+    );
+    eprintln!("{summary}");
+    // Up the ladder at the pilot's climbing speed, over the top onto the roof…
+    assert_eq!(triggered(&app, climber, "ladder_grab"), 2, "{summary}");
+    assert_eq!(triggered(&app, climber, "ladder_exit"), 2, "{summary}");
+    let roof = on_roof.expect(&summary);
+    assert!((roof.x - 23.2).abs() < 0.3 && roof.z < 14.0, "{summary}");
+    assert!((fastest_up - 2.6).abs() < 0.1, "{summary}");
+    // …and back down the same ladder, sliding most of the way.
+    assert!(slid && fastest_down < -6.5, "{summary}");
+    let down = back_down.expect(&summary);
+    assert!((down.x - 23.2).abs() < 0.3 && down.z > 14.9, "{summary}");
+    assert!(secs < 11.0, "{summary}");
+}
+
+#[test]
 fn the_rider_wall_runs_along_the_moving_car_climbs_aboard_and_rides_it() {
     let (mut app, _) = demo_app(None);
     let mut q = app.world.query::<(Entity, &Name)>();

@@ -1,7 +1,7 @@
 //! Renders particles offscreen and checks the pixels: glowing particles appear where their
 //! emitter is (also 30 000 km from the world origin), a spell's light brightens the ground
 //! around it, smoke lit by the sun covers what's behind it, nearer puffs cover farther ones,
-//! and marks change the ground. Needs a GPU or a software
+//! an engine plume shows shock diamonds only in air, and marks change the ground. Needs a GPU or a software
 //! Vulkan driver (lavapipe); passes with a note when neither is available (`RenderDisabled`),
 //! unless `ENGINE_REQUIRE_GPU=1`.
 
@@ -301,6 +301,72 @@ fn nearer_puffs_cover_farther_ones() {
     assert!(
         a > b + 80.0,
         "the nearest, whitest puff should be on top: {b} -> {a}"
+    );
+}
+
+#[test]
+fn a_plume_shows_shock_diamonds_in_air_but_not_in_a_vacuum() {
+    // A plume lying along +X across the view, its nozzle at x = -2. In air its axis is banded:
+    // bright knots at the shock diamonds and darker gas between them. Without air there are no
+    // diamonds, so the same spots are as bright as the gaps.
+    const LENGTH: f64 = 4.0;
+    let nozzle = DVec3::new(-2.0, 1.0, 0.0);
+    // Knots and gaps alternate down the axis (see `plume` in particles_draw.wgsl), and their
+    // averages sit at the same distance, so the flame dimming along its length cancels.
+    let knots = [0.85, 1.85, 2.85].map(|k: f64| k / 6.5);
+    let gaps = [1.35, 2.35].map(|k: f64| k / 6.5);
+    let mut contrast = Vec::new();
+    for vacuum in [false, true] {
+        let mut app = app(DVec3::ZERO, 200.0);
+        app.add_plugins(engine_world::WorldPlugin);
+        if vacuum {
+            app.world.resource_mut::<engine_world::Atmospheres>().top_m = 0.0;
+        }
+        let plume = EffectDesc {
+            name: "test.plume".into(),
+            emitters: vec![EmitterDesc {
+                rate: 12.0,
+                speed: [0.0, 0.0],
+                lifetime: [0.2, 0.2],
+                size: [LENGTH as f32, LENGTH as f32],
+                rotation_deg: [0.0, 0.0],
+                local_space: true,
+                sprite: Sprite::Plume,
+                facing: engine_vfx::Facing::Axis,
+                stretch: 0.3,
+                color: Gradient::constant([1.0, 0.6, 0.3, 1.0]),
+                emissive: 500.0,
+                additive: 1.0,
+                soft: 0.0,
+                wind: 0.0,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        app.world
+            .resource_mut::<EffectLibrary>()
+            .insert(plume)
+            .unwrap();
+        app.world.spawn((
+            Transform::from_translation(nozzle)
+                .with_rotation(Quat::from_rotation_arc(Vec3::Y, Vec3::X)),
+            ParticleEffect::new("test.plume"),
+        ));
+        app.update_n(12);
+        let name = if vacuum { "vacuum" } else { "air" };
+        let Some(img) = shot(&mut app, &format!("vfx_plume_{name}.png")) else {
+            return;
+        };
+        let along = |t: f64| luma(&img, project(nozzle + DVec3::X * (t * LENGTH)), 1);
+        let mean = |ts: &[f64]| ts.iter().map(|t| along(*t)).sum::<f32>() / ts.len() as f32;
+        let (k, g) = (mean(&knots), mean(&gaps));
+        eprintln!("{name}: knots {k}, gaps {g}");
+        assert!(k > 30.0, "{name}: the plume should glow, knots {k}");
+        contrast.push(k - g);
+    }
+    assert!(
+        contrast[0] > 20.0 && contrast[0] > contrast[1] * 2.0 + 10.0,
+        "diamonds should stand out in air but not in a vacuum: knots - gaps {contrast:?}"
     );
 }
 
