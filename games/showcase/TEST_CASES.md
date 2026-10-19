@@ -85,12 +85,12 @@ are built, nothing simulates yet) · ⬜ not visible yet
 
 | # | Test case | Zone / viewpoint | Owner | Status |
 |---|---|---|---|---|
-| 40 | Beautiful magic spells (particles) | `magic`, `magic_spells`, `magic_portal`, `magic_starburst`, `magic_footsteps`, `magic_marks`, `magic_impacts` | Particles and magic effects | ✅ Spell court: arcane portal, a standing portal in the gate arch swirling the valley seen through it, starburst fireworks whose stars trail glitter and crackle, fireballs and frost bolts hitting a wall and leaving a glowing scorch and a frost film on it, lightning between obelisks, a healing aura, fountain, anvil sparks that split as they skid, torches and fireflies; footprint puffs on mud, snow, sand and water and shot impacts on six materials (chipping the rock) |
+| 40 | Beautiful magic spells (particles) | `magic`, `magic_spells`, `magic_portal`, `magic_starburst`, `magic_footsteps`, `magic_marks`, `magic_impacts`, `magic_engine` | Particles and magic effects | ✅ Spell court: arcane portal, a standing portal in the gate arch swirling the valley seen through it, starburst fireworks whose stars trail glitter and crackle, fireballs and frost bolts hitting a wall and leaving a glowing scorch and a frost film on it, lightning between obelisks, a healing aura, fountain, anvil sparks that split as they skid, torches and fireflies; footprint puffs on mud, snow, sand and water and shot impacts on six materials (throwing solid rock chips and splinters); a rocket motor test-firing on a stand outside the rim, its plume showing shock diamonds |
 | 41 | Conversation UI between two people | `market_dialogue` | UI system and maps | ✅ portraits that talk and blink, typewriter text, choices (one opens the shop) |
 | 42 | Shop UI | `market_shop` | UI system and maps | ✅ buy and sell tabs, item cards, quantity, prices and gold |
 | 43 | Inventory UI | `market_inventory` | UI system and maps | ✅ bag grid with drag and drop, equipment, weight, item details |
 | 44 | Interactive maps: flat map, 3D globe, galaxy map | `market_map_surface`, `market_map_globe`, `market_map_system`, `market_map_galaxy` | UI system and maps | ✅ one map zooming surface → globe → star system → galaxy, with POIs, waypoint and info cards |
-| 45 | HUD | `market_hud` (any zone via `ui.show {"screen": "hud"}`) | UI system and maps | ✅ vitals, compass, minimap, quest, hotbar, slow-motion gauge, world markers; also `market_pause`, `market_settings` |
+| 45 | HUD | `market_hud` (any zone via `ui.show {"screen": "hud"}`) | UI system and maps | ✅ vitals, compass, minimap, quest, hotbar, slow-motion gauge, world markers; also `market_pause`, `market_settings`, and `market_journal` (quests by kind with objectives, rewards and a live map of the place; tracking one moves the HUD tracker and the waypoint) |
 
 ## Engine-wide
 

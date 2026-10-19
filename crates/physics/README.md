@@ -114,7 +114,12 @@ changing that one plugin line.
   kinematic wall).
 - **Events**: one `ContactEvent::Started` per touch with the impact impulse and a normal from
   `a` to `b`, one `Ended` when it stops; sensors too. Hard impacts also send `NoiseEvent` (AI
-  hearing) and, against static ground, `GroundContact` (dents, dust, impact sounds).
+  hearing) and, against static ground, `GroundContact` (dents, dust, impact sounds). That
+  includes hits on pairs that never stop touching: a crate tumbling face over face, a post
+  slapping down flat while its foot stays on the ground, a drum bouncing down the runway. Each
+  substep whose impulse changes the lighter body's speed by `impact_min_speed` (beyond holding
+  it up) counts, once per hit. A `GroundContact`'s `yaw` follows the slide, or for a body landing
+  still, its longest axis lying flat.
 - **World inputs**: `Gravity` (uniform or planets; each body gets the gravity at its own
   position), buoyancy and drag in `Water`, `WorldImpulse` blasts (blast wind drag), `ApplyImpulse`.
   Buoyancy integrates water pressure over each collider's real shape (boxes, balls, capsules,
@@ -125,7 +130,13 @@ changing that one plugin line.
   bottom (half of critical), so floaters settle instead of bobbing forever; water forces are
   recomputed every substep. Turning drag is per axis, by how far the shape reaches across it
   (a log rolls easily, end over end it drags its whole length). Other shapes (meshes,
-  heightfields) use the submerged share of their bounding box.
+  heightfields) use the submerged share of their bounding box. Sleeping bodies notice the water
+  changing: every 6 steps the water under each one is compared with what it was when the body fell
+  asleep, and a body the water reaches wakes once its level moved 2 cm or its current 0.1 m/s, so
+  a plank rides a slow tide up, a crate floats off a flooded quay and a floater drops with the
+  water when a sluice opens. A body afloat in a current is kept awake while it touches nothing
+  fixed, so it keeps drifting even below Rapier's sleep speed; a stone on the bed sleeps on, and a
+  body the water stays clear of, or stays well over, is never woken by waves.
 - **Time**: runs in `FixedUpdate` / `SimSet::Physics` on world time, so `TimeDilation` slows it;
   each fixed step is split into substeps of at most `max_substep_secs`, so 10× fast-forward is
   as stable as 1×. `LocalTimeScale` speeds a single body up or down, in everything: its
