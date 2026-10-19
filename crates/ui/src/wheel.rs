@@ -293,13 +293,13 @@ fn paint_wheel(world: &mut World, e: Entity, ctx: &mut DrawCtx) {
                 );
             });
         }
-        // Seams between the slots: even dark lines, cutting through any hover halo.
+        // Seams between the slots: even dark lines out to the rim.
         for i in 0..n {
             let b = (i as f32 - 0.5) * sweep;
             let pop = pop_of(i).max(pop_of((i + n - 1) % n));
             ctx.line(
                 c + dir(b) * (r_in - 1.0 * px),
-                c + dir(b) * (r_out + (12.0 + 20.0) * px * pop + 1.0 * px),
+                c + dir(b) * (r_out + 12.0 * px * pop + 1.0 * px),
                 3.0 * px,
                 Color::hexa(0x04060bf2),
                 0.0,
