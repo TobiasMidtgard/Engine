@@ -3,8 +3,10 @@
 //! per moment. Software Vulkan (lavapipe) is enough.
 //!
 //! ```sh
-//! cargo run -p engine_softbody --example unveil --release -- [out_dir] [WIDTHxHEIGHT]
+//! cargo run -p engine_softbody --example unveil --release -- [out_dir] [WIDTHxHEIGHT] [shot,...]
 //! ```
+//!
+//! The first shots are close-ups of the bare statue, before the sheet comes down.
 
 use engine_core::prelude::*;
 use engine_core::time::TimeSource;
@@ -17,6 +19,10 @@ const FACING: Vec3 = Vec3::new(0.5, 0.0, -0.87);
 /// Seconds into the cycle, and the camera: distance out in front, to the statue's right,
 /// height; and the height it looks at.
 const SHOTS: &[(&str, f32, [f64; 3], f64)] = &[
+    ("statue", 1.0, [2.5, 0.5, 1.8], 1.85),
+    ("statue_quarter", 1.0, [1.7, 1.7, 2.0], 1.9),
+    ("statue_torso", 1.0, [1.25, 0.35, 2.15], 2.1),
+    ("statue_head", 1.0, [0.62, 0.22, 2.66], 2.62),
     ("raised", 2.0, [6.5, 1.0, 2.6], 3.2),
     ("lowering", 5.5, [5.5, 0.8, 2.2], 2.6),
     ("settling", 8.5, [5.0, 0.6, 2.0], 2.0),
@@ -36,6 +42,14 @@ fn main() {
         .and_then(|s| s.split_once('x'))
         .and_then(|(w, h)| Some((w.parse().ok()?, h.parse().ok()?)))
         .unwrap_or((1280u32, 720u32));
+    let only: Option<Vec<String>> = args
+        .get(3)
+        .map(|s| s.split(',').map(str::to_string).collect());
+    let wanted = |name: &str| only.as_ref().is_none_or(|o| o.iter().any(|n| n == name));
+    let last = SHOTS
+        .iter()
+        .rposition(|(name, ..)| wanted(name))
+        .expect("no such shot");
     engine_core::log::init("info,wgpu=warn,naga=warn");
 
     let mut app = App::new();
@@ -55,7 +69,8 @@ fn main() {
         engine_world::WorldPlugin,
         engine_softbody::SoftBodyPlugin,
     ));
-    app.world.resource_mut::<Atmosphere>().ground_color = [0.09, 0.18, 0.04];
+    // Bare earth around the plinth, meadow beyond.
+    app.world.resource_mut::<Atmosphere>().ground_color = [0.11, 0.12, 0.07];
     // The statue's body is built before the first frame.
     app.world
         .resource_mut::<engine_softbody::demo::skin::BodyLibrary>()
@@ -90,7 +105,10 @@ fn main() {
     let front = FACING.as_dvec3();
     let right = DVec3::new(-front.z, 0.0, front.x);
     let mut elapsed = 0.0f32;
-    for (i, (name, secs, [ahead, side, up], look)) in SHOTS.iter().enumerate() {
+    for (i, (name, secs, [ahead, side, up], look)) in SHOTS.iter().enumerate().take(last + 1) {
+        if !wanted(name) {
+            continue;
+        }
         while elapsed < *secs {
             app.update();
             elapsed += 1.0 / 30.0;

@@ -67,7 +67,7 @@ fn grass_translucency(s: Surface, rel: vec3<f32>, along: f32) -> vec3<f32> {
     let amount = (through * 0.35 + toward_sun * 0.9) * along * along;
     if (amount <= 0.0) { return vec3<f32>(0.0); }
     let lit_side = select(s.normal, -s.normal, dot(s.normal, l) < 0.0);
-    let sun = frame.sun_color.rgb * sun_transmittance(rel) * shadow_factor(rel, lit_side);
+    let sun = frame.sun_color.rgb * sun_transmittance(rel) * cloud_shadow(rel) * shadow_factor(rel, lit_side);
     let tint = s.albedo * saturate3(s.albedo * 4.0);
     return pre_expose(sun * tint * amount * INV_PI);
 }

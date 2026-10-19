@@ -16,6 +16,13 @@ fracture and debris.
 - **Reinforced walls** have a rebar mesh in their cells. Explosions strip the concrete off
   the bars but leave the mesh standing until the energy per square meter is enough to cut
   steel (2.5 MJ/m²), the way a reinforced wall in Siege needs a hard breacher.
+- **Floors, roofs and hatches** (Siege vertical play) are the same walls laid flat
+  (`DestructibleWall::flat()`): `floor` is 5 cm boards between joists, `hatch` a wooden hatch
+  cover, `steel_hatch` a steel plate over one. Bullets fired from below punch up through
+  boards, a charge on top blows a hole to drop through and what breaks loose falls into the
+  room below; a sledgehammer smashes a wooden hatch in, while a steel one only dents until
+  thermite cuts it out. Built openings (`with_opening`: doorways, windows, hatch holes) come
+  back every time a wall is rebuilt.
 - **Breach charges** (`BreachCharge`): an explosive charge blows a hole through soft walls; a
   thermite charge burns around its edge (sparks, smoke, glowing strip), cutting rebar too, and
   the panel inside drops out at the end.
@@ -57,8 +64,8 @@ fracture and debris.
 - **Doors** (`door`): a ledged and braced plank door (iron strap hinges, clenched nails, a
   ring pull on each face) hangs in every doorway built in build mode. `interact` (E, gamepad
   West) opens or shuts the door nearest a character within 2.2 m; it swings 95° away from
-  whoever opens it, either way, and with a physics module its collider swings with it (shut,
-  it closes the doorway). When its doorway falls the door swings shut and falls with it; take
+  whoever opens it, either way, and with a physics module it is a kinematic body that swings
+  with it (shut, it closes the doorway; swinging, it shoves crates out of its way). When its doorway falls the door swings shut and falls with it; take
   the doorway down and the door goes too.
 - **Burning wood** (`burn`): wooden building pieces get an `engine_world::Combustible`
   holding their wood as fuel, so the fire module (when installed) can light and burn them.
@@ -103,8 +110,9 @@ Writes: `WorldImpulse` (falling structures, strength only), `NoiseEvent` (breaks
 doors),
 `SmokeEmission` (dust and thermite smoke for the smoke module), `GroundContact` (debris
 landing on a surface, for footstep-style impact sounds), physics-contract bodies for debris
-and static colliders for standing building pieces, breakable props, set dressing and doors
-(moved with them).
+and static colliders for standing building pieces, breakable props and set dressing, and
+kinematic bodies for doors (moved by their `Transform`), and `Climbable` on the breach house's
+ladders (climbed by the movement module, linked by NPC navigation).
 
 ## Using it
 
@@ -137,7 +145,7 @@ grenade writes `WorldImpulse`, a pickaxe writes `TerrainEdit`.
 
 | Function | Does |
 |---|---|
-| `destruction.spawn_wall` | `{preset: soft\|barricade\|reinforced\|brick\|stone\|concrete, at, yaw_deg, size, thickness, material}` |
+| `destruction.spawn_wall` | `{preset: soft\|barricade\|reinforced\|brick\|stone\|concrete\|floor\|hatch\|steel_hatch, at, yaw_deg, size, thickness, material}` (floors and hatches lie flat) |
 | `destruction.spawn_voxels` | `{preset: cliff\|arch\|boulder, at, yaw_deg, size, voxel_size, material}` |
 | `destruction.shoot` | A burst of bullets `{from, to, speed, count, spread}` |
 | `destruction.hit` | One impact `{at, dir, energy_j, melee}` |
@@ -173,6 +181,16 @@ the Siege fortress zone). It is about 80 × 40 m and runs a 20 s loop, then rebu
   wall with a thermite doorway; a reinforced wall after an explosive (concrete gone, rebar
   standing); a brick wall with a blast hole. Two run live: thermite burning through reinforced
   concrete, and a drywall shot up and then blown open by a charge.
+- **Breach house** (vertical play, north of the tower): a brick room with an open front and a
+  window in each side wall under a timber roof deck on joists, with a stair up its back wall
+  to the roof and a climbable steel ladder under each of its two rimmed hatches. Galvanized
+  tube-and-clamp guard railings (`PropKind::PipeRailing`: cast clamp fittings, base flanges,
+  a timber toe board) run round the roof, open at the stair's head, and up the stair's open
+  side on palms bolted to its stringer. Its west roof bay was
+  shot up from below long ago, so sunlight comes through the holes; every loop the room fires
+  up through the east bay, a charge on the roof blows a hole and the boards rain in, thermite
+  cuts the steel hatch out and its plate drops onto the floor, and a sledgehammer smashes the
+  wooden hatch in.
 - **Valheim tower.** The support colors come on, then the posts break one by one and the tower
   comes down.
 - **Gate** of stone blocks blown apart.
@@ -185,7 +203,7 @@ the Siege fortress zone). It is about 80 × 40 m and runs a 20 s loop, then rebu
   no flames).
 
 `cargo run -p engine_destruction --release --example fortress -- <out_dir>` renders all of it
-headless to 22 screenshots.
+headless to 28 screenshots (`house` for the breach house's).
 
 `hill::spawn_voxel_hill(commands, origin)` builds the dig-and-build hill (the showcase's voxel
 hill zone) on a 28 s loop: a tunnel dug into the hill until its hall caves in, a terrace raised
@@ -216,7 +234,9 @@ still holds it, red), then under both, and the shelter drops into the pit.
   down, the hill's cabin going up with its red ghost and its door swung open and its shelter
   standing on the terrace's rock, pieces on voxel rock falling when it is dug out from under
   them, doors opening away from whoever presses interact and falling with their doorway,
-  stairs built up to the cabin's deck and their ramp-shaped colliders).
+  stairs built up to the cabin's deck and their ramp-shaped colliders, a floor shot through
+  from below and blown open from above, hatches smashed in or cut out while steel stops
+  bullets and charges, built openings surviving a rebuild, and the breach house's loop).
 - `hill::tests::the_yard_cabin_snaps_together_as_planned` and
   `the_terrace_shelter_snaps_together_as_planned` aim every step of the cabin and the shelter
   and check each piece lands where it should with the support the solver gives it.
@@ -228,4 +248,4 @@ still holds it, red), then under both, and the shelter drops into the pit.
   voxel cliff. **Done** (tests above and the showcase).
 
 Next: debris resting on other debris without a physics module, cave-in boulders resting on
-rock ledges (they need side contacts, not just floors), railings and ladders.
+rock ledges (they need side contacts, not just floors).

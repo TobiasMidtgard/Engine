@@ -67,11 +67,14 @@ pub enum Mat {
     Antifoul,
     /// Cast and polished bronze (boat fittings).
     Bronze,
+    /// Polished statuary marble with grey veins, mapped without UVs (triplanar, in the
+    /// object's space, so the veins stay put on a posed figure).
+    Marble,
 }
 
 impl Mat {
     /// Every material, in declaration order.
-    pub const ALL: [Mat; 25] = [
+    pub const ALL: [Mat; 26] = [
         Mat::Timber,
         Mat::TimberDark,
         Mat::Pine,
@@ -97,6 +100,7 @@ impl Mat {
         Mat::InteriorPaint,
         Mat::Antifoul,
         Mat::Bronze,
+        Mat::Marble,
     ];
 
     /// Asset key of this material in `Assets<StandardMaterial>`.
@@ -113,6 +117,8 @@ const ROPE_SIZE: u32 = 256;
 const VARNISH_SIZE: (u32, u32) = (1024, 512);
 const PAINT_SIZE: u32 = 512;
 const ANTIFOUL_SIZE: u32 = 256;
+/// Marble is seen close up (the statue).
+const MARBLE_SIZE: u32 = 1024;
 
 /// Albedo, normal and ORM handles of one texture set.
 #[derive(Clone, Copy)]
@@ -187,8 +193,10 @@ pub fn ensure_materials(world: &mut World) {
     let varnish = texgen::varnished_wood(VARNISH_SIZE.0, VARNISH_SIZE.1);
     let enamel = texgen::gloss_paint(PAINT_SIZE);
     let antifoul = texgen::antifoul(ANTIFOUL_SIZE);
+    let marble = texgen::marble(MARBLE_SIZE);
     let mut bytes: usize = [
         &wood, &galv, &iron, &metal, &stone, &concrete, &rope, &varnish, &enamel, &antifoul,
+        &marble,
     ]
     .iter()
     .map(|t| t.bytes())
@@ -216,6 +224,7 @@ pub fn ensure_materials(world: &mut World) {
     let varnish = add_set(&mut images, varnish);
     let enamel = add_set(&mut images, enamel);
     let antifoul = add_set(&mut images, antifoul);
+    let marble = add_set(&mut images, marble);
     // Varnished wood tiles 1.6 m along the grain (u) and 0.3 m across it (v).
     let varnished = |base: [f32; 3], rough: f32| StandardMaterial {
         uv_scale: [
@@ -253,6 +262,13 @@ pub fn ensure_materials(world: &mut World) {
             Mat::InteriorPaint => textured(enamel, [0.88, 0.74, 0.5], 0.55, 0.0, 1.0),
             Mat::Antifoul => textured(antifoul, [0.24, 0.05, 0.03], 1.0, 0.0, 2.0),
             Mat::Bronze => textured(metal, [0.74, 0.47, 0.24], 0.42, 1.0, 2.0),
+            Mat::Marble => StandardMaterial {
+                reflectance: 0.5,
+                texture_scale: texgen::MARBLE_TILE_M,
+                ..textured(marble, [1.0; 3], 1.0, 0.0, 1.0)
+                    .with_subsurface(0.35)
+                    .with_triplanar()
+            },
         };
         mats.insert_keyed(&m.key(), material);
     }

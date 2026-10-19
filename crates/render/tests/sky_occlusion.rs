@@ -24,6 +24,18 @@ fn scene_app(
     debug: DebugView,
     configure: impl FnOnce(&mut RenderSettings),
 ) -> App {
+    scene_app_with_ground(blocks, debug, configure, |_| {
+        StandardMaterial::color(0.5, 0.5, 0.5).with_roughness(0.9)
+    })
+}
+
+/// `scene_app` with the ground's material made by `ground`.
+fn scene_app_with_ground(
+    blocks: &[Block],
+    debug: DebugView,
+    configure: impl FnOnce(&mut RenderSettings),
+    ground: impl FnOnce(&mut App) -> StandardMaterial,
+) -> App {
     engine_core::log::init("error");
     let mut app = App::new();
     app.world.resource_mut::<EngineConfig>().headless = true;
@@ -46,6 +58,7 @@ fn scene_app(
         }
         configure(&mut s);
     }
+    let ground = ground(&mut app);
     let w = &mut app.world;
     w.spawn((
         Camera {
@@ -65,7 +78,7 @@ fn scene_app(
                 size: [200.0, 200.0],
                 subdivisions: 1,
             },
-            StandardMaterial::color(0.5, 0.5, 0.5).with_roughness(0.9),
+            ground,
         ),
     ));
     for &(center, size) in blocks {
@@ -341,5 +354,120 @@ fn a_closed_room_isnt_lit_by_the_ground_outside() {
     assert!(
         (green(ceiling) - green(floor)).abs() < 0.04,
         "the ceiling and the floor should get the same light: ceiling {ceiling:.1}, floor {floor:.1}"
+    );
+}
+
+/// RGBA8 texel of a tangent-space normal.
+fn encode_normal(n: Vec3) -> [u8; 4] {
+    let n = n.normalize();
+    let c = |v: f32| ((v * 0.5 + 0.5) * 255.0).round() as u8;
+    [c(n.x), c(n.y), c(n.z), 255]
+}
+
+/// Ground with a strong normal map: bumps 2 m apart in both directions that tilt the shading
+/// normal by up to 40° (like the folds of a shirt seen from close up).
+fn wrinkled_ground(app: &mut App) -> StandardMaterial {
+    let tau = std::f32::consts::TAU;
+    let bumps = Image::from_fn(64, 64, false, |x, y| {
+        let a = (x as f32 + 0.5) / 64.0 * tau;
+        let b = (y as f32 + 0.5) / 64.0 * tau;
+        encode_normal(Vec3::new(0.85 * a.sin(), 0.85 * b.cos(), 1.0))
+    });
+    let bumps = app
+        .world
+        .resource_mut::<engine_assets::Assets<Image>>()
+        .add(bumps);
+    // The plane's UVs are in meters: one tile every 2 m.
+    StandardMaterial::color(0.5, 0.5, 0.5)
+        .with_roughness(0.9)
+        .with_normal_texture(bumps)
+        .with_uv_scale(0.5, 0.5)
+}
+
+/// Where the ray through pixel `(x, y)` meets the ground (y = 0), if it does.
+fn ground_under_pixel(app: &App, x: u32, y: u32) -> Option<DVec3> {
+    let view = app.world.resource::<Renderer>().last_view()?.clone();
+    let inv = view.unjittered_view_proj.inverse();
+    let ndc = Vec2::new(
+        (x as f32 + 0.5) / W as f32 * 2.0 - 1.0,
+        1.0 - (y as f32 + 0.5) / H as f32 * 2.0,
+    );
+    // Reverse-Z: depth 1 is the near plane.
+    let near = inv.project_point3(ndc.extend(1.0));
+    let far = inv.project_point3(ndc.extend(0.5));
+    let dir = (far - near).normalize();
+    let origin = view.origin + near.as_dvec3();
+    if dir.y >= -1e-4 {
+        return None;
+    }
+    let t = -origin.y / dir.y as f64;
+    Some(origin + dir.as_dvec3() * t)
+}
+
+/// Linear luminance of pixel `(x, y)`.
+fn linear_luma(img: &RgbaImage, x: u32, y: u32) -> f32 {
+    let p = img.get_pixel(x, y);
+    decode(0.2126 * p[0] as f32 + 0.7152 * p[1] as f32 + 0.0722 * p[2] as f32)
+}
+
+/// The pixels showing ground within `half` meters of the carport's middle (in x and z).
+fn carport_ground_pixels(app: &App, half: f64) -> Vec<(u32, u32)> {
+    let mut pixels = Vec::new();
+    for y in 0..H {
+        for x in 0..W {
+            if let Some(g) = ground_under_pixel(app, x, y)
+                && g.x.abs() <= half
+                && g.z.abs() <= half
+            {
+                pixels.push((x, y));
+            }
+        }
+    }
+    assert!(
+        pixels.len() > 1000,
+        "too few ground pixels ({})",
+        pixels.len()
+    );
+    pixels
+}
+
+#[test]
+fn normal_map_wrinkles_dont_show_in_sky_visibility() {
+    // Sky cover is large-scale: it comes from the smooth (vertex) normal, so a normal-mapped
+    // ground under and around the carport sees the same sky as a flat one, instead of cover
+    // that changes bump by bump.
+    let mut flat = scene_app(&[CARPORT], DebugView::SkyVisibility, |_| {});
+    let mut wrinkled = scene_app_with_ground(
+        &[CARPORT],
+        DebugView::SkyVisibility,
+        |_| {},
+        wrinkled_ground,
+    );
+    let (Some(flat_img), Some(wrinkled_img)) = (
+        render(&mut flat, "sky_visibility_flat"),
+        render(&mut wrinkled, "sky_visibility_wrinkled"),
+    ) else {
+        return;
+    };
+    let pixels = carport_ground_pixels(&flat, 7.0);
+    let (mut sum, mut far_off) = (0.0, 0.0);
+    for &(x, y) in &pixels {
+        let d = (linear_luma(&flat_img, x, y) - linear_luma(&wrinkled_img, x, y)).abs();
+        sum += d;
+        if d > 0.05 {
+            far_off += 1.0;
+        }
+    }
+    let n = pixels.len() as f32;
+    let (mean, far_off) = (sum / n, far_off / n);
+    eprintln!(
+        "sky visibility, wrinkled vs flat ground over {n} pixels: mean difference {mean:.4}, \
+         {:.1}% off by more than 0.05",
+        far_off * 100.0
+    );
+    assert!(
+        mean < 0.01 && far_off < 0.01,
+        "the normal map shows in sky visibility (mean {mean:.4}, {:.1}% off by more than 0.05)",
+        far_off * 100.0
     );
 }

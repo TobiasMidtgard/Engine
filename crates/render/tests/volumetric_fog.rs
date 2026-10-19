@@ -1,7 +1,8 @@
 //! Volumetric fog: sunbeams through a hole in a wall light up the fog behind it, the volumetric
 //! and the analytic fog dim distant things alike, fog volumes keep their fog inside their shape
-//! (and follow their transform), and the temporal accumulation holds still with a still camera.
-//! Needs a GPU or lavapipe; passes with a note when neither is available.
+//! (and follow their transform), the temporal accumulation holds still with a still camera, and
+//! the sky behind a fogged hillside is as fogged as the hillside. Needs a GPU or lavapipe;
+//! passes with a note when neither is available.
 
 use engine_core::prelude::*;
 use engine_render::prelude::*;
@@ -284,6 +285,73 @@ fn volumetric_and_analytic_fog_dim_distant_things_alike() {
             "{name} panel in daylight: volumetric {lv} and analytic {la} fog disagree"
         );
     }
+}
+
+/// A dark ridge 60 m high, 800 m away across the view, in thick ground fog in daylight (seen
+/// from 2 m up, the sun behind the camera).
+const RIDGE: DVec3 = DVec3::new(0.0, 30.0, -800.0);
+
+fn ridge_app() -> App {
+    let mut app = app(|_| {});
+    {
+        let mut fog = app.world.resource_mut::<FogSettings>();
+        fog.density = 0.004;
+        fog.height_falloff = 0.01;
+    }
+    let w = &mut app.world;
+    w.spawn((
+        Camera {
+            exposure: Exposure::Manual { ev100: 14.0 },
+            ..Camera::perspective(50.0)
+        },
+        Transform::from_xyz(0.0, 2.0, 0.0).looking_at(DVec3::new(0.0, 30.0, -800.0), Vec3::Y),
+    ));
+    w.spawn((
+        DirectionalLight::default(),
+        Transform::default().looking_at(DVec3::new(0.3, -0.5, -1.0), Vec3::Y),
+    ));
+    spawn_box(
+        w,
+        RIDGE,
+        [2000.0, 60.0, 20.0],
+        StandardMaterial::color(0.05, 0.06, 0.04),
+    );
+    app
+}
+
+#[test]
+fn the_sky_behind_a_fogged_ridge_is_fogged_too() {
+    let mut app = ridge_app();
+    let Some(img) = render(&mut app, 24, "fogged_ridge") else {
+        return;
+    };
+    // Below the ridge's top edge and above it, in the sky.
+    let ridge = luma_at(&app, &img, RIDGE + DVec3::new(0.0, 10.0, 10.0));
+    let sky = luma_at(&app, &img, RIDGE + DVec3::new(0.0, 60.0, 10.0));
+    eprintln!("ridge {ridge:.4}, sky above it {sky:.4}");
+    // 800 m of fog leaves 4% of the ridge: the sky right above it must look the same, not a
+    // bright wall of clear sky.
+    assert!(
+        (sky / ridge - 1.0).abs() < 0.15,
+        "the ridge ({ridge}) and the sky above it ({sky}) should both be fog"
+    );
+    // 20 degrees up the fog has thinned out (its density halves every 69 m up) and the blue
+    // sky shows through the grey.
+    let blue = |p: DVec3| {
+        let (x, y) = screen(&app, p);
+        let px = img.get_pixel(x as u32, y as u32);
+        let (r, g, b) = (linear(px[0]), linear(px[1]), linear(px[2]));
+        b / (r + g + b)
+    };
+    let (low, high) = (
+        blue(RIDGE + DVec3::new(0.0, 60.0, 10.0)),
+        blue(DVec3::new(0.0, 300.0, -790.0)),
+    );
+    eprintln!("blue share: {low:.3} above the ridge, {high:.3} 20 degrees up");
+    assert!(
+        high > low + 0.02,
+        "the fog should thin out higher up the sky: blue share {high} vs {low}"
+    );
 }
 
 /// A glowing box of fog in the dark, 6 x 2 x 2 m along its local axes, turned on its end (90
