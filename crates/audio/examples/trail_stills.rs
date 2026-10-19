@@ -1,7 +1,7 @@
 //! Close-up stills of every stretch of the footstep trail, for judging the ground and props:
 //! one view from eye height (1.7 m) along the path and one low three-quarter view from the
-//! side, plus a wide view of the whole loop. Same scene as `trail_recording` (sun, grass
-//! plane, trees). Views of where one ground meets the next are named after both
+//! side, plus a wide view of the whole loop. Same scene as `trail_recording` (sun, lawn
+//! and trees). Views of where one ground meets the next are named after both
 //! (`mud-snow`, `snow-ice`, ...) and rendered only when asked for with `--only`.
 //!
 //! ```text
