@@ -3,7 +3,8 @@
 //! ```text
 //! prepare (features read the world) → compute → environment map (+ filters) → shadow cascades
 //! → prepass → volumetric fog → AO, reflections, bounce light → scene pass [opaque → sky]
-//! → (scene copies) → transparent pass → TAA → bloom → tonemap to LDR → overlays (UI)
+//! → (scene copies) → transparent pass → TAA → depth of field → motion blur → bloom
+//! → tonemap to LDR → overlays (UI)
 //! → screenshot readback → blit to window
 //! ```
 
@@ -193,6 +194,8 @@ pub struct Renderer {
     exposure: ExposureState,
     meter: crate::exposure::ExposureMeter,
     volumetrics: crate::volumetrics::Volumetrics,
+    /// Depth of field and motion blur (camera components), after TAA.
+    lens: crate::lens::LensEffects,
     previous: Option<PreviousView>,
     /// How far the camera moved the frame before (camera cut detection).
     prev_step: f64,
@@ -572,6 +575,7 @@ impl Renderer {
             exposure: ExposureState::default(),
             meter,
             volumetrics,
+            lens: Default::default(),
             previous: None,
             prev_step: 0.0,
             prev_aa: settings.anti_aliasing,
@@ -621,6 +625,7 @@ impl Renderer {
             self.surface.as_ref().map(|s| s.view_format),
         );
         self.effects.resize(&self.shared, &self.targets);
+        self.lens.resize();
         self.volumetrics.resize(&self.shared, &self.targets);
         self.rebuild_frame_groups();
         self.previous = None;
@@ -683,6 +688,7 @@ impl Renderer {
 
         // Metered exposure from earlier frames (non-blocking readback).
         self.meter.collect(&self.shared.device);
+        self.lens.collect();
         self.exposure.measured_ev100 = self.meter.measured_ev100;
 
         // View & uniforms.
@@ -723,6 +729,13 @@ impl Renderer {
         let real_dt = world
             .get_resource::<Time>()
             .map_or(0.0, |t| t.real_delta_secs());
+        // The camera's lens effects (off unless it has the components).
+        let lens_settings = view.camera.map_or((None, None), |e| {
+            (
+                world.get::<crate::DepthOfField>(e).copied(),
+                world.get::<crate::MotionBlur>(e).copied(),
+            )
+        });
         let surface_resized = self.surface_weather.prepare(world, &self.shared, real_dt);
         (uniform.surface_map, uniform.surface_open) =
             self.surface_weather.frame_params(view.origin);
@@ -1153,6 +1166,18 @@ impl Renderer {
             view.exposure,
         );
 
+        // Depth of field, then motion blur: on the anti-aliased, pre-exposed HDR image, before
+        // bloom and tonemapping (see depth_of_field.rs and motion_blur.rs).
+        self.lens.encode(
+            &self.shared,
+            &self.targets,
+            &mut encoder,
+            &view,
+            lens_settings.0.as_ref(),
+            lens_settings.1.as_ref(),
+            real_dt,
+        );
+
         // Bloom.
         let levels = self.targets.bloom.len();
         for i in 0..levels {
@@ -1240,6 +1265,7 @@ impl Renderer {
         let mut stats = self.collect_stats(&view, started);
         self.shared.queue.submit([encoder.finish()]);
         self.meter.after_submit();
+        self.lens.after_submit();
         if let Some(t) = surface_texture {
             self.shared.queue.present(t);
         }
@@ -1300,6 +1326,9 @@ impl Renderer {
             );
             if let Some(ev) = self.meter.measured_ev100 {
                 d.set("render.ev100_metered", ev as f64);
+            }
+            if let Some(focus) = self.lens.focus_distance_m() {
+                d.set("render.dof_focus_m", focus as f64);
             }
         }
         world.insert_resource(stats);
