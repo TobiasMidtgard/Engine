@@ -15,8 +15,14 @@
 //!   rest (hands, head on the neck, toes, hair) keep animating on top.
 //! * Below weight 1 every joint is pulled toward the animated pose, holding the limbs up
 //!   against gravity, and the hips toward the animated hips; the closer to 1, the weaker.
-//! * Back at 0 the bodies go and the pose blends back to the animation over
-//!   [`BLEND_OUT_SECS`].
+//! * Back at 0 the bodies go. A person lying on the floor gets up: the ragdoll triggers the
+//!   graph's `get_up_back` or `get_up_front` (whichever way up it lies, see [`lying`]), blends
+//!   from the pose it lay in into the clip's first frame over [`GET_UP_BLEND_SECS`], and lines
+//!   the clip up with the body (turned and moved in model space, an offset that fades as the
+//!   body stands, so the requester should stand its entity where [`get_up_placement`] says to
+//!   keep the body from sliding). It reports `getting_up` and `got_up` animation events. A body
+//!   still on its feet, or without those clips, blends back to the animation over
+//!   [`BLEND_OUT_SECS`]. Blends run on each bone's local rotation, so limbs keep their length.
 //! * Parts are on [`RAGDOLL_LAYER`] and don't collide with each other; while a body is
 //!   physical its own character controller ignores them.
 //! * A part hitting something hard reports a `GroundContact` of kind `Body` (body falls for
@@ -34,6 +40,8 @@ use engine_world::physics::{
 use engine_world::{ContactKind, Gravity, Ground, GroundContact, NoiseEvent, SurfaceMaterials};
 
 use crate::animator::Animator;
+use crate::build::humanoid::{GET_UP_BACK_HIPS, GET_UP_FRONT_HIPS, HIPS_HEIGHT};
+use crate::graph::FiredEvent;
 use crate::skeleton::Skeleton;
 use crate::xform::{Xf, rotation_between};
 
@@ -42,6 +50,11 @@ use crate::xform::{Xf, rotation_between};
 pub const RAGDOLL_LAYER: u32 = 1 << 29;
 /// How long the pose takes to blend back to the animation when the weight returns to 0, s.
 pub const BLEND_OUT_SECS: f32 = 0.45;
+/// How long a body lying on the floor takes to blend into its get-up clip, s.
+pub const GET_UP_BLEND_SECS: f32 = 0.35;
+/// Farthest the hips may lie from the entity (model units, horizontally) for a get-up;
+/// farther means the body was moved while limp, and it blends straight back to standing.
+pub const GET_UP_REACH: f32 = 4.0;
 /// Faster than this between two frames is a teleport, not motion, m/s.
 const TELEPORT_SPEED: f32 = 60.0;
 /// How long the animated motion a body keeps when it turns physical is averaged over, s (so
@@ -57,6 +70,12 @@ const DRIVE_FREQUENCY: f32 = 30.0;
 const DRIVE_DAMPING: f32 = 0.9;
 /// Slower than this into a hard surface makes no sound, m/s.
 const IMPACT_SPEED: f32 = 1.2;
+/// Joint stiffness of a fully toned limp body (see [`RagdollTone`]), 1/s.
+const TONE_FREQUENCY: f32 = 16.0;
+/// A part hitting something at least this fast lands a toned body, m/s.
+const LANDING_SPEED: f32 = 2.5;
+/// Contacts this soon after going limp (feet still on the ground) don't count as landing, s.
+const LANDING_GRACE_SECS: f32 = 0.15;
 
 /// How a part hangs on its parent part.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -729,8 +748,8 @@ pub struct RagdollRig {
     momentum: Vec<Velocity>,
     /// The frame the parts were spawned (they exist from the next one).
     spawned: u64,
-    /// Pose to blend back from after the body stopped being physical, and seconds since.
-    blend: Option<(Vec<Xf>, f32)>,
+    /// Blending back to the animation after the body stopped being physical.
+    blend: Option<BlendBack>,
     /// Whether this took the ragdoll layer out of the owner's character controller.
     took_controller_bit: bool,
 }
@@ -757,9 +776,17 @@ impl RagdollRig {
         !self.parts.is_empty()
     }
 
-    /// Whether the pose is still blending back to the animation.
+    /// Whether the pose is still blending back to the animation (or getting up).
     pub fn is_blending_back(&self) -> bool {
         self.blend.is_some()
+    }
+
+    /// The get-up clip the body is playing, while it gets up off the floor.
+    pub fn getting_up(&self) -> Option<&'static str> {
+        self.blend
+            .as_ref()
+            .and_then(|b| b.get_up.as_ref())
+            .map(|g| g.clip)
     }
 
     pub(crate) fn follow_shift(&mut self, s: &engine_world::WorldShift) {
@@ -768,6 +795,93 @@ impl RagdollRig {
             *r = s.orientation(*r);
         }
     }
+}
+
+/// The blend back to the animation after a body stopped being physical.
+#[derive(Debug, Clone)]
+struct BlendBack {
+    /// The pose shown when the body stopped being physical, local to each parent.
+    from: Vec<Xf>,
+    /// Seconds since, and how long the blend takes.
+    t: f32,
+    secs: f32,
+    get_up: Option<GetUp>,
+}
+
+/// A body getting up off the floor.
+#[derive(Debug, Clone)]
+struct GetUp {
+    clip: &'static str,
+    /// Animation seconds into the clip, and its length.
+    time: f32,
+    secs: f32,
+    /// Model-space offset (a turn about Y and a move) that lines the clip's start up with the
+    /// body as it lay; it fades out while the body stands.
+    offset: Xf,
+    /// Whether the graph has been seen playing the clip.
+    started: bool,
+}
+
+/// How a body lies on the floor (see [`lying`]).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Lying {
+    /// Face down (else face up, or on its side and nearer face up).
+    pub face_down: bool,
+    /// The get-up clip for it (`get_up_front` or `get_up_back`).
+    pub clip: &'static str,
+    /// Model-space offset that puts the clip's first frame onto the body: turned about Y and
+    /// moved along the floor.
+    pub offset: Xf,
+}
+
+/// Whether a pose (model space, of a skeleton with `hips` and `chest` bones) lies on the
+/// floor: the trunk within 35° of level. `None` for a body on its feet (or one without those
+/// bones).
+pub fn lying(skeleton: &Skeleton, model: &[Xf]) -> Option<Lying> {
+    let hips = model.get(skeleton.index_of("hips")?)?;
+    let chest = model.get(skeleton.index_of("chest")?)?;
+    let axis = chest.t - hips.t;
+    let along = axis.with_y(0.0);
+    if axis.y > axis.length() * 0.58 || along.length() < 1e-4 {
+        return None;
+    }
+    // Scale of this body against the humanoid the clips were made for.
+    let k = skeleton.rest_model[skeleton.index_of("hips")?].t.y / HIPS_HEIGHT;
+    let face_down = (chest.r * Vec3::NEG_Z).y < 0.0;
+    // Face down, the clip's head points the way it will face (−Z); face up, its feet do.
+    let (clip, start, ahead) = if face_down {
+        ("get_up_front", GET_UP_FRONT_HIPS, along)
+    } else {
+        ("get_up_back", GET_UP_BACK_HIPS, -along)
+    };
+    let ahead = ahead.normalize();
+    let turn = Quat::from_rotation_y((-ahead.x).atan2(-ahead.z));
+    let start = turn * (start * k).with_y(0.0);
+    Some(Lying {
+        face_down,
+        clip,
+        offset: Xf::from_tr((hips.t - start).with_y(0.0), turn),
+    })
+}
+
+/// Where to stand the entity of a body lying as `pose` shows (entity at `gt`) so that its
+/// get-up starts right where the body lies, without sliding: the entity's new position (its
+/// height unchanged) and rotation. `None` if the body isn't lying down.
+pub fn get_up_placement(
+    skeleton: &Skeleton,
+    pose: &SkeletonPose,
+    gt: &GlobalTransform,
+) -> Option<(DVec3, Quat)> {
+    if pose.bones.len() != skeleton.len() {
+        return None;
+    }
+    let model: Vec<Xf> = pose.bones.iter().map(Xf::from_bone_pose).collect();
+    let l = lying(skeleton, &model)?;
+    let rot = gt.rotation();
+    let scale = gt.scale().max_element();
+    let mut at = gt.translation() + (rot * (l.offset.t * scale)).as_dvec3();
+    at.y = gt.translation().y;
+    Some((at, (rot * l.offset.r).normalize()))
 }
 
 /// Give animated bodies whose skeleton has a ragdoll a [`RagdollRig`] (again when their
@@ -807,6 +921,7 @@ type Owners<'w, 's> = Query<
         Option<&'static Ragdoll>,
         Option<&'static Name>,
         Option<&'static mut CharacterController>,
+        Option<&'static mut RagdollTone>,
     ),
     Without<RagdollPart>,
 >;
@@ -821,6 +936,36 @@ type Parts<'w, 's> = Query<
     ),
     With<RagdollPart>,
 >;
+
+/// Muscle tone in a limp body: its joints turn toward the animated pose (each part relative
+/// to its parent, so nothing pulls the body toward a place or holds it up against gravity),
+/// so a falling body keeps the shape of, say, a `fall_brace` clip in the air. The first hard
+/// landing after it went limp relaxes it over `relax_secs`. Remove it, or set `tone` and
+/// `landed` again, for the next fall.
+#[derive(Component, Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RagdollTone {
+    /// 0 slack .. 1 firm.
+    pub tone: f32,
+    /// How long it takes to go slack once landed, s (0 keeps the tone).
+    pub relax_secs: f32,
+    /// Whether a part has hit something hard since the body went limp.
+    pub landed: bool,
+    /// Seconds limp (landings count after a moment, once the feet have left the ground).
+    #[serde(skip)]
+    pub limp_secs: f32,
+}
+
+impl Default for RagdollTone {
+    fn default() -> Self {
+        Self {
+            tone: 1.0,
+            relax_secs: 0.25,
+            landed: false,
+            limp_secs: 0.0,
+        }
+    }
+}
 
 /// Turn bodies physical and back as their weight changes, pose them from their parts, and
 /// drive the parts toward the animation.
@@ -837,7 +982,9 @@ pub(crate) fn ragdoll_system(
     let frame = time.frame_count();
     let dt = time.delta_secs();
     let flesh = surfaces.id_or_default("flesh");
-    for (entity, mut animator, mut rig, gt, published, ragdoll, name, controller) in &mut owners {
+    for (entity, mut animator, mut rig, gt, published, ragdoll, name, controller, tone) in
+        &mut owners
+    {
         let rig = &mut *rig;
         let def = rig.def.clone();
         let weight = ragdoll.map_or(0.0, |r| r.weight.clamp(0.0, 1.0));
@@ -862,10 +1009,47 @@ pub(crate) fn ragdoll_system(
                 c.layers.collides_with &= !RAGDOLL_LAYER;
             }
         } else if weight <= 0.0 && rig.is_physical() {
-            // Blend back from the pose shown last frame.
+            // Blend back from the pose shown last frame; get up if it lay on the floor.
             if published.bones.len() == animator.skeleton.len() && frame > rig.spawned + 1 {
-                let snapshot = published.bones.iter().map(Xf::from_bone_pose).collect();
-                rig.blend = Some((snapshot, 0.0));
+                let skeleton = animator.skeleton.clone();
+                let model: Vec<Xf> = published.bones.iter().map(Xf::from_bone_pose).collect();
+                // A body far from its entity was moved (teleported or re-placed) while limp:
+                // it blends straight back to standing there instead.
+                let near = skeleton.index_of("hips").is_some_and(|h| {
+                    let t = model[h].t;
+                    Vec2::new(t.x, t.z).length() < GET_UP_REACH
+                });
+                let get_up = lying(&skeleton, &model).filter(|_| near).and_then(|l| {
+                    let secs = get_up_secs(&animator, l.clip)?;
+                    animator.trigger(l.clip);
+                    animator.events.push(FiredEvent {
+                        name: "getting_up".into(),
+                        bone: None,
+                    });
+                    Some(GetUp {
+                        clip: l.clip,
+                        time: 0.0,
+                        secs,
+                        offset: l.offset,
+                        started: false,
+                    })
+                });
+                let from = (0..skeleton.len())
+                    .map(|b| match skeleton.parents[b] {
+                        Some(p) => model[p as usize].inverse().mul(&model[b]),
+                        None => model[b],
+                    })
+                    .collect();
+                rig.blend = Some(BlendBack {
+                    from,
+                    t: 0.0,
+                    secs: if get_up.is_some() {
+                        GET_UP_BLEND_SECS
+                    } else {
+                        BLEND_OUT_SECS
+                    },
+                    get_up,
+                });
             }
             for e in rig.parts.drain(..).chain(rig.joints.drain(..)) {
                 commands.entity(e).try_despawn();
@@ -878,33 +1062,37 @@ pub(crate) fn ragdoll_system(
             rig.took_controller_bit = false;
         }
 
+        let tone = match tone {
+            Some(mut t) if rig.is_physical() => {
+                t.limp_secs += dt;
+                if t.landed && t.relax_secs > 0.0 {
+                    t.tone = (t.tone - dt / t.relax_secs).max(0.0);
+                }
+                t.tone.clamp(0.0, 1.0)
+            }
+            Some(mut t) => {
+                if t.limp_secs != 0.0 {
+                    t.limp_secs = 0.0;
+                }
+                0.0
+            }
+            None => 0.0,
+        };
         if rig.is_physical() && frame > rig.spawned {
             follow_parts(
                 &def,
                 rig,
                 &mut animator,
                 (gt, &animated),
-                weight,
+                (weight, tone),
                 (frame, dt),
                 &gravity,
                 &mut parts,
             );
-        } else if let Some((snapshot, t)) = &mut rig.blend {
-            *t += dt;
-            let w = (*t / BLEND_OUT_SECS).clamp(0.0, 1.0);
-            let w = w * w * (3.0 - 2.0 * w);
-            let skeleton = animator.skeleton.clone();
-            let Animator { local, model, .. } = &mut *animator;
-            for b in 0..skeleton.len() {
-                model[b] = snapshot[b].lerp(&model[b], w);
-                local[b] = match skeleton.parents[b] {
-                    Some(p) => model[p as usize].inverse().mul(&model[b]),
-                    None => model[b],
-                };
-            }
-            if *t >= BLEND_OUT_SECS {
-                rig.blend = None;
-            }
+        } else if let Some(blend) = &mut rig.blend
+            && blend_back(blend, &mut animator, dt)
+        {
+            rig.blend = None;
         }
         // How the animated parts move (teleports don't count).
         let a = crate::xform::smoothing(dt, MOMENTUM_SECS);
@@ -923,6 +1111,57 @@ pub(crate) fn ragdoll_system(
         rig.last = animated;
         rig.last_frame = Some(frame);
     }
+}
+
+/// One frame of blending back to the animation (and of getting up); true once done.
+fn blend_back(blend: &mut BlendBack, animator: &mut Animator, dt: f32) -> bool {
+    blend.t += dt;
+    let mut standing = true;
+    if let Some(g) = &mut blend.get_up {
+        let playing = animator.graph().is_some_and(|graph| graph.in_state(g.clip));
+        g.started |= playing;
+        g.time += animator.dt;
+        if playing || (!g.started && g.time < 0.25) {
+            standing = false;
+            // Line the clip up with where the body lay, fading out as it stands.
+            let fade = ((g.time / g.secs - 0.5) / 0.45).clamp(0.0, 1.0);
+            let keep = 1.0 - fade * fade * (3.0 - 2.0 * fade);
+            let offset = Xf::IDENTITY.lerp(&g.offset, keep);
+            let skeleton = animator.skeleton.clone();
+            for b in 0..skeleton.len() {
+                if skeleton.parents[b].is_none() {
+                    animator.local[b] = offset.mul(&animator.local[b]);
+                }
+            }
+            animator.refresh_model();
+        } else {
+            animator.events.push(FiredEvent {
+                name: "got_up".into(),
+                bone: None,
+            });
+            blend.get_up = None;
+        }
+    }
+    if blend.t < blend.secs {
+        let w = (blend.t / blend.secs).clamp(0.0, 1.0);
+        let w = w * w * (3.0 - 2.0 * w);
+        let skeleton = animator.skeleton.clone();
+        let Animator { local, model, .. } = &mut *animator;
+        for b in 0..skeleton.len() {
+            local[b] = blend.from[b].lerp(&local[b], w);
+            model[b] = match skeleton.parents[b] {
+                Some(p) => model[p as usize].mul(&local[b]),
+                None => local[b],
+            };
+        }
+    }
+    standing && blend.t >= blend.secs
+}
+
+/// Length of the get-up clip `clip` in the animator's graph, if it has one.
+fn get_up_secs(animator: &Animator, clip: &str) -> Option<f32> {
+    let graph = animator.graph()?;
+    graph.clip_duration(clip)
 }
 
 /// Spawn the part bodies and joints on the animated pose, moving as it moved.
@@ -1010,7 +1249,7 @@ fn follow_parts(
     rig: &RagdollRig,
     animator: &mut Animator,
     (gt, animated): (&GlobalTransform, &[(DVec3, Quat)]),
-    weight: f32,
+    (weight, tone): (f32, f32),
     (frame, dt): (u64, f32),
     gravity: &Gravity,
     parts: &mut Parts,
@@ -1074,6 +1313,15 @@ fn follow_parts(
         let inertia = (inverse[i] + inverse[p]).inverse();
         let mut accel = Vec3::ZERO;
         let mut damping = TONE;
+        // Muscle tone: the joint turns toward its animated angle (the parts' rotations
+        // relative to each other, so nothing is pulled toward a place or held up).
+        if tone > 0.0 {
+            let w = cap(TONE_FREQUENCY) * tone;
+            let want = animated[p].1.inverse() * animated[i].1;
+            let have = rot[p].inverse() * rot[i];
+            accel += rot[p] * rotation_vector(want * have.inverse()) * w * w;
+            damping += 1.4 * w;
+        }
         if let JointDef::Ball { limits } = def.parts[i].joint {
             let v = rotation_vector(delta[p].inverse() * delta[i]);
             let excess = Vec3::new(
@@ -1162,6 +1410,7 @@ pub(crate) fn ragdoll_impacts(
     mut noises: MessageWriter<NoiseEvent>,
     parts: Query<(&RagdollPart, &Transform)>,
     rigs: Query<&RagdollRig>,
+    mut tones: Query<&mut RagdollTone>,
 ) {
     for ev in events.read() {
         if ev.phase != ContactPhase::Started || ev.sensor || ev.impulse <= 0.0 {
@@ -1179,6 +1428,13 @@ pub(crate) fn ragdoll_impacts(
             continue;
         };
         let speed = ev.impulse / def.mass_kg.max(0.1);
+        if speed >= LANDING_SPEED
+            && let Ok(mut tone) = tones.get_mut(part.owner)
+            && !tone.landed
+            && tone.limp_secs >= LANDING_GRACE_SECS
+        {
+            tone.landed = true;
+        }
         if speed < IMPACT_SPEED {
             continue;
         }
@@ -1206,6 +1462,43 @@ pub(crate) fn ragdoll_impacts(
 mod tests {
     use super::*;
     use crate::build::humanoid;
+
+    fn first_frame(s: &Skeleton, name: &str) -> Vec<Xf> {
+        let clip = humanoid::clips(s)
+            .into_iter()
+            .find(|c| c.name == name)
+            .unwrap();
+        let binding = crate::clip::ClipBinding::new(&clip, s);
+        let mut local = s.rest.clone();
+        clip.sample(0.0, &binding, &mut local);
+        let mut model = s.rest_model.clone();
+        s.to_model(&local, &mut model);
+        model
+    }
+
+    #[test]
+    fn lying_tells_face_up_from_face_down_and_lines_the_clip_up_with_the_body() {
+        let s = humanoid::skeleton();
+        assert!(lying(&s, &s.rest_model).is_none(), "standing isn't lying");
+        for (clip, face_down) in [("get_up_back", false), ("get_up_front", true)] {
+            let start = first_frame(&s, clip);
+            let l = lying(&s, &start).expect(clip);
+            assert_eq!((l.clip, l.face_down), (clip, face_down));
+            // The clip's own first frame needs no offset.
+            assert!(l.offset.t.length() < 1e-3, "{clip}: {}", l.offset.t);
+            assert!(l.offset.r.angle_between(Quat::IDENTITY) < 1e-3);
+            // Turned and moved on the floor, the offset is that turn and move.
+            let moved = Xf::from_tr(Vec3::new(1.5, 0.0, -0.7), Quat::from_rotation_y(1.2));
+            let pose: Vec<Xf> = start.iter().map(|x| moved.mul(x)).collect();
+            let l = lying(&s, &pose).expect(clip);
+            assert!(
+                (l.offset.t - moved.t).length() < 1e-3,
+                "{clip}: {}",
+                l.offset.t
+            );
+            assert!(l.offset.r.angle_between(moved.r) < 1e-3);
+        }
+    }
 
     #[test]
     fn a_person_has_fourteen_parts_weighing_seventy_five_kilos() {

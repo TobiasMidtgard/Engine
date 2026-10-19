@@ -196,21 +196,32 @@ pub fn fbm_smooth(p: DVec3, seed: u64, octaves: f64, gain: f64) -> f64 {
 /// Ridged multifractal: sharp crests like mountain ridges, about `[0, 1]`. `octaves` may be
 /// fractional (see [`fbm_smooth`]).
 pub fn ridged(p: DVec3, seed: u64, octaves: f64) -> f64 {
+    ridged_worn(p, seed, octaves, 0.0)
+}
+
+/// [`ridged`] with its crests worn round: `wear` 0 is exactly [`ridged`], 1 leaves broad,
+/// rounded massifs with fainter small ridges on them (mountains on an airless world, worn
+/// down by billions of years of small impacts instead of cut by water and ice).
+pub fn ridged_worn(p: DVec3, seed: u64, octaves: f64, wear: f64) -> f64 {
     let whole = octaves.floor().max(0.0) as u32;
     let frac = octaves - whole as f64;
     let (mut sum, mut amp, mut norm, mut weight) = (0.0, 1.0, 0.0, 1.0f64);
+    // A crest is the fold `1 - |n|`; `1 - sqrt(n² + k²)` rounds it over a width of about k.
+    let k = 0.3 * wear;
+    let gain = 0.5 - 0.15 * wear;
     let mut q = p;
     for i in 0..=whole {
         let w = if i == whole { frac } else { 1.0 };
         if w <= 0.0 {
             break;
         }
-        let n = 1.0 - noise3(q, seed.wrapping_add(i as u64 * 0x3C6E)).abs();
+        let v = noise3(q, seed.wrapping_add(i as u64 * 0x3C6E));
+        let n = (1.0 - (v * v + k * k).sqrt()) / (1.0 - k);
         let n = n * n * weight;
         weight = (n * 1.8).clamp(0.0, 1.0);
         sum += n * amp * w;
         norm += amp * w;
-        amp *= 0.5;
+        amp *= gain;
         q = twist(q);
     }
     sum / norm.max(1e-9)

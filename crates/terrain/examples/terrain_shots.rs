@@ -35,8 +35,20 @@ struct View {
     target: DVec3,
     /// Place `eye` this high above the ground below it instead of using `eye.y`.
     above_ground: Option<f64>,
+    /// Likewise for `target`.
+    target_above_ground: Option<f64>,
+    /// Move the eye to this many meters inland of where the line from `eye` toward `target`
+    /// first reaches the sea (then `above_ground` above the ground there), and the target as
+    /// far beyond that point as it was from the eye.
+    shore: Option<f64>,
     /// Sun azimuth (degrees from north toward east) and elevation (degrees).
     sun: (f64, f64),
+    /// Far from home: the eye and target as (latitude, longitude, height above the ground),
+    /// the target the planet's center when only the eye is given, and the sun overhead at
+    /// (latitude, longitude) instead of `sun`.
+    eye_ll: Option<[f64; 3]>,
+    target_ll: Option<[f64; 3]>,
+    sun_ll: Option<[f64; 2]>,
     /// The showcase's own auto exposure by default, so pictures look the way the game shows
     /// them; fixed for views of space, where the black sky would brighten the planet.
     exposure: Exposure,
@@ -60,7 +72,12 @@ const BASE: View = View {
     eye: DVec3::ZERO,
     target: DVec3::ZERO,
     above_ground: None,
+    target_above_ground: None,
+    shore: None,
     sun: (220.0, 35.0),
+    eye_ll: None,
+    target_ll: None,
+    sun_ll: None,
     exposure: AUTO,
     fov: 60.0,
     lab: false,
@@ -177,6 +194,16 @@ fn views() -> Vec<View> {
             painted: true,
             ..BASE
         },
+        // The same patchwork after rain: wet sand darkens and shines, soil turns to mud.
+        View {
+            name: "painted_wet",
+            eye: DVec3::new(-60.0, 32.0, -150.0),
+            target: DVec3::new(20.0, 0.0, -260.0),
+            sun: (230.0, 32.0),
+            painted: true,
+            ground: Ground::Rain,
+            ..BASE
+        },
         View {
             name: "painted_border",
             eye: DVec3::new(-4.0, 2.2, -172.0),
@@ -243,6 +270,18 @@ fn views() -> Vec<View> {
             exposure: Exposure::Manual { ev100: 14.8 },
             ..BASE
         },
+        // Down on the beach on the same coast, with the surf running in.
+        View {
+            name: "earth_beach",
+            eye: DVec3::new(-7_000.0, 0.0, 12_500.0),
+            target: DVec3::new(-17_000.0, 0.0, 20_000.0),
+            shore: Some(60.0),
+            above_ground: Some(4.0),
+            target_above_ground: Some(-40.0),
+            sun: (255.0, 25.0),
+            fov: 60.0,
+            ..BASE
+        },
         View {
             name: "earth_mountains",
             eye: DVec3::new(-14_000.0, 0.0, -19_000.0),
@@ -252,11 +291,35 @@ fn views() -> Vec<View> {
             ..BASE
         },
         View {
+            name: "range_dusk",
+            eye: DVec3::new(2_000.0, 0.0, -11_000.0),
+            target: DVec3::new(-3_000.0, 1_500.0, -20_000.0),
+            above_ground: Some(300.0),
+            sun: (285.0, 7.0),
+            ..BASE
+        },
+        View {
             name: "earth_cliffs",
             eye: DVec3::new(-11_500.0, 0.0, -22_400.0),
             target: DVec3::new(-13_000.0, 1_900.0, -21_700.0),
             above_ground: Some(350.0),
             sun: (175.0, 28.0),
+            ..BASE
+        },
+        View {
+            name: "earth_river",
+            eye: DVec3::new(3_500.0, 0.0, -6_500.0),
+            target: DVec3::new(9_800.0, -150.0, -6_200.0),
+            above_ground: Some(150.0),
+            sun: (230.0, 30.0),
+            ..BASE
+        },
+        View {
+            name: "earth_rivers_air",
+            eye: DVec3::new(6_500.0, 0.0, -1_500.0),
+            target: DVec3::new(9_000.0, 0.0, -5_000.0),
+            above_ground: Some(1_200.0),
+            sun: (230.0, 30.0),
             ..BASE
         },
         View {
@@ -287,12 +350,31 @@ fn views() -> Vec<View> {
             ..BASE
         },
         View {
+            name: "earth_globe",
+            world: World3::Earth,
+            eye_ll: Some([25.0, 10.0, 14_000_000.0]),
+            sun_ll: Some([10.0, -15.0]),
+            fov: 55.0,
+            ..BASE
+        },
+        View {
             name: "moon_surface",
             world: World3::Moon,
             eye: DVec3::new(3_500.0, 0.0, -2_500.0),
             target: DVec3::new(9_000.0, -200.0, -9_000.0),
             above_ground: Some(1.8),
             sun: (200.0, 12.0),
+            exposure: Exposure::Manual { ev100: 15.0 },
+            ..BASE
+        },
+        View {
+            name: "moon_feet",
+            world: World3::Moon,
+            eye: DVec3::new(3_500.0, 0.0, -2_500.0),
+            target: DVec3::new(3_503.0, 0.0, -2_504.0),
+            above_ground: Some(1.7),
+            target_above_ground: Some(0.0),
+            sun: (120.0, 15.0),
             exposure: Exposure::Manual { ev100: 15.0 },
             ..BASE
         },
@@ -317,6 +399,16 @@ fn views() -> Vec<View> {
             ..BASE
         },
         View {
+            name: "moon_full",
+            world: World3::Moon,
+            eye: DVec3::new(0.0, 900_000.0, 3_200_000.0),
+            target: DVec3::new(0.0, -1_737_400.0, 0.0),
+            sun: (190.0, 36.0),
+            exposure: Exposure::Manual { ev100: 15.0 },
+            fov: 50.0,
+            ..BASE
+        },
+        View {
             name: "mars_orbit",
             world: World3::Mars,
             eye: DVec3::new(0.0, 1_500_000.0, 6_000_000.0),
@@ -326,7 +418,62 @@ fn views() -> Vec<View> {
             fov: 50.0,
             ..BASE
         },
+        View {
+            name: "mars_valles",
+            world: World3::Mars,
+            eye_ll: Some([-8.0, 282.0, 6_200_000.0]),
+            sun_ll: Some([-5.0, 235.0]),
+            fov: 45.0,
+            exposure: Exposure::Manual { ev100: 14.5 },
+            ..BASE
+        },
+        View {
+            name: "mars_olympus",
+            world: World3::Mars,
+            eye_ll: Some([2.0, 224.0, 600_000.0]),
+            target_ll: Some([19.0, 226.2, 0.0]),
+            sun_ll: Some([15.0, 158.0]),
+            fov: 50.0,
+            exposure: Exposure::Manual { ev100: 14.5 },
+            ..BASE
+        },
+        View {
+            name: "mars_canyon",
+            world: World3::Mars,
+            eye_ll: Some([-13.15, 300.0, 400.0]),
+            target_ll: Some([-13.45, 303.5, 1_500.0]),
+            sun_ll: Some([5.0, 345.0]),
+            fov: 70.0,
+            exposure: Exposure::Manual { ev100: 14.6 },
+            ..BASE
+        },
+        View {
+            name: "mars_rim",
+            world: World3::Mars,
+            eye_ll: Some([-13.6, 297.0, 2_000.0]),
+            target_ll: Some([-12.4, 297.6, 0.0]),
+            sun_ll: Some([10.0, 330.0]),
+            fov: 70.0,
+            exposure: Exposure::Manual { ev100: 14.6 },
+            ..BASE
+        },
+        View {
+            name: "mars_pole",
+            world: World3::Mars,
+            eye_ll: Some([62.0, 20.0, 1_200_000.0]),
+            target_ll: Some([85.0, 10.0, 0.0]),
+            sun_ll: Some([25.0, 30.0]),
+            fov: 50.0,
+            exposure: Exposure::Manual { ev100: 14.5 },
+            ..BASE
+        },
     ]
+}
+
+/// A point `above` meters over the ground at a latitude and longitude of the planet.
+fn on_ground(tf: &Transform, planet: &PlanetTerrain, [lat, lon, above]: [f64; 3]) -> DVec3 {
+    let dir = engine_terrain::shape::dir_from_lat_lon(lat, lon);
+    tf.transform_point(dir * (planet.shape.radius_m + planet.shape.height(dir) + above))
 }
 
 fn painted_height(x: f64, z: f64) -> f64 {
@@ -429,6 +576,12 @@ fn build(view: &View, size: (u32, u32)) -> App {
         planet
     };
     let tf = planet.home_transform(pad);
+    let sun = match view.sun_ll {
+        Some([lat, lon]) => {
+            tf.rotation.as_dquat() * engine_terrain::shape::dir_from_lat_lon(lat, lon)
+        }
+        None => sun_dir(view.sun.0, view.sun.1),
+    };
     {
         let mut atmo = app.world.resource_mut::<Atmosphere>();
         match view.world {
@@ -442,7 +595,6 @@ fn build(view: &View, size: (u32, u32)) -> App {
     app.world.spawn((tf, planet));
     app.world
         .spawn((Transform::default(), SimulationFocus::default()));
-    let sun = sun_dir(view.sun.0, view.sun.1);
     app.world.spawn((
         DirectionalLight::default(),
         Transform::default().looking_at(-sun, Vec3::Y),
@@ -463,8 +615,13 @@ fn build(view: &View, size: (u32, u32)) -> App {
         let mut w = app.world.resource_mut::<WeatherState>();
         w.fog = 0.0;
         w.cloud_cover = 0.15;
-        // Clear-day visibility (~100 km) instead of the default ground haze.
-        app.world.resource_mut::<FogSettings>().density = 0.00002;
+        // Clear-day visibility (~100 km) instead of the default ground haze. None where there
+        // is no atmosphere: without one the haze measures height as world y, so it would pile
+        // up on the far side of the globe.
+        app.world.resource_mut::<FogSettings>().density = match view.world {
+            World3::Earth => 0.00002,
+            World3::Moon | World3::Mars => 0.0,
+        };
     }
     match view.ground {
         Ground::Dry => {}
@@ -525,25 +682,59 @@ fn main() {
             eprintln!("no GPU: {}", d.0);
             return;
         }
-        let mut eye = view.eye;
-        if let Some(h) = view.above_ground {
-            let ground = app.world.resource::<engine_world::Ground>().clone();
-            // On a planet the ground is found along the local vertical, so ask again from
-            // just above it: from high up the answer lies a little to the side.
-            let mut y = 50_000.0;
-            for _ in 0..3 {
-                y = ground
-                    .height(DVec3::new(eye.x, y + 10.0, eye.z))
-                    .unwrap_or(0.0);
+        let ground = app.world.resource::<engine_world::Ground>().clone();
+        let place = |mut p: DVec3, above: Option<f64>| {
+            if let Some(h) = above {
+                // On a planet the ground is found along the local vertical, so ask again from
+                // just above it: from high up the answer lies a little to the side.
+                let mut y = 50_000.0;
+                for _ in 0..3 {
+                    y = ground.height(DVec3::new(p.x, y + 10.0, p.z)).unwrap_or(0.0);
+                }
+                p.y = y + h;
             }
-            eye.y = y + h;
+            p
+        };
+        let (mut from, mut toward) = (view.eye, view.target);
+        if let Some(back) = view.shore {
+            let mut q = app.world.query::<(&Transform, &PlanetTerrain)>();
+            let (tf, planet) = q.iter(&app.world).next().expect("planet");
+            let d = DVec3::new(toward.x - from.x, 0.0, toward.z - from.z);
+            let (len, d) = (d.length(), d.normalize());
+            let inv = tf.rotation.as_dquat().inverse();
+            let sea_at = |s: f64| {
+                let p = from + d * s;
+                let dir = (inv * (DVec3::new(p.x, 0.0, p.z) - tf.translation)).normalize();
+                planet.shape.height(dir) < 0.0
+            };
+            if let Some(s) = (0..20_000).map(|i| i as f64 * 5.0).find(|&s| sea_at(s)) {
+                let shore = from + d * s;
+                from = shore - d * back;
+                toward = shore + d * (len - back).max(50.0);
+            }
+        }
+        let mut eye = place(from, view.above_ground);
+        let mut target = place(toward, view.target_above_ground);
+        let mut up = Vec3::Y;
+        if let Some(e) = view.eye_ll {
+            let mut q = app.world.query::<(&Transform, &PlanetTerrain)>();
+            let (tf, planet) = q.iter(&app.world).next().expect("planet");
+            eye = on_ground(tf, planet, e);
+            target = view
+                .target_ll
+                .map_or(tf.translation, |t| on_ground(tf, planet, t));
+            // Level with the ground below, or north up from orbit.
+            up = match view.target_ll {
+                Some(_) => (eye - tf.translation).normalize().as_vec3(),
+                None => (tf.rotation.as_dquat() * DVec3::Y).as_vec3(),
+            };
         }
         app.world.spawn((
             Camera {
                 exposure: view.exposure,
                 ..Camera::perspective(view.fov)
             },
-            Transform::from_translation(eye).looking_at(view.target, Vec3::Y),
+            Transform::from_translation(eye).looking_at(target, up),
         ));
         // Let the walkers lay their trails and the terrain finish streaming, with the ground
         // materials baked.
@@ -562,6 +753,21 @@ fn main() {
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
         app.update_n(12);
+        // The far shadow map's patches stream in a few a frame after the view's own, and
+        // planets seen from afar ease into finer detail.
+        let mut last_boost = 0.0;
+        for _ in 0..300 {
+            let d = app
+                .world
+                .resource::<engine_core::diagnostics::Diagnostics>();
+            let built = d.get("terrain.patches_built").unwrap_or(0.0);
+            let boost = d.get("terrain.detail_boost").unwrap_or(1.0);
+            if built == 0.0 && (boost - last_boost).abs() < 0.005 {
+                break;
+            }
+            last_boost = boost;
+            app.update();
+        }
         let path = out.join(format!("{}.png", view.name));
         match capture_now(&mut app.world, &path) {
             Ok(_) => {
@@ -569,11 +775,13 @@ fn main() {
                     .world
                     .resource::<engine_core::diagnostics::Diagnostics>();
                 println!(
-                    "{:<16} {:>6.1}s  patches drawn {:>5}  resident {:>5}  -> {}",
+                    "{:<16} {:>6.1}s  patches drawn {:>5}  far shadow {:>5}  resident {:>5}  detail ×{:.2}  -> {}",
                     view.name,
                     started.elapsed().as_secs_f32(),
                     d.get("terrain.patches_drawn").unwrap_or(0.0),
+                    d.get("terrain.far_shadow_patches").unwrap_or(0.0),
                     d.get("terrain.patches_resident").unwrap_or(0.0),
+                    d.get("terrain.detail_boost").unwrap_or(1.0),
                     path.display()
                 );
             }

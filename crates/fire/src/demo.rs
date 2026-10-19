@@ -17,17 +17,23 @@
 //! (`FireDemo::warmup_secs`) so there is something to see straight away. Fires that escape
 //! the mown border are put out (`FireDemo::bounds`), so the rest of the map is safe.
 //! `fire.demo {"at_secs": 54}` starts a fresh fire that far along, which is how a camera tour
-//! catches each view's moment (`DemoView::at_secs`).
+//! catches each view's moment: each view jumps to `DemoView::at_secs` and then watches for
+//! `DemoView::warmup_secs` while the smoke rises. A jump puts everything the old fire left
+//! back (grass, props, embers, its random sequence, the wind it jumped in), so a view looks
+//! much the same whichever view came before it, once its smoke is cleared too (`smoke.clear`).
 
 use engine_assets::Assets;
 use engine_core::math::{DQuat, DVec2, DVec3, Mat4, Quat, Rng, Vec2, Vec3};
 use engine_core::prelude::*;
 use engine_render::{Image, Mesh, MeshRenderer};
-use engine_world::{Combustible, FocusPoints, Ground, SurfaceMaterials, Water, WeatherState};
+use engine_world::{
+    Combustible, FocusPoints, Ground, SurfaceMaterials, Water, WeatherState, WindField,
+};
 
+use crate::embers::Embers;
 use crate::field::FireField;
 use crate::fuel::{FuelPatch, PatchShape};
-use crate::grass::GrassMeadow;
+use crate::grass::{GrassBurn, GrassMeadow};
 use crate::ground::{GroundKind, GroundPaint, PaintedGround};
 use crate::objects::{Burning, Charring, ContainedFire, FlameShape};
 use crate::props::{
@@ -59,10 +65,16 @@ pub struct DemoView {
     pub hour: f32,
     /// Seconds since the fire was lit; `fire.demo {"at_secs": ..}` jumps there.
     pub at_secs: f32,
-    /// Seconds to watch after the jump before the picture (smoke needs time to rise: the jump
-    /// fast-forwards only the fire).
+    /// Seconds to watch after the jump before the picture: the jump fast-forwards only the fire,
+    /// so its smoke, embers and lights build up while this runs. The picture shows the fire
+    /// `at_secs + warmup_secs` along.
     pub warmup_secs: f32,
 }
+
+/// How long a view watches its fire before the picture: long enough for the smoke to rise
+/// through its 40 m box and drift across the meadow in a 5 m/s wind. (The front's view, which
+/// stands downwind, watches less, or the smoke would bury the front.)
+pub const WATCH_SECS: f32 = 20.0;
 
 /// Suggested viewpoints (camera bookmarks and screenshot-tour stops).
 pub const VIEWS: &[DemoView] = &[
@@ -72,8 +84,8 @@ pub const VIEWS: &[DemoView] = &[
         eye: [6.0, 2.4, -20.0],
         target: [-4.0, 1.2, -4.0],
         hour: 17.5,
-        at_secs: 35.0,
-        warmup_secs: 0.0,
+        at_secs: 32.0,
+        warmup_secs: 3.0,
     },
     DemoView {
         key: "fire_trees",
@@ -81,8 +93,8 @@ pub const VIEWS: &[DemoView] = &[
         eye: [22.0, 4.0, -14.0],
         target: [2.0, 3.0, 4.0],
         hour: 17.85,
-        at_secs: 80.0,
-        warmup_secs: 0.0,
+        at_secs: 60.0,
+        warmup_secs: WATCH_SECS,
     },
     DemoView {
         key: "fire_campfire",
@@ -90,8 +102,8 @@ pub const VIEWS: &[DemoView] = &[
         eye: [-19.4, 1.3, -18.0],
         target: [-22.5, 0.35, -21.1],
         hour: 17.95,
-        at_secs: 30.0,
-        warmup_secs: 0.0,
+        at_secs: 10.0,
+        warmup_secs: WATCH_SECS,
     },
     DemoView {
         key: "fire_plume",
@@ -99,8 +111,8 @@ pub const VIEWS: &[DemoView] = &[
         eye: [-58.0, 9.0, -52.0],
         target: [12.0, 12.0, 6.0],
         hour: 15.5,
-        at_secs: 80.0,
-        warmup_secs: 4.0,
+        at_secs: 25.0,
+        warmup_secs: WATCH_SECS,
     },
     DemoView {
         key: "fire_night",
@@ -108,8 +120,8 @@ pub const VIEWS: &[DemoView] = &[
         eye: [17.0, 2.0, -12.0],
         target: [0.0, 2.0, 4.0],
         hour: 22.5,
-        at_secs: 55.0,
-        warmup_secs: 0.0,
+        at_secs: 35.0,
+        warmup_secs: WATCH_SECS,
     },
 ];
 
@@ -647,9 +659,10 @@ pub fn run_demos(world: &mut World) {
             }
             state.started = true;
             state.cycles += 1;
+            world.resource_mut::<FireClock>().reset_for_demo();
             light(world, place, &demo);
             if at > 0.0 {
-                fast_forward(world, place.origin, at);
+                fast_forward(world, place.origin, reach(&demo), at);
             }
             state.since = at;
             let field = world.resource::<FireField>();
@@ -663,7 +676,7 @@ pub fn run_demos(world: &mut World) {
             state.cycles = 1;
             light(world, place, &demo);
             if demo.warmup_secs > 0.0 {
-                fast_forward(world, place.origin, demo.warmup_secs);
+                fast_forward(world, place.origin, reach(&demo), demo.warmup_secs);
             }
             state.since = demo.warmup_secs;
         } else {
@@ -728,8 +741,15 @@ pub fn jump_to(world: &mut World, at_secs: f32) -> usize {
     n
 }
 
-/// Run the fire alone for `secs` of simulated time, right now.
-fn fast_forward(world: &mut World, origin: DVec3, secs: f32) {
+/// How far from a demo's center its fires reach: its bounds plus the margin [`contain`] allows
+/// escaped embers.
+fn reach(demo: &FireDemo) -> f64 {
+    Vec2::from(demo.bounds).length() as f64 + CONTAIN_MARGIN_M
+}
+
+/// Run the fire within `radius` of `origin` alone for `secs` of simulated time, right now
+/// (fires elsewhere, such as a burning building across the valley, are left where they are).
+fn fast_forward(world: &mut World, origin: DVec3, radius: f64, secs: f32) {
     let hz = world.resource::<FireSettings>().sim_hz.clamp(1.0, 240.0);
     let steps = (secs * hz).round() as usize;
     let mut schedule = Schedule::default();
@@ -746,11 +766,38 @@ fn fast_forward(world: &mut World, origin: DVec3, secs: f32) {
         &mut world.resource_mut::<FocusPoints>().points,
         vec![origin],
     );
-    world.resource_mut::<FireClock>().fast_forward = true;
+    let sim_radius = std::mem::replace(
+        &mut world.resource_mut::<FireSettings>().sim_radius_m,
+        radius as f32,
+    );
+    {
+        let mut clock = world.resource_mut::<FireClock>();
+        clock.fast_forward = true;
+        clock.scope = Some((origin, radius));
+    }
+    // The wind the fire sees while it jumps ahead: the prevailing wind with its gusts from a
+    // fixed start, and none of the old fire's updrafts, so the jump burns the same way whenever
+    // it is made. The world's own wind is put back afterwards.
+    let wind = world.get_resource::<WindField>().cloned();
+    if let Some(mut w) = world.get_resource_mut::<WindField>() {
+        w.time = 0.0;
+        w.local.data.fill(Vec3::ZERO);
+    }
     for _ in 0..steps {
         schedule.run(world);
+        if let Some(mut w) = world.get_resource_mut::<WindField>() {
+            w.time += 1.0 / hz;
+        }
     }
-    world.resource_mut::<FireClock>().fast_forward = false;
+    if let Some(wind) = wind {
+        world.insert_resource(wind);
+    }
+    {
+        let mut clock = world.resource_mut::<FireClock>();
+        clock.fast_forward = false;
+        clock.scope = None;
+    }
+    world.resource_mut::<FireSettings>().sim_radius_m = sim_radius;
     world.resource_mut::<FocusPoints>().points = focus;
 }
 
@@ -775,6 +822,28 @@ fn reset(world: &mut World, demo_entity: Entity, place: Place, demo: &FireDemo) 
             }
         }
     }
+    // The grass forgets the old fire (its blades would otherwise take a minute to stand up
+    // again and turn green, and keep the old fire's glow for a while); the next update rebuilds
+    // the map from the reset field.
+    let mut meadows = world.query_filtered::<(Entity, &GlobalTransform), With<GrassBurn>>();
+    let meadows: Vec<Entity> = meadows
+        .iter(world)
+        .filter(|(_, t)| t.translation().distance(place.origin) <= reach(demo))
+        .map(|(e, _)| e)
+        .collect();
+    for e in meadows {
+        world.entity_mut(e).remove::<GrassBurn>();
+    }
+    // Embers still flying from the old fire would light spot fires on the fresh meadow, and its
+    // lights would flicker on for a frame.
+    let near = |p: DVec3| p.distance(place.origin) <= reach(demo);
+    let mut embers = world.resource_mut::<Embers>();
+    embers.list.retain(|e| !near(e.position));
+    embers.landings.retain(|(p, _)| !near(*p));
+    world
+        .resource_mut::<sim::FireLights>()
+        .targets
+        .retain(|t| !near(t.position));
     let half = DVec2::new(demo.bounds[0] as f64, demo.bounds[1] as f64);
     let center = DVec2::new(place.origin.x, place.origin.z);
     // Turned or not, the bounds fit in this square.
@@ -796,10 +865,13 @@ fn reset(world: &mut World, demo_entity: Entity, place: Place, demo: &FireDemo) 
     });
 }
 
+/// How far past its bounds a demo puts out fires that escaped it, meters.
+const CONTAIN_MARGIN_M: f64 = 40.0;
+
 /// Put out anything burning just outside the demo (embers that jumped the border).
 fn contain(world: &mut World, place: Place, demo: &FireDemo) {
     let half = Vec2::from(demo.bounds).as_dvec2();
-    let margin = 40.0;
+    let margin = CONTAIN_MARGIN_M;
     let mut field = world.resource_mut::<FireField>();
     let field = &mut *field;
     let cell = field.cell_m as f64;
@@ -910,6 +982,53 @@ mod tests {
         .unwrap();
         app.update_n(2);
         assert_eq!(state(&mut app, -8.0), Some(Intact));
+    }
+
+    #[test]
+    fn a_fresh_fire_looks_the_same_whatever_burnt_before() {
+        use crate::field::CellState;
+        let wind = Vec3::new(3.0, 0.0, 1.0);
+        // What the meadow shows: each cell's state, how many embers fly and how burnt the
+        // grass blades look.
+        let look = |app: &mut App, origin: DVec3| {
+            let field = app.world.resource::<FireField>();
+            let mut counts = [0usize; 5];
+            for x in -40..=40 {
+                for z in -30..=30 {
+                    let p = origin + DVec3::new(x as f64, 0.0, z as f64);
+                    if let Some(c) = field.cell_at(p) {
+                        counts[c.state() as usize] += 1;
+                    }
+                }
+            }
+            let embers = app.world.resource::<Embers>().list.len();
+            let mut q = app.world.query::<&GrassBurn>();
+            let (n, stubble) = q.iter(&app.world).fold((0, 0), |(n, s), g| {
+                let short = g.cells.iter().filter(|c| c.height < 0.5).count();
+                (n + g.cells.len(), s + short)
+            });
+            (counts, embers, n, stubble)
+        };
+        let (mut fresh, origin) = jumped(30.0, wind);
+        let want = look(&mut fresh, origin);
+        // A fire well along, with embers in the air and the grass burnt, then the same jump.
+        let (mut after, _) = jumped(90.0, wind);
+        after.update_n(60);
+        assert!(!after.world.resource::<Embers>().list.is_empty());
+        engine_core::registry::call_api(
+            &mut after.world,
+            "fire.demo",
+            serde_json::json!({ "at_secs": 30.0 }),
+        )
+        .unwrap();
+        after.update_n(2);
+        let got = look(&mut after, origin);
+        // (Intact and bare cells are left out: the bigger fire made the field cover more
+        // ground, which is all intact grass again.)
+        assert_eq!(got.0[2..], want.0[2..], "cells burning, smoldering, burnt");
+        assert_eq!(got.1, want.1, "embers");
+        assert_eq!((got.2, got.3), (want.2, want.3), "grass cells, short ones");
+        assert!(want.0[CellState::Burning as usize] > 0);
     }
 
     #[test]

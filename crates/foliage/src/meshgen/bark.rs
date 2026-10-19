@@ -1259,6 +1259,22 @@ fn wood_params(kind: BarkKind) -> WoodParams {
     }
 }
 
+/// The mean color (linear RGB) a kind's cut face is painted in inside the bark: what a cap
+/// shows under the [`CUT_VERTEX_WOOD`] vertex color. Tints of weathered cut faces are set
+/// relative to it.
+pub fn cut_wood_mean(kind: BarkKind) -> [f32; 3] {
+    let w = wood_params(kind);
+    // Heartwood fills heart_r² of the face; late wood darkens about a third of each ring.
+    let heart = w.heart_r * w.heart_r;
+    (w.sap.lerp(w.heart, heart) * (1.0 - 0.3 * w.late)).to_array()
+}
+
+/// Whether a kind of wood has a distinct, durable heartwood (oak, pine), which outlasts the
+/// sapwood around it as a stump rots, rather than rotting from the heart out (birch, spruce).
+pub fn has_heartwood(kind: BarkKind) -> bool {
+    wood_params(kind).heart_r > 0.0
+}
+
 /// Paint end grain at disc coordinates `p` (|p| ≤ 1).
 fn paint_cut(w: &WoodParams, seed: u64, p: Vec2) -> Texel {
     let r = p.length();

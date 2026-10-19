@@ -14,6 +14,8 @@
 //! - Ferns and flowers: each plant disappears once its share of the year's growth drops below
 //!   its own threshold ([`Leafing::shows`]).
 //! - Meadow grass: [`grass_dryness`] browns the GPU grass toward straw.
+//! - The forest floor: freshly fallen leaves color the leaf litter (and the leaf clumps on it)
+//!   in autumn, and it lies dark and sodden through winter ([`litter_season`]).
 
 use engine_assets::Assets;
 use engine_core::math::{hash01, smoothstep};
@@ -146,6 +148,42 @@ pub fn grass_dryness(day: f32) -> f32 {
     0.8 * greening.max(browning)
 }
 
+/// The leaf litter on a day: above 0 (up to 1) freshly fallen autumn leaves, from the first
+/// leaf fall in early October until they brown in late November; below 0 (down to −0.6) the
+/// dark, sodden litter of winter, drying out by late April.
+pub fn litter_season(day: f32) -> f32 {
+    let d = day.rem_euclid(YEAR_DAYS);
+    let fresh = smoothstep(262.0, 295.0, d) * (1.0 - smoothstep(318.0, 350.0, d));
+    let sodden = smoothstep(330.0, 362.0, d).max(1.0 - smoothstep(60.0, 118.0, d));
+    fresh - 0.6 * sodden
+}
+
+/// Tint the leaf clumps lying on the forest floor with the season ([`litter_season`]): bright
+/// and warm while freshly fallen, dark through winter.
+pub fn apply_litter_color(
+    season: Res<FoliageSeason>,
+    assets: Option<Res<crate::scenery::SceneryAssets>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+) {
+    let Some(assets) = assets else {
+        return;
+    };
+    if !season.is_changed() && !assets.is_changed() {
+        return;
+    }
+    let s = litter_season(season.day_of_year);
+    let tint = if s > 0.0 {
+        [1.0 + 0.55 * s, 1.0 + 0.08 * s, 1.0 - 0.5 * s]
+    } else {
+        [1.0 + 0.32 * s, 1.0 + 0.34 * s, 1.0 + 0.36 * s]
+    };
+    if let Some(m) = materials.get_mut(assets.leaves)
+        && m.base_color[..3] != tint
+    {
+        m.base_color = [tint[0], tint[1], tint[2], m.base_color[3]];
+    }
+}
+
 /// Copy the weather's calendar into [`FoliageSeason`] when it follows the weather. Small clock
 /// steps are skipped, so plants re-dress a few times a day rather than every frame.
 pub fn follow_weather_calendar(
@@ -227,6 +265,14 @@ mod tests {
         let c = birch.color(green, l, 1);
         assert!(c[0] > c[1] * 0.9 && c[0] > green[0] * 3.0, "{c:?}");
         assert_eq!(birch.color(green, Leafing::SUMMER, 1), green);
+    }
+
+    #[test]
+    fn leaf_litter_is_fresh_in_autumn_and_sodden_in_winter() {
+        assert_eq!(litter_season(MIDSUMMER), 0.0);
+        assert!(litter_season(300.0) > 0.8, "late October");
+        assert!(litter_season(20.0) < -0.5, "January");
+        assert_eq!(litter_season(150.0), 0.0, "June");
     }
 
     #[test]
