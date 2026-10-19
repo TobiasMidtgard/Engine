@@ -672,7 +672,9 @@ pub fn update_glow_lights(
                 g.base_lm = lm;
                 g.pulse_secs = pulse;
                 g.phase = (t.translation.x * 0.37 + t.translation.z * 0.61) as f32;
-                light.range = (4.0 + lm.sqrt() * 1.2).min(16.0);
+                // Far enough to light the cave's walls and roof faintly, not just the floor
+                // round each cluster.
+                light.range = (6.0 + lm.sqrt() * 1.8).min(28.0);
             }
             None => {
                 g.base_lm = 0.0;
