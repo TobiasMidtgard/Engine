@@ -1,14 +1,16 @@
 //! Sprites, sprite sheets, tile maps and pixel-perfect cameras, with all art drawn by code
 //! here: a 2D side-scroller (a pixel-art tile map, parallax layers, an animated hero, a slime
 //! and coins, seen through a `PixelPerfect` camera) and a 2.5D diorama (lit paper sprites and
-//! billboard trees among 3D meshes, casting and receiving shadows), by day and at dusk.
+//! billboard trees among 3D meshes, casting and receiving shadows), by day, at sunset and by
+//! lantern light at night.
 //!
 //! ```sh
 //! cargo run -p engine_render --release --example sprites_2d -- [out-dir]
 //! ```
 //!
-//! Saves `side_scroller_a.png`, `side_scroller_b.png`, `diorama_day.png` and
-//! `diorama_dusk.png` (1280 × 720) to `out-dir` (default `sprites_2d`).
+//! Saves `side_scroller_a.png`, `side_scroller_b.png`, `diorama_day.png`, `diorama_dusk.png`
+//! and `diorama_night.png` (1280 × 720) to `out-dir` (default `sprites_2d`); a second
+//! argument (`side,day,dusk,night`) picks scenes.
 
 use std::f32::consts::{FRAC_PI_2, PI};
 use std::path::Path;
@@ -406,28 +408,72 @@ fn forest(w: i32, h: i32, seed: u32, body: Rgba, rim: Rgba) -> Canvas {
     c
 }
 
-/// Dark grass and fern silhouettes for a foreground layer repeating every `w` texels.
-fn foreground_grass(w: i32) -> Canvas {
-    let mut c = Canvas::new(w, 28);
-    let mut x = 2.0;
-    let mut i = 0;
-    while x < w as f32 {
-        let clump = hash(i, 0, 91) < 0.55;
-        if clump {
-            let blades = 4 + (hash(i, 1, 91) * 5.0) as i32;
-            for b in 0..blades {
-                let lean = (hash(i, b + 2, 91) - 0.5) * 10.0;
-                let len = 8.0 + hash(i, b + 20, 91) * 18.0;
-                let bx = x + b as f32 * 1.5;
-                c.line((bx, 27.0), (bx + lean, 27.0 - len), 1, INK);
+/// Dark foliage (bush mounds and fern fronds over a strip of grass) for a foreground layer
+/// repeating every `w` texels, with a dim rim of light along its upper edges.
+fn foreground_foliage(w: i32) -> Canvas {
+    let h = 40;
+    let mut c = Canvas::new(w, h);
+    let (dark, rim) = (hex(0x0f2027), hex(0x1d3d44));
+    for (i, x) in [30.0f32, 122.0, 200.0].into_iter().enumerate() {
+        let i = i as i32;
+        let r = 8.0 + hash(i, 0, 91) * 5.0;
+        for k in -2..=2 {
+            let kx = x + k as f32 * r * 0.7;
+            let kr = r * (1.0 - 0.18 * (k as f32).abs()) + hash(i, k + 10, 91) * 2.0;
+            let ky = h as f32 + 1.0 - kr * 0.75;
+            c.disc(kx, ky, kr, dark);
+            // Leafy bumps along the top.
+            for b in 0..4 {
+                let a = (b as f32 / 3.0 - 0.5) * 2.2 + (hash(i, k * 7 + b, 94) - 0.5) * 0.4;
+                let br = 1.5 + hash(i, k * 7 + b, 95) * 1.5;
+                c.disc(kx + a.sin() * kr, ky - a.cos() * kr, br, dark);
             }
         }
-        x += 6.0 + hash(i, 40, 91) * 26.0;
-        i += 1;
+        // Fronds arching out of the mound, with leaflets.
+        let (sx, sy) = (x, h as f32 + 4.0 - r * 1.75);
+        for f in 0..5 {
+            let a = (f as f32 / 4.0 - 0.5) * 1.5 + (hash(i, f + 30, 91) - 0.5) * 0.3;
+            let len = 14.0 + hash(i, f + 20, 91) * 10.0;
+            let mut prev = (sx, sy);
+            for step in 1..=10 {
+                let t = step as f32 / 10.0;
+                let ang = a * (1.0 + t * 0.6);
+                let p = (
+                    sx + ang.sin() * len * t,
+                    sy - ang.cos() * len * t + t * t * 3.0,
+                );
+                c.line(prev, p, if t < 0.5 { 2 } else { 1 }, dark);
+                if step % 2 == 0 && t < 0.95 {
+                    let side = 3.5 * (1.0 - t) + 0.5;
+                    c.line(
+                        p,
+                        (p.0 - ang.cos() * side, p.1 - ang.sin() * side - 1.0),
+                        1,
+                        dark,
+                    );
+                    c.line(
+                        p,
+                        (p.0 + ang.cos() * side, p.1 + ang.sin() * side - 1.0),
+                        1,
+                        dark,
+                    );
+                }
+                prev = p;
+            }
+        }
     }
     for x in 0..w {
-        let h = (2.0 + 3.0 * noise1(x as f32 / 8.0, w / 8, 92)) as i32;
-        c.rect(x, 28 - h, 1, h, INK);
+        let spike = if hash(x, 0, 93) < 0.3 { 2 } else { 0 };
+        let gh = (2.0 + 4.0 * noise1(x as f32 / 8.0, w / 8, 92)) as i32 + spike;
+        c.rect(x, h - gh, 1, gh, dark);
+    }
+    let src = c.clone();
+    for y in 0..h {
+        for x in 0..w {
+            if src.opaque(x, y) && !src.opaque(x, y - 1) && !src.opaque(x - 1, y - 1) {
+                c.set(x, y, rim);
+            }
+        }
     }
     c
 }
@@ -454,6 +500,8 @@ const SIGN: u32 = 17;
 const WATER_TOP: u32 = 18;
 const WATER: u32 = 19;
 const BRICK_DARK: u32 = 20;
+const BRICK_CRACKED: u32 = 21;
+const BRICK_DARK_BROKEN: u32 = 22;
 const TILESET_COLUMNS: u32 = 8;
 const TILESET_ROWS: u32 = 3;
 
@@ -504,7 +552,7 @@ fn brick_tile(t: &mut Canvas, [face, light, mortar, dark]: [Rgba; 4]) {
             let y0 = row * 4;
             for y in y0..y0 + 3 {
                 for x in x0..x0 + 7 {
-                    if x < 0 || x >= 16 {
+                    if !(0..16).contains(&x) {
                         continue;
                     }
                     let col = if y == y0 {
@@ -709,6 +757,27 @@ fn tileset() -> Canvas {
                 }
             }
             BRICK_DARK => brick_tile(&mut t, [STEEL, SLATE, DEEP, INK]),
+            BRICK_CRACKED => {
+                brick_tile(&mut t, [SLATE, SILVER, STEEL, hex(0x47566f)]);
+                // A missing brick and a crack running from it.
+                t.rect(8, 4, 7, 3, DEEP);
+                t.rect(8, 4, 7, 1, STEEL);
+                t.line((8.0, 7.0), (5.0, 10.0), 1, STEEL);
+                t.line((5.0, 10.0), (6.0, 14.0), 1, STEEL);
+            }
+            BRICK_DARK_BROKEN => {
+                brick_tile(&mut t, [STEEL, SLATE, DEEP, INK]);
+                // Broken away in steps toward the right.
+                for x in 0..16 {
+                    let gone = [0, 0, 0, 0, 1, 1, 4, 4, 4, 4, 5, 8, 8, 8, 9, 12][x as usize];
+                    for y in 0..gone {
+                        t.set(x, y, CLEAR);
+                    }
+                    if gone > 0 && gone < 16 {
+                        t.set(x, gone, SLATE);
+                    }
+                }
+            }
             PLANK => plank_tile(&mut t, false),
             PLANK_END => plank_tile(&mut t, true),
             CRATE => crate_tile(&mut t),
@@ -897,7 +966,20 @@ fn side_scroller_map(tileset: Handle<Image>) -> (TileMap, TileMap, TileMap) {
             let edge_left = left <= y;
             let edge_right = right <= y;
             let (frame, flip) = if brick {
-                (if top { BRICK_MOSS } else { BRICK }, 0)
+                let cracked = hash(x as i32, y as i32, 23) < 0.22;
+                let frame = match (top, cracked) {
+                    (true, _) => BRICK_MOSS,
+                    (false, true) => BRICK_CRACKED,
+                    (false, false) => BRICK,
+                };
+                (
+                    frame,
+                    if hash(x as i32, y as i32, 24) < 0.5 {
+                        TILE_FLIP_X
+                    } else {
+                        0
+                    },
+                )
             } else if top {
                 match (edge_left, edge_right) {
                     (true, _) => (GRASS_LEFT, 0),
@@ -908,7 +990,7 @@ fn side_scroller_map(tileset: Handle<Image>) -> (TileMap, TileMap, TileMap) {
                 (DIRT_LEFT, 0)
             } else if edge_right {
                 (DIRT_LEFT, TILE_FLIP_X)
-            } else if y + 3 < h {
+            } else if y + 3 < h || (y == 0 && h >= 2) {
                 (DIRT_DEEP, 0)
             } else if hash(x as i32, y as i32, 5) < 0.5 {
                 (DIRT_A, 0)
@@ -961,11 +1043,27 @@ fn side_scroller_map(tileset: Handle<Image>) -> (TileMap, TileMap, TileMap) {
         set(&mut ground, x, y, tile(CRATE));
     }
     set(&mut ground, 4, 3, tile(SIGN));
-    // A ruined wall behind the brick hill (a second map, tinted darker, behind the first).
-    for x in 31..=43u32 {
-        let top = 9 - ((x as i32 - 37).abs() / 2) as u32 - (hash(x as i32, 3, 9) * 2.0) as u32;
+    // A ruined wall behind the brick hill (a second map, tinted darker, behind the first):
+    // broken tops, two window openings.
+    let tops = [6u32, 7, 9, 9, 8, 9, 10, 10, 9, 8, 9, 7, 6];
+    for (i, x) in (31..=43u32).enumerate() {
+        let top = tops[i];
         for y in 3..top {
-            set(&mut back, x, y, tile(BRICK_DARK));
+            let window = (x == 35 || x == 39) && (6..=7).contains(&y);
+            if window {
+                continue;
+            }
+            let v = if y + 1 == top {
+                let flip = if hash(x as i32, 5, 9) < 0.5 {
+                    TILE_FLIP_X
+                } else {
+                    0
+                };
+                tile(BRICK_DARK_BROKEN) | flip
+            } else {
+                tile(BRICK_DARK)
+            };
+            set(&mut back, x, y, v);
         }
     }
     (ground, back, water)
@@ -1140,11 +1238,11 @@ fn side_scroller() -> SideScroller {
         ));
     }
 
-    // Dark grass in front of everything, moving faster than the level.
-    let grass = add_image(&mut app, foreground_grass(256).image());
+    // Dark foliage in front of everything, moving faster than the level.
+    let foliage = add_image(&mut app, foreground_foliage(256).image());
     app.world.spawn((
-        Transform::from_translation(layer_position(DVec3::new(0.0, -0.2, 5.0), 1.35, camera_at)),
-        Sprite::pixel_art(grass, [256, 28], PPU)
+        Transform::from_translation(layer_position(DVec3::new(0.0, -0.25, 5.0), 1.35, camera_at)),
+        Sprite::pixel_art(foliage, [256, 40], PPU)
             .with_anchor([0.0, 0.0])
             .with_layer(10),
         Parallax::new(1.35).repeating(16.0),
@@ -1407,20 +1505,22 @@ fn flower_sprite(petals: Rgba, center: Rgba) -> Canvas {
     c
 }
 
+/// A tuft of grass fanning out from its root, 12 × 10 texels.
 fn tuft_sprite(seed: u32) -> Canvas {
     let mut c = Canvas::new(12, 10);
-    for b in 0..5 {
-        let x = 2.0 + b as f32 * 2.0;
-        let lean = (hash(b, 0, seed) - 0.5) * 5.0;
-        let len = 4.0 + hash(b, 1, seed) * 5.0;
-        c.line(
-            (x, 9.0),
-            (x + lean, 9.0 - len),
-            1,
-            if b % 2 == 0 { GREEN } else { TEAL },
-        );
-        c.set((x + lean) as i32, (9.0 - len) as i32, LIME);
+    let blades = 7;
+    for b in 0..blades {
+        let fan = b as f32 / (blades - 1) as f32 - 0.5;
+        let len = 5.0 + hash(b, 1, seed) * 4.0 - fan.abs() * 3.0;
+        let tip = (6.0 + fan * 10.0 + (hash(b, 0, seed) - 0.5) * 2.0, 9.5 - len);
+        let root = (6.0 + fan * 3.0, 9.5);
+        let mid = ((root.0 + tip.0) * 0.5, (root.1 + tip.1) * 0.5);
+        let shade = if b % 3 == 1 { hex(0x2f7448) } else { GREEN };
+        c.line(root, mid, 1, hex(0x2f7448));
+        c.line(mid, tip, 1, shade);
+        c.set(tip.0 as i32, tip.1 as i32, LIME);
     }
+    c.rect(4, 9, 5, 1, hex(0x2f7448));
     c
 }
 
@@ -1758,14 +1858,18 @@ struct Diorama {
     app: App,
 }
 
-/// The diorama's light: the sun (shining along `sun_dir`), the exposure, and whether the
-/// lanterns, windows and campfire are lit.
+/// The diorama's light: the sun or moon (shining along `sun_dir`), the exposure, and the
+/// lanterns, windows and campfire (lit when `lamps`).
 #[derive(Clone, Copy)]
 struct Lighting {
     sun_dir: DVec3,
     sun: DirectionalLight,
     ev100: f32,
-    dusk: bool,
+    lamps: bool,
+    /// Lantern glass and window luminance (cd/m²) and the lanterns' and fire's light (lm).
+    glow_nits: f32,
+    lantern_lm: f32,
+    fire_lm: f32,
 }
 
 impl Lighting {
@@ -1775,25 +1879,49 @@ impl Lighting {
             sun_dir: DVec3::new(0.5, -0.7, -0.5),
             sun: DirectionalLight::default(),
             ev100: 14.0,
-            dusk: false,
+            lamps: false,
+            glow_nits: 0.0,
+            lantern_lm: 0.0,
+            fire_lm: 800.0,
         }
     }
 
-    /// The sun low behind the village (the atmosphere reddens and dims it), lamps lit.
+    /// The sun `elevation_deg` above the horizon behind the village (the atmosphere reddens
+    /// and dims it), lamps lit.
     fn dusk(elevation_deg: f64, ev100: f32) -> Self {
         let e = elevation_deg.to_radians();
         Self {
             sun_dir: DVec3::new(-0.55 * e.cos(), -e.sin(), 0.83 * e.cos()),
             sun: DirectionalLight::default(),
             ev100,
-            dusk: true,
+            lamps: true,
+            glow_nits: 600.0,
+            lantern_lm: 500.0,
+            fire_lm: 2500.0,
+        }
+    }
+
+    /// Night under a bright moon: the lanterns, windows and fire light the village.
+    fn night() -> Self {
+        Self {
+            sun_dir: DVec3::new(0.35, -0.75, -0.55),
+            sun: DirectionalLight {
+                color: [0.6, 0.72, 1.0],
+                illuminance: 1.0,
+                ..Default::default()
+            },
+            ev100: 0.5,
+            lamps: true,
+            glow_nits: 2.5,
+            lantern_lm: 450.0,
+            fire_lm: 900.0,
         }
     }
 }
 
 /// The diorama under `light`.
 fn diorama(light: Lighting) -> Diorama {
-    let dusk = light.dusk;
+    let dusk = light.lamps;
     let mut app = headless_app(1280, 720);
     app.world.resource_mut::<FogSettings>().density = 0.0;
     let w = &mut app.world;
@@ -1879,7 +2007,7 @@ fn diorama(light: Lighting) -> Diorama {
         ),
     ));
     let window = if dusk {
-        StandardMaterial::color(0.9, 0.7, 0.4).with_emissive([1.0, 0.62, 0.3], 8.0)
+        StandardMaterial::color(0.9, 0.7, 0.4).with_emissive([1.0, 0.62, 0.3], light.glow_nits)
     } else {
         StandardMaterial::color(0.25, 0.35, 0.45).with_roughness(0.2)
     };
@@ -2217,7 +2345,7 @@ fn diorama(light: Lighting) -> Diorama {
         SpriteAnimation::new(6..8, 2.0),
     ));
 
-    // Lanterns along the road and the campfire's flames; lit at dusk.
+    // Lanterns along the road and the campfire's flames.
     let lantern_image = add_image(&mut app, lantern().image());
     let glow_image = add_image(&mut app, glow());
     let post = StandardMaterial::color(0.08, 0.08, 0.09).with_roughness(0.5);
@@ -2239,7 +2367,7 @@ fn diorama(light: Lighting) -> Diorama {
             .with_billboard(Billboard::Upright)
             .lit();
         if dusk {
-            head = head.with_emissive(40.0);
+            head = head.with_emissive(light.glow_nits);
             app.world.spawn((
                 Transform::from_translation(base + DVec3::new(0.0, 2.15, 0.25)),
                 Sprite::new(glow_image, [1.6, 1.6])
@@ -2251,7 +2379,7 @@ fn diorama(light: Lighting) -> Diorama {
                 Transform::from_translation(base + DVec3::new(0.0, 2.15, 0.3)),
                 PointLight {
                     color: [1.0, 0.7, 0.4],
-                    intensity_lm: 500.0,
+                    intensity_lm: light.lantern_lm,
                     range: 7.0,
                     radius: 0.05,
                 },
@@ -2282,8 +2410,8 @@ fn diorama(light: Lighting) -> Diorama {
     app.world.spawn((
         Transform::from_translation(fire + DVec3::new(0.0, 0.6, 0.0)),
         PointLight {
-            color: [1.0, 0.55, 0.25],
-            intensity_lm: if dusk { 2500.0 } else { 800.0 },
+            color: [1.0, 0.45, 0.18],
+            intensity_lm: light.fire_lm,
             range: 9.0,
             radius: 0.2,
         },
@@ -2302,7 +2430,7 @@ fn save(app: &mut App, out: &Path, name: &str) {
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let out = std::path::PathBuf::from(args.first().map_or("sprites_2d", |s| s.as_str()));
-    // Optional: which scenes to render (`side`, `day`, `dusk`; all by default).
+    // Optional: which scenes to render (`side`, `day`, `dusk`, `night`; all by default).
     let only = args.get(1).cloned().unwrap_or_default();
     let wanted = |scene: &str| only.is_empty() || only.split(',').any(|s| s == scene);
     std::fs::create_dir_all(&out).expect("output directory");
@@ -2326,6 +2454,11 @@ fn main() {
         let Diorama { mut app } = diorama(Lighting::dusk(4.0, 10.0));
         app.update_n(8);
         save(&mut app, &out, "diorama_dusk");
+    }
+    if wanted("night") {
+        let Diorama { mut app } = diorama(Lighting::night());
+        app.update_n(8);
+        save(&mut app, &out, "diorama_night");
     }
     // Lighting experiments: `exp:<elevation>:<ev100>`.
     for e in only.split(',').filter_map(|s| s.strip_prefix("exp:")) {

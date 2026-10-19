@@ -562,7 +562,7 @@ fn lit_sprite_is_darker_in_shadow_than_in_sun_and_cutouts_cast_shadows() {
                 size: [40.0, 40.0],
                 subdivisions: 1,
             },
-            gray.clone(),
+            gray,
         ),
     ));
     // A white paper sprite lying on the ground (facing up), lit; a 2 m wall to its left shades

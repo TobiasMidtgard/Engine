@@ -30,8 +30,9 @@
 //!   `MeshRenderer`s that name an asset key load it on first use; files hot reload. See
 //!   [`gltf_loader`].
 //! - **2D and 2.5D**: [`Sprite`]s (sprite sheets, [`SpriteAnimation`], billboards, lit or unlit,
-//!   cut-out sprites that write depth and cast shadows), [`TileMap`]s drawn a chunk per draw
-//!   call, [`Parallax`] layers and [`PixelPerfect`] orthographic cameras for crisp pixel art.
+//!   cut-out sprites that write depth and cast shadows), [`TileMap`]s drawn in one or a few
+//!   draw calls, [`Parallax`] layers and [`PixelPerfect`] orthographic cameras for crisp pixel
+//!   art.
 //!   See [`sprites`].
 //! - **Extensible**: everything is a [`RenderFeature`]; water, terrain, particles, volumetric
 //!   clouds, foliage and UI plug in without touching the core.

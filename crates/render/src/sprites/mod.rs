@@ -90,10 +90,11 @@ pub enum SpriteFilter {
 }
 
 /// How a sprite's alpha is used.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
 pub enum SpriteAlpha {
     /// Alpha blending over what is behind, after the opaque scene: soft edges, glass, smoke.
     /// Sorted by [`Sprite::layer`], then back to front. Casts no shadow.
+    #[default]
     Blend,
     /// Adds its color (times alpha) to what is behind: fire, sparks, magic glows.
     Additive,
@@ -101,12 +102,6 @@ pub enum SpriteAlpha {
     /// goes through the depth prepass and casts sun shadows (with the cut-out holes). Paper
     /// characters, foliage cards, pixel art with hard edges.
     Cutout(f32),
-}
-
-impl Default for SpriteAlpha {
-    fn default() -> Self {
-        SpriteAlpha::Blend
-    }
 }
 
 /// How an image is cut into frames: the cells of a sprite sheet or a tileset.
