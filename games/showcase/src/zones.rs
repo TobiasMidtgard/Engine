@@ -265,6 +265,17 @@ fn lake_water<'a>(z: &Zone, ground: &'a dyn Fn(f64, f64) -> f64) -> engine_water
     }
 }
 
+/// A tour stop for one of the water module's views; those it marks as pure CPU simulation warm
+/// up without drawing.
+fn water_view(v: &engine_water::demo::DemoView) -> View {
+    let view = View::new(v.key, v.name, v.eye, v.target, v.hour).warmup(v.warmup_secs);
+    if v.quick_warmup {
+        view.quick_warmup()
+    } else {
+        view
+    }
+}
+
 /// Where Physics' float test floats: out on the deep water south-east of the lake's middle,
 /// clear of the jetty and the dinghy's lane on the west side.
 fn float_test(lake: &Zone) -> DVec3 {
@@ -785,9 +796,7 @@ pub fn demo_views(z: &Zone) -> Vec<View> {
             let mut views: Vec<View> =
                 engine_water::demo::valley_views(&lake_water(z, &|x, z| land.height(x, z)))
                     .iter()
-                    .map(|v| {
-                        View::new(v.key, v.name, v.eye, v.target, v.hour).warmup(v.warmup_secs)
-                    })
+                    .map(water_view)
                     .collect();
             // The float test from the south, 8 m off and 3 m up, a few seconds after a drop
             // (its cycle runs while the camera is near, so it drops as the camera arrives).
@@ -804,10 +813,7 @@ pub fn demo_views(z: &Zone) -> Vec<View> {
             );
             views
         }
-        "water" => engine_water::demo::VIEWS
-            .iter()
-            .map(|v| View::new(v.key, v.name, v.eye, v.target, v.hour).warmup(v.warmup_secs))
-            .collect(),
+        "water" => engine_water::demo::VIEWS.iter().map(water_view).collect(),
         "yard" => vec![
             View::new(
                 "yard_banners",
