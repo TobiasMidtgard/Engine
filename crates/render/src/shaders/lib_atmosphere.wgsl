@@ -12,12 +12,11 @@
 // Radiance is per lux of sunlight above the atmosphere (multiply by `frame.sun_color`).
 // Lengths are meters; `h` is a height above the planet surface, `mu` the cosine of a direction's
 // angle from the local zenith.
+//
+// The air is the planet's (`Atmosphere` on the CPU): Rayleigh and Mie scattering, Mie and ozone
+// absorption per meter at the surface (frame.air_*), so Earth's sky is blue and Mars' is
+// butterscotch with a blue sunset.
 // ============================================================================
-
-const RAYLEIGH_BETA: vec3<f32> = vec3<f32>(5.802e-6, 13.558e-6, 33.1e-6);
-const MIE_BETA: f32 = 3.996e-6;
-const MIE_EXT: f32 = 4.40e-6;
-const OZONE_BETA: vec3<f32> = vec3<f32>(0.650e-6, 1.881e-6, 0.085e-6);
 
 const TRANSMITTANCE_LUT_SIZE: vec2<f32> = vec2<f32>(256.0, 64.0);
 const MULTISCATTER_LUT_SIZE: vec2<f32> = vec2<f32>(32.0, 32.0);
@@ -130,6 +129,13 @@ fn phase_mie(cos_t: f32, g: f32) -> f32 {
         / ((2.0 + g2) * pow(max(1.0 + g2 - 2.0 * g * cos_t, 1e-4), 1.5));
 }
 
+// `phase_mie` with an anisotropy per color channel (the air's: frame.air_mie_g).
+fn phase_mie_rgb(cos_t: f32, g: vec3<f32>) -> vec3<f32> {
+    let g2 = g * g;
+    return 3.0 / (8.0 * PI) * ((1.0 - g2) * (1.0 + cos_t * cos_t))
+        / ((2.0 + g2) * pow(max(1.0 + g2 - 2.0 * g * cos_t, vec3<f32>(1e-4)), vec3<f32>(1.5)));
+}
+
 fn ozone_density(h: f32) -> f32 {
     return max(0.0, 1.0 - abs(h - 25000.0) / 15000.0);
 }
@@ -140,21 +146,23 @@ fn atmo_density(h: f32) -> vec3<f32> {
     return vec3<f32>(exp(-hh / frame.atmosphere.y), exp(-hh / frame.atmosphere.z), ozone_density(hh));
 }
 
+// Extinction (1/m, or optical depth) of the air for densities (or optical depths) `od` of
+// (rayleigh, mie, ozone).
 fn extinction(od: vec3<f32>) -> vec3<f32> {
-    return RAYLEIGH_BETA * od.x + vec3(MIE_EXT) * od.y + OZONE_BETA * od.z;
+    return frame.air_rayleigh.rgb * od.x + frame.air_mie_extinction.rgb * od.y + frame.air_ozone.rgb * od.z;
 }
 
 struct Medium {
     rayleigh: vec3<f32>,    // Rayleigh scattering coefficient (1/m)
-    mie: f32,               // Mie scattering coefficient (1/m)
+    mie: vec3<f32>,         // Mie scattering coefficient (1/m)
     extinction: vec3<f32>,  // total extinction (1/m)
 };
 
 fn atmo_medium(h: f32) -> Medium {
     let d = atmo_density(h);
     var m: Medium;
-    m.rayleigh = RAYLEIGH_BETA * d.x;
-    m.mie = MIE_BETA * d.y;
+    m.rayleigh = frame.air_rayleigh.rgb * d.x;
+    m.mie = frame.air_mie.rgb * d.y;
     m.extinction = extinction(d);
     return m;
 }
@@ -277,7 +285,7 @@ fn integrate_atmosphere(h0: f32, mu: f32, mu_s: f32, nu: f32, t0: f32, t1: f32, 
     let radius = frame.planet.w;
     let r0 = radius + h0;
     let pr = phase_rayleigh(nu);
-    let pm = phase_mie(nu, frame.atmosphere.w);
+    let pm = phase_mie_rgb(nu, frame.air_mie_g.rgb);
     let len = t1 - t0;
     var prev = 0.0;
     var throughput = vec3<f32>(1.0);
@@ -292,8 +300,8 @@ fn integrate_atmosphere(h0: f32, mu: f32, mu_s: f32, nu: f32, t0: f32, t1: f32, 
         let mu_s_t = clamp((r0 * mu_s + tm * nu) / (radius + h), -1.0, 1.0);
         let m = atmo_medium(h);
         let sun = transmittance_to_top(h, mu_s_t) * sun_above_horizon(h, mu_s_t);
-        let scattering = m.rayleigh + vec3<f32>(m.mie);
-        let s = sun * (m.rayleigh * pr + vec3<f32>(m.mie * pm)) + multiscatter(h, mu_s_t) * scattering;
+        let scattering = m.rayleigh + m.mie;
+        let s = sun * (m.rayleigh * pr + m.mie * pm) + multiscatter(h, mu_s_t) * scattering;
         let seg = exp(-m.extinction * dt);
         radiance += throughput * (s - s * seg) / max(m.extinction, vec3<f32>(1e-12));
         throughput *= seg;

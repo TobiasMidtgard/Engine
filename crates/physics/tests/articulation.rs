@@ -279,6 +279,131 @@ fn cone_limits_hold_on_articulated_ball_joints() {
     }
 }
 
+/// Angle between `a`'s and `b`'s `local` axis, radians.
+fn axes_apart(app: &App, a: Entity, b: Entity, local: Vec3) -> f32 {
+    let (ra, rb) = (transform(app, a).rotation, transform(app, b).rotation);
+    (ra * local).angle_between(rb * local)
+}
+
+/// A heavy block with an arm hanging from its underside on a ball joint with a 0.4 rad cone.
+fn hanging_arm(app: &mut App) -> (Entity, Entity) {
+    let block = body(
+        app,
+        DVec3::new(0.0, 3.0, 0.0),
+        Quat::IDENTITY,
+        Collider::cuboid(Vec3::splat(0.5)),
+    );
+    let arm = body(
+        app,
+        DVec3::new(0.0, 1.9, 0.0),
+        Quat::IDENTITY,
+        Collider::cuboid(Vec3::new(0.08, 0.5, 0.08)),
+    );
+    joint(
+        app,
+        JointKind::Spherical {
+            cone_limit: Some(0.4),
+        },
+        block,
+        arm,
+        DVec3::new(0.0, 2.4, 0.0),
+    );
+    (block, arm)
+}
+
+/// A cone limit is round, around the limb's rest direction, and leaves the limb free to twist
+/// about itself: an arm kicked out diagonally stops at the same angle as one kicked straight
+/// out (a square cone lets the diagonal go 40% farther), and an arm turned half a turn about
+/// its own length stays turned, hanging straight.
+#[test]
+fn cone_limits_are_round_and_let_the_limb_twist() {
+    for articulated in [true, false] {
+        for kick in [Vec3::X, Vec3::new(1.0, 0.0, 1.0).normalize()] {
+            let mut app = app(articulated);
+            zero_g(&mut app);
+            let (block, arm) = hanging_arm(&mut app);
+            app.update();
+            // Swing the arm about the joint, its tip out along `kick`.
+            let turn = Vec3::NEG_Y.cross(kick) * 6.0;
+            *app.world.get_mut::<Velocity>(arm).unwrap() = Velocity {
+                linear: turn.cross(Vec3::NEG_Y * 0.5),
+                angular: turn,
+            };
+            let mut widest = 0.0f32;
+            for _ in 0..60 {
+                app.update();
+                widest = widest.max(axes_apart(&app, block, arm, Vec3::Y));
+            }
+            assert!(
+                (0.36..0.44).contains(&widest),
+                "articulated {articulated}, kicked along {kick}: swung {widest} rad (cone 0.4)"
+            );
+        }
+        let mut app = app(articulated);
+        zero_g(&mut app);
+        let (block, arm) = hanging_arm(&mut app);
+        app.update();
+        app.world.get_mut::<Transform>(arm).unwrap().rotation = Quat::from_rotation_y(2.0);
+        let mut widest = 0.0f32;
+        for _ in 0..60 {
+            app.update();
+            widest = widest.max(axes_apart(&app, block, arm, Vec3::Y));
+        }
+        let twist = angle(&app, block, arm, Vec3::Y);
+        assert!(
+            (twist - 2.0).abs() < 0.05 && widest < 0.05,
+            "articulated {articulated}: twisted back to {twist} rad (put at 2), swung {widest} rad"
+        );
+    }
+}
+
+/// A limb pressed against its cone's rim rubs there: an arm sticking out sideways, held at the
+/// bottom of its cone by gravity and swung along the rim, stops within a few swings instead of
+/// rocking along the rim for half a minute.
+#[test]
+fn a_limb_swinging_along_its_cone_rim_stops() {
+    for articulated in [true, false] {
+        let mut app = app(articulated);
+        ground(&mut app);
+        let block = body(
+            &mut app,
+            DVec3::new(0.0, 0.5, 0.0),
+            Quat::IDENTITY,
+            Collider::cuboid(Vec3::splat(0.5)),
+        );
+        let arm = body(
+            &mut app,
+            DVec3::new(1.1, 0.8, 0.0),
+            Quat::IDENTITY,
+            Collider::cuboid(Vec3::new(0.5, 0.08, 0.08)),
+        );
+        joint(
+            &mut app,
+            JointKind::Spherical {
+                cone_limit: Some(0.4),
+            },
+            block,
+            arm,
+            DVec3::new(0.6, 0.8, 0.0),
+        );
+        app.update_n(60);
+        // Send the tip along the rim, toward -Z.
+        app.world.get_mut::<Velocity>(arm).unwrap().angular = Vec3::Y * 3.0;
+        let mut moving = 0;
+        for f in 1..=360 {
+            app.update();
+            if vel(&app, arm).angular.length() > 0.05 {
+                moving = f;
+            }
+        }
+        let secs = moving as f32 / 60.0;
+        assert!(
+            secs < 3.0,
+            "articulated {articulated}: the arm swung along the rim for {secs} s"
+        );
+    }
+}
+
 /// Two arms hinged to a hub, each holding a motor's target angle. One of the two joints can't
 /// make the hub its child (it already has a parent), so it is made from the hub's side: the
 /// motor must still hold the same angle.

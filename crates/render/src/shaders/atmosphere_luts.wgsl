@@ -65,7 +65,7 @@ fn cs_multiscatter(@builtin(global_invocation_id) id: vec3<u32>) {
                 let hk = height_along(h, mu, t);
                 let mu_s_t = clamp((r0 * mu_s + t * nu) / (radius + hk), -1.0, 1.0);
                 let m = atmo_medium(hk);
-                let scattering = m.rayleigh + vec3<f32>(m.mie);
+                let scattering = m.rayleigh + m.mie;
                 let sun = transmittance_to_top(hk, mu_s_t) * sun_above_horizon(hk, mu_s_t);
                 let absorbed = (vec3<f32>(1.0) - exp(-m.extinction * dt)) / max(m.extinction, vec3<f32>(1e-12));
                 light += throughput * sun * scattering * ISOTROPIC_PHASE * absorbed;

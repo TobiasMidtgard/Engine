@@ -246,6 +246,16 @@ fn shots() -> Vec<Shot> {
             frames: 12,
             face_moon: false,
         },
+        // Out of the rain under the bus shelter, looking out at the soaked yard: the ground
+        // under the roof is dry while everything in view past it is wet.
+        Shot {
+            name: "station_under_the_shelter",
+            setup: vec![dry(), set("rain"), hour(14.0), advance(900.0)],
+            eye: DVec3::new(-3.0, 1.5, -3.7),
+            target: DVec3::new(1.5, 0.4, 3.5),
+            frames: 12,
+            face_moon: false,
+        },
     ]
 }
 
