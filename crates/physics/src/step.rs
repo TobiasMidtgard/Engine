@@ -473,6 +473,15 @@ pub(crate) fn physics_step(world: &mut World, mut q: Local<Option<StepQueries>>)
             }
         }
     }
+    sim.water_clock += 1;
+    if sim.water_clock >= WATER_LOOK_EVERY {
+        sim.water_clock = 0;
+        if settings.buoyancy
+            && let Some(w) = water.as_ref()
+        {
+            wake_for_water(&mut sim, w);
+        }
+    }
 
     // ---------------------------------------------------------------- regions
     let max_step = sim
@@ -819,6 +828,115 @@ fn region_reach(region: &crate::sim::Region) -> f64 {
         .world_bounds()
         .map(|(lo, hi)| (hi - lo).length() * 0.5 + region.anchor.distance((lo + hi) * 0.5))
         .unwrap_or(0.0)
+}
+
+/// Steps between looks at the water under bodies ([`wake_for_water`]).
+const WATER_LOOK_EVERY: u32 = 6;
+/// A sleeping body wakes when the water at it rose or fell this far (m) since it fell asleep...
+const WATER_WAKE_LEVEL: f64 = 0.02;
+/// ...or its current changed this much (m/s).
+const WATER_WAKE_CURRENT: f32 = 0.1;
+/// A body afloat in a current faster than this (m/s) drifts with it and never falls asleep.
+const WATER_CARRY: f32 = 0.02;
+/// Water this far (m) below a body's bottom still counts as reaching it.
+const WATER_REACH: f64 = 0.05;
+
+/// Wake bodies the water moves. Rapier wakes a sleeping body only when another body touches it,
+/// and the water is no body, so:
+/// - a sleeping body wakes when the water reaching it rises, falls or starts to flow. Each look
+///   compares the water with what it was when the body was first seen asleep, so a slow tide
+///   adds up. A body the water stays clear of, or stays well over, sleeps on through waves.
+/// - a body afloat in a current is carried along and must not fall asleep, though it may drift
+///   slower than Rapier's sleep threshold: it is kept awake while it rests on nothing fixed.
+fn wake_for_water(sim: &mut Simulation, water: &Water) {
+    let Simulation {
+        bodies, regions, ..
+    } = sim;
+    for entry in bodies.values_mut() {
+        if entry.kind != BodyKind::Dynamic {
+            continue;
+        }
+        let Some(region) = regions[entry.region as usize].as_mut() else {
+            continue;
+        };
+        if region.frozen {
+            continue;
+        }
+        let world = &mut region.world;
+        // `get`, not `get_mut`: Rapier re-checks every body taken mutably.
+        let Some(rb) = world.bodies.get(entry.handle) else {
+            continue;
+        };
+        let sleeping = rb.is_sleeping();
+        if !sleeping {
+            entry.water_mark = None;
+        }
+        let anchor = region.anchor;
+        let now = water
+            .sample(anchor + rb.center_of_mass().as_dvec3())
+            .map_or((f64::NEG_INFINITY, Vec3::ZERO), |s| {
+                (s.surface_height, s.velocity)
+            });
+        let flowing = now.1.length() > WATER_CARRY;
+        if !sleeping && !flowing {
+            continue;
+        }
+        let (mut bottom, mut top) = (f32::INFINITY, f32::NEG_INFINITY);
+        for &ch in rb.colliders() {
+            if let Some(c) = world.colliders.get(ch)
+                && !c.is_sensor()
+            {
+                let aabb = c.compute_aabb();
+                bottom = bottom.min(aabb.mins.y);
+                top = top.max(aabb.maxs.y);
+            }
+        }
+        if bottom > top {
+            continue;
+        }
+        let (bottom, top) = (anchor.y + bottom as f64, anchor.y + top as f64);
+        let reaches = |level: f64| level > bottom - WATER_REACH;
+        let over = |level: f64| level > top + WATER_REACH;
+        let changed = sleeping
+            && match entry.water_mark {
+                None => {
+                    entry.water_mark = Some(now);
+                    false
+                }
+                Some(then) => {
+                    (reaches(now.0) || reaches(then.0))
+                        && (((now.0 - then.0).abs() > WATER_WAKE_LEVEL
+                            && !(over(now.0) && over(then.0)))
+                            || (now.1 - then.1).length() > WATER_WAKE_CURRENT)
+                }
+            };
+        let carried = flowing && reaches(now.0) && !resting_on_fixed(world, rb);
+        if changed || carried {
+            entry.water_mark = None;
+            if let Some(rb) = world.bodies.get_mut(entry.handle) {
+                rb.wake_up(true);
+            }
+        }
+    }
+}
+
+/// Does the body touch a fixed body or a static collider (a riverbed, a quay)?
+fn resting_on_fixed(world: &PhysicsWorld, rb: &rapier3d::prelude::RigidBody) -> bool {
+    rb.colliders().iter().any(|&ch| {
+        world.narrow_phase.contact_pairs_with(ch).any(|pair| {
+            let other = if pair.collider1 == ch {
+                pair.collider2
+            } else {
+                pair.collider1
+            };
+            pair.has_any_active_contact()
+                && world.colliders.get(other).is_some_and(|c| {
+                    c.parent()
+                        .and_then(|b| world.bodies.get(b))
+                        .is_none_or(|b| !b.is_dynamic())
+                })
+        })
+    })
 }
 
 /// Set this step's forces: gameplay `ExternalForce`, the difference between real gravity and

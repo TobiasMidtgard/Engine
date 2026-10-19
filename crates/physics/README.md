@@ -125,7 +125,13 @@ changing that one plugin line.
   bottom (half of critical), so floaters settle instead of bobbing forever; water forces are
   recomputed every substep. Turning drag is per axis, by how far the shape reaches across it
   (a log rolls easily, end over end it drags its whole length). Other shapes (meshes,
-  heightfields) use the submerged share of their bounding box.
+  heightfields) use the submerged share of their bounding box. Sleeping bodies notice the water
+  changing: every 6 steps the water under each one is compared with what it was when the body fell
+  asleep, and a body the water reaches wakes once its level moved 2 cm or its current 0.1 m/s, so
+  a plank rides a slow tide up, a crate floats off a flooded quay and a floater drops with the
+  water when a sluice opens. A body afloat in a current is kept awake while it touches nothing
+  fixed, so it keeps drifting even below Rapier's sleep speed; a stone on the bed sleeps on, and a
+  body the water stays clear of, or stays well over, is never woken by waves.
 - **Time**: runs in `FixedUpdate` / `SimSet::Physics` on world time, so `TimeDilation` slows it;
   each fixed step is split into substeps of at most `max_substep_secs`, so 10× fast-forward is
   as stable as 1×. `LocalTimeScale` speeds a single body up or down, in everything: its

@@ -1234,6 +1234,139 @@ fn barges_pitch_with_a_passing_swell() {
     );
 }
 
+/// Water whose level (m) and current (m/s) can change: a tide, a sluice, a flood.
+struct Tide(Arc<std::sync::Mutex<(f64, Vec3)>>);
+
+impl WaterQuery for Tide {
+    fn sample(&self, _p: DVec3) -> Option<WaterSample> {
+        let (level, current) = *self.0.lock().unwrap();
+        Some(WaterSample {
+            surface_height: level,
+            depth: 20.0,
+            velocity: current,
+            normal: Vec3::Y,
+        })
+    }
+}
+
+fn asleep(app: &App, e: Entity) -> bool {
+    *app.world.get::<Velocity>(e).unwrap() == Velocity::default()
+}
+
+#[test]
+fn sleeping_bodies_wake_when_the_water_rises_falls_or_flows() {
+    let mut app = app();
+    let tide = Arc::new(std::sync::Mutex::new((0.0, Vec3::ZERO)));
+    app.world
+        .insert_resource(Water(Arc::new(Tide(tide.clone()))));
+    // A wooden plank floating, and a light crate on a quay 1 m above the water.
+    let plank = floater(
+        &mut app,
+        DVec3::new(0.0, 0.1, 0.0),
+        Quat::IDENTITY,
+        Collider::cuboid(Vec3::new(1.0, 0.1, 0.5)).with_density(500.0),
+    );
+    ground(&mut app, DVec3::new(10.0, 1.0, 0.0), 3.0);
+    let crate_ = floater(
+        &mut app,
+        DVec3::new(10.0, 1.4, 0.0),
+        Quat::IDENTITY,
+        Collider::cuboid(Vec3::splat(0.4)).with_density(200.0),
+    );
+    // Left alone by the water: a stone on the bed 3 m down, and a crate on a high quay.
+    ground(&mut app, DVec3::new(-10.0, -3.0, 0.0), 3.0);
+    let stone = floater(
+        &mut app,
+        DVec3::new(-10.0, -2.7, 0.0),
+        Quat::IDENTITY,
+        Collider::cuboid(Vec3::splat(0.3)).with_density(2600.0),
+    );
+    ground(&mut app, DVec3::new(0.0, 3.0, 10.0), 3.0);
+    let dry = floater(
+        &mut app,
+        DVec3::new(0.0, 3.4, 10.0),
+        Quat::IDENTITY,
+        Collider::cuboid(Vec3::splat(0.4)).with_density(200.0),
+    );
+    app.update_n(20 * 60);
+    let all = [plank, crate_, stone, dry];
+    assert!(all.iter().all(|&e| asleep(&app, e)), "nothing fell asleep");
+    let rest = pos(&app, plank).y;
+    // Steps the app, noting whether the stone or the dry crate ever woke.
+    let stirred = std::cell::RefCell::new(Vec::new());
+    let run = |app: &mut App, frames: usize| {
+        for _ in 0..frames {
+            app.update();
+            for (name, e) in [("stone", stone), ("dry crate", dry)] {
+                let mut s = stirred.borrow_mut();
+                if !asleep(app, e) && !s.contains(&name) {
+                    s.push(name);
+                }
+            }
+        }
+    };
+
+    // The tide comes in: 1.5 m over 6 s. The plank rides up, the crate floats off the quay.
+    for i in 1..=360 {
+        tide.lock().unwrap().0 = 1.5 * i as f64 / 360.0;
+        run(&mut app, 1);
+    }
+    run(&mut app, 180);
+    let rose = pos(&app, plank).y - rest;
+    assert!(
+        (rose - 1.5).abs() < 0.05,
+        "the plank rose {rose} m with a 1.5 m tide"
+    );
+    // 200 kg/m³ draws 0.16 m: the crate's center 0.24 m above the water.
+    let c = pos(&app, crate_).y;
+    assert!(
+        (c - 1.74).abs() < 0.05,
+        "the crate's center at {c} m on 1.5 m of water"
+    );
+
+    // Calm again: both fall asleep and stay asleep.
+    run(&mut app, 20 * 60);
+    assert!(
+        asleep(&app, plank) && asleep(&app, crate_),
+        "still awake in calm water"
+    );
+
+    // A sluice opens: the water drops 1 m at once and the plank drops with it.
+    tide.lock().unwrap().0 = 0.5;
+    run(&mut app, 5 * 60);
+    let fell = rest + 1.5 - pos(&app, plank).y;
+    assert!(
+        (fell - 1.0).abs() < 0.05,
+        "the plank fell {fell} m with the water"
+    );
+
+    // A current starts: 0.5 m/s along x carries the sleeping plank off, slowly at first (below
+    // the speed at which bodies fall asleep), but the stone on the bed stays where it is.
+    run(&mut app, 20 * 60);
+    assert!(asleep(&app, plank), "plank still awake before the current");
+    assert!(stirred.borrow().is_empty(), "the tide woke the {stirred:?}");
+    let x = pos(&app, plank).x;
+    let bed = pos(&app, stone);
+    tide.lock().unwrap().1 = Vec3::new(0.5, 0.0, 0.0);
+    run(&mut app, 5 * 60);
+    let drift = pos(&app, plank).x - x;
+    assert!(
+        drift > 1.0,
+        "the current carried the plank only {drift} m in 5 s"
+    );
+    // The stone may wake to feel the new current, but sleeps again where it lay.
+    assert!(
+        asleep(&app, stone),
+        "the stone is still awake in the current"
+    );
+    let moved = pos(&app, stone).distance(bed);
+    assert!(moved < 0.01, "the current moved the stone {moved} m");
+    assert!(
+        !stirred.borrow().contains(&"dry crate"),
+        "the water woke the dry crate"
+    );
+}
+
 #[test]
 fn blasts_throw_nearby_bodies_away() {
     let mut app = app();
