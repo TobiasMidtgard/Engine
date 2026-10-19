@@ -1121,17 +1121,39 @@ fn dirt(u: f32, v: f32, seed: u32) -> Texel {
     let dry = smooth(0.15, 0.45, fbm(u * 3.0, v * 3.0, 3, 3, 3, 0.5, seed ^ 0x73));
     let width = 0.012 + 0.02 * (fine * 0.5 + 0.5);
     let crack = (1.0 - smooth(0.0, width, cr.f2 - cr.f1)) * dry;
-    let peb = cells(u * 90.0, v * 90.0, 90, 90, 1.0, seed ^ 0x9);
-    let has_pebble = hash01(peb.id as i32, 1, seed) < 0.12;
-    let pr = 0.18 + 0.25 * hash01(peb.id as i32, 2, seed);
-    let pebble = if has_pebble {
-        1.0 - smooth(pr * 0.7, pr, peb.f1)
-    } else {
-        0.0
-    };
-    let pk = hash01(peb.id as i32, 3, seed);
-    let pebble_col = mix3(rgb(0x6e665c), rgb(0x9a9284), pk);
-    col = mix3(col, pebble_col * (0.8 + 0.3 * (1.0 - peb.f1 / pr)), pebble);
+    // Stones: a few pebbles and a scatter of grit, gathered in patches rather than sprinkled
+    // evenly, irregular, sunk into the soil with a dark rim, and of the soil's own rock (a
+    // little paler or darker than it), not bright specks.
+    let gather = smooth(-0.3, 0.5, fbm(u * 5.0, v * 5.0, 5, 5, 3, 0.5, seed ^ 0x13));
+    let mut pebble = 0.0f32;
+    let mut bump = 0.0f32;
+    let mut rim = 0.0f32;
+    let mut pk = 0.0f32;
+    for (scale, chance, size, tall, k) in [
+        (40.0f32, 0.02 + 0.12 * gather, 0.42f32, 0.004f32, 0x9u32),
+        (90.0, 0.03 + 0.14 * gather, 0.3, 0.0015, 0x19),
+    ] {
+        let p = scale as i32;
+        let c = cells(u * scale, v * scale, p, p, 1.0, seed ^ k);
+        let id = c.id as i32;
+        if hash01(id, 1, seed ^ k) >= chance {
+            continue;
+        }
+        let angle = c.offset.y.atan2(c.offset.x);
+        let phase = 6.0 * hash01(id, 4, seed ^ k);
+        let lumpy = 1.0 + 0.1 * (angle * 2.0 + phase).sin() + 0.07 * (angle * 3.0 - phase).sin();
+        let r = size * (0.5 + 0.5 * hash01(id, 2, seed ^ k)) * lumpy;
+        let inside = 1.0 - smooth(r * 0.75, r, c.f1);
+        rim = rim.max(smooth(r * 0.8, r, c.f1) * (1.0 - smooth(r, r * 1.35, c.f1)));
+        if inside > pebble {
+            pebble = inside;
+            bump = tall * (1.0 - (c.f1 / r).min(1.0).powi(2)).sqrt();
+            pk = hash01(id, 3, seed ^ k);
+        }
+    }
+    let rock = mix3(rgb(0x564d43), rgb(0x8e8578), pk) * (0.8 + 0.3 * (bump * 250.0).min(1.0));
+    col = mix3(col, col * 0.72, rim * 0.35);
+    col = mix3(col, rock, pebble);
     col = mix3(col, rgb(0x2e261e), crack * 0.55);
     // Bits of dead grass lying on the dirt.
     let st = cells(u * 26.0, v * 140.0 + u * 140.0, 26, 140, 1.0, seed ^ 0x11);
@@ -1142,10 +1164,10 @@ fn dirt(u: f32, v: f32, seed: u32) -> Texel {
     Texel {
         albedo: col,
         height: 0.003 * tone + 0.0012 * clods + 0.0004 * fine - 0.0015 * crack
-            + 0.004 * pebble * (1.0 - peb.f1 / pr)
+            + bump * pebble
             + 0.001 * stub,
-        roughness: 0.92 - 0.1 * pebble,
-        ao: 1.0 - 0.3 * crack,
+        roughness: 0.92 - 0.06 * pebble,
+        ao: (1.0 - 0.3 * crack) * (1.0 - 0.2 * rim),
         ..Default::default()
     }
 }

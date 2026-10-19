@@ -248,9 +248,9 @@ fn cs_scatter(
         let g = clamp(g_sum / s_lum, -0.95, 0.95);
         let view_dir = rel / max(length(rel), 1e-6);
         var incoming = vec3<f32>(0.0); // radiance arriving, weighted by the phase function
-        // Sun, through the air and the shadow cascades.
+        // Sun, through the air, the clouds and the shadow cascades.
         if (any(frame.sun_color.rgb > vec3<f32>(0.0))) {
-            let shadow = volume_shadow(lit_at);
+            let shadow = volume_shadow(lit_at) * cloud_shadow(lit_at);
             if (shadow > 0.0) {
                 let phase = henyey_greenstein(dot(view_dir, frame.sun_dir.xyz), g);
                 incoming += frame.sun_color.rgb * sun_transmittance(lit_at) * (shadow * phase);

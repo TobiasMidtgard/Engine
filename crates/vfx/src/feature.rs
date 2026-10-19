@@ -11,9 +11,11 @@
 //!    (particles that hit something or died feeding other layers) from
 //!    `shaders/particles_sim.wgsl`. World-space particles are stored camera-relative and
 //!    shifted by the camera's movement, so they stay precise anywhere in a solar system.
+//!    Last, `cs_sort` (`shaders/particles_sort.wgsl`) orders each visible layer's slots far
+//!    to near.
 //! 3. `draw` (transparent phase) draws ribbons, then each visible emitter far to near as one
-//!    instanced quad per slot (`shaders/particles_draw.wgsl`), softened against the scene
-//!    depth copy. Layers of [`Debris`](crate::Debris) draw instead as solid pieces, one
+//!    instanced quad per slot in that order (`shaders/particles_draw.wgsl`), softened against
+//!    the scene depth copy. Layers of [`Debris`](crate::Debris) draw instead as solid pieces, one
 //!    instanced mesh per slot, in the depth prepass, the opaque phase and the nearer shadow
 //!    cascades (`shaders/debris*.wgsl`).
 //!
@@ -54,6 +56,8 @@ pub const SHADER_DEBRIS_SHADOW: &str = include_str!("shaders/debris_shadow.wgsl"
 pub const SHADER_SIM: &str = include_str!("shaders/particles_sim.wgsl");
 /// Particle sprites (`vs_particle`, `fs_particle`).
 pub const SHADER_DRAW: &str = include_str!("shaders/particles_draw.wgsl");
+/// Sorting each layer's particles far to near (`cs_sort`).
+pub const SHADER_SORT: &str = include_str!("shaders/particles_sort.wgsl");
 /// Trails and beams (`vs_ribbon`, `fs_ribbon`).
 pub const SHADER_RIBBONS: &str = include_str!("shaders/ribbons.wgsl");
 
@@ -67,6 +71,20 @@ pub fn particle_shader(source: &str) -> String {
 /// passes are then composed with `lib_frame`; the shadow pass only with `lib_types`.
 pub fn debris_shader(source: &str) -> String {
     format!("{SHADER_COMMON}\n{SHADER_DEBRIS_COMMON}\n{source}")
+}
+
+/// Most slots one `cs_sort` workgroup sorts; longer rings are sorted in runs of this many.
+const SORT_MAX: u32 = 2048;
+
+/// One run of a layer's slots for `cs_sort` (`SortJob` in `particles_sort.wgsl`), with the
+/// distances its keys span.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct GpuSortJob {
+    first: u32,
+    count: u32,
+    near: f32,
+    far: f32,
 }
 
 /// Nearest shadow cascades debris draws into (the far ones are too coarse for it).
@@ -100,23 +118,29 @@ struct Gpu {
     update: wgpu::ComputePipeline,
     spawn: wgpu::ComputePipeline,
     sub_spawn: wgpu::ComputePipeline,
+    sort: wgpu::ComputePipeline,
     draw: wgpu::RenderPipeline,
     ribbon: wgpu::RenderPipeline,
     debris: wgpu::RenderPipeline,
     debris_prepass: wgpu::RenderPipeline,
     debris_shadow: wgpu::RenderPipeline,
     sim_layout: wgpu::BindGroupLayout,
+    sort_layout: wgpu::BindGroupLayout,
     draw_layout: wgpu::BindGroupLayout,
     debris_layout: wgpu::BindGroupLayout,
     /// Every debris piece's vertices ([`debris::pieces`]).
     pieces: wgpu::Buffer,
     particles: wgpu::Buffer,
+    /// The slot each instance draws: every visible layer's ring sorted far to near.
+    order: wgpu::Buffer,
     slots: u32,
     /// The previous particle buffer and its size, copied into the new one after growing.
     old_particles: Option<(wgpu::Buffer, u64)>,
     emitters: GrowBuffer,
     spawns: GrowBuffer,
     updates: GrowBuffer,
+    /// A count, then this frame's [`GpuSortJob`]s.
+    sort_jobs: GrowBuffer,
     sim: wgpu::Buffer,
     /// Sub-emitter events: a count, then the events (cleared each frame).
     events: wgpu::Buffer,
@@ -124,6 +148,7 @@ struct Gpu {
     cursors: wgpu::Buffer,
     ribbons: GrowBuffer,
     sim_group: Option<wgpu::BindGroup>,
+    sort_group: Option<wgpu::BindGroup>,
     draw_group: Option<wgpu::BindGroup>,
     debris_group: Option<wgpu::BindGroup>,
     /// View size the bind groups' scene copies were made for.
@@ -142,6 +167,8 @@ pub struct ParticleFeature {
     cleared: Vec<PoolRange>,
     /// Visible emitters: view depth, first slot, slot count (drawn far to near).
     draws: Vec<(f32, u32, u32)>,
+    /// Runs of visible layers to sort far to near.
+    sort_jobs: Vec<GpuSortJob>,
     /// Visible debris layers: first slot, slot count.
     debris_draws: Vec<(u32, u32)>,
     /// Debris layers near enough to cast shadows: first slot, slot count.
@@ -196,6 +223,20 @@ fn particle_buffer(device: &wgpu::Device, slots: u32) -> wgpu::Buffer {
             | wgpu::BufferUsages::COPY_SRC,
         mapped_at_creation: false,
     })
+}
+
+/// The draw order of `slots` slots, each drawing itself until the first sort.
+fn order_buffer(gpu: &GpuShared, slots: u32) -> wgpu::Buffer {
+    let buffer = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("vfx draw order"),
+        size: slots as u64 * 4,
+        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+    let identity: Vec<u32> = (0..slots).collect();
+    gpu.queue
+        .write_buffer(&buffer, 0, bytemuck::cast_slice(&identity));
+    buffer
 }
 
 /// Premultiplied blending: alpha 0 adds light, alpha 1 covers what's behind.
@@ -298,6 +339,7 @@ impl RenderFeature for ParticleFeature {
                     },
                     count: None,
                 },
+                storage(4, true, wgpu::ShaderStages::VERTEX),
             ],
         });
 
@@ -320,6 +362,35 @@ impl RenderFeature for ParticleFeature {
         let update = kernel("cs_update");
         let spawn = kernel("cs_spawn");
         let sub_spawn = kernel("cs_sub_spawn");
+
+        let sort_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("vfx sort"),
+            entries: &[
+                storage(0, true, compute),
+                storage(1, true, compute),
+                storage(2, true, compute),
+                storage(3, false, compute),
+            ],
+        });
+        let sort_shader = gpu.shader(
+            "vfx sort",
+            &format!("{SHADER_COMMON}\n{SHADER_SORT}"),
+            false,
+        );
+        let sort = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("cs_sort"),
+            layout: Some(
+                &device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                    label: Some("vfx sort"),
+                    bind_group_layouts: &[Some(&sort_layout)],
+                    immediate_size: 0,
+                }),
+            ),
+            module: &sort_shader,
+            entry_point: Some("cs_sort"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
 
         let target = [Some(wgpu::ColorTargetState {
             format: gpu.formats.hdr,
@@ -510,16 +581,19 @@ impl RenderFeature for ParticleFeature {
             update,
             spawn,
             sub_spawn,
+            sort,
             draw,
             ribbon,
             debris,
             debris_prepass,
             debris_shadow,
             sim_layout,
+            sort_layout,
             draw_layout,
             debris_layout,
             pieces,
             particles: particle_buffer(device, slots),
+            order: order_buffer(gpu, slots),
             slots,
             old_particles: None,
             emitters: GrowBuffer::new(
@@ -530,6 +604,7 @@ impl RenderFeature for ParticleFeature {
             ),
             spawns: GrowBuffer::new(device, "vfx spawns", storage_usage, 64 * 1024),
             updates: GrowBuffer::new(device, "vfx updates", storage_usage, 64 * 1024),
+            sort_jobs: GrowBuffer::new(device, "vfx sort jobs", storage_usage, 16 * 1024),
             sim: device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("vfx sim"),
                 size: std::mem::size_of::<GpuSim>() as u64,
@@ -545,6 +620,7 @@ impl RenderFeature for ParticleFeature {
                 4096 * std::mem::size_of::<RibbonVertex>() as u64,
             ),
             sim_group: None,
+            sort_group: None,
             draw_group: None,
             debris_group: None,
             bound_size: (0, 0),
@@ -654,8 +730,10 @@ impl RenderFeature for ParticleFeature {
             if g.old_particles.is_none() {
                 g.old_particles = Some((old, g.slots as u64 * PARTICLE_BYTES));
             }
+            g.order = order_buffer(gpu, slots);
             g.slots = slots;
             g.sim_group = None;
+            g.sort_group = None;
             g.draw_group = None;
             g.debris_group = None;
         }
@@ -665,6 +743,7 @@ impl RenderFeature for ParticleFeature {
         self.updates.clear();
         self.spawns.clear();
         self.draws.clear();
+        self.sort_jobs.clear();
         self.debris_draws.clear();
         self.debris_shadows.clear();
         self.skipped = 0;
@@ -773,6 +852,17 @@ impl RenderFeature for ParticleFeature {
                 self.debris_draws.push((base, len));
             } else {
                 self.draws.push((view.view_depth(rel), base, len));
+                let distance = rel.length();
+                let mut k = 0;
+                while k < len {
+                    self.sort_jobs.push(GpuSortJob {
+                        first: base + k,
+                        count: SORT_MAX.min(len - k),
+                        near: (distance - reach).max(0.0),
+                        far: distance + reach,
+                    });
+                    k += SORT_MAX;
+                }
             }
         }
         // Far to near, so nearer effects blend over farther ones.
@@ -798,8 +888,22 @@ impl RenderFeature for ParticleFeature {
                 .spawns
                 .write(device, queue, bytemuck::cast_slice(&self.spawns));
         }
+        if !self.sort_jobs.is_empty() {
+            let mut bytes = Vec::with_capacity(16 + self.sort_jobs.len() * 16);
+            bytes.extend_from_slice(bytemuck::cast_slice(&[
+                self.sort_jobs.len() as u32,
+                0,
+                0,
+                0,
+            ]));
+            bytes.extend_from_slice(bytemuck::cast_slice(&self.sort_jobs));
+            if g.sort_jobs.write(device, queue, &bytes) {
+                g.sort_group = None;
+            }
+        }
         if grown {
             g.sim_group = None;
+            g.sort_group = None;
             g.draw_group = None;
             g.debris_group = None;
         }
@@ -921,6 +1025,34 @@ impl RenderFeature for ParticleFeature {
                         binding: 3,
                         resource: wgpu::BindingResource::TextureView(ctx.scene_color_copy),
                     },
+                    wgpu::BindGroupEntry {
+                        binding: 4,
+                        resource: g.order.as_entire_binding(),
+                    },
+                ],
+            }));
+        }
+        if g.sort_group.is_none() {
+            g.sort_group = Some(device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("vfx sort"),
+                layout: &g.sort_layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: g.particles.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: g.emitters.buffer.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: g.sort_jobs.buffer.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 3,
+                        resource: g.order.as_entire_binding(),
+                    },
                 ],
             }));
         }
@@ -981,6 +1113,16 @@ impl RenderFeature for ParticleFeature {
             pass.set_bind_group(0, ctx.frame_group, &[]);
             pass.set_bind_group(1, group, &[]);
             let (x, y) = dispatch_size(jobs);
+            pass.dispatch_workgroups(x, y, 1);
+        }
+        if let (false, Some(group)) = (self.sort_jobs.is_empty(), &g.sort_group) {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("vfx sort"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&g.sort);
+            pass.set_bind_group(0, group, &[]);
+            let (x, y) = dispatch_size(self.sort_jobs.len() as u32);
             pass.dispatch_workgroups(x, y, 1);
         }
     }
@@ -1048,6 +1190,7 @@ impl RenderFeature for ParticleFeature {
 impl ParticleFeature {
     fn clear_draws(&mut self) {
         self.draws.clear();
+        self.sort_jobs.clear();
         self.debris_draws.clear();
         self.debris_shadows.clear();
     }
@@ -1111,6 +1254,17 @@ mod tests {
         // Shadow passes have their own group 0, so no frame bindings.
         let shadow = engine_render::compose_shader(&debris_shader(SHADER_DEBRIS_SHADOW), false);
         engine_render::validate_wgsl("debris_shadow", &shadow).unwrap();
+        let sort = engine_render::compose_shader(&format!("{SHADER_COMMON}\n{SHADER_SORT}"), false);
+        engine_render::validate_wgsl("particles_sort", &sort).unwrap();
+    }
+
+    #[test]
+    fn sort_shader_matches_its_jobs() {
+        assert!(SHADER_SORT.contains(&format!("const SORT_MAX: u32 = {SORT_MAX}u;")));
+        assert!(SHADER_SORT.contains(&format!("array<u32, {SORT_MAX}>")));
+        assert_eq!(std::mem::size_of::<GpuSortJob>(), 16);
+        // Run indices fit below the 16-bit distance in a key.
+        const { assert!(SORT_MAX <= 1 << 16) };
     }
 
     #[test]
