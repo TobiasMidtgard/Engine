@@ -172,6 +172,9 @@ impl Default for RopeBridge {
                 thickness: 0.03,
                 wind_scale: 0.5,
                 prewarm_secs: 2.0,
+                // Mostly timber planks: they float, and their weight hardly changes when wet.
+                buoyancy: 1.5,
+                soak: 0.0,
                 ..SimSettings::default()
             },
             material: SoftMaterial::hex(0x9a8158)

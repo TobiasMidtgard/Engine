@@ -907,6 +907,7 @@ pub fn demo_views(z: &Zone) -> Vec<View> {
             .warmup(12.0),
             // From the stream's west bank, upstream of the silk rinse, with the afternoon sun
             // behind: down through the clear water onto the silks streaming away.
+            // The stream is the lake zone's: render with `--tour yard_rinse --zones yard,lake`.
             {
                 let land = crate::landscape::shared();
                 let (at, down, width) = rinse_site(land);

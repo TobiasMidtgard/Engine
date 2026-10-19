@@ -116,13 +116,13 @@ fn silks() -> [SoftMaterial; 5] {
     let silk = |m: SoftMaterial| m.with_roughness(0.48).with_sheen(0.7).with_wrinkles(0.5);
     [
         // Seigaiha waves in white on indigo.
-        silk(SoftMaterial::hex(0x1c2c5a).with_pattern(Pattern::Waves(150), 0xeae4d4, 0xeae4d4)),
+        silk(SoftMaterial::hex(0x1c2c5a).with_pattern(Pattern::Waves(240), 0xeae4d4, 0xeae4d4)),
         // White plum blossoms with gold hearts on vermilion.
         silk(SoftMaterial::hex(0xbf3426).with_pattern(Pattern::Blossoms(120), 0xf3ecdf, 0xe0ac36)),
         // Kanoko tie-dye dots on murasaki purple.
-        silk(SoftMaterial::hex(0x4a2a5c).with_pattern(Pattern::Shibori(30), 0xeee4ee, 0xeee4ee)),
+        silk(SoftMaterial::hex(0x4a2a5c).with_pattern(Pattern::Shibori(40), 0xeee4ee, 0xeee4ee)),
         // Fine white waves on celadon.
-        silk(SoftMaterial::hex(0x6fa592).with_pattern(Pattern::Waves(110), 0xf1efe4, 0xf1efe4)),
+        silk(SoftMaterial::hex(0x6fa592).with_pattern(Pattern::Waves(190), 0xf1efe4, 0xf1efe4)),
         // Crimson blossoms on cherry-pink.
         silk(SoftMaterial::hex(0xe9bcbc).with_pattern(Pattern::Blossoms(90), 0xa8233a, 0xf0cf55)),
     ]

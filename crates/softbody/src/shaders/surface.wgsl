@@ -64,10 +64,17 @@ fn bands(x: f32, n: u32, m: SoftMaterial) -> vec3<f32> {
     return mix(c0, c1, saturate((f - 1.0) / max(w, 1e-5) + 0.5) * select(0.0, 1.0, k + 1u < n));
 }
 
+// How far a pixel spans in `p`: the longer of its two screen-axis steps.
+fn footprint(p: vec2<f32>) -> f32 {
+    return max(length(dpdx(p)), length(dpdy(p)));
+}
+
 // Seigaiha ("blue sea waves"): rows of fans of concentric arcs, each row overlapping the one
 // above it. `p` in fan radii: fans are 2 apart along a row, rows 0.5 apart, every other row
 // shifted by 1. Returns how much line covers `p` (0..1).
 fn seigaiha(p: vec2<f32>) -> f32 {
+    // A pixel's footprint in arcs (taken before the loop, in uniform control flow).
+    let w = max(footprint(p) * 4.0, 1e-4);
     let j0 = i32(floor(p.y * 2.0)) - 2;
     var r = 0.0;
     // The lowest row whose fan holds `p` is drawn over the others.
@@ -82,12 +89,11 @@ fn seigaiha(p: vec2<f32>) -> f32 {
     }
     // Four arcs to a fan, and a solid dot at its heart. Antialiased by the pattern's own
     // footprint (fwidth of `rings` jumps where fans meet), and faded to the share of line in
-    // the pattern where a pixel spans more than an arc.
+    // the pattern where a pixel spans most of an arc.
     let rings = r * 4.0;
-    let w = max(length(fwidth(p)) * 4.0, 1e-4);
-    let line = 1.0 - smoothstep(0.16 - w, 0.16 + w, abs(rings - round(rings)));
-    let ink = max(select(line, 0.0, rings < 0.5), 1.0 - smoothstep(0.42 - w, 0.42 + w, rings));
-    return mix(ink, 0.33, smoothstep(0.2, 0.6, w));
+    let line = 1.0 - smoothstep(0.13 - 0.5 * w, 0.13 + 0.5 * w, abs(rings - round(rings)));
+    let ink = max(select(line, 0.0, rings < 0.5), 1.0 - smoothstep(0.42 - 0.5 * w, 0.42 + 0.5 * w, rings));
+    return mix(ink, 0.28, smoothstep(0.3, 0.8, w));
 }
 
 // Plum blossoms scattered over cells of `p` (one cell per blossom spacing), some cells bare:
@@ -95,6 +101,8 @@ fn seigaiha(p: vec2<f32>) -> f32 {
 fn blossoms(p: vec2<f32>) -> vec2<f32> {
     var petal = 0.0;
     var heart = 0.0;
+    // Taken before the loop, in uniform control flow.
+    let fp = footprint(p);
     let base = floor(p);
     for (var y = -1; y <= 1; y++) {
         for (var x = -1; x <= 1; x++) {
@@ -105,7 +113,7 @@ fn blossoms(p: vec2<f32>) -> vec2<f32> {
             let size = mix(0.16, 0.3, hash12(cell + 11.7));
             let spin = hash12(cell + 5.9) * 6.2832;
             let q = (p - c) / size;
-            let w = max(length(fwidth(p)) / size, 1e-4);
+            let w = max(fp / size, 1e-4);
             var d = length(q) - 0.45;
             for (var k = 0; k < 5; k++) {
                 let a = spin + f32(k) * 1.2566;
@@ -117,7 +125,7 @@ fn blossoms(p: vec2<f32>) -> vec2<f32> {
         }
     }
     // Where a pixel spans a good part of a blossom, its share of the cloth.
-    let far = smoothstep(0.1, 0.4, length(fwidth(p)));
+    let far = smoothstep(0.1, 0.4, fp);
     return mix(vec2(petal, heart), vec2(0.1, 0.012), far);
 }
 
@@ -130,7 +138,7 @@ fn shibori(p: vec2<f32>) -> f32 {
     let f = fract(q) - 0.5 + (vec2(hash12(cell + 1.3), hash12(cell + 9.1)) - 0.5) * 0.08;
     // Rounded square: the binding thread pinched the cloth into a little tent.
     let d = pow(pow(abs(f.x), 3.0) + pow(abs(f.y), 3.0), 1.0 / 3.0);
-    let w = max(length(fwidth(p)), 1e-4);
+    let w = max(footprint(p), 1e-4);
     let size = mix(0.2, 0.25, hash12(cell + 4.4));
     let ring = smoothstep(size * 0.55 - w, size * 0.55 + w, d) * (1.0 - smoothstep(size - w, size + w * 3.0, d));
     // Where a pixel spans a dot, the dots' share of the cloth.

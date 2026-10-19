@@ -640,9 +640,30 @@ impl Sim {
             }
         }
 
-        // External accelerations: gravity, air, loads.
+        // External accelerations: gravity, water, air, loads.
         self.accel.clear();
         self.accel.resize(self.pos.len(), p.gravity);
+        // Water: lift against gravity on what's under the surface (the same force on a soaked,
+        // heavier particle lifts it less), eased in across the particle's thickness.
+        self.submerged.clear();
+        if let Some(water) = &self.water {
+            self.submerged.resize(self.pos.len(), 0.0);
+            let r = p.radius.max(0.005);
+            for i in 0..self.pos.len() {
+                if self.inv_mass[i] == 0.0 {
+                    continue;
+                }
+                let s = ((water.depth(self.pos[i]) + r) / (2.0 * r)).clamp(0.0, 1.0);
+                if s > 0.0 {
+                    self.submerged[i] = s;
+                    let dry = self.base_inv_mass[i].max(1e-9);
+                    self.accel[i] -= p.gravity * (p.buoyancy * s * self.inv_mass[i] / dry);
+                }
+            }
+        }
+        // The wind only reaches what is out of the water.
+        let submerged = &self.submerged;
+        let in_air = |i: usize| 1.0 - submerged.get(i).copied().unwrap_or(0.0);
         let time = p.time + t0 * dt;
         let side = p.wind.cross(Vec3::Y);
         let gust = |x: Vec3| -> Vec3 {
@@ -653,19 +674,26 @@ impl Sim {
             p.wind * (1.0 + p.turbulence * f) + side * (0.5 * p.turbulence * g)
         };
         if p.drag > 0.0 {
-            for ((a, v), x) in self.accel.iter_mut().zip(&self.vel).zip(&self.pos) {
-                *a += (gust(*x) - *v) * p.drag;
+            for (i, ((a, v), x)) in self
+                .accel
+                .iter_mut()
+                .zip(&self.vel)
+                .zip(&self.pos)
+                .enumerate()
+            {
+                *a += (gust(*x) - *v) * (p.drag * in_air(i));
             }
         }
         if let Some(aero) = p.aero {
             for tri in &self.aero_triangles {
                 let [a, b, c] = tri.map(|i| i as usize);
+                let exposed = (in_air(a) + in_air(b) + in_air(c)) * (1.0 / 3.0);
                 let n2 = (self.pos[b] - self.pos[a]).cross(self.pos[c] - self.pos[a]);
                 let len = n2.length();
-                if len < 1e-12 {
+                if len < 1e-12 || exposed <= 0.0 {
                     continue;
                 }
-                let area = 0.5 * len;
+                let area = 0.5 * len * exposed;
                 let n = n2 / len;
                 let center = (self.pos[a] + self.pos[b] + self.pos[c]) * (1.0 / 3.0);
                 let v_rel = gust(center) - (self.vel[a] + self.vel[b] + self.vel[c]) * (1.0 / 3.0);
@@ -692,24 +720,6 @@ impl Sim {
             let i = i as usize;
             self.accel[i] += f * self.inv_mass[i];
         }
-        // Water: lift against gravity on what's under the surface (the same force on a soaked,
-        // heavier particle lifts it less), eased in across the particle's thickness.
-        self.submerged.clear();
-        if let Some(water) = &self.water {
-            self.submerged.resize(self.pos.len(), 0.0);
-            let r = p.radius.max(0.005);
-            for i in 0..self.pos.len() {
-                if self.inv_mass[i] == 0.0 {
-                    continue;
-                }
-                let s = ((water.depth(self.pos[i]) + r) / (2.0 * r)).clamp(0.0, 1.0);
-                if s > 0.0 {
-                    self.submerged[i] = s;
-                    let dry = self.base_inv_mass[i].max(1e-9);
-                    self.accel[i] -= p.gravity * (p.buoyancy * s * self.inv_mass[i] / dry);
-                }
-            }
-        }
 
         // Water drag on what's in it: cloth resists moving across its face far more than
         // sliding along it (so a strip in a stream lies along the flow and ripples, and a
@@ -733,7 +743,10 @@ impl Sim {
         // Eddies in moving water, like gusts in the wind, turning it every way and carried
         // along by the current, so what streams in it undulates (none in still water).
         // In world space (wrapped), so bodies side by side feel the same eddies.
-        let world = self.origin.rem_euclid(DVec3::splat(4096.0)).as_vec3();
+        // The wrap's seams sit 2 km out, not at the origin (the lake's surface is at y = 0).
+        let world = (self.origin + DVec3::splat(2048.0))
+            .rem_euclid(DVec3::splat(4096.0))
+            .as_vec3();
         let current = |x: Vec3| -> Vec3 {
             if across == Vec3::ZERO {
                 return flow;

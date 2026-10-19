@@ -793,6 +793,9 @@ fn clay_press(commands: &mut Commands, c: DVec3) {
             friction: 0.9,
             thickness: 0.03,
             wind_scale: 0.0,
+            // Clay: sinks, and rain doesn't soak in.
+            buoyancy: 0.5,
+            soak: 0.0,
             ..SimSettings::default()
         },
         ..SoftVolume::default()

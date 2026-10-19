@@ -183,6 +183,38 @@ fn a_dipped_cloth_wets_below_the_waterline_and_a_little_above() {
 }
 
 #[test]
+fn the_wind_only_blows_what_is_out_of_the_water() {
+    // The same cloth hanging in a stiff breeze, in air and all but its top in still water.
+    let mut hems = Vec::new();
+    for water in [None, Some(Vec3::ZERO)] {
+        let mut app = app(water);
+        app.world.resource_mut::<WeatherState>().wind = Vec3::new(0.0, 0.0, 6.0);
+        let cloth = hanging(&mut app, DVec3::new(0.0, LEVEL + 0.1, 0.0));
+        app.update_n(60 * 10);
+        let b = body(&app, cloth);
+        // The lowest dozen particles: how far downwind the hem hangs.
+        let mut low: Vec<DVec3> = (0..b.particle_count())
+            .map(|i| b.world_position(i))
+            .collect();
+        low.sort_by(|a, c| a.y.total_cmp(&c.y));
+        let hem = low[..12].iter().map(|p| p.z).sum::<f64>() / 12.0;
+        hems.push(hem);
+    }
+    eprintln!(
+        "hem {:.2} m downwind in air, {:.2} m in water",
+        hems[0], hems[1]
+    );
+    assert!(
+        hems[0] > 0.3,
+        "in air the breeze blows the hem out: {hems:?}"
+    );
+    assert!(
+        hems[1].abs() < 0.25 * hems[0],
+        "in water the hem hangs nearly straight down: {hems:?}"
+    );
+}
+
+#[test]
 fn a_current_carries_floating_cloth_along() {
     let mut app = app(Some(Vec3::new(0.5, 0.0, 0.0)));
     let cloth = sheet(&mut app, DVec3::new(0.0, LEVEL + 0.1, 0.0));
