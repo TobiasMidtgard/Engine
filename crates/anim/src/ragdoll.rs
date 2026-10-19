@@ -70,6 +70,12 @@ const DRIVE_FREQUENCY: f32 = 30.0;
 const DRIVE_DAMPING: f32 = 0.9;
 /// Slower than this into a hard surface makes no sound, m/s.
 const IMPACT_SPEED: f32 = 1.2;
+/// Joint stiffness of a fully toned limp body (see [`RagdollTone`]), 1/s.
+const TONE_FREQUENCY: f32 = 16.0;
+/// A part hitting something at least this fast lands a toned body, m/s.
+const LANDING_SPEED: f32 = 2.5;
+/// Contacts this soon after going limp (feet still on the ground) don't count as landing, s.
+const LANDING_GRACE_SECS: f32 = 0.15;
 
 /// How a part hangs on its parent part.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -915,6 +921,7 @@ type Owners<'w, 's> = Query<
         Option<&'static Ragdoll>,
         Option<&'static Name>,
         Option<&'static mut CharacterController>,
+        Option<&'static mut RagdollTone>,
     ),
     Without<RagdollPart>,
 >;
@@ -929,6 +936,36 @@ type Parts<'w, 's> = Query<
     ),
     With<RagdollPart>,
 >;
+
+/// Muscle tone in a limp body: its joints turn toward the animated pose (each part relative
+/// to its parent, so nothing pulls the body toward a place or holds it up against gravity),
+/// so a falling body keeps the shape of, say, a `fall_brace` clip in the air. The first hard
+/// landing after it went limp relaxes it over `relax_secs`. Remove it, or set `tone` and
+/// `landed` again, for the next fall.
+#[derive(Component, Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RagdollTone {
+    /// 0 slack .. 1 firm.
+    pub tone: f32,
+    /// How long it takes to go slack once landed, s (0 keeps the tone).
+    pub relax_secs: f32,
+    /// Whether a part has hit something hard since the body went limp.
+    pub landed: bool,
+    /// Seconds limp (landings count after a moment, once the feet have left the ground).
+    #[serde(skip)]
+    pub limp_secs: f32,
+}
+
+impl Default for RagdollTone {
+    fn default() -> Self {
+        Self {
+            tone: 1.0,
+            relax_secs: 0.25,
+            landed: false,
+            limp_secs: 0.0,
+        }
+    }
+}
 
 /// Turn bodies physical and back as their weight changes, pose them from their parts, and
 /// drive the parts toward the animation.
@@ -945,7 +982,9 @@ pub(crate) fn ragdoll_system(
     let frame = time.frame_count();
     let dt = time.delta_secs();
     let flesh = surfaces.id_or_default("flesh");
-    for (entity, mut animator, mut rig, gt, published, ragdoll, name, controller) in &mut owners {
+    for (entity, mut animator, mut rig, gt, published, ragdoll, name, controller, tone) in
+        &mut owners
+    {
         let rig = &mut *rig;
         let def = rig.def.clone();
         let weight = ragdoll.map_or(0.0, |r| r.weight.clamp(0.0, 1.0));
@@ -1023,13 +1062,29 @@ pub(crate) fn ragdoll_system(
             rig.took_controller_bit = false;
         }
 
+        let tone = match tone {
+            Some(mut t) if rig.is_physical() => {
+                t.limp_secs += dt;
+                if t.landed && t.relax_secs > 0.0 {
+                    t.tone = (t.tone - dt / t.relax_secs).max(0.0);
+                }
+                t.tone.clamp(0.0, 1.0)
+            }
+            Some(mut t) => {
+                if t.limp_secs != 0.0 {
+                    t.limp_secs = 0.0;
+                }
+                0.0
+            }
+            None => 0.0,
+        };
         if rig.is_physical() && frame > rig.spawned {
             follow_parts(
                 &def,
                 rig,
                 &mut animator,
                 (gt, &animated),
-                weight,
+                (weight, tone),
                 (frame, dt),
                 &gravity,
                 &mut parts,
@@ -1194,7 +1249,7 @@ fn follow_parts(
     rig: &RagdollRig,
     animator: &mut Animator,
     (gt, animated): (&GlobalTransform, &[(DVec3, Quat)]),
-    weight: f32,
+    (weight, tone): (f32, f32),
     (frame, dt): (u64, f32),
     gravity: &Gravity,
     parts: &mut Parts,
@@ -1258,6 +1313,15 @@ fn follow_parts(
         let inertia = (inverse[i] + inverse[p]).inverse();
         let mut accel = Vec3::ZERO;
         let mut damping = TONE;
+        // Muscle tone: the joint turns toward its animated angle (the parts' rotations
+        // relative to each other, so nothing is pulled toward a place or held up).
+        if tone > 0.0 {
+            let w = cap(TONE_FREQUENCY) * tone;
+            let want = animated[p].1.inverse() * animated[i].1;
+            let have = rot[p].inverse() * rot[i];
+            accel += rot[p] * rotation_vector(want * have.inverse()) * w * w;
+            damping += 1.4 * w;
+        }
         if let JointDef::Ball { limits } = def.parts[i].joint {
             let v = rotation_vector(delta[p].inverse() * delta[i]);
             let excess = Vec3::new(
@@ -1346,6 +1410,7 @@ pub(crate) fn ragdoll_impacts(
     mut noises: MessageWriter<NoiseEvent>,
     parts: Query<(&RagdollPart, &Transform)>,
     rigs: Query<&RagdollRig>,
+    mut tones: Query<&mut RagdollTone>,
 ) {
     for ev in events.read() {
         if ev.phase != ContactPhase::Started || ev.sensor || ev.impulse <= 0.0 {
@@ -1363,6 +1428,13 @@ pub(crate) fn ragdoll_impacts(
             continue;
         };
         let speed = ev.impulse / def.mass_kg.max(0.1);
+        if speed >= LANDING_SPEED
+            && let Ok(mut tone) = tones.get_mut(part.owner)
+            && !tone.landed
+            && tone.limp_secs >= LANDING_GRACE_SECS
+        {
+            tone.landed = true;
+        }
         if speed < IMPACT_SPEED {
             continue;
         }

@@ -37,7 +37,7 @@ pub use muscle::{MorphWeights, Muscle, MuscleDriver, MuscleRig};
 pub use procedural::gait::{GaitLeg, GaitStage, LeggedGait};
 pub use procedural::spring::{SpringChainDef, SpringChains};
 pub use procedural::vehicle::{VehicleRig, WheelRig};
-pub use ragdoll::{RagdollDef, RagdollPart, RagdollRig};
+pub use ragdoll::{RagdollDef, RagdollPart, RagdollRig, RagdollTone};
 pub use retarget::{HandGrip, HandRig, Retarget, RetargetMap, Retargeter};
 pub use skeleton::Skeleton;
 pub use skin::feature::SkinningFeature;
@@ -215,6 +215,10 @@ fn register_types(app: &mut App) {
     .register_component::<HandGrip>(
         "Keeps a character's hands closed at least this much (left, right: 0..1), as when it \
          carries something.",
+    )
+    .register_component::<RagdollTone>(
+        "Muscle tone in a limp body: joints hold the animated pose in the air (tone 0..1) \
+         until the first hard landing, then relax over relax_secs.",
     )
     .register_component::<Face>(
         "Living face on an imported person with face joints: blinks (per minute), gaze at \

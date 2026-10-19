@@ -4,7 +4,7 @@
 //! the physics module); runs with or without the fetched models.
 
 use engine_anim::ragdoll::{BLEND_OUT_SECS, GET_UP_BLEND_SECS, RAGDOLL_LAYER};
-use engine_anim::{AnimationPlugin, RagdollPart, RagdollRig};
+use engine_anim::{AnimationPlugin, RagdollPart, RagdollRig, RagdollTone};
 use engine_core::prelude::*;
 use engine_core::time::TimeSource;
 use engine_world::animation::{AnimationEvent, BodyRequest, Ragdoll, SkeletonPose};
@@ -316,6 +316,66 @@ fn half_limp_bodies_are_pulled_toward_the_animation_and_held_up() {
         f.force
     );
     assert!(f.force.y > 100.0, "held up against gravity: {}", f.force);
+}
+
+#[test]
+fn a_toned_limp_body_holds_its_shape_without_being_held_up_and_relaxes_on_landing() {
+    let mut app = app(true);
+    let e = person(&mut app);
+    wait(&mut app, 0.5);
+    app.world
+        .entity_mut(e)
+        .insert((Ragdoll { weight: 1.0 }, RagdollTone::default()));
+    app.update();
+    let ps = parts(&mut app);
+    let forearm = ps.iter().find(|p| p.1.bone == "lower_arm_l").unwrap().0;
+    // Bend the forearm away from the pose: tone turns it back, with no force on any part.
+    let mut t = app.world.get_mut::<Transform>(forearm).unwrap();
+    t.rotation = Quat::from_rotation_x(1.0) * t.rotation;
+    app.update();
+    let f = app.world.get::<ExternalForce>(forearm).unwrap();
+    assert!(
+        f.torque.length() > 1.0,
+        "toned joint turns back: {}",
+        f.torque
+    );
+    for (p, _) in &ps {
+        let f = app.world.get::<ExternalForce>(*p).unwrap();
+        assert!(
+            f.force.length() < 1e-3,
+            "no pull and no support: {}",
+            f.force
+        );
+    }
+
+    // A hard hit lands it, and it goes slack.
+    wait(&mut app, 0.2);
+    let ground = app.world.spawn(Transform::default()).id();
+    app.world.write_message(ContactEvent {
+        phase: ContactPhase::Started,
+        a: forearm,
+        b: ground,
+        point: DVec3::new(0.0, 0.1, 0.0),
+        normal: Vec3::NEG_Y,
+        impulse: 40.0,
+        sensor: false,
+    });
+    app.update();
+    assert!(app.world.get::<RagdollTone>(e).unwrap().landed);
+    wait(&mut app, 0.3);
+    let tone = app.world.get::<RagdollTone>(e).unwrap();
+    assert_eq!(tone.tone, 0.0);
+    app.update();
+    let mut t = app.world.get_mut::<Transform>(forearm).unwrap();
+    t.rotation = Quat::from_rotation_x(1.0) * t.rotation;
+    app.update();
+    let slack = app
+        .world
+        .get::<ExternalForce>(forearm)
+        .unwrap()
+        .torque
+        .length();
+    assert!(slack < 20.0, "only friction once slack: {slack}");
 }
 
 #[test]

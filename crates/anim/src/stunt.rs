@@ -1,21 +1,22 @@
 //! The paddock's stunt yard, its ragdoll test case: a stuntman climbs the stairs of a raised
 //! deck, sprints across it and goes limp at the edge, falls onto a crash mat with the momentum
-//! of his run, lies still, gets up off the mat (face up or face down, whichever way he landed)
-//! and walks back round to go again. The deck,
-//! stairs and mat are physics colliders (and IK surfaces for his feet); without a physics
-//! module he stops at the edge, stays on his feet and walks back.
+//! of his run (braced, arms out and knees bent, until he hits it: `fall_brace` and
+//! [`RagdollTone`]), lies still, gets up off the mat (face up or face down, whichever way he
+//! landed) and walks back round to go again. The deck, stairs and mat are physics colliders
+//! (and IK surfaces for his feet); without a physics module he stops at the edge, stays on
+//! his feet and walks back.
 
 use std::f32::consts::PI;
 
 use engine_core::prelude::*;
 use engine_render::{MaterialPreset, MeshRenderer, Shape as MeshShape, StandardMaterial};
 use engine_world::Ground;
-use engine_world::animation::{BodyRequest, Ragdoll, SkeletonPose};
+use engine_world::animation::{AnimationTrigger, BodyRequest, Ragdoll, SkeletonPose};
 use engine_world::physics::{Collider, PhysicsQueries, RigidBody};
 
 use crate::animator::Animator;
 use crate::ik::{GroundProbe, IkShape, IkSurface, IkSurfaces};
-use crate::ragdoll::{RagdollRig, get_up_placement};
+use crate::ragdoll::{RagdollRig, RagdollTone, get_up_placement};
 use crate::xform::smoothing;
 
 /// Where the stunt yard is in the paddock: x, z from its center, m.
@@ -224,6 +225,7 @@ pub fn spawn_yard(world: &mut World, origin: DVec3) -> Entity {
 #[allow(clippy::type_complexity)]
 pub(crate) fn stunt_system(
     mut commands: Commands,
+    mut triggers: MessageWriter<AnimationTrigger>,
     time: Res<Time>,
     ground: Res<Ground>,
     physics: Option<Res<PhysicsQueries>>,
@@ -284,8 +286,14 @@ pub(crate) fn stunt_system(
                         stunt.next = 1;
                         stunt.time = 0.0;
                         if stunt.phase == StuntPhase::Run {
-                            // Off the edge: limp, with the run's momentum.
+                            // Off the edge: limp, with the run's momentum, braced for the
+                            // landing until he hits the mat.
                             stunt.phase = StuntPhase::Fall;
+                            triggers.write(AnimationTrigger {
+                                entity,
+                                name: "fall_brace".into(),
+                            });
+                            commands.entity(entity).insert(RagdollTone::default());
                             match ragdoll {
                                 Some(mut r) => r.weight = 1.0,
                                 None => {

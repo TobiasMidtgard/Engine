@@ -1178,6 +1178,52 @@ fn block(s: &Skeleton) -> AnimationClip {
     .with_curve("brace", 2, |_| 1.0)
 }
 
+/// Bracing for a fall: arms reaching forward and down to take it, knees bent, chin tucked,
+/// held for its length. A ragdoll with [`RagdollTone`](crate::ragdoll::RagdollTone) holds
+/// this shape in the air until it lands.
+fn fall_brace(s: &Skeleton) -> AnimationClip {
+    AnimationClip::from_fn("fall_brace", 1.5, 16, false, |ph| {
+        let mut p = PoseBuilder::new(s);
+        // Into the shape over the first fifth.
+        let k = (ph / 0.2).clamp(0.0, 1.0);
+        let k = k * k * (3.0 - 2.0 * k);
+        p.rot("hips", -6.0 * k, 0.0, 0.0);
+        spine(
+            &mut p,
+            [-14.0 * k, -10.0 * k, -8.0 * k, -14.0 * k],
+            [0.0; 4],
+            [0.0; 4],
+        );
+        for side in 0..2 {
+            arm(
+                &mut p,
+                side,
+                Arm {
+                    flex: 4.0 + 66.0 * k,
+                    twist: 10.0 * k,
+                    abduct: 4.0 + 18.0 * k,
+                    elbow: 10.0 + 22.0 * k,
+                    wrist: -35.0 * k,
+                    protract: 8.0 * k,
+                    elevate: 4.0 * k,
+                },
+            );
+            leg(
+                &mut p,
+                side,
+                4.0 + [38.0, 26.0][side] * k,
+                4.0 * k,
+                [62.0, 40.0][side] * k,
+                10.0 * k,
+                0.0,
+            );
+        }
+        p.take()
+    })
+    .with_curve("brace", 2, |_| 1.0)
+    .with_curve("effort", 16, |ph| (ph / 0.2).clamp(0.0, 1.0) * 0.9)
+}
+
 fn reach(s: &Skeleton) -> AnimationClip {
     let effort = [
         (0.0, 0.0),
@@ -1908,13 +1954,15 @@ pub fn clips(s: &Skeleton) -> Vec<AnimationClip> {
         flex(s),
         get_up_back(s),
         get_up_front(s),
+        fall_brace(s),
     ]
 }
 
 /// Locomotion (idle/walk/run by `speed`, leaning by `turn`), plus `heavy_swing` (also on
 /// the contract's `attack_heavy`), `block` (on its trigger or while `blocking` > 0.5, held
 /// while it stays there), `reach` and `flex` actions, and getting up off the floor
-/// (`get_up_back`, `get_up_front`: triggered by the ragdoll when a limp body comes round).
+/// (`get_up_back`, `get_up_front`: triggered by the ragdoll when a limp body comes round), and
+/// `fall_brace` (bracing for a fall, on its trigger from anywhere).
 pub fn graph() -> AnimGraph {
     graph_with(GRAPH, &Locomotion::default())
 }
@@ -2003,6 +2051,7 @@ pub fn graph_with(name: &str, motion: &Locomotion) -> AnimGraph {
                 state("flex", NodeDef::one_shot("flex")),
                 state("get_up_back", NodeDef::one_shot("get_up_back")),
                 state("get_up_front", NodeDef::one_shot("get_up_front")),
+                state("fall_brace", NodeDef::one_shot("fall_brace")),
             ],
             transitions: vec![
                 TransitionDef::new(
@@ -2045,6 +2094,8 @@ pub fn graph_with(name: &str, motion: &Locomotion) -> AnimGraph {
                 TransitionDef::new("*", "get_up_front", Condition::trigger("get_up_front"), 0.0),
                 TransitionDef::new("get_up_back", "move", Condition::Finished, 0.3).inertialize(),
                 TransitionDef::new("get_up_front", "move", Condition::Finished, 0.3).inertialize(),
+                TransitionDef::new("*", "fall_brace", Condition::trigger("fall_brace"), 0.15),
+                TransitionDef::new("fall_brace", "move", Condition::Finished, 0.4).inertialize(),
             ],
             initial: Some("move".into()),
         },
