@@ -307,6 +307,14 @@ fn views() -> Vec<View> {
             ..BASE
         },
         View {
+            name: "earth_globe",
+            world: World3::Earth,
+            eye_ll: Some([25.0, 10.0, 14_000_000.0]),
+            sun_ll: Some([10.0, -15.0]),
+            fov: 55.0,
+            ..BASE
+        },
+        View {
             name: "moon_surface",
             world: World3::Moon,
             eye: DVec3::new(3_500.0, 0.0, -2_500.0),
