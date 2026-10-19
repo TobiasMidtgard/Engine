@@ -592,10 +592,12 @@ pub fn spawn_cave_demo(commands: &mut Commands, center: DVec3) {
             source,
         ));
     }
-    // The pool: dark mineral water with a faint glow of its own, held by a rim of crust.
+    // The pool: dark mineral water with a faint glow of its own, held by a rim of crust. The
+    // glow stays faint: it is the same everywhere on the flat surface, so seen from above any
+    // more of it reads as a painted disc rather than water mirroring the glowcaps.
     let mut pool = StandardMaterial::hex(0x061a1e)
         .with_roughness(0.03)
-        .with_emissive([0.1, 0.9, 0.75], 0.12);
+        .with_emissive([0.1, 0.9, 0.75], 0.025);
     pool.reflectance = 0.5;
     pool.receives_wetness = false;
     commands.spawn((

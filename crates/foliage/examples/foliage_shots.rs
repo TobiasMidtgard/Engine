@@ -263,7 +263,7 @@ fn main() {
     take(&mut app, "03_clearing", &by_name("forest_clearing"));
 
     // Fell a big tree at the edge of the clear-cut into the open, and photograph it coming
-    // down from across the clearing.
+    // down from beside its path.
     let library = app.world.resource::<PlantLibrary>().clone();
     let view = by_name("forest_clearing");
     let fwd = (view.target - view.eye).with_y(0.0).normalize();
@@ -292,7 +292,7 @@ fn main() {
     let crowded = |eye: DVec3| {
         standing
             .iter()
-            .any(|&(p, h, r)| h > 1.2 && (p - eye).with_y(0.0).length() < r + 1.0)
+            .any(|&(p, h, r)| h > 0.8 && (p - eye).with_y(0.0).length() < r + 2.5)
     };
     let candidates: Vec<(Entity, DVec3, f32)> = q
         .iter(&app.world)
@@ -305,27 +305,38 @@ fn main() {
         })
         .map(|(e, p, t)| (e, t.translation, p.size))
         .collect();
-    let camera_for = |base: DVec3| {
+    // Fell it straight into the open and watch from beside its path, inside the clearing:
+    // the trunk shows its whole length, and its crown rises above the far tree line.
+    let camera_for = |base: DVec3, side: f64| {
         let outward = (base - clearing).with_y(0.0).normalize();
-        (outward, (base - outward * 34.0).with_y(view.eye.y + 0.5))
+        let across = DVec3::Y.cross(outward) * side;
+        let eye = (base - outward * 9.0 + across * 12.0).with_y(view.eye.y - 0.5);
+        (outward, eye)
     };
-    let felled = candidates.into_iter().max_by(|a, b| {
-        // Clear line of sight, nothing at the camera, a big tree, the morning sun as in the
-        // clearing view.
-        let score = |&(_, base, size): &(Entity, DVec3, f32)| {
-            let (outward, eye) = camera_for(base);
-            let clear = if in_view(eye, base) { 10.0 } else { 0.0 };
-            let room = if crowded(eye) { 0.0 } else { 5.0 };
-            clear + room + size + 2.0 * outward.dot(fwd) as f32
-        };
-        score(a).total_cmp(&score(b))
-    });
-    if let Some((tree, base, _)) = felled.filter(|_| wanted("04_falling") || wanted("05_fallen")) {
-        let (outward, eye) = camera_for(base);
+    let felled = candidates
+        .into_iter()
+        .flat_map(|c| [(c, 1.0), (c, -1.0)])
+        .max_by(|a, b| {
+            // Clear line of sight, nothing at the camera, a big tree, the morning sun as in
+            // the clearing view.
+            let score = |&((_, base, size), side): &((Entity, DVec3, f32), f64)| {
+                let (outward, eye) = camera_for(base, side);
+                let path = base - outward * 7.0;
+                let clear = if in_view(eye, path) { 10.0 } else { 0.0 };
+                let room = if crowded(eye) { 0.0 } else { 5.0 };
+                let looking = (path - eye).with_y(0.0).normalize();
+                clear + room + size + 2.0 * looking.dot(fwd) as f32
+            };
+            score(a).total_cmp(&score(b))
+        });
+    if let Some(((tree, base, _), side)) =
+        felled.filter(|_| wanted("04_falling") || wanted("05_fallen"))
+    {
+        let (outward, eye) = camera_for(base, side);
         println!(
             "felling a tree {:.0} m from the camera ({}, {})",
             (base - eye).with_y(0.0).length(),
-            if in_view(eye, base) {
+            if in_view(eye, base - outward * 7.0) {
                 "in plain view"
             } else {
                 "partly hidden"
@@ -336,17 +347,16 @@ fn main() {
                 "room at the camera"
             }
         );
-        // Into the clearing, across the view and toward the camera.
-        let dir = (DVec3::Y.cross(outward) - outward).normalize();
-        let look = base + dir * 10.0 + DVec3::Y * 7.0;
+        let dir = -outward;
+        let look = base + dir * 8.0 + DVec3::Y * 5.5;
         aim(&mut app.world, eye, look);
         set_hour(&mut app.world, view.hour);
         app.update_n(6);
         fell_tree(&mut app.world, tree, dir.as_vec3());
-        // It tips slowly, then comes down fast: photograph it halfway, with time stopped so
-        // the frame is sharp.
+        // It tips slowly, then comes down fast: photograph it while its crown still stands
+        // clear of the trees around it, with time stopped so the frame is sharp.
         let mut frames = 0;
-        while fall_angle(&mut app).is_some_and(|a| a < 0.95) && frames < 300 {
+        while fall_angle(&mut app).is_some_and(|a| a < 0.7) && frames < 300 {
             simulate(&mut app, 1);
             frames += 1;
         }
@@ -382,17 +392,17 @@ fn main() {
             .min_by(|a, b| a.0.distance(base).total_cmp(&b.0.distance(base)));
         let (eye, target) = match lying {
             Some((butt, axis)) => {
-                let mid = butt + axis * length * 0.45;
-                let across = DVec3::Y.cross(axis).with_y(0.0).normalize();
-                let toward_clearing = if (clearing - mid).dot(across) > 0.0 {
-                    across
+                // From the same side, a little higher: grass and saplings would hide it from
+                // head height.
+                let mid = butt + axis * length * 0.55;
+                let across = DVec3::Y.cross(outward) * side;
+                let eye = |s: f64| (mid + across * (s * 12.0)).with_y(view.eye.y + 2.5);
+                let s = if crowded(eye(1.0)) && !crowded(eye(-1.0)) {
+                    -1.0
                 } else {
-                    -across
+                    1.0
                 };
-                (
-                    (mid + toward_clearing * 13.0).with_y(view.eye.y),
-                    mid + DVec3::Y * 0.6,
-                )
+                (eye(s), mid + DVec3::Y * 0.4)
             }
             None => (eye, look - DVec3::Y * 5.0),
         };
