@@ -215,23 +215,47 @@ fn a_walker_goes_limp_keeps_moving_and_comes_back() {
     assert!(!app.world.get::<RagdollRig>(e).unwrap().is_blending_back());
 }
 
-#[test]
-fn a_body_lying_face_down_gets_up_off_its_front_and_stands_on_its_entity() {
-    let mut app = app(true);
-    let e = person(&mut app);
-    wait(&mut app, 0.5);
+/// Make `e` limp, topple every part forward about its feet onto the floor (then move it by
+/// `shift`) and let it lie still.
+fn lay_face_down(app: &mut App, e: Entity, shift: DVec3) {
     app.world.entity_mut(e).insert(Ragdoll { weight: 1.0 });
     app.update();
-    // Topple every part forward about the feet onto the floor, and let it lie still.
     let topple = Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2);
-    let lift = DVec3::new(0.0, 0.12, 0.0);
-    for (p, _) in parts(&mut app) {
+    let lift = DVec3::new(0.0, 0.12, 0.0) + shift;
+    for (p, _) in parts(app) {
         let mut t = app.world.get_mut::<Transform>(p).unwrap();
         t.translation = (topple * t.translation.as_vec3()).as_dvec3() + lift;
         t.rotation = topple * t.rotation;
         app.world.get_mut::<Velocity>(p).unwrap().linear = Vec3::ZERO;
     }
+    wait(app, 0.5);
+}
+
+#[test]
+fn a_body_moved_far_from_its_entity_stands_up_there_without_a_get_up() {
+    let mut app = app(true);
+    let e = person(&mut app);
     wait(&mut app, 0.5);
+    lay_face_down(&mut app, e, DVec3::new(5.0, 0.0, 0.0));
+    app.world.get_mut::<Ragdoll>(e).unwrap().weight = 0.0;
+    app.update();
+    app.update();
+    let rig = app.world.get::<RagdollRig>(e).unwrap();
+    assert!(rig.is_blending_back() && rig.getting_up().is_none());
+    wait(&mut app, BLEND_OUT_SECS as f64 + 0.1);
+    let standing = bone(&app, e, "hips");
+    assert!(
+        standing.y > 0.8 && standing.x.abs() < 0.1,
+        "stands at {standing}"
+    );
+}
+
+#[test]
+fn a_body_lying_face_down_gets_up_off_its_front_and_stands_on_its_entity() {
+    let mut app = app(true);
+    let e = person(&mut app);
+    wait(&mut app, 0.5);
+    lay_face_down(&mut app, e, DVec3::ZERO);
     let lying = bone(&app, e, "hips");
     assert!(
         lying.y < 0.3 && lying.z < -0.6,

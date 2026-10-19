@@ -52,6 +52,9 @@ pub const RAGDOLL_LAYER: u32 = 1 << 29;
 pub const BLEND_OUT_SECS: f32 = 0.45;
 /// How long a body lying on the floor takes to blend into its get-up clip, s.
 pub const GET_UP_BLEND_SECS: f32 = 0.35;
+/// Farthest the hips may lie from the entity (model units, horizontally) for a get-up;
+/// farther means the body was moved while limp, and it blends straight back to standing.
+pub const GET_UP_REACH: f32 = 4.0;
 /// Faster than this between two frames is a teleport, not motion, m/s.
 const TELEPORT_SPEED: f32 = 60.0;
 /// How long the animated motion a body keeps when it turns physical is averaged over, s (so
@@ -971,7 +974,13 @@ pub(crate) fn ragdoll_system(
             if published.bones.len() == animator.skeleton.len() && frame > rig.spawned + 1 {
                 let skeleton = animator.skeleton.clone();
                 let model: Vec<Xf> = published.bones.iter().map(Xf::from_bone_pose).collect();
-                let get_up = lying(&skeleton, &model).and_then(|l| {
+                // A body far from its entity was moved (teleported or re-placed) while limp:
+                // it blends straight back to standing there instead.
+                let near = skeleton.index_of("hips").is_some_and(|h| {
+                    let t = model[h].t;
+                    Vec2::new(t.x, t.z).length() < GET_UP_REACH
+                });
+                let get_up = lying(&skeleton, &model).filter(|_| near).and_then(|l| {
                     let secs = get_up_secs(&animator, l.clip)?;
                     animator.trigger(l.clip);
                     animator.events.push(FiredEvent {
@@ -1381,6 +1390,43 @@ pub(crate) fn ragdoll_impacts(
 mod tests {
     use super::*;
     use crate::build::humanoid;
+
+    fn first_frame(s: &Skeleton, name: &str) -> Vec<Xf> {
+        let clip = humanoid::clips(s)
+            .into_iter()
+            .find(|c| c.name == name)
+            .unwrap();
+        let binding = crate::clip::ClipBinding::new(&clip, s);
+        let mut local = s.rest.clone();
+        clip.sample(0.0, &binding, &mut local);
+        let mut model = s.rest_model.clone();
+        s.to_model(&local, &mut model);
+        model
+    }
+
+    #[test]
+    fn lying_tells_face_up_from_face_down_and_lines_the_clip_up_with_the_body() {
+        let s = humanoid::skeleton();
+        assert!(lying(&s, &s.rest_model).is_none(), "standing isn't lying");
+        for (clip, face_down) in [("get_up_back", false), ("get_up_front", true)] {
+            let start = first_frame(&s, clip);
+            let l = lying(&s, &start).expect(clip);
+            assert_eq!((l.clip, l.face_down), (clip, face_down));
+            // The clip's own first frame needs no offset.
+            assert!(l.offset.t.length() < 1e-3, "{clip}: {}", l.offset.t);
+            assert!(l.offset.r.angle_between(Quat::IDENTITY) < 1e-3);
+            // Turned and moved on the floor, the offset is that turn and move.
+            let moved = Xf::from_tr(Vec3::new(1.5, 0.0, -0.7), Quat::from_rotation_y(1.2));
+            let pose: Vec<Xf> = start.iter().map(|x| moved.mul(x)).collect();
+            let l = lying(&s, &pose).expect(clip);
+            assert!(
+                (l.offset.t - moved.t).length() < 1e-3,
+                "{clip}: {}",
+                l.offset.t
+            );
+            assert!(l.offset.r.angle_between(moved.r) < 1e-3);
+        }
+    }
 
     #[test]
     fn a_person_has_fourteen_parts_weighing_seventy_five_kilos() {
