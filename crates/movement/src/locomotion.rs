@@ -1784,7 +1784,8 @@ fn write_params(m: &Mover, params: &mut AnimationParams, up: Vec3) {
     let direction = if speed > 0.1 {
         let local = Quat::from_rotation_arc(m.facing, Vec3::NEG_Z);
         let d = local * vh;
-        d.x.atan2(-d.z)
+        // 0 ahead, positive to the left (counter-clockwise from above), ±π behind.
+        (-d.x).atan2(-d.z)
     } else {
         0.0
     };
@@ -1853,6 +1854,31 @@ fn smooth01(x: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::f32::consts::FRAC_PI_2;
+
+    #[test]
+    fn the_direction_parameter_turns_counter_clockwise_like_yaw() {
+        // Facing −Z: ahead is 0, to the left (−X) is +π/2, to the right −π/2, behind ±π.
+        for (velocity, want) in [
+            (Vec3::NEG_Z, 0.0),
+            (Vec3::NEG_X, FRAC_PI_2),
+            (Vec3::X, -FRAC_PI_2),
+            (Vec3::Z, PI),
+        ] {
+            let m = Mover {
+                facing: Vec3::NEG_Z,
+                velocity: velocity * 4.0,
+                ..Default::default()
+            };
+            let mut params = AnimationParams::default();
+            write_params(&m, &mut params, Vec3::Y);
+            let got = params.get("direction");
+            assert!(
+                (got - want).abs() < 1e-4 || (got.abs() - PI).abs() < 1e-4 && want == PI,
+                "{velocity}: {got} for {want}"
+            );
+        }
+    }
 
     #[test]
     fn a_landing_keeps_coming_down_until_the_ground_stops_it() {
