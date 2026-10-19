@@ -7,7 +7,7 @@
 use engine_core::math::{Quat, Vec3};
 use engine_core::prelude::*;
 use engine_render::{MeshRenderer, StandardMaterial};
-use engine_world::VehicleControls;
+use engine_world::{ExhaustEffects, VehicleControls};
 
 use crate::aero::{Aircraft, Propulsion};
 use crate::drivetrain::Drivetrain;
@@ -245,14 +245,22 @@ pub fn aircraft_visuals(
     }
 }
 
-/// Exhaust plumes: length follows thrust, with a little flicker.
+/// Exhaust plumes: length follows thrust, with a little flicker. Hidden while an effects
+/// module draws the [`engine_world::Exhausts`] instead.
 pub fn plume_visuals(
     time: Res<Time>,
+    effects: Option<Res<ExhaustEffects>>,
     ships: Query<&Spacecraft>,
     mut q: Query<(&ChildOf, &PlumeVisual, &mut Transform, &mut MeshRenderer)>,
 ) {
     let flicker_t = time.elapsed_secs();
     for (parent, vis, mut t, mut r) in &mut q {
+        if effects.is_some() {
+            if r.visible {
+                r.visible = false;
+            }
+            continue;
+        }
         let Ok(ship) = ships.get(parent.parent()) else {
             continue;
         };
