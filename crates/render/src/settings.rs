@@ -284,6 +284,23 @@ impl Default for RenderSettings {
     }
 }
 
+impl RenderSettings {
+    /// Show colors as authored, for pure 2D art (unlit sprites and tile maps, pixel art): no
+    /// tonemapping curve ([`Tonemapper::None`]: 1.0 is white), no grading, vignette, film grain,
+    /// bloom or night desaturation. Turn bloom back on for glowing sprites (colors above 1).
+    pub fn with_flat_colors(mut self) -> Self {
+        self.tonemapper = Tonemapper::None;
+        self.saturation = 1.0;
+        self.contrast = 1.0;
+        self.vignette = 0.0;
+        self.film_grain = 0.0;
+        self.white_balance = 0.0;
+        self.bloom_intensity = 0.0;
+        self.night_desaturation = 0.0;
+        self
+    }
+}
+
 /// Height fog everywhere: the global fog the weather drives. Its density falls off
 /// exponentially with height above `base_height`, so it pools in valleys and thins on hills.
 ///

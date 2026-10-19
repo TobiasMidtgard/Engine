@@ -5,17 +5,22 @@
 //! cargo run -p engine_foliage --example lookdev_trees --release -- /tmp/lookdev_trees [shot..]
 //! ```
 //!
-//! Renders (640×360): a lineup of every tree species at full size (also with every tree forced
-//! to its far level of detail), the oak's root flares, an oak crown lit from the front and
+//! Renders (640×360, or `LOOKDEV_SIZE=1280x720`; `LOOKDEV_ONLY=pine` plants only that species
+//! of the lineup): a lineup of every tree species at full size (also with every tree forced
+//! to its far level of detail, and to its distant one), the oak's root flares, an oak crown lit from the front and
 //! from behind (the sun shining through the leaves), single leaves up close, the conifers,
-//! birch and hazel, and a small mixed grove from 40 m and from 150 m. Name shots after the
-//! directory to render only those (`lineup`, `lineup_lod`, `roots`, `crown_front`,
-//! `leaves_close`, `crown_back`, `conifers`, `birch_hazel`, `grove`, `grove_far`), `textures`
-//! to save the leaf atlases and their normal maps instead, or `stats` to print triangle counts.
+//! birch and hazel, the pine's crown from below, a small mixed grove from 40 m and from
+//! 150 m, and a wood of 12,000 scenery trees from a hill (with and without the distant level). Name shots after the directory to render
+//! only those (`lineup`, `lineup_lod`, `lineup_distant`, `roots`, `crown_front`,
+//! `leaves_close`, `crown_back`, `conifers`, `pine_crown`, `birch_hazel`, `grove`,
+//! `grove_far`, `valley`, `valley_far`), `textures`
+//! to save the leaf atlases, their normal maps and three of their mip levels instead, or `stats` to print triangle counts.
 
 use engine_core::prelude::*;
 use engine_core::time::TimeSource;
-use engine_foliage::{EcologySettings, FoliagePlugin, Genes, spawn_plant};
+use engine_foliage::{
+    EcologySettings, FoliagePlugin, Genes, PlantLibrary, SceneryTree, spawn_plant,
+};
 use engine_render::prelude::*;
 use engine_render::{Exposure, Screenshots};
 use engine_world::WeatherState;
@@ -44,8 +49,9 @@ fn aim(world: &mut World, eye: DVec3, target: DVec3) {
 fn shot(app: &mut App, out: &str, name: &str, eye: DVec3, target: DVec3, to_sun: Vec3) {
     aim(&mut app.world, eye, target);
     set_sun(&mut app.world, to_sun);
-    // Let auto exposure settle.
-    app.update_n(5);
+    // Let auto exposure settle, and every plant pick its level of detail for the new view
+    // (they all do every eighth frame).
+    app.update_n(9);
     let path = format!("{out}/{name}.png");
     app.world
         .resource_mut::<Screenshots>()
@@ -78,28 +84,42 @@ fn save_textures(out: &str) {
                 .expect("png");
             println!("saved {path}");
         }
+        // The color's mip levels a crown 10-50 m away samples (256, 128 and 64 pixels).
+        for level in 1..4 {
+            let size = t.color.width >> (level + 1);
+            let path = format!("{out}/leaves_{name}_color_mip{}.png", level + 1);
+            image::RgbaImage::from_raw(size, size, t.color.mips[level].clone())
+                .expect("rgba")
+                .save(&path)
+                .expect("png");
+            println!("saved {path}");
+        }
     }
 }
 
-/// Triangles of every tree species' near and far meshes (mean over the mesh variants).
+/// Triangles of every tree species' near, far and distant meshes (mean over the mesh variants).
 fn print_stats() {
     use engine_foliage::meshgen::tree::woody;
     let library = engine_foliage::PlantLibrary::default();
     for name in ["oak", "birch", "hazel", "pine", "spruce"] {
         let sp = library.get(library.id(name).unwrap());
         let tris = |m: &Option<engine_render::Mesh>| m.as_ref().map_or(0, |m| m.triangle_count());
-        let (mut near, mut far, mut leaves) = (0, 0, 0);
+        let (mut near, mut far, mut distant, mut leaves, mut hero) = (0, 0, 0, 0, 0);
         for seed in 0..4u64 {
             let m = woody(sp, seed * 0x9e37_79b9, false);
             near += tris(&m.wood) + tris(&m.foliage) + tris(&m.base);
             far += tris(&m.wood_lod) + tris(&m.foliage_lod) + tris(&m.base);
+            distant += tris(&m.wood_distant) + tris(&m.foliage_distant);
             leaves += tris(&m.foliage);
+            hero += tris(&m.foliage_hero);
         }
         println!(
-            "{name:7} near {:6} (leaves {:6})  far {:5}",
+            "{name:7} near {:6} (leaves {:6})  leaf by leaf {:6}  far {:5}  distant {:4}",
             near / 4,
             leaves / 4,
-            far / 4
+            hero / 4,
+            far / 4,
+            distant / 4
         );
     }
 }
@@ -131,9 +151,16 @@ fn main() {
     let mut app = App::new();
     app.world.resource_mut::<EngineConfig>().headless = true;
     {
+        // LOOKDEV_SIZE=1280x720 renders bigger shots.
+        let size = std::env::var("LOOKDEV_SIZE").ok();
+        let (width, height) = size
+            .as_deref()
+            .and_then(|s| s.split_once('x'))
+            .and_then(|(w, h)| Some((w.parse().ok()?, h.parse().ok()?)))
+            .unwrap_or((640, 360));
         let mut w = app.world.resource_mut::<Window>();
-        w.width = 640;
-        w.height = 360;
+        w.width = width;
+        w.height = height;
     }
     app.world
         .resource_mut::<Time>()
@@ -185,7 +212,11 @@ fn main() {
         ("pine", 7.0),
         ("spruce", 19.0),
     ];
+    let only_sp = std::env::var("LOOKDEV_ONLY").ok();
     for (name, x) in lineup {
+        if only_sp.as_deref().is_some_and(|o| o != name) {
+            continue;
+        }
         spawn_plant(
             &mut app.world,
             name,
@@ -262,6 +293,23 @@ fn main() {
             .resource_mut::<EcologySettings>()
             .tree_lod_distance_m = 70.0;
     }
+    if wanted("lineup_distant") {
+        // The same lineup with every tree switched to its distant level of detail.
+        app.world
+            .resource_mut::<EcologySettings>()
+            .tree_distant_distance_m = 1.0;
+        shot(
+            &mut app,
+            &out,
+            "lineup_distant",
+            DVec3::new(-5.0, 4.0, 52.0),
+            DVec3::new(-5.0, 8.0, 0.0),
+            front_sun,
+        );
+        app.world
+            .resource_mut::<EcologySettings>()
+            .tree_distant_distance_m = EcologySettings::default().tree_distant_distance_m;
+    }
     if wanted("roots") {
         // The oak's foot: root flares and the bark where the trunk meets the ground.
         shot(
@@ -315,6 +363,17 @@ fn main() {
             front_sun,
         );
     }
+    if wanted("pine_crown") {
+        // Up into the pine's crown: its limbs and the pads of needles on them.
+        shot(
+            &mut app,
+            &out,
+            "pine_crown",
+            DVec3::new(13.0, 11.0, 12.0),
+            DVec3::new(7.0, 16.5, 0.0),
+            front_sun,
+        );
+    }
     if wanted("birch_hazel") {
         shot(
             &mut app,
@@ -345,5 +404,62 @@ fn main() {
             grove + DVec3::new(0.0, 6.0, 0.0),
             Vec3::new(-0.6, 0.5, 0.35),
         );
+    }
+    if wanted("valley") || wanted("valley_far") {
+        // A wood of scenery trees (no simulation) seen from a hill: the nearest draw in full,
+        // then far, then distant out to a kilometer (`valley_far`: no distant level).
+        spawn_wood(&mut app.world);
+        let eye = DVec3::new(0.0, 35.0, 60.0);
+        let target = DVec3::new(0.0, 0.0, -400.0);
+        let sun = Vec3::new(-0.6, 0.5, 0.35);
+        if wanted("valley") {
+            app.update_n(10);
+            shot(&mut app, &out, "valley", eye, target, sun);
+        }
+        if wanted("valley_far") {
+            app.world
+                .resource_mut::<EcologySettings>()
+                .tree_distant_distance_m = 1.0e6;
+            app.update_n(10);
+            shot(&mut app, &out, "valley_far", eye, target, sun);
+        }
+    }
+}
+
+/// 12,000 scenery trees in a wood from 100 m to a kilometer in front of the valley shot's hill, mostly conifers, in patches with glades between them.
+fn spawn_wood(world: &mut World) {
+    let library = world.resource::<PlantLibrary>().clone();
+    let mut rng = Rng::new(0x0a11e7);
+    let mut count = 0;
+    while count < 12_000 {
+        let x = rng.range(-500.0, 500.0);
+        let z = rng.range(-1000.0, -40.0);
+        // Keep clear of the lineup and the grove.
+        if (x.abs() < 45.0 && z > -25.0) || (x.abs() < 40.0 && (z + 300.0).abs() < 30.0) {
+            continue;
+        }
+        // Glades: a few soft holes in the wood.
+        let patch = (x * 0.011).sin() * (z * 0.013 + 1.3).cos() + (x * 0.004 - z * 0.006).sin();
+        if patch < -0.6 && rng.chance(0.9) {
+            continue;
+        }
+        let pick = rng.range(0.0, 1.0);
+        let name = if pick < 0.42 {
+            "spruce"
+        } else if pick < 0.74 {
+            "pine"
+        } else if pick < 0.9 {
+            "birch"
+        } else {
+            "oak"
+        };
+        let mut tree = SceneryTree::new(&library, name, rng.next_u64()).unwrap();
+        tree.size = rng.range(0.65, 1.0);
+        let yaw = Quat::from_rotation_y(rng.range(0.0, std::f32::consts::TAU));
+        world.spawn((
+            Transform::from_translation(DVec3::new(x as f64, 0.0, z as f64)).with_rotation(yaw),
+            tree,
+        ));
+        count += 1;
     }
 }

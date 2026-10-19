@@ -34,6 +34,8 @@ struct Flag {
     pins: vec4<u32>,
     // Rotation (quaternion) of a world shift since the last frame, applied to the kept state.
     turn: vec4<f32>,
+    // How wet it is at the top (x) and at the hem (y), 0..1.
+    wet: vec4<f32>,
 }
 
 // Must match `SoftVertex` in render.rs.
@@ -50,6 +52,7 @@ struct OutVertex {
     tv: f32,
     burn_char: f32,
     burn_glow: f32,
+    wet: f32,
     material: u32,
 }
 
@@ -302,6 +305,7 @@ fn cs_simulate(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_i
                 f32(i) / f32(nu - 1u), f32(j) / f32(nv - 1u),
                 tu, tv,
                 0.0, 0.0,
+                mix(f.wet.x, f.wet.y, f32(j) / f32(nv - 1u)),
                 f.grid.w,
             );
         }

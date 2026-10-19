@@ -3,7 +3,8 @@
 //! ```text
 //! prepare (features read the world) → compute → environment map (+ filters) → shadow cascades
 //! → prepass → volumetric fog → AO, reflections, bounce light → scene pass [opaque → sky]
-//! → (scene copies) → transparent pass → TAA → bloom → tonemap to LDR → overlays (UI)
+//! → (scene copies) → transparent pass → depth of field → TAA → motion blur → bloom
+//! → tonemap to LDR → overlays (UI)
 //! → screenshot readback → blit to window
 //! ```
 
@@ -193,6 +194,8 @@ pub struct Renderer {
     exposure: ExposureState,
     meter: crate::exposure::ExposureMeter,
     volumetrics: crate::volumetrics::Volumetrics,
+    /// Depth of field (before TAA) and motion blur (after it): camera components.
+    lens: crate::lens::LensEffects,
     previous: Option<PreviousView>,
     /// How far the camera moved the frame before (camera cut detection).
     prev_step: f64,
@@ -572,6 +575,7 @@ impl Renderer {
             exposure: ExposureState::default(),
             meter,
             volumetrics,
+            lens: Default::default(),
             previous: None,
             prev_step: 0.0,
             prev_aa: settings.anti_aliasing,
@@ -621,6 +625,7 @@ impl Renderer {
             self.surface.as_ref().map(|s| s.view_format),
         );
         self.effects.resize(&self.shared, &self.targets);
+        self.lens.resize();
         self.volumetrics.resize(&self.shared, &self.targets);
         self.rebuild_frame_groups();
         self.previous = None;
@@ -683,13 +688,21 @@ impl Renderer {
 
         // Metered exposure from earlier frames (non-blocking readback).
         self.meter.collect(&self.shared.device);
+        self.lens.collect();
         self.exposure.measured_ev100 = self.meter.measured_ev100;
 
         // View & uniforms.
-        let taa = settings.anti_aliasing == AntiAliasing::Taa;
-        if settings.anti_aliasing != self.prev_aa {
+        // A pixel-perfect camera renders without temporal anti-aliasing: no jitter to blur its
+        // texels, nothing between them to smooth.
+        let anti_aliasing = if crate::frame::active_camera_is_pixel_perfect(world) {
+            AntiAliasing::None
+        } else {
+            settings.anti_aliasing
+        };
+        let taa = anti_aliasing == AntiAliasing::Taa;
+        if anti_aliasing != self.prev_aa {
             self.effects.reset_history();
-            self.prev_aa = settings.anti_aliasing;
+            self.prev_aa = anti_aliasing;
         }
         let jitter = if taa {
             crate::effects::jitter(self.frame_index)
@@ -723,6 +736,13 @@ impl Renderer {
         let real_dt = world
             .get_resource::<Time>()
             .map_or(0.0, |t| t.real_delta_secs());
+        // The camera's lens effects (off unless it has the components).
+        let lens_settings = view.camera.map_or((None, None), |e| {
+            (
+                world.get::<crate::DepthOfField>(e).copied(),
+                world.get::<crate::MotionBlur>(e).copied(),
+            )
+        });
         let surface_resized = self.surface_weather.prepare(world, &self.shared, real_dt);
         (uniform.surface_map, uniform.surface_open) =
             self.surface_weather.frame_params(view.origin);
@@ -809,7 +829,7 @@ impl Renderer {
                 bytemuck::bytes_of(&u),
             );
         }
-        self.write_post_params(&settings, &view);
+        self.write_post_params(&settings, &view, taa);
 
         // Prepare features.
         for f in &mut self.features {
@@ -1171,6 +1191,16 @@ impl Renderer {
             }
         }
 
+        // Depth of field, on the scene before TAA (see depth_of_field.rs).
+        self.lens.encode_depth_of_field(
+            &self.shared,
+            &self.targets,
+            &mut encoder,
+            &view,
+            lens_settings.0.as_ref(),
+            real_dt,
+        );
+
         // Temporal anti-aliasing (writes the resolved image back into the HDR target). Either
         // way the finished image is kept for next frame's reflections and bounce light.
         if taa {
@@ -1193,6 +1223,17 @@ impl Renderer {
             self.targets.width,
             self.targets.height,
             view.exposure,
+        );
+
+        // Motion blur: on the anti-aliased, pre-exposed HDR image, before bloom and tonemapping
+        // (see motion_blur.rs).
+        self.lens.encode_motion_blur(
+            &self.shared,
+            &self.targets,
+            &mut encoder,
+            &view,
+            lens_settings.1.as_ref(),
+            real_dt,
         );
 
         // Bloom.
@@ -1282,6 +1323,7 @@ impl Renderer {
         let mut stats = self.collect_stats(&view, started);
         self.shared.queue.submit([encoder.finish()]);
         self.meter.after_submit();
+        self.lens.after_submit();
         if let Some(t) = surface_texture {
             self.shared.queue.present(t);
         }
@@ -1343,6 +1385,9 @@ impl Renderer {
             if let Some(ev) = self.meter.measured_ev100 {
                 d.set("render.ev100_metered", ev as f64);
             }
+            if let Some(focus) = self.lens.focus_distance_m() {
+                d.set("render.dof_focus_m", focus as f64);
+            }
         }
         world.insert_resource(stats);
 
@@ -1356,7 +1401,8 @@ impl Renderer {
         self.frame_index += 1;
     }
 
-    fn write_post_params(&self, settings: &RenderSettings, view: &ViewData) {
+    /// `taa`: temporal anti-aliasing runs this frame (its softness is sharpened back).
+    fn write_post_params(&self, settings: &RenderSettings, view: &ViewData, taa: bool) {
         let tonemapper = match settings.tonemapper {
             Tonemapper::AgX => 0.0,
             Tonemapper::Aces => 1.0,
@@ -1380,7 +1426,7 @@ impl Renderer {
                 1.0 / levels,
             ],
             params3: [
-                if settings.anti_aliasing == AntiAliasing::Taa {
+                if taa {
                     settings.sharpness.clamp(0.0, 1.0)
                 } else {
                     0.0

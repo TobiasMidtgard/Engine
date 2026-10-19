@@ -16,7 +16,9 @@ compresses and stretches.
   one-shot triggers and conditions on parameters. Graphs are serde data, so tools and AI
   agents can add or edit them at runtime (`anim.add_graph`).
 - **IK.** `FootIk` plants feet on uneven ground (pelvis drop, two-bone legs, foot tilt, toes
-  stay flat at toe-off). `LookAt` turns spine, neck and head toward an entity or point.
+  stay flat at toe-off) and locks them: a foot that comes down still is held where it
+  landed until it lifts, however the clip's stride matches the body's speed, and a body
+  turned or moved off its standing feet steps them round one at a time. `LookAt` turns spine, neck and head toward an entity or point.
   `ReachIk` reaches hands to world points or to points on other bones (the off hand on a
   two-handed grip), faded in and out by a clip curve. Feet step on `IkSurface` boxes, ramps
   and stairs, on `Ground`, and on physics colliders through `PhysicsQueries`.
@@ -57,7 +59,14 @@ compresses and stretches.
   ponytail spring chain, and optional motion-capture idle, walk and run replace the
   generated ones. Files load on background threads; until then the person keeps its
   generated body.
-- **Contracts.** Reads `AnimationParams` and `AnimationTrigger`; writes `SkeletonPose` every
+- **Directions and blows.** People blend by `heading` (where they move relative to where
+  they face, positive left): walking ahead, sidestepping (stance widened so the feet never
+  cross) and backpedalling, clips solved by leg IK so planted feet move at the body's speed;
+  generated people stroll on whole steps below walking speed. A `DamageEvent` makes the
+  struck person flinch (`HitReaction`): joints below the hit give with the blow, joints above
+  lag, the hips are shoved, the face winces, and it all springs back.
+- **Contracts.** Reads `AnimationParams` and `AnimationTrigger` (`attack_heavy` swings,
+  `block` raises the guard, and a mover's `LocomotionState.blocking` holds it); writes `SkeletonPose` every
   frame and `AnimationEvent` at marked frames, so movement, AI, cloth and hair never depend
   on this crate. Footsteps and hoof falls become `GroundContact` (foot, paw or hoof, with
   load and speed) and `NoiseEvent`; hammer impacts are loud `NoiseEvent`s.
@@ -84,6 +93,24 @@ compresses and stretches.
   each other or their owner's controller (`RAGDOLL_LAYER`), foot IK ignores them, and hard
   hits become `GroundContact`s of kind `Body` and `NoiseEvent`s. Without a physics module the
   body stays animated. It runs in `AnimSet::Ragdoll`, after IK and before muscles.
+- **Getting up.** A person whose weight returns to 0 while lying flat gets up rather than
+  blending straight to standing: `get_up_back` (sits up, tucks a leg, plants a hand and a
+  knee, steps up) or `get_up_front` (palms down, pushes up to all fours, kneels, steps up),
+  with hands, knees and feet planted by IK on the floor. The clip starts from where and how
+  the body lies, its first frame lined up with the body and blended in from the limp pose;
+  foot IK stays off while on the floor. It reports `getting_up` and `got_up`
+  `AnimationEvent`s so a mover knows when to take over again. A body moved far from its
+  entity while limp (more than `GET_UP_REACH`) blends straight back to standing.
+- **Bracing.** `RagdollTone` gives a limp body muscle tone: each joint turns toward its
+  animated angle, with no pull toward a place and no help against gravity, so a falling
+  person holds the shape of the `fall_brace` clip (arms reaching to take the fall, knees
+  bent, chin tucked) until the first hard landing relaxes it.
+- **Faces.** Imported people with Biped face joints (eyes, lids, jaw, mouth corners, lips,
+  brows, cheeks) get a `Face`: seeded blinks, eyes that lead the head toward `LookAt` or
+  `Face::look_at` (clamped to their sockets) and glance about otherwise, an effort
+  expression from the `effort`, `brace` and `flex` curves (narrowed eyes, brows down and
+  knit, mouth pulled into a grimace over gritted teeth), and a limp body's drooping lids and
+  hanging jaw. It runs after retargeting, on the imported skeleton.
 - **Time.** Every animator uses `Time::delta_for(LocalTimeScale)`, so `TimeDilation` slows
   animation and a hero who ignores world dilation keeps moving at full speed. Animators
   beyond `lod_distance` from the simulation focus update at a quarter rate.
@@ -146,15 +173,19 @@ renderer's generated materials (planks, concrete, sand, rock), and the spider cl
 | Lifter | Double-biceps flex: biceps, shoulders and chest bulge |
 | Shirt reach | Sleeves bunch at the elbows on the wind-up, the shirt stretches across the back on the reach |
 | Step course | A walker climbs a ramp, crosses a deck, walks down stairs with feet planted by IK, then runs back leaning into the turns |
+| Footwork drill | An athlete walks a square facing one way: ahead, sidestepping left, backpedalling, sidestepping right, blending through the corners, every planted foot still on the sand (`paddock_footwork`) |
+| Sparring partner | A lifter takes a jab to the chin (head snaps back), a hook to the side of the head, a blow to the stomach (folds over it) and a shove on the back of a shoulder, flinching away from each and recovering (`paddock_flinch`) |
 | Horse oval | A textured horse walks, trots, canters and gallops by speed; in the swing the knees fold, the hocks bend and the hooves curl back behind the fetlocks; haunches and shoulders flex with each stride; the mane rides the neck and the tail streams |
 | Dog run | A furred Labrador walks off, trots, canters out of a turn and gallops down the far straight, the spine flexing with each stride, ears and tail swinging; it pants as it goes (`paddock_dog_trot`, `paddock_dog`) |
 | Spider garden | A furred red-knee tarantula climbs over boulders in alternating sets of legs, a wave running from the back legs forward; its palps tap, its jaws work and its abdomen sways (`paddock_spider`) |
 | Car loop | A concept car: suspension over speed bumps, roll in corners, steering and spinning wheels with the brake calipers held still |
 | Parked car | A second concept car inside the loop swings its doors open on their front hinges, holds, and shuts them with a bounce on the latch |
-| Stunt yard | A stuntman climbs the stairs to a deck, sprints across and goes limp at the edge: he tumbles onto the crash mat with the run's momentum, lies still, gets up where he landed and walks back round (`paddock_stunt`, `paddock_stunt_down`; needs the physics module) |
+| Stunt yard | A stuntman climbs the stairs to a deck, sprints across and goes off the edge braced, arms out and knees bent; he goes limp on the crash mat with the run's momentum, lies still with a slack face, gets up off his back or front with a hand and a knee planted, and walks back round (`paddock_stunt`, `paddock_stunt_down`, `paddock_stunt_up`; needs the physics module) |
+| Faces | The imported people blink at their own times and glance about; under effort (the lifter's flex, the hammer strike, the block) the eyes narrow, the brows knit and the teeth grit (`paddock_face`; needs the fetched characters) |
 
 `cargo run -p engine_anim --example anim_gallery --release -- out_dir` renders close-ups of
-each test case (`GALLERY_SEQUENCE=horse:11:12:0.05` renders a strip of one subject).
+each test case (`GALLERY_SEQUENCE=horse:11:12:0.05` renders a strip of one subject;
+`GALLERY_TRIGGER=get_up_back:1.0` with subject `stuntman` plays a graph state on him).
 In the showcase valley the paddock is the `paddock` zone; `demo::VIEWS` are its close-up
 tour stops, each restarting the paddock and waiting for its moment
 (`cargo run -p showcase --release -- --headless --tour paddock_hammer,paddock_gallop`).
@@ -171,6 +202,9 @@ renders a skinned character on the GPU and checks the pixels follow the pose, an
 textured submeshes each draw with their own surface, and that fur shells grow strands over a
 furred skin. `tests/world_shift.rs` runs two
 paddocks, shifts one halfway, and checks every pose and place still matches.
+`tests/feet.rs` walks, runs, turns, sidesteps and backpedals a person and measures how far
+each planted foot slides (under 1 cm per step), and that one turned on the spot steps round.
+`tests/hits.rs` punches a person and checks the head snaps back and recovers.
 `tests/body_request.rs` asks for a hiker, a horse, a 40 cm dog and an unknown kind on
 entities the test moves itself: the bodies walk, run and gallop from that motion, step on the ground, keep the
 requester's own parameters, rebuild on a changed request and go with a removed one.
@@ -178,7 +212,12 @@ requester's own parameters, rebuild on a changed request and go with a removed o
 jointed parts that start together, keep the walk's momentum and ignore each other and the
 owner's controller; the pose follows them, footsteps stop, half-limp parts are pulled
 toward the animation and held up, hard hits sound like a body falling, and the pose blends
-back to standing. A dog and a horse go limp at their weight and get up again too.
+back to standing. A body laid face down gets up off its front with `getting_up` and
+`got_up` events and stands on its entity; one moved far away blends straight up; muscle
+tone turns joints without pulling or holding the body up, and relaxes on landing. A dog
+and a horse go limp at their weight and get up again too. `face.rs` tests blinks, gaze
+within the sockets, the effort and limp expressions, and that a skeleton without face
+joints is left alone.
 
 ## Not yet
 

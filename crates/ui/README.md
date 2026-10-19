@@ -1,8 +1,9 @@
 # engine_ui — UI
 
-**Owner:** UI system and maps. **Status:** round 5: every screen below works and has a test
+**Owner:** UI system and maps. **Status:** round 6: every screen below works and has a test
 and a gallery screenshot; the showcase's market street is detailed procedural art; quests and
-the journal drive the HUD tracker and the map waypoint.
+the journal drive the HUD tracker and the map waypoint; a quick-select wheel slows the world
+while you choose a weapon.
 Background research: `game-engine-research/ui.md` in the project files.
 
 ## What it is
@@ -28,6 +29,7 @@ to 0 and restores it when it closes.
 | `hud` | Vitals with portrait, compass with waypoint bearing, minimap, quest tracker, hotbar with cooldowns, weapon, interaction prompt, slow-motion gauge, world markers | |
 | `map` | One map that zooms surface → planet globe → star system → galaxy, with POIs, layers, waypoint and info cards | `zoom` (0-4), `system`, `planet`, `select`, `focus` |
 | `journal` | Quests by kind (main story, side quests, contracts), active and finished tabs, objectives with counts, rewards, who gave each, a live map of where it leads; track a quest or show its place on the map | `select` (quest id), `tab` |
+| `wheel` | Quick-select wheel: weapons, items and abilities around a ring, picked by pointing (mouse, locked-cursor motion or either stick), a click, A, Enter or a number key; slows the world while open; hold-and-release mode; picks write the HUD's `weapon.*` | `items` (default `wheel.items`), `current`, `slow`, `hold`, `hold_pad` |
 | `pause` | Pause menu with a character card; pauses game time | |
 | `settings` | Gameplay, Video (`RenderSettings`), Audio, Controls (rebinding), Interface (scale, accent colour) | `tab` |
 | `confirm` | Yes/no dialog that sends `confirm:<action>` | `title`, `text`, `confirm`, `cancel`, `action`, `danger` |
@@ -84,6 +86,7 @@ Cross-module interaction goes through `engine_world` (see AGENTS.md).
 Veil galaxy), builds the market street and pins world markers over Old Brannoc's stall. The
 showcase's `market` zone calls it, and its tour opens each screen in turn in front of the
 trader (`market_hud`, `market_dialogue`, `market_shop`, `market_inventory`, `market_journal`,
+`market_wheel`,
 `market_map_*`, `market_pause`, `market_settings`; the camera is `demo::market::ui_view()`).
 
 The market street (`demo::market`): five stalls around a cobbled square (produce, cloth, Old
@@ -105,10 +108,10 @@ square).
 ## Tests and screenshots
 
 - `cargo test -p engine_ui`: unit tests, `tests/flows.rs` (mouse click, dialogue choice opens
-  the shop, buying, drag and drop, map zoom and waypoint, quests and the journal, pause and
-  resume, key rebinding) and
+  the shop, buying, drag and drop, map zoom and waypoint, quests and the journal, the
+  quick-select wheel, pause and resume, key rebinding) and
   `tests/headless.rs` (renders a panel and checks pixels; needs a GPU or lavapipe).
 - `cargo run -p engine_ui --example gallery --release -- <dir> [width] [height] [shot ...]`
-  renders every screen (hud, dialogue, dialogue_choices, shop, shop_sell, inventory,
+  renders every screen (hud, wheel, dialogue, dialogue_choices, shop, shop_sell, inventory,
   inventory_drag, journal, journal_finished, map_galaxy, map_system, map_globe, map_surface, pause, confirm, settings,
   settings_video, settings_controls, theme_cyan) to PNGs.

@@ -8,7 +8,7 @@ use engine_core::prelude::*;
 use engine_world::WorldShift;
 
 use crate::demo::DemoPath;
-use crate::ik::{LookAt, ReachIk};
+use crate::ik::{FootIk, LookAt, ReachIk};
 use crate::muscle::MuscleRig;
 use crate::procedural::gait::LeggedGait;
 use crate::procedural::spring::SpringChains;
@@ -24,6 +24,7 @@ pub(crate) fn follow_world_shifts(
     mut gaits: Query<&mut LeggedGait>,
     mut vehicles: Query<&mut VehicleRig>,
     mut looks: Query<&mut LookAt>,
+    mut feet: Query<&mut FootIk>,
     mut reaches: Query<&mut ReachIk>,
     mut paths: Query<&mut DemoPath>,
     mut ragdolls: Query<&mut RagdollRig>,
@@ -46,6 +47,13 @@ pub(crate) fn follow_world_shifts(
     }
     for mut r in &mut ragdolls {
         r.follow_shift(&s);
+    }
+    for mut f in &mut feet {
+        for l in &mut f.locks {
+            l.at = l.at.map(|p| s.point(p));
+            l.last = l.last.map(|p| s.point(p));
+        }
+        f.last_body = f.last_body.map(|p| s.point(p));
     }
     for mut l in &mut looks {
         l.target = s.point(l.target);

@@ -102,6 +102,7 @@ module's **contract** in `engine_world`:
 | `terrain`: `TerrainEdit`, `TerrainChanged`, plus the `Ground` query | `engine_terrain` | destruction, foliage, physics, water, npc |
 | `Obscurance`: smoke, fog and dust between two points (`transmittance`, `extinction`); sources stack by name and implementations pass `check_obscurance` | `engine_smoke` (weather fog and destruction dust can add their own) | npc, gameplay, ui |
 | `WorldShift` (+ `WorldShiftSet`, `FollowsWorldShift`): the world was re-anchored (floating origin, a new planet's frame). `engine_world` moves transforms, velocities, forces, intents, gravity, wind and sun, the fields, and pending contract messages; query providers answer in the new frame from `WorldShiftSet::Apply` on | written by `engine_space` | every module or crate that keeps world positions or directions of its own shifts them in `WorldShiftSet::Apply`: physics (bodies, statics, query caches), softbody, vehicles, movement, npc (memories, nav goals), anim (IK targets), vfx, fire, smoke, water, weather, terrain, foliage, destruction, audio, ui (map markers), render (sky and planet centers), debug |
+| `FarCloudLayer`: a far cloud layer (a planet's cloud tops seen from high up) and where the volumetric clouds hand over to it (`near_share`) | `engine_space` | weather |
 | `Water`, `Gravity`, fields and world events (see the crate docs) | water, space, weather, … | everyone |
 
 Anything a module needs that isn't there is a missing contract: ask the core owner to add it
@@ -283,6 +284,29 @@ pushes blades aside (16 nearest the camera). `RenderSettings::grass_density` sca
 draw distance. `engine_foliage` drives grass by spawning fields from its soil grid; game code
 can spawn them directly.
 
+**Sprites and tile maps** (built; `sprites/`): 2D and 2.5D. A `Sprite` draws an image (or a solid
+color) as a quad at its entity's `Transform`: size in meters, an atlas frame (`SpriteAtlas::grid`,
+`grid_cells` or explicit rectangles), tint, flips, anchor, a `layer` that orders 2D scenes, and
+`Billboard::Fixed`, `FaceCamera` or `Upright` (turns about its own up axis only). `SpriteAnimation`
+steps `Sprite::frame` through a frame list (loop, once, ping-pong) on world time, so slow motion
+and `LocalTimeScale` slow it. A `TileMap` holds a grid of atlas frames (0 empty, Tiled's flip bits)
+and draws with one instanced draw per run of visible 32 × 32 chunks (one for a map wholly in view)
+from a GPU buffer rebuilt only when the map changes; a `Parallax` component moves a sprite or map
+with part of the camera's motion and can repeat it along x. Filtering is `Linear`, `Nearest` or
+`PixelArt` (sharp bilinear: texel centers, blending only across the one pixel a texel edge
+crosses), always kept inside the frame's rectangle so atlas neighbours never bleed.
+`SpriteAlpha::Cutout` sprites draw with the meshes (depth prepass, depth writes, sun shadows with
+the cut-out); `Blend` and `Additive` ones draw after them, sorted by layer and then back to front.
+Unlit sprites show their colors as authored (like unlit meshes); `lit` ones are shaded as thin
+sheets by the sun, sky light and point lights with shadows, optionally through a normal map,
+`roundness` (a bent normal, like a rounded volume) and `translucency`. A `PixelPerfect` component
+(art texels per meter, scale, snap) on an orthographic camera renders at full resolution with a
+whole number of screen pixels per art texel, moves the view and every sprite and tile corner to
+whole texels (or pixels), and turns temporal anti-aliasing off while it renders (jitter would blur
+the texel edges and there is nothing between them to smooth); full resolution keeps lighting,
+shadows and UI sharp without an extra target or upscale. Images come from the shared image cache.
+Nothing is built for scenes without sprites or tile maps.
+
 **Volumetric fog** (built): with `RenderSettings::volumetric_fog` (the default), fog within
 `volumetric_fog_range` (default 256 m) of the camera lives in a froxel grid fitted to the view,
 after Wronski 2014 and Hillaire 2015 (`volumetric_fog_quality`: `High` 8 px tiles and 128
@@ -359,6 +383,26 @@ props and clutter. Instanced and cluster-drawn meshes alike; skipped entities co
 threshold, mixed in by `RenderSettings::bloom_intensity` (0.04). What a pixel brings in is
 limited to `bloom_limit` times white at the current exposure (64; it rolls off smoothly from half
 of that), so a neon sign at night or the sun's disc glows instead of swamping the frame.
+
+**Depth of field** (built; `depth_of_field.rs`): a `DepthOfField` component on the camera (off
+without it) is a thin lens: the focal length follows from the vertical field of view and
+`sensor_height_mm` (`DepthOfField::fov_y_deg_for_lens(50.0, 24.0)` is a 50 mm full-frame lens),
+the aperture from `f_stop`, so f/1.4 blurs like the real lens and f/16 hardly at all. Focus is
+`focus_distance_m` or `autofocus` on the screen center (a center-weighted median of depths that
+ignores sky through gaps, eased at `autofocus_speed` and snapped after a camera cut; read back as
+`render.dof_focus_m`). A half-res gather after Jimenez 2014 with separate near and far fields:
+a blurred foreground spreads softly over whatever is behind it, a sharp object in front of a blurred
+background keeps a crisp edge, small lights open into round, even discs, up to `max_radius_px`.
+It runs on the scene before TAA (so TAA anti-aliases its silhouettes; next frame's reflections
+then see the defocused image) and before bloom and tonemapping.
+
+**Motion blur** (built; `motion_blur.rs`): a `MotionBlur` component on the camera (off without
+it). Velocity per pixel from the prepass motion vectors (moving objects included) or, where the
+prepass drew nothing, the camera's motion and the depth; McGuire 2012 reconstruction with tile and
+neighbor-max velocities and a depth-aware gather. The streak is the on-screen speed (per real
+second) times the exposure `shutter_fraction / reference_fps` (0.5 at 30: a 180° shutter, 1/60 s),
+so it doesn't change with the frame rate and shrinks in slow motion. No blur on the frame after a
+camera cut; with nothing moving the image is unchanged. Runs after TAA, before bloom and tonemap.
 
 **Thin sheets** (built): double-sided and alpha-masked materials (leaves, grass and fern cards,
 paper, cloth, fences) are shaded as sheets with no inside (`shade_thin_surface(s, rel,

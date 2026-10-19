@@ -19,12 +19,13 @@ use bytemuck::{Pod, Zeroable};
 use engine_core::prelude::*;
 use engine_render::shadows::{MAX_CASCADES, SKY_OCCLUSION_VIEW};
 use engine_render::{GpuShared, GrowBuffer, ViewData, wgpu};
-use engine_world::{Gravity, WindField, WorldShift};
+use engine_world::{Gravity, HeatField, WeatherState, WindField, WorldShift};
 
 use crate::cloth::{Cloth, ClothPins};
 use crate::render::{GpuSoftMaterial, SoftVertex};
 use crate::settings::SoftBodyConfig;
 use crate::solver::AIR_DENSITY;
+use crate::systems::{drying_warmth, in_the_open};
 
 /// The simulation kernel.
 pub const SIM_SHADER: &str = include_str!("shaders/cloth_sim.wgsl");
@@ -55,6 +56,8 @@ pub struct GpuFlag {
     pub grid: [u32; 4],
     pub pins: [u32; 4],
     pub turn: [f32; 4],
+    /// How wet the cloth is (0..1), and its hem's share of it (drained toward the bottom).
+    pub wet: [f32; 4],
 }
 
 /// The kernel's pin bits for `pins` (left 1, top 2, right 4, bottom 8, top corners 16) and
@@ -130,6 +133,8 @@ pub struct GpuClothProbe {
     /// Row by row from the top-left of the grid.
     pub positions: Vec<DVec3>,
     pub grid: [u32; 2],
+    /// How wet it is (0..1), this frame.
+    pub wet: f32,
 }
 
 /// World shifts not yet taken into the GPU cloths, composed into one.
@@ -168,6 +173,8 @@ struct Slot {
     anchor: DVec3,
     fresh: bool,
     seen: bool,
+    /// Rain soaks it and wind and warmth dry it, as CPU cloth out of the water.
+    wet: f32,
 }
 
 struct Readback {
@@ -504,10 +511,20 @@ impl GpuCloths {
         }
         let wind_field = world.get_resource::<WindField>();
         let gravity = world.get_resource::<Gravity>();
+        let weather = world.get_resource::<WeatherState>();
+        let heat = world.get_resource::<HeatField>();
+        let rain = weather.map_or(0.0, |w| {
+            if w.is_raining() {
+                w.precipitation_mm_h
+            } else {
+                0.0
+            }
+        });
         for slot in self.slots.values_mut() {
             slot.seen = false;
         }
         let mut new_layouts = false;
+        let mut probe_wet = None;
         for (e, spec, t) in &found {
             let grid = grid(spec);
             let anchor = t.translation();
@@ -525,6 +542,7 @@ impl GpuCloths {
                         anchor,
                         fresh: true,
                         seen: false,
+                        wet: 0.0,
                     },
                 );
             }
@@ -557,6 +575,19 @@ impl GpuCloths {
                 (0, 1.0 / rate)
             };
             let wind = wind_field.map_or(Vec3::ZERO, |f| f.sample(anchor)) * s.wind_scale;
+            let slot = self.slots.get_mut(e).expect("slot");
+            if s.soak > 0.0 {
+                let temperature = weather.map_or(15.0, |w| w.temperature_at_altitude(anchor.y))
+                    + heat.map_or(0.0, |h| h.sample(anchor));
+                let warmth = drying_warmth(temperature);
+                slot.wet = in_the_open(slot.wet, dt, rain, wind.length(), warmth);
+            } else {
+                slot.wet = 0.0;
+            }
+            let wet = slot.wet;
+            // Soaked, it weighs more: the wind moves it less and its links give less.
+            let soaked = 1.0 + s.soak.max(0.0) * wet;
+            let mass = mass * soaked;
             let g = gravity.map_or(Vec3::NEG_Y * 9.81, |g| g.at(anchor)) * s.gravity_scale;
             let (mask, every) = pin_mask(&spec.pins).unwrap_or((1, 1));
             let rot = t.rotation();
@@ -576,7 +607,7 @@ impl GpuCloths {
                     link_softness(spec.stretch_compliance, mass, step),
                     link_softness(spec.shear_compliance, mass, step),
                     link_softness(spec.bend_compliance, mass, step),
-                    0.5 * AIR_DENSITY / spec.mass_per_m2.max(1e-4),
+                    0.5 * AIR_DENSITY / (spec.mass_per_m2.max(1e-4) * soaked),
                 ],
                 air: [
                     spec.aero_drag.max(0.0),
@@ -587,9 +618,12 @@ impl GpuCloths {
                 grid: [grid[0], grid[1], first, material],
                 pins: [mask, every, substeps, u32::from(fresh)],
                 turn: turn.to_array(),
+                // Rain runs down: the hem a little wetter than the top.
+                wet: [wet, (wet * 1.25).min(1.0), 0.0, 0.0],
             });
             if probe == Some(*e) {
                 self.probe = Some((first, grid, anchor));
+                probe_wet = Some(wet);
             }
 
             // Cull: the cloth stays within its diagonal of the anchor.
@@ -615,6 +649,11 @@ impl GpuCloths {
                     shadows,
                 });
             }
+        }
+        if let Some(wet) = probe_wet
+            && let Some(mut p) = world.get_resource_mut::<GpuClothProbe>()
+        {
+            p.wet = wet;
         }
         // Slots of cloths that are gone (or moved to the CPU) become free.
         let gone: Vec<Entity> = self
@@ -767,7 +806,7 @@ mod tests {
 
     #[test]
     fn gpu_flag_matches_the_kernel_layout() {
-        assert_eq!(std::mem::size_of::<GpuFlag>(), 176);
+        assert_eq!(std::mem::size_of::<GpuFlag>(), 192);
     }
 
     #[test]

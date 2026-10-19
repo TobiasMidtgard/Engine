@@ -8,7 +8,9 @@ pub mod character;
 pub mod clip;
 pub mod demo;
 pub mod events;
+pub mod face;
 pub mod graph;
+pub mod hit;
 pub mod horse_model;
 pub mod ik;
 pub mod import;
@@ -28,14 +30,16 @@ pub use attach::{BoneAttachment, Hang};
 pub use body::{Body, BodyKind, BodyMotion};
 pub use character::{HumanModel, HumanModels};
 pub use clip::AnimationClip;
+pub use face::{Face, FaceControls, FaceRig};
 pub use graph::{AnimGraph, NodeDef};
+pub use hit::HitReaction;
 pub use horse_model::{HorseModel, HorseModels};
 pub use ik::{FootIk, IkShape, IkSurface, LegIk, LookAt, Reach, ReachIk};
 pub use muscle::{MorphWeights, Muscle, MuscleDriver, MuscleRig};
 pub use procedural::gait::{GaitLeg, GaitStage, LeggedGait};
 pub use procedural::spring::{SpringChainDef, SpringChains};
 pub use procedural::vehicle::{VehicleRig, WheelRig};
-pub use ragdoll::{RagdollDef, RagdollPart, RagdollRig};
+pub use ragdoll::{RagdollDef, RagdollPart, RagdollRig, RagdollTone};
 pub use retarget::{HandGrip, HandRig, Retarget, RetargetMap, Retargeter};
 pub use skeleton::Skeleton;
 pub use skin::feature::SkinningFeature;
@@ -137,6 +141,7 @@ impl Plugin for AnimationPlugin {
                         procedural::vehicle::vehicle_rig_system,
                     ),
                     procedural::spring::spring_chain_system,
+                    (hit::take_hits, hit::flinch_system).chain(),
                 )
                     .chain()
                     .in_set(AnimSet::Procedural),
@@ -154,6 +159,7 @@ impl Plugin for AnimationPlugin {
                 (
                     animator::publish_pose,
                     retarget::retarget_poses,
+                    face::face_system,
                     (
                         skin::update_skin_poses,
                         attach::attachment_system,
@@ -212,6 +218,19 @@ fn register_types(app: &mut App) {
     .register_component::<HandGrip>(
         "Keeps a character's hands closed at least this much (left, right: 0..1), as when it \
          carries something.",
+    )
+    .register_component::<RagdollTone>(
+        "Muscle tone in a limp body: joints hold the animated pose in the air (tone 0..1) \
+         until the first hard landing, then relax over relax_secs.",
+    )
+    .register_component::<Face>(
+        "Living face on an imported person with face joints: blinks (per minute), gaze at \
+         look_at or its LookAt target, effort and limp expressions (expressiveness, 1 = normal).",
+    )
+    .register_component::<HitReaction>(
+        "Hit flinch: a DamageEvent turns the spine, head and a struck arm away from the blow \
+         (degrees_per_impulse per N·s, up to max_degrees), shoves the hips \
+         (shove_per_impulse) and springs back over settle_secs.",
     );
 }
 

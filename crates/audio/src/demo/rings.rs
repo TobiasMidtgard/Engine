@@ -71,11 +71,13 @@ fn ring_material(color: usize, level: usize) -> StandardMaterial {
     StandardMaterial::color(c[0] * 0.2, c[1] * 0.2, c[2] * 0.2).with_emissive(c, 6.0 * k * k)
 }
 
+/// A thin band: rings near the camera (a film riding behind a walker) would otherwise read as
+/// a hoop lying on the path.
 fn ring_shape() -> Shape {
     Shape::Torus {
         radius: 1.0,
-        tube: 0.03,
-        segments: 48,
+        tube: 0.012,
+        segments: 96,
     }
 }
 
@@ -142,7 +144,8 @@ pub(super) fn grow_rings(
         }
         let grow = 1.0 - (1.0 - k).powi(3);
         let s = r.size * (0.08 + 0.92 * grow);
-        t.scale = Vec3::new(s, 1.0, s);
+        // The band stays about 2 cm high and, even for a loud step, a few centimetres across.
+        t.scale = Vec3::new(s, 0.8, s);
         let level = ((k * RING_LEVELS as f32) as usize).min(RING_LEVELS - 1);
         if level != r.level {
             r.level = level;

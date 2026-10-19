@@ -13,7 +13,7 @@
 //! The solver knows nothing about the ECS. The plugin feeds it frames (bones, entities),
 //! colliders and wind each step and reads back positions and reaction impulses.
 
-use engine_core::math::{DVec3, IVec3, Mat3, Quat, Vec3};
+use engine_core::math::{DVec3, IVec3, Mat3, Quat, Vec2, Vec3};
 use engine_world::WorldShift;
 
 use crate::collide::{LocalCollider, PosedCollider};
@@ -171,6 +171,11 @@ pub struct SimParams {
     /// Cloth against itself: particles stay this far (m) from the body's own triangles, on
     /// the side they came from. 0 = off.
     pub self_collide: f32,
+    /// Under water: the lift on a fully submerged particle as a fraction of its dry weight
+    /// (above 1 floats while dry; soaking up water makes it heavier, so it may sink).
+    pub buoyancy: f32,
+    /// Under water: how fast a particle takes on the current's velocity, 1/s.
+    pub water_drag: f32,
 }
 
 impl Default for SimParams {
@@ -189,7 +194,50 @@ impl Default for SimParams {
             max_speed: 60.0,
             follow: None,
             self_collide: 0.0,
+            buoyancy: 1.0,
+            water_drag: 4.0,
         }
+    }
+}
+
+/// The water around a body this step, in the body's frame: the surface height sampled on a
+/// 3 × 3 grid over the body (bilinear in between) and the current.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct WaterSurface {
+    /// Local x and z of the grid's first sample, and the spacing between samples.
+    pub min: Vec2,
+    pub cell: Vec2,
+    /// Local y of the surface, rows along z, columns along x.
+    pub heights: [f32; 9],
+    /// Current, m/s.
+    pub current: Vec3,
+}
+
+impl WaterSurface {
+    /// Calm water at local height `y` everywhere.
+    pub fn flat(y: f32, current: Vec3) -> Self {
+        Self {
+            min: Vec2::ZERO,
+            cell: Vec2::ONE,
+            heights: [y; 9],
+            current,
+        }
+    }
+
+    /// Local height of the surface over `p`.
+    pub fn height(&self, p: Vec3) -> f32 {
+        let g = ((Vec2::new(p.x, p.z) - self.min) / self.cell).clamp(Vec2::ZERO, Vec2::splat(2.0));
+        let (c, r) = ((g.x as usize).min(1), (g.y as usize).min(1));
+        let (fx, fz) = (g.x - c as f32, g.y - r as f32);
+        let h = |r: usize, c: usize| self.heights[r * 3 + c];
+        let top = h(r, c) + (h(r, c + 1) - h(r, c)) * fx;
+        let bottom = h(r + 1, c) + (h(r + 1, c + 1) - h(r + 1, c)) * fx;
+        top + (bottom - top) * fz
+    }
+
+    /// How far under the surface `p` is (negative above it).
+    pub fn depth(&self, p: Vec3) -> f32 {
+        self.height(p) - p.y
     }
 }
 
@@ -240,7 +288,13 @@ pub struct Sim {
     pub ground_impact: (f32, Vec3),
     /// Particle-collider contacts in the last substep.
     pub contacts: u32,
+    /// The water around the body this step, if it is near any.
+    pub water: Option<WaterSurface>,
     accel: Vec<Vec3>,
+    /// How far each particle is in the water this substep (0..1).
+    submerged: Vec<f32>,
+    /// Each particle's surface normal (area-weighted), for drag in water.
+    normals: Vec<Vec3>,
     posed: Vec<PosedCollider>,
     self_contacts: SelfContacts,
 }
@@ -351,6 +405,15 @@ impl Sim {
         for i in 0..self.pos.len() {
             if self.pin_of[i] == u32::MAX {
                 self.inv_mass[i] = self.base_inv_mass[i] * s;
+            }
+        }
+    }
+
+    /// Multiply each free particle's mass by `scale(i)` (wetness), from its base mass.
+    pub fn set_mass_scales(&mut self, scale: impl Fn(usize) -> f32) {
+        for i in 0..self.pos.len() {
+            if self.pin_of[i] == u32::MAX {
+                self.inv_mass[i] = self.base_inv_mass[i] / scale(i).max(1e-3);
             }
         }
     }
@@ -577,9 +640,30 @@ impl Sim {
             }
         }
 
-        // External accelerations: gravity, air, loads.
+        // External accelerations: gravity, water, air, loads.
         self.accel.clear();
         self.accel.resize(self.pos.len(), p.gravity);
+        // Water: lift against gravity on what's under the surface (the same force on a soaked,
+        // heavier particle lifts it less), eased in across the particle's thickness.
+        self.submerged.clear();
+        if let Some(water) = &self.water {
+            self.submerged.resize(self.pos.len(), 0.0);
+            let r = p.radius.max(0.005);
+            for i in 0..self.pos.len() {
+                if self.inv_mass[i] == 0.0 {
+                    continue;
+                }
+                let s = ((water.depth(self.pos[i]) + r) / (2.0 * r)).clamp(0.0, 1.0);
+                if s > 0.0 {
+                    self.submerged[i] = s;
+                    let dry = self.base_inv_mass[i].max(1e-9);
+                    self.accel[i] -= p.gravity * (p.buoyancy * s * self.inv_mass[i] / dry);
+                }
+            }
+        }
+        // The wind only reaches what is out of the water.
+        let submerged = &self.submerged;
+        let in_air = |i: usize| 1.0 - submerged.get(i).copied().unwrap_or(0.0);
         let time = p.time + t0 * dt;
         let side = p.wind.cross(Vec3::Y);
         let gust = |x: Vec3| -> Vec3 {
@@ -590,19 +674,26 @@ impl Sim {
             p.wind * (1.0 + p.turbulence * f) + side * (0.5 * p.turbulence * g)
         };
         if p.drag > 0.0 {
-            for ((a, v), x) in self.accel.iter_mut().zip(&self.vel).zip(&self.pos) {
-                *a += (gust(*x) - *v) * p.drag;
+            for (i, ((a, v), x)) in self
+                .accel
+                .iter_mut()
+                .zip(&self.vel)
+                .zip(&self.pos)
+                .enumerate()
+            {
+                *a += (gust(*x) - *v) * (p.drag * in_air(i));
             }
         }
         if let Some(aero) = p.aero {
             for tri in &self.aero_triangles {
                 let [a, b, c] = tri.map(|i| i as usize);
+                let exposed = (in_air(a) + in_air(b) + in_air(c)) * (1.0 / 3.0);
                 let n2 = (self.pos[b] - self.pos[a]).cross(self.pos[c] - self.pos[a]);
                 let len = n2.length();
-                if len < 1e-12 {
+                if len < 1e-12 || exposed <= 0.0 {
                     continue;
                 }
-                let area = 0.5 * len;
+                let area = 0.5 * len * exposed;
                 let n = n2 / len;
                 let center = (self.pos[a] + self.pos[b] + self.pos[c]) * (1.0 / 3.0);
                 let v_rel = gust(center) - (self.vel[a] + self.vel[b] + self.vel[c]) * (1.0 / 3.0);
@@ -630,11 +721,66 @@ impl Sim {
             self.accel[i] += f * self.inv_mass[i];
         }
 
-        // Predict.
+        // Water drag on what's in it: cloth resists moving across its face far more than
+        // sliding along it (so a strip in a stream lies along the flow and ripples, and a
+        // sinking sheet glides); strands and ropes drag the same every way.
+        self.normals.clear();
+        if !self.submerged.is_empty() && !self.aero_triangles.is_empty() {
+            self.normals.resize(self.pos.len(), Vec3::ZERO);
+            for tri in &self.aero_triangles {
+                let [a, b, c] = tri.map(|i| i as usize);
+                if self.submerged[a] + self.submerged[b] + self.submerged[c] == 0.0 {
+                    continue;
+                }
+                let n2 = (self.pos[b] - self.pos[a]).cross(self.pos[c] - self.pos[a]);
+                for i in [a, b, c] {
+                    self.normals[i] += n2;
+                }
+            }
+        }
+        let flow = self.water.map_or(Vec3::ZERO, |w| w.current);
+        let across = flow.cross(Vec3::Y);
+        // Eddies in moving water, like gusts in the wind, turning it every way and carried
+        // along by the current, so what streams in it undulates (none in still water).
+        // In world space (wrapped), so bodies side by side feel the same eddies.
+        // The wrap's seams sit 2 km out, not at the origin (the lake's surface is at y = 0).
+        let world = (self.origin + DVec3::splat(2048.0))
+            .rem_euclid(DVec3::splat(4096.0))
+            .as_vec3();
+        let current = |x: Vec3| -> Vec3 {
+            if across == Vec3::ZERO {
+                return flow;
+            }
+            let drift = x + world - flow * time;
+            let (f, g) = flutter(drift * 0.6, time * 0.35);
+            let (e, _) = flutter(Vec3::new(drift.z, drift.x, drift.y) * 0.8, time * 0.5 + 3.0);
+            let speed = flow.length();
+            flow * (1.0 + 0.5 * WATER_EDDIES * f)
+                + across * (0.8 * WATER_EDDIES * g)
+                + Vec3::Y * (WATER_EDDIES * speed * e)
+        };
+
+        // Predict. Water drag pulls the velocity toward the current, implicitly (stable
+        // however strong).
         for i in 0..self.pos.len() {
             self.prev[i] = self.pos[i];
             if self.inv_mass[i] > 0.0 {
                 self.vel[i] += self.accel[i] * h;
+                if let Some(&s) = self.submerged.get(i)
+                    && s > 0.0
+                {
+                    let k = p.water_drag * s * h;
+                    let c = current(self.pos[i]);
+                    let rel = self.vel[i] - c;
+                    self.vel[i] = match self.normals.get(i).and_then(|n| n.try_normalize()) {
+                        Some(n) => {
+                            let along = rel.dot(n);
+                            let slide = rel - n * along;
+                            c + n * (along / (1.0 + k)) + slide / (1.0 + k * SLIDE_DRAG)
+                        }
+                        None => c + rel / (1.0 + k),
+                    };
+                }
                 self.pos[i] += self.vel[i] * h;
             }
         }
@@ -997,6 +1143,11 @@ fn barycentric(p: Vec3, a: Vec3, b: Vec3, c: Vec3) -> [f32; 3] {
     let w = (d00 * d21 - d01 * d20) / den;
     [1.0 - v - w, v, w]
 }
+
+/// How much a current swirls about its mean (0..1), in speed along it and sway across it.
+const WATER_EDDIES: f32 = 0.5;
+/// Water drag on cloth sliding along its own plane, relative to moving across it.
+const SLIDE_DRAG: f32 = 0.3;
 
 /// Two cheap, smooth pseudo-random signals in -1..1 that vary over space and time (gusts).
 #[inline]
