@@ -46,11 +46,16 @@ pub struct PlantMeshes {
     pub foliage_lod_thin: Vec<engine_render::Mesh>,
     /// The cheapest level, for trees hundreds of meters off (whole valleys of scenery trees):
     /// the trunk from the ground up on a few four-sided rings with sticks for the big limbs,
-    /// and about a tenth of the crown's cards, flat and much bigger. No base goes with it.
+    /// and about a seventh of the crown's cards, flat and much bigger. No base goes with it.
     pub wood_distant: Option<engine_render::Mesh>,
     pub foliage_distant: Option<engine_render::Mesh>,
     /// Thinned copies of `foliage_distant` (deciduous species only, as `foliage_thin`).
     pub foliage_distant_thin: Vec<engine_render::Mesh>,
+    /// The crown leaf by leaf, for broadleaf trees and shrubs seen up close: every leaf of
+    /// every near card's spray as its own small folded quad, turned its own way out of the
+    /// spray's plane, with the twigs as narrow strips. Drawn with the single-leaf atlas
+    /// ([`super::textures::hero_leaf_textures`]) and a double-sided material.
+    pub foliage_hero: Option<engine_render::Mesh>,
     /// A felled log once its twigs have rotted off: the trunk above the cut with stubs of the
     /// big limbs (same model space as `wood`).
     pub log: Option<engine_render::Mesh>,
@@ -474,15 +479,22 @@ impl PlantMeshes {
             }
         }
         let (lo, hi) = bounds(
-            [&self.wood, &self.foliage, &self.wood_lod, &self.foliage_lod]
-                .into_iter()
-                .flatten(),
+            [
+                &self.wood,
+                &self.foliage,
+                &self.foliage_hero,
+                &self.wood_lod,
+                &self.foliage_lod,
+            ]
+            .into_iter()
+            .flatten(),
         );
         // Thinned crowns lie within the full one, and must sway with it.
         widen(
             [
                 &mut self.wood,
                 &mut self.foliage,
+                &mut self.foliage_hero,
                 &mut self.wood_lod,
                 &mut self.foliage_lod,
             ]
@@ -1445,6 +1457,138 @@ fn crown_meshes(
     )
 }
 
+/// How much larger a crown drawn leaf by leaf draws each leaf than its spray card paints it.
+const HERO_LEAF_SCALE: f32 = 1.12;
+
+/// The crown leaf by leaf ([`PlantMeshes::foliage_hero`]): each card's spray (its atlas cell's
+/// layout) rebuilt from single leaves where the card would have drawn them. `None` for
+/// needles and fronds.
+fn hero_crown(
+    cards: &[Card],
+    shading: &Shading,
+    kind: LeafKind,
+    style: LeafStyle,
+    seed: u64,
+) -> Option<engine_render::Mesh> {
+    use super::textures::{
+        ATLAS_CELLS, HERO_CELLS, HERO_PETIOLE_Y, HERO_TWIG_CELL, atlas_seed, hero_cell,
+        hero_leaf_frame, hero_leaf_rect, spray_layout,
+    };
+    let atlas = atlas_seed(style);
+    let layouts: Vec<_> = (0..(ATLAS_CELLS * ATLAS_CELLS) as usize)
+        .map(|c| spray_layout(kind, c, atlas))
+        .collect::<Option<_>>()?;
+    let (_, blade) = hero_leaf_frame(kind);
+    let (rect0, rect1) = hero_leaf_rect(kind);
+    let leaf_cells = (HERO_CELLS * HERO_CELLS) as u64 - 1;
+    let (twig0, twig1) = hero_cell(HERO_TWIG_CELL);
+    let twig_u = 0.5 * (twig0.x + twig1.x);
+    let mut b = MeshBuilder::new();
+    for (ci, c) in cards.iter().enumerate() {
+        let layout = &layouts[c.cell % layouts.len()];
+        // The card's frame, as `emit_card` lays it out.
+        let g = c.dir.normalize_or(Vec3::Y);
+        let n = (c.face - g * c.face.dot(g)).normalize_or(g.any_orthonormal_vector());
+        let u = g.cross(n);
+        let (w, l) = (c.width, c.length);
+        let start = if c.centered {
+            c.base - g * l * 0.5
+        } else {
+            c.base - g * l * 0.06
+        };
+        let sx = if c.mirror { -1.0 } else { 1.0 };
+        // A point of the cell (x across, y down) on the drooping, folded card.
+        let on_card = |q: Vec2| {
+            let (s, t) = (sx * (q.x - 0.5), 1.0 - q.y);
+            let bend = c.droop * l * t * t + c.fold * w * s.abs();
+            start + g * (l * t) + u * (w * s) - n * bend
+        };
+        // A direction in the cell, in the card's plane.
+        let in_plane = |d: Vec2| u * (w * sx * d.x) - g * (l * d.y);
+        // The twig end of a spray sits deeper in the foliage than its tip.
+        let inner = |q: Vec2| {
+            if c.centered {
+                1.0
+            } else {
+                0.84 + 0.2 * (1.0 - q.y)
+            }
+        };
+        let mut rng = Rng::new(seed ^ (ci as u64).wrapping_mul(0x2545_f491_4f6c_dd1d));
+        for leaf in &layout.leaves {
+            let d3 = in_plane(leaf.dir);
+            let len = d3.length() * leaf.length;
+            if len < 1e-4 {
+                continue;
+            }
+            let a = d3 / d3.length();
+            let side = a.cross(n).normalize_or(u);
+            // Each leaf turns its own way on its petiole: tip lifted or dropped, rolled about
+            // the midrib.
+            let pitch = rng.range(-0.55, 0.55);
+            let roll = rng.range(-0.75, 0.75);
+            let (a, face) = (rotate(a, side, pitch), rotate(n, side, pitch));
+            let (side, face) = (rotate(side, a, roll), rotate(face, a, roll));
+            // A little larger than painted: turned every which way, single leaves show less
+            // of themselves than a flat spray does.
+            let k = HERO_LEAF_SCALE * len / blade;
+            let bottom = on_card(leaf.at) - a * (k * (1.0 - HERO_PETIOLE_Y));
+            let (uv0, uv1) = hero_cell(((leaf.seed ^ ci as u64) % leaf_cells) as usize);
+            let flip = rng.chance(0.5);
+            let tint = c.tint * rng.range(0.9, 1.08);
+            let first = b.vertices.len() as u32;
+            // A flat quad: the fold along the midrib is in the leaf's normal map.
+            for y in [rect1.y, rect0.y] {
+                for x in [rect0.x, rect1.x] {
+                    let p = bottom + a * (k * (1.0 - y)) + side * (k * (x - 0.5));
+                    let tx = if flip { 1.0 - x } else { x };
+                    let uv = Vec2::new(uv0.x + (uv1.x - uv0.x) * tx, uv0.y + (uv1.y - uv0.y) * y);
+                    let (crown_n, ao) = shading.at(p, c.clump);
+                    // The crown's rounded shading broken up by each leaf's own facing, kept on
+                    // the leaf's front so a face is never lit from behind.
+                    let mut normal = (crown_n + face).normalize_or(face);
+                    let dn = normal.dot(face);
+                    if dn < 0.25 {
+                        normal = (normal + face * (0.25 - dn)).normalize_or(face);
+                    }
+                    let shade = ao * inner(leaf.base);
+                    b.vertex(p, normal, uv, (tint * shade).extend(1.0));
+                }
+            }
+            b.tri(first, first + 1, first + 3);
+            b.tri(first, first + 3, first + 2);
+        }
+        // Twigs: narrow strips in the card's plane.
+        for (path, width) in &layout.twigs {
+            let first = b.vertices.len() as u32;
+            let m = path.len();
+            for (i, &q) in path.iter().enumerate() {
+                let f = i as f32 / (m - 1).max(1) as f32;
+                let dir = if i + 1 < m {
+                    path[i + 1] - q
+                } else {
+                    q - path[i - 1]
+                };
+                let along = in_plane(dir).normalize_or(g);
+                let half = 0.5 * width * (1.0 - 0.55 * f) * w;
+                let wide = along.cross(n).normalize_or(u) * half;
+                let p = on_card(q);
+                let (crown_n, ao) = shading.at(p, c.clump);
+                let normal = (crown_n + n).normalize_or(n);
+                let v = twig0.y + (twig1.y - twig0.y) * (1.0 - f);
+                let color = Vec3::splat(ao * inner(q)).extend(1.0);
+                b.vertex(p - wide, normal, Vec2::new(twig_u - 0.05, v), color);
+                b.vertex(p + wide, normal, Vec2::new(twig_u + 0.05, v), color);
+            }
+            for i in 0..m.saturating_sub(1) as u32 {
+                let a = first + 2 * i;
+                b.tri(a, a + 1, a + 3);
+                b.tri(a, a + 3, a + 2);
+            }
+        }
+    }
+    Some(b.finish())
+}
+
 fn leaf_tint(sp: &PlantSpecies, rng: &mut Rng) -> Vec3 {
     let leaf = Vec3::from(sp.leaf_color).max(Vec3::splat(0.01));
     let accent = Vec3::from(sp.accent_color);
@@ -1663,6 +1807,7 @@ fn assemble(
             out.wood = Some(b.finish());
             out.foliage = Some(f);
             out.foliage_thin = thin;
+            out.foliage_hero = hero_crown(&crowns.cards, &shading, kind, sp.shape.leaf, seed);
         }
     }
     out.wood_distant = Some(distant_wood(sp, trunk_path, trunk_r, branches, h, seed));
@@ -2523,6 +2668,7 @@ fn shrub(sp: &PlantSpecies, seed: u64) -> PlantMeshes {
             out.wood = Some(b.finish());
             out.foliage = Some(f);
             out.foliage_thin = thin;
+            out.foliage_hero = hero_crown(&cr.cards, &shading, kind, sh.leaf, seed);
         }
     }
     // Far off a shrub is its leaves alone.
@@ -2566,6 +2712,32 @@ mod tests {
                 // Parts share vertical bounds, so they sway together.
                 let (a, b) = (wood.aabb(), foliage.aabb());
                 assert!((a.min.y - b.min.y).abs() < 1e-4 && (a.max.y - b.max.y).abs() < 1e-4);
+                // Broadleaves also come leaf by leaf, within the same bounds; needles don't.
+                match &m.foliage_hero {
+                    Some(hero) => {
+                        assert!(!matches!(name, "pine" | "spruce"));
+                        let h = hero.aabb();
+                        assert!(
+                            (h.min.y - b.min.y).abs() < 1e-4 && (h.max.y - b.max.y).abs() < 1e-4
+                        );
+                        let wide = h.max.x.max(-h.min.x).max(h.max.z).max(-h.min.z);
+                        assert!(
+                            wide < sp.crown_radius_m * 1.8,
+                            "{name} hero too wide: {wide}"
+                        );
+                        // Several leaves per card, and few enough for the trees nearest the
+                        // camera.
+                        let tris = hero.triangle_count();
+                        assert!(
+                            tris > foliage.triangle_count() && tris < 300_000,
+                            "{name}: {tris}"
+                        );
+                    }
+                    None => assert!(
+                        matches!(name, "pine" | "spruce"),
+                        "{name} has no hero crown"
+                    ),
+                }
                 // The crown stays roughly within the species' size.
                 assert!(
                     b.max.y <= sp.max_height_m * 1.15,

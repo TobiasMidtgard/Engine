@@ -145,10 +145,20 @@ pub fn desired_parts(
                     pair(&crown, leaves),
                 ]
             } else {
+                // Up close, in full leaf, a broadleaf crown leaf by leaf.
+                let hero = vis.leaves_hero.filter(|_| {
+                    vis.glow.is_empty()
+                        && amount >= 1.0
+                        && distance < settings.tree_hero_distance_m * (0.5 + plant.size)
+                });
+                let crown = match (hero, v.foliage_hero) {
+                    (Some(m), Some(mesh)) => Some((mesh, m[tint])),
+                    _ => pair(&leafy(v.foliage, &v.foliage_thin, amount), leaves),
+                };
                 [
                     pair(&v.base, vis.bark_rigid),
                     pair(&v.wood, vis.bark),
-                    pair(&leafy(v.foliage, &v.foliage_thin, amount), leaves),
+                    crown,
                 ]
             }
         }
