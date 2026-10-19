@@ -174,6 +174,11 @@ pub fn spawn_jetty(commands: &mut Commands, jetty: &Jetty) -> Entity {
         .spawn((
             Name::new("Jetty"),
             Transform::from_translation(origin).with_rotation(rot),
+            // The deck stands over the wet band at the shore: keep it out of the floor.
+            crate::shore::ShoreCover {
+                min: [-0.3, -POST_ACROSS],
+                max: [jetty.length, POST_ACROSS],
+            },
         ))
         .id();
     add_parts(commands, e, merged(placed));

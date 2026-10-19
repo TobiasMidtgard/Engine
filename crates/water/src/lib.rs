@@ -10,6 +10,7 @@ pub mod puddles;
 pub mod render;
 pub mod ripples;
 pub mod shift;
+pub mod shore;
 pub mod sim;
 pub mod state;
 pub mod waves;
@@ -21,6 +22,7 @@ pub use buoyancy::{Buoyancy, Floating, Tether};
 pub use flow::{FlowBed, FlowFill, FlowRegion, FlowSource, Lip};
 pub use interact::WaterInteractor;
 pub use render::WaterFeature;
+pub use shore::ShoreCover;
 pub use state::{SharedWater, WaterState};
 
 use std::sync::Arc;
@@ -43,7 +45,8 @@ impl Plugin for WaterPlugin {
             .init_resource::<sim::SimBook>()
             .register_resource::<WaterSettings>(
                 "Water quality and behavior: ripple grid size (cells, meters), ripple speed (m/s) \
-                 and damping (1/s), foam life (s), raindrops per m² per mm/h, puddles on/off.",
+                 and damping (1/s), foam life (s), raindrops per m² per mm/h, puddles on/off, \
+                 wet shores on/off.",
             )
             .register_component::<WaterBody>(
                 "A body of water (ocean, lake, pool): extent around the entity, bed (terrain, \
@@ -70,6 +73,10 @@ impl Plugin for WaterPlugin {
                 "Makes wakes, rings and entry splashes when moving through water: body radius \
                  (m), wake strength.",
             )
+            .register_component::<shore::ShoreCover>(
+                "Keeps the ground under it dry of lake, stream and spray water (a jetty's deck, \
+                 a boathouse): a rectangle in the entity's x/z, min and max (m).",
+            )
             .register_component::<RainShower>(
                 "Local rain over water and ground (shower, fountain spray, leak): radius (m), \
                  rate (mm/h). Adds rings on water and fills puddles.",
@@ -86,6 +93,7 @@ impl Plugin for WaterPlugin {
                     sim::ripple_system,
                     sim::flow_system,
                     puddles::puddle_system,
+                    shore::shore_wetness_system,
                     sim::diagnostics_system,
                 )
                     .chain()

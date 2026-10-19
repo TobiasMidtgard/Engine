@@ -164,6 +164,31 @@ pub struct Zip {
     pub secs: f32,
 }
 
+/// A ladder being climbed (see [`crate::ladder`]).
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct Ladder {
+    /// The ladder's entity (the one with the
+    /// [`Climbable`](engine_world::locomotion::Climbable)).
+    #[serde(skip)]
+    pub entity: Option<Entity>,
+    /// How far up the climb the feet are: 0 on the lowest rung, 1 on the top one.
+    pub t: f32,
+    /// The same in meters above the lowest rung.
+    pub climbed: f32,
+    /// Speed up the ladder, m/s (own time; negative going down).
+    pub speed: f32,
+    /// The way the climber faces (toward the ladder), horizontal unit, world.
+    pub facing: Vec3,
+    /// Sliding down with the hands and feet on the rails.
+    pub sliding: bool,
+    /// Own seconds on the ladder.
+    pub secs: f32,
+    /// The rung (counted from the lowest, [`crate::ladder::RUNG`] apart) the last rung
+    /// contact went out for.
+    #[serde(default)]
+    pub(crate) rung: i32,
+}
+
 /// Ask the movement module to dash. Combat uses this for dash-strikes; gameplay can use it
 /// for scripted dashes. Consumed on the next fixed step.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -230,6 +255,8 @@ pub struct Mover {
     pub grapple: Option<Grapple>,
     /// The zip line ridden.
     pub zip: Option<Zip>,
+    /// The ladder climbed (mode [`LocomotionMode::Climb`]).
+    pub ladder: Option<Ladder>,
     /// The capsule is shrunk (crouching or sliding).
     pub crouched: bool,
     /// Remaining dodge invulnerability, s (own time).
@@ -259,6 +286,11 @@ pub struct Mover {
     /// The zip line last let go of: not caught again before touching the ground.
     #[serde(skip)]
     pub(crate) zip_last: Option<Entity>,
+    /// No grabbing a ladder until this runs out, s.
+    pub(crate) ladder_cooldown: f32,
+    /// The ladder last kicked off: not grabbed again before touching the ground.
+    #[serde(skip)]
+    pub(crate) ladder_last: Option<Entity>,
     pub(crate) last_wall: Option<WallContact>,
     pub(crate) stand_height: f32,
     pub(crate) stride: f32,
@@ -296,6 +328,7 @@ impl Default for Mover {
             hang: None,
             grapple: None,
             zip: None,
+            ladder: None,
             crouched: false,
             evade_secs: 0.0,
             disabled: false,
@@ -310,6 +343,8 @@ impl Default for Mover {
             grapple_cooldown: 0.0,
             zip_cooldown: 0.0,
             zip_last: None,
+            ladder_cooldown: 0.0,
+            ladder_last: None,
             last_wall: None,
             stand_height: 0.0,
             stride: 0.0,
@@ -370,7 +405,7 @@ impl Mover {
     }
 
     /// Teleport bookkeeping: clear velocity and any dash, mantle, ledge hang, grapple, zip
-    /// line or wall-run.
+    /// line, ladder or wall-run.
     pub fn reset_motion(&mut self) {
         self.velocity = Vec3::ZERO;
         self.knockback = Vec3::ZERO;
@@ -383,6 +418,9 @@ impl Mover {
         self.zip = None;
         self.zip_cooldown = 0.0;
         self.zip_last = None;
+        self.ladder = None;
+        self.ladder_cooldown = 0.0;
+        self.ladder_last = None;
         self.wall = None;
         self.last_wall = None;
         self.pending_dash = None;

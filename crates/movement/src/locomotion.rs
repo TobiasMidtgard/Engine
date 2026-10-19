@@ -3,7 +3,7 @@
 //! Runs in `FixedUpdate` / `SimSet::Gameplay`, before physics. It reads what the physics
 //! backend reported last step ([`CharacterState`]: ground, walls, ceiling), probes the world
 //! with [`PhysicsQueries`] (walls to run on, ledges to climb), picks a mode (run, sprint,
-//! slide, air, wall-run, mantle, ledge hang, dash) and writes the velocity the character controller should
+//! slide, air, wall-run, mantle, ledge hang, ladder, zip line, dash) and writes the velocity the character controller should
 //! move with ([`CharacterMove`]). Gravity is applied here, as the physics contract asks.
 //!
 //! Every character runs on its own clock: `dt = time.delta_for(LocalTimeScale)`, so slow
@@ -15,13 +15,17 @@ use engine_core::math::{DVec3, Quat, Vec3};
 use engine_core::prelude::*;
 use engine_core::transform::look_rotation;
 use engine_world::animation::{AnimationParams, AnimationTrigger, SkeletonPose};
-use engine_world::locomotion::{LocomotionMode, LocomotionState, MoveIntent};
+use engine_world::locomotion::{ClimbLine, Climbable, LocomotionMode, LocomotionState, MoveIntent};
 use engine_world::physics::{
-    CharacterController, CharacterMove, CharacterState, Hit, PhysicsQueries, QueryFilter, Velocity,
+    CharacterController, CharacterMove, CharacterState, Collider, Hit, PhysicsQueries, QueryFilter,
+    Velocity,
 };
-use engine_world::{ContactKind, Gravity, Ground, GroundContact, NoiseEvent};
+use engine_world::{
+    ContactKind, Gravity, Ground, GroundContact, NoiseEvent, SurfaceId, SurfaceMaterials,
+};
 
 use crate::grapple;
+use crate::ladder;
 use crate::mover::{
     Corner, Dash, DashRequest, Hang, Mantle, Mover, WallContact, flat, move_towards,
 };
@@ -62,6 +66,10 @@ impl Outputs<'_> {
         });
     }
 
+    pub(crate) fn contact(&mut self, contact: GroundContact) {
+        self.contacts.write(contact);
+    }
+
     pub(crate) fn noise(&mut self, entity: Entity, position: DVec3, radius: f32) {
         self.noise.write(NoiseEvent {
             position,
@@ -79,6 +87,22 @@ pub(crate) type Bodies<'w, 's> =
 /// Zip lines.
 pub(crate) type Lines<'w, 's> = Query<'w, 's, (Entity, &'static Zipline)>;
 
+/// Ladders: where they are (their own `Transform` when they have no parent, so a ladder moved
+/// this step is where it is now) and what they are made of.
+pub(crate) type Ladders<'w, 's> = Query<
+    'w,
+    's,
+    (
+        Entity,
+        &'static Climbable,
+        &'static Transform,
+        &'static GlobalTransform,
+        Option<&'static Collider>,
+        Has<ChildOf>,
+    ),
+    Without<Mover>,
+>;
+
 /// Scene probes for one character (walls, ledges, ground below).
 pub(crate) struct Probe<'a> {
     queries: &'a PhysicsQueries,
@@ -87,6 +111,9 @@ pub(crate) struct Probe<'a> {
     movers: &'a Query<'a, 'a, (), With<Mover>>,
     bodies: &'a Bodies<'a, 'a>,
     lines: &'a Lines<'a, 'a>,
+    ladders: &'a Ladders<'a, 'a>,
+    /// The surface rungs ring as when a ladder has no collider to say.
+    metal: Option<SurfaceId>,
     /// The character's seconds per world second (bodies move in world time).
     rate: f32,
 }
@@ -136,10 +163,52 @@ impl Probe<'_> {
         })
     }
 
+    /// The climb line of the ladder `ladder`, in world space.
+    pub(crate) fn climb_line(&self, ladder: Entity) -> Option<ClimbLine> {
+        let (_, c, t, g, _, parented) = self.ladders.get(ladder).ok()?;
+        Some(climb_line(c, t, g, parented))
+    }
+
+    /// Every ladder's climb line.
+    pub(crate) fn climb_lines(&self) -> impl Iterator<Item = (Entity, ClimbLine)> + '_ {
+        self.ladders
+            .iter()
+            .map(|(e, c, t, g, _, parented)| (e, climb_line(c, t, g, parented)))
+    }
+
+    /// What the ladder `ladder`'s rungs are made of: its collider's surface, else metal.
+    pub(crate) fn ladder_surface(&self, ladder: Entity) -> Option<SurfaceId> {
+        let (.., collider, _) = self.ladders.get(ladder).ok()?;
+        collider
+            .map(|c| c.surface)
+            .filter(|&s| s != SurfaceId::DEFAULT)
+            .or(self.metal)
+    }
+
+    /// Pins `point` and `dir` to the ladder `ladder` (one without a parent; a child's own
+    /// `Transform` isn't where it is).
+    pub(crate) fn ladder_pin(&self, ladder: Entity, point: DVec3, dir: Vec3) -> Option<Pin> {
+        let (.., parented) = self.ladders.get(ladder).ok()?;
+        if parented {
+            return None;
+        }
+        self.pin(ladder, point, dir)
+    }
+
     /// Pins `point` and `dir` to the body `entity`, so they move with it.
     pub(crate) fn pin(&self, entity: Entity, point: DVec3, dir: Vec3) -> Option<Pin> {
         let (t, _) = self.bodies.get(entity).ok()?;
         Some(Pin::new(entity, t, point, dir))
+    }
+}
+
+/// A ladder's climb line in world space. A ladder without a parent goes by its `Transform`
+/// (up to date within the fixed steps of a frame), a child by its `GlobalTransform`.
+fn climb_line(c: &Climbable, t: &Transform, g: &GlobalTransform, parented: bool) -> ClimbLine {
+    if parented {
+        c.in_world(g)
+    } else {
+        c.in_world(&GlobalTransform::from(*t))
     }
 }
 
@@ -187,6 +256,8 @@ pub(crate) fn step_movers(
     movers: Query<(), With<Mover>>,
     decks: Bodies,
     lines: Lines,
+    ladders: Ladders,
+    materials: Res<SurfaceMaterials>,
     mut q: Query<(
         Entity,
         &mut Transform,
@@ -203,6 +274,7 @@ pub(crate) fn step_movers(
     )>,
 ) {
     let world_dt = time.delta_secs();
+    let metal = materials.id("metal");
     for (
         entity,
         mut transform,
@@ -252,6 +324,8 @@ pub(crate) fn step_movers(
             movers: &movers,
             bodies: &decks,
             lines: &lines,
+            ladders: &ladders,
+            metal,
             rate,
         };
 
@@ -287,21 +361,28 @@ pub(crate) fn step_movers(
             .grapple
             .and_then(|g| flat((g.anchor - pos).as_vec3(), up).try_normalize());
         let zip = m.zip.and_then(|z| flat(z.heading, up).try_normalize());
-        let face = m.hang.map(|h| -h.normal).or(hook).or(zip).or_else(|| {
-            m.influence
-                .face
-                .or(intent.look)
-                .map(|l| flat(l, up))
-                .filter(|l| l.length() > 0.1)
-                .or_else(|| match m.mode {
-                    LocomotionMode::Dash => m.dash.map(|d| flat(d.dir, up)),
-                    LocomotionMode::Mantle => m.mantle.map(|mt| mt.forward),
-                    _ => {
-                        let h = flat(v, up);
-                        (h.length() > 0.5).then_some(h)
-                    }
-                })
-        });
+        let ladder = m.ladder.map(|l| l.facing);
+        let face = m
+            .hang
+            .map(|h| -h.normal)
+            .or(ladder)
+            .or(hook)
+            .or(zip)
+            .or_else(|| {
+                m.influence
+                    .face
+                    .or(intent.look)
+                    .map(|l| flat(l, up))
+                    .filter(|l| l.length() > 0.1)
+                    .or_else(|| match m.mode {
+                        LocomotionMode::Dash => m.dash.map(|d| flat(d.dir, up)),
+                        LocomotionMode::Mantle => m.mantle.map(|mt| mt.forward),
+                        _ => {
+                            let h = flat(v, up);
+                            (h.length() > 0.5).then_some(h)
+                        }
+                    })
+            });
         if let Some(f) = face.and_then(|f| f.try_normalize()) {
             let snap = matches!(m.mode, LocomotionMode::Dash) || m.influence.face.is_some();
             m.facing = if snap {
@@ -345,11 +426,12 @@ pub(crate) fn step_movers(
 }
 
 /// The body the character holds on to off the ground: the wall it runs along, the ledge it
-/// hangs from or climbs.
+/// hangs from or climbs, the ladder it climbs.
 fn held(m: &Mover) -> Option<Entity> {
     let on = |pin: Option<Pin>| pin.map(|p| p.entity);
     on(m.hang.and_then(|h| h.on))
         .or_else(|| on(m.mantle.and_then(|mt| mt.on)))
+        .or_else(|| m.ladder.and_then(|l| l.entity))
         .or_else(|| {
             m.wall
                 .filter(|_| m.mode == LocomotionMode::WallRun)
@@ -466,6 +548,7 @@ fn step_one(
     m.grounded = grounded;
     m.ground_normal = if grounded { state.ground_normal } else { up };
 
+    let knocked = m.knockback.length() > ladder::KNOCKED_OFF;
     let mut v = m.velocity + m.knockback;
     m.knockback = Vec3::ZERO;
     if grounded {
@@ -528,6 +611,7 @@ fn step_one(
         m.dash = None;
         m.mantle = None;
         m.hang = None;
+        m.ladder = None;
         m.grapple = None;
         m.wall = None;
         let vh = flat(v, up);
@@ -547,9 +631,13 @@ fn step_one(
     }
     wish *= m.influence.move_scale;
 
-    // Dashing, climbing, hanging or riding a zip line lets go of the grapple.
+    // Dashing, climbing, hanging, on a ladder or riding a zip line lets go of the grapple.
     if m.grapple.is_some()
-        && (m.dash.is_some() || m.mantle.is_some() || m.hang.is_some() || m.zip.is_some())
+        && (m.dash.is_some()
+            || m.mantle.is_some()
+            || m.hang.is_some()
+            || m.ladder.is_some()
+            || m.zip.is_some())
     {
         grapple::release(m, p, b.entity, out);
     }
@@ -572,6 +660,9 @@ fn step_one(
     {
         if m.zip.is_some() {
             zipline::let_go(m, b, out, "zip_release");
+        }
+        if m.ladder.is_some() {
+            ladder::let_go(m, b, out, "ladder_exit", true);
         }
         start_dash(m, p, req, b, v, out);
     }
@@ -650,6 +741,32 @@ fn step_one(
             );
         }
         m.hang = None;
+    }
+
+    // ---- ladder: climbing one, or grabbing one in reach
+    if m.dash.is_none()
+        && m.mantle.is_none()
+        && m.hang.is_none()
+        && m.zip.is_none()
+        && let Some(v) = ladder::step(
+            m,
+            p,
+            b,
+            probe,
+            v,
+            wish,
+            ladder::Held {
+                jump_pressed,
+                crouch: intent.crouch,
+                sprint: intent.sprint,
+                knocked,
+            },
+            grounded,
+            dt,
+            out,
+        )
+    {
+        return v;
     }
 
     // ---- zip line: riding one, or catching one in reach
@@ -1672,6 +1789,8 @@ fn write_params(m: &Mover, params: &mut AnimationParams, up: Vec3) {
     );
     params.set("grapple", if reeling { 1.0 } else { 0.0 });
     params.set("zipline", if m.zip.is_some() { 1.0 } else { 0.0 });
+    params.set("ladder", if m.ladder.is_some() { 1.0 } else { 0.0 });
+    params.set("climb_speed", m.ladder.map_or(0.0, |l| l.speed));
 }
 
 /// Rotate unit vector `from` toward `to` by at most `max_angle` radians.

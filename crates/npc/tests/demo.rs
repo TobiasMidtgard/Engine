@@ -64,12 +64,16 @@ fn the_arena_fight_keeps_going() {
         .map(|&e| app.world.get::<NpcCombat>(e).unwrap().stats)
         .collect();
     let shots: u32 = stats.iter().map(|s| s.shots).sum();
+    let revives: u32 = stats.iter().map(|s| s.revives).sum();
     let attacks: u32 = stats.iter().map(|s| s.attacks).sum();
     let defended: u32 = stats.iter().map(|s| s.blocks + s.parries + s.dodges).sum();
     assert!(shots > 30, "shots {shots}");
     assert!(attacks > 40, "attacks {attacks}");
     assert!(defended > 5, "defended {defended}");
     assert!(downed_seen > 0, "nobody went down");
+    // Squad mates run to the downed and get them up where they lie.
+    assert!(actions.contains(&NpcAction::Revive), "{actions:?}");
+    assert!(revives >= 2, "squad mates revived {revives} in a minute");
     assert!(actions.contains(&NpcAction::Engage), "{actions:?}");
     // Shooters use cover: as a TakeCover action when pinned, or by picking covered spots to
     // fight from.

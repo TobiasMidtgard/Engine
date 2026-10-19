@@ -7,7 +7,7 @@ use engine_core::registry::call_api;
 use engine_core::time::TimeSource;
 use engine_physics::PhysicsPlugin;
 use engine_physics::demo::{self, Station};
-use engine_world::physics::{RigidBody, Velocity};
+use engine_world::physics::{BodyKind, RigidBody, Velocity};
 use engine_world::{SimulationFocus, WorldPlugin};
 use serde_json::json;
 
@@ -168,4 +168,66 @@ fn drums_roll_down_the_barrel_run_into_the_sand() {
             "a drum isn't resting in the sand: at {p}, {v} m/s"
         );
     }
+}
+
+/// Ten crash test dummies stumble off the stairs' landing together, tumble down the flight,
+/// and all come to rest and fall asleep well before the station replays (without the friction
+/// in `cones.rs` and `rolling.rs`, a head or a limb kept them awake).
+#[test]
+fn ten_dummies_tumble_down_the_stairs_and_fall_asleep() {
+    let mut app = app();
+    app.update();
+    let base = Station::Ragdolls.base();
+    // The landing: 14 steps of 0.22 m up and 0.32 m deep from the station's base toward -z.
+    let top = 0.22 * 14.0;
+    let edge = -0.32 * 14.0;
+    let local = |app: &App, e: Entity| app.world.get::<Transform>(e).unwrap().translation - base;
+    let parts: Vec<Entity> = app
+        .world
+        .query::<(Entity, &RigidBody)>()
+        .iter(&app.world)
+        .filter(|(_, b)| b.kind == BodyKind::Dynamic)
+        .map(|(e, _)| e)
+        .filter(|&e| {
+            let p = local(&app, e);
+            p.y > top - 0.05 && p.x.abs() < 3.5 && p.z < edge + 0.1
+        })
+        .collect();
+    let chests: Vec<Entity> = app
+        .world
+        .query::<(Entity, &Name)>()
+        .iter(&app.world)
+        .filter(|(_, n)| n.as_str().starts_with("Ragdoll ("))
+        .map(|(e, _)| e)
+        .collect();
+    assert_eq!(chests.len(), 10, "dummies on the landing");
+    assert_eq!(parts.len(), 110, "dummy parts on the landing");
+    // Asleep from then on, with time to spare before the replay.
+    let deadline = Station::Ragdolls.cycle_secs().unwrap() - 5.0;
+    let (mut asleep_since, mut lowest) = (None, f64::MAX);
+    for f in 1..=(deadline * 60.0) as usize {
+        app.update();
+        let awake = parts
+            .iter()
+            .any(|&e| *app.world.get::<Velocity>(e).unwrap() != Velocity::default());
+        if awake {
+            asleep_since = None;
+        } else {
+            asleep_since.get_or_insert(f as f64 / 60.0);
+        }
+        for &e in &parts {
+            lowest = lowest.min(local(&app, e).y);
+        }
+    }
+    let at: Vec<DVec3> = chests.iter().map(|&c| local(&app, c)).collect();
+    println!("asleep since {asleep_since:?} s; chests at {at:?}");
+    assert!(
+        asleep_since.is_some(),
+        "the dummies are still moving after {deadline} s"
+    );
+    assert!(
+        at.iter().all(|p| p.y < top - 0.5),
+        "a dummy stayed on the landing: {at:?}"
+    );
+    assert!(lowest > 0.02, "a dummy sank into the yard ({lowest} m)");
 }

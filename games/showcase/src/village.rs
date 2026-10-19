@@ -245,7 +245,7 @@ impl Mb {
 
     /// Polygon with texture coordinates projected onto it in meters: U along `grain` (along
     /// `alt` when the face looks down the grain).
-    fn face(&mut self, pts: &[Vec3], facing: Vec3, grain: Vec3, alt: Vec3, col: Vec3) {
+    pub(crate) fn face(&mut self, pts: &[Vec3], facing: Vec3, grain: Vec3, alt: Vec3, col: Vec3) {
         let f = facing.normalize_or(Vec3::Y);
         let mut t = grain - f * grain.dot(f);
         if t.length_squared() < 0.04 {
@@ -267,7 +267,7 @@ impl Mb {
 
     /// [`Mb::cbox`] whose corners are displaced up to `rough` meters (rough-hewn stones).
     #[allow(clippy::too_many_arguments)]
-    fn cbox_rough(
+    pub(crate) fn cbox_rough(
         &mut self,
         center: Vec3,
         ax: [Vec3; 3],

@@ -956,13 +956,15 @@ impl Painted<'_> {
     }
 }
 
-/// Ids of the map screen's panels that labels keep clear of.
-const PANELS: [&str; 5] = [
+/// Ids of the panels over map canvases (the map screen's, the journal's place tag) that
+/// labels keep clear of.
+const PANELS: [&str; 6] = [
     "map_layers",
     "map_zoom",
     "map_card",
     "map_tabs",
     "map_hints",
+    "journal_place",
 ];
 
 /// The waypoint pin, `s` tall, its tip at `tip`; returns the rectangle it covers.
@@ -1143,7 +1145,8 @@ fn paint_map(world: &mut World, e: Entity, ctx: &mut DrawCtx) {
     );
     let r = ctx.rect;
     let t = ctx.time;
-    let z = view.zoom.clamp(0.0, 3.999);
+    // Below 0 (only embedded views go there) the surface comes up to 2.3x closer.
+    let z = view.zoom.clamp(-0.3, 3.999);
 
     // Deep space under everything, drifting with the pan.
     ctx.rect(r, Color::hex(0x03050a), 0.0, 0.0, Color::TRANSPARENT);
@@ -1929,7 +1932,12 @@ fn draw_surface(
             .find(|v| *v >= target * 0.6)
             .unwrap_or(mag * 10.0);
         let len = (nice / km_per_px) as f32;
-        let a = Vec2::new(r.x + 340.0 * px, r.y + r.h - 96.0 * px);
+        // Clear of the map screen's panels; bottom right on a small canvas.
+        let a = if r.h < 420.0 * px {
+            Vec2::new(r.x + r.w - len - 18.0 * px, r.y + r.h - 16.0 * px)
+        } else {
+            Vec2::new(r.x + 340.0 * px, r.y + r.h - 96.0 * px)
+        };
         ctx.line(
             a,
             a + Vec2::new(len, 0.0),
@@ -2488,6 +2496,16 @@ pub fn build_screen(world: &mut World, args: &Value) -> Result<Entity, String> {
     if let Some(sel) = args.get("select") {
         view.selected = serde_json::from_value(sel.clone()).ok();
     }
+    // `focus`: open looking at the selected item (at `zoom` when given).
+    if args.get("focus").and_then(Value::as_bool) == Some(true)
+        && let Some(sel) = view.selected.clone()
+    {
+        focus_on(&mut view, &map, &sel);
+        if args.get("zoom").is_some() {
+            view.target = zoom;
+        }
+        view.zoom = view.target;
+    }
     let el = build(world, &view);
     let sp = screens::spawn_screen(
         world,
@@ -2817,6 +2835,25 @@ pub fn map_system(world: &mut World, mut seen: Local<MessageCursor<UiEvent>>) {
     world.entity_mut(root).insert(ms);
 }
 
+/// Put the waypoint on a place. Returns false when there is no such place.
+pub fn set_waypoint(map: &mut MapData, poi_id: &str) -> bool {
+    let Some((pl, poi)) = map.poi(poi_id).map(|(p, q)| (p.id.clone(), q.clone())) else {
+        return false;
+    };
+    let system = map
+        .planet(&pl)
+        .map(|(s, _)| s.id.clone())
+        .unwrap_or_default();
+    map.waypoint = Some(Waypoint {
+        system,
+        planet: pl,
+        lon: poi.lon,
+        lat: poi.lat,
+        label: poi.name,
+    });
+    true
+}
+
 fn toggle_waypoint(world: &mut World, poi_id: &str) {
     let Some(mut map) = world.get_resource_mut::<MapData>() else {
         return;
@@ -2824,13 +2861,7 @@ fn toggle_waypoint(world: &mut World, poi_id: &str) {
     let Some((pl, poi)) = map.poi(poi_id).map(|(p, q)| (p.clone(), q.clone())) else {
         return;
     };
-    let system = map
-        .planet(&pl.id)
-        .map(|(s, _)| s.id.clone())
-        .unwrap_or_default();
-    let same = map.waypoint.as_ref().is_some_and(|w| {
-        w.planet == pl.id && (w.lon - poi.lon).abs() < 1e-6 && (w.lat - poi.lat).abs() < 1e-6
-    });
+    let same = map.is_waypoint(&pl.id, &poi);
     if same {
         map.waypoint = None;
         toast::notify(
@@ -2842,13 +2873,7 @@ fn toggle_waypoint(world: &mut World, poi_id: &str) {
             2.0,
         );
     } else {
-        map.waypoint = Some(Waypoint {
-            system,
-            planet: pl.id.clone(),
-            lon: poi.lon,
-            lat: poi.lat,
-            label: poi.name.clone(),
-        });
+        set_waypoint(&mut map, poi_id);
         toast::notify(
             world,
             ToastKind::Good,
