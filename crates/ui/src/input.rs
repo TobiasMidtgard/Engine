@@ -173,6 +173,9 @@ pub struct UiInputState {
     last_cursor: Option<Vec2>,
     repeat_dir: Option<NavDir>,
     repeat_timer: f32,
+    /// Game actions held while a menu blocked them: kept blocked after it closes until they
+    /// are let go, so the click or A that closed a menu doesn't also attack or jump.
+    swallowed: std::collections::BTreeSet<String>,
 }
 
 /// A focus move direction.
@@ -1009,14 +1012,26 @@ pub fn ui_input_system(world: &mut World) {
     if world.get_resource::<UiInputCapture>() != Some(&capture) {
         world.insert_resource(capture);
     }
-    if capture.keyboard
-        && settings.block_game_input
-        && let Some(mut actions) = world.get_resource_mut::<ActionState>()
-    {
-        for v in actions.actions.values_mut() {
-            let was = v.pressed;
-            *v = Default::default();
-            v.just_released = was;
+    if let Some(mut actions) = world.get_resource_mut::<ActionState>() {
+        if capture.keyboard && settings.block_game_input {
+            for (name, v) in actions.actions.iter_mut() {
+                let was = v.pressed;
+                if was {
+                    st.swallowed.insert(name.clone());
+                }
+                *v = Default::default();
+                v.just_released = was;
+            }
+        } else if !st.swallowed.is_empty() {
+            let mut held = std::mem::take(&mut st.swallowed);
+            held.retain(|name| match actions.actions.get_mut(name) {
+                Some(v) if v.pressed => {
+                    *v = Default::default();
+                    true
+                }
+                _ => false,
+            });
+            st.swallowed = held;
         }
     }
     world.insert_resource(st);

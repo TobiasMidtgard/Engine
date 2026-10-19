@@ -33,7 +33,7 @@ pub use locomotion::{FootKind, Footfall, MoverState, SelfPropelled};
 pub use nav::{NavAgent, NavGrid, NavSettings, PathStatus};
 pub use perception::{BodyHeight, Known, NpcMemory, Perceivables};
 pub use skills::{NpcSkills, Perception};
-pub use squad::{AttackTokens, SquadSettings};
+pub use squad::{AttackTokens, ReviveClaims, SquadSettings};
 pub use training::SparringPost;
 pub use visuals::{IntentMarker, Part, StandIn, StandInPart};
 pub use wildlife::{Animal, AnimalMind, AnimalState, BirdFlight, Herd, Species, WildlifeSettings};
@@ -71,6 +71,7 @@ impl Plugin for NpcPlugin {
             .init_resource::<NavGrid>()
             .init_resource::<Perceivables>()
             .init_resource::<AttackTokens>()
+            .init_resource::<ReviveClaims>()
             .init_resource::<OpponentModels>()
             .init_resource::<WildlifeSettings>()
             .register_component::<Npc>(
@@ -120,7 +121,8 @@ impl Plugin for NpcPlugin {
             )
             .register_resource::<NpcSettings>(
                 "NPC module settings: built-in locomotion, hit resolution, think rate, LOD distance, \
-                 intent overlay, revive time.",
+                 intent overlay, showcase revive timer (s), squad mates reviving the downed \
+                 (ally_revive_secs, 0 = off; ally_revive_health 0..1; ally_revive_range m).",
             )
             .register_resource::<WildlifeSettings>(
                 "Wildlife: enabled, respawn_secs (killed animals return), thirst_secs, hunger_secs \

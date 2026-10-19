@@ -120,6 +120,7 @@ pub fn valley_views(valley: &Valley) -> Vec<DemoView> {
             target: rel(jetty.point(along - 4.0, 1.0), level + 0.3),
             hour: 16.5,
             warmup_secs: 4.0,
+            quick_warmup: true,
         },
         DemoView {
             key: "lake_boats",
@@ -128,6 +129,7 @@ pub fn valley_views(valley: &Valley) -> Vec<DemoView> {
             target: rel(jetty.point(along - 3.5, 1.5), level + 0.4),
             hour: 16.5,
             warmup_secs: 4.0,
+            quick_warmup: true,
         },
     ]
 }

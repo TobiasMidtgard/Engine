@@ -1,5 +1,7 @@
 //! Dynamic fauna: deer and rabbits that graze, wander as a herd, drink at water, bed down at
-//! night and bolt when something comes near; wolf packs that roam, stalk, encircle and run
+//! night and bolt when something comes near; wild boar that root about in sounders (sows with
+//! their young) or alone (males) and run, but turn and charge with their tusks when cornered or
+//! wounded, or when a sow's young are threatened; wolf packs that roam, stalk, encircle and run
 //! prey down, then feed; bird flocks that peck on the ground and take off together.
 //!
 //! Animals share the NPC module's senses budget (`Perceivables`), tactical world, nav grid and
@@ -12,7 +14,8 @@
 //! * scent carried by the wind: deer and wolves smell what is upwind even without seeing it;
 //! * being hurt, loud noises (gunfire, explosions, howls) and fire (`HeatField`);
 //! * each other: when one herd member bolts the rest follow a moment later, alert deer warn
-//!   the herd, and one bird taking off lifts the whole flock.
+//!   the herd, and one bird taking off lifts the whole flock; wolves give a charging boar
+//!   room.
 
 use std::collections::HashMap;
 
@@ -39,10 +42,18 @@ pub enum Species {
     Rabbit,
     Wolf,
     Bird,
+    /// Wild boar (Sus scrofa).
+    Boar,
 }
 
 impl Species {
-    pub const ALL: [Species; 4] = [Species::Deer, Species::Rabbit, Species::Wolf, Species::Bird];
+    pub const ALL: [Species; 5] = [
+        Species::Deer,
+        Species::Rabbit,
+        Species::Wolf,
+        Species::Bird,
+        Species::Boar,
+    ];
 
     pub fn name(self) -> &'static str {
         match self {
@@ -50,6 +61,7 @@ impl Species {
             Species::Rabbit => "rabbit",
             Species::Wolf => "wolf",
             Species::Bird => "bird",
+            Species::Boar => "boar",
         }
     }
 
@@ -64,9 +76,9 @@ impl Species {
         }
     }
 
-    /// Hunted by wolves.
+    /// Hunted by wolves (boars fight back).
     pub fn is_prey(self) -> bool {
-        matches!(self, Species::Deer | Species::Rabbit)
+        matches!(self, Species::Deer | Species::Rabbit | Species::Boar)
     }
 
     fn traits(self) -> Traits {
@@ -110,6 +122,17 @@ impl Species {
                 stamina_drain: 0.0,
                 stamina_regen: 1.0,
                 bite: 0.0,
+            },
+            // Poor eyes, a keen nose; the bite is a slash of the tusks.
+            Species::Boar => Traits {
+                sight: 32.0,
+                hearing: 1.5,
+                smell: 90.0,
+                flight: 16.0,
+                health: 90.0,
+                stamina_drain: 1.0 / 12.0,
+                stamina_regen: 1.0 / 12.0,
+                bite: 25.0,
             },
         }
     }
@@ -161,6 +184,17 @@ impl Species {
                 step_height: 0.1,
                 ..NpcMotor::default()
             },
+            Species::Boar => NpcMotor {
+                walk_speed: 1.1,
+                run_speed: 5.5,
+                sprint_speed: 9.5,
+                acceleration: 14.0,
+                turn_rate: 6.0,
+                radius: 0.35,
+                height: 0.95,
+                step_height: 0.4,
+                ..NpcMotor::default()
+            },
         }
     }
 
@@ -190,6 +224,12 @@ impl Species {
                 size: [0.02, 0.03],
                 stride: 0.1,
             },
+            Species::Boar => Footfall {
+                kind: FootKind::Hoof,
+                mass_kg: 80.0,
+                size: [0.05, 0.06],
+                stride: 0.6,
+            },
         }
     }
 
@@ -199,6 +239,7 @@ impl Species {
             Species::Rabbit => 0.3,
             Species::Wolf => 0.8,
             Species::Bird => 0.2,
+            Species::Boar => 0.85,
         }
     }
 }
@@ -244,8 +285,10 @@ pub struct Animal {
     pub range: f32,
     /// Multiplies its flight distance: 0.5 tame .. 2 very skittish.
     pub skittishness: f32,
-    /// Males carry antlers (deer stand-ins).
+    /// Males carry antlers (deer) or tusks (boars).
     pub male: bool,
+    /// Young (boars: a striped piglet that keeps with its mother's sounder).
+    pub young: bool,
 }
 
 impl Default for Animal {
@@ -264,9 +307,11 @@ impl Animal {
                 Species::Rabbit => 12.0,
                 Species::Wolf => 60.0,
                 Species::Bird => 15.0,
+                Species::Boar => 40.0,
             },
             skittishness: 1.0,
             male: false,
+            young: false,
         }
     }
 }
@@ -296,6 +341,8 @@ pub enum AnimalState {
     Stalk,
     /// Wolves: running prey down.
     Chase,
+    /// Boars: charging a threat to slash it with the tusks.
+    Charge,
     /// Wolves: eating a kill.
     Feed,
     /// Killed (lies there until it respawns).
@@ -317,6 +364,7 @@ impl AnimalState {
             AnimalState::Flee => "flee",
             AnimalState::Stalk => "stalk",
             AnimalState::Chase => "chase",
+            AnimalState::Charge => "charge",
             AnimalState::Feed => "feed",
             AnimalState::Dead => "dead",
             AnimalState::Perched => "perched",
@@ -360,6 +408,9 @@ pub struct AnimalMind {
     pub heard: Option<(DVec3, f32)>,
     /// Hurt since the last think, by something at this position.
     pub hurt_from: Option<DVec3>,
+    /// When it was last hurt (animal clock) and where the blow came from (kept after the
+    /// think that reacts to it).
+    pub wounded: Option<(f64, DVec3)>,
     /// Wolves: bite this animal this tick.
     pub bite: Option<Entity>,
     pub bite_ready: f64,
@@ -368,6 +419,11 @@ pub struct AnimalMind {
     zig: f32,
     next_zig: f64,
     next_howl: f64,
+    /// Boars: when its flight last found no way out, when its tusks last struck, and the
+    /// earliest it charges again after breaking off.
+    cornered_at: Option<f64>,
+    slashed_at: Option<f64>,
+    rally_at: f64,
     rng: u64,
     initialized: bool,
 }
@@ -451,20 +507,36 @@ pub(crate) fn init_animals(mut commands: Commands, mut q: Query<InitItem, Added<
             continue;
         }
         let s = animal.species;
+        // The young are smaller, lighter and frailer; boars are bigger than sows.
+        let (size, mass, health) = match (animal.young, s == Species::Boar && animal.male) {
+            (true, _) => (0.5, 0.15, 0.25),
+            (false, true) => (1.1, 1.4, 1.3),
+            _ => (1.0, 1.0, 1.0),
+        };
         if *motor == NpcMotor::default() {
             *motor = s.motor();
+            motor.radius *= size;
+            motor.height *= size;
+            motor.step_height *= size;
+            if animal.young {
+                motor.run_speed *= 0.7;
+                motor.sprint_speed *= 0.45;
+            }
         }
         if *foot == Footfall::default() {
             *foot = s.footfall();
+            foot.mass_kg *= mass;
+            foot.size = foot.size.map(|v| v * size);
+            foot.stride *= size;
         }
         if *body == BodyHeight::default() {
-            *body = BodyHeight(s.body_height());
+            *body = BodyHeight(s.body_height() * size);
         }
         if *faction == Faction::default() {
             *faction = s.faction();
         }
         if *vitals == NpcVitals::default() {
-            vitals.max_health = s.traits().health;
+            vitals.max_health = s.traits().health * health;
             vitals.health = vitals.max_health;
         }
         mind.initialized = true;
@@ -533,11 +605,13 @@ pub(crate) fn animal_senses(
             .and_then(|s| positions.get(s).ok())
             .map(|p| p.translation)
             .unwrap_or(h.point);
-        mind.hurt_from = Some(if from.distance(t.translation) < 0.1 {
+        let from = if from.distance(t.translation) < 0.1 {
             t.translation + DVec3::new(0.0, 0.0, 1.0)
         } else {
             from
-        });
+        };
+        mind.hurt_from = Some(from);
+        mind.wounded = Some((clock.now, from));
         if vitals.health <= 0.0 {
             vitals.health = 0.0;
             vitals.downed = true;
@@ -554,6 +628,8 @@ pub(crate) fn animal_senses(
 #[derive(Debug, Clone, Copy)]
 struct Snap {
     species: Species,
+    young: bool,
+    male: bool,
     pos: DVec3,
     vel: Vec3,
     state: AnimalState,
@@ -611,6 +687,8 @@ pub(crate) fn animal_think(
             e,
             Snap {
                 species: animal.species,
+                young: animal.young,
+                male: animal.male,
                 pos: t.translation,
                 vel: bird.map(|b| b.velocity).unwrap_or(loco.velocity),
                 state: mind.state,
@@ -702,6 +780,7 @@ pub(crate) fn animal_think(
                 mind.threat = None;
                 mind.prey = None;
                 mind.hurt_from = None;
+                mind.wounded = None;
                 mind.heard = None;
                 let start = if species == Species::Bird {
                     AnimalState::Perched
@@ -749,14 +828,20 @@ pub(crate) fn animal_think(
                     continue;
                 }
                 let other = snaps.get(&p.entity);
+                let d = DVec2::new(p.position.x - pos.x, p.position.z - pos.z).length() as f32;
+                // Wolves give a boar charging at them room.
+                let charging = other.is_some_and(|o| {
+                    o.species == Species::Boar && o.state == AnimalState::Charge && d < 8.0
+                });
                 let threat = match species {
-                    Species::Wolf => p.faction != Faction::PREY && p.faction != Faction::PREDATOR,
+                    Species::Wolf => {
+                        (p.faction != Faction::PREY && p.faction != Faction::PREDATOR) || charging
+                    }
                     _ => p.faction != Faction::PREY,
                 };
                 if !threat || other.is_some_and(|o| o.dead) {
                     continue;
                 }
-                let d = DVec2::new(p.position.x - pos.x, p.position.z - pos.z).length() as f32;
                 let mut f = match p.mode {
                     LocomotionMode::Crouch => 0.4,
                     LocomotionMode::Idle => 0.75,
@@ -770,6 +855,7 @@ pub(crate) fn animal_think(
                     // Prey can tell a hunting pack from a passing one.
                     f *= match o.state {
                         AnimalState::Chase => 2.2,
+                        AnimalState::Charge => 2.0,
                         AnimalState::Stalk => 0.5,
                         AnimalState::Feed | AnimalState::Rest => 0.6,
                         _ => 0.8,
@@ -919,13 +1005,19 @@ pub(crate) fn animal_think(
         let walk = (motor.walk_speed / run).max(0.1);
         match mind.state {
             AnimalState::Graze | AnimalState::Drink | AnimalState::Rest | AnimalState::Feed => {
-                // Small steps now and then while grazing.
+                // Small steps now and then while grazing (a rooting boar shuffles on slowly, its
+                // snout kept down).
+                let shuffle = if species == Species::Boar {
+                    walk * 0.35
+                } else {
+                    walk
+                };
                 if mind.state == AnimalState::Graze
                     && let Some(dest) = mind.destination
                     && walk_to(
                         pos,
                         dest,
-                        walk,
+                        shuffle,
                         &mut nav,
                         &mut w,
                         now,
@@ -1014,6 +1106,10 @@ pub(crate) fn animal_think(
                 mind.flee_dir = dir;
                 nav.clear();
             }
+            AnimalState::Charge => {
+                nav.clear();
+                charge(&mut mind, pos, &w, now, &mut intent, traits);
+            }
             AnimalState::Stalk | AnimalState::Chase => {
                 hunt(
                     &mut mind,
@@ -1099,6 +1195,13 @@ fn decide(
         if danger >= 1.0 && mind.state == AnimalState::Perched {
             mind.set(AnimalState::Flying, now);
         }
+        return;
+    }
+    // ---------------------------------------------------------------- boars turn and fight
+    if species == Species::Boar
+        && !animal.young
+        && boar_fights(mind, animal, me, pos, mates, snaps, now, w)
+    {
         return;
     }
     // ---------------------------------------------------------------- danger first
@@ -1211,11 +1314,15 @@ fn decide(
                     continue;
                 }
                 let d = s.pos.distance(pos);
-                // Sight up close, scent trails further out.
-                let reach = if s.species == Species::Deer {
-                    110.0
-                } else {
-                    35.0
+                // Sight up close, scent trails further out; prefer deer, and a boar (which
+                // fights back) only when nothing easier is about: a piglet sooner, a tusker
+                // last of all.
+                let (reach, pick) = match s.species {
+                    Species::Deer => (110.0, 1.0),
+                    Species::Boar if s.young => (60.0, 1.6),
+                    Species::Boar if s.male => (60.0, 4.0),
+                    Species::Boar => (60.0, 2.6),
+                    _ => (35.0, 1.8),
                 };
                 if d > reach {
                     continue;
@@ -1224,8 +1331,8 @@ fn decide(
                 if d < 25.0 && w.world.raycast(eye, s.pos + DVec3::Y * 0.8).is_some() {
                     continue;
                 }
-                // Prefer deer, prefer close.
-                let score = d * if s.species == Species::Deer { 1.0 } else { 1.8 };
+                // Prefer close.
+                let score = d * pick;
                 if best.is_none_or(|b| score < b.1) {
                     best = Some((e, score));
                 }
@@ -1238,6 +1345,8 @@ fn decide(
         }
     }
     // ---------------------------------------------------------------- calm life
+    // Wolves and boars are about at night; the others bed down.
+    let nocturnal = matches!(species, Species::Wolf | Species::Boar);
     if mind.water.is_none() && species != Species::Wolf {
         mind.water = Some(find_water(home, animal.range * 3.0, &w.ground, &w.water));
     }
@@ -1254,9 +1363,9 @@ fn decide(
         if n > 0.0 { sum / n } else { pos }
     };
     let resting = mind.state == AnimalState::Rest;
-    let should_rest = (night && species != Species::Wolf) || mind.fatigue > 0.9;
+    let should_rest = (night && !nocturnal) || mind.fatigue > 0.9;
     if resting {
-        if now < mind.wait_until || (night && species != Species::Wolf) {
+        if now < mind.wait_until || (night && !nocturnal) {
             return;
         }
         mind.set(AnimalState::Graze, now);
@@ -1294,14 +1403,19 @@ fn decide(
                 mind.thirst = 0.0;
             }
             if now < mind.wait_until && mind.state != AnimalState::Alert {
-                // Now and then a small step while grazing.
+                // Now and then a small step while grazing (a rooting boar shuffles on often).
+                let (often, step) = if species == Species::Boar {
+                    (0.12, 1.4)
+                } else {
+                    (0.04, 1.5)
+                };
                 if mind.state == AnimalState::Graze
                     && mind.destination.is_none()
-                    && mind.random() < 0.04
+                    && mind.random() < often
                 {
                     let a = mind.random() * TAU;
                     mind.destination =
-                        Some(pos + DVec3::new(a.cos() as f64 * 1.5, 0.0, a.sin() as f64 * 1.5));
+                        Some(pos + DVec3::new(a.cos() as f64 * step, 0.0, a.sin() as f64 * step));
                 }
                 return;
             }
@@ -1326,6 +1440,8 @@ fn decide(
                 let spread = match species {
                     Species::Rabbit => 5.0,
                     Species::Wolf => animal.range * 0.6,
+                    // Piglets keep close to the sounder.
+                    Species::Boar if animal.young => 4.0,
                     _ => 9.0,
                 };
                 let a = mind.random() * TAU;
@@ -1520,8 +1636,105 @@ fn flee_direction(
                 }
             }
         }
+        // No way out.
+        mind.cornered_at = Some(now);
     }
     dir
+}
+
+/// A boar turns on what threatens it when it is cornered (its flight finds no way out, or the
+/// threat is on top of it) or wounded, and a sow when her young are close by. It keeps on at
+/// the threat until its tusks strike (or the threat gets away, or it runs out of steam), then
+/// breaks off and runs for a moment before it may turn again. True when that decided what it
+/// does.
+#[allow(clippy::too_many_arguments)]
+fn boar_fights(
+    mind: &mut AnimalMind,
+    animal: &Animal,
+    me: Entity,
+    pos: DVec3,
+    mates: &[Entity],
+    snaps: &HashMap<Entity, Snap>,
+    now: f64,
+    w: &AnimalWorld,
+) -> bool {
+    let live = mind.threat.and_then(|t| w.seen.get(t)).map(|p| p.position);
+    let target = live.or(mind.threat_pos);
+    let flat = |p: DVec3| DVec2::new(p.x - pos.x, p.z - pos.z).length() as f32;
+    if mind.state == AnimalState::Charge {
+        let struck = mind
+            .slashed_at
+            .is_some_and(|t| t >= mind.since && now - t > 0.35);
+        if !struck && now - mind.since < 6.0 && target.is_some_and(|p| flat(p) < 25.0) {
+            return true;
+        }
+        // Away for a moment.
+        mind.set(AnimalState::Flee, now);
+        mind.flee_until = now + 2.0 + mind.random() as f64;
+        mind.rally_at = now + 2.5 + 1.5 * mind.random() as f64;
+        if let Some(p) = target {
+            let away = Vec3::new((pos.x - p.x) as f32, 0.0, (pos.z - p.z) as f32);
+            if away.length() > 0.1 {
+                mind.flee_dir = away.normalize();
+            }
+        }
+        return true;
+    }
+    if mind.danger < 0.5 || now < mind.rally_at {
+        return false;
+    }
+    // Something real to turn on: a threat it senses now, or what just hurt it.
+    let wounded = mind.wounded.is_some_and(|(at, _)| now - at < 15.0);
+    let Some(at) = target.filter(|_| live.is_some() || wounded) else {
+        return false;
+    };
+    let d = flat(at);
+    let cornered = d < 3.0 || (mind.cornered_at.is_some_and(|t| now - t < 1.0) && d < 12.0);
+    let young = !animal.male
+        && mates.iter().any(|m| {
+            *m != me
+                && snaps
+                    .get(m)
+                    .is_some_and(|s| s.young && !s.dead && s.pos.distance(pos) < 12.0)
+        });
+    if cornered || (wounded && d < 20.0) || (young && d < 14.0) {
+        mind.set(AnimalState::Charge, now);
+        return true;
+    }
+    false
+}
+
+/// Boars: run at the threat, head down, and slash it with the tusks when close.
+fn charge(
+    mind: &mut AnimalMind,
+    pos: DVec3,
+    w: &AnimalWorld,
+    now: f64,
+    out: &mut MoveIntent,
+    traits: Traits,
+) {
+    let live = mind
+        .threat
+        .and_then(|t| w.seen.get(t))
+        .map(|p| (p.position, p.velocity));
+    let Some((at, vel)) = live.or(mind.threat_pos.map(|p| (p, Vec3::ZERO))) else {
+        return;
+    };
+    let to = Vec3::new((at.x - pos.x) as f32, 0.0, (at.z - pos.z) as f32);
+    let d = to.length();
+    // Lead a moving target a little.
+    let aim = to + Vec3::new(vel.x, 0.0, vel.z) * (d / 9.0).min(0.6);
+    let dir = aim.normalize_or(Vec3::X);
+    out.direction = dir;
+    out.look = Some(dir);
+    out.sprint = mind.stamina > 0.1;
+    if d < 1.5 && now >= mind.bite_ready && traits.bite > 0.0 {
+        if live.is_some() {
+            mind.bite = mind.threat;
+        }
+        mind.slashed_at = Some(now);
+        mind.bite_ready = now + 1.0 + 0.3 * mind.random() as f64;
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1791,7 +2004,7 @@ fn fly(
     }
 }
 
-/// Wolves' bites land as damage.
+/// Wolves' bites and boars' tusks land as damage.
 pub(crate) fn animal_bites(
     mut q: Query<(Entity, &Animal, &Transform, &mut AnimalMind)>,
     mut damage: MessageWriter<DamageEvent>,
@@ -1832,5 +2045,10 @@ mod tests {
         let (deer, wolf) = (Species::Deer, Species::Wolf);
         assert!(deer.motor().sprint_speed > wolf.motor().sprint_speed);
         assert!(deer.traits().stamina_drain > wolf.traits().stamina_drain);
+        // Boars are prey that fights back, and wolves run them down.
+        let boar = Species::Boar;
+        assert_eq!(boar.faction(), Faction::PREY);
+        assert!(boar.is_prey() && boar.traits().bite > 0.0);
+        assert!(wolf.motor().sprint_speed > boar.motor().sprint_speed);
     }
 }
