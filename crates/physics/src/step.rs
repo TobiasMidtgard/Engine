@@ -725,7 +725,7 @@ pub(crate) fn physics_step(world: &mut World, mut q: Local<Option<StepQueries>>)
                     position: i.event.point,
                     normal: i.normal,
                     size: i.size,
-                    yaw: 0.0,
+                    yaw: GroundContact::yaw_of(i.forward),
                     load_kg: i.mass * (1.0 + dv / g),
                     speed: i.tangent_speed,
                     kind: ContactKind::Body,

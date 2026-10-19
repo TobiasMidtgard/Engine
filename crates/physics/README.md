@@ -114,7 +114,12 @@ changing that one plugin line.
   kinematic wall).
 - **Events**: one `ContactEvent::Started` per touch with the impact impulse and a normal from
   `a` to `b`, one `Ended` when it stops; sensors too. Hard impacts also send `NoiseEvent` (AI
-  hearing) and, against static ground, `GroundContact` (dents, dust, impact sounds).
+  hearing) and, against static ground, `GroundContact` (dents, dust, impact sounds). That
+  includes hits on pairs that never stop touching: a crate tumbling face over face, a post
+  slapping down flat while its foot stays on the ground, a drum bouncing down the runway. Each
+  substep whose impulse changes the lighter body's speed by `impact_min_speed` (beyond holding
+  it up) counts, once per hit. A `GroundContact`'s `yaw` follows the slide, or for a body landing
+  still, its longest axis lying flat.
 - **World inputs**: `Gravity` (uniform or planets; each body gets the gravity at its own
   position), buoyancy and drag in `Water`, `WorldImpulse` blasts (blast wind drag), `ApplyImpulse`.
   Buoyancy integrates water pressure over each collider's real shape (boxes, balls, capsules,
