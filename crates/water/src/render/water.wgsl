@@ -365,11 +365,43 @@ fn trace_reflection(rel: vec3<f32>, r: vec3<f32>, size: vec2<f32>, roughness: f3
     return vec4<f32>(0.0);
 }
 
+// Foam on running water (0..1 pattern at `wp`): streaks drawn out along the current `vel`
+// and carried downstream (two copies over 4 s, cross-faded). Streaks run along the two nearest
+// of eight fixed headings, blended by the current's own, so where the current turns the pattern
+// bends with it instead of winding up.
+fn streak_foam(wp: vec2<f32>, vel: vec2<f32>) -> f32 {
+    let t = time_s();
+    let ph0 = fract(t * 0.25);
+    let ph1 = fract(t * 0.25 + 0.5);
+    let fade = abs(ph0 - 0.5) * 2.0;
+    let s = atan2(vel.y, vel.x) / (PI * 0.25);
+    let k0 = floor(s);
+    let p0 = wp - vel * 4.0 * ph0;
+    let p1 = wp - vel * 4.0 * ph1;
+    var sum = 0.0;
+    for (var k = 0; k < 2; k++) {
+        let a = (k0 + f32(k)) * PI * 0.25;
+        let d = vec2<f32>(cos(a), sin(a));
+        let side = vec2<f32>(-d.y, d.x);
+        // Three times longer along the current than across it.
+        let q0 = vec2<f32>(dot(p0, d) * 0.33, dot(p0, side)) * 2.3;
+        let q1 = vec2<f32>(dot(p1, d) * 0.33, dot(p1, side)) * 2.3 + vec2<f32>(5.2, 1.3);
+        let w = select(1.0 - (s - k0), s - k0, k == 1);
+        sum += w * mix(fbm2(q0, 4), fbm2(q1, 4), fade);
+    }
+    // Blending two headings evens the pattern out: restore its contrast about the mean.
+    let f = s - k0;
+    return 0.47 + (sum - 0.47) * inverseSqrt(f * f + (1.0 - f) * (1.0 - f));
+}
+
 // Full water surface shading seen from above. `n` world normal, `foam` 0..1, `crest` 0..1 how
 // high on a wave this point is, `wind` m/s. Returns pre-exposed radiance with fog applied.
 // `edge` is how deep the water gets before the waterline is fully drawn, meters.
+// `shore_depth`: water shallower than this laps at the shore (a lake's beach; only the very
+// edge of a stream, which is shallow all over). `vel`: the current (m/s), which carries the
+// foam downstream.
 fn shade_water(rel: vec3<f32>, n_in: vec3<f32>, look: WaterLook, foam_in: f32, crest: f32,
-               frag: vec4<f32>, wind: f32, edge: f32) -> vec3<f32> {
+               frag: vec4<f32>, wind: f32, edge: f32, shore_depth: f32, vel: vec2<f32>) -> vec3<f32> {
     let dist = length(rel);
     let v = -rel / max(dist, 1e-4);
     var n = n_in;
@@ -456,7 +488,7 @@ fn shade_water(rel: vec3<f32>, n_in: vec3<f32>, look: WaterLook, foam_in: f32, c
 
     // ---- foam: whitecaps, wakes, splashes, shoreline
     var foam = foam_in;
-    let shore = 1.0 - smoothstep(0.0, 0.3, depth_below);
+    let shore = 1.0 - smoothstep(0.0, shore_depth, depth_below);
     if (thick < 1e5) {
         let wp = tiling_pos(rel).xz;
         let lap = 0.5 + 0.5 * sin(time_s() * 1.3 + value_noise2(wp * 0.7) * 6.0);
@@ -465,7 +497,10 @@ fn shade_water(rel: vec3<f32>, n_in: vec3<f32>, look: WaterLook, foam_in: f32, c
     foam = saturate(foam * look.foam);
     if (foam > 0.001) {
         let wp = tiling_pos(rel).xz;
-        let pattern = fbm2(wp * 2.3 + vec2<f32>(time_s() * 0.07, 0.0), 4);
+        var pattern = fbm2(wp * 2.3 + vec2<f32>(time_s() * 0.07, 0.0), 4);
+        if (dot(vel, vel) > 1e-4) {
+            pattern = streak_foam(wp, vel);
+        }
         let cover = smoothstep(1.0 - foam, 1.0 - foam + 0.3, pattern + foam * 0.35);
         let up = sky_ambient(n) * sky_vis * PI;
         // Foam is a dense froth: light gets through it, so it glows even with the sun behind.
@@ -570,7 +605,7 @@ fn fs_body(in: BodyOut) -> @location(0) vec4<f32> {
     if (water.g.rain.z >= 0.0) {
         color = shade_underside(in.rel, n, look, in.clip);
     } else {
-        color = shade_water(in.rel, n, look, foam, in.crest, in.clip, wind, 0.05);
+        color = shade_water(in.rel, n, look, foam, in.crest, in.clip, wind, 0.05, 0.3, vec2<f32>(0.0));
     }
     return vec4<f32>(color, 1.0);
 }
@@ -650,17 +685,18 @@ fn fs_flow(in: FlowOut, @builtin(front_facing) front: bool) -> @location(0) vec4
     let g0 = capillary_gradient(wp - shift * phase0, wind_dir, 3.0 + speed * 3.0, fp);
     let g1 = capillary_gradient(wp - shift * phase1 + vec2<f32>(4.7, 1.3), wind_dir, 3.0 + speed * 3.0, fp);
     let wgt = abs(phase0 - 0.5) * 2.0;
-    var g = mix(g0, g1, wgt) * (1.0 + speed * 1.5);
+    var g = mix(g0, g1, wgt) * (1.0 + speed * 0.5);
     g += rain_gradient(wp, rain_at(in.rel.xz), saturate(1.0 - pixel / 0.02));
     let n = normalize(in.normal + vec3<f32>(-g.x, 0.0, -g.y));
-    // White water: fast, steep or tumbling.
+    // White water: fast, steep or tumbling. Fast water breaks into streaks and patches of
+    // white over its riffles, never a white sheet; drops churn it white all over.
     let steep = 1.0 - in.normal.y;
-    var foam = saturate((speed - 2.2) * 0.35) + saturate(steep * 2.5 - 0.3) * 1.3;
+    var foam = saturate((speed - 1.8) * 0.25) * 0.5 + saturate(steep * 2.5 - 0.3) * 1.3;
     foam *= saturate(in.depth * 30.0);
     var color: vec3<f32>;
     if (front) {
         // Streams run shallow over riffles: only the last centimeter fades.
-        color = shade_water(in.rel, n, look, foam, saturate(steep * 2.0), in.clip, 3.0 + speed, 0.01);
+        color = shade_water(in.rel, n, look, foam, saturate(steep * 2.0), in.clip, 3.0 + speed, 0.01, 0.04, in.vel);
     } else {
         color = shade_underside(in.rel, n, look, in.clip);
     }

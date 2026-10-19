@@ -3,7 +3,7 @@
 use engine_core::math::{DVec3, Quat, Vec3};
 use engine_core::prelude::*;
 use engine_core::time::TimeSource;
-use engine_physics::{PhysicsPlugin, PhysicsStats};
+use engine_physics::{PhysicsPlugin, PhysicsSettings, PhysicsStats};
 use engine_world::WorldPlugin;
 use engine_world::physics::{Collider, ColliderShape, Joint, JointKind, RigidBody, Velocity};
 
@@ -450,7 +450,8 @@ fn ragdoll_is_stable_in_slow_motion_and_fast_forward() {
             .map(|p| speed(&app, *p))
             .fold(0.0, f32::max);
         println!("ragdoll {label}: worst joint gap {gap:.4} m, fastest part {fastest:.3}");
-        assert!(gap < 0.03, "{label}: joints pulled apart by {gap} m");
+        // A free ragdoll is an articulation: its joints can't open at all.
+        assert!(gap < 1e-4, "{label}: joints pulled apart by {gap} m");
         assert!(lowest > -0.05, "{label}: ragdoll fell through the ground");
         if scale >= 1.0 {
             assert!(
@@ -459,6 +460,42 @@ fn ragdoll_is_stable_in_slow_motion_and_fast_forward() {
                 frames as f32 / 60.0 * scale
             );
         }
+    }
+}
+
+/// Ragdolls dropped from different heights and knocked over in different directions all come
+/// to rest and fall asleep: no head spinning on its spot, no limb rocking along its joint's
+/// limit.
+#[test]
+fn ragdolls_knocked_over_every_which_way_fall_asleep() {
+    for articulated in [true, false] {
+        let mut restless = Vec::new();
+        for t in 0..8 {
+            let mut app = app();
+            app.world
+                .resource_mut::<PhysicsSettings>()
+                .articulated_joints = articulated;
+            ground(&mut app, DVec3::ZERO, 40.0);
+            let rig = ragdoll(&mut app, DVec3::new(0.0, 1.0 + 0.1 * t as f64, 0.0));
+            let a = t as f32 * 0.7;
+            app.world.get_mut::<Velocity>(rig.parts[1]).unwrap().linear =
+                Vec3::new(2.0 * a.cos(), 0.0, 2.0 * a.sin());
+            let mut awake = 0;
+            for f in 1..=720 {
+                app.update();
+                if stats(&app).awake > 0 {
+                    awake = f;
+                }
+            }
+            println!("articulated {articulated}, drop {t}: asleep after {awake} frames");
+            if awake == 720 {
+                restless.push(t);
+            }
+        }
+        assert!(
+            restless.is_empty(),
+            "articulated {articulated}: drops {restless:?} still moving after 12 s"
+        );
     }
 }
 
@@ -471,6 +508,7 @@ fn jointed_chain_is_stable_in_slow_motion_and_fast_forward() {
         let gap = run_rig(&mut app, &rig, frames, label);
         let tip = pos(&app, *rig.parts.last().unwrap());
         println!("chain {label}: worst joint gap {gap:.4} m, tip at {tip:?}");
+        // Hung from the world, so constraint joints (see `PhysicsSettings::articulated_joints`).
         assert!(gap < 0.03, "{label}: links pulled apart by {gap} m");
         // It swung down: the tip is below the anchor.
         assert!(

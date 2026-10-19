@@ -130,11 +130,90 @@ fn shots() -> Vec<(f32, &'static str, [f64; 3], [f64; 3])> {
             [-26.0, 6.0, -4.0],
             [-36.0, 3.0, 16.0],
         ),
+        (0.5, "22_house_roof", [20.5, 8.5, 13.5], [15.0, 3.0, 21.0]),
+        (
+            0.55,
+            "23_house_under_the_roof",
+            [16.2, 1.6, 25.4],
+            [15.1, 2.1, 20.4],
+        ),
+        (
+            6.3,
+            "24_house_roof_charge",
+            [20.5, 8.5, 13.5],
+            [15.0, 3.0, 21.0],
+        ),
+        (
+            10.2,
+            "25_house_hatch_thermite",
+            [18.0, 6.0, 17.0],
+            [15.6, 3.2, 20.4],
+        ),
+        (
+            13.0,
+            "26_house_under_the_roof_after",
+            [16.2, 1.6, 25.4],
+            [15.1, 2.1, 20.4],
+        ),
+        (
+            13.2,
+            "27_house_roof_after",
+            [20.5, 8.5, 13.5],
+            [15.0, 3.0, 21.0],
+        ),
+        (
+            1.0,
+            "28_reinforce_shot_through",
+            [-24.6, 1.8, -13.6],
+            [-26.6, 1.4, -8.0],
+        ),
+        (
+            2.3,
+            "29_reinforce_behind_carried_in",
+            [-23.6, 2.3, -2.6],
+            [-27.2, 1.3, -8.2],
+        ),
+        (
+            4.2,
+            "30_reinforce_behind_braced",
+            [-23.6, 2.3, -2.6],
+            [-27.2, 1.3, -8.2],
+        ),
+        (
+            4.4,
+            "35_reinforce_behind_struts",
+            [-25.9, 1.0, -5.3],
+            [-27.2, 0.7, -7.6],
+        ),
+        (
+            5.3,
+            "31_reinforce_bullets_stop",
+            [-25.3, 1.7, -11.2],
+            [-27.0, 1.5, -8.0],
+        ),
+        (
+            7.6,
+            "32_reinforce_charge",
+            [-24.6, 1.8, -13.6],
+            [-26.6, 1.3, -8.0],
+        ),
+        (
+            13.0,
+            "33_reinforce_thermite",
+            [-24.6, 1.8, -13.6],
+            [-26.4, 1.3, -8.0],
+        ),
         (
             17.0,
             "21_everything_after",
             [-2.0, 17.0, -44.0],
             [-3.0, 2.5, 4.0],
+        ),
+        (
+            17.6,
+            "34_reinforce_behind_cut_through",
+            [-23.6, 2.3, -2.6],
+            [-27.2, 1.3, -8.2],
         ),
     ];
     v.sort_by(|a, b| a.0.total_cmp(&b.0));
@@ -222,10 +301,22 @@ fn main() {
             app.world.insert_resource(r);
         }
         {
-            let mut q = app.world.query_filtered::<&mut Transform, With<Camera>>();
-            for mut c in q.iter_mut(&mut app.world) {
+            // Indoors is about three stops darker than the sunlit courtyard, the back of a
+            // wall in its own shadow about one, and right down at its foot a little more.
+            let ev100 = if name.contains("under") {
+                12.3
+            } else if name.contains("behind_struts") {
+                13.0
+            } else if name.contains("behind") {
+                13.6
+            } else {
+                14.6
+            };
+            let mut q = app.world.query::<(&mut Transform, &mut Camera)>();
+            for (mut c, mut cam) in q.iter_mut(&mut app.world) {
                 *c = Transform::from_translation(DVec3::from_array(eye))
                     .looking_at(DVec3::from_array(target), Vec3::Y);
+                cam.exposure = Exposure::Manual { ev100 };
             }
         }
         // Render the new view (exposure adapts over a couple of frames) without moving time.

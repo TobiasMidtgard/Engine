@@ -8,8 +8,13 @@
 //!
 //! Local space: the wall stands on its origin, `x` from `-width/2` to `width/2`, `y` from `0`
 //! to `height`, thickness along `z` (the front face looks along `+Z`).
+//!
+//! Laid flat with [`DestructibleWall::flat`], the same grid is a floor, a roof deck or a hatch
+//! cover (Siege vertical play): its front face looks up, bullets fired from below punch up
+//! through it, a charge on top blows a hole people can drop through, and what breaks loose
+//! falls into the room below.
 
-use engine_core::math::{Vec2, Vec3};
+use engine_core::math::{Quat, Vec2, Vec3};
 use engine_core::prelude::*;
 
 use crate::material::{DestructibleMaterial, DestructionMaterials, MaterialProps};
@@ -83,6 +88,9 @@ pub struct DestructibleWall {
     pub masonry: Option<[f32; 2]>,
     /// Linear RGB paint over the material's outside color; `None` = bare material.
     pub paint: Option<[f32; 3]>,
+    /// Built openings (doorways, windows, hatches) as local `[x0, y0, x1, y1]` rectangles: no
+    /// material there from the start, and again every time the wall is rebuilt.
+    pub openings: Vec<[f32; 4]>,
     pub seed: u64,
 }
 
@@ -107,6 +115,7 @@ impl DestructibleWall {
             plank_gap: 0.0,
             masonry: None,
             paint: None,
+            openings: Vec::new(),
             seed: 1,
         }
     }
@@ -176,6 +185,57 @@ impl DestructibleWall {
         }
     }
 
+    /// Floorboards or a roof deck between joists, `width` across the boards' length (local
+    /// X) and `length` along the joists (local Y); lay it flat with [`Self::flat`]. 5 cm
+    /// boards 15 cm wide, held on every edge by the joists and beams under it: bullets go
+    /// through, a breach charge blows a hole big enough to drop through.
+    pub fn floor(width: f32, length: f32) -> Self {
+        Self {
+            thickness: 0.05,
+            cell_size: 0.05,
+            material: DestructibleMaterial::Wood,
+            stud_spacing: 0.0,
+            plank_height: 0.15,
+            plank_gap: 0.0,
+            ..Self::soft(width, length)
+        }
+    }
+
+    /// A wooden hatch cover resting on the frame of an opening in a floor (lay it flat):
+    /// thick boards, kicked or blown in from above.
+    pub fn hatch(width: f32, length: f32) -> Self {
+        Self {
+            thickness: 0.06,
+            cell_size: 0.04,
+            plank_height: 0.12,
+            ..Self::floor(width, length)
+        }
+    }
+
+    /// A steel plate over a hatch (lay it flat): bullets and breach charges only dent it;
+    /// thermite cuts it out.
+    pub fn steel_hatch(width: f32, length: f32) -> Self {
+        Self {
+            thickness: 0.04,
+            cell_size: 0.04,
+            material: DestructibleMaterial::Metal,
+            stud_spacing: 0.0,
+            ..Self::soft(width, length)
+        }
+    }
+
+    /// The rotation that lays a wall flat as a floor, roof deck or hatch: its front face looks
+    /// up (+Y), `x` stays `x` and its height runs from the origin along −Z.
+    pub fn flat() -> Quat {
+        Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2)
+    }
+
+    /// Build an opening (doorway, window, hatch) from local `min` to `max`.
+    pub fn with_opening(mut self, min: Vec2, max: Vec2) -> Self {
+        self.openings.push([min.x, min.y, max.x, max.y]);
+        self
+    }
+
     pub fn with_anchors(mut self, anchors: WallAnchors) -> Self {
         self.anchors = anchors;
         self
@@ -199,6 +259,9 @@ pub enum CellKind {
     Main,
     /// A wooden stud inside a soft wall.
     Stud,
+    /// Part of a built opening (doorway, window, hatch hole): no material, and its edges are
+    /// straight like the wall's outer border, not broken.
+    Opening,
 }
 
 /// Rebar bits per cell.
@@ -223,8 +286,8 @@ pub struct CellGrid {
     pub kind: Vec<CellKind>,
     /// Toughness multiplier (material variation, studs).
     pub tough: Vec<f32>,
-    /// Blast scorch 0..1.
-    pub scorch: Vec<f32>,
+    /// Blast scorch 0..1 on the front and back faces.
+    pub scorch: Vec<[f32; 2]>,
     /// Intact rebar through this cell (`VBAR`, `HBAR`).
     pub rebar: Vec<u8>,
     /// Index of cell (0, 0) in the wall this grid came from (stable noise and jitter).
@@ -391,7 +454,7 @@ impl WallState {
             solid: vec![true; n],
             kind: vec![CellKind::Main; n],
             tough: vec![1.0; n],
-            scorch: vec![0.0; n],
+            scorch: vec![[0.0; 2]; n],
             rebar: vec![0; n],
             global: (0, 0),
         };
@@ -440,6 +503,16 @@ impl WallState {
                     bits |= HBAR;
                 }
                 grid.rebar[idx] = bits;
+            }
+        }
+        for &[x0, y0, x1, y1] in &wall.openings {
+            for idx in 0..n {
+                let c = grid.center(idx);
+                if c.x >= x0 && c.x <= x1 && c.y >= y0 && c.y <= y1 {
+                    grid.solid[idx] = false;
+                    grid.rebar[idx] = 0;
+                    grid.kind[idx] = CellKind::Opening;
+                }
             }
         }
         let tiles_x = nx.div_ceil(TILE);
@@ -619,7 +692,9 @@ impl WallState {
                 if !g.solid[idx] {
                     continue;
                 }
-                g.scorch[idx] = (g.scorch[idx] + flux / 3.0e5).min(1.0);
+                // Soot on the face toward the blast; the far face only where it spalls.
+                let (near, far) = if front { (0, 1) } else { (1, 0) };
+                g.scorch[idx][near] = (g.scorch[idx][near] + flux / 3.0e5).min(1.0);
                 let depth = flux * facing / (props.toughness_j_m3 * g.tough[idx].max(0.1));
                 if depth < 1e-4 {
                     out.touch(i, j);
@@ -631,6 +706,7 @@ impl WallState {
                 // The shock spalls the far face of cells it nearly went through.
                 if !gone && depth > before * 0.55 {
                     gone = g.erode(idx, depth * 0.35, !front);
+                    g.scorch[idx][far] = g.scorch[idx][far].max(g.scorch[idx][near] * 0.5);
                 }
                 out.volume += (before - g.remaining(idx)) * area;
                 out.touch(i, j);
@@ -657,6 +733,7 @@ impl WallState {
                 g.rebar[idx] = 0;
                 g.front[idx] = 0.0;
                 g.back[idx] = 0.0;
+                g.kind[idx] = CellKind::Opening;
             }
         }
         self.initial_volume = g.volume();
@@ -685,7 +762,8 @@ impl WallState {
                     && c.y <= max.y + g.cell.y * 2.0)
                     && !inside;
                 if ring {
-                    g.scorch[idx] = 1.0;
+                    // Thermite melts right through: both faces blacken round the cut.
+                    g.scorch[idx] = [1.0; 2];
                     out.touch(i, j);
                 }
                 if !inside {
@@ -859,7 +937,7 @@ impl WallState {
             solid: vec![false; n],
             kind: vec![CellKind::Main; n],
             tough: vec![1.0; n],
-            scorch: vec![0.0; n],
+            scorch: vec![[0.0; 2]; n],
             rebar: vec![0; n],
             global: (g.global.0 + i0 as i64, g.global.1 + j0 as i64),
         };
@@ -975,7 +1053,7 @@ struct GridVertex {
     zb: f32,
     removed_front: f32,
     removed_back: f32,
-    scorch: f32,
+    scorch: [f32; 2],
     stud: bool,
 }
 
@@ -998,7 +1076,7 @@ pub fn mesh_cells(
         for vi in i0..=i1 {
             let mut f = 0.0;
             let mut b = 0.0;
-            let mut sc = 0.0;
+            let mut sc = [0.0f32; 2];
             let mut count = 0.0;
             let mut any_solid = false;
             let mut damaged = false;
@@ -1020,12 +1098,13 @@ pub fn mesh_cells(
                     if grid.front[c] > 1e-3 || grid.back[c] > 1e-3 {
                         damaged = true;
                     }
-                } else {
+                } else if grid.kind[c] != CellKind::Opening {
                     damaged = true;
                     f += grid.front[c].min(t);
                     b += grid.back[c].min(t);
                 }
-                sc += grid.scorch[c];
+                sc[0] += grid.scorch[c][0];
+                sc[1] += grid.scorch[c][1];
                 stud |= grid.kind[c] == CellKind::Stud;
             }
             if !any_solid {
@@ -1033,7 +1112,7 @@ pub fn mesh_cells(
             }
             f /= count;
             b /= count;
-            sc /= count;
+            sc = sc.map(|x| x / count);
             let max_sum = t * 0.92;
             if f + b > max_sum {
                 let s = max_sum / (f + b);
@@ -1070,10 +1149,11 @@ pub fn mesh_cells(
             look.interior
         }
     };
-    let surface_color = |v: &GridVertex, removed: f32, gx: i64, gy: i64| {
-        let base = scale(look.outside_color(v.xy, gx, gy), 1.0 - 0.8 * v.scorch);
+    let surface_color = |v: &GridVertex, front: bool, removed: f32, gx: i64, gy: i64| {
+        let scorch = v.scorch[usize::from(!front)];
+        let base = scale(look.outside_color(v.xy, gx, gy), 1.0 - 0.8 * scorch);
         let k = ((removed - 0.002) / 0.02).clamp(0.0, 1.0);
-        let inner = scale(interior_of(v.stud), 1.0 - 0.5 * v.scorch);
+        let inner = scale(interior_of(v.stud), 1.0 - 0.5 * scorch);
         mix(base, scale(inner, 0.93), k)
     };
 
@@ -1102,7 +1182,7 @@ pub fn mesh_cells(
                         };
                         let gx = grid.global.0 + vi as i64;
                         let gy = grid.global.1 + vj as i64;
-                        let color = surface_color(&v, removed, gx, gy);
+                        let color = surface_color(&v, front, removed, gx, gy);
                         let n = if front { Vec3::Z } else { Vec3::NEG_Z };
                         index[slot] = mb.vertex(Vec3::new(v.xy.x, v.xy.y, z), n, color);
                     }
@@ -1157,7 +1237,8 @@ pub fn mesh_cells(
                 let (Some(va), Some(vb)) = (vert(a.0, a.1), vert(b.0, b.1)) else {
                     continue;
                 };
-                let broken = neighbor.is_some() || !look.straight_border;
+                let built = neighbor.is_some_and(|k| grid.kind[k] == CellKind::Opening);
+                let broken = (neighbor.is_some() && !built) || !look.straight_border;
                 let color = if broken {
                     scale(interior_of(stud), 0.86)
                 } else {

@@ -13,7 +13,8 @@ different wet, frozen, snowed on or burnt.
   have their own sound: grass, mud, snow, ice, gravel, sand, dirt, rock, concrete, wood,
   metal, glass, water, leaves, fabric, flesh, ash and a default; any other
   `SurfaceMaterial` gets a guess from its density and deformation. Heavier and faster steps
-  are louder and sharper. The ground's state (`SurfaceLayers`) changes them: wet ground
+  are louder and sharper (a contact without a speed takes its walker's `AnimationParams`
+  speed). The ground's state (`SurfaceLayers`) changes them: wet ground
   squelches, puddles splash, snow cover crunches over whatever is under it, burnt ground
   crackles, mud freezes hard below 0 °C, and wading drags through water.
 - **Impacts** from physics contacts (what hit what, how hard), **splashes** from
@@ -116,7 +117,7 @@ tween system cost more than writing the mixer.
 
 ## Contracts
 
-Reads (all from `engine_world`): `GroundContact`, `ContactEvent`, `WaterSplash`,
+Reads (all from `engine_world`): `GroundContact`, `AnimationParams` (speed), `ContactEvent`, `WaterSplash`,
 `WorldImpulse`, `ProjectileTrace`, `AttackEvent`, `LightningStrike`, `Collider::surface`,
 `SurfaceMaterials`, `SurfaceLayers` (wetness, puddles, snow, scorch), `HeatField` and
 `Combustible` (fires), `WaterQuery` (shores and currents), `EngineState` and

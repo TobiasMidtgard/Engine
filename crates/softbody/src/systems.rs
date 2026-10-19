@@ -18,6 +18,7 @@ use engine_world::{
 use crate::body::{FrameSource, SoftBodySim, SoftKind};
 use crate::character::BoneColliders;
 use crate::collide::{LocalCollider, LocalShape};
+use crate::field::{BAKE_REACH, FieldCache};
 use crate::rope::{BridgePlank, SoftLoad};
 use crate::settings::SoftBodyConfig;
 use crate::solver::ColliderImpulse;
@@ -45,7 +46,7 @@ pub struct StepOutput {
 }
 
 /// A collider as every soft body sees it this step.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct WorldCollider {
     pub shape: LocalShape,
     pub pos: DVec3,
@@ -73,6 +74,8 @@ pub struct ColliderWorld {
     pub list: Vec<WorldCollider>,
     prev: HashMap<(Entity, u32), (DVec3, Quat)>,
     seen: HashMap<(Entity, u32), (DVec3, Quat)>,
+    /// Mesh and height-grid colliders baked for the solver.
+    pub fields: FieldCache,
 }
 
 impl ColliderWorld {
@@ -133,12 +136,16 @@ fn find_carrier(e: Entity, parents: &Query<&ChildOf>, rigid: &Query<&RigidBody>)
     None
 }
 
+/// The solver's shapes for a physics collider shape, posed in the collider's space. `grid`
+/// answers meshes and height grids (with the part's scale, offset and rotation), or `None`
+/// while they aren't baked.
 fn convert_shape(
     shape: &ColliderShape,
     scale: Vec3,
     offset: Vec3,
     rot: Quat,
     out: &mut Vec<(LocalShape, Vec3, Quat)>,
+    grid: &mut dyn FnMut(&ColliderShape, Vec3, Vec3, Quat) -> Option<LocalShape>,
 ) {
     let s = scale.abs();
     match shape {
@@ -197,31 +204,39 @@ fn convert_shape(
         }
         ColliderShape::Compound(parts) => {
             for (o, r, part) in parts {
-                convert_shape(part, scale, offset + rot * (*o * s), rot * *r, out);
+                convert_shape(part, scale, offset + rot * (*o * s), rot * *r, out, grid);
             }
         }
-        // Meshes and heightfields are static scenery: soft bodies rely on `Ground` for terrain
-        // and skip arbitrary meshes.
-        ColliderShape::TriMesh { .. } | ColliderShape::Heightfield { .. } => {}
+        ColliderShape::TriMesh { .. } | ColliderShape::Heightfield { .. } => {
+            if let Some(g) = grid(shape, scale, offset, rot) {
+                out.push((g, offset, rot));
+            }
+        }
     }
 }
 
-/// Collect physics colliders, character capsules and bone capsules.
+/// Collect physics colliders (meshes and height grids baked once a soft body comes near),
+/// character capsules and bone capsules.
 #[allow(clippy::type_complexity, clippy::too_many_arguments)]
 pub fn gather_colliders(
     mut world: ResMut<ColliderWorld>,
-    colliders: Query<(Entity, &Collider, Option<&ChildOf>)>,
+    colliders: Query<(Entity, Ref<Collider>, Option<&ChildOf>)>,
     transforms: Query<(&GlobalTransform, Option<&Transform>, Option<&ChildOf>)>,
     rigid: Query<(&RigidBody, Option<&MassProperties>)>,
     characters: Query<(Entity, &CharacterController), Without<BoneColliders>>,
     skinned: Query<(Entity, &BoneColliders, &SkeletonPose)>,
     materials: Res<SurfaceMaterials>,
+    bodies: Query<&SoftBodySim>,
     mut shapes: Local<Vec<(LocalShape, Vec3, Quat)>>,
     mut bone_shapes: Local<Vec<(LocalShape, DVec3, Quat)>>,
 ) {
     let world = &mut *world;
     world.list.clear();
     world.seen.clear();
+    let near_bodies: Vec<(DVec3, f64)> = bodies
+        .iter()
+        .map(|b| (b.center, b.radius as f64 + BAKE_REACH))
+        .collect();
     for (entity, collider, parent) in &colliders {
         if collider.sensor {
             continue;
@@ -254,6 +269,10 @@ pub fn gather_colliders(
             None => t.translation(),
         };
         let friction = materials.get(collider.surface).friction;
+        let rot = t.rotation();
+        let changed = collider.is_changed();
+        let fields = &mut world.fields;
+        let mut part = 0;
         shapes.clear();
         convert_shape(
             &collider.shape,
@@ -261,15 +280,23 @@ pub fn gather_colliders(
             Vec3::ZERO,
             Quat::IDENTITY,
             &mut shapes,
+            &mut |shape, scale, offset, r| {
+                part += 1;
+                fields.shape((entity, part - 1), shape, scale, changed, |c, radius| {
+                    let at = t.translation() + (rot * (offset + r * c)).as_dvec3();
+                    near_bodies
+                        .iter()
+                        .any(|(b, reach)| (at - *b).length() < radius as f64 + reach)
+                })
+            },
         );
-        let rot = t.rotation();
-        for (k, (shape, offset, r)) in shapes.iter().enumerate() {
+        for (k, (shape, offset, r)) in shapes.drain(..).enumerate() {
             world.push(
                 (entity, k as u32),
                 WorldCollider {
-                    shape: *shape,
-                    pos: t.translation() + (rot * *offset).as_dvec3(),
-                    rot: rot * *r,
+                    shape,
+                    pos: t.translation() + (rot * offset).as_dvec3(),
+                    rot: rot * r,
                     prev_pos: DVec3::ZERO,
                     prev_rot: Quat::IDENTITY,
                     friction,
@@ -308,23 +335,24 @@ pub fn gather_colliders(
         };
         bone_shapes.clear();
         bones.resolve(&t, pose, &mut bone_shapes);
-        for (k, (shape, pos, rot)) in bone_shapes.iter().enumerate() {
+        for (k, (shape, pos, rot)) in bone_shapes.drain(..).enumerate() {
             world.push(
                 (entity, 20_000 + k as u32),
                 WorldCollider {
-                    shape: *shape,
-                    pos: *pos,
-                    rot: *rot,
+                    shape,
+                    pos,
+                    rot,
                     prev_pos: DVec3::ZERO,
                     prev_rot: Quat::IDENTITY,
                     friction: bones.friction,
                     entity,
                     body: None,
-                    com: *pos,
+                    com: pos,
                 },
             );
         }
     }
+    world.fields.sweep();
     std::mem::swap(&mut world.prev, &mut world.seen);
 }
 
@@ -881,7 +909,7 @@ fn step_one(entity: Entity, body: &mut SoftBodySim, ctx: &StepContext) {
                 continue;
             }
             local.push(LocalCollider {
-                shape: c.shape,
+                shape: c.shape.clone(),
                 from_pos: (c.prev_pos - origin).as_vec3(),
                 from_rot: c.prev_rot,
                 to_pos: (c.pos - origin).as_vec3(),
@@ -1060,14 +1088,17 @@ pub fn emit_outputs(
             s.0 += imp.linear;
             s.1 += angular;
         }
+        // A burning triangle puffs about 1.5 times a second; a whole curtain alight gives
+        // a few hundredths of a kilogram of smoke a second (a dozen smoke grenades at the
+        // 2 g a puff it once had).
         for p in &body.out.smoke {
             smoke.write(SmokeEmission {
                 position: *p,
                 velocity: Vec3::Y * 0.8,
-                radius: 0.15,
-                mass_kg: 0.002,
+                radius: 0.12,
+                mass_kg: 0.000_12,
                 temperature_c: 300.0,
-                darkness: 0.6,
+                darkness: 0.55,
             });
         }
         if let Some((speed, at)) = body.out.impact {

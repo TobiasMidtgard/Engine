@@ -50,6 +50,19 @@ pub struct PhysicsSettings {
     /// Multiplies how hard explosions push. 1 = real blast wind (a grenade barely moves a
     /// tonne of stone); action games often use 3–10.
     pub blast_scale: f32,
+    /// The joints of a free-floating group of dynamic bodies (ragdolls, loose chains) become
+    /// articulations: each body only moves along its joint's free axes, so joints never open
+    /// however hard the landing. Groups pinned to the world or a kinematic body, or with a body
+    /// over 100× heavier than another, keep constraint joints (Rapier's articulations blow up
+    /// there). Costs about 1 ms per tumbling ragdoll per frame. Off = every joint is a
+    /// constraint the solver pulls together each step.
+    pub articulated_joints: bool,
+    /// Most moving free-floating jointed groups (ragdolls, loose chains) solved as articulations
+    /// at once: the ones nearest a `SimulationFocus`. The rest use constraint joints until a
+    /// place frees up (a tumbling ragdoll costs about 0.9 ms per frame articulated, 0.15 ms on
+    /// constraint joints, where its joints may open a few centimeters for a frame on hard
+    /// landings). Sleeping groups keep their joints and don't count.
+    pub max_articulated: u32,
 }
 
 impl Default for PhysicsSettings {
@@ -70,6 +83,8 @@ impl Default for PhysicsSettings {
             buoyancy: true,
             blast_response: true,
             blast_scale: 1.0,
+            articulated_joints: true,
+            max_articulated: 4,
         }
     }
 }

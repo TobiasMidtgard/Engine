@@ -386,3 +386,98 @@ fn markers_sit_on_their_point_and_clamp_inside_the_screen() {
         "{behind:?}"
     );
 }
+
+#[test]
+fn a_waypoint_marker_shows_the_distance_to_the_map_waypoint() {
+    use engine_core::math::{DVec3, Vec3};
+    use engine_ui::hud::{MarkerDistance, format_distance};
+    let mut app = app();
+    app.world.spawn((
+        engine_render::Camera::perspective(60.0),
+        Transform::default().looking_at(DVec3::new(0.0, 0.0, -1.0), Vec3::Y),
+    ));
+    api(
+        &mut app,
+        "ui.show",
+        json!({"screen": "hud", "instant": true}),
+    );
+    api(
+        &mut app,
+        "hud.marker",
+        json!({"title": "Beacon", "position": [0.0, 0.0, -10.0], "waypoint": true}),
+    );
+    app.update_n(4);
+    let (far, _) = app
+        .world
+        .resource::<engine_ui::map::MapData>()
+        .waypoint_nav()
+        .expect("the demo waypoint is on the player's planet");
+    let root = engine_ui::input::find_id(&mut app.world, "marker:Beacon").unwrap();
+    let text = engine_ui::screens::subtree(&app.world, root)
+        .into_iter()
+        .find(|&e| app.world.get::<MarkerDistance>(e).is_some())
+        .and_then(|e| app.world.get::<Text>(e))
+        .map(|t| t.text.clone())
+        .expect("a distance label");
+    assert_eq!(text, format_distance(far as f32 as f64));
+    assert!(far > 10_000.0, "far beyond the anchor 10 m away: {far}");
+}
+
+#[test]
+fn shop_and_inventory_open_with_the_item_asked_for() {
+    use engine_ui::inventory::{InventoryScreen, SlotRef};
+    use engine_ui::shop::ShopScreen;
+    let mut app = app();
+    api(
+        &mut app,
+        "ui.show",
+        json!({"screen": "shop", "select": "hammer", "instant": true}),
+    );
+    app.update_n(2);
+    let mut q = app.world.query::<&ShopScreen>();
+    let st = q.single(&app.world).unwrap();
+    let vendor = app.world.get::<Vendor>(st.vendor).unwrap();
+    let i = st.selected.expect("a card is selected");
+    assert_eq!(vendor.stock[i].item, "hammer");
+    assert_eq!(st.shown, Some(i));
+    api(&mut app, "ui.hide_all", json!({}));
+    api(
+        &mut app,
+        "ui.show",
+        json!({"screen": "inventory", "select": 3, "instant": true}),
+    );
+    app.update_n(2);
+    let mut q = app.world.query::<&InventoryScreen>();
+    let st = q.single(&app.world).unwrap();
+    assert_eq!(st.selected, Some(SlotRef::Bag(3)));
+}
+
+#[test]
+fn short_labels_stay_on_one_line() {
+    let mut app = app();
+    // A scaled UI (900 px tall) lays out at fractional sizes.
+    {
+        let mut w = app.world.resource_mut::<Window>();
+        w.width = 1600;
+        w.height = 900;
+    }
+    app.update_n(2);
+    api(
+        &mut app,
+        "ui.show",
+        json!({"screen": "inventory", "select": "greatsword", "instant": true}),
+    );
+    app.update_n(4);
+    let mut q = app.world.query::<(Entity, &Text)>();
+    let chips: Vec<Entity> = q
+        .iter(&app.world)
+        .filter(|(_, t)| t.text == "Main hand" || t.text == "Weapon")
+        .map(|(e, _)| e)
+        .collect();
+    assert!(!chips.is_empty());
+    let layouts = app.world.resource::<engine_ui::text::TextLayouts>();
+    for e in chips {
+        let lines = layouts.entries[&e].buffer.layout_runs().count();
+        assert_eq!(lines, 1, "a short label wrapped");
+    }
+}

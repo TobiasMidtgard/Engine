@@ -4,7 +4,8 @@
 //! sells one at once.
 //!
 //! Open it with `ui.show {"screen": "shop", "vendor": "Merchant"}` (the name of an entity
-//! with a [`Vendor`]; `owner` names the buyer, default the Player).
+//! with a [`Vendor`]; `owner` names the buyer, default the Player). `mode: "sell"` opens the
+//! sell tab; `select` (a card index or an item id) opens with that card selected.
 
 use bevy_ecs::message::MessageCursor;
 use bevy_ecs::prelude::*;
@@ -145,12 +146,18 @@ fn card(
                 ),
         )
         .child(
-            widgets::currency(&group(price), 17.0)
-                .with_style(|s| if ok { s } else { s.color(p.bad) })
-                .pick_ignore(),
+            if ok {
+                widgets::currency(&group(price), 17.0)
+            } else {
+                widgets::currency_tinted(&group(price), 17.0, p.bad)
+            }
+            .pick_ignore(),
         );
     if !ok {
-        el = el.with_style(|s| s.opacity(0.62));
+        // A price out of reach shows in red and the card stays readable; what can't be
+        // sold at all steps further back.
+        let o = if st.mode == ShopMode::Buy { 0.85 } else { 0.62 };
+        el = el.with_style(|s| s.opacity(o));
     }
     el
 }
@@ -496,6 +503,20 @@ pub fn build_screen(world: &mut World, args: &Value) -> Result<Entity, String> {
         quantity: 1,
         snapshot: None,
     };
+    st.selected = match args.get("select") {
+        Some(Value::String(id)) => {
+            let inv = world.get::<Inventory>(owner).cloned().unwrap_or_default();
+            let vendor = world.get::<Vendor>(vendor).cloned().unwrap_or_default();
+            let n = match st.mode {
+                ShopMode::Buy => vendor.stock.len(),
+                ShopMode::Sell => inv.slots.len(),
+            };
+            (0..n).find(|&i| card_stack(&st, &inv, &vendor, i).is_some_and(|s| s.item == *id))
+        }
+        Some(v) => v.as_u64().map(|i| i as usize),
+        None => None,
+    };
+    st.shown = st.selected;
     st.snapshot = snapshot(world, &st);
     let content = build(world, &st);
     let el = El::new()

@@ -1,12 +1,15 @@
 //! Renders the fighters headless to PNGs: the four styles side by side (front and back),
-//! helmet, back, whole-body and katana close-ups, and a sequence of poses from the
+//! helmet, face, back, whole-body and katana close-ups, and a sequence of poses from the
 //! procedural animation.
 //!
 //! ```text
-//! cargo run -p engine_movement --release --example fighter_preview -- [out_dir] [quick]
+//! cargo run -p engine_movement --release --example fighter_preview -- [out_dir] [quick|ladder]
 //! ```
 //!
-//! `quick` stops after the lineup, helmets, backs and whole bodies (for iterating on armor).
+//! `quick` stops after the lineup, helmets, faces, backs and whole bodies (for iterating on
+//! armor); `ladder` renders only pilots on a ladder (climbing at two moments of the hand over
+//! hand cycle, sliding down, and getting on with the sword going away) from the side and from
+//! behind.
 //!
 //! Each pose comes from the real animator ([`Animator`]) fed a short scripted timeline of
 //! movement and combat state, exactly as the demo feeds it from `Mover` and `CombatState`.
@@ -159,6 +162,103 @@ fn shoot(app: &mut App, camera: Entity, view: (DVec3, DVec3, f32), path: &Path) 
     }
 }
 
+/// Pilots on a ladder up a wall at `at`, each on its own ladder 3 m apart: climbing at two
+/// moments of the cycle, sliding down, and halfway through getting on. Shot from the side,
+/// from behind on the right and from behind on the left.
+fn ladder_shots(app: &mut App, camera: Entity, out: &Path, at: DVec3) {
+    use engine_movement::ladder::{RUNG, RUNG_AHEAD};
+    let v = DVec3::new;
+    let climbing = |climbed: f32, speed: f32, sliding: bool, secs: f32| {
+        simulate(Style::Pilot, secs, |t| AnimInput {
+            mode: LocomotionMode::Climb,
+            grounded: false,
+            velocity: Vec3::Y * speed,
+            fighter: false,
+            ladder: Some(rig::LadderAnim {
+                climbed: climbed - speed * (secs - t),
+                speed,
+                sliding,
+            }),
+            ..AnimInput::default()
+        })
+    };
+    // Getting on: from standing, a few frames into the ladder.
+    let getting_on = simulate(Style::Pilot, 1.12, |t| AnimInput {
+        mode: if t < 1.0 {
+            LocomotionMode::Idle
+        } else {
+            LocomotionMode::Climb
+        },
+        fighter: false,
+        ladder: (t >= 1.0).then_some(rig::LadderAnim {
+            climbed: 0.0,
+            speed: 0.0,
+            sliding: false,
+        }),
+        ..AnimInput::default()
+    });
+    let poses = [
+        ("climb_a", 1.05, climbing(1.05, 2.4, false, 1.0)),
+        ("climb_b", 1.2, climbing(1.2, 2.4, false, 1.0)),
+        ("slide", 1.2, climbing(1.2, -7.0, true, 1.0)),
+        ("getting_on", 0.0, getting_on),
+    ];
+    let mut paths = Vec::new();
+    // Turned round, the climbers face +Z with the low sun on their backs.
+    let turn = |x: f64, y: f64, z: f64| v(-x, y, -z);
+    for (k, (name, climbed, pose)) in poses.iter().enumerate() {
+        let base = at + v(k as f64 * 3.0, 0.0, 0.0);
+        // The wall, the rails and the rungs: the lowest rung 0.3 m up, the feet's line
+        // `RUNG_AHEAD` behind the rungs.
+        let z = -(RUNG_AHEAD as f64);
+        block(
+            &mut app.world,
+            base + turn(0.0, 3.0, z - 0.32),
+            [1.6, 6.0, 0.4],
+            0x8d8a84,
+        );
+        for x in [-0.23, 0.23] {
+            block(
+                &mut app.world,
+                base + turn(x, 3.0, z),
+                [0.044, 6.0, 0.044],
+                0x9aa1a8,
+            );
+        }
+        for i in 0..18 {
+            let y = 0.3 + i as f64 * RUNG as f64;
+            block(
+                &mut app.world,
+                base + turn(0.0, y, z),
+                [0.46, 0.032, 0.032],
+                0x9aa1a8,
+            );
+        }
+        let feet = base + v(0.0, 0.3 + *climbed, 0.0);
+        let a = spawn_actor(&mut app.world, Style::Pilot, feet, std::f32::consts::PI);
+        set_pose(&mut app.world, &a, pose);
+        for (side, eye, target) in [
+            ("side", turn(2.3, 1.2, -0.1), turn(0.0, 1.0, -0.15)),
+            ("back_right", turn(1.3, 1.9, 2.0), turn(0.0, 1.05, -0.1)),
+            ("back_left", turn(-1.4, 0.9, 1.9), turn(0.0, 1.1, -0.1)),
+        ] {
+            let p = out.join(format!("ladder_{name}_{side}.png"));
+            if shoot(app, camera, (feet + eye, feet + target, 40.0), &p) {
+                paths.push(p);
+            }
+        }
+    }
+    if !paths.is_empty() {
+        sheet(
+            &paths,
+            3,
+            WIDTH / 3,
+            HEIGHT / 3,
+            &out.join("ladder_sheet.png"),
+        );
+    }
+}
+
 /// Puts images on one sheet, `cols` across, each scaled to `tw`×`th`.
 fn sheet(paths: &[PathBuf], cols: u32, tw: u32, th: u32, out: &Path) {
     let rows = (paths.len() as u32).div_ceil(cols);
@@ -271,6 +371,11 @@ fn main() {
 
     let idle = AnimInput::default();
     let v = DVec3::new;
+
+    if std::env::args().nth(2).is_some_and(|a| a == "ladder") {
+        ladder_shots(&mut app, camera, &out, stage(30));
+        return;
+    }
 
     // 0: the lineup.
     let mut lineup = Vec::new();
@@ -530,6 +635,26 @@ fn main() {
             HEIGHT / 2,
             &out.join("02_helmets.png"),
         );
+    }
+    // Face on, a little from the right: masks and visors.
+    let mut faces = Vec::new();
+    for (style, head) in &lineup {
+        let p = out.join(format!("02_face_{}.png", style.key()));
+        if shoot(
+            &mut app,
+            camera,
+            (
+                *head + v(0.16, -0.08, -0.6),
+                *head + v(0.0, -0.04, 0.0),
+                28.0,
+            ),
+            &p,
+        ) {
+            faces.push(p);
+        }
+    }
+    if !faces.is_empty() {
+        sheet(&faces, 2, WIDTH / 2, HEIGHT / 2, &out.join("02_faces.png"));
     }
     // From behind and to the side: neck guards, shoulder lames, the sash's knot.
     let mut backs = Vec::new();

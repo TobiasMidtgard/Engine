@@ -11,10 +11,10 @@ use engine_world::{ContactKind, GroundContact, WorldPlugin};
 
 const STEP: f64 = 1.0 / 60.0;
 
-/// Footsteps heard this frame: (entity, contact kind) and (entity, event name, bone).
+/// Footsteps heard: (entity, contact kind, speed) and (entity, event name, bone).
 #[derive(Resource, Default)]
 struct Heard {
-    contacts: Vec<(Entity, ContactKind)>,
+    contacts: Vec<(Entity, ContactKind, f32)>,
     events: Vec<(Entity, String, Option<String>)>,
 }
 
@@ -25,7 +25,7 @@ fn listen(
 ) {
     for c in contacts.read() {
         if let Some(e) = c.entity {
-            heard.contacts.push((e, c.kind));
+            heard.contacts.push((e, c.kind, c.speed));
         }
     }
     for e in events.read() {
@@ -62,6 +62,17 @@ fn walk(app: &mut App, e: Entity, speed: f64, secs: f64) {
     }
 }
 
+/// Speeds the footstep contacts of `e` reported.
+fn step_speeds(app: &App, e: Entity) -> Vec<f32> {
+    let heard = app.world.resource::<Heard>();
+    heard
+        .contacts
+        .iter()
+        .filter(|c| c.0 == e)
+        .map(|c| c.2)
+        .collect()
+}
+
 fn footsteps(app: &mut App, e: Entity) -> (usize, usize) {
     let mut heard = app.world.resource_mut::<Heard>();
     let contacts = heard.contacts.iter().filter(|c| c.0 == e).count();
@@ -96,6 +107,12 @@ fn a_hiker_gets_a_body_that_walks_runs_and_goes_again() {
         .unwrap()
         .get("speed");
     assert!((speed - 1.4).abs() < 0.15, "walking speed {speed}");
+    // Each step carries the walking speed (footstep sounds key on it).
+    let speeds = step_speeds(&app, hiker);
+    assert!(
+        speeds.iter().all(|s| (s - 1.4).abs() < 0.3),
+        "walking step speeds {speeds:?}"
+    );
     let (contacts, events) = footsteps(&mut app, hiker);
     assert!(
         contacts >= 4,
@@ -110,6 +127,11 @@ fn a_hiker_gets_a_body_that_walks_runs_and_goes_again() {
         .unwrap()
         .get("speed");
     assert!((speed - 4.0).abs() < 0.3, "running speed {speed}");
+    let speeds = step_speeds(&app, hiker);
+    assert!(
+        speeds.iter().filter(|s| **s > 3.5).count() * 2 > speeds.len(),
+        "running step speeds {speeds:?}"
+    );
     let (contacts, _) = footsteps(&mut app, hiker);
     assert!(
         contacts >= 6,

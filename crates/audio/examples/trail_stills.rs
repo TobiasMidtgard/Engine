@@ -1,11 +1,12 @@
 //! Close-up stills of every stretch of the footstep trail, for judging the ground and props:
 //! one view from eye height (1.7 m) along the path and one low three-quarter view from the
 //! side, plus a wide view of the whole loop. Same scene as `trail_recording` (sun, grass
-//! plane, trees).
+//! plane, trees). Views of where one ground meets the next are named after both
+//! (`mud-snow`, `snow-ice`, ...) and rendered only when asked for with `--only`.
 //!
 //! ```text
 //! cargo run -p engine_audio --release --example trail_stills -- [out_dir]
-//!     [--only grass,mud,wide] [--size 1280x720] [--walkers] [--panels]
+//!     [--only grass,mud,mud-snow,wide] [--size 1280x720] [--walkers] [--panels]
 //!     [--wide eye_x,eye_y,eye_z,at_x,at_y,at_z] [--sun x,y,z] [--ev ev100]
 //! cargo run -p engine_audio --example trail_stills -- --measure
 //! ```
@@ -135,7 +136,8 @@ fn main() {
     // Let shaders compile and the first uploads happen.
     app.update();
 
-    let mut shots: Vec<(String, Vec<View>)> = Vec::new();
+    // Name, views, and whether it is only rendered when asked for by name.
+    let mut shots: Vec<(String, Vec<View>, bool)> = Vec::new();
     for &(name, len) in STRETCHES {
         let s0 = stretch_start(name).unwrap_or(0.0);
         let mid = s0 + len * 0.5;
@@ -157,7 +159,30 @@ fn main() {
             look + DVec3::new(0.0, 0.08, 0.0),
             55.0,
         );
-        shots.push((name.to_string(), vec![eye, low]));
+        shots.push((name.to_string(), vec![eye, low], false));
+    }
+    // Where each ground meets the next: from eye height before the boundary, and low from
+    // the side across it.
+    for (k, &(a, _)) in STRETCHES.iter().enumerate() {
+        let b = STRETCHES[(k + 1) % STRETCHES.len()].0;
+        let at = stretch_start(b).unwrap_or(0.0);
+        let (p, d) = trail_point(at);
+        let right = Vec3::new(-d.z, 0.0, d.x).as_dvec3();
+        let outward = if p.dot(right) > 0.0 { right } else { -right };
+        let (back, _) = trail_point(at - 2.6);
+        let (ahead, _) = trail_point(at + 0.9);
+        let eye = (
+            back + outward * 0.3 + DVec3::new(0.0, 1.7, 0.0),
+            ahead + DVec3::new(0.0, 0.05, 0.0),
+            60.0,
+        );
+        let (side, _) = trail_point(at - 0.8);
+        let low = (
+            side + outward * 2.1 + DVec3::new(0.0, 0.6, 0.0),
+            p + DVec3::new(0.0, 0.06, 0.0),
+            55.0,
+        );
+        shots.push((format!("{a}-{b}"), vec![eye, low], true));
     }
     shots.push((
         "wide".into(),
@@ -166,12 +191,15 @@ fn main() {
             DVec3::new(o.wide[3], o.wide[4], o.wide[5]),
             52.0,
         )],
+        false,
     ));
 
-    for (name, views) in shots {
-        if let Some(only) = &o.only
-            && !only.contains(&name)
-        {
+    for (name, views, on_request) in shots {
+        let wanted = match &o.only {
+            Some(only) => only.contains(&name),
+            None => !on_request,
+        };
+        if !wanted {
             continue;
         }
         let started = Instant::now();

@@ -48,6 +48,9 @@ struct Seen {
     walker_foot_float: f64,
     horse_max_speed: f32,
     haunch_at_gallop: f32,
+    /// How far a swinging hind hoof flexes back from its cannon at the gallop (sine of the
+    /// fetlock angle).
+    hind_hoof_curl: f32,
     dog_gaits: Vec<String>,
     dog_spine: (f32, f32),
     /// Highest planted paw while walking, m.
@@ -109,6 +112,21 @@ fn every_test_case_does_what_it_shows() {
         if horse_speed > 9.0 {
             let haunch = activation(w, d.horse, "haunch_l").max(activation(w, d.horse, "haunch_r"));
             seen.haunch_at_gallop = seen.haunch_at_gallop.max(haunch);
+            // In the swing the hind hooves curl back behind the fetlocks.
+            let a = w.get::<Animator>(d.horse).unwrap();
+            let horse_gait = w.get::<LeggedGait>(d.horse).unwrap();
+            let turn = |bone: &str| {
+                let b = a.skeleton.bone(bone);
+                a.model[b].r * a.skeleton.rest_model[b].r.inverse()
+            };
+            for (leg, side) in [(2, "l"), (3, "r")] {
+                if horse_gait.planted(leg) {
+                    continue;
+                }
+                let fetlock = turn(&format!("hind_cannon_{side}")).inverse()
+                    * turn(&format!("hind_hoof_{side}"));
+                seen.hind_hoof_curl = seen.hind_hoof_curl.max((fetlock * Vec3::NEG_Y).z);
+            }
         }
         let gait = w.get::<LeggedGait>(d.dog).unwrap();
         let stage = gait.stage_name().to_string();
@@ -202,6 +220,11 @@ fn every_test_case_does_what_it_shows() {
         seen.haunch_at_gallop > 0.4,
         "haunches at the gallop {}",
         seen.haunch_at_gallop
+    );
+    assert!(
+        seen.hind_hoof_curl > 0.5,
+        "the swinging hind hooves don't curl back: {:.2}",
+        seen.hind_hoof_curl
     );
     for g in ["walk", "trot", "gallop"] {
         assert!(

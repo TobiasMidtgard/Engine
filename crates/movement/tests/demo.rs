@@ -246,7 +246,7 @@ fn the_runner_completes_the_parkour_route() {
 }
 
 #[test]
-fn the_climber_catches_the_ledge_shimmies_climbs_up_and_drops_off() {
+fn the_climber_catches_the_ledge_shimmies_around_the_corner_climbs_up_and_drops_off() {
     let (mut app, _) = demo_app(None);
     let mut q = app.world.query::<(Entity, &Name)>();
     let climber = q
@@ -271,13 +271,14 @@ fn the_climber_catches_the_ledge_shimmies_climbs_up_and_drops_off() {
     let summary = format!("hung from {hung_from:?}, shimmied {shimmied:.2} m");
     assert_eq!(triggered(&app, climber, "ledge_grab"), 1, "{summary}");
     assert!(shimmied > 2.5, "{summary}");
+    assert_eq!(triggered(&app, climber, "ledge_corner"), 1, "{summary}");
     assert!(triggered(&app, climber, "mantle") >= 1, "{summary}");
     assert!(stood_on_top && back_down, "{summary}");
     assert_eq!(triggered(&app, climber, "jump"), 1, "{summary}");
 }
 
 #[test]
-fn the_grappler_hooks_the_tower_is_reeled_up_and_climbs_over() {
+fn the_grappler_hooks_the_tower_climbs_over_and_rides_the_zip_line_down() {
     let (mut app, _) = demo_app(None);
     let mut q = app.world.query::<(Entity, &Name)>();
     let grappler = q
@@ -287,21 +288,31 @@ fn the_grappler_hooks_the_tower_is_reeled_up_and_climbs_over() {
         .0;
     let top = demo::layout::GRAPPLE_TOP;
     let target = DVec3::from_array(demo::layout::GRAPPLE_TARGET);
-    let (mut bit_at, mut highest, mut stood_on_top, mut landed) = (None, 0.0, false, None);
-    run_until(&mut app, 12.0, |w| {
+    let (mut bit_at, mut highest, mut stood_on_top) = (None, 0.0, false);
+    let (mut rode, mut fastest, mut landed) = (0.0, 0.0f32, None);
+    run_until(&mut app, 16.0, |w| {
         let m = w.get::<Mover>(grappler).unwrap();
         let p = w.get::<Transform>(grappler).unwrap().translation;
         if let Some(g) = m.grapple.filter(|g| g.attached) {
             bit_at.get_or_insert(g.anchor);
         }
-        highest = p.y.max(highest);
+        if !stood_on_top {
+            highest = p.y.max(highest);
+        }
         stood_on_top |= m.grounded && p.y > top + 0.8;
-        if stood_on_top && m.grounded && p.y < 1.5 {
+        if let Some(z) = m.zip {
+            rode = z.s.max(rode);
+            fastest = fastest.max(z.speed);
+        }
+        if rode > 0.0 && m.grounded && p.y < 1.5 {
             landed.get_or_insert(p);
         }
         landed.is_some()
     });
-    let summary = format!("hook bit at {bit_at:?}, highest {highest:.2} m, landed at {landed:?}");
+    let summary = format!(
+        "hook bit at {bit_at:?}, highest {highest:.2} m, rode to s = {rode:.2} at up to \
+         {fastest:.1} m/s, landed at {landed:?}"
+    );
     assert_eq!(triggered(&app, grappler, "grapple_fire"), 1, "{summary}");
     assert_eq!(triggered(&app, grappler, "grapple_hit"), 1, "{summary}");
     let bit = bit_at.expect("the hook bit");
@@ -309,14 +320,66 @@ fn the_grappler_hooks_the_tower_is_reeled_up_and_climbs_over() {
     assert_eq!(triggered(&app, grappler, "mantle"), 1, "{summary}");
     // Over the edge, not flung high above the deck.
     assert!(highest < top + 0.9 + 1.0, "{summary}");
-    // Back down off the far side, on the pad.
+    assert!(stood_on_top, "{summary}");
+    // Caught the zip line once, rode it nearly to the gate, fast, and let go there.
+    assert_eq!(triggered(&app, grappler, "zip_grab"), 1, "{summary}");
+    assert_eq!(triggered(&app, grappler, "zip_release"), 1, "{summary}");
+    assert!(rode > 0.8, "{summary}");
+    assert!(fastest > 12.0 && fastest < 18.0, "{summary}");
+    // Down through the gate onto its pad.
     let landed = landed.expect(&summary);
-    let pad = demo::layout::GRAPPLE_PAD;
-    assert!(
-        landed.z < pad.center[2] + pad.size[2] as f64 * 0.5 - 0.5,
-        "{summary}"
-    );
+    let pad = demo::layout::ZIP_PAD;
+    for (i, p) in [landed.x, landed.z].into_iter().enumerate() {
+        let (c, h) = (pad.center[i * 2], pad.size[i * 2] as f64 * 0.5);
+        assert!((p - c).abs() < h - 0.3, "{summary}");
+    }
     assert!(landed.y > pad.center[1] + 0.5, "{summary}");
+}
+
+#[test]
+fn the_ladder_climber_climbs_onto_the_tower_and_slides_back_down() {
+    let (mut app, _) = demo_app(None);
+    let mut q = app.world.query::<(Entity, &Name)>();
+    let climber = q
+        .iter(&app.world)
+        .find(|(_, n)| n.as_str() == "Ladder climber")
+        .unwrap()
+        .0;
+    let top = demo::layout::TOWER_TOP;
+    let (mut on_roof, mut fastest_up, mut fastest_down) = (None, 0.0f32, 0.0f32);
+    let (mut slid, mut back_down) = (false, None);
+    let secs = run_until(&mut app, 14.0, |w| {
+        let m = w.get::<Mover>(climber).unwrap();
+        let p = w.get::<Transform>(climber).unwrap().translation;
+        if let Some(l) = m.ladder {
+            fastest_up = fastest_up.max(l.speed);
+            fastest_down = fastest_down.min(l.speed);
+            slid |= l.sliding;
+        }
+        if m.grounded && p.y > top + 0.5 {
+            on_roof.get_or_insert(p);
+        }
+        if on_roof.is_some() && m.grounded && p.y < 1.5 {
+            back_down.get_or_insert(p);
+        }
+        back_down.is_some()
+    });
+    let summary = format!(
+        "after {secs:.1} s: on the roof at {on_roof:?}, up at {fastest_up:.1} m/s, down at \
+         {fastest_down:.1} m/s, slid {slid}, back down at {back_down:?}"
+    );
+    eprintln!("{summary}");
+    // Up the ladder at the pilot's climbing speed, over the top onto the roof…
+    assert_eq!(triggered(&app, climber, "ladder_grab"), 2, "{summary}");
+    assert_eq!(triggered(&app, climber, "ladder_exit"), 2, "{summary}");
+    let roof = on_roof.expect(&summary);
+    assert!((roof.x - 23.2).abs() < 0.3 && roof.z < 14.0, "{summary}");
+    assert!((fastest_up - 2.6).abs() < 0.1, "{summary}");
+    // …and back down the same ladder, sliding most of the way.
+    assert!(slid && fastest_down < -6.5, "{summary}");
+    let down = back_down.expect(&summary);
+    assert!((down.x - 23.2).abs() < 0.3 && down.z > 14.9, "{summary}");
+    assert!(secs < 11.0, "{summary}");
 }
 
 #[test]
@@ -465,17 +528,22 @@ fn the_demo_spawns_the_same_static_collider_boxes() {
         ([-14.0, 1.35, 12.0], [0.15, 0.2, 3.5]),    // slide bar
         ([-14.0, 0.775, 8.5], [0.15, 0.775, 0.15]), // slide bar posts
         ([-14.0, 0.775, 15.5], [0.15, 0.775, 0.15]),
-        ([-2.0, 2.6, 14.8], [6.0, 2.5, 0.3]),   // wall A
-        ([12.5, 2.6, 9.2], [6.5, 2.5, 0.3]),    // wall B
-        ([22.0, 2.75, 11.0], [3.0, 2.75, 3.5]), // tower
-        ([0.0, 0.05, -14.0], [8.0, 0.05, 8.0]), // ring
-        ([0.0, 0.15, -25.5], [8.0, 0.15, 1.5]), // stands
-        ([17.0, 0.05, 2.0], [6.0, 0.05, 3.5]),  // ledge station
-        ([17.0, 1.9, 1.2], [3.0, 1.8, 0.8]),    // ledge block
-        ([8.0, 0.05, 29.0], [5.0, 0.05, 11.0]), // grapple pad
-        ([8.0, 4.5, 31.0], [4.0, 4.5, 3.0]),    // grapple tower
-        ([-14.0, 0.5, 25.4], [12.0, 0.5, 1.9]), // freight platform
+        ([-2.0, 2.6, 14.8], [6.0, 2.5, 0.3]),       // wall A
+        ([12.5, 2.6, 9.2], [6.5, 2.5, 0.3]),        // wall B
+        ([22.0, 2.75, 11.0], [3.0, 2.75, 3.5]),     // tower
+        ([0.0, 0.05, -14.0], [8.0, 0.05, 8.0]),     // ring
+        ([0.0, 0.15, -25.5], [8.0, 0.15, 1.5]),     // stands
+        ([17.0, 0.05, 2.0], [6.0, 0.05, 3.5]),      // ledge station
+        ([17.0, 1.9, 1.2], [3.0, 1.8, 0.8]),        // ledge block
+        ([8.0, 0.05, 29.0], [5.0, 0.05, 11.0]),     // grapple pad
+        ([8.0, 4.5, 31.0], [4.0, 4.5, 3.0]),        // grapple tower
+        ([-14.0, 0.5, 25.4], [12.0, 0.5, 1.9]),     // freight platform
+        ([33.75, 0.05, 20.75], [5.25, 0.05, 5.25]), // zip line pad
     ];
+    // The posts of the zip line's gantry and gate.
+    for p in demo::layout::zip_posts() {
+        expected.push((p.center, p.size.map(|s| s * 0.5)));
+    }
     let key = |b: &([f64; 3], [f32; 3])| {
         b.0.map(|v| (v * 1000.0).round() as i64)
             .into_iter()

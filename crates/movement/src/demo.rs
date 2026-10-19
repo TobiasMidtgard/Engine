@@ -2,12 +2,16 @@
 //!
 //! * **Parkour course** (+Z side): a runner loops sprint → slide under a bar → wall-run →
 //!   wall-jump → wall-run → mantle onto a tower → jump and double jump off it. Afterimages
-//!   trail every fast move, so a still frame shows the route.
+//!   trail every fast move, so a still frame shows the route. Round the back of the tower a
+//!   second pilot climbs the caged ladder, steps off onto the roof, looks out over the course,
+//!   then climbs back down a few rungs and slides the rest of the way.
 //! * **Ledge station** (between the two): a climber jumps at a block too high to climb
-//!   straight onto, catches its top, shimmies along it, climbs up and walks off the far end.
+//!   straight onto, catches its top, shimmies along it and around the corner at its end,
+//!   climbs up and walks off.
 //! * **Grapple tower** (behind the course): a grappler sprints at a 9 m tower, jumps, fires
-//!   its grapple hook at the top edge, is reeled up the wall, climbs over the top, runs across
-//!   and drops off the back.
+//!   its grapple hook at the top edge, is reeled up the wall and climbs over the top, then
+//!   runs under the launch gantry on the roof, jumps into the zip line and rides it down
+//!   26 m to a landing gate, letting go to drop through the gate onto its pad.
 //! * **Freight station** (beside the grapple tower): a freight car shuttles along a short
 //!   track past a loading platform. As it pulls out, a rider sprints along the platform,
 //!   leaps onto the car's side and wall-runs along it, climbs over onto its roof, rides it to
@@ -37,7 +41,7 @@ use engine_core::prelude::*;
 use engine_core::time::LocalTimeScale;
 use engine_render::{Camera, MeshRenderer, StandardMaterial};
 use engine_world::animation::AnimationParams;
-use engine_world::locomotion::{LocomotionMode, MoveIntent};
+use engine_world::locomotion::{Climbable, LocomotionMode, MoveIntent};
 use engine_world::physics::{CharacterController, Collider, PhysicsBackend, RigidBody, Velocity};
 use engine_world::{AttackEvent, AttackKind};
 
@@ -103,6 +107,17 @@ pub mod layout {
         center: [22.0, TOWER_TOP * 0.5, 11.0],
         size: [6.0, TOWER_TOP as f32, 7.0],
     };
+    /// The caged ladder up the tower's north face (+Z), climbed facing −Z: the climber's feet
+    /// on its lowest rung (0.4 m up, a step off the runway) and on its top one (level with the
+    /// roof), 0.4 m out from the face, and where it steps off onto the roof. Its rungs are 0.3
+    /// m apart, 0.2 m out from the face.
+    pub const LADDER_BOTTOM: [f64; 3] = [23.2, 0.416, 14.9];
+    pub const LADDER_TOP: [f64; 3] = [23.2, TOWER_TOP + 0.016, 14.9];
+    pub const LADDER_EXIT: [f64; 3] = [23.2, TOWER_TOP, 13.7];
+    /// Where the ladder climber starts (feet), facing the ladder.
+    pub const LADDER_START: [f64; 3] = [23.2, 0.1, 16.8];
+    /// The ladder climber climbs down this far from the top, then slides, m.
+    pub const LADDER_SLIDE_FROM: f32 = 1.5;
     /// The ring platform (a 16 m square, 0.1 m high).
     pub const RING_PLATFORM: Block = Block {
         center: [RING[0], RING[1] + 0.05, RING[2]],
@@ -121,7 +136,8 @@ pub mod layout {
     /// Top of the ledge block: too high to climb straight onto, in reach of a jump and a grab.
     pub const LEDGE_TOP: f64 = 3.7;
     /// The ledge block on the station's floor. The climber catches its top from the face at
-    /// z = 2.0 (toward the course), shimmies toward +X, climbs up and walks off the +X end.
+    /// z = 2.0 (toward the course), shimmies toward +X and around the corner onto the +X end,
+    /// climbs up there and walks off it.
     pub const LEDGE_WALL: Block = Block {
         center: [17.0, (LEDGE_TOP + 0.1) * 0.5, 1.2],
         size: [6.0, (LEDGE_TOP - 0.1) as f32, 1.6],
@@ -146,6 +162,59 @@ pub mod layout {
     pub const GRAPPLE_START: [f64; 3] = [8.0, 0.1, 19.0];
     /// The grappler jumps (and fires once airborne) as it crosses this z.
     pub const GRAPPLE_TAKEOFF_Z: f64 = 21.0;
+    /// The zip line from the grapple tower's roof down to a landing gate on its own pad: its
+    /// top anchor, under the launch gantry's crossbeam, and its bottom anchor, under the
+    /// gate's.
+    pub const ZIP_FROM: [f64; 3] = [10.4, GRAPPLE_TOP + 3.8, 31.0];
+    pub const ZIP_TO: [f64; 3] = [33.0, 2.9, 21.6];
+    /// The line's sag at mid-span, m.
+    pub const ZIP_SAG: f32 = 0.45;
+    /// Riders let go this far before the gate (and drop through it onto the pad), m.
+    pub const ZIP_END_CLEAR: f32 = 4.0;
+    /// From the line to each post of the launch gantry and of the landing gate, m.
+    pub const ZIP_GANTRY_HALF: f64 = 1.1;
+    pub const ZIP_GATE_HALF: f64 = 1.4;
+    /// Tops of the gantry's posts (over the roof) and of the gate's (over the ground).
+    pub const ZIP_GANTRY_TOP: f64 = ZIP_FROM[1] + 0.3;
+    pub const ZIP_GATE_TOP: f64 = ZIP_TO[1] + 0.35;
+    /// The landing pad around the bottom of the line.
+    pub const ZIP_PAD: Block = Block {
+        center: [33.75, 0.05, 20.75],
+        size: [10.5, 0.1, 10.5],
+    };
+    /// The grappler's way onto the line from where it climbs over the roof's edge, in the
+    /// line's frame (m along it from the top anchor, m across it): round the front of the
+    /// gantry's post, then under the line, facing down it…
+    pub const ZIP_APPROACH: [[f64; 2]; 2] = [[0.9, -1.7], [0.3, 0.0]];
+    /// …and it jumps once this far along.
+    pub const ZIP_TAKEOFF: f64 = 0.7;
+
+    /// Along the zip line (from top to bottom) and across it, both level and unit.
+    pub fn zip_axes() -> ([f64; 3], [f64; 3]) {
+        let (dx, dz) = (ZIP_TO[0] - ZIP_FROM[0], ZIP_TO[2] - ZIP_FROM[2]);
+        let l = (dx * dx + dz * dz).sqrt();
+        ([dx / l, 0.0, dz / l], [-dz / l, 0.0, dx / l])
+    }
+
+    /// The posts of the launch gantry and of the landing gate (colliders): two each, either
+    /// side of the line.
+    pub fn zip_posts() -> [Block; 4] {
+        let (_, across) = zip_axes();
+        let post = |anchor: [f64; 3], half: f64, side: f64, base: f64, top: f64| Block {
+            center: [
+                anchor[0] + across[0] * half * side,
+                (base + top) * 0.5,
+                anchor[2] + across[2] * half * side,
+            ],
+            size: [0.2, (top - base) as f32, 0.2],
+        };
+        [
+            post(ZIP_FROM, ZIP_GANTRY_HALF, 1.0, GRAPPLE_TOP, ZIP_GANTRY_TOP),
+            post(ZIP_FROM, ZIP_GANTRY_HALF, -1.0, GRAPPLE_TOP, ZIP_GANTRY_TOP),
+            post(ZIP_TO, ZIP_GATE_HALF, 1.0, 0.1, ZIP_GATE_TOP),
+            post(ZIP_TO, ZIP_GATE_HALF, -1.0, 0.1, ZIP_GATE_TOP),
+        ]
+    }
     /// The freight station's loading platform, beside the track (−Z side). Its +Z edge is at
     /// z = 27.3, 1.2 m short of the car's side.
     pub const FREIGHT_PLATFORM: Block = Block {
@@ -260,7 +329,16 @@ pub enum Brain {
         #[serde(skip)]
         origin: DVec3,
     },
-    /// Loops the grapple tower: run, jump, hook the top edge, reel up, climb over.
+    /// Loops the course tower's ladder: climb up onto the roof, look out, climb back down and
+    /// slide the rest.
+    LadderClimber {
+        step: Rungs,
+        secs: f32,
+        #[serde(skip)]
+        origin: DVec3,
+    },
+    /// Loops the grapple tower: run, jump, hook the top edge, reel up, climb over, ride the zip
+    /// line down.
     Grappler {
         step: GrappleLoop,
         secs: f32,
@@ -423,10 +501,12 @@ pub fn spawn_demo(commands: &mut Commands, origin: DVec3) {
     block(commands, origin, "Wall A", layout::WALL_A);
     block(commands, origin, "Wall B", layout::WALL_B);
     block(commands, origin, "Tower", layout::TOWER);
+    spawn_ladder(commands, origin);
     block(commands, origin, "Ledge station", layout::LEDGE_PAD);
     block(commands, origin, "Ledge block", layout::LEDGE_WALL);
     block(commands, origin, "Grapple pad", layout::GRAPPLE_PAD);
     block(commands, origin, "Grapple tower", layout::GRAPPLE_TOWER);
+    spawn_zipline(commands, origin);
     block(
         commands,
         origin,
@@ -460,6 +540,20 @@ pub fn spawn_demo(commands: &mut Commands, origin: DVec3) {
         MovementProfile::pilot(),
         Brain::Climber {
             step: Climb::Start,
+            secs: 0.0,
+            origin,
+        },
+    );
+
+    spawn_character(
+        commands,
+        "Ladder climber",
+        origin + DVec3::from_array(layout::LADDER_START) + DVec3::Y * 0.9,
+        Vec3::NEG_Z,
+        Style::Pilot,
+        MovementProfile::pilot(),
+        Brain::LadderClimber {
+            step: Rungs::Start,
             secs: 0.0,
             origin,
         },
@@ -619,6 +713,7 @@ pub(crate) fn register(app: &mut App) {
             direct_duel,
             run_runner,
             run_climber,
+            run_ladder_climber,
             run_grappler,
             run_rider,
             think_duelists,
@@ -635,6 +730,8 @@ pub(crate) fn register(app: &mut App) {
             animate_puppets,
             crate::look::rope::draw_ropes,
             crate::look::rope::drop_orphan_ropes,
+            crate::look::zipline::draw_ziplines,
+            crate::look::zipline::drop_orphan_cables,
         )
             .chain(),
     );
@@ -784,7 +881,8 @@ pub enum Climb {
     Approach,
     /// Hang for a moment.
     Hang,
-    /// Shimmy along the top toward +X.
+    /// Shimmy along the top toward +X, around the corner and on along the end (the stick held
+    /// toward +X all the way).
     Shimmy,
     /// Hold toward the block: climb up onto it.
     ClimbUp,
@@ -794,8 +892,9 @@ pub enum Climb {
     Rest,
 }
 
-/// Where the climber stops shimmying and climbs, x relative to the origin.
-const CLIMB_AT_X: f64 = 18.4;
+/// Where the climber stops shimmying along the block's end and climbs, z relative to the
+/// origin.
+const CLIMB_AT_Z: f64 = 1.25;
 
 #[allow(clippy::type_complexity)]
 fn run_climber(
@@ -840,14 +939,17 @@ fn run_climber(
             Climb::Hang => (*secs >= 0.7).then_some(Climb::Shimmy),
             Climb::Shimmy => {
                 intent.direction = Vec3::X;
-                (rel.x >= CLIMB_AT_X).then_some(Climb::ClimbUp)
+                let on_end = m
+                    .hang
+                    .is_some_and(|h| h.corner.is_none() && h.normal.dot(Vec3::X) > 0.9);
+                (on_end && rel.z <= CLIMB_AT_Z).then_some(Climb::ClimbUp)
             }
             Climb::ClimbUp => {
-                intent.direction = Vec3::NEG_Z;
+                intent.direction = m.hang.map_or(Vec3::NEG_X, |h| -h.normal);
                 (m.grounded && rel.y > layout::LEDGE_TOP).then_some(Climb::WalkOff)
             }
             Climb::WalkOff => {
-                intent.direction = Vec3::X * 0.5;
+                intent.direction = Vec3::X * 0.8;
                 (*secs > 0.3 && m.grounded && rel.y < 1.5).then_some(Climb::Rest)
             }
             Climb::Rest => (*secs >= 1.0).then_some(Climb::Start),
@@ -877,6 +979,133 @@ pub(crate) fn restart_climbers(world: &mut World) -> usize {
     n
 }
 
+// ------------------------------------------------------------------------ the ladder climber
+
+/// The caged ladder up the course tower's north face.
+fn spawn_ladder(commands: &mut Commands, origin: DVec3) {
+    let bottom = DVec3::from_array(layout::LADDER_BOTTOM);
+    let rel = |p: [f64; 3]| (DVec3::from_array(p) - bottom).as_vec3();
+    commands.spawn((
+        Name::new("Tower ladder"),
+        Transform::from_translation(origin + bottom),
+        Climbable::ladder(Vec3::ZERO, rel(layout::LADDER_TOP), Vec3::NEG_Z)
+            .with_half_width(0.23)
+            .with_exit(rel(layout::LADDER_EXIT)),
+    ));
+}
+
+/// The ladder climber's loop at the course tower.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum Rungs {
+    /// Stand at the start (teleported there) facing the ladder.
+    #[default]
+    Start,
+    /// Walk to the ladder until the hands are on it.
+    Walk,
+    /// Climb to the top and step off onto the roof.
+    Up,
+    /// Turn round on the roof and look out over the course.
+    Look,
+    /// Walk back to the ladder: grabbed at the top, climbed down a few rungs…
+    Down,
+    /// …then slide the rest of the way.
+    Slide,
+    /// Step back from the ladder.
+    Off,
+    /// Wait before looping.
+    Rest,
+}
+
+#[allow(clippy::type_complexity)]
+fn run_ladder_climber(
+    time: Res<Time>,
+    mut q: Query<(
+        &mut Brain,
+        &mut Transform,
+        &mut Mover,
+        &mut MoveIntent,
+        Option<&mut TransformInterpolation>,
+    )>,
+) {
+    let real = time.real_delta_secs();
+    for (mut brain, mut t, mut m, mut intent, interp) in &mut q {
+        let Brain::LadderClimber { step, secs, origin } = &mut *brain else {
+            continue;
+        };
+        *secs += real;
+        let rel = t.translation - *origin;
+        *intent = MoveIntent::default();
+        let next = match *step {
+            Rungs::Start => {
+                if *secs < 0.02 {
+                    t.translation =
+                        *origin + DVec3::from_array(layout::LADDER_START) + DVec3::Y * 0.9;
+                    t.rotation = Quat::IDENTITY;
+                    m.reset_motion();
+                    m.facing = Vec3::NEG_Z;
+                    if let Some(mut i) = interp {
+                        i.reset();
+                    }
+                }
+                intent.look = Some(Vec3::NEG_Z);
+                (*secs >= 0.8).then_some(Rungs::Walk)
+            }
+            Rungs::Walk => {
+                intent.direction = Vec3::NEG_Z * 0.6;
+                m.ladder.is_some().then_some(Rungs::Up)
+            }
+            Rungs::Up => {
+                intent.direction = Vec3::NEG_Z;
+                let on_roof = rel.y > layout::TOWER_TOP + 0.5;
+                (m.grounded && on_roof && m.mode != LocomotionMode::Mantle).then_some(Rungs::Look)
+            }
+            Rungs::Look => {
+                intent.look = Some(Vec3::Z);
+                (*secs >= 1.6).then_some(Rungs::Down)
+            }
+            Rungs::Down => {
+                intent.direction = Vec3::Z * 0.6;
+                let top = (layout::LADDER_TOP[1] - layout::LADDER_BOTTOM[1]) as f32;
+                m.ladder
+                    .is_some_and(|l| l.climbed < top - layout::LADDER_SLIDE_FROM)
+                    .then_some(Rungs::Slide)
+            }
+            Rungs::Slide => {
+                intent.crouch = m.ladder.is_some();
+                (m.ladder.is_none() && m.grounded).then_some(Rungs::Off)
+            }
+            Rungs::Off => {
+                intent.direction = Vec3::Z * 0.5;
+                intent.look = Some(Vec3::NEG_Z);
+                (*secs >= 0.6).then_some(Rungs::Rest)
+            }
+            Rungs::Rest => (*secs >= 0.8).then_some(Rungs::Start),
+        };
+        // Stuck (knocked off, say): start over.
+        if *secs > 6.0 {
+            *step = Rungs::Start;
+            *secs = 0.0;
+        } else if let Some(n) = next {
+            *step = n;
+            *secs = 0.0;
+        }
+    }
+}
+
+/// Starts every ladder climber's loop over (for tour stops that time a capture).
+pub(crate) fn restart_ladder_climbers(world: &mut World) -> usize {
+    let mut q = world.query::<&mut Brain>();
+    let mut n = 0;
+    for mut b in q.iter_mut(world) {
+        if let Brain::LadderClimber { step, secs, .. } = &mut *b {
+            *step = Rungs::Start;
+            *secs = 0.0;
+            n += 1;
+        }
+    }
+    n
+}
+
 // ------------------------------------------------------------------------ the grappler
 
 /// The grappler's loop at the grapple tower.
@@ -891,10 +1120,16 @@ pub enum GrappleLoop {
     Jump,
     /// Reeled up the tower, then over the edge.
     Reel,
-    /// Run across the top and off the back.
-    Cross,
-    /// Falling to the ground behind the tower.
-    Drop,
+    /// Walk round the front of the zip line's gantry…
+    ToGantry,
+    /// …and under the line, facing down it.
+    ToZip,
+    /// Run a step and jump into the line.
+    ZipRun,
+    /// Ride the line down to the landing gate.
+    Zip,
+    /// Let go at the gate: drop onto the pad.
+    Land,
     /// Wait before looping.
     Rest,
 }
@@ -917,6 +1152,9 @@ fn run_grappler(
         };
         *secs += real;
         let rel = t.translation - *origin;
+        let (along, across) = layout::zip_axes();
+        let (along, across) = (DVec3::from_array(along), DVec3::from_array(across));
+        let down = along.as_vec3();
         *intent = MoveIntent::default();
         let next = match *step {
             GrappleLoop::Start => {
@@ -951,18 +1189,35 @@ fn run_grappler(
                 intent.direction = Vec3::Z;
                 let on_top = rel.y > layout::GRAPPLE_TOP + 0.5;
                 (m.grounded && on_top && m.mode != LocomotionMode::Mantle)
-                    .then_some(GrappleLoop::Cross)
+                    .then_some(GrappleLoop::ToGantry)
             }
-            GrappleLoop::Cross => {
-                // A jog over the top, so the drop off the back lands on the pad.
-                intent.direction = Vec3::Z * 0.5;
-                (!m.grounded && rel.z > layout::GRAPPLE_TOWER.center[2] + 2.5)
-                    .then_some(GrappleLoop::Drop)
+            GrappleLoop::ToGantry | GrappleLoop::ToZip => {
+                let last = *step == GrappleLoop::ToZip;
+                let [a, c] = layout::ZIP_APPROACH[last as usize];
+                let to = DVec3::from_array(layout::ZIP_FROM) + along * a + across * c - rel;
+                let to = Vec3::new(to.x as f32, 0.0, to.z as f32);
+                intent.direction =
+                    to.normalize_or_zero() * if to.length() > 0.5 { 0.6 } else { 0.3 };
+                intent.look = Some(if !last || to.length() > 0.5 {
+                    to.normalize_or(down)
+                } else {
+                    down
+                });
+                match last {
+                    false => (to.length() < 0.4).then_some(GrappleLoop::ToZip),
+                    true => (to.length() < 0.25 && m.facing.dot(down) > 0.95)
+                        .then_some(GrappleLoop::ZipRun),
+                }
             }
-            GrappleLoop::Drop => {
-                intent.direction = Vec3::Z * 0.3;
-                (m.grounded && rel.y < 2.0).then_some(GrappleLoop::Rest)
+            GrappleLoop::ZipRun => {
+                intent.direction = down;
+                let past = (rel - DVec3::from_array(layout::ZIP_FROM)).dot(along);
+                intent.jump = past > layout::ZIP_TAKEOFF;
+                intent.jump.then_some(GrappleLoop::Zip)
             }
+            // Caught, rode it down and let go (or missed it and fell).
+            GrappleLoop::Zip => (*secs > 1.0 && m.zip.is_none()).then_some(GrappleLoop::Land),
+            GrappleLoop::Land => m.grounded.then_some(GrappleLoop::Rest),
             GrappleLoop::Rest => (*secs >= 1.0).then_some(GrappleLoop::Start),
         };
         // Stuck (missed the edge, say): start over.
@@ -996,7 +1251,7 @@ pub(crate) fn restart_grapplers(world: &mut World) -> usize {
 /// stand there, back, and a stand at `from`, easing in and out of each run, on world time.
 /// With a physics backend it drives the body by its `Velocity` (the backend moves it and
 /// writes the `Transform` back, so what stands on it is carried); with only the stand-in
-/// physics it sets the `Transform`.
+/// physics it sets the `Transform` and keeps the `Velocity` true to how it moved.
 #[derive(Component, Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct Shuttle {
     #[serde(skip)]
@@ -1076,13 +1331,35 @@ fn drive_shuttles(
         }
         s.secs = (s.secs + dt).rem_euclid(s.cycle_secs());
         let to = s.position();
-        if backend.is_some() {
-            // From where the backend put it, so it never drifts off the track.
-            v.linear = ((to - t.translation) / dt as f64).as_vec3();
-        } else {
+        // From where it is, so it never drifts off the track. A backend moves it by its
+        // velocity; without one it is placed, and the velocity still says how fast it moves
+        // (characters judge a wall-run along it by that).
+        v.linear = ((to - t.translation) / dt as f64).as_vec3();
+        if backend.is_none() {
             t.translation = to;
         }
     }
+}
+
+/// The zip line from the grapple tower's roof to the landing gate, the posts of the gantry and
+/// the gate it hangs from, and the landing pad.
+fn spawn_zipline(commands: &mut Commands, origin: DVec3) {
+    let from = origin + DVec3::from_array(layout::ZIP_FROM);
+    let to = DVec3::from_array(layout::ZIP_TO) - DVec3::from_array(layout::ZIP_FROM);
+    commands.spawn((
+        Name::new("Zip line"),
+        Transform::from_translation(from),
+        crate::zipline::Zipline {
+            to: to.as_vec3(),
+            sag: layout::ZIP_SAG,
+            end_clear: layout::ZIP_END_CLEAR,
+            exit_hop: 0.5,
+        },
+    ));
+    for post in layout::zip_posts() {
+        block(commands, origin, "Zip line post", post);
+    }
+    block(commands, origin, "Zip line pad", layout::ZIP_PAD);
 }
 
 /// The freight car: a kinematic box shuttling along the track, dressed as a box car.
@@ -1698,6 +1975,15 @@ fn anim_input(
             let from = crate::grapple::shoulders(t.translation, m.up, cc.height);
             let hook = crate::grapple::hook_position(&g, from);
             (inv * (hook - feet).as_vec3(), g.attached)
+        }),
+        zip: m.zip.map(|z| {
+            let grip = Vec3::Y * (cc.height * (0.5 + crate::zipline::GRIP_ABOVE));
+            (grip, inv * z.heading)
+        }),
+        ladder: m.ladder.map(|l| rig::LadderAnim {
+            climbed: l.climbed,
+            speed: l.speed,
+            sliding: l.sliding,
         }),
         dash_strike: m.dash.is_some_and(|d| d.strike),
         attack,

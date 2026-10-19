@@ -30,13 +30,15 @@
 //! A mesh without submeshes is drawn whole with the renderer's first surface (the default
 //! surface when it has none); a submesh whose surface index is out of range uses the default.
 //!
-//! * **Images** are uploaded once per (image, color space) with their whole mip chain and
-//!   re-uploaded when the asset's version changes. Every character that uses an image shares
-//!   the upload.
+//! * **Images** are the renderer's shared GPU copies ([`GpuShared::image_texture`]): the
+//!   standard meshes, every character and any other feature that draws an image share one
+//!   upload, and with `RenderSettings::release_image_pixels` the renderer may free the image's
+//!   CPU pixels once it is on the GPU. Each surface asks for its images on every frame it is
+//!   drawn, which keeps them on the GPU.
 //! * **Surface bind groups** are cached by what they are built from (canonical image handles
 //!   and the factors), so characters with the same materials share them. A group is rebuilt
-//!   only when an image it binds changes (loaded, edited, removed).
-//! * Images and groups unused for `EVICT_AFTER_FRAMES` (600) frames are released.
+//!   only when an image it binds gets a new upload (loaded, new pixels, removed).
+//! * Groups unused for `EVICT_AFTER_FRAMES` (600) frames are released.
 //!
 //! Single-sided and double-sided surfaces use two scene pipelines (back-face culling on/off;
 //! double-sided ones shade the side the camera sees). Shadows are never culled, like the
@@ -44,6 +46,7 @@
 //! base color alpha.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use bevy_ecs::prelude::*;
 use bytemuck::{Pod, Zeroable};
@@ -59,7 +62,7 @@ use engine_render::shadows::MAX_CASCADES;
 use engine_render::wgpu;
 use wgpu::util::DeviceExt;
 
-use engine_render::{AlphaMode, Image, PixelFormat, StandardMaterial};
+use engine_render::{AlphaMode, Image, ImageTexture, StandardMaterial};
 
 use super::{SkinMaterial, SkinPose, SkinnedMesh, SkinnedMeshRenderer};
 
@@ -84,7 +87,7 @@ const SURFACE_COLOR_SLOT: [bool; SURFACE_SLOTS] = [true, false, false];
 /// 1×1 stand-ins for missing textures: white base color, flat normal, white
 /// metallic/roughness (the factors pass through unchanged).
 const DEFAULT_TEXELS: [[u8; 4]; SURFACE_SLOTS] = [[255; 4], [128, 128, 255, 255], [255; 4]];
-/// Surface bind groups and images unused for this many frames are released.
+/// Surface bind groups unused for this many frames are released.
 const EVICT_AFTER_FRAMES: u64 = 600;
 
 /// `GpuSurface::flags[0]` bits (`SURFACE_*` in the shaders).
@@ -335,37 +338,25 @@ struct SurfaceKey {
     factors: [u32; 16],
 }
 
-struct GpuImage {
-    _texture: wgpu::Texture,
-    view: wgpu::TextureView,
-    version: u64,
-    last_used: u64,
-}
-
 /// One cached surface bind group.
 struct SurfaceSet {
     group: wgpu::BindGroup,
     _uniform: wgpu::Buffer,
     key: SurfaceKey,
-    /// (image index, version, sRGB view) bound per slot; `None` = the default texture (no
+    /// The shared texture bound per slot (`ImageTexture::id`); `None` = the default texture (no
     /// image, not loaded yet, or not uploadable).
-    bound: [Option<(u32, u64, bool)>; SURFACE_SLOTS],
+    bound: [Option<u64>; SURFACE_SLOTS],
     double_sided: bool,
     masked: bool,
     /// Frame its images were last checked (once per frame, however many characters use it).
     checked: u64,
 }
 
-/// GPU images and surface bind groups shared by every character (see the module docs).
+/// Surface bind groups shared by every character (see the module docs).
 struct SurfaceCache {
     layout: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
     defaults: Vec<(wgpu::Texture, wgpu::TextureView)>,
-    /// By (canonical image index, sRGB view).
-    images: HashMap<(u32, bool), GpuImage>,
-    /// Images that could not be uploaded, by (image index, sRGB view) → asset version, so a
-    /// broken image is reported once, not every frame.
-    failed: HashMap<(u32, bool), u64>,
     /// By id; id 0 is the default (procedural) surface and is never released.
     sets: Vec<Option<SurfaceSet>>,
     ids: HashMap<SurfaceKey, u32>,
@@ -428,17 +419,12 @@ impl SurfaceCache {
         let defaults = DEFAULT_TEXELS
             .iter()
             .enumerate()
-            .map(|(slot, texel)| {
-                let srgb = SURFACE_COLOR_SLOT[slot];
-                upload_image(gpu, &Image::solid(*texel, srgb), srgb).expect("1x1 default texture")
-            })
+            .map(|(slot, texel)| solid_texture(gpu, *texel, SURFACE_COLOR_SLOT[slot]))
             .collect();
         let mut cache = Self {
             layout,
             sampler,
             defaults,
-            images: HashMap::new(),
-            failed: HashMap::new(),
             sets: Vec::new(),
             ids: HashMap::new(),
             free: Vec::new(),
@@ -448,55 +434,19 @@ impl SurfaceCache {
             textures: [None; SURFACE_SLOTS],
             factors: bytemuck::cast(GpuSurface::PROCEDURAL),
         };
-        let default = cache.build(gpu, key, [None; SURFACE_SLOTS], GpuSurface::PROCEDURAL);
+        let default = cache.build(
+            gpu,
+            key,
+            [None; SURFACE_SLOTS],
+            [None; SURFACE_SLOTS],
+            GpuSurface::PROCEDURAL,
+        );
         cache.sets.push(Some(default));
         cache
     }
 
-    /// Make sure the image is on the GPU with the given color space; false if it cannot be
-    /// uploaded (invalid data, too large).
-    fn ensure_image(
-        &mut self,
-        gpu: &GpuShared,
-        index: u32,
-        image: &Image,
-        version: u64,
-        srgb: bool,
-    ) -> bool {
-        let frame = self.frame;
-        if let Some(existing) = self.images.get_mut(&(index, srgb))
-            && existing.version == version
-        {
-            existing.last_used = frame;
-            return true;
-        }
-        if self.failed.get(&(index, srgb)) == Some(&version) {
-            return false;
-        }
-        match upload_image(gpu, image, srgb) {
-            Some((texture, view)) => {
-                self.failed.remove(&(index, srgb));
-                self.images.insert(
-                    (index, srgb),
-                    GpuImage {
-                        _texture: texture,
-                        view,
-                        version,
-                        last_used: frame,
-                    },
-                );
-                true
-            }
-            None => {
-                self.images.remove(&(index, srgb));
-                self.failed.insert((index, srgb), version);
-                false
-            }
-        }
-    }
-
-    /// Surface id for a material, uploading its images and building (or rebuilding) its bind
-    /// group when needed.
+    /// Surface id for a material, asking the renderer for its images and building (or
+    /// rebuilding) its bind group when needed.
     fn surface(
         &mut self,
         gpu: &GpuShared,
@@ -522,19 +472,17 @@ impl SurfaceCache {
         {
             return id;
         }
-        // First use this frame: are the images uploaded and current?
+        // First use this frame: ask for the images (which keeps them on the GPU) and see
+        // whether any got a new upload.
         let mut bound = [None; SURFACE_SLOTS];
+        let mut textures: [Option<Arc<ImageTexture>>; SURFACE_SLOTS] = Default::default();
         for (slot, handle) in handles.iter().enumerate() {
             let (Some(handle), Some(images)) = (handle, images) else {
                 continue;
             };
-            let version = images.version(*handle);
-            let Some(image) = images.get(*handle) else {
-                continue;
-            };
-            let srgb = SURFACE_COLOR_SLOT[slot] && image.srgb && image.format == PixelFormat::Rgba8;
-            if self.ensure_image(gpu, handle.index(), image, version, srgb) {
-                bound[slot] = Some((handle.index(), version, srgb));
+            if let Some(texture) = gpu.image_texture(images, *handle, SURFACE_COLOR_SLOT[slot]) {
+                bound[slot] = Some(texture.id);
+                textures[slot] = Some(texture);
             }
         }
         let id = match self.ids.get(&key) {
@@ -558,18 +506,21 @@ impl SurfaceCache {
                         uniform.flags[0] &= !SURFACE_TEXTURE_FLAGS[slot];
                     }
                 }
-                let set = self.build(gpu, key, bound, uniform);
+                let views = std::array::from_fn(|slot| textures[slot].as_ref().map(|t| &t.view));
+                let set = self.build(gpu, key, bound, views, uniform);
                 self.sets[id as usize] = Some(set);
             }
         }
         id
     }
 
+    /// A surface binding `views` (the default texture where `None`), whose ids are `bound`.
     fn build(
         &self,
         gpu: &GpuShared,
         key: SurfaceKey,
-        bound: [Option<(u32, u64, bool)>; SURFACE_SLOTS],
+        bound: [Option<u64>; SURFACE_SLOTS],
+        views: [Option<&wgpu::TextureView>; SURFACE_SLOTS],
         uniform: GpuSurface,
     ) -> SurfaceSet {
         let buffer = gpu
@@ -579,12 +530,8 @@ impl SurfaceCache {
                 contents: bytemuck::bytes_of(&uniform),
                 usage: wgpu::BufferUsages::UNIFORM,
             });
-        let views: [&wgpu::TextureView; SURFACE_SLOTS] = std::array::from_fn(|slot| {
-            bound[slot]
-                .and_then(|(index, _, srgb)| self.images.get(&(index, srgb)))
-                .map(|i| &i.view)
-                .unwrap_or(&self.defaults[slot].1)
-        });
+        let views: [&wgpu::TextureView; SURFACE_SLOTS] =
+            std::array::from_fn(|slot| views[slot].unwrap_or(&self.defaults[slot].1));
         let group = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("skin surface"),
             layout: &self.layout,
@@ -622,7 +569,7 @@ impl SurfaceCache {
         }
     }
 
-    /// Release surfaces and images nobody used for a while.
+    /// Release surfaces nobody used for a while.
     fn evict(&mut self) {
         let frame = self.frame;
         for id in 1..self.sets.len() {
@@ -634,8 +581,19 @@ impl SurfaceCache {
                 self.free.push(id as u32);
             }
         }
-        self.images
-            .retain(|_, image| image.last_used + EVICT_AFTER_FRAMES >= frame);
+    }
+
+    /// Distinct images bound by the cached surfaces.
+    fn image_count(&self) -> usize {
+        let mut ids: Vec<u64> = self
+            .sets
+            .iter()
+            .flatten()
+            .flat_map(|s| s.bound.iter().flatten().copied())
+            .collect();
+        ids.sort_unstable();
+        ids.dedup();
+        ids.len()
     }
 
     fn set(&self, id: u32) -> Option<&SurfaceSet> {
@@ -646,92 +604,37 @@ impl SurfaceCache {
     }
 }
 
-/// Upload an image with its mip chain (the same rules as the standard mesh feature). `srgb`
-/// selects an sRGB format for RGBA8 data; mips are regenerated in the matching color space
-/// when the stored ones don't match. Levels larger than the device allows are skipped.
-fn upload_image(
+/// A 1×1 texture of one texel (sRGB or linear), for slots without an image.
+fn solid_texture(
     gpu: &GpuShared,
-    image: &Image,
+    texel: [u8; 4],
     srgb: bool,
-) -> Option<(wgpu::Texture, wgpu::TextureView)> {
-    if !image.is_valid() {
-        tracing::warn!(
-            "image data or mip chain does not match its size ({image:?}); not uploading it"
-        );
-        return None;
-    }
-    let format = match image.format {
-        PixelFormat::Rgba8 if srgb => wgpu::TextureFormat::Rgba8UnormSrgb,
-        PixelFormat::Rgba8 => wgpu::TextureFormat::Rgba8Unorm,
-        PixelFormat::Rgba16Float => wgpu::TextureFormat::Rgba16Float,
-    };
-    let generated;
-    let mips: &[Vec<u8>] = if !image.mipmaps {
-        &[]
-    } else if !image.mips.is_empty() && (image.format != PixelFormat::Rgba8 || srgb == image.srgb) {
-        &image.mips
-    } else {
-        generated = image.mip_chain(srgb);
-        &generated
-    };
-    let mut levels: Vec<(u32, u32, &[u8])> = Vec::with_capacity(mips.len() + 1);
-    levels.push((image.width, image.height, &image.data));
-    for (i, m) in mips.iter().enumerate() {
-        let (w, h) = image.level_size(i as u32 + 1);
-        levels.push((w, h, m));
-    }
-    let max = gpu.device.limits().max_texture_dimension_2d;
-    let skip = levels
-        .iter()
-        .take_while(|(w, h, _)| *w > max || *h > max)
-        .count();
-    let levels = &levels[skip.min(levels.len())..];
-    let Some(&(width, height, _)) = levels.first() else {
-        tracing::warn!(
-            "image {}x{} is larger than the GPU allows ({max})",
-            image.width,
-            image.height
-        );
-        return None;
-    };
-    let texture = gpu.device.create_texture(&wgpu::TextureDescriptor {
-        label: Some("skin surface image"),
-        size: wgpu::Extent3d {
-            width,
-            height,
-            depth_or_array_layers: 1,
-        },
-        mip_level_count: levels.len() as u32,
-        sample_count: 1,
-        dimension: wgpu::TextureDimension::D2,
-        format,
-        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-        view_formats: &[],
-    });
-    let bpp = image.format.bytes_per_pixel() as u32;
-    for (level, (w, h, data)) in levels.iter().enumerate() {
-        gpu.queue.write_texture(
-            wgpu::TexelCopyTextureInfo {
-                texture: &texture,
-                mip_level: level as u32,
-                origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
-            },
-            data,
-            wgpu::TexelCopyBufferLayout {
-                offset: 0,
-                bytes_per_row: Some(w * bpp),
-                rows_per_image: Some(*h),
-            },
-            wgpu::Extent3d {
-                width: *w,
-                height: *h,
+) -> (wgpu::Texture, wgpu::TextureView) {
+    let texture = gpu.device.create_texture_with_data(
+        &gpu.queue,
+        &wgpu::TextureDescriptor {
+            label: Some("skin default texture"),
+            size: wgpu::Extent3d {
+                width: 1,
+                height: 1,
                 depth_or_array_layers: 1,
             },
-        );
-    }
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: if srgb {
+                wgpu::TextureFormat::Rgba8UnormSrgb
+            } else {
+                wgpu::TextureFormat::Rgba8Unorm
+            },
+            usage: wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        },
+        wgpu::util::TextureDataOrder::LayerMajor,
+        &texel,
+    );
     let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-    Some((texture, view))
+    (texture, view)
 }
 
 /// Where one mesh lives in the shared static buffers.
@@ -1768,7 +1671,7 @@ impl RenderFeature for SkinningFeature {
             "instances": self.items.len(),
             "detailed": self.items.iter().filter(|i| i.detail).count(),
             "surfaces": self.surfaces.as_ref().map_or(0, |c| c.sets.iter().flatten().count()),
-            "images": self.surfaces.as_ref().map_or(0, |c| c.images.len()),
+            "images": self.surfaces.as_ref().map_or(0, SurfaceCache::image_count),
             "skinned_vertices": self.job_list.iter().map(|(c, _)| *c as u64).sum::<u64>(),
         })
     }

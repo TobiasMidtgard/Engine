@@ -139,6 +139,19 @@ pub struct MovementProfile {
     /// Seconds after letting go before the next shot.
     pub grapple_cooldown_secs: f32,
 
+    // ------------------------------------------------------------ zip lines
+    /// Catch a [`Zipline`](crate::zipline::Zipline) by jumping into it and ride it.
+    pub zipline: bool,
+    /// Riding speed on a level line, m/s (faster downhill, slower uphill).
+    pub zip_speed: f32,
+
+    // ------------------------------------------------------------ ladders
+    /// Climb ladders (anything with a
+    /// [`Climbable`](engine_world::locomotion::Climbable)): walk or jump into one.
+    pub ladder: bool,
+    /// Climbing speed, m/s (half as fast again sprinting).
+    pub ladder_speed: f32,
+
     // ------------------------------------------------------------ feedback
     /// Body mass for footsteps and landings, kg.
     pub mass_kg: f32,
@@ -212,6 +225,10 @@ impl MovementProfile {
             grapple_pull: 40.0,
             grapple_speed: 20.0,
             grapple_cooldown_secs: 2.5,
+            zipline: true,
+            zip_speed: 12.0,
+            ladder: true,
+            ladder_speed: 2.6,
             mass_kg: 80.0,
             stride_footsteps: true,
         }
@@ -233,6 +250,7 @@ impl MovementProfile {
             dash_recharge_secs: 2.0,
             dash_exit_speed: 5.0,
             grapple: false,
+            ladder_speed: 1.8,
             ..Self::pilot()
         }
     }

@@ -731,22 +731,25 @@ pub fn village_materials(
         "village textures generated in {:.2} s",
         t0.elapsed().as_secs_f32()
     );
-    let mut add = |set: TexSet| {
+    // Keyed, so the memory report names the showcase as their owner.
+    let mut add = |name: &str, set: TexSet| {
+        let key = |map: &str| format!("showcase/village/{name}/{map}");
         (
-            images.add(set.albedo),
-            images.add(set.normal),
-            images.add(set.orm),
-            set.emissive.map(|e| images.add(e)),
+            images.insert_keyed(&key("albedo"), set.albedo),
+            images.insert_keyed(&key("normal"), set.normal),
+            images.insert_keyed(&key("orm"), set.orm),
+            set.emissive
+                .map(|e| images.insert_keyed(&key("emissive"), e)),
         )
     };
-    let pl = add(pl);
-    let tb = add(tb);
-    let st = add(st);
-    let br = add(br);
-    let clay = add(clay);
-    let slate = add(slate);
-    let gl = add(gl);
-    let ir = add(ir);
+    let pl = add("plaster", pl);
+    let tb = add("timber", tb);
+    let st = add("stone", st);
+    let br = add("brick", br);
+    let clay = add("clay_roof", clay);
+    let slate = add("slate_roof", slate);
+    let gl = add("glass", gl);
+    let ir = add("iron", ir);
     type Set = (
         Handle<Image>,
         Handle<Image>,

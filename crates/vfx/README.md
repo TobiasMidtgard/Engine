@@ -34,7 +34,8 @@ box, line), how particles move (`speed`, `velocity`, `orbit_speed`, `gravity`, `
 `turbulence`, `vortex`, `attract`, `collide` with the ground or water: bounce, die or stick) and
 how they look (`sprite`: glow, spark, smoke, flame, droplet, ring, star, rune, shard, dust;
 `facing`: camera, velocity or horizontal; `color` and `size_over_life`; `emissive` in cd/m²;
-`lit` by sun, sky and point lights; `additive`; `soft`). An effect can also carry a point
+`lit` by sun, sky and point lights; `additive`; `soft`), or `debris` to draw solid 3D pieces
+instead of sprites ([`Debris`]: rock, splinter, shard or scrap). An effect can also carry a point
 `light` with flicker and fade, a `trail`, and `prewarm` so loops look settled from the first
 frame.
 
@@ -108,8 +109,14 @@ and `VfxReactions`. Components: `ParticleEffect`, `Trail`, `Beam`.
   a continuous stream). Particles that hit, die or fly on for a sub-emitter append events,
   and a third pass turns them into particles of the fed layer, claiming slots in its ring
   with an atomic cursor (up to 65 536 events a frame). Lit particles get sun (with shadows and forward scattering for smoke),
-  sky and point lights, refreshed every fourth frame. Sprites are procedural, drawn as one
-  instanced quad per slot, far to near, softened against the scene depth.
+  sky and point lights, refreshed every fourth frame. A last pass sorts each visible layer's
+  particles by distance (a bitonic sort per run of 2048 slots), so nearer puffs of smoke
+  cover farther ones. Sprites are procedural, drawn as one instanced quad per particle, layers
+  and particles far to near, softened against the scene depth.
+- **Debris** ([`debris`]): a `debris` layer draws each particle as a small flat-shaded mesh
+  (four variants of each kind) tumbling about an axis of its own, in the depth prepass, the
+  opaque pass and the two nearest shadow cascades, so chips are lit, shadowed and motion
+  blurred like the rest of the scene. They rest on the ground plane and fade by dissolving.
 - **Precision**: world-space particles are stored relative to the camera and shifted when it
   moves, so effects stay sharp anywhere in a solar system.
 - **Time**: everything runs on world time. `TimeDilation` slows spawning and motion together,
@@ -132,13 +139,16 @@ starburst fireworks over the court, fireballs and frost bolts scorching and fros
 lightning between two obelisks, a healing aura, a fountain, an anvil throwing sparks that
 split as they skid, a pond with stones splashing in, a golem stomping over mud, snow, sand and
 water, shot impacts on six materials (chipping the rock), and braziers burning charcoal around
-the rim, with fireflies in the shrubs beyond.
+the rim, with fireflies in the shrubs beyond. Its glowing stone (runes, crystals, coals)
+follows the camera's exposure as particle glow does ([`VfxSettings::glow_exposure`]), so it
+keeps its color at night instead of turning white.
 `cargo run -p engine_vfx --release --example sub_emitters` renders the firework and the
-splitting sparks; `--example braziers` renders the brazier fires by day, at dusk and at night.
+splitting sparks; `--example braziers` renders the brazier fires and `--example court` the
+whole court, each by day, at dusk and at night.
 
 ## Next
 
-Sorting within an emitter, mesh particles, LOD, and a 1M-particle benchmark on a real GPU.
+LOD, and a 1M-particle benchmark on a real GPU.
 
 ## Checklist
 

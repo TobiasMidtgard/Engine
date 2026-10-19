@@ -1,15 +1,16 @@
 //! Locomotion against the physics contract (run here by the stand-in character physics):
 //! sprint, jump, double jump, slide under a bar, wall-run and wall-jump, mantle, ledge hang,
-//! grapple, riding moving walls, ledges and hooks, dash, and characters running on their own
-//! clocks in slow motion.
+//! grapple, riding moving walls, ledges and hooks, zip lines, ladders, dash, and characters
+//! running on their own clocks in slow motion.
 
 mod support;
 
 use engine_core::math::{DVec3, Vec3};
 use engine_core::prelude::*;
 use engine_movement::prelude::*;
-use engine_world::locomotion::{LocomotionState, MoveIntent};
-use engine_world::physics::CharacterController;
+use engine_movement::zipline::Zipline;
+use engine_world::locomotion::{Climbable, LocomotionState, MoveIntent};
+use engine_world::physics::{CharacterController, Velocity};
 use engine_world::{GroundContact, LocomotionMode};
 use support::*;
 
@@ -362,11 +363,22 @@ fn catches_a_ledge_too_high_to_mantle_and_shimmies_along_it() {
     assert_eq!(mover(&app, c).mode, LocomotionMode::Climb);
     assert!(q.z - p.z > 1.5, "shimmied {:.2} m", q.z - p.z);
     assert!((q.y - p.y).abs() < 0.05, "{q:?}");
-    // ...and stops at the end of the wall instead of falling off it.
-    run(&mut app, 3.0);
-    let end = pos(&app, c);
-    assert_eq!(mover(&app, c).mode, LocomotionMode::Climb);
-    assert!(end.z > 3.0 && end.z < 4.0, "{end:?}");
+    // ...and at the end of the wall goes on around the corner onto its end face, still
+    // holding +Z, at the same height.
+    run(&mut app, 2.5);
+    let around = pos(&app, c);
+    let m = mover(&app, c);
+    assert_eq!(m.mode, LocomotionMode::Climb);
+    assert_eq!(triggered(&app, c, "ledge_corner"), 1);
+    let h = m.hang.unwrap();
+    assert!(
+        h.corner.is_none() && h.normal.distance(Vec3::Z) < 0.05,
+        "{h:?}"
+    );
+    assert!(m.facing.distance(Vec3::NEG_Z) < 0.1, "{}", m.facing);
+    assert!((around.z - (4.0 + 0.35 + 0.04)).abs() < 0.05, "{around:?}");
+    assert!(around.x > 1.3, "{around:?}");
+    assert!((around.y - p.y).abs() < 0.05, "{around:?}");
 
     // Jump: climbs up and stands on top.
     intent(&mut app, c, |i| i.direction = Vec3::ZERO);
@@ -377,6 +389,57 @@ fn catches_a_ledge_too_high_to_mantle_and_shimmies_along_it() {
     let m = mover(&app, c);
     assert!(m.grounded && top.x > 1.2, "{top:?}");
     assert!((top.y - (3.6 + 0.9)).abs() < 0.05, "{top:?}");
+}
+
+#[test]
+fn shimmies_into_an_inside_corner_and_on_along_the_other_wall() {
+    let mut app = app();
+    let c = hang_from_a_high_wall(&mut app);
+    // A wall across the way: its face at z = 2 runs out in front of the first one.
+    block(
+        &mut app,
+        DVec3::new(1.0, 1.8, 3.0),
+        Vec3::new(4.0, 3.6, 2.0),
+    );
+    let p = pos(&app, c);
+    intent(&mut app, c, |i| i.direction = Vec3::Z);
+    let secs = run_until(&mut app, 3.0, |w| {
+        let m = w.get::<Mover>(c).unwrap();
+        m.hang
+            .is_some_and(|h| h.corner.is_none() && h.normal.dot(Vec3::NEG_Z) > 0.99)
+    });
+    let m = mover(&app, c);
+    assert!(secs < 2.5, "{:?}", m.hang);
+    assert_eq!(triggered(&app, c, "ledge_corner"), 1);
+    // Hanging from the second wall, clear of the first, and still going (the stick still
+    // held toward +Z): along the second wall, away from the corner.
+    let q = pos(&app, c);
+    assert!((q.z - (2.0 - 0.35 - 0.04)).abs() < 0.06, "{q:?}");
+    assert!(q.x < 1.0 - 0.35, "{q:?}");
+    run(&mut app, 0.3);
+    let r = pos(&app, c);
+    assert_eq!(mover(&app, c).mode, LocomotionMode::Climb);
+    assert!(r.x < q.x - 0.2, "{q:?} → {r:?}");
+    assert!((r.y - p.y).abs() < 0.05, "{r:?}");
+}
+
+#[test]
+fn stops_in_a_corner_whose_other_wall_is_too_high() {
+    let mut app = app();
+    let c = hang_from_a_high_wall(&mut app);
+    block(
+        &mut app,
+        DVec3::new(1.0, 3.0, 3.0),
+        Vec3::new(4.0, 6.0, 2.0),
+    );
+    intent(&mut app, c, |i| i.direction = Vec3::Z);
+    run(&mut app, 2.0);
+    let m = mover(&app, c);
+    let q = pos(&app, c);
+    assert_eq!(m.mode, LocomotionMode::Climb);
+    assert_eq!(triggered(&app, c, "ledge_corner"), 0);
+    assert!(m.hang.unwrap().normal.distance(Vec3::NEG_X) < 0.05);
+    assert!(q.z > 1.4 && q.z < 1.7, "{q:?}");
 }
 
 #[test]
@@ -751,6 +814,84 @@ fn wall_runs_on_a_moving_wall_and_jumps_off_with_its_speed() {
     );
 }
 
+/// The wall from the wall-run test moving along its length at `speed` (m/s along +X), with
+/// a `Velocity` that says so.
+fn sliding_wall(app: &mut App, speed: f32) -> Entity {
+    drifting(app);
+    let wall = block(app, DVec3::new(15.0, 2.5, 1.5), Vec3::new(30.0, 5.0, 0.6));
+    app.world.entity_mut(wall).insert((
+        Drift(Vec3::X * speed),
+        Velocity {
+            linear: Vec3::X * speed,
+            angular: Vec3::ZERO,
+        },
+    ));
+    wall
+}
+
+fn wall_ran(app: &mut App, c: Entity, secs: f64) -> f64 {
+    let mut wallrun_secs = 0.0;
+    run_until(app, secs, |w| {
+        if w.get::<Mover>(c).unwrap().mode == LocomotionMode::WallRun {
+            wallrun_secs += DT;
+        }
+        false
+    });
+    wallrun_secs
+}
+
+#[test]
+fn running_beside_a_wall_as_fast_as_it_moves_is_no_wall_run() {
+    let mut app = app();
+    sliding_wall(&mut app, 7.0);
+    let c = character(
+        &mut app,
+        DVec3::new(0.0, 0.9, 0.0),
+        MovementProfile::pilot(),
+    );
+    // Sprint beside it and jump at it, as in the wall-run test: 1.5 m/s past it is too slow.
+    intent(&mut app, c, |i| {
+        i.direction = Vec3::X;
+        i.sprint = true;
+    });
+    run(&mut app, 1.0);
+    tap_jump(&mut app, c);
+    intent(&mut app, c, |i| {
+        i.direction = Vec3::new(0.2, 0.0, 1.0).normalize()
+    });
+    let secs = wall_ran(&mut app, c, 1.2);
+    assert_eq!(secs, 0.0, "wall-ran for {secs:.2} s");
+    assert_eq!(triggered(&app, c, "wallrun"), 0);
+}
+
+#[test]
+fn a_jump_at_a_wall_sliding_past_runs_along_it() {
+    let mut app = app();
+    sliding_wall(&mut app, -9.0);
+    let c = character(
+        &mut app,
+        DVec3::new(0.0, 0.9, 0.0),
+        MovementProfile::pilot(),
+    );
+    // Walk up to it and jump: barely moving along it, but it slides past at 9 m/s.
+    intent(&mut app, c, |i| i.direction = Vec3::new(0.0, 0.0, 0.4));
+    run(&mut app, 0.3);
+    tap_jump(&mut app, c);
+    intent(&mut app, c, |i| {
+        i.direction = Vec3::new(0.2, 0.0, 1.0).normalize()
+    });
+    run_until(&mut app, 1.0, |w| {
+        w.get::<Mover>(c).unwrap().mode == LocomotionMode::WallRun
+    });
+    assert_eq!(triggered(&app, c, "wallrun"), 1);
+    // It runs along the wall the way the wall passes it (+X relative to the wall).
+    intent(&mut app, c, |i| i.direction = Vec3::X);
+    let secs = wall_ran(&mut app, c, 0.6);
+    assert!(secs > 0.5, "wall-ran for {secs:.2} s");
+    let m = mover(&app, c);
+    assert!(m.velocity.x > 6.0, "along the wall: {}", m.velocity);
+}
+
 #[test]
 fn hangs_from_a_moving_ledge_and_climbs_onto_it() {
     let mut app = app();
@@ -878,4 +1019,426 @@ fn the_stand_in_carries_a_character_on_a_moving_box_and_a_jump_lands_on_the_same
     let after = rel(&app);
     assert!(flew > 0.3, "never left the box");
     assert!((after - before).length() < 0.15, "{before:?} -> {after:?}");
+}
+
+// ------------------------------------------------------------------------ zip lines
+
+/// A 30 m zip line along +X from x = −3, dropping `drop` meters, with 0.3 m of sag and its
+/// cable 5.35 m up at x = 1.5, and a 2 m high deck to jump into it from (its edge at x = −0.5).
+fn zip_line(app: &mut App, drop: f32) -> Entity {
+    block(app, DVec3::new(-6.0, 1.0, 0.0), Vec3::new(11.0, 2.0, 4.0));
+    app.world
+        .spawn((
+            Transform::from_translation(DVec3::new(-3.0, 5.5 + 0.15 * drop as f64, 0.0)),
+            Zipline {
+                to: Vec3::new(30.0, -drop, 0.0),
+                sag: 0.3,
+                end_clear: 1.5,
+                exit_hop: 2.0,
+            },
+        ))
+        .id()
+}
+
+/// A pilot sprinting +X along the deck that jumps into the line at its edge.
+fn jump_into_the_line(app: &mut App) -> Entity {
+    let c = character(app, DVec3::new(-9.0, 2.9, 0.0), MovementProfile::pilot());
+    intent(app, c, |i| {
+        i.direction = Vec3::X;
+        i.sprint = true;
+    });
+    run_until(app, 2.0, |w| {
+        w.get::<Transform>(c).unwrap().translation.x > -1.2
+    });
+    tap_jump(app, c);
+    intent(app, c, |i| i.direction = Vec3::ZERO);
+    run_until(app, 1.0, |w| w.get::<Mover>(c).unwrap().zip.is_some());
+    c
+}
+
+fn cable_y(app: &App, line: Entity, x: f64) -> f64 {
+    let t = app.world.get::<Transform>(line).unwrap();
+    let z = app.world.get::<Zipline>(line).unwrap();
+    let s = ((x - t.translation.x) / z.to.x as f64) as f32;
+    let c = engine_movement::zipline::Cable::new(t, z, Vec3::Y);
+    c.grip(s).y
+}
+
+#[test]
+fn jumps_into_a_zip_line_rides_it_down_and_lets_go_at_the_end() {
+    let mut app = app();
+    let line = zip_line(&mut app, 4.0);
+    let c = jump_into_the_line(&mut app);
+    assert_eq!(triggered(&app, c, "zip_grab"), 1);
+    let m = mover(&app, c);
+    let z = m.zip.expect("caught the line");
+    assert_eq!(z.dir, 1.0, "rides the way it ran");
+    assert_eq!(m.air_jumps_left, 1);
+
+    // Hanging under the cable, feet 1.95 m below it, facing down the line, at speed.
+    run(&mut app, 1.0);
+    let p = pos(&app, c);
+    let m = mover(&app, c);
+    assert!(m.zip.is_some());
+    let below = cable_y(&app, line, p.x) - p.y;
+    assert!(
+        (below - 1.8 * 0.58).abs() < 0.08,
+        "hangs {below:.2} m below"
+    );
+    assert!(m.facing.dot(Vec3::X) > 0.98, "{}", m.facing);
+    let speed = m.velocity.x;
+    assert!(speed > 11.0 && speed < 14.5, "{speed:.1} m/s");
+    assert!(!m.grounded);
+
+    // Lets go 1.5 m before the far anchor with a hop, flies on and lands running.
+    let end_x = -3.0 + 30.0;
+    run_until(&mut app, 3.0, |w| w.get::<Mover>(c).unwrap().zip.is_none());
+    let p = pos(&app, c);
+    assert!(
+        (p.x - (end_x - 1.5)).abs() < 0.6,
+        "let go at x = {:.2}",
+        p.x
+    );
+    assert_eq!(triggered(&app, c, "zip_release"), 1);
+    assert!(mover(&app, c).velocity.y > 0.0, "a hop off the end");
+    run_until(&mut app, 2.0, |w| w.get::<Mover>(c).unwrap().grounded);
+    assert!(mover(&app, c).horizontal_speed() > 6.0);
+}
+
+#[test]
+fn a_jump_lets_go_of_a_zip_line_and_the_double_jump_is_back() {
+    let mut app = app();
+    zip_line(&mut app, 4.0);
+    let c = jump_into_the_line(&mut app);
+    // The jump into the line used no air jump; spend it, then catch nothing for a moment.
+    run(&mut app, 0.6);
+    let before = mover(&app, c).velocity;
+    tap_jump(&mut app, c);
+    let m = mover(&app, c);
+    assert!(m.zip.is_none());
+    assert_eq!(triggered(&app, c, "jump"), 2);
+    assert!(m.velocity.y > 4.0, "{}", m.velocity);
+    assert!(
+        (m.velocity.x - before.x).abs() < 0.5,
+        "keeps its speed: {}",
+        m.velocity
+    );
+    // Up and away from the cable, the air jump still works.
+    run(&mut app, 0.3);
+    tap_jump(&mut app, c);
+    assert_eq!(triggered(&app, c, "double_jump"), 1);
+    // It doesn't catch the line again on the way down past it.
+    run_until(&mut app, 3.0, |w| w.get::<Mover>(c).unwrap().grounded);
+    assert_eq!(triggered(&app, c, "zip_grab"), 1);
+
+    // Crouch drops off without a jump.
+    let mut app2 = app_with_line(4.0);
+    let c2 = jump_into_the_line(&mut app2);
+    run(&mut app2, 0.3);
+    intent(&mut app2, c2, |i| i.crouch = true);
+    app2.update();
+    let m = mover(&app2, c2);
+    assert!(m.zip.is_none());
+    assert_eq!(triggered(&app2, c2, "zip_release"), 1);
+    assert!(m.velocity.y < 0.5, "drops: {}", m.velocity);
+}
+
+fn app_with_line(drop: f32) -> App {
+    let mut app = app();
+    zip_line(&mut app, drop);
+    app
+}
+
+#[test]
+fn zip_lines_are_faster_downhill_than_uphill() {
+    let speed_after = |drop: f32| {
+        let mut app = app_with_line(drop);
+        let c = jump_into_the_line(&mut app);
+        run(&mut app, 1.2);
+        mover(&app, c).zip.expect("still riding").speed
+    };
+    let down = speed_after(5.0);
+    let level = speed_after(0.0);
+    let up = speed_after(-5.0);
+    assert!(
+        down > level + 0.6 && level > up + 0.6,
+        "{down:.1} {level:.1} {up:.1}"
+    );
+    assert!(up > 7.0, "still climbs at {up:.1} m/s");
+}
+
+#[test]
+fn a_zip_line_rider_s_camera_widens_like_a_sprinter_s() {
+    let mut app = app();
+    zip_line(&mut app, 4.0);
+    let c = jump_into_the_line(&mut app);
+    let cam = app
+        .world
+        .spawn((
+            engine_render::Camera::default(),
+            Transform::default(),
+            CameraFx {
+                target: Some(c),
+                ..CameraFx::default()
+            },
+        ))
+        .id();
+    run(&mut app, 1.0);
+    assert!(mover(&app, c).zip.is_some());
+    let fx = app.world.get::<CameraFx>(cam).unwrap();
+    assert!(
+        fx.fov_offset_deg > 0.9 * fx.sprint_fov_deg,
+        "{:.1}°",
+        fx.fov_offset_deg
+    );
+}
+
+#[test]
+fn a_rider_moves_with_its_zip_line() {
+    let mut app = app();
+    let line = zip_line(&mut app, 4.0);
+    let c = jump_into_the_line(&mut app);
+    run(&mut app, 0.3);
+    // The line moves 0.8 m sideways at once: the rider is pulled after it and hangs under it
+    // again.
+    app.world.get_mut::<Transform>(line).unwrap().translation.z += 0.8;
+    run(&mut app, 0.4);
+    let m = mover(&app, c);
+    assert!(m.zip.is_some(), "still on the line");
+    assert!((pos(&app, c).z - 0.8).abs() < 0.05, "{:?}", pos(&app, c));
+}
+
+// ------------------------------------------------------------------------ ladders
+
+/// A 6 m wall whose north face is at z = 0 (x from −3 to 3) with a ladder up it at x = 0:
+/// climbed facing −Z 0.45 m out from the face, feet on the lowest rung 0.3 m up and on the top
+/// one at the top, stepped off 1.5 m in onto the roof.
+fn ladder_wall(app: &mut App) -> Entity {
+    block(app, DVec3::new(0.0, 3.0, -2.0), Vec3::new(6.0, 6.0, 4.0));
+    app.world
+        .spawn((
+            Transform::from_translation(DVec3::new(0.0, 0.0, 0.45)),
+            Climbable::ladder(Vec3::Y * 0.3, Vec3::Y * 6.0, Vec3::NEG_Z)
+                .with_exit(Vec3::new(0.0, 6.0, -1.5)),
+        ))
+        .id()
+}
+
+/// A pilot 4 m out from the ladder walking at it until it grabs it.
+fn walk_onto_the_ladder(app: &mut App) -> Entity {
+    let c = character(app, DVec3::new(0.0, 0.9, 4.0), MovementProfile::pilot());
+    intent(app, c, |i| i.direction = Vec3::NEG_Z);
+    run_until(app, 3.0, |w| w.get::<Mover>(c).unwrap().ladder.is_some());
+    c
+}
+
+#[test]
+fn climbs_a_ladder_onto_the_roof_and_back_down() {
+    let mut app = app();
+    ladder_wall(&mut app);
+    let c = walk_onto_the_ladder(&mut app);
+    assert_eq!(triggered(&app, c, "ladder_grab"), 1);
+    let m = mover(&app, c);
+    assert_eq!(m.mode, LocomotionMode::Climb);
+    assert_eq!(m.air_jumps_left, 1);
+
+    // Holding forward climbs at the profile's speed, on the line, facing the ladder.
+    run(&mut app, 1.0);
+    let m = mover(&app, c);
+    let l = m.ladder.expect("on the ladder");
+    assert!((l.speed - 2.6).abs() < 0.05, "{:.2} m/s", l.speed);
+    let p = pos(&app, c);
+    assert!(
+        p.x.abs() < 0.02 && (p.z - 0.45).abs() < 0.02,
+        "on the line: {p:?}"
+    );
+    assert!(
+        (p.y - 0.9 - 0.3 - l.climbed as f64).abs() < 0.03,
+        "{p:?} {}",
+        l.climbed
+    );
+    assert!(m.facing.dot(Vec3::NEG_Z) > 0.99, "{}", m.facing);
+    assert!(!m.grounded);
+
+    // Over the top and onto the roof.
+    let secs = run_until(&mut app, 4.0, |w| {
+        let m = w.get::<Mover>(c).unwrap();
+        m.grounded && m.mode != LocomotionMode::Mantle
+    });
+    assert!(secs < 2.6, "took {secs:.2} s");
+    let p = pos(&app, c);
+    assert!((p.y - 6.9).abs() < 0.05 && p.z < -0.3, "on the roof: {p:?}");
+    assert_eq!(triggered(&app, c, "ladder_exit"), 1);
+
+    // Walk back to the ladder: it's grabbed at the top, and holding the same way climbs down.
+    intent(&mut app, c, |i| i.direction = Vec3::Z);
+    run_until(&mut app, 2.0, |w| {
+        w.get::<Mover>(c).unwrap().ladder.is_some()
+    });
+    let l = mover(&app, c).ladder.expect("grabbed it from the top");
+    assert!(l.t > 0.95, "{}", l.t);
+    assert_eq!(triggered(&app, c, "ladder_grab"), 2);
+    run(&mut app, 0.6);
+    let m = mover(&app, c);
+    assert!(
+        m.facing.dot(Vec3::NEG_Z) > 0.99,
+        "turned to face it: {}",
+        m.facing
+    );
+    assert!(m.ladder.expect("climbing down").speed < -2.0);
+    run_until(&mut app, 4.0, |w| {
+        w.get::<Mover>(c).unwrap().ladder.is_none()
+    });
+    run(&mut app, 0.5);
+    let m = mover(&app, c);
+    assert!(m.grounded && m.ladder.is_none());
+    assert_eq!(triggered(&app, c, "ladder_exit"), 2);
+    let p = pos(&app, c);
+    assert!((p.y - 0.9).abs() < 0.05 && p.z > 0.6, "stepped off: {p:?}");
+}
+
+#[test]
+fn rungs_ring_under_a_climber() {
+    let mut app = app();
+    #[derive(Resource, Default)]
+    struct Rungs(Vec<GroundContact>);
+    app.init_resource::<Rungs>();
+    app.add_systems(
+        Last,
+        |mut seen: ResMut<Rungs>, mut contacts: MessageReader<GroundContact>| {
+            seen.0
+                .extend(contacts.read().filter(|c| c.position.y > 0.5).cloned());
+        },
+    );
+    ladder_wall(&mut app);
+    walk_onto_the_ladder(&mut app);
+    run(&mut app, 1.5);
+    let rungs = &app.world.resource::<Rungs>().0;
+    // About one rung every 0.3 m climbed, in front of the line, on metal.
+    assert!(rungs.len() >= 8, "{} rungs", rungs.len());
+    let metal = app
+        .world
+        .resource::<engine_world::SurfaceMaterials>()
+        .id("metal");
+    for r in rungs {
+        assert!((r.position.z - 0.25).abs() < 1e-3, "{:?}", r.position);
+        assert_eq!(r.surface, metal);
+    }
+    assert!(rungs.windows(2).all(|w| w[1].position.y > w[0].position.y));
+}
+
+#[test]
+fn crouch_slides_down_and_jump_kicks_off() {
+    let mut app = app();
+    ladder_wall(&mut app);
+    let c = walk_onto_the_ladder(&mut app);
+    run(&mut app, 1.5);
+    let high = pos(&app, c).y;
+    intent(&mut app, c, |i| {
+        i.direction = Vec3::ZERO;
+        i.crouch = true;
+    });
+    run(&mut app, 0.6);
+    let l = mover(&app, c).ladder.expect("still on");
+    assert!(l.sliding && l.speed < -6.0, "{l:?}");
+    assert!(pos(&app, c).y < high - 1.5);
+    run_until(&mut app, 2.0, |w| {
+        w.get::<Mover>(c).unwrap().ladder.is_none()
+    });
+    run(&mut app, 0.3);
+    assert!(mover(&app, c).grounded);
+
+    // Climb again, then jump: kicked off backward, not grabbed again on the way down.
+    intent(&mut app, c, |i| {
+        i.crouch = false;
+        i.direction = Vec3::NEG_Z;
+    });
+    run_until(&mut app, 2.0, |w| {
+        w.get::<Mover>(c).unwrap().ladder.is_some()
+    });
+    run(&mut app, 1.0);
+    intent(&mut app, c, |i| i.direction = Vec3::ZERO);
+    tap_jump(&mut app, c);
+    let m = mover(&app, c);
+    assert!(m.ladder.is_none());
+    assert!(m.velocity.z > 3.5 && m.velocity.y > 3.0, "{}", m.velocity);
+    let grabs = triggered(&app, c, "ladder_grab");
+    run_until(&mut app, 3.0, |w| w.get::<Mover>(c).unwrap().grounded);
+    assert_eq!(triggered(&app, c, "ladder_grab"), grabs);
+    assert!(pos(&app, c).z > 1.5, "{:?}", pos(&app, c));
+}
+
+#[test]
+fn a_jump_into_a_ladder_catches_it() {
+    let mut app = app();
+    ladder_wall(&mut app);
+    let c = character(
+        &mut app,
+        DVec3::new(0.0, 0.9, 5.0),
+        MovementProfile::pilot(),
+    );
+    intent(&mut app, c, |i| {
+        i.direction = Vec3::NEG_Z;
+        i.sprint = true;
+    });
+    run_until(&mut app, 2.0, |w| {
+        w.get::<Transform>(c).unwrap().translation.z < 3.2
+    });
+    tap_jump(&mut app, c);
+    intent(&mut app, c, |i| i.direction = Vec3::ZERO);
+    run_until(&mut app, 1.5, |w| {
+        w.get::<Mover>(c).unwrap().ladder.is_some()
+    });
+    let l = mover(&app, c).ladder.expect("caught it");
+    assert!(l.climbed > 0.4, "caught {:.2} m up", l.climbed);
+    // Let go of the stick: it hangs on.
+    run(&mut app, 0.5);
+    let m = mover(&app, c);
+    assert!(m.ladder.is_some_and(|l| l.speed.abs() < 0.01));
+    assert!(!m.grounded);
+}
+
+#[test]
+fn a_moving_ladder_carries_its_climber_and_one_that_goes_drops_it() {
+    let mut app = app();
+    drifting(&mut app);
+    // A free-standing ladder (no wall), sliding along +X at 1.5 m/s.
+    let ladder = app
+        .world
+        .spawn((
+            Transform::from_translation(DVec3::new(0.0, 0.0, 0.45)),
+            Climbable::ladder(Vec3::Y * 0.3, Vec3::Y * 8.0, Vec3::NEG_Z),
+            Drift(Vec3::X * 1.5),
+        ))
+        .id();
+    let c = character(
+        &mut app,
+        DVec3::new(0.0, 0.9, 1.6),
+        MovementProfile::pilot(),
+    );
+    intent(&mut app, c, |i| i.direction = Vec3::NEG_Z);
+    run_until(&mut app, 2.0, |w| {
+        w.get::<Mover>(c).unwrap().ladder.is_some()
+    });
+    intent(&mut app, c, |i| i.direction = Vec3::ZERO);
+    run(&mut app, 1.0);
+    run(&mut app, 1.0);
+    let lx = app.world.get::<Transform>(ladder).unwrap().translation.x;
+    let p = pos(&app, c);
+    assert!(mover(&app, c).ladder.is_some());
+    assert!(
+        (p.x - lx).abs() < 0.05,
+        "{:.2} vs the ladder at {lx:.2}",
+        p.x
+    );
+    // Loco reports the world's motion: the ladder's.
+    let loco = app.world.get::<LocomotionState>(c).unwrap();
+    assert!((loco.velocity.x - 1.5).abs() < 0.1, "{}", loco.velocity);
+
+    app.world.entity_mut(ladder).remove::<Climbable>();
+    app.update();
+    assert!(mover(&app, c).ladder.is_none());
+    assert_eq!(triggered(&app, c, "ladder_exit"), 1);
+    run_until(&mut app, 2.0, |w| w.get::<Mover>(c).unwrap().grounded);
+    assert!(mover(&app, c).grounded);
 }

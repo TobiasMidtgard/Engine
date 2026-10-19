@@ -157,6 +157,9 @@ pub(crate) fn physics_step(world: &mut World, mut q: Local<Option<StepQueries>>)
     // ---------------------------------------------------------------- settings & environment
     let settings = world.resource::<PhysicsSettings>().clone();
     if settings != sim.settings {
+        if settings.articulated_joints != sim.settings.articulated_joints {
+            sim.unmake_joints();
+        }
         sim.settings = settings.clone();
         for r in sim.regions.iter_mut().flatten() {
             settings.apply_to(&mut r.world.integration_parameters);
@@ -312,14 +315,25 @@ pub(crate) fn physics_step(world: &mut World, mut q: Local<Option<StepQueries>>)
             continue;
         }
         sim.remove_joint(e);
-        sim.joints.insert(
-            e,
-            crate::sim::JointEntry {
-                desc,
-                created: None,
-                no_contact: Vec::new(),
-            },
-        );
+        sim.joints.insert(e, crate::sim::JointEntry::new(desc));
+    }
+    if !sim.regroup.is_empty() {
+        let graph = sim.joint_graph();
+        sim.rearticulate(&graph);
+    }
+    // The articulation budget looks every few steps, and whenever joints are being made (so a
+    // new ragdoll past the budget starts on constraint joints).
+    sim.budget_clock += 1;
+    let mut graph = None;
+    if sim.settings.articulated_joints
+        && (sim.budget_clock >= crate::sim::BUDGET_EVERY
+            || sim.joints.values().any(|j| j.created.is_none()))
+    {
+        sim.budget_clock = 0;
+        let g = sim.joint_graph();
+        let lookup = |x: Entity| world_pose(world, x).map(|t| (t.translation, t.rotation));
+        sim.budget_articulations(&g, &foci, &lookup);
+        graph = Some(g);
     }
     let waiting: Vec<Entity> = sim
         .joints
@@ -327,9 +341,14 @@ pub(crate) fn physics_step(world: &mut World, mut q: Local<Option<StepQueries>>)
         .filter(|(_, j)| j.created.is_none())
         .map(|(e, _)| *e)
         .collect();
+    let graph = match graph {
+        Some(g) => g,
+        None if waiting.is_empty() => Default::default(),
+        None => sim.joint_graph(),
+    };
     for e in waiting {
         let lookup = |x: Entity| world_pose(world, x).map(|t| (t.translation, t.rotation));
-        sim.create_joint(e, &lookup);
+        sim.create_joint(e, &lookup, &graph);
     }
 
     // ---------------------------------------------------------------- characters
@@ -378,25 +397,33 @@ pub(crate) fn physics_step(world: &mut World, mut q: Local<Option<StepQueries>>)
             continue;
         };
         let (rid, handle, kind) = (entry.region, entry.handle, entry.kind);
-        let teleported = entry
-            .written
-            .is_some_and(|w| w != (t.translation, t.rotation));
+        // A kinematic body moved by its `Transform` is never written back, so until gameplay
+        // moves it there is nothing to compare with: take its pose as gameplay's.
+        let teleported = match entry.written {
+            Some(w) => w != (t.translation, t.rotation),
+            None => kind == BodyKind::Kinematic,
+        };
         let new_velocity = v.filter(|v| entry.written_velocity.is_none_or(|w| w != *v));
         let new_force = f
             .map(|f| (f.force, f.torque, f.at))
             .filter(|f| *f != entry.external);
         if teleported {
             let pose = world_pose(world, e).unwrap_or(t);
+            let by_velocity = match new_velocity {
+                Some(v) => v.linear != Vec3::ZERO || v.angular != Vec3::ZERO,
+                None => entry.kinematic_by_velocity,
+            };
             let region = sim.region_mut(rid);
             let p = Pose::from_parts(region.local(pose.translation), pose.rotation);
-            if let Some(rb) = region.world.bodies.get_mut(handle) {
-                if kind == BodyKind::Kinematic {
-                    rb.set_next_kinematic_position(p);
-                } else {
-                    rb.set_position(p, true);
-                }
+            // A kinematic body driven by its `Transform` moves there over the step, carrying
+            // what it touches; one driven by `Velocity` jumps there and goes on from it.
+            let glide = kind == BodyKind::Kinematic && !by_velocity;
+            if !glide && let Some(rb) = region.world.bodies.get_mut(handle) {
+                rb.set_position(p, true);
             }
-            sim.bodies.get_mut(&e).unwrap().written = Some((t.translation, t.rotation));
+            let entry = sim.bodies.get_mut(&e).unwrap();
+            entry.written = Some((t.translation, t.rotation));
+            entry.kinematic_goal = glide.then_some(p);
         }
         if let Some(v) = new_velocity {
             let entry = sim.bodies.get_mut(&e).unwrap();
@@ -477,6 +504,7 @@ pub(crate) fn physics_step(world: &mut World, mut q: Local<Option<StepQueries>>)
             (r.frozen, r.movers)
         };
         if frozen || movers == 0 || substeps == 0 {
+            place_kinematics(&mut sim, rid);
             let s = &mut *sim;
             let filter = ContactFilter {
                 no_contact: &s.no_contact,
@@ -484,7 +512,11 @@ pub(crate) fn physics_step(world: &mut World, mut q: Local<Option<StepQueries>>)
             };
             let r = s.regions[rid as usize].as_mut().expect("live region");
             if r.needs_refresh {
-                r.world.detect_collisions(&filter, &());
+                // A zero-length step: Rapier applies the removals and updates the contacts and
+                // its islands together (its collision-only pass leaves the islands a link
+                // behind the contact graph, and a later contact gets mislinked).
+                r.world.integration_parameters.dt = 0.0;
+                r.world.step_with_events(&filter, &());
                 r.needs_refresh = false;
                 r.queries_refreshed();
                 r.update_bounds();
@@ -501,7 +533,7 @@ pub(crate) fn physics_step(world: &mut World, mut q: Local<Option<StepQueries>>)
             }
             character::find_platforms(&mut sim, rid, &gravity);
         }
-        for _ in 0..substeps {
+        for sub in 0..substeps {
             // Every substep: water pressure follows the pose (forces held over several
             // substeps lag behind it and pump energy into a floating body's rocking).
             prepare_forces(
@@ -512,7 +544,8 @@ pub(crate) fn physics_step(world: &mut World, mut q: Local<Option<StepQueries>>)
                 water.as_ref(),
                 settings.buoyancy,
             );
-            drive_kinematics(&mut sim, rid, sub_dt);
+            drive_kinematics(&mut sim, rid, sub_dt, substeps - sub);
+            crate::cones::orient(&mut sim, rid);
             let scaled = scale_time(&mut sim, rid, true);
             {
                 let s = &mut *sim;
@@ -523,7 +556,9 @@ pub(crate) fn physics_step(world: &mut World, mut q: Local<Option<StepQueries>>)
                 let r = s.regions[rid as usize].as_mut().expect("live region");
                 r.world.integration_parameters.dt = sub_dt;
                 let collector = std::mem::take(&mut r.collector);
+                crate::articulation::before_step(&mut r.world, &r.links);
                 r.world.step_with_events(&filter, &collector);
+                crate::articulation::after_step(&mut r.world, &mut r.links);
                 r.collector = collector;
                 r.needs_refresh = false;
             }
@@ -531,6 +566,7 @@ pub(crate) fn physics_step(world: &mut World, mut q: Local<Option<StepQueries>>)
                 scale_time(&mut sim, rid, false);
             }
             crate::rolling::resist_rolling(&mut sim, rid);
+            crate::cones::rub(&mut sim, rid);
             if settings.contact_events {
                 sim.process_contacts(rid, sub_dt);
             } else {
@@ -1021,13 +1057,28 @@ fn refresh_contact_hooks(world: &mut PhysicsWorld) {
     }
 }
 
-/// Kinematic bodies moved by `Velocity`: advance their target pose by one substep.
-fn drive_kinematics(sim: &mut Simulation, rid: RegionId, sub_dt: f32) {
+/// Kinematic bodies moved by gameplay: those driven by `Velocity` advance by one substep, and
+/// those put somewhere through their `Transform` go 1/`left` of the rest of the way there
+/// (`left` substeps of this step remain, this one included).
+fn drive_kinematics(sim: &mut Simulation, rid: RegionId, sub_dt: f32, left: u32) {
     let moving: Vec<(rapier3d::prelude::RigidBodyHandle, Velocity)> = sim
         .bodies
         .values()
         .filter(|b| b.region == rid && b.kinematic_by_velocity)
         .map(|b| (b.handle, b.written_velocity.unwrap_or_default()))
+        .collect();
+    let gliding: Vec<(rapier3d::prelude::RigidBodyHandle, Pose)> = sim
+        .bodies
+        .values_mut()
+        .filter(|b| b.region == rid)
+        .filter_map(|b| {
+            let goal = if left <= 1 {
+                b.kinematic_goal.take()
+            } else {
+                b.kinematic_goal
+            };
+            goal.map(|g| (b.handle, g))
+        })
         .collect();
     let region = sim.region_mut(rid);
     for (h, v) in moving {
@@ -1041,6 +1092,41 @@ fn drive_kinematics(sim: &mut Simulation, rid: RegionId, sub_dt: f32) {
             ));
         }
     }
+    for (h, goal) in gliding {
+        if let Some(rb) = region.world.bodies.get_mut(h) {
+            let next = if left <= 1 {
+                goal
+            } else {
+                let (p, k) = (*rb.position(), 1.0 / left as f32);
+                Pose::from_parts(
+                    p.translation.lerp(goal.translation, k),
+                    p.rotation.slerp(goal.rotation, k).normalize(),
+                )
+            };
+            rb.set_next_kinematic_position(next);
+        }
+    }
+}
+
+/// Kinematic bodies put somewhere through their `Transform` in a region that doesn't step
+/// (asleep, out of reach or paused): place them there now.
+fn place_kinematics(sim: &mut Simulation, rid: RegionId) {
+    let placed: Vec<(rapier3d::prelude::RigidBodyHandle, Pose)> = sim
+        .bodies
+        .values_mut()
+        .filter(|b| b.region == rid)
+        .filter_map(|b| b.kinematic_goal.take().map(|g| (b.handle, g)))
+        .collect();
+    if placed.is_empty() {
+        return;
+    }
+    let region = sim.region_mut(rid);
+    for (h, goal) in placed {
+        if let Some(rb) = region.world.bodies.get_mut(h) {
+            rb.set_position(goal, true);
+        }
+    }
+    region.needs_refresh = true;
 }
 
 /// Bodies with their own time rate (`LocalTimeScale`): scale velocity and gravity so they move
@@ -1086,7 +1172,7 @@ fn break_joints(sim: &mut Simulation, rid: RegionId, sub_dt: f32) {
         .iter()
         .filter_map(|(e, j)| {
             let (r, h) = j.created?;
-            (r == rid).then_some((*e, h, j.desc.break_force?))
+            (r == rid).then_some((*e, h.impulse()?, j.desc.break_force?))
         })
         .collect();
     let iterations = sim.settings.solver_iterations.clamp(1, 64) as f32;

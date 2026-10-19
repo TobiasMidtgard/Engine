@@ -1,9 +1,11 @@
 #![doc = include_str!("../README.md")]
 
 mod api;
+mod articulation;
 mod buoyancy;
 mod capsule_box;
 mod character;
+mod cones;
 mod convert;
 mod debug;
 pub mod demo;
@@ -48,6 +50,8 @@ pub struct PhysicsStats {
     pub step_ms: f64,
     /// Substeps in the last fixed step.
     pub substeps: u32,
+    /// Joints solved as articulations (see [`PhysicsSettings::articulated_joints`]).
+    pub articulated: usize,
 }
 
 impl PhysicsStats {
@@ -69,6 +73,11 @@ impl PhysicsStats {
             touching: sim.contacts.touching.len(),
             step_ms,
             substeps,
+            articulated: sim
+                .joints
+                .values()
+                .filter(|j| matches!(j.created, Some((_, sim::JointHandle::Articulated { .. }))))
+                .count(),
         }
     }
 }
