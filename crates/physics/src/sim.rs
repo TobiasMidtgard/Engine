@@ -205,6 +205,9 @@ pub struct BodyEntry {
     pub was_sleeping: bool,
     /// Mass properties need writing back.
     pub mass_dirty: bool,
+    /// The water's level (`-inf` when dry) and current at this body when it was last seen
+    /// asleep, to wake it when the water changes (`step::wake_for_water`).
+    pub water_mark: Option<(f64, Vec3)>,
 }
 
 /// A collider: attached to a body, or static (copied into every region it can touch).
@@ -400,6 +403,8 @@ pub struct Simulation {
     pub held: EntityHashSet,
     /// Steps since the articulation budget last looked.
     pub budget_clock: u32,
+    /// Steps since the water under sleeping bodies was last looked at.
+    pub water_clock: u32,
 }
 
 /// Rapier hooks: drop the contacts listed in [`Simulation::no_contact`], and keep round bodies
@@ -627,6 +632,7 @@ impl Simulation {
                 kinematic_goal: None,
                 was_sleeping: false,
                 mass_dirty: true,
+                water_mark: None,
             },
         );
     }
