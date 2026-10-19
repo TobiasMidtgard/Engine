@@ -132,12 +132,13 @@ pub fn wheel_visuals(
             continue;
         };
         let st = &w.state;
+        // On the ground the wheel sits where the spring puts it; in the air it hangs at full
+        // travel, which the model's leg may not reach.
         let travel = if st.grounded {
             st.spring_length
         } else {
-            w.suspension.travel_m
-        }
-        .min(vis.max_travel);
+            w.suspension.travel_m.min(vis.max_travel)
+        };
         // Gear that doesn't fold retracts by shrinking away (with everything attached to it).
         let shown = !vis.retracts || aircraft.is_none_or(|a| a.gear_down);
         let gear = aircraft.map_or(1.0, |a| a.gear);

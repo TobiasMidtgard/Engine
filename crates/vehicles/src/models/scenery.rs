@@ -411,7 +411,7 @@ impl<'w> Scene<'w> {
         };
         let runway = |w: &mut World| {
             textures(w, "runway", STD, |px| {
-                tex::asphalt(px, RUNWAY_TILE, Some(0.038), 12)
+                tex::asphalt(px, RUNWAY_TILE, Some(RUNWAY_TILE / 256.0), 12)
             })
         };
         let concrete = |w: &mut World| {

@@ -657,8 +657,8 @@ impl Features {
         };
         if p.z < -1.55 {
             // The nose openings are read on the skin under `p`, so their walls stand square to
-            // the raked panels round them.
-            let q = if plain > -0.15 && self.near(p, 0.2).is_some() {
+            // the raked panels round them (not inside a wheel well, whose wall is skin too).
+            let q = if plain > -0.15 && self.near(p, 0.2).is_some() && !in_wheel_well(p, 0.1) {
                 on_surface(skin, p, plain)
             } else {
                 p

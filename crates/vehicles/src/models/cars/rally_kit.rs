@@ -1390,7 +1390,8 @@ fn number_plate(plain: Field) -> Mesh {
 fn number_texture() -> Image {
     let (w, h) = (512u32, 102u32);
     let mut cv = Canvas::new(w, h);
-    let size = 66.0;
+    // Small enough that the strokes stay clear of the border.
+    let size = 58.0;
     let text = "27";
     let tw = tex::text_width(text, size);
     let origin = Vec2::new((w as f32 - tw) * 0.5, (h as f32 + size) * 0.5);

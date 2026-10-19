@@ -211,6 +211,10 @@ fn ship_in_flight(name: &str, gear: f32, eye: [f64; 3], target: [f64; 3]) {
                 a.gear_down = false;
                 a.gear = gear;
             }
+            // No assist, so the hover engines don't light up to hold it there.
+            if let Some(mut s) = app.world.get_mut::<engine_vehicles::Spacecraft>(e) {
+                s.assist.mode = engine_vehicles::AssistMode::Off;
+            }
         },
         Transform::from_xyz(eye[0], eye[1], eye[2])
             .looking_at(DVec3::new(target[0], target[1], target[2]), Vec3::Y),

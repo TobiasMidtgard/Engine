@@ -600,18 +600,24 @@ fn fly(
         // Wheel contacts and telemetry aren't known until the vehicle has run once.
         return;
     }
-    // Runway height, read once the telemetry has run: it reads 0 m before, which for a
-    // runway on high ground (or a planet's surface) put the plane far above it.
-    let start = *ap.start_altitude.get_or_insert(tel.altitude_m);
-    let height = (tel.altitude_m - start) as f32;
+    // Runway height, from this frame's air sample: the telemetry is a frame old and reads
+    // 0 m before the vehicle has run, which for a runway on high ground (or a planet's
+    // surface) put the plane far above it.
+    let altitude = f.air.altitude_m;
+    let start = *ap.start_altitude.get_or_insert(altitude);
+    let height = (altitude - start) as f32;
     let on_ground = tel.wheels_grounded > 0 && height < 2.0;
     if ap.phase.is_empty() {
         // Too slow to fly means a take-off, even when the wheels are off the ground for a
         // moment (a plane put down on a runway bounces as it settles). Cruise logic at
         // walking speed would turn the nose into the wind and roll off the runway.
-        if on_ground || tel.speed < rotate_speed * 0.5 {
+        if on_ground || (tel.speed < rotate_speed * 0.5 && height < 2.0) {
             ap.set_phase("takeoff roll");
             ap.runway = Some((f.position, fwd_flat));
+        } else if tel.speed < rotate_speed * 0.5 && ap.timer < 1.0 {
+            // Slow and well off the ground: still settling (or falling onto something), so
+            // wait a moment before choosing.
+            return;
         } else {
             ap.set_phase("cruise");
         }
@@ -807,7 +813,8 @@ fn ascend(
     } else {
         heading
     };
-    let alt = tel.altitude_m;
+    // This frame's air sample: the telemetry is a frame old.
+    let alt = f.air.altitude_m;
     let planet = !gravity.bodies.is_empty();
     c.strafe = 0.0;
     c.lift = 0.0;
