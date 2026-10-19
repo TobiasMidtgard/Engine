@@ -119,7 +119,9 @@ are drawn as their own layer 5 km above the ground, over whatever terrain covers
 the baked cloud map broken up with procedural detail down to a few hundred meters, so far
 away it shows the weather systems and up close it breaks into crisp cumulus covering the
 same share of sky, with a thin veil under broken cloud. The tops are lit through the air and
-veiled by it. Within `SpaceSettings::cloud_hole_m` (60 km) of the camera the layer leaves
+veiled by it, and cast their shadows on the ground between them, offset away from the sun
+(long at a low sun), so the terrain under the layer is shaded like the far globe. Within
+`SpaceSettings::cloud_hole_m` (60 km) of the camera the layer leaves
 the sky to the weather's own volumetric clouds. Views `earth_leo` (400 km) and `earth_edge`
 (35 km) in `space_shots` show it, and `mars_low` and `mars_edge` the same heights over Mars.
 
