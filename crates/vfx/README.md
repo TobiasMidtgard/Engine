@@ -58,7 +58,10 @@ Engine exhausts (`exhaust.*`) play at a nozzle with the effect's +Y pointing dow
 `scale` 1 is the nozzle size each one names and `intensity` follows the throttle. Every nozzle
 of an `Exhausts` component (written by vehicles, jump kits) gets its kind's effect by itself,
 sized by its radius and following its level; running jets and tailpipes keep idling while the
-entity's `EngineState` says the engine runs ([`exhaust`]). The `plume`
+entity's `EngineState` says the engine runs, and each runs on its owner's `LocalTimeScale`
+([`exhaust`]). A cut engine's smoke drifts on, and it relights without starting over. The
+flame and nozzle glow are `steady` layers, which keep their full rate whatever the effect's
+`rate` and the density setting (stopping only at rate 0), so they never thin into flicker. The `plume`
 sprite draws the flame procedurally: a white-hot core, a train of shock diamonds about a
 nozzle's width apart with the gas banded bright and dark around them, and a turbulent tail
 that flickers and tears away.

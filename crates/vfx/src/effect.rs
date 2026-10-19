@@ -580,6 +580,10 @@ pub struct EmitterDesc {
     pub collide: Collide,
     /// Particles move with the emitter instead of being left behind (auras, orbiting runes).
     pub local_space: bool,
+    /// Spawns at its full rate whatever the effect's `rate` and the density setting, stopping
+    /// only at rate 0: for a shape drawn by a few overlapping particles (an engine's plume),
+    /// which would flicker or break up if thinned.
+    pub steady: bool,
 
     // ---- sub-emitters
     /// New particles in another layer wherever this layer's particles hit the ground, water or
@@ -650,6 +654,7 @@ impl Default for EmitterDesc {
             attract: 0.0,
             collide: Collide::None,
             local_space: false,
+            steady: false,
             on_hit: None,
             on_death: None,
             trailing: None,
@@ -681,6 +686,7 @@ impl EmitterDesc {
         if self.max_particles > 0 {
             return self.max_particles;
         }
+        let rate_scale = if self.steady { 1.0 } else { rate_scale };
         let life = self.max_lifetime();
         let steady = (self.rate + self.rate_per_meter * ASSUMED_EMITTER_SPEED) * life * rate_scale;
         let bursts: u32 = self.bursts.iter().map(Burst::total).sum();

@@ -2463,6 +2463,7 @@ fn plume(name: &str, rgb: [f32; 3], length: f32, width: f32, glow: f32) -> Emitt
         size: [length * 0.94, length * 1.06],
         rotation_deg: [0.0, 0.0],
         local_space: true,
+        steady: true,
         sprite: Sprite::Plume,
         facing: Facing::Axis,
         stretch: width / length,
@@ -2485,6 +2486,7 @@ fn nozzle_glow(rgb: [f32; 3], size: f32, glow: f32) -> EmitterDesc {
         lifetime: [0.2, 0.3],
         size: [size * 0.9, size * 1.1],
         local_space: true,
+        steady: true,
         color: fade(rgb, 1.0, 0.3, 0.6),
         emissive: glow,
         additive: 1.0,
@@ -2541,12 +2543,11 @@ fn exhausts() -> Vec<EffectDesc> {
                     // The exhaust cloud billowing up where the plume dies away.
                     EmitterDesc {
                         rate: 30.0,
-                        shape: EmitShape::Sphere {
+                        shape: EmitShape::Cone {
+                            angle_deg: 30.0,
                             radius: 0.8,
-                            surface: false,
                         },
                         offset: [0.0, 7.0, 0.0],
-                        spread_deg: 25.0,
                         speed: [4.0, 8.0],
                         drag: 1.2,
                         acceleration: [0.0, 0.5, 0.0],
@@ -2620,12 +2621,11 @@ fn exhausts() -> Vec<EffectDesc> {
                 },
                 EmitterDesc {
                     rate: 40.0,
-                    shape: EmitShape::Sphere {
+                    shape: EmitShape::Cone {
+                        angle_deg: 5.0,
                         radius: 0.3,
-                        surface: false,
                     },
                     offset: [0.0, 0.5, 0.0],
-                    spread_deg: 5.0,
                     speed: [20.0, 30.0],
                     lifetime: [0.4, 0.7],
                     size: [1.0, 1.4],
@@ -2656,11 +2656,10 @@ fn exhausts() -> Vec<EffectDesc> {
             vec![
                 EmitterDesc {
                     rate: 9.0,
-                    shape: EmitShape::Sphere {
+                    shape: EmitShape::Cone {
+                        angle_deg: 12.0,
                         radius: 0.02,
-                        surface: false,
                     },
-                    spread_deg: 12.0,
                     speed: [1.5, 2.5],
                     drag: 2.5,
                     acceleration: [0.0, 0.4, 0.0],
@@ -2708,11 +2707,10 @@ fn exhausts() -> Vec<EffectDesc> {
                     },
                     EmitterDesc {
                         bursts: vec![at(0.02, 4)],
-                        shape: EmitShape::Sphere {
+                        shape: EmitShape::Cone {
+                            angle_deg: 20.0,
                             radius: 0.03,
-                            surface: false,
                         },
-                        spread_deg: 20.0,
                         speed: [2.5, 4.0],
                         drag: 3.0,
                         lifetime: [0.8, 1.4],

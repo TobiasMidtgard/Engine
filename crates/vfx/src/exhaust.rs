@@ -4,18 +4,22 @@
 //! The owner (vehicles, a jump kit) writes [`Exhausts`] each frame; this plays the effect for
 //! each nozzle's kind, sized by its radius, glowing and spawning with its level. Jets and
 //! tailpipes keep idling (haze, faint fumes) while the entity's [`EngineState`] says the
-//! engine runs; everything else goes out at level 0.
+//! engine runs; everything else goes out at level 0, its smoke drifting on. The effects run
+//! on their owner's [`LocalTimeScale`].
 
 use std::collections::HashMap;
 
 use engine_core::math::{Quat, Vec3};
 use engine_core::prelude::*;
+use engine_core::time::LocalTimeScale;
 use engine_world::{EngineState, ExhaustKind, Exhausts};
+use serde::{Deserialize, Serialize};
 
 use crate::emitter::ParticleEffect;
 
 /// The effect playing one nozzle of its parent's [`Exhausts`].
-#[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(default)]
 pub struct ExhaustNozzle {
     /// Index into the parent's [`Exhausts`].
     pub index: usize,
@@ -41,30 +45,55 @@ fn idle(kind: ExhaustKind) -> f32 {
     }
 }
 
+/// The level a nozzle shows at: its throttle, or its idle while the engine runs.
+fn shown_level(n: &engine_world::Exhaust, engine: Option<&EngineState>) -> f32 {
+    let running = engine.is_some_and(|e| e.running);
+    n.level
+        .clamp(0.0, 1.0)
+        .max(if running { idle(n.kind) } else { 0.0 })
+}
+
+/// How densely a nozzle at `level` spawns. The effect keeps playing at 0, so its smoke drifts
+/// on and it relights without starting over; its plume and glow are steady layers, which
+/// only stop at 0 and otherwise keep their full rate.
+fn rate_at(level: f32) -> f32 {
+    if level > 0.01 { 0.4 + 0.6 * level } else { 0.0 }
+}
+
+type Owner<'a> = (
+    Entity,
+    &'a Exhausts,
+    Option<&'a EngineState>,
+    Option<&'a LocalTimeScale>,
+);
+
+type Nozzle<'a> = (
+    Entity,
+    &'a ExhaustNozzle,
+    Option<&'a ChildOf>,
+    &'a mut Transform,
+    &'a mut ParticleEffect,
+    Option<&'a LocalTimeScale>,
+);
+
 /// Spawn, update and remove the nozzle effects of every [`Exhausts`].
-pub fn follow_exhausts(
-    mut commands: Commands,
-    owners: Query<(Entity, &Exhausts, Option<&EngineState>)>,
-    mut nozzles: Query<(
-        Entity,
-        &ExhaustNozzle,
-        &ChildOf,
-        &mut Transform,
-        &mut ParticleEffect,
-    )>,
-) {
+pub fn follow_exhausts(mut commands: Commands, owners: Query<Owner>, mut nozzles: Query<Nozzle>) {
     let mut have: HashMap<Entity, Vec<bool>> = HashMap::new();
-    for (entity, nozzle, parent, mut tr, mut effect) in &mut nozzles {
-        let owner = parent.parent();
+    for (entity, nozzle, parent, mut tr, mut effect, scale) in &mut nozzles {
+        // Orphans (the owner went in the frame its nozzle was spawned) go too.
+        let Some(owner) = parent.map(ChildOf::parent) else {
+            commands.entity(entity).despawn();
+            continue;
+        };
         let Some(ex) = owners
             .get(owner)
             .ok()
-            .and_then(|(_, ex, engine)| ex.0.get(nozzle.index).map(|n| (*n, engine)))
+            .and_then(|(_, ex, engine, time)| ex.0.get(nozzle.index).map(|n| (*n, engine, time)))
         else {
             commands.entity(entity).despawn();
             continue;
         };
-        let (n, engine) = ex;
+        let (n, engine, time) = ex;
         let slots = have.entry(owner).or_default();
         if slots.len() <= nozzle.index {
             slots.resize(nozzle.index + 1, false);
@@ -82,28 +111,34 @@ pub fn follow_exhausts(
         *tr = Transform::from_translation(n.position.as_dvec3()).with_rotation(
             Quat::from_rotation_arc(Vec3::Y, n.direction.normalize_or(Vec3::Z)),
         );
-        let running = engine.is_some_and(|e| e.running);
-        let level = n
-            .level
-            .clamp(0.0, 1.0)
-            .max(if running { idle(n.kind) } else { 0.0 });
+        let level = shown_level(&n, engine);
         effect.scale = (n.radius / radius).max(0.01);
         effect.intensity = level;
-        effect.rate = 0.4 + 0.6 * level;
-        effect.playing = level > 0.01;
+        effect.rate = rate_at(level);
+        effect.playing = true;
+        match (time, scale) {
+            (Some(t), s) if s != Some(t) => {
+                commands.entity(entity).insert(*t);
+            }
+            (None, Some(_)) => {
+                commands.entity(entity).remove::<LocalTimeScale>();
+            }
+            _ => {}
+        }
     }
-    for (owner, ex, _) in &owners {
+    for (owner, ex, engine, time) in &owners {
         let slots = have.get(&owner);
         for (index, n) in ex.0.iter().enumerate() {
             if slots.and_then(|s| s.get(index)).copied().unwrap_or(false) {
                 continue;
             }
             let (name, radius) = exhaust_effect(n.kind);
+            let level = shown_level(n, engine);
             let mut effect = ParticleEffect::new(name)
                 .with_scale((n.radius / radius).max(0.01))
-                .with_intensity(0.0);
-            effect.playing = false;
-            commands.spawn((
+                .with_intensity(level);
+            effect.rate = rate_at(level);
+            let mut nozzle = commands.spawn((
                 Transform::from_translation(n.position.as_dvec3()).with_rotation(
                     Quat::from_rotation_arc(Vec3::Y, n.direction.normalize_or(Vec3::Z)),
                 ),
@@ -111,6 +146,9 @@ pub fn follow_exhausts(
                 ExhaustNozzle { index },
                 ChildOf(owner),
             ));
+            if let Some(t) = time {
+                nozzle.insert(*t);
+            }
         }
     }
 }
@@ -172,7 +210,14 @@ mod tests {
         );
         let (_, thruster, ..) = &v[1];
         assert_eq!(thruster.effect, "exhaust.thruster");
-        assert!(!thruster.playing, "an idle thruster is out");
+        assert!(
+            thruster.rate == 0.0 && thruster.intensity == 0.0,
+            "an idle thruster is out"
+        );
+        assert!(
+            thruster.playing,
+            "but stays ready to relight where it left off"
+        );
 
         // The throttle drops, a kind changes and a nozzle goes away.
         app.world.get_mut::<Exhausts>(ship).unwrap().0 = vec![
@@ -212,14 +257,59 @@ mod tests {
             .id();
         app.update_n(2);
         let v = nozzles(&mut app);
-        assert!(v[0].1.playing, "an idling car puffs fumes");
+        assert!(v[0].1.rate > 0.0, "an idling car puffs fumes");
         assert!((v[0].1.scale - 1.0).abs() < 1e-5);
         app.world.get_mut::<EngineState>(car).unwrap().running = false;
         app.update_n(1);
-        assert!(!nozzles(&mut app)[0].1.playing, "a parked car does not");
+        assert_eq!(nozzles(&mut app)[0].1.rate, 0.0, "a parked car does not");
         // Without its exhausts the effect goes too.
         app.world.entity_mut(car).remove::<Exhausts>();
         app.update_n(2);
         assert!(nozzles(&mut app).is_empty());
+    }
+
+    #[test]
+    fn nozzles_run_on_their_owners_time_and_orphans_go() {
+        let mut app = app();
+        let slow = LocalTimeScale {
+            factor: 0.25,
+            ignore_world_dilation: true,
+        };
+        let pack = app
+            .world
+            .spawn((
+                Transform::default(),
+                Exhausts(vec![Exhaust::new(
+                    ExhaustKind::JumpJet,
+                    Vec3::ZERO,
+                    Vec3::NEG_Y,
+                    0.06,
+                )]),
+                slow,
+            ))
+            .id();
+        app.update_n(2);
+        let nozzle = app
+            .world
+            .query_filtered::<Entity, With<ExhaustNozzle>>()
+            .iter(&app.world)
+            .next()
+            .unwrap();
+        assert_eq!(app.world.get::<LocalTimeScale>(nozzle), Some(&slow));
+        app.world.entity_mut(pack).remove::<LocalTimeScale>();
+        app.update_n(1);
+        assert_eq!(app.world.get::<LocalTimeScale>(nozzle), None);
+
+        // A nozzle whose owner vanished before it was parented is cleaned up.
+        let orphan = app
+            .world
+            .spawn((
+                Transform::default(),
+                ParticleEffect::new("exhaust.jumpjet"),
+                ExhaustNozzle { index: 0 },
+            ))
+            .id();
+        app.update_n(1);
+        assert!(app.world.get_entity(orphan).is_err());
     }
 }

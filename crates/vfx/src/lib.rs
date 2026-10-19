@@ -118,6 +118,10 @@ impl Plugin for VfxPlugin {
                  `flicker_hz` times a second, with forking branches.",
             )
             .register_component::<VfxLifetime>("Removes the entity after this many seconds.")
+            .register_component::<ExhaustNozzle>(
+                "Marks the effect playing one nozzle of its parent's Exhausts (index); spawned \
+                 and kept up by the particles module.",
+            )
             .register_resource::<VfxSettings>(
                 "Particle budget (max_particles), density (spawn_scale), draw distance, soft \
                  particles, and an on/off switch.",

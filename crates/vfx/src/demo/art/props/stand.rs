@@ -157,7 +157,7 @@ pub fn engine_stand() -> Prop {
     for y in [0.85f32, 1.95] {
         let x = PLATE_X + y + 0.18;
         iron.merge(&on_axis(moved(
-            band(CASE_R + 0.022, 0.14, 0.03, 48),
+            band(CASE_R, 0.14, 0.03, 48),
             Vec3::Y * (y + 0.18),
             Quat::IDENTITY,
         )));
@@ -165,7 +165,7 @@ pub fn engine_stand() -> Prop {
             iron.merge(&bar(
                 &[
                     Vec3::new(x, PAD, side * 0.82),
-                    Vec3::new(x, AXIS_Y - 0.22, side * 0.36),
+                    Vec3::new(x, AXIS_Y - 0.21, side * 0.35),
                 ],
                 0.045,
                 0.0,
@@ -200,7 +200,11 @@ pub fn engine_stand() -> Prop {
             (front + 0.3, PAD + 2.9, 0.52),
             (PLATE_X + 0.35, AXIS_Y + 0.9, 0.38),
             (PLATE_X + 0.38, AXIS_Y + 0.55, 0.26),
-            (PLATE_X + 0.38, AXIS_Y + CASE_R - 0.02, 0.2),
+            (
+                PLATE_X + 0.38,
+                AXIS_Y + (CASE_R * CASE_R - 0.04).sqrt() - 0.02,
+                0.2,
+            ),
         ]
         .iter()
         .map(|&(x, y, z)| Vec3::new(x, y, z * side))
