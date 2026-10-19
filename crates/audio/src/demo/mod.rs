@@ -24,10 +24,12 @@ use engine_world::animation::SkeletonPose;
 use engine_world::physical::{Deformation, SurfaceMaterial};
 use engine_world::{ContactKind, GroundContact, SurfaceMaterials};
 
+mod backdrop;
 mod bodies;
 mod ground;
 mod rings;
 
+pub use backdrop::{lawn_style, meadow_reach, spawn_backdrop};
 pub use rings::SoundRings;
 
 /// Half the length of the two straights, meters.
