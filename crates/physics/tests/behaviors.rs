@@ -13,7 +13,9 @@ use engine_world::physics::{
     CollisionLayers, ContactEvent, ContactPhase, ExternalForce, Joint, JointKind, PhysicsQueries,
     QueryFilter, RigidBody, Velocity,
 };
-use engine_world::{Gravity, Water, WaterQuery, WaterSample, WorldImpulse, WorldPlugin};
+use engine_world::{
+    Gravity, GroundContact, NoiseEvent, Water, WaterQuery, WaterSample, WorldImpulse, WorldPlugin,
+};
 
 const DT: f64 = 1.0 / 60.0;
 
@@ -1365,6 +1367,108 @@ fn sleeping_bodies_wake_when_the_water_rises_falls_or_flows() {
         !stirred.borrow().contains(&"dry crate"),
         "the water woke the dry crate"
     );
+}
+
+#[derive(Resource, Default)]
+struct Landings(Vec<GroundContact>, Vec<NoiseEvent>);
+
+fn landings(
+    mut seen: ResMut<Landings>,
+    mut ground: MessageReader<GroundContact>,
+    mut noise: MessageReader<NoiseEvent>,
+) {
+    seen.0.extend(ground.read().copied());
+    seen.1.extend(noise.read().copied());
+}
+
+#[test]
+fn tumbling_bodies_report_every_hard_landing() {
+    let mut app = app();
+    app.init_resource::<Landings>();
+    app.add_systems(Last, landings);
+    ground(&mut app, DVec3::ZERO, 40.0);
+    // A crate thrown along +x, spinning forward: it lands on face after face.
+    let tumbler = cube(&mut app, DVec3::new(0.0, 2.0, 0.0), 0.4);
+    // A post standing on one edge, leaning 20° toward +x: it slaps down flat without ever
+    // leaving the ground (its foot stays in contact, so only its impulse tells the landing).
+    let lean = 20f32.to_radians();
+    let post = app
+        .world
+        .spawn((
+            Transform::from_xyz(0.0, (0.6 * lean.cos() + 0.15 * lean.sin()) as f64, 20.0)
+                .with_rotation(Quat::from_rotation_z(-lean)),
+            RigidBody::dynamic(),
+            Collider::cuboid(Vec3::new(0.15, 0.6, 0.15)),
+            Velocity::default(),
+        ))
+        .id();
+    // One resting where it was put, one sliding flat: neither ever lands hard.
+    let resting = cube(&mut app, DVec3::new(0.0, 0.4, 10.0), 0.4);
+    let sliding = cube(&mut app, DVec3::new(0.0, 0.4, -10.0), 0.4);
+    app.world.entity_mut(tumbler).insert(Velocity {
+        linear: Vec3::new(6.0, 4.0, 0.0),
+        angular: Vec3::new(0.0, 0.0, -20.0),
+    });
+    app.world.entity_mut(sliding).insert(Velocity {
+        linear: Vec3::new(5.0, 0.0, 0.0),
+        angular: Vec3::ZERO,
+    });
+    app.update_n(1);
+    let mass = app
+        .world
+        .get::<engine_world::physics::MassProperties>(tumbler)
+        .unwrap()
+        .mass_kg;
+    app.update_n(4 * 60);
+    let seen = app.world.resource::<Landings>();
+    let of = |e: Entity| -> Vec<GroundContact> {
+        seen.0
+            .iter()
+            .filter(|c| c.entity == Some(e))
+            .copied()
+            .collect()
+    };
+    let hits = of(tumbler);
+    assert!(
+        hits.len() >= 3,
+        "the tumbling crate landed {} times",
+        hits.len()
+    );
+    for h in &hits {
+        assert!(h.load_kg > mass, "a landing carried {} kg", h.load_kg);
+        if h.speed > 0.5 {
+            // Thrown along +x (its corners kick it a little sideways).
+            let f = h.forward();
+            assert!(
+                f.x > 0.6,
+                "a landing travelling along +x faces {f:?} (yaw {})",
+                h.yaw
+            );
+        }
+    }
+    let slap = of(post);
+    assert_eq!(
+        slap.len(),
+        1,
+        "the toppled post landed {} times",
+        slap.len()
+    );
+    let f = slap[0].forward();
+    assert!(
+        f.x.abs() > 0.9,
+        "the post lies along x, its landing along {f:?}"
+    );
+    assert!(
+        (slap[0].size[1] - 1.2).abs() < 0.1,
+        "the post's landing is {:?} m",
+        slap[0].size
+    );
+    let heard = seen.1.iter().filter(|n| n.source == Some(tumbler)).count();
+    assert_eq!(heard, hits.len(), "every landing is heard");
+    for (name, e) in [("resting", resting), ("sliding", sliding)] {
+        let n = of(e).len();
+        assert!(n <= 1, "the {name} crate reported {n} landings");
+    }
 }
 
 #[test]
