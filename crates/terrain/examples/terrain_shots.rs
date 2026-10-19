@@ -37,6 +37,10 @@ struct View {
     above_ground: Option<f64>,
     /// Likewise for `target`.
     target_above_ground: Option<f64>,
+    /// Move the eye to this many meters inland of where the line from `eye` toward `target`
+    /// first reaches the sea (then `above_ground` above the ground there), and the target as
+    /// far beyond that point as it was from the eye.
+    shore: Option<f64>,
     /// Sun azimuth (degrees from north toward east) and elevation (degrees).
     sun: (f64, f64),
     /// Far from home: the eye and target as (latitude, longitude, height above the ground),
@@ -69,6 +73,7 @@ const BASE: View = View {
     target: DVec3::ZERO,
     above_ground: None,
     target_above_ground: None,
+    shore: None,
     sun: (220.0, 35.0),
     eye_ll: None,
     target_ll: None,
@@ -253,6 +258,18 @@ fn views() -> Vec<View> {
             above_ground: Some(250.0),
             sun: (255.0, 12.0),
             exposure: Exposure::Manual { ev100: 14.8 },
+            ..BASE
+        },
+        // Down on the beach on the same coast, with the surf running in.
+        View {
+            name: "earth_beach",
+            eye: DVec3::new(-7_000.0, 0.0, 12_500.0),
+            target: DVec3::new(-17_000.0, 0.0, 20_000.0),
+            shore: Some(60.0),
+            above_ground: Some(4.0),
+            target_above_ground: Some(-40.0),
+            sun: (255.0, 25.0),
+            fov: 60.0,
             ..BASE
         },
         View {
@@ -668,8 +685,26 @@ fn main() {
             }
             p
         };
-        let mut eye = place(view.eye, view.above_ground);
-        let mut target = place(view.target, view.target_above_ground);
+        let (mut from, mut toward) = (view.eye, view.target);
+        if let Some(back) = view.shore {
+            let mut q = app.world.query::<(&Transform, &PlanetTerrain)>();
+            let (tf, planet) = q.iter(&app.world).next().expect("planet");
+            let d = DVec3::new(toward.x - from.x, 0.0, toward.z - from.z);
+            let (len, d) = (d.length(), d.normalize());
+            let inv = tf.rotation.as_dquat().inverse();
+            let sea_at = |s: f64| {
+                let p = from + d * s;
+                let dir = (inv * (DVec3::new(p.x, 0.0, p.z) - tf.translation)).normalize();
+                planet.shape.height(dir) < 0.0
+            };
+            if let Some(s) = (0..20_000).map(|i| i as f64 * 5.0).find(|&s| sea_at(s)) {
+                let shore = from + d * s;
+                from = shore - d * back;
+                toward = shore + d * (len - back).max(50.0);
+            }
+        }
+        let mut eye = place(from, view.above_ground);
+        let mut target = place(toward, view.target_above_ground);
         let mut up = Vec3::Y;
         if let Some(e) = view.eye_ll {
             let mut q = app.world.query::<(&Transform, &PlanetTerrain)>();

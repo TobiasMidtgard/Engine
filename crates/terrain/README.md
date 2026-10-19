@@ -120,6 +120,13 @@ everything else (streaming, LOD, colliders, ground queries, prints) follows the 
   hand-made overlay stay dry. Turn it off with `PlanetShape::rivers = false` (the Moon and
   Mars have none); `shape.river_network()` returns the solved network, and its
   `segments()` give every river piece with its water level and width.
+- **Seas and coasts.** The open sea shows the bed through clear shallows (turquoise in warm
+  water, greener in cold, with weed patches), darkening with depth. Wind sets how rough it
+  is (Cox–Munk slope spread) and so how wide the sun's glitter spreads, and how high the
+  breakers run: surf lines roll in toward the shore, break into froth at the waterline and
+  wash up the sand, leaving a darker wet band behind. Beaches are strips some tens of meters
+  wide whose height follows the coast's slope, with pale dune grass behind them, and they
+  fade out from afar so coasts seen from orbit get no outline.
 - **Detailed ground materials up close.** Nine PBR materials (turf in tufts over thatch,
   leaf litter with needles and twigs, soil, churned mud, rock, snow, rippled sand, gravel,
   concrete) are generated procedurally in `materials.rs` like a node-graph material: height
@@ -209,7 +216,7 @@ commands.entity(bodies["Moon"]).insert(PlanetTerrain::moon(7).with_radius(1_737_
 `examples/terrain_shots.rs` renders the test views headless (lab prints, rain, snow, painted
 ground and a patchwork of painted layers, a meadow tinted the way the showcase paints its
 valley and a natural one at eye height, snow at eye height and over the valley, woods from the air, the range, the range at dusk
-(`range_dusk`: ridges casting long shadows), the coast, the Moon
+(`range_dusk`: ridges casting long shadows), the coast, a beach at eye height (`earth_beach`), the Moon
 underfoot, from low orbit, half lit and full, the Earth's climate belts from far out
 (`earth_globe`), a river at eye height (`earth_river`) and rivers from the air
 (`earth_rivers_air`), and Mars: from orbit (`mars_orbit`,

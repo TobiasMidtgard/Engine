@@ -1107,10 +1107,19 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     // From high up, dark needle woods and lighter broadleaf ones.
     let canopy_tone = mix(vec3<f32>(0.5, 0.55, 0.7), mix(vec3<f32>(0.34, 0.45, 0.42), vec3<f32>(0.56, 0.63, 0.42), saturate(far_n.y * 2.5 - 0.75)), far);
     col[M_FOREST] = mix(forest_floor, planet.colors[C_LUSH].rgb * canopy_tone, canopy);
-    // Beaches and deserts.
-    // From afar the strip is far thinner than the vertices that carry it, so it fades (it
-    // drew a white outline around every coast seen from orbit).
-    let beach = vegetation * (1.0 - smoothstep(1.5, 5.0, altitude)) * step(-1.0, altitude) * (1.0 - 0.85 * smoothstep(30.0, 300.0, pixel));
+    // Beaches and deserts. A beach is a strip some tens of meters wide above the water, its
+    // width wandering along the coast: on a gentle coast it reaches only a little above the
+    // sea, on a steeper one a few meters up. From afar the strip is far thinner than the
+    // vertices that carry it, so it fades (it drew a white outline around every coast seen
+    // from orbit).
+    let nu = max(dot(n_geo, up), 0.05);
+    let shore_tan = sqrt(max(1.0 - nu * nu, 0.0)) / nu;
+    let beach_w = mix(40.0, 160.0, saturate((meadow_v - 0.35) * 2.5));
+    let beach_top = clamp(shore_tan * beach_w, 0.8, 5.0);
+    let beach_h = altitude + (mid_v - 0.5) * 0.5 * beach_top * clump_fade;
+    let beach = vegetation * (1.0 - smoothstep(beach_top * 0.55, beach_top * 1.15, beach_h)) * step(-1.0, altitude) * (1.0 - 0.85 * smoothstep(30.0, 300.0, pixel));
+    // Behind it, grass that salt and wind keep pale and thin.
+    let dune = vegetation * planet.params.w * (1.0 - smoothstep(beach_top * 1.5, beach_top * 3.0, beach_h)) * step(0.0, altitude);
     let desert = vegetation * (1.0 - smoothstep(0.08, 0.22, moisture + (variety - 0.5) * 0.1 + (far_n.y - 0.5) * 0.15 * far)) * smoothstep(12.0, 22.0, temp_c);
     let sandy = saturate(beach + desert);
     col[M_SAND] = planet.colors[C_SAND].rgb;
@@ -1209,7 +1218,7 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     let clump = (mid_v - 0.5) * 2.0 * clump_fade + tuft * 0.5;
     let sward = (patch_v - 0.5) * 2.0 * macro_fade;
     let straw = planet.colors[C_DRY].rgb * 1.1;
-    var grass_col = mix(col[M_GRASS], straw, saturate(clump) * 0.45 + saturate(sward - 0.2) * 0.25);
+    var grass_col = mix(col[M_GRASS], straw, saturate(clump) * 0.45 + saturate(sward - 0.2) * 0.25 + dune * 0.45);
     grass_col *= (1.0 - saturate(-clump) * 0.35) * mix(vec3<f32>(1.0), vec3<f32>(0.88, 0.96, 1.05), saturate(-sward) * 0.5);
     // Hand-painted pasture (its tint sets one color) still lies across the land the way grass
     // grows: lusher and darker in hollows, sun-dried on crests and knolls, in drifts tens to
@@ -1506,15 +1515,53 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
 
     // ---- Open sea.
     let sea_depth = max(-altitude, 0.0);
-    let shallow = exp(-sea_depth / 25.0);
+    // The wind roughens the sea: the mean square slope of its waves (Cox and Munk 1954) sets
+    // how wide the sun's glitter spreads, and the waves it raises break higher on the shore.
+    let wind = min(length(frame.wind.xz), 20.0);
+    let slope_var = 0.003 + 0.00512 * wind;
+    let breaker = clamp(0.3 + 0.012 * wind * wind, 0.3, 2.5);
+    let wave_period = 6.0 + 0.3 * wind;
+    let coast_near = planet.params.w * (1.0 - smoothstep(8.0, 60.0, pixel));
     // Seen from high up, the shelf seas along the coasts are paler and greener, most of all
     // in warm water; cold seas are a deeper, greener blue than the subtropical ones.
     let shelf = exp(-sea_depth / 150.0) * far * (0.35 + 0.65 * smoothstep(5.0, 25.0, temp_c));
     let deep = mix(vec3<f32>(1.0), vec3<f32>(0.8, 1.05, 0.95), (1.0 - smoothstep(0.0, 20.0, temp_c)) * far);
-    var water = mix(planet.colors[C_OCEAN].rgb * deep, planet.colors[C_OCEAN].rgb * vec3(1.6, 3.2, 2.6), max(shallow * 0.7, shelf * 0.55));
+    let deep_col = planet.colors[C_OCEAN].rgb * deep;
+    // Water over the coastal shelf scatters more light back (silt, plankton) than the open
+    // ocean: paler and greener, least in warm, clear seas.
+    let warm = smoothstep(10.0, 22.0, temp_c);
+    let coastal = exp(-sea_depth / 25.0) * mix(0.7, 0.45, warm);
+    var water = mix(deep_col, deep_col * vec3(1.6, 3.2, 2.6), max(coastal, shelf * 0.55));
+    // That water takes the red out of the light within a few meters and the blue and green
+    // over tens: in the shallows the bed shows through it (sand, with dark beds of weed and
+    // rock), turquoise over sand. Light goes down and back up, on a slant. Warm seas are the
+    // clearest; cooler ones are greener and murkier.
+    let murk = mix(vec3<f32>(0.42, 0.13, 0.13), vec3<f32>(0.32, 0.07, 0.04), warm);
+    let through = exp(-murk * sea_depth * 2.5);
+    let weed = smoothstep(0.58, 0.75, patch_v + (detail_n - 0.5) * 0.25 * fine_fade) * macro_fade;
+    let bed = mix(planet.colors[C_SAND].rgb * 0.85, mix(planet.colors[C_ROCK].rgb * 0.35, planet.colors[C_LUSH].rgb * 0.3, 0.6), weed * 0.75);
+    water = mix(water, bed, through);
     let wave_fade = 1.0 - smoothstep(0.5, 8.0, pixel);
     var wave_n = normalize(mix(up, bump(up, dp1, dp2, dw1, dw2), wave_fade * 0.6));
     var sea_rough = mix(0.12, 0.05, wave_fade);
+    // The sun's glitter: the sun mirrored in every wave facet that tilts the right way, a lobe
+    // as wide as the waves are steep (added after shading, below; the surface itself stays
+    // glossy so the sky mirrors in it). Up close the waves drawn carry part of that slope;
+    // the rest is ripples smaller than a pixel. GGX's long tails spread a lobe more than the
+    // Beckmann one the slopes were measured with, so its width is taken a little lower.
+    var glitter_a = 0.7 * sqrt(mix(slope_var, max(slope_var - 0.012, 0.0025), wave_fade));
+    // Surf: the waves steepen and break where the water gets about as shallow as they are
+    // high, and their white water runs in to the shore in lines along it (lines of equal
+    // depth), each with a sharp front and a fading trail, broken into patches. Froth lines the
+    // water's edge. Where the lines get finer than a pixel they blend into their average.
+    let surf_depth = breaker * 1.3;
+    let line_phase = sea_depth / max(breaker * 0.45, 0.12) + frame.time.x / wave_period + (meadow_v - 0.5) * 3.0;
+    let line_f = fract(line_phase);
+    let surf_front = smoothstep(0.0, 0.05, line_f) * (1.0 - smoothstep(0.05, 0.6, line_f));
+    let broken = smoothstep(0.25, 0.65, detail_n + (mid_v - 0.5) * 0.5 * clump_fade);
+    let lines = mix(surf_front * broken, 0.2, smoothstep(0.3, 1.0, fwidth(line_phase)));
+    let froth = (1.0 - smoothstep(0.03, 0.08 + breaker * 0.1, sea_depth)) * (0.55 + 0.45 * broken);
+    var foam = saturate(lines * (1.0 - smoothstep(surf_depth * 0.6, surf_depth, sea_depth)) + froth) * coast_near;
     // Sea ice on cold seas: floes of snow-covered ice with dark leads of open water between
     // them, thinning out to drift ice at its edge.
     let ice_edge = -9.0 + (far_n.x - 0.5) * 6.0 + (macro_v - 0.5) * 3.0 * macro_fade;
@@ -1525,7 +1572,27 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
         water = mix(water, planet.colors[C_SNOW].rgb * (0.82 + 0.18 * far_n.x), cover);
         wave_n = normalize(mix(wave_n, up, cover));
         sea_rough = mix(sea_rough, 0.6, cover);
+        foam *= 1.0 - cover;
     }
+    // The beach the waves wash: dark wet sand up to where the biggest ones run, and the thin
+    // sheet of each wave sliding up it and back, glossy, with froth along its edge.
+    let runup = 0.2 + breaker * 0.6;
+    let shore_h = altitude + (detail_n - 0.5) * 0.06 * fine_fade;
+    let washed = (1.0 - smoothstep(runup * 0.8, runup * 1.2, shore_h)) * step(0.0, altitude) * coast_near * (1.0 - ocean);
+    let surge = runup * (0.45 + 0.4 * sin(6.2832 * (frame.time.x / wave_period + (meadow_v - 0.5) * 0.7)));
+    let swash = (1.0 - smoothstep(surge - 0.02, surge, shore_h)) * washed;
+    let swash_edge = smoothstep(surge - 0.06, surge - 0.015, shore_h) * swash * broken;
+    albedo = mix(albedo, albedo * 0.6, washed);
+    roughness = mix(roughness, 0.4, washed);
+    albedo = mix(albedo, mix(albedo * 0.7, water, 0.4), swash);
+    roughness = mix(roughness, 0.06, swash);
+    reflectance = mix(reflectance, 0.354, swash);
+    n = normalize(mix(n, up, swash));
+    albedo = mix(albedo, vec3<f32>(0.8, 0.82, 0.82), swash_edge * 0.8);
+    roughness = mix(roughness, 0.5, swash_edge);
+    water = mix(water, vec3<f32>(0.8, 0.82, 0.82), foam * 0.85);
+    wave_n = normalize(mix(wave_n, up, foam));
+    sea_rough = mix(sea_rough, 0.5, foam);
     albedo = mix(albedo, water, ocean);
     n = normalize(mix(n, wave_n, ocean));
     roughness = mix(roughness, sea_rough, ocean);
@@ -1584,6 +1651,16 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
         planet_lit = smoothstep(-dip - 0.015, -dip + 0.01, dot(up, to_sun));
     }
     var color = shade_surface_shadowed(s, in.rel, planet_lit);
+    let glitter = ocean * (1.0 - foam);
+    if (glitter > 0.0 && dot(n, to_sun) > 0.0 && planet_lit > 0.0) {
+        let v = normalize(-in.rel);
+        let h = normalize(to_sun + v);
+        let nl = saturate(dot(n, to_sun));
+        let nv = max(dot(n, v), 1e-3);
+        let spec = d_ggx(saturate(dot(n, h)), glitter_a) * v_smith_ggx_correlated(nv, nl, glitter_a)
+            * f_schlick(vec3<f32>(0.02), saturate(dot(v, h))) * nl;
+        color += pre_expose(frame.sun_color.rgb * sun_transmittance(in.rel) * shadow_factor(in.rel, n) * planet_lit * spec * glitter);
+    }
     // Snow glints: the sun mirrored in a crystal facet (a glossy GGX lobe; facets stacked in
     // the crystal reflect far more than one ice surface's 2 %).
     if (glint > 0.0 && dot(n, to_sun) > 0.0 && planet_lit > 0.0) {
