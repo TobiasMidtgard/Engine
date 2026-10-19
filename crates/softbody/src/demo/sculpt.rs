@@ -410,6 +410,9 @@ pub struct Sculpt {
     lofts: Vec<LoftData>,
     /// Skip parts beyond their bounds (off only to check that skipping changes nothing).
     cull: bool,
+    /// Scale of every bump added from now on (1 = as given; a statue's carving runs deeper
+    /// than a mannequin's).
+    pub relief: f32,
 }
 
 impl Default for Sculpt {
@@ -418,6 +421,7 @@ impl Default for Sculpt {
             parts: Vec::new(),
             lofts: Vec::new(),
             cull: true,
+            relief: 1.0,
         }
     }
 }
@@ -542,10 +546,10 @@ impl Sculpt {
     }
 
     /// Raise the surface by `height` meters (negative: sink it) at `center`, fading out
-    /// smoothly toward the ellipsoid `radii` (turned by `rot`).
+    /// smoothly toward the ellipsoid `radii` (turned by `rot`); scaled by [`Self::relief`].
     pub fn bump(&mut self, center: Vec3, radii: Vec3, rot: Quat, height: f32) {
         let (s, c, r) = Self::ellipsoid_shape(center, radii, rot);
-        self.push(Op::Bump(height), 0, 0.0, s, c, r);
+        self.push(Op::Bump(height * self.relief), 0, 0.0, s, c, r);
     }
 
     /// [`Self::bump`] centered where the surface built so far is nearest to `near`.

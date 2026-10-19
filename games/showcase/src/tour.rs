@@ -5,12 +5,17 @@
 use crate::camera;
 use crate::places::{Place, places};
 use engine::prelude::*;
+use engine::render::{RenderDisabled, Renderer};
 
 /// Frames to wait at each place before capturing (metered auto-exposure reads back a frame or
 /// two late, then adapts).
 const SETTLE_FRAMES: u32 = 8;
 /// Simulated seconds per tour frame.
 const STEP_SECS: f32 = 0.05;
+
+/// The renderer, parked while a stop with [`Place::quick_warmup`] warms up.
+#[derive(Resource)]
+struct Parked(Renderer);
 
 #[derive(Resource, Debug)]
 pub struct Tour {
@@ -52,6 +57,7 @@ fn run(world: &mut World) {
         let tour = world.resource::<Tour>();
         let Some(place) = tour.places.get(tour.index).cloned() else {
             // Done: give the last screenshot a frame to be written, then exit.
+            unpark(world);
             crate::places::leave(world);
             world.write_message(AppExit::Success);
             return;
@@ -85,6 +91,16 @@ fn run(world: &mut World) {
         engine::core::log::info!("tour {}/{}: {}", index + 1, total, place.name);
     }
 
+    // A quick warm-up runs without drawing, from after the arrival calls until the frames
+    // that settle the picture.
+    let settle_from = capture_at - SETTLE_FRAMES;
+    if place.quick_warmup && frames == crate::places::ARRIVE_DELAY + 2 && frames < settle_from {
+        park(world);
+    }
+    if frames == settle_from {
+        unpark(world);
+    }
+
     if frames == capture_at {
         let d = world.resource::<Diagnostics>();
         engine::core::log::info!(
@@ -101,5 +117,21 @@ fn run(world: &mut World) {
         world.resource_mut::<Screenshots>().request(path);
     } else {
         tour.frames += 1;
+    }
+}
+
+/// Take the renderer out of the world, so frames run the simulation only (as the module
+/// galleries do between pictures).
+fn park(world: &mut World) {
+    if let Some(renderer) = world.remove_resource::<Renderer>() {
+        world.insert_resource(Parked(renderer));
+        world.insert_resource(RenderDisabled("parked through a quick warm-up".into()));
+    }
+}
+
+fn unpark(world: &mut World) {
+    if let Some(Parked(renderer)) = world.remove_resource::<Parked>() {
+        world.remove_resource::<RenderDisabled>();
+        world.insert_resource(renderer);
     }
 }

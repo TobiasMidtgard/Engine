@@ -3,7 +3,8 @@
 //! A [`RenderFeature`] owns its GPU resources and hooks into fixed points of the frame:
 //!
 //! 1. `prepare` — read the world, cull, upload buffers (CPU side, `&mut World` access).
-//! 2. `compute` — record compute or offscreen passes (particles, simulation, clouds).
+//! 2. `compute` — record compute or offscreen passes (particles, simulation, clouds). A feature
+//!    that asked for the cloud shadow map ([`RenderFeature::cloud_shadows`]) draws it here.
 //! 3. `draw_environment` — draw into the sky environment map (ambient light + reflections).
 //! 4. `draw_shadow` — draw depth into one shadow cascade, or into the top-down sky occlusion
 //!    map when the index is [`SKY_OCCLUSION_VIEW`](crate::shadows::SKY_OCCLUSION_VIEW);
@@ -30,11 +31,15 @@
 use std::sync::Arc;
 
 use bevy_ecs::prelude::*;
+use engine_assets::{Assets, Handle};
 use engine_core::App;
 
+use crate::cloud_shadows::{CloudShadowRequest, CloudShadowTarget};
 use crate::frame::ViewData;
+use crate::image_cache::{ImageCache, ImageTexture};
 use crate::material_library::{MaterialLibrary, MaterialMaps, MaterialPreset, MaterialTextures};
 use crate::settings::RenderSettings;
+use crate::texture::Image;
 
 /// Shared types and pure functions (no bindings).
 pub const SHADER_LIB_TYPES: &str = include_str!("shaders/lib_types.wgsl");
@@ -90,6 +95,9 @@ pub struct GpuShared {
     pub features: wgpu::Features,
     /// Generated material textures (presets), built on first use and shared by every feature.
     pub materials: MaterialLibrary,
+    /// The renderer's uploaded [`Image`]s, shared by every feature (see
+    /// [`GpuShared::image_texture`] and [`crate::image_cache`]).
+    pub images: ImageCache,
 }
 
 impl GpuShared {
@@ -108,6 +116,27 @@ impl GpuShared {
     /// the views like any texture (base color is an sRGB view).
     pub fn material_textures(&self, preset: MaterialPreset, size: u32) -> Arc<MaterialTextures> {
         self.materials.get(self, preset, size)
+    }
+
+    /// The renderer's own GPU copy of an image asset, ready to bind: uploaded with its mip chain
+    /// the first time any feature asks for it and again when its asset gets new pixels, and
+    /// shared by every feature that asks (one upload per image and color space). `color`: the
+    /// slot holds color (base color, emissive), so an sRGB RGBA8 image is sampled through an sRGB
+    /// view; data slots (normal, metallic/roughness, occlusion, masks) pass false. `None` while
+    /// the image is still loading, or when it cannot be uploaded (invalid data, too large).
+    ///
+    /// Ask every frame the image is drawn (images nobody asks for in 600 frames leave the GPU),
+    /// and rebuild a bind group that binds [`ImageTexture::view`] when [`ImageTexture::id`]
+    /// changes. Use this rather than uploading `Image::data` yourself: with
+    /// `RenderSettings::release_image_pixels` the renderer frees the CPU pixels of images
+    /// uploaded here, and this keeps returning their texture.
+    pub fn image_texture(
+        &self,
+        images: &Assets<Image>,
+        handle: Handle<Image>,
+        color: bool,
+    ) -> Option<Arc<ImageTexture>> {
+        self.images.get(self, images, handle, color)
     }
 
     /// Copy a preset's maps back to the CPU (mip 0), generating them first if needed. Blocks
@@ -212,6 +241,12 @@ pub struct FrameContext<'a> {
     pub scene_depth_copy: &'a wgpu::TextureView,
     /// The final LDR image (overlays draw here).
     pub ldr: &'a wgpu::TextureView,
+    /// The cloud shadow map to draw into: set only in [`RenderFeature::compute`], and only for
+    /// the feature whose [`RenderFeature::cloud_shadows`] asked for it this frame (see
+    /// [`crate::cloud_shadows`]). It has been cleared to 1 (no shadow). During `compute`,
+    /// `frame_group` binds a white stand-in in its place (frame binding 22), so the pass that
+    /// draws the map can bind `frame_group` too.
+    pub cloud_shadows: Option<CloudShadowTarget<'a>>,
 }
 
 /// Counters a feature reports for `render.stats`.
@@ -252,6 +287,15 @@ pub trait RenderFeature: Send + Sync + 'static {
 
     /// Record compute or offscreen work before the scene is drawn.
     fn compute(&mut self, encoder: &mut wgpu::CommandEncoder, ctx: &FrameContext) {}
+
+    /// The cloud shadow map this feature draws this frame, if any (the weather module's clouds;
+    /// see [`crate::cloud_shadows`]). Called every frame after `prepare`. When it returns a
+    /// request, `compute` gets the map, placed around the camera, in `ctx.cloud_shadows`, and
+    /// everything the sun lights is shaded by it. The first feature (in `order`) that asks
+    /// gets it. Nothing asks by default: the map stays 1 and costs nothing.
+    fn cloud_shadows(&self) -> Option<CloudShadowRequest> {
+        None
+    }
 
     /// Draw into the environment map (equirectangular, radiance not pre-exposed).
     fn draw_environment(&self, pass: &mut wgpu::RenderPass<'_>, ctx: &FrameContext) {}

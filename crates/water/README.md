@@ -69,7 +69,10 @@ Screenshots from several viewpoints, without a window:
 cargo run -p engine_water --example water_gallery --release -- <out_dir> [seconds] [views]
 ```
 
-Views: overview, falls, shore, under, pond, wake, aerial.
+Views: overview, falls, shore, under, pond, wake, aerial, ditch.
+
+To try shader changes without rebuilding, point `ENGINE_WATER_SHADER` at a copy of
+`src/render/water.wgsl`; the gallery and the showcase then load the shader from that file.
 
 ## Contracts
 

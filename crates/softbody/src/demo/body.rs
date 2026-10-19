@@ -210,9 +210,30 @@ pub fn dog_bind() -> Vec<BonePose> {
 /// and glutes over it, one lofted piece per limb with deltoids, calves and kneecaps, a
 /// stylized head (brow, nose, lips, jaw, simplified ears) and relaxed hands and feet.
 pub fn human_sculpt() -> Sculpt {
+    human_figure(false)
+}
+
+/// How much deeper a statue's muscles and features are carved than the mannequin's.
+const STATUE_RELIEF: f32 = 1.8;
+
+/// The mannequin's body carved as a marble statue of a young athlete: every muscle and
+/// feature cut deeper, and the anatomy a sculptor adds: the six panels of the abdomen, the
+/// flanks over the hip bones and the groove below them, the ribs under the chest, biceps,
+/// triceps, the heads of the thigh, the shin muscle, and open eyes with carved irises.
+pub fn statue_sculpt() -> Sculpt {
+    human_figure(true)
+}
+
+fn human_figure(statue: bool) -> Sculpt {
     let mut s = Sculpt::new();
+    if statue {
+        s.relief = STATUE_RELIEF;
+    }
     human_torso(&mut s);
-    human_head(&mut s);
+    human_head(&mut s, statue);
+    if statue {
+        statue_torso(&mut s);
+    }
     // Each limb blends into the torso but never into the other limb.
     s.group(0.03, |s| {
         for side in [-1.0f32, 1.0] {
@@ -224,10 +245,96 @@ pub fn human_sculpt() -> Sculpt {
             s.group(0.0, |s| human_leg(s, side));
         }
     });
+    if statue {
+        for side in [-1.0f32, 1.0] {
+            statue_limbs(&mut s, side);
+        }
+    }
     // Flat soles.
     let sole = human_bind()[Human::LEG_L + 2].translation.y - Human::ANKLE_HEIGHT;
     s.clip(0.004, Vec3::NEG_Y, -sole);
     s
+}
+
+/// The statue's carving on the trunk (before the limbs are joined on).
+fn statue_torso(s: &mut Sculpt) {
+    let v = Vec3::new;
+    let id = Quat::IDENTITY;
+    let rz = Quat::from_rotation_z;
+    // The groove down the middle of the abdomen.
+    s.bump_surface(v(0.0, 1.17, -0.11), v(0.01, 0.13, 0.04), id, -0.0015);
+    for side in [-1.0f32, 1.0] {
+        let m = |x: f32, y: f32, z: f32| v(x * side, y, z);
+        let q = |r: Quat| mirror(r, side);
+        // The abdomen's long muscle, crossed by three shallow tendons into panels.
+        s.bump_surface(m(0.034, 1.17, -0.11), v(0.036, 0.15, 0.04), id, 0.0022);
+        for (y, w) in [(1.252, 0.028), (1.19, 0.03), (1.124, 0.031)] {
+            s.bump_surface(m(0.033, y, -0.11), v(w, 0.009, 0.035), id, -0.0009);
+        }
+        // The flank over the hip bone, and the groove below it running down toward the
+        // groin.
+        s.bump_surface(
+            m(0.128, 1.02, -0.055),
+            v(0.04, 0.05, 0.06),
+            q(rz(0.2)),
+            0.0045,
+        );
+        s.bump_surface(
+            m(0.09, 0.985, -0.1),
+            v(0.065, 0.007, 0.05),
+            q(rz(0.85)),
+            -0.0026,
+        );
+        // The ribs showing under the side of the chest, and the crease under the pectoral.
+        for k in 0..3 {
+            let k = k as f32;
+            s.bump_surface(
+                m(0.148 - 0.006 * k, 1.325 - 0.034 * k, -0.065 + 0.006 * k),
+                v(0.024, 0.011, 0.03),
+                q(rz(-0.5)),
+                0.0011,
+            );
+        }
+        s.bump_surface(
+            m(0.09, 1.322, -0.115),
+            v(0.07, 0.007, 0.04),
+            q(rz(0.32)),
+            -0.0016,
+        );
+    }
+}
+
+/// The statue's carving on one arm and one leg.
+fn statue_limbs(s: &mut Sculpt, side: f32) {
+    let v = Vec3::new;
+    let id = Quat::IDENTITY;
+    let bind = human_bind();
+    let (arm, leg) = if side < 0.0 {
+        (Human::ARM_L, Human::LEG_L)
+    } else {
+        (Human::ARM_R, Human::LEG_R)
+    };
+    let (sh, ru) = (bind[arm].translation, bind[arm].rotation);
+    let (el, rf) = (bind[arm + 1].translation, bind[arm + 1].rotation);
+    let lu = |x: f32, y: f32, z: f32| sh + ru * v(x * side, y, z);
+    let lf = |x: f32, y: f32, z: f32| el + rf * v(x * side, y, z);
+    let qu = |r: Quat| ru * mirror(r, side);
+    let qf = |r: Quat| rf * mirror(r, side);
+    // Biceps in front, triceps behind, the flexors under the forearm.
+    s.bump_surface(lu(0.0, -0.15, -0.035), v(0.028, 0.07, 0.03), qu(id), 0.0035);
+    s.bump_surface(lu(0.005, -0.13, 0.035), v(0.03, 0.075, 0.03), qu(id), 0.003);
+    s.bump_surface(
+        lf(-0.01, -0.07, 0.025),
+        v(0.025, 0.07, 0.03),
+        qf(id),
+        0.0025,
+    );
+    // The front and outer heads of the thigh, and the muscle down the front of the shin.
+    let knee = bind[leg + 1].translation;
+    let m = |x: f32, y: f32, z: f32| knee + v(x * side, y, z);
+    s.bump_surface(m(0.0, 0.24, -0.08), v(0.034, 0.12, 0.03), id, 0.003);
+    s.bump_surface(m(0.058, 0.17, -0.03), v(0.03, 0.13, 0.04), id, 0.003);
+    s.bump_surface(m(0.022, -0.15, -0.045), v(0.016, 0.09, 0.02), id, 0.002);
 }
 
 fn human_torso(s: &mut Sculpt) {
@@ -314,13 +421,17 @@ fn human_torso(s: &mut Sculpt) {
         );
         // Columns of the lower back.
         s.bump_surface(m(0.035, 1.12, 0.08), v(0.03, 0.13, 0.05), id, 0.006);
-        // Collarbones, from the notch to the shoulder.
+        // Collarbones, from the notch to the shoulder (no deeper on a statue: a thin ridge
+        // carved deep reads as a seam).
+        let relief = s.relief;
+        s.relief = relief.min(1.2);
         s.bump_surface(
             m(0.085, 1.497, -0.07),
             v(0.075, 0.011, 0.03),
             q(ry(-0.29)),
             0.0035,
         );
+        s.relief = relief;
         // Glutes.
         s.bump_surface(
             m(0.068, 0.895, 0.11),
@@ -367,7 +478,7 @@ fn human_torso(s: &mut Sculpt) {
     }
 }
 
-fn human_head(s: &mut Sculpt) {
+fn human_head(s: &mut Sculpt, statue: bool) {
     let v = Vec3::new;
     let id = Quat::IDENTITY;
     let head = Human::HEAD_I as u8;
@@ -425,9 +536,18 @@ fn human_head(s: &mut Sculpt) {
         // Features laid on the face.
         for side in [-1.0f32, 1.0] {
             let m = |x: f32, y: f32, z: f32| v(x * side, y, z);
-            // Eye sockets, closed almond lids in them.
+            // Eye sockets, closed almond lids in them; a statue's eyes are open: the ball
+            // under a heavier upper lid, a lower lid, and a carved iris and pupil.
             s.bump_surface(m(0.032, 1.711, -0.1), v(0.025, 0.018, 0.03), id, -0.005);
-            s.bump_surface(m(0.032, 1.7125, -0.1), v(0.017, 0.011, 0.03), id, 0.0042);
+            if statue {
+                s.bump_surface(m(0.032, 1.711, -0.1), v(0.015, 0.0095, 0.03), id, 0.0028);
+                s.bump_surface(m(0.031, 1.7195, -0.1), v(0.017, 0.0035, 0.03), id, 0.0012);
+                s.bump_surface(m(0.032, 1.7035, -0.1), v(0.014, 0.0025, 0.03), id, 0.0006);
+                s.bump_surface(m(0.031, 1.711, -0.1), v(0.0055, 0.0055, 0.03), id, -0.0005);
+                s.bump_surface(m(0.031, 1.711, -0.1), v(0.0022, 0.0022, 0.03), id, -0.0007);
+            } else {
+                s.bump_surface(m(0.032, 1.7125, -0.1), v(0.017, 0.011, 0.03), id, 0.0042);
+            }
             // Cheekbones, the wings of the nose, the bowl of the ear.
             s.bump_surface(m(0.05, 1.69, -0.08), v(0.026, 0.016, 0.03), id, 0.004);
             s.bump_surface(m(0.0125, 1.667, -0.1), v(0.009, 0.0085, 0.012), id, 0.0035);
@@ -1048,6 +1168,8 @@ pub const DOG_EYE_RADIUS: f32 = 0.0125;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum BodyPart {
     Mannequin,
+    /// The mannequin carved as a statue ([`statue_sculpt`]).
+    Statue,
     Dog,
     DogNose,
     DogEyes,
@@ -1098,8 +1220,13 @@ impl Default for BodyQuality {
 pub fn build(part: BodyPart, quality: BodyQuality) -> SkinTemplate {
     let q = quality.0.max(0.1);
     match part {
-        BodyPart::Mannequin => {
-            let mesh = human_sculpt().mesh(&MeshSettings {
+        BodyPart::Mannequin | BodyPart::Statue => {
+            let sculpt = if part == BodyPart::Statue {
+                statue_sculpt()
+            } else {
+                human_sculpt()
+            };
+            let mesh = sculpt.mesh(&MeshSettings {
                 cell: 0.0034 * q,
                 target_triangles: (90_000.0 / (q * q)) as usize,
                 max_edge: 0.022 * q,

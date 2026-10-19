@@ -1,7 +1,8 @@
 // ============================================================================
 // Particle drawing. Composed as lib_types + lib_frame + particles_common + this.
 //
-// One instance per pool slot (triangle strip of 4 vertices); dead slots collapse to nothing.
+// One instance per pool slot (triangle strip of 4 vertices), in the order `cs_sort` left in
+// `order` (far to near within each layer); dead slots collapse to nothing.
 // Sprites are procedural, so there are no textures to load. Output is premultiplied:
 // `additive` 0 blends like a normal transparent surface, 1 only adds light.
 // ============================================================================
@@ -10,6 +11,7 @@
 @group(1) @binding(1) var<storage, read> emitters: array<Emitter>;
 @group(1) @binding(2) var scene_depth: texture_depth_2d;
 @group(1) @binding(3) var scene_color: texture_2d<f32>; // HDR, pre-exposed (heat haze)
+@group(1) @binding(4) var<storage, read> order: array<u32>;
 
 struct VsOut {
     @builtin(position) position: vec4<f32>,
@@ -37,8 +39,8 @@ fn hidden() -> VsOut {
 }
 
 @vertex
-fn vs_particle(@builtin(vertex_index) vi: u32, @builtin(instance_index) slot: u32) -> VsOut {
-    let p = particles[slot];
+fn vs_particle(@builtin(vertex_index) vi: u32, @builtin(instance_index) instance: u32) -> VsOut {
+    let p = particles[order[instance]];
     if (p.age >= p.life) { return hidden(); }
     let e = emitters[p.emitter];
     let t = p.age / p.life;

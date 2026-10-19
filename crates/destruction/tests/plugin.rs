@@ -9,8 +9,8 @@ use engine_core::time::TimeSource;
 use engine_destruction::*;
 use engine_render::{Mesh, StandardMaterial};
 use engine_world::physics::{
-    CharacterController, Collider, ColliderShape, PhysicsBackend, PhysicsQueries, PhysicsQuery,
-    QueryFilter, RigidBody,
+    BodyKind, CharacterController, Collider, ColliderShape, PhysicsBackend, PhysicsQueries,
+    PhysicsQuery, QueryFilter, RigidBody,
 };
 use engine_world::{
     DamageEvent, DamageKind, EditOp, EditShape, ProjectileTrace, SurfaceMaterials, TerrainEdit,
@@ -545,6 +545,21 @@ fn the_breach_house_roof_is_breached_from_below_and_above_every_cycle() {
     let hatch = wall(&mut app, "Wooden hatch");
     let steel = wall(&mut app, "Steel hatch");
     let bay2 = wall(&mut app, "Breach house roof bay 2");
+    // Both hatch ladders can be climbed, from a step off the floor up to the deck behind them.
+    let ladders: Vec<_> = app
+        .world
+        .query::<(&engine_world::Climbable, &GlobalTransform)>()
+        .iter(&app.world)
+        .map(|(c, gt)| c.in_world(gt))
+        .collect();
+    assert_eq!(ladders.len(), 2);
+    for l in &ladders {
+        assert!((l.bottom.y - 0.27).abs() < 0.02, "{l:?}");
+        assert!(l.top.y > 2.9 && l.top.y < l.exit.y, "{l:?}");
+        assert!((l.exit.y - 3.29).abs() < 0.02, "onto the deck: {l:?}");
+        assert!(l.exit.z < l.top.z - 0.4, "over the header behind it: {l:?}");
+        assert!(l.facing.distance(Vec3::NEG_Z) < 1e-4, "{l:?}");
+    }
     assert!(
         integrity(&app, old) < 0.995,
         "the west bay starts shot up ({})",
@@ -966,8 +981,12 @@ fn doors_hang_in_doorways_swing_away_from_you_and_fall_with_them() {
         .get::<door::HungDoor>(frame)
         .expect("a door hangs in the doorway")
         .0;
-    // Shut, a box fills the opening; it has no body, so the backend moves it with the door.
-    assert!(app.world.get::<RigidBody>(door).is_none());
+    // Shut, a box fills the opening; the door is a kinematic body moved by its Transform, so
+    // it shoves what it swings into.
+    assert_eq!(
+        app.world.get::<RigidBody>(door).map(|b| b.kind),
+        Some(BodyKind::Kinematic)
+    );
     let Some(Collider {
         shape: ColliderShape::Cuboid { half_extents },
         ..
@@ -1037,8 +1056,9 @@ fn doors_hang_in_doorways_swing_away_from_you_and_fall_with_them() {
     let d = *app.world.get::<Door>(high_door).unwrap();
     assert!(d.loose && d.open == 0.0, "{d:?}");
     assert!(
-        app.world.get::<Collider>(high_door).is_none(),
-        "the door rides its doorway down, no collider of its own"
+        app.world.get::<Collider>(high_door).is_none()
+            && app.world.get::<RigidBody>(high_door).is_none(),
+        "the door rides its doorway down, no body of its own"
     );
     // Taken down, a doorway takes its door with it.
     app.world.despawn(frame);

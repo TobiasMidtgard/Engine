@@ -32,7 +32,7 @@ use bevy_ecs::world::CommandQueue;
 use engine_core::math::{DVec3, Quat, Rng, Vec2, Vec3};
 use engine_core::prelude::*;
 use engine_render::{MeshRenderer, Shape, StandardMaterial};
-use engine_world::{EditOp, EditShape, ProjectileTrace, TerrainEdit, WorldImpulse};
+use engine_world::{Climbable, EditOp, EditShape, ProjectileTrace, TerrainEdit, WorldImpulse};
 
 use crate::DemoView;
 use crate::architecture::TowerTop;
@@ -41,7 +41,7 @@ use crate::debris::{Debris, PendingDebris, settle};
 use crate::dress::{ArchKind, ArchModel, GravelPad, PropModel};
 use crate::hits::{Hit, HitQueue};
 use crate::material::{DestructibleMaterial, linear};
-use crate::props::PropKind;
+use crate::props::{self, PropKind};
 use crate::structure::{Fracturable, FractureShape, ShowSupport, StructuralPiece};
 use crate::voxel::VoxelVolume;
 use crate::wall::{DestructibleWall, WallAnchors, WallState};
@@ -964,14 +964,22 @@ fn spawn_breach_house(commands: &mut Commands, o: DVec3) -> House {
                 0.0,
             );
         }
-        // The ladder hangs off the back header, its brackets bolted to its face.
+        // The ladder hangs off the back header, its brackets bolted to its face. It is climbed
+        // facing the header and stepped off over it onto the deck.
         let ladder_h = 3.18;
-        model(
+        let ladder_at = at(hx, 0.02 + ladder_h as f64 * 0.5, hz - half + 0.05 + 0.12);
+        let ladder = model(
             commands,
             PropKind::SteelLadder { height: ladder_h },
             k as u64,
-            at(hx, 0.02 + ladder_h as f64 * 0.5, hz - half + 0.05 + 0.12),
+            ladder_at,
             0.0,
+        );
+        let (low, high) = props::ladder_rungs(ladder_h);
+        let feet = |y: f32| Vec3::new(0.0, y - ladder_h * 0.5, props::LADDER_STILE_Z + 0.05);
+        let deck = at(hx, JOIST_TOP + DECK_T as f64, hz - half - 0.35) - ladder_at;
+        commands.entity(ladder).insert(
+            Climbable::ladder(feet(low), feet(high), Vec3::NEG_Z).with_exit(deck.as_vec3()),
         );
     }
     // The roof deck: one board panel per bay, the hatch openings left out.
@@ -1041,6 +1049,57 @@ fn spawn_breach_house(commands: &mut Commands, o: DVec3) -> House {
         5,
         at(0.0, deck_top * 0.5, -3.57),
         FRAC_PI_2,
+    );
+    // Guard railings round the roof, open at the stair's head, and up the stair's open side.
+    let rail = |length: f32, rise: f32, side_mount: bool| {
+        let kind = PropKind::PipeRailing {
+            length,
+            rise,
+            side_mount,
+        };
+        (
+            kind,
+            props::pipe_railing_foot(length, rise, side_mount) as f64,
+        )
+    };
+    let edge = 0.1;
+    let (px, pz) = (3.42 - edge, DECK_FRONT - edge);
+    let back = DECK_FRONT - DECK_LEN as f64 + edge;
+    let flange = 0.065;
+    let gap = 0.3;
+    let side_len = pz - gap - back;
+    let back_x0 = -1.75;
+    let back_x1 = px - gap;
+    for (k, (length, x, z, yaw)) in [
+        (2.0 * px, 0.0, pz, PI),
+        (side_len, px, back + side_len * 0.5, -FRAC_PI_2),
+        (side_len, -px, back + side_len * 0.5, FRAC_PI_2),
+        (back_x1 - back_x0, (back_x0 + back_x1) * 0.5, back, 0.0),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let (kind, foot) = rail(length as f32 + 2.0 * flange, 0.0, false);
+        model(
+            commands,
+            kind,
+            90 + k as u64,
+            at(x, deck_top - foot, z),
+            yaw,
+        );
+    }
+    // The stair's: palms bolted to its outer stringer, climbing west with it.
+    let (kind, foot) = rail(5.0, deck_top as f32, true);
+    model(
+        commands,
+        kind,
+        94,
+        at(
+            0.0,
+            deck_top * 0.5 - foot,
+            -4.07 - props::RAIL_PALM_BACK as f64,
+        ),
+        PI,
     );
     House {
         roof: vec![bays[2], bays[3]],
