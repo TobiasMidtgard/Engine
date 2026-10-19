@@ -47,7 +47,12 @@ from inside. They sit in the atmosphere (aerial perspective, distance haze, and 
 fog in front of them out to any distance, so fogged hills fade into the sky instead of ending in
 a wall), cast grey rain shafts under distant showers, wrap around mountains and the camera when
 it flies through them, and are visible from above (a sea of clouds from a plane or a mountain).
-They also feed the environment map, so reflections and ambient light change with the sky.
+They also feed the environment map, so reflections and ambient light change with the sky, and
+cast shadows: every frame they draw the renderer's cloud shadow map (512² texels over 48 km
+around the camera, `CloudSettings::cloud_shadows`), so fair-weather cumulus dapple the valley
+and the mountains, a storm's shelf darkens the land before it arrives, and the volumetric fog
+under a cloud loses its sunbeams. The map holds the sunlight relative to the dimming the sun
+already gets under thick overcast at the player, so a deck isn't darkened twice.
 
 **Rain and snow.** Rain streaks with motion blur that catch the light of lamps behind them,
 splashes on the ground and on roofs, snowflakes that flutter; all generated on the GPU (no CPU
@@ -163,7 +168,8 @@ environment map), `weather precipitation` (rain, snow, splashes, bolts) and `wea
 
 ## Known gaps
 
-- Clouds don't yet cast shadows on the ground (the renderer's hook is on its way).
+- Under thick overcast the sun is dimmed as a whole, so a break in the deck lets through no
+  more than that dimmed sun (the renderer's cloud shadows can only darken).
 
 While the clouds are on, the renderer's own flat cloud layer is switched off
 (`RenderSettings::sky_cloud_layer`), so with `replace_sky` off the clouds blend over a clear
