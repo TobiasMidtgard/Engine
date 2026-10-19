@@ -13,13 +13,18 @@
 //! a camera cut it snaps. `Diagnostics` reports the focus distance as `render.dof_focus_m` (read
 //! back a frame or two later).
 //!
-//! It runs after TAA and before bloom and tonemapping (see `shaders/depth_of_field.wgsl` for
-//! the passes): TAA's history and the previous frame's image that reflections and bounce light
-//! read stay sharp; the input is already anti-aliased and temporally stable, so the gather can
-//! use a fixed sample pattern and needs no history of its own; the fog is part of the radiance
-//! that reaches the lens, so it is blurred with what it covers; bloom (glare inside the lens)
-//! spreads around the defocused image, as in a camera; and working on linear pre-exposed HDR
-//! keeps the energy of small bright lights, which open into bright discs.
+//! It runs on the scene before TAA, and before bloom and tonemapping (see
+//! `shaders/depth_of_field.wgsl` for the passes). The circle of confusion comes from this
+//! frame's depth, which TAA's jitter moves by a fraction of a pixel every frame: on TAA's
+//! resolved image a silhouette between something in focus and a blurred background would flip
+//! between sharp and blurred from one frame to the next. Before TAA, color and depth agree, and
+//! TAA anti-aliases the silhouettes of the defocused image and smooths what is left of the
+//! gather's sample pattern like any other detail. The fog is part of the radiance that reaches
+//! the lens, so it is blurred with what it covers; bloom (glare inside the lens) spreads around
+//! the defocused image, as in a camera; and working on linear pre-exposed HDR keeps the energy
+//! of small bright lights, which open into bright discs. What the order costs: next frame's
+//! reflections and bounce light, which read the finished image, see it defocused (much as the
+//! lens sees the reflection of a defocused background anyway).
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, Ordering};
@@ -189,6 +194,7 @@ pub(crate) struct DofPass {
     dilate: wgpu::RenderPipeline,
     prefilter: wgpu::RenderPipeline,
     gather: wgpu::RenderPipeline,
+    postfilter: wgpu::RenderPipeline,
     composite: wgpu::RenderPipeline,
     /// The focus (diopters) carried between frames, and this frame's.
     focus_state: Tex,
@@ -217,7 +223,7 @@ struct DofTargets {
     near: Tex,
     tiles: Tex,
     dilated: Tex,
-    groups: [wgpu::BindGroup; 7],
+    groups: [wgpu::BindGroup; 8],
 }
 
 impl DofPass {
@@ -282,6 +288,7 @@ impl DofPass {
         let dilate = pipeline("dof dilate", "fs_dilate", &[TILE_FORMAT]);
         let prefilter = pipeline("dof prefilter", "fs_prefilter", &[half]);
         let gather = pipeline("dof gather", "fs_gather", &[half, half]);
+        let postfilter = pipeline("dof postfilter", "fs_postfilter", &[half, half]);
         let composite = pipeline("dof composite", "fs_composite", &[shared.formats.hdr]);
         let params = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("dof params"),
@@ -326,6 +333,7 @@ impl DofPass {
             dilate,
             prefilter,
             gather,
+            postfilter,
             composite,
             focus_state,
             focus_next,
@@ -464,29 +472,50 @@ impl DofPass {
             &t.groups[4],
             &t.pre.view,
         );
-        {
-            let clear = wgpu::Operations {
-                load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
-                store: wgpu::StoreOp::Store,
-            };
+        // Both fields at once, then both filtered back into `half` and `pre`.
+        let fields = |encoder: &mut wgpu::CommandEncoder,
+                      label: &str,
+                      pipeline: &wgpu::RenderPipeline,
+                      group: &wgpu::BindGroup,
+                      far: &wgpu::TextureView,
+                      near: &wgpu::TextureView| {
             let attachment = |view| {
                 Some(wgpu::RenderPassColorAttachment {
                     view,
                     depth_slice: None,
                     resolve_target: None,
-                    ops: clear,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                        store: wgpu::StoreOp::Store,
+                    },
                 })
             };
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("dof gather"),
-                color_attachments: &[attachment(&t.far.view), attachment(&t.near.view)],
+                label: Some(label),
+                color_attachments: &[attachment(far), attachment(near)],
                 ..Default::default()
             });
-            pass.set_pipeline(&self.gather);
-            pass.set_bind_group(0, &t.groups[5], &[]);
+            pass.set_pipeline(pipeline);
+            pass.set_bind_group(0, group, &[]);
             pass.draw(0..3, 0..1);
-        }
-        pass(encoder, "dof composite", &self.composite, &t.groups[6], out);
+        };
+        fields(
+            encoder,
+            "dof gather",
+            &self.gather,
+            &t.groups[5],
+            &t.far.view,
+            &t.near.view,
+        );
+        fields(
+            encoder,
+            "dof postfilter",
+            &self.postfilter,
+            &t.groups[6],
+            &t.half.view,
+            &t.pre.view,
+        );
+        pass(encoder, "dof composite", &self.composite, &t.groups[7], out);
         self.read_back_focus(encoder);
     }
 
@@ -631,7 +660,9 @@ impl DofTargets {
             group("dof dilate", &tiles, &pre, &pre),
             group("dof prefilter", &half, &dilated, &far),
             group("dof gather", &pre, &dilated, &half),
-            group("dof composite", scene, &far, &near),
+            group("dof postfilter", &far, &near, &dilated),
+            // The filtered fields: far in `half`, near in `pre`.
+            group("dof composite", scene, &half, &pre),
         ];
         Self {
             size: (w, h),

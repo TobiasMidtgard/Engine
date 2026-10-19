@@ -125,18 +125,8 @@ struct MotionBlurTargets {
     velocity: Tex,
     tiles: Tex,
     neighbors: Tex,
-    /// Velocity, tiles, neighbors.
-    groups: [wgpu::BindGroup; 3],
-    /// Gathers reading `targets.hdr` and reading the scratch target.
-    gather_hdr: wgpu::BindGroup,
-    gather_scratch: wgpu::BindGroup,
-}
-
-/// Which image the gather reads.
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub(crate) enum BlurSource {
-    Hdr,
-    Scratch,
+    /// Velocity, tiles, neighbors, gather.
+    groups: [wgpu::BindGroup; 4],
 }
 
 impl MotionBlurPass {
@@ -228,19 +218,16 @@ impl MotionBlurPass {
         self.targets = None;
     }
 
-    /// Record motion blur of `source` into `out` (`scratch` is the post chain's scratch target,
-    /// the other image besides `targets.hdr`).
+    /// Record motion blur of `targets.hdr` into `out`.
     #[allow(clippy::too_many_arguments)]
     pub fn encode(
         &mut self,
         shared: &GpuShared,
         targets: &Targets,
-        scratch: &Tex,
         encoder: &mut wgpu::CommandEncoder,
         view: &ViewData,
         settings: &MotionBlur,
         real_dt: f32,
-        source: BlurSource,
         out: &wgpu::TextureView,
     ) {
         let size = (targets.width, targets.height);
@@ -248,7 +235,6 @@ impl MotionBlurPass {
             self.targets = Some(MotionBlurTargets::new(
                 shared,
                 targets,
-                scratch,
                 &self.layout,
                 &self.params,
             ));
@@ -297,14 +283,10 @@ impl MotionBlurPass {
                 &t.neighbors.view,
             ),
         ];
-        let gather = match source {
-            BlurSource::Hdr => &t.gather_hdr,
-            BlurSource::Scratch => &t.gather_scratch,
-        };
         for (label, pipeline, group, target) in
             passes
                 .into_iter()
-                .chain([("motion blur gather", &self.gather, gather, out)])
+                .chain([("motion blur gather", &self.gather, &t.groups[3], out)])
         {
             let mut pass = fullscreen_pass(encoder, label, target, true);
             pass.set_pipeline(pipeline);
@@ -318,7 +300,6 @@ impl MotionBlurTargets {
     fn new(
         shared: &GpuShared,
         targets: &Targets,
-        scratch: &Tex,
         layout: &wgpu::BindGroupLayout,
         params: &wgpu::Buffer,
     ) -> Self {
@@ -372,17 +353,14 @@ impl MotionBlurTargets {
             group("motion blur velocity", &targets.hdr, &tiles, &neighbors),
             group("motion blur tiles", &targets.hdr, &velocity, &neighbors),
             group("motion blur neighbors", &targets.hdr, &tiles, &velocity),
+            group("motion blur gather", &targets.hdr, &velocity, &neighbors),
         ];
-        let gather_hdr = group("motion blur gather", &targets.hdr, &velocity, &neighbors);
-        let gather_scratch = group("motion blur gather", scratch, &velocity, &neighbors);
         Self {
             size: (w, h),
             velocity,
             tiles,
             neighbors,
             groups,
-            gather_hdr,
-            gather_scratch,
         }
     }
 }

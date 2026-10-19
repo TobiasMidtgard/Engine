@@ -3,7 +3,7 @@
 //! ```text
 //! prepare (features read the world) → compute → environment map (+ filters) → shadow cascades
 //! → prepass → volumetric fog → AO, reflections, bounce light → scene pass [opaque → sky]
-//! → (scene copies) → transparent pass → TAA → depth of field → motion blur → bloom
+//! → (scene copies) → transparent pass → depth of field → TAA → motion blur → bloom
 //! → tonemap to LDR → overlays (UI)
 //! → screenshot readback → blit to window
 //! ```
@@ -1142,6 +1142,16 @@ impl Renderer {
             }
         }
 
+        // Depth of field, on the scene before TAA (see depth_of_field.rs).
+        self.lens.encode_depth_of_field(
+            &self.shared,
+            &self.targets,
+            &mut encoder,
+            &view,
+            lens_settings.0.as_ref(),
+            real_dt,
+        );
+
         // Temporal anti-aliasing (writes the resolved image back into the HDR target). Either
         // way the finished image is kept for next frame's reflections and bounce light.
         if taa {
@@ -1166,14 +1176,13 @@ impl Renderer {
             view.exposure,
         );
 
-        // Depth of field, then motion blur: on the anti-aliased, pre-exposed HDR image, before
-        // bloom and tonemapping (see depth_of_field.rs and motion_blur.rs).
-        self.lens.encode(
+        // Motion blur: on the anti-aliased, pre-exposed HDR image, before bloom and tonemapping
+        // (see motion_blur.rs).
+        self.lens.encode_motion_blur(
             &self.shared,
             &self.targets,
             &mut encoder,
             &view,
-            lens_settings.0.as_ref(),
             lens_settings.1.as_ref(),
             real_dt,
         );

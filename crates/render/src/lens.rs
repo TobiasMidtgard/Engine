@@ -1,12 +1,13 @@
-//! The camera's lens effects on the finished HDR image: depth of field, then motion blur (after
-//! TAA, before bloom and tonemapping; see [`crate::depth_of_field`] and [`crate::motion_blur`]
-//! for why there). Both are off unless the active camera has the component; their GPU resources
-//! are created the first time a camera uses them.
+//! The camera's lens effects on the HDR image: depth of field on the scene before TAA, motion
+//! blur on the anti-aliased image after it, both before bloom and tonemapping (see
+//! [`crate::depth_of_field`] and [`crate::motion_blur`] for why there). Both are off unless the
+//! active camera has the component; their GPU resources are created the first time a camera
+//! uses them.
 
 use crate::depth_of_field::{DepthOfField, DofPass};
 use crate::features::GpuShared;
 use crate::frame::ViewData;
-use crate::motion_blur::{BlurSource, MotionBlur, MotionBlurPass};
+use crate::motion_blur::{MotionBlur, MotionBlurPass};
 use crate::targets::{Targets, Tex};
 
 #[derive(Default)]
@@ -29,30 +30,7 @@ impl LensEffects {
         }
     }
 
-    /// Record the effects the camera asks for, leaving the result in `targets.hdr`. Motion blur
-    /// is skipped when the previous frame is not this view's (`view.history_valid`), and depth
-    /// of field for orthographic cameras.
-    #[allow(clippy::too_many_arguments)]
-    pub fn encode(
-        &mut self,
-        shared: &GpuShared,
-        targets: &Targets,
-        encoder: &mut wgpu::CommandEncoder,
-        view: &ViewData,
-        dof: Option<&DepthOfField>,
-        motion_blur: Option<&MotionBlur>,
-        real_dt: f32,
-    ) {
-        let dof = dof.filter(|_| !view.orthographic);
-        let motion_blur = motion_blur.filter(|m| view.history_valid && m.shutter_fraction > 0.0);
-        if dof.is_none()
-            && let Some(pass) = &mut self.dof
-        {
-            pass.skip();
-        }
-        if dof.is_none() && motion_blur.is_none() {
-            return;
-        }
+    fn scratch(&mut self, shared: &GpuShared, targets: &Targets) -> &Tex {
         if self
             .scratch
             .as_ref()
@@ -68,47 +46,67 @@ impl LensEffects {
                 U::RENDER_ATTACHMENT | U::TEXTURE_BINDING | U::COPY_SRC,
             ));
         }
+        self.scratch.as_ref().expect("scratch target")
+    }
+
+    /// Record depth of field if the camera asks for it (not for orthographic cameras), leaving
+    /// the result in `targets.hdr`. Runs on the scene before TAA.
+    pub fn encode_depth_of_field(
+        &mut self,
+        shared: &GpuShared,
+        targets: &Targets,
+        encoder: &mut wgpu::CommandEncoder,
+        view: &ViewData,
+        dof: Option<&DepthOfField>,
+        real_dt: f32,
+    ) {
+        let Some(settings) = dof.filter(|_| !view.orthographic) else {
+            if let Some(pass) = &mut self.dof {
+                pass.skip();
+            }
+            return;
+        };
+        let scratch = self.scratch(shared, targets).view.clone();
+        let pass = self.dof.get_or_insert_with(|| DofPass::new(shared));
+        pass.encode(shared, targets, encoder, view, settings, real_dt, &scratch);
+        self.copy_back(encoder, targets);
+    }
+
+    /// Record motion blur if the camera asks for it, leaving the result in `targets.hdr`.
+    /// Skipped when the previous frame is not this view's (`view.history_valid`). Runs on the
+    /// anti-aliased image after TAA.
+    pub fn encode_motion_blur(
+        &mut self,
+        shared: &GpuShared,
+        targets: &Targets,
+        encoder: &mut wgpu::CommandEncoder,
+        view: &ViewData,
+        motion_blur: Option<&MotionBlur>,
+        real_dt: f32,
+    ) {
+        let Some(settings) = motion_blur.filter(|m| view.history_valid && m.shutter_fraction > 0.0)
+        else {
+            return;
+        };
+        let scratch = self.scratch(shared, targets).view.clone();
+        let pass = self
+            .motion_blur
+            .get_or_insert_with(|| MotionBlurPass::new(shared));
+        pass.encode(shared, targets, encoder, view, settings, real_dt, &scratch);
+        self.copy_back(encoder, targets);
+    }
+
+    fn copy_back(&self, encoder: &mut wgpu::CommandEncoder, targets: &Targets) {
         let scratch = self.scratch.as_ref().expect("scratch target");
-        // Where the image is now.
-        let mut in_scratch = false;
-        if let Some(settings) = dof {
-            let pass = self.dof.get_or_insert_with(|| DofPass::new(shared));
-            pass.encode(
-                shared,
-                targets,
-                encoder,
-                view,
-                settings,
-                real_dt,
-                &scratch.view,
-            );
-            in_scratch = true;
-        }
-        if let Some(settings) = motion_blur {
-            let pass = self
-                .motion_blur
-                .get_or_insert_with(|| MotionBlurPass::new(shared));
-            let (source, out) = if in_scratch {
-                (BlurSource::Scratch, &targets.hdr.view)
-            } else {
-                (BlurSource::Hdr, &scratch.view)
-            };
-            pass.encode(
-                shared, targets, scratch, encoder, view, settings, real_dt, source, out,
-            );
-            in_scratch = !in_scratch;
-        }
-        if in_scratch {
-            encoder.copy_texture_to_texture(
-                scratch.texture.as_image_copy(),
-                targets.hdr.texture.as_image_copy(),
-                wgpu::Extent3d {
-                    width: targets.width,
-                    height: targets.height,
-                    depth_or_array_layers: 1,
-                },
-            );
-        }
+        encoder.copy_texture_to_texture(
+            scratch.texture.as_image_copy(),
+            targets.hdr.texture.as_image_copy(),
+            wgpu::Extent3d {
+                width: targets.width,
+                height: targets.height,
+                depth_or_array_layers: 1,
+            },
+        );
     }
 
     /// Call right after `queue.submit`.

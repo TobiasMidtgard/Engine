@@ -9,6 +9,7 @@
 //! The camera stands at the origin looking down -Z through an 85 mm lens on a full-frame
 //! sensor; the scenes are unlit, so every pixel is exactly the color it was given.
 
+use engine_assets::Assets;
 use engine_core::prelude::*;
 use engine_core::time::TimeSource;
 use engine_render::prelude::*;
@@ -229,67 +230,200 @@ fn a_tiny_aperture_keeps_both_sharp() {
     );
 }
 
-/// A black board 1 m away covering the left half of the view, in front of a checkerboard 10 m
-/// away, with the lens focused on the checkerboard.
-#[test]
-fn a_blurred_foreground_edge_is_soft_and_spreads_over_the_sharp_background() {
-    let render = |dof: Option<DepthOfField>, name: &str| {
-        let mut app = app();
-        camera(&mut app, dof);
-        checkerboard(&mut app, DVec3::new(0.0, 0.0, -10.0), 4.0, 32);
+/// Mean luma over the screen rectangle of a rectangle on the plane `z` m in front of the
+/// camera, from (x0, y0) to (x1, y1) m, less a 2 px margin.
+fn plane_mean(img: &RgbaImage, z: f64, (x0, y0): (f64, f64), (x1, y1): (f64, f64)) -> f64 {
+    let (left, bottom) = to_screen(DVec3::new(x0, y0, -z));
+    let (right, top) = to_screen(DVec3::new(x1, y1, -z));
+    let (left, right, top, bottom) = (
+        left as u32 + 2,
+        right as u32 - 2,
+        top as u32 + 2,
+        bottom as u32 - 2,
+    );
+    let sum: f64 = (top..bottom)
+        .flat_map(|y| (left..right).map(move |x| (x, y)))
+        .map(|(x, y)| luma(img, x, y))
+        .sum();
+    sum / ((right - left) * (bottom - top)) as f64
+}
+
+/// Gray of the wall behind the black foreground board.
+const WALL: f64 = 0.5;
+/// Gray patches from black to the wall's gray, for undoing the tonemapping.
+const PATCHES: usize = 11;
+
+fn patch_gray(i: usize) -> f64 {
+    WALL * i as f64 / (PATCHES - 1) as f64
+}
+
+/// A black board 1 m away covering the left half of the view, in front of a gray wall 10 m away
+/// with a checkered strip along its top, the lens focused on the wall. Along the bottom right,
+/// in focus: patches from black to the wall's gray, to undo the tonemapping when measuring how
+/// much of the black board covers the wall. With `band_m`, a band of the same gray `band_m` away
+/// stands in front of the wall where the coverage is measured.
+fn foreground_edge(
+    dof: Option<DepthOfField>,
+    band_m: Option<f64>,
+    name: &str,
+) -> Option<RgbaImage> {
+    let mut app = app();
+    camera(&mut app, dof);
+    quad(
+        &mut app,
+        DVec3::new(0.0, 0.0, -10.0),
+        [6.0, 6.0],
+        unlit([WALL as f32; 3]),
+    );
+    if let Some(d) = band_m {
+        // Rows from 0.4 m above the axis to 0.6 m below it on the wall.
+        let s = d / 10.0;
         quad(
             &mut app,
-            DVec3::new(-0.5, 0.0, -1.0),
-            [1.0, 1.0],
-            unlit([0.0, 0.0, 0.0]),
+            DVec3::new(0.0, -0.1 * s, -d),
+            [6.0 * s as f32, 1.0 * s as f32],
+            unlit([WALL as f32; 3]),
         );
-        app.update_n(3);
-        if gpu_missing(&app) {
-            return None;
-        }
-        Some(shoot(&mut app, name))
+    }
+    let image = app
+        .world
+        .resource_mut::<Assets<Image>>()
+        .add(Image::checker(
+            256,
+            8,
+            [255, 255, 255, 255],
+            [24, 24, 24, 255],
+        ));
+    quad(
+        &mut app,
+        DVec3::new(1.25, 0.9, -9.98),
+        [2.5, 0.6],
+        unlit([1.0; 3])
+            .with_base_color_texture(image)
+            .with_uv_scale(4.0, 1.0),
+    );
+    for i in 0..PATCHES {
+        quad(
+            &mut app,
+            DVec3::new(1.15 + 0.12 * i as f64, -1.05, -9.98),
+            [0.12, 0.3],
+            unlit([patch_gray(i) as f32; 3]),
+        );
+    }
+    quad(
+        &mut app,
+        DVec3::new(-0.5, 0.0, -1.0),
+        [1.0, 1.0],
+        unlit([0.0; 3]),
+    );
+    app.update_n(3);
+    if gpu_missing(&app) {
+        return None;
+    }
+    Some(shoot(&mut app, name))
+}
+
+/// How much of the black board covers the gray behind it at `CoC / 6` steps across its edge,
+/// from -8 to 8 (linear, from the patches).
+fn edge_coverage(img: &RgbaImage, coc: f64) -> Vec<f64> {
+    let levels: Vec<(f64, f64)> = (0..PATCHES)
+        .map(|i| {
+            let x = 1.09 + 0.12 * i as f64;
+            let d = plane_mean(img, 10.0, (x, -1.2), (x + 0.12, -0.9));
+            (d, patch_gray(i))
+        })
+        .collect();
+    let linear = |d: f64| {
+        let i = levels
+            .windows(2)
+            .position(|w| d <= w[1].0)
+            .unwrap_or(PATCHES - 2);
+        let (a, b) = (levels[i], levels[i + 1]);
+        a.1 + (b.1 - a.1) * ((d - a.0) / (b.0 - a.0).max(1e-6)).clamp(0.0, 1.0)
     };
-    let Some(off) = render(None, "edge_off") else {
+    let edge = to_screen(DVec3::new(0.0, 0.0, -1.0)).0;
+    // Rows of plain gray.
+    let (y0, y1) = (
+        to_screen(DVec3::new(0.0, 0.35, -10.0)).1 as u32,
+        to_screen(DVec3::new(0.0, -0.55, -10.0)).1 as u32,
+    );
+    (-8..=8)
+        .map(|i| {
+            let x = edge + i as f64 * coc / 6.0;
+            1.0 - linear(column(img, x.floor() as u32, y0, y1)) / WALL
+        })
+        .collect()
+}
+
+/// The coverage profile across a blurred foreground's edge: opaque well inside, fading out
+/// over its blur on both sides of its edge, gone past it.
+fn assert_soft_edge(profile: &[f64], what: &str) {
+    let shown: Vec<String> = profile.iter().map(|c| format!("{c:.2}")).collect();
+    eprintln!("{what}: coverage across the edge, every CoC/6: {shown:?}");
+    // Index 8 is the edge; every 3 steps is half the CoC.
+    for (i, lo, hi, where_) in [
+        (0, 0.97, 1.02, "deep inside the foreground"),
+        (
+            5,
+            0.6,
+            0.9,
+            "half its blur inside its edge (it should fade out)",
+        ),
+        (7, 0.5, 0.78, "a sixth of its blur inside its edge"),
+        (8, 0.3, 0.7, "at its edge"),
+        (
+            11,
+            0.05,
+            0.4,
+            "half its blur outside its edge (it should spread over what's behind)",
+        ),
+        (16, -0.02, 0.02, "past its blur"),
+    ] {
+        let c = profile[i];
+        assert!(
+            (lo..=hi).contains(&c),
+            "{what}: the foreground covers {c:.2} {where_}; expected {lo}..{hi} ({shown:?})"
+        );
+    }
+}
+
+#[test]
+fn a_blurred_foreground_edge_is_soft_and_spreads_over_the_sharp_background() {
+    let Some(off) = foreground_edge(None, None, "edge_off") else {
         return;
     };
     let dof = DepthOfField::new(10.0, 1.4);
-    let blurred = render(Some(dof), "edge").unwrap();
+    let blurred = foreground_edge(Some(dof), None, "edge").unwrap();
     let r = coc_px(&dof, 1.0, 10.0).abs().min(dof.max_radius_px) as f64;
-    let edge = to_screen(DVec3::new(0.0, 0.0, -1.0)).0;
-    let (y0, y1) = (40, H - 40);
-    // The background's mean brightness, from the sharp image right of the edge.
-    let bg = (0..40)
-        .map(|i| column(&off, edge as u32 + 4 + i, y0, y1))
-        .sum::<f64>()
-        / 40.0;
-    // How much of the black foreground covers column x.
-    let cover = |x: f64| 1.0 - column(&blurred, x.round() as u32, y0, y1) / bg;
-    let profile: Vec<String> = (-8..=8)
-        .map(|i| format!("{:.2}", cover(edge + i as f64 * r / 6.0)))
-        .collect();
-    eprintln!("foreground CoC {r:.1} px; coverage across the edge: {profile:?}");
-    let (inside, outside) = (cover(edge - 0.4 * r), cover(edge + 0.4 * r));
-    assert!(
-        (0.6..0.95).contains(&inside),
-        "the foreground's edge should fade out over its blur: coverage {inside:.2} at 0.4 CoC inside"
+    assert_soft_edge(&edge_coverage(&blurred, r), "over a sharp wall");
+    // The checkered strip past the foreground's blur keeps its detail.
+    let x0 = (to_screen(DVec3::new(0.0, 0.0, -1.0)).0 + r + 6.0) as u32;
+    let sharp = (
+        x0,
+        to_screen(DVec3::new(0.0, 1.15, -10.0)).1 as u32,
+        x0 + 48,
+        to_screen(DVec3::new(0.0, 0.65, -10.0)).1 as u32,
     );
-    assert!(
-        (0.05..0.4).contains(&outside),
-        "the blurred foreground should spread over the sharp background: coverage {outside:.2} at 0.4 CoC outside"
-    );
-    assert!(
-        cover(edge + 1.5 * r) < 0.03,
-        "the foreground spread too far: {:.2} at 1.5 CoC",
-        cover(edge + 1.5 * r)
-    );
-    // The background past the foreground's blur keeps its detail.
-    let x0 = (edge + r + 6.0) as u32;
-    let sharp = (x0, 60, x0 + 48, H - 60);
     let (c, c_off) = (contrast(&blurred, sharp), contrast(&off, sharp));
+    eprintln!("wall detail past the blur: contrast {c:.1} (off {c_off:.1})");
+    assert!(c_off > 40.0, "the checkered strip isn't in view");
     assert!(
         c > 0.9 * c_off,
-        "the background in focus lost detail: {c:.1} (off {c_off:.1})"
+        "the wall in focus lost detail: {c:.1} (off {c_off:.1})"
     );
+}
+
+/// The same board in front of a gray band 3 m away, itself in front of the focus plane but far
+/// less blurred: the board's blur still spreads over it, the nearer over the farther.
+#[test]
+fn a_blurred_foreground_spreads_over_a_less_blurred_one_behind_it() {
+    let dof = DepthOfField::new(10.0, 1.4);
+    let Some(blurred) = foreground_edge(Some(dof), Some(3.0), "edge_layered") else {
+        return;
+    };
+    let r = coc_px(&dof, 1.0, 10.0).abs().min(dof.max_radius_px) as f64;
+    eprintln!("band CoC {:.1} px", coc_px(&dof, 3.0, 10.0));
+    assert_soft_edge(&edge_coverage(&blurred, r), "over a band 3 m away");
 }
 
 /// A black board 2 m away, in focus, covering the left half of the view, in front of a white
@@ -551,5 +685,67 @@ fn autofocus_eases_toward_a_new_distance_and_snaps_after_a_cut() {
     assert!(
         (after_cut - 16.0).abs() < 0.6,
         "autofocus should snap after a cut: {after_cut:.2} m (subject 16 m away)"
+    );
+}
+
+/// Two consecutive frames of a still scene with TAA, whose jitter moves every silhouette by a
+/// fraction of a pixel each frame: an in-focus board over a blurred wall and a blurred post over
+/// it. Returns the largest change of any pixel between the frames, and the mean change.
+fn taa_flicker(dof: Option<DepthOfField>, name: &str) -> Option<(f64, f64)> {
+    let mut app = app();
+    app.world.resource_mut::<RenderSettings>().anti_aliasing = AntiAliasing::Taa;
+    camera(&mut app, dof);
+    checkerboard(&mut app, DVec3::new(0.0, 0.0, -20.0), 12.0, 24);
+    // In focus, tilted so its edge is a slanted line.
+    app.world.spawn((
+        Transform::from_xyz(-0.35, -0.05, -2.0).with_rotation(Quat::from_rotation_z(0.3)),
+        MeshRenderer::new(Shape::Quad { size: [0.5, 0.5] }, unlit([0.05, 0.05, 0.05]))
+            .without_shadows(),
+    ));
+    // Far out of focus in front.
+    app.world.spawn((
+        Transform::from_xyz(0.18, 0.0, -0.8).with_rotation(Quat::from_rotation_z(-0.2)),
+        MeshRenderer::new(Shape::Quad { size: [0.05, 1.0] }, unlit([0.9, 0.5, 0.2]))
+            .without_shadows(),
+    ));
+    app.update_n(24);
+    if gpu_missing(&app) {
+        return None;
+    }
+    let dir = std::path::Path::new(env!("CARGO_TARGET_TMPDIR"));
+    let mut frames = Vec::new();
+    for i in 0..2 {
+        let path = dir.join(format!("dof_taa_{name}_{i}.png"));
+        app.world
+            .resource_mut::<engine_render::Screenshots>()
+            .request(&path);
+        app.update();
+        frames.push(image::open(&path).expect("png").to_rgba8());
+    }
+    let diffs: Vec<f64> = frames[0]
+        .pixels()
+        .zip(frames[1].pixels())
+        .map(|(a, b)| {
+            (0..3)
+                .map(|c| (a[c] as f64 - b[c] as f64).abs())
+                .fold(0.0, f64::max)
+        })
+        .collect();
+    let max = diffs.iter().copied().fold(0.0, f64::max);
+    let mean = diffs.iter().sum::<f64>() / diffs.len() as f64;
+    eprintln!("{name}: frame to frame change: largest {max}, mean {mean:.3}");
+    Some((max, mean))
+}
+
+#[test]
+fn depth_of_field_does_not_flicker_under_taa_jitter() {
+    let Some((max_off, mean_off)) = taa_flicker(None, "off") else {
+        return;
+    };
+    let (max, mean) = taa_flicker(Some(DepthOfField::new(2.0, 1.4)), "on").unwrap();
+    assert!(
+        max <= max_off.max(8.0) && mean <= mean_off + 0.1,
+        "depth of field flickers between TAA frames: largest change {max} (off {max_off}), \
+         mean {mean:.3} (off {mean_off:.3})"
     );
 }
