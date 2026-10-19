@@ -306,6 +306,11 @@ The crate depends only on core crates (`engine_core`, `engine_world`, `engine_re
   the tactical world move exactly with the world, the rifleman keeps looking and shooting at
   the player, the deer keep running from what scared them and stay around their home, and
   paths go around a wall where it moved to, not where it was.
+- `tests/schedule_order.rs`: no two systems in the fixed step or `PostUpdate` touch the same
+  data without an order between them (the scheduler's ambiguity check), and the arena fight
+  and the meadow end bit for bit the same with unrelated systems added. An ignored test shows
+  that one more entity spawned before them still changes the outcome, because NPC and animal
+  randomness is seeded from `Entity` ids.
 - `tests/art_fighters.rs`, `tests/art_animals.rs`, `tests/art_arena.rs`: close-up renders of
   the fighters, wildlife and arena in chosen poses and lights, flipbook strips of the wildlife
   on the move (gaits, starts and stops, an alarm, a bend, a stalk, a wolf's hunt from stalk

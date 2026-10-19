@@ -151,7 +151,12 @@ impl Plugin for NpcPlugin {
                     )
                         .chain()
                         .in_set(NpcSet::Prepare),
-                    (perception::perceive, wildlife::animal_senses).in_set(NpcSet::Perceive),
+                    // Both touch `NpcVitals` (fighters' and animals'), so they are chained:
+                    // nothing in this schedule runs in an order the scheduler picks
+                    // (`tests/schedule_order.rs`).
+                    (perception::perceive, wildlife::animal_senses)
+                        .chain()
+                        .in_set(NpcSet::Perceive),
                     (
                         squad::plan_squads,
                         combat::notice_attacks,
