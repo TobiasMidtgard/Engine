@@ -286,6 +286,8 @@ fn sequence(spec: &str) -> Vec<Shot> {
         "lifter" => |d| d.lifter,
         "reacher" => |d| d.reacher,
         "walker" => |d| d.walker,
+        "drill" => |d| d.drill,
+        "sparring" => |d| d.sparring,
         "horse" => |d| d.horse,
         "spider" => |d| d.spider,
         "dog" => |d| d.dog,

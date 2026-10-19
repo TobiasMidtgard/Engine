@@ -1363,7 +1363,9 @@ impl Simulation {
 
     /// Keep at most `PhysicsSettings::max_articulated` moving jointed groups articulated: the
     /// ones nearest a focus (or the origin, without one; an articulated group keeps its place
-    /// unless another comes a fifth closer). The others are held to constraint joints until they
+    /// unless another comes a fifth closer), and with a focus only those within
+    /// `PhysicsSettings::articulate_within_m` of it (an articulated one until a quarter
+    /// farther). The others are held to constraint joints until they
     /// rank among the nearest again. Sleeping groups keep their joints and don't count.
     pub fn budget_articulations(
         &mut self,
@@ -1443,7 +1445,14 @@ impl Simulation {
             });
         }
         let max = self.settings.max_articulated as usize;
-        if groups.len() <= max && groups.iter().all(|g| !g.held) {
+        // Past this, a constraint joint's few centimeters on a hard landing are too small to see.
+        // Without a focus every group is in reach.
+        let reach = if foci.is_empty() {
+            f64::INFINITY
+        } else {
+            self.settings.articulate_within_m as f64
+        };
+        if groups.len() <= max && groups.iter().all(|g| !g.held && g.rank <= reach) {
             return;
         }
         // Nearest first; on a tie, articulated ones.
@@ -1453,6 +1462,7 @@ impl Simulation {
                 .then(b.articulated.cmp(&a.articulated))
         });
         for (place, g) in groups.into_iter().enumerate() {
+            let place = if g.rank <= reach { place } else { max };
             if place < max && g.held {
                 for e in &g.bodies {
                     self.held.remove(e);

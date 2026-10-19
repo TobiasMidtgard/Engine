@@ -15,6 +15,7 @@ struct Clouds {
     detail: vec4<f32>,      // detail noise origin xyz (wrapped), 1 = draw rain shafts
     veil: vec4<f32>,        // falling rain or snow veils from x (m), fully from y (m); z = snow share 0..1
     shadow: vec4<f32>,      // cloud shadow map: the shading light's dimming at the player, samples toward the light
+    far: vec4<f32>,         // far cloud layer drawn by another module: hand over from x to y m of ground distance, z = its weight
 };
 
 @group(1) @binding(0) var<uniform> clouds: Clouds;
@@ -147,6 +148,18 @@ struct CloudResult {
     rain_back: f32,         // its total along the ray (m)
 };
 
+// How much of the clouds at camera-relative `p` to draw: another module's far cloud layer
+// (space's cloud tops seen from high up) takes over beyond `clouds.far.x` of ground distance,
+// fully by `clouds.far.y`, as much as it is drawn (`FarCloudLayer::near_share`).
+fn near_share(p: vec3<f32>) -> f32 {
+    if (clouds.far.z <= 0.0 || frame.planet.w <= 0.0) { return 1.0; }
+    let a = normalize(p - frame.planet.xyz);
+    let b = normalize(-frame.planet.xyz);
+    let ground = frame.planet.w * asin(min(length(cross(a, b)), 1.0));
+    let t = saturate((ground - clouds.far.x) / max(clouds.far.y - clouds.far.x, 1e-3));
+    return 1.0 - clouds.far.z * t * t * (3.0 - 2.0 * t);
+}
+
 // Interleaved gradient noise: a stable per-pixel start offset that hides banding.
 fn ign(px: vec2<f32>) -> f32 {
     return fract(52.9829189 * fract(dot(px, vec2<f32>(0.06711056, 0.00583715))));
@@ -241,7 +254,8 @@ fn march_clouds(dir: vec3<f32>, steps: i32, light_steps: i32, jitter: f32) -> Cl
         empty = 0;
         let dt = fine_dt;
         let d = cloud_density(p, h, w, true);
-        if (d > 0.0) {
+        let share = near_share(p);
+        if (d > 0.0 && share > 0.0) {
             let sigma = d * extinction;
             // Optical depth toward the light over samples that double in length, 1.24 km in
             // all however many there are (5 on screen: 40 m to 640 m), so the environment
@@ -304,7 +318,7 @@ fn march_clouds(dir: vec3<f32>, steps: i32, light_steps: i32, jitter: f32) -> Cl
                 s += vec3<f32>(0.75, 0.82, 1.0) * clouds.flash.w / (d2 + 90000.0)
                     * exp(-sqrt(d2) * 0.0007) * (2.0 / (4.0 * PI));
             }
-            let tr = exp(-sigma * dt);
+            let tr = mix(1.0, exp(-sigma * dt), share);
             r.radiance += r.transmittance * s * (1.0 - tr);
             if (!hit && r.transmittance * tr < 0.97) {
                 hit = true;
