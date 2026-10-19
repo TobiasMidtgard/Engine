@@ -164,7 +164,9 @@ everything else (streaming, LOD, colliders, ground queries, prints) follows the 
   rim, snow compacts down to its depth, sand is granular and slowly fills back in, grass is
   flattened and springs back. Prints outside the grid are kept and re-stamped when it moves.
 - **Weather on the ground.** Wetness, puddles, snow depth and scorch from `SurfaceLayers`
-  (written by the weather module) darken and gloss the ground, turn soil to mud, fill
+  (written by the weather module, and by the water module along shores) darken and gloss
+  the ground (wet sand to about half its dry brightness, without turning to mud), turn soil
+  to mud, fill
   footprints, ruts and the hollows of the mud texture with water (with rain ripples), and
   cover the ground in snow that settles in hollows and on ledges first and that footprints
   cut through. The wind lays snow in low drifts and ridges along the prevailing east-west
@@ -216,7 +218,7 @@ commands.entity(bodies["Moon"]).insert(PlanetTerrain::moon(7).with_radius(1_737_
 `examples/terrain_shots.rs` renders the test views headless (lab prints, rain, snow, painted
 ground and a patchwork of painted layers, a meadow tinted the way the showcase paints its
 valley and a natural one at eye height, snow at eye height and over the valley, woods from the air, the range, the range at dusk
-(`range_dusk`: ridges casting long shadows), the coast, a beach at eye height (`earth_beach`), the Moon
+(`range_dusk`: ridges casting long shadows), the coast, a beach at eye height (`earth_beach`), the painted patchwork after rain (`painted_wet`), the Moon
 underfoot, from low orbit, half lit and full, the Earth's climate belts from far out
 (`earth_globe`), a river at eye height (`earth_river`) and rivers from the air
 (`earth_rivers_air`), and Mars: from orbit (`mars_orbit`,

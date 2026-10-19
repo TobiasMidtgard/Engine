@@ -1447,7 +1447,10 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     let natural_bare = 1.0 - veg;
     let bare = natural_bare * (1.0 - paint_w) + pw[1] + pw[4] + pw[8] + pw[10];
     let trodden = saturate(depth * 25.0) * print_fade + flattened * 0.6;
-    let soil_like = (1.0 - rock) * saturate(bare + trodden);
+    // Sand soaks water up and darkens far more than grass or stone, glossy where it is
+    // saturated, but it drains too fast to turn to mud.
+    let sand = saturate(w[M_SAND]);
+    let soil_like = (1.0 - rock) * saturate(bare + trodden) * (1.0 - sand);
     let mud_amount = saturate(max(pw[1], wet * soil_like * smoothstep(0.55, 0.9, rain_wet) * 0.8)) * (1.0 - snow);
     var mud = 0.0;
     if (mud_amount > 0.003) {
@@ -1461,8 +1464,10 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     }
     // Water darkens more in the hollows, where it collects.
     let wet_here = wet * (1.0 + 0.4 * (0.5 - ground_h));
-    albedo *= mix(1.0, mix(0.72, 0.5, soil_like), saturate(wet_here));
-    roughness = mix(roughness, mix(0.55, 0.35, soil_like), saturate(wet_here) * 0.8);
+    let wet_dark = mix(mix(0.72, 0.5, soil_like), 0.55, sand * (1.0 - mud));
+    albedo *= mix(1.0, wet_dark, saturate(wet_here));
+    let wet_rough = mix(mix(0.55, 0.35, soil_like), 0.3, sand * (1.0 - mud));
+    roughness = mix(roughness, wet_rough, saturate(wet_here) * 0.8);
 
     // Puddles: from the surface layers, in prints on soaked ground, and in the low spots of
     // soaked soil and mud.
