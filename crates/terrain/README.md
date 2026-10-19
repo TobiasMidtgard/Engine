@@ -179,12 +179,14 @@ everything else (streaming, LOD, colliders, ground queries, prints) follows the 
 - **Ocean.** Optional sea surface at sea level (`PlanetTerrain::ocean_surface`) with depth
   tint and waves; turn it off when a water module draws the sea.
 - **Ground query and colliders.** Installs the `Ground` provider (height, normal, surface
-  material) for every terrain, and keeps heightfield collider tiles around the focus.
+  material) for every terrain, and keeps heightfield collider tiles around every focus
+  point and under every dynamic body (awake or asleep, the nearest 64 away from a focus),
+  so a crate dropped far off or a car driven by AI never falls through the ground.
 
 ## Contracts
 
 Reads: `GroundContact`, `TerrainEdit`, `SurfaceLayers`, `Weather`, `FocusPoints`,
-`SurfaceMaterials`.
+`SurfaceMaterials`, `RigidBody` (dynamic bodies, for their collider tiles).
 
 Writes: `Ground` (the query provider), `TerrainChanged`, static `Collider` heightfield tiles
 (tagged `TerrainColliderTile`).
