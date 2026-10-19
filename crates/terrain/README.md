@@ -16,6 +16,10 @@ everything else (streaming, LOD, colliders, ground queries, prints) follows the 
   flying fast, and a teleport builds until the view is complete. Vertices geomorph toward the
   parent patch's shape before a split or merge, so detail never pops. Positions are `f64` and
   rendered camera-relative, so a 6,371 km Earth is exact to the centimeter at the surface.
+  A planet that fills only part of the view gets finer patches in its share of the screen
+  (up to 4× finer split distance, aiming at `TerrainSettings::patch_budget` patches for a
+  planet that fills the view), so seen from orbit its canyons, volcanoes and coasts stay
+  sharp instead of dissolving into a few big patches.
   Patches also draw the renderer's depth prepass (depth, normal, motion; moving planets
   carry their own motion), so the ground gets ambient occlusion and contact shadows from
   what stands on it and anti-aliasing reprojects it cleanly.
@@ -28,7 +32,7 @@ everything else (streaming, LOD, colliders, ground queries, prints) follows the 
   it lacks a few patches a frame after the view's own.
 - **Planet shapes.** `PlanetShape` presets for an Earth-like world (continents, oceans,
   eroded mountains whose steep sides break into rock ledges, hills, climate bands), the
-  Moon (craters, maria) and Mars (craters, plains, dry ice caps), all seeded and
+  Moon (craters, maria) and Mars, all seeded and
   deterministic. Detail is generated down to
   `finest_spacing_m` (0.5 m by default). On the Moon the maria are big impact basins ringed by
   worn massifs and flooded with lava of different shades, plus lava that spilled across the
@@ -36,6 +40,20 @@ everything else (streaming, LOD, colliders, ground queries, prints) follows the 
   which engine_space turns to the parent; `PlanetShape::lava_basins` 0 leaves basins pale and
   dusty, as on Mars). Craters age from crisp bowls into soft dishes, and
   on airless worlds hills and mountains are worn round (`PlanetShape::worn`).
+- **The real Mars.** `PlanetShape::mars` lays the real planet's landmarks where they are
+  (`landforms::Landforms`, by latitude and longitude, degrees east): the northern lowlands,
+  the Tharsis and Elysium rises, Olympus Mons (21 km, its scarp cliff and nested caldera) and
+  the other shield volcanoes, Valles Marineris (7 km deep, spurred walls, landslides, dark
+  dune floors) with Noctis Labyrinthus at its head and chaos terrain at its mouth, the Hellas,
+  Argyre and Isidis basins, both polar caps on their layered domes with spiral troughs and
+  Chasma Boreale, the dark regions seen from Earth (Syrtis Major, Mare Acidalium, ...) with
+  wind-streaked edges, and a dusty mottling between them. The seed varies only the small
+  things. Any planet can carry its own `Landforms`. Young lava keeps few craters: the shape
+  and the shader thin them out on the volcanoes (to a tenth), the rises and the lowland
+  plains (`Landforms::youth`). Ice on barren worlds takes on the planet's dust where it is
+  thin. Climate temperatures run from −130 to +60 °C. On airless worlds (no atmosphere to
+  hide the sun below the horizon) the ground past the terminator stays dark however its
+  slopes face, except peaks standing far above the land around them.
 - **Flat pads and a view worth having.** `FlatPad` blends the planet into level ground for a
   level, town or spaceport. `PlanetTerrain::home_transform(pad)` places the planet so the pad
   sits at the world origin with +Y up (north toward −Z; `heading_deg` 180 turns north to +Z,
@@ -173,7 +191,9 @@ commands.entity(bodies["Moon"]).insert(PlanetTerrain::moon(7).with_radius(1_737_
 ground and a patchwork of painted layers, a meadow tinted the way the showcase paints its
 valley and a natural one at eye height, snow at eye height and over the valley, woods from the air, the range, the range at dusk
 (`range_dusk`: ridges casting long shadows), the coast, the Moon
-underfoot, from low orbit, half lit and full, and Mars from orbit)
+underfoot, from low orbit, half lit and full, and Mars: from orbit (`mars_orbit`,
+`mars_valles`), Olympus Mons (`mars_olympus`), the north pole (`mars_pole`), and the floor and
+rim of Valles Marineris (`mars_canyon`, `mars_rim`))
 with the game's auto exposure, and `examples/terrain_map.rs` draws a relief map around the
 home pad for tuning shapes.
 
@@ -195,3 +215,6 @@ from `Ground` when they apply), so the lab works on uneven ground too.
 - Prints are recorded in world X/Z, which is right on level ground near the focus (the
   showcase map, or anywhere once the space module re-centers the world on the player).
 - No caves or overhangs yet (voxel volumes are next).
+- Mars has a black sky: the renderer's atmosphere scatters light with Earth's colors only, so
+  the test views turn it off there. A thin, dusty, butterscotch sky needs per-planet
+  scattering in the renderer.
