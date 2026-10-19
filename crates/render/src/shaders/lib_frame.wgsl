@@ -1149,7 +1149,14 @@ fn surface_fog(rel: vec3<f32>) -> SurfaceFog {
     // closer than a couple hundred meters).
     if (dist > 200.0) {
         let a = atmosphere(vec3(0.0), dir, dist, 8);
-        out.inscatter = out.inscatter * a.transmittance + pre_expose(a.radiance * frame.sun_color.rgb);
+        // Under an overcast sky the air is lit by the cloud deck's grey light and the ground
+        // below it, not by the sun the clouds dim: it scatters that light back in as much as
+        // it takes out, so distant hills fade toward grey instead of losing only their blue
+        // and turning tan. Clear and broken skies keep the sunlit air alone (its look-up
+        // tables already hold the sky's light).
+        let overcast = smoothstep(0.55, 0.88, frame.weather.z);
+        let deck_lit = (1.0 - a.transmittance) * (fog_sky_light() + frame.ambient.rgb) * overcast;
+        out.inscatter = out.inscatter * a.transmittance + pre_expose(a.radiance * frame.sun_color.rgb + deck_lit);
         out.transmittance *= a.transmittance;
     }
     return out;

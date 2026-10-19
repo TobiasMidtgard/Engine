@@ -470,7 +470,8 @@ fn disturb(
             }
         }
         Disturbance::ClearCut { center: c, radius } => {
-            // Loggers fell in rows (one direction) and haul most trunks away.
+            // Loggers fell mostly one way and haul most trunks away; trees leaning or hung
+            // up on their neighbors go down wherever they can, so the slash lies crossed.
             let felling_yaw = sim.rng.range(0.0, TAU);
             for p in plants.iter_mut() {
                 if !within(p.pos, *c, *radius) {
@@ -482,7 +483,11 @@ fn disturb(
                     if sim.rng.chance(0.55) {
                         continue;
                     }
-                    let yaw = felling_yaw + sim.rng.range(-0.35, 0.35);
+                    let yaw = if sim.rng.chance(0.35) {
+                        sim.rng.range(0.0, TAU)
+                    } else {
+                        felling_yaw + sim.rng.range(-0.6, 0.6)
+                    };
                     logs.push(SimLog {
                         entity: None,
                         pos: p.pos,

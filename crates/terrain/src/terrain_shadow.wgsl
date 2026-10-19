@@ -7,13 +7,18 @@ struct ShadowView {
     camera_frac: vec4<f32>,
 };
 
-// Must match `PlanetGpu` in render.rs (only the rotation is used here).
+// Must match `PlanetGpu` in render.rs field for field, or every planet after the first
+// reads another's rotation (only the rotation is used here).
 struct PlanetGpu {
     rot: array<vec4<f32>, 3>,
     center: vec4<f32>,
     colors: array<vec4<f32>, 10>,
     params: vec4<f32>,
     params2: vec4<f32>,
+    motion: vec4<f32>,
+    params3: vec4<f32>,
+    rays: array<vec4<f32>, 8>,
+    young: array<vec4<f32>, 12>,
 };
 
 @group(0) @binding(0) var<uniform> shadow_view: ShadowView;

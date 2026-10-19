@@ -1,4 +1,5 @@
-//! Top-down shaded relief map of a planet around its home pad, for tuning shapes.
+//! Top-down shaded relief map of a planet around its home pad, with its rivers and lakes, for
+//! tuning shapes.
 //!
 //! ```text
 //! cargo run --release -p engine_terrain --example terrain_map -- [out.png] [km across] [px]
@@ -45,6 +46,9 @@ fn main() {
             let col: [f64; 3] = if h < 0.0 {
                 let deep = (-h / 3000.0).clamp(0.0, 1.0);
                 [0.1 - 0.06 * deep, 0.3 - 0.17 * deep, 0.5 - 0.2 * deep]
+            } else if s.lake > 0.5 {
+                land += 1;
+                [0.12, 0.3, 0.5]
             } else {
                 land += 1;
                 // Height tint: lowland green, upland olive, high brown, then snow and rock.
@@ -75,6 +79,25 @@ fn main() {
                 j,
                 image::Rgb(col.map(|v| ((v * k).clamp(0.0, 1.0) * 255.0) as u8)),
             );
+        }
+    }
+    // Rivers (their straight pieces; the meanders bend them by a little).
+    for seg in shape.river_network().iter().flat_map(|r| r.segments()) {
+        let to_px = |p: DVec3| {
+            let q = p.normalize() * r - c * r;
+            (
+                q.dot(east) / step + px as f64 * 0.5,
+                px as f64 * 0.5 - q.dot(north) / step,
+            )
+        };
+        let ((x0, y0), (x1, y1)) = (to_px(seg.a), to_px(seg.b));
+        let n = ((x1 - x0).hypot(y1 - y0) * 2.0).ceil().max(1.0) as usize;
+        for k in 0..=n {
+            let t = k as f64 / n as f64;
+            let (x, y) = (x0 + (x1 - x0) * t, y0 + (y1 - y0) * t);
+            if seg.a.dot(c) > 0.0 && x >= 0.0 && y >= 0.0 && x < px as f64 && y < px as f64 {
+                img.put_pixel(x as u32, y as u32, image::Rgb([40, 90, 170]));
+            }
         }
     }
     // Mark the pad.

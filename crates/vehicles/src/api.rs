@@ -124,9 +124,13 @@ fn place_api(world: &mut World, args: Value) -> Result<Value, String> {
         i.reset();
     }
     crate::wheels::set_rolling(world, e, linear.dot(forward));
-    // A path follower looks for its place on the path again (a drift keeps its phase).
+    // A path follower looks for its place on the path again, and a pilot picks its phase
+    // (and runway) afresh (a drift keeps its phase).
     if let Some(mut ap) = world.get_mut::<Autopilot>(e)
-        && matches!(ap.mode, AutopilotMode::Drive { .. })
+        && matches!(
+            ap.mode,
+            AutopilotMode::Drive { .. } | AutopilotMode::Fly { .. }
+        )
     {
         *ap = Autopilot::new(ap.mode.clone());
     }

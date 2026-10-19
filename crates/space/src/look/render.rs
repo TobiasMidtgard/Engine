@@ -35,6 +35,16 @@ const F_RELIEF: u32 = 4;
 const F_AIR: u32 = 8;
 const F_FULLSCREEN: u32 = 16;
 const F_HAZE: u32 = 32;
+const F_SHELL_ON: u32 = 128;
+
+/// Height of the cloud tops drawn as their own layer from high up, meters.
+const SHELL_HEIGHT_M: f64 = 5_000.0;
+/// The cloud layer is drawn from below this altitude (in body radii); farther out the body's
+/// own disk carries its clouds.
+const SHELL_RANGE: f64 = 0.4;
+/// The cloud layer fades in between these camera altitudes, meters (below, the weather's
+/// clouds are the sky).
+const SHELL_FADE_M: (f64, f64) = (9_000.0, 25_000.0);
 
 /// GPU layout of `Body` in `bodies.wgsl`.
 #[repr(C)]
@@ -95,6 +105,7 @@ struct Job {
 #[derive(Default)]
 pub struct BodiesFeature {
     pipeline: Option<wgpu::RenderPipeline>,
+    shell_pipeline: Option<wgpu::RenderPipeline>,
     layout1: Option<wgpu::BindGroupLayout>,
     layout2: Option<wgpu::BindGroupLayout>,
     instances: Option<GrowBuffer>,
@@ -106,9 +117,10 @@ pub struct BodiesFeature {
     /// Bodies that want full-detail maps, with their size on screen (pixels).
     wanted: Vec<(Entity, f32)>,
     job: Option<Job>,
-    scratch: Vec<(f64, Entity, GpuBody)>,
+    scratch: Vec<(f64, Entity, GpuBody, bool)>,
     instance_data: Vec<GpuBody>,
-    draws: Vec<Entity>,
+    /// Bodies to draw, back to front, and whether each is a cloud shell.
+    draws: Vec<(Entity, bool)>,
     stats: FeatureStats,
 }
 
@@ -361,9 +373,9 @@ impl RenderFeature for BodiesFeature {
                 operation: wgpu::BlendOperation::Add,
             },
         };
-        self.pipeline = Some(
+        let pipeline = |label: &str, entry: &str| {
             device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                label: Some("space bodies"),
+                label: Some(label),
                 layout: Some(&pl),
                 vertex: wgpu::VertexState {
                     module: &shader,
@@ -379,7 +391,7 @@ impl RenderFeature for BodiesFeature {
                 multisample: Default::default(),
                 fragment: Some(wgpu::FragmentState {
                     module: &shader,
-                    entry_point: Some("fs_body"),
+                    entry_point: Some(entry),
                     compilation_options: Default::default(),
                     targets: &[Some(wgpu::ColorTargetState {
                         format: gpu.formats.hdr,
@@ -389,8 +401,10 @@ impl RenderFeature for BodiesFeature {
                 }),
                 multiview_mask: None,
                 cache: None,
-            }),
-        );
+            })
+        };
+        self.pipeline = Some(pipeline("space bodies", "fs_body"));
+        self.shell_pipeline = Some(pipeline("space cloud shells", "fs_shell"));
         self.map_sampler = Some(device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("body maps"),
             address_mode_u: wgpu::AddressMode::Repeat,
@@ -499,8 +513,14 @@ impl RenderFeature for BodiesFeature {
             if !view.frustum.intersects_sphere(rel_f, bound as f32) {
                 continue;
             }
-            // Down on a solid body, the terrain (or the sky's ground) takes over.
-            if body.look.solid() && d - radius < radius * 0.002 {
+            // Down on a solid body, the terrain (or the sky's ground) takes over; from high up
+            // its cloud tops are still drawn, as a layer of their own.
+            let altitude = (d - radius) / scale;
+            let ground = body.look.solid() && d - radius < radius * 0.002;
+            let shell_wanted = body.look.clouds()
+                && altitude < body.radius_m * SHELL_RANGE
+                && altitude > SHELL_FADE_M.0;
+            if ground && !shell_wanted {
                 continue;
             }
             let radius_px = view.projected_radius_px(r_eq as f32, d as f32);
@@ -508,6 +528,10 @@ impl RenderFeature for BodiesFeature {
             let Some(maps) = self.maps.get(&entity) else {
                 continue;
             };
+            let shell = shell_wanted && maps.clouds;
+            if ground && !shell {
+                continue;
+            }
 
             let axes = [
                 (m.x_axis / scale).normalize(),
@@ -545,6 +569,9 @@ impl RenderFeature for BodiesFeature {
             }
             if maps.clouds {
                 flags |= F_CLOUDS;
+            }
+            if shell {
+                flags |= F_SHELL_ON;
             }
             if maps.relief && shading.relief > 0.0 {
                 flags |= F_RELIEF;
@@ -586,7 +613,26 @@ impl RenderFeature for BodiesFeature {
                 rings: [inner, outer, 1.0, 0.0],
                 flags: [flags, 0, 0, 0],
             };
-            self.scratch.push((d, entity, gpu_body));
+            if !ground {
+                self.scratch.push((d, entity, gpu_body, false));
+            }
+            if shell {
+                // The cloud tops, a few kilometers up, just in front of the body.
+                let k = 1.0 + SHELL_HEIGHT_M * scale / r_eq;
+                let t = ((altitude - SHELL_FADE_M.0) / (SHELL_FADE_M.1 - SHELL_FADE_M.0))
+                    .clamp(0.0, 1.0);
+                let fade = t * t * (3.0 - 2.0 * t);
+                let mut g = gpu_body;
+                g.center[3] = (r_eq * k) as f32;
+                g.flags[0] = (flags & F_AIR) | if d < r_eq * k * 1.15 { F_FULLSCREEN } else { 0 };
+                g.haze3 = [
+                    0.0,
+                    k as f32,
+                    fade as f32,
+                    (space.cloud_hole_m * scale / r_eq) as f32,
+                ];
+                self.scratch.push((d * (1.0 - 1e-6), entity, g, true));
+            }
         }
         self.run_jobs(world, gpu, &mut bakes);
         world.insert_resource(bakes);
@@ -594,9 +640,9 @@ impl RenderFeature for BodiesFeature {
         // Back to front.
         self.scratch.sort_by(|a, b| b.0.total_cmp(&a.0));
         self.instance_data.clear();
-        for (_, e, g) in &self.scratch {
+        for (_, e, g, shell) in &self.scratch {
             self.instance_data.push(*g);
-            self.draws.push(*e);
+            self.draws.push((*e, *shell));
         }
         if let Some(buf) = &mut self.instances
             && !self.instance_data.is_empty()
@@ -653,13 +699,15 @@ impl RenderFeature for BodiesFeature {
         if phase != RenderPhase::Transparent || self.draws.is_empty() {
             return;
         }
-        let (Some(pipeline), Some(group1)) = (&self.pipeline, &self.group1) else {
+        let (Some(pipeline), Some(shells), Some(group1)) =
+            (&self.pipeline, &self.shell_pipeline, &self.group1)
+        else {
             return;
         };
-        pass.set_pipeline(pipeline);
         pass.set_bind_group(1, group1, &[]);
-        for (i, e) in self.draws.iter().enumerate() {
+        for (i, (e, shell)) in self.draws.iter().enumerate() {
             if let Some(m) = self.maps.get(e) {
+                pass.set_pipeline(if *shell { shells } else { pipeline });
                 pass.set_bind_group(2, &m.group, &[]);
                 pass.draw(0..6, i as u32..i as u32 + 1);
             }

@@ -939,8 +939,14 @@ pub fn add_demo_trees(world: &mut World) {
             "c": {"speaker": "quill", "text": "Let me show you where you [b]could[/b] go.",
                   "choices": [
                       {"text": "Open the star map.", "action": "ui.show:map", "next": null},
+                      {"text": "You wanted crystals from the Glass Caves.", "tag": "Quest", "action": "quest.track:glass_and_glow", "next": "crystals"},
                       {"text": "Maybe later.", "next": null}
-                  ]}
+                  ]},
+            "crystals": {"speaker": "quill", "text": "Three, unbroken. They sing to the relay, and the relay sings to [i]something else[/i]. Bring them to me and I will draw you where.",
+                         "choices": [
+                             {"text": "Open my journal.", "action": "ui.show:journal", "next": null},
+                             {"text": "I'm on it.", "next": null}
+                         ]}
         }
     }))
     .expect("demo dialogue");

@@ -106,12 +106,12 @@ fn mix(a: Vec3, b: Vec3, t: f32) -> Vec3 {
 /// Grass verge: soil under a mat of flattened blades, thatch and clover.
 fn verge() -> TexSet {
     let mut c = Canvas::new(512, 512, Vec2::splat(1.5));
-    let (soil, soil_dark, moss) = (hex(0x4d3d2b), hex(0x30271c), hex(0x4f5c27));
+    let (soil, soil_dark, moss) = (hex(0x4b3e30), hex(0x30281f), hex(0x545b30));
     c.fill(|u, v| {
         let n = fbm(u, v, 6, 4, 11);
         let m = fbm(u, v, 3, 2, 12);
         Texel {
-            color: mix(soil, soil_dark, 0.5 + 0.35 * n).lerp(moss, smooth(-0.1, 0.5, m) * 0.45),
+            color: mix(soil, soil_dark, 0.5 + 0.35 * n).lerp(moss, smooth(-0.1, 0.5, m) * 0.25),
             height: n * 0.003,
             rough: 0.9,
             alpha: coverage(u, v, 5, 13),
@@ -120,12 +120,12 @@ fn verge() -> TexSet {
     });
     let mut rng = Rand::new(1);
     let greens = [
-        hex(0x5b7d2c),
-        hex(0x4a6b22),
-        hex(0x6f8c38),
-        hex(0x7d9142),
-        hex(0x3d5d20),
-        hex(0x587a33),
+        hex(0x637a3a),
+        hex(0x546a30),
+        hex(0x738a44),
+        hex(0x7e8f4c),
+        hex(0x45583a),
+        hex(0x5f7640),
     ];
     let straw = [hex(0x9c8c58), hex(0x857447), hex(0xa89a66)];
     for _ in 0..13_000 {
@@ -150,11 +150,11 @@ fn verge() -> TexSet {
         });
     }
     // Clover and small round leaves.
-    for _ in 0..260 {
+    for _ in 0..120 {
         let (u, v) = (rng.f(), rng.f());
-        let r = rng.range(2.5, 4.5);
+        let r = rng.range(2.0, 3.5);
         let rot = rng.range(0.0, TAU);
-        let col = hex(0x4a7a2a) * rng.range(0.85, 1.2);
+        let col = hex(0x5c6e3a) * rng.range(0.8, 1.0);
         for k in 0..3 {
             let a = rot + k as f32 * TAU / 3.0;
             let off = Vec2::new(a.cos(), a.sin()) * r * 0.9 / 512.0;
@@ -168,7 +168,7 @@ fn verge() -> TexSet {
                 |cov, q, _, t| {
                     t.color = mix(t.color, col * (1.05 - 0.25 * q), cov);
                     t.height += 0.0015 * cov * (1.0 - q * q);
-                    t.rough = lerp(t.rough, 0.7, cov);
+                    t.rough = lerp(t.rough, 0.88, cov);
                 },
             );
         }
@@ -179,12 +179,16 @@ fn verge() -> TexSet {
 /// Packed bare earth: the worn line down the middle of the grass.
 fn dirt() -> TexSet {
     let mut c = Canvas::new(512, 512, Vec2::splat(1.5));
-    let (light, dark, grey) = (hex(0x7b6c5a), hex(0x55483a), hex(0x77706a));
+    let (light, dark, grey) = (hex(0x786d60), hex(0x524940), hex(0x77716b));
     c.fill(|u, v| {
         let n = fbm(u, v, 5, 4, 21);
         let f = fbm(u, v, 40, 2, 22);
-        let cell = worley(u * 14.0, v * 14.0, 14, 23, 0.9);
-        let crack = 1.0 - smooth(0.0, 0.035, cell.f2 - cell.f1);
+        // Cracks wander (a warped cell net), are hairline thin and only open where the earth
+        // has dried out, in patches.
+        let (wu, wv) = (0.25 * fbm(u, v, 6, 2, 27), 0.25 * fbm(u, v, 6, 2, 28));
+        let cell = worley((u + wu / 14.0) * 14.0, (v + wv / 14.0) * 14.0, 14, 23, 0.9);
+        let dry = smooth(0.2, 0.6, fbm(u, v, 3, 2, 26));
+        let crack = (1.0 - smooth(0.0, 0.018, cell.f2 - cell.f1)) * dry;
         let grit = unit(super::procgen::hash(
             (u * 512.0) as i32,
             (v * 512.0) as i32,
@@ -192,10 +196,10 @@ fn dirt() -> TexSet {
         ));
         let col = mix(light, dark, 0.45 + 0.5 * n).lerp(grey, smooth(0.2, 0.7, f) * 0.3)
             * (0.9 + 0.2 * grit)
-            * (1.0 - crack * 0.35);
+            * (1.0 - crack * 0.15);
         Texel {
             color: col,
-            height: n * 0.004 + f * 0.0008 - crack * 0.0015,
+            height: n * 0.004 + f * 0.0008 - crack * 0.0007,
             rough: 0.92 - 0.1 * smooth(0.0, 1.0, n),
             alpha: coverage(u, v, 6, 25),
             ..Default::default()
@@ -247,7 +251,7 @@ fn dirt() -> TexSet {
 /// and drier ridges, straw and grit.
 fn mud() -> TexSet {
     let mut c = Canvas::new(512, 512, Vec2::splat(2.0));
-    let (wet, dry, brown) = (hex(0x2a1f17), hex(0x574536), hex(0x433326));
+    let (wet, dry, brown) = (hex(0x27231f), hex(0x5a5047), hex(0x403830));
     c.fill(|u, v| {
         let n = fbm(u, v, 4, 5, 31);
         let d = fbm(u, v, 12, 3, 32);
@@ -259,10 +263,12 @@ fn mud() -> TexSet {
         let wetness = smooth(0.0, -0.4, low);
         let film = smooth(-0.42, -0.5, low);
         let col = mix(brown, dry, smooth(-0.2, 0.6, n + d * 0.5)).lerp(wet, wetness * 0.8);
+        // The films lie flat over the bumps, so only they mirror the sky.
+        let height = (h - wetness * 0.002).max(-0.0056);
         Texel {
             color: col * (1.0 - 0.2 * film),
-            height: (h - wetness * 0.002).max(-0.0056),
-            rough: lerp(lerp(0.86, 0.45, wetness), 0.06, film),
+            height: lerp(height, -0.0056, smooth(0.3, 0.8, film)),
+            rough: lerp(lerp(0.88, 0.62, wetness), 0.08, film),
             alpha: coverage(u, v, 5, 34),
             ..Default::default()
         }
@@ -272,7 +278,7 @@ fn mud() -> TexSet {
     for _ in 0..450 {
         let (u, v) = (rng.f(), rng.f());
         let r = rng.range(2.0, 7.0);
-        let col = hex(0x4f3c2a) * rng.range(0.85, 1.3);
+        let col = hex(0x4b433a) * rng.range(0.85, 1.3);
         let lift = rng.range(0.0008, 0.0028);
         let (k1, k2) = (rng.range(0.0, TAU), rng.range(0.0, TAU));
         ellipse(
@@ -295,7 +301,7 @@ fn mud() -> TexSet {
     }
     for _ in 0..80 {
         let (u, v) = (rng.f(), rng.f());
-        let col = hex(0x7d6a40) * rng.range(0.5, 0.9);
+        let col = hex(0x7a6c4e) * rng.range(0.5, 0.9);
         line(
             &mut c,
             u,
@@ -329,7 +335,7 @@ fn mud() -> TexSet {
             },
         );
     }
-    c.bake(1.5, 26.0)
+    c.bake(1.2, 26.0)
 }
 
 /// Settled snow: soft drifts and wind ripples, a granular crust of old crystals, and ice
@@ -371,7 +377,15 @@ fn snow() -> TexSet {
             } else {
                 0.6 + 0.12 * grain + 0.06 * crusty
             },
-            alpha: coverage(u, v, 5, 45),
+            // Crumbly: blobs of a few centimeters broken up by the grains, so thin snow
+            // and the snow's edge fall apart into crumbs rather than smooth lobes.
+            alpha: 0.5
+                + 0.5
+                    * (0.5
+                        + 0.9 * fbm(u, v, 10, 3, 45)
+                        + 0.45 * (bead - 0.5)
+                        + 0.3 * fbm(u, v, 40, 2, 48))
+                    .clamp(0.0, 1.0),
             facet,
             ..Default::default()
         }
@@ -535,7 +549,7 @@ fn gravel() -> TexSet {
         hex(0x8a7f78),
         hex(0xb3aa9a),
     ];
-    let gap = hex(0x4a4036);
+    let gap = hex(0x3a332c);
     c.fill(|u, v| {
         let warp = fbm(u, v, 8, 2, 61) * 0.4;
         let a = worley(u * 38.0 + warp, v * 38.0 - warp, 38, 62, 0.95);
@@ -567,7 +581,7 @@ fn gravel() -> TexSet {
             ..Default::default()
         }
     });
-    c.bake(1.0, 60.0)
+    c.bake(1.4, 70.0)
 }
 
 /// Cast concrete: fine aggregate, pores, blotchy stains.
@@ -715,7 +729,15 @@ fn sand() -> TexSet {
             color: col,
             height: profile * 0.003 + n * 0.0025,
             rough: 0.95,
-            alpha: coverage(u, v, 5, 95),
+            // Coarse lobes broken down to drifts of grains, so the thin edge dissolves
+            // instead of ending in a cut-out line.
+            alpha: 0.5
+                + 0.5
+                    * (0.5
+                        + 0.8 * fbm(u, v, 5, 3, 95)
+                        + 0.45 * fbm(u, v, 24, 2, 98)
+                        + 0.35 * (unit(px >> 17) - 0.5))
+                        .clamp(0.0, 1.0),
             ..Default::default()
         }
     });
@@ -741,10 +763,13 @@ fn sand() -> TexSet {
     c.bake(0.85, 15.0)
 }
 
-/// Forest floor: dark soil under decayed leaves, needles, twigs and moss.
+/// Forest floor: dark soil under decayed leaves (real leaf outlines, overlapping, each
+/// shading the one under it, some curled up at an edge), needles, twigs and moss. The
+/// coverage alpha follows the leaves, so where the litter thins out at its edges it falls
+/// apart leaf by leaf.
 fn forest_floor() -> TexSet {
     let mut c = Canvas::new(512, 512, Vec2::splat(2.0));
-    let (soil, moss) = (hex(0x2c2119), hex(0x46532a));
+    let (soil, moss) = (hex(0x2c2420), hex(0x464f2c));
     c.fill(|u, v| {
         let n = fbm(u, v, 5, 4, 101);
         let m = smooth(0.3, 0.7, fbm(u, v, 4, 3, 102));
@@ -752,7 +777,8 @@ fn forest_floor() -> TexSet {
             color: soil * (0.85 + 0.3 * n) + moss * m * 0.5,
             height: n * 0.003,
             rough: 0.85,
-            alpha: coverage(u, v, 5, 103),
+            // Bare soil between the leaves is the first to go at a ragged edge.
+            alpha: 0.5 + 0.6 * (coverage(u, v, 5, 103) - 0.5),
             ..Default::default()
         }
     });
@@ -768,33 +794,55 @@ fn forest_floor() -> TexSet {
         hex(0x2a2119),
         hex(0x7d6a4a),
     ];
-    for _ in 0..2600 {
+    for _ in 0..2300 {
         let (u, v) = (rng.f(), rng.f());
-        let rx = rng.range(4.0, 11.0);
-        let ry = rx * rng.range(0.4, 0.75);
+        // Leaf length in pixels (5..12 cm).
+        let size = rng.range(13.0, 30.0);
         let ang = rng.range(0.0, TAU);
+        let cell = rng.below(4) as u32;
         let col = leaf_cols[rng.below(leaf_cols.len())] * rng.range(0.75, 1.15);
         // Older leaves lose their colour to grey-brown.
         let col = col.lerp(
             Vec3::splat(col.dot(Vec3::splat(1.0 / 3.0))),
             rng.range(0.0, 0.5),
         );
-        let rot = rng.range(0.6, 1.0);
-        ellipse(&mut c, u, v, rx, ry, ang, |cov, q, p, t| {
-            let vein = 1.0 - smooth(0.0, 0.08, p.y.abs());
-            let edge = smooth(0.7, 1.0, q);
-            t.color = mix(
-                t.color,
-                col * (1.0 + 0.2 * vein) * (1.0 - edge * 0.35) * rot,
-                cov,
-            );
-            t.height += 0.0009 * cov + 0.0003 * vein * cov;
-            t.rough = lerp(t.rough, 0.7, cov);
+        let curl = rng.range(-1.0, 1.0);
+        let (sn, cs) = ang.sin_cos();
+        // Leaf space of a texel `(dx, dy)` pixels from the centre: across and along.
+        let local = move |dx: f32, dy: f32| {
+            let along = (dx * cs + dy * sn) / size;
+            let across = (-dx * sn + dy * cs) / size;
+            (across, along)
+        };
+        // Its shadow on what lies under it, offset away from the light.
+        c.stamp(u, v, size * 0.6 + 2.0, |dx, dy, t| {
+            let (cc, a) = local(dx - 1.5, dy - 1.5);
+            let (inside, _) = leaf_shape(cell, cc, a);
+            let k = smooth(-0.02, 0.03, inside);
+            t.color *= 1.0 - 0.22 * k;
+            t.ao *= 1.0 - 0.15 * k;
+        });
+        c.stamp(u, v, size * 0.6 + 2.0, |dx, dy, t| {
+            let (cc, a) = local(dx, dy);
+            let (inside, vein) = leaf_shape(cell, cc, a);
+            let cov = smooth(-0.01, 0.01, inside);
+            if cov <= 0.0 {
+                return;
+            }
+            let edge = 1.0 - smooth(0.0, 0.05, inside);
+            // One side curled up, catching the light.
+            let lift = smooth(0.0, 0.25, cc * curl) * edge;
+            let shade = (1.0 + 0.15 * vein) * (1.0 - 0.15 * edge) * (1.0 + 0.25 * lift);
+            t.color = mix(t.color, col * shade, cov);
+            t.height += (0.0008 + 0.0012 * lift) * cov + 0.0002 * vein * cov;
+            t.rough = lerp(t.rough, 0.72, cov);
+            t.ao = lerp(t.ao, 1.0, cov);
+            t.alpha = lerp(t.alpha, 1.0, cov * rng_free(u, v, cell));
         });
     }
     for _ in 0..1200 {
         let (u, v) = (rng.f(), rng.f());
-        let col = [hex(0x6b3e1e), hex(0x4a2e18), hex(0x8a5a2e)][rng.below(3)];
+        let col = [hex(0x5e3e26), hex(0x4a3220), hex(0x7a5a3a)][rng.below(3)];
         line(
             &mut c,
             u,
@@ -829,13 +877,24 @@ fn forest_floor() -> TexSet {
     c.bake(1.4, 30.0)
 }
 
+/// How solid one leaf stamp is in the coverage (0.6..1): most leaves fully, some only
+/// partly, so the litter's edge keeps a few loose leaves rather than all or none.
+fn rng_free(u: f32, v: f32, cell: u32) -> f32 {
+    0.6 + 0.4
+        * unit(super::procgen::hash(
+            (u * 4096.0) as i32,
+            (v * 4096.0) as i32,
+            cell + 1,
+        ))
+}
+
 // ----------------------------------------------------------------------------- props
 
 /// Weathered softwood: grain along u (2 m) across 0.5 m, latewood ridges, checks and knots,
 /// half silvered. Planks pick their own window of it.
 fn planks() -> TexSet {
     let mut c = Canvas::new(1024, 256, Vec2::new(2.0, 0.5));
-    let (early, late, silver) = (hex(0x98806a), hex(0x564434), hex(0x8e8c86));
+    let (early, late, silver) = (hex(0x8c7c6a), hex(0x4e4337), hex(0x9a9994));
     let mut rng = Rand::new(13);
     let knots: Vec<(Vec2, f32)> = (0..5)
         .map(|_| (Vec2::new(rng.f(), rng.f()), rng.range(0.006, 0.014)))
@@ -899,16 +958,17 @@ fn galvanized() -> TexSet {
         let dir = Vec2::new(unit(cell.id) - 0.5, unit(cell.id >> 7) - 0.5);
         let sheen = (cell.to.dot(dir) * 1.5).clamp(-0.5, 0.5);
         let dirt = smooth(0.0, 0.7, fbm(u, v, 4, 4, 122));
-        let white = smooth(0.35, 0.65, fbm(u, v, 6, 3, 123));
+        // White rust in faint streaks along the length (u), never in round spots.
+        let white = smooth(0.45, 0.75, fbm2(u, v, 3, 18, 3, 123));
         let tone = 0.6 + 0.12 * (unit(cell.id >> 3) - 0.5) + 0.04 * sheen;
         let col = Vec3::splat(tone)
             .lerp(Vec3::new(0.25, 0.24, 0.22), dirt * 0.4)
-            .lerp(Vec3::splat(0.72), white * 0.5);
+            .lerp(Vec3::splat(0.62), white * 0.2);
         Texel {
             color: col,
             height: -0.00003 * smooth(0.0, 0.05, cell.f2 - cell.f1),
-            rough: (0.45 + 0.2 * unit(cell.id >> 11) + dirt * 0.25 + white * 0.3).min(1.0),
-            metal: 0.8 - white * 0.6 - dirt * 0.3,
+            rough: (0.45 + 0.2 * unit(cell.id >> 11) + dirt * 0.25 + white * 0.15).min(1.0),
+            metal: 0.8 - white * 0.3 - dirt * 0.3,
             ..Default::default()
         }
     });
@@ -947,7 +1007,7 @@ fn tread() -> TexSet {
             .lerp(Vec3::new(0.14, 0.12, 0.1), grime * 0.7);
         Texel {
             color: col,
-            rough: lerp(0.58 + 0.08 * spangle, 0.36, polish)
+            rough: lerp(0.58 + 0.08 * spangle, 0.45, polish)
                 .max(0.85 * rust)
                 .max(0.9 * grime),
             metal: lerp(0.8, 1.0, polish) * (1.0 - rust * 0.9) * (1.0 - 0.8 * grime),

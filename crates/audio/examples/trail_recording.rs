@@ -14,14 +14,11 @@
 
 use std::path::PathBuf;
 
-use engine_audio::demo::{TRAIL_LENGTH, TrailWalker, spawn_demo, stretch_start};
+use engine_audio::demo::{TRAIL_LENGTH, TrailWalker, spawn_backdrop, spawn_demo, stretch_start};
 use engine_audio::{Audio, AudioListener, AudioOutput, AudioPlugin, AudioSettings};
 use engine_core::prelude::*;
 use engine_core::time::TimeSource;
-use engine_render::{
-    Atmosphere, Camera, DirectionalLight, MeshRenderer, RenderPlugin, Screenshots, Shape,
-    StandardMaterial,
-};
+use engine_render::{Atmosphere, Camera, DirectionalLight, RenderPlugin, Screenshots};
 use engine_world::{PrecipitationKind, SurfaceLayers, WeatherState, WorldPlugin};
 
 struct Options {
@@ -218,77 +215,9 @@ fn setup(mut commands: Commands, script: Res<Script>) {
         DirectionalLight::default(),
         Transform::default().looking_at(DVec3::new(-0.55, -0.42, -0.62), Vec3::Y),
     ));
-    let grass = StandardMaterial::hex(0x55743a).with_roughness(0.95);
-    commands.spawn((
-        Transform::from_translation(origin),
-        MeshRenderer::new(
-            Shape::Plane {
-                size: [800.0, 800.0],
-                subdivisions: 1,
-            },
-            grass,
-        ),
-    ));
-    // Trees round the trail, so there is something to walk past.
-    let bark = StandardMaterial::hex(0x5a4030).with_roughness(0.9);
-    let leaves = [0x3f6b2a, 0x557f2c, 0x2f5a2f].map(|c| {
-        StandardMaterial::hex(c)
-            .with_roughness(0.7)
-            .with_subsurface(0.45)
-            .with_wind_sway(0.3)
-    });
-    let mut seed = 0x9E37_79B9_7F4A_7C15u64;
-    let mut rnd = move || {
-        seed ^= seed << 13;
-        seed ^= seed >> 7;
-        seed ^= seed << 17;
-        (seed >> 11) as f64 / (1u64 << 53) as f64
-    };
-    for i in 0..60 {
-        let a = rnd() * std::f64::consts::TAU;
-        let p = if i < 6 {
-            // A few trees in the middle of the loop.
-            DVec3::new((rnd() - 0.5) * 26.0, 0.0, (rnd() - 0.5) * 3.0)
-        } else {
-            let r = 16.0 + rnd() * 34.0;
-            DVec3::new(a.cos() * (r + 22.0), 0.0, a.sin() * r)
-        };
-        let p = origin + p;
-        let h = 3.5 + rnd() as f32 * 4.5;
-        commands.spawn((
-            Transform::from_translation(p + DVec3::new(0.0, h as f64 * 0.5, 0.0)),
-            MeshRenderer::new(
-                Shape::Cylinder {
-                    radius: 0.1 + h * 0.015,
-                    height: h,
-                    segments: 10,
-                },
-                bark,
-            ),
-        ));
-        let crown = 1.1 + h * 0.2;
-        for (k, (dx, dy, dz, r)) in [
-            (0.0, 0.2, 0.0, 1.0),
-            (0.45, 0.75, -0.25, 0.7),
-            (-0.4, 0.55, 0.35, 0.75),
-        ]
-        .into_iter()
-        .enumerate()
-        {
-            let c = DVec3::new(dx, dy, dz) * crown as f64;
-            commands.spawn((
-                Transform::from_translation(p + DVec3::new(0.0, h as f64, 0.0) + c)
-                    .with_scale(Vec3::new(1.0, 0.85, 1.0)),
-                MeshRenderer::new(
-                    Shape::Sphere {
-                        radius: crown * r as f32,
-                        segments: 18,
-                    },
-                    leaves[(i + k) % 3],
-                ),
-            ));
-        }
-    }
+    // Ground, a lawn where the trail's meadow ends, and trees to walk past (placed so
+    // their shadows miss the trail).
+    spawn_backdrop(&mut commands, origin);
     spawn_demo(&mut commands, origin);
     let mut cam = Camera::perspective(50.0);
     if let engine_render::Exposure::Auto { speed, .. } = &mut cam.exposure {
