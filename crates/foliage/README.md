@@ -49,7 +49,8 @@ engine_foliage::spawn_plant(world, "oak", DVec3::new(3.0, 0.0, 4.0), 0.2, None)?
 - **Scale**: regions far from every `SimulationFocus` stop and catch up in coarse steps when
   the player returns. Trees use a cheaper mesh far away (past `tree_lod_distance_m`) and a
   cheapest one beyond `tree_distant_distance_m` (a trunk and a few big crown cards, 150 to 1,000
-  triangles, for whole wooded hillsides); grass, ferns and flowers switch to a
+  triangles, for whole wooded hillsides); both distances scale with `0.5 + size`, so a grown
+  tree switches at 105 m and 360 m by default; grass, ferns and flowers switch to a
   far mesh (about a tenth of the triangles) past `EcologySettings::small_plant_lod_distance_m`
   and vanish beyond `small_plant_distance_m`. Each species has four mesh variants shared by all
   its plants, so a forest draws in a few instanced batches.
@@ -58,7 +59,9 @@ engine_foliage::spawn_plant(world, "oak", DVec3::new(3.0, 0.0, 4.0), 0.2, None)?
   from a tower): it never grows, seeds, burns or falls, and gets no collider, but it draws
   its near, far or distant level by its distance to the camera, follows the season, and is
   hidden beyond `scenery_tree_draw_distance_m` (6 km). Only an eighth of them are looked at
-  each frame, so tens of thousands cost little.
+  each frame, so tens of thousands cost little, and only those within the renderer's shadow
+  distance cast shadows. Vary sizes with `size`, not the transform's scale (the detail
+  distances count `size` only).
   `SceneryTree::new(&library, "pine", seed)` picks its genes from the seed.
 - **Chopping** (`felling`): `DamageEvent`s on a plant, its drawn parts or its trunk collider
   add chop damage (axes count fully, bullets a little, fire not at all). Past the species'

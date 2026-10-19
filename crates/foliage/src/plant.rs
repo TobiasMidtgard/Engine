@@ -317,12 +317,15 @@ pub struct EcologySettings {
     pub small_plant_distance_m: f32,
     /// Small plants beyond this distance use their simplified mesh, meters.
     pub small_plant_lod_distance_m: f32,
-    /// Trees beyond this distance use their simplified mesh, meters.
+    /// Trees beyond this distance use their simplified mesh, meters, scaled by
+    /// `0.5 + size`: a grown tree switches at 1.5× this (105 m by default), a sapling sooner.
     pub tree_lod_distance_m: f32,
     /// Trees beyond this distance use their cheapest mesh (a trunk and a few big crown
-    /// cards, a few hundred triangles), meters: for valleys of scenery trees seen from afar.
+    /// cards, a few hundred triangles), meters, scaled like `tree_lod_distance_m` (360 m for a
+    /// grown tree by default): for valleys of scenery trees seen from afar.
     pub tree_distant_distance_m: f32,
-    /// Scenery trees ([`crate::SceneryTree`]) beyond this distance are not drawn, meters.
+    /// Scenery trees ([`crate::SceneryTree`]) beyond this distance are not drawn, meters (not
+    /// scaled by size).
     pub scenery_tree_draw_distance_m: f32,
     /// Only trees this close to a `FocusPoints` focus have a trunk collider, meters (colliders
     /// stream in and out as the focus moves; every tree has one when there is no focus).

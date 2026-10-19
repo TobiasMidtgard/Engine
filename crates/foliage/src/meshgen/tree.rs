@@ -1553,8 +1553,8 @@ fn distant_wood(
     let p: Vec<Vec3> = pick.iter().map(|&i| path[i]).collect();
     let r: Vec<f32> = pick.iter().map(|&i| radius[i]).collect();
     let color = |i: usize, _a: f32| bark_color(sp, p[i].y, h, pick[i], seed);
-    let tip = |_: f32| rgb(sp.bark_color, 0.8);
-    b.tube(&p, &r, 4, 0.5, &color, None, Some(&tip));
+    // No cap: the trunk's top is hidden in the crown.
+    b.tube(&p, &r, 4, 0.5, &color, None, None);
     for (k, br) in branches
         .iter()
         .filter(|br| br.level == 1 && br.radius[0] > 0.045)

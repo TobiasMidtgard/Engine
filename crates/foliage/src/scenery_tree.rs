@@ -21,7 +21,9 @@ use crate::visuals::{Part, PlantPart, apply, camera_position, desired_parts, pla
 
 /// A static tree with a species' looks (see the module docs). Put it on an entity with a
 /// `Transform` at the foot of the tree: the transform places, turns and scales the tree; its
-/// lean, height and crown width come from `genes` on top.
+/// lean, height and crown width come from `genes` on top. The level-of-detail distances count
+/// `size` (see [`EcologySettings::tree_lod_distance_m`]) but not the transform's scale, so vary
+/// tree sizes through `size` rather than the scale.
 #[derive(Component, Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[require(Transform)]
 #[serde(default)]
@@ -64,14 +66,23 @@ impl SceneryTree {
 pub struct SceneryTreeVisual {
     pub parts: [Entity; 3],
     shown: [Part; 3],
+    /// Whether the parts cast sun shadows (only within the renderer's shadow reach).
+    shadows: bool,
 }
 
 /// Scenery trees are looked at in this many slices, one slice a frame.
 const SLICES: u32 = 8;
 
+/// How far past the renderer's shadow distance a tree still casts its shadow, meters (its
+/// crown and its shadow reach in from beyond it).
+const SHADOW_MARGIN_M: f32 = 40.0;
+
 /// Keep each scenery tree's parts showing the right level of detail for its distance and the
 /// season. New and changed trees are handled at once, the rest a slice a frame (all of them
-/// when the visuals, the settings or the season change).
+/// when the visuals, the settings or the season change). Nothing is picked without an active
+/// camera, and a new tree waits one frame for its world transform, so trees spawned with the
+/// camera don't all start in full detail at the origin. Only trees within the renderer's
+/// shadow reach cast shadows.
 #[allow(clippy::type_complexity, clippy::too_many_arguments)]
 pub fn sync_scenery_trees(
     mut commands: Commands,
@@ -80,21 +91,31 @@ pub fn sync_scenery_trees(
     visuals: Res<FoliageVisuals>,
     settings: Res<EcologySettings>,
     season: Res<FoliageSeason>,
+    render: Option<Res<engine_render::RenderSettings>>,
     cams: Query<(&Camera, &GlobalTransform)>,
     mut trees: Query<(
         Entity,
         Ref<SceneryTree>,
-        &GlobalTransform,
+        Ref<GlobalTransform>,
         Option<&mut SceneryTreeVisual>,
     )>,
     mut parts: Query<(&mut MeshRenderer, &mut Transform), With<PlantPart>>,
 ) {
     *frame = frame.wrapping_add(1);
-    let all = visuals.is_changed() || settings.is_changed() || season.is_changed();
+    let render_changed = render.as_ref().is_some_and(|r| r.is_changed());
+    let all =
+        visuals.is_changed() || settings.is_changed() || season.is_changed() || render_changed;
     let slice = *frame % SLICES;
-    let cam = camera_position(&cams);
+    let Some(cam) = camera_position(&cams) else {
+        return;
+    };
+    let shadow_reach = render.as_ref().map_or(350.0, |r| r.shadow_distance) + SHADOW_MARGIN_M;
     for (entity, tree, global, visual) in &mut trees {
         let fresh = visual.is_none();
+        // Not propagated yet: its world transform still says the origin.
+        if fresh && global.is_added() {
+            continue;
+        }
         if !all && !fresh && !tree.is_changed() && entity.index().index() % SLICES != slice {
             continue;
         }
@@ -103,7 +124,8 @@ pub fn sync_scenery_trees(
         };
         let sp = library.get(tree.species);
         let plant = tree.plant();
-        let distance = cam.map_or(0.0, |c| c.distance(global.translation()) as f32);
+        let distance = cam.distance(global.translation()) as f32;
+        let shadows = distance <= shadow_reach;
         let want = if distance > settings.scenery_tree_draw_distance_m {
             [None; 3]
         } else {
@@ -114,7 +136,7 @@ pub fn sync_scenery_trees(
         let pose = Transform::from_rotation(rotation).with_scale(scale);
         match visual {
             Some(mut visual) => {
-                if visual.shown == want && !tree.is_changed() {
+                if visual.shown == want && visual.shadows == shadows && !tree.is_changed() {
                     continue;
                 }
                 for (i, &part) in visual.parts.iter().enumerate() {
@@ -124,11 +146,15 @@ pub fn sync_scenery_trees(
                     if visual.shown[i] != want[i] {
                         apply(&mut r, want[i]);
                     }
+                    if r.cast_shadows != shadows {
+                        r.cast_shadows = shadows;
+                    }
                     if *t != pose {
                         *t = pose;
                     }
                 }
                 visual.shown = want;
+                visual.shadows = shadows;
             }
             None => {
                 let parts = std::array::from_fn(|i| {
@@ -137,11 +163,14 @@ pub fn sync_scenery_trees(
                         engine_render::StandardMaterial::default(),
                     );
                     apply(&mut r, want[i]);
+                    r.cast_shadows = shadows;
                     commands.spawn((pose, ChildOf(entity), r, PlantPart)).id()
                 });
-                commands
-                    .entity(entity)
-                    .insert(SceneryTreeVisual { parts, shown: want });
+                commands.entity(entity).insert(SceneryTreeVisual {
+                    parts,
+                    shown: want,
+                    shadows,
+                });
             }
         }
     }
@@ -199,6 +228,10 @@ mod tests {
             .id();
         let at = |d: f64| Transform::from_translation(DVec3::new(d, 0.0, 0.0));
         let trees = [10.0, 150.0, 900.0, 9000.0].map(|d| app.world.spawn((at(d), pine)).id());
+        // Spawned with the camera: the first frame waits for their world transforms, rather
+        // than drawing every tree in full detail at the origin.
+        app.update();
+        assert!(app.world.get::<SceneryTreeVisual>(trees[3]).is_none());
         app.update_n(SLICES as usize + 2);
         let vis = app
             .world
@@ -212,6 +245,12 @@ mod tests {
         assert_eq!(distant, [None, v.wood_distant, v.foliage_distant]);
         assert!(v.foliage_distant.is_some());
         assert_eq!(gone, [None; 3]);
+        // Only trees within the shadow reach cast shadows.
+        let casts = |t: Entity| {
+            let p = app.world.get::<SceneryTreeVisual>(t).unwrap().parts[1];
+            app.world.get::<MeshRenderer>(p).unwrap().cast_shadows
+        };
+        assert!(casts(trees[0]) && casts(trees[1]) && !casts(trees[2]));
         // The camera walks up to the far tree: it draws in full detail within a few frames.
         app.world.get_mut::<Transform>(cam).unwrap().translation = DVec3::new(140.0, 0.0, 0.0);
         app.update_n(SLICES as usize + 1);
