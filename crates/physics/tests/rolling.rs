@@ -294,3 +294,29 @@ fn zero_rolling_resistance_rolls_forever() {
         "slowed at {got} m/s² with no rolling resistance"
     );
 }
+
+#[test]
+fn a_ball_spun_on_its_spot_slows_and_stops() {
+    // Spin friction over the contact patch: α = μ·g·lever / (2/5·r²), with a lever of 1 cm and μ
+    // between the ball's and the concrete's (0.5–0.8): 1.4–2.2 rad/s² for a 0.3 m ball.
+    let mut app = app();
+    ground(&mut app, "concrete");
+    let ball = launch(&mut app, Roller::Ball, 0.0);
+    app.update_n(15);
+    app.world.get_mut::<Velocity>(ball).unwrap().angular = Vec3::Y * 8.0;
+    let spin = |app: &App| app.world.get::<Velocity>(ball).unwrap().angular.y;
+    app.update_n(120);
+    let slowed = (8.0 - spin(&app)) / 2.0;
+    assert!(
+        (1.0..3.0).contains(&slowed),
+        "spin slowed at {slowed} rad/s², expected about 1.4–2.2"
+    );
+    app.update_n(6 * 60);
+    let at = app.world.get::<Transform>(ball).unwrap().translation;
+    assert!(
+        spin(&app).abs() < 0.05 && speed(&app, ball) < 0.01 && (at.x + 150.0).abs() < 0.05,
+        "the ball still spins at {} rad/s, or wandered off to x {}",
+        spin(&app),
+        at.x
+    );
+}

@@ -71,6 +71,19 @@ compresses and stretches.
   height: 1.74 m or 1.81 m), else generated; the imported horse is scaled to the requested
   shoulder height and the dog is built at it. Other kinds get no body and keep the
   requester's stand-in.
+- **Ragdolls.** A person, dog or horse with `Ragdoll { weight }` (the physics contract)
+  turns physical. A person is fourteen capsule bodies (pelvis, belly, chest, head, upper and
+  lower arms and legs, feet) weighing 75 kg at 1.75 m, with real joint ranges (hinged elbows
+  and knees, cones and twist limits at hips, shoulders, spine and ankles) and joint friction.
+  Dogs (30 kg at 56 cm, scaled by size) and horses (500 kg) are sixteen: trunk, neck, head
+  and three parts a leg, the elbows and hocks folding forward, the carpi and stifles back. At weight 1 the body is
+  limp and carries the momentum it had; between 0 and 1 each part is pulled toward the
+  animated pose and held up against gravity, so a half-limp person staggers and sags instead
+  of collapsing. The pose follows the bodies (feet, gait and footsteps stop) and blends back
+  to the animation when the weight returns to 0. Parts collide with the world but not with
+  each other or their owner's controller (`RAGDOLL_LAYER`), foot IK ignores them, and hard
+  hits become `GroundContact`s of kind `Body` and `NoiseEvent`s. Without a physics module the
+  body stays animated. It runs in `AnimSet::Ragdoll`, after IK and before muscles.
 - **Time.** Every animator uses `Time::delta_for(LocalTimeScale)`, so `TimeDilation` slows
   animation and a hero who ignores world dilation keeps moving at full speed. Animators
   beyond `lod_distance` from the simulation focus update at a quarter rate.
@@ -96,7 +109,8 @@ with automatic weights and muscle morph targets.
 
 Tunable at runtime (JSON, console, scripts, AI agents): `AnimatorSettings`, `FootIk`,
 `LookAt`, `ReachIk`, `IkSurface`, `SpringChains`, `LeggedGait`, `VehicleRig`, `MuscleRig`,
-`SkinnedMeshRenderer` (with its `SkinMaterial`), `BoneAttachment`, `DemoPath`, `DemoScript`.
+`SkinnedMeshRenderer` (with its `SkinMaterial`), `BoneAttachment`, `DemoPath`, `DemoScript`,
+`Stunt`.
 
 API: `anim.list`, `anim.state` (graph state, curves, events, muscles, gait), `anim.clips`,
 `anim.set_param`, `anim.trigger`, `anim.add_graph`, `anim.set_graph`, `anim.spawn`,
@@ -137,6 +151,7 @@ renderer's generated materials (planks, concrete, sand, rock), and the spider cl
 | Spider garden | A furred red-knee tarantula climbs over boulders in alternating sets of legs, a wave running from the back legs forward; its palps tap, its jaws work and its abdomen sways (`paddock_spider`) |
 | Car loop | A concept car: suspension over speed bumps, roll in corners, steering and spinning wheels with the brake calipers held still |
 | Parked car | A second concept car inside the loop swings its doors open on their front hinges, holds, and shuts them with a bounce on the latch |
+| Stunt yard | A stuntman climbs the stairs to a deck, sprints across and goes limp at the edge: he tumbles onto the crash mat with the run's momentum, lies still, gets up where he landed and walks back round (`paddock_stunt`, `paddock_stunt_down`; needs the physics module) |
 
 `cargo run -p engine_anim --example anim_gallery --release -- out_dir` renders close-ups of
 each test case (`GALLERY_SEQUENCE=horse:11:12:0.05` renders a strip of one subject).
@@ -159,8 +174,13 @@ paddocks, shifts one halfway, and checks every pose and place still matches.
 `tests/body_request.rs` asks for a hiker, a horse, a 40 cm dog and an unknown kind on
 entities the test moves itself: the bodies walk, run and gallop from that motion, step on the ground, keep the
 requester's own parameters, rebuild on a changed request and go with a removed one.
+`tests/ragdoll.rs` turns a walking person limp on a stand-in physics backend: fourteen
+jointed parts that start together, keep the walk's momentum and ignore each other and the
+owner's controller; the pose follows them, footsteps stop, half-limp parts are pulled
+toward the animation and held up, hard hits sound like a body falling, and the pose blends
+back to standing. A dog and a horse go limp at their weight and get up again too.
 
 ## Not yet
 
-Ragdolls from the physics contract; an imported spider (no free realistic one exists, so it
-is generated from code).
+Ragdolls for spiders; an imported spider (no free realistic one exists, so it is generated
+from code).

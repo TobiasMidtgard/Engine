@@ -60,6 +60,13 @@ engine_foliage::spawn_plant(world, "oak", DVec3::new(3.0, 0.0, 4.0), 0.2, None)?
   feeding the soil. Oak, birch and hazel stumps resprout. Explosions knock trees over too.
 - **Fire**: plants are `Combustible`; when the fire module burns them they become charred
   snags that collapse into ash, which enriches the soil for the next generation.
+- **Seasons** (`season`): plants show `FoliageSeason::day_of_year` (midsummer unless set,
+  or the weather's calendar with `follow_weather`). Deciduous species carry a calendar
+  (`PlantSpecies::seasons`): oak, birch and hazel leaf out in fresh yellow-green, turn their
+  own autumn colors (birch first and yellow, oak last and russet), thin out through leaf fall
+  (each crown has thinned copies; the same leaves go first) and stand bare in winter; bracken
+  rusts and dies back, flowers go to seed and vanish, meadow grass turns to straw. Each leaf
+  tint runs a week apart and every plant a few days of its own, so a wood turns patchily.
 - **Glow**: glowing species pick a brighter material the healthier and better fed they are,
   breathe slowly, and light their surroundings through a pool of point lights (one per
   cluster, at most 40).
@@ -80,7 +87,7 @@ engine_foliage::spawn_plant(world, "oak", DVec3::new(3.0, 0.0, 4.0), 0.2, None)?
 `plant`, `chop`, `fell`, `clear` (fell, burn or remove an area), `species`, `define_species`,
 `stats`, `inspect` (why a plant thrives or struggles: what limits it, the soil under it),
 `set_speed` (world or per-region growth speed, pause), `add_source` (spring, mineral pool,
-dry ridge). Every component and resource above is registered for scenes and the AI bridge.
+dry ridge), `season` (time of year, or follow the weather's calendar). Every component and resource above is registered for scenes and the AI bridge.
 
 ## Showcase
 
@@ -91,7 +98,8 @@ seep feeding glowcaps and lantern caps, a cave floor with mineral crust). Both r
 than the world default so regrowth is visible while you watch.
 
 `cargo run -p engine_foliage --example foliage_shots --release -- <dir>` renders both from
-several viewpoints (including a tree mid-fall and the clearing ten years later).
+several viewpoints (including a tree mid-fall, the clearing through the year and ten years
+later).
 
 ## Contracts
 
@@ -107,4 +115,4 @@ Writes: `Combustible` on plants and logs, static `RigidBody` + `Collider` entiti
 - Grass meadows through the renderer's shared strand pipeline (blades bend under feet).
 - Impostors for distant forests and planet-scale scattering on terrain.
 - A falling tree as a dynamic body when a physics backend is installed.
-- Seasons (autumn color, bare winter crowns, snow on branches).
+- Snow on branches and crowns in winter; fallen leaves on the forest floor in autumn.

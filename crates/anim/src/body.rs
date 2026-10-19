@@ -34,6 +34,7 @@ use crate::ik::FootIk;
 use crate::muscle::{MorphWeights, MuscleRig};
 use crate::procedural::gait::LeggedGait;
 use crate::procedural::spring::SpringChains;
+use crate::ragdoll::RagdollRig;
 use crate::retarget::Retarget;
 use crate::skin::{SkinPose, SkinnedMeshRenderer};
 use crate::xform::smoothing;
@@ -337,5 +338,5 @@ fn strip(world: &mut World, entity: Entity) {
         MorphWeights,
         MuscleRig,
     )>();
-    e.remove::<(FootIk, SpringChains, LeggedGait)>();
+    e.remove::<(FootIk, SpringChains, LeggedGait, RagdollRig)>();
 }

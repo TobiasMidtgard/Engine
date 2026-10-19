@@ -229,7 +229,7 @@ pub const BARE_FOOTPRINTS: &[(&str, [f64; 2], [f64; 2])] = &[
     // The weather station's asphalt yard, sand pit and stone patio.
     ("weather", [-13.5, 13.0], [-8.0, 9.0]),
     // The siege fortress's gravel breach range.
-    ("fortress", [-26.5, 26.5], [-14.0, -4.0]),
+    ("fortress", [-33.5, 26.5], [-14.0, -4.0]),
     // The siege fortress's breach house and the stair up its back wall.
     ("fortress", [11.2, 18.8], [17.7, 25.4]),
     // The market's cobbled square (grass still grows where its edge frays out).
@@ -654,6 +654,20 @@ pub fn demo_views(z: &Zone) -> Vec<View> {
                 .on_arrive("movement.duel", &duel("Blink"))
                 .on_arrive("movement.grappler", "{}")
                 .on_leave("movement.duel", cycle),
+                // The tower ladder: the climber restarts its loop on arrival and is caught
+                // halfway up the caged ladder, hand over hand, the roof railing above it.
+                View::new(
+                    "parkour_ladder",
+                    "Ladder: climb the tower's caged ladder hand over hand, slide back down",
+                    [26.6, 2.0, 19.4],
+                    [23.0, 3.6, 14.6],
+                    16.0,
+                )
+                // Halfway up about 2.9 s into the loop.
+                .warmup(2.45)
+                .on_arrive("movement.duel", &duel("Blink"))
+                .on_arrive("movement.ladder", "{}")
+                .on_leave("movement.duel", cycle),
                 // The freight station: the rider restarts its loop on arrival, with the car
                 // about to pull out, and is caught leaping onto the car's side.
                 View::new(
@@ -731,7 +745,7 @@ pub fn demo_views(z: &Zone) -> Vec<View> {
                 ui(
                     "market_shop",
                     "The trader's shop",
-                    r#"{"screen": "shop", "select": "rifle"}"#,
+                    r#"{"screen": "shop", "select": "staff"}"#,
                 ),
                 ui(
                     "market_inventory",
