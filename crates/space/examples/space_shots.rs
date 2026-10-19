@@ -66,6 +66,17 @@ fn views() -> Vec<View> {
             horizon_deg: Some(4.0),
             ..v("earth_edge", "Earth", 1.0 + 35.0 / 6371.0, 20.0, 38.0, 14.6)
         },
+        // The same over Mars: its dusty air from low orbit and from 30 km up.
+        View {
+            fov: 60.0,
+            horizon_deg: Some(12.0),
+            ..v("mars_low", "Mars", 1.0 + 300.0 / 3389.5, 20.0, 38.0, 14.0)
+        },
+        View {
+            fov: 60.0,
+            horizon_deg: Some(4.0),
+            ..v("mars_edge", "Mars", 1.0 + 30.0 / 3389.5, 20.0, 38.0, 14.0)
+        },
     ]
 }
 

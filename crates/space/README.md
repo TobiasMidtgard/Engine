@@ -57,7 +57,11 @@ world re-anchors on the next body.
 - **Gravity, air and light.** Writes `Gravity::bodies` (the anchor and any body whose reach
   holds the focus), sets the renderer's `Atmosphere` to the nearest body with air (off when
   none), and points every `DirectionalLight` marked `StarLight` at its star with the right
-  illuminance for the distance (≈127 000 lux at 1 AU).
+  illuminance for the distance (≈127 000 lux at 1 AU). Each body's air carries its own
+  scattering (`BodyAtmosphere`, with the renderer's presets `earth()` and `mars()`): Earth's
+  sky is blue with red sunsets, and on Mars the sky is butterscotch by day with a blue glow
+  around the setting sun, its dust veils far cliffs and fills shadows with orange light, and
+  its limb wears that dust seen from orbit.
 - **One sun with the weather.** Either module can run the day:
   - With a `StarLight`, space is the day/night cycle: it writes engine_world's
     `WeatherState::sun_direction`, `time_of_day_h` (local solar time at the world origin) and
@@ -100,7 +104,8 @@ commands.spawn((StarLight::default(), DirectionalLight::default(), Transform::de
 Every planet and moon is drawn from afar by the `space bodies` render feature: a ray-traced
 spheroid (real polar flattening) with anti-aliased edges, limb darkening, relief at the
 terminator, Earth's clouds as a separate layer with shadows and sun glint on its oceans,
-thin haze rims (Venus, Mars; Earth uses the renderer's atmosphere), and Saturn's rings with
+thin haze rims (Venus, and Earth or Mars while the renderer's atmosphere is on another body;
+the body it is on is seen through it), and Saturn's rings with
 their real radial profile, lit and unlit sides and the planet's shadow. Each look
 (`BodyLook`) is painted on the CPU into 2048×1024 maps (rings 4096 texels) with mips: a
 small map first, the full one on a background thread once the body is bigger than ~40 px.
@@ -116,7 +121,7 @@ away it shows the weather systems and up close it breaks into crisp cumulus cove
 same share of sky, with a thin veil under broken cloud. The tops are lit through the air and
 veiled by it. Within `SpaceSettings::cloud_hole_m` (60 km) of the camera the layer leaves
 the sky to the weather's own volumetric clouds. Views `earth_leo` (400 km) and `earth_edge`
-(35 km) in `space_shots` show it.
+(35 km) in `space_shots` show it, and `mars_low` and `mars_edge` the same heights over Mars.
 
 ## Known limits (next rounds)
 

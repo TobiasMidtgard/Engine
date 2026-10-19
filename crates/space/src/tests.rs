@@ -155,14 +155,58 @@ fn sample_air(app: &App, p: DVec3) -> engine_world::AirSample {
 #[test]
 fn every_planet_has_its_own_air() {
     let mut app = app();
-    // Earth keeps the weather-driven standard atmosphere.
+    // Earth keeps the weather-driven standard atmosphere, and its sky is Earth's.
     let home = sample_air(&app, DVec3::new(0.0, 2.0, 0.0));
     assert!((1.1..1.3).contains(&home.density), "{}", home.density);
+    let sky = *app.world.resource::<Atmosphere>();
+    let earth = Atmosphere::earth();
+    assert_eq!(
+        (
+            sky.rayleigh_scattering,
+            sky.mie_absorption,
+            sky.ozone_absorption
+        ),
+        (
+            earth.rayleigh_scattering,
+            earth.mie_absorption,
+            earth.ozone_absorption
+        )
+    );
     // Mars: about 1.6 % of Earth's.
     travel_to(&mut app.world, "Mars", 0.0, 0.0, 2.0).unwrap();
     app.update();
     let mars = sample_air(&app, DVec3::new(0.0, 2.0, 0.0));
     assert!((0.015..0.025).contains(&mars.density), "{}", mars.density);
+    // Its sky is its own dusty air (butterscotch by day, blue around the setting sun), around
+    // the planet under the pad.
+    let sky = *app.world.resource::<Atmosphere>();
+    let dusty = Atmosphere::mars();
+    assert!(sky.enabled);
+    assert_eq!(
+        (
+            sky.rayleigh_scattering,
+            sky.mie_scattering,
+            sky.mie_absorption,
+            sky.ozone_absorption,
+            sky.mie_g_offset,
+            sky.thickness
+        ),
+        (
+            dusty.rayleigh_scattering,
+            dusty.mie_scattering,
+            dusty.mie_absorption,
+            dusty.ozone_absorption,
+            dusty.mie_g_offset,
+            dusty.thickness
+        )
+    );
+    assert!(
+        (sky.planet_radius - 3_389_500.0).abs() < 1.0,
+        "{}",
+        sky.planet_radius
+    );
+    let down = sky.planet_center.normalize();
+    assert!(down.y < -0.999, "{:?}", sky.planet_center);
     let list = &app.world.resource::<Atmospheres>().bodies;
     assert!(
         list.iter().any(|a| a.sea_level_density == 0.0),
