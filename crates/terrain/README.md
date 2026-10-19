@@ -61,7 +61,9 @@ everything else (streaming, LOD, colliders, ground queries, prints) follows the 
   near the camera.) Mountainsides are a patchwork: grass and woods hold
   steep ground below the tree line, outcrops stand on spurs with grass and scree in the
   hollows, and weathered rock (iron-stained faces, dark wet gullies) takes over on cliffs
-  and high up. From orbit, noise per pixel gives woods, snowfields and coasts natural
+  and high up. On Earth-like worlds, cliff faces are eroded into ribs and runnels along the
+  fall line (8 m and 32 m across, sixteen times as long) and streaked where water runs down
+  them: dark varnish and pale mineral stains. From orbit, noise per pixel gives woods, snowfields and coasts natural
   shapes instead of the vertices' blocky ones. On cratered worlds the shader shades the
   craters too small for the vertices, per pixel, from the same scatter as the shape (so
   nothing pops on the way down), fresh ones with bright walls and ejecta.
@@ -82,7 +84,9 @@ everything else (streaming, LOD, colliders, ground queries, prints) follows the 
   across the view at glancing angles. Grass grows in clumps whatever its color, painted and
   tinted grass included: straw-colored tufts beside dark, dense ones, and sunburnt and lush
   stretches tens of meters across; dirt, sand and gravel lie in damp, darker and dry, paler
-  patches. `examples/material_swatches.rs` saves a lit preview of each.
+  patches. Grass tinted to one color (a level's painted pasture) also lies across the land
+  the way grass grows: lusher and darker in hollows, sun-dried on crests and knolls, in
+  drifts tens to hundreds of meters across, so it doesn't read as a lawn from the air. `examples/material_swatches.rs` saves a lit preview of each.
 - **Photo-scanned ground where fetched.** Seven materials (grass, forest floor, soil, mud,
   rock, sand, gravel) have CC0 Poly Haven scans listed in `assets/manifests/terrain.toml`.
   After `cargo run -p fetch-assets -- terrain` they replace the procedural versions
