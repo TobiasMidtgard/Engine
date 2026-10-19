@@ -33,6 +33,11 @@ pub struct PlantMeshes {
     pub foliage: Option<engine_render::Mesh>,
     pub wood_lod: Option<engine_render::Mesh>,
     pub foliage_lod: Option<engine_render::Mesh>,
+    /// Thinned copies of `foliage` for leaf fall and leaf-out ([`LEAF_STEPS`]); deciduous
+    /// species only.
+    pub foliage_thin: Vec<engine_render::Mesh>,
+    /// The same for `foliage_lod`.
+    pub foliage_lod_thin: Vec<engine_render::Mesh>,
     /// A felled log once its twigs have rotted off: the trunk above the cut with stubs of the
     /// big limbs (same model space as `wood`).
     pub log: Option<engine_render::Mesh>,
@@ -429,6 +434,11 @@ impl PlantMeshes {
             lo = lo.min(b.min.y);
             hi = hi.max(b.max.y);
         }
+        // Thinned crowns lie within the full one, and must sway with it.
+        let thin = self
+            .foliage_thin
+            .iter_mut()
+            .chain(&mut self.foliage_lod_thin);
         for m in [
             &mut self.wood,
             &mut self.foliage,
@@ -437,6 +447,7 @@ impl PlantMeshes {
         ]
         .into_iter()
         .flatten()
+        .chain(thin)
         {
             for y in [lo, hi] {
                 m.vertices.push(engine_render::Vertex::new(
@@ -850,6 +861,47 @@ fn emit_card(
 }
 
 /// Leaf tint: brightness and a shift toward the accent color.
+/// Share of a deciduous crown's leaf cards kept at each step of leaf fall (and, the other way,
+/// of leaf-out in spring). The same cards go first at every step, so a crown thins out rather
+/// than reshuffling.
+pub const LEAF_STEPS: [f32; 3] = [0.6, 0.3, 0.1];
+
+/// The thinning steps a species' crown needs: deciduous ones only.
+fn leaf_steps(sp: &PlantSpecies) -> &'static [f32] {
+    if sp.seasons.is_some() {
+        &LEAF_STEPS
+    } else {
+        &[]
+    }
+}
+
+/// A crown's leaf cards as one mesh (`lod`: only the far cards, drawn larger), and thinned
+/// copies of it keeping each share in `steps`.
+fn crown_meshes(
+    cards: &[Card],
+    shading: &Shading,
+    kind: LeafKind,
+    lod: bool,
+    grid: (u32, u32),
+    steps: &[f32],
+) -> (engine_render::Mesh, Vec<engine_render::Mesh>) {
+    let mut full = MeshBuilder::new();
+    let mut thin: Vec<MeshBuilder> = steps.iter().map(|_| MeshBuilder::new()).collect();
+    for (i, c) in cards.iter().enumerate().filter(|(_, c)| !lod || c.far) {
+        emit_card(&mut full, c, shading, kind, lod, grid);
+        let keep = engine_core::math::hash01(i as i64, 0, 0, 0x1eaf_fa11);
+        for (b, &share) in thin.iter_mut().zip(steps) {
+            if keep < share {
+                emit_card(b, c, shading, kind, lod, grid);
+            }
+        }
+    }
+    (
+        full.finish(),
+        thin.into_iter().map(MeshBuilder::finish).collect(),
+    )
+}
+
 fn leaf_tint(sp: &PlantSpecies, rng: &mut Rng) -> Vec3 {
     let leaf = Vec3::from(sp.leaf_color).max(Vec3::splat(0.01));
     let accent = Vec3::from(sp.accent_color);
@@ -964,6 +1016,7 @@ fn assemble(
         out.log = Some(log);
     }
     let kind = kind_of(sp.shape.leaf);
+    let steps = leaf_steps(sp);
     let shading = Shading {
         crown: crowns.crown,
         clumps: crowns.clumps,
@@ -997,18 +1050,15 @@ fn assemble(
             Some(&tip),
         );
         add_branches(&mut b, sp, branches, h, lod, seed, &shading);
-        let mut f = MeshBuilder::new();
-        for c in &crowns.cards {
-            if !lod || c.far {
-                emit_card(&mut f, c, &shading, kind, lod, crowns.grid);
-            }
-        }
+        let (f, thin) = crown_meshes(&crowns.cards, &shading, kind, lod, crowns.grid, steps);
         if lod {
             out.wood_lod = Some(b.finish());
-            out.foliage_lod = Some(f.finish());
+            out.foliage_lod = Some(f);
+            out.foliage_lod_thin = thin;
         } else {
             out.wood = Some(b.finish());
-            out.foliage = Some(f.finish());
+            out.foliage = Some(f);
+            out.foliage_thin = thin;
         }
     }
     out
@@ -1658,21 +1708,19 @@ fn shrub(sp: &PlantSpecies, seed: u64) -> PlantMeshes {
         up: 0.3,
         deep: 0.38,
     };
+    let steps = leaf_steps(sp);
     for lod in [false, true] {
         let mut b = MeshBuilder::new();
         add_branches(&mut b, sp, &cr.branches, h, lod, seed, &shading);
-        let mut f = MeshBuilder::new();
-        for c in &cr.cards {
-            if !lod || c.far {
-                emit_card(&mut f, c, &shading, kind, lod, cr.grid);
-            }
-        }
+        let (f, thin) = crown_meshes(&cr.cards, &shading, kind, lod, cr.grid, steps);
         if lod {
             out.wood_lod = Some(b.finish());
-            out.foliage_lod = Some(f.finish());
+            out.foliage_lod = Some(f);
+            out.foliage_lod_thin = thin;
         } else {
             out.wood = Some(b.finish());
-            out.foliage = Some(f.finish());
+            out.foliage = Some(f);
+            out.foliage_thin = thin;
         }
     }
     out
@@ -1721,6 +1769,30 @@ mod tests {
         let hazel = lib.get(lib.id("hazel").unwrap());
         let m = woody(hazel, 3, false);
         assert!(m.base.is_none() && m.foliage.unwrap().triangle_count() > 50);
+    }
+
+    #[test]
+    fn deciduous_crowns_come_in_thinner_copies_for_leaf_fall() {
+        let lib = PlantLibrary::default();
+        for name in ["oak", "birch", "hazel"] {
+            let m = woody(lib.get(lib.id(name).unwrap()), 2, false);
+            let full = m.foliage.as_ref().unwrap().triangle_count() as f32;
+            assert_eq!(m.foliage_thin.len(), LEAF_STEPS.len(), "{name}");
+            for (thin, share) in m.foliage_thin.iter().zip(LEAF_STEPS) {
+                let kept = thin.triangle_count() as f32 / full;
+                assert!(
+                    (kept - share).abs() < 0.12,
+                    "{name}: kept {kept} of {share}"
+                );
+            }
+            // They sway with the full crown, so they share its bounds.
+            let b = m.foliage.as_ref().unwrap().aabb();
+            for thin in &m.foliage_thin {
+                assert_eq!((thin.aabb().min.y, thin.aabb().max.y), (b.min.y, b.max.y));
+            }
+        }
+        let pine = woody(lib.get(lib.id("pine").unwrap()), 2, false);
+        assert!(pine.foliage_thin.is_empty() && pine.foliage_lod_thin.is_empty());
     }
 
     #[test]

@@ -8,15 +8,17 @@
 //!
 //! Grows the showcase forest and mushroom cave, then photographs them from the demo's
 //! viewpoints: the old forest, the trail, the clear-cut, a tree mid-fall and after it lands, the
-//! spring, the burn scar, the dry ridge, the clearing ten years later, and the cave.
+//! spring, the burn scar, the dry ridge, the clearing through the year (spring leaves, autumn
+//! color, leaf fall, bare winter), the clearing ten years later, and the cave.
 
 use engine_core::prelude::*;
 use engine_core::time::TimeSource;
-use engine_foliage::demo;
 use engine_foliage::scenery::random_rock;
 use engine_foliage::{
-    FallingTree, FelledLog, FoliagePlugin, Plant, PlantLibrary, PlantStage, fell_tree,
+    FallingTree, FelledLog, FoliagePlugin, FoliageSeason, Plant, PlantLibrary, PlantStage,
+    fell_tree,
 };
+use engine_foliage::{demo, season};
 use engine_render::prelude::*;
 use engine_render::{Exposure, RenderDisabled, Screenshots, SkyLightVolume};
 use engine_world::WeatherState;
@@ -411,6 +413,21 @@ fn main() {
     take(&mut app, "06_spring", &by_name("forest_spring"));
     take(&mut app, "07_burn_scar", &by_name("forest_burn_scar"));
     take(&mut app, "08_dry_ridge", &by_name("forest_dry_ridge"));
+
+    // The same clearing through the year: fresh leaves, autumn color, leaf fall, bare winter.
+    for (file, day, view) in [
+        ("12_spring", 126.0, "forest_clearing"),
+        ("13_autumn", 282.0, "forest_clearing"),
+        ("14_autumn_trail", 282.0, "forest_trail"),
+        ("15_late_autumn", 300.0, "forest_clearing"),
+        ("16_winter", 345.0, "forest_clearing"),
+    ] {
+        if wanted(file) {
+            app.world.resource_mut::<FoliageSeason>().day_of_year = day;
+            take(&mut app, file, &by_name(view));
+        }
+    }
+    app.world.resource_mut::<FoliageSeason>().day_of_year = season::MIDSUMMER;
 
     // Ten more years in the clearing.
     if wanted("09_clearing_10_years_later") {
