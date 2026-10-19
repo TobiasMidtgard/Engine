@@ -173,12 +173,10 @@ fn unrelated_systems_change_nothing() {
     assert!(changed.is_empty(), "{}", changed.join("\n"));
 }
 
-/// Fails today: NPC and animal randomness is seeded from `Entity` ids (`brain.rs`
-/// `rng_state`, `combat::roll`, `wildlife.rs` `mind.rng`), so one more entity spawned before
-/// them (any new resource, such as #287's `Messages<WaterDisturbance>`) changes every draw.
-/// Not a system-order problem: see `unrelated_systems_change_nothing`.
+/// One more entity spawned before the bodies (any new resource is one, such as #287's
+/// `Messages<WaterDisturbance>`) moves every later `Entity` id, so randomness drawn from ids
+/// would change; the bodies' `Seed`s don't come from ids.
 #[test]
-#[ignore = "NPC randomness is seeded from Entity ids; un-ignore once seeds are id-independent"]
 fn unrelated_entities_change_nothing() {
     let changed = changed_by(&[Extra::ShiftedMessage, Extra::Entity]);
     assert!(changed.is_empty(), "{}", changed.join("\n"));

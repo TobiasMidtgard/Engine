@@ -113,6 +113,7 @@ pub(crate) fn think_and_act(
     mut w: BrainWorld,
     mut revives: ResMut<ReviveClaims>,
     mut scratch: Local<Scratch>,
+    seeds: Query<&crate::seed::Seed>,
 ) {
     let s = &mut *scratch;
     s.claims.clear();
@@ -169,7 +170,7 @@ pub(crate) fn think_and_act(
         let pos = t.translation;
         if brain.home.is_none() {
             brain.home = Some(npc.home.unwrap_or(pos));
-            brain.rng_state = me.to_bits() ^ 0x5eed;
+            brain.rng_state = crate::seed::seed_of(&seeds, me) ^ 0x5eed;
             brain.strafe = if brain.random() < 0.5 { -1.0 } else { 1.0 };
         }
         let far =

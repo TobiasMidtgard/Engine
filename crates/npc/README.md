@@ -308,9 +308,10 @@ The crate depends only on core crates (`engine_core`, `engine_world`, `engine_re
   paths go around a wall where it moved to, not where it was.
 - `tests/schedule_order.rs`: no two systems in the fixed step or `PostUpdate` touch the same
   data without an order between them (the scheduler's ambiguity check), and the arena fight
-  and the meadow end bit for bit the same with unrelated systems added. An ignored test shows
-  that one more entity spawned before them still changes the outcome, because NPC and animal
-  randomness is seeded from `Entity` ids.
+  and the meadow end bit for bit the same with unrelated systems, resources or entities added.
+  Randomness comes from each body's `Seed` (a hash of where it spawned and what it is, given
+  on its first step; insert one to choose it), never from `Entity` ids, which every new
+  resource moves.
 - `tests/art_fighters.rs`, `tests/art_animals.rs`, `tests/art_arena.rs`: close-up renders of
   the fighters, wildlife and arena in chosen poses and lights, flipbook strips of the wildlife
   on the move (gaits, starts and stops, an alarm, a bend, a stalk, a wolf's hunt from stalk
