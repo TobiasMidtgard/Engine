@@ -352,8 +352,8 @@ fn a_moving_object_smears_while_the_still_background_stays_sharp() {
 
 /// A still camera (with TAA's jitter) over fine detail: a checkered wall and a white bar below
 /// the sky, with the sun's disc in view (the sky has no motion vectors of its own: its motion
-/// is the camera's).
-fn still_scene(blur: Option<MotionBlur>, name: &str) -> Option<RgbaImage> {
+/// is the camera's). Four frames in a row, so several jitter offsets are seen.
+fn still_scene(blur: Option<MotionBlur>, name: &str) -> Option<Vec<RgbaImage>> {
     let mut app = app(1.0 / 60.0, 1.0, AntiAliasing::Taa);
     let cam = camera(&mut app, blur, 0.0);
     app.world.get_mut::<Camera>(cam).unwrap().exposure = Exposure::Manual { ev100: 14.0 };
@@ -390,20 +390,29 @@ fn still_scene(blur: Option<MotionBlur>, name: &str) -> Option<RgbaImage> {
     if gpu_missing(&app) {
         return None;
     }
-    Some(shoot(&mut app, name))
+    Some(
+        (0..4)
+            .map(|i| shoot(&mut app, &format!("{name}_{i}")))
+            .collect(),
+    )
 }
 
+/// With a long exposure (a 360° shutter at 24 fps: 1/24 s, 2.5 frames at 60 fps), so that a
+/// stray sub-pixel motion (the camera's reprojection picking up TAA's jitter) would become a
+/// visible streak.
 #[test]
 fn a_still_camera_leaves_the_image_as_it_is() {
     let Some(off) = still_scene(None, "still_off") else {
         return;
     };
-    let on = still_scene(Some(MotionBlur::default()), "still").unwrap();
-    let worst = largest_difference(&off, &on);
-    assert!(
-        worst <= 2,
-        "motion blur changed a still image by up to {worst} levels"
-    );
+    let on = still_scene(Some(MotionBlur::new(1.0, 24.0)), "still").unwrap();
+    for (i, (off, on)) in off.iter().zip(&on).enumerate() {
+        let worst = largest_difference(off, on);
+        assert!(
+            worst <= 2,
+            "motion blur changed a still image by up to {worst} levels (frame {i})"
+        );
+    }
 }
 
 /// The camera hops 12 m sideways between two frames (a cut), the bar still 10 m in front.

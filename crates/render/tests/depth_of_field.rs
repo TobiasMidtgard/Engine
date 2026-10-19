@@ -1,10 +1,11 @@
 //! Depth of field (`DepthOfField` on the camera): what is in focus keeps its detail and what is
 //! far behind loses it, a small aperture keeps everything sharp, a blurred foreground edge is
 //! soft and spreads over the sharp background behind it, an in-focus edge in front of a blurred
-//! background stays crisp with no halo, a small bright light opens into a round, even disc, and
-//! autofocus finds the object at the screen center (ignoring sky through a gap), eases toward a
-//! new distance and snaps after a camera cut. Needs a GPU or lavapipe; passes with a note when
-//! neither is available.
+//! background stays crisp with no halo, a far blurred background spreads no farther over a less
+//! blurred object in front of it than that object's own blur, a small bright light opens into a
+//! round, even disc, and autofocus finds the object at the screen center (ignoring sky through a
+//! gap), eases toward a new distance and snaps after a camera cut. Needs a GPU or lavapipe;
+//! passes with a note when neither is available.
 //!
 //! The camera stands at the origin looking down -Z through an 85 mm lens on a full-frame
 //! sensor; the scenes are unlit, so every pixel is exactly the color it was given.
@@ -488,6 +489,102 @@ fn an_in_focus_edge_in_front_of_a_blurred_background_has_no_halo() {
     }
 }
 
+/// A black board 3 m away covering the left half of the view, in front of a white wall 60 m
+/// away, the lens focused 2 m away: both are behind the focus plane, the wall far more blurred
+/// than the board. The board hides what is behind it, so the wall's blur spreads no farther over
+/// it than the board's own, and the board's blurred edge fades out around where its edge is
+/// (half covering the wall there), as it would in front of a sharp wall. Below the measured rows,
+/// in focus: gray patches as the board covering 30%, 60%, 70% and 90% of the wall would look.
+#[test]
+fn a_blurred_object_hides_the_more_blurred_background_behind_it() {
+    const WALL_GRAY: f32 = 0.8;
+    let patch = |coverage: f64| DVec3::new(0.1 + 0.4 * coverage, -0.24, -2.0);
+    let render = |dof: Option<DepthOfField>, name: &str| {
+        let mut app = app();
+        camera(&mut app, dof);
+        quad(
+            &mut app,
+            DVec3::new(0.0, 0.0, -60.0),
+            [60.0, 60.0],
+            unlit([WALL_GRAY; 3]),
+        );
+        quad(
+            &mut app,
+            DVec3::new(-1.5, 0.0, -3.0),
+            [3.0, 3.0],
+            unlit([0.0, 0.0, 0.0]),
+        );
+        for coverage in [0.3, 0.6, 0.7, 0.9] {
+            let gray = WALL_GRAY * (1.0 - coverage as f32);
+            quad(&mut app, patch(coverage), [0.04, 0.04], unlit([gray; 3]));
+        }
+        app.update_n(3);
+        if gpu_missing(&app) {
+            return None;
+        }
+        Some(shoot(&mut app, name))
+    };
+    let Some(off) = render(None, "occlusion_off") else {
+        return;
+    };
+    let dof = DepthOfField::new(2.0, 1.4);
+    let blurred = render(Some(dof), "occlusion").unwrap();
+    let (board, wall) = (coc_px(&dof, 3.0, 2.0), coc_px(&dof, 60.0, 2.0));
+    let edge = to_screen(DVec3::new(0.0, 0.0, -3.0)).0.round() as u32;
+    let (y0, y1) = (40, H - 40);
+    let profile: Vec<String> = (edge - wall.ceil() as u32 - 1..edge + board.ceil() as u32 + 2)
+        .map(|x| format!("{:.0}", column(&blurred, x, y0, y1)))
+        .collect();
+    let patch_luma = |coverage: f64| {
+        let (x, y) = to_screen(patch(coverage));
+        let (x, y) = (x as u32, y as u32);
+        (y - 3..y + 4)
+            .flat_map(|y| (x - 3..x + 4).map(move |x| (x, y)))
+            .map(|(x, y)| luma(&blurred, x, y))
+            .sum::<f64>()
+            / 49.0
+    };
+    // The pixels on either side of the edge (it falls between two columns), and the column half
+    // the board's blur inside it.
+    let at_edge = 0.5 * (column(&blurred, edge - 1, y0, y1) + column(&blurred, edge, y0, y1));
+    let half_inside = column(&blurred, (edge as f32 - 0.5 * board) as u32, y0, y1);
+    eprintln!(
+        "board CoC {board:.1} px, wall CoC {wall:.1} px; at the edge {at_edge:.0}, half its blur \
+         inside {half_inside:.0} (90/70/60/30% covered {:.0}/{:.0}/{:.0}/{:.0}); across it from \
+         the board: {profile:?}",
+        patch_luma(0.9),
+        patch_luma(0.7),
+        patch_luma(0.6),
+        patch_luma(0.3)
+    );
+    for (value, (most, least), what) in [
+        (at_edge, (0.7, 0.3), "where its edge is"),
+        (half_inside, (0.9, 0.6), "half its blur inside its edge"),
+    ] {
+        let (lo, hi) = (patch_luma(most), patch_luma(least));
+        assert!(
+            (lo..=hi).contains(&value),
+            "the board's blurred edge should fade out over the wall {what}: {value:.0}, \
+             expected {lo:.0}..{hi:.0} ({:.0}%..{:.0}% covered)",
+            100.0 * most,
+            100.0 * least
+        );
+    }
+    let inside = (board + 2.0).ceil() as u32..(wall - 2.0).floor() as u32;
+    assert!(inside.len() >= 4, "the scene should leave room: {inside:?}");
+    for d in inside {
+        let (on, sharp) = (
+            column(&blurred, edge - d, y0, y1),
+            column(&off, edge - d, y0, y1),
+        );
+        assert!(
+            (on - sharp).abs() < 3.0,
+            "the wall spread over the board {d} px inside its edge, past the board's own \
+             {board:.1} px blur: {on:.1} (off {sharp:.1})"
+        );
+    }
+}
+
 /// A small bright light 20 m away with the lens focused 1.2 m away opens into a disc: round,
 /// as large as the circle of confusion, and evenly lit.
 #[test]
@@ -569,7 +666,7 @@ fn a_bright_point_opens_into_a_round_even_disc() {
         "the disc isn't round: radii {radii:.1?}"
     );
     assert!(
-        at_q(0.95) - at_q(0.05) < 0.2 * median,
+        at_q(0.95) - at_q(0.05) < 0.1 * median,
         "the disc isn't evenly lit: 5%/95% {:.0}/{:.0} around {median:.0}",
         at_q(0.05),
         at_q(0.95)

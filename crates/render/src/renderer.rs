@@ -194,7 +194,7 @@ pub struct Renderer {
     exposure: ExposureState,
     meter: crate::exposure::ExposureMeter,
     volumetrics: crate::volumetrics::Volumetrics,
-    /// Depth of field and motion blur (camera components), after TAA.
+    /// Depth of field (before TAA) and motion blur (after it): camera components.
     lens: crate::lens::LensEffects,
     previous: Option<PreviousView>,
     /// How far the camera moved the frame before (camera cut detection).
