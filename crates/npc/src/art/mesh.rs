@@ -10,8 +10,8 @@
 //!   with per-face projected UVs and baked occlusion.
 //! * Editing: [`append`] (merge with a transform), [`deform`] (bend or shear, normals follow),
 //!   [`displace`] (push along normals), [`smooth_normals`], [`paint`] (vertex colors).
-//! * [`bake_par`]: texture baking spread over all cores, [`image_par`] for single images, and
-//!   [`par_map`].
+//! * [`bake_par`]: texture baking spread over all cores ([`bake_par_alpha`] with an alpha
+//!   channel), [`image_par`] for single images, and [`par_map`].
 //!
 //! Texture coordinates are in meters unless a builder says otherwise, so tiling materials keep
 //! their scale everywhere: set the material's `uv_scale` to one over the meters a texture
@@ -908,9 +908,21 @@ pub fn image_par(w: u32, h: u32, f: impl Fn(Vec2) -> Vec4 + Sync) -> Image {
 /// chains), with the same encoding: sRGB albedo, a tangent-space normal map from Sobel slopes
 /// of the height (green up), and linear ORM.
 pub fn bake_par(size: u32, meters: f32, f: impl Fn(Vec2) -> Texel + Sync) -> TextureSet {
+    bake_par_alpha(size, meters, |uv| (f(uv), 1.0))
+}
+
+/// [`bake_par`] with an alpha channel in the albedo (`f` returns the texel and its alpha), for
+/// masked and blended materials.
+pub fn bake_par_alpha(
+    size: u32,
+    meters: f32,
+    f: impl Fn(Vec2) -> (Texel, f32) + Sync,
+) -> TextureSet {
+    // Each row's texels with their alpha, and its heights (for the normal map).
+    type Row = (Vec<(Texel, f32)>, Vec<f32>);
     let n = size.max(1) as usize;
-    let rows: Vec<(Vec<Texel>, Vec<f32>)> = par_map(n, |y| {
-        let row: Vec<Texel> = (0..n)
+    let rows: Vec<Row> = par_map(n, |y| {
+        let row: Vec<(Texel, f32)> = (0..n)
             .map(|x| {
                 f(Vec2::new(
                     (x as f32 + 0.5) / n as f32,
@@ -918,7 +930,7 @@ pub fn bake_par(size: u32, meters: f32, f: impl Fn(Vec2) -> Texel + Sync) -> Tex
                 ))
             })
             .collect();
-        let heights = row.iter().map(|t| t.height).collect();
+        let heights = row.iter().map(|t| t.0.height).collect();
         (row, heights)
     });
     let inv = 1.0 / (8.0 * meters / n as f32);
@@ -930,12 +942,12 @@ pub fn bake_par(size: u32, meters: f32, f: impl Fn(Vec2) -> Texel + Sync) -> Tex
         );
         // Rows above and below (wrapping), for the Sobel slopes.
         let (r0, r1, r2) = (&rows[(y + n - 1) % n].1, &rows[y].1, &rows[(y + 1) % n].1);
-        for (x, t) in rows[y].0.iter().enumerate() {
+        for (x, (t, alpha)) in rows[y].0.iter().enumerate() {
             a.extend_from_slice(&[
                 srgb_u8(t.albedo.x),
                 srgb_u8(t.albedo.y),
                 srgb_u8(t.albedo.z),
-                255,
+                unorm(*alpha),
             ]);
             let (xm, xp) = (
                 if x == 0 { n - 1 } else { x - 1 },

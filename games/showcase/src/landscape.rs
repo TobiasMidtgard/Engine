@@ -258,14 +258,24 @@ impl Scarp {
         if ends <= 0.0 || side < -2.0 {
             return 0.0;
         }
-        // The cliff's rock stands in front of a 3.5 m wide step; at the falls its face is worn
-        // back (`rocks::face_at`), and the step narrows to sit just behind it.
-        let notch = self
-            .notch
-            .map_or(0.0, |u| smooth(14.0, 5.0, (along - u).abs()));
-        let face = smooth(-1.5 + 1.1 * notch, 2.0 - 0.9 * notch, side);
+        let (start, end) = Self::step_span(self.notch_weight(along));
+        let face = smooth(start, end, side);
         let back = 1.0 - smooth(self.reach * 0.6, self.reach * 1.4, side);
         self.height * face * back * ends
+    }
+
+    /// 0..1: how far into the falls' notch a point `along` the line is (1 within 5 m of the
+    /// water, 0 beyond 14 m).
+    pub fn notch_weight(&self, along: f64) -> f64 {
+        self.notch
+            .map_or(0.0, |u| smooth(14.0, 5.0, (along - u).abs()))
+    }
+
+    /// Where the step rises, across the line (from, to; m): the cliff's rock stands in front of
+    /// a 3.5 m wide step, and at the falls (`notch` 1) its face is worn back
+    /// (`rocks::face_at`), so the step narrows to sit just behind it.
+    pub fn step_span(notch: f64) -> (f64, f64) {
+        (-1.5 + 1.1 * notch, 2.0 - 0.9 * notch)
     }
 }
 

@@ -18,6 +18,7 @@ pub mod player;
 pub mod profile;
 mod shift;
 pub mod tempo;
+pub mod zipline;
 
 use engine_core::prelude::*;
 use engine_render::RenderAppExt;
@@ -30,7 +31,7 @@ pub use combat::{
 pub use fx::{CameraFx, SlowMotionFx};
 pub use lockon::LockOn;
 pub use look::effects::{EffectSettings, Effects};
-pub use mover::{Dash, DashRequest, Grapple, Hang, Mantle, Mover, WallContact};
+pub use mover::{Corner, Dash, DashRequest, Grapple, Hang, Mantle, Mover, WallContact, Zip};
 pub use play::{Play, PlayToggle};
 pub use player::PlayerControlled;
 pub use profile::MovementProfile;
@@ -38,6 +39,7 @@ pub use tempo::{
     CINEMATIC_KEY, Cinematic, FOCUS_KEY, Perceiver, PerceptionStatus, SlowMoPulse, Tempo,
     TimePerception,
 };
+pub use zipline::Zipline;
 
 /// Everything a game needs to use movement, in one import.
 pub mod prelude {
@@ -114,6 +116,11 @@ impl Plugin for MovementPlugin {
             .register_component::<PlayerControlled>(
                 "Drive this character from input actions (move, jump, sprint, crouch, dash, \
                  attack, block), relative to the active camera.",
+            )
+            .register_component::<Zipline>(
+                "A zip line from this entity (near anchor) to `to` (far anchor, m, in its frame), \
+                 sagging `sag` m at mid-span; riders let go `end_clear` m before an anchor, \
+                 lifted at `exit_hop` m/s. Characters catch it by jumping into it.",
             )
             .register_resource::<TimePerception>(
                 "Reflex slow motion (min scale, blend in, linger, threat radius) and cinematic \

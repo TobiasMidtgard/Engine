@@ -5,6 +5,8 @@
 //! on a skeleton whose knees and elbows bend. Their feet stay where they are set on the ground
 //! while the body walks, runs or turns over them, the stride lengthening into a run with the
 //! heels kicking up and the arms pumping; on guard they shuffle without breaking their stance.
+//! Turning on the spot, the hips come round after the body and the feet pivot on their balls
+//! and step round under them.
 //! Standing, they breathe and shift their weight from leg to leg (on guard, bob and rock on
 //! bent knees), and they kneel behind low cover. A swing coils back onto the rear foot during
 //! the attack's telegraph (the blade glows orange for a heavy guard breaker), then the hips
@@ -12,18 +14,26 @@
 //! follows through; a feint called off mid-telegraph lurches into the release, checks and
 //! rocks back onto its guard instead of snapping there. A dash pushes off the rear foot: the
 //! body is drawn low behind the owner and eases after it as the drive leg extends, the lead
-//! foot reaching ahead. They raise the guard or shield to the line the blow comes on (overhead
-//! against a heavy cut from above, on the side a cut comes from, low across a thrust or a
-//! dash), bracing and rocking back as it lands (on a parry the blade beats the blow aside and
+//! foot reaching ahead. They raise the guard or shield to the line the blow comes on (a roof
+//! over the helmet against a heavy cut from above, the elbows high and out so the face shows,
+//! on the side a cut comes from, low across a thrust or a dash), bracing and rocking back as
+//! it lands (on a parry the blade beats the blow aside and
 //! glints white, and the shield lights up), hop aside to dodge and step back under themselves,
 //! and are thrown back and stumble when staggered. A blow that lands throws them by where it
-//! struck (the head snaps along it, the trunk doubles over and turns away, the legs buckle on
-//! the struck side), and they light up for an instant (tinted, never blown out to white: the
+//! struck (the head is wrenched round away from it, the shoulders following, as they stumble
+//! back half a step; the trunk doubles over and turns away; the legs buckle on the struck
+//! side), and they light up for an instant (tinted, never blown out to white: the
 //! plates light up in a pale tint of the team's color). Downed, the knees give, the body
 //! topples back along the blow and lands hips, back, then head, the legs kick and settle (one
 //! straight, one folded out) and the arms flop out on the ground, the weapon dropped beside
-//! them. Shooters shoulder their carbine (with a muzzle flash and kick); archers
-//! draw to the jaw. Faces show under open helmets worn over mail coifs. The helmet's horsehair
+//! them. Shooters carry their carbine at port arms on the move and shoulder it to aim, the
+//! muzzle drifting a little as they breathe; a shot flashes and kicks the muzzle up, and it
+//! settles; every few shots they change the magazine as it cools down (stripped, stowed in the
+//! hip pouch, a fresh one seated, the charging handle racked). Archers draw to the corner of the
+//! mouth and hold, loose (the string hand flies back along the jaw, the bow rolls forward in
+//! the hand), then draw the next arrow from the quiver over the shoulder and nock it. The
+//! crest, the tabards and the belt pouches swing after the body (a stop throws them on, a blow
+//! snaps them round) and settle. Faces show under open helmets worn over mail coifs. The helmet's horsehair
 //! crest shows skill (grey rookie, bronze, silver, gold master) and a light in its brow band
 //! glows with alertness (yellow suspicious, orange searching, red fighting). Their painted
 //! armor shows skill too: a rookie's is nearly new, a veteran's or master's chipped to the
@@ -31,11 +41,25 @@
 //! knee-length tabards and arm bands, so squads tell apart across the arena; the gambesons and
 //! hose under it are undyed or earthy, and differ between fighters.
 //!
+//! Fighters look at what they are after: the eyes flick to a new foe first and the head
+//! follows a beat behind (the shoulders taking what the neck can't); they glance at a flanker
+//! or toward a noise for a moment and sweep the ground ahead when searching. They blink (more
+//! often when alarmed), set the jaw or grimace on a heavy blow and when hit, and breathe hard
+//! through an open mouth after a sprint or when badly hurt. Badly hurt, they limp on the leg
+//! last struck, or hunch over a wound to the body, with shorter steps, and at ease press a
+//! free hand to it. At ease the weapon is carried (the longsword on the shoulder, the arming
+//! sword point down, the carbine hanging by its grip, the bow low); a foe brings it up to guard
+//! (an archer drawing an arrow from the quiver and nocking it on the way), and it goes down
+//! again after the fight. Revived, they get up from where they lay: roll onto the side, come
+//! up onto a knee taking up the weapon, push up and settle onto guard.
+//!
 //! Animals are sculpted procedural red deer, grey wolves, rabbits and starlings (see
-//! `art::animals`; cheap primitives without the renderer). They plant their feet as they walk,
-//! trot and gallop, graze head-down, raise their heads when alert, lie down to rest, hop
-//! (rabbits), creep low when stalking, peck, flap and bank in flight, and fall over when
-//! killed.
+//! `art::animals`; cheap primitives without the renderer), posed by `animal.rs` from their
+//! state and what their body did the step before (kept on `StandInState`): planted feet in
+//! each species' footfalls, a body that rides on them, flexes its spine in the gallop and
+//! throws its weight on starts, stops and turns, ears and tails that answer noises and alarm,
+//! grazing, alert freezes, rest, stalking, hopping, a starling's wing beat, bounds, glides,
+//! banks, takeoffs and landings, and falling over when killed.
 //!
 //! With `NpcSettings::show_intent` on, a ring on the ground marks where each NPC decided to
 //! go and a line leads to it, colored by why: blue cover, orange flank, purple high ground,
@@ -46,7 +70,7 @@ mod humanoid;
 
 use engine_core::prelude::*;
 use engine_render::{MaterialRef, MeshRenderer, Shape, StandardMaterial};
-use engine_world::locomotion::{LocomotionState, MoveIntent};
+use engine_world::locomotion::{LocomotionMode, LocomotionState, MoveIntent};
 use engine_world::{AttackEvent, AttackKind, DamageEvent};
 
 use crate::agent::{NpcBrain, NpcClock, NpcCombat, NpcMotor, NpcSettings, NpcVitals, NpcWeapon};
@@ -54,6 +78,7 @@ use crate::art::ArtAssets;
 use crate::combat::Downed;
 use crate::faction::Faction;
 use crate::locomotion::MoverState;
+use crate::perception::NpcMemory;
 use crate::skills::NpcSkills;
 use crate::wildlife::{Animal, AnimalMind, BirdFlight, Species};
 
@@ -112,13 +137,15 @@ pub struct IntentMarker {
     line: bool,
 }
 
-/// Per-body bookkeeping for effects, and a fighter's motion from one pose to the next.
+/// Per-body bookkeeping for effects, and a fighter's or animal's motion from one pose to the
+/// next.
 #[derive(Component, Debug, Clone, Copy, Default)]
 pub struct StandInState {
     was_winding: bool,
     flash_until: f64,
     markers: Option<[Entity; 2]>,
     motion: humanoid::Motion,
+    beast: animal::Motion,
 }
 
 fn mat(hex: u32) -> StandardMaterial {
@@ -244,6 +271,7 @@ type PoseItem<'a> = (
         Option<&'a AnimalMind>,
         Option<&'a BirdFlight>,
         Option<&'a NpcMotor>,
+        Option<&'a NpcMemory>,
     ),
 );
 
@@ -304,8 +332,7 @@ pub(crate) fn pose_stand_ins(
     {
         let now = clock.map(|c| c.now).unwrap_or(0.0);
         let phase = mover.map(|m| m.phase).unwrap_or(0.0);
-        let speed = Vec3::new(loco.velocity.x, 0.0, loco.velocity.z).length();
-        let (animal, mind, bird, motor) = animal;
+        let (animal, mind, bird, motor, memory) = animal;
         let mut materials: Vec<(Part, StandardMaterial)> = Vec::new();
         let placed: Box<dyn Fn(Part) -> Placed> = match animal.map(|a| a.species) {
             None => {
@@ -316,6 +343,7 @@ pub(crate) fn pose_stand_ins(
                     blows: &seen.blows,
                     dash_secs: motor.map_or(0.22, |m| m.dash_secs),
                     foe: &foe,
+                    memory,
                 };
                 let pose = humanoid::humanoid(
                     now,
@@ -336,16 +364,24 @@ pub(crate) fn pose_stand_ins(
                 Box::new(pose)
             }
             Some(species) => {
-                let state = mind.map(|m| m.state).unwrap_or_default();
-                let since = mind.map(|m| m.since).unwrap_or(0.0);
-                let biting = mind.is_some_and(|m| now < m.bite_ready - 0.55);
-                let flap = bird.map(|b| b.flap).unwrap_or(0.0);
-                let male = animal.is_some_and(|a| a.male);
-                Box::new(move |p| {
-                    animal::animal_pose(
-                        species, p, state, since, now, phase, speed, loco, biting, flap, male,
-                    )
-                })
+                let input = animal::Input {
+                    species,
+                    male: animal.is_some_and(|a| a.male),
+                    state: mind.map(|m| m.state).unwrap_or_default(),
+                    since: mind.map(|m| m.since).unwrap_or(0.0),
+                    now,
+                    phase,
+                    at: owner.translation,
+                    facing: owner.rotation,
+                    vel: loco.velocity,
+                    crouch: loco.mode == LocomotionMode::Crouch,
+                    biting: mind.is_some_and(|m| now < m.bite_ready - 0.55),
+                    vary: ((me.to_bits() as u32) as f32 * 0.618_034).fract(),
+                    senses: mind.map(|m| animal::Senses::of(m, now)).unwrap_or_default(),
+                    bird: bird.copied(),
+                };
+                let pose = animal::animal(&input, &mut st.beast);
+                Box::new(move |p| pose.place(p))
             }
         };
         for child in children.iter() {

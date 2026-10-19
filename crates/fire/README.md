@@ -85,18 +85,21 @@ commands.spawn((transform, Combustible { fuel_kg: 40.0, moisture: 0.3, ..default
     Charring { shrink: 0.55, ..default() }));
 ```
 
-AI bridge: `fire.ignite`, `fire.extinguish`, `fire.clear`, `fire.status`, `fire.sample`;
-tune `FireSettings` (spread, embers, damage, lights) and the demo live.
+AI bridge: `fire.ignite`, `fire.extinguish`, `fire.clear`, `fire.status`, `fire.sample`,
+`fire.demo`; tune `FireSettings` (spread, embers, damage, lights) and the demo live.
 
 ## Demo
 
 `demo::spawn_demo(commands, origin)` builds a 64 × 44 m meadow of dry grass (the showcase's
-grass field): a fire starts at its upwind edge and runs across it with the wind, stops at a
-gravel road and a soaked patch, lights four trees (trunk first, then the crown), a wooden
+grass field): a fire starts at whichever edge of it faces the wind blowing at the time (west
+of the road) and runs across it with the wind, stops at a gravel road and a soaked patch, lights four trees (trunk first, then the crown), a wooden
 shed and hay bales, while the bales across the road survive. A campfire burns forever by the
 path. Once the meadow has regrown, the next fire starts. The first fire is already 50 s along
 when the demo starts so there's something to see right away. `demo::VIEWS` lists camera spots
-for it (fire front, burning trees, campfire at dusk, the fire coming at you at night).
+for it (fire front, burning trees, campfire at dusk, the smoke plume, the fire at night), each
+with the moment it shows: `fire.demo {"at_secs": 35}` starts a fresh fire that far along, which
+the showcase tour calls on arriving at each stop (the jump fast-forwards only the fire, so the
+plume stop then waits a few seconds for the smoke to rise).
 
 The grass is a `GrassMeadow` (`grass.rs`): a few hundred thousand curved, tapered blades
 drawn on the GPU, thinned with distance, swaying in the wind and casting shadows, standing on

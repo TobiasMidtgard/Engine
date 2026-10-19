@@ -341,12 +341,14 @@ pub fn flow_system(
                 if mass < 0.02 {
                     continue;
                 }
-                // Flow times drop (m⁴/s): bigger falls throw spray higher and wider.
+                // Flow times drop (m⁴/s): bigger falls throw spray higher and wider. The
+                // cloud spans a few meters round the plunge (a 9 m fall of 1 m³/s: about 2 m
+                // across), the mist drifting off it with the wind.
                 let size = (power / 9810.0).max(0.0).sqrt();
                 splashes.write(WaterSplash {
                     position: foot,
                     velocity: Vec3::new(v.x * 0.4, 1.5 + size.min(4.0), v.y * 0.4),
-                    radius: (0.4 + size * 0.5).min(4.0),
+                    radius: (0.3 + size * 0.25).min(2.5),
                     mass_kg: mass,
                     source: Some(sim.entity),
                 });
