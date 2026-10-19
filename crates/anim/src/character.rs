@@ -25,6 +25,7 @@ use engine_render::{Image, StandardMaterial};
 use serde::{Deserialize, Serialize};
 
 use crate::animator::{AnimationLibrary, AnimatorSettings};
+use crate::face::Face;
 use crate::muscle::{MorphWeights, MuscleRig};
 use crate::procedural::spring::SpringChains;
 use crate::retarget::{Retarget, Retargeter};
@@ -1055,6 +1056,9 @@ fn wear(world: &mut World, entity: Entity, model: &HumanModel, loaded: &LoadedHu
         Retarget::new(loaded.retargeter.clone()),
         AppliedHumanModel(model.key()),
     ));
+    if !e.contains::<Face>() {
+        e.insert(Face::default());
+    }
     match &loaded.ponytail {
         Some(p) => {
             e.insert(SpringChains::new(vec![p.clone()]));
