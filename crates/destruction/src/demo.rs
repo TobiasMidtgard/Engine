@@ -32,7 +32,7 @@ use bevy_ecs::world::CommandQueue;
 use engine_core::math::{DVec3, Quat, Rng, Vec2, Vec3};
 use engine_core::prelude::*;
 use engine_render::{MeshRenderer, Shape, StandardMaterial};
-use engine_world::{EditOp, EditShape, ProjectileTrace, TerrainEdit, WorldImpulse};
+use engine_world::{Climbable, EditOp, EditShape, ProjectileTrace, TerrainEdit, WorldImpulse};
 
 use crate::DemoView;
 use crate::architecture::TowerTop;
@@ -964,14 +964,22 @@ fn spawn_breach_house(commands: &mut Commands, o: DVec3) -> House {
                 0.0,
             );
         }
-        // The ladder hangs off the back header, its brackets bolted to its face.
+        // The ladder hangs off the back header, its brackets bolted to its face. It is climbed
+        // facing the header and stepped off over it onto the deck.
         let ladder_h = 3.18;
-        model(
+        let ladder_at = at(hx, 0.02 + ladder_h as f64 * 0.5, hz - half + 0.05 + 0.12);
+        let ladder = model(
             commands,
             PropKind::SteelLadder { height: ladder_h },
             k as u64,
-            at(hx, 0.02 + ladder_h as f64 * 0.5, hz - half + 0.05 + 0.12),
+            ladder_at,
             0.0,
+        );
+        let (low, high) = props::ladder_rungs(ladder_h);
+        let feet = |y: f32| Vec3::new(0.0, y - ladder_h * 0.5, props::LADDER_STILE_Z + 0.05);
+        let deck = at(hx, JOIST_TOP + DECK_T as f64, hz - half - 0.35) - ladder_at;
+        commands.entity(ladder).insert(
+            Climbable::ladder(feet(low), feet(high), Vec3::NEG_Z).with_exit(deck.as_vec3()),
         );
     }
     // The roof deck: one board panel per bay, the hatch openings left out.
