@@ -39,6 +39,17 @@ pub struct SimSettings {
     pub prewarm_secs: f32,
     /// Speed limit per particle, m/s.
     pub max_speed: f32,
+    /// Under water: the lift on it fully submerged, as a fraction of its dry weight. Dry cloth
+    /// holds air and floats (above 1) until it soaks through; hair and rope sink slowly.
+    pub buoyancy: f32,
+    /// Under water: how fast it takes on the current's velocity, 1/s (water is 800 times
+    /// denser than air, so cloth and hair drift and sway slowly in it). For cloth this is
+    /// moving across its face; sliding along it drags less.
+    pub water_drag: f32,
+    /// Water it soaks up: soaked through, it weighs (1 + soak) times its dry weight (cotton
+    /// about 1.5, hair about 0.5, jelly and plastic 0). It soaks under water and in the rain, wicks
+    /// a little way along itself and dries in the wind and warmth.
+    pub soak: f32,
 }
 
 impl Default for SimSettings {
@@ -56,6 +67,9 @@ impl Default for SimSettings {
             gpu: false,
             prewarm_secs: 0.0,
             max_speed: 60.0,
+            buoyancy: 1.6,
+            water_drag: 6.0,
+            soak: 1.5,
         }
     }
 }
@@ -82,6 +96,14 @@ pub enum Pattern {
     Diagonal,
     /// Three twisted plies (ropes and cables).
     Rope,
+    /// Seigaiha, the Japanese "blue sea waves": overlapping fans of arcs in `color2` on
+    /// `color`, each fan this many millimeters across.
+    Waves(u32),
+    /// Plum blossoms about this many millimeters apart: `color2` petals with `color3` hearts
+    /// on `color`.
+    Blossoms(u32),
+    /// Tie-dye dots (kanoko shibori) this many millimeters apart: `color2` rings on `color`.
+    Shibori(u32),
 }
 
 impl Pattern {
@@ -97,6 +119,9 @@ impl Pattern {
             Pattern::Border => (6, 0),
             Pattern::Diagonal => (7, 0),
             Pattern::Rope => (8, 0),
+            Pattern::Waves(mm) => (9, mm.max(1)),
+            Pattern::Blossoms(mm) => (10, mm.max(1)),
+            Pattern::Shibori(mm) => (11, mm.max(1)),
         }
     }
 }

@@ -64,12 +64,15 @@ pub struct SoftVertex {
     pub tension: [f32; 2],
     /// Char, glow.
     pub burn: [f32; 2],
+    /// Wetness, 0..1.
+    pub wet: f32,
     pub material: u32,
 }
 
 impl SoftVertex {
-    const ATTRIBUTES: [wgpu::VertexAttribute; 6] = wgpu::vertex_attr_array![
-        0 => Float32x3, 1 => Float32x3, 2 => Float32x2, 3 => Float32x2, 4 => Float32x2, 5 => Uint32
+    const ATTRIBUTES: [wgpu::VertexAttribute; 7] = wgpu::vertex_attr_array![
+        0 => Float32x3, 1 => Float32x3, 2 => Float32x2, 3 => Float32x2, 4 => Float32x2,
+        6 => Float32, 5 => Uint32
     ];
 
     fn layout() -> wgpu::VertexBufferLayout<'static> {
@@ -216,6 +219,7 @@ fn curved_midpoint(a: &SoftVertex, b: &SoftVertex) -> SoftVertex {
         uv: avg(a.uv, b.uv),
         tension: avg(a.tension, b.tension),
         burn: avg(a.burn, b.burn),
+        wet: (a.wet + b.wet) * 0.5,
         material: a.material,
     }
 }
@@ -253,7 +257,10 @@ impl Geometry {
             return start..start;
         }
         let material = self.materials.len() as u32;
-        let wetness = body.cloth.as_ref().map_or(0.0, |c| c.wetness);
+        // Wetness goes per vertex (a wet line where cloth meets the water); ropes take the
+        // body's average.
+        let wetness = 0.0;
+        let mean_wet = body.wet.iter().sum::<f32>() / body.wet.len().max(1) as f32;
         let uv_scale = body.surface.as_ref().map_or(Vec2::ONE, |s| s.uv_scale);
         let first_hole = self.holes.len() as u32;
         if let Some(c) = &body.cloth {
@@ -271,7 +278,7 @@ impl Geometry {
             self.add_surface(body, surface, material, refine);
         }
         for tube in &body.tubes {
-            self.add_tube(tube, material);
+            self.add_tube(tube, material, mean_wet);
         }
         start..self.indices.len() as u32
     }
@@ -363,6 +370,11 @@ impl Geometry {
                 uv: s.uv.get(i).copied().unwrap_or_default().to_array(),
                 tension,
                 burn,
+                wet: if s.embed.is_none() {
+                    body.wet.get(i).copied().unwrap_or(0.0)
+                } else {
+                    0.0
+                },
                 material,
             });
         }
@@ -426,7 +438,7 @@ impl Geometry {
         }
     }
 
-    fn add_tube(&mut self, tube: &Tube, material: u32) {
+    fn add_tube(&mut self, tube: &Tube, material: u32, wet: f32) {
         let pts: Vec<Vec3> = tube
             .particles
             .iter()
@@ -486,6 +498,7 @@ impl Geometry {
                     uv: [k as f32 / TUBE_SIDES as f32, v],
                     tension: [0.0; 2],
                     burn: [0.0; 2],
+                    wet,
                     material,
                 });
             }
@@ -509,6 +522,7 @@ impl Geometry {
                 uv,
                 tension: [0.0; 2],
                 burn: [0.0; 2],
+                wet,
                 material,
             };
             self.vertices.push(vertex(c, [0.5, v]));
@@ -525,12 +539,12 @@ impl Geometry {
             }
         }
         if let Some(beads) = &tube.beads {
-            self.add_beads(beads, material);
+            self.add_beads(beads, material, wet);
         }
     }
 
     /// Beads threaded along the centerline in `self.ring`, evenly spaced by arc length.
-    fn add_beads(&mut self, beads: &Beads, material: u32) {
+    fn add_beads(&mut self, beads: &Beads, material: u32, wet: f32) {
         let total = self.ring.last().map_or(0.0, |r| r.3);
         let spacing = beads.spacing.max(beads.radius * 1.2).max(1e-3);
         let (r, half_len) = (beads.radius, beads.radius * beads.elongation.max(0.2));
@@ -574,6 +588,7 @@ impl Geometry {
                 uv,
                 tension: [0.0; 2],
                 burn: [0.0; 2],
+                wet,
                 material,
             };
             let first = self.vertices.len() as u32;
@@ -651,11 +666,17 @@ impl Geometry {
         let mut max_points = 2;
         for (k, g) in s.guides.iter().enumerate() {
             let range = g.first as usize..(g.first + g.count) as usize;
-            let Some(pts) = self.particles.get(range) else {
+            let Some(pts) = self.particles.get(range.clone()) else {
                 continue;
             };
             let first = self.points.len() as u32;
-            self.points.extend(pts.iter().map(|p| [p.x, p.y, p.z, 0.0]));
+            // w: how wet the guide is there.
+            let wet = body.wet.get(range.clone()).unwrap_or(&[]);
+            self.points.extend(
+                pts.iter()
+                    .enumerate()
+                    .map(|(k, p)| [p.x, p.y, p.z, wet.get(k).copied().unwrap_or(0.0)]),
+            );
             let length: f32 = pts.windows(2).map(|w| w[0].distance(w[1])).sum();
             let rot = body
                 .sim
@@ -1346,7 +1367,7 @@ mod tests {
 
     #[test]
     fn gpu_structs_match_wgsl_sizes() {
-        assert_eq!(std::mem::size_of::<SoftVertex>(), 52);
+        assert_eq!(std::mem::size_of::<SoftVertex>(), 56);
         assert_eq!(std::mem::size_of::<GpuSoftMaterial>(), 112);
         assert_eq!(std::mem::size_of::<GpuStrandGuide>(), 48);
         assert_eq!(std::mem::size_of::<GpuGroom>(), 64);
