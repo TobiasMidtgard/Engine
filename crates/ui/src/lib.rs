@@ -148,8 +148,8 @@ impl Plugin for UiPlugin {
             );
             screens.add(
                 "wheel",
-                "The quick-select wheel: weapons, items and abilities around a ring, picked by pointing (mouse or either stick), a click, Enter or A, or a number key. The world slows to `slow` (default 0.2) while it is open. `items` are slots (id, icon, label, kind, count, details, color, action, data, disabled; default: UiData wheel.items); `current` is the id in hand.",
-                r#"{"current": "pistol", "slow": 0.2}"#,
+                "The quick-select wheel: weapons, items and abilities around a ring, picked by pointing (mouse or either stick), a click, Enter or A, or a number key. The world slows to `slow` (default 0.2) while it is open. `items` are slots (id, icon, label, kind, count, details, color, action, data, disabled, instant = used at once, not taken in hand; default: UiData wheel.items); `current` is the id in hand; `hold` (a key name like \"Tab\") and/or `hold_pad` (a pad button like \"LeftBumper\") pick the pointed slot when released.",
+                r#"{"current": "pistol", "slow": 0.2, "hold": "Tab"}"#,
                 wheel::build_screen,
             );
             screens.add(

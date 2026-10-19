@@ -140,7 +140,7 @@ pub fn player_data(data: &mut UiData) {
     );
     data.set(
         "weapon",
-        json!({"name": "Arc Pistol", "icon": "pistol", "ammo": 12, "reserve": 36, "grenades": 4}),
+        json!({"name": "Ion Pistol", "icon": "pistol", "ammo": 12, "reserve": 36, "grenades": 4}),
     );
     data.set(
         "prompt",

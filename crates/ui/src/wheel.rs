@@ -30,13 +30,14 @@ use serde_json::{Map, Value, json};
 
 use crate::color::Color;
 use crate::data::UiData;
-use crate::draw::{DrawCtx, Painters};
+use crate::draw::{DrawCtx, Painters, flag};
 use crate::el::El;
 use crate::input::UiEvent;
 use crate::items::ItemDatabase;
 use crate::node::*;
 use crate::screens;
 use crate::style::{Corners, Fill, Pick, Position};
+use crate::text::TextSpec;
 use crate::theme::Theme;
 use crate::toast::{self, ToastKind};
 use crate::widgets;
@@ -106,6 +107,28 @@ fn dir(a: f32) -> Vec2 {
     Vec2::new(a.sin(), -a.cos())
 }
 
+/// Size of a one-line label in physical px (`size` logical).
+fn text_size(ctx: &mut DrawCtx, text: &str, size: f32, weight: u16) -> Vec2 {
+    let px = ctx.px;
+    ctx.measure(&TextSpec {
+        text: text.to_string(),
+        size: size * px,
+        weight,
+        wrap: false,
+        ..Default::default()
+    })
+}
+
+/// The largest size up to `size` (down to `min`) at which `text` fits in `width` px.
+fn fit_size(ctx: &mut DrawCtx, text: &str, size: f32, min: f32, weight: u16, width: f32) -> f32 {
+    let w = text_size(ctx, text, size, weight).x;
+    if w <= width || w <= 0.0 {
+        size
+    } else {
+        (size * width / w).max(min)
+    }
+}
+
 fn paint_wheel(world: &mut World, e: Entity, ctx: &mut DrawCtx) {
     let Some(v) = world.get::<WheelView>(e).cloned() else {
         return;
@@ -121,107 +144,130 @@ fn paint_wheel(world: &mut World, e: Entity, ctx: &mut DrawCtx) {
     let k = (0.86 + 0.14 * ease) * px;
     let (r_out, r_in) = (R_OUT * k, R_IN * k);
     let sweep = TAU / n as f32;
-    let gap = 0.018;
+    let pop_of = |i: usize| v.pop.get(i).copied().unwrap_or(0.0);
     ctx.faded(ease, |ctx| {
-        // A dark well behind the ring.
-        ctx.glow(c, r_out * 1.45, Color::hexa(0x000000b0), 1.2);
+        // A dark well behind the ring, so the slots read as glass over a shaded world.
+        ctx.shadow(
+            Rect::new(c.x - r_out, c.y - r_out, r_out * 2.0, r_out * 2.0),
+            r_out,
+            72.0 * px,
+            Color::hexa(0x000000b8),
+        );
         for (i, it) in v.items.iter().enumerate() {
-            let pop = v.pop.get(i).copied().unwrap_or(0.0);
+            let pop = pop_of(i);
             let col = it.color.unwrap_or(p.accent);
             let a = i as f32 * sweep;
-            let start = a - sweep * 0.5 + gap;
-            let len = sweep - gap * 2.0;
+            let start = a - sweep * 0.5;
             let out = 12.0 * px * pop;
             let (ro, ri) = (r_out + out, r_in + out * 0.4);
             let mid = (ro + ri) * 0.5;
             let thick = ro - ri;
-            let dim = if it.disabled { 0.45 } else { 1.0 };
-            // The slot: dark glass, lit toward its color when hovered.
+            let lit = if it.disabled { 0.0 } else { 1.0 };
+            let dim = if it.disabled { 0.5 } else { 1.0 };
+            // The slot: dark glass, a breath of its color, lit from the rim when hovered.
             ctx.ring(
                 c,
                 Vec2::splat(mid),
                 thick,
-                Color::hexa(0x0a1019d8),
+                Color::hexa(0x0b111ceb),
                 start,
-                len,
+                sweep,
                 0.0,
             );
             ctx.ring(
                 c,
                 Vec2::splat(mid),
                 thick,
-                col.with_alpha(0.07 + 0.2 * pop),
+                col.with_alpha((0.012 + 0.06 * pop) * lit),
                 start,
-                len,
+                sweep,
                 0.0,
             );
-            // Light falling in from the outer edge.
-            ctx.ring(
-                c,
-                Vec2::splat(ro - thick * 0.18),
-                thick * 0.36,
-                col.with_alpha(0.05 + 0.16 * pop),
-                start,
-                len,
-                0.0,
-            );
-            // Edges: a hairline inside, the outer rim bright when hovered.
-            ctx.ring(
-                c,
-                Vec2::splat(ri),
-                1.2 * px,
-                Color::WHITE.with_alpha(0.12),
-                start,
-                len,
-                0.0,
-            );
-            ctx.ring(
-                c,
-                Vec2::splat(ro),
-                (1.4 + 2.8 * pop) * px,
-                col.lerp(Color::WHITE, 0.15 * pop)
-                    .with_alpha((0.3 + 0.7 * pop) * dim),
-                start,
-                len,
-                0.0,
-            );
-            if pop > 0.01 {
-                for (w, al) in [(10.0, 0.10), (20.0, 0.05)] {
+            if pop > 0.01 && lit > 0.0 {
+                for j in 0..8 {
+                    let t = j as f32 / 8.0;
                     ctx.ring(
                         c,
-                        Vec2::splat(ro + w * 0.5 * px),
-                        w * px,
-                        col.with_alpha(al * pop),
+                        Vec2::splat(ro - (2.0 + j as f32 * 4.0) * px),
+                        4.0 * px,
+                        col.with_alpha(0.11 * (1.0 - t).powi(2) * pop),
                         start,
-                        len,
+                        sweep,
                         0.0,
                     );
                 }
             }
-            // The slot in use: a bar on its inner edge.
+            // Edges: a hairline inside, the rarity color on the outer rim.
+            ctx.ring(
+                c,
+                Vec2::splat(ri),
+                1.2 * px,
+                Color::WHITE.with_alpha(0.1),
+                start,
+                sweep,
+                0.0,
+            );
+            ctx.ring(
+                c,
+                Vec2::splat(ro - (1.0 + 0.75 * pop) * px),
+                (2.0 + 1.5 * pop) * px,
+                col.lerp(Color::WHITE, 0.15 * pop)
+                    .with_alpha((0.55 + 0.45 * pop) * dim),
+                start,
+                sweep,
+                0.0,
+            );
+            // Hover halo outside the rim, fading out over about 16 px.
+            if pop > 0.01 {
+                for j in 0..8 {
+                    let t = j as f32 / 8.0;
+                    ctx.ring(
+                        c,
+                        Vec2::splat(ro + (1.0 + j as f32 * 2.0) * px),
+                        2.0 * px,
+                        col.with_alpha(0.12 * (1.0 - t).powi(2) * pop),
+                        start,
+                        sweep,
+                        0.0,
+                    );
+                }
+            }
+            // The slot in use: a short white bar on its inner edge.
             if v.current == Some(i) {
                 ctx.ring(
                     c,
-                    Vec2::splat(ri + 5.0 * px),
-                    3.0 * px,
-                    p.accent_light.with_alpha(0.9),
-                    a - sweep * 0.22,
-                    sweep * 0.44,
+                    Vec2::splat(ri + 4.0 * px),
+                    2.5 * px,
+                    Color::WHITE.with_alpha(0.85),
+                    a - sweep * 0.14,
+                    sweep * 0.28,
                     0.0,
                 );
             }
-            // Icon and count.
-            let q = c + dir(a) * (mid - 6.0 * px);
+            // Icon and count, centered together in the slot.
+            let q = c + dir(a) * mid;
             let s = (60.0 + 12.0 * pop) * px;
-            if pop > 0.01 {
-                ctx.glow(q, s * 0.9, col.with_alpha(0.22 * pop), 1.6);
+            let th = if it.count.is_empty() {
+                0.0
+            } else {
+                text_size(ctx, &it.count, 13.0, 700).y + 4.0 * px
+            };
+            let ic = q - Vec2::new(0.0, th * 0.5);
+            if pop > 0.01 && lit > 0.0 {
+                ctx.glow(ic, s * 0.9, col.with_alpha(0.22 * pop), 1.6);
             }
             ctx.faded(dim, |ctx| {
+                let n0 = ctx.list.instances.len();
                 ctx.icon(
                     &it.icon,
-                    Rect::new(q.x - s * 0.5, q.y - s * 0.5, s, s),
+                    Rect::new(ic.x - s * 0.5, ic.y - s * 0.5, s, s),
                     Color::WHITE,
                 );
+                if it.disabled {
+                    for inst in &mut ctx.list.instances[n0..] {
+                        inst.kind[1] |= flag::DESATURATE;
+                    }
+                }
                 if !it.count.is_empty() {
                     ctx.text(
                         &it.count,
@@ -232,30 +278,41 @@ fn paint_wheel(world: &mut World, e: Entity, ctx: &mut DrawCtx) {
                         } else {
                             p.text_dim.lerp(p.text, pop)
                         },
-                        q + Vec2::new(0.0, s * 0.5 + 4.0 * px),
+                        ic + Vec2::new(0.0, s * 0.5 + 4.0 * px),
                         Vec2::new(0.5, 0.0),
                     );
                 }
+                // Slot number, small, near the outer edge.
+                ctx.text(
+                    &(i + 1).to_string(),
+                    11.0,
+                    700,
+                    p.text_faint.lerp(p.text_dim, pop),
+                    c + dir(a) * (ro - 14.0 * px),
+                    Vec2::splat(0.5),
+                );
             });
-            // Slot number, small, near the inner edge.
-            let nq = c + dir(a) * (ri + 16.0 * px);
-            ctx.text(
-                &(i + 1).to_string(),
-                11.0,
-                700,
-                p.text_faint.with_alpha(0.8),
-                nq,
-                Vec2::splat(0.5),
+        }
+        // Seams between the slots: even dark lines, cutting through any hover halo.
+        for i in 0..n {
+            let b = (i as f32 - 0.5) * sweep;
+            let pop = pop_of(i).max(pop_of((i + n - 1) % n));
+            ctx.line(
+                c + dir(b) * (r_in - 1.0 * px),
+                c + dir(b) * (r_out + (12.0 + 20.0) * px * pop + 1.0 * px),
+                3.0 * px,
+                Color::hexa(0x04060bf2),
+                0.0,
             );
         }
 
-        // The middle: a dark disc with the pointer on its rim and the hovered slot's name.
+        // The middle: an opaque disc with the pointer on its rim and the slot's name.
         let rd = r_in - 14.0 * px;
         ctx.rect_fill(
             Rect::new(c.x - rd, c.y - rd, rd * 2.0, rd * 2.0),
             Fill::Radial {
-                inner: Color::hexa(0x141c2bf2),
-                outer: Color::hexa(0x070a12f6),
+                inner: Color::hexa(0x141c2bff),
+                outer: Color::hexa(0x070a12ff),
             },
             [rd; 4],
             1.0 * px,
@@ -265,58 +322,72 @@ fn paint_wheel(world: &mut World, e: Entity, ctx: &mut DrawCtx) {
             ctx.ring(c, Vec2::splat(rd), 3.0 * px, p.accent, a - 0.2, 0.4, 0.0);
             ctx.glow(c + dir(a) * rd, 18.0 * px, p.accent.with_alpha(0.5), 2.0);
         }
-        let shown = v.hovered.or(v.current).and_then(|i| v.items.get(i));
-        if let Some(it) = shown {
-            let col = it.color.unwrap_or(p.accent);
-            let mut y = c.y - 46.0 * px - it.details.len().min(3) as f32 * 9.0 * px;
-            if !it.kind.is_empty() {
-                ctx.text(
-                    &it.kind.to_uppercase(),
-                    11.0,
-                    700,
-                    col,
-                    Vec2::new(c.x, y),
-                    Vec2::new(0.5, 0.0),
-                );
-                y += 20.0 * px;
-            }
-            let r = ctx.text(
-                &it.label,
-                21.0,
+        let shown = v.hovered.or(v.current);
+        let Some(it) = shown.and_then(|i| v.items.get(i)) else {
+            return;
+        };
+        let col = it.color.unwrap_or(p.accent);
+        let state = if it.disabled {
+            Some(("Unavailable", p.bad))
+        } else if v.current.is_some() && v.current == shown {
+            Some(("Equipped", p.accent_light))
+        } else {
+            None
+        };
+        // Lay the block out first so it sits in the middle of the disc.
+        let width = rd * 2.0 * 0.82;
+        let title = fit_size(ctx, &it.label, 21.0, 16.0, 700, width);
+        let details: Vec<(&String, f32)> = it
+            .details
+            .iter()
+            .take(3)
+            .map(|d| (d, fit_size(ctx, d, 13.0, 10.0, 600, width)))
+            .collect();
+        let kind_h = if it.kind.is_empty() { 0.0 } else { 20.0 * px };
+        let title_h = text_size(ctx, &it.label, title, 700).y;
+        let state_h = if state.is_some() { 24.0 * px } else { 0.0 };
+        let total = kind_h + title_h + 10.0 * px + details.len() as f32 * 19.0 * px + state_h;
+        let mut y = c.y - total * 0.5;
+        if !it.kind.is_empty() {
+            ctx.text(
+                &it.kind.to_uppercase(),
+                11.0,
                 700,
-                p.text,
+                col.lerp(Color::WHITE, 0.2),
                 Vec2::new(c.x, y),
                 Vec2::new(0.5, 0.0),
             );
-            y = r.y + r.h + 10.0 * px;
-            for line in it.details.iter().take(3) {
-                ctx.text(
-                    line,
-                    13.0,
-                    600,
-                    p.text_dim,
-                    Vec2::new(c.x, y),
-                    Vec2::new(0.5, 0.0),
-                );
-                y += 19.0 * px;
-            }
-            let state = if it.disabled {
-                Some(("Unavailable", p.bad))
-            } else if v.current.is_some() && v.current == v.hovered.or(v.current) {
-                Some(("Equipped", p.accent_light))
-            } else {
-                None
-            };
-            if let Some((t, color)) = state {
-                ctx.text(
-                    &t.to_uppercase(),
-                    11.0,
-                    700,
-                    color,
-                    Vec2::new(c.x, y + 6.0 * px),
-                    Vec2::new(0.5, 0.0),
-                );
-            }
+            y += kind_h;
+        }
+        let r = ctx.text(
+            &it.label,
+            title,
+            700,
+            p.text,
+            Vec2::new(c.x, y),
+            Vec2::new(0.5, 0.0),
+        );
+        y = r.y + r.h + 10.0 * px;
+        for (line, size) in details {
+            ctx.text(
+                line,
+                size,
+                600,
+                p.text_dim,
+                Vec2::new(c.x, y),
+                Vec2::new(0.5, 0.0),
+            );
+            y += 19.0 * px;
+        }
+        if let Some((t, color)) = state {
+            ctx.text(
+                &t.to_uppercase(),
+                11.0,
+                700,
+                color,
+                Vec2::new(c.x, y + 6.0 * px),
+                Vec2::new(0.5, 0.0),
+            );
         }
     });
 }
@@ -371,7 +442,7 @@ pub fn build_screen(world: &mut World, args: &Value) -> Result<Entity, String> {
         .class("hud_panel row")
         .with_style(|s| {
             s.position(Position::Absolute)
-                .bottom(48.0)
+                .bottom(140.0)
                 .gap(22.0)
                 .padding([10.0, 18.0])
                 .radius(Corners::all(999.0))
@@ -439,10 +510,13 @@ pub fn build_screen(world: &mut World, args: &Value) -> Result<Entity, String> {
         aim: Vec2::ZERO,
         last_cursor,
     });
-    if slow < 0.999
-        && let Some(mut d) = world.get_resource_mut::<TimeDilation>()
-    {
-        d.hold(SLOW_KEY, slow, 0.12);
+    if let Some(mut d) = world.get_resource_mut::<TimeDilation>() {
+        if slow < 0.999 {
+            d.hold(SLOW_KEY, slow, 0.12);
+        } else {
+            // Shown again without slow motion: let go of the old hold.
+            d.release(SLOW_KEY);
+        }
     }
     Ok(root)
 }
@@ -536,11 +610,17 @@ pub fn wheel_system(world: &mut World, mut seen: Local<MessageCursor<UiEvent>>) 
     let slot_at = |a: f32| ((a.rem_euclid(TAU) + sweep * 0.5) / sweep) as usize % n;
     let mut confirm: Option<usize> = None;
     let mut cancel = false;
+    let mut unavailable: Option<String> = None;
 
     // Mouse: the direction from the middle once it leaves the dead zone. A moving cursor
     // points where it is; raw motion (a locked cursor) pushes the aim around.
     let mouse = world.get_resource::<Mouse>().cloned().unwrap_or_default();
-    let cursor_moved = mouse.position.is_some() && mouse.position != ws.last_cursor;
+    // Where locking falls back to confining, the hidden cursor still reports positions;
+    // only a visible cursor aims by where it is.
+    let visible = world
+        .get_resource::<Window>()
+        .is_none_or(|w| w.cursor_mode == CursorMode::Normal);
+    let cursor_moved = visible && mouse.position.is_some() && mouse.position != ws.last_cursor;
     let mut aimed = false;
     if cursor_moved && let Some(pos) = mouse.position {
         ws.aim = pos - center;
@@ -569,9 +649,10 @@ pub fn wheel_system(world: &mut World, mut seen: Local<MessageCursor<UiEvent>>) 
             }
         }
     }
+    // Keys go to the topmost modal screen, as everywhere else in the UI.
     let on_top = screens::open_screens(world)
         .into_iter()
-        .find(|(k, ..)| !matches!(k.as_str(), "toasts" | "tooltip" | "drag"))
+        .find(|(.., modal)| *modal)
         .is_some_and(|(_, e, ..)| e == root);
     if on_top {
         if let Some(k) = world.get_resource::<ButtonInput<KeyCode>>() {
@@ -616,7 +697,16 @@ pub fn wheel_system(world: &mut World, mut seen: Local<MessageCursor<UiEvent>>) 
         });
         if released && confirm.is_none() {
             match v.hovered {
-                Some(i) if v.pointer.is_some() && v.hovered != v.current => confirm = Some(i),
+                Some(i) if v.pointer.is_some() && v.hovered != v.current => {
+                    // Letting go always closes: over an unavailable slot, say why.
+                    match v.items.get(i) {
+                        Some(it) if it.disabled => {
+                            unavailable = Some(format!("{} isn't available right now.", it.label));
+                            cancel = true;
+                        }
+                        _ => confirm = Some(i),
+                    }
+                }
                 _ => cancel = true,
             }
         }
@@ -653,6 +743,9 @@ pub fn wheel_system(world: &mut World, mut seen: Local<MessageCursor<UiEvent>>) 
     }
     if cancel {
         screens::close_screen(world, root, false);
+        if let Some(e) = unavailable {
+            toast::notify(world, ToastKind::Bad, "", "", &e, 2.0);
+        }
         return;
     }
     if let Some(i) = confirm

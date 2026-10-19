@@ -878,10 +878,13 @@ pub fn hud_system(world: &mut World) {
     }
 
     if let Some(root) = screens::find_screen(world, "hud") {
-        let prompt_on = world
-            .get_resource::<UiData>()
-            .and_then(|d| d.get_str("prompt.verb"))
-            .is_some_and(|v| !v.is_empty());
+        // The interaction prompt sits where the wheel's middle is.
+        let wheel_open = screens::find_screen(world, "wheel").is_some();
+        let prompt_on = !wheel_open
+            && world
+                .get_resource::<UiData>()
+                .and_then(|d| d.get_str("prompt.verb"))
+                .is_some_and(|v| !v.is_empty());
         let health = match (
             data_f64(world, "player.health"),
             data_f64(world, "player.health_max"),
@@ -952,7 +955,8 @@ fn set_opacity(world: &mut World, root: Entity, id: &str, opacity: f32) {
 
 /// The HUD fades out while a menu (any other modal screen: dialogue, shop, inventory, map,
 /// settings) is open, and back in when it closes. It stays up under the quick-select wheel,
-/// so the ammo and the slow-motion gauge read while choosing.
+/// so the ammo and the slow-motion gauge read while choosing; only the interaction prompt,
+/// which would sit in the wheel's middle, hides (in `hud_system`).
 fn step_aside_for_menus(world: &mut World) {
     let Some(root) = screens::find_screen(world, "hud") else {
         return;
