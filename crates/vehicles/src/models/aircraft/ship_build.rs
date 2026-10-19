@@ -8,8 +8,10 @@ use engine_core::prelude::*;
 use engine_render::{AlphaMode, Image, MaterialRef, Mesh, MeshRef, MeshRenderer, StandardMaterial};
 
 use engine_assets::Assets;
+use engine_world::{Exhaust, Exhausts};
 
 use crate::aero::Aircraft;
+use crate::exhaust::thruster_kind;
 use crate::ship::{Thruster, ThrusterRole};
 use crate::visuals::{GearFold, HeatGlow, PlumeVisual, SurfaceVisual, WheelVisual};
 use crate::wheels::Wheels;
@@ -295,6 +297,52 @@ pub fn rcs_port(h: &Hull, t: &Thruster) -> (Vec3, Vec3, PortOn) {
     }
     let (q, n) = h.exit(p, e);
     (q, n, PortOn::Hull)
+}
+
+/// Where a thruster's gas leaves the model, and its stand-in plume's full length.
+#[derive(Debug, Clone, Copy)]
+pub struct NozzleExit {
+    pub at: Vec3,
+    /// The way the gas leaves (unit).
+    pub dir: Vec3,
+    pub radius: f32,
+    pub length: f32,
+    pub kind: &'static str,
+}
+
+/// Each thruster's nozzle exit, in thruster order: the main bells' rims, the hover wells
+/// (a little inside the belly), the RCS ports on the skin.
+pub fn nozzle_exits(h: &Hull, thrusters: &[Thruster]) -> Vec<NozzleExit> {
+    thrusters
+        .iter()
+        .map(|t| {
+            let exhaust = -t.direction.normalize_or(Vec3::Z);
+            let (at, dir, radius, length, kind) = match t.role {
+                ThrusterRole::Main => (
+                    t.position + exhaust * BELL_EXIT.0,
+                    exhaust,
+                    BELL_EXIT.1 * 0.95,
+                    16.0,
+                    "main",
+                ),
+                ThrusterRole::Hover => {
+                    let (p, n) = h.exit(Vec3::new(t.position.x, -1.0, t.position.z), Vec3::NEG_Y);
+                    (p - n * 0.2, n, HOVER_R * 0.8, 7.0, "hover")
+                }
+                ThrusterRole::Rcs => {
+                    let (p, n, _) = rcs_port(h, t);
+                    (p + n * 0.01, n, 0.1, 1.4, "rcs")
+                }
+            };
+            NozzleExit {
+                at,
+                dir,
+                radius,
+                length,
+                kind,
+            }
+        })
+        .collect()
 }
 
 /// Port plates, hover wells and the like for the painters.
@@ -756,26 +804,26 @@ pub fn spawn(
             true,
         );
     }
-    // Plumes at every thruster's nozzle exit.
-    for (i, t) in thrusters.iter().enumerate() {
-        let exhaust = -t.direction.normalize_or(Vec3::Z);
-        let (at, dir, radius, length, kind) = match t.role {
-            ThrusterRole::Main => (
-                t.position + exhaust * BELL_EXIT.0,
-                exhaust,
-                BELL_EXIT.1 * 0.95,
-                16.0,
-                "main",
-            ),
-            ThrusterRole::Hover => {
-                let (p, n) = h.exit(Vec3::new(t.position.x, -1.0, t.position.z), Vec3::NEG_Y);
-                (p - n * 0.2, n, HOVER_R * 0.8, 7.0, "hover")
-            }
-            ThrusterRole::Rcs => {
-                let (p, n, _) = rcs_port(&h, t);
-                (p + n * 0.01, n, 0.1, 1.4, "rcs")
-            }
-        };
+    // Plumes at every thruster's nozzle exit, and the same nozzles for the effects modules.
+    let exits = nozzle_exits(&h, thrusters);
+    commands.entity(body).insert(Exhausts(
+        exits
+            .iter()
+            .zip(thrusters)
+            .map(|(n, t)| Exhaust::new(thruster_kind(t.role), n.at, n.dir, n.radius))
+            .collect(),
+    ));
+    for (
+        i,
+        &NozzleExit {
+            at,
+            dir,
+            radius,
+            length,
+            kind,
+        },
+    ) in exits.iter().enumerate()
+    {
         let mesh = if kind == "hover" {
             "plume_soft"
         } else {

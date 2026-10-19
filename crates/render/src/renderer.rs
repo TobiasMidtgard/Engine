@@ -692,10 +692,17 @@ impl Renderer {
         self.exposure.measured_ev100 = self.meter.measured_ev100;
 
         // View & uniforms.
-        let taa = settings.anti_aliasing == AntiAliasing::Taa;
-        if settings.anti_aliasing != self.prev_aa {
+        // A pixel-perfect camera renders without temporal anti-aliasing: no jitter to blur its
+        // texels, nothing between them to smooth.
+        let anti_aliasing = if crate::frame::active_camera_is_pixel_perfect(world) {
+            AntiAliasing::None
+        } else {
+            settings.anti_aliasing
+        };
+        let taa = anti_aliasing == AntiAliasing::Taa;
+        if anti_aliasing != self.prev_aa {
             self.effects.reset_history();
-            self.prev_aa = settings.anti_aliasing;
+            self.prev_aa = anti_aliasing;
         }
         let jitter = if taa {
             crate::effects::jitter(self.frame_index)
@@ -822,7 +829,7 @@ impl Renderer {
                 bytemuck::bytes_of(&u),
             );
         }
-        self.write_post_params(&settings, &view);
+        self.write_post_params(&settings, &view, taa);
 
         // Prepare features.
         for f in &mut self.features {
@@ -1352,7 +1359,8 @@ impl Renderer {
         self.frame_index += 1;
     }
 
-    fn write_post_params(&self, settings: &RenderSettings, view: &ViewData) {
+    /// `taa`: temporal anti-aliasing runs this frame (its softness is sharpened back).
+    fn write_post_params(&self, settings: &RenderSettings, view: &ViewData, taa: bool) {
         let tonemapper = match settings.tonemapper {
             Tonemapper::AgX => 0.0,
             Tonemapper::Aces => 1.0,
@@ -1376,7 +1384,7 @@ impl Renderer {
                 1.0 / levels,
             ],
             params3: [
-                if settings.anti_aliasing == AntiAliasing::Taa {
+                if taa {
                     settings.sharpness.clamp(0.0, 1.0)
                 } else {
                     0.0

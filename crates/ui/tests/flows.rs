@@ -642,3 +642,281 @@ fn short_labels_stay_on_one_line() {
         assert_eq!(lines, 1, "a short label wrapped");
     }
 }
+
+fn dilation(app: &mut App) -> f32 {
+    app.world
+        .resource::<engine_core::time::TimeDilation>()
+        .factor()
+}
+
+fn data_str(app: &mut App, path: &str) -> String {
+    let d = app.world.resource::<engine_ui::data::UiData>();
+    d.get(path)
+        .map(|v| {
+            v.as_str()
+                .map(String::from)
+                .unwrap_or_else(|| v.to_string())
+        })
+        .unwrap_or_default()
+}
+
+fn wheel_hovered(app: &mut App) -> Option<usize> {
+    let mut q = app.world.query::<&engine_ui::wheel::WheelView>();
+    q.iter(&app.world).next().and_then(|v| v.hovered)
+}
+
+fn press(app: &mut App, key: KeyCode) {
+    input(app, InputEvent::Key { key, pressed: true });
+    input(
+        app,
+        InputEvent::Key {
+            key,
+            pressed: false,
+        },
+    );
+}
+
+#[test]
+fn the_wheel_slows_time_points_with_the_cursor_and_equips_on_click() {
+    let mut app = app();
+    api(
+        &mut app,
+        "ui.show",
+        json!({"screen": "hud", "instant": true}),
+    );
+    api(&mut app, "ui.show", json!({"screen": "wheel"}));
+    app.update_n(40);
+    // The world slows while it is open; the HUD stays up underneath.
+    assert!(dilation(&mut app) < 0.3, "{}", dilation(&mut app));
+    let hud = open(&mut app).contains(&"hud".to_string());
+    assert!(hud);
+    // The pistol is in hand, so it starts hovered.
+    assert_eq!(wheel_hovered(&mut app), Some(0));
+    // Point to the right of the middle: slot 2 (the greatsword, clockwise from the top).
+    let c = center(&mut app, "wheel_canvas");
+    input(
+        &mut app,
+        InputEvent::CursorMoved {
+            position: c + Vec2::new(220.0, 0.0),
+        },
+    );
+    assert_eq!(wheel_hovered(&mut app), Some(2));
+    let since = next_event(&mut app);
+    input(
+        &mut app,
+        InputEvent::MouseButton {
+            button: MouseButton::Left,
+            pressed: true,
+        },
+    );
+    input(
+        &mut app,
+        InputEvent::MouseButton {
+            button: MouseButton::Left,
+            pressed: false,
+        },
+    );
+    assert!(
+        actions_since(&mut app, since).contains(&"weapon.equip:greatsword".to_string()),
+        "{:?}",
+        actions_since(&mut app, since)
+    );
+    assert_eq!(data_str(&mut app, "weapon.icon"), "greatsword");
+    assert_eq!(data_str(&mut app, "wheel.current"), "greatsword");
+    app.update_n(60);
+    assert!(!open(&mut app).contains(&"wheel".to_string()));
+    // Time runs again once it has closed.
+    assert!((dilation(&mut app) - 1.0).abs() < 1e-3);
+    // The HUD shows the new weapon.
+    let e = engine_ui::input::find_id(&mut app.world, "hud_weapon_icon").unwrap();
+    assert_eq!(app.world.get::<Icon>(e).unwrap().name, "greatsword");
+}
+
+#[test]
+fn number_keys_pick_a_slot_and_unavailable_slots_stay_shut() {
+    let mut app = app();
+    api(&mut app, "ui.show", json!({"screen": "wheel"}));
+    app.update_n(20);
+    // Slot 7 is Time Slow, cooling down: nothing happens and the wheel stays open.
+    press(&mut app, KeyCode::Digit7);
+    app.update_n(5);
+    assert!(open(&mut app).contains(&"wheel".to_string()));
+    assert_eq!(data_str(&mut app, "wheel.current"), "pistol");
+    // Slot 2 is the rail rifle.
+    press(&mut app, KeyCode::Digit2);
+    app.update_n(60);
+    assert!(!open(&mut app).contains(&"wheel".to_string()));
+    assert_eq!(data_str(&mut app, "weapon.icon"), "rifle");
+    assert_eq!(data_str(&mut app, "weapon.ammo"), "4");
+}
+
+#[test]
+fn a_held_wheel_picks_on_release_and_cancels_if_the_pointer_never_moved() {
+    let mut app = app();
+    // Held with Tab, let go without pointing: closes, nothing changes.
+    input(
+        &mut app,
+        InputEvent::Key {
+            key: KeyCode::Tab,
+            pressed: true,
+        },
+    );
+    api(
+        &mut app,
+        "ui.show",
+        json!({"screen": "wheel", "hold": "Tab"}),
+    );
+    app.update_n(20);
+    input(
+        &mut app,
+        InputEvent::Key {
+            key: KeyCode::Tab,
+            pressed: false,
+        },
+    );
+    app.update_n(60);
+    assert!(!open(&mut app).contains(&"wheel".to_string()));
+    assert_eq!(data_str(&mut app, "wheel.selected"), "");
+    // Held again with the cursor locked: raw motion straight down aims at the grenades
+    // (slot 5 of 8, clockwise from the top).
+    input(
+        &mut app,
+        InputEvent::Key {
+            key: KeyCode::Tab,
+            pressed: true,
+        },
+    );
+    api(
+        &mut app,
+        "ui.show",
+        json!({"screen": "wheel", "hold": "Tab"}),
+    );
+    app.update_n(20);
+    input(
+        &mut app,
+        InputEvent::MouseMotion {
+            delta: Vec2::new(0.0, 160.0),
+        },
+    );
+    assert_eq!(wheel_hovered(&mut app), Some(4));
+    input(
+        &mut app,
+        InputEvent::Key {
+            key: KeyCode::Tab,
+            pressed: false,
+        },
+    );
+    app.update_n(60);
+    assert!(!open(&mut app).contains(&"wheel".to_string()));
+    assert_eq!(data_str(&mut app, "wheel.selected"), "grenade");
+    // Grenades are thrown, not held: the pistol stays in hand.
+    assert_eq!(data_str(&mut app, "wheel.current"), "pistol");
+}
+
+#[test]
+fn the_click_that_picks_from_the_wheel_does_not_also_attack() {
+    let mut app = app();
+    app.world
+        .resource_mut::<InputMap>()
+        .bind("attack", Binding::Mouse(MouseButton::Left));
+    api(&mut app, "ui.show", json!({"screen": "wheel"}));
+    app.update_n(20);
+    let c = center(&mut app, "wheel_canvas");
+    input(
+        &mut app,
+        InputEvent::CursorMoved {
+            position: c + Vec2::new(0.0, -220.0),
+        },
+    );
+    // Press, hold while the wheel closes, then let go: the game never sees an attack.
+    app.world.write_message(InputEvent::MouseButton {
+        button: MouseButton::Left,
+        pressed: true,
+    });
+    let mut attacked = false;
+    for _ in 0..30 {
+        app.update();
+        let a = app
+            .world
+            .resource::<engine_input::ActionState>()
+            .get("attack");
+        attacked |= a.just_pressed || a.pressed_since_tick;
+    }
+    assert!(!open(&mut app).contains(&"wheel".to_string()));
+    input(
+        &mut app,
+        InputEvent::MouseButton {
+            button: MouseButton::Left,
+            pressed: false,
+        },
+    );
+    let a = app
+        .world
+        .resource::<engine_input::ActionState>()
+        .get("attack");
+    attacked |= a.just_pressed || a.pressed_since_tick;
+    assert!(!attacked);
+    // The next click attacks as usual.
+    input(
+        &mut app,
+        InputEvent::MouseButton {
+            button: MouseButton::Left,
+            pressed: true,
+        },
+    );
+    assert!(
+        app.world
+            .resource::<engine_input::ActionState>()
+            .get("attack")
+            .pressed
+    );
+}
+
+#[test]
+fn letting_go_over_an_unavailable_slot_closes_the_wheel_and_restores_time() {
+    let mut app = app();
+    input(
+        &mut app,
+        InputEvent::Key {
+            key: KeyCode::Tab,
+            pressed: true,
+        },
+    );
+    api(
+        &mut app,
+        "ui.show",
+        json!({"screen": "wheel", "hold": "Tab"}),
+    );
+    app.update_n(20);
+    // Left points at Time Slow, which is cooling down.
+    input(
+        &mut app,
+        InputEvent::MouseMotion {
+            delta: Vec2::new(-160.0, 0.0),
+        },
+    );
+    assert_eq!(wheel_hovered(&mut app), Some(6));
+    input(
+        &mut app,
+        InputEvent::Key {
+            key: KeyCode::Tab,
+            pressed: false,
+        },
+    );
+    app.update_n(60);
+    assert!(!open(&mut app).contains(&"wheel".to_string()));
+    assert_eq!(data_str(&mut app, "wheel.selected"), "");
+    assert!((dilation(&mut app) - 1.0).abs() < 1e-3);
+}
+
+#[test]
+fn showing_the_wheel_again_without_slow_motion_lets_time_run() {
+    let mut app = app();
+    api(&mut app, "ui.show", json!({"screen": "wheel"}));
+    app.update_n(30);
+    assert!(dilation(&mut app) < 0.3);
+    api(&mut app, "ui.show", json!({"screen": "wheel", "slow": 1.0}));
+    app.update_n(60);
+    assert!(open(&mut app).contains(&"wheel".to_string()));
+    assert!((dilation(&mut app) - 1.0).abs() < 1e-3);
+}
