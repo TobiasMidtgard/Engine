@@ -91,6 +91,13 @@ fn pause_el(world: &World) -> El {
             "pause_inventory",
         ))
         .child(menu_item(
+            "marker_quest",
+            "Journal",
+            "pause.open:journal",
+            "J",
+            "pause_journal",
+        ))
+        .child(menu_item(
             "ui_galaxy",
             "Star Map",
             "pause.open:map",

@@ -444,16 +444,28 @@ fn quest_tracker(p: &crate::theme::Palette) -> El {
             El::new()
                 .class("row")
                 .with_style(|s| s.gap(10.0).margin([2.0, 0.0, 0.0, 20.0]))
-                .child(El::new().with_style(|s| s.grow(1.0)).child(bar(
-                    "quest.progress",
-                    "quest.progress_max",
-                    p.accent_dark,
-                    p.accent,
-                    4.0,
-                    3,
-                    0.0,
-                    false,
-                )))
+                .child(
+                    El::new().with_style(|s| s.grow(1.0)).child(
+                        El::new()
+                            .class("bar_track")
+                            .paint("bar")
+                            .attach(
+                                "Bar",
+                                &Bar {
+                                    unit_ticks: true,
+                                    ..Bar::bound(
+                                        "quest.progress",
+                                        "quest.progress_max",
+                                        p.accent_dark,
+                                        p.accent,
+                                    )
+                                },
+                            )
+                            .with_style(|s| {
+                                s.width(pct(100.0)).height(4.0).radius(Corners::all(2.0))
+                            }),
+                    ),
+                )
                 .child(
                     El::text("{quest.progress} / {quest.progress_max}")
                         .text_style(|t| t.tabular().nowrap())
@@ -883,7 +895,12 @@ pub fn hud_system(world: &mut World) {
         let pad = world
             .get_resource::<UiData>()
             .and_then(|d| d.get_str("prompt.pad").map(String::from));
+        let quest_on = world
+            .get_resource::<UiData>()
+            .and_then(|d| d.get_str("quest.title"))
+            .is_some_and(|t| !t.is_empty());
         set_opacity(world, root, "hud_prompt", if prompt_on { 1.0 } else { 0.0 });
+        set_opacity(world, root, "hud_quest", if quest_on { 1.0 } else { 0.0 });
         set_opacity(world, root, "hud_time", if dilated { 1.0 } else { 0.0 });
         set_opacity(
             world,
