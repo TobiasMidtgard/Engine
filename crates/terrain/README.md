@@ -19,6 +19,13 @@ everything else (streaming, LOD, colliders, ground queries, prints) follows the 
   Patches also draw the renderer's depth prepass (depth, normal, motion; moving planets
   carry their own motion), so the ground gets ambient occlusion and contact shadows from
   what stands on it and anti-aliasing reprojects it cleanly.
+- **Shadows kilometers long.** Patches cast into the sun's shadow cascades and into the
+  renderer's far shadow map (out to `RenderSettings::far_shadow_distance`, 8 km), so at low sun
+  ridges shade the valleys beside them and a range throws its shadow across the plain. A second
+  walk of the quadtree from the camera picks the patches for the far map: the ground the map
+  covers plus what lies toward the sun from it, outside the view too, one level coarser than
+  the view and never finer than about half a shadow texel between vertices, and builds what
+  it lacks a few patches a frame after the view's own.
 - **Planet shapes.** `PlanetShape` presets for an Earth-like world (continents, oceans,
   eroded mountains whose steep sides break into rock ledges, hills, climate bands), the
   Moon (craters, maria) and Mars (craters, plains, dry ice caps), all seeded and
@@ -164,7 +171,8 @@ commands.entity(bodies["Moon"]).insert(PlanetTerrain::moon(7).with_radius(1_737_
 
 `examples/terrain_shots.rs` renders the test views headless (lab prints, rain, snow, painted
 ground and a patchwork of painted layers, a meadow tinted the way the showcase paints its
-valley and a natural one at eye height, snow at eye height and over the valley, woods from the air, the range, the coast, the Moon
+valley and a natural one at eye height, snow at eye height and over the valley, woods from the air, the range, the range at dusk
+(`range_dusk`: ridges casting long shadows), the coast, the Moon
 underfoot, from low orbit, half lit and full, and Mars from orbit)
 with the game's auto exposure, and `examples/terrain_map.rs` draws a relief map around the
 home pad for tuning shapes.
