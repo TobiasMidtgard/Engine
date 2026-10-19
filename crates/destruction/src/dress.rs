@@ -296,13 +296,16 @@ fn spawn_part(
     ));
 }
 
+/// Height of a [`GravelPad`]'s top over its origin, m.
+pub const GRAVEL_TOP: f32 = 0.06;
+
 /// A gravel ground: a gently uneven top on a half-meter grid, its rim rounding down into the
 /// ground, darker where wheels and feet have packed it and along the rim.
 pub fn gravel_pad(size: [f32; 2]) -> MeshBuilder {
     let (hx, hz) = (size[0] * 0.5, size[1] * 0.5);
     const STEP: f32 = 0.5;
     const RIM: f32 = 0.35;
-    const TOP: f32 = 0.06;
+    const TOP: f32 = GRAVEL_TOP;
     let (nx, nz) = (
         ((size[0] + 2.0 * RIM) / STEP).ceil() as usize,
         ((size[1] + 2.0 * RIM) / STEP).ceil() as usize,
